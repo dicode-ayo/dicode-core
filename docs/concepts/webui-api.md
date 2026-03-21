@@ -1,0 +1,187 @@
+# Web UI & API
+
+Dicode includes a built-in web interface and REST API. The UI is served by the dicode process itself — no separate web server needed. All frontend assets are embedded in the binary.
+
+---
+
+## Accessing the UI
+
+```
+http://localhost:8080
+```
+
+Configure the port in `dicode.yaml`:
+```yaml
+server:
+  port: 8080
+```
+
+---
+
+## UI pages
+
+### Task list (`/`)
+
+- All registered tasks with their source, trigger type, and last run status
+- Status badges: ✅ success / 🔴 failed / 🟡 running / ⚪ never run
+- Click a task to open its detail page
+
+### Task detail (`/tasks/{id}`)
+
+- Task metadata (name, trigger, source)
+- `task.yaml` and `task.js` viewer
+- Manual trigger button (with parameter override inputs)
+- Run history table (last 50 runs)
+
+### Run detail (`/runs/{runID}`)
+
+- Run metadata (task, trigger type, start time, duration, status)
+- Live log viewer — logs stream via Server-Sent Events while the run is in progress
+- Return value (for completed runs)
+- Parent/child run links (for chained runs)
+
+### AI Generate (`/generate`)
+
+- Plain-language prompt input
+- Generated diff view (task.yaml / task.js / task.test.js)
+- Edit-and-re-validate inline
+- Confirm to write to local source
+
+### Secrets (`/secrets`)
+
+- List of registered secret names
+- Add / delete secrets (values never shown in the UI)
+
+---
+
+## Frontend
+
+The UI uses [HTMX](https://htmx.org) — HTML with `hx-*` attributes for dynamic behavior. No npm, no build step, no JavaScript framework.
+
+All HTML templates are embedded via `//go:embed templates/` and served by the chi HTTP router. The only client-side JavaScript is HTMX itself (~14KB gzipped, also embedded).
+
+Live log streaming uses Server-Sent Events (SSE) — supported natively in all modern browsers.
+
+---
+
+## REST API
+
+All API responses are JSON.
+
+### Tasks
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/tasks` | List all tasks |
+| `GET` | `/api/tasks/{id}` | Get task detail (spec + last run) |
+| `POST` | `/api/tasks/{id}/run` | Manual trigger |
+| `GET` | `/api/tasks/{id}/runs` | Run history (last 50) |
+
+**POST `/api/tasks/{id}/run`** — trigger with optional param overrides:
+```json
+{
+  "params": {
+    "slack_channel": "#ops",
+    "max_emails": "5"
+  }
+}
+```
+
+Response:
+```json
+{ "run_id": "run_abc123" }
+```
+
+### Runs
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/runs/{runID}` | Run detail |
+| `GET` | `/api/runs/{runID}/logs` | Run logs (completed) |
+| `GET` | `/api/runs/{runID}/logs/stream` | Run logs (SSE, live) |
+
+**GET `/api/runs/{runID}`** response:
+```json
+{
+  "id": "run_abc123",
+  "task_id": "morning-email-check",
+  "status": "success",
+  "trigger": "cron",
+  "started_at": "2026-03-22T08:00:01Z",
+  "finished_at": "2026-03-22T08:00:04Z",
+  "duration_ms": 3241,
+  "return_value": { "count": 5 },
+  "parent_run_id": null
+}
+```
+
+### Webhooks
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/hooks/{path}` | Trigger a webhook task |
+
+The path matches `trigger.webhook` in `task.yaml`. The POST body is available as `input` in the task.
+
+### Secrets
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/secrets` | List secret names (never values) |
+| `POST` | `/api/secrets` | Set a secret |
+| `DELETE` | `/api/secrets/{key}` | Delete a secret |
+
+**POST `/api/secrets`**:
+```json
+{ "key": "SLACK_TOKEN", "value": "xoxb-..." }
+```
+
+### AI generation
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/api/generate` | Generate task from prompt |
+
+**POST `/api/generate`**:
+```json
+{ "prompt": "Check the Stripe status page every 15 minutes and alert if degraded" }
+```
+
+Response (streaming JSON lines):
+```jsonl
+{ "type": "progress", "message": "Generating task..." }
+{ "type": "result", "files": { "task.yaml": "...", "task.js": "...", "task.test.js": "..." } }
+```
+
+**POST `/api/generate/confirm`** — write generated files to local source:
+```json
+{
+  "task_id": "stripe-status-monitor",
+  "files": { "task.yaml": "...", "task.js": "...", "task.test.js": "..." }
+}
+```
+
+### MCP
+
+| Path | Description |
+|---|---|
+| `/mcp` | MCP server endpoint (see [MCP Server](./mcp-server.md)) |
+
+---
+
+## API authentication
+
+The REST API has no authentication by default (localhost only). For remote access, set a shared secret:
+
+```yaml
+server:
+  api_secret_env: DICODE_API_SECRET
+```
+
+Include it as a header: `Authorization: Bearer <secret>`.
+
+---
+
+## API reference
+
+Full OpenAPI spec available at `http://localhost:8080/api/openapi.json` when dicode is running.

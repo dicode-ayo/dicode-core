@@ -1,0 +1,65 @@
+sources:
+  # Remote git repo — pulled every poll_interval or instantly on GitHub push webhook
+  - type: git
+    url: https://github.com/you/my-tasks
+    branch: main
+    poll_interval: 30s
+    auth:
+      type: token
+      token_env: GITHUB_TOKEN
+
+  # Optional: second git repo (e.g. shared team tasks)
+  # - type: git
+  #   url: https://github.com/team/shared-tasks
+  #   branch: main
+  #   auth:
+  #     type: token
+  #     token_env: GITHUB_TOKEN
+
+  # Optional: local directory for development (instant reload via fsnotify)
+  # - type: local
+  #   path: ~/tasks-dev
+  #   watch: true
+
+database:
+  type: sqlite                  # sqlite (default/free) | postgres | mysql
+  path: ~/.dicode/data.db       # sqlite only
+  # url_env: DATABASE_URL       # postgres/mysql: env var holding DSN
+
+relay:
+  enabled: true                 # WebSocket tunnel to dicode.app for public webhook URLs
+  account_env: DICODE_TOKEN     # env var holding your dicode.app account token
+  # Run `dicode relay login` to authenticate and set this up
+
+secrets:
+  providers:
+    - type: local   # encrypted SQLite, key at ~/.dicode/master.key (auto-generated)
+    - type: env     # host environment variables (fallback)
+
+notifications:
+  on_failure: true   # push to your phone when any task fails
+  on_success: false
+  # provider:
+  #   type: ntfy
+  #   url: https://ntfy.sh
+  #   topic: my-dicode-alerts
+  #   token_env: NTFY_TOKEN
+    # - type: vault
+    #   address: https://vault.example.com
+    #   token_env: VAULT_TOKEN
+    # - type: aws-secrets-manager
+    #   region: us-east-1
+
+server:
+  port: 8080
+  secret: ""   # set to require a password for the web UI
+  mcp: true    # expose MCP endpoint at /mcp for AI agent integration
+  tray: true   # system tray icon with status + quick actions (auto-detected if omitted)
+
+ai:
+  provider: claude
+  model: claude-sonnet-4-6
+  api_key_env: ANTHROPIC_API_KEY
+
+log_level: info
+data_dir: ~/.dicode
