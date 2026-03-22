@@ -140,6 +140,60 @@ Keys are namespaced per task ID — two tasks cannot access each other's KV data
 
 ---
 
+### `fs` — filesystem access
+
+Only available when `fs:` is declared in `task.yaml`. Zero filesystem access by default.
+
+Every call is validated against the declared paths before execution. Requests outside declared paths, or with insufficient permission, throw immediately.
+
+```javascript
+// Read
+const text = await fs.read("~/reports/data.csv")          // string (utf-8)
+const obj  = await fs.readJSON("~/data/config.json")       // parsed object
+
+// Write
+await fs.write("~/reports/weekly.html", htmlContent)       // creates or overwrites
+await fs.writeJSON("~/reports/summary.json", { count: 42 })
+await fs.append("~/reports/log.txt", `${new Date().toISOString()} — done\n`)
+
+// Directory listing
+const entries = await fs.list("~/data")
+// → [{ name, path, isDir, size, modified }]
+
+// Glob
+const csvFiles = await fs.glob("~/data/**/*.csv")          // string[] of matching paths
+
+// File info
+const info   = await fs.stat("~/reports/weekly.html")      // { size, modified, isDir }
+const exists = await fs.exists("~/reports/weekly.html")    // boolean
+
+// Mutations
+await fs.mkdir("~/reports/2026/march")                     // creates full path (like mkdir -p)
+await fs.copy("~/reports/weekly.html", "~/archive/weekly-2026-03-22.html")
+await fs.move("~/reports/tmp.html", "~/reports/weekly.html")
+await fs.delete("~/reports/old.txt")
+```
+
+**`fs.list()` entry shape:**
+```javascript
+{ name: "report.html", path: "/home/alice/reports/report.html", isDir: false, size: 4821, modified: 1742601600000 }
+```
+
+**Error cases:**
+- Path outside any declared `fs:` entry → `PermissionError: path not declared`
+- Insufficient permission (e.g. write to a `r` path) → `PermissionError: write not allowed`
+- Symlink resolving outside a declared path → `PermissionError: symlink target not declared`
+- File not found → `NotFoundError`
+
+**Security enforcement (Go side):**
+1. Resolve requested path to absolute path (`filepath.Abs`)
+2. Resolve symlinks (`filepath.EvalSymlinks`)
+3. Check resolved path has a declared `fs:` entry as a prefix
+4. Check the operation matches the declared permission
+5. Block — no silent fallback
+
+---
+
 ### `notify` — send notifications
 
 ```javascript
@@ -206,9 +260,111 @@ const ok = await dicode.ask("Deploy to 500 users?", {
   options: ["approve", "reject"]
 })
 if (ok !== "approve") return
+
+// Query orchestrator state (primary use: daemon tasks / WebUI task)
+const tasks   = await dicode.listTasks()
+const spec    = await dicode.getTask("morning-email-check")
+const runs    = await dicode.listRuns("morning-email-check", 20)
+const run     = await dicode.getRun("run_abc123")
+const logs    = await dicode.getRunLogs("run_abc123")
+const secrets = await dicode.listSecrets()   // names only, never values
 ```
 
 See [Task → Orchestrator API](./orchestrator-api.md) for full documentation.
+
+---
+
+### `output` — rich return values
+
+By default, returning a plain object shows a JSON viewer in the WebUI. The `output` global lets tasks return typed content that renders appropriately.
+
+```javascript
+// Rendered HTML (sandboxed iframe in WebUI)
+return output.html(`
+  <h1>Daily Report — ${new Date().toDateString()}</h1>
+  <table>
+    <tr><td>Emails processed</td><td>${count}</td></tr>
+  </table>
+`)
+
+// Plain text (monospace block)
+return output.text(`Done: ${count} items\n${errors} errors`)
+
+// Image
+return output.image("image/png", base64PngData)
+
+// File download trigger in WebUI
+return output.file("report.csv", csvContent, "text/csv")
+
+// HTML + structured data: humans see the HTML, chain triggers receive { data }
+return output.html(htmlContent, { data: { count, errors } })
+```
+
+**Chain compatibility:** when using `output.html(content, { data })`, the `data` field is what chained tasks receive as `input` — not the HTML. One task can produce a human-readable report AND pass structured data downstream.
+
+**WebUI rendering:**
+
+| Output type | Rendered as |
+|---|---|
+| plain return | Collapsible JSON tree |
+| `output.html(...)` | Sandboxed `<iframe>` |
+| `output.text(...)` | Monospace `<pre>` block |
+| `output.image(...)` | `<img>` tag |
+| `output.file(...)` | Download button |
+
+---
+
+### `server` — HTTP serving for daemon tasks (north star)
+
+Available only in daemon tasks (`trigger: { daemon: true }`). Allows a task to serve HTTP — either mounted on the dicode server or on a standalone port.
+
+```javascript
+// Mount on dicode's main HTTP server (port 8080)
+// Ideal for the WebUI task — replaces the built-in embedded UI
+const app = server.mount("/")
+
+app.get("/api/tasks", async (req, res) => {
+  res.json(await dicode.listTasks())
+})
+app.get("/api/runs/:runId", async (req, res) => {
+  res.json(await dicode.getRun(req.params.runId))
+})
+app.post("/api/tasks/:id/run", async (req, res) => {
+  const runId = await dicode.trigger(req.params.id, req.body.params)
+  res.json({ runId })
+})
+app.static("/", "./dist")   // serve compiled React/TypeScript bundle
+
+await app.start()           // register routes and block (daemon never returns)
+
+// Or: standalone port (for custom API servers, background services)
+server.get("/api/v1/data", async (req, res) => { ... })
+await server.listen(9090)
+```
+
+**Request:** `req.method`, `req.path`, `req.params`, `req.query`, `req.headers`, `req.body`
+
+**Response:** `res.json(data)`, `res.html(str)`, `res.text(str)`, `res.status(404).json(...)`, `res.header(k, v)`
+
+Not available in MVP — planned post-MVP. See [Web UI & API](./webui-api.md#webui-as-a-daemon-task).
+
+---
+
+## Globals summary
+
+| Global | MVP | Description |
+|---|---|---|
+| `log` | ✅ | Structured logging |
+| `env` | ✅ | Resolved secrets / env vars |
+| `params` | ✅ | Task parameters |
+| `http` | ✅ | Outbound HTTP |
+| `kv` | ✅ | Persistent key-value store |
+| `output` | ✅ | Typed return values (html, text, image, file) |
+| `fs` | ✅ | Filesystem access (only when declared in task.yaml) |
+| `input` | ✅ | Chain / webhook payload |
+| `notify` | ✅ | Push notifications |
+| `dicode` | ✅ | Orchestrator API (progress, trigger, isRunning, query methods) |
+| `server` | 🔮 | HTTP serving for daemon tasks (post-MVP) |
 
 ---
 

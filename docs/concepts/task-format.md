@@ -61,6 +61,11 @@ env:
 | `trigger.chain` | object | | Chain trigger (see below) |
 | `trigger.chain.from` | string | | Task ID to listen for |
 | `trigger.chain.on` | string | | `success` (default), `failure`, `always` |
+| `trigger.daemon` | bool | | `true` for long-running daemon tasks |
+| `trigger.daemon.restart` | string | | `always` (default), `never`, `on-failure` |
+| `fs` | list | | Filesystem access declarations |
+| `fs[].path` | string | | Absolute or `~`-prefixed path |
+| `fs[].permission` | string | | `r`, `w`, or `rw` |
 | `params` | list | | Input parameters with defaults |
 | `params[].name` | string | | Parameter name |
 | `params[].description` | string | | Human-readable description |
@@ -91,6 +96,15 @@ Endpoint: `POST /hooks/github-push`. Request body available as `input` global in
 trigger:
   manual: true
 ```
+
+**Daemon** — starts with dicode and runs indefinitely. Restarts automatically if the script exits.
+```yaml
+trigger:
+  daemon: true
+  restart: always   # always (default) | never | on-failure
+```
+
+Daemon tasks are long-lived processes — the script never returns. Use them to run persistent HTTP servers, background workers, or anything that should always be running. See [Web UI & API](./webui-api.md#webui-as-a-daemon-task) for the WebUI-as-task pattern.
 
 **Chain** — fires when another task completes:
 ```yaml
@@ -191,6 +205,63 @@ test("handles empty inbox gracefully", async () => {
 ```
 
 ---
+
+## Filesystem access
+
+By default tasks have **zero filesystem access**. To grant access, declare the paths and permissions explicitly in `task.yaml`:
+
+```yaml
+fs:
+  - path: ~/data
+    permission: r       # read-only
+  - path: ~/reports
+    permission: rw      # read + write + delete
+  - path: /tmp/dicode
+    permission: rw
+```
+
+| Permission | Read | Write | Delete | mkdir |
+|---|---|---|---|---|
+| `r` | ✅ | ❌ | ❌ | ❌ |
+| `w` | ❌ | ✅ | ✅ | ✅ |
+| `rw` | ✅ | ✅ | ✅ | ✅ |
+
+**Path resolution:**
+- `~` is expanded to the user's home directory
+- Relative paths are resolved relative to the task folder (useful for bundling data files alongside the script)
+- Symlinks are resolved before permission checking — a symlink pointing outside a declared path is rejected
+- `../` traversal that escapes a declared base path is rejected
+
+The `fs` global is only injected into the runtime when `fs:` is declared. Tasks without `fs:` cannot access the filesystem at all.
+
+See [JS Runtime — fs global](./js-runtime.md#fs--filesystem-access) for the full API.
+
+## Rich output types
+
+Tasks can return typed output that renders nicely in the WebUI. Use the `output` global:
+
+```javascript
+// Default: JSON viewer
+return { count: 5 }
+
+// Rendered HTML (sandboxed iframe in WebUI)
+return output.html(`<h1>Daily Report</h1><table>...</table>`)
+
+// Plain text (monospace block)
+return output.text("Done: processed 42 items\n3 errors")
+
+// Image
+return output.image("image/png", base64PngData)
+
+// File download
+return output.file("report.csv", csvContent, "text/csv")
+
+// HTML with structured data for chain triggers
+// chained tasks receive { count: 5 }, not the HTML
+return output.html(htmlContent, { data: { count: 5 } })
+```
+
+See [JS Runtime — output global](./js-runtime.md#output--rich-return-values) for the full API.
 
 ## Task ID
 

@@ -155,9 +155,35 @@ Each call to `Run()`:
 | `params` | `globals/params.go` | MVP |
 | `http` | `globals/http.go` | MVP |
 | `kv` | `globals/kv.go` | MVP |
+| `output` | `globals/output.go` | MVP |
+| `fs` | `globals/fs.go` | MVP |
 | `notify` | `globals/notify.go` | Post-MVP |
 | `input` | `globals/input.go` | Post-MVP (chain) |
-| `dicode` | `dicode.go` | North star |
+| `dicode` | `dicode.go` | Post-MVP (progress, trigger, isRunning, query methods) |
+| `server` | `globals/server.go` | North star (daemon tasks) |
+
+### `pkg/runtime/js/globals/output.go`
+
+Wraps return values with a content type for rich WebUI rendering:
+```javascript
+return output.html("<h1>Report</h1>...")      // rendered iframe
+return output.text("Done: 42 items")           // monospace pre block
+return output.image("image/png", base64)       // img tag
+return output.file("r.csv", csv, "text/csv")   // download button
+return output.html(html, { data: { count } })  // html for humans, data for chains
+```
+
+Returns a plain Go struct `{ ContentType, Content, Data }`. The runner stores it in sqlite alongside the run. The WebUI reads `ContentType` to decide how to render.
+
+### `pkg/runtime/js/globals/fs.go`
+
+Filesystem access. Only injected when `task.yaml` declares `fs:`. Security enforced in Go before every call:
+1. `filepath.Abs` → resolve to absolute path
+2. `filepath.EvalSymlinks` → resolve symlinks
+3. Check resolved path has a declared entry as prefix
+4. Check operation matches declared permission (`r`/`w`/`rw`)
+
+Methods: `read`, `readJSON`, `write`, `writeJSON`, `append`, `list`, `glob`, `stat`, `exists`, `mkdir`, `copy`, `move`, `delete`
 
 ### `pkg/runtime/js/globals/log.go`
 ```javascript
@@ -530,7 +556,44 @@ Future: index at `dicode.app/store` for discovery.
 
 ---
 
-## Milestone 18 — Onboarding wizard
+## Milestone 18 — Daemon tasks + `server` global
+
+**Goal**: long-running tasks that serve HTTP. Enables the WebUI-as-task pattern.
+
+### Daemon task lifecycle in the trigger engine
+
+- On reconciler `added`/`updated`: if `trigger.daemon`, start the task immediately
+- Track daemon runs separately — they don't appear in normal run history pagination
+- On `removed` or `updated`: send a cancellation signal to the running instance
+- `restart` policy: `always` → restart after any exit; `on-failure` → restart only on error; `never` → don't restart
+
+### `pkg/runtime/js/globals/server.go`
+
+Two modes:
+
+**`server.mount(path)`** — registers routes on the dicode HTTP server (chi router):
+```javascript
+const app = server.mount("/")
+app.get("/api/tasks", handler)
+app.static("/", "./dist")
+await app.start()
+```
+
+**`server.listen(port)`** — starts a standalone HTTP server in a goroutine, blocks until context cancelled:
+```javascript
+server.get("/api/v1/data", handler)
+await server.listen(9090)
+```
+
+### Bootstrap page
+
+When no daemon task has mounted `/`, the dicode binary serves a minimal page pointing to `dicode task install github.com/dicode/webui`. The REST API at `/api/` is always served by the binary.
+
+**Deliverable**: a TypeScript/React WebUI can run as a daemon task, replacing the embedded Go UI.
+
+---
+
+## Milestone 19 — Onboarding wizard
 
 **Goal**: first-run browser wizard instead of config file editing.
 
@@ -569,6 +632,7 @@ On first run (no config):
 | 15 | Public webhook URLs on laptops |
 | 16 | Run on startup |
 | 17 | Community task install |
-| 18 | Smooth first-run onboarding |
+| 18 | WebUI-as-daemon-task, `server` global, standalone UIs |
+| 19 | Smooth first-run onboarding |
 
 Milestones 0–7 are the **MVP**. Everything after is additive.

@@ -117,6 +117,40 @@ This feature is the north star for human-in-the-loop AI workflows. Requires the 
 
 ---
 
+## Query methods
+
+Read-only access to orchestrator state. Primarily used by daemon tasks (e.g. a WebUI task that needs to list tasks and fetch run history), but available to any task.
+
+```javascript
+// List all registered tasks
+const tasks = await dicode.listTasks()
+// → [{ id, name, trigger, status, lastRun }, ...]
+
+// Get a single task spec
+const spec = await dicode.getTask("morning-email-check")
+// → { id, name, trigger, params, env, ... }
+
+// Run history for a task
+const runs = await dicode.listRuns("morning-email-check", 20)
+// → [{ id, status, startedAt, finishedAt, durationMs, triggerType }, ...]
+
+// Full run detail
+const run = await dicode.getRun("run_abc123")
+// → { id, taskId, status, startedAt, finishedAt, returnValue, parentRunId }
+
+// Run log entries
+const logs = await dicode.getRunLogs("run_abc123")
+// → [{ ts, level, message, data }, ...]
+
+// Secret names (never values)
+const names = await dicode.listSecrets()
+// → ["SLACK_TOKEN", "GMAIL_TOKEN"]
+```
+
+These methods are what allow a [WebUI daemon task](./webui-api.md#webui-as-a-daemon-task) to serve a full dashboard backed by live orchestrator data — without the UI being embedded in the binary.
+
+---
+
 ## Summary
 
 | Method | Sync/Async | Blocks? | Description |
@@ -125,3 +159,9 @@ This feature is the north star for human-in-the-loop AI workflows. Requires the 
 | `await dicode.trigger(id, payload)` | Async | No (fire-and-forget) | Schedule another task |
 | `await dicode.isRunning(id)` | Async | No | Check if task is running |
 | `await dicode.ask(question, opts)` | Async | Yes — until response | Request human approval |
+| `await dicode.listTasks()` | Async | No | All registered tasks |
+| `await dicode.getTask(id)` | Async | No | Single task spec |
+| `await dicode.listRuns(taskId, n)` | Async | No | Run history |
+| `await dicode.getRun(runId)` | Async | No | Run detail |
+| `await dicode.getRunLogs(runId)` | Async | No | Run log entries |
+| `await dicode.listSecrets()` | Async | No | Secret names (no values) |

@@ -169,6 +169,101 @@ Response (streaming JSON lines):
 
 ---
 
+---
+
+## WebUI as a daemon task (north star)
+
+The embedded Go WebUI is the MVP. The north star is a **WebUI daemon task** — a long-running task that serves a TypeScript/React frontend using the `server` global and `dicode` query methods.
+
+This decouples the UI entirely from the binary:
+- The UI can be developed in a separate repo (TypeScript, React, any framework)
+- It is versioned and updated independently of the dicode binary
+- Community-built alternative UIs are possible
+- The dicode binary becomes purely an orchestrator — no UI opinion baked in
+
+### Architecture
+
+```
+github.com/dicode/webui/        ← separate TypeScript/React repo
+  src/                           ← source (not committed to task folder)
+  dist/                          ← compiled bundle (released as GitHub artifact)
+
+your-tasks/webui/                ← the dicode task
+  task.yaml                      ← trigger: daemon: true
+  task.js                        ← server setup, API routes, dicode queries
+  dist/                          ← compiled bundle (copied from webui release)
+```
+
+### task.yaml
+
+```yaml
+name: Dicode WebUI
+trigger:
+  daemon: true
+  restart: always
+params:
+  - name: port
+    default: "8080"
+```
+
+### task.js
+
+```javascript
+const app = server.mount("/")
+
+// API routes backed by dicode query methods
+app.get("/api/tasks", async (req, res) => {
+  res.json(await dicode.listTasks())
+})
+app.get("/api/tasks/:id", async (req, res) => {
+  res.json(await dicode.getTask(req.params.id))
+})
+app.post("/api/tasks/:id/run", async (req, res) => {
+  const runId = await dicode.trigger(req.params.id, req.body?.params)
+  res.json({ runId })
+})
+app.get("/api/runs/:runId", async (req, res) => {
+  res.json(await dicode.getRun(req.params.runId))
+})
+app.get("/api/runs/:runId/logs", async (req, res) => {
+  res.json(await dicode.getRunLogs(req.params.runId))
+})
+
+// Serve the compiled React bundle for everything else
+app.static("/", "./dist")
+
+await app.start()
+```
+
+### Bootstrap
+
+If no daemon task has mounted `/`, the dicode binary serves a minimal bootstrap page:
+
+```
+Dicode is running.
+
+No WebUI task is installed. To install the default WebUI:
+  dicode task install github.com/dicode/webui
+
+The REST API is available at /api/
+```
+
+The REST API is always served by the binary regardless of whether a WebUI task is running.
+
+### Separate repo development
+
+The TypeScript/React source lives in a separate repo. To update the UI:
+1. Make changes in the React repo, build (`npm run build` → `dist/`)
+2. Copy `dist/` to your tasks `webui/dist/`
+3. The local source detects the change, reloads the daemon task (~100ms)
+4. The new UI is live immediately — no dicode restart
+
+Or: the task fetches the latest release bundle from GitHub on startup and caches it in `kv`. On restart it checks for a newer release.
+
+This is a post-MVP feature requiring the `server` global and daemon task type. See [Implementation Plan](../implementation-plan.md) for the milestone order.
+
+---
+
 ## API authentication
 
 The REST API has no authentication by default (localhost only). For remote access, set a shared secret:

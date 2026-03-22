@@ -150,8 +150,33 @@ For full chain documentation including data flow and constraints, see [Task Chai
 
 ---
 
+## Daemon (north star)
+
+Long-running tasks that start with dicode and run indefinitely.
+
+```yaml
+trigger:
+  daemon: true
+  restart: always   # always (default) | never | on-failure
+```
+
+Daemon tasks:
+- Start automatically when dicode starts (or when the task is registered)
+- Are expected to run forever — they block on `server.listen()` or a similar call
+- Are restarted according to the `restart` policy if they exit
+- Appear in the task list with status `running` while active
+- Have a run log like any other task
+
+The canonical use case is a [WebUI daemon task](./webui-api.md#webui-as-a-daemon-task) — a TypeScript/React frontend served using the `server` global.
+
+Other uses: background workers, WebSocket servers, custom API gateways, persistent integrations that maintain a long-lived connection (e.g. a Slack socket-mode bot).
+
+Daemon tasks are not available in MVP — they require the `server` global (post-MVP).
+
+---
+
 ## Trigger constraints
 
 - Exactly one trigger per task. Multiple triggers are not supported (use `dicode.trigger()` from a task for complex dispatch logic).
-- All four trigger types coexist in the same task registry.
-- Cron and chain tasks can also be triggered manually via the API/UI regardless of their configured trigger.
+- All five trigger types coexist in the same task registry.
+- Cron, chain, and daemon tasks can also be triggered manually via the API/UI (manual trigger on a daemon task restarts it).

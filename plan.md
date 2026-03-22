@@ -14,7 +14,7 @@ Single `dicode` binary. Configured via `dicode.yaml` (tasks repo URL, auth, serv
 Each task = a folder in the tasks git repo:
 ```
 tasks/morning-email-check/
-├── task.yaml       ← name, trigger (cron/webhook/manual/chain), params, env vars
+├── task.yaml       ← name, trigger (cron/webhook/manual/chain/daemon), params, env, fs
 ├── task.js         ← JS logic
 └── task.test.js    ← optional unit tests (picked up automatically)
 ```
@@ -22,7 +22,11 @@ tasks/morning-email-check/
 ### 3. JS Runtime (goja)
 Tasks run as JS scripts with injected helpers: `http`, `kv`, `log`, `params`, `env`, `notify`, `dicode`. No filesystem or shell access. Each run is isolated (fresh runtime instance).
 
-Full globals: `http`, `kv`, `log`, `params`, `env`, `input` (chain), `notify`, `dicode`
+Full globals: `http`, `kv`, `log`, `params`, `env`, `input` (chain), `notify`, `output`, `dicode`
+
+**MVP globals**: `log`, `env`, `params`, `http`, `kv`, `output`, `fs`
+**Post-MVP**: `notify`, `input`, `dicode` (full API)
+**North star**: `server` (daemon tasks only)
 
 ### 3e. Notifications
 
@@ -96,6 +100,16 @@ const ok = await dicode.ask("Send to 500 users?", { timeout: "1h", options: ["ye
 
 **Package**: `pkg/runtime/js/dicode.go`
 **North star**: daemon task type (`trigger: daemon: true`) + agent-orchestration tasks that use `dicode.ask()` + `dicode.trigger()` to build human-in-the-loop AI workflows.
+
+**`dicode` read query methods** (for daemon tasks / WebUI task):
+```javascript
+await dicode.listTasks()          // all task specs
+await dicode.getTask(id)          // single task
+await dicode.listRuns(id, n)      // run history
+await dicode.getRun(runId)        // run detail
+await dicode.getRunLogs(runId)    // log entries
+await dicode.listSecrets()        // names only
+```
 
 ### 3a. Secrets
 Tasks declare required secrets in `task.yaml` under `env:`. The runtime resolves them via a **provider chain** — tried in order until found.
@@ -266,6 +280,97 @@ dicode agent skill install --claude-code    # write to ~/.claude/skills/dicode-t
 - Chain trigger constraints (output < 1MB, JSON-serializable)
 
 **File**: `pkg/agent/skill.go` — embeds `skill.md` via `//go:embed`; `dicode agent skill show` prints it.
+
+### 3f-2. Filesystem Access (`fs` global)
+
+Zero filesystem access by default. Tasks opt in by declaring paths + permissions in `task.yaml`:
+
+```yaml
+fs:
+  - path: ~/data
+    permission: r       # read-only
+  - path: ~/reports
+    permission: rw      # read + write + delete
+  - path: /tmp/dicode
+    permission: rw
+```
+
+**Permissions**: `r` (read only), `w` (write/delete/mkdir), `rw` (both).
+
+**`fs` global** (`pkg/runtime/js/globals/fs.go`):
+```javascript
+const text     = await fs.read("~/data/users.csv")
+const obj      = await fs.readJSON("~/data/config.json")
+await fs.write("~/reports/weekly.html", content)
+await fs.writeJSON("~/reports/summary.json", data)
+await fs.append("~/log.txt", line)
+const entries  = await fs.list("~/data")       // [{ name, path, isDir, size, modified }]
+const paths    = await fs.glob("~/data/**/*.csv")
+const info     = await fs.stat("~/reports/weekly.html")
+const exists   = await fs.exists("~/reports/weekly.html")
+await fs.mkdir("~/reports/2026/march")
+await fs.copy(src, dst)
+await fs.move(src, dst)
+await fs.delete("~/reports/old.txt")
+```
+
+**Security model** — enforced in Go before every call:
+1. `filepath.Abs` → absolute path
+2. `filepath.EvalSymlinks` → resolve symlinks (blocks symlink escapes)
+3. Check resolved path is prefixed by a declared `fs:` entry
+4. Check operation matches declared permission
+5. Throw `PermissionError` on any violation — no silent fallback
+
+**`fs` global is not injected at all** when `task.yaml` has no `fs:` section — no possibility of accidental access.
+
+**Use cases**: agent tasks (read codebase, write reports), cleanup tasks (archive old files), report generators (read data CSVs, write HTML output), any task that needs to read config files or write artifacts.
+
+### 3g. Rich Task Output (`output` global)
+
+Tasks return typed content that renders in the WebUI run detail view:
+
+```javascript
+return output.html(`<h1>Daily Report</h1><table>...</table>`)
+return output.text("Done: 42 items\n3 errors")
+return output.image("image/png", base64Data)
+return output.file("report.csv", csvContent, "text/csv")
+// HTML for humans + structured data for chain triggers:
+return output.html(htmlContent, { data: { count, errors } })
+```
+
+**WebUI rendering**: `text/html` → sandboxed iframe, `text/plain` → `<pre>`, `image/*` → `<img>`, file types → download button, plain return → JSON tree.
+
+**Chain compatibility**: `output.html(html, { data })` — chained tasks receive `data` as `input`, not the HTML. Visual output and machine-readable output are independent.
+
+**Go implementation**: `globals/output.go` returns a struct `{ ContentType, Content, Data }` stored in sqlite alongside the run.
+
+### 3h. Daemon Tasks + `server` Global (north star)
+
+**Daemon task type** — long-running tasks that start with dicode and run forever:
+```yaml
+trigger:
+  daemon: true
+  restart: always   # always | never | on-failure
+```
+
+**`server` global** — HTTP serving from inside a task:
+```javascript
+// Mount on dicode's main server (ideal for WebUI task)
+const app = server.mount("/")
+app.get("/api/tasks", async (req, res) => res.json(await dicode.listTasks()))
+app.static("/", "./dist")
+await app.start()
+
+// Or standalone port
+server.get("/health", (req, res) => res.json({ ok: true }))
+await server.listen(9090)
+```
+
+**WebUI-as-task**: The embedded Go WebUI is the MVP. The north star is the WebUI running as a daemon task served from a TypeScript/React app in a separate repo (`github.com/dicode/webui`). The dicode binary becomes a pure orchestrator — no UI opinion baked in. Community can build alternative UIs.
+
+**Bootstrap**: when no daemon task mounts `/`, the binary serves a minimal page: "Install WebUI: `dicode task install github.com/dicode/webui`". The REST API at `/api/` is always served by the binary.
+
+**`pkg/runtime/js/globals/server.go`** — `server.mount(path)` (wires into chi router) + `server.listen(port)` (standalone net/http server in goroutine).
 
 ### 4. Source Abstraction + Reconciler
 
