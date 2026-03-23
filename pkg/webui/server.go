@@ -13,6 +13,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/dicode/dicode/pkg/config"
 	"github.com/dicode/dicode/pkg/registry"
 	"github.com/dicode/dicode/pkg/trigger"
 	"go.uber.org/zap"
@@ -25,30 +26,33 @@ var templateFS embed.FS
 type Server struct {
 	registry *registry.Registry
 	engine   *trigger.Engine
+	cfg      *config.Config
 	log      *zap.Logger
 	port     int
 	srv      *http.Server
-	tmpl     *template.Template
+	baseTmpl *template.Template // parsed base.html only; cloned per render
 }
 
 // New creates a Server.
-func New(port int, r *registry.Registry, eng *trigger.Engine, log *zap.Logger) (*Server, error) {
+func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config, log *zap.Logger) (*Server, error) {
 	funcMap := template.FuncMap{
 		"triggerLabel": triggerLabel,
 		"fmtTime":      fmtTime,
 		"fmtDuration":  fmtDuration,
 		"slice":        func(s string, i, j int) string { return s[i:j] },
+		"string":       fmt.Sprint,
 	}
-	tmpl, err := template.New("").Funcs(funcMap).ParseFS(templateFS, "templates/*.html")
+	base, err := template.New("base.html").Funcs(funcMap).ParseFS(templateFS, "templates/base.html")
 	if err != nil {
-		return nil, fmt.Errorf("parse templates: %w", err)
+		return nil, fmt.Errorf("parse base template: %w", err)
 	}
 	return &Server{
 		registry: r,
 		engine:   eng,
+		cfg:      cfg,
 		log:      log,
 		port:     port,
-		tmpl:     tmpl,
+		baseTmpl: base,
 	}, nil
 }
 
@@ -62,8 +66,10 @@ func (s *Server) Handler() http.Handler {
 	r.Get("/", s.handleTaskList)
 	r.Get("/tasks/{id}", s.handleTaskDetail)
 	r.Get("/runs/{runID}", s.handleRunDetail)
+	r.Get("/config", s.handleConfig)
 
 	// REST API
+	r.Get("/api/config", s.apiGetConfig)
 	r.Get("/api/tasks", s.apiListTasks)
 	r.Get("/api/tasks/{id}", s.apiGetTask)
 	r.Post("/api/tasks/{id}/run", s.apiRunTask)
@@ -102,7 +108,7 @@ func (s *Server) Start(ctx context.Context) error {
 // --- UI handlers ---
 
 func (s *Server) handleTaskList(w http.ResponseWriter, r *http.Request) {
-	s.render(w, "tasks.html", map[string]interface{}{
+	s.render(w, "tasks.html", map[string]any{
 		"Title": "Tasks",
 		"Tasks": s.registry.All(),
 	})
@@ -116,7 +122,7 @@ func (s *Server) handleTaskDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	runs, _ := s.registry.ListRuns(r.Context(), id, 20)
-	s.render(w, "task.html", map[string]interface{}{
+	s.render(w, "task.html", map[string]any{
 		"Title": spec.Name,
 		"Spec":  spec,
 		"Runs":  runs,
@@ -131,22 +137,42 @@ func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	logs, _ := s.registry.GetRunLogs(r.Context(), runID)
-	s.render(w, "run.html", map[string]interface{}{
+	s.render(w, "run.html", map[string]any{
 		"Title": "Run " + runID[:8],
 		"Run":   run,
 		"Logs":  logs,
 	})
 }
 
-func (s *Server) render(w http.ResponseWriter, name string, data interface{}) {
+func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
+	s.render(w, "config.html", map[string]any{
+		"Title": "Config",
+		"Cfg":   s.cfg,
+	})
+}
+
+func (s *Server) render(w http.ResponseWriter, name string, data any) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := s.tmpl.ExecuteTemplate(w, name, data); err != nil {
+	t, err := s.baseTmpl.Clone()
+	if err != nil {
+		http.Error(w, "template clone error", http.StatusInternalServerError)
+		return
+	}
+	if _, err = t.ParseFS(templateFS, "templates/"+name); err != nil {
+		s.log.Error("template parse", zap.String("template", name), zap.Error(err))
+		http.Error(w, "template parse error", http.StatusInternalServerError)
+		return
+	}
+	if err = t.ExecuteTemplate(w, "base.html", data); err != nil {
 		s.log.Error("template render", zap.String("template", name), zap.Error(err))
-		http.Error(w, "render error", http.StatusInternalServerError)
 	}
 }
 
 // --- REST API handlers ---
+
+func (s *Server) apiGetConfig(w http.ResponseWriter, r *http.Request) {
+	jsonOK(w, s.cfg)
+}
 
 func (s *Server) apiListTasks(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, s.registry.All())
@@ -212,7 +238,7 @@ func (s *Server) apiGetLogs(w http.ResponseWriter, r *http.Request) {
 
 // --- helpers ---
 
-func jsonOK(w http.ResponseWriter, v interface{}) {
+func jsonOK(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
 }
@@ -223,7 +249,7 @@ func jsonErr(w http.ResponseWriter, msg string, code int) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
-func triggerLabel(tc interface{}) string {
+func triggerLabel(tc any) string {
 	// tc is task.TriggerConfig — use fmt to inspect its fields via reflection would
 	// require importing task. Instead the template passes the whole Trigger field
 	// and we return a human-readable string by type-switching the map form.
@@ -231,7 +257,7 @@ func triggerLabel(tc interface{}) string {
 		GetCron() string
 	}
 	switch v := tc.(type) {
-	case map[string]interface{}:
+	case map[string]any:
 		if c, _ := v["cron"].(string); c != "" {
 			return "cron: " + c
 		}

@@ -1,65 +1,77 @@
-sources:
-  # Remote git repo — pulled every poll_interval or instantly on GitHub push webhook
-  - type: git
-    url: https://github.com/you/my-tasks
-    branch: main
-    poll_interval: 30s
-    auth:
-      type: token
-      token_env: GITHUB_TOKEN
+# dicode configuration
+# Generated on first run. Edit this file to change settings.
+# Restart dicode after making changes.
 
-  # Optional: second git repo (e.g. shared team tasks)
+# ---------------------------------------------------------------------------
+# Task sources — where dicode looks for task folders.
+# Each folder under the path must contain task.yaml + task.js.
+# ---------------------------------------------------------------------------
+sources:
+  - type: local
+    path: /home/dr14/dicode-tasks
+    watch: true       # reload tasks automatically when files change (~150ms)
+
+  # Add a git source to version your tasks in GitHub/GitLab:
   # - type: git
-  #   url: https://github.com/team/shared-tasks
+  #   url: https://github.com/you/my-tasks
   #   branch: main
+  #   poll_interval: 30s
   #   auth:
   #     type: token
   #     token_env: GITHUB_TOKEN
 
-  # Optional: local directory for development (instant reload via fsnotify)
-  # - type: local
-  #   path: ~/tasks-dev
-  #   watch: true
-
+# ---------------------------------------------------------------------------
+# Database — stores run history and task KV data.
+# ---------------------------------------------------------------------------
 database:
-  type: sqlite                  # sqlite (default/free) | postgres | mysql
-  path: ~/.dicode/data.db       # sqlite only
-  # url_env: DATABASE_URL       # postgres/mysql: env var holding DSN
+  type: sqlite
+  path: /home/dr14/.dicode/data.db
 
-relay:
-  enabled: true                 # WebSocket tunnel to dicode.app for public webhook URLs
-  account_env: DICODE_TOKEN     # env var holding your dicode.app account token
-  # Run `dicode relay login` to authenticate and set this up
+  # Switch to Postgres/MySQL for multi-machine or high-availability setups:
+  # type: postgres
+  # url_env: DATABASE_URL    # env var holding the DSN
 
+# ---------------------------------------------------------------------------
+# Secrets — encrypted storage for API keys and tokens used by tasks.
+# Tasks reference secrets by name in task.yaml under env:
+# ---------------------------------------------------------------------------
 secrets:
   providers:
-    - type: local   # encrypted SQLite, key at ~/.dicode/master.key (auto-generated)
-    - type: env     # host environment variables (fallback)
+    - type: local   # encrypted SQLite, master key at /home/dr14/.dicode/master.key
+    - type: env     # fall back to host environment variables
 
-notifications:
-  on_failure: true   # push to your phone when any task fails
-  on_success: false
-  # provider:
-  #   type: ntfy
-  #   url: https://ntfy.sh
-  #   topic: my-dicode-alerts
-  #   token_env: NTFY_TOKEN
-    # - type: vault
-    #   address: https://vault.example.com
-    #   token_env: VAULT_TOKEN
-    # - type: aws-secrets-manager
-    #   region: us-east-1
-
+# ---------------------------------------------------------------------------
+# Web UI & API server
+# ---------------------------------------------------------------------------
 server:
   port: 8080
-  secret: ""   # set to require a password for the web UI
-  mcp: true    # expose MCP endpoint at /mcp for AI agent integration
-  tray: true   # system tray icon with status + quick actions (auto-detected if omitted)
+  mcp: true    # expose MCP endpoint at /mcp (for AI agent / Claude Code integration)
+  tray: false  # set to true to enable the system tray icon on desktop systems
+  # secret: ""  # uncomment and set to require a password for the web UI
 
-ai:
-  provider: claude
-  model: claude-sonnet-4-6
-  api_key_env: ANTHROPIC_API_KEY
+# ---------------------------------------------------------------------------
+# AI task generation (optional)
+# Set ANTHROPIC_API_KEY in your environment to enable "New Task" in the UI.
+# ---------------------------------------------------------------------------
+# ai:
+#   provider: claude
+#   model: claude-sonnet-4-6
+#   api_key_env: ANTHROPIC_API_KEY
 
-log_level: info
-data_dir: ~/.dicode
+# ---------------------------------------------------------------------------
+# Push notifications (optional) — sends alerts to your phone on task failure.
+# ---------------------------------------------------------------------------
+# notifications:
+#   on_failure: true
+#   on_success: false
+#   provider:
+#     type: ntfy              # ntfy.sh is free and self-hostable
+#     url: https://ntfy.sh
+#     topic: my-dicode-alerts
+#     # token_env: NTFY_TOKEN  # only needed for private topics
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+log_level: info   # debug | info | warn | error
+data_dir: /home/dr14/.dicode

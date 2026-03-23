@@ -128,7 +128,25 @@ func Load(path string) (*Config, error) {
 	return &cfg, nil
 }
 
+// expandHome replaces a leading ~/ with the actual home directory.
+func expandHome(path string) string {
+	if len(path) >= 2 && path[:2] == "~/" {
+		home, err := os.UserHomeDir()
+		if err == nil {
+			return home + path[1:]
+		}
+	}
+	return path
+}
+
 func applyDefaults(cfg *Config) {
+	// Expand ~ in all path fields before anything else.
+	cfg.DataDir = expandHome(cfg.DataDir)
+	cfg.Database.Path = expandHome(cfg.Database.Path)
+	for i := range cfg.Sources {
+		cfg.Sources[i].Path = expandHome(cfg.Sources[i].Path)
+	}
+
 	for i := range cfg.Sources {
 		s := &cfg.Sources[i]
 		if s.Type == SourceTypeGit {
