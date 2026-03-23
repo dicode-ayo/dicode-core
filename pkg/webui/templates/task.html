@@ -1,0 +1,28 @@
+{{template "base.html" .}}
+{{define "content"}}
+<div style="display:flex;align-items:center;gap:1rem;margin-bottom:1rem">
+  <h1>{{.Spec.Name}}</h1>
+  <button class="btn"
+    hx-post="/api/tasks/{{.Spec.ID}}/run"
+    hx-swap="none">▶ Run now</button>
+</div>
+<p class="meta">{{.Spec.Description}}</p>
+
+<h2>Recent runs</h2>
+<table>
+  <thead><tr><th>Run ID</th><th>Status</th><th>Started</th><th>Duration</th><th></th></tr></thead>
+  <tbody>
+  {{range .Runs}}
+  <tr>
+    <td><a href="/runs/{{.ID}}">{{slice .ID 0 8}}</a></td>
+    <td><span class="badge badge-{{.Status}}">{{.Status}}</span></td>
+    <td class="meta">{{fmtTime .StartedAt}}</td>
+    <td class="meta">{{fmtDuration .StartedAt .FinishedAt}}</td>
+    <td><a href="/runs/{{.ID}}">logs →</a></td>
+  </tr>
+  {{else}}
+  <tr><td colspan="5" style="text-align:center;color:#888;padding:1rem">No runs yet.</td></tr>
+  {{end}}
+  </tbody>
+</table>
+{{end}}

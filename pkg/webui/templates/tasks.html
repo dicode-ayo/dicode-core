@@ -1,0 +1,27 @@
+{{template "base.html" .}}
+{{define "content"}}
+<h1>Tasks</h1>
+<table>
+  <thead><tr><th>ID</th><th>Name</th><th>Trigger</th><th>Last Status</th><th></th></tr></thead>
+  <tbody>
+  {{range .Tasks}}
+  <tr>
+    <td><a href="/tasks/{{.ID}}">{{.ID}}</a></td>
+    <td>{{.Name}}</td>
+    <td>{{triggerLabel .Trigger}}</td>
+    <td>—</td>
+    <td>
+      {{if or .Trigger.Manual (eq .Trigger.Cron "") }}
+      <button class="btn btn-sm"
+        hx-post="/api/tasks/{{.ID}}/run"
+        hx-swap="none"
+        hx-confirm="Run {{.ID}}?">Run</button>
+      {{end}}
+    </td>
+  </tr>
+  {{else}}
+  <tr><td colspan="5" style="text-align:center;color:#888;padding:2rem">No tasks loaded yet.</td></tr>
+  {{end}}
+  </tbody>
+</table>
+{{end}}

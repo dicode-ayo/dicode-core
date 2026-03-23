@@ -9,8 +9,17 @@ import (
 	"syscall"
 
 	"github.com/dicode/dicode/pkg/config"
+	"github.com/dicode/dicode/pkg/db"
 	"github.com/dicode/dicode/pkg/onboarding"
+	"github.com/dicode/dicode/pkg/registry"
+	jsruntime "github.com/dicode/dicode/pkg/runtime/js"
+	"github.com/dicode/dicode/pkg/secrets"
+	"github.com/dicode/dicode/pkg/source"
+	"github.com/dicode/dicode/pkg/source/local"
+	"github.com/dicode/dicode/pkg/trigger"
+	"github.com/dicode/dicode/pkg/webui"
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 )
 
 var version = "dev"
@@ -20,7 +29,7 @@ func main() {
 	flag.StringVar(&configPath, "config", "dicode.yaml", "path to config file")
 	flag.Parse()
 
-	// Handle subcommands
+	// Handle subcommands.
 	if flag.NArg() > 0 {
 		switch flag.Arg(0) {
 		case "task":
@@ -32,18 +41,19 @@ func main() {
 		}
 	}
 
-	// First-run onboarding: if no config exists, launch the setup wizard.
+	// First-run onboarding: if no config exists, generate a default one.
 	if onboarding.Required(configPath) {
-		fmt.Println("Welcome to dicode! Opening setup wizard...")
-		// TODO: launch onboarding wizard (temporary HTTP server + open browser)
-		// For now, generate a default local-only config so dicode can start.
+		fmt.Println("Welcome to dicode! No config found — creating a local-only setup.")
 		home, _ := os.UserHomeDir()
 		content := onboarding.DefaultLocalConfig(home+"/dicode-tasks", home+"/.dicode")
 		if err := onboarding.WriteConfig(configPath, content); err != nil {
 			fmt.Fprintf(os.Stderr, "failed to write config: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("Created %s — edit it to add git sources or change settings.\n", configPath)
+		fmt.Printf("Created %s\n", configPath)
+		if err := os.MkdirAll(home+"/dicode-tasks", 0755); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to create tasks dir: %v\n", err)
+		}
 	}
 
 	cfg, err := config.Load(configPath)
@@ -70,14 +80,107 @@ func main() {
 }
 
 func run(ctx context.Context, cfg *config.Config, log *zap.Logger) error {
-	// TODO: wire up components
-	// 1. registry
-	// 2. git watcher + reconciler
-	// 3. trigger engine
-	// 4. web server
-	<-ctx.Done()
-	log.Info("shutting down")
-	return nil
+	// 1. Open database.
+	database, err := db.Open(db.Config{
+		Type:   cfg.Database.Type,
+		Path:   cfg.Database.Path,
+		URLEnv: cfg.Database.URLEnv,
+	})
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer database.Close()
+
+	// 2. Build secrets chain.
+	secretsChain := buildSecretsChain(cfg, database, log)
+
+	// 3. Task registry.
+	reg := registry.New(database)
+
+	// 4. JS runtime.
+	rt := jsruntime.New(reg, secretsChain, database, log)
+
+	// 5. Trigger engine.
+	eng := trigger.New(reg, rt, log)
+
+	// 6. Sources + reconciler.
+	sources, err := buildSources(cfg, log)
+	if err != nil {
+		return fmt.Errorf("build sources: %w", err)
+	}
+	rec := registry.NewReconciler(reg, sources, log)
+	rec.OnRegister = eng.Register
+	rec.OnUnregister = eng.Unregister
+
+	// 7. Web UI.
+	port := cfg.Server.Port
+	if port == 0 {
+		port = 8080
+	}
+	srv, err := webui.New(port, reg, eng, log)
+	if err != nil {
+		return fmt.Errorf("build webui: %w", err)
+	}
+
+	// 8. Run everything concurrently.
+	g, ctx := errgroup.WithContext(ctx)
+	g.Go(func() error { return rec.Run(ctx) })
+	g.Go(func() error { return eng.Start(ctx) })
+	g.Go(func() error { return srv.Start(ctx) })
+
+	return g.Wait()
+}
+
+func buildSecretsChain(cfg *config.Config, database db.DB, log *zap.Logger) secrets.Chain {
+	var chain secrets.Chain
+	home, _ := os.UserHomeDir()
+	dataDir := cfg.DataDir
+	if dataDir == "" {
+		dataDir = home + "/.dicode"
+	}
+
+	for _, p := range cfg.Secrets.Providers {
+		switch p.Type {
+		case "local":
+			sdb := secrets.NewSQLiteSecretDB(database)
+			lp, err := secrets.NewLocalProvider(dataDir, sdb)
+			if err != nil {
+				log.Warn("local secrets provider init failed", zap.Error(err))
+				continue
+			}
+			chain = append(chain, lp)
+		case "env", "":
+			chain = append(chain, secrets.NewEnvProvider())
+		}
+	}
+	// Default: local + env if no providers configured.
+	if len(chain) == 0 {
+		sdb := secrets.NewSQLiteSecretDB(database)
+		if lp, err := secrets.NewLocalProvider(dataDir, sdb); err == nil {
+			chain = append(chain, lp)
+		}
+		chain = append(chain, secrets.NewEnvProvider())
+	}
+	return chain
+}
+
+func buildSources(cfg *config.Config, log *zap.Logger) ([]source.Source, error) {
+	var sources []source.Source
+	for _, sc := range cfg.Sources {
+		switch sc.Type {
+		case config.SourceTypeLocal:
+			s, err := local.New(sc.Path, sc.Path, log)
+			if err != nil {
+				return nil, fmt.Errorf("local source %q: %w", sc.Path, err)
+			}
+			sources = append(sources, s)
+		case config.SourceTypeGit:
+			log.Warn("git source not yet implemented, skipping", zap.String("url", sc.URL))
+		default:
+			return nil, fmt.Errorf("unknown source type %q", sc.Type)
+		}
+	}
+	return sources, nil
 }
 
 func runTaskCmd(args []string) {
@@ -87,10 +190,8 @@ func runTaskCmd(args []string) {
 	}
 	switch args[0] {
 	case "install":
-		// TODO: pkg/store installer
 		fmt.Println("task install: not yet implemented")
 	case "list":
-		// TODO: list tasks from registry
 		fmt.Println("task list: not yet implemented")
 	default:
 		fmt.Fprintf(os.Stderr, "unknown task subcommand: %s\n", args[0])

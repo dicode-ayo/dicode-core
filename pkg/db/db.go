@@ -66,7 +66,6 @@ func (e *UnsupportedBackendError) Error() string {
 	return "unsupported database type: " + e.Type + " (supported: sqlite, postgres, mysql)"
 }
 
-// Stub functions — implemented in sqlite.go, postgres.go, mysql.go
-func openSQLite(_ string) (DB, error)  { panic("not yet implemented") }
+// Stub functions — implemented in postgres.go, mysql.go
 func openPostgres(_ string) (DB, error) { panic("not yet implemented") }
 func openMySQL(_ string) (DB, error)    { panic("not yet implemented") }
