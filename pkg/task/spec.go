@@ -40,6 +40,12 @@ type Param struct {
 	Required    bool   `yaml:"required"`
 }
 
+// FSEntry declares a path a task is allowed to access.
+type FSEntry struct {
+	Path       string `yaml:"path"`
+	Permission string `yaml:"permission"` // "r" | "w" | "rw"
+}
+
 // Spec is parsed from task.yaml.
 type Spec struct {
 	Name        string        `yaml:"name"`
@@ -50,6 +56,7 @@ type Spec struct {
 	Trigger     TriggerConfig `yaml:"trigger"`
 	Params      []Param       `yaml:"params,omitempty"`
 	Env         []string      `yaml:"env,omitempty"` // env var names required at runtime
+	FS          []FSEntry     `yaml:"fs,omitempty"`  // filesystem access declarations
 	Timeout     time.Duration `yaml:"timeout"`
 
 	// TaskDir is the directory path of the task in the repo (not stored in YAML).

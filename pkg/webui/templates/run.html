@@ -1,0 +1,36 @@
+{{template "base.html" .}}
+{{define "content"}}
+<div style="margin-bottom:1rem">
+  <a href="/tasks/{{.Run.TaskID}}">← {{.Run.TaskID}}</a>
+</div>
+<div class="card">
+  <div style="display:flex;gap:1rem;align-items:center">
+    <span class="badge badge-{{.Run.Status}}">{{.Run.Status}}</span>
+    <span class="meta">Run {{.Run.ID}}</span>
+    <span class="meta">Started {{fmtTime .Run.StartedAt}}</span>
+    {{if .Run.FinishedAt}}<span class="meta">Duration {{fmtDuration .Run.StartedAt .Run.FinishedAt}}</span>{{end}}
+  </div>
+</div>
+
+{{if .Output}}
+<h2>Output</h2>
+<div class="card">
+  {{if eq .Output.ContentType "text/html"}}
+  <iframe srcdoc="{{.Output.Content}}" style="width:100%;min-height:300px;border:none"></iframe>
+  {{else if eq .Output.ContentType "text/plain"}}
+  <pre>{{.Output.Content}}</pre>
+  {{else}}
+  <pre>{{.Output.Content}}</pre>
+  {{end}}
+</div>
+{{end}}
+
+<h2>Logs</h2>
+<pre id="log-output"
+  {{if eq .Run.Status "running"}}
+  hx-get="/api/runs/{{.Run.ID}}/logs"
+  hx-trigger="every 2s"
+  hx-swap="innerHTML"
+  {{end}}>{{range .Logs}}[{{.Level}}] {{fmtTime .Ts}} {{.Message}}
+{{end}}</pre>
+{{end}}
