@@ -19,6 +19,7 @@ import (
 	"github.com/dicode/dicode/pkg/trigger"
 	"github.com/dicode/dicode/pkg/webui"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -62,7 +63,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	logger, err := buildLogger(cfg.LogLevel)
+	logBroadcaster := webui.NewLogBroadcaster()
+
+	logger, err := buildLogger(cfg.LogLevel, logBroadcaster)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to init logger: %v\n", err)
 		os.Exit(1)
@@ -74,12 +77,12 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	if err := run(ctx, cfg, logger); err != nil {
+	if err := run(ctx, cfg, logBroadcaster, logger); err != nil {
 		logger.Fatal("dicode exited with error", zap.Error(err))
 	}
 }
 
-func run(ctx context.Context, cfg *config.Config, log *zap.Logger) error {
+func run(ctx context.Context, cfg *config.Config, logBroadcaster *webui.LogBroadcaster, log *zap.Logger) error {
 	// 1. Open database.
 	database, err := db.Open(db.Config{
 		Type:   cfg.Database.Type,
@@ -117,7 +120,7 @@ func run(ctx context.Context, cfg *config.Config, log *zap.Logger) error {
 	if port == 0 {
 		port = 8080
 	}
-	srv, err := webui.New(port, reg, eng, cfg, log)
+	srv, err := webui.New(port, reg, eng, cfg, logBroadcaster, log)
 	if err != nil {
 		return fmt.Errorf("build webui: %w", err)
 	}
@@ -199,11 +202,15 @@ func runTaskCmd(args []string) {
 	}
 }
 
-func buildLogger(level string) (*zap.Logger, error) {
-	switch level {
-	case "debug":
-		return zap.NewDevelopment()
-	default:
-		return zap.NewProduction()
+func buildLogger(level string, broadcast *webui.LogBroadcaster) (*zap.Logger, error) {
+	zapLevel := zapcore.InfoLevel
+	if level == "debug" {
+		zapLevel = zapcore.DebugLevel
 	}
+	enc := zapcore.NewJSONEncoder(zap.NewProductionEncoderConfig())
+	core := zapcore.NewTee(
+		zapcore.NewCore(enc, zapcore.AddSync(os.Stderr), zapLevel),
+		zapcore.NewCore(enc, zapcore.AddSync(broadcast), zapLevel),
+	)
+	return zap.New(core, zap.AddCaller()), nil
 }

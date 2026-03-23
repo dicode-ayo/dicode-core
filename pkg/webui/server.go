@@ -15,6 +15,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/dicode/dicode/pkg/config"
 	"github.com/dicode/dicode/pkg/registry"
+	"github.com/dicode/dicode/pkg/task"
 	"github.com/dicode/dicode/pkg/trigger"
 	"go.uber.org/zap"
 )
@@ -24,35 +25,44 @@ var templateFS embed.FS
 
 // Server is the HTTP server for the web UI and REST API.
 type Server struct {
-	registry *registry.Registry
-	engine   *trigger.Engine
-	cfg      *config.Config
-	log      *zap.Logger
-	port     int
-	srv      *http.Server
-	baseTmpl *template.Template // parsed base.html only; cloned per render
+	registry    *registry.Registry
+	engine      *trigger.Engine
+	cfg         *config.Config
+	logs        *LogBroadcaster
+	log         *zap.Logger
+	port        int
+	srv         *http.Server
+	baseTmpl    *template.Template // parsed base.html only; cloned per render
+	partialTmpl *template.Template // row partials, no base wrapper
 }
 
 // New creates a Server.
-func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config, log *zap.Logger) (*Server, error) {
+func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config, logs *LogBroadcaster, log *zap.Logger) (*Server, error) {
 	funcMap := template.FuncMap{
 		"triggerLabel": triggerLabel,
 		"fmtTime":      fmtTime,
 		"fmtDuration":  fmtDuration,
 		"slice":        func(s string, i, j int) string { return s[i:j] },
 		"string":       fmt.Sprint,
+		"deref":        func(t *time.Time) time.Time { return *t },
 	}
 	base, err := template.New("base.html").Funcs(funcMap).ParseFS(templateFS, "templates/base.html")
 	if err != nil {
 		return nil, fmt.Errorf("parse base template: %w", err)
 	}
+	partials, err := template.New("").Funcs(funcMap).ParseFS(templateFS, "templates/*_rows.html")
+	if err != nil {
+		return nil, fmt.Errorf("parse partial templates: %w", err)
+	}
 	return &Server{
-		registry: r,
-		engine:   eng,
-		cfg:      cfg,
-		log:      log,
-		port:     port,
-		baseTmpl: base,
+		registry:    r,
+		engine:      eng,
+		cfg:         cfg,
+		logs:        logs,
+		log:         log,
+		port:        port,
+		baseTmpl:    base,
+		partialTmpl: partials,
 	}, nil
 }
 
@@ -67,6 +77,13 @@ func (s *Server) Handler() http.Handler {
 	r.Get("/tasks/{id}", s.handleTaskDetail)
 	r.Get("/runs/{runID}", s.handleRunDetail)
 	r.Get("/config", s.handleConfig)
+
+	// HTMX partial row updates
+	r.Get("/ui/tasks/rows", s.uiTaskRows)
+	r.Get("/ui/tasks/{id}/runs/rows", s.uiRunRows)
+
+	// SSE log stream
+	r.Get("/logs/stream", s.handleLogsStream)
 
 	// REST API
 	r.Get("/api/config", s.apiGetConfig)
@@ -110,7 +127,7 @@ func (s *Server) Start(ctx context.Context) error {
 func (s *Server) handleTaskList(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "tasks.html", map[string]any{
 		"Title": "Tasks",
-		"Tasks": s.registry.All(),
+		"Tasks": s.buildTaskRows(r.Context()),
 	})
 }
 
@@ -151,11 +168,75 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// --- HTMX partial handlers ---
+
+func (s *Server) uiTaskRows(w http.ResponseWriter, r *http.Request) {
+	s.renderPartial(w, "tasks-rows", s.buildTaskRows(r.Context()))
+}
+
+func (s *Server) uiRunRows(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	runs, _ := s.registry.ListRuns(r.Context(), id, 20)
+	s.renderPartial(w, "runs-rows", runs)
+}
+
+func (s *Server) renderPartial(w http.ResponseWriter, name string, data any) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := s.partialTmpl.ExecuteTemplate(w, name, data); err != nil {
+		s.log.Error("partial render", zap.String("template", name), zap.Error(err))
+	}
+}
+
+// --- SSE log stream ---
+
+func (s *Server) handleLogsStream(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+	if s.logs == nil {
+		http.Error(w, "log streaming not configured", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	ch, recent := s.logs.subscribe()
+	defer s.logs.unsubscribe(ch)
+
+	for _, line := range recent {
+		fmt.Fprintf(w, "data: %s\n\n", line)
+	}
+	flusher.Flush()
+
+	for {
+		select {
+		case line, ok := <-ch:
+			if !ok {
+				return
+			}
+			fmt.Fprintf(w, "data: %s\n\n", line)
+			flusher.Flush()
+		case <-r.Context().Done():
+			return
+		}
+	}
+}
+
 func (s *Server) render(w http.ResponseWriter, name string, data any) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	t, err := s.baseTmpl.Clone()
 	if err != nil {
 		http.Error(w, "template clone error", http.StatusInternalServerError)
+		return
+	}
+	// Include row partials so page templates can call {{template "tasks-rows" ...}} etc.
+	if _, err = t.ParseFS(templateFS, "templates/*_rows.html"); err != nil {
+		s.log.Error("partial parse", zap.Error(err))
+		http.Error(w, "template parse error", http.StatusInternalServerError)
 		return
 	}
 	if _, err = t.ParseFS(templateFS, "templates/"+name); err != nil {
@@ -249,26 +330,43 @@ func jsonErr(w http.ResponseWriter, msg string, code int) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
-func triggerLabel(tc any) string {
-	// tc is task.TriggerConfig — use fmt to inspect its fields via reflection would
-	// require importing task. Instead the template passes the whole Trigger field
-	// and we return a human-readable string by type-switching the map form.
-	type triggerable interface {
-		GetCron() string
+// TaskRow pairs a task spec with its most-recent run info for the UI table.
+type TaskRow struct {
+	*task.Spec
+	LastStatus string     // empty if no runs yet
+	LastRunID  string     // ID of the most recent run
+	LastRunAt  *time.Time // start time of the most recent run
+}
+
+// buildTaskRows fetches all tasks and annotates each with last-run info.
+func (s *Server) buildTaskRows(ctx context.Context) []TaskRow {
+	specs := s.registry.All()
+	rows := make([]TaskRow, len(specs))
+	for i, spec := range specs {
+		row := TaskRow{Spec: spec}
+		if runs, err := s.registry.ListRuns(ctx, spec.ID, 1); err == nil && len(runs) > 0 {
+			row.LastStatus = runs[0].Status
+			row.LastRunID = runs[0].ID
+			t := runs[0].StartedAt
+			row.LastRunAt = &t
+		}
+		rows[i] = row
 	}
-	switch v := tc.(type) {
-	case map[string]any:
-		if c, _ := v["cron"].(string); c != "" {
-			return "cron: " + c
-		}
-		if p, _ := v["webhook"].(string); p != "" {
-			return "webhook"
-		}
-		if m, _ := v["manual"].(bool); m {
-			return "manual"
-		}
-	default:
-		_ = v
+	return rows
+}
+
+func triggerLabel(tc task.TriggerConfig) string {
+	if tc.Cron != "" {
+		return "cron: " + tc.Cron
+	}
+	if tc.Webhook != "" {
+		return "webhook: " + tc.Webhook
+	}
+	if tc.Chain != nil {
+		return "chain: " + tc.Chain.From
+	}
+	if tc.Manual {
+		return "manual"
 	}
 	return "—"
 }

@@ -31,7 +31,7 @@ func newTestServer(t *testing.T) (*Server, *registry.Registry) {
 	rt := jsruntime.New(reg, secrets.Chain{}, d, zap.NewNop())
 	eng := trigger.New(reg, rt, zap.NewNop())
 
-	srv, err := New(8080, reg, eng, &config.Config{Server: config.ServerConfig{Port: 8080}}, zap.NewNop())
+	srv, err := New(8080, reg, eng, &config.Config{Server: config.ServerConfig{Port: 8080}}, NewLogBroadcaster(), zap.NewNop())
 	if err != nil {
 		t.Fatalf("New server: %v", err)
 	}

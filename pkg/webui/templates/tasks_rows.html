@@ -1,0 +1,24 @@
+{{define "tasks-rows"}}
+{{range .}}
+<tr>
+  <td><a href="/tasks/{{.ID}}">{{.ID}}</a></td>
+  <td>{{.Name}}</td>
+  <td>{{triggerLabel .Trigger}}</td>
+  <td class="meta">{{if .LastRunAt}}{{fmtTime (deref .LastRunAt)}}{{else}}—{{end}}</td>
+  <td>
+    {{if .LastStatus}}
+    <a href="/runs/{{.LastRunID}}" style="text-decoration:none">
+      <span class="badge badge-{{.LastStatus}}">{{.LastStatus}}</span>
+    </a>
+    {{else}}—{{end}}
+  </td>
+  <td>
+    <button class="btn btn-sm"
+      hx-post="/api/tasks/{{.ID}}/run"
+      hx-swap="none">Run</button>
+  </td>
+</tr>
+{{else}}
+<tr><td colspan="6" style="text-align:center;color:#888;padding:2rem">No tasks loaded yet.</td></tr>
+{{end}}
+{{end}}
