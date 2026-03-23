@@ -1,0 +1,123 @@
+{{define "editor"}}
+<div class="card" id="editor-panel" style="margin-top:1.5rem;padding:0.75rem">
+
+  <!-- Tab bar -->
+  <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.5rem">
+    <button id="tab-js" class="btn btn-sm" onclick="editorSwitchTab('task.js')">task.js</button>
+    {{if .TestExists}}
+    <button id="tab-test" class="btn btn-sm" style="background:#6c757d" onclick="editorSwitchTab('task.test.js')">task.test.js</button>
+    {{end}}
+    <div style="margin-left:auto;display:flex;gap:0.5rem;align-items:center">
+      <span id="editor-status" style="font-size:0.8rem"></span>
+      <button class="btn btn-sm" onclick="editorSave()">💾 Save</button>
+      {{if not .TestExists}}
+      <button class="btn btn-sm" style="background:#6c757d" onclick="editorCreateTest()">+ task.test.js</button>
+      {{end}}
+      <button class="btn btn-sm" style="background:#6c757d"
+        onclick="editorDestroy();document.getElementById('editor-panel').remove()">✕ Close</button>
+    </div>
+  </div>
+
+  <!-- Monaco mount point -->
+  <div id="monaco-container" style="width:100%;height:420px;border-radius:4px;overflow:hidden"></div>
+  <p class="meta" style="margin-top:0.4rem">Ctrl+S / ⌘+S to save</p>
+</div>
+
+<script>
+(function() {
+  var TASK_ID    = {{toJSON .ID}};
+  var files      = { 'task.js': {{toJSON .TaskJS}} {{if .TestExists}}, 'task.test.js': {{toJSON .TestJS}}{{end}} };
+  var curFile    = 'task.js';
+  var editor     = null;
+  var models     = {};
+
+  /* ── load Monaco from CDN ── */
+  function loadMonaco(cb) {
+    if (window.monaco) { cb(); return; }
+    var s = document.createElement('script');
+    s.src = 'https://unpkg.com/monaco-editor@0.52.0/min/vs/loader.js';
+    s.onload = function() {
+      require.config({ paths: { vs: 'https://unpkg.com/monaco-editor@0.52.0/min/vs' } });
+      require(['vs/editor/editor.main'], cb);
+    };
+    document.head.appendChild(s);
+  }
+
+  function initEditor() {
+    Object.keys(files).forEach(function(f) {
+      models[f] = monaco.editor.createModel(files[f], 'javascript');
+    });
+    editor = monaco.editor.create(document.getElementById('monaco-container'), {
+      model:               models['task.js'],
+      theme:               'vs-dark',
+      automaticLayout:     true,
+      minimap:             { enabled: false },
+      fontSize:            13,
+      lineHeight:          20,
+      scrollBeyondLastLine:false,
+      tabSize:             2,
+      insertSpaces:        true,
+      wordWrap:            'off',
+      renderLineHighlight: 'gutter',
+    });
+
+    /* Ctrl/Cmd+S → save */
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, editorSave);
+  }
+
+  /* ── tab switching ── */
+  window.editorSwitchTab = function(file) {
+    if (!editor || !models[file]) return;
+    curFile = file;
+    editor.setModel(models[file]);
+    document.getElementById('tab-js').style.background =
+      file === 'task.js' ? '#0d6efd' : '#6c757d';
+    var tt = document.getElementById('tab-test');
+    if (tt) tt.style.background = file === 'task.test.js' ? '#0d6efd' : '#6c757d';
+  };
+
+  /* ── save ── */
+  window.editorSave = function() {
+    if (!editor) return;
+    var statusEl = document.getElementById('editor-status');
+    statusEl.textContent = 'Saving…';
+    statusEl.style.color = '#888';
+    fetch('/api/tasks/' + TASK_ID + '/files/' + curFile, {
+      method: 'POST',
+      body:   new URLSearchParams({ content: editor.getValue() }),
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      var ok = d.status === 'saved';
+      statusEl.textContent = ok ? '✓ Saved' : ('✗ ' + (d.error || 'Error'));
+      statusEl.style.color  = ok ? '#a6e3a1' : '#f38ba8';
+      setTimeout(function() { statusEl.textContent = ''; }, 3000);
+    })
+    .catch(function() {
+      statusEl.textContent = '✗ Network error';
+      statusEl.style.color  = '#f38ba8';
+    });
+  };
+
+  /* ── create test file ── */
+  window.editorCreateTest = function() {
+    fetch('/api/tasks/' + TASK_ID + '/files/task.test.js', {
+      method: 'POST',
+      body:   new URLSearchParams({ content: '// Tests for ' + TASK_ID + '\n' }),
+    }).then(function() {
+      htmx.ajax('GET', '/ui/tasks/' + TASK_ID + '/editor',
+        { target: '#editor-panel', swap: 'outerHTML' });
+    });
+  };
+
+  /* ── cleanup on close ── */
+  window.editorDestroy = function() {
+    if (editor) { editor.dispose(); editor = null; }
+    Object.values(models).forEach(function(m) { m.dispose(); });
+    models = {};
+  };
+
+  loadMonaco(initEditor);
+})();
+</script>
+{{end}}

@@ -1,11 +1,26 @@
 {{define "content"}}
-<div style="display:flex;align-items:center;gap:1rem;margin-bottom:1rem">
+<div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:0.5rem">
   <h1>{{.Spec.Name}}</h1>
   <button class="btn"
     hx-post="/api/tasks/{{.Spec.ID}}/run"
     hx-swap="none">▶ Run now</button>
+  <button class="btn" style="background:#495057"
+    hx-get="/ui/tasks/{{.Spec.ID}}/editor"
+    hx-target="#editor-mount"
+    hx-swap="innerHTML">✏ Edit code</button>
 </div>
-<p class="meta">{{.Spec.Description}}</p>
+{{if .Spec.Description}}<p class="meta" style="margin-bottom:0.75rem">{{.Spec.Description}}</p>{{end}}
+
+<div class="card" style="margin-bottom:1rem;display:flex;align-items:center;gap:0.75rem">
+  <span style="font-size:0.85rem"><strong>Trigger:</strong> {{triggerLabel .Spec.Trigger}}</span>
+  <button class="btn btn-sm" style="background:#495057;margin-left:auto"
+    hx-get="/ui/tasks/{{.Spec.ID}}/trigger-editor"
+    hx-target="#trigger-editor-mount"
+    hx-swap="innerHTML">✏ Edit trigger</button>
+</div>
+<div id="trigger-editor-mount"></div>
+
+<div id="editor-mount"></div>
 
 <h2>Recent runs</h2>
 <table>
