@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"html/template"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -18,6 +20,7 @@ import (
 	"github.com/dicode/dicode/pkg/task"
 	"github.com/dicode/dicode/pkg/trigger"
 	"go.uber.org/zap"
+	"gopkg.in/yaml.v3"
 )
 
 //go:embed templates/*.html
@@ -45,12 +48,21 @@ func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config
 		"slice":        func(s string, i, j int) string { return s[i:j] },
 		"string":       fmt.Sprint,
 		"deref":        func(t *time.Time) time.Time { return *t },
+		"toJSON": func(v any) (template.JS, error) {
+			b, err := json.Marshal(v)
+			return template.JS(b), err
+		},
+		"list": func(items ...string) []string { return items },
 	}
 	base, err := template.New("base.html").Funcs(funcMap).ParseFS(templateFS, "templates/base.html")
 	if err != nil {
 		return nil, fmt.Errorf("parse base template: %w", err)
 	}
-	partials, err := template.New("").Funcs(funcMap).ParseFS(templateFS, "templates/*_rows.html")
+	partials, err := template.New("").Funcs(funcMap).ParseFS(templateFS,
+		"templates/*_rows.html",
+		"templates/editor.html",
+		"templates/trigger_editor.html",
+	)
 	if err != nil {
 		return nil, fmt.Errorf("parse partial templates: %w", err)
 	}
@@ -81,9 +93,16 @@ func (s *Server) Handler() http.Handler {
 	// HTMX partial row updates
 	r.Get("/ui/tasks/rows", s.uiTaskRows)
 	r.Get("/ui/tasks/{id}/runs/rows", s.uiRunRows)
+	r.Get("/ui/tasks/{id}/editor", s.uiTaskEditor)
+	r.Get("/ui/tasks/{id}/trigger-editor", s.uiTriggerEditor)
 
 	// SSE log stream
 	r.Get("/logs/stream", s.handleLogsStream)
+
+	// File editor API (task.js / task.test.js only)
+	r.Get("/api/tasks/{id}/files/{filename}", s.apiGetFile)
+	r.Post("/api/tasks/{id}/files/{filename}", s.apiSaveFile)
+	r.Post("/api/tasks/{id}/trigger", s.apiSaveTrigger)
 
 	// REST API
 	r.Get("/api/config", s.apiGetConfig)
@@ -178,6 +197,169 @@ func (s *Server) uiRunRows(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	runs, _ := s.registry.ListRuns(r.Context(), id, 20)
 	s.renderPartial(w, "runs-rows", runs)
+}
+
+// editorData is passed to the editor partial template.
+type editorData struct {
+	ID         string
+	TaskJS     string
+	TestJS     string
+	TestExists bool
+}
+
+func (s *Server) uiTaskEditor(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	spec, ok := s.registry.Get(id)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	d := editorData{ID: id}
+	if b, err := os.ReadFile(filepath.Join(spec.TaskDir, "task.js")); err == nil {
+		d.TaskJS = string(b)
+	}
+	if b, err := os.ReadFile(filepath.Join(spec.TaskDir, "task.test.js")); err == nil {
+		d.TestJS = string(b)
+		d.TestExists = true
+	}
+	s.renderPartial(w, "editor", d)
+}
+
+// allowedFiles restricts which files the editor API can read/write.
+var allowedFiles = map[string]bool{"task.js": true, "task.test.js": true}
+
+func (s *Server) apiGetFile(w http.ResponseWriter, r *http.Request) {
+	id, filename := chi.URLParam(r, "id"), chi.URLParam(r, "filename")
+	if !allowedFiles[filename] {
+		jsonErr(w, "file not allowed", http.StatusBadRequest)
+		return
+	}
+	spec, ok := s.registry.Get(id)
+	if !ok {
+		jsonErr(w, "task not found", http.StatusNotFound)
+		return
+	}
+	b, err := os.ReadFile(filepath.Join(spec.TaskDir, filename))
+	if err != nil {
+		jsonErr(w, "file not found", http.StatusNotFound)
+		return
+	}
+	jsonOK(w, map[string]string{"content": string(b)})
+}
+
+func (s *Server) apiSaveFile(w http.ResponseWriter, r *http.Request) {
+	id, filename := chi.URLParam(r, "id"), chi.URLParam(r, "filename")
+	if !allowedFiles[filename] {
+		jsonErr(w, "file not allowed", http.StatusBadRequest)
+		return
+	}
+	spec, ok := s.registry.Get(id)
+	if !ok {
+		jsonErr(w, "task not found", http.StatusNotFound)
+		return
+	}
+	content := r.FormValue("content")
+	if err := os.WriteFile(filepath.Join(spec.TaskDir, filename), []byte(content), 0644); err != nil {
+		jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.log.Info("file saved", zap.String("task", id), zap.String("file", filename))
+	jsonOK(w, map[string]string{"status": "saved"})
+}
+
+// triggerEditorData is the view model for the trigger editor partial.
+type triggerEditorData struct {
+	ID          string
+	TriggerType string // "cron" | "webhook" | "manual" | "chain"
+	Cron        string
+	Webhook     string
+	ChainFrom   string
+	ChainOn     string
+}
+
+func triggerEditorDataFromSpec(spec *task.Spec) triggerEditorData {
+	d := triggerEditorData{ID: spec.ID}
+	switch {
+	case spec.Trigger.Cron != "":
+		d.TriggerType = "cron"
+		d.Cron = spec.Trigger.Cron
+	case spec.Trigger.Webhook != "":
+		d.TriggerType = "webhook"
+		d.Webhook = spec.Trigger.Webhook
+	case spec.Trigger.Manual:
+		d.TriggerType = "manual"
+	case spec.Trigger.Chain != nil:
+		d.TriggerType = "chain"
+		d.ChainFrom = spec.Trigger.Chain.From
+		d.ChainOn = spec.Trigger.Chain.ChainOn()
+	}
+	return d
+}
+
+func (s *Server) uiTriggerEditor(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	spec, ok := s.registry.Get(id)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	s.renderPartial(w, "trigger-editor", triggerEditorDataFromSpec(spec))
+}
+
+func (s *Server) apiSaveTrigger(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	spec, ok := s.registry.Get(id)
+	if !ok {
+		jsonErr(w, "task not found", http.StatusNotFound)
+		return
+	}
+
+	// Read and parse existing task.yaml as a generic map to preserve all other fields.
+	yamlPath := filepath.Join(spec.TaskDir, "task.yaml")
+	raw, err := os.ReadFile(yamlPath)
+	if err != nil {
+		jsonErr(w, "read task.yaml: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	var doc map[string]any
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		jsonErr(w, "parse task.yaml: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Build the new trigger map from form values.
+	trigType := r.FormValue("type")
+	var trigMap map[string]any
+	switch trigType {
+	case "cron":
+		trigMap = map[string]any{"cron": r.FormValue("cron")}
+	case "webhook":
+		trigMap = map[string]any{"webhook": r.FormValue("webhook")}
+	case "manual":
+		trigMap = map[string]any{"manual": true}
+	case "chain":
+		chain := map[string]any{"from": r.FormValue("chain_from")}
+		if on := r.FormValue("chain_on"); on != "" && on != "success" {
+			chain["on"] = on
+		}
+		trigMap = map[string]any{"chain": chain}
+	default:
+		jsonErr(w, "invalid trigger type", http.StatusBadRequest)
+		return
+	}
+
+	doc["trigger"] = trigMap
+	out, err := yaml.Marshal(doc)
+	if err != nil {
+		jsonErr(w, "marshal yaml: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := os.WriteFile(yamlPath, out, 0644); err != nil {
+		jsonErr(w, "write task.yaml: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.log.Info("trigger saved", zap.String("task", id), zap.String("type", trigType))
+	jsonOK(w, map[string]string{"status": "saved"})
 }
 
 func (s *Server) renderPartial(w http.ResponseWriter, name string, data any) {
