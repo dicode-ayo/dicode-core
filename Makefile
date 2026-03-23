@@ -2,7 +2,7 @@ BINARY  := dicode
 CMD     := ./cmd/dicode
 VERSION ?= dev
 
-GO      := go
+GO      := $(shell which go 2>/dev/null || echo $(HOME)/.local/share/mise/shims/go)
 GOFLAGS := -ldflags "-X main.version=$(VERSION)"
 
 .PHONY: build test test-verbose lint clean run tidy

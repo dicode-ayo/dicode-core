@@ -1,0 +1,96 @@
+{{define "content"}}
+<h1>Configuration</h1>
+
+<div class="card">
+  <h2>Server</h2>
+  <table>
+    <tbody>
+      <tr><th>Port</th><td>{{.Cfg.Server.Port}}</td></tr>
+      <tr><th>MCP endpoint</th><td>{{if .Cfg.Server.MCP}}enabled (/mcp){{else}}disabled{{end}}</td></tr>
+      <tr><th>Log level</th><td>{{.Cfg.LogLevel}}</td></tr>
+      <tr><th>Data dir</th><td>{{.Cfg.DataDir}}</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h2>Database</h2>
+  <table>
+    <tbody>
+      <tr><th>Type</th><td>{{.Cfg.Database.Type}}</td></tr>
+      {{if .Cfg.Database.Path}}<tr><th>Path</th><td>{{.Cfg.Database.Path}}</td></tr>{{end}}
+      {{if .Cfg.Database.URLEnv}}<tr><th>URL env</th><td>{{.Cfg.Database.URLEnv}}</td></tr>{{end}}
+    </tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h2>Sources ({{len .Cfg.Sources}})</h2>
+  {{if .Cfg.Sources}}
+  <table>
+    <thead><tr><th>Type</th><th>Path / URL</th><th>Details</th></tr></thead>
+    <tbody>
+    {{range .Cfg.Sources}}
+    <tr>
+      <td><span class="badge badge-manual">{{.Type}}</span></td>
+      <td>{{if .Path}}{{.Path}}{{else}}{{.URL}}{{end}}</td>
+      <td class="meta">
+        {{if eq (string .Type) "git"}}branch: {{.Branch}} · poll: {{.PollInterval}}{{end}}
+        {{if eq (string .Type) "local"}}watch: {{.Watch}}{{end}}
+      </td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p class="meta">No sources configured.</p>
+  {{end}}
+</div>
+
+<div class="card">
+  <h2>AI</h2>
+  <table>
+    <tbody>
+      <tr><th>Provider</th><td>{{.Cfg.AI.Provider}}</td></tr>
+      <tr><th>Model</th><td>{{.Cfg.AI.Model}}</td></tr>
+      <tr><th>API key env</th><td>{{.Cfg.AI.APIKeyEnv}}</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h2>Secrets</h2>
+  <table>
+    <thead><tr><th>Provider</th><th>Details</th></tr></thead>
+    <tbody>
+    {{range .Cfg.Secrets.Providers}}
+    <tr>
+      <td>{{.Type}}</td>
+      <td class="meta">{{if .Address}}{{.Address}}{{end}}{{if .TokenEnv}}token env: {{.TokenEnv}}{{end}}</td>
+    </tr>
+    {{else}}
+    <tr><td colspan="2" class="meta">None configured.</td></tr>
+    {{end}}
+    </tbody>
+  </table>
+</div>
+
+{{if .Cfg.Notifications.Provider}}
+<div class="card">
+  <h2>Notifications</h2>
+  <table>
+    <tbody>
+      <tr><th>On failure</th><td>{{.Cfg.Notifications.OnFailure}}</td></tr>
+      <tr><th>On success</th><td>{{.Cfg.Notifications.OnSuccess}}</td></tr>
+      <tr><th>Provider</th><td>{{.Cfg.Notifications.Provider.Type}}</td></tr>
+      <tr><th>URL</th><td>{{.Cfg.Notifications.Provider.URL}}</td></tr>
+      {{if .Cfg.Notifications.Provider.Topic}}<tr><th>Topic</th><td>{{.Cfg.Notifications.Provider.Topic}}</td></tr>{{end}}
+    </tbody>
+  </table>
+</div>
+{{end}}
+
+<p style="margin-top:1rem">
+  <a class="btn" href="/api/config">View as JSON</a>
+</p>
+{{end}}

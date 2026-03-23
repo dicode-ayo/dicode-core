@@ -117,7 +117,7 @@ func run(ctx context.Context, cfg *config.Config, log *zap.Logger) error {
 	if port == 0 {
 		port = 8080
 	}
-	srv, err := webui.New(port, reg, eng, log)
+	srv, err := webui.New(port, reg, eng, cfg, log)
 	if err != nil {
 		return fmt.Errorf("build webui: %w", err)
 	}

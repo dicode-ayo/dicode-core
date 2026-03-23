@@ -37,10 +37,11 @@
   <a href="/">⚡ dicode</a>
   <nav>
     <a href="/">Tasks</a>
+    <a href="/config">Config</a>
   </nav>
 </header>
 <main>
-{{template "content" .}}
+{{block "content" .}}{{end}}
 </main>
 </body>
 </html>
