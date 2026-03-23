@@ -95,7 +95,7 @@ func run(ctx context.Context, cfg *config.Config, logBroadcaster *webui.LogBroad
 	defer database.Close()
 
 	// 2. Build secrets chain.
-	secretsChain := buildSecretsChain(cfg, database, log)
+	secretsChain, localSecrets := buildSecretsChain(cfg, database, log)
 
 	// 3. Task registry.
 	reg := registry.New(database)
@@ -120,7 +120,7 @@ func run(ctx context.Context, cfg *config.Config, logBroadcaster *webui.LogBroad
 	if port == 0 {
 		port = 8080
 	}
-	srv, err := webui.New(port, reg, eng, cfg, logBroadcaster, log)
+	srv, err := webui.New(port, reg, eng, cfg, localSecrets, logBroadcaster, log)
 	if err != nil {
 		return fmt.Errorf("build webui: %w", err)
 	}
@@ -134,8 +134,9 @@ func run(ctx context.Context, cfg *config.Config, logBroadcaster *webui.LogBroad
 	return g.Wait()
 }
 
-func buildSecretsChain(cfg *config.Config, database db.DB, log *zap.Logger) secrets.Chain {
+func buildSecretsChain(cfg *config.Config, database db.DB, log *zap.Logger) (secrets.Chain, webui.SecretsManager) {
 	var chain secrets.Chain
+	var localProvider webui.SecretsManager
 	home, _ := os.UserHomeDir()
 	dataDir := cfg.DataDir
 	if dataDir == "" {
@@ -152,6 +153,9 @@ func buildSecretsChain(cfg *config.Config, database db.DB, log *zap.Logger) secr
 				continue
 			}
 			chain = append(chain, lp)
+			if localProvider == nil {
+				localProvider = lp
+			}
 		case "env", "":
 			chain = append(chain, secrets.NewEnvProvider())
 		}
@@ -161,10 +165,11 @@ func buildSecretsChain(cfg *config.Config, database db.DB, log *zap.Logger) secr
 		sdb := secrets.NewSQLiteSecretDB(database)
 		if lp, err := secrets.NewLocalProvider(dataDir, sdb); err == nil {
 			chain = append(chain, lp)
+			localProvider = lp
 		}
 		chain = append(chain, secrets.NewEnvProvider())
 	}
-	return chain
+	return chain, localProvider
 }
 
 func buildSources(cfg *config.Config, log *zap.Logger) ([]source.Source, error) {

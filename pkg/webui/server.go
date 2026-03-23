@@ -3,7 +3,12 @@ package webui
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"html/template"
@@ -11,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -23,6 +29,49 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// SecretsManager is the interface the secrets UI uses — satisfied by *secrets.LocalProvider.
+type SecretsManager interface {
+	List(ctx context.Context) ([]string, error)
+	Set(ctx context.Context, key, value string) error
+	Delete(ctx context.Context, key string) error
+}
+
+// sessionStore holds in-memory session tokens for the secrets page.
+type sessionStore struct {
+	mu     sync.Mutex
+	tokens map[string]time.Time
+}
+
+func newSessionStore() *sessionStore { return &sessionStore{tokens: make(map[string]time.Time)} }
+
+func (s *sessionStore) issue(passphrase string) string {
+	raw := make([]byte, 32)
+	_, _ = rand.Read(raw)
+	mac := hmac.New(sha256.New, []byte(passphrase))
+	mac.Write(raw)
+	token := hex.EncodeToString(raw) + "." + hex.EncodeToString(mac.Sum(nil))
+	s.mu.Lock()
+	s.tokens[token] = time.Now().Add(8 * time.Hour)
+	s.mu.Unlock()
+	return token
+}
+
+func (s *sessionStore) valid(token string) bool {
+	if token == "" {
+		return false
+	}
+	s.mu.Lock()
+	exp, ok := s.tokens[token]
+	s.mu.Unlock()
+	return ok && time.Now().Before(exp)
+}
+
+func (s *sessionStore) revoke(token string) {
+	s.mu.Lock()
+	delete(s.tokens, token)
+	s.mu.Unlock()
+}
+
 //go:embed templates/*.html
 var templateFS embed.FS
 
@@ -31,6 +80,8 @@ type Server struct {
 	registry    *registry.Registry
 	engine      *trigger.Engine
 	cfg         *config.Config
+	secretsMgr  SecretsManager // nil if local provider not configured
+	sessions    *sessionStore
 	logs        *LogBroadcaster
 	log         *zap.Logger
 	port        int
@@ -40,7 +91,7 @@ type Server struct {
 }
 
 // New creates a Server.
-func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config, logs *LogBroadcaster, log *zap.Logger) (*Server, error) {
+func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config, secretsMgr SecretsManager, logs *LogBroadcaster, log *zap.Logger) (*Server, error) {
 	funcMap := template.FuncMap{
 		"triggerLabel": triggerLabel,
 		"fmtTime":      fmtTime,
@@ -70,6 +121,8 @@ func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config
 		registry:    r,
 		engine:      eng,
 		cfg:         cfg,
+		secretsMgr:  secretsMgr,
+		sessions:    newSessionStore(),
 		logs:        logs,
 		log:         log,
 		port:        port,
@@ -112,6 +165,14 @@ func (s *Server) Handler() http.Handler {
 	r.Get("/api/tasks/{id}/runs", s.apiListRuns)
 	r.Get("/api/runs/{runID}", s.apiGetRun)
 	r.Get("/api/runs/{runID}/logs", s.apiGetLogs)
+
+	// Secrets management
+	r.Get("/secrets", s.handleSecretsPage)
+	r.Post("/secrets/unlock", s.handleSecretsUnlock)
+	r.Post("/secrets/lock", s.handleSecretsLock)
+	r.Get("/api/secrets", s.apiListSecrets)
+	r.Post("/api/secrets", s.apiSetSecret)
+	r.Delete("/api/secrets/{key}", s.apiDeleteSecret)
 
 	// Webhook passthrough
 	r.Post("/hooks/*", func(w http.ResponseWriter, req *http.Request) {
@@ -406,6 +467,123 @@ func (s *Server) handleLogsStream(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+const secretsCookie = "dicode_secrets_sess"
+
+func (s *Server) secretsPassphrase() string { return s.cfg.Server.Secret }
+
+func (s *Server) secretsSessionValid(r *http.Request) bool {
+	// If no passphrase is configured, the session is always valid.
+	if s.secretsPassphrase() == "" {
+		return true
+	}
+	c, err := r.Cookie(secretsCookie)
+	if err != nil {
+		return false
+	}
+	return s.sessions.valid(c.Value)
+}
+
+func (s *Server) handleSecretsPage(w http.ResponseWriter, r *http.Request) {
+	if s.secretsMgr == nil {
+		s.render(w, "secrets.html", map[string]any{
+			"Title":       "Secrets",
+			"Unavailable": true,
+		})
+		return
+	}
+	unlocked := s.secretsSessionValid(r)
+	var keys []string
+	if unlocked {
+		keys, _ = s.secretsMgr.List(r.Context())
+	}
+	s.render(w, "secrets.html", map[string]any{
+		"Title":     "Secrets",
+		"Unlocked":  unlocked,
+		"Protected": s.secretsPassphrase() != "",
+		"Keys":      keys,
+	})
+}
+
+func (s *Server) handleSecretsUnlock(w http.ResponseWriter, r *http.Request) {
+	entered := r.FormValue("passphrase")
+	expected := s.secretsPassphrase()
+	if expected == "" || subtle.ConstantTimeCompare([]byte(entered), []byte(expected)) == 1 {
+		token := s.sessions.issue(expected + "dicode")
+		http.SetCookie(w, &http.Cookie{
+			Name:     secretsCookie,
+			Value:    token,
+			Path:     "/secrets",
+			HttpOnly: true,
+			SameSite: http.SameSiteStrictMode,
+			MaxAge:   8 * 3600,
+		})
+	}
+	http.Redirect(w, r, "/secrets", http.StatusSeeOther)
+}
+
+func (s *Server) handleSecretsLock(w http.ResponseWriter, r *http.Request) {
+	if c, err := r.Cookie(secretsCookie); err == nil {
+		s.sessions.revoke(c.Value)
+	}
+	http.SetCookie(w, &http.Cookie{Name: secretsCookie, Path: "/secrets", MaxAge: -1})
+	http.Redirect(w, r, "/secrets", http.StatusSeeOther)
+}
+
+func (s *Server) requireSecretsSession(w http.ResponseWriter, r *http.Request) bool {
+	if s.secretsMgr == nil {
+		jsonErr(w, "secrets not configured", http.StatusServiceUnavailable)
+		return false
+	}
+	if !s.secretsSessionValid(r) {
+		jsonErr(w, "secrets locked — unlock at /secrets first", http.StatusUnauthorized)
+		return false
+	}
+	return true
+}
+
+func (s *Server) apiListSecrets(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSecretsSession(w, r) {
+		return
+	}
+	keys, err := s.secretsMgr.List(r.Context())
+	if err != nil {
+		jsonErr(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, keys)
+}
+
+func (s *Server) apiSetSecret(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSecretsSession(w, r) {
+		return
+	}
+	key := r.FormValue("key")
+	value := r.FormValue("value")
+	if key == "" {
+		jsonErr(w, "key is required", http.StatusBadRequest)
+		return
+	}
+	if err := s.secretsMgr.Set(r.Context(), key, value); err != nil {
+		jsonErr(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.log.Info("secret set", zap.String("key", key))
+	jsonOK(w, map[string]string{"status": "ok"})
+}
+
+func (s *Server) apiDeleteSecret(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSecretsSession(w, r) {
+		return
+	}
+	key := chi.URLParam(r, "key")
+	if err := s.secretsMgr.Delete(r.Context(), key); err != nil {
+		jsonErr(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.log.Info("secret deleted", zap.String("key", key))
+	jsonOK(w, map[string]string{"status": "ok"})
 }
 
 func (s *Server) render(w http.ResponseWriter, name string, data any) {
