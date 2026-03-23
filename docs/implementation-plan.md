@@ -6,6 +6,8 @@ This document is the ordered build roadmap. Each milestone produces something ru
 
 **MVP status: ✅ Complete (Milestones 0–7).** The binary compiles, all tests pass, and dicode runs in local-only mode.
 
+**Post-MVP Web UI enhancements ✅ Complete.** Config page, reactive HTMX tables, SSE app-log stream, Monaco code editor, trigger editor, secrets manager UI.
+
 ---
 
 ## Milestone 0 — Environment setup ✅
@@ -323,7 +325,43 @@ All HTML templates embedded via `//go:embed templates/`.
 
 **Deliverable**: working browser UI. Tasks visible, runnable, logs viewable.
 
-**Implemented**: `pkg/webui/server.go` — chi router, all REST endpoints, HTMX templates embedded via `//go:embed`. UI pages: task list, task detail + run history, run log viewer. Webhook passthrough to trigger engine. 9 tests passing.
+**Implemented**: `pkg/webui/server.go` — chi router, all REST + UI endpoints, HTMX templates embedded via `//go:embed`. 11 tests passing.
+
+**Post-MVP additions (all complete):**
+
+UI pages:
+- `/` — task list with reactive HTMX polling (`hx-trigger="every 3s"`), last-run timestamp + status badge as clickable link
+- `/tasks/{id}` — task detail with trigger display, code editor (Monaco), trigger editor, run history (live-polling)
+- `/runs/{runID}` — run log viewer
+- `/config` — server/database/sources/AI/secrets configuration viewer + JSON API link
+- `/secrets` — encrypted secrets manager with passphrase lock screen (ChaCha20-Poly1305)
+
+New REST API endpoints:
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/config` | Full config as JSON |
+| `GET` | `/api/tasks/{id}/files/{filename}` | Read task source file |
+| `POST` | `/api/tasks/{id}/files/{filename}` | Save task source file |
+| `POST` | `/api/tasks/{id}/trigger` | Update trigger config in task.yaml |
+| `GET` | `/api/secrets` | List secret keys (values never returned) |
+| `POST` | `/api/secrets` | Set secret (key + encrypted value) |
+| `DELETE` | `/api/secrets/{key}` | Delete secret |
+| `GET` | `/logs/stream` | App-log SSE stream |
+
+HTMX partial endpoints:
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/ui/tasks/rows` | Task list tbody fragment (polled every 3s) |
+| `GET` | `/ui/tasks/{id}/runs/rows` | Run history tbody fragment (polled every 3s) |
+| `GET` | `/ui/tasks/{id}/editor` | Monaco editor HTML fragment (lazy-loaded) |
+| `GET` | `/ui/tasks/{id}/trigger-editor` | Trigger editor form fragment (lazy-loaded) |
+
+Other:
+- `LogBroadcaster` (`pkg/webui/logstream.go`) — io.Writer, ring buffer (300 lines), SSE fan-out; tee'd from zap logger via `zapcore.NewTee`
+- Session store for secrets page — HMAC-SHA256 tokens, 8-hour expiry, HttpOnly+SameSite=Strict cookies
+- `SecretsManager` interface — backed by `*secrets.LocalProvider`
+- Monaco Editor (VS Code engine) for code editing — separate models per file, Ctrl+S save, test file bootstrap
+- Template clone-per-render pattern to isolate `{{block "content"}}` across pages
 
 ---
 
@@ -426,7 +464,7 @@ This unblocks `LocalProvider.Set/Get/Delete/List` (already written, just missing
 
 **Deliverable**: secrets stored encrypted in sqlite, resolved at task runtime.
 
-**Partial**: sqlite backend and LocalProvider are fully implemented (M1). Missing: `secrets` subcommand wired into `main.go`.
+**Partial**: sqlite backend and LocalProvider are fully implemented (M1). Web UI secrets manager is fully implemented (M6 post-MVP). Missing: `secrets` subcommand wired into `main.go` CLI.
 
 ---
 
@@ -651,7 +689,7 @@ On first run (no config):
 | 7 | **Full local-only mode** — end-to-end working binary | ✅ Done |
 | 8 | Git-backed tasks | 🔲 Not started |
 | 9 | `dicode task test` | 🔲 Not started |
-| 10 | `dicode secrets` CLI | 🔧 Backend done, CLI subcommand missing |
+| 10 | `dicode secrets` CLI | 🔧 Backend + Web UI done, CLI subcommand missing |
 | 11 | Push notifications | 🔧 ntfy done, gotify/desktop missing |
 | 12 | System tray | 🔲 Not started |
 | 13 | AI agent development via MCP | 🔧 Stub only |
@@ -664,4 +702,4 @@ On first run (no config):
 
 Milestones 0–7 are the **MVP** — ✅ all complete as of 2026-03-23. Everything after is additive.
 
-**Test coverage**: 61 tests across db, secrets, source/local, registry, runtime/js, trigger, and webui packages.
+**Test coverage**: 62 tests across db, secrets, source/local, registry, runtime/js, trigger, and webui packages.
