@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -74,6 +75,68 @@ func (s *sessionStore) revoke(token string) {
 	s.mu.Unlock()
 }
 
+func (s *sessionStore) purgeLoop() {
+	t := time.NewTicker(time.Hour)
+	defer t.Stop()
+	for range t.C {
+		s.mu.Lock()
+		now := time.Now()
+		for tok, exp := range s.tokens {
+			if now.After(exp) {
+				delete(s.tokens, tok)
+			}
+		}
+		s.mu.Unlock()
+	}
+}
+
+// unlockLimiter is a simple per-IP rate limiter for the secrets unlock endpoint.
+// It allows up to maxAttempts requests per window before blocking.
+type unlockLimiter struct {
+	mu      sync.Mutex
+	entries map[string]*limitEntry
+}
+
+type limitEntry struct {
+	count   int
+	resetAt time.Time
+}
+
+const (
+	unlockMaxAttempts = 5
+	unlockWindow      = time.Minute
+)
+
+func newUnlockLimiter() *unlockLimiter {
+	return &unlockLimiter{entries: make(map[string]*limitEntry)}
+}
+
+func (l *unlockLimiter) allow(ip string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := time.Now()
+	e, ok := l.entries[ip]
+	if !ok || now.After(e.resetAt) {
+		l.entries[ip] = &limitEntry{count: 1, resetAt: now.Add(unlockWindow)}
+		return true
+	}
+	if e.count >= unlockMaxAttempts {
+		return false
+	}
+	e.count++
+	return true
+}
+
+// securityHeaders adds baseline security headers to every response.
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "SAMEORIGIN")
+		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		next.ServeHTTP(w, r)
+	})
+}
+
 //go:embed templates/*.html
 var templateFS embed.FS
 
@@ -87,6 +150,7 @@ type Server struct {
 	reconciler  *registry.Reconciler // nil if not wired
 	dataDir     string              // ~/.dicode or cfg.DataDir
 	sessions    *sessionStore
+	limiter     *unlockLimiter
 	logs        *LogBroadcaster
 	log         *zap.Logger
 	port        int
@@ -103,7 +167,18 @@ func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config
 		"triggerLabel": triggerLabel,
 		"fmtTime":      fmtTime,
 		"fmtDuration":  fmtDuration,
-		"slice":        func(s string, i, j int) string { return s[i:j] },
+		"slice": func(s string, i, j int) string {
+			if i < 0 {
+				i = 0
+			}
+			if j > len(s) {
+				j = len(s)
+			}
+			if i > j {
+				return ""
+			}
+			return s[i:j]
+		},
 		"string":       fmt.Sprint,
 		"deref":        func(t *time.Time) time.Time { return *t },
 		"toJSON": func(v any) (template.JS, error) {
@@ -126,6 +201,8 @@ func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config
 	if err != nil {
 		return nil, fmt.Errorf("parse partial templates: %w", err)
 	}
+	ss := newSessionStore()
+	go ss.purgeLoop()
 	return &Server{
 		registry:    r,
 		engine:      eng,
@@ -134,7 +211,8 @@ func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config
 		secretsMgr:  secretsMgr,
 		reconciler:  rec,
 		dataDir:     dataDir,
-		sessions:    newSessionStore(),
+		sessions:    ss,
+		limiter:     newUnlockLimiter(),
 		logs:        logs,
 		log:         log,
 		port:        port,
@@ -148,6 +226,7 @@ func (s *Server) Handler() http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Logger)
+	r.Use(securityHeaders)
 
 	// UI routes
 	r.Get("/", s.handleTaskList)
@@ -212,8 +291,11 @@ func (s *Server) Handler() http.Handler {
 // Start listens on the configured port until ctx is cancelled.
 func (s *Server) Start(ctx context.Context) error {
 	s.srv = &http.Server{
-		Addr:    fmt.Sprintf(":%d", s.port),
-		Handler: s.Handler(),
+		Addr:              fmt.Sprintf(":%d", s.port),
+		Handler:           s.Handler(),
+		ReadHeaderTimeout: 5 * time.Second,  // mitigates Slowloris
+		IdleTimeout:       120 * time.Second, // clean up idle keep-alives
+		// WriteTimeout is intentionally 0: SSE and AI stream endpoints write indefinitely.
 	}
 	go func() {
 		<-ctx.Done()
@@ -260,8 +342,12 @@ func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	logs, _ := s.registry.GetRunLogs(r.Context(), runID)
+	title := runID
+	if len(title) > 8 {
+		title = title[:8]
+	}
 	s.render(w, "run.html", map[string]any{
-		"Title": "Run " + runID[:8],
+		"Title": "Run " + title,
 		"Run":   run,
 		"Logs":  logs,
 	})
@@ -281,14 +367,20 @@ func (s *Server) handleConfigCode(w http.ResponseWriter, r *http.Request) {
 }
 
 // apiGetConfigRaw returns the raw content of dicode.yaml.
+// Guarded by secrets session because the config may contain API keys.
 func (s *Server) apiGetConfigRaw(w http.ResponseWriter, r *http.Request) {
+	if !s.secretsSessionValid(r) {
+		jsonErr(w, "unlock secrets first to access raw config", http.StatusUnauthorized)
+		return
+	}
 	if s.cfgPath == "" {
 		jsonOK(w, map[string]string{"content": "# config file path not set"})
 		return
 	}
 	b, err := os.ReadFile(s.cfgPath)
 	if err != nil {
-		jsonErr(w, "read config: "+err.Error(), http.StatusInternalServerError)
+		s.log.Error("read config file", zap.Error(err))
+		jsonErr(w, "could not read config file", http.StatusInternalServerError)
 		return
 	}
 	jsonOK(w, map[string]string{"content": string(b)})
@@ -296,7 +388,12 @@ func (s *Server) apiGetConfigRaw(w http.ResponseWriter, r *http.Request) {
 
 // apiSaveConfigRaw validates and writes the raw config back to dicode.yaml,
 // then reloads it into memory.
+// Guarded by secrets session because the config may contain API keys.
 func (s *Server) apiSaveConfigRaw(w http.ResponseWriter, r *http.Request) {
+	if !s.secretsSessionValid(r) {
+		jsonErr(w, "unlock secrets first to edit raw config", http.StatusUnauthorized)
+		return
+	}
 	if s.cfgPath == "" {
 		jsonErr(w, "config file path not set", http.StatusBadRequest)
 		return
@@ -310,7 +407,7 @@ func (s *Server) apiSaveConfigRaw(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := os.WriteFile(s.cfgPath, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(s.cfgPath, []byte(content), 0600); err != nil {
 		jsonErr(w, "write config: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -398,7 +495,7 @@ func (s *Server) apiSaveFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	content := r.FormValue("content")
-	if err := os.WriteFile(filepath.Join(spec.TaskDir, filename), []byte(content), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(spec.TaskDir, filename), []byte(content), 0600); err != nil {
 		jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -597,6 +694,13 @@ func (s *Server) handleSecretsPage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSecretsUnlock(w http.ResponseWriter, r *http.Request) {
+	// Rate-limit by client IP: max 5 attempts per minute.
+	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if !s.limiter.allow(ip) {
+		http.Error(w, "too many unlock attempts — try again in a minute", http.StatusTooManyRequests)
+		return
+	}
+
 	entered := r.FormValue("passphrase")
 	expected := s.secretsPassphrase()
 	if expected == "" || subtle.ConstantTimeCompare([]byte(entered), []byte(expected)) == 1 {
@@ -606,6 +710,7 @@ func (s *Server) handleSecretsUnlock(w http.ResponseWriter, r *http.Request) {
 			Value:    token,
 			Path:     "/secrets",
 			HttpOnly: true,
+			Secure:   true, // must be set; deploy behind TLS or set server.insecure for dev
 			SameSite: http.SameSiteStrictMode,
 			MaxAge:   8 * 3600,
 		})
@@ -752,16 +857,38 @@ func (s *Server) apiGetRun(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) apiGetLogs(w http.ResponseWriter, r *http.Request) {
 	runID := chi.URLParam(r, "runID")
-	logs, err := s.registry.GetRunLogs(r.Context(), runID)
+
+	// Parse optional ?since=N cursor for incremental HTMX polling.
+	var sinceID int64
+	if v := r.URL.Query().Get("since"); v != "" {
+		fmt.Sscanf(v, "%d", &sinceID)
+	}
+
+	var (
+		logs []*registry.LogEntry
+		err  error
+	)
+	if sinceID > 0 {
+		logs, err = s.registry.GetRunLogsSince(r.Context(), runID, sinceID)
+	} else {
+		logs, err = s.registry.GetRunLogs(r.Context(), runID)
+	}
 	if err != nil {
-		jsonErr(w, err.Error(), http.StatusInternalServerError)
+		s.log.Error("get run logs", zap.String("run", runID), zap.Error(err))
+		jsonErr(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	// For HTMX polling return plain text; for API callers return JSON.
+
+	// HTMX polling: return HTML spans so they can be appended with beforeend.
 	if strings.Contains(r.Header.Get("Accept"), "text/html") {
-		w.Header().Set("Content-Type", "text/plain")
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		for _, l := range logs {
-			fmt.Fprintf(w, "[%s] %s %s\n", l.Level, fmtTime(l.Ts), l.Message)
+			// Each line is a <span> carrying the log ID so the client can track the cursor.
+			fmt.Fprintf(w, "<span data-log-id=\"%d\">[%s] %s %s\n</span>",
+				l.ID, template.HTMLEscapeString(l.Level),
+				template.HTMLEscapeString(fmtTime(l.Ts)),
+				template.HTMLEscapeString(l.Message),
+			)
 		}
 		return
 	}
@@ -873,9 +1000,6 @@ func (s *Server) apiAddSource(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Build and start the source.
-	var src interface {
-		ID() string
-	}
 	if s.reconciler != nil {
 		switch sc.Type {
 		case config.SourceTypeLocal:
@@ -888,7 +1012,6 @@ func (s *Server) apiAddSource(w http.ResponseWriter, r *http.Request) {
 				jsonErr(w, "start source: "+err.Error(), http.StatusInternalServerError)
 				return
 			}
-			src = ls
 		case config.SourceTypeGit:
 			gs, err := gitSource.New(s.dataDir, sc.URL, sc.Branch, sc.PollInterval, sc.Auth.TokenEnv, sc.Auth.SSHKey, s.log)
 			if err != nil {
@@ -899,10 +1022,8 @@ func (s *Server) apiAddSource(w http.ResponseWriter, r *http.Request) {
 				jsonErr(w, "start source: "+err.Error(), http.StatusInternalServerError)
 				return
 			}
-			src = gs
 		}
 	}
-	_ = src
 
 	// Persist to config.
 	s.cfg.Sources = append(s.cfg.Sources, sc)
@@ -1035,7 +1156,7 @@ func (s *Server) persistConfig() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(s.cfgPath, out, 0644)
+	return os.WriteFile(s.cfgPath, out, 0600)
 }
 
 // --- helpers ---

@@ -28,6 +28,9 @@
     .btn { display: inline-block; padding: 0.4rem 0.9rem; border-radius: 5px; border: none; cursor: pointer; font-size: 0.85rem; font-weight: 600; background: #0d6efd; color: #fff; text-decoration: none; }
     .btn:hover { background: #0b5ed7; }
     .btn-sm { padding: 0.25rem 0.6rem; font-size: 0.78rem; }
+    /* Keyboard navigation — visible focus ring on all interactive elements */
+    :focus-visible { outline: 2px solid #0d6efd; outline-offset: 2px; border-radius: 2px; }
+    .btn:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
     pre { background: #1e1e2e; color: #cdd6f4; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.82rem; line-height: 1.5; white-space: pre-wrap; }
     .card { background: #fff; border-radius: 6px; box-shadow: 0 1px 3px rgba(0,0,0,.08); padding: 1rem 1.25rem; margin-bottom: 1rem; }
     .meta { font-size: 0.82rem; color: #6c757d; }
@@ -99,6 +102,16 @@
   es.onmessage = function(e) { append(e.data); };
   es.onerror = function() { statusEl.textContent = '● disconnected'; statusEl.style.color = '#f38ba8'; };
 })();
+</script>
+<script>
+// Cancel any HTMX polling request while the tab is hidden.
+// The polling timer still fires but the network call is aborted immediately.
+// When the tab becomes visible the next tick fires normally — no extra code needed.
+document.addEventListener('htmx:beforeRequest', function(evt) {
+  if (document.hidden) {
+    evt.preventDefault();
+  }
+});
 </script>
 </body>
 </html>
