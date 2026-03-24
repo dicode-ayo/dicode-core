@@ -51,11 +51,17 @@
   <h2>AI</h2>
   <table>
     <tbody>
-      <tr><th>Provider</th><td>{{.Cfg.AI.Provider}}</td></tr>
+      <tr>
+        <th>Endpoint (base URL)</th>
+        <td>{{if .Cfg.AI.BaseURL}}{{.Cfg.AI.BaseURL}}{{else}}<span class="meta">https://api.openai.com/v1 (default)</span>{{end}}</td>
+      </tr>
       <tr><th>Model</th><td>{{.Cfg.AI.Model}}</td></tr>
       <tr><th>API key env</th><td>{{.Cfg.AI.APIKeyEnv}}</td></tr>
     </tbody>
   </table>
+  <p class="meta" style="margin-top:0.5rem">
+    Compatible with OpenAI, Claude (<code>base_url: https://api.anthropic.com/v1</code>), and Ollama (<code>base_url: http://localhost:11434/v1</code>).
+  </p>
 </div>
 
 <div class="card">

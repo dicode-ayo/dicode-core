@@ -101,9 +101,16 @@ type ServerConfig struct {
 }
 
 type AIConfig struct {
-	Provider  string `yaml:"provider"`    // "claude" | "openai"
+	// BaseURL is the OpenAI-compatible API endpoint.
+	// Leave empty for OpenAI (https://api.openai.com/v1).
+	// Use "https://api.anthropic.com/v1" for Claude.
+	// Use "http://localhost:11434/v1" for Ollama.
+	BaseURL   string `yaml:"base_url"`
+	// Model name as accepted by the chosen endpoint.
 	Model     string `yaml:"model"`
-	APIKeyEnv string `yaml:"api_key_env"` // env var name holding the key
+	// APIKeyEnv is the env var that holds the API key.
+	// Leave empty for Ollama (no key needed).
+	APIKeyEnv string `yaml:"api_key_env"`
 }
 
 // Load reads and parses the config file at path, then applies defaults.
@@ -192,14 +199,12 @@ func applyDefaults(cfg *Config) {
 	// Notifications default to alerting on failure only
 	// (OnFailure zero value is false, so only set if provider is configured)
 
-	if cfg.AI.Provider == "" {
-		cfg.AI.Provider = "claude"
-	}
+	// AI defaults — OpenAI-compatible, works with OpenAI / Claude / Ollama.
 	if cfg.AI.Model == "" {
-		cfg.AI.Model = "claude-sonnet-4-6"
+		cfg.AI.Model = "gpt-4o"
 	}
 	if cfg.AI.APIKeyEnv == "" {
-		cfg.AI.APIKeyEnv = "ANTHROPIC_API_KEY"
+		cfg.AI.APIKeyEnv = "OPENAI_API_KEY"
 	}
 	if cfg.LogLevel == "" {
 		cfg.LogLevel = "info"
