@@ -1,0 +1,84 @@
+name: Release Please
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  build:
+    name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+          - goos: windows
+            goarch: arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          VERSION=${{ needs.release-please.outputs.tag_name }}
+          BINARY_NAME=dicode
+          if [ "$GOOS" = "windows" ]; then
+            BINARY_NAME=dicode.exe
+          fi
+          go build \
+            -ldflags "-X main.version=${VERSION} -s -w" \
+            -o "dist/${BINARY_NAME}" \
+            ./cmd/dicode/
+
+      - name: Create archive
+        run: |
+          ARCHIVE_NAME="dicode-${{ needs.release-please.outputs.tag_name }}-${{ matrix.goos }}-${{ matrix.goarch }}"
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            zip -j "dist/${ARCHIVE_NAME}.zip" dist/dicode.exe
+            echo "ASSET_PATH=dist/${ARCHIVE_NAME}.zip" >> $GITHUB_ENV
+          else
+            tar -czf "dist/${ARCHIVE_NAME}.tar.gz" -C dist dicode
+            echo "ASSET_PATH=dist/${ARCHIVE_NAME}.tar.gz" >> $GITHUB_ENV
+          fi
+
+      - name: Upload release asset
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload ${{ needs.release-please.outputs.tag_name }} "$ASSET_PATH"
