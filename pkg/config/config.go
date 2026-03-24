@@ -95,7 +95,7 @@ type SourceAuth struct {
 
 type ServerConfig struct {
 	Port   int    `yaml:"port"`
-	Secret string `yaml:"secret"` // optional basic-auth password
+	Secret string `yaml:"secret" json:"-"` // optional basic-auth password; excluded from JSON API
 	MCP    bool   `yaml:"mcp"`    // expose MCP endpoint at /mcp (default: true)
 	Tray   *bool  `yaml:"tray"`   // system tray icon (nil = auto-detect)
 }
@@ -113,7 +113,8 @@ type AIConfig struct {
 	APIKeyEnv string `yaml:"api_key_env"`
 	// APIKey is a direct API key value. If set it takes precedence over APIKeyEnv.
 	// Stored in dicode.yaml — only use for local/trusted setups.
-	APIKey string `yaml:"api_key,omitempty"`
+	// json:"-" prevents it from appearing in /api/config HTTP responses.
+	APIKey string `yaml:"api_key,omitempty" json:"-"`
 }
 
 // Load reads and parses the config file at path, then applies defaults.

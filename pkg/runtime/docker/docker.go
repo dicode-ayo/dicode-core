@@ -6,6 +6,7 @@ package docker
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
@@ -45,6 +46,12 @@ func New(r *registry.Registry, log *zap.Logger) *Runtime {
 	return &Runtime{registry: r, log: log}
 }
 
+// fail marks a run as failed and returns the result. Used to DRY up early-exit error paths.
+func (rt *Runtime) fail(runID string, err error) (*RunResult, error) {
+	_ = rt.registry.FinishRun(context.Background(), runID, registry.StatusFailure)
+	return &RunResult{RunID: runID, Error: err}, nil
+}
+
 // Run starts a container for the given spec and streams its logs until it exits or ctx is cancelled.
 func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*RunResult, error) {
 	if opts.RunID == "" {
@@ -67,13 +74,11 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		pullPolicy = "missing"
 	}
 	if err := rt.maybePull(ctx, dc, cfg.Image, pullPolicy, runID); err != nil {
-		status := registry.StatusFailure
 		if ctx.Err() != nil {
-			status = registry.StatusCancelled
+			_ = rt.registry.FinishRun(context.Background(), runID, registry.StatusCancelled)
+			return &RunResult{RunID: runID, Error: err}, nil
 		}
-		_ = rt.registry.FinishRun(context.Background(), runID, status)
-		result.Error = err
-		return result, nil
+		return rt.fail(runID, err)
 	}
 
 	// Build container config.
@@ -126,9 +131,7 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 
 	created, err := dc.ContainerCreate(ctx, containerCfg, hostCfg, nil, nil, "")
 	if err != nil {
-		_ = rt.registry.FinishRun(context.Background(), runID, registry.StatusFailure)
-		result.Error = fmt.Errorf("create container: %w", err)
-		return result, nil
+		return rt.fail(runID, fmt.Errorf("create container: %w", err))
 	}
 	containerID := created.ID
 	shortID := containerID
@@ -147,9 +150,7 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	}()
 
 	if err := dc.ContainerStart(ctx, containerID, container.StartOptions{}); err != nil {
-		_ = rt.registry.FinishRun(context.Background(), runID, registry.StatusFailure)
-		result.Error = fmt.Errorf("start container: %w", err)
-		return result, nil
+		return rt.fail(runID, fmt.Errorf("start container: %w", err))
 	}
 	rt.log.Info("container started",
 		zap.String("task", spec.ID),
@@ -170,9 +171,7 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		Timestamps: false,
 	})
 	if err != nil {
-		_ = rt.registry.FinishRun(context.Background(), runID, registry.StatusFailure)
-		result.Error = fmt.Errorf("attach logs: %w", err)
-		return result, nil
+		return rt.fail(runID, fmt.Errorf("attach logs: %w", err))
 	}
 
 	// closeLog closes logReader exactly once — safe to call from multiple goroutines.
@@ -256,11 +255,14 @@ func (rt *Runtime) maybePull(ctx context.Context, dc *dockerclient.Client, img, 
 		return fmt.Errorf("pull image %s: %w", img, err)
 	}
 	defer reader.Close()
+	var pullMsg struct {
+		Status string `json:"status"`
+	}
 	scanner := bufio.NewScanner(reader)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		if strings.Contains(line, "\"status\"") && strings.Contains(line, "Pull complete") {
-			_ = rt.registry.AppendLog(ctx, runID, "info", line)
+		if err := json.Unmarshal([]byte(line), &pullMsg); err == nil && pullMsg.Status != "" {
+			_ = rt.registry.AppendLog(ctx, runID, "info", pullMsg.Status)
 		}
 	}
 	return nil

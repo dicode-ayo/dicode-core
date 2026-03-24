@@ -29,7 +29,9 @@
 <h2>Output</h2>
 <div class="card">
   {{if eq .Output.ContentType "text/html"}}
-  <iframe srcdoc="{{.Output.Content}}" style="width:100%;min-height:300px;border:none"></iframe>
+  <iframe srcdoc="{{.Output.Content}}"
+          sandbox="allow-same-origin"
+          style="width:100%;min-height:300px;border:none"></iframe>
   {{else}}
   <pre>{{.Output.Content}}</pre>
   {{end}}
@@ -41,8 +43,10 @@
   {{if eq .Run.Status "running"}}
   hx-get="/api/runs/{{.Run.ID}}/logs"
   hx-trigger="every 2s"
-  hx-swap="innerHTML"
+  hx-swap="beforeend"
   hx-headers='{"Accept": "text/html"}'
-  {{end}}>{{range .Logs}}[{{.Level}}] {{fmtTime .Ts}} {{.Message}}
-{{end}}</pre>
+  hx-vals="js:{since: (function(){ var spans = document.getElementById('log-output').querySelectorAll('[data-log-id]'); return spans.length ? spans[spans.length-1].dataset.logId : '0'; })()}"
+  hx-on::after-request="this.scrollTop = this.scrollHeight"
+  {{end}}>{{range .Logs}}<span data-log-id="{{.ID}}">[{{.Level}}] {{fmtTime .Ts}} {{.Message}}
+</span>{{end}}</pre>
 {{end}}

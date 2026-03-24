@@ -230,12 +230,22 @@ func (r *Registry) CleanupStaleRuns(ctx context.Context) ([]string, error) {
 	return taskIDs, nil
 }
 
-// GetRunLogs returns log entries for a run.
+// GetRunLogs returns all log entries for a run ordered by ID ascending.
 func (r *Registry) GetRunLogs(ctx context.Context, runID string) ([]*LogEntry, error) {
+	return r.getRunLogsQuery(ctx, runID, 0)
+}
+
+// GetRunLogsSince returns log entries for a run with ID greater than sinceID.
+// Used for incremental polling so callers only receive new lines.
+func (r *Registry) GetRunLogsSince(ctx context.Context, runID string, sinceID int64) ([]*LogEntry, error) {
+	return r.getRunLogsQuery(ctx, runID, sinceID)
+}
+
+func (r *Registry) getRunLogsQuery(ctx context.Context, runID string, sinceID int64) ([]*LogEntry, error) {
 	var logs []*LogEntry
 	err := r.db.Query(ctx,
-		`SELECT id, run_id, ts, level, message FROM run_logs WHERE run_id = ? ORDER BY id ASC`,
-		[]any{runID},
+		`SELECT id, run_id, ts, level, message FROM run_logs WHERE run_id = ? AND id > ? ORDER BY id ASC`,
+		[]any{runID, sinceID},
 		func(rows db.Scanner) error {
 			for rows.Next() {
 				e := &LogEntry{}
