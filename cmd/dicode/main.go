@@ -77,12 +77,12 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	if err := run(ctx, cfg, logBroadcaster, logger); err != nil {
+	if err := run(ctx, cfg, configPath, logBroadcaster, logger); err != nil {
 		logger.Fatal("dicode exited with error", zap.Error(err))
 	}
 }
 
-func run(ctx context.Context, cfg *config.Config, logBroadcaster *webui.LogBroadcaster, log *zap.Logger) error {
+func run(ctx context.Context, cfg *config.Config, configPath string, logBroadcaster *webui.LogBroadcaster, log *zap.Logger) error {
 	// 1. Open database.
 	database, err := db.Open(db.Config{
 		Type:   cfg.Database.Type,
@@ -120,7 +120,7 @@ func run(ctx context.Context, cfg *config.Config, logBroadcaster *webui.LogBroad
 	if port == 0 {
 		port = 8080
 	}
-	srv, err := webui.New(port, reg, eng, cfg, localSecrets, logBroadcaster, log)
+	srv, err := webui.New(port, reg, eng, cfg, configPath, localSecrets, logBroadcaster, log)
 	if err != nil {
 		return fmt.Errorf("build webui: %w", err)
 	}
