@@ -80,6 +80,7 @@ type Server struct {
 	registry    *registry.Registry
 	engine      *trigger.Engine
 	cfg         *config.Config
+	cfgPath     string         // path to dicode.yaml; empty in tests
 	secretsMgr  SecretsManager // nil if local provider not configured
 	sessions    *sessionStore
 	logs        *LogBroadcaster
@@ -90,8 +91,9 @@ type Server struct {
 	partialTmpl *template.Template // row partials, no base wrapper
 }
 
-// New creates a Server.
-func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config, secretsMgr SecretsManager, logs *LogBroadcaster, log *zap.Logger) (*Server, error) {
+// New creates a Server. cfgPath is the path to dicode.yaml used to persist
+// settings changes; pass "" in tests or when persistence is not needed.
+func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config, cfgPath string, secretsMgr SecretsManager, logs *LogBroadcaster, log *zap.Logger) (*Server, error) {
 	funcMap := template.FuncMap{
 		"triggerLabel": triggerLabel,
 		"fmtTime":      fmtTime,
@@ -121,6 +123,7 @@ func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config
 		registry:    r,
 		engine:      eng,
 		cfg:         cfg,
+		cfgPath:     cfgPath,
 		secretsMgr:  secretsMgr,
 		sessions:    newSessionStore(),
 		logs:        logs,
@@ -159,6 +162,10 @@ func (s *Server) Handler() http.Handler {
 
 	// AI chat — streams SSE, writes task files live
 	r.Post("/api/tasks/{id}/ai/stream", s.handleAIStream)
+
+	// Settings (persist to dicode.yaml)
+	r.Post("/api/settings/ai", s.apiSaveAISettings)
+	r.Post("/api/settings/server", s.apiSaveServerSettings)
 
 	// REST API
 	r.Get("/api/config", s.apiGetConfig)
@@ -678,6 +685,107 @@ func (s *Server) apiGetLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOK(w, logs)
+}
+
+// --- Settings handlers ---
+
+// apiSaveAISettings updates the AI config section in memory and persists to dicode.yaml.
+func (s *Server) apiSaveAISettings(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		jsonErr(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	s.cfg.AI.BaseURL = strings.TrimSpace(r.FormValue("base_url"))
+	s.cfg.AI.Model = strings.TrimSpace(r.FormValue("model"))
+	s.cfg.AI.APIKeyEnv = strings.TrimSpace(r.FormValue("api_key_env"))
+	// Only overwrite APIKey if the user submitted a non-empty value;
+	// blank means "keep using env var".
+	if v := r.FormValue("api_key"); v != "" {
+		s.cfg.AI.APIKey = v
+	} else if r.FormValue("clear_api_key") == "1" {
+		s.cfg.AI.APIKey = ""
+	}
+
+	if err := s.persistConfig(); err != nil {
+		s.log.Warn("settings persist failed", zap.Error(err))
+		jsonErr(w, "saved in memory but could not write file: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.log.Info("AI settings updated", zap.String("model", s.cfg.AI.Model), zap.String("base_url", s.cfg.AI.BaseURL))
+	jsonOK(w, map[string]string{"status": "ok"})
+}
+
+// apiSaveServerSettings updates server.secret and log_level in memory + file.
+func (s *Server) apiSaveServerSettings(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		jsonErr(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if v := r.FormValue("log_level"); v != "" {
+		s.cfg.LogLevel = v
+	}
+	if r.Form.Has("secret") { // explicit empty is allowed (disables passphrase)
+		s.cfg.Server.Secret = r.FormValue("secret")
+	}
+
+	if err := s.persistConfig(); err != nil {
+		s.log.Warn("settings persist failed", zap.Error(err))
+		jsonErr(w, "saved in memory but could not write file: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.log.Info("server settings updated")
+	jsonOK(w, map[string]string{"status": "ok"})
+}
+
+// persistConfig writes the current in-memory config back to dicode.yaml.
+// It reads the existing file as a generic map (to preserve unknown keys),
+// merges the changed sections, and writes back.
+func (s *Server) persistConfig() error {
+	if s.cfgPath == "" {
+		return nil // no path configured (e.g. in tests)
+	}
+
+	// Read existing YAML as a generic document to preserve unknown keys.
+	raw, err := os.ReadFile(s.cfgPath)
+	if err != nil {
+		return err
+	}
+	var doc map[string]any
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		return err
+	}
+	if doc == nil {
+		doc = make(map[string]any)
+	}
+
+	// Merge AI section.
+	aiMap := map[string]any{
+		"base_url":    s.cfg.AI.BaseURL,
+		"model":       s.cfg.AI.Model,
+		"api_key_env": s.cfg.AI.APIKeyEnv,
+	}
+	if s.cfg.AI.APIKey != "" {
+		aiMap["api_key"] = s.cfg.AI.APIKey
+	}
+	doc["ai"] = aiMap
+
+	// Merge top-level fields.
+	doc["log_level"] = s.cfg.LogLevel
+
+	// Merge server section carefully.
+	serverMap, _ := doc["server"].(map[string]any)
+	if serverMap == nil {
+		serverMap = map[string]any{}
+	}
+	serverMap["port"] = s.cfg.Server.Port
+	serverMap["secret"] = s.cfg.Server.Secret
+	doc["server"] = serverMap
+
+	out, err := yaml.Marshal(doc)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(s.cfgPath, out, 0644)
 }
 
 // --- helpers ---

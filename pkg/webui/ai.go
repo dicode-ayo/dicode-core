@@ -56,12 +56,15 @@ func (s *Server) handleAIStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Resolve API key (may be empty for Ollama — that's fine).
-	apiKeyEnv := s.cfg.AI.APIKeyEnv
-	if apiKeyEnv == "" {
-		apiKeyEnv = "OPENAI_API_KEY"
+	// Resolve API key: direct value in config takes precedence over env var.
+	apiKey := s.cfg.AI.APIKey
+	if apiKey == "" {
+		apiKeyEnv := s.cfg.AI.APIKeyEnv
+		if apiKeyEnv == "" {
+			apiKeyEnv = "OPENAI_API_KEY"
+		}
+		apiKey = os.Getenv(apiKeyEnv)
 	}
-	apiKey := os.Getenv(apiKeyEnv)
 
 	model := s.cfg.AI.Model
 	if model == "" {

@@ -105,12 +105,15 @@ type AIConfig struct {
 	// Leave empty for OpenAI (https://api.openai.com/v1).
 	// Use "https://api.anthropic.com/v1" for Claude.
 	// Use "http://localhost:11434/v1" for Ollama.
-	BaseURL   string `yaml:"base_url"`
+	BaseURL string `yaml:"base_url"`
 	// Model name as accepted by the chosen endpoint.
-	Model     string `yaml:"model"`
+	Model string `yaml:"model"`
 	// APIKeyEnv is the env var that holds the API key.
 	// Leave empty for Ollama (no key needed).
 	APIKeyEnv string `yaml:"api_key_env"`
+	// APIKey is a direct API key value. If set it takes precedence over APIKeyEnv.
+	// Stored in dicode.yaml — only use for local/trusted setups.
+	APIKey string `yaml:"api_key,omitempty"`
 }
 
 // Load reads and parses the config file at path, then applies defaults.

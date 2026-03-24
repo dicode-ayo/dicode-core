@@ -1,18 +1,117 @@
 {{define "content"}}
 <h1>Configuration</h1>
 
+<style>
+.settings-form input, .settings-form select, .settings-form textarea {
+  background:#2a2a3e; color:#cdd6f4; border:1px solid #444; border-radius:4px;
+  padding:0.35rem 0.5rem; font-size:0.85rem; width:100%; box-sizing:border-box;
+}
+.settings-form input:focus, .settings-form select:focus {
+  outline:none; border-color:#7c3aed;
+}
+.settings-form label { font-size:0.78rem; color:#888; display:block; margin-bottom:0.25rem; }
+.settings-form .field { margin-bottom:0.75rem; }
+.settings-form .hint  { font-size:0.72rem; color:#666; margin-top:0.2rem; }
+.save-status { font-size:0.8rem; margin-left:0.5rem; }
+</style>
+
+<!-- ── AI settings (editable) ── -->
 <div class="card">
-  <h2>Server</h2>
-  <table>
-    <tbody>
-      <tr><th>Port</th><td>{{.Cfg.Server.Port}}</td></tr>
-      <tr><th>MCP endpoint</th><td>{{if .Cfg.Server.MCP}}enabled (/mcp){{else}}disabled{{end}}</td></tr>
-      <tr><th>Log level</th><td>{{.Cfg.LogLevel}}</td></tr>
-      <tr><th>Data dir</th><td>{{.Cfg.DataDir}}</td></tr>
-    </tbody>
-  </table>
+  <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:0.75rem">
+    <h2 style="margin:0">AI</h2>
+    <span id="ai-status" class="save-status"></span>
+  </div>
+
+  <form class="settings-form" onsubmit="return false">
+
+    <div class="field">
+      <label>Endpoint (base URL)</label>
+      <input id="ai-base-url" type="text" name="base_url" value="{{.Cfg.AI.BaseURL}}"
+        placeholder="leave blank for https://api.openai.com/v1">
+      <div class="hint">
+        OpenAI: <em>leave blank</em> &nbsp;|&nbsp;
+        Claude: <code>https://api.anthropic.com/v1</code> &nbsp;|&nbsp;
+        Ollama: <code>http://localhost:11434/v1</code>
+      </div>
+    </div>
+
+    <div class="field">
+      <label>Model</label>
+      <input id="ai-model" type="text" name="model" value="{{.Cfg.AI.Model}}"
+        placeholder="gpt-4o">
+      <div class="hint">
+        Examples: <code>gpt-4o</code>, <code>claude-sonnet-4-6</code>, <code>qwen2.5-coder:7b</code>
+      </div>
+    </div>
+
+    <div class="field">
+      <label>API key env var</label>
+      <input id="ai-key-env" type="text" name="api_key_env" value="{{.Cfg.AI.APIKeyEnv}}"
+        placeholder="OPENAI_API_KEY">
+      <div class="hint">Name of the environment variable holding the key. Leave blank for Ollama.</div>
+    </div>
+
+    <div class="field">
+      <label>API key (direct value — stored in dicode.yaml)</label>
+      <div style="display:flex;gap:0.5rem">
+        <input id="ai-key-val" type="password" name="api_key"
+          placeholder="{{if .Cfg.AI.APIKey}}••••••••••••••••{{else}}paste key here to override env var{{end}}">
+        {{if .Cfg.AI.APIKey}}
+        <button class="btn btn-sm" style="background:#6c757d;white-space:nowrap"
+          onclick="clearAPIKey()">✕ Clear</button>
+        {{end}}
+      </div>
+      <div class="hint">
+        {{if .Cfg.AI.APIKey}}
+          A key is stored in the config file. Leave blank to keep it; click Clear to remove it.
+        {{else}}
+          Paste a key here to store it directly in dicode.yaml (useful for local setups).
+          Leave blank to use the env var above instead.
+        {{end}}
+      </div>
+    </div>
+
+    <button class="btn" onclick="saveAI()">💾 Save AI settings</button>
+  </form>
 </div>
 
+<!-- ── Server settings (editable) ── -->
+<div class="card">
+  <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:0.75rem">
+    <h2 style="margin:0">Server</h2>
+    <span id="srv-status" class="save-status"></span>
+  </div>
+
+  <form class="settings-form" onsubmit="return false">
+    <div class="field">
+      <label>Port</label>
+      <input type="text" value="{{.Cfg.Server.Port}}" disabled style="color:#666;cursor:not-allowed">
+      <div class="hint">Changing the port requires a restart; edit dicode.yaml directly.</div>
+    </div>
+
+    <div class="field">
+      <label>Log level</label>
+      <select id="srv-log-level">
+        {{range $l := list "debug" "info" "warn" "error"}}
+        <option value="{{$l}}"{{if eq $l $.Cfg.LogLevel}} selected{{end}}>{{$l}}</option>
+        {{end}}
+      </select>
+    </div>
+
+    <div class="field">
+      <label>Secrets passphrase (server.secret)</label>
+      <input id="srv-secret" type="password"
+        placeholder="{{if .Cfg.Server.Secret}}••••••••••••••••{{else}}leave blank = no passphrase{{end}}">
+      <div class="hint">
+        Used to lock the /secrets page. Leave blank to keep the current value.
+      </div>
+    </div>
+
+    <button class="btn" onclick="saveServer()">💾 Save server settings</button>
+  </form>
+</div>
+
+<!-- ── Read-only sections ── -->
 <div class="card">
   <h2>Database</h2>
   <table>
@@ -48,24 +147,7 @@
 </div>
 
 <div class="card">
-  <h2>AI</h2>
-  <table>
-    <tbody>
-      <tr>
-        <th>Endpoint (base URL)</th>
-        <td>{{if .Cfg.AI.BaseURL}}{{.Cfg.AI.BaseURL}}{{else}}<span class="meta">https://api.openai.com/v1 (default)</span>{{end}}</td>
-      </tr>
-      <tr><th>Model</th><td>{{.Cfg.AI.Model}}</td></tr>
-      <tr><th>API key env</th><td>{{.Cfg.AI.APIKeyEnv}}</td></tr>
-    </tbody>
-  </table>
-  <p class="meta" style="margin-top:0.5rem">
-    Compatible with OpenAI, Claude (<code>base_url: https://api.anthropic.com/v1</code>), and Ollama (<code>base_url: http://localhost:11434/v1</code>).
-  </p>
-</div>
-
-<div class="card">
-  <h2>Secrets</h2>
+  <h2>Secrets providers</h2>
   <table>
     <thead><tr><th>Provider</th><th>Details</th></tr></thead>
     <tbody>
@@ -96,7 +178,54 @@
 </div>
 {{end}}
 
-<p style="margin-top:1rem">
-  <a class="btn" href="/api/config">View as JSON</a>
-</p>
+<p style="margin-top:1rem"><a class="btn" href="/api/config">View as JSON</a></p>
+
+<script>
+function showStatus(id, ok, msg) {
+  var el = document.getElementById(id);
+  el.textContent = ok ? '✓ ' + msg : '✗ ' + msg;
+  el.style.color  = ok ? '#a6e3a1' : '#f38ba8';
+  setTimeout(function() { el.textContent = ''; }, 4000);
+}
+
+function saveAI() {
+  var body = new URLSearchParams({
+    base_url:    document.getElementById('ai-base-url').value.trim(),
+    model:       document.getElementById('ai-model').value.trim(),
+    api_key_env: document.getElementById('ai-key-env').value.trim(),
+    api_key:     document.getElementById('ai-key-val').value,
+  });
+  fetch('/api/settings/ai', { method: 'POST', body: body })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      showStatus('ai-status', d.status === 'ok', d.status === 'ok' ? 'Saved' : (d.error || 'Error'));
+      if (d.status === 'ok') document.getElementById('ai-key-val').value = '';
+    })
+    .catch(function(e) { showStatus('ai-status', false, e.message); });
+}
+
+function clearAPIKey() {
+  fetch('/api/settings/ai', { method: 'POST', body: new URLSearchParams({ clear_api_key: '1' }) })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      showStatus('ai-status', d.status === 'ok', d.status === 'ok' ? 'Key cleared' : (d.error || 'Error'));
+      if (d.status === 'ok') setTimeout(function() { location.reload(); }, 1000);
+    });
+}
+
+function saveServer() {
+  var secret = document.getElementById('srv-secret').value;
+  var body = new URLSearchParams({
+    log_level: document.getElementById('srv-log-level').value,
+  });
+  if (secret !== '') body.append('secret', secret);
+  fetch('/api/settings/server', { method: 'POST', body: body })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      showStatus('srv-status', d.status === 'ok', d.status === 'ok' ? 'Saved' : (d.error || 'Error'));
+      if (d.status === 'ok') document.getElementById('srv-secret').value = '';
+    })
+    .catch(function(e) { showStatus('srv-status', false, e.message); });
+}
+</script>
 {{end}}
