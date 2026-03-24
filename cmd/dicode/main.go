@@ -4,9 +4,11 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/dicode/dicode/pkg/config"
 	"github.com/dicode/dicode/pkg/db"
@@ -19,6 +21,7 @@ import (
 	"github.com/dicode/dicode/pkg/source/local"
 	"github.com/dicode/dicode/pkg/tray"
 	"github.com/dicode/dicode/pkg/trigger"
+	"github.com/dicode/dicode/pkg/tui"
 	"github.com/dicode/dicode/pkg/webui"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -41,29 +44,14 @@ func main() {
 		case "version":
 			fmt.Printf("dicode %s\n", version)
 			return
+		case "tui":
+			runTUICmd(flag.Args()[1:])
+			return
 		}
 	}
 
-	// First-run onboarding: if no config exists, generate a default one.
-	if onboarding.Required(configPath) {
-		fmt.Println("Welcome to dicode! No config found — creating a local-only setup.")
-		home, _ := os.UserHomeDir()
-		content := onboarding.DefaultLocalConfig(home+"/dicode-tasks", home+"/.dicode")
-		if err := onboarding.WriteConfig(configPath, content); err != nil {
-			fmt.Fprintf(os.Stderr, "failed to write config: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Printf("Created %s\n", configPath)
-		if err := os.MkdirAll(home+"/dicode-tasks", 0755); err != nil {
-			fmt.Fprintf(os.Stderr, "failed to create tasks dir: %v\n", err)
-		}
-	}
-
-	cfg, err := config.Load(configPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to load config: %v\n", err)
-		os.Exit(1)
-	}
+	ensureConfig(configPath)
+	cfg := mustLoadConfig(configPath)
 
 	logBroadcaster := webui.NewLogBroadcaster()
 
@@ -82,6 +70,34 @@ func main() {
 	if err := run(ctx, cancel, cfg, configPath, logBroadcaster, logger); err != nil {
 		logger.Fatal("dicode exited with error", zap.Error(err))
 	}
+}
+
+// ensureConfig runs first-time onboarding if no config file exists yet.
+func ensureConfig(configPath string) {
+	if !onboarding.Required(configPath) {
+		return
+	}
+	fmt.Println("Welcome to dicode! No config found — creating a local-only setup.")
+	home, _ := os.UserHomeDir()
+	content := onboarding.DefaultLocalConfig(home+"/dicode-tasks", home+"/.dicode")
+	if err := onboarding.WriteConfig(configPath, content); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to write config: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("Created %s\n", configPath)
+	if err := os.MkdirAll(home+"/dicode-tasks", 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to create tasks dir: %v\n", err)
+	}
+}
+
+// mustLoadConfig loads the config file, printing an error and exiting on failure.
+func mustLoadConfig(configPath string) *config.Config {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to load config: %v\n", err)
+		os.Exit(1)
+	}
+	return cfg
 }
 
 func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, configPath string, logBroadcaster *webui.LogBroadcaster, log *zap.Logger) error {
@@ -216,6 +232,78 @@ func buildSources(cfg *config.Config, log *zap.Logger) ([]source.Source, error) 
 	return sources, nil
 }
 
+func runTUICmd(args []string) {
+	fs := flag.NewFlagSet("tui", flag.ExitOnError)
+	configPath := fs.String("config", "dicode.yaml", "path to config file")
+	host := fs.String("host", "localhost", "dicode server host")
+	portFlag := fs.Int("port", 0, "dicode server port (default: from config or 8080)")
+	_ = fs.Parse(args)
+
+	ensureConfig(*configPath)
+	cfg := mustLoadConfig(*configPath)
+
+	// Determine actual port.
+	serverPort := cfg.Server.Port
+	if serverPort == 0 {
+		serverPort = 8080
+	}
+	if *portFlag != 0 {
+		serverPort = *portFlag
+	}
+	cfg.Server.Port = serverPort
+
+	// Disable tray when running in TUI mode.
+	disabled := false
+	cfg.Server.Tray = &disabled
+
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	logBroadcaster := webui.NewLogBroadcaster()
+	// Write logs only to the broadcaster — not to stderr — so they appear in
+	// the TUI's Server Logs panel without corrupting the terminal display.
+	logger := buildBroadcastLogger(cfg.LogLevel, logBroadcaster)
+
+	// Start the full server stack in the background.
+	go func() {
+		if err := run(ctx, cancel, cfg, *configPath, logBroadcaster, logger); err != nil {
+			// Only log after TUI exits (stderr is safe again).
+			fmt.Fprintf(os.Stderr, "server error: %v\n", err)
+		}
+	}()
+
+	// Wait until the server is accepting requests (up to 10s).
+	if err := waitForServer(*host, serverPort); err != nil {
+		fmt.Fprintf(os.Stderr, "dicode server did not start: %v\n", err)
+		cancel()
+		os.Exit(1)
+	}
+
+	// Launch TUI — blocks until the user presses q.
+	if err := tui.Run(*host, serverPort); err != nil {
+		fmt.Fprintf(os.Stderr, "tui error: %v\n", err)
+	}
+
+	// Shut down the embedded server when TUI exits.
+	cancel()
+}
+
+func waitForServer(host string, port int) error {
+	url := fmt.Sprintf("http://%s:%d/api/tasks", host, port)
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(url) //nolint:gosec
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == 200 {
+				return nil
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return fmt.Errorf("timeout waiting for %s", url)
+}
+
 func runTaskCmd(args []string) {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "usage: dicode task <install|list> [args...]")
@@ -243,4 +331,16 @@ func buildLogger(level string, broadcast *webui.LogBroadcaster) (*zap.Logger, er
 		zapcore.NewCore(enc, zapcore.AddSync(broadcast), zapLevel),
 	)
 	return zap.New(core, zap.AddCaller()), nil
+}
+
+// buildBroadcastLogger builds a logger that writes only to the broadcaster,
+// not to stderr. Used in TUI mode to keep the terminal display clean.
+func buildBroadcastLogger(level string, broadcast *webui.LogBroadcaster) *zap.Logger {
+	zapLevel := zapcore.InfoLevel
+	if level == "debug" {
+		zapLevel = zapcore.DebugLevel
+	}
+	enc := zapcore.NewJSONEncoder(zap.NewProductionEncoderConfig())
+	core := zapcore.NewCore(enc, zapcore.AddSync(broadcast), zapLevel)
+	return zap.New(core, zap.AddCaller())
 }

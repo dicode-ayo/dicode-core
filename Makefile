@@ -5,7 +5,7 @@ VERSION ?= dev
 GO      := $(shell which go 2>/dev/null || echo $(HOME)/.local/share/mise/shims/go)
 GOFLAGS := -ldflags "-X main.version=$(VERSION)"
 
-.PHONY: build test test-verbose lint clean run tidy
+.PHONY: build test test-verbose lint clean run tui tidy
 
 ## build: compile the dicode binary into the project root
 build:
@@ -14,6 +14,10 @@ build:
 ## run: build and run dicode (Ctrl-C to stop)
 run: build
 	./$(BINARY)
+
+## tui: build and launch the terminal dashboard (connects to localhost:8080)
+tui: build
+	./$(BINARY) tui
 
 ## test: run all tests
 test:

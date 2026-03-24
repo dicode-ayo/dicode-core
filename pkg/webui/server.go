@@ -147,7 +147,6 @@ func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config
 func (s *Server) Handler() http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
-	r.Use(middleware.Logger)
 
 	// UI routes
 	r.Get("/", s.handleTaskList)
