@@ -99,6 +99,20 @@
     </div>
 
     <div class="field">
+      <label>System tray icon</label>
+      <select id="srv-tray">
+        {{if derefBool .Cfg.Server.Tray}}
+        <option value="true" selected>Enabled</option>
+        <option value="false">Disabled</option>
+        {{else}}
+        <option value="true">Enabled</option>
+        <option value="false" selected>Disabled</option>
+        {{end}}
+      </select>
+      <div class="hint">Takes effect on next restart.</div>
+    </div>
+
+    <div class="field">
       <label>Secrets passphrase (server.secret)</label>
       <input id="srv-secret" type="password"
         placeholder="{{if .Cfg.Server.Secret}}••••••••••••••••{{else}}leave blank = no passphrase{{end}}">
@@ -358,6 +372,7 @@ function saveServer() {
   var secret = document.getElementById('srv-secret').value;
   var body = new URLSearchParams({
     log_level: document.getElementById('srv-log-level').value,
+    tray:      document.getElementById('srv-tray').value,
   });
   if (secret !== '') body.append('secret', secret);
   fetch('/api/settings/server', { method: 'POST', body: body })

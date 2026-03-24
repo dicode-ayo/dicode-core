@@ -15,8 +15,9 @@ import (
 	jsruntime "github.com/dicode/dicode/pkg/runtime/js"
 	"github.com/dicode/dicode/pkg/secrets"
 	"github.com/dicode/dicode/pkg/source"
-	"github.com/dicode/dicode/pkg/source/local"
 	gitSource "github.com/dicode/dicode/pkg/source/git"
+	"github.com/dicode/dicode/pkg/source/local"
+	"github.com/dicode/dicode/pkg/tray"
 	"github.com/dicode/dicode/pkg/trigger"
 	"github.com/dicode/dicode/pkg/webui"
 	"go.uber.org/zap"
@@ -136,6 +137,15 @@ func run(ctx context.Context, cfg *config.Config, configPath string, logBroadcas
 	g.Go(func() error { return rec.Run(ctx) })
 	g.Go(func() error { return eng.Start(ctx) })
 	g.Go(func() error { return srv.Start(ctx) })
+
+	// 9. System tray (optional).
+	trayEnabled := cfg.Server.Tray == nil || *cfg.Server.Tray // nil = auto = enabled
+	if trayEnabled {
+		g.Go(func() error {
+			tray.Run(ctx, port, log)
+			return nil
+		})
+	}
 
 	return g.Wait()
 }
