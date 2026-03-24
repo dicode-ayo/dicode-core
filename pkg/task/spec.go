@@ -36,12 +36,14 @@ type ChainTrigger struct {
 }
 
 // TriggerConfig defines how a task is triggered.
-// Exactly one of Cron, Webhook, Manual, or Chain should be set.
+// Exactly one of Cron, Webhook, Manual, Chain, or Daemon should be set.
 type TriggerConfig struct {
 	Cron    string        `yaml:"cron,omitempty"`    // cron expression e.g. "0 9 * * *"
 	Webhook string        `yaml:"webhook,omitempty"` // HTTP path e.g. "/hooks/my-task"
 	Manual  bool          `yaml:"manual,omitempty"`  // only via explicit trigger
 	Chain   *ChainTrigger `yaml:"chain,omitempty"`   // fire when another task completes
+	Daemon  bool          `yaml:"daemon,omitempty"`  // start on app start, restart on exit
+	Restart string        `yaml:"restart,omitempty"` // daemon only: "always"(default)|"on-failure"|"never"
 }
 
 // Param defines a user-configurable input for a task.
@@ -103,8 +105,8 @@ func LoadDir(dir string) (*Spec, error) {
 	if spec.Runtime == "" {
 		spec.Runtime = RuntimeJS
 	}
-	// Docker tasks may run indefinitely; don't impose a default timeout.
-	if spec.Timeout == 0 && spec.Runtime != RuntimeDocker {
+	// Docker and daemon tasks may run indefinitely; don't impose a default timeout.
+	if spec.Timeout == 0 && spec.Runtime != RuntimeDocker && !spec.Trigger.Daemon {
 		spec.Timeout = 60 * time.Second
 	}
 
@@ -144,6 +146,15 @@ func (s *Spec) validate() error {
 	}
 	if s.Trigger.Manual {
 		triggers++
+	}
+	if s.Trigger.Daemon {
+		triggers++
+		switch s.Trigger.Restart {
+		case "", "always", "on-failure", "never":
+			// ok
+		default:
+			return fmt.Errorf("trigger.restart must be always, on-failure, or never")
+		}
 	}
 	if s.Trigger.Chain != nil {
 		triggers++

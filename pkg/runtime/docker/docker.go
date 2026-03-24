@@ -77,7 +77,14 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	}
 
 	// Build container config.
-	containerCfg := &container.Config{Image: cfg.Image}
+	// Labels let startup cleanup identify orphaned containers from a previous session.
+	containerCfg := &container.Config{
+		Image: cfg.Image,
+		Labels: map[string]string{
+			"dicode.run-id":  runID,
+			"dicode.task-id": spec.ID,
+		},
+	}
 	if len(cfg.Command) > 0 {
 		containerCfg.Cmd = cfg.Command
 	}
@@ -124,6 +131,16 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		return result, nil
 	}
 	containerID := created.ID
+	shortID := containerID
+	if len(shortID) > 12 {
+		shortID = shortID[:12]
+	}
+	rt.log.Info("container created",
+		zap.String("task", spec.ID),
+		zap.String("run", runID),
+		zap.String("container", shortID),
+		zap.String("image", cfg.Image),
+	)
 
 	defer func() {
 		_ = dc.ContainerRemove(context.Background(), containerID, container.RemoveOptions{Force: true})
@@ -134,6 +151,11 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		result.Error = fmt.Errorf("start container: %w", err)
 		return result, nil
 	}
+	rt.log.Info("container started",
+		zap.String("task", spec.ID),
+		zap.String("run", runID),
+		zap.String("container", shortID),
+	)
 
 	// ContainerWait is started early so we don't miss the exit event.
 	waitStatusCh, waitErrCh := dc.ContainerWait(context.Background(), containerID, container.WaitConditionNotRunning)
@@ -206,6 +228,13 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 			result.Error = fmt.Errorf("container exited with code %d", exitCode)
 		}
 	}
+	rt.log.Info("container finished",
+		zap.String("task", spec.ID),
+		zap.String("run", runID),
+		zap.String("container", shortID),
+		zap.Int64("exit_code", exitCode),
+		zap.String("status", finalStatus),
+	)
 	_ = rt.registry.FinishRun(context.Background(), runID, finalStatus)
 	return result, nil
 }

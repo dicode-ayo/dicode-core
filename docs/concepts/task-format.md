@@ -61,8 +61,8 @@ env:
 | `trigger.chain` | object | | Chain trigger (see below) |
 | `trigger.chain.from` | string | | Task ID to listen for |
 | `trigger.chain.on` | string | | `success` (default), `failure`, `always` |
-| `trigger.daemon` | bool | | `true` for long-running daemon tasks |
-| `trigger.daemon.restart` | string | | `always` (default), `never`, `on-failure` |
+| `trigger.daemon` | bool | | Start on app start, restart on exit |
+| `trigger.restart` | string | | daemon only: `always` (default), `on-failure`, `never` |
 | `fs` | list | | Filesystem access declarations |
 | `fs[].path` | string | | Absolute or `~`-prefixed path |
 | `fs[].permission` | string | | `r`, `w`, or `rw` |
@@ -97,14 +97,22 @@ trigger:
   manual: true
 ```
 
-**Daemon** — starts with dicode and runs indefinitely. Restarts automatically if the script exits.
+**Daemon** — starts automatically when dicode starts and restarts when it exits.
 ```yaml
 trigger:
   daemon: true
-  restart: always   # always (default) | never | on-failure
+  restart: always   # always (default) | on-failure | never
 ```
 
-Daemon tasks are long-lived processes — the script never returns. Use them to run persistent HTTP servers, background workers, or anything that should always be running. See [Web UI & API](./webui-api.md#webui-as-a-daemon-task) for the WebUI-as-task pattern.
+- **`always`** (default) — restarts whenever the task exits (success, failure). Does not restart if explicitly killed.
+- **`on-failure`** — only restarts on non-zero exit / script error. Stops if the task succeeds.
+- **`never`** — starts once on app start, never restarts.
+
+**Stale run detection:** if dicode is killed without a clean shutdown, any "running" runs from the previous session are automatically marked "cancelled" on the next startup, so the history stays accurate and daemon tasks start fresh.
+
+**Graceful shutdown:** when dicode stops, all daemon tasks receive a kill signal (SIGTERM for Docker tasks, context cancellation for JS tasks) before the process exits.
+
+A 2-second back-off is applied between restarts to prevent tight loops on immediately-failing tasks.
 
 **Chain** — fires when another task completes:
 ```yaml
