@@ -19,6 +19,7 @@ import (
 
 // RunOptions controls a single task execution.
 type RunOptions struct {
+	RunID           string // if non-empty, use this run ID instead of generating one
 	Params          map[string]string
 	Input           interface{}
 	ParentRunID     string
@@ -53,9 +54,16 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		opts.Params = map[string]string{}
 	}
 
-	runID, err := rt.registry.StartRun(ctx, spec.ID, opts.ParentRunID)
-	if err != nil {
-		return nil, fmt.Errorf("start run: %w", err)
+	var runID string
+	var err error
+	if opts.RunID != "" {
+		// Run record already created by the engine (async path).
+		runID = opts.RunID
+	} else {
+		runID, err = rt.registry.StartRun(ctx, spec.ID, opts.ParentRunID)
+		if err != nil {
+			return nil, fmt.Errorf("start run: %w", err)
+		}
 	}
 
 	sink := newLogSink(runID, rt.registry, ctx, rt.log)
@@ -64,7 +72,8 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 
 	defer func() {
 		result.Logs = sink.entries
-		if ferr := rt.registry.FinishRun(ctx, runID, status); ferr != nil {
+		// Use context.Background() so FinishRun succeeds even if ctx was cancelled.
+		if ferr := rt.registry.FinishRun(context.Background(), runID, status); ferr != nil {
 			rt.log.Error("finish run", zap.String("run", runID), zap.Error(ferr))
 		}
 	}()
@@ -93,7 +102,11 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 
 	execResult, execErr := execute(execCtx, spec, script, resolved, sink, rt.db, rt.log, opts)
 	if execErr != nil {
-		status = registry.StatusFailure
+		if ctx.Err() != nil {
+			status = registry.StatusCancelled
+		} else {
+			status = registry.StatusFailure
+		}
 		result.Error = execErr
 		return result, nil
 	}

@@ -11,8 +11,10 @@ import (
 	"sync"
 
 	"github.com/dicode/dicode/pkg/registry"
+	dockerruntime "github.com/dicode/dicode/pkg/runtime/docker"
 	jsruntime "github.com/dicode/dicode/pkg/runtime/js"
 	"github.com/dicode/dicode/pkg/task"
+	"github.com/google/uuid"
 	"github.com/robfig/cron/v3"
 	"go.uber.org/zap"
 )
@@ -20,25 +22,33 @@ import (
 // Engine coordinates all trigger types and fires task runs.
 type Engine struct {
 	registry *registry.Registry
-	runtime  *jsruntime.Runtime
+	jsRT     *jsruntime.Runtime
+	dockerRT *dockerruntime.Runtime
 	cron     *cron.Cron
 	log      *zap.Logger
 
 	mu          sync.Mutex
 	cronEntries map[string]cron.EntryID // taskID → cron entry
 	webhooks    map[string]string        // webhook path → taskID
+
+	runCancels sync.Map // runID → context.CancelFunc
 }
 
 // New creates a trigger Engine.
 func New(r *registry.Registry, rt *jsruntime.Runtime, log *zap.Logger) *Engine {
 	return &Engine{
 		registry:    r,
-		runtime:     rt,
+		jsRT:        rt,
 		cron:        cron.New(),
 		log:         log,
 		cronEntries: make(map[string]cron.EntryID),
 		webhooks:    make(map[string]string),
 	}
+}
+
+// SetDockerRuntime wires the Docker executor into the engine.
+func (e *Engine) SetDockerRuntime(rt *dockerruntime.Runtime) {
+	e.dockerRT = rt
 }
 
 // Start begins cron scheduling and runs until ctx is cancelled.
@@ -88,7 +98,7 @@ func (e *Engine) registerCron(spec *task.Spec) {
 		if !ok {
 			return
 		}
-		e.fire(context.Background(), s, jsruntime.RunOptions{})
+		e.fireAsync(context.Background(), s, jsruntime.RunOptions{})
 	})
 	if err != nil {
 		e.log.Error("invalid cron expression",
@@ -112,17 +122,24 @@ func (e *Engine) registerWebhook(spec *task.Spec) {
 }
 
 // FireManual triggers a task by ID with optional param overrides.
-// Returns the run ID.
+// Returns the run ID immediately (fire is asynchronous).
 func (e *Engine) FireManual(ctx context.Context, taskID string, params map[string]string) (string, error) {
 	spec, ok := e.registry.Get(taskID)
 	if !ok {
 		return "", fmt.Errorf("task %q not found", taskID)
 	}
-	result := e.fire(ctx, spec, jsruntime.RunOptions{Params: params})
-	if result == nil {
-		return "", fmt.Errorf("run failed to start")
+	return e.fireAsync(context.Background(), spec, jsruntime.RunOptions{Params: params})
+}
+
+// KillRun cancels a running task by its run ID.
+// Returns true if the run was found and cancelled, false if not found.
+func (e *Engine) KillRun(runID string) bool {
+	v, ok := e.runCancels.Load(runID)
+	if !ok {
+		return false
 	}
-	return result.RunID, result.Error
+	v.(context.CancelFunc)()
+	return true
 }
 
 // FireChain checks if any tasks declare a chain trigger from completedTaskID
@@ -137,7 +154,7 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runStatus strin
 		if on != "always" && on != runStatus {
 			continue
 		}
-		go e.fire(ctx, spec, jsruntime.RunOptions{Input: output})
+		go e.fireAsync(ctx, spec, jsruntime.RunOptions{Input: output}) //nolint:errcheck
 	}
 }
 
@@ -170,41 +187,93 @@ func (e *Engine) WebhookHandler() http.Handler {
 			}
 		}
 
-		result := e.fire(r.Context(), spec, jsruntime.RunOptions{Input: input})
-		if result == nil || result.Error != nil {
-			http.Error(w, "task failed", http.StatusInternalServerError)
+		runID, err := e.fireAsync(r.Context(), spec, jsruntime.RunOptions{Input: input})
+		if err != nil {
+			http.Error(w, "task failed to start", http.StatusInternalServerError)
 			return
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{"runId": result.RunID})
+		_ = json.NewEncoder(w).Encode(map[string]string{"runId": runID})
 	})
 }
 
-// fire executes a task and triggers any chain reactions on completion.
-func (e *Engine) fire(ctx context.Context, spec *task.Spec, opts jsruntime.RunOptions) *jsruntime.RunResult {
-	e.log.Info("firing task", zap.String("task", spec.ID))
-	result, err := e.runtime.Run(ctx, spec, opts)
-	if err != nil {
-		e.log.Error("run error", zap.String("task", spec.ID), zap.Error(err))
-		return nil
-	}
-	if result.Error != nil {
-		e.log.Warn("task failed", zap.String("task", spec.ID), zap.Error(result.Error))
+// fireAsync pre-creates the run record, starts execution in a goroutine,
+// and returns the run ID immediately. This allows callers to poll for status.
+func (e *Engine) fireAsync(ctx context.Context, spec *task.Spec, opts jsruntime.RunOptions) (string, error) {
+	runID := uuid.New().String()
+	opts.RunID = runID
+
+	if _, err := e.registry.StartRunWithID(context.Background(), runID, spec.ID, opts.ParentRunID); err != nil {
+		return "", fmt.Errorf("start run record: %w", err)
 	}
 
-	// Trigger chain reactions.
-	status := "success"
-	if result.Error != nil {
-		status = "failure"
-	}
-	var chainInput interface{}
-	if result.Output != nil {
-		chainInput = result.Output.Data
-	} else {
-		chainInput = result.ReturnValue
-	}
-	e.FireChain(ctx, spec.ID, status, chainInput)
+	runCtx, runCancel := context.WithCancel(context.Background())
+	e.runCancels.Store(runID, runCancel)
 
-	return result
+	go func() {
+		defer func() {
+			e.runCancels.Delete(runID)
+			runCancel()
+		}()
+		e.log.Info("firing task", zap.String("task", spec.ID), zap.String("run", runID))
+		e.dispatch(runCtx, spec, opts)
+	}()
+
+	return runID, nil
+}
+
+// dispatch routes a run to the appropriate runtime based on spec.Runtime.
+func (e *Engine) dispatch(ctx context.Context, spec *task.Spec, opts jsruntime.RunOptions) {
+	switch spec.Runtime {
+	case task.RuntimeDocker:
+		if e.dockerRT == nil {
+			e.log.Error("docker runtime not configured", zap.String("task", spec.ID))
+			_ = e.registry.FinishRun(context.Background(), opts.RunID, registry.StatusFailure)
+			return
+		}
+		dockerOpts := dockerruntime.RunOptions{
+			RunID:       opts.RunID,
+			ParentRunID: opts.ParentRunID,
+			Params:      opts.Params,
+		}
+		result, err := e.dockerRT.Run(ctx, spec, dockerOpts)
+		if err != nil {
+			e.log.Error("docker run error", zap.String("task", spec.ID), zap.Error(err))
+			return
+		}
+		status := "success"
+		if result.Error != nil {
+			if ctx.Err() != nil {
+				status = registry.StatusCancelled
+			} else {
+				status = registry.StatusFailure
+			}
+			e.log.Warn("docker task ended", zap.String("task", spec.ID), zap.String("status", status), zap.Error(result.Error))
+		}
+		e.FireChain(context.Background(), spec.ID, status, nil)
+
+	default: // RuntimeJS
+		result, err := e.jsRT.Run(ctx, spec, opts)
+		if err != nil {
+			e.log.Error("js run error", zap.String("task", spec.ID), zap.Error(err))
+			return
+		}
+		status := "success"
+		if result.Error != nil {
+			if ctx.Err() != nil {
+				status = registry.StatusCancelled
+			} else {
+				status = registry.StatusFailure
+			}
+			e.log.Warn("task failed", zap.String("task", spec.ID), zap.Error(result.Error))
+		}
+		var chainInput interface{}
+		if result.Output != nil {
+			chainInput = result.Output.Data
+		} else {
+			chainInput = result.ReturnValue
+		}
+		e.FireChain(context.Background(), spec.ID, status, chainInput)
+	}
 }

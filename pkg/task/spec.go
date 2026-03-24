@@ -13,8 +13,21 @@ import (
 type Runtime string
 
 const (
-	RuntimeJS Runtime = "js"
+	RuntimeJS     Runtime = "js"
+	RuntimeDocker Runtime = "docker"
 )
+
+// DockerConfig holds Docker-specific task configuration.
+type DockerConfig struct {
+	Image      string            `yaml:"image"`                 // e.g. "nginx:alpine"
+	Command    []string          `yaml:"command,omitempty"`     // overrides image CMD
+	Entrypoint []string          `yaml:"entrypoint,omitempty"`  // overrides image ENTRYPOINT
+	Volumes    []string          `yaml:"volumes,omitempty"`     // "host:container[:ro]"
+	Ports      []string          `yaml:"ports,omitempty"`       // "hostPort:containerPort[/proto]"
+	WorkingDir string            `yaml:"working_dir,omitempty"` // container working dir
+	EnvVars    map[string]string `yaml:"env_vars,omitempty"`    // extra env vars (literal)
+	PullPolicy string            `yaml:"pull_policy,omitempty"` // "always" | "missing" (default) | "never"
+}
 
 // ChainTrigger fires a task when another task completes.
 type ChainTrigger struct {
@@ -53,6 +66,7 @@ type Spec struct {
 	Version     string        `yaml:"version"`
 	Author      string        `yaml:"author,omitempty"`
 	Runtime     Runtime       `yaml:"runtime"`
+	Docker      *DockerConfig `yaml:"docker,omitempty"` // required when runtime == "docker"
 	Trigger     TriggerConfig `yaml:"trigger"`
 	Params      []Param       `yaml:"params,omitempty"`
 	Env         []string      `yaml:"env,omitempty"` // env var names required at runtime
@@ -86,23 +100,25 @@ func LoadDir(dir string) (*Spec, error) {
 	spec.TaskDir = dir
 	spec.ID = filepath.Base(dir)
 
-	if spec.Timeout == 0 {
-		spec.Timeout = 60 * time.Second
-	}
 	if spec.Runtime == "" {
 		spec.Runtime = RuntimeJS
+	}
+	// Docker tasks may run indefinitely; don't impose a default timeout.
+	if spec.Timeout == 0 && spec.Runtime != RuntimeDocker {
+		spec.Timeout = 60 * time.Second
 	}
 
 	return &spec, nil
 }
 
 // ScriptPath returns the path to the task script file.
+// Returns empty string for runtimes that don't use a script file (e.g. Docker).
 func (s *Spec) ScriptPath() string {
 	switch s.Runtime {
 	case RuntimeJS:
 		return filepath.Join(s.TaskDir, "task.js")
 	default:
-		return filepath.Join(s.TaskDir, "task.js")
+		return ""
 	}
 }
 
@@ -150,8 +166,21 @@ func (s *Spec) validate() error {
 	switch s.Runtime {
 	case RuntimeJS, "":
 		// ok
+	case RuntimeDocker:
+		if s.Docker == nil {
+			return fmt.Errorf("runtime docker requires a docker: section in task.yaml")
+		}
+		if s.Docker.Image == "" {
+			return fmt.Errorf("docker.image is required")
+		}
+		switch s.Docker.PullPolicy {
+		case "", "missing", "always", "never":
+			// ok
+		default:
+			return fmt.Errorf("docker.pull_policy must be always, missing, or never")
+		}
 	default:
-		return fmt.Errorf("unsupported runtime %q (supported: js)", s.Runtime)
+		return fmt.Errorf("unsupported runtime %q (supported: js, docker)", s.Runtime)
 	}
 	return nil
 }

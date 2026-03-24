@@ -53,7 +53,7 @@ env:
 |---|---|---|---|
 | `name` | string | ✅ | Human-readable task name |
 | `description` | string | | One-line description |
-| `runtime` | string | | `js` (default, only option currently) |
+| `runtime` | string | | `js` (default) or `docker` |
 | `trigger` | object | ✅ | Exactly one trigger must be set |
 | `trigger.cron` | string | | Standard cron expression (5 fields) |
 | `trigger.webhook` | string | | Webhook path, e.g. `/github-push` |
@@ -115,6 +115,69 @@ trigger:
 ```
 
 The completing task's return value is available as the `input` global.
+
+---
+
+## Docker runtime
+
+Set `runtime: docker` to run a container instead of a JS script. No `task.js` is needed.
+
+```yaml
+name: Nginx Dev Server
+description: Serves /tmp on port 8888. Kill from the run page when done.
+runtime: docker
+
+trigger:
+  manual: true
+
+docker:
+  image: nginx:alpine
+  pull_policy: missing       # always | missing (default) | never
+  ports:
+    - "8888:80"              # host:container
+  volumes:
+    - "/tmp:/usr/share/nginx/html:ro"
+```
+
+A more complete example:
+
+```yaml
+name: Data Pipeline
+runtime: docker
+
+trigger:
+  cron: "0 3 * * *"
+
+docker:
+  image: python:3.12-slim
+  command: ["python", "/scripts/pipeline.py"]
+  pull_policy: missing
+  volumes:
+    - "/data/input:/input:ro"
+    - "/data/output:/output"
+  working_dir: /scripts
+  env_vars:
+    BATCH_SIZE: "500"
+```
+
+### Docker fields
+
+| Field | Type | Description |
+|---|---|---|
+| `docker.image` | string | ✅ Docker image (e.g. `nginx:alpine`, `python:3.12-slim`) |
+| `docker.command` | list | Overrides image CMD |
+| `docker.entrypoint` | list | Overrides image ENTRYPOINT |
+| `docker.ports` | list | Port bindings — `"hostPort:containerPort"` |
+| `docker.volumes` | list | Volume mounts — `"host:container[:ro]"` |
+| `docker.working_dir` | string | Container working directory |
+| `docker.env_vars` | map | Literal environment variables injected into container |
+| `docker.pull_policy` | string | `missing` (default), `always`, `never` |
+
+**Live logs** — container stdout/stderr is streamed line-by-line to the run log as it runs.
+
+**Kill** — Docker tasks may run indefinitely. Use the **Kill** button on the run detail page (or `POST /api/runs/{runID}/kill`) to stop the container gracefully (SIGTERM + 10 s timeout).
+
+**No default timeout** — unlike JS tasks (60 s default), Docker tasks have no timeout unless you set `timeout:` explicitly.
 
 ---
 

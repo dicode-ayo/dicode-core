@@ -51,7 +51,8 @@ func DefaultLocalConfig(tasksDir, dataDir string) string {
 
 # ---------------------------------------------------------------------------
 # Task sources — where dicode looks for task folders.
-# Each folder under the path must contain task.yaml + task.js.
+# JS tasks: folder must contain task.yaml + task.js
+# Docker tasks: folder must contain task.yaml (no task.js needed)
 # ---------------------------------------------------------------------------
 sources:
   - type: local
@@ -125,6 +126,29 @@ ai:
 #     url: https://ntfy.sh
 #     topic: my-dicode-alerts
 #     # token_env: NTFY_TOKEN  # only needed for private topics
+
+# ---------------------------------------------------------------------------
+# Docker executor (optional)
+# ---------------------------------------------------------------------------
+# Tasks can use runtime: docker to run containers instead of JS scripts.
+# No extra config needed — dicode uses the Docker socket from the environment
+# (DOCKER_HOST or the default unix:///var/run/docker.sock).
+#
+# Example docker task (task.yaml in your tasks dir):
+#
+#   name: Nginx Dev Server
+#   runtime: docker
+#   trigger:
+#     manual: true
+#   docker:
+#     image: nginx:alpine
+#     pull_policy: missing   # always | missing | never
+#     ports:
+#       - "8888:80"
+#     volumes:
+#       - "/tmp:/usr/share/nginx/html:ro"
+#
+# Docker tasks stream logs live and can be killed from the run detail page.
 
 # ---------------------------------------------------------------------------
 # Logging

@@ -12,6 +12,7 @@ import (
 	"github.com/dicode/dicode/pkg/db"
 	"github.com/dicode/dicode/pkg/onboarding"
 	"github.com/dicode/dicode/pkg/registry"
+	dockerruntime "github.com/dicode/dicode/pkg/runtime/docker"
 	jsruntime "github.com/dicode/dicode/pkg/runtime/js"
 	"github.com/dicode/dicode/pkg/secrets"
 	"github.com/dicode/dicode/pkg/source"
@@ -107,6 +108,10 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 
 	// 5. Trigger engine.
 	eng := trigger.New(reg, rt, log)
+
+	// 5a. Docker runtime (wired into engine).
+	dockerRT := dockerruntime.New(reg, log)
+	eng.SetDockerRuntime(dockerRT)
 
 	// 6. Sources + reconciler.
 	sources, err := buildSources(cfg, log)

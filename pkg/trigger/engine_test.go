@@ -68,9 +68,18 @@ func TestEngine_FireManual(t *testing.T) {
 		t.Fatal("empty run ID")
 	}
 
-	run, err := e.reg.GetRun(context.Background(), runID)
-	if err != nil {
-		t.Fatalf("GetRun: %v", err)
+	// FireManual is async; poll until the run finishes (up to 5s).
+	var run *registry.Run
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		run, err = e.reg.GetRun(context.Background(), runID)
+		if err != nil {
+			t.Fatalf("GetRun: %v", err)
+		}
+		if run.Status != registry.StatusRunning {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 	if run.Status != registry.StatusSuccess {
 		t.Errorf("expected success, got %s", run.Status)
