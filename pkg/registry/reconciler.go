@@ -3,6 +3,7 @@ package registry
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/dicode/dicode/pkg/source"
 	"github.com/dicode/dicode/pkg/task"
@@ -19,42 +20,97 @@ type Reconciler struct {
 	OnRegister func(spec *task.Spec)
 	// OnUnregister is called after a task is removed.
 	OnUnregister func(id string)
+
+	// runtime state — set when Run is called
+	mu      sync.Mutex
+	merged  chan source.Event
+	cancels map[string]context.CancelFunc // sourceID → cancel fn
+	runCtx  context.Context
 }
 
 // NewReconciler creates a Reconciler for the given registry and sources.
 func NewReconciler(r *Registry, sources []source.Source, log *zap.Logger) *Reconciler {
-	return &Reconciler{registry: r, sources: sources, log: log}
+	return &Reconciler{
+		registry: r,
+		sources:  sources,
+		log:      log,
+		cancels:  make(map[string]context.CancelFunc),
+	}
 }
 
 // Run starts all sources and processes their events until ctx is cancelled.
 func (rc *Reconciler) Run(ctx context.Context) error {
+	rc.mu.Lock()
+	rc.runCtx = ctx
+	rc.merged = make(chan source.Event, 64)
+	rc.mu.Unlock()
+
 	if len(rc.sources) == 0 {
-		<-ctx.Done()
-		return nil
+		// Still need to run so dynamic AddSource works.
+		goto loop
 	}
 
-	// Fan-in: merge all source channels into one.
-	merged := make(chan source.Event, 64)
 	for _, src := range rc.sources {
-		ch, err := src.Start(ctx)
-		if err != nil {
+		if err := rc.startSource(src); err != nil {
 			return fmt.Errorf("start source %s: %w", src.ID(), err)
 		}
-		go func(c <-chan source.Event) {
-			for ev := range c {
-				merged <- ev
-			}
-		}(ch)
 	}
 
+loop:
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
-		case ev := <-merged:
+		case ev := <-rc.merged:
 			rc.handle(ev)
 		}
 	}
+}
+
+// AddSource adds a new source at runtime and starts it immediately.
+// Safe to call from any goroutine after Run has been called.
+func (rc *Reconciler) AddSource(src source.Source) error {
+	return rc.startSource(src)
+}
+
+// RemoveSource stops and removes a source by its ID.
+// Safe to call from any goroutine after Run has been called.
+func (rc *Reconciler) RemoveSource(id string) {
+	rc.mu.Lock()
+	cancel, ok := rc.cancels[id]
+	delete(rc.cancels, id)
+	rc.mu.Unlock()
+	if ok {
+		cancel()
+	}
+}
+
+// startSource begins watching a source and forwarding its events to merged.
+func (rc *Reconciler) startSource(src source.Source) error {
+	rc.mu.Lock()
+	ctx := rc.runCtx
+	rc.mu.Unlock()
+	if ctx == nil {
+		return fmt.Errorf("reconciler not yet running")
+	}
+
+	srcCtx, cancel := context.WithCancel(ctx)
+	ch, err := src.Start(srcCtx)
+	if err != nil {
+		cancel()
+		return err
+	}
+
+	rc.mu.Lock()
+	rc.cancels[src.ID()] = cancel
+	rc.mu.Unlock()
+
+	go func() {
+		for ev := range ch {
+			rc.merged <- ev
+		}
+	}()
+	return nil
 }
 
 func (rc *Reconciler) handle(ev source.Event) {

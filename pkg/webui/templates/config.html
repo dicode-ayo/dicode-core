@@ -124,26 +124,76 @@
 </div>
 
 <div class="card">
-  <h2>Sources ({{len .Cfg.Sources}})</h2>
+  <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:0.75rem">
+    <h2 style="margin:0">Sources ({{len .Cfg.Sources}})</h2>
+    <span id="src-status" class="save-status"></span>
+  </div>
+
   {{if .Cfg.Sources}}
-  <table>
-    <thead><tr><th>Type</th><th>Path / URL</th><th>Details</th></tr></thead>
+  <table id="sources-table" style="margin-bottom:1rem">
+    <thead><tr><th>Type</th><th>Path / URL</th><th>Details</th><th></th></tr></thead>
     <tbody>
-    {{range .Cfg.Sources}}
-    <tr>
-      <td><span class="badge badge-manual">{{.Type}}</span></td>
-      <td>{{if .Path}}{{.Path}}{{else}}{{.URL}}{{end}}</td>
+    {{range $i, $s := .Cfg.Sources}}
+    <tr id="src-row-{{$i}}">
+      <td><span class="badge badge-manual">{{$s.Type}}</span></td>
+      <td style="word-break:break-all">{{if $s.Path}}{{$s.Path}}{{else}}{{$s.URL}}{{end}}</td>
       <td class="meta">
-        {{if eq (string .Type) "git"}}branch: {{.Branch}} · poll: {{.PollInterval}}{{end}}
-        {{if eq (string .Type) "local"}}watch: {{.Watch}}{{end}}
+        {{if eq (string $s.Type) "git"}}branch: {{$s.Branch}} · poll: {{$s.PollInterval}}{{end}}
+        {{if eq (string $s.Type) "local"}}watch: {{$s.Watch}}{{end}}
       </td>
+      <td><button class="btn btn-sm" style="background:#c0392b" onclick="removeSource({{$i}})">Remove</button></td>
     </tr>
     {{end}}
     </tbody>
   </table>
   {{else}}
-  <p class="meta">No sources configured.</p>
+  <p class="meta" id="no-sources-msg">No sources configured.</p>
   {{end}}
+
+  <!-- Add Source form -->
+  <details style="margin-top:0.5rem">
+    <summary style="cursor:pointer;font-size:0.85rem;color:#7c3aed;user-select:none">+ Add source</summary>
+    <form class="settings-form" style="margin-top:0.75rem" onsubmit="return false">
+      <div class="field">
+        <label>Type</label>
+        <select id="new-src-type" onchange="toggleSrcFields()">
+          <option value="local">local</option>
+          <option value="git">git</option>
+        </select>
+      </div>
+
+      <div id="src-local-fields">
+        <div class="field">
+          <label>Directory path</label>
+          <input id="new-src-path" type="text" placeholder="/home/you/tasks">
+        </div>
+      </div>
+
+      <div id="src-git-fields" style="display:none">
+        <div class="field">
+          <label>Repository URL</label>
+          <input id="new-src-url" type="text" placeholder="https://github.com/you/tasks.git">
+        </div>
+        <div class="field">
+          <label>Auth token env var (optional)</label>
+          <input id="new-src-token-env" type="text" placeholder="GITHUB_TOKEN">
+          <div class="hint">Name of the env var holding a personal access token (HTTP auth). Leave blank for public repos.</div>
+        </div>
+        <div class="field">
+          <label>Branch</label>
+          <div style="display:flex;gap:0.5rem;align-items:center">
+            <select id="new-src-branch" style="flex:1">
+              <option value="main">main</option>
+            </select>
+            <button class="btn btn-sm" type="button" onclick="fetchBranches()" id="fetch-branches-btn">Fetch</button>
+          </div>
+          <div class="hint" id="fetch-branches-hint">Click Fetch to load available branches from the remote.</div>
+        </div>
+      </div>
+
+      <button class="btn" onclick="addSource()">Add source</button>
+    </form>
+  </details>
 </div>
 
 <div class="card">
@@ -178,9 +228,100 @@
 </div>
 {{end}}
 
-<p style="margin-top:1rem"><a class="btn" href="/api/config">View as JSON</a></p>
+<p style="margin-top:1rem">
+  <a class="btn" href="/config/code" style="background:#7c3aed">Edit as code</a>
+</p>
 
 <script>
+function toggleSrcFields() {
+  var t = document.getElementById('new-src-type').value;
+  document.getElementById('src-local-fields').style.display = t === 'local' ? '' : 'none';
+  document.getElementById('src-git-fields').style.display  = t === 'git'   ? '' : 'none';
+}
+
+function fetchBranches() {
+  var url      = document.getElementById('new-src-url').value.trim();
+  var tokenEnv = document.getElementById('new-src-token-env').value.trim();
+  var btn      = document.getElementById('fetch-branches-btn');
+  var hint     = document.getElementById('fetch-branches-hint');
+  if (!url) { hint.textContent = 'Enter a repository URL first.'; hint.style.color = '#f38ba8'; return; }
+  btn.disabled = true;
+  btn.textContent = '…';
+  hint.textContent = 'Fetching…';
+  hint.style.color = '#888';
+  var qs = '?url=' + encodeURIComponent(url) + (tokenEnv ? '&token_env=' + encodeURIComponent(tokenEnv) : '');
+  fetch('/api/settings/sources/git/branches' + qs)
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      btn.disabled = false;
+      btn.textContent = 'Fetch';
+      if (Array.isArray(data) && data.length > 0) {
+        var sel = document.getElementById('new-src-branch');
+        var prev = sel.value;
+        sel.innerHTML = '';
+        data.forEach(function(b) {
+          var opt = document.createElement('option');
+          opt.value = b; opt.textContent = b;
+          if (b === prev || b === 'main' || b === 'master') opt.selected = true;
+          sel.appendChild(opt);
+        });
+        hint.textContent = data.length + ' branch' + (data.length > 1 ? 'es' : '') + ' loaded.';
+        hint.style.color = '#a6e3a1';
+      } else if (data.error) {
+        hint.textContent = data.error;
+        hint.style.color = '#f38ba8';
+      } else {
+        hint.textContent = 'No branches found.';
+        hint.style.color = '#888';
+      }
+    })
+    .catch(function(e) {
+      btn.disabled = false;
+      btn.textContent = 'Fetch';
+      hint.textContent = e.message;
+      hint.style.color = '#f38ba8';
+    });
+}
+
+function addSource() {
+  var type = document.getElementById('new-src-type').value;
+  var body = new URLSearchParams({ type: type });
+  if (type === 'local') {
+    body.append('path', document.getElementById('new-src-path').value.trim());
+  } else {
+    body.append('url',       document.getElementById('new-src-url').value.trim());
+    body.append('branch',    document.getElementById('new-src-branch').value);
+    body.append('auth_type', 'token');
+    body.append('token_env', document.getElementById('new-src-token-env').value.trim());
+  }
+  fetch('/api/settings/sources', { method: 'POST', body: body })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d.status === 'ok') {
+        showStatus('src-status', true, 'Added — reload to see updated list');
+      } else {
+        showStatus('src-status', false, d.error || 'Error');
+      }
+    })
+    .catch(function(e) { showStatus('src-status', false, e.message); });
+}
+
+function removeSource(idx) {
+  if (!confirm('Remove this source? Tasks from it will stay registered until they are unregistered on next sync.')) return;
+  fetch('/api/settings/sources/' + idx, { method: 'DELETE' })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d.status === 'ok') {
+        var row = document.getElementById('src-row-' + idx);
+        if (row) row.remove();
+        showStatus('src-status', true, 'Source removed');
+      } else {
+        showStatus('src-status', false, d.error || 'Error');
+      }
+    })
+    .catch(function(e) { showStatus('src-status', false, e.message); });
+}
+
 function showStatus(id, ok, msg) {
   var el = document.getElementById(id);
   el.textContent = ok ? '✓ ' + msg : '✗ ' + msg;

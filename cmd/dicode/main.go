@@ -16,6 +16,7 @@ import (
 	"github.com/dicode/dicode/pkg/secrets"
 	"github.com/dicode/dicode/pkg/source"
 	"github.com/dicode/dicode/pkg/source/local"
+	gitSource "github.com/dicode/dicode/pkg/source/git"
 	"github.com/dicode/dicode/pkg/trigger"
 	"github.com/dicode/dicode/pkg/webui"
 	"go.uber.org/zap"
@@ -120,7 +121,12 @@ func run(ctx context.Context, cfg *config.Config, configPath string, logBroadcas
 	if port == 0 {
 		port = 8080
 	}
-	srv, err := webui.New(port, reg, eng, cfg, configPath, localSecrets, logBroadcaster, log)
+	dataDir := cfg.DataDir
+	if dataDir == "" {
+		home, _ := os.UserHomeDir()
+		dataDir = home + "/.dicode"
+	}
+	srv, err := webui.New(port, reg, eng, cfg, configPath, localSecrets, rec, dataDir, logBroadcaster, log)
 	if err != nil {
 		return fmt.Errorf("build webui: %w", err)
 	}
@@ -173,6 +179,11 @@ func buildSecretsChain(cfg *config.Config, database db.DB, log *zap.Logger) (sec
 }
 
 func buildSources(cfg *config.Config, log *zap.Logger) ([]source.Source, error) {
+	dataDir := cfg.DataDir
+	if dataDir == "" {
+		home, _ := os.UserHomeDir()
+		dataDir = home + "/.dicode"
+	}
 	var sources []source.Source
 	for _, sc := range cfg.Sources {
 		switch sc.Type {
@@ -183,7 +194,11 @@ func buildSources(cfg *config.Config, log *zap.Logger) ([]source.Source, error) 
 			}
 			sources = append(sources, s)
 		case config.SourceTypeGit:
-			log.Warn("git source not yet implemented, skipping", zap.String("url", sc.URL))
+			gs, err := gitSource.New(dataDir, sc.URL, sc.Branch, sc.PollInterval, sc.Auth.TokenEnv, sc.Auth.SSHKey, log)
+			if err != nil {
+				return nil, fmt.Errorf("git source %q: %w", sc.URL, err)
+			}
+			sources = append(sources, gs)
 		default:
 			return nil, fmt.Errorf("unknown source type %q", sc.Type)
 		}

@@ -23,6 +23,8 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/dicode/dicode/pkg/config"
 	"github.com/dicode/dicode/pkg/registry"
+	"github.com/dicode/dicode/pkg/source/local"
+	gitSource "github.com/dicode/dicode/pkg/source/git"
 	"github.com/dicode/dicode/pkg/task"
 	"github.com/dicode/dicode/pkg/trigger"
 	"go.uber.org/zap"
@@ -80,8 +82,10 @@ type Server struct {
 	registry    *registry.Registry
 	engine      *trigger.Engine
 	cfg         *config.Config
-	cfgPath     string         // path to dicode.yaml; empty in tests
-	secretsMgr  SecretsManager // nil if local provider not configured
+	cfgPath     string              // path to dicode.yaml; empty in tests
+	secretsMgr  SecretsManager      // nil if local provider not configured
+	reconciler  *registry.Reconciler // nil if not wired
+	dataDir     string              // ~/.dicode or cfg.DataDir
 	sessions    *sessionStore
 	logs        *LogBroadcaster
 	log         *zap.Logger
@@ -93,7 +97,8 @@ type Server struct {
 
 // New creates a Server. cfgPath is the path to dicode.yaml used to persist
 // settings changes; pass "" in tests or when persistence is not needed.
-func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config, cfgPath string, secretsMgr SecretsManager, logs *LogBroadcaster, log *zap.Logger) (*Server, error) {
+// rec and dataDir enable live source management; pass nil/"" in tests.
+func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config, cfgPath string, secretsMgr SecretsManager, rec *registry.Reconciler, dataDir string, logs *LogBroadcaster, log *zap.Logger) (*Server, error) {
 	funcMap := template.FuncMap{
 		"triggerLabel": triggerLabel,
 		"fmtTime":      fmtTime,
@@ -125,6 +130,8 @@ func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config
 		cfg:         cfg,
 		cfgPath:     cfgPath,
 		secretsMgr:  secretsMgr,
+		reconciler:  rec,
+		dataDir:     dataDir,
 		sessions:    newSessionStore(),
 		logs:        logs,
 		log:         log,
@@ -145,6 +152,7 @@ func (s *Server) Handler() http.Handler {
 	r.Get("/tasks/{id}", s.handleTaskDetail)
 	r.Get("/runs/{runID}", s.handleRunDetail)
 	r.Get("/config", s.handleConfig)
+	r.Get("/config/code", s.handleConfigCode)
 
 	// HTMX partial row updates
 	r.Get("/ui/tasks/rows", s.uiTaskRows)
@@ -166,9 +174,14 @@ func (s *Server) Handler() http.Handler {
 	// Settings (persist to dicode.yaml)
 	r.Post("/api/settings/ai", s.apiSaveAISettings)
 	r.Post("/api/settings/server", s.apiSaveServerSettings)
+	r.Post("/api/settings/sources", s.apiAddSource)
+	r.Delete("/api/settings/sources/{idx}", s.apiRemoveSource)
+	r.Get("/api/settings/sources/git/branches", s.apiListGitBranches)
 
 	// REST API
 	r.Get("/api/config", s.apiGetConfig)
+	r.Get("/api/config/raw", s.apiGetConfigRaw)
+	r.Post("/api/config/raw", s.apiSaveConfigRaw)
 	r.Get("/api/tasks", s.apiListTasks)
 	r.Get("/api/tasks/{id}", s.apiGetTask)
 	r.Post("/api/tasks/{id}/run", s.apiRunTask)
@@ -256,6 +269,58 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		"Title": "Config",
 		"Cfg":   s.cfg,
 	})
+}
+
+func (s *Server) handleConfigCode(w http.ResponseWriter, r *http.Request) {
+	s.render(w, "config_code.html", map[string]any{
+		"Title": "Edit config",
+	})
+}
+
+// apiGetConfigRaw returns the raw content of dicode.yaml.
+func (s *Server) apiGetConfigRaw(w http.ResponseWriter, r *http.Request) {
+	if s.cfgPath == "" {
+		jsonOK(w, map[string]string{"content": "# config file path not set"})
+		return
+	}
+	b, err := os.ReadFile(s.cfgPath)
+	if err != nil {
+		jsonErr(w, "read config: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, map[string]string{"content": string(b)})
+}
+
+// apiSaveConfigRaw validates and writes the raw config back to dicode.yaml,
+// then reloads it into memory.
+func (s *Server) apiSaveConfigRaw(w http.ResponseWriter, r *http.Request) {
+	if s.cfgPath == "" {
+		jsonErr(w, "config file path not set", http.StatusBadRequest)
+		return
+	}
+	content := r.FormValue("content")
+
+	// Validate: must parse as valid YAML mapping.
+	var check map[string]any
+	if err := yaml.Unmarshal([]byte(content), &check); err != nil {
+		jsonErr(w, "invalid YAML: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if err := os.WriteFile(s.cfgPath, []byte(content), 0644); err != nil {
+		jsonErr(w, "write config: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Hot-reload config into memory (best-effort; server restart needed for port changes).
+	if newCfg, err := config.Load(s.cfgPath); err == nil {
+		s.cfg = newCfg
+	} else {
+		s.log.Warn("config reload after raw save failed", zap.Error(err))
+	}
+
+	s.log.Info("config saved via code editor")
+	jsonOK(w, map[string]string{"status": "ok"})
 }
 
 // --- HTMX partial handlers ---
@@ -737,6 +802,129 @@ func (s *Server) apiSaveServerSettings(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]string{"status": "ok"})
 }
 
+// apiAddSource adds a new source (local or git) at runtime and persists it.
+func (s *Server) apiAddSource(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		jsonErr(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	srcType := r.FormValue("type")
+	var sc config.SourceConfig
+	switch config.SourceType(srcType) {
+	case config.SourceTypeLocal:
+		path := strings.TrimSpace(r.FormValue("path"))
+		if path == "" {
+			jsonErr(w, "path is required for local source", http.StatusBadRequest)
+			return
+		}
+		sc = config.SourceConfig{Type: config.SourceTypeLocal, Path: path, Watch: true}
+	case config.SourceTypeGit:
+		url := strings.TrimSpace(r.FormValue("url"))
+		if url == "" {
+			jsonErr(w, "url is required for git source", http.StatusBadRequest)
+			return
+		}
+		sc = config.SourceConfig{
+			Type:         config.SourceTypeGit,
+			URL:          url,
+			Branch:       strings.TrimSpace(r.FormValue("branch")),
+			Auth: config.SourceAuth{
+				Type:     r.FormValue("auth_type"),
+				TokenEnv: r.FormValue("token_env"),
+			},
+		}
+		if sc.Branch == "" {
+			sc.Branch = "main"
+		}
+		sc.PollInterval = 30 * 1e9 // 30s in nanoseconds as time.Duration
+	default:
+		jsonErr(w, "type must be 'local' or 'git'", http.StatusBadRequest)
+		return
+	}
+
+	// Build and start the source.
+	var src interface {
+		ID() string
+	}
+	if s.reconciler != nil {
+		switch sc.Type {
+		case config.SourceTypeLocal:
+			ls, err := local.New(sc.Path, sc.Path, s.log)
+			if err != nil {
+				jsonErr(w, "create local source: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if err := s.reconciler.AddSource(ls); err != nil {
+				jsonErr(w, "start source: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			src = ls
+		case config.SourceTypeGit:
+			gs, err := gitSource.New(s.dataDir, sc.URL, sc.Branch, sc.PollInterval, sc.Auth.TokenEnv, sc.Auth.SSHKey, s.log)
+			if err != nil {
+				jsonErr(w, "create git source: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if err := s.reconciler.AddSource(gs); err != nil {
+				jsonErr(w, "start source: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			src = gs
+		}
+	}
+	_ = src
+
+	// Persist to config.
+	s.cfg.Sources = append(s.cfg.Sources, sc)
+	if err := s.persistConfig(); err != nil {
+		s.log.Warn("source persist failed", zap.Error(err))
+	}
+	s.log.Info("source added", zap.String("type", srcType))
+	jsonOK(w, map[string]string{"status": "ok"})
+}
+
+// apiListGitBranches lists branches for a remote git URL.
+// GET /api/settings/sources/git/branches?url=...&token_env=...
+func (s *Server) apiListGitBranches(w http.ResponseWriter, r *http.Request) {
+	repoURL := r.URL.Query().Get("url")
+	if repoURL == "" {
+		jsonErr(w, "url is required", http.StatusBadRequest)
+		return
+	}
+	tokenEnv := r.URL.Query().Get("token_env")
+	branches, err := gitSource.ListBranches(r.Context(), repoURL, tokenEnv)
+	if err != nil {
+		jsonErr(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	jsonOK(w, branches)
+}
+
+// apiRemoveSource removes a source by its index in cfg.Sources and stops it.
+func (s *Server) apiRemoveSource(w http.ResponseWriter, r *http.Request) {
+	idxStr := chi.URLParam(r, "idx")
+	idx := 0
+	if _, err := fmt.Sscanf(idxStr, "%d", &idx); err != nil || idx < 0 || idx >= len(s.cfg.Sources) {
+		jsonErr(w, "invalid index", http.StatusBadRequest)
+		return
+	}
+	sc := s.cfg.Sources[idx]
+	if s.reconciler != nil {
+		switch sc.Type {
+		case config.SourceTypeLocal:
+			s.reconciler.RemoveSource(sc.Path)
+		case config.SourceTypeGit:
+			s.reconciler.RemoveSource(sc.URL)
+		}
+	}
+	s.cfg.Sources = append(s.cfg.Sources[:idx], s.cfg.Sources[idx+1:]...)
+	if err := s.persistConfig(); err != nil {
+		s.log.Warn("source persist failed", zap.Error(err))
+	}
+	s.log.Info("source removed", zap.Int("idx", idx))
+	jsonOK(w, map[string]string{"status": "ok"})
+}
+
 // persistConfig writes the current in-memory config back to dicode.yaml.
 // It reads the existing file as a generic map (to preserve unknown keys),
 // merges the changed sections, and writes back.
@@ -780,6 +968,35 @@ func (s *Server) persistConfig() error {
 	serverMap["port"] = s.cfg.Server.Port
 	serverMap["secret"] = s.cfg.Server.Secret
 	doc["server"] = serverMap
+
+	// Serialize sources list.
+	if len(s.cfg.Sources) > 0 {
+		var srcs []map[string]any
+		for _, sc := range s.cfg.Sources {
+			m := map[string]any{"type": string(sc.Type)}
+			switch sc.Type {
+			case config.SourceTypeLocal:
+				m["path"] = sc.Path
+			case config.SourceTypeGit:
+				m["url"] = sc.URL
+				if sc.Branch != "" {
+					m["branch"] = sc.Branch
+				}
+				if sc.PollInterval > 0 {
+					m["poll_interval"] = sc.PollInterval.String()
+				}
+				if sc.Auth.TokenEnv != "" {
+					m["auth"] = map[string]any{"type": "token", "token_env": sc.Auth.TokenEnv}
+				} else if sc.Auth.SSHKey != "" {
+					m["auth"] = map[string]any{"type": "ssh", "ssh_key": sc.Auth.SSHKey}
+				}
+			}
+			srcs = append(srcs, m)
+		}
+		doc["sources"] = srcs
+	} else {
+		doc["sources"] = []any{}
+	}
 
 	out, err := yaml.Marshal(doc)
 	if err != nil {
