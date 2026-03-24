@@ -25,22 +25,30 @@ jobs:
     name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runs-on }}
     strategy:
       matrix:
         include:
           - goos: linux
             goarch: amd64
+            runs-on: ubuntu-latest
+            cgo: 0
           - goos: linux
             goarch: arm64
+            runs-on: ubuntu-latest
+            cgo: 0
           - goos: darwin
             goarch: amd64
+            runs-on: macos-13
+            cgo: 1
           - goos: darwin
             goarch: arm64
+            runs-on: macos-latest
+            cgo: 1
           - goos: windows
             goarch: amd64
-          - goos: windows
-            goarch: arm64
+            runs-on: windows-latest
+            cgo: 1
 
     steps:
       - uses: actions/checkout@v4
@@ -51,26 +59,29 @@ jobs:
           cache: true
 
       - name: Build binary
+        shell: bash
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: 0
+          CGO_ENABLED: ${{ matrix.cgo }}
         run: |
           VERSION=${{ needs.release-please.outputs.tag_name }}
           BINARY_NAME=dicode
           if [ "$GOOS" = "windows" ]; then
             BINARY_NAME=dicode.exe
           fi
+          mkdir -p dist
           go build \
             -ldflags "-X main.version=${VERSION} -s -w" \
             -o "dist/${BINARY_NAME}" \
             ./cmd/dicode/
 
       - name: Create archive
+        shell: bash
         run: |
           ARCHIVE_NAME="dicode-${{ needs.release-please.outputs.tag_name }}-${{ matrix.goos }}-${{ matrix.goarch }}"
           if [ "${{ matrix.goos }}" = "windows" ]; then
-            zip -j "dist/${ARCHIVE_NAME}.zip" dist/dicode.exe
+            cd dist && zip "${ARCHIVE_NAME}.zip" dicode.exe && cd ..
             echo "ASSET_PATH=dist/${ARCHIVE_NAME}.zip" >> $GITHUB_ENV
           else
             tar -czf "dist/${ARCHIVE_NAME}.tar.gz" -C dist dicode
@@ -78,6 +89,7 @@ jobs:
           fi
 
       - name: Upload release asset
+        shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
