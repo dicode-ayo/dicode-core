@@ -18,8 +18,9 @@ import (
 )
 
 // Run starts the system-tray icon. It blocks until ctx is cancelled.
+// cancel must be the CancelFunc for ctx so that clicking Quit shuts the whole app down.
 // port is the HTTP port dicode is listening on (used to build the dashboard URL).
-func Run(ctx context.Context, port int, log *zap.Logger) {
+func Run(ctx context.Context, cancel context.CancelFunc, port int, log *zap.Logger) {
 	url := fmt.Sprintf("http://localhost:%d", port)
 
 	onReady := func() {
@@ -44,6 +45,7 @@ func Run(ctx context.Context, port int, log *zap.Logger) {
 				case <-mOpen.ClickedCh:
 					openBrowser(url, log)
 				case <-mQuit.ClickedCh:
+					cancel() // cancels the root context → shuts down server + all goroutines
 					systray.Quit()
 				case <-ctx.Done():
 					return

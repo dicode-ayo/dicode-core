@@ -79,12 +79,12 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	if err := run(ctx, cfg, configPath, logBroadcaster, logger); err != nil {
+	if err := run(ctx, cancel, cfg, configPath, logBroadcaster, logger); err != nil {
 		logger.Fatal("dicode exited with error", zap.Error(err))
 	}
 }
 
-func run(ctx context.Context, cfg *config.Config, configPath string, logBroadcaster *webui.LogBroadcaster, log *zap.Logger) error {
+func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, configPath string, logBroadcaster *webui.LogBroadcaster, log *zap.Logger) error {
 	// 1. Open database.
 	database, err := db.Open(db.Config{
 		Type:   cfg.Database.Type,
@@ -142,7 +142,7 @@ func run(ctx context.Context, cfg *config.Config, configPath string, logBroadcas
 	trayEnabled := cfg.Server.Tray == nil || *cfg.Server.Tray // nil = auto = enabled
 	if trayEnabled {
 		g.Go(func() error {
-			tray.Run(ctx, port, log)
+			tray.Run(ctx, cancel, port, log)
 			return nil
 		})
 	}
