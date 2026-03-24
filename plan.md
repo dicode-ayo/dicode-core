@@ -46,18 +46,17 @@ notifications:
 **2. OS desktop notifications** (local, via libnotify/macOS NSUserNotification)
 Fires automatically alongside mobile push when dicode is running locally. No config needed — uses OS native notification system (`pkg/notify/desktop.go`).
 
-**3. System tray icon** (`pkg/tray/`)
-A tray icon (using `systray` library — MIT licensed) that:
-- Shows overall status: green (all ok) / yellow (running) / red (last run failed)
-- Left-click → open WebUI in browser
-- Right-click menu:
-  - Open Web UI
-  - Run task > [task list submenu]
-  - Last run status
-  - Pause/Resume reconciler
-  - Quit
+**3. System tray icon** (`pkg/tray/`) ✅ Implemented
+A tray icon using `fyne.io/systray` (MIT licensed, pure Go — no CGo/GTK):
+- Linux: StatusNotifierItem via DBus (`github.com/godbus/dbus/v5`)
+- macOS: native NSStatusItem
+- Windows: notification area
 
-Tray icon is optional — enabled via `--tray` flag or `server.tray: true` in config. Runs as a goroutine alongside the HTTP server. Only compiled on platforms where systray is supported (Linux/macOS/Windows).
+Current menu:
+- Open Dashboard → opens browser at `http://localhost:<port>`
+- Quit dicode → cancels root context, stops server and all goroutines
+
+Tray icon is optional — controlled via `server.tray: true/false` in config (default true). Runs as a goroutine via `errgroup`. Quit propagates shutdown via context cancel to all components.
 
 **Task-level** (`notify` global in JS):
 ```javascript
@@ -412,8 +411,12 @@ dicode task install github.com/someone/tasks/morning-email-check --param slack_c
 ```
 Copies task into local tasks repo, commits, pushes. Reconciler picks it up. Future: searchable community registry index.
 
-### 8. AI Generator
-User types a prompt in WebUI → AI (Claude) generates `task.yaml` + `task.js` → syntax validated → shown as diff → user confirms → committed to tasks repo → reconciler picks it up.
+### 8. AI Generator ✅ Implemented
+User types a prompt in WebUI → AI generates `task.yaml` + `task.js` → syntax validated → saved to local source dir → reconciler picks it up instantly (~100ms).
+
+Uses the **OpenAI-compatible Chat Completions API** (`pkg/webui/ai.go`). Any provider works: OpenAI, Anthropic Claude (via `base_url: https://api.anthropic.com/v1`), Ollama, or any other OpenAI-compatible endpoint. Configured via `ai.model`, `ai.api_key_env`, and optional `ai.base_url` in `dicode.yaml`.
+
+**In-editor AI chat**: Monaco editor has a built-in AI panel. Streams responses via SSE. Supports a `write_file` tool so the AI can write files directly into the task source directory. Conversation is stateful per session.
 
 ### 9. Web UI & API
 - REST API for tasks/runs/triggers/AI generation
@@ -498,10 +501,10 @@ When writing or generating a task locally, there's no need for a git round-trip.
 | Filesystem watch | fsnotify | Cross-platform, pure Go |
 | DB | sqlite (modernc) | Pure Go, no CGo, simple |
 | HTTP router | chi | Lightweight, idiomatic |
-| AI | Claude API | Best code generation quality |
-| Frontend | HTMX | No npm, single binary, enough for MVP |
+| AI | OpenAI-compatible API | Works with OpenAI, Claude, Ollama, any compatible provider |
+| Frontend | HTMX + Monaco | No npm, single binary; Monaco for code editing + AI chat |
 | Mobile push | ntfy | Apache 2.0, self-hostable, action buttons, simple HTTP API |
-| System tray | systray | MIT, cross-platform (Linux/macOS/Windows) |
+| System tray | fyne.io/systray | MIT, pure Go, no CGo; DBus/StatusNotifierItem on Linux |
 | Secret encryption | ChaCha20-Poly1305 + Argon2id | Fast, authenticated, no padding oracle |
 
 ---
