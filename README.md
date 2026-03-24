@@ -408,9 +408,19 @@ server:
   secret: ""                              # optional: require this password to access the UI
 
 ai:
-  provider: claude                        # "claude" (default) or "openai"
-  model: claude-sonnet-4-6               # model to use for task generation
-  api_key_env: ANTHROPIC_API_KEY          # env var holding the API key
+  model: gpt-4o                           # any OpenAI-compatible model name
+  api_key_env: OPENAI_API_KEY             # env var holding the API key
+  # base_url: https://api.openai.com/v1  # default; override for Anthropic/Ollama/etc.
+
+  # Claude (via Anthropic API):
+  # model: claude-sonnet-4-6
+  # api_key_env: ANTHROPIC_API_KEY
+  # base_url: https://api.anthropic.com/v1
+
+  # Local Ollama:
+  # model: qwen2.5-coder:7b
+  # base_url: http://localhost:11434/v1
+  # api_key_env: ""  # not needed
 
 log_level: info                           # "debug", "info", "warn", "error"
 data_dir: ~/.dicode                       # where to store repo clones, sqlite db, etc.
@@ -422,22 +432,32 @@ data_dir: ~/.dicode                       # where to store repo clones, sqlite d
 
 ## AI Task Generation
 
+### New task from prompt
+
 Open the web UI and click **New Task**. Type what you want in plain English:
 
 > "Every Monday at 9am, fetch the top 10 posts from Hacker News and send them to my Slack channel #links"
 
 dicode will:
 
-1. Check the task store for an existing task that matches
-2. If none found, ask Claude to generate `task.yaml` + `task.js`
-3. Validate the generated code (syntax check, schema check)
-4. Show you the diff in the browser
-5. On your confirmation, commit and push to your tasks repo
-6. The task goes live within one poll interval
+1. Ask your configured AI model to generate `task.yaml` + `task.js`
+2. Validate the generated code (syntax check, schema check)
+3. Show you the generated files in the browser
+4. Save to your local tasks directory immediately — the task goes live within ~100ms
 
 The AI has access to the full JS API documentation and a few example tasks as context, so the generated code consistently uses the correct patterns.
 
-You can also edit the generated code before confirming — the editor in the UI writes directly to the git commit.
+### AI chat in the editor
+
+When editing an existing task, the Monaco editor has a built-in AI panel. Ask questions or request changes:
+
+> "Rewrite this to batch the API calls in groups of 10"
+> "Add error handling for rate limit responses"
+> "Write a task.test.js for this"
+
+The AI can read the current file content and write files directly using a `write_file` tool — changes appear in the editor instantly. The conversation streams in real time via SSE.
+
+Works with any OpenAI-compatible endpoint — OpenAI, Anthropic (Claude), Ollama, or any other provider that speaks the OpenAI API format.
 
 ---
 
@@ -480,7 +500,7 @@ A community registry index is planned — tasks will be searchable by name and t
 |---|---|
 | Task execution (cron / webhook / manual / chain) | ✅ |
 | JavaScript runtime + all globals | ✅ |
-| AI task generation | ✅ needs Anthropic API key |
+| AI task generation | ✅ needs any OpenAI-compatible API key |
 | Local encrypted secrets | ✅ |
 | MCP server + agent skill | ✅ |
 | Testing, validation, dry-run | ✅ |
@@ -513,12 +533,21 @@ No tokens, no URLs, no external services. Tasks are files in `~/dicode-tasks/`. 
 
 ### AI generation in local mode
 
-AI generation still works — it writes generated task files directly to your local tasks directory instead of committing to git. You can use any Anthropic API key:
+AI generation still works — it writes generated task files directly to your local tasks directory instead of committing to git. Any OpenAI-compatible endpoint works:
 
 ```yaml
 ai:
-  provider: claude
-  api_key_env: ANTHROPIC_API_KEY
+  model: gpt-4o
+  api_key_env: OPENAI_API_KEY
+
+  # Or use Claude via Anthropic API:
+  # model: claude-sonnet-4-6
+  # api_key_env: ANTHROPIC_API_KEY
+  # base_url: https://api.anthropic.com/v1
+
+  # Or a local Ollama model (no API key needed):
+  # model: qwen2.5-coder:7b
+  # base_url: http://localhost:11434/v1
 ```
 
 Or skip AI entirely and write tasks by hand — the JS runtime, testing, and all other features work without it.
@@ -766,7 +795,7 @@ dicode --no-tray # force tray icon off (e.g. when running as systemd service)
 └─────────────────────────────┘
 ```
 
-Tray support: Linux (libappindicator), macOS, Windows. Automatically disabled when running as a headless service (no `$DISPLAY` / no desktop session).
+Tray support: Linux (StatusNotifierItem / DBus — works with KDE, GNOME with AppIndicator extension, waybar, and most modern panels), macOS, Windows. Uses `fyne.io/systray` — no CGo or GTK required. Automatically disabled when running as a headless service (`server.tray: false` in config).
 
 ### Approval gates (north star)
 

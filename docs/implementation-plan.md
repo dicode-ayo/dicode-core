@@ -1,12 +1,14 @@
 # Implementation Plan
 
-> Last updated: 2026-03-23
+> Last updated: 2026-03-24
 
 This document is the ordered build roadmap. Each milestone produces something runnable. Work top-to-bottom; later milestones depend on earlier ones.
 
 **MVP status: ✅ Complete (Milestones 0–7).** The binary compiles, all tests pass, and dicode runs in local-only mode.
 
 **Post-MVP Web UI enhancements ✅ Complete.** Config page, reactive HTMX tables, SSE app-log stream, Monaco code editor, trigger editor, secrets manager UI.
+
+**Post-MVP Platform enhancements ✅ Complete.** Git source (M8), system tray (M12), AI chat in task editor, editable config UI, live source management, raw config code editor.
 
 ---
 
@@ -395,33 +397,24 @@ func run(ctx context.Context, cfg *config.Config, log *zap.Logger) error {
 
 ---
 
-## Milestone 8 — Git source 🔲
+## Milestone 8 — Git source ✅
 
 **Goal**: tasks from a git repository.
 
-### `pkg/source/git/git.go`
-Implement `Source` interface using `go-git`.
+**Implemented**: `pkg/source/git/git.go` — full `Source` interface using `fyne.io/systray` (DBus-based, no CGo) and `go-git`.
 
-```go
-type GitSource struct {
-    id     string
-    cfg    config.SourceConfig
-    repo   *git.Repository
-}
+- Clones on first `Start()` into `~/.dicode/repos/<sha256-of-url>/` (deterministic, URL-addressed)
+- Polls every `poll_interval` (default 30s) via `git pull`, then snapshot-diff against previous state
+- Same `task.ScanDir` + content-hash diff approach as local source — consistent event semantics
+- HTTP Basic-auth via token env var (`token_env`); SSH key field reserved for future
+- `ListBranches(ctx, url, tokenEnv)` — contacts remote via DBus, returns sorted branch names; used by the config UI "Fetch" button
+- Integrated into `buildSources()` in `cmd/dicode/main.go`
 
-func New(cfg config.SourceConfig) (*GitSource, error)
-func (s *GitSource) ID() string
-func (s *GitSource) Start(ctx context.Context) (<-chan source.Event, error)
-func (s *GitSource) Sync(ctx context.Context) error
-```
+**Reconciler extended**: `pkg/registry/reconciler.go` — `AddSource(src)` and `RemoveSource(id)` allow live hot-add/remove at runtime. Each source gets its own `context.WithCancel` so removal is clean. `Run()` now works with zero initial sources (needed for sources added after startup).
 
-Logic:
-1. On first `Start()`: clone repo to `~/.dicode/repos/{source-id}/`
-2. Poll every `poll_interval`: `git fetch` + `git diff` to detect changed task folders
-3. Webhook handler: HTTP endpoint that triggers immediate `Sync()` on push
-4. Auth: token in Authorization header (for HTTPS) or SSH key (future)
+**Sources management UI**: `POST /api/settings/sources` (add, validates type + required fields, starts source immediately), `DELETE /api/settings/sources/{idx}` (stops + removes), `GET /api/settings/sources/git/branches` (remote branch listing). Config UI has an expandable Add Source form with local/git toggle, auth token env, and Fetch Branches button that populates a `<select>`.
 
-**Deliverable**: tasks load from a GitHub/GitLab repo. Changes reconcile on push or poll.
+**Deliverable**: tasks load from GitHub/GitLab repos. Sources can be added/removed live via the config UI without restarting.
 
 ---
 
@@ -487,19 +480,56 @@ Wire notifier into JS runtime's `notify` global and trigger engine (on-failure/o
 
 ---
 
-## Milestone 12 — System tray 🔲
+## Milestone 12 — System tray ✅
 
 **Goal**: desktop tray icon with status and quick actions.
 
-### `pkg/tray/tray.go`
-Using `github.com/getlantern/systray`:
-- Green/yellow/red status icon
-- Right-click menu: Open WebUI, Run task submenu, Pause/Resume, Quit
-- Left-click: open browser to `http://localhost:{port}`
+**Implemented**: `pkg/tray/` — `fyne.io/systray` (MIT licensed, DBus StatusNotifierItem on Linux — no CGo/GTK required).
 
-Only compiled when `server.tray: true` and platform supports it.
+- `pkg/tray/icon.go` — 32×32 PNG icon generated at `init()` time: purple (#7c3aed) background with white lightning bolt. No binary asset dependency.
+- `pkg/tray/tray.go` — `Run(ctx, cancel, port, log)` blocks until context cancelled:
+  - **Open Dashboard** menu item → `xdg-open http://localhost:<port>` (Linux), `open` (macOS)
+  - **Quit dicode** menu item → calls `cancel()` (shuts down server + all goroutines) then `systray.Quit()`
+  - Listens on `ctx.Done()` — icon disappears cleanly on Ctrl+C or SIGTERM
+- Controlled by `server.tray` in `dicode.yaml` (`true` = enabled, `false` = disabled for headless). Default is enabled (`true`).
+- Toggle available in the Config UI server settings section (persisted to `dicode.yaml`).
+- Uses `org.kde.StatusNotifierItem` DBus protocol — compatible with waybar, KDE, GNOME (with AppIndicator extension), etc.
 
-**Deliverable**: dicode has a tray icon on desktop systems.
+**Deliverable**: dicode has a tray icon on Linux/macOS/Windows desktop systems. Quit from the tray fully stops the process.
+
+---
+
+## Post-MVP — AI chat in task editor ✅
+
+**Goal**: AI-powered task development directly in the Monaco editor.
+
+**Implemented**: `pkg/webui/ai.go` — OpenAI-compatible Chat Completions streaming endpoint.
+
+- Uses `github.com/openai/openai-go` SDK — compatible with OpenAI, Claude (via `api.anthropic.com/v1`), Ollama (`localhost:11434/v1`), and any OpenAI-compatible endpoint
+- `POST /api/tasks/{id}/ai/stream` — SSE endpoint; browser connects via `fetch` + `ReadableStream` (EventSource doesn't support POST)
+- Agentic loop: up to 6 turns; first turn streams, follow-up turns synchronous
+- `write_file` tool — AI writes `task.js`, `task.yaml`, `task.test.js` live to disk as tokens stream. Files update in the Monaco editor in real time via `file` SSE events
+- `ChatCompletionAccumulator.JustFinishedToolCall()` with `ParallelToolCalls: false` — fires file writes the instant each tool call finishes streaming
+- System prompt includes `pkg/agent/skill.md` + current file contents for full context
+- Monaco editor split layout: editor on left, AI chat panel on right (hidden until toggled). Purple **🤖 AI** button in toolbar. Ctrl+Enter to send
+- Minimal Markdown renderer for AI responses (code fences, inline code, bold)
+
+**Config UI**: AI settings editable in `/config` — endpoint, model, API key env var, direct API key value. Persisted to `dicode.yaml` without losing other keys.
+
+---
+
+## Post-MVP — Config code editor ✅
+
+**Goal**: raw `dicode.yaml` editing in a Monaco editor within the web UI.
+
+**Implemented**:
+
+- `GET /config/code` — full-viewport Monaco editor (YAML language mode, dark theme)
+- `GET /api/config/raw` — returns raw file content as JSON
+- `POST /api/config/raw` — validates YAML (must parse cleanly), writes to disk, hot-reloads config into memory
+- Ctrl+S / Cmd+S shortcut to save; dirty indicator (`● unsaved`) when modified
+- "← Visual view" link back to the form-based config page
+- **Edit as code** button added to `/config` visual page
 
 ---
 
