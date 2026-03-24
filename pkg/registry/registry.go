@@ -14,9 +14,10 @@ import (
 
 // RunStatus values.
 const (
-	StatusRunning = "running"
-	StatusSuccess = "success"
-	StatusFailure = "failure"
+	StatusRunning   = "running"
+	StatusSuccess   = "success"
+	StatusFailure   = "failure"
+	StatusCancelled = "cancelled"
 )
 
 // Run is a single execution record.
@@ -89,7 +90,12 @@ func (r *Registry) All() []*task.Spec {
 
 // StartRun records a new run in sqlite and returns its ID.
 func (r *Registry) StartRun(ctx context.Context, taskID, parentRunID string) (string, error) {
-	id := uuid.New().String()
+	return r.StartRunWithID(ctx, uuid.New().String(), taskID, parentRunID)
+}
+
+// StartRunWithID records a new run using a caller-supplied ID.
+// Use this when the run ID must be known before execution begins (e.g. async fire).
+func (r *Registry) StartRunWithID(ctx context.Context, id, taskID, parentRunID string) (string, error) {
 	now := time.Now().UnixMilli()
 	err := r.db.Exec(ctx,
 		`INSERT INTO runs (id, task_id, status, started_at, parent_run_id) VALUES (?, ?, ?, ?, ?)`,

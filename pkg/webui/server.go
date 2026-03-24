@@ -190,6 +190,7 @@ func (s *Server) Handler() http.Handler {
 	r.Get("/api/tasks/{id}/runs", s.apiListRuns)
 	r.Get("/api/runs/{runID}", s.apiGetRun)
 	r.Get("/api/runs/{runID}/logs", s.apiGetLogs)
+	r.Post("/api/runs/{runID}/kill", s.apiKillRun)
 
 	// Secrets management
 	r.Get("/secrets", s.handleSecretsPage)
@@ -752,6 +753,15 @@ func (s *Server) apiGetLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOK(w, logs)
+}
+
+func (s *Server) apiKillRun(w http.ResponseWriter, r *http.Request) {
+	runID := chi.URLParam(r, "runID")
+	if !s.engine.KillRun(runID) {
+		jsonErr(w, "run not found or already finished", http.StatusNotFound)
+		return
+	}
+	jsonOK(w, map[string]string{"status": "killing"})
 }
 
 // --- Settings handlers ---

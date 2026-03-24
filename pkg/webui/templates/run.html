@@ -2,12 +2,24 @@
 <div style="margin-bottom:1rem">
   <a href="/tasks/{{.Run.TaskID}}">← {{.Run.TaskID}}</a>
 </div>
-<div class="card">
+<div class="card"
+  {{if eq .Run.Status "running"}}
+  id="run-status-card"
+  hx-get="/runs/{{.Run.ID}}"
+  hx-trigger="every 3s"
+  hx-target="#run-status-card"
+  hx-swap="outerHTML"
+  {{end}}>
   <div style="display:flex;gap:1rem;align-items:center">
     <span class="badge badge-{{.Run.Status}}">{{.Run.Status}}</span>
     <span class="meta">Run {{.Run.ID}}</span>
     <span class="meta">Started {{fmtTime .Run.StartedAt}}</span>
     {{if .Run.FinishedAt}}<span class="meta">Duration {{fmtDuration .Run.StartedAt .Run.FinishedAt}}</span>{{end}}
+    {{if eq .Run.Status "running"}}
+    <button class="btn" style="background:#dc3545;margin-left:auto"
+      hx-post="/api/runs/{{.Run.ID}}/kill"
+      hx-confirm="Kill this run?">Kill</button>
+    {{end}}
   </div>
 </div>
 

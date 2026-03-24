@@ -168,12 +168,21 @@ func TestAPI_GetRun_and_Logs(t *testing.T) {
 	_ = json.NewDecoder(w.Body).Decode(&resp)
 	runID := resp["runId"]
 
-	// Get run.
-	req2 := httptest.NewRequest(http.MethodGet, "/api/runs/"+runID, nil)
-	w2 := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w2, req2)
-	if w2.Code != http.StatusOK {
-		t.Fatalf("get run: %d", w2.Code)
+	// FireManual is async; poll until run is no longer running (up to 5s).
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		req2 := httptest.NewRequest(http.MethodGet, "/api/runs/"+runID, nil)
+		w2 := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w2, req2)
+		if w2.Code != http.StatusOK {
+			t.Fatalf("get run: %d", w2.Code)
+		}
+		var run map[string]interface{}
+		_ = json.NewDecoder(w2.Body).Decode(&run)
+		if run["Status"] != "running" {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 
 	// Get logs.
