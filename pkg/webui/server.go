@@ -157,6 +157,9 @@ func (s *Server) Handler() http.Handler {
 	r.Post("/api/tasks/{id}/files/{filename}", s.apiSaveFile)
 	r.Post("/api/tasks/{id}/trigger", s.apiSaveTrigger)
 
+	// AI chat — streams SSE, writes task files live
+	r.Post("/api/tasks/{id}/ai/stream", s.handleAIStream)
+
 	// REST API
 	r.Get("/api/config", s.apiGetConfig)
 	r.Get("/api/tasks", s.apiListTasks)
