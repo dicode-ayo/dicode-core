@@ -110,7 +110,9 @@ func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config
 			b, err := json.Marshal(v)
 			return template.JS(b), err
 		},
-		"list": func(items ...string) []string { return items },
+		"list":      func(items ...string) []string { return items },
+		"not":       func(b bool) bool { return !b },
+		"derefBool": func(b *bool) bool { return b != nil && *b },
 	}
 	base, err := template.New("base.html").Funcs(funcMap).ParseFS(templateFS, "templates/base.html")
 	if err != nil {
@@ -789,8 +791,12 @@ func (s *Server) apiSaveServerSettings(w http.ResponseWriter, r *http.Request) {
 	if v := r.FormValue("log_level"); v != "" {
 		s.cfg.LogLevel = v
 	}
-	if r.Form.Has("secret") { // explicit empty is allowed (disables passphrase)
+	if r.Form.Has("secret") {
 		s.cfg.Server.Secret = r.FormValue("secret")
+	}
+	if v := r.FormValue("tray"); v != "" {
+		enabled := v == "true"
+		s.cfg.Server.Tray = &enabled
 	}
 
 	if err := s.persistConfig(); err != nil {
@@ -967,6 +973,9 @@ func (s *Server) persistConfig() error {
 	}
 	serverMap["port"] = s.cfg.Server.Port
 	serverMap["secret"] = s.cfg.Server.Secret
+	if s.cfg.Server.Tray != nil {
+		serverMap["tray"] = *s.cfg.Server.Tray
+	}
 	doc["server"] = serverMap
 
 	// Serialize sources list.

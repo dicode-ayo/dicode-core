@@ -46,7 +46,7 @@ secrets:
 server:
   port: 8080
   mcp: true    # expose MCP endpoint at /mcp (for AI agent / Claude Code integration)
-  tray: false  # set to true to enable the system tray icon on desktop systems
+  tray: true  # set to true to enable the system tray icon on desktop systems
   # secret: ""  # uncomment and set to require a password for the web UI
 
 # ---------------------------------------------------------------------------

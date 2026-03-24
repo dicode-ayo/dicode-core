@@ -93,17 +93,26 @@ secrets:
 server:
   port: 8080
   mcp: true    # expose MCP endpoint at /mcp (for AI agent / Claude Code integration)
-  tray: false  # set to true to enable the system tray icon on desktop systems
+  tray: true   # set to false to disable the system tray icon (e.g. on headless servers)
   # secret: ""  # uncomment and set to require a password for the web UI
 
 # ---------------------------------------------------------------------------
-# AI task generation (optional)
-# Set ANTHROPIC_API_KEY in your environment to enable "New Task" in the UI.
+# AI task generation — powers the AI chat in the task editor.
+# Pick one provider and uncomment the matching block.
 # ---------------------------------------------------------------------------
-# ai:
-#   provider: claude
-#   model: claude-sonnet-4-6
-#   api_key_env: ANTHROPIC_API_KEY
+ai:
+  # OpenAI (default) — set OPENAI_API_KEY in your environment
+  model: gpt-4o
+  api_key_env: OPENAI_API_KEY
+
+  # Claude (Anthropic) — uncomment and set ANTHROPIC_API_KEY
+  # model: claude-sonnet-4-6
+  # api_key_env: ANTHROPIC_API_KEY
+  # base_url: https://api.anthropic.com/v1
+
+  # Ollama (local, no key needed)
+  # model: qwen2.5-coder:7b
+  # base_url: http://localhost:11434/v1
 
 # ---------------------------------------------------------------------------
 # Push notifications (optional) — sends alerts to your phone on task failure.
