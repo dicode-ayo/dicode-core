@@ -100,8 +100,17 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	// 2. Build secrets chain.
 	secretsChain, localSecrets := buildSecretsChain(cfg, database, log)
 
-	// 3. Task registry.
+	// 3. Task registry + startup cleanup.
+	// Remove orphaned Docker containers first (before marking runs cancelled)
+	// so the DB status reflects what actually happened to each container.
+	dockerruntime.CleanupOrphanedContainers(ctx, log)
+
 	reg := registry.New(database)
+	if stale, err := reg.CleanupStaleRuns(ctx); err != nil {
+		log.Warn("stale run cleanup failed", zap.Error(err))
+	} else if len(stale) > 0 {
+		log.Info("cancelled stale runs from previous session", zap.Strings("tasks", stale))
+	}
 
 	// 4. JS runtime.
 	rt := jsruntime.New(reg, secretsChain, database, log)

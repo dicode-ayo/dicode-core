@@ -12,8 +12,8 @@
 
   <form id="trigger-form">
     <!-- Type selector -->
-    <div style="display:flex;gap:1.5rem;margin-bottom:1rem">
-      {{range $t := list "cron" "webhook" "manual" "chain"}}
+    <div style="display:flex;gap:1.5rem;margin-bottom:1rem;flex-wrap:wrap">
+      {{range $t := list "cron" "webhook" "manual" "chain" "daemon"}}
       <label style="display:flex;align-items:center;gap:0.35rem;cursor:pointer;font-size:0.9rem">
         <input type="radio" name="type" value="{{$t}}"
           {{if eq $t $.TriggerType}}checked{{end}}
@@ -55,6 +55,21 @@
         <option value="success" {{if eq .ChainOn "success"}}selected{{end}}>success</option>
         <option value="failure" {{if eq .ChainOn "failure"}}selected{{end}}>failure</option>
         <option value="always"  {{if eq .ChainOn "always"}}selected{{end}}>always</option>
+      </select>
+    </div>
+
+    <!-- daemon -->
+    <div id="trig-daemon" class="trig-fields" {{if ne .TriggerType "daemon"}}style="display:none"{{end}}>
+      <p class="meta" style="margin-bottom:0.6rem">
+        Task starts automatically when dicode starts and is restarted when it exits.<br>
+        On shutdown dicode sends a kill signal before exiting.
+      </p>
+      <label style="font-size:0.85rem;font-weight:600">Restart policy</label>
+      <select name="restart"
+        style="display:block;margin-top:0.25rem;padding:0.4rem 0.6rem;border:1px solid #dee2e6;border-radius:4px">
+        <option value="always"     {{if eq .Restart "always"}}selected{{end}}>always — restart on any exit (default)</option>
+        <option value="on-failure" {{if eq .Restart "on-failure"}}selected{{end}}>on-failure — restart only on error exit</option>
+        <option value="never"      {{if eq .Restart "never"}}selected{{end}}>never — start once, do not restart</option>
       </select>
     </div>
   </form>

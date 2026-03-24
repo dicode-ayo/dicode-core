@@ -4,6 +4,7 @@ package registry
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -77,7 +78,7 @@ func (r *Registry) Get(id string) (*task.Spec, bool) {
 	return s, ok
 }
 
-// All returns a snapshot of all registered task specs.
+// All returns a snapshot of all registered task specs sorted by ID.
 func (r *Registry) All() []*task.Spec {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -85,6 +86,7 @@ func (r *Registry) All() []*task.Spec {
 	for _, s := range r.tasks {
 		out = append(out, s)
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
 }
 
@@ -191,6 +193,41 @@ func (r *Registry) ListRuns(ctx context.Context, taskID string, limit int) ([]*R
 		},
 	)
 	return runs, err
+}
+
+// CleanupStaleRuns marks any "running" runs as "cancelled".
+// Called at startup to handle runs from a previous session that never finished.
+// Returns the distinct task IDs that had stale runs so callers can restart them.
+func (r *Registry) CleanupStaleRuns(ctx context.Context) ([]string, error) {
+	var taskIDs []string
+	err := r.db.Query(ctx,
+		`SELECT DISTINCT task_id FROM runs WHERE status = ?`,
+		[]any{StatusRunning},
+		func(rows db.Scanner) error {
+			for rows.Next() {
+				var id string
+				if err := rows.Scan(&id); err != nil {
+					return err
+				}
+				taskIDs = append(taskIDs, id)
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query stale runs: %w", err)
+	}
+	if len(taskIDs) == 0 {
+		return nil, nil
+	}
+	now := time.Now().UnixMilli()
+	if err := r.db.Exec(ctx,
+		`UPDATE runs SET status = ?, finished_at = ? WHERE status = ?`,
+		StatusCancelled, now, StatusRunning,
+	); err != nil {
+		return nil, fmt.Errorf("cancel stale runs: %w", err)
+	}
+	return taskIDs, nil
 }
 
 // GetRunLogs returns log entries for a run.

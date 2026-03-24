@@ -1,5 +1,5 @@
 // Package trigger manages cron schedules, webhook dispatch, manual fires,
-// and chain reactions between tasks.
+// chain reactions, and daemon (always-on) tasks.
 package trigger
 
 import (
@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/dicode/dicode/pkg/registry"
 	dockerruntime "github.com/dicode/dicode/pkg/runtime/docker"
@@ -32,6 +33,13 @@ type Engine struct {
 	webhooks    map[string]string        // webhook path → taskID
 
 	runCancels sync.Map // runID → context.CancelFunc
+
+	shutdownMu  sync.RWMutex
+	shutdownCtx context.Context
+
+	daemonMu    sync.Mutex
+	daemonRuns  map[string]string
+	daemonSpecs map[string]*task.Spec
 }
 
 // New creates a trigger Engine.
@@ -43,6 +51,8 @@ func New(r *registry.Registry, rt *jsruntime.Runtime, log *zap.Logger) *Engine {
 		log:         log,
 		cronEntries: make(map[string]cron.EntryID),
 		webhooks:    make(map[string]string),
+		daemonRuns:  make(map[string]string),
+		daemonSpecs: make(map[string]*task.Spec),
 	}
 }
 
@@ -51,22 +61,37 @@ func (e *Engine) SetDockerRuntime(rt *dockerruntime.Runtime) {
 	e.dockerRT = rt
 }
 
-// Start begins cron scheduling and runs until ctx is cancelled.
+// Start begins scheduling and runs until ctx is cancelled.
 func (e *Engine) Start(ctx context.Context) error {
-	// Register all tasks already in the registry.
+	e.shutdownMu.Lock()
+	e.shutdownCtx = ctx
+	e.shutdownMu.Unlock()
+
 	for _, spec := range e.registry.All() {
 		e.Register(spec)
 	}
 	e.cron.Start()
+
 	<-ctx.Done()
 	e.cron.Stop()
+
+	e.daemonMu.Lock()
+	killList := make(map[string]string, len(e.daemonRuns))
+	for k, v := range e.daemonRuns {
+		killList[k] = v
+	}
+	e.daemonMu.Unlock()
+
+	for taskID, runID := range killList {
+		e.log.Info("stopping daemon on shutdown", zap.String("task", taskID), zap.String("run", runID))
+		e.KillRun(runID)
+	}
 	return nil
 }
 
 // Register adds or updates trigger registrations for a task spec.
-// Called by the reconciler's OnRegister callback.
 func (e *Engine) Register(spec *task.Spec) {
-	e.Unregister(spec.ID) // remove old registrations first
+	e.Unregister(spec.ID)
 
 	if spec.Trigger.Cron != "" {
 		e.registerCron(spec)
@@ -74,13 +99,19 @@ func (e *Engine) Register(spec *task.Spec) {
 	if spec.Trigger.Webhook != "" {
 		e.registerWebhook(spec)
 	}
+	if spec.Trigger.Daemon {
+		e.registerDaemon(spec)
+	}
+	e.log.Info("task registered",
+		zap.String("task", spec.ID),
+		zap.String("trigger", triggerSource(spec)),
+		zap.String("runtime", string(spec.Runtime)),
+	)
 }
 
 // Unregister removes all trigger registrations for a task ID.
 func (e *Engine) Unregister(id string) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
-
 	if entryID, ok := e.cronEntries[id]; ok {
 		e.cron.Remove(entryID)
 		delete(e.cronEntries, id)
@@ -90,6 +121,19 @@ func (e *Engine) Unregister(id string) {
 			delete(e.webhooks, path)
 		}
 	}
+	e.mu.Unlock()
+
+	e.daemonMu.Lock()
+	delete(e.daemonSpecs, id)
+	runID := e.daemonRuns[id]
+	delete(e.daemonRuns, id)
+	e.daemonMu.Unlock()
+
+	if runID != "" {
+		e.log.Info("stopping daemon — task unregistered", zap.String("task", id), zap.String("run", runID))
+		e.KillRun(runID)
+	}
+	e.log.Info("task unregistered", zap.String("task", id))
 }
 
 func (e *Engine) registerCron(spec *task.Spec) {
@@ -98,7 +142,7 @@ func (e *Engine) registerCron(spec *task.Spec) {
 		if !ok {
 			return
 		}
-		e.fireAsync(context.Background(), s, jsruntime.RunOptions{})
+		e.fireAsync(context.Background(), s, jsruntime.RunOptions{}, "cron") //nolint:errcheck
 	})
 	if err != nil {
 		e.log.Error("invalid cron expression",
@@ -111,39 +155,132 @@ func (e *Engine) registerCron(spec *task.Spec) {
 	e.mu.Lock()
 	e.cronEntries[spec.ID] = id
 	e.mu.Unlock()
-	e.log.Info("cron registered", zap.String("task", spec.ID), zap.String("expr", spec.Trigger.Cron))
 }
 
 func (e *Engine) registerWebhook(spec *task.Spec) {
 	e.mu.Lock()
 	e.webhooks[spec.Trigger.Webhook] = spec.ID
 	e.mu.Unlock()
-	e.log.Info("webhook registered", zap.String("task", spec.ID), zap.String("path", spec.Trigger.Webhook))
+}
+
+func (e *Engine) registerDaemon(spec *task.Spec) {
+	e.daemonMu.Lock()
+	e.daemonSpecs[spec.ID] = spec
+	_, alreadyRunning := e.daemonRuns[spec.ID]
+	e.daemonMu.Unlock()
+
+	if alreadyRunning {
+		return
+	}
+	e.startDaemon(spec)
+}
+
+func (e *Engine) startDaemon(spec *task.Spec) {
+	runID, err := e.fireAsync(context.Background(), spec, jsruntime.RunOptions{}, "daemon")
+	if err != nil {
+		e.log.Error("daemon start failed", zap.String("task", spec.ID), zap.Error(err))
+		return
+	}
+	e.daemonMu.Lock()
+	e.daemonRuns[spec.ID] = runID
+	e.daemonMu.Unlock()
+}
+
+func (e *Engine) onDaemonRunFinished(spec *task.Spec, runID string) {
+	e.daemonMu.Lock()
+	if e.daemonRuns[spec.ID] == runID {
+		delete(e.daemonRuns, spec.ID)
+	}
+	_, stillRegistered := e.daemonSpecs[spec.ID]
+	e.daemonMu.Unlock()
+
+	if !stillRegistered || e.isShuttingDown() {
+		return
+	}
+
+	run, err := e.registry.GetRun(context.Background(), runID)
+	if err != nil {
+		e.log.Error("daemon: failed to get run status", zap.String("run", runID), zap.Error(err))
+		return
+	}
+	if run.Status == registry.StatusCancelled {
+		return
+	}
+
+	restart := spec.Trigger.Restart
+	if restart == "" {
+		restart = "always"
+	}
+	switch restart {
+	case "never":
+		e.log.Info("daemon exited — restart=never, not restarting",
+			zap.String("task", spec.ID), zap.String("status", run.Status))
+		return
+	case "on-failure":
+		if run.Status != registry.StatusFailure {
+			e.log.Info("daemon exited — restart=on-failure, not restarting (no failure)",
+				zap.String("task", spec.ID), zap.String("status", run.Status))
+			return
+		}
+	}
+
+	e.log.Info("daemon exited, scheduling restart",
+		zap.String("task", spec.ID),
+		zap.String("status", run.Status),
+		zap.String("restart", restart),
+	)
+
+	shutCtx := e.getShutdownCtx()
+	if shutCtx == nil {
+		shutCtx = context.Background()
+	}
+	select {
+	case <-shutCtx.Done():
+		return
+	case <-time.After(2 * time.Second):
+	}
+
+	if !e.isShuttingDown() {
+		e.log.Info("restarting daemon task", zap.String("task", spec.ID))
+		e.startDaemon(spec)
+	}
+}
+
+func (e *Engine) isShuttingDown() bool {
+	e.shutdownMu.RLock()
+	ctx := e.shutdownCtx
+	e.shutdownMu.RUnlock()
+	return ctx != nil && ctx.Err() != nil
+}
+
+func (e *Engine) getShutdownCtx() context.Context {
+	e.shutdownMu.RLock()
+	defer e.shutdownMu.RUnlock()
+	return e.shutdownCtx
 }
 
 // FireManual triggers a task by ID with optional param overrides.
-// Returns the run ID immediately (fire is asynchronous).
 func (e *Engine) FireManual(ctx context.Context, taskID string, params map[string]string) (string, error) {
 	spec, ok := e.registry.Get(taskID)
 	if !ok {
 		return "", fmt.Errorf("task %q not found", taskID)
 	}
-	return e.fireAsync(context.Background(), spec, jsruntime.RunOptions{Params: params})
+	e.log.Info("manual trigger", zap.String("task", taskID))
+	return e.fireAsync(context.Background(), spec, jsruntime.RunOptions{Params: params}, "manual")
 }
 
 // KillRun cancels a running task by its run ID.
-// Returns true if the run was found and cancelled, false if not found.
 func (e *Engine) KillRun(runID string) bool {
 	v, ok := e.runCancels.Load(runID)
 	if !ok {
 		return false
 	}
+	e.log.Info("run kill requested", zap.String("run", runID))
 	v.(context.CancelFunc)()
 	return true
 }
 
-// FireChain checks if any tasks declare a chain trigger from completedTaskID
-// and fires them with the given output as input.
+// FireChain checks if any tasks declare a chain trigger from completedTaskID.
 func (e *Engine) FireChain(ctx context.Context, completedTaskID, runStatus string, output interface{}) {
 	for _, spec := range e.registry.All() {
 		chain := spec.Trigger.Chain
@@ -154,7 +291,12 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runStatus strin
 		if on != "always" && on != runStatus {
 			continue
 		}
-		go e.fireAsync(ctx, spec, jsruntime.RunOptions{Input: output}) //nolint:errcheck
+		e.log.Info("chain trigger",
+			zap.String("from", completedTaskID),
+			zap.String("to", spec.ID),
+			zap.String("on", on),
+		)
+		go e.fireAsync(ctx, spec, jsruntime.RunOptions{Input: output}, "chain") //nolint:errcheck
 	}
 }
 
@@ -178,7 +320,8 @@ func (e *Engine) WebhookHandler() http.Handler {
 			return
 		}
 
-		// Parse body as JSON input.
+		e.log.Info("webhook trigger", zap.String("path", path), zap.String("task", taskID))
+
 		var input interface{}
 		if r.Body != nil {
 			body, err := io.ReadAll(r.Body)
@@ -187,7 +330,7 @@ func (e *Engine) WebhookHandler() http.Handler {
 			}
 		}
 
-		runID, err := e.fireAsync(r.Context(), spec, jsruntime.RunOptions{Input: input})
+		runID, err := e.fireAsync(r.Context(), spec, jsruntime.RunOptions{Input: input}, "webhook")
 		if err != nil {
 			http.Error(w, "task failed to start", http.StatusInternalServerError)
 			return
@@ -199,8 +342,9 @@ func (e *Engine) WebhookHandler() http.Handler {
 }
 
 // fireAsync pre-creates the run record, starts execution in a goroutine,
-// and returns the run ID immediately. This allows callers to poll for status.
-func (e *Engine) fireAsync(ctx context.Context, spec *task.Spec, opts jsruntime.RunOptions) (string, error) {
+// and returns the run ID immediately.
+// source identifies how the run was triggered ("manual","cron","webhook","chain","daemon").
+func (e *Engine) fireAsync(ctx context.Context, spec *task.Spec, opts jsruntime.RunOptions, source string) (string, error) {
 	runID := uuid.New().String()
 	opts.RunID = runID
 
@@ -216,21 +360,42 @@ func (e *Engine) fireAsync(ctx context.Context, spec *task.Spec, opts jsruntime.
 			e.runCancels.Delete(runID)
 			runCancel()
 		}()
-		e.log.Info("firing task", zap.String("task", spec.ID), zap.String("run", runID))
-		e.dispatch(runCtx, spec, opts)
+
+		e.log.Info("run started",
+			zap.String("task", spec.ID),
+			zap.String("run", runID),
+			zap.String("trigger", source),
+			zap.String("runtime", string(spec.Runtime)),
+		)
+
+		start := time.Now()
+		status := e.dispatch(runCtx, spec, opts)
+		elapsed := time.Since(start)
+
+		e.log.Info("run finished",
+			zap.String("task", spec.ID),
+			zap.String("run", runID),
+			zap.String("status", status),
+			zap.String("trigger", source),
+			zap.Duration("duration", elapsed.Truncate(time.Millisecond)),
+		)
+
+		if spec.Trigger.Daemon {
+			e.onDaemonRunFinished(spec, runID)
+		}
 	}()
 
 	return runID, nil
 }
 
-// dispatch routes a run to the appropriate runtime based on spec.Runtime.
-func (e *Engine) dispatch(ctx context.Context, spec *task.Spec, opts jsruntime.RunOptions) {
+// dispatch routes a run to the appropriate runtime and returns the final status.
+func (e *Engine) dispatch(ctx context.Context, spec *task.Spec, opts jsruntime.RunOptions) string {
 	switch spec.Runtime {
 	case task.RuntimeDocker:
 		if e.dockerRT == nil {
 			e.log.Error("docker runtime not configured", zap.String("task", spec.ID))
 			_ = e.registry.FinishRun(context.Background(), opts.RunID, registry.StatusFailure)
-			return
+			return registry.StatusFailure
 		}
 		dockerOpts := dockerruntime.RunOptions{
 			RunID:       opts.RunID,
@@ -240,33 +405,32 @@ func (e *Engine) dispatch(ctx context.Context, spec *task.Spec, opts jsruntime.R
 		result, err := e.dockerRT.Run(ctx, spec, dockerOpts)
 		if err != nil {
 			e.log.Error("docker run error", zap.String("task", spec.ID), zap.Error(err))
-			return
+			return registry.StatusFailure
 		}
-		status := "success"
+		status := registry.StatusSuccess
 		if result.Error != nil {
 			if ctx.Err() != nil {
 				status = registry.StatusCancelled
 			} else {
 				status = registry.StatusFailure
 			}
-			e.log.Warn("docker task ended", zap.String("task", spec.ID), zap.String("status", status), zap.Error(result.Error))
 		}
 		e.FireChain(context.Background(), spec.ID, status, nil)
+		return status
 
 	default: // RuntimeJS
 		result, err := e.jsRT.Run(ctx, spec, opts)
 		if err != nil {
 			e.log.Error("js run error", zap.String("task", spec.ID), zap.Error(err))
-			return
+			return registry.StatusFailure
 		}
-		status := "success"
+		status := registry.StatusSuccess
 		if result.Error != nil {
 			if ctx.Err() != nil {
 				status = registry.StatusCancelled
 			} else {
 				status = registry.StatusFailure
 			}
-			e.log.Warn("task failed", zap.String("task", spec.ID), zap.Error(result.Error))
 		}
 		var chainInput interface{}
 		if result.Output != nil {
@@ -275,5 +439,22 @@ func (e *Engine) dispatch(ctx context.Context, spec *task.Spec, opts jsruntime.R
 			chainInput = result.ReturnValue
 		}
 		e.FireChain(context.Background(), spec.ID, status, chainInput)
+		return status
+	}
+}
+
+// triggerSource returns a short string identifying the trigger type of a spec.
+func triggerSource(spec *task.Spec) string {
+	switch {
+	case spec.Trigger.Cron != "":
+		return "cron"
+	case spec.Trigger.Webhook != "":
+		return "webhook"
+	case spec.Trigger.Daemon:
+		return "daemon"
+	case spec.Trigger.Chain != nil:
+		return "chain"
+	default:
+		return "manual"
 	}
 }

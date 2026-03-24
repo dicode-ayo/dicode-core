@@ -409,11 +409,12 @@ func (s *Server) apiSaveFile(w http.ResponseWriter, r *http.Request) {
 // triggerEditorData is the view model for the trigger editor partial.
 type triggerEditorData struct {
 	ID          string
-	TriggerType string // "cron" | "webhook" | "manual" | "chain"
+	TriggerType string // "cron" | "webhook" | "manual" | "chain" | "daemon"
 	Cron        string
 	Webhook     string
 	ChainFrom   string
 	ChainOn     string
+	Restart     string
 }
 
 func triggerEditorDataFromSpec(spec *task.Spec) triggerEditorData {
@@ -431,6 +432,12 @@ func triggerEditorDataFromSpec(spec *task.Spec) triggerEditorData {
 		d.TriggerType = "chain"
 		d.ChainFrom = spec.Trigger.Chain.From
 		d.ChainOn = spec.Trigger.Chain.ChainOn()
+	case spec.Trigger.Daemon:
+		d.TriggerType = "daemon"
+		d.Restart = spec.Trigger.Restart
+		if d.Restart == "" {
+			d.Restart = "always"
+		}
 	}
 	return d
 }
@@ -482,6 +489,11 @@ func (s *Server) apiSaveTrigger(w http.ResponseWriter, r *http.Request) {
 			chain["on"] = on
 		}
 		trigMap = map[string]any{"chain": chain}
+	case "daemon":
+		trigMap = map[string]any{"daemon": true}
+		if restart := r.FormValue("restart"); restart != "" && restart != "always" {
+			trigMap["restart"] = restart
+		}
 	default:
 		jsonErr(w, "invalid trigger type", http.StatusBadRequest)
 		return
@@ -709,6 +721,7 @@ func (s *Server) apiGetTask(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) apiRunTask(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+	s.log.Info("run requested via API", zap.String("task", id))
 	runID, err := s.engine.FireManual(r.Context(), id, nil)
 	if err != nil {
 		jsonErr(w, err.Error(), http.StatusBadRequest)
@@ -757,6 +770,7 @@ func (s *Server) apiGetLogs(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) apiKillRun(w http.ResponseWriter, r *http.Request) {
 	runID := chi.URLParam(r, "runID")
+	s.log.Info("kill requested via API", zap.String("run", runID))
 	if !s.engine.KillRun(runID) {
 		jsonErr(w, "run not found or already finished", http.StatusNotFound)
 		return
@@ -1074,6 +1088,13 @@ func triggerLabel(tc task.TriggerConfig) string {
 	}
 	if tc.Manual {
 		return "manual"
+	}
+	if tc.Daemon {
+		restart := tc.Restart
+		if restart == "" {
+			restart = "always"
+		}
+		return "daemon (restart: " + restart + ")"
 	}
 	return "—"
 }
