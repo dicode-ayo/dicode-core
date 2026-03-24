@@ -19,14 +19,41 @@ tasks/morning-email-check/
 └── task.test.js    ← optional unit tests (picked up automatically)
 ```
 
-### 3. JS Runtime (goja)
+### 3. Runtimes
+
+#### 3-JS. JS Runtime (goja) ✅
 Tasks run as JS scripts with injected helpers: `http`, `kv`, `log`, `params`, `env`, `notify`, `dicode`. No filesystem or shell access. Each run is isolated (fresh runtime instance).
 
 Full globals: `http`, `kv`, `log`, `params`, `env`, `input` (chain), `notify`, `output`, `dicode`
 
-**MVP globals**: `log`, `env`, `params`, `http`, `kv`, `output`, `fs`
+**Implemented**: `log`, `env`, `params`, `http`, `kv`, `output`, `fs`
 **Post-MVP**: `notify`, `input`, `dicode` (full API)
 **North star**: `server` (daemon tasks only)
+
+#### 3-Docker. Docker Runtime ✅
+Set `runtime: docker` in `task.yaml` to run a container instead of a JS script. Implemented in `pkg/runtime/docker/`.
+
+- Live log streaming: stdout/stderr demuxed via `stdcopy.StdCopy`, streamed line-by-line to the run log
+- Kill support: context cancellation → `closeLog()` → `ContainerStop` (10s SIGTERM)
+- Port bindings, volume mounts, env vars, custom commands/entrypoints
+- Pull policies: `missing` (default), `always`, `never`
+- Every container is labelled `dicode.run-id` + `dicode.task-id` for orphan detection
+- `CleanupOrphanedContainers(ctx, log)` — called at startup; stops and removes any containers from previous sessions
+- No default timeout — Docker tasks run until completion or explicit kill
+- Audit logs: container created (short ID, image), container started, container finished (exit code, status)
+
+```yaml
+runtime: docker
+docker:
+  image: nginx:alpine
+  pull_policy: missing
+  ports:
+    - "8888:80"
+  volumes:
+    - "/tmp:/usr/share/nginx/html:ro"
+trigger:
+  daemon: true
+```
 
 ### 3e. Notifications
 
@@ -401,6 +428,11 @@ Task IDs must be unique across all sources. Conflict = error logged, second task
 - `webhook` — HTTP POST to `/hooks/<path>`
 - `manual` — WebUI button or API call
 - `chain` — fired when another task completes (see Task Chaining)
+- `daemon` ✅ — starts on app start, killed on shutdown, restarted per policy (always/on-failure/never)
+
+**Kill**: `POST /api/runs/{runID}/kill` cancels a running task via context cancellation (JS) or ContainerStop (Docker). The kill button is available on the run detail page.
+
+**Audit logging**: all major trigger and lifecycle events are logged via zap — run started (task, run, trigger source, runtime), run finished (status, duration), kill requested, task registered/unregistered, daemon restart decisions, container created/started/finished, API-level run requests and kills.
 
 ### 6. Task Registry
 In-memory map of loaded tasks + sqlite-backed run history (status, logs, timestamps).
