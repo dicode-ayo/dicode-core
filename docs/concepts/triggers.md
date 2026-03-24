@@ -150,28 +150,40 @@ For full chain documentation including data flow and constraints, see [Task Chai
 
 ---
 
-## Daemon (north star)
+## Daemon ✅
 
 Long-running tasks that start with dicode and run indefinitely.
 
 ```yaml
 trigger:
   daemon: true
-  restart: always   # always (default) | never | on-failure
+  restart: always   # always (default) | on-failure | never
 ```
 
 Daemon tasks:
-- Start automatically when dicode starts (or when the task is registered)
-- Are expected to run forever — they block on `server.listen()` or a similar call
-- Are restarted according to the `restart` policy if they exit
-- Appear in the task list with status `running` while active
-- Have a run log like any other task
+- Start automatically when dicode starts (or when the task is first registered)
+- Are restarted according to the `restart` policy when they exit
+- Receive a kill signal (context cancellation for JS, SIGTERM for Docker) when dicode shuts down
+- Appear in the task list with a run record like any other task
+- Explicitly killed tasks (status `cancelled`) are **never** restarted regardless of policy
 
-The canonical use case is a [WebUI daemon task](./webui-api.md#webui-as-a-daemon-task) — a TypeScript/React frontend served using the `server` global.
+**Restart policies:**
 
-Other uses: background workers, WebSocket servers, custom API gateways, persistent integrations that maintain a long-lived connection (e.g. a Slack socket-mode bot).
+| Policy | Behavior |
+|---|---|
+| `always` (default) | Restart on any exit — success or failure |
+| `on-failure` | Only restart on non-zero exit / uncaught exception |
+| `never` | Start once; do not restart |
 
-Daemon tasks are not available in MVP — they require the `server` global (post-MVP).
+A 2-second back-off is applied between restarts to prevent tight loops on immediately-failing tasks.
+
+**Stale run cleanup:** if dicode crashes without a clean shutdown, any `running` runs from the previous session are marked `cancelled` on the next startup. Daemon tasks start fresh.
+
+**Orphan container cleanup:** for Docker daemon tasks, any containers from a previous session (identified by `dicode.run-id` label) are stopped and removed on startup.
+
+**Use cases:** Docker services (nginx, postgres, custom APIs), persistent background workers, Slack socket-mode bots, custom API gateways.
+
+**JS + `server` global (north star):** the `server` global that lets JS daemon tasks serve HTTP is not yet implemented. Docker daemon tasks work fully today — use `runtime: docker` for HTTP-serving daemons.
 
 ---
 

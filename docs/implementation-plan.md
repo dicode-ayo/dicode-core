@@ -6,9 +6,11 @@ This document is the ordered build roadmap. Each milestone produces something ru
 
 **MVP status: ✅ Complete (Milestones 0–7).** The binary compiles, all tests pass, and dicode runs in local-only mode.
 
-**Post-MVP Web UI enhancements ✅ Complete.** Config page, reactive HTMX tables, SSE app-log stream, Monaco code editor, trigger editor, secrets manager UI.
+**Post-MVP Web UI enhancements ✅ Complete.** Config page, reactive HTMX tables, SSE app-log stream, Monaco code editor, trigger editor (cron/webhook/manual/chain/daemon), secrets manager UI, live log fixes, kill button.
 
 **Post-MVP Platform enhancements ✅ Complete.** Git source (M8), system tray (M12), AI chat in task editor, editable config UI, live source management, raw config code editor.
+
+**Post-MVP Runtime enhancements ✅ Complete.** Docker executor (M18-partial), daemon trigger with restart policies, task kill, orphan/stale run cleanup, comprehensive audit logging.
 
 ---
 
@@ -282,7 +284,15 @@ func (e *Engine) WebhookHandler() http.Handler
 
 **Deliverable**: cron tasks fire on schedule, webhooks trigger tasks, chains propagate.
 
-**Implemented**: `pkg/trigger/engine.go` — cron (robfig/cron), webhook HTTP handler, manual FireManual(), chain FireChain() (success/failure/always conditions). Register/Unregister wired to reconciler callbacks. 8 tests passing.
+**Implemented**: `pkg/trigger/engine.go` — cron (robfig/cron), webhook HTTP handler, manual `FireManual()`, chain `FireChain()` (success/failure/always conditions). Register/Unregister wired to reconciler callbacks. 8 tests passing.
+
+**Post-MVP additions (complete):**
+
+- **Daemon trigger** — `startDaemon` / `onDaemonRunFinished` — starts tasks on engine start; restart policies (always/on-failure/never); 2s back-off; no restart on `StatusCancelled` (kill); kills all daemon runs on shutdown. `trigger.daemon: true` + `trigger.restart: always|on-failure|never` in task.yaml.
+- **Docker executor** — `dispatch()` routes to `dockerRT.Run()` when `spec.Runtime == "docker"`. `fireAsync(ctx, spec, opts, source)` pre-generates runID, fires goroutine, returns runID immediately.
+- **Kill** — `KillRun(runID)` cancels via `runCancels sync.Map`. `POST /api/runs/{runID}/kill` REST endpoint.
+- **Async execution** — `fireAsync` takes a `source string` param ("manual"/"cron"/"webhook"/"chain"/"daemon"); logs "run started" (task, run, trigger, runtime) and "run finished" (status, duration).
+- **Comprehensive audit logging** — every major lifecycle event logged via zap: run started/finished, kill requested, manual/chain/webhook trigger, task registered/unregistered, daemon restart decisions.
 
 ---
 
@@ -332,9 +342,9 @@ All HTML templates embedded via `//go:embed templates/`.
 **Post-MVP additions (all complete):**
 
 UI pages:
-- `/` — task list with reactive HTMX polling (`hx-trigger="every 3s"`), last-run timestamp + status badge as clickable link
+- `/` — task list with reactive HTMX polling (`hx-trigger="every 3s"`), last-run timestamp + status badge as clickable link; task rows sorted stably by ID
 - `/tasks/{id}` — task detail with trigger display, code editor (Monaco), trigger editor, run history (live-polling)
-- `/runs/{runID}` — run log viewer
+- `/runs/{runID}` — run log viewer with kill button; live log HTMX fixed (`hx-select="#run-status-card"` prevents full-page nesting)
 - `/config` — server/database/sources/AI/secrets configuration viewer + JSON API link
 - `/secrets` — encrypted secrets manager with passphrase lock screen (ChaCha20-Poly1305)
 
@@ -342,9 +352,12 @@ New REST API endpoints:
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/config` | Full config as JSON |
+| `GET` | `/api/config/raw` | Raw dicode.yaml content |
+| `POST` | `/api/config/raw` | Validate + save dicode.yaml, hot-reload |
 | `GET` | `/api/tasks/{id}/files/{filename}` | Read task source file |
 | `POST` | `/api/tasks/{id}/files/{filename}` | Save task source file |
-| `POST` | `/api/tasks/{id}/trigger` | Update trigger config in task.yaml |
+| `POST` | `/api/tasks/{id}/trigger` | Update trigger config in task.yaml (supports daemon) |
+| `POST` | `/api/runs/{runID}/kill` | Cancel a running task |
 | `GET` | `/api/secrets` | List secret keys (values never returned) |
 | `POST` | `/api/secrets` | Set secret (key + encrypted value) |
 | `DELETE` | `/api/secrets/{key}` | Delete secret |
@@ -356,7 +369,7 @@ HTMX partial endpoints:
 | `GET` | `/ui/tasks/rows` | Task list tbody fragment (polled every 3s) |
 | `GET` | `/ui/tasks/{id}/runs/rows` | Run history tbody fragment (polled every 3s) |
 | `GET` | `/ui/tasks/{id}/editor` | Monaco editor HTML fragment (lazy-loaded) |
-| `GET` | `/ui/tasks/{id}/trigger-editor` | Trigger editor form fragment (lazy-loaded) |
+| `GET` | `/ui/tasks/{id}/trigger-editor` | Trigger editor form fragment (lazy-loaded; includes daemon+restart) |
 
 Other:
 - `LogBroadcaster` (`pkg/webui/logstream.go`) — io.Writer, ring buffer (300 lines), SSE fan-out; tee'd from zap logger via `zapcore.NewTee`
@@ -393,7 +406,13 @@ func run(ctx context.Context, cfg *config.Config, log *zap.Logger) error {
 
 **Deliverable**: `dicode` binary is fully functional in local-only mode. Add a local source, write a task, see it in the UI, run it, see logs.
 
-**Implemented**: `cmd/dicode/main.go` fully wired — db → secrets chain → registry → JS runtime → trigger engine → reconciler (with OnRegister/OnUnregister callbacks) → webui. Binary builds and starts. `go build -o dicode ./cmd/dicode`
+**Implemented**: `cmd/dicode/main.go` fully wired — db → secrets chain → registry → JS runtime → Docker runtime → trigger engine → reconciler (with OnRegister/OnUnregister callbacks) → webui → tray. Binary builds and starts. `go build -o dicode ./cmd/dicode`
+
+Startup sequence:
+1. `dockerruntime.CleanupOrphanedContainers(ctx, log)` — removes containers from any previous (crashed) session
+2. `reg.CleanupStaleRuns(ctx)` — marks `running` DB rows as `cancelled`; logs affected task IDs
+3. Task registration via reconciler
+4. `engine.Start(ctx)` — starts cron + daemon tasks
 
 ---
 
@@ -651,9 +670,20 @@ Future: index at `dicode.app/store` for discovery.
 
 ---
 
-## Milestone 18 — Daemon tasks + `server` global 🔲
+## Milestone 18 — Daemon tasks + `server` global 🔧
 
 **Goal**: long-running tasks that serve HTTP. Enables the WebUI-as-task pattern.
+
+**Daemon lifecycle: ✅ Complete.** `trigger.daemon: true` fully implemented in the trigger engine:
+- Tasks start automatically when dicode starts (or when the task is registered)
+- Restart policies: `always` (default), `on-failure`, `never`
+- Explicit kills (cancelled status) do not trigger restart
+- 2s back-off between restarts
+- All daemon runs killed cleanly on shutdown
+- Available for both JS and Docker runtimes (nginx daemon task example ships in `~/dicode-tasks/nginx-start/`)
+- Trigger editor in WebUI includes daemon type with restart policy selector
+
+**Remaining for M18**: the `server` global (`pkg/runtime/js/globals/server.go`) is not yet implemented. Daemon tasks work, but JS daemons cannot serve HTTP yet. Docker daemon tasks (like nginx) work fully.
 
 ### Daemon task lifecycle in the trigger engine
 
@@ -717,19 +747,29 @@ On first run (no config):
 | 5 | Automatic triggers (cron, webhook, chain) | ✅ Done |
 | 6 | Browser UI | ✅ Done |
 | 7 | **Full local-only mode** — end-to-end working binary | ✅ Done |
-| 8 | Git-backed tasks | 🔲 Not started |
+| 8 | Git-backed tasks | ✅ Done |
 | 9 | `dicode task test` | 🔲 Not started |
 | 10 | `dicode secrets` CLI | 🔧 Backend + Web UI done, CLI subcommand missing |
 | 11 | Push notifications | 🔧 ntfy done, gotify/desktop missing |
-| 12 | System tray | 🔲 Not started |
+| 12 | System tray | ✅ Done |
 | 13 | AI agent development via MCP | 🔧 Stub only |
-| 14 | AI task generation in WebUI | 🔲 Not started |
+| 14 | AI task generation in WebUI | ✅ Done (AI chat in editor) |
 | 15 | Public webhook URLs on laptops | 🔧 Stub only |
 | 16 | Run on startup | 🔧 Interface only |
 | 17 | Community task install | 🔲 Not started |
-| 18 | WebUI-as-daemon-task, `server` global, standalone UIs | 🔲 Not started |
+| 18 | Daemon task lifecycle + Docker executor | 🔧 Daemon ✅, Docker ✅, `server` global 🔲 |
 | 19 | Smooth first-run onboarding | 🔧 Config generation done, browser wizard missing |
 
-Milestones 0–7 are the **MVP** — ✅ all complete as of 2026-03-23. Everything after is additive.
+Milestones 0–7 are the **MVP** — ✅ all complete. Everything after is additive.
 
-**Test coverage**: 62 tests across db, secrets, source/local, registry, runtime/js, trigger, and webui packages.
+**Additional post-MVP work completed (outside original milestone plan):**
+- `POST /api/runs/{runID}/kill` — kill running tasks from UI or API
+- `pkg/runtime/docker/` — full Docker executor with live logs, kill support, orphan cleanup
+- Comprehensive audit logging across engine, Docker runtime, and API layer
+- Stale run cleanup on startup (`registry.CleanupStaleRuns`)
+- Stable task table sort (`registry.All()` sorted by ID)
+- Live log HTMX fix (`hx-select="#run-status-card"`)
+- Daemon trigger in the trigger editor UI
+- Nginx example daemon task
+
+**Test coverage**: 62+ tests across db, secrets, source/local, registry, runtime/js, trigger, and webui packages.

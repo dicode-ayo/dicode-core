@@ -52,9 +52,10 @@ Tasks are plain JavaScript files. You can write them yourself, install them from
 │  │  AI Gen     │   │   Web UI     │   │   JS Runtime (goja)  │ │
 │  │             │   │   + REST API │   │   http / kv / log    │ │
 │  │  prompt →   │   │              │   │   params / env       │ │
-│  │  code →     │   │  dashboard   │   └──────────┬───────────┘ │
-│  │  git commit │   │  logs/runs   │              │             │
-│  └─────────────┘   └──────────────┘              ▼             │
+│  │  code →     │   │  dashboard   │   ├──────────────────────┤ │
+│  │  git commit │   │  logs/runs   │   │   Docker Runtime     │ │
+│  └─────────────┘   └──────────────┘   │   live logs / kill   │ │
+│                                        └──────────┬───────────┘ │
 │                                        ┌─────────────────────┐ │
 │                                        │   SQLite run log    │ │
 │                                        └─────────────────────┘ │
@@ -177,31 +178,26 @@ tasks/
 ```yaml
 name: morning-email-check
 description: Check Gmail and post a digest to Slack every morning
-version: "1.0.0"
-author: yourname  # optional
 
-runtime: js  # currently the only supported runtime
+runtime: js   # js (default) or docker
 
 trigger:
   cron: "0 9 * * *"   # 9am every day
   # webhook: /hooks/my-task   # or: HTTP POST trigger
   # manual: true              # or: only manual via UI/API
+  # daemon: true              # or: start on app start, restart on exit
 
 params:
   - name: slack_channel
-    type: string
     default: "#general"
-    description: Slack channel to post to
   - name: max_emails
-    type: number
     default: "10"
-    description: Maximum number of emails to include in the digest
 
 env:
-  - SLACK_TOKEN    # env vars that must be present at runtime
+  - SLACK_TOKEN    # env vars resolved from secrets chain
   - GMAIL_TOKEN
 
-timeout: 120s   # default: 60s
+timeout: 120s   # default: 60s for JS tasks; no timeout for Docker/daemon
 ```
 
 **Trigger options** — exactly one must be set:
@@ -212,6 +208,23 @@ timeout: 120s   # default: 60s
 | `webhook` | `"/hooks/my-task"` | HTTP POST to this path triggers a run |
 | `manual` | `true` | Only triggerable from UI or API |
 | `chain` | `from: other-task` | Triggered when another task completes |
+| `daemon` | `true` | Starts on app start, restarted on exit |
+
+**Docker runtime** — run containers instead of JS scripts. Live log streaming, kill support, daemon-compatible:
+
+```yaml
+name: Nginx Dev Server
+runtime: docker
+trigger:
+  daemon: true
+docker:
+  image: nginx:alpine
+  pull_policy: missing
+  ports:
+    - "8888:80"
+  volumes:
+    - "/tmp:/usr/share/nginx/html:ro"
+```
 
 ### task.js
 
@@ -498,8 +511,9 @@ A community registry index is planned — tasks will be searchable by name and t
 
 | Feature | Local-only |
 |---|---|
-| Task execution (cron / webhook / manual / chain) | ✅ |
+| Task execution (cron / webhook / manual / chain / daemon) | ✅ |
 | JavaScript runtime + all globals | ✅ |
+| Docker runtime (containers as tasks) | ✅ requires Docker daemon |
 | AI task generation | ✅ needs any OpenAI-compatible API key |
 | Local encrypted secrets | ✅ |
 | MCP server + agent skill | ✅ |
