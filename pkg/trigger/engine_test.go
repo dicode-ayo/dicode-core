@@ -12,7 +12,7 @@ import (
 
 	"github.com/dicode/dicode/pkg/db"
 	"github.com/dicode/dicode/pkg/registry"
-	jsruntime "github.com/dicode/dicode/pkg/runtime/js"
+	denoruntime "github.com/dicode/dicode/pkg/runtime/deno"
 	"github.com/dicode/dicode/pkg/secrets"
 	"github.com/dicode/dicode/pkg/task"
 	"go.uber.org/zap"
@@ -31,7 +31,10 @@ func newTestEnv(t *testing.T) *testEnv {
 	}
 	t.Cleanup(func() { d.Close() })
 	reg := registry.New(d)
-	rt := jsruntime.New(reg, secrets.Chain{}, d, zap.NewNop())
+	rt, err := denoruntime.New(reg, secrets.Chain{}, d, zap.NewNop())
+	if err != nil {
+		t.Skipf("deno not available: %v", err)
+	}
 	eng := New(reg, rt, zap.NewNop())
 	return &testEnv{engine: eng, reg: reg}
 }
@@ -40,15 +43,15 @@ func writeTask(t *testing.T, dir, id, script string, trigger task.TriggerConfig)
 	t.Helper()
 	td := filepath.Join(dir, id)
 	_ = os.MkdirAll(td, 0755)
-	yaml := "name: " + id + "\ntrigger:\n  manual: true\nruntime: js\n"
+	yaml := "name: " + id + "\ntrigger:\n  manual: true\nruntime: deno\n"
 	_ = os.WriteFile(filepath.Join(td, "task.yaml"), []byte(yaml), 0644)
-	_ = os.WriteFile(filepath.Join(td, "task.js"), []byte(script), 0644)
+	_ = os.WriteFile(filepath.Join(td, "task.ts"), []byte(script), 0644)
 	spec := &task.Spec{
 		ID:      id,
 		Name:    id,
-		Runtime: task.RuntimeJS,
+		Runtime: task.RuntimeDeno,
 		Trigger: trigger,
-		Timeout: 5 * time.Second,
+		Timeout: 30 * time.Second,
 		TaskDir: td,
 	}
 	return spec
@@ -68,9 +71,9 @@ func TestEngine_FireManual(t *testing.T) {
 		t.Fatal("empty run ID")
 	}
 
-	// FireManual is async; poll until the run finishes (up to 5s).
+	// FireManual is async; poll until the run finishes (up to 30s for deno startup).
 	var run *registry.Run
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		run, err = e.reg.GetRun(context.Background(), runID)
 		if err != nil {
@@ -79,7 +82,7 @@ func TestEngine_FireManual(t *testing.T) {
 		if run.Status != registry.StatusRunning {
 			break
 		}
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 	}
 	if run.Status != registry.StatusSuccess {
 		t.Errorf("expected success, got %s", run.Status)
@@ -132,7 +135,6 @@ func TestEngine_Chain(t *testing.T) {
 	dir := t.TempDir()
 	e := newTestEnv(t)
 
-	// task-a returns a value; task-b listens for task-a completion.
 	specA := writeTask(t, dir, "task-a", `return { msg: "from-a" }`, task.TriggerConfig{Manual: true})
 	specB := writeTask(t, dir, "task-b", `return input.msg`, task.TriggerConfig{
 		Chain: &task.ChainTrigger{From: "task-a", On: "success"},
@@ -149,10 +151,16 @@ func TestEngine_Chain(t *testing.T) {
 		t.Fatal("no run ID")
 	}
 
-	// Give chain goroutine time to complete.
-	time.Sleep(300 * time.Millisecond)
+	// Wait for both task-a and the chained task-b to complete.
+	deadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(deadline) {
+		runs, _ := e.reg.ListRuns(context.Background(), "task-b", 5)
+		if len(runs) > 0 && runs[0].Status != registry.StatusRunning {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
 
-	// task-b should have a run record now.
 	runs, err := e.reg.ListRuns(context.Background(), "task-b", 5)
 	if err != nil {
 		t.Fatalf("ListRuns task-b: %v", err)
@@ -178,7 +186,15 @@ func TestEngine_Chain_OnFailure(t *testing.T) {
 	_ = e.reg.Register(specB)
 
 	e.engine.FireManual(context.Background(), "fail-a", nil)
-	time.Sleep(300 * time.Millisecond)
+
+	deadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(deadline) {
+		runs, _ := e.reg.ListRuns(context.Background(), "on-fail-b", 5)
+		if len(runs) > 0 && runs[0].Status != registry.StatusRunning {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
 
 	runs, _ := e.reg.ListRuns(context.Background(), "on-fail-b", 5)
 	if len(runs) == 0 {
@@ -193,7 +209,6 @@ func TestEngine_Register_Unregister(t *testing.T) {
 	_ = e.reg.Register(spec)
 	e.engine.Register(spec)
 
-	// Webhook should be registered.
 	e.engine.mu.Lock()
 	_, ok := e.engine.webhooks["/hooks/test"]
 	e.engine.mu.Unlock()

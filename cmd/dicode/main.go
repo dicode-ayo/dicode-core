@@ -12,8 +12,8 @@ import (
 	"github.com/dicode/dicode/pkg/db"
 	"github.com/dicode/dicode/pkg/onboarding"
 	"github.com/dicode/dicode/pkg/registry"
+	denoruntime "github.com/dicode/dicode/pkg/runtime/deno"
 	dockerruntime "github.com/dicode/dicode/pkg/runtime/docker"
-	jsruntime "github.com/dicode/dicode/pkg/runtime/js"
 	"github.com/dicode/dicode/pkg/secrets"
 	"github.com/dicode/dicode/pkg/source"
 	gitSource "github.com/dicode/dicode/pkg/source/git"
@@ -112,8 +112,11 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 		log.Info("cancelled stale runs from previous session", zap.Strings("tasks", stale))
 	}
 
-	// 4. JS runtime.
-	rt := jsruntime.New(reg, secretsChain, database, log)
+	// 4. Deno runtime.
+	rt, err := denoruntime.New(reg, secretsChain, database, log)
+	if err != nil {
+		return fmt.Errorf("init deno runtime: %w", err)
+	}
 
 	// 5. Trigger engine.
 	eng := trigger.New(reg, rt, log)

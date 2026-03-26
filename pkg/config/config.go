@@ -45,9 +45,9 @@ type SecretProviderConfig struct {
 }
 
 type NotificationsConfig struct {
-	OnFailure bool                   `yaml:"on_failure"`
-	OnSuccess bool                   `yaml:"on_success"`
-	Provider  *NotifyProviderConfig  `yaml:"provider,omitempty"`
+	OnFailure bool                  `yaml:"on_failure"`
+	OnSuccess bool                  `yaml:"on_success"`
+	Provider  *NotifyProviderConfig `yaml:"provider,omitempty"`
 }
 
 type NotifyProviderConfig struct {
@@ -96,8 +96,8 @@ type SourceAuth struct {
 type ServerConfig struct {
 	Port   int    `yaml:"port"`
 	Secret string `yaml:"secret" json:"-"` // optional basic-auth password; excluded from JSON API
-	MCP    bool   `yaml:"mcp"`    // expose MCP endpoint at /mcp (default: true)
-	Tray   *bool  `yaml:"tray"`   // system tray icon (nil = auto-detect)
+	MCP    bool   `yaml:"mcp"`             // expose MCP endpoint at /mcp (default: true)
+	Tray   *bool  `yaml:"tray"`            // system tray icon (nil = auto-detect)
 }
 
 type AIConfig struct {

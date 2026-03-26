@@ -20,14 +20,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
 	"github.com/dicode/dicode/pkg/config"
 	"github.com/dicode/dicode/pkg/registry"
-	"github.com/dicode/dicode/pkg/source/local"
 	gitSource "github.com/dicode/dicode/pkg/source/git"
+	"github.com/dicode/dicode/pkg/source/local"
 	"github.com/dicode/dicode/pkg/task"
 	"github.com/dicode/dicode/pkg/trigger"
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 )
@@ -145,10 +145,10 @@ type Server struct {
 	registry    *registry.Registry
 	engine      *trigger.Engine
 	cfg         *config.Config
-	cfgPath     string              // path to dicode.yaml; empty in tests
-	secretsMgr  SecretsManager      // nil if local provider not configured
+	cfgPath     string               // path to dicode.yaml; empty in tests
+	secretsMgr  SecretsManager       // nil if local provider not configured
 	reconciler  *registry.Reconciler // nil if not wired
-	dataDir     string              // ~/.dicode or cfg.DataDir
+	dataDir     string               // ~/.dicode or cfg.DataDir
 	sessions    *sessionStore
 	limiter     *unlockLimiter
 	logs        *LogBroadcaster
@@ -179,8 +179,8 @@ func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config
 			}
 			return s[i:j]
 		},
-		"string":       fmt.Sprint,
-		"deref":        func(t *time.Time) time.Time { return *t },
+		"string": fmt.Sprint,
+		"deref":  func(t *time.Time) time.Time { return *t },
 		"toJSON": func(v any) (template.JS, error) {
 			b, err := json.Marshal(v)
 			return template.JS(b), err
@@ -293,7 +293,7 @@ func (s *Server) Start(ctx context.Context) error {
 	s.srv = &http.Server{
 		Addr:              fmt.Sprintf(":%d", s.port),
 		Handler:           s.Handler(),
-		ReadHeaderTimeout: 5 * time.Second,  // mitigates Slowloris
+		ReadHeaderTimeout: 5 * time.Second,   // mitigates Slowloris
 		IdleTimeout:       120 * time.Second, // clean up idle keep-alives
 		// WriteTimeout is intentionally 0: SSE and AI stream endpoints write indefinitely.
 	}
@@ -982,9 +982,9 @@ func (s *Server) apiAddSource(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		sc = config.SourceConfig{
-			Type:         config.SourceTypeGit,
-			URL:          url,
-			Branch:       strings.TrimSpace(r.FormValue("branch")),
+			Type:   config.SourceTypeGit,
+			URL:    url,
+			Branch: strings.TrimSpace(r.FormValue("branch")),
 			Auth: config.SourceAuth{
 				Type:     r.FormValue("auth_type"),
 				TokenEnv: r.FormValue("token_env"),

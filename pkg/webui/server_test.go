@@ -12,7 +12,7 @@ import (
 	"github.com/dicode/dicode/pkg/config"
 	"github.com/dicode/dicode/pkg/db"
 	"github.com/dicode/dicode/pkg/registry"
-	jsruntime "github.com/dicode/dicode/pkg/runtime/js"
+	denoruntime "github.com/dicode/dicode/pkg/runtime/deno"
 	"github.com/dicode/dicode/pkg/secrets"
 	"github.com/dicode/dicode/pkg/task"
 	"github.com/dicode/dicode/pkg/trigger"
@@ -28,7 +28,10 @@ func newTestServer(t *testing.T) (*Server, *registry.Registry) {
 	t.Cleanup(func() { d.Close() })
 
 	reg := registry.New(d)
-	rt := jsruntime.New(reg, secrets.Chain{}, d, zap.NewNop())
+	rt, err := denoruntime.New(reg, secrets.Chain{}, d, zap.NewNop())
+	if err != nil {
+		t.Skipf("deno not available: %v", err)
+	}
 	eng := trigger.New(reg, rt, zap.NewNop())
 
 	srv, err := New(8080, reg, eng, &config.Config{Server: config.ServerConfig{Port: 8080}}, "", nil, nil, "", NewLogBroadcaster(), zap.NewNop())
@@ -43,12 +46,12 @@ func registerTask(t *testing.T, reg *registry.Registry, id, script string) *task
 	dir := t.TempDir()
 	td := filepath.Join(dir, id)
 	_ = os.MkdirAll(td, 0755)
-	_ = os.WriteFile(filepath.Join(td, "task.yaml"), []byte("name: "+id+"\ntrigger:\n  manual: true\nruntime: js\n"), 0644)
-	_ = os.WriteFile(filepath.Join(td, "task.js"), []byte(script), 0644)
+	_ = os.WriteFile(filepath.Join(td, "task.yaml"), []byte("name: "+id+"\ntrigger:\n  manual: true\nruntime: deno\n"), 0644)
+	_ = os.WriteFile(filepath.Join(td, "task.ts"), []byte(script), 0644)
 	spec := &task.Spec{
 		ID:      id,
 		Name:    id,
-		Runtime: task.RuntimeJS,
+		Runtime: task.RuntimeDeno,
 		Trigger: task.TriggerConfig{Manual: true},
 		Timeout: 5 * time.Second,
 		TaskDir: td,
