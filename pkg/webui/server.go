@@ -438,7 +438,8 @@ func (s *Server) uiRunRows(w http.ResponseWriter, r *http.Request) {
 // editorData is passed to the editor partial template.
 type editorData struct {
 	ID         string
-	TaskJS     string
+	ScriptFile string // "task.ts" or "task.js"
+	TaskJS     string // content of ScriptFile
 	TestJS     string
 	TestExists bool
 }
@@ -451,18 +452,32 @@ func (s *Server) uiTaskEditor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d := editorData{ID: id}
-	if b, err := os.ReadFile(filepath.Join(spec.TaskDir, "task.js")); err == nil {
-		d.TaskJS = string(b)
+	// Prefer task.ts for deno tasks; fall back to task.js.
+	for _, name := range []string{"task.ts", "task.js"} {
+		if b, err := os.ReadFile(filepath.Join(spec.TaskDir, name)); err == nil {
+			d.ScriptFile = name
+			d.TaskJS = string(b)
+			break
+		}
 	}
-	if b, err := os.ReadFile(filepath.Join(spec.TaskDir, "task.test.js")); err == nil {
-		d.TestJS = string(b)
-		d.TestExists = true
+	if d.ScriptFile == "" {
+		d.ScriptFile = "task.ts" // default for new deno tasks
+	}
+	for _, name := range []string{"task.test.ts", "task.test.js"} {
+		if b, err := os.ReadFile(filepath.Join(spec.TaskDir, name)); err == nil {
+			d.TestJS = string(b)
+			d.TestExists = true
+			break
+		}
 	}
 	s.renderPartial(w, "editor", d)
 }
 
 // allowedFiles restricts which files the editor API can read/write.
-var allowedFiles = map[string]bool{"task.js": true, "task.test.js": true}
+var allowedFiles = map[string]bool{
+	"task.js": true, "task.ts": true,
+	"task.test.js": true, "task.test.ts": true,
+}
 
 func (s *Server) apiGetFile(w http.ResponseWriter, r *http.Request) {
 	id, filename := chi.URLParam(r, "id"), chi.URLParam(r, "filename")

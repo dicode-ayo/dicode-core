@@ -102,7 +102,7 @@ func LoadDir(dir string) (*Spec, error) {
 	spec.TaskDir = dir
 	spec.ID = filepath.Base(dir)
 
-	if spec.Runtime == "" {
+	if spec.Runtime == "" || spec.Runtime == "js" {
 		spec.Runtime = RuntimeDeno
 	}
 	// Docker and daemon tasks may run indefinitely; don't impose a default timeout.
@@ -180,8 +180,8 @@ func (s *Spec) validate() error {
 		return fmt.Errorf("only one trigger type is allowed per task")
 	}
 	switch s.Runtime {
-	case RuntimeDeno, "":
-		// ok
+	case RuntimeDeno, "js", "":
+		// ok — "js" is a legacy alias for "deno"
 	case RuntimeDocker:
 		if s.Docker == nil {
 			return fmt.Errorf("runtime docker requires a docker: section in task.yaml")
@@ -196,7 +196,7 @@ func (s *Spec) validate() error {
 			return fmt.Errorf("docker.pull_policy must be always, missing, or never")
 		}
 	default:
-		return fmt.Errorf("unsupported runtime %q (supported: deno, docker)", s.Runtime)
+		return fmt.Errorf("unsupported runtime %q (supported: deno, js, docker)", s.Runtime)
 	}
 	return nil
 }
