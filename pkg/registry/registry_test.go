@@ -23,7 +23,7 @@ func makeSpec(id string) *task.Spec {
 	return &task.Spec{
 		ID:      id,
 		Name:    id,
-		Runtime: task.RuntimeJS,
+		Runtime: task.RuntimeDeno,
 		Trigger: task.TriggerConfig{Manual: true},
 		Timeout: 30 * time.Second,
 	}

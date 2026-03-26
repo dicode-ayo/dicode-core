@@ -14,13 +14,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dicode/dicode/pkg/source"
+	"github.com/dicode/dicode/pkg/task"
 	gogit "github.com/go-git/go-git/v5"
 	gogitconfig "github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
 	gogittransport "github.com/go-git/go-git/v5/plumbing/transport"
 	"github.com/go-git/go-git/v5/plumbing/transport/http"
-	"github.com/dicode/dicode/pkg/source"
-	"github.com/dicode/dicode/pkg/task"
 	"go.uber.org/zap"
 )
 

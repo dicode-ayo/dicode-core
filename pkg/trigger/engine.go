@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/dicode/dicode/pkg/registry"
+	denoruntime "github.com/dicode/dicode/pkg/runtime/deno"
 	dockerruntime "github.com/dicode/dicode/pkg/runtime/docker"
-	jsruntime "github.com/dicode/dicode/pkg/runtime/js"
 	"github.com/dicode/dicode/pkg/task"
 	"github.com/google/uuid"
 	"github.com/robfig/cron/v3"
@@ -23,14 +23,14 @@ import (
 // Engine coordinates all trigger types and fires task runs.
 type Engine struct {
 	registry *registry.Registry
-	jsRT     *jsruntime.Runtime
+	denoRT   *denoruntime.Runtime
 	dockerRT *dockerruntime.Runtime
 	cron     *cron.Cron
 	log      *zap.Logger
 
 	mu          sync.Mutex
 	cronEntries map[string]cron.EntryID // taskID → cron entry
-	webhooks    map[string]string        // webhook path → taskID
+	webhooks    map[string]string       // webhook path → taskID
 
 	runCancels sync.Map // runID → context.CancelFunc
 
@@ -43,10 +43,10 @@ type Engine struct {
 }
 
 // New creates a trigger Engine.
-func New(r *registry.Registry, rt *jsruntime.Runtime, log *zap.Logger) *Engine {
+func New(r *registry.Registry, rt *denoruntime.Runtime, log *zap.Logger) *Engine {
 	return &Engine{
 		registry:    r,
-		jsRT:        rt,
+		denoRT:      rt,
 		cron:        cron.New(),
 		log:         log,
 		cronEntries: make(map[string]cron.EntryID),
@@ -142,7 +142,7 @@ func (e *Engine) registerCron(spec *task.Spec) {
 		if !ok {
 			return
 		}
-		e.fireAsync(context.Background(), s, jsruntime.RunOptions{}, "cron") //nolint:errcheck
+		e.fireAsync(context.Background(), s, denoruntime.RunOptions{}, "cron") //nolint:errcheck
 	})
 	if err != nil {
 		e.log.Error("invalid cron expression",
@@ -176,7 +176,7 @@ func (e *Engine) registerDaemon(spec *task.Spec) {
 }
 
 func (e *Engine) startDaemon(spec *task.Spec) {
-	runID, err := e.fireAsync(context.Background(), spec, jsruntime.RunOptions{}, "daemon")
+	runID, err := e.fireAsync(context.Background(), spec, denoruntime.RunOptions{}, "daemon")
 	if err != nil {
 		e.log.Error("daemon start failed", zap.String("task", spec.ID), zap.Error(err))
 		return
@@ -266,7 +266,7 @@ func (e *Engine) FireManual(ctx context.Context, taskID string, params map[strin
 		return "", fmt.Errorf("task %q not found", taskID)
 	}
 	e.log.Info("manual trigger", zap.String("task", taskID))
-	return e.fireAsync(context.Background(), spec, jsruntime.RunOptions{Params: params}, "manual")
+	return e.fireAsync(context.Background(), spec, denoruntime.RunOptions{Params: params}, "manual")
 }
 
 // KillRun cancels a running task by its run ID.
@@ -296,7 +296,7 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runStatus strin
 			zap.String("to", spec.ID),
 			zap.String("on", on),
 		)
-		go e.fireAsync(ctx, spec, jsruntime.RunOptions{Input: output}, "chain") //nolint:errcheck
+		go e.fireAsync(ctx, spec, denoruntime.RunOptions{Input: output}, "chain") //nolint:errcheck
 	}
 }
 
@@ -330,7 +330,7 @@ func (e *Engine) WebhookHandler() http.Handler {
 			}
 		}
 
-		runID, err := e.fireAsync(r.Context(), spec, jsruntime.RunOptions{Input: input}, "webhook")
+		runID, err := e.fireAsync(r.Context(), spec, denoruntime.RunOptions{Input: input}, "webhook")
 		if err != nil {
 			http.Error(w, "task failed to start", http.StatusInternalServerError)
 			return
@@ -343,8 +343,7 @@ func (e *Engine) WebhookHandler() http.Handler {
 
 // fireAsync pre-creates the run record, starts execution in a goroutine,
 // and returns the run ID immediately.
-// source identifies how the run was triggered ("manual","cron","webhook","chain","daemon").
-func (e *Engine) fireAsync(ctx context.Context, spec *task.Spec, opts jsruntime.RunOptions, source string) (string, error) {
+func (e *Engine) fireAsync(ctx context.Context, spec *task.Spec, opts denoruntime.RunOptions, source string) (string, error) {
 	runID := uuid.New().String()
 	opts.RunID = runID
 
@@ -389,7 +388,7 @@ func (e *Engine) fireAsync(ctx context.Context, spec *task.Spec, opts jsruntime.
 }
 
 // dispatch routes a run to the appropriate runtime and returns the final status.
-func (e *Engine) dispatch(ctx context.Context, spec *task.Spec, opts jsruntime.RunOptions) string {
+func (e *Engine) dispatch(ctx context.Context, spec *task.Spec, opts denoruntime.RunOptions) string {
 	switch spec.Runtime {
 	case task.RuntimeDocker:
 		if e.dockerRT == nil {
@@ -418,10 +417,15 @@ func (e *Engine) dispatch(ctx context.Context, spec *task.Spec, opts jsruntime.R
 		e.FireChain(context.Background(), spec.ID, status, nil)
 		return status
 
-	default: // RuntimeJS
-		result, err := e.jsRT.Run(ctx, spec, opts)
+	default: // RuntimeDeno
+		if e.denoRT == nil {
+			e.log.Error("deno runtime not configured", zap.String("task", spec.ID))
+			_ = e.registry.FinishRun(context.Background(), opts.RunID, registry.StatusFailure)
+			return registry.StatusFailure
+		}
+		result, err := e.denoRT.Run(ctx, spec, opts)
 		if err != nil {
-			e.log.Error("js run error", zap.String("task", spec.ID), zap.Error(err))
+			e.log.Error("deno run error", zap.String("task", spec.ID), zap.Error(err))
 			return registry.StatusFailure
 		}
 		status := registry.StatusSuccess

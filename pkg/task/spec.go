@@ -13,7 +13,7 @@ import (
 type Runtime string
 
 const (
-	RuntimeJS     Runtime = "js"
+	RuntimeDeno   Runtime = "deno"
 	RuntimeDocker Runtime = "docker"
 )
 
@@ -31,8 +31,8 @@ type DockerConfig struct {
 
 // ChainTrigger fires a task when another task completes.
 type ChainTrigger struct {
-	From string `yaml:"from"`           // task ID to listen for
-	On   string `yaml:"on,omitempty"`   // "success" (default) | "failure" | "always"
+	From string `yaml:"from"`         // task ID to listen for
+	On   string `yaml:"on,omitempty"` // "success" (default) | "failure" | "always"
 }
 
 // TriggerConfig defines how a task is triggered.
@@ -49,7 +49,7 @@ type TriggerConfig struct {
 // Param defines a user-configurable input for a task.
 type Param struct {
 	Name        string `yaml:"name"`
-	Type        string `yaml:"type"`        // "string" | "number" | "boolean" | "cron"
+	Type        string `yaml:"type"` // "string" | "number" | "boolean" | "cron"
 	Default     string `yaml:"default"`
 	Description string `yaml:"description"`
 	Required    bool   `yaml:"required"`
@@ -103,7 +103,7 @@ func LoadDir(dir string) (*Spec, error) {
 	spec.ID = filepath.Base(dir)
 
 	if spec.Runtime == "" {
-		spec.Runtime = RuntimeJS
+		spec.Runtime = RuntimeDeno
 	}
 	// Docker and daemon tasks may run indefinitely; don't impose a default timeout.
 	if spec.Timeout == 0 && spec.Runtime != RuntimeDocker && !spec.Trigger.Daemon {
@@ -115,9 +115,14 @@ func LoadDir(dir string) (*Spec, error) {
 
 // ScriptPath returns the path to the task script file.
 // Returns empty string for runtimes that don't use a script file (e.g. Docker).
+// For the deno runtime, task.ts is preferred over task.js.
 func (s *Spec) ScriptPath() string {
 	switch s.Runtime {
-	case RuntimeJS:
+	case RuntimeDeno:
+		ts := filepath.Join(s.TaskDir, "task.ts")
+		if _, err := os.Stat(ts); err == nil {
+			return ts
+		}
 		return filepath.Join(s.TaskDir, "task.js")
 	default:
 		return ""
@@ -175,7 +180,7 @@ func (s *Spec) validate() error {
 		return fmt.Errorf("only one trigger type is allowed per task")
 	}
 	switch s.Runtime {
-	case RuntimeJS, "":
+	case RuntimeDeno, "":
 		// ok
 	case RuntimeDocker:
 		if s.Docker == nil {
@@ -191,7 +196,7 @@ func (s *Spec) validate() error {
 			return fmt.Errorf("docker.pull_policy must be always, missing, or never")
 		}
 	default:
-		return fmt.Errorf("unsupported runtime %q (supported: js, docker)", s.Runtime)
+		return fmt.Errorf("unsupported runtime %q (supported: deno, docker)", s.Runtime)
 	}
 	return nil
 }

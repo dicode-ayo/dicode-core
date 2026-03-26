@@ -13,10 +13,10 @@ import (
 // NtfyNotifier sends notifications via ntfy (https://ntfy.sh).
 // ntfy is Apache 2.0 licensed and can be self-hosted.
 type NtfyNotifier struct {
-	baseURL  string
-	topic    string
-	token    string // optional Bearer token for auth
-	client   *http.Client
+	baseURL string
+	topic   string
+	token   string // optional Bearer token for auth
+	client  *http.Client
 }
 
 func NewNtfyNotifier(baseURL, topic, tokenEnv string) *NtfyNotifier {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -35,9 +36,9 @@ func writeTask(t *testing.T, dir, name string) string {
 	if err := os.MkdirAll(td, 0755); err != nil {
 		t.Fatal(err)
 	}
-	yaml := "name: " + name + "\ntrigger:\n  manual: true\nruntime: js\n"
+	yaml := "name: " + name + "\ntrigger:\n  manual: true\nruntime: deno\n"
 	_ = os.WriteFile(filepath.Join(td, "task.yaml"), []byte(yaml), 0644)
-	_ = os.WriteFile(filepath.Join(td, "task.js"), []byte("return 'ok'"), 0644)
+	_ = os.WriteFile(filepath.Join(td, "task.ts"), []byte("return 'ok'"), 0644)
 	return td
 }
 
@@ -95,7 +96,7 @@ func TestReconciler_Updated(t *testing.T) {
 
 	// Update the task name on disk and emit Updated.
 	_ = os.WriteFile(filepath.Join(td, "task.yaml"),
-		[]byte("name: upd-task-v2\ntrigger:\n  manual: true\nruntime: js\n"), 0644)
+		[]byte("name: upd-task-v2\ntrigger:\n  manual: true\nruntime: deno\n"), 0644)
 	fs.ch <- source.Event{Kind: source.EventUpdated, TaskID: "upd-task", TaskDir: td, Source: "test"}
 	time.Sleep(50 * time.Millisecond)
 
@@ -156,8 +157,13 @@ func TestReconciler_OnRegisterCallback(t *testing.T) {
 	fs := newFakeSource("test")
 	_, rec := newTestReconciler(t, fs)
 
+	var mu sync.Mutex
 	var called *task.Spec
-	rec.OnRegister = func(spec *task.Spec) { called = spec }
+	rec.OnRegister = func(spec *task.Spec) {
+		mu.Lock()
+		called = spec
+		mu.Unlock()
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -166,8 +172,11 @@ func TestReconciler_OnRegisterCallback(t *testing.T) {
 	fs.ch <- source.Event{Kind: source.EventAdded, TaskID: "cb-task", TaskDir: td, Source: "test"}
 	time.Sleep(50 * time.Millisecond)
 
-	if called == nil || called.ID != "cb-task" {
-		t.Errorf("OnRegister not called, got %v", called)
+	mu.Lock()
+	got := called
+	mu.Unlock()
+	if got == nil || got.ID != "cb-task" {
+		t.Errorf("OnRegister not called, got %v", got)
 	}
 }
 
