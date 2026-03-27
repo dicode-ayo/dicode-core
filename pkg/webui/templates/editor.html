@@ -3,15 +3,15 @@
 
   <!-- ── Toolbar ── -->
   <div id="editor-tabs" style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.5rem;flex-wrap:wrap">
-    <button id="tab-task-js" class="btn btn-sm" onclick="editorSwitchTab({{toJSON .ScriptFile}})">{{.ScriptFile}}</button>
+    <button id="tab-{{tabID .ScriptFile}}" class="btn btn-sm" data-tab="1" onclick="editorSwitchTab({{toJSON .ScriptFile}})">{{.ScriptFile}}</button>
     {{if .TestExists}}
-    <button id="tab-task-test-js" class="btn btn-sm" style="background:#6c757d" onclick="editorSwitchTab('task.test.js')">task.test.js</button>
+    <button id="tab-task-test-js" class="btn btn-sm" style="background:#6c757d" data-tab="1" onclick="editorSwitchTab('task.test.js')">task.test.js</button>
     {{end}}
 
     <div style="margin-left:auto;display:flex;gap:0.5rem;align-items:center">
       <span id="editor-status" style="font-size:0.8rem"></span>
       <button class="btn btn-sm" onclick="editorSave()">💾 Save</button>
-      {{if not .TestExists}}
+      {{if and (not .IsContainer) (not .TestExists)}}
       <button class="btn btn-sm" style="background:#6c757d" onclick="editorCreateTest()">+ test</button>
       {{end}}
       <button id="ai-toggle-btn" class="btn btn-sm" style="background:#7c3aed" onclick="aiToggle()">🤖 AI</button>
@@ -93,6 +93,7 @@
 
   function langFor(fname) {
     if (fname === 'task.yaml') return 'yaml';
+    if (fname === 'Dockerfile') return 'dockerfile';
     if (fname.endsWith('.ts')) return 'typescript';
     if (fname.endsWith('.py')) return 'python';
     return 'javascript';
@@ -133,13 +134,9 @@
     if (btn) btn.style.background = '#0d6efd';
   };
 
-  /* Mark tab buttons with data-tab so the selector above works */
-  document.querySelectorAll('#editor-tabs button[id^="tab-"]').forEach(function(b) {
-    b.setAttribute('data-tab', '1');
-  });
-  /* Ensure task.js tab starts active */
-  var jsBtn = document.getElementById('tab-task-js');
-  if (jsBtn) { jsBtn.setAttribute('data-tab','1'); jsBtn.style.background = '#0d6efd'; }
+  /* Activate the primary file tab on load */
+  var primaryBtn = document.getElementById('tab-' + SCRIPT_FILE.replace(/\./g,'-'));
+  if (primaryBtn) primaryBtn.style.background = '#0d6efd';
 
   /* Dynamically add a tab for a file if it doesn't exist yet */
   function ensureTab(fname) {

@@ -196,6 +196,7 @@ func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config
 		"list":      func(items ...string) []string { return items },
 		"not":       func(b bool) bool { return !b },
 		"derefBool": func(b *bool) bool { return b != nil && *b },
+		"tabID":     func(s string) string { return strings.ReplaceAll(s, ".", "-") },
 	}
 	base, err := template.New("base.html").Funcs(funcMap).ParseFS(templateFS, "templates/base.html")
 	if err != nil {
@@ -451,10 +452,11 @@ func (s *Server) uiRunRows(w http.ResponseWriter, r *http.Request) {
 // editorData is passed to the editor partial template.
 type editorData struct {
 	ID         string
-	ScriptFile string // "task.ts" or "task.js"
+	ScriptFile string // primary file shown in editor (e.g. "task.ts", "task.py", "Dockerfile")
 	TaskJS     string // content of ScriptFile
 	TestJS     string
 	TestExists bool
+	IsContainer bool // true for docker/podman tasks — hides test-related UI
 }
 
 func (s *Server) uiTaskEditor(w http.ResponseWriter, r *http.Request) {
@@ -465,24 +467,36 @@ func (s *Server) uiTaskEditor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d := editorData{ID: id}
-	// Probe script files in priority order; Python tasks use task.py.
-	for _, name := range []string{"task.ts", "task.js", "task.py"} {
-		if b, err := os.ReadFile(filepath.Join(spec.TaskDir, name)); err == nil {
-			d.ScriptFile = name
+
+	switch spec.Runtime {
+	case task.RuntimeDocker, task.RuntimePodman:
+		// Container tasks: primary file is the Dockerfile.
+		d.IsContainer = true
+		d.ScriptFile = "Dockerfile"
+		if b, err := os.ReadFile(filepath.Join(spec.TaskDir, "Dockerfile")); err == nil {
 			d.TaskJS = string(b)
-			break
+		}
+	default:
+		// Code tasks: probe for the script file.
+		for _, name := range []string{"task.ts", "task.js", "task.py"} {
+			if b, err := os.ReadFile(filepath.Join(spec.TaskDir, name)); err == nil {
+				d.ScriptFile = name
+				d.TaskJS = string(b)
+				break
+			}
+		}
+		if d.ScriptFile == "" {
+			d.ScriptFile = "task.ts"
+		}
+		for _, name := range []string{"task.test.ts", "task.test.js"} {
+			if b, err := os.ReadFile(filepath.Join(spec.TaskDir, name)); err == nil {
+				d.TestJS = string(b)
+				d.TestExists = true
+				break
+			}
 		}
 	}
-	if d.ScriptFile == "" {
-		d.ScriptFile = "task.ts" // default for new deno tasks
-	}
-	for _, name := range []string{"task.test.ts", "task.test.js"} {
-		if b, err := os.ReadFile(filepath.Join(spec.TaskDir, name)); err == nil {
-			d.TestJS = string(b)
-			d.TestExists = true
-			break
-		}
-	}
+
 	s.renderPartial(w, "editor", d)
 }
 
@@ -490,6 +504,7 @@ func (s *Server) uiTaskEditor(w http.ResponseWriter, r *http.Request) {
 var allowedFiles = map[string]bool{
 	"task.js": true, "task.ts": true, "task.py": true,
 	"task.test.js": true, "task.test.ts": true,
+	"Dockerfile": true,
 }
 
 func (s *Server) apiGetFile(w http.ResponseWriter, r *http.Request) {

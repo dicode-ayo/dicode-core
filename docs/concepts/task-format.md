@@ -204,18 +204,50 @@ docker:
 
 ## Container fields (`docker:`)
 
-Both the `docker` and `podman` runtimes share the same `docker:` config section:
+Both the `docker` and `podman` runtimes share the same `docker:` config section.
+Either `image` or `build` must be set — not neither.
+
+### Pull a pre-built image
+
+```yaml
+docker:
+  image: nginx:alpine
+  pull_policy: missing   # always | missing (default) | never
+```
+
+### Build from a local Dockerfile
+
+```yaml
+docker:
+  build:
+    dockerfile: Dockerfile   # relative to task folder; default "Dockerfile"
+    context: .               # relative to task folder; default task folder
+  ports:
+    - "8888:80"
+```
+
+The built image is tagged `dicode-<taskID>:<hash>` where `<hash>` is derived
+from the Dockerfile content. If the Dockerfile hasn't changed, the existing image
+is reused and the build step is skipped entirely. Build output is streamed to the
+run log in real time.
+
+Use **Edit code** on the task page to edit the Dockerfile directly in the web UI.
+
+### All fields
 
 | Field | Type | Description |
 |---|---|---|
-| `docker.image` | string | ✅ Container image (e.g. `nginx:alpine`, `python:3.12-slim`) |
+| `docker.image` | string | Container image (e.g. `nginx:alpine`). Required if `build` is not set. |
+| `docker.build` | object | Build from local Dockerfile instead of pulling. |
+| `docker.build.dockerfile` | string | Path to Dockerfile, relative to task folder. Default: `Dockerfile` |
+| `docker.build.context` | string | Build context path, relative to task folder. Default: task folder |
 | `docker.command` | list | Overrides image CMD |
 | `docker.entrypoint` | list | Overrides image ENTRYPOINT |
 | `docker.ports` | list | Port bindings — `"hostPort:containerPort"` |
 | `docker.volumes` | list | Volume mounts — `"host:container[:ro]"` |
 | `docker.working_dir` | string | Container working directory |
 | `docker.env_vars` | map | Literal environment variables injected into container |
-| `docker.pull_policy` | string | `missing` (default), `always`, `never` |
+| `docker.pull_policy` | string | `missing` (default), `always`, `never`. Ignored when using `build`. |
 
 **Live logs** — container stdout/stderr is streamed line-by-line to the run log as it runs.
 
@@ -399,6 +431,7 @@ Examples: `morning-email-check`, `github-release-notifier`, `backup-database`
 
 - `task.yaml` is always required. A folder without it is ignored.
 - The script file (`task.ts`, `task.js`, or `task.py`) is required for code runtimes; omit it only for `runtime: docker` or `runtime: podman`.
+- Container tasks using `docker.build` need a `Dockerfile` in the task folder (or at the path set in `docker.build.dockerfile`).
 - `task.test.js` / `task.test.ts` is optional. `dicode task test` skips tasks without it.
 - Any other files in the folder are ignored (useful for README, schema files, etc.).
 - Subdirectories are ignored — task folders are flat.

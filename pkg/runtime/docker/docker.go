@@ -4,17 +4,23 @@
 package docker
 
 import (
+	"archive/tar"
 	"bufio"
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
 	"github.com/dicode/dicode/pkg/registry"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	"github.com/dicode/dicode/pkg/task"
+	dockerbuild "github.com/docker/docker/api/types/build"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
 	dockerclient "github.com/docker/docker/client"
@@ -47,7 +53,7 @@ func New(r *registry.Registry, log *zap.Logger) *Runtime {
 	return &Runtime{registry: r, log: log}
 }
 
-// fail marks a run as failed and returns the result. Used to DRY up early-exit error paths.
+// fail marks a run as failed and returns the result.
 func (rt *Runtime) fail(runID string, err error) (*RunResult, error) {
 	_ = rt.registry.FinishRun(context.Background(), runID, registry.StatusFailure)
 	return &RunResult{RunID: runID, Error: err}, nil
@@ -69,23 +75,34 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 
 	cfg := spec.Docker
 
-	// Pull image if needed.
-	pullPolicy := cfg.PullPolicy
-	if pullPolicy == "" {
-		pullPolicy = "missing"
-	}
-	if err := rt.maybePull(ctx, dc, cfg.Image, pullPolicy, runID); err != nil {
-		if ctx.Err() != nil {
-			_ = rt.registry.FinishRun(context.Background(), runID, registry.StatusCancelled)
-			return &RunResult{RunID: runID, Error: err}, nil
+	// Resolve the image: build from Dockerfile or pull.
+	imageTag := cfg.Image
+	if cfg.Build != nil {
+		imageTag, err = rt.buildImage(ctx, dc, spec, runID)
+		if err != nil {
+			if ctx.Err() != nil {
+				_ = rt.registry.FinishRun(context.Background(), runID, registry.StatusCancelled)
+				return &RunResult{RunID: runID, Error: err}, nil
+			}
+			return rt.fail(runID, err)
 		}
-		return rt.fail(runID, err)
+	} else {
+		pullPolicy := cfg.PullPolicy
+		if pullPolicy == "" {
+			pullPolicy = "missing"
+		}
+		if err := rt.maybePull(ctx, dc, cfg.Image, pullPolicy, runID); err != nil {
+			if ctx.Err() != nil {
+				_ = rt.registry.FinishRun(context.Background(), runID, registry.StatusCancelled)
+				return &RunResult{RunID: runID, Error: err}, nil
+			}
+			return rt.fail(runID, err)
+		}
 	}
 
 	// Build container config.
-	// Labels let startup cleanup identify orphaned containers from a previous session.
 	containerCfg := &container.Config{
-		Image: cfg.Image,
+		Image: imageTag,
 		Labels: map[string]string{
 			"dicode.run-id":  runID,
 			"dicode.task-id": spec.ID,
@@ -106,7 +123,6 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	}
 	containerCfg.Env = envList
 
-	// Parse port bindings: "hostPort:containerPort[/proto]"
 	portBindings := nat.PortMap{}
 	exposedPorts := nat.PortSet{}
 	for _, p := range cfg.Ports {
@@ -143,7 +159,7 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		zap.String("task", spec.ID),
 		zap.String("run", runID),
 		zap.String("container", shortID),
-		zap.String("image", cfg.Image),
+		zap.String("image", imageTag),
 	)
 
 	defer func() {
@@ -153,18 +169,9 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	if err := dc.ContainerStart(ctx, containerID, container.StartOptions{}); err != nil {
 		return rt.fail(runID, fmt.Errorf("start container: %w", err))
 	}
-	rt.log.Info("container started",
-		zap.String("task", spec.ID),
-		zap.String("run", runID),
-		zap.String("container", shortID),
-	)
 
-	// ContainerWait is started early so we don't miss the exit event.
 	waitStatusCh, waitErrCh := dc.ContainerWait(context.Background(), containerID, container.WaitConditionNotRunning)
 
-	// Attach log stream using context.Background() so we control closure explicitly.
-	// This prevents the Docker HTTP transport from leaving reads half-open when the
-	// run context is cancelled — we close logReader ourselves to unblock stdcopy.
 	logReader, err := dc.ContainerLogs(context.Background(), containerID, container.LogsOptions{
 		ShowStdout: true,
 		ShowStderr: true,
@@ -175,12 +182,10 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		return rt.fail(runID, fmt.Errorf("attach logs: %w", err))
 	}
 
-	// closeLog closes logReader exactly once — safe to call from multiple goroutines.
 	var closeOnce sync.Once
 	closeLog := func() { closeOnce.Do(func() { logReader.Close() }) }
 	defer closeLog()
 
-	// stdcopy demuxes the Docker multiplexed stream into stdout/stderr pipes.
 	stdoutR, stdoutW := io.Pipe()
 	stderrR, stderrW := io.Pipe()
 	go func() {
@@ -196,16 +201,13 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	}()
 	go func() { rt.streamLines(runID, stderrR, "error") }()
 
-	// Kill watcher: when ctx is cancelled, close the log stream immediately so
-	// stdcopy unblocks, then stop the container.
 	go func() {
 		<-ctx.Done()
-		closeLog() // unblocks stdcopy.StdCopy → pipes drain → logDone closed
+		closeLog()
 		stopTimeout := 10
 		_ = dc.ContainerStop(context.Background(), containerID, container.StopOptions{Timeout: &stopTimeout})
 	}()
 
-	// Wait for the container to exit.
 	var exitCode int64
 	select {
 	case waitResult := <-waitStatusCh:
@@ -214,10 +216,13 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		result.Error = fmt.Errorf("container wait: %w", waitErr)
 	}
 
-	// Close log reader so stdcopy returns (no-op if kill watcher already did it).
-	closeLog()
-	// Drain remaining log lines.
+	// Do NOT force-close the log reader here. When the container exits, Docker
+	// closes the follow stream naturally, which drains stdcopy and the scanners.
+	// Force-closing immediately after ContainerWait races with buffered log data
+	// still in flight from the daemon — fast containers lose their last log lines.
+	// The kill-watcher goroutine handles the cancellation path via closeLog().
 	<-logDone
+	closeLog() // no-op if the kill-watcher already closed it
 
 	finalStatus := registry.StatusSuccess
 	if ctx.Err() != nil {
@@ -228,15 +233,128 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 			result.Error = fmt.Errorf("container exited with code %d", exitCode)
 		}
 	}
-	rt.log.Info("container finished",
-		zap.String("task", spec.ID),
-		zap.String("run", runID),
-		zap.String("container", shortID),
-		zap.Int64("exit_code", exitCode),
-		zap.String("status", finalStatus),
-	)
 	_ = rt.registry.FinishRun(context.Background(), runID, finalStatus)
 	return result, nil
+}
+
+// buildImage builds a Docker image from the task's Dockerfile and returns the image tag.
+// Results are cached by Dockerfile content hash — if the Dockerfile hasn't changed the
+// existing image is reused and the build is skipped entirely.
+func (rt *Runtime) buildImage(ctx context.Context, dc *dockerclient.Client, spec *task.Spec, runID string) (string, error) {
+	b := spec.Docker.Build
+
+	dockerfilePath := b.Dockerfile
+	if dockerfilePath == "" {
+		dockerfilePath = "Dockerfile"
+	}
+	if !filepath.IsAbs(dockerfilePath) {
+		dockerfilePath = filepath.Join(spec.TaskDir, dockerfilePath)
+	}
+
+	contextDir := spec.TaskDir
+	if b.Context != "" {
+		if filepath.IsAbs(b.Context) {
+			contextDir = b.Context
+		} else {
+			contextDir = filepath.Join(spec.TaskDir, b.Context)
+		}
+	}
+
+	content, err := os.ReadFile(dockerfilePath) //nolint:gosec
+	if err != nil {
+		return "", fmt.Errorf("read Dockerfile: %w", err)
+	}
+	h := sha256.Sum256(content)
+	tag := fmt.Sprintf("dicode-%s:%x", spec.ID, h[:6])
+
+	// Cache hit: image with this tag already exists.
+	if _, _, err := dc.ImageInspectWithRaw(ctx, tag); err == nil {
+		_ = rt.registry.AppendLog(ctx, runID, "info", "image up to date ("+tag+"), skipping build")
+		return tag, nil
+	}
+
+	_ = rt.registry.AppendLog(ctx, runID, "info", "building image "+tag+"…")
+
+	relDockerfile, err := filepath.Rel(contextDir, dockerfilePath)
+	if err != nil {
+		relDockerfile = "Dockerfile"
+	}
+
+	buildCtx, err := buildContextTar(contextDir)
+	if err != nil {
+		return "", fmt.Errorf("create build context: %w", err)
+	}
+
+	resp, err := dc.ImageBuild(ctx, buildCtx, dockerbuild.ImageBuildOptions{
+		Tags:       []string{tag},
+		Dockerfile: relDockerfile,
+		Remove:     true,
+	})
+	if err != nil {
+		return "", fmt.Errorf("image build: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var msg struct {
+		Stream string `json:"stream"`
+		Error  string `json:"error"`
+	}
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if err := json.Unmarshal([]byte(line), &msg); err != nil {
+			continue
+		}
+		if msg.Error != "" {
+			return "", fmt.Errorf("build error: %s", msg.Error)
+		}
+		if out := strings.TrimSpace(msg.Stream); out != "" {
+			_ = rt.registry.AppendLog(ctx, runID, "info", out)
+		}
+	}
+
+	return tag, nil
+}
+
+// buildContextTar creates an uncompressed tar archive of dir for use as a Docker build context.
+func buildContextTar(dir string) (io.Reader, error) {
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		hdr, err := tar.FileInfoHeader(info, "")
+		if err != nil {
+			return err
+		}
+		hdr.Name = rel
+		if err := tw.WriteHeader(hdr); err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			f, err := os.Open(path) //nolint:gosec
+			if err != nil {
+				return err
+			}
+			defer f.Close()
+			_, err = io.Copy(tw, f)
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	_ = tw.Close()
+	return &buf, nil
 }
 
 // maybePull pulls the image according to the pull policy.
@@ -247,7 +365,7 @@ func (rt *Runtime) maybePull(ctx context.Context, dc *dockerclient.Client, img, 
 	case "missing":
 		_, _, err := dc.ImageInspectWithRaw(ctx, img)
 		if err == nil {
-			return nil // already present
+			return nil
 		}
 	}
 	_ = rt.registry.AppendLog(ctx, runID, "info", "pulling image: "+img)
@@ -269,7 +387,7 @@ func (rt *Runtime) maybePull(ctx context.Context, dc *dockerclient.Client, img, 
 	return nil
 }
 
-// streamLines reads lines from r and appends them to the run log with the given level.
+// streamLines reads lines from r and appends them to the run log.
 func (rt *Runtime) streamLines(runID string, r io.Reader, level string) {
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
