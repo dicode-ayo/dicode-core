@@ -29,6 +29,10 @@
 | [Webhook Relay](./concepts/webhook-relay.md) | relay architecture, dicode.app tunnel |
 | [Business Model](./concepts/business-model.md) | tiers, marketplace, distribution |
 
+## Design documents
+
+- [Notifications & Interactive Tasks](./notifications-design.md) — browser notifications, run detail page, interact SDK, OAuth helper
+
 ## Runtime guides
 
 - [Deno Runtime](./deno-runtime.md) — TypeScript/JavaScript, SDK globals, npm/jsr imports
