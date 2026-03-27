@@ -1,0 +1,11 @@
+name: Hello Python
+description: Simple Python task demonstrating SDK globals
+runtime: python
+
+trigger:
+  manual: true
+
+params:
+  - name: name
+    description: Name to greet
+    default: "World"

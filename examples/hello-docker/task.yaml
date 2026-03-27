@@ -1,0 +1,10 @@
+name: Hello Docker
+description: Builds a custom Alpine image and prints a greeting
+runtime: docker
+
+trigger:
+  manual: true
+
+docker:
+  build:
+    dockerfile: Dockerfile

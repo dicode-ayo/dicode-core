@@ -18,9 +18,20 @@ const (
 	RuntimePodman Runtime = "podman"
 )
 
-// DockerConfig holds Docker-specific task configuration.
+// DockerBuild configures a local Dockerfile build instead of pulling a pre-built image.
+// The built image is tagged dicode-<taskID>:<hash> and cached; rebuild only happens when
+// the Dockerfile content changes.
+//
+// TODO: clean up old dicode-<taskID>:* images when a task is removed or the Dockerfile changes.
+type DockerBuild struct {
+	Dockerfile string `yaml:"dockerfile,omitempty"` // path relative to task dir; default "Dockerfile"
+	Context    string `yaml:"context,omitempty"`    // path relative to task dir; default task dir
+}
+
+// DockerConfig holds Docker/Podman-specific task configuration.
 type DockerConfig struct {
-	Image      string            `yaml:"image"`                 // e.g. "nginx:alpine"
+	Image      string            `yaml:"image,omitempty"`       // e.g. "nginx:alpine"
+	Build      *DockerBuild      `yaml:"build,omitempty"`       // build from local Dockerfile instead of pulling
 	Command    []string          `yaml:"command,omitempty"`     // overrides image CMD
 	Entrypoint []string          `yaml:"entrypoint,omitempty"`  // overrides image ENTRYPOINT
 	Volumes    []string          `yaml:"volumes,omitempty"`     // "host:container[:ro]"
@@ -198,8 +209,8 @@ func (s *Spec) validate() error {
 		if s.Docker == nil {
 			return fmt.Errorf("runtime %s requires a docker: section in task.yaml", s.Runtime)
 		}
-		if s.Docker.Image == "" {
-			return fmt.Errorf("docker.image is required")
+		if s.Docker.Image == "" && s.Docker.Build == nil {
+			return fmt.Errorf("docker: requires either image or build")
 		}
 		switch s.Docker.PullPolicy {
 		case "", "missing", "always", "never":

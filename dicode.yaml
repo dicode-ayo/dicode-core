@@ -20,5 +20,5 @@ server:
     secret: ""
     tray: true
 sources:
-    - path: /home/dr14/dicode-tasks
+    - path: /home/dr14/dicode/examples
       type: local

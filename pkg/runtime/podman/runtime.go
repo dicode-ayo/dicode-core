@@ -8,28 +8,34 @@
 //
 // # Task spec
 //
-// Uses the same docker: section in task.yaml as the Docker runtime:
+// Uses the same docker: section in task.yaml as the Docker runtime.
+// Either docker.image (pull) or docker.build (local Dockerfile) must be set:
 //
 //	runtime: podman
 //
 //	docker:
-//	  image: nginx:alpine
+//	  build:
+//	    dockerfile: Dockerfile   # default
+//	    context: .               # default: task folder
 //	  ports:
 //	    - "8888:80"
-//	  volumes:
-//	    - "/tmp:/usr/share/nginx/html:ro"
 //
-// # Orphan cleanup
+// # Build caching
 //
-// Containers are named "dicode-<runID>" so they can be found and removed on
-// the next startup if dicode was killed without a clean shutdown.
+// Images are tagged dicode-<taskID>:<hash> where hash is derived from the
+// Dockerfile content. If the image already exists, the build is skipped.
+//
+// TODO: clean up old dicode-<taskID>:* images when a task is removed or the Dockerfile changes.
 package podman
 
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/dicode/dicode/pkg/registry"
@@ -58,28 +64,20 @@ func (rt *Runtime) Description() string {
 	return "Rootless container runtime. Uses the system podman binary — install via your package manager (dnf, apt, brew)."
 }
 
-// DefaultVersion returns "" — podman is a system package with no managed version.
 func (rt *Runtime) DefaultVersion() string { return "" }
 
-// BinaryPath returns the path to the system podman binary.
-// The version argument is ignored; podman is not version-managed by dicode.
 func (rt *Runtime) BinaryPath(_ string) (string, error) {
 	return podmanpkg.BinaryPath()
 }
 
-// IsInstalled reports whether podman is available on the system.
 func (rt *Runtime) IsInstalled(_ string) bool {
 	return podmanpkg.IsInstalled()
 }
 
-// Install is not supported for Podman — it must be installed via the system
-// package manager. This method always returns a descriptive error.
 func (rt *Runtime) Install(_ context.Context, _ string) error {
 	return fmt.Errorf("podman must be installed via your system package manager — see https://podman.io/docs/installation")
 }
 
-// NewExecutor returns an Executor that runs containers via the podman binary
-// at binaryPath.
 func (rt *Runtime) NewExecutor(binaryPath string) pkgruntime.Executor {
 	return &executor{podmanPath: binaryPath, reg: rt.reg, log: rt.log}
 }
@@ -107,12 +105,28 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 	cfg := spec.Docker
 	containerName := "dicode-" + runID
 
-	args := e.buildArgs(cfg, containerName, spec)
+	// Resolve the image: build from Dockerfile or pull.
+	imageTag := cfg.Image
+	if cfg.Build != nil {
+		var err error
+		imageTag, err = e.buildImage(ctx, spec, runID)
+		if err != nil {
+			if ctx.Err() != nil {
+				status = registry.StatusCancelled
+			} else {
+				status = registry.StatusFailure
+			}
+			result.Error = err
+			return result, nil
+		}
+	}
+
+	args := e.buildArgs(cfg, imageTag, containerName, spec)
 
 	e.log.Info("podman run",
 		zap.String("task", spec.ID),
 		zap.String("run", runID),
-		zap.String("image", cfg.Image),
+		zap.String("image", imageTag),
 		zap.String("container", containerName),
 	)
 
@@ -137,7 +151,6 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 		return result, nil
 	}
 
-	// Stream stdout (info) and stderr (warn) to the run log concurrently.
 	logDone := make(chan struct{})
 	go func() {
 		defer close(logDone)
@@ -153,15 +166,10 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 		}
 	}()
 
-	// When context is cancelled, stop the container gracefully.
-	stopDone := make(chan struct{})
 	go func() {
-		defer close(stopDone)
 		<-ctx.Done()
-		stopCtx := context.Background()
-		stopArgs := []string{"stop", "--time", "10", containerName}
-		_ = exec.Command(e.podmanPath, stopArgs...).Run() //nolint:gosec
-		_ = exec.CommandContext(stopCtx, e.podmanPath, "rm", "-f", containerName).Run() //nolint:gosec
+		_ = exec.Command(e.podmanPath, "stop", "--time", "10", containerName).Run() //nolint:gosec
+		_ = exec.Command(e.podmanPath, "rm", "-f", containerName).Run()             //nolint:gosec
 	}()
 
 	exitErr := cmd.Wait()
@@ -176,23 +184,86 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 		result.Error = exitErr
 	}
 
-	e.log.Info("podman finished",
-		zap.String("task", spec.ID),
-		zap.String("run", runID),
-		zap.String("status", status),
-	)
 	return result, nil
 }
 
-func (e *executor) buildArgs(cfg *task.DockerConfig, containerName string, spec *task.Spec) []string {
-	args := []string{
-		"run",
-		"--rm",
-		"--name", containerName,
-		"--label", "dicode.run-id=" + spec.ID, // task ID in label for cleanup
-		"--label", "dicode.task-id=" + spec.ID,
+// buildImage builds a Podman image from the task's Dockerfile and returns the image tag.
+// Results are cached by Dockerfile content hash — if the image already exists the build is skipped.
+func (e *executor) buildImage(ctx context.Context, spec *task.Spec, runID string) (string, error) {
+	b := spec.Docker.Build
+
+	dockerfilePath := b.Dockerfile
+	if dockerfilePath == "" {
+		dockerfilePath = "Dockerfile"
+	}
+	if !filepath.IsAbs(dockerfilePath) {
+		dockerfilePath = filepath.Join(spec.TaskDir, dockerfilePath)
 	}
 
+	contextDir := spec.TaskDir
+	if b.Context != "" {
+		if filepath.IsAbs(b.Context) {
+			contextDir = b.Context
+		} else {
+			contextDir = filepath.Join(spec.TaskDir, b.Context)
+		}
+	}
+
+	content, err := os.ReadFile(dockerfilePath) //nolint:gosec
+	if err != nil {
+		return "", fmt.Errorf("read Dockerfile: %w", err)
+	}
+	h := sha256.Sum256(content)
+	tag := fmt.Sprintf("dicode-%s:%x", spec.ID, h[:6])
+
+	// Cache hit: image with this tag already exists.
+	if exec.CommandContext(ctx, e.podmanPath, "image", "exists", tag).Run() == nil { //nolint:gosec
+		_ = e.reg.AppendLog(ctx, runID, "info", "image up to date ("+tag+"), skipping build")
+		return tag, nil
+	}
+
+	_ = e.reg.AppendLog(ctx, runID, "info", "building image "+tag+"…")
+
+	buildArgs := []string{"build", "-t", tag, "-f", dockerfilePath, contextDir}
+	cmd := exec.CommandContext(ctx, e.podmanPath, buildArgs...) //nolint:gosec
+
+	stdout, _ := cmd.StdoutPipe()
+	stderr, _ := cmd.StderrPipe()
+
+	if err := cmd.Start(); err != nil {
+		return "", fmt.Errorf("podman build: %w", err)
+	}
+
+	buildDone := make(chan struct{})
+	go func() {
+		defer close(buildDone)
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			_ = e.reg.AppendLog(ctx, runID, "info", scanner.Text())
+		}
+	}()
+	go func() {
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			_ = e.reg.AppendLog(ctx, runID, "info", scanner.Text())
+		}
+	}()
+
+	if err := cmd.Wait(); err != nil {
+		return "", fmt.Errorf("podman build failed: %w", err)
+	}
+	<-buildDone
+
+	return tag, nil
+}
+
+func (e *executor) buildArgs(cfg *task.DockerConfig, imageTag, containerName string, spec *task.Spec) []string {
+	args := []string{
+		"run", "--rm",
+		"--name", containerName,
+		"--label", "dicode.run-id=" + runID(spec, containerName),
+		"--label", "dicode.task-id=" + spec.ID,
+	}
 	for _, p := range cfg.Ports {
 		args = append(args, "-p", p)
 	}
@@ -205,34 +276,34 @@ func (e *executor) buildArgs(cfg *task.DockerConfig, containerName string, spec 
 	if cfg.WorkingDir != "" {
 		args = append(args, "--workdir", cfg.WorkingDir)
 	}
-
-	pullPolicy := cfg.PullPolicy
-	if pullPolicy == "" {
-		pullPolicy = "missing"
+	// Pull policy only applies when using a pre-built image (not a local build).
+	if cfg.Build == nil {
+		switch cfg.PullPolicy {
+		case "always":
+			args = append(args, "--pull=always")
+		case "never":
+			args = append(args, "--pull=never")
+		default:
+			args = append(args, "--pull=missing")
+		}
+	} else {
+		args = append(args, "--pull=never") // image was just built locally
 	}
-	switch pullPolicy {
-	case "always":
-		args = append(args, "--pull=always")
-	case "never":
-		args = append(args, "--pull=never")
-	default:
-		args = append(args, "--pull=missing")
-	}
-
 	if len(cfg.Entrypoint) > 0 {
 		args = append(args, "--entrypoint", strings.Join(cfg.Entrypoint, " "))
 	}
-
-	args = append(args, cfg.Image)
-
+	args = append(args, imageTag)
 	args = append(args, cfg.Command...)
-
 	return args
+}
+
+// runID extracts the run ID from the container name ("dicode-<runID>").
+func runID(_ *task.Spec, containerName string) string {
+	return strings.TrimPrefix(containerName, "dicode-")
 }
 
 // CleanupOrphanedContainers stops and removes any podman containers left
 // behind by a previous dicode session (identified by the dicode.run-id label).
-// Safe to call even when podman is not installed.
 func CleanupOrphanedContainers(ctx context.Context, log *zap.Logger) {
 	podmanPath, err := podmanpkg.BinaryPath()
 	if err != nil {
