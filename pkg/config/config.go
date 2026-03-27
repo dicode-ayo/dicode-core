@@ -8,16 +8,29 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// RuntimeConfig configures a managed runtime executor.
+// The Version field pins the interpreter version that dicode downloads;
+// leave it empty to use the default version bundled with this release.
+// Set Disabled: true to prevent the runtime from being registered at startup.
+type RuntimeConfig struct {
+	// Version pins the interpreter version (e.g. "2.3.3" for Deno,
+	// "0.7.3" for uv/Python). If empty the runtime's built-in default is used.
+	Version string `yaml:"version,omitempty"`
+	// Disabled prevents this runtime from being registered at startup.
+	Disabled bool `yaml:"disabled,omitempty"`
+}
+
 type Config struct {
-	Sources       []SourceConfig      `yaml:"sources"`
-	Database      DatabaseConfig      `yaml:"database"`
-	Secrets       SecretsConfig       `yaml:"secrets"`
-	Notifications NotificationsConfig `yaml:"notifications"`
-	Relay         RelayConfig         `yaml:"relay"`
-	Server        ServerConfig        `yaml:"server"`
-	AI            AIConfig            `yaml:"ai"`
-	LogLevel      string              `yaml:"log_level"`
-	DataDir       string              `yaml:"data_dir"`
+	Sources       []SourceConfig             `yaml:"sources"`
+	Database      DatabaseConfig             `yaml:"database"`
+	Secrets       SecretsConfig              `yaml:"secrets"`
+	Notifications NotificationsConfig        `yaml:"notifications"`
+	Relay         RelayConfig                `yaml:"relay"`
+	Server        ServerConfig               `yaml:"server"`
+	AI            AIConfig                   `yaml:"ai"`
+	Runtimes      map[string]RuntimeConfig   `yaml:"runtimes,omitempty"`
+	LogLevel      string                     `yaml:"log_level"`
+	DataDir       string                     `yaml:"data_dir"`
 }
 
 // DatabaseConfig selects the storage backend.
