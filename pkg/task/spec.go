@@ -15,6 +15,7 @@ type Runtime string
 const (
 	RuntimeDeno   Runtime = "deno"
 	RuntimeDocker Runtime = "docker"
+	RuntimePodman Runtime = "podman"
 )
 
 // DockerConfig holds Docker-specific task configuration.
@@ -105,8 +106,8 @@ func LoadDir(dir string) (*Spec, error) {
 	if spec.Runtime == "" || spec.Runtime == "js" {
 		spec.Runtime = RuntimeDeno
 	}
-	// Docker and daemon tasks may run indefinitely; don't impose a default timeout.
-	if spec.Timeout == 0 && spec.Runtime != RuntimeDocker && !spec.Trigger.Daemon {
+	// Container and daemon tasks may run indefinitely; don't impose a default timeout.
+	if spec.Timeout == 0 && spec.Runtime != RuntimeDocker && spec.Runtime != RuntimePodman && !spec.Trigger.Daemon {
 		spec.Timeout = 60 * time.Second
 	}
 
@@ -126,7 +127,7 @@ func (s *Spec) ScriptPath() string {
 			return ts
 		}
 		return filepath.Join(s.TaskDir, "task.js")
-	case RuntimeDocker:
+	case RuntimeDocker, RuntimePodman:
 		return ""
 	default:
 		// For subprocess runtimes, look for any task.* file in the task dir.
@@ -193,9 +194,9 @@ func (s *Spec) validate() error {
 	switch s.Runtime {
 	case RuntimeDeno, "js", "":
 		// ok — "js" is a legacy alias for "deno"
-	case RuntimeDocker:
+	case RuntimeDocker, RuntimePodman:
 		if s.Docker == nil {
-			return fmt.Errorf("runtime docker requires a docker: section in task.yaml")
+			return fmt.Errorf("runtime %s requires a docker: section in task.yaml", s.Runtime)
 		}
 		if s.Docker.Image == "" {
 			return fmt.Errorf("docker.image is required")

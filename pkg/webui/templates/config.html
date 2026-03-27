@@ -355,9 +355,16 @@ function removeSource(idx) {
 
 function showStatus(id, ok, msg) {
   var el = document.getElementById(id);
-  el.textContent = ok ? '✓ ' + msg : '✗ ' + msg;
-  el.style.color  = ok ? '#a6e3a1' : '#f38ba8';
-  setTimeout(function() { el.textContent = ''; }, 4000);
+  el.style.color = ok ? '#a6e3a1' : '#f38ba8';
+  // Escape HTML, then turn URLs into clickable links.
+  var escaped = (ok ? '✓ ' : '✗ ') + msg
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  el.innerHTML = escaped.replace(
+    /(https?:\/\/[^\s]+)/g,
+    '<a href="$1" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline">$1</a>'
+  );
+  if (el._statusTimer) clearTimeout(el._statusTimer);
+  el._statusTimer = setTimeout(function() { el.innerHTML = ''; }, ok ? 4000 : 12000);
 }
 
 function saveAI() {
