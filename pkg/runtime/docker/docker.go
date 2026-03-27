@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	"github.com/dicode/dicode/pkg/registry"
+	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	"github.com/dicode/dicode/pkg/task"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
@@ -274,4 +275,17 @@ func (rt *Runtime) streamLines(runID string, r io.Reader, level string) {
 	for scanner.Scan() {
 		_ = rt.registry.AppendLog(context.Background(), runID, level, scanner.Text())
 	}
+}
+
+// Execute implements runtime.Executor.
+func (rt *Runtime) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime.RunOptions) (*pkgruntime.RunResult, error) {
+	result, err := rt.Run(ctx, spec, RunOptions{
+		RunID:       opts.RunID,
+		ParentRunID: opts.ParentRunID,
+		Params:      opts.Params,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &pkgruntime.RunResult{RunID: result.RunID, Error: result.Error}, nil
 }

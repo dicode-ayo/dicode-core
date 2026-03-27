@@ -53,7 +53,7 @@ env:
 |---|---|---|---|
 | `name` | string | ✅ | Human-readable task name |
 | `description` | string | | One-line description |
-| `runtime` | string | | `js` (default) or `docker` |
+| `runtime` | string | | `deno` (default), `python`, or `docker` |
 | `trigger` | object | ✅ | Exactly one trigger must be set |
 | `trigger.cron` | string | | Standard cron expression (5 fields) |
 | `trigger.webhook` | string | | Webhook path, e.g. `/github-push` |
@@ -189,11 +189,11 @@ docker:
 
 ---
 
-## `task.js`
+## `task.ts` / `task.js` (Deno runtime)
 
-Plain JavaScript (ES2020, no `import`/`require`). Runs in goja — a pure Go JS engine.
+TypeScript or JavaScript. Runs via a managed Deno subprocess.
 
-Globals available: `http`, `kv`, `log`, `params`, `env`, `input`, `notify`, `dicode`.
+Globals available: `log`, `kv`, `params`, `env`, `input`, `output`.
 
 ### Example
 
@@ -225,11 +225,25 @@ return { count: messages.length }
 
 ### Constraints
 
-- No filesystem access (`fs`, `require`, `import` are not available)
-- No shell execution (`child_process` is not available)
-- No network access except via `http` global
+- Filesystem access requires explicit `fs:` declarations in task.yaml
 - Return value must be JSON-serializable (for chain triggers — capped at 1MB)
-- Async/await supported. Top-level await works.
+- Async/await and top-level await are supported
+
+---
+
+## `task.py` (Python runtime)
+
+Python script executed via the managed [uv](https://github.com/astral-sh/uv) runner.
+Install the Python runtime from **Config → Runtimes** before use.
+
+```yaml
+runtime: python
+```
+
+Params are available as `DICODE_PARAM_<NAME>` environment variables (name uppercased).
+Inline dependencies via PEP 723 `# /// script` blocks are supported.
+
+See [Python Runtime](../python-runtime.md) for full documentation.
 
 ---
 
@@ -347,8 +361,9 @@ Examples: `morning-email-check`, `github-release-notifier`, `backup-database`
 
 ## File layout rules
 
-- `task.yaml` and `task.js` are both required. A folder missing either is ignored.
-- `task.test.js` is optional. `dicode task test` skips tasks without it.
+- `task.yaml` is always required. A folder without it is ignored.
+- The script file (`task.ts`, `task.js`, or `task.py`) is required for code runtimes; omit it only for `runtime: docker`.
+- `task.test.js` / `task.test.ts` is optional. `dicode task test` skips tasks without it.
 - Any other files in the folder are ignored (useful for README, schema files, etc.).
 - Subdirectories are ignored — task folders are flat.
 

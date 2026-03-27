@@ -17,6 +17,7 @@ import (
 	"github.com/dicode/dicode/pkg/db"
 	denopkg "github.com/dicode/dicode/pkg/deno"
 	"github.com/dicode/dicode/pkg/registry"
+	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	denoserver "github.com/dicode/dicode/pkg/runtime/deno/server"
 	"github.com/dicode/dicode/pkg/secrets"
 	"github.com/dicode/dicode/pkg/task"
@@ -250,4 +251,24 @@ func buildEnv(resolved map[string]string, socketPath string) []string {
 		env = append(env, k+"="+v)
 	}
 	return env
+}
+
+// Execute implements runtime.Executor.
+func (rt *Runtime) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime.RunOptions) (*pkgruntime.RunResult, error) {
+	result, err := rt.Run(ctx, spec, RunOptions{
+		RunID:       opts.RunID,
+		ParentRunID: opts.ParentRunID,
+		Params:      opts.Params,
+		Input:       opts.Input,
+	})
+	if err != nil {
+		return nil, err
+	}
+	r := &pkgruntime.RunResult{RunID: result.RunID, Error: result.Error}
+	if result.Output != nil {
+		r.ChainInput = result.Output.Data
+	} else {
+		r.ChainInput = result.ReturnValue
+	}
+	return r, nil
 }

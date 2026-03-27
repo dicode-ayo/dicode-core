@@ -116,6 +116,8 @@ func LoadDir(dir string) (*Spec, error) {
 // ScriptPath returns the path to the task script file.
 // Returns empty string for runtimes that don't use a script file (e.g. Docker).
 // For the deno runtime, task.ts is preferred over task.js.
+// For other runtimes, the first existing task.<ext> candidate is returned;
+// callers that know the exact extension should construct the path themselves.
 func (s *Spec) ScriptPath() string {
 	switch s.Runtime {
 	case RuntimeDeno:
@@ -124,7 +126,16 @@ func (s *Spec) ScriptPath() string {
 			return ts
 		}
 		return filepath.Join(s.TaskDir, "task.js")
+	case RuntimeDocker:
+		return ""
 	default:
+		// For subprocess runtimes, look for any task.* file in the task dir.
+		for _, ext := range []string{".py", ".jl", ".rb", ".sh", ".ts", ".js", ".mjs"} {
+			p := filepath.Join(s.TaskDir, "task"+ext)
+			if _, err := os.Stat(p); err == nil {
+				return p
+			}
+		}
 		return ""
 	}
 }
@@ -196,7 +207,7 @@ func (s *Spec) validate() error {
 			return fmt.Errorf("docker.pull_policy must be always, missing, or never")
 		}
 	default:
-		return fmt.Errorf("unsupported runtime %q (supported: deno, js, docker)", s.Runtime)
+		// Any other non-empty runtime is accepted; executor presence is checked at run time.
 	}
 	return nil
 }

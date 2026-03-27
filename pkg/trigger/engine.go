@@ -12,8 +12,7 @@ import (
 	"time"
 
 	"github.com/dicode/dicode/pkg/registry"
-	denoruntime "github.com/dicode/dicode/pkg/runtime/deno"
-	dockerruntime "github.com/dicode/dicode/pkg/runtime/docker"
+	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	"github.com/dicode/dicode/pkg/task"
 	"github.com/google/uuid"
 	"github.com/robfig/cron/v3"
@@ -22,11 +21,10 @@ import (
 
 // Engine coordinates all trigger types and fires task runs.
 type Engine struct {
-	registry *registry.Registry
-	denoRT   *denoruntime.Runtime
-	dockerRT *dockerruntime.Runtime
-	cron     *cron.Cron
-	log      *zap.Logger
+	registry  *registry.Registry
+	executors map[task.Runtime]pkgruntime.Executor
+	cron      *cron.Cron
+	log       *zap.Logger
 
 	mu          sync.Mutex
 	cronEntries map[string]cron.EntryID // taskID → cron entry
@@ -42,11 +40,11 @@ type Engine struct {
 	daemonSpecs map[string]*task.Spec
 }
 
-// New creates a trigger Engine.
-func New(r *registry.Registry, rt *denoruntime.Runtime, log *zap.Logger) *Engine {
-	return &Engine{
+// New creates a trigger Engine with a default Deno executor.
+func New(r *registry.Registry, defaultExec pkgruntime.Executor, log *zap.Logger) *Engine {
+	e := &Engine{
 		registry:    r,
-		denoRT:      rt,
+		executors:   make(map[task.Runtime]pkgruntime.Executor),
 		cron:        cron.New(),
 		log:         log,
 		cronEntries: make(map[string]cron.EntryID),
@@ -54,11 +52,16 @@ func New(r *registry.Registry, rt *denoruntime.Runtime, log *zap.Logger) *Engine
 		daemonRuns:  make(map[string]string),
 		daemonSpecs: make(map[string]*task.Spec),
 	}
+	e.executors[task.RuntimeDeno] = defaultExec
+	return e
 }
 
-// SetDockerRuntime wires the Docker executor into the engine.
-func (e *Engine) SetDockerRuntime(rt *dockerruntime.Runtime) {
-	e.dockerRT = rt
+// RegisterExecutor registers an executor for the given runtime name.
+// Call this before Start to wire in Docker, subprocess, or custom runtimes.
+func (e *Engine) RegisterExecutor(rt task.Runtime, exec pkgruntime.Executor) {
+	e.mu.Lock()
+	e.executors[rt] = exec
+	e.mu.Unlock()
 }
 
 // Start begins scheduling and runs until ctx is cancelled.
@@ -142,7 +145,7 @@ func (e *Engine) registerCron(spec *task.Spec) {
 		if !ok {
 			return
 		}
-		e.fireAsync(context.Background(), s, denoruntime.RunOptions{}, "cron") //nolint:errcheck
+		e.fireAsync(context.Background(), s, pkgruntime.RunOptions{}, "cron") //nolint:errcheck
 	})
 	if err != nil {
 		e.log.Error("invalid cron expression",
@@ -176,7 +179,7 @@ func (e *Engine) registerDaemon(spec *task.Spec) {
 }
 
 func (e *Engine) startDaemon(spec *task.Spec) {
-	runID, err := e.fireAsync(context.Background(), spec, denoruntime.RunOptions{}, "daemon")
+	runID, err := e.fireAsync(context.Background(), spec, pkgruntime.RunOptions{}, "daemon")
 	if err != nil {
 		e.log.Error("daemon start failed", zap.String("task", spec.ID), zap.Error(err))
 		return
@@ -266,7 +269,7 @@ func (e *Engine) FireManual(ctx context.Context, taskID string, params map[strin
 		return "", fmt.Errorf("task %q not found", taskID)
 	}
 	e.log.Info("manual trigger", zap.String("task", taskID))
-	return e.fireAsync(context.Background(), spec, denoruntime.RunOptions{Params: params}, "manual")
+	return e.fireAsync(context.Background(), spec, pkgruntime.RunOptions{Params: params}, "manual")
 }
 
 // KillRun cancels a running task by its run ID.
@@ -296,7 +299,7 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runStatus strin
 			zap.String("to", spec.ID),
 			zap.String("on", on),
 		)
-		go e.fireAsync(ctx, spec, denoruntime.RunOptions{Input: output}, "chain") //nolint:errcheck
+		go e.fireAsync(ctx, spec, pkgruntime.RunOptions{Input: output}, "chain") //nolint:errcheck
 	}
 }
 
@@ -330,7 +333,7 @@ func (e *Engine) WebhookHandler() http.Handler {
 			}
 		}
 
-		runID, err := e.fireAsync(r.Context(), spec, denoruntime.RunOptions{Input: input}, "webhook")
+		runID, err := e.fireAsync(r.Context(), spec, pkgruntime.RunOptions{Input: input}, "webhook")
 		if err != nil {
 			http.Error(w, "task failed to start", http.StatusInternalServerError)
 			return
@@ -343,7 +346,7 @@ func (e *Engine) WebhookHandler() http.Handler {
 
 // fireAsync pre-creates the run record, starts execution in a goroutine,
 // and returns the run ID immediately.
-func (e *Engine) fireAsync(ctx context.Context, spec *task.Spec, opts denoruntime.RunOptions, source string) (string, error) {
+func (e *Engine) fireAsync(ctx context.Context, spec *task.Spec, opts pkgruntime.RunOptions, source string) (string, error) {
 	runID := uuid.New().String()
 	opts.RunID = runID
 
@@ -387,64 +390,43 @@ func (e *Engine) fireAsync(ctx context.Context, spec *task.Spec, opts denoruntim
 	return runID, nil
 }
 
-// dispatch routes a run to the appropriate runtime and returns the final status.
-func (e *Engine) dispatch(ctx context.Context, spec *task.Spec, opts denoruntime.RunOptions) string {
-	switch spec.Runtime {
-	case task.RuntimeDocker:
-		if e.dockerRT == nil {
-			e.log.Error("docker runtime not configured", zap.String("task", spec.ID))
-			_ = e.registry.FinishRun(context.Background(), opts.RunID, registry.StatusFailure)
-			return registry.StatusFailure
-		}
-		dockerOpts := dockerruntime.RunOptions{
-			RunID:       opts.RunID,
-			ParentRunID: opts.ParentRunID,
-			Params:      opts.Params,
-		}
-		result, err := e.dockerRT.Run(ctx, spec, dockerOpts)
-		if err != nil {
-			e.log.Error("docker run error", zap.String("task", spec.ID), zap.Error(err))
-			return registry.StatusFailure
-		}
-		status := registry.StatusSuccess
-		if result.Error != nil {
-			if ctx.Err() != nil {
-				status = registry.StatusCancelled
-			} else {
-				status = registry.StatusFailure
-			}
-		}
-		e.FireChain(context.Background(), spec.ID, status, nil)
-		return status
+// dispatch routes a run to the appropriate executor and returns the final status.
+func (e *Engine) dispatch(ctx context.Context, spec *task.Spec, opts pkgruntime.RunOptions) string {
+	e.mu.Lock()
+	exec, ok := e.executors[spec.Runtime]
+	e.mu.Unlock()
 
-	default: // RuntimeDeno
-		if e.denoRT == nil {
-			e.log.Error("deno runtime not configured", zap.String("task", spec.ID))
-			_ = e.registry.FinishRun(context.Background(), opts.RunID, registry.StatusFailure)
-			return registry.StatusFailure
-		}
-		result, err := e.denoRT.Run(ctx, spec, opts)
-		if err != nil {
-			e.log.Error("deno run error", zap.String("task", spec.ID), zap.Error(err))
-			return registry.StatusFailure
-		}
-		status := registry.StatusSuccess
-		if result.Error != nil {
-			if ctx.Err() != nil {
-				status = registry.StatusCancelled
-			} else {
-				status = registry.StatusFailure
-			}
-		}
-		var chainInput interface{}
-		if result.Output != nil {
-			chainInput = result.Output.Data
-		} else {
-			chainInput = result.ReturnValue
-		}
-		e.FireChain(context.Background(), spec.ID, status, chainInput)
-		return status
+	if !ok {
+		e.log.Error("no executor for runtime",
+			zap.String("task", spec.ID),
+			zap.String("runtime", string(spec.Runtime)),
+		)
+		_ = e.registry.FinishRun(context.Background(), opts.RunID, registry.StatusFailure)
+		return registry.StatusFailure
 	}
+
+	result, err := exec.Execute(ctx, spec, opts)
+	if err != nil {
+		e.log.Error("executor error",
+			zap.String("task", spec.ID),
+			zap.String("runtime", string(spec.Runtime)),
+			zap.Error(err),
+		)
+		_ = e.registry.FinishRun(context.Background(), opts.RunID, registry.StatusFailure)
+		return registry.StatusFailure
+	}
+
+	status := registry.StatusSuccess
+	if result.Error != nil {
+		if ctx.Err() != nil {
+			status = registry.StatusCancelled
+		} else {
+			status = registry.StatusFailure
+		}
+	}
+
+	e.FireChain(context.Background(), spec.ID, status, result.ChainInput)
+	return status
 }
 
 // triggerSource returns a short string identifying the trigger type of a spec.

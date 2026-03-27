@@ -1,87 +1,24 @@
-# dicode configuration
-# Generated on first run. Edit this file to change settings.
-# Restart dicode after making changes.
-
-# ---------------------------------------------------------------------------
-# Task sources — where dicode looks for task folders.
-# Each folder under the path must contain task.yaml + task.js.
-# ---------------------------------------------------------------------------
-sources:
-  - type: local
-    path: /home/dr14/dicode-tasks
-    watch: true       # reload tasks automatically when files change (~150ms)
-
-  # Add a git source to version your tasks in GitHub/GitLab:
-  # - type: git
-  #   url: https://github.com/you/my-tasks
-  #   branch: main
-  #   poll_interval: 30s
-  #   auth:
-  #     type: token
-  #     token_env: GITHUB_TOKEN
-
-# ---------------------------------------------------------------------------
-# Database — stores run history and task KV data.
-# ---------------------------------------------------------------------------
-database:
-  type: sqlite
-  path: /home/dr14/.dicode/data.db
-
-  # Switch to Postgres/MySQL for multi-machine or high-availability setups:
-  # type: postgres
-  # url_env: DATABASE_URL    # env var holding the DSN
-
-# ---------------------------------------------------------------------------
-# Secrets — encrypted storage for API keys and tokens used by tasks.
-# Tasks reference secrets by name in task.yaml under env:
-# ---------------------------------------------------------------------------
-secrets:
-  providers:
-    - type: local   # encrypted SQLite, master key at /home/dr14/.dicode/master.key
-    - type: env     # fall back to host environment variables
-
-# ---------------------------------------------------------------------------
-# Web UI & API server
-# ---------------------------------------------------------------------------
-server:
-  port: 8080
-  mcp: true    # expose MCP endpoint at /mcp (for AI agent / Claude Code integration)
-  tray: true  # set to true to enable the system tray icon on desktop systems
-  # secret: ""  # uncomment and set to require a password for the web UI
-
-# ---------------------------------------------------------------------------
-# AI task generation — uses the OpenAI-compatible Chat Completions API.
-# Works with OpenAI, Claude, Ollama, and any compatible provider.
-# ---------------------------------------------------------------------------
-# ai:
-#   model: gpt-4o
-#   api_key_env: OPENAI_API_KEY    # env var holding the API key
-#   # base_url: ""                 # leave empty for OpenAI (api.openai.com/v1)
-#
-#   # Claude via Anthropic's OpenAI-compatible endpoint:
-#   # model: claude-sonnet-4-6
-#   # api_key_env: ANTHROPIC_API_KEY
-#   # base_url: https://api.anthropic.com/v1
-#
-#   # Ollama (local, no API key needed):
-#   # model: qwen2.5-coder:7b
-#   # api_key_env: ""              # Ollama ignores the key
-#   # base_url: http://localhost:11434/v1
-
-# ---------------------------------------------------------------------------
-# Push notifications (optional) — sends alerts to your phone on task failure.
-# ---------------------------------------------------------------------------
-# notifications:
-#   on_failure: true
-#   on_success: false
-#   provider:
-#     type: ntfy              # ntfy.sh is free and self-hostable
-#     url: https://ntfy.sh
-#     topic: my-dicode-alerts
-#     # token_env: NTFY_TOKEN  # only needed for private topics
-
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
-log_level: info   # debug | info | warn | error
+ai:
+    api_key_env: OPENAI_API_KEY
+    base_url: ""
+    model: gpt-4o
 data_dir: /home/dr14/.dicode
+database:
+    path: /home/dr14/.dicode/data.db
+    type: sqlite
+log_level: info
+runtimes:
+    python:
+        version: 0.7.3
+secrets:
+    providers:
+        - type: local
+        - type: env
+server:
+    mcp: true
+    port: 8080
+    secret: ""
+    tray: true
+sources:
+    - path: /home/dr14/dicode-tasks
+      type: local
