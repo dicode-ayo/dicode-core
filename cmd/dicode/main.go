@@ -197,7 +197,7 @@ func buildRuntimes(
 	eng.RegisterExecutor(task.RuntimeDocker, dockerruntime.New(reg, log))
 
 	// --- Python (uv) — register only if configured + installed ---
-	pythonMgr := pythonruntime.New(reg, log)
+	pythonMgr := pythonruntime.New(reg, secretsChain, database, log)
 	managed = append(managed, pythonMgr)
 
 	if rc, ok := cfg.Runtimes["python"]; ok && !rc.Disabled {

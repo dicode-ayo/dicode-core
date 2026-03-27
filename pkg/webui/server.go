@@ -465,8 +465,8 @@ func (s *Server) uiTaskEditor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d := editorData{ID: id}
-	// Prefer task.ts for deno tasks; fall back to task.js.
-	for _, name := range []string{"task.ts", "task.js"} {
+	// Probe script files in priority order; Python tasks use task.py.
+	for _, name := range []string{"task.ts", "task.js", "task.py"} {
 		if b, err := os.ReadFile(filepath.Join(spec.TaskDir, name)); err == nil {
 			d.ScriptFile = name
 			d.TaskJS = string(b)
@@ -488,7 +488,7 @@ func (s *Server) uiTaskEditor(w http.ResponseWriter, r *http.Request) {
 
 // allowedFiles restricts which files the editor API can read/write.
 var allowedFiles = map[string]bool{
-	"task.js": true, "task.ts": true,
+	"task.js": true, "task.ts": true, "task.py": true,
 	"task.test.js": true, "task.test.ts": true,
 }
 

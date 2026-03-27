@@ -94,6 +94,7 @@
   function langFor(fname) {
     if (fname === 'task.yaml') return 'yaml';
     if (fname.endsWith('.ts')) return 'typescript';
+    if (fname.endsWith('.py')) return 'python';
     return 'javascript';
   }
 
