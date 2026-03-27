@@ -55,15 +55,92 @@ env:
 ### task.py
 
 ```python
-import os
+# SDK globals are injected automatically — no imports needed.
 
-# Parameters are available as DICODE_PARAM_<NAME> (uppercased).
-limit = int(os.environ.get("DICODE_PARAM_LIMIT", "10"))
+name = params.get("name")
+db_url = env.get("DATABASE_URL")
 
-# Env vars declared in task.yaml under `env:` are inherited from the host.
-db_url = os.environ.get("DATABASE_URL")
+log.info(f"Processing up to {name} rows from {db_url}")
 
-print(f"Processing up to {limit} rows from {db_url}")
+previous = kv.get("last_run_count")
+if previous:
+    log.info(f"Last run processed: {previous}")
+
+kv.set("last_run_count", 42)
+
+result = {"processed": 42}
+```
+
+---
+
+## SDK globals
+
+The Python runtime injects the same SDK globals as the Deno runtime via a Unix
+socket bridge. No imports are needed — all globals are available at module level.
+
+### `log`
+
+```python
+log.info("message", extra_arg)
+log.warn("something looks off")
+log.error("it broke")
+log.debug("verbose detail")
+```
+
+### `params`
+
+```python
+value = params.get("my_param")          # returns default if not set
+all_params = params.all()               # dict of all params
+```
+
+### `env`
+
+```python
+token = env.get("SLACK_TOKEN")          # reads from host environment
+```
+
+### `kv`
+
+Persistent key-value store scoped to the task.
+
+```python
+kv.set("counter", 42)
+value = kv.get("counter")              # returns None if not set
+keys  = kv.list()                      # list all keys
+keys  = kv.list("prefix_")            # list keys with prefix
+kv.delete("counter")
+```
+
+### `input`
+
+The return value of the upstream task (chain triggers). `None` for other trigger types.
+
+```python
+if input:
+    log.info(f"upstream returned: {input}")
+```
+
+### `output`
+
+Rich output types rendered in the Web UI.
+
+```python
+output.html("<h1>Report</h1><table>...</table>")
+output.text("plain text result")
+output.image("image/png", base64_data)
+output.file("report.csv", csv_content, "text/csv")
+
+# HTML with structured data for chain triggers
+output.html(html, data={"count": 5})   # chained tasks receive {"count": 5}
+```
+
+### Return value
+
+Assign `result` at module level. The value is passed to chained tasks via `input`.
+
+```python
+result = {"count": 42, "status": "ok"}
 ```
 
 ---
@@ -83,31 +160,25 @@ import requests
 import boto3
 
 resp = requests.get("https://api.example.com/data")
-print(resp.json())
+log.info(str(resp.json()))
+
+result = resp.json()
 ```
 
-uv creates a dedicated virtual environment per script on first run and caches
-it for subsequent runs. Cache location: `~/.cache/uv/`.
+The `# /// script` block must appear near the top of `task.py`. uv creates a
+dedicated virtual environment per script on first run and caches it for
+subsequent runs (`~/.cache/uv/`).
 
 ---
 
 ## Run context
 
+In addition to SDK globals, the following environment variables are always set:
+
 | Environment variable | Value |
 |---|---|
 | `DICODE_RUN_ID` | The current run ID |
-| `DICODE_PARAM_<NAME>` | Each task param value (name uppercased) |
 | *(all `env:` vars)* | Inherited from the host process |
-
-Task params listed in `task.yaml` under `params:` are merged (defaults +
-per-run overrides) before the script starts.
-
----
-
-## Stdout / stderr
-
-- **stdout** lines → info-level log entries (visible in the Run detail page)
-- **stderr** lines → warn-level log entries
 
 ---
 
@@ -116,13 +187,12 @@ per-run overrides) before the script starts.
 | Feature | Deno | Python |
 |---|---|---|
 | Binary management | dicode downloads `deno` | dicode downloads `uv` |
-| SDK globals (`log`, `kv`, …) | Yes — injected via shim | No — use env vars + stdout |
+| SDK globals (`log`, `kv`, …) | Yes — injected via JS shim | Yes — injected via `sdk.py` shim |
 | Dependency management | npm / jsr imports | PEP 723 inline deps via uv |
 | Filesystem sandboxing | Yes — `--allow-read/write` | No — inherits host permissions |
-| Return value / rich output | `output.html(…)`, `return` | Not supported yet |
-| Chain trigger input | `input` global | Not supported yet |
-
-SDK globals and rich output for Python are planned for a future release.
+| Return value | `return` statement | `result = ...` module-level variable |
+| Rich output | `output.html(…)`, etc. | Same — `output.html(…)`, etc. |
+| Chain trigger input | `input` global | `input` global |
 
 ---
 

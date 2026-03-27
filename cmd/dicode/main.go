@@ -15,6 +15,7 @@ import (
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	denoruntime "github.com/dicode/dicode/pkg/runtime/deno"
 	dockerruntime "github.com/dicode/dicode/pkg/runtime/docker"
+	podmanruntime "github.com/dicode/dicode/pkg/runtime/podman"
 	pythonruntime "github.com/dicode/dicode/pkg/runtime/python"
 	"github.com/dicode/dicode/pkg/secrets"
 	"github.com/dicode/dicode/pkg/source"
@@ -104,9 +105,10 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	secretsChain, localSecrets := buildSecretsChain(cfg, database, log)
 
 	// 3. Task registry + startup cleanup.
-	// Remove orphaned Docker containers first (before marking runs cancelled)
+	// Remove orphaned containers first (before marking runs cancelled)
 	// so the DB status reflects what actually happened to each container.
 	dockerruntime.CleanupOrphanedContainers(ctx, log)
+	podmanruntime.CleanupOrphanedContainers(ctx, log)
 
 	reg := registry.New(database)
 	if stale, err := reg.CleanupStaleRuns(ctx); err != nil {
@@ -195,6 +197,16 @@ func buildRuntimes(
 
 	// --- Docker ---
 	eng.RegisterExecutor(task.RuntimeDocker, dockerruntime.New(reg, log))
+
+	// --- Podman — registered as ManagedRuntime; executor added only if binary found ---
+	podmanMgr := podmanruntime.New(reg, log)
+	managed = append(managed, podmanMgr)
+	if podmanMgr.IsInstalled("") {
+		if p, err := podmanMgr.BinaryPath(""); err == nil {
+			eng.RegisterExecutor(task.RuntimePodman, podmanMgr.NewExecutor(p))
+			log.Info("podman runtime registered", zap.String("path", p))
+		}
+	}
 
 	// --- Python (uv) — register only if configured + installed ---
 	pythonMgr := pythonruntime.New(reg, secretsChain, database, log)
