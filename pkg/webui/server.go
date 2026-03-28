@@ -9,6 +9,7 @@ import (
 	"crypto/subtle"
 	"embed"
 	"encoding/hex"
+	"io/fs"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -246,9 +247,10 @@ func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config
 		})
 	})
 
-	// Wire log broadcaster hook → ws BroadcastLog
+	// Wire log broadcaster hook → ws BroadcastLog + replay buffer
 	if logs != nil {
 		logs.SetHook(s.ws.BroadcastLog)
+		s.ws.recentLogs = logs.Recent
 	}
 
 	return s, nil
@@ -335,6 +337,10 @@ func (s *Server) Handler() http.Handler {
 		req.URL.Path = "/hooks/" + chi.URLParam(req, "*")
 		s.engine.WebhookHandler().ServeHTTP(w, req)
 	})
+
+	// Static SPA assets (/app/app.js, etc.)
+	appFS, _ := fs.Sub(staticFS, "static")
+	r.Handle("/app/*", http.FileServer(http.FS(appFS)))
 
 	// SPA catch-all — serve index.html for all unmatched GET routes
 	r.Get("/*", s.serveSPA)
@@ -939,19 +945,25 @@ func (s *Server) apiKillRun(w http.ResponseWriter, r *http.Request) {
 // --- Settings handlers ---
 
 func (s *Server) apiSaveAISettings(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseForm(); err != nil {
+	var body struct {
+		BaseURL     string `json:"base_url"`
+		Model       string `json:"model"`
+		APIKeyEnv   string `json:"api_key_env"`
+		APIKey      string `json:"api_key"`
+		ClearAPIKey bool   `json:"clear_api_key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonErr(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	s.cfg.AI.BaseURL = strings.TrimSpace(r.FormValue("base_url"))
-	s.cfg.AI.Model = strings.TrimSpace(r.FormValue("model"))
-	s.cfg.AI.APIKeyEnv = strings.TrimSpace(r.FormValue("api_key_env"))
-	if v := r.FormValue("api_key"); v != "" {
-		s.cfg.AI.APIKey = v
-	} else if r.FormValue("clear_api_key") == "1" {
+	s.cfg.AI.BaseURL = strings.TrimSpace(body.BaseURL)
+	s.cfg.AI.Model = strings.TrimSpace(body.Model)
+	s.cfg.AI.APIKeyEnv = strings.TrimSpace(body.APIKeyEnv)
+	if body.APIKey != "" {
+		s.cfg.AI.APIKey = body.APIKey
+	} else if body.ClearAPIKey {
 		s.cfg.AI.APIKey = ""
 	}
-
 	if err := s.persistConfig(); err != nil {
 		s.log.Warn("settings persist failed", zap.Error(err))
 		jsonErr(w, "saved in memory but could not write file: "+err.Error(), http.StatusInternalServerError)
@@ -962,21 +974,24 @@ func (s *Server) apiSaveAISettings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) apiSaveServerSettings(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseForm(); err != nil {
+	var body struct {
+		LogLevel string `json:"log_level"`
+		Secret   string `json:"secret"`
+		Tray     *bool  `json:"tray"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonErr(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	if v := r.FormValue("log_level"); v != "" {
-		s.cfg.LogLevel = v
+	if body.LogLevel != "" {
+		s.cfg.LogLevel = body.LogLevel
 	}
-	if r.Form.Has("secret") {
-		s.cfg.Server.Secret = r.FormValue("secret")
+	if body.Secret != "" {
+		s.cfg.Server.Secret = body.Secret
 	}
-	if v := r.FormValue("tray"); v != "" {
-		enabled := v == "true"
-		s.cfg.Server.Tray = &enabled
+	if body.Tray != nil {
+		s.cfg.Server.Tray = body.Tray
 	}
-
 	if err := s.persistConfig(); err != nil {
 		s.log.Warn("settings persist failed", zap.Error(err))
 		jsonErr(w, "saved in memory but could not write file: "+err.Error(), http.StatusInternalServerError)
@@ -987,39 +1002,43 @@ func (s *Server) apiSaveServerSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) apiAddSource(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseForm(); err != nil {
+	var body struct {
+		Type     string `json:"type"`
+		Path     string `json:"path"`
+		URL      string `json:"url"`
+		Branch   string `json:"branch"`
+		TokenEnv string `json:"token_env"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonErr(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	srcType := r.FormValue("type")
 	var sc config.SourceConfig
-	switch config.SourceType(srcType) {
+	switch config.SourceType(body.Type) {
 	case config.SourceTypeLocal:
-		path := strings.TrimSpace(r.FormValue("path"))
+		path := strings.TrimSpace(body.Path)
 		if path == "" {
 			jsonErr(w, "path is required for local source", http.StatusBadRequest)
 			return
 		}
 		sc = config.SourceConfig{Type: config.SourceTypeLocal, Path: path, Watch: true}
 	case config.SourceTypeGit:
-		url := strings.TrimSpace(r.FormValue("url"))
+		url := strings.TrimSpace(body.URL)
 		if url == "" {
 			jsonErr(w, "url is required for git source", http.StatusBadRequest)
 			return
 		}
+		branch := body.Branch
+		if branch == "" {
+			branch = "main"
+		}
 		sc = config.SourceConfig{
-			Type:   config.SourceTypeGit,
-			URL:    url,
-			Branch: strings.TrimSpace(r.FormValue("branch")),
-			Auth: config.SourceAuth{
-				Type:     r.FormValue("auth_type"),
-				TokenEnv: r.FormValue("token_env"),
-			},
+			Type:         config.SourceTypeGit,
+			URL:          url,
+			Branch:       branch,
+			PollInterval: 30 * 1e9,
+			Auth:         config.SourceAuth{TokenEnv: body.TokenEnv},
 		}
-		if sc.Branch == "" {
-			sc.Branch = "main"
-		}
-		sc.PollInterval = 30 * 1e9 // 30s in nanoseconds as time.Duration
 	default:
 		jsonErr(w, "type must be 'local' or 'git'", http.StatusBadRequest)
 		return
@@ -1054,7 +1073,7 @@ func (s *Server) apiAddSource(w http.ResponseWriter, r *http.Request) {
 	if err := s.persistConfig(); err != nil {
 		s.log.Warn("source persist failed", zap.Error(err))
 	}
-	s.log.Info("source added", zap.String("type", srcType))
+	s.log.Info("source added", zap.String("type", body.Type))
 	jsonOK(w, map[string]string{"status": "ok"})
 }
 

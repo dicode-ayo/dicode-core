@@ -25,14 +25,26 @@ const wsHandlers = {};  // type → [fn]
 function wsConnect() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}/ws`);
+  ws.onopen = () => {
+    wsSend('sub:logs');
+    setLogStatus('● connected', '#a6e3a1');
+  };
   ws.onmessage = (e) => {
     try {
       const msg = JSON.parse(e.data);
       (wsHandlers[msg.type] || []).forEach(fn => fn(msg.data));
     } catch(_) {}
   };
-  ws.onclose = () => { ws = null; setTimeout(wsConnect, 3000); };
+  ws.onclose = () => {
+    ws = null;
+    setLogStatus('● disconnected', '#f38ba8');
+    setTimeout(wsConnect, 3000);
+  };
   ws.onerror = () => { if (ws) ws.close(); };
+}
+function setLogStatus(text, color) {
+  const el = document.getElementById('logstatus');
+  if (el) { el.textContent = text; el.style.color = color; }
 }
 function wsSend(type, data) {
   if (ws && ws.readyState === WebSocket.OPEN) {
@@ -137,17 +149,9 @@ function toggleLogBar() {
   logBarOpen = !logBarOpen;
   const el = document.getElementById('logconsole');
   const arrow = document.getElementById('logarrow');
-  const status = document.getElementById('logstatus');
   if (el) el.style.display = logBarOpen ? 'block' : 'none';
   if (arrow) arrow.textContent = logBarOpen ? '▼' : '▶';
-  if (logBarOpen) {
-    if (el) el.scrollTop = el.scrollHeight;
-    wsSend('sub:logs');
-    if (status) { status.textContent = '● connected'; status.style.color = '#a6e3a1'; }
-  } else {
-    wsSend('unsub:logs');
-    if (status) status.textContent = '';
-  }
+  if (logBarOpen && el) el.scrollTop = el.scrollHeight;
 }
 
 // ── Helper: mount HTML into #app ─────────────────────────────────────────────
@@ -577,15 +581,129 @@ async function killRun(runID) {
 // ── Config page ─────────────────────────────────────────────────────────────
 async function renderConfig() {
   mount('<div class="meta">Loading…</div>');
-  let raw;
-  try { raw = await get('/api/config/raw'); } catch(e) { mount(`<p style="color:red">Error: ${esc(e.message)}</p>`); return; }
+  let cfg, raw;
+  try {
+    [cfg, raw] = await Promise.all([get('/api/config'), get('/api/config/raw')]);
+  } catch(e) { mount(`<p style="color:red">Error: ${esc(e.message)}</p>`); return; }
+
+  const ai = cfg.AI || cfg.ai || {};
+  const srv = cfg.Server || cfg.server || {};
+  const db = cfg.Database || cfg.database || {};
+  const sources = cfg.Sources || cfg.sources || [];
+  const tray = srv.Tray != null ? srv.Tray : (srv.tray != null ? srv.tray : true);
+
+  const srcRows = sources.length ? sources.map((s, i) => `
+    <tr>
+      <td><span class="badge badge-manual">${esc(s.Type||s.type||'')}</span></td>
+      <td style="word-break:break-all">${esc(s.Path||s.path||s.URL||s.url||'')}</td>
+      <td class="meta">${s.Type==='git'||s.type==='git' ? `branch: ${esc(s.Branch||s.branch||'')}` : `watch: ${s.Watch||s.watch||false}`}</td>
+      <td><button class="btn btn-sm" style="background:#c0392b" onclick="removeSource(${i})">Remove</button></td>
+    </tr>`).join('') : `<tr><td colspan="4" class="meta" style="text-align:center">No sources configured.</td></tr>`;
+
   mount(`
-    <h1>Config</h1>
-    <p class="meta" style="margin-bottom:1rem">Edit <code>dicode.yaml</code> directly. Requires secrets session to be unlocked.</p>
-    <div id="config-monaco" style="height:500px;border-radius:4px;overflow:hidden;margin-bottom:1rem"></div>
-    <div style="display:flex;gap:0.5rem;align-items:center">
-      <button class="btn" onclick="saveConfig()">Save</button>
-      <span id="config-status" style="font-size:0.85rem;color:#888"></span>
+    <h1>Configuration</h1>
+
+    <style>
+    .cfg-form input,.cfg-form select{background:#2a2a3e;color:#cdd6f4;border:1px solid #444;border-radius:4px;padding:0.35rem 0.5rem;font-size:0.85rem;width:100%;box-sizing:border-box}
+    .cfg-form label{font-size:0.78rem;color:#888;display:block;margin-bottom:0.25rem}
+    .cfg-form .field{margin-bottom:0.75rem}
+    .cfg-form .hint{font-size:0.72rem;color:#666;margin-top:0.2rem}
+    </style>
+
+    <div class="card">
+      <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:0.75rem">
+        <h2 style="margin:0">AI</h2><span id="ai-status" style="font-size:0.82rem;color:#888"></span>
+      </div>
+      <div class="cfg-form">
+        <div class="field"><label>Endpoint (base URL)</label>
+          <input id="ai-base-url" value="${esc(ai.BaseURL||ai.base_url||'')}" placeholder="leave blank for OpenAI">
+          <div class="hint">OpenAI: leave blank &nbsp;|&nbsp; Claude: https://api.anthropic.com/v1 &nbsp;|&nbsp; Ollama: http://localhost:11434/v1</div>
+        </div>
+        <div class="field"><label>Model</label>
+          <input id="ai-model" value="${esc(ai.Model||ai.model||'')}" placeholder="gpt-4o">
+        </div>
+        <div class="field"><label>API key env var</label>
+          <input id="ai-key-env" value="${esc(ai.APIKeyEnv||ai.api_key_env||'')}" placeholder="OPENAI_API_KEY">
+        </div>
+        <div class="field"><label>API key (direct value)</label>
+          <input id="ai-key-val" type="password" placeholder="paste to set; leave blank to keep current">
+        </div>
+        <button class="btn" onclick="saveAI()">&#128190; Save AI settings</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:0.75rem">
+        <h2 style="margin:0">Server</h2><span id="srv-status" style="font-size:0.82rem;color:#888"></span>
+      </div>
+      <div class="cfg-form">
+        <div class="field"><label>Port</label>
+          <input value="${srv.Port||srv.port||''}" disabled style="color:#666;cursor:not-allowed">
+          <div class="hint">Changing port requires restart; edit dicode.yaml directly.</div>
+        </div>
+        <div class="field"><label>Log level</label>
+          <select id="srv-log-level">
+            ${['debug','info','warn','error'].map(l=>`<option value="${l}"${(cfg.LogLevel||cfg.log_level||'info')===l?' selected':''}>${l}</option>`).join('')}
+          </select>
+        </div>
+        <div class="field"><label>System tray icon</label>
+          <select id="srv-tray">
+            <option value="true"${tray?' selected':''}>Enabled</option>
+            <option value="false"${!tray?' selected':''}>Disabled</option>
+          </select>
+          <div class="hint">Takes effect on next restart.</div>
+        </div>
+        <div class="field"><label>Secrets passphrase</label>
+          <input id="srv-secret" type="password" placeholder="leave blank to keep current">
+        </div>
+        <button class="btn" onclick="saveServer()">&#128190; Save server settings</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Database</h2>
+      <table><tbody>
+        <tr><th>Type</th><td>${esc(db.Type||db.type||'sqlite')}</td></tr>
+        ${db.Path||db.path ? `<tr><th>Path</th><td>${esc(db.Path||db.path)}</td></tr>` : ''}
+        ${db.URLEnv||db.url_env ? `<tr><th>URL env</th><td>${esc(db.URLEnv||db.url_env)}</td></tr>` : ''}
+      </tbody></table>
+    </div>
+
+    <div class="card">
+      <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:0.75rem">
+        <h2 style="margin:0">Sources (${sources.length})</h2>
+        <span id="src-status" style="font-size:0.82rem;color:#888"></span>
+      </div>
+      <table style="margin-bottom:1rem"><thead><tr><th>Type</th><th>Path / URL</th><th>Details</th><th></th></tr></thead>
+        <tbody id="sources-tbody">${srcRows}</tbody>
+      </table>
+      <details>
+        <summary style="cursor:pointer;font-size:0.85rem;color:#7c3aed;user-select:none">+ Add source</summary>
+        <div class="cfg-form" style="margin-top:0.75rem">
+          <div class="field"><label>Type</label>
+            <select id="new-src-type" onchange="toggleSrcFields()">
+              <option value="local">local</option><option value="git">git</option>
+            </select>
+          </div>
+          <div id="src-local-fields">
+            <div class="field"><label>Directory path</label><input id="new-src-path" placeholder="/home/you/tasks"></div>
+          </div>
+          <div id="src-git-fields" style="display:none">
+            <div class="field"><label>Repository URL</label><input id="new-src-url" placeholder="https://github.com/you/tasks.git"></div>
+            <div class="field"><label>Branch</label><input id="new-src-branch" placeholder="main"></div>
+            <div class="field"><label>Auth token env var (optional)</label><input id="new-src-token-env" placeholder="GITHUB_TOKEN"></div>
+          </div>
+          <button class="btn" onclick="addSource()">Add source</button>
+        </div>
+      </details>
+    </div>
+
+    <div class="card">
+      <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:0.75rem">
+        <h2 style="margin:0">Raw YAML</h2><span id="config-status" style="font-size:0.82rem;color:#888"></span>
+      </div>
+      <div id="config-monaco" style="height:400px;border-radius:4px;overflow:hidden;margin-bottom:0.75rem"></div>
+      <button class="btn" onclick="saveConfig()">&#128190; Save</button>
     </div>`);
 
   require.config({ paths: { vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs' } });
@@ -598,6 +716,66 @@ async function renderConfig() {
       minimap: { enabled: false },
     });
   });
+}
+
+function toggleSrcFields() {
+  const t = document.getElementById('new-src-type').value;
+  document.getElementById('src-local-fields').style.display = t === 'local' ? '' : 'none';
+  document.getElementById('src-git-fields').style.display = t === 'git' ? '' : 'none';
+}
+
+async function saveAI() {
+  const st = document.getElementById('ai-status');
+  if (st) st.textContent = 'Saving…';
+  try {
+    await post('/api/settings/ai', {
+      base_url: document.getElementById('ai-base-url').value,
+      model: document.getElementById('ai-model').value,
+      api_key_env: document.getElementById('ai-key-env').value,
+      api_key: document.getElementById('ai-key-val').value,
+    });
+    if (st) { st.textContent = 'Saved ✓'; setTimeout(() => { if(st) st.textContent=''; }, 2000); }
+  } catch(e) { if (st) st.textContent = 'Error: '+e.message; }
+}
+
+async function saveServer() {
+  const st = document.getElementById('srv-status');
+  if (st) st.textContent = 'Saving…';
+  try {
+    const trayVal = document.getElementById('srv-tray').value === 'true';
+    await post('/api/settings/server', {
+      log_level: document.getElementById('srv-log-level').value,
+      tray: trayVal,
+      secret: document.getElementById('srv-secret').value || undefined,
+    });
+    if (st) { st.textContent = 'Saved ✓'; setTimeout(() => { if(st) st.textContent=''; }, 2000); }
+  } catch(e) { if (st) st.textContent = 'Error: '+e.message; }
+}
+
+async function removeSource(idx) {
+  if (!confirm('Remove this source?')) return;
+  const st = document.getElementById('src-status');
+  try {
+    await del(`/api/settings/sources/${idx}`);
+    renderConfig();
+  } catch(e) { if (st) st.textContent = 'Error: '+e.message; }
+}
+
+async function addSource() {
+  const type = document.getElementById('new-src-type').value;
+  const st = document.getElementById('src-status');
+  const body = { type };
+  if (type === 'local') {
+    body.path = document.getElementById('new-src-path').value;
+  } else {
+    body.url = document.getElementById('new-src-url').value;
+    body.branch = document.getElementById('new-src-branch').value || 'main';
+    body.token_env = document.getElementById('new-src-token-env').value;
+  }
+  try {
+    await post('/api/settings/sources', body);
+    renderConfig();
+  } catch(e) { if (st) st.textContent = 'Error: '+e.message; }
 }
 
 async function saveConfig() {
