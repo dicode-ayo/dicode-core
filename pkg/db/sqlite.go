@@ -36,11 +36,14 @@ func openSQLite(path string) (DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite %q: %w", path, err)
 	}
-	// SQLite does not support concurrent writers and in-memory databases are
-	// per-connection. A single connection prevents both "database is locked"
-	// errors and the silent data-isolation bug where two goroutines each get
-	// their own empty :memory: DB from the pool.
-	db.SetMaxOpenConns(1)
+	// In-memory databases are per-connection: every connection gets its own
+	// empty DB. A single connection prevents the silent isolation bug where
+	// two goroutines each see a different empty database.
+	// File-based DBs use WAL mode, which allows concurrent readers alongside
+	// one writer — no connection limit needed there.
+	if path == ":memory:" {
+		db.SetMaxOpenConns(1)
+	}
 	if err := db.Ping(); err != nil {
 		return nil, fmt.Errorf("ping sqlite: %w", err)
 	}
