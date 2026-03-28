@@ -32,15 +32,16 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
+	"time"
 
+	podmanpkg "github.com/dicode/dicode/pkg/podman"
 	"github.com/dicode/dicode/pkg/registry"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
-	podmanpkg "github.com/dicode/dicode/pkg/podman"
 	"github.com/dicode/dicode/pkg/task"
 	"go.uber.org/zap"
 )
@@ -121,7 +122,7 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 		}
 	}
 
-	args := e.buildArgs(cfg, imageTag, containerName, spec)
+	args := e.buildArgs(cfg, imageTag, containerName, runID, spec.ID)
 
 	e.log.Info("podman run",
 		zap.String("task", spec.ID),
@@ -191,23 +192,7 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 // Results are cached by Dockerfile content hash — if the image already exists the build is skipped.
 func (e *executor) buildImage(ctx context.Context, spec *task.Spec, runID string) (string, error) {
 	b := spec.Docker.Build
-
-	dockerfilePath := b.Dockerfile
-	if dockerfilePath == "" {
-		dockerfilePath = "Dockerfile"
-	}
-	if !filepath.IsAbs(dockerfilePath) {
-		dockerfilePath = filepath.Join(spec.TaskDir, dockerfilePath)
-	}
-
-	contextDir := spec.TaskDir
-	if b.Context != "" {
-		if filepath.IsAbs(b.Context) {
-			contextDir = b.Context
-		} else {
-			contextDir = filepath.Join(spec.TaskDir, b.Context)
-		}
-	}
+	dockerfilePath, contextDir := b.ResolvePaths(spec.TaskDir)
 
 	content, err := os.ReadFile(dockerfilePath) //nolint:gosec
 	if err != nil {
@@ -224,11 +209,17 @@ func (e *executor) buildImage(ctx context.Context, spec *task.Spec, runID string
 
 	_ = e.reg.AppendLog(ctx, runID, "info", "building image "+tag+"…")
 
-	buildArgs := []string{"build", "-t", tag, "-f", dockerfilePath, contextDir}
-	cmd := exec.CommandContext(ctx, e.podmanPath, buildArgs...) //nolint:gosec
+	buildCmd := []string{"build", "-t", tag, "-f", dockerfilePath, contextDir}
+	cmd := exec.CommandContext(ctx, e.podmanPath, buildCmd...) //nolint:gosec
 
-	stdout, _ := cmd.StdoutPipe()
-	stderr, _ := cmd.StderrPipe()
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", fmt.Errorf("podman build stdout: %w", err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return "", fmt.Errorf("podman build stderr: %w", err)
+	}
 
 	if err := cmd.Start(); err != nil {
 		return "", fmt.Errorf("podman build: %w", err)
@@ -245,24 +236,24 @@ func (e *executor) buildImage(ctx context.Context, spec *task.Spec, runID string
 	go func() {
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {
-			_ = e.reg.AppendLog(ctx, runID, "info", scanner.Text())
+			_ = e.reg.AppendLog(ctx, runID, "warn", scanner.Text())
 		}
 	}()
 
+	<-buildDone
 	if err := cmd.Wait(); err != nil {
 		return "", fmt.Errorf("podman build failed: %w", err)
 	}
-	<-buildDone
 
 	return tag, nil
 }
 
-func (e *executor) buildArgs(cfg *task.DockerConfig, imageTag, containerName string, spec *task.Spec) []string {
+func (e *executor) buildArgs(cfg *task.DockerConfig, imageTag, containerName, runID, taskID string) []string {
 	args := []string{
 		"run", "--rm",
 		"--name", containerName,
-		"--label", "dicode.run-id=" + runID(spec, containerName),
-		"--label", "dicode.task-id=" + spec.ID,
+		"--label", "dicode.run-id=" + runID,
+		"--label", "dicode.task-id=" + taskID,
 	}
 	for _, p := range cfg.Ports {
 		args = append(args, "-p", p)
@@ -290,16 +281,12 @@ func (e *executor) buildArgs(cfg *task.DockerConfig, imageTag, containerName str
 		args = append(args, "--pull=never") // image was just built locally
 	}
 	if len(cfg.Entrypoint) > 0 {
-		args = append(args, "--entrypoint", strings.Join(cfg.Entrypoint, " "))
+		ep, _ := json.Marshal(cfg.Entrypoint)
+		args = append(args, "--entrypoint", string(ep))
 	}
 	args = append(args, imageTag)
 	args = append(args, cfg.Command...)
 	return args
-}
-
-// runID extracts the run ID from the container name ("dicode-<runID>").
-func runID(_ *task.Spec, containerName string) string {
-	return strings.TrimPrefix(containerName, "dicode-")
 }
 
 // CleanupOrphanedContainers stops and removes any podman containers left
@@ -311,7 +298,10 @@ func CleanupOrphanedContainers(ctx context.Context, log *zap.Logger) {
 		return
 	}
 
-	out, err := exec.CommandContext(ctx, podmanPath, "ps", "-a", //nolint:gosec
+	listCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	out, err := exec.CommandContext(listCtx, podmanPath, "ps", "-a", //nolint:gosec
 		"--filter", "label=dicode.run-id",
 		"--format", "{{.Names}}",
 	).Output()
@@ -327,6 +317,8 @@ func CleanupOrphanedContainers(ctx context.Context, log *zap.Logger) {
 	log.Info("removing orphaned podman containers from previous session", zap.Int("count", len(names)))
 	for _, name := range names {
 		log.Info("removing orphaned container", zap.String("container", name))
-		_ = exec.CommandContext(ctx, podmanPath, "rm", "-f", name).Run() //nolint:gosec
+		rmCtx, rmCancel := context.WithTimeout(ctx, 15*time.Second)
+		_ = exec.CommandContext(rmCtx, podmanPath, "rm", "-f", name).Run() //nolint:gosec
+		rmCancel()
 	}
 }

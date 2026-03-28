@@ -28,6 +28,27 @@ type DockerBuild struct {
 	Context    string `yaml:"context,omitempty"`    // path relative to task dir; default task dir
 }
 
+// ResolvePaths returns the absolute Dockerfile path and build context directory
+// for this build config, resolving relative paths against taskDir.
+func (b *DockerBuild) ResolvePaths(taskDir string) (dockerfilePath, contextDir string) {
+	dockerfilePath = b.Dockerfile
+	if dockerfilePath == "" {
+		dockerfilePath = "Dockerfile"
+	}
+	if !filepath.IsAbs(dockerfilePath) {
+		dockerfilePath = filepath.Join(taskDir, dockerfilePath)
+	}
+	contextDir = taskDir
+	if b.Context != "" {
+		if filepath.IsAbs(b.Context) {
+			contextDir = b.Context
+		} else {
+			contextDir = filepath.Join(taskDir, b.Context)
+		}
+	}
+	return
+}
+
 // DockerConfig holds Docker/Podman-specific task configuration.
 type DockerConfig struct {
 	Image      string            `yaml:"image,omitempty"`       // e.g. "nginx:alpine"

@@ -451,11 +451,12 @@ func (s *Server) uiRunRows(w http.ResponseWriter, r *http.Request) {
 
 // editorData is passed to the editor partial template.
 type editorData struct {
-	ID         string
-	ScriptFile string // primary file shown in editor (e.g. "task.ts", "task.py", "Dockerfile")
-	TaskJS     string // content of ScriptFile
-	TestJS     string
-	TestExists bool
+	ID          string
+	ScriptFile  string // primary file shown in editor (e.g. "task.ts", "task.py", "Dockerfile")
+	TaskJS      string // content of ScriptFile
+	TestFile    string // test file name (e.g. "task.test.ts" or "task.test.js")
+	TestJS      string
+	TestExists  bool
 	IsContainer bool // true for docker/podman tasks — hides test-related UI
 }
 
@@ -490,9 +491,18 @@ func (s *Server) uiTaskEditor(w http.ResponseWriter, r *http.Request) {
 		}
 		for _, name := range []string{"task.test.ts", "task.test.js"} {
 			if b, err := os.ReadFile(filepath.Join(spec.TaskDir, name)); err == nil {
+				d.TestFile = name
 				d.TestJS = string(b)
 				d.TestExists = true
 				break
+			}
+		}
+		if d.TestFile == "" {
+			// Default for the "+ test" create button — match the primary script extension.
+			if strings.HasSuffix(d.ScriptFile, ".ts") {
+				d.TestFile = "task.test.ts"
+			} else {
+				d.TestFile = "task.test.js"
 			}
 		}
 	}
@@ -1285,6 +1295,9 @@ func (s *Server) persistConfig() error {
 			}
 			if rc.Disabled {
 				entry["disabled"] = true
+			}
+			if len(entry) == 0 {
+				continue
 			}
 			rtMap[rtName] = entry
 		}
