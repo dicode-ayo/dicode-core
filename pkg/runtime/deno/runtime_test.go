@@ -259,7 +259,10 @@ func TestRuntime_ScriptError(t *testing.T) {
 	if r.Error == nil {
 		t.Fatal("expected error")
 	}
-	run, _ := e.reg.GetRun(context.Background(), r.RunID)
+	run, err := e.reg.GetRun(context.Background(), r.RunID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
 	if run.Status != registry.StatusFailure {
 		t.Errorf("expected failure, got %s", run.Status)
 	}

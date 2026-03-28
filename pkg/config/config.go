@@ -21,16 +21,16 @@ type RuntimeConfig struct {
 }
 
 type Config struct {
-	Sources       []SourceConfig             `yaml:"sources"`
-	Database      DatabaseConfig             `yaml:"database"`
-	Secrets       SecretsConfig              `yaml:"secrets"`
-	Notifications NotificationsConfig        `yaml:"notifications"`
-	Relay         RelayConfig                `yaml:"relay"`
-	Server        ServerConfig               `yaml:"server"`
-	AI            AIConfig                   `yaml:"ai"`
-	Runtimes      map[string]RuntimeConfig   `yaml:"runtimes,omitempty"`
-	LogLevel      string                     `yaml:"log_level"`
-	DataDir       string                     `yaml:"data_dir"`
+	Sources       []SourceConfig           `yaml:"sources"`
+	Database      DatabaseConfig           `yaml:"database"`
+	Secrets       SecretsConfig            `yaml:"secrets"`
+	Notifications NotificationsConfig      `yaml:"notifications"`
+	Relay         RelayConfig              `yaml:"relay"`
+	Server        ServerConfig             `yaml:"server"`
+	AI            AIConfig                 `yaml:"ai"`
+	Runtimes      map[string]RuntimeConfig `yaml:"runtimes,omitempty"`
+	LogLevel      string                   `yaml:"log_level"`
+	DataDir       string                   `yaml:"data_dir"`
 }
 
 // DatabaseConfig selects the storage backend.
