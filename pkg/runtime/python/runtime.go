@@ -325,4 +325,3 @@ func buildEnv(resolved map[string]string, socketPath string) []string {
 	}
 	return env
 }
-
