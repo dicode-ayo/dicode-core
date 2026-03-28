@@ -141,6 +141,9 @@ func securityHeaders(next http.Handler) http.Handler {
 //go:embed templates/*.html
 var templateFS embed.FS
 
+//go:embed static
+var staticFS embed.FS
+
 // Server is the HTTP server for the web UI and REST API.
 type Server struct {
 	registry        *registry.Registry
@@ -154,6 +157,7 @@ type Server struct {
 	sessions        *sessionStore
 	limiter         *unlockLimiter
 	logs            *LogBroadcaster
+	runEvents       *RunEventBroadcaster
 	log             *zap.Logger
 	port            int
 	srv             *http.Server
@@ -212,7 +216,7 @@ func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config
 	}
 	ss := newSessionStore()
 	go ss.purgeLoop()
-	return &Server{
+	s := &Server{
 		registry:    r,
 		engine:      eng,
 		cfg:         cfg,
@@ -227,7 +231,23 @@ func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config
 		port:        port,
 		baseTmpl:    base,
 		partialTmpl: partials,
-	}, nil
+	}
+	s.runEvents = NewRunEventBroadcaster()
+	eng.SetRunFinishedHook(func(taskID, runID, status, triggerSource string, durationMs int64) {
+		taskName := taskID
+		if spec, ok := r.Get(taskID); ok {
+			taskName = spec.Name
+		}
+		s.runEvents.Publish(RunEvent{
+			RunID:         runID,
+			TaskID:        taskID,
+			TaskName:      taskName,
+			Status:        status,
+			DurationMs:    durationMs,
+			TriggerSource: triggerSource,
+		})
+	})
+	return s, nil
 }
 
 // Handler returns the HTTP handler (useful for testing without starting a server).
@@ -252,6 +272,10 @@ func (s *Server) Handler() http.Handler {
 
 	// SSE log stream
 	r.Get("/logs/stream", s.handleLogsStream)
+
+	// SSE run events stream + service worker
+	r.Get("/api/events", s.handleRunEvents)
+	r.Get("/sw.js", s.handleServiceWorker)
 
 	// File editor API (task.js / task.test.js only)
 	r.Get("/api/tasks/{id}/files/{filename}", s.apiGetFile)
@@ -360,10 +384,15 @@ func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 	if len(title) > 8 {
 		title = title[:8]
 	}
+	taskName := run.TaskID
+	if spec, ok := s.registry.Get(run.TaskID); ok {
+		taskName = spec.Name
+	}
 	s.render(w, "run.html", map[string]any{
-		"Title": "Run " + title,
-		"Run":   run,
-		"Logs":  logs,
+		"Title":    "Run " + title,
+		"Run":      run,
+		"Logs":     logs,
+		"TaskName": taskName,
 	})
 }
 
@@ -378,6 +407,50 @@ func (s *Server) handleConfigCode(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "config_code.html", map[string]any{
 		"Title": "Edit config",
 	})
+}
+
+// handleServiceWorker serves the Service Worker JS file.
+func (s *Server) handleServiceWorker(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/javascript")
+	w.Header().Set("Service-Worker-Allowed", "/")
+	b, err := staticFS.ReadFile("static/sw.js")
+	if err != nil {
+		http.Error(w, "sw.js not found", http.StatusNotFound)
+		return
+	}
+	w.Write(b) //nolint:errcheck
+}
+
+// handleRunEvents streams run:complete SSE events to the client.
+func (s *Server) handleRunEvents(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	ch := s.runEvents.Subscribe()
+	defer s.runEvents.Unsubscribe(ch)
+
+	// Send a keepalive comment immediately so the browser knows it's connected.
+	fmt.Fprintf(w, ": connected\n\n")
+	flusher.Flush()
+
+	for {
+		select {
+		case evt, ok := <-ch:
+			if !ok {
+				return
+			}
+			fmt.Fprintf(w, "event: run:complete\ndata: %s\n\n", evt.JSON())
+			flusher.Flush()
+		case <-r.Context().Done():
+			return
+		}
+	}
 }
 
 // apiGetConfigRaw returns the raw content of dicode.yaml.

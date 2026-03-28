@@ -44,6 +44,9 @@
     <a href="/config">Config</a>
     <a href="/secrets">Secrets</a>
   </nav>
+  <div id="notif-bell" onclick="toggleInbox()" style="margin-left:auto;cursor:pointer;position:relative;padding:0.25rem 0.5rem;color:#ccc;font-size:1.1rem" title="Notifications">
+    🔔 <span id="notif-badge" style="display:none;position:absolute;top:0;right:0;background:#f38ba8;color:#fff;border-radius:9px;font-size:0.65rem;padding:1px 5px;font-weight:700">0</span>
+  </div>
 </header>
 <main>
 {{block "content" .}}{{end}}
@@ -112,6 +115,160 @@ document.addEventListener('htmx:beforeRequest', function(evt) {
     evt.preventDefault();
   }
 });
+</script>
+
+<!-- Notification inbox panel -->
+<div id="notif-panel" style="display:none;position:fixed;top:48px;right:0;width:340px;max-height:480px;overflow-y:auto;background:#fff;border:1px solid #dee2e6;border-radius:6px 0 0 6px;box-shadow:-2px 2px 8px rgba(0,0,0,.15);z-index:200">
+  <div style="display:flex;align-items:center;padding:0.6rem 1rem;border-bottom:1px solid #eee;background:#f8f9fa">
+    <strong style="font-size:0.9rem">Notifications</strong>
+    <button onclick="clearInbox()" style="margin-left:auto;background:none;border:none;cursor:pointer;color:#6c757d;font-size:0.8rem">Clear</button>
+  </div>
+  <div id="notif-list" style="font-size:0.85rem"></div>
+</div>
+
+<!-- Notification permission banner -->
+<div id="notif-banner" style="display:none;position:fixed;bottom:2.5rem;left:0;right:0;background:#1a1a2e;color:#cdd6f4;padding:0.6rem 1.5rem;align-items:center;gap:1rem;z-index:150;border-top:1px solid #333">
+  <span style="flex:1">⚡ dicode can send browser notifications when tasks complete.</span>
+  <button onclick="requestNotifPermission()" class="btn btn-sm">Allow</button>
+  <button onclick="dismissNotifBanner()" style="background:none;border:none;cursor:pointer;color:#888;font-size:1.1rem">✕</button>
+</div>
+
+<script>
+(function() {
+  var STORAGE_KEY = 'dicode_notifs';
+  var BANNER_KEY  = 'dicode_notif_banner_dismissed';
+  var MAX_NOTIFS  = 50;
+  var unread = 0;
+  var inboxOpen = false;
+
+  /* ── Inbox state ── */
+  function loadNotifs() {
+    try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]'); } catch(_) { return []; }
+  }
+  function saveNotifs(list) {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(list.slice(-MAX_NOTIFS)));
+  }
+
+  function addNotif(evt) {
+    var list = loadNotifs();
+    list.push({ ts: Date.now(), runID: evt.runID, taskName: evt.taskName, taskID: evt.taskID, status: evt.status, durationMs: evt.durationMs });
+    saveNotifs(list);
+    renderInbox();
+    if (!inboxOpen) {
+      unread++;
+      updateBadge();
+    }
+  }
+
+  function renderInbox() {
+    var list = loadNotifs().slice().reverse();
+    var el = document.getElementById('notif-list');
+    if (!el) return;
+    if (list.length === 0) {
+      el.innerHTML = '<div style="padding:1rem;color:#888;text-align:center">No notifications yet.</div>';
+      return;
+    }
+    el.innerHTML = list.map(function(n) {
+      var ago = Math.round((Date.now() - n.ts) / 60000);
+      var agoStr = ago < 1 ? 'just now' : ago < 60 ? ago + 'm ago' : Math.round(ago/60) + 'h ago';
+      var ok = n.status === 'success';
+      var icon = ok ? '✓' : '✗';
+      var color = ok ? '#0f5132' : '#842029';
+      var bg = ok ? '#d1e7dd' : '#f8d7da';
+      return '<div style="display:flex;align-items:center;gap:0.5rem;padding:0.6rem 1rem;border-bottom:1px solid #f0f0f0">'
+        + '<span style="background:' + bg + ';color:' + color + ';border-radius:4px;padding:0.1em 0.5em;font-weight:600;font-size:0.78rem">' + icon + ' ' + n.status + '</span>'
+        + '<div style="flex:1;min-width:0"><div style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + n.taskName + '</div>'
+        + '<div style="color:#888;font-size:0.75rem">' + agoStr + '</div></div>'
+        + '<a href="/runs/' + n.runID + '" style="font-size:0.75rem;white-space:nowrap">View →</a>'
+        + '</div>';
+    }).join('');
+  }
+
+  function updateBadge() {
+    var badge = document.getElementById('notif-badge');
+    if (!badge) return;
+    if (unread > 0) {
+      badge.textContent = unread > 99 ? '99+' : unread;
+      badge.style.display = 'block';
+    } else {
+      badge.style.display = 'none';
+    }
+  }
+
+  window.toggleInbox = function() {
+    inboxOpen = !inboxOpen;
+    var panel = document.getElementById('notif-panel');
+    if (panel) panel.style.display = inboxOpen ? 'block' : 'none';
+    if (inboxOpen) {
+      unread = 0;
+      updateBadge();
+      renderInbox();
+    }
+  };
+
+  window.clearInbox = function() {
+    saveNotifs([]);
+    renderInbox();
+  };
+
+  /* ── Permission banner ── */
+  function maybeShowBanner() {
+    if (typeof Notification === 'undefined') return;
+    if (Notification.permission === 'granted') return;
+    if (localStorage.getItem(BANNER_KEY)) return;
+    var banner = document.getElementById('notif-banner');
+    if (banner) banner.style.display = 'flex';
+  }
+
+  window.requestNotifPermission = function() {
+    Notification.requestPermission().then(function() {
+      dismissNotifBanner();
+      registerSW();
+    });
+  };
+
+  window.dismissNotifBanner = function() {
+    localStorage.setItem(BANNER_KEY, '1');
+    var banner = document.getElementById('notif-banner');
+    if (banner) banner.style.display = 'none';
+  };
+
+  /* ── Service Worker ── */
+  var swReg = null;
+  function registerSW() {
+    if (!('serviceWorker' in navigator)) return;
+    navigator.serviceWorker.register('/sw.js', { scope: '/' }).then(function(reg) {
+      swReg = reg;
+    }).catch(function(e) {
+      console.warn('dicode SW registration failed:', e);
+    });
+  }
+
+  /* ── SSE run:complete stream ── */
+  function connectRunEvents() {
+    var es = new EventSource('/api/events');
+    es.addEventListener('run:complete', function(e) {
+      try {
+        var evt = JSON.parse(e.data);
+        addNotif(evt);
+        // Post to Service Worker for browser notification.
+        if (swReg && swReg.active && Notification.permission === 'granted') {
+          swReg.active.postMessage({ type: 'run:complete', ...evt });
+        }
+      } catch(_) {}
+    });
+    es.onerror = function() {
+      setTimeout(connectRunEvents, 5000);
+      es.close();
+    };
+  }
+
+  /* ── Init ── */
+  renderInbox();
+  maybeShowBanner();
+  registerSW();
+  connectRunEvents();
+})();
 </script>
 </body>
 </html>

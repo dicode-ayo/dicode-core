@@ -23,12 +23,14 @@ const (
 
 // Run is a single execution record.
 type Run struct {
-	ID          string
-	TaskID      string
-	Status      string
-	StartedAt   time.Time
-	FinishedAt  *time.Time
-	ParentRunID string
+	ID            string
+	TaskID        string
+	Status        string
+	StartedAt     time.Time
+	FinishedAt    *time.Time
+	ParentRunID   string
+	TriggerSource string
+	ReturnValue   string // JSON-encoded return value; empty if none
 }
 
 // LogEntry is one log line from a run.
@@ -92,21 +94,29 @@ func (r *Registry) All() []*task.Spec {
 
 // StartRun records a new run in sqlite and returns its ID.
 func (r *Registry) StartRun(ctx context.Context, taskID, parentRunID string) (string, error) {
-	return r.StartRunWithID(ctx, uuid.New().String(), taskID, parentRunID)
+	return r.StartRunWithID(ctx, uuid.New().String(), taskID, parentRunID, "")
 }
 
 // StartRunWithID records a new run using a caller-supplied ID.
 // Use this when the run ID must be known before execution begins (e.g. async fire).
-func (r *Registry) StartRunWithID(ctx context.Context, id, taskID, parentRunID string) (string, error) {
+func (r *Registry) StartRunWithID(ctx context.Context, id, taskID, parentRunID, triggerSource string) (string, error) {
 	now := time.Now().UnixMilli()
 	err := r.db.Exec(ctx,
-		`INSERT INTO runs (id, task_id, status, started_at, parent_run_id) VALUES (?, ?, ?, ?, ?)`,
-		id, taskID, StatusRunning, now, parentRunID,
+		`INSERT INTO runs (id, task_id, status, started_at, parent_run_id, trigger_source) VALUES (?, ?, ?, ?, ?, ?)`,
+		id, taskID, StatusRunning, now, parentRunID, triggerSource,
 	)
 	if err != nil {
 		return "", fmt.Errorf("start run: %w", err)
 	}
 	return id, nil
+}
+
+// SetRunResult stores a JSON-encoded return value for a finished run.
+func (r *Registry) SetRunResult(ctx context.Context, runID, returnValueJSON string) error {
+	return r.db.Exec(ctx,
+		`UPDATE runs SET return_value = ? WHERE id = ?`,
+		returnValueJSON, runID,
+	)
 }
 
 // FinishRun updates the run status and finished_at timestamp.
@@ -131,7 +141,7 @@ func (r *Registry) AppendLog(ctx context.Context, runID, level, msg string) erro
 func (r *Registry) GetRun(ctx context.Context, runID string) (*Run, error) {
 	var run *Run
 	err := r.db.Query(ctx,
-		`SELECT id, task_id, status, started_at, finished_at, parent_run_id FROM runs WHERE id = ?`,
+		`SELECT id, task_id, status, started_at, finished_at, parent_run_id, trigger_source, COALESCE(return_value, '') FROM runs WHERE id = ?`,
 		[]any{runID},
 		func(rows db.Scanner) error {
 			if rows.Next() {
@@ -139,7 +149,7 @@ func (r *Registry) GetRun(ctx context.Context, runID string) (*Run, error) {
 				var startedMs int64
 				var finishedMs *int64
 				var parentID *string
-				if err := rows.Scan(&run.ID, &run.TaskID, &run.Status, &startedMs, &finishedMs, &parentID); err != nil {
+				if err := rows.Scan(&run.ID, &run.TaskID, &run.Status, &startedMs, &finishedMs, &parentID, &run.TriggerSource, &run.ReturnValue); err != nil {
 					return err
 				}
 				run.StartedAt = time.UnixMilli(startedMs)
@@ -167,7 +177,7 @@ func (r *Registry) GetRun(ctx context.Context, runID string) (*Run, error) {
 func (r *Registry) ListRuns(ctx context.Context, taskID string, limit int) ([]*Run, error) {
 	var runs []*Run
 	err := r.db.Query(ctx,
-		`SELECT id, task_id, status, started_at, finished_at, parent_run_id
+		`SELECT id, task_id, status, started_at, finished_at, parent_run_id, trigger_source, COALESCE(return_value, '')
 		 FROM runs WHERE task_id = ? ORDER BY started_at DESC LIMIT ?`,
 		[]any{taskID, limit},
 		func(rows db.Scanner) error {
@@ -176,7 +186,7 @@ func (r *Registry) ListRuns(ctx context.Context, taskID string, limit int) ([]*R
 				var startedMs int64
 				var finishedMs *int64
 				var parentID *string
-				if err := rows.Scan(&run.ID, &run.TaskID, &run.Status, &startedMs, &finishedMs, &parentID); err != nil {
+				if err := rows.Scan(&run.ID, &run.TaskID, &run.Status, &startedMs, &finishedMs, &parentID, &run.TriggerSource, &run.ReturnValue); err != nil {
 					return err
 				}
 				run.StartedAt = time.UnixMilli(startedMs)

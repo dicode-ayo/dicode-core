@@ -38,6 +38,8 @@ type Engine struct {
 	daemonMu    sync.Mutex
 	daemonRuns  map[string]string
 	daemonSpecs map[string]*task.Spec
+
+	runFinishedHook func(taskID, runID, status, triggerSource string, durationMs int64)
 }
 
 // New creates a trigger Engine with a default Deno executor.
@@ -54,6 +56,13 @@ func New(r *registry.Registry, defaultExec pkgruntime.Executor, log *zap.Logger)
 	}
 	e.executors[task.RuntimeDeno] = defaultExec
 	return e
+}
+
+// SetRunFinishedHook registers a callback invoked after every run completes.
+// Called from the goroutine that ran the task, so the hook must be non-blocking
+// (e.g. send to a buffered channel).
+func (e *Engine) SetRunFinishedHook(fn func(taskID, runID, status, triggerSource string, durationMs int64)) {
+	e.runFinishedHook = fn
 }
 
 // RegisterExecutor registers an executor for the given runtime name.
@@ -350,7 +359,7 @@ func (e *Engine) fireAsync(ctx context.Context, spec *task.Spec, opts pkgruntime
 	runID := uuid.New().String()
 	opts.RunID = runID
 
-	if _, err := e.registry.StartRunWithID(context.Background(), runID, spec.ID, opts.ParentRunID); err != nil {
+	if _, err := e.registry.StartRunWithID(context.Background(), runID, spec.ID, opts.ParentRunID, source); err != nil {
 		return "", fmt.Errorf("start run record: %w", err)
 	}
 
@@ -381,6 +390,10 @@ func (e *Engine) fireAsync(ctx context.Context, spec *task.Spec, opts pkgruntime
 			zap.String("trigger", source),
 			zap.Duration("duration", elapsed.Truncate(time.Millisecond)),
 		)
+
+		if h := e.runFinishedHook; h != nil {
+			h(spec.ID, runID, status, source, elapsed.Milliseconds())
+		}
 
 		if spec.Trigger.Daemon {
 			e.onDaemonRunFinished(spec, runID)
@@ -414,6 +427,13 @@ func (e *Engine) dispatch(ctx context.Context, spec *task.Spec, opts pkgruntime.
 		)
 		_ = e.registry.FinishRun(context.Background(), opts.RunID, registry.StatusFailure)
 		return registry.StatusFailure
+	}
+
+	// Store return value if present.
+	if result != nil && result.ReturnValue != nil {
+		if b, merr := json.Marshal(result.ReturnValue); merr == nil {
+			_ = e.registry.SetRunResult(context.Background(), opts.RunID, string(b))
+		}
 	}
 
 	status := registry.StatusSuccess

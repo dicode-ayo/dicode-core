@@ -84,7 +84,17 @@ func (s *SQLiteDB) migrate() error {
 			nonce      BLOB NOT NULL
 		);
 	`)
-	return err
+	if err != nil {
+		return err
+	}
+	// Add new columns to existing tables (errors suppressed — expected on re-run).
+	for _, stmt := range []string{
+		`ALTER TABLE runs ADD COLUMN trigger_source TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE runs ADD COLUMN return_value TEXT`,
+	} {
+		_, _ = s.db.Exec(stmt)
+	}
+	return nil
 }
 
 func (s *SQLiteDB) Ping(ctx context.Context) error {
