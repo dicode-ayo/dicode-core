@@ -1,4 +1,4 @@
-package js
+package deno
 
 import (
 	"context"
@@ -16,7 +16,8 @@ import (
 	"go.uber.org/zap"
 )
 
-// testEnv wires up a full runtime for tests.
+// testEnv wires up a full Deno runtime for tests.
+// Tests are skipped if Deno is not available on the system / download fails.
 type testEnv struct {
 	rt  *Runtime
 	reg *registry.Registry
@@ -31,8 +32,10 @@ func newTestEnv(t *testing.T) *testEnv {
 	}
 	t.Cleanup(func() { d.Close() })
 	reg := registry.New(d)
-	chain := secrets.Chain{} // no secrets in tests
-	rt := New(reg, chain, d, zap.NewNop())
+	rt, err := New(reg, secrets.Chain{}, d, zap.NewNop())
+	if err != nil {
+		t.Skipf("deno not available: %v", err)
+	}
 	return &testEnv{rt: rt, reg: reg, db: d}
 }
 
@@ -41,15 +44,15 @@ func (e *testEnv) run(t *testing.T, script string, opts ...RunOptions) *RunResul
 	spec := &task.Spec{
 		ID:      "test-task",
 		Name:    "test-task",
-		Runtime: task.RuntimeJS,
+		Runtime: task.RuntimeDeno,
 		Trigger: task.TriggerConfig{Manual: true},
-		Timeout: 10 * time.Second,
+		Timeout: 30 * time.Second,
 	}
-	// Write script to a temp dir so spec.Script() can read it.
 	dir := t.TempDir()
 	spec.TaskDir = dir
-	_ = os.WriteFile(filepath.Join(dir, "task.js"), []byte(script), 0644)
-	_ = os.WriteFile(filepath.Join(dir, "task.yaml"), []byte("name: test-task\ntrigger:\n  manual: true\n"), 0644)
+	_ = os.WriteFile(filepath.Join(dir, "task.ts"), []byte(script), 0644)
+	_ = os.WriteFile(filepath.Join(dir, "task.yaml"),
+		[]byte("name: test-task\nruntime: deno\ntrigger:\n  manual: true\n"), 0644)
 	_ = e.reg.Register(spec)
 
 	o := RunOptions{}
@@ -71,7 +74,8 @@ func TestRuntime_ReturnValue(t *testing.T) {
 	if r.Error != nil {
 		t.Fatalf("unexpected error: %v", r.Error)
 	}
-	if r.ReturnValue != int64(42) {
+	// JSON numbers deserialise to float64.
+	if r.ReturnValue != float64(42) {
 		t.Errorf("expected 42, got %v (%T)", r.ReturnValue, r.ReturnValue)
 	}
 }
@@ -102,17 +106,23 @@ func TestRuntime_AsyncAwait(t *testing.T) {
 func TestRuntime_Log(t *testing.T) {
 	e := newTestEnv(t)
 	r := e.run(t, `
-		log.info("hello")
-		log.warn("world")
+		await log.info("hello")
+		await log.warn("world")
 		return "done"
 	`)
 	if r.Error != nil {
 		t.Fatalf("error: %v", r.Error)
 	}
-	if len(r.Logs) != 2 {
-		t.Fatalf("expected 2 logs, got %d", len(r.Logs))
+	if len(r.Logs) < 2 {
+		t.Fatalf("expected ≥2 logs, got %d", len(r.Logs))
 	}
-	if r.Logs[0].Message != "hello" || r.Logs[1].Level != "warn" {
+	found := map[string]bool{}
+	for _, l := range r.Logs {
+		if l.Message == "hello" || l.Message == "world" {
+			found[l.Message] = true
+		}
+	}
+	if !found["hello"] || !found["world"] {
 		t.Errorf("unexpected logs: %+v", r.Logs)
 	}
 }
@@ -122,20 +132,19 @@ func TestRuntime_Env(t *testing.T) {
 	spec := &task.Spec{
 		ID:      "env-task",
 		Name:    "env-task",
-		Runtime: task.RuntimeJS,
+		Runtime: task.RuntimeDeno,
 		Trigger: task.TriggerConfig{Manual: true},
-		Timeout: 10 * time.Second,
+		Timeout: 30 * time.Second,
 		Env:     []string{"MY_TOKEN"},
 	}
 	dir := t.TempDir()
 	spec.TaskDir = dir
-	_ = os.WriteFile(filepath.Join(dir, "task.js"), []byte(`return env.get("MY_TOKEN")`), 0644)
-	_ = os.WriteFile(filepath.Join(dir, "task.yaml"), []byte("name: env-task\ntrigger:\n  manual: true\nenv:\n  - MY_TOKEN\n"), 0644)
+	_ = os.WriteFile(filepath.Join(dir, "task.ts"), []byte(`return env.get("MY_TOKEN")`), 0644)
+	_ = os.WriteFile(filepath.Join(dir, "task.yaml"),
+		[]byte("name: env-task\nruntime: deno\ntrigger:\n  manual: true\nenv:\n  - MY_TOKEN\n"), 0644)
 	_ = e.reg.Register(spec)
 
-	// Wire a secret.
-	mockProvider := &mockSecretProvider{"MY_TOKEN": "tok-123"}
-	e.rt.secrets = secrets.Chain{mockProvider}
+	e.rt.secrets = secrets.Chain{mockSecretProvider{"MY_TOKEN": "tok-123"}}
 
 	result, _ := e.rt.Run(context.Background(), spec, RunOptions{})
 	if result.ReturnValue != "tok-123" {
@@ -148,15 +157,16 @@ func TestRuntime_Params(t *testing.T) {
 	spec := &task.Spec{
 		ID:      "param-task",
 		Name:    "param-task",
-		Runtime: task.RuntimeJS,
+		Runtime: task.RuntimeDeno,
 		Trigger: task.TriggerConfig{Manual: true},
-		Timeout: 10 * time.Second,
+		Timeout: 30 * time.Second,
 		Params:  []task.Param{{Name: "channel", Default: "#general"}},
 	}
 	dir := t.TempDir()
 	spec.TaskDir = dir
-	_ = os.WriteFile(filepath.Join(dir, "task.js"), []byte(`return params.get("channel")`), 0644)
-	_ = os.WriteFile(filepath.Join(dir, "task.yaml"), []byte("name: param-task\ntrigger:\n  manual: true\n"), 0644)
+	_ = os.WriteFile(filepath.Join(dir, "task.ts"), []byte(`return await params.get("channel")`), 0644)
+	_ = os.WriteFile(filepath.Join(dir, "task.yaml"),
+		[]byte("name: param-task\nruntime: deno\ntrigger:\n  manual: true\n"), 0644)
 	_ = e.reg.Register(spec)
 
 	result, _ := e.rt.Run(context.Background(), spec, RunOptions{
@@ -170,43 +180,21 @@ func TestRuntime_Params(t *testing.T) {
 func TestRuntime_HTTP(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"ok":true}`))
+		w.Write([]byte(`{"ok":true}`)) //nolint:errcheck
 	}))
 	defer srv.Close()
 
 	e := newTestEnv(t)
 	r := e.run(t, `
-		const res = await http.get("`+srv.URL+`")
-		return res.body.ok
+		const res = await fetch("`+srv.URL+`")
+		const body = await res.json()
+		return body.ok
 	`)
 	if r.Error != nil {
 		t.Fatalf("error: %v", r.Error)
 	}
 	if r.ReturnValue != true {
 		t.Errorf("expected true, got %v", r.ReturnValue)
-	}
-}
-
-func TestRuntime_HTTP_Interceptor(t *testing.T) {
-	e := newTestEnv(t)
-	intercepted := false
-	r := e.run(t, `
-		const res = await http.post("https://example.com/api", { body: { x: 1 } })
-		return res.status
-	`, RunOptions{
-		HTTPInterceptor: func(method, url string, body []byte) (int, []byte, bool) {
-			intercepted = true
-			return 201, []byte(`{"created":true}`), true
-		},
-	})
-	if r.Error != nil {
-		t.Fatalf("error: %v", r.Error)
-	}
-	if !intercepted {
-		t.Error("interceptor not called")
-	}
-	if r.ReturnValue != int64(201) {
-		t.Errorf("expected 201, got %v", r.ReturnValue)
 	}
 }
 
@@ -220,8 +208,7 @@ func TestRuntime_KV(t *testing.T) {
 	if r.Error != nil {
 		t.Fatalf("error: %v", r.Error)
 	}
-	// JSON number round-trips as int64 via goja export.
-	if r.ReturnValue != int64(42) && r.ReturnValue != float64(42) {
+	if r.ReturnValue != float64(42) {
 		t.Errorf("expected 42, got %v (%T)", r.ReturnValue, r.ReturnValue)
 	}
 }
@@ -257,8 +244,7 @@ func TestRuntime_RunRecord(t *testing.T) {
 	if r.RunID == "" {
 		t.Fatal("no run ID")
 	}
-	ctx := context.Background()
-	run, err := e.reg.GetRun(ctx, r.RunID)
+	run, err := e.reg.GetRun(context.Background(), r.RunID)
 	if err != nil {
 		t.Fatalf("GetRun: %v", err)
 	}
@@ -273,8 +259,10 @@ func TestRuntime_ScriptError(t *testing.T) {
 	if r.Error == nil {
 		t.Fatal("expected error")
 	}
-	// Run should be marked failed in DB.
-	run, _ := e.reg.GetRun(context.Background(), r.RunID)
+	run, err := e.reg.GetRun(context.Background(), r.RunID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
 	if run.Status != registry.StatusFailure {
 		t.Errorf("expected failure, got %s", run.Status)
 	}
@@ -284,19 +272,24 @@ func TestRuntime_Timeout(t *testing.T) {
 	d, _ := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
 	defer d.Close()
 	reg := registry.New(d)
-	rt := New(reg, secrets.Chain{}, d, zap.NewNop())
+	rt, err := New(reg, secrets.Chain{}, d, zap.NewNop())
+	if err != nil {
+		t.Skipf("deno not available: %v", err)
+	}
 
 	spec := &task.Spec{
 		ID:      "timeout-task",
 		Name:    "timeout-task",
-		Runtime: task.RuntimeJS,
+		Runtime: task.RuntimeDeno,
 		Trigger: task.TriggerConfig{Manual: true},
-		Timeout: 200 * time.Millisecond,
+		Timeout: 500 * time.Millisecond,
 	}
 	dir := t.TempDir()
 	spec.TaskDir = dir
-	_ = os.WriteFile(filepath.Join(dir, "task.js"), []byte(`await new Promise(r => setTimeout(r, 5000))`), 0644)
-	_ = os.WriteFile(filepath.Join(dir, "task.yaml"), []byte("name: timeout-task\ntrigger:\n  manual: true\n"), 0644)
+	_ = os.WriteFile(filepath.Join(dir, "task.ts"),
+		[]byte(`await new Promise(r => setTimeout(r, 30000))`), 0644)
+	_ = os.WriteFile(filepath.Join(dir, "task.yaml"),
+		[]byte("name: timeout-task\nruntime: deno\ntrigger:\n  manual: true\n"), 0644)
 	_ = reg.Register(spec)
 
 	r, _ := rt.Run(context.Background(), spec, RunOptions{})

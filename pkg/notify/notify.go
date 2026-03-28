@@ -47,5 +47,5 @@ type Notifier interface {
 // NoopNotifier silently drops all notifications. Used when no provider is configured.
 type NoopNotifier struct{}
 
-func (n *NoopNotifier) Name() string                          { return "noop" }
+func (n *NoopNotifier) Name() string                            { return "noop" }
 func (n *NoopNotifier) Send(_ context.Context, _ Message) error { return nil }

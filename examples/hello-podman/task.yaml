@@ -1,0 +1,10 @@
+name: Hello Podman
+description: Builds a custom Python image and prints system info
+runtime: podman
+
+trigger:
+  manual: true
+
+docker:
+  build:
+    dockerfile: Dockerfile

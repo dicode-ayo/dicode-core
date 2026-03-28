@@ -3,16 +3,16 @@
 
   <!-- ── Toolbar ── -->
   <div id="editor-tabs" style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.5rem;flex-wrap:wrap">
-    <button id="tab-task-js" class="btn btn-sm" onclick="editorSwitchTab('task.js')">task.js</button>
+    <button id="tab-{{tabID .ScriptFile}}" class="btn btn-sm" data-tab="1" onclick="editorSwitchTab({{toJSON .ScriptFile}})">{{.ScriptFile}}</button>
     {{if .TestExists}}
-    <button id="tab-task-test-js" class="btn btn-sm" style="background:#6c757d" onclick="editorSwitchTab('task.test.js')">task.test.js</button>
+    <button id="tab-{{tabID .TestFile}}" class="btn btn-sm" style="background:#6c757d" data-tab="1" onclick="editorSwitchTab({{toJSON .TestFile}})">{{.TestFile}}</button>
     {{end}}
 
     <div style="margin-left:auto;display:flex;gap:0.5rem;align-items:center">
       <span id="editor-status" style="font-size:0.8rem"></span>
       <button class="btn btn-sm" onclick="editorSave()">💾 Save</button>
-      {{if not .TestExists}}
-      <button class="btn btn-sm" style="background:#6c757d" onclick="editorCreateTest()">+ task.test.js</button>
+      {{if and (not .IsContainer) (not .TestExists)}}
+      <button class="btn btn-sm" style="background:#6c757d" onclick="editorCreateTest()">+ test</button>
       {{end}}
       <button id="ai-toggle-btn" class="btn btn-sm" style="background:#7c3aed" onclick="aiToggle()">🤖 AI</button>
       <button class="btn btn-sm" style="background:#6c757d"
@@ -70,9 +70,13 @@
 
 <script>
 (function() {
-  var TASK_ID = {{toJSON .ID}};
-  var files   = { 'task.js': {{toJSON .TaskJS}} {{if .TestExists}}, 'task.test.js': {{toJSON .TestJS}}{{end}} };
-  var curFile = 'task.js';
+  var TASK_ID    = {{toJSON .ID}};
+  var SCRIPT_FILE = {{toJSON .ScriptFile}};
+  var TEST_FILE  = {{toJSON .TestFile}};
+  var files   = {};
+  files[SCRIPT_FILE] = {{toJSON .TaskJS}};
+  {{if .TestExists}}files[{{toJSON .TestFile}}] = {{toJSON .TestJS}};{{end}}
+  var curFile = SCRIPT_FILE;
   var editor  = null;
   var models  = {};
 
@@ -89,7 +93,11 @@
   }
 
   function langFor(fname) {
-    return fname === 'task.yaml' ? 'yaml' : 'javascript';
+    if (fname === 'task.yaml') return 'yaml';
+    if (fname === 'Dockerfile') return 'dockerfile';
+    if (fname.endsWith('.ts')) return 'typescript';
+    if (fname.endsWith('.py')) return 'python';
+    return 'javascript';
   }
 
   function initEditor() {
@@ -97,7 +105,7 @@
       models[f] = monaco.editor.createModel(files[f], langFor(f));
     });
     editor = monaco.editor.create(document.getElementById('monaco-container'), {
-      model:                models['task.js'],
+      model:                models[SCRIPT_FILE],
       theme:                'vs-dark',
       automaticLayout:      true,
       minimap:              { enabled: false },
@@ -127,13 +135,9 @@
     if (btn) btn.style.background = '#0d6efd';
   };
 
-  /* Mark tab buttons with data-tab so the selector above works */
-  document.querySelectorAll('#editor-tabs button[id^="tab-"]').forEach(function(b) {
-    b.setAttribute('data-tab', '1');
-  });
-  /* Ensure task.js tab starts active */
-  var jsBtn = document.getElementById('tab-task-js');
-  if (jsBtn) { jsBtn.setAttribute('data-tab','1'); jsBtn.style.background = '#0d6efd'; }
+  /* Activate the primary file tab on load */
+  var primaryBtn = document.getElementById('tab-' + SCRIPT_FILE.replace(/\./g,'-'));
+  if (primaryBtn) primaryBtn.style.background = '#0d6efd';
 
   /* Dynamically add a tab for a file if it doesn't exist yet */
   function ensureTab(fname) {
@@ -176,7 +180,7 @@
 
   /* ── Create test file ── */
   window.editorCreateTest = function() {
-    fetch('/api/tasks/' + TASK_ID + '/files/task.test.js', {
+    fetch('/api/tasks/' + TASK_ID + '/files/' + TEST_FILE, {
       method: 'POST',
       body:   new URLSearchParams({ content: '// Tests for ' + TASK_ID + '\n' }),
     }).then(function() {

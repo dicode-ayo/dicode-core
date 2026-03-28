@@ -29,6 +29,16 @@
 | [Webhook Relay](./concepts/webhook-relay.md) | relay architecture, dicode.app tunnel |
 | [Business Model](./concepts/business-model.md) | tiers, marketplace, distribution |
 
+## Design documents
+
+- [Notifications & Interactive Tasks](./notifications-design.md) — browser notifications, run detail page, interact SDK, OAuth helper
+
+## Runtime guides
+
+- [Deno Runtime](./deno-runtime.md) — TypeScript/JavaScript, SDK globals, npm/jsr imports
+- [Python Runtime](./python-runtime.md) — uv, PEP 723 inline deps, SDK globals
+- [Podman Runtime](./podman-runtime.md) — rootless containers via Podman CLI
+
 ## Reference
 
 - [Configuration Reference](./concepts/task-format.md#configuration-reference)

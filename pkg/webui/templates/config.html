@@ -242,6 +242,23 @@
 </div>
 {{end}}
 
+<!-- ── Runtimes ── -->
+<div class="card" id="runtimes-card">
+  <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:0.75rem">
+    <h2 style="margin:0">Runtimes</h2>
+    <span id="rt-status" class="save-status"></span>
+  </div>
+
+  <p class="meta" style="margin-bottom:0.75rem">
+    Managed runtimes are downloaded and cached by dicode — no system-wide installation required.
+    Click <strong>Install</strong> to download a runtime; tasks using that runtime will be available immediately.
+  </p>
+
+  <div id="runtimes-table-wrap">
+    <p class="meta">Loading…</p>
+  </div>
+</div>
+
 <p style="margin-top:1rem">
   <a class="btn" href="/config/code" style="background:#7c3aed">Edit as code</a>
 </p>
@@ -338,9 +355,16 @@ function removeSource(idx) {
 
 function showStatus(id, ok, msg) {
   var el = document.getElementById(id);
-  el.textContent = ok ? '✓ ' + msg : '✗ ' + msg;
-  el.style.color  = ok ? '#a6e3a1' : '#f38ba8';
-  setTimeout(function() { el.textContent = ''; }, 4000);
+  el.style.color = ok ? '#a6e3a1' : '#f38ba8';
+  // Escape HTML, then turn URLs into clickable links.
+  var escaped = (ok ? '✓ ' : '✗ ') + msg
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  el.innerHTML = escaped.replace(
+    /(https?:\/\/[^\s]+)/g,
+    '<a href="$1" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline">$1</a>'
+  );
+  if (el._statusTimer) clearTimeout(el._statusTimer);
+  el._statusTimer = setTimeout(function() { el.innerHTML = ''; }, ok ? 4000 : 12000);
 }
 
 function saveAI() {
@@ -367,6 +391,83 @@ function clearAPIKey() {
       if (d.status === 'ok') setTimeout(function() { location.reload(); }, 1000);
     });
 }
+
+// ── Runtimes ──
+function loadRuntimes() {
+  fetch('/api/runtimes')
+    .then(function(r) { return r.json(); })
+    .then(function(list) {
+      var wrap = document.getElementById('runtimes-table-wrap');
+      if (!list || list.length === 0) {
+        wrap.innerHTML = '<p class="meta">No managed runtimes configured.</p>';
+        return;
+      }
+      var rows = list.map(function(rt) {
+        var effectiveVersion = rt.version || rt.default_version;
+        var badge = rt.installed
+          ? '<span class="badge badge-success">installed ' + effectiveVersion + '</span>'
+          : '<span class="badge badge-failure">not installed</span>';
+        var versionInput = (rt.name !== 'deno' || !rt.installed)
+          ? '<input type="text" id="rt-ver-' + rt.name + '" value="' + effectiveVersion + '" style="width:7rem" placeholder="' + rt.default_version + '">'
+          : '<span style="color:#888">' + effectiveVersion + '</span>';
+        var installBtn = '<button class="btn btn-sm" onclick="installRuntime(\'' + rt.name + '\')">'
+          + (rt.installed ? 'Reinstall' : 'Install') + '</button>';
+        var removeBtn = rt.name !== 'deno'
+          ? ' <button class="btn btn-sm" style="background:#6c757d" onclick="removeRuntime(\'' + rt.name + '\')">Remove</button>'
+          : '';
+        return '<tr>'
+          + '<td><strong>' + rt.display_name + '</strong></td>'
+          + '<td class="meta" style="max-width:18rem">' + rt.description + '</td>'
+          + '<td>' + badge + '</td>'
+          + '<td>' + versionInput + '</td>'
+          + '<td>' + installBtn + removeBtn + '</td>'
+          + '</tr>';
+      });
+      wrap.innerHTML = '<table><thead><tr>'
+        + '<th>Runtime</th><th>Description</th><th>Status</th><th>Version</th><th></th>'
+        + '</tr></thead><tbody>' + rows.join('') + '</tbody></table>';
+    })
+    .catch(function(e) {
+      document.getElementById('runtimes-table-wrap').innerHTML =
+        '<p style="color:#f38ba8">Failed to load runtimes: ' + e.message + '</p>';
+    });
+}
+
+function installRuntime(name) {
+  var verEl = document.getElementById('rt-ver-' + name);
+  var version = verEl ? verEl.value.trim() : '';
+  showStatus('rt-status', true, 'Installing ' + name + '…');
+  var body = new URLSearchParams({ version: version });
+  fetch('/api/runtimes/' + name + '/install', { method: 'POST', body: body })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d.status === 'ok') {
+        showStatus('rt-status', true, name + ' ' + d.version + ' installed');
+        loadRuntimes();
+      } else {
+        showStatus('rt-status', false, d.error || 'Install failed');
+      }
+    })
+    .catch(function(e) { showStatus('rt-status', false, e.message); });
+}
+
+function removeRuntime(name) {
+  if (!confirm('Remove ' + name + ' from config? Running tasks will continue until they finish.')) return;
+  fetch('/api/runtimes/' + name, { method: 'DELETE' })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d.status === 'ok') {
+        showStatus('rt-status', true, name + ' removed from config');
+        loadRuntimes();
+      } else {
+        showStatus('rt-status', false, d.error || 'Error');
+      }
+    })
+    .catch(function(e) { showStatus('rt-status', false, e.message); });
+}
+
+// Load on page ready.
+document.addEventListener('DOMContentLoaded', loadRuntimes);
 
 function saveServer() {
   var secret = document.getElementById('srv-secret').value;

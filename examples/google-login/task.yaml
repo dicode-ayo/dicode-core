@@ -1,0 +1,20 @@
+name: Google Login
+description: >
+  Obtains a Gmail refresh token via the Device Authorization Grant flow.
+  Logs a short code for you to enter at google.com/device — no browser
+  on the same machine required.
+runtime: js
+
+trigger:
+  manual: true
+
+env:
+  - GMAIL_CLIENT_ID
+
+params:
+  - name: scope
+    type: string
+    default: "https://www.googleapis.com/auth/gmail.readonly"
+    description: Gmail OAuth scope to request
+
+timeout: 120s

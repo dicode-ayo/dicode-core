@@ -20,14 +20,15 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
 	"github.com/dicode/dicode/pkg/config"
 	"github.com/dicode/dicode/pkg/registry"
-	"github.com/dicode/dicode/pkg/source/local"
+	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	gitSource "github.com/dicode/dicode/pkg/source/git"
+	"github.com/dicode/dicode/pkg/source/local"
 	"github.com/dicode/dicode/pkg/task"
 	"github.com/dicode/dicode/pkg/trigger"
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 )
@@ -142,21 +143,28 @@ var templateFS embed.FS
 
 // Server is the HTTP server for the web UI and REST API.
 type Server struct {
-	registry    *registry.Registry
-	engine      *trigger.Engine
-	cfg         *config.Config
-	cfgPath     string              // path to dicode.yaml; empty in tests
-	secretsMgr  SecretsManager      // nil if local provider not configured
-	reconciler  *registry.Reconciler // nil if not wired
-	dataDir     string              // ~/.dicode or cfg.DataDir
-	sessions    *sessionStore
-	limiter     *unlockLimiter
-	logs        *LogBroadcaster
-	log         *zap.Logger
-	port        int
-	srv         *http.Server
-	baseTmpl    *template.Template // parsed base.html only; cloned per render
-	partialTmpl *template.Template // row partials, no base wrapper
+	registry        *registry.Registry
+	engine          *trigger.Engine
+	cfg             *config.Config
+	cfgPath         string               // path to dicode.yaml; empty in tests
+	secretsMgr      SecretsManager       // nil if local provider not configured
+	reconciler      *registry.Reconciler // nil if not wired
+	dataDir         string               // ~/.dicode or cfg.DataDir
+	managedRuntimes []pkgruntime.ManagedRuntime
+	sessions        *sessionStore
+	limiter         *unlockLimiter
+	logs            *LogBroadcaster
+	log             *zap.Logger
+	port            int
+	srv             *http.Server
+	baseTmpl        *template.Template // parsed base.html only; cloned per render
+	partialTmpl     *template.Template // row partials, no base wrapper
+}
+
+// SetManagedRuntimes registers the list of managed runtimes (Deno, Python, …)
+// that will appear in the Config UI. Call this after New and before Start.
+func (s *Server) SetManagedRuntimes(runtimes []pkgruntime.ManagedRuntime) {
+	s.managedRuntimes = runtimes
 }
 
 // New creates a Server. cfgPath is the path to dicode.yaml used to persist
@@ -179,8 +187,8 @@ func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config
 			}
 			return s[i:j]
 		},
-		"string":       fmt.Sprint,
-		"deref":        func(t *time.Time) time.Time { return *t },
+		"string": fmt.Sprint,
+		"deref":  func(t *time.Time) time.Time { return *t },
 		"toJSON": func(v any) (template.JS, error) {
 			b, err := json.Marshal(v)
 			return template.JS(b), err
@@ -188,6 +196,7 @@ func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config
 		"list":      func(items ...string) []string { return items },
 		"not":       func(b bool) bool { return !b },
 		"derefBool": func(b *bool) bool { return b != nil && *b },
+		"tabID":     func(s string) string { return strings.ReplaceAll(s, ".", "-") },
 	}
 	base, err := template.New("base.html").Funcs(funcMap).ParseFS(templateFS, "templates/base.html")
 	if err != nil {
@@ -259,6 +268,11 @@ func (s *Server) Handler() http.Handler {
 	r.Delete("/api/settings/sources/{idx}", s.apiRemoveSource)
 	r.Get("/api/settings/sources/git/branches", s.apiListGitBranches)
 
+	// Managed runtime lifecycle
+	r.Get("/api/runtimes", s.apiListRuntimes)
+	r.Post("/api/runtimes/{name}/install", s.apiInstallRuntime)
+	r.Delete("/api/runtimes/{name}", s.apiRemoveRuntime)
+
 	// REST API
 	r.Get("/api/config", s.apiGetConfig)
 	r.Get("/api/config/raw", s.apiGetConfigRaw)
@@ -293,7 +307,7 @@ func (s *Server) Start(ctx context.Context) error {
 	s.srv = &http.Server{
 		Addr:              fmt.Sprintf(":%d", s.port),
 		Handler:           s.Handler(),
-		ReadHeaderTimeout: 5 * time.Second,  // mitigates Slowloris
+		ReadHeaderTimeout: 5 * time.Second,   // mitigates Slowloris
 		IdleTimeout:       120 * time.Second, // clean up idle keep-alives
 		// WriteTimeout is intentionally 0: SSE and AI stream endpoints write indefinitely.
 	}
@@ -437,10 +451,13 @@ func (s *Server) uiRunRows(w http.ResponseWriter, r *http.Request) {
 
 // editorData is passed to the editor partial template.
 type editorData struct {
-	ID         string
-	TaskJS     string
-	TestJS     string
-	TestExists bool
+	ID          string
+	ScriptFile  string // primary file shown in editor (e.g. "task.ts", "task.py", "Dockerfile")
+	TaskJS      string // content of ScriptFile
+	TestFile    string // test file name (e.g. "task.test.ts" or "task.test.js")
+	TestJS      string
+	TestExists  bool
+	IsContainer bool // true for docker/podman tasks — hides test-related UI
 }
 
 func (s *Server) uiTaskEditor(w http.ResponseWriter, r *http.Request) {
@@ -451,18 +468,54 @@ func (s *Server) uiTaskEditor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d := editorData{ID: id}
-	if b, err := os.ReadFile(filepath.Join(spec.TaskDir, "task.js")); err == nil {
-		d.TaskJS = string(b)
+
+	switch spec.Runtime {
+	case task.RuntimeDocker, task.RuntimePodman:
+		// Container tasks: primary file is the Dockerfile.
+		d.IsContainer = true
+		d.ScriptFile = "Dockerfile"
+		if b, err := os.ReadFile(filepath.Join(spec.TaskDir, "Dockerfile")); err == nil {
+			d.TaskJS = string(b)
+		}
+	default:
+		// Code tasks: probe for the script file.
+		for _, name := range []string{"task.ts", "task.js", "task.py"} {
+			if b, err := os.ReadFile(filepath.Join(spec.TaskDir, name)); err == nil {
+				d.ScriptFile = name
+				d.TaskJS = string(b)
+				break
+			}
+		}
+		if d.ScriptFile == "" {
+			d.ScriptFile = "task.ts"
+		}
+		for _, name := range []string{"task.test.ts", "task.test.js"} {
+			if b, err := os.ReadFile(filepath.Join(spec.TaskDir, name)); err == nil {
+				d.TestFile = name
+				d.TestJS = string(b)
+				d.TestExists = true
+				break
+			}
+		}
+		if d.TestFile == "" {
+			// Default for the "+ test" create button — match the primary script extension.
+			if strings.HasSuffix(d.ScriptFile, ".ts") {
+				d.TestFile = "task.test.ts"
+			} else {
+				d.TestFile = "task.test.js"
+			}
+		}
 	}
-	if b, err := os.ReadFile(filepath.Join(spec.TaskDir, "task.test.js")); err == nil {
-		d.TestJS = string(b)
-		d.TestExists = true
-	}
+
 	s.renderPartial(w, "editor", d)
 }
 
 // allowedFiles restricts which files the editor API can read/write.
-var allowedFiles = map[string]bool{"task.js": true, "task.test.js": true}
+var allowedFiles = map[string]bool{
+	"task.js": true, "task.ts": true, "task.py": true,
+	"task.test.js": true, "task.test.ts": true,
+	"Dockerfile": true,
+}
 
 func (s *Server) apiGetFile(w http.ResponseWriter, r *http.Request) {
 	id, filename := chi.URLParam(r, "id"), chi.URLParam(r, "filename")
@@ -982,9 +1035,9 @@ func (s *Server) apiAddSource(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		sc = config.SourceConfig{
-			Type:         config.SourceTypeGit,
-			URL:          url,
-			Branch:       strings.TrimSpace(r.FormValue("branch")),
+			Type:   config.SourceTypeGit,
+			URL:    url,
+			Branch: strings.TrimSpace(r.FormValue("branch")),
 			Auth: config.SourceAuth{
 				Type:     r.FormValue("auth_type"),
 				TokenEnv: r.FormValue("token_env"),
@@ -1076,6 +1129,115 @@ func (s *Server) apiRemoveSource(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]string{"status": "ok"})
 }
 
+// --- Managed runtime handlers ---
+
+// RuntimeInfo is the JSON shape returned by GET /api/runtimes.
+type RuntimeInfo struct {
+	Name           string `json:"name"`
+	DisplayName    string `json:"display_name"`
+	Description    string `json:"description"`
+	DefaultVersion string `json:"default_version"`
+	Version        string `json:"version"`   // configured version (empty = use default)
+	Installed      bool   `json:"installed"` // binary present on disk?
+}
+
+// apiListRuntimes returns the status of every managed runtime.
+func (s *Server) apiListRuntimes(w http.ResponseWriter, r *http.Request) {
+	var out []RuntimeInfo
+	for _, mgr := range s.managedRuntimes {
+		version := ""
+		if rc, ok := s.cfg.Runtimes[mgr.Name()]; ok {
+			version = rc.Version
+		}
+		effectiveVersion := version
+		if effectiveVersion == "" {
+			effectiveVersion = mgr.DefaultVersion()
+		}
+		out = append(out, RuntimeInfo{
+			Name:           mgr.Name(),
+			DisplayName:    mgr.DisplayName(),
+			Description:    mgr.Description(),
+			DefaultVersion: mgr.DefaultVersion(),
+			Version:        version,
+			Installed:      mgr.IsInstalled(effectiveVersion),
+		})
+	}
+	jsonOK(w, out)
+}
+
+// apiInstallRuntime downloads and caches the binary for a managed runtime,
+// updates dicode.yaml, and registers the executor in the running engine.
+func (s *Server) apiInstallRuntime(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	var mgr pkgruntime.ManagedRuntime
+	for _, m := range s.managedRuntimes {
+		if m.Name() == name {
+			mgr = m
+			break
+		}
+	}
+	if mgr == nil {
+		jsonErr(w, "unknown runtime: "+name, http.StatusNotFound)
+		return
+	}
+
+	if err := r.ParseForm(); err != nil {
+		jsonErr(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	version := strings.TrimSpace(r.FormValue("version"))
+	if version == "" {
+		if rc, ok := s.cfg.Runtimes[name]; ok && rc.Version != "" {
+			version = rc.Version
+		} else {
+			version = mgr.DefaultVersion()
+		}
+	}
+
+	s.log.Info("installing runtime", zap.String("runtime", name), zap.String("version", version))
+	if err := mgr.Install(r.Context(), version); err != nil {
+		s.log.Error("runtime install failed", zap.String("runtime", name), zap.Error(err))
+		jsonErr(w, "install failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Persist version to config.
+	if s.cfg.Runtimes == nil {
+		s.cfg.Runtimes = make(map[string]config.RuntimeConfig)
+	}
+	rc := s.cfg.Runtimes[name]
+	rc.Version = version
+	s.cfg.Runtimes[name] = rc
+	if err := s.persistConfig(); err != nil {
+		s.log.Warn("runtime config persist failed", zap.Error(err))
+	}
+
+	// Register the executor in the running engine.
+	if path, err := mgr.BinaryPath(version); err == nil {
+		s.engine.RegisterExecutor(task.Runtime(name), mgr.NewExecutor(path))
+		s.log.Info("runtime registered in engine", zap.String("runtime", name), zap.String("version", version))
+	}
+
+	jsonOK(w, map[string]string{"status": "ok", "version": version})
+}
+
+// apiRemoveRuntime removes a runtime from dicode.yaml.
+// The executor is NOT unregistered from the engine (in-flight runs must finish).
+func (s *Server) apiRemoveRuntime(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	if name == "deno" {
+		jsonErr(w, "deno is required and cannot be removed", http.StatusBadRequest)
+		return
+	}
+	if s.cfg.Runtimes != nil {
+		delete(s.cfg.Runtimes, name)
+	}
+	if err := s.persistConfig(); err != nil {
+		s.log.Warn("runtime config persist failed", zap.Error(err))
+	}
+	jsonOK(w, map[string]string{"status": "ok"})
+}
+
 // persistConfig writes the current in-memory config back to dicode.yaml.
 // It reads the existing file as a generic map (to preserve unknown keys),
 // merges the changed sections, and writes back.
@@ -1122,6 +1284,27 @@ func (s *Server) persistConfig() error {
 		serverMap["tray"] = *s.cfg.Server.Tray
 	}
 	doc["server"] = serverMap
+
+	// Merge runtimes section.
+	if len(s.cfg.Runtimes) > 0 {
+		rtMap := make(map[string]any, len(s.cfg.Runtimes))
+		for rtName, rc := range s.cfg.Runtimes {
+			entry := map[string]any{}
+			if rc.Version != "" {
+				entry["version"] = rc.Version
+			}
+			if rc.Disabled {
+				entry["disabled"] = true
+			}
+			if len(entry) == 0 {
+				continue
+			}
+			rtMap[rtName] = entry
+		}
+		doc["runtimes"] = rtMap
+	} else {
+		delete(doc, "runtimes")
+	}
 
 	// Serialize sources list.
 	if len(s.cfg.Sources) > 0 {

@@ -13,13 +13,46 @@ import (
 type Runtime string
 
 const (
-	RuntimeJS     Runtime = "js"
+	RuntimeDeno   Runtime = "deno"
 	RuntimeDocker Runtime = "docker"
+	RuntimePodman Runtime = "podman"
 )
 
-// DockerConfig holds Docker-specific task configuration.
+// DockerBuild configures a local Dockerfile build instead of pulling a pre-built image.
+// The built image is tagged dicode-<taskID>:<hash> and cached; rebuild only happens when
+// the Dockerfile content changes.
+//
+// TODO: clean up old dicode-<taskID>:* images when a task is removed or the Dockerfile changes.
+type DockerBuild struct {
+	Dockerfile string `yaml:"dockerfile,omitempty"` // path relative to task dir; default "Dockerfile"
+	Context    string `yaml:"context,omitempty"`    // path relative to task dir; default task dir
+}
+
+// ResolvePaths returns the absolute Dockerfile path and build context directory
+// for this build config, resolving relative paths against taskDir.
+func (b *DockerBuild) ResolvePaths(taskDir string) (dockerfilePath, contextDir string) {
+	dockerfilePath = b.Dockerfile
+	if dockerfilePath == "" {
+		dockerfilePath = "Dockerfile"
+	}
+	if !filepath.IsAbs(dockerfilePath) {
+		dockerfilePath = filepath.Join(taskDir, dockerfilePath)
+	}
+	contextDir = taskDir
+	if b.Context != "" {
+		if filepath.IsAbs(b.Context) {
+			contextDir = b.Context
+		} else {
+			contextDir = filepath.Join(taskDir, b.Context)
+		}
+	}
+	return
+}
+
+// DockerConfig holds Docker/Podman-specific task configuration.
 type DockerConfig struct {
-	Image      string            `yaml:"image"`                 // e.g. "nginx:alpine"
+	Image      string            `yaml:"image,omitempty"`       // e.g. "nginx:alpine"
+	Build      *DockerBuild      `yaml:"build,omitempty"`       // build from local Dockerfile instead of pulling
 	Command    []string          `yaml:"command,omitempty"`     // overrides image CMD
 	Entrypoint []string          `yaml:"entrypoint,omitempty"`  // overrides image ENTRYPOINT
 	Volumes    []string          `yaml:"volumes,omitempty"`     // "host:container[:ro]"
@@ -31,8 +64,8 @@ type DockerConfig struct {
 
 // ChainTrigger fires a task when another task completes.
 type ChainTrigger struct {
-	From string `yaml:"from"`           // task ID to listen for
-	On   string `yaml:"on,omitempty"`   // "success" (default) | "failure" | "always"
+	From string `yaml:"from"`         // task ID to listen for
+	On   string `yaml:"on,omitempty"` // "success" (default) | "failure" | "always"
 }
 
 // TriggerConfig defines how a task is triggered.
@@ -49,7 +82,7 @@ type TriggerConfig struct {
 // Param defines a user-configurable input for a task.
 type Param struct {
 	Name        string `yaml:"name"`
-	Type        string `yaml:"type"`        // "string" | "number" | "boolean" | "cron"
+	Type        string `yaml:"type"` // "string" | "number" | "boolean" | "cron"
 	Default     string `yaml:"default"`
 	Description string `yaml:"description"`
 	Required    bool   `yaml:"required"`
@@ -102,11 +135,11 @@ func LoadDir(dir string) (*Spec, error) {
 	spec.TaskDir = dir
 	spec.ID = filepath.Base(dir)
 
-	if spec.Runtime == "" {
-		spec.Runtime = RuntimeJS
+	if spec.Runtime == "" || spec.Runtime == "js" {
+		spec.Runtime = RuntimeDeno
 	}
-	// Docker and daemon tasks may run indefinitely; don't impose a default timeout.
-	if spec.Timeout == 0 && spec.Runtime != RuntimeDocker && !spec.Trigger.Daemon {
+	// Container and daemon tasks may run indefinitely; don't impose a default timeout.
+	if spec.Timeout == 0 && spec.Runtime != RuntimeDocker && spec.Runtime != RuntimePodman && !spec.Trigger.Daemon {
 		spec.Timeout = 60 * time.Second
 	}
 
@@ -115,11 +148,27 @@ func LoadDir(dir string) (*Spec, error) {
 
 // ScriptPath returns the path to the task script file.
 // Returns empty string for runtimes that don't use a script file (e.g. Docker).
+// For the deno runtime, task.ts is preferred over task.js.
+// For other runtimes, the first existing task.<ext> candidate is returned;
+// callers that know the exact extension should construct the path themselves.
 func (s *Spec) ScriptPath() string {
 	switch s.Runtime {
-	case RuntimeJS:
+	case RuntimeDeno:
+		ts := filepath.Join(s.TaskDir, "task.ts")
+		if _, err := os.Stat(ts); err == nil {
+			return ts
+		}
 		return filepath.Join(s.TaskDir, "task.js")
+	case RuntimeDocker, RuntimePodman:
+		return ""
 	default:
+		// For subprocess runtimes, look for any task.* file in the task dir.
+		for _, ext := range []string{".py", ".jl", ".rb", ".sh", ".ts", ".js", ".mjs"} {
+			p := filepath.Join(s.TaskDir, "task"+ext)
+			if _, err := os.Stat(p); err == nil {
+				return p
+			}
+		}
 		return ""
 	}
 }
@@ -175,14 +224,14 @@ func (s *Spec) validate() error {
 		return fmt.Errorf("only one trigger type is allowed per task")
 	}
 	switch s.Runtime {
-	case RuntimeJS, "":
-		// ok
-	case RuntimeDocker:
+	case RuntimeDeno, "js", "":
+		// ok — "js" is a legacy alias for "deno"
+	case RuntimeDocker, RuntimePodman:
 		if s.Docker == nil {
-			return fmt.Errorf("runtime docker requires a docker: section in task.yaml")
+			return fmt.Errorf("runtime %s requires a docker: section in task.yaml", s.Runtime)
 		}
-		if s.Docker.Image == "" {
-			return fmt.Errorf("docker.image is required")
+		if s.Docker.Image == "" && s.Docker.Build == nil {
+			return fmt.Errorf("docker: requires either image or build")
 		}
 		switch s.Docker.PullPolicy {
 		case "", "missing", "always", "never":
@@ -191,7 +240,7 @@ func (s *Spec) validate() error {
 			return fmt.Errorf("docker.pull_policy must be always, missing, or never")
 		}
 	default:
-		return fmt.Errorf("unsupported runtime %q (supported: js, docker)", s.Runtime)
+		// Any other non-empty runtime is accepted; executor presence is checked at run time.
 	}
 	return nil
 }
