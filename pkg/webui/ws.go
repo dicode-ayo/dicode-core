@@ -46,9 +46,10 @@ type RunFinishedData struct {
 
 // WSHub manages all WebSocket clients.
 type WSHub struct {
-	mu      sync.Mutex
-	clients map[*wsClient]struct{}
-	log     *zap.Logger
+	mu         sync.Mutex
+	clients    map[*wsClient]struct{}
+	log        *zap.Logger
+	recentLogs func() []string // returns buffered log lines for replay on subscribe
 }
 
 type wsClient struct {
@@ -163,6 +164,16 @@ func (h *WSHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			c.mu.Lock()
 			c.logSub = true
 			c.mu.Unlock()
+			// Replay buffered history so the log bar isn't empty on first open.
+			if h.recentLogs != nil {
+				for _, line := range h.recentLogs() {
+					b, _ := json.Marshal(WSMsg{Type: "log:line", Data: map[string]string{"line": line}})
+					select {
+					case c.send <- b:
+					default:
+					}
+				}
+			}
 		case "unsub:logs":
 			c.mu.Lock()
 			c.logSub = false

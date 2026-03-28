@@ -96,22 +96,22 @@ type FSEntry struct {
 
 // Spec is parsed from task.yaml.
 type Spec struct {
-	Name        string        `yaml:"name"`
-	Description string        `yaml:"description"`
-	Version     string        `yaml:"version"`
-	Author      string        `yaml:"author,omitempty"`
-	Runtime     Runtime       `yaml:"runtime"`
-	Docker      *DockerConfig `yaml:"docker,omitempty"` // required when runtime == "docker"
-	Trigger     TriggerConfig `yaml:"trigger"`
-	Params      []Param       `yaml:"params,omitempty"`
-	Env         []string      `yaml:"env,omitempty"` // env var names required at runtime
-	FS          []FSEntry     `yaml:"fs,omitempty"`  // filesystem access declarations
-	Timeout     time.Duration `yaml:"timeout"`
+	Name        string        `yaml:"name"             json:"name"`
+	Description string        `yaml:"description"      json:"description"`
+	Version     string        `yaml:"version"          json:"version"`
+	Author      string        `yaml:"author,omitempty" json:"author,omitempty"`
+	Runtime     Runtime       `yaml:"runtime"          json:"runtime"`
+	Docker      *DockerConfig `yaml:"docker,omitempty" json:"docker,omitempty"`
+	Trigger     TriggerConfig `yaml:"trigger"          json:"trigger"`
+	Params      []Param       `yaml:"params,omitempty" json:"params,omitempty"`
+	Env         []string      `yaml:"env,omitempty"    json:"env,omitempty"`
+	FS          []FSEntry     `yaml:"fs,omitempty"     json:"fs,omitempty"`
+	Timeout     time.Duration `yaml:"timeout"          json:"timeout"`
 
 	// TaskDir is the directory path of the task in the repo (not stored in YAML).
-	TaskDir string `yaml:"-"`
+	TaskDir string `yaml:"-" json:"-"`
 	// ID is derived from the directory name (not stored in YAML).
-	ID string `yaml:"-"`
+	ID string `yaml:"-" json:"id"`
 }
 
 // LoadDir reads a task from its directory (expects task.yaml and task.<ext>).
