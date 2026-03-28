@@ -5,7 +5,7 @@
   <div id="editor-tabs" style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.5rem;flex-wrap:wrap">
     <button id="tab-{{tabID .ScriptFile}}" class="btn btn-sm" data-tab="1" onclick="editorSwitchTab({{toJSON .ScriptFile}})">{{.ScriptFile}}</button>
     {{if .TestExists}}
-    <button id="tab-task-test-js" class="btn btn-sm" style="background:#6c757d" data-tab="1" onclick="editorSwitchTab('task.test.js')">task.test.js</button>
+    <button id="tab-{{tabID .TestFile}}" class="btn btn-sm" style="background:#6c757d" data-tab="1" onclick="editorSwitchTab({{toJSON .TestFile}})">{{.TestFile}}</button>
     {{end}}
 
     <div style="margin-left:auto;display:flex;gap:0.5rem;align-items:center">
@@ -72,9 +72,10 @@
 (function() {
   var TASK_ID    = {{toJSON .ID}};
   var SCRIPT_FILE = {{toJSON .ScriptFile}};
+  var TEST_FILE  = {{toJSON .TestFile}};
   var files   = {};
   files[SCRIPT_FILE] = {{toJSON .TaskJS}};
-  {{if .TestExists}}files['task.test.js'] = {{toJSON .TestJS}};{{end}}
+  {{if .TestExists}}files[{{toJSON .TestFile}}] = {{toJSON .TestJS}};{{end}}
   var curFile = SCRIPT_FILE;
   var editor  = null;
   var models  = {};
@@ -179,8 +180,7 @@
 
   /* ── Create test file ── */
   window.editorCreateTest = function() {
-    var testFile = SCRIPT_FILE.endsWith('.ts') ? 'task.test.ts' : 'task.test.js';
-    fetch('/api/tasks/' + TASK_ID + '/files/' + testFile, {
+    fetch('/api/tasks/' + TASK_ID + '/files/' + TEST_FILE, {
       method: 'POST',
       body:   new URLSearchParams({ content: '// Tests for ' + TASK_ID + '\n' }),
     }).then(function() {

@@ -33,7 +33,6 @@ import (
 type RunOptions struct {
 	RunID       string
 	ParentRunID string
-	Params      map[string]string
 }
 
 // RunResult is returned by Run.
@@ -199,7 +198,7 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		defer close(logDone)
 		rt.streamLines(runID, stdoutR, "info")
 	}()
-	go func() { rt.streamLines(runID, stderrR, "error") }()
+	go func() { rt.streamLines(runID, stderrR, "warn") }()
 
 	go func() {
 		<-ctx.Done()
@@ -242,23 +241,7 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 // existing image is reused and the build is skipped entirely.
 func (rt *Runtime) buildImage(ctx context.Context, dc *dockerclient.Client, spec *task.Spec, runID string) (string, error) {
 	b := spec.Docker.Build
-
-	dockerfilePath := b.Dockerfile
-	if dockerfilePath == "" {
-		dockerfilePath = "Dockerfile"
-	}
-	if !filepath.IsAbs(dockerfilePath) {
-		dockerfilePath = filepath.Join(spec.TaskDir, dockerfilePath)
-	}
-
-	contextDir := spec.TaskDir
-	if b.Context != "" {
-		if filepath.IsAbs(b.Context) {
-			contextDir = b.Context
-		} else {
-			contextDir = filepath.Join(spec.TaskDir, b.Context)
-		}
-	}
+	dockerfilePath, contextDir := b.ResolvePaths(spec.TaskDir)
 
 	content, err := os.ReadFile(dockerfilePath) //nolint:gosec
 	if err != nil {
@@ -400,7 +383,6 @@ func (rt *Runtime) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 	result, err := rt.Run(ctx, spec, RunOptions{
 		RunID:       opts.RunID,
 		ParentRunID: opts.ParentRunID,
-		Params:      opts.Params,
 	})
 	if err != nil {
 		return nil, err
