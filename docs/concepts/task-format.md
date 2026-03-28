@@ -53,7 +53,7 @@ env:
 |---|---|---|---|
 | `name` | string | ✅ | Human-readable task name |
 | `description` | string | | One-line description |
-| `runtime` | string | | `js` (default) or `docker` |
+| `runtime` | string | | `deno` (default), `python`, `docker`, or `podman` |
 | `trigger` | object | ✅ | Exactly one trigger must be set |
 | `trigger.cron` | string | | Standard cron expression (5 fields) |
 | `trigger.webhook` | string | | Webhook path, e.g. `/github-push` |
@@ -128,7 +128,7 @@ The completing task's return value is available as the `input` global.
 
 ## Docker runtime
 
-Set `runtime: docker` to run a container instead of a JS script. No `task.js` is needed.
+Set `runtime: docker` to run a container instead of a JS script. No `task.js` is needed. Uses the Docker daemon via the Go SDK.
 
 ```yaml
 name: Nginx Dev Server
@@ -168,32 +168,100 @@ docker:
     BATCH_SIZE: "500"
 ```
 
-### Docker fields
+---
+
+## Podman runtime
+
+Set `runtime: podman` to run a rootless container via the `podman` CLI. Uses the same `docker:` config section as the Docker runtime — no changes to task fields required.
+
+Podman must be installed on the host via the system package manager. dicode does not download it automatically, but the **Config → Runtimes** card will show its status and link to installation instructions.
+
+```yaml
+name: Nginx Dev Server
+runtime: podman
+
+trigger:
+  manual: true
+
+docker:
+  image: nginx:alpine
+  ports:
+    - "8888:80"
+  volumes:
+    - "/tmp:/usr/share/nginx/html:ro"
+```
+
+**Differences from Docker:**
+
+| | Docker | Podman |
+|---|---|---|
+| Daemon required | Yes (`dockerd`) | No — daemonless, rootless by default |
+| Go SDK | Yes | No — dicode uses the CLI |
+| stdout/stderr | Multiplexed (Docker framing) | Plain line-by-line streams |
+| Binary management | System / Docker Desktop | System package manager |
+
+---
+
+## Container fields (`docker:`)
+
+Both the `docker` and `podman` runtimes share the same `docker:` config section.
+Either `image` or `build` must be set — not neither.
+
+### Pull a pre-built image
+
+```yaml
+docker:
+  image: nginx:alpine
+  pull_policy: missing   # always | missing (default) | never
+```
+
+### Build from a local Dockerfile
+
+```yaml
+docker:
+  build:
+    dockerfile: Dockerfile   # relative to task folder; default "Dockerfile"
+    context: .               # relative to task folder; default task folder
+  ports:
+    - "8888:80"
+```
+
+The built image is tagged `dicode-<taskID>:<hash>` where `<hash>` is derived
+from the Dockerfile content. If the Dockerfile hasn't changed, the existing image
+is reused and the build step is skipped entirely. Build output is streamed to the
+run log in real time.
+
+Use **Edit code** on the task page to edit the Dockerfile directly in the web UI.
+
+### All fields
 
 | Field | Type | Description |
 |---|---|---|
-| `docker.image` | string | ✅ Docker image (e.g. `nginx:alpine`, `python:3.12-slim`) |
+| `docker.image` | string | Container image (e.g. `nginx:alpine`). Required if `build` is not set. |
+| `docker.build` | object | Build from local Dockerfile instead of pulling. |
+| `docker.build.dockerfile` | string | Path to Dockerfile, relative to task folder. Default: `Dockerfile` |
+| `docker.build.context` | string | Build context path, relative to task folder. Default: task folder |
 | `docker.command` | list | Overrides image CMD |
 | `docker.entrypoint` | list | Overrides image ENTRYPOINT |
 | `docker.ports` | list | Port bindings — `"hostPort:containerPort"` |
 | `docker.volumes` | list | Volume mounts — `"host:container[:ro]"` |
 | `docker.working_dir` | string | Container working directory |
 | `docker.env_vars` | map | Literal environment variables injected into container |
-| `docker.pull_policy` | string | `missing` (default), `always`, `never` |
+| `docker.pull_policy` | string | `missing` (default), `always`, `never`. Ignored when using `build`. |
 
 **Live logs** — container stdout/stderr is streamed line-by-line to the run log as it runs.
 
-**Kill** — Docker tasks may run indefinitely. Use the **Kill** button on the run detail page (or `POST /api/runs/{runID}/kill`) to stop the container gracefully (SIGTERM + 10 s timeout).
+**Kill** — Container tasks may run indefinitely. Use the **Kill** button on the run detail page (or `POST /api/runs/{runID}/kill`) to stop the container gracefully (SIGTERM + 10 s timeout).
 
-**No default timeout** — unlike JS tasks (60 s default), Docker tasks have no timeout unless you set `timeout:` explicitly.
+**No default timeout** — unlike JS tasks (60 s default), container tasks have no timeout unless you set `timeout:` explicitly.
 
 ---
 
-## `task.js`
+## `task.ts` / `task.js` (Deno runtime)
 
-Plain JavaScript (ES2020, no `import`/`require`). Runs in goja — a pure Go JS engine.
+TypeScript or JavaScript. Runs via a managed Deno subprocess.
 
-Globals available: `http`, `kv`, `log`, `params`, `env`, `input`, `notify`, `dicode`.
+Globals available: `log`, `kv`, `params`, `env`, `input`, `output`.
 
 ### Example
 
@@ -225,11 +293,25 @@ return { count: messages.length }
 
 ### Constraints
 
-- No filesystem access (`fs`, `require`, `import` are not available)
-- No shell execution (`child_process` is not available)
-- No network access except via `http` global
+- Filesystem access requires explicit `fs:` declarations in task.yaml
 - Return value must be JSON-serializable (for chain triggers — capped at 1MB)
-- Async/await supported. Top-level await works.
+- Async/await and top-level await are supported
+
+---
+
+## `task.py` (Python runtime)
+
+Python script executed via the managed [uv](https://github.com/astral-sh/uv) runner.
+Install the Python runtime from **Config → Runtimes** before use.
+
+```yaml
+runtime: python
+```
+
+Params are available as `DICODE_PARAM_<NAME>` environment variables (name uppercased).
+Inline dependencies via PEP 723 `# /// script` blocks are supported.
+
+See [Python Runtime](../python-runtime.md) for full documentation.
 
 ---
 
@@ -347,8 +429,10 @@ Examples: `morning-email-check`, `github-release-notifier`, `backup-database`
 
 ## File layout rules
 
-- `task.yaml` and `task.js` are both required. A folder missing either is ignored.
-- `task.test.js` is optional. `dicode task test` skips tasks without it.
+- `task.yaml` is always required. A folder without it is ignored.
+- The script file (`task.ts`, `task.js`, or `task.py`) is required for code runtimes; omit it only for `runtime: docker` or `runtime: podman`.
+- Container tasks using `docker.build` need a `Dockerfile` in the task folder (or at the path set in `docker.build.dockerfile`).
+- `task.test.js` / `task.test.ts` is optional. `dicode task test` skips tasks without it.
 - Any other files in the folder are ignored (useful for README, schema files, etc.).
 - Subdirectories are ignored — task folders are flat.
 

@@ -1,0 +1,8 @@
+name: Hello Cron
+description: Logs a hello message with the current timestamp every minute.
+runtime: js
+
+trigger:
+  cron: "* * * * *"   # every minute
+
+timeout: 10s

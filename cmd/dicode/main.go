@@ -12,12 +12,16 @@ import (
 	"github.com/dicode/dicode/pkg/db"
 	"github.com/dicode/dicode/pkg/onboarding"
 	"github.com/dicode/dicode/pkg/registry"
+	pkgruntime "github.com/dicode/dicode/pkg/runtime"
+	denoruntime "github.com/dicode/dicode/pkg/runtime/deno"
 	dockerruntime "github.com/dicode/dicode/pkg/runtime/docker"
-	jsruntime "github.com/dicode/dicode/pkg/runtime/js"
+	podmanruntime "github.com/dicode/dicode/pkg/runtime/podman"
+	pythonruntime "github.com/dicode/dicode/pkg/runtime/python"
 	"github.com/dicode/dicode/pkg/secrets"
 	"github.com/dicode/dicode/pkg/source"
 	gitSource "github.com/dicode/dicode/pkg/source/git"
 	"github.com/dicode/dicode/pkg/source/local"
+	"github.com/dicode/dicode/pkg/task"
 	"github.com/dicode/dicode/pkg/tray"
 	"github.com/dicode/dicode/pkg/trigger"
 	"github.com/dicode/dicode/pkg/webui"
@@ -101,9 +105,10 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	secretsChain, localSecrets := buildSecretsChain(cfg, database, log)
 
 	// 3. Task registry + startup cleanup.
-	// Remove orphaned Docker containers first (before marking runs cancelled)
+	// Remove orphaned containers first (before marking runs cancelled)
 	// so the DB status reflects what actually happened to each container.
 	dockerruntime.CleanupOrphanedContainers(ctx, log)
+	podmanruntime.CleanupOrphanedContainers(ctx, log)
 
 	reg := registry.New(database)
 	if stale, err := reg.CleanupStaleRuns(ctx); err != nil {
@@ -112,17 +117,13 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 		log.Info("cancelled stale runs from previous session", zap.Strings("tasks", stale))
 	}
 
-	// 4. JS runtime.
-	rt := jsruntime.New(reg, secretsChain, database, log)
+	// 4. Build managed runtimes (deno is always available; others depend on config).
+	managedRuntimes, eng, err := buildRuntimes(ctx, cfg, reg, secretsChain, database, log)
+	if err != nil {
+		return err
+	}
 
-	// 5. Trigger engine.
-	eng := trigger.New(reg, rt, log)
-
-	// 5a. Docker runtime (wired into engine).
-	dockerRT := dockerruntime.New(reg, log)
-	eng.SetDockerRuntime(dockerRT)
-
-	// 6. Sources + reconciler.
+	// 5. Sources + reconciler.
 	sources, err := buildSources(cfg, log)
 	if err != nil {
 		return fmt.Errorf("build sources: %w", err)
@@ -131,7 +132,7 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	rec.OnRegister = eng.Register
 	rec.OnUnregister = eng.Unregister
 
-	// 7. Web UI.
+	// 6. Web UI.
 	port := cfg.Server.Port
 	if port == 0 {
 		port = 8080
@@ -145,14 +146,15 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	if err != nil {
 		return fmt.Errorf("build webui: %w", err)
 	}
+	srv.SetManagedRuntimes(managedRuntimes)
 
-	// 8. Run everything concurrently.
+	// 7. Run everything concurrently.
 	g, ctx := errgroup.WithContext(ctx)
 	g.Go(func() error { return rec.Run(ctx) })
 	g.Go(func() error { return eng.Start(ctx) })
 	g.Go(func() error { return srv.Start(ctx) })
 
-	// 9. System tray (optional).
+	// 8. System tray (optional).
 	trayEnabled := cfg.Server.Tray == nil || *cfg.Server.Tray // nil = auto = enabled
 	if trayEnabled {
 		g.Go(func() error {
@@ -162,6 +164,71 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	}
 
 	return g.Wait()
+}
+
+// buildRuntimes initialises all managed runtimes, registers them in the trigger
+// engine, and returns the managed-runtime list (for the Config UI).
+func buildRuntimes(
+	_ context.Context,
+	cfg *config.Config,
+	reg *registry.Registry,
+	secretsChain secrets.Chain,
+	database db.DB,
+	log *zap.Logger,
+) ([]pkgruntime.ManagedRuntime, *trigger.Engine, error) {
+	// --- Deno (always-on default executor) ---
+	denoRT, err := denoruntime.New(reg, secretsChain, database, log)
+	if err != nil {
+		return nil, nil, fmt.Errorf("init deno runtime: %w", err)
+	}
+	eng := trigger.New(reg, denoRT, log)
+
+	var managed []pkgruntime.ManagedRuntime
+	managed = append(managed, denoRT) // *denoruntime.Runtime implements ManagedRuntime
+
+	// Allow overriding the deno version at startup (unusual but supported).
+	if rc, ok := cfg.Runtimes["deno"]; ok && rc.Version != "" {
+		if denoRT.IsInstalled(rc.Version) {
+			if p, err := denoRT.BinaryPath(rc.Version); err == nil {
+				eng.RegisterExecutor(task.RuntimeDeno, denoRT.NewExecutor(p))
+			}
+		}
+	}
+
+	// --- Docker ---
+	eng.RegisterExecutor(task.RuntimeDocker, dockerruntime.New(reg, log))
+
+	// --- Podman — registered as ManagedRuntime; executor added only if binary found ---
+	podmanMgr := podmanruntime.New(reg, log)
+	managed = append(managed, podmanMgr)
+	if podmanMgr.IsInstalled("") {
+		if p, err := podmanMgr.BinaryPath(""); err == nil {
+			eng.RegisterExecutor(task.RuntimePodman, podmanMgr.NewExecutor(p))
+			log.Info("podman runtime registered", zap.String("path", p))
+		}
+	}
+
+	// --- Python (uv) — register only if configured + installed ---
+	pythonMgr := pythonruntime.New(reg, secretsChain, database, log)
+	managed = append(managed, pythonMgr)
+
+	if rc, ok := cfg.Runtimes["python"]; ok && !rc.Disabled {
+		version := rc.Version
+		if version == "" {
+			version = pythonMgr.DefaultVersion()
+		}
+		if pythonMgr.IsInstalled(version) {
+			if p, err := pythonMgr.BinaryPath(version); err == nil {
+				eng.RegisterExecutor(task.Runtime("python"), pythonMgr.NewExecutor(p))
+				log.Info("python runtime registered", zap.String("version", version))
+			}
+		} else {
+			log.Info("python runtime configured but not installed — run install from Config UI",
+				zap.String("version", version))
+		}
+	}
+
+	return managed, eng, nil
 }
 
 func buildSecretsChain(cfg *config.Config, database db.DB, log *zap.Logger) (secrets.Chain, webui.SecretsManager) {

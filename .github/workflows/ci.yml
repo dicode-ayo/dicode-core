@@ -19,7 +19,7 @@ jobs:
           cache: true
 
       - name: Run tests
-        run: go test -timeout 60s -race ./...
+        run: go test -timeout 300s -race ./...
 
   lint:
     name: Lint

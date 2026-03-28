@@ -1,0 +1,12 @@
+description: Starts an Nginx container serving /tmp on port 8888. Kill from the run page when done.
+docker:
+    image: nginx:alpine
+    ports:
+        - 8888:80
+    pull_policy: missing
+    volumes:
+        - /tmp:/usr/share/nginx/html:ro
+name: Nginx Dev Server
+runtime: docker
+trigger:
+    daemon: true
