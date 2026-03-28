@@ -1,9 +1,0 @@
-{{define "content"}}
-<h1>Tasks</h1>
-<table>
-  <thead><tr><th>ID</th><th>Name</th><th>Trigger</th><th>Last Run</th><th>Last Status</th><th></th></tr></thead>
-  <tbody hx-get="/ui/tasks/rows" hx-trigger="every 3s" hx-swap="innerHTML">
-    {{template "tasks-rows" .Tasks}}
-  </tbody>
-</table>
-{{end}}

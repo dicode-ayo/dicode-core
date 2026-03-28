@@ -48,9 +48,11 @@ type LogEntry struct {
 
 // Registry is an in-memory map of tasks backed by a sqlite run log.
 type Registry struct {
-	mu    sync.RWMutex
-	tasks map[string]*task.Spec
-	db    db.DB
+	mu      sync.RWMutex
+	tasks   map[string]*task.Spec
+	db      db.DB
+	logHook func(runID, level, msg string, ts int64)
+	logMu   sync.Mutex
 }
 
 // New creates an empty Registry backed by the given DB.
@@ -132,13 +134,29 @@ func (r *Registry) FinishRun(ctx context.Context, runID, status string) error {
 	)
 }
 
+// SetLogHook registers a function called after each log entry is written.
+func (r *Registry) SetLogHook(fn func(runID, level, msg string, ts int64)) {
+	r.logMu.Lock()
+	r.logHook = fn
+	r.logMu.Unlock()
+}
+
 // AppendLog adds a log entry for a run.
 func (r *Registry) AppendLog(ctx context.Context, runID, level, msg string) error {
 	now := time.Now().UnixMilli()
-	return r.db.Exec(ctx,
+	if err := r.db.Exec(ctx,
 		`INSERT INTO run_logs (run_id, ts, level, message) VALUES (?, ?, ?, ?)`,
 		runID, now, level, msg,
-	)
+	); err != nil {
+		return err
+	}
+	r.logMu.Lock()
+	hook := r.logHook
+	r.logMu.Unlock()
+	if hook != nil {
+		hook(runID, level, msg, now)
+	}
+	return nil
 }
 
 // GetRun fetches a run record by ID.
