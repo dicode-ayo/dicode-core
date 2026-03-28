@@ -17,9 +17,10 @@ type RunOptions struct {
 
 // RunResult is returned by every Executor.
 type RunResult struct {
-	RunID      string
-	ChainInput interface{} // passed to FireChain; nil for runtimes that don't produce output
-	Error      error
+	RunID       string
+	ChainInput  interface{} // passed to FireChain; nil for runtimes that don't produce output
+	ReturnValue interface{} // return value to store/display; nil for container runtimes
+	Error       error
 }
 
 // Executor is the common interface satisfied by every runtime (Deno, Docker,

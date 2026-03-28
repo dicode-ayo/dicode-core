@@ -264,7 +264,7 @@ func (rt *Runtime) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 	if err != nil {
 		return nil, err
 	}
-	r := &pkgruntime.RunResult{RunID: result.RunID, Error: result.Error}
+	r := &pkgruntime.RunResult{RunID: result.RunID, Error: result.Error, ReturnValue: result.ReturnValue}
 	if result.Output != nil {
 		r.ChainInput = result.Output.Data
 	} else {

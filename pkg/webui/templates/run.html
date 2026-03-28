@@ -1,9 +1,8 @@
 {{define "content"}}
 <div style="margin-bottom:1rem">
-  <a href="/tasks/{{.Run.TaskID}}">← {{.Run.TaskID}}</a>
+  <a href="/tasks/{{.Run.TaskID}}">← {{if .TaskName}}{{.TaskName}}{{else}}{{.Run.TaskID}}{{end}}</a>
 </div>
 
-{{/* id is always present so hx-select="#run-status-card" can find it after swap */}}
 <div id="run-status-card" class="card"
   {{if eq .Run.Status "running"}}
   hx-get="/runs/{{.Run.ID}}"
@@ -12,11 +11,13 @@
   hx-swap="outerHTML"
   hx-select="#run-status-card"
   {{end}}>
-  <div style="display:flex;gap:1rem;align-items:center">
+  <div style="display:flex;gap:1rem;align-items:center;flex-wrap:wrap">
     <span class="badge badge-{{.Run.Status}}">{{.Run.Status}}</span>
-    <span class="meta">Run {{.Run.ID}}</span>
+    {{if .TaskName}}<strong>{{.TaskName}}</strong>{{end}}
+    {{if .Run.TriggerSource}}<span class="meta badge badge-manual">{{.Run.TriggerSource}}</span>{{end}}
+    <span class="meta">Run <code>{{slice .Run.ID 0 8}}</code></span>
     <span class="meta">Started {{fmtTime .Run.StartedAt}}</span>
-    {{if .Run.FinishedAt}}<span class="meta">Duration {{fmtDuration .Run.StartedAt .Run.FinishedAt}}</span>{{end}}
+    {{if .Run.FinishedAt}}<span class="meta">{{fmtDuration .Run.StartedAt .Run.FinishedAt}}</span>{{end}}
     {{if eq .Run.Status "running"}}
     <button class="btn" style="background:#dc3545;margin-left:auto"
       hx-post="/api/runs/{{.Run.ID}}/kill"
@@ -25,15 +26,30 @@
   </div>
 </div>
 
+{{if .Run.ReturnValue}}
+<h2>Return value</h2>
+<div class="card" style="padding:0">
+  <pre id="return-value" style="margin:0;border-radius:6px">{{.Run.ReturnValue}}</pre>
+</div>
+<script>
+(function(){
+  var pre = document.getElementById('return-value');
+  try { pre.textContent = JSON.stringify(JSON.parse(pre.textContent), null, 2); } catch(_){}
+})();
+</script>
+{{end}}
+
 {{if .Output}}
 <h2>Output</h2>
-<div class="card">
+<div class="card" style="padding:0">
   {{if eq .Output.ContentType "text/html"}}
   <iframe srcdoc="{{.Output.Content}}"
           sandbox="allow-same-origin"
-          style="width:100%;min-height:300px;border:none"></iframe>
+          style="width:100%;min-height:300px;border:none;border-radius:6px"></iframe>
+  {{else if eq .Output.ContentType "text/plain"}}
+  <pre style="margin:0;border-radius:6px">{{.Output.Content}}</pre>
   {{else}}
-  <pre>{{.Output.Content}}</pre>
+  <pre style="margin:0;border-radius:6px">{{.Output.Content}}</pre>
   {{end}}
 </div>
 {{end}}
