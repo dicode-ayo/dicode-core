@@ -5,16 +5,33 @@ import (
 	"sync"
 )
 
-// LogBroadcaster is an io.Writer that fans out written log lines to SSE subscribers.
-// It also keeps a short ring buffer so new subscribers receive recent history.
+// LogBroadcaster is an io.Writer (used by zap) that fans out log lines
+// to a registered hook (e.g. the WSHub). It also keeps a ring buffer
+// so the log bar can show recent history when first opened.
 type LogBroadcaster struct {
-	mu      sync.Mutex
-	clients map[chan string]struct{}
-	recent  []string
+	mu     sync.Mutex
+	hook   func(line string)
+	recent []string
 }
 
 func NewLogBroadcaster() *LogBroadcaster {
-	return &LogBroadcaster{clients: make(map[chan string]struct{})}
+	return &LogBroadcaster{}
+}
+
+// SetHook registers a function called for each new log line.
+func (b *LogBroadcaster) SetHook(fn func(line string)) {
+	b.mu.Lock()
+	b.hook = fn
+	b.mu.Unlock()
+}
+
+// Recent returns the last N buffered log lines.
+func (b *LogBroadcaster) Recent() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]string, len(b.recent))
+	copy(out, b.recent)
+	return out
 }
 
 func (b *LogBroadcaster) Write(p []byte) (int, error) {
@@ -27,29 +44,10 @@ func (b *LogBroadcaster) Write(p []byte) (int, error) {
 	if len(b.recent) > 300 {
 		b.recent = b.recent[1:]
 	}
-	for ch := range b.clients {
-		select {
-		case ch <- line:
-		default: // drop if client is slow
-		}
+	hook := b.hook
+	b.mu.Unlock()
+	if hook != nil {
+		hook(line)
 	}
-	b.mu.Unlock()
 	return len(p), nil
-}
-
-func (b *LogBroadcaster) subscribe() (ch chan string, snapshot []string) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	ch = make(chan string, 64)
-	b.clients[ch] = struct{}{}
-	snapshot = make([]string, len(b.recent))
-	copy(snapshot, b.recent)
-	return ch, snapshot
-}
-
-func (b *LogBroadcaster) unsubscribe(ch chan string) {
-	b.mu.Lock()
-	delete(b.clients, ch)
-	b.mu.Unlock()
-	close(ch)
 }

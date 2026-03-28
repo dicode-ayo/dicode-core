@@ -40,6 +40,7 @@ type Engine struct {
 	daemonSpecs map[string]*task.Spec
 
 	runFinishedHook func(taskID, runID, status, triggerSource string, durationMs int64)
+	runStartedHook  func(taskID, runID, triggerSource string)
 }
 
 // New creates a trigger Engine with a default Deno executor.
@@ -56,6 +57,11 @@ func New(r *registry.Registry, defaultExec pkgruntime.Executor, log *zap.Logger)
 	}
 	e.executors[task.RuntimeDeno] = defaultExec
 	return e
+}
+
+// SetRunStartedHook registers a callback invoked when a run starts.
+func (e *Engine) SetRunStartedHook(fn func(taskID, runID, triggerSource string)) {
+	e.runStartedHook = fn
 }
 
 // SetRunFinishedHook registers a callback invoked after every run completes.
@@ -361,6 +367,10 @@ func (e *Engine) fireAsync(ctx context.Context, spec *task.Spec, opts pkgruntime
 
 	if _, err := e.registry.StartRunWithID(context.Background(), runID, spec.ID, opts.ParentRunID, source); err != nil {
 		return "", fmt.Errorf("start run record: %w", err)
+	}
+
+	if h := e.runStartedHook; h != nil {
+		h(spec.ID, runID, source)
 	}
 
 	runCtx, runCancel := context.WithCancel(context.Background())

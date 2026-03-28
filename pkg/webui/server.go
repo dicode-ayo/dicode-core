@@ -1,4 +1,4 @@
-// Package webui serves the REST API and HTMX-based dashboard.
+// Package webui serves the REST API and SPA dashboard.
 package webui
 
 import (
@@ -11,7 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"html/template"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -92,7 +92,6 @@ func (s *sessionStore) purgeLoop() {
 }
 
 // unlockLimiter is a simple per-IP rate limiter for the secrets unlock endpoint.
-// It allows up to maxAttempts requests per window before blocking.
 type unlockLimiter struct {
 	mu      sync.Mutex
 	entries map[string]*limitEntry
@@ -138,9 +137,6 @@ func securityHeaders(next http.Handler) http.Handler {
 	})
 }
 
-//go:embed templates/*.html
-var templateFS embed.FS
-
 //go:embed static
 var staticFS embed.FS
 
@@ -157,12 +153,10 @@ type Server struct {
 	sessions        *sessionStore
 	limiter         *unlockLimiter
 	logs            *LogBroadcaster
-	runEvents       *RunEventBroadcaster
+	ws              *WSHub
 	log             *zap.Logger
 	port            int
 	srv             *http.Server
-	baseTmpl        *template.Template // parsed base.html only; cloned per render
-	partialTmpl     *template.Template // row partials, no base wrapper
 }
 
 // SetManagedRuntimes registers the list of managed runtimes (Deno, Python, …)
@@ -175,78 +169,88 @@ func (s *Server) SetManagedRuntimes(runtimes []pkgruntime.ManagedRuntime) {
 // settings changes; pass "" in tests or when persistence is not needed.
 // rec and dataDir enable live source management; pass nil/"" in tests.
 func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config, cfgPath string, secretsMgr SecretsManager, rec *registry.Reconciler, dataDir string, logs *LogBroadcaster, log *zap.Logger) (*Server, error) {
-	funcMap := template.FuncMap{
-		"triggerLabel": triggerLabel,
-		"fmtTime":      fmtTime,
-		"fmtDuration":  fmtDuration,
-		"slice": func(s string, i, j int) string {
-			if i < 0 {
-				i = 0
-			}
-			if j > len(s) {
-				j = len(s)
-			}
-			if i > j {
-				return ""
-			}
-			return s[i:j]
-		},
-		"string": fmt.Sprint,
-		"deref":  func(t *time.Time) time.Time { return *t },
-		"toJSON": func(v any) (template.JS, error) {
-			b, err := json.Marshal(v)
-			return template.JS(b), err
-		},
-		"list":      func(items ...string) []string { return items },
-		"not":       func(b bool) bool { return !b },
-		"derefBool": func(b *bool) bool { return b != nil && *b },
-		"tabID":     func(s string) string { return strings.ReplaceAll(s, ".", "-") },
-	}
-	base, err := template.New("base.html").Funcs(funcMap).ParseFS(templateFS, "templates/base.html")
-	if err != nil {
-		return nil, fmt.Errorf("parse base template: %w", err)
-	}
-	partials, err := template.New("").Funcs(funcMap).ParseFS(templateFS,
-		"templates/*_rows.html",
-		"templates/editor.html",
-		"templates/trigger_editor.html",
-	)
-	if err != nil {
-		return nil, fmt.Errorf("parse partial templates: %w", err)
-	}
 	ss := newSessionStore()
 	go ss.purgeLoop()
+
+	wsHub := NewWSHub(log)
+
 	s := &Server{
-		registry:    r,
-		engine:      eng,
-		cfg:         cfg,
-		cfgPath:     cfgPath,
-		secretsMgr:  secretsMgr,
-		reconciler:  rec,
-		dataDir:     dataDir,
-		sessions:    ss,
-		limiter:     newUnlockLimiter(),
-		logs:        logs,
-		log:         log,
-		port:        port,
-		baseTmpl:    base,
-		partialTmpl: partials,
+		registry:   r,
+		engine:     eng,
+		cfg:        cfg,
+		cfgPath:    cfgPath,
+		secretsMgr: secretsMgr,
+		reconciler: rec,
+		dataDir:    dataDir,
+		sessions:   ss,
+		limiter:    newUnlockLimiter(),
+		logs:       logs,
+		ws:         wsHub,
+		log:        log,
+		port:       port,
 	}
-	s.runEvents = NewRunEventBroadcaster()
-	eng.SetRunFinishedHook(func(taskID, runID, status, triggerSource string, durationMs int64) {
+
+	// Wire run started hook → broadcast run:started
+	eng.SetRunStartedHook(func(taskID, runID, triggerSource string) {
 		taskName := taskID
 		if spec, ok := r.Get(taskID); ok {
 			taskName = spec.Name
 		}
-		s.runEvents.Publish(RunEvent{
-			RunID:         runID,
-			TaskID:        taskID,
-			TaskName:      taskName,
-			Status:        status,
-			DurationMs:    durationMs,
-			TriggerSource: triggerSource,
+		s.ws.Broadcast(WSMsg{
+			Type: "run:started",
+			Data: RunStartedData{
+				RunID:         runID,
+				TaskID:        taskID,
+				TaskName:      taskName,
+				TriggerSource: triggerSource,
+			},
 		})
 	})
+
+	// Wire run finished hook → broadcast run:finished
+	eng.SetRunFinishedHook(func(taskID, runID, status, triggerSource string, durationMs int64) {
+		taskName := taskID
+		var outputContentType, returnValue string
+		if spec, ok := r.Get(taskID); ok {
+			taskName = spec.Name
+		}
+		if run, err := r.GetRun(context.Background(), runID); err == nil {
+			outputContentType = run.OutputContentType
+			returnValue = run.ReturnValue
+		}
+		s.ws.Broadcast(WSMsg{
+			Type: "run:finished",
+			Data: RunFinishedData{
+				RunID:             runID,
+				TaskID:            taskID,
+				TaskName:          taskName,
+				Status:            status,
+				DurationMs:        durationMs,
+				TriggerSource:     triggerSource,
+				OutputContentType: outputContentType,
+				ReturnValue:       returnValue,
+			},
+		})
+	})
+
+	// Wire registry log hook → broadcast run:log
+	r.SetLogHook(func(runID, level, msg string, ts int64) {
+		s.ws.Broadcast(WSMsg{
+			Type: "run:log",
+			Data: RunLogData{
+				RunID:   runID,
+				Level:   level,
+				Message: msg,
+				Ts:      ts,
+			},
+		})
+	})
+
+	// Wire log broadcaster hook → ws BroadcastLog
+	if logs != nil {
+		logs.SetHook(s.ws.BroadcastLog)
+	}
+
 	return s, nil
 }
 
@@ -257,26 +261,14 @@ func (s *Server) Handler() http.Handler {
 	r.Use(middleware.Logger)
 	r.Use(securityHeaders)
 
-	// UI routes
-	r.Get("/", s.handleTaskList)
-	r.Get("/tasks/{id}", s.handleTaskDetail)
-	r.Get("/runs/{runID}", s.handleRunDetail)
-	r.Get("/runs/{runID}/result", s.handleRunResult)
-	r.Get("/config", s.handleConfig)
-	r.Get("/config/code", s.handleConfigCode)
+	// WebSocket
+	r.Get("/ws", s.ws.ServeHTTP)
 
-	// HTMX partial row updates
-	r.Get("/ui/tasks/rows", s.uiTaskRows)
-	r.Get("/ui/tasks/{id}/runs/rows", s.uiRunRows)
-	r.Get("/ui/tasks/{id}/editor", s.uiTaskEditor)
-	r.Get("/ui/tasks/{id}/trigger-editor", s.uiTriggerEditor)
-
-	// SSE log stream
-	r.Get("/logs/stream", s.handleLogsStream)
-
-	// SSE run events stream + service worker
-	r.Get("/api/events", s.handleRunEvents)
+	// Service worker
 	r.Get("/sw.js", s.handleServiceWorker)
+
+	// Run result (bare page, no chrome)
+	r.Get("/runs/{runID}/result", s.handleRunResult)
 
 	// File editor API (task.js / task.test.js only)
 	r.Get("/api/tasks/{id}/files/{filename}", s.apiGetFile)
@@ -286,43 +278,66 @@ func (s *Server) Handler() http.Handler {
 	// AI chat — streams SSE, writes task files live
 	r.Post("/api/tasks/{id}/ai/stream", s.handleAIStream)
 
-	// Settings (persist to dicode.yaml)
-	r.Post("/api/settings/ai", s.apiSaveAISettings)
-	r.Post("/api/settings/server", s.apiSaveServerSettings)
-	r.Post("/api/settings/sources", s.apiAddSource)
-	r.Delete("/api/settings/sources/{idx}", s.apiRemoveSource)
-	r.Get("/api/settings/sources/git/branches", s.apiListGitBranches)
+	// REST API with CORS
+	r.Route("/api", func(r chi.Router) {
+		r.Use(func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+				if r.Method == http.MethodOptions {
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
+				next.ServeHTTP(w, r)
+			})
+		})
 
-	// Managed runtime lifecycle
-	r.Get("/api/runtimes", s.apiListRuntimes)
-	r.Post("/api/runtimes/{name}/install", s.apiInstallRuntime)
-	r.Delete("/api/runtimes/{name}", s.apiRemoveRuntime)
+		r.Get("/config", s.apiGetConfig)
+		r.Get("/config/raw", s.apiGetConfigRaw)
+		r.Post("/config/raw", s.apiSaveConfigRaw)
 
-	// REST API
-	r.Get("/api/config", s.apiGetConfig)
-	r.Get("/api/config/raw", s.apiGetConfigRaw)
-	r.Post("/api/config/raw", s.apiSaveConfigRaw)
-	r.Get("/api/tasks", s.apiListTasks)
-	r.Get("/api/tasks/{id}", s.apiGetTask)
-	r.Post("/api/tasks/{id}/run", s.apiRunTask)
-	r.Get("/api/tasks/{id}/runs", s.apiListRuns)
-	r.Get("/api/runs/{runID}", s.apiGetRun)
-	r.Get("/api/runs/{runID}/logs", s.apiGetLogs)
-	r.Post("/api/runs/{runID}/kill", s.apiKillRun)
+		r.Get("/tasks", s.apiListTasks)
+		r.Get("/tasks/{id}", s.apiGetTask)
+		r.Post("/tasks/{id}/run", s.apiRunTask)
+		r.Get("/tasks/{id}/runs", s.apiListRuns)
+		r.Get("/tasks/{id}/files/{filename}", s.apiGetFile)
+		r.Post("/tasks/{id}/files/{filename}", s.apiSaveFile)
+		r.Post("/tasks/{id}/trigger", s.apiSaveTrigger)
+		r.Post("/tasks/{id}/ai/stream", s.handleAIStream)
 
-	// Secrets management
-	r.Get("/secrets", s.handleSecretsPage)
-	r.Post("/secrets/unlock", s.handleSecretsUnlock)
-	r.Post("/secrets/lock", s.handleSecretsLock)
-	r.Get("/api/secrets", s.apiListSecrets)
-	r.Post("/api/secrets", s.apiSetSecret)
-	r.Delete("/api/secrets/{key}", s.apiDeleteSecret)
+		r.Get("/runs/{runID}", s.apiGetRun)
+		r.Get("/runs/{runID}/logs", s.apiGetLogs)
+		r.Post("/runs/{runID}/kill", s.apiKillRun)
+
+		// Secrets management
+		r.Get("/secrets", s.apiListSecrets)
+		r.Post("/secrets", s.apiSetSecret)
+		r.Delete("/secrets/{key}", s.apiDeleteSecret)
+		r.Post("/secrets/unlock", s.apiSecretsUnlock)
+		r.Post("/secrets/lock", s.apiSecretsLock)
+
+		// Settings
+		r.Post("/settings/ai", s.apiSaveAISettings)
+		r.Post("/settings/server", s.apiSaveServerSettings)
+		r.Post("/settings/sources", s.apiAddSource)
+		r.Delete("/settings/sources/{idx}", s.apiRemoveSource)
+		r.Get("/settings/sources/git/branches", s.apiListGitBranches)
+
+		// Managed runtime lifecycle
+		r.Get("/runtimes", s.apiListRuntimes)
+		r.Post("/runtimes/{name}/install", s.apiInstallRuntime)
+		r.Delete("/runtimes/{name}", s.apiRemoveRuntime)
+	})
 
 	// Webhook passthrough
 	r.Post("/hooks/*", func(w http.ResponseWriter, req *http.Request) {
 		req.URL.Path = "/hooks/" + chi.URLParam(req, "*")
 		s.engine.WebhookHandler().ServeHTTP(w, req)
 	})
+
+	// SPA catch-all — serve index.html for all unmatched GET routes
+	r.Get("/*", s.serveSPA)
 
 	return r
 }
@@ -332,9 +347,9 @@ func (s *Server) Start(ctx context.Context) error {
 	s.srv = &http.Server{
 		Addr:              fmt.Sprintf(":%d", s.port),
 		Handler:           s.Handler(),
-		ReadHeaderTimeout: 5 * time.Second,   // mitigates Slowloris
-		IdleTimeout:       120 * time.Second, // clean up idle keep-alives
-		// WriteTimeout is intentionally 0: SSE and AI stream endpoints write indefinitely.
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		// WriteTimeout is intentionally 0: WebSocket, SSE and AI stream endpoints write indefinitely.
 	}
 	go func() {
 		<-ctx.Done()
@@ -349,65 +364,18 @@ func (s *Server) Start(ctx context.Context) error {
 	return nil
 }
 
-// --- UI handlers ---
-
-func (s *Server) handleTaskList(w http.ResponseWriter, r *http.Request) {
-	s.render(w, "tasks.html", map[string]any{
-		"Title": "Tasks",
-		"Tasks": s.buildTaskRows(r.Context()),
-	})
-}
-
-func (s *Server) handleTaskDetail(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	spec, ok := s.registry.Get(id)
-	if !ok {
-		http.NotFound(w, r)
-		return
-	}
-	runs, _ := s.registry.ListRuns(r.Context(), id, 20)
-	s.render(w, "task.html", map[string]any{
-		"Title": spec.Name,
-		"Spec":  spec,
-		"Runs":  runs,
-	})
-}
-
-func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
-	runID := chi.URLParam(r, "runID")
-	run, err := s.registry.GetRun(r.Context(), runID)
+// serveSPA serves the SPA index.html for all unmatched GET routes.
+func (s *Server) serveSPA(w http.ResponseWriter, r *http.Request) {
+	b, err := staticFS.ReadFile("static/app/index.html")
 	if err != nil {
-		http.NotFound(w, r)
+		http.Error(w, "SPA not found", http.StatusNotFound)
 		return
 	}
-	logs, _ := s.registry.GetRunLogs(r.Context(), runID)
-	title := runID
-	if len(title) > 8 {
-		title = title[:8]
-	}
-	taskName := run.TaskID
-	if spec, ok := s.registry.Get(run.TaskID); ok {
-		taskName = spec.Name
-	}
-	data := map[string]any{
-		"Title":    "Run " + title,
-		"Run":      run,
-		"Logs":     logs,
-		"TaskName": taskName,
-	}
-	if run.OutputContentType != "" {
-		data["Output"] = map[string]string{
-			"ContentType": run.OutputContentType,
-			"Content":     run.OutputContent,
-		}
-	}
-	s.render(w, "run.html", data)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write(b) //nolint:errcheck
 }
 
 // handleRunResult serves only the structured output of a run (bare page, no chrome).
-// For text/html output this is a full HTML page suitable for embedding or direct viewing.
-// For text/plain it renders a plain-text response.
-// Returns 404 if the run has no structured output.
 func (s *Server) handleRunResult(w http.ResponseWriter, r *http.Request) {
 	runID := chi.URLParam(r, "runID")
 	run, err := s.registry.GetRun(r.Context(), runID)
@@ -423,19 +391,6 @@ func (s *Server) handleRunResult(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(run.OutputContent))
 }
 
-func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
-	s.render(w, "config.html", map[string]any{
-		"Title": "Config",
-		"Cfg":   s.cfg,
-	})
-}
-
-func (s *Server) handleConfigCode(w http.ResponseWriter, r *http.Request) {
-	s.render(w, "config_code.html", map[string]any{
-		"Title": "Edit config",
-	})
-}
-
 // handleServiceWorker serves the Service Worker JS file.
 func (s *Server) handleServiceWorker(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/javascript")
@@ -446,38 +401,6 @@ func (s *Server) handleServiceWorker(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Write(b) //nolint:errcheck
-}
-
-// handleRunEvents streams run:complete SSE events to the client.
-func (s *Server) handleRunEvents(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "streaming not supported", http.StatusInternalServerError)
-		return
-	}
-
-	ch := s.runEvents.Subscribe()
-	defer s.runEvents.Unsubscribe(ch)
-
-	// Send a keepalive comment immediately so the browser knows it's connected.
-	fmt.Fprintf(w, ": connected\n\n")
-	flusher.Flush()
-
-	for {
-		select {
-		case evt, ok := <-ch:
-			if !ok {
-				return
-			}
-			fmt.Fprintf(w, "event: run:complete\ndata: %s\n\n", evt.JSON())
-			flusher.Flush()
-		case <-r.Context().Done():
-			return
-		}
-	}
 }
 
 // apiGetConfigRaw returns the raw content of dicode.yaml.
@@ -500,9 +423,7 @@ func (s *Server) apiGetConfigRaw(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]string{"content": string(b)})
 }
 
-// apiSaveConfigRaw validates and writes the raw config back to dicode.yaml,
-// then reloads it into memory.
-// Guarded by secrets session because the config may contain API keys.
+// apiSaveConfigRaw validates and writes the raw config back to dicode.yaml.
 func (s *Server) apiSaveConfigRaw(w http.ResponseWriter, r *http.Request) {
 	if !s.secretsSessionValid(r) {
 		jsonErr(w, "unlock secrets first to edit raw config", http.StatusUnauthorized)
@@ -512,7 +433,22 @@ func (s *Server) apiSaveConfigRaw(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "config file path not set", http.StatusBadRequest)
 		return
 	}
-	content := r.FormValue("content")
+
+	// Support both JSON body and form value.
+	var content string
+	ct := r.Header.Get("Content-Type")
+	if strings.Contains(ct, "application/json") {
+		var body struct {
+			Content string `json:"content"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			jsonErr(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		content = body.Content
+	} else {
+		content = r.FormValue("content")
+	}
 
 	// Validate: must parse as valid YAML mapping.
 	var check map[string]any
@@ -535,79 +471,6 @@ func (s *Server) apiSaveConfigRaw(w http.ResponseWriter, r *http.Request) {
 
 	s.log.Info("config saved via code editor")
 	jsonOK(w, map[string]string{"status": "ok"})
-}
-
-// --- HTMX partial handlers ---
-
-func (s *Server) uiTaskRows(w http.ResponseWriter, r *http.Request) {
-	s.renderPartial(w, "tasks-rows", s.buildTaskRows(r.Context()))
-}
-
-func (s *Server) uiRunRows(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	runs, _ := s.registry.ListRuns(r.Context(), id, 20)
-	s.renderPartial(w, "runs-rows", runs)
-}
-
-// editorData is passed to the editor partial template.
-type editorData struct {
-	ID          string
-	ScriptFile  string // primary file shown in editor (e.g. "task.ts", "task.py", "Dockerfile")
-	TaskJS      string // content of ScriptFile
-	TestFile    string // test file name (e.g. "task.test.ts" or "task.test.js")
-	TestJS      string
-	TestExists  bool
-	IsContainer bool // true for docker/podman tasks — hides test-related UI
-}
-
-func (s *Server) uiTaskEditor(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	spec, ok := s.registry.Get(id)
-	if !ok {
-		http.NotFound(w, r)
-		return
-	}
-	d := editorData{ID: id}
-
-	switch spec.Runtime {
-	case task.RuntimeDocker, task.RuntimePodman:
-		// Container tasks: primary file is the Dockerfile.
-		d.IsContainer = true
-		d.ScriptFile = "Dockerfile"
-		if b, err := os.ReadFile(filepath.Join(spec.TaskDir, "Dockerfile")); err == nil {
-			d.TaskJS = string(b)
-		}
-	default:
-		// Code tasks: probe for the script file.
-		for _, name := range []string{"task.ts", "task.js", "task.py"} {
-			if b, err := os.ReadFile(filepath.Join(spec.TaskDir, name)); err == nil {
-				d.ScriptFile = name
-				d.TaskJS = string(b)
-				break
-			}
-		}
-		if d.ScriptFile == "" {
-			d.ScriptFile = "task.ts"
-		}
-		for _, name := range []string{"task.test.ts", "task.test.js"} {
-			if b, err := os.ReadFile(filepath.Join(spec.TaskDir, name)); err == nil {
-				d.TestFile = name
-				d.TestJS = string(b)
-				d.TestExists = true
-				break
-			}
-		}
-		if d.TestFile == "" {
-			// Default for the "+ test" create button — match the primary script extension.
-			if strings.HasSuffix(d.ScriptFile, ".ts") {
-				d.TestFile = "task.test.ts"
-			} else {
-				d.TestFile = "task.test.js"
-			}
-		}
-	}
-
-	s.renderPartial(w, "editor", d)
 }
 
 // allowedFiles restricts which files the editor API can read/write.
@@ -633,7 +496,9 @@ func (s *Server) apiGetFile(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "file not found", http.StatusNotFound)
 		return
 	}
-	jsonOK(w, map[string]string{"content": string(b)})
+	// Return plain text so the SPA can use it directly
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Write(b) //nolint:errcheck
 }
 
 func (s *Server) apiSaveFile(w http.ResponseWriter, r *http.Request) {
@@ -647,59 +512,27 @@ func (s *Server) apiSaveFile(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "task not found", http.StatusNotFound)
 		return
 	}
-	content := r.FormValue("content")
+
+	// Accept either plain text body or form value "content"
+	var content string
+	ct := r.Header.Get("Content-Type")
+	if strings.Contains(ct, "text/plain") {
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			jsonErr(w, "read body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		content = string(b)
+	} else {
+		content = r.FormValue("content")
+	}
+
 	if err := os.WriteFile(filepath.Join(spec.TaskDir, filename), []byte(content), 0600); err != nil {
 		jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	s.log.Info("file saved", zap.String("task", id), zap.String("file", filename))
 	jsonOK(w, map[string]string{"status": "saved"})
-}
-
-// triggerEditorData is the view model for the trigger editor partial.
-type triggerEditorData struct {
-	ID          string
-	TriggerType string // "cron" | "webhook" | "manual" | "chain" | "daemon"
-	Cron        string
-	Webhook     string
-	ChainFrom   string
-	ChainOn     string
-	Restart     string
-}
-
-func triggerEditorDataFromSpec(spec *task.Spec) triggerEditorData {
-	d := triggerEditorData{ID: spec.ID}
-	switch {
-	case spec.Trigger.Cron != "":
-		d.TriggerType = "cron"
-		d.Cron = spec.Trigger.Cron
-	case spec.Trigger.Webhook != "":
-		d.TriggerType = "webhook"
-		d.Webhook = spec.Trigger.Webhook
-	case spec.Trigger.Manual:
-		d.TriggerType = "manual"
-	case spec.Trigger.Chain != nil:
-		d.TriggerType = "chain"
-		d.ChainFrom = spec.Trigger.Chain.From
-		d.ChainOn = spec.Trigger.Chain.ChainOn()
-	case spec.Trigger.Daemon:
-		d.TriggerType = "daemon"
-		d.Restart = spec.Trigger.Restart
-		if d.Restart == "" {
-			d.Restart = "always"
-		}
-	}
-	return d
-}
-
-func (s *Server) uiTriggerEditor(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	spec, ok := s.registry.Get(id)
-	if !ok {
-		http.NotFound(w, r)
-		return
-	}
-	s.renderPartial(w, "trigger-editor", triggerEditorDataFromSpec(spec))
 }
 
 func (s *Server) apiSaveTrigger(w http.ResponseWriter, r *http.Request) {
@@ -723,26 +556,49 @@ func (s *Server) apiSaveTrigger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build the new trigger map from form values.
-	trigType := r.FormValue("type")
+	// Parse trigger from JSON body.
+	var body struct {
+		Type    string `json:"type"`
+		Cron    string `json:"cron"`
+		Webhook string `json:"webhook"`
+		From    string `json:"from"`
+		On      string `json:"on"`
+		Restart string `json:"restart"`
+	}
+	ct := r.Header.Get("Content-Type")
+	if strings.Contains(ct, "application/json") {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			jsonErr(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	} else {
+		// Fallback: form values
+		body.Type = r.FormValue("type")
+		body.Cron = r.FormValue("cron")
+		body.Webhook = r.FormValue("webhook")
+		body.From = r.FormValue("chain_from")
+		body.On = r.FormValue("chain_on")
+		body.Restart = r.FormValue("restart")
+	}
+
 	var trigMap map[string]any
-	switch trigType {
+	switch body.Type {
 	case "cron":
-		trigMap = map[string]any{"cron": r.FormValue("cron")}
+		trigMap = map[string]any{"cron": body.Cron}
 	case "webhook":
-		trigMap = map[string]any{"webhook": r.FormValue("webhook")}
+		trigMap = map[string]any{"webhook": body.Webhook}
 	case "manual":
 		trigMap = map[string]any{"manual": true}
 	case "chain":
-		chain := map[string]any{"from": r.FormValue("chain_from")}
-		if on := r.FormValue("chain_on"); on != "" && on != "success" {
-			chain["on"] = on
+		chain := map[string]any{"from": body.From}
+		if body.On != "" && body.On != "success" {
+			chain["on"] = body.On
 		}
 		trigMap = map[string]any{"chain": chain}
 	case "daemon":
 		trigMap = map[string]any{"daemon": true}
-		if restart := r.FormValue("restart"); restart != "" && restart != "always" {
-			trigMap["restart"] = restart
+		if body.Restart != "" && body.Restart != "always" {
+			trigMap["restart"] = body.Restart
 		}
 	default:
 		jsonErr(w, "invalid trigger type", http.StatusBadRequest)
@@ -759,54 +615,8 @@ func (s *Server) apiSaveTrigger(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "write task.yaml: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	s.log.Info("trigger saved", zap.String("task", id), zap.String("type", trigType))
+	s.log.Info("trigger saved", zap.String("task", id), zap.String("type", body.Type))
 	jsonOK(w, map[string]string{"status": "saved"})
-}
-
-func (s *Server) renderPartial(w http.ResponseWriter, name string, data any) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := s.partialTmpl.ExecuteTemplate(w, name, data); err != nil {
-		s.log.Error("partial render", zap.String("template", name), zap.Error(err))
-	}
-}
-
-// --- SSE log stream ---
-
-func (s *Server) handleLogsStream(w http.ResponseWriter, r *http.Request) {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
-		return
-	}
-	if s.logs == nil {
-		http.Error(w, "log streaming not configured", http.StatusServiceUnavailable)
-		return
-	}
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no")
-
-	ch, recent := s.logs.subscribe()
-	defer s.logs.unsubscribe(ch)
-
-	for _, line := range recent {
-		fmt.Fprintf(w, "data: %s\n\n", line)
-	}
-	flusher.Flush()
-
-	for {
-		select {
-		case line, ok := <-ch:
-			if !ok {
-				return
-			}
-			fmt.Fprintf(w, "data: %s\n\n", line)
-			flusher.Flush()
-		case <-r.Context().Done():
-			return
-		}
-	}
 }
 
 const secretsCookie = "dicode_secrets_sess"
@@ -825,70 +635,60 @@ func (s *Server) secretsSessionValid(r *http.Request) bool {
 	return s.sessions.valid(c.Value)
 }
 
-func (s *Server) handleSecretsPage(w http.ResponseWriter, r *http.Request) {
-	if s.secretsMgr == nil {
-		s.render(w, "secrets.html", map[string]any{
-			"Title":       "Secrets",
-			"Unavailable": true,
-		})
-		return
-	}
-	unlocked := s.secretsSessionValid(r)
-	var keys []string
-	if unlocked {
-		keys, _ = s.secretsMgr.List(r.Context())
-	}
-	s.render(w, "secrets.html", map[string]any{
-		"Title":     "Secrets",
-		"Unlocked":  unlocked,
-		"Protected": s.secretsPassphrase() != "",
-		"Keys":      keys,
-	})
-}
-
-func (s *Server) handleSecretsUnlock(w http.ResponseWriter, r *http.Request) {
-	// Rate-limit by client IP: max 5 attempts per minute.
-	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
-	if !s.limiter.allow(ip) {
-		http.Error(w, "too many unlock attempts — try again in a minute", http.StatusTooManyRequests)
-		return
-	}
-
-	entered := r.FormValue("passphrase")
-	expected := s.secretsPassphrase()
-	if expected == "" || subtle.ConstantTimeCompare([]byte(entered), []byte(expected)) == 1 {
-		token := s.sessions.issue(expected + "dicode")
-		http.SetCookie(w, &http.Cookie{
-			Name:     secretsCookie,
-			Value:    token,
-			Path:     "/secrets",
-			HttpOnly: true,
-			Secure:   true, // must be set; deploy behind TLS or set server.insecure for dev
-			SameSite: http.SameSiteStrictMode,
-			MaxAge:   8 * 3600,
-		})
-	}
-	http.Redirect(w, r, "/secrets", http.StatusSeeOther)
-}
-
-func (s *Server) handleSecretsLock(w http.ResponseWriter, r *http.Request) {
-	if c, err := r.Cookie(secretsCookie); err == nil {
-		s.sessions.revoke(c.Value)
-	}
-	http.SetCookie(w, &http.Cookie{Name: secretsCookie, Path: "/secrets", MaxAge: -1})
-	http.Redirect(w, r, "/secrets", http.StatusSeeOther)
-}
-
 func (s *Server) requireSecretsSession(w http.ResponseWriter, r *http.Request) bool {
 	if s.secretsMgr == nil {
 		jsonErr(w, "secrets not configured", http.StatusServiceUnavailable)
 		return false
 	}
 	if !s.secretsSessionValid(r) {
-		jsonErr(w, "secrets locked — unlock at /secrets first", http.StatusUnauthorized)
+		jsonErr(w, "secrets locked — unlock via POST /api/secrets/unlock", http.StatusUnauthorized)
 		return false
 	}
 	return true
+}
+
+// apiSecretsUnlock accepts {"password":"..."} and issues a session cookie.
+func (s *Server) apiSecretsUnlock(w http.ResponseWriter, r *http.Request) {
+	// Rate-limit by client IP.
+	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if !s.limiter.allow(ip) {
+		jsonErr(w, "too many unlock attempts — try again in a minute", http.StatusTooManyRequests)
+		return
+	}
+
+	var body struct {
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonErr(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	expected := s.secretsPassphrase()
+	if expected != "" && subtle.ConstantTimeCompare([]byte(body.Password), []byte(expected)) != 1 {
+		jsonErr(w, "incorrect password", http.StatusUnauthorized)
+		return
+	}
+
+	token := s.sessions.issue(expected + "dicode")
+	http.SetCookie(w, &http.Cookie{
+		Name:     secretsCookie,
+		Value:    token,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		MaxAge:   8 * 3600,
+	})
+	jsonOK(w, map[string]string{"status": "ok"})
+}
+
+// apiSecretsLock revokes the current session cookie.
+func (s *Server) apiSecretsLock(w http.ResponseWriter, r *http.Request) {
+	if c, err := r.Cookie(secretsCookie); err == nil {
+		s.sessions.revoke(c.Value)
+	}
+	http.SetCookie(w, &http.Cookie{Name: secretsCookie, Path: "/", MaxAge: -1})
+	jsonOK(w, map[string]string{"status": "ok"})
 }
 
 func (s *Server) apiListSecrets(w http.ResponseWriter, r *http.Request) {
@@ -907,8 +707,25 @@ func (s *Server) apiSetSecret(w http.ResponseWriter, r *http.Request) {
 	if !s.requireSecretsSession(w, r) {
 		return
 	}
-	key := r.FormValue("key")
-	value := r.FormValue("value")
+
+	var key, value string
+	ct := r.Header.Get("Content-Type")
+	if strings.Contains(ct, "application/json") {
+		var body struct {
+			Key   string `json:"key"`
+			Value string `json:"value"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			jsonErr(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		key = body.Key
+		value = body.Value
+	} else {
+		key = r.FormValue("key")
+		value = r.FormValue("value")
+	}
+
 	if key == "" {
 		jsonErr(w, "key is required", http.StatusBadRequest)
 		return
@@ -934,37 +751,44 @@ func (s *Server) apiDeleteSecret(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]string{"status": "ok"})
 }
 
-func (s *Server) render(w http.ResponseWriter, name string, data any) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	t, err := s.baseTmpl.Clone()
-	if err != nil {
-		http.Error(w, "template clone error", http.StatusInternalServerError)
-		return
-	}
-	// Include row partials so page templates can call {{template "tasks-rows" ...}} etc.
-	if _, err = t.ParseFS(templateFS, "templates/*_rows.html"); err != nil {
-		s.log.Error("partial parse", zap.Error(err))
-		http.Error(w, "template parse error", http.StatusInternalServerError)
-		return
-	}
-	if _, err = t.ParseFS(templateFS, "templates/"+name); err != nil {
-		s.log.Error("template parse", zap.String("template", name), zap.Error(err))
-		http.Error(w, "template parse error", http.StatusInternalServerError)
-		return
-	}
-	if err = t.ExecuteTemplate(w, "base.html", data); err != nil {
-		s.log.Error("template render", zap.String("template", name), zap.Error(err))
-	}
-}
-
 // --- REST API handlers ---
 
 func (s *Server) apiGetConfig(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, s.cfg)
 }
 
+// TaskListItem is the shape returned by GET /api/tasks.
+type TaskListItem struct {
+	*task.Spec
+	TriggerLabel  string `json:"trigger_label"`
+	LastRunID     string `json:"last_run_id,omitempty"`
+	LastRunStatus string `json:"last_run_status,omitempty"`
+}
+
 func (s *Server) apiListTasks(w http.ResponseWriter, r *http.Request) {
-	jsonOK(w, s.registry.All())
+	specs := s.registry.All()
+	items := make([]TaskListItem, len(specs))
+	for i, spec := range specs {
+		item := TaskListItem{
+			Spec:         spec,
+			TriggerLabel: triggerLabel(spec.Trigger),
+		}
+		if runs, err := s.registry.ListRuns(r.Context(), spec.ID, 1); err == nil && len(runs) > 0 {
+			item.LastRunID = runs[0].ID
+			item.LastRunStatus = runs[0].Status
+		}
+		items[i] = item
+	}
+	jsonOK(w, items)
+}
+
+// TaskDetail is the shape returned by GET /api/tasks/{id}.
+type TaskDetail struct {
+	*task.Spec
+	TriggerLabel string `json:"trigger_label"`
+	ScriptFile   string `json:"script_file"`
+	TestFile     string `json:"test_file"`
+	TestExists   bool   `json:"test_exists"`
 }
 
 func (s *Server) apiGetTask(w http.ResponseWriter, r *http.Request) {
@@ -974,7 +798,43 @@ func (s *Server) apiGetTask(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "task not found", http.StatusNotFound)
 		return
 	}
-	jsonOK(w, spec)
+
+	detail := TaskDetail{
+		Spec:         spec,
+		TriggerLabel: triggerLabel(spec.Trigger),
+	}
+
+	// Determine script file
+	switch spec.Runtime {
+	case task.RuntimeDocker, task.RuntimePodman:
+		detail.ScriptFile = "Dockerfile"
+	default:
+		for _, name := range []string{"task.ts", "task.js", "task.py"} {
+			if _, err := os.Stat(filepath.Join(spec.TaskDir, name)); err == nil {
+				detail.ScriptFile = name
+				break
+			}
+		}
+		if detail.ScriptFile == "" {
+			detail.ScriptFile = "task.ts"
+		}
+		for _, name := range []string{"task.test.ts", "task.test.js"} {
+			if _, err := os.Stat(filepath.Join(spec.TaskDir, name)); err == nil {
+				detail.TestFile = name
+				detail.TestExists = true
+				break
+			}
+		}
+		if detail.TestFile == "" {
+			if strings.HasSuffix(detail.ScriptFile, ".ts") {
+				detail.TestFile = "task.test.ts"
+			} else {
+				detail.TestFile = "task.test.js"
+			}
+		}
+	}
+
+	jsonOK(w, detail)
 }
 
 func (s *Server) apiRunTask(w http.ResponseWriter, r *http.Request) {
@@ -990,12 +850,23 @@ func (s *Server) apiRunTask(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) apiListRuns(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	runs, err := s.registry.ListRuns(r.Context(), id, 50)
+	limitStr := r.URL.Query().Get("limit")
+	limit := 50
+	if limitStr != "" {
+		fmt.Sscanf(limitStr, "%d", &limit)
+	}
+	runs, err := s.registry.ListRuns(r.Context(), id, limit)
 	if err != nil {
 		jsonErr(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	jsonOK(w, runs)
+}
+
+// RunDetail is the shape returned by GET /api/runs/{runID}.
+type RunDetail struct {
+	*registry.Run
+	TaskName string `json:"task_name"`
 }
 
 func (s *Server) apiGetRun(w http.ResponseWriter, r *http.Request) {
@@ -1005,13 +876,24 @@ func (s *Server) apiGetRun(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "run not found", http.StatusNotFound)
 		return
 	}
-	jsonOK(w, run)
+	taskName := run.TaskID
+	if spec, ok := s.registry.Get(run.TaskID); ok {
+		taskName = spec.Name
+	}
+	jsonOK(w, RunDetail{Run: run, TaskName: taskName})
+}
+
+// LogEntryJSON is the JSON shape returned by GET /api/runs/{runID}/logs.
+type LogEntryJSON struct {
+	ID      int64  `json:"id"`
+	Level   string `json:"level"`
+	Message string `json:"message"`
+	Ts      int64  `json:"ts"` // Unix milliseconds
 }
 
 func (s *Server) apiGetLogs(w http.ResponseWriter, r *http.Request) {
 	runID := chi.URLParam(r, "runID")
 
-	// Parse optional ?since=N cursor for incremental HTMX polling.
 	var sinceID int64
 	if v := r.URL.Query().Get("since"); v != "" {
 		fmt.Sscanf(v, "%d", &sinceID)
@@ -1032,20 +914,16 @@ func (s *Server) apiGetLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// HTMX polling: return HTML spans so they can be appended with beforeend.
-	if strings.Contains(r.Header.Get("Accept"), "text/html") {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		for _, l := range logs {
-			// Each line is a <span> carrying the log ID so the client can track the cursor.
-			fmt.Fprintf(w, "<span data-log-id=\"%d\">[%s] %s %s\n</span>",
-				l.ID, template.HTMLEscapeString(l.Level),
-				template.HTMLEscapeString(fmtTime(l.Ts)),
-				template.HTMLEscapeString(l.Message),
-			)
+	out := make([]LogEntryJSON, len(logs))
+	for i, l := range logs {
+		out[i] = LogEntryJSON{
+			ID:      l.ID,
+			Level:   l.Level,
+			Message: l.Message,
+			Ts:      l.Ts.UnixMilli(),
 		}
-		return
 	}
-	jsonOK(w, logs)
+	jsonOK(w, out)
 }
 
 func (s *Server) apiKillRun(w http.ResponseWriter, r *http.Request) {
@@ -1060,7 +938,6 @@ func (s *Server) apiKillRun(w http.ResponseWriter, r *http.Request) {
 
 // --- Settings handlers ---
 
-// apiSaveAISettings updates the AI config section in memory and persists to dicode.yaml.
 func (s *Server) apiSaveAISettings(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		jsonErr(w, "bad request", http.StatusBadRequest)
@@ -1069,8 +946,6 @@ func (s *Server) apiSaveAISettings(w http.ResponseWriter, r *http.Request) {
 	s.cfg.AI.BaseURL = strings.TrimSpace(r.FormValue("base_url"))
 	s.cfg.AI.Model = strings.TrimSpace(r.FormValue("model"))
 	s.cfg.AI.APIKeyEnv = strings.TrimSpace(r.FormValue("api_key_env"))
-	// Only overwrite APIKey if the user submitted a non-empty value;
-	// blank means "keep using env var".
 	if v := r.FormValue("api_key"); v != "" {
 		s.cfg.AI.APIKey = v
 	} else if r.FormValue("clear_api_key") == "1" {
@@ -1086,7 +961,6 @@ func (s *Server) apiSaveAISettings(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]string{"status": "ok"})
 }
 
-// apiSaveServerSettings updates server.secret and log_level in memory + file.
 func (s *Server) apiSaveServerSettings(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		jsonErr(w, "bad request", http.StatusBadRequest)
@@ -1112,7 +986,6 @@ func (s *Server) apiSaveServerSettings(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]string{"status": "ok"})
 }
 
-// apiAddSource adds a new source (local or git) at runtime and persists it.
 func (s *Server) apiAddSource(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		jsonErr(w, "bad request", http.StatusBadRequest)
@@ -1152,7 +1025,6 @@ func (s *Server) apiAddSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build and start the source.
 	if s.reconciler != nil {
 		switch sc.Type {
 		case config.SourceTypeLocal:
@@ -1178,7 +1050,6 @@ func (s *Server) apiAddSource(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Persist to config.
 	s.cfg.Sources = append(s.cfg.Sources, sc)
 	if err := s.persistConfig(); err != nil {
 		s.log.Warn("source persist failed", zap.Error(err))
@@ -1187,8 +1058,6 @@ func (s *Server) apiAddSource(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]string{"status": "ok"})
 }
 
-// apiListGitBranches lists branches for a remote git URL.
-// GET /api/settings/sources/git/branches?url=...&token_env=...
 func (s *Server) apiListGitBranches(w http.ResponseWriter, r *http.Request) {
 	repoURL := r.URL.Query().Get("url")
 	if repoURL == "" {
@@ -1204,7 +1073,6 @@ func (s *Server) apiListGitBranches(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, branches)
 }
 
-// apiRemoveSource removes a source by its index in cfg.Sources and stops it.
 func (s *Server) apiRemoveSource(w http.ResponseWriter, r *http.Request) {
 	idxStr := chi.URLParam(r, "idx")
 	idx := 0
@@ -1231,17 +1099,15 @@ func (s *Server) apiRemoveSource(w http.ResponseWriter, r *http.Request) {
 
 // --- Managed runtime handlers ---
 
-// RuntimeInfo is the JSON shape returned by GET /api/runtimes.
 type RuntimeInfo struct {
 	Name           string `json:"name"`
 	DisplayName    string `json:"display_name"`
 	Description    string `json:"description"`
 	DefaultVersion string `json:"default_version"`
-	Version        string `json:"version"`   // configured version (empty = use default)
-	Installed      bool   `json:"installed"` // binary present on disk?
+	Version        string `json:"version"`
+	Installed      bool   `json:"installed"`
 }
 
-// apiListRuntimes returns the status of every managed runtime.
 func (s *Server) apiListRuntimes(w http.ResponseWriter, r *http.Request) {
 	var out []RuntimeInfo
 	for _, mgr := range s.managedRuntimes {
@@ -1265,8 +1131,6 @@ func (s *Server) apiListRuntimes(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, out)
 }
 
-// apiInstallRuntime downloads and caches the binary for a managed runtime,
-// updates dicode.yaml, and registers the executor in the running engine.
 func (s *Server) apiInstallRuntime(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	var mgr pkgruntime.ManagedRuntime
@@ -1301,7 +1165,6 @@ func (s *Server) apiInstallRuntime(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Persist version to config.
 	if s.cfg.Runtimes == nil {
 		s.cfg.Runtimes = make(map[string]config.RuntimeConfig)
 	}
@@ -1312,7 +1175,6 @@ func (s *Server) apiInstallRuntime(w http.ResponseWriter, r *http.Request) {
 		s.log.Warn("runtime config persist failed", zap.Error(err))
 	}
 
-	// Register the executor in the running engine.
 	if path, err := mgr.BinaryPath(version); err == nil {
 		s.engine.RegisterExecutor(task.Runtime(name), mgr.NewExecutor(path))
 		s.log.Info("runtime registered in engine", zap.String("runtime", name), zap.String("version", version))
@@ -1321,8 +1183,6 @@ func (s *Server) apiInstallRuntime(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]string{"status": "ok", "version": version})
 }
 
-// apiRemoveRuntime removes a runtime from dicode.yaml.
-// The executor is NOT unregistered from the engine (in-flight runs must finish).
 func (s *Server) apiRemoveRuntime(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	if name == "deno" {
@@ -1339,14 +1199,11 @@ func (s *Server) apiRemoveRuntime(w http.ResponseWriter, r *http.Request) {
 }
 
 // persistConfig writes the current in-memory config back to dicode.yaml.
-// It reads the existing file as a generic map (to preserve unknown keys),
-// merges the changed sections, and writes back.
 func (s *Server) persistConfig() error {
 	if s.cfgPath == "" {
-		return nil // no path configured (e.g. in tests)
+		return nil
 	}
 
-	// Read existing YAML as a generic document to preserve unknown keys.
 	raw, err := os.ReadFile(s.cfgPath)
 	if err != nil {
 		return err
@@ -1359,7 +1216,6 @@ func (s *Server) persistConfig() error {
 		doc = make(map[string]any)
 	}
 
-	// Merge AI section.
 	aiMap := map[string]any{
 		"base_url":    s.cfg.AI.BaseURL,
 		"model":       s.cfg.AI.Model,
@@ -1370,10 +1226,8 @@ func (s *Server) persistConfig() error {
 	}
 	doc["ai"] = aiMap
 
-	// Merge top-level fields.
 	doc["log_level"] = s.cfg.LogLevel
 
-	// Merge server section carefully.
 	serverMap, _ := doc["server"].(map[string]any)
 	if serverMap == nil {
 		serverMap = map[string]any{}
@@ -1385,7 +1239,6 @@ func (s *Server) persistConfig() error {
 	}
 	doc["server"] = serverMap
 
-	// Merge runtimes section.
 	if len(s.cfg.Runtimes) > 0 {
 		rtMap := make(map[string]any, len(s.cfg.Runtimes))
 		for rtName, rc := range s.cfg.Runtimes {
@@ -1406,7 +1259,6 @@ func (s *Server) persistConfig() error {
 		delete(doc, "runtimes")
 	}
 
-	// Serialize sources list.
 	if len(s.cfg.Sources) > 0 {
 		var srcs []map[string]any
 		for _, sc := range s.cfg.Sources {
@@ -1456,28 +1308,12 @@ func jsonErr(w http.ResponseWriter, msg string, code int) {
 }
 
 // TaskRow pairs a task spec with its most-recent run info for the UI table.
+// Kept for internal use.
 type TaskRow struct {
 	*task.Spec
-	LastStatus string     // empty if no runs yet
-	LastRunID  string     // ID of the most recent run
-	LastRunAt  *time.Time // start time of the most recent run
-}
-
-// buildTaskRows fetches all tasks and annotates each with last-run info.
-func (s *Server) buildTaskRows(ctx context.Context) []TaskRow {
-	specs := s.registry.All()
-	rows := make([]TaskRow, len(specs))
-	for i, spec := range specs {
-		row := TaskRow{Spec: spec}
-		if runs, err := s.registry.ListRuns(ctx, spec.ID, 1); err == nil && len(runs) > 0 {
-			row.LastStatus = runs[0].Status
-			row.LastRunID = runs[0].ID
-			t := runs[0].StartedAt
-			row.LastRunAt = &t
-		}
-		rows[i] = row
-	}
-	return rows
+	LastStatus string
+	LastRunID  string
+	LastRunAt  *time.Time
 }
 
 func triggerLabel(tc task.TriggerConfig) string {
