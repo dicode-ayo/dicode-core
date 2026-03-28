@@ -1,0 +1,13 @@
+name: GitHub Stars
+description: Fetches the star count for a GitHub repo and shows a trend compared to the last run.
+runtime: deno
+
+trigger:
+  manual: true
+
+params:
+  - name: repo
+    description: GitHub repo in owner/name format
+    default: "denoland/deno"
+
+timeout: 30s
