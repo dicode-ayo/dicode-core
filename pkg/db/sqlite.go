@@ -94,6 +94,8 @@ func (s *SQLiteDB) migrate() error {
 	for _, stmt := range []string{
 		`ALTER TABLE runs ADD COLUMN trigger_source TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE runs ADD COLUMN return_value TEXT`,
+		`ALTER TABLE runs ADD COLUMN output_content_type TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE runs ADD COLUMN output_content TEXT`,
 	} {
 		_, _ = s.db.Exec(stmt)
 	}

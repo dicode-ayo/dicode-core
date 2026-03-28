@@ -261,6 +261,7 @@ func (s *Server) Handler() http.Handler {
 	r.Get("/", s.handleTaskList)
 	r.Get("/tasks/{id}", s.handleTaskDetail)
 	r.Get("/runs/{runID}", s.handleRunDetail)
+	r.Get("/runs/{runID}/result", s.handleRunResult)
 	r.Get("/config", s.handleConfig)
 	r.Get("/config/code", s.handleConfigCode)
 
@@ -388,12 +389,38 @@ func (s *Server) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 	if spec, ok := s.registry.Get(run.TaskID); ok {
 		taskName = spec.Name
 	}
-	s.render(w, "run.html", map[string]any{
+	data := map[string]any{
 		"Title":    "Run " + title,
 		"Run":      run,
 		"Logs":     logs,
 		"TaskName": taskName,
-	})
+	}
+	if run.OutputContentType != "" {
+		data["Output"] = map[string]string{
+			"ContentType": run.OutputContentType,
+			"Content":     run.OutputContent,
+		}
+	}
+	s.render(w, "run.html", data)
+}
+
+// handleRunResult serves only the structured output of a run (bare page, no chrome).
+// For text/html output this is a full HTML page suitable for embedding or direct viewing.
+// For text/plain it renders a plain-text response.
+// Returns 404 if the run has no structured output.
+func (s *Server) handleRunResult(w http.ResponseWriter, r *http.Request) {
+	runID := chi.URLParam(r, "runID")
+	run, err := s.registry.GetRun(r.Context(), runID)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if run.OutputContentType == "" {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", run.OutputContentType+"; charset=utf-8")
+	_, _ = w.Write([]byte(run.OutputContent))
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
