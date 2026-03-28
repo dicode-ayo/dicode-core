@@ -96,17 +96,17 @@ type FSEntry struct {
 
 // Spec is parsed from task.yaml.
 type Spec struct {
-	Name        string        `yaml:"name"             json:"name"`
-	Description string        `yaml:"description"      json:"description"`
-	Version     string        `yaml:"version"          json:"version"`
+	Name        string        `yaml:"name"        json:"name"`
+	Description string        `yaml:"description" json:"description"`
+	Version     string        `yaml:"version"     json:"version"`
 	Author      string        `yaml:"author,omitempty" json:"author,omitempty"`
-	Runtime     Runtime       `yaml:"runtime"          json:"runtime"`
+	Runtime     Runtime       `yaml:"runtime"     json:"runtime"`
 	Docker      *DockerConfig `yaml:"docker,omitempty" json:"docker,omitempty"`
-	Trigger     TriggerConfig `yaml:"trigger"          json:"trigger"`
+	Trigger     TriggerConfig `yaml:"trigger"     json:"trigger"`
 	Params      []Param       `yaml:"params,omitempty" json:"params,omitempty"`
-	Env         []string      `yaml:"env,omitempty"    json:"env,omitempty"`
-	FS          []FSEntry     `yaml:"fs,omitempty"     json:"fs,omitempty"`
-	Timeout     time.Duration `yaml:"timeout"          json:"timeout"`
+	Env         []string      `yaml:"env,omitempty" json:"env,omitempty"`
+	FS          []FSEntry     `yaml:"fs,omitempty"  json:"fs,omitempty"`
+	Timeout     time.Duration `yaml:"timeout"     json:"timeout"`
 
 	// TaskDir is the directory path of the task in the repo (not stored in YAML).
 	TaskDir string `yaml:"-" json:"-"`

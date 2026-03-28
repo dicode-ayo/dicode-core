@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:www.windmill.dev)",
+      "WebFetch(domain:github.com)",
+      "Skill(update-config)",
+      "Skill(update-config:*)",
+      "mcp__playwright__*",
+      "mcp__chrome-devtools__*",
+      "Bash(make run:*)",
+      "Bash(make build:*)",
+      "Bash(make test:*)"
+    ]
+  },
+  "autoMemoryDirectory": "/home/dr14/dicode/.claude/memory",
+  "enabledMcpjsonServers": [
+    "chrome-devtools",
+    "playwright"
+  ]
+}
