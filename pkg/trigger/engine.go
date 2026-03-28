@@ -429,11 +429,15 @@ func (e *Engine) dispatch(ctx context.Context, spec *task.Spec, opts pkgruntime.
 		return registry.StatusFailure
 	}
 
-	// Store return value if present.
-	if result != nil && result.ReturnValue != nil {
-		if b, merr := json.Marshal(result.ReturnValue); merr == nil {
-			_ = e.registry.SetRunResult(context.Background(), opts.RunID, string(b))
+	// Store return value and structured output if present.
+	if result != nil && (result.ReturnValue != nil || result.OutputContent != "") {
+		retJSON := ""
+		if result.ReturnValue != nil {
+			if b, merr := json.Marshal(result.ReturnValue); merr == nil {
+				retJSON = string(b)
+			}
 		}
+		_ = e.registry.SetRunResult(context.Background(), opts.RunID, retJSON, result.OutputContentType, result.OutputContent)
 	}
 
 	status := registry.StatusSuccess

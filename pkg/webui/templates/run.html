@@ -40,14 +40,14 @@
 {{end}}
 
 {{if .Output}}
-<h2>Output</h2>
+<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.5rem">
+  <h2 style="margin:0">Output</h2>
+  <a href="/runs/{{.Run.ID}}/result" target="_blank" style="font-size:.85rem">open full page ↗</a>
+</div>
 <div class="card" style="padding:0">
   {{if eq .Output.ContentType "text/html"}}
-  <iframe srcdoc="{{.Output.Content}}"
-          sandbox="allow-same-origin"
+  <iframe src="/runs/{{.Run.ID}}/result"
           style="width:100%;min-height:300px;border:none;border-radius:6px"></iframe>
-  {{else if eq .Output.ContentType "text/plain"}}
-  <pre style="margin:0;border-radius:6px">{{.Output.Content}}</pre>
   {{else}}
   <pre style="margin:0;border-radius:6px">{{.Output.Content}}</pre>
   {{end}}
