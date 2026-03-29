@@ -20,7 +20,6 @@ jobs:
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
-      upload_url: ${{ steps.release.outputs.upload_url }}
     steps:
       - uses: googleapis/release-please-action@v4
         id: release
@@ -32,30 +31,20 @@ jobs:
     name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created }}
-    runs-on: ${{ matrix.runs-on }}
+    runs-on: ubuntu-latest
     strategy:
       matrix:
         include:
           - goos: linux
             goarch: amd64
-            runs-on: ubuntu-latest
-            cgo: 0
           - goos: linux
             goarch: arm64
-            runs-on: ubuntu-latest
-            cgo: 0
           - goos: darwin
             goarch: amd64
-            runs-on: macos-13
-            cgo: 1
           - goos: darwin
             goarch: arm64
-            runs-on: macos-latest
-            cgo: 1
           - goos: windows
             goarch: amd64
-            runs-on: windows-latest
-            cgo: 1
 
     steps:
       - uses: actions/checkout@v4
@@ -66,11 +55,10 @@ jobs:
           cache: true
 
       - name: Build binary
-        shell: bash
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: ${{ matrix.cgo }}
+          CGO_ENABLED: 0
         run: |
           TAG=${{ needs.release-please.outputs.tag_name }}
           BINARY=dicode
@@ -82,10 +70,9 @@ jobs:
             ./cmd/dicode/
 
       - name: Create archive
-        shell: bash
         run: |
           TAG=${{ needs.release-please.outputs.tag_name }}
-          # Strip the package-name prefix so the archive is just dicode-v0.0.2-linux-amd64
+          # Strip package-name prefix: dicode-v0.0.2 → v0.0.2
           VERSION=${TAG#dicode-}
           ARCHIVE="dicode-${VERSION}-${{ matrix.goos }}-${{ matrix.goarch }}"
           if [ "${{ matrix.goos }}" = "windows" ]; then
@@ -97,11 +84,9 @@ jobs:
           fi
 
       - name: Upload release asset
-        shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release upload ${{ needs.release-please.outputs.tag_name }} "$ASSET"
+        run: gh release upload ${{ needs.release-please.outputs.tag_name }} "$ASSET"
 
   publish:
     name: Publish release

@@ -1,3 +1,5 @@
+//go:build cgo
+
 // Package tray manages the system-tray icon for dicode.
 // On Linux it uses the StatusNotifierItem DBus protocol (no GTK needed).
 // On macOS it uses the native NSStatusItem.

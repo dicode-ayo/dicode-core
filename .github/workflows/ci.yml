@@ -45,13 +45,12 @@ jobs:
           fi
 
   build-pr:
-    name: Build PR artifacts
+    name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
     if: github.event_name == 'pull_request'
     needs: [test, lint]
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: write
     strategy:
       matrix:
         include:
@@ -59,6 +58,12 @@ jobs:
             goarch: amd64
           - goos: linux
             goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
 
     steps:
       - uses: actions/checkout@v4
@@ -74,69 +79,44 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: 0
         run: |
+          BINARY=dicode
+          if [ "$GOOS" = "windows" ]; then BINARY=dicode.exe; fi
           mkdir -p dist
           go build \
             -ldflags "-X main.version=pr-${{ github.event.pull_request.number }} -s -w" \
-            -o "dist/dicode-${{ matrix.goos }}-${{ matrix.goarch }}" \
+            -o "dist/${BINARY}" \
             ./cmd/dicode/
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: dicode-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: dist/dicode-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/
           retention-days: 7
 
   comment-pr:
-    name: Comment on PR
+    name: Comment artifacts on PR
     if: github.event_name == 'pull_request'
     needs: build-pr
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write
     steps:
-      - name: Post artifact links
-        uses: actions/github-script@v7
+      - name: Post sticky comment
+        uses: marocchino/sticky-pull-request-comment@v2
         with:
-          script: |
-            const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-            const sha = context.payload.pull_request.head.sha.slice(0, 7);
-            const body = [
-              '## Build Artifacts',
-              '',
-              `Dev binaries for commit \`${sha}\` (Linux only — macOS/Windows built on release):`,
-              '',
-              '| Platform | Download |',
-              '| --- | --- |',
-              `| linux/amd64 | [dicode-linux-amd64](${runUrl}#artifacts) |`,
-              `| linux/arm64 | [dicode-linux-arm64](${runUrl}#artifacts) |`,
-              '',
-              `> Artifacts expire after 7 days. [View run](${runUrl})`,
-              '<!-- dicode-build-artifacts -->',
-            ].join('\n');
+          header: build-artifacts
+          message: |
+            ## Build Artifacts
 
-            const marker = '<!-- dicode-build-artifacts -->';
-            const { data: comments } = await github.rest.issues.listComments({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.payload.pull_request.number,
-            });
-            const existing = comments.find(c =>
-              c.user.type === 'Bot' && c.body.includes(marker)
-            );
+            Dev binaries for `${{ github.event.pull_request.head.sha }}` — all platforms built from Linux via cross-compilation (`CGO_ENABLED=0`):
 
-            if (existing) {
-              await github.rest.issues.updateComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                comment_id: existing.id,
-                body,
-              });
-            } else {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.payload.pull_request.number,
-                body,
-              });
-            }
+            | Platform | Artifact |
+            | --- | --- |
+            | linux/amd64 | [dicode-linux-amd64](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}#artifacts) |
+            | linux/arm64 | [dicode-linux-arm64](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}#artifacts) |
+            | darwin/amd64 | [dicode-darwin-amd64](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}#artifacts) |
+            | darwin/arm64 | [dicode-darwin-arm64](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}#artifacts) |
+            | windows/amd64 | [dicode-windows-amd64](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}#artifacts) |
+
+            > Artifacts expire after 7 days. Systray is disabled in these builds (`CGO_ENABLED=0`); release builds are identical.
