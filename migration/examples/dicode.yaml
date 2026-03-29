@@ -1,0 +1,57 @@
+# dicode.yaml — Example with TaskSet support
+#
+# `sources` is unchanged. New optional fields:
+#   name         → root namespace segment (default: last segment of url/path)
+#   path         → path to entry yaml within repo or dir (default: taskset.yaml)
+#   config_path  → path to kind: Config file (default: dicode-config.yaml)
+#
+# Field defaults:
+#   branch        → main
+#   poll_interval → 30s
+#   auth          → none (public repo or local)
+
+sources:
+
+  # Minimal — all defaults. Resolves github.com/org/infra-tasks @ main → taskset.yaml
+  # All tasks namespaced under: infra/...
+  - name: infra
+    url: https://github.com/org/infra-tasks
+
+  # Non-default branch, path, and auth
+  - name: backend
+    url: https://github.com/team/backend-tasks
+    branch: develop
+    path: ops/taskset.yaml
+    poll_interval: 120s
+    auth:
+      type: token
+      token_env: GITHUB_TOKEN
+
+  # Same repo as infra but different branch — separate clone
+  - name: staging
+    url: https://github.com/org/infra-tasks
+    branch: staging
+    auth:
+      type: token
+      token_env: GITHUB_TOKEN
+
+  # Local source — path points directly to the yaml file
+  - name: local-dev
+    path: /home/user/dev-tasks/taskset.yaml
+
+  # Backward-compatible — no name/path, no taskset.yaml → scans tasks/ as before
+  - url: https://github.com/org/legacy-tasks
+
+# ── Rest of config unchanged ─────────────────────────────────────────────────
+
+database:
+  type: sqlite
+  path: ~/.dicode/data.db
+
+server:
+  port: 8080
+  mcp: true
+
+log_level: info
+
+# dev: true   # activates dev mode globally (uses dev_ref on all task refs)

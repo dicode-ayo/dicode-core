@@ -1,0 +1,112 @@
+# taskset-root.yaml — Root-level task set
+#
+# Lives at github.com/org/infra-tasks (pointed to by the `infra` source).
+# Entry keys become namespace segments and task IDs.
+#
+# Resolved task IDs:
+#   infra/deploy-prod
+#   infra/db-backup
+#   infra/health-check
+#   infra/backend/...      (from taskset-nested.yaml)
+
+apiVersion: dicode/v1
+kind: TaskSet
+
+metadata:
+  name: infra
+
+spec:
+
+  # ── Set-level defaults ────────────────────────────────────────────────────
+  # Applied to every entry in this set before per-entry overrides.
+  # Env entries are merged by key — they extend, not replace, each task's env.
+  defaults:
+    timeout: 120s
+    env:
+      - LOG_LEVEL=info
+      - NOTIFY_CHANNEL=#infra-alerts
+
+  entries:
+
+    # ── Task reference ──────────────────────────────────────────────────────
+    # Resolver fetches task.yaml → kind: Task → loads it.
+    # Precedence applied: task.yaml → set defaults above → entry overrides below.
+    #
+    # Resolved ID: infra/deploy-prod
+    deploy-prod:
+      ref:
+        url: https://github.com/org/shared-tasks
+        path: tasks/deploy/task.yaml
+        # branch defaults to main, poll_interval defaults to 30s
+        dev_ref:
+          path: /home/user/shared-tasks/tasks/deploy/task.yaml
+      overrides:
+        enabled: true
+        trigger:
+          cron: "0 2 * * *"          # overrides task.yaml default
+        params:
+          - name: environment
+            default: production       # patches only this param's default
+          - name: notify_channel
+            default: "#prod-deploys"
+        env:
+          - DEPLOY_TARGET=prod        # merged with set defaults by key
+
+    # ── Task in the same repo as this taskset ───────────────────────────────
+    #
+    # Resolved ID: infra/db-backup
+    db-backup:
+      ref:
+        url: https://github.com/org/infra-tasks
+        path: tasks/db-backup/task.yaml
+      overrides:
+        trigger:
+          cron: "0 3 * * *"
+
+    # ── Inline task ─────────────────────────────────────────────────────────
+    # No ref — full task defined here. Set defaults still apply.
+    #
+    # Resolved ID: infra/health-check
+    health-check:
+      inline:
+        name: Health Check
+        description: Pings all production services and alerts on failure
+        runtime: deno
+        trigger:
+          cron: "*/5 * * * *"
+        timeout: 10s                  # entry-level timeout wins over set default (120s)
+        env:
+          - SERVICE_URL
+          - ALERT_WEBHOOK
+
+    # ── Nested TaskSet ──────────────────────────────────────────────────────
+    # Resolver sees kind: TaskSet → recurses.
+    #
+    # overrides.defaults: set-level defaults pushed into the nested set
+    #   → applies to all tasks in backend/, merged with backend's own defaults
+    # overrides.entries: patches specific entries within the nested set
+    #   → only those entries are affected
+    #
+    # Resolved IDs: infra/backend/api-deploy, infra/backend/worker, etc.
+    backend:
+      ref:
+        url: https://github.com/team/backend-tasks
+        path: taskset.yaml
+        poll_interval: 120s
+      overrides:
+        defaults:                     # injected as a layer below backend's own defaults
+          env:
+            - REGION=eu-west-1        # all backend tasks get this env var
+        entries:
+          api-deploy:
+            trigger:
+              cron: "0 3 * * *"      # shift 4am team default to 3am here
+          legacy-job:
+            enabled: false           # disable in this environment
+
+    # ── Nested TaskSet: local ────────────────────────────────────────────────
+    #
+    # Resolved IDs: infra/data-team/...
+    data-team:
+      ref:
+        path: /home/user/data-team-tasks/taskset.yaml

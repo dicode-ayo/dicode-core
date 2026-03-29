@@ -1,0 +1,59 @@
+# taskset-config.yaml — Example of kind: Config
+#
+# A Config file lets you scope dicode.yaml settings to a specific source
+# without touching the global config. A team ships this alongside their
+# taskset.yaml in the same repo.
+#
+# Discovery order (first match wins):
+#   1. source.config_path field in dicode.yaml (explicit path)
+#   2. dicode-config.yaml at the same directory as the source's taskset.yaml
+#
+# Precedence in the override stack:
+#   Config defaults sit at level 2 (above task.yaml base, below TaskSet spec.defaults).
+#   They apply to every task resolved through this source.
+
+apiVersion: dicode/v1
+kind: Config
+
+metadata:
+  name: backend-config
+
+spec:
+
+  # ── Runtime pins scoped to this source ──────────────────────────────────
+  # Overrides the global runtime versions in dicode.yaml for tasks here.
+  runtimes:
+    deno:
+      version: "2.1.0"
+    python:
+      version: "3.12"
+
+  # ── Notification routing scoped to this source ───────────────────────────
+  notifications:
+    on_failure:
+      slack:
+        channel: "#backend-alerts"
+        token_env: SLACK_TOKEN
+    on_success:
+      slack:
+        channel: "#backend-deploys"
+        token_env: SLACK_TOKEN
+
+  # ── Secrets providers scoped to this source ──────────────────────────────
+  secrets:
+    providers:
+      - type: env                    # resolve secrets from environment first
+      - type: local                  # fallback to local encrypted store
+
+  # ── Task defaults scoped to this source (precedence level 2) ────────────
+  # Applied to every task in this source before TaskSet spec.defaults.
+  # Supports the same fields as TaskSet spec.defaults:
+  #   timeout, retry, env
+  # Does NOT support trigger, params, enabled — those are task-set/entry concerns.
+  defaults:
+    timeout: 120s
+    retry:
+      attempts: 3
+      backoff: 10s
+    env:
+      - RUNTIME_ENV=backend          # available in all tasks under this source
