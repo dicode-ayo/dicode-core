@@ -203,8 +203,31 @@ func (r *Resolver) resolveRef(ctx context.Context, ref *Ref) (string, error) {
 	return filepath.Join(localDir, ref.Path), nil
 }
 
+// Pull clones or fetches the latest commits for the given git ref and returns
+// the local directory. It also updates the clone cache so subsequent Resolve
+// calls can find the directory without re-cloning.
+// For local refs it is a no-op and returns filepath.Dir(ref.Path).
+func (r *Resolver) Pull(ctx context.Context, ref *Ref) (string, error) {
+	if !ref.IsGit() {
+		return filepath.Dir(ref.Path), nil
+	}
+	branch := ref.effectiveBranch()
+	h := sha256.Sum256([]byte(ref.URL + "@" + branch))
+	dir := filepath.Join(r.dataDir, "repos", fmt.Sprintf("ts-%x", h[:8]))
+	if err := cloneOrPull(ctx, dir, ref.URL, branch, ref.Auth.TokenEnv); err != nil {
+		return "", fmt.Errorf("pull %s@%s: %w", ref.URL, branch, err)
+	}
+	key := repoKey{URL: ref.URL, Branch: branch}
+	r.mu.Lock()
+	r.clones[key] = dir
+	r.mu.Unlock()
+	return dir, nil
+}
+
 // ensureClone returns the local dir for (url, branch), cloning if necessary.
-// Concurrent calls for the same key are serialised via the mutex.
+// Within a single resolution pass it deduplicates: once a repo is cloned the
+// cached path is returned without a second network round-trip.
+// Use Pull to force a fetch from the remote.
 func (r *Resolver) ensureClone(ctx context.Context, url, branch string, _ time.Duration, tokenEnv string) (string, error) {
 	key := repoKey{URL: url, Branch: branch}
 
@@ -229,16 +252,6 @@ func (r *Resolver) ensureClone(ctx context.Context, url, branch string, _ time.D
 	r.mu.Unlock()
 
 	return dir, nil
-}
-
-// InvalidateClones clears the clone cache so the next Resolve call re-pulls all
-// repos. Call this at the start of each poll cycle to pick up remote changes.
-// Within a single resolution pass the cache still deduplicates pulls when
-// multiple taskset entries reference the same repo.
-func (r *Resolver) InvalidateClones() {
-	r.mu.Lock()
-	r.clones = make(map[repoKey]string)
-	r.mu.Unlock()
 }
 
 // ClonedRepos returns a snapshot of all (url, branch) → localDir mappings.
