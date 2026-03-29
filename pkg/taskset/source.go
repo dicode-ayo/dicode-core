@@ -16,8 +16,13 @@ import (
 )
 
 // Source implements source.Source using a TaskSet yaml file as its entry point.
-// It resolves the full task tree on startup and on each poll cycle, diffs the
+// It resolves the full task tree on startup and on each change cycle, diffs the
 // result against the previous snapshot, and emits Added/Updated/Removed events.
+//
+// For local sources fsnotify is used to react to file changes immediately
+// (debounced at 150 ms). For git sources a periodic ticker pulls from the
+// remote; fsnotify on the local clone directory then detects actual file
+// changes so syncAndEmit only runs when content has changed.
 type Source struct {
 	id         string
 	namespace  string
@@ -32,6 +37,7 @@ type Source struct {
 	snapshot    map[string]taskSnap // namespaced taskID → snapshot
 	ch          chan source.Event   // live channel set by Start; nil before Start
 	devRootPath string              // non-empty overrides rootRef.Path in dev mode
+	watchRoot   string             // directory watched by fsnotify; set in Start
 }
 
 type taskSnap struct {
@@ -75,25 +81,33 @@ func NewSource(
 // ID implements source.Source.
 func (s *Source) ID() string { return s.id }
 
-// Start performs an initial resolution, emits events, then polls for changes.
-// The returned channel is closed when ctx is cancelled.
+// Start performs an initial resolution, emits events, then watches for changes.
+// For git refs the root repo is cloned eagerly so fsnotify can be set up on the
+// local clone directory immediately. The returned channel is closed when ctx is
+// cancelled.
 func (s *Source) Start(ctx context.Context) (<-chan source.Event, error) {
 	ch := make(chan source.Event, 64)
 	s.mu.Lock()
 	s.ch = ch
 	s.mu.Unlock()
 
+	// Determine (and cache) the local directory to watch.
+	watchRoot, err := s.resolver.Pull(ctx, s.rootRef)
+	if err != nil {
+		s.log.Warn("taskset source: initial clone/pull failed",
+			zap.String("id", s.id), zap.Error(err))
+		// Non-fatal: still try to sync; pull will be retried on the next tick.
+	}
+	s.mu.Lock()
+	s.watchRoot = watchRoot
+	s.mu.Unlock()
+
 	if err := s.syncAndEmit(ctx, ch); err != nil {
 		s.log.Warn("taskset source: initial resolution failed",
 			zap.String("id", s.id), zap.Error(err))
-		// Non-fatal: keep polling in case the repo becomes accessible.
 	}
 
-	if !s.rootRef.IsGit() {
-		go s.watchLocal(ctx, ch)
-	} else {
-		go s.poll(ctx, ch)
-	}
+	go s.watch(ctx, ch)
 	return ch, nil
 }
 
@@ -104,6 +118,9 @@ func (s *Source) SetDevMode(ctx context.Context, enabled bool, localPath string)
 	s.resolver.SetDevMode(enabled)
 	s.mu.Lock()
 	s.devRootPath = localPath
+	if enabled && localPath != "" {
+		s.watchRoot = filepath.Dir(localPath)
+	}
 	ch := s.ch
 	s.mu.Unlock()
 	if ch == nil {
@@ -128,28 +145,28 @@ func (s *Source) Sync(ctx context.Context) error {
 	return err
 }
 
-// watchLocal uses fsnotify to react to local file changes immediately (debounced
-// at 150 ms) rather than waiting for the poll interval. Falls back to poll if
-// fsnotify is unavailable. A background ticker still fires at pollInterval to
-// catch any directories that weren't watched at the time they were created.
-func (s *Source) watchLocal(ctx context.Context, ch chan<- source.Event) {
+// watch is the unified file-watching loop for both local and git sources.
+//
+//   - For local sources:  fsnotify reacts directly to edits; a background
+//     ticker re-registers any new task directories added since last sync.
+//   - For git sources:    a pull ticker fetches from the remote on every
+//     pollInterval; fsnotify then fires only when the pull actually changed
+//     files on disk, so syncAndEmit is skipped on no-op pulls.
+//
+// Falls back to a plain polling loop if fsnotify is unavailable.
+func (s *Source) watch(ctx context.Context, ch chan<- source.Event) {
 	defer close(ch)
 
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		s.log.Warn("taskset: fsnotify unavailable, falling back to poll",
 			zap.String("id", s.id), zap.Error(err))
-		s.pollLoop(ctx, ch)
+		s.pollFallback(ctx, ch)
 		return
 	}
 	defer watcher.Close()
 
-	// Always watch the directory that contains the root taskset.yaml.
-	rootDir := filepath.Dir(s.rootRef.Path)
-	_ = watcher.Add(rootDir)
-
-	// Watch all task directories already in the snapshot.
-	s.addSnapshotDirs(watcher)
+	s.addWatchDirs(watcher)
 
 	const debounce = 150 * time.Millisecond
 	var (
@@ -164,8 +181,18 @@ func (s *Source) watchLocal(ctx context.Context, ch chan<- source.Event) {
 		timerC = timer.C
 	}
 
-	ticker := time.NewTicker(s.pollInterval)
-	defer ticker.Stop()
+	// Pull ticker — only for git sources; nil for local.
+	var pullTickC <-chan time.Time
+	if s.rootRef.IsGit() {
+		pt := time.NewTicker(s.pollInterval)
+		defer pt.Stop()
+		pullTickC = pt.C
+	}
+
+	// Re-registration ticker picks up newly created task directories that
+	// weren't watched at the time they were first created.
+	reregTicker := time.NewTicker(s.pollInterval)
+	defer reregTicker.Stop()
 
 	for {
 		select {
@@ -182,44 +209,49 @@ func (s *Source) watchLocal(ctx context.Context, ch chan<- source.Event) {
 			}
 			resetTimer()
 		case <-timerC:
+			// Debounce fired: files changed (from a local edit or a git pull).
 			timerC = nil
 			if err := s.syncAndEmit(ctx, ch); err != nil {
-				s.log.Warn("taskset source: watch sync failed",
+				s.log.Warn("taskset source: sync failed",
 					zap.String("id", s.id), zap.Error(err))
 			}
-			// Pick up any new task directories added by the re-sync.
-			s.addSnapshotDirs(watcher)
-		case <-ticker.C:
-			if err := s.syncAndEmit(ctx, ch); err != nil {
-				s.log.Warn("taskset source: poll failed",
+			s.addWatchDirs(watcher)
+		case <-pullTickC:
+			// Fetch from remote. If the pull actually changed files on disk,
+			// fsnotify will fire and trigger syncAndEmit via the debounce path.
+			if _, err := s.resolver.Pull(ctx, s.rootRef); err != nil {
+				s.log.Warn("taskset source: pull failed",
 					zap.String("id", s.id), zap.Error(err))
 			}
-			s.addSnapshotDirs(watcher)
+		case <-reregTicker.C:
+			// Re-register any task directories that appeared since last sync.
+			s.addWatchDirs(watcher)
 		}
 	}
 }
 
-// addSnapshotDirs adds every task directory in the current snapshot to watcher
-// (silently ignores duplicates — fsnotify deduplicates internally).
-func (s *Source) addSnapshotDirs(watcher *fsnotify.Watcher) {
+// addWatchDirs registers the watch-root and all current snapshot task
+// directories with the watcher. Duplicates are silently ignored by fsnotify.
+func (s *Source) addWatchDirs(watcher *fsnotify.Watcher) {
 	s.mu.Lock()
+	root := s.watchRoot
 	dirs := make([]string, 0, len(s.snapshot))
 	for _, snap := range s.snapshot {
 		dirs = append(dirs, snap.taskDir)
 	}
 	s.mu.Unlock()
+
+	if root != "" {
+		_ = watcher.Add(root)
+	}
 	for _, d := range dirs {
 		_ = watcher.Add(d)
 	}
 }
 
-func (s *Source) poll(ctx context.Context, ch chan<- source.Event) {
-	defer close(ch)
-	s.pollLoop(ctx, ch)
-}
-
-func (s *Source) pollLoop(ctx context.Context, ch chan<- source.Event) {
-	defer close(ch)
+// pollFallback is a plain ticker loop used when fsnotify is unavailable.
+// For git sources it pulls before each sync; for local sources it just syncs.
+func (s *Source) pollFallback(ctx context.Context, ch chan<- source.Event) {
 	ticker := time.NewTicker(s.pollInterval)
 	defer ticker.Stop()
 	for {
@@ -227,7 +259,12 @@ func (s *Source) pollLoop(ctx context.Context, ch chan<- source.Event) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			s.resolver.InvalidateClones() // force re-pull from remote on each tick
+			if s.rootRef.IsGit() {
+				if _, err := s.resolver.Pull(ctx, s.rootRef); err != nil {
+					s.log.Warn("taskset source: pull failed",
+						zap.String("id", s.id), zap.Error(err))
+				}
+			}
 			if err := s.syncAndEmit(ctx, ch); err != nil {
 				s.log.Warn("taskset source: poll failed",
 					zap.String("id", s.id), zap.Error(err))
