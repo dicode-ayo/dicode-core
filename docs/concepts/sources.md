@@ -6,6 +6,90 @@ Dicode watches one or more **sources** for task files and reconciles them automa
 
 ## Source types
 
+### TaskSet source (recommended)
+
+A **TaskSet source** uses a `taskset.yaml` file as its entry point. Tasks are composed hierarchically — a TaskSet can reference other TaskSets, allowing large task trees to be built from smaller ones (like ArgoCD App-of-Apps).
+
+```yaml
+# dicode.yaml
+sources:
+  - name: infra
+    path: /home/user/tasks/taskset.yaml
+    type: local
+```
+
+**`taskset.yaml`** — the root entry point:
+
+```yaml
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: infra
+spec:
+  defaults:
+    timeout: 30m
+  entries:
+    deploy-backend:
+      ref:
+        path: ./backend/task.yaml
+      overrides:
+        timeout: 5m
+    platform:
+      ref:
+        path: ./platform/taskset.yaml   # nested TaskSet — namespace: infra/platform
+```
+
+Each task file must declare its kind:
+
+```yaml
+apiVersion: dicode/v1
+kind: Task
+name: Deploy Backend
+trigger:
+  manual: true
+```
+
+**Namespace-scoped task IDs** — task IDs are built from the path of TaskSet names:
+- Root TaskSet `infra` + entry `deploy-backend` → ID `infra/deploy-backend`
+- Nested TaskSet `infra` > `platform` + entry `nginx-start` → ID `infra/platform/nginx-start`
+
+**6-level precedence stack** (lowest → highest):
+
+1. `task.yaml` base values
+2. `kind:Config` defaults file (auto-discovered as `dicode-config.yaml` alongside root)
+3. Root TaskSet `spec.defaults`
+4. Parent TaskSet `overrides.defaults`
+5. Parent TaskSet `overrides.entries[key]`
+6. Entry-level `overrides` (leaf wins)
+
+**`kind:Config`** — optional shared defaults file:
+
+```yaml
+apiVersion: dicode/v1
+kind: Config
+metadata:
+  name: infra-config
+spec:
+  defaults:
+    timeout: 1h
+    runtime: deno
+```
+
+**Dev mode** — swap the TaskSet root to a local path for live development without editing `dicode.yaml`:
+
+```bash
+# via REST API
+curl -X PATCH http://localhost:8080/api/sources/infra/dev \
+  -H 'Content-Type: application/json' \
+  -d '{"enabled": true, "local_path": "/tmp/my-dev-tasks/taskset.yaml"}'
+```
+
+Or toggle in the web UI: **Sources** page → enable dev mode + enter local path.
+
+Disabling dev mode immediately reverts to the original root ref.
+
+---
+
 ### Git source
 
 Watches a git repository. Tasks are committed into the repo — dicode polls or receives a push webhook, pulls changes, and updates the running task set accordingly.

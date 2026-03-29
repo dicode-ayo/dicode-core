@@ -1,7 +1,9 @@
 # Dicode — High-Level Design
 
 ## What it is
-A single Go binary that watches a git repo of task scripts, reconciles them automatically (ArgoCD-style), executes them on schedule/webhook/manual, and lets AI generate task code from natural language.
+A single Go binary that watches task sources, reconciles them automatically (ArgoCD-style), executes them on schedule/webhook/manual, and lets AI generate task code from natural language.
+
+Tasks are organized using **TaskSet files** (`kind:TaskSet`) — hierarchical YAML manifests that compose task trees from local paths or git repos. Task IDs are namespace-scoped (`infra/backend/deploy`). A 6-level override precedence stack allows defaults to flow from root to leaf.
 
 ---
 
@@ -11,12 +13,20 @@ A single Go binary that watches a git repo of task scripts, reconciles them auto
 Single `dicode` binary. Configured via `dicode.yaml` (tasks repo URL, auth, server port, AI key, poll interval).
 
 ### 2. Task Spec
-Each task = a folder in the tasks git repo:
-```
+Each task = a folder containing a `task.yaml` (with `apiVersion: dicode/v1` / `kind: Task`) and a script file:
+
+```text
 tasks/morning-email-check/
-├── task.yaml       ← name, trigger (cron/webhook/manual/chain/daemon), params, env, fs
-├── task.js         ← JS logic
-└── task.test.js    ← optional unit tests (picked up automatically)
+├── task.yaml       ← kind:Task — trigger (cron/webhook/manual/chain/daemon), params, env, fs
+├── task.ts         ← TypeScript logic (Deno runtime)
+└── task.test.ts    ← optional unit tests
+```
+
+TaskSets compose tasks hierarchically:
+
+```text
+taskset.yaml        ← kind:TaskSet — entries referencing task.yaml files or nested TaskSets
+dicode-config.yaml  ← kind:Config — shared defaults (timeout, runtime, etc.)
 ```
 
 ### 3. Runtimes
@@ -404,24 +414,26 @@ Tasks can come from multiple sources simultaneously. All sources emit the same `
 
 **`pkg/source/source.go`** — `Source` interface: `ID()`, `Start(ctx) (<-chan Event, error)`, `Sync(ctx)`
 
-**`pkg/source/git/`** — GitSource: `go-git` poll/push-webhook, pause-safe (won't pull while local dev is active on same dir)
+**`pkg/taskset/`** — TaskSet source: resolves a full task tree from a `kind:TaskSet` yaml, supports nested TaskSets, namespace-scoped IDs, 6-level override precedence, and runtime dev mode switching (`SetDevMode(ctx, enabled, localPath)`).
 
-**`pkg/source/local/`** — LocalSource: `fsnotify` filesystem watcher, instant reload on file save (~100ms)
+**`pkg/source/git/`** — GitSource: `go-git` poll/push-webhook, `ListBranches()`.
 
-Config supports a `sources:` array (replaces single `repo:`):
+**`pkg/source/local/`** — LocalSource: `fsnotify` filesystem watcher, instant reload on file save (~100ms).
+
+Config `sources:` array:
+
 ```yaml
 sources:
-  - type: git
+  - name: infra
+    path: /home/user/tasks/taskset.yaml
+    type: local
+  - name: shared
+    type: git
     url: https://github.com/team/shared-tasks
     branch: main
-    poll_interval: 60s
-    auth: { type: token, token_env: GITHUB_TOKEN }
-  - type: local
-    path: ~/tasks-dev
-    watch: true   # fsnotify instant reload
 ```
 
-Task IDs must be unique across all sources. Conflict = error logged, second task skipped.
+Task IDs from TaskSet sources are namespace-scoped and never collide. Legacy local/git sources use flat task IDs (folder names).
 
 ### 5. Trigger System
 - `cron` — `robfig/cron` scheduler

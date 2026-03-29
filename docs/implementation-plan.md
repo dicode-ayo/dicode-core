@@ -1,6 +1,6 @@
 # Implementation Plan
 
-> Last updated: 2026-03-24
+> Last updated: 2026-03-29
 
 This document is the ordered build roadmap. Each milestone produces something runnable. Work top-to-bottom; later milestones depend on earlier ones.
 
@@ -11,6 +11,8 @@ This document is the ordered build roadmap. Each milestone produces something ru
 **Post-MVP Platform enhancements ✅ Complete.** Git source (M8), system tray (M12), AI chat in task editor, editable config UI, live source management, raw config code editor.
 
 **Post-MVP Runtime enhancements ✅ Complete.** Docker executor (M18-partial), daemon trigger with restart policies, task kill, orphan/stale run cleanup, comprehensive audit logging.
+
+**TaskSet Architecture ✅ Complete.** Hierarchical task composition (`kind:TaskSet`, `kind:Config`, `kind:Task`), namespace-scoped IDs (`infra/backend/deploy`), 6-level override precedence, dev mode API (`PATCH /api/sources/:name/dev`), MCP server with `list_tasks`/`get_task`/`run_task`/`list_sources`/`switch_dev_mode` tools, Sources web UI page, task list namespace grouping, examples updated to TaskSet model.
 
 ---
 
