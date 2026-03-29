@@ -375,101 +375,198 @@ func (e *Engine) WebhookHandler() http.Handler {
 		e.log.Info("webhook trigger", zap.String("path", path), zap.String("task", taskID))
 
 		var input interface{}
-		if r.Body != nil {
+		if r.Method == http.MethodGet {
+			if q := r.URL.Query(); len(q) > 0 {
+				m := make(map[string]interface{}, len(q))
+				for k, v := range q {
+					if len(v) == 1 {
+						m[k] = v[0]
+					} else {
+						m[k] = v
+					}
+				}
+				input = m
+			}
+		} else if r.Body != nil {
 			body, err := io.ReadAll(r.Body)
 			if err == nil && len(body) > 0 {
 				_ = json.Unmarshal(body, &input)
 			}
 		}
 
-		runID, err := e.fireAsync(r.Context(), spec, pkgruntime.RunOptions{Input: input}, "webhook")
+		// Default: wait for the run to finish and return the result inline.
+		// Pass ?wait=false to fire-and-forget (returns runId immediately).
+		async := r.URL.Query().Get("wait") == "false"
+
+		if async {
+			runID, err := e.fireAsync(r.Context(), spec, pkgruntime.RunOptions{Input: input}, "webhook")
+			if err != nil {
+				http.Error(w, "task failed to start", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{"runId": runID})
+			return
+		}
+
+		runID, result, err := e.fireSync(spec, pkgruntime.RunOptions{Input: input}, "webhook")
 		if err != nil {
 			http.Error(w, "task failed to start", http.StatusInternalServerError)
 			return
 		}
 
+		// Return structured output or return value directly when available.
+		if result.OutputContent != "" {
+			ct := result.OutputContentType
+			if ct == "" {
+				ct = "text/plain"
+			}
+			w.Header().Set("Content-Type", ct+"; charset=utf-8")
+			w.Header().Set("X-Run-Id", runID)
+			if result.Error != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+			}
+			_, _ = w.Write([]byte(result.OutputContent))
+			return
+		}
+		if result.ReturnValue != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("X-Run-Id", runID)
+			if result.Error != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+			}
+			_ = json.NewEncoder(w).Encode(result.ReturnValue)
+			return
+		}
+
+		// No output: return status envelope.
+		status := "success"
+		if result.Error != nil {
+			status = "failure"
+			w.WriteHeader(http.StatusInternalServerError)
+		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{"runId": runID})
+		_ = json.NewEncoder(w).Encode(map[string]string{"runId": runID, "status": status})
 	})
+}
+
+// startRun creates the DB record, stores the cancel func, fires the started
+// hook, and returns a ready-to-run context. The caller is responsible for
+// calling the returned cleanup func when the run finishes.
+func (e *Engine) startRun(spec *task.Spec, opts *pkgruntime.RunOptions, source string) (runCtx context.Context, cleanup func(), err error) {
+	if _, err = e.registry.StartRunWithID(context.Background(), opts.RunID, spec.ID, opts.ParentRunID, source); err != nil {
+		return nil, nil, fmt.Errorf("start run record: %w", err)
+	}
+	if h := e.runStartedHook; h != nil {
+		h(spec.ID, opts.RunID, source)
+	}
+	var cancel context.CancelFunc
+	runCtx, cancel = context.WithCancel(context.Background())
+	e.runCancels.Store(opts.RunID, cancel)
+	cleanup = func() {
+		e.runCancels.Delete(opts.RunID)
+		cancel()
+	}
+	return runCtx, cleanup, nil
+}
+
+// runTask executes a task synchronously and handles all post-run bookkeeping
+// (logging, notifications, hooks, daemon restart). Returns status and result.
+func (e *Engine) runTask(runCtx context.Context, spec *task.Spec, opts pkgruntime.RunOptions, source string) (string, *pkgruntime.RunResult) {
+	e.log.Info("run started",
+		zap.String("task", spec.ID),
+		zap.String("run", opts.RunID),
+		zap.String("trigger", source),
+		zap.String("runtime", string(spec.Runtime)),
+	)
+
+	start := time.Now()
+	status, result := e.dispatch(runCtx, spec, opts)
+	elapsed := time.Since(start)
+
+	e.log.Info("run finished",
+		zap.String("task", spec.ID),
+		zap.String("run", opts.RunID),
+		zap.String("status", status),
+		zap.String("trigger", source),
+		zap.Duration("duration", elapsed.Truncate(time.Millisecond)),
+	)
+
+	notifyOnSuccess, notifyOnFailure := e.resolveNotify(spec)
+
+	if e.notifier != nil {
+		shouldNotify := (status == registry.StatusSuccess && notifyOnSuccess) ||
+			(status == registry.StatusFailure && notifyOnFailure)
+		if shouldNotify {
+			msg := notify.Message{
+				Title: fmt.Sprintf("[dicode] %s %s", spec.Name, status),
+				Body:  fmt.Sprintf("Run finished in %.1fs", elapsed.Seconds()),
+			}
+			if status == registry.StatusFailure {
+				msg.Priority = notify.PriorityHigh
+			}
+			go func() {
+				if err := e.notifier.Send(context.Background(), msg); err != nil {
+					e.log.Warn("notification send failed", zap.Error(err))
+				}
+			}()
+		}
+	}
+
+	if h := e.runFinishedHook; h != nil {
+		h(spec.ID, opts.RunID, status, source, elapsed.Milliseconds(), notifyOnSuccess, notifyOnFailure)
+	}
+
+	if spec.Trigger.Daemon {
+		e.onDaemonRunFinished(spec, opts.RunID)
+	}
+
+	return status, result
 }
 
 // fireAsync pre-creates the run record, starts execution in a goroutine,
 // and returns the run ID immediately.
 func (e *Engine) fireAsync(ctx context.Context, spec *task.Spec, opts pkgruntime.RunOptions, source string) (string, error) {
-	runID := uuid.New().String()
-	opts.RunID = runID
+	opts.RunID = uuid.New().String()
 
-	if _, err := e.registry.StartRunWithID(context.Background(), runID, spec.ID, opts.ParentRunID, source); err != nil {
-		return "", fmt.Errorf("start run record: %w", err)
+	runCtx, cleanup, err := e.startRun(spec, &opts, source)
+	if err != nil {
+		return "", err
 	}
-
-	if h := e.runStartedHook; h != nil {
-		h(spec.ID, runID, source)
-	}
-
-	runCtx, runCancel := context.WithCancel(context.Background())
-	e.runCancels.Store(runID, runCancel)
 
 	go func() {
-		defer func() {
-			e.runCancels.Delete(runID)
-			runCancel()
-		}()
-
-		e.log.Info("run started",
-			zap.String("task", spec.ID),
-			zap.String("run", runID),
-			zap.String("trigger", source),
-			zap.String("runtime", string(spec.Runtime)),
-		)
-
-		start := time.Now()
-		status := e.dispatch(runCtx, spec, opts)
-		elapsed := time.Since(start)
-
-		e.log.Info("run finished",
-			zap.String("task", spec.ID),
-			zap.String("run", runID),
-			zap.String("status", status),
-			zap.String("trigger", source),
-			zap.Duration("duration", elapsed.Truncate(time.Millisecond)),
-		)
-
-		notifyOnSuccess, notifyOnFailure := e.resolveNotify(spec)
-
-		if e.notifier != nil {
-			shouldNotify := (status == registry.StatusSuccess && notifyOnSuccess) ||
-				(status == registry.StatusFailure && notifyOnFailure)
-			if shouldNotify {
-				msg := notify.Message{
-					Title: fmt.Sprintf("[dicode] %s %s", spec.Name, status),
-					Body:  fmt.Sprintf("Run finished in %.1fs", elapsed.Seconds()),
-				}
-				if status == registry.StatusFailure {
-					msg.Priority = notify.PriorityHigh
-				}
-				go func() {
-					if err := e.notifier.Send(context.Background(), msg); err != nil {
-						e.log.Warn("notification send failed", zap.Error(err))
-					}
-				}()
-			}
-		}
-
-		if h := e.runFinishedHook; h != nil {
-			h(spec.ID, runID, status, source, elapsed.Milliseconds(), notifyOnSuccess, notifyOnFailure)
-		}
-
-		if spec.Trigger.Daemon {
-			e.onDaemonRunFinished(spec, runID)
-		}
+		defer cleanup()
+		e.runTask(runCtx, spec, opts, source)
 	}()
 
-	return runID, nil
+	return opts.RunID, nil
 }
 
-// dispatch routes a run to the appropriate executor and returns the final status.
-func (e *Engine) dispatch(ctx context.Context, spec *task.Spec, opts pkgruntime.RunOptions) string {
+// fireSync runs the task synchronously and returns the run ID and result.
+// The caller's context is used only for cancellation of the run setup; the
+// run itself uses an independent context so it is not cancelled when the HTTP
+// request context ends mid-execution.
+func (e *Engine) fireSync(spec *task.Spec, opts pkgruntime.RunOptions, source string) (string, *pkgruntime.RunResult, error) {
+	opts.RunID = uuid.New().String()
+
+	runCtx, cleanup, err := e.startRun(spec, &opts, source)
+	if err != nil {
+		return "", nil, err
+	}
+	defer cleanup()
+
+	status, result := e.runTask(runCtx, spec, opts, source)
+	if result == nil {
+		result = &pkgruntime.RunResult{}
+	}
+	if result.Error == nil && status != registry.StatusSuccess {
+		result.Error = fmt.Errorf("run %s", status)
+	}
+	return opts.RunID, result, nil
+}
+
+// dispatch routes a run to the appropriate executor and returns the final status and result.
+func (e *Engine) dispatch(ctx context.Context, spec *task.Spec, opts pkgruntime.RunOptions) (string, *pkgruntime.RunResult) {
 	e.mu.Lock()
 	exec, ok := e.executors[spec.Runtime]
 	e.mu.Unlock()
@@ -480,7 +577,7 @@ func (e *Engine) dispatch(ctx context.Context, spec *task.Spec, opts pkgruntime.
 			zap.String("runtime", string(spec.Runtime)),
 		)
 		_ = e.registry.FinishRun(context.Background(), opts.RunID, registry.StatusFailure)
-		return registry.StatusFailure
+		return registry.StatusFailure, &pkgruntime.RunResult{Error: fmt.Errorf("no executor for runtime %s", spec.Runtime)}
 	}
 
 	result, err := exec.Execute(ctx, spec, opts)
@@ -491,7 +588,7 @@ func (e *Engine) dispatch(ctx context.Context, spec *task.Spec, opts pkgruntime.
 			zap.Error(err),
 		)
 		_ = e.registry.FinishRun(context.Background(), opts.RunID, registry.StatusFailure)
-		return registry.StatusFailure
+		return registry.StatusFailure, &pkgruntime.RunResult{Error: err}
 	}
 
 	// Store return value and structured output if present.
@@ -515,7 +612,7 @@ func (e *Engine) dispatch(ctx context.Context, spec *task.Spec, opts pkgruntime.
 	}
 
 	e.FireChain(context.Background(), spec.ID, status, result.ChainInput)
-	return status
+	return status, result
 }
 
 // triggerSource returns a short string identifying the trigger type of a spec.

@@ -7,7 +7,12 @@ spec:
     hello-cron:
       ref:
         path: /home/dr14/dicode/examples/hello-cron/task.yaml
-
+    github-stars-hook:
+      ref:
+        path: /home/dr14/dicode/examples/github-stars/task.yaml
+      overrides:
+        trigger:
+          webhook: /hooks/examples/github-stars-hook
     github-stars:
       ref:
         path: /home/dr14/dicode/examples/github-stars/task.yaml
