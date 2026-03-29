@@ -14,16 +14,16 @@ const app = document.getElementById('app');
 
 route(/^\/tasks\/([^/]+)$/, id => {
   const el = document.createElement('dc-task-detail');
+  el.taskid = id;
   app.innerHTML = '';
   app.appendChild(el);
-  el.taskid = id;
 });
 
 route(/^\/runs\/([^/]+)$/, id => {
   const el = document.createElement('dc-run-detail');
+  el.runid = id;
   app.innerHTML = '';
   app.appendChild(el);
-  el.runid = id;
 });
 
 route(/^\/config$/,  () => { app.innerHTML = '<dc-config></dc-config>'; });

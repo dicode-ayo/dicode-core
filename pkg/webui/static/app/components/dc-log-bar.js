@@ -9,7 +9,6 @@ class DcLogBar extends LitElement {
   static properties = {
     _open:      { state: true },
     _connected: { state: true },
-    _count:     { state: true },
   };
 
   constructor() {
@@ -73,7 +72,7 @@ class DcLogBar extends LitElement {
           style="padding:0.3rem 1rem;cursor:pointer;background:#16213e;display:flex;align-items:center;gap:0.5rem;user-select:none;">
           <span>${this._open ? '▼' : '▶'}</span> App Logs
           <span style="margin-left:0.5rem;font-size:0.7rem;color:${statusColor}">${statusText}</span>
-          <span id="logcount" style="margin-left:auto;font-size:0.7rem;color:#666">${this._count ? this._count + ' lines' : ''}</span>
+          <span id="logcount" style="margin-left:auto;font-size:0.7rem;color:#666"></span>
         </div>
         <pre id="logconsole"
           style="display:${this._open ? 'block' : 'none'};height:200px;overflow-y:auto;padding:0.5rem 1rem;margin:0;white-space:pre-wrap;word-break:break-all"></pre>
