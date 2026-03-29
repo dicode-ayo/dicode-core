@@ -4,11 +4,12 @@ on:
   push:
     branches: [main]
 
-# Prevent concurrent runs on main so that a release-please follow-up commit
-# never cancels the build jobs started by the release commit.
 concurrency:
   group: release-please-main
   cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 permissions:
   contents: write
@@ -27,77 +28,27 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
-  build:
-    name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
+  goreleaser:
+    name: GoReleaser
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created }}
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - goos: linux
-            goarch: amd64
-          - goos: linux
-            goarch: arm64
-          - goos: darwin
-            goarch: amd64
-          - goos: darwin
-            goarch: arm64
-          - goos: windows
-            goarch: amd64
-
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
 
-      - name: Build binary
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: 0
-        run: |
-          TAG=${{ needs.release-please.outputs.tag_name }}
-          BINARY=dicode
-          if [ "$GOOS" = "windows" ]; then BINARY=dicode.exe; fi
-          mkdir -p dist
-          go build \
-            -ldflags "-X main.version=${TAG} -s -w" \
-            -o "dist/${BINARY}" \
-            ./cmd/dicode/
-
-      - name: Create archive
-        run: |
-          TAG=${{ needs.release-please.outputs.tag_name }}
-          # Strip package-name prefix: dicode-v0.0.2 → v0.0.2
-          VERSION=${TAG#dicode-}
-          ARCHIVE="dicode-${VERSION}-${{ matrix.goos }}-${{ matrix.goarch }}"
-          if [ "${{ matrix.goos }}" = "windows" ]; then
-            cd dist && zip "${ARCHIVE}.zip" dicode.exe && cd ..
-            echo "ASSET=dist/${ARCHIVE}.zip" >> $GITHUB_ENV
-          else
-            tar -czf "dist/${ARCHIVE}.tar.gz" -C dist dicode
-            echo "ASSET=dist/${ARCHIVE}.tar.gz" >> $GITHUB_ENV
-          fi
-
-      - name: Upload release asset
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload ${{ needs.release-please.outputs.tag_name }} "$ASSET"
-
-  publish:
-    name: Publish release
-    needs: [release-please, build]
-    if: ${{ needs.release-please.outputs.release_created }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Undraft release
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release edit ${{ needs.release-please.outputs.tag_name }} \
-            --draft=false \
-            --repo ${{ github.repository }}
+          GORELEASER_CURRENT_TAG: ${{ needs.release-please.outputs.tag_name }}
