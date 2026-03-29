@@ -49,11 +49,12 @@ func (r *Ref) effectivePoll() time.Duration {
 // Defaults are applied to all entries in a TaskSet before per-entry overrides.
 // They sit at levels 2–4 in the six-level precedence stack.
 type Defaults struct {
-	Timeout time.Duration `yaml:"timeout,omitempty"`
-	Retry   *RetryConfig  `yaml:"retry,omitempty"`
-	Env     []string      `yaml:"env,omitempty"`
+	Timeout time.Duration    `yaml:"timeout,omitempty"`
+	Retry   *RetryConfig     `yaml:"retry,omitempty"`
+	Env     []string         `yaml:"env,omitempty"`
 	// Trigger sets a fallback trigger for any entry that has none.
-	Trigger *TriggerPatch `yaml:"trigger,omitempty"`
+	Trigger *TriggerPatch    `yaml:"trigger,omitempty"`
+	Notify  *task.NotifyConfig `yaml:"notify,omitempty"`
 }
 
 // RetryConfig defines automatic retry behaviour for task runs.
@@ -84,13 +85,14 @@ type ParamOverride struct {
 // Overrides is a patch applied to a resolved task or to a nested TaskSet entry.
 // Fields are applied in the six-level override cascade; later layers win.
 type Overrides struct {
-	Enabled *bool           `yaml:"enabled,omitempty"`
-	Trigger *TriggerPatch   `yaml:"trigger,omitempty"`
-	Params  []ParamOverride `yaml:"params,omitempty"`
-	Env     []string        `yaml:"env,omitempty"`
-	Timeout time.Duration   `yaml:"timeout,omitempty"`
-	Retry   *RetryConfig    `yaml:"retry,omitempty"`
-	Runtime string          `yaml:"runtime,omitempty"`
+	Enabled *bool              `yaml:"enabled,omitempty"`
+	Trigger *TriggerPatch      `yaml:"trigger,omitempty"`
+	Params  []ParamOverride    `yaml:"params,omitempty"`
+	Env     []string           `yaml:"env,omitempty"`
+	Timeout time.Duration      `yaml:"timeout,omitempty"`
+	Retry   *RetryConfig       `yaml:"retry,omitempty"`
+	Runtime string             `yaml:"runtime,omitempty"`
+	Notify  *task.NotifyConfig `yaml:"notify,omitempty"`
 
 	// For task_set entries only — Defaults is pushed into the nested set as level 4.
 	Defaults *Defaults `yaml:"defaults,omitempty"`

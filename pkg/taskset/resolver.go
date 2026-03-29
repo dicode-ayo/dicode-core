@@ -231,6 +231,16 @@ func (r *Resolver) ensureClone(ctx context.Context, url, branch string, _ time.D
 	return dir, nil
 }
 
+// InvalidateClones clears the clone cache so the next Resolve call re-pulls all
+// repos. Call this at the start of each poll cycle to pick up remote changes.
+// Within a single resolution pass the cache still deduplicates pulls when
+// multiple taskset entries reference the same repo.
+func (r *Resolver) InvalidateClones() {
+	r.mu.Lock()
+	r.clones = make(map[repoKey]string)
+	r.mu.Unlock()
+}
+
 // ClonedRepos returns a snapshot of all (url, branch) → localDir mappings.
 // Used by tests and diagnostics.
 func (r *Resolver) ClonedRepos() map[string]string {
@@ -299,6 +309,7 @@ func mergeOverrides(a, b *Overrides) *Overrides {
 	if out.Defaults == nil {
 		out.Defaults = a.Defaults
 	}
+	out.Notify = mergeNotify(a.Notify, out.Notify)
 	// Env: merge by key (a first, b wins)
 	if len(a.Env) > 0 || len(out.Env) > 0 {
 		out.Env = mergeEnv(a.Env, out.Env)

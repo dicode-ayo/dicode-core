@@ -136,15 +136,16 @@ class DcRunDetail extends LitElement {
           <span class="meta">Run <code>${this.runid.slice(0,8)}</code></span>
           <span class="meta">Started ${fmtTime(startedAt)}</span>
           <span class="meta">${this._duration || (finishedAt ? fmtDuration(startedAt, finishedAt) : isRunning ? 'running…' : '—')}</span>
+          ${otype || retval ? html`
+            <a href="/runs/${this.runid}/result" target="_blank" class="btn btn-sm secondary" style="margin-left:auto">Show Result ↗</a>` : ''}
           ${isRunning ? html`
-            <button class="btn" style="background:#dc3545;margin-left:auto" @click=${() => this._kill()}>Kill</button>` : ''}
+            <button class="btn" style="background:#dc3545;${otype || retval ? '' : 'margin-left:auto'}" @click=${() => this._kill()}>Kill</button>` : ''}
         </div>
       </div>
 
       ${otype ? html`
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.5rem">
+        <div style="margin-bottom:.5rem">
           <h2 style="margin:0">Output</h2>
-          <a href="/runs/${this.runid}/result" target="_blank" style="font-size:.85rem">open full page ↗</a>
         </div>
         <div class="card" style="padding:0">
           ${otype === 'text/html'

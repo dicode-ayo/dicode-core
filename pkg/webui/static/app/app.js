@@ -13,7 +13,7 @@ import './components/dc-notif-panel.js';
 // ── Router ────────────────────────────────────────────────────────────────────
 const app = document.getElementById('app');
 
-route(/^\/tasks\/([^/]+)$/, id => {
+route(/^\/tasks\/(.+)$/, id => {
   const el = document.createElement('dc-task-detail');
   el.taskid = id;
   app.innerHTML = '';

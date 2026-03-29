@@ -52,7 +52,7 @@ class DcTaskList extends LitElement {
 
   async _run(taskID) {
     try {
-      const r = await post(`/api/tasks/${taskID}/run`);
+      const r = await post(`/api/tasks/${encodeURIComponent(taskID)}/run`);
       navigate(`/runs/${r.runId}`);
     } catch(e) { alert('Failed to run task: ' + e.message); }
   }

@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -213,7 +214,7 @@ func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config
 	})
 
 	// Wire run finished hook → broadcast run:finished
-	eng.SetRunFinishedHook(func(taskID, runID, status, triggerSource string, durationMs int64) {
+	eng.SetRunFinishedHook(func(taskID, runID, status, triggerSource string, durationMs int64, notifyOnSuccess, notifyOnFailure bool) {
 		taskName := taskID
 		var outputContentType, returnValue string
 		if spec, ok := r.Get(taskID); ok {
@@ -234,6 +235,8 @@ func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config
 				TriggerSource:     triggerSource,
 				OutputContentType: outputContentType,
 				ReturnValue:       returnValue,
+				NotifyOnSuccess:   notifyOnSuccess,
+				NotifyOnFailure:   notifyOnFailure,
 			},
 		})
 	})
@@ -263,6 +266,7 @@ func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config
 // Handler returns the HTTP handler (useful for testing without starting a server).
 func (s *Server) Handler() http.Handler {
 	r := chi.NewRouter()
+	r.Use(useEncodedPath)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Logger)
 	r.Use(securityHeaders)
@@ -385,6 +389,32 @@ func (s *Server) Start(ctx context.Context) error {
 	return nil
 }
 
+// useEncodedPath is a middleware that makes chi route on r.URL.RawPath instead
+// of r.URL.Path, so percent-encoded slashes (%2F) in task IDs are treated as a
+// single path segment rather than path separators.
+func useEncodedPath(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if raw := r.URL.RawPath; raw != "" && raw != r.URL.Path {
+			r2 := r.Clone(r.Context())
+			r2.URL.Path = raw
+			next.ServeHTTP(w, r2)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// taskIDParam returns the decoded task ID from the chi URL parameter "id".
+// When task IDs contain slashes they are transmitted as %2F (via encodeURIComponent
+// in the frontend), so we must URL-decode after chi captures the raw segment.
+func taskIDParam(r *http.Request) string {
+	id, err := url.PathUnescape(chi.URLParam(r, "id"))
+	if err != nil {
+		return chi.URLParam(r, "id")
+	}
+	return id
+}
+
 // serveSPA serves the SPA index.html for all unmatched GET routes.
 func (s *Server) serveSPA(w http.ResponseWriter, r *http.Request) {
 	b, err := staticFS.ReadFile("static/app/index.html")
@@ -502,7 +532,7 @@ var allowedFiles = map[string]bool{
 }
 
 func (s *Server) apiGetFile(w http.ResponseWriter, r *http.Request) {
-	id, filename := chi.URLParam(r, "id"), chi.URLParam(r, "filename")
+	id, filename := taskIDParam(r), chi.URLParam(r, "filename")
 	if !allowedFiles[filename] {
 		jsonErr(w, "file not allowed", http.StatusBadRequest)
 		return
@@ -523,7 +553,7 @@ func (s *Server) apiGetFile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) apiSaveFile(w http.ResponseWriter, r *http.Request) {
-	id, filename := chi.URLParam(r, "id"), chi.URLParam(r, "filename")
+	id, filename := taskIDParam(r), chi.URLParam(r, "filename")
 	if !allowedFiles[filename] {
 		jsonErr(w, "file not allowed", http.StatusBadRequest)
 		return
@@ -557,7 +587,7 @@ func (s *Server) apiSaveFile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) apiSaveTrigger(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
+	id := taskIDParam(r)
 	spec, ok := s.registry.Get(id)
 	if !ok {
 		jsonErr(w, "task not found", http.StatusNotFound)
@@ -813,7 +843,7 @@ type TaskDetail struct {
 }
 
 func (s *Server) apiGetTask(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
+	id := taskIDParam(r)
 	spec, ok := s.registry.Get(id)
 	if !ok {
 		jsonErr(w, "task not found", http.StatusNotFound)
@@ -859,7 +889,7 @@ func (s *Server) apiGetTask(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) apiRunTask(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
+	id := taskIDParam(r)
 	s.log.Info("run requested via API", zap.String("task", id))
 	runID, err := s.engine.FireManual(r.Context(), id, nil)
 	if err != nil {
@@ -870,7 +900,7 @@ func (s *Server) apiRunTask(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) apiListRuns(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
+	id := taskIDParam(r)
 	limitStr := r.URL.Query().Get("limit")
 	limit := 50
 	if limitStr != "" {

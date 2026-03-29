@@ -11,6 +11,7 @@ import (
 
 	"github.com/dicode/dicode/pkg/source"
 	"github.com/dicode/dicode/pkg/task"
+	"github.com/fsnotify/fsnotify"
 	"go.uber.org/zap"
 )
 
@@ -88,7 +89,11 @@ func (s *Source) Start(ctx context.Context) (<-chan source.Event, error) {
 		// Non-fatal: keep polling in case the repo becomes accessible.
 	}
 
-	go s.poll(ctx, ch)
+	if !s.rootRef.IsGit() {
+		go s.watchLocal(ctx, ch)
+	} else {
+		go s.poll(ctx, ch)
+	}
 	return ch, nil
 }
 
@@ -123,7 +128,97 @@ func (s *Source) Sync(ctx context.Context) error {
 	return err
 }
 
+// watchLocal uses fsnotify to react to local file changes immediately (debounced
+// at 150 ms) rather than waiting for the poll interval. Falls back to poll if
+// fsnotify is unavailable. A background ticker still fires at pollInterval to
+// catch any directories that weren't watched at the time they were created.
+func (s *Source) watchLocal(ctx context.Context, ch chan<- source.Event) {
+	defer close(ch)
+
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		s.log.Warn("taskset: fsnotify unavailable, falling back to poll",
+			zap.String("id", s.id), zap.Error(err))
+		s.pollLoop(ctx, ch)
+		return
+	}
+	defer watcher.Close()
+
+	// Always watch the directory that contains the root taskset.yaml.
+	rootDir := filepath.Dir(s.rootRef.Path)
+	_ = watcher.Add(rootDir)
+
+	// Watch all task directories already in the snapshot.
+	s.addSnapshotDirs(watcher)
+
+	const debounce = 150 * time.Millisecond
+	var (
+		timer  *time.Timer
+		timerC <-chan time.Time
+	)
+	resetTimer := func() {
+		if timer != nil {
+			timer.Stop()
+		}
+		timer = time.NewTimer(debounce)
+		timerC = timer.C
+	}
+
+	ticker := time.NewTicker(s.pollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case err, ok := <-watcher.Errors:
+			if !ok {
+				return
+			}
+			s.log.Warn("taskset watcher error", zap.String("id", s.id), zap.Error(err))
+		case _, ok := <-watcher.Events:
+			if !ok {
+				return
+			}
+			resetTimer()
+		case <-timerC:
+			timerC = nil
+			if err := s.syncAndEmit(ctx, ch); err != nil {
+				s.log.Warn("taskset source: watch sync failed",
+					zap.String("id", s.id), zap.Error(err))
+			}
+			// Pick up any new task directories added by the re-sync.
+			s.addSnapshotDirs(watcher)
+		case <-ticker.C:
+			if err := s.syncAndEmit(ctx, ch); err != nil {
+				s.log.Warn("taskset source: poll failed",
+					zap.String("id", s.id), zap.Error(err))
+			}
+			s.addSnapshotDirs(watcher)
+		}
+	}
+}
+
+// addSnapshotDirs adds every task directory in the current snapshot to watcher
+// (silently ignores duplicates — fsnotify deduplicates internally).
+func (s *Source) addSnapshotDirs(watcher *fsnotify.Watcher) {
+	s.mu.Lock()
+	dirs := make([]string, 0, len(s.snapshot))
+	for _, snap := range s.snapshot {
+		dirs = append(dirs, snap.taskDir)
+	}
+	s.mu.Unlock()
+	for _, d := range dirs {
+		_ = watcher.Add(d)
+	}
+}
+
 func (s *Source) poll(ctx context.Context, ch chan<- source.Event) {
+	defer close(ch)
+	s.pollLoop(ctx, ch)
+}
+
+func (s *Source) pollLoop(ctx context.Context, ch chan<- source.Event) {
 	defer close(ch)
 	ticker := time.NewTicker(s.pollInterval)
 	defer ticker.Stop()
@@ -132,6 +227,7 @@ func (s *Source) poll(ctx context.Context, ch chan<- source.Event) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			s.resolver.InvalidateClones() // force re-pull from remote on each tick
 			if err := s.syncAndEmit(ctx, ch); err != nil {
 				s.log.Warn("taskset source: poll failed",
 					zap.String("id", s.id), zap.Error(err))

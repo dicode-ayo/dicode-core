@@ -42,6 +42,8 @@ type RunFinishedData struct {
 	TriggerSource     string `json:"triggerSource"`
 	OutputContentType string `json:"outputContentType,omitempty"`
 	ReturnValue       string `json:"returnValue,omitempty"`
+	NotifyOnSuccess   bool   `json:"notifyOnSuccess"`
+	NotifyOnFailure   bool   `json:"notifyOnFailure"`
 }
 
 // WSHub manages all WebSocket clients.

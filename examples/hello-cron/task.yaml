@@ -3,7 +3,9 @@ kind: Task
 name: Hello Cron
 description: Logs a hello message with the current timestamp every minute.
 runtime: js
-
+notify:
+  on_failure: true
+  on_success: false
 trigger:
   cron: "* * * * *"   # every minute
 
