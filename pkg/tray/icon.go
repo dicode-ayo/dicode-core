@@ -1,3 +1,5 @@
+//go:build cgo
+
 package tray
 
 // icon generates a 32×32 PNG icon at init time: purple background (#7c3aed),

@@ -4,6 +4,12 @@ on:
   push:
     branches: [main]
 
+# Prevent concurrent runs on main so that a release-please follow-up commit
+# never cancels the build jobs started by the release commit.
+concurrency:
+  group: release-please-main
+  cancel-in-progress: false
+
 permissions:
   contents: write
   pull-requests: write
@@ -25,30 +31,20 @@ jobs:
     name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created }}
-    runs-on: ${{ matrix.runs-on }}
+    runs-on: ubuntu-latest
     strategy:
       matrix:
         include:
           - goos: linux
             goarch: amd64
-            runs-on: ubuntu-latest
-            cgo: 0
           - goos: linux
             goarch: arm64
-            runs-on: ubuntu-latest
-            cgo: 0
           - goos: darwin
             goarch: amd64
-            runs-on: macos-13
-            cgo: 1
           - goos: darwin
             goarch: arm64
-            runs-on: macos-latest
-            cgo: 1
           - goos: windows
             goarch: amd64
-            runs-on: windows-latest
-            cgo: 1
 
     steps:
       - uses: actions/checkout@v4
@@ -59,38 +55,49 @@ jobs:
           cache: true
 
       - name: Build binary
-        shell: bash
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: ${{ matrix.cgo }}
+          CGO_ENABLED: 0
         run: |
-          VERSION=${{ needs.release-please.outputs.tag_name }}
-          BINARY_NAME=dicode
-          if [ "$GOOS" = "windows" ]; then
-            BINARY_NAME=dicode.exe
-          fi
+          TAG=${{ needs.release-please.outputs.tag_name }}
+          BINARY=dicode
+          if [ "$GOOS" = "windows" ]; then BINARY=dicode.exe; fi
           mkdir -p dist
           go build \
-            -ldflags "-X main.version=${VERSION} -s -w" \
-            -o "dist/${BINARY_NAME}" \
+            -ldflags "-X main.version=${TAG} -s -w" \
+            -o "dist/${BINARY}" \
             ./cmd/dicode/
 
       - name: Create archive
-        shell: bash
         run: |
-          ARCHIVE_NAME="dicode-${{ needs.release-please.outputs.tag_name }}-${{ matrix.goos }}-${{ matrix.goarch }}"
+          TAG=${{ needs.release-please.outputs.tag_name }}
+          # Strip package-name prefix: dicode-v0.0.2 → v0.0.2
+          VERSION=${TAG#dicode-}
+          ARCHIVE="dicode-${VERSION}-${{ matrix.goos }}-${{ matrix.goarch }}"
           if [ "${{ matrix.goos }}" = "windows" ]; then
-            cd dist && zip "${ARCHIVE_NAME}.zip" dicode.exe && cd ..
-            echo "ASSET_PATH=dist/${ARCHIVE_NAME}.zip" >> $GITHUB_ENV
+            cd dist && zip "${ARCHIVE}.zip" dicode.exe && cd ..
+            echo "ASSET=dist/${ARCHIVE}.zip" >> $GITHUB_ENV
           else
-            tar -czf "dist/${ARCHIVE_NAME}.tar.gz" -C dist dicode
-            echo "ASSET_PATH=dist/${ARCHIVE_NAME}.tar.gz" >> $GITHUB_ENV
+            tar -czf "dist/${ARCHIVE}.tar.gz" -C dist dicode
+            echo "ASSET=dist/${ARCHIVE}.tar.gz" >> $GITHUB_ENV
           fi
 
       - name: Upload release asset
-        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload ${{ needs.release-please.outputs.tag_name }} "$ASSET"
+
+  publish:
+    name: Publish release
+    needs: [release-please, build]
+    if: ${{ needs.release-please.outputs.release_created }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Undraft release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload ${{ needs.release-please.outputs.tag_name }} "$ASSET_PATH"
+          gh release edit ${{ needs.release-please.outputs.tag_name }} \
+            --draft=false \
+            --repo ${{ github.repository }}
