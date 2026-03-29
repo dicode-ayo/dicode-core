@@ -445,6 +445,9 @@ func TestInjectDicodeSDK(t *testing.T) {
 	html := `<html><head><title>Test</title></head><body></body></html>`
 	result := injectDicodeSDK(html, "/hooks/my-task", "my-task")
 
+	if !strings.Contains(result, `<base href="/hooks/my-task/">`) {
+		t.Error("base tag not injected")
+	}
 	if !strings.Contains(result, `<script src="/dicode.js"></script>`) {
 		t.Error("dicode.js script tag not injected")
 	}
