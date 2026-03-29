@@ -1,6 +1,6 @@
 # Current State
 
-> Last updated: 2026-03-29
+> Last updated: 2026-03-29 — TaskSet architecture, MCP server, Sources web UI
 
 This document describes exactly what exists in the codebase today — what is fully implemented, what is stubbed with interfaces and TODOs, and what exists only as documentation.
 
@@ -62,10 +62,25 @@ Full configuration loading. All structs defined and validated:
 - `gotify.go` — **not yet created**
 - `desktop.go` — **not yet created** (OS desktop notifications)
 
-### `pkg/mcp/` 🟡
+### `pkg/taskset/` ✅
 
-- `server.go` — `Server` struct, `Handler()` returning a stub HTTP mux, `Shutdown()`
-- All MCP tools — **not yet implemented** (TODO comments in place)
+Full TaskSet architecture — hierarchical task composition inspired by ArgoCD App-of-Apps.
+
+- `spec.go` — `TaskSetSpec`, `TaskSetEntry`, `Ref`, `Defaults`, `TaskOverrides` structs. `kind` field required on all yaml files (Task, TaskSet, Config). `Ref` encodes local vs git: `url` present = git ref, `path` only = local ref.
+- `loader.go` — `LoadTaskSet(path)`, `LoadConfig(path)` — loads and validates `kind:TaskSet` and `kind:Config` yaml files
+- `resolver.go` — `Resolver` struct (per `(url, branch)` repo dedup), `Resolve(ctx, namespace, rootRef, configDefaults, parentOverrides) []*ResolvedTask`. Implements 6-level precedence stack: task.yaml base → kind:Config defaults → spec.defaults → parent overrides.defaults → parent overrides.entries[key] → entry overrides (leaf wins). `SetDevMode(bool)` / `DevMode() bool`.
+- `source.go` — `Source` implementing `source.Source`: polls by re-resolving the full task tree and diffing against snapshot. `SetDevMode(ctx, enabled, localPath)` — swaps the root ref to a local path and triggers immediate re-sync. `DevMode() bool`, `DevRootPath() string`.
+- 11 tests passing (resolver override ordering, nested overrides, source event emission).
+
+**Namespace-scoped task IDs**: tasks from a TaskSet source use `/`-separated IDs: `infra/backend/deploy`. Namespaces map to parent TaskSet names.
+
+### `pkg/mcp/` ✅
+
+- `server.go` — JSON-RPC 2.0 MCP server at `POST /mcp`. Protocol version `2024-11-05`. `GET /mcp` returns server info.
+- `SourceLister` interface (`List() []SourceEntry`, `SetDevMode(...)`) — avoids import cycle with webui.
+- `SourceEntry` struct: Name, Type, URL, Path, Branch, DevMode, DevPath.
+- **Implemented tools**: `list_tasks`, `get_task`, `run_task`, `list_sources`, `switch_dev_mode`.
+- `New(registry, sourceLister)` constructor.
 
 ### `pkg/agent/` ✅
 
@@ -128,15 +143,17 @@ Full configuration loading. All structs defined and validated:
 
 - `server.go` — chi router, all REST + SPA endpoints, static assets embedded via `//go:embed static`
 - REST API endpoints including `POST /api/runs/{runID}/kill`, file editor, trigger editor, AI stream
+- **Source management** (`sources.go`): `SourceManager` (maps source name → `*taskset.Source`), HTTP handlers: `GET /api/sources`, `PATCH /api/sources/:name/dev`, `GET /api/sources/:name/branches`
+- **MCP server mounted** at `/mcp`: `mcp.New(registry, sourceMgr)` wired and served via `r.Mount("/mcp", ...)`
 - WebSocket hub (`/ws`) — real-time fan-out for log lines, run status changes, task events; ring buffer (recent logs replayed on connect)
 - Session store, secrets manager UI (unlock/lock with passphrase), AI chat, config editor
 - SPA routing: `/app/*` serves static assets; `/*` catch-all serves `index.html`
 - Audit logs: run requested via API, kill requested via API
-- Task table sorted stably (registry.All() sorts by ID)
+- Task table sorted stably (registry.All() sorts by ID); namespace headers rendered when namespaced IDs present
 - **Frontend** — Lit/LitElement SPA with ESM modules (no build step):
   - `static/app/app.js` — entry point, client-side router, WebSocket boot
-  - `static/app/lib/` — `ws.js` (WebSocket client + auto-reconnect), `router.js`, `api.js`, `styles.js`, `utils.js`
-  - `static/app/components/` — `dc-task-list`, `dc-task-detail`, `dc-run-detail`, `dc-config`, `dc-secrets`, `dc-log-bar`, `dc-notif-panel`
+  - `static/app/lib/` — `ws.js` (WebSocket client + auto-reconnect), `router.js`, `api.js` (get/post/patch), `styles.js`, `utils.js`
+  - `static/app/components/` — `dc-task-list` (namespace-grouped), `dc-task-detail`, `dc-run-detail`, `dc-config`, `dc-secrets`, `dc-sources` (dev mode toggle, branch picker), `dc-log-bar`, `dc-notif-panel`
 - 11 tests passing
 
 ### `pkg/tray/` ✅
@@ -153,6 +170,8 @@ Full configuration loading. All structs defined and validated:
 ### `cmd/dicode/main.go` ✅
 
 - Full component wiring: db → secrets → registry → JS runtime → Docker runtime → trigger engine → reconciler → webui → tray
+- `buildSources()` returns `([]source.Source, *webui.SourceManager, error)` — builds both the source slice and the `SourceManager` for dev mode control
+- `buildTaskSetSource()` returns `*taskset.Source` (not `source.Source`) so it can be stored in the source map for runtime dev mode control
 - Startup sequence: `CleanupOrphanedContainers` → `CleanupStaleRuns` → register tasks → `engine.Start`
 - `task` + `version` subcommands; secrets CLI subcommand missing
 
@@ -169,6 +188,7 @@ Full configuration loading. All structs defined and validated:
 | `pkg/db/postgres.go` | PostgreSQL implementation |
 | `pkg/db/mysql.go` | MySQL implementation |
 | `pkg/runtime/js/globals/server.go` | `server` global (daemon tasks serving HTTP) |
+| MCP tools: `validate_task`, `test_task`, `dry_run_task`, `commit_task` | Advanced agent workflow tools (list_tasks/get_task/run_task/list_sources/switch_dev_mode are implemented) |
 
 ---
 
@@ -188,6 +208,6 @@ Full configuration loading. All structs defined and validated:
 
 ## Test coverage
 
-62+ tests across: db, secrets, source/local, registry, runtime/js, trigger, and webui packages.
+70+ tests across: db, secrets, source/local, registry, runtime/js, trigger, taskset, and webui packages.
 
-All packages compile and all tests pass as of 2026-03-24.
+All packages compile and all tests pass as of 2026-03-29.

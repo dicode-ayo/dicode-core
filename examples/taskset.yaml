@@ -1,0 +1,37 @@
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: examples
+spec:
+  entries:
+    hello-cron:
+      ref:
+        path: /home/dr14/dicode/examples/hello-cron/task.yaml
+
+    github-stars:
+      ref:
+        path: /home/dr14/dicode/examples/github-stars/task.yaml
+
+    gmail-to-slack:
+      ref:
+        path: /home/dr14/dicode/examples/gmail-to-slack/task.yaml
+
+    google-login:
+      ref:
+        path: /home/dr14/dicode/examples/google-login/task.yaml
+
+    hello-docker:
+      ref:
+        path: /home/dr14/dicode/examples/hello-docker/task.yaml
+
+    hello-podman:
+      ref:
+        path: /home/dr14/dicode/examples/hello-podman/task.yaml
+
+    hello-python:
+      ref:
+        path: /home/dr14/dicode/examples/hello-python/task.yaml
+
+    nginx-start:
+      ref:
+        path: /home/dr14/dicode/examples/nginx-start/task.yaml

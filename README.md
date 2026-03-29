@@ -14,12 +14,13 @@ That's it. The task appears in your dashboard within seconds.
 
 `dicode` is a single Go binary that:
 
-- **Watches a git repo** of task scripts and reconciles them automatically (like ArgoCD, but for automation tasks)
+- **Watches task sources** and reconciles them automatically (like ArgoCD, but for automation tasks) — git repos, local directories, or hierarchical **TaskSet** manifests
 - **Executes tasks** on a schedule (cron), via HTTP webhook, or manually from the web UI
-- **Lets AI write your tasks** from natural language — the generated code is committed to git so you can read, review, and modify it
-- **Serves a web UI** for monitoring runs, viewing logs, and triggering tasks
+- **Lets AI write your tasks** from natural language — the generated code lives in your source so you can read, review, and modify it
+- **Serves a web UI** for monitoring runs, viewing logs, triggering tasks, and managing sources
+- **Exposes an MCP server** at `/mcp` so AI agents (Claude Code, Cursor) can list tasks, trigger runs, and control dev mode
 
-Tasks are plain JavaScript files. You can write them yourself, install them from the community task store, or have AI generate them. All three approaches produce the same artifact: a folder in your git repo.
+Tasks are TypeScript/Python/Docker containers. You can write them yourself or have AI generate them. All approaches produce the same artifact: a folder with `task.yaml` + script.
 
 ---
 
@@ -64,16 +65,40 @@ Tasks are plain JavaScript files. You can write them yourself, install them from
 
 ### The reconciliation loop
 
-Every 30 seconds (or immediately on a GitHub push webhook), `dicode`:
+Every 30 seconds (or immediately on a push webhook), `dicode`:
 
-1. Pulls the tasks repo
-2. Scans the `tasks/` directory and computes a content hash per task
-3. Compares against the current registry:
+1. Re-resolves the full task tree from each source
+2. Diffs the result against the current registry snapshot
+3. Emits Added / Updated / Removed events:
    - New task → register and start scheduling
    - Removed task → deregister and cancel triggers
-   - Changed task (different hash) → reload with new config
+   - Changed task (different content hash) → reload with new config
 
-This means you never need to restart `dicode`. Push a change to git and it's live within one poll interval.
+This means you never need to restart `dicode`. Change a file and it's live within one poll interval (or ~100ms for local sources with fsnotify).
+
+### TaskSet sources
+
+Tasks are organized as **TaskSets** — hierarchical YAML manifests that compose task trees:
+
+```yaml
+# taskset.yaml
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: infra
+spec:
+  defaults:
+    timeout: 30m
+  entries:
+    deploy-backend:
+      ref:
+        path: ./backend/task.yaml
+    platform:
+      ref:
+        path: ./platform/taskset.yaml   # nested TaskSet
+```
+
+Tasks get namespace-scoped IDs: `infra/deploy-backend`, `infra/platform/nginx-start`. A 6-level override stack flows defaults from root TaskSet down to individual tasks.
 
 ---
 

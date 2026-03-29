@@ -18,10 +18,14 @@ import (
 	podmanruntime "github.com/dicode/dicode/pkg/runtime/podman"
 	pythonruntime "github.com/dicode/dicode/pkg/runtime/python"
 	"github.com/dicode/dicode/pkg/secrets"
+	"path/filepath"
+	"strings"
+
 	"github.com/dicode/dicode/pkg/source"
 	gitSource "github.com/dicode/dicode/pkg/source/git"
 	"github.com/dicode/dicode/pkg/source/local"
 	"github.com/dicode/dicode/pkg/task"
+	"github.com/dicode/dicode/pkg/taskset"
 	"github.com/dicode/dicode/pkg/tray"
 	"github.com/dicode/dicode/pkg/trigger"
 	"github.com/dicode/dicode/pkg/webui"
@@ -124,7 +128,7 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	}
 
 	// 5. Sources + reconciler.
-	sources, err := buildSources(cfg, log)
+	sources, sourceMgr, err := buildSources(cfg, log)
 	if err != nil {
 		return fmt.Errorf("build sources: %w", err)
 	}
@@ -142,7 +146,7 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 		home, _ := os.UserHomeDir()
 		dataDir = home + "/.dicode"
 	}
-	srv, err := webui.New(port, reg, eng, cfg, configPath, localSecrets, rec, dataDir, logBroadcaster, log)
+	srv, err := webui.New(port, reg, eng, cfg, configPath, localSecrets, rec, sourceMgr, dataDir, logBroadcaster, log)
 	if err != nil {
 		return fmt.Errorf("build webui: %w", err)
 	}
@@ -269,32 +273,116 @@ func buildSecretsChain(cfg *config.Config, database db.DB, log *zap.Logger) (sec
 	return chain, localProvider
 }
 
-func buildSources(cfg *config.Config, log *zap.Logger) ([]source.Source, error) {
+func buildSources(cfg *config.Config, log *zap.Logger) ([]source.Source, *webui.SourceManager, error) {
 	dataDir := cfg.DataDir
 	if dataDir == "" {
 		home, _ := os.UserHomeDir()
 		dataDir = home + "/.dicode"
 	}
+
+	tasksetSources := make(map[string]*taskset.Source)
 	var sources []source.Source
+
 	for _, sc := range cfg.Sources {
+		// Use taskset.Source when the new model is indicated (Name or EntryPath set).
+		if sc.Name != "" || sc.EntryPath != "" {
+			ts, err := buildTaskSetSource(sc, dataDir, log)
+			if err != nil {
+				return nil, nil, err
+			}
+			sources = append(sources, ts)
+			name := sourceNameFor(sc)
+			tasksetSources[name] = ts
+			continue
+		}
+
 		switch sc.Type {
 		case config.SourceTypeLocal:
 			s, err := local.New(sc.Path, sc.Path, log)
 			if err != nil {
-				return nil, fmt.Errorf("local source %q: %w", sc.Path, err)
+				return nil, nil, fmt.Errorf("local source %q: %w", sc.Path, err)
 			}
 			sources = append(sources, s)
 		case config.SourceTypeGit:
 			gs, err := gitSource.New(dataDir, sc.URL, sc.Branch, sc.PollInterval, sc.Auth.TokenEnv, sc.Auth.SSHKey, log)
 			if err != nil {
-				return nil, fmt.Errorf("git source %q: %w", sc.URL, err)
+				return nil, nil, fmt.Errorf("git source %q: %w", sc.URL, err)
 			}
 			sources = append(sources, gs)
 		default:
-			return nil, fmt.Errorf("unknown source type %q", sc.Type)
+			return nil, nil, fmt.Errorf("unknown source type %q", sc.Type)
 		}
 	}
-	return sources, nil
+
+	sourceMgr := webui.NewSourceManager(cfg, tasksetSources, dataDir, log)
+	return sources, sourceMgr, nil
+}
+
+// sourceNameFor derives the canonical name for a SourceConfig.
+// Must stay in sync with webui.sourceName.
+func sourceNameFor(sc config.SourceConfig) string {
+	if sc.Name != "" {
+		return sc.Name
+	}
+	base := sc.URL
+	if base == "" {
+		base = sc.Path
+	}
+	base = strings.TrimRight(base, "/")
+	name := filepath.Base(base)
+	if ext := filepath.Ext(name); ext == ".yaml" || ext == ".yml" {
+		name = strings.TrimSuffix(name, ext)
+	}
+	return name
+}
+
+// buildTaskSetSource creates a taskset.Source for a SourceConfig using the new model.
+func buildTaskSetSource(sc config.SourceConfig, dataDir string, log *zap.Logger) (*taskset.Source, error) {
+	// Derive namespace from Name, falling back to last segment of URL or Path.
+	namespace := sc.Name
+	if namespace == "" {
+		base := sc.URL
+		if base == "" {
+			base = sc.Path
+		}
+		// Strip trailing slashes and take the last path segment.
+		base = strings.TrimRight(base, "/")
+		namespace = filepath.Base(base)
+		// Strip common extensions from local paths.
+		if ext := filepath.Ext(namespace); ext == ".yaml" || ext == ".yml" {
+			namespace = strings.TrimSuffix(namespace, ext)
+		}
+	}
+
+	var rootRef *taskset.Ref
+	if sc.URL != "" {
+		entryPath := sc.EntryPath
+		if entryPath == "" {
+			entryPath = "taskset.yaml"
+		}
+		rootRef = &taskset.Ref{
+			URL:          sc.URL,
+			Branch:       sc.Branch,
+			Path:         entryPath,
+			PollInterval: sc.PollInterval,
+			Auth:         taskset.RefAuth{TokenEnv: sc.Auth.TokenEnv, SSHKey: sc.Auth.SSHKey},
+		}
+	} else {
+		// Local source: Path points to the taskset.yaml file.
+		entryPath := sc.Path
+		if sc.EntryPath != "" {
+			entryPath = sc.EntryPath
+		}
+		rootRef = &taskset.Ref{Path: entryPath}
+	}
+
+	id := sc.URL
+	if id == "" {
+		id = sc.Path
+	}
+
+	src := taskset.NewSource(id, namespace, rootRef, sc.ConfigPath, dataDir, false, sc.PollInterval, log)
+	return src, nil
 }
 
 func runTaskCmd(args []string) {

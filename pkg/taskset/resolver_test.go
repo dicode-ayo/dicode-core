@@ -1,0 +1,634 @@
+package taskset
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/dicode/dicode/pkg/task"
+	"go.uber.org/zap"
+)
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+func newResolver(t *testing.T) *Resolver {
+	t.Helper()
+	return NewResolver(t.TempDir(), false, zap.NewNop())
+}
+
+// writeTaskDir writes a minimal task.yaml + task.js into dir/name/ and returns
+// the absolute path to the task directory.
+func writeTaskDir(t *testing.T, parent, name string, extra ...string) string {
+	t.Helper()
+	dir := filepath.Join(parent, name)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	cron := "0 8 * * *"
+	if len(extra) > 0 {
+		cron = extra[0]
+	}
+	yaml := "kind: Task\napiVersion: dicode/v1\nname: " + name + "\nruntime: deno\ntrigger:\n  cron: \"" + cron + "\"\n"
+	writeFile(t, dir, "task.yaml", yaml)
+	writeFile(t, dir, "task.js", "// task")
+	return dir
+}
+
+// writeTaskSet writes a taskset.yaml into dir/name.yaml and returns the path.
+func writeTaskSetFile(t *testing.T, dir, name, content string) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, name)
+	writeFile(t, dir, name, content)
+	return p
+}
+
+// ── joinNamespace ─────────────────────────────────────────────────────────────
+
+func TestJoinNamespace(t *testing.T) {
+	tests := []struct{ ns, key, want string }{
+		{"infra", "deploy", "infra/deploy"},
+		{"", "deploy", "deploy"},
+		{"a/b", "c", "a/b/c"},
+	}
+	for _, tc := range tests {
+		got := joinNamespace(tc.ns, tc.key)
+		if got != tc.want {
+			t.Errorf("joinNamespace(%q,%q) = %q, want %q", tc.ns, tc.key, got, tc.want)
+		}
+	}
+}
+
+// ── buildOverrideLayers ───────────────────────────────────────────────────────
+
+func TestBuildOverrideLayers_Order(t *testing.T) {
+	cfg := &Defaults{Timeout: 10 * time.Second}
+	set := &Defaults{Timeout: 20 * time.Second}
+	parent := &Overrides{Defaults: &Defaults{Timeout: 30 * time.Second}}
+	parentEntry := &Overrides{Timeout: 40 * time.Second}
+	entry := &Overrides{Timeout: 50 * time.Second}
+
+	layers := buildOverrideLayers(cfg, set, parent, parentEntry, entry)
+
+	base := &task.Spec{Name: "x", Runtime: task.RuntimeDeno, Trigger: task.TriggerConfig{Manual: true}}
+	got := applyOverrides(base, layers...)
+	// Entry (50s) is highest.
+	if got.Timeout != 50*time.Second {
+		t.Errorf("leaf should win: got %v", got.Timeout)
+	}
+}
+
+func TestBuildOverrideLayers_ParentEntryBeatsParentDefaults(t *testing.T) {
+	parent := &Overrides{Defaults: &Defaults{Timeout: 30 * time.Second}}
+	parentEntry := &Overrides{Timeout: 40 * time.Second} // level 5 beats level 4
+
+	layers := buildOverrideLayers(nil, nil, parent, parentEntry, nil)
+	base := &task.Spec{Name: "x", Runtime: task.RuntimeDeno, Trigger: task.TriggerConfig{Manual: true}}
+	got := applyOverrides(base, layers...)
+	if got.Timeout != 40*time.Second {
+		t.Errorf("parent entry patch should beat parent defaults: got %v", got.Timeout)
+	}
+}
+
+// ── Resolver local resolution ─────────────────────────────────────────────────
+
+func TestResolver_SingleTask(t *testing.T) {
+	repoDir := t.TempDir()
+	taskDir := writeTaskDir(t, repoDir, "deploy")
+
+	tsContent := `
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: infra
+spec:
+  entries:
+    deploy:
+      ref:
+        path: ` + filepath.Join(taskDir, "task.yaml") + `
+`
+	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
+
+	r := newResolver(t)
+	rootRef := &Ref{Path: tsPath}
+	results, err := r.Resolve(context.Background(), "infra", rootRef, nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+	if results[0].ID != "infra/deploy" {
+		t.Errorf("ID: got %q", results[0].ID)
+	}
+	if results[0].Spec.Name != "deploy" {
+		t.Errorf("spec.name: %q", results[0].Spec.Name)
+	}
+}
+
+func TestResolver_NamespaceBuildsCorrectly(t *testing.T) {
+	repoDir := t.TempDir()
+	taskA := writeTaskDir(t, repoDir, "task-a")
+	taskB := writeTaskDir(t, repoDir, "task-b")
+
+	tsContent := `
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: root
+spec:
+  entries:
+    task-a:
+      ref:
+        path: ` + filepath.Join(taskA, "task.yaml") + `
+    task-b:
+      ref:
+        path: ` + filepath.Join(taskB, "task.yaml") + `
+`
+	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
+	r := newResolver(t)
+	results, err := r.Resolve(context.Background(), "team", &Ref{Path: tsPath}, nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	ids := make(map[string]bool)
+	for _, rt := range results {
+		ids[rt.ID] = true
+	}
+	if !ids["team/task-a"] || !ids["team/task-b"] {
+		t.Errorf("IDs: %v", ids)
+	}
+}
+
+func TestResolver_OverrideApplied(t *testing.T) {
+	repoDir := t.TempDir()
+	taskDir := writeTaskDir(t, repoDir, "deploy")
+
+	tsContent := `
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: infra
+spec:
+  entries:
+    deploy:
+      ref:
+        path: ` + filepath.Join(taskDir, "task.yaml") + `
+      overrides:
+        trigger:
+          cron: "0 2 * * *"
+        env:
+          - DEPLOY_TARGET=prod
+`
+	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
+	r := newResolver(t)
+	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("want 1")
+	}
+	spec := results[0].Spec
+	if spec.Trigger.Cron != "0 2 * * *" {
+		t.Errorf("cron: %q", spec.Trigger.Cron)
+	}
+	found := false
+	for _, e := range spec.Env {
+		if e == "DEPLOY_TARGET=prod" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("env not merged: %v", spec.Env)
+	}
+}
+
+func TestResolver_DisabledEntrySkipped(t *testing.T) {
+	repoDir := t.TempDir()
+	taskDir := writeTaskDir(t, repoDir, "deploy")
+
+	tsContent := `
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: infra
+spec:
+  entries:
+    deploy:
+      ref:
+        path: ` + filepath.Join(taskDir, "task.yaml") + `
+      overrides:
+        enabled: false
+`
+	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
+	r := newResolver(t)
+	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if len(results) != 0 {
+		t.Errorf("disabled task should not appear: %v", results)
+	}
+}
+
+func TestResolver_ParentEntryPatchDisables(t *testing.T) {
+	// Task is enabled in taskset.yaml but parent patches it to disabled.
+	repoDir := t.TempDir()
+	taskDir := writeTaskDir(t, repoDir, "deploy")
+
+	tsContent := `
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: backend
+spec:
+  entries:
+    deploy:
+      ref:
+        path: ` + filepath.Join(taskDir, "task.yaml") + `
+      overrides:
+        enabled: true
+`
+	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
+	r := newResolver(t)
+	parentOverrides := &Overrides{
+		Entries: map[string]*Overrides{
+			"deploy": {Enabled: boolPtr(false)},
+		},
+	}
+	results, err := r.Resolve(context.Background(), "infra/backend", &Ref{Path: tsPath}, nil, parentOverrides)
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if len(results) != 0 {
+		t.Errorf("parent disabled task should not appear: got %d results", len(results))
+	}
+}
+
+func TestResolver_SetDefaultsApplied(t *testing.T) {
+	repoDir := t.TempDir()
+	taskDir := writeTaskDir(t, repoDir, "deploy")
+
+	tsContent := `
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: infra
+spec:
+  defaults:
+    timeout: 90s
+    env:
+      - LOG=info
+  entries:
+    deploy:
+      ref:
+        path: ` + filepath.Join(taskDir, "task.yaml") + `
+`
+	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
+	r := newResolver(t)
+	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("want 1")
+	}
+	spec := results[0].Spec
+	if spec.Timeout != 90*time.Second {
+		t.Errorf("timeout from defaults: got %v", spec.Timeout)
+	}
+	found := false
+	for _, e := range spec.Env {
+		if e == "LOG=info" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("env from defaults not applied: %v", spec.Env)
+	}
+}
+
+func TestResolver_ConfigDefaultsApplied(t *testing.T) {
+	repoDir := t.TempDir()
+	taskDir := writeTaskDir(t, repoDir, "deploy")
+
+	tsContent := `
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: infra
+spec:
+  entries:
+    deploy:
+      ref:
+        path: ` + filepath.Join(taskDir, "task.yaml") + `
+`
+	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
+	r := newResolver(t)
+	configDefaults := &Defaults{
+		Timeout: 120 * time.Second,
+		Env:     []string{"RUNTIME_ENV=backend"},
+	}
+	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, configDefaults, nil)
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("want 1")
+	}
+	spec := results[0].Spec
+	if spec.Timeout != 120*time.Second {
+		t.Errorf("config defaults timeout: got %v", spec.Timeout)
+	}
+	found := false
+	for _, e := range spec.Env {
+		if e == "RUNTIME_ENV=backend" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("config env not applied: %v", spec.Env)
+	}
+}
+
+func TestResolver_EntryOverrideBeatsConfigDefaults(t *testing.T) {
+	// Entry overrides (level 6) must beat config defaults (level 2).
+	repoDir := t.TempDir()
+	taskDir := writeTaskDir(t, repoDir, "deploy")
+
+	tsContent := `
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: infra
+spec:
+  entries:
+    deploy:
+      ref:
+        path: ` + filepath.Join(taskDir, "task.yaml") + `
+      overrides:
+        timeout: 30s
+`
+	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
+	r := newResolver(t)
+	configDefaults := &Defaults{Timeout: 120 * time.Second}
+	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, configDefaults, nil)
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if results[0].Spec.Timeout != 30*time.Second {
+		t.Errorf("entry override should beat config defaults: got %v", results[0].Spec.Timeout)
+	}
+}
+
+func TestResolver_NestedTaskSet(t *testing.T) {
+	rootDir := t.TempDir()
+	nestedDir := t.TempDir()
+	taskDir := writeTaskDir(t, nestedDir, "api-deploy")
+
+	nestedTS := `
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: backend
+spec:
+  entries:
+    api-deploy:
+      ref:
+        path: ` + filepath.Join(taskDir, "task.yaml") + `
+`
+	nestedPath := writeTaskSetFile(t, nestedDir, "taskset.yaml", nestedTS)
+
+	rootTS := `
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: infra
+spec:
+  entries:
+    backend:
+      ref:
+        path: ` + nestedPath + `
+`
+	rootPath := writeTaskSetFile(t, rootDir, "taskset.yaml", rootTS)
+
+	r := newResolver(t)
+	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: rootPath}, nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("want 1, got %d", len(results))
+	}
+	if results[0].ID != "infra/backend/api-deploy" {
+		t.Errorf("nested ID: got %q", results[0].ID)
+	}
+}
+
+func TestResolver_NestedOverrideFromParent(t *testing.T) {
+	// Parent patches a task inside a nested set via overrides.entries.
+	rootDir := t.TempDir()
+	nestedDir := t.TempDir()
+	taskDir := writeTaskDir(t, nestedDir, "deploy")
+
+	nestedTS := `
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: backend
+spec:
+  entries:
+    deploy:
+      ref:
+        path: ` + filepath.Join(taskDir, "task.yaml") + `
+      overrides:
+        trigger:
+          cron: "0 4 * * *"
+`
+	nestedPath := writeTaskSetFile(t, nestedDir, "taskset.yaml", nestedTS)
+
+	rootTS := `
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: infra
+spec:
+  entries:
+    backend:
+      ref:
+        path: ` + nestedPath + `
+      overrides:
+        entries:
+          deploy:
+            trigger:
+              cron: "0 3 * * *"
+`
+	rootPath := writeTaskSetFile(t, rootDir, "taskset.yaml", rootTS)
+
+	r := newResolver(t)
+	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: rootPath}, nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("want 1, got %d", len(results))
+	}
+	// Nested entry's own override (0 4 * * *) beats parent entry patch (0 3 * * *) — leaf wins.
+	if results[0].Spec.Trigger.Cron != "0 4 * * *" {
+		t.Errorf("leaf should win: got %q", results[0].Spec.Trigger.Cron)
+	}
+}
+
+func TestResolver_RepoDedupLocalRefs(t *testing.T) {
+	// Two entries pointing to the same local path are both resolved correctly.
+	repoDir := t.TempDir()
+	taskA := writeTaskDir(t, repoDir, "task-a")
+	taskB := writeTaskDir(t, repoDir, "task-b")
+
+	tsContent := `
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: root
+spec:
+  entries:
+    task-a:
+      ref:
+        path: ` + filepath.Join(taskA, "task.yaml") + `
+    task-b:
+      ref:
+        path: ` + filepath.Join(taskB, "task.yaml") + `
+`
+	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
+	r := newResolver(t)
+	results, err := r.Resolve(context.Background(), "ns", &Ref{Path: tsPath}, nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("want 2, got %d", len(results))
+	}
+}
+
+func TestResolver_DevModeSubstitution(t *testing.T) {
+	// When devMode is true and a ref has a DevRef, the DevRef is used.
+	repoDir := t.TempDir()
+	devDir := t.TempDir()
+
+	// "remote" task has cron 0 8 * * *, dev task has cron 0 1 * * *
+	writeTaskDir(t, repoDir, "deploy", "0 8 * * *")
+	writeTaskDir(t, devDir, "deploy", "0 1 * * *") // dev version
+
+	tsContent := `
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: infra
+spec:
+  entries:
+    deploy:
+      ref:
+        path: ` + filepath.Join(repoDir, "deploy", "task.yaml") + `
+        dev_ref:
+          path: ` + filepath.Join(devDir, "deploy", "task.yaml") + `
+`
+	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
+
+	// dev mode OFF — should use remote (0 8)
+	r := NewResolver(t.TempDir(), false, zap.NewNop())
+	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if results[0].Spec.Trigger.Cron != "0 8 * * *" {
+		t.Errorf("dev mode off: got %q", results[0].Spec.Trigger.Cron)
+	}
+
+	// dev mode ON — should use dev ref (0 1)
+	rDev := NewResolver(t.TempDir(), true, zap.NewNop())
+	resultsDev, err := rDev.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if resultsDev[0].Spec.Trigger.Cron != "0 1 * * *" {
+		t.Errorf("dev mode on: got %q", resultsDev[0].Spec.Trigger.Cron)
+	}
+}
+
+func TestResolver_InlineTask(t *testing.T) {
+	repoDir := t.TempDir()
+
+	tsContent := `
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: infra
+spec:
+  entries:
+    health-check:
+      inline:
+        name: Health Check
+        runtime: deno
+        trigger:
+          manual: true
+`
+	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
+	r := newResolver(t)
+	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("want 1, got %d", len(results))
+	}
+	if results[0].ID != "infra/health-check" {
+		t.Errorf("ID: %q", results[0].ID)
+	}
+	if !results[0].Spec.Trigger.Manual {
+		t.Error("trigger.manual should be true")
+	}
+}
+
+// ── mergeOverrides ────────────────────────────────────────────────────────────
+
+func TestMergeOverrides_BNil(t *testing.T) {
+	a := &Overrides{Timeout: 10 * time.Second}
+	got := mergeOverrides(a, nil)
+	if got.Timeout != 10*time.Second {
+		t.Errorf("got %v", got.Timeout)
+	}
+}
+
+func TestMergeOverrides_ANil(t *testing.T) {
+	b := &Overrides{Timeout: 20 * time.Second}
+	got := mergeOverrides(nil, b)
+	if got.Timeout != 20*time.Second {
+		t.Errorf("got %v", got.Timeout)
+	}
+}
+
+func TestMergeOverrides_BWins(t *testing.T) {
+	a := &Overrides{Timeout: 10 * time.Second}
+	b := &Overrides{Timeout: 20 * time.Second}
+	got := mergeOverrides(a, b)
+	if got.Timeout != 20*time.Second {
+		t.Errorf("b should win: got %v", got.Timeout)
+	}
+}
+
+func TestMergeOverrides_EntriesMerged(t *testing.T) {
+	a := &Overrides{Entries: map[string]*Overrides{"x": {Timeout: 5 * time.Second}}}
+	b := &Overrides{Entries: map[string]*Overrides{"y": {Timeout: 10 * time.Second}}}
+	got := mergeOverrides(a, b)
+	if got.Entries["x"] == nil {
+		t.Error("x from a missing")
+	}
+	if got.Entries["y"] == nil {
+		t.Error("y from b missing")
+	}
+}
