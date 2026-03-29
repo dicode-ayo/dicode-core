@@ -1,3 +1,5 @@
+apiVersion: dicode/v1
+kind: Task
 description: Starts an Nginx container serving /tmp on port 8888. Kill from the run page when done.
 docker:
     image: nginx:alpine

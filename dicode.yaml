@@ -20,5 +20,6 @@ server:
     secret: ""
     tray: true
 sources:
-    - path: /home/dr14/dicode/examples
+    - name: examples
+      path: /home/dr14/dicode/examples/taskset.yaml
       type: local
