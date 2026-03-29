@@ -71,12 +71,14 @@ Tracking implementation of the TaskSet architecture refactor.
 - [x] Dev ref substitution: `dev_ref` replaces `ref` when resolver devMode is active
 - [x] `taskset.Source.SetDevMode(ctx, enabled, localPath)` — runtime dev mode toggle
 - [x] `taskset.Resolver.SetDevMode(enabled)` — mutex-safe devMode update
-- [ ] Auto-branch logic: create `dicode/dev-<taskId>` branch in cloned repo
-- [ ] `--dev` CLI flag wired through to resolver
+- [-] Auto-branch logic: deferred — `local_path` in `switch_dev_mode` covers the AI workflow
+- [-] `--dev` CLI flag: deferred — API-driven toggle is sufficient for current use cases
 
 ---
 
 ## Phase 5 — Web UI
+
+> Deferred to a follow-up PR. Backend API is complete; UI wires up when the SPA is updated.
 
 - [ ] Namespace-aware task list (group by namespace segments)
 - [ ] Show full task ID `infra/backend/deploy` in run logs and task detail
@@ -85,11 +87,8 @@ Tracking implementation of the TaskSet architecture refactor.
 
 ### Source / Ref Management UI
 
-- [ ] **Add source dialog**: form to add a new git ref (url, branch, path, auth token env)
-- [ ] **Edit source dialog**: change branch or path on an existing source (writes back to `dicode.yaml`)
-- [ ] **Branch picker**: dropdown populated from remote branches via `GET /api/sources/:name/branches`
-- [ ] **Dev mode toggle per ref**: switch icon/button on each source row in the UI
-  - Active dev mode shown with a visual indicator (e.g. badge on the source)
+- [ ] **Branch picker**: dropdown populated from `GET /api/sources/:name/branches`
+- [ ] **Dev mode toggle per ref**: switch icon/button in Sources panel
   - Toggle calls `PATCH /api/sources/:name/dev`
   - State held in runtime memory (not committed to `taskset.yaml`)
 
@@ -139,8 +138,10 @@ When an AI agent is asked "create a new task for X":
 
 ## Phase 6 — Migration Guide
 
-- [ ] Document how to add `name` and `path` to an existing `sources` entry to opt in
-- [ ] Document backward-compat rules (no `taskset.yaml` → existing `tasks/` scan)
+> Deferred to a follow-up PR.
+
+- [ ] Document how to add `name` and `entry_path` to an existing `sources` entry to opt in
+- [-] Backward-compat rules: dropped — `kind` is required, no legacy `tasks/` scan
 - [ ] Add `dicode migrate` dry-run command: reads existing source, proposes `taskset.yaml`
 - [ ] Update `examples/` in the repo with real before/after configs
 
