@@ -4,6 +4,7 @@ package registry
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"sort"
 	"sync"
 	"time"
@@ -12,6 +13,10 @@ import (
 	"github.com/dicode/dicode/pkg/task"
 	"github.com/google/uuid"
 )
+
+// ansiEscape matches ANSI/VT100 escape sequences (colours, cursor movement, etc.).
+// Stripped from log messages before storage so the UI does not render raw codes.
+var ansiEscape = regexp.MustCompile(`\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])`)
 
 // RunStatus values.
 const (
@@ -143,6 +148,7 @@ func (r *Registry) SetLogHook(fn func(runID, level, msg string, ts int64)) {
 
 // AppendLog adds a log entry for a run.
 func (r *Registry) AppendLog(ctx context.Context, runID, level, msg string) error {
+	msg = ansiEscape.ReplaceAllString(msg, "")
 	now := time.Now().UnixMilli()
 	if err := r.db.Exec(ctx,
 		`INSERT INTO run_logs (run_id, ts, level, message) VALUES (?, ?, ?, ?)`,
