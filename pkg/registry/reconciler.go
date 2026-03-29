@@ -116,14 +116,22 @@ func (rc *Reconciler) startSource(src source.Source) error {
 func (rc *Reconciler) handle(ev source.Event) {
 	switch ev.Kind {
 	case source.EventAdded, source.EventUpdated:
-		spec, err := task.LoadDir(ev.TaskDir)
-		if err != nil {
-			rc.log.Warn("failed to load task",
-				zap.String("task", ev.TaskID),
-				zap.String("source", ev.Source),
-				zap.Error(err),
-			)
-			return
+		var spec *task.Spec
+		if ev.Spec != nil {
+			// TaskSet sources pre-resolve the spec (overrides already applied).
+			spec = ev.Spec
+			spec.ID = ev.TaskID
+		} else {
+			var err error
+			spec, err = task.LoadDir(ev.TaskDir)
+			if err != nil {
+				rc.log.Warn("failed to load task",
+					zap.String("task", ev.TaskID),
+					zap.String("source", ev.Source),
+					zap.Error(err),
+				)
+				return
+			}
 		}
 		if err := rc.registry.Register(spec); err != nil {
 			rc.log.Error("failed to register task", zap.String("task", ev.TaskID), zap.Error(err))

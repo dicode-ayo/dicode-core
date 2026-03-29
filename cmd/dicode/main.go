@@ -18,10 +18,14 @@ import (
 	podmanruntime "github.com/dicode/dicode/pkg/runtime/podman"
 	pythonruntime "github.com/dicode/dicode/pkg/runtime/python"
 	"github.com/dicode/dicode/pkg/secrets"
+	"path/filepath"
+	"strings"
+
 	"github.com/dicode/dicode/pkg/source"
 	gitSource "github.com/dicode/dicode/pkg/source/git"
 	"github.com/dicode/dicode/pkg/source/local"
 	"github.com/dicode/dicode/pkg/task"
+	"github.com/dicode/dicode/pkg/taskset"
 	"github.com/dicode/dicode/pkg/tray"
 	"github.com/dicode/dicode/pkg/trigger"
 	"github.com/dicode/dicode/pkg/webui"
@@ -277,6 +281,16 @@ func buildSources(cfg *config.Config, log *zap.Logger) ([]source.Source, error) 
 	}
 	var sources []source.Source
 	for _, sc := range cfg.Sources {
+		// Use taskset.Source when the new model is indicated (Name or EntryPath set).
+		if sc.Name != "" || sc.EntryPath != "" {
+			src, err := buildTaskSetSource(sc, dataDir, log)
+			if err != nil {
+				return nil, err
+			}
+			sources = append(sources, src)
+			continue
+		}
+
 		switch sc.Type {
 		case config.SourceTypeLocal:
 			s, err := local.New(sc.Path, sc.Path, log)
@@ -295,6 +309,55 @@ func buildSources(cfg *config.Config, log *zap.Logger) ([]source.Source, error) 
 		}
 	}
 	return sources, nil
+}
+
+// buildTaskSetSource creates a taskset.Source for a SourceConfig using the new model.
+func buildTaskSetSource(sc config.SourceConfig, dataDir string, log *zap.Logger) (source.Source, error) {
+	// Derive namespace from Name, falling back to last segment of URL or Path.
+	namespace := sc.Name
+	if namespace == "" {
+		base := sc.URL
+		if base == "" {
+			base = sc.Path
+		}
+		// Strip trailing slashes and take the last path segment.
+		base = strings.TrimRight(base, "/")
+		namespace = filepath.Base(base)
+		// Strip common extensions from local paths.
+		if ext := filepath.Ext(namespace); ext == ".yaml" || ext == ".yml" {
+			namespace = strings.TrimSuffix(namespace, ext)
+		}
+	}
+
+	var rootRef *taskset.Ref
+	if sc.URL != "" {
+		entryPath := sc.EntryPath
+		if entryPath == "" {
+			entryPath = "taskset.yaml"
+		}
+		rootRef = &taskset.Ref{
+			URL:          sc.URL,
+			Branch:       sc.Branch,
+			Path:         entryPath,
+			PollInterval: sc.PollInterval,
+			Auth:         taskset.RefAuth{TokenEnv: sc.Auth.TokenEnv, SSHKey: sc.Auth.SSHKey},
+		}
+	} else {
+		// Local source: Path points to the taskset.yaml file.
+		entryPath := sc.Path
+		if sc.EntryPath != "" {
+			entryPath = sc.EntryPath
+		}
+		rootRef = &taskset.Ref{Path: entryPath}
+	}
+
+	id := sc.URL
+	if id == "" {
+		id = sc.Path
+	}
+
+	src := taskset.NewSource(id, namespace, rootRef, sc.ConfigPath, dataDir, false, sc.PollInterval, log)
+	return src, nil
 }
 
 func runTaskCmd(args []string) {

@@ -2,7 +2,11 @@
 // reconciler. Concrete implementations (git, local) live in sub-packages.
 package source
 
-import "context"
+import (
+	"context"
+
+	"github.com/dicode/dicode/pkg/task"
+)
 
 // EventKind classifies a task change detected by a source.
 type EventKind string
@@ -13,12 +17,16 @@ const (
 	EventUpdated EventKind = "updated"
 )
 
-// Event is emitted by a Source when a task directory changes.
+// Event is emitted by a Source when a task changes.
 type Event struct {
 	Kind    EventKind
-	TaskID  string // directory name, e.g. "morning-email-check"
-	TaskDir string // absolute path to the task directory
-	Source  string // source identifier (URL or path) for logging
+	TaskID  string     // namespaced task ID, e.g. "infra/backend/deploy"
+	TaskDir string     // absolute path to the task directory (used by reconciler for LoadDir)
+	Source  string     // source identifier (URL or path) for logging
+	// Spec, when non-nil, is a fully resolved task spec (overrides already applied).
+	// The reconciler uses it directly instead of calling task.LoadDir(TaskDir).
+	// Set by taskset sources; nil for plain git/local sources.
+	Spec *task.Spec
 }
 
 // Source is anything that can produce task change events.
