@@ -27,8 +27,10 @@ type Source struct {
 	pollInterval time.Duration
 	log          *zap.Logger
 
-	mu       sync.Mutex
-	snapshot map[string]taskSnap // namespaced taskID → snapshot
+	mu          sync.Mutex
+	snapshot    map[string]taskSnap // namespaced taskID → snapshot
+	ch          chan source.Event   // live channel set by Start; nil before Start
+	devRootPath string             // non-empty overrides rootRef.Path in dev mode
 }
 
 type taskSnap struct {
@@ -76,6 +78,9 @@ func (s *Source) ID() string { return s.id }
 // The returned channel is closed when ctx is cancelled.
 func (s *Source) Start(ctx context.Context) (<-chan source.Event, error) {
 	ch := make(chan source.Event, 64)
+	s.mu.Lock()
+	s.ch = ch
+	s.mu.Unlock()
 
 	if err := s.syncAndEmit(ctx, ch); err != nil {
 		s.log.Warn("taskset source: initial resolution failed",
@@ -85,6 +90,31 @@ func (s *Source) Start(ctx context.Context) (<-chan source.Event, error) {
 
 	go s.poll(ctx, ch)
 	return ch, nil
+}
+
+// SetDevMode enables or disables dev mode for this source.
+// localPath, when non-empty, overrides the root entry point to that local yaml path.
+// Triggers an immediate re-sync so changes are reflected in the registry.
+func (s *Source) SetDevMode(ctx context.Context, enabled bool, localPath string) error {
+	s.resolver.SetDevMode(enabled)
+	s.mu.Lock()
+	s.devRootPath = localPath
+	ch := s.ch
+	s.mu.Unlock()
+	if ch == nil {
+		return nil // not started yet; will take effect on next Start
+	}
+	return s.syncAndEmit(ctx, ch)
+}
+
+// DevMode reports whether dev mode is currently active.
+func (s *Source) DevMode() bool { return s.resolver.DevMode() }
+
+// DevRootPath returns the current dev-mode local path override (empty if none).
+func (s *Source) DevRootPath() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.devRootPath
 }
 
 // Sync triggers an immediate re-resolution without emitting events.
@@ -175,7 +205,16 @@ func (s *Source) resolve(ctx context.Context) ([]*ResolvedTask, error) {
 			zap.String("path", s.configPath), zap.Error(err))
 		// Non-fatal — proceed without config defaults.
 	}
-	return s.resolver.Resolve(ctx, s.namespace, s.rootRef, configDefaults, nil)
+
+	rootRef := s.rootRef
+	s.mu.Lock()
+	devRootPath := s.devRootPath
+	s.mu.Unlock()
+	if devRootPath != "" && s.resolver.DevMode() {
+		rootRef = &Ref{Path: devRootPath}
+	}
+
+	return s.resolver.Resolve(ctx, s.namespace, rootRef, configDefaults, nil)
 }
 
 func (s *Source) loadConfigDefaults() (*Defaults, error) {
