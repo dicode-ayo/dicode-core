@@ -56,11 +56,37 @@ server:
 
 ## Frontend
 
-The UI uses [HTMX](https://htmx.org) — HTML with `hx-*` attributes for dynamic behavior. No npm, no build step, no JavaScript framework.
+The UI is a single-page application (SPA) built with [Lit](https://lit.dev) web components. No npm build step — all files are plain ESM modules loaded directly by the browser.
 
-All HTML templates are embedded via `//go:embed templates/` and served by the chi HTTP router. The only client-side JavaScript is HTMX itself (~14KB gzipped, also embedded).
+All frontend assets are embedded in the binary via `//go:embed static` and served under `/app/*`. The entry point is `static/app/index.html`, which loads `app.js` as an ES module. A catch-all route (`/*`) serves `index.html` for all unmatched paths so client-side navigation works on reload.
 
-Live log streaming uses Server-Sent Events (SSE) — supported natively in all modern browsers.
+### Components
+
+| File | Component | Description |
+|---|---|---|
+| `components/dc-task-list.js` | `<dc-task-list>` | Task list page |
+| `components/dc-task-detail.js` | `<dc-task-detail>` | Task detail, file viewer, run history |
+| `components/dc-run-detail.js` | `<dc-run-detail>` | Run detail, live log viewer |
+| `components/dc-config.js` | `<dc-config>` | Config editor |
+| `components/dc-secrets.js` | `<dc-secrets>` | Secrets manager |
+| `components/dc-log-bar.js` | `<dc-log-bar>` | Global log bar (bottom of every page) |
+| `components/dc-notif-panel.js` | `<dc-notif-panel>` | Notification panel |
+
+### Client-side routing
+
+`lib/router.js` matches `location.pathname` against regex routes and mounts the appropriate Lit component into `<div id="app">`. Navigation uses `history.pushState` — no full page reloads.
+
+### Real-time: WebSocket
+
+All real-time data flows over a single persistent WebSocket at `/ws`:
+
+- On connect, the client sends `{ type: "sub:logs" }` to subscribe to log lines
+- The server pushes log lines, run status changes, and task registration events as JSON messages
+- `lib/ws.js` handles connect, dispatch by message type, and auto-reconnect (3 s backoff)
+
+The old SSE endpoint (`/api/runs/{runID}/logs/stream`) is still available for direct log streaming.
+
+> **Development note:** static files are embedded in the binary via `//go:embed static`. Changes to frontend files require a binary rebuild (`make run`) to take effect.
 
 ---
 
