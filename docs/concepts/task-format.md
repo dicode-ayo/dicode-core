@@ -2,23 +2,27 @@
 
 Every dicode task is a folder containing up to three files:
 
-```
+```text
 tasks/
 └── morning-email-check/
     ├── task.yaml       ← required: trigger, params, env, metadata
-    ├── task.js         ← required: JavaScript logic
-    └── task.test.js    ← optional: unit tests
+    ├── task.ts         ← required: TypeScript/JS logic (Deno runtime)
+    └── task.test.ts    ← optional: unit tests
 ```
 
-The folder name is the task ID. It must be unique across all sources.
+When using a TaskSet source, the folder name is not the task ID — instead, the ID is built from the namespace path (e.g. `infra/morning-email-check`).
 
 ---
 
 ## `task.yaml`
 
+All task files must declare `apiVersion` and `kind`:
+
 ### Minimal example
 
 ```yaml
+apiVersion: dicode/v1
+kind: Task
 name: Morning Email Check
 trigger:
   cron: "0 8 * * *"
@@ -27,6 +31,8 @@ trigger:
 ### Full example
 
 ```yaml
+apiVersion: dicode/v1
+kind: Task
 name: Morning Email Digest
 description: Fetches unread emails and posts a summary to Slack
 runtime: js

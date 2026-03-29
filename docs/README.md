@@ -12,7 +12,7 @@
 |---|---|
 | [Task Format](./concepts/task-format.md) | `task.yaml`, `task.js`, `task.test.js` |
 | [JS Runtime](./concepts/js-runtime.md) | goja engine, all injected globals |
-| [Sources & Reconciler](./concepts/sources.md) | git source, local source, reconciliation loop |
+| [Sources & Reconciler](./concepts/sources.md) | TaskSet source, git source, local source, dev mode, reconciliation loop |
 | [Triggers](./concepts/triggers.md) | cron, webhook, manual, chain |
 | [Task Chaining](./concepts/task-chaining.md) | chain triggers, `dicode.trigger()`, pipeline north star |
 | [Secrets](./concepts/secrets.md) | provider chain, local encrypted store, external providers |
