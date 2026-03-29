@@ -113,8 +113,12 @@ func TestEngine_WebhookHandler(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), "runId") {
-		t.Errorf("expected runId in response, got: %s", w.Body.String())
+	// Sync mode: response is the task's return value with X-Run-Id header.
+	if !strings.Contains(w.Body.String(), "webhook-ok") {
+		t.Errorf("expected return value in response, got: %s", w.Body.String())
+	}
+	if w.Header().Get("X-Run-Id") == "" {
+		t.Errorf("expected X-Run-Id header")
 	}
 }
 

@@ -351,11 +351,13 @@ func (s *Server) Handler() http.Handler {
 		r.Mount("/mcp", mcpSrv.Handler())
 	}
 
-	// Webhook passthrough
-	r.Post("/hooks/*", func(w http.ResponseWriter, req *http.Request) {
+	// Webhook passthrough — POST accepts a JSON body; GET accepts query params.
+	webhookHandler := func(w http.ResponseWriter, req *http.Request) {
 		req.URL.Path = "/hooks/" + chi.URLParam(req, "*")
 		s.engine.WebhookHandler().ServeHTTP(w, req)
-	})
+	}
+	r.Get("/hooks/*", webhookHandler)
+	r.Post("/hooks/*", webhookHandler)
 
 	// Static SPA assets (/app/app.js, etc.)
 	appFS, _ := fs.Sub(staticFS, "static")
