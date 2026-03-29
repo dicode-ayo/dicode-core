@@ -453,12 +453,17 @@ func (e *Engine) WebhookHandler() http.Handler {
 			}
 		}
 
+		// Extract a flat string map from the input so it is accessible via
+		// params.get() in task scripts (RunOptions.Params), in addition to the
+		// raw input being available as the `input` global (RunOptions.Input).
+		params := flatStringMap(input)
+
 		// Default: wait for the run to finish and return the result inline.
 		// Pass ?wait=false to fire-and-forget (returns runId immediately).
 		async := r.URL.Query().Get("wait") == "false"
 
 		if async {
-			runID, err := e.fireAsync(r.Context(), spec, pkgruntime.RunOptions{Input: input}, "webhook")
+			runID, err := e.fireAsync(r.Context(), spec, pkgruntime.RunOptions{Input: input, Params: params}, "webhook")
 			if err != nil {
 				http.Error(w, "task failed to start", http.StatusInternalServerError)
 				return
@@ -469,7 +474,7 @@ func (e *Engine) WebhookHandler() http.Handler {
 			return
 		}
 
-		runID, result, err := e.fireSync(spec, pkgruntime.RunOptions{Input: input}, "webhook")
+		runID, result, err := e.fireSync(spec, pkgruntime.RunOptions{Input: input, Params: params}, "webhook")
 		if err != nil {
 			http.Error(w, "task failed to start", http.StatusInternalServerError)
 			return
@@ -514,6 +519,20 @@ func (e *Engine) WebhookHandler() http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"runId": runID, "status": status})
 	})
+}
+
+// flatStringMap converts a map[string]interface{} into a map[string]string by
+// formatting each value with %v. Returns nil if input is not a flat map.
+func flatStringMap(v interface{}) map[string]string {
+	m, ok := v.(map[string]interface{})
+	if !ok || len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, val := range m {
+		out[k] = fmt.Sprintf("%v", val)
+	}
+	return out
 }
 
 // injectDicodeSDK injects the dicode client SDK script and context meta tags
