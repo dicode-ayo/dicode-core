@@ -59,7 +59,7 @@ type SecretProviderConfig struct {
 
 type NotificationsConfig struct {
 	// OnFailure sends a notification when a task run fails. Defaults to true.
-	OnFailure *bool                 `yaml:"on_failure,omitempty"`
+	OnFailure *bool `yaml:"on_failure,omitempty"`
 	// OnSuccess sends a notification when a task run succeeds. Defaults to false.
 	OnSuccess *bool                 `yaml:"on_success,omitempty"`
 	Provider  *NotifyProviderConfig `yaml:"provider,omitempty"`

@@ -37,7 +37,7 @@ type Source struct {
 	snapshot    map[string]taskSnap // namespaced taskID → snapshot
 	ch          chan source.Event   // live channel set by Start; nil before Start
 	devRootPath string              // non-empty overrides rootRef.Path in dev mode
-	watchRoot   string             // directory watched by fsnotify; set in Start
+	watchRoot   string              // directory watched by fsnotify; set in Start
 }
 
 type taskSnap struct {
