@@ -32,60 +32,37 @@
   }
 
   // ── ANSI → HTML ──────────────────────────────────────────────────────────
-  // Catppuccin Mocha palette mapped to standard ANSI foreground colour codes.
-  var ANSI_FG = {
-    30: '#585b70', 31: '#f38ba8', 32: '#a6e3a1', 33: '#f9e2af',
-    34: '#89b4fa', 35: '#cba6f7', 36: '#89dceb', 37: '#cdd6f4',
-    90: '#6c7086', 91: '#f38ba8', 92: '#a6e3a1', 93: '#f9e2af',
-    94: '#89b4fa', 95: '#cba6f7', 96: '#89dceb', 97: '#cdd6f4'
-  };
+  // Use ansi-to-html from esm.sh (same package as the main UI uses).
+  // Dynamic import so this standalone script doesn't need to be a module.
+  // Until the package loads, ansiToHtml falls back to HTML-escaping only.
+
+  var _convert = null;
+  import('https://esm.sh/ansi-to-html@0.7.2').then(function (m) {
+    _convert = new m.default({
+      fg: '#cdd6f4', bg: '#1e1e2e', newline: false, escapeXML: true,
+      colors: {
+        0:  '#585b70', 1:  '#f38ba8', 2:  '#a6e3a1', 3:  '#f9e2af',
+        4:  '#89b4fa', 5:  '#cba6f7', 6:  '#89dceb', 7:  '#cdd6f4',
+        8:  '#6c7086', 9:  '#f38ba8', 10: '#a6e3a1', 11: '#f9e2af',
+        12: '#89b4fa', 13: '#cba6f7', 14: '#89dceb', 15: '#cdd6f4',
+      },
+    });
+  });
 
   function escHtml(s) {
     return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
 
   /**
-   * Convert a string containing ANSI SGR escape sequences to an HTML string.
-   * Text content is HTML-escaped; styles become inline <span> elements.
-   * Safe to set as innerHTML / insertAdjacentHTML.
+   * Convert a string containing ANSI escape sequences to an HTML string.
+   * Falls back to plain HTML-escaping until ansi-to-html finishes loading.
+   * Safe for innerHTML / insertAdjacentHTML.
    *
    * @param {string} text
    * @returns {string}
    */
   function ansiToHtml(text) {
-    var parts  = text.split(/(\x1b\[[0-9;]*m)/);
-    var out    = '';
-    var bold   = false, italic = false, color = '';
-
-    for (var i = 0; i < parts.length; i++) {
-      var part = parts[i];
-      if (part.charAt(0) === '\x1b' && part.charAt(part.length - 1) === 'm') {
-        var seq   = part.slice(2, -1);
-        var codes = seq === '' ? [0] : seq.split(';');
-        for (var j = 0; j < codes.length; j++) {
-          var c = parseInt(codes[j], 10) || 0;
-          if      (c === 0)  { bold = false; italic = false; color = ''; }
-          else if (c === 1)  { bold   = true;  }
-          else if (c === 3)  { italic = true;  }
-          else if (c === 22) { bold   = false; }
-          else if (c === 23) { italic = false; }
-          else if (c === 39) { color  = '';    }
-          else if (ANSI_FG[c]) { color = ANSI_FG[c]; }
-        }
-      } else if (part !== '') {
-        var escaped = escHtml(part);
-        if (bold || italic || color) {
-          var styles = [];
-          if (bold)   styles.push('font-weight:bold');
-          if (italic) styles.push('font-style:italic');
-          if (color)  styles.push('color:' + color);
-          out += '<span style="' + styles.join(';') + '">' + escaped + '</span>';
-        } else {
-          out += escaped;
-        }
-      }
-    }
-    return out;
+    return _convert ? _convert.toHtml(text) : escHtml(text);
   }
 
   var dicode = {
