@@ -43,3 +43,100 @@ jobs:
             echo "$unformatted"
             exit 1
           fi
+
+  build-pr:
+    name: Build PR artifacts
+    if: github.event_name == 'pull_request'
+    needs: [test, lint]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          mkdir -p dist
+          go build \
+            -ldflags "-X main.version=pr-${{ github.event.pull_request.number }} -s -w" \
+            -o "dist/dicode-${{ matrix.goos }}-${{ matrix.goarch }}" \
+            ./cmd/dicode/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dicode-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/dicode-${{ matrix.goos }}-${{ matrix.goarch }}
+          retention-days: 7
+
+  comment-pr:
+    name: Comment on PR
+    if: github.event_name == 'pull_request'
+    needs: build-pr
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Post artifact links
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const sha = context.payload.pull_request.head.sha.slice(0, 7);
+            const body = [
+              '## Build Artifacts',
+              '',
+              `Dev binaries for commit \`${sha}\` (Linux only — macOS/Windows built on release):`,
+              '',
+              '| Platform | Download |',
+              '| --- | --- |',
+              `| linux/amd64 | [dicode-linux-amd64](${runUrl}#artifacts) |`,
+              `| linux/arm64 | [dicode-linux-arm64](${runUrl}#artifacts) |`,
+              '',
+              `> Artifacts expire after 7 days. [View run](${runUrl})`,
+              '<!-- dicode-build-artifacts -->',
+            ].join('\n');
+
+            const marker = '<!-- dicode-build-artifacts -->';
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+            });
+            const existing = comments.find(c =>
+              c.user.type === 'Bot' && c.body.includes(marker)
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.payload.pull_request.number,
+                body,
+              });
+            }

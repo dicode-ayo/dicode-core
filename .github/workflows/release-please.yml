@@ -4,6 +4,12 @@ on:
   push:
     branches: [main]
 
+# Prevent concurrent runs on main so that a release-please follow-up commit
+# never cancels the build jobs started by the release commit.
+concurrency:
+  group: release-please-main
+  cancel-in-progress: false
+
 permissions:
   contents: write
   pull-requests: write
@@ -14,6 +20,7 @@ jobs:
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
+      upload_url: ${{ steps.release.outputs.upload_url }}
     steps:
       - uses: googleapis/release-please-action@v4
         id: release
@@ -65,27 +72,28 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: ${{ matrix.cgo }}
         run: |
-          VERSION=${{ needs.release-please.outputs.tag_name }}
-          BINARY_NAME=dicode
-          if [ "$GOOS" = "windows" ]; then
-            BINARY_NAME=dicode.exe
-          fi
+          TAG=${{ needs.release-please.outputs.tag_name }}
+          BINARY=dicode
+          if [ "$GOOS" = "windows" ]; then BINARY=dicode.exe; fi
           mkdir -p dist
           go build \
-            -ldflags "-X main.version=${VERSION} -s -w" \
-            -o "dist/${BINARY_NAME}" \
+            -ldflags "-X main.version=${TAG} -s -w" \
+            -o "dist/${BINARY}" \
             ./cmd/dicode/
 
       - name: Create archive
         shell: bash
         run: |
-          ARCHIVE_NAME="dicode-${{ needs.release-please.outputs.tag_name }}-${{ matrix.goos }}-${{ matrix.goarch }}"
+          TAG=${{ needs.release-please.outputs.tag_name }}
+          # Strip the package-name prefix so the archive is just dicode-v0.0.2-linux-amd64
+          VERSION=${TAG#dicode-}
+          ARCHIVE="dicode-${VERSION}-${{ matrix.goos }}-${{ matrix.goarch }}"
           if [ "${{ matrix.goos }}" = "windows" ]; then
-            cd dist && zip "${ARCHIVE_NAME}.zip" dicode.exe && cd ..
-            echo "ASSET_PATH=dist/${ARCHIVE_NAME}.zip" >> $GITHUB_ENV
+            cd dist && zip "${ARCHIVE}.zip" dicode.exe && cd ..
+            echo "ASSET=dist/${ARCHIVE}.zip" >> $GITHUB_ENV
           else
-            tar -czf "dist/${ARCHIVE_NAME}.tar.gz" -C dist dicode
-            echo "ASSET_PATH=dist/${ARCHIVE_NAME}.tar.gz" >> $GITHUB_ENV
+            tar -czf "dist/${ARCHIVE}.tar.gz" -C dist dicode
+            echo "ASSET=dist/${ARCHIVE}.tar.gz" >> $GITHUB_ENV
           fi
 
       - name: Upload release asset
@@ -93,4 +101,18 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload ${{ needs.release-please.outputs.tag_name }} "$ASSET_PATH"
+          gh release upload ${{ needs.release-please.outputs.tag_name }} "$ASSET"
+
+  publish:
+    name: Publish release
+    needs: [release-please, build]
+    if: ${{ needs.release-please.outputs.release_created }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Undraft release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release edit ${{ needs.release-please.outputs.tag_name }} \
+            --draft=false \
+            --repo ${{ github.repository }}
