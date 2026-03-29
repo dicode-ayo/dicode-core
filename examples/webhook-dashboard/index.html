@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>System Dashboard</title>
+  <link rel="stylesheet" href="style.css">
+  <!--
+    dicode.js is automatically injected here by dicode when serving this page.
+    This example uses dicode.execute() directly (Level 3) for full control:
+    live log streaming into a status bar + custom tile rendering from the
+    task's JSON return value.
+  -->
+</head>
+<body>
+<header>
+  <div>
+    <h1>System Dashboard</h1>
+    <p class="subtitle">Live data from your local dicode runtime</p>
+  </div>
+  <button id="refresh-btn">Refresh</button>
+</header>
+
+<pre id="log-stream"></pre>
+<div class="grid" id="grid"></div>
+<p id="status"></p>
+
+<script>
+  var logEl    = document.getElementById('log-stream');
+  var gridEl   = document.getElementById('grid');
+  var statusEl = document.getElementById('status');
+  var btn      = document.getElementById('refresh-btn');
+
+  function fmt(bytes) {
+    return (bytes / 1024 / 1024).toFixed(1) + ' MB';
+  }
+
+  function renderTiles(data) {
+    var tiles = [
+      { label: 'Deno',       value: data.deno },
+      { label: 'TypeScript', value: data.typescript },
+      { label: 'V8',         value: data.v8 },
+      { label: 'OS',         value: data.os + ' / ' + data.arch },
+      { label: 'PID',        value: data.pid },
+      { label: 'Heap used',  value: fmt(data.memory.heapUsed) },
+      { label: 'Heap total', value: fmt(data.memory.heapTotal) },
+      { label: 'RSS',        value: fmt(data.memory.rss) },
+    ];
+
+    gridEl.innerHTML = tiles.map(function(t) {
+      return '<div class="tile"><div class="label">' + t.label +
+             '</div><div class="value">' + t.value + '</div></div>';
+    }).join('');
+  }
+
+  function refresh() {
+    btn.disabled = true;
+    logEl.textContent = '';
+    logEl.classList.add('active');
+    gridEl.innerHTML = '';
+    statusEl.textContent = '';
+
+    // Level 3 — full programmatic API.
+    // dicode.execute() fires the task asynchronously, streams logs via
+    // WebSocket, and resolves with the RunFinishedData payload containing
+    // the task's JSON return value.
+    dicode.execute({}, {
+      onLog: function(line) {
+        logEl.textContent += line + '\n';
+      },
+      onFinish: function(data) {
+        btn.disabled = false;
+        logEl.classList.remove('active');
+        logEl.textContent = '';
+
+        if (data.status !== 'success') {
+          statusEl.textContent = 'Run failed: ' + data.status;
+          return;
+        }
+
+        // returnValue is the JSON-serialised task return value.
+        var info;
+        try { info = JSON.parse(data.returnValue); } catch (e) {
+          statusEl.textContent = 'Could not parse result';
+          return;
+        }
+        renderTiles(info);
+        statusEl.textContent = 'Last refreshed ' + new Date().toLocaleTimeString();
+      }
+    }).catch(function() {
+      btn.disabled = false;
+      statusEl.textContent = 'Connection error — is dicode running?';
+    });
+  }
+
+  btn.addEventListener('click', refresh);
+
+  // Auto-refresh on page load once dicode.js is ready.
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', refresh);
+  } else {
+    refresh();
+  }
+</script>
+</body>
+</html>

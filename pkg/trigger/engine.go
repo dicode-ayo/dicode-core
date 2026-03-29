@@ -8,6 +8,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -353,12 +356,34 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runStatus strin
 }
 
 // WebhookHandler returns an HTTP handler that dispatches webhook-triggered tasks.
+//
+// Behaviour by request type:
+//   - GET  /{hookPath}            — if the task directory contains index.html, serve
+//     it with the dicode client SDK injected; otherwise run the task with query params.
+//   - GET  /{hookPath}/{asset}    — serve a static asset (CSS/JS/image) from the task
+//     directory, sandboxed so path traversal is impossible.
+//   - POST /{hookPath}            — run the task. JSON body or form-encoded body are
+//     both accepted. Browser form submissions (Content-Type: form) redirect to the run
+//     result page; API callers receive the usual JSON envelope.
 func (e *Engine) WebhookHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
 
+		// Exact match — normal webhook execution path.
 		e.mu.Lock()
 		taskID, ok := e.webhooks[path]
+		var assetPath string
+		if !ok {
+			// Prefix match — request is for a static asset belonging to a webhook UI.
+			for hookPath, tid := range e.webhooks {
+				if strings.HasPrefix(path, hookPath+"/") {
+					taskID = tid
+					assetPath = path[len(hookPath)+1:]
+					ok = true
+					break
+				}
+			}
+		}
 		e.mu.Unlock()
 
 		if !ok {
@@ -372,9 +397,29 @@ func (e *Engine) WebhookHandler() http.Handler {
 			return
 		}
 
+		// Serve a static asset from the task directory (CSS, JS, images, …).
+		if assetPath != "" {
+			e.serveTaskAsset(w, r, spec.TaskDir, assetPath)
+			return
+		}
+
+		// On GET, serve the task's index.html UI when one is present.
+		if r.Method == http.MethodGet {
+			indexFile := filepath.Join(spec.TaskDir, "index.html")
+			if data, err := os.ReadFile(indexFile); err == nil {
+				e.log.Info("webhook UI served", zap.String("path", path), zap.String("task", taskID))
+				html := injectDicodeSDK(string(data), path, taskID)
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				_, _ = w.Write([]byte(html))
+				return
+			}
+		}
+
 		e.log.Info("webhook trigger", zap.String("path", path), zap.String("task", taskID))
 
 		var input interface{}
+		isFormSubmit := false
+
 		if r.Method == http.MethodGet {
 			if q := r.URL.Query(); len(q) > 0 {
 				m := make(map[string]interface{}, len(q))
@@ -386,6 +431,20 @@ func (e *Engine) WebhookHandler() http.Handler {
 					}
 				}
 				input = m
+			}
+		} else if strings.Contains(r.Header.Get("Content-Type"), "application/x-www-form-urlencoded") {
+			// Browser form submission — parse form fields as task input.
+			if err := r.ParseForm(); err == nil {
+				m := make(map[string]interface{}, len(r.Form))
+				for k, v := range r.Form {
+					if len(v) == 1 {
+						m[k] = v[0]
+					} else {
+						m[k] = v
+					}
+				}
+				input = m
+				isFormSubmit = true
 			}
 		} else if r.Body != nil {
 			body, err := io.ReadAll(r.Body)
@@ -404,6 +463,7 @@ func (e *Engine) WebhookHandler() http.Handler {
 				http.Error(w, "task failed to start", http.StatusInternalServerError)
 				return
 			}
+			w.Header().Set("X-Run-Id", runID)
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]string{"runId": runID})
 			return
@@ -412,6 +472,12 @@ func (e *Engine) WebhookHandler() http.Handler {
 		runID, result, err := e.fireSync(spec, pkgruntime.RunOptions{Input: input}, "webhook")
 		if err != nil {
 			http.Error(w, "task failed to start", http.StatusInternalServerError)
+			return
+		}
+
+		// Browser form submissions redirect to the run result page.
+		if isFormSubmit {
+			http.Redirect(w, r, "/runs/"+runID+"/result", http.StatusSeeOther)
 			return
 		}
 
@@ -448,6 +514,70 @@ func (e *Engine) WebhookHandler() http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"runId": runID, "status": status})
 	})
+}
+
+// injectDicodeSDK injects the dicode client SDK script and context meta tags
+// into an HTML page's <head>, allowing the page to use window.dicode.
+func injectDicodeSDK(html, hookPath, taskID string) string {
+	injection := `<meta name="dicode-task" content="` + taskID + `">` +
+		`<meta name="dicode-hook" content="` + hookPath + `">` +
+		`<script src="/dicode.js"></script>`
+	if i := strings.Index(html, "</head>"); i != -1 {
+		return html[:i] + injection + "\n" + html[i:]
+	}
+	return injection + "\n" + html
+}
+
+// allowedAssetTypes maps file extensions to their Content-Type for webhook UI assets.
+var allowedAssetTypes = map[string]string{
+	".html":  "text/html; charset=utf-8",
+	".css":   "text/css; charset=utf-8",
+	".js":    "application/javascript; charset=utf-8",
+	".json":  "application/json; charset=utf-8",
+	".svg":   "image/svg+xml",
+	".png":   "image/png",
+	".jpg":   "image/jpeg",
+	".jpeg":  "image/jpeg",
+	".ico":   "image/x-icon",
+	".woff":  "font/woff",
+	".woff2": "font/woff2",
+}
+
+// serveTaskAsset serves a static asset file from a webhook task's directory.
+// Access is sandboxed: only known file types are served and path traversal is blocked.
+func (e *Engine) serveTaskAsset(w http.ResponseWriter, r *http.Request, taskDir, assetPath string) {
+	// Block path traversal before filepath.Clean can resolve it.
+	if strings.Contains(assetPath, "..") {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	clean := filepath.Clean(assetPath)
+	if filepath.IsAbs(clean) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	ct, allowed := allowedAssetTypes[strings.ToLower(filepath.Ext(clean))]
+	if !allowed {
+		http.Error(w, "file type not allowed", http.StatusForbidden)
+		return
+	}
+
+	fullPath := filepath.Join(taskDir, clean)
+	// Double-check the resolved path is still inside taskDir.
+	if !strings.HasPrefix(fullPath, filepath.Clean(taskDir)+string(filepath.Separator)) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	data, err := os.ReadFile(fullPath)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	w.Header().Set("Content-Type", ct)
+	_, _ = w.Write(data)
 }
 
 // startRun creates the DB record, stores the cancel func, fires the started
