@@ -537,8 +537,14 @@ func flatStringMap(v interface{}) map[string]string {
 
 // injectDicodeSDK injects the dicode client SDK script and context meta tags
 // into an HTML page's <head>, allowing the page to use window.dicode.
+//
+// A <base> tag with a trailing slash is also injected so that relative URLs
+// in the task's HTML (e.g. href="style.css") resolve to the correct sub-path
+// (e.g. /hooks/my-task/style.css) regardless of the page having no trailing
+// slash in its URL.
 func injectDicodeSDK(html, hookPath, taskID string) string {
-	injection := `<meta name="dicode-task" content="` + taskID + `">` +
+	injection := `<base href="` + hookPath + `/">` +
+		`<meta name="dicode-task" content="` + taskID + `">` +
 		`<meta name="dicode-hook" content="` + hookPath + `">` +
 		`<script src="/dicode.js"></script>`
 	if i := strings.Index(html, "</head>"); i != -1 {
