@@ -253,3 +253,219 @@ func TestEngine_Cron_Register(t *testing.T) {
 		t.Fatal("cron entry should be removed")
 	}
 }
+
+// newMinimalEngine creates an Engine without a real executor, suitable for
+// tests that only exercise HTTP serving (UI pages, assets) without task execution.
+func newMinimalEngine(t *testing.T) (*Engine, *registry.Registry) {
+	t.Helper()
+	d, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { d.Close() })
+	reg := registry.New(d)
+	eng := New(reg, nil, zap.NewNop())
+	return eng, reg
+}
+
+// writeUITask creates a task directory with a task.yaml, optional task.ts,
+// and optional extra files (filename → content).
+func writeUITask(t *testing.T, dir, id string, trigger task.TriggerConfig, extraFiles map[string]string) *task.Spec {
+	t.Helper()
+	td := filepath.Join(dir, id)
+	_ = os.MkdirAll(td, 0755)
+	yaml := "name: " + id + "\nruntime: deno\n"
+	_ = os.WriteFile(filepath.Join(td, "task.yaml"), []byte(yaml), 0644)
+	for name, content := range extraFiles {
+		_ = os.WriteFile(filepath.Join(td, name), []byte(content), 0644)
+	}
+	return &task.Spec{
+		ID:      id,
+		Name:    id,
+		Runtime: task.RuntimeDeno,
+		Trigger: trigger,
+		TaskDir: td,
+	}
+}
+
+func TestEngine_WebhookHandler_ServesIndexHTML(t *testing.T) {
+	dir := t.TempDir()
+	eng, reg := newMinimalEngine(t)
+
+	const indexContent = `<html><head><title>My UI</title></head><body>Hello</body></html>`
+	spec := writeUITask(t, dir, "ui-task", task.TriggerConfig{Webhook: "/hooks/ui-task"}, map[string]string{
+		"index.html": indexContent,
+	})
+	_ = reg.Register(spec)
+	eng.Register(spec)
+
+	handler := eng.WebhookHandler()
+	req := httptest.NewRequest(http.MethodGet, "/hooks/ui-task", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !strings.Contains(w.Header().Get("Content-Type"), "text/html") {
+		t.Errorf("expected text/html content type, got %s", w.Header().Get("Content-Type"))
+	}
+	if !strings.Contains(body, "/dicode.js") {
+		t.Errorf("expected dicode.js injection, got: %s", body)
+	}
+	if !strings.Contains(body, `content="ui-task"`) {
+		t.Errorf("expected dicode-task meta tag, got: %s", body)
+	}
+	if !strings.Contains(body, "Hello") {
+		t.Errorf("expected original HTML content, got: %s", body)
+	}
+}
+
+func TestEngine_WebhookHandler_NoIndexHTML_RunsTask(t *testing.T) {
+	dir := t.TempDir()
+	e := newTestEnv(t)
+	spec := writeTask(t, dir, "plain-hook", `return "ran"`, task.TriggerConfig{Webhook: "/hooks/plain-hook"})
+	_ = e.reg.Register(spec)
+	e.engine.Register(spec)
+
+	handler := e.engine.WebhookHandler()
+	req := httptest.NewRequest(http.MethodGet, "/hooks/plain-hook", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "ran") {
+		t.Errorf("expected task output, got: %s", w.Body.String())
+	}
+}
+
+func TestEngine_WebhookHandler_ServesAsset(t *testing.T) {
+	dir := t.TempDir()
+	eng, reg := newMinimalEngine(t)
+
+	const cssContent = `body { color: red; }`
+	spec := writeUITask(t, dir, "asset-task", task.TriggerConfig{Webhook: "/hooks/asset-task"}, map[string]string{
+		"index.html": `<html><head></head><body></body></html>`,
+		"style.css":  cssContent,
+	})
+	_ = reg.Register(spec)
+	eng.Register(spec)
+
+	handler := eng.WebhookHandler()
+	req := httptest.NewRequest(http.MethodGet, "/hooks/asset-task/style.css", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Header().Get("Content-Type"), "text/css") {
+		t.Errorf("expected text/css, got %s", w.Header().Get("Content-Type"))
+	}
+	if w.Body.String() != cssContent {
+		t.Errorf("expected CSS content, got: %s", w.Body.String())
+	}
+}
+
+func TestEngine_WebhookHandler_AssetTraversalBlocked(t *testing.T) {
+	dir := t.TempDir()
+	eng, reg := newMinimalEngine(t)
+
+	spec := writeUITask(t, dir, "traversal-task", task.TriggerConfig{Webhook: "/hooks/traversal-task"}, map[string]string{
+		"index.html": `<html><head></head><body></body></html>`,
+	})
+	_ = reg.Register(spec)
+	eng.Register(spec)
+
+	handler := eng.WebhookHandler()
+
+	for _, dangerous := range []string{
+		"/hooks/traversal-task/../../../etc/passwd",
+		"/hooks/traversal-task/%2e%2e/secret",
+	} {
+		req := httptest.NewRequest(http.MethodGet, dangerous, nil)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code == http.StatusOK {
+			t.Errorf("path traversal not blocked for %q: got 200", dangerous)
+		}
+	}
+}
+
+func TestEngine_WebhookHandler_AssetUnknownTypeBlocked(t *testing.T) {
+	dir := t.TempDir()
+	eng, reg := newMinimalEngine(t)
+
+	spec := writeUITask(t, dir, "blocked-task", task.TriggerConfig{Webhook: "/hooks/blocked-task"}, map[string]string{
+		"index.html": `<html><head></head><body></body></html>`,
+		"task.ts":    `return 1`,
+	})
+	_ = reg.Register(spec)
+	eng.Register(spec)
+
+	handler := eng.WebhookHandler()
+	req := httptest.NewRequest(http.MethodGet, "/hooks/blocked-task/task.ts", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("expected 403 for .ts file, got %d", w.Code)
+	}
+}
+
+func TestEngine_WebhookHandler_FormPOST(t *testing.T) {
+	dir := t.TempDir()
+	e := newTestEnv(t)
+	spec := writeTask(t, dir, "form-task", `return params.get("name")`, task.TriggerConfig{Webhook: "/hooks/form-task"})
+	_ = e.reg.Register(spec)
+	e.engine.Register(spec)
+
+	handler := e.engine.WebhookHandler()
+
+	req := httptest.NewRequest(http.MethodPost, "/hooks/form-task",
+		strings.NewReader("name=Alice"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	// Form POST should redirect to /runs/{id}/result.
+	if w.Code != http.StatusSeeOther {
+		t.Errorf("expected 303 redirect, got %d: %s", w.Code, w.Body.String())
+	}
+	loc := w.Header().Get("Location")
+	if !strings.HasPrefix(loc, "/runs/") {
+		t.Errorf("expected redirect to /runs/..., got %q", loc)
+	}
+}
+
+func TestInjectDicodeSDK(t *testing.T) {
+	html := `<html><head><title>Test</title></head><body></body></html>`
+	result := injectDicodeSDK(html, "/hooks/my-task", "my-task")
+
+	if !strings.Contains(result, `<script src="/dicode.js"></script>`) {
+		t.Error("dicode.js script tag not injected")
+	}
+	if !strings.Contains(result, `content="my-task"`) {
+		t.Error("dicode-task meta not injected")
+	}
+	if !strings.Contains(result, `content="/hooks/my-task"`) {
+		t.Error("dicode-hook meta not injected")
+	}
+	// Injection must appear before </head>, not after.
+	injIdx := strings.Index(result, "dicode.js")
+	headIdx := strings.Index(result, "</head>")
+	if injIdx > headIdx {
+		t.Error("injection appeared after </head>")
+	}
+}
+
+func TestInjectDicodeSDK_NoHead(t *testing.T) {
+	html := `<body>No head tag</body>`
+	result := injectDicodeSDK(html, "/hooks/x", "x")
+	if !strings.Contains(result, "dicode.js") {
+		t.Error("dicode.js not injected when no </head> present")
+	}
+}
