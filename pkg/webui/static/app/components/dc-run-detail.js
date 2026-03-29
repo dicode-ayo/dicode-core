@@ -1,8 +1,10 @@
 import { LitElement, html } from 'https://esm.sh/lit@3';
+import { unsafeHTML } from 'https://esm.sh/lit@3/directives/unsafe-html.js';
 import { get, post } from '../lib/api.js';
 import { wsOn } from '../lib/ws.js';
 import { navigate } from '../lib/router.js';
 import { fmtTime, fmtDuration } from '../lib/utils.js';
+import { ansiToHtml } from '../lib/ansi.js';
 
 class DcRunDetail extends LitElement {
   createRenderRoot() { return this; }
@@ -161,7 +163,7 @@ class DcRunDetail extends LitElement {
         </div>` : ''}
 
       <h2>Logs</h2>
-      <pre id="log-output" style="max-height:600px;overflow-y:auto">${this._logs.map(l => html`<span>[${l.level}] ${l.time} ${l.message}\n</span>`)}</pre>`;
+      <pre id="log-output" style="max-height:600px;overflow-y:auto">${this._logs.map(l => html`<span>[${l.level}] ${l.time} ${unsafeHTML(ansiToHtml(l.message))}\n</span>`)}</pre>`;
   }
 }
 

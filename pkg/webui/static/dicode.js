@@ -31,6 +31,63 @@
     return new WebSocket(proto + '//' + location.host + '/ws');
   }
 
+  // ── ANSI → HTML ──────────────────────────────────────────────────────────
+  // Catppuccin Mocha palette mapped to standard ANSI foreground colour codes.
+  var ANSI_FG = {
+    30: '#585b70', 31: '#f38ba8', 32: '#a6e3a1', 33: '#f9e2af',
+    34: '#89b4fa', 35: '#cba6f7', 36: '#89dceb', 37: '#cdd6f4',
+    90: '#6c7086', 91: '#f38ba8', 92: '#a6e3a1', 93: '#f9e2af',
+    94: '#89b4fa', 95: '#cba6f7', 96: '#89dceb', 97: '#cdd6f4'
+  };
+
+  function escHtml(s) {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  /**
+   * Convert a string containing ANSI SGR escape sequences to an HTML string.
+   * Text content is HTML-escaped; styles become inline <span> elements.
+   * Safe to set as innerHTML / insertAdjacentHTML.
+   *
+   * @param {string} text
+   * @returns {string}
+   */
+  function ansiToHtml(text) {
+    var parts  = text.split(/(\x1b\[[0-9;]*m)/);
+    var out    = '';
+    var bold   = false, italic = false, color = '';
+
+    for (var i = 0; i < parts.length; i++) {
+      var part = parts[i];
+      if (part.charAt(0) === '\x1b' && part.charAt(part.length - 1) === 'm') {
+        var seq   = part.slice(2, -1);
+        var codes = seq === '' ? [0] : seq.split(';');
+        for (var j = 0; j < codes.length; j++) {
+          var c = parseInt(codes[j], 10) || 0;
+          if      (c === 0)  { bold = false; italic = false; color = ''; }
+          else if (c === 1)  { bold   = true;  }
+          else if (c === 3)  { italic = true;  }
+          else if (c === 22) { bold   = false; }
+          else if (c === 23) { italic = false; }
+          else if (c === 39) { color  = '';    }
+          else if (ANSI_FG[c]) { color = ANSI_FG[c]; }
+        }
+      } else if (part !== '') {
+        var escaped = escHtml(part);
+        if (bold || italic || color) {
+          var styles = [];
+          if (bold)   styles.push('font-weight:bold');
+          if (italic) styles.push('font-style:italic');
+          if (color)  styles.push('color:' + color);
+          out += '<span style="' + styles.join(';') + '">' + escaped + '</span>';
+        } else {
+          out += escaped;
+        }
+      }
+    }
+    return out;
+  }
+
   var dicode = {
     /** Context for the current task UI page. */
     task: { id: taskID, hookPath: hookPath },
@@ -122,7 +179,15 @@
      */
     result: function (runId) {
       return fetch('/api/runs/' + runId).then(function (r) { return r.json(); });
-    }
+    },
+
+    /**
+     * Convert a string containing ANSI escape sequences to an HTML string.
+     * Safe to use with innerHTML / insertAdjacentHTML.
+     * @param {string} text
+     * @returns {string}
+     */
+    ansiToHtml: ansiToHtml
   };
 
   // ── Auto-enhanced forms ───────────────────────────────────────────────────
@@ -146,18 +211,18 @@
           var btn = form.querySelector('[type="submit"]') ||
                     form.querySelector('button:not([type])');
           if (btn) { btn.disabled = true; }
-          if (output) { output.textContent = ''; }
+          if (output) { output.innerHTML = ''; }
 
           dicode.execute(params, {
             onLog: function (line) {
-              if (output) { output.textContent += line + '\n'; }
+              if (output) { output.insertAdjacentHTML('beforeend', ansiToHtml(line) + '\n'); }
             },
             onFinish: function () {
               if (btn) { btn.disabled = false; }
             },
             onError: function () {
               if (btn) { btn.disabled = false; }
-              if (output) { output.textContent += '\nConnection error.'; }
+              if (output) { output.insertAdjacentHTML('beforeend', '\nConnection error.'); }
             }
           }).catch(function () {
             if (btn) { btn.disabled = false; }
