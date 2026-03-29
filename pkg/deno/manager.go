@@ -70,8 +70,31 @@ func EnsureDeno(version string) (string, error) {
 		return "", fmt.Errorf("extract deno binary: %w", err)
 	}
 
-	if err := os.WriteFile(cachePath, binData, 0755); err != nil {
+	// Write to a temp file in the same directory, then rename atomically.
+	// This prevents concurrent downloaders from corrupting the binary: if two
+	// goroutines both find the binary missing and both download, the last rename
+	// wins and the final file is always a complete binary.
+	tmp, err := os.CreateTemp(filepath.Dir(cachePath), "deno-*.tmp")
+	if err != nil {
+		return "", fmt.Errorf("create temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(binData); err != nil {
+		tmp.Close()
+		_ = os.Remove(tmpPath)
 		return "", fmt.Errorf("write deno binary: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return "", fmt.Errorf("close temp file: %w", err)
+	}
+	if err := os.Chmod(tmpPath, 0755); err != nil {
+		_ = os.Remove(tmpPath)
+		return "", fmt.Errorf("chmod deno binary: %w", err)
+	}
+	if err := os.Rename(tmpPath, cachePath); err != nil {
+		_ = os.Remove(tmpPath)
+		return "", fmt.Errorf("install deno binary: %w", err)
 	}
 
 	return cachePath, nil
