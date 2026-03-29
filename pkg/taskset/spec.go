@@ -84,13 +84,13 @@ type ParamOverride struct {
 // Overrides is a patch applied to a resolved task or to a nested TaskSet entry.
 // Fields are applied in the six-level override cascade; later layers win.
 type Overrides struct {
-	Enabled *bool          `yaml:"enabled,omitempty"`
-	Trigger *TriggerPatch  `yaml:"trigger,omitempty"`
+	Enabled *bool           `yaml:"enabled,omitempty"`
+	Trigger *TriggerPatch   `yaml:"trigger,omitempty"`
 	Params  []ParamOverride `yaml:"params,omitempty"`
-	Env     []string       `yaml:"env,omitempty"`
-	Timeout time.Duration  `yaml:"timeout,omitempty"`
-	Retry   *RetryConfig   `yaml:"retry,omitempty"`
-	Runtime string         `yaml:"runtime,omitempty"`
+	Env     []string        `yaml:"env,omitempty"`
+	Timeout time.Duration   `yaml:"timeout,omitempty"`
+	Retry   *RetryConfig    `yaml:"retry,omitempty"`
+	Runtime string          `yaml:"runtime,omitempty"`
 
 	// For task_set entries only — Defaults is pushed into the nested set as level 4.
 	Defaults *Defaults `yaml:"defaults,omitempty"`
@@ -101,9 +101,9 @@ type Overrides struct {
 // Entry is one named item in spec.entries.
 // Exactly one of Ref or Inline must be set.
 type Entry struct {
-	Ref      *Ref           `yaml:"ref,omitempty"`
-	Inline   *task.Spec     `yaml:"inline,omitempty"`
-	Overrides *Overrides    `yaml:"overrides,omitempty"`
+	Ref       *Ref       `yaml:"ref,omitempty"`
+	Inline    *task.Spec `yaml:"inline,omitempty"`
+	Overrides *Overrides `yaml:"overrides,omitempty"`
 }
 
 // TaskSetSpec is parsed from a yaml file with kind: TaskSet.
