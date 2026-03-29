@@ -1,3 +1,5 @@
+apiVersion: dicode/v1
+kind: Task
 name: Gmail to Slack
 description: Fetches today's Gmail messages and posts a digest to a Slack channel.
 runtime: js

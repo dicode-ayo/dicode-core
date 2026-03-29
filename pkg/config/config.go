@@ -79,7 +79,7 @@ const (
 )
 
 // SourceConfig describes one task source — either a remote git repo or a
-// local directory watched via fsnotify.
+// local path pointing to a taskset.yaml (or kind: Task yaml).
 type SourceConfig struct {
 	Type SourceType `yaml:"type"` // "git" | "local"
 
@@ -90,12 +90,22 @@ type SourceConfig struct {
 	Auth         SourceAuth    `yaml:"auth,omitempty"`
 
 	// Local source fields
-	Path  string `yaml:"path,omitempty"`  // local directory to watch
+	Path  string `yaml:"path,omitempty"`  // absolute path to taskset.yaml (local) or tasks dir (legacy)
 	Watch bool   `yaml:"watch,omitempty"` // enable fsnotify (default true for local)
 
+	// TaskSet fields (new model)
+	// Name is the root namespace segment for all tasks from this source.
+	// Defaults to the last segment of URL or Path.
+	Name string `yaml:"name,omitempty"`
+	// EntryPath is the path within the git repo (or absolute path for local)
+	// to the entry yaml file. Defaults to "taskset.yaml".
+	EntryPath string `yaml:"entry_path,omitempty"`
+	// ConfigPath is the path to an optional kind:Config yaml file.
+	// For git sources: path within the repo. For local: absolute path.
+	// Defaults to "dicode-config.yaml" alongside the entry file.
+	ConfigPath string `yaml:"config_path,omitempty"`
+
 	// Shared / future
-	// Tags filters which tasks are loaded from this source (north star).
-	// Empty = load all tasks.
 	Tags []string `yaml:"tags,omitempty"`
 }
 

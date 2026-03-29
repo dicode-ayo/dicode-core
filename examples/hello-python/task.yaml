@@ -1,3 +1,5 @@
+apiVersion: dicode/v1
+kind: Task
 name: Hello Python
 description: Simple Python task demonstrating SDK globals
 runtime: python

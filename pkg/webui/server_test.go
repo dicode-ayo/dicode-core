@@ -34,7 +34,7 @@ func newTestServer(t *testing.T) (*Server, *registry.Registry) {
 	}
 	eng := trigger.New(reg, rt, zap.NewNop())
 
-	srv, err := New(8080, reg, eng, &config.Config{Server: config.ServerConfig{Port: 8080}}, "", nil, nil, "", NewLogBroadcaster(), zap.NewNop())
+	srv, err := New(8080, reg, eng, &config.Config{Server: config.ServerConfig{Port: 8080}}, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop())
 	if err != nil {
 		t.Fatalf("New server: %v", err)
 	}
