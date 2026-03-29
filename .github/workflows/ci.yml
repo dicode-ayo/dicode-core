@@ -45,52 +45,33 @@ jobs:
           fi
 
   build-pr:
-    name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
+    name: Build PR artifacts
     if: github.event_name == 'pull_request'
     needs: [test, lint]
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    strategy:
-      matrix:
-        include:
-          - goos: linux
-            goarch: amd64
-          - goos: linux
-            goarch: arm64
-          - goos: darwin
-            goarch: amd64
-          - goos: darwin
-            goarch: arm64
-          - goos: windows
-            goarch: amd64
-
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
 
-      - name: Build
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: build --clean --snapshot
         env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: 0
-        run: |
-          BINARY=dicode
-          if [ "$GOOS" = "windows" ]; then BINARY=dicode.exe; fi
-          mkdir -p dist
-          go build \
-            -ldflags "-X main.version=pr-${{ github.event.pull_request.number }} -s -w" \
-            -o "dist/${BINARY}" \
-            ./cmd/dicode/
+          GORELEASER_CURRENT_TAG: pr-${{ github.event.pull_request.number }}
 
-      - name: Upload artifact
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: dicode-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: dicode-pr-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
           path: dist/
           retention-days: 7
 
@@ -109,14 +90,16 @@ jobs:
           message: |
             ## Build Artifacts
 
-            Dev binaries for `${{ github.event.pull_request.head.sha }}` — all platforms built from Linux via cross-compilation (`CGO_ENABLED=0`):
+            Dev binaries for `${{ github.event.pull_request.head.sha }}` (all platforms, cross-compiled from Linux):
 
-            | Platform | Artifact |
+            | Platform | File |
             | --- | --- |
-            | linux/amd64 | [dicode-linux-amd64](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}#artifacts) |
-            | linux/arm64 | [dicode-linux-arm64](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}#artifacts) |
-            | darwin/amd64 | [dicode-darwin-amd64](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}#artifacts) |
-            | darwin/arm64 | [dicode-darwin-arm64](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}#artifacts) |
-            | windows/amd64 | [dicode-windows-amd64](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}#artifacts) |
+            | linux/amd64 | `dicode-linux-amd64` |
+            | linux/arm64 | `dicode-linux-arm64` |
+            | darwin/amd64 | `dicode-darwin-amd64` |
+            | darwin/arm64 (Apple Silicon) | `dicode-darwin-arm64` |
+            | windows/amd64 | `dicode-windows-amd64.exe` |
 
-            > Artifacts expire after 7 days. Systray is disabled in these builds (`CGO_ENABLED=0`); release builds are identical.
+            [Download all from this run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+            > Artifacts expire after 7 days.
