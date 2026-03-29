@@ -547,9 +547,13 @@ func injectDicodeSDK(html, hookPath, taskID string) string {
 		`<meta name="dicode-task" content="` + taskID + `">` +
 		`<meta name="dicode-hook" content="` + hookPath + `">` +
 		`<script src="/dicode.js"></script>`
-	if i := strings.Index(html, "</head>"); i != -1 {
-		return html[:i] + injection + "\n" + html[i:]
+	// Inject immediately after <head> so <base> precedes every other element
+	// (stylesheets, scripts, images) that carries a relative URL.
+	if i := strings.Index(html, "<head>"); i != -1 {
+		after := i + len("<head>")
+		return html[:after] + "\n" + injection + html[after:]
 	}
+	// Fallback for pages without a <head> tag.
 	return injection + "\n" + html
 }
 

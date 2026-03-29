@@ -457,11 +457,11 @@ func TestInjectDicodeSDK(t *testing.T) {
 	if !strings.Contains(result, `content="/hooks/my-task"`) {
 		t.Error("dicode-hook meta not injected")
 	}
-	// Injection must appear before </head>, not after.
-	injIdx := strings.Index(result, "dicode.js")
-	headIdx := strings.Index(result, "</head>")
-	if injIdx > headIdx {
-		t.Error("injection appeared after </head>")
+	// <base> must appear before any other head element (i.e. right after <head>).
+	baseIdx := strings.Index(result, "<base ")
+	linkIdx := strings.Index(result, "<title>")
+	if baseIdx > linkIdx {
+		t.Error("<base> tag must appear before other <head> elements")
 	}
 }
 
