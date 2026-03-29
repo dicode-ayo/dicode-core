@@ -79,8 +79,8 @@ class DcTaskList extends LitElement {
       <tr>
         <td><a href="/tasks/${t.id}" @click=${e => { e.preventDefault(); navigate('/tasks/' + t.id); }}>${t.id}</a></td>
         <td>${t.name}</td>
-        <td>${t.trigger?.webhook
-          ? html`<a href="${t.trigger.webhook}" target="_blank" class="meta">${t.trigger_label}</a>`
+        <td>${t.trigger?.Webhook
+          ? html`<a href="${t.trigger.Webhook}" target="_blank" class="meta">${t.trigger_label}</a>`
           : html`<span class="meta">${t.trigger_label || 'manual'}</span>`}</td>
         <td>${t.last_run_id
           ? html`<a href="/runs/${t.last_run_id}" @click=${e => { e.preventDefault(); navigate('/runs/' + t.last_run_id); }}>${t.last_run_id.slice(0, 8)}</a>`
