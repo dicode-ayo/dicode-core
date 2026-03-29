@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/dicode/dicode/pkg/config"
+	"github.com/dicode/dicode/pkg/mcp"
 	"github.com/dicode/dicode/pkg/registry"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	gitSource "github.com/dicode/dicode/pkg/source/git"
@@ -149,6 +150,7 @@ type Server struct {
 	cfgPath         string               // path to dicode.yaml; empty in tests
 	secretsMgr      SecretsManager       // nil if local provider not configured
 	reconciler      *registry.Reconciler // nil if not wired
+	sourceMgr       *SourceManager       // nil if not wired
 	dataDir         string               // ~/.dicode or cfg.DataDir
 	managedRuntimes []pkgruntime.ManagedRuntime
 	sessions        *sessionStore
@@ -169,7 +171,8 @@ func (s *Server) SetManagedRuntimes(runtimes []pkgruntime.ManagedRuntime) {
 // New creates a Server. cfgPath is the path to dicode.yaml used to persist
 // settings changes; pass "" in tests or when persistence is not needed.
 // rec and dataDir enable live source management; pass nil/"" in tests.
-func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config, cfgPath string, secretsMgr SecretsManager, rec *registry.Reconciler, dataDir string, logs *LogBroadcaster, log *zap.Logger) (*Server, error) {
+// sourceMgr enables the /api/sources endpoints and MCP source tools; pass nil in tests.
+func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config, cfgPath string, secretsMgr SecretsManager, rec *registry.Reconciler, sourceMgr *SourceManager, dataDir string, logs *LogBroadcaster, log *zap.Logger) (*Server, error) {
 	ss := newSessionStore()
 	go ss.purgeLoop()
 
@@ -182,6 +185,7 @@ func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config
 		cfgPath:    cfgPath,
 		secretsMgr: secretsMgr,
 		reconciler: rec,
+		sourceMgr:  sourceMgr,
 		dataDir:    dataDir,
 		sessions:   ss,
 		limiter:    newUnlockLimiter(),
@@ -326,11 +330,22 @@ func (s *Server) Handler() http.Handler {
 		r.Delete("/settings/sources/{idx}", s.apiRemoveSource)
 		r.Get("/settings/sources/git/branches", s.apiListGitBranches)
 
+		// Source management (taskset model)
+		r.Get("/sources", s.apiListSources)
+		r.Patch("/sources/{name}/dev", s.apiSetDevMode)
+		r.Get("/sources/{name}/branches", s.apiListSourceBranches)
+
 		// Managed runtime lifecycle
 		r.Get("/runtimes", s.apiListRuntimes)
 		r.Post("/runtimes/{name}/install", s.apiInstallRuntime)
 		r.Delete("/runtimes/{name}", s.apiRemoveRuntime)
 	})
+
+	// MCP endpoint
+	if s.cfg == nil || s.cfg.Server.MCP {
+		mcpSrv := mcp.New(s.registry, s.sourceMgr)
+		r.Mount("/mcp", mcpSrv.Handler())
+	}
 
 	// Webhook passthrough
 	r.Post("/hooks/*", func(w http.ResponseWriter, req *http.Request) {

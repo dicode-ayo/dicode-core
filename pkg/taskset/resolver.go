@@ -41,6 +41,20 @@ func NewResolver(dataDir string, devMode bool, log *zap.Logger) *Resolver {
 	}
 }
 
+// SetDevMode enables or disables dev ref substitution on future Resolve calls.
+func (r *Resolver) SetDevMode(enabled bool) {
+	r.mu.Lock()
+	r.devMode = enabled
+	r.mu.Unlock()
+}
+
+// DevMode reports whether dev mode is currently active.
+func (r *Resolver) DevMode() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.devMode
+}
+
 // Resolve walks the TaskSet rooted at tsRef with the given namespace prefix.
 // configDefaults comes from the source's kind:Config file (precedence level 2).
 // parentOverrides are injected by the parent TaskSet entry (levels 4–5).

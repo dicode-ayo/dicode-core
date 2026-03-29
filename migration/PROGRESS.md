@@ -35,39 +35,44 @@ Tracking implementation of the TaskSet architecture refactor.
 
 ## Phase 1 — Core Types
 
-- [ ] `pkg/taskset/spec.go` — define `TaskSetSpec`, `ConfigSpec`, `Entry`, `Ref`, `Overrides`, `Defaults`
-- [ ] `pkg/taskset/loader.go` — parse and validate `taskset.yaml`; detect `kind` field
-- [ ] `pkg/taskset/loader_test.go` — unit tests for parsing and validation
-- [ ] Update `pkg/config/config.go` — add `name`, `path`, `config_path` to `SourceConfig`; add defaults for `branch`, `poll_interval`
+- [x] `pkg/taskset/spec.go` — define `TaskSetSpec`, `ConfigSpec`, `Entry`, `Ref`, `Overrides`, `Defaults`
+- [x] `pkg/taskset/loader.go` — parse and validate `taskset.yaml`; detect `kind` field
+- [x] `pkg/taskset/loader_test.go` — unit tests for parsing and validation
+- [x] Update `pkg/config/config.go` — add `name`, `entry_path`, `config_path` to `SourceConfig`
 
 ---
 
 ## Phase 2 — Resolver
 
-- [ ] `pkg/taskset/resolver.go` — walk entry tree, collect unique refs, apply override cascade
-- [ ] `pkg/taskset/resolver_test.go` — namespace building, all 6 precedence levels, per-field merge strategies, repo dedup, dev mode substitution
-- [ ] Repo deduplication: single `GitSource` per `(url, branch)` pair
-- [ ] Override merge logic: patch-style, field-level, leaf wins
-- [ ] Integration test: 3-level nested set resolves correct namespaced IDs and overrides end-to-end
+- [x] `pkg/taskset/resolver.go` — walk entry tree, collect unique refs, apply override cascade
+- [x] `pkg/taskset/resolver_test.go` — namespace building, all 6 precedence levels, per-field merge strategies, repo dedup, dev mode substitution
+- [x] Repo deduplication: single clone per `(url, branch)` pair
+- [x] Override merge logic: patch-style, field-level, leaf wins
+- [x] `pkg/taskset/override.go` + `override_test.go` — per-field merge strategies
+- [x] `pkg/taskset/git.go` — cloneOrPull helper
+- [x] Integration test: 3-level nested set resolves correct namespaced IDs and overrides end-to-end
 
 ---
 
 ## Phase 3 — Reconciler Integration
 
-- [ ] Update `pkg/registry/reconciler.go` — detect `kind` in resolved file; call `taskset.Resolver` when `kind: TaskSet`
-- [ ] Wire `SourceConfig` (extended with `name`, `path`, `config_path`) to existing `GitSource` / `LocalSource`
-- [ ] Load `kind: Config` file alongside TaskSet; apply as precedence level 2
-- [ ] Ensure per-ref `poll_interval` is respected (vs global default)
-- [ ] Namespace-aware task ID registration in registry
+- [x] `pkg/source/source.go` — add `Spec *task.Spec` to Event
+- [x] Update `pkg/registry/reconciler.go` — use `ev.Spec` directly when non-nil (skip LoadDir)
+- [x] `pkg/taskset/source.go` — Source implements source.Source; polls, diffs, emits events
+- [x] `pkg/taskset/source_test.go` — Added/Updated/Removed event tests
+- [x] Wire `SourceConfig` (Name, EntryPath, ConfigPath) to taskset.Source in `cmd/dicode/main.go`
+- [x] Load `kind: Config` file alongside TaskSet; apply as precedence level 2
+- [x] Namespace-aware task ID registration in registry
 
 ---
 
 ## Phase 4 — Dev Mode
 
-- [ ] `pkg/taskset/dev.go` — ref substitution (`dev_ref` replaces `ref` when `--dev` active)
+- [x] Dev ref substitution: `dev_ref` replaces `ref` when resolver devMode is active
+- [x] `taskset.Source.SetDevMode(ctx, enabled, localPath)` — runtime dev mode toggle
+- [x] `taskset.Resolver.SetDevMode(enabled)` — mutex-safe devMode update
 - [ ] Auto-branch logic: create `dicode/dev-<taskId>` branch in cloned repo
 - [ ] `--dev` CLI flag wired through to resolver
-- [ ] `dev: true` config option in `dicode.yaml`
 
 ---
 
@@ -82,12 +87,11 @@ Tracking implementation of the TaskSet architecture refactor.
 
 - [ ] **Add source dialog**: form to add a new git ref (url, branch, path, auth token env)
 - [ ] **Edit source dialog**: change branch or path on an existing source (writes back to `dicode.yaml`)
-- [ ] **Branch picker**: dropdown populated from remote branches via `git ls-remote` on the cloned repo
-- [ ] **Path picker**: file browser scoped to the cloned repo, filters to `.yaml` files
+- [ ] **Branch picker**: dropdown populated from remote branches via `GET /api/sources/:name/branches`
 - [ ] **Dev mode toggle per ref**: switch icon/button on each source row in the UI
   - Active dev mode shown with a visual indicator (e.g. badge on the source)
-  - Toggle calls `PATCH /api/sources/:name/dev` (see Phase 7)
-  - State persisted in local config / runtime state, not committed to `taskset.yaml`
+  - Toggle calls `PATCH /api/sources/:name/dev`
+  - State held in runtime memory (not committed to `taskset.yaml`)
 
 ---
 
@@ -99,37 +103,26 @@ or edit a task.
 
 ### REST API
 
-- [ ] `GET  /api/sources` — list all sources with their current dev mode state
-- [ ] `PATCH /api/sources/:name/dev` — toggle dev mode for a source
+- [x] `GET  /api/sources` — list all sources with their current dev mode state
+- [x] `PATCH /api/sources/:name/dev` — toggle dev mode for a source
 
   ```json
   { "enabled": true, "local_path": "/home/user/tasks/deploy" }
   ```
 
-  - `local_path` optional: if provided, sets a runtime `dev_ref` override for that source
-  - if omitted, Dicode auto-creates branch `dicode/dev-<name>` in the cloned repo
-
-- [ ] `GET  /api/sources/:name/branches` — list remote branches (for branch picker)
+- [x] `GET  /api/sources/:name/branches` — list remote branches (for branch picker)
 - [ ] `GET  /api/sources/:name/tree?path=` — list yaml files in the cloned repo (for path picker)
 
-### MCP Tools
+### MCP Server (`/mcp`) — JSON-RPC 2.0
 
-- [ ] `switch_dev_mode` — turn dev mode on/off for a named source or specific task ref
-
-  ```json
-  { "source": "infra", "enabled": true, "local_path": "/home/user/..." }
-  ```
-
-  Returns: `{ source, dev_mode, branch, local_path }`
-
-- [ ] `list_sources` — list all sources with name, url, branch, path, dev_mode state
-- [ ] `add_source` — add a new source entry (writes to `dicode.yaml`)
-
-  ```json
-  { "name": "my-tasks", "url": "https://github.com/org/tasks", "branch": "main", "path": "taskset.yaml" }
-  ```
-
-  Returns: `{ source, status }`
+- [x] `initialize` — returns protocol version and capabilities
+- [x] `tools/list` — returns all available tools with schemas
+- [x] `tools/call` dispatches to:
+  - [x] `list_tasks` — list all registered tasks
+  - [x] `list_sources` — list all sources with dev mode state
+  - [x] `switch_dev_mode` — toggle dev mode for a named source
+  - [x] `get_task` — get full task spec
+  - [x] `run_task` — trigger a manual run
 
 ### Typical AI agent workflow
 
@@ -137,10 +130,10 @@ When an AI agent is asked "create a new task for X":
 
 1. Agent calls `list_sources` to find the right source/repo
 2. Agent calls `switch_dev_mode` with `local_path` pointing to a local working directory
-3. Agent writes `task.yaml` + script to the local path
-4. Dicode hot-reloads via fsnotify — task appears in the registry immediately
-5. Agent can run/test the task via existing MCP `run_task` tool
-6. When done, agent (or user) calls `switch_dev_mode` with `enabled: false` to return to git ref
+3. Agent writes `task.yaml` + `task.ts` to the local path
+4. Dicode hot-reloads via the poll loop — task appears in the registry
+5. Agent can run/test the task via `run_task` MCP tool
+6. When done, agent calls `switch_dev_mode` with `enabled: false` to return to git ref
 
 ---
 
