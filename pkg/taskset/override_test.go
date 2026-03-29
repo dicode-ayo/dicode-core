@@ -7,8 +7,8 @@ import (
 	"github.com/dicode/dicode/pkg/task"
 )
 
-func boolPtr(b bool) *bool       { return &b }
-func strPtr(s string) *string    { return &s }
+func boolPtr(b bool) *bool                  { return &b }
+func strPtr(s string) *string               { return &s }
 func durPtr(d time.Duration) *time.Duration { return &d }
 
 func baseSpec() *task.Spec {

@@ -30,7 +30,7 @@ type Source struct {
 	mu          sync.Mutex
 	snapshot    map[string]taskSnap // namespaced taskID → snapshot
 	ch          chan source.Event   // live channel set by Start; nil before Start
-	devRootPath string             // non-empty overrides rootRef.Path in dev mode
+	devRootPath string              // non-empty overrides rootRef.Path in dev mode
 }
 
 type taskSnap struct {
