@@ -58,9 +58,27 @@ type SecretProviderConfig struct {
 }
 
 type NotificationsConfig struct {
-	OnFailure bool                  `yaml:"on_failure"`
-	OnSuccess bool                  `yaml:"on_success"`
+	// OnFailure sends a notification when a task run fails. Defaults to true.
+	OnFailure *bool                 `yaml:"on_failure,omitempty"`
+	// OnSuccess sends a notification when a task run succeeds. Defaults to false.
+	OnSuccess *bool                 `yaml:"on_success,omitempty"`
 	Provider  *NotifyProviderConfig `yaml:"provider,omitempty"`
+}
+
+// NotifyOnFailure returns the effective on_failure value (defaults to true).
+func (n *NotificationsConfig) NotifyOnFailure() bool {
+	if n.OnFailure == nil {
+		return true
+	}
+	return *n.OnFailure
+}
+
+// NotifyOnSuccess returns the effective on_success value (defaults to false).
+func (n *NotificationsConfig) NotifyOnSuccess() bool {
+	if n.OnSuccess == nil {
+		return false
+	}
+	return *n.OnSuccess
 }
 
 type NotifyProviderConfig struct {
@@ -223,9 +241,6 @@ func applyDefaults(cfg *Config) {
 	if cfg.Relay.AccountEnv == "" {
 		cfg.Relay.AccountEnv = "DICODE_TOKEN"
 	}
-	// Notifications default to alerting on failure only
-	// (OnFailure zero value is false, so only set if provider is configured)
-
 	// AI defaults — OpenAI-compatible, works with OpenAI / Claude / Ollama.
 	if cfg.AI.Model == "" {
 		cfg.AI.Model = "gpt-4o"

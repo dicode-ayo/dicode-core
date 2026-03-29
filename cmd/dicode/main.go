@@ -10,6 +10,7 @@ import (
 
 	"github.com/dicode/dicode/pkg/config"
 	"github.com/dicode/dicode/pkg/db"
+	"github.com/dicode/dicode/pkg/notify"
 	"github.com/dicode/dicode/pkg/onboarding"
 	"github.com/dicode/dicode/pkg/registry"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
@@ -186,6 +187,11 @@ func buildRuntimes(
 		return nil, nil, fmt.Errorf("init deno runtime: %w", err)
 	}
 	eng := trigger.New(reg, denoRT, log)
+	// Wire notification provider and global defaults.
+	if p := cfg.Notifications.Provider; p != nil {
+		eng.SetNotifier(notify.NewNotifier(p.Type, p.URL, p.Topic, p.TokenEnv))
+	}
+	eng.SetNotifyDefaults(cfg.Notifications.NotifyOnSuccess(), cfg.Notifications.NotifyOnFailure())
 
 	var managed []pkgruntime.ManagedRuntime
 	managed = append(managed, denoRT) // *denoruntime.Runtime implements ManagedRuntime

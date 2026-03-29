@@ -94,6 +94,13 @@ type FSEntry struct {
 	Permission string `yaml:"permission"` // "r" | "w" | "rw"
 }
 
+// NotifyConfig controls when dicode sends push notifications for a task.
+// Nil fields inherit from the parent TaskSet defaults or the global config.
+type NotifyConfig struct {
+	OnSuccess *bool `yaml:"on_success,omitempty" json:"on_success,omitempty"`
+	OnFailure *bool `yaml:"on_failure,omitempty" json:"on_failure,omitempty"`
+}
+
 // Spec is parsed from task.yaml.
 type Spec struct {
 	Name        string        `yaml:"name"        json:"name"`
@@ -107,6 +114,7 @@ type Spec struct {
 	Env         []string      `yaml:"env,omitempty" json:"env,omitempty"`
 	FS          []FSEntry     `yaml:"fs,omitempty"  json:"fs,omitempty"`
 	Timeout     time.Duration `yaml:"timeout"     json:"timeout"`
+	Notify      *NotifyConfig `yaml:"notify,omitempty" json:"notify,omitempty"`
 
 	// TaskDir is the directory path of the task in the repo (not stored in YAML).
 	TaskDir string `yaml:"-" json:"-"`

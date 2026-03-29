@@ -1,10 +1,5 @@
 // Package notify defines the Notifier interface and provider implementations
 // for push notifications (ntfy, gotify, pushover, telegram).
-//
-// The Notifier is used in two ways:
-//  1. System-level: dicode calls it automatically on task failure/success
-//  2. Task-level: injected as the `notify` JS global so tasks can send
-//     notifications from script code
 package notify
 
 import "context"
@@ -26,7 +21,7 @@ type Message struct {
 	Body     string
 	Priority Priority
 	Tags     []string // emoji shortcodes, e.g. ["warning", "skull"]
-	Actions  []Action // optional action buttons (approval gates)
+	Actions  []Action // optional action buttons
 }
 
 // Action is a button the user can tap in the notification.
@@ -49,3 +44,14 @@ type NoopNotifier struct{}
 
 func (n *NoopNotifier) Name() string                            { return "noop" }
 func (n *NoopNotifier) Send(_ context.Context, _ Message) error { return nil }
+
+// NewNotifier creates the appropriate Notifier from a provider type string and config.
+// Returns a *NoopNotifier when providerType is empty or unrecognised.
+func NewNotifier(providerType, url, topic, tokenEnv string) Notifier {
+	switch providerType {
+	case "ntfy":
+		return NewNtfyNotifier(url, topic, tokenEnv)
+	default:
+		return &NoopNotifier{}
+	}
+}

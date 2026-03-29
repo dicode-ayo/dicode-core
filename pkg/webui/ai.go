@@ -15,7 +15,6 @@ import (
 	"strings"
 
 	"github.com/dicode/dicode/pkg/agent"
-	"github.com/go-chi/chi/v5"
 	openai "github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
 	"go.uber.org/zap"
@@ -39,7 +38,7 @@ func (s *Server) handleAIStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := chi.URLParam(r, "id")
+	id := taskIDParam(r)
 	spec, found := s.registry.Get(id)
 	if !found {
 		http.Error(w, "task not found", http.StatusNotFound)

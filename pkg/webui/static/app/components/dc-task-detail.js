@@ -61,8 +61,8 @@ class DcTaskDetail extends LitElement {
     this._editorOpen = false; this._triggerOpen = false;
     try {
       const [task, runs] = await Promise.all([
-        get(`/api/tasks/${this.taskid}`),
-        get(`/api/tasks/${this.taskid}/runs?limit=20`),
+        get(`/api/tasks/${encodeURIComponent(this.taskid)}`),
+        get(`/api/tasks/${encodeURIComponent(this.taskid)}/runs?limit=20`),
       ]);
       this._task = task;
       this._runs = runs || [];
@@ -89,7 +89,7 @@ class DcTaskDetail extends LitElement {
 
   async _run() {
     try {
-      const r = await post(`/api/tasks/${this.taskid}/run`);
+      const r = await post(`/api/tasks/${encodeURIComponent(this.taskid)}/run`);
       navigate(`/runs/${r.runId}`);
     } catch(e) { alert('Failed: ' + e.message); }
   }
@@ -108,7 +108,7 @@ class DcTaskDetail extends LitElement {
   async _loadEditorFile(filename) {
     this._currentFile = filename;
     try {
-      const content = await fetch(`/api/tasks/${this.taskid}/files/${filename}`)
+      const content = await fetch(`/api/tasks/${encodeURIComponent(this.taskid)}/files/${filename}`)
         .then(r => r.ok ? r.text() : Promise.reject(new Error('not found')));
       const lang = filename.endsWith('.ts') ? 'typescript' : filename.endsWith('.py') ? 'python' : 'javascript';
       const container = this.querySelector('#monaco-container');
@@ -132,7 +132,7 @@ class DcTaskDetail extends LitElement {
     if (!this._editor || !this._currentFile) return;
     this._editorStatus = 'Saving…';
     try {
-      await fetch(`/api/tasks/${this.taskid}/files/${this._currentFile}`, {
+      await fetch(`/api/tasks/${encodeURIComponent(this.taskid)}/files/${this._currentFile}`, {
         method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: this._editor.getValue(),
       });
       this._editorStatus = 'Saved ✓';
@@ -148,9 +148,9 @@ class DcTaskDetail extends LitElement {
     if (type === 'chain')   body.from    = this.querySelector('#trig-from')?.value;
     if (type === 'daemon')  body.restart = this.querySelector('#trig-restart')?.value;
     try {
-      await post(`/api/tasks/${this.taskid}/trigger`, body);
+      await post(`/api/tasks/${encodeURIComponent(this.taskid)}/trigger`, body);
       this._triggerOpen = false;
-      this._task = await get(`/api/tasks/${this.taskid}`);
+      this._task = await get(`/api/tasks/${encodeURIComponent(this.taskid)}`);
     } catch(e) { alert('Save failed: ' + e.message); }
   }
 
@@ -165,7 +165,7 @@ class DcTaskDetail extends LitElement {
     const aiMsg = { role: 'ai', text: '' };
     this._aiHistory = [...this._aiHistory, aiMsg];
 
-    const res = await fetch(`/api/tasks/${this.taskid}/ai/stream`, {
+    const res = await fetch(`/api/tasks/${encodeURIComponent(this.taskid)}/ai/stream`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message: msg }),
     });
@@ -309,16 +309,19 @@ class DcTaskDetail extends LitElement {
 
       <h2>Recent runs</h2>
       <table>
-        <thead><tr><th>Run ID</th><th>Status</th><th>Started</th><th>Duration</th></tr></thead>
+        <thead><tr><th>Run ID</th><th>Status</th><th>Started</th><th>Duration</th><th></th></tr></thead>
         <tbody>
           ${!this._runs?.length ? html`
-            <tr><td colspan="4" style="text-align:center;color:#888">No runs yet.</td></tr>
+            <tr><td colspan="5" style="text-align:center;color:#888">No runs yet.</td></tr>
           ` : this._runs.map(r => html`
             <tr>
               <td><a href="/runs/${r.ID}" @click=${e => { e.preventDefault(); navigate('/runs/' + r.ID); }}>${r.ID.slice(0,8)}</a></td>
               <td><span class="badge badge-${r.Status}">${r.Status}</span></td>
               <td class="meta">${fmtTime(r.StartedAt)}</td>
               <td class="meta">${fmtDuration(r.StartedAt, r.FinishedAt)}</td>
+              <td>${(r.OutputContentType || r.ReturnValue) ? html`
+                <a href="/runs/${r.ID}/result" @click=${e => { e.preventDefault(); navigate('/runs/' + r.ID); }}
+                   class="btn btn-sm secondary">Result</a>` : ''}</td>
             </tr>`)}
         </tbody>
       </table>`;

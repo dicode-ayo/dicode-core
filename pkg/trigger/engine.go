@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dicode/dicode/pkg/notify"
 	"github.com/dicode/dicode/pkg/registry"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	"github.com/dicode/dicode/pkg/task"
@@ -39,7 +40,11 @@ type Engine struct {
 	daemonRuns  map[string]string
 	daemonSpecs map[string]*task.Spec
 
-	runFinishedHook func(taskID, runID, status, triggerSource string, durationMs int64)
+	notifier        notify.Notifier
+	notifyOnSuccess bool
+	notifyOnFailure bool
+
+	runFinishedHook func(taskID, runID, status, triggerSource string, durationMs int64, notifyOnSuccess, notifyOnFailure bool)
 	runStartedHook  func(taskID, runID, triggerSource string)
 }
 
@@ -67,8 +72,37 @@ func (e *Engine) SetRunStartedHook(fn func(taskID, runID, triggerSource string))
 // SetRunFinishedHook registers a callback invoked after every run completes.
 // Called from the goroutine that ran the task, so the hook must be non-blocking
 // (e.g. send to a buffered channel).
-func (e *Engine) SetRunFinishedHook(fn func(taskID, runID, status, triggerSource string, durationMs int64)) {
+// notifyOnSuccess and notifyOnFailure carry the resolved per-task notification flags.
+func (e *Engine) SetRunFinishedHook(fn func(taskID, runID, status, triggerSource string, durationMs int64, notifyOnSuccess, notifyOnFailure bool)) {
 	e.runFinishedHook = fn
+}
+
+// SetNotifier configures the push notification provider used for system-level alerts.
+func (e *Engine) SetNotifier(n notify.Notifier) {
+	e.notifier = n
+}
+
+// SetNotifyDefaults sets the global on_success / on_failure defaults.
+// Per-task Notify overrides in task.Spec take precedence over these.
+func (e *Engine) SetNotifyDefaults(onSuccess, onFailure bool) {
+	e.notifyOnSuccess = onSuccess
+	e.notifyOnFailure = onFailure
+}
+
+// resolveNotify returns the effective notification flags for a task spec,
+// falling back to the engine's global defaults when the spec has no override.
+func (e *Engine) resolveNotify(spec *task.Spec) (onSuccess, onFailure bool) {
+	onSuccess = e.notifyOnSuccess
+	onFailure = e.notifyOnFailure
+	if n := spec.Notify; n != nil {
+		if n.OnSuccess != nil {
+			onSuccess = *n.OnSuccess
+		}
+		if n.OnFailure != nil {
+			onFailure = *n.OnFailure
+		}
+	}
+	return
 }
 
 // RegisterExecutor registers an executor for the given runtime name.
@@ -401,8 +435,29 @@ func (e *Engine) fireAsync(ctx context.Context, spec *task.Spec, opts pkgruntime
 			zap.Duration("duration", elapsed.Truncate(time.Millisecond)),
 		)
 
+		notifyOnSuccess, notifyOnFailure := e.resolveNotify(spec)
+
+		if e.notifier != nil {
+			shouldNotify := (status == registry.StatusSuccess && notifyOnSuccess) ||
+				(status == registry.StatusFailure && notifyOnFailure)
+			if shouldNotify {
+				msg := notify.Message{
+					Title: fmt.Sprintf("[dicode] %s %s", spec.Name, status),
+					Body:  fmt.Sprintf("Run finished in %.1fs", elapsed.Seconds()),
+				}
+				if status == registry.StatusFailure {
+					msg.Priority = notify.PriorityHigh
+				}
+				go func() {
+					if err := e.notifier.Send(context.Background(), msg); err != nil {
+						e.log.Warn("notification send failed", zap.Error(err))
+					}
+				}()
+			}
+		}
+
 		if h := e.runFinishedHook; h != nil {
-			h(spec.ID, runID, status, source, elapsed.Milliseconds())
+			h(spec.ID, runID, status, source, elapsed.Milliseconds(), notifyOnSuccess, notifyOnFailure)
 		}
 
 		if spec.Trigger.Daemon {
