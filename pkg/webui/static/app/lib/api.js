@@ -10,6 +10,7 @@ export async function api(method, path, body) {
   if (ct.includes('application/json')) return res.json();
   return res.text();
 }
-export const get  = (path)       => api('GET',    path);
-export const post = (path, body) => api('POST',   path, body);
-export const del  = (path)       => api('DELETE', path);
+export const get   = (path)       => api('GET',    path);
+export const post  = (path, body) => api('POST',   path, body);
+export const patch = (path, body) => api('PATCH',  path, body);
+export const del   = (path)       => api('DELETE', path);
