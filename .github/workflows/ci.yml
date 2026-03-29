@@ -54,6 +54,12 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    outputs:
+      url-linux-amd64:   ${{ steps.upload-linux-amd64.outputs.artifact-url }}
+      url-linux-arm64:   ${{ steps.upload-linux-arm64.outputs.artifact-url }}
+      url-darwin-amd64:  ${{ steps.upload-darwin-amd64.outputs.artifact-url }}
+      url-darwin-arm64:  ${{ steps.upload-darwin-arm64.outputs.artifact-url }}
+      url-windows-amd64: ${{ steps.upload-windows-amd64.outputs.artifact-url }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -71,11 +77,47 @@ jobs:
         env:
           GORELEASER_CURRENT_TAG: pr-${{ github.event.pull_request.number }}
 
-      - name: Upload artifacts
+      - name: List dist
+        run: find dist -type f | sort
+
+      - name: Upload linux/amd64
+        id: upload-linux-amd64
         uses: actions/upload-artifact@v4
         with:
-          name: dicode-pr-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
-          path: dist/
+          name: dicode-linux-amd64
+          path: dist/dicode_linux_amd64_v1/dicode
+          retention-days: 7
+
+      - name: Upload linux/arm64
+        id: upload-linux-arm64
+        uses: actions/upload-artifact@v4
+        with:
+          name: dicode-linux-arm64
+          path: dist/dicode_linux_arm64/dicode
+          retention-days: 7
+
+      - name: Upload darwin/amd64
+        id: upload-darwin-amd64
+        uses: actions/upload-artifact@v4
+        with:
+          name: dicode-darwin-amd64
+          path: dist/dicode_darwin_amd64_v1/dicode
+          retention-days: 7
+
+      - name: Upload darwin/arm64
+        id: upload-darwin-arm64
+        uses: actions/upload-artifact@v4
+        with:
+          name: dicode-darwin-arm64
+          path: dist/dicode_darwin_arm64/dicode
+          retention-days: 7
+
+      - name: Upload windows/amd64
+        id: upload-windows-amd64
+        uses: actions/upload-artifact@v4
+        with:
+          name: dicode-windows-amd64
+          path: dist/dicode_windows_amd64_v1/dicode.exe
           retention-days: 7
 
   comment-pr:
@@ -93,16 +135,14 @@ jobs:
           message: |
             ## Build Artifacts
 
-            Dev binaries for `${{ github.event.pull_request.head.sha }}` (all platforms, cross-compiled from Linux):
+            Dev binaries for `${{ github.event.pull_request.head.sha }}`:
 
-            | Platform | File |
+            | Platform | Download |
             | --- | --- |
-            | linux/amd64 | `dicode-linux-amd64` |
-            | linux/arm64 | `dicode-linux-arm64` |
-            | darwin/amd64 | `dicode-darwin-amd64` |
-            | darwin/arm64 (Apple Silicon) | `dicode-darwin-arm64` |
-            | windows/amd64 | `dicode-windows-amd64.exe` |
-
-            [Download all from this run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            | linux/amd64 | [dicode-linux-amd64](${{ needs.build-pr.outputs.url-linux-amd64 }}) |
+            | linux/arm64 | [dicode-linux-arm64](${{ needs.build-pr.outputs.url-linux-arm64 }}) |
+            | darwin/amd64 | [dicode-darwin-amd64](${{ needs.build-pr.outputs.url-darwin-amd64 }}) |
+            | darwin/arm64 (Apple Silicon) | [dicode-darwin-arm64](${{ needs.build-pr.outputs.url-darwin-arm64 }}) |
+            | windows/amd64 | [dicode-windows-amd64.exe](${{ needs.build-pr.outputs.url-windows-amd64 }}) |
 
             > Artifacts expire after 7 days.
