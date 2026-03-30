@@ -43,3 +43,11 @@ spec:
     nginx-start:
       ref:
         path: /home/dr14/dicode/examples/nginx-start/task.yaml
+
+    webhook-form:
+      ref:
+        path: /home/dr14/dicode/examples/webhook-form/task.yaml
+
+    webhook-dashboard:
+      ref:
+        path: /home/dr14/dicode/examples/webhook-dashboard/task.yaml
