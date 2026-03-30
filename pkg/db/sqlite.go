@@ -99,7 +99,32 @@ func (s *SQLiteDB) migrate() error {
 	} {
 		_, _ = s.db.Exec(stmt)
 	}
-	return nil
+
+	// Auth tables — sessions (browser sessions + trusted devices) and API keys.
+	_, err = s.db.Exec(`
+		CREATE TABLE IF NOT EXISTS sessions (
+			id          TEXT PRIMARY KEY,
+			token_hash  TEXT NOT NULL UNIQUE,
+			kind        TEXT NOT NULL CHECK(kind IN ('session','device')),
+			label       TEXT NOT NULL DEFAULT '',
+			ip          TEXT NOT NULL DEFAULT '',
+			created_at  INTEGER NOT NULL,
+			last_seen   INTEGER NOT NULL,
+			expires_at  INTEGER NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+
+		CREATE TABLE IF NOT EXISTS api_keys (
+			id         TEXT PRIMARY KEY,
+			name       TEXT NOT NULL,
+			key_hash   TEXT NOT NULL UNIQUE,
+			prefix     TEXT NOT NULL,
+			created_at INTEGER NOT NULL,
+			last_used  INTEGER,
+			expires_at INTEGER
+		);
+	`)
+	return err
 }
 
 func (s *SQLiteDB) Ping(ctx context.Context) error {

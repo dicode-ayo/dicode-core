@@ -4,12 +4,16 @@ package trigger
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -355,6 +359,56 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runStatus strin
 	}
 }
 
+const (
+	// webhookMaxBodyBytes caps the body read for HMAC verification.
+	webhookMaxBodyBytes = 5 << 20 // 5 MB
+	// webhookTimestampTolerance is the replay-protection window.
+	webhookTimestampTolerance = 5 * time.Minute
+	// webhookSignatureHeader is the default signature header (GitHub-compatible).
+	webhookSignatureHeader = "X-Hub-Signature-256"
+	// webhookTimestampHeader carries the Unix timestamp for replay protection.
+	webhookTimestampHeader = "X-Dicode-Timestamp"
+)
+
+// verifyWebhookSignature validates HMAC-SHA256 signature and optional replay
+// protection for a webhook request. Returns nil when the request is authentic.
+// When no secret is configured on the task the check is skipped (open webhook).
+func verifyWebhookSignature(spec *task.Spec, r *http.Request, body []byte) error {
+	secret := spec.Trigger.WebhookSecret
+	if secret == "" {
+		return nil // unauthenticated webhook — allowed for backwards-compat
+	}
+
+	// Replay protection via timestamp header (optional — not all senders provide it).
+	if tsStr := r.Header.Get(webhookTimestampHeader); tsStr != "" {
+		ts, err := strconv.ParseInt(tsStr, 10, 64)
+		if err != nil {
+			return fmt.Errorf("invalid %s header", webhookTimestampHeader)
+		}
+		age := time.Since(time.Unix(ts, 0))
+		if age < 0 {
+			age = -age
+		}
+		if age > webhookTimestampTolerance {
+			return fmt.Errorf("webhook timestamp out of tolerance window (%v)", age.Round(time.Second))
+		}
+	}
+
+	got := r.Header.Get(webhookSignatureHeader)
+	if got == "" {
+		return fmt.Errorf("missing %s header", webhookSignatureHeader)
+	}
+
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write(body)
+	want := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+
+	if !hmac.Equal([]byte(got), []byte(want)) {
+		return fmt.Errorf("signature mismatch")
+	}
+	return nil
+}
+
 // WebhookHandler returns an HTTP handler that dispatches webhook-triggered tasks.
 //
 // Behaviour by request type:
@@ -419,6 +473,7 @@ func (e *Engine) WebhookHandler() http.Handler {
 
 		var input interface{}
 		isFormSubmit := false
+		var body []byte
 
 		if r.Method == http.MethodGet {
 			if q := r.URL.Query(); len(q) > 0 {
@@ -447,10 +502,22 @@ func (e *Engine) WebhookHandler() http.Handler {
 				isFormSubmit = true
 			}
 		} else if r.Body != nil {
-			body, err := io.ReadAll(r.Body)
+			var err error
+			body, err = io.ReadAll(io.LimitReader(r.Body, webhookMaxBodyBytes))
 			if err == nil && len(body) > 0 {
 				_ = json.Unmarshal(body, &input)
 			}
+		}
+
+		// Verify HMAC signature when a secret is configured on the task.
+		if err := verifyWebhookSignature(spec, r, body); err != nil {
+			e.log.Warn("webhook signature verification failed",
+				zap.String("path", path),
+				zap.String("task", taskID),
+				zap.Error(err),
+			)
+			http.Error(w, "forbidden: "+err.Error(), http.StatusForbidden)
+			return
 		}
 
 		// Extract a flat string map from the input so it is accessible via
