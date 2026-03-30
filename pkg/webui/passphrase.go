@@ -3,6 +3,7 @@ package webui
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -70,6 +71,10 @@ func generateRandomPassphrase() (string, error) {
 //   1. YAML override (server.secret) — explicit operator config, highest priority
 //   2. DB-stored passphrase — set via UI or auto-generated on first boot
 //   3. "" — auth is configured but no passphrase exists yet (bootstrap state)
+//
+// The DB result is cached in memory and only re-read from SQLite on a cache
+// miss. The cache is warmed at startup (ensurePassphrase) and invalidated
+// whenever apiChangePassphrase succeeds.
 func (s *Server) resolvePassphrase(ctx context.Context) string {
 	// YAML override takes precedence so headless/scripted setups keep working.
 	if s.cfg.Server.Secret != "" {
@@ -78,7 +83,22 @@ func (s *Server) resolvePassphrase(ctx context.Context) string {
 	if s.passphraseStore == nil {
 		return ""
 	}
-	val, _ := s.passphraseStore.get(ctx)
+	s.cachedPassphraseMu.RLock()
+	cached := s.cachedPassphrase
+	s.cachedPassphraseMu.RUnlock()
+	if cached != "" {
+		return cached
+	}
+	val, err := s.passphraseStore.get(ctx)
+	if err != nil {
+		s.log.Error("failed to read passphrase from DB", zap.Error(err))
+		return ""
+	}
+	if val != "" {
+		s.cachedPassphraseMu.Lock()
+		s.cachedPassphrase = val
+		s.cachedPassphraseMu.Unlock()
+	}
 	return val
 }
 
@@ -111,6 +131,9 @@ func (s *Server) ensurePassphrase(ctx context.Context) error {
 	if err := s.passphraseStore.set(ctx, pass); err != nil {
 		return fmt.Errorf("store passphrase: %w", err)
 	}
+	s.cachedPassphraseMu.Lock()
+	s.cachedPassphrase = pass
+	s.cachedPassphraseMu.Unlock()
 
 	// Print clearly to stdout — this is the operator's only chance to see it.
 	fmt.Println("╔══════════════════════════════════════════════════════════════╗")
@@ -160,6 +183,7 @@ func (s *Server) apiChangePassphrase(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body struct {
+		Current    string `json:"current"`
 		Passphrase string `json:"passphrase"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Passphrase == "" {
@@ -171,11 +195,25 @@ func (s *Server) apiChangePassphrase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Require the current passphrase to prevent a stolen session from rotating
+	// the credential without knowing the existing secret. Skip only when no
+	// passphrase is set yet (bootstrap: first-time setup from a valid session).
+	existing := s.resolvePassphrase(r.Context())
+	if existing != "" && subtle.ConstantTimeCompare([]byte(body.Current), []byte(existing)) != 1 {
+		jsonErr(w, "current passphrase is incorrect", http.StatusUnauthorized)
+		return
+	}
+
 	if err := s.passphraseStore.set(r.Context(), body.Passphrase); err != nil {
 		s.log.Error("failed to store passphrase", zap.Error(err))
 		jsonErr(w, "failed to store passphrase", http.StatusInternalServerError)
 		return
 	}
+
+	// Update the in-memory cache so subsequent auth checks see the new value immediately.
+	s.cachedPassphraseMu.Lock()
+	s.cachedPassphrase = body.Passphrase
+	s.cachedPassphraseMu.Unlock()
 
 	// Invalidate all current sessions — everyone must re-login with the new passphrase.
 	s.sessions.mu.Lock()

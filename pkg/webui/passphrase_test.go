@@ -225,9 +225,6 @@ func TestEnsurePassphrase_NoopWhenYAMLOverridePresent(t *testing.T) {
 // ── /api/auth/passphrase HTTP endpoints ───────────────────────────────────────
 
 func TestPassphraseAPI_StatusEndpoint(t *testing.T) {
-	d, _ := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
-	defer d.Close()
-
 	srv := newAuthServer(t, "") // auth enabled, no YAML secret
 	// Manually set a DB passphrase
 	_ = srv.passphraseStore.set(context.Background(), "test-pass")
@@ -254,9 +251,6 @@ func TestPassphraseAPI_StatusEndpoint(t *testing.T) {
 }
 
 func TestPassphraseAPI_ChangePassphrase(t *testing.T) {
-	d, _ := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
-	defer d.Close()
-
 	srv := newAuthServer(t, "")
 	_ = srv.passphraseStore.set(context.Background(), "old-passphrase-here")
 
@@ -266,8 +260,8 @@ func TestPassphraseAPI_ChangePassphrase(t *testing.T) {
 		t.Fatal("login with old passphrase failed")
 	}
 
-	// Change passphrase.
-	body, _ := json.Marshal(map[string]string{"passphrase": "new-strong-passphrase-123"})
+	// Change passphrase — must supply the current one.
+	body, _ := json.Marshal(map[string]string{"current": "old-passphrase-here", "passphrase": "new-strong-passphrase-123"})
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/passphrase", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.AddCookie(cookie)
@@ -292,14 +286,11 @@ func TestPassphraseAPI_ChangePassphrase(t *testing.T) {
 }
 
 func TestPassphraseAPI_ChangeRequiresSession(t *testing.T) {
-	d, _ := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
-	defer d.Close()
-
 	srv := newAuthServer(t, "")
 	_ = srv.passphraseStore.set(context.Background(), "existing-pass-1234")
 	h := srv.Handler()
 
-	body, _ := json.Marshal(map[string]string{"passphrase": "new-pass-should-fail"})
+	body, _ := json.Marshal(map[string]string{"current": "existing-pass-1234", "passphrase": "new-pass-should-fail"})
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/passphrase", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	// No cookie.
@@ -312,9 +303,6 @@ func TestPassphraseAPI_ChangeRequiresSession(t *testing.T) {
 }
 
 func TestPassphraseAPI_ChangeTooShortRejected(t *testing.T) {
-	d, _ := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
-	defer d.Close()
-
 	srv := newAuthServer(t, "")
 	_ = srv.passphraseStore.set(context.Background(), "existing-long-pass-1234")
 	h := srv.Handler()
@@ -324,7 +312,7 @@ func TestPassphraseAPI_ChangeTooShortRejected(t *testing.T) {
 		t.Fatal("login failed")
 	}
 
-	body, _ := json.Marshal(map[string]string{"passphrase": "short"})
+	body, _ := json.Marshal(map[string]string{"current": "existing-long-pass-1234", "passphrase": "short"})
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/passphrase", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.AddCookie(cookie)
@@ -333,6 +321,33 @@ func TestPassphraseAPI_ChangeTooShortRejected(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 for short passphrase, got %d", w.Code)
+	}
+}
+
+func TestPassphraseAPI_WrongCurrentRejected(t *testing.T) {
+	srv := newAuthServer(t, "")
+	_ = srv.passphraseStore.set(context.Background(), "correct-current-pass-123")
+	h := srv.Handler()
+
+	cookie := login(t, h, "correct-current-pass-123", false)
+	if cookie == nil {
+		t.Fatal("login failed")
+	}
+
+	body, _ := json.Marshal(map[string]string{"current": "wrong-current-passphrase", "passphrase": "new-strong-passphrase-123"})
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/passphrase", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 for wrong current passphrase, got %d", w.Code)
+	}
+
+	// Original passphrase must still work.
+	if c := login(t, h, "correct-current-pass-123", false); c == nil {
+		t.Error("passphrase should not have changed after rejected attempt")
 	}
 }
 
