@@ -8,6 +8,64 @@ import (
 	"go.uber.org/zap"
 )
 
+// webhookAuthGuard checks whether the task associated with the requested webhook
+// path has trigger.auth: true. If it does, and the request carries no valid
+// dicode session, the request is rejected (401 JSON for API callers, redirect
+// for browsers). Public webhooks (no auth: true) pass through unchanged.
+func (s *Server) webhookAuthGuard(w http.ResponseWriter, r *http.Request, next http.Handler) {
+	// Find the spec whose webhook path is a prefix-match for r.URL.Path.
+	var requiresAuth bool
+	for _, spec := range s.registry.All() {
+		wp := spec.Trigger.Webhook
+		if wp == "" {
+			continue
+		}
+		if r.URL.Path == wp || strings.HasPrefix(r.URL.Path, wp+"/") {
+			requiresAuth = spec.Trigger.WebhookAuth
+			break
+		}
+	}
+
+	if !requiresAuth {
+		next.ServeHTTP(w, r)
+		return
+	}
+
+	// Task requires a valid dicode session.
+	if s.hasValidSession(r) {
+		next.ServeHTTP(w, r)
+		return
+	}
+
+	// For webhook paths, a GET without an API content/accept header is a
+	// browser navigating to the task UI — redirect rather than 401.
+	isBrowserGet := r.Method == http.MethodGet &&
+		r.Header.Get("Accept") != "application/json" &&
+		!strings.Contains(r.Header.Get("Content-Type"), "application/json")
+	if !isBrowserGet {
+		jsonErr(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	http.Redirect(w, r, "/?auth=required", http.StatusSeeOther)
+}
+
+// hasValidSession returns true if r carries a valid in-memory session cookie
+// or a device token that can be auto-renewed.
+func (s *Server) hasValidSession(r *http.Request) bool {
+	if cookie, err := r.Cookie(secretsCookie); err == nil {
+		if s.sessions.valid(cookie.Value) {
+			return true
+		}
+	}
+	if s.dbSessions != nil {
+		if dc, err := r.Cookie(deviceCookie); err == nil {
+			_, ok := s.dbSessions.renewFromDevice(r.Context(), dc.Value, clientIP(r, s.cfg.Server.TrustProxy))
+			return ok
+		}
+	}
+	return false
+}
+
 // requireAuth is a middleware that enforces authentication when server.auth is
 // enabled. API requests receive a 401 JSON response; browser requests are
 // redirected to the login page. Public paths (login endpoint, static assets,
