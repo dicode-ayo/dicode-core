@@ -63,6 +63,7 @@ env:
 | `trigger` | object | ✅ | Exactly one trigger must be set |
 | `trigger.cron` | string | | Standard cron expression (5 fields) |
 | `trigger.webhook` | string | | Webhook path, e.g. `/github-push` |
+| `trigger.auth` | bool | | Require a valid dicode session for webhook GET (UI) and POST (run) |
 | `trigger.manual` | bool | | Set `true` to enable manual-only |
 | `trigger.chain` | object | | Chain trigger (see below) |
 | `trigger.chain.from` | string | | Task ID to listen for |
@@ -96,6 +97,19 @@ trigger:
 ```
 
 Endpoint: `POST /hooks/github-push`. Request body available as `input` global in `task.js`.
+
+To require a valid dicode session before allowing access to the webhook UI or running the task, add `auth: true`:
+
+```yaml
+trigger:
+  webhook: /hooks/my-internal-tool
+  auth: true
+```
+
+- `GET /hooks/my-internal-tool` (serving `index.html`) → redirects to `/?auth=required` if no session
+- `POST /hooks/my-internal-tool` (running the task) → returns `401` JSON if no session
+- `dicode.js` handles 401 automatically: silent refresh via device token, then redirects to login
+- Open webhooks (no `auth: true`) remain fully public — no behaviour change
 
 **Manual** — only fires when explicitly triggered via API or UI:
 ```yaml

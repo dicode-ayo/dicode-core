@@ -308,10 +308,13 @@ func (s *Server) Handler() http.Handler {
 	r.Post("/api/secrets/unlock", s.apiSecretsUnlock)
 	r.Post("/api/auth/refresh", s.apiAuthRefresh)
 
-	// Webhook passthrough — auth via per-task HMAC secret, not session cookie.
+	// Webhook passthrough — auth via per-task HMAC secret or optional session cookie.
+	// When a task sets trigger.auth: true, a valid dicode session is required for
+	// both GET (serving the task UI) and POST (running the task). Public webhooks
+	// (no auth: true) remain fully open — zero behaviour change.
 	webhookHandler := func(w http.ResponseWriter, req *http.Request) {
 		req.URL.Path = "/hooks/" + chi.URLParam(req, "*")
-		s.engine.WebhookHandler().ServeHTTP(w, req)
+		s.webhookAuthGuard(w, req, s.engine.WebhookHandler())
 	}
 	r.Get("/hooks/*", webhookHandler)
 	r.Post("/hooks/*", webhookHandler)
