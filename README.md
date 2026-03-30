@@ -444,7 +444,8 @@ notifications:
 server:
   port: 8080                              # web UI + API port (default: 8080)
   auth: false                             # set true to require passphrase for all endpoints
-  secret: ""                              # passphrase used for auth (and webhook relay HMAC)
+  secret: ""                              # optional YAML passphrase override; if omitted dicode
+                                          # auto-generates one on first boot and stores it in SQLite
   allowed_origins: []                     # CORS allowlist — empty = same-origin only
   mcp: true                               # MCP server at /mcp (default: true)
   tray: true                              # system tray icon (default: true when interactive)

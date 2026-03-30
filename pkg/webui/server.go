@@ -136,24 +136,27 @@ var staticFS embed.FS
 
 // Server is the HTTP server for the web UI and REST API.
 type Server struct {
-	registry        *registry.Registry
-	engine          *trigger.Engine
-	cfg             *config.Config
-	cfgPath         string               // path to dicode.yaml; empty in tests
-	secretsMgr      SecretsManager       // nil if local provider not configured
-	reconciler      *registry.Reconciler // nil if not wired
-	sourceMgr       *SourceManager       // nil if not wired
-	dataDir         string               // ~/.dicode or cfg.DataDir
-	managedRuntimes []pkgruntime.ManagedRuntime
-	sessions        *sessionStore
-	dbSessions      *dbSessionStore // persistent sessions / trusted devices
-	apiKeys         *apiKeyStore    // MCP / programmatic API keys
-	limiter         *unlockLimiter
-	logs            *LogBroadcaster
-	ws              *WSHub
-	log             *zap.Logger
-	port            int
-	srv             *http.Server
+	registry           *registry.Registry
+	engine             *trigger.Engine
+	cfg                *config.Config
+	cfgPath            string               // path to dicode.yaml; empty in tests
+	secretsMgr         SecretsManager       // nil if local provider not configured
+	reconciler         *registry.Reconciler // nil if not wired
+	sourceMgr          *SourceManager       // nil if not wired
+	dataDir            string               // ~/.dicode or cfg.DataDir
+	managedRuntimes    []pkgruntime.ManagedRuntime
+	sessions           *sessionStore
+	dbSessions         *dbSessionStore  // persistent sessions / trusted devices
+	apiKeys            *apiKeyStore     // MCP / programmatic API keys
+	passphraseStore    *passphraseStore // auth passphrase persisted in DB
+	cachedPassphrase   string           // in-memory cache of resolved passphrase; invalidated on change
+	cachedPassphraseMu sync.RWMutex
+	limiter            *unlockLimiter
+	logs               *LogBroadcaster
+	ws                 *WSHub
+	log                *zap.Logger
+	port               int
+	srv                *http.Server
 }
 
 // SetManagedRuntimes registers the list of managed runtimes (Deno, Python, …)
@@ -175,28 +178,31 @@ func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config
 
 	var dbs *dbSessionStore
 	var aks *apiKeyStore
+	var ps *passphraseStore
 	if database != nil {
 		dbs = newDBSessionStore(database)
 		aks = newAPIKeyStore(database)
+		ps = newPassphraseStore(database)
 	}
 
 	s := &Server{
-		registry:   r,
-		engine:     eng,
-		cfg:        cfg,
-		cfgPath:    cfgPath,
-		secretsMgr: secretsMgr,
-		reconciler: rec,
-		sourceMgr:  sourceMgr,
-		dataDir:    dataDir,
-		sessions:   ss,
-		dbSessions: dbs,
-		apiKeys:    aks,
-		limiter:    newUnlockLimiter(),
-		logs:       logs,
-		ws:         wsHub,
-		log:        log,
-		port:       port,
+		registry:        r,
+		engine:          eng,
+		cfg:             cfg,
+		cfgPath:         cfgPath,
+		secretsMgr:      secretsMgr,
+		reconciler:      rec,
+		sourceMgr:       sourceMgr,
+		dataDir:         dataDir,
+		sessions:        ss,
+		dbSessions:      dbs,
+		apiKeys:         aks,
+		passphraseStore: ps,
+		limiter:         newUnlockLimiter(),
+		logs:            logs,
+		ws:              wsHub,
+		log:             log,
+		port:            port,
 	}
 
 	// Wire run started hook → broadcast run:started
@@ -364,7 +370,7 @@ func (s *Server) Handler() http.Handler {
 			r.Delete("/secrets/{key}", s.apiDeleteSecret)
 			r.Post("/secrets/lock", s.apiSecretsLock)
 
-			// Auth management — trusted devices & API keys
+			// Auth management — trusted devices, API keys & passphrase
 			r.Get("/auth/devices", s.apiListDevices)
 			r.Delete("/auth/devices/{id}", s.apiRevokeDevice)
 			r.Post("/auth/logout", s.apiLogout)
@@ -372,6 +378,8 @@ func (s *Server) Handler() http.Handler {
 			r.Get("/auth/keys", s.apiListAPIKeys)
 			r.Post("/auth/keys", s.apiCreateAPIKey)
 			r.Delete("/auth/keys/{id}", s.apiRevokeAPIKey)
+			r.Get("/auth/passphrase", s.apiGetPassphraseStatus)
+			r.Post("/auth/passphrase", s.apiChangePassphrase)
 
 			// Settings
 			r.Post("/settings/ai", s.apiSaveAISettings)
@@ -406,6 +414,12 @@ func (s *Server) Handler() http.Handler {
 
 // Start listens on the configured port until ctx is cancelled.
 func (s *Server) Start(ctx context.Context) error {
+	// Ensure an auth passphrase exists before accepting any connections.
+	// Auto-generates and prints one if server.auth is true and none is configured.
+	if err := s.ensurePassphrase(ctx); err != nil {
+		return fmt.Errorf("ensure auth passphrase: %w", err)
+	}
+
 	s.srv = &http.Server{
 		Addr:              fmt.Sprintf(":%d", s.port),
 		Handler:           s.Handler(),
@@ -711,7 +725,10 @@ func (s *Server) apiSaveTrigger(w http.ResponseWriter, r *http.Request) {
 
 const secretsCookie = "dicode_secrets_sess"
 
-func (s *Server) secretsPassphrase() string { return s.cfg.Server.Secret }
+// secretsPassphrase returns the effective auth passphrase (YAML > DB > "").
+func (s *Server) secretsPassphrase() string {
+	return s.resolvePassphrase(context.Background())
+}
 
 func (s *Server) secretsSessionValid(r *http.Request) bool {
 	// If no passphrase is configured, the session is always valid.
