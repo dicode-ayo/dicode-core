@@ -1,0 +1,15 @@
+apiVersion: dicode/v1
+kind: Task
+name: GitHub Push Webhook
+description: >
+  Receives GitHub push events, verifies the HMAC-SHA256 signature, and
+  summarises what changed — branch, commits, and files touched.
+  Demonstrates webhook_secret auth: dicode validates every incoming request
+  against the shared secret before the task script runs.
+runtime: deno
+
+trigger:
+  webhook: /hooks/github-push
+  webhook_secret: "${GITHUB_WEBHOOK_SECRET}"
+
+timeout: 15s
