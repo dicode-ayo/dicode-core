@@ -1,6 +1,6 @@
 # Current State
 
-> Last updated: 2026-03-29 — TaskSet architecture, MCP server, Sources web UI
+> Last updated: 2026-03-29 — TaskSet architecture, MCP server, Sources web UI, Webhook Task UIs
 
 This document describes exactly what exists in the codebase today — what is fully implemented, what is stubbed with interfaces and TODOs, and what exists only as documentation.
 
@@ -137,7 +137,11 @@ Full TaskSet architecture — hierarchical task composition inspired by ArgoCD A
   - Daemon: `startDaemon`, `onDaemonRunFinished` with restart policy (always/on-failure/never)
   - Shutdown: kills all active daemon runs via `shutdownCtx`
   - Audit logs: run started (task, run, trigger source, runtime), run finished (status, duration), kill requested, manual trigger, chain trigger (from/to/on), webhook trigger (path/task), task registered/unregistered, daemon restart lifecycle events
-- 8 tests passing
+  - **Webhook Task UIs**: `WebhookHandler()` detects tasks with an `index.html` file; on browser GET it serves the page with SDK injection; on POST it either runs the task (JSON/API) or redirects browser form submissions to `/runs/{id}/result`
+  - `injectDicodeSDK(html, hookPath, taskID)` — injects `<base href>` + meta tags + `<script src="/dicode.js">` after `<head>` open tag
+  - `serveTaskAsset()` — sandboxed static asset serving with extension allowlist (`.html/.css/.js/.json/.svg/.png/.jpg/.ico/.woff/.woff2`) and path-traversal guard
+  - `flatStringMap()` — converts JSON POST body `map[string]interface{}` to `map[string]string` for `RunOptions.Params`
+- 16 tests passing
 
 ### `pkg/webui/` ✅
 
@@ -148,12 +152,15 @@ Full TaskSet architecture — hierarchical task composition inspired by ArgoCD A
 - WebSocket hub (`/ws`) — real-time fan-out for log lines, run status changes, task events; ring buffer (recent logs replayed on connect)
 - Session store, secrets manager UI (unlock/lock with passphrase), AI chat, config editor
 - SPA routing: `/app/*` serves static assets; `/*` catch-all serves `index.html`
+- `GET /dicode.js` — serves the standalone webhook task UI SDK (embedded from `static/dicode.js`)
 - Audit logs: run requested via API, kill requested via API
 - Task table sorted stably (registry.All() sorts by ID); namespace headers rendered when namespaced IDs present
+- Webhook trigger labels rendered as clickable links (using `t.trigger?.Webhook` — capital W matches Go's JSON marshalling of untagged struct fields)
 - **Frontend** — Lit/LitElement SPA with ESM modules (no build step):
   - `static/app/app.js` — entry point, client-side router, WebSocket boot
-  - `static/app/lib/` — `ws.js` (WebSocket client + auto-reconnect), `router.js`, `api.js` (get/post/patch), `styles.js`, `utils.js`
-  - `static/app/components/` — `dc-task-list` (namespace-grouped), `dc-task-detail`, `dc-run-detail`, `dc-config`, `dc-secrets`, `dc-sources` (dev mode toggle, branch picker), `dc-log-bar`, `dc-notif-panel`
+  - `static/app/lib/` — `ws.js` (WebSocket client + auto-reconnect), `router.js`, `api.js` (get/post/patch), `styles.js`, `utils.js`, `ansi.js` (ansi-to-html wrapper, Catppuccin Mocha palette)
+  - `static/app/components/` — `dc-task-list` (namespace-grouped, webhook links), `dc-task-detail`, `dc-run-detail` (ANSI log rendering via `unsafeHTML(ansiToHtml(...))`), `dc-config`, `dc-secrets`, `dc-sources` (dev mode toggle, branch picker), `dc-log-bar`, `dc-notif-panel`
+  - `static/dicode.js` — standalone IIFE SDK for webhook task UIs; exposes `window.dicode` with `run()`, `stream()`, `execute()`, `result()`, `ansiToHtml()`; auto-enhances `<form data-dicode>` elements
 - 11 tests passing
 
 ### `pkg/tray/` ✅

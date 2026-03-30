@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Text Transformer</title>
+  <link rel="stylesheet" href="style.css">
+  <!--
+    dicode.js is automatically injected here by dicode when serving this page.
+    It provides window.dicode with run(), execute(), stream(), and result() methods,
+    and auto-enhances any <form data-dicode> element.
+  -->
+</head>
+<body>
+<div class="card">
+  <h1>Text Transformer</h1>
+  <p class="subtitle">Transform text using a dicode task running on your machine.</p>
+
+  <!--
+    Level 2 — auto-enhanced form.
+    dicode.js intercepts submit, POSTs JSON to the webhook, streams
+    logs into #output, and re-enables the button on finish.
+
+    For a zero-JS fallback just remove data-dicode / data-output and add
+    method="POST" — the server will redirect to the run result page.
+  -->
+  <form data-dicode data-output="#output">
+    <label for="text">Input text</label>
+    <textarea id="text" name="text" placeholder="Type something…" required></textarea>
+
+    <label for="op">Operation</label>
+    <select id="op" name="op">
+      <option value="uppercase">UPPERCASE</option>
+      <option value="lowercase">lowercase</option>
+      <option value="reverse">Reverse</option>
+      <option value="wordcount">Word count</option>
+    </select>
+
+    <button type="submit">Transform</button>
+  </form>
+
+  <pre id="output"></pre>
+</div>
+</body>
+</html>

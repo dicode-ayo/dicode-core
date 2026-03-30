@@ -15,9 +15,9 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -351,13 +351,25 @@ func (s *Server) Handler() http.Handler {
 		r.Mount("/mcp", mcpSrv.Handler())
 	}
 
-	// Webhook passthrough — POST accepts a JSON body; GET accepts query params.
+	// Webhook passthrough — POST accepts JSON or form body; GET accepts query params
+	// or serves the task's index.html UI when one is present.
 	webhookHandler := func(w http.ResponseWriter, req *http.Request) {
 		req.URL.Path = "/hooks/" + chi.URLParam(req, "*")
 		s.engine.WebhookHandler().ServeHTTP(w, req)
 	}
 	r.Get("/hooks/*", webhookHandler)
 	r.Post("/hooks/*", webhookHandler)
+
+	// dicode.js — client SDK injected into webhook task UIs.
+	r.Get("/dicode.js", func(w http.ResponseWriter, req *http.Request) {
+		b, err := staticFS.ReadFile("static/dicode.js")
+		if err != nil {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+		_, _ = w.Write(b)
+	})
 
 	// Static SPA assets (/app/app.js, etc.)
 	appFS, _ := fs.Sub(staticFS, "static")
@@ -531,6 +543,8 @@ var allowedFiles = map[string]bool{
 	"task.js": true, "task.ts": true, "task.py": true,
 	"task.test.js": true, "task.test.ts": true,
 	"Dockerfile": true,
+	// Webhook UI files — editable via the built-in code editor.
+	"index.html": true, "style.css": true, "script.js": true,
 }
 
 func (s *Server) apiGetFile(w http.ResponseWriter, r *http.Request) {

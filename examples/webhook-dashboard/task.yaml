@@ -1,0 +1,14 @@
+apiVersion: dicode/v1
+kind: Task
+name: System Dashboard
+description: |
+  Returns a JSON snapshot of system info (Deno version, platform, memory,
+  environment variables). Demonstrates a webhook task with a custom UI that
+  uses the dicode.execute() JavaScript API for full control over rendering —
+  no page reload required.
+runtime: deno
+
+trigger:
+  webhook: /hooks/system-dashboard
+
+timeout: 15s

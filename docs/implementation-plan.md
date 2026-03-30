@@ -14,6 +14,8 @@ This document is the ordered build roadmap. Each milestone produces something ru
 
 **TaskSet Architecture ✅ Complete.** Hierarchical task composition (`kind:TaskSet`, `kind:Config`, `kind:Task`), namespace-scoped IDs (`infra/backend/deploy`), 6-level override precedence, dev mode API (`PATCH /api/sources/:name/dev`), MCP server with `list_tasks`/`get_task`/`run_task`/`list_sources`/`switch_dev_mode` tools, Sources web UI page, task list namespace grouping, examples updated to TaskSet model.
 
+**Webhook Task UIs ✅ Complete.** Webhook tasks can include an `index.html` to serve a custom browser UI. The `dicode.js` SDK is auto-injected (with `<base href>` + meta tags), providing three complexity levels: zero-JS plain forms, auto-enhanced `<form data-dicode>` with log streaming, and full `dicode.execute()` API. Assets (CSS, JS, images) served sandboxed from the task directory. ANSI escape codes rendered in the SPA run detail view via `ansi-to-html`. Two examples ship: `webhook-form` (text transformer, Level 2) and `webhook-dashboard` (system info, Level 3).
+
 ---
 
 ## Milestone 0 — Environment setup ✅
