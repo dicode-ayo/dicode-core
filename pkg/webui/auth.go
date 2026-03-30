@@ -115,8 +115,10 @@ func securityHeaders(next http.Handler) http.Handler {
 // session: static assets, the service worker, and the login/unlock endpoints.
 func isPublicPath(path string) bool {
 	switch {
-	case path == "/api/secrets/unlock",
+	case path == "/api/auth/login",
 		path == "/api/auth/refresh",
+		// Deprecated alias — kept for one release.
+		path == "/api/secrets/unlock",
 		strings.HasPrefix(path, "/app/"),
 		path == "/sw.js":
 		return true

@@ -6,14 +6,12 @@ class DcSecrets extends LitElement {
 
   static properties = {
     _secrets: { state: true },
-    _locked:  { state: true },
     _status:  { state: true },
   };
 
   constructor() {
     super();
     this._secrets = null;
-    this._locked = false;
     this._status = '';
   }
 
@@ -26,23 +24,10 @@ class DcSecrets extends LitElement {
     this._status = '';
     try {
       this._secrets = await get('/api/secrets');
-      this._locked = false;
-    } catch(_) {
-      this._locked = true;
-      this._secrets = null;
+    } catch(e) {
+      this._status = 'Failed to load secrets: ' + e.message;
+      this._secrets = [];
     }
-  }
-
-  async _unlock() {
-    const pw = this.querySelector('#secrets-pw')?.value;
-    try {
-      await post('/api/secrets/unlock', { password: pw });
-      this._load();
-    } catch(_) { this._status = 'Incorrect password'; }
-  }
-
-  async _lock() {
-    try { await post('/api/secrets/lock'); this._load(); } catch(_) {}
   }
 
   async _add() {
@@ -60,24 +45,9 @@ class DcSecrets extends LitElement {
   }
 
   render() {
-    if (this._locked) return html`
-      <h1>Secrets</h1>
-      <div class="card" style="max-width:400px">
-        <h2>Unlock Secrets</h2>
-        <p class="meta" style="margin-bottom:1rem">Enter your master password to view and edit secrets.</p>
-        <input type="password" id="secrets-pw" placeholder="Master password" class="input"
-          style="width:100%;margin-bottom:0.5rem"
-          @keydown=${e => { if (e.key === 'Enter') this._unlock(); }}>
-        <button class="btn" @click=${() => this._unlock()}>Unlock</button>
-        <span style="margin-left:0.5rem;font-size:0.85rem;color:red">${this._status}</span>
-      </div>`;
-
     const secrets = this._secrets || [];
     return html`
       <h1>Secrets</h1>
-      <div style="display:flex;gap:0.5rem;margin-bottom:1rem">
-        <button class="btn btn-sm secondary" @click=${() => this._lock()}>Lock</button>
-      </div>
       <div class="card" style="margin-bottom:1rem">
         <h2 style="margin-bottom:0.75rem">Add Secret</h2>
         <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
@@ -86,6 +56,7 @@ class DcSecrets extends LitElement {
           <button class="btn" @click=${() => this._add()}>Add</button>
         </div>
       </div>
+      ${this._status ? html`<p style="color:red;margin-bottom:1rem">${this._status}</p>` : ''}
       <table>
         <thead><tr><th>Key</th><th></th></tr></thead>
         <tbody>
