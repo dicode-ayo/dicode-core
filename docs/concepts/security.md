@@ -8,7 +8,7 @@ This document covers the full security architecture implemented across `pkg/webu
 
 Security is **opt-in**. Without `server.auth: true` in `dicode.yaml`, all behaviour is identical to an unauthenticated deployment. When enabled, every request passes through a middleware chain before reaching any handler:
 
-```
+```text
 request
   └─▶ securityHeaders          adds CSP, X-Frame-Options, etc. (always active)
   └─▶ corsMiddleware            validates Origin against allowlist (always active)
@@ -29,16 +29,43 @@ Middleware is applied in [server.go](../../pkg/webui/server.go) inside `Handler(
 ```yaml
 server:
   auth: true
-  secret: "your-strong-passphrase"   # ≥ 16 chars recommended
+  secret: ""                          # optional YAML override — see passphrase source priority below
   allowed_origins: []                 # empty = same-origin only
   trust_proxy: false                  # set true when behind nginx/Caddy
 ```
+
+### Passphrase source priority
+
+The effective passphrase is resolved in this order on every auth check:
+
+```text
+1. server.secret (YAML)  — highest priority; use for headless / scripted setups
+2. kv["auth.passphrase"] — stored in SQLite; managed via web UI or API
+3. ""                    — bootstrap state (see auto-generation below)
+```
+
+**Auto-generation on first boot**: if `server.auth: true` and no passphrase is set (neither YAML nor DB), dicode generates a cryptographically random 43-character passphrase (32 random bytes, base64url) and prints it to stdout once:
+
+```text
+╔══════════════════════════════════════════════════════════════╗
+║  dicode — auth passphrase generated                         ║
+║                                                              ║
+║  <43-char passphrase>                                        ║
+║                                                              ║
+║  Save this somewhere safe. You can change it any time at    ║
+║  /security in the web UI (requires a valid session).        ║
+╚══════════════════════════════════════════════════════════════╝
+```
+
+The passphrase is immediately persisted in SQLite. Subsequent restarts read it from the DB — the banner is not shown again.
+
+**YAML override behaviour**: when `server.secret` is set, the API refuses passphrase changes (`409 Conflict`) to prevent split-brain state. Remove the YAML field to manage the passphrase via the web UI.
 
 ### `requireAuth` middleware
 
 Defined in [auth.go](../../pkg/webui/auth.go).
 
-```
+```text
 incoming request
   ├── is public path? → allow through
   ├── has valid session cookie? → allow through
@@ -51,6 +78,7 @@ incoming request
 ```
 
 **Public paths** (never require auth):
+
 - `POST /api/secrets/unlock` — login endpoint itself
 - `POST /api/auth/refresh` — silent session renewal (device cookie only, no session required)
 - `/app/*` — static SPA assets (JS, CSS) needed to render the login page
@@ -62,7 +90,7 @@ incoming request
 `securityHeaders` middleware (always active, independent of `server.auth`) adds:
 
 | Header | Value |
-|--------|-------|
+| --- | --- |
 | `X-Content-Type-Options` | `nosniff` |
 | `X-Frame-Options` | `SAMEORIGIN` |
 | `Referrer-Policy` | `strict-origin-when-cross-origin` |
@@ -117,10 +145,10 @@ const (
 
 Two cookie types are in play:
 
-| Cookie | Name | TTL | Stored as |
-|--------|------|-----|-----------|
-| Session | `dicode_secrets_sess` | 8 hours | In-memory map only |
-| Device | `dicode_device` | 30 days | SHA-256 hash in SQLite |
+| Cookie  | Name                  | TTL      | Stored as              |
+| ------- | --------------------- | -------- | ---------------------- |
+| Session | `dicode_secrets_sess` | 8 hours  | In-memory map only     |
+| Device  | `dicode_device`       | 30 days  | SHA-256 hash in SQLite |
 
 Both cookies are: `HttpOnly`, `SameSite=Strict`, `Path=/`.
 
@@ -139,6 +167,7 @@ func (s *sessionStore) issue() string {
 ```
 
 Key properties:
+
 - **Purely random** — no passphrase is involved in token generation
 - Validated by in-memory map lookup (`sessionStore.valid(token)`)
 - Lost on restart — that is intentional; the device cookie handles persistence
@@ -149,11 +178,13 @@ Key properties:
 Managed by `dbSessionStore` in [sessions_db.go](../../pkg/webui/sessions_db.go).
 
 **Issuance** (at login with `trust: true`):
+
 1. Generate 32 random bytes → hex-encode → raw token
 2. Compute `sha256(raw)` → store only the hash in the `sessions` table
 3. Return raw token to be placed in the `dicode_device` cookie
 
 **Renewal** (`renewFromDevice(ctx, rawDeviceToken, ip string)`):
+
 1. Hash the incoming cookie value
 2. Open a **database transaction**
 3. Query for a matching, non-expired `device` row
@@ -188,11 +219,12 @@ CREATE INDEX IF NOT EXISTS idx_sessions_hash ON sessions(token_hash);
 
 ### Login flow
 
-```
+```text
 POST /api/secrets/unlock  {"password":"…","trust":true}
   │
   ├─ rate limit check (IP-based)
-  ├─ ConstantTimeCompare(password, server.secret)
+  ├─ resolvePassphrase() → YAML secret → DB kv["auth.passphrase"] → ""
+  ├─ ConstantTimeCompare(password, resolvedPassphrase)
   ├─ sessions.issue() → 32-byte random session token → cookie
   └─ if trust: dbSessions.issueDeviceToken(ip, user-agent) → device cookie
 
@@ -201,7 +233,7 @@ Response: 200 {"status":"ok"}  +  Set-Cookie: dicode_secrets_sess + dicode_devic
 
 ### Silent refresh flow
 
-```
+```text
 SPA detects 401 from api.js
   │
   ├─ POST /api/auth/refresh  (sends dicode_device cookie)
@@ -217,11 +249,32 @@ SPA detects 401 from api.js
 All require a valid session:
 
 | Method | Path | Action |
-|--------|------|--------|
+| --- | --- | --- |
 | `GET` | `/api/auth/devices` | List active trusted devices |
 | `DELETE` | `/api/auth/devices/{id}` | Revoke one device |
 | `POST` | `/api/auth/logout` | Revoke current session + device cookie |
 | `POST` | `/api/auth/logout-all` | Wipe all in-memory sessions + all device rows |
+
+### Passphrase management endpoints
+
+| Method | Path | Auth | Action |
+| --- | --- | --- | --- |
+| `GET` | `/api/auth/passphrase` | session | Returns `{"source":"yaml"/"db"/"none"}` — never the value |
+| `POST` | `/api/auth/passphrase` | session | Change the DB-stored passphrase |
+
+`POST /api/auth/passphrase` request body:
+
+```json
+{"current": "old-passphrase", "passphrase": "new-passphrase-16chars+"}
+```
+
+Rules:
+
+- Requires a valid session
+- `current` must match the active passphrase (constant-time compare); skipped only when no passphrase is set yet (bootstrap)
+- New passphrase must be ≥ 16 characters
+- Blocked with `409` when `server.secret` (YAML override) is active
+- On success: all in-memory sessions and DB device tokens are invalidated — everyone must re-login
 
 ---
 
@@ -241,7 +294,7 @@ When `webhook_secret` is absent the webhook is open (backwards-compatible). When
 
 `verifyWebhookSignature(spec, r, body []byte)` in [engine.go](../../pkg/trigger/engine.go):
 
-```
+```text
 1. If no secret configured → return nil (open webhook)
 2. Check X-Dicode-Timestamp if present:
    - Parse as Unix int64
@@ -275,6 +328,7 @@ This is critical: if form-encoded bodies were parsed via `r.ParseForm()` first (
 The signature format is intentionally identical to GitHub's webhook delivery. A GitHub webhook pointed at a dicode endpoint with the same secret works with zero configuration on the GitHub side.
 
 Constants:
+
 ```go
 webhookSignatureHeader    = "X-Hub-Signature-256"
 webhookTimestampHeader    = "X-Dicode-Timestamp"
@@ -359,7 +413,7 @@ func (s *Server) requireAPIKey(next http.Handler) http.Handler {
 All require a valid session (not just an API key — key management is a human operation):
 
 | Method | Path | Response |
-|--------|------|---------|
+| --- | --- | --- |
 | `GET` | `/api/auth/keys` | List of `APIKeyInfo` (no raw values) |
 | `POST` | `/api/auth/keys` | `{key: "dck_…", info: APIKeyInfo}` — key shown once |
 | `DELETE` | `/api/auth/keys/{id}` | `{status: "revoked"}` |
@@ -405,9 +459,9 @@ Expired rows are cleaned up by `dbSessionStore.purgeExpired(ctx)` which is calle
 All security-relevant fields in `ServerConfig`:
 
 | Field | Type | Default | Description |
-|-------|------|---------|-------------|
+| --- | --- | --- | --- |
 | `auth` | bool | `false` | Enable global auth wall |
-| `secret` | string | `""` | Login passphrase (excluded from JSON API) |
+| `secret` | string | `""` | YAML passphrase override — highest priority; if omitted dicode auto-generates one on first boot and stores it in SQLite |
 | `allowed_origins` | []string | `[]` | CORS allowlist — empty = same-origin only |
 | `trust_proxy` | bool | `false` | Trust `X-Forwarded-For` (set when behind a reverse proxy) |
 | `mcp` | bool | `true` | Expose MCP endpoint at `/mcp` |
@@ -426,7 +480,7 @@ All security-relevant fields in `ServerConfig`:
 ## Security Properties Summary
 
 | Property | Implementation |
-|----------|---------------|
+| --- | --- |
 | Session tokens are random | `crypto/rand`, 32 bytes, never passphrase-derived |
 | Device tokens stored as hash | SHA-256 in SQLite, raw value only in cookie |
 | API keys stored as hash | SHA-256 in SQLite, raw value returned once |
@@ -440,3 +494,4 @@ All security-relevant fields in `ServerConfig`:
 | Brute force protection | 5 attempts/IP, then 15-min lockout |
 | Replay attack protection | 5-minute timestamp window on signed webhooks |
 | CORS misconfiguration guard | Origins validated with `url.Parse()` at startup |
+| Passphrase rotation requires current | `crypto/subtle.ConstantTimeCompare` on `current` field |

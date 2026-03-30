@@ -148,8 +148,10 @@ type Server struct {
 	sessions        *sessionStore
 	dbSessions      *dbSessionStore  // persistent sessions / trusted devices
 	apiKeys         *apiKeyStore     // MCP / programmatic API keys
-	passphraseStore *passphraseStore // auth passphrase persisted in DB
-	limiter         *unlockLimiter
+	passphraseStore    *passphraseStore // auth passphrase persisted in DB
+	cachedPassphrase   string           // in-memory cache of resolved passphrase; invalidated on change
+	cachedPassphraseMu sync.RWMutex
+	limiter            *unlockLimiter
 	logs            *LogBroadcaster
 	ws              *WSHub
 	log             *zap.Logger
@@ -723,9 +725,7 @@ func (s *Server) apiSaveTrigger(w http.ResponseWriter, r *http.Request) {
 
 const secretsCookie = "dicode_secrets_sess"
 
-// secretsPassphrase returns the effective auth passphrase. DB-stored value
-// takes precedence over the YAML override for backwards-compat, but YAML
-// override is checked inside resolvePassphrase first (highest priority).
+// secretsPassphrase returns the effective auth passphrase (YAML > DB > "").
 func (s *Server) secretsPassphrase() string {
 	return s.resolvePassphrase(context.Background())
 }
