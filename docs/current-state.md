@@ -1,6 +1,6 @@
 # Current State
 
-> Last updated: 2026-03-29 — TaskSet architecture, MCP server, Sources web UI, Webhook Task UIs
+> Last updated: 2026-03-30 — Security: auth wall, trusted browser, webhook HMAC, MCP API keys; Webhook Task UIs
 
 This document describes exactly what exists in the codebase today — what is fully implemented, what is stubbed with interfaces and TODOs, and what exists only as documentation.
 
@@ -26,7 +26,7 @@ Full configuration loading. All structs defined and validated:
 - `Config`, `SourceConfig`, `DatabaseConfig`, `RelayConfig`
 - `SecretsConfig`, `SecretProviderConfig`
 - `NotificationsConfig`, `NotifyProviderConfig`
-- `ServerConfig` (port, secret, MCP, tray)
+- `ServerConfig` — port, secret, **auth** (global auth wall), **allowed_origins** (CORS allowlist), MCP, tray
 - `AIConfig`
 - `applyDefaults()` with sensible defaults for all fields
 - `validate()` checking required fields per source type
@@ -34,13 +34,12 @@ Full configuration loading. All structs defined and validated:
 ### `pkg/task/` ✅
 
 - `spec.go` — `Spec`, `TriggerConfig`, `ChainTrigger`, `Param`, `DockerConfig` structs
+- `TriggerConfig` includes `Webhook string`, **`WebhookSecret string`** (HMAC auth), `Daemon bool`, `Restart string`
 - `LoadDir(dir)` — reads and validates `task.yaml` from a directory
 - `Script()` / `ScriptPath()` — reads task script source (returns `""` for non-JS runtimes)
-- `validate()` — schema validation including Docker (requires `docker.image`), daemon restart values, cycle detection stubs
+- `validate()` — schema validation including Docker, daemon restart values, cycle detection stubs
 - `hash.go` — `Hash(dir)` SHA256 over task.yaml + task.js
 - `ScanDir(tasksDir)` — scans tasks directory, returns map[taskID]hash
-- `RuntimeDocker = "docker"` constant; `DockerConfig` (image, command, entrypoint, volumes, ports, working_dir, env_vars, pull_policy)
-- `TriggerConfig` includes `Daemon bool` and `Restart string`
 
 ### `pkg/source/` ✅
 
@@ -80,6 +79,7 @@ Full TaskSet architecture — hierarchical task composition inspired by ArgoCD A
 - `SourceLister` interface (`List() []SourceEntry`, `SetDevMode(...)`) — avoids import cycle with webui.
 - `SourceEntry` struct: Name, Type, URL, Path, Branch, DevMode, DevPath.
 - **Implemented tools**: `list_tasks`, `get_task`, `run_task`, `list_sources`, `switch_dev_mode`.
+- **Auth**: protected by `requireAPIKey` middleware when `server.auth: true`. Bearer token format: `dck_<32 random bytes hex>`.
 - `New(registry, sourceLister)` constructor.
 
 ### `pkg/agent/` ✅
@@ -101,6 +101,7 @@ Full TaskSet architecture — hierarchical task composition inspired by ArgoCD A
 
 - `db.go` — `DB` interface, `Scanner`, `Config`, `Open()` dispatcher
 - `sqlite.go` — WAL mode, full schema migration, Tx with rollback
+- **New tables**: `sessions` (browser sessions + trusted device tokens), `api_keys` (MCP/programmatic keys, hashed)
 
 ### `pkg/registry/` ✅
 
@@ -136,32 +137,41 @@ Full TaskSet architecture — hierarchical task composition inspired by ArgoCD A
   - `KillRun(runID)` — cancels run via `runCancels sync.Map`
   - Daemon: `startDaemon`, `onDaemonRunFinished` with restart policy (always/on-failure/never)
   - Shutdown: kills all active daemon runs via `shutdownCtx`
-  - Audit logs: run started (task, run, trigger source, runtime), run finished (status, duration), kill requested, manual trigger, chain trigger (from/to/on), webhook trigger (path/task), task registered/unregistered, daemon restart lifecycle events
+  - **Webhook HMAC**: `verifyWebhookSignature(spec, r, body)` — HMAC-SHA256, `X-Hub-Signature-256` header (GitHub-compatible), optional replay protection via `X-Dicode-Timestamp` (5-minute window). Body capped at 5 MB. Backwards-compatible: open when `webhook_secret` is absent.
   - **Webhook Task UIs**: `WebhookHandler()` detects tasks with an `index.html` file; on browser GET it serves the page with SDK injection; on POST it either runs the task (JSON/API) or redirects browser form submissions to `/runs/{id}/result`
   - `injectDicodeSDK(html, hookPath, taskID)` — injects `<base href>` + meta tags + `<script src="/dicode.js">` after `<head>` open tag
-  - `serveTaskAsset()` — sandboxed static asset serving with extension allowlist (`.html/.css/.js/.json/.svg/.png/.jpg/.ico/.woff/.woff2`) and path-traversal guard
-  - `flatStringMap()` — converts JSON POST body `map[string]interface{}` to `map[string]string` for `RunOptions.Params`
-- 16 tests passing
+  - `serveTaskAsset()` — sandboxed static asset serving with extension allowlist and path-traversal guard
+  - `flatStringMap()` — converts POST body to `map[string]string` for `RunOptions.Params`
+  - Audit logs: run started, run finished, kill requested, trigger types, daemon lifecycle
+- 16 tests passing + 7 new HMAC/signature tests
 
 ### `pkg/webui/` ✅
 
 - `server.go` — chi router, all REST + SPA endpoints, static assets embedded via `//go:embed static`
+  - `New()` now accepts `db.DB` parameter for persistent session and key storage
+  - Router restructured: always-public paths (login, static assets, webhooks) separated from the auth-gated group
+- **`auth.go`** — `requireAuth` middleware (session cookie check → device token renewal → 401/redirect), `corsMiddleware` (explicit allowlist, Vary header), `securityHeaders` (X-Content-Type-Options, X-Frame-Options, Referrer-Policy, Permissions-Policy, **Content-Security-Policy**)
+- **`sessions_db.go`** — SQLite-backed `dbSessionStore`: `issueDeviceToken`, `renewFromDevice`, `listDevices`, `revokeDevice`, `revokeAllDevices`. Device tokens: 30-day expiry, stored as SHA-256 hash, cookie is HttpOnly + SameSite=Strict. HTTP handlers: `apiAuthRefresh`, `apiListDevices`, `apiRevokeDevice`, `apiLogout`, `apiLogoutAll`.
+- **`apikeys.go`** — `apiKeyStore`: `generate` (returns raw `dck_`-prefixed key once), `validate` (hash-compare + `last_used` update), `list`, `revoke`. `requireAPIKey` middleware for MCP. HTTP handlers: `apiListAPIKeys`, `apiCreateAPIKey`, `apiRevokeAPIKey`.
+- `apiSecretsUnlock` extended: accepts `trust: true` → issues device cookie alongside session cookie
 - REST API endpoints including `POST /api/runs/{runID}/kill`, file editor, trigger editor, AI stream
-- **Source management** (`sources.go`): `SourceManager` (maps source name → `*taskset.Source`), HTTP handlers: `GET /api/sources`, `PATCH /api/sources/:name/dev`, `GET /api/sources/:name/branches`
-- **MCP server mounted** at `/mcp`: `mcp.New(registry, sourceMgr)` wired and served via `r.Mount("/mcp", ...)`
-- WebSocket hub (`/ws`) — real-time fan-out for log lines, run status changes, task events; ring buffer (recent logs replayed on connect)
-- Session store, secrets manager UI (unlock/lock with passphrase), AI chat, config editor
-- SPA routing: `/app/*` serves static assets; `/*` catch-all serves `index.html`
-- `GET /dicode.js` — serves the standalone webhook task UI SDK (embedded from `static/dicode.js`)
+- **New auth endpoints**: `POST /api/secrets/unlock` (with trust), `POST /api/auth/refresh`, `GET/DELETE /api/auth/devices/{id}`, `POST /api/auth/logout`, `POST /api/auth/logout-all`, `GET/POST/DELETE /api/auth/keys/{id}`
+- **Source management** (`sources.go`): `SourceManager` (maps source name → `*taskset.Source`), `GET /api/sources`, `PATCH /api/sources/:name/dev`, `GET /api/sources/:name/branches`
+- **MCP server** at `/mcp`: protected by `requireAPIKey` when auth enabled
+- WebSocket hub (`/ws`) — real-time fan-out for log lines, run status, task events (`tasks:changed`); ring buffer (recent logs replayed on connect)
+- `GET /dicode.js` — standalone webhook task UI SDK (public, no auth)
 - Audit logs: run requested via API, kill requested via API
-- Task table sorted stably (registry.All() sorts by ID); namespace headers rendered when namespaced IDs present
-- Webhook trigger labels rendered as clickable links (using `t.trigger?.Webhook` — capital W matches Go's JSON marshalling of untagged struct fields)
+- Task table sorted stably; namespace headers rendered when namespaced IDs present
+- Webhook trigger labels rendered as clickable links
 - **Frontend** — Lit/LitElement SPA with ESM modules (no build step):
-  - `static/app/app.js` — entry point, client-side router, WebSocket boot
-  - `static/app/lib/` — `ws.js` (WebSocket client + auto-reconnect), `router.js`, `api.js` (get/post/patch), `styles.js`, `utils.js`, `ansi.js` (ansi-to-html wrapper, Catppuccin Mocha palette)
-  - `static/app/components/` — `dc-task-list` (namespace-grouped, webhook links), `dc-task-detail`, `dc-run-detail` (ANSI log rendering via `unsafeHTML(ansiToHtml(...))`), `dc-config`, `dc-secrets`, `dc-sources` (dev mode toggle, branch picker), `dc-log-bar`, `dc-notif-panel`
-  - `static/dicode.js` — standalone IIFE SDK for webhook task UIs; exposes `window.dicode` with `run()`, `stream()`, `execute()`, `result()`, `ansiToHtml()`; auto-enhances `<form data-dicode>` elements
-- 11 tests passing
+  - `static/app/app.js` — entry point, client-side router, WebSocket boot, auth overlay injection
+  - `static/app/lib/` — `ws.js`, `router.js`, `api.js` (401 interceptor: silent refresh → auth overlay → retry), `styles.js`, `utils.js`, `ansi.js`
+  - `static/app/components/` — `dc-task-list` (re-fetches on `tasks:changed` WS event), `dc-task-detail`, `dc-run-detail`, `dc-config`, `dc-secrets`, `dc-sources`, `dc-log-bar`, `dc-notif-panel`
+  - `components/dc-auth-overlay.js` — modal injected by `app.js`; passphrase + "Trust this browser for 30 days" checkbox
+  - `components/dc-security.js` — `/security` page: trusted devices, API key management, logout-all
+  - `static/dicode.js` — standalone IIFE SDK for webhook task UIs; `window.dicode` with `run()`, `stream()`, `execute()`, `result()`, `ansiToHtml()`
+  - **Security nav link** added to `index.html`
+- 11 existing + 12 new auth/security tests (public path gate, 401 enforcement, session lifecycle, device cookie, rate limiting, CORS allowlist, security headers, CSP, API key generate/validate/revoke, MCP key check)
 
 ### `pkg/tray/` ✅
 
@@ -178,9 +188,23 @@ Full TaskSet architecture — hierarchical task composition inspired by ArgoCD A
 
 - Full component wiring: db → secrets → registry → JS runtime → Docker runtime → trigger engine → reconciler → webui → tray
 - `buildSources()` returns `([]source.Source, *webui.SourceManager, error)` — builds both the source slice and the `SourceManager` for dev mode control
-- `buildTaskSetSource()` returns `*taskset.Source` (not `source.Source`) so it can be stored in the source map for runtime dev mode control
+- `buildTaskSetSource()` returns `*taskset.Source` so it can be stored in the source map for runtime dev mode control
 - Startup sequence: `CleanupOrphanedContainers` → `CleanupStaleRuns` → register tasks → `engine.Start`
-- `task` + `version` subcommands; secrets CLI subcommand missing
+- `db.DB` passed to `webui.New()` for persistent sessions and API key storage
+
+### `examples/` ✅
+
+| Example | Trigger | Runtime |
+| --- | --- | --- |
+| `hello-cron/` | cron | deno |
+| `github-stars/` | manual | deno |
+| `gmail-to-slack/` | cron | deno |
+| `google-login/` | manual | deno |
+| `hello-docker/` | manual | docker |
+| `hello-podman/` | manual | podman |
+| `hello-python/` | manual | python |
+| `nginx-start/` | daemon | docker |
+| **`github-push-webhook/`** | **webhook + HMAC auth** | **deno** |
 
 ---
 
@@ -195,7 +219,8 @@ Full TaskSet architecture — hierarchical task composition inspired by ArgoCD A
 | `pkg/db/postgres.go` | PostgreSQL implementation |
 | `pkg/db/mysql.go` | MySQL implementation |
 | `pkg/runtime/js/globals/server.go` | `server` global (daemon tasks serving HTTP) |
-| MCP tools: `validate_task`, `test_task`, `dry_run_task`, `commit_task` | Advanced agent workflow tools (list_tasks/get_task/run_task/list_sources/switch_dev_mode are implemented) |
+| MCP tools: `validate_task`, `test_task`, `dry_run_task`, `commit_task` | Advanced agent workflow tools |
+| Multi-user RBAC | `users` table, argon2id passwords, role-based access (north star) |
 
 ---
 
@@ -208,13 +233,13 @@ Full TaskSet architecture — hierarchical task composition inspired by ArgoCD A
 | `BUSINESSPLAN.md` | ✅ Full business model documentation |
 | `README.md` | ✅ Comprehensive user documentation |
 | `docs/` | ✅ This documentation tree |
+| `docs/security-plan.md` | ✅ Security design document (phases 1–4 implemented) |
 | `pkg/agent/skill.md` | ✅ Agent skill document |
-| `~/dicode-tasks/nginx-start/task.yaml` | ✅ Example Docker daemon task |
 
 ---
 
 ## Test coverage
 
-70+ tests across: db, secrets, source/local, registry, runtime/js, trigger, taskset, and webui packages.
+90+ tests across: db, secrets, source/local, registry, runtime/js, trigger (including HMAC), taskset, and webui (including auth) packages.
 
-All packages compile and all tests pass as of 2026-03-29.
+All packages compile with `go test -race ./...` as of 2026-03-30.

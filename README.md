@@ -443,7 +443,11 @@ notifications:
 
 server:
   port: 8080                              # web UI + API port (default: 8080)
-  secret: ""                              # optional: require this password to access the UI
+  auth: false                             # set true to require passphrase for all endpoints
+  secret: ""                              # passphrase used for auth (and webhook relay HMAC)
+  allowed_origins: []                     # CORS allowlist — empty = same-origin only
+  mcp: true                               # MCP server at /mcp (default: true)
+  tray: true                              # system tray icon (default: true when interactive)
 
 ai:
   model: gpt-4o                           # any OpenAI-compatible model name
@@ -1268,12 +1272,14 @@ server:
 
 ### Connecting Claude Code
 
-```bash
-# Add to your project's .mcp.json
+```json
+// .mcp.json
 {
   "mcpServers": {
     "dicode": {
       "url": "http://localhost:8080/mcp"
+      // When server.auth: true, add an API key from the Security page:
+      // "headers": { "Authorization": "Bearer dck_your-key-here" }
     }
   }
 }
@@ -1414,13 +1420,84 @@ To get near-instant task updates instead of waiting for the poll interval, add a
 
 ## Security
 
-**Task isolation**: Each task run gets a fresh JS runtime instance. Tasks share no memory. The JS environment is sandboxed — there is no `fs`, `exec`, or direct network binding available. Tasks can only make outbound HTTP calls and read env vars explicitly listed in `task.yaml`.
+### Authentication
+
+Enable the auth wall to gate all endpoints behind a passphrase:
+
+```yaml
+server:
+  auth: true
+  secret: "your-strong-passphrase"   # ≥ 16 chars recommended
+  allowed_origins: []                 # empty = same-origin only
+  # allowed_origins: ["https://your-domain.com"]   # if serving from a separate origin
+```
+
+When `auth: true`, every API call and page load requires a valid session. The SPA shows a login modal — no page reload. Wrong passwords are rate-limited (429 after 5 attempts per IP).
+
+### Trusted browser (30-day device tokens)
+
+Check **"Trust this browser for 30 days"** at login to issue a long-lived device cookie. On return visits the SPA silently renews your session — no login prompt unless the device is revoked.
+
+Manage trusted devices from the **Security** page (`/security`): see all devices, revoke individually, or use the emergency **Logout all devices** button.
+
+### Webhook HMAC authentication
+
+Secure any webhook endpoint with a per-task shared secret:
+
+```yaml
+# task.yaml
+trigger:
+  webhook: /hooks/my-task
+  webhook_secret: "${MY_WEBHOOK_SECRET}"   # resolved from secrets chain
+```
+
+dicode verifies `X-Hub-Signature-256: sha256=<hmac>` before the task script runs. The format is GitHub-compatible — point a GitHub webhook at a dicode endpoint with the same secret and it works out of the box. Requests older than 5 minutes are rejected (replay protection via `X-Dicode-Timestamp`).
+
+See `examples/github-push-webhook/` for a full working example.
+
+### MCP API key authentication
+
+When `server.auth: true`, the MCP endpoint requires a bearer token:
+
+```
+Authorization: Bearer dck_<your-key>
+```
+
+Generate keys from the **Security** page. Keys are stored as SHA-256 hashes; the raw value is shown only once at creation. Revoke any key individually from the same page.
+
+**Connecting Claude Code with a key:**
+
+```json
+{
+  "mcpServers": {
+    "dicode": {
+      "url": "http://localhost:8080/mcp",
+      "headers": { "Authorization": "Bearer dck_your-key-here" }
+    }
+  }
+}
+```
+
+### Task isolation
+
+Each task run gets a fresh JS runtime instance. Tasks share no memory. The JS environment is sandboxed — there is no `exec` or direct network binding available. Tasks can only make outbound HTTP calls and read env vars explicitly listed in `task.yaml`.
 
 **Environment variables**: Tasks can only access env vars they declare in their `task.yaml` `env:` list. Undeclared vars are not visible even if set on the host.
 
 **Git access**: dicode needs read access to your tasks repo (to pull changes) and write access (to commit AI-generated tasks). Use a fine-grained GitHub token scoped to the tasks repo only.
 
 **AI-generated code**: Generated code is always shown as a diff before committing. Review it before confirming. The code runs with the same permissions as any other task — no special privileges.
+
+### Deployment checklist
+
+Before exposing dicode outside localhost:
+
+- `server.auth: true` with a strong passphrase (`server.secret`)
+- TLS terminated at a reverse proxy (nginx / Caddy) — dicode listens on localhost only
+- `server.allowed_origins` set to your exact WebUI origin (if separate from the API host)
+- Webhook tasks using `webhook_secret:` for any public-facing endpoint
+- MCP API key generated from the Security page and set in your agent config
+- `dicode.yaml` not world-readable (`chmod 600`)
 
 ---
 

@@ -600,6 +600,32 @@ Both paths land on the same experience. The onboarding is a one-time flow — su
 
 **`pkg/onboarding/`** — first-run detection (`dicode.yaml` absent) + wizard handler (served by WebUI on first request).
 
+## Security
+
+Four phases implemented. See `docs/security-plan.md` for full detail.
+
+### Auth wall (`server.auth: true`) ✅
+
+All routes gated behind a passphrase session. Always-public: `/api/secrets/unlock`, `/api/auth/refresh`, static assets, webhooks (HMAC-authenticated separately). CORS restricted to `server.allowed_origins` allowlist. Security headers: CSP, X-Frame-Options, Referrer-Policy, Permissions-Policy.
+
+### Trusted browser / device tokens ✅
+
+Login issues an 8-hour session cookie plus an optional 30-day device cookie (`trust: true`). On return visits the SPA silently refreshes the session from the device cookie — no login prompt. Tokens stored as SHA-256 hashes in SQLite `sessions` table. `/security` page lists trusted devices with individual revoke. Emergency `logout-all` wipes everything.
+
+### Webhook HMAC authentication ✅
+
+Per-task `webhook_secret` field. Incoming requests must carry `X-Hub-Signature-256: sha256=<hmac>` (GitHub-compatible). Replay protection via `X-Dicode-Timestamp` (5-minute window). Backwards-compatible — open when `webhook_secret` is absent.
+
+### MCP API key authentication ✅
+
+`dck_<64 hex chars>` bearer tokens. SHA-256 stored in `api_keys` table; raw key shown once at creation. `requireAPIKey` middleware on `/mcp`. Managed from `/security` page.
+
+### North star: multi-user RBAC 📄
+
+`admin` / `operator` / `viewer` roles. Argon2id password hashing. `users` table with role field; `sessions` and `api_keys` gain `user_id` FK. Design in `docs/security-plan.md`.
+
+---
+
 ## Business Model
 
 See `BUSINESSPLAN.md` for full detail. Summary of locked decisions:
