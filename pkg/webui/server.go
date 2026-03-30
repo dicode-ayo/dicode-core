@@ -257,6 +257,25 @@ func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config
 		})
 	})
 
+	// Wire reconciler hooks → broadcast tasks:changed when tasks are added/removed.
+	// Chain with the existing callbacks (already wired to the trigger engine in main).
+	if rec != nil {
+		prev := rec.OnRegister
+		rec.OnRegister = func(spec *task.Spec) {
+			if prev != nil {
+				prev(spec)
+			}
+			s.ws.Broadcast(WSMsg{Type: "tasks:changed"})
+		}
+		prevUn := rec.OnUnregister
+		rec.OnUnregister = func(id string) {
+			if prevUn != nil {
+				prevUn(id)
+			}
+			s.ws.Broadcast(WSMsg{Type: "tasks:changed"})
+		}
+	}
+
 	// Wire log broadcaster hook → ws BroadcastLog + replay buffer
 	if logs != nil {
 		logs.SetHook(s.ws.BroadcastLog)
