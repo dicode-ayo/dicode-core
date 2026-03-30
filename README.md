@@ -1273,13 +1273,23 @@ server:
 ### Connecting Claude Code
 
 ```json
-// .mcp.json
 {
   "mcpServers": {
     "dicode": {
       "url": "http://localhost:8080/mcp"
-      // When server.auth: true, add an API key from the Security page:
-      // "headers": { "Authorization": "Bearer dck_your-key-here" }
+    }
+  }
+}
+```
+
+When `server.auth: true`, add an API key from the Security page:
+
+```json
+{
+  "mcpServers": {
+    "dicode": {
+      "url": "http://localhost:8080/mcp",
+      "headers": { "Authorization": "Bearer dck_your-key-here" }
     }
   }
 }

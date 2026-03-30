@@ -32,7 +32,14 @@ func (s *apiKeyStore) generate(ctx context.Context, name string) (raw string, in
 	}
 	raw = apiKeyPrefix + rawBytes
 	hash := hashAPIKey(raw)
-	prefix := raw[:min(len(raw), 12)] + "..."
+	// Show the first 12 chars of the key (prefix + start of random part).
+	// The key is always dck_ (4) + 64 hex chars = 68 chars, so this is safe,
+	// but guard against any future length change.
+	prefixEnd := 12
+	if prefixEnd > len(raw) {
+		prefixEnd = len(raw)
+	}
+	prefix := raw[:prefixEnd] + "..."
 
 	id := uuid.New().String()
 	now := time.Now().Unix()
@@ -130,13 +137,6 @@ type APIKeyInfo struct {
 func hashAPIKey(raw string) string {
 	h := sha256.Sum256([]byte(raw))
 	return hex.EncodeToString(h[:])
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 // --- HTTP handlers -----------------------------------------------------------

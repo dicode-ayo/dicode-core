@@ -3,6 +3,7 @@
 package trigger
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -487,24 +488,29 @@ func (e *Engine) WebhookHandler() http.Handler {
 				}
 				input = m
 			}
-		} else if strings.Contains(r.Header.Get("Content-Type"), "application/x-www-form-urlencoded") {
-			// Browser form submission — parse form fields as task input.
-			if err := r.ParseForm(); err == nil {
-				m := make(map[string]interface{}, len(r.Form))
-				for k, v := range r.Form {
-					if len(v) == 1 {
-						m[k] = v[0]
-					} else {
-						m[k] = v
-					}
-				}
-				input = m
-				isFormSubmit = true
+		} else {
+			// Read the raw body first so HMAC verification always covers the
+			// actual request bytes, regardless of content-type.
+			if r.Body != nil {
+				body, _ = io.ReadAll(io.LimitReader(r.Body, webhookMaxBodyBytes))
 			}
-		} else if r.Body != nil {
-			var err error
-			body, err = io.ReadAll(io.LimitReader(r.Body, webhookMaxBodyBytes))
-			if err == nil && len(body) > 0 {
+			ct := r.Header.Get("Content-Type")
+			if strings.Contains(ct, "application/x-www-form-urlencoded") {
+				// Replay the raw bytes back into r.Body so ParseForm can read them.
+				r.Body = io.NopCloser(bytes.NewReader(body))
+				if err := r.ParseForm(); err == nil {
+					m := make(map[string]interface{}, len(r.Form))
+					for k, v := range r.Form {
+						if len(v) == 1 {
+							m[k] = v[0]
+						} else {
+							m[k] = v
+						}
+					}
+					input = m
+					isFormSubmit = true
+				}
+			} else if len(body) > 0 {
 				_ = json.Unmarshal(body, &input)
 			}
 		}

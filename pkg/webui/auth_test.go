@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/dicode/dicode/pkg/config"
 	"github.com/dicode/dicode/pkg/db"
@@ -373,5 +374,148 @@ func TestAPIKey_MCP_Requires_Key_When_Auth_Enabled(t *testing.T) {
 	h.ServeHTTP(w, req)
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("expected 401 for MCP without key, got %d", w.Code)
+	}
+}
+
+// ── Rate limiter lockout ──────────────────────────────────────────────────────
+
+func TestAuth_RateLimit_ExtendedLockout(t *testing.T) {
+	srv := newAuthServer(t, "secret")
+	h := srv.Handler()
+
+	body, _ := json.Marshal(map[string]any{"password": "wrong"})
+
+	// Exhaust the limit.
+	for i := 0; i < unlockMaxAttempts; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/api/secrets/unlock", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.RemoteAddr = "10.0.0.2:1234"
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+	}
+
+	// Next attempt should be 429 immediately (not after a 1-minute reset).
+	req := httptest.NewRequest(http.MethodPost, "/api/secrets/unlock", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = "10.0.0.2:1234"
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusTooManyRequests {
+		t.Errorf("expected 429 during extended lockout, got %d", w.Code)
+	}
+
+	// A different IP must still be allowed.
+	req2 := httptest.NewRequest(http.MethodPost, "/api/secrets/unlock", bytes.NewReader(body))
+	req2.Header.Set("Content-Type", "application/json")
+	req2.RemoteAddr = "10.0.0.3:1234"
+	w2 := httptest.NewRecorder()
+	h.ServeHTTP(w2, req2)
+	if w2.Code == http.StatusTooManyRequests {
+		t.Errorf("different IP should not be rate-limited, got %d", w2.Code)
+	}
+}
+
+// ── X-Forwarded-For trust ─────────────────────────────────────────────────────
+
+func TestClientIP_IgnoresXFFWithoutTrustProxy(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "10.0.0.1:9999"
+	req.Header.Set("X-Forwarded-For", "1.2.3.4")
+
+	// trust_proxy: false — must use RemoteAddr, not XFF.
+	ip := clientIP(req, false)
+	if ip != "10.0.0.1" {
+		t.Errorf("expected RemoteAddr IP 10.0.0.1, got %q", ip)
+	}
+}
+
+func TestClientIP_RespectsXFFWithTrustProxy(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "10.0.0.1:9999"
+	req.Header.Set("X-Forwarded-For", "1.2.3.4, 10.0.0.1")
+
+	// trust_proxy: true — must use the leftmost (client) XFF entry.
+	ip := clientIP(req, true)
+	if ip != "1.2.3.4" {
+		t.Errorf("expected XFF IP 1.2.3.4, got %q", ip)
+	}
+}
+
+// ── CORS origin validation ────────────────────────────────────────────────────
+
+func TestCORS_MalformedOrigin_IsSkipped(t *testing.T) {
+	d, _ := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	defer d.Close()
+	reg := registry.New(d)
+	eng := trigger.New(reg, nil, zap.NewNop())
+	cfg := &config.Config{Server: config.ServerConfig{
+		Port: 8080,
+		// space-separated string is a common config typo — should be ignored
+		AllowedOrigins: []string{"https://good.example.com https://evil.example.com"},
+	}}
+	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d)
+	h := srv.Handler()
+
+	// The malformed entry is skipped, so neither origin gets the CORS header.
+	for _, origin := range []string{"https://good.example.com", "https://evil.example.com"} {
+		req := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
+		req.Header.Set("Origin", origin)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if got := w.Header().Get("Access-Control-Allow-Origin"); got != "" {
+			t.Errorf("malformed origin entry %q should be skipped, but ACAO=%q for request origin %q", cfg.Server.AllowedOrigins[0], got, origin)
+		}
+	}
+}
+
+// ── Device token rotation ─────────────────────────────────────────────────────
+
+func TestAuth_DeviceToken_Rotation(t *testing.T) {
+	d, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("db: %v", err)
+	}
+	defer d.Close()
+
+	store := newDBSessionStore(d)
+	ctx := t.Context()
+
+	// Issue a device token with a created_at far enough in the past to trigger rotation.
+	raw, err := randomToken()
+	if err != nil {
+		t.Fatalf("randomToken: %v", err)
+	}
+	hash := hashToken(raw)
+	pastCreated := time.Now().Add(-(deviceRotateAfter + time.Minute)).Unix()
+	exp := time.Now().Add(deviceTTL).Unix()
+	if err := d.Exec(ctx,
+		`INSERT INTO sessions (id, token_hash, kind, label, ip, created_at, last_seen, expires_at)
+		 VALUES ('test-id', ?, 'device', 'test', '127.0.0.1', ?, ?, ?)`,
+		hash, pastCreated, pastCreated, exp,
+	); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	newDevToken, ok := store.renewFromDevice(ctx, raw, "127.0.0.1")
+	if !ok {
+		t.Fatal("renewFromDevice returned not-ok for valid token")
+	}
+	if newDevToken == "" {
+		t.Error("expected a rotated device token to be returned")
+	}
+	if newDevToken == raw {
+		t.Error("rotated token must differ from the original")
+	}
+
+	// Old token must now be rejected.
+	_, ok2 := store.renewFromDevice(ctx, raw, "127.0.0.1")
+	if ok2 {
+		t.Error("old device token should be rejected after rotation")
+	}
+
+	// New token must be accepted.
+	_, ok3 := store.renewFromDevice(ctx, newDevToken, "127.0.0.1")
+	if !ok3 {
+		t.Error("new rotated device token should be accepted")
 	}
 }

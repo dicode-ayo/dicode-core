@@ -2,7 +2,10 @@ package webui
 
 import (
 	"net/http"
+	"net/url"
 	"strings"
+
+	"go.uber.org/zap"
 )
 
 // requireAuth is a middleware that enforces authentication when server.auth is
@@ -32,9 +35,12 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 		}
 
 		// Session missing or expired — try device token for auto-renewal.
-		if deviceCookie, err := r.Cookie(deviceCookie); err == nil {
-			if newSession, ok := s.dbSessions.renewFromDevice(r.Context(), deviceCookie.Value, clientIP(r)); ok {
-				setSessionCookie(w, newSession)
+		if dc, err := r.Cookie(deviceCookie); err == nil {
+			if newDevToken, ok := s.dbSessions.renewFromDevice(r.Context(), dc.Value, clientIP(r, s.cfg.Server.TrustProxy)); ok {
+				setSessionCookie(w, s.sessions.issue())
+				if newDevToken != "" {
+					setDeviceCookie(w, newDevToken)
+				}
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -51,10 +57,18 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 // corsMiddleware replaces the inline wildcard CORS with a configurable
 // allowlist. When AllowedOrigins is empty only same-origin requests are served
 // (no Access-Control-Allow-Origin header emitted).
+// Origins are validated with url.Parse at startup; malformed entries are
+// silently skipped so a config typo can't accidentally open the allowlist.
 func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 	origins := make(map[string]bool, len(s.cfg.Server.AllowedOrigins))
 	for _, o := range s.cfg.Server.AllowedOrigins {
-		origins[strings.TrimRight(o, "/")] = true
+		o = strings.TrimRight(o, "/")
+		parsed, err := url.Parse(o)
+		if err != nil || parsed.Host == "" || parsed.Scheme == "" {
+			s.log.Warn("invalid allowed_origins entry — skipping", zap.String("origin", o))
+			continue
+		}
+		origins[o] = true
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -123,13 +137,17 @@ func isAPIRequest(r *http.Request) bool {
 		strings.Contains(r.Header.Get("Content-Type"), "application/json")
 }
 
-// clientIP extracts the real client IP, respecting X-Forwarded-For when set.
-func clientIP(r *http.Request) string {
-	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-		if idx := strings.Index(fwd, ","); idx != -1 {
-			return strings.TrimSpace(fwd[:idx])
+// clientIP extracts the real client IP. X-Forwarded-For is only trusted when
+// trustProxy is true (i.e. server.trust_proxy: true in config), so that direct
+// clients cannot spoof their IP and bypass rate limiting.
+func clientIP(r *http.Request, trustProxy bool) string {
+	if trustProxy {
+		if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
+			if idx := strings.Index(fwd, ","); idx != -1 {
+				return strings.TrimSpace(fwd[:idx])
+			}
+			return strings.TrimSpace(fwd)
 		}
-		return strings.TrimSpace(fwd)
 	}
 	ip, _, _ := splitHostPort(r.RemoteAddr)
 	return ip

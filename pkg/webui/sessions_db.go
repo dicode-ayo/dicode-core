@@ -58,46 +58,81 @@ func (s *dbSessionStore) issueDeviceToken(ctx context.Context, ip, userAgent str
 }
 
 // renewFromDevice validates a device token cookie value. If valid it updates
-// last_seen, optionally rotates the token, and returns a new in-memory session
-// token. The caller must set the session cookie on the response.
-//
-// Token rotation: when the device token is older than deviceRotateAfter, a new
-// device token is issued and the old one revoked. The new raw token is returned
-// as the second value so the caller can update the cookie.
-func (s *dbSessionStore) renewFromDevice(ctx context.Context, rawDeviceToken, ip string) (sessionToken string, ok bool) {
+// last_seen inside a transaction and returns ok=true. When the token is older
+// than deviceRotateAfter a new device token is issued and the old one deleted
+// atomically; the new raw token is returned in newDeviceToken so the caller
+// can set a fresh device cookie. The caller is always responsible for issuing
+// a new in-memory session token.
+func (s *dbSessionStore) renewFromDevice(ctx context.Context, rawDeviceToken, ip string) (newDeviceToken string, ok bool) {
 	if rawDeviceToken == "" {
 		return "", false
 	}
 	hash := hashToken(rawDeviceToken)
-	now := time.Now().Unix()
+	now := time.Now()
+	nowUnix := now.Unix()
 
-	var id, label string
-	var exp, createdAt int64
-	found := false
+	var notFound bool
+	var rotated string
 
-	_ = s.db.Query(ctx,
-		`SELECT id, label, created_at, expires_at FROM sessions
-		 WHERE token_hash = ? AND kind = 'device' AND expires_at > ?`,
-		[]any{hash, now},
-		func(rows db.Scanner) error {
-			if rows.Next() {
-				found = true
-				return rows.Scan(&id, &label, &createdAt, &exp)
-			}
+	err := s.db.Tx(ctx, func(tx db.DB) error {
+		var id, label string
+		var createdAt int64
+		found := false
+
+		if err := tx.Query(ctx,
+			`SELECT id, label, created_at FROM sessions
+			 WHERE token_hash = ? AND kind = 'device' AND expires_at > ?`,
+			[]any{hash, nowUnix},
+			func(rows db.Scanner) error {
+				if rows.Next() {
+					found = true
+					return rows.Scan(&id, &label, &createdAt)
+				}
+				return nil
+			},
+		); err != nil {
+			return err
+		}
+		if !found {
+			notFound = true
 			return nil
-		},
-	)
-	if !found {
+		}
+
+		age := now.Sub(time.Unix(createdAt, 0))
+		if age >= deviceRotateAfter {
+			// Rotate: insert a fresh token, delete the old one.
+			raw, err := randomToken()
+			if err != nil {
+				return err
+			}
+			newHash := hashToken(raw)
+			newExp := now.Add(deviceTTL).Unix()
+			if err := tx.Exec(ctx,
+				`INSERT INTO sessions (id, token_hash, kind, label, ip, created_at, last_seen, expires_at)
+				 VALUES (?, ?, 'device', ?, ?, ?, ?, ?)`,
+				uuid.New().String(), newHash, label, ip, nowUnix, nowUnix, newExp,
+			); err != nil {
+				return err
+			}
+			if err := tx.Exec(ctx, `DELETE FROM sessions WHERE id = ?`, id); err != nil {
+				return err
+			}
+			rotated = raw
+		} else {
+			if err := tx.Exec(ctx,
+				`UPDATE sessions SET last_seen = ?, ip = ? WHERE id = ?`,
+				nowUnix, ip, id,
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+
+	if err != nil || notFound {
 		return "", false
 	}
-
-	// Update last_seen.
-	_ = s.db.Exec(ctx,
-		`UPDATE sessions SET last_seen = ?, ip = ? WHERE id = ?`,
-		now, ip, id,
-	)
-
-	return "", true
+	return rotated, true // rotated is "" when no rotation occurred
 }
 
 // ListDevices returns all active trusted devices.
@@ -212,18 +247,16 @@ func (s *Server) apiAuthRefresh(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "no device token", http.StatusUnauthorized)
 		return
 	}
-	newSession, ok := s.dbSessions.renewFromDevice(r.Context(), dc.Value, clientIP(r))
+	newDevToken, ok := s.dbSessions.renewFromDevice(r.Context(), dc.Value, clientIP(r, s.cfg.Server.TrustProxy))
 	if !ok {
 		clearAuthCookies(w)
 		jsonErr(w, "device token invalid or expired", http.StatusUnauthorized)
 		return
 	}
-	// renewFromDevice returns "" for newSession when it just updates last_seen;
-	// issue a fresh in-memory session token.
-	if newSession == "" {
-		newSession = s.sessions.issue(s.secretsPassphrase() + "dicode")
+	setSessionCookie(w, s.sessions.issue())
+	if newDevToken != "" {
+		setDeviceCookie(w, newDevToken)
 	}
-	setSessionCookie(w, newSession)
 	jsonOK(w, map[string]string{"status": "ok"})
 }
 
