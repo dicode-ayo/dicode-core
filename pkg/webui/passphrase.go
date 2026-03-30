@@ -68,9 +68,9 @@ func generateRandomPassphrase() (string, error) {
 }
 
 // resolvePassphrase returns the effective passphrase for the server:
-//   1. YAML override (server.secret) — explicit operator config, highest priority
-//   2. DB-stored passphrase — set via UI or auto-generated on first boot
-//   3. "" — auth is configured but no passphrase exists yet (bootstrap state)
+//  1. YAML override (server.secret) — explicit operator config, highest priority
+//  2. DB-stored passphrase — set via UI or auto-generated on first boot
+//  3. "" — auth is configured but no passphrase exists yet (bootstrap state)
 //
 // The DB result is cached in memory and only re-read from SQLite on a cache
 // miss. The cache is warmed at startup (ensurePassphrase) and invalidated
@@ -139,7 +139,7 @@ func (s *Server) ensurePassphrase(ctx context.Context) error {
 	fmt.Println("╔══════════════════════════════════════════════════════════════╗")
 	fmt.Println("║  dicode — auth passphrase generated                         ║")
 	fmt.Println("║                                                              ║")
-	fmt.Printf( "║  %s  ║\n", pass)
+	fmt.Printf("║  %s  ║\n", pass)
 	fmt.Println("║                                                              ║")
 	fmt.Println("║  Save this somewhere safe. You can change it any time at    ║")
 	fmt.Println("║  /security in the web UI (requires a valid session).        ║")
