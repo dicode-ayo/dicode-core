@@ -3,9 +3,7 @@ package webui
 
 import (
 	"context"
-	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/subtle"
 	"embed"
 	"encoding/hex"
@@ -51,12 +49,10 @@ type sessionStore struct {
 
 func newSessionStore() *sessionStore { return &sessionStore{tokens: make(map[string]time.Time)} }
 
-func (s *sessionStore) issue(passphrase string) string {
+func (s *sessionStore) issue() string {
 	raw := make([]byte, 32)
 	_, _ = rand.Read(raw)
-	mac := hmac.New(sha256.New, []byte(passphrase))
-	mac.Write(raw)
-	token := hex.EncodeToString(raw) + "." + hex.EncodeToString(mac.Sum(nil))
+	token := hex.EncodeToString(raw)
 	s.mu.Lock()
 	s.tokens[token] = time.Now().Add(8 * time.Hour)
 	s.mu.Unlock()
@@ -108,6 +104,7 @@ type limitEntry struct {
 const (
 	unlockMaxAttempts = 5
 	unlockWindow      = time.Minute
+	unlockLockoutTTL  = 15 * time.Minute // extended lockout after max attempts
 )
 
 func newUnlockLimiter() *unlockLimiter {
@@ -127,6 +124,10 @@ func (l *unlockLimiter) allow(ip string) bool {
 		return false
 	}
 	e.count++
+	if e.count >= unlockMaxAttempts {
+		// Extend the lockout window significantly on the attempt that hits the cap.
+		e.resetAt = now.Add(unlockLockoutTTL)
+	}
 	return true
 }
 
@@ -740,7 +741,7 @@ func (s *Server) requireSecretsSession(w http.ResponseWriter, r *http.Request) b
 // session cookie. When trust=true a long-lived device cookie is also issued so
 // the browser is remembered across restarts (trusted-browser feature).
 func (s *Server) apiSecretsUnlock(w http.ResponseWriter, r *http.Request) {
-	ip := clientIP(r)
+	ip := clientIP(r, s.cfg.Server.TrustProxy)
 	if !s.limiter.allow(ip) {
 		jsonErr(w, "too many unlock attempts — try again in a minute", http.StatusTooManyRequests)
 		return
@@ -761,7 +762,7 @@ func (s *Server) apiSecretsUnlock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token := s.sessions.issue(expected + "dicode")
+	token := s.sessions.issue()
 	setSessionCookie(w, token)
 
 	// Issue a trusted-device token when the client explicitly requests it.
