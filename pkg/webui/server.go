@@ -136,27 +136,27 @@ var staticFS embed.FS
 
 // Server is the HTTP server for the web UI and REST API.
 type Server struct {
-	registry        *registry.Registry
-	engine          *trigger.Engine
-	cfg             *config.Config
-	cfgPath         string               // path to dicode.yaml; empty in tests
-	secretsMgr      SecretsManager       // nil if local provider not configured
-	reconciler      *registry.Reconciler // nil if not wired
-	sourceMgr       *SourceManager       // nil if not wired
-	dataDir         string               // ~/.dicode or cfg.DataDir
-	managedRuntimes []pkgruntime.ManagedRuntime
-	sessions        *sessionStore
-	dbSessions      *dbSessionStore  // persistent sessions / trusted devices
-	apiKeys         *apiKeyStore     // MCP / programmatic API keys
+	registry           *registry.Registry
+	engine             *trigger.Engine
+	cfg                *config.Config
+	cfgPath            string               // path to dicode.yaml; empty in tests
+	secretsMgr         SecretsManager       // nil if local provider not configured
+	reconciler         *registry.Reconciler // nil if not wired
+	sourceMgr          *SourceManager       // nil if not wired
+	dataDir            string               // ~/.dicode or cfg.DataDir
+	managedRuntimes    []pkgruntime.ManagedRuntime
+	sessions           *sessionStore
+	dbSessions         *dbSessionStore  // persistent sessions / trusted devices
+	apiKeys            *apiKeyStore     // MCP / programmatic API keys
 	passphraseStore    *passphraseStore // auth passphrase persisted in DB
 	cachedPassphrase   string           // in-memory cache of resolved passphrase; invalidated on change
 	cachedPassphraseMu sync.RWMutex
 	limiter            *unlockLimiter
-	logs            *LogBroadcaster
-	ws              *WSHub
-	log             *zap.Logger
-	port            int
-	srv             *http.Server
+	logs               *LogBroadcaster
+	ws                 *WSHub
+	log                *zap.Logger
+	port               int
+	srv                *http.Server
 }
 
 // SetManagedRuntimes registers the list of managed runtimes (Deno, Python, …)

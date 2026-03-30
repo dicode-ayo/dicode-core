@@ -5,7 +5,7 @@ VERSION ?= dev
 GO      := $(shell which go 2>/dev/null || echo $(HOME)/.local/share/mise/shims/go)
 GOFLAGS := -ldflags "-X main.version=$(VERSION)"
 
-.PHONY: build test test-verbose lint clean run tidy
+.PHONY: build test test-verbose lint fmt clean run tidy
 
 ## build: compile the dicode binary into the project root
 build:
@@ -31,8 +31,12 @@ test-race:
 tidy:
 	$(GO) mod tidy
 
-## lint: run go vet
-lint:
+## fmt: format all Go source files
+fmt:
+	$(GO) fmt ./...
+
+## lint: format and vet all Go source files
+lint: fmt
 	$(GO) vet ./...
 
 ## clean: remove the compiled binary
