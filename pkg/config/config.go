@@ -136,11 +136,11 @@ type SourceAuth struct {
 
 type ServerConfig struct {
 	Port           int      `yaml:"port"`
-	Secret         string   `yaml:"secret" json:"-"`          // optional passphrase; excluded from JSON API
-	Auth           bool     `yaml:"auth"`                     // enable global auth wall (default: false)
+	Secret         string   `yaml:"secret" json:"-"`           // optional passphrase; excluded from JSON API
+	Auth           bool     `yaml:"auth"`                      // enable global auth wall (default: false)
 	AllowedOrigins []string `yaml:"allowed_origins,omitempty"` // CORS allowlist; empty = same-origin only
-	MCP            bool     `yaml:"mcp"`                      // expose MCP endpoint at /mcp (default: true)
-	Tray           *bool    `yaml:"tray"`                     // system tray icon (nil = auto-detect)
+	MCP            bool     `yaml:"mcp"`                       // expose MCP endpoint at /mcp (default: true)
+	Tray           *bool    `yaml:"tray"`                      // system tray icon (nil = auto-detect)
 }
 
 type AIConfig struct {

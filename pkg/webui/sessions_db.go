@@ -17,7 +17,7 @@ const (
 	deviceCookie      = "dicode_device"
 	sessionTTL        = 8 * time.Hour
 	deviceTTL         = 30 * 24 * time.Hour // 30 days
-	deviceRotateAfter = 24 * time.Hour       // rotate device token once per day on use
+	deviceRotateAfter = 24 * time.Hour      // rotate device token once per day on use
 )
 
 // dbSessionStore backs sessions and trusted-device tokens in SQLite so they
@@ -144,7 +144,7 @@ func (s *dbSessionStore) purgeExpired(ctx context.Context) error {
 // DeviceInfo is returned by ListDevices.
 type DeviceInfo struct {
 	ID        string    `json:"id"`
-	Label     string    `json:"label"`     // user-agent (truncated)
+	Label     string    `json:"label"` // user-agent (truncated)
 	IP        string    `json:"ip"`
 	CreatedAt time.Time `json:"created_at"`
 	LastSeen  time.Time `json:"last_seen"`

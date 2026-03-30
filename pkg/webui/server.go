@@ -130,7 +130,6 @@ func (l *unlockLimiter) allow(ip string) bool {
 	return true
 }
 
-
 //go:embed static
 var staticFS embed.FS
 
