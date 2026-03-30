@@ -17,6 +17,7 @@ class DcTaskList extends LitElement {
     this._error = null;
     this._offFinished = null;
     this._offStarted = null;
+    this._offChanged = null;
   }
 
   connectedCallback() {
@@ -34,12 +35,14 @@ class DcTaskList extends LitElement {
         t.id === d.taskID ? { ...t, last_run_id: d.runID, last_run_status: 'running' } : t
       );
     });
+    this._offChanged = wsOn('tasks:changed', () => this._load());
   }
 
   disconnectedCallback() {
     super.disconnectedCallback();
     this._offFinished?.();
     this._offStarted?.();
+    this._offChanged?.();
   }
 
   async _load() {

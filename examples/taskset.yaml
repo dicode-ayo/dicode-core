@@ -51,3 +51,11 @@ spec:
     webhook-dashboard:
       ref:
         path: /home/dr14/dicode/examples/webhook-dashboard/task.yaml
+
+    hello-webhook:
+      ref:
+        path: /home/dr14/dicode/examples/hello-webhook/task.yaml
+
+    github-push-webhook:
+      ref:
+        path: /home/dr14/dicode/examples/github-push-webhook/task.yaml

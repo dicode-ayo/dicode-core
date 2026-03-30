@@ -147,7 +147,7 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 		home, _ := os.UserHomeDir()
 		dataDir = home + "/.dicode"
 	}
-	srv, err := webui.New(port, reg, eng, cfg, configPath, localSecrets, rec, sourceMgr, dataDir, logBroadcaster, log)
+	srv, err := webui.New(port, reg, eng, cfg, configPath, localSecrets, rec, sourceMgr, dataDir, logBroadcaster, log, database)
 	if err != nil {
 		return fmt.Errorf("build webui: %w", err)
 	}

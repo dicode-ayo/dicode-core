@@ -3,9 +3,7 @@ package webui
 
 import (
 	"context"
-	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/subtle"
 	"embed"
 	"encoding/hex"
@@ -13,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -23,6 +20,7 @@ import (
 	"time"
 
 	"github.com/dicode/dicode/pkg/config"
+	"github.com/dicode/dicode/pkg/db"
 	"github.com/dicode/dicode/pkg/mcp"
 	"github.com/dicode/dicode/pkg/registry"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
@@ -51,12 +49,10 @@ type sessionStore struct {
 
 func newSessionStore() *sessionStore { return &sessionStore{tokens: make(map[string]time.Time)} }
 
-func (s *sessionStore) issue(passphrase string) string {
+func (s *sessionStore) issue() string {
 	raw := make([]byte, 32)
 	_, _ = rand.Read(raw)
-	mac := hmac.New(sha256.New, []byte(passphrase))
-	mac.Write(raw)
-	token := hex.EncodeToString(raw) + "." + hex.EncodeToString(mac.Sum(nil))
+	token := hex.EncodeToString(raw)
 	s.mu.Lock()
 	s.tokens[token] = time.Now().Add(8 * time.Hour)
 	s.mu.Unlock()
@@ -108,6 +104,7 @@ type limitEntry struct {
 const (
 	unlockMaxAttempts = 5
 	unlockWindow      = time.Minute
+	unlockLockoutTTL  = 15 * time.Minute // extended lockout after max attempts
 )
 
 func newUnlockLimiter() *unlockLimiter {
@@ -127,17 +124,11 @@ func (l *unlockLimiter) allow(ip string) bool {
 		return false
 	}
 	e.count++
+	if e.count >= unlockMaxAttempts {
+		// Extend the lockout window significantly on the attempt that hits the cap.
+		e.resetAt = now.Add(unlockLockoutTTL)
+	}
 	return true
-}
-
-// securityHeaders adds baseline security headers to every response.
-func securityHeaders(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("X-Frame-Options", "SAMEORIGIN")
-		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
-		next.ServeHTTP(w, r)
-	})
 }
 
 //go:embed static
@@ -155,6 +146,8 @@ type Server struct {
 	dataDir         string               // ~/.dicode or cfg.DataDir
 	managedRuntimes []pkgruntime.ManagedRuntime
 	sessions        *sessionStore
+	dbSessions      *dbSessionStore // persistent sessions / trusted devices
+	apiKeys         *apiKeyStore    // MCP / programmatic API keys
 	limiter         *unlockLimiter
 	logs            *LogBroadcaster
 	ws              *WSHub
@@ -173,11 +166,19 @@ func (s *Server) SetManagedRuntimes(runtimes []pkgruntime.ManagedRuntime) {
 // settings changes; pass "" in tests or when persistence is not needed.
 // rec and dataDir enable live source management; pass nil/"" in tests.
 // sourceMgr enables the /api/sources endpoints and MCP source tools; pass nil in tests.
-func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config, cfgPath string, secretsMgr SecretsManager, rec *registry.Reconciler, sourceMgr *SourceManager, dataDir string, logs *LogBroadcaster, log *zap.Logger) (*Server, error) {
+// database is required for persistent sessions and API key storage; pass nil in tests (auth features disabled).
+func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config, cfgPath string, secretsMgr SecretsManager, rec *registry.Reconciler, sourceMgr *SourceManager, dataDir string, logs *LogBroadcaster, log *zap.Logger, database db.DB) (*Server, error) {
 	ss := newSessionStore()
 	go ss.purgeLoop()
 
 	wsHub := NewWSHub(log)
+
+	var dbs *dbSessionStore
+	var aks *apiKeyStore
+	if database != nil {
+		dbs = newDBSessionStore(database)
+		aks = newAPIKeyStore(database)
+	}
 
 	s := &Server{
 		registry:   r,
@@ -189,6 +190,8 @@ func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config
 		sourceMgr:  sourceMgr,
 		dataDir:    dataDir,
 		sessions:   ss,
+		dbSessions: dbs,
+		apiKeys:    aks,
 		limiter:    newUnlockLimiter(),
 		logs:       logs,
 		ws:         wsHub,
@@ -254,6 +257,25 @@ func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config
 		})
 	})
 
+	// Wire reconciler hooks → broadcast tasks:changed when tasks are added/removed.
+	// Chain with the existing callbacks (already wired to the trigger engine in main).
+	if rec != nil {
+		prev := rec.OnRegister
+		rec.OnRegister = func(spec *task.Spec) {
+			if prev != nil {
+				prev(spec)
+			}
+			s.ws.Broadcast(WSMsg{Type: "tasks:changed"})
+		}
+		prevUn := rec.OnUnregister
+		rec.OnUnregister = func(id string) {
+			if prevUn != nil {
+				prevUn(id)
+			}
+			s.ws.Broadcast(WSMsg{Type: "tasks:changed"})
+		}
+	}
+
 	// Wire log broadcaster hook → ws BroadcastLog + replay buffer
 	if logs != nil {
 		logs.SetHook(s.ws.BroadcastLog)
@@ -271,88 +293,16 @@ func (s *Server) Handler() http.Handler {
 	r.Use(middleware.Logger)
 	r.Use(securityHeaders)
 
-	// WebSocket
-	r.Get("/ws", s.ws.ServeHTTP)
-
-	// Service worker
+	// Always-public: static assets, service worker (needed to render login page).
+	appFS, _ := fs.Sub(staticFS, "static")
+	r.Handle("/app/*", http.FileServer(http.FS(appFS)))
 	r.Get("/sw.js", s.handleServiceWorker)
 
-	// Run result (bare page, no chrome)
-	r.Get("/runs/{runID}/result", s.handleRunResult)
+	// Auth endpoints — always public (login flow must be reachable without session).
+	r.Post("/api/secrets/unlock", s.apiSecretsUnlock)
+	r.Post("/api/auth/refresh", s.apiAuthRefresh)
 
-	// File editor API (task.js / task.test.js only)
-	r.Get("/api/tasks/{id}/files/{filename}", s.apiGetFile)
-	r.Post("/api/tasks/{id}/files/{filename}", s.apiSaveFile)
-	r.Post("/api/tasks/{id}/trigger", s.apiSaveTrigger)
-
-	// AI chat — streams SSE, writes task files live
-	r.Post("/api/tasks/{id}/ai/stream", s.handleAIStream)
-
-	// REST API with CORS
-	r.Route("/api", func(r chi.Router) {
-		r.Use(func(next http.Handler) http.Handler {
-			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Access-Control-Allow-Origin", "*")
-				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-				if r.Method == http.MethodOptions {
-					w.WriteHeader(http.StatusNoContent)
-					return
-				}
-				next.ServeHTTP(w, r)
-			})
-		})
-
-		r.Get("/config", s.apiGetConfig)
-		r.Get("/config/raw", s.apiGetConfigRaw)
-		r.Post("/config/raw", s.apiSaveConfigRaw)
-
-		r.Get("/tasks", s.apiListTasks)
-		r.Get("/tasks/{id}", s.apiGetTask)
-		r.Post("/tasks/{id}/run", s.apiRunTask)
-		r.Get("/tasks/{id}/runs", s.apiListRuns)
-		r.Get("/tasks/{id}/files/{filename}", s.apiGetFile)
-		r.Post("/tasks/{id}/files/{filename}", s.apiSaveFile)
-		r.Post("/tasks/{id}/trigger", s.apiSaveTrigger)
-		r.Post("/tasks/{id}/ai/stream", s.handleAIStream)
-
-		r.Get("/runs/{runID}", s.apiGetRun)
-		r.Get("/runs/{runID}/logs", s.apiGetLogs)
-		r.Post("/runs/{runID}/kill", s.apiKillRun)
-
-		// Secrets management
-		r.Get("/secrets", s.apiListSecrets)
-		r.Post("/secrets", s.apiSetSecret)
-		r.Delete("/secrets/{key}", s.apiDeleteSecret)
-		r.Post("/secrets/unlock", s.apiSecretsUnlock)
-		r.Post("/secrets/lock", s.apiSecretsLock)
-
-		// Settings
-		r.Post("/settings/ai", s.apiSaveAISettings)
-		r.Post("/settings/server", s.apiSaveServerSettings)
-		r.Post("/settings/sources", s.apiAddSource)
-		r.Delete("/settings/sources/{idx}", s.apiRemoveSource)
-		r.Get("/settings/sources/git/branches", s.apiListGitBranches)
-
-		// Source management (taskset model)
-		r.Get("/sources", s.apiListSources)
-		r.Patch("/sources/{name}/dev", s.apiSetDevMode)
-		r.Get("/sources/{name}/branches", s.apiListSourceBranches)
-
-		// Managed runtime lifecycle
-		r.Get("/runtimes", s.apiListRuntimes)
-		r.Post("/runtimes/{name}/install", s.apiInstallRuntime)
-		r.Delete("/runtimes/{name}", s.apiRemoveRuntime)
-	})
-
-	// MCP endpoint
-	if s.cfg == nil || s.cfg.Server.MCP {
-		mcpSrv := mcp.New(s.registry, s.sourceMgr)
-		r.Mount("/mcp", mcpSrv.Handler())
-	}
-
-	// Webhook passthrough — POST accepts JSON or form body; GET accepts query params
-	// or serves the task's index.html UI when one is present.
+	// Webhook passthrough — auth via per-task HMAC secret, not session cookie.
 	webhookHandler := func(w http.ResponseWriter, req *http.Request) {
 		req.URL.Path = "/hooks/" + chi.URLParam(req, "*")
 		s.engine.WebhookHandler().ServeHTTP(w, req)
@@ -360,7 +310,7 @@ func (s *Server) Handler() http.Handler {
 	r.Get("/hooks/*", webhookHandler)
 	r.Post("/hooks/*", webhookHandler)
 
-	// dicode.js — client SDK injected into webhook task UIs.
+	// dicode.js — client SDK injected into webhook task UIs (public, no auth required).
 	r.Get("/dicode.js", func(w http.ResponseWriter, req *http.Request) {
 		b, err := staticFS.ReadFile("static/dicode.js")
 		if err != nil {
@@ -371,12 +321,85 @@ func (s *Server) Handler() http.Handler {
 		_, _ = w.Write(b)
 	})
 
-	// Static SPA assets (/app/app.js, etc.)
-	appFS, _ := fs.Sub(staticFS, "static")
-	r.Handle("/app/*", http.FileServer(http.FS(appFS)))
+	// Everything below this point requires a valid session when auth is enabled.
+	r.Group(func(r chi.Router) {
+		r.Use(s.requireAuth)
+		r.Use(s.corsMiddleware)
 
-	// SPA catch-all — serve index.html for all unmatched GET routes
-	r.Get("/*", s.serveSPA)
+		// WebSocket
+		r.Get("/ws", s.ws.ServeHTTP)
+
+		// Run result (bare page, no chrome)
+		r.Get("/runs/{runID}/result", s.handleRunResult)
+
+		// File editor API (task.js / task.test.js only)
+		r.Get("/api/tasks/{id}/files/{filename}", s.apiGetFile)
+		r.Post("/api/tasks/{id}/files/{filename}", s.apiSaveFile)
+		r.Post("/api/tasks/{id}/trigger", s.apiSaveTrigger)
+
+		// AI chat — streams SSE, writes task files live
+		r.Post("/api/tasks/{id}/ai/stream", s.handleAIStream)
+
+		r.Route("/api", func(r chi.Router) {
+			r.Get("/config", s.apiGetConfig)
+			r.Get("/config/raw", s.apiGetConfigRaw)
+			r.Post("/config/raw", s.apiSaveConfigRaw)
+
+			r.Get("/tasks", s.apiListTasks)
+			r.Get("/tasks/{id}", s.apiGetTask)
+			r.Post("/tasks/{id}/run", s.apiRunTask)
+			r.Get("/tasks/{id}/runs", s.apiListRuns)
+			r.Get("/tasks/{id}/files/{filename}", s.apiGetFile)
+			r.Post("/tasks/{id}/files/{filename}", s.apiSaveFile)
+			r.Post("/tasks/{id}/trigger", s.apiSaveTrigger)
+			r.Post("/tasks/{id}/ai/stream", s.handleAIStream)
+
+			r.Get("/runs/{runID}", s.apiGetRun)
+			r.Get("/runs/{runID}/logs", s.apiGetLogs)
+			r.Post("/runs/{runID}/kill", s.apiKillRun)
+
+			// Secrets management
+			r.Get("/secrets", s.apiListSecrets)
+			r.Post("/secrets", s.apiSetSecret)
+			r.Delete("/secrets/{key}", s.apiDeleteSecret)
+			r.Post("/secrets/lock", s.apiSecretsLock)
+
+			// Auth management — trusted devices & API keys
+			r.Get("/auth/devices", s.apiListDevices)
+			r.Delete("/auth/devices/{id}", s.apiRevokeDevice)
+			r.Post("/auth/logout", s.apiLogout)
+			r.Post("/auth/logout-all", s.apiLogoutAll)
+			r.Get("/auth/keys", s.apiListAPIKeys)
+			r.Post("/auth/keys", s.apiCreateAPIKey)
+			r.Delete("/auth/keys/{id}", s.apiRevokeAPIKey)
+
+			// Settings
+			r.Post("/settings/ai", s.apiSaveAISettings)
+			r.Post("/settings/server", s.apiSaveServerSettings)
+			r.Post("/settings/sources", s.apiAddSource)
+			r.Delete("/settings/sources/{idx}", s.apiRemoveSource)
+			r.Get("/settings/sources/git/branches", s.apiListGitBranches)
+
+			// Source management (taskset model)
+			r.Get("/sources", s.apiListSources)
+			r.Patch("/sources/{name}/dev", s.apiSetDevMode)
+			r.Get("/sources/{name}/branches", s.apiListSourceBranches)
+
+			// Managed runtime lifecycle
+			r.Get("/runtimes", s.apiListRuntimes)
+			r.Post("/runtimes/{name}/install", s.apiInstallRuntime)
+			r.Delete("/runtimes/{name}", s.apiRemoveRuntime)
+		})
+
+		// MCP endpoint — requires API key when auth is enabled.
+		if s.cfg == nil || s.cfg.Server.MCP {
+			mcpSrv := mcp.New(s.registry, s.sourceMgr)
+			r.With(s.requireAPIKey).Mount("/mcp", mcpSrv.Handler())
+		}
+
+		// SPA catch-all — serve index.html for all unmatched GET routes
+		r.Get("/*", s.serveSPA)
+	})
 
 	return r
 }
@@ -714,10 +737,11 @@ func (s *Server) requireSecretsSession(w http.ResponseWriter, r *http.Request) b
 	return true
 }
 
-// apiSecretsUnlock accepts {"password":"..."} and issues a session cookie.
+// apiSecretsUnlock accepts {"password":"...","trust":true} and issues a
+// session cookie. When trust=true a long-lived device cookie is also issued so
+// the browser is remembered across restarts (trusted-browser feature).
 func (s *Server) apiSecretsUnlock(w http.ResponseWriter, r *http.Request) {
-	// Rate-limit by client IP.
-	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	ip := clientIP(r, s.cfg.Server.TrustProxy)
 	if !s.limiter.allow(ip) {
 		jsonErr(w, "too many unlock attempts — try again in a minute", http.StatusTooManyRequests)
 		return
@@ -725,6 +749,7 @@ func (s *Server) apiSecretsUnlock(w http.ResponseWriter, r *http.Request) {
 
 	var body struct {
 		Password string `json:"password"`
+		Trust    bool   `json:"trust"` // request a long-lived device token
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonErr(w, "invalid JSON", http.StatusBadRequest)
@@ -737,24 +762,31 @@ func (s *Server) apiSecretsUnlock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token := s.sessions.issue(expected + "dicode")
-	http.SetCookie(w, &http.Cookie{
-		Name:     secretsCookie,
-		Value:    token,
-		Path:     "/",
-		HttpOnly: true,
-		SameSite: http.SameSiteStrictMode,
-		MaxAge:   8 * 3600,
-	})
+	token := s.sessions.issue()
+	setSessionCookie(w, token)
+
+	// Issue a trusted-device token when the client explicitly requests it.
+	if body.Trust && s.dbSessions != nil {
+		ua := r.Header.Get("User-Agent")
+		if devToken, err := s.dbSessions.issueDeviceToken(r.Context(), ip, ua); err == nil {
+			setDeviceCookie(w, devToken)
+		}
+	}
+
 	jsonOK(w, map[string]string{"status": "ok"})
 }
 
-// apiSecretsLock revokes the current session cookie.
+// apiSecretsLock revokes the current session and optionally the device cookie.
 func (s *Server) apiSecretsLock(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(secretsCookie); err == nil {
 		s.sessions.revoke(c.Value)
 	}
-	http.SetCookie(w, &http.Cookie{Name: secretsCookie, Path: "/", MaxAge: -1})
+	if s.dbSessions != nil {
+		if dc, err := r.Cookie(deviceCookie); err == nil {
+			_ = s.dbSessions.revokeDevice(r.Context(), dc.Value)
+		}
+	}
+	clearAuthCookies(w)
 	jsonOK(w, map[string]string{"status": "ok"})
 }
 

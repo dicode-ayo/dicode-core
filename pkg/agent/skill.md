@@ -37,7 +37,7 @@ description: <what this task does>
 runtime: js                        # only supported runtime
 trigger:                           # exactly ONE of:
   cron: "0 9 * * *"               #   standard 5-field cron
-  webhook: /hooks/<path>           #   HTTP POST trigger
+  webhook: /hooks/<path>           #   HTTP POST trigger (open — no auth)
   manual: true                     #   UI/API only
   chain:                           #   fires when another task completes
     from: <task-id>
@@ -51,6 +51,25 @@ params:                            # optional user-configurable inputs
     default: "#general"
 timeout: 60s                       # default: 60s
 ```
+
+### Protected webhook trigger (HMAC authentication)
+
+When a webhook must only accept requests from a trusted sender (GitHub, Stripe, etc.), add `webhook_secret`:
+
+```yaml
+trigger:
+  webhook: /hooks/<path>
+  webhook_secret: "${WEBHOOK_SECRET}"   # ALWAYS reference a secret, never hardcode
+env:
+  - WEBHOOK_SECRET
+```
+
+- dicode verifies the `X-Hub-Signature-256` header automatically before the task script runs
+- A request with a missing or wrong signature is rejected with HTTP 403 — the script never executes
+- The format is identical to GitHub's webhook signature — point any GitHub webhook at the endpoint with the same secret and it works with no changes
+- Replay protection: if the sender includes `X-Dicode-Timestamp`, requests older than 5 minutes are rejected
+
+**Always use `"${ENV_VAR}"` syntax** — never write the raw secret value in `task.yaml`. Store it as a dicode secret first, then reference it via env.
 
 ## Available JS globals
 
@@ -88,10 +107,17 @@ const channel = params.slack_channel   // string, uses default if not overridden
 const token = env.SLACK_TOKEN   // undefined if not declared in task.yaml
 ```
 
-### `input` — upstream task output (ONLY in chain-triggered tasks)
+### `input` — incoming data (chain tasks and webhook tasks)
 ```javascript
-const data = input.emails   // whatever the upstream task returned
+// Chain trigger: upstream task's return value
+const data = input.emails
+
+// Webhook trigger: parsed POST body (JSON or form fields)
+const action = input.action       // e.g. GitHub push event field
+const repo   = input.repository   // nested objects fully available
 ```
+
+For webhook tasks the raw POST body is parsed and available as `input`. Query-string parameters are also available via `params`.
 
 ### `return` — pass data to downstream chain tasks
 ```javascript
@@ -151,7 +177,7 @@ test("edge case: empty result", async () => {
 ## Common mistakes to avoid
 
 | Mistake | Correct approach |
-|---|---|
+| --- | --- |
 | `fetch("https://...")` | `await http.get("https://...")` |
 | `process.env.SLACK_TOKEN` | `env.SLACK_TOKEN` |
 | Accessing env var not in `task.yaml env:` | Add it to `env:` list |
@@ -160,3 +186,103 @@ test("edge case: empty result", async () => {
 | One trigger type + another trigger type | Exactly one trigger per task.yaml |
 | `chain.on: "ok"` | Must be `success`, `failure`, or `always` |
 | Large return values (>1MB) | Keep returns small; use external storage for large data |
+| `webhook_secret: "abc123"` (hardcoded) | `webhook_secret: "${MY_SECRET}"` + add to `env:` list |
+| Forgetting `env:` entry for `webhook_secret` | Every `${VAR}` in task.yaml needs a matching `env:` entry |
+| Trying to verify the signature in `task.js` | dicode verifies it automatically — the script only runs if the signature is valid |
+| Using `webhook_secret` on a public form endpoint | Only add `webhook_secret` when the sender can set `X-Hub-Signature-256`; browser forms cannot sign requests |
+
+## Protected webhook — worked example
+
+### task.yaml
+
+```yaml
+name: github-push-handler
+description: Receives GitHub push events and posts a summary to Slack
+runtime: js
+trigger:
+  webhook: /hooks/github-push
+  webhook_secret: "${GITHUB_WEBHOOK_SECRET}"
+env:
+  - GITHUB_WEBHOOK_SECRET   # dicode uses this for HMAC verification
+  - SLACK_TOKEN             # used inside task.js
+params:
+  - name: slack_channel
+    type: string
+    default: "#deploys"
+timeout: 30s
+```
+
+### task.js
+
+```javascript
+// input contains the parsed GitHub push payload.
+// dicode has already verified the HMAC signature — no need to check it here.
+
+const branch  = input.ref?.replace("refs/heads/", "") ?? "unknown"
+const repo    = input.repository?.full_name ?? "unknown"
+const commits = input.commits ?? []
+const pusher  = input.pusher?.name ?? "someone"
+
+if (commits.length === 0) {
+  log.info("push event with no commits — skipping")
+  return { skipped: true }
+}
+
+const lines = commits.map(c => `• \`${c.id.slice(0,7)}\` ${c.message.split("\n")[0]}`)
+const text  = `*${pusher}* pushed ${commits.length} commit(s) to \`${repo}@${branch}\`\n${lines.join("\n")}`
+
+const res = await http.post("https://slack.com/api/chat.postMessage", {
+  headers: { Authorization: `Bearer ${env.SLACK_TOKEN}` },
+  body: { channel: params.slack_channel, text }
+})
+
+if (!res.body.ok) throw new Error(`Slack error: ${res.body.error}`)
+
+return { commits: commits.length, branch, repo }
+```
+
+### task.test.js
+
+```javascript
+test("posts commit summary to Slack on valid push", async () => {
+  env.set("SLACK_TOKEN", "xoxb-test")
+  params.set("slack_channel", "#test-deploys")
+  http.mock("POST", "https://slack.com/api/chat.postMessage", { status: 200, body: { ok: true } })
+
+  // Simulate webhook payload via input mock
+  input.set({
+    ref: "refs/heads/main",
+    pusher: { name: "alice" },
+    repository: { full_name: "acme/api" },
+    commits: [
+      { id: "abc1234567890", message: "fix: null pointer in auth" },
+      { id: "def0987654321", message: "chore: bump dependencies" }
+    ]
+  })
+
+  const result = await runTask()
+
+  assert.equal(result.commits, 2)
+  assert.equal(result.branch, "main")
+  assert.httpCalled("POST", "https://slack.com/api/chat.postMessage")
+})
+
+test("skips when push has no commits", async () => {
+  env.set("SLACK_TOKEN", "xoxb-test")
+  input.set({ ref: "refs/heads/main", repository: { full_name: "acme/api" }, commits: [] })
+
+  const result = await runTask()
+
+  assert.equal(result.skipped, true)
+  assert.httpNotCalled("POST", "https://slack.com/api/chat.postMessage")
+})
+```
+
+### Setting up on the sender side (GitHub example)
+
+After deploying the task, configure the GitHub webhook:
+
+- **Payload URL**: `https://your-dicode-host/hooks/github-push`
+- **Content type**: `application/json`
+- **Secret**: the value of `GITHUB_WEBHOOK_SECRET` stored in dicode secrets
+- **Events**: choose whichever events the task needs (`push`, `pull_request`, etc.)
