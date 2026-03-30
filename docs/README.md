@@ -9,7 +9,7 @@
 ## Concepts
 
 | Document | What it covers |
-|---|---|
+| --- | --- |
 | [Task Format](./concepts/task-format.md) | `task.yaml`, `task.js`, `task.test.js` |
 | [JS Runtime](./concepts/js-runtime.md) | goja engine, all injected globals |
 | [Sources & Reconciler](./concepts/sources.md) | TaskSet source, git source, local source, dev mode, reconciliation loop |
@@ -24,6 +24,7 @@
 | [AI Generation](./concepts/ai-generation.md) | Claude API, prompt building, validation loop |
 | [Task Store](./concepts/task-store.md) | install, share, marketplace |
 | [Web UI & API](./concepts/webui-api.md) | REST API, HTMX frontend |
+| [Security](./concepts/security.md) | auth wall, sessions, device tokens, webhook HMAC, API keys |
 | [Deployment](./concepts/deployment.md) | desktop, headless, Docker, systemd |
 | [Local-Only Mode](./concepts/local-only.md) | no git required, onboarding, migration |
 | [Webhook Relay](./concepts/webhook-relay.md) | relay architecture, dicode.app tunnel |
@@ -31,6 +32,7 @@
 
 ## Design documents
 
+- [Security Plan](./security-plan.md) — threat model, phases 1–4 design decisions, Phase 5 RBAC north star
 - [Notifications & Interactive Tasks](./notifications-design.md) — browser notifications, run detail page, interact SDK, OAuth helper
 
 ## Runtime guides
