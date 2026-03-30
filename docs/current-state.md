@@ -1,6 +1,6 @@
 # Current State
 
-> Last updated: 2026-03-30 — Security: auth wall, trusted browser, webhook HMAC, MCP API keys; Webhook Task UIs
+> Last updated: 2026-03-30 — Security hardening: token rotation, trust_proxy flag, rate-limit lockout extension, CORS origin validation, webhook body fix, API key prefix guard
 
 This document describes exactly what exists in the codebase today — what is fully implemented, what is stubbed with interfaces and TODOs, and what exists only as documentation.
 
@@ -26,7 +26,7 @@ Full configuration loading. All structs defined and validated:
 - `Config`, `SourceConfig`, `DatabaseConfig`, `RelayConfig`
 - `SecretsConfig`, `SecretProviderConfig`
 - `NotificationsConfig`, `NotifyProviderConfig`
-- `ServerConfig` — port, secret, **auth** (global auth wall), **allowed_origins** (CORS allowlist), MCP, tray
+- `ServerConfig` — port, secret, **auth** (global auth wall), **allowed_origins** (CORS allowlist), **trust_proxy** (XFF trust flag), MCP, tray
 - `AIConfig`
 - `applyDefaults()` with sensible defaults for all fields
 - `validate()` checking required fields per source type
@@ -137,7 +137,7 @@ Full TaskSet architecture — hierarchical task composition inspired by ArgoCD A
   - `KillRun(runID)` — cancels run via `runCancels sync.Map`
   - Daemon: `startDaemon`, `onDaemonRunFinished` with restart policy (always/on-failure/never)
   - Shutdown: kills all active daemon runs via `shutdownCtx`
-  - **Webhook HMAC**: `verifyWebhookSignature(spec, r, body)` — HMAC-SHA256, `X-Hub-Signature-256` header (GitHub-compatible), optional replay protection via `X-Dicode-Timestamp` (5-minute window). Body capped at 5 MB. Backwards-compatible: open when `webhook_secret` is absent.
+  - **Webhook HMAC**: `verifyWebhookSignature(spec, r, body)` — HMAC-SHA256, `X-Hub-Signature-256` header (GitHub-compatible), optional replay protection via `X-Dicode-Timestamp` (5-minute window). Body capped at 5 MB. Backwards-compatible: open when `webhook_secret` is absent. Raw body bytes read **before** `ParseForm` (replayed via `bytes.NewReader`) so HMAC always covers actual request bytes for form-encoded bodies.
   - **Webhook Task UIs**: `WebhookHandler()` detects tasks with an `index.html` file; on browser GET it serves the page with SDK injection; on POST it either runs the task (JSON/API) or redirects browser form submissions to `/runs/{id}/result`
   - `injectDicodeSDK(html, hookPath, taskID)` — injects `<base href>` + meta tags + `<script src="/dicode.js">` after `<head>` open tag
   - `serveTaskAsset()` — sandboxed static asset serving with extension allowlist and path-traversal guard
@@ -150,9 +150,9 @@ Full TaskSet architecture — hierarchical task composition inspired by ArgoCD A
 - `server.go` — chi router, all REST + SPA endpoints, static assets embedded via `//go:embed static`
   - `New()` now accepts `db.DB` parameter for persistent session and key storage
   - Router restructured: always-public paths (login, static assets, webhooks) separated from the auth-gated group
-- **`auth.go`** — `requireAuth` middleware (session cookie check → device token renewal → 401/redirect), `corsMiddleware` (explicit allowlist, Vary header), `securityHeaders` (X-Content-Type-Options, X-Frame-Options, Referrer-Policy, Permissions-Policy, **Content-Security-Policy**)
-- **`sessions_db.go`** — SQLite-backed `dbSessionStore`: `issueDeviceToken`, `renewFromDevice`, `listDevices`, `revokeDevice`, `revokeAllDevices`. Device tokens: 30-day expiry, stored as SHA-256 hash, cookie is HttpOnly + SameSite=Strict. HTTP handlers: `apiAuthRefresh`, `apiListDevices`, `apiRevokeDevice`, `apiLogout`, `apiLogoutAll`.
-- **`apikeys.go`** — `apiKeyStore`: `generate` (returns raw `dck_`-prefixed key once), `validate` (hash-compare + `last_used` update), `list`, `revoke`. `requireAPIKey` middleware for MCP. HTTP handlers: `apiListAPIKeys`, `apiCreateAPIKey`, `apiRevokeAPIKey`.
+- **`auth.go`** — `requireAuth` middleware (session cookie check → device token renewal → 401/redirect), `corsMiddleware` (explicit allowlist, Vary header; origins validated with `url.Parse()` at startup — malformed entries skipped), `securityHeaders` (X-Content-Type-Options, X-Frame-Options, Referrer-Policy, Permissions-Policy, **Content-Security-Policy**), `clientIP(r, trustProxy bool)` — XFF only trusted when `server.trust_proxy: true`
+- **`sessions_db.go`** — SQLite-backed `dbSessionStore`: `issueDeviceToken`, `renewFromDevice` (wrapped in `db.Tx()`; implements atomic device token rotation after 24h — deletes old row, inserts new, returns new raw token to caller), `listDevices`, `revokeDevice`, `revokeAllDevices`. Device tokens: 30-day expiry, stored as SHA-256 hash, cookie is HttpOnly + SameSite=Strict. HTTP handlers: `apiAuthRefresh`, `apiListDevices`, `apiRevokeDevice`, `apiLogout`, `apiLogoutAll`.
+- **`apikeys.go`** — `apiKeyStore`: `generate` (returns raw `dck_`-prefixed key once; prefix truncation bounds-checked), `validate` (hash-compare + `last_used` update), `list`, `revoke`. `requireAPIKey` middleware for MCP. HTTP handlers: `apiListAPIKeys`, `apiCreateAPIKey`, `apiRevokeAPIKey`.
 - `apiSecretsUnlock` extended: accepts `trust: true` → issues device cookie alongside session cookie
 - REST API endpoints including `POST /api/runs/{runID}/kill`, file editor, trigger editor, AI stream
 - **New auth endpoints**: `POST /api/secrets/unlock` (with trust), `POST /api/auth/refresh`, `GET/DELETE /api/auth/devices/{id}`, `POST /api/auth/logout`, `POST /api/auth/logout-all`, `GET/POST/DELETE /api/auth/keys/{id}`
@@ -171,7 +171,7 @@ Full TaskSet architecture — hierarchical task composition inspired by ArgoCD A
   - `components/dc-security.js` — `/security` page: trusted devices, API key management, logout-all
   - `static/dicode.js` — standalone IIFE SDK for webhook task UIs; `window.dicode` with `run()`, `stream()`, `execute()`, `result()`, `ansiToHtml()`
   - **Security nav link** added to `index.html`
-- 11 existing + 12 new auth/security tests (public path gate, 401 enforcement, session lifecycle, device cookie, rate limiting, CORS allowlist, security headers, CSP, API key generate/validate/revoke, MCP key check)
+- 11 existing + 16 new auth/security tests (public path gate, 401 enforcement, session lifecycle, device cookie, rate limiting, **extended lockout**, CORS allowlist, **malformed origin skipping**, security headers, CSP, API key generate/validate/revoke, MCP key check, **device token rotation**, **XFF trust flag**)
 
 ### `pkg/tray/` ✅
 
@@ -233,13 +233,14 @@ Full TaskSet architecture — hierarchical task composition inspired by ArgoCD A
 | `BUSINESSPLAN.md` | ✅ Full business model documentation |
 | `README.md` | ✅ Comprehensive user documentation |
 | `docs/` | ✅ This documentation tree |
-| `docs/security-plan.md` | ✅ Security design document (phases 1–4 implemented) |
+| `docs/security-plan.md` | ✅ Security design document (phases 1–4 implemented + hardened) |
+| `docs/concepts/security.md` | ✅ Security developer reference (implementation details, DB schema, config reference) |
 | `pkg/agent/skill.md` | ✅ Agent skill document |
 
 ---
 
 ## Test coverage
 
-90+ tests across: db, secrets, source/local, registry, runtime/js, trigger (including HMAC), taskset, and webui (including auth) packages.
+94+ tests across: db, secrets, source/local, registry, runtime/js, trigger (including HMAC), taskset, and webui (including auth) packages.
 
 All packages compile with `go test -race ./...` as of 2026-03-30.

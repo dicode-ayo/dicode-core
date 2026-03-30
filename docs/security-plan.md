@@ -1,7 +1,9 @@
 # Security Plan — dicode
 
-> **Status**: Phases 1–4 implemented and merged on branch `feat/security-auth` (PR #11).
+> **Status**: Phases 1–4 implemented, code-reviewed, and hardened (PR #11 + review fixes).
 > Phase 5 (multi-user RBAC) is the north star — design documented, not yet built.
+>
+> For deep implementation details see [Security Developer Reference](./concepts/security.md).
 
 ---
 
@@ -25,7 +27,7 @@
 
 dicode is self-hosted. The expected deployment:
 
-```
+```text
 internet ──TLS──▶ reverse proxy (nginx/Caddy) ──▶ dicode :8080 (localhost)
 ```
 
@@ -42,14 +44,17 @@ server:
   auth: true
   secret: "your-passphrase"
   allowed_origins: []   # empty = same-origin only
+  trust_proxy: false    # set true when behind nginx/Caddy
 ```
 
 **What was built**:
 
 - `requireAuth` middleware in `pkg/webui/auth.go` — gates all routes when `server.auth: true`; API requests get 401, browser navigations get a redirect to `/?auth=required`
 - Always-public paths: `POST /api/secrets/unlock`, `POST /api/auth/refresh`, `/app/*` static assets, `/sw.js`, `/hooks/*` (webhook auth is HMAC-based, not session-based)
-- `corsMiddleware` replaces the former wildcard with an explicit `server.allowed_origins` list; unrecognised origins receive no `Access-Control-Allow-Origin` header
+- `corsMiddleware` replaces the former wildcard with an explicit `server.allowed_origins` list; unrecognised origins receive no `Access-Control-Allow-Origin` header; entries are validated with `url.Parse()` at startup — malformed entries are skipped and logged rather than silently corrupting the allowlist
 - `securityHeaders` extended with `Content-Security-Policy` and `Permissions-Policy`
+- `X-Forwarded-For` only trusted when `server.trust_proxy: true` — prevents direct clients from spoofing their IP to bypass the login rate limiter
+- Login rate limiter extended: on the 5th failed attempt the lockout window extends to **15 minutes** (not just 1 minute)
 
 ---
 
@@ -63,6 +68,10 @@ server:
 4. User sees all trusted devices in the **Security** page and can revoke any of them individually or all at once
 
 **Storage**: SQLite `sessions` table — token stored as SHA-256 hash only; raw token lives only in the cookie.
+
+**Session token design**: session tokens are generated from `crypto/rand` (32 bytes). The passphrase plays no role in token generation or validation — tokens are validated by in-memory map lookup only. This means knowing the passphrase does not allow forging a session token.
+
+**Device token rotation**: `renewFromDevice()` is wrapped in a `db.Tx()` transaction. When a device token's age exceeds `deviceRotateAfter` (24h), the old row is deleted and a new token is inserted atomically. The new raw token is returned to the caller so the browser's device cookie is refreshed. This prevents long-lived tokens from accumulating without ever cycling.
 
 **New endpoints**:
 
@@ -98,6 +107,8 @@ trigger:
 
 **Implementation**: `verifyWebhookSignature` in `pkg/trigger/engine.go`; body capped at 5 MB before HMAC computation.
 
+**Body capture**: the raw request body is read into a `[]byte` slice **before** any content-type parsing. For `application/x-www-form-urlencoded` requests the bytes are replayed back via `bytes.NewReader` so `r.ParseForm()` can still work. This ensures HMAC is always computed over the actual request bytes regardless of content-type.
+
 **Example**: `examples/github-push-webhook/` — full working task that receives GitHub push events, verifies the signature, and renders a commit summary.
 
 ---
@@ -110,7 +121,7 @@ trigger:
 
 **Usage**:
 
-```
+```http
 Authorization: Bearer dck_A3kR9pQz…
 ```
 
@@ -185,9 +196,10 @@ The `/api/auth/*` endpoints are already designed to work with header-based auth 
 Before exposing dicode outside localhost:
 
 - [ ] `server.auth: true` in `dicode.yaml`
-- [ ] Strong passphrase in `server.secret` (≥ 16 chars, high entropy)
+- [ ] Strong passphrase in `server.secret` (≥ 20 chars, high entropy — longer is better since the passphrase is hashed for comparison only, not used to derive tokens)
 - [ ] TLS terminated at the reverse proxy (nginx / Caddy)
-- [ ] `server.allowed_origins` set to the exact WebUI origin (if separate)
+- [ ] `server.trust_proxy: true` **only** if sitting behind a proxy (otherwise IP rate limiting can be bypassed)
+- [ ] `server.allowed_origins` set to the exact WebUI origin (if served from a separate origin)
 - [ ] Webhook tasks using `webhook_secret:` for any public-facing endpoint
 - [ ] MCP API key generated from `/security` page and set in Claude / agent config
 - [ ] dicode port not directly reachable from the internet (only via proxy)

@@ -556,6 +556,56 @@ Wire notifier into JS runtime's `notify` global and trigger engine (on-failure/o
 
 ---
 
+## Post-MVP — Security (Phases 1–4) ✅
+
+**Goal**: production-grade authentication and authorization without breaking existing deployments.
+
+All security features are **opt-in**. Behaviour is identical to `main` without `server.auth: true`.
+
+**Phase 1 — Global auth wall**:
+
+- `requireAuth` middleware gates all routes (`/api/*`, `/ws`, `/mcp`); API callers get 401, browsers redirect to `/?auth=required`
+- Always-public paths: login endpoint, static SPA assets, service worker, webhook paths (HMAC-gated separately)
+- `corsMiddleware` replaces wildcard `*` with explicit `server.allowed_origins`; origins validated with `url.Parse()` at startup
+- `securityHeaders` adds CSP, Permissions-Policy, X-Frame-Options, X-Content-Type-Options, Referrer-Policy
+- `server.trust_proxy: true` required to trust `X-Forwarded-For` — prevents IP spoofing against rate limiter
+- Login rate limiter: 5 attempts/IP/minute; on cap, lockout extends to 15 minutes
+
+**Phase 2 — Trusted browser**:
+
+- Session tokens: 32-byte `crypto/rand`, in-memory map, 8h TTL; passphrase plays no role in token generation
+- Device tokens: 30-day SQLite-backed, stored as SHA-256 hash, cookie is HttpOnly+SameSite=Strict
+- `renewFromDevice()` wrapped in `db.Tx()`; implements atomic rotation every 24h (delete old row, insert new)
+- Silent refresh: SPA POSTs to `/api/auth/refresh` on 401; original request retried transparently
+- `/security` page: list devices, revoke individual, emergency logout-all; API key management
+
+**Phase 3 — Webhook HMAC**:
+
+- Per-task `webhook_secret` for HMAC-SHA256 verification (GitHub-compatible `X-Hub-Signature-256`)
+- Raw body read before `ParseForm` — HMAC covers actual bytes for form-encoded bodies
+- Replay protection: `X-Dicode-Timestamp` header, 5-minute window
+
+**Phase 4 — MCP API keys**:
+
+- `dck_`-prefixed keys, 32 random bytes, stored as SHA-256 hash
+- `requireAPIKey` middleware on `/mcp`; raw key returned once at creation
+- Key management: `GET/POST/DELETE /api/auth/keys`
+
+**Code review hardening** (PR #11 review → follow-up commit):
+
+- Session tokens made purely random (removed passphrase HMAC from `issue()`)
+- Device token rotation implemented (was a documented no-op)
+- `renewFromDevice` wrapped in DB transaction (was unbounded separate queries)
+- `trust_proxy` config flag added (XFF was trusted unconditionally)
+- Rate limiter lockout extended to 15 min on cap (was 1-min reset)
+- CORS origins validated with `url.Parse()` (malformed entries now skipped, not silently accepted)
+- Webhook form body fixed (raw bytes now captured before `ParseForm`)
+- API key prefix bounds-checked
+
+See [Security Developer Reference](./concepts/security.md) for full implementation details.
+
+---
+
 ## Milestone 13 — MCP server 🔧
 
 **Goal**: AI agents can develop tasks via MCP tools.
