@@ -1,0 +1,14 @@
+apiVersion: dicode/v1
+kind: Task
+name: Hello Webhook
+description: >
+  Minimal webhook example with HMAC authentication.
+  dicode verifies the X-Hub-Signature-256 header before the script runs —
+  requests without a valid signature are rejected with 403.
+runtime: deno
+
+trigger:
+  webhook: /hooks/hello
+  webhook_secret: "${HELLO_WEBHOOK_SECRET}"
+
+timeout: 10s
