@@ -27,7 +27,7 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 		}
 
 		// Check session cookie first.
-		if cookie, err := r.Cookie(secretsCookie); err == nil {
+		if cookie, err := r.Cookie(sessionCookie); err == nil {
 			if s.sessions.valid(cookie.Value) {
 				next.ServeHTTP(w, r)
 				return
