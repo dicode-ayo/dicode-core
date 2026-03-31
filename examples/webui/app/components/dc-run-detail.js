@@ -127,7 +127,7 @@ class DcRunDetail extends LitElement {
 
     return html`
       <div style="margin-bottom:1rem">
-        <a href="/tasks/${taskID}" @click=${e => { e.preventDefault(); navigate('/tasks/' + taskID); }}>← ${taskName}</a>
+        <a href="tasks/${encodeURIComponent(taskID)}">← ${taskName}</a>
       </div>
 
       <div class="card">

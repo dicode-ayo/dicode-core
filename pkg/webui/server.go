@@ -473,12 +473,17 @@ func (s *Server) handleRunResult(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if run.OutputContentType == "" {
-		http.NotFound(w, r)
+	if run.OutputContentType != "" {
+		w.Header().Set("Content-Type", run.OutputContentType+"; charset=utf-8")
+		_, _ = w.Write([]byte(run.OutputContent))
 		return
 	}
-	w.Header().Set("Content-Type", run.OutputContentType+"; charset=utf-8")
-	_, _ = w.Write([]byte(run.OutputContent))
+	if run.ReturnValue != "" {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_, _ = w.Write([]byte(run.ReturnValue))
+		return
+	}
+	http.NotFound(w, r)
 }
 
 // apiGetConfigRaw returns the raw content of dicode.yaml.
