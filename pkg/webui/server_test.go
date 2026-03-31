@@ -209,9 +209,12 @@ func TestSPA_Root(t *testing.T) {
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 
-	// SPA index.html should be served (or 404 if static/app/index.html not embedded yet in test build)
-	if w.Code != http.StatusOK && w.Code != http.StatusNotFound {
-		t.Fatalf("expected 200 or 404, got %d", w.Code)
+	// The SPA now lives at /hooks/webui; bare / redirects there.
+	if w.Code != http.StatusFound {
+		t.Fatalf("expected 302 redirect to /hooks/webui, got %d", w.Code)
+	}
+	if loc := w.Header().Get("Location"); loc != "/hooks/webui" {
+		t.Fatalf("expected redirect to /hooks/webui, got %q", loc)
 	}
 }
 
@@ -223,9 +226,12 @@ func TestSPA_TaskRoute(t *testing.T) {
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 
-	// SPA catch-all should return 200 (index.html) or 404 if not yet created
-	if w.Code != http.StatusOK && w.Code != http.StatusNotFound {
-		t.Fatalf("expected 200 or 404, got %d", w.Code)
+	// Unmatched paths redirect to /hooks/webui (SPA catch-all redirect).
+	if w.Code != http.StatusFound {
+		t.Fatalf("expected 302 redirect, got %d", w.Code)
+	}
+	if loc := w.Header().Get("Location"); loc != "/hooks/webui" {
+		t.Fatalf("expected redirect to /hooks/webui, got %q", loc)
 	}
 }
 
@@ -243,9 +249,9 @@ func TestSPA_RunRoute(t *testing.T) {
 	req2 := httptest.NewRequest(http.MethodGet, "/runs/"+resp["runId"], nil)
 	w2 := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w2, req2)
-	// SPA catch-all
-	if w2.Code != http.StatusOK && w2.Code != http.StatusNotFound {
-		t.Fatalf("expected 200 or 404, got %d: %s", w2.Code, w2.Body)
+	// Unmatched /runs/{id} redirects to /hooks/webui.
+	if w2.Code != http.StatusFound {
+		t.Fatalf("expected 302 redirect, got %d: %s", w2.Code, w2.Body)
 	}
 }
 
@@ -291,7 +297,7 @@ func TestWebhook_AuthTask_BlocksUnauthenticated(t *testing.T) {
 
 	h := srv.Handler()
 
-	// Unauthenticated GET with browser Accept header → redirect to /?auth=required.
+	// Unauthenticated GET with browser Accept header → redirect to / (which redirects to /hooks/webui).
 	getReq := httptest.NewRequest(http.MethodGet, "/hooks/priv", nil)
 	getReq.Header.Set("Accept", "text/html,application/xhtml+xml,*/*")
 	getW := httptest.NewRecorder()
@@ -299,8 +305,8 @@ func TestWebhook_AuthTask_BlocksUnauthenticated(t *testing.T) {
 	if getW.Code != http.StatusSeeOther {
 		t.Errorf("unauthenticated browser GET: expected 303, got %d", getW.Code)
 	}
-	if loc := getW.Header().Get("Location"); loc != "/?auth=required" {
-		t.Errorf("unauthenticated browser GET: expected redirect to /?auth=required, got %q", loc)
+	if loc := getW.Header().Get("Location"); loc != "/" {
+		t.Errorf("unauthenticated browser GET: expected redirect to /, got %q", loc)
 	}
 
 	// Unauthenticated GET without browser Accept header → 401 JSON.
@@ -331,7 +337,7 @@ func TestWebhook_AuthTask_AllowsAuthenticatedSession(t *testing.T) {
 	// GET with a valid session: should serve index.html (200), NOT be blocked.
 	getReq := httptest.NewRequest(http.MethodGet, "/hooks/priv2", nil)
 	getReq.Header.Set("Accept", "text/html,application/xhtml+xml,*/*")
-	getReq.AddCookie(&http.Cookie{Name: secretsCookie, Value: token})
+	getReq.AddCookie(&http.Cookie{Name: sessionCookie, Value: token})
 	getW := httptest.NewRecorder()
 	h.ServeHTTP(getW, getReq)
 	if getW.Code == http.StatusUnauthorized || getW.Code == http.StatusSeeOther {
@@ -340,7 +346,7 @@ func TestWebhook_AuthTask_AllowsAuthenticatedSession(t *testing.T) {
 
 	// POST with a valid session: should pass through, NOT be blocked.
 	postReq := httptest.NewRequest(http.MethodPost, "/hooks/priv2", nil)
-	postReq.AddCookie(&http.Cookie{Name: secretsCookie, Value: token})
+	postReq.AddCookie(&http.Cookie{Name: sessionCookie, Value: token})
 	postW := httptest.NewRecorder()
 	h.ServeHTTP(postW, postReq)
 	if postW.Code == http.StatusUnauthorized || postW.Code == http.StatusSeeOther {

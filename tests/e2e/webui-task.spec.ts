@@ -200,9 +200,10 @@ test.describe('WebUI dashboard — Run Detail', () => {
 
     await page.locator('button', { hasText: 'Run now' }).click();
 
-    // Should navigate to /runs/{runID} client-side
+    // Should navigate to /hooks/webui/runs/{runID} client-side
     await page.waitForFunction(
-      () => location.pathname.startsWith('/runs/'),
+      (base) => location.pathname.startsWith(base + '/runs/'),
+      WEBUI_URL,
       { timeout: 15_000 },
     );
     await page.waitForSelector('dc-run-detail', { timeout: 10_000 });
@@ -243,7 +244,8 @@ test.describe('WebUI dashboard — Navigation', () => {
   test('nav link to Sources navigates client-side', async ({ page }) => {
     await page.locator('nav a', { hasText: 'Sources' }).click();
     await page.waitForFunction(
-      () => location.pathname.startsWith('/sources'),
+      (base) => location.pathname.startsWith(base + '/sources'),
+      WEBUI_URL,
       { timeout: 5_000 },
     );
     await page.waitForSelector('dc-sources', { timeout: 10_000 });
@@ -252,7 +254,8 @@ test.describe('WebUI dashboard — Navigation', () => {
   test('nav link to Config navigates client-side', async ({ page }) => {
     await page.locator('nav a', { hasText: 'Config' }).click();
     await page.waitForFunction(
-      () => location.pathname.startsWith('/config'),
+      (base) => location.pathname.startsWith(base + '/config'),
+      WEBUI_URL,
       { timeout: 5_000 },
     );
     await page.waitForSelector('dc-config', { timeout: 10_000 });
