@@ -459,7 +459,15 @@ func (e *Engine) WebhookHandler() http.Handler {
 		// If the sub-path has no recognised file extension and the task has an
 		// index.html, fall back to serving that — enabling SPA client-side routing
 		// (e.g. /hooks/webui/config, /hooks/webui/tasks/foo all return the SPA shell).
+		// This intentionally applies to any webhook task that ships an index.html,
+		// not just the built-in webui — it is the standard "SPA shell" pattern.
 		if assetPath != "" {
+			// Block path traversal before any extension check; the SPA fallback
+			// must not silently swallow traversal attempts by serving index.html.
+			if strings.Contains(assetPath, "..") {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
 			if r.Method == http.MethodGet &&
 				filepath.Ext(assetPath) == "" {
 				indexFile := filepath.Join(spec.TaskDir, "index.html")
@@ -654,8 +662,8 @@ var allowedAssetTypes = map[string]string{
 	".json":  "application/json; charset=utf-8",
 	".svg":   "image/svg+xml",
 	".png":   "image/png",
-	".jpg":  "image/jpeg",
-	".jpeg": "image/jpeg",
+	".jpg":   "image/jpeg",
+	".jpeg":  "image/jpeg",
 	".ico":   "image/x-icon",
 	".woff":  "font/woff",
 	".woff2": "font/woff2",

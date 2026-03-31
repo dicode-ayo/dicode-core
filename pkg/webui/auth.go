@@ -46,7 +46,7 @@ func (s *Server) webhookAuthGuard(w http.ResponseWriter, r *http.Request, next h
 		jsonErr(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	http.Redirect(w, r, "/hooks/webui", http.StatusSeeOther)
+	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
 // hasValidSession returns true if r carries a valid in-memory session cookie
@@ -110,7 +110,7 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 			jsonErr(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		http.Redirect(w, r, "/hooks/webui", http.StatusSeeOther)
+		http.Redirect(w, r, "/", http.StatusSeeOther)
 	})
 }
 
