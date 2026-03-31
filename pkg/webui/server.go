@@ -305,7 +305,7 @@ func (s *Server) Handler() http.Handler {
 	r.Get("/sw.js", s.handleServiceWorker)
 
 	// Auth endpoints — always public (login flow must be reachable without session).
-	r.Post("/api/secrets/unlock", s.apiSecretsUnlock)
+	r.Post("/api/auth/login", s.apiSecretsUnlock)
 	r.Post("/api/auth/refresh", s.apiAuthRefresh)
 
 	// Webhook passthrough — auth via per-task HMAC secret, not session cookie.
@@ -364,11 +364,11 @@ func (s *Server) Handler() http.Handler {
 			r.Get("/runs/{runID}/logs", s.apiGetLogs)
 			r.Post("/runs/{runID}/kill", s.apiKillRun)
 
-			// Secrets management
+			// Secrets management (protected by main session via requireAuth above).
+			// GET returns key names only — values are never surfaced via API.
 			r.Get("/secrets", s.apiListSecrets)
 			r.Post("/secrets", s.apiSetSecret)
 			r.Delete("/secrets/{key}", s.apiDeleteSecret)
-			r.Post("/secrets/lock", s.apiSecretsLock)
 
 			// Auth management — trusted devices, API keys & passphrase
 			r.Get("/auth/devices", s.apiListDevices)
@@ -506,12 +506,8 @@ func (s *Server) handleServiceWorker(w http.ResponseWriter, r *http.Request) {
 }
 
 // apiGetConfigRaw returns the raw content of dicode.yaml.
-// Guarded by secrets session because the config may contain API keys.
+// Protected by the main session via requireAuth.
 func (s *Server) apiGetConfigRaw(w http.ResponseWriter, r *http.Request) {
-	if !s.secretsSessionValid(r) {
-		jsonErr(w, "unlock secrets first to access raw config", http.StatusUnauthorized)
-		return
-	}
 	if s.cfgPath == "" {
 		jsonOK(w, map[string]string{"content": "# config file path not set"})
 		return
@@ -526,11 +522,8 @@ func (s *Server) apiGetConfigRaw(w http.ResponseWriter, r *http.Request) {
 }
 
 // apiSaveConfigRaw validates and writes the raw config back to dicode.yaml.
+// Protected by the main session via requireAuth.
 func (s *Server) apiSaveConfigRaw(w http.ResponseWriter, r *http.Request) {
-	if !s.secretsSessionValid(r) {
-		jsonErr(w, "unlock secrets first to edit raw config", http.StatusUnauthorized)
-		return
-	}
 	if s.cfgPath == "" {
 		jsonErr(w, "config file path not set", http.StatusBadRequest)
 		return
@@ -723,36 +716,7 @@ func (s *Server) apiSaveTrigger(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]string{"status": "saved"})
 }
 
-const secretsCookie = "dicode_secrets_sess"
-
-// secretsPassphrase returns the effective auth passphrase (YAML > DB > "").
-func (s *Server) secretsPassphrase() string {
-	return s.resolvePassphrase(context.Background())
-}
-
-func (s *Server) secretsSessionValid(r *http.Request) bool {
-	// If no passphrase is configured, the session is always valid.
-	if s.secretsPassphrase() == "" {
-		return true
-	}
-	c, err := r.Cookie(secretsCookie)
-	if err != nil {
-		return false
-	}
-	return s.sessions.valid(c.Value)
-}
-
-func (s *Server) requireSecretsSession(w http.ResponseWriter, r *http.Request) bool {
-	if s.secretsMgr == nil {
-		jsonErr(w, "secrets not configured", http.StatusServiceUnavailable)
-		return false
-	}
-	if !s.secretsSessionValid(r) {
-		jsonErr(w, "secrets locked — unlock via POST /api/secrets/unlock", http.StatusUnauthorized)
-		return false
-	}
-	return true
-}
+const sessionCookie = "dicode_secrets_sess"
 
 // apiSecretsUnlock accepts {"password":"...","trust":true} and issues a
 // session cookie. When trust=true a long-lived device cookie is also issued so
@@ -773,7 +737,7 @@ func (s *Server) apiSecretsUnlock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	expected := s.secretsPassphrase()
+	expected := s.resolvePassphrase(r.Context())
 	if expected != "" && subtle.ConstantTimeCompare([]byte(body.Password), []byte(expected)) != 1 {
 		jsonErr(w, "incorrect password", http.StatusUnauthorized)
 		return
@@ -793,22 +757,9 @@ func (s *Server) apiSecretsUnlock(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]string{"status": "ok"})
 }
 
-// apiSecretsLock revokes the current session and optionally the device cookie.
-func (s *Server) apiSecretsLock(w http.ResponseWriter, r *http.Request) {
-	if c, err := r.Cookie(secretsCookie); err == nil {
-		s.sessions.revoke(c.Value)
-	}
-	if s.dbSessions != nil {
-		if dc, err := r.Cookie(deviceCookie); err == nil {
-			_ = s.dbSessions.revokeDevice(r.Context(), dc.Value)
-		}
-	}
-	clearAuthCookies(w)
-	jsonOK(w, map[string]string{"status": "ok"})
-}
-
 func (s *Server) apiListSecrets(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSecretsSession(w, r) {
+	if s.secretsMgr == nil {
+		jsonErr(w, "secrets not configured", http.StatusServiceUnavailable)
 		return
 	}
 	keys, err := s.secretsMgr.List(r.Context())
@@ -820,7 +771,8 @@ func (s *Server) apiListSecrets(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) apiSetSecret(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSecretsSession(w, r) {
+	if s.secretsMgr == nil {
+		jsonErr(w, "secrets not configured", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -855,7 +807,8 @@ func (s *Server) apiSetSecret(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) apiDeleteSecret(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSecretsSession(w, r) {
+	if s.secretsMgr == nil {
+		jsonErr(w, "secrets not configured", http.StatusServiceUnavailable)
 		return
 	}
 	key := chi.URLParam(r, "key")

@@ -220,7 +220,7 @@ func (s *Server) authSessionValid(r *http.Request) bool {
 	if !s.cfg.Server.Auth {
 		return true
 	}
-	c, err := r.Cookie(secretsCookie)
+	c, err := r.Cookie(sessionCookie)
 	if err != nil {
 		return false
 	}

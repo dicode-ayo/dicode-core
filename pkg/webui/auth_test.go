@@ -41,16 +41,16 @@ func newAuthServer(t *testing.T, passphrase string) *Server {
 	return srv
 }
 
-// login calls /api/secrets/unlock and returns the session cookie.
+// login calls /api/auth/login and returns the session cookie.
 func login(t *testing.T, h http.Handler, password string, trust bool) *http.Cookie {
 	t.Helper()
 	body, _ := json.Marshal(map[string]any{"password": password, "trust": trust})
-	req := httptest.NewRequest(http.MethodPost, "/api/secrets/unlock", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 	for _, c := range w.Result().Cookies() {
-		if c.Name == secretsCookie {
+		if c.Name == sessionCookie {
 			return c
 		}
 	}
@@ -64,7 +64,7 @@ func TestAuth_PublicPathsAlwaysAccessible(t *testing.T) {
 	h := srv.Handler()
 
 	publicPaths := []string{
-		"/api/secrets/unlock",
+		"/api/auth/login",
 		"/app/app.js",
 		"/sw.js",
 	}
@@ -117,7 +117,7 @@ func TestAuth_WrongPassword_Returns401(t *testing.T) {
 	h := srv.Handler()
 
 	body, _ := json.Marshal(map[string]any{"password": "wrong"})
-	req := httptest.NewRequest(http.MethodPost, "/api/secrets/unlock", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
@@ -176,7 +176,7 @@ func TestAuth_TrustedDevice_IssuedOnLogin(t *testing.T) {
 	h := srv.Handler()
 
 	body, _ := json.Marshal(map[string]any{"password": "secret", "trust": true})
-	req := httptest.NewRequest(http.MethodPost, "/api/secrets/unlock", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "TestBrowser/1.0")
 	w := httptest.NewRecorder()
@@ -220,7 +220,7 @@ func TestAuth_DeviceList_RequiresSession(t *testing.T) {
 
 // ── Rate limiter ──────────────────────────────────────────────────────────────
 
-func TestAuth_RateLimit_UnlockEndpoint(t *testing.T) {
+func TestAuth_RateLimit_LoginEndpoint(t *testing.T) {
 	srv := newAuthServer(t, "secret")
 	h := srv.Handler()
 
@@ -228,7 +228,7 @@ func TestAuth_RateLimit_UnlockEndpoint(t *testing.T) {
 
 	var lastCode int
 	for i := 0; i < 10; i++ {
-		req := httptest.NewRequest(http.MethodPost, "/api/secrets/unlock", bytes.NewReader(body))
+		req := httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		req.RemoteAddr = "10.0.0.1:12345" // same IP every time
 		w := httptest.NewRecorder()
@@ -387,7 +387,7 @@ func TestAuth_RateLimit_ExtendedLockout(t *testing.T) {
 
 	// Exhaust the limit.
 	for i := 0; i < unlockMaxAttempts; i++ {
-		req := httptest.NewRequest(http.MethodPost, "/api/secrets/unlock", bytes.NewReader(body))
+		req := httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		req.RemoteAddr = "10.0.0.2:1234"
 		w := httptest.NewRecorder()
@@ -395,7 +395,7 @@ func TestAuth_RateLimit_ExtendedLockout(t *testing.T) {
 	}
 
 	// Next attempt should be 429 immediately (not after a 1-minute reset).
-	req := httptest.NewRequest(http.MethodPost, "/api/secrets/unlock", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.RemoteAddr = "10.0.0.2:1234"
 	w := httptest.NewRecorder()
@@ -405,7 +405,7 @@ func TestAuth_RateLimit_ExtendedLockout(t *testing.T) {
 	}
 
 	// A different IP must still be allowed.
-	req2 := httptest.NewRequest(http.MethodPost, "/api/secrets/unlock", bytes.NewReader(body))
+	req2 := httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewReader(body))
 	req2.Header.Set("Content-Type", "application/json")
 	req2.RemoteAddr = "10.0.0.3:1234"
 	w2 := httptest.NewRecorder()
