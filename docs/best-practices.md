@@ -221,7 +221,7 @@ r.Use(securityHeaders)
 
 #### Rate limiting
 
-There is currently no rate limiting. The `/secrets/unlock` and `/api/tasks/{id}/run` endpoints are especially worth protecting.
+There is currently no rate limiting. The `/api/auth/login` and `/api/tasks/{id}/run` endpoints are especially worth protecting.
 
 ```go
 // Using golang.org/x/time/rate (stdlib-adjacent)

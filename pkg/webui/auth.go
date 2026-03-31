@@ -27,7 +27,7 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 		}
 
 		// Check session cookie first.
-		if cookie, err := r.Cookie(secretsCookie); err == nil {
+		if cookie, err := r.Cookie(sessionCookie); err == nil {
 			if s.sessions.valid(cookie.Value) {
 				next.ServeHTTP(w, r)
 				return
@@ -115,7 +115,7 @@ func securityHeaders(next http.Handler) http.Handler {
 // session: static assets, the service worker, and the login/unlock endpoints.
 func isPublicPath(path string) bool {
 	switch {
-	case path == "/api/secrets/unlock",
+	case path == "/api/auth/login",
 		path == "/api/auth/refresh",
 		strings.HasPrefix(path, "/app/"),
 		path == "/sw.js":

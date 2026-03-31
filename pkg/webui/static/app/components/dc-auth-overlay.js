@@ -40,7 +40,7 @@ class DcAuthOverlay extends LitElement {
     this._loading = true;
     this._error   = '';
     try {
-      const res = await fetch('/api/secrets/unlock', {
+      const res = await fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ password: pw, trust }),

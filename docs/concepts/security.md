@@ -13,7 +13,7 @@ request
   └─▶ securityHeaders          adds CSP, X-Frame-Options, etc. (always active)
   └─▶ corsMiddleware            validates Origin against allowlist (always active)
   └─▶ requireAuth               gates routes behind session / device token (auth only)
-        ├─ public paths bypass  /api/secrets/unlock, /api/auth/refresh, /app/*, /sw.js
+        ├─ public paths bypass  /api/auth/login, /api/auth/refresh, /app/*, /sw.js
         ├─ /hooks/* bypasses    webhook auth is HMAC-based, not session-based
         └─ /mcp goes to requireAPIKey instead of requireAuth
 ```
@@ -79,7 +79,7 @@ incoming request
 
 **Public paths** (never require auth):
 
-- `POST /api/secrets/unlock` — login endpoint itself
+- `POST /api/auth/login` — login endpoint itself
 - `POST /api/auth/refresh` — silent session renewal (device cookie only, no session required)
 - `/app/*` — static SPA assets (JS, CSS) needed to render the login page
 - `/sw.js` — service worker
@@ -220,7 +220,7 @@ CREATE INDEX IF NOT EXISTS idx_sessions_hash ON sessions(token_hash);
 ### Login flow
 
 ```text
-POST /api/secrets/unlock  {"password":"…","trust":true}
+POST /api/auth/login  {"password":"…","trust":true}
   │
   ├─ rate limit check (IP-based)
   ├─ resolvePassphrase() → YAML secret → DB kv["auth.passphrase"] → ""
@@ -230,6 +230,8 @@ POST /api/secrets/unlock  {"password":"…","trust":true}
 
 Response: 200 {"status":"ok"}  +  Set-Cookie: dicode_secrets_sess + dicode_device
 ```
+
+There is no secondary "secrets unlock" step — one login grants access to all protected resources including the secrets API.
 
 ### Silent refresh flow
 
@@ -243,6 +245,16 @@ SPA detects 401 from api.js
   │     └─ fail → 401, clear cookies → show login modal
   └─ on success: retry original request with new session cookie
 ```
+
+### Secrets API endpoints
+
+All require a valid session. Secret **values are never returned via API** — secrets are write-only from the API's perspective and injected directly into task environment at runtime.
+
+| Method | Path | Response |
+| --- | --- | --- |
+| `GET` | `/api/secrets` | `["KEY_NAME_1", "KEY_NAME_2"]` — key names only |
+| `POST` | `/api/secrets` | `{status: "ok"}` — creates/updates a secret |
+| `DELETE` | `/api/secrets/{key}` | `{status: "ok"}` — removes a secret |
 
 ### Device management endpoints
 

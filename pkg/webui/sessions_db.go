@@ -204,7 +204,7 @@ func hashToken(raw string) string {
 // setSessionCookie writes the short-lived session cookie to the response.
 func setSessionCookie(w http.ResponseWriter, token string) {
 	http.SetCookie(w, &http.Cookie{
-		Name:     secretsCookie,
+		Name:     sessionCookie,
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
@@ -228,7 +228,7 @@ func setDeviceCookie(w http.ResponseWriter, token string) {
 
 // clearAuthCookies removes both auth cookies (logout).
 func clearAuthCookies(w http.ResponseWriter) {
-	for _, name := range []string{secretsCookie, deviceCookie} {
+	for _, name := range []string{sessionCookie, deviceCookie} {
 		http.SetCookie(w, &http.Cookie{Name: name, Path: "/", MaxAge: -1})
 	}
 }
@@ -293,7 +293,7 @@ func (s *Server) apiRevokeDevice(w http.ResponseWriter, r *http.Request) {
 
 // apiLogout revokes the current session and device token.
 func (s *Server) apiLogout(w http.ResponseWriter, r *http.Request) {
-	if c, err := r.Cookie(secretsCookie); err == nil {
+	if c, err := r.Cookie(sessionCookie); err == nil {
 		s.sessions.revoke(c.Value)
 	}
 	if s.dbSessions != nil {
