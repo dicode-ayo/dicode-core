@@ -1,0 +1,8 @@
+apiVersion: dicode/v1
+kind: Task
+name: Hello Cron
+description: A cron task that fires every minute, for e2e testing.
+runtime: js
+trigger:
+  cron: "* * * * *"
+timeout: 10s

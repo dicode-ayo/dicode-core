@@ -7,7 +7,7 @@ VERSION       ?= dev
 GO      := $(shell which go 2>/dev/null || echo $(HOME)/.local/share/mise/shims/go)
 GOFLAGS := -ldflags "-X main.version=$(VERSION)"
 
-.PHONY: build test test-verbose test-race lint fmt clean run tidy help
+.PHONY: build test test-verbose test-race lint fmt clean run tidy help test-e2e test-e2e-headed test-e2e-ui
 
 ## build: compile both dicode (CLI) and dicoded (daemon) into the project root
 build:
@@ -41,6 +41,18 @@ fmt:
 ## lint: format and vet all Go source files
 lint: fmt
 	$(GO) vet ./...
+
+## test-e2e: run Playwright end-to-end tests (builds dicode binary first)
+test-e2e:
+	npx playwright test
+
+## test-e2e-headed: run e2e tests in headed mode (shows browser)
+test-e2e-headed:
+	npx playwright test --headed
+
+## test-e2e-ui: open Playwright UI mode
+test-e2e-ui:
+	npx playwright test --ui
 
 ## clean: remove compiled binaries
 clean:
