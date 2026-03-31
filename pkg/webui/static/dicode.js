@@ -70,18 +70,60 @@
     task: { id: taskID, hookPath: hookPath },
 
     /**
+     * Attempt a silent session refresh via the device-token cookie.
+     * Returns a Promise<boolean> — true if the refresh succeeded.
+     * @private
+     */
+    _tryRefresh: function () {
+      return fetch('/api/auth/refresh', { method: 'POST' })
+        .then(function (res) { return res.ok; })
+        .catch(function () { return false; });
+    },
+
+    /**
+     * Handle a 401 response: try silent refresh, then redirect to login page.
+     * Returns a Promise that resolves with the retried fetch Response when
+     * refresh succeeds, or redirects the browser on failure.
+     * @private
+     */
+    _handle401: function (retryFn) {
+      var self = this;
+      return self._tryRefresh().then(function (refreshed) {
+        if (refreshed) {
+          return retryFn();
+        }
+        location.href = '/?auth=required';
+        // Return a never-resolving promise so callers don't proceed.
+        return new Promise(function () {});
+      });
+    },
+
+    /**
      * Run the task asynchronously with the given params.
      * Returns a Promise resolving to { runId: string }.
+     * On 401, attempts a silent refresh; redirects to login on failure.
      *
      * @param {Object} [params] - Key/value params passed to the task.
      */
     run: function (params) {
+      var self = this;
       params = params || {};
-      return fetch(hookPath + '?wait=false', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(params)
-      }).then(function (res) {
+      var doFetch = function () {
+        return fetch(hookPath + '?wait=false', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(params)
+        });
+      };
+      return doFetch().then(function (res) {
+        if (res.status === 401) {
+          return self._handle401(doFetch).then(function (retried) {
+            var runId = retried.headers.get('X-Run-Id');
+            return retried.json().then(function (body) {
+              return { runId: runId || body.runId };
+            });
+          });
+        }
         // Run ID is available both as a header and in the JSON body.
         var runId = res.headers.get('X-Run-Id');
         return res.json().then(function (body) {

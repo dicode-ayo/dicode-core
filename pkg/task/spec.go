@@ -74,6 +74,7 @@ type TriggerConfig struct {
 	Cron          string        `yaml:"cron,omitempty"`           // cron expression e.g. "0 9 * * *"
 	Webhook       string        `yaml:"webhook,omitempty"`        // HTTP path e.g. "/hooks/my-task"
 	WebhookSecret string        `yaml:"webhook_secret,omitempty"` // HMAC-SHA256 secret for webhook auth
+	WebhookAuth   bool          `yaml:"auth,omitempty"`           // require dicode session for GET (UI) and POST (run)
 	Manual        bool          `yaml:"manual,omitempty"`         // only via explicit trigger
 	Chain         *ChainTrigger `yaml:"chain,omitempty"`          // fire when another task completes
 	Daemon        bool          `yaml:"daemon,omitempty"`         // start on app start, restart on exit
