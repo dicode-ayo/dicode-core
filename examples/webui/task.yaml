@@ -1,0 +1,26 @@
+apiVersion: dicode/v1
+kind: Task
+name: WebUI Example
+description: |
+  A full-featured web dashboard served as a webhook task. Demonstrates the
+  dicode webhook UI pattern: open /hooks/webui in a browser to see the SPA;
+  the dicode.js SDK is injected automatically. Requires a valid dicode session
+  (trigger.auth: true) so the page redirects to login when unauthenticated.
+runtime: deno
+
+trigger:
+  webhook: /hooks/webui
+
+params:
+  - name: action
+    type: string
+    description: "Action to perform: status | ping | echo"
+    default: ping
+  - name: query
+    type: string
+    description: Optional payload for the echo action
+
+env:
+  - DICODE_VERSION  # optional — displayed in the status panel
+
+timeout: 30s
