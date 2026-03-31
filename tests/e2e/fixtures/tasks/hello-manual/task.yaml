@@ -1,0 +1,6 @@
+apiVersion: dicode/v1
+kind: Task
+name: Hello Manual
+description: A simple manual task for e2e testing.
+runtime: js
+timeout: 10s
