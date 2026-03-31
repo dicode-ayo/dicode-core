@@ -1,0 +1,8 @@
+apiVersion: dicode/v1
+kind: Task
+name: Hello Webhook
+description: A webhook task for e2e testing.
+runtime: js
+trigger:
+  webhook: /hooks/test-webhook
+timeout: 10s

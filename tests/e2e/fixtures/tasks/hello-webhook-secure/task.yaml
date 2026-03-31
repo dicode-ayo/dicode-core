@@ -1,0 +1,9 @@
+apiVersion: dicode/v1
+kind: Task
+name: Hello Webhook Secure
+description: A webhook task with HMAC secret for e2e testing.
+runtime: js
+trigger:
+  webhook: /hooks/test-webhook-secure
+  webhook_secret: "${TEST_WEBHOOK_SECRET}"
+timeout: 10s

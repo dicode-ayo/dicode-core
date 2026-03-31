@@ -2,4 +2,7 @@ dicode
 node_modules/
 .playwright-mcp/
 .worktrees/
+playwright-report/
+test-results/
+.playwright/
 !.claude/memory/
