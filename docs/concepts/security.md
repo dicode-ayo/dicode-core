@@ -85,8 +85,6 @@ incoming request
 - `/sw.js` — service worker
 - `/hooks/*` — webhooks; auth is per-task HMAC, not global session
 
-> **Deprecated**: `POST /api/secrets/unlock` is a legacy alias for `/api/auth/login`, kept for one release. Clients should migrate to `/api/auth/login`.
-
 ### Security headers
 
 `securityHeaders` middleware (always active, independent of `server.auth`) adds:

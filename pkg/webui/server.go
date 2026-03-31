@@ -307,8 +307,6 @@ func (s *Server) Handler() http.Handler {
 	// Auth endpoints — always public (login flow must be reachable without session).
 	r.Post("/api/auth/login", s.apiSecretsUnlock)
 	r.Post("/api/auth/refresh", s.apiAuthRefresh)
-	// Deprecated alias — kept for one release; clients should migrate to /api/auth/login.
-	r.Post("/api/secrets/unlock", s.apiSecretsUnlock)
 
 	// Webhook passthrough — auth via per-task HMAC secret, not session cookie.
 	webhookHandler := func(w http.ResponseWriter, req *http.Request) {
