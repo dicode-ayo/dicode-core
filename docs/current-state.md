@@ -1,6 +1,6 @@
 # Current State
 
-> Last updated: 2026-03-30 — Security hardening: token rotation, trust_proxy flag, rate-limit lockout extension, CORS origin validation, webhook body fix, API key prefix guard
+> Last updated: 2026-04-01 — Web UI migrated to standalone webhook task (`examples/webui/`); engine SPA fallback for any webhook task with `index.html`; `handleRunResult` now serves `ReturnValue` as JSON; path-traversal guard added before SPA fallback
 
 This document describes exactly what exists in the codebase today — what is fully implemented, what is stubbed with interfaces and TODOs, and what exists only as documentation.
 
@@ -140,6 +140,7 @@ Full TaskSet architecture — hierarchical task composition inspired by ArgoCD A
   - **Webhook HMAC**: `verifyWebhookSignature(spec, r, body)` — HMAC-SHA256, `X-Hub-Signature-256` header (GitHub-compatible), optional replay protection via `X-Dicode-Timestamp` (5-minute window). Body capped at 5 MB. Backwards-compatible: open when `webhook_secret` is absent. Raw body bytes read **before** `ParseForm` (replayed via `bytes.NewReader`) so HMAC always covers actual request bytes for form-encoded bodies.
   - **Webhook Task UIs**: `WebhookHandler()` detects tasks with an `index.html` file; on browser GET it serves the page with SDK injection; on POST it either runs the task (JSON/API) or redirects browser form submissions to `/runs/{id}/result`
   - `injectDicodeSDK(html, hookPath, taskID)` — injects `<base href>` + meta tags + `<script src="/dicode.js">` after `<head>` open tag
+  - **SPA fallback** — extensionless sub-paths under a webhook hook path (e.g. `/hooks/webui/tasks/foo`) serve `index.html` from the task directory, enabling client-side routing for any webhook task that ships an `index.html`. Path-traversal guard runs before extension check so `..` segments are rejected with 403 rather than silently served as the SPA shell.
   - `serveTaskAsset()` — sandboxed static asset serving with extension allowlist and path-traversal guard
   - `flatStringMap()` — converts POST body to `map[string]string` for `RunOptions.Params`
   - Audit logs: run started, run finished, kill requested, trigger types, daemon lifecycle
@@ -163,14 +164,9 @@ Full TaskSet architecture — hierarchical task composition inspired by ArgoCD A
 - Audit logs: run requested via API, kill requested via API
 - Task table sorted stably; namespace headers rendered when namespaced IDs present
 - Webhook trigger labels rendered as clickable links
-- **Frontend** — Lit/LitElement SPA with ESM modules (no build step):
-  - `static/app/app.js` — entry point, client-side router, WebSocket boot, auth overlay injection
-  - `static/app/lib/` — `ws.js`, `router.js`, `api.js` (401 interceptor: silent refresh → auth overlay → retry), `styles.js`, `utils.js`, `ansi.js`
-  - `static/app/components/` — `dc-task-list` (re-fetches on `tasks:changed` WS event), `dc-task-detail`, `dc-run-detail`, `dc-config`, `dc-secrets`, `dc-sources`, `dc-log-bar`, `dc-notif-panel`
-  - `components/dc-auth-overlay.js` — modal injected by `app.js`; passphrase + "Trust this browser for 30 days" checkbox
-  - `components/dc-security.js` — `/security` page: trusted devices, API key management, logout-all
-  - `static/dicode.js` — standalone IIFE SDK for webhook task UIs; `window.dicode` with `run()`, `stream()`, `execute()`, `result()`, `ansiToHtml()`
-  - **Security nav link** added to `index.html`
+- **Frontend (migrated)** — The dashboard SPA has been moved to `examples/webui/` and is served as a standalone webhook task at `/hooks/webui`. The Go binary no longer embeds the frontend assets. The server catch-all redirects `GET /*` to `/hooks/webui`. See `examples/webui/` below.
+  - `static/dicode.js` still embedded — standalone IIFE SDK injected into any webhook task UI; `window.dicode` with `run()`, `stream()`, `execute()`, `result()`, `ansiToHtml()`
+- `GET /runs/{runID}/result` — serves `OutputContent` with its MIME type, or `ReturnValue` as `application/json` when no structured output type is set
 - 11 existing + 16 new auth/security tests (public path gate, 401 enforcement, session lifecycle, device cookie, rate limiting, **extended lockout**, CORS allowlist, **malformed origin skipping**, security headers, CSP, API key generate/validate/revoke, MCP key check, **device token rotation**, **XFF trust flag**)
 
 ### `pkg/tray/` ✅
@@ -205,6 +201,9 @@ Full TaskSet architecture — hierarchical task composition inspired by ArgoCD A
 | `hello-python/` | manual | python |
 | `nginx-start/` | daemon | docker |
 | **`github-push-webhook/`** | **webhook + HMAC auth** | **deno** |
+| **`webui/`** | **webhook (SPA shell)** | **deno** |
+
+`examples/webui/` is the full dicode dashboard SPA. It ships as a self-contained webhook task: `index.html` + Lit/LitElement components under `app/`. The engine injects `<base href="/hooks/webui/">` and the dicode SDK on every GET. Auth is enforced client-side by `dc-auth-overlay` (intercepts 401s from the REST API). Any unauthenticated REST call shows the login modal without a page redirect.
 
 ---
 
