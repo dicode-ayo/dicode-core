@@ -65,7 +65,6 @@ func TestAuth_PublicPathsAlwaysAccessible(t *testing.T) {
 
 	publicPaths := []string{
 		"/api/auth/login",
-		"/api/secrets/unlock", // deprecated alias, must remain public for one release
 		"/app/app.js",
 		"/sw.js",
 	}

@@ -117,8 +117,6 @@ func isPublicPath(path string) bool {
 	switch {
 	case path == "/api/auth/login",
 		path == "/api/auth/refresh",
-		// Deprecated alias — kept for one release.
-		path == "/api/secrets/unlock",
 		strings.HasPrefix(path, "/app/"),
 		path == "/sw.js":
 		return true
