@@ -9,10 +9,11 @@ export default defineConfig({
   expect: {
     timeout: 10_000,
   },
+  // Run tests serially — we share a single dicode process.
   fullyParallel: false,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,
-  workers: 1, // run sequentially — single shared dicode instance
+  workers: 1,
   reporter: [['html', { open: 'never' }], ['list']],
   use: {
     baseURL: BASE_URL,
@@ -21,6 +22,9 @@ export default defineConfig({
   },
 
   projects: [
+    // ── unauthenticated ────────────────────────────────────────────────────────
+    // Starts dicode with auth disabled. Covers the bulk of UI and API tests.
+    // Run:  npx playwright test --project=unauthenticated
     {
       name: 'webui',
       testMatch: ['**/webui-task.spec.ts'],
@@ -46,6 +50,10 @@ export default defineConfig({
         baseURL: BASE_URL,
       },
     },
+
+    // ── authenticated ─────────────────────────────────────────────────────────
+    // Starts dicode with auth enabled (passphrase = test-passphrase-12345).
+    // Run:  DICODE_AUTH_MODE=authenticated npx playwright test --project=authenticated
     {
       name: 'authenticated',
       testMatch: ['**/auth.spec.ts'],
@@ -56,6 +64,8 @@ export default defineConfig({
     },
   ],
 
+  // Global setup builds the binary, writes temp configs, and starts dicode.
+  // Set DICODE_AUTH_MODE=authenticated before running to use the auth config.
   globalSetup: path.join(__dirname, 'tests/e2e/helpers/global-setup.ts'),
   globalTeardown: path.join(__dirname, 'tests/e2e/helpers/global-teardown.ts'),
 });
