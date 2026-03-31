@@ -50,7 +50,7 @@ func login(t *testing.T, h http.Handler, password string, trust bool) *http.Cook
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 	for _, c := range w.Result().Cookies() {
-		if c.Name == secretsCookie {
+		if c.Name == sessionCookie {
 			return c
 		}
 	}

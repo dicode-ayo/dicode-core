@@ -718,7 +718,7 @@ func (s *Server) apiSaveTrigger(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]string{"status": "saved"})
 }
 
-const secretsCookie = "dicode_secrets_sess"
+const sessionCookie = "dicode_secrets_sess"
 
 // apiSecretsUnlock accepts {"password":"...","trust":true} and issues a
 // session cookie. When trust=true a long-lived device cookie is also issued so
