@@ -37,11 +37,11 @@ func (s *Server) webhookAuthGuard(w http.ResponseWriter, r *http.Request, next h
 		return
 	}
 
-	// For webhook paths, a GET without an API content/accept header is a
-	// browser navigating to the task UI — redirect rather than 401.
+	// For webhook paths, a GET from a browser includes "text/html" in Accept.
+	// API clients (curl, fetch without custom headers, etc.) typically don't,
+	// so we use that to decide redirect vs 401.
 	isBrowserGet := r.Method == http.MethodGet &&
-		r.Header.Get("Accept") != "application/json" &&
-		!strings.Contains(r.Header.Get("Content-Type"), "application/json")
+		strings.Contains(r.Header.Get("Accept"), "text/html")
 	if !isBrowserGet {
 		jsonErr(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -50,7 +50,9 @@ func (s *Server) webhookAuthGuard(w http.ResponseWriter, r *http.Request, next h
 }
 
 // hasValidSession returns true if r carries a valid in-memory session cookie
-// or a device token that can be auto-renewed.
+// or a device token that can be auto-renewed. Note: when a device token is
+// present the function has a side effect — it consumes the token and issues a
+// fresh one via renewFromDevice.
 func (s *Server) hasValidSession(r *http.Request) bool {
 	if cookie, err := r.Cookie(secretsCookie); err == nil {
 		if s.sessions.valid(cookie.Value) {

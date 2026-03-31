@@ -118,7 +118,6 @@
       return doFetch().then(function (res) {
         if (res.status === 401) {
           return self._handle401(doFetch).then(function (retried) {
-            if (!retried) return new Promise(function () {});
             var runId = retried.headers.get('X-Run-Id');
             return retried.json().then(function (body) {
               return { runId: runId || body.runId };
