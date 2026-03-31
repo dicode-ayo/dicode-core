@@ -287,34 +287,28 @@ func TestWebhook_PublicTask_NoAuth(t *testing.T) {
 
 func TestWebhook_AuthTask_BlocksUnauthenticated(t *testing.T) {
 	srv := newAuthServer(t, "hunter2")
-
-	dir := t.TempDir()
-	td := filepath.Join(dir, "auth-hook")
-	_ = os.MkdirAll(td, 0755)
-	_ = os.WriteFile(filepath.Join(td, "task.ts"), []byte(`return "ok"`), 0644)
-	_ = os.WriteFile(filepath.Join(td, "index.html"), []byte(`<!doctype html><html><body>tool</body></html>`), 0644)
-	spec := &task.Spec{
-		ID:      "auth-hook",
-		Name:    "auth-hook",
-		Runtime: task.RuntimeDeno,
-		Trigger: task.TriggerConfig{Webhook: "/hooks/priv", WebhookAuth: true},
-		Timeout: 5 * time.Second,
-		TaskDir: td,
-	}
-	_ = srv.registry.Register(spec)
-	srv.engine.Register(spec)
+	registerWebhookTask(t, srv.registry, srv, "auth-hook", "/hooks/priv", true)
 
 	h := srv.Handler()
 
-	// Unauthenticated GET → redirect to /?auth=required.
+	// Unauthenticated GET with browser Accept header → redirect to /?auth=required.
 	getReq := httptest.NewRequest(http.MethodGet, "/hooks/priv", nil)
+	getReq.Header.Set("Accept", "text/html,application/xhtml+xml,*/*")
 	getW := httptest.NewRecorder()
 	h.ServeHTTP(getW, getReq)
 	if getW.Code != http.StatusSeeOther {
-		t.Errorf("unauthenticated GET: expected 303, got %d", getW.Code)
+		t.Errorf("unauthenticated browser GET: expected 303, got %d", getW.Code)
 	}
 	if loc := getW.Header().Get("Location"); loc != "/?auth=required" {
-		t.Errorf("unauthenticated GET: expected redirect to /?auth=required, got %q", loc)
+		t.Errorf("unauthenticated browser GET: expected redirect to /?auth=required, got %q", loc)
+	}
+
+	// Unauthenticated GET without browser Accept header → 401 JSON.
+	apiGetReq := httptest.NewRequest(http.MethodGet, "/hooks/priv", nil)
+	apiGetW := httptest.NewRecorder()
+	h.ServeHTTP(apiGetW, apiGetReq)
+	if apiGetW.Code != http.StatusUnauthorized {
+		t.Errorf("unauthenticated API GET: expected 401, got %d", apiGetW.Code)
 	}
 
 	// Unauthenticated POST → 401 JSON.
@@ -328,21 +322,7 @@ func TestWebhook_AuthTask_BlocksUnauthenticated(t *testing.T) {
 
 func TestWebhook_AuthTask_AllowsAuthenticatedSession(t *testing.T) {
 	srv := newAuthServer(t, "hunter2")
-
-	dir := t.TempDir()
-	td := filepath.Join(dir, "auth-hook2")
-	_ = os.MkdirAll(td, 0755)
-	_ = os.WriteFile(filepath.Join(td, "index.html"), []byte(`<!doctype html><html><body>tool</body></html>`), 0644)
-	spec := &task.Spec{
-		ID:      "auth-hook2",
-		Name:    "auth-hook2",
-		Runtime: task.RuntimeDeno,
-		Trigger: task.TriggerConfig{Webhook: "/hooks/priv2", WebhookAuth: true},
-		Timeout: 5 * time.Second,
-		TaskDir: td,
-	}
-	_ = srv.registry.Register(spec)
-	srv.engine.Register(spec)
+	registerWebhookTask(t, srv.registry, srv, "auth-hook2", "/hooks/priv2", true)
 
 	// Issue a valid in-memory session token.
 	token := srv.sessions.issue()
@@ -350,11 +330,21 @@ func TestWebhook_AuthTask_AllowsAuthenticatedSession(t *testing.T) {
 
 	// GET with a valid session: should serve index.html (200), NOT be blocked.
 	getReq := httptest.NewRequest(http.MethodGet, "/hooks/priv2", nil)
+	getReq.Header.Set("Accept", "text/html,application/xhtml+xml,*/*")
 	getReq.AddCookie(&http.Cookie{Name: secretsCookie, Value: token})
 	getW := httptest.NewRecorder()
 	h.ServeHTTP(getW, getReq)
 	if getW.Code == http.StatusUnauthorized || getW.Code == http.StatusSeeOther {
 		t.Errorf("authenticated GET: unexpected auth rejection, got %d", getW.Code)
+	}
+
+	// POST with a valid session: should pass through, NOT be blocked.
+	postReq := httptest.NewRequest(http.MethodPost, "/hooks/priv2", nil)
+	postReq.AddCookie(&http.Cookie{Name: secretsCookie, Value: token})
+	postW := httptest.NewRecorder()
+	h.ServeHTTP(postW, postReq)
+	if postW.Code == http.StatusUnauthorized || postW.Code == http.StatusSeeOther {
+		t.Errorf("authenticated POST: unexpected auth rejection, got %d", postW.Code)
 	}
 }
 
