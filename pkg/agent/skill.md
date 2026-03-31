@@ -38,6 +38,7 @@ runtime: js                        # only supported runtime
 trigger:                           # exactly ONE of:
   cron: "0 9 * * *"               #   standard 5-field cron
   webhook: /hooks/<path>           #   HTTP POST trigger (open — no auth)
+  auth: true                       #   optional: require dicode session for webhook GET/POST
   manual: true                     #   UI/API only
   chain:                           #   fires when another task completes
     from: <task-id>
@@ -70,6 +71,21 @@ env:
 - Replay protection: if the sender includes `X-Dicode-Timestamp`, requests older than 5 minutes are rejected
 
 **Always use `"${ENV_VAR}"` syntax** — never write the raw secret value in `task.yaml`. Store it as a dicode secret first, then reference it via env.
+
+### Session-authenticated webhook (internal tools)
+
+When the webhook UI should only be accessible by logged-in dicode users, add `auth: true`:
+
+```yaml
+trigger:
+  webhook: /hooks/my-internal-tool
+  auth: true
+```
+
+- `GET /hooks/…` (serving `index.html`) requires a valid session → redirects to `/?auth=required` if missing
+- `POST /hooks/…` (running the task) requires a valid session → returns `401` JSON if missing
+- `dicode.js` handles 401 automatically: silent refresh via device token, then redirects to login
+- Open webhooks (no `auth: true`) remain fully public — no behaviour change
 
 ## Available JS globals
 

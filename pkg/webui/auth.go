@@ -8,6 +8,66 @@ import (
 	"go.uber.org/zap"
 )
 
+// webhookAuthGuard checks whether the task associated with the requested webhook
+// path has trigger.auth: true. If it does, and the request carries no valid
+// dicode session, the request is rejected (401 JSON for API callers, redirect
+// for browsers). Public webhooks (no auth: true) pass through unchanged.
+func (s *Server) webhookAuthGuard(w http.ResponseWriter, r *http.Request, next http.Handler) {
+	// Find the spec whose webhook path is a prefix-match for r.URL.Path.
+	var requiresAuth bool
+	for _, spec := range s.registry.All() {
+		wp := spec.Trigger.Webhook
+		if wp == "" {
+			continue
+		}
+		if r.URL.Path == wp || strings.HasPrefix(r.URL.Path, wp+"/") {
+			requiresAuth = spec.Trigger.WebhookAuth
+			break
+		}
+	}
+
+	if !requiresAuth {
+		next.ServeHTTP(w, r)
+		return
+	}
+
+	// Task requires a valid dicode session.
+	if s.hasValidSession(r) {
+		next.ServeHTTP(w, r)
+		return
+	}
+
+	// For webhook paths, a GET from a browser includes "text/html" in Accept.
+	// API clients (curl, fetch without custom headers, etc.) typically don't,
+	// so we use that to decide redirect vs 401.
+	isBrowserGet := r.Method == http.MethodGet &&
+		strings.Contains(r.Header.Get("Accept"), "text/html")
+	if !isBrowserGet {
+		jsonErr(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	http.Redirect(w, r, "/?auth=required", http.StatusSeeOther)
+}
+
+// hasValidSession returns true if r carries a valid in-memory session cookie
+// or a device token that can be auto-renewed. Note: when a device token is
+// present the function has a side effect — it consumes the token and issues a
+// fresh one via renewFromDevice.
+func (s *Server) hasValidSession(r *http.Request) bool {
+	if cookie, err := r.Cookie(secretsCookie); err == nil {
+		if s.sessions.valid(cookie.Value) {
+			return true
+		}
+	}
+	if s.dbSessions != nil {
+		if dc, err := r.Cookie(deviceCookie); err == nil {
+			_, ok := s.dbSessions.renewFromDevice(r.Context(), dc.Value, clientIP(r, s.cfg.Server.TrustProxy))
+			return ok
+		}
+	}
+	return false
+}
+
 // requireAuth is a middleware that enforces authentication when server.auth is
 // enabled. API requests receive a 401 JSON response; browser requests are
 // redirected to the login page. Public paths (login endpoint, static assets,

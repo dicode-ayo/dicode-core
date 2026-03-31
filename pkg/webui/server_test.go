@@ -249,6 +249,105 @@ func TestSPA_RunRoute(t *testing.T) {
 	}
 }
 
+func registerWebhookTask(t *testing.T, reg *registry.Registry, srv *Server, id, hookPath string, requireAuth bool) *task.Spec {
+	t.Helper()
+	dir := t.TempDir()
+	td := filepath.Join(dir, id)
+	_ = os.MkdirAll(td, 0755)
+	_ = os.WriteFile(filepath.Join(td, "task.ts"), []byte(`return "ok"`), 0644)
+	// Write a minimal index.html so GET serves the UI.
+	_ = os.WriteFile(filepath.Join(td, "index.html"), []byte(`<!doctype html><html><body>tool</body></html>`), 0644)
+	spec := &task.Spec{
+		ID:      id,
+		Name:    id,
+		Runtime: task.RuntimeDeno,
+		Trigger: task.TriggerConfig{Webhook: hookPath, WebhookAuth: requireAuth},
+		Timeout: 5 * time.Second,
+		TaskDir: td,
+	}
+	_ = reg.Register(spec)
+	srv.engine.Register(spec)
+	return spec
+}
+
+func TestWebhook_PublicTask_NoAuth(t *testing.T) {
+	srv, reg := newTestServer(t)
+	registerWebhookTask(t, reg, srv, "pub-hook", "/hooks/pub", false)
+
+	// GET and POST without a session should not be blocked by session auth.
+	for _, method := range []string{http.MethodGet, http.MethodPost} {
+		req := httptest.NewRequest(method, "/hooks/pub", nil)
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, req)
+		if w.Code == http.StatusUnauthorized || w.Code == http.StatusSeeOther {
+			t.Errorf("public webhook %s: should not require auth, got %d", method, w.Code)
+		}
+	}
+}
+
+func TestWebhook_AuthTask_BlocksUnauthenticated(t *testing.T) {
+	srv := newAuthServer(t, "hunter2")
+	registerWebhookTask(t, srv.registry, srv, "auth-hook", "/hooks/priv", true)
+
+	h := srv.Handler()
+
+	// Unauthenticated GET with browser Accept header → redirect to /?auth=required.
+	getReq := httptest.NewRequest(http.MethodGet, "/hooks/priv", nil)
+	getReq.Header.Set("Accept", "text/html,application/xhtml+xml,*/*")
+	getW := httptest.NewRecorder()
+	h.ServeHTTP(getW, getReq)
+	if getW.Code != http.StatusSeeOther {
+		t.Errorf("unauthenticated browser GET: expected 303, got %d", getW.Code)
+	}
+	if loc := getW.Header().Get("Location"); loc != "/?auth=required" {
+		t.Errorf("unauthenticated browser GET: expected redirect to /?auth=required, got %q", loc)
+	}
+
+	// Unauthenticated GET without browser Accept header → 401 JSON.
+	apiGetReq := httptest.NewRequest(http.MethodGet, "/hooks/priv", nil)
+	apiGetW := httptest.NewRecorder()
+	h.ServeHTTP(apiGetW, apiGetReq)
+	if apiGetW.Code != http.StatusUnauthorized {
+		t.Errorf("unauthenticated API GET: expected 401, got %d", apiGetW.Code)
+	}
+
+	// Unauthenticated POST → 401 JSON.
+	postReq := httptest.NewRequest(http.MethodPost, "/hooks/priv", nil)
+	postW := httptest.NewRecorder()
+	h.ServeHTTP(postW, postReq)
+	if postW.Code != http.StatusUnauthorized {
+		t.Errorf("unauthenticated POST: expected 401, got %d", postW.Code)
+	}
+}
+
+func TestWebhook_AuthTask_AllowsAuthenticatedSession(t *testing.T) {
+	srv := newAuthServer(t, "hunter2")
+	registerWebhookTask(t, srv.registry, srv, "auth-hook2", "/hooks/priv2", true)
+
+	// Issue a valid in-memory session token.
+	token := srv.sessions.issue()
+	h := srv.Handler()
+
+	// GET with a valid session: should serve index.html (200), NOT be blocked.
+	getReq := httptest.NewRequest(http.MethodGet, "/hooks/priv2", nil)
+	getReq.Header.Set("Accept", "text/html,application/xhtml+xml,*/*")
+	getReq.AddCookie(&http.Cookie{Name: secretsCookie, Value: token})
+	getW := httptest.NewRecorder()
+	h.ServeHTTP(getW, getReq)
+	if getW.Code == http.StatusUnauthorized || getW.Code == http.StatusSeeOther {
+		t.Errorf("authenticated GET: unexpected auth rejection, got %d", getW.Code)
+	}
+
+	// POST with a valid session: should pass through, NOT be blocked.
+	postReq := httptest.NewRequest(http.MethodPost, "/hooks/priv2", nil)
+	postReq.AddCookie(&http.Cookie{Name: secretsCookie, Value: token})
+	postW := httptest.NewRecorder()
+	h.ServeHTTP(postW, postReq)
+	if postW.Code == http.StatusUnauthorized || postW.Code == http.StatusSeeOther {
+		t.Errorf("authenticated POST: unexpected auth rejection, got %d", postW.Code)
+	}
+}
+
 func contains(s, sub string) bool {
 	return len(s) >= len(sub) && (s == sub || len(s) > 0 && containsStr(s, sub))
 }
