@@ -59,3 +59,7 @@ spec:
     github-push-webhook:
       ref:
         path: /home/dr14/dicode/examples/github-push-webhook/task.yaml
+
+    webui:
+      ref:
+        path: /home/dr14/dicode/examples/webui/task.yaml

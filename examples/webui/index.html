@@ -46,13 +46,13 @@
 </head>
 <body>
 <header>
-  <a href="/" onclick="navigate('/');return false">&#9889; dicode</a>
+  <a href=".">&#9889; dicode</a>
   <nav>
-    <a href="/" onclick="navigate('/');return false">Tasks</a>
-    <a href="/sources" onclick="navigate('/sources');return false">Sources</a>
-    <a href="/config" onclick="navigate('/config');return false">Config</a>
-    <a href="/secrets" onclick="navigate('/secrets');return false">Secrets</a>
-    <a href="/security" onclick="navigate('/security');return false">Security</a>
+    <a href=".">Tasks</a>
+    <a href="sources">Sources</a>
+    <a href="config">Config</a>
+    <a href="secrets">Secrets</a>
+    <a href="security">Security</a>
   </nav>
   <dc-notif-panel></dc-notif-panel>
 </header>
@@ -61,6 +61,6 @@
 
 <!-- Monaco CDN loader (used by dc-task-detail and dc-config) -->
 <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.js"></script>
-<script type="module" src="/app/app.js"></script>
+<script type="module" src="app/app.js"></script>
 </body>
 </html>
