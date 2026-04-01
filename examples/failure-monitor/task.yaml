@@ -1,0 +1,18 @@
+apiVersion: dicode/v1
+kind: Task
+name: failure-monitor
+description: "Called automatically when any task fails — diagnoses the error using AI."
+runtime: deno
+
+# Wire this up globally in dicode.yaml:
+#
+#   defaults:
+#     on_failure_chain: failure-monitor
+#
+# To disable for a specific task:
+#   on_failure_chain: ""
+
+trigger:
+  manual: true
+
+timeout: 60s
