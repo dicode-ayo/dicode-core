@@ -1,0 +1,28 @@
+apiVersion: dicode/v1
+kind: Task
+name: ai-agent
+description: >
+  Generic AI agent — runs a tool-use loop calling dicode tasks as tools.
+  Works with OpenAI, Ollama, Anthropic, or any OpenAI-compatible provider.
+  Configure the provider via `dicode config set ai.baseURL`, `ai.model`, and
+  `ai.apiKey`. The `skills` param restricts which tasks the agent can call.
+runtime: deno
+
+trigger:
+  webhook: /hooks/ai
+  auth: true
+
+params:
+  - name: prompt
+    type: string
+    required: true
+    description: "What you want the agent to do"
+  - name: skills
+    type: string
+    description: "Comma-separated task IDs this agent can call. Empty = all tasks."
+    default: ""
+
+security:
+  allowed_tasks: ["*"]
+
+timeout: 120s
