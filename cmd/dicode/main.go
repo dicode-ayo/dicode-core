@@ -187,6 +187,8 @@ func buildRuntimes(
 		return nil, nil, fmt.Errorf("init deno runtime: %w", err)
 	}
 	eng := trigger.New(reg, denoRT, log)
+	// Wire the engine into the Deno runtime so tasks can orchestrate other tasks.
+	denoRT.SetEngine(eng)
 	// Wire notification provider and global defaults.
 	if p := cfg.Notifications.Provider; p != nil {
 		eng.SetNotifier(notify.NewNotifier(p.Type, p.URL, p.Topic, p.TokenEnv))

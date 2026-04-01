@@ -22,6 +22,7 @@ import (
 	"github.com/dicode/dicode/pkg/notify"
 	"github.com/dicode/dicode/pkg/registry"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
+	denoserver "github.com/dicode/dicode/pkg/runtime/deno/server"
 	"github.com/dicode/dicode/pkg/task"
 	"github.com/google/uuid"
 	"github.com/robfig/cron/v3"
@@ -327,6 +328,35 @@ func (e *Engine) FireManual(ctx context.Context, taskID string, params map[strin
 	}
 	e.log.Info("manual trigger", zap.String("task", taskID))
 	return e.fireAsync(context.Background(), spec, pkgruntime.RunOptions{Params: params}, "manual")
+}
+
+// WaitRun polls until the run identified by runID reaches a terminal state,
+// then returns a RunResult. Implements denoserver.EngineRunner.
+func (e *Engine) WaitRun(ctx context.Context, runID string) (denoserver.RunResult, error) {
+	for {
+		select {
+		case <-ctx.Done():
+			return denoserver.RunResult{}, ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+		}
+		run, err := e.registry.GetRun(ctx, runID)
+		if err != nil {
+			return denoserver.RunResult{}, err
+		}
+		switch run.Status {
+		case registry.StatusRunning:
+			continue
+		}
+		var returnValue interface{}
+		if run.ReturnValue != "" {
+			_ = json.Unmarshal([]byte(run.ReturnValue), &returnValue)
+		}
+		return denoserver.RunResult{
+			RunID:       runID,
+			Status:      run.Status,
+			ReturnValue: returnValue,
+		}, nil
+	}
 }
 
 // KillRun cancels a running task by its run ID.
