@@ -47,6 +47,19 @@ route(/^\/$/,          () => { app.innerHTML = '<dc-task-list></dc-task-list>'; 
 // Expose navigate globally for any inline hrefs
 window.navigate = navigate;
 
+// ── Relative-href SPA interceptor ─────────────────────────────────────────────
+// Intercept clicks on relative hrefs (no leading /, no protocol) so they trigger
+// a client-side pushState transition instead of a full page reload.
+// Root-relative hrefs (/runs/…) and external links are intentionally left alone.
+document.addEventListener('click', e => {
+  const a = e.target.closest('a[href]');
+  if (!a || a.target === '_blank') return;
+  const href = a.getAttribute('href');
+  if (!href || href.startsWith('/') || href.startsWith('#') || href.includes('://')) return;
+  e.preventDefault();
+  navigate(href === '.' ? '/' : '/' + href);
+});
+
 // ── Boot ─────────────────────────────────────────────────────────────────────
 wsConnect();
 render(location.pathname);

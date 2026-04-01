@@ -427,17 +427,20 @@ func (e *Engine) WebhookHandler() http.Handler {
 		// Exact match — normal webhook execution path.
 		e.mu.Lock()
 		taskID, ok := e.webhooks[path]
-		var assetPath string
+		var assetPath, matchedHook string
 		if !ok {
 			// Prefix match — request is for a static asset belonging to a webhook UI.
 			for hookPath, tid := range e.webhooks {
 				if strings.HasPrefix(path, hookPath+"/") {
 					taskID = tid
+					matchedHook = hookPath
 					assetPath = path[len(hookPath)+1:]
 					ok = true
 					break
 				}
 			}
+		} else {
+			matchedHook = path
 		}
 		e.mu.Unlock()
 
@@ -453,7 +456,28 @@ func (e *Engine) WebhookHandler() http.Handler {
 		}
 
 		// Serve a static asset from the task directory (CSS, JS, images, …).
+		// If the sub-path has no recognised file extension and the task has an
+		// index.html, fall back to serving that — enabling SPA client-side routing
+		// (e.g. /hooks/webui/config, /hooks/webui/tasks/foo all return the SPA shell).
+		// This intentionally applies to any webhook task that ships an index.html,
+		// not just the built-in webui — it is the standard "SPA shell" pattern.
 		if assetPath != "" {
+			// Block path traversal before any extension check; the SPA fallback
+			// must not silently swallow traversal attempts by serving index.html.
+			if strings.Contains(assetPath, "..") {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+			if r.Method == http.MethodGet &&
+				filepath.Ext(assetPath) == "" {
+				indexFile := filepath.Join(spec.TaskDir, "index.html")
+				if data, err := os.ReadFile(indexFile); err == nil {
+					html := injectDicodeSDK(string(data), matchedHook, taskID)
+					w.Header().Set("Content-Type", "text/html; charset=utf-8")
+					_, _ = w.Write([]byte(html))
+					return
+				}
+			}
 			e.serveTaskAsset(w, r, spec.TaskDir, assetPath)
 			return
 		}
@@ -463,7 +487,7 @@ func (e *Engine) WebhookHandler() http.Handler {
 			indexFile := filepath.Join(spec.TaskDir, "index.html")
 			if data, err := os.ReadFile(indexFile); err == nil {
 				e.log.Info("webhook UI served", zap.String("path", path), zap.String("task", taskID))
-				html := injectDicodeSDK(string(data), path, taskID)
+				html := injectDicodeSDK(string(data), matchedHook, taskID)
 				w.Header().Set("Content-Type", "text/html; charset=utf-8")
 				_, _ = w.Write([]byte(html))
 				return
