@@ -20,6 +20,13 @@ type RuntimeConfig struct {
 	Disabled bool `yaml:"disabled,omitempty"`
 }
 
+// DefaultsConfig holds task-level defaults that apply globally unless overridden per-task.
+type DefaultsConfig struct {
+	// OnFailureChain is the task ID to fire whenever any task fails.
+	// Per-task on_failure_chain field can override or disable this.
+	OnFailureChain string `yaml:"on_failure_chain,omitempty"`
+}
+
 type Config struct {
 	Sources       []SourceConfig           `yaml:"sources"`
 	Database      DatabaseConfig           `yaml:"database"`
@@ -28,6 +35,7 @@ type Config struct {
 	Relay         RelayConfig              `yaml:"relay"`
 	Server        ServerConfig             `yaml:"server"`
 	AI            AIConfig                 `yaml:"ai"`
+	Defaults      DefaultsConfig           `yaml:"defaults"`
 	Runtimes      map[string]RuntimeConfig `yaml:"runtimes,omitempty"`
 	LogLevel      string                   `yaml:"log_level"`
 	DataDir       string                   `yaml:"data_dir"`

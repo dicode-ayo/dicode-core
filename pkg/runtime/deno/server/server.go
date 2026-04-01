@@ -333,6 +333,141 @@ func (s *Server) handleConn(conn net.Conn) {
 			default:
 			}
 			reply(req.ID, true, "")
+
+		// --- dicode.* ---
+
+		case "dicode.run_task":
+			if s.engine == nil {
+				reply(req.ID, nil, "dicode.run_task: engine not available")
+				continue
+			}
+			if !s.taskAllowed(req.TaskID) {
+				reply(req.ID, nil, fmt.Sprintf("dicode.run_task: task %q not in security.allowed_tasks", req.TaskID))
+				continue
+			}
+			var callParams map[string]string
+			if len(req.Params) > 0 {
+				_ = json.Unmarshal(req.Params, &callParams)
+			}
+			runID, err := s.engine.FireManual(context.Background(), req.TaskID, callParams)
+			if err != nil {
+				reply(req.ID, nil, err.Error())
+				continue
+			}
+			result, err := s.engine.WaitRun(context.Background(), runID)
+			if err != nil {
+				reply(req.ID, nil, err.Error())
+				continue
+			}
+			reply(req.ID, result, "")
+
+		case "dicode.list_tasks":
+			type taskSummary struct {
+				ID          string      `json:"id"`
+				Name        string      `json:"name"`
+				Description string      `json:"description"`
+				Params      interface{} `json:"params,omitempty"`
+			}
+			all := s.registry.All()
+			summaries := make([]taskSummary, 0, len(all))
+			for _, sp := range all {
+				summaries = append(summaries, taskSummary{
+					ID:          sp.ID,
+					Name:        sp.Name,
+					Description: sp.Description,
+					Params:      sp.Params,
+				})
+			}
+			reply(req.ID, summaries, "")
+
+		case "dicode.get_runs":
+			limit := req.Limit
+			if limit <= 0 {
+				limit = 10
+			}
+			runs, err := s.registry.ListRuns(context.Background(), req.TaskID, limit)
+			if err != nil {
+				reply(req.ID, nil, err.Error())
+				continue
+			}
+			reply(req.ID, runs, "")
+
+		case "dicode.get_config":
+			if req.Section != "ai" {
+				reply(req.ID, nil, fmt.Sprintf("dicode.get_config: unsupported section %q (only \"ai\" is supported)", req.Section))
+				continue
+			}
+			reply(req.ID, map[string]string{
+				"baseURL": s.aiBaseURL,
+				"model":   s.aiModel,
+				"apiKey":  s.aiAPIKey,
+			}, "")
+
+		// --- mcp.* ---
+
+		case "mcp.list_tools":
+			if !s.mcpAllowed(req.MCPName) {
+				reply(req.ID, nil, fmt.Sprintf("mcp.list_tools: %q not in security.allowed_mcp", req.MCPName))
+				continue
+			}
+			port, err := s.getMCPPort(req.MCPName)
+			if err != nil {
+				reply(req.ID, nil, err.Error())
+				continue
+			}
+			_ = port // MCP client not yet implemented; return empty list
+			reply(req.ID, []interface{}{}, "")
+
+		case "mcp.call":
+			if !s.mcpAllowed(req.MCPName) {
+				reply(req.ID, nil, fmt.Sprintf("mcp.call: %q not in security.allowed_mcp", req.MCPName))
+				continue
+			}
+			port, err := s.getMCPPort(req.MCPName)
+			if err != nil {
+				reply(req.ID, nil, err.Error())
+				continue
+			}
+			_ = port // MCP client not yet implemented
+			reply(req.ID, nil, "mcp client not yet implemented")
 		}
 	}
+}
+
+// taskAllowed reports whether the running task's security config permits calling taskID.
+func (s *Server) taskAllowed(taskID string) bool {
+	if s.spec == nil || s.spec.Security == nil {
+		return false
+	}
+	for _, allowed := range s.spec.Security.AllowedTasks {
+		if allowed == "*" || allowed == taskID {
+			return true
+		}
+	}
+	return false
+}
+
+// mcpAllowed reports whether the running task's security config permits accessing the named MCP server.
+func (s *Server) mcpAllowed(name string) bool {
+	if s.spec == nil || s.spec.Security == nil {
+		return false
+	}
+	for _, allowed := range s.spec.Security.AllowedMCP {
+		if allowed == "*" || allowed == name {
+			return true
+		}
+	}
+	return false
+}
+
+// getMCPPort looks up the mcp_port of a daemon task by its task ID.
+func (s *Server) getMCPPort(taskID string) (int, error) {
+	spec, ok := s.registry.Get(taskID)
+	if !ok {
+		return 0, fmt.Errorf("mcp: task %q not found", taskID)
+	}
+	if spec.MCPPort == 0 {
+		return 0, fmt.Errorf("mcp: task %q does not declare mcp_port", taskID)
+	}
+	return spec.MCPPort, nil
 }

@@ -189,6 +189,16 @@ func buildRuntimes(
 	eng := trigger.New(reg, denoRT, log)
 	// Wire the engine into the Deno runtime so tasks can orchestrate other tasks.
 	denoRT.SetEngine(eng)
+	// Wire AI config so tasks can call dicode.get_config("ai").
+	aiAPIKey := cfg.AI.APIKey
+	if aiAPIKey == "" && cfg.AI.APIKeyEnv != "" {
+		aiAPIKey = os.Getenv(cfg.AI.APIKeyEnv)
+	}
+	denoRT.SetAIConfig(cfg.AI.BaseURL, cfg.AI.Model, aiAPIKey)
+	// Wire config-level on_failure_chain default.
+	if cfg.Defaults.OnFailureChain != "" {
+		eng.SetDefaultsOnFailureChain(cfg.Defaults.OnFailureChain)
+	}
 	// Wire notification provider and global defaults.
 	if p := cfg.Notifications.Provider; p != nil {
 		eng.SetNotifier(notify.NewNotifier(p.Type, p.URL, p.Topic, p.TokenEnv))
