@@ -103,20 +103,36 @@ type NotifyConfig struct {
 	OnFailure *bool `yaml:"on_failure,omitempty" json:"on_failure,omitempty"`
 }
 
+// SecurityConfig controls which other tasks and MCP servers this task can access.
+type SecurityConfig struct {
+	// AllowedTasks lists task IDs this task may invoke via dicode.run_task().
+	// Use "*" to allow all tasks. Empty slice denies all.
+	AllowedTasks []string `yaml:"allowed_tasks,omitempty" json:"allowed_tasks,omitempty"`
+	// AllowedMCP lists MCP daemon task IDs this task may call via mcp.call().
+	// Use "*" to allow all. Empty slice denies all.
+	AllowedMCP []string `yaml:"allowed_mcp,omitempty" json:"allowed_mcp,omitempty"`
+}
+
 // Spec is parsed from task.yaml.
 type Spec struct {
-	Name        string        `yaml:"name"        json:"name"`
-	Description string        `yaml:"description" json:"description"`
-	Version     string        `yaml:"version"     json:"version"`
-	Author      string        `yaml:"author,omitempty" json:"author,omitempty"`
-	Runtime     Runtime       `yaml:"runtime"     json:"runtime"`
-	Docker      *DockerConfig `yaml:"docker,omitempty" json:"docker,omitempty"`
-	Trigger     TriggerConfig `yaml:"trigger"     json:"trigger"`
-	Params      []Param       `yaml:"params,omitempty" json:"params,omitempty"`
-	Env         []string      `yaml:"env,omitempty" json:"env,omitempty"`
-	FS          []FSEntry     `yaml:"fs,omitempty"  json:"fs,omitempty"`
-	Timeout     time.Duration `yaml:"timeout"     json:"timeout"`
-	Notify      *NotifyConfig `yaml:"notify,omitempty" json:"notify,omitempty"`
+	Name        string          `yaml:"name"        json:"name"`
+	Description string          `yaml:"description" json:"description"`
+	Version     string          `yaml:"version"     json:"version"`
+	Author      string          `yaml:"author,omitempty" json:"author,omitempty"`
+	Runtime     Runtime         `yaml:"runtime"     json:"runtime"`
+	Docker      *DockerConfig   `yaml:"docker,omitempty" json:"docker,omitempty"`
+	Trigger     TriggerConfig   `yaml:"trigger"     json:"trigger"`
+	Params      []Param         `yaml:"params,omitempty" json:"params,omitempty"`
+	Env         []string        `yaml:"env,omitempty" json:"env,omitempty"`
+	FS          []FSEntry       `yaml:"fs,omitempty"  json:"fs,omitempty"`
+	Timeout     time.Duration   `yaml:"timeout"     json:"timeout"`
+	Notify      *NotifyConfig   `yaml:"notify,omitempty" json:"notify,omitempty"`
+	Security    *SecurityConfig `yaml:"security,omitempty" json:"security,omitempty"`
+	// MCPPort declares that this daemon task exposes an MCP server on the given port.
+	MCPPort int `yaml:"mcp_port,omitempty" json:"mcp_port,omitempty"`
+	// OnFailureChain overrides the global defaults.on_failure_chain for this task.
+	// nil = inherit global default, "" = disable, "task-id" = custom target.
+	OnFailureChain *string `yaml:"on_failure_chain,omitempty" json:"on_failure_chain,omitempty"`
 
 	// TaskDir is the directory path of the task in the repo (not stored in YAML).
 	TaskDir string `yaml:"-" json:"-"`
