@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
@@ -299,11 +298,6 @@ func (s *Server) Handler() http.Handler {
 	r.Use(middleware.Logger)
 	r.Use(securityHeaders)
 
-	// Always-public: static assets, service worker (needed to render login page).
-	appFS, _ := fs.Sub(staticFS, "static")
-	r.Handle("/app/*", http.FileServer(http.FS(appFS)))
-	r.Get("/sw.js", s.handleServiceWorker)
-
 	// Auth endpoints — always public (login flow must be reachable without session).
 	r.Post("/api/auth/login", s.apiSecretsUnlock)
 	r.Post("/api/auth/refresh", s.apiAuthRefresh)
@@ -408,8 +402,10 @@ func (s *Server) Handler() http.Handler {
 			r.With(s.requireAPIKey).Mount("/mcp", mcpSrv.Handler())
 		}
 
-		// SPA catch-all — serve index.html for all unmatched GET routes
-		r.Get("/*", s.serveSPA)
+		// Redirect root and unmatched GET routes to the webui webhook task.
+		r.Get("/*", func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "/hooks/webui", http.StatusFound)
+		})
 	})
 
 	return r
@@ -469,17 +465,6 @@ func taskIDParam(r *http.Request) string {
 	return id
 }
 
-// serveSPA serves the SPA index.html for all unmatched GET routes.
-func (s *Server) serveSPA(w http.ResponseWriter, r *http.Request) {
-	b, err := staticFS.ReadFile("static/app/index.html")
-	if err != nil {
-		http.Error(w, "SPA not found", http.StatusNotFound)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write(b) //nolint:errcheck
-}
-
 // handleRunResult serves only the structured output of a run (bare page, no chrome).
 func (s *Server) handleRunResult(w http.ResponseWriter, r *http.Request) {
 	runID := chi.URLParam(r, "runID")
@@ -488,24 +473,17 @@ func (s *Server) handleRunResult(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if run.OutputContentType == "" {
-		http.NotFound(w, r)
+	if run.OutputContentType != "" {
+		w.Header().Set("Content-Type", run.OutputContentType+"; charset=utf-8")
+		_, _ = w.Write([]byte(run.OutputContent))
 		return
 	}
-	w.Header().Set("Content-Type", run.OutputContentType+"; charset=utf-8")
-	_, _ = w.Write([]byte(run.OutputContent))
-}
-
-// handleServiceWorker serves the Service Worker JS file.
-func (s *Server) handleServiceWorker(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/javascript")
-	w.Header().Set("Service-Worker-Allowed", "/")
-	b, err := staticFS.ReadFile("static/sw.js")
-	if err != nil {
-		http.Error(w, "sw.js not found", http.StatusNotFound)
+	if run.ReturnValue != "" {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_, _ = w.Write([]byte(run.ReturnValue))
 		return
 	}
-	w.Write(b) //nolint:errcheck
+	http.NotFound(w, r)
 }
 
 // apiGetConfigRaw returns the raw content of dicode.yaml.

@@ -46,7 +46,7 @@ func (s *Server) webhookAuthGuard(w http.ResponseWriter, r *http.Request, next h
 		jsonErr(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	http.Redirect(w, r, "/?auth=required", http.StatusSeeOther)
+	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
 // hasValidSession returns true if r carries a valid in-memory session cookie
@@ -54,7 +54,7 @@ func (s *Server) webhookAuthGuard(w http.ResponseWriter, r *http.Request, next h
 // present the function has a side effect — it consumes the token and issues a
 // fresh one via renewFromDevice.
 func (s *Server) hasValidSession(r *http.Request) bool {
-	if cookie, err := r.Cookie(secretsCookie); err == nil {
+	if cookie, err := r.Cookie(sessionCookie); err == nil {
 		if s.sessions.valid(cookie.Value) {
 			return true
 		}
@@ -110,7 +110,7 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 			jsonErr(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		http.Redirect(w, r, "/?auth=required", http.StatusSeeOther)
+		http.Redirect(w, r, "/", http.StatusSeeOther)
 	})
 }
 
@@ -162,8 +162,9 @@ func securityHeaders(next http.Handler) http.Handler {
 		h.Set("Content-Security-Policy",
 			"default-src 'self'; "+
 				"script-src 'self' https://cdn.jsdelivr.net https://esm.sh; "+
-				"style-src 'self' 'unsafe-inline'; "+
-				"connect-src 'self' ws: wss: https://esm.sh; "+
+				"style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "+
+				"connect-src 'self' ws: wss: https://esm.sh https://cdn.jsdelivr.net; "+
+				"worker-src 'self' blob:; "+
 				"font-src 'self' https://cdn.jsdelivr.net; "+
 				"img-src 'self' data:;",
 		)
@@ -172,13 +173,13 @@ func securityHeaders(next http.Handler) http.Handler {
 }
 
 // isPublicPath returns true for paths that must remain accessible without a
-// session: static assets, the service worker, and the login/unlock endpoints.
+// session: the login/unlock endpoints, the webhook UI, and the dicode SDK.
 func isPublicPath(path string) bool {
 	switch {
 	case path == "/api/auth/login",
 		path == "/api/auth/refresh",
-		strings.HasPrefix(path, "/app/"),
-		path == "/sw.js":
+		path == "/dicode.js",
+		strings.HasPrefix(path, "/hooks/"):
 		return true
 	}
 	return false

@@ -1,6 +1,6 @@
 # Implementation Plan
 
-> Last updated: 2026-03-29
+> Last updated: 2026-04-01
 
 This document is the ordered build roadmap. Each milestone produces something runnable. Work top-to-bottom; later milestones depend on earlier ones.
 
@@ -14,7 +14,9 @@ This document is the ordered build roadmap. Each milestone produces something ru
 
 **TaskSet Architecture ✅ Complete.** Hierarchical task composition (`kind:TaskSet`, `kind:Config`, `kind:Task`), namespace-scoped IDs (`infra/backend/deploy`), 6-level override precedence, dev mode API (`PATCH /api/sources/:name/dev`), MCP server with `list_tasks`/`get_task`/`run_task`/`list_sources`/`switch_dev_mode` tools, Sources web UI page, task list namespace grouping, examples updated to TaskSet model.
 
-**Webhook Task UIs ✅ Complete.** Webhook tasks can include an `index.html` to serve a custom browser UI. The `dicode.js` SDK is auto-injected (with `<base href>` + meta tags), providing three complexity levels: zero-JS plain forms, auto-enhanced `<form data-dicode>` with log streaming, and full `dicode.execute()` API. Assets (CSS, JS, images) served sandboxed from the task directory. ANSI escape codes rendered in the SPA run detail view via `ansi-to-html`. Two examples ship: `webhook-form` (text transformer, Level 2) and `webhook-dashboard` (system info, Level 3).
+**Webhook Task UIs ✅ Complete.** Webhook tasks can include an `index.html` to serve a custom browser UI. The `dicode.js` SDK is auto-injected (with `<base href>` + meta tags), providing three complexity levels: zero-JS plain forms, auto-enhanced `<form data-dicode>` with log streaming, and full `dicode.execute()` API. Assets (CSS, JS, images) served sandboxed from the task directory. ANSI escape codes rendered in the SPA run detail view via `ansi-to-html`.
+
+**Web UI as Webhook Task ✅ Complete.** The dicode dashboard SPA (`examples/webui/`) is now a self-contained webhook task served at `/hooks/webui`. The Go binary no longer embeds frontend assets. Engine SPA fallback serves `index.html` for any extensionless sub-path under a webhook with an `index.html`, enabling client-side routing for arbitrary webhook UIs. Auth enforced client-side via `dc-auth-overlay`. `handleRunResult` serves both HTML output and plain return values. Path-traversal guard added before extension check.
 
 ---
 
@@ -827,3 +829,75 @@ Milestones 0–7 are the **MVP** — ✅ all complete. Everything after is addit
 - Nginx example daemon task
 
 **Test coverage**: 62+ tests across db, secrets, source/local, registry, runtime/js, trigger, and webui packages.
+
+---
+
+## Next: AI-Native Tasks & Agent Orchestration
+
+> Ideas captured 2026-04-01 — not yet planned in detail
+
+### Agent as a trigger / agent runtime
+
+The core idea: a task whose "runtime" is an AI agent rather than a script. Instead of running TypeScript, the engine gives the agent a prompt, a set of skills (the agent skill doc), optional MCP server access, and lets it act autonomously.
+
+Two shapes being considered:
+
+**Shape A — `runtime: agent` task**
+```yaml
+name: watch-and-fix-flaky-tests
+runtime: agent
+trigger:
+  webhook: /hooks/fix-tests
+agent:
+  prompt: |
+    A CI run just failed. Look at the failing tests, identify the root cause,
+    fix the code, and open a PR. If you cannot fix it confidently, open an issue
+    with your analysis instead.
+  skills: [git, github]
+  mcp:
+    - url: http://localhost:8080/mcp   # dicode's own MCP server
+```
+The engine spawns a Claude Code (or compatible) subprocess, injects the prompt + skills + MCP config, and streams the output as run logs. The task finishes when the agent exits.
+
+**Shape B — orchestrator task calling agent sub-tasks**
+A regular deno task that uses `dicode.run('agent-task', { prompt: '...' })` to invoke agent tasks as sub-runs. The parent task coordinates; the agent sub-tasks do the work. Enables retry, fan-out, and conditional branching around AI actions.
+
+### Security model for agent tasks
+
+Agent tasks have broader access than script tasks — they can call tools, read files, make API calls. Needs scoping:
+
+- **Allowed MCP endpoints** — per-task allowlist of MCP servers the agent can connect to (default: none)
+- **Allowed task execution** — can the agent trigger other tasks? Which ones?
+- **Dynamic MCP** — agents discover available tools from a registry rather than a static list; scoped by namespace (e.g. `infra/*` tasks only)
+- **Audit trail** — every tool call logged as a structured run log entry, not just raw output
+
+### Self-healing / watch-and-fix pattern
+
+A daemon task that watches run results and fires an agent sub-task when a run fails:
+
+```yaml
+name: auto-fix-daemon
+runtime: deno
+trigger:
+  daemon: true
+```
+```typescript
+// Watches run:finished events via WebSocket, fires agent on failure
+for await (const event of dicode.stream('run:finished')) {
+  if (event.status === 'failure') {
+    await dicode.run('fix-task-agent', { taskId: event.taskId, runId: event.runId });
+  }
+}
+```
+
+The agent task gets the failed run logs as context and attempts a fix.
+
+### What needs to be built
+
+| Component | Description |
+|---|---|
+| `pkg/runtime/agent/` | Agent runtime: spawns Claude Code subprocess, streams output, handles tool call audit |
+| `task.yaml` agent fields | `agent.prompt`, `agent.skills`, `agent.mcp[]`, `agent.allowed_tasks[]` |
+| MCP scope enforcement | Per-task MCP allowlist enforced by a proxy in the engine |
+| `dicode.stream()` global | WebSocket subscription global for daemon tasks watching events |
+| Agent skill update | Add `runtime: agent` docs + security notes to `pkg/agent/skill.md` |

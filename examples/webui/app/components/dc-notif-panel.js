@@ -83,7 +83,8 @@ class DcNotifPanel extends LitElement {
 
   _registerSW() {
     if (!('serviceWorker' in navigator)) return;
-    navigator.serviceWorker.register('/sw.js', { scope: '/' })
+    const base = document.querySelector('base')?.getAttribute('href') || '/';
+    navigator.serviceWorker.register(base + 'sw.js', { scope: base })
       .then(reg => { this._swReg = reg; })
       .catch(() => {});
   }

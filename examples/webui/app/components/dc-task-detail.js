@@ -83,7 +83,15 @@ class DcTaskDetail extends LitElement {
     });
     this._offFinished = wsOn('run:finished', d => {
       if (d.taskID !== this.taskid) return;
-      this._runs = (this._runs || []).map(r => r.ID === d.runID ? { ...r, Status: d.status } : r);
+      const finishedAt = new Date().toISOString();
+      const existing = (this._runs || []).find(r => r.ID === d.runID);
+      if (existing) {
+        this._runs = this._runs.map(r => r.ID === d.runID
+          ? { ...r, Status: d.status, FinishedAt: finishedAt, OutputContentType: d.outputContentType, ReturnValue: d.returnValue }
+          : r);
+      } else {
+        this._runs = [{ ID: d.runID, Status: d.status, StartedAt: finishedAt, FinishedAt: finishedAt, OutputContentType: d.outputContentType, ReturnValue: d.returnValue }, ...(this._runs || [])];
+      }
     });
   }
 
@@ -315,7 +323,7 @@ class DcTaskDetail extends LitElement {
             <tr><td colspan="5" style="text-align:center;color:#888">No runs yet.</td></tr>
           ` : this._runs.map(r => html`
             <tr>
-              <td><a href="/runs/${r.ID}" @click=${e => { e.preventDefault(); navigate('/runs/' + r.ID); }}>${r.ID.slice(0,8)}</a></td>
+              <td><a href="runs/${r.ID}">${r.ID.slice(0,8)}</a></td>
               <td><span class="badge badge-${r.Status}">${r.Status}</span></td>
               <td class="meta">${fmtTime(r.StartedAt)}</td>
               <td class="meta">${fmtDuration(r.StartedAt, r.FinishedAt)}</td>
