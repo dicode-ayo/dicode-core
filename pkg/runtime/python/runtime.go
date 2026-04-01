@@ -49,16 +49,30 @@ import (
 	"go.uber.org/zap"
 )
 
-//go:embed sdk/sdk.py
+//go:embed sdk/dicode_sdk.py
 var sdkContent string
 
 // Runtime is the ManagedRuntime implementation for Python+uv.
 // It manages the uv binary lifecycle and creates socket-bridge Executors.
 type Runtime struct {
-	reg     *registry.Registry
-	secrets secrets.Chain
-	db      db.DB
-	log     *zap.Logger
+	reg       *registry.Registry
+	secrets   secrets.Chain
+	db        db.DB
+	log       *zap.Logger
+	engine    denoserver.EngineRunner
+	aiBaseURL string
+	aiModel   string
+	aiAPIKey  string
+}
+
+// SetEngine configures the engine runner used for dicode.run_task calls.
+func (rt *Runtime) SetEngine(e denoserver.EngineRunner) { rt.engine = e }
+
+// SetAIConfig configures the AI provider details passed to tasks via dicode.get_config.
+func (rt *Runtime) SetAIConfig(baseURL, model, apiKey string) {
+	rt.aiBaseURL = baseURL
+	rt.aiModel = model
+	rt.aiAPIKey = apiKey
 }
 
 // New creates a Python Runtime manager.
@@ -100,22 +114,30 @@ func (rt *Runtime) Install(_ context.Context, version string) error {
 // at binaryPath, connected to the dicode socket-bridge SDK.
 func (rt *Runtime) NewExecutor(binaryPath string) pkgruntime.Executor {
 	return &executor{
-		uvPath:  binaryPath,
-		reg:     rt.reg,
-		secrets: rt.secrets,
-		db:      rt.db,
-		log:     rt.log,
+		uvPath:    binaryPath,
+		reg:       rt.reg,
+		secrets:   rt.secrets,
+		db:        rt.db,
+		log:       rt.log,
+		engine:    rt.engine,
+		aiBaseURL: rt.aiBaseURL,
+		aiModel:   rt.aiModel,
+		aiAPIKey:  rt.aiAPIKey,
 	}
 }
 
 // --- executor ---
 
 type executor struct {
-	uvPath  string
-	reg     *registry.Registry
-	secrets secrets.Chain
-	db      db.DB
-	log     *zap.Logger
+	uvPath    string
+	reg       *registry.Registry
+	secrets   secrets.Chain
+	db        db.DB
+	log       *zap.Logger
+	engine    denoserver.EngineRunner
+	aiBaseURL string
+	aiModel   string
+	aiAPIKey  string
 }
 
 // Execute implements runtime.Executor.
@@ -162,7 +184,7 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 
 	mergedParams := mergeParams(spec.Params, opts.Params)
 
-	srv := denoserver.New(runID, spec.ID, e.reg, e.db, mergedParams, opts.Input, e.log, spec, nil, "", "", "")
+	srv := denoserver.New(runID, spec.ID, e.reg, e.db, mergedParams, opts.Input, e.log, spec, e.engine, e.aiBaseURL, e.aiModel, e.aiAPIKey)
 	socketPath, err := srv.Start(execCtx)
 	if err != nil {
 		status = registry.StatusFailure
