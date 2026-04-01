@@ -1,0 +1,21 @@
+apiVersion: dicode/v1
+kind: Task
+name: task-creator
+description: "Describe a task in plain language — AI writes the task.yaml and task.ts for you."
+runtime: deno
+
+trigger:
+  webhook: /hooks/task-creator
+  auth: true
+
+params:
+  - name: description
+    type: string
+    required: true
+    description: "What should the task do? (plain language)"
+  - name: task_id
+    type: string
+    required: true
+    description: "Slug for the new task, e.g. send-weekly-report"
+
+timeout: 120s
