@@ -228,12 +228,22 @@ timeout: 120s   # default: 60s for JS tasks; no timeout for Docker/daemon
 **Trigger options** — exactly one must be set:
 
 | Type | Example | Description |
-|------|---------|-------------|
+| --- | --- | --- |
 | `cron` | `"0 9 * * *"` | Standard 5-field cron expression |
 | `webhook` | `"/hooks/my-task"` | HTTP POST to this path triggers a run |
 | `manual` | `true` | Only triggerable from UI or API |
 | `chain` | `from: other-task` | Triggered when another task completes |
 | `daemon` | `true` | Starts on app start, restarted on exit |
+
+**Additional task.yaml fields:**
+
+```yaml
+on_failure_chain: failure-monitor   # override global default; "" to disable
+mcp_port: 3000                      # declare MCP server port (daemon tasks only)
+security:
+  allowed_tasks: ["*"]              # tasks this script may call via dicode.run_task()
+  allowed_mcp: ["github-mcp"]       # MCP daemon tasks this script may call via mcp.call()
+```
 
 **Docker runtime** — run containers instead of JS scripts. Live log streaming, kill support, daemon-compatible:
 
@@ -333,33 +343,59 @@ await notify.send("API is DOWN", {
 
 Uses the notification provider configured in `dicode.yaml`. No configuration needed in the task itself.
 
-#### `dicode` — communicate with the orchestrator
+#### `dicode` — task orchestration (agent tasks)
 
-```javascript
-// Report intermediate progress (streamed live to the WebUI run log)
-dicode.progress("processing email 42 of 200", { done: 42, total: 200 })
+Run and await other tasks, inspect the registry, and read AI provider config. Requires `security.allowed_tasks` in `task.yaml` — tasks opt in to which other tasks they can call.
 
-// Send a notification through the configured provider
-await dicode.notify("Unusual spike detected", { priority: "high" })
+```typescript
+// Run another task and await its result
+const result = await dicode.run_task("send-report", { channel: "#ops" })
+// result: { runID, status, returnValue }
 
-// Imperatively trigger another task (fire-and-forget)
-// Different from chain: this task controls when and whether to fire
-await dicode.trigger("send-alert", { reason: "threshold exceeded", value: 99 })
+// List all registered tasks (for building AI tool schemas)
+const tasks = await dicode.list_tasks()
+// [{ id, name, description, params }]
 
-// Query orchestrator state
-const running = await dicode.isRunning("backup-task")
-if (running) {
-  log.info("backup in progress, skipping duplicate run")
-  return
-}
+// Fetch recent run history
+const runs = await dicode.get_runs("send-report", { limit: 5 })
 
-// Human approval gate — suspends this run, sends actionable notification,
-// resumes when user responds (north star feature)
-const decision = await dicode.ask("Deploy to production?", {
-  timeout: "30m",
-  options: ["approve", "reject"]
-})
-if (decision !== "approve") return
+// Get AI provider config (resolved server-side — API key never exposed to git)
+const ai = await dicode.get_config("ai")
+// { baseURL, model, apiKey }
+```
+
+```yaml
+# task.yaml — must declare which tasks this task is allowed to call
+security:
+  allowed_tasks:
+    - "send-report"   # specific task ID
+    - "*"             # or allow all
+```
+
+#### `mcp` — call MCP server tools
+
+Connect to any MCP daemon task (Docker/Python/Deno process that exposes an MCP server on a declared port).
+
+```typescript
+const tools  = await mcp.list_tools("github-mcp")
+const result = await mcp.call("github-mcp", "search_repositories", { query: "dicode" })
+```
+
+```yaml
+# task.yaml
+security:
+  allowed_mcp:
+    - "github-mcp"   # task ID of the daemon that declares mcp_port
+
+# The MCP daemon task itself:
+# name: github-mcp
+# runtime: docker
+# trigger:
+#   daemon: true
+# mcp_port: 3000
+# docker:
+#   image: ghcr.io/github/github-mcp-server
+#   ports: ["3000:3000"]
 ```
 
 ### Full example
@@ -464,6 +500,11 @@ ai:
   # model: qwen2.5-coder:7b
   # base_url: http://localhost:11434/v1
   # api_key_env: ""  # not needed
+
+defaults:
+  on_failure_chain: failure-monitor       # task to call whenever any task fails
+                                          # receives input: { taskID, runID, status, output }
+                                          # override per task with on_failure_chain: "" to disable
 
 log_level: info                           # "debug", "info", "warn", "error"
 data_dir: ~/.dicode                       # where to store repo clones, sqlite db, etc.

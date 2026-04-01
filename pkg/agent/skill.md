@@ -13,8 +13,8 @@ Follow this order every time — no exceptions:
 4. `get_example_tasks` — use as style and pattern reference
 5. Write files via `write_task_file`:
    - `<task-id>/task.yaml` — trigger, params, env declarations
-   - `<task-id>/task.js`   — task logic
-   - `<task-id>/task.test.js` — unit tests (required, no exceptions)
+   - `<task-id>/task.ts`   — task logic (TypeScript for `runtime: deno`; use `task.py` for `runtime: python`)
+   - `<task-id>/task.test.ts` — unit tests (required, no exceptions)
 6. `validate_task("<task-id>")` — fix ALL errors before proceeding
 7. `test_task("<task-id>")` — ALL tests must pass before proceeding
 8. `dry_run_task("<task-id>")` — verify HTTP calls and secret resolution
@@ -23,8 +23,8 @@ Follow this order every time — no exceptions:
 ## Hard rules
 
 - **Never commit** if `validate_task` or `test_task` return any errors
-- **Always write `task.test.js`** — a task without tests will not be committed
-- `task.js` **must return a JSON-serializable value** — required for chain triggers
+- **Always write `task.test.ts`** — a task without tests will not be committed
+- `task.ts` **must return a JSON-serializable value** — required for chain triggers
 - **Never hardcode secrets** — use `env.VARIABLE_NAME`; declare in `task.yaml env:`
 - **One task, one responsibility** — keep tasks focused and composable
 - **Output under 1MB** — tasks are not a data pipeline; keep return values small
@@ -34,7 +34,7 @@ Follow this order every time — no exceptions:
 ```yaml
 name: <unique-kebab-case-id>       # must match the directory name
 description: <what this task does>
-runtime: js                        # only supported runtime
+runtime: deno                      # deno (default), python, docker
 trigger:                           # exactly ONE of:
   cron: "0 9 * * *"               #   standard 5-field cron
   webhook: /hooks/<path>           #   HTTP POST trigger (open — no auth)
@@ -43,6 +43,7 @@ trigger:                           # exactly ONE of:
   chain:                           #   fires when another task completes
     from: <task-id>
     on: success                    #   success | failure | always
+  daemon: true                     #   starts on app start, restarts on exit
 env:                               # list ALL env vars the script accesses
   - SLACK_TOKEN
   - GMAIL_TOKEN
@@ -51,6 +52,15 @@ params:                            # optional user-configurable inputs
     type: string
     default: "#general"
 timeout: 60s                       # default: 60s
+
+# Agent / orchestration fields (optional):
+on_failure_chain: <task-id>        # task to invoke when this task fails; "" disables global default
+mcp_port: 3000                     # declare MCP server port (daemon tasks only)
+security:
+  allowed_tasks:                   # tasks this script may call via dicode.run_task()
+    - "*"                          # use "*" to allow all, or list specific IDs
+  allowed_mcp:                     # MCP daemon task IDs this script may access via mcp.call()
+    - "github-mcp"
 ```
 
 ### Protected webhook trigger (HMAC authentication)
@@ -87,16 +97,22 @@ trigger:
 - `dicode.js` handles 401 automatically: silent refresh via device token, then redirects to login
 - Open webhooks (no `auth: true`) remain fully public — no behaviour change
 
-## Available JS globals
+## Available globals (Deno runtime)
 
-### `http` — outbound HTTP only (no fetch, no XMLHttpRequest)
-```javascript
-const res = await http.get(url, { headers, params })
-const res = await http.post(url, { headers, body })
-const res = await http.put(url, { headers, body })
-const res = await http.patch(url, { headers, body })
-const res = await http.delete(url, { headers })
-// res: { status: number, body: any (parsed JSON or string), headers: object }
+### HTTP — use native `fetch` (Deno)
+```typescript
+const res = await fetch("https://api.example.com/data", {
+  method: "POST",
+  headers: { "Authorization": `Bearer ${env.MY_TOKEN}`, "Content-Type": "application/json" },
+  body: JSON.stringify({ key: "value" }),
+})
+const data = await res.json()
+```
+
+### npm packages — import inline
+```typescript
+import OpenAI from "npm:openai"
+import { z } from "npm:zod"
 ```
 
 ### `kv` — persistent key-value store (survives restarts, scoped to task)
@@ -124,7 +140,7 @@ const token = env.SLACK_TOKEN   // undefined if not declared in task.yaml
 ```
 
 ### `input` — incoming data (chain tasks and webhook tasks)
-```javascript
+```typescript
 // Chain trigger: upstream task's return value
 const data = input.emails
 
@@ -135,14 +151,37 @@ const repo   = input.repository   // nested objects fully available
 
 For webhook tasks the raw POST body is parsed and available as `input`. Query-string parameters are also available via `params`.
 
+### `dicode` — task orchestration (requires security.allowed_tasks)
+```typescript
+// Run another task and await its result
+const result = await dicode.run_task("send-report", { channel: "#ops" })
+// result: { runID, status, returnValue }
+
+// List all registered tasks (useful for building AI tool schemas)
+const tasks = await dicode.list_tasks()
+
+// Get recent run history
+const runs = await dicode.get_runs("send-report", { limit: 5 })
+
+// Get AI provider config (API key resolved server-side)
+const ai = await dicode.get_config("ai")
+// { baseURL, model, apiKey }
+```
+
+### `mcp` — MCP server tools (requires security.allowed_mcp)
+```typescript
+const tools  = await mcp.list_tools("github-mcp")
+const result = await mcp.call("github-mcp", "search_repositories", { query: "dicode" })
+```
+
 ### `return` — pass data to downstream chain tasks
-```javascript
+```typescript
 return { count: 3, ids: ["a", "b", "c"] }   // must be JSON-serializable
 ```
 
-## task.test.js format
+## task.test.ts format
 
-```javascript
+```typescript
 // Each test() gets a fresh mock state — mocks don't leak between tests.
 
 test("description of happy path", async () => {
@@ -194,7 +233,6 @@ test("edge case: empty result", async () => {
 
 | Mistake | Correct approach |
 | --- | --- |
-| `fetch("https://...")` | `await http.get("https://...")` |
 | `process.env.SLACK_TOKEN` | `env.SLACK_TOKEN` |
 | Accessing env var not in `task.yaml env:` | Add it to `env:` list |
 | Returning `new Date()` | Return `date.toISOString()` |
@@ -204,8 +242,11 @@ test("edge case: empty result", async () => {
 | Large return values (>1MB) | Keep returns small; use external storage for large data |
 | `webhook_secret: "abc123"` (hardcoded) | `webhook_secret: "${MY_SECRET}"` + add to `env:` list |
 | Forgetting `env:` entry for `webhook_secret` | Every `${VAR}` in task.yaml needs a matching `env:` entry |
-| Trying to verify the signature in `task.js` | dicode verifies it automatically — the script only runs if the signature is valid |
+| Trying to verify the signature in `task.ts` | dicode verifies it automatically — the script only runs if the signature is valid |
 | Using `webhook_secret` on a public form endpoint | Only add `webhook_secret` when the sender can set `X-Hub-Signature-256`; browser forms cannot sign requests |
+| Calling `dicode.run_task()` without `security.allowed_tasks` | Add `security.allowed_tasks` to task.yaml; calls are blocked otherwise |
+| Calling `mcp.call()` without `security.allowed_mcp` | Add `security.allowed_mcp` listing the daemon task IDs |
+| Creating task.js instead of task.ts | Use TypeScript (`.ts`) for Deno runtime tasks |
 
 ## Protected webhook — worked example
 
@@ -214,7 +255,7 @@ test("edge case: empty result", async () => {
 ```yaml
 name: github-push-handler
 description: Receives GitHub push events and posts a summary to Slack
-runtime: js
+runtime: deno
 trigger:
   webhook: /hooks/github-push
   webhook_secret: "${GITHUB_WEBHOOK_SECRET}"
@@ -228,9 +269,9 @@ params:
 timeout: 30s
 ```
 
-### task.js
+### task.ts
 
-```javascript
+```typescript
 // input contains the parsed GitHub push payload.
 // dicode has already verified the HMAC signature — no need to check it here.
 
@@ -257,9 +298,9 @@ if (!res.body.ok) throw new Error(`Slack error: ${res.body.error}`)
 return { commits: commits.length, branch, repo }
 ```
 
-### task.test.js
+### task.test.ts
 
-```javascript
+```typescript
 test("posts commit summary to Slack on valid push", async () => {
   env.set("SLACK_TOKEN", "xoxb-test")
   params.set("slack_channel", "#test-deploys")
