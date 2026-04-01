@@ -96,6 +96,12 @@ type FSEntry struct {
 	Permission string `yaml:"permission"` // "r" | "w" | "rw"
 }
 
+// SecurityConfig controls inter-task access permissions.
+type SecurityConfig struct {
+	AllowedTasks []string `yaml:"allowed_tasks,omitempty"`
+	AllowedMCP   []string `yaml:"allowed_mcp,omitempty"`
+}
+
 // NotifyConfig controls when dicode sends push notifications for a task.
 // Nil fields inherit from the parent TaskSet defaults or the global config.
 type NotifyConfig struct {
@@ -105,18 +111,20 @@ type NotifyConfig struct {
 
 // Spec is parsed from task.yaml.
 type Spec struct {
-	Name        string        `yaml:"name"        json:"name"`
-	Description string        `yaml:"description" json:"description"`
-	Version     string        `yaml:"version"     json:"version"`
-	Author      string        `yaml:"author,omitempty" json:"author,omitempty"`
-	Runtime     Runtime       `yaml:"runtime"     json:"runtime"`
-	Docker      *DockerConfig `yaml:"docker,omitempty" json:"docker,omitempty"`
-	Trigger     TriggerConfig `yaml:"trigger"     json:"trigger"`
-	Params      []Param       `yaml:"params,omitempty" json:"params,omitempty"`
-	Env         []string      `yaml:"env,omitempty" json:"env,omitempty"`
-	FS          []FSEntry     `yaml:"fs,omitempty"  json:"fs,omitempty"`
-	Timeout     time.Duration `yaml:"timeout"     json:"timeout"`
-	Notify      *NotifyConfig `yaml:"notify,omitempty" json:"notify,omitempty"`
+	Name        string          `yaml:"name"        json:"name"`
+	Description string          `yaml:"description" json:"description"`
+	Version     string          `yaml:"version"     json:"version"`
+	Author      string          `yaml:"author,omitempty" json:"author,omitempty"`
+	Runtime     Runtime         `yaml:"runtime"     json:"runtime"`
+	Docker      *DockerConfig   `yaml:"docker,omitempty" json:"docker,omitempty"`
+	Trigger     TriggerConfig   `yaml:"trigger"     json:"trigger"`
+	Params      []Param         `yaml:"params,omitempty" json:"params,omitempty"`
+	Env         []string        `yaml:"env,omitempty" json:"env,omitempty"`
+	FS          []FSEntry       `yaml:"fs,omitempty"  json:"fs,omitempty"`
+	Timeout     time.Duration   `yaml:"timeout"     json:"timeout"`
+	Notify      *NotifyConfig   `yaml:"notify,omitempty" json:"notify,omitempty"`
+	Security    *SecurityConfig `yaml:"security,omitempty" json:"security,omitempty"`
+	MCPPort     int             `yaml:"mcp_port,omitempty" json:"mcp_port,omitempty"`
 
 	// TaskDir is the directory path of the task in the repo (not stored in YAML).
 	TaskDir string `yaml:"-" json:"-"`

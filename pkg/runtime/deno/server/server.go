@@ -27,7 +27,9 @@ import (
 	"sync"
 
 	"github.com/dicode/dicode/pkg/db"
+	mcpclient "github.com/dicode/dicode/pkg/mcp/client"
 	"github.com/dicode/dicode/pkg/registry"
+	"github.com/dicode/dicode/pkg/task"
 	"go.uber.org/zap"
 )
 
@@ -56,6 +58,7 @@ type Server struct {
 	returnCh     chan interface{}
 	mu           sync.Mutex
 	outputResult *OutputResult
+	spec         *task.Spec
 }
 
 // request is an inbound message from the Deno subprocess.
@@ -77,6 +80,11 @@ type request struct {
 	ContentType string          `json:"contentType,omitempty"`
 	Content     string          `json:"content,omitempty"`
 	Data        json.RawMessage `json:"data,omitempty"`
+
+	// mcp.*
+	MCPName string          `json:"mcpName,omitempty"`
+	Tool    string          `json:"tool,omitempty"`
+	Args    json.RawMessage `json:"args,omitempty"`
 }
 
 // response is an outbound message to the Deno subprocess.
@@ -94,6 +102,7 @@ func New(
 	params map[string]string,
 	input interface{},
 	log *zap.Logger,
+	spec *task.Spec,
 ) *Server {
 	return &Server{
 		runID:    runID,
@@ -104,6 +113,7 @@ func New(
 		input:    input,
 		log:      log,
 		returnCh: make(chan interface{}, 1),
+		spec:     spec,
 	}
 }
 
@@ -307,6 +317,71 @@ func (s *Server) handleConn(conn net.Conn) {
 			default:
 			}
 			reply(req.ID, true, "")
+
+		case "mcp.list_tools":
+			if !s.mcpAllowed(req.MCPName) {
+				reply(req.ID, nil, fmt.Sprintf("task %q is not in allowed_mcp", req.MCPName))
+				continue
+			}
+			port, err := s.getMCPPort(req.MCPName)
+			if err != nil {
+				reply(req.ID, nil, err.Error())
+				continue
+			}
+			c := mcpclient.New(port)
+			tools, err := c.ListTools(context.Background())
+			if err != nil {
+				reply(req.ID, nil, err.Error())
+				continue
+			}
+			reply(req.ID, tools, "")
+
+		case "mcp.call":
+			if !s.mcpAllowed(req.MCPName) {
+				reply(req.ID, nil, fmt.Sprintf("task %q is not in allowed_mcp", req.MCPName))
+				continue
+			}
+			port, err := s.getMCPPort(req.MCPName)
+			if err != nil {
+				reply(req.ID, nil, err.Error())
+				continue
+			}
+			var args map[string]any
+			if len(req.Args) > 0 {
+				_ = json.Unmarshal(req.Args, &args)
+			}
+			c := mcpclient.New(port)
+			result, err := c.Call(context.Background(), req.Tool, args)
+			if err != nil {
+				reply(req.ID, nil, err.Error())
+				continue
+			}
+			reply(req.ID, result, "")
 		}
 	}
+}
+
+// mcpAllowed reports whether the calling task is permitted to access the named MCP server.
+func (s *Server) mcpAllowed(name string) bool {
+	if s.spec == nil || s.spec.Security == nil {
+		return false
+	}
+	for _, allowed := range s.spec.Security.AllowedMCP {
+		if allowed == "*" || allowed == name {
+			return true
+		}
+	}
+	return false
+}
+
+// getMCPPort looks up the mcp_port declared by the named task.
+func (s *Server) getMCPPort(taskID string) (int, error) {
+	spec, ok := s.registry.Get(taskID)
+	if !ok {
+		return 0, fmt.Errorf("task %q not found", taskID)
+	}
+	if spec.MCPPort == 0 {
+		return 0, fmt.Errorf("task %q does not declare mcp_port", taskID)
+	}
+	return spec.MCPPort, nil
 }
