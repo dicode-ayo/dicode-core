@@ -27,6 +27,7 @@ import (
 	"sync"
 
 	"github.com/dicode/dicode/pkg/db"
+	mcpclient "github.com/dicode/dicode/pkg/mcp/client"
 	"github.com/dicode/dicode/pkg/registry"
 	"github.com/dicode/dicode/pkg/task"
 	"go.uber.org/zap"
@@ -415,8 +416,12 @@ func (s *Server) handleConn(conn net.Conn) {
 				reply(req.ID, nil, err.Error())
 				continue
 			}
-			_ = port // MCP client not yet implemented; return empty list
-			reply(req.ID, []interface{}{}, "")
+			tools, err := mcpclient.New(port).ListTools(context.Background())
+			if err != nil {
+				reply(req.ID, nil, err.Error())
+				continue
+			}
+			reply(req.ID, tools, "")
 
 		case "mcp.call":
 			if !s.mcpAllowed(req.MCPName) {
@@ -428,8 +433,16 @@ func (s *Server) handleConn(conn net.Conn) {
 				reply(req.ID, nil, err.Error())
 				continue
 			}
-			_ = port // MCP client not yet implemented
-			reply(req.ID, nil, "mcp client not yet implemented")
+			var args map[string]any
+			if len(req.Args) > 0 {
+				_ = json.Unmarshal(req.Args, &args)
+			}
+			result, err := mcpclient.New(port).Call(context.Background(), req.Tool, args)
+			if err != nil {
+				reply(req.ID, nil, err.Error())
+				continue
+			}
+			reply(req.ID, result, "")
 		}
 	}
 }
