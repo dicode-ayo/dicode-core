@@ -1,197 +1,357 @@
-# Deno Runtime Integration Plan
+# Deno Runtime
 
-Replace the embedded goja JS engine with a Deno subprocess runtime, giving tasks
-full npm support, native TypeScript, and a real V8 engine — while preserving the
-existing globals API (`log`, `kv`, `params`, `env`, `input`, `output`) and keeping
-all other runtimes (`docker`) and infrastructure untouched.
+dicode executes TypeScript/JavaScript tasks via [Deno](https://deno.com/) — the Deno binary is downloaded and cached automatically; no system installation is required.
 
 ---
 
-## Architecture Overview
+## Setup
 
-```
-dicode-core (Go)
-  │
-  ├── pkg/deno/                   ← binary manager (download, cache, verify)
-  │
-  ├── pkg/runtime/deno/
-  │   ├── runtime.go              ← Run() — mirrors js/runtime.go signature
-  │   ├── runtime_test.go
-  │   └── sdk/
-  │       └── shim.js             ← injected before every task script
-  │
-  └── pkg/runtime/deno/server/
-      └── server.go               ← per-run unix socket server
-```
+The Deno runtime is always available. To update to a specific version:
 
-### Execution flow
+1. Open **Config → Runtimes** in the dicode web UI.
+2. Find **Deno** in the table, change the version, and click **Install**.
 
-```
-Run(ctx, spec, opts)
-  1. Create run record in registry
-  2. Resolve secrets from spec.Env
-  3. Start unix socket server  →  /tmp/dicode-<runID>.sock
-  4. Write wrapped script to temp file  (shim + task content)
-  5. Spawn: deno run --allow-net --allow-env=... --allow-read=... <tempfile>
-             └── DICODE_SOCKET env var points to socket
-  6. Stream deno stderr → log.warn in registry (real-time)
-  7. Block until: POST /return received | process exit | ctx timeout
-  8. Shutdown socket server, delete temp files
-  9. Return RunResult
-```
+Or pin a version in `dicode.yaml`:
 
-### Globals bridge
-
-| Global | Bridge method |
-|--------|--------------|
-| `env`  | Process env vars (resolved secrets passed directly) |
-| `params` | `GET /params` on socket |
-| `log` | `POST /log` on socket → registry in real-time |
-| `kv` | `GET /kv/:key`, `PUT /kv/:key`, `DELETE /kv/:key`, `GET /kv` on socket |
-| `input` | `GET /input` on socket (chain-triggered tasks) |
-| `output` | `POST /output` on socket |
-| `http` | Native Deno `fetch` — no bridge needed |
-| return value | `POST /return` on socket |
-
-### Deno permissions (derived from task.yaml)
-
-```
---allow-net                          always (tasks make HTTP calls)
---allow-env=DICODE_SOCKET,VAR1,...   DICODE_SOCKET + declared env: vars
---allow-read=/path1,/path2           from fs: entries with r or rw permission
---allow-write=/path1                 from fs: entries with w or rw permission
+```yaml
+runtimes:
+  deno:
+    version: "2.3.3"
 ```
 
 ---
 
-## Checklist
+## Task structure
 
-### Phase 1 — Deno binary manager (`pkg/deno/`)
+```
+tasks/
+└── my-task/
+    ├── task.yaml
+    └── task.ts
+```
 
-- [ ] `EnsureDeno(version string) (path string, err error)`
-  - [ ] Resolve cache path: `~/.cache/dicode/deno/<version>/deno`
-  - [ ] Return cached path if binary already exists
-  - [ ] Detect platform: `GOOS`/`GOARCH` → deno release filename
-  - [ ] Download zip from `https://github.com/denoland/deno/releases/download/v<version>/deno-<platform>.zip`
-  - [ ] Verify sha256 against `deno-<platform>.zip.sha256sum` from same release
-  - [ ] Extract `deno` binary from zip, write to cache path, `chmod 0755`
-- [ ] Platform matrix: `linux/amd64`, `linux/arm64`, `darwin/amd64`, `darwin/arm64`, `windows/amd64`
-- [ ] Configurable version (default pinned in `pkg/deno/version.go`)
-- [ ] Tests: mock HTTP download, verify extraction and checksum logic
+### task.yaml
 
-### Phase 2 — Per-run socket server (`pkg/runtime/deno/server/`)
+```yaml
+name: My Task
+runtime: deno
+trigger:
+  manual: true
 
-- [ ] `Server` struct: holds run context, registry, db, resolved env/params/input
-- [ ] `Start(runID string) (socketPath string, err error)` — creates unix socket
-- [ ] `Stop()` — closes listener, removes socket file
-- [ ] Endpoints:
-  - [ ] `GET  /params`      → JSON of all merged params
-  - [ ] `GET  /input`       → JSON of chained input (null if not a chain run)
-  - [ ] `POST /log`         → `{ level, message, fields }` → `registry.AppendLog`
-  - [ ] `GET  /kv/:key`     → sqlite kv read, namespaced by taskID
-  - [ ] `PUT  /kv/:key`     → sqlite kv write
-  - [ ] `DELETE /kv/:key`   → sqlite kv delete
-  - [ ] `GET  /kv`          → list all keys for task
-  - [ ] `POST /return`      → capture task return value, signal run complete
-  - [ ] `POST /output`      → capture structured output (html/text/image/file)
-- [ ] Real-time log streaming (each `/log` call writes to registry immediately)
-- [ ] Tests: unit test each endpoint, verify kv namespacing
+params:
+  - name: limit
+    default: "10"
+    description: Maximum items to process
 
-### Phase 3 — SDK shim (`pkg/runtime/deno/sdk/shim.js`)
+env:
+  - API_TOKEN
 
-- [ ] Unix socket HTTP client helper (`_call(method, path, body)`)
-- [ ] `log` global: `info`, `warn`, `error`, `debug` → `POST /log`
-- [ ] `params` global: `get(key)`, `all()` → `GET /params`
-- [ ] `kv` global: `get`, `set`, `delete`, `list` → socket endpoints
-- [ ] `env` global: `get(key)` → `Deno.env.get(key)` (vars already in process env)
-- [ ] `input` global: fetched once at startup from `GET /input`
-- [ ] `output` global: `html`, `text`, `image`, `file` → `POST /output`
-- [ ] Script wrapper: Go wraps task content so `return value` still works:
-  ```js
-  // prepended by runtime — not visible to task author
-  import { log, kv, params, env, input, output } from "/__dicode__/sdk.js";
-  const __result__ = await (async () => {
-    // ---- task script content ----
-  })();
-  await __setReturn__(__result__);
-  ```
-- [ ] Embed shim.js into Go binary via `//go:embed sdk/shim.js`
-- [ ] Tests: shim logic unit tests (mock socket server)
+timeout: 60s
+```
 
-### Phase 4 — Deno runtime (`pkg/runtime/deno/runtime.go`)
+### task.ts
 
-- [ ] `Runtime` struct: `registry`, `secrets`, `db`, `log`, `denoPath`
-- [ ] `New(r, sc, db, log) *Runtime` — calls `deno.EnsureDeno()` on startup
-- [ ] `Run(ctx, spec, opts) (*RunResult, error)`:
-  - [ ] Create/load run record in registry
-  - [ ] Resolve secrets from `spec.Env`
-  - [ ] Start socket server, defer `Stop()`
-  - [ ] Write wrapped script to `os.CreateTemp`
-  - [ ] Build `deno run` command with derived permission flags
-  - [ ] Set `DICODE_SOCKET` + resolved env vars on subprocess
-  - [ ] Pipe stderr to registry logs in real-time (goroutine)
-  - [ ] Wait: socket `/return` received OR process exits OR `ctx` cancelled
-  - [ ] Map exit states to `StatusSuccess`, `StatusFailure`, `StatusCancelled`
-  - [ ] Clean up temp file
-  - [ ] Return `RunResult`
-- [ ] Timeout: respect `spec.Timeout`, send `SIGTERM` then `SIGKILL` after grace period
-- [ ] Tests: mirror `pkg/runtime/js/runtime_test.go` test cases
+```typescript
+// SDK globals are injected automatically — no imports needed.
 
-### Phase 5 — Wiring
+const limit = parseInt(params.limit)
+const token = env.API_TOKEN
 
-- [ ] `pkg/task/spec.go`: add `RuntimeDeno = "deno"` constant
-- [ ] `pkg/trigger/engine.go`:
-  - [ ] Add `denoRT *denoruntime.Runtime` field to `Engine`
-  - [ ] Add `SetDenoRuntime(rt *denoruntime.Runtime)` method
-  - [ ] Add `case task.RuntimeDeno` in `dispatch()`
-- [ ] `cmd/dicode/main.go`:
-  - [ ] Instantiate `denoruntime.New(...)`
-  - [ ] Call `eng.SetDenoRuntime(denoRT)`
-- [ ] Update task spec validation to accept `"deno"` as a valid runtime value
+log.info(`Processing up to ${limit} items`)
 
-### Phase 6 — Goja removal
+const prev = await kv.get("last_count")
+if (prev) log.info(`Last run: ${prev}`)
 
-- [ ] Confirm all existing `runtime: js` tasks migrated or relabelled to `runtime: deno`
-- [ ] Delete `pkg/runtime/js/` directory
-- [ ] Delete `pkg/runtime/js/globals/` directory
-- [ ] Remove `jsRT *jsruntime.Runtime` field from `trigger.Engine`
-- [ ] Remove `jsruntime` import and wiring from `cmd/dicode/main.go`
-- [ ] Remove `case task.RuntimeJS` (or `default`) from `engine.dispatch()`
-- [ ] Remove `RuntimeJS` constant from `pkg/task/spec.go`
-- [ ] Drop goja dependencies from `go.mod`:
-  - [ ] `github.com/dop251/goja`
-  - [ ] `github.com/dop251/goja_nodejs`
-- [ ] Run `go mod tidy`
-- [ ] Confirm no remaining references: `grep -r "goja" .`
+await kv.set("last_count", limit)
 
-### Phase 7 — Docs & task migration
-
-- [ ] Update `README.md`: replace goja/JS runtime section with Deno
-- [ ] Update `docs/concepts/` and `docs/introduction.md` if they reference goja
-- [ ] Update `dicode.yaml` example if it references `runtime: js`
-- [ ] Migrate built-in example tasks (`hello-cron`, `gmail-to-slack`) to `runtime: deno`
-- [ ] Add `runtime: deno` to task spec documentation
+return { processed: limit }
+```
 
 ---
 
-## What stays unchanged
+## SDK globals
 
-- `task.yaml` format — only `runtime: js` → `runtime: deno`
-- All globals names and API (`log`, `kv`, `params`, `env`, `input`, `output`)
-- Trigger engine, cron scheduling, chain logic, webhook dispatch
-- `runtime: docker` — fully unaffected
-- Registry, secrets, sqlite persistence layer
+The Deno runtime injects all globals via a Unix socket bridge. No imports needed — all globals are available at the top level.
+
+### `log`
+
+```typescript
+log.info("message")
+log.warn("something looks off")
+log.error("it broke")
+log.debug("verbose detail")
+```
+
+### `params`
+
+```typescript
+const value = params.my_param       // string, uses default if not overridden
+```
+
+### `env`
+
+```typescript
+const token = env.API_TOKEN         // reads from host environment
+```
+
+### `kv`
+
+Persistent key-value store scoped to the task.
+
+```typescript
+await kv.set("counter", 42)
+const value = await kv.get("counter")    // null if not set
+const keys  = await kv.list()            // all keys
+const keys  = await kv.list("prefix_")  // keys with prefix
+await kv.delete("counter")
+```
+
+### `input`
+
+The return value of the upstream task (chain triggers), or the parsed webhook POST body.
+
+```typescript
+if (input) {
+  log.info(`upstream returned: ${JSON.stringify(input)}`)
+}
+```
+
+### `output`
+
+Rich output types rendered in the Web UI.
+
+```typescript
+output.html("<h1>Report</h1><table>...</table>")
+output.text("plain text result")
+
+// HTML with structured data for chain triggers
+output.html(html, { data: { count: 5 } })  // chained tasks receive { count: 5 }
+```
+
+### Return value
+
+```typescript
+return { count: 42, status: "ok" }
+```
 
 ---
 
-## Files changed summary
+## Agent globals
 
-| File | Change |
-|------|--------|
-| `pkg/deno/` | New package |
-| `pkg/runtime/deno/` | New package |
-| `pkg/runtime/js/` | Deleted (Phase 6) |
-| `pkg/task/spec.go` | Add `RuntimeDeno`, remove `RuntimeJS` |
-| `pkg/trigger/engine.go` | Add deno field, dispatch case; remove js |
-| `cmd/dicode/main.go` | Wire deno runtime; remove js runtime |
-| `go.mod` | Remove goja deps, `go mod tidy` |
+### `dicode` — task orchestration
+
+Allows a task to orchestrate other tasks. Requires `security.allowed_tasks` to be configured.
+
+```typescript
+// Run another task and await its result
+const result = await dicode.run_task("send-report", { channel: "#ops" })
+// result: { runID, status, returnValue }
+
+// List all registered tasks
+const tasks = await dicode.list_tasks()
+// tasks: [{ id, name, description, params }]
+
+// Get recent run history for a task
+const runs = await dicode.get_runs("send-report", { limit: 5 })
+
+// Get AI provider config (resolved server-side)
+const ai = await dicode.get_config("ai")
+// ai: { baseURL, model, apiKey }
+```
+
+**task.yaml security config:**
+
+```yaml
+security:
+  allowed_tasks:
+    - "send-report"   # specific task ID
+    - "*"             # or allow all tasks
+```
+
+### `mcp` — MCP server tools
+
+Allows a task to call tools exposed by daemon tasks that declare `mcp_port`. Requires `security.allowed_mcp`.
+
+```typescript
+// List available tools on an MCP server
+const tools = await mcp.list_tools("github-mcp")
+
+// Call an MCP tool
+const result = await mcp.call("github-mcp", "search_repositories", { query: "dicode" })
+```
+
+**task.yaml security config:**
+
+```yaml
+security:
+  allowed_mcp:
+    - "github-mcp"   # daemon task ID that declares mcp_port
+    - "*"            # or allow all MCP servers
+```
+
+**MCP daemon task example:**
+
+```yaml
+# tasks/github-mcp/task.yaml
+name: GitHub MCP Server
+runtime: docker
+trigger:
+  daemon: true
+mcp_port: 3000
+docker:
+  image: ghcr.io/github/github-mcp-server
+  ports: ["3000:3000"]
+env:
+  - GITHUB_TOKEN
+```
+
+---
+
+## Agent task pattern
+
+A full AI agent task using OpenAI tool-use:
+
+```yaml
+# task.yaml
+name: ai-agent
+runtime: deno
+trigger:
+  webhook: /hooks/agent
+  auth: true
+params:
+  - name: prompt
+    type: string
+    required: true
+security:
+  allowed_tasks: ["*"]
+```
+
+```typescript
+// task.ts
+import OpenAI from "npm:openai"
+
+const ai = await dicode.get_config("ai")
+const client = new OpenAI({
+  baseURL: ai.baseURL || undefined,
+  apiKey: ai.apiKey || "ollama",
+})
+
+const allTasks = await dicode.list_tasks()
+const tools = allTasks.map(t => ({
+  type: "function" as const,
+  function: {
+    name: t.id.replace(/[^a-z0-9_]/gi, "_"),
+    description: t.description,
+    parameters: {
+      type: "object",
+      properties: Object.fromEntries(
+        (t.params ?? []).map((p: any) => [p.name, { type: "string", description: p.description }])
+      ),
+    },
+  },
+}))
+
+const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
+  { role: "user", content: params.prompt },
+]
+
+while (true) {
+  const response = await client.chat.completions.create({
+    model: ai.model || "gpt-4o-mini",
+    messages,
+    tools,
+    tool_choice: "auto",
+  })
+  const msg = response.choices[0].message
+  messages.push(msg)
+
+  if (!msg.tool_calls?.length) {
+    return { answer: msg.content }
+  }
+
+  for (const call of msg.tool_calls) {
+    const taskID = call.function.name.replace(/_/g, "-")
+    const callParams = JSON.parse(call.function.arguments)
+    const result = await dicode.run_task(taskID, callParams)
+    messages.push({
+      role: "tool",
+      tool_call_id: call.id,
+      content: JSON.stringify(result),
+    })
+  }
+}
+```
+
+---
+
+## on_failure_chain
+
+A task can declare a failure handler that runs automatically when it fails:
+
+```yaml
+on_failure_chain: failure-monitor   # override for this task
+# on_failure_chain: ""              # disable global default for this task
+```
+
+A global default can be set in `dicode.yaml`:
+
+```yaml
+defaults:
+  on_failure_chain: failure-monitor
+```
+
+The failure handler receives:
+
+```typescript
+// input to the failure handler task:
+// { taskID, runID, status, output }
+const { taskID, runID } = input
+log.info(`Task ${taskID} failed — run ${runID}`)
+```
+
+---
+
+## npm / jsr imports
+
+Any npm or jsr package can be imported inline:
+
+```typescript
+import OpenAI from "npm:openai"
+import { z } from "npm:zod"
+import * as _ from "npm:lodash-es"
+```
+
+Deno caches packages on first run.
+
+---
+
+## Deno permissions
+
+Permissions are derived from `task.yaml`:
+
+| Permission | Source |
+| --- | --- |
+| `--allow-net` | Always granted |
+| `--allow-env=DICODE_SOCKET,VAR1,...` | `DICODE_SOCKET` + all `env:` vars |
+| `--allow-read=path1,path2` | `fs:` entries with `r` or `rw` |
+| `--allow-write=path1` | `fs:` entries with `w` or `rw` |
+
+---
+
+## Configuration reference
+
+```yaml
+runtimes:
+  deno:
+    version: "2.3.3"   # Deno version; leave blank to use the dicode default
+
+defaults:
+  on_failure_chain: my-monitor-task   # global failure handler
+
+ai:
+  base_url: "https://api.openai.com/v1"
+  model: "gpt-4o-mini"
+  api_key_env: OPENAI_API_KEY         # resolved from env, never exposed to tasks directly
+```
+
+See [task.yaml reference](./concepts/task-format.md) for the full field list.
