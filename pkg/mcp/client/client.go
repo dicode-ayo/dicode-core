@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"time"
 )
 
 // Tool describes an MCP tool.
@@ -25,7 +26,7 @@ type Client struct {
 func New(port int) *Client {
 	return &Client{
 		baseURL:    fmt.Sprintf("http://localhost:%d", port),
-		httpClient: &http.Client{},
+		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}
 }
 
@@ -52,7 +53,7 @@ func (c *Client) call(ctx context.Context, method string, params interface{}) (j
 	if err != nil {
 		return nil, err
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/rpc", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/mcp", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
