@@ -74,7 +74,7 @@ func newTestEnv(t *testing.T) *testEnv {
 func (e *testEnv) start(t *testing.T, params map[string]string, input interface{}) (net.Conn, *Server) {
 	t.Helper()
 	runID := fmt.Sprintf("test-%d", time.Now().UnixNano())
-	srv := New(runID, "test-task", e.reg, e.db, params, input, zap.NewNop())
+	srv := New(runID, "test-task", e.reg, e.db, params, input, zap.NewNop(), nil, nil, "", "", "")
 	socketPath, err := srv.Start(context.Background())
 	if err != nil {
 		t.Fatalf("Start: %v", err)
@@ -212,7 +212,7 @@ func TestServer_KV_Namespacing(t *testing.T) {
 
 	makeServer := func(taskID string) (net.Conn, *Server) {
 		runID := fmt.Sprintf("run-%s", taskID)
-		srv := New(runID, taskID, reg, d, nil, nil, zap.NewNop())
+		srv := New(runID, taskID, reg, d, nil, nil, zap.NewNop(), nil, nil, "", "", "")
 		sp, err := srv.Start(context.Background())
 		if err != nil {
 			t.Fatalf("Start %s: %v", taskID, err)
