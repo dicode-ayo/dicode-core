@@ -28,6 +28,7 @@ import (
 
 	"github.com/dicode/dicode/pkg/db"
 	"github.com/dicode/dicode/pkg/registry"
+	"github.com/dicode/dicode/pkg/task"
 	"go.uber.org/zap"
 )
 
@@ -56,6 +57,12 @@ type Server struct {
 	returnCh     chan interface{}
 	mu           sync.Mutex
 	outputResult *OutputResult
+	spec         *task.Spec
+
+	engine    EngineRunner
+	aiBaseURL string
+	aiModel   string
+	aiAPIKey  string
 }
 
 // request is an inbound message from the Deno subprocess.
@@ -77,6 +84,17 @@ type request struct {
 	ContentType string          `json:"contentType,omitempty"`
 	Content     string          `json:"content,omitempty"`
 	Data        json.RawMessage `json:"data,omitempty"`
+
+	// dicode.*
+	TaskID  string          `json:"taskID,omitempty"`
+	Limit   int             `json:"limit,omitempty"`
+	Section string          `json:"section,omitempty"`
+	Params  json.RawMessage `json:"params,omitempty"`
+
+	// mcp.*
+	MCPName string          `json:"mcpName,omitempty"`
+	Tool    string          `json:"tool,omitempty"`
+	Args    json.RawMessage `json:"args,omitempty"`
 }
 
 // response is an outbound message to the Deno subprocess.
@@ -94,16 +112,24 @@ func New(
 	params map[string]string,
 	input interface{},
 	log *zap.Logger,
+	spec *task.Spec,
+	engine EngineRunner,
+	aiBaseURL, aiModel, aiAPIKey string,
 ) *Server {
 	return &Server{
-		runID:    runID,
-		taskID:   taskID,
-		registry: reg,
-		db:       database,
-		params:   params,
-		input:    input,
-		log:      log,
-		returnCh: make(chan interface{}, 1),
+		runID:     runID,
+		taskID:    taskID,
+		registry:  reg,
+		db:        database,
+		params:    params,
+		input:     input,
+		log:       log,
+		spec:      spec,
+		engine:    engine,
+		aiBaseURL: aiBaseURL,
+		aiModel:   aiModel,
+		aiAPIKey:  aiAPIKey,
+		returnCh:  make(chan interface{}, 1),
 	}
 }
 

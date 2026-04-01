@@ -128,3 +128,17 @@ const output = {
 async function __setReturn__(val) {
   await __call__({ method: "return", value: val ?? null });
 }
+
+// --- mcp ---
+const mcp = {
+  list_tools: (name)             => __call__({ method: "mcp.list_tools", mcpName: name }),
+  call:       (name, tool, args) => __call__({ method: "mcp.call", mcpName: name, tool, args: args ?? {} }),
+};
+
+// --- dicode ---
+const dicode = {
+  run_task:   (taskID, params)  => __call__({ method: "dicode.run_task",   taskID, params: params ?? {} }),
+  list_tasks: ()                => __call__({ method: "dicode.list_tasks" }),
+  get_runs:   (taskID, opts)    => __call__({ method: "dicode.get_runs",   taskID, limit: opts?.limit ?? 10 }),
+  get_config: (section)         => __call__({ method: "dicode.get_config", section }),
+};
