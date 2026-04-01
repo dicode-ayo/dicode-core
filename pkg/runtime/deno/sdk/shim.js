@@ -128,3 +128,9 @@ const output = {
 async function __setReturn__(val) {
   await __call__({ method: "return", value: val ?? null });
 }
+
+// --- mcp ---
+const mcp = {
+  list_tools: (name)             => __call__({ method: "mcp.list_tools", mcpName: name }),
+  call:       (name, tool, args) => __call__({ method: "mcp.call", mcpName: name, tool, args: args ?? {} }),
+};

@@ -116,7 +116,7 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 
 	mergedParams := mergeParams(spec.Params, opts.Params)
 
-	srv := denoserver.New(runID, spec.ID, rt.registry, rt.db, mergedParams, opts.Input, rt.log)
+	srv := denoserver.New(runID, spec.ID, rt.registry, rt.db, mergedParams, opts.Input, rt.log, spec)
 	socketPath, err := srv.Start(execCtx)
 	if err != nil {
 		status = registry.StatusFailure

@@ -162,7 +162,7 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 
 	mergedParams := mergeParams(spec.Params, opts.Params)
 
-	srv := denoserver.New(runID, spec.ID, e.reg, e.db, mergedParams, opts.Input, e.log)
+	srv := denoserver.New(runID, spec.ID, e.reg, e.db, mergedParams, opts.Input, e.log, spec)
 	socketPath, err := srv.Start(execCtx)
 	if err != nil {
 		status = registry.StatusFailure
