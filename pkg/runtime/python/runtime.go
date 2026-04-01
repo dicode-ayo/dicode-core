@@ -7,10 +7,10 @@
 // # Execution model
 //
 // Each Run spawns a fresh uv subprocess connected to the same per-run Unix
-// socket server used by the Deno runtime. An embedded Python shim (sdk.py)
+// socket server used by the Deno runtime. An embedded Python shim (dicode_sdk.py)
 // provides the same globals as the Deno SDK:
 //
-//	log, params, env, kv, input, output
+//	log, params, env, kv, input, output, dicode, mcp
 //
 // To return a value from a task, assign the module-level variable `result`:
 //
@@ -49,7 +49,7 @@ import (
 	"go.uber.org/zap"
 )
 
-//go:embed sdk/sdk.py
+//go:embed sdk/dicode_sdk.py
 var sdkContent string
 
 // Runtime is the ManagedRuntime implementation for Python+uv.
@@ -71,7 +71,7 @@ func New(reg *registry.Registry, sc secrets.Chain, database db.DB, log *zap.Logg
 func (rt *Runtime) Name() string        { return "python" }
 func (rt *Runtime) DisplayName() string { return "Python (uv)" }
 func (rt *Runtime) Description() string {
-	return "Python runtime managed by uv. Supports inline dependencies via PEP 723 (# /// script blocks). Full SDK globals: log, params, env, kv, input, output."
+	return "Python runtime managed by uv. Supports inline dependencies via PEP 723 (# /// script blocks). Full SDK globals: log, params, env, kv, input, output, dicode, mcp."
 }
 func (rt *Runtime) DefaultVersion() string { return uvpkg.DefaultVersion }
 
@@ -260,7 +260,7 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 //
 //  1. PEP 723 script block (extracted from the user script, if present) — must
 //     be first so uv can parse inline dependencies.
-//  2. The dicode SDK shim (sdk.py).
+//  2. The dicode SDK shim (dicode_sdk.py).
 //  3. The user script body (script block stripped out).
 //  4. Return-capture epilogue.
 func buildWrapper(scriptBytes []byte) (string, error) {
