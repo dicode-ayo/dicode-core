@@ -342,17 +342,17 @@ func (e *Engine) FireManual(ctx context.Context, taskID string, params map[strin
 // then returns a RunResult. Implements denoserver.EngineRunner.
 func (e *Engine) WaitRun(ctx context.Context, runID string) (denoserver.RunResult, error) {
 	for {
-		select {
-		case <-ctx.Done():
-			return denoserver.RunResult{}, ctx.Err()
-		case <-time.After(500 * time.Millisecond):
-		}
 		run, err := e.registry.GetRun(ctx, runID)
 		if err != nil {
 			return denoserver.RunResult{}, err
 		}
 		switch run.Status {
 		case registry.StatusRunning:
+			select {
+			case <-ctx.Done():
+				return denoserver.RunResult{}, ctx.Err()
+			case <-time.After(500 * time.Millisecond):
+			}
 			continue
 		}
 		var returnValue interface{}

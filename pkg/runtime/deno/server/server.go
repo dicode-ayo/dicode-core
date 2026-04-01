@@ -53,6 +53,7 @@ type Server struct {
 	input    interface{}
 	log      *zap.Logger
 
+	ctx          context.Context
 	socketPath   string
 	listener     net.Listener
 	returnCh     chan interface{}
@@ -136,7 +137,8 @@ func New(
 
 // Start creates the Unix socket and begins accepting connections.
 // Returns the socket path for the Deno subprocess.
-func (s *Server) Start(_ context.Context) (string, error) {
+func (s *Server) Start(ctx context.Context) (string, error) {
+	s.ctx = ctx
 	socketPath := fmt.Sprintf("/tmp/dicode-%s.sock", s.runID)
 	_ = os.Remove(socketPath)
 
@@ -350,12 +352,12 @@ func (s *Server) handleConn(conn net.Conn) {
 			if len(req.Params) > 0 {
 				_ = json.Unmarshal(req.Params, &callParams)
 			}
-			runID, err := s.engine.FireManual(context.Background(), req.TaskID, callParams)
+			runID, err := s.engine.FireManual(s.ctx, req.TaskID, callParams)
 			if err != nil {
 				reply(req.ID, nil, err.Error())
 				continue
 			}
-			result, err := s.engine.WaitRun(context.Background(), runID)
+			result, err := s.engine.WaitRun(s.ctx, runID)
 			if err != nil {
 				reply(req.ID, nil, err.Error())
 				continue
