@@ -223,7 +223,9 @@ spec:
 	}
 }
 
-func TestSource_WithConfigDefaults(t *testing.T) {
+func TestSource_ConfigDefaultsDeprecated(t *testing.T) {
+	// kind:Config spec.defaults are deprecated and no longer applied to the override stack.
+	// The source resolves successfully (no error) but the config values are not applied.
 	dir := t.TempDir()
 	taskDir := writeTaskDir(t, dir, "deploy")
 
@@ -266,16 +268,13 @@ spec:
 		t.Fatalf("want 1, got %d", len(events))
 	}
 	spec := events[0].Spec
-	if spec.Timeout != 90*time.Second {
-		t.Errorf("config timeout not applied: %v", spec.Timeout)
+	// Deprecated: config defaults should NOT be applied.
+	if spec.Timeout == 90*time.Second {
+		t.Errorf("deprecated kind:Config defaults should not be applied: timeout was set to 90s")
 	}
-	found := false
 	for _, e := range spec.Env {
 		if e == "RUNTIME=prod" {
-			found = true
+			t.Errorf("deprecated kind:Config defaults should not be applied: found env %q", e)
 		}
-	}
-	if !found {
-		t.Errorf("config env not applied: %v", spec.Env)
 	}
 }
