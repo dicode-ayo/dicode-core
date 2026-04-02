@@ -143,6 +143,50 @@ Assign `result` at module level. The value is passed to chained tasks via `input
 result = {"count": 42, "status": "ok"}
 ```
 
+### `dicode` — task orchestration
+
+Allows a task to orchestrate other tasks. Requires `security.allowed_tasks` in `task.yaml`.
+
+```python
+# Run another task and await its result
+result = dicode.run_task("send-report", {"channel": "#ops"})
+# result: { "runID": ..., "status": ..., "returnValue": ... }
+
+# List all registered tasks
+tasks = dicode.list_tasks()
+
+# Get recent run history
+runs = dicode.get_runs("send-report", limit=5)
+
+# Get AI provider config (resolved server-side)
+ai = dicode.get_config("ai")
+# ai: { "baseURL": ..., "model": ..., "apiKey": ... }
+```
+
+```yaml
+# task.yaml
+security:
+  allowed_tasks:
+    - "send-report"
+    - "*"   # or allow all
+```
+
+### `mcp` — MCP server tools
+
+Calls tools on daemon tasks that declare `mcp_port`. Requires `security.allowed_mcp`.
+
+```python
+tools  = mcp.list_tools("github-mcp")
+result = mcp.call("github-mcp", "search_repositories", {"query": "dicode"})
+```
+
+```yaml
+# task.yaml
+security:
+  allowed_mcp:
+    - "github-mcp"
+```
+
 ---
 
 ## Inline dependencies (PEP 723)
@@ -185,14 +229,15 @@ In addition to SDK globals, the following environment variables are always set:
 ## Differences from the Deno runtime
 
 | Feature | Deno | Python |
-|---|---|---|
+| --- | --- | --- |
 | Binary management | dicode downloads `deno` | dicode downloads `uv` |
-| SDK globals (`log`, `kv`, …) | Yes — injected via JS shim | Yes — injected via `sdk.py` shim |
+| SDK globals (`log`, `kv`, `dicode`, `mcp`, …) | Yes — injected via JS shim | Yes — injected via `dicode_sdk.py` shim |
 | Dependency management | npm / jsr imports | PEP 723 inline deps via uv |
 | Filesystem sandboxing | Yes — `--allow-read/write` | No — inherits host permissions |
 | Return value | `return` statement | `result = ...` module-level variable |
 | Rich output | `output.html(…)`, etc. | Same — `output.html(…)`, etc. |
 | Chain trigger input | `input` global | `input` global |
+| Agent orchestration (`dicode`, `mcp`) | Yes | Yes |
 
 ---
 
