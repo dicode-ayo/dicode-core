@@ -36,7 +36,7 @@ func IssueToken(secret []byte, identity, runID string, caps []string) (string, e
 		return "", err
 	}
 	encoded := base64.RawURLEncoding.EncodeToString(payload)
-	sig := tokenSig(secret, encoded)
+	sig := base64.RawURLEncoding.EncodeToString(tokenSig(secret, encoded))
 	return encoded + "." + sig, nil
 }
 
@@ -46,8 +46,9 @@ func VerifyToken(secret []byte, tok string) (tokenClaims, error) {
 	if dot < 0 {
 		return tokenClaims{}, errors.New("ipc: malformed token")
 	}
-	encoded, sig := tok[:dot], tok[dot+1:]
-	if tokenSig(secret, encoded) != sig {
+	encoded, sigStr := tok[:dot], tok[dot+1:]
+	sigBytes, err := base64.RawURLEncoding.DecodeString(sigStr)
+	if err != nil || !hmac.Equal(tokenSig(secret, encoded), sigBytes) {
 		return tokenClaims{}, errors.New("ipc: invalid token signature")
 	}
 	payload, err := base64.RawURLEncoding.DecodeString(encoded)
@@ -64,10 +65,10 @@ func VerifyToken(secret []byte, tok string) (tokenClaims, error) {
 	return claims, nil
 }
 
-func tokenSig(secret []byte, encoded string) string {
+func tokenSig(secret []byte, encoded string) []byte {
 	mac := hmac.New(sha256.New, secret)
 	mac.Write([]byte(encoded))
-	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	return mac.Sum(nil)
 }
 
 // hasCap reports whether caps contains the given capability.
