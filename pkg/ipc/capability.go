@@ -43,7 +43,25 @@ const (
 	CapHTTPRegister  = "http.register" // register HTTP handler routes (issue #54)
 	CapSourcesManage = "sources.manage"
 	CapSecretsWrite  = "secrets.write"
+
+	// CLI capabilities — granted to dicode CLI clients on the control socket.
+	CapCLIRun     = "cli.run"     // trigger a task run and stream its output
+	CapCLIList    = "cli.list"    // list tasks and their last-run status
+	CapCLILogs    = "cli.logs"    // fetch log entries for a run
+	CapCLIStatus  = "cli.status"  // daemon health and uptime
+	CapCLISecrets = "cli.secrets" // list / set / delete secrets
 )
+
+// cliCaps is the full capability set granted to every CLI client.
+func cliCaps() []string {
+	return []string{
+		CapCLIRun,
+		CapCLIList,
+		CapCLILogs,
+		CapCLIStatus,
+		CapCLISecrets,
+	}
+}
 
 // defaultTaskCaps returns the base capability set granted to every task shim token.
 func defaultTaskCaps() []string {

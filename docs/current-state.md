@@ -1,6 +1,6 @@
 # Current State
 
-> Last updated: 2026-04-01 — Agent globals (`dicode`, `mcp`) added to Deno + Python shims; `SecurityConfig` + `MCPPort` + `OnFailureChain` in `task.Spec`; `EngineRunner` interface for cross-package orchestration; `pkg/mcp/client` HTTP JSON-RPC 2.0 client; `defaults.on_failure_chain` in config; Python `dicode_sdk.py` shim; example tasks: `ai-agent`, `task-creator`, `failure-monitor`
+> Last updated: 2026-04-03 — Daemon/CLI split: `cmd/dicoded` (daemon) + `cmd/dicode` (CLI); `pkg/ipc` gains `ControlServer` + `ControlClient` (persistent control socket at `~/.dicode/daemon.sock`); `pkg/relay` deleted; `pkg/secrets.Manager` interface; `make run` now starts `dicoded`
 
 This document describes exactly what exists in the codebase today — what is fully implemented, what is stubbed with interfaces and TODOs, and what exists only as documentation.
 
@@ -53,7 +53,7 @@ Full configuration loading. All structs defined and validated:
 
 ### `pkg/secrets/` ✅
 
-- `provider.go` — `Provider` interface, `Chain`, `ResolveAll()`, `NotFoundError`
+- `provider.go` — `Provider` interface, `Chain`, `ResolveAll()`, `NotFoundError`; **`Manager` interface** (`List`, `Set`, `Delete`) — satisfied by `*LocalProvider`, used by `ControlServer` and `pkg/webui` (`SecretsManager = secrets.Manager` type alias)
 - `env.go` — `EnvProvider` (reads host env vars)
 - `local.go` — `LocalProvider` — ChaCha20-Poly1305 + Argon2id, master key management
 - `localdb.go` — `SQLiteSecretDB` — sqlite-backed Set/Get/Delete/List
@@ -92,10 +92,9 @@ Full TaskSet architecture — hierarchical task composition inspired by ArgoCD A
 - `skill.go` — `//go:embed skill.md` + exported `Skill` string
 - `skill.md` — complete agent skill document (workflow, rules, globals reference, test format, common mistakes)
 
-### `pkg/relay/` 🟡
+### `pkg/relay/` ❌ deleted
 
-- `relay.go` — `Client` struct, `Start()`, `WebhookURL()`, `WebhookHandler` type
-- WebSocket tunnel logic — **not yet implemented**
+Removed in PR #56. The HTTP gateway in `pkg/ipc/` replaced all relay functionality.
 
 ### `pkg/service/` 🟡
 
@@ -191,18 +190,25 @@ Full TaskSet architecture — hierarchical task composition inspired by ArgoCD A
 
 ### `pkg/ipc/` ✅
 
-Unified IPC protocol replacing the old per-runtime `pkg/runtime/deno/server/`.
+Unified IPC protocol replacing the old per-runtime `pkg/runtime/deno/server/`. Two socket types:
 
-- **Wire format**: 4-byte little-endian length prefix + JSON payload (replaces newline-delimited JSON — correctly handles multi-line messages)
+**Task shim sockets** (per-run, temporary):
+
+- **Wire format**: 4-byte little-endian length prefix + JSON payload
 - **Handshake**: client sends `{"token":"<DICODE_TOKEN>"}`, server validates HMAC-signed token and replies `{"proto":1,"caps":[...]}`
-- **Capability tokens**: HMAC-SHA256 signed, scoped to a specific run ID. Task shims get `log`, `params.read`, `input.read`, `kv.read`, `kv.write`, `output.write`, `return`, `tasks.list`, `runs.list`, `config.read`; additionally `tasks.trigger` if `security.allowed_tasks` is set; `mcp.call` if `security.allowed_mcp` is set
+- **Capability tokens**: HMAC-SHA256 signed, scoped to a specific run ID. Task shims get `log`, `params.read`, `input.read`, `kv.read`, `kv.write`, `output.write`, `return`, `tasks.list`, `runs.list`, `config.read`; additionally `tasks.trigger` / `mcp.call` based on security config; `http.register` for daemon tasks
 - `server.go` — `Server` struct; `Start()` returns `(socketPath, token, error)`. Dispatcher enforces capability checks before every handler
-- `token.go` — `IssueToken` / `VerifyToken` (HMAC-SHA256); `NewSecret()` generates per-runtime random secret
-- `conn.go` — `readMsg` / `writeMsg` (length-prefix framing)
-- `capability.go` — capability constants; `defaultTaskCaps()`
-- `message.go` — `Request`, `Response`, `OutputResult`, `EngineRunner`, `RunResult` types (moved from `pkg/runtime/deno/server/`)
-- Methods: all 15 from the old server plus structured capability enforcement on each
-- `EngineRunner` interface lives here (breaks trigger ↔ runtime import cycle)
+- `gateway.go` — `Gateway` HTTP dispatch layer: priority-ordered pattern routing (longest-prefix wins). Two handler types: Go handlers (webhook tasks) and IPC handlers (daemon tasks via `http.register`). `ipcHandler` bridges HTTP requests to open IPC connections via `HTTPInboundRequest` push + `http.respond` reply
+- `token.go` — `IssueToken` / `IssueTokenWithTTL` / `VerifyToken` (HMAC-SHA256); `NewSecret()`
+- `conn.go` — `readMsg` / `writeMsg` (length-prefix framing) with outbound size guard (8 MiB)
+- `capability.go` — capability constants; `defaultTaskCaps()`; **`CapCLI*` constants** + `cliCaps()` for control socket clients
+- `message.go` — `Request`, `Response`, `OutputResult`, `EngineRunner`, `RunResult`, `HTTPInboundRequest`, **`TaskSummary`**, **`LogEntry`**, **`DaemonStatus`** types
+
+**Control socket** (persistent, daemon-lifetime):
+
+- `control.go` — **`ControlServer`**: listens at `~/.dicode/daemon.sock` (mode 0600). On startup writes a pre-issued CLI token to `~/.dicode/daemon.token` (mode 0600, atomic write). Handles `cli.ping`, `cli.list`, `cli.run`, `cli.logs`, `cli.status`, `cli.secrets.{list,set,delete}`. Context-aware: per-connection context cancels in-flight `cli.run` on client disconnect. CLI tokens use `tokenCLITTL` (~10 years) — daemon restart re-issues anyway
+- `control_client.go` — **`ControlClient`**: `Dial(socketPath, tokenPath)` → `Send(req)` → `Close()`. Handshake decodes a union struct covering both success (`proto`) and error (`error`) envelopes
+
 - `pkg/runtime/deno/server/` **deleted** — both Deno and Python runtimes now import `pkg/ipc`
 
 ### `pkg/runtime/deno/sdk/shim.js` ✅
@@ -222,17 +228,24 @@ Injected before every Python task script via `buildWrapper()`. Updated for unifi
 - `kv.get_async`, `kv.set_async`, `kv.list_async` variants for async task bodies
 - Globals: `log`, `params`, `env`, `kv`, `input`, `output`, **`dicode`**, **`mcp`**
 
-### `cmd/dicode/main.go` ✅
+### `cmd/dicoded/main.go` ✅ (daemon binary)
 
-- Full component wiring: db → secrets → registry → Deno runtime → Docker/Podman/Python runtimes → trigger engine → reconciler → webui → tray
-- `denoRT.SetEngine(eng)` — wires the trigger engine into the Deno runtime for `dicode.run_task` support
-- `denoRT.SetAIConfig(baseURL, model, apiKey)` — resolves `ai.api_key_env` and passes config to socket server for `dicode.get_config("ai")`
-- `pythonRT` receives the same engine + AI config wiring via `SetEngine` / `SetAIConfig`
-- `eng.SetDefaultsOnFailureChain(id)` — set when `defaults.on_failure_chain` is present in config
-- `buildSources()` returns `([]source.Source, *webui.SourceManager, error)` — builds both the source slice and the `SourceManager` for dev mode control
-- `buildTaskSetSource()` returns `*taskset.Source` so it can be stored in the source map for runtime dev mode control
-- Startup sequence: `CleanupOrphanedContainers` → `CleanupStaleRuns` → register tasks → `engine.Start`
-- `db.DB` passed to `webui.New()` for persistent sessions and API key storage
+The full daemon process — extracted from the old monolith. Starts all long-running components:
+
+- Full component wiring: db → secrets → registry → Deno runtime → Docker/Podman/Python runtimes → trigger engine → reconciler → HTTP gateway → webui → control socket → tray
+- `NewControlServer(socketPath, tokenPath, ...)` — creates the CLI control socket and writes `daemon.token`
+- `buildSecretsChain(cfg, dataDir, database, log)` returns `(secrets.Chain, secrets.Manager)` — the `Manager` is passed to both `webui.New()` and `NewControlServer()`
+- Startup sequence: `CleanupOrphanedContainers` → `CleanupStaleRuns` → build runtimes → build sources → build webui → build control socket → run errgroup (reconciler + engine + webui + control socket + tray)
+- `make run` builds and starts this binary
+
+### `cmd/dicode/main.go` ✅ (CLI binary)
+
+Thin command dispatcher — no runtime or database initialisation:
+
+- Subcommands: `run <task-id> [key=value ...]`, `list`, `logs <run-id>`, `status [task-id]`, `secrets {list,set,delete}`, `version`
+- **Auto-start**: if `~/.dicode/daemon.sock` is not connectable, locates `dicoded` (next to `dicode` binary, then `$PATH`), starts it in the background, redirects stderr to `~/.dicode/daemon.log`, polls for the socket (8 second timeout)
+- Reads `~/.dicode/daemon.token` and calls `ipc.Dial()` to connect
+- `DICODE_DATA_DIR` env var overrides the default data directory
 
 ### `examples/` ✅
 
@@ -287,8 +300,20 @@ Injected before every Python task script via `buildWrapper()`. Updated for unifi
 
 ---
 
+## Build
+
+```bash
+make build   # compiles both ./dicode (CLI) and ./dicoded (daemon)
+make run     # builds and starts dicoded — web UI on :8080, control socket at ~/.dicode/daemon.sock
+make test    # go test ./...
+make lint    # go fmt + go vet
+make clean   # removes both binaries
+```
+
+---
+
 ## Test coverage
 
-94+ tests across: db, secrets, source/local, registry, runtime/js, trigger (including HMAC), taskset, and webui (including auth) packages.
+94+ tests across: db, secrets, source/local, registry, runtime/js, trigger (including HMAC), taskset, ipc (including gateway + control socket), and webui (including auth) packages.
 
-All packages compile with `go test -race ./...` as of 2026-03-30.
+All packages compile with `go test -race ./...` as of 2026-04-03.

@@ -58,6 +58,14 @@ func (c Chain) ResolveAll(ctx context.Context, keys []string) (map[string]string
 	return out, nil
 }
 
+// Manager is implemented by secret stores that support full CRUD operations
+// (list, set, delete). Satisfied by *LocalProvider.
+type Manager interface {
+	List(ctx context.Context) ([]string, error)
+	Set(ctx context.Context, key, value string) error
+	Delete(ctx context.Context, key string) error
+}
+
 // NotFoundError is returned when no provider in the chain has the requested key.
 type NotFoundError struct {
 	Key string
