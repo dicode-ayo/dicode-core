@@ -231,7 +231,10 @@ func buildRuntimes(
 	}
 
 	// --- Python (uv) — register only if configured + installed ---
-	pythonMgr := pythonruntime.New(reg, secretsChain, database, log)
+	pythonMgr, err := pythonruntime.New(reg, secretsChain, database, log)
+	if err != nil {
+		log.Fatal("python runtime init", zap.Error(err))
+	}
 	managed = append(managed, pythonMgr)
 
 	if rc, ok := cfg.Runtimes["python"]; ok && !rc.Disabled {
