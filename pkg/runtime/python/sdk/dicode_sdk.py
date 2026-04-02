@@ -2,93 +2,128 @@
 # Provides: log, params, env, kv, input, output, dicode, mcp.
 # To return a value from a task, assign: result = <value>
 #
-# Protocol: newline-delimited JSON over a single persistent Unix socket.
+# Protocol: length-prefixed JSON over a single persistent Unix socket.
+#   Frame:  [4-byte little-endian length][JSON bytes]
+#
+# Handshake (first exchange after connect):
+#   Client → { "token": "<DICODE_TOKEN>" }
+#   Server → { "proto": 1, "caps": ["log", "params.read", ...] }
+#
+# After handshake, same request/response pattern as before:
 #   Fire-and-forget (no id):    log, kv.set, kv.delete, output
 #   Request/response (id req):  params, input, kv.get, kv.list, return,
 #                               dicode.run_task, dicode.list_tasks,
 #                               dicode.get_runs, dicode.get_config,
 #                               mcp.list_tools, mcp.call
+import asyncio
 import json
 import os
-import socket
+import struct
+import sys
 import threading
 
-_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-_sock.connect(os.environ["DICODE_SOCKET"])
-_file = _sock.makefile("rwb", buffering=0)
+# ── async IO loop ─────────────────────────────────────────────────────────────
+# A single background event loop owns the socket.  All IPC operations are
+# coroutines dispatched onto it via run_coroutine_threadsafe().
 
-_pending = {}       # id -> threading.Event
-_results = {}       # id -> msg
+_loop = asyncio.new_event_loop()
+threading.Thread(target=_loop.run_forever, daemon=True, name="dicode-io").start()
+
+
+async def _open_conn():
+    return await asyncio.open_unix_connection(os.environ["DICODE_SOCKET"])
+
+_reader_obj, _writer = asyncio.run_coroutine_threadsafe(_open_conn(), _loop).result(timeout=10)
+
+
+# ── framing helpers ───────────────────────────────────────────────────────────
+
+async def _read_msg():
+    hdr = await _reader_obj.readexactly(4)
+    (size,) = struct.unpack_from("<I", hdr)
+    body = await _reader_obj.readexactly(size)
+    return json.loads(body)
+
+
+def _write_msg(obj):
+    body = json.dumps(obj, separators=(",", ":")).encode()
+    hdr = struct.pack("<I", len(body))
+    _writer.write(hdr + body)
+
+
+# ── handshake ─────────────────────────────────────────────────────────────────
+
+async def _handshake():
+    _write_msg({"token": os.environ["DICODE_TOKEN"]})
+    await _writer.drain()
+    resp = await _read_msg()
+    if resp.get("error"):
+        raise RuntimeError(f"ipc handshake failed: {resp['error']}")
+    return resp.get("caps", [])
+
+_caps = asyncio.run_coroutine_threadsafe(_handshake(), _loop).result(timeout=10)
+
+
+# ── read loop ─────────────────────────────────────────────────────────────────
+
+_pending = {}   # id -> asyncio.Future (set on the IO loop)
+
+
+async def _read_loop():
+    while True:
+        try:
+            msg = await _read_msg()
+        except Exception:
+            break
+        rid = msg.get("id")
+        if rid:
+            fut = _pending.pop(rid, None)
+            if fut is not None:
+                fut.set_result(msg)
+
+asyncio.run_coroutine_threadsafe(_read_loop(), _loop)
+
+
+# ── call helpers ──────────────────────────────────────────────────────────────
+
 _nid = 0
-_lock = threading.Lock()
+_nid_lock = threading.Lock()
 
 
 def _next_id():
     global _nid
-    with _lock:
+    with _nid_lock:
         _nid += 1
         return str(_nid)
 
 
-def _send(obj):
-    line = json.dumps(obj, separators=(",", ":")) + "\n"
-    with _lock:
-        _file.write(line.encode())
-        _file.flush()
-
-
-def _call(req):
-    """Send a request and block until the response arrives."""
+async def _async_call(req):
     rid = _next_id()
-    ev = threading.Event()
-    with _lock:
-        _pending[rid] = ev
-    _send({**req, "id": rid})
-    ev.wait()
-    msg = _results.pop(rid, {})
+    fut = _loop.create_future()
+    _pending[rid] = fut
+    _write_msg({**req, "id": rid})
+    await _writer.drain()
+    msg = await asyncio.wait_for(fut, timeout=30)
     if msg.get("error"):
         raise RuntimeError(msg["error"])
     return msg.get("result")
 
 
+def _call(req):
+    """Send a request and block until the response arrives (sync API)."""
+    fut = asyncio.run_coroutine_threadsafe(_async_call(req), _loop)
+    return fut.result(timeout=30)
+
+
 def _fire(req):
-    """Send a fire-and-forget message (no id, no response expected)."""
-    _send(req)
+    """Send a fire-and-forget message (no response expected)."""
+    async def _do():
+        _write_msg(req)
+        await _writer.drain()
+    asyncio.run_coroutine_threadsafe(_do(), _loop)
 
 
-def _reader():
-    """Background thread: read response lines and wake waiting _call()s."""
-    buf = b""
-    while True:
-        try:
-            chunk = _file.read(4096)
-        except Exception:
-            break
-        if not chunk:
-            break
-        buf += chunk
-        while b"\n" in buf:
-            line, buf = buf.split(b"\n", 1)
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                msg = json.loads(line)
-            except Exception:
-                continue
-            rid = msg.get("id")
-            if rid and rid in _pending:
-                _results[rid] = msg
-                _pending.pop(rid).set()
-
-
-_reader_thread = threading.Thread(target=_reader, daemon=True)
-_reader_thread.start()
-
-
-# ---------------------------------------------------------------------------
-# log
-# ---------------------------------------------------------------------------
+# ── log ───────────────────────────────────────────────────────────────────────
 
 class _Log:
     @staticmethod
@@ -108,9 +143,7 @@ class _Log:
 log = _Log()
 
 
-# ---------------------------------------------------------------------------
-# params (lazy-fetched, cached)
-# ---------------------------------------------------------------------------
+# ── params (lazy-fetched, cached) ─────────────────────────────────────────────
 
 _params_cache = None
 _params_once = threading.Lock()
@@ -136,9 +169,7 @@ class _Params:
 params = _Params()
 
 
-# ---------------------------------------------------------------------------
-# env
-# ---------------------------------------------------------------------------
+# ── env ───────────────────────────────────────────────────────────────────────
 
 class _Env:
     def get(self, key, default=None):
@@ -148,9 +179,7 @@ class _Env:
 env = _Env()
 
 
-# ---------------------------------------------------------------------------
-# kv
-# ---------------------------------------------------------------------------
+# ── kv ────────────────────────────────────────────────────────────────────────
 
 class _KV:
     def get(self, key):
@@ -165,20 +194,26 @@ class _KV:
     def list(self, prefix=""):
         return _call({"method": "kv.list", "prefix": prefix}) or []
 
+    # Async variants for use inside async def main() tasks.
+    async def get_async(self, key):
+        return await _async_call({"method": "kv.get", "key": key})
+
+    async def set_async(self, key, value):
+        _fire({"method": "kv.set", "key": key, "value": value})
+
+    async def list_async(self, prefix=""):
+        return await _async_call({"method": "kv.list", "prefix": prefix}) or []
+
 
 kv = _KV()
 
 
-# ---------------------------------------------------------------------------
-# input (fetched once at import time)
-# ---------------------------------------------------------------------------
+# ── input (fetched once at import time) ───────────────────────────────────────
 
 input = _call({"method": "input"})
 
 
-# ---------------------------------------------------------------------------
-# output
-# ---------------------------------------------------------------------------
+# ── output ────────────────────────────────────────────────────────────────────
 
 class _Output:
     def html(self, content, data=None):
@@ -202,9 +237,7 @@ class _Output:
 output = _Output()
 
 
-# ---------------------------------------------------------------------------
-# dicode — task orchestration helpers
-# ---------------------------------------------------------------------------
+# ── dicode — task orchestration helpers ───────────────────────────────────────
 
 class _Dicode:
     def run_task(self, task_id, params=None):
@@ -225,9 +258,7 @@ class _Dicode:
 dicode = _Dicode()
 
 
-# ---------------------------------------------------------------------------
-# mcp — Model Context Protocol tool access
-# ---------------------------------------------------------------------------
+# ── mcp — Model Context Protocol tool access ──────────────────────────────────
 
 class _MCP:
     def list_tools(self, name):
@@ -241,9 +272,7 @@ class _MCP:
 mcp = _MCP()
 
 
-# ---------------------------------------------------------------------------
-# Internal: send the task return value (called by the wrapper, not user code).
-# ---------------------------------------------------------------------------
+# ── internal: send task return value (called by the wrapper, not user code) ───
 
 def _set_return(value):
     try:

@@ -1,24 +1,6 @@
-// Package server implements the per-run Unix socket server that bridges
-// the Deno subprocess and the Go host.
-//
-// Protocol: newline-delimited JSON over a single persistent connection.
-//
-// Task → Go (request):
-//
-//	{"id":"1","method":"kv.get","key":"x"}          — needs response
-//	{"method":"log","level":"info","message":"hi"}   — fire-and-forget (no id)
-//
-// Go → Task (response, only when request had an id):
-//
-//	{"id":"1","result":{...}}
-//	{"id":"1","error":"something went wrong"}
-//
-// Fire-and-forget methods (no id, no response): log, kv.set, kv.delete, output.
-// Request/response methods (require id):        params, input, kv.get, kv.list, return.
-package server
+package ipc
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -33,86 +15,45 @@ import (
 	"go.uber.org/zap"
 )
 
-// OutputResult is a structured output from a task.
-type OutputResult struct {
-	ContentType string      `json:"contentType"`
-	Content     string      `json:"content"`
-	Data        interface{} `json:"data,omitempty"`
-}
-
-// IsSet reports whether output was set by the task.
-func (o *OutputResult) IsSet() bool { return o.ContentType != "" }
-
-// Server is a per-run Unix socket server.
+// Server is a per-run Unix socket server that bridges a task subprocess and
+// the Go host using the unified IPC protocol.
+//
+// Each task run gets its own socket. The subprocess connects, performs the
+// capability handshake, then exchanges length-prefixed JSON messages.
 type Server struct {
-	runID    string
-	taskID   string
+	runID  string
+	taskID string
+	secret []byte // daemon-level HMAC secret for token verification
+
 	registry *registry.Registry
 	db       db.DB
 	params   map[string]string
-	input    interface{}
+	input    any
+	spec     *task.Spec
+	engine   EngineRunner
 	log      *zap.Logger
 
-	ctx          context.Context
-	socketPath   string
-	listener     net.Listener
-	returnCh     chan interface{}
-	mu           sync.Mutex
-	outputResult *OutputResult
-	spec         *task.Spec
-
-	engine    EngineRunner
 	aiBaseURL string
 	aiModel   string
 	aiAPIKey  string
-}
 
-// request is an inbound message from the Deno subprocess.
-type request struct {
-	ID string `json:"id,omitempty"` // absent → fire-and-forget
+	ctx        context.Context
+	socketPath string
+	listener   net.Listener
 
-	Method string `json:"method"`
-
-	// log
-	Level   string `json:"level,omitempty"`
-	Message string `json:"message,omitempty"`
-
-	// kv.*
-	Key    string          `json:"key,omitempty"`
-	Value  json.RawMessage `json:"value,omitempty"`
-	Prefix string          `json:"prefix,omitempty"`
-
-	// output
-	ContentType string          `json:"contentType,omitempty"`
-	Content     string          `json:"content,omitempty"`
-	Data        json.RawMessage `json:"data,omitempty"`
-
-	// dicode.*
-	TaskID  string          `json:"taskID,omitempty"`
-	Limit   int             `json:"limit,omitempty"`
-	Section string          `json:"section,omitempty"`
-	Params  json.RawMessage `json:"params,omitempty"`
-
-	// mcp.*
-	MCPName string          `json:"mcpName,omitempty"`
-	Tool    string          `json:"tool,omitempty"`
-	Args    json.RawMessage `json:"args,omitempty"`
-}
-
-// response is an outbound message to the Deno subprocess.
-type response struct {
-	ID     string      `json:"id"`
-	Result interface{} `json:"result,omitempty"`
-	Error  string      `json:"error,omitempty"`
+	mu     sync.Mutex
+	output *OutputResult
+	retCh  chan any
 }
 
 // New creates a Server (not yet started).
 func New(
 	runID, taskID string,
+	secret []byte,
 	reg *registry.Registry,
 	database db.DB,
 	params map[string]string,
-	input interface{},
+	input any,
 	log *zap.Logger,
 	spec *task.Spec,
 	engine EngineRunner,
@@ -121,36 +62,53 @@ func New(
 	return &Server{
 		runID:     runID,
 		taskID:    taskID,
+		secret:    secret,
 		registry:  reg,
 		db:        database,
 		params:    params,
 		input:     input,
-		log:       log,
 		spec:      spec,
 		engine:    engine,
+		log:       log,
 		aiBaseURL: aiBaseURL,
 		aiModel:   aiModel,
 		aiAPIKey:  aiAPIKey,
-		returnCh:  make(chan interface{}, 1),
+		retCh:     make(chan any, 1),
 	}
 }
 
 // Start creates the Unix socket and begins accepting connections.
-// Returns the socket path for the Deno subprocess.
-func (s *Server) Start(ctx context.Context) (string, error) {
+// Returns the socket path and a capability token to pass to the subprocess.
+func (s *Server) Start(ctx context.Context) (socketPath, token string, err error) {
 	s.ctx = ctx
-	socketPath := fmt.Sprintf("/tmp/dicode-%s.sock", s.runID)
+	socketPath = fmt.Sprintf("/tmp/dicode-%s.sock", s.runID)
 	_ = os.Remove(socketPath)
 
 	l, err := net.Listen("unix", socketPath)
 	if err != nil {
-		return "", fmt.Errorf("listen unix %s: %w", socketPath, err)
+		return "", "", fmt.Errorf("ipc: listen %s: %w", socketPath, err)
 	}
 	s.socketPath = socketPath
 	s.listener = l
 
+	// Build capability set for this task.
+	caps := defaultTaskCaps()
+	if s.spec != nil && s.spec.Security != nil && len(s.spec.Security.AllowedTasks) > 0 {
+		caps = append(caps, CapTaskTrigger)
+	}
+	if s.spec != nil && s.spec.Security != nil && len(s.spec.Security.AllowedMCP) > 0 {
+		caps = append(caps, CapMCPCall)
+	}
+
+	token, err = IssueToken(s.secret, "task:"+s.taskID, s.runID, caps)
+	if err != nil {
+		_ = l.Close()
+		_ = os.Remove(socketPath)
+		return "", "", fmt.Errorf("ipc: issue token: %w", err)
+	}
+
 	go s.accept()
-	return socketPath, nil
+	return socketPath, token, nil
 }
 
 // Stop closes the listener and removes the socket file.
@@ -163,14 +121,14 @@ func (s *Server) Stop() {
 	}
 }
 
-// ReturnCh receives the task return value once the subprocess posts "return".
-func (s *Server) ReturnCh() <-chan interface{} { return s.returnCh }
+// ReturnCh receives the task return value once the subprocess sends "return".
+func (s *Server) ReturnCh() <-chan any { return s.retCh }
 
 // Output returns the captured output, or nil if none was set.
 func (s *Server) Output() *OutputResult {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.outputResult
+	return s.output
 }
 
 func (s *Server) accept() {
@@ -183,40 +141,56 @@ func (s *Server) accept() {
 	}
 }
 
-// handleConn reads newline-delimited JSON requests and dispatches them
-// sequentially. Responses (for request/response methods) are written back
-// on the same connection.
 func (s *Server) handleConn(conn net.Conn) {
 	defer conn.Close()
-	enc := json.NewEncoder(conn)
 
-	// reply writes a response only when the request included an id.
-	reply := func(id string, result interface{}, errMsg string) {
+	// ── handshake ────────────────────────────────────────────────────────────
+	var hs handshakeReq
+	if err := readMsg(conn, &hs); err != nil {
+		s.log.Warn("ipc: handshake read failed", zap.String("run", s.runID), zap.Error(err))
+		return
+	}
+	claims, err := VerifyToken(s.secret, hs.Token)
+	if err != nil {
+		_ = writeMsg(conn, handshakeErr{Error: err.Error()})
+		return
+	}
+	if claims.RunID != s.runID {
+		_ = writeMsg(conn, handshakeErr{Error: "ipc: token run ID mismatch"})
+		return
+	}
+	if err := writeMsg(conn, handshakeResp{Proto: 1, Caps: claims.Caps}); err != nil {
+		return
+	}
+	caps := claims.Caps
+
+	// ── message loop ─────────────────────────────────────────────────────────
+	reply := func(id string, result any, errMsg string) {
 		if id == "" {
 			return
 		}
-		r := response{ID: id, Result: result}
+		r := Response{ID: id, Result: result}
 		if errMsg != "" {
 			r.Error = errMsg
 			r.Result = nil
 		}
-		_ = enc.Encode(r)
+		_ = writeMsg(conn, r)
 	}
 
-	scanner := bufio.NewScanner(conn)
-	scanner.Buffer(make([]byte, 256*1024), 256*1024)
-
-	for scanner.Scan() {
-		var req request
-		if err := json.Unmarshal(scanner.Bytes(), &req); err != nil {
-			continue
+	for {
+		var req Request
+		if err := readMsg(conn, &req); err != nil {
+			return // EOF or closed connection
 		}
 
 		switch req.Method {
 
-		// --- fire-and-forget ---
+		// ── fire-and-forget ───────────────────────────────────────────────
 
 		case "log":
+			if !hasCap(caps, CapLog) {
+				continue
+			}
 			level := req.Level
 			if level == "" {
 				level = "info"
@@ -224,7 +198,10 @@ func (s *Server) handleConn(conn net.Conn) {
 			_ = s.registry.AppendLog(context.Background(), s.runID, level, req.Message)
 
 		case "kv.set":
-			var val interface{}
+			if !hasCap(caps, CapKVWrite) {
+				continue
+			}
+			var val any
 			if len(req.Value) > 0 {
 				_ = json.Unmarshal(req.Value, &val)
 			}
@@ -235,39 +212,57 @@ func (s *Server) handleConn(conn net.Conn) {
 				 ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
 				ns, string(valJSON),
 			); err != nil {
-				s.log.Error("kv.set", zap.String("key", req.Key), zap.Error(err))
+				s.log.Error("ipc: kv.set", zap.String("key", req.Key), zap.Error(err))
 			}
 
 		case "kv.delete":
+			if !hasCap(caps, CapKVWrite) {
+				continue
+			}
 			ns := s.taskID + ":" + req.Key
 			if err := s.db.Exec(context.Background(),
 				`DELETE FROM kv WHERE key = ?`, ns,
 			); err != nil {
-				s.log.Error("kv.delete", zap.String("key", req.Key), zap.Error(err))
+				s.log.Error("ipc: kv.delete", zap.String("key", req.Key), zap.Error(err))
 			}
 
 		case "output":
-			var data interface{}
+			if !hasCap(caps, CapOutputWrite) {
+				continue
+			}
+			var data any
 			if len(req.Data) > 0 {
 				_ = json.Unmarshal(req.Data, &data)
 			}
 			s.mu.Lock()
-			s.outputResult = &OutputResult{
+			s.output = &OutputResult{
 				ContentType: req.ContentType,
 				Content:     req.Content,
 				Data:        data,
 			}
 			s.mu.Unlock()
 
-		// --- request / response ---
+		// ── request / response ────────────────────────────────────────────
 
 		case "params":
+			if !hasCap(caps, CapParamsRead) {
+				reply(req.ID, nil, "ipc: permission denied (params.read)")
+				continue
+			}
 			reply(req.ID, s.params, "")
 
 		case "input":
+			if !hasCap(caps, CapInputRead) {
+				reply(req.ID, nil, "ipc: permission denied (input.read)")
+				continue
+			}
 			reply(req.ID, s.input, "")
 
 		case "kv.get":
+			if !hasCap(caps, CapKVRead) {
+				reply(req.ID, nil, "ipc: permission denied (kv.read)")
+				continue
+			}
 			ns := s.taskID + ":" + req.Key
 			var raw string
 			var found bool
@@ -289,11 +284,15 @@ func (s *Server) handleConn(conn net.Conn) {
 				reply(req.ID, nil, "")
 				continue
 			}
-			var out interface{}
+			var out any
 			_ = json.Unmarshal([]byte(raw), &out)
 			reply(req.ID, out, "")
 
 		case "kv.list":
+			if !hasCap(caps, CapKVRead) {
+				reply(req.ID, nil, "ipc: permission denied (kv.read)")
+				continue
+			}
 			ns := s.taskID + ":"
 			prefix := ns
 			if req.Prefix != "" {
@@ -324,28 +323,35 @@ func (s *Server) handleConn(conn net.Conn) {
 			reply(req.ID, keys, "")
 
 		case "return":
-			var val interface{}
+			if !hasCap(caps, CapReturn) {
+				reply(req.ID, nil, "ipc: permission denied (return)")
+				continue
+			}
+			var val any
 			if len(req.Value) > 0 {
 				_ = json.Unmarshal(req.Value, &val)
 			}
-			// Signal returnCh BEFORE replying to Deno. This guarantees the
-			// runtime's select sees returnCh before doneCh (which only becomes
-			// ready after Deno receives the reply and exits).
+			// Signal retCh BEFORE replying so the runtime's select sees it
+			// before doneCh (which fires after the subprocess exits).
 			select {
-			case s.returnCh <- val:
+			case s.retCh <- val:
 			default:
 			}
 			reply(req.ID, true, "")
 
-		// --- dicode.* ---
+		// ── dicode.* ──────────────────────────────────────────────────────
 
 		case "dicode.run_task":
+			if !hasCap(caps, CapTaskTrigger) {
+				reply(req.ID, nil, "ipc: permission denied (tasks.trigger)")
+				continue
+			}
 			if s.engine == nil {
-				reply(req.ID, nil, "dicode.run_task: engine not available")
+				reply(req.ID, nil, "ipc: engine not available")
 				continue
 			}
 			if !s.taskAllowed(req.TaskID) {
-				reply(req.ID, nil, fmt.Sprintf("dicode.run_task: task %q not in security.allowed_tasks", req.TaskID))
+				reply(req.ID, nil, fmt.Sprintf("ipc: task %q not in security.allowed_tasks", req.TaskID))
 				continue
 			}
 			var callParams map[string]string
@@ -365,11 +371,15 @@ func (s *Server) handleConn(conn net.Conn) {
 			reply(req.ID, result, "")
 
 		case "dicode.list_tasks":
+			if !hasCap(caps, CapTasksList) {
+				reply(req.ID, nil, "ipc: permission denied (tasks.list)")
+				continue
+			}
 			type taskSummary struct {
-				ID          string      `json:"id"`
-				Name        string      `json:"name"`
-				Description string      `json:"description"`
-				Params      interface{} `json:"params,omitempty"`
+				ID          string `json:"id"`
+				Name        string `json:"name"`
+				Description string `json:"description,omitempty"`
+				Params      any    `json:"params,omitempty"`
 			}
 			all := s.registry.All()
 			summaries := make([]taskSummary, 0, len(all))
@@ -384,6 +394,10 @@ func (s *Server) handleConn(conn net.Conn) {
 			reply(req.ID, summaries, "")
 
 		case "dicode.get_runs":
+			if !hasCap(caps, CapRunsList) {
+				reply(req.ID, nil, "ipc: permission denied (runs.list)")
+				continue
+			}
 			limit := req.Limit
 			if limit <= 0 {
 				limit = 10
@@ -396,8 +410,12 @@ func (s *Server) handleConn(conn net.Conn) {
 			reply(req.ID, runs, "")
 
 		case "dicode.get_config":
+			if !hasCap(caps, CapConfigRead) {
+				reply(req.ID, nil, "ipc: permission denied (config.read)")
+				continue
+			}
 			if req.Section != "ai" {
-				reply(req.ID, nil, fmt.Sprintf("dicode.get_config: unsupported section %q (only \"ai\" is supported)", req.Section))
+				reply(req.ID, nil, fmt.Sprintf("ipc: unsupported config section %q", req.Section))
 				continue
 			}
 			reply(req.ID, map[string]string{
@@ -406,11 +424,15 @@ func (s *Server) handleConn(conn net.Conn) {
 				"apiKey":  s.aiAPIKey,
 			}, "")
 
-		// --- mcp.* ---
+		// ── mcp.* ─────────────────────────────────────────────────────────
 
 		case "mcp.list_tools":
+			if !hasCap(caps, CapMCPCall) {
+				reply(req.ID, nil, "ipc: permission denied (mcp.call)")
+				continue
+			}
 			if !s.mcpAllowed(req.MCPName) {
-				reply(req.ID, nil, fmt.Sprintf("mcp.list_tools: %q not in security.allowed_mcp", req.MCPName))
+				reply(req.ID, nil, fmt.Sprintf("ipc: %q not in security.allowed_mcp", req.MCPName))
 				continue
 			}
 			port, err := s.getMCPPort(req.MCPName)
@@ -426,8 +448,12 @@ func (s *Server) handleConn(conn net.Conn) {
 			reply(req.ID, tools, "")
 
 		case "mcp.call":
+			if !hasCap(caps, CapMCPCall) {
+				reply(req.ID, nil, "ipc: permission denied (mcp.call)")
+				continue
+			}
 			if !s.mcpAllowed(req.MCPName) {
-				reply(req.ID, nil, fmt.Sprintf("mcp.call: %q not in security.allowed_mcp", req.MCPName))
+				reply(req.ID, nil, fmt.Sprintf("ipc: %q not in security.allowed_mcp", req.MCPName))
 				continue
 			}
 			port, err := s.getMCPPort(req.MCPName)
@@ -445,44 +471,46 @@ func (s *Server) handleConn(conn net.Conn) {
 				continue
 			}
 			reply(req.ID, result, "")
+
+		default:
+			if req.ID != "" {
+				reply(req.ID, nil, fmt.Sprintf("ipc: unknown method %q", req.Method))
+			}
 		}
 	}
 }
 
-// taskAllowed reports whether the running task's security config permits calling taskID.
 func (s *Server) taskAllowed(taskID string) bool {
 	if s.spec == nil || s.spec.Security == nil {
 		return false
 	}
-	for _, allowed := range s.spec.Security.AllowedTasks {
-		if allowed == "*" || allowed == taskID {
+	for _, a := range s.spec.Security.AllowedTasks {
+		if a == "*" || a == taskID {
 			return true
 		}
 	}
 	return false
 }
 
-// mcpAllowed reports whether the running task's security config permits accessing the named MCP server.
 func (s *Server) mcpAllowed(name string) bool {
 	if s.spec == nil || s.spec.Security == nil {
 		return false
 	}
-	for _, allowed := range s.spec.Security.AllowedMCP {
-		if allowed == "*" || allowed == name {
+	for _, a := range s.spec.Security.AllowedMCP {
+		if a == "*" || a == name {
 			return true
 		}
 	}
 	return false
 }
 
-// getMCPPort looks up the mcp_port of a daemon task by its task ID.
 func (s *Server) getMCPPort(taskID string) (int, error) {
 	spec, ok := s.registry.Get(taskID)
 	if !ok {
-		return 0, fmt.Errorf("mcp: task %q not found", taskID)
+		return 0, fmt.Errorf("ipc: mcp task %q not found", taskID)
 	}
 	if spec.MCPPort == 0 {
-		return 0, fmt.Errorf("mcp: task %q does not declare mcp_port", taskID)
+		return 0, fmt.Errorf("ipc: task %q does not declare mcp_port", taskID)
 	}
 	return spec.MCPPort, nil
 }
