@@ -1,19 +1,22 @@
-BINARY  := dicode
-CMD     := ./cmd/dicode
-VERSION ?= dev
+BINARY        := dicode
+DAEMON_BINARY := dicoded
+CMD           := ./cmd/dicode
+DAEMON_CMD    := ./cmd/dicoded
+VERSION       ?= dev
 
 GO      := $(shell which go 2>/dev/null || echo $(HOME)/.local/share/mise/shims/go)
 GOFLAGS := -ldflags "-X main.version=$(VERSION)"
 
-.PHONY: build test test-verbose lint fmt clean run tidy
+.PHONY: build test test-verbose test-race lint fmt clean run tidy help
 
-## build: compile the dicode binary into the project root
+## build: compile both dicode (CLI) and dicoded (daemon) into the project root
 build:
 	$(GO) build $(GOFLAGS) -o $(BINARY) $(CMD)
+	$(GO) build $(GOFLAGS) -o $(DAEMON_BINARY) $(DAEMON_CMD)
 
-## run: build and run dicode (Ctrl-C to stop)
+## run: build and run dicoded daemon (Ctrl-C to stop)
 run: build
-	./$(BINARY)
+	./$(DAEMON_BINARY)
 
 ## test: run all tests
 test:
@@ -39,9 +42,9 @@ fmt:
 lint: fmt
 	$(GO) vet ./...
 
-## clean: remove the compiled binary
+## clean: remove compiled binaries
 clean:
-	rm -f $(BINARY)
+	rm -f $(BINARY) $(DAEMON_BINARY)
 
 ## help: list available targets
 help:
