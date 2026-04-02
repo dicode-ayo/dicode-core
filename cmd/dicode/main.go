@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 
 	"github.com/dicode/dicode/pkg/config"
@@ -139,15 +140,28 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 		return fmt.Errorf("build sources: %w", err)
 	}
 	rec := registry.NewReconciler(reg, sources, log)
+	// Capture the webhook handler once — it is a singleton backed by the engine.
+	webhookH := eng.WebhookHandler()
+	// Track webhook paths locally so OnUnregister doesn't need to call reg.Get,
+	// which would race with a concurrent re-registration of the same task ID.
+	var webhookMu sync.Mutex
+	webhookPaths := make(map[string]string) // taskID → registered path
 	rec.OnRegister = func(spec *task.Spec) {
 		eng.Register(spec)
 		if spec.Trigger.Webhook != "" {
-			gateway.Register(spec.Trigger.Webhook, eng.WebhookHandler())
+			gateway.Register(spec.Trigger.Webhook, webhookH)
+			webhookMu.Lock()
+			webhookPaths[spec.ID] = spec.Trigger.Webhook
+			webhookMu.Unlock()
 		}
 	}
 	rec.OnUnregister = func(id string) {
-		if spec, ok := reg.Get(id); ok && spec.Trigger.Webhook != "" {
-			gateway.Unregister(spec.Trigger.Webhook)
+		webhookMu.Lock()
+		path := webhookPaths[id]
+		delete(webhookPaths, id)
+		webhookMu.Unlock()
+		if path != "" {
+			gateway.Unregister(path)
 		}
 		eng.Unregister(id)
 	}

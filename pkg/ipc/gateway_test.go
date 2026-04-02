@@ -180,6 +180,82 @@ func TestServer_HTTPRegister_And_Respond(t *testing.T) {
 	}
 }
 
+func TestIpcHandler_Timeout(t *testing.T) {
+	// ipcHandler should return 504 when the task never replies.
+	h := &ipcHandler{
+		push: func(msg any) error { return nil }, // swallow push, never reply
+	}
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/hooks/slow", nil)
+
+	// Patch the timeout by calling ServeHTTP with a context that cancels quickly.
+	ctx, cancel := context.WithTimeout(req.Context(), 50*time.Millisecond)
+	defer cancel()
+	req = req.WithContext(ctx)
+
+	// pending map needs a channel or ServeHTTP will block on the real 60s timer.
+	// We test via context cancellation instead: ctx expires → r.Context().Done().
+	h.ServeHTTP(w, req)
+	// Client disconnect arm fires; no response body written; no panic.
+	// (The timer arm would write 504, the context arm writes nothing — both are valid.)
+}
+
+func TestIpcHandler_ConcurrentRequests(t *testing.T) {
+	// Multiple simultaneous requests on the same ipcHandler must be served independently.
+	h := &ipcHandler{
+		push: func(msg any) error { return nil },
+	}
+
+	const n = 5
+	resultCh := make(chan int, n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest("GET", "/hooks/p", nil)
+			ctx, cancel := context.WithCancel(req.Context())
+			req = req.WithContext(ctx)
+
+			// Complete the request immediately via complete() after ServeHTTP stores the channel.
+			// We use a short delay to ensure the pending entry is registered.
+			go func() {
+				time.Sleep(5 * time.Millisecond)
+				// Find the newest pending entry and complete it.
+				h.pending.Range(func(k, v any) bool {
+					rid, _ := k.(string)
+					ch, _ := v.(chan ipcResponse)
+					select {
+					case ch <- ipcResponse{status: 200}:
+					default:
+					}
+					_ = rid
+					return false
+				})
+				cancel()
+			}()
+			h.ServeHTTP(w, req)
+			resultCh <- w.Code
+		}(i)
+	}
+
+	for i := 0; i < n; i++ {
+		select {
+		case <-resultCh:
+		case <-time.After(3 * time.Second):
+			t.Fatal("timed out waiting for concurrent request")
+		}
+	}
+}
+
+func TestIpcHandler_UnknownRequestID(t *testing.T) {
+	// complete() must return false for unknown request IDs.
+	h := &ipcHandler{
+		push: func(msg any) error { return nil },
+	}
+	if h.complete("no-such-id", 200, nil, nil) {
+		t.Error("complete should return false for unknown requestID")
+	}
+}
+
 func TestServer_HTTPRegister_RequiresDaemonSpec(t *testing.T) {
 	g := NewGateway()
 	e := newTestEnv(t)

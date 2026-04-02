@@ -1,6 +1,7 @@
 package ipc
 
 import (
+	"io"
 	"net/http"
 	"sort"
 	"strings"
@@ -122,18 +123,14 @@ func (h *ipcHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer h.pending.Delete(rid)
 
 	// Collect request body (up to 8 MiB — matches maxMessageSize).
+	// io.LimitReader caps the read and io.ReadAll surfaces any real I/O error.
 	var body []byte
 	if r.Body != nil {
-		body = make([]byte, 0, 512)
-		buf := make([]byte, 4096)
-		total := 0
-		for total < maxMessageSize {
-			n, err := r.Body.Read(buf)
-			body = append(body, buf[:n]...)
-			total += n
-			if err != nil {
-				break
-			}
+		var err error
+		body, err = io.ReadAll(io.LimitReader(r.Body, maxMessageSize))
+		if err != nil {
+			http.Error(w, "gateway: read request body failed", http.StatusBadRequest)
+			return
 		}
 	}
 
@@ -159,6 +156,8 @@ func (h *ipcHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	t := time.NewTimer(60 * time.Second)
+	defer t.Stop()
 	select {
 	case resp := <-ch:
 		for k, v := range resp.headers {
@@ -168,14 +167,20 @@ func (h *ipcHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(resp.status)
 		}
 		_, _ = w.Write(resp.body)
-	case <-time.After(60 * time.Second):
+	case <-t.C:
 		http.Error(w, "gateway: handler timeout", http.StatusGatewayTimeout)
+	case <-r.Context().Done():
+		// Client disconnected; nothing to write.
 	}
 }
 
 // complete delivers a task's http.respond reply to the waiting ServeHTTP call.
-func (h *ipcHandler) complete(rid string, status int, headers map[string]string, body []byte) {
-	if v, ok := h.pending.Load(rid); ok {
-		v.(chan ipcResponse) <- ipcResponse{status: status, headers: headers, body: body}
+// Returns false if rid has no pending request (already timed out or unknown).
+func (h *ipcHandler) complete(rid string, status int, headers map[string]string, body []byte) bool {
+	v, ok := h.pending.Load(rid)
+	if !ok {
+		return false
 	}
+	v.(chan ipcResponse) <- ipcResponse{status: status, headers: headers, body: body}
+	return true
 }

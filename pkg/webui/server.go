@@ -322,10 +322,10 @@ func (s *Server) Handler() http.Handler {
 			return s.gateway
 		}
 		return s.engine.WebhookHandler()
-	}()
+	}
 	webhookHandler := func(w http.ResponseWriter, req *http.Request) {
 		req.URL.Path = "/hooks/" + chi.URLParam(req, "*")
-		s.webhookAuthGuard(w, req, webhookDispatch)
+		s.webhookAuthGuard(w, req, webhookDispatch())
 	}
 	r.Get("/hooks/*", webhookHandler)
 	r.Post("/hooks/*", webhookHandler)
