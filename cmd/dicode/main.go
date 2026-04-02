@@ -176,11 +176,10 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 		home, _ := os.UserHomeDir()
 		dataDir = home + "/.dicode"
 	}
-	srv, err := webui.New(port, reg, eng, cfg, configPath, localSecrets, rec, sourceMgr, dataDir, logBroadcaster, log, database)
+	srv, err := webui.New(port, reg, eng, cfg, configPath, localSecrets, rec, sourceMgr, dataDir, logBroadcaster, log, database, gateway)
 	if err != nil {
 		return fmt.Errorf("build webui: %w", err)
 	}
-	srv.SetGateway(gateway)
 	srv.SetManagedRuntimes(managedRuntimes)
 
 	// 7. Run everything concurrently.
