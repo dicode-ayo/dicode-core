@@ -52,6 +52,16 @@ type Request struct {
 	MCPName string          `json:"mcpName,omitempty"`
 	Tool    string          `json:"tool,omitempty"`
 	Args    json.RawMessage `json:"args,omitempty"`
+
+	// http.register (daemon tasks register an HTTP pattern with the gateway)
+	Pattern  string `json:"pattern,omitempty"`
+	StreamID string `json:"streamID,omitempty"`
+
+	// http.respond (task sends HTTP response back to a pending gateway request)
+	RequestID   string            `json:"requestID,omitempty"`
+	Status      int               `json:"status,omitempty"`
+	RespHeaders map[string]string `json:"respHeaders,omitempty"`
+	RespBody    []byte            `json:"respBody,omitempty"` // base64-encoded in JSON
 }
 
 // Response is an outbound message to a connected client.
@@ -76,6 +86,18 @@ func (o *OutputResult) IsSet() bool { return o != nil && o.ContentType != "" }
 type EngineRunner interface {
 	FireManual(ctx context.Context, taskID string, params map[string]string) (string, error)
 	WaitRun(ctx context.Context, runID string) (RunResult, error)
+}
+
+// HTTPInboundRequest is a server-initiated push to a daemon task that has
+// registered an HTTP pattern via http.register. The task responds by sending
+// an http.respond Request with the matching RequestID.
+type HTTPInboundRequest struct {
+	RequestID  string            `json:"requestID"`
+	HTTPMethod string            `json:"httpMethod"`
+	Path       string            `json:"path"`
+	Query      string            `json:"query,omitempty"`
+	ReqHeaders map[string]string `json:"reqHeaders,omitempty"`
+	ReqBody    []byte            `json:"reqBody,omitempty"` // base64-encoded in JSON
 }
 
 // RunResult is returned by EngineRunner.WaitRun.
