@@ -10,6 +10,7 @@ import (
 
 	"github.com/dicode/dicode/pkg/config"
 	"github.com/dicode/dicode/pkg/db"
+	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/registry"
 	"github.com/dicode/dicode/pkg/trigger"
 	"go.uber.org/zap"
@@ -34,7 +35,7 @@ func newAuthServer(t *testing.T, passphrase string) *Server {
 			MCP:    true,
 		},
 	}
-	srv, err := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d)
+	srv, err := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -132,7 +133,7 @@ func TestAuth_NoAuthConfig_AllEndpointsOpen(t *testing.T) {
 	reg := registry.New(d)
 	eng := trigger.New(reg, nil, zap.NewNop())
 	cfg := &config.Config{Server: config.ServerConfig{Port: 8080, Auth: false}}
-	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d)
+	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
 	h := srv.Handler()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
@@ -251,7 +252,7 @@ func TestCORS_DisallowedOrigin_NoHeader(t *testing.T) {
 		Port:           8080,
 		AllowedOrigins: []string{"https://trusted.example.com"},
 	}}
-	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d)
+	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
 	h := srv.Handler()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
@@ -273,7 +274,7 @@ func TestCORS_AllowedOrigin_HasHeader(t *testing.T) {
 		Port:           8080,
 		AllowedOrigins: []string{"https://trusted.example.com"},
 	}}
-	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d)
+	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
 	h := srv.Handler()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
@@ -293,7 +294,7 @@ func TestSecurityHeaders_Present(t *testing.T) {
 	defer d.Close()
 	reg := registry.New(d)
 	eng := trigger.New(reg, nil, zap.NewNop())
-	srv, _ := New(8080, reg, eng, &config.Config{}, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d)
+	srv, _ := New(8080, reg, eng, &config.Config{}, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
 	h := srv.Handler()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
@@ -453,7 +454,7 @@ func TestCORS_MalformedOrigin_IsSkipped(t *testing.T) {
 		// space-separated string is a common config typo — should be ignored
 		AllowedOrigins: []string{"https://good.example.com https://evil.example.com"},
 	}}
-	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d)
+	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
 	h := srv.Handler()
 
 	// The malformed entry is skipped, so neither origin gets the CORS header.

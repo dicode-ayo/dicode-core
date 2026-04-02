@@ -10,6 +10,7 @@ import (
 
 	"github.com/dicode/dicode/pkg/config"
 	"github.com/dicode/dicode/pkg/db"
+	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/registry"
 	"github.com/dicode/dicode/pkg/trigger"
 	"go.uber.org/zap"
@@ -100,7 +101,7 @@ func TestResolvePassphrase_YAMLOverrideTakesPrecedence(t *testing.T) {
 	reg := registry.New(d)
 	eng := trigger.New(reg, nil, zap.NewNop())
 	cfg := &config.Config{Server: config.ServerConfig{Auth: true, Secret: "yaml-passphrase"}}
-	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d)
+	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
 
 	got := srv.resolvePassphrase(context.Background())
 	if got != "yaml-passphrase" {
@@ -115,7 +116,7 @@ func TestResolvePassphrase_DBUsedWhenNoYAML(t *testing.T) {
 	reg := registry.New(d)
 	eng := trigger.New(reg, nil, zap.NewNop())
 	cfg := &config.Config{Server: config.ServerConfig{Auth: true, Secret: ""}}
-	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d)
+	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
 
 	_ = srv.passphraseStore.set(context.Background(), "stored-pass")
 
@@ -132,7 +133,7 @@ func TestResolvePassphrase_EmptyWhenNeitherSet(t *testing.T) {
 	reg := registry.New(d)
 	eng := trigger.New(reg, nil, zap.NewNop())
 	cfg := &config.Config{Server: config.ServerConfig{Auth: true}}
-	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d)
+	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
 
 	got := srv.resolvePassphrase(context.Background())
 	if got != "" {
@@ -149,7 +150,7 @@ func TestEnsurePassphrase_GeneratesWhenMissing(t *testing.T) {
 	reg := registry.New(d)
 	eng := trigger.New(reg, nil, zap.NewNop())
 	cfg := &config.Config{Server: config.ServerConfig{Auth: true}}
-	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d)
+	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
 
 	if err := srv.ensurePassphrase(context.Background()); err != nil {
 		t.Fatalf("ensurePassphrase: %v", err)
@@ -171,7 +172,7 @@ func TestEnsurePassphrase_DoesNotOverwriteExisting(t *testing.T) {
 	reg := registry.New(d)
 	eng := trigger.New(reg, nil, zap.NewNop())
 	cfg := &config.Config{Server: config.ServerConfig{Auth: true}}
-	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d)
+	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
 
 	_ = srv.passphraseStore.set(context.Background(), "already-set")
 	if err := srv.ensurePassphrase(context.Background()); err != nil {
@@ -191,7 +192,7 @@ func TestEnsurePassphrase_NoopWhenAuthDisabled(t *testing.T) {
 	reg := registry.New(d)
 	eng := trigger.New(reg, nil, zap.NewNop())
 	cfg := &config.Config{Server: config.ServerConfig{Auth: false}}
-	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d)
+	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
 
 	if err := srv.ensurePassphrase(context.Background()); err != nil {
 		t.Fatalf("ensurePassphrase: %v", err)
@@ -210,7 +211,7 @@ func TestEnsurePassphrase_NoopWhenYAMLOverridePresent(t *testing.T) {
 	reg := registry.New(d)
 	eng := trigger.New(reg, nil, zap.NewNop())
 	cfg := &config.Config{Server: config.ServerConfig{Auth: true, Secret: "from-yaml"}}
-	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d)
+	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
 
 	if err := srv.ensurePassphrase(context.Background()); err != nil {
 		t.Fatalf("ensurePassphrase: %v", err)
