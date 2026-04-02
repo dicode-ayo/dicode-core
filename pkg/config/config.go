@@ -32,7 +32,6 @@ type Config struct {
 	Database      DatabaseConfig           `yaml:"database"`
 	Secrets       SecretsConfig            `yaml:"secrets"`
 	Notifications NotificationsConfig      `yaml:"notifications"`
-	Relay         RelayConfig              `yaml:"relay"`
 	Server        ServerConfig             `yaml:"server"`
 	AI            AIConfig                 `yaml:"ai"`
 	Defaults      DefaultsConfig           `yaml:"defaults"`
@@ -47,14 +46,6 @@ type DatabaseConfig struct {
 	Type   string `yaml:"type"`    // "sqlite" (default) | "postgres" | "mysql"
 	Path   string `yaml:"path"`    // sqlite: path to .db file
 	URLEnv string `yaml:"url_env"` // postgres/mysql: env var holding DSN
-}
-
-// RelayConfig is retained for parse compatibility only.
-// The relay feature has been removed. Any relay: block in dicode.yaml triggers
-// a deprecation error at load time.
-type RelayConfig struct {
-	Enabled    bool   `yaml:"enabled,omitempty"`
-	AccountEnv string `yaml:"account_env,omitempty"`
 }
 
 type SecretsConfig struct {
@@ -267,10 +258,6 @@ func applyDefaults(cfg *Config) {
 }
 
 func (cfg *Config) validate() error {
-	if cfg.Relay.Enabled || cfg.Relay.AccountEnv != "" {
-		return fmt.Errorf("relay: the relay feature has been removed in this version; " +
-			"remove the relay: block from dicode.yaml and use a reverse proxy or tunnel for public webhook exposure")
-	}
 	for i, s := range cfg.Sources {
 		switch s.Type {
 		case SourceTypeGit:
