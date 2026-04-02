@@ -47,7 +47,7 @@ func (r *Ref) effectivePoll() time.Duration {
 }
 
 // Defaults are applied to all entries in a TaskSet before per-entry overrides.
-// They sit at levels 2–4 in the six-level precedence stack.
+// They form level 2 in the three-level precedence stack.
 type Defaults struct {
 	Timeout time.Duration `yaml:"timeout,omitempty"`
 	Retry   *RetryConfig  `yaml:"retry,omitempty"`
@@ -83,7 +83,7 @@ type ParamOverride struct {
 }
 
 // Overrides is a patch applied to a resolved task or to a nested TaskSet entry.
-// Fields are applied in the six-level override cascade; later layers win.
+// Fields are applied in the three-level override cascade; later layers win.
 type Overrides struct {
 	Enabled *bool              `yaml:"enabled,omitempty"`
 	Trigger *TriggerPatch      `yaml:"trigger,omitempty"`
@@ -94,7 +94,8 @@ type Overrides struct {
 	Runtime string             `yaml:"runtime,omitempty"`
 	Notify  *task.NotifyConfig `yaml:"notify,omitempty"`
 
-	// For task_set entries only — Defaults is pushed into the nested set as level 4.
+	// For task_set entries only — Deprecated: Defaults cross-boundary cascade is no longer applied.
+	// Use per-entry overrides.entries[key] to patch nested tasks explicitly.
 	Defaults *Defaults `yaml:"defaults,omitempty"`
 	// For task_set entries only — Entries patches specific tasks within the nested set.
 	Entries map[string]*Overrides `yaml:"entries,omitempty"`
@@ -123,7 +124,7 @@ type TSMetadata struct {
 
 // TaskSetBody is the spec block of a TaskSet.
 type TaskSetBody struct {
-	// Defaults are applied at level 3 (above Config defaults, below parent overrides).
+	// Defaults are applied at level 1 in the three-level precedence stack (below per-entry overrides).
 	Defaults *Defaults         `yaml:"defaults,omitempty"`
 	Entries  map[string]*Entry `yaml:"entries"`
 }
@@ -140,8 +141,8 @@ type ConfigSpec struct {
 // ConfigBody is the spec block of a Config file.
 type ConfigBody struct {
 	Runtimes map[string]RuntimePinConfig `yaml:"runtimes,omitempty"`
-	// Defaults sit at precedence level 2 (above task.yaml base, below TaskSet spec.defaults).
-	// Only timeout, retry, and env are honoured here; trigger/params/enabled are not.
+	// Defaults previously sat at precedence level 2 in the old six-level stack.
+	// Deprecated: kind:Config spec.defaults no longer affects the override stack; use dicode.yaml defaults: instead.
 	Defaults *Defaults `yaml:"defaults,omitempty"`
 }
 

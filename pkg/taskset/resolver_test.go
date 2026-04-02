@@ -9,9 +9,16 @@ import (
 
 	"github.com/dicode/dicode/pkg/task"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+func newObservedLogger() (*zap.Logger, *observer.ObservedLogs) {
+	core, logs := observer.New(zapcore.WarnLevel)
+	return zap.New(core), logs
+}
 
 func newResolver(t *testing.T) *Resolver {
 	t.Helper()
@@ -66,13 +73,12 @@ func TestJoinNamespace(t *testing.T) {
 // ── buildOverrideLayers ───────────────────────────────────────────────────────
 
 func TestBuildOverrideLayers_Order(t *testing.T) {
-	cfg := &Defaults{Timeout: 10 * time.Second}
+	// Three-level stack (lowest to highest): setDefaults → parentEntryOverride → entryOverrides.
 	set := &Defaults{Timeout: 20 * time.Second}
-	parent := &Overrides{Defaults: &Defaults{Timeout: 30 * time.Second}}
 	parentEntry := &Overrides{Timeout: 40 * time.Second}
 	entry := &Overrides{Timeout: 50 * time.Second}
 
-	layers := buildOverrideLayers(cfg, set, parent, parentEntry, entry)
+	layers := buildOverrideLayers(set, parentEntry, entry)
 
 	base := &task.Spec{Name: "x", Runtime: task.RuntimeDeno, Trigger: task.TriggerConfig{Manual: true}}
 	got := applyOverrides(base, layers...)
@@ -82,15 +88,29 @@ func TestBuildOverrideLayers_Order(t *testing.T) {
 	}
 }
 
-func TestBuildOverrideLayers_ParentEntryBeatsParentDefaults(t *testing.T) {
-	parent := &Overrides{Defaults: &Defaults{Timeout: 30 * time.Second}}
-	parentEntry := &Overrides{Timeout: 40 * time.Second} // level 5 beats level 4
+func TestBuildOverrideLayers_EntryBeatsSetDefaults(t *testing.T) {
+	// Entry overrides (level 3) beat set defaults (level 1).
+	set := &Defaults{Timeout: 20 * time.Second}
+	entry := &Overrides{Timeout: 50 * time.Second}
 
-	layers := buildOverrideLayers(nil, nil, parent, parentEntry, nil)
+	layers := buildOverrideLayers(set, nil, entry)
+	base := &task.Spec{Name: "x", Runtime: task.RuntimeDeno, Trigger: task.TriggerConfig{Manual: true}}
+	got := applyOverrides(base, layers...)
+	if got.Timeout != 50*time.Second {
+		t.Errorf("entry should beat set defaults: got %v", got.Timeout)
+	}
+}
+
+func TestBuildOverrideLayers_ParentEntryBeatsSetDefaults(t *testing.T) {
+	// Parent entry patch (level 2) beats set defaults (level 1).
+	set := &Defaults{Timeout: 20 * time.Second}
+	parentEntry := &Overrides{Timeout: 40 * time.Second}
+
+	layers := buildOverrideLayers(set, parentEntry, nil)
 	base := &task.Spec{Name: "x", Runtime: task.RuntimeDeno, Trigger: task.TriggerConfig{Manual: true}}
 	got := applyOverrides(base, layers...)
 	if got.Timeout != 40*time.Second {
-		t.Errorf("parent entry patch should beat parent defaults: got %v", got.Timeout)
+		t.Errorf("parent entry patch should beat set defaults: got %v", got.Timeout)
 	}
 }
 
@@ -313,7 +333,9 @@ spec:
 	}
 }
 
-func TestResolver_ConfigDefaultsApplied(t *testing.T) {
+func TestResolver_ConfigDefaultsDeprecated(t *testing.T) {
+	// configDefaults passed to Resolve are now deprecated and NOT applied to the override stack.
+	// A deprecation warning is emitted; the resolved spec retains task.yaml values.
 	repoDir := t.TempDir()
 	taskDir := writeTaskDir(t, repoDir, "deploy")
 
@@ -329,7 +351,9 @@ spec:
         path: ` + filepath.Join(taskDir, "task.yaml") + `
 `
 	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
-	r := newResolver(t)
+	// Use an observed logger so we can verify the deprecation warning is emitted.
+	logger, logs := newObservedLogger()
+	r := NewResolver(t.TempDir(), false, logger)
 	configDefaults := &Defaults{
 		Timeout: 120 * time.Second,
 		Env:     []string{"RUNTIME_ENV=backend"},
@@ -342,22 +366,23 @@ spec:
 		t.Fatalf("want 1")
 	}
 	spec := results[0].Spec
-	if spec.Timeout != 120*time.Second {
-		t.Errorf("config defaults timeout: got %v", spec.Timeout)
+	// Timeout should NOT be overridden by configDefaults.
+	if spec.Timeout == 120*time.Second {
+		t.Errorf("deprecated configDefaults should not be applied: timeout was set to 120s")
 	}
-	found := false
 	for _, e := range spec.Env {
 		if e == "RUNTIME_ENV=backend" {
-			found = true
+			t.Errorf("deprecated configDefaults env should not be applied: found %q", e)
 		}
 	}
-	if !found {
-		t.Errorf("config env not applied: %v", spec.Env)
+	// Deprecation warning must have been logged.
+	if logs.FilterMessageSnippet("kind:Config spec.defaults is deprecated").Len() == 0 {
+		t.Error("expected deprecation warning for configDefaults")
 	}
 }
 
-func TestResolver_EntryOverrideBeatsConfigDefaults(t *testing.T) {
-	// Entry overrides (level 6) must beat config defaults (level 2).
+func TestResolver_EntryOverrideBeatsSetDefaults(t *testing.T) {
+	// Entry overrides (level 3) must beat set defaults (level 1).
 	repoDir := t.TempDir()
 	taskDir := writeTaskDir(t, repoDir, "deploy")
 
@@ -367,6 +392,8 @@ kind: TaskSet
 metadata:
   name: infra
 spec:
+  defaults:
+    timeout: 120s
   entries:
     deploy:
       ref:
@@ -376,13 +403,12 @@ spec:
 `
 	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
 	r := newResolver(t)
-	configDefaults := &Defaults{Timeout: 120 * time.Second}
-	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, configDefaults, nil)
+	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
 	if results[0].Spec.Timeout != 30*time.Second {
-		t.Errorf("entry override should beat config defaults: got %v", results[0].Spec.Timeout)
+		t.Errorf("entry override should beat set defaults: got %v", results[0].Spec.Timeout)
 	}
 }
 
