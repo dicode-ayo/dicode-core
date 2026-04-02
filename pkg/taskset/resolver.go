@@ -56,8 +56,19 @@ func (r *Resolver) DevMode() bool {
 }
 
 // Resolve walks the TaskSet rooted at tsRef with the given namespace prefix.
-// configDefaults comes from the source's kind:Config file (precedence level 2).
-// parentOverrides are injected by the parent TaskSet entry (levels 4–5).
+//
+// The override precedence is three levels (lowest to highest):
+//  1. task.yaml base spec
+//  2. This TaskSet's spec.defaults
+//  3. Per-entry overrides (parent entry patch merged with local entry overrides)
+//
+// configDefaults (from a colocated kind:Config file) is accepted for backwards
+// compatibility but is no longer applied to the override stack. A deprecation
+// warning is logged when it is non-nil. Use dicode.yaml defaults: instead.
+//
+// parentOverrides carries per-entry patches from the parent TaskSet (level 3).
+// Passing parentOverrides.Defaults is also deprecated and now a no-op; only
+// Entries is honoured.
 func (r *Resolver) Resolve(ctx context.Context, namespace string, tsRef *Ref, configDefaults *Defaults, parentOverrides *Overrides) ([]*ResolvedTask, error) {
 	tsPath, err := r.resolveRef(ctx, tsRef)
 	if err != nil {
@@ -79,6 +90,18 @@ func (r *Resolver) resolveBody(
 	configDefaults *Defaults,
 	parentOverrides *Overrides,
 ) ([]*ResolvedTask, error) {
+	// Deprecation warnings for removed precedence levels.
+	if defaultsNonEmpty(configDefaults) {
+		r.log.Warn("taskset: kind:Config spec.defaults is deprecated and no longer applied to the override stack; migrate settings to dicode.yaml defaults:",
+			zap.String("taskset", tsPath),
+		)
+	}
+	if parentOverrides != nil && defaultsNonEmpty(parentOverrides.Defaults) {
+		r.log.Warn("taskset: overrides.defaults cross-boundary cascade is deprecated and no longer applied; use per-entry overrides.entries[key] to patch nested tasks explicitly",
+			zap.String("taskset", tsPath),
+		)
+	}
+
 	var results []*ResolvedTask
 
 	for key, entry := range ts.Spec.Entries {
@@ -103,7 +126,7 @@ func (r *Resolver) resolveBody(
 			if !enabled {
 				continue
 			}
-			layers := buildOverrideLayers(configDefaults, ts.Spec.Defaults, parentOverrides, parentEntryOverride, entry.Overrides)
+			layers := buildOverrideLayers(ts.Spec.Defaults, parentEntryOverride, entry.Overrides)
 			resolved := applyOverrides(entry.Inline, layers...)
 			resolved.ID = fullID
 			resolved.TaskDir = filepath.Dir(tsPath)
@@ -147,7 +170,7 @@ func (r *Resolver) resolveBody(
 					zap.String("entry", fullID), zap.Error(err))
 				continue
 			}
-			layers := buildOverrideLayers(configDefaults, ts.Spec.Defaults, parentOverrides, parentEntryOverride, entry.Overrides)
+			layers := buildOverrideLayers(ts.Spec.Defaults, parentEntryOverride, entry.Overrides)
 			resolved := applyOverrides(spec, layers...)
 			resolved.ID = fullID
 			results = append(results, &ResolvedTask{
@@ -266,23 +289,29 @@ func (r *Resolver) ClonedRepos() map[string]string {
 	return out
 }
 
-// buildOverrideLayers assembles the six-level precedence stack (lowest first):
+// buildOverrideLayers assembles the three-level precedence stack (lowest first):
 //  1. (task.yaml base — not in this function, it is the base passed to applyOverrides)
-//  2. configDefaults — from kind:Config file
-//  3. setDefaults — from this TaskSet's spec.defaults
-//  4. parentDefaults — pushed in by the parent's overrides.defaults
-//  5. parentEntryPatch — parent's overrides.entries[key]
-//  6. entryOverrides — this entry's own overrides block  ← highest
-func buildOverrideLayers(configDefaults, setDefaults *Defaults, parentOverrides, parentEntryOverride, entryOverrides *Overrides) []*Overrides {
-	layers := make([]*Overrides, 0, 5)
-	layers = append(layers, defaultsToOverrides(configDefaults))
+//  2. setDefaults — from this TaskSet's spec.defaults
+//  3. parentEntryPatch — parent's overrides.entries[key]  (merged with)
+//     entryOverrides  — this entry's own overrides block  ← highest
+//
+// Removed from the old six-level stack (both now emit deprecation warnings):
+//   - configDefaults (was level 2): migrate to dicode.yaml defaults:
+//   - parentOverrides.Defaults (was level 4): use per-entry overrides.entries[key]
+func buildOverrideLayers(setDefaults *Defaults, parentEntryOverride, entryOverrides *Overrides) []*Overrides {
+	layers := make([]*Overrides, 0, 3)
 	layers = append(layers, defaultsToOverrides(setDefaults))
-	if parentOverrides != nil {
-		layers = append(layers, defaultsToOverrides(parentOverrides.Defaults))
-	}
 	layers = append(layers, parentEntryOverride)
 	layers = append(layers, entryOverrides) // entry overrides win (leaf wins)
 	return layers
+}
+
+// defaultsNonEmpty reports whether d has at least one field set.
+func defaultsNonEmpty(d *Defaults) bool {
+	if d == nil {
+		return false
+	}
+	return d.Timeout != 0 || d.Retry != nil || len(d.Env) > 0 || d.Trigger != nil || d.Notify != nil
 }
 
 // joinNamespace joins namespace segments with '/'.
