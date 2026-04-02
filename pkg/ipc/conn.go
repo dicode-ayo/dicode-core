@@ -15,6 +15,9 @@ func writeMsg(w io.Writer, v any) error {
 	if err != nil {
 		return fmt.Errorf("ipc: marshal: %w", err)
 	}
+	if len(data) > maxMessageSize {
+		return fmt.Errorf("ipc: outbound message too large (%d bytes)", len(data))
+	}
 	var hdr [4]byte
 	binary.LittleEndian.PutUint32(hdr[:], uint32(len(data)))
 	if _, err := w.Write(hdr[:]); err != nil {
