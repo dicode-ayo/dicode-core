@@ -105,7 +105,10 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	// 2. Resolve data directory.
 	dataDir := cfg.DataDir
 	if dataDir == "" {
-		home, _ := os.UserHomeDir()
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("cannot determine home directory: %w", err)
+		}
 		dataDir = home + "/.dicode"
 	}
 
