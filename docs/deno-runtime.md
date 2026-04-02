@@ -332,7 +332,7 @@ Permissions are derived from `task.yaml`:
 | Permission | Source |
 | --- | --- |
 | `--allow-net` | Always granted |
-| `--allow-env=DICODE_SOCKET,VAR1,...` | `DICODE_SOCKET` + all `env:` vars |
+| `--allow-env=DICODE_SOCKET,DICODE_TOKEN,VAR1,...` | `DICODE_SOCKET`, `DICODE_TOKEN` (IPC handshake) + all `env:` vars |
 | `--allow-read=path1,path2` | `fs:` entries with `r` or `rw` |
 | `--allow-write=path1` | `fs:` entries with `w` or `rw` |
 

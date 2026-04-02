@@ -26,6 +26,7 @@ Follow this order every time — no exceptions:
 - **Always write `task.test.ts`** — a task without tests will not be committed
 - `task.ts` **must return a JSON-serializable value** — required for chain triggers
 - **Never hardcode secrets** — use `env.VARIABLE_NAME`; declare in `task.yaml env:`
+- **Never declare `DICODE_SOCKET` or `DICODE_TOKEN` in `task.yaml env:`** — these are internal IPC variables injected by the runtime; declaring them leaks the token to user code
 - **One task, one responsibility** — keep tasks focused and composable
 - **Output under 1MB** — tasks are not a data pipeline; keep return values small
 

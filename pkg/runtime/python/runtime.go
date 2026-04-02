@@ -40,9 +40,9 @@ import (
 	"time"
 
 	"github.com/dicode/dicode/pkg/db"
+	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/registry"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
-	denoserver "github.com/dicode/dicode/pkg/runtime/deno/server"
 	"github.com/dicode/dicode/pkg/secrets"
 	"github.com/dicode/dicode/pkg/task"
 	uvpkg "github.com/dicode/dicode/pkg/uv"
@@ -59,14 +59,15 @@ type Runtime struct {
 	secrets   secrets.Chain
 	db        db.DB
 	log       *zap.Logger
-	engine    denoserver.EngineRunner
+	secret    []byte
+	engine    ipc.EngineRunner
 	aiBaseURL string
 	aiModel   string
 	aiAPIKey  string
 }
 
 // SetEngine configures the engine runner used for dicode.run_task calls.
-func (rt *Runtime) SetEngine(e denoserver.EngineRunner) { rt.engine = e }
+func (rt *Runtime) SetEngine(e ipc.EngineRunner) { rt.engine = e }
 
 // SetAIConfig configures the AI provider details passed to tasks via dicode.get_config.
 func (rt *Runtime) SetAIConfig(baseURL, model, apiKey string) {
@@ -77,7 +78,11 @@ func (rt *Runtime) SetAIConfig(baseURL, model, apiKey string) {
 
 // New creates a Python Runtime manager.
 func New(reg *registry.Registry, sc secrets.Chain, database db.DB, log *zap.Logger) *Runtime {
-	return &Runtime{reg: reg, secrets: sc, db: database, log: log}
+	secret, err := ipc.NewSecret()
+	if err != nil {
+		panic(fmt.Sprintf("ipc secret: %v", err))
+	}
+	return &Runtime{reg: reg, secrets: sc, db: database, log: log, secret: secret}
 }
 
 // --- ManagedRuntime interface ---
@@ -119,6 +124,7 @@ func (rt *Runtime) NewExecutor(binaryPath string) pkgruntime.Executor {
 		secrets:   rt.secrets,
 		db:        rt.db,
 		log:       rt.log,
+		secret:    rt.secret,
 		engine:    rt.engine,
 		aiBaseURL: rt.aiBaseURL,
 		aiModel:   rt.aiModel,
@@ -134,7 +140,8 @@ type executor struct {
 	secrets   secrets.Chain
 	db        db.DB
 	log       *zap.Logger
-	engine    denoserver.EngineRunner
+	secret    []byte
+	engine    ipc.EngineRunner
 	aiBaseURL string
 	aiModel   string
 	aiAPIKey  string
@@ -184,8 +191,8 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 
 	mergedParams := mergeParams(spec.Params, opts.Params)
 
-	srv := denoserver.New(runID, spec.ID, e.reg, e.db, mergedParams, opts.Input, e.log, spec, e.engine, e.aiBaseURL, e.aiModel, e.aiAPIKey)
-	socketPath, err := srv.Start(execCtx)
+	srv := ipc.New(runID, spec.ID, e.secret, e.reg, e.db, mergedParams, opts.Input, e.log, spec, e.engine, e.aiBaseURL, e.aiModel, e.aiAPIKey)
+	socketPath, token, err := srv.Start(execCtx)
 	if err != nil {
 		status = registry.StatusFailure
 		result.Error = fmt.Errorf("start socket server: %w", err)
@@ -218,7 +225,7 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 	tmpFile.Close()
 
 	cmd := exec.CommandContext(execCtx, e.uvPath, "run", tmpFile.Name()) //nolint:gosec
-	cmd.Env = buildEnv(resolved, socketPath)
+	cmd.Env = buildEnv(resolved, socketPath, token)
 
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
@@ -298,8 +305,12 @@ func buildWrapper(scriptBytes []byte) (string, error) {
 	w.WriteString("\n# === task script ===\n")
 	w.WriteString(body)
 	w.WriteString("\n# === return capture ===\n")
+	w.WriteString("import sys as _sys\n")
+	w.WriteString("_asyncio_mod = _sys.modules['asyncio']\n")
+	w.WriteString("_main = globals().get('main')\n")
+	w.WriteString("if _main is not None and _asyncio_mod.iscoroutinefunction(_main):\n")
+	w.WriteString("    result = _asyncio_mod.run(_main())\n")
 	w.WriteString("_set_return(globals().get('result', None))\n")
-	w.WriteString("try:\n    _sock.close()\nexcept Exception:\n    pass\n")
 	return w.String(), nil
 }
 
@@ -340,8 +351,8 @@ func mergeParams(specParams []task.Param, overrides map[string]string) map[strin
 	return out
 }
 
-func buildEnv(resolved map[string]string, socketPath string) []string {
-	env := append(os.Environ(), "DICODE_SOCKET="+socketPath)
+func buildEnv(resolved map[string]string, socketPath, token string) []string {
+	env := append(os.Environ(), "DICODE_SOCKET="+socketPath, "DICODE_TOKEN="+token)
 	for k, v := range resolved {
 		env = append(env, k+"="+v)
 	}
