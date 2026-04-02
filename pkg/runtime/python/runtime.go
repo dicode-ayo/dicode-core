@@ -77,12 +77,12 @@ func (rt *Runtime) SetAIConfig(baseURL, model, apiKey string) {
 }
 
 // New creates a Python Runtime manager.
-func New(reg *registry.Registry, sc secrets.Chain, database db.DB, log *zap.Logger) *Runtime {
+func New(reg *registry.Registry, sc secrets.Chain, database db.DB, log *zap.Logger) (*Runtime, error) {
 	secret, err := ipc.NewSecret()
 	if err != nil {
-		panic(fmt.Sprintf("ipc secret: %v", err))
+		return nil, fmt.Errorf("python runtime: generate ipc secret: %w", err)
 	}
-	return &Runtime{reg: reg, secrets: sc, db: database, log: log, secret: secret}
+	return &Runtime{reg: reg, secrets: sc, db: database, log: log, secret: secret}, nil
 }
 
 // --- ManagedRuntime interface ---

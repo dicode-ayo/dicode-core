@@ -2,6 +2,7 @@ package ipc
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -710,5 +711,90 @@ func TestServer_MCP_Call_Success(t *testing.T) {
 	}
 	if resp["result"] == nil {
 		t.Error("expected non-nil result")
+	}
+}
+
+// ── additional coverage ───────────────────────────────────────────────────────
+
+func TestToken_Expired(t *testing.T) {
+	secret, _ := NewSecret()
+	// Construct a validly signed token whose expiry is in the past.
+	claims := tokenClaims{
+		Identity: "task:x",
+		RunID:    "r1",
+		Caps:     []string{CapLog},
+		Exp:      time.Now().Add(-time.Hour).Unix(),
+	}
+	payload, _ := json.Marshal(claims)
+	encoded := base64.RawURLEncoding.EncodeToString(payload)
+	sig := base64.RawURLEncoding.EncodeToString(tokenSig(secret, encoded))
+	tok := encoded + "." + sig
+
+	if _, err := VerifyToken(secret, tok); err == nil {
+		t.Error("expected error for expired token")
+	}
+}
+
+func TestHandshake_NoHandshakeSent(t *testing.T) {
+	// Connect to the server but close without sending anything. The server
+	// should recover cleanly (no goroutine leak) and still accept the next
+	// connection with a valid token.
+	e := newTestEnv(t)
+	runID := fmt.Sprintf("test-%d", time.Now().UnixNano())
+	srv := New(runID, "test-task", e.secret, e.reg, e.db, nil, nil, zap.NewNop(), nil, nil, "", "", "")
+	socketPath, token, err := srv.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(srv.Stop)
+
+	// First connection: connect then immediately close without sending anything.
+	bad := dial(t, socketPath)
+	bad.Close()
+
+	// Brief pause so the server goroutine can process the EOF.
+	time.Sleep(20 * time.Millisecond)
+
+	// Second connection: valid handshake should still succeed.
+	conn := dial(t, socketPath)
+	t.Cleanup(func() { conn.Close() })
+	caps := doHandshake(t, conn, token)
+	if !hasCap(caps, CapLog) {
+		t.Errorf("expected log cap after recovery; got %v", caps)
+	}
+}
+
+func TestServer_CapDenied_KVWrite_Silent(t *testing.T) {
+	// A fire-and-forget kv.set without the kv.write cap should be silently
+	// dropped — the key must NOT appear in a subsequent kv.get.
+	e := newTestEnv(t)
+	runID := fmt.Sprintf("test-%d", time.Now().UnixNano())
+	srv := New(runID, "test-task", e.secret, e.reg, e.db, nil, nil, zap.NewNop(), nil, nil, "", "", "")
+	socketPath, _, err := srv.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(srv.Stop)
+
+	// Token with kv.read but NOT kv.write.
+	tok, _ := IssueToken(e.secret, "task:test-task", runID, []string{CapLog, CapKVRead})
+	conn := dial(t, socketPath)
+	t.Cleanup(func() { conn.Close() })
+	doHandshake(t, conn, tok)
+
+	// Fire-and-forget kv.set (no id → no response expected).
+	sendMsg(t, conn, map[string]any{"method": "kv.set", "key": "secret", "value": json.RawMessage(`"leaked"`)})
+
+	// Give the server a moment to process the message.
+	time.Sleep(20 * time.Millisecond)
+
+	// kv.get should return null — the write was silently dropped.
+	sendMsg(t, conn, map[string]any{"id": "1", "method": "kv.get", "key": "secret"})
+	resp := recvMsg(t, conn)
+	if resp["error"] != nil {
+		t.Fatalf("unexpected error from kv.get: %v", resp["error"])
+	}
+	if resp["result"] != nil {
+		t.Errorf("key should not exist; got result=%v", resp["result"])
 	}
 }

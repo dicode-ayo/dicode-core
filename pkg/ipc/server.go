@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/dicode/dicode/pkg/db"
 	mcpclient "github.com/dicode/dicode/pkg/mcp/client"
@@ -145,11 +146,15 @@ func (s *Server) handleConn(conn net.Conn) {
 	defer conn.Close()
 
 	// ── handshake ────────────────────────────────────────────────────────────
+	// Enforce a deadline so a subprocess that connects but never sends the
+	// handshake token cannot hold this goroutine indefinitely.
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 	var hs handshakeReq
 	if err := readMsg(conn, &hs); err != nil {
 		s.log.Warn("ipc: handshake read failed", zap.String("run", s.runID), zap.Error(err))
 		return
 	}
+	_ = conn.SetDeadline(time.Time{}) // clear deadline for normal message loop
 	claims, err := VerifyToken(s.secret, hs.Token)
 	if err != nil {
 		_ = writeMsg(conn, handshakeErr{Error: err.Error()})
