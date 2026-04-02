@@ -45,17 +45,23 @@ func (c *ControlClient) handshake(token string) error {
 		return fmt.Errorf("handshake send: %w", err)
 	}
 
-	// Try success response first; fall back to error envelope.
-	var resp handshakeResp
-	if err := readMsg(c.conn, &resp); err != nil {
+	// Decode into a struct that covers both the success and error envelopes.
+	// The server sends either {"proto":1,"caps":[...]} or {"error":"..."}.
+	var raw struct {
+		Proto int      `json:"proto"`
+		Caps  []string `json:"caps"`
+		Error string   `json:"error"`
+	}
+	if err := readMsg(c.conn, &raw); err != nil {
 		return fmt.Errorf("handshake recv: %w", err)
 	}
-	if resp.Proto == 0 {
-		// Server sent an error — re-read as handshakeErr.
-		// (We already consumed the bytes, so check via the zero Proto.)
-		return fmt.Errorf("handshake rejected by daemon")
+	if raw.Error != "" {
+		return fmt.Errorf("handshake rejected: %s", raw.Error)
 	}
-	c.caps = resp.Caps
+	if raw.Proto == 0 {
+		return fmt.Errorf("handshake: unexpected response from daemon (proto=0)")
+	}
+	c.caps = raw.Caps
 	return nil
 }
 

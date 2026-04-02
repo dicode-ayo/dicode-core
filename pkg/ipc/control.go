@@ -9,7 +9,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"sync"
 	"time"
 
 	"github.com/dicode/dicode/pkg/registry"
@@ -37,10 +36,6 @@ type ControlServer struct {
 
 	startedAt time.Time
 	version   string
-
-	listener net.Listener
-	mu       sync.Mutex
-	done     chan struct{}
 }
 
 // NewControlServer creates a ControlServer. Call Start to begin accepting
@@ -69,11 +64,11 @@ func NewControlServer(
 		log:        log,
 		startedAt:  time.Now(),
 		version:    version,
-		done:       make(chan struct{}),
 	}
 
-	// Issue the CLI token and write it atomically.
-	tok, err := IssueToken(secret, "cli", "cli", cliCaps())
+	// Issue the CLI token with a long TTL — the daemon re-issues on every restart,
+	// so expiry is not the right protection mechanism here.
+	tok, err := IssueTokenWithTTL(secret, "cli", "cli", cliCaps(), tokenCLITTL)
 	if err != nil {
 		return nil, fmt.Errorf("control: issue token: %w", err)
 	}
@@ -112,16 +107,11 @@ func (cs *ControlServer) Start(ctx context.Context) error {
 		ln.Close()
 		return fmt.Errorf("control: chmod socket: %w", err)
 	}
-	cs.mu.Lock()
-	cs.listener = ln
-	cs.mu.Unlock()
-
 	cs.log.Info("control socket ready", zap.String("path", cs.socketPath))
 
 	go func() {
 		<-ctx.Done()
 		ln.Close()
-		close(cs.done)
 		_ = os.Remove(cs.socketPath)
 		_ = os.Remove(cs.tokenPath)
 	}()
@@ -129,20 +119,18 @@ func (cs *ControlServer) Start(ctx context.Context) error {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			select {
-			case <-cs.done:
-				return nil
-			default:
-				cs.log.Warn("control: accept error", zap.Error(err))
-				continue
+			if ctx.Err() != nil {
+				return nil // clean shutdown
 			}
+			cs.log.Warn("control: accept error", zap.Error(err))
+			continue
 		}
-		go cs.handleConn(conn)
+		go cs.handleConn(ctx, conn)
 	}
 }
 
 // handleConn runs the handshake and then the request loop for one CLI client.
-func (cs *ControlServer) handleConn(conn net.Conn) {
+func (cs *ControlServer) handleConn(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 
 	// Handshake — 5-second deadline.
@@ -159,6 +147,11 @@ func (cs *ControlServer) handleConn(conn net.Conn) {
 	_ = writeMsg(conn, handshakeResp{Proto: 1, Caps: claims.Caps})
 	_ = conn.SetDeadline(time.Time{})
 
+	// Derive a per-connection context so that when the client disconnects,
+	// in-flight requests (e.g. cli.run) can be cancelled.
+	connCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	// Request loop.
 	for {
 		var req Request
@@ -168,7 +161,7 @@ func (cs *ControlServer) handleConn(conn net.Conn) {
 		if req.ID == "" {
 			continue // fire-and-forget not used on control socket
 		}
-		result, rerr := cs.dispatch(req)
+		result, rerr := cs.dispatch(connCtx, req)
 		resp := Response{ID: req.ID}
 		if rerr != nil {
 			resp.Error = rerr.Error()
@@ -181,8 +174,7 @@ func (cs *ControlServer) handleConn(conn net.Conn) {
 	}
 }
 
-func (cs *ControlServer) dispatch(req Request) (any, error) {
-	ctx := context.Background()
+func (cs *ControlServer) dispatch(ctx context.Context, req Request) (any, error) {
 	switch req.Method {
 	case "cli.ping":
 		return cs.handlePing(), nil
@@ -223,6 +215,7 @@ func (cs *ControlServer) handlePing() DaemonStatus {
 }
 
 func (cs *ControlServer) handleList() ([]TaskSummary, error) {
+	ctx := context.Background()
 	specs := cs.reg.All()
 	out := make([]TaskSummary, 0, len(specs))
 	for _, s := range specs {
@@ -231,6 +224,14 @@ func (cs *ControlServer) handleList() ([]TaskSummary, error) {
 			Name:        s.Name,
 			Description: s.Description,
 			Trigger:     triggerLabel(s),
+		}
+		if runs, err := cs.reg.ListRuns(ctx, s.ID, 1); err == nil && len(runs) > 0 {
+			r := runs[0]
+			summary.LastStatus = r.Status
+			summary.LastRunID = r.ID
+			if !r.StartedAt.IsZero() {
+				summary.LastRunAt = r.StartedAt.UTC().Format(time.RFC3339)
+			}
 		}
 		out = append(out, summary)
 	}

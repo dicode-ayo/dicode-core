@@ -12,7 +12,10 @@ import (
 	"time"
 )
 
-const tokenTTL = 24 * time.Hour
+const (
+	tokenTTL    = 24 * time.Hour
+	tokenCLITTL = 10 * 365 * 24 * time.Hour // CLI tokens are valid for ~10 years; daemon restart re-issues anyway
+)
 
 // tokenClaims is the payload embedded in a capability token.
 type tokenClaims struct {
@@ -25,11 +28,20 @@ type tokenClaims struct {
 // IssueToken creates a signed capability token for the given identity and caps.
 // secret is a per-daemon random secret; runID ties the token to a specific run.
 func IssueToken(secret []byte, identity, runID string, caps []string) (string, error) {
+	return issueToken(secret, identity, runID, caps, tokenTTL)
+}
+
+// IssueTokenWithTTL is like IssueToken but with an explicit TTL.
+func IssueTokenWithTTL(secret []byte, identity, runID string, caps []string, ttl time.Duration) (string, error) {
+	return issueToken(secret, identity, runID, caps, ttl)
+}
+
+func issueToken(secret []byte, identity, runID string, caps []string, ttl time.Duration) (string, error) {
 	claims := tokenClaims{
 		Identity: identity,
 		RunID:    runID,
 		Caps:     caps,
-		Exp:      time.Now().Add(tokenTTL).Unix(),
+		Exp:      time.Now().Add(ttl).Unix(),
 	}
 	payload, err := json.Marshal(claims)
 	if err != nil {

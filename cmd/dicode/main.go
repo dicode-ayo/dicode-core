@@ -22,6 +22,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -235,6 +236,8 @@ func ensureDaemon(socketPath string) error {
 	if isDaemonRunning(socketPath) {
 		return nil
 	}
+	// Remove a stale socket file so the new daemon can bind cleanly.
+	_ = os.Remove(socketPath)
 
 	// Locate the dicoded binary next to the dicode binary.
 	self, err := os.Executable()
@@ -250,17 +253,30 @@ func ensureDaemon(socketPath string) error {
 		}
 	}
 
+	// Log daemon stderr to dataDir/daemon.log so startup failures are diagnosable.
+	logPath := filepath.Join(filepath.Dir(socketPath), "daemon.log")
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		logFile = nil // non-fatal: proceed without log capture
+	}
+
 	cmd := exec.Command(dicoded)
-	cmd.Stdout = nil
-	cmd.Stderr = nil
 	cmd.Stdin = nil
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
 	if err := cmd.Start(); err != nil {
+		if logFile != nil {
+			logFile.Close()
+		}
 		return fmt.Errorf("start dicoded: %w", err)
 	}
-	// Detach from the child process.
-	go func() { _ = cmd.Wait() }()
+	if logFile != nil {
+		go func() { _ = cmd.Wait(); logFile.Close() }()
+	} else {
+		go func() { _ = cmd.Wait() }()
+	}
 
-	// Poll until the socket appears (up to 8 seconds).
+	// Poll until the socket is live (up to 8 seconds).
 	deadline := time.Now().Add(8 * time.Second)
 	for time.Now().Before(deadline) {
 		if isDaemonRunning(socketPath) {
@@ -268,19 +284,28 @@ func ensureDaemon(socketPath string) error {
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	return fmt.Errorf("daemon did not start within 8 seconds")
+	return fmt.Errorf("daemon did not start within 8 seconds (check %s)", logPath)
 }
 
+// isDaemonRunning returns true if the socket exists and accepts connections.
 func isDaemonRunning(socketPath string) bool {
-	_, err := os.Stat(socketPath)
-	return err == nil
+	conn, err := net.DialTimeout("unix", socketPath, 200*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
 }
 
 func defaultDataDir() string {
 	if d := os.Getenv("DICODE_DATA_DIR"); d != "" {
 		return d
 	}
-	home, _ := os.UserHomeDir()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dicode: cannot determine home directory: %v\n", err)
+		os.Exit(1)
+	}
 	return filepath.Join(home, ".dicode")
 }
 
