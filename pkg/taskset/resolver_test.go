@@ -352,8 +352,8 @@ spec:
 `
 	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
 	// Use an observed logger so we can verify the deprecation warning is emitted.
-	obs, logs := newObservedLogger()
-	r := NewResolver(t.TempDir(), false, obs)
+	logger, logs := newObservedLogger()
+	r := NewResolver(t.TempDir(), false, logger)
 	configDefaults := &Defaults{
 		Timeout: 120 * time.Second,
 		Env:     []string{"RUNTIME_ENV=backend"},

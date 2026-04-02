@@ -181,12 +181,13 @@ func (r *Resolver) resolveBody(
 
 		case KindTaskSet:
 			// Build the overrides context for the nested set.
-			// entry.Overrides carries both defaults (level 4) and per-entry patches (level 5).
+			// entry.Overrides carries per-entry patches for children; parentEntryOverride
+			// is the parent's patch for this entry — merge them (entry wins on conflict).
 			nestedOverrides := entry.Overrides
 			if parentEntryOverride != nil {
 				nestedOverrides = mergeOverrides(parentEntryOverride, nestedOverrides)
 			}
-			nested, err := r.resolveNestedRef(ctx, fullID, localPath, configDefaults, nestedOverrides)
+			nested, err := r.resolveNestedRef(ctx, fullID, localPath, nestedOverrides)
 			if err != nil {
 				r.log.Warn("taskset: failed to resolve nested taskset",
 					zap.String("entry", fullID), zap.Error(err))
@@ -203,12 +204,14 @@ func (r *Resolver) resolveBody(
 	return results, nil
 }
 
-func (r *Resolver) resolveNestedRef(ctx context.Context, namespace, tsPath string, configDefaults *Defaults, overrides *Overrides) ([]*ResolvedTask, error) {
+func (r *Resolver) resolveNestedRef(ctx context.Context, namespace, tsPath string, overrides *Overrides) ([]*ResolvedTask, error) {
 	ts, err := LoadTaskSet(tsPath)
 	if err != nil {
 		return nil, err
 	}
-	return r.resolveBody(ctx, namespace, tsPath, ts, configDefaults, overrides)
+	// Pass nil for configDefaults: deprecation warnings are emitted once at the
+	// public Resolve entry point; nested sets do not re-emit them.
+	return r.resolveBody(ctx, namespace, tsPath, ts, nil, overrides)
 }
 
 // resolveRef returns the absolute local path to the yaml file pointed to by ref.

@@ -94,7 +94,8 @@ type Overrides struct {
 	Runtime string             `yaml:"runtime,omitempty"`
 	Notify  *task.NotifyConfig `yaml:"notify,omitempty"`
 
-	// For task_set entries only — Defaults is pushed into the nested set as level 4.
+	// For task_set entries only — Deprecated: Defaults cross-boundary cascade is no longer applied.
+	// Use per-entry overrides.entries[key] to patch nested tasks explicitly.
 	Defaults *Defaults `yaml:"defaults,omitempty"`
 	// For task_set entries only — Entries patches specific tasks within the nested set.
 	Entries map[string]*Overrides `yaml:"entries,omitempty"`
@@ -123,7 +124,7 @@ type TSMetadata struct {
 
 // TaskSetBody is the spec block of a TaskSet.
 type TaskSetBody struct {
-	// Defaults are applied at level 3 (above Config defaults, below parent overrides).
+	// Defaults are applied at level 1 in the three-level precedence stack (below per-entry overrides).
 	Defaults *Defaults         `yaml:"defaults,omitempty"`
 	Entries  map[string]*Entry `yaml:"entries"`
 }
