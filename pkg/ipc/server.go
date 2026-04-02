@@ -516,16 +516,23 @@ func (s *Server) handleConn(conn net.Conn) {
 			if httpH == nil {
 				httpH = &ipcHandler{push: func(msg any) error { return writeMsg(conn, msg) }}
 			}
+			// Register the new pattern before removing the old one to avoid
+			// a brief window where requests for the path return 404.
+			s.gateway.Register(req.Pattern, httpH)
 			if registeredPattern != "" && registeredPattern != req.Pattern {
 				s.gateway.Unregister(registeredPattern)
 			}
 			registeredPattern = req.Pattern
-			s.gateway.Register(req.Pattern, httpH)
 			reply(req.ID, true, "")
 
 		case "http.respond":
 			if httpH != nil {
-				httpH.complete(req.RequestID, req.Status, req.RespHeaders, req.RespBody)
+				if !httpH.complete(req.RequestID, req.Status, req.RespHeaders, req.RespBody) {
+					s.log.Warn("ipc: http.respond for unknown requestID",
+						zap.String("run", s.runID),
+						zap.String("requestID", req.RequestID),
+					)
+				}
 			}
 
 		default:
