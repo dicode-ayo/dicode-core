@@ -46,11 +46,15 @@ type RunResult struct {
 
 // Runtime executes task scripts with Deno.
 type Runtime struct {
-	registry *registry.Registry
-	secrets  secrets.Chain
-	db       db.DB
-	log      *zap.Logger
-	denoPath string
+	registry  *registry.Registry
+	secrets   secrets.Chain
+	db        db.DB
+	log       *zap.Logger
+	denoPath  string
+	engine    denoserver.EngineRunner
+	aiBaseURL string
+	aiModel   string
+	aiAPIKey  string
 }
 
 // New creates a Deno Runtime. It ensures the Deno binary is present in the
@@ -61,6 +65,16 @@ func New(r *registry.Registry, sc secrets.Chain, database db.DB, log *zap.Logger
 		return nil, fmt.Errorf("ensure deno: %w", err)
 	}
 	return &Runtime{registry: r, secrets: sc, db: database, log: log, denoPath: path}, nil
+}
+
+// SetEngine configures the engine runner used for dicode.run_task calls.
+func (rt *Runtime) SetEngine(e denoserver.EngineRunner) { rt.engine = e }
+
+// SetAIConfig configures the AI provider details passed to tasks via dicode.get_config.
+func (rt *Runtime) SetAIConfig(baseURL, model, apiKey string) {
+	rt.aiBaseURL = baseURL
+	rt.aiModel = model
+	rt.aiAPIKey = apiKey
 }
 
 // Run executes a task script and returns the result.
@@ -116,7 +130,7 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 
 	mergedParams := mergeParams(spec.Params, opts.Params)
 
-	srv := denoserver.New(runID, spec.ID, rt.registry, rt.db, mergedParams, opts.Input, rt.log)
+	srv := denoserver.New(runID, spec.ID, rt.registry, rt.db, mergedParams, opts.Input, rt.log, spec, rt.engine, rt.aiBaseURL, rt.aiModel, rt.aiAPIKey)
 	socketPath, err := srv.Start(execCtx)
 	if err != nil {
 		status = registry.StatusFailure

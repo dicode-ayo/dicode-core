@@ -22,6 +22,7 @@ import (
 	"github.com/dicode/dicode/pkg/notify"
 	"github.com/dicode/dicode/pkg/registry"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
+	denoserver "github.com/dicode/dicode/pkg/runtime/deno/server"
 	"github.com/dicode/dicode/pkg/task"
 	"github.com/google/uuid"
 	"github.com/robfig/cron/v3"
@@ -51,6 +52,8 @@ type Engine struct {
 	notifier        notify.Notifier
 	notifyOnSuccess bool
 	notifyOnFailure bool
+
+	defaultsOnFailureChain string // from config.Defaults.OnFailureChain
 
 	runFinishedHook func(taskID, runID, status, triggerSource string, durationMs int64, notifyOnSuccess, notifyOnFailure bool)
 	runStartedHook  func(taskID, runID, triggerSource string)
@@ -95,6 +98,12 @@ func (e *Engine) SetNotifier(n notify.Notifier) {
 func (e *Engine) SetNotifyDefaults(onSuccess, onFailure bool) {
 	e.notifyOnSuccess = onSuccess
 	e.notifyOnFailure = onFailure
+}
+
+// SetDefaultsOnFailureChain sets the global task ID to fire when any task fails.
+// Corresponds to config.Defaults.OnFailureChain. Per-task on_failure_chain overrides this.
+func (e *Engine) SetDefaultsOnFailureChain(taskID string) {
+	e.defaultsOnFailureChain = taskID
 }
 
 // resolveNotify returns the effective notification flags for a task spec,
@@ -329,6 +338,35 @@ func (e *Engine) FireManual(ctx context.Context, taskID string, params map[strin
 	return e.fireAsync(context.Background(), spec, pkgruntime.RunOptions{Params: params}, "manual")
 }
 
+// WaitRun polls until the run identified by runID reaches a terminal state,
+// then returns a RunResult. Implements denoserver.EngineRunner.
+func (e *Engine) WaitRun(ctx context.Context, runID string) (denoserver.RunResult, error) {
+	for {
+		run, err := e.registry.GetRun(ctx, runID)
+		if err != nil {
+			return denoserver.RunResult{}, err
+		}
+		switch run.Status {
+		case registry.StatusRunning:
+			select {
+			case <-ctx.Done():
+				return denoserver.RunResult{}, ctx.Err()
+			case <-time.After(500 * time.Millisecond):
+			}
+			continue
+		}
+		var returnValue interface{}
+		if run.ReturnValue != "" {
+			_ = json.Unmarshal([]byte(run.ReturnValue), &returnValue)
+		}
+		return denoserver.RunResult{
+			RunID:       runID,
+			Status:      run.Status,
+			ReturnValue: returnValue,
+		}, nil
+	}
+}
+
 // KillRun cancels a running task by its run ID.
 func (e *Engine) KillRun(runID string) bool {
 	v, ok := e.runCancels.Load(runID)
@@ -340,8 +378,10 @@ func (e *Engine) KillRun(runID string) bool {
 	return true
 }
 
-// FireChain checks if any tasks declare a chain trigger from completedTaskID.
-func (e *Engine) FireChain(ctx context.Context, completedTaskID, runStatus string, output interface{}) {
+// FireChain checks if any tasks declare a chain trigger from completedTaskID,
+// and fires the global on_failure_chain if configured.
+func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatus string, output interface{}) {
+	// Declared chain triggers.
 	for _, spec := range e.registry.All() {
 		chain := spec.Trigger.Chain
 		if chain == nil || chain.From != completedTaskID {
@@ -357,6 +397,33 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runStatus strin
 			zap.String("on", on),
 		)
 		go e.fireAsync(ctx, spec, pkgruntime.RunOptions{Input: output}, "chain") //nolint:errcheck
+	}
+
+	// Config-level default on_failure_chain.
+	if runStatus == "failure" {
+		targetID := e.defaultsOnFailureChain
+		if failedSpec, ok := e.registry.Get(completedTaskID); ok {
+			if failedSpec.OnFailureChain != nil {
+				targetID = *failedSpec.OnFailureChain // "" disables, "other-id" overrides
+			}
+		}
+		if targetID != "" && targetID != completedTaskID {
+			if targetSpec, ok := e.registry.Get(targetID); ok {
+				e.log.Info("on_failure_chain trigger",
+					zap.String("from", completedTaskID),
+					zap.String("to", targetID),
+					zap.String("run", runID),
+				)
+				go e.fireAsync(ctx, targetSpec, pkgruntime.RunOptions{ //nolint:errcheck
+					Input: map[string]interface{}{
+						"taskID": completedTaskID,
+						"runID":  runID,
+						"status": runStatus,
+						"output": output,
+					},
+				}, "chain")
+			}
+		}
 	}
 }
 
@@ -867,7 +934,7 @@ func (e *Engine) dispatch(ctx context.Context, spec *task.Spec, opts pkgruntime.
 		}
 	}
 
-	e.FireChain(context.Background(), spec.ID, status, result.ChainInput)
+	e.FireChain(context.Background(), spec.ID, opts.RunID, status, result.ChainInput)
 	return status, result
 }
 

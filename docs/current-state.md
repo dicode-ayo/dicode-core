@@ -1,6 +1,6 @@
 # Current State
 
-> Last updated: 2026-04-01 — Web UI migrated to standalone webhook task (`examples/webui/`); engine SPA fallback for any webhook task with `index.html`; `handleRunResult` now serves `ReturnValue` as JSON; path-traversal guard added before SPA fallback
+> Last updated: 2026-04-01 — Agent globals (`dicode`, `mcp`) added to Deno + Python shims; `SecurityConfig` + `MCPPort` + `OnFailureChain` in `task.Spec`; `EngineRunner` interface for cross-package orchestration; `pkg/mcp/client` HTTP JSON-RPC 2.0 client; `defaults.on_failure_chain` in config; Python `dicode_sdk.py` shim; example tasks: `ai-agent`, `task-creator`, `failure-monitor`
 
 This document describes exactly what exists in the codebase today — what is fully implemented, what is stubbed with interfaces and TODOs, and what exists only as documentation.
 
@@ -27,7 +27,8 @@ Full configuration loading. All structs defined and validated:
 - `SecretsConfig`, `SecretProviderConfig`
 - `NotificationsConfig`, `NotifyProviderConfig`
 - `ServerConfig` — port, secret, **auth** (global auth wall), **allowed_origins** (CORS allowlist), **trust_proxy** (XFF trust flag), MCP, tray
-- `AIConfig`
+- `AIConfig` — `BaseURL`, `Model`, `APIKey`, `APIKeyEnv`
+- **`DefaultsConfig`** — `OnFailureChain string` — global failure handler task ID
 - `applyDefaults()` with sensible defaults for all fields
 - `validate()` checking required fields per source type
 
@@ -35,6 +36,9 @@ Full configuration loading. All structs defined and validated:
 
 - `spec.go` — `Spec`, `TriggerConfig`, `ChainTrigger`, `Param`, `DockerConfig` structs
 - `TriggerConfig` includes `Webhook string`, **`WebhookSecret string`** (HMAC auth), `Daemon bool`, `Restart string`
+- **`SecurityConfig`** — `AllowedTasks []string` + `AllowedMCP []string`; attached as `Security *SecurityConfig` on `Spec`
+- **`MCPPort int`** — declares the port an MCP daemon task listens on
+- **`OnFailureChain *string`** — per-task override (`nil` = inherit global default, `""` = disable, `"task-id"` = override)
 - `LoadDir(dir)` — reads and validates `task.yaml` from a directory
 - `Script()` / `ScriptPath()` — reads task script source (returns `""` for non-JS runtimes)
 - `validate()` — schema validation including Docker, daemon restart values, cycle detection stubs
@@ -81,6 +85,7 @@ Full TaskSet architecture — hierarchical task composition inspired by ArgoCD A
 - **Implemented tools**: `list_tasks`, `get_task`, `run_task`, `list_sources`, `switch_dev_mode`.
 - **Auth**: protected by `requireAPIKey` middleware when `server.auth: true`. Bearer token format: `dck_<32 random bytes hex>`.
 - `New(registry, sourceLister)` constructor.
+- **`pkg/mcp/client/`** — lightweight HTTP JSON-RPC 2.0 MCP client: `New(port int)`, `ListTools(ctx)`, `Call(ctx, tool, args)`. Used by the socket server to proxy `mcp.list_tools` / `mcp.call` requests from task scripts to daemon MCP tasks.
 
 ### `pkg/agent/` ✅
 
@@ -135,6 +140,9 @@ Full TaskSet architecture — hierarchical task composition inspired by ArgoCD A
   - `fireAsync(ctx, spec, opts, source)` — pre-generates runID, starts goroutine, returns immediately
   - `dispatch(ctx, spec, opts) string` — routes to JS or Docker runtime, returns final status string
   - `KillRun(runID)` — cancels run via `runCancels sync.Map`
+  - **`WaitRun(ctx, runID) (RunResult, error)`** — polls `registry.GetRun` every 500ms until terminal status; used by `EngineRunner` for `dicode.run_task` blocking calls from within task scripts
+  - **`SetDefaultsOnFailureChain(id string)`** — sets the config-level global failure handler; called from `cmd/dicode/main.go` when `defaults.on_failure_chain` is set
+  - **`on_failure_chain` logic** — after each run, if the run failed, the spec's `OnFailureChain` (or the global default) is invoked with `input: { taskID, runID, status, output }`; per-task `on_failure_chain: ""` disables the global default
   - Daemon: `startDaemon`, `onDaemonRunFinished` with restart policy (always/on-failure/never)
   - Shutdown: kills all active daemon runs via `shutdownCtx`
   - **Webhook HMAC**: `verifyWebhookSignature(spec, r, body)` — HMAC-SHA256, `X-Hub-Signature-256` header (GitHub-compatible), optional replay protection via `X-Dicode-Timestamp` (5-minute window). Body capped at 5 MB. Backwards-compatible: open when `webhook_secret` is absent. Raw body bytes read **before** `ParseForm` (replayed via `bytes.NewReader`) so HMAC always covers actual request bytes for form-encoded bodies.
@@ -144,6 +152,7 @@ Full TaskSet architecture — hierarchical task composition inspired by ArgoCD A
   - `serveTaskAsset()` — sandboxed static asset serving with extension allowlist and path-traversal guard
   - `flatStringMap()` — converts POST body to `map[string]string` for `RunOptions.Params`
   - Audit logs: run started, run finished, kill requested, trigger types, daemon lifecycle
+- Implements `denoserver.EngineRunner` interface: `FireManual()` + `WaitRun()` — allows Deno/Python task scripts to trigger and await other tasks via `dicode.run_task()`
 - 16 tests passing + 7 new HMAC/signature tests
 
 ### `pkg/webui/` ✅
@@ -180,9 +189,30 @@ Full TaskSet architecture — hierarchical task composition inspired by ArgoCD A
 - `onboarding.go` — `Required()`, `DefaultLocalConfig()` (with Docker examples), `WriteConfig()` ✅
 - Browser wizard (HTTP server + HTML page) — **not yet implemented**
 
+### `pkg/runtime/deno/server/` ✅
+
+- `server.go` — Unix socket server (per-run). Protocol: newline-delimited JSON. Fire-and-forget methods: `log`, `kv.set`, `kv.delete`, `output`. Request/response: `params`, `input`, `kv.get`, `kv.list`, `return`.
+- **New agent methods**: `dicode.run_task` (checks `security.allowed_tasks`, calls `EngineRunner.FireManual` + `WaitRun`), `dicode.list_tasks`, `dicode.get_runs`, `dicode.get_config` (section `"ai"` — returns resolved API key, never raw)
+- **New MCP methods**: `mcp.list_tools`, `mcp.call` (check `security.allowed_mcp`, look up `mcp_port` from registry, proxy to `pkg/mcp/client`)
+- `engine.go` — `EngineRunner` interface (`FireManual`, `WaitRun`) defined here to break import cycle between `pkg/trigger` and `pkg/runtime/deno/server`
+- Buffer: 256 KB per scanner line (supports large JSON payloads)
+- 13 tests passing
+
+### `pkg/runtime/deno/sdk/shim.js` ✅
+
+Injected before every Deno task script. Globals provided: `log`, `params`, `env`, `kv`, `input`, `output`, **`dicode`** (`run_task`, `list_tasks`, `get_runs`, `get_config`), **`mcp`** (`list_tools`, `call`).
+
+### `pkg/runtime/python/sdk/dicode_sdk.py` ✅
+
+Injected before every Python task script via `buildWrapper()`. Mirrors the Deno shim API over the same Unix socket protocol. Globals: `log`, `params`, `env`, `kv`, `input`, `output`, **`dicode`**, **`mcp`**. PEP 723 script block extracted and placed first so uv can parse inline dependencies.
+
 ### `cmd/dicode/main.go` ✅
 
-- Full component wiring: db → secrets → registry → JS runtime → Docker runtime → trigger engine → reconciler → webui → tray
+- Full component wiring: db → secrets → registry → Deno runtime → Docker/Podman/Python runtimes → trigger engine → reconciler → webui → tray
+- `denoRT.SetEngine(eng)` — wires the trigger engine into the Deno runtime for `dicode.run_task` support
+- `denoRT.SetAIConfig(baseURL, model, apiKey)` — resolves `ai.api_key_env` and passes config to socket server for `dicode.get_config("ai")`
+- `pythonRT` receives the same engine + AI config wiring via `SetEngine` / `SetAIConfig`
+- `eng.SetDefaultsOnFailureChain(id)` — set when `defaults.on_failure_chain` is present in config
 - `buildSources()` returns `([]source.Source, *webui.SourceManager, error)` — builds both the source slice and the `SourceManager` for dev mode control
 - `buildTaskSetSource()` returns `*taskset.Source` so it can be stored in the source map for runtime dev mode control
 - Startup sequence: `CleanupOrphanedContainers` → `CleanupStaleRuns` → register tasks → `engine.Start`
@@ -200,8 +230,11 @@ Full TaskSet architecture — hierarchical task composition inspired by ArgoCD A
 | `hello-podman/` | manual | podman |
 | `hello-python/` | manual | python |
 | `nginx-start/` | daemon | docker |
-| **`github-push-webhook/`** | **webhook + HMAC auth** | **deno** |
-| **`webui/`** | **webhook (SPA shell)** | **deno** |
+| `github-push-webhook/` | webhook + HMAC auth | deno |
+| `webui/` | webhook (SPA shell) | deno |
+| **`ai/`** | **webhook (auth)** | **deno** — generic OpenAI-compatible agent; uses `dicode.run_task()` as tools in a tool-use loop |
+| **`failure-monitor/`** | **on_failure_chain** | **deno** — AI-powered failure diagnosis; receives `{ taskID, runID, status }` via `input` |
+| **`task-creator/`** | **webhook (auth)** | **deno** — AI generates `task.yaml` + `task.ts` from a plain-language description |
 
 `examples/webui/` is the full dicode dashboard SPA. It ships as a self-contained webhook task: `index.html` + Lit/LitElement components under `app/`. The engine injects `<base href="/hooks/webui/">` and the dicode SDK on every GET. Auth is enforced client-side by `dc-auth-overlay` (intercepts 401s from the REST API). Any unauthenticated REST call shows the login modal without a page redirect.
 

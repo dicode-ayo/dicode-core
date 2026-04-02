@@ -5,13 +5,31 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/dicode/dicode/pkg/db"
 	"github.com/dicode/dicode/pkg/registry"
+	"github.com/dicode/dicode/pkg/task"
 	"go.uber.org/zap"
 )
+
+// mockEngine is a test double for EngineRunner.
+type mockEngine struct {
+	runID  string
+	result RunResult
+	err    error
+}
+
+func (m *mockEngine) FireManual(_ context.Context, _ string, _ map[string]string) (string, error) {
+	return m.runID, m.err
+}
+
+func (m *mockEngine) WaitRun(_ context.Context, _ string) (RunResult, error) {
+	return m.result, m.err
+}
 
 // dial connects to the server's Unix socket.
 func dial(t *testing.T, socketPath string) net.Conn {
@@ -74,7 +92,7 @@ func newTestEnv(t *testing.T) *testEnv {
 func (e *testEnv) start(t *testing.T, params map[string]string, input interface{}) (net.Conn, *Server) {
 	t.Helper()
 	runID := fmt.Sprintf("test-%d", time.Now().UnixNano())
-	srv := New(runID, "test-task", e.reg, e.db, params, input, zap.NewNop())
+	srv := New(runID, "test-task", e.reg, e.db, params, input, zap.NewNop(), nil, nil, "", "", "")
 	socketPath, err := srv.Start(context.Background())
 	if err != nil {
 		t.Fatalf("Start: %v", err)
@@ -212,7 +230,7 @@ func TestServer_KV_Namespacing(t *testing.T) {
 
 	makeServer := func(taskID string) (net.Conn, *Server) {
 		runID := fmt.Sprintf("run-%s", taskID)
-		srv := New(runID, taskID, reg, d, nil, nil, zap.NewNop())
+		srv := New(runID, taskID, reg, d, nil, nil, zap.NewNop(), nil, nil, "", "", "")
 		sp, err := srv.Start(context.Background())
 		if err != nil {
 			t.Fatalf("Start %s: %v", taskID, err)
@@ -332,5 +350,266 @@ func TestServer_MalformedRequest_Ignored(t *testing.T) {
 	resp := recv(t, conn)
 	if resp["id"] != "1" {
 		t.Errorf("server did not recover after malformed input: %v", resp)
+	}
+}
+
+// startWithSpec starts a server that has a spec and optional engine wired in.
+func startWithSpec(t *testing.T, reg *registry.Registry, database db.DB, spec *task.Spec, eng EngineRunner, aiBaseURL, aiModel, aiAPIKey string) (net.Conn, *Server) {
+	t.Helper()
+	runID := fmt.Sprintf("test-%d", time.Now().UnixNano())
+	srv := New(runID, "test-task", reg, database, nil, nil, zap.NewNop(), spec, eng, aiBaseURL, aiModel, aiAPIKey)
+	socketPath, err := srv.Start(context.Background())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(srv.Stop)
+	conn := dial(t, socketPath)
+	t.Cleanup(func() { conn.Close() })
+	return conn, srv
+}
+
+func TestServer_Dicode_ListTasks(t *testing.T) {
+	e := newTestEnv(t)
+	_ = e.reg.Register(&task.Spec{ID: "hello-cron", Name: "Hello Cron", Description: "A cron task"})
+	_ = e.reg.Register(&task.Spec{ID: "send-report", Name: "Send Report", Description: "Sends a report"})
+
+	conn, _ := e.start(t, nil, nil)
+
+	send(t, conn, map[string]interface{}{"id": "1", "method": "dicode.list_tasks"})
+	resp := recv(t, conn)
+
+	tasks, ok := resp["result"].([]interface{})
+	if !ok {
+		t.Fatalf("expected array result, got %T: %v", resp["result"], resp["result"])
+	}
+	if len(tasks) != 2 {
+		t.Errorf("expected 2 tasks, got %d", len(tasks))
+	}
+	first, ok := tasks[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("task entry not an object: %v", tasks[0])
+	}
+	if first["id"] == nil {
+		t.Errorf("task entry missing id field: %v", first)
+	}
+}
+
+func TestServer_Dicode_GetConfig(t *testing.T) {
+	e := newTestEnv(t)
+	conn, _ := startWithSpec(t, e.reg, e.db, nil, nil, "https://api.openai.com/v1", "gpt-4o", "sk-test")
+
+	send(t, conn, map[string]interface{}{"id": "1", "method": "dicode.get_config", "section": "ai"})
+	resp := recv(t, conn)
+
+	result, ok := resp["result"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected object result, got %T: %v", resp["result"], resp["result"])
+	}
+	if result["model"] != "gpt-4o" {
+		t.Errorf("model: got %v", result["model"])
+	}
+	if result["apiKey"] != "sk-test" {
+		t.Errorf("apiKey: got %v", result["apiKey"])
+	}
+	if result["baseURL"] != "https://api.openai.com/v1" {
+		t.Errorf("baseURL: got %v", result["baseURL"])
+	}
+}
+
+func TestServer_Dicode_GetConfig_UnknownSection(t *testing.T) {
+	e := newTestEnv(t)
+	conn, _ := e.start(t, nil, nil)
+
+	send(t, conn, map[string]interface{}{"id": "1", "method": "dicode.get_config", "section": "storage"})
+	resp := recv(t, conn)
+
+	if resp["error"] == nil {
+		t.Errorf("expected error for unknown section, got: %v", resp)
+	}
+}
+
+func TestServer_Dicode_RunTask_SecurityDenied_NilSpec(t *testing.T) {
+	// nil spec → taskAllowed always returns false.
+	e := newTestEnv(t)
+	conn, _ := e.start(t, nil, nil) // e.start passes nil spec
+
+	send(t, conn, map[string]interface{}{"id": "1", "method": "dicode.run_task", "taskID": "some-task"})
+	resp := recv(t, conn)
+
+	if resp["error"] == nil {
+		t.Errorf("expected security error when spec is nil, got: %v", resp)
+	}
+}
+
+func TestServer_Dicode_RunTask_SecurityDenied_NotAllowed(t *testing.T) {
+	e := newTestEnv(t)
+	spec := &task.Spec{
+		ID:       "caller",
+		Security: &task.SecurityConfig{AllowedTasks: []string{"permitted-task"}},
+	}
+	conn, _ := startWithSpec(t, e.reg, e.db, spec, nil, "", "", "")
+
+	send(t, conn, map[string]interface{}{"id": "1", "method": "dicode.run_task", "taskID": "forbidden-task"})
+	resp := recv(t, conn)
+
+	if resp["error"] == nil {
+		t.Errorf("expected security error for unlisted task, got: %v", resp)
+	}
+}
+
+func TestServer_Dicode_RunTask(t *testing.T) {
+	e := newTestEnv(t)
+	eng := &mockEngine{
+		runID:  "run-abc",
+		result: RunResult{RunID: "run-abc", Status: "success"},
+	}
+	spec := &task.Spec{
+		ID:       "caller",
+		Security: &task.SecurityConfig{AllowedTasks: []string{"target-task"}},
+	}
+	conn, _ := startWithSpec(t, e.reg, e.db, spec, eng, "", "", "")
+
+	send(t, conn, map[string]interface{}{"id": "1", "method": "dicode.run_task", "taskID": "target-task"})
+	resp := recv(t, conn)
+
+	if resp["error"] != nil {
+		t.Fatalf("unexpected error: %v", resp["error"])
+	}
+	result, ok := resp["result"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected object result, got %T: %v", resp["result"], resp["result"])
+	}
+	if result["runID"] != "run-abc" {
+		t.Errorf("runID: got %v", result["runID"])
+	}
+	if result["status"] != "success" {
+		t.Errorf("status: got %v", result["status"])
+	}
+}
+
+func TestServer_Dicode_RunTask_Wildcard(t *testing.T) {
+	// allowed_tasks: ["*"] permits any task.
+	e := newTestEnv(t)
+	eng := &mockEngine{runID: "run-1", result: RunResult{RunID: "run-1", Status: "success"}}
+	spec := &task.Spec{
+		ID:       "caller",
+		Security: &task.SecurityConfig{AllowedTasks: []string{"*"}},
+	}
+	conn, _ := startWithSpec(t, e.reg, e.db, spec, eng, "", "", "")
+
+	send(t, conn, map[string]interface{}{"id": "1", "method": "dicode.run_task", "taskID": "any-task-name"})
+	resp := recv(t, conn)
+
+	if resp["error"] != nil {
+		t.Errorf("wildcard should allow any task, got error: %v", resp["error"])
+	}
+}
+
+func TestServer_MCP_SecurityDenied(t *testing.T) {
+	// nil spec → mcpAllowed always returns false.
+	e := newTestEnv(t)
+	conn, _ := e.start(t, nil, nil)
+
+	send(t, conn, map[string]interface{}{"id": "1", "method": "mcp.list_tools", "mcpName": "github-mcp"})
+	resp := recv(t, conn)
+
+	if resp["error"] == nil {
+		t.Errorf("expected security error when spec is nil, got: %v", resp)
+	}
+}
+
+func TestServer_MCP_ListTools_NoPort(t *testing.T) {
+	// Task is allowed but declares no mcp_port — should return an error.
+	e := newTestEnv(t)
+	_ = e.reg.Register(&task.Spec{ID: "github-mcp"}) // MCPPort = 0
+
+	spec := &task.Spec{
+		ID:       "caller",
+		Security: &task.SecurityConfig{AllowedMCP: []string{"github-mcp"}},
+	}
+	conn, _ := startWithSpec(t, e.reg, e.db, spec, nil, "", "", "")
+
+	send(t, conn, map[string]interface{}{"id": "1", "method": "mcp.list_tools", "mcpName": "github-mcp"})
+	resp := recv(t, conn)
+
+	if resp["error"] == nil {
+		t.Errorf("expected error when mcp_port is 0, got: %v", resp)
+	}
+}
+
+func TestServer_MCP_ListTools_Success(t *testing.T) {
+	// Start a fake MCP HTTP server that returns one tool.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"search","description":"Search repos","inputSchema":{"type":"object","properties":{}}}]}}`) //nolint:errcheck
+	}))
+	defer ts.Close()
+
+	port := ts.Listener.Addr().(*net.TCPAddr).Port
+
+	e := newTestEnv(t)
+	_ = e.reg.Register(&task.Spec{ID: "github-mcp", MCPPort: port})
+
+	spec := &task.Spec{
+		ID:       "caller",
+		Security: &task.SecurityConfig{AllowedMCP: []string{"github-mcp"}},
+	}
+	conn, _ := startWithSpec(t, e.reg, e.db, spec, nil, "", "", "")
+
+	send(t, conn, map[string]interface{}{"id": "1", "method": "mcp.list_tools", "mcpName": "github-mcp"})
+	resp := recv(t, conn)
+
+	if resp["error"] != nil {
+		t.Fatalf("unexpected error: %v", resp["error"])
+	}
+	tools, ok := resp["result"].([]interface{})
+	if !ok {
+		t.Fatalf("expected array result, got %T: %v", resp["result"], resp["result"])
+	}
+	if len(tools) != 1 {
+		t.Errorf("expected 1 tool, got %d", len(tools))
+	}
+}
+
+func TestServer_MCP_Call_Success(t *testing.T) {
+	// Fake MCP server: routes list_tools and tools/call.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req map[string]interface{}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		w.Header().Set("Content-Type", "application/json")
+		switch req["method"] {
+		case "tools/call":
+			fmt.Fprintf(w, `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"found 3 repos"}]}}`) //nolint:errcheck
+		default:
+			fmt.Fprintf(w, `{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}`) //nolint:errcheck
+		}
+	}))
+	defer ts.Close()
+
+	port := ts.Listener.Addr().(*net.TCPAddr).Port
+
+	e := newTestEnv(t)
+	_ = e.reg.Register(&task.Spec{ID: "github-mcp", MCPPort: port})
+
+	spec := &task.Spec{
+		ID:       "caller",
+		Security: &task.SecurityConfig{AllowedMCP: []string{"github-mcp"}},
+	}
+	conn, _ := startWithSpec(t, e.reg, e.db, spec, nil, "", "", "")
+
+	send(t, conn, map[string]interface{}{
+		"id":      "1",
+		"method":  "mcp.call",
+		"mcpName": "github-mcp",
+		"tool":    "search",
+		"args":    map[string]interface{}{"query": "dicode"},
+	})
+	resp := recv(t, conn)
+
+	if resp["error"] != nil {
+		t.Fatalf("unexpected error: %v", resp["error"])
+	}
+	if resp["result"] == nil {
+		t.Errorf("expected non-nil result")
 	}
 }
