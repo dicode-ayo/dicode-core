@@ -62,6 +62,11 @@ type Request struct {
 	Status      int               `json:"status,omitempty"`
 	RespHeaders map[string]string `json:"respHeaders,omitempty"`
 	RespBody    []byte            `json:"respBody,omitempty"` // base64-encoded in JSON
+
+	// cli.* (control socket — CLI client commands)
+	RunID       string `json:"runID,omitempty"`
+	StringValue string `json:"stringValue,omitempty"` // cli.secrets.set value
+	Follow      bool   `json:"follow,omitempty"`      // cli.logs — reserved for streaming
 }
 
 // Response is an outbound message to a connected client.
@@ -98,6 +103,33 @@ type HTTPInboundRequest struct {
 	Query      string            `json:"query,omitempty"`
 	ReqHeaders map[string]string `json:"reqHeaders,omitempty"`
 	ReqBody    []byte            `json:"reqBody,omitempty"` // base64-encoded in JSON
+}
+
+// TaskSummary is a single row in the cli.list response.
+type TaskSummary struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Trigger     string `json:"trigger"`    // "manual" | "cron:..." | "webhook:..." | "daemon"
+	LastStatus  string `json:"lastStatus"` // "success" | "failure" | "running" | ""
+	LastRunID   string `json:"lastRunID"`  // "" if never run
+	LastRunAt   string `json:"lastRunAt"`  // RFC3339 or ""
+}
+
+// LogEntry is one log line returned by cli.logs.
+type LogEntry struct {
+	RunID     string `json:"runID"`
+	Timestamp string `json:"timestamp"` // RFC3339
+	Level     string `json:"level"`
+	Message   string `json:"message"`
+}
+
+// DaemonStatus is the cli.status response.
+type DaemonStatus struct {
+	Version   string `json:"version"`
+	UptimeSec int64  `json:"uptimeSec"`
+	TaskCount int    `json:"taskCount"`
+	RunCount  int    `json:"runCount"` // runs in the last 24h
 }
 
 // RunResult is returned by EngineRunner.WaitRun.
