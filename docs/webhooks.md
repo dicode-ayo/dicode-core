@@ -121,22 +121,3 @@ dicode.http.serve(async (req) => {
 Registered patterns are automatically unregistered when the daemon task exits.
 Pattern priority: exact match wins; for equal-length patterns, first-registered
 wins. Built-in daemon routes (`/health`, `/api/*`) always have priority.
-
----
-
-## Migration from relay
-
-The relay feature (`relay:` config block) has been removed. If your
-`dicode.yaml` contains a `relay:` section, loading will fail with a
-deprecation error. Remove the block and configure a reverse proxy or tunnel
-instead (see the table above).
-
-Before:
-```yaml
-relay:
-  enabled: true
-  account_env: DICODE_TOKEN
-```
-
-After: remove the block entirely, then expose port 8080 via your preferred
-tunnel tool.
