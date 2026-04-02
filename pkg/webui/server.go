@@ -20,6 +20,7 @@ import (
 
 	"github.com/dicode/dicode/pkg/config"
 	"github.com/dicode/dicode/pkg/db"
+	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/mcp"
 	"github.com/dicode/dicode/pkg/registry"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
@@ -143,6 +144,7 @@ type Server struct {
 	reconciler         *registry.Reconciler // nil if not wired
 	sourceMgr          *SourceManager       // nil if not wired
 	dataDir            string               // ~/.dicode or cfg.DataDir
+	gateway            *ipc.Gateway
 	managedRuntimes    []pkgruntime.ManagedRuntime
 	sessions           *sessionStore
 	dbSessions         *dbSessionStore  // persistent sessions / trusted devices
@@ -169,7 +171,7 @@ func (s *Server) SetManagedRuntimes(runtimes []pkgruntime.ManagedRuntime) {
 // rec and dataDir enable live source management; pass nil/"" in tests.
 // sourceMgr enables the /api/sources endpoints and MCP source tools; pass nil in tests.
 // database is required for persistent sessions and API key storage; pass nil in tests (auth features disabled).
-func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config, cfgPath string, secretsMgr SecretsManager, rec *registry.Reconciler, sourceMgr *SourceManager, dataDir string, logs *LogBroadcaster, log *zap.Logger, database db.DB) (*Server, error) {
+func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config, cfgPath string, secretsMgr SecretsManager, rec *registry.Reconciler, sourceMgr *SourceManager, dataDir string, logs *LogBroadcaster, log *zap.Logger, database db.DB, gateway *ipc.Gateway) (*Server, error) {
 	ss := newSessionStore()
 	go ss.purgeLoop()
 
@@ -202,6 +204,7 @@ func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config
 		ws:              wsHub,
 		log:             log,
 		port:            port,
+		gateway:         gateway,
 	}
 
 	// Wire run started hook → broadcast run:started
@@ -305,10 +308,10 @@ func (s *Server) Handler() http.Handler {
 	// Webhook passthrough — auth via per-task HMAC secret or optional session cookie.
 	// When a task sets trigger.auth: true, a valid dicode session is required for
 	// both GET (serving the task UI) and POST (running the task). Public webhooks
-	// (no auth: true) remain fully open — zero behaviour change.
+	// (no auth: true) remain fully open.
 	webhookHandler := func(w http.ResponseWriter, req *http.Request) {
 		req.URL.Path = "/hooks/" + chi.URLParam(req, "*")
-		s.webhookAuthGuard(w, req, s.engine.WebhookHandler())
+		s.webhookAuthGuard(w, req, s.gateway)
 	}
 	r.Get("/hooks/*", webhookHandler)
 	r.Post("/hooks/*", webhookHandler)

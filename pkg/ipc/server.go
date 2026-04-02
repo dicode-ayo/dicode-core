@@ -38,6 +38,8 @@ type Server struct {
 	aiModel   string
 	aiAPIKey  string
 
+	gateway *Gateway // optional; enables http.register for daemon tasks
+
 	ctx        context.Context
 	socketPath string
 	listener   net.Listener
@@ -100,6 +102,9 @@ func (s *Server) Start(ctx context.Context) (socketPath, token string, err error
 	if s.spec != nil && s.spec.Security != nil && len(s.spec.Security.AllowedMCP) > 0 {
 		caps = append(caps, CapMCPCall)
 	}
+	if s.spec != nil && s.spec.Trigger.Daemon && s.gateway != nil {
+		caps = append(caps, CapHTTPRegister)
+	}
 
 	token, err = IssueToken(s.secret, "task:"+s.taskID, s.runID, caps)
 	if err != nil {
@@ -121,6 +126,10 @@ func (s *Server) Stop() {
 		_ = os.Remove(s.socketPath)
 	}
 }
+
+// SetGateway attaches the HTTP gateway so daemon tasks can call http.register.
+// Must be called before Start.
+func (s *Server) SetGateway(g *Gateway) { s.gateway = g }
 
 // ReturnCh receives the task return value once the subprocess sends "return".
 func (s *Server) ReturnCh() <-chan any { return s.retCh }
@@ -144,6 +153,18 @@ func (s *Server) accept() {
 
 func (s *Server) handleConn(conn net.Conn) {
 	defer conn.Close()
+
+	// For daemon tasks that call http.register: track the registered pattern
+	// so we can unregister when the connection closes.
+	var (
+		registeredPattern string
+		httpH             *ipcHandler
+	)
+	defer func() {
+		if registeredPattern != "" && s.gateway != nil {
+			s.gateway.Unregister(registeredPattern)
+		}
+	}()
 
 	// ── handshake ────────────────────────────────────────────────────────────
 	// Enforce a deadline so a subprocess that connects but never sends the
@@ -476,6 +497,43 @@ func (s *Server) handleConn(conn net.Conn) {
 				continue
 			}
 			reply(req.ID, result, "")
+
+		// ── http.register / http.respond ─────────────────────────────────
+
+		case "http.register":
+			if !hasCap(caps, CapHTTPRegister) {
+				reply(req.ID, nil, "ipc: permission denied (http.register)")
+				continue
+			}
+			if s.gateway == nil {
+				reply(req.ID, nil, "ipc: http gateway not available")
+				continue
+			}
+			if req.Pattern == "" {
+				reply(req.ID, nil, "ipc: pattern is required")
+				continue
+			}
+			if httpH == nil {
+				httpH = &ipcHandler{push: func(msg any) error { return writeMsg(conn, msg) }}
+			}
+			// Register the new pattern before removing the old one to avoid
+			// a brief window where requests for the path return 404.
+			s.gateway.Register(req.Pattern, httpH)
+			if registeredPattern != "" && registeredPattern != req.Pattern {
+				s.gateway.Unregister(registeredPattern)
+			}
+			registeredPattern = req.Pattern
+			reply(req.ID, true, "")
+
+		case "http.respond":
+			if httpH != nil {
+				if !httpH.complete(req.RequestID, req.Status, req.RespHeaders, req.RespBody) {
+					s.log.Warn("ipc: http.respond for unknown requestID",
+						zap.String("run", s.runID),
+						zap.String("requestID", req.RequestID),
+					)
+				}
+			}
 
 		default:
 			if req.ID != "" {

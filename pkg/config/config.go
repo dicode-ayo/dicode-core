@@ -32,7 +32,6 @@ type Config struct {
 	Database      DatabaseConfig           `yaml:"database"`
 	Secrets       SecretsConfig            `yaml:"secrets"`
 	Notifications NotificationsConfig      `yaml:"notifications"`
-	Relay         RelayConfig              `yaml:"relay"`
 	Server        ServerConfig             `yaml:"server"`
 	AI            AIConfig                 `yaml:"ai"`
 	Defaults      DefaultsConfig           `yaml:"defaults"`
@@ -47,12 +46,6 @@ type DatabaseConfig struct {
 	Type   string `yaml:"type"`    // "sqlite" (default) | "postgres" | "mysql"
 	Path   string `yaml:"path"`    // sqlite: path to .db file
 	URLEnv string `yaml:"url_env"` // postgres/mysql: env var holding DSN
-}
-
-// RelayConfig controls the dicode.app WebSocket tunnel for public webhook URLs.
-type RelayConfig struct {
-	Enabled    bool   `yaml:"enabled"`     // default: true if AccountEnv is set
-	AccountEnv string `yaml:"account_env"` // env var holding dicode.app token
 }
 
 type SecretsConfig struct {
@@ -247,10 +240,6 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Database.Type == "sqlite" && cfg.Database.Path == "" {
 		cfg.Database.Path = cfg.DataDir + "/data.db"
-	}
-	// Enable relay if account token env is set
-	if cfg.Relay.AccountEnv == "" {
-		cfg.Relay.AccountEnv = "DICODE_TOKEN"
 	}
 	// AI defaults — OpenAI-compatible, works with OpenAI / Claude / Ollama.
 	if cfg.AI.Model == "" {

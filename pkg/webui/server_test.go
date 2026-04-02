@@ -11,6 +11,7 @@ import (
 
 	"github.com/dicode/dicode/pkg/config"
 	"github.com/dicode/dicode/pkg/db"
+	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/registry"
 	denoruntime "github.com/dicode/dicode/pkg/runtime/deno"
 	"github.com/dicode/dicode/pkg/secrets"
@@ -34,7 +35,7 @@ func newTestServer(t *testing.T) (*Server, *registry.Registry) {
 	}
 	eng := trigger.New(reg, rt, zap.NewNop())
 
-	srv, err := New(8080, reg, eng, &config.Config{Server: config.ServerConfig{Port: 8080}}, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d)
+	srv, err := New(8080, reg, eng, &config.Config{Server: config.ServerConfig{Port: 8080}}, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
 	if err != nil {
 		t.Fatalf("New server: %v", err)
 	}
