@@ -189,22 +189,38 @@ Full TaskSet architecture — hierarchical task composition inspired by ArgoCD A
 - `onboarding.go` — `Required()`, `DefaultLocalConfig()` (with Docker examples), `WriteConfig()` ✅
 - Browser wizard (HTTP server + HTML page) — **not yet implemented**
 
-### `pkg/runtime/deno/server/` ✅
+### `pkg/ipc/` ✅
 
-- `server.go` — Unix socket server (per-run). Protocol: newline-delimited JSON. Fire-and-forget methods: `log`, `kv.set`, `kv.delete`, `output`. Request/response: `params`, `input`, `kv.get`, `kv.list`, `return`.
-- **New agent methods**: `dicode.run_task` (checks `security.allowed_tasks`, calls `EngineRunner.FireManual` + `WaitRun`), `dicode.list_tasks`, `dicode.get_runs`, `dicode.get_config` (section `"ai"` — returns resolved API key, never raw)
-- **New MCP methods**: `mcp.list_tools`, `mcp.call` (check `security.allowed_mcp`, look up `mcp_port` from registry, proxy to `pkg/mcp/client`)
-- `engine.go` — `EngineRunner` interface (`FireManual`, `WaitRun`) defined here to break import cycle between `pkg/trigger` and `pkg/runtime/deno/server`
-- Buffer: 256 KB per scanner line (supports large JSON payloads)
-- 13 tests passing
+Unified IPC protocol replacing the old per-runtime `pkg/runtime/deno/server/`.
+
+- **Wire format**: 4-byte little-endian length prefix + JSON payload (replaces newline-delimited JSON — correctly handles multi-line messages)
+- **Handshake**: client sends `{"token":"<DICODE_TOKEN>"}`, server validates HMAC-signed token and replies `{"proto":1,"caps":[...]}`
+- **Capability tokens**: HMAC-SHA256 signed, scoped to a specific run ID. Task shims get `log`, `params.read`, `input.read`, `kv.read`, `kv.write`, `output.write`, `return`, `tasks.list`, `runs.list`, `config.read`; additionally `tasks.trigger` if `security.allowed_tasks` is set; `mcp.call` if `security.allowed_mcp` is set
+- `server.go` — `Server` struct; `Start()` returns `(socketPath, token, error)`. Dispatcher enforces capability checks before every handler
+- `token.go` — `IssueToken` / `VerifyToken` (HMAC-SHA256); `NewSecret()` generates per-runtime random secret
+- `conn.go` — `readMsg` / `writeMsg` (length-prefix framing)
+- `capability.go` — capability constants; `defaultTaskCaps()`
+- `message.go` — `Request`, `Response`, `OutputResult`, `EngineRunner`, `RunResult` types (moved from `pkg/runtime/deno/server/`)
+- Methods: all 15 from the old server plus structured capability enforcement on each
+- `EngineRunner` interface lives here (breaks trigger ↔ runtime import cycle)
+- `pkg/runtime/deno/server/` **deleted** — both Deno and Python runtimes now import `pkg/ipc`
 
 ### `pkg/runtime/deno/sdk/shim.js` ✅
 
-Injected before every Deno task script. Globals provided: `log`, `params`, `env`, `kv`, `input`, `output`, **`dicode`** (`run_task`, `list_tasks`, `get_runs`, `get_config`), **`mcp`** (`list_tools`, `call`).
+Injected before every Deno task script. Updated for unified IPC protocol:
+- Length-prefix framing (`readExact` + 4-byte LE header) replaces newline-delimited reads
+- Handshake on connect: reads `DICODE_TOKEN` from env, sends to server, validates response
+- All globals unchanged: `log`, `params`, `env`, `kv`, `input`, `output`, **`dicode`** (`run_task`, `list_tasks`, `get_runs`, `get_config`), **`mcp`** (`list_tools`, `call`)
 
 ### `pkg/runtime/python/sdk/dicode_sdk.py` ✅
 
-Injected before every Python task script via `buildWrapper()`. Mirrors the Deno shim API over the same Unix socket protocol. Globals: `log`, `params`, `env`, `kv`, `input`, `output`, **`dicode`**, **`mcp`**. PEP 723 script block extracted and placed first so uv can parse inline dependencies.
+Injected before every Python task script via `buildWrapper()`. Updated for unified IPC protocol:
+- asyncio background IO loop (`asyncio.new_event_loop()` + daemon thread)
+- `asyncio.open_unix_connection()` for socket; length-prefix framing via `struct.pack("<I", ...)`
+- Handshake on connect: sends `DICODE_TOKEN`, validates server response
+- `async def main()` detected via `asyncio.iscoroutinefunction` and run with `asyncio.run()`
+- `kv.get_async`, `kv.set_async`, `kv.list_async` variants for async task bodies
+- Globals: `log`, `params`, `env`, `kv`, `input`, `output`, **`dicode`**, **`mcp`**
 
 ### `cmd/dicode/main.go` ✅
 
