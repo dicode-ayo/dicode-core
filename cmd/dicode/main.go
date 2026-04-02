@@ -10,6 +10,7 @@ import (
 
 	"github.com/dicode/dicode/pkg/config"
 	"github.com/dicode/dicode/pkg/db"
+	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/notify"
 	"github.com/dicode/dicode/pkg/onboarding"
 	"github.com/dicode/dicode/pkg/registry"
@@ -122,22 +123,36 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 		log.Info("cancelled stale runs from previous session", zap.Strings("tasks", stale))
 	}
 
-	// 4. Build managed runtimes (deno is always available; others depend on config).
-	managedRuntimes, eng, err := buildRuntimes(ctx, cfg, reg, secretsChain, database, log)
+	// 4. HTTP gateway — created early so runtimes can propagate it to IPC servers.
+	gateway := ipc.NewGateway()
+
+	// 5. Build managed runtimes (deno is always available; others depend on config).
+	managedRuntimes, eng, err := buildRuntimes(ctx, cfg, reg, secretsChain, database, log, gateway)
 	if err != nil {
 		return err
 	}
 
-	// 5. Sources + reconciler.
+	// 6. Sources + reconciler.
+	// Auto-register webhook tasks in the gateway so HTTP traffic is routed to them.
 	sources, sourceMgr, err := buildSources(cfg, log)
 	if err != nil {
 		return fmt.Errorf("build sources: %w", err)
 	}
 	rec := registry.NewReconciler(reg, sources, log)
-	rec.OnRegister = eng.Register
-	rec.OnUnregister = eng.Unregister
+	rec.OnRegister = func(spec *task.Spec) {
+		eng.Register(spec)
+		if spec.Trigger.Webhook != "" {
+			gateway.Register(spec.Trigger.Webhook, eng.WebhookHandler())
+		}
+	}
+	rec.OnUnregister = func(id string) {
+		if spec, ok := reg.Get(id); ok && spec.Trigger.Webhook != "" {
+			gateway.Unregister(spec.Trigger.Webhook)
+		}
+		eng.Unregister(id)
+	}
 
-	// 6. Web UI.
+	// 7. Web UI.
 	port := cfg.Server.Port
 	if port == 0 {
 		port = 8080
@@ -151,6 +166,7 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	if err != nil {
 		return fmt.Errorf("build webui: %w", err)
 	}
+	srv.SetGateway(gateway)
 	srv.SetManagedRuntimes(managedRuntimes)
 
 	// 7. Run everything concurrently.
@@ -180,6 +196,7 @@ func buildRuntimes(
 	secretsChain secrets.Chain,
 	database db.DB,
 	log *zap.Logger,
+	gateway *ipc.Gateway,
 ) ([]pkgruntime.ManagedRuntime, *trigger.Engine, error) {
 	// --- Deno (always-on default executor) ---
 	denoRT, err := denoruntime.New(reg, secretsChain, database, log)
@@ -189,6 +206,7 @@ func buildRuntimes(
 	eng := trigger.New(reg, denoRT, log)
 	// Wire the engine into the Deno runtime so tasks can orchestrate other tasks.
 	denoRT.SetEngine(eng)
+	denoRT.SetGateway(gateway)
 	// Wire AI config so tasks can call dicode.get_config("ai").
 	aiAPIKey := cfg.AI.APIKey
 	if aiAPIKey == "" && cfg.AI.APIKeyEnv != "" {
@@ -235,6 +253,7 @@ func buildRuntimes(
 	if err != nil {
 		log.Fatal("python runtime init", zap.Error(err))
 	}
+	pythonMgr.SetGateway(gateway)
 	managed = append(managed, pythonMgr)
 
 	if rc, ok := cfg.Runtimes["python"]; ok && !rc.Disabled {

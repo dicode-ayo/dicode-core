@@ -61,6 +61,7 @@ type Runtime struct {
 	log       *zap.Logger
 	secret    []byte
 	engine    ipc.EngineRunner
+	gateway   *ipc.Gateway
 	aiBaseURL string
 	aiModel   string
 	aiAPIKey  string
@@ -68,6 +69,9 @@ type Runtime struct {
 
 // SetEngine configures the engine runner used for dicode.run_task calls.
 func (rt *Runtime) SetEngine(e ipc.EngineRunner) { rt.engine = e }
+
+// SetGateway attaches the HTTP gateway so daemon tasks can call http.register.
+func (rt *Runtime) SetGateway(g *ipc.Gateway) { rt.gateway = g }
 
 // SetAIConfig configures the AI provider details passed to tasks via dicode.get_config.
 func (rt *Runtime) SetAIConfig(baseURL, model, apiKey string) {
@@ -126,6 +130,7 @@ func (rt *Runtime) NewExecutor(binaryPath string) pkgruntime.Executor {
 		log:       rt.log,
 		secret:    rt.secret,
 		engine:    rt.engine,
+		gateway:   rt.gateway,
 		aiBaseURL: rt.aiBaseURL,
 		aiModel:   rt.aiModel,
 		aiAPIKey:  rt.aiAPIKey,
@@ -142,6 +147,7 @@ type executor struct {
 	log       *zap.Logger
 	secret    []byte
 	engine    ipc.EngineRunner
+	gateway   *ipc.Gateway
 	aiBaseURL string
 	aiModel   string
 	aiAPIKey  string
@@ -192,6 +198,7 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 	mergedParams := mergeParams(spec.Params, opts.Params)
 
 	srv := ipc.New(runID, spec.ID, e.secret, e.reg, e.db, mergedParams, opts.Input, e.log, spec, e.engine, e.aiBaseURL, e.aiModel, e.aiAPIKey)
+	srv.SetGateway(e.gateway)
 	socketPath, token, err := srv.Start(execCtx)
 	if err != nil {
 		status = registry.StatusFailure

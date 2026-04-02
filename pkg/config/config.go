@@ -49,10 +49,12 @@ type DatabaseConfig struct {
 	URLEnv string `yaml:"url_env"` // postgres/mysql: env var holding DSN
 }
 
-// RelayConfig controls the dicode.app WebSocket tunnel for public webhook URLs.
+// RelayConfig is retained for parse compatibility only.
+// The relay feature has been removed. Any relay: block in dicode.yaml triggers
+// a deprecation error at load time.
 type RelayConfig struct {
-	Enabled    bool   `yaml:"enabled"`     // default: true if AccountEnv is set
-	AccountEnv string `yaml:"account_env"` // env var holding dicode.app token
+	Enabled    bool   `yaml:"enabled,omitempty"`
+	AccountEnv string `yaml:"account_env,omitempty"`
 }
 
 type SecretsConfig struct {
@@ -248,10 +250,6 @@ func applyDefaults(cfg *Config) {
 	if cfg.Database.Type == "sqlite" && cfg.Database.Path == "" {
 		cfg.Database.Path = cfg.DataDir + "/data.db"
 	}
-	// Enable relay if account token env is set
-	if cfg.Relay.AccountEnv == "" {
-		cfg.Relay.AccountEnv = "DICODE_TOKEN"
-	}
 	// AI defaults — OpenAI-compatible, works with OpenAI / Claude / Ollama.
 	if cfg.AI.Model == "" {
 		cfg.AI.Model = "gpt-4o"
@@ -269,6 +267,10 @@ func applyDefaults(cfg *Config) {
 }
 
 func (cfg *Config) validate() error {
+	if cfg.Relay.Enabled || cfg.Relay.AccountEnv != "" {
+		return fmt.Errorf("relay: the relay feature has been removed in this version; " +
+			"remove the relay: block from dicode.yaml and use a reverse proxy or tunnel for public webhook exposure")
+	}
 	for i, s := range cfg.Sources {
 		switch s.Type {
 		case SourceTypeGit:

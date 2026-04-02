@@ -20,6 +20,7 @@ import (
 
 	"github.com/dicode/dicode/pkg/config"
 	"github.com/dicode/dicode/pkg/db"
+	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/mcp"
 	"github.com/dicode/dicode/pkg/registry"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
@@ -143,6 +144,7 @@ type Server struct {
 	reconciler         *registry.Reconciler // nil if not wired
 	sourceMgr          *SourceManager       // nil if not wired
 	dataDir            string               // ~/.dicode or cfg.DataDir
+	gateway            *ipc.Gateway         // optional; routes /hooks/* when set
 	managedRuntimes    []pkgruntime.ManagedRuntime
 	sessions           *sessionStore
 	dbSessions         *dbSessionStore  // persistent sessions / trusted devices
@@ -157,6 +159,11 @@ type Server struct {
 	port               int
 	srv                *http.Server
 }
+
+// SetGateway attaches the HTTP gateway. When set, /hooks/* requests are
+// dispatched through the gateway instead of the engine's built-in handler.
+// Call this after New and before Start.
+func (s *Server) SetGateway(g *ipc.Gateway) { s.gateway = g }
 
 // SetManagedRuntimes registers the list of managed runtimes (Deno, Python, …)
 // that will appear in the Config UI. Call this after New and before Start.
@@ -306,9 +313,19 @@ func (s *Server) Handler() http.Handler {
 	// When a task sets trigger.auth: true, a valid dicode session is required for
 	// both GET (serving the task UI) and POST (running the task). Public webhooks
 	// (no auth: true) remain fully open — zero behaviour change.
+	//
+	// When a Gateway is attached (production), requests are dispatched through it
+	// so that IPC-registered daemon tasks can also serve /hooks/* routes.
+	// The engine's built-in WebhookHandler is used as fallback (tests / no gateway).
+	webhookDispatch := func() http.Handler {
+		if s.gateway != nil {
+			return s.gateway
+		}
+		return s.engine.WebhookHandler()
+	}()
 	webhookHandler := func(w http.ResponseWriter, req *http.Request) {
 		req.URL.Path = "/hooks/" + chi.URLParam(req, "*")
-		s.webhookAuthGuard(w, req, s.engine.WebhookHandler())
+		s.webhookAuthGuard(w, req, webhookDispatch)
 	}
 	r.Get("/hooks/*", webhookHandler)
 	r.Post("/hooks/*", webhookHandler)
