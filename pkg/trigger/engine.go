@@ -19,10 +19,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/notify"
 	"github.com/dicode/dicode/pkg/registry"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
-	denoserver "github.com/dicode/dicode/pkg/runtime/deno/server"
 	"github.com/dicode/dicode/pkg/task"
 	"github.com/google/uuid"
 	"github.com/robfig/cron/v3"
@@ -339,18 +339,18 @@ func (e *Engine) FireManual(ctx context.Context, taskID string, params map[strin
 }
 
 // WaitRun polls until the run identified by runID reaches a terminal state,
-// then returns a RunResult. Implements denoserver.EngineRunner.
-func (e *Engine) WaitRun(ctx context.Context, runID string) (denoserver.RunResult, error) {
+// then returns a RunResult. Implements ipc.EngineRunner.
+func (e *Engine) WaitRun(ctx context.Context, runID string) (ipc.RunResult, error) {
 	for {
 		run, err := e.registry.GetRun(ctx, runID)
 		if err != nil {
-			return denoserver.RunResult{}, err
+			return ipc.RunResult{}, err
 		}
 		switch run.Status {
 		case registry.StatusRunning:
 			select {
 			case <-ctx.Done():
-				return denoserver.RunResult{}, ctx.Err()
+				return ipc.RunResult{}, ctx.Err()
 			case <-time.After(500 * time.Millisecond):
 			}
 			continue
@@ -359,7 +359,7 @@ func (e *Engine) WaitRun(ctx context.Context, runID string) (denoserver.RunResul
 		if run.ReturnValue != "" {
 			_ = json.Unmarshal([]byte(run.ReturnValue), &returnValue)
 		}
-		return denoserver.RunResult{
+		return ipc.RunResult{
 			RunID:       runID,
 			Status:      run.Status,
 			ReturnValue: returnValue,

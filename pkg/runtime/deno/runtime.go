@@ -16,9 +16,9 @@ import (
 
 	"github.com/dicode/dicode/pkg/db"
 	denopkg "github.com/dicode/dicode/pkg/deno"
+	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/registry"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
-	denoserver "github.com/dicode/dicode/pkg/runtime/deno/server"
 	"github.com/dicode/dicode/pkg/secrets"
 	"github.com/dicode/dicode/pkg/task"
 	"go.uber.org/zap"
@@ -39,7 +39,7 @@ type RunOptions struct {
 type RunResult struct {
 	RunID       string
 	ReturnValue interface{}
-	Output      *denoserver.OutputResult
+	Output      *ipc.OutputResult
 	Logs        []*registry.LogEntry
 	Error       error
 }
@@ -51,7 +51,8 @@ type Runtime struct {
 	db        db.DB
 	log       *zap.Logger
 	denoPath  string
-	engine    denoserver.EngineRunner
+	secret    []byte
+	engine    ipc.EngineRunner
 	aiBaseURL string
 	aiModel   string
 	aiAPIKey  string
@@ -64,11 +65,15 @@ func New(r *registry.Registry, sc secrets.Chain, database db.DB, log *zap.Logger
 	if err != nil {
 		return nil, fmt.Errorf("ensure deno: %w", err)
 	}
-	return &Runtime{registry: r, secrets: sc, db: database, log: log, denoPath: path}, nil
+	secret, err := ipc.NewSecret()
+	if err != nil {
+		return nil, fmt.Errorf("ipc secret: %w", err)
+	}
+	return &Runtime{registry: r, secrets: sc, db: database, log: log, denoPath: path, secret: secret}, nil
 }
 
 // SetEngine configures the engine runner used for dicode.run_task calls.
-func (rt *Runtime) SetEngine(e denoserver.EngineRunner) { rt.engine = e }
+func (rt *Runtime) SetEngine(e ipc.EngineRunner) { rt.engine = e }
 
 // SetAIConfig configures the AI provider details passed to tasks via dicode.get_config.
 func (rt *Runtime) SetAIConfig(baseURL, model, apiKey string) {
@@ -130,8 +135,8 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 
 	mergedParams := mergeParams(spec.Params, opts.Params)
 
-	srv := denoserver.New(runID, spec.ID, rt.registry, rt.db, mergedParams, opts.Input, rt.log, spec, rt.engine, rt.aiBaseURL, rt.aiModel, rt.aiAPIKey)
-	socketPath, err := srv.Start(execCtx)
+	srv := ipc.New(runID, spec.ID, rt.secret, rt.registry, rt.db, mergedParams, opts.Input, rt.log, spec, rt.engine, rt.aiBaseURL, rt.aiModel, rt.aiAPIKey)
+	socketPath, token, err := srv.Start(execCtx)
 	if err != nil {
 		status = registry.StatusFailure
 		result.Error = fmt.Errorf("start socket server: %w", err)
@@ -161,7 +166,7 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 
 	args := buildDenoArgs(spec, socketPath, tmpFile.Name())
 	cmd := exec.CommandContext(execCtx, rt.denoPath, args...) //nolint:gosec
-	cmd.Env = buildEnv(resolved, socketPath)
+	cmd.Env = buildEnv(resolved, socketPath, token)
 
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
@@ -233,7 +238,7 @@ func mergeParams(specParams []task.Param, overrides map[string]string) map[strin
 func buildDenoArgs(spec *task.Spec, socketPath, scriptPath string) []string {
 	args := []string{"run", "--allow-net"}
 
-	envVars := append([]string{"DICODE_SOCKET"}, spec.Env...)
+	envVars := append([]string{"DICODE_SOCKET", "DICODE_TOKEN"}, spec.Env...)
 	args = append(args, "--allow-env="+strings.Join(envVars, ","))
 
 	// Deno 2.x requires explicit read+write permission for Unix socket paths.
@@ -257,10 +262,10 @@ func buildDenoArgs(spec *task.Spec, socketPath, scriptPath string) []string {
 	return args
 }
 
-func buildEnv(resolved map[string]string, socketPath string) []string {
+func buildEnv(resolved map[string]string, socketPath, token string) []string {
 	// Inherit the host environment so Deno can locate its cache (DENO_DIR etc).
 	// The --allow-env flag separately controls which vars the JS script can read.
-	env := append(os.Environ(), "DICODE_SOCKET="+socketPath)
+	env := append(os.Environ(), "DICODE_SOCKET="+socketPath, "DICODE_TOKEN="+token)
 	for k, v := range resolved {
 		env = append(env, k+"="+v)
 	}
