@@ -144,7 +144,7 @@ type Server struct {
 	reconciler         *registry.Reconciler // nil if not wired
 	sourceMgr          *SourceManager       // nil if not wired
 	dataDir            string               // ~/.dicode or cfg.DataDir
-	gateway            *ipc.Gateway         // optional; routes /hooks/* when set
+	gateway            *ipc.Gateway
 	managedRuntimes    []pkgruntime.ManagedRuntime
 	sessions           *sessionStore
 	dbSessions         *dbSessionStore  // persistent sessions / trusted devices
@@ -160,11 +160,6 @@ type Server struct {
 	srv                *http.Server
 }
 
-// SetGateway attaches the HTTP gateway. When set, /hooks/* requests are
-// dispatched through the gateway instead of the engine's built-in handler.
-// Call this after New and before Start.
-func (s *Server) SetGateway(g *ipc.Gateway) { s.gateway = g }
-
 // SetManagedRuntimes registers the list of managed runtimes (Deno, Python, …)
 // that will appear in the Config UI. Call this after New and before Start.
 func (s *Server) SetManagedRuntimes(runtimes []pkgruntime.ManagedRuntime) {
@@ -176,7 +171,7 @@ func (s *Server) SetManagedRuntimes(runtimes []pkgruntime.ManagedRuntime) {
 // rec and dataDir enable live source management; pass nil/"" in tests.
 // sourceMgr enables the /api/sources endpoints and MCP source tools; pass nil in tests.
 // database is required for persistent sessions and API key storage; pass nil in tests (auth features disabled).
-func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config, cfgPath string, secretsMgr SecretsManager, rec *registry.Reconciler, sourceMgr *SourceManager, dataDir string, logs *LogBroadcaster, log *zap.Logger, database db.DB) (*Server, error) {
+func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config, cfgPath string, secretsMgr SecretsManager, rec *registry.Reconciler, sourceMgr *SourceManager, dataDir string, logs *LogBroadcaster, log *zap.Logger, database db.DB, gateway *ipc.Gateway) (*Server, error) {
 	ss := newSessionStore()
 	go ss.purgeLoop()
 
@@ -209,6 +204,7 @@ func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config
 		ws:              wsHub,
 		log:             log,
 		port:            port,
+		gateway:         gateway,
 	}
 
 	// Wire run started hook → broadcast run:started
@@ -312,20 +308,10 @@ func (s *Server) Handler() http.Handler {
 	// Webhook passthrough — auth via per-task HMAC secret or optional session cookie.
 	// When a task sets trigger.auth: true, a valid dicode session is required for
 	// both GET (serving the task UI) and POST (running the task). Public webhooks
-	// (no auth: true) remain fully open — zero behaviour change.
-	//
-	// When a Gateway is attached (production), requests are dispatched through it
-	// so that IPC-registered daemon tasks can also serve /hooks/* routes.
-	// The engine's built-in WebhookHandler is used as fallback (tests / no gateway).
-	webhookDispatch := func() http.Handler {
-		if s.gateway != nil {
-			return s.gateway
-		}
-		return s.engine.WebhookHandler()
-	}
+	// (no auth: true) remain fully open.
 	webhookHandler := func(w http.ResponseWriter, req *http.Request) {
 		req.URL.Path = "/hooks/" + chi.URLParam(req, "*")
-		s.webhookAuthGuard(w, req, webhookDispatch())
+		s.webhookAuthGuard(w, req, s.gateway)
 	}
 	r.Get("/hooks/*", webhookHandler)
 	r.Post("/hooks/*", webhookHandler)
