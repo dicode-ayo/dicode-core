@@ -24,6 +24,7 @@ import (
 	"github.com/dicode/dicode/pkg/mcp"
 	"github.com/dicode/dicode/pkg/registry"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
+	"github.com/dicode/dicode/pkg/secrets"
 	gitSource "github.com/dicode/dicode/pkg/source/git"
 	"github.com/dicode/dicode/pkg/source/local"
 	"github.com/dicode/dicode/pkg/task"
@@ -34,12 +35,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// SecretsManager is the interface the secrets UI uses — satisfied by *secrets.LocalProvider.
-type SecretsManager interface {
-	List(ctx context.Context) ([]string, error)
-	Set(ctx context.Context, key, value string) error
-	Delete(ctx context.Context, key string) error
-}
+// SecretsManager is an alias for secrets.Manager kept for call-site clarity.
+type SecretsManager = secrets.Manager
 
 // sessionStore holds in-memory session tokens for the secrets page.
 type sessionStore struct {
