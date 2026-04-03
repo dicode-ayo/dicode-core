@@ -53,14 +53,13 @@ trigger:
 - Root TaskSet `infra` + entry `deploy-backend` → ID `infra/deploy-backend`
 - Nested TaskSet `infra` > `platform` + entry `nginx-start` → ID `infra/platform/nginx-start`
 
-**6-level precedence stack** (lowest → highest):
+**3-level precedence stack** (lowest → highest):
 
 1. `task.yaml` base values
-2. `kind:Config` defaults file (auto-discovered as `dicode-config.yaml` alongside root)
-3. Root TaskSet `spec.defaults`
-4. Parent TaskSet `overrides.defaults`
-5. Parent TaskSet `overrides.entries[key]`
-6. Entry-level `overrides` (leaf wins)
+2. Root TaskSet `spec.defaults`
+3. Per-entry `overrides` (parent entry patch merged with local entry overrides; leaf wins)
+
+> **Deprecated:** `kind:Config spec.defaults` and `overrides.defaults` from parent TaskSets are no longer applied to the override stack. Migrate shared defaults to `dicode.yaml defaults:` instead.
 
 **`kind:Config`** — optional shared defaults file:
 
