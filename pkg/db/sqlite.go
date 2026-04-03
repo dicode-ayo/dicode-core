@@ -86,6 +86,13 @@ func (s *SQLiteDB) migrate() error {
 			ciphertext BLOB NOT NULL,
 			nonce      BLOB NOT NULL
 		);
+
+		CREATE TABLE IF NOT EXISTS cron_jobs (
+			task_id     TEXT PRIMARY KEY,
+			cron_expr   TEXT NOT NULL,
+			last_run_at INTEGER,
+			next_run_at INTEGER NOT NULL
+		);
 	`)
 	if err != nil {
 		return err
