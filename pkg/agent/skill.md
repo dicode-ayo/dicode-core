@@ -230,6 +230,41 @@ test("edge case: empty result", async () => {
 | `assert.httpCalledWith(method, url, opts)` | | Assert call with body/headers |
 | `assert.httpNotCalled(method, pattern)` | | Assert no matching call |
 
+## taskset.yaml format
+
+When creating or editing a `taskset.yaml` (the root entry point for a TaskSet source), use this format:
+
+```yaml
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: <source-name>
+spec:
+  defaults:             # optional — applied at precedence level 2
+    timeout: 30m
+  entries:              # required — map of entry-key → task or nested TaskSet ref
+    my-task:
+      ref:
+        path: ./my-task   # path to task.yaml or a nested taskset.yaml
+      overrides:          # optional — precedence level 3 (highest)
+        timeout: 5m
+    nested-set:
+      ref:
+        path: ./platform/taskset.yaml   # nested TaskSet — namespace: <source>/nested-set
+```
+
+**3-level precedence stack** (lowest → highest):
+1. `task.yaml` base values
+2. `spec.defaults` (this TaskSet)
+3. Per-entry `overrides` (leaf wins)
+
+**Common mistakes:**
+| Mistake | Correct |
+|---|---|
+| `tasks: [{path: ./foo}]` (old flat format) | Use `spec.entries:` map |
+| `name: foo` at top level (no metadata block) | Use `metadata: {name: foo}` |
+| Expecting `kind:Config spec.defaults` to apply | Deprecated — use `dicode.yaml defaults:` instead |
+
 ## Common mistakes to avoid
 
 | Mistake | Correct approach |

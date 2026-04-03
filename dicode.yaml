@@ -20,6 +20,7 @@ server:
     secret: ""
     tray: true
 sources:
-    - name: examples
-      path: /home/dr14/dicode/examples/taskset.yaml
-      type: local
+    - name: dicode-buildin
+      type: git
+      url: https://github.com/dicode-ayo/dicode-buildin
+      branch: main
