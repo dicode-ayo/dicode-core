@@ -40,6 +40,10 @@ Schedule is evaluated in the dicode process's local timezone. Set the `TZ` envir
 
 **Implementation:** `robfig/cron` v3. The cron scheduler is managed by the trigger engine — when a task is added or updated, the engine cancels any existing cron registration and creates a new one. When a task is removed, the registration is cancelled.
 
+**Missed-run catchup:** dicode persists each cron task's next scheduled time in the database (`cron_jobs` table). On startup, any task whose recorded `next_run_at` is in the past (but within the last 24 hours) is fired immediately with `trigger_source = "cron-catchup"`. This prevents silent skips when dicode restarts mid-schedule (e.g. after an OS reboot or deploy).
+
+**Fire-once semantics:** at most one catchup run is fired per task per restart, regardless of how many intervals were missed. For example, if a task runs every 5 minutes and the daemon was offline for 2 hours, one catchup run fires — not 24. This avoids bulk-firing high-frequency tasks after long outages. Runs missed more than 24 hours ago are skipped with a `Warn` log. Tasks deleted between sessions are pruned from the `cron_jobs` table on startup.
+
 ---
 
 ## Webhook

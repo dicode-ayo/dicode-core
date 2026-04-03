@@ -212,7 +212,10 @@ func (e *Engine) Unregister(id string) {
 	e.mu.Unlock()
 
 	if hadCron && e.db != nil {
-		_ = e.db.Exec(context.Background(), `DELETE FROM cron_jobs WHERE task_id=?`, id)
+		if dbErr := e.db.Exec(context.Background(), `DELETE FROM cron_jobs WHERE task_id=?`, id); dbErr != nil {
+			e.log.Warn("cron: failed to delete cron_jobs row on unregister",
+				zap.String("task", id), zap.Error(dbErr))
+		}
 	}
 
 	e.daemonMu.Lock()
@@ -243,7 +246,10 @@ func (e *Engine) registerCron(spec *task.Spec) {
 		if !ok {
 			return
 		}
-		if e.db != nil {
+		// Advance next_run_at AFTER fireAsync so that a failed dispatch does not
+		// silently advance the schedule and cause the missed run to be invisible
+		// on the next restart.
+		if _, ferr := e.fireAsync(context.Background(), s, pkgruntime.RunOptions{}, "cron"); ferr == nil && e.db != nil {
 			if next, nerr := cronNextRun(spec.Trigger.Cron); nerr == nil {
 				if dbErr := e.db.Exec(context.Background(),
 					`UPDATE cron_jobs SET last_run_at=?, next_run_at=? WHERE task_id=?`,
@@ -254,7 +260,6 @@ func (e *Engine) registerCron(spec *task.Spec) {
 				}
 			}
 		}
-		e.fireAsync(context.Background(), s, pkgruntime.RunOptions{}, "cron") //nolint:errcheck
 	})
 	if err != nil {
 		e.log.Error("invalid cron expression",
@@ -284,6 +289,11 @@ func (e *Engine) registerCron(spec *task.Spec) {
 
 // catchupMissedCronRuns fires any cron tasks whose next_run_at is in the past,
 // up to a 24-hour cutoff. Called at startup before tasks are re-registered.
+//
+// Fire-once semantics: at most one catchup run is fired per task per restart,
+// regardless of how many intervals were missed. This prevents bulk-firing a
+// high-frequency task after a long outage. Operators can see the skipped count
+// in the Warn log entries for rows older than 24h.
 func (e *Engine) catchupMissedCronRuns(ctx context.Context) {
 	now := time.Now().Unix()
 	cutoff := time.Now().Add(-24 * time.Hour).Unix()
@@ -315,7 +325,7 @@ func (e *Engine) catchupMissedCronRuns(ctx context.Context) {
 	}
 	var missed, tooOld []missedRow
 
-	_ = e.db.Query(ctx,
+	if queryErr := e.db.Query(ctx,
 		`SELECT task_id, next_run_at FROM cron_jobs WHERE next_run_at < ?`,
 		[]any{now},
 		func(rows db.Scanner) error {
@@ -331,7 +341,10 @@ func (e *Engine) catchupMissedCronRuns(ctx context.Context) {
 			}
 			return nil
 		},
-	)
+	); queryErr != nil {
+		e.log.Warn("cron catchup: failed to query missed runs", zap.Error(queryErr))
+		return
+	}
 
 	for _, m := range tooOld {
 		e.log.Warn("cron catchup: missed run is older than 24h — skipping",
