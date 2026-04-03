@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dicode/dicode/pkg/db"
 	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/notify"
 	"github.com/dicode/dicode/pkg/registry"
@@ -55,6 +56,8 @@ type Engine struct {
 
 	defaultsOnFailureChain string // from config.Defaults.OnFailureChain
 
+	db db.DB // optional — enables cron-job persistence and missed-run catchup
+
 	runFinishedHook func(taskID, runID, status, triggerSource string, durationMs int64, notifyOnSuccess, notifyOnFailure bool)
 	runStartedHook  func(taskID, runID, triggerSource string)
 }
@@ -73,6 +76,13 @@ func New(r *registry.Registry, defaultExec pkgruntime.Executor, log *zap.Logger)
 	}
 	e.executors[task.RuntimeDeno] = defaultExec
 	return e
+}
+
+// SetDB wires a database into the engine for cron-job persistence.
+// When set, the engine persists each cron task's next scheduled time and
+// detects missed runs on startup (e.g. after a process restart).
+func (e *Engine) SetDB(d db.DB) {
+	e.db = d
 }
 
 // SetRunStartedHook registers a callback invoked when a run starts.
@@ -136,6 +146,13 @@ func (e *Engine) Start(ctx context.Context) error {
 	e.shutdownCtx = ctx
 	e.shutdownMu.Unlock()
 
+	// Check for missed cron runs BEFORE registering tasks: registration overwrites
+	// next_run_at with a fresh future value, so the catchup must read the prior
+	// session's persisted next_run_at first.
+	if e.db != nil {
+		e.catchupMissedCronRuns(ctx)
+	}
+
 	for _, spec := range e.registry.All() {
 		e.Register(spec)
 	}
@@ -181,9 +198,11 @@ func (e *Engine) Register(spec *task.Spec) {
 // Unregister removes all trigger registrations for a task ID.
 func (e *Engine) Unregister(id string) {
 	e.mu.Lock()
+	hadCron := false
 	if entryID, ok := e.cronEntries[id]; ok {
 		e.cron.Remove(entryID)
 		delete(e.cronEntries, id)
+		hadCron = true
 	}
 	for path, tid := range e.webhooks {
 		if tid == id {
@@ -191,6 +210,13 @@ func (e *Engine) Unregister(id string) {
 		}
 	}
 	e.mu.Unlock()
+
+	if hadCron && e.db != nil {
+		if dbErr := e.db.Exec(context.Background(), `DELETE FROM cron_jobs WHERE task_id=?`, id); dbErr != nil {
+			e.log.Warn("cron: failed to delete cron_jobs row on unregister",
+				zap.String("task", id), zap.Error(dbErr))
+		}
+	}
 
 	e.daemonMu.Lock()
 	delete(e.daemonSpecs, id)
@@ -205,13 +231,35 @@ func (e *Engine) Unregister(id string) {
 	e.log.Info("task unregistered", zap.String("task", id))
 }
 
+// cronNextRun parses expr and returns the next scheduled time after now.
+func cronNextRun(expr string) (time.Time, error) {
+	sched, err := cron.ParseStandard(expr)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return sched.Next(time.Now()), nil
+}
+
 func (e *Engine) registerCron(spec *task.Spec) {
 	id, err := e.cron.AddFunc(spec.Trigger.Cron, func() {
 		s, ok := e.registry.Get(spec.ID)
 		if !ok {
 			return
 		}
-		e.fireAsync(context.Background(), s, pkgruntime.RunOptions{}, "cron") //nolint:errcheck
+		// Advance next_run_at AFTER fireAsync so that a failed dispatch does not
+		// silently advance the schedule and cause the missed run to be invisible
+		// on the next restart.
+		if _, ferr := e.fireAsync(context.Background(), s, pkgruntime.RunOptions{}, "cron"); ferr == nil && e.db != nil {
+			if next, nerr := cronNextRun(spec.Trigger.Cron); nerr == nil {
+				if dbErr := e.db.Exec(context.Background(),
+					`UPDATE cron_jobs SET last_run_at=?, next_run_at=? WHERE task_id=?`,
+					time.Now().Unix(), next.Unix(), spec.ID,
+				); dbErr != nil {
+					e.log.Warn("cron: failed to persist next_run_at",
+						zap.String("task", spec.ID), zap.Error(dbErr))
+				}
+			}
+		}
 	})
 	if err != nil {
 		e.log.Error("invalid cron expression",
@@ -224,6 +272,101 @@ func (e *Engine) registerCron(spec *task.Spec) {
 	e.mu.Lock()
 	e.cronEntries[spec.ID] = id
 	e.mu.Unlock()
+
+	if e.db != nil {
+		if next, nerr := cronNextRun(spec.Trigger.Cron); nerr == nil {
+			if dbErr := e.db.Exec(context.Background(),
+				`INSERT INTO cron_jobs(task_id,cron_expr,next_run_at) VALUES(?,?,?)
+				 ON CONFLICT(task_id) DO UPDATE SET cron_expr=excluded.cron_expr, next_run_at=excluded.next_run_at`,
+				spec.ID, spec.Trigger.Cron, next.Unix(),
+			); dbErr != nil {
+				e.log.Warn("cron: failed to persist cron_jobs row",
+					zap.String("task", spec.ID), zap.Error(dbErr))
+			}
+		}
+	}
+}
+
+// catchupMissedCronRuns fires any cron tasks whose next_run_at is in the past,
+// up to a 24-hour cutoff. Called at startup before tasks are re-registered.
+//
+// Fire-once semantics: at most one catchup run is fired per task per restart,
+// regardless of how many intervals were missed. This prevents bulk-firing a
+// high-frequency task after a long outage. Operators can see the skipped count
+// in the Warn log entries for rows older than 24h.
+func (e *Engine) catchupMissedCronRuns(ctx context.Context) {
+	now := time.Now().Unix()
+	cutoff := time.Now().Add(-24 * time.Hour).Unix()
+
+	// Remove rows for tasks no longer in the registry (deleted while daemon was offline).
+	allSpecs := e.registry.All()
+	knownIDs := make([]any, 0, len(allSpecs))
+	for _, s := range allSpecs {
+		knownIDs = append(knownIDs, s.ID)
+	}
+	if len(knownIDs) > 0 {
+		placeholders := strings.Repeat("?,", len(knownIDs))
+		placeholders = placeholders[:len(placeholders)-1]
+		if dbErr := e.db.Exec(ctx,
+			`DELETE FROM cron_jobs WHERE task_id NOT IN (`+placeholders+`)`,
+			knownIDs...,
+		); dbErr != nil {
+			e.log.Warn("cron catchup: failed to prune orphaned rows", zap.Error(dbErr))
+		}
+	} else {
+		if dbErr := e.db.Exec(ctx, `DELETE FROM cron_jobs`); dbErr != nil {
+			e.log.Warn("cron catchup: failed to prune orphaned rows", zap.Error(dbErr))
+		}
+	}
+
+	type missedRow struct {
+		taskID string
+		nextAt int64
+	}
+	var missed, tooOld []missedRow
+
+	if queryErr := e.db.Query(ctx,
+		`SELECT task_id, next_run_at FROM cron_jobs WHERE next_run_at < ?`,
+		[]any{now},
+		func(rows db.Scanner) error {
+			for rows.Next() {
+				var r missedRow
+				if err := rows.Scan(&r.taskID, &r.nextAt); err == nil {
+					if r.nextAt > cutoff {
+						missed = append(missed, r)
+					} else {
+						tooOld = append(tooOld, r)
+					}
+				}
+			}
+			return nil
+		},
+	); queryErr != nil {
+		e.log.Warn("cron catchup: failed to query missed runs", zap.Error(queryErr))
+		return
+	}
+
+	for _, m := range tooOld {
+		e.log.Warn("cron catchup: missed run is older than 24h — skipping",
+			zap.String("task", m.taskID),
+			zap.Time("was_due", time.Unix(m.nextAt, 0)),
+		)
+	}
+	for _, m := range missed {
+		spec, ok := e.registry.Get(m.taskID)
+		if !ok {
+			e.log.Warn("cron catchup: task no longer registered, skipping",
+				zap.String("task", m.taskID),
+				zap.Time("was_due", time.Unix(m.nextAt, 0)),
+			)
+			continue
+		}
+		e.log.Info("cron catchup: firing missed run",
+			zap.String("task", m.taskID),
+			zap.Time("was_due", time.Unix(m.nextAt, 0)),
+		)
+		e.fireAsync(ctx, spec, pkgruntime.RunOptions{}, "cron-catchup") //nolint:errcheck
+	}
 }
 
 func (e *Engine) registerWebhook(spec *task.Spec) {
@@ -894,7 +1037,7 @@ func (e *Engine) dispatch(ctx context.Context, spec *task.Spec, opts pkgruntime.
 	exec, ok := e.executors[spec.Runtime]
 	e.mu.Unlock()
 
-	if !ok {
+	if !ok || exec == nil {
 		e.log.Error("no executor for runtime",
 			zap.String("task", spec.ID),
 			zap.String("runtime", string(spec.Runtime)),

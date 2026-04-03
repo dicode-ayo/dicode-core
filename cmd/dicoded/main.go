@@ -216,6 +216,7 @@ func buildRuntimes(
 		return nil, nil, fmt.Errorf("init deno runtime: %w", err)
 	}
 	eng := trigger.New(reg, denoRT, log)
+	eng.SetDB(database)
 	denoRT.SetEngine(eng)
 	denoRT.SetGateway(gateway)
 	aiAPIKey := cfg.AI.APIKey
