@@ -1,7 +1,10 @@
 apiVersion: dicode/v1
 kind: Task
 name: Hello Python
-description: Simple Python task demonstrating SDK globals
+description: |
+  Async Python task showcasing PR #52 SDK additions: async def main(),
+  params/kv/log/output *_async variants, dicode.get_config_async, and
+  PEP 723 inline dependencies (httpx).
 runtime: python
 
 trigger:
@@ -11,3 +14,6 @@ params:
   - name: name
     description: Name to greet
     default: "World"
+  - name: count
+    description: Run count (shown in greeting)
+    default: "1"
