@@ -318,9 +318,16 @@ func buildWrapper(scriptBytes []byte) (string, error) {
 	w.WriteString("if _main is not None and _asyncio_mod.iscoroutinefunction(_main):\n")
 	w.WriteString("    result = _asyncio_mod.run(_main())\n")
 	w.WriteString("_set_return(globals().get('result', None))\n")
-	// Close the asyncio writer gracefully so the Go server sees a clean EOF.
-	w.WriteString("_writer.close()\n")
-	w.WriteString("_asyncio_mod.run_coroutine_threadsafe(_writer.wait_closed(), _loop).result(timeout=5)\n")
+	// Schedule close on _loop so it runs *after* any pending _fire coroutines
+	// (the event loop is FIFO — tasks submitted before this will drain first).
+	// Wrap in try/except so a timeout never marks a successful run as failed.
+	w.WriteString("async def _dicode_close():\n")
+	w.WriteString("    _writer.close()\n")
+	w.WriteString("    await _writer.wait_closed()\n")
+	w.WriteString("try:\n")
+	w.WriteString("    _asyncio_mod.run_coroutine_threadsafe(_dicode_close(), _loop).result(timeout=5)\n")
+	w.WriteString("except Exception:\n")
+	w.WriteString("    pass\n")
 	return w.String(), nil
 }
 
