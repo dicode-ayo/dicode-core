@@ -224,8 +224,9 @@ Injected before every Python task script via `buildWrapper()`. Updated for unifi
 - asyncio background IO loop (`asyncio.new_event_loop()` + daemon thread)
 - `asyncio.open_unix_connection()` for socket; length-prefix framing via `struct.pack("<I", ...)`
 - Handshake on connect: sends `DICODE_TOKEN`, validates server response
-- `async def main()` detected via `asyncio.iscoroutinefunction` and run with `asyncio.run()`
-- `kv.get_async`, `kv.set_async`, `kv.list_async` variants for async task bodies
+- `async def main()` detected via `asyncio.iscoroutinefunction` and run with `asyncio.run()`; return value captured as `result`; writer closed gracefully after `_set_return`
+- `_call_async(req)` — bridges `_async_call` into the caller's event loop via `asyncio.wrap_future`; no thread pool
+- Full `_async` variants on all globals: `log.*_async`, `params.get_async/all_async`, `kv.*_async`, `dicode.*_async` (including `get_config_async`), `mcp.*_async`
 - Globals: `log`, `params`, `env`, `kv`, `input`, `output`, **`dicode`**, **`mcp`**
 
 ### `cmd/dicoded/main.go` ✅ (daemon binary)
