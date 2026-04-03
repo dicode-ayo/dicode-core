@@ -525,6 +525,43 @@ func TestCronCatchup_OrphanRow(t *testing.T) {
 	}
 }
 
+// TestCronCatchup_TooOld verifies that a missed run older than 24h is skipped
+// (not fired) and produces a Warn log, not a catchup run.
+func TestCronCatchup_TooOld(t *testing.T) {
+	d, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { d.Close() })
+
+	reg := registry.New(d)
+
+	dir := t.TempDir()
+	spec := writeTask(t, dir, "old-cron", `return 1`, task.TriggerConfig{Cron: "* * * * *"})
+	_ = reg.Register(spec)
+
+	// Seed a next_run_at more than 24h in the past.
+	tooOldAt := time.Now().Add(-25 * time.Hour).Unix()
+	if err := d.Exec(context.Background(),
+		`INSERT INTO cron_jobs(task_id,cron_expr,next_run_at) VALUES(?,?,?)`,
+		"old-cron", "* * * * *", tooOldAt,
+	); err != nil {
+		t.Fatalf("seed cron_jobs: %v", err)
+	}
+
+	eng := New(reg, nil, zap.NewNop())
+	eng.SetDB(d)
+	eng.catchupMissedCronRuns(context.Background())
+
+	// No run should be created — the row is too old.
+	runs, _ := reg.ListRuns(context.Background(), "old-cron", 5)
+	for _, r := range runs {
+		if r.TriggerSource == "cron-catchup" {
+			t.Error("expected no cron-catchup run for a >24h old missed run")
+		}
+	}
+}
+
 // TestCronPersistence verifies that registering a cron task writes a cron_jobs
 // row and unregistering it removes the row.
 func TestCronPersistence(t *testing.T) {
