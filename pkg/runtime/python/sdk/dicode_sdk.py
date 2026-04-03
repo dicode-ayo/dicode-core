@@ -93,6 +93,9 @@ asyncio.run_coroutine_threadsafe(_read_loop(), _loop)
 # ── call helpers ──────────────────────────────────────────────────────────────
 
 _nid = 0
+# _next_id is only called from _async_call, which is a coroutine on _loop.
+# asyncio is single-threaded within a loop, so no cross-thread contention exists.
+# The lock is kept as a safeguard if callers ever change.
 _nid_lock = threading.Lock()
 
 
