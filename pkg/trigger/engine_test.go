@@ -441,6 +441,174 @@ func TestEngine_WebhookHandler_FormPOST(t *testing.T) {
 	}
 }
 
+// TestCronCatchup verifies that cron tasks whose next_run_at is in the past
+// are fired with trigger_source="cron-catchup".
+// Calls catchupMissedCronRuns directly (same package) to avoid the goroutine
+// race that would arise from calling Start() and then polling.
+func TestCronCatchup(t *testing.T) {
+	d, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { d.Close() })
+
+	reg := registry.New(d)
+
+	dir := t.TempDir()
+	spec := writeTask(t, dir, "catchup-task", `return 1`, task.TriggerConfig{Cron: "0 9 * * *"})
+	if err := reg.Register(spec); err != nil {
+		t.Fatalf("reg.Register: %v", err)
+	}
+
+	// Seed a stale cron_jobs row simulating the previous session.
+	missedAt := time.Now().Add(-5 * time.Minute).Unix()
+	if err := d.Exec(context.Background(),
+		`INSERT INTO cron_jobs(task_id,cron_expr,next_run_at) VALUES(?,?,?)`,
+		"catchup-task", "0 9 * * *", missedAt,
+	); err != nil {
+		t.Fatalf("seed cron_jobs: %v", err)
+	}
+
+	eng := New(reg, nil, zap.NewNop()) // nil executor — dispatch fails but run record is created
+	eng.SetDB(d)
+
+	// Call directly — synchronous, no goroutine scheduling race.
+	// fireAsync creates the run record before launching its goroutine, so
+	// ListRuns is reliable immediately after this returns.
+	eng.catchupMissedCronRuns(context.Background())
+
+	runs, err := reg.ListRuns(context.Background(), "catchup-task", 5)
+	if err != nil {
+		t.Fatalf("ListRuns: %v", err)
+	}
+	var found bool
+	for _, r := range runs {
+		if r.TriggerSource == "cron-catchup" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected a cron-catchup run to be created")
+	}
+}
+
+// TestCronCatchup_OrphanRow verifies that a task deleted between sessions
+// produces a warning log and does not panic.
+func TestCronCatchup_OrphanRow(t *testing.T) {
+	d, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { d.Close() })
+
+	reg := registry.New(d)
+
+	// Seed a cron_jobs row for a task that is NOT in the registry.
+	missedAt := time.Now().Add(-5 * time.Minute).Unix()
+	if err := d.Exec(context.Background(),
+		`INSERT INTO cron_jobs(task_id,cron_expr,next_run_at) VALUES(?,?,?)`,
+		"deleted-task", "* * * * *", missedAt,
+	); err != nil {
+		t.Fatalf("seed cron_jobs: %v", err)
+	}
+
+	eng := New(reg, nil, zap.NewNop())
+	eng.SetDB(d)
+
+	// Should not panic; orphan row is skipped with a warning.
+	eng.catchupMissedCronRuns(context.Background())
+
+	runs, _ := reg.ListRuns(context.Background(), "deleted-task", 5)
+	if len(runs) != 0 {
+		t.Errorf("expected no runs for deleted task, got %d", len(runs))
+	}
+}
+
+// TestCronCatchup_TooOld verifies that a missed run older than 24h is skipped
+// (not fired) and produces a Warn log, not a catchup run.
+func TestCronCatchup_TooOld(t *testing.T) {
+	d, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { d.Close() })
+
+	reg := registry.New(d)
+
+	dir := t.TempDir()
+	spec := writeTask(t, dir, "old-cron", `return 1`, task.TriggerConfig{Cron: "* * * * *"})
+	_ = reg.Register(spec)
+
+	// Seed a next_run_at more than 24h in the past.
+	tooOldAt := time.Now().Add(-25 * time.Hour).Unix()
+	if err := d.Exec(context.Background(),
+		`INSERT INTO cron_jobs(task_id,cron_expr,next_run_at) VALUES(?,?,?)`,
+		"old-cron", "* * * * *", tooOldAt,
+	); err != nil {
+		t.Fatalf("seed cron_jobs: %v", err)
+	}
+
+	eng := New(reg, nil, zap.NewNop())
+	eng.SetDB(d)
+	eng.catchupMissedCronRuns(context.Background())
+
+	// No run should be created — the row is too old.
+	runs, _ := reg.ListRuns(context.Background(), "old-cron", 5)
+	for _, r := range runs {
+		if r.TriggerSource == "cron-catchup" {
+			t.Error("expected no cron-catchup run for a >24h old missed run")
+		}
+	}
+}
+
+// TestCronPersistence verifies that registering a cron task writes a cron_jobs
+// row and unregistering it removes the row.
+func TestCronPersistence(t *testing.T) {
+	d, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { d.Close() })
+
+	reg := registry.New(d)
+	eng := New(reg, nil, zap.NewNop())
+	eng.SetDB(d)
+
+	dir := t.TempDir()
+	spec := writeTask(t, dir, "persist-cron", `return 1`, task.TriggerConfig{Cron: "* * * * *"})
+	_ = reg.Register(spec)
+	eng.Register(spec)
+
+	// Row must exist after Register.
+	var count int
+	_ = d.Query(context.Background(),
+		`SELECT COUNT(*) FROM cron_jobs WHERE task_id=?`, []any{"persist-cron"},
+		func(rows db.Scanner) error {
+			rows.Next()
+			return rows.Scan(&count)
+		},
+	)
+	if count != 1 {
+		t.Errorf("expected 1 cron_jobs row after Register, got %d", count)
+	}
+
+	eng.Unregister("persist-cron")
+
+	// Row must be gone after Unregister.
+	count = 0
+	_ = d.Query(context.Background(),
+		`SELECT COUNT(*) FROM cron_jobs WHERE task_id=?`, []any{"persist-cron"},
+		func(rows db.Scanner) error {
+			rows.Next()
+			return rows.Scan(&count)
+		},
+	)
+	if count != 0 {
+		t.Errorf("expected 0 cron_jobs rows after Unregister, got %d", count)
+	}
+}
+
 func TestInjectDicodeSDK(t *testing.T) {
 	html := `<html><head><title>Test</title></head><body></body></html>`
 	result := injectDicodeSDK(html, "/hooks/my-task", "my-task")
