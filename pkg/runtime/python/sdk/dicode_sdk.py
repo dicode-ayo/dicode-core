@@ -110,9 +110,20 @@ async def _async_call(req):
 
 
 def _call(req):
-    """Send a request and block until the response arrives (sync API)."""
+    """Sync: block until the response arrives. Raises RuntimeError after 30s."""
     fut = asyncio.run_coroutine_threadsafe(_async_call(req), _loop)
     return fut.result(timeout=30)
+
+
+async def _call_async(req):
+    """Async: await without occupying a thread.
+
+    Uses asyncio.wrap_future to bridge the concurrent.futures.Future returned
+    by run_coroutine_threadsafe into the caller's event loop — no thread pool.
+    """
+    return await asyncio.wrap_future(
+        asyncio.run_coroutine_threadsafe(_async_call(req), _loop)
+    )
 
 
 def _fire(req):
@@ -139,6 +150,12 @@ class _Log:
     def error(self, *args):  self._emit("error", *args)
     def debug(self, *args):  self._emit("debug", *args)
 
+    # Async variants — _fire is non-blocking, no executor needed.
+    async def info_async(self, *args):   self._emit("info",  *args)
+    async def warn_async(self, *args):   self._emit("warn",  *args)
+    async def error_async(self, *args):  self._emit("error", *args)
+    async def debug_async(self, *args):  self._emit("debug", *args)
+
 
 log = _Log()
 
@@ -164,6 +181,12 @@ class _Params:
 
     def all(self):
         return dict(_get_params())
+
+    async def get_async(self, key, default=None):
+        return (await _call_async({"method": "params"}) or {}).get(key, default)
+
+    async def all_async(self):
+        return dict(await _call_async({"method": "params"}) or {})
 
 
 params = _Params()
@@ -196,13 +219,16 @@ class _KV:
 
     # Async variants for use inside async def main() tasks.
     async def get_async(self, key):
-        return await _async_call({"method": "kv.get", "key": key})
+        return await _call_async({"method": "kv.get", "key": key})
 
     async def set_async(self, key, value):
-        _fire({"method": "kv.set", "key": key, "value": value})
+        self.set(key, value)  # _fire is non-blocking
+
+    async def delete_async(self, key):
+        self.delete(key)  # _fire is non-blocking
 
     async def list_async(self, prefix=""):
-        return await _async_call({"method": "kv.list", "prefix": prefix}) or []
+        return await _call_async({"method": "kv.list", "prefix": prefix}) or []
 
 
 kv = _KV()
@@ -254,6 +280,20 @@ class _Dicode:
     def get_config(self, section):
         return _call({"method": "dicode.get_config", "section": section})
 
+    async def get_config_async(self, section):
+        return await _call_async({"method": "dicode.get_config", "section": section})
+
+    async def run_task_async(self, task_id, params=None):
+        return await _call_async({"method": "dicode.run_task", "taskID": task_id,
+                                  "params": params or {}})
+
+    async def list_tasks_async(self):
+        return await _call_async({"method": "dicode.list_tasks"}) or []
+
+    async def get_runs_async(self, task_id, limit=10):
+        return await _call_async({"method": "dicode.get_runs", "taskID": task_id,
+                                  "limit": limit}) or []
+
 
 dicode = _Dicode()
 
@@ -267,6 +307,13 @@ class _MCP:
     def call(self, name, tool, args=None):
         return _call({"method": "mcp.call", "mcpName": name, "tool": tool,
                       "args": args or {}})
+
+    async def list_tools_async(self, name):
+        return await _call_async({"method": "mcp.list_tools", "mcpName": name}) or []
+
+    async def call_async(self, name, tool, args=None):
+        return await _call_async({"method": "mcp.call", "mcpName": name, "tool": tool,
+                                  "args": args or {}})
 
 
 mcp = _MCP()

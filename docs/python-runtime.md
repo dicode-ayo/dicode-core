@@ -143,6 +143,25 @@ Assign `result` at module level. The value is passed to chained tasks via `input
 result = {"count": 42, "status": "ok"}
 ```
 
+### Async tasks
+
+Define `async def main()` and return a value from it. The shim detects the coroutine and runs it with `asyncio.run()`.
+
+```python
+async def main():
+    email = await params.get_async("email")
+    await log.info_async(f"processing {email}")
+    count = await kv.get_async("count") or 0
+    await kv.set_async("count", count + 1)
+    return {"email": email, "count": count + 1}
+```
+
+All SDK globals expose `_async` variants (`log.info_async`, `kv.get_async`, `params.get_async`, `dicode.run_task_async`, `mcp.call_async`, etc.) that are non-blocking from within an async context.
+
+> **Implementation note**: `_async` methods submit requests directly to the background IO loop via `asyncio.wrap_future` — no thread pool is involved. Many concurrent `asyncio.gather` calls are safe and do not block each other.
+
+Sync-style scripts (module-level code with `result = ...`) continue to work unchanged — the async interface is opt-in.
+
 ### `dicode` — task orchestration
 
 Allows a task to orchestrate other tasks. Requires `security.allowed_tasks` in `task.yaml`.
@@ -234,7 +253,7 @@ In addition to SDK globals, the following environment variables are always set:
 | SDK globals (`log`, `kv`, `dicode`, `mcp`, …) | Yes — injected via JS shim | Yes — injected via `dicode_sdk.py` shim |
 | Dependency management | npm / jsr imports | PEP 723 inline deps via uv |
 | Filesystem sandboxing | Yes — `--allow-read/write` | No — inherits host permissions |
-| Return value | `return` statement | `result = ...` module-level variable |
+| Return value | `return` statement | `result = ...` module-level variable, or `return` from `async def main()` |
 | Rich output | `output.html(…)`, etc. | Same — `output.html(…)`, etc. |
 | Chain trigger input | `input` global | `input` global |
 | Agent orchestration (`dicode`, `mcp`) | Yes | Yes |
