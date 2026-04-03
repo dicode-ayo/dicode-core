@@ -70,16 +70,22 @@ _pending = {}   # id -> asyncio.Future (set on the IO loop)
 
 
 async def _read_loop():
-    while True:
-        try:
+    try:
+        while True:
             msg = await _read_msg()
-        except Exception:
-            break
-        rid = msg.get("id")
-        if rid:
-            fut = _pending.pop(rid, None)
-            if fut is not None:
-                fut.set_result(msg)
+            rid = msg.get("id")
+            if rid:
+                fut = _pending.pop(rid, None)
+                if fut is not None:
+                    fut.set_result(msg)
+    except Exception as exc:
+        # Cancel all pending futures so callers fail fast instead of
+        # blocking for 30s each waiting for a response that will never arrive.
+        err = RuntimeError(f"dicode SDK: IO loop terminated: {exc}")
+        for fut in list(_pending.values()):
+            if not fut.done():
+                fut.set_exception(err)
+        _pending.clear()
 
 asyncio.run_coroutine_threadsafe(_read_loop(), _loop)
 
@@ -183,10 +189,16 @@ class _Params:
         return dict(_get_params())
 
     async def get_async(self, key, default=None):
-        return (await _call_async({"method": "params"}) or {}).get(key, default)
+        global _params_cache
+        if _params_cache is None:
+            _params_cache = await _call_async({"method": "params"}) or {}
+        return _params_cache.get(key, default)
 
     async def all_async(self):
-        return dict(await _call_async({"method": "params"}) or {})
+        global _params_cache
+        if _params_cache is None:
+            _params_cache = await _call_async({"method": "params"}) or {}
+        return dict(_params_cache)
 
 
 params = _Params()
@@ -258,6 +270,12 @@ class _Output:
         _fire({"method": "output",
                "contentType": mime or "application/octet-stream",
                "content": content, "data": {"filename": name}})
+
+    # Async variants — _fire is non-blocking, no executor needed.
+    async def html_async(self, content, data=None):  self.html(content, data)
+    async def text_async(self, content):              self.text(content)
+    async def image_async(self, mime, content):       self.image(mime, content)
+    async def file_async(self, name, content, mime=None): self.file(name, content, mime)
 
 
 output = _Output()

@@ -522,8 +522,12 @@ func TestServer_Dicode_GetConfig(t *testing.T) {
 	if result["model"] != "gpt-4o" {
 		t.Errorf("model: %v", result["model"])
 	}
-	if result["apiKey"] != "sk-test" {
-		t.Errorf("apiKey: %v", result["apiKey"])
+	if result["baseURL"] != "https://api.openai.com/v1" {
+		t.Errorf("baseURL: %v", result["baseURL"])
+	}
+	// apiKey must never be returned to task scripts (security: credential exposure).
+	if _, present := result["apiKey"]; present {
+		t.Errorf("apiKey must not be returned by get_config: %v", result["apiKey"])
 	}
 }
 

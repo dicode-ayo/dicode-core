@@ -444,10 +444,13 @@ func (s *Server) handleConn(conn net.Conn) {
 				reply(req.ID, nil, fmt.Sprintf("ipc: unsupported config section %q", req.Section))
 				continue
 			}
+			// apiKey is never sent to task scripts — it must be fetched
+			// from the environment or secrets store by the task itself.
+			// Returning it here would expose the credential to any task
+			// regardless of whether it needs AI access.
 			reply(req.ID, map[string]string{
 				"baseURL": s.aiBaseURL,
 				"model":   s.aiModel,
-				"apiKey":  s.aiAPIKey,
 			}, "")
 
 		// ── mcp.* ─────────────────────────────────────────────────────────
