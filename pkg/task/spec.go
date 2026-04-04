@@ -135,7 +135,7 @@ func (e *EnvEntry) UnmarshalYAML(value *yaml.Node) error {
 
 // Permissions declares what the task is explicitly allowed to access.
 // Nothing is passed implicitly — every env var, filesystem path,
-// subprocess executable, and network host must be listed here.
+// subprocess executable, network host, and dicode API must be listed here.
 type Permissions struct {
 	// Env lists env vars the task script may read or that are injected into it.
 	Env []EnvEntry `yaml:"env,omitempty" json:"env,omitempty"`
@@ -152,6 +152,9 @@ type Permissions struct {
 	// Use ["*"] for all, or list specific names: ["hostname", "osRelease", "networkInterfaces"].
 	// Omit to deny all sys access (default).
 	Sys []string `yaml:"sys,omitempty" json:"sys,omitempty"`
+	// Dicode controls which dicode runtime APIs (dicode.*, mcp.*) the task may call.
+	// All dicode APIs are denied by default; each must be explicitly enabled.
+	Dicode *DicodePermissions `yaml:"dicode,omitempty" json:"dicode,omitempty"`
 }
 
 // NotifyConfig controls when dicode sends push notifications for a task.
@@ -161,14 +164,24 @@ type NotifyConfig struct {
 	OnFailure *bool `yaml:"on_failure,omitempty" json:"on_failure,omitempty"`
 }
 
-// SecurityConfig controls which other tasks and MCP servers this task can access.
-type SecurityConfig struct {
-	// AllowedTasks lists task IDs this task may invoke via dicode.run_task().
-	// Use "*" to allow all tasks. Empty slice denies all.
-	AllowedTasks []string `yaml:"allowed_tasks,omitempty" json:"allowed_tasks,omitempty"`
-	// AllowedMCP lists MCP daemon task IDs this task may call via mcp.call().
-	// Use "*" to allow all. Empty slice denies all.
-	AllowedMCP []string `yaml:"allowed_mcp,omitempty" json:"allowed_mcp,omitempty"`
+// DicodePermissions declares which dicode runtime APIs the task may call.
+// All dicode.* and mcp.* globals are denied by default; each must be explicitly enabled here.
+type DicodePermissions struct {
+	// Tasks enables dicode.run_task() and lists the target task IDs allowed.
+	// Use ["*"] to allow all tasks. Omit (nil) to deny dicode.run_task() entirely.
+	Tasks []string `yaml:"tasks,omitempty" json:"tasks,omitempty"`
+	// MCP enables mcp.list_tools() and mcp.call() for the listed MCP daemon task IDs.
+	// Use ["*"] to allow all MCP daemons. Omit (nil) to deny all MCP access.
+	MCP []string `yaml:"mcp,omitempty" json:"mcp,omitempty"`
+	// ListTasks enables dicode.list_tasks().
+	ListTasks bool `yaml:"list_tasks,omitempty" json:"list_tasks,omitempty"`
+	// GetRuns enables dicode.get_runs().
+	GetRuns bool `yaml:"get_runs,omitempty" json:"get_runs,omitempty"`
+	// GetConfig enables dicode.get_config().
+	GetConfig bool `yaml:"get_config,omitempty" json:"get_config,omitempty"`
+	// SecretsWrite enables dicode.secrets_set() and dicode.secrets_delete().
+	// Tasks may write or overwrite secrets but never read them back.
+	SecretsWrite bool `yaml:"secrets_write,omitempty" json:"secrets_write,omitempty"`
 }
 
 // Spec is parsed from task.yaml.
@@ -183,8 +196,7 @@ type Spec struct {
 	Params      []Param     `yaml:"params,omitempty"      json:"params,omitempty"`
 	Permissions Permissions `yaml:"permissions,omitempty" json:"permissions,omitempty"`
 	Timeout     time.Duration `yaml:"timeout"             json:"timeout"`
-	Notify   *NotifyConfig   `yaml:"notify,omitempty" json:"notify,omitempty"`
-	Security *SecurityConfig `yaml:"security,omitempty" json:"security,omitempty"`
+	Notify *NotifyConfig `yaml:"notify,omitempty" json:"notify,omitempty"`
 	// MCPPort declares that this daemon task exposes an MCP server on the given port.
 	MCPPort int `yaml:"mcp_port,omitempty" json:"mcp_port,omitempty"`
 	// OnFailureChain overrides the global defaults.on_failure_chain for this task.

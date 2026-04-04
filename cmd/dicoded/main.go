@@ -36,7 +36,6 @@ import (
 	"github.com/dicode/dicode/pkg/source/local"
 	"github.com/dicode/dicode/pkg/task"
 	"github.com/dicode/dicode/pkg/taskset"
-	"github.com/dicode/dicode/pkg/tray"
 	"github.com/dicode/dicode/pkg/trigger"
 	"github.com/dicode/dicode/pkg/webui"
 	"go.uber.org/zap"
@@ -130,7 +129,7 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	gateway := ipc.NewGateway()
 
 	// 6. Managed runtimes + trigger engine.
-	managedRuntimes, eng, err := buildRuntimes(ctx, cfg, reg, secretsChain, database, log, gateway)
+	managedRuntimes, eng, err := buildRuntimes(ctx, cfg, reg, secretsChain, localSecrets, database, log, gateway)
 	if err != nil {
 		return err
 	}
@@ -190,15 +189,6 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	g.Go(func() error { return srv.Start(ctx) })
 	g.Go(func() error { return ctrlSrv.Start(ctx) })
 
-	// 11. System tray (optional).
-	trayEnabled := cfg.Server.Tray == nil || *cfg.Server.Tray
-	if trayEnabled {
-		g.Go(func() error {
-			tray.Run(ctx, cancel, port, log)
-			return nil
-		})
-	}
-
 	return g.Wait()
 }
 
@@ -207,6 +197,7 @@ func buildRuntimes(
 	cfg *config.Config,
 	reg *registry.Registry,
 	secretsChain secrets.Chain,
+	secretsMgr secrets.Manager,
 	database db.DB,
 	log *zap.Logger,
 	gateway *ipc.Gateway,
@@ -219,6 +210,7 @@ func buildRuntimes(
 	eng.SetDB(database)
 	denoRT.SetEngine(eng)
 	denoRT.SetGateway(gateway)
+	denoRT.SetSecretsManager(secretsMgr)
 	aiAPIKey := cfg.AI.APIKey
 	if aiAPIKey == "" && cfg.AI.APIKeyEnv != "" {
 		aiAPIKey = os.Getenv(cfg.AI.APIKeyEnv)
@@ -259,6 +251,7 @@ func buildRuntimes(
 		log.Fatal("python runtime init", zap.Error(err))
 	}
 	pythonMgr.SetGateway(gateway)
+	pythonMgr.SetSecretsManager(secretsMgr)
 	managed = append(managed, pythonMgr)
 
 	if rc, ok := cfg.Runtimes["python"]; ok && !rc.Disabled {

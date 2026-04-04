@@ -5,7 +5,7 @@ Every dicode task is a folder containing up to three files:
 ```text
 tasks/
 └── morning-email-check/
-    ├── task.yaml       ← required: trigger, params, env, metadata
+    ├── task.yaml       ← required: trigger, params, permissions, metadata
     ├── task.ts         ← required: TypeScript/JS logic (Deno runtime)
     └── task.test.ts    ← optional: unit tests
 ```
@@ -77,6 +77,15 @@ permissions:
 | `permissions.fs[].path` | string | | Absolute or `~`-prefixed path |
 | `permissions.fs[].permission` | string | | `r`, `w`, or `rw` |
 | `permissions.run` | list of strings | | Executables the script may spawn (Deno only); use `["*"]` for all |
+| `permissions.net` | list of strings | | Outbound network hosts (Deno only); omit = unrestricted, `[]` = deny all |
+| `permissions.sys` | list of strings | | Deno sys APIs (Deno only); omit = deny all, `["*"]` = all |
+| `permissions.dicode` | object | | Which dicode runtime APIs the task may call (all denied by default) |
+| `permissions.dicode.tasks` | list of strings | | Task IDs the script may invoke via `dicode.run_task()`; use `["*"]` for all |
+| `permissions.dicode.mcp` | list of strings | | MCP daemon task IDs the script may call via `mcp.call()`; use `["*"]` for all |
+| `permissions.dicode.list_tasks` | bool | | Allow `dicode.list_tasks()` |
+| `permissions.dicode.get_runs` | bool | | Allow `dicode.get_runs()` |
+| `permissions.dicode.get_config` | bool | | Allow `dicode.get_config()` |
+| `permissions.dicode.secrets_write` | bool | | Allow `dicode.secrets_set()` and `dicode.secrets_delete()` — write-only, no read |
 | `params` | list | | Input parameters with defaults |
 | `params[].name` | string | | Parameter name |
 | `params[].description` | string | | Human-readable description |
@@ -425,7 +434,6 @@ Four forms, with clear source distinction:
 | `value:` | — | Literal | Inject a fixed string (used by taskset override layers) |
 
 **`from:` vs `secret:` — the key distinction:**
-
 - `from:` reads **only** from the host OS environment (`os.Getenv`). Use it to rename a host env var or make the mapping explicit.
 - `secret:` reads **only** from the dicode secrets store (set via `dicode secrets set`). Run fails immediately if the key is not in the store.
 - A bare name does **neither** — it only allowlists the var so the script can read it from the host env via `env.get()`. No injection, no secrets lookup.
@@ -525,6 +533,65 @@ export default async function main({ env }) {
 ### `permissions.run` — subprocess execution (Deno only)
 
 Lists executables the script may spawn via `Deno.Command`. Use `["*"]` to allow all. Omitting this field blocks all subprocess execution.
+
+### `permissions.net` — outbound network (Deno only)
+
+Controls which hostnames the task may connect to.
+
+| Value | Effect |
+| --- | --- |
+| Omit field (default) | Unrestricted outbound (`--allow-net`) |
+| `["api.github.com", "hooks.slack.com"]` | Restrict to listed hosts only |
+| `[]` (empty list) | Deny all outbound network |
+
+### `permissions.sys` — system-info APIs (Deno only)
+
+Controls access to Deno's [`Deno.systemMemoryInfo()`](https://deno.land/api?s=Deno.systemMemoryInfo), `Deno.hostname()`, etc.
+
+| Value | Effect |
+| --- | --- |
+| Omit field (default) | Deny all sys APIs |
+| `["hostname", "osRelease"]` | Allow listed APIs only |
+| `["*"]` | Allow all sys APIs |
+
+### `permissions.dicode` — dicode runtime API access
+
+All `dicode.*` and `mcp.*` globals are **denied by default**. Each capability must be explicitly enabled under `permissions.dicode`.
+
+| Field | What it enables |
+| --- | --- |
+| `tasks: ["task-id"]` | `dicode.run_task("task-id", …)` — only listed task IDs are callable; `["*"]` allows all |
+| `mcp: ["daemon-id"]` | `mcp.list_tools()` and `mcp.call()` for the listed MCP daemon task IDs; `["*"]` allows all |
+| `list_tasks: true` | `dicode.list_tasks()` |
+| `get_runs: true` | `dicode.get_runs()` |
+| `get_config: true` | `dicode.get_config("ai")` (returns `baseURL` and `model` only — never the API key) |
+| `secrets_write: true` | `dicode.secrets_set(key, value)` and `dicode.secrets_delete(key)` — **write-only**, tasks can never read secrets back |
+
+```yaml
+# An agent task that can call other tasks and read AI config:
+permissions:
+  dicode:
+    tasks:
+      - send-report      # only this task ID is callable
+      - notify-slack
+    list_tasks: true     # can enumerate registered tasks
+    get_config: true     # can read AI provider config
+
+# Allow all task IDs and all MCP daemons:
+permissions:
+  dicode:
+    tasks: ["*"]
+    mcp: ["*"]
+
+# A provisioning task that writes secrets programmatically:
+permissions:
+  dicode:
+    secrets_write: true  # may set/delete secrets, never read them
+```
+
+> `dicode.run_task()` has a two-level check: the task must have the `tasks.trigger` capability (granted when `tasks:` is non-empty) **and** the specific task ID must be in the allowlist. The allowlist check is skipped only when `["*"]` is used.
+>
+> `secrets_write` intentionally has no read counterpart. Tasks access secrets at startup via `permissions.env` (injected before the script runs). A script cannot call `dicode.secrets_get()` — this is by design.
 
 ## Rich output types
 

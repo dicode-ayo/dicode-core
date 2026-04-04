@@ -490,12 +490,34 @@ func TestServer_CapDenied_KVRead(t *testing.T) {
 
 // ── dicode.* tests ────────────────────────────────────────────────────────────
 
+// specWithDicode is a helper to build a spec with a DicodePermissions block.
+func specWithDicode(id string, dp *task.DicodePermissions) *task.Spec {
+	return &task.Spec{
+		ID:          id,
+		Permissions: task.Permissions{Dicode: dp},
+	}
+}
+
+func TestServer_Dicode_ListTasks_Denied(t *testing.T) {
+	// list_tasks is denied when permissions.dicode.list_tasks is not set.
+	e := newTestEnv(t)
+	_ = e.reg.Register(&task.Spec{ID: "hello-cron", Name: "Hello Cron"})
+
+	conn, _ := e.start(t, nil, nil)
+	sendMsg(t, conn, map[string]any{"id": "1", "method": "dicode.list_tasks"})
+	resp := recvMsg(t, conn)
+	if resp["error"] == nil {
+		t.Errorf("expected permission denied for dicode.list_tasks without list_tasks cap")
+	}
+}
+
 func TestServer_Dicode_ListTasks(t *testing.T) {
 	e := newTestEnv(t)
 	_ = e.reg.Register(&task.Spec{ID: "hello-cron", Name: "Hello Cron"})
 	_ = e.reg.Register(&task.Spec{ID: "send-report", Name: "Send Report"})
 
-	conn, _ := e.start(t, nil, nil)
+	spec := specWithDicode("caller", &task.DicodePermissions{ListTasks: true})
+	conn, _ := e.startWithSpec(t, nil, nil, spec, nil, "", "", "")
 	sendMsg(t, conn, map[string]any{"id": "1", "method": "dicode.list_tasks"})
 	resp := recvMsg(t, conn)
 
@@ -508,9 +530,22 @@ func TestServer_Dicode_ListTasks(t *testing.T) {
 	}
 }
 
+func TestServer_Dicode_GetConfig_Denied(t *testing.T) {
+	// get_config is denied when permissions.dicode.get_config is not set.
+	e := newTestEnv(t)
+	conn, _ := e.start(t, nil, nil)
+
+	sendMsg(t, conn, map[string]any{"id": "1", "method": "dicode.get_config", "section": "ai"})
+	resp := recvMsg(t, conn)
+	if resp["error"] == nil {
+		t.Errorf("expected permission denied for dicode.get_config without get_config cap")
+	}
+}
+
 func TestServer_Dicode_GetConfig(t *testing.T) {
 	e := newTestEnv(t)
-	conn, _ := e.startWithSpec(t, nil, nil, nil, nil, "https://api.openai.com/v1", "gpt-4o", "sk-test")
+	spec := specWithDicode("caller", &task.DicodePermissions{GetConfig: true})
+	conn, _ := e.startWithSpec(t, nil, nil, spec, nil, "https://api.openai.com/v1", "gpt-4o", "sk-test")
 
 	sendMsg(t, conn, map[string]any{"id": "1", "method": "dicode.get_config", "section": "ai"})
 	resp := recvMsg(t, conn)
@@ -533,7 +568,8 @@ func TestServer_Dicode_GetConfig(t *testing.T) {
 
 func TestServer_Dicode_GetConfig_UnknownSection(t *testing.T) {
 	e := newTestEnv(t)
-	conn, _ := e.start(t, nil, nil)
+	spec := specWithDicode("caller", &task.DicodePermissions{GetConfig: true})
+	conn, _ := e.startWithSpec(t, nil, nil, spec, nil, "", "", "")
 
 	sendMsg(t, conn, map[string]any{"id": "1", "method": "dicode.get_config", "section": "storage"})
 	resp := recvMsg(t, conn)
@@ -543,35 +579,32 @@ func TestServer_Dicode_GetConfig_UnknownSection(t *testing.T) {
 	}
 }
 
-func TestServer_Dicode_RunTask_SecurityDenied_NilSpec(t *testing.T) {
+func TestServer_Dicode_GetRuns_Denied(t *testing.T) {
 	e := newTestEnv(t)
-	// Must issue token with tasks.trigger cap but nil spec → taskAllowed=false.
-	runID := fmt.Sprintf("test-%d", time.Now().UnixNano())
-	srv := New(runID, "test-task", e.secret, e.reg, e.db, nil, nil, zap.NewNop(), nil, nil, "", "", "")
-	socketPath, _, err := srv.Start(context.Background())
-	if err != nil {
-		t.Fatal(err)
+	conn, _ := e.start(t, nil, nil)
+
+	sendMsg(t, conn, map[string]any{"id": "1", "method": "dicode.get_runs", "taskID": "some-task"})
+	resp := recvMsg(t, conn)
+	if resp["error"] == nil {
+		t.Errorf("expected permission denied for dicode.get_runs without get_runs cap")
 	}
-	t.Cleanup(srv.Stop)
-	caps := append(defaultTaskCaps(), CapTaskTrigger)
-	tok, _ := IssueToken(e.secret, "task:test-task", runID, caps)
-	conn := dial(t, socketPath)
-	t.Cleanup(func() { conn.Close() })
-	doHandshake(t, conn, tok)
+}
+
+func TestServer_Dicode_RunTask_Denied_NoSpec(t *testing.T) {
+	// run_task is denied when no permissions.dicode block is set.
+	e := newTestEnv(t)
+	conn, _ := e.start(t, nil, nil)
 
 	sendMsg(t, conn, map[string]any{"id": "1", "method": "dicode.run_task", "taskID": "some-task"})
 	resp := recvMsg(t, conn)
 	if resp["error"] == nil {
-		t.Errorf("expected security error when spec is nil")
+		t.Errorf("expected permission denied for dicode.run_task without tasks cap")
 	}
 }
 
-func TestServer_Dicode_RunTask_SecurityDenied_NotAllowed(t *testing.T) {
+func TestServer_Dicode_RunTask_Denied_NotAllowed(t *testing.T) {
 	e := newTestEnv(t)
-	spec := &task.Spec{
-		ID:       "caller",
-		Security: &task.SecurityConfig{AllowedTasks: []string{"permitted-task"}},
-	}
+	spec := specWithDicode("caller", &task.DicodePermissions{Tasks: []string{"permitted-task"}})
 	conn, _ := e.startWithSpec(t, nil, nil, spec, nil, "", "", "")
 
 	sendMsg(t, conn, map[string]any{"id": "1", "method": "dicode.run_task", "taskID": "forbidden-task"})
@@ -584,10 +617,7 @@ func TestServer_Dicode_RunTask_SecurityDenied_NotAllowed(t *testing.T) {
 func TestServer_Dicode_RunTask(t *testing.T) {
 	e := newTestEnv(t)
 	eng := &mockEngine{runID: "run-abc", result: RunResult{RunID: "run-abc", Status: "success"}}
-	spec := &task.Spec{
-		ID:       "caller",
-		Security: &task.SecurityConfig{AllowedTasks: []string{"target-task"}},
-	}
+	spec := specWithDicode("caller", &task.DicodePermissions{Tasks: []string{"target-task"}})
 	conn, _ := e.startWithSpec(t, nil, nil, spec, eng, "", "", "")
 
 	sendMsg(t, conn, map[string]any{"id": "1", "method": "dicode.run_task", "taskID": "target-task"})
@@ -608,10 +638,7 @@ func TestServer_Dicode_RunTask(t *testing.T) {
 func TestServer_Dicode_RunTask_Wildcard(t *testing.T) {
 	e := newTestEnv(t)
 	eng := &mockEngine{runID: "run-1", result: RunResult{RunID: "run-1", Status: "success"}}
-	spec := &task.Spec{
-		ID:       "caller",
-		Security: &task.SecurityConfig{AllowedTasks: []string{"*"}},
-	}
+	spec := specWithDicode("caller", &task.DicodePermissions{Tasks: []string{"*"}})
 	conn, _ := e.startWithSpec(t, nil, nil, spec, eng, "", "", "")
 
 	sendMsg(t, conn, map[string]any{"id": "1", "method": "dicode.run_task", "taskID": "any-task"})
@@ -623,9 +650,9 @@ func TestServer_Dicode_RunTask_Wildcard(t *testing.T) {
 
 // ── mcp.* tests ───────────────────────────────────────────────────────────────
 
-func TestServer_MCP_SecurityDenied(t *testing.T) {
+func TestServer_MCP_Denied_NoSpec(t *testing.T) {
 	e := newTestEnv(t)
-	conn, _ := e.start(t, nil, nil) // default caps — no mcp.call
+	conn, _ := e.start(t, nil, nil) // no permissions.dicode — no mcp.call
 
 	sendMsg(t, conn, map[string]any{"id": "1", "method": "mcp.list_tools", "mcpName": "github-mcp"})
 	resp := recvMsg(t, conn)
@@ -638,10 +665,7 @@ func TestServer_MCP_ListTools_NoPort(t *testing.T) {
 	e := newTestEnv(t)
 	_ = e.reg.Register(&task.Spec{ID: "github-mcp"}) // MCPPort = 0
 
-	spec := &task.Spec{
-		ID:       "caller",
-		Security: &task.SecurityConfig{AllowedMCP: []string{"github-mcp"}},
-	}
+	spec := specWithDicode("caller", &task.DicodePermissions{MCP: []string{"github-mcp"}})
 	conn, _ := e.startWithSpec(t, nil, nil, spec, nil, "", "", "")
 
 	sendMsg(t, conn, map[string]any{"id": "1", "method": "mcp.list_tools", "mcpName": "github-mcp"})
@@ -661,10 +685,7 @@ func TestServer_MCP_ListTools_Success(t *testing.T) {
 
 	e := newTestEnv(t)
 	_ = e.reg.Register(&task.Spec{ID: "github-mcp", MCPPort: port})
-	spec := &task.Spec{
-		ID:       "caller",
-		Security: &task.SecurityConfig{AllowedMCP: []string{"github-mcp"}},
-	}
+	spec := specWithDicode("caller", &task.DicodePermissions{MCP: []string{"github-mcp"}})
 	conn, _ := e.startWithSpec(t, nil, nil, spec, nil, "", "", "")
 
 	sendMsg(t, conn, map[string]any{"id": "1", "method": "mcp.list_tools", "mcpName": "github-mcp"})
@@ -695,10 +716,7 @@ func TestServer_MCP_Call_Success(t *testing.T) {
 
 	e := newTestEnv(t)
 	_ = e.reg.Register(&task.Spec{ID: "github-mcp", MCPPort: port})
-	spec := &task.Spec{
-		ID:       "caller",
-		Security: &task.SecurityConfig{AllowedMCP: []string{"github-mcp"}},
-	}
+	spec := specWithDicode("caller", &task.DicodePermissions{MCP: []string{"github-mcp"}})
 	conn, _ := e.startWithSpec(t, nil, nil, spec, nil, "", "", "")
 
 	sendMsg(t, conn, map[string]any{
@@ -715,6 +733,194 @@ func TestServer_MCP_Call_Success(t *testing.T) {
 	}
 	if resp["result"] == nil {
 		t.Error("expected non-nil result")
+	}
+}
+
+func TestServer_Dicode_GetRuns(t *testing.T) {
+	e := newTestEnv(t)
+	_ = e.reg.Register(&task.Spec{ID: "hello-cron", Name: "Hello Cron"})
+	spec := specWithDicode("caller", &task.DicodePermissions{GetRuns: true})
+	conn, _ := e.startWithSpec(t, nil, nil, spec, nil, "", "", "")
+
+	sendMsg(t, conn, map[string]any{"id": "1", "method": "dicode.get_runs", "taskID": "hello-cron"})
+	resp := recvMsg(t, conn)
+	if resp["error"] != nil {
+		t.Fatalf("unexpected error: %v", resp["error"])
+	}
+	// result is an array (possibly empty) — only an error field indicates failure.
+}
+
+func TestServer_MCP_Denied_WrongName(t *testing.T) {
+	// Task has mcp cap for "github-mcp" but tries to call "other-mcp" — should be denied.
+	e := newTestEnv(t)
+	spec := specWithDicode("caller", &task.DicodePermissions{MCP: []string{"github-mcp"}})
+	conn, _ := e.startWithSpec(t, nil, nil, spec, nil, "", "", "")
+
+	sendMsg(t, conn, map[string]any{"id": "1", "method": "mcp.list_tools", "mcpName": "other-mcp"})
+	resp := recvMsg(t, conn)
+	if resp["error"] == nil {
+		t.Errorf("expected permission denied for unlisted MCP daemon")
+	}
+}
+
+func TestServer_MCP_Call_Denied_WrongName(t *testing.T) {
+	e := newTestEnv(t)
+	spec := specWithDicode("caller", &task.DicodePermissions{MCP: []string{"github-mcp"}})
+	conn, _ := e.startWithSpec(t, nil, nil, spec, nil, "", "", "")
+
+	sendMsg(t, conn, map[string]any{
+		"id": "1", "method": "mcp.call", "mcpName": "other-mcp", "tool": "search",
+	})
+	resp := recvMsg(t, conn)
+	if resp["error"] == nil {
+		t.Errorf("expected permission denied for unlisted MCP daemon")
+	}
+}
+
+func TestServer_MCP_Wildcard(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}`) //nolint:errcheck
+	}))
+	defer ts.Close()
+	port := ts.Listener.Addr().(*net.TCPAddr).Port
+
+	e := newTestEnv(t)
+	_ = e.reg.Register(&task.Spec{ID: "any-mcp", MCPPort: port})
+	spec := specWithDicode("caller", &task.DicodePermissions{MCP: []string{"*"}})
+	conn, _ := e.startWithSpec(t, nil, nil, spec, nil, "", "", "")
+
+	sendMsg(t, conn, map[string]any{"id": "1", "method": "mcp.list_tools", "mcpName": "any-mcp"})
+	resp := recvMsg(t, conn)
+	if resp["error"] != nil {
+		t.Errorf("wildcard should allow any MCP daemon, got: %v", resp["error"])
+	}
+}
+
+// ── dicode.secrets_* tests ────────────────────────────────────────────────────
+
+// mockSecrets is an in-memory secrets.Manager for testing.
+type mockSecrets struct {
+	store map[string]string
+}
+
+func newMockSecrets() *mockSecrets { return &mockSecrets{store: map[string]string{}} }
+
+func (m *mockSecrets) List(_ context.Context) ([]string, error) {
+	keys := make([]string, 0, len(m.store))
+	for k := range m.store {
+		keys = append(keys, k)
+	}
+	return keys, nil
+}
+func (m *mockSecrets) Set(_ context.Context, key, value string) error {
+	m.store[key] = value
+	return nil
+}
+func (m *mockSecrets) Delete(_ context.Context, key string) error {
+	delete(m.store, key)
+	return nil
+}
+
+// startWithSecrets starts a server with the given spec and secrets manager wired.
+func (e *testEnv) startWithSecrets(t *testing.T, spec *task.Spec, mgr *mockSecrets) (net.Conn, *Server) {
+	t.Helper()
+	runID := fmt.Sprintf("test-%d", time.Now().UnixNano())
+	srv := New(runID, "test-task", e.secret, e.reg, e.db, nil, nil, zap.NewNop(), spec, nil, "", "", "")
+	srv.SetSecrets(mgr)
+	socketPath, token, err := srv.Start(context.Background())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(srv.Stop)
+	conn := dial(t, socketPath)
+	t.Cleanup(func() { conn.Close() })
+	doHandshake(t, conn, token)
+	return conn, srv
+}
+
+func TestServer_Dicode_SecretsSet_Denied(t *testing.T) {
+	e := newTestEnv(t)
+	conn, _ := e.start(t, nil, nil) // no permissions.dicode.secrets_write
+
+	sendMsg(t, conn, map[string]any{"id": "1", "method": "dicode.secrets_set", "key": "FOO", "stringValue": "bar"})
+	resp := recvMsg(t, conn)
+	if resp["error"] == nil {
+		t.Errorf("expected permission denied for dicode.secrets_set without secrets_write cap")
+	}
+}
+
+func TestServer_Dicode_SecretsDelete_Denied(t *testing.T) {
+	e := newTestEnv(t)
+	conn, _ := e.start(t, nil, nil)
+
+	sendMsg(t, conn, map[string]any{"id": "1", "method": "dicode.secrets_delete", "key": "FOO"})
+	resp := recvMsg(t, conn)
+	if resp["error"] == nil {
+		t.Errorf("expected permission denied for dicode.secrets_delete without secrets_write cap")
+	}
+}
+
+func TestServer_Dicode_SecretsSet(t *testing.T) {
+	e := newTestEnv(t)
+	mgr := newMockSecrets()
+	spec := specWithDicode("caller", &task.DicodePermissions{SecretsWrite: true})
+	conn, _ := e.startWithSecrets(t, spec, mgr)
+
+	sendMsg(t, conn, map[string]any{"id": "1", "method": "dicode.secrets_set", "key": "MY_TOKEN", "stringValue": "secret123"})
+	resp := recvMsg(t, conn)
+	if resp["error"] != nil {
+		t.Fatalf("unexpected error: %v", resp["error"])
+	}
+	if mgr.store["MY_TOKEN"] != "secret123" {
+		t.Errorf("secret not stored: %v", mgr.store)
+	}
+}
+
+func TestServer_Dicode_SecretsSet_Replace(t *testing.T) {
+	e := newTestEnv(t)
+	mgr := newMockSecrets()
+	mgr.store["MY_TOKEN"] = "old"
+	spec := specWithDicode("caller", &task.DicodePermissions{SecretsWrite: true})
+	conn, _ := e.startWithSecrets(t, spec, mgr)
+
+	sendMsg(t, conn, map[string]any{"id": "1", "method": "dicode.secrets_set", "key": "MY_TOKEN", "stringValue": "new"})
+	resp := recvMsg(t, conn)
+	if resp["error"] != nil {
+		t.Fatalf("unexpected error: %v", resp["error"])
+	}
+	if mgr.store["MY_TOKEN"] != "new" {
+		t.Errorf("secret not replaced: got %q", mgr.store["MY_TOKEN"])
+	}
+}
+
+func TestServer_Dicode_SecretsDelete(t *testing.T) {
+	e := newTestEnv(t)
+	mgr := newMockSecrets()
+	mgr.store["MY_TOKEN"] = "secret123"
+	spec := specWithDicode("caller", &task.DicodePermissions{SecretsWrite: true})
+	conn, _ := e.startWithSecrets(t, spec, mgr)
+
+	sendMsg(t, conn, map[string]any{"id": "1", "method": "dicode.secrets_delete", "key": "MY_TOKEN"})
+	resp := recvMsg(t, conn)
+	if resp["error"] != nil {
+		t.Fatalf("unexpected error: %v", resp["error"])
+	}
+	if _, exists := mgr.store["MY_TOKEN"]; exists {
+		t.Errorf("secret not deleted")
+	}
+}
+
+func TestServer_Dicode_SecretsSet_EmptyKey(t *testing.T) {
+	e := newTestEnv(t)
+	mgr := newMockSecrets()
+	spec := specWithDicode("caller", &task.DicodePermissions{SecretsWrite: true})
+	conn, _ := e.startWithSecrets(t, spec, mgr)
+
+	sendMsg(t, conn, map[string]any{"id": "1", "method": "dicode.secrets_set", "stringValue": "bar"})
+	resp := recvMsg(t, conn)
+	if resp["error"] == nil {
+		t.Errorf("expected error for empty key")
 	}
 }
 

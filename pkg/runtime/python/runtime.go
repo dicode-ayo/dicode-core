@@ -55,16 +55,17 @@ var sdkContent string
 // Runtime is the ManagedRuntime implementation for Python+uv.
 // It manages the uv binary lifecycle and creates socket-bridge Executors.
 type Runtime struct {
-	reg       *registry.Registry
-	secrets   secrets.Chain
-	db        db.DB
-	log       *zap.Logger
-	secret    []byte
-	engine    ipc.EngineRunner
-	gateway   *ipc.Gateway
-	aiBaseURL string
-	aiModel   string
-	aiAPIKey  string
+	reg            *registry.Registry
+	secrets        secrets.Chain
+	secretsManager secrets.Manager // optional; wired for dicode.secrets_set/delete
+	db             db.DB
+	log            *zap.Logger
+	secret         []byte
+	engine         ipc.EngineRunner
+	gateway        *ipc.Gateway
+	aiBaseURL      string
+	aiModel        string
+	aiAPIKey       string
 }
 
 // SetEngine configures the engine runner used for dicode.run_task calls.
@@ -72,6 +73,10 @@ func (rt *Runtime) SetEngine(e ipc.EngineRunner) { rt.engine = e }
 
 // SetGateway attaches the HTTP gateway so daemon tasks can call http.register.
 func (rt *Runtime) SetGateway(g *ipc.Gateway) { rt.gateway = g }
+
+// SetSecretsManager wires the secrets manager so tasks with permissions.dicode.secrets_write
+// can call dicode.secrets_set() and dicode.secrets_delete().
+func (rt *Runtime) SetSecretsManager(m secrets.Manager) { rt.secretsManager = m }
 
 // SetAIConfig configures the AI provider details passed to tasks via dicode.get_config.
 func (rt *Runtime) SetAIConfig(baseURL, model, apiKey string) {
@@ -123,34 +128,36 @@ func (rt *Runtime) Install(_ context.Context, version string) error {
 // at binaryPath, connected to the dicode socket-bridge SDK.
 func (rt *Runtime) NewExecutor(binaryPath string) pkgruntime.Executor {
 	return &executor{
-		uvPath:    binaryPath,
-		reg:       rt.reg,
-		secrets:   rt.secrets,
-		db:        rt.db,
-		log:       rt.log,
-		secret:    rt.secret,
-		engine:    rt.engine,
-		gateway:   rt.gateway,
-		aiBaseURL: rt.aiBaseURL,
-		aiModel:   rt.aiModel,
-		aiAPIKey:  rt.aiAPIKey,
+		uvPath:         binaryPath,
+		reg:            rt.reg,
+		secrets:        rt.secrets,
+		secretsManager: rt.secretsManager,
+		db:             rt.db,
+		log:            rt.log,
+		secret:         rt.secret,
+		engine:         rt.engine,
+		gateway:        rt.gateway,
+		aiBaseURL:      rt.aiBaseURL,
+		aiModel:        rt.aiModel,
+		aiAPIKey:       rt.aiAPIKey,
 	}
 }
 
 // --- executor ---
 
 type executor struct {
-	uvPath    string
-	reg       *registry.Registry
-	secrets   secrets.Chain
-	db        db.DB
-	log       *zap.Logger
-	secret    []byte
-	engine    ipc.EngineRunner
-	gateway   *ipc.Gateway
-	aiBaseURL string
-	aiModel   string
-	aiAPIKey  string
+	uvPath         string
+	reg            *registry.Registry
+	secrets        secrets.Chain
+	secretsManager secrets.Manager
+	db             db.DB
+	log            *zap.Logger
+	secret         []byte
+	engine         ipc.EngineRunner
+	gateway        *ipc.Gateway
+	aiBaseURL      string
+	aiModel        string
+	aiAPIKey       string
 }
 
 // Execute implements runtime.Executor.
@@ -214,6 +221,7 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 
 	srv := ipc.New(runID, spec.ID, e.secret, e.reg, e.db, mergedParams, opts.Input, e.log, spec, e.engine, e.aiBaseURL, e.aiModel, e.aiAPIKey)
 	srv.SetGateway(e.gateway)
+	srv.SetSecrets(e.secretsManager)
 	socketPath, token, err := srv.Start(execCtx)
 	if err != nil {
 		status = registry.StatusFailure

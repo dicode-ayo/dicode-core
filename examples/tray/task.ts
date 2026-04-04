@@ -1,19 +1,9 @@
 import type { DicodeSdk } from "../sdk.ts";
 // tray/task.ts — System tray daemon for dicode.
 //
-// Replaces pkg/tray/ (CGO, fyne.io/systray) with a pure Deno implementation.
-// Option A from issue #59: deno.land/x/systray ships a pre-compiled native
-// helper binary (systray-master / systray.exe) that communicates with the Deno
-// process over stdin/stdout JSON, so there is no CGO or GTK dependency.
-//
-// TODO(#59): Verify the exact import path before shipping. At time of writing
-// the canonical module is https://deno.land/x/systray@v0.0.2/mod.ts — check
-// https://deno.land/x/systray for the latest version tag.
-//
-// References:
-//   https://github.com/dicode-ayo/dicode-core/issues/59
-//   https://github.com/zserge/lorca (inspiration)
-//   https://github.com/getlantern/systray (Go helper, same binary approach)
+// Uses a pre-compiled native helper binary (systray-portable) that
+// communicates with the Deno process over stdin/stdout JSON.
+// No CGO, no GTK, no fyne dependency.
 
 import Systray, { type MenuItem } from "./systray/mod.ts";
 
@@ -25,12 +15,10 @@ import Systray, { type MenuItem } from "./systray/mod.ts";
 // Generated offline with the same algorithm as icon.go and base64-encoded so
 // this file has zero external asset dependencies.
 
+// 32×32 PNG: purple background (#7c3aed) with a white ⚡ bolt.
+// Generated from the same pixel algorithm as the removed pkg/tray/icon.go.
 const ICON_BASE64 =
-  // 32×32 RGBA PNG, purple bg + white lightning bolt
-  // To regenerate: run pkg/tray/icon.go's init() logic and base64-encode the output.
-  // TODO(#59): Replace with the actual pre-generated base64 string once icon.go
-  //            can be run standalone (or embed the PNG as a repo asset).
-  "";
+  "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAg0lEQVR4nGKpsXrLQEvARFPTh4UFLJRobj4qBGfXWr/DqmYQBxExzh/EPiDS+YPVB8Q7f1D6gCTnDz4fkOp8fEUFGWZhBST4gDwrGfFUOFTxxIBGMrKrkX1DNQuoAghYQLknBtoHlHtiEPiAQk8MDh9Q4gl8RQVVwKAJosFrASAAAP///MwvLg37TZMAAAAASUVORK5CYII=";
 
 export default async function main({ log, params }: DicodeSdk) {
   // ── platform browser-open helper ─────────────────────────────────────────────
@@ -121,8 +109,9 @@ export default async function main({ log, params }: DicodeSdk) {
         break;
 
       case "Quit dicode":
-        log.info("tray: Quit clicked — exiting");
-        systray.kill(); // sends exit to native helper, then calls Deno.exit()
+        log.info("tray: Quit clicked — sending SIGTERM to dicoded");
+        systray.kill(false); // shut down the native helper without exiting Deno
+        Deno.kill(Deno.ppid, "SIGTERM"); // signal dicoded to shut down gracefully
         break;
 
       default:

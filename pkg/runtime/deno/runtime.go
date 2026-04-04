@@ -46,17 +46,18 @@ type RunResult struct {
 
 // Runtime executes task scripts with Deno.
 type Runtime struct {
-	registry  *registry.Registry
-	secrets   secrets.Chain
-	db        db.DB
-	log       *zap.Logger
-	denoPath  string
-	secret    []byte
-	engine    ipc.EngineRunner
-	gateway   *ipc.Gateway
-	aiBaseURL string
-	aiModel   string
-	aiAPIKey  string
+	registry       *registry.Registry
+	secrets        secrets.Chain
+	secretsManager secrets.Manager // optional; wired for dicode.secrets_set/delete
+	db             db.DB
+	log            *zap.Logger
+	denoPath       string
+	secret         []byte
+	engine         ipc.EngineRunner
+	gateway        *ipc.Gateway
+	aiBaseURL      string
+	aiModel        string
+	aiAPIKey       string
 }
 
 // New creates a Deno Runtime. It ensures the Deno binary is present in the
@@ -78,6 +79,10 @@ func (rt *Runtime) SetEngine(e ipc.EngineRunner) { rt.engine = e }
 
 // SetGateway attaches the HTTP gateway so daemon tasks can call http.register.
 func (rt *Runtime) SetGateway(g *ipc.Gateway) { rt.gateway = g }
+
+// SetSecretsManager wires the secrets manager so tasks with permissions.dicode.secrets_write
+// can call dicode.secrets_set() and dicode.secrets_delete().
+func (rt *Runtime) SetSecretsManager(m secrets.Manager) { rt.secretsManager = m }
 
 // SetAIConfig configures the AI provider details passed to tasks via dicode.get_config.
 func (rt *Runtime) SetAIConfig(baseURL, model, apiKey string) {
@@ -159,6 +164,7 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 
 	srv := ipc.New(runID, spec.ID, rt.secret, rt.registry, rt.db, mergedParams, opts.Input, rt.log, spec, rt.engine, rt.aiBaseURL, rt.aiModel, rt.aiAPIKey)
 	srv.SetGateway(rt.gateway)
+	srv.SetSecrets(rt.secretsManager)
 	socketPath, token, err := srv.Start(execCtx)
 	if err != nil {
 		status = registry.StatusFailure
