@@ -752,6 +752,11 @@ func TestFireAsync_ConcurrencyLimit(t *testing.T) {
 	// blockCh gates each task: send a value to unblock one goroutine.
 	blockCh := make(chan struct{}, total)
 
+	// atLimitCh is closed when inflight first reaches the concurrency limit,
+	// giving the test a reliable signal without sleeping.
+	atLimitCh := make(chan struct{})
+	var atLimitOnce sync.Once
+
 	// Build a fake executor that records concurrency.
 	fakeExec := &fakeExecutor{
 		fn: func() {
@@ -763,6 +768,10 @@ func TestFireAsync_ConcurrencyLimit(t *testing.T) {
 				if cur <= old || maxSeen.CompareAndSwap(old, cur) {
 					break
 				}
+			}
+			// Signal the test once we have reached the semaphore limit.
+			if cur >= int32(limit) {
+				atLimitOnce.Do(func() { close(atLimitCh) })
 			}
 			// Block until the test unblocks us.
 			<-blockCh
@@ -796,8 +805,12 @@ func TestFireAsync_ConcurrencyLimit(t *testing.T) {
 		}
 	}
 
-	// Give goroutines time to start and fill the semaphore.
-	time.Sleep(100 * time.Millisecond)
+	// Wait until the semaphore is full before unblocking tasks.
+	select {
+	case <-atLimitCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for inflight tasks to reach concurrency limit")
+	}
 
 	// Unblock all tasks.
 	for range total {
@@ -829,8 +842,15 @@ func TestFireAsync_ShutdownUnblocksWaiting(t *testing.T) {
 	reg := registry.New(d)
 
 	holdCh := make(chan struct{})
+	// acquiredCh is closed by the first task once it has acquired the semaphore
+	// slot, giving the test a reliable signal without sleeping.
+	acquiredCh := make(chan struct{})
+	var acquiredOnce sync.Once
+
 	fakeExec := &fakeExecutor{
 		fn: func() {
+			// Signal that the semaphore slot has been acquired.
+			acquiredOnce.Do(func() { close(acquiredCh) })
 			// Block until test releases.
 			<-holdCh
 		},
@@ -855,8 +875,12 @@ func TestFireAsync_ShutdownUnblocksWaiting(t *testing.T) {
 		t.Fatalf("fireAsync 1: %v", err)
 	}
 
-	// Give task 1 time to acquire the semaphore.
-	time.Sleep(50 * time.Millisecond)
+	// Wait until task 1 has acquired the semaphore before firing task 2.
+	select {
+	case <-acquiredCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for task 1 to acquire semaphore")
+	}
 
 	// Fire task 2 — it will block waiting for a slot.
 	var wg sync.WaitGroup
@@ -867,7 +891,6 @@ func TestFireAsync_ShutdownUnblocksWaiting(t *testing.T) {
 	}()
 
 	// Cancel the shutdown context — task 2's goroutine should unblock.
-	time.Sleep(50 * time.Millisecond)
 	cancel()
 
 	done := make(chan struct{})

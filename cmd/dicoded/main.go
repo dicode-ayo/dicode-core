@@ -236,7 +236,11 @@ func buildRuntimes(
 	eng.SetDB(database)
 	if v := os.Getenv("DICODE_MAX_CONCURRENT_TASKS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
+			// Negative values and overflow are handled inside SetMaxConcurrentTasks.
 			eng.SetMaxConcurrentTasks(n)
+		} else {
+			log.Warn("DICODE_MAX_CONCURRENT_TASKS: invalid integer value — ignoring",
+				zap.String("value", v), zap.Error(err))
 		}
 	}
 	denoRT.SetEngine(eng)

@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dicode/dicode/pkg/db"
@@ -61,6 +62,7 @@ type Engine struct {
 	db db.DB // optional — enables cron-job persistence and missed-run catchup
 
 	taskSem chan struct{} // nil = unlimited; capacity = MaxConcurrentTasks
+	started atomic.Bool   // set to true by Start(); guards SetMaxConcurrentTasks
 
 	runFinishedHook func(taskID, runID, status, triggerSource string, durationMs int64, notifyOnSuccess, notifyOnFailure bool)
 	runStartedHook  func(taskID, runID, triggerSource string)
@@ -91,8 +93,22 @@ func (e *Engine) SetDB(d db.DB) {
 
 // SetMaxConcurrentTasks configures a semaphore that limits how many task
 // goroutines run concurrently. n == 0 (the default) means unlimited.
-// Must be called before Start().
+// Must be called before Start(); calls after Start() are ignored with a warning.
 func (e *Engine) SetMaxConcurrentTasks(n int) {
+	if e.started.Load() {
+		e.log.Warn("SetMaxConcurrentTasks called after Start — ignoring; configure before Start()")
+		return
+	}
+	if n < 0 {
+		e.log.Warn("SetMaxConcurrentTasks: negative value treated as unlimited", zap.Int("n", n))
+		n = 0
+	}
+	const maxConcurrentTasksLimit = 10000
+	if n > maxConcurrentTasksLimit {
+		e.log.Warn("SetMaxConcurrentTasks: value exceeds maximum, capping",
+			zap.Int("requested", n), zap.Int("cap", maxConcurrentTasksLimit))
+		n = maxConcurrentTasksLimit
+	}
 	if n > 0 {
 		e.taskSem = make(chan struct{}, n)
 	} else {
@@ -167,6 +183,7 @@ func (e *Engine) RegisterExecutor(rt task.Runtime, exec pkgruntime.Executor) {
 
 // Start begins scheduling and runs until ctx is cancelled.
 func (e *Engine) Start(ctx context.Context) error {
+	e.started.Store(true)
 	e.shutdownMu.Lock()
 	e.shutdownCtx = ctx
 	e.shutdownMu.Unlock()
@@ -1139,18 +1156,24 @@ func (e *Engine) fireAsync(ctx context.Context, spec *task.Spec, opts pkgruntime
 	go func() {
 		defer cleanup()
 
-		if e.taskSem != nil {
-			// Obtain shutdown context snapshot so we can select on it.
-			e.shutdownMu.RLock()
-			shutCtx := e.shutdownCtx
-			e.shutdownMu.RUnlock()
+		// Daemon tasks are long-running; they must not consume semaphore slots
+		// or they would permanently starve webhook/cron tasks.
+		if e.taskSem != nil && !spec.Trigger.Daemon {
+			// Build a done channel that is nil (blocks forever) when the engine
+			// has not yet started — nil channels never select, which is safe.
+			var shutDone <-chan struct{}
+			shutCtx := e.getShutdownCtx()
+			if shutCtx != nil {
+				shutDone = shutCtx.Done()
+			}
 
 			select {
 			case e.taskSem <- struct{}{}:
 				// Slot acquired; release when done.
 				defer func() { <-e.taskSem }()
-			case <-shutCtx.Done():
-				// Daemon is shutting down; abort without running.
+			case <-shutDone:
+				// Engine is shutting down; mark the run as cancelled and abort.
+				_ = e.registry.FinishRun(context.Background(), opts.RunID, registry.StatusCancelled)
 				return
 			}
 		}

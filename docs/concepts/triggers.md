@@ -203,7 +203,7 @@ DICODE_MAX_CONCURRENT_TASKS=8 dicoded
 
 - `0` (default) — unlimited, backwards-compatible behaviour.
 - `N > 0` — at most N tasks execute concurrently. Additional invocations queue inside the daemon and run as slots become free.
-- **Shutdown safety:** queued goroutines are unblocked immediately when the daemon shuts down, so a full slot queue never causes a hang on `SIGTERM`.
+- **Shutdown safety:** queued goroutines are unblocked when the semaphore releases or the daemon shuts down, so a full slot queue never causes a hang on `SIGTERM`.
 
 ---
 
