@@ -92,9 +92,9 @@ env:
   - OPENAI_API_KEY
 ```
 
-At runtime, `env.get("SLACK_TOKEN")` in `task.js` resolves via the provider chain. The task doesn't know or care which provider holds the value.
+At runtime, `Deno.env.get("SLACK_TOKEN")` in a Deno task reads the variable, which is injected by the runtime after resolving it through the provider chain. The task doesn't know or care which provider holds the value.
 
-**Boundary enforcement:** tasks can only access secrets that are declared in their `task.yaml`. The runtime rejects `env.get()` calls for undeclared keys. This prevents tasks from fishing for arbitrary environment variables.
+**Boundary enforcement:** tasks can only access env vars declared in their `task.yaml`. The Deno `--allow-env` flag is scoped to declared vars, so `Deno.env.get()` calls for undeclared keys throw a permission error. This prevents tasks from fishing for arbitrary environment variables.
 
 ---
 

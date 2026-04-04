@@ -27,7 +27,9 @@ func applyLayer(spec *task.Spec, o *Overrides) {
 		mergeParams(&spec.Params, o.Params)
 	}
 	if len(o.Env) > 0 {
-		spec.Env = mergeEnv(spec.Env, o.Env)
+		// Convert override env strings (KEY or KEY=VALUE) into EnvEntry objects
+		// and merge them into permissions.env by name (overlay wins).
+		spec.Permissions.Env = mergeEnvEntries(spec.Permissions.Env, envStringsToEntries(o.Env))
 	}
 	if o.Timeout != 0 {
 		spec.Timeout = o.Timeout
@@ -148,6 +150,39 @@ func envKey(e string) string {
 	return e
 }
 
+// envStringsToEntries converts legacy []string env entries (KEY or KEY=value)
+// into []task.EnvEntry for merging into permissions.env.
+func envStringsToEntries(ss []string) []task.EnvEntry {
+	out := make([]task.EnvEntry, 0, len(ss))
+	for _, s := range ss {
+		if i := strings.IndexByte(s, '='); i >= 0 {
+			out = append(out, task.EnvEntry{Name: s[:i], Value: s[i+1:]})
+		} else {
+			out = append(out, task.EnvEntry{Name: s})
+		}
+	}
+	return out
+}
+
+// mergeEnvEntries merges overlay entries into base by Name (overlay wins).
+func mergeEnvEntries(base, overlay []task.EnvEntry) []task.EnvEntry {
+	m := make(map[string]int, len(base))
+	out := make([]task.EnvEntry, len(base))
+	copy(out, base)
+	for i, e := range out {
+		m[e.Name] = i
+	}
+	for _, e := range overlay {
+		if idx, exists := m[e.Name]; exists {
+			out[idx] = e
+		} else {
+			m[e.Name] = len(out)
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 // defaultsToOverrides converts a Defaults block into an Overrides that can be
 // slotted into the cascade. Only fields valid at the Defaults level are included.
 func defaultsToOverrides(d *Defaults) *Overrides {
@@ -194,13 +229,17 @@ func copySpec(s *task.Spec) *task.Spec {
 		out.Params = make([]task.Param, len(s.Params))
 		copy(out.Params, s.Params)
 	}
-	if s.Env != nil {
-		out.Env = make([]string, len(s.Env))
-		copy(out.Env, s.Env)
+	if s.Permissions.Env != nil {
+		out.Permissions.Env = make([]task.EnvEntry, len(s.Permissions.Env))
+		copy(out.Permissions.Env, s.Permissions.Env)
 	}
-	if s.FS != nil {
-		out.FS = make([]task.FSEntry, len(s.FS))
-		copy(out.FS, s.FS)
+	if s.Permissions.FS != nil {
+		out.Permissions.FS = make([]task.FSEntry, len(s.Permissions.FS))
+		copy(out.Permissions.FS, s.Permissions.FS)
+	}
+	if s.Permissions.Run != nil {
+		out.Permissions.Run = make([]string, len(s.Permissions.Run))
+		copy(out.Permissions.Run, s.Permissions.Run)
 	}
 	if s.Trigger.Chain != nil {
 		chain := *s.Trigger.Chain

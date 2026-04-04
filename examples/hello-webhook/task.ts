@@ -1,3 +1,4 @@
+import type { DicodeSdk } from "../sdk.ts";
 // Minimal webhook example with HMAC auth.
 //
 // Setup:
@@ -15,11 +16,12 @@
 // Requests without a valid signature are rejected with 403 before this
 // script runs — nothing here needs to verify auth.
 
-const body = params.input as Record<string, unknown> | null;
+export default async function main({ log, input, output }: DicodeSdk) {
+  const body = input as Record<string, unknown> | null;
 
-await log.info("hello from protected webhook", { body });
+  console.log("hello from protected webhook", { body });
 
-return output.html(`
+  return output.html(`
 <div style="font-family:system-ui,sans-serif;padding:2rem">
   <h2>Hello from protected webhook</h2>
   <p>The HMAC signature was verified by dicode before this script ran.</p>
@@ -29,3 +31,4 @@ return output.html(`
   }
 </div>
 `);
+}

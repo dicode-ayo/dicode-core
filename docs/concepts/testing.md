@@ -155,7 +155,7 @@ Useful for verifying that secret resolution works and the task targets the right
 **Output:**
 ```
 [dry-run] fetch-emails
-  → env.get("GMAIL_TOKEN") = "xoxb-..." [resolved from local store]
+  → Deno.env.get("GMAIL_TOKEN") = "xoxb-..." [resolved from local store]
   → http.get("https://gmail.googleapis.com/gmail/v1/users/me/messages") [intercepted]
   ← would return { status: 200, body: [mock response omitted] }
   → return { count: 42 }

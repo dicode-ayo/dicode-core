@@ -142,7 +142,6 @@ type ServerConfig struct {
 	AllowedOrigins []string `yaml:"allowed_origins,omitempty"` // CORS allowlist; empty = same-origin only
 	TrustProxy     bool     `yaml:"trust_proxy,omitempty"`     // trust X-Forwarded-For from upstream proxy
 	MCP            bool     `yaml:"mcp"`                       // expose MCP endpoint at /mcp (default: true)
-	Tray           *bool    `yaml:"tray"`                      // system tray icon (nil = auto-detect)
 }
 
 type AIConfig struct {

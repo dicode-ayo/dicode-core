@@ -4,62 +4,71 @@ metadata:
   name: examples
 spec:
   entries:
+    tray:
+      ref:
+        path: ./tray/task.yaml
+    notifications:
+      ref:
+        path: ./notify/task.yaml
+    alert:
+      ref:
+        path: ./alert/task.yaml
     hello-cron:
       ref:
-        path: /home/dr14/dicode/examples/hello-cron/task.yaml
+        path: ./hello-cron/task.yaml
     github-stars-hook:
       ref:
-        path: /home/dr14/dicode/examples/github-stars/task.yaml
+        path: ./github-stars/task.yaml
       overrides:
         trigger:
           webhook: /hooks/examples/github-stars-hook
     github-stars:
       ref:
-        path: /home/dr14/dicode/examples/github-stars/task.yaml
+        path: ./github-stars/task.yaml
       overrides:
         notify:
           on_success: true  # silence success for this one task
           on_failure: true
     gmail-to-slack:
       ref:
-        path: /home/dr14/dicode/examples/gmail-to-slack/task.yaml
+        path: ./gmail-to-slack/task.yaml
 
     google-login:
       ref:
-        path: /home/dr14/dicode/examples/google-login/task.yaml
+        path: ./google-login/task.yaml
 
     hello-docker:
       ref:
-        path: /home/dr14/dicode/examples/hello-docker/task.yaml
+        path: ./hello-docker/task.yaml
 
     hello-podman:
       ref:
-        path: /home/dr14/dicode/examples/hello-podman/task.yaml
+        path: ./hello-podman/task.yaml
 
     hello-python:
       ref:
-        path: /home/dr14/dicode/examples/hello-python/task.yaml
+        path: ./hello-python/task.yaml
 
     nginx-start:
       ref:
-        path: /home/dr14/dicode/examples/nginx-start/task.yaml
+        path: ./nginx-start/task.yaml
 
     webhook-form:
       ref:
-        path: /home/dr14/dicode/examples/webhook-form/task.yaml
+        path: ./webhook-form/task.yaml
 
     webhook-dashboard:
       ref:
-        path: /home/dr14/dicode/examples/webhook-dashboard/task.yaml
+        path: ./webhook-dashboard/task.yaml
 
     hello-webhook:
       ref:
-        path: /home/dr14/dicode/examples/hello-webhook/task.yaml
+        path: ./hello-webhook/task.yaml
 
     github-push-webhook:
       ref:
-        path: /home/dr14/dicode/examples/github-push-webhook/task.yaml
+        path: ./github-push-webhook/task.yaml
 
     webui:
       ref:
-        path: /home/dr14/dicode/examples/webui/task.yaml
+        path: ./webui/task.yaml

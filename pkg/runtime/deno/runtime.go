@@ -24,8 +24,14 @@ import (
 	"go.uber.org/zap"
 )
 
-//go:embed sdk/shim.js
+//go:embed sdk/shim.ts
 var shimContent string
+
+// SdkDts is the TypeScript declaration file for the dicode task SDK.
+// Exposed for use by the web UI to provide Monaco IntelliSense.
+//
+//go:embed sdk/sdk.d.ts
+var SdkDts []byte
 
 // RunOptions controls a single task execution.
 type RunOptions struct {
@@ -46,17 +52,18 @@ type RunResult struct {
 
 // Runtime executes task scripts with Deno.
 type Runtime struct {
-	registry  *registry.Registry
-	secrets   secrets.Chain
-	db        db.DB
-	log       *zap.Logger
-	denoPath  string
-	secret    []byte
-	engine    ipc.EngineRunner
-	gateway   *ipc.Gateway
-	aiBaseURL string
-	aiModel   string
-	aiAPIKey  string
+	registry       *registry.Registry
+	secrets        secrets.Chain
+	secretsManager secrets.Manager // optional; wired for dicode.secrets_set/delete
+	db             db.DB
+	log            *zap.Logger
+	denoPath       string
+	secret         []byte
+	engine         ipc.EngineRunner
+	gateway        *ipc.Gateway
+	aiBaseURL      string
+	aiModel        string
+	aiAPIKey       string
 }
 
 // New creates a Deno Runtime. It ensures the Deno binary is present in the
@@ -78,6 +85,10 @@ func (rt *Runtime) SetEngine(e ipc.EngineRunner) { rt.engine = e }
 
 // SetGateway attaches the HTTP gateway so daemon tasks can call http.register.
 func (rt *Runtime) SetGateway(g *ipc.Gateway) { rt.gateway = g }
+
+// SetSecretsManager wires the secrets manager so tasks with permissions.dicode.secrets_write
+// can call dicode.secrets_set() and dicode.secrets_delete().
+func (rt *Runtime) SetSecretsManager(m secrets.Manager) { rt.secretsManager = m }
 
 // SetAIConfig configures the AI provider details passed to tasks via dicode.get_config.
 func (rt *Runtime) SetAIConfig(baseURL, model, apiKey string) {
@@ -115,32 +126,51 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		}
 	}()
 
-	resolved, err := rt.secrets.ResolveAll(ctx, spec.Env)
-	if err != nil {
+	// Resolve only env vars explicitly declared in permissions.env.
+	// - entry.Value  → literal (taskset override); inject directly
+	// - entry.Secret → look up in secrets store; fail if not found
+	// - entry.From   → read from host OS env (os.Getenv); inject as entry.Name
+	// - bare name    → allowlisted via --allow-env; script reads from host env at runtime
+	resolved := make(map[string]string, len(spec.Permissions.Env))
+	for _, entry := range spec.Permissions.Env {
+		switch {
+		case entry.Value != "":
+			resolved[entry.Name] = entry.Value
+		case entry.Secret != "":
+			val, err := rt.secrets.Resolve(ctx, entry.Secret)
+			if err != nil {
+				status = registry.StatusFailure
+				result.Error = fmt.Errorf("resolve secret %q for env %q: %w", entry.Secret, entry.Name, err)
+				return result, nil
+			}
+			resolved[entry.Name] = val
+		case entry.From != "":
+			resolved[entry.Name] = os.Getenv(entry.From)
+			// bare name: --allow-env only, no injection
+		}
+	}
+
+	taskPath := spec.ScriptPath()
+	if taskPath == "" {
 		status = registry.StatusFailure
-		result.Error = err
+		result.Error = fmt.Errorf("script not found for task %s", spec.ID)
 		return result, nil
 	}
 
-	script, err := spec.Script()
-	if err != nil {
-		status = registry.StatusFailure
-		result.Error = fmt.Errorf("read script: %w", err)
-		return result, nil
+	var execCtx context.Context
+	var cancel context.CancelFunc
+	if spec.Timeout > 0 {
+		execCtx, cancel = context.WithTimeout(ctx, spec.Timeout)
+	} else {
+		execCtx, cancel = context.WithCancel(ctx)
 	}
-
-	timeout := spec.Timeout
-	if timeout == 0 {
-		timeout = 60 * time.Second
-	}
-
-	execCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	mergedParams := mergeParams(spec.Params, opts.Params)
 
 	srv := ipc.New(runID, spec.ID, rt.secret, rt.registry, rt.db, mergedParams, opts.Input, rt.log, spec, rt.engine, rt.aiBaseURL, rt.aiModel, rt.aiAPIKey)
 	srv.SetGateway(rt.gateway)
+	srv.SetSecrets(rt.secretsManager)
 	socketPath, token, err := srv.Start(execCtx)
 	if err != nil {
 		status = registry.StatusFailure
@@ -149,30 +179,79 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	}
 	defer srv.Stop()
 
-	tmpFile, err := os.CreateTemp("", "dicode-task-*.ts")
+	debug := rt.log.Core().Enabled(zap.DebugLevel)
+
+	// Write the shim as a proper ES module to a temp file.
+	shimFile, err := os.CreateTemp("", "dicode-shim-*.ts")
 	if err != nil {
 		status = registry.StatusFailure
-		result.Error = fmt.Errorf("create temp file: %w", err)
+		result.Error = fmt.Errorf("create shim file: %w", err)
 		return result, nil
 	}
-	defer os.Remove(tmpFile.Name())
-
-	// Wrap the user script in try/finally so the connection is always closed,
-	// allowing the shim's background reader loop to exit and Deno to terminate
-	// cleanly even when the script throws an unhandled exception.
-	wrapped := shimContent + "\n\ntry {\nconst __result__ = await (async () => {\n" + script + "\n})();\nawait __setReturn__(__result__);\n} finally {\ntry { __conn__.close(); } catch {}\n}\n"
-	if _, err := tmpFile.WriteString(wrapped); err != nil {
-		tmpFile.Close()
+	shimPath := shimFile.Name()
+	if !debug {
+		defer os.Remove(shimPath)
+	}
+	if _, err := shimFile.WriteString(shimContent); err != nil {
+		shimFile.Close()
 		status = registry.StatusFailure
-		result.Error = fmt.Errorf("write script: %w", err)
+		result.Error = fmt.Errorf("write shim: %w", err)
 		return result, nil
 	}
-	tmpFile.Close()
+	shimFile.Close()
 
-	args := buildDenoArgs(spec, socketPath, tmpFile.Name())
+	// Write the wrapper that imports both and calls the user's exported main().
+	runnerFile, err := os.CreateTemp("", "dicode-runner-*.ts")
+	if err != nil {
+		status = registry.StatusFailure
+		result.Error = fmt.Errorf("create runner file: %w", err)
+		return result, nil
+	}
+	runnerPath := runnerFile.Name()
+	if !debug {
+		defer os.Remove(runnerPath)
+	}
+	rt.log.Debug("deno temp files",
+		zap.String("task", spec.ID),
+		zap.String("shim", shimPath),
+		zap.String("task_script", taskPath),
+		zap.String("runner", runnerPath),
+	)
+	runner := "import { params, kv, input, output, mcp, dicode, __setReturn__, __conn__, __flush__ } from \"" + shimPath + "\";\n" +
+		"let __main__;\n" +
+		"try {\n" +
+		"  __main__ = (await import(\"" + taskPath + "\")).default;\n" +
+		"} catch (__importErr__) {\n" +
+		"  console.error(\"[dicode] task import failed:\", String(__importErr__));\n" +
+		"  await __flush__();\n" +
+		"  try { __conn__.close(); } catch {}\n" +
+		"  Deno.exit(1);\n" +
+		"}\n" +
+		"try {\n" +
+		"  const result = await __main__({ params, kv, input, output, mcp, dicode });\n" +
+		"  await __setReturn__(result);\n" +
+		"} finally {\n" +
+		"  await __flush__();\n" +
+		"  try { __conn__.close(); } catch {}\n" +
+		"}\n"
+	if _, err := runnerFile.WriteString(runner); err != nil {
+		runnerFile.Close()
+		status = registry.StatusFailure
+		result.Error = fmt.Errorf("write runner: %w", err)
+		return result, nil
+	}
+	runnerFile.Close()
+
+	args := buildDenoArgs(spec, socketPath, shimPath, runnerPath)
 	cmd := exec.CommandContext(execCtx, rt.denoPath, args...) //nolint:gosec
 	cmd.Env = buildEnv(resolved, socketPath, token)
 
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		status = registry.StatusFailure
+		result.Error = err
+		return result, nil
+	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		status = registry.StatusFailure
@@ -186,11 +265,18 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		return result, nil
 	}
 
-	// Stream deno stderr to registry logs in real-time.
+	// Stream stdout (console.log/info) as "info" and stderr (console.error +
+	// Deno runtime errors) as "error" in the run log.
+	go func() {
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			_ = rt.registry.AppendLog(context.Background(), runID, "info", scanner.Text())
+		}
+	}()
 	go func() {
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {
-			_ = rt.registry.AppendLog(context.Background(), runID, "warn", scanner.Text())
+			_ = rt.registry.AppendLog(context.Background(), runID, "error", scanner.Text())
 		}
 	}()
 
@@ -232,7 +318,9 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 func mergeParams(specParams []task.Param, overrides map[string]string) map[string]string {
 	out := make(map[string]string, len(specParams))
 	for _, p := range specParams {
-		out[p.Name] = p.Default
+		if p.Default != "" {
+			out[p.Name] = p.Default
+		}
 	}
 	for k, v := range overrides {
 		out[k] = v
@@ -240,30 +328,77 @@ func mergeParams(specParams []task.Param, overrides map[string]string) map[strin
 	return out
 }
 
-func buildDenoArgs(spec *task.Spec, socketPath, scriptPath string) []string {
-	args := []string{"run", "--allow-net"}
+func expandHome(p string) string {
+	if strings.HasPrefix(p, "~/") || p == "~" {
+		home, err := os.UserHomeDir()
+		if err == nil {
+			return home + p[1:]
+		}
+	}
+	return p
+}
 
-	envVars := append([]string{"DICODE_SOCKET", "DICODE_TOKEN"}, spec.Env...)
+func buildDenoArgs(spec *task.Spec, socketPath, shimPath, runnerPath string) []string {
+	args := []string{"run"}
+
+	// Network: omit = unrestricted (--allow-net); empty list = deny all; named hosts = allowlist.
+	// The IPC socket itself uses a Unix socket (--allow-read/write), not TCP, so net
+	// permission does not affect it.
+	net := spec.Permissions.Net
+	if net == nil {
+		// no net: field → unrestricted (backward-compatible default)
+		args = append(args, "--allow-net")
+	} else if len(net) == 1 && net[0] == "*" {
+		args = append(args, "--allow-net")
+	} else if len(net) > 0 {
+		args = append(args, "--allow-net="+strings.Join(net, ","))
+	}
+	// len(net) == 0 (explicit empty list) → no --allow-net flag → network denied
+
+	// Env: always allow the internal IPC vars plus HOME/DENO_DIR/XDG_CACHE_HOME
+	// (required by deno.land/x/cache for vendored binary downloads).
+	envVars := []string{"DICODE_SOCKET", "DICODE_TOKEN", "HOME", "DENO_DIR", "XDG_CACHE_HOME"}
+	for _, e := range spec.Permissions.Env {
+		envVars = append(envVars, e.Name)
+	}
 	args = append(args, "--allow-env="+strings.Join(envVars, ","))
 
+	// Sys: omit field = deny all (default); ["*"] = all; named = allowlist.
+	sys := spec.Permissions.Sys
+	if len(sys) == 1 && sys[0] == "*" {
+		args = append(args, "--allow-sys")
+	} else if len(sys) > 0 {
+		args = append(args, "--allow-sys="+strings.Join(sys, ","))
+	}
+
 	// Deno 2.x requires explicit read+write permission for Unix socket paths.
-	readPaths := []string{socketPath}
+	// The shim needs read permission since it is imported. The entire task
+	// directory is allowed so helper modules (e.g. ./lib/foo.ts) can be imported.
+	readPaths := []string{socketPath, shimPath, spec.TaskDir}
 	writePaths := []string{socketPath}
-	for _, entry := range spec.FS {
+	for _, entry := range spec.Permissions.FS {
+		path := expandHome(entry.Path)
 		switch entry.Permission {
 		case "r":
-			readPaths = append(readPaths, entry.Path)
+			readPaths = append(readPaths, path)
 		case "w":
-			writePaths = append(writePaths, entry.Path)
+			writePaths = append(writePaths, path)
 		case "rw":
-			readPaths = append(readPaths, entry.Path)
-			writePaths = append(writePaths, entry.Path)
+			readPaths = append(readPaths, path)
+			writePaths = append(writePaths, path)
 		}
 	}
 	args = append(args, "--allow-read="+strings.Join(readPaths, ","))
 	args = append(args, "--allow-write="+strings.Join(writePaths, ","))
 
-	args = append(args, scriptPath)
+	run := spec.Permissions.Run
+	if len(run) == 1 && run[0] == "*" {
+		args = append(args, "--allow-run")
+	} else if len(run) > 0 {
+		args = append(args, "--allow-run="+strings.Join(run, ","))
+	}
+
+	args = append(args, runnerPath)
 	return args
 }
 

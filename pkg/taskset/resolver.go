@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -70,7 +71,7 @@ func (r *Resolver) DevMode() bool {
 // Passing parentOverrides.Defaults is also deprecated and now a no-op; only
 // Entries is honoured.
 func (r *Resolver) Resolve(ctx context.Context, namespace string, tsRef *Ref, configDefaults *Defaults, parentOverrides *Overrides) ([]*ResolvedTask, error) {
-	tsPath, err := r.resolveRef(ctx, tsRef)
+	tsPath, err := r.resolveRef(ctx, tsRef, "")
 	if err != nil {
 		return nil, fmt.Errorf("resolve ref for namespace %q: %w", namespace, err)
 	}
@@ -144,7 +145,7 @@ func (r *Resolver) resolveBody(
 			ref = ref.DevRef
 		}
 
-		localPath, err := r.resolveRef(ctx, ref)
+		localPath, err := r.resolveRef(ctx, ref, tsPath)
 		if err != nil {
 			r.log.Warn("taskset: failed to resolve ref",
 				zap.String("entry", fullID), zap.Error(err))
@@ -216,17 +217,41 @@ func (r *Resolver) resolveNestedRef(ctx context.Context, namespace, tsPath strin
 
 // resolveRef returns the absolute local path to the yaml file pointed to by ref.
 // For git refs this may trigger a clone or pull.
-func (r *Resolver) resolveRef(ctx context.Context, ref *Ref) (string, error) {
+// parentTSPath is the absolute path of the parent taskset.yaml — used to resolve
+// relative paths in local refs against the parent's directory.
+func (r *Resolver) resolveRef(ctx context.Context, ref *Ref, parentTSPath string) (string, error) {
+	var resolved string
 	if !ref.IsGit() {
-		return ref.Path, nil
+		if !filepath.IsAbs(ref.Path) {
+			resolved = filepath.Join(filepath.Dir(parentTSPath), ref.Path)
+		} else {
+			resolved = ref.Path
+		}
+	} else {
+		branch := ref.effectiveBranch()
+		localDir, err := r.ensureClone(ctx, ref.URL, branch, ref.effectivePoll(), ref.Auth.TokenEnv)
+		if err != nil {
+			return "", err
+		}
+		resolved = filepath.Join(localDir, ref.Path)
 	}
+	return resolveYAMLPath(resolved), nil
+}
 
-	branch := ref.effectiveBranch()
-	localDir, err := r.ensureClone(ctx, ref.URL, branch, ref.effectivePoll(), ref.Auth.TokenEnv)
-	if err != nil {
-		return "", err
+// resolveYAMLPath returns path unchanged if it is already a file.
+// If path is a directory it probes for taskset.yaml then task.yaml inside it.
+func resolveYAMLPath(path string) string {
+	fi, err := os.Stat(path)
+	if err != nil || !fi.IsDir() {
+		return path
 	}
-	return filepath.Join(localDir, ref.Path), nil
+	for _, candidate := range []string{"taskset.yaml", "task.yaml"} {
+		p := filepath.Join(path, candidate)
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return path
 }
 
 // Pull clones or fetches the latest commits for the given git ref and returns

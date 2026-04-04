@@ -64,6 +64,8 @@ func cliCaps() []string {
 }
 
 // defaultTaskCaps returns the base capability set granted to every task shim token.
+// Only the core I/O caps are always granted; all dicode.* API caps are opt-in
+// via permissions.dicode in task.yaml.
 func defaultTaskCaps() []string {
 	return []string{
 		CapLog,
@@ -73,8 +75,5 @@ func defaultTaskCaps() []string {
 		CapKVWrite,
 		CapOutputWrite,
 		CapReturn,
-		CapTasksList,
-		CapRunsList,
-		CapConfigRead,
 	}
 }

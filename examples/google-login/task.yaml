@@ -10,8 +10,9 @@ runtime: js
 trigger:
   manual: true
 
-env:
-  - GMAIL_CLIENT_ID
+permissions:
+  env:
+    - GMAIL_CLIENT_ID
 
 params:
   - name: scope
