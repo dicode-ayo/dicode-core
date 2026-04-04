@@ -299,7 +299,9 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 func mergeParams(specParams []task.Param, overrides map[string]string) map[string]string {
 	out := make(map[string]string, len(specParams))
 	for _, p := range specParams {
-		out[p.Name] = p.Default
+		if p.Default != "" {
+			out[p.Name] = p.Default
+		}
 	}
 	for k, v := range overrides {
 		out[k] = v
