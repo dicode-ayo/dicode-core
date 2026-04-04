@@ -1059,6 +1059,7 @@ func TestServer_CapDenied_KVWrite_Silent(t *testing.T) {
 // TestServer_Log_FlushOnStop verifies that buffered log entries that have not
 // yet been flushed by the ticker are written to the DB when Stop() is called.
 func TestServer_Log_FlushOnStop(t *testing.T) {
+	t.Parallel()
 	e := newTestEnv(t)
 	conn, srv := e.start(t, nil, nil)
 
@@ -1096,6 +1097,7 @@ func TestServer_Log_FlushOnStop(t *testing.T) {
 // TestServer_Log_FlushOnTicker verifies that entries are flushed automatically
 // after the flush interval even without an explicit Stop.
 func TestServer_Log_FlushOnTicker(t *testing.T) {
+	t.Parallel()
 	e := newTestEnv(t)
 	conn, srv := e.start(t, nil, nil)
 	defer srv.Stop()
@@ -1118,6 +1120,7 @@ func TestServer_Log_FlushOnTicker(t *testing.T) {
 // TestServer_Log_SizeThresholdFlush verifies that when the buffer fills to
 // logFlushSize (50) entries the flush happens inline before the ticker fires.
 func TestServer_Log_SizeThresholdFlush(t *testing.T) {
+	t.Parallel()
 	e := newTestEnv(t)
 	conn, srv := e.start(t, nil, nil)
 	defer srv.Stop()
@@ -1150,6 +1153,7 @@ func TestServer_Log_SizeThresholdFlush(t *testing.T) {
 // TestServer_Log_OrderingPreserved verifies that the AUTOINCREMENT rowid
 // preserves insertion order across a full batch flush.
 func TestServer_Log_OrderingPreserved(t *testing.T) {
+	t.Parallel()
 	e := newTestEnv(t)
 	conn, srv := e.start(t, nil, nil)
 
@@ -1178,4 +1182,67 @@ func TestServer_Log_OrderingPreserved(t *testing.T) {
 			t.Errorf("entry %d: got %q, want %q", i, lg.Message, want)
 		}
 	}
+}
+
+// TestServer_Log_InvalidLevel verifies that an unrecognised level value is
+// normalised to "info" rather than being stored verbatim (prevents log injection).
+func TestServer_Log_InvalidLevel(t *testing.T) {
+	t.Parallel()
+	e := newTestEnv(t)
+	conn, srv := e.start(t, nil, nil)
+
+	sendMsg(t, conn, map[string]any{
+		"method":  "log",
+		"level":   "CRITICAL; DROP TABLE run_logs; --",
+		"message": "injected",
+	})
+	// Wait for the entry to be flushed via the ticker.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+		logs, _ := e.reg.GetRunLogs(context.Background(), srv.runID)
+		if len(logs) > 0 {
+			if logs[0].Level != "info" {
+				t.Errorf("expected level normalised to \"info\", got %q", logs[0].Level)
+			}
+			srv.Stop()
+			return
+		}
+	}
+	srv.Stop()
+	t.Fatal("log entry was not flushed within 2 s")
+}
+
+// TestServer_Log_BufCap verifies that the buffer never grows beyond
+// logBufMaxSize by triggering an inline flush when the cap is hit.
+func TestServer_Log_BufCap(t *testing.T) {
+	t.Parallel()
+	e := newTestEnv(t)
+	conn, srv := e.start(t, nil, nil)
+	defer srv.Stop()
+	defer conn.Close()
+
+	// Send logBufMaxSize+1 messages at once. The (logBufMaxSize+1)-th message
+	// must trigger a synchronous cap-flush so all previous entries land in the
+	// DB even before the 200 ms ticker fires.
+	total := logBufMaxSize + 1
+	for i := 0; i < total; i++ {
+		sendMsg(t, conn, map[string]any{
+			"method":  "log",
+			"level":   "info",
+			"message": fmt.Sprintf("cap-%d", i),
+		})
+	}
+
+	// Wait up to 1 s for the cap-flush to land (well under the ticker).
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+		logs, _ := e.reg.GetRunLogs(context.Background(), srv.runID)
+		if len(logs) >= logBufMaxSize {
+			return // cap-flush worked
+		}
+	}
+	logs, _ := e.reg.GetRunLogs(context.Background(), srv.runID)
+	t.Fatalf("expected at least %d entries after cap-flush, got %d", logBufMaxSize, len(logs))
 }

@@ -174,17 +174,15 @@ type PendingLogEntry struct {
 }
 
 // BulkAppendLogs inserts a batch of log entries in a single transaction.
-// Entries may belong to different run IDs; row ordering is preserved by
-// the AUTOINCREMENT rowid assigned by SQLite.
+// Entries may belong to different run IDs; insertion order within the batch is
+// preserved by the AUTOINCREMENT rowid assigned by SQLite.
 func (r *Registry) BulkAppendLogs(ctx context.Context, entries []PendingLogEntry) error {
 	if len(entries) == 0 {
 		return nil
 	}
-	if len(entries) == 1 {
-		e := entries[0]
-		return r.AppendLog(ctx, e.RunID, e.Level, e.Message)
-	}
 
+	// Always use the bulk path (even for a single entry) so that the
+	// pre-captured TsMs is written instead of time.Now() from AppendLog.
 	// Wrap all inserts in a single transaction so they land atomically
 	// and only one fsync is needed per batch.
 	err := r.db.Tx(ctx, func(tx db.DB) error {

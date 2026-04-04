@@ -32,6 +32,7 @@ func makeSpec(id string) *task.Spec {
 }
 
 func TestRegistry_RegisterGetAll(t *testing.T) {
+	t.Parallel()
 	r := newTestRegistry(t)
 
 	_ = r.Register(makeSpec("task-a"))
@@ -51,6 +52,7 @@ func TestRegistry_RegisterGetAll(t *testing.T) {
 }
 
 func TestRegistry_Unregister(t *testing.T) {
+	t.Parallel()
 	r := newTestRegistry(t)
 	_ = r.Register(makeSpec("task-x"))
 	r.Unregister("task-x")
@@ -61,6 +63,7 @@ func TestRegistry_Unregister(t *testing.T) {
 }
 
 func TestRegistry_Register_Upsert(t *testing.T) {
+	t.Parallel()
 	r := newTestRegistry(t)
 	s := makeSpec("task-u")
 	s.Name = "original"
@@ -77,6 +80,7 @@ func TestRegistry_Register_Upsert(t *testing.T) {
 }
 
 func TestRegistry_RunLifecycle(t *testing.T) {
+	t.Parallel()
 	r := newTestRegistry(t)
 	_ = r.Register(makeSpec("task-r"))
 	ctx := context.Background()
@@ -111,6 +115,7 @@ func TestRegistry_RunLifecycle(t *testing.T) {
 }
 
 func TestRegistry_AppendLog_GetRunLogs(t *testing.T) {
+	t.Parallel()
 	r := newTestRegistry(t)
 	ctx := context.Background()
 	runID, _ := r.StartRun(ctx, "task-l", "")
@@ -132,6 +137,7 @@ func TestRegistry_AppendLog_GetRunLogs(t *testing.T) {
 }
 
 func TestRegistry_ListRuns(t *testing.T) {
+	t.Parallel()
 	r := newTestRegistry(t)
 	ctx := context.Background()
 
@@ -150,6 +156,7 @@ func TestRegistry_ListRuns(t *testing.T) {
 }
 
 func TestRegistry_ParentRunID(t *testing.T) {
+	t.Parallel()
 	r := newTestRegistry(t)
 	ctx := context.Background()
 
@@ -168,6 +175,7 @@ func TestRegistry_ParentRunID(t *testing.T) {
 // ── BulkAppendLogs tests ──────────────────────────────────────────────────────
 
 func TestRegistry_BulkAppendLogs_Empty(t *testing.T) {
+	t.Parallel()
 	r := newTestRegistry(t)
 	ctx := context.Background()
 	// Should be a no-op and not return an error.
@@ -180,6 +188,7 @@ func TestRegistry_BulkAppendLogs_Empty(t *testing.T) {
 }
 
 func TestRegistry_BulkAppendLogs_Single(t *testing.T) {
+	t.Parallel()
 	r := newTestRegistry(t)
 	ctx := context.Background()
 	runID, _ := r.StartRun(ctx, "t", "")
@@ -200,9 +209,14 @@ func TestRegistry_BulkAppendLogs_Single(t *testing.T) {
 	if logs[0].Message != "hello" || logs[0].Level != "info" {
 		t.Errorf("unexpected entry: %+v", logs[0])
 	}
+	// The enqueue timestamp must be preserved — not replaced by time.Now().
+	if logs[0].Ts.UnixMilli() != 1000 {
+		t.Errorf("expected enqueue TsMs=1000, got %d", logs[0].Ts.UnixMilli())
+	}
 }
 
 func TestRegistry_BulkAppendLogs_Multiple(t *testing.T) {
+	t.Parallel()
 	r := newTestRegistry(t)
 	ctx := context.Background()
 	runID, _ := r.StartRun(ctx, "t", "")
@@ -237,6 +251,7 @@ func TestRegistry_BulkAppendLogs_Multiple(t *testing.T) {
 }
 
 func TestRegistry_BulkAppendLogs_HookFired(t *testing.T) {
+	t.Parallel()
 	r := newTestRegistry(t)
 	ctx := context.Background()
 	runID, _ := r.StartRun(ctx, "t", "")
