@@ -27,6 +27,9 @@ import (
 //go:embed sdk/shim.js
 var shimContent string
 
+//go:embed pool_shim.js
+var poolShimContent string
+
 // RunOptions controls a single task execution.
 type RunOptions struct {
 	RunID       string
@@ -57,6 +60,9 @@ type Runtime struct {
 	aiBaseURL string
 	aiModel   string
 	aiAPIKey  string
+	pool      *Pool
+	// poolShimPath holds the path of the embedded pool shim written to disk.
+	poolShimPath string
 }
 
 // New creates a Deno Runtime. It ensures the Deno binary is present in the
@@ -70,7 +76,49 @@ func New(r *registry.Registry, sc secrets.Chain, database db.DB, log *zap.Logger
 	if err != nil {
 		return nil, fmt.Errorf("ipc secret: %w", err)
 	}
-	return &Runtime{registry: r, secrets: sc, db: database, log: log, denoPath: path, secret: secret}, nil
+
+	// Write the embedded pool shim to a temp file so Deno can execute it.
+	shimFile, err := os.CreateTemp("", "dicode-pool-shim-*.js")
+	if err != nil {
+		return nil, fmt.Errorf("create pool shim file: %w", err)
+	}
+	if _, err := shimFile.WriteString(poolShimContent); err != nil {
+		shimFile.Close()
+		_ = os.Remove(shimFile.Name())
+		return nil, fmt.Errorf("write pool shim: %w", err)
+	}
+	shimFile.Close()
+
+	return &Runtime{
+		registry:     r,
+		secrets:      sc,
+		db:           database,
+		log:          log,
+		denoPath:     path,
+		secret:       secret,
+		poolShimPath: shimFile.Name(),
+	}, nil
+}
+
+// SetPool attaches a warm process pool to the runtime.
+// Must be called before any Run invocations.
+func (rt *Runtime) SetPool(p *Pool) { rt.pool = p }
+
+// NewPool creates a warm process Pool sized from the DICODE_DENO_POOL_SIZE
+// environment variable (default 0 = disabled). The pool is tied to ctx.
+func (rt *Runtime) NewPool(ctx context.Context) *Pool {
+	size := 0
+	if v := os.Getenv("DICODE_DENO_POOL_SIZE"); v != "" {
+		var n int
+		if _, err := fmt.Sscan(v, &n); err == nil && n > 0 {
+			size = n
+		}
+	}
+	if size == 0 {
+		return NewPool(ctx, rt.denoPath, rt.poolShimPath, 0)
+	}
+	rt.log.Info("deno pool enabled", zap.Int("size", size))
+	return NewPool(ctx, rt.denoPath, rt.poolShimPath, size)
 }
 
 // SetEngine configures the engine runner used for dicode.run_task calls.
@@ -149,31 +197,75 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	}
 	defer srv.Stop()
 
-	tmpFile, err := os.CreateTemp("", "dicode-task-*.ts")
-	if err != nil {
-		status = registry.StatusFailure
-		result.Error = fmt.Errorf("create temp file: %w", err)
-		return result, nil
-	}
-	defer os.Remove(tmpFile.Name())
-
 	// Wrap the user script in try/finally so the connection is always closed,
 	// allowing the shim's background reader loop to exit and Deno to terminate
 	// cleanly even when the script throws an unhandled exception.
 	wrapped := shimContent + "\n\ntry {\nconst __result__ = await (async () => {\n" + script + "\n})();\nawait __setReturn__(__result__);\n} finally {\ntry { __conn__.close(); } catch {}\n}\n"
-	if _, err := tmpFile.WriteString(wrapped); err != nil {
-		tmpFile.Close()
-		status = registry.StatusFailure
-		result.Error = fmt.Errorf("write script: %w", err)
-		return result, nil
+
+	// Try to acquire a warm process from the pool (500ms timeout).
+	// Fall back to cold-spawn if the pool is disabled or timed out.
+	var cmd *exec.Cmd
+
+	if rt.pool != nil && rt.pool.size > 0 {
+		acquireCtx, acquireCancel := context.WithTimeout(execCtx, 500*time.Millisecond)
+		warm, acquireErr := rt.pool.Acquire(acquireCtx)
+		acquireCancel()
+
+		if acquireErr == nil {
+			// Dispatch the script to the warm process via the pool socket.
+			dispatchErr := warm.conn.SetDeadline(time.Now().Add(5 * time.Second))
+			if dispatchErr == nil {
+				dispatchErr = warm.dispatch(poolDispatch{
+					SocketPath: socketPath,
+					Token:      token,
+					Script:     wrapped,
+				})
+			}
+			_ = warm.conn.Close()
+			warm.conn = nil
+
+			if dispatchErr != nil {
+				warm.close()
+				warm = nil
+				rt.log.Warn("deno pool dispatch failed, falling back to cold spawn",
+					zap.String("run", runID), zap.Error(dispatchErr))
+			} else {
+				// Wire up the warm process as our cmd.
+				cmd = warm.cmd
+				warm.cmd = nil
+				_ = os.Remove(warm.socketPath)
+				warm.socketPath = ""
+
+				// Replenish the pool slot we just consumed.
+				go rt.pool.replenish()
+			}
+		}
 	}
-	tmpFile.Close()
 
-	args := buildDenoArgs(spec, socketPath, tmpFile.Name())
-	cmd := exec.CommandContext(execCtx, rt.denoPath, args...) //nolint:gosec
-	cmd.Env = buildEnv(resolved, socketPath, token)
+	if cmd == nil {
+		// Cold-spawn path (pool disabled, timed out, or dispatch failed).
+		tmpFile, err := os.CreateTemp("", "dicode-task-*.ts")
+		if err != nil {
+			status = registry.StatusFailure
+			result.Error = fmt.Errorf("create temp file: %w", err)
+			return result, nil
+		}
+		defer os.Remove(tmpFile.Name())
 
-	stderr, err := cmd.StderrPipe()
+		if _, err := tmpFile.WriteString(wrapped); err != nil {
+			tmpFile.Close()
+			status = registry.StatusFailure
+			result.Error = fmt.Errorf("write script: %w", err)
+			return result, nil
+		}
+		tmpFile.Close()
+
+		args := buildDenoArgs(spec, socketPath, tmpFile.Name())
+		cmd = exec.CommandContext(execCtx, rt.denoPath, args...) //nolint:gosec
+		cmd.Env = buildEnv(resolved, socketPath, token)
+	}
+
+	stderrPipe, err := cmd.StderrPipe()
 	if err != nil {
 		status = registry.StatusFailure
 		result.Error = err
@@ -188,7 +280,7 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 
 	// Stream deno stderr to registry logs in real-time.
 	go func() {
-		scanner := bufio.NewScanner(stderr)
+		scanner := bufio.NewScanner(stderrPipe)
 		for scanner.Scan() {
 			_ = rt.registry.AppendLog(context.Background(), runID, "warn", scanner.Text())
 		}

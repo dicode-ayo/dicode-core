@@ -23,7 +23,7 @@ runtimes:
 
 ## Task structure
 
-```
+```text
 tasks/
 └── my-task/
     ├── task.yaml
@@ -335,6 +335,42 @@ Permissions are derived from `task.yaml`:
 | `--allow-env=DICODE_SOCKET,DICODE_TOKEN,VAR1,...` | `DICODE_SOCKET`, `DICODE_TOKEN` (IPC handshake) + all `env:` vars |
 | `--allow-read=path1,path2` | `fs:` entries with `r` or `rw` |
 | `--allow-write=path1` | `fs:` entries with `w` or `rw` |
+
+---
+
+## Warm process pool
+
+By default, dicode spawns a fresh Deno process for every task execution. Deno's cold-start costs 100–300 ms per invocation on typical hardware. The **warm process pool** eliminates this overhead by keeping a set of Deno processes pre-initialized and ready to receive a task.
+
+### How it works
+
+1. On daemon startup, the pool pre-spawns N Deno processes. Each process runs a lightweight bootstrap shim that connects back to the daemon and waits for a dispatch message.
+2. When a task is triggered, the daemon dispatches the script to a waiting process (< 1 ms), the process executes it, then exits.
+3. A replacement process is spawned in the background to keep the pool full.
+
+If no warm process is available within 500 ms (e.g. pool is still warming up or all slots are busy), the runtime falls back to the normal cold-spawn path transparently.
+
+### Enabling the pool
+
+Set the `DICODE_DENO_POOL_SIZE` environment variable before starting `dicoded`:
+
+```bash
+DICODE_DENO_POOL_SIZE=3 dicoded
+```
+
+- **0** (default) — pool disabled; all tasks cold-spawn (backwards-compatible)
+- **1–N** — keep N warm processes ready at all times
+
+A pool size of **2–4** is a good starting point for most workloads. Larger values consume more memory (each idle Deno process uses ~30–60 MB RSS) but reduce latency under high concurrency.
+
+### When to use it
+
+| Scenario | Recommendation |
+| --- | --- |
+| Infrequent manual tasks | Pool not needed (default size 0) |
+| Webhook-driven tasks with < 1 s SLA | `DICODE_DENO_POOL_SIZE=2` |
+| High-throughput cron / chain workloads | `DICODE_DENO_POOL_SIZE=4` |
+| Memory-constrained environments | Keep at 0 or 1 |
 
 ---
 

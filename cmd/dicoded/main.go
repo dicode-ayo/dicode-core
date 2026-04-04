@@ -203,7 +203,7 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 }
 
 func buildRuntimes(
-	_ context.Context,
+	ctx context.Context,
 	cfg *config.Config,
 	reg *registry.Registry,
 	secretsChain secrets.Chain,
@@ -219,6 +219,10 @@ func buildRuntimes(
 	eng.SetDB(database)
 	denoRT.SetEngine(eng)
 	denoRT.SetGateway(gateway)
+
+	// Start the warm process pool (size controlled by DICODE_DENO_POOL_SIZE env var).
+	denoPool := denoRT.NewPool(ctx)
+	denoRT.SetPool(denoPool)
 	aiAPIKey := cfg.AI.APIKey
 	if aiAPIKey == "" && cfg.AI.APIKeyEnv != "" {
 		aiAPIKey = os.Getenv(cfg.AI.APIKeyEnv)
