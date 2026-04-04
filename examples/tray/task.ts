@@ -33,7 +33,7 @@ export default async function main({ log, params }: DicodeSdk) {
     } else if (os === "windows") {
       cmd = ["rundll32", "url.dll,FileProtocolHandler", url];
     } else {
-      log.warn(`openBrowser: unsupported OS "${os}", cannot open ${url}`);
+      console.warn(`openBrowser: unsupported OS "${os}", cannot open ${url}`);
       return;
     }
 
@@ -41,7 +41,7 @@ export default async function main({ log, params }: DicodeSdk) {
       const proc = new Deno.Command(cmd[0], { args: cmd.slice(1) });
       await proc.spawn().status;
     } catch (err) {
-      log.warn(`openBrowser: failed to open ${url}: ${err}`);
+      console.warn(`openBrowser: failed to open ${url}: ${err}`);
     }
   }
 
@@ -73,7 +73,7 @@ export default async function main({ log, params }: DicodeSdk) {
     },
   ];
 
-  await log.info("tray: starting system tray icon");
+  console.log("tray: starting system tray icon");
 
   const version = await params.get("tray_version") ?? undefined;
 
@@ -104,12 +104,12 @@ export default async function main({ log, params }: DicodeSdk) {
     switch (action.item.title) {
       case "Open Dashboard":
         openBrowser(dashboardURL).catch((err) =>
-          log.error(`tray: openBrowser error: ${err}`)
+          console.error(`tray: openBrowser error: ${err}`)
         );
         break;
 
       case "Quit dicode":
-        log.info("tray: Quit clicked — sending SIGTERM to dicoded");
+        console.log("tray: Quit clicked — sending SIGTERM to dicoded");
         systray.kill(false); // shut down the native helper without exiting Deno
         Deno.kill(Deno.ppid, "SIGTERM"); // signal dicoded to shut down gracefully
         break;

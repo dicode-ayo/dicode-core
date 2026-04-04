@@ -8,19 +8,19 @@ import type { DicodeSdk } from "../sdk.ts";
  *   echo    — echo the query param back with a log line
  */
 
-export default async function main({ log, params, env }: DicodeSdk) {
+export default async function main({ params }: DicodeSdk) {
   const action = String((await params.get("action")) ?? "ping").trim();
   const query  = String((await params.get("query"))  ?? "").trim();
 
   switch (action) {
     case "status": {
-      await log.info("Collecting status…");
+      console.log("Collecting status…");
 
-      const version = (await env.get("DICODE_VERSION")) ?? "unknown";
+      const version = Deno.env.get("DICODE_VERSION") ?? "unknown";
       const uptimeMs = performance.now();
       const uptimeSec = Math.round(uptimeMs / 1000);
 
-      await log.info(`Uptime: ${uptimeSec}s  |  Version: ${version}`);
+      console.log(`Uptime: ${uptimeSec}s  |  Version: ${version}`);
 
       return {
         action: "status",
@@ -39,7 +39,7 @@ export default async function main({ log, params, env }: DicodeSdk) {
     }
 
     case "ping": {
-      await log.info("Pong!");
+      console.log("Pong!");
       return {
         action: "ping",
         pong: true,
@@ -49,7 +49,7 @@ export default async function main({ log, params, env }: DicodeSdk) {
 
     case "echo": {
       if (!query) throw new Error("echo action requires a non-empty 'query' param");
-      await log.info(`Echo: ${query}`);
+      console.log(`Echo: ${query}`);
       return {
         action: "echo",
         query,

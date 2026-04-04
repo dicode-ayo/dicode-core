@@ -43,7 +43,7 @@ export default async function main({ log, input, kv, output }: DicodeSdk) {
   const pusher = event.pusher?.name ?? "unknown";
   const commits = event.commits ?? [];
 
-  await log.info(
+  console.log(
     `Push to ${repo} on branch ${branch} by ${pusher} — ${commits.length} commit(s)`,
   );
 
@@ -56,7 +56,7 @@ export default async function main({ log, input, kv, output }: DicodeSdk) {
     c.added?.forEach(f => added.add(f));
     c.removed?.forEach(f => removed.add(f));
     c.modified?.forEach(f => modified.add(f));
-    await log.info(`  ${c.id.slice(0, 7)}  ${c.message.split("\n")[0]}`);
+    console.log(`  ${c.id.slice(0, 7)}  ${c.message.split("\n")[0]}`);
   }
 
   // ── Persist a run counter per repo/branch for trend display ──────────────────

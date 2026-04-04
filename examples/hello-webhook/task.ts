@@ -19,7 +19,7 @@ import type { DicodeSdk } from "../sdk.ts";
 export default async function main({ log, input, output }: DicodeSdk) {
   const body = input as Record<string, unknown> | null;
 
-  await log.info("hello from protected webhook", { body });
+  console.log("hello from protected webhook", { body });
 
   return output.html(`
 <div style="font-family:system-ui,sans-serif;padding:2rem">

@@ -1,4 +1,3 @@
-import type { DicodeSdk } from "../sdk.ts";
 
 // Demonstrates calling another task via dicode.run_task().
 // The caller needs permissions.dicode.tasks: [examples/notifications].
@@ -11,7 +10,7 @@ export default async function main({ params, log, dicode }: DicodeSdk) {
 
 
 
-  await log.info("alert: dispatching notification via examples/notifications", { title, priority });
+  console.log("alert: dispatching notification via examples/notifications", { title, priority });
 
   const result = await dicode.run_task("examples/notifications", {
     title,
@@ -20,6 +19,6 @@ export default async function main({ params, log, dicode }: DicodeSdk) {
     tags,
   });
 
-  await log.info("alert: notification run queued", { result });
+  console.log("alert: notification run queued", { result });
   return { dispatched: true, title, priority };
 }
