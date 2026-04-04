@@ -191,6 +191,22 @@ A 2-second back-off is applied between restarts to prevent tight loops on immedi
 
 ---
 
+## Concurrency limit
+
+By default dicode spawns a goroutine for every task invocation with no upper bound. Under sustained load this can cause goroutine storms and amplified SQLite write contention.
+
+Set `DICODE_MAX_CONCURRENT_TASKS` to cap how many task goroutines run in parallel:
+
+```bash
+DICODE_MAX_CONCURRENT_TASKS=8 dicoded
+```
+
+- `0` (default) — unlimited, backwards-compatible behaviour.
+- `N > 0` — at most N tasks execute concurrently. Additional invocations queue inside the daemon and run as slots become free.
+- **Shutdown safety:** queued goroutines are unblocked immediately when the daemon shuts down, so a full slot queue never causes a hang on `SIGTERM`.
+
+---
+
 ## Trigger constraints
 
 - Exactly one trigger per task. Multiple triggers are not supported (use `dicode.trigger()` from a task for complex dispatch logic).
