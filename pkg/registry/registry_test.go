@@ -2,6 +2,8 @@ package registry
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -160,5 +162,103 @@ func TestRegistry_ParentRunID(t *testing.T) {
 	}
 	if child.ParentRunID != parentID {
 		t.Errorf("expected parentRunID=%s, got %s", parentID, child.ParentRunID)
+	}
+}
+
+// ── BulkAppendLogs tests ──────────────────────────────────────────────────────
+
+func TestRegistry_BulkAppendLogs_Empty(t *testing.T) {
+	r := newTestRegistry(t)
+	ctx := context.Background()
+	// Should be a no-op and not return an error.
+	if err := r.BulkAppendLogs(ctx, nil); err != nil {
+		t.Fatalf("BulkAppendLogs(nil): %v", err)
+	}
+	if err := r.BulkAppendLogs(ctx, []PendingLogEntry{}); err != nil {
+		t.Fatalf("BulkAppendLogs([]): %v", err)
+	}
+}
+
+func TestRegistry_BulkAppendLogs_Single(t *testing.T) {
+	r := newTestRegistry(t)
+	ctx := context.Background()
+	runID, _ := r.StartRun(ctx, "t", "")
+
+	entries := []PendingLogEntry{
+		{RunID: runID, Level: "info", Message: "hello", TsMs: 1000},
+	}
+	if err := r.BulkAppendLogs(ctx, entries); err != nil {
+		t.Fatalf("BulkAppendLogs: %v", err)
+	}
+	logs, err := r.GetRunLogs(ctx, runID)
+	if err != nil {
+		t.Fatalf("GetRunLogs: %v", err)
+	}
+	if len(logs) != 1 {
+		t.Fatalf("expected 1 log, got %d", len(logs))
+	}
+	if logs[0].Message != "hello" || logs[0].Level != "info" {
+		t.Errorf("unexpected entry: %+v", logs[0])
+	}
+}
+
+func TestRegistry_BulkAppendLogs_Multiple(t *testing.T) {
+	r := newTestRegistry(t)
+	ctx := context.Background()
+	runID, _ := r.StartRun(ctx, "t", "")
+
+	const n = 30
+	entries := make([]PendingLogEntry, n)
+	baseTs := int64(2000)
+	for i := range entries {
+		entries[i] = PendingLogEntry{
+			RunID:   runID,
+			Level:   "info",
+			Message: fmt.Sprintf("msg-%02d", i),
+			TsMs:    baseTs + int64(i),
+		}
+	}
+	if err := r.BulkAppendLogs(ctx, entries); err != nil {
+		t.Fatalf("BulkAppendLogs: %v", err)
+	}
+	logs, err := r.GetRunLogs(ctx, runID)
+	if err != nil {
+		t.Fatalf("GetRunLogs: %v", err)
+	}
+	if len(logs) != n {
+		t.Fatalf("expected %d logs, got %d", n, len(logs))
+	}
+	for i, lg := range logs {
+		want := fmt.Sprintf("msg-%02d", i)
+		if lg.Message != want {
+			t.Errorf("log[%d]: got %q, want %q", i, lg.Message, want)
+		}
+	}
+}
+
+func TestRegistry_BulkAppendLogs_HookFired(t *testing.T) {
+	r := newTestRegistry(t)
+	ctx := context.Background()
+	runID, _ := r.StartRun(ctx, "t", "")
+
+	var mu sync.Mutex
+	var hooked []string
+	r.SetLogHook(func(_ string, _ string, msg string, _ int64) {
+		mu.Lock()
+		hooked = append(hooked, msg)
+		mu.Unlock()
+	})
+
+	entries := []PendingLogEntry{
+		{RunID: runID, Level: "info", Message: "a", TsMs: 1},
+		{RunID: runID, Level: "warn", Message: "b", TsMs: 2},
+	}
+	if err := r.BulkAppendLogs(ctx, entries); err != nil {
+		t.Fatalf("BulkAppendLogs: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(hooked) != 2 || hooked[0] != "a" || hooked[1] != "b" {
+		t.Errorf("hook got %v, want [a b]", hooked)
 	}
 }

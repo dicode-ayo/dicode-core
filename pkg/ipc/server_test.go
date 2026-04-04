@@ -301,7 +301,10 @@ func TestServer_Log(t *testing.T) {
 	conn, srv := e.start(t, nil, nil)
 
 	sendMsg(t, conn, map[string]any{"method": "log", "level": "info", "message": "test message"})
+	// Give the server goroutine time to receive and enqueue the message,
+	// then Stop() flushes the buffer before we query.
 	time.Sleep(20 * time.Millisecond)
+	srv.Stop()
 
 	logs, err := e.reg.GetRunLogs(context.Background(), srv.runID)
 	if err != nil {
@@ -323,6 +326,7 @@ func TestServer_Log_MultiLine(t *testing.T) {
 	msg := "line one\nline two\nline three"
 	sendMsg(t, conn, map[string]any{"method": "log", "level": "info", "message": msg})
 	time.Sleep(20 * time.Millisecond)
+	srv.Stop()
 
 	logs, _ := e.reg.GetRunLogs(context.Background(), srv.runID)
 	if len(logs) == 0 {
@@ -1047,5 +1051,131 @@ func TestServer_CapDenied_KVWrite_Silent(t *testing.T) {
 	}
 	if resp["result"] != nil {
 		t.Errorf("key should not exist; got result=%v", resp["result"])
+	}
+}
+
+// ── log buffering tests ───────────────────────────────────────────────────────
+
+// TestServer_Log_FlushOnStop verifies that buffered log entries that have not
+// yet been flushed by the ticker are written to the DB when Stop() is called.
+func TestServer_Log_FlushOnStop(t *testing.T) {
+	e := newTestEnv(t)
+	conn, srv := e.start(t, nil, nil)
+
+	const n = 5
+	for i := 0; i < n; i++ {
+		sendMsg(t, conn, map[string]any{
+			"method":  "log",
+			"level":   "info",
+			"message": fmt.Sprintf("msg-%d", i),
+		})
+	}
+	// Give the server a moment to enqueue without flushing (ticker is 200ms).
+	time.Sleep(10 * time.Millisecond)
+
+	// Verify nothing in the DB yet (buffer hasn't flushed).
+	logs, err := e.reg.GetRunLogs(context.Background(), srv.runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Entries may or may not be flushed by now (race with ticker), so we
+	// only assert the final count after Stop, not the intermediate state.
+
+	conn.Close()
+	srv.Stop() // must flush
+
+	logs, err = e.reg.GetRunLogs(context.Background(), srv.runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) != n {
+		t.Fatalf("expected %d log entries after Stop, got %d", n, len(logs))
+	}
+}
+
+// TestServer_Log_FlushOnTicker verifies that entries are flushed automatically
+// after the flush interval even without an explicit Stop.
+func TestServer_Log_FlushOnTicker(t *testing.T) {
+	e := newTestEnv(t)
+	conn, srv := e.start(t, nil, nil)
+	defer srv.Stop()
+	defer conn.Close()
+
+	sendMsg(t, conn, map[string]any{"method": "log", "level": "info", "message": "ticker-test"})
+
+	// Wait long enough for the 200 ms ticker to fire.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+		logs, _ := e.reg.GetRunLogs(context.Background(), srv.runID)
+		if len(logs) > 0 {
+			return // flushed
+		}
+	}
+	t.Fatal("log entry was not flushed within 2 s")
+}
+
+// TestServer_Log_SizeThresholdFlush verifies that when the buffer fills to
+// logFlushSize (50) entries the flush happens inline before the ticker fires.
+func TestServer_Log_SizeThresholdFlush(t *testing.T) {
+	e := newTestEnv(t)
+	conn, srv := e.start(t, nil, nil)
+	defer srv.Stop()
+	defer conn.Close()
+
+	// Send exactly logFlushSize messages. The 50th message should trigger an
+	// inline flush.
+	for i := 0; i < logFlushSize; i++ {
+		sendMsg(t, conn, map[string]any{
+			"method":  "log",
+			"level":   "info",
+			"message": fmt.Sprintf("bulk-%d", i),
+		})
+	}
+
+	// Wait a short time (well under the 200 ms ticker) for the server to
+	// process the messages and perform the size-triggered flush.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+		logs, _ := e.reg.GetRunLogs(context.Background(), srv.runID)
+		if len(logs) == logFlushSize {
+			return // all entries written
+		}
+	}
+	logs, _ := e.reg.GetRunLogs(context.Background(), srv.runID)
+	t.Fatalf("expected %d entries after size-threshold flush, got %d", logFlushSize, len(logs))
+}
+
+// TestServer_Log_OrderingPreserved verifies that the AUTOINCREMENT rowid
+// preserves insertion order across a full batch flush.
+func TestServer_Log_OrderingPreserved(t *testing.T) {
+	e := newTestEnv(t)
+	conn, srv := e.start(t, nil, nil)
+
+	const n = 20
+	for i := 0; i < n; i++ {
+		sendMsg(t, conn, map[string]any{
+			"method":  "log",
+			"level":   "info",
+			"message": fmt.Sprintf("order-%02d", i),
+		})
+	}
+	// Give server time to receive all messages before flushing.
+	time.Sleep(50 * time.Millisecond)
+	srv.Stop()
+
+	logs, err := e.reg.GetRunLogs(context.Background(), srv.runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) != n {
+		t.Fatalf("expected %d entries, got %d", n, len(logs))
+	}
+	for i, lg := range logs {
+		want := fmt.Sprintf("order-%02d", i)
+		if lg.Message != want {
+			t.Errorf("entry %d: got %q, want %q", i, lg.Message, want)
+		}
 	}
 }

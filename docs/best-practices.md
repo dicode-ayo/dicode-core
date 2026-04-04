@@ -797,6 +797,19 @@ Always name columns in SELECT statements. `SELECT *` breaks if columns are added
 
 When rendering task lists with run status, load all needed data in one or two queries rather than querying inside a loop.
 
+#### Batch high-frequency writes (log buffering)
+
+SQLite allows only one writer at a time. Inserting one row per `console.log()` call monopolises the write lock and blocks all other concurrent tasks from performing any DB operation (KV writes, status updates, output stores).
+
+The IPC server buffers log entries in memory and flushes them in batches:
+
+- Up to **50 entries** are accumulated before an inline flush.
+- A background ticker flushes at most every **200 ms** regardless of buffer size.
+- `Server.Stop()` performs an unconditional synchronous flush so no entries are lost when a run completes or errors out.
+- `registry.BulkAppendLogs()` wraps all inserts in a single transaction, reducing fsync overhead by up to 50×.
+
+This pattern is transparent to task scripts — `console.log()` behaviour is unchanged.
+
 ---
 
 ### 1.17 Context Values
