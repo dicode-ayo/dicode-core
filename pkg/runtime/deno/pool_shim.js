@@ -70,5 +70,10 @@ Deno.env.set("DICODE_SOCKET", __dispatch__.socketPath);
 Deno.env.set("DICODE_TOKEN", __dispatch__.token);
 
 // ── evaluate the script (shim + user code) ──────────────────────────────────
+//
+// One-use-then-exit contract: this process handles exactly one dispatch and
+// then exits. The IIFE below isolates the task script in its own function
+// scope so it cannot accidentally read or overwrite the shim bootstrap
+// variables defined above (e.g. __poolSocket__, __enc__, __dispatch__, etc.).
 
-await eval(__dispatch__.script);
+await (new Function("return (async()=>{\n" + __dispatch__.script + "\n})()"))(  );

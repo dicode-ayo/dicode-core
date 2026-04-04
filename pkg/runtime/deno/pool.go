@@ -5,11 +5,18 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
+	"sync"
 	"sync/atomic"
 	"time"
+)
+
+const (
+	// maxPoolSize caps the DICODE_DENO_POOL_SIZE value to prevent resource exhaustion.
+	maxPoolSize = 32
 )
 
 // poolDispatch is the message sent from the Go pool to a warm Deno process
@@ -24,7 +31,9 @@ type poolDispatch struct {
 type warmProc struct {
 	cmd        *exec.Cmd
 	socketPath string // pool socket this process is listening on
+	socketDir  string // private 0700 temp directory containing socketPath
 	conn       net.Conn
+	stderr     io.ReadCloser // captured before cmd.Start(); used by Run() for log streaming
 }
 
 // dispatch sends the task details to the warm process so it can execute.
@@ -53,6 +62,9 @@ func (w *warmProc) close() {
 	if w.socketPath != "" {
 		_ = os.Remove(w.socketPath)
 	}
+	if w.socketDir != "" {
+		_ = os.Remove(w.socketDir)
+	}
 }
 
 // Pool maintains a set of pre-warmed Deno processes ready for immediate dispatch.
@@ -66,7 +78,11 @@ type Pool struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	// counter for generating unique socket names
+	// wg tracks in-flight replenish() goroutines so Close() can wait for them.
+	wg sync.WaitGroup
+
+	// counter for generating unique socket names (kept for fallback uniqueness,
+	// primary isolation is via per-socket private temp dir).
 	counter atomic.Uint64
 }
 
@@ -90,10 +106,18 @@ func NewPool(ctx context.Context, denoPath string, shimPath string, size int) *P
 	}
 	if size > 0 {
 		for i := 0; i < size; i++ {
-			go p.replenish()
+			p.goReplenish()
 		}
 	}
 	return p
+}
+
+// goReplenish increments the WaitGroup and launches a replenish goroutine.
+// wg.Add must happen in the caller (before go) to avoid racing with wg.Wait
+// in Close().
+func (p *Pool) goReplenish() {
+	p.wg.Add(1)
+	go p.replenish()
 }
 
 // Acquire blocks until a warm process is available or ctx is cancelled.
@@ -113,25 +137,52 @@ func (p *Pool) Acquire(ctx context.Context) (*warmProc, error) {
 }
 
 // replenish spawns a single new warm process and adds it to the ready channel.
-// It runs in its own goroutine and respects p.ctx cancellation.
+// It runs in its own goroutine (launched via goReplenish) and respects p.ctx
+// cancellation. Do NOT call this directly; use goReplenish() so that
+// wg.Add(1) happens before the goroutine starts (avoiding a race with
+// wg.Wait in Close).
 func (p *Pool) replenish() {
+	defer p.wg.Done()
+
 	if p.ctx.Err() != nil {
 		return
 	}
 
-	id := p.counter.Add(1)
-	socketPath := fmt.Sprintf("/tmp/dicode-pool-%d.sock", id)
-	_ = os.Remove(socketPath)
-
-	ln, err := net.Listen("unix", socketPath)
+	// Create a private 0700 directory for the socket so that other local users
+	// cannot connect and intercept the dispatch message (which contains the IPC
+	// token and full task script).
+	socketDir, err := os.MkdirTemp("", "dicode-pool-*")
 	if err != nil {
-		// If we can't listen, back off briefly and try again.
 		select {
 		case <-p.ctx.Done():
 			return
 		case <-time.After(500 * time.Millisecond):
 		}
-		go p.replenish()
+		p.goReplenish()
+		return
+	}
+	if err := os.Chmod(socketDir, 0700); err != nil {
+		_ = os.Remove(socketDir)
+		select {
+		case <-p.ctx.Done():
+			return
+		case <-time.After(500 * time.Millisecond):
+		}
+		p.goReplenish()
+		return
+	}
+	socketPath := socketDir + "/pool.sock"
+
+	ln, err := net.Listen("unix", socketPath)
+	if err != nil {
+		// If we can't listen, back off briefly and try again.
+		_ = os.Remove(socketDir)
+		select {
+		case <-p.ctx.Done():
+			return
+		case <-time.After(500 * time.Millisecond):
+		}
+		p.goReplenish()
 		return
 	}
 
@@ -145,15 +196,31 @@ func (p *Pool) replenish() {
 	) //nolint:gosec
 	cmd.Env = append(os.Environ(), "DICODE_POOL_SOCKET="+socketPath)
 
-	if err := cmd.Start(); err != nil {
+	// Capture StderrPipe BEFORE cmd.Start(); Go disallows calling it after Start.
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
 		_ = ln.Close()
 		_ = os.Remove(socketPath)
+		_ = os.Remove(socketDir)
 		select {
 		case <-p.ctx.Done():
 			return
 		case <-time.After(500 * time.Millisecond):
 		}
-		go p.replenish()
+		p.goReplenish()
+		return
+	}
+
+	if err := cmd.Start(); err != nil {
+		_ = ln.Close()
+		_ = os.Remove(socketPath)
+		_ = os.Remove(socketDir)
+		select {
+		case <-p.ctx.Done():
+			return
+		case <-time.After(500 * time.Millisecond):
+		}
+		p.goReplenish()
 		return
 	}
 
@@ -165,12 +232,13 @@ func (p *Pool) replenish() {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 		_ = os.Remove(socketPath)
+		_ = os.Remove(socketDir)
 		select {
 		case <-p.ctx.Done():
 			return
 		case <-time.After(500 * time.Millisecond):
 		}
-		go p.replenish()
+		p.goReplenish()
 		return
 	}
 
@@ -182,17 +250,18 @@ func (p *Pool) replenish() {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 		_ = os.Remove(socketPath)
+		_ = os.Remove(socketDir)
 		select {
 		case <-p.ctx.Done():
 			return
 		case <-time.After(500 * time.Millisecond):
 		}
-		go p.replenish()
+		p.goReplenish()
 		return
 	}
 	_ = conn.SetDeadline(time.Time{}) // clear deadline
 
-	w := &warmProc{cmd: cmd, socketPath: socketPath, conn: conn}
+	w := &warmProc{cmd: cmd, socketPath: socketPath, socketDir: socketDir, conn: conn, stderr: stderrPipe}
 
 	select {
 	case p.ready <- w:
@@ -203,6 +272,7 @@ func (p *Pool) replenish() {
 }
 
 // Close drains the pool, kills all waiting processes, and stops the pool.
+// It waits for all in-flight replenish goroutines to exit before returning.
 func (p *Pool) Close() {
 	p.cancel()
 	// Drain and kill all waiting warm processes.
@@ -211,9 +281,12 @@ func (p *Pool) Close() {
 		case w := <-p.ready:
 			w.close()
 		default:
-			return
+			goto drained
 		}
 	}
+drained:
+	// Wait for replenish goroutines to observe cancellation and exit.
+	p.wg.Wait()
 }
 
 // ── framing helpers ──────────────────────────────────────────────────────────

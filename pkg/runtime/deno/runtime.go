@@ -8,6 +8,7 @@ import (
 	"context"
 	_ "embed"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -82,12 +83,16 @@ func New(r *registry.Registry, sc secrets.Chain, database db.DB, log *zap.Logger
 	if err != nil {
 		return nil, fmt.Errorf("create pool shim file: %w", err)
 	}
+	shimPath := shimFile.Name()
 	if _, err := shimFile.WriteString(poolShimContent); err != nil {
 		shimFile.Close()
-		_ = os.Remove(shimFile.Name())
+		_ = os.Remove(shimPath)
 		return nil, fmt.Errorf("write pool shim: %w", err)
 	}
 	shimFile.Close()
+	// Clean up the shim temp file when the runtime is no longer needed.
+	// We store the path so Close() can remove it; we also defer removal here
+	// as a best-effort safety net for the constructor-only path.
 
 	return &Runtime{
 		registry:     r,
@@ -96,8 +101,15 @@ func New(r *registry.Registry, sc secrets.Chain, database db.DB, log *zap.Logger
 		log:          log,
 		denoPath:     path,
 		secret:       secret,
-		poolShimPath: shimFile.Name(),
+		poolShimPath: shimPath,
 	}, nil
+}
+
+// Close releases resources held by the Runtime (e.g. the pool shim temp file).
+func (rt *Runtime) Close() {
+	if rt.poolShimPath != "" {
+		_ = os.Remove(rt.poolShimPath)
+	}
 }
 
 // SetPool attaches a warm process pool to the runtime.
@@ -106,6 +118,7 @@ func (rt *Runtime) SetPool(p *Pool) { rt.pool = p }
 
 // NewPool creates a warm process Pool sized from the DICODE_DENO_POOL_SIZE
 // environment variable (default 0 = disabled). The pool is tied to ctx.
+// Pool size is capped at maxPoolSize (32) to prevent resource exhaustion.
 func (rt *Runtime) NewPool(ctx context.Context) *Pool {
 	size := 0
 	if v := os.Getenv("DICODE_DENO_POOL_SIZE"); v != "" {
@@ -116,6 +129,11 @@ func (rt *Runtime) NewPool(ctx context.Context) *Pool {
 	}
 	if size == 0 {
 		return NewPool(ctx, rt.denoPath, rt.poolShimPath, 0)
+	}
+	if size > maxPoolSize {
+		rt.log.Warn("DICODE_DENO_POOL_SIZE exceeds maximum; capping",
+			zap.Int("requested", size), zap.Int("cap", maxPoolSize))
+		size = maxPoolSize
 	}
 	rt.log.Info("deno pool enabled", zap.Int("size", size))
 	return NewPool(ctx, rt.denoPath, rt.poolShimPath, size)
@@ -205,6 +223,7 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	// Try to acquire a warm process from the pool (500ms timeout).
 	// Fall back to cold-spawn if the pool is disabled or timed out.
 	var cmd *exec.Cmd
+	var stderrPipe io.ReadCloser
 
 	if rt.pool != nil && rt.pool.size > 0 {
 		acquireCtx, acquireCancel := context.WithTimeout(execCtx, 500*time.Millisecond)
@@ -225,19 +244,32 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 			warm.conn = nil
 
 			if dispatchErr != nil {
+				// Kill and reap the warm process to avoid zombies, then fall back.
+				if warm.cmd != nil && warm.cmd.Process != nil {
+					_ = warm.cmd.Process.Kill()
+					go func(w *warmProc) { _ = w.cmd.Wait() }(warm)
+					warm.cmd = nil
+				}
 				warm.close()
 				warm = nil
 				rt.log.Warn("deno pool dispatch failed, falling back to cold spawn",
 					zap.String("run", runID), zap.Error(dispatchErr))
 			} else {
 				// Wire up the warm process as our cmd.
+				// StderrPipe was captured before cmd.Start() in replenish() and
+				// stored on warmProc — we must NOT call cmd.StderrPipe() again here
+				// as Go returns an error on an already-started process.
 				cmd = warm.cmd
+				stderrPipe = warm.stderr
 				warm.cmd = nil
+				warm.stderr = nil
 				_ = os.Remove(warm.socketPath)
+				_ = os.Remove(warm.socketDir)
 				warm.socketPath = ""
+				warm.socketDir = ""
 
 				// Replenish the pool slot we just consumed.
-				go rt.pool.replenish()
+				rt.pool.goReplenish()
 			}
 		}
 	}
@@ -263,19 +295,20 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		args := buildDenoArgs(spec, socketPath, tmpFile.Name())
 		cmd = exec.CommandContext(execCtx, rt.denoPath, args...) //nolint:gosec
 		cmd.Env = buildEnv(resolved, socketPath, token)
-	}
 
-	stderrPipe, err := cmd.StderrPipe()
-	if err != nil {
-		status = registry.StatusFailure
-		result.Error = err
-		return result, nil
-	}
+		// For cold-spawn we must call StderrPipe before Start.
+		stderrPipe, err = cmd.StderrPipe()
+		if err != nil {
+			status = registry.StatusFailure
+			result.Error = err
+			return result, nil
+		}
 
-	if err := cmd.Start(); err != nil {
-		status = registry.StatusFailure
-		result.Error = fmt.Errorf("start deno: %w", err)
-		return result, nil
+		if err := cmd.Start(); err != nil {
+			status = registry.StatusFailure
+			result.Error = fmt.Errorf("start deno: %w", err)
+			return result, nil
+		}
 	}
 
 	// Stream deno stderr to registry logs in real-time.
