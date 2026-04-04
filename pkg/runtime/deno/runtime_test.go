@@ -39,22 +39,27 @@ func newTestEnv(t *testing.T) *testEnv {
 	return &testEnv{rt: rt, reg: reg, db: d}
 }
 
-func (e *testEnv) run(t *testing.T, script string, opts ...RunOptions) *RunResult {
+// run executes a task body wrapped in export default async function main().
+// body is the function body; use runRaw to provide a complete task.ts.
+func (e *testEnv) run(t *testing.T, body string, opts ...RunOptions) *RunResult {
 	t.Helper()
-	spec := &task.Spec{
+	return e.runSpec(t, "export default async function main({ log, env, params, kv, input, output }) {\n"+body+"\n}", &task.Spec{
 		ID:      "test-task",
 		Name:    "test-task",
 		Runtime: task.RuntimeDeno,
 		Trigger: task.TriggerConfig{Manual: true},
 		Timeout: 30 * time.Second,
-	}
+	}, opts...)
+}
+
+func (e *testEnv) runSpec(t *testing.T, script string, spec *task.Spec, opts ...RunOptions) *RunResult {
+	t.Helper()
 	dir := t.TempDir()
 	spec.TaskDir = dir
 	_ = os.WriteFile(filepath.Join(dir, "task.ts"), []byte(script), 0644)
 	_ = os.WriteFile(filepath.Join(dir, "task.yaml"),
 		[]byte("name: test-task\nruntime: deno\ntrigger:\n  manual: true\n"), 0644)
 	_ = e.reg.Register(spec)
-
 	o := RunOptions{}
 	if len(opts) > 0 {
 		o = opts[0]
@@ -127,30 +132,165 @@ func TestRuntime_Log(t *testing.T) {
 	}
 }
 
-func TestRuntime_Env(t *testing.T) {
+// ── permissions tests ─────────────────────────────────────────────────────────
+
+// TestRuntime_Env_BarePassthrough: bare name allowlists the var so the script
+// can read it from the host env — no injection, no secrets.
+func TestRuntime_Env_BarePassthrough(t *testing.T) {
+	t.Setenv("DICODE_TEST_TOKEN", "bare-value")
 	e := newTestEnv(t)
 	spec := &task.Spec{
-		ID:      "env-task",
-		Name:    "env-task",
-		Runtime: task.RuntimeDeno,
-		Trigger: task.TriggerConfig{Manual: true},
-		Timeout: 30 * time.Second,
-		Env:     []string{"MY_TOKEN"},
+		ID: "env-bare", Name: "env-bare", Runtime: task.RuntimeDeno,
+		Trigger: task.TriggerConfig{Manual: true}, Timeout: 30 * time.Second,
+		Permissions: task.Permissions{
+			Env: []task.EnvEntry{{Name: "DICODE_TEST_TOKEN"}},
+		},
 	}
-	dir := t.TempDir()
-	spec.TaskDir = dir
-	_ = os.WriteFile(filepath.Join(dir, "task.ts"), []byte(`return env.get("MY_TOKEN")`), 0644)
-	_ = os.WriteFile(filepath.Join(dir, "task.yaml"),
-		[]byte("name: env-task\nruntime: deno\ntrigger:\n  manual: true\nenv:\n  - MY_TOKEN\n"), 0644)
-	_ = e.reg.Register(spec)
-
-	e.rt.secrets = secrets.Chain{mockSecretProvider{"MY_TOKEN": "tok-123"}}
-
-	result, _ := e.rt.Run(context.Background(), spec, RunOptions{})
-	if result.ReturnValue != "tok-123" {
-		t.Errorf("expected tok-123, got %v", result.ReturnValue)
+	r := e.runSpec(t, `export default async function main({ env }) { return await env.get("DICODE_TEST_TOKEN") }`, spec)
+	if r.Error != nil {
+		t.Fatalf("error: %v", r.Error)
+	}
+	if r.ReturnValue != "bare-value" {
+		t.Errorf("expected bare-value, got %v", r.ReturnValue)
 	}
 }
+
+// TestRuntime_Env_From: from: reads a host env var and injects it under a different name.
+func TestRuntime_Env_From(t *testing.T) {
+	t.Setenv("DICODE_TEST_SOURCE", "from-value")
+	e := newTestEnv(t)
+	spec := &task.Spec{
+		ID: "env-from", Name: "env-from", Runtime: task.RuntimeDeno,
+		Trigger: task.TriggerConfig{Manual: true}, Timeout: 30 * time.Second,
+		Permissions: task.Permissions{
+			Env: []task.EnvEntry{{Name: "INJECTED", From: "DICODE_TEST_SOURCE"}},
+		},
+	}
+	r := e.runSpec(t, `export default async function main({ env }) { return await env.get("INJECTED") }`, spec)
+	if r.Error != nil {
+		t.Fatalf("error: %v", r.Error)
+	}
+	if r.ReturnValue != "from-value" {
+		t.Errorf("expected from-value, got %v", r.ReturnValue)
+	}
+}
+
+// TestRuntime_Env_Secret: secret: resolves from the secrets chain and injects.
+func TestRuntime_Env_Secret(t *testing.T) {
+	e := newTestEnv(t)
+	e.rt.secrets = secrets.Chain{mockSecretProvider{"my_api_key": "secret-value"}}
+	spec := &task.Spec{
+		ID: "env-secret", Name: "env-secret", Runtime: task.RuntimeDeno,
+		Trigger: task.TriggerConfig{Manual: true}, Timeout: 30 * time.Second,
+		Permissions: task.Permissions{
+			Env: []task.EnvEntry{{Name: "API_KEY", Secret: "my_api_key"}},
+		},
+	}
+	r := e.runSpec(t, `export default async function main({ env }) { return await env.get("API_KEY") }`, spec)
+	if r.Error != nil {
+		t.Fatalf("error: %v", r.Error)
+	}
+	if r.ReturnValue != "secret-value" {
+		t.Errorf("expected secret-value, got %v", r.ReturnValue)
+	}
+}
+
+// TestRuntime_Env_SecretMissing: secret: with a missing key fails the run immediately.
+func TestRuntime_Env_SecretMissing(t *testing.T) {
+	e := newTestEnv(t)
+	e.rt.secrets = secrets.Chain{mockSecretProvider{}} // empty — key not present
+	spec := &task.Spec{
+		ID: "env-missing", Name: "env-missing", Runtime: task.RuntimeDeno,
+		Trigger: task.TriggerConfig{Manual: true}, Timeout: 30 * time.Second,
+		Permissions: task.Permissions{
+			Env: []task.EnvEntry{{Name: "API_KEY", Secret: "nonexistent"}},
+		},
+	}
+	r := e.runSpec(t, `export default async function main({ env }) { return "should not reach" }`, spec)
+	if r.Error == nil {
+		t.Fatal("expected error for missing secret, got nil")
+	}
+}
+
+// TestRuntime_Env_NotDeclared: a var not in permissions.env must not be readable by the script.
+func TestRuntime_Env_NotDeclared(t *testing.T) {
+	t.Setenv("DICODE_TEST_SECRET", "should-be-hidden")
+	e := newTestEnv(t)
+	spec := &task.Spec{
+		ID: "env-reject", Name: "env-reject", Runtime: task.RuntimeDeno,
+		Trigger: task.TriggerConfig{Manual: true}, Timeout: 30 * time.Second,
+		// Permissions.Env is empty — DICODE_TEST_SECRET is NOT declared.
+	}
+	// Deno throws NotCapable when a script tries to read an undeclared env var.
+	r := e.runSpec(t, `export default async function main({ env }) {
+		try {
+			const v = Deno.env.get("DICODE_TEST_SECRET")
+			return v ?? "null"
+		} catch (e) {
+			return "blocked"
+		}
+	}`, spec)
+	if r.Error != nil {
+		t.Fatalf("unexpected run error: %v", r.Error)
+	}
+	if r.ReturnValue != "blocked" {
+		t.Errorf("expected env var to be blocked, got %v", r.ReturnValue)
+	}
+}
+
+// TestRuntime_Net_Restricted: net: with specific hosts blocks requests to unlisted hosts.
+func TestRuntime_Net_Restricted(t *testing.T) {
+	e := newTestEnv(t)
+	spec := &task.Spec{
+		ID: "net-restrict", Name: "net-restrict", Runtime: task.RuntimeDeno,
+		Trigger: task.TriggerConfig{Manual: true}, Timeout: 30 * time.Second,
+		Permissions: task.Permissions{
+			Net: []string{"localhost"}, // only localhost allowed
+		},
+	}
+	// Trying to fetch 1.2.3.4 (not in the allowlist) should throw NotCapable.
+	r := e.runSpec(t, `export default async function main() {
+		try {
+			await fetch("http://1.2.3.4/")
+			return "allowed"
+		} catch (e) {
+			return "blocked"
+		}
+	}`, spec)
+	if r.Error != nil {
+		t.Fatalf("unexpected run error: %v", r.Error)
+	}
+	if r.ReturnValue != "blocked" {
+		t.Errorf("expected fetch to non-allowlisted host to be blocked, got %v", r.ReturnValue)
+	}
+}
+
+// TestRuntime_Net_Denied: net: [] (empty) blocks all network access.
+func TestRuntime_Net_Denied(t *testing.T) {
+	e := newTestEnv(t)
+	spec := &task.Spec{
+		ID: "net-deny", Name: "net-deny", Runtime: task.RuntimeDeno,
+		Trigger: task.TriggerConfig{Manual: true}, Timeout: 30 * time.Second,
+		Permissions: task.Permissions{
+			Net: []string{}, // explicit empty = deny all
+		},
+	}
+	r := e.runSpec(t, `export default async function main() {
+		try {
+			await fetch("http://example.com/")
+			return "allowed"
+		} catch (e) {
+			return "blocked"
+		}
+	}`, spec)
+	if r.Error != nil {
+		t.Fatalf("unexpected run error: %v", r.Error)
+	}
+	if r.ReturnValue != "blocked" {
+		t.Errorf("expected all network to be blocked, got %v", r.ReturnValue)
+	}
+}
+
 
 func TestRuntime_Params(t *testing.T) {
 	e := newTestEnv(t)
@@ -162,18 +302,10 @@ func TestRuntime_Params(t *testing.T) {
 		Timeout: 30 * time.Second,
 		Params:  []task.Param{{Name: "channel", Default: "#general"}},
 	}
-	dir := t.TempDir()
-	spec.TaskDir = dir
-	_ = os.WriteFile(filepath.Join(dir, "task.ts"), []byte(`return await params.get("channel")`), 0644)
-	_ = os.WriteFile(filepath.Join(dir, "task.yaml"),
-		[]byte("name: param-task\nruntime: deno\ntrigger:\n  manual: true\n"), 0644)
-	_ = e.reg.Register(spec)
-
-	result, _ := e.rt.Run(context.Background(), spec, RunOptions{
-		Params: map[string]string{"channel": "#devops"},
-	})
-	if result.ReturnValue != "#devops" {
-		t.Errorf("expected #devops, got %v", result.ReturnValue)
+	r := e.runSpec(t, `export default async function main({ params }) { return await params.get("channel") }`, spec,
+		RunOptions{Params: map[string]string{"channel": "#devops"}})
+	if r.ReturnValue != "#devops" {
+		t.Errorf("expected #devops, got %v", r.ReturnValue)
 	}
 }
 
@@ -198,13 +330,39 @@ func TestRuntime_HTTP(t *testing.T) {
 	}
 }
 
+func TestRuntime_HTTP_Unrestricted(t *testing.T) {
+	// net: omitted → --allow-net (unrestricted); fetch should succeed.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"ok":true}`)) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	e := newTestEnv(t)
+	spec := &task.Spec{
+		ID: "net-open", Name: "net-open", Runtime: task.RuntimeDeno,
+		Trigger: task.TriggerConfig{Manual: true}, Timeout: 30 * time.Second,
+		// Permissions.Net is nil → unrestricted
+	}
+	r := e.runSpec(t, `export default async function main() {
+		const res = await fetch("`+srv.URL+`")
+		const body = await res.json()
+		return body.ok
+	}`, spec)
+	if r.Error != nil {
+		t.Fatalf("error: %v", r.Error)
+	}
+	if r.ReturnValue != true {
+		t.Errorf("expected true, got %v", r.ReturnValue)
+	}
+}
+
 func TestRuntime_KV(t *testing.T) {
 	e := newTestEnv(t)
 	r := e.run(t, `
 		await kv.set("mykey", { count: 42 })
 		const val = await kv.get("mykey")
 		return val.count
-	`)
+	`, RunOptions{})
 	if r.Error != nil {
 		t.Fatalf("error: %v", r.Error)
 	}
@@ -255,7 +413,7 @@ func TestRuntime_RunRecord(t *testing.T) {
 
 func TestRuntime_ScriptError(t *testing.T) {
 	e := newTestEnv(t)
-	r := e.run(t, `throw new Error("boom")`)
+	r := e.run(t, `throw new Error("boom")`, RunOptions{})
 	if r.Error == nil {
 		t.Fatal("expected error")
 	}

@@ -96,6 +96,64 @@ type FSEntry struct {
 	Permission string `yaml:"permission"` // "r" | "w" | "rw"
 }
 
+// EnvEntry declares one environment variable the task is allowed to access.
+// Supports four forms in YAML:
+//
+//	- HOME                          # bare name: allowlist $HOME from host env, same name
+//	- name: API_KEY                 # rename from host env: read $GH_TOKEN, expose as API_KEY
+//	  from: GH_TOKEN
+//	- name: DB_PASS                 # secret injection: resolve "db_password" from secrets store
+//	  secret: db_password
+//	- name: LOG_LEVEL               # literal value (used by taskset overrides)
+//	  value: "info"
+//
+// Lookup rules:
+//   - secret: → secrets store only; run fails if key not found
+//   - from:   → host OS environment only (os.Getenv); injected as entry.Name
+//   - bare name (no secret/from/value) → allowlisted in --allow-env; script reads it from host env at runtime
+type EnvEntry struct {
+	Name   string `yaml:"name"             json:"name"`
+	From   string `yaml:"from,omitempty"   json:"from,omitempty"`   // host OS env var name to read and inject as Name
+	Secret string `yaml:"secret,omitempty" json:"secret,omitempty"` // secrets store key to resolve and inject as Name
+	Value  string `yaml:"value,omitempty"  json:"value,omitempty"`  // literal value injection (taskset overrides)
+}
+
+// UnmarshalYAML allows EnvEntry to decode from either a plain string or a mapping.
+func (e *EnvEntry) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind == yaml.ScalarNode {
+		e.Name = value.Value
+		return nil
+	}
+	type alias EnvEntry
+	var a alias
+	if err := value.Decode(&a); err != nil {
+		return err
+	}
+	*e = EnvEntry(a)
+	return nil
+}
+
+// Permissions declares what the task is explicitly allowed to access.
+// Nothing is passed implicitly — every env var, filesystem path,
+// subprocess executable, and network host must be listed here.
+type Permissions struct {
+	// Env lists env vars the task script may read or that are injected into it.
+	Env []EnvEntry `yaml:"env,omitempty" json:"env,omitempty"`
+	// FS lists filesystem paths and their access modes ("r", "w", "rw"). Deno only.
+	FS []FSEntry `yaml:"fs,omitempty" json:"fs,omitempty"`
+	// Run lists executables the task may spawn via Deno.Command. Use ["*"] for all. Deno only.
+	Run []string `yaml:"run,omitempty" json:"run,omitempty"`
+	// Net controls outbound network access (Deno only).
+	// Omit or use ["*"] for unrestricted access (--allow-net).
+	// List specific hosts to restrict: ["api.github.com", "hooks.slack.com"].
+	// Use [] (empty list) to deny all network access.
+	Net []string `yaml:"net,omitempty" json:"net,omitempty"`
+	// Sys lists Deno system-info APIs the task may call (Deno only).
+	// Use ["*"] for all, or list specific names: ["hostname", "osRelease", "networkInterfaces"].
+	// Omit to deny all sys access (default).
+	Sys []string `yaml:"sys,omitempty" json:"sys,omitempty"`
+}
+
 // NotifyConfig controls when dicode sends push notifications for a task.
 // Nil fields inherit from the parent TaskSet defaults or the global config.
 type NotifyConfig struct {
@@ -115,19 +173,18 @@ type SecurityConfig struct {
 
 // Spec is parsed from task.yaml.
 type Spec struct {
-	Name        string          `yaml:"name"        json:"name"`
-	Description string          `yaml:"description" json:"description"`
-	Version     string          `yaml:"version"     json:"version"`
-	Author      string          `yaml:"author,omitempty" json:"author,omitempty"`
-	Runtime     Runtime         `yaml:"runtime"     json:"runtime"`
-	Docker      *DockerConfig   `yaml:"docker,omitempty" json:"docker,omitempty"`
-	Trigger     TriggerConfig   `yaml:"trigger"     json:"trigger"`
-	Params      []Param         `yaml:"params,omitempty" json:"params,omitempty"`
-	Env         []string        `yaml:"env,omitempty" json:"env,omitempty"`
-	FS          []FSEntry       `yaml:"fs,omitempty"  json:"fs,omitempty"`
-	Timeout     time.Duration   `yaml:"timeout"     json:"timeout"`
-	Notify      *NotifyConfig   `yaml:"notify,omitempty" json:"notify,omitempty"`
-	Security    *SecurityConfig `yaml:"security,omitempty" json:"security,omitempty"`
+	Name        string        `yaml:"name"        json:"name"`
+	Description string        `yaml:"description" json:"description"`
+	Version     string        `yaml:"version"     json:"version"`
+	Author      string        `yaml:"author,omitempty" json:"author,omitempty"`
+	Runtime     Runtime       `yaml:"runtime"     json:"runtime"`
+	Docker      *DockerConfig `yaml:"docker,omitempty" json:"docker,omitempty"`
+	Trigger     TriggerConfig `yaml:"trigger"     json:"trigger"`
+	Params      []Param     `yaml:"params,omitempty"      json:"params,omitempty"`
+	Permissions Permissions `yaml:"permissions,omitempty" json:"permissions,omitempty"`
+	Timeout     time.Duration `yaml:"timeout"             json:"timeout"`
+	Notify   *NotifyConfig   `yaml:"notify,omitempty" json:"notify,omitempty"`
+	Security *SecurityConfig `yaml:"security,omitempty" json:"security,omitempty"`
 	// MCPPort declares that this daemon task exposes an MCP server on the given port.
 	MCPPort int `yaml:"mcp_port,omitempty" json:"mcp_port,omitempty"`
 	// OnFailureChain overrides the global defaults.on_failure_chain for this task.

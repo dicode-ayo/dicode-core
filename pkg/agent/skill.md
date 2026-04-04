@@ -25,8 +25,8 @@ Follow this order every time — no exceptions:
 - **Never commit** if `validate_task` or `test_task` return any errors
 - **Always write `task.test.ts`** — a task without tests will not be committed
 - `task.ts` **must return a JSON-serializable value** — required for chain triggers
-- **Never hardcode secrets** — use `env.VARIABLE_NAME`; declare in `task.yaml env:`
-- **Never declare `DICODE_SOCKET` or `DICODE_TOKEN` in `task.yaml env:`** — these are internal IPC variables injected by the runtime; declaring them leaks the token to user code
+- **Never hardcode secrets** — use `env.get("VAR")` in the script; declare the var in `permissions.env`
+- **Never declare `DICODE_SOCKET` or `DICODE_TOKEN` in `permissions.env`** — these are internal IPC variables injected automatically; declaring them leaks the token to user code
 - **One task, one responsibility** — keep tasks focused and composable
 - **Output under 1MB** — tasks are not a data pipeline; keep return values small
 
@@ -45,9 +45,24 @@ trigger:                           # exactly ONE of:
     from: <task-id>
     on: success                    #   success | failure | always
   daemon: true                     #   starts on app start, restarts on exit
-env:                               # list ALL env vars the script accesses
-  - SLACK_TOKEN
-  - GMAIL_TOKEN
+permissions:                       # explicit access grants — nothing is implicit
+  env:                             # env vars the script may read (four forms):
+    - SLACK_TOKEN                  #   bare: allowlist $SLACK_TOKEN from host env, same name
+    - name: API_KEY                #   from: read $GH_TOKEN from host OS env, inject as API_KEY
+      from: GH_TOKEN
+    - name: DB_PASS                #   secret: resolve "db_password" from secrets store only
+      secret: db_password
+    - name: LOG_LEVEL              #   value: literal injection (taskset overrides)
+      value: "info"
+  net:                             # outbound network (Deno only)
+    - "api.github.com"             #   list specific hosts; omit for unrestricted; [] to deny all
+  fs:                              # filesystem paths (Deno only)
+    - path: ~/data
+      permission: r                #   r | w | rw
+  run:                             # executables the script may spawn (Deno only)
+    - curl                         #   list binaries, or use ["*"] to allow all
+  sys:                             # Deno system-info APIs (Deno only; omit = deny all)
+    - hostname                     #   or use ["*"] for all
 params:                            # optional user-configurable inputs
   - name: slack_channel
     type: string
@@ -72,8 +87,9 @@ When a webhook must only accept requests from a trusted sender (GitHub, Stripe, 
 trigger:
   webhook: /hooks/<path>
   webhook_secret: "${WEBHOOK_SECRET}"   # ALWAYS reference a secret, never hardcode
-env:
-  - WEBHOOK_SECRET
+permissions:
+  env:
+    - WEBHOOK_SECRET
 ```
 
 - dicode verifies the `X-Hub-Signature-256` header automatically before the task script runs
@@ -135,9 +151,9 @@ log.error("message", { optional: "context" })
 const channel = params.slack_channel   // string, uses default if not overridden
 ```
 
-### `env` — environment variables (ONLY those declared in task.yaml env:)
+### `env` — environment variables (ONLY those declared in permissions.env)
 ```javascript
-const token = env.SLACK_TOKEN   // undefined if not declared in task.yaml
+const token = await env.get("SLACK_TOKEN")  // null if not declared in permissions.env
 ```
 
 ### `input` — incoming data (chain tasks and webhook tasks)
@@ -269,15 +285,17 @@ spec:
 
 | Mistake | Correct approach |
 | --- | --- |
-| `process.env.SLACK_TOKEN` | `env.SLACK_TOKEN` |
-| Accessing env var not in `task.yaml env:` | Add it to `env:` list |
+| `process.env.SLACK_TOKEN` | `await env.get("SLACK_TOKEN")` |
+| Accessing env var not in `permissions.env` | Add it to `permissions.env` |
+| Using `from:` to read from secrets store | Use `secret:` for secrets store; `from:` is host OS env rename only |
+| Using `secret:` for a host env var | Use bare name or `from:` for host env; `secret:` is secrets store only |
 | Returning `new Date()` | Return `date.toISOString()` |
 | Writing tests that don't call `runTask()` | Always call `runTask()` in each test |
 | One trigger type + another trigger type | Exactly one trigger per task.yaml |
 | `chain.on: "ok"` | Must be `success`, `failure`, or `always` |
 | Large return values (>1MB) | Keep returns small; use external storage for large data |
-| `webhook_secret: "abc123"` (hardcoded) | `webhook_secret: "${MY_SECRET}"` + add to `env:` list |
-| Forgetting `env:` entry for `webhook_secret` | Every `${VAR}` in task.yaml needs a matching `env:` entry |
+| `webhook_secret: "abc123"` (hardcoded) | `webhook_secret: "${MY_SECRET}"` + add to `permissions.env` |
+| Forgetting `permissions.env` entry for `webhook_secret` | Every `${VAR}` in task.yaml needs a matching entry in `permissions.env` |
 | Trying to verify the signature in `task.ts` | dicode verifies it automatically — the script only runs if the signature is valid |
 | Using `webhook_secret` on a public form endpoint | Only add `webhook_secret` when the sender can set `X-Hub-Signature-256`; browser forms cannot sign requests |
 | Calling `dicode.run_task()` without `security.allowed_tasks` | Add `security.allowed_tasks` to task.yaml; calls are blocked otherwise |
@@ -295,9 +313,10 @@ runtime: deno
 trigger:
   webhook: /hooks/github-push
   webhook_secret: "${GITHUB_WEBHOOK_SECRET}"
-env:
-  - GITHUB_WEBHOOK_SECRET   # dicode uses this for HMAC verification
-  - SLACK_TOKEN             # used inside task.js
+permissions:
+  env:
+    - GITHUB_WEBHOOK_SECRET   # dicode uses this for HMAC verification
+    - SLACK_TOKEN             # used inside task.ts
 params:
   - name: slack_channel
     type: string

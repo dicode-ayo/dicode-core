@@ -165,12 +165,27 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 		}
 	}()
 
-	// Resolve secrets.
-	resolved, err := e.secrets.ResolveAll(ctx, spec.Env)
-	if err != nil {
-		status = registry.StatusFailure
-		result.Error = err
-		return result, nil
+	// Resolve only env vars explicitly declared in permissions.env.
+	// - entry.Value  → literal (taskset override); inject directly
+	// - entry.Secret → look up in secrets store; fail if not found
+	// - entry.From   → read from host OS env (os.Getenv); inject as entry.Name
+	// - bare name    → passthrough only, no injection needed
+	resolved := make(map[string]string, len(spec.Permissions.Env))
+	for _, entry := range spec.Permissions.Env {
+		switch {
+		case entry.Value != "":
+			resolved[entry.Name] = entry.Value
+		case entry.Secret != "":
+			val, err := e.secrets.Resolve(ctx, entry.Secret)
+			if err != nil {
+				status = registry.StatusFailure
+				result.Error = fmt.Errorf("resolve secret %q for env %q: %w", entry.Secret, entry.Name, err)
+				return result, nil
+			}
+			resolved[entry.Name] = val
+		case entry.From != "":
+			resolved[entry.Name] = os.Getenv(entry.From)
+		}
 	}
 
 	// Read the user's task.py.
@@ -316,7 +331,7 @@ func buildWrapper(scriptBytes []byte) (string, error) {
 	w.WriteString("_asyncio_mod = _sys.modules['asyncio']\n")
 	w.WriteString("_main = globals().get('main')\n")
 	w.WriteString("if _main is not None and _asyncio_mod.iscoroutinefunction(_main):\n")
-	w.WriteString("    result = _asyncio_mod.run(_main())\n")
+	w.WriteString("    result = _asyncio_mod.run(_main(log=log, kv=kv, params=params, env=env, input=input, output=output, mcp=mcp, dicode=dicode))\n")
 	w.WriteString("_set_return(globals().get('result', None))\n")
 	// Schedule close on _loop so it runs *after* any pending _fire coroutines
 	// (the event loop is FIFO — tasks submitted before this will drain first).

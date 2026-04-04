@@ -217,14 +217,9 @@ spec:
 	if spec.Trigger.Cron != "0 2 * * *" {
 		t.Errorf("cron: %q", spec.Trigger.Cron)
 	}
-	found := false
-	for _, e := range spec.Env {
-		if e == "DEPLOY_TARGET=prod" {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("env not merged: %v", spec.Env)
+	em := envMap(spec.Permissions.Env)
+	if em["DEPLOY_TARGET"] != "prod" {
+		t.Errorf("env not merged: %v", spec.Permissions.Env)
 	}
 }
 
@@ -322,14 +317,9 @@ spec:
 	if spec.Timeout != 90*time.Second {
 		t.Errorf("timeout from defaults: got %v", spec.Timeout)
 	}
-	found := false
-	for _, e := range spec.Env {
-		if e == "LOG=info" {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("env from defaults not applied: %v", spec.Env)
+	em := envMap(spec.Permissions.Env)
+	if em["LOG"] != "info" {
+		t.Errorf("env from defaults not applied: %v", spec.Permissions.Env)
 	}
 }
 
@@ -370,10 +360,9 @@ spec:
 	if spec.Timeout == 120*time.Second {
 		t.Errorf("deprecated configDefaults should not be applied: timeout was set to 120s")
 	}
-	for _, e := range spec.Env {
-		if e == "RUNTIME_ENV=backend" {
-			t.Errorf("deprecated configDefaults env should not be applied: found %q", e)
-		}
+	em := envMap(spec.Permissions.Env)
+	if em["RUNTIME_ENV"] == "backend" {
+		t.Errorf("deprecated configDefaults env should not be applied: found RUNTIME_ENV=backend")
 	}
 	// Deprecation warning must have been logged.
 	if logs.FilterMessageSnippet("kind:Config spec.defaults is deprecated").Len() == 0 {

@@ -60,7 +60,7 @@ func writeTask(t *testing.T, dir, id, script string, trigger task.TriggerConfig)
 func TestEngine_FireManual(t *testing.T) {
 	dir := t.TempDir()
 	e := newTestEnv(t)
-	spec := writeTask(t, dir, "manual-task", `return "manual-ok"`, task.TriggerConfig{Manual: true})
+	spec := writeTask(t, dir, "manual-task", `export default async function main() { return "manual-ok" }`, task.TriggerConfig{Manual: true})
 	_ = e.reg.Register(spec)
 
 	runID, err := e.engine.FireManual(context.Background(), "manual-task", nil)
@@ -100,7 +100,7 @@ func TestEngine_FireManual_NotFound(t *testing.T) {
 func TestEngine_WebhookHandler(t *testing.T) {
 	dir := t.TempDir()
 	e := newTestEnv(t)
-	spec := writeTask(t, dir, "hook-task", `return "webhook-ok"`, task.TriggerConfig{Webhook: "/hooks/my-hook"})
+	spec := writeTask(t, dir, "hook-task", `export default async function main() { return "webhook-ok" }`, task.TriggerConfig{Webhook: "/hooks/my-hook"})
 	_ = e.reg.Register(spec)
 	e.engine.Register(spec)
 
@@ -139,8 +139,8 @@ func TestEngine_Chain(t *testing.T) {
 	dir := t.TempDir()
 	e := newTestEnv(t)
 
-	specA := writeTask(t, dir, "task-a", `return { msg: "from-a" }`, task.TriggerConfig{Manual: true})
-	specB := writeTask(t, dir, "task-b", `return input.msg`, task.TriggerConfig{
+	specA := writeTask(t, dir, "task-a", `export default async function main() { return { msg: "from-a" } }`, task.TriggerConfig{Manual: true})
+	specB := writeTask(t, dir, "task-b", `export default async function main({ input }) { return input.msg }`, task.TriggerConfig{
 		Chain: &task.ChainTrigger{From: "task-a", On: "success"},
 	})
 
@@ -325,7 +325,7 @@ func TestEngine_WebhookHandler_ServesIndexHTML(t *testing.T) {
 func TestEngine_WebhookHandler_NoIndexHTML_RunsTask(t *testing.T) {
 	dir := t.TempDir()
 	e := newTestEnv(t)
-	spec := writeTask(t, dir, "plain-hook", `return "ran"`, task.TriggerConfig{Webhook: "/hooks/plain-hook"})
+	spec := writeTask(t, dir, "plain-hook", `export default async function main() { return "ran" }`, task.TriggerConfig{Webhook: "/hooks/plain-hook"})
 	_ = e.reg.Register(spec)
 	e.engine.Register(spec)
 
