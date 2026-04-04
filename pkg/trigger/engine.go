@@ -60,6 +60,8 @@ type Engine struct {
 
 	db db.DB // optional — enables cron-job persistence and missed-run catchup
 
+	taskSem chan struct{} // nil = unlimited; capacity = MaxConcurrentTasks
+
 	runFinishedHook func(taskID, runID, status, triggerSource string, durationMs int64, notifyOnSuccess, notifyOnFailure bool)
 	runStartedHook  func(taskID, runID, triggerSource string)
 }
@@ -85,6 +87,17 @@ func New(r *registry.Registry, defaultExec pkgruntime.Executor, log *zap.Logger)
 // detects missed runs on startup (e.g. after a process restart).
 func (e *Engine) SetDB(d db.DB) {
 	e.db = d
+}
+
+// SetMaxConcurrentTasks configures a semaphore that limits how many task
+// goroutines run concurrently. n == 0 (the default) means unlimited.
+// Must be called before Start().
+func (e *Engine) SetMaxConcurrentTasks(n int) {
+	if n > 0 {
+		e.taskSem = make(chan struct{}, n)
+	} else {
+		e.taskSem = nil
+	}
 }
 
 // SetRunStartedHook registers a callback invoked when a run starts.
@@ -1111,6 +1124,10 @@ func (e *Engine) runTask(runCtx context.Context, spec *task.Spec, opts pkgruntim
 
 // fireAsync pre-creates the run record, starts execution in a goroutine,
 // and returns the run ID immediately.
+//
+// When a MaxConcurrentTasks semaphore is configured, the goroutine blocks
+// until a slot is available or the shutdown context is cancelled — ensuring
+// shutdown never deadlocks waiting tasks.
 func (e *Engine) fireAsync(ctx context.Context, spec *task.Spec, opts pkgruntime.RunOptions, source string) (string, error) {
 	opts.RunID = uuid.New().String()
 
@@ -1121,6 +1138,23 @@ func (e *Engine) fireAsync(ctx context.Context, spec *task.Spec, opts pkgruntime
 
 	go func() {
 		defer cleanup()
+
+		if e.taskSem != nil {
+			// Obtain shutdown context snapshot so we can select on it.
+			e.shutdownMu.RLock()
+			shutCtx := e.shutdownCtx
+			e.shutdownMu.RUnlock()
+
+			select {
+			case e.taskSem <- struct{}{}:
+				// Slot acquired; release when done.
+				defer func() { <-e.taskSem }()
+			case <-shutCtx.Done():
+				// Daemon is shutting down; abort without running.
+				return
+			}
+		}
+
 		e.runTask(runCtx, spec, opts, source)
 	}()
 

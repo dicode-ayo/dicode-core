@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -233,6 +234,11 @@ func buildRuntimes(
 	}
 	eng := trigger.New(reg, denoRT, log)
 	eng.SetDB(database)
+	if v := os.Getenv("DICODE_MAX_CONCURRENT_TASKS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			eng.SetMaxConcurrentTasks(n)
+		}
+	}
 	denoRT.SetEngine(eng)
 	denoRT.SetGateway(gateway)
 	denoRT.SetSecretsManager(secretsMgr)
