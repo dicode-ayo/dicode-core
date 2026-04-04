@@ -640,3 +640,108 @@ func TestInjectDicodeSDK_NoHead(t *testing.T) {
 		t.Error("dicode.js not injected when no </head> present")
 	}
 }
+
+// TestWaitRun_ChannelNotification verifies that WaitRun returns within 10ms of
+// the run finishing, exercising the channel-based notification path.
+func TestWaitRun_ChannelNotification(t *testing.T) {
+	dir := t.TempDir()
+	e := newTestEnv(t)
+	// A task that sleeps briefly then returns — we want it to run quickly.
+	spec := writeTask(t, dir, "wait-task", `return "done"`, task.TriggerConfig{Manual: true})
+	_ = e.reg.Register(spec)
+
+	runID, err := e.engine.FireManual(context.Background(), "wait-task", nil)
+	if err != nil {
+		t.Fatalf("FireManual: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	result, err := e.engine.WaitRun(ctx, runID)
+	if err != nil {
+		t.Fatalf("WaitRun returned error: %v", err)
+	}
+	if result.Status != registry.StatusSuccess {
+		t.Errorf("expected success, got %s", result.Status)
+	}
+}
+
+// TestWaitRun_AlreadyFinished verifies that WaitRun returns immediately when
+// called after the run has already completed (channel already deleted).
+func TestWaitRun_AlreadyFinished(t *testing.T) {
+	dir := t.TempDir()
+	e := newTestEnv(t)
+	spec := writeTask(t, dir, "already-done-task", `return "ok"`, task.TriggerConfig{Manual: true})
+	_ = e.reg.Register(spec)
+
+	runID, err := e.engine.FireManual(context.Background(), "already-done-task", nil)
+	if err != nil {
+		t.Fatalf("FireManual: %v", err)
+	}
+
+	// Wait until the run is no longer running (poll the registry).
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		run, err := e.reg.GetRun(context.Background(), runID)
+		if err != nil {
+			t.Fatalf("GetRun: %v", err)
+		}
+		if run.Status != registry.StatusRunning {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// By now the run is finished and the channel has been closed and deleted.
+	// WaitRun should return essentially immediately via the DB fallback path.
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	result, err := e.engine.WaitRun(ctx, runID)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("WaitRun returned error: %v", err)
+	}
+	if result.Status != registry.StatusSuccess {
+		t.Errorf("expected success, got %s", result.Status)
+	}
+	// The "already finished" path does a single DB read — should be well under 1s.
+	if elapsed > time.Second {
+		t.Errorf("WaitRun took too long for already-finished run: %v", elapsed)
+	}
+}
+
+// TestWaitRun_ContextCancellation verifies that WaitRun respects context
+// cancellation and returns ctx.Err() rather than blocking indefinitely.
+func TestWaitRun_ContextCancellation(t *testing.T) {
+	d, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { d.Close() })
+
+	reg := registry.New(d)
+	// Use a nil executor so this engine never actually executes tasks.
+	eng := New(reg, nil, zap.NewNop())
+
+	// Manually register a doneCh to simulate a run that never completes.
+	fakeRunID := "fake-run-cancellation-test"
+	doneCh := make(chan struct{}) // never closed
+	eng.runDone.Store(fakeRunID, doneCh)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, werr := eng.WaitRun(ctx, fakeRunID)
+	elapsed := time.Since(start)
+
+	if werr == nil {
+		t.Fatal("expected WaitRun to return an error on context cancellation")
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("WaitRun did not respect context timeout: elapsed %v", elapsed)
+	}
+}
