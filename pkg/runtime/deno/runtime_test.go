@@ -43,7 +43,7 @@ func newTestEnv(t *testing.T) *testEnv {
 // body is the function body; use runRaw to provide a complete task.ts.
 func (e *testEnv) run(t *testing.T, body string, opts ...RunOptions) *RunResult {
 	t.Helper()
-	return e.runSpec(t, "export default async function main({ log, env, params, kv, input, output }) {\n"+body+"\n}", &task.Spec{
+	return e.runSpec(t, "export default async function main({ params, kv, input, output }) {\n"+body+"\n}", &task.Spec{
 		ID:      "test-task",
 		Name:    "test-task",
 		Runtime: task.RuntimeDeno,
@@ -111,8 +111,8 @@ func TestRuntime_AsyncAwait(t *testing.T) {
 func TestRuntime_Log(t *testing.T) {
 	e := newTestEnv(t)
 	r := e.run(t, `
-		await log.info("hello")
-		await log.warn("world")
+		console.log("hello")
+		console.warn("world")
 		return "done"
 	`)
 	if r.Error != nil {
@@ -146,7 +146,7 @@ func TestRuntime_Env_BarePassthrough(t *testing.T) {
 			Env: []task.EnvEntry{{Name: "DICODE_TEST_TOKEN"}},
 		},
 	}
-	r := e.runSpec(t, `export default async function main({ env }) { return await env.get("DICODE_TEST_TOKEN") }`, spec)
+	r := e.runSpec(t, `export default async function main() { return Deno.env.get("DICODE_TEST_TOKEN") ?? null }`, spec)
 	if r.Error != nil {
 		t.Fatalf("error: %v", r.Error)
 	}
@@ -166,7 +166,7 @@ func TestRuntime_Env_From(t *testing.T) {
 			Env: []task.EnvEntry{{Name: "INJECTED", From: "DICODE_TEST_SOURCE"}},
 		},
 	}
-	r := e.runSpec(t, `export default async function main({ env }) { return await env.get("INJECTED") }`, spec)
+	r := e.runSpec(t, `export default async function main() { return Deno.env.get("INJECTED") ?? null }`, spec)
 	if r.Error != nil {
 		t.Fatalf("error: %v", r.Error)
 	}
@@ -186,7 +186,7 @@ func TestRuntime_Env_Secret(t *testing.T) {
 			Env: []task.EnvEntry{{Name: "API_KEY", Secret: "my_api_key"}},
 		},
 	}
-	r := e.runSpec(t, `export default async function main({ env }) { return await env.get("API_KEY") }`, spec)
+	r := e.runSpec(t, `export default async function main() { return Deno.env.get("API_KEY") ?? null }`, spec)
 	if r.Error != nil {
 		t.Fatalf("error: %v", r.Error)
 	}
@@ -206,7 +206,7 @@ func TestRuntime_Env_SecretMissing(t *testing.T) {
 			Env: []task.EnvEntry{{Name: "API_KEY", Secret: "nonexistent"}},
 		},
 	}
-	r := e.runSpec(t, `export default async function main({ env }) { return "should not reach" }`, spec)
+	r := e.runSpec(t, `export default async function main() { return "should not reach" }`, spec)
 	if r.Error == nil {
 		t.Fatal("expected error for missing secret, got nil")
 	}
@@ -290,7 +290,6 @@ func TestRuntime_Net_Denied(t *testing.T) {
 		t.Errorf("expected all network to be blocked, got %v", r.ReturnValue)
 	}
 }
-
 
 func TestRuntime_Params(t *testing.T) {
 	e := newTestEnv(t)

@@ -99,13 +99,13 @@ type FSEntry struct {
 // EnvEntry declares one environment variable the task is allowed to access.
 // Supports four forms in YAML:
 //
-//	- HOME                          # bare name: allowlist $HOME from host env, same name
-//	- name: API_KEY                 # rename from host env: read $GH_TOKEN, expose as API_KEY
-//	  from: GH_TOKEN
-//	- name: DB_PASS                 # secret injection: resolve "db_password" from secrets store
-//	  secret: db_password
-//	- name: LOG_LEVEL               # literal value (used by taskset overrides)
-//	  value: "info"
+//   - HOME                          # bare name: allowlist $HOME from host env, same name
+//   - name: API_KEY                 # rename from host env: read $GH_TOKEN, expose as API_KEY
+//     from: GH_TOKEN
+//   - name: DB_PASS                 # secret injection: resolve "db_password" from secrets store
+//     secret: db_password
+//   - name: LOG_LEVEL               # literal value (used by taskset overrides)
+//     value: "info"
 //
 // Lookup rules:
 //   - secret: → secrets store only; run fails if key not found
@@ -193,10 +193,10 @@ type Spec struct {
 	Runtime     Runtime       `yaml:"runtime"     json:"runtime"`
 	Docker      *DockerConfig `yaml:"docker,omitempty" json:"docker,omitempty"`
 	Trigger     TriggerConfig `yaml:"trigger"     json:"trigger"`
-	Params      []Param     `yaml:"params,omitempty"      json:"params,omitempty"`
-	Permissions Permissions `yaml:"permissions,omitempty" json:"permissions,omitempty"`
+	Params      []Param       `yaml:"params,omitempty"      json:"params,omitempty"`
+	Permissions Permissions   `yaml:"permissions,omitempty" json:"permissions,omitempty"`
 	Timeout     time.Duration `yaml:"timeout"             json:"timeout"`
-	Notify *NotifyConfig `yaml:"notify,omitempty" json:"notify,omitempty"`
+	Notify      *NotifyConfig `yaml:"notify,omitempty" json:"notify,omitempty"`
 	// MCPPort declares that this daemon task exposes an MCP server on the given port.
 	MCPPort int `yaml:"mcp_port,omitempty" json:"mcp_port,omitempty"`
 	// OnFailureChain overrides the global defaults.on_failure_chain for this task.

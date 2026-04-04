@@ -132,7 +132,6 @@ func (l *unlockLimiter) allow(ip string) bool {
 //go:embed static
 var staticFS embed.FS
 
-
 // Server is the HTTP server for the web UI and REST API.
 type Server struct {
 	registry           *registry.Registry
