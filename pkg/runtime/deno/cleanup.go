@@ -48,6 +48,10 @@ func StartCleanup(ctx context.Context, activePIDs func() []int, interval time.Du
 		return
 	}
 
+	if interval <= 0 {
+		interval = 10 * time.Minute
+	}
+
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
@@ -73,10 +77,15 @@ func cleanupOnce(maxAge time.Duration, log *zap.Logger) {
 
 	now := time.Now()
 	for _, path := range matches {
-		info, err := os.Stat(path)
+		info, err := os.Lstat(path)
 		if err != nil {
-			// File may have been removed between Glob and Stat — not an error.
+			// File may have been removed between Glob and Lstat — not an error.
 			log.Debug("deno temp cleanup: stat skipped", zap.String("path", path), zap.Error(err))
+			continue
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			// Skip symlinks: following them could touch files outside /tmp and
+			// is a known /tmp cleanup vulnerability class.
 			continue
 		}
 		if now.Sub(info.ModTime()) <= maxAge {

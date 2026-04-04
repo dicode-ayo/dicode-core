@@ -119,7 +119,6 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	// 4. Task registry + startup cleanup.
 	dockerruntime.CleanupOrphanedContainers(ctx, log)
 	podmanruntime.CleanupOrphanedContainers(ctx, log)
-	denoruntime.StartCleanup(ctx, nil, 10*time.Minute, 30*time.Minute, log)
 
 	reg := registry.New(database)
 	if stale, err := reg.CleanupStaleRuns(ctx); err != nil {
@@ -187,6 +186,9 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 
 	// 10. Run everything concurrently.
 	g, ctx := errgroup.WithContext(ctx)
+	// StartCleanup uses the errgroup-derived ctx so it stops whenever any
+	// component returns an error (not just on SIGINT/SIGTERM).
+	denoruntime.StartCleanup(ctx, nil, 10*time.Minute, 30*time.Minute, log)
 	g.Go(func() error { return rec.Run(ctx) })
 	g.Go(func() error { return eng.Start(ctx) })
 	g.Go(func() error { return srv.Start(ctx) })

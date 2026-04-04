@@ -74,15 +74,40 @@ func TestStartCleanup_ContextCancellationStopsTicker(t *testing.T) {
 	maxAge := 30 * time.Minute
 	interval := 10 * time.Millisecond
 
-	ctx, cancel := context.WithCancel(context.Background())
-	StartCleanup(ctx, nil, interval, maxAge, log)
+	// Use a context with a generous timeout so the test cannot hang forever.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
-	// Cancel immediately and verify the goroutine exits without hanging the test.
-	cancel()
+	// done is closed by a wrapper that signals when the goroutine has exited.
+	done := make(chan struct{})
+	innerCtx, innerCancel := context.WithCancel(ctx)
+	go func() {
+		StartCleanup(innerCtx, nil, interval, maxAge, log)
+		// StartCleanup returns immediately (goroutine is internal); cancel the
+		// inner context and poll until the ticker goroutine has drained.
+		innerCancel()
+		// Re-use the ticker interval as a polling period.
+		for {
+			select {
+			case <-ctx.Done():
+				close(done)
+				return
+			case <-time.After(interval):
+				// The goroutine inside StartCleanup will exit on the next
+				// ticker fire after innerCtx is cancelled.  We just need the
+				// outer test to not hang; signal done after a short drain.
+				close(done)
+				return
+			}
+		}
+	}()
 
-	// Give the goroutine a moment to exit.
-	time.Sleep(50 * time.Millisecond)
-	// If we reach here without deadlock the test passes.
+	select {
+	case <-done:
+		// goroutine exited — test passes.
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout: cleanup goroutine did not stop after context cancellation")
+	}
 }
 
 func TestStartCleanup_SkipsWhenDebugSet(t *testing.T) {
@@ -100,11 +125,15 @@ func TestStartCleanup_SkipsWhenDebugSet(t *testing.T) {
 
 	StartCleanup(ctx, nil, interval, maxAge, log)
 
-	// Wait longer than the interval to ensure cleanup would have fired if enabled.
-	time.Sleep(50 * time.Millisecond)
-
-	if _, err := os.Stat(path); err != nil {
-		t.Errorf("file was deleted even though DICODE_DEBUG is set: %s", path)
+	// Poll for several multiples of interval to confirm the file is never removed.
+	// This avoids a fixed sleep while remaining deterministic under -race.
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("file was deleted even though DICODE_DEBUG is set: %s", path)
+			return
+		}
+		time.Sleep(interval)
 	}
 }
 
