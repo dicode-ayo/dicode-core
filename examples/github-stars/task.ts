@@ -3,7 +3,7 @@ export default async function main({ log, kv, params, output }: DicodeSdk) {
   const repo = await params.get("repo");
   const kvKey = `github-stars:${repo}`;
 
-  await log.info(`Fetching star count for ${repo}…`);
+  console.log(`Fetching star count for ${repo}…`);
 
   const res = await fetch(`https://api.github.com/repos/${repo}`, {
     headers: { "Accept": "application/vnd.github+json" },
@@ -28,7 +28,7 @@ export default async function main({ log, kv, params, output }: DicodeSdk) {
     : delta < 0    ? `${delta} since last run`
     :                "no change since last run";
 
-  await log.info(`${repo}: ${stars.toLocaleString()} ⭐  (${trend})`);
+  console.log(`${repo}: ${stars.toLocaleString()} ⭐  (${trend})`);
 
   const trendBadge =
     delta === null ? `<span style="color:#888">first run</span>`

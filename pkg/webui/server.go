@@ -24,6 +24,7 @@ import (
 	"github.com/dicode/dicode/pkg/mcp"
 	"github.com/dicode/dicode/pkg/registry"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
+	denoruntime "github.com/dicode/dicode/pkg/runtime/deno"
 	"github.com/dicode/dicode/pkg/secrets"
 	gitSource "github.com/dicode/dicode/pkg/source/git"
 	"github.com/dicode/dicode/pkg/source/local"
@@ -130,6 +131,7 @@ func (l *unlockLimiter) allow(ip string) bool {
 
 //go:embed static
 var staticFS embed.FS
+
 
 // Server is the HTTP server for the web UI and REST API.
 type Server struct {
@@ -312,6 +314,12 @@ func (s *Server) Handler() http.Handler {
 	}
 	r.Get("/hooks/*", webhookHandler)
 	r.Post("/hooks/*", webhookHandler)
+
+	// sdk.d.ts — TypeScript declarations for Monaco IntelliSense (public, no auth required).
+	r.Get("/api/sdk/types", func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/typescript; charset=utf-8")
+		_, _ = w.Write(denoruntime.SdkDts)
+	})
 
 	// dicode.js — client SDK injected into webhook task UIs (public, no auth required).
 	r.Get("/dicode.js", func(w http.ResponseWriter, req *http.Request) {

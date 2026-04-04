@@ -112,6 +112,6 @@ if (!result.success) {
   throw new Error(`notification command failed (exit ${result.code}): ${stderr}`);
 }
 
-await log.info("notification dispatched", { title, priority, urgency, tags });
+console.log("notification dispatched", { title, priority, urgency, tags });
 return { title, urgency, tags };
 }

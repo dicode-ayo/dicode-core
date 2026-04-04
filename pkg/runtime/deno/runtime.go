@@ -24,8 +24,13 @@ import (
 	"go.uber.org/zap"
 )
 
-//go:embed sdk/shim.js
+//go:embed sdk/shim.ts
 var shimContent string
+
+//go:embed sdk/sdk.d.ts
+// SdkDts is the TypeScript declaration file for the dicode task SDK.
+// Exposed for use by the web UI to provide Monaco IntelliSense.
+var SdkDts []byte
 
 // RunOptions controls a single task execution.
 type RunOptions struct {
@@ -176,7 +181,7 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	debug := rt.log.Core().Enabled(zap.DebugLevel)
 
 	// Write the shim as a proper ES module to a temp file.
-	shimFile, err := os.CreateTemp("", "dicode-shim-*.js")
+	shimFile, err := os.CreateTemp("", "dicode-shim-*.ts")
 	if err != nil {
 		status = registry.StatusFailure
 		result.Error = fmt.Errorf("create shim file: %w", err)
@@ -211,18 +216,18 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		zap.String("task_script", taskPath),
 		zap.String("runner", runnerPath),
 	)
-	runner := "import { log, params, env, kv, input, output, mcp, dicode, __setReturn__, __conn__, __flush__ } from \"" + shimPath + "\";\n" +
+	runner := "import { params, kv, input, output, mcp, dicode, __setReturn__, __conn__, __flush__ } from \"" + shimPath + "\";\n" +
 		"let __main__;\n" +
 		"try {\n" +
 		"  __main__ = (await import(\"" + taskPath + "\")).default;\n" +
 		"} catch (__importErr__) {\n" +
-		"  await log.error(\"[dicode] task import failed:\", String(__importErr__));\n" +
+		"  console.error(\"[dicode] task import failed:\", String(__importErr__));\n" +
 		"  await __flush__();\n" +
 		"  try { __conn__.close(); } catch {}\n" +
 		"  Deno.exit(1);\n" +
 		"}\n" +
 		"try {\n" +
-		"  const result = await __main__({ log, params, env, kv, input, output, mcp, dicode });\n" +
+		"  const result = await __main__({ params, kv, input, output, mcp, dicode });\n" +
 		"  await __setReturn__(result);\n" +
 		"} finally {\n" +
 		"  await __flush__();\n" +
@@ -240,6 +245,12 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	cmd := exec.CommandContext(execCtx, rt.denoPath, args...) //nolint:gosec
 	cmd.Env = buildEnv(resolved, socketPath, token)
 
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		status = registry.StatusFailure
+		result.Error = err
+		return result, nil
+	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		status = registry.StatusFailure
@@ -253,11 +264,18 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		return result, nil
 	}
 
-	// Stream deno stderr to registry logs in real-time.
+	// Stream stdout (console.log/info) as "info" and stderr (console.error +
+	// Deno runtime errors) as "error" in the run log.
+	go func() {
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			_ = rt.registry.AppendLog(context.Background(), runID, "info", scanner.Text())
+		}
+	}()
 	go func() {
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {
-			_ = rt.registry.AppendLog(context.Background(), runID, "warn", scanner.Text())
+			_ = rt.registry.AppendLog(context.Background(), runID, "error", scanner.Text())
 		}
 	}()
 

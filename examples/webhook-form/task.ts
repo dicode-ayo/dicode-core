@@ -5,7 +5,7 @@ export default async function main({ log, params, output }: DicodeSdk) {
 
   if (!text) throw new Error("text param is required");
 
-  await log.info(`Running "${op}" on ${text.length} character(s)…`);
+  console.log(`Running "${op}" on ${text.length} character(s)…`);
 
   let result: string;
   switch (op) {
@@ -27,7 +27,7 @@ export default async function main({ log, params, output }: DicodeSdk) {
       throw new Error(`Unknown operation: ${op}`);
   }
 
-  await log.info(`Result: ${result}`);
+  console.log(`Result: ${result}`);
 
   return output.html(`
 <div style="font-family:system-ui,sans-serif;max-width:640px;padding:1.5rem">

@@ -123,7 +123,12 @@ class DcTaskDetail extends LitElement {
       if (!container) return;
       if (!this._editor) {
         require.config({ paths: { vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs' } });
-        require(['vs/editor/editor.main'], () => {
+        require(['vs/editor/editor.main'], async () => {
+          const dts = await fetch('/api/sdk/types').then(r => r.ok ? r.text() : '');
+          if (dts) {
+            monaco.languages.typescript.typescriptDefaults.addExtraLib(dts, 'file:///dicode-sdk.d.ts');
+            monaco.languages.typescript.javascriptDefaults.addExtraLib(dts, 'file:///dicode-sdk.d.ts');
+          }
           this._editor = monaco.editor.create(container, {
             value: content, language: lang, theme: 'vs-dark',
             fontSize: 13, minimap: { enabled: false }, scrollBeyondLastLine: false,
