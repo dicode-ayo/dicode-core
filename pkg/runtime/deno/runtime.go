@@ -27,9 +27,10 @@ import (
 //go:embed sdk/shim.ts
 var shimContent string
 
-//go:embed sdk/sdk.d.ts
 // SdkDts is the TypeScript declaration file for the dicode task SDK.
 // Exposed for use by the web UI to provide Monaco IntelliSense.
+//
+//go:embed sdk/sdk.d.ts
 var SdkDts []byte
 
 // RunOptions controls a single task execution.
@@ -145,7 +146,7 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 			resolved[entry.Name] = val
 		case entry.From != "":
 			resolved[entry.Name] = os.Getenv(entry.From)
-		// bare name: --allow-env only, no injection
+			// bare name: --allow-env only, no injection
 		}
 	}
 
