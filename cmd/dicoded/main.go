@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/dicode/dicode/pkg/config"
 	"github.com/dicode/dicode/pkg/db"
@@ -118,6 +119,7 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	// 4. Task registry + startup cleanup.
 	dockerruntime.CleanupOrphanedContainers(ctx, log)
 	podmanruntime.CleanupOrphanedContainers(ctx, log)
+	denoruntime.StartCleanup(ctx, nil, 10*time.Minute, 30*time.Minute, log)
 
 	reg := registry.New(database)
 	if stale, err := reg.CleanupStaleRuns(ctx); err != nil {
