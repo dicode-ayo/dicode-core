@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -29,6 +30,9 @@ import (
 	"github.com/robfig/cron/v3"
 	"go.uber.org/zap"
 )
+
+// ErrRunNotFound is returned by WaitRun when no run record exists for the given ID.
+var ErrRunNotFound = errors.New("run not found")
 
 // Engine coordinates all trigger types and fires task runs.
 type Engine struct {
@@ -508,6 +512,9 @@ func (e *Engine) WaitRun(ctx context.Context, runID string) (ipc.RunResult, erro
 	// arrived) or it was just closed. Either way, fetch the final record.
 	run, err := e.registry.GetRun(ctx, runID)
 	if err != nil {
+		if errors.Is(err, registry.ErrRunNotFound) {
+			return ipc.RunResult{}, ErrRunNotFound
+		}
 		return ipc.RunResult{}, err
 	}
 	var returnValue interface{}
