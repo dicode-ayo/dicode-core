@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -394,6 +395,61 @@ func TestAPI_Metrics_AuthRequired(t *testing.T) {
 
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d", w.Code)
+	}
+}
+
+func TestAPI_Metrics_AuthOK(t *testing.T) {
+	// Verify that GET /api/metrics returns 200 with valid JSON when auth is
+	// enabled and a valid session token is present.
+	srv := newAuthServer(t, "hunter2")
+	token := srv.sessions.issue()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/metrics", nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: token})
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var m map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&m); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, ok := m["daemon"]; !ok {
+		t.Error("missing 'daemon' key in metrics response")
+	}
+	if _, ok := m["tasks"]; !ok {
+		t.Error("missing 'tasks' key in metrics response")
+	}
+}
+
+func TestAPI_Metrics_Concurrent(t *testing.T) {
+	// Fire 5 concurrent GET /api/metrics requests and verify all return 200.
+	// Run with -race to detect data races in the metrics collection path.
+	srv, _ := newTestServer(t)
+	h := srv.Handler()
+
+	const n = 5
+	var wg sync.WaitGroup
+	wg.Add(n)
+	codes := make([]int, n)
+	for i := 0; i < n; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			req := httptest.NewRequest(http.MethodGet, "/api/metrics", nil)
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+			codes[i] = w.Code
+		}()
+	}
+	wg.Wait()
+
+	for i, code := range codes {
+		if code != http.StatusOK {
+			t.Errorf("goroutine %d: expected 200, got %d", i, code)
+		}
 	}
 }
 

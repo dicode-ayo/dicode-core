@@ -53,9 +53,10 @@ Fields marked "Linux only" are sourced from `/proc/self/stat` and `/proc/<pid>/s
 
 There is no background aggregation thread. Every request to `/api/metrics` reads current values synchronously:
 
-- `runtime.ReadMemStats()` for Go heap figures
+- `runtime/metrics.Read()` for Go heap figures (no stop-the-world pause)
 - `runtime.NumGoroutine()` for goroutine count
 - `/proc/self/stat` for daemon CPU time (Linux)
+- `/proc/<pid>/stat` for each active Deno child CPU time (Linux)
 - `/proc/<pid>/status` for each active Deno child RSS (Linux)
 - The engine's `runCancels` map for active task count
 
