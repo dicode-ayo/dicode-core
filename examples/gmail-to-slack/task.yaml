@@ -7,11 +7,12 @@ runtime: js
 trigger:
   cron: "0 8 * * *"  # every day at 8 AM
 
-env:
-  - GMAIL_CLIENT_ID
-  - GMAIL_CLIENT_SECRET
-  - GMAIL_REFRESH_TOKEN
-  - SLACK_BOT_TOKEN
+permissions:
+  env:
+    - GMAIL_CLIENT_ID
+    - GMAIL_CLIENT_SECRET
+    - GMAIL_REFRESH_TOKEN
+    - SLACK_BOT_TOKEN
   
 params:
   - name: slack_channel

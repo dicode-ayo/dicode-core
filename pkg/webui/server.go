@@ -1021,7 +1021,6 @@ func (s *Server) apiSaveServerSettings(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		LogLevel string `json:"log_level"`
 		Secret   string `json:"secret"`
-		Tray     *bool  `json:"tray"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonErr(w, "bad request", http.StatusBadRequest)
@@ -1032,9 +1031,6 @@ func (s *Server) apiSaveServerSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Secret != "" {
 		s.cfg.Server.Secret = body.Secret
-	}
-	if body.Tray != nil {
-		s.cfg.Server.Tray = body.Tray
 	}
 	if err := s.persistConfig(); err != nil {
 		s.log.Warn("settings persist failed", zap.Error(err))
@@ -1297,9 +1293,6 @@ func (s *Server) persistConfig() error {
 	}
 	serverMap["port"] = s.cfg.Server.Port
 	serverMap["secret"] = s.cfg.Server.Secret
-	if s.cfg.Server.Tray != nil {
-		serverMap["tray"] = *s.cfg.Server.Tray
-	}
 	doc["server"] = serverMap
 
 	if len(s.cfg.Runtimes) > 0 {

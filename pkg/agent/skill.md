@@ -72,11 +72,16 @@ timeout: 60s                       # default: 60s
 # Agent / orchestration fields (optional):
 on_failure_chain: <task-id>        # task to invoke when this task fails; "" disables global default
 mcp_port: 3000                     # declare MCP server port (daemon tasks only)
-security:
-  allowed_tasks:                   # tasks this script may call via dicode.run_task()
-    - "*"                          # use "*" to allow all, or list specific IDs
-  allowed_mcp:                     # MCP daemon task IDs this script may access via mcp.call()
-    - "github-mcp"
+permissions:
+  dicode:                          # dicode runtime API access — all denied by default
+    tasks:                         # task IDs this script may call via dicode.run_task()
+      - "*"                        # use "*" to allow all, or list specific IDs
+    mcp:                           # MCP daemon task IDs accessible via mcp.call()
+      - "github-mcp"
+    list_tasks: true               # allow dicode.list_tasks()
+    get_runs: true                 # allow dicode.get_runs()
+    get_config: true               # allow dicode.get_config()
+    secrets_write: true            # allow dicode.secrets_set() and dicode.secrets_delete() — write-only
 ```
 
 ### Protected webhook trigger (HMAC authentication)
@@ -168,24 +173,30 @@ const repo   = input.repository   // nested objects fully available
 
 For webhook tasks the raw POST body is parsed and available as `input`. Query-string parameters are also available via `params`.
 
-### `dicode` — task orchestration (requires security.allowed_tasks)
+### `dicode` — task orchestration (requires `permissions.dicode`)
 ```typescript
-// Run another task and await its result
+// Run another task and await its result (requires permissions.dicode.tasks)
 const result = await dicode.run_task("send-report", { channel: "#ops" })
 // result: { runID, status, returnValue }
 
-// List all registered tasks (useful for building AI tool schemas)
+// List all registered tasks (requires permissions.dicode.list_tasks: true)
 const tasks = await dicode.list_tasks()
 
-// Get recent run history
+// Get recent run history (requires permissions.dicode.get_runs: true)
 const runs = await dicode.get_runs("send-report", { limit: 5 })
 
-// Get AI provider config (API key resolved server-side)
+// Get AI provider config — returns baseURL and model only, never the API key
+// (requires permissions.dicode.get_config: true)
 const ai = await dicode.get_config("ai")
-// { baseURL, model, apiKey }
+// { baseURL, model }
+
+// Write or replace a secret (requires permissions.dicode.secrets_write: true)
+// Tasks can NEVER read secrets back — use permissions.env for secret injection
+await dicode.secrets_set("MY_TOKEN", newValue)
+await dicode.secrets_delete("OLD_TOKEN")
 ```
 
-### `mcp` — MCP server tools (requires security.allowed_mcp)
+### `mcp` — MCP server tools (requires `permissions.dicode.mcp`)
 ```typescript
 const tools  = await mcp.list_tools("github-mcp")
 const result = await mcp.call("github-mcp", "search_repositories", { query: "dicode" })
@@ -298,8 +309,13 @@ spec:
 | Forgetting `permissions.env` entry for `webhook_secret` | Every `${VAR}` in task.yaml needs a matching entry in `permissions.env` |
 | Trying to verify the signature in `task.ts` | dicode verifies it automatically — the script only runs if the signature is valid |
 | Using `webhook_secret` on a public form endpoint | Only add `webhook_secret` when the sender can set `X-Hub-Signature-256`; browser forms cannot sign requests |
-| Calling `dicode.run_task()` without `security.allowed_tasks` | Add `security.allowed_tasks` to task.yaml; calls are blocked otherwise |
-| Calling `mcp.call()` without `security.allowed_mcp` | Add `security.allowed_mcp` listing the daemon task IDs |
+| Calling `dicode.run_task()` without `permissions.dicode.tasks` | Add `permissions.dicode.tasks` listing callable task IDs; calls are blocked otherwise |
+| Calling `mcp.call()` without `permissions.dicode.mcp` | Add `permissions.dicode.mcp` listing the daemon task IDs |
+| Calling `dicode.list_tasks()` without `permissions.dicode.list_tasks: true` | Add `permissions.dicode.list_tasks: true`; denied by default |
+| Calling `dicode.get_config()` without `permissions.dicode.get_config: true` | Add `permissions.dicode.get_config: true`; denied by default |
+| Using `security:` top-level field | `security:` is removed — use `permissions.dicode:` instead |
+| Calling `dicode.secrets_set()` without `permissions.dicode.secrets_write: true` | Add `permissions.dicode.secrets_write: true`; denied by default |
+| Trying to read a secret via `dicode.secrets_get()` | No such method — secrets are injected at startup via `permissions.env`; tasks never read them at runtime |
 | Creating task.js instead of task.ts | Use TypeScript (`.ts`) for Deno runtime tasks |
 
 ## Protected webhook — worked example

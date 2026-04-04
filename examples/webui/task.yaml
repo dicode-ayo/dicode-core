@@ -21,7 +21,8 @@ params:
     type: string
     description: Optional payload for the echo action
 
-env:
-  - DICODE_VERSION  # optional — displayed in the status panel
+permissions:
+  env:
+    - DICODE_VERSION  # optional — displayed in the status panel
 
 timeout: 30s
