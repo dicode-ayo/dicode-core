@@ -355,6 +355,48 @@ func TestWebhook_AuthTask_AllowsAuthenticatedSession(t *testing.T) {
 	}
 }
 
+func TestAPI_Metrics_OK(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/metrics", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	ct := w.Header().Get("Content-Type")
+	if ct == "" || ct[:16] != "application/json" {
+		t.Errorf("expected application/json content-type, got %q", ct)
+	}
+	var m map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&m); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, ok := m["daemon"]; !ok {
+		t.Error("missing 'daemon' key in metrics response")
+	}
+	if _, ok := m["tasks"]; !ok {
+		t.Error("missing 'tasks' key in metrics response")
+	}
+}
+
+func TestAPI_Metrics_AuthRequired(t *testing.T) {
+	srv, _ := newTestServer(t)
+	// Enable auth so requireAuth rejects unauthenticated requests.
+	srv.cfg.Server.Auth = true
+
+	req := httptest.NewRequest(http.MethodGet, "/api/metrics", nil)
+	// Mark as API request so we get 401 instead of a redirect.
+	req.Header.Set("Accept", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+}
+
 func contains(s, sub string) bool {
 	return len(s) >= len(sub) && (s == sub || len(s) > 0 && containsStr(s, sub))
 }

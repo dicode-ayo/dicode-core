@@ -1,0 +1,62 @@
+# Metrics endpoint
+
+Dicode exposes a lightweight JSON metrics endpoint that surfaces daemon health, active task counts, and child-process resource usage. No external monitoring agent is required.
+
+## Endpoint
+
+```
+GET /api/metrics
+```
+
+Requires authentication when `server.auth: true` is set in `dicode.yaml`. Returns `401 Unauthorized` for unauthenticated requests.
+
+## Response schema
+
+```json
+{
+  "daemon": {
+    "heap_alloc_mb": 42.3,
+    "heap_sys_mb": 68.0,
+    "goroutines": 87,
+    "cpu_ms": 1240
+  },
+  "tasks": {
+    "active_tasks": 5,
+    "children_rss_mb": 310.5,
+    "children_cpu_ms": 4800
+  }
+}
+```
+
+### `daemon` object
+
+| Field | Type | Description |
+|---|---|---|
+| `heap_alloc_mb` | float | Go heap currently allocated (MB) |
+| `heap_sys_mb` | float | Go heap reserved from OS (MB) |
+| `goroutines` | int | Number of live goroutines |
+| `cpu_ms` | int | Daemon CPU time (user+sys) in milliseconds — **Linux only**, omitted otherwise |
+
+### `tasks` object
+
+| Field | Type | Description |
+|---|---|---|
+| `active_tasks` | int | Number of task runs currently in progress |
+| `children_rss_mb` | float | Aggregate RSS of all active Deno child processes (MB) — **Linux only**, omitted otherwise |
+| `children_cpu_ms` | int | Aggregate CPU time (user+sys) of all active Deno child processes (ms) — **Linux only**, omitted otherwise |
+
+## Platform notes
+
+Fields marked "Linux only" are sourced from `/proc/self/stat` and `/proc/<pid>/status`. On macOS, Windows, and other non-Linux platforms those fields are omitted from the JSON object (`omitempty`), so the response remains valid and parseable — the fields simply do not appear.
+
+## Metrics are computed on-demand
+
+There is no background aggregation thread. Every request to `/api/metrics` reads current values synchronously:
+
+- `runtime.ReadMemStats()` for Go heap figures
+- `runtime.NumGoroutine()` for goroutine count
+- `/proc/self/stat` for daemon CPU time (Linux)
+- `/proc/<pid>/status` for each active Deno child RSS (Linux)
+- The engine's `runCancels` map for active task count
+
+This means the endpoint is always fresh and adds negligible overhead.
