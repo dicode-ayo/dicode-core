@@ -7,6 +7,12 @@ spec:
     tray:
       ref:
         path: ./tray/task.yaml
+    notifications:
+      ref:
+        path: ./notify/task.yaml
+    alert:
+      ref:
+        path: ./alert/task.yaml
     hello-cron:
       ref:
         path: ./hello-cron/task.yaml
