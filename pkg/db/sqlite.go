@@ -32,20 +32,30 @@ func openSQLite(path string) (DB, error) {
 			return nil, fmt.Errorf("create db dir: %w", err)
 		}
 	}
-	db, err := sql.Open("sqlite", path+"?_journal_mode=WAL&_foreign_keys=on")
+	db, err := sql.Open("sqlite", path+"?_foreign_keys=on")
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite %q: %w", path, err)
 	}
-	// In-memory databases are per-connection: every connection gets its own
-	// empty DB. A single connection prevents the silent isolation bug where
-	// two goroutines each see a different empty database.
-	// File-based DBs use WAL mode, which allows concurrent readers alongside
-	// one writer — no connection limit needed there.
-	if path == ":memory:" {
-		db.SetMaxOpenConns(1)
-	}
+	// Serialize all DB access through a single connection. SQLite only allows
+	// one writer at a time regardless of mode; multiple connections within the
+	// same process race on writes and produce SQLITE_BUSY. A single connection
+	// eliminates intra-process lock contention entirely.
+	db.SetMaxOpenConns(1)
 	if err := db.Ping(); err != nil {
 		return nil, fmt.Errorf("ping sqlite: %w", err)
+	}
+	// Apply pragmas via exec — modernc.org/sqlite does not honour DSN-style
+	// _pragma parameters reliably. WAL allows readers to proceed concurrently
+	// with the single writer. busy_timeout is a belt-and-suspenders safeguard
+	// for any external process (e.g. sqlite3 CLI) that may also open the file.
+	for _, pragma := range []string{
+		"PRAGMA journal_mode=WAL",
+		"PRAGMA busy_timeout=5000",
+		"PRAGMA foreign_keys=ON",
+	} {
+		if _, err := db.Exec(pragma); err != nil {
+			return nil, fmt.Errorf("sqlite pragma %q: %w", pragma, err)
+		}
 	}
 	s := &SQLiteDB{db: db}
 	if err := s.migrate(); err != nil {

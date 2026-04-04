@@ -48,15 +48,16 @@ params:
     description: Maximum emails to include
     default: "20"
 
-env:
-  - GMAIL_TOKEN
-  - SLACK_TOKEN
+permissions:
+  env:
+    - GMAIL_TOKEN
+    - SLACK_TOKEN
 ```
 
 ### All fields
 
 | Field | Type | Required | Description |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `name` | string | ✅ | Human-readable task name |
 | `description` | string | | One-line description |
 | `runtime` | string | | `deno` (default), `python`, `docker`, or `podman` |
@@ -70,19 +71,22 @@ env:
 | `trigger.chain.on` | string | | `success` (default), `failure`, `always` |
 | `trigger.daemon` | bool | | Start on app start, restart on exit |
 | `trigger.restart` | string | | daemon only: `always` (default), `on-failure`, `never` |
-| `fs` | list | | Filesystem access declarations |
-| `fs[].path` | string | | Absolute or `~`-prefixed path |
-| `fs[].permission` | string | | `r`, `w`, or `rw` |
+| `permissions` | object | | Explicit access grants — nothing is implicit |
+| `permissions.env` | list | | Env vars the script may read (see below) |
+| `permissions.fs` | list | | Filesystem access declarations (Deno only) |
+| `permissions.fs[].path` | string | | Absolute or `~`-prefixed path |
+| `permissions.fs[].permission` | string | | `r`, `w`, or `rw` |
+| `permissions.run` | list of strings | | Executables the script may spawn (Deno only); use `["*"]` for all |
 | `params` | list | | Input parameters with defaults |
 | `params[].name` | string | | Parameter name |
 | `params[].description` | string | | Human-readable description |
 | `params[].default` | string | | Default value (all params are strings) |
-| `env` | list of strings | | Secret/env var names required by this task |
 | `tags` | list of strings | | Tags for filtering (future: source selectors) |
 
 ### Trigger types
 
 **Cron** — runs on a schedule:
+
 ```yaml
 trigger:
   cron: "*/15 * * * *"   # every 15 minutes
@@ -91,6 +95,7 @@ trigger:
 Uses standard 5-field cron syntax. Evaluated against the machine's local timezone.
 
 **Webhook** — fires on HTTP POST:
+
 ```yaml
 trigger:
   webhook: /github-push
@@ -112,12 +117,14 @@ trigger:
 - Open webhooks (no `auth: true`) remain fully public — no behaviour change
 
 **Manual** — only fires when explicitly triggered via API or UI:
+
 ```yaml
 trigger:
   manual: true
 ```
 
 **Daemon** — starts automatically when dicode starts and restarts when it exits.
+
 ```yaml
 trigger:
   daemon: true
@@ -135,6 +142,7 @@ trigger:
 A 2-second back-off is applied between restarts to prevent tight loops on immediately-failing tasks.
 
 **Chain** — fires when another task completes:
+
 ```yaml
 trigger:
   chain:
@@ -214,7 +222,7 @@ docker:
 **Differences from Docker:**
 
 | | Docker | Podman |
-|---|---|---|
+| --- | --- | --- |
 | Daemon required | Yes (`dockerd`) | No — daemonless, rootless by default |
 | Go SDK | Yes | No — dicode uses the CLI |
 | stdout/stderr | Multiplexed (Docker framing) | Plain line-by-line streams |
@@ -253,10 +261,10 @@ run log in real time.
 
 Use **Edit code** on the task page to edit the Dockerfile directly in the web UI.
 
-### All fields
+### Container fields reference
 
 | Field | Type | Description |
-|---|---|---|
+| --- | --- | --- |
 | `docker.image` | string | Container image (e.g. `nginx:alpine`). Required if `build` is not set. |
 | `docker.build` | object | Build from local Dockerfile instead of pulling. |
 | `docker.build.dockerfile` | string | Path to Dockerfile, relative to task folder. Default: `Dockerfile` |
@@ -341,7 +349,7 @@ Unit test file. Uses a mock-aware test harness injected by the runtime.
 
 See [Testing & Validation](./testing.md) for full documentation.
 
-### Example
+### Test example
 
 ```javascript
 test("sends digest to slack on new emails", async () => {
@@ -379,35 +387,144 @@ test("handles empty inbox gracefully", async () => {
 
 ---
 
-## Filesystem access
+## Permissions
 
-By default tasks have **zero filesystem access**. To grant access, declare the paths and permissions explicitly in `task.yaml`:
+All access is **deny by default**. Tasks can only read env vars, touch the filesystem, or spawn subprocesses that are explicitly listed under `permissions:`.
 
 ```yaml
-fs:
-  - path: ~/data
-    permission: r       # read-only
-  - path: ~/reports
-    permission: rw      # read + write + delete
-  - path: /tmp/dicode
-    permission: rw
+permissions:
+  env:
+    - SLACK_TOKEN               # bare: allowlist $SLACK_TOKEN from host env (same name)
+    - name: API_KEY             # from: read $GH_TOKEN from host OS env, inject as API_KEY
+      from: GH_TOKEN
+    - name: DB_PASS             # secret: resolve "db_password" from secrets store
+      secret: db_password
+  net:
+    - "api.github.com"          # restrict outbound to these hosts (omit = unrestricted)
+  fs:
+    - path: ~/data
+      permission: r             # read-only
+    - path: ~/reports
+      permission: rw            # read + write + delete
+  run:
+    - curl                      # allow spawning curl (Deno only)
+    # - "*"                     # allow all executables
+  sys:
+    - hostname                  # Deno system-info APIs (omit = deny all)
 ```
 
+### `permissions.env` — environment variables
+
+Four forms, with clear source distinction:
+
+| Form | Key | Source | Effect |
+| --- | --- | --- | --- |
+| Bare name | — | Host OS env | Script reads `$VAR` at runtime via `env.get()`; no injection |
+| `from:` | host OS var name | Host OS env | Read `$GH_TOKEN` from OS, inject subprocess env as `API_KEY` |
+| `secret:` | secrets store key | Secrets store | Resolve encrypted secret, inject as the given name; **fails if not found** |
+| `value:` | — | Literal | Inject a fixed string (used by taskset override layers) |
+
+**`from:` vs `secret:` — the key distinction:**
+
+- `from:` reads **only** from the host OS environment (`os.Getenv`). Use it to rename a host env var or make the mapping explicit.
+- `secret:` reads **only** from the dicode secrets store (set via `dicode secrets set`). Run fails immediately if the key is not in the store.
+- A bare name does **neither** — it only allowlists the var so the script can read it from the host env via `env.get()`. No injection, no secrets lookup.
+
+#### Example 1 — bare passthrough (name stays the same)
+
+```yaml
+# task.yaml
+permissions:
+  env:
+    - GITHUB_TOKEN
+```
+
+```typescript
+// task.ts
+export default async function main({ env }) {
+  const token = await env.get("GITHUB_TOKEN")  // reads $GITHUB_TOKEN from host env at runtime
+}
+```
+
+#### Example 2 — rename from host OS env
+
+The host OS has `GH_TOKEN`. The script needs it as `GITHUB_TOKEN`.
+
+```yaml
+# task.yaml
+permissions:
+  env:
+    - name: GITHUB_TOKEN   # name the script sees
+      from: GH_TOKEN       # name in the host OS environment
+```
+
+```typescript
+// task.ts
+export default async function main({ env }) {
+  const token = await env.get("GITHUB_TOKEN")  // injected from $GH_TOKEN
+}
+```
+
+#### Example 3 — inject from secrets store
+
+Store first: `dicode secrets set slack_bot_token xoxb-…`
+
+```yaml
+# task.yaml
+permissions:
+  env:
+    - name: SLACK_TOKEN        # name the script sees
+      secret: slack_bot_token  # key in the dicode secrets store
+```
+
+```typescript
+// task.ts
+export default async function main({ env }) {
+  const token = await env.get("SLACK_TOKEN")  // resolved from secrets store
+}
+```
+
+#### Example 4 — all forms together
+
+```yaml
+# task.yaml
+permissions:
+  env:
+    - PORT                          # bare: script reads $PORT from host env directly
+    - name: GITHUB_TOKEN            # from: rename $GH_TOKEN → GITHUB_TOKEN
+      from: GH_TOKEN
+    - name: SLACK_TOKEN             # secret: from encrypted secrets store
+      secret: slack_bot_token
+    - name: LOG_LEVEL               # value: literal (set by taskset override)
+      value: "info"
+  net:
+    - "api.github.com"
+    - "hooks.slack.com"
+```
+
+```typescript
+// task.ts
+export default async function main({ env }) {
+  const port    = await env.get("PORT")          // from host env (bare)
+  const ghToken = await env.get("GITHUB_TOKEN")  // injected, renamed from $GH_TOKEN
+  const slToken = await env.get("SLACK_TOKEN")   // injected from secrets store
+  const level   = await env.get("LOG_LEVEL")     // literal "info"
+}
+```
+
+### `permissions.fs` — filesystem access (Deno only)
+
 | Permission | Read | Write | Delete | mkdir |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | `r` | ✅ | ❌ | ❌ | ❌ |
 | `w` | ❌ | ✅ | ✅ | ✅ |
 | `rw` | ✅ | ✅ | ✅ | ✅ |
 
-**Path resolution:**
-- `~` is expanded to the user's home directory
-- Relative paths are resolved relative to the task folder (useful for bundling data files alongside the script)
-- Symlinks are resolved before permission checking — a symlink pointing outside a declared path is rejected
-- `../` traversal that escapes a declared base path is rejected
+`~` is expanded to the user's home directory at runtime.
 
-The `fs` global is only injected into the runtime when `fs:` is declared. Tasks without `fs:` cannot access the filesystem at all.
+### `permissions.run` — subprocess execution (Deno only)
 
-See [JS Runtime — fs global](./js-runtime.md#fs--filesystem-access) for the full API.
+Lists executables the script may spawn via `Deno.Command`. Use `["*"]` to allow all. Omitting this field blocks all subprocess execution.
 
 ## Rich output types
 
@@ -439,6 +556,7 @@ See [JS Runtime — output global](./js-runtime.md#output--rich-return-values) f
 ## Task ID
 
 The task ID is derived from the folder name. It must be:
+
 - Lowercase letters, digits, and hyphens only
 - Unique across all configured sources
 - Stable — changing the folder name changes the ID (breaks chain references and run history links)

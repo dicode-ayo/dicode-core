@@ -1,3 +1,4 @@
+import type { DicodeSdk } from "../sdk.ts";
 // GitHub push webhook handler.
 //
 // Setup (GitHub side):
@@ -15,70 +16,71 @@
 // If the signature is missing or wrong the request is rejected with 403 and
 // the script is never executed.
 
-// Input is the parsed JSON body GitHub sends for a push event.
-const event = params.input as {
-  ref: string;
-  before: string;
-  after: string;
-  repository: { full_name: string; html_url: string };
-  pusher: { name: string };
-  commits: Array<{
-    id: string;
-    message: string;
-    author: { name: string };
-    added: string[];
-    removed: string[];
-    modified: string[];
-  }>;
-};
+export default async function main({ log, input, kv, output }: DicodeSdk) {
+  // Input is the parsed JSON body GitHub sends for a push event.
+  const event = input as {
+    ref: string;
+    before: string;
+    after: string;
+    repository: { full_name: string; html_url: string };
+    pusher: { name: string };
+    commits: Array<{
+      id: string;
+      message: string;
+      author: { name: string };
+      added: string[];
+      removed: string[];
+      modified: string[];
+    }>;
+  };
 
-if (!event?.repository) {
-  throw new Error("Unexpected payload — missing repository field");
-}
+  if (!event?.repository) {
+    throw new Error("Unexpected payload — missing repository field");
+  }
 
-const branch = event.ref.replace("refs/heads/", "");
-const repo   = event.repository.full_name;
-const pusher = event.pusher?.name ?? "unknown";
-const commits = event.commits ?? [];
+  const branch = event.ref.replace("refs/heads/", "");
+  const repo   = event.repository.full_name;
+  const pusher = event.pusher?.name ?? "unknown";
+  const commits = event.commits ?? [];
 
-await log.info(
-  `Push to ${repo} on branch ${branch} by ${pusher} — ${commits.length} commit(s)`,
-);
+  await log.info(
+    `Push to ${repo} on branch ${branch} by ${pusher} — ${commits.length} commit(s)`,
+  );
 
-// Collect all touched files across commits.
-const added    = new Set<string>();
-const removed  = new Set<string>();
-const modified = new Set<string>();
+  // Collect all touched files across commits.
+  const added    = new Set<string>();
+  const removed  = new Set<string>();
+  const modified = new Set<string>();
 
-for (const c of commits) {
-  c.added?.forEach(f => added.add(f));
-  c.removed?.forEach(f => removed.add(f));
-  c.modified?.forEach(f => modified.add(f));
-  await log.info(`  ${c.id.slice(0, 7)}  ${c.message.split("\n")[0]}`);
-}
+  for (const c of commits) {
+    c.added?.forEach(f => added.add(f));
+    c.removed?.forEach(f => removed.add(f));
+    c.modified?.forEach(f => modified.add(f));
+    await log.info(`  ${c.id.slice(0, 7)}  ${c.message.split("\n")[0]}`);
+  }
 
-// ── Persist a run counter per repo/branch for trend display ──────────────────
-const kvKey = `github-push:${repo}:${branch}:count`;
-const prev  = (await kv.get(kvKey) as number | null) ?? 0;
-const count = prev + 1;
-await kv.set(kvKey, count);
+  // ── Persist a run counter per repo/branch for trend display ──────────────────
+  const kvKey = `github-push:${repo}:${branch}:count`;
+  const prev  = (await kv.get(kvKey) as number | null) ?? 0;
+  const count = prev + 1;
+  await kv.set(kvKey, count);
 
-// ── Build a compact HTML summary ─────────────────────────────────────────────
-function fileList(files: Set<string>, colour: string, label: string) {
-  if (files.size === 0) return "";
-  const items = [...files].slice(0, 10).map(
-    f => `<li style="font-family:monospace;font-size:.8rem">${f}</li>`,
-  ).join("");
-  const more = files.size > 10
-    ? `<li style="color:#888">…and ${files.size - 10} more</li>` : "";
-  return `
+  // ── Build a compact HTML summary ─────────────────────────────────────────────
+  function fileList(files: Set<string>, colour: string, label: string) {
+    if (files.size === 0) return "";
+    const items = [...files].slice(0, 10).map(
+      f => `<li style="font-family:monospace;font-size:.8rem">${f}</li>`,
+    ).join("");
+    const more = files.size > 10
+      ? `<li style="color:#888">…and ${files.size - 10} more</li>` : "";
+    return `
     <div style="margin-top:.75rem">
       <span style="color:${colour};font-weight:600">${label} (${files.size})</span>
       <ul style="margin:.25rem 0 0 1rem;padding:0">${items}${more}</ul>
     </div>`;
-}
+  }
 
-const commitRows = commits.slice(0, 5).map(c => `
+  const commitRows = commits.slice(0, 5).map(c => `
   <tr>
     <td style="font-family:monospace;font-size:.8rem;padding:.3rem .6rem">
       <a href="${event.repository.html_url}/commit/${c.id}" target="_blank"
@@ -88,11 +90,11 @@ const commitRows = commits.slice(0, 5).map(c => `
     <td style="padding:.3rem .6rem;font-size:.82rem;color:#555">${c.author.name}</td>
   </tr>`).join("");
 
-const moreCommits = commits.length > 5
-  ? `<tr><td colspan="3" style="padding:.3rem .6rem;color:#888;font-size:.82rem">
-       …and ${commits.length - 5} more commits</td></tr>` : "";
+  const moreCommits = commits.length > 5
+    ? `<tr><td colspan="3" style="padding:.3rem .6rem;color:#888;font-size:.82rem">
+         …and ${commits.length - 5} more commits</td></tr>` : "";
 
-return output.html(`
+  return output.html(`
 <div style="font-family:system-ui,sans-serif;max-width:600px;padding:1.5rem">
 
   <div style="display:flex;align-items:baseline;gap:.75rem;margin-bottom:1.25rem">
@@ -131,3 +133,4 @@ return output.html(`
 
 </div>
 `);
+}

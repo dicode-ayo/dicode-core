@@ -1,4 +1,4 @@
-// dicode SDK shim — injected before every task script.
+// dicode SDK shim — imported by the per-run wrapper before calling main().
 // Provides: log, params, env, kv, input, output, __setReturn__, mcp, dicode.
 //
 // Protocol: length-prefixed JSON over a single persistent Unix socket.
@@ -176,3 +176,12 @@ const dicode = {
   get_runs:   (taskID, opts)    => __call__({ method: "dicode.get_runs",   taskID, limit: opts?.limit ?? 10 }),
   get_config: (section)         => __call__({ method: "dicode.get_config", section }),
 };
+
+// ── exports ───────────────────────────────────────────────────────────────────
+// Named exports consumed by the per-run wrapper that calls the user's main().
+
+// __flush__ drains the write queue before the connection is closed.
+// The runner awaits this on exit so fire-and-forget log writes are not lost.
+async function __flush__() { await __wq__; }
+
+export { log, params, env, kv, input, output, mcp, dicode, __setReturn__, __conn__, __flush__ };
