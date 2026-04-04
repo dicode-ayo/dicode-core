@@ -57,10 +57,10 @@ timeout: 60s
 const limit = parseInt(params.limit)
 const token = env.API_TOKEN
 
-log.info(`Processing up to ${limit} items`)
+console.log(`Processing up to ${limit} items`)
 
 const prev = await kv.get("last_count")
-if (prev) log.info(`Last run: ${prev}`)
+if (prev) console.log(`Last run: ${prev}`)
 
 await kv.set("last_count", limit)
 
@@ -73,13 +73,15 @@ return { processed: limit }
 
 The Deno runtime injects all globals via a Unix socket bridge. No imports needed — all globals are available at the top level.
 
-### `log`
+### Logging
+
+Use standard `console` methods — stdout is captured as `info` and stderr as `error` in the run log:
 
 ```typescript
-log.info("message")
-log.warn("something looks off")
-log.error("it broke")
-log.debug("verbose detail")
+console.log("processing started")
+console.warn("something looks off")
+console.error("it broke")
+console.debug("verbose detail")
 ```
 
 ### `params`
@@ -112,7 +114,7 @@ The return value of the upstream task (chain triggers), or the parsed webhook PO
 
 ```typescript
 if (input) {
-  log.info(`upstream returned: ${JSON.stringify(input)}`)
+  console.log(`upstream returned: ${JSON.stringify(input)}`)
 }
 ```
 
@@ -306,7 +308,7 @@ The failure handler receives:
 // input to the failure handler task:
 // { taskID, runID, status, output }
 const { taskID, runID } = input
-log.info(`Task ${taskID} failed — run ${runID}`)
+console.log(`Task ${taskID} failed — run ${runID}`)
 ```
 
 ---

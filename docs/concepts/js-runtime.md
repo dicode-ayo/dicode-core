@@ -17,18 +17,18 @@ Tasks run as JavaScript files inside a sandboxed [goja](https://github.com/dop25
 
 ## Globals reference
 
-### `log` — structured logging
+### Logging
+
+Use standard `console` methods — no separate `log` global needed:
 
 ```javascript
-log.debug("message")
-log.info("message", { key: value })
-log.warn("message")
-log.error("message", { err: error.message })
+console.log("message")
+console.warn("something looks off")
+console.error("it broke", err.message)
+console.debug("verbose detail")
 ```
 
-All log calls are captured in the run log (visible in the WebUI and via `dicode task run --verbose`). They are also forwarded to the dicode process logger at the corresponding level.
-
-The second argument (optional) is a plain object — its fields are added as structured context fields.
+stdout is captured as `info` and stderr as `error` in the run log (visible in the WebUI and via `dicode task run --verbose`).
 
 ---
 
@@ -227,7 +227,7 @@ Available when a task is triggered by a chain or a webhook. Contains the output 
 
 ```javascript
 // task-b/task.js — triggered by task-a completing
-log.info(`Processing ${input.count} items`)
+console.log(`Processing ${input.count} items`)
 const results = await processItems(input.items)
 return { processed: results.length }
 ```
@@ -250,7 +250,7 @@ await dicode.trigger("send-alert", { reason: "spike", value: 99 })
 // Check if another task is currently running
 const busy = await dicode.isRunning("backup-task")
 if (busy) {
-  log.warn("backup already running, skipping")
+  console.warn("backup already running, skipping")
   return
 }
 
@@ -354,7 +354,7 @@ Not available in MVP — planned post-MVP. See [Web UI & API](./webui-api.md#web
 
 | Global | MVP | Description |
 |---|---|---|
-| `log` | ✅ | Structured logging |
+| `console` | ✅ | Logging (stdout → info, stderr → error in run log) |
 | `env` | ✅ | Resolved secrets / env vars |
 | `params` | ✅ | Task parameters |
 | `http` | ✅ | Outbound HTTP |
@@ -379,12 +379,12 @@ try {
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   return { data: res.body }
 } catch (err) {
-  log.error("request failed", { err: err.message })
+  console.error("request failed", err.message)
   throw err   // re-throw to mark run as failed
 }
 ```
 
-Use `log.error()` to record context before re-throwing. The final uncaught exception is always recorded regardless.
+Use `console.error()` to record context before re-throwing. The final uncaught exception is always recorded regardless.
 
 ---
 
@@ -405,6 +405,6 @@ There is no shared state between runs. `kv` is the only cross-run persistence me
 
 - No `import`/`require` — all libraries must be implemented via the injected globals or pure JS
 - No `setTimeout`/`setInterval` — scheduling is done via `task.yaml` triggers
-- No `console.log` — use `log.info()` instead
+- No custom log levels beyond stdout/stderr — use `console.log`/`console.error` etc.
 - Output cap for chain triggers: 1MB. Large data should be stored in `kv` and referenced by key.
 - CPU timeout: configurable (default: 30s per run). Long-running tasks should use `dicode.progress()` to signal activity.

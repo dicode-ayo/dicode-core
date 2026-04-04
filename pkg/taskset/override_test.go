@@ -17,12 +17,26 @@ func baseSpec() *task.Spec {
 		Runtime: task.RuntimeDeno,
 		Timeout: 60 * time.Second,
 		Trigger: task.TriggerConfig{Cron: "0 8 * * *"},
-		Env:     []string{"APP=base", "LOG=debug"},
+		Permissions: task.Permissions{
+			Env: []task.EnvEntry{
+				{Name: "APP", Value: "base"},
+				{Name: "LOG", Value: "debug"},
+			},
+		},
 		Params: []task.Param{
 			{Name: "env", Default: "staging"},
 			{Name: "region", Default: "us-east-1"},
 		},
 	}
+}
+
+// envMap converts permissions.env entries to a name→value map for assertions.
+func envMap(entries []task.EnvEntry) map[string]string {
+	m := make(map[string]string, len(entries))
+	for _, e := range entries {
+		m[e.Name] = e.Value
+	}
+	return m
 }
 
 // ── mergeEnv ──────────────────────────────────────────────────────────────────
@@ -157,8 +171,9 @@ func TestApplyOverrides_SingleLayer(t *testing.T) {
 	if got.Timeout != 30*time.Second {
 		t.Errorf("timeout: got %v", got.Timeout)
 	}
-	if got.Env[1] != "LOG=info" {
-		t.Errorf("env: %v", got.Env)
+	em := envMap(got.Permissions.Env)
+	if em["LOG"] != "info" {
+		t.Errorf("env: %v", got.Permissions.Env)
 	}
 	// Base must not be mutated.
 	if base.Timeout != 60*time.Second {
@@ -194,22 +209,18 @@ func TestApplyOverrides_EnvMerge(t *testing.T) {
 		&Overrides{Env: []string{"LOG=info"}},
 		&Overrides{Env: []string{"LOG=warn", "REGION=eu"}},
 	)
-	envMap := make(map[string]string)
-	for _, e := range got.Env {
-		k := envKey(e)
-		envMap[k] = e
+	em := envMap(got.Permissions.Env)
+	if em["APP"] != "base" {
+		t.Errorf("APP: %q", em["APP"])
 	}
-	if envMap["APP"] != "APP=base" {
-		t.Errorf("APP: %q", envMap["APP"])
+	if em["LOG"] != "warn" {
+		t.Errorf("LOG should be warn: %q", em["LOG"])
 	}
-	if envMap["LOG"] != "LOG=warn" {
-		t.Errorf("LOG should be warn: %q", envMap["LOG"])
+	if em["RUNTIME_ENV"] != "backend" {
+		t.Errorf("RUNTIME_ENV: %q", em["RUNTIME_ENV"])
 	}
-	if envMap["RUNTIME_ENV"] != "RUNTIME_ENV=backend" {
-		t.Errorf("RUNTIME_ENV: %q", envMap["RUNTIME_ENV"])
-	}
-	if envMap["REGION"] != "REGION=eu" {
-		t.Errorf("REGION: %q", envMap["REGION"])
+	if em["REGION"] != "eu" {
+		t.Errorf("REGION: %q", em["REGION"])
 	}
 }
 
@@ -273,9 +284,9 @@ func TestDefaultsToOverrides_Fields(t *testing.T) {
 func TestCopySpec_Independence(t *testing.T) {
 	orig := baseSpec()
 	cp := copySpec(orig)
-	cp.Env[0] = "APP=modified"
+	cp.Permissions.Env[0] = task.EnvEntry{Name: "APP", Value: "modified"}
 	cp.Params[0].Default = "modified"
-	if orig.Env[0] != "APP=base" {
+	if orig.Permissions.Env[0].Value != "base" {
 		t.Error("original env mutated")
 	}
 	if orig.Params[0].Default != "staging" {

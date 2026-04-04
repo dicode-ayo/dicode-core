@@ -55,16 +55,17 @@ var sdkContent string
 // Runtime is the ManagedRuntime implementation for Python+uv.
 // It manages the uv binary lifecycle and creates socket-bridge Executors.
 type Runtime struct {
-	reg       *registry.Registry
-	secrets   secrets.Chain
-	db        db.DB
-	log       *zap.Logger
-	secret    []byte
-	engine    ipc.EngineRunner
-	gateway   *ipc.Gateway
-	aiBaseURL string
-	aiModel   string
-	aiAPIKey  string
+	reg            *registry.Registry
+	secrets        secrets.Chain
+	secretsManager secrets.Manager // optional; wired for dicode.secrets_set/delete
+	db             db.DB
+	log            *zap.Logger
+	secret         []byte
+	engine         ipc.EngineRunner
+	gateway        *ipc.Gateway
+	aiBaseURL      string
+	aiModel        string
+	aiAPIKey       string
 }
 
 // SetEngine configures the engine runner used for dicode.run_task calls.
@@ -72,6 +73,10 @@ func (rt *Runtime) SetEngine(e ipc.EngineRunner) { rt.engine = e }
 
 // SetGateway attaches the HTTP gateway so daemon tasks can call http.register.
 func (rt *Runtime) SetGateway(g *ipc.Gateway) { rt.gateway = g }
+
+// SetSecretsManager wires the secrets manager so tasks with permissions.dicode.secrets_write
+// can call dicode.secrets_set() and dicode.secrets_delete().
+func (rt *Runtime) SetSecretsManager(m secrets.Manager) { rt.secretsManager = m }
 
 // SetAIConfig configures the AI provider details passed to tasks via dicode.get_config.
 func (rt *Runtime) SetAIConfig(baseURL, model, apiKey string) {
@@ -123,34 +128,36 @@ func (rt *Runtime) Install(_ context.Context, version string) error {
 // at binaryPath, connected to the dicode socket-bridge SDK.
 func (rt *Runtime) NewExecutor(binaryPath string) pkgruntime.Executor {
 	return &executor{
-		uvPath:    binaryPath,
-		reg:       rt.reg,
-		secrets:   rt.secrets,
-		db:        rt.db,
-		log:       rt.log,
-		secret:    rt.secret,
-		engine:    rt.engine,
-		gateway:   rt.gateway,
-		aiBaseURL: rt.aiBaseURL,
-		aiModel:   rt.aiModel,
-		aiAPIKey:  rt.aiAPIKey,
+		uvPath:         binaryPath,
+		reg:            rt.reg,
+		secrets:        rt.secrets,
+		secretsManager: rt.secretsManager,
+		db:             rt.db,
+		log:            rt.log,
+		secret:         rt.secret,
+		engine:         rt.engine,
+		gateway:        rt.gateway,
+		aiBaseURL:      rt.aiBaseURL,
+		aiModel:        rt.aiModel,
+		aiAPIKey:       rt.aiAPIKey,
 	}
 }
 
 // --- executor ---
 
 type executor struct {
-	uvPath    string
-	reg       *registry.Registry
-	secrets   secrets.Chain
-	db        db.DB
-	log       *zap.Logger
-	secret    []byte
-	engine    ipc.EngineRunner
-	gateway   *ipc.Gateway
-	aiBaseURL string
-	aiModel   string
-	aiAPIKey  string
+	uvPath         string
+	reg            *registry.Registry
+	secrets        secrets.Chain
+	secretsManager secrets.Manager
+	db             db.DB
+	log            *zap.Logger
+	secret         []byte
+	engine         ipc.EngineRunner
+	gateway        *ipc.Gateway
+	aiBaseURL      string
+	aiModel        string
+	aiAPIKey       string
 }
 
 // Execute implements runtime.Executor.
@@ -165,12 +172,27 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 		}
 	}()
 
-	// Resolve secrets.
-	resolved, err := e.secrets.ResolveAll(ctx, spec.Env)
-	if err != nil {
-		status = registry.StatusFailure
-		result.Error = err
-		return result, nil
+	// Resolve only env vars explicitly declared in permissions.env.
+	// - entry.Value  → literal (taskset override); inject directly
+	// - entry.Secret → look up in secrets store; fail if not found
+	// - entry.From   → read from host OS env (os.Getenv); inject as entry.Name
+	// - bare name    → passthrough only, no injection needed
+	resolved := make(map[string]string, len(spec.Permissions.Env))
+	for _, entry := range spec.Permissions.Env {
+		switch {
+		case entry.Value != "":
+			resolved[entry.Name] = entry.Value
+		case entry.Secret != "":
+			val, err := e.secrets.Resolve(ctx, entry.Secret)
+			if err != nil {
+				status = registry.StatusFailure
+				result.Error = fmt.Errorf("resolve secret %q for env %q: %w", entry.Secret, entry.Name, err)
+				return result, nil
+			}
+			resolved[entry.Name] = val
+		case entry.From != "":
+			resolved[entry.Name] = os.Getenv(entry.From)
+		}
 	}
 
 	// Read the user's task.py.
@@ -199,6 +221,7 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 
 	srv := ipc.New(runID, spec.ID, e.secret, e.reg, e.db, mergedParams, opts.Input, e.log, spec, e.engine, e.aiBaseURL, e.aiModel, e.aiAPIKey)
 	srv.SetGateway(e.gateway)
+	srv.SetSecrets(e.secretsManager)
 	socketPath, token, err := srv.Start(execCtx)
 	if err != nil {
 		status = registry.StatusFailure
@@ -316,7 +339,7 @@ func buildWrapper(scriptBytes []byte) (string, error) {
 	w.WriteString("_asyncio_mod = _sys.modules['asyncio']\n")
 	w.WriteString("_main = globals().get('main')\n")
 	w.WriteString("if _main is not None and _asyncio_mod.iscoroutinefunction(_main):\n")
-	w.WriteString("    result = _asyncio_mod.run(_main())\n")
+	w.WriteString("    result = _asyncio_mod.run(_main(log=log, kv=kv, params=params, env=env, input=input, output=output, mcp=mcp, dicode=dicode))\n")
 	w.WriteString("_set_return(globals().get('result', None))\n")
 	// Schedule close on _loop so it runs *after* any pending _fire coroutines
 	// (the event loop is FIFO — tasks submitted before this will drain first).
@@ -360,7 +383,9 @@ func extractPEP723(src string) (block, body string) {
 func mergeParams(specParams []task.Param, overrides map[string]string) map[string]string {
 	out := make(map[string]string, len(specParams))
 	for _, p := range specParams {
-		out[p.Name] = p.Default
+		if p.Default != "" {
+			out[p.Name] = p.Default
+		}
 	}
 	for k, v := range overrides {
 		out[k] = v

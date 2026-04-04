@@ -15,11 +15,11 @@ const tokenRes = await http.post("https://oauth2.googleapis.com/token", {
   },
 });
 if (tokenRes.status !== 200) {
-  log.error("OAuth2 token exchange failed", { status: tokenRes.status });
+  console.error("OAuth2 token exchange failed", { status: tokenRes.status });
   throw new Error(`OAuth2 error: ${tokenRes.status}`);
 }
 const accessToken = tokenRes.body.access_token;
-log.info("Obtained Gmail access token");
+console.log("Obtained Gmail access token");
 
 // Fetch today's message list
 const maxEmails = Math.min(parseInt(params.max_emails) || 20, 50);
@@ -31,15 +31,15 @@ const listRes = await http.get(listUrl, {
   headers: { Authorization: `Bearer ${accessToken}` },
 });
 if (listRes.status !== 200) {
-  log.error("Gmail list messages failed", { status: listRes.status });
+  console.error("Gmail list messages failed", { status: listRes.status });
   throw new Error(`Gmail API error: ${listRes.status}`);
 }
 
 const messages = listRes.body.messages || [];
-log.info(`Found ${messages.length} email(s) today`);
+console.log(`Found ${messages.length} email(s) today`);
 
 if (messages.length === 0) {
-  log.info("Inbox quiet today — skipping Slack notification");
+  console.log("Inbox quiet today — skipping Slack notification");
   return { count: 0, posted: false };
 }
 
@@ -51,7 +51,7 @@ for (const msg of messages) {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
   if (detailRes.status !== 200) {
-    log.warn("Failed to fetch message metadata", { id: msg.id, status: detailRes.status });
+    console.warn("Failed to fetch message metadata", { id: msg.id, status: detailRes.status });
     continue;
   }
   const hdrs = detailRes.body.payload?.headers || [];
@@ -82,9 +82,9 @@ const slackRes = await http.post("https://slack.com/api/chat.postMessage", {
   body: { channel, text: slackText, mrkdwn: true },
 });
 if (!slackRes.body?.ok) {
-  log.error("Slack post failed", { error: slackRes.body?.error });
+  console.error("Slack post failed", { error: slackRes.body?.error });
   throw new Error(`Slack error: ${slackRes.body?.error}`);
 }
 
-log.info("Digest posted to Slack", { channel, count: emails.length });
+console.log("Digest posted to Slack", { channel, count: emails.length });
 return { count: emails.length, posted: true, channel };

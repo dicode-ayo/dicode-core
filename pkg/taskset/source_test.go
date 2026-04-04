@@ -272,9 +272,8 @@ spec:
 	if spec.Timeout == 90*time.Second {
 		t.Errorf("deprecated kind:Config defaults should not be applied: timeout was set to 90s")
 	}
-	for _, e := range spec.Env {
-		if e == "RUNTIME=prod" {
-			t.Errorf("deprecated kind:Config defaults should not be applied: found env %q", e)
-		}
+	em := envMap(spec.Permissions.Env)
+	if em["RUNTIME"] == "prod" {
+		t.Errorf("deprecated kind:Config defaults should not be applied: found RUNTIME=prod")
 	}
 }

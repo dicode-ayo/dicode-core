@@ -24,6 +24,7 @@ import (
 	"github.com/dicode/dicode/pkg/mcp"
 	"github.com/dicode/dicode/pkg/registry"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
+	denoruntime "github.com/dicode/dicode/pkg/runtime/deno"
 	"github.com/dicode/dicode/pkg/secrets"
 	gitSource "github.com/dicode/dicode/pkg/source/git"
 	"github.com/dicode/dicode/pkg/source/local"
@@ -312,6 +313,12 @@ func (s *Server) Handler() http.Handler {
 	}
 	r.Get("/hooks/*", webhookHandler)
 	r.Post("/hooks/*", webhookHandler)
+
+	// sdk.d.ts — TypeScript declarations for Monaco IntelliSense (public, no auth required).
+	r.Get("/api/sdk/types", func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/typescript; charset=utf-8")
+		_, _ = w.Write(denoruntime.SdkDts)
+	})
 
 	// dicode.js — client SDK injected into webhook task UIs (public, no auth required).
 	r.Get("/dicode.js", func(w http.ResponseWriter, req *http.Request) {
@@ -1021,7 +1028,6 @@ func (s *Server) apiSaveServerSettings(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		LogLevel string `json:"log_level"`
 		Secret   string `json:"secret"`
-		Tray     *bool  `json:"tray"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonErr(w, "bad request", http.StatusBadRequest)
@@ -1032,9 +1038,6 @@ func (s *Server) apiSaveServerSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Secret != "" {
 		s.cfg.Server.Secret = body.Secret
-	}
-	if body.Tray != nil {
-		s.cfg.Server.Tray = body.Tray
 	}
 	if err := s.persistConfig(); err != nil {
 		s.log.Warn("settings persist failed", zap.Error(err))
@@ -1297,9 +1300,6 @@ func (s *Server) persistConfig() error {
 	}
 	serverMap["port"] = s.cfg.Server.Port
 	serverMap["secret"] = s.cfg.Server.Secret
-	if s.cfg.Server.Tray != nil {
-		serverMap["tray"] = *s.cfg.Server.Tray
-	}
 	doc["server"] = serverMap
 
 	if len(s.cfg.Runtimes) > 0 {

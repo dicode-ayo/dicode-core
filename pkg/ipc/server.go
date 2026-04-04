@@ -12,6 +12,7 @@ import (
 	"github.com/dicode/dicode/pkg/db"
 	mcpclient "github.com/dicode/dicode/pkg/mcp/client"
 	"github.com/dicode/dicode/pkg/registry"
+	"github.com/dicode/dicode/pkg/secrets"
 	"github.com/dicode/dicode/pkg/task"
 	"go.uber.org/zap"
 )
@@ -32,6 +33,7 @@ type Server struct {
 	input    any
 	spec     *task.Spec
 	engine   EngineRunner
+	secrets  secrets.Manager // optional; enables dicode.secrets_set / dicode.secrets_delete
 	log      *zap.Logger
 
 	aiBaseURL string
@@ -80,6 +82,10 @@ func New(
 	}
 }
 
+// SetSecrets attaches the secrets manager so tasks with permissions.dicode.secrets_write
+// can call dicode.secrets_set() and dicode.secrets_delete().
+func (s *Server) SetSecrets(m secrets.Manager) { s.secrets = m }
+
 // Start creates the Unix socket and begins accepting connections.
 // Returns the socket path and a capability token to pass to the subprocess.
 func (s *Server) Start(ctx context.Context) (socketPath, token string, err error) {
@@ -95,12 +101,28 @@ func (s *Server) Start(ctx context.Context) (socketPath, token string, err error
 	s.listener = l
 
 	// Build capability set for this task.
+	// Core I/O caps are always granted; dicode.* API caps require explicit
+	// opt-in via permissions.dicode in task.yaml.
 	caps := defaultTaskCaps()
-	if s.spec != nil && s.spec.Security != nil && len(s.spec.Security.AllowedTasks) > 0 {
-		caps = append(caps, CapTaskTrigger)
-	}
-	if s.spec != nil && s.spec.Security != nil && len(s.spec.Security.AllowedMCP) > 0 {
-		caps = append(caps, CapMCPCall)
+	if dp := dicodePerms(s.spec); dp != nil {
+		if len(dp.Tasks) > 0 {
+			caps = append(caps, CapTaskTrigger)
+		}
+		if len(dp.MCP) > 0 {
+			caps = append(caps, CapMCPCall)
+		}
+		if dp.ListTasks {
+			caps = append(caps, CapTasksList)
+		}
+		if dp.GetRuns {
+			caps = append(caps, CapRunsList)
+		}
+		if dp.GetConfig {
+			caps = append(caps, CapConfigRead)
+		}
+		if dp.SecretsWrite {
+			caps = append(caps, CapSecretsWrite)
+		}
 	}
 	if s.spec != nil && s.spec.Trigger.Daemon && s.gateway != nil {
 		caps = append(caps, CapHTTPRegister)
@@ -453,6 +475,46 @@ func (s *Server) handleConn(conn net.Conn) {
 				"model":   s.aiModel,
 			}, "")
 
+		// ── dicode.secrets_* ──────────────────────────────────────────────
+
+		case "dicode.secrets_set":
+			if !hasCap(caps, CapSecretsWrite) {
+				reply(req.ID, nil, "ipc: permission denied (secrets.write)")
+				continue
+			}
+			if s.secrets == nil {
+				reply(req.ID, nil, "ipc: no secrets provider configured")
+				continue
+			}
+			if req.Key == "" {
+				reply(req.ID, nil, "ipc: key required")
+				continue
+			}
+			if err := s.secrets.Set(context.Background(), req.Key, req.StringValue); err != nil {
+				reply(req.ID, nil, err.Error())
+				continue
+			}
+			reply(req.ID, true, "")
+
+		case "dicode.secrets_delete":
+			if !hasCap(caps, CapSecretsWrite) {
+				reply(req.ID, nil, "ipc: permission denied (secrets.write)")
+				continue
+			}
+			if s.secrets == nil {
+				reply(req.ID, nil, "ipc: no secrets provider configured")
+				continue
+			}
+			if req.Key == "" {
+				reply(req.ID, nil, "ipc: key required")
+				continue
+			}
+			if err := s.secrets.Delete(context.Background(), req.Key); err != nil {
+				reply(req.ID, nil, err.Error())
+				continue
+			}
+			reply(req.ID, true, "")
+
 		// ── mcp.* ─────────────────────────────────────────────────────────
 
 		case "mcp.list_tools":
@@ -546,11 +608,20 @@ func (s *Server) handleConn(conn net.Conn) {
 	}
 }
 
+// dicodePerms returns the Dicode permission block for the current spec, or nil.
+func dicodePerms(spec *task.Spec) *task.DicodePermissions {
+	if spec == nil {
+		return nil
+	}
+	return spec.Permissions.Dicode
+}
+
 func (s *Server) taskAllowed(taskID string) bool {
-	if s.spec == nil || s.spec.Security == nil {
+	dp := dicodePerms(s.spec)
+	if dp == nil {
 		return false
 	}
-	for _, a := range s.spec.Security.AllowedTasks {
+	for _, a := range dp.Tasks {
 		if a == "*" || a == taskID {
 			return true
 		}
@@ -559,10 +630,11 @@ func (s *Server) taskAllowed(taskID string) bool {
 }
 
 func (s *Server) mcpAllowed(name string) bool {
-	if s.spec == nil || s.spec.Security == nil {
+	dp := dicodePerms(s.spec)
+	if dp == nil {
 		return false
 	}
-	for _, a := range s.spec.Security.AllowedMCP {
+	for _, a := range dp.MCP {
 		if a == "*" || a == name {
 			return true
 		}
