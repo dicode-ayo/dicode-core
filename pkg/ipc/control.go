@@ -29,10 +29,11 @@ type ControlServer struct {
 	secret     []byte // HMAC key, generated on New
 	token      string // pre-issued CLI token written to tokenPath
 
-	reg     *registry.Registry
-	engine  EngineRunner
-	secrets secrets.Manager // nil if no local provider configured
-	log     *zap.Logger
+	reg             *registry.Registry
+	engine          EngineRunner
+	secrets         secrets.Manager // nil if no local provider configured
+	metricsProvider MetricsProvider
+	log             *zap.Logger
 
 	startedAt time.Time
 	version   string
@@ -46,6 +47,7 @@ func NewControlServer(
 	reg *registry.Registry,
 	engine EngineRunner,
 	secretsMgr secrets.Manager,
+	mp MetricsProvider,
 	version string,
 	log *zap.Logger,
 ) (*ControlServer, error) {
@@ -55,15 +57,16 @@ func NewControlServer(
 	}
 
 	cs := &ControlServer{
-		socketPath: socketPath,
-		tokenPath:  tokenPath,
-		secret:     secret,
-		reg:        reg,
-		engine:     engine,
-		secrets:    secretsMgr,
-		log:        log,
-		startedAt:  time.Now(),
-		version:    version,
+		socketPath:      socketPath,
+		tokenPath:       tokenPath,
+		secret:          secret,
+		reg:             reg,
+		engine:          engine,
+		secrets:         secretsMgr,
+		metricsProvider: mp,
+		log:             log,
+		startedAt:       time.Now(),
+		version:         version,
 	}
 
 	// Issue the CLI token with a long TTL — the daemon re-issues on every restart,
@@ -200,6 +203,9 @@ func (cs *ControlServer) dispatch(ctx context.Context, req Request) (any, error)
 	case "cli.secrets.delete":
 		return nil, cs.handleSecretsDelete(ctx, req)
 
+	case "cli.metrics":
+		return cs.handleMetrics(), nil
+
 	default:
 		return nil, fmt.Errorf("unknown method: %s", req.Method)
 	}
@@ -315,6 +321,43 @@ func (cs *ControlServer) handleSecretsDelete(ctx context.Context, req Request) e
 		return errors.New("key required")
 	}
 	return cs.secrets.Delete(ctx, req.Key)
+}
+
+// MetricsProvider is a pair of functions injected at startup to avoid import
+// cycles between pkg/ipc and pkg/metrics / pkg/runtime/deno.
+type MetricsProvider struct {
+	// ReadDaemon returns current daemon heap/goroutine/CPU metrics.
+	ReadDaemon func() (heapAllocMB, heapSysMB float64, goroutines int, cpuMs *int64)
+	// ActivePIDs returns the PIDs of live child (Deno) processes.
+	ActivePIDs func() []int
+	// ReadChildren returns aggregate RSS and CPU for the given PIDs.
+	ReadChildren func(pids []int, activeTasks int) (rssTotal float64, cpuTotal *int64)
+}
+
+// handleMetrics returns a MetricsSnapshot populated from the runtime/metrics
+// package and, on Linux, from /proc. It is wired to the cli.metrics command so
+// that the CLI and TUI can query live daemon health over the control socket
+// without going through the HTTP API.
+func (cs *ControlServer) handleMetrics() MetricsSnapshot {
+	var snap MetricsSnapshot
+	snap.Tasks.ActiveTasks = cs.engine.ActiveRunCount()
+
+	if cs.metricsProvider.ReadDaemon != nil {
+		heapAlloc, heapSys, goroutines, cpuMs := cs.metricsProvider.ReadDaemon()
+		snap.Daemon.HeapAllocMB = heapAlloc
+		snap.Daemon.HeapSysMB = heapSys
+		snap.Daemon.Goroutines = goroutines
+		snap.Daemon.CPUMs = cpuMs
+	}
+
+	if cs.metricsProvider.ActivePIDs != nil && cs.metricsProvider.ReadChildren != nil {
+		pids := cs.metricsProvider.ActivePIDs()
+		rss, cpu := cs.metricsProvider.ReadChildren(pids, snap.Tasks.ActiveTasks)
+		snap.Tasks.ChildRSSMB = rss
+		snap.Tasks.ChildCPUMs = cpu
+	}
+
+	return snap
 }
 
 // triggerLabel returns a human-readable trigger description for a task spec.
