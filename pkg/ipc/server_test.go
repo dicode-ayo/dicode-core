@@ -31,6 +31,7 @@ func (m *mockEngine) FireManual(_ context.Context, _ string, _ map[string]string
 func (m *mockEngine) WaitRun(_ context.Context, _ string) (RunResult, error) {
 	return m.result, m.err
 }
+func (m *mockEngine) ActiveRunCount() int { return 0 }
 
 // sendMsg writes a length-prefixed JSON message to conn.
 func sendMsg(t *testing.T, conn net.Conn, v any) {
