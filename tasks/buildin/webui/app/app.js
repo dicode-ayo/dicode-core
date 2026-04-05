@@ -12,6 +12,7 @@ import './components/dc-security.js';
 import './components/dc-sources.js';
 import './components/dc-log-bar.js';
 import './components/dc-notif-panel.js';
+import './components/dc-metrics.js';
 
 // ── Auth overlay ──────────────────────────────────────────────────────────────
 // Inject a single <dc-auth-overlay> into the document body. The API client
@@ -42,6 +43,7 @@ route(/^\/config$/,    () => { app.innerHTML = '<dc-config></dc-config>'; });
 route(/^\/secrets$/,   () => { app.innerHTML = '<dc-secrets></dc-secrets>'; });
 route(/^\/security$/,  () => { app.innerHTML = '<dc-security></dc-security>'; });
 route(/^\/sources$/,   () => { app.innerHTML = '<dc-sources></dc-sources>'; });
+route(/^\/metrics$/,   () => { app.innerHTML = '<dc-metrics></dc-metrics>'; });
 route(/^\/$/,          () => { app.innerHTML = '<dc-task-list></dc-task-list>'; });
 
 // Expose navigate globally for any inline hrefs
