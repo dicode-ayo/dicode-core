@@ -1,0 +1,54 @@
+apiVersion: dicode/v1
+kind: Task
+name: Google OAuth
+description: >
+  Dual-mode Google OAuth2 task using PKCE — no client secret required.
+  Run manually from the UI to get the authorization URL, open it in a browser.
+  Google redirects to the webhook, which exchanges the code and stores
+  GOOGLE_REFRESH_TOKEN and GOOGLE_ACCESS_TOKEN in the encrypted secret store.
+
+  ── Google Cloud Console setup ───────────────────────────────────────────────
+  1. https://console.cloud.google.com → select or create a project.
+  2. APIs & Services → Enable APIs → enable the APIs you need (e.g. Gmail API).
+  3. APIs & Services → OAuth consent screen → fill in app name and add scopes.
+  4. APIs & Services → Credentials → Create credentials → OAuth 2.0 Client ID.
+     Application type: Desktop app  (no secret issued — PKCE only).
+  5. Copy the client ID and store it:
+       dicode secret set GOOGLE_CLIENT_ID <client-id>
+  6. Set your dicode base URL (the host dicode is running on):
+       dicode secret set DICODE_BASE_URL http://localhost:8080
+
+  ── Using the task ───────────────────────────────────────────────────────────
+  - Click Run in the dicode UI → opens an auth page with the Google button.
+  - After authorizing, tokens are stored automatically. Other tasks can use them:
+      env:
+        - name: GOOGLE_ACCESS_TOKEN
+          secret: GOOGLE_ACCESS_TOKEN
+
+runtime: deno
+
+trigger:
+  webhook: /hooks/google-oauth
+
+permissions:
+  env:
+    - name: GOOGLE_CLIENT_ID
+      secret: GOOGLE_CLIENT_ID
+    - name: DICODE_BASE_URL
+      secret: DICODE_BASE_URL
+  net:
+    - oauth2.googleapis.com
+    - accounts.google.com
+  fs:
+    - path: ../_oauth
+      permission: r
+  dicode:
+    secrets_write: true
+
+params:
+  - name: scope
+    type: string
+    default: "https://www.googleapis.com/auth/gmail.readonly"
+    description: Space-separated OAuth scopes to request
+
+timeout: 30s

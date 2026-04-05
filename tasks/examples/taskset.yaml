@@ -1,0 +1,52 @@
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: examples
+spec:
+  entries:
+    hello-cron:
+      ref:
+        path: ./hello-cron/task.yaml
+
+    hello-docker:
+      ref:
+        path: ./hello-docker/task.yaml
+
+    hello-podman:
+      ref:
+        path: ./hello-podman/task.yaml
+
+    hello-python:
+      ref:
+        path: ./hello-python/task.yaml
+
+    hello-webhook:
+      ref:
+        path: ./hello-webhook/task.yaml
+
+    nginx-start:
+      ref:
+        path: ./nginx-start/task.yaml
+
+    webhook-form:
+      ref:
+        path: ./webhook-form/task.yaml
+
+    webhook-dashboard:
+      ref:
+        path: ./webhook-dashboard/task.yaml
+
+    github-stars:
+      ref:
+        path: ./github-stars/task.yaml
+
+    github-stars-hook:
+      ref:
+        path: ./github-stars/task.yaml
+      overrides:
+        trigger:
+          webhook: /hooks/examples/github-stars-hook
+
+    github-push-webhook:
+      ref:
+        path: ./github-push-webhook/task.yaml
