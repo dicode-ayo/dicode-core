@@ -49,6 +49,31 @@ Requires authentication when `server.auth: true` is set in `dicode.yaml`. Return
 
 Fields marked "Linux only" are sourced from `/proc/self/stat` and `/proc/<pid>/status`. On macOS, Windows, and other non-Linux platforms those fields are omitted from the JSON object (`omitempty`), so the response remains valid and parseable — the fields simply do not appear.
 
+## WebUI dashboard
+
+The webui example includes a `dc-metrics` component at the `/metrics` route that polls `GET /api/metrics` every 5 seconds and renders daemon and task cards automatically. No configuration required.
+
+## IPC control socket (`cli.metrics`)
+
+Metrics are also accessible over the daemon's Unix control socket, enabling the CLI and TUI to query live health without going through HTTP.
+
+**Request:**
+```json
+{ "id": "1", "method": "cli.metrics" }
+```
+
+**Response** (`result` field):
+```json
+{
+  "daemon": { "heap_alloc_mb": 42.3, "goroutines": 87, "cpu_ms": 1240 },
+  "tasks":  { "active_tasks": 5, "children_rss_mb": 310.5 }
+}
+```
+
+The response shape (`MetricsSnapshot`) mirrors the HTTP JSON exactly. The field set is identical to `/api/metrics`; Linux-only `/proc` fields are omitted on other platforms.
+
+Authentication uses the pre-shared CLI token written to `dataDir/daemon.token` on daemon startup — the same token used by all `cli.*` commands.
+
 ## Metrics are computed on-demand
 
 There is no background aggregation thread. Every request to `/api/metrics` reads current values synchronously:
