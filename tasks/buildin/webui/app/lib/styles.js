@@ -38,6 +38,24 @@ export const SHARED_CSS = `
   .cfg-form label { font-size: 0.78rem; color: #888; display: block; margin-bottom: 0.25rem; }
   .cfg-form .field { margin-bottom: 0.75rem; }
   .cfg-form .hint { font-size: 0.72rem; color: #666; margin-top: 0.2rem; }
+  .task-desc { font-size: 0.875rem; color: #444; line-height: 1.65; margin-bottom: 0.75rem; }
+  .task-desc p  { margin-bottom: 0.5rem; }
+  .task-desc p:last-child { margin-bottom: 0; }
+  .task-desc h2 { font-size: 0.875rem; font-weight: 700; color: #212529; margin: 0.85rem 0 0.3rem; }
+  .task-desc h3 { font-size: 0.825rem; font-weight: 600; color: #495057; margin: 0.6rem 0 0.2rem; }
+  .task-desc ul, .task-desc ol { padding-left: 1.4rem; margin-bottom: 0.5rem; }
+  .task-desc li { margin-bottom: 0.2rem; }
+  .task-desc li p { margin-bottom: 0; }
+  .task-desc ol > li { padding-left: 0.15rem; margin-bottom: 0.45rem; }
+  .task-desc ol > li::marker { font-weight: 700; color: #495057; }
+  .task-desc ol > li > ul { margin-top: 0.3rem; margin-bottom: 0; padding-left: 1.1rem; }
+  .task-desc ol > li > ul > li { margin-bottom: 0.15rem; list-style-type: disc; }
+  .task-desc code { background: #f1f3f5; color: #c92a2a; padding: 0.1em 0.35em; border-radius: 3px; font-size: 0.82em; font-family: ui-monospace,SFMono-Regular,Menlo,monospace; }
+  .task-desc pre { margin: 0.5rem 0; }
+  .task-desc pre code { background: none; color: inherit; padding: 0; }
+  .task-desc a { color: #0d6efd; }
+  .task-desc hr { border: none; border-top: 1px solid #dee2e6; margin: 0.75rem 0; }
+  .task-desc strong { color: #212529; }
 `;
 
 // For Shadow DOM adoption (unused if all components use light DOM)

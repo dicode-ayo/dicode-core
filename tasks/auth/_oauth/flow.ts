@@ -78,7 +78,37 @@ export async function exchangeCodePKCE(opts: {
   return data;
 }
 
-// ── Token exchange: client secret (no PKCE) ───────────────────────────────────
+// ── Token exchange: PKCE + client secret (Google Desktop app) ────────────────
+// Google requires client_secret even for public Desktop app clients using PKCE.
+// The secret is acknowledged as non-confidential by Google's own docs but is
+// still required as a client identifier in the token exchange.
+
+export async function exchangeCodePKCEWithSecret(opts: {
+  provider:     OAuthProvider;
+  clientId:     string;
+  clientSecret: string;
+  redirectURI:  string;
+  code:         string;
+  verifier:     string;
+}): Promise<TokenResponse> {
+  const res = await fetch(opts.provider.tokenUrl, {
+    method:  "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type:    "authorization_code",
+      client_id:     opts.clientId,
+      client_secret: opts.clientSecret,
+      redirect_uri:  opts.redirectURI,
+      code:          opts.code,
+      code_verifier: opts.verifier,
+    }),
+  });
+  const data = await res.json() as TokenResponse;
+  if (!res.ok) throw new Error(`Token exchange failed: ${data.error_description ?? data.error ?? res.status}`);
+  return data;
+}
+
+// ── Token exchange: client secret only (no PKCE) ──────────────────────────────
 
 export async function exchangeCodeSecret(opts: {
   provider:     OAuthProvider;
@@ -101,6 +131,101 @@ export async function exchangeCodeSecret(opts: {
   const data = await res.json() as TokenResponse;
   if (!res.ok) throw new Error(`Token exchange failed: ${data.error_description ?? data.error ?? res.status}`);
   return data;
+}
+
+// ── Token refresh: PKCE (no client secret) ───────────────────────────────────
+
+export async function refreshAccessTokenPKCE(opts: {
+  provider:     OAuthProvider;
+  clientId:     string;
+  refreshToken: string;
+}): Promise<TokenResponse> {
+  const res = await fetch(opts.provider.tokenUrl, {
+    method:  "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type:    "refresh_token",
+      client_id:     opts.clientId,
+      refresh_token: opts.refreshToken,
+    }),
+  });
+  const data = await res.json() as TokenResponse;
+  if (!res.ok) throw new Error(`Token refresh failed: ${data.error_description ?? data.error ?? res.status}`);
+  return data;
+}
+
+// ── Token refresh: PKCE + client secret ──────────────────────────────────────
+
+export async function refreshAccessTokenWithSecret(opts: {
+  provider:     OAuthProvider;
+  clientId:     string;
+  clientSecret: string;
+  refreshToken: string;
+}): Promise<TokenResponse> {
+  const res = await fetch(opts.provider.tokenUrl, {
+    method:  "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type:    "refresh_token",
+      client_id:     opts.clientId,
+      client_secret: opts.clientSecret,
+      refresh_token: opts.refreshToken,
+    }),
+  });
+  const data = await res.json() as TokenResponse;
+  if (!res.ok) throw new Error(`Token refresh failed: ${data.error_description ?? data.error ?? res.status}`);
+  return data;
+}
+
+// ── Expiry helpers ────────────────────────────────────────────────────────────
+
+/** Returns true if the token expires within `seconds` from now (or expiry unknown). */
+export function tokenExpiresWithin(expiresAt: number | null | undefined, seconds: number): boolean {
+  if (expiresAt == null) return true;
+  return Date.now() >= (expiresAt - seconds * 1000);
+}
+
+// ── Auth entry point: log URL + HTML or chain notification ───────────────────
+//
+// Call this at the end of every auth task instead of duplicating the pattern.
+// It always logs the authorization URL (visible in CLI, CI logs, and run detail),
+// then either returns the HTML page (manual/webhook) or fires a desktop
+// notification and throws (chain/cron trigger — no interactive output available).
+//
+// `isChain` should be true whenever `input !== null && !code` (non-interactive run).
+
+export async function handleAuthNeeded(opts: {
+  name:        string;
+  authURL:     string;
+  redirectURI: string;
+  scope:       string;
+  color?:      string;
+  isChain:     boolean;
+  output:      { html(content: string): unknown };
+  dicode:      { run_task(id: string, params?: Record<string, string>): Promise<unknown> };
+}): Promise<unknown> {
+  // Always log — shows up in `dicode run`, CI job logs, and the run-detail log panel.
+  console.log(`\n  ${opts.name} OAuth — open this URL to authorize:\n  ${opts.authURL}\n`);
+
+  if (opts.isChain) {
+    // Non-interactive: send a desktop notification and fail fast with the URL in the error.
+    try {
+      await opts.dicode.run_task("buildin/notifications", {
+        title:    `${opts.name} re-authorisation required`,
+        body:     `Open dicode and run "${opts.name} OAuth" to refresh your access token.`,
+        priority: "high",
+      });
+    } catch (_) { /* notification is best-effort */ }
+    throw new Error(
+      `${opts.name} OAuth token expired or missing — re-auth required.\n` +
+      `Open this URL to authorize: ${opts.authURL}`
+    );
+  }
+
+  return opts.output.html(authorizeHtml({
+    name: opts.name, authURL: opts.authURL,
+    redirectURI: opts.redirectURI, scope: opts.scope, color: opts.color,
+  }));
 }
 
 // ── Shared UI helpers ─────────────────────────────────────────────────────────

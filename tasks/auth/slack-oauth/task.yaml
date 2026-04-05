@@ -1,37 +1,34 @@
 apiVersion: dicode/v1
 kind: Task
 name: Slack OAuth
-description: >
-  Dual-mode Slack OAuth2 task (Authorization Code + client secret).
-  Run manually from the UI to get the authorization URL, open it in a browser.
-  Slack redirects to the webhook, which exchanges the code and stores
-  SLACK_BOT_TOKEN (and optionally SLACK_USER_TOKEN) in the encrypted secret store.
+description: |
+  Slack OAuth 2.0 — PKCE only, no client secret required (GA March 2026).
+  Works out of the box with the built-in dicode app registration.
+  Slack user tokens do **not expire** — once stored, no refresh is needed.
 
-  Note: Slack does not support PKCE, so a client secret is required.
+  ## Zero setup (built-in app)
 
-  ── Slack App setup ───────────────────────────────────────────────────────────
-  1. Go to https://api.slack.com/apps → Create New App → From scratch.
-  2. OAuth & Permissions → Redirect URLs → Add: http://localhost:8080/hooks/slack-oauth
-  3. OAuth & Permissions → Bot Token Scopes → add the scopes you need.
-  4. Basic Information → copy App Credentials (Client ID, Client Secret).
-  5. Store credentials:
-       dicode secret set SLACK_CLIENT_ID     <client-id>
-       dicode secret set SLACK_CLIENT_SECRET <client-secret>
-       dicode secret set DICODE_BASE_URL     http://localhost:8080
+  Just click **Run now**. The built-in client ID is used automatically.
+  Redirect URI: `http://localhost:8080/hooks/slack-oauth`
+
+  ## Using your own Slack App
+
+  1. [api.slack.com/apps](https://api.slack.com/apps) → Create New App → From scratch
+  2. **Settings** → Enable PKCE *(one-way operation)*
+  3. **OAuth & Permissions** → Redirect URLs → `http://localhost:8080/hooks/slack-oauth`
+  4. **OAuth & Permissions** → User Token Scopes → add scopes
+  5. `dicode secret set SLACK_CLIENT_ID <client-id>`
 
 runtime: deno
-
 trigger:
   webhook: /hooks/slack-oauth
-
 permissions:
   env:
-    - name: SLACK_CLIENT_ID
-      secret: SLACK_CLIENT_ID
-    - name: SLACK_CLIENT_SECRET
-      secret: SLACK_CLIENT_SECRET
-    - name: DICODE_BASE_URL
-      secret: DICODE_BASE_URL
+    - SLACK_CLIENT_ID    # optional — falls back to built-in
+    - DICODE_BASE_URL    # optional — defaults to http://localhost:8080
+    - name: SLACK_USER_TOKEN
+      secret: SLACK_USER_TOKEN
+      optional: true
   net:
     - slack.com
   fs:
@@ -39,11 +36,11 @@ permissions:
       permission: r
   dicode:
     secrets_write: true
-
+    tasks:
+      - buildin/notifications
 params:
   - name: scope
     type: string
-    default: "channels:read,chat:write"
-    description: Comma-separated bot token scopes to request
-
+    default: "channels:read"
+    description: Space-separated Slack user token scopes
 timeout: 30s

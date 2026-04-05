@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"context"
 	_ "embed"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -119,6 +120,12 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	status := registry.StatusSuccess
 
 	defer func() {
+		// If the run failed before Deno started (secret missing, script not found,
+		// etc.) result.Error is set but no log entries exist yet. Append it now so
+		// the error is visible in both the Web UI run detail and the CLI log output.
+		if result.Error != nil {
+			_ = rt.registry.AppendLog(context.Background(), runID, "error", result.Error.Error())
+		}
 		if logs, lerr := rt.registry.GetRunLogs(context.Background(), runID); lerr == nil {
 			result.Logs = logs
 		}
@@ -140,6 +147,12 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		case entry.Secret != "":
 			val, err := rt.secrets.Resolve(ctx, entry.Secret)
 			if err != nil {
+				var notFound *secrets.NotFoundError
+				if entry.Optional && errors.As(err, &notFound) {
+					// optional secret not set — inject empty string so Deno.env.get() returns null
+					resolved[entry.Name] = ""
+					break
+				}
 				status = registry.StatusFailure
 				result.Error = fmt.Errorf("resolve secret %q for env %q: %w", entry.Secret, entry.Name, err)
 				return result, nil
