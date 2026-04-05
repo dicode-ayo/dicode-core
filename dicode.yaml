@@ -20,6 +20,12 @@ server:
     secret: ""
     tray: true
 sources:
+    - name: buildin
+      path: /home/dr14/dicode/tasks/buildin/taskset.yaml
+      type: local
+    - name: auth
+      path: /home/dr14/dicode/tasks/auth/taskset.yaml
+      type: local
     - name: examples
-      path: /home/dr14/dicode/examples/taskset.yaml
+      path: /home/dr14/dicode/tasks/examples/taskset.yaml
       type: local

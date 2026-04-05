@@ -1,0 +1,13 @@
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: auth
+spec:
+  entries:
+    google-oauth:
+      ref:
+        path: ./google-oauth/task.yaml
+
+    slack-oauth:
+      ref:
+        path: ./slack-oauth/task.yaml
