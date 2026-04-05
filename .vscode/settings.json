@@ -1,3 +1,5 @@
 {
-    "makefile.configureOnOpen": false
+    "makefile.configureOnOpen": false,
+    "deno.enablePaths": ["tasks"],
+    "deno.lint": true
 }

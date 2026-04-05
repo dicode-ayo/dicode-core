@@ -1,8 +1,12 @@
 import { LitElement, html } from 'https://esm.sh/lit@3';
+import { unsafeHTML } from 'https://esm.sh/lit@3/directives/unsafe-html.js';
+import { marked } from 'https://esm.sh/marked@14';
 import { get, post } from '../lib/api.js';
 import { wsOn } from '../lib/ws.js';
 import { navigate } from '../lib/router.js';
 import { fmtTime, fmtDuration } from '../lib/utils.js';
+
+marked.use({ gfm: true, breaks: true });
 
 class DcTaskDetail extends LitElement {
   createRenderRoot() { return this; } // light DOM — Monaco needs direct DOM access
@@ -255,7 +259,7 @@ class DcTaskDetail extends LitElement {
         <button class="btn" @click=${() => this._run()}>&#9654; Run now</button>
         <button class="btn" style="background:#495057" @click=${() => this._openEditor()}>&#9998; Edit code</button>
       </div>
-      ${task.description ? html`<p class="meta" style="margin-bottom:0.75rem">${task.description}</p>` : ''}
+      ${task.description ? html`<div class="task-desc">${unsafeHTML(marked.parse(task.description))}</div>` : ''}
 
       <div class="card" style="margin-bottom:1rem;display:flex;align-items:center;gap:0.75rem">
         <span style="font-size:0.85rem"><strong>Trigger:</strong> ${task.trigger_label || 'manual'}</span>

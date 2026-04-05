@@ -1,0 +1,33 @@
+apiVersion: dicode/v1
+kind: Task
+name: Notion OAuth
+description: >
+  Notion OAuth2 — client secret required, no PKCE support.
+
+  ── Setup ─────────────────────────────────────────────────────────────────────
+  1. https://www.notion.so/profile/integrations → New integration → Public.
+     Redirect URI: http://localhost:8080/hooks/notion-oauth
+  2. Store credentials:
+       dicode secret set NOTION_CLIENT_ID     <oauth-client-id>
+       dicode secret set NOTION_CLIENT_SECRET <oauth-client-secret>
+       dicode secret set DICODE_BASE_URL      http://localhost:8080
+
+runtime: deno
+trigger:
+  webhook: /hooks/notion-oauth
+permissions:
+  env:
+    - name: NOTION_CLIENT_ID
+      secret: NOTION_CLIENT_ID
+    - name: NOTION_CLIENT_SECRET
+      secret: NOTION_CLIENT_SECRET
+    - name: DICODE_BASE_URL
+      secret: DICODE_BASE_URL
+  net:
+    - api.notion.com
+  fs:
+    - path: ../_oauth
+      permission: r
+  dicode:
+    secrets_write: true
+timeout: 30s

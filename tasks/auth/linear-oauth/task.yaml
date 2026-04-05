@@ -1,0 +1,45 @@
+apiVersion: dicode/v1
+kind: Task
+name: Linear OAuth
+description: |
+  Linear OAuth 2.0 — PKCE only, no client secret required (apps created after Oct 2025).
+  Linear access tokens are very **long-lived** — once stored, re-auth is rarely needed.
+
+  ## Zero setup (built-in app)
+
+  Just click **Run now**. The built-in client ID is used automatically.
+  Redirect URI: `http://localhost:8080/hooks/linear-oauth`
+
+  ## Using your own Linear OAuth App
+
+  1. [linear.app/settings/api](https://linear.app/settings/api) → OAuth applications → Create new
+     - Callback URL: `http://localhost:8080/hooks/linear-oauth`
+     - ✅ Enable PKCE
+  2. `dicode secret set LINEAR_CLIENT_ID <client-id>`
+
+runtime: deno
+trigger:
+  webhook: /hooks/linear-oauth
+permissions:
+  env:
+    - LINEAR_CLIENT_ID   # optional — falls back to built-in
+    - DICODE_BASE_URL    # optional — defaults to http://localhost:8080
+    - name: LINEAR_ACCESS_TOKEN
+      secret: LINEAR_ACCESS_TOKEN
+      optional: true
+  net:
+    - linear.app
+    - api.linear.app
+  fs:
+    - path: ../_oauth
+      permission: r
+  dicode:
+    secrets_write: true
+    tasks:
+      - buildin/notifications
+params:
+  - name: scope
+    type: string
+    default: "read"
+    description: Space-separated Linear scopes (read, write, issues:create, etc.)
+timeout: 30s

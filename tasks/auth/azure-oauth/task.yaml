@@ -1,0 +1,43 @@
+apiVersion: dicode/v1
+kind: Task
+name: Microsoft Azure OAuth
+description: >
+  Microsoft Azure AD OAuth2 — PKCE + client secret.
+  Works for personal accounts, work/school accounts, or both (set tenant param).
+
+  ── Setup ─────────────────────────────────────────────────────────────────────
+  1. https://portal.azure.com → Azure Active Directory → App registrations → New.
+     Redirect URI: http://localhost:8080/hooks/azure-oauth (type: Public client/native)
+  2. Store credentials:
+       dicode secret set AZURE_CLIENT_ID     <application-id>
+       dicode secret set AZURE_CLIENT_SECRET <client-secret-value>
+       dicode secret set DICODE_BASE_URL     http://localhost:8080
+
+runtime: deno
+trigger:
+  webhook: /hooks/azure-oauth
+permissions:
+  env:
+    - name: AZURE_CLIENT_ID
+      secret: AZURE_CLIENT_ID
+    - name: AZURE_CLIENT_SECRET
+      secret: AZURE_CLIENT_SECRET
+    - name: DICODE_BASE_URL
+      secret: DICODE_BASE_URL
+  net:
+    - login.microsoftonline.com
+  fs:
+    - path: ../_oauth
+      permission: r
+  dicode:
+    secrets_write: true
+params:
+  - name: scope
+    type: string
+    default: "openid profile email offline_access"
+    description: Space-separated Microsoft Graph scopes
+  - name: tenant
+    type: string
+    default: "common"
+    description: "Tenant: common, organizations, consumers, or tenant ID"
+timeout: 30s
