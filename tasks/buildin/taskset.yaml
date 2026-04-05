@@ -1,0 +1,21 @@
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: buildin
+spec:
+  entries:
+    tray:
+      ref:
+        path: ./tray/task.yaml
+
+    notifications:
+      ref:
+        path: ./notify/task.yaml
+
+    alert:
+      ref:
+        path: ./alert/task.yaml
+
+    webui:
+      ref:
+        path: ./webui/task.yaml

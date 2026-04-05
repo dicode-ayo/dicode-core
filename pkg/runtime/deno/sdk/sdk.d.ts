@@ -33,10 +33,12 @@ declare interface MCP {
 }
 
 declare interface Dicode {
-  run_task:   (taskID: string, params?: Record<string, string>) => Promise<unknown>;
-  list_tasks: ()                                                 => Promise<unknown>;
-  get_runs:   (taskID: string, opts?: { limit?: number })        => Promise<unknown>;
-  get_config: (section: string)                                  => Promise<unknown>;
+  run_task:       (taskID: string, params?: Record<string, string>) => Promise<unknown>;
+  list_tasks:     ()                                                 => Promise<unknown>;
+  get_runs:       (taskID: string, opts?: { limit?: number })        => Promise<unknown>;
+  get_config:     (section: string)                                  => Promise<unknown>;
+  secrets_set:    (key: string, value: string)                       => Promise<void>;
+  secrets_delete: (key: string)                                       => Promise<void>;
 }
 
 /** All SDK globals passed to your task's main() function. */

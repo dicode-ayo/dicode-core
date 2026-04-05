@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -378,6 +379,9 @@ func buildDenoArgs(spec *task.Spec, socketPath, shimPath, runnerPath string) []s
 	writePaths := []string{socketPath}
 	for _, entry := range spec.Permissions.FS {
 		path := expandHome(entry.Path)
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(spec.TaskDir, path)
+		}
 		switch entry.Permission {
 		case "r":
 			readPaths = append(readPaths, path)
