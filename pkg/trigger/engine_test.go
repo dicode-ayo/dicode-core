@@ -663,7 +663,13 @@ func TestWaitRun_ChannelNotification(t *testing.T) {
 		t.Fatalf("WaitRun returned error: %v", err)
 	}
 	if result.Status != registry.StatusSuccess {
-		t.Errorf("expected success, got %s", result.Status)
+		// Print run logs to help diagnose CI failures.
+		if logs, lerr := e.reg.GetRunLogs(context.Background(), runID); lerr == nil {
+			for _, l := range logs {
+				t.Logf("run log [%s]: %s", l.Level, l.Message)
+			}
+		}
+		t.Errorf("expected success, got %s (returnValue=%v)", result.Status, result.ReturnValue)
 	}
 }
 
@@ -705,7 +711,12 @@ func TestWaitRun_AlreadyFinished(t *testing.T) {
 		t.Fatalf("WaitRun returned error: %v", err)
 	}
 	if result.Status != registry.StatusSuccess {
-		t.Errorf("expected success, got %s", result.Status)
+		if logs, lerr := e.reg.GetRunLogs(context.Background(), runID); lerr == nil {
+			for _, l := range logs {
+				t.Logf("run log [%s]: %s", l.Level, l.Message)
+			}
+		}
+		t.Errorf("expected success, got %s (returnValue=%v)", result.Status, result.ReturnValue)
 	}
 	// The "already finished" path does a single DB read — should be well under 1s.
 	if elapsed > time.Second {
