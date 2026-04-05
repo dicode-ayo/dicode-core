@@ -32,6 +32,7 @@ import (
 	"bufio"
 	"context"
 	_ "embed"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -185,6 +186,11 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 		case entry.Secret != "":
 			val, err := e.secrets.Resolve(ctx, entry.Secret)
 			if err != nil {
+				var notFound *secrets.NotFoundError
+				if entry.Optional && errors.As(err, &notFound) {
+					resolved[entry.Name] = ""
+					break
+				}
 				status = registry.StatusFailure
 				result.Error = fmt.Errorf("resolve secret %q for env %q: %w", entry.Secret, entry.Name, err)
 				return result, nil

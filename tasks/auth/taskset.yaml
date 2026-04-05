@@ -4,6 +4,7 @@ metadata:
   name: auth
 spec:
   entries:
+    # ── PKCE only (no secret needed) ─────────────────────────────────────────
     google-oauth:
       ref:
         path: ./google-oauth/task.yaml
@@ -11,3 +12,58 @@ spec:
     slack-oauth:
       ref:
         path: ./slack-oauth/task.yaml
+
+    github-oauth:
+      ref:
+        path: ./github-oauth/task.yaml
+
+    spotify-oauth:
+      ref:
+        path: ./spotify-oauth/task.yaml
+
+    linear-oauth:
+      ref:
+        path: ./linear-oauth/task.yaml
+
+    discord-oauth:
+      ref:
+        path: ./discord-oauth/task.yaml
+
+    # ── PKCE + secret ─────────────────────────────────────────────────────────
+    airtable-oauth:
+      ref:
+        path: ./airtable-oauth/task.yaml
+
+    gitlab-oauth:
+      ref:
+        path: ./gitlab-oauth/task.yaml
+
+    azure-oauth:
+      ref:
+        path: ./azure-oauth/task.yaml
+
+    # ── Secret only (no PKCE support) ─────────────────────────────────────────
+    notion-oauth:
+      ref:
+        path: ./notion-oauth/task.yaml
+
+    # ── New providers ─────────────────────────────────────────────────────────
+    confluence-oauth:
+      ref:
+        path: ./confluence-oauth/task.yaml
+
+    looker-oauth:
+      ref:
+        path: ./looker-oauth/task.yaml
+
+    office365-oauth:
+      ref:
+        path: ./office365-oauth/task.yaml
+
+    salesforce-oauth:
+      ref:
+        path: ./salesforce-oauth/task.yaml
+
+    stripe-oauth:
+      ref:
+        path: ./stripe-oauth/task.yaml

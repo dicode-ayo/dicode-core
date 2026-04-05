@@ -1,0 +1,56 @@
+apiVersion: dicode/v1
+kind: Task
+name: Salesforce OAuth
+description: |
+  Salesforce Connected App — PKCE only, no client secret required.
+  Access tokens **do not expire** by default. Stores `SALESFORCE_ACCESS_TOKEN` and
+  `SALESFORCE_INSTANCE_URL` (the org-specific API base URL, e.g. `na1.salesforce.com`).
+
+  ## Connected App setup
+
+  1. **Salesforce Setup** → App Manager → New Connected App
+     - Enable OAuth Settings
+     - Callback URL: `http://localhost:8080/hooks/salesforce-oauth`
+     - Selected OAuth Scopes: `api`, `refresh_token` (offline_access)
+     - ✅ **Enable PKCE Extension**
+  2. Copy the **Consumer Key** (= client ID):
+     ```
+     dicode secret set SALESFORCE_CLIENT_ID <consumer-key>
+     ```
+
+  ## Sandbox
+
+  For Sandbox orgs, update the provider endpoints in `_oauth/providers.ts` to use
+  `https://test.salesforce.com` as the base URL.
+
+  ## API calls
+
+  Use `SALESFORCE_INSTANCE_URL` as the API base:
+  `$SALESFORCE_INSTANCE_URL/services/data/v59.0/sobjects/Account`
+
+runtime: deno
+trigger:
+  webhook: /hooks/salesforce-oauth
+permissions:
+  env:
+    - SALESFORCE_CLIENT_ID  # optional — falls back to built-in
+    - DICODE_BASE_URL        # optional — defaults to http://localhost:8080
+    - name: SALESFORCE_ACCESS_TOKEN
+      secret: SALESFORCE_ACCESS_TOKEN
+      optional: true
+  net:
+    - login.salesforce.com
+    - test.salesforce.com
+  fs:
+    - path: ../_oauth
+      permission: r
+  dicode:
+    secrets_write: true
+    tasks:
+      - buildin/notifications
+params:
+  - name: scope
+    type: string
+    default: "api refresh_token"
+    description: Space-separated Salesforce scopes
+timeout: 30s

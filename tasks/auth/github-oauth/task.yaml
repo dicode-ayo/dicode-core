@@ -1,0 +1,45 @@
+apiVersion: dicode/v1
+kind: Task
+name: GitHub OAuth
+description: |
+  GitHub OAuth 2.0 — PKCE only, no client secret required (GA July 2025).
+  Works out of the box with the built-in dicode app registration.
+  GitHub OAuth tokens do **not expire** by default — once stored, no refresh is needed.
+
+  ## Zero setup (built-in app)
+
+  Just click **Run now**. The built-in client ID is used automatically.
+  Redirect URI: `http://localhost:8080/hooks/github-oauth`
+
+  ## Using your own GitHub OAuth App
+
+  1. [github.com/settings/developers](https://github.com/settings/developers) → OAuth Apps → New OAuth App
+     - Callback URL: `http://localhost:8080/hooks/github-oauth`
+     - ✅ Enable PKCE checkbox
+  2. `dicode secret set GITHUB_CLIENT_ID <your-client-id>`
+
+runtime: deno
+trigger:
+  webhook: /hooks/github-oauth
+permissions:
+  env:
+    - GITHUB_CLIENT_ID   # optional — falls back to built-in
+    - DICODE_BASE_URL    # optional — defaults to http://localhost:8080
+    - name: GITHUB_ACCESS_TOKEN
+      secret: GITHUB_ACCESS_TOKEN
+      optional: true
+  net:
+    - github.com
+  fs:
+    - path: ../_oauth
+      permission: r
+  dicode:
+    secrets_write: true
+    tasks:
+      - buildin/notifications
+params:
+  - name: scope
+    type: string
+    default: "user,repo"
+    description: Space-separated GitHub scopes
+timeout: 30s

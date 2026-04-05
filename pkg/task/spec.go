@@ -112,10 +112,11 @@ type FSEntry struct {
 //   - from:   → host OS environment only (os.Getenv); injected as entry.Name
 //   - bare name (no secret/from/value) → allowlisted in --allow-env; script reads it from host env at runtime
 type EnvEntry struct {
-	Name   string `yaml:"name"             json:"name"`
-	From   string `yaml:"from,omitempty"   json:"from,omitempty"`   // host OS env var name to read and inject as Name
-	Secret string `yaml:"secret,omitempty" json:"secret,omitempty"` // secrets store key to resolve and inject as Name
-	Value  string `yaml:"value,omitempty"  json:"value,omitempty"`  // literal value injection (taskset overrides)
+	Name     string `yaml:"name"               json:"name"`
+	From     string `yaml:"from,omitempty"     json:"from,omitempty"`     // host OS env var name to read and inject as Name
+	Secret   string `yaml:"secret,omitempty"   json:"secret,omitempty"`   // secrets store key to resolve and inject as Name
+	Value    string `yaml:"value,omitempty"    json:"value,omitempty"`    // literal value injection (taskset overrides)
+	Optional bool   `yaml:"optional,omitempty" json:"optional,omitempty"` // if true, missing secret → empty string instead of failure
 }
 
 // UnmarshalYAML allows EnvEntry to decode from either a plain string or a mapping.
