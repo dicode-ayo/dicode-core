@@ -51,7 +51,7 @@ permissions:
     tasks:
       - buildin/notifications
 params:
-  - name: scope
+  scope:
     type: string
     default: "offline_access User.Read Mail.Read Calendars.Read"
     description: Space-separated Microsoft Graph scopes. Always include offline_access for a refresh token.

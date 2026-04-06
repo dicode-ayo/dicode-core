@@ -19,7 +19,7 @@ permissions:
       permission: rw
 
 params:
-  - name: tray_version
+  tray_version:
     description: Systray portable binary release tag
     default: "v0.2.0"
 

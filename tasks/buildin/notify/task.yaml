@@ -8,23 +8,23 @@ trigger:
   manual: true
 
 params:
-  - name: title
+  title:
     type: string
     required: true
     description: "Notification title"
-  - name: body
+  body:
     type: string
     required: true
     description: "Notification body text"
-  - name: priority
+  priority:
     type: string
     default: "default"
     description: "Notification urgency: min | low | default | high | urgent"
-  - name: tags
+  tags:
     type: string
     default: ""
     description: "Comma-separated emoji shortcode tags, e.g. 'warning,skull'"
-  - name: icon
+  icon:
     type: string
     default: ""
     description: "Linux: freedesktop icon name (e.g. dialog-warning). Auto-mapped from priority when empty. Ignored on macOS and Windows."

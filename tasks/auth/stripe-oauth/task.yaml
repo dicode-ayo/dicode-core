@@ -52,7 +52,7 @@ permissions:
     tasks:
       - buildin/notifications
 params:
-  - name: scope
+  scope:
     type: string
     default: "read_write"
     description: "Stripe Connect scope: read_write or read_only"

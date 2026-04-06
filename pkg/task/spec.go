@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -90,6 +91,60 @@ type Param struct {
 	Required    bool   `yaml:"required"`
 }
 
+// Params is a list of Param values that can be written in two equivalent YAML forms:
+//
+//	# concise map (name → default or full spec):
+//	params:
+//	  repo: "deno/deno"
+//	  limit:
+//	    description: Max results
+//	    default: "10"
+//	    type: number
+//
+//	# explicit list:
+//	params:
+//	  - name: repo
+//	    default: "deno/deno"
+//	    description: GitHub repo in owner/name format
+type Params []Param
+
+func (p *Params) UnmarshalYAML(value *yaml.Node) error {
+	switch value.Kind {
+	case yaml.MappingNode:
+		if len(value.Content)%2 != 0 {
+			return fmt.Errorf("params mapping has odd number of nodes")
+		}
+		*p = make(Params, 0, len(value.Content)/2)
+		for i := 0; i < len(value.Content); i += 2 {
+			name := value.Content[i].Value
+			val := value.Content[i+1]
+			param := Param{Name: name}
+			if val.Kind == yaml.ScalarNode {
+				param.Default = val.Value
+			} else {
+				type paramBody struct {
+					Type        string `yaml:"type"`
+					Default     string `yaml:"default"`
+					Description string `yaml:"description"`
+					Required    bool   `yaml:"required"`
+				}
+				var body paramBody
+				if err := val.Decode(&body); err != nil {
+					return fmt.Errorf("param %q: %w", name, err)
+				}
+				param.Type = body.Type
+				param.Default = body.Default
+				param.Description = body.Description
+				param.Required = body.Required
+			}
+			*p = append(*p, param)
+		}
+		return nil
+	default:
+		return fmt.Errorf("params must be a sequence or mapping, got %v", value.Tag)
+	}
+}
+
 // FSEntry declares a path a task is allowed to access.
 type FSEntry struct {
 	Path       string `yaml:"path"`
@@ -119,10 +174,16 @@ type EnvEntry struct {
 	Optional bool   `yaml:"optional,omitempty" json:"optional,omitempty"` // if true, missing secret → empty string instead of failure
 }
 
-// UnmarshalYAML allows EnvEntry to decode from either a plain string or a mapping.
+// UnmarshalYAML allows EnvEntry to decode from a plain string, "KEY=VALUE" string, or a mapping.
 func (e *EnvEntry) UnmarshalYAML(value *yaml.Node) error {
 	if value.Kind == yaml.ScalarNode {
-		e.Name = value.Value
+		s := value.Value
+		if i := strings.IndexByte(s, '='); i >= 0 {
+			e.Name = s[:i]
+			e.Value = s[i+1:]
+		} else {
+			e.Name = s
+		}
 		return nil
 	}
 	type alias EnvEntry
@@ -194,7 +255,7 @@ type Spec struct {
 	Runtime     Runtime       `yaml:"runtime"     json:"runtime"`
 	Docker      *DockerConfig `yaml:"docker,omitempty" json:"docker,omitempty"`
 	Trigger     TriggerConfig `yaml:"trigger"     json:"trigger"`
-	Params      []Param       `yaml:"params,omitempty"      json:"params,omitempty"`
+	Params      Params        `yaml:"params,omitempty"      json:"params,omitempty"`
 	Permissions Permissions   `yaml:"permissions,omitempty" json:"permissions,omitempty"`
 	Timeout     time.Duration `yaml:"timeout"             json:"timeout"`
 	Notify      *NotifyConfig `yaml:"notify,omitempty" json:"notify,omitempty"`

@@ -64,7 +64,7 @@ permissions:                       # explicit access grants — nothing is impli
   sys:                             # Deno system-info APIs (Deno only; omit = deny all)
     - hostname                     #   or use ["*"] for all
 params:                            # optional user-configurable inputs
-  - name: slack_channel
+  slack_channel:                   #   key = param name
     type: string
     default: "#general"
 timeout: 60s                       # default: 60s
@@ -334,7 +334,7 @@ permissions:
     - GITHUB_WEBHOOK_SECRET   # dicode uses this for HMAC verification
     - SLACK_TOKEN             # used inside task.ts
 params:
-  - name: slack_channel
+  slack_channel:
     type: string
     default: "#deploys"
 timeout: 30s

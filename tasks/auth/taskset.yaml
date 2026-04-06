@@ -5,65 +5,490 @@ metadata:
 spec:
   entries:
     # ── PKCE only (no secret needed) ─────────────────────────────────────────
+
     google-oauth:
       ref:
-        path: ./google-oauth/task.yaml
+        path: ./_oauth-app/task.yaml
+      overrides:
+        name: Google OAuth
+        description: |
+          Google OAuth 2.0 — PKCE + client secret. Google requires `client_secret` even for Desktop apps
+          using PKCE; the secret is non-confidential by their own docs but still required as a client identifier.
+          Stores `GOOGLE_REFRESH_TOKEN` (permanent) and `GOOGLE_ACCESS_TOKEN` (1-hour expiry, auto-refreshed).
+
+          ## Google Cloud Console setup
+
+          1. [console.cloud.google.com](https://console.cloud.google.com) → select or create a project
+          2. **APIs & Services** → Enable APIs → enable the APIs you need (e.g. Gmail API)
+          3. **APIs & Services** → OAuth consent screen → fill in app name and add scopes
+          4. **APIs & Services** → Credentials → Create credentials → **OAuth 2.0 Client ID**
+             - Application type: **Desktop app**
+             - Add redirect URI: `http://localhost:8080/hooks/google-oauth`
+          5. Store credentials:
+             ```
+             dicode secret set GOOGLE_CLIENT_ID     <client-id>
+             dicode secret set GOOGLE_CLIENT_SECRET <client-secret>
+             ```
+        trigger:
+          webhook: /hooks/google-oauth
+        params:
+          provider:          google
+          scope:             "https://www.googleapis.com/auth/gmail.readonly"
+          token_lifetime:    expires
+          color:             "#4285f4"
+          client_id_env:     CLIENT_ID
+          client_secret_env: CLIENT_SECRET
+          access_token_env:  GOOGLE_ACCESS_TOKEN
+          refresh_token_env: GOOGLE_REFRESH_TOKEN
+        env:
+          - { name: CLIENT_ID,            secret: GOOGLE_CLIENT_ID }
+          - { name: CLIENT_SECRET,        secret: GOOGLE_CLIENT_SECRET }
+          - { name: GOOGLE_ACCESS_TOKEN,  secret: GOOGLE_ACCESS_TOKEN,  optional: true }
+          - { name: GOOGLE_REFRESH_TOKEN, secret: GOOGLE_REFRESH_TOKEN, optional: true }
+        net:
+          - accounts.google.com
+          - oauth2.googleapis.com
 
     slack-oauth:
       ref:
-        path: ./slack-oauth/task.yaml
+        path: ./_oauth-app/task.yaml
+      overrides:
+        name: Slack OAuth
+        description: |
+          Slack OAuth 2.0 — PKCE only, no client secret required (GA March 2026).
+          Slack user tokens do **not expire** — once stored, no refresh is needed.
+
+          ## Zero setup (built-in app)
+
+          Just click **Run now**. Redirect URI: `http://localhost:8080/hooks/slack-oauth`
+
+          ## Using your own Slack App
+
+          1. [api.slack.com/apps](https://api.slack.com/apps) → Create New App → From scratch
+          2. **Settings** → Enable PKCE *(one-way operation)*
+          3. **OAuth & Permissions** → Redirect URLs → `http://localhost:8080/hooks/slack-oauth`
+          4. **OAuth & Permissions** → User Token Scopes → add scopes
+          5. `dicode secret set SLACK_CLIENT_ID <client-id>`
+        trigger:
+          webhook: /hooks/slack-oauth
+        params:
+          provider:        slack
+          scope:           "channels:read"
+          token_lifetime:  permanent
+          color:           "#4A154B"
+          client_id_env:   CLIENT_ID
+          access_token_env: SLACK_USER_TOKEN
+        env:
+          - { name: CLIENT_ID,        secret: SLACK_CLIENT_ID,  optional: true }
+          - { name: SLACK_USER_TOKEN, secret: SLACK_USER_TOKEN, optional: true }
 
     github-oauth:
       ref:
-        path: ./github-oauth/task.yaml
+        path: ./_oauth-app/task.yaml
+      overrides:
+        name: GitHub OAuth
+        description: |
+          GitHub OAuth 2.0 — PKCE only, no client secret required (GA July 2025).
+          GitHub OAuth tokens do **not expire** by default — once stored, no refresh is needed.
+
+          ## Zero setup (built-in app)
+
+          Just click **Run now**. Redirect URI: `http://localhost:8080/hooks/github-oauth`
+
+          ## Using your own GitHub OAuth App
+
+          1. [github.com/settings/developers](https://github.com/settings/developers) → OAuth Apps → New OAuth App
+             - Callback URL: `http://localhost:8080/hooks/github-oauth`
+             - ✅ Enable PKCE checkbox
+          2. `dicode secret set GITHUB_CLIENT_ID <your-client-id>`
+        trigger:
+          webhook: /hooks/github-oauth
+        params:
+          provider:        github
+          scope:           "user,repo"
+          token_lifetime:  permanent
+          color:           "#24292e"
+          client_id_env:   CLIENT_ID
+          access_token_env: GITHUB_ACCESS_TOKEN
+        env:
+          - { name: CLIENT_ID,           secret: GITHUB_CLIENT_ID,    optional: true }
+          - { name: GITHUB_ACCESS_TOKEN, secret: GITHUB_ACCESS_TOKEN, optional: true }
+        net:
+          - github.com
 
     spotify-oauth:
       ref:
-        path: ./spotify-oauth/task.yaml
+        path: ./_oauth-app/task.yaml
+      overrides:
+        name: Spotify OAuth
+        description: |
+          Spotify OAuth 2.0 — PKCE only, no client secret required.
+          Access tokens expire in **1 hour** and are refreshed automatically.
+
+          ## Zero setup (built-in app)
+
+          Just click **Run now**. Redirect URI: `http://localhost:8080/hooks/spotify-oauth`
+
+          ## Using your own Spotify App
+
+          1. [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard) → Create app
+             - Redirect URI: `http://localhost:8080/hooks/spotify-oauth`
+          2. `dicode secret set SPOTIFY_CLIENT_ID <client-id>`
+        trigger:
+          webhook: /hooks/spotify-oauth
+        params:
+          provider:          spotify
+          scope:             "user-read-private user-read-email"
+          token_lifetime:    expires
+          color:             "#1DB954"
+          client_id_env:     CLIENT_ID
+          access_token_env:  SPOTIFY_ACCESS_TOKEN
+          refresh_token_env: SPOTIFY_REFRESH_TOKEN
+        env:
+          - { name: CLIENT_ID,             secret: SPOTIFY_CLIENT_ID,     optional: true }
+          - { name: SPOTIFY_ACCESS_TOKEN,  secret: SPOTIFY_ACCESS_TOKEN,  optional: true }
+          - { name: SPOTIFY_REFRESH_TOKEN, secret: SPOTIFY_REFRESH_TOKEN, optional: true }
+        net:
+          - accounts.spotify.com
 
     linear-oauth:
       ref:
-        path: ./linear-oauth/task.yaml
+        path: ./_oauth-app/task.yaml
+      overrides:
+        name: Linear OAuth
+        description: |
+          Linear OAuth 2.0 — PKCE only, no client secret required (apps created after Oct 2025).
+          Linear access tokens are very **long-lived** — once stored, re-auth is rarely needed.
+
+          ## Zero setup (built-in app)
+
+          Just click **Run now**. Redirect URI: `http://localhost:8080/hooks/linear-oauth`
+
+          ## Using your own Linear OAuth App
+
+          1. [linear.app/settings/api](https://linear.app/settings/api) → OAuth applications → Create new
+             - Callback URL: `http://localhost:8080/hooks/linear-oauth`
+             - ✅ Enable PKCE
+          2. `dicode secret set LINEAR_CLIENT_ID <client-id>`
+        trigger:
+          webhook: /hooks/linear-oauth
+        params:
+          provider:        linear
+          scope:           "read"
+          token_lifetime:  permanent
+          color:           "#5E6AD2"
+          client_id_env:   CLIENT_ID
+          access_token_env: LINEAR_ACCESS_TOKEN
+        env:
+          - { name: CLIENT_ID,           secret: LINEAR_CLIENT_ID,    optional: true }
+          - { name: LINEAR_ACCESS_TOKEN, secret: LINEAR_ACCESS_TOKEN, optional: true }
+        net:
+          - linear.app
+          - api.linear.app
 
     discord-oauth:
       ref:
-        path: ./discord-oauth/task.yaml
+        path: ./_oauth-app/task.yaml
+      overrides:
+        name: Discord OAuth
+        description: |
+          Discord OAuth 2.0 — PKCE only, no client secret required.
+          Access tokens expire in **~1 week** and are refreshed automatically.
+
+          ## Zero setup (built-in app)
+
+          Just click **Run now**. Redirect URI: `http://localhost:8080/hooks/discord-oauth`
+
+          ## Using your own Discord Application
+
+          1. [discord.com/developers/applications](https://discord.com/developers/applications) → New Application
+          2. **OAuth2** → Redirects → Add: `http://localhost:8080/hooks/discord-oauth`
+          3. `dicode secret set DISCORD_CLIENT_ID <client-id>`
+        trigger:
+          webhook: /hooks/discord-oauth
+        params:
+          provider:          discord
+          scope:             "identify email"
+          token_lifetime:    expires
+          color:             "#5865F2"
+          client_id_env:     CLIENT_ID
+          access_token_env:  DISCORD_ACCESS_TOKEN
+          refresh_token_env: DISCORD_REFRESH_TOKEN
+        env:
+          - { name: CLIENT_ID,             secret: DISCORD_CLIENT_ID,    optional: true }
+          - { name: DISCORD_ACCESS_TOKEN,  secret: DISCORD_ACCESS_TOKEN,  optional: true }
+          - { name: DISCORD_REFRESH_TOKEN, secret: DISCORD_REFRESH_TOKEN, optional: true }
+        net:
+          - discord.com
 
     # ── PKCE + secret ─────────────────────────────────────────────────────────
+
     airtable-oauth:
       ref:
-        path: ./airtable-oauth/task.yaml
+        path: ./_oauth-app/task.yaml
+      overrides:
+        name: Airtable OAuth
+        trigger:
+          webhook: /hooks/airtable-oauth
+        params:
+          provider:          airtable
+          scope:             "data.records:read"
+          token_lifetime:    expires
+          color:             "#FCB400"
+          client_id_env:     CLIENT_ID
+          client_secret_env: CLIENT_SECRET
+          access_token_env:  AIRTABLE_ACCESS_TOKEN
+          refresh_token_env: AIRTABLE_REFRESH_TOKEN
+        env:
+          - { name: CLIENT_ID,              secret: AIRTABLE_CLIENT_ID }
+          - { name: CLIENT_SECRET,          secret: AIRTABLE_CLIENT_SECRET }
+          - { name: AIRTABLE_ACCESS_TOKEN,  secret: AIRTABLE_ACCESS_TOKEN,  optional: true }
+          - { name: AIRTABLE_REFRESH_TOKEN, secret: AIRTABLE_REFRESH_TOKEN, optional: true }
 
     gitlab-oauth:
       ref:
-        path: ./gitlab-oauth/task.yaml
+        path: ./_oauth-app/task.yaml
+      overrides:
+        name: GitLab OAuth
+        trigger:
+          webhook: /hooks/gitlab-oauth
+        params:
+          provider:          gitlab
+          scope:             "read_user read_api"
+          token_lifetime:    expires
+          color:             "#FC6D26"
+          client_id_env:     CLIENT_ID
+          client_secret_env: CLIENT_SECRET
+          access_token_env:  GITLAB_ACCESS_TOKEN
+          refresh_token_env: GITLAB_REFRESH_TOKEN
+        env:
+          - { name: CLIENT_ID,            secret: GITLAB_CLIENT_ID }
+          - { name: CLIENT_SECRET,        secret: GITLAB_CLIENT_SECRET }
+          - { name: GITLAB_ACCESS_TOKEN,  secret: GITLAB_ACCESS_TOKEN,  optional: true }
+          - { name: GITLAB_REFRESH_TOKEN, secret: GITLAB_REFRESH_TOKEN, optional: true }
 
     azure-oauth:
       ref:
-        path: ./azure-oauth/task.yaml
+        path: ./_oauth-app/task.yaml
+      overrides:
+        name: Microsoft Azure OAuth
+        trigger:
+          webhook: /hooks/azure-oauth
+        params:
+          provider:          azure
+          scope:             "openid profile email offline_access"
+          token_lifetime:    expires
+          color:             "#0078D4"
+          client_id_env:     CLIENT_ID
+          client_secret_env: CLIENT_SECRET
+          access_token_env:  AZURE_ACCESS_TOKEN
+          refresh_token_env: AZURE_REFRESH_TOKEN
+        env:
+          - { name: CLIENT_ID,           secret: AZURE_CLIENT_ID }
+          - { name: CLIENT_SECRET,       secret: AZURE_CLIENT_SECRET }
+          - { name: AZURE_ACCESS_TOKEN,  secret: AZURE_ACCESS_TOKEN,  optional: true }
+          - { name: AZURE_REFRESH_TOKEN, secret: AZURE_REFRESH_TOKEN, optional: true }
+        net:
+          - login.microsoftonline.com
 
-    # ── Secret only (no PKCE support) ─────────────────────────────────────────
-    notion-oauth:
-      ref:
-        path: ./notion-oauth/task.yaml
-
-    # ── New providers ─────────────────────────────────────────────────────────
     confluence-oauth:
       ref:
-        path: ./confluence-oauth/task.yaml
+        path: ./_oauth-app/task.yaml
+      overrides:
+        name: Confluence / Atlassian OAuth
+        description: |
+          Atlassian OAuth 2.0 (3LO) — PKCE only, no client secret required.
+          A single token covers all Atlassian Cloud products: Confluence, Jira, Trello, etc.
 
-    looker-oauth:
-      ref:
-        path: ./looker-oauth/task.yaml
+          ## Setup
+
+          1. [developer.atlassian.com/console/myapps](https://developer.atlassian.com/console/myapps/) → Create → **OAuth 2.0 integration**
+          2. **Permissions** → add the scopes your task needs (Confluence, Jira, …)
+          3. **Authorization** → callback URL: `http://localhost:8080/hooks/confluence-oauth`
+          4. `dicode secret set CONFLUENCE_CLIENT_ID <client-id>`
+        trigger:
+          webhook: /hooks/confluence-oauth
+        params:
+          provider:          confluence
+          scope:             "read:me read:confluence-content.all offline_access"
+          token_lifetime:    expires
+          color:             "#0052CC"
+          client_id_env:     CLIENT_ID
+          access_token_env:  CONFLUENCE_ACCESS_TOKEN
+          refresh_token_env: CONFLUENCE_REFRESH_TOKEN
+        env:
+          - { name: CLIENT_ID,               secret: CONFLUENCE_CLIENT_ID,    optional: true }
+          - { name: CONFLUENCE_ACCESS_TOKEN,  secret: CONFLUENCE_ACCESS_TOKEN,  optional: true }
+          - { name: CONFLUENCE_REFRESH_TOKEN, secret: CONFLUENCE_REFRESH_TOKEN, optional: true }
+        net:
+          - auth.atlassian.com
+          - api.atlassian.com
 
     office365-oauth:
       ref:
-        path: ./office365-oauth/task.yaml
+        path: ./_oauth-app/task.yaml
+      overrides:
+        name: Office 365 OAuth
+        description: |
+          Microsoft identity platform OAuth 2.0 — PKCE + client secret.
+          Covers all **Microsoft Graph** APIs: Mail, Calendar, Teams, OneDrive, SharePoint, and more.
+
+          ## Azure App Registration
+
+          1. [portal.azure.com](https://portal.azure.com) → **Azure Active Directory** → App registrations → **New registration**
+             - Redirect URI: `http://localhost:8080/hooks/office365-oauth`
+          2. **Certificates & secrets** → Client secrets → New client secret → copy the **Value**
+          3. **API permissions** → Microsoft Graph → Delegated → add your scopes
+          4. Store credentials:
+             ```
+             dicode secret set OFFICE365_CLIENT_ID     <application-id>
+             dicode secret set OFFICE365_CLIENT_SECRET <client-secret-value>
+             ```
+        trigger:
+          webhook: /hooks/office365-oauth
+        params:
+          provider:          office365
+          scope:             "offline_access User.Read Mail.Read Calendars.Read"
+          token_lifetime:    expires
+          color:             "#0078D4"
+          client_id_env:     CLIENT_ID
+          client_secret_env: CLIENT_SECRET
+          access_token_env:  OFFICE365_ACCESS_TOKEN
+          refresh_token_env: OFFICE365_REFRESH_TOKEN
+        env:
+          - { name: CLIENT_ID,               secret: OFFICE365_CLIENT_ID }
+          - { name: CLIENT_SECRET,           secret: OFFICE365_CLIENT_SECRET }
+          - { name: OFFICE365_ACCESS_TOKEN,  secret: OFFICE365_ACCESS_TOKEN,  optional: true }
+          - { name: OFFICE365_REFRESH_TOKEN, secret: OFFICE365_REFRESH_TOKEN, optional: true }
+        net:
+          - login.microsoftonline.com
+          - graph.microsoft.com
 
     salesforce-oauth:
       ref:
-        path: ./salesforce-oauth/task.yaml
+        path: ./_oauth-app/task.yaml
+      overrides:
+        name: Salesforce OAuth
+        description: |
+          Salesforce Connected App — PKCE only, no client secret required.
+          Access tokens **do not expire** by default. Stores `SALESFORCE_ACCESS_TOKEN` and
+          `SALESFORCE_INSTANCE_URL` (the org-specific API base URL).
+
+          ## Connected App setup
+
+          1. **Salesforce Setup** → App Manager → New Connected App
+             - Callback URL: `http://localhost:8080/hooks/salesforce-oauth`
+             - ✅ **Enable PKCE Extension**
+          2. `dicode secret set SALESFORCE_CLIENT_ID <consumer-key>`
+        trigger:
+          webhook: /hooks/salesforce-oauth
+        params:
+          provider:        salesforce
+          scope:           "api refresh_token"
+          token_lifetime:  permanent
+          color:           "#00A1E0"
+          client_id_env:   CLIENT_ID
+          access_token_env: SALESFORCE_ACCESS_TOKEN
+        env:
+          - { name: CLIENT_ID,               secret: SALESFORCE_CLIENT_ID,    optional: true }
+          - { name: SALESFORCE_ACCESS_TOKEN, secret: SALESFORCE_ACCESS_TOKEN, optional: true }
+        net:
+          - login.salesforce.com
+          - test.salesforce.com
+
+    # ── Secret only (no PKCE support) ─────────────────────────────────────────
+
+    notion-oauth:
+      ref:
+        path: ./_oauth-app/task.yaml
+      overrides:
+        name: Notion OAuth
+        trigger:
+          webhook: /hooks/notion-oauth
+        params:
+          provider:          notion
+          scope:             ""
+          token_lifetime:    permanent
+          color:             "#000000"
+          client_id_env:     CLIENT_ID
+          client_secret_env: CLIENT_SECRET
+          access_token_env:  NOTION_ACCESS_TOKEN
+        env:
+          - { name: CLIENT_ID,           secret: NOTION_CLIENT_ID }
+          - { name: CLIENT_SECRET,       secret: NOTION_CLIENT_SECRET }
+          - { name: NOTION_ACCESS_TOKEN, secret: NOTION_ACCESS_TOKEN, optional: true }
 
     stripe-oauth:
       ref:
-        path: ./stripe-oauth/task.yaml
+        path: ./_oauth-app/task.yaml
+      overrides:
+        name: Stripe Connect OAuth
+        description: |
+          Stripe Connect OAuth — connects a Stripe account to your platform.
+          Stores `STRIPE_ACCESS_TOKEN`, `STRIPE_REFRESH_TOKEN`, and `STRIPE_ACCOUNT_ID`.
+
+          > `client_id` is your Connect platform's client ID (`ca_xxx`).
+          > `client_secret` is your platform's Stripe secret key (`sk_live_xxx` / `sk_test_xxx`).
+
+          ## Setup
+
+          1. [dashboard.stripe.com/settings/connect](https://dashboard.stripe.com/settings/connect) → Enable Connect
+          2. **Connect settings** → OAuth → redirect URI: `http://localhost:8080/hooks/stripe-oauth`
+          3. Store credentials:
+             ```
+             dicode secret set STRIPE_CLIENT_ID  ca_xxx
+             dicode secret set STRIPE_SECRET_KEY sk_live_xxx
+             ```
+        trigger:
+          webhook: /hooks/stripe-oauth
+        params:
+          provider:          stripe
+          scope:             "read_write"
+          token_lifetime:    expires
+          color:             "#635BFF"
+          client_id_env:     CLIENT_ID
+          client_secret_env: CLIENT_SECRET
+          access_token_env:  STRIPE_ACCESS_TOKEN
+          refresh_token_env: STRIPE_REFRESH_TOKEN
+        env:
+          - { name: CLIENT_ID,            secret: STRIPE_CLIENT_ID }
+          - { name: CLIENT_SECRET,        secret: STRIPE_SECRET_KEY }
+          - { name: STRIPE_ACCESS_TOKEN,  secret: STRIPE_ACCESS_TOKEN,  optional: true }
+          - { name: STRIPE_REFRESH_TOKEN, secret: STRIPE_REFRESH_TOKEN, optional: true }
+        net:
+          - connect.stripe.com
+
+    looker-oauth:
+      ref:
+        path: ./_oauth-app/task.yaml
+      overrides:
+        name: Looker OAuth
+        description: |
+          Looker OAuth 2.0 — PKCE, `client_secret` optional.
+          Tokens expire in **1 hour**; Looker does not issue refresh tokens.
+
+          ## Setup
+
+          1. **Looker Admin** → Users → OAuth Applications → Register a new app.
+             Redirect URI: `http://localhost:8080/hooks/looker-oauth`
+          2. `dicode secret set LOOKER_CLIENT_ID <client-id>`
+
+          > Set `LOOKER_INSTANCE` secret to your hostname (e.g. `company.cloud.looker.com`).
+          > The `net` permission uses `*` because the instance hostname is dynamic.
+        trigger:
+          webhook: /hooks/looker-oauth
+        params:
+          provider:          looker
+          scope:             ""
+          token_lifetime:    expires
+          color:             "#4285F4"
+          client_id_env:     CLIENT_ID
+          client_secret_env: CLIENT_SECRET
+          access_token_env:  LOOKER_ACCESS_TOKEN
+        env:
+          - { name: LOOKER_INSTANCE,    secret: LOOKER_INSTANCE,    optional: true }
+          - { name: CLIENT_ID,          secret: LOOKER_CLIENT_ID }
+          - { name: CLIENT_SECRET,      secret: LOOKER_CLIENT_SECRET, optional: true }
+          - { name: LOOKER_ACCESS_TOKEN, secret: LOOKER_ACCESS_TOKEN, optional: true }
+        net:
+          - "*"

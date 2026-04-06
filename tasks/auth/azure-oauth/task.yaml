@@ -32,11 +32,11 @@ permissions:
   dicode:
     secrets_write: true
 params:
-  - name: scope
+  scope:
     type: string
     default: "openid profile email offline_access"
     description: Space-separated Microsoft Graph scopes
-  - name: tenant
+  tenant:
     type: string
     default: "common"
     description: "Tenant: common, organizations, consumers, or tenant ID"
