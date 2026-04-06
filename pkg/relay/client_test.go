@@ -2,6 +2,10 @@ package relay
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -217,12 +221,32 @@ func TestWebhookForwarding(t *testing.T) {
 
 func TestAutoReconnect(t *testing.T) {
 	log := noopLogger()
+
+	// connectedCh is closed each time a client completes the welcome handshake.
+	// We use a buffered channel big enough for multiple reconnects.
+	connectedCh := make(chan struct{}, 10)
+
+	// Wrap the relay server so we can detect each successful connection by
+	// intercepting the inbound webhook path. Instead we use a dedicated test
+	// handler that fires connectedCh whenever the relay server registers a new
+	// client. We achieve this by using the /u/<uuid>/hooks/ping path: the
+	// client's handler sends a signal on the channel.
+	id := newTestIdentity(t)
+
+	// Relay server.
 	srv := NewServer("https://example.com", log)
 	ts := httptest.NewServer(srv)
+	defer ts.Close()
 
 	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
-	id := newTestIdentity(t)
+
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/hooks/ping" {
+			select {
+			case connectedCh <- struct{}{}:
+			default:
+			}
+		}
 		w.WriteHeader(http.StatusOK)
 	})
 
@@ -230,29 +254,46 @@ func TestAutoReconnect(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	connected := make(chan struct{}, 5)
-	origRun := client.runOnce
-
-	// Patch: wrap runOnce to signal each successful connection.
-	// Since we can't easily patch without interfaces, just observe the server side.
-	_ = origRun
-
 	go func() { _ = client.Run(ctx) }()
 
-	// Wait for first connection.
-	time.Sleep(300 * time.Millisecond)
+	// Helper: poll until a webhook reaches the handler (proves connection is live).
+	pingUntilConnected := func(label string) {
+		t.Helper()
+		deadline := time.After(5 * time.Second)
+		for {
+			select {
+			case <-deadline:
+				t.Fatalf("timeout: %s — webhook never reached handler", label)
+			default:
+			}
+			hookURL := fmt.Sprintf("%s/u/%s/hooks/ping", ts.URL, id.UUID)
+			resp, err := http.Post(hookURL, "application/json", strings.NewReader("{}"))
+			if err == nil {
+				resp.Body.Close()
+				if resp.StatusCode == http.StatusOK {
+					// Drain the channel if the signal arrived.
+					select {
+					case <-connectedCh:
+					default:
+					}
+					return
+				}
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
 
-	// Close the test server to force disconnection.
-	ts.Close()
+	// Wait for the first connection to be live.
+	pingUntilConnected("first connection")
 
-	// Start a new server at the same address — not possible with httptest.
-	// Instead verify the client retries by checking it logs a reconnect attempt.
-	// For this test, just verify Run doesn't panic and terminates cleanly on cancel.
+	// Drop all active connections.
+	ts.CloseClientConnections()
+
+	// Give the client a moment to detect the drop and start reconnecting.
 	time.Sleep(200 * time.Millisecond)
-	cancel()
 
-	// If we get here without deadlock, the test passes.
-	close(connected)
+	// Verify the client reconnects and the webhook reaches the handler again.
+	pingUntilConnected("reconnect after drop")
 }
 
 func isContextError(err error) bool {
@@ -262,4 +303,230 @@ func isContextError(err error) bool {
 	s := err.Error()
 	return strings.Contains(s, "context") || strings.Contains(s, "canceled") ||
 		strings.Contains(s, "closed") || strings.Contains(s, "EOF")
+}
+
+// ---------------------------------------------------------------------------
+// Security tests (issue #16)
+// ---------------------------------------------------------------------------
+
+// TestNonceReplay verifies that a nonce cannot be used twice.
+func TestNonceReplay(t *testing.T) {
+	log := noopLogger()
+	srv := NewServer("https://example.com", log)
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
+	id := newTestIdentity(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// --- First attempt: valid handshake, grab the nonce. ---
+	conn1, _, err := dialWS(ctx, wsURL)
+	if err != nil {
+		t.Fatalf("dial1: %v", err)
+	}
+	_, data, err := conn1.Read(ctx)
+	if err != nil {
+		t.Fatalf("read challenge1: %v", err)
+	}
+	var ch1 challengeMsg
+	if err := json.Unmarshal(data, &ch1); err != nil {
+		t.Fatalf("parse challenge1: %v", err)
+	}
+	nonce1, _ := hex.DecodeString(ch1.Nonce)
+
+	ts1 := time.Now().Unix()
+	sig1, _ := signChallenge(id.PrivateKey, nonce1, ts1)
+	hello1, _ := encodeMsg(helloMsg{
+		Type:      msgHello,
+		UUID:      id.UUID,
+		PubKey:    base64.StdEncoding.EncodeToString(id.UncompressedPublicKey()),
+		Sig:       base64.StdEncoding.EncodeToString(sig1),
+		Timestamp: ts1,
+	})
+	if err := conn1.Write(ctx, websocket.MessageText, hello1); err != nil {
+		t.Fatalf("send hello1: %v", err)
+	}
+	// Read welcome (first connection succeeds).
+	_, resp1, err := conn1.Read(ctx)
+	if err != nil {
+		t.Fatalf("read welcome1: %v", err)
+	}
+	if msgType(resp1) != msgWelcome {
+		t.Fatalf("expected welcome on first attempt, got %q: %s", msgType(resp1), resp1)
+	}
+	conn1.CloseNow()
+
+	// --- Second attempt: replay nonce1 on a fresh connection. ---
+	conn2, _, err := dialWS(ctx, wsURL)
+	if err != nil {
+		t.Fatalf("dial2: %v", err)
+	}
+	defer conn2.CloseNow()
+
+	// Drain the new challenge (we won't use it).
+	_, _, err = conn2.Read(ctx)
+	if err != nil {
+		t.Fatalf("read challenge2: %v", err)
+	}
+
+	// Re-use nonce1 (which was already consumed).
+	ts2 := time.Now().Unix()
+	sig2, _ := signChallenge(id.PrivateKey, nonce1, ts2)
+	hello2, _ := encodeMsg(helloMsg{
+		Type:      msgHello,
+		UUID:      id.UUID,
+		PubKey:    base64.StdEncoding.EncodeToString(id.UncompressedPublicKey()),
+		Sig:       base64.StdEncoding.EncodeToString(sig2),
+		Timestamp: ts2,
+	})
+	if err := conn2.Write(ctx, websocket.MessageText, hello2); err != nil {
+		t.Fatalf("send hello2: %v", err)
+	}
+
+	// The server must reject this (nonce unknown / already deleted).
+	_, resp2, err := conn2.Read(ctx)
+	if err != nil {
+		return // connection closed — also a rejection
+	}
+	if msgType(resp2) != msgError {
+		t.Fatalf("expected auth error on nonce replay, got %q: %s", msgType(resp2), resp2)
+	}
+	var errMsg errorMsg
+	_ = json.Unmarshal(resp2, &errMsg)
+	if errMsg.Message != "authentication failed" {
+		t.Fatalf("expected opaque auth error, got %q", errMsg.Message)
+	}
+}
+
+// TestMalformedPubKey verifies that a truncated / invalid public key is rejected.
+func TestMalformedPubKey(t *testing.T) {
+	log := noopLogger()
+	srv := NewServer("https://example.com", log)
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	cases := []struct {
+		name   string
+		pubKey []byte
+	}{
+		{"too short", make([]byte, 32)},
+		{"wrong prefix", append([]byte{0x03}, make([]byte, 64)...)},
+		{"not on curve", append([]byte{0x04}, make([]byte, 64)...)},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			conn, _, err := dialWS(ctx, wsURL)
+			if err != nil {
+				t.Fatalf("dial: %v", err)
+			}
+			defer conn.CloseNow()
+
+			_, data, err := conn.Read(ctx)
+			if err != nil {
+				t.Fatalf("read challenge: %v", err)
+			}
+			var ch challengeMsg
+			if err := json.Unmarshal(data, &ch); err != nil {
+				t.Fatalf("parse challenge: %v", err)
+			}
+			nonceBytes, _ := hex.DecodeString(ch.Nonce)
+
+			// Compute a fake UUID from the bad pubkey bytes.
+			sum := sha256.Sum256(tc.pubKey)
+			fakeUUID := hex.EncodeToString(sum[:])
+
+			ts := time.Now().Unix()
+			// Sign with a real key — doesn't matter, server should reject before sig check.
+			realKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+			sig, _ := signChallenge(realKey, nonceBytes, ts)
+
+			hello, _ := encodeMsg(helloMsg{
+				Type:      msgHello,
+				UUID:      fakeUUID,
+				PubKey:    base64.StdEncoding.EncodeToString(tc.pubKey),
+				Sig:       base64.StdEncoding.EncodeToString(sig),
+				Timestamp: ts,
+			})
+			if err := conn.Write(ctx, websocket.MessageText, hello); err != nil {
+				t.Fatalf("send hello: %v", err)
+			}
+
+			_, resp, err := conn.Read(ctx)
+			if err != nil {
+				return // connection closed — rejection
+			}
+			if msgType(resp) != msgError {
+				t.Fatalf("expected error, got %q: %s", msgType(resp), resp)
+			}
+			var errMsg errorMsg
+			_ = json.Unmarshal(resp, &errMsg)
+			if errMsg.Message != "authentication failed" {
+				t.Fatalf("expected opaque auth error, got %q", errMsg.Message)
+			}
+		})
+	}
+}
+
+// TestWrongUUID verifies that claiming someone else's UUID is rejected.
+func TestWrongUUID(t *testing.T) {
+	log := noopLogger()
+	srv := NewServer("https://example.com", log)
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
+	id := newTestIdentity(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn, _, err := dialWS(ctx, wsURL)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.CloseNow()
+
+	_, data, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatalf("read challenge: %v", err)
+	}
+	var ch challengeMsg
+	if err := json.Unmarshal(data, &ch); err != nil {
+		t.Fatalf("parse challenge: %v", err)
+	}
+	nonceBytes, _ := hex.DecodeString(ch.Nonce)
+
+	ts2 := time.Now().Unix()
+	sig, _ := signChallenge(id.PrivateKey, nonceBytes, ts2)
+
+	// Send a valid pubkey but a wrong UUID (all-zeros).
+	hello, _ := encodeMsg(helloMsg{
+		Type:      msgHello,
+		UUID:      strings.Repeat("0", 64),
+		PubKey:    base64.StdEncoding.EncodeToString(id.UncompressedPublicKey()),
+		Sig:       base64.StdEncoding.EncodeToString(sig),
+		Timestamp: ts2,
+	})
+	if err := conn.Write(ctx, websocket.MessageText, hello); err != nil {
+		t.Fatalf("send hello: %v", err)
+	}
+
+	_, resp, err := conn.Read(ctx)
+	if err != nil {
+		return // connection closed — rejection
+	}
+	if msgType(resp) != msgError {
+		t.Fatalf("expected error for wrong UUID, got %q: %s", msgType(resp), resp)
+	}
+	var errMsg errorMsg
+	_ = json.Unmarshal(resp, &errMsg)
+	if errMsg.Message != "authentication failed" {
+		t.Fatalf("expected opaque auth error, got %q", errMsg.Message)
+	}
 }
