@@ -88,30 +88,35 @@ spec:
       overrides:
         name: GitHub OAuth
         description: |
-          GitHub OAuth 2.0 — PKCE only, no client secret required (GA July 2025).
-          GitHub OAuth tokens do **not expire** by default — once stored, no refresh is needed.
+          GitHub OAuth 2.0 — PKCE + client secret. GitHub added PKCE support in July 2025,
+          but `client_secret` is still required for OAuth Apps in the token exchange.
+          GitHub tokens do **not expire** by default — once stored, no refresh is needed.
 
-          ## Zero setup (built-in app)
-
-          Just click **Run now**. Redirect URI: `http://localhost:8080/hooks/github-oauth`
-
-          ## Using your own GitHub OAuth App
+          ## Setup
 
           1. [github.com/settings/developers](https://github.com/settings/developers) → OAuth Apps → New OAuth App
+             - Homepage URL: `http://localhost:8080`
              - Callback URL: `http://localhost:8080/hooks/github-oauth`
-             - ✅ Enable PKCE checkbox
-          2. `dicode secret set GITHUB_CLIENT_ID <your-client-id>`
+             - ✅ **Enable Device Flow** *(optional)*
+          2. Click **Generate a new client secret**
+          3. Store credentials:
+             ```
+             dicode secret set GITHUB_CLIENT_ID     <client-id>
+             dicode secret set GITHUB_CLIENT_SECRET <client-secret>
+             ```
         trigger:
           webhook: /hooks/github-oauth
         params:
-          provider:        github
-          scope:           "user,repo"
-          token_lifetime:  permanent
-          color:           "#24292e"
-          client_id_env:   CLIENT_ID
-          access_token_env: GITHUB_ACCESS_TOKEN
+          provider:          github
+          scope:             "user repo"
+          token_lifetime:    permanent
+          color:             "#24292e"
+          client_id_env:     CLIENT_ID
+          client_secret_env: CLIENT_SECRET
+          access_token_env:  GITHUB_ACCESS_TOKEN
         env:
-          - { name: CLIENT_ID,           secret: GITHUB_CLIENT_ID,    optional: true }
+          - { name: CLIENT_ID,           secret: GITHUB_CLIENT_ID }
+          - { name: CLIENT_SECRET,       secret: GITHUB_CLIENT_SECRET }
           - { name: GITHUB_ACCESS_TOKEN, secret: GITHUB_ACCESS_TOKEN, optional: true }
         net:
           - github.com

@@ -40,7 +40,7 @@ Browser                   dicode                    Provider
 
 Navigate to the task for your provider (e.g. `auth/github-oauth`) and click **Run now**.
 
-For providers that support **zero-setup** (GitHub, Slack, Spotify, Linear, Salesforce, Discord, Confluence), dicode uses a shared built-in app — just click the authorize button and you're done.
+For providers that support **zero-setup** (Slack, Spotify, Linear, Salesforce, Discord, Confluence), dicode uses a shared built-in app — just click the authorize button and you're done.
 
 ### 2. Store your credentials (providers that require your own app)
 
@@ -100,7 +100,7 @@ The OAuth task checks token validity first. If the token needs refreshing it sil
 |---------|----------|------|----------------|----------------|
 | `auth/google-oauth` | Google | PKCE + secret | 1 h (auto-refreshed) | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` |
 | `auth/slack-oauth` | Slack | PKCE only | Permanent | `SLACK_CLIENT_ID` *(optional — built-in app works)* |
-| `auth/github-oauth` | GitHub | PKCE only | Permanent | `GITHUB_CLIENT_ID` *(optional — built-in app works)* |
+| `auth/github-oauth` | GitHub | PKCE + secret | Permanent | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` |
 | `auth/spotify-oauth` | Spotify | PKCE only | 1 h (auto-refreshed) | `SPOTIFY_CLIENT_ID` *(optional — built-in app works)* |
 | `auth/linear-oauth` | Linear | PKCE only | Long-lived | `LINEAR_CLIENT_ID` *(optional — built-in app works)* |
 | `auth/discord-oauth` | Discord | PKCE only | ~1 week (auto-refreshed) | `DISCORD_CLIENT_ID` *(optional — built-in app works)* |
