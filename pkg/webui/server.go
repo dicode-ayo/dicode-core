@@ -439,9 +439,19 @@ func (s *Server) Start(ctx context.Context) error {
 		defer cancel()
 		_ = s.srv.Shutdown(shutCtx)
 	}()
-	s.log.Info("webui listening", zap.Int("port", s.port))
-	if err := s.srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		return err
+	certFile := s.cfg.Server.TLSCertFile
+	keyFile  := s.cfg.Server.TLSKeyFile
+	if certFile != "" && keyFile != "" {
+		s.log.Info("webui listening (HTTPS)", zap.Int("port", s.port),
+			zap.String("hint", fmt.Sprintf("set DICODE_BASE_URL secret to https://YOUR_HOST:%d", s.port)))
+		if err := s.srv.ListenAndServeTLS(certFile, keyFile); err != nil && err != http.ErrServerClosed {
+			return err
+		}
+	} else {
+		s.log.Info("webui listening", zap.Int("port", s.port))
+		if err := s.srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			return err
+		}
 	}
 	return nil
 }

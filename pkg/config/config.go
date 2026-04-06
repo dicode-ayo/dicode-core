@@ -151,6 +151,8 @@ type ServerConfig struct {
 	AllowedOrigins []string `yaml:"allowed_origins,omitempty"` // CORS allowlist; empty = same-origin only
 	TrustProxy     bool     `yaml:"trust_proxy,omitempty"`     // trust X-Forwarded-For from upstream proxy
 	MCP            bool     `yaml:"mcp"`                       // expose MCP endpoint at /mcp (default: true)
+	TLSCertFile    string   `yaml:"tls_cert,omitempty"`        // path to TLS certificate (PEM); enables HTTPS when set with tls_key
+	TLSKeyFile     string   `yaml:"tls_key,omitempty"`         // path to TLS private key (PEM)
 }
 
 type AIConfig struct {

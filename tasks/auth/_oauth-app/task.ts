@@ -26,14 +26,15 @@
 
 import type { DicodeSdk } from "../../sdk.ts";
 import {
-  buildAuthUrl, exchangeCodePKCE, exchangeCodePKCEWithSecret, exchangeCodeSecret,
-  generatePKCE, handleAuthNeeded, refreshAccessTokenPKCE, refreshAccessTokenWithSecret,
-  successHtml, tokenExpiresWithin,
+  buildAuthUrl, exchangeCode, generatePKCE, generateState,
+  handleAuthNeeded, refreshAccessToken, successHtml, tokenExpiresWithin,
 } from "../_oauth/flow.ts";
 import { resolveClientId } from "../_oauth/builtin.ts";
 import { resolveProvider } from "./providers.ts";
 
-const EXPIRY_KV_SUFFIX = "_oauth_expires_at";
+const EXPIRY_KV_SUFFIX   = "_oauth_expires_at";
+const VERIFIER_KV_SUFFIX = "_oauth_verifier";
+const STATE_KV_SUFFIX    = "_oauth_state";
 
 export default async function main({ params, input, output, kv, dicode }: DicodeSdk) {
   const providerKey      = (await params.get("provider") ?? "").toLowerCase();
@@ -50,14 +51,15 @@ export default async function main({ params, input, output, kv, dicode }: Dicode
   // resolveClientId: env var → built-in app ID → throws with a helpful message.
   const clientId      = resolveClientId(providerKey, clientIdEnv);
   const clientSecret  = clientSecretEnv ? (Deno.env.get(clientSecretEnv) ?? "") : "";
-  const existingToken = Deno.env.get(accessTokenEnv) ?? "";
+  const existingToken = Deno.env.get(accessTokenEnv)   ?? "";
   const existingRefresh = Deno.env.get(refreshTokenEnv) ?? "";
   const baseURL       = (Deno.env.get("DICODE_BASE_URL") ?? "http://localhost:8080").replace(/\/$/, "");
 
   const { provider, name, redirectSuffix } = resolveProvider(providerKey);
-  const redirectURI  = `${baseURL}/hooks/${redirectSuffix}`;
-  const expiryKvKey  = `${providerKey}${EXPIRY_KV_SUFFIX}`;
-  const verifierKvKey = `${providerKey}_oauth_verifier`;
+  const redirectURI   = `${baseURL}/hooks/${redirectSuffix}`;
+  const expiryKvKey   = `${providerKey}${EXPIRY_KV_SUFFIX}`;
+  const verifierKvKey = `${providerKey}${VERIFIER_KV_SUFFIX}`;
+  const stateKvKey    = `${providerKey}${STATE_KV_SUFFIX}`;
 
   // input is undefined (not null) for manual/CLI runs because the IPC Response.result
   // field uses omitempty — coerce to null so that null-checks work correctly.
@@ -66,20 +68,24 @@ export default async function main({ params, input, output, kv, dicode }: Dicode
 
   // ── Webhook leg: exchange code → store tokens ─────────────────────────────
   if (code) {
-    const verifier = await kv.get(verifierKvKey) as string | null;
-    if (!verifier) return output.html(`<p style="color:red">PKCE verifier missing — click Run to restart.</p>`);
-    await kv.delete(verifierKvKey);
+    const verifier      = await kv.get(verifierKvKey) as string | null;
+    const expectedState = await kv.get(stateKvKey)    as string | null;
 
-    let tokens;
-    if (clientSecret && verifier) {
-      tokens = await exchangeCodePKCEWithSecret({ provider, clientId, clientSecret, redirectURI, code, verifier });
-    } else if (verifier) {
-      tokens = await exchangeCodePKCE({ provider, clientId, redirectURI, code, verifier });
-    } else {
-      tokens = await exchangeCodeSecret({ provider, clientId, clientSecret, redirectURI, code });
+    if (!verifier && !provider.noPKCE) {
+      return output.html(`<p style="color:red">PKCE verifier missing — click Run to restart.</p>`);
     }
 
-    // Debug: log all token response fields (values masked) so we can see what the provider sends.
+    await kv.delete(verifierKvKey);
+    await kv.delete(stateKvKey);
+
+    const tokens = await exchangeCode({
+      provider, clientId, clientSecret, redirectURI, code,
+      returnedState: inp?.state as string | undefined,
+      expectedState,
+      verifier: provider.noPKCE ? undefined : (verifier ?? undefined),
+    });
+
+    // Log all token response fields (values masked) so we can trace what the provider sends.
     const extra = tokens as Record<string, unknown>;
     const debugFields = Object.entries(extra).map(([k, v]) => {
       if (k === "access_token" || k === "refresh_token") return `${k}=<set>`;
@@ -93,7 +99,7 @@ export default async function main({ params, input, output, kv, dicode }: Dicode
       await dicode.secrets_set(refreshTokenEnv, tokens.refresh_token);
       stored.push(refreshTokenEnv);
     }
-    // Store extra fields providers include in their token response
+    // Store extra fields some providers include in their token response.
     if (typeof extra.instance_url === "string") {
       const key = `${providerKey.toUpperCase()}_INSTANCE_URL`;
       await dicode.secrets_set(key, extra.instance_url);
@@ -110,9 +116,6 @@ export default async function main({ params, input, output, kv, dicode }: Dicode
       stored.push(key);
     }
 
-    // expires_in: store timestamp if present.
-    // Note: GitHub and other "permanent" providers don't return expires_in at all.
-    // token_lifetime=permanent tasks skip expiry checks entirely (handled below).
     if (tokens.expires_in) {
       const expiresAt = Date.now() + Number(tokens.expires_in) * 1000;
       await kv.set(expiryKvKey, expiresAt);
@@ -152,9 +155,9 @@ export default async function main({ params, input, output, kv, dicode }: Dicode
     console.log(`[${name}] token expired or expiring soon, refresh_token present=${!!existingRefresh}`);
     if (existingRefresh) {
       try {
-        const refreshed = clientSecret
-          ? await refreshAccessTokenWithSecret({ provider, clientId, clientSecret, refreshToken: existingRefresh })
-          : await refreshAccessTokenPKCE({ provider, clientId, refreshToken: existingRefresh });
+        const refreshed = await refreshAccessToken({
+          provider, clientId, clientSecret, refreshToken: existingRefresh,
+        });
         const refreshDebug = Object.entries(refreshed as Record<string, unknown>)
           .map(([k, v]) => k === "access_token" || k === "refresh_token" ? `${k}=<set>` : `${k}=${JSON.stringify(v)}`)
           .join(", ");
@@ -177,13 +180,15 @@ export default async function main({ params, input, output, kv, dicode }: Dicode
   }
 
   // ── Need (re-)authorisation ───────────────────────────────────────────────
-  const { verifier, challenge } = await generatePKCE();
-  await kv.set(verifierKvKey, verifier);
+  const state  = generateState();
+  const pkce   = provider.noPKCE ? null : await generatePKCE();
 
-  const usePKCE = !!verifier; // always true; Notion/secret-only would need separate handling
+  await kv.set(stateKvKey, state);
+  if (pkce) await kv.set(verifierKvKey, pkce.verifier);
+
   const authURL = buildAuthUrl({
-    provider, clientId, redirectURI, scope,
-    extra: usePKCE ? { code_challenge: challenge, code_challenge_method: "S256" } : undefined,
+    provider, clientId, redirectURI, scope, state,
+    challenge: pkce?.challenge,
   });
 
   return handleAuthNeeded({ name, authURL, redirectURI, scope, color, isChain: inp !== null, output, dicode });

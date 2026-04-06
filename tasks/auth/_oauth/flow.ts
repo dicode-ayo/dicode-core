@@ -1,16 +1,20 @@
 // Shared OAuth2 helpers for dicode tasks.
-// Inspired by @deno/kv-oauth provider pattern — provider config is a plain
-// object; PKCE and token exchange are handled here; session state goes into
-// dicode kv (instead of Deno KV).
+// Uses oauth4webapi for PKCE, token exchange, and response parsing.
+// Provider config is a plain AuthorizationServer object (no discovery required).
 
-export interface OAuthProvider {
-  /** Authorization endpoint URL. */
-  authUrl: string;
-  /** Token exchange endpoint URL. */
-  tokenUrl: string;
+import * as oauth from "jsr:@panva/oauth4webapi";
+
+export { oauth };
+
+// Extend AuthorizationServer with provider convenience fields.
+export type OAuthProvider = oauth.AuthorizationServer & {
   /** Extra query params appended to the auth URL (e.g. access_type, prompt). */
   extraParams?: Record<string, string>;
-}
+  /** Set true for providers that don't support PKCE (e.g. Notion, Stripe). */
+  noPKCE?: boolean;
+  /** Client authentication method for token endpoint. Default: "post". */
+  clientAuthMethod?: "post" | "basic";
+};
 
 export interface TokenResponse {
   access_token:  string;
@@ -20,46 +24,16 @@ export interface TokenResponse {
   [key: string]: unknown;
 }
 
-// ── Token response parsing ────────────────────────────────────────────────────
-
-// Parses a token endpoint response that may be JSON or URL-encoded form data,
-// then throws if the response contains an error — regardless of HTTP status.
-// GitHub (and others) return HTTP 200 with an error body on auth failures.
-async function parseTokenResponse(res: Response): Promise<TokenResponse> {
-  const text = await res.text();
-  const ct = res.headers.get("content-type") ?? "";
-  let data: TokenResponse;
-  if (ct.includes("application/x-www-form-urlencoded") || (!ct.includes("json") && text.includes("="))) {
-    const params = new URLSearchParams(text);
-    const obj: Record<string, unknown> = {};
-    for (const [k, v] of params) obj[k] = v;
-    data = obj as unknown as TokenResponse;
-  } else {
-    try {
-      data = JSON.parse(text) as TokenResponse;
-    } catch {
-      throw new Error(`Token endpoint returned non-JSON response (${res.status}): ${text.slice(0, 200)}`);
-    }
-  }
-  // Check for error field — some providers (GitHub) return 200 OK with an error body.
-  const d = data as Record<string, unknown>;
-  if (d.error || !res.ok) {
-    throw new Error(`Token request failed: ${d.error_description ?? d.error ?? res.status}`);
-  }
-  return data;
-}
-
-// ── PKCE ─────────────────────────────────────────────────────────────────────
-
-function base64url(buf: Uint8Array): string {
-  return btoa(String.fromCharCode(...buf))
-    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
-}
+// ── PKCE & state ─────────────────────────────────────────────────────────────
 
 export async function generatePKCE(): Promise<{ verifier: string; challenge: string }> {
-  const verifier = base64url(crypto.getRandomValues(new Uint8Array(32)));
-  const digest   = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
-  return { verifier, challenge: base64url(new Uint8Array(digest)) };
+  const verifier = oauth.generateRandomCodeVerifier();
+  const challenge = await oauth.calculatePKCECodeChallenge(verifier);
+  return { verifier, challenge };
+}
+
+export function generateState(): string {
+  return oauth.generateRandomState();
 }
 
 // ── Auth URL ──────────────────────────────────────────────────────────────────
@@ -69,131 +43,87 @@ export function buildAuthUrl(opts: {
   clientId:    string;
   redirectURI: string;
   scope:       string;
+  state:       string;
+  challenge?:  string; // omit for noPKCE providers
   extra?:      Record<string, string>;
 }): string {
-  const p = new URLSearchParams({
-    client_id:     opts.clientId,
-    redirect_uri:  opts.redirectURI,
-    response_type: "code",
-    scope:         opts.scope,
-    ...opts.provider.extraParams,
-    ...opts.extra,
-  });
-  return `${opts.provider.authUrl}?${p}`;
+  const url = new URL(opts.provider.authorization_endpoint!);
+  url.searchParams.set("client_id",     opts.clientId);
+  url.searchParams.set("redirect_uri",  opts.redirectURI);
+  url.searchParams.set("response_type", "code");
+  url.searchParams.set("scope",         opts.scope);
+  url.searchParams.set("state",         opts.state);
+  if (opts.challenge) {
+    url.searchParams.set("code_challenge",        opts.challenge);
+    url.searchParams.set("code_challenge_method", "S256");
+  }
+  for (const [k, v] of Object.entries(opts.provider.extraParams ?? {})) url.searchParams.set(k, v);
+  for (const [k, v] of Object.entries(opts.extra ?? {})) url.searchParams.set(k, v);
+  return url.toString();
 }
 
-// ── Token exchange: PKCE (no client secret) ───────────────────────────────────
+// ── Token exchange ────────────────────────────────────────────────────────────
 
-export async function exchangeCodePKCE(opts: {
-  provider:    OAuthProvider;
-  clientId:    string;
-  redirectURI: string;
-  code:        string;
-  verifier:    string;
+function makeClientAuth(provider: OAuthProvider, secret: string): oauth.ClientAuth {
+  if (!secret) return oauth.None();
+  return provider.clientAuthMethod === "basic"
+    ? oauth.ClientSecretBasic(secret)
+    : oauth.ClientSecretPost(secret);
+}
+
+export async function exchangeCode(opts: {
+  provider:      OAuthProvider;
+  clientId:      string;
+  clientSecret:  string; // empty = public PKCE-only client
+  redirectURI:   string;
+  code:          string;
+  returnedState?: string;
+  expectedState?: string | null;
+  verifier?:     string; // omit for noPKCE providers
 }): Promise<TokenResponse> {
-  const res = await fetch(opts.provider.tokenUrl, {
-    method:  "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type:    "authorization_code",
-      client_id:     opts.clientId,
-      redirect_uri:  opts.redirectURI,
-      code:          opts.code,
-      code_verifier: opts.verifier,
-    }),
-  });
-  return await parseTokenResponse(res);
+  const as     = opts.provider as oauth.AuthorizationServer;
+  const client = { client_id: opts.clientId } satisfies oauth.Client;
+
+  // Reconstruct callback URL so validateAuthResponse can parse code + state.
+  const callbackUrl = new URL(opts.redirectURI);
+  callbackUrl.searchParams.set("code", opts.code);
+  if (opts.returnedState) callbackUrl.searchParams.set("state", opts.returnedState);
+
+  const params = oauth.validateAuthResponse(
+    as, client, callbackUrl,
+    opts.expectedState ?? oauth.skipStateCheck,
+  );
+
+  const response = await oauth.authorizationCodeGrantRequest(
+    as, client,
+    makeClientAuth(opts.provider, opts.clientSecret),
+    params, opts.redirectURI,
+    opts.verifier ?? oauth.nopkce,
+  );
+
+  const result = await oauth.processAuthorizationCodeResponse(as, client, response);
+  return result as unknown as TokenResponse;
 }
 
-// ── Token exchange: PKCE + client secret (Google Desktop app) ────────────────
-// Google requires client_secret even for public Desktop app clients using PKCE.
-// The secret is acknowledged as non-confidential by Google's own docs but is
-// still required as a client identifier in the token exchange.
+// ── Token refresh ─────────────────────────────────────────────────────────────
 
-export async function exchangeCodePKCEWithSecret(opts: {
+export async function refreshAccessToken(opts: {
   provider:     OAuthProvider;
   clientId:     string;
-  clientSecret: string;
-  redirectURI:  string;
-  code:         string;
-  verifier:     string;
-}): Promise<TokenResponse> {
-  const res = await fetch(opts.provider.tokenUrl, {
-    method:  "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type:    "authorization_code",
-      client_id:     opts.clientId,
-      client_secret: opts.clientSecret,
-      redirect_uri:  opts.redirectURI,
-      code:          opts.code,
-      code_verifier: opts.verifier,
-    }),
-  });
-  return await parseTokenResponse(res);
-}
-
-// ── Token exchange: client secret only (no PKCE) ──────────────────────────────
-
-export async function exchangeCodeSecret(opts: {
-  provider:     OAuthProvider;
-  clientId:     string;
-  clientSecret: string;
-  redirectURI:  string;
-  code:         string;
-}): Promise<TokenResponse> {
-  const res = await fetch(opts.provider.tokenUrl, {
-    method:  "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type:    "authorization_code",
-      client_id:     opts.clientId,
-      client_secret: opts.clientSecret,
-      redirect_uri:  opts.redirectURI,
-      code:          opts.code,
-    }),
-  });
-  return await parseTokenResponse(res);
-}
-
-// ── Token refresh: PKCE (no client secret) ───────────────────────────────────
-
-export async function refreshAccessTokenPKCE(opts: {
-  provider:     OAuthProvider;
-  clientId:     string;
+  clientSecret: string; // empty = public PKCE-only client
   refreshToken: string;
 }): Promise<TokenResponse> {
-  const res = await fetch(opts.provider.tokenUrl, {
-    method:  "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type:    "refresh_token",
-      client_id:     opts.clientId,
-      refresh_token: opts.refreshToken,
-    }),
-  });
-  return await parseTokenResponse(res);
-}
+  const as     = opts.provider as oauth.AuthorizationServer;
+  const client = { client_id: opts.clientId } satisfies oauth.Client;
 
-// ── Token refresh: PKCE + client secret ──────────────────────────────────────
+  const response = await oauth.refreshTokenGrantRequest(
+    as, client,
+    makeClientAuth(opts.provider, opts.clientSecret),
+    opts.refreshToken,
+  );
 
-export async function refreshAccessTokenWithSecret(opts: {
-  provider:     OAuthProvider;
-  clientId:     string;
-  clientSecret: string;
-  refreshToken: string;
-}): Promise<TokenResponse> {
-  const res = await fetch(opts.provider.tokenUrl, {
-    method:  "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type:    "refresh_token",
-      client_id:     opts.clientId,
-      client_secret: opts.clientSecret,
-      refresh_token: opts.refreshToken,
-    }),
-  });
-  return await parseTokenResponse(res);
+  const result = await oauth.processRefreshTokenResponse(as, client, response);
+  return result as unknown as TokenResponse;
 }
 
 // ── Expiry helpers ────────────────────────────────────────────────────────────
