@@ -30,6 +30,7 @@ import {
   generatePKCE, handleAuthNeeded, refreshAccessTokenPKCE, refreshAccessTokenWithSecret,
   successHtml, tokenExpiresWithin,
 } from "../_oauth/flow.ts";
+import { resolveClientId } from "../_oauth/builtin.ts";
 import { resolveProvider } from "./providers.ts";
 
 const EXPIRY_KV_SUFFIX = "_oauth_expires_at";
@@ -46,15 +47,12 @@ export default async function main({ params, input, output, kv, dicode }: Dicode
 
   if (!providerKey) throw new Error("param 'provider' is required — set it via taskset overrides");
 
-  const clientId      = Deno.env.get(clientIdEnv) ?? "";
+  // resolveClientId: env var → built-in app ID → throws with a helpful message.
+  const clientId      = resolveClientId(providerKey, clientIdEnv);
   const clientSecret  = clientSecretEnv ? (Deno.env.get(clientSecretEnv) ?? "") : "";
   const existingToken = Deno.env.get(accessTokenEnv) ?? "";
   const existingRefresh = Deno.env.get(refreshTokenEnv) ?? "";
   const baseURL       = (Deno.env.get("DICODE_BASE_URL") ?? "http://localhost:8080").replace(/\/$/, "");
-
-  if (!clientId) throw new Error(
-    `Client ID not set — inject it via env[name: ${clientIdEnv}, secret: YOUR_CLIENT_ID_SECRET]`
-  );
 
   const { provider, name, redirectSuffix } = resolveProvider(providerKey);
   const redirectURI  = `${baseURL}/hooks/${redirectSuffix}`;

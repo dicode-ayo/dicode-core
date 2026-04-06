@@ -145,10 +145,19 @@ func cmdRun(c *ipc.ControlClient, taskID string, kvArgs []string) error {
 	if err := remarshal(resp.Result, &result); err != nil {
 		return err
 	}
+
+	// Always print logs so the user can see task output in the terminal.
+	if logErr := cmdLogs(c, result.RunID); logErr != nil {
+		fmt.Fprintf(os.Stderr, "dicode: fetch logs: %v\n", logErr)
+	}
+
 	fmt.Printf("run %s: %s\n", result.RunID, result.Status)
 	if result.ReturnValue != nil {
 		out, _ := json.MarshalIndent(result.ReturnValue, "", "  ")
 		fmt.Println(string(out))
+	}
+	if result.Status == "failure" {
+		return fmt.Errorf("task failed")
 	}
 	return nil
 }
