@@ -15,7 +15,9 @@ export const Slack: OAuthProvider = {
   tokenUrl: "https://slack.com/api/oauth.v2.access",
 };
 
-// PKCE replaces client_secret (GitHub, July 2025).
+// PKCE supported (July 2025), but client_secret is still required in the token
+// exchange for OAuth Apps. Register a GitHub OAuth App with PKCE enabled and
+// provide both GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET.
 export const GitHub: OAuthProvider = {
   authUrl:  "https://github.com/login/oauth/authorize",
   tokenUrl: "https://github.com/login/oauth/access_token",

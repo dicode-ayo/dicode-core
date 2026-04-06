@@ -59,7 +59,9 @@ export default async function main({ params, input, output, kv, dicode }: Dicode
   const expiryKvKey  = `${providerKey}${EXPIRY_KV_SUFFIX}`;
   const verifierKvKey = `${providerKey}_oauth_verifier`;
 
-  const inp  = input as Record<string, unknown> | null;
+  // input is undefined (not null) for manual/CLI runs because the IPC Response.result
+  // field uses omitempty — coerce to null so that null-checks work correctly.
+  const inp  = (input ?? null) as Record<string, unknown> | null;
   const code = inp?.code as string | undefined;
 
   // ── Webhook leg: exchange code → store tokens ─────────────────────────────
@@ -77,6 +79,14 @@ export default async function main({ params, input, output, kv, dicode }: Dicode
       tokens = await exchangeCodeSecret({ provider, clientId, clientSecret, redirectURI, code });
     }
 
+    // Debug: log all token response fields (values masked) so we can see what the provider sends.
+    const extra = tokens as Record<string, unknown>;
+    const debugFields = Object.entries(extra).map(([k, v]) => {
+      if (k === "access_token" || k === "refresh_token") return `${k}=<set>`;
+      return `${k}=${JSON.stringify(v)}`;
+    });
+    console.log(`[${name}] token response fields: ${debugFields.join(", ")}`);
+
     await dicode.secrets_set(accessTokenEnv, tokens.access_token);
     const stored = [accessTokenEnv];
     if (tokens.refresh_token) {
@@ -84,7 +94,6 @@ export default async function main({ params, input, output, kv, dicode }: Dicode
       stored.push(refreshTokenEnv);
     }
     // Store extra fields providers include in their token response
-    const extra = tokens as Record<string, unknown>;
     if (typeof extra.instance_url === "string") {
       const key = `${providerKey.toUpperCase()}_INSTANCE_URL`;
       await dicode.secrets_set(key, extra.instance_url);
@@ -100,14 +109,27 @@ export default async function main({ params, input, output, kv, dicode }: Dicode
       await dicode.secrets_set(key, extra.workspace_id);
       stored.push(key);
     }
-    if (tokens.expires_in) await kv.set(expiryKvKey, Date.now() + tokens.expires_in * 1000);
+
+    // expires_in: store timestamp if present.
+    // Note: GitHub and other "permanent" providers don't return expires_in at all.
+    // token_lifetime=permanent tasks skip expiry checks entirely (handled below).
+    if (tokens.expires_in) {
+      const expiresAt = Date.now() + Number(tokens.expires_in) * 1000;
+      await kv.set(expiryKvKey, expiresAt);
+      console.log(`[${name}] token expires in ${tokens.expires_in}s (at ${new Date(expiresAt).toISOString()})`);
+    } else {
+      console.log(`[${name}] no expires_in in response — token treated as ${tokenLifetime}`);
+    }
+
     return output.html(successHtml(name, stored));
   }
 
   // ── Refresh / validity check leg ──────────────────────────────────────────
   if (existingToken) {
+    console.log(`[${name}] existing token found (env: ${accessTokenEnv}), lifetime=${tokenLifetime}`);
+
     if (tokenLifetime === "permanent") {
-      // Token never expires (GitHub, Linear, Slack, Salesforce).
+      console.log(`[${name}] permanent token — skipping expiry check`);
       if (inp !== null) return { valid: true };
       return output.html(`<div style="font-family:system-ui,sans-serif;padding:2rem">
         <h2 style="color:#1a7f37">${name} token already stored</h2>
@@ -116,7 +138,10 @@ export default async function main({ params, input, output, kv, dicode }: Dicode
     }
 
     const expiresAt = (await kv.get(expiryKvKey)) as number | null;
+    console.log(`[${name}] expiresAt=${expiresAt ? new Date(expiresAt).toISOString() : "not set"}, now=${new Date().toISOString()}`);
+
     if (!tokenExpiresWithin(expiresAt, 60)) {
+      console.log(`[${name}] token still valid`);
       if (inp !== null) return { valid: true };
       return output.html(`<div style="font-family:system-ui,sans-serif;padding:2rem">
         <h2 style="color:#1a7f37">${name} token still valid</h2>
@@ -124,21 +149,31 @@ export default async function main({ params, input, output, kv, dicode }: Dicode
       </div>`);
     }
 
+    console.log(`[${name}] token expired or expiring soon, refresh_token present=${!!existingRefresh}`);
     if (existingRefresh) {
       try {
         const refreshed = clientSecret
           ? await refreshAccessTokenWithSecret({ provider, clientId, clientSecret, refreshToken: existingRefresh })
           : await refreshAccessTokenPKCE({ provider, clientId, refreshToken: existingRefresh });
+        const refreshDebug = Object.entries(refreshed as Record<string, unknown>)
+          .map(([k, v]) => k === "access_token" || k === "refresh_token" ? `${k}=<set>` : `${k}=${JSON.stringify(v)}`)
+          .join(", ");
+        console.log(`[${name}] refresh response fields: ${refreshDebug}`);
         await dicode.secrets_set(accessTokenEnv, refreshed.access_token);
         if (refreshed.refresh_token) await dicode.secrets_set(refreshTokenEnv, refreshed.refresh_token);
-        if (refreshed.expires_in) await kv.set(expiryKvKey, Date.now() + refreshed.expires_in * 1000);
-        console.log(`${name} access token refreshed silently`);
+        if (refreshed.expires_in) {
+          const newExpiry = Date.now() + Number(refreshed.expires_in) * 1000;
+          await kv.set(expiryKvKey, newExpiry);
+          console.log(`[${name}] refreshed — new expiry: ${new Date(newExpiry).toISOString()}`);
+        }
         if (inp !== null) return { refreshed: true };
         return output.html(successHtml(`${name} (refreshed)`, [accessTokenEnv]));
       } catch (err) {
-        console.error("Silent refresh failed:", err);
+        console.error(`[${name}] silent refresh failed:`, err);
       }
     }
+  } else {
+    console.log(`[${name}] no existing token (env: ${accessTokenEnv})`);
   }
 
   // ── Need (re-)authorisation ───────────────────────────────────────────────
