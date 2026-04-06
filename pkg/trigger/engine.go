@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"os"
@@ -581,6 +582,49 @@ const (
 	webhookTimestampHeader = "X-Dicode-Timestamp"
 )
 
+// taskErrorPage is the HTML template for task failures that produce no output.
+// Uses the same ansi-to-html library and log styling as the webui run-detail component.
+// Printf args: %s = runID, %s = error message (html-escaped), %s = JSON log lines array.
+const taskErrorPage = `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body { font-family: system-ui, sans-serif; padding: 2rem; background: #1e1e2e; color: #cdd6f4; margin: 0; }
+  h2 { color: #f38ba8; margin-top: 0; }
+  .run-id { font-family: monospace; font-size: .85em; color: #6c7086; margin-bottom: 1.5rem; }
+  .error-msg { background: #302030; border-left: 3px solid #f38ba8; padding: 1rem; border-radius: 4px;
+               white-space: pre-wrap; font-family: monospace; font-size: .9em; margin-bottom: 1.5rem; }
+  h3 { color: #cdd6f4; margin-bottom: .5rem; }
+  pre#logs { background: #181825; border-radius: 6px; padding: 1rem; overflow-x: auto;
+             font-family: monospace; font-size: .85em; line-height: 1.5; white-space: pre-wrap; }
+  pre#logs span { display: block; }
+  pre#logs span.error { color: #f38ba8; }
+  pre#logs span.warn  { color: #f9e2af; }
+  pre#logs span.info  { color: #cdd6f4; }
+</style>
+</head>
+<body>
+<h2>Task error</h2>
+<div class="run-id">Run %s</div>
+<div class="error-msg">%s</div>
+<h3>Logs</h3>
+<pre id="logs"></pre>
+<script type="module">
+import Convert from 'https://esm.sh/ansi-to-html@0.7.2';
+const conv = new Convert({ fg: '#cdd6f4', bg: '#181825', escapeXML: true,
+  colors: { 1:'#f38ba8',2:'#a6e3a1',3:'#f9e2af',4:'#89b4fa',5:'#cba6f7',6:'#89dceb',7:'#cdd6f4' } });
+const logs = %s;
+const pre = document.getElementById('logs');
+if (!logs.length) { pre.textContent = '(no logs)'; }
+else { pre.innerHTML = logs.map(l => {
+  const cls = /error|uncaught|notcapable/i.test(l) ? 'error' : /warn/i.test(l) ? 'warn' : 'info';
+  return '<span class="' + cls + '">' + conv.toHtml(l) + '</span>';
+}).join(''); }
+</script>
+</body>
+</html>`
+
 // verifyWebhookSignature validates HMAC-SHA256 signature and optional replay
 // protection for a webhook request. Returns nil when the request is authentic.
 // When no secret is configured on the task the check is skipped (open webhook).
@@ -817,14 +861,47 @@ func (e *Engine) WebhookHandler() http.Handler {
 			return
 		}
 
-		// No output: return status envelope.
-		status := "success"
-		if result.Error != nil {
-			status = "failure"
-			w.WriteHeader(http.StatusInternalServerError)
+		// No output produced — the task either succeeded silently or threw before
+		// calling output.*. Collect logs so we can surface them to the caller.
+		var logLines []string
+		if logEntries, logErr := e.registry.GetRunLogs(context.Background(), runID); logErr == nil {
+			for _, le := range logEntries {
+				logLines = append(logLines, le.Message)
+			}
 		}
+
+		if result.Error != nil {
+			errMsg := result.Error.Error()
+			// Browser: render an error page using the same log style as the webui.
+			if strings.Contains(r.Header.Get("Accept"), "text/html") {
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				w.Header().Set("X-Run-Id", runID)
+				w.WriteHeader(http.StatusInternalServerError)
+				logsJSON, _ := json.Marshal(logLines)
+				_, _ = fmt.Fprintf(w, taskErrorPage, html.EscapeString(runID), html.EscapeString(errMsg), logsJSON)
+				return
+			}
+			// API: JSON envelope with error message.
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("X-Run-Id", runID)
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"runId":  runID,
+				"status": "failure",
+				"error":  errMsg,
+				"logs":   logLines,
+			})
+			return
+		}
+
+		// Successful run with no output.
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{"runId": runID, "status": status})
+		w.Header().Set("X-Run-Id", runID)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"runId":  runID,
+			"status": "success",
+			"logs":   logLines,
+		})
 	})
 }
 
