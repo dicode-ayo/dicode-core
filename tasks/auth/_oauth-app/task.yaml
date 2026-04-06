@@ -9,9 +9,13 @@ trigger:
   webhook: /hooks/oauth
 permissions:
   env:
-    - DICODE_BASE_URL  # optional — defaults to http://localhost:8080
-    # Injected by taskset overrides per provider:
-    # CLIENT_ID, CLIENT_SECRET (optional), ACCESS_TOKEN (optional), REFRESH_TOKEN (optional)
+    - DICODE_BASE_URL   # optional — defaults to http://localhost:8080
+    # Default param values — taskset overrides replace these with provider-specific names.
+    # Both the defaults and the overrides must be in --allow-env so Deno can read them.
+    - CLIENT_ID
+    - CLIENT_SECRET
+    - ACCESS_TOKEN
+    - REFRESH_TOKEN
   net:
     - "*"  # restricted per provider via overrides.net
   fs:

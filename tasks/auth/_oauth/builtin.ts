@@ -20,7 +20,7 @@
 
 export const BUILTIN_CLIENT_IDS: Record<string, string> = {
   // Filled in as each app is registered with the provider.
-  // "github":  "Ov23li...",
+   "github":  "Ov23li9UVwIzZBPoSmo0",
   // "spotify": "abc123...",
   // "linear":  "lin_oauth_...",
   // "discord": "123456789012345678",
