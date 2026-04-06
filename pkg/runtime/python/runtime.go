@@ -37,6 +37,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -277,7 +278,10 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 	}
 
 	// Stream uv/Python stderr to registry logs in real-time.
+	var wg sync.WaitGroup
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {
 			_ = e.reg.AppendLog(context.Background(), runID, "warn", scanner.Text())
@@ -318,6 +322,7 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 		}
 	}
 
+	wg.Wait()
 	return result, nil
 }
 

@@ -20,6 +20,35 @@ export interface TokenResponse {
   [key: string]: unknown;
 }
 
+// ── Token response parsing ────────────────────────────────────────────────────
+
+// Parses a token endpoint response that may be JSON or URL-encoded form data,
+// then throws if the response contains an error — regardless of HTTP status.
+// GitHub (and others) return HTTP 200 with an error body on auth failures.
+async function parseTokenResponse(res: Response): Promise<TokenResponse> {
+  const text = await res.text();
+  const ct = res.headers.get("content-type") ?? "";
+  let data: TokenResponse;
+  if (ct.includes("application/x-www-form-urlencoded") || (!ct.includes("json") && text.includes("="))) {
+    const params = new URLSearchParams(text);
+    const obj: Record<string, unknown> = {};
+    for (const [k, v] of params) obj[k] = v;
+    data = obj as unknown as TokenResponse;
+  } else {
+    try {
+      data = JSON.parse(text) as TokenResponse;
+    } catch {
+      throw new Error(`Token endpoint returned non-JSON response (${res.status}): ${text.slice(0, 200)}`);
+    }
+  }
+  // Check for error field — some providers (GitHub) return 200 OK with an error body.
+  const d = data as Record<string, unknown>;
+  if (d.error || !res.ok) {
+    throw new Error(`Token request failed: ${d.error_description ?? d.error ?? res.status}`);
+  }
+  return data;
+}
+
 // ── PKCE ─────────────────────────────────────────────────────────────────────
 
 function base64url(buf: Uint8Array): string {
@@ -73,9 +102,7 @@ export async function exchangeCodePKCE(opts: {
       code_verifier: opts.verifier,
     }),
   });
-  const data = await res.json() as TokenResponse;
-  if (!res.ok) throw new Error(`Token exchange failed: ${data.error_description ?? data.error ?? res.status}`);
-  return data;
+  return await parseTokenResponse(res);
 }
 
 // ── Token exchange: PKCE + client secret (Google Desktop app) ────────────────
@@ -103,9 +130,7 @@ export async function exchangeCodePKCEWithSecret(opts: {
       code_verifier: opts.verifier,
     }),
   });
-  const data = await res.json() as TokenResponse;
-  if (!res.ok) throw new Error(`Token exchange failed: ${data.error_description ?? data.error ?? res.status}`);
-  return data;
+  return await parseTokenResponse(res);
 }
 
 // ── Token exchange: client secret only (no PKCE) ──────────────────────────────
@@ -128,9 +153,7 @@ export async function exchangeCodeSecret(opts: {
       code:          opts.code,
     }),
   });
-  const data = await res.json() as TokenResponse;
-  if (!res.ok) throw new Error(`Token exchange failed: ${data.error_description ?? data.error ?? res.status}`);
-  return data;
+  return await parseTokenResponse(res);
 }
 
 // ── Token refresh: PKCE (no client secret) ───────────────────────────────────
@@ -149,9 +172,7 @@ export async function refreshAccessTokenPKCE(opts: {
       refresh_token: opts.refreshToken,
     }),
   });
-  const data = await res.json() as TokenResponse;
-  if (!res.ok) throw new Error(`Token refresh failed: ${data.error_description ?? data.error ?? res.status}`);
-  return data;
+  return await parseTokenResponse(res);
 }
 
 // ── Token refresh: PKCE + client secret ──────────────────────────────────────
@@ -172,9 +193,7 @@ export async function refreshAccessTokenWithSecret(opts: {
       refresh_token: opts.refreshToken,
     }),
   });
-  const data = await res.json() as TokenResponse;
-  if (!res.ok) throw new Error(`Token refresh failed: ${data.error_description ?? data.error ?? res.status}`);
-  return data;
+  return await parseTokenResponse(res);
 }
 
 // ── Expiry helpers ────────────────────────────────────────────────────────────

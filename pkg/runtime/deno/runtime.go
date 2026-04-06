@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -281,13 +282,19 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 
 	// Stream stdout (console.log/info) as "info" and stderr (console.error +
 	// Deno runtime errors) as "error" in the run log.
+	// wg ensures all log lines are flushed before Run returns, avoiding the race
+	// where the caller fetches logs immediately after exit and sees an empty list.
+	var wg sync.WaitGroup
+	wg.Add(2)
 	go func() {
+		defer wg.Done()
 		scanner := bufio.NewScanner(stdout)
 		for scanner.Scan() {
 			_ = rt.registry.AppendLog(context.Background(), runID, "info", scanner.Text())
 		}
 	}()
 	go func() {
+		defer wg.Done()
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {
 			_ = rt.registry.AppendLog(context.Background(), runID, "error", scanner.Text())
@@ -325,6 +332,11 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 			result.Error = exitErr
 		}
 	}
+
+	// Wait for stdout/stderr scanners to flush all log lines before returning.
+	// Without this, callers that fetch logs immediately after Run returns may see
+	// an empty list because the goroutines haven't written to the DB yet.
+	wg.Wait()
 
 	return result, nil
 }
