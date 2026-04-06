@@ -2,8 +2,6 @@ package relay
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
 	"testing"
 
 	"github.com/dicode/dicode/pkg/db"
@@ -42,10 +40,6 @@ func TestGenerateIdentity(t *testing.T) {
 	}
 	if len(id.UUID) != 64 {
 		t.Fatalf("UUID must be 64 hex chars, got %d", len(id.UUID))
-	}
-	// Verify it is a valid P-256 key.
-	if id.PrivateKey.Curve != elliptic.P256() {
-		t.Fatal("not a P-256 key")
 	}
 }
 
@@ -109,12 +103,14 @@ func TestUncompressedPublicKey(t *testing.T) {
 		t.Fatalf("uncompressed key must start with 0x04, got 0x%02x", raw[0])
 	}
 
-	// Must round-trip through elliptic.Unmarshal.
-	x, y := elliptic.Unmarshal(elliptic.P256(), raw)
-	if x == nil {
-		t.Fatal("elliptic.Unmarshal failed")
+	// Must round-trip through unmarshalUncompressed.
+	pub, err := unmarshalUncompressed(raw)
+	if err != nil {
+		t.Fatalf("unmarshalUncompressed failed: %v", err)
 	}
-	_ = &ecdsa.PublicKey{Curve: elliptic.P256(), X: x, Y: y}
+	if pub.X.Cmp(id.PrivateKey.PublicKey.X) != 0 || pub.Y.Cmp(id.PrivateKey.PublicKey.Y) != 0 {
+		t.Fatal("round-trip public key mismatch")
+	}
 }
 
 func TestDeriveUUID(t *testing.T) {

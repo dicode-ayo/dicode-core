@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/pem"
 	"fmt"
+	"math/big"
 
 	"github.com/dicode/dicode/pkg/db"
 )
@@ -25,12 +26,36 @@ type Identity struct {
 // UncompressedPublicKey returns the 65-byte uncompressed P-256 public key.
 func (id *Identity) UncompressedPublicKey() []byte {
 	pub := &id.PrivateKey.PublicKey
-	return elliptic.Marshal(elliptic.P256(), pub.X, pub.Y)
+	return marshalUncompressed(pub)
+}
+
+// marshalUncompressed serializes a P-256 public key as a 65-byte uncompressed
+// point (0x04 || X || Y) without relying on the deprecated elliptic.Marshal.
+func marshalUncompressed(pub *ecdsa.PublicKey) []byte {
+	b := make([]byte, 65)
+	b[0] = 0x04
+	pub.X.FillBytes(b[1:33])
+	pub.Y.FillBytes(b[33:65])
+	return b
+}
+
+// unmarshalUncompressed parses a 65-byte uncompressed P-256 point without
+// relying on the deprecated elliptic.Unmarshal.
+func unmarshalUncompressed(b []byte) (*ecdsa.PublicKey, error) {
+	if len(b) != 65 || b[0] != 0x04 {
+		return nil, fmt.Errorf("invalid uncompressed public key (len=%d)", len(b))
+	}
+	x := new(big.Int).SetBytes(b[1:33])
+	y := new(big.Int).SetBytes(b[33:65])
+	if !elliptic.P256().IsOnCurve(x, y) {
+		return nil, fmt.Errorf("public key point is not on P-256 curve")
+	}
+	return &ecdsa.PublicKey{Curve: elliptic.P256(), X: x, Y: y}, nil
 }
 
 // deriveUUID computes hex(sha256(uncompressed pubkey bytes)).
 func deriveUUID(pub *ecdsa.PublicKey) string {
-	raw := elliptic.Marshal(elliptic.P256(), pub.X, pub.Y)
+	raw := marshalUncompressed(pub)
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:])
 }

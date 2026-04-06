@@ -3,9 +3,9 @@ package relay
 import (
 	"context"
 	"crypto/ecdsa"
-	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -28,9 +29,10 @@ import (
 // It keeps nonce state in memory; restarting the server invalidates used nonces
 // (acceptable since nonce TTL is 60 s and the clock window is ±30 s).
 type Server struct {
-	mux  *http.ServeMux
-	log  *zap.Logger
-	host string // e.g. "https://relay.example.com"
+	mux            *http.ServeMux
+	log            *zap.Logger
+	host           string // e.g. "https://relay.example.com"
+	originPatterns []string
 
 	mu      sync.Mutex
 	clients map[string]*serverConn // uuid → conn
@@ -39,13 +41,17 @@ type Server struct {
 
 // NewServer creates a relay server. host is the public base URL used in
 // welcome messages (e.g. "https://relay.example.com").
-func NewServer(host string, log *zap.Logger) *Server {
+// originPatterns is the allowlist of Origin header patterns passed to
+// websocket.AcceptOptions.OriginPatterns; pass nil or empty to disallow
+// cross-origin connections entirely (most secure for a relay server).
+func NewServer(host string, log *zap.Logger, originPatterns ...string) *Server {
 	s := &Server{
-		mux:     http.NewServeMux(),
-		log:     log,
-		host:    host,
-		clients: make(map[string]*serverConn),
-		nonces:  make(map[string]time.Time),
+		mux:            http.NewServeMux(),
+		log:            log,
+		host:           host,
+		originPatterns: originPatterns,
+		clients:        make(map[string]*serverConn),
+		nonces:         make(map[string]time.Time),
 	}
 	s.mux.HandleFunc("/ws", s.handleWS)
 	s.mux.HandleFunc("/u/", s.handleInbound)
@@ -59,15 +65,24 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // serverConn represents one authenticated client connection.
 type serverConn struct {
+	mu      sync.Mutex // serializes writes to conn
 	conn    *websocket.Conn
 	uuid    string
 	pending sync.Map // request id → chan responseMsg
 }
 
+func (sc *serverConn) write(ctx context.Context, data []byte) error {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	return sc.conn.Write(ctx, websocket.MessageText, data)
+}
+
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
-	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		InsecureSkipVerify: true, // TLS termination is handled upstream
-	})
+	opts := &websocket.AcceptOptions{}
+	if len(s.originPatterns) > 0 {
+		opts.OriginPatterns = s.originPatterns
+	}
+	conn, err := websocket.Accept(w, r, opts)
 	if err != nil {
 		s.log.Warn("relay: ws accept", zap.Error(err))
 		return
@@ -85,14 +100,15 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	sc, err := s.receiveHello(ctx, conn, nonce)
 	if err != nil {
 		s.log.Warn("relay: handshake failed", zap.Error(err))
-		errData, _ := encodeMsg(errorMsg{Type: msgError, Message: err.Error()})
+		// Collapse all auth errors to a single opaque message (issue #7).
+		errData, _ := encodeMsg(errorMsg{Type: msgError, Message: "authentication failed"})
 		_ = conn.Write(ctx, websocket.MessageText, errData)
 		return
 	}
 
 	welcomeURL := fmt.Sprintf("%s/u/%s/hooks/", s.host, sc.uuid)
 	welcomeData, _ := encodeMsg(welcomeMsg{Type: msgWelcome, URL: welcomeURL})
-	if err := conn.Write(ctx, websocket.MessageText, welcomeData); err != nil {
+	if err := sc.write(ctx, welcomeData); err != nil {
 		return
 	}
 
@@ -135,15 +151,20 @@ func (s *Server) sendChallenge(ctx context.Context, conn *websocket.Conn) ([]byt
 	}
 	nonceHex := hex.EncodeToString(nonce)
 
-	s.mu.Lock()
-	s.nonces[nonceHex] = time.Now().Add(60 * time.Second)
-	s.mu.Unlock()
-
 	data, err := encodeMsg(challengeMsg{Type: msgChallenge, Nonce: nonceHex})
 	if err != nil {
 		return nil, err
 	}
-	return nonce, conn.Write(ctx, websocket.MessageText, data)
+	if err := conn.Write(ctx, websocket.MessageText, data); err != nil {
+		return nil, err
+	}
+
+	// Only register the nonce after it has been successfully sent (issue #11).
+	s.mu.Lock()
+	s.nonces[nonceHex] = time.Now().Add(60 * time.Second)
+	s.mu.Unlock()
+
+	return nonce, nil
 }
 
 func (s *Server) receiveHello(ctx context.Context, conn *websocket.Conn, nonce []byte) (*serverConn, error) {
@@ -166,23 +187,30 @@ func (s *Server) receiveHello(ctx context.Context, conn *websocket.Conn, nonce [
 	// Verify pubkey decodes properly.
 	pubBytes, err := base64.StdEncoding.DecodeString(hello.PubKey)
 	if err != nil {
-		return nil, fmt.Errorf("decode pubkey: %w", err)
-	}
-	if len(pubBytes) != 65 || pubBytes[0] != 0x04 {
-		return nil, fmt.Errorf("invalid uncompressed public key")
+		s.log.Debug("relay: decode pubkey failed", zap.Error(err))
+		return nil, fmt.Errorf("authentication failed")
 	}
 
-	// Verify UUID matches pubkey.
+	// Parse and validate the public key (replaces deprecated elliptic.Unmarshal).
+	pub, err := unmarshalUncompressed(pubBytes)
+	if err != nil {
+		s.log.Debug("relay: invalid public key", zap.Error(err))
+		return nil, fmt.Errorf("authentication failed")
+	}
+
+	// Verify UUID matches pubkey using constant-time comparison (issue #4).
 	sum := sha256.Sum256(pubBytes)
-	expectedUUID := hex.EncodeToString(sum[:])
-	if hello.UUID != expectedUUID {
-		return nil, fmt.Errorf("uuid mismatch")
+	computedUUID := hex.EncodeToString(sum[:])
+	if subtle.ConstantTimeCompare([]byte(computedUUID), []byte(hello.UUID)) != 1 {
+		s.log.Debug("relay: uuid mismatch", zap.String("claimed", hello.UUID), zap.String("computed", computedUUID))
+		return nil, fmt.Errorf("authentication failed")
 	}
 
 	// Verify timestamp window.
 	now := time.Now().Unix()
 	if hello.Timestamp < now-30 || hello.Timestamp > now+30 {
-		return nil, fmt.Errorf("timestamp out of window")
+		s.log.Debug("relay: timestamp out of window", zap.Int64("timestamp", hello.Timestamp))
+		return nil, fmt.Errorf("authentication failed")
 	}
 
 	// Verify nonce is not replayed.
@@ -195,20 +223,15 @@ func (s *Server) receiveHello(ctx context.Context, conn *websocket.Conn, nonce [
 	s.mu.Unlock()
 
 	if !known || time.Now().After(expiry) {
-		return nil, fmt.Errorf("nonce expired or unknown")
+		s.log.Debug("relay: nonce expired or unknown")
+		return nil, fmt.Errorf("authentication failed")
 	}
-
-	// Parse public key.
-	x, y := elliptic.Unmarshal(elliptic.P256(), pubBytes)
-	if x == nil {
-		return nil, fmt.Errorf("invalid public key point")
-	}
-	pub := &ecdsa.PublicKey{Curve: elliptic.P256(), X: x, Y: y}
 
 	// Verify signature.
 	sigBytes, err := base64.StdEncoding.DecodeString(hello.Sig)
 	if err != nil {
-		return nil, fmt.Errorf("decode sig: %w", err)
+		s.log.Debug("relay: decode sig failed", zap.Error(err))
+		return nil, fmt.Errorf("authentication failed")
 	}
 
 	var tsBuf [8]byte
@@ -219,7 +242,8 @@ func (s *Server) receiveHello(ctx context.Context, conn *websocket.Conn, nonce [
 	digest := h.Sum(nil)
 
 	if !ecdsa.VerifyASN1(pub, digest, sigBytes) {
-		return nil, fmt.Errorf("invalid signature")
+		s.log.Debug("relay: invalid signature")
+		return nil, fmt.Errorf("authentication failed")
 	}
 
 	return &serverConn{conn: conn, uuid: hello.UUID}, nil
@@ -230,27 +254,19 @@ func (s *Server) receiveHello(ctx context.Context, conn *websocket.Conn, nonce [
 //
 // URL pattern: /u/<uuid>/hooks/<path>
 func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
-	// Extract uuid from path: /u/<uuid>/...
+	// Extract uuid from path using safe string operations (issue #12).
 	path := r.URL.Path // e.g. /u/abc123/hooks/my-task
-	if len(path) < 4 {
+	rest, ok := strings.CutPrefix(path, "/u/")
+	if !ok {
 		http.NotFound(w, r)
 		return
 	}
-
-	rest := path[3:] // strip "/u/"
-	slash := -1
-	for i, c := range rest {
-		if c == '/' {
-			slash = i
-			break
-		}
-	}
-	if slash < 0 {
+	uuid, hookPath, ok := strings.Cut(rest, "/")
+	if !ok || uuid == "" {
 		http.NotFound(w, r)
 		return
 	}
-	uuid := rest[:slash]
-	hookPath := rest[slash:] // e.g. /hooks/my-task
+	hookPath = "/" + hookPath
 
 	s.mu.Lock()
 	sc, ok := s.clients[uuid]
@@ -261,10 +277,15 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Read body.
-	body, err := io.ReadAll(r.Body)
+	// Read body with a size limit to prevent memory exhaustion (issue #2).
+	limited := io.LimitReader(r.Body, maxBodySize+1)
+	body, err := io.ReadAll(limited)
 	if err != nil {
 		http.Error(w, "read body", http.StatusBadRequest)
+		return
+	}
+	if int64(len(body)) > maxBodySize {
+		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 		return
 	}
 
@@ -296,7 +317,7 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 
-	if err := sc.conn.Write(ctx, websocket.MessageText, data); err != nil {
+	if err := sc.write(ctx, data); err != nil {
 		http.Error(w, "relay write error", http.StatusBadGateway)
 		return
 	}
@@ -307,6 +328,9 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 		return
 	case resp := <-respCh:
 		for k, vals := range resp.Headers {
+			if hopByHopHeaders[k] {
+				continue
+			}
 			for _, v := range vals {
 				w.Header().Add(k, v)
 			}

@@ -88,11 +88,17 @@ The relay private key is stored in the SQLite database under the key
 sqlite3 ~/.dicode/data.db "SELECT value FROM kv WHERE key = 'relay.private_key';"
 ```
 
-To restore it on another machine, insert the same row into the `kv` table
-before starting the daemon:
+To restore it on another machine, write the PEM to a temp file first, then
+insert it — this avoids storing the raw key in your shell history:
 
 ```sh
-sqlite3 ~/.dicode/data.db "INSERT OR REPLACE INTO kv (key, value) VALUES ('relay.private_key', '<pem>');"
+# Export from source machine
+sqlite3 ~/.dicode/data.db "SELECT value FROM kv WHERE key = 'relay.private_key';" > /tmp/relay_key.pem
+
+# On the destination machine, import via a file variable (not an inline string)
+PEM=$(cat /tmp/relay_key.pem)
+sqlite3 ~/.dicode/data.db "INSERT OR REPLACE INTO kv (key, value) VALUES ('relay.private_key', '$PEM');"
+rm /tmp/relay_key.pem
 ```
 
 Keep this value secret. Anyone with the private key can impersonate your relay

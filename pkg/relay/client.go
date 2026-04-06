@@ -13,15 +13,30 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	mathrand "math/rand/v2"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
 	"go.uber.org/zap"
+)
+
+const (
+	// maxBodySize is the maximum request body size accepted by the relay (5 MB).
+	maxBodySize = 5 * 1024 * 1024
+
+	// dialTimeout is the maximum time allowed for the WebSocket dial + handshake.
+	dialTimeout = 15 * time.Second
+
+	// stableConnectionThreshold is the minimum time a connection must stay up
+	// before the backoff resets on the next reconnect.
+	stableConnectionThreshold = 10 * time.Second
 )
 
 // Client maintains a persistent WebSocket connection to a relay server and
@@ -33,8 +48,15 @@ type Client struct {
 	log       *zap.Logger
 }
 
-// NewClient creates a relay client. serverURL must be a ws:// or wss:// URL.
+// NewClient creates a relay client. serverURL must be a wss:// URL.
+// In test/dev environments ws:// is accepted but a warning is logged.
 func NewClient(serverURL string, identity *Identity, handler http.Handler, log *zap.Logger) *Client {
+	if !strings.HasPrefix(serverURL, "wss://") && !strings.HasPrefix(serverURL, "ws://") {
+		log.Error("relay: serverURL must start with wss:// or ws://", zap.String("url", serverURL))
+	} else if strings.HasPrefix(serverURL, "ws://") {
+		log.Warn("relay: using unencrypted ws:// connection — use wss:// in production",
+			zap.String("url", serverURL))
+	}
 	return &Client{
 		serverURL: serverURL,
 		identity:  identity,
@@ -50,6 +72,7 @@ func (c *Client) Run(ctx context.Context) error {
 	const maxBackoff = 60 * time.Second
 
 	for {
+		connectedAt := time.Now()
 		if err := c.runOnce(ctx); err != nil {
 			if ctx.Err() != nil {
 				return nil
@@ -57,10 +80,17 @@ func (c *Client) Run(ctx context.Context) error {
 			c.log.Warn("relay disconnected, reconnecting", zap.Error(err), zap.Duration("backoff", backoff))
 		}
 
+		// Reset backoff if the connection was stable long enough.
+		if time.Since(connectedAt) >= stableConnectionThreshold {
+			backoff = time.Second
+		}
+
+		t := time.NewTimer(jitter(backoff))
 		select {
 		case <-ctx.Done():
+			t.Stop()
 			return nil
-		case <-time.After(jitter(backoff)):
+		case <-t.C:
 		}
 
 		backoff = time.Duration(math.Min(float64(backoff*2), float64(maxBackoff)))
@@ -76,20 +106,28 @@ func jitter(d time.Duration) time.Duration {
 }
 
 func (c *Client) runOnce(ctx context.Context) error {
-	conn, _, err := websocket.Dial(ctx, c.serverURL, nil)
+	// Apply a timeout to the dial + handshake phase.
+	dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
+	defer cancel()
+
+	conn, _, err := websocket.Dial(dialCtx, c.serverURL, nil)
 	if err != nil {
 		return fmt.Errorf("dial relay: %w", err)
 	}
 	defer conn.CloseNow()
 
-	if err := c.handshake(ctx, conn); err != nil {
+	// sendMu serializes all writes to this connection (required by coder/websocket).
+	var sendMu sync.Mutex
+
+	if err := c.handshake(dialCtx, conn, &sendMu); err != nil {
 		return fmt.Errorf("handshake: %w", err)
 	}
+	cancel() // handshake done — release the dial timeout
 
-	return c.serve(ctx, conn)
+	return c.serve(ctx, conn, &sendMu)
 }
 
-func (c *Client) handshake(ctx context.Context, conn *websocket.Conn) error {
+func (c *Client) handshake(ctx context.Context, conn *websocket.Conn, sendMu *sync.Mutex) error {
 	_, data, err := conn.Read(ctx)
 	if err != nil {
 		return fmt.Errorf("read challenge: %w", err)
@@ -126,7 +164,10 @@ func (c *Client) handshake(ctx context.Context, conn *websocket.Conn) error {
 		return fmt.Errorf("encode hello: %w", err)
 	}
 
-	if err := conn.Write(ctx, websocket.MessageText, hello); err != nil {
+	sendMu.Lock()
+	err = conn.Write(ctx, websocket.MessageText, hello)
+	sendMu.Unlock()
+	if err != nil {
 		return fmt.Errorf("send hello: %w", err)
 	}
 
@@ -152,7 +193,7 @@ func (c *Client) handshake(ctx context.Context, conn *websocket.Conn) error {
 	}
 }
 
-func (c *Client) serve(ctx context.Context, conn *websocket.Conn) error {
+func (c *Client) serve(ctx context.Context, conn *websocket.Conn, sendMu *sync.Mutex) error {
 	for {
 		_, data, err := conn.Read(ctx)
 		if err != nil {
@@ -173,18 +214,21 @@ func (c *Client) serve(ctx context.Context, conn *websocket.Conn) error {
 			continue
 		}
 
-		go c.handleRequest(ctx, conn, req)
+		go c.handleRequest(ctx, conn, sendMu, req)
 	}
 }
 
-func (c *Client) handleRequest(ctx context.Context, conn *websocket.Conn, req requestMsg) {
+func (c *Client) handleRequest(ctx context.Context, conn *websocket.Conn, sendMu *sync.Mutex, req requestMsg) {
 	resp := c.dispatchRequest(req)
 	out, err := encodeMsg(resp)
 	if err != nil {
 		c.log.Error("relay: encode response", zap.Error(err))
 		return
 	}
-	if err := conn.Write(ctx, websocket.MessageText, out); err != nil {
+	sendMu.Lock()
+	err = conn.Write(ctx, websocket.MessageText, out)
+	sendMu.Unlock()
+	if err != nil {
 		c.log.Warn("relay: send response", zap.Error(err))
 	}
 }
@@ -192,19 +236,27 @@ func (c *Client) handleRequest(ctx context.Context, conn *websocket.Conn, req re
 func (c *Client) dispatchRequest(req requestMsg) responseMsg {
 	var body []byte
 	if req.Body != "" {
-		var err error
-		body, err = base64.StdEncoding.DecodeString(req.Body)
+		// Limit base64-decoded body to maxBodySize to avoid memory exhaustion.
+		// The base64 string itself can be at most ~4/3 * maxBodySize.
+		maxB64 := int64(maxBodySize * 4 / 3)
+		limited := io.LimitReader(strings.NewReader(req.Body), maxB64+1)
+		b64Data, err := io.ReadAll(limited)
+		if err != nil || int64(len(b64Data)) > maxB64 {
+			return errorResponse(req.ID, http.StatusRequestEntityTooLarge)
+		}
+		body, err = base64.StdEncoding.DecodeString(string(b64Data))
 		if err != nil {
 			return errorResponse(req.ID, http.StatusBadRequest)
 		}
+		if len(body) > maxBodySize {
+			return errorResponse(req.ID, http.StatusRequestEntityTooLarge)
+		}
 	}
 
-	httpReq, err := http.NewRequest(req.Method, req.Path, bytes.NewReader(body))
+	u := &url.URL{Scheme: "http", Host: "relay", Path: req.Path}
+	httpReq, err := http.NewRequestWithContext(context.Background(), req.Method, u.String(), bytes.NewReader(body))
 	if err != nil {
 		return errorResponse(req.ID, http.StatusBadRequest)
-	}
-	if !strings.HasPrefix(req.Path, "http") {
-		httpReq.RequestURI = req.Path
 	}
 	for k, vals := range req.Headers {
 		for _, v := range vals {
@@ -224,10 +276,7 @@ func (c *Client) dispatchRequest(req requestMsg) responseMsg {
 		respBody = buf.Bytes()
 	}
 
-	headers := make(map[string][]string)
-	for k, vals := range result.Header {
-		headers[k] = vals
-	}
+	headers := filterResponseHeaders(result.Header)
 
 	return responseMsg{
 		Type:    msgResponse,
@@ -236,6 +285,33 @@ func (c *Client) dispatchRequest(req requestMsg) responseMsg {
 		Headers: headers,
 		Body:    base64.StdEncoding.EncodeToString(respBody),
 	}
+}
+
+// hopByHopHeaders are headers that must not be forwarded per HTTP/1.1.
+var hopByHopHeaders = map[string]bool{
+	"Connection":          true,
+	"Keep-Alive":          true,
+	"Proxy-Authenticate":  true,
+	"Proxy-Authorization": true,
+	"Te":                  true,
+	"Trailers":            true,
+	"Transfer-Encoding":   true,
+	"Upgrade":             true,
+	// Sensitive headers that should not leak to the inbound caller.
+	"Set-Cookie": true,
+}
+
+// filterResponseHeaders strips hop-by-hop and sensitive headers before
+// forwarding the response back to the inbound webhook caller.
+func filterResponseHeaders(h http.Header) map[string][]string {
+	out := make(map[string][]string, len(h))
+	for k, vals := range h {
+		if hopByHopHeaders[k] {
+			continue
+		}
+		out[k] = vals
+	}
+	return out
 }
 
 func errorResponse(id string, status int) responseMsg {
