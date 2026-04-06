@@ -27,6 +27,14 @@ type DefaultsConfig struct {
 	OnFailureChain string `yaml:"on_failure_chain,omitempty"`
 }
 
+// RelayConfig configures the WebSocket relay client.
+// The relay allows a local dicode instance to receive webhooks from external
+// services (GitHub, Slack, etc.) without port forwarding.
+type RelayConfig struct {
+	Enabled   bool   `yaml:"enabled"`
+	ServerURL string `yaml:"server_url"` // wss://relay.dicode.app
+}
+
 type Config struct {
 	Sources       []SourceConfig           `yaml:"sources"`
 	Database      DatabaseConfig           `yaml:"database"`
@@ -36,6 +44,7 @@ type Config struct {
 	AI            AIConfig                 `yaml:"ai"`
 	Defaults      DefaultsConfig           `yaml:"defaults"`
 	Runtimes      map[string]RuntimeConfig `yaml:"runtimes,omitempty"`
+	Relay         RelayConfig              `yaml:"relay,omitempty"`
 	LogLevel      string                   `yaml:"log_level"`
 	DataDir       string                   `yaml:"data_dir"`
 }
