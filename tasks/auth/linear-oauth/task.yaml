@@ -38,7 +38,7 @@ permissions:
     tasks:
       - buildin/notifications
 params:
-  - name: scope
+  scope:
     type: string
     default: "read"
     description: Space-separated Linear scopes (read, write, issues:create, etc.)

@@ -49,11 +49,11 @@ permissions:
     tasks:
       - buildin/notifications
 params:
-  - name: looker_instance
+  looker_instance:
     type: string
     default: ""
     description: Looker hostname, e.g. company.cloud.looker.com (overrides LOOKER_INSTANCE secret)
-  - name: scope
+  scope:
     type: string
     default: ""
     description: Space-separated Looker scopes (leave empty if your app has a fixed scope)

@@ -1,0 +1,57 @@
+apiVersion: dicode/v1
+kind: Task
+name: OAuth
+description: |
+  Generic OAuth 2.0 task — configured entirely through taskset overrides.
+  Do not use this task directly; instantiate it via a taskset entry with overrides.
+runtime: deno
+trigger:
+  webhook: /hooks/oauth
+permissions:
+  env:
+    - DICODE_BASE_URL  # optional — defaults to http://localhost:8080
+    # Injected by taskset overrides per provider:
+    # CLIENT_ID, CLIENT_SECRET (optional), ACCESS_TOKEN (optional), REFRESH_TOKEN (optional)
+  net:
+    - "*"  # restricted per provider via overrides.net
+  fs:
+    - path: ../_oauth
+      permission: r
+  dicode:
+    secrets_write: true
+    tasks:
+      - buildin/notifications
+params:
+  provider:
+    type: string
+    default: ""
+    description: Provider key passed to the generic script (set via overrides, not by the user)
+  client_id_env:
+    type: string
+    default: "CLIENT_ID"
+    description: Env var name holding the client ID
+  client_secret_env:
+    type: string
+    default: ""
+    description: Env var name holding the client secret (empty = PKCE-only)
+  access_token_env:
+    type: string
+    default: "ACCESS_TOKEN"
+    description: Env var name to read existing access token from
+  refresh_token_env:
+    type: string
+    default: "REFRESH_TOKEN"
+    description: Env var name to read existing refresh token from
+  scope:
+    type: string
+    default: ""
+    description: Space-separated OAuth scopes to request
+  color:
+    type: string
+    default: "#333"
+    description: Brand color for the authorize button
+  token_lifetime:
+    type: string
+    default: "expires"
+    description: "expires (token has expires_in) | permanent (never expires, skip refresh check)"
+timeout: 30s

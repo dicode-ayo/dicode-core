@@ -380,9 +380,9 @@ func mergeOverrides(a, b *Overrides) *Overrides {
 		out.Defaults = a.Defaults
 	}
 	out.Notify = mergeNotify(a.Notify, out.Notify)
-	// Env: merge by key (a first, b wins)
+	// Env: merge by name (a first, b wins)
 	if len(a.Env) > 0 || len(out.Env) > 0 {
-		out.Env = mergeEnv(a.Env, out.Env)
+		out.Env = mergeEnvEntries(a.Env, out.Env)
 	}
 	// Params: merge by name (b wins)
 	if len(a.Params) > 0 {
