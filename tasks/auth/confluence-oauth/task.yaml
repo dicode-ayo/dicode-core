@@ -42,7 +42,7 @@ permissions:
     tasks:
       - buildin/notifications
 params:
-  - name: scope
+  scope:
     type: string
     default: "read:me read:confluence-content.all offline_access"
     description: Space-separated Atlassian scopes. Include offline_access for a refresh token.

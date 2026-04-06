@@ -39,7 +39,7 @@ permissions:
     tasks:
       - buildin/notifications
 params:
-  - name: scope
+  scope:
     type: string
     default: "user-read-private user-read-email"
     description: Space-separated Spotify scopes

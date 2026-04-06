@@ -8,7 +8,7 @@ trigger:
   manual: true
 
 params:
-  - name: repo
+  repo:
     description: GitHub repo in owner/name format
     default: "denoland/deno"
 

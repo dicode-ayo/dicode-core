@@ -11,19 +11,19 @@ trigger:
   manual: true
 
 params:
-  - name: title
+  title:
     type: string
     required: true
     description: "Notification title"
-  - name: message
+  message:
     type: string
     required: true
     description: "Notification body text"
-  - name: priority
+  priority:
     type: string
     default: "default"
     description: "Urgency: min | low | default | high | urgent"
-  - name: tags
+  tags:
     type: string
     default: ""
     description: "Comma-separated tags passed through to the notify task"

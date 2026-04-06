@@ -39,7 +39,7 @@ permissions:
     tasks:
       - buildin/notifications
 params:
-  - name: scope
+  scope:
     type: string
     default: "identify email"
     description: Space-separated Discord scopes

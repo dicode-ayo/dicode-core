@@ -32,7 +32,7 @@ permissions:
   dicode:
     secrets_write: true
 params:
-  - name: scope
+  scope:
     type: string
     default: "data.records:read"
     description: Space-separated Airtable scopes

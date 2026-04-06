@@ -13,11 +13,11 @@ trigger:
   webhook: /hooks/webui
 
 params:
-  - name: action
+  action:
     type: string
     description: "Action to perform: status | ping | echo"
     default: ping
-  - name: query
+  query:
     type: string
     description: Optional payload for the echo action
 

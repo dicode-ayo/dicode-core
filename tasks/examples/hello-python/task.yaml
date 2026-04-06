@@ -11,9 +11,9 @@ trigger:
   manual: true
 
 params:
-  - name: name
+  name:
     description: Name to greet
     default: "World"
-  - name: count
+  count:
     description: Run count (shown in greeting)
     default: "1"

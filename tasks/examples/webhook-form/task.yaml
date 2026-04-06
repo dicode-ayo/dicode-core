@@ -11,11 +11,11 @@ trigger:
   webhook: /hooks/text-transform
 
 params:
-  - name: text
+  text:
     type: string
     description: The input text to transform
     required: true
-  - name: op
+  op:
     type: string
     description: "Operation: uppercase | lowercase | reverse | wordcount"
     default: uppercase

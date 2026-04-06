@@ -38,7 +38,7 @@ permissions:
     tasks:
       - buildin/notifications
 params:
-  - name: scope
+  scope:
     type: string
     default: "user,repo"
     description: Space-separated GitHub scopes
