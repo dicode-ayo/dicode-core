@@ -25,6 +25,7 @@ import (
 	"github.com/dicode/dicode/pkg/notify"
 	"github.com/dicode/dicode/pkg/onboarding"
 	"github.com/dicode/dicode/pkg/registry"
+	"github.com/dicode/dicode/pkg/relay"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	denoruntime "github.com/dicode/dicode/pkg/runtime/deno"
 	dockerruntime "github.com/dicode/dicode/pkg/runtime/docker"
@@ -188,6 +189,17 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	g.Go(func() error { return eng.Start(ctx) })
 	g.Go(func() error { return srv.Start(ctx) })
 	g.Go(func() error { return ctrlSrv.Start(ctx) })
+
+	// 11. Relay client — optional, enabled via config.
+	if cfg.Relay.Enabled && cfg.Relay.ServerURL != "" {
+		id, err := relay.LoadOrGenerateIdentity(ctx, database)
+		if err != nil {
+			log.Warn("relay: identity init failed, relay disabled", zap.Error(err))
+		} else {
+			rc := relay.NewClient(cfg.Relay.ServerURL, id, eng.WebhookHandler(), log)
+			g.Go(func() error { return rc.Run(ctx) })
+		}
+	}
 
 	return g.Wait()
 }
