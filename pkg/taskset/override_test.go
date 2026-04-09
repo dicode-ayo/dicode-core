@@ -46,7 +46,7 @@ func envMap(entries []task.EnvEntry) map[string]string {
 // ── mergeEnvEntries ───────────────────────────────────────────────────────────
 
 func TestMergeEnvEntries_NewKeyAppended(t *testing.T) {
-	base    := []task.EnvEntry{{Name: "A", Value: "1"}}
+	base := []task.EnvEntry{{Name: "A", Value: "1"}}
 	overlay := []task.EnvEntry{{Name: "B", Value: "2"}}
 	got := mergeEnvEntries(base, overlay)
 	if len(got) != 2 {
@@ -58,7 +58,7 @@ func TestMergeEnvEntries_NewKeyAppended(t *testing.T) {
 }
 
 func TestMergeEnvEntries_OverlayWins(t *testing.T) {
-	base    := []task.EnvEntry{{Name: "A", Value: "1"}, {Name: "B", Value: "2"}}
+	base := []task.EnvEntry{{Name: "A", Value: "1"}, {Name: "B", Value: "2"}}
 	overlay := []task.EnvEntry{{Name: "A", Value: "99"}}
 	got := mergeEnvEntries(base, overlay)
 	em := envMap(got)
@@ -71,7 +71,7 @@ func TestMergeEnvEntries_OverlayWins(t *testing.T) {
 }
 
 func TestMergeEnvEntries_PreservesOrder(t *testing.T) {
-	base    := []task.EnvEntry{{Name: "A", Value: "1"}, {Name: "B", Value: "2"}, {Name: "C", Value: "3"}}
+	base := []task.EnvEntry{{Name: "A", Value: "1"}, {Name: "B", Value: "2"}, {Name: "C", Value: "3"}}
 	overlay := []task.EnvEntry{{Name: "B", Value: "99"}, {Name: "D", Value: "4"}}
 	got := mergeEnvEntries(base, overlay)
 	if len(got) != 4 {
@@ -83,7 +83,7 @@ func TestMergeEnvEntries_PreservesOrder(t *testing.T) {
 }
 
 func TestMergeEnvEntries_SecretEntry(t *testing.T) {
-	base    := []task.EnvEntry{{Name: "TOKEN", Secret: "my_token"}}
+	base := []task.EnvEntry{{Name: "TOKEN", Secret: "my_token"}}
 	overlay := []task.EnvEntry{{Name: "TOKEN", Secret: "new_token", Optional: true}}
 	got := mergeEnvEntries(base, overlay)
 	if len(got) != 1 || got[0].Secret != "new_token" || !got[0].Optional {

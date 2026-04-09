@@ -21,9 +21,9 @@ import (
 	"github.com/dicode/dicode/pkg/config"
 	"github.com/dicode/dicode/pkg/db"
 	"github.com/dicode/dicode/pkg/ipc"
-	"github.com/dicode/dicode/pkg/relay"
 	"github.com/dicode/dicode/pkg/mcp"
 	"github.com/dicode/dicode/pkg/registry"
+	"github.com/dicode/dicode/pkg/relay"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	denoruntime "github.com/dicode/dicode/pkg/runtime/deno"
 	"github.com/dicode/dicode/pkg/secrets"
@@ -448,7 +448,7 @@ func (s *Server) Start(ctx context.Context) error {
 		_ = s.srv.Shutdown(shutCtx)
 	}()
 	certFile := s.cfg.Server.TLSCertFile
-	keyFile  := s.cfg.Server.TLSKeyFile
+	keyFile := s.cfg.Server.TLSKeyFile
 	if certFile != "" && keyFile != "" {
 		s.log.Info("webui listening (HTTPS)", zap.Int("port", s.port),
 			zap.String("hint", fmt.Sprintf("set DICODE_BASE_URL secret to https://YOUR_HOST:%d", s.port)))
