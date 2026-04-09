@@ -178,11 +178,6 @@ func (s *Server) SetManagedRuntimes(runtimes []pkgruntime.ManagedRuntime) {
 // sourceMgr enables the /api/sources endpoints and MCP source tools; pass nil in tests.
 // database is required for persistent sessions and API key storage; pass nil in tests (auth features disabled).
 func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config, cfgPath string, secretsMgr SecretsManager, rec *registry.Reconciler, sourceMgr *SourceManager, dataDir string, logs *LogBroadcaster, log *zap.Logger, database db.DB, gateway *ipc.Gateway) (*Server, error) {
-	// Provide dicode.js to the engine so relay-proxied webhook UIs can load it.
-	if dicodeJS, err := staticFS.ReadFile("static/dicode.js"); err == nil {
-		eng.SetDicodeJS(dicodeJS)
-	}
-
 	ss := newSessionStore()
 	go ss.purgeLoop()
 
