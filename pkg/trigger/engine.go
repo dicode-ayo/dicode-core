@@ -51,8 +51,6 @@ type Engine struct {
 	daemonRuns  map[string]string
 	daemonSpecs map[string]*task.Spec
 
-	dicodeJS []byte // optional: dicode.js SDK content for relay-served UIs
-
 	notifier        notify.Notifier
 	notifyOnSuccess bool
 	notifyOnFailure bool
@@ -79,12 +77,6 @@ func New(r *registry.Registry, defaultExec pkgruntime.Executor, log *zap.Logger)
 	}
 	e.executors[task.RuntimeDeno] = defaultExec
 	return e
-}
-
-// SetDicodeJS provides the dicode.js SDK content so the webhook handler can
-// serve it for relay-proxied UIs that can't reach the main webui server.
-func (e *Engine) SetDicodeJS(js []byte) {
-	e.dicodeJS = js
 }
 
 // SetDB wires a database into the engine for cron-job persistence.
@@ -686,14 +678,6 @@ func (e *Engine) WebhookHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
 
-		// Serve dicode.js SDK if available (for relay-proxied UIs).
-		if path == "/dicode.js" && e.dicodeJS != nil {
-			w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write(e.dicodeJS)
-			return
-		}
-
 		// Exact match — normal webhook execution path.
 		e.mu.Lock()
 		taskID, ok := e.webhooks[path]
@@ -742,7 +726,7 @@ func (e *Engine) WebhookHandler() http.Handler {
 				filepath.Ext(assetPath) == "" {
 				indexFile := filepath.Join(spec.TaskDir, "index.html")
 				if data, err := os.ReadFile(indexFile); err == nil {
-					html := injectDicodeSDK(string(data), matchedHook, taskID)
+					html := injectDicodeSDK(string(data), matchedHook, taskID, r)
 					w.Header().Set("Content-Type", "text/html; charset=utf-8")
 					_, _ = w.Write([]byte(html))
 					return
@@ -757,7 +741,7 @@ func (e *Engine) WebhookHandler() http.Handler {
 			indexFile := filepath.Join(spec.TaskDir, "index.html")
 			if data, err := os.ReadFile(indexFile); err == nil {
 				e.log.Info("webhook UI served", zap.String("path", path), zap.String("task", taskID))
-				html := injectDicodeSDK(string(data), matchedHook, taskID)
+				html := injectDicodeSDK(string(data), matchedHook, taskID, r)
 				w.Header().Set("Content-Type", "text/html; charset=utf-8")
 				_, _ = w.Write([]byte(html))
 				return
@@ -942,11 +926,23 @@ func flatStringMap(v interface{}) map[string]string {
 // in the task's HTML (e.g. href="style.css") resolve to the correct sub-path
 // (e.g. /hooks/my-task/style.css) regardless of the page having no trailing
 // slash in its URL.
-func injectDicodeSDK(html, hookPath, taskID string) string {
-	injection := `<base href="` + hookPath + `/">` +
+//
+// When the request arrives via the relay proxy, the X-Relay-Base header
+// provides the relay path prefix (e.g. /u/<uuid>) so that <base href> and
+// script sources are adjusted to work through the relay.
+func injectDicodeSDK(html, hookPath, taskID string, r *http.Request) string {
+	relayBase := r.Header.Get("X-Relay-Base")
+	basePath := hookPath
+	dicodeJSSrc := "/dicode.js"
+	if relayBase != "" {
+		basePath = relayBase + hookPath
+		dicodeJSSrc = relayBase + "/dicode.js"
+	}
+
+	injection := `<base href="` + basePath + `/">` +
 		`<meta name="dicode-task" content="` + taskID + `">` +
-		`<meta name="dicode-hook" content="` + hookPath + `">` +
-		`<script src="/dicode.js"></script>`
+		`<meta name="dicode-hook" content="` + basePath + `">` +
+		`<script src="` + dicodeJSSrc + `"></script>`
 	// Inject immediately after <head> so <base> precedes every other element
 	// (stylesheets, scripts, images) that carries a relative URL.
 	if i := strings.Index(html, "<head>"); i != -1 {
