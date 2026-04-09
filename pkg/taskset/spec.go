@@ -54,7 +54,7 @@ type Defaults struct {
 	Timeout time.Duration `yaml:"timeout,omitempty"`
 	Retry   *RetryConfig  `yaml:"retry,omitempty"`
 	// Env accepts full EnvEntry mappings or bare "KEY" / "KEY=value" strings.
-	Env     []task.EnvEntry `yaml:"env,omitempty"`
+	Env []task.EnvEntry `yaml:"env,omitempty"`
 	// Trigger sets a fallback trigger for any entry that has none.
 	Trigger *TriggerPatch      `yaml:"trigger,omitempty"`
 	Notify  *task.NotifyConfig `yaml:"notify,omitempty"`
@@ -132,19 +132,19 @@ func (p *ParamOverrides) UnmarshalYAML(value *yaml.Node) error {
 // Overrides is a patch applied to a resolved task or to a nested TaskSet entry.
 // Fields are applied in the three-level override cascade; later layers win.
 type Overrides struct {
-	Enabled     *bool              `yaml:"enabled,omitempty"`
-	Name        string             `yaml:"name,omitempty"`        // replaces spec.Name
-	Description string             `yaml:"description,omitempty"` // replaces spec.Description
-	Trigger     *TriggerPatch      `yaml:"trigger,omitempty"`
-	Params      ParamOverrides     `yaml:"params,omitempty"`
+	Enabled     *bool          `yaml:"enabled,omitempty"`
+	Name        string         `yaml:"name,omitempty"`        // replaces spec.Name
+	Description string         `yaml:"description,omitempty"` // replaces spec.Description
+	Trigger     *TriggerPatch  `yaml:"trigger,omitempty"`
+	Params      ParamOverrides `yaml:"params,omitempty"`
 	// Env accepts full EnvEntry mappings (name/secret/from/value/optional) or bare "KEY" / "KEY=value" strings.
-	Env         []task.EnvEntry    `yaml:"env,omitempty"`
-	Net         []string           `yaml:"net,omitempty"` // replaces permissions.net
-	Timeout     time.Duration      `yaml:"timeout,omitempty"`
-	Retry       *RetryConfig       `yaml:"retry,omitempty"`
-	Runtime     string             `yaml:"runtime,omitempty"`
-	Notify      *task.NotifyConfig `yaml:"notify,omitempty"`
-	Dicode      *task.DicodePermissions `yaml:"dicode,omitempty"` // replaces permissions.dicode
+	Env     []task.EnvEntry         `yaml:"env,omitempty"`
+	Net     []string                `yaml:"net,omitempty"` // replaces permissions.net
+	Timeout time.Duration           `yaml:"timeout,omitempty"`
+	Retry   *RetryConfig            `yaml:"retry,omitempty"`
+	Runtime string                  `yaml:"runtime,omitempty"`
+	Notify  *task.NotifyConfig      `yaml:"notify,omitempty"`
+	Dicode  *task.DicodePermissions `yaml:"dicode,omitempty"` // replaces permissions.dicode
 
 	// For task_set entries only — Deprecated: Defaults cross-boundary cascade is no longer applied.
 	// Use per-entry overrides.entries[key] to patch nested tasks explicitly.
