@@ -10,12 +10,15 @@
       "mcp__chrome-devtools__*",
       "Bash(make run:*)",
       "Bash(make build:*)",
-      "Bash(make test:*)"
+      "Bash(make test:*)",
+      "Bash(git stash:*)",
+      "Bash(dpkg:*)",
+      "Bash(grep -n \"type Registry\" /workspaces/dicode-core/pkg/registry/*.go)"
     ]
   },
-  "autoMemoryDirectory": "/home/dr14/dicode/.claude/memory",
   "enabledMcpjsonServers": [
     "chrome-devtools",
     "playwright"
-  ]
+  ],
+  "autoMemoryDirectory": "/home/dr14/dicode/.claude/memory"
 }

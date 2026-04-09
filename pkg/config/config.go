@@ -3,6 +3,8 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -185,7 +187,8 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
-	applyDefaults(&cfg)
+	configDir, _ := filepath.Abs(filepath.Dir(path))
+	applyDefaults(&cfg, configDir)
 
 	if err := cfg.validate(); err != nil {
 		return nil, fmt.Errorf("invalid config: %w", err)
@@ -205,12 +208,41 @@ func expandHome(path string) string {
 	return path
 }
 
-func applyDefaults(cfg *Config) {
-	// Expand ~ in all path fields before anything else.
-	cfg.DataDir = expandHome(cfg.DataDir)
-	cfg.Database.Path = expandHome(cfg.Database.Path)
+// expandVars replaces ${VAR} placeholders in path strings.
+// Supported variables:
+//   - ${HOME}      — user home directory
+//   - ${CONFIGDIR} — directory containing dicode.yaml
+//   - ${DATADIR}   — resolved data_dir value
+func expandVars(path string, vars map[string]string) string {
+	for k, v := range vars {
+		path = strings.ReplaceAll(path, "${"+k+"}", v)
+	}
+	return path
+}
+
+func applyDefaults(cfg *Config, configDir string) {
+	// Build template variables for path expansion.
+	home, _ := os.UserHomeDir()
+	vars := map[string]string{
+		"HOME":      home,
+		"CONFIGDIR": configDir,
+	}
+
+	// Expand ~ and ${VAR} in all path fields before anything else.
+	expand := func(path string) string {
+		return expandVars(expandHome(path), vars)
+	}
+	cfg.DataDir = expand(cfg.DataDir)
+
+	// DataDir must be resolved first so ${DATADIR} is available for other paths.
+	if cfg.DataDir == "" {
+		cfg.DataDir = home + "/.dicode"
+	}
+	vars["DATADIR"] = cfg.DataDir
+
+	cfg.Database.Path = expand(cfg.Database.Path)
 	for i := range cfg.Sources {
-		cfg.Sources[i].Path = expandHome(cfg.Sources[i].Path)
+		cfg.Sources[i].Path = expand(cfg.Sources[i].Path)
 	}
 
 	for i := range cfg.Sources {
@@ -261,10 +293,7 @@ func applyDefaults(cfg *Config) {
 	if cfg.LogLevel == "" {
 		cfg.LogLevel = "info"
 	}
-	if cfg.DataDir == "" {
-		home, _ := os.UserHomeDir()
-		cfg.DataDir = home + "/.dicode"
-	}
+	// DataDir default is set earlier during variable expansion.
 }
 
 func (cfg *Config) validate() error {
