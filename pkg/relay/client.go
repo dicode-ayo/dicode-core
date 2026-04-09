@@ -17,8 +17,6 @@ import (
 	"math"
 	mathrand "math/rand/v2"
 	"net/http"
-	"net/http/httptest"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -40,11 +38,11 @@ const (
 )
 
 // Client maintains a persistent WebSocket connection to a relay server and
-// forwards incoming webhook requests through a local http.Handler.
+// forwards incoming webhook requests to the local daemon HTTP server.
 type Client struct {
 	serverURL string
 	identity  *Identity
-	handler   http.Handler
+	localPort int
 	log       *zap.Logger
 
 	hookMu      sync.RWMutex
@@ -53,7 +51,7 @@ type Client struct {
 
 // NewClient creates a relay client. serverURL must be a wss:// URL.
 // In test/dev environments ws:// is accepted but a warning is logged.
-func NewClient(serverURL string, identity *Identity, handler http.Handler, log *zap.Logger) *Client {
+func NewClient(serverURL string, identity *Identity, localPort int, log *zap.Logger) *Client {
 	if !strings.HasPrefix(serverURL, "wss://") && !strings.HasPrefix(serverURL, "ws://") {
 		log.Error("relay: serverURL must start with wss:// or ws://", zap.String("url", serverURL))
 	} else if strings.HasPrefix(serverURL, "ws://") {
@@ -63,7 +61,7 @@ func NewClient(serverURL string, identity *Identity, handler http.Handler, log *
 	return &Client{
 		serverURL: serverURL,
 		identity:  identity,
-		handler:   handler,
+		localPort: localPort,
 		log:       log,
 	}
 }
@@ -268,8 +266,8 @@ func (c *Client) dispatchRequest(req requestMsg) responseMsg {
 		}
 	}
 
-	u := &url.URL{Scheme: "http", Host: "relay", Path: req.Path}
-	httpReq, err := http.NewRequestWithContext(context.Background(), req.Method, u.String(), bytes.NewReader(body))
+	targetURL := fmt.Sprintf("http://localhost:%d%s", c.localPort, req.Path)
+	httpReq, err := http.NewRequestWithContext(context.Background(), req.Method, targetURL, bytes.NewReader(body))
 	if err != nil {
 		return errorResponse(req.ID, http.StatusBadRequest)
 	}
@@ -279,24 +277,38 @@ func (c *Client) dispatchRequest(req requestMsg) responseMsg {
 		}
 	}
 
-	rec := httptest.NewRecorder()
-	c.handler.ServeHTTP(rec, httpReq)
-
-	result := rec.Result()
-	var respBody []byte
-	if result.Body != nil {
-		buf := new(bytes.Buffer)
-		_, _ = buf.ReadFrom(result.Body)
-		_ = result.Body.Close()
-		respBody = buf.Bytes()
+	// Tell the daemon this request arrives via the relay so it can adjust
+	// <base href> and other URL references for relay-proxied UIs.
+	c.hookMu.RLock()
+	relayBase := c.hookBaseURL
+	c.hookMu.RUnlock()
+	if relayBase != "" {
+		if idx := strings.Index(relayBase, "/u/"); idx != -1 {
+			suffix := relayBase[idx:]
+			suffix = strings.TrimRight(suffix, "/")
+			suffix = strings.TrimSuffix(suffix, "/hooks")
+			httpReq.Header.Set("X-Relay-Base", suffix)
+		}
 	}
 
-	headers := filterResponseHeaders(result.Header)
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		c.log.Warn("relay: local request failed", zap.Error(err))
+		return errorResponse(req.ID, http.StatusBadGateway)
+	}
+	defer resp.Body.Close()
+
+	var respBody []byte
+	buf := new(bytes.Buffer)
+	_, _ = buf.ReadFrom(resp.Body)
+	respBody = buf.Bytes()
+
+	headers := filterResponseHeaders(resp.Header)
 
 	return responseMsg{
 		Type:    msgResponse,
 		ID:      req.ID,
-		Status:  result.StatusCode,
+		Status:  resp.StatusCode,
 		Headers: headers,
 		Body:    base64.StdEncoding.EncodeToString(respBody),
 	}
