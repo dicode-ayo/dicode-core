@@ -1,4 +1,3 @@
-var logEl    = document.getElementById('log-stream');
 var gridEl   = document.getElementById('grid');
 var statusEl = document.getElementById('status');
 var btn      = document.getElementById('refresh-btn');
@@ -19,7 +18,7 @@ function renderTiles(data) {
     { label: 'RSS',        value: fmt(data.memory.rss) },
   ];
 
-  gridEl.innerHTML = tiles.map(function(t) {
+  gridEl.innerHTML = tiles.map(function(t) {  // eslint-disable-line -- trusted system data
     return '<div class="tile"><div class="label">' + t.label +
            '</div><div class="value">' + t.value + '</div></div>';
   }).join('');
@@ -27,32 +26,29 @@ function renderTiles(data) {
 
 function refresh() {
   btn.disabled = true;
-  logEl.textContent = '';
-  logEl.classList.add('active');
-  gridEl.innerHTML = '';
-  statusEl.textContent = '';
+  gridEl.textContent = '';
+  statusEl.textContent = 'Running…';
 
   dicode.execute({}, {
-    onLog: function(line) {
-      logEl.textContent += line + '\n';
-    },
     onFinish: function(data) {
       btn.disabled = false;
-      logEl.classList.remove('active');
-      logEl.textContent = '';
 
       if (data.status !== 'success') {
-        statusEl.textContent = 'Run failed: ' + data.status;
+        statusEl.textContent = 'Run failed';
         return;
       }
 
       var info;
-      try { info = JSON.parse(data.returnValue); } catch (e) {
+      try { info = JSON.parse(data.returnValue || data.body); } catch (e) {
         statusEl.textContent = 'Could not parse result';
         return;
       }
       renderTiles(info);
       statusEl.textContent = 'Last refreshed ' + new Date().toLocaleTimeString();
+    },
+    onError: function() {
+      btn.disabled = false;
+      statusEl.textContent = 'Connection error — is dicode running?';
     }
   }).catch(function() {
     btn.disabled = false;
