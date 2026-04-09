@@ -25,10 +25,6 @@ import (
 	"go.uber.org/zap"
 )
 
-// localClient is used for forwarding relay requests to the local daemon,
-// with a timeout to prevent hanging connections.
-var localClient = &http.Client{Timeout: 25 * time.Second}
-
 const (
 	// maxBodySize is the maximum request body size accepted by the relay (5 MB).
 	maxBodySize = 5 * 1024 * 1024
@@ -44,10 +40,11 @@ const (
 // Client maintains a persistent WebSocket connection to a relay server and
 // forwards incoming webhook requests to the local daemon HTTP server.
 type Client struct {
-	serverURL string
-	identity  *Identity
-	localPort int
-	log       *zap.Logger
+	serverURL   string
+	identity    *Identity
+	localPort   int
+	log         *zap.Logger
+	localClient *http.Client
 
 	hookMu      sync.RWMutex
 	hookBaseURL string // set after successful handshake from welcome message
@@ -63,10 +60,11 @@ func NewClient(serverURL string, identity *Identity, localPort int, log *zap.Log
 			zap.String("url", serverURL))
 	}
 	return &Client{
-		serverURL: serverURL,
-		identity:  identity,
-		localPort: localPort,
-		log:       log,
+		serverURL:   serverURL,
+		identity:    identity,
+		localPort:   localPort,
+		log:         log,
+		localClient: &http.Client{Timeout: 25 * time.Second},
 	}
 }
 
@@ -297,7 +295,7 @@ func (c *Client) dispatchRequest(req requestMsg) responseMsg {
 	// Set X-Relay-Base using the client's known UUID — no URL parsing needed.
 	httpReq.Header.Set("X-Relay-Base", "/u/"+c.identity.UUID)
 
-	resp, err := localClient.Do(httpReq)
+	resp, err := c.localClient.Do(httpReq)
 	if err != nil {
 		c.log.Warn("relay: local request failed", zap.Error(err))
 		return errorResponse(req.ID, http.StatusBadGateway)
@@ -306,7 +304,7 @@ func (c *Client) dispatchRequest(req requestMsg) responseMsg {
 
 	var respBody []byte
 	buf := new(bytes.Buffer)
-	_, _ = buf.ReadFrom(resp.Body)
+	_, _ = buf.ReadFrom(io.LimitReader(resp.Body, maxBodySize))
 	respBody = buf.Bytes()
 
 	headers := filterResponseHeaders(resp.Header)

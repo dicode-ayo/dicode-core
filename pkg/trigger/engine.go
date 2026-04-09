@@ -611,11 +611,12 @@ const taskErrorPage = `<!doctype html>
 <div class="error-msg">%s</div>
 <h3>Logs</h3>
 <pre id="logs"></pre>
+<script id="log-data" type="application/json">%s</script>
 <script type="module">
 import Convert from 'https://esm.sh/ansi-to-html@0.7.2';
 const conv = new Convert({ fg: '#cdd6f4', bg: '#181825', escapeXML: true,
   colors: { 1:'#f38ba8',2:'#a6e3a1',3:'#f9e2af',4:'#89b4fa',5:'#cba6f7',6:'#89dceb',7:'#cdd6f4' } });
-const logs = %s;
+const logs = JSON.parse(document.getElementById('log-data').textContent);
 const pre = document.getElementById('logs');
 if (!logs.length) { pre.textContent = '(no logs)'; }
 else { pre.innerHTML = logs.map(l => {
@@ -879,7 +880,9 @@ func (e *Engine) WebhookHandler() http.Handler {
 				w.Header().Set("X-Run-Id", runID)
 				w.WriteHeader(http.StatusInternalServerError)
 				logsJSON, _ := json.Marshal(logLines)
-				_, _ = fmt.Fprintf(w, taskErrorPage, html.EscapeString(runID), html.EscapeString(errMsg), logsJSON)
+				var safeJSON bytes.Buffer
+				json.HTMLEscape(&safeJSON, logsJSON)
+				_, _ = fmt.Fprintf(w, taskErrorPage, html.EscapeString(runID), html.EscapeString(errMsg), safeJSON.String())
 				return
 			}
 			// API: JSON envelope with error message.
