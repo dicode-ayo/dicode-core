@@ -196,7 +196,7 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 		if err != nil {
 			log.Warn("relay: identity init failed, relay disabled", zap.Error(err))
 		} else {
-			rc := relay.NewClient(cfg.Relay.ServerURL, id, eng.WebhookHandler(), log)
+			rc := relay.NewClient(cfg.Relay.ServerURL, id, port, log)
 			srv.SetRelayClient(rc)
 			g.Go(func() error { return rc.Run(ctx) })
 		}
