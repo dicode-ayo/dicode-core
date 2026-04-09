@@ -13,6 +13,7 @@ package onboarding
 import (
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Required returns true if no config file exists at path and onboarding
@@ -44,10 +45,24 @@ const (
 
 // DefaultLocalConfig returns a fully-commented dicode.yaml for local-only mode.
 // All optional sections are included as comments so users can enable them easily.
+// Path fields use ${HOME} and ${DATADIR} template variables for portability.
 func DefaultLocalConfig(tasksDir, dataDir string) string {
+	// Convert absolute paths to template variables where possible.
+	home, _ := os.UserHomeDir()
+	if home != "" {
+		tasksDir = strings.Replace(tasksDir, home, "${HOME}", 1)
+		dataDir = strings.Replace(dataDir, home, "${HOME}", 1)
+	}
+
 	return `# dicode configuration
 # Generated on first run. Edit this file to change settings.
 # Restart dicode after making changes.
+#
+# Path variables — use these in any path field instead of absolute paths:
+#   ${HOME}      — user home directory
+#   ${CONFIGDIR} — directory containing this dicode.yaml file
+#   ${DATADIR}   — resolved data_dir (default: ~/.dicode)
+#   ~/           — also expanded to home directory
 
 # ---------------------------------------------------------------------------
 # Task sources — where dicode looks for task folders.
@@ -73,7 +88,7 @@ sources:
 # ---------------------------------------------------------------------------
 database:
   type: sqlite
-  path: ` + dataDir + `/data.db
+  path: ${DATADIR}/data.db
 
   # Switch to Postgres/MySQL for multi-machine or high-availability setups:
   # type: postgres
@@ -85,7 +100,7 @@ database:
 # ---------------------------------------------------------------------------
 secrets:
   providers:
-    - type: local   # encrypted SQLite, master key at ` + dataDir + `/master.key
+    - type: local   # encrypted SQLite, master key at ${DATADIR}/master.key
     - type: env     # fall back to host environment variables
 
 # ---------------------------------------------------------------------------
