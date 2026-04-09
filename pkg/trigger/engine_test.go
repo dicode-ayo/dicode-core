@@ -611,7 +611,8 @@ func TestCronPersistence(t *testing.T) {
 
 func TestInjectDicodeSDK(t *testing.T) {
 	html := `<html><head><title>Test</title></head><body></body></html>`
-	result := injectDicodeSDK(html, "/hooks/my-task", "my-task")
+	dummyReq, _ := http.NewRequest(http.MethodGet, "http://localhost/hooks/my-task", nil)
+	result := injectDicodeSDK(html, "/hooks/my-task", "my-task", dummyReq)
 
 	if !strings.Contains(result, `<base href="/hooks/my-task/">`) {
 		t.Error("base tag not injected")
@@ -635,7 +636,8 @@ func TestInjectDicodeSDK(t *testing.T) {
 
 func TestInjectDicodeSDK_NoHead(t *testing.T) {
 	html := `<body>No head tag</body>`
-	result := injectDicodeSDK(html, "/hooks/x", "x")
+	dummyReq, _ := http.NewRequest(http.MethodGet, "http://localhost/hooks/x", nil)
+	result := injectDicodeSDK(html, "/hooks/x", "x", dummyReq)
 	if !strings.Contains(result, "dicode.js") {
 		t.Error("dicode.js not injected when no </head> present")
 	}
