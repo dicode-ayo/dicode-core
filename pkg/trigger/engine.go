@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -930,8 +931,19 @@ func flatStringMap(v interface{}) map[string]string {
 // When the request arrives via the relay proxy, the X-Relay-Base header
 // provides the relay path prefix (e.g. /u/<uuid>) so that <base href> and
 // script sources are adjusted to work through the relay.
+// validRelayBaseRe matches only /u/<64-hex-chars> to prevent header injection.
+var validRelayBaseRe = regexp.MustCompile(`^/u/[0-9a-f]{64}$`)
+
+func isValidRelayBase(s string) bool {
+	return validRelayBaseRe.MatchString(s)
+}
+
 func injectDicodeSDK(html, hookPath, taskID string, r *http.Request) string {
 	relayBase := r.Header.Get("X-Relay-Base")
+	// Only accept relay base paths matching /u/<64-hex-chars>.
+	if relayBase != "" && !isValidRelayBase(relayBase) {
+		relayBase = ""
+	}
 	basePath := hookPath
 	dicodeJSSrc := "/dicode.js"
 	if relayBase != "" {

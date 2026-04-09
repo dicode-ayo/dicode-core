@@ -634,6 +634,42 @@ func TestInjectDicodeSDK(t *testing.T) {
 	}
 }
 
+func TestInjectDicodeSDK_WithRelayBase(t *testing.T) {
+	input := `<html><head><title>Test</title></head><body></body></html>`
+	r := httptest.NewRequest(http.MethodGet, "/hooks/my-task", nil)
+	r.Header.Set("X-Relay-Base", "/u/"+strings.Repeat("ab", 32))
+
+	result := injectDicodeSDK(input, "/hooks/my-task", "my-task", r)
+
+	expectedBase := "/u/" + strings.Repeat("ab", 32)
+	if !strings.Contains(result, `<base href="`+expectedBase+`/hooks/my-task/">`) {
+		t.Errorf("expected relay-prefixed base href, got: %s", result)
+	}
+	if !strings.Contains(result, `content="`+expectedBase+`/hooks/my-task"`) {
+		t.Errorf("expected relay-prefixed dicode-hook meta, got: %s", result)
+	}
+	if !strings.Contains(result, `src="`+expectedBase+`/dicode.js"`) {
+		t.Errorf("expected relay-prefixed dicode.js src, got: %s", result)
+	}
+}
+
+func TestInjectDicodeSDK_InvalidRelayBase(t *testing.T) {
+	input := `<html><head></head><body></body></html>`
+	r := httptest.NewRequest(http.MethodGet, "/hooks/my-task", nil)
+	r.Header.Set("X-Relay-Base", `"><script>alert(1)</script><x a="`)
+
+	result := injectDicodeSDK(input, "/hooks/my-task", "my-task", r)
+
+	// Invalid relay base should be ignored — output should NOT contain the injection
+	if strings.Contains(result, "alert(1)") {
+		t.Error("XSS injection was not blocked")
+	}
+	// Should fall back to local paths
+	if !strings.Contains(result, `<base href="/hooks/my-task/">`) {
+		t.Errorf("expected local base href fallback, got: %s", result)
+	}
+}
+
 func TestInjectDicodeSDK_NoHead(t *testing.T) {
 	html := `<body>No head tag</body>`
 	dummyReq, _ := http.NewRequest(http.MethodGet, "http://localhost/hooks/x", nil)
