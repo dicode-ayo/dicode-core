@@ -46,6 +46,9 @@ type Client struct {
 	identity  *Identity
 	handler   http.Handler
 	log       *zap.Logger
+
+	hookMu      sync.RWMutex
+	hookBaseURL string // set after successful handshake from welcome message
 }
 
 // NewClient creates a relay client. serverURL must be a wss:// URL.
@@ -63,6 +66,15 @@ func NewClient(serverURL string, identity *Identity, handler http.Handler, log *
 		handler:   handler,
 		log:       log,
 	}
+}
+
+// HookBaseURL returns the relay hook base URL received from the server after a
+// successful handshake (e.g. "https://relay.dicode.app/u/<uuid>/hooks/").
+// Returns empty string if not yet connected.
+func (c *Client) HookBaseURL() string {
+	c.hookMu.RLock()
+	defer c.hookMu.RUnlock()
+	return c.hookBaseURL
 }
 
 // Run connects to the relay server and maintains the connection until ctx is
@@ -182,6 +194,9 @@ func (c *Client) handshake(ctx context.Context, conn *websocket.Conn, sendMu *sy
 		if err := json.Unmarshal(data, &w); err != nil {
 			return fmt.Errorf("parse welcome: %w", err)
 		}
+		c.hookMu.Lock()
+		c.hookBaseURL = w.URL
+		c.hookMu.Unlock()
 		c.log.Info("relay connected", zap.String("url", w.URL))
 		return nil
 	case msgError:

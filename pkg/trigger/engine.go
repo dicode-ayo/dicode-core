@@ -51,6 +51,8 @@ type Engine struct {
 	daemonRuns  map[string]string
 	daemonSpecs map[string]*task.Spec
 
+	dicodeJS []byte // optional: dicode.js SDK content for relay-served UIs
+
 	notifier        notify.Notifier
 	notifyOnSuccess bool
 	notifyOnFailure bool
@@ -77,6 +79,12 @@ func New(r *registry.Registry, defaultExec pkgruntime.Executor, log *zap.Logger)
 	}
 	e.executors[task.RuntimeDeno] = defaultExec
 	return e
+}
+
+// SetDicodeJS provides the dicode.js SDK content so the webhook handler can
+// serve it for relay-proxied UIs that can't reach the main webui server.
+func (e *Engine) SetDicodeJS(js []byte) {
+	e.dicodeJS = js
 }
 
 // SetDB wires a database into the engine for cron-job persistence.
@@ -677,6 +685,14 @@ func verifyWebhookSignature(spec *task.Spec, r *http.Request, body []byte) error
 func (e *Engine) WebhookHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
+
+		// Serve dicode.js SDK if available (for relay-proxied UIs).
+		if path == "/dicode.js" && e.dicodeJS != nil {
+			w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(e.dicodeJS)
+			return
+		}
 
 		// Exact match — normal webhook execution path.
 		e.mu.Lock()

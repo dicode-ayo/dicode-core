@@ -2,6 +2,7 @@ import { LitElement, html } from 'https://esm.sh/lit@3';
 import { get, post } from '../lib/api.js';
 import { wsOn } from '../lib/ws.js';
 import { navigate } from '../lib/router.js';
+import { relayHookBaseURL, webhookURL } from '../lib/config.js';
 
 class DcTaskList extends LitElement {
   createRenderRoot() { return this; }
@@ -15,6 +16,7 @@ class DcTaskList extends LitElement {
     super();
     this._tasks = null;
     this._error = null;
+    this._relayBase = '';
     this._offFinished = null;
     this._offStarted = null;
     this._offChanged = null;
@@ -47,7 +49,9 @@ class DcTaskList extends LitElement {
 
   async _load() {
     try {
-      this._tasks = await get('/api/tasks');
+      const [tasks, base] = await Promise.all([get('/api/tasks'), relayHookBaseURL()]);
+      this._tasks = tasks;
+      this._relayBase = base;
     } catch(e) {
       this._error = e.message;
     }
@@ -83,7 +87,7 @@ class DcTaskList extends LitElement {
         <td><a href="/tasks/${t.id}" @click=${e => { e.preventDefault(); navigate('/tasks/' + t.id); }}>${t.id}</a></td>
         <td>${t.name}</td>
         <td>${t.trigger?.Webhook
-          ? html`<a href="${t.trigger.Webhook}" target="_blank" class="meta">${t.trigger_label}</a>`
+          ? html`<a href="${webhookURL(this._relayBase, t.trigger.Webhook)}" target="_blank" class="meta">${t.trigger_label}</a>`
           : html`<span class="meta">${t.trigger_label || 'manual'}</span>`}</td>
         <td>${t.last_run_id
           ? html`<a href="/runs/${t.last_run_id}" @click=${e => { e.preventDefault(); navigate('/runs/' + t.last_run_id); }}>${t.last_run_id.slice(0, 8)}</a>`
