@@ -1043,13 +1043,18 @@ func (e *Engine) runTask(runCtx context.Context, spec *task.Spec, opts pkgruntim
 	status, result := e.dispatch(runCtx, spec, opts)
 	elapsed := time.Since(start)
 
-	e.log.Info("run finished",
+	runFields := []zap.Field{
 		zap.String("task", spec.ID),
 		zap.String("run", opts.RunID),
 		zap.String("status", status),
 		zap.String("trigger", source),
 		zap.Duration("duration", elapsed.Truncate(time.Millisecond)),
-	)
+	}
+	if status == registry.StatusSuccess {
+		e.log.Debug("run finished", runFields...)
+	} else {
+		e.log.Warn("run finished", runFields...)
+	}
 
 	notifyOnSuccess, notifyOnFailure := e.resolveNotify(spec)
 
