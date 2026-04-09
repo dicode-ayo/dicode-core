@@ -25,6 +25,10 @@ import (
 	"go.uber.org/zap"
 )
 
+// localClient is used for forwarding relay requests to the local daemon,
+// with a timeout to prevent hanging connections.
+var localClient = &http.Client{Timeout: 25 * time.Second}
+
 const (
 	// maxBodySize is the maximum request body size accepted by the relay (5 MB).
 	maxBodySize = 5 * 1024 * 1024
@@ -116,6 +120,10 @@ func jitter(d time.Duration) time.Duration {
 }
 
 func (c *Client) runOnce(ctx context.Context) error {
+	c.hookMu.Lock()
+	c.hookBaseURL = ""
+	c.hookMu.Unlock()
+
 	// Apply a timeout to the dial + handshake phase.
 	dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
 	defer cancel()
@@ -266,32 +274,30 @@ func (c *Client) dispatchRequest(req requestMsg) responseMsg {
 		}
 	}
 
+	// Only forward requests to /hooks/ and /dicode.js paths — reject anything
+	// else to limit blast radius if the relay server is compromised.
+	if !strings.HasPrefix(req.Path, "/hooks/") && req.Path != "/dicode.js" {
+		return errorResponse(req.ID, http.StatusForbidden)
+	}
+
 	targetURL := fmt.Sprintf("http://localhost:%d%s", c.localPort, req.Path)
 	httpReq, err := http.NewRequestWithContext(context.Background(), req.Method, targetURL, bytes.NewReader(body))
 	if err != nil {
 		return errorResponse(req.ID, http.StatusBadRequest)
 	}
 	for k, vals := range req.Headers {
+		if http.CanonicalHeaderKey(k) == "X-Relay-Base" {
+			continue
+		}
 		for _, v := range vals {
 			httpReq.Header.Add(k, v)
 		}
 	}
 
-	// Tell the daemon this request arrives via the relay so it can adjust
-	// <base href> and other URL references for relay-proxied UIs.
-	c.hookMu.RLock()
-	relayBase := c.hookBaseURL
-	c.hookMu.RUnlock()
-	if relayBase != "" {
-		if idx := strings.Index(relayBase, "/u/"); idx != -1 {
-			suffix := relayBase[idx:]
-			suffix = strings.TrimRight(suffix, "/")
-			suffix = strings.TrimSuffix(suffix, "/hooks")
-			httpReq.Header.Set("X-Relay-Base", suffix)
-		}
-	}
+	// Set X-Relay-Base using the client's known UUID — no URL parsing needed.
+	httpReq.Header.Set("X-Relay-Base", "/u/"+c.identity.UUID)
 
-	resp, err := http.DefaultClient.Do(httpReq)
+	resp, err := localClient.Do(httpReq)
 	if err != nil {
 		c.log.Warn("relay: local request failed", zap.Error(err))
 		return errorResponse(req.ID, http.StatusBadGateway)
