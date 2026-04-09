@@ -21,6 +21,7 @@ import (
 	"github.com/dicode/dicode/pkg/config"
 	"github.com/dicode/dicode/pkg/db"
 	"github.com/dicode/dicode/pkg/ipc"
+	"github.com/dicode/dicode/pkg/relay"
 	"github.com/dicode/dicode/pkg/mcp"
 	"github.com/dicode/dicode/pkg/registry"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
@@ -143,6 +144,7 @@ type Server struct {
 	sourceMgr          *SourceManager       // nil if not wired
 	dataDir            string               // ~/.dicode or cfg.DataDir
 	gateway            *ipc.Gateway
+	relayClient        *relay.Client
 	managedRuntimes    []pkgruntime.ManagedRuntime
 	sessions           *sessionStore
 	dbSessions         *dbSessionStore  // persistent sessions / trusted devices
@@ -158,6 +160,12 @@ type Server struct {
 	srv                *http.Server
 }
 
+// SetRelayClient stores a reference to the relay client so the API can expose
+// the relay hook base URL to the web UI.
+func (s *Server) SetRelayClient(rc *relay.Client) {
+	s.relayClient = rc
+}
+
 // SetManagedRuntimes registers the list of managed runtimes (Deno, Python, …)
 // that will appear in the Config UI. Call this after New and before Start.
 func (s *Server) SetManagedRuntimes(runtimes []pkgruntime.ManagedRuntime) {
@@ -170,6 +178,11 @@ func (s *Server) SetManagedRuntimes(runtimes []pkgruntime.ManagedRuntime) {
 // sourceMgr enables the /api/sources endpoints and MCP source tools; pass nil in tests.
 // database is required for persistent sessions and API key storage; pass nil in tests (auth features disabled).
 func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config, cfgPath string, secretsMgr SecretsManager, rec *registry.Reconciler, sourceMgr *SourceManager, dataDir string, logs *LogBroadcaster, log *zap.Logger, database db.DB, gateway *ipc.Gateway) (*Server, error) {
+	// Provide dicode.js to the engine so relay-proxied webhook UIs can load it.
+	if dicodeJS, err := staticFS.ReadFile("static/dicode.js"); err == nil {
+		eng.SetDicodeJS(dicodeJS)
+	}
+
 	ss := newSessionStore()
 	go ss.purgeLoop()
 
@@ -821,7 +834,15 @@ func (s *Server) apiDeleteSecret(w http.ResponseWriter, r *http.Request) {
 // --- REST API handlers ---
 
 func (s *Server) apiGetConfig(w http.ResponseWriter, r *http.Request) {
-	jsonOK(w, s.cfg)
+	type configResponse struct {
+		*config.Config
+		RelayHookBaseURL string `json:"relay_hook_base_url,omitempty"`
+	}
+	resp := configResponse{Config: s.cfg}
+	if s.relayClient != nil {
+		resp.RelayHookBaseURL = s.relayClient.HookBaseURL()
+	}
+	jsonOK(w, resp)
 }
 
 // TaskListItem is the shape returned by GET /api/tasks.

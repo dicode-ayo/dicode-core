@@ -5,6 +5,7 @@ import { get, post } from '../lib/api.js';
 import { wsOn } from '../lib/ws.js';
 import { navigate } from '../lib/router.js';
 import { fmtTime, fmtDuration } from '../lib/utils.js';
+import { relayHookBaseURL, webhookURL } from '../lib/config.js';
 
 marked.use({ gfm: true, breaks: true });
 
@@ -33,6 +34,7 @@ class DcTaskDetail extends LitElement {
     this._editorOpen = false; this._editorStatus = ''; this._currentFile = null;
     this._aiOpen = false; this._aiHistory = []; this._aiStatus = '';
     this._editor = null;
+    this._relayBase = '';
     this._offStarted = null; this._offFinished = null;
   }
 
@@ -64,11 +66,13 @@ class DcTaskDetail extends LitElement {
     this._task = null; this._runs = null; this._error = null;
     this._editorOpen = false; this._triggerOpen = false;
     try {
-      const [task, runs] = await Promise.all([
+      const [task, runs, base] = await Promise.all([
         get(`/api/tasks/${encodeURIComponent(this.taskid)}`),
         get(`/api/tasks/${encodeURIComponent(this.taskid)}/runs?limit=20`),
+        relayHookBaseURL(),
       ]);
       this._task = task;
+      this._relayBase = base;
       this._runs = runs || [];
       const t = task.trigger || task.Trigger || {};
       if (t.cron || t.Cron) this._triggerType = 'cron';
@@ -226,10 +230,16 @@ class DcTaskDetail extends LitElement {
       <label>Cron expression<br>
         <input id="trig-cron" class="input" .value=${cron} style="font-family:monospace;width:100%;margin-top:0.25rem">
       </label>`;
-    if (type === 'webhook') return html`
+    if (type === 'webhook') {
+      const fullURL = this._relayBase ? webhookURL(this._relayBase, webhook) : '';
+      return html`
       <label>Path<br>
         <input id="trig-webhook" class="input" .value=${webhook} style="width:100%;margin-top:0.25rem">
-      </label>`;
+      </label>
+      ${fullURL ? html`<div style="margin-top:0.5rem;font-size:0.85rem;color:var(--text-2,#888)">
+        Relay URL: <code style="user-select:all;word-break:break-all">${fullURL}</code>
+      </div>` : ''}`;
+    }
     if (type === 'chain') return html`
       <label>From task ID<br>
         <input id="trig-from" class="input" .value=${chainFrom} style="width:100%;margin-top:0.25rem">
