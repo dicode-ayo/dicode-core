@@ -11,7 +11,7 @@
 | Document | What it covers |
 | --- | --- |
 | [Task Format](./concepts/task-format.md) | `task.yaml`, `task.js`, `task.test.js` |
-| [JS Runtime](./concepts/js-runtime.md) | goja engine, all injected globals |
+| [JS Runtime](./concepts/js-runtime.md) | goja engine (deprecated — see Deno/Python runtime guides) |
 | [Sources & Reconciler](./concepts/sources.md) | TaskSet source, git source, local source, dev mode, reconciliation loop |
 | [Triggers](./concepts/triggers.md) | cron, webhook, manual, chain |
 | [Task Chaining](./concepts/task-chaining.md) | chain triggers, `dicode.trigger()`, pipeline north star |
@@ -27,7 +27,7 @@
 | [Security](./concepts/security.md) | auth wall, sessions, device tokens, webhook HMAC, API keys |
 | [Deployment](./concepts/deployment.md) | desktop, headless, Docker, systemd |
 | [Local-Only Mode](./concepts/local-only.md) | no git required, onboarding, migration |
-| [Webhook Relay](./concepts/webhook-relay.md) | relay architecture, dicode.app tunnel |
+| [Webhook Relay](./concepts/webhook-relay.md) | relay architecture, cryptographic identity, protocol, self-hosted vs hosted |
 | [Business Model](./concepts/business-model.md) | tiers, marketplace, distribution |
 
 ## Design documents
