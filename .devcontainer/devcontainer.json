@@ -1,0 +1,64 @@
+{
+  "name": "dicode-core",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+  "workspaceFolder": "/workspace",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
+
+  "mounts": [
+    // SSH: mounted read-only to a staging path; postCreateCommand copies it with correct permissions
+    "source=${localEnv:HOME}/.ssh,target=/tmp/host-ssh,type=bind,readonly",
+
+    // Docker socket: allows running docker commands inside the container against the host daemon
+    "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind"
+
+    // Claude Code account isolation:
+    // Each devcontainer instance gets its own ~/.claude, separate from your host account.
+    // Run `claude login` inside the container to authenticate with a different account.
+    // Uncomment to persist Claude Code credentials across container rebuilds:
+    // "source=dicode-claude-credentials,target=/home/vscode/.claude,type=volume"
+  ],
+
+  // Pass ANTHROPIC_API_KEY from host env if set (alternative to `claude login`)
+  "remoteEnv": {
+    "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}"
+  },
+
+  "postCreateCommand": "mkdir -p ~/.ssh && cp -r /tmp/host-ssh/. ~/.ssh/ && chmod 700 ~/.ssh && chmod 600 ~/.ssh/* 2>/dev/null; npm install -g @anthropic-ai/claude-code && go mod download",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "golang.go",
+        "eamodio.gitlens",
+        "anthropic.claude-code"
+      ],
+      "settings": {
+        "go.useLanguageServer": true,
+        "go.toolsManagement.autoUpdate": false,
+        "[go]": {
+          "editor.formatOnSave": true,
+          "editor.codeActionsOnSave": {
+            "source.organizeImports": "explicit"
+          }
+        },
+        "terminal.integrated.defaultProfile.linux": "bash"
+      }
+    }
+  },
+
+  "runArgs": [
+    "--cap-add=SYS_ADMIN",
+    "--device=/dev/fuse",
+    "--security-opt=seccomp=unconfined"
+  ],
+
+  "features": {
+    // Installs Docker CLI + buildx + compose, configures group permissions for the socket
+    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {},
+    // Installs Node.js 22 via nvm (avoids stale apt-cache issues with nodesource scripts)
+    "ghcr.io/devcontainers/features/node:1": { "version": "22" }
+  }
+}

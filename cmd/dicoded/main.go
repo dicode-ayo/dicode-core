@@ -196,7 +196,8 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 		if err != nil {
 			log.Warn("relay: identity init failed, relay disabled", zap.Error(err))
 		} else {
-			rc := relay.NewClient(cfg.Relay.ServerURL, id, eng.WebhookHandler(), log)
+			rc := relay.NewClient(cfg.Relay.ServerURL, id, port, log)
+			srv.SetRelayClient(rc)
 			g.Go(func() error { return rc.Run(ctx) })
 		}
 	}
@@ -415,10 +416,20 @@ func buildLogger(level string, broadcast *webui.LogBroadcaster) (*zap.Logger, er
 	if level == "debug" {
 		zapLevel = zapcore.DebugLevel
 	}
-	enc := zapcore.NewJSONEncoder(zap.NewProductionEncoderConfig())
+
+	// Console encoder: colored level, human-readable timestamp, clean layout.
+	consoleCfg := zap.NewDevelopmentEncoderConfig()
+	consoleCfg.EncodeLevel = zapcore.CapitalColorLevelEncoder
+	consoleCfg.EncodeTime = zapcore.TimeEncoderOfLayout("2006-01-02 15:04:05")
+	consoleCfg.ConsoleSeparator = "  "
+	consoleEnc := zapcore.NewConsoleEncoder(consoleCfg)
+
+	// JSON encoder for the web UI log broadcaster.
+	jsonEnc := zapcore.NewJSONEncoder(zap.NewProductionEncoderConfig())
+
 	core := zapcore.NewTee(
-		zapcore.NewCore(enc, zapcore.AddSync(os.Stderr), zapLevel),
-		zapcore.NewCore(enc, zapcore.AddSync(broadcast), zapLevel),
+		zapcore.NewCore(consoleEnc, zapcore.AddSync(os.Stderr), zapLevel),
+		zapcore.NewCore(jsonEnc, zapcore.AddSync(broadcast), zapLevel),
 	)
 	return zap.New(core, zap.AddCaller()), nil
 }

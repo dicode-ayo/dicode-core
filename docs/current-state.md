@@ -1,6 +1,6 @@
 # Current State
 
-> Last updated: 2026-04-03 — Daemon/CLI split: `cmd/dicoded` (daemon) + `cmd/dicode` (CLI); `pkg/ipc` gains `ControlServer` + `ControlClient` (persistent control socket at `~/.dicode/daemon.sock`); `pkg/relay` deleted; `pkg/secrets.Manager` interface; `make run` now starts `dicoded`
+> Last updated: 2026-04-09 — Relay client restored and hardened (`pkg/relay`): ECDSA P-256 identity, transparent HTTP proxy to local daemon, X-Relay-Base header injection, path restriction (`/hooks/*` + `/dicode.js`), hop-by-hop header filtering; `dicode-relay` (Node.js) is the production relay server; Go `relay.Server` kept for self-hosting and integration tests; config variables (`${HOME}`, `${DATADIR}`, `${CONFIGDIR}`) in `dicode.yaml`
 
 This document describes exactly what exists in the codebase today — what is fully implemented, what is stubbed with interfaces and TODOs, and what exists only as documentation.
 
@@ -92,9 +92,19 @@ Full TaskSet architecture — hierarchical task composition inspired by ArgoCD A
 - `skill.go` — `//go:embed skill.md` + exported `Skill` string
 - `skill.md` — complete agent skill document (workflow, rules, globals reference, test format, common mistakes)
 
-### `pkg/relay/` ❌ deleted
+### `pkg/relay/` ✅
 
-Removed in PR #56. The HTTP gateway in `pkg/ipc/` replaced all relay functionality.
+WebSocket relay client and self-hosting server for receiving webhooks behind NAT. Restored and hardened after the initial PR #79, then refactored to act as a transparent HTTP proxy.
+
+- `client.go` — `Client` struct: persistent WSS connection to relay server with exponential backoff reconnection (1 s → 60 s, ±20% jitter). Receives `request` messages, makes real HTTP requests to the local daemon at `http://localhost:<port>`, and sends `response` messages back. Security: path whitelist (`/hooks/*` and `/dicode.js` only), `X-Relay-Base` header injection (set from client's UUID, incoming values stripped), hop-by-hop + `Set-Cookie` header filtering, 5 MB body limit, 25 s local request timeout. `HookBaseURL()` exposes the relay URL for SDK injection.
+- `server.go` — `Server` struct: simple relay server for self-hosting and integration tests. ECDSA P-256 challenge-response handshake, in-memory nonce store (60 s TTL), client registry, 30 s per-request forwarding timeout, 5 MB body limit. Implements `http.Handler` for embedding in tests.
+- `protocol.go` — JSON message types: `challenge`, `hello`, `welcome`, `error`, `request`, `response`. All messages are text WebSocket frames.
+- `keys.go` — `Identity` struct: P-256 keypair generation, `LoadOrGenerateIdentity(ctx, db)` persists private key in SQLite `kv` table (key: `relay.private_key`). UUID derived as `hex(sha256(uncompressed_pubkey))` — stable across restarts.
+- Tests: `client_test.go` (16 tests), `keys_test.go`, `helpers_test.go`
+
+**Wiring**: `cmd/dicoded/main.go` starts the relay client when `relay.enabled: true` and `relay.server_url` is set. The `webui.Server` receives the relay client via `SetRelayClient()` to expose the hook base URL to the frontend.
+
+**Production relay server**: The production relay server is a separate TypeScript/Node.js service in the `dicode-relay` repository. It implements the same protocol with additional features: OAuth broker (Grant + Express), ECIES token encryption, status dashboard, and support for 14 OAuth providers. The Go `relay.Server` is kept for self-hosting and testing scenarios.
 
 ### `pkg/service/` 🟡
 
@@ -146,7 +156,7 @@ Removed in PR #56. The HTTP gateway in `pkg/ipc/` replaced all relay functionali
   - Shutdown: kills all active daemon runs via `shutdownCtx`
   - **Webhook HMAC**: `verifyWebhookSignature(spec, r, body)` — HMAC-SHA256, `X-Hub-Signature-256` header (GitHub-compatible), optional replay protection via `X-Dicode-Timestamp` (5-minute window). Body capped at 5 MB. Backwards-compatible: open when `webhook_secret` is absent. Raw body bytes read **before** `ParseForm` (replayed via `bytes.NewReader`) so HMAC always covers actual request bytes for form-encoded bodies.
   - **Webhook Task UIs**: `WebhookHandler()` detects tasks with an `index.html` file; on browser GET it serves the page with SDK injection; on POST it either runs the task (JSON/API) or redirects browser form submissions to `/runs/{id}/result`
-  - `injectDicodeSDK(html, hookPath, taskID)` — injects `<base href>` + meta tags + `<script src="/dicode.js">` after `<head>` open tag
+  - `injectDicodeSDK(html, hookPath, taskID)` — injects `<base href>` + meta tags + `<script src="/dicode.js">` after `<head>` open tag; reads `X-Relay-Base` header to rewrite `<base href>` and SDK paths for relay-served tasks
   - **SPA fallback** — extensionless sub-paths under a webhook hook path (e.g. `/hooks/webui/tasks/foo`) serve `index.html` from the task directory, enabling client-side routing for any webhook task that ships an `index.html`. Path-traversal guard runs before extension check so `..` segments are rejected with 403 rather than silently served as the SPA shell.
   - `serveTaskAsset()` — sandboxed static asset serving with extension allowlist and path-traversal guard
   - `flatStringMap()` — converts POST body to `map[string]string` for `RunOptions.Params`
@@ -283,6 +293,8 @@ Thin command dispatcher — no runtime or database initialisation:
 | `pkg/runtime/js/globals/server.go` | `server` global (daemon tasks serving HTTP) |
 | MCP tools: `validate_task`, `test_task`, `dry_run_task`, `commit_task` | Advanced agent workflow tools |
 | Multi-user RBAC | `users` table, argon2id passwords, role-based access (north star) |
+| OAuth token delivery handler in `pkg/relay/client.go` | ECIES decryption of tokens forwarded by dicode-relay broker (design in `docs/design/oauth-broker.md`) |
+| `tasks/auth/_oauth-app/task.ts` broker mode | Open browser to dicode-relay OAuth broker when relay is connected (`config.relay.broker_url`) |
 
 ---
 
@@ -315,6 +327,6 @@ make clean   # removes both binaries
 
 ## Test coverage
 
-94+ tests across: db, secrets, source/local, registry, runtime/js, trigger (including HMAC), taskset, ipc (including gateway + control socket), and webui (including auth) packages.
+94+ tests across: db, secrets, source/local, registry, runtime/js, trigger (including HMAC), taskset, ipc (including gateway + control socket), webui (including auth), and relay (client, keys) packages.
 
-All packages compile with `go test -race ./...` as of 2026-04-03.
+All packages compile with `go test -race ./...` as of 2026-04-09.

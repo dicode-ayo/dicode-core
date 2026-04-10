@@ -1,0 +1,23 @@
+apiVersion: dicode/v1
+kind: Task
+name: Text Transformer
+description: |
+  Transforms text using one of several operations (uppercase, lowercase,
+  reverse, word-count). Demonstrates a webhook task with an HTML form UI:
+  open the webhook URL in a browser to see the form; submit it to run the task.
+runtime: deno
+
+trigger:
+  webhook: /hooks/text-transform
+
+params:
+  text:
+    type: string
+    description: The input text to transform
+    required: true
+  op:
+    type: string
+    description: "Operation: uppercase | lowercase | reverse | wordcount"
+    default: uppercase
+
+timeout: 10s

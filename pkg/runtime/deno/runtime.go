@@ -7,10 +7,13 @@ import (
 	"bufio"
 	"context"
 	_ "embed"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -118,6 +121,12 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	status := registry.StatusSuccess
 
 	defer func() {
+		// If the run failed before Deno started (secret missing, script not found,
+		// etc.) result.Error is set but no log entries exist yet. Append it now so
+		// the error is visible in both the Web UI run detail and the CLI log output.
+		if result.Error != nil {
+			_ = rt.registry.AppendLog(context.Background(), runID, "error", result.Error.Error())
+		}
 		if logs, lerr := rt.registry.GetRunLogs(context.Background(), runID); lerr == nil {
 			result.Logs = logs
 		}
@@ -139,6 +148,12 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		case entry.Secret != "":
 			val, err := rt.secrets.Resolve(ctx, entry.Secret)
 			if err != nil {
+				var notFound *secrets.NotFoundError
+				if entry.Optional && errors.As(err, &notFound) {
+					// optional secret not set — inject empty string so Deno.env.get() returns null
+					resolved[entry.Name] = ""
+					break
+				}
 				status = registry.StatusFailure
 				result.Error = fmt.Errorf("resolve secret %q for env %q: %w", entry.Secret, entry.Name, err)
 				return result, nil
@@ -267,13 +282,19 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 
 	// Stream stdout (console.log/info) as "info" and stderr (console.error +
 	// Deno runtime errors) as "error" in the run log.
+	// wg ensures all log lines are flushed before Run returns, avoiding the race
+	// where the caller fetches logs immediately after exit and sees an empty list.
+	var wg sync.WaitGroup
+	wg.Add(2)
 	go func() {
+		defer wg.Done()
 		scanner := bufio.NewScanner(stdout)
 		for scanner.Scan() {
 			_ = rt.registry.AppendLog(context.Background(), runID, "info", scanner.Text())
 		}
 	}()
 	go func() {
+		defer wg.Done()
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {
 			_ = rt.registry.AppendLog(context.Background(), runID, "error", scanner.Text())
@@ -311,6 +332,11 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 			result.Error = exitErr
 		}
 	}
+
+	// Wait for stdout/stderr scanners to flush all log lines before returning.
+	// Without this, callers that fetch logs immediately after Run returns may see
+	// an empty list because the goroutines haven't written to the DB yet.
+	wg.Wait()
 
 	return result, nil
 }
@@ -378,6 +404,9 @@ func buildDenoArgs(spec *task.Spec, socketPath, shimPath, runnerPath string) []s
 	writePaths := []string{socketPath}
 	for _, entry := range spec.Permissions.FS {
 		path := expandHome(entry.Path)
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(spec.TaskDir, path)
+		}
 		switch entry.Permission {
 		case "r":
 			readPaths = append(readPaths, path)

@@ -23,7 +23,7 @@ func baseSpec() *task.Spec {
 				{Name: "LOG", Value: "debug"},
 			},
 		},
-		Params: []task.Param{
+		Params: task.Params{
 			{Name: "env", Default: "staging"},
 			{Name: "region", Default: "us-east-1"},
 		},
@@ -34,53 +34,59 @@ func baseSpec() *task.Spec {
 func envMap(entries []task.EnvEntry) map[string]string {
 	m := make(map[string]string, len(entries))
 	for _, e := range entries {
-		m[e.Name] = e.Value
+		v := e.Value
+		if v == "" && e.Secret != "" {
+			v = "secret:" + e.Secret
+		}
+		m[e.Name] = v
 	}
 	return m
 }
 
-// ── mergeEnv ──────────────────────────────────────────────────────────────────
+// ── mergeEnvEntries ───────────────────────────────────────────────────────────
 
-func TestMergeEnv_NewKeyAppended(t *testing.T) {
-	got := mergeEnv([]string{"A=1"}, []string{"B=2"})
+func TestMergeEnvEntries_NewKeyAppended(t *testing.T) {
+	base := []task.EnvEntry{{Name: "A", Value: "1"}}
+	overlay := []task.EnvEntry{{Name: "B", Value: "2"}}
+	got := mergeEnvEntries(base, overlay)
 	if len(got) != 2 {
 		t.Fatalf("want 2 entries, got %v", got)
 	}
-	if got[0] != "A=1" || got[1] != "B=2" {
+	if got[0].Name != "A" || got[1].Name != "B" {
 		t.Errorf("unexpected: %v", got)
 	}
 }
 
-func TestMergeEnv_OverlayWins(t *testing.T) {
-	got := mergeEnv([]string{"A=1", "B=2"}, []string{"A=99"})
-	want := map[string]string{"A": "A=99", "B": "B=2"}
-	for _, e := range got {
-		k := envKey(e)
-		if want[k] != e {
-			t.Errorf("key %s: got %q, want %q", k, e, want[k])
-		}
+func TestMergeEnvEntries_OverlayWins(t *testing.T) {
+	base := []task.EnvEntry{{Name: "A", Value: "1"}, {Name: "B", Value: "2"}}
+	overlay := []task.EnvEntry{{Name: "A", Value: "99"}}
+	got := mergeEnvEntries(base, overlay)
+	em := envMap(got)
+	if em["A"] != "99" {
+		t.Errorf("A should be 99, got %q", em["A"])
+	}
+	if em["B"] != "2" {
+		t.Errorf("B should be 2, got %q", em["B"])
 	}
 }
 
-func TestMergeEnv_PreservesOrder(t *testing.T) {
-	got := mergeEnv([]string{"A=1", "B=2", "C=3"}, []string{"B=99", "D=4"})
-	// A, B, C from base order; D appended
+func TestMergeEnvEntries_PreservesOrder(t *testing.T) {
+	base := []task.EnvEntry{{Name: "A", Value: "1"}, {Name: "B", Value: "2"}, {Name: "C", Value: "3"}}
+	overlay := []task.EnvEntry{{Name: "B", Value: "99"}, {Name: "D", Value: "4"}}
+	got := mergeEnvEntries(base, overlay)
 	if len(got) != 4 {
 		t.Fatalf("want 4, got %v", got)
 	}
-	keys := make([]string, len(got))
-	for i, e := range got {
-		keys[i] = envKey(e)
-	}
-	if keys[0] != "A" || keys[1] != "B" || keys[2] != "C" || keys[3] != "D" {
-		t.Errorf("order wrong: %v", keys)
+	if got[0].Name != "A" || got[1].Name != "B" || got[2].Name != "C" || got[3].Name != "D" {
+		t.Errorf("order wrong: %v", got)
 	}
 }
 
-func TestMergeEnv_BareKey(t *testing.T) {
-	// Bare key (no '=') is treated as a key reference, merged by name.
-	got := mergeEnv([]string{"SECRET"}, []string{"SECRET=explicit"})
-	if len(got) != 1 || got[0] != "SECRET=explicit" {
+func TestMergeEnvEntries_SecretEntry(t *testing.T) {
+	base := []task.EnvEntry{{Name: "TOKEN", Secret: "my_token"}}
+	overlay := []task.EnvEntry{{Name: "TOKEN", Secret: "new_token", Optional: true}}
+	got := mergeEnvEntries(base, overlay)
+	if len(got) != 1 || got[0].Secret != "new_token" || !got[0].Optional {
 		t.Errorf("unexpected: %v", got)
 	}
 }
@@ -88,7 +94,7 @@ func TestMergeEnv_BareKey(t *testing.T) {
 // ── mergeParams ───────────────────────────────────────────────────────────────
 
 func TestMergeParams_PatchExisting(t *testing.T) {
-	params := []task.Param{{Name: "env", Default: "staging"}}
+	params := task.Params{{Name: "env", Default: "staging"}}
 	mergeParams(&params, []ParamOverride{{Name: "env", Default: "production"}})
 	if params[0].Default != "production" {
 		t.Errorf("got %q", params[0].Default)
@@ -96,7 +102,7 @@ func TestMergeParams_PatchExisting(t *testing.T) {
 }
 
 func TestMergeParams_AppendNew(t *testing.T) {
-	params := []task.Param{{Name: "env", Default: "staging"}}
+	params := task.Params{{Name: "env", Default: "staging"}}
 	mergeParams(&params, []ParamOverride{{Name: "region", Default: "eu-west-1"}})
 	if len(params) != 2 {
 		t.Fatalf("want 2 params, got %d", len(params))
@@ -107,7 +113,7 @@ func TestMergeParams_AppendNew(t *testing.T) {
 }
 
 func TestMergeParams_PatchRequired(t *testing.T) {
-	params := []task.Param{{Name: "env", Required: false}}
+	params := task.Params{{Name: "env", Required: false}}
 	mergeParams(&params, []ParamOverride{{Name: "env", Required: boolPtr(true)}})
 	if !params[0].Required {
 		t.Error("required should be true")
@@ -153,7 +159,6 @@ func TestApplyTriggerPatch_Restart(t *testing.T) {
 
 func TestApplyTriggerPatch_NilFieldsNotApplied(t *testing.T) {
 	tr := task.TriggerConfig{Cron: "0 8 * * *"}
-	// Empty patch — nothing changes.
 	applyTriggerPatch(&tr, &TriggerPatch{})
 	if tr.Cron != "0 8 * * *" {
 		t.Error("cron changed unexpectedly")
@@ -166,7 +171,7 @@ func TestApplyOverrides_SingleLayer(t *testing.T) {
 	base := baseSpec()
 	got := applyOverrides(base, &Overrides{
 		Timeout: 30 * time.Second,
-		Env:     []string{"LOG=info"},
+		Env:     []task.EnvEntry{{Name: "LOG", Value: "info"}},
 	})
 	if got.Timeout != 30*time.Second {
 		t.Errorf("timeout: got %v", got.Timeout)
@@ -178,6 +183,23 @@ func TestApplyOverrides_SingleLayer(t *testing.T) {
 	// Base must not be mutated.
 	if base.Timeout != 60*time.Second {
 		t.Error("base spec mutated")
+	}
+}
+
+func TestApplyOverrides_NameDescription(t *testing.T) {
+	base := baseSpec()
+	got := applyOverrides(base, &Overrides{
+		Name:        "My Task",
+		Description: "My description",
+	})
+	if got.Name != "My Task" {
+		t.Errorf("name: %q", got.Name)
+	}
+	if got.Description != "My description" {
+		t.Errorf("description: %q", got.Description)
+	}
+	if base.Name != "test" {
+		t.Error("base name mutated")
 	}
 }
 
@@ -200,14 +222,11 @@ func TestApplyOverrides_NilLayerSkipped(t *testing.T) {
 }
 
 func TestApplyOverrides_EnvMerge(t *testing.T) {
-	// Config (level 2): adds RUNTIME_ENV
-	// Set defaults (level 3): sets LOG
-	// Entry (level 6): overrides LOG, adds REGION
 	base := baseSpec() // APP=base, LOG=debug
 	got := applyOverrides(base,
-		&Overrides{Env: []string{"RUNTIME_ENV=backend"}},
-		&Overrides{Env: []string{"LOG=info"}},
-		&Overrides{Env: []string{"LOG=warn", "REGION=eu"}},
+		&Overrides{Env: []task.EnvEntry{{Name: "RUNTIME_ENV", Value: "backend"}}},
+		&Overrides{Env: []task.EnvEntry{{Name: "LOG", Value: "info"}}},
+		&Overrides{Env: []task.EnvEntry{{Name: "LOG", Value: "warn"}, {Name: "REGION", Value: "eu"}}},
 	)
 	em := envMap(got.Permissions.Env)
 	if em["APP"] != "base" {
@@ -221,6 +240,14 @@ func TestApplyOverrides_EnvMerge(t *testing.T) {
 	}
 	if em["REGION"] != "eu" {
 		t.Errorf("REGION: %q", em["REGION"])
+	}
+}
+
+func TestApplyOverrides_Net(t *testing.T) {
+	base := baseSpec()
+	got := applyOverrides(base, &Overrides{Net: []string{"api.example.com"}})
+	if len(got.Permissions.Net) != 1 || got.Permissions.Net[0] != "api.example.com" {
+		t.Errorf("net: %v", got.Permissions.Net)
 	}
 }
 
@@ -257,7 +284,7 @@ func TestDefaultsToOverrides_Nil(t *testing.T) {
 func TestDefaultsToOverrides_Fields(t *testing.T) {
 	d := &Defaults{
 		Timeout: 90 * time.Second,
-		Env:     []string{"X=1"},
+		Env:     []task.EnvEntry{{Name: "X", Value: "1"}},
 		Retry:   &RetryConfig{Attempts: 3},
 	}
 	o := defaultsToOverrides(d)
@@ -267,13 +294,12 @@ func TestDefaultsToOverrides_Fields(t *testing.T) {
 	if o.Timeout != 90*time.Second {
 		t.Errorf("timeout: %v", o.Timeout)
 	}
-	if len(o.Env) != 1 || o.Env[0] != "X=1" {
+	if len(o.Env) != 1 || o.Env[0].Name != "X" || o.Env[0].Value != "1" {
 		t.Errorf("env: %v", o.Env)
 	}
 	if o.Retry == nil || o.Retry.Attempts != 3 {
 		t.Error("retry wrong")
 	}
-	// trigger/params/enabled must NOT be carried over by defaultsToOverrides.
 	if o.Enabled != nil {
 		t.Error("enabled should not be set from defaults")
 	}

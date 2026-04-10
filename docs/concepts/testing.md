@@ -1,12 +1,14 @@
 # Testing & Validation
 
-Dicode has four validation layers, each catching different classes of problems.
+> **Status**: This document describes the **planned** testing and validation system. The test harness (`pkg/testing/`), CLI commands (`dicode task validate`, `dicode task test`, `dicode task run --dry-run`, `dicode ci init`), and mock API are not yet implemented. This serves as the design spec for future development.
+
+Dicode is designed with four validation layers, each catching different classes of problems.
 
 ```
-Layer 1: Static validation     — schema + syntax, zero execution, instant
-Layer 2: Unit tests            — mocked globals, full task run in goja, local
-Layer 3: Dry run               — real secrets, intercepted HTTP, no side effects
-Layer 4: CI guardrails         — layers 1+2 on every push, offline-safe
+Layer 1: Static validation     — schema + syntax, zero execution, instant        [planned]
+Layer 2: Unit tests            — mocked globals, full task run, local             [planned]
+Layer 3: Dry run               — real secrets, intercepted HTTP, no side effects  [planned]
+Layer 4: CI guardrails         — layers 1+2 on every push, offline-safe           [planned]
 ```
 
 ---

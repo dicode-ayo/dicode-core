@@ -10,10 +10,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -581,6 +583,50 @@ const (
 	webhookTimestampHeader = "X-Dicode-Timestamp"
 )
 
+// taskErrorPage is the HTML template for task failures that produce no output.
+// Uses the same ansi-to-html library and log styling as the webui run-detail component.
+// Printf args: %s = runID, %s = error message (html-escaped), %s = JSON log lines array.
+const taskErrorPage = `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body { font-family: system-ui, sans-serif; padding: 2rem; background: #1e1e2e; color: #cdd6f4; margin: 0; }
+  h2 { color: #f38ba8; margin-top: 0; }
+  .run-id { font-family: monospace; font-size: .85em; color: #6c7086; margin-bottom: 1.5rem; }
+  .error-msg { background: #302030; border-left: 3px solid #f38ba8; padding: 1rem; border-radius: 4px;
+               white-space: pre-wrap; font-family: monospace; font-size: .9em; margin-bottom: 1.5rem; }
+  h3 { color: #cdd6f4; margin-bottom: .5rem; }
+  pre#logs { background: #181825; border-radius: 6px; padding: 1rem; overflow-x: auto;
+             font-family: monospace; font-size: .85em; line-height: 1.5; white-space: pre-wrap; }
+  pre#logs span { display: block; }
+  pre#logs span.error { color: #f38ba8; }
+  pre#logs span.warn  { color: #f9e2af; }
+  pre#logs span.info  { color: #cdd6f4; }
+</style>
+</head>
+<body>
+<h2>Task error</h2>
+<div class="run-id">Run %s</div>
+<div class="error-msg">%s</div>
+<h3>Logs</h3>
+<pre id="logs"></pre>
+<script id="log-data" type="application/json">%s</script>
+<script type="module">
+import Convert from 'https://esm.sh/ansi-to-html@0.7.2';
+const conv = new Convert({ fg: '#cdd6f4', bg: '#181825', escapeXML: true,
+  colors: { 1:'#f38ba8',2:'#a6e3a1',3:'#f9e2af',4:'#89b4fa',5:'#cba6f7',6:'#89dceb',7:'#cdd6f4' } });
+const logs = JSON.parse(document.getElementById('log-data').textContent);
+const pre = document.getElementById('logs');
+if (!logs.length) { pre.textContent = '(no logs)'; }
+else { pre.innerHTML = logs.map(l => {
+  const cls = /error|uncaught|notcapable/i.test(l) ? 'error' : /warn/i.test(l) ? 'warn' : 'info';
+  return '<span class="' + cls + '">' + conv.toHtml(l) + '</span>';
+}).join(''); }
+</script>
+</body>
+</html>`
+
 // verifyWebhookSignature validates HMAC-SHA256 signature and optional replay
 // protection for a webhook request. Returns nil when the request is authentic.
 // When no secret is configured on the task the check is skipped (open webhook).
@@ -682,7 +728,7 @@ func (e *Engine) WebhookHandler() http.Handler {
 				filepath.Ext(assetPath) == "" {
 				indexFile := filepath.Join(spec.TaskDir, "index.html")
 				if data, err := os.ReadFile(indexFile); err == nil {
-					html := injectDicodeSDK(string(data), matchedHook, taskID)
+					html := injectDicodeSDK(string(data), matchedHook, taskID, r)
 					w.Header().Set("Content-Type", "text/html; charset=utf-8")
 					_, _ = w.Write([]byte(html))
 					return
@@ -697,7 +743,7 @@ func (e *Engine) WebhookHandler() http.Handler {
 			indexFile := filepath.Join(spec.TaskDir, "index.html")
 			if data, err := os.ReadFile(indexFile); err == nil {
 				e.log.Info("webhook UI served", zap.String("path", path), zap.String("task", taskID))
-				html := injectDicodeSDK(string(data), matchedHook, taskID)
+				html := injectDicodeSDK(string(data), matchedHook, taskID, r)
 				w.Header().Set("Content-Type", "text/html; charset=utf-8")
 				_, _ = w.Write([]byte(html))
 				return
@@ -817,14 +863,49 @@ func (e *Engine) WebhookHandler() http.Handler {
 			return
 		}
 
-		// No output: return status envelope.
-		status := "success"
-		if result.Error != nil {
-			status = "failure"
-			w.WriteHeader(http.StatusInternalServerError)
+		// No output produced — the task either succeeded silently or threw before
+		// calling output.*. Collect logs so we can surface them to the caller.
+		var logLines []string
+		if logEntries, logErr := e.registry.GetRunLogs(context.Background(), runID); logErr == nil {
+			for _, le := range logEntries {
+				logLines = append(logLines, le.Message)
+			}
 		}
+
+		if result.Error != nil {
+			errMsg := result.Error.Error()
+			// Browser: render an error page using the same log style as the webui.
+			if strings.Contains(r.Header.Get("Accept"), "text/html") {
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				w.Header().Set("X-Run-Id", runID)
+				w.WriteHeader(http.StatusInternalServerError)
+				logsJSON, _ := json.Marshal(logLines)
+				var safeJSON bytes.Buffer
+				json.HTMLEscape(&safeJSON, logsJSON)
+				_, _ = fmt.Fprintf(w, taskErrorPage, html.EscapeString(runID), html.EscapeString(errMsg), safeJSON.String())
+				return
+			}
+			// API: JSON envelope with error message.
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("X-Run-Id", runID)
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"runId":  runID,
+				"status": "failure",
+				"error":  errMsg,
+				"logs":   logLines,
+			})
+			return
+		}
+
+		// Successful run with no output.
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{"runId": runID, "status": status})
+		w.Header().Set("X-Run-Id", runID)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"runId":  runID,
+			"status": "success",
+			"logs":   logLines,
+		})
 	})
 }
 
@@ -849,11 +930,34 @@ func flatStringMap(v interface{}) map[string]string {
 // in the task's HTML (e.g. href="style.css") resolve to the correct sub-path
 // (e.g. /hooks/my-task/style.css) regardless of the page having no trailing
 // slash in its URL.
-func injectDicodeSDK(html, hookPath, taskID string) string {
-	injection := `<base href="` + hookPath + `/">` +
+//
+// When the request arrives via the relay proxy, the X-Relay-Base header
+// provides the relay path prefix (e.g. /u/<uuid>) so that <base href> and
+// script sources are adjusted to work through the relay.
+// validRelayBaseRe matches only /u/<64-hex-chars> to prevent header injection.
+var validRelayBaseRe = regexp.MustCompile(`^/u/[0-9a-f]{64}$`)
+
+func isValidRelayBase(s string) bool {
+	return validRelayBaseRe.MatchString(s)
+}
+
+func injectDicodeSDK(html, hookPath, taskID string, r *http.Request) string {
+	relayBase := r.Header.Get("X-Relay-Base")
+	// Only accept relay base paths matching /u/<64-hex-chars>.
+	if relayBase != "" && !isValidRelayBase(relayBase) {
+		relayBase = ""
+	}
+	basePath := hookPath
+	dicodeJSSrc := "/dicode.js"
+	if relayBase != "" {
+		basePath = relayBase + hookPath
+		dicodeJSSrc = relayBase + "/dicode.js"
+	}
+
+	injection := `<base href="` + basePath + `/">` +
 		`<meta name="dicode-task" content="` + taskID + `">` +
-		`<meta name="dicode-hook" content="` + hookPath + `">` +
-		`<script src="/dicode.js"></script>`
+		`<meta name="dicode-hook" content="` + basePath + `">` +
+		`<script src="` + dicodeJSSrc + `"></script>`
 	// Inject immediately after <head> so <base> precedes every other element
 	// (stylesheets, scripts, images) that carries a relative URL.
 	if i := strings.Index(html, "<head>"); i != -1 {
@@ -950,13 +1054,18 @@ func (e *Engine) runTask(runCtx context.Context, spec *task.Spec, opts pkgruntim
 	status, result := e.dispatch(runCtx, spec, opts)
 	elapsed := time.Since(start)
 
-	e.log.Info("run finished",
+	runFields := []zap.Field{
 		zap.String("task", spec.ID),
 		zap.String("run", opts.RunID),
 		zap.String("status", status),
 		zap.String("trigger", source),
 		zap.Duration("duration", elapsed.Truncate(time.Millisecond)),
-	)
+	}
+	if status == registry.StatusSuccess {
+		e.log.Debug("run finished", runFields...)
+	} else {
+		e.log.Warn("run finished", runFields...)
+	}
 
 	notifyOnSuccess, notifyOnFailure := e.resolveNotify(spec)
 
