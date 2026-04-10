@@ -1,167 +1,124 @@
 # Task → Orchestrator API
 
-The `dicode` global is a two-way communication channel between a running task script and the dicode orchestrator. It lets tasks report progress, trigger other tasks, query orchestrator state, and request human approval.
+The `dicode` global is a communication channel between a running task script and the dicode daemon. It lets tasks run other tasks, query orchestrator state, read config, and manage secrets.
+
+> **Runtime note**: In Deno tasks all methods are async (return Promises). In Python tasks both sync and `_async` variants are available.
 
 ---
 
-## `dicode.progress()`
+## Implemented methods
 
-Emit an intermediate progress update. Streamed live to the WebUI run log and visible in `dicode task run --verbose`.
+### `dicode.run_task()`
 
-```javascript
-dicode.progress("Processing emails", { done: 0, total: 100 })
+Run another task and wait for it to complete. Returns the run result.
 
-for (let i = 0; i < emails.length; i++) {
-  await processEmail(emails[i])
-  dicode.progress(`Processed ${i + 1} of ${emails.length}`, {
-    done: i + 1,
-    total: emails.length,
-    percent: Math.round(((i + 1) / emails.length) * 100)
-  })
-}
+```typescript
+// Deno
+const result = await dicode.run_task("send-report", { channel: "#ops" })
+// result: { runID, status, returnValue }
+```
+
+```python
+# Python
+result = dicode.run_task("send-report", {"channel": "#ops"})
 ```
 
 **Parameters:**
-- `message` (string) — human-readable progress description
-- `data` (object, optional) — structured data attached to the progress event
+- `taskID` (string) — the ID of the task to run
+- `params` (object, optional) — key-value params passed to the task
 
-Progress events appear in the run log with a `progress` level. The WebUI can render the `percent` field as a progress bar.
+**Returns:** `{ runID, status, returnValue }` — blocks until the run completes.
 
-`dicode.progress()` is synchronous (fire-and-forget, no await needed).
-
----
-
-## `dicode.trigger()`
-
-Imperatively dispatch another task. Fire-and-forget — returns once the run has been **scheduled**, not after it completes.
-
-```javascript
-// Fire-and-forget
-await dicode.trigger("send-alert", {
-  reason: "spike",
-  value: 99.7
-})
-
-// The triggered task receives the payload as its `input` global
-```
-
-**Parameters:**
-- `taskID` (string) — the ID of the task to trigger
-- `payload` (object, optional) — passed as `input` to the triggered task
-
-**Difference from chain triggers:**
-- Chain trigger: TaskB *declares* it follows TaskA. TaskA is unaware.
-- `dicode.trigger()`: TaskA *imperatively* fires TaskB. TaskA controls the dispatch.
-
-Use `dicode.trigger()` when the decision of what to fire next depends on runtime logic. Use chain triggers when the relationship is fixed and declarative.
+**Requires:** `security.allowed_tasks` in `task.yaml` — tasks must declare which other tasks they can call.
 
 ---
 
-## `dicode.isRunning()`
+### `dicode.list_tasks()`
 
-Query whether another task is currently executing. Useful for skipping a run if a dependency is busy.
+List all registered tasks.
 
-```javascript
-const backupRunning = await dicode.isRunning("database-backup")
-if (backupRunning) {
-  log.warn("Backup already running, skipping report generation")
-  return
-}
-
-await generateReport()
+```typescript
+// Deno
+const tasks = await dicode.list_tasks()
+// [{ id, name, description, params }, ...]
 ```
 
-**Parameters:**
-- `taskID` (string) — the task ID to check
-
-**Returns:** `boolean` — `true` if the task has at least one run in `running` state.
+```python
+# Python
+tasks = dicode.list_tasks()
+```
 
 ---
 
-## `dicode.ask()` (north star)
+### `dicode.get_runs()`
 
-Suspend the current run and send an actionable notification requesting human approval. The run resumes when the user responds or the timeout expires.
+Fetch recent run history for a task.
 
-```javascript
-const decision = await dicode.ask("Deploy to 500 production users?", {
-  timeout: "30m",
-  options: ["approve", "reject"]
-})
-
-if (decision === "approve") {
-  await deploy()
-  log.info("Deployment complete")
-} else {
-  log.info(`Deployment cancelled (response: ${decision})`)
-}
+```typescript
+// Deno
+const runs = await dicode.get_runs("morning-email-check", { limit: 5 })
 ```
 
-**Parameters:**
-- `question` (string) — the question shown in the notification
-- `options.timeout` (string, default `"1h"`) — how long to wait before resuming with `null`
-- `options.options` (array, default `["approve", "reject"]`) — button labels
-
-**Returns:** the string the user selected, or `null` if the timeout expired.
-
-**How it works:**
-1. Run state is saved to sqlite as `suspended`
-2. A notification is sent via the configured provider with action buttons
-3. The goroutine running the task blocks on a channel
-4. User taps a button (via notification or WebUI)
-5. The response is written to the channel
-6. Task execution resumes from the point of `await dicode.ask()`
-
-**Timeout:** if no response is received within `timeout`, the run resumes with `return null`. The task should handle `null` as a cancellation.
-
-This feature is the north star for human-in-the-loop AI workflows. Requires the suspension mechanism in the runtime (not yet implemented — see [Implementation Plan](../implementation-plan.md)).
+```python
+# Python
+runs = dicode.get_runs("morning-email-check", limit=5)
+```
 
 ---
 
-## Query methods
+### `dicode.get_config()`
 
-Read-only access to orchestrator state. Primarily used by daemon tasks (e.g. a WebUI task that needs to list tasks and fetch run history), but available to any task.
+Read daemon config sections (e.g. AI provider settings). The API key is resolved server-side and never exposed to git.
 
-```javascript
-// List all registered tasks
-const tasks = await dicode.listTasks()
-// → [{ id, name, trigger, status, lastRun }, ...]
-
-// Get a single task spec
-const spec = await dicode.getTask("morning-email-check")
-// → { id, name, trigger, params, env, ... }
-
-// Run history for a task
-const runs = await dicode.listRuns("morning-email-check", 20)
-// → [{ id, status, startedAt, finishedAt, durationMs, triggerType }, ...]
-
-// Full run detail
-const run = await dicode.getRun("run_abc123")
-// → { id, taskId, status, startedAt, finishedAt, returnValue, parentRunId }
-
-// Run log entries
-const logs = await dicode.getRunLogs("run_abc123")
-// → [{ ts, level, message, data }, ...]
-
-// Secret names (never values)
-const names = await dicode.listSecrets()
-// → ["SLACK_TOKEN", "GMAIL_TOKEN"]
+```typescript
+// Deno
+const ai = await dicode.get_config("ai")
+// { baseURL, model, apiKey }
 ```
 
-These methods are what allow a [WebUI daemon task](./webui-api.md#webui-as-a-daemon-task) to serve a full dashboard backed by live orchestrator data — without the UI being embedded in the binary.
+```python
+# Python
+ai = dicode.get_config("ai")
+```
+
+---
+
+### `dicode.secrets_set()` / `dicode.secrets_delete()` (Deno only)
+
+Manage secrets from within a task.
+
+```typescript
+await dicode.secrets_set("MY_TOKEN", "new-value")
+await dicode.secrets_delete("OLD_TOKEN")
+```
+
+Not available in the Python SDK.
+
+---
+
+## Planned methods (not yet implemented)
+
+| Method | Description |
+|---|---|
+| `dicode.progress(msg, data)` | Stream intermediate progress to WebUI |
+| `dicode.trigger(id, payload)` | Fire-and-forget dispatch (non-blocking) |
+| `dicode.isRunning(id)` | Check if a task has an active run |
+| `dicode.ask(question, opts)` | Suspend run and request human approval (north star) |
+| `dicode.listSecrets()` | List secret names (no values) |
 
 ---
 
 ## Summary
 
-| Method | Sync/Async | Blocks? | Description |
+| Method | Deno | Python | Status |
 |---|---|---|---|
-| `dicode.progress(msg, data)` | Sync | No | Emit progress update |
-| `await dicode.trigger(id, payload)` | Async | No (fire-and-forget) | Schedule another task |
-| `await dicode.isRunning(id)` | Async | No | Check if task is running |
-| `await dicode.ask(question, opts)` | Async | Yes — until response | Request human approval |
-| `await dicode.listTasks()` | Async | No | All registered tasks |
-| `await dicode.getTask(id)` | Async | No | Single task spec |
-| `await dicode.listRuns(taskId, n)` | Async | No | Run history |
-| `await dicode.getRun(runId)` | Async | No | Run detail |
-| `await dicode.getRunLogs(runId)` | Async | No | Run log entries |
-| `await dicode.listSecrets()` | Async | No | Secret names (no values) |
+| `run_task(id, params?)` | `await dicode.run_task(...)` | `dicode.run_task(...)` | Implemented |
+| `list_tasks()` | `await dicode.list_tasks()` | `dicode.list_tasks()` | Implemented |
+| `get_runs(id, opts?)` | `await dicode.get_runs(...)` | `dicode.get_runs(...)` | Implemented |
+| `get_config(section)` | `await dicode.get_config(...)` | `dicode.get_config(...)` | Implemented |
+| `secrets_set(key, val)` | `await dicode.secrets_set(...)` | — | Implemented (Deno only) |
+| `secrets_delete(key)` | `await dicode.secrets_delete(...)` | — | Implemented (Deno only) |
+| `progress(msg, data)` | — | — | Planned |
+| `trigger(id, payload)` | — | — | Planned |
+| `isRunning(id)` | — | — | Planned |
+| `ask(question, opts)` | — | — | Planned (north star) |

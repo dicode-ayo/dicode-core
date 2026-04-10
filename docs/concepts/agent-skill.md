@@ -1,43 +1,38 @@
 # Agent Skill
 
-The dicode agent skill is a markdown document that gives any AI agent full context to develop tasks correctly — without human guidance. It is embedded in the dicode binary and can be installed as a skill for Claude Code or any compatible agent.
+The dicode agent skill is a markdown document that gives any AI agent full context to develop tasks correctly — without human guidance. It is embedded in the dicode binary (`pkg/agent/skill.md`).
+
+> **Note**: The skill references a full MCP tool workflow (`list_tasks` → `list_secrets` → `validate_task` → `test_task` → `dry_run_task` → `commit_task`). Only `list_tasks`, `get_task`, `run_task`, `list_sources`, and `switch_dev_mode` are currently implemented. The remaining tools are planned. The skill will need updating as tools are added.
 
 ---
 
 ## Installing the skill
 
+CLI commands for `dicode agent skill show/install` are planned but not yet implemented. For now, copy the skill directly from the source:
+
 ```bash
-# Print to stdout
-dicode agent skill show
-
-# Install globally for this user
-dicode agent skill install
-
-# Install as a Claude Code skill
-dicode agent skill install --claude-code
+# Copy the embedded skill to your project
+cat pkg/agent/skill.md >> CLAUDE.md
 ```
-
-The `--claude-code` flag writes the skill to `~/.claude/skills/dicode-task-developer.md` where Claude Code automatically picks it up as an available skill.
 
 ---
 
 ## What the skill covers
 
-1. **Mandatory workflow** — the exact sequence of MCP tool calls to follow, in order, every time. No shortcuts.
+1. **Recommended workflow** — the sequence of MCP tool calls to follow. Currently only `list_tasks`, `get_task`, and `run_task` are available; the full workflow (`validate_task` → `test_task` → `commit_task`) requires planned tools.
 
 2. **Hard rules** — things the agent must never do:
-   - Never commit if `validate_task` or `test_task` fail
-   - Always write tests
    - Never hardcode secrets
    - Return JSON-serializable values only
    - Check existing tasks before naming a new one
+   - Always write tests (when test harness is available)
 
 3. **`task.yaml` schema** — all fields, required vs optional, valid values for `trigger.chain.on`, cron syntax reference, common mistakes (two triggers, invalid cron, missing `from`)
 
-4. **JS globals reference** — all globals with type signatures:
-   - `http.get(url, opts?)`, `http.post(url, opts?)`, response shape
+4. **SDK globals reference** — all globals with type signatures (Deno/Python):
+   - `params.get(key)`, `params.all()` — task parameters
    - `kv.get(key)`, `kv.set(key, value)`, `kv.delete(key)`, `kv.list(prefix)`
-   - `env.get(key)` — only for keys declared in `task.yaml`
+   - `Deno.env.get(key)` / `env.get(key)` — only for keys declared in `task.yaml`
    - `params.get(name)`
    - `log.info/warn/error/debug(msg, data?)`
    - `notify.send(msg, opts?)`

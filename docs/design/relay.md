@@ -44,10 +44,14 @@ GitHub / Slack / Stripe
 ```
 
 The relay server proxies `POST /u/<uuid>/hooks/my-task` to the local daemon as
-a WebSocket `request` message. The daemon runs the webhook handler against a
-synthetic `*http.Request`, captures the response with `httptest.ResponseRecorder`,
+a WebSocket `request` message. The daemon makes a real HTTP request to its own
+local HTTP server (`http://localhost:<port>/hooks/my-task`), captures the response,
 and sends back a `response` message. The relay server translates that back into
 an HTTP response to the original caller.
+
+The client sets an `X-Relay-Base` header (`/u/<uuid>`) on every forwarded request
+so the local server can generate correct relay-aware URLs (e.g. for `<base href>`
+and SDK injection in webhook task UIs).
 
 ---
 
@@ -184,5 +188,6 @@ within 10 seconds of a ping.
 | Privacy | Relay sees plaintext payloads | You see your own payloads |
 
 For high-security environments, self-host the relay server inside your network
-perimeter. The relay server implementation (`pkg/relay/server.go`) is designed
-to run standalone.
+perimeter. The Go relay server implementation (`pkg/relay/server.go`) can run
+standalone. The production relay server is a separate Node.js service
+(`dicode-relay` repo) that adds OAuth broker support and multi-client features.

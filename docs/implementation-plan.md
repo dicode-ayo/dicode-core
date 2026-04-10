@@ -1,6 +1,6 @@
 # Implementation Plan
 
-> Last updated: 2026-04-01
+> Last updated: 2026-04-09
 
 This document is the ordered build roadmap. Each milestone produces something runnable. Work top-to-bottom; later milestones depend on earlier ones.
 
@@ -17,6 +17,10 @@ This document is the ordered build roadmap. Each milestone produces something ru
 **Webhook Task UIs ✅ Complete.** Webhook tasks can include an `index.html` to serve a custom browser UI. The `dicode.js` SDK is auto-injected (with `<base href>` + meta tags), providing three complexity levels: zero-JS plain forms, auto-enhanced `<form data-dicode>` with log streaming, and full `dicode.execute()` API. Assets (CSS, JS, images) served sandboxed from the task directory. ANSI escape codes rendered in the SPA run detail view via `ansi-to-html`.
 
 **Web UI as Webhook Task ✅ Complete.** The dicode dashboard SPA (`examples/webui/`) is now a self-contained webhook task served at `/hooks/webui`. The Go binary no longer embeds frontend assets. Engine SPA fallback serves `index.html` for any extensionless sub-path under a webhook with an `index.html`, enabling client-side routing for arbitrary webhook UIs. Auth enforced client-side via `dc-auth-overlay`. `handleRunResult` serves both HTML output and plain return values. Path-traversal guard added before extension check.
+
+**Webhook Relay ✅ Complete (client-side).** `pkg/relay` implements a WebSocket relay client with ECDSA P-256 cryptographic identity (PR #79). The client connects to a relay server, authenticates via challenge-response, and transparently proxies HTTP requests to the local daemon. Security hardened: path whitelist (`/hooks/*` + `/dicode.js`), `X-Relay-Base` header injection for relay-aware SDK URLs, hop-by-hop header filtering, 5 MB body limit. Go `relay.Server` available for self-hosting/tests. Production relay server is a separate Node.js service (`dicode-relay` repo) with OAuth broker support. Config variables (`${HOME}`, `${DATADIR}`, `${CONFIGDIR}`) added to `dicode.yaml`.
+
+**OAuth Broker 🔧 In progress.** The production relay server (`dicode-relay`) implements the full OAuth broker: Grant middleware for 14 providers, ECIES token encryption, PKCE binding, session management. What remains: Go client-side ECIES decryption handler in `pkg/relay/client.go`, `config.relay.broker_url` field, and broker mode in `tasks/auth/_oauth-app/task.ts`. Design in `docs/design/oauth-broker.md`.
 
 ---
 
