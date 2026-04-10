@@ -1,0 +1,40 @@
+apiVersion: dicode/v1
+kind: Task
+name: "Alert via Notify"
+description: >
+  Sends a desktop notification by calling the buildin/notifications task
+  through the dicode shim. Demonstrates dicode.run_task() and the
+  permissions.dicode.tasks allowlist.
+runtime: deno
+
+trigger:
+  manual: true
+
+params:
+  title:
+    type: string
+    required: true
+    description: "Notification title"
+  message:
+    type: string
+    required: true
+    description: "Notification body text"
+  priority:
+    type: string
+    default: "default"
+    description: "Urgency: min | low | default | high | urgent"
+  tags:
+    type: string
+    default: ""
+    description: "Comma-separated tags passed through to the notify task"
+
+permissions:
+  dicode:
+    tasks:
+      - buildin/notifications
+
+timeout: 30s
+
+notify:
+  on_success: false
+  on_failure: false

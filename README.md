@@ -15,12 +15,16 @@ That's it. The task appears in your dashboard within seconds.
 `dicode` is a single Go binary that:
 
 - **Watches task sources** and reconciles them automatically (like ArgoCD, but for automation tasks) — git repos, local directories, or hierarchical **TaskSet** manifests
-- **Executes tasks** on a schedule (cron), via HTTP webhook, or manually from the web UI
+- **Executes tasks** on a schedule (cron), via HTTP webhook, manually, on chain completion, or as always-running daemons
 - **Lets AI write your tasks** from natural language — the generated code lives in your source so you can read, review, and modify it
-- **Serves a web UI** for monitoring runs, viewing logs, triggering tasks, and managing sources
+- **Serves a web UI** for monitoring runs, viewing logs, triggering tasks, and managing sources — the dashboard itself is a webhook task
 - **Exposes an MCP server** at `/mcp` so AI agents (Claude Code, Cursor) can list tasks, trigger runs, and control dev mode
+- **Receives webhooks behind NAT** via a built-in WebSocket relay tunnel — stable public URLs without port forwarding or ngrok
+- **Serves custom webhook UIs** — webhook tasks can include `index.html` for browser-based interfaces with the auto-injected `dicode.js` SDK
 
-Tasks are TypeScript/Python/Docker containers. You can write them yourself or have AI generate them. All approaches produce the same artifact: a folder with `task.yaml` + script.
+Tasks are TypeScript (Deno), Python (uv), Docker containers, or Podman containers. You can write them yourself or have AI generate them. All approaches produce the same artifact: a folder with `task.yaml` + script.
+
+dicode runs as two binaries: `dicoded` (daemon — runs all long-lived components) and `dicode` (CLI — thin dispatcher that auto-starts the daemon and communicates over a Unix socket).
 
 ---
 
@@ -32,35 +36,42 @@ Tasks are TypeScript/Python/Docker containers. You can write them yourself or ha
 │  tasks/                                                         │
 │  ├── morning-email-check/                                       │
 │  │   ├── task.yaml   ← trigger config, params, env vars        │
-│  │   └── task.js     ← JavaScript logic                        │
+│  │   └── task.ts     ← TypeScript logic (Deno runtime)         │
 │  └── weekly-report/                                             │
 │      ├── task.yaml                                              │
-│      └── task.js                                                │
+│      └── task.py     ← Python logic (uv runtime)               │
 └──────────────────────┬──────────────────────────────────────────┘
                        │  git pull (every 30s or on push webhook)
                        ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                        dicode binary                            │
+│  dicoded (daemon)                                               │
 │                                                                 │
 │  ┌─────────────┐   ┌──────────────┐   ┌──────────────────────┐ │
 │  │ Reconciler  │──▶│   Registry   │──▶│   Trigger Engine     │ │
 │  │             │   │              │   │  cron / webhook /    │ │
-│  │ add/remove/ │   │  in-memory   │   │  manual              │ │
-│  │ update tasks│   │  task state  │   └──────────┬───────────┘ │
-│  └─────────────┘   └──────────────┘              │             │
+│  │ add/remove/ │   │  in-memory   │   │  manual / chain /   │ │
+│  │ update tasks│   │  task state  │   │  daemon              │ │
+│  └─────────────┘   └──────────────┘   └──────────┬───────────┘ │
 │                                                  ▼             │
 │  ┌─────────────┐   ┌──────────────┐   ┌──────────────────────┐ │
-│  │  AI Gen     │   │   Web UI     │   │   JS Runtime (goja)  │ │
-│  │             │   │   + REST API │   │   http / kv / log    │ │
-│  │  prompt →   │   │              │   │   params / env       │ │
-│  │  code →     │   │  dashboard   │   ├──────────────────────┤ │
-│  │  git commit │   │  logs/runs   │   │   Docker Runtime     │ │
-│  └─────────────┘   └──────────────┘   │   live logs / kill   │ │
-│                                        └──────────┬───────────┘ │
-│                                        ┌─────────────────────┐ │
-│                                        │   SQLite run log    │ │
-│                                        └─────────────────────┘ │
+│  │  AI Gen     │   │   Web UI     │   │ Runtimes             │ │
+│  │             │   │   + REST API │   │  Deno (TypeScript)   │ │
+│  │  prompt →   │   │   + MCP      │   │  Python (uv)         │ │
+│  │  code →     │   │              │   │  Docker / Podman     │ │
+│  │  commit     │   │  dashboard   │   └──────────┬───────────┘ │
+│  └─────────────┘   │  logs/runs   │              │             │
+│                     └──────────────┘   ┌──────────────────────┐ │
+│  ┌─────────────┐                      │   SQLite             │ │
+│  │ Relay       │ WSS to relay server  │   runs / kv / keys   │ │
+│  │ Client      │──────────────────▶   │   sessions / secrets │ │
+│  └─────────────┘                      └──────────────────────┘ │
 └─────────────────────────────────────────────────────────────────┘
+   ▲                                                    ▲
+   │ unix socket (control)                              │
+   ▼                                                    │
+┌───────────────┐                                       │
+│  dicode (CLI) │  run / list / logs / secrets / status │
+└───────────────┘───────────────────────────────────────┘
 ```
 
 ### The reconciliation loop
@@ -175,14 +186,7 @@ dicode generates the code, shows you a diff, and saves it. The task is live imme
 
 ### Migrating from local to git later
 
-Start local, add git when you're ready — no rework required:
-
-```bash
-# 1. Add a git source to dicode.yaml
-# 2. Push your local tasks to the repo
-dicode task commit my-task --to https://github.com/you/my-tasks
-# task moves to the git repo; reconciler takes over ownership automatically
-```
+Start local, add git when you're ready — no rework required. Add a git source to `dicode.yaml`, copy your task directories into the repo, and push. The reconciler takes over automatically.
 
 ---
 
@@ -204,7 +208,7 @@ tasks/
 name: morning-email-check
 description: Check Gmail and post a digest to Slack every morning
 
-runtime: js   # js (default) or docker
+runtime: deno   # deno (TypeScript/JS) | python | docker | podman
 
 trigger:
   cron: "0 9 * * *"   # 9am every day
@@ -245,7 +249,11 @@ security:
   allowed_mcp: ["github-mcp"]       # MCP daemon tasks this script may call via mcp.call()
 ```
 
-**Docker runtime** — run containers instead of JS scripts. Live log streaming, kill support, daemon-compatible:
+**Deno runtime** — tasks use TypeScript/JavaScript with the Deno runtime (auto-installed). npm packages can be imported inline with `import ... from "npm:package"`.
+
+**Python runtime** — tasks use Python with uv (auto-installed). PEP 723 inline dependency declarations supported.
+
+**Docker runtime** — run containers instead of scripts. Live log streaming, kill support, daemon-compatible:
 
 ```yaml
 name: Nginx Dev Server
@@ -261,107 +269,129 @@ docker:
     - "/tmp:/usr/share/nginx/html:ro"
 ```
 
-### task.js
+### Task script (task.ts / task.py)
 
-The task script. Has access to the following globals:
+The task script. Deno (TypeScript) and Python tasks communicate with the daemon over a Unix socket IPC protocol. The following globals are injected automatically — no imports needed.
 
-#### `http` — make outbound HTTP requests
+#### `params` — task parameters from task.yaml (with user overrides)
 
-```javascript
-// GET
-const res = await http.get("https://api.example.com/data")
-console.log(res.status)    // 200
-console.log(res.body)      // parsed JSON if Content-Type is application/json, else string
-
-// POST
-const res = await http.post("https://api.example.com/events", {
-  headers: { "Authorization": `Bearer ${env.MY_TOKEN}` },
-  body: { event: "deploy", status: "success" }
-})
-
-// Other methods
-await http.put(url, options)
-await http.patch(url, options)
-await http.delete(url, options)
+```typescript
+// Deno (TypeScript) — all methods are async
+const channel = await params.get("slack_channel")   // string | null
+const all = await params.all()                       // Record<string, string>
 ```
 
-#### `kv` — persistent key-value store (per-task, survives restarts)
-
-```javascript
-kv.set("last_processed_id", "msg_12345")
-const id = kv.get("last_processed_id")   // "msg_12345" or null
-kv.delete("last_processed_id")
-```
-
-#### `log` — structured logging (appears in the run log in the UI)
-
-```javascript
-log.info("starting email check")
-log.warn("rate limited, waiting...")
-log.error("failed to send Slack message", { error: err.message })
-```
-
-#### `params` — values from task.yaml params (with user overrides applied)
-
-```javascript
-const channel = params.slack_channel    // "#devops" (from params or default)
-const max = params.max_emails           // 10
+```python
+# Python — sync and async variants
+channel = params.get("slack_channel")      # str | None
+channel = params.get("slack_channel", "#general")  # with default
+all_params = params.all()                  # dict
 ```
 
 #### `env` — environment variables declared in task.yaml `env:` list
 
-```javascript
-const token = env.SLACK_TOKEN   // only vars declared in task.yaml are accessible
+```typescript
+// Deno — uses native Deno.env
+const token = Deno.env.get("SLACK_TOKEN")   // only declared vars are accessible
 ```
 
-#### `input` — output from the previous task (only in chain-triggered tasks)
-
-```javascript
-// task-b is triggered when task-a completes
-log.info("emails received", { count: input.count })
-await sendToSlack(input.emails)
+```python
+# Python — env.get() wrapper
+token = env.get("SLACK_TOKEN")             # str | None
+token = env.get("SLACK_TOKEN", "fallback") # with default
 ```
 
-The `input` global contains whatever the upstream task returned. Always JSON.
-
-#### `webhook` — incoming webhook payload (only in webhook-triggered tasks)
-
-```javascript
-const payload = webhook.body      // parsed request body
-const headers = webhook.headers   // request headers
-```
-
-#### `notify` — send push notifications
-
-```javascript
-await notify.send("Task completed successfully", { priority: "default" })
-await notify.send("API is DOWN", {
-  priority: "urgent",   // min | low | default | high | urgent
-  tags: ["warning", "skull"]
-})
-```
-
-Uses the notification provider configured in `dicode.yaml`. No configuration needed in the task itself.
-
-#### `dicode` — task orchestration (agent tasks)
-
-Run and await other tasks, inspect the registry, and read AI provider config. Requires `security.allowed_tasks` in `task.yaml` — tasks opt in to which other tasks they can call.
+#### `kv` — persistent key-value store (per-task, survives restarts)
 
 ```typescript
-// Run another task and await its result
+// Deno
+await kv.set("last_id", "msg_12345")
+const id = await kv.get("last_id")         // unknown | null
+await kv.delete("last_id")
+const all = await kv.list("prefix_")       // Record<string, unknown>
+```
+
+```python
+# Python
+kv.set("last_id", "msg_12345")
+id = kv.get("last_id")                    # Any | None
+kv.delete("last_id")
+all = kv.list("prefix_")                  # dict
+```
+
+#### `input` — payload from upstream (chain triggers and webhooks)
+
+```typescript
+// Deno — module-level awaited value
+console.log(input.count)                   // chain: upstream return value
+console.log(input.body)                    // webhook: request body
+```
+
+```python
+# Python — module-level variable
+print(input["count"])
+```
+
+The `input` global contains whatever the upstream task returned (chain) or the webhook request body. Always JSON-serializable.
+
+#### `output` — rich output rendering (HTML, text, images, files)
+
+```typescript
+// Deno
+await output.html("<h1>Report</h1>", { data: { count: 42 } })  // HTML for humans, data for chains
+await output.text("Done: 42 items processed")
+await output.image("image/png", base64EncodedContent)
+await output.file("report.csv", csvContent, "text/csv")
+```
+
+```python
+# Python
+output.html("<h1>Report</h1>", data={"count": 42})
+output.text("Done: 42 items processed")
+output.image("image/png", base64_content)
+output.file("report.csv", csv_content, "text/csv")
+```
+
+Output is stored alongside the run in SQLite. The WebUI reads the content type to decide how to render it (iframe for HTML, `<pre>` for text, `<img>` for images, download button for files).
+
+#### Logging
+
+```typescript
+// Deno — use native console (captured as structured logs)
+console.log("starting email check")
+console.warn("rate limited")
+console.error("failed", error.message)
+```
+
+```python
+# Python — log object with methods
+log.info("starting email check")
+log.warn("rate limited")
+log.error("failed", error_message)
+```
+
+#### `dicode` — task orchestration
+
+Run and await other tasks, inspect the registry, and read config. Requires `security.allowed_tasks` in `task.yaml`.
+
+```typescript
+// Deno
 const result = await dicode.run_task("send-report", { channel: "#ops" })
-// result: { runID, status, returnValue }
-
-// List all registered tasks (for building AI tool schemas)
 const tasks = await dicode.list_tasks()
-// [{ id, name, description, params }]
-
-// Fetch recent run history
 const runs = await dicode.get_runs("send-report", { limit: 5 })
+const ai = await dicode.get_config("ai")   // { baseURL, model, apiKey }
 
-// Get AI provider config (resolved server-side — API key never exposed to git)
-const ai = await dicode.get_config("ai")
-// { baseURL, model, apiKey }
+// Secrets management (Deno only)
+await dicode.secrets_set("MY_TOKEN", "new-value")
+await dicode.secrets_delete("OLD_TOKEN")
+```
+
+```python
+# Python
+result = dicode.run_task("send-report", {"channel": "#ops"})
+tasks = dicode.list_tasks()
+runs = dicode.get_runs("send-report", limit=5)
+ai = dicode.get_config("ai")
 ```
 
 ```yaml
@@ -377,8 +407,15 @@ security:
 Connect to any MCP daemon task (Docker/Python/Deno process that exposes an MCP server on a declared port).
 
 ```typescript
+// Deno
 const tools  = await mcp.list_tools("github-mcp")
 const result = await mcp.call("github-mcp", "search_repositories", { query: "dicode" })
+```
+
+```python
+# Python
+tools = mcp.list_tools("github-mcp")
+result = mcp.call("github-mcp", "search_repositories", {"query": "dicode"})
 ```
 
 ```yaml
@@ -386,48 +423,83 @@ const result = await mcp.call("github-mcp", "search_repositories", { query: "dic
 security:
   allowed_mcp:
     - "github-mcp"   # task ID of the daemon that declares mcp_port
-
-# The MCP daemon task itself:
-# name: github-mcp
-# runtime: docker
-# trigger:
-#   daemon: true
-# mcp_port: 3000
-# docker:
-#   image: ghcr.io/github/github-mcp-server
-#   ports: ["3000:3000"]
 ```
 
-### Full example
+#### HTTP requests
 
-```javascript
-// task: morning-email-check
+Deno and Python tasks use their native HTTP libraries — no special `http` global:
+
+```typescript
+// Deno — native fetch
+const res = await fetch("https://api.example.com/data", {
+  headers: { "Authorization": `Bearer ${Deno.env.get("MY_TOKEN")}` }
+})
+const data = await res.json()
+```
+
+```python
+# Python — use any library (declare in PEP 723 inline deps)
+# /// script
+# dependencies = ["httpx"]
+# ///
+import httpx
+res = httpx.get("https://api.example.com/data",
+    headers={"Authorization": f"Bearer {env.get('MY_TOKEN')}"})
+data = res.json()
+```
+
+#### Return values
+
+```typescript
+// Deno — return from the top-level script
+return { count: 42, status: "ok" }   // must be JSON-serializable
+```
+
+```python
+# Python — assign to the result variable
+result = {"count": 42, "status": "ok"}  # must be JSON-serializable
+```
+
+Return values are passed to downstream chain-triggered tasks via `input`.
+
+### Full example (Deno TypeScript)
+
+```typescript
+// task: morning-email-check (task.ts)
 // Fetches recent emails via Gmail API and posts a digest to Slack
 
-const since = kv.get("last_check") || new Date(Date.now() - 86400000).toISOString()
+const since = await kv.get("last_check") as string ?? new Date(Date.now() - 86400000).toISOString()
+const maxEmails = await params.get("max_emails") ?? "10"
+const channel = await params.get("slack_channel") ?? "#general"
 
-log.info("checking emails since", { since })
+console.log("checking emails since", since)
 
-const emails = await http.get("https://gmail.googleapis.com/gmail/v1/users/me/messages", {
-  headers: { Authorization: `Bearer ${env.GMAIL_TOKEN}` },
-  params: { q: `after:${since} is:unread`, maxResults: params.max_emails }
-})
+const emailRes = await fetch(
+  `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=after:${since}+is:unread&maxResults=${maxEmails}`,
+  { headers: { Authorization: `Bearer ${Deno.env.get("GMAIL_TOKEN")}` } }
+)
+const emails = await emailRes.json()
 
-if (emails.body.messages?.length === 0) {
-  log.info("no new emails")
-  return
+if (!emails.messages?.length) {
+  console.log("no new emails")
+  return { count: 0 }
 }
 
-const lines = emails.body.messages.map(m => `• ${m.snippet}`)
+const lines = emails.messages.map((m: { snippet: string }) => `• ${m.snippet}`)
 const text = `*Morning email digest* (${lines.length} unread)\n${lines.join("\n")}`
 
-await http.post("https://slack.com/api/chat.postMessage", {
-  headers: { Authorization: `Bearer ${env.SLACK_TOKEN}` },
-  body: { channel: params.slack_channel, text }
+await fetch("https://slack.com/api/chat.postMessage", {
+  method: "POST",
+  headers: {
+    Authorization: `Bearer ${Deno.env.get("SLACK_TOKEN")}`,
+    "Content-Type": "application/json",
+  },
+  body: JSON.stringify({ channel, text }),
 })
 
-kv.set("last_check", new Date().toISOString())
-log.info("digest sent", { count: lines.length, channel: params.slack_channel })
+await kv.set("last_check", new Date().toISOString())
+console.log("digest sent", { count: lines.length, channel })
+return { count: lines.length }
 ```
 
 ---
@@ -506,9 +578,22 @@ defaults:
                                           # receives input: { taskID, runID, status, output }
                                           # override per task with on_failure_chain: "" to disable
 
+relay:
+  enabled: false                          # enable WebSocket relay for public webhook URLs
+  server_url: wss://relay.dicode.app      # relay server URL (wss:// for production)
+
+runtimes:
+  deno:
+    version: ""                           # pin Deno version (empty = bundled default)
+  python:
+    version: "0.7.3"                      # pin uv version
+    # disabled: true                      # disable this runtime entirely
+
 log_level: info                           # "debug", "info", "warn", "error"
 data_dir: ~/.dicode                       # where to store repo clones, sqlite db, etc.
 ```
+
+**Config variables**: `${HOME}`, `${DATADIR}` (resolves to `data_dir`), and `${CONFIGDIR}` (resolves to the directory containing `dicode.yaml`) can be used in any string value.
 
 **Task ID uniqueness**: task IDs (directory names) must be unique across all sources. If two sources contain a task with the same ID, the second one is skipped and an error is logged.
 
@@ -545,32 +630,18 @@ Works with any OpenAI-compatible endpoint — OpenAI, Anthropic (Claude), Ollama
 
 ---
 
-## Task Store
+## Task Store (planned)
 
-Tasks can be shared as git repos. Install any public task with:
+Tasks can be shared as git repos. Any git repo with a `tasks/` directory is a valid task source — add it as a git source in `dicode.yaml` and the reconciler pulls tasks automatically.
 
-```bash
-dicode task install github.com/dicode-community/tasks/morning-email-check
-```
-
-Override params at install time:
+A dedicated `dicode task install` CLI command and community registry are planned. When built, they will support:
 
 ```bash
 dicode task install github.com/dicode-community/tasks/morning-email-check \
-  --param slack_channel="#devops" \
-  --param max_emails=20
+  --param slack_channel="#devops"
 ```
 
-This clones the task directory into your tasks repo, commits, and pushes. The reconciler picks it up automatically.
-
-### Publishing a task
-
-Any git repo with a `tasks/` directory is a valid task source. To share your tasks:
-
-1. Push your tasks repo to GitHub as a public repo
-2. Tell others the install path: `github.com/you/my-tasks/<task-name>`
-
-A community registry index is planned — tasks will be searchable by name and tag from the UI.
+See [docs/concepts/task-store.md](docs/concepts/task-store.md) for the full design.
 
 ---
 
@@ -593,7 +664,7 @@ A community registry index is planned — tasks will be searchable by name and t
 | Mobile push (ntfy) | ✅ optional |
 | WebUI + REST API | ✅ |
 | Community task store (install tasks) | ✅ public repos |
-| Relay / public webhook URLs | ❌ no public URL without account |
+| Relay / public webhook URLs | ✅ enable `relay.enabled: true` in config |
 | Task version history | ❌ no git = no history |
 
 ### Minimal config
@@ -665,13 +736,11 @@ Both options land on the same dashboard. You can always add a git source later.
 
 When you're ready to version and share your tasks:
 
-```bash
-# Add a git source to dicode.yaml, then commit each local task
-dicode task commit morning-email-check --to https://github.com/you/my-tasks
-dicode task commit api-health-check    --to https://github.com/you/my-tasks
-```
+1. Add a git source to `dicode.yaml`
+2. Copy your task directories from the local source into the git repo
+3. Git commit and push — the reconciler picks them up automatically
 
-Each task is moved into the git repo, committed, and pushed. The git source takes over ownership. Your local tasks directory becomes a development sandbox.
+A `dicode task commit` CLI command to automate this is planned.
 
 ---
 
@@ -729,9 +798,6 @@ The `local` provider stores secrets encrypted in SQLite using **ChaCha20-Poly130
 ```bash
 # Store a secret
 dicode secrets set SLACK_TOKEN xoxb-your-token-here
-
-# Retrieve a secret (for verification)
-dicode secrets get SLACK_TOKEN
 
 # List all stored secret names (values never printed)
 dicode secrets list
@@ -801,24 +867,9 @@ Install the [ntfy app](https://ntfy.sh) on your phone, subscribe to your topic, 
 
 **Why ntfy?** It's [Apache 2.0 licensed](https://github.com/binwiederheer/ntfy), self-hostable, has iOS and Android apps, and supports action buttons for approval gates. The API is a single HTTP POST.
 
-### Task-level notifications (from code)
+### Task-level notifications (north star)
 
-Use the `notify` global inside any task script:
-
-```javascript
-// Simple notification
-await notify.send("Weekly report generated", { priority: "default" })
-
-// Urgent alert
-await notify.send("Payment API is returning 500s", {
-  priority: "urgent",
-  tags: ["warning", "rotating_light"]
-})
-```
-
-Priority levels: `min` · `low` · `default` · `high` · `urgent`
-
-Tags map to emoji in the ntfy app — see [ntfy emoji list](https://docs.ntfy.sh/emojis/).
+A `notify` global for sending notifications from within task scripts is planned but not yet implemented in the Deno/Python SDKs. System-level notifications (on task failure/success) work automatically via the config above.
 
 ### Supported providers
 
@@ -835,9 +886,9 @@ All providers implement the same Go interface — switching provider requires on
 
 When running dicode locally, you also get native OS integration.
 
-**Desktop notifications** fire automatically (alongside any configured mobile push) using the OS native notification system — no extra config needed.
+**Desktop notifications** are planned but not yet implemented. Mobile push (ntfy) works now.
 
-**System tray icon** gives you ambient status and quick actions without opening a browser.
+**System tray icon** gives you quick access to the dashboard without opening a browser.
 
 Enable in config or via flag:
 
@@ -846,62 +897,22 @@ server:
   tray: true   # default: true when running interactively, false as a service
 ```
 
-```bash
-dicode --tray    # force tray icon on
-dicode --no-tray # force tray icon off (e.g. when running as systemd service)
-```
-
-**Tray icon states:**
-
-| Icon | Meaning |
-|---|---|
-| 🟢 Green | All tasks healthy, last run succeeded |
-| 🟡 Yellow | A task is currently running |
-| 🔴 Red | Last run failed — click for details |
-| ⚪ Grey | Reconciler paused (dev mode or manual pause) |
-
-**Right-click menu:**
+**Tray menu:**
 
 ```
 ┌─────────────────────────────┐
-│ dicode  ●  3 tasks active   │
+│ dicode                      │
 ├─────────────────────────────┤
-│ Open Web UI                 │
-│ Run task ▶                  │
-│   morning-email-check       │
-│   api-health-check          │
-│   weekly-report             │
-├─────────────────────────────┤
-│ Last run: api-health-check  │
-│   ✓ 2 min ago               │
-├─────────────────────────────┤
-│ Pause reconciler            │
-│ Quit                        │
+│ Open Dashboard              │
+│ Quit dicode                 │
 └─────────────────────────────┘
 ```
 
-Tray support: Linux (StatusNotifierItem / DBus — works with KDE, GNOME with AppIndicator extension, waybar, and most modern panels), macOS, Windows. Uses `fyne.io/systray` — no CGo or GTK required. Automatically disabled when running as a headless service (`server.tray: false` in config).
+The tray runs as a built-in Deno daemon task (`tasks/buildin/tray/`) using a portable systray helper binary — no CGo or GTK required. Works on Linux, macOS, and Windows. Disabled when running headless (`server.tray: false`).
 
-### Approval gates (north star)
+### Approval gates (planned)
 
-Pause a task mid-execution and wait for a human decision on your phone:
-
-```javascript
-// Task pauses here, sends an actionable notification, resumes when you respond
-const decision = await notify.ask("Send report to all 500 users?", {
-  timeout: "1h",              // fail the run if no response within 1 hour
-  options: ["approve", "reject"]
-})
-
-if (decision !== "approve") {
-  log.info("rejected by user, aborting")
-  return
-}
-
-await sendReport()
-```
-
-The run is stored as `suspended` in sqlite. When you tap Approve or Reject in the notification, dicode resumes the run with your answer. If the timeout expires, the run fails with a timeout error.
+A future `notify.ask()` API will pause a task mid-execution and wait for a human decision via push notification. The run would be stored as `suspended` in SQLite and resumed when the user responds. See [docs/concepts/notifications.md](docs/concepts/notifications.md) for the design.
 
 ---
 
@@ -909,71 +920,54 @@ The run is stored as `suspended` in sqlite. When you tap Approve or Reject in th
 
 Tasks are not isolated black boxes — they can communicate back to the orchestrator while running. The `dicode` global provides this two-way channel.
 
-### Intermediate progress
+### Running other tasks
 
-Stream progress updates to the WebUI run log in real time:
+Tasks can run other tasks and await their results. This is the primary way to compose behavior at runtime:
 
-```javascript
-const emails = await fetchAllEmails()
-for (let i = 0; i < emails.length; i++) {
-  dicode.progress(`processing ${i + 1} of ${emails.length}`, {
-    done: i + 1,
-    total: emails.length,
-    percent: Math.round(((i + 1) / emails.length) * 100)
-  })
-  await processEmail(emails[i])
-}
+```typescript
+// Deno — run another task and wait for it to complete
+const result = await dicode.run_task("send-report", { channel: "#ops" })
+// result: { runID, status, returnValue }
 ```
 
-Progress events are streamed via SSE to the WebUI. Long-running tasks no longer look frozen.
+```python
+# Python
+result = dicode.run_task("send-report", {"channel": "#ops"})
+```
+
+Requires `security.allowed_tasks` in `task.yaml` — tasks opt in to which other tasks they can call.
 
 ### Querying orchestrator state
 
-```javascript
-// Check if another task is currently running
-const backupRunning = await dicode.isRunning("nightly-backup")
-if (backupRunning) {
-  log.warn("backup in progress, skipping to avoid conflict")
-  return
-}
+```typescript
+// List all registered tasks (useful for building dynamic tool schemas)
+const tasks = await dicode.list_tasks()
+
+// Fetch recent run history for a specific task
+const runs = await dicode.get_runs("nightly-backup", { limit: 5 })
+
+// Get AI provider config (resolved server-side — API key never exposed to git)
+const ai = await dicode.get_config("ai")
 ```
-
-### Imperative task dispatch
-
-Chain triggers are **declarative**: TaskB says "I follow TaskA" and TaskA doesn't know. Sometimes you need **imperative** dispatch — the running task explicitly decides to fire another:
-
-```javascript
-const result = await analyzeMetrics()
-
-if (result.anomalies.length > 0) {
-  // fire alert task with context — only when needed, not always
-  await dicode.trigger("send-pagerduty-alert", {
-    anomalies: result.anomalies,
-    severity: result.maxSeverity
-  })
-}
-
-return result
-```
-
-`dicode.trigger()` fires the target task asynchronously (fire-and-forget). The current run does not wait for it to complete.
 
 ### `dicode` global reference
 
-| Method | Description |
-|---|---|
-| `dicode.progress(msg, data?)` | Stream intermediate progress to WebUI |
-| `dicode.notify(msg, opts?)` | Send notification through configured provider |
-| `dicode.trigger(taskId, input?)` | Imperatively fire another task |
-| `dicode.isRunning(taskId)` | Returns `true` if task has an active run |
-| `dicode.ask(question, opts)` | *(north star)* Suspend run, wait for human input |
+| Method | Deno | Python | Description |
+|---|---|---|---|
+| `run_task(id, params?)` | `await dicode.run_task(...)` | `dicode.run_task(...)` | Run another task and await its result |
+| `list_tasks()` | `await dicode.list_tasks()` | `dicode.list_tasks()` | List all registered tasks |
+| `get_runs(id, opts?)` | `await dicode.get_runs(...)` | `dicode.get_runs(...)` | Fetch recent run history |
+| `get_config(section)` | `await dicode.get_config(...)` | `dicode.get_config(...)` | Read daemon config (e.g. AI settings) |
+| `secrets_set(key, val)` | `await dicode.secrets_set(...)` | — | Store a secret (Deno only) |
+| `secrets_delete(key)` | `await dicode.secrets_delete(...)` | — | Delete a secret (Deno only) |
 
-### Chain vs `dicode.trigger()` — when to use each
+### Chain vs `dicode.run_task()` — when to use each
 
-| | Chain trigger | `dicode.trigger()` |
+| | Chain trigger | `dicode.run_task()` |
 |---|---|---|
 | Coupling | None — TaskB declares dependency | TaskA knows about TaskB |
-| Condition | Always fires on task completion | Task code decides |
+| Condition | Always fires on task completion | Task code decides at runtime |
+| Blocking | Async (fire-and-forget) | Synchronous (awaits result) |
 | Fan-out | Multiple tasks can chain from same source | Explicit, one at a time |
 | Use when | Standard pipeline steps | Conditional dispatch, error escalation |
 
@@ -1117,186 +1111,41 @@ For complex DAGs (parallel steps, fan-in, conditionals), a future `pipeline.yaml
 
 ## Testing & Validation
 
-Every task can be validated statically and tested with mocked globals — no live credentials, no network, no side effects. This is the foundation for CI guardrails on your tasks repo.
+The testing and validation system is designed with four layers. Not all are implemented yet — see status below.
 
 ### Four layers
 
-| Layer | Command | What it catches |
-|---|---|---|
-| Static validation | `dicode task validate` | Schema errors, JS syntax, chain cycles |
-| Unit tests | `dicode task test` | Logic bugs, wrong HTTP calls, bad return values |
-| Dry run | `dicode task run --dry-run` | Secret resolution, correct endpoints |
-| CI | auto on push | Regressions before merge |
+| Layer | Command | What it catches | Status |
+|---|---|---|---|
+| Static validation | `dicode task validate` | Schema errors, syntax, chain cycles | Planned |
+| Unit tests | `dicode task test` | Logic bugs, wrong HTTP calls, bad return values | Planned |
+| Dry run | `dicode task run --dry-run` | Secret resolution, correct endpoints | Planned |
+| CI | auto on push | Regressions before merge | Planned |
+
+> **Note**: The CLI commands above (`task validate`, `task test`, `task run --dry-run`, `ci init`) are not yet implemented. Current CLI supports: `run`, `list`, `logs`, `status`, `secrets`, `version`.
 
 ---
 
-### Layer 1 — Static validation
+### Layer 1 — Static validation (planned)
 
 ```bash
 dicode task validate morning-email-check   # single task
 dicode task validate --all                 # every loaded task
 ```
 
-Checks (in order):
-1. `task.yaml` parses and passes schema validation
-2. JS compiles without syntax errors (goja compile-without-execute)
-3. All `env:` vars have a matching secret registered (warning, not error)
-4. Chain cycles — if this task is chained, no circular dependency exists
-
-Exit code 1 on any failure. Structured error output with file and line number where possible.
+Will check: `task.yaml` schema, script syntax, env var resolution, chain cycle detection.
 
 ---
 
-### Layer 2 — Unit tests (`task.test.js`)
+### Layers 2–4 — Unit tests, dry run, CI (planned)
 
-Place a `task.test.js` file in the task directory. It's picked up automatically:
+The test harness (`pkg/testing/`) is designed but not yet implemented. When built, it will support:
 
-```
-tasks/morning-email-check/
-├── task.yaml
-├── task.js
-└── task.test.js    ← optional, runs with `dicode task test`
-```
+- **Unit tests**: `task.test.ts` files with mock globals (`http.mock`, `env.set`, `params.set`), `runTask()`, and assertion APIs
+- **Dry run**: `dicode task run --dry-run` with intercepted HTTP calls
+- **CI integration**: `dicode ci init` to generate GitHub Actions / GitLab CI configs
 
-The test file runs in a goja runtime with **mock globals** injected. Call `runTask()` to evaluate `task.js` inside the same runtime — the task uses the mocks transparently.
-
-```javascript
-// task.test.js
-
-test("sends digest to Slack when emails exist", async () => {
-  // mock outbound HTTP
-  http.mock("GET", "https://gmail.googleapis.com/*", {
-    status: 200,
-    body: { messages: [{ snippet: "Meeting at 3pm" }, { snippet: "Hello" }] }
-  })
-  http.mock("POST", "https://slack.com/api/chat.postMessage", { ok: true })
-
-  // mock secrets and params
-  env.set("SLACK_TOKEN", "xoxb-test")
-  env.set("GMAIL_TOKEN", "ya29-test")
-  params.set("slack_channel", "#test")
-
-  // run the task
-  const result = await runTask()
-
-  // assert on return value
-  assert.equal(result.count, 2)
-
-  // assert on HTTP calls made
-  assert.httpCalled("POST", "https://slack.com/api/chat.postMessage")
-  assert.httpCalledWith("POST", "https://slack.com/api/chat.postMessage", {
-    body: { channel: "#test" }
-  })
-})
-
-test("skips Slack when inbox is empty", async () => {
-  http.mock("GET", "https://gmail.googleapis.com/*", {
-    status: 200,
-    body: { messages: [] }
-  })
-
-  await runTask()
-
-  assert.httpNotCalled("POST", "https://slack.com/api/chat.postMessage")
-})
-```
-
-#### Test globals reference
-
-| Global | Description |
-|---|---|
-| `test(name, fn)` | Define a test case. `fn` can be async. |
-| `runTask()` | Evaluate `task.js` in the current test runtime. Returns the task's return value. |
-| `http.mock(method, urlPattern, response)` | Intercept matching HTTP calls. `urlPattern` supports `*` wildcards. |
-| `http.mockOnce(method, urlPattern, response)` | Same but only matches the first call. |
-| `env.set(key, value)` | Set a mock env var for this test. |
-| `params.set(key, value)` | Set a mock param for this test. |
-| `kv.set(key, value)` | Pre-populate the kv store. |
-| `assert.equal(a, b)` | Deep equality assertion. |
-| `assert.ok(val)` | Assert truthy. |
-| `assert.throws(fn)` | Assert that `fn` throws. |
-| `assert.httpCalled(method, urlPattern)` | Assert an HTTP call was made. |
-| `assert.httpCalledWith(method, url, opts)` | Assert call was made with specific body/headers. |
-| `assert.httpNotCalled(method, urlPattern)` | Assert no matching HTTP call was made. |
-
-Each `test()` call gets a **fresh mock state** — mocks from one test don't leak into the next.
-
-#### Running tests
-
-```bash
-dicode task test morning-email-check
-
-# ✓ sends digest to Slack when emails exist  (38ms)
-# ✓ skips Slack when inbox is empty          (11ms)
-# 2 passed, 0 failed
-
-dicode task test --all   # run tests for every task that has task.test.js
-```
-
----
-
-### Layer 3 — Dry run
-
-Run the full task execution path with real secrets and real logic — but intercept all outbound HTTP calls and log them instead of sending:
-
-```bash
-dicode task run morning-email-check --dry-run
-```
-
-```
-[dry-run] Secrets resolved: SLACK_TOKEN=✓  GMAIL_TOKEN=✓
-[dry-run] GET https://gmail.googleapis.com/gmail/v1/users/me/messages?...
-[dry-run]   → intercepted, not executed
-[dry-run] POST https://slack.com/api/chat.postMessage
-[dry-run]   body: { "channel": "#devops", "text": "Morning digest..." }
-[dry-run]   → intercepted, not executed
-[dry-run] Task returned: { count: 3 }
-[dry-run] Duration: 120ms
-```
-
-Useful for verifying that secrets resolve correctly and the task targets the right endpoints before a live run.
-
----
-
-### Layer 4 — CI integration
-
-Generate a CI config for your tasks repo:
-
-```bash
-dicode ci init --github    # creates .github/workflows/dicode.yml
-dicode ci init --gitlab    # creates .gitlab-ci.yml
-```
-
-Generated GitHub Actions workflow:
-
-```yaml
-# .github/workflows/dicode.yml
-name: Validate tasks
-on: [push, pull_request]
-
-jobs:
-  validate:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dicode/setup-action@v1   # downloads the dicode binary
-      - name: Validate all tasks
-        run: dicode task validate --all
-      - name: Run task tests
-        run: dicode task test --all
-```
-
-CI runs entirely **offline** — no secrets needed, no database, no live network. Validation and unit tests only use the files in the repo.
-
-**What CI catches on every PR:**
-- Broken `task.yaml` (typo in cron expression, missing name, invalid chain)
-- JS syntax errors
-- Chain cycles introduced by a new task
-- Test regressions in any `task.test.js`
-
-### AI-generated tests
-
-When AI generates a task, it generates `task.test.js` alongside `task.js`. Both are shown in the diff before you confirm. If the test file has a syntax error, the AI retry loop fixes it automatically (up to 3 attempts) before showing you the result.
+See [docs/concepts/testing.md](docs/concepts/testing.md) for the full design.
 
 ---
 
@@ -1339,40 +1188,45 @@ When `server.auth: true`, add an API key from the Security page:
 
 ### MCP tools reference
 
+**Implemented:**
+
 | Tool | Description |
 |---|---|
 | `list_tasks` | All registered tasks with id, trigger, status, last run time |
-| `get_task(id)` | Full task content: task.yaml + task.js + task.test.js |
-| `get_js_api` | Complete JS globals reference (http, kv, log, params, env, input) |
-| `get_example_tasks` | 2-3 curated example tasks for few-shot context |
-| `list_secrets` | Names of registered secrets (values never exposed) |
-| `write_task_file(path, content)` | Write a file into the configured local dev source directory |
-| `validate_task(id_or_path)` | Static validation — returns structured errors with line numbers |
-| `test_task(id_or_path)` | Run task.test.js — returns pass/fail per test case with output |
-| `dry_run_task(id)` | Full execution with intercepted HTTP — returns log + return value |
-| `run_task(id)` | Trigger a live run — returns run ID for log streaming |
-| `get_run_log(run_id)` | Fetch execution log for any run |
-| `commit_task(id, source_id)` | Promote local task to git repo — returns commit SHA |
+| `get_task(id)` | Full task content: task.yaml + script source |
+| `run_task(id)` | Trigger a live run — returns run ID |
+| `list_sources` | List configured task sources with dev mode status |
+| `switch_dev_mode(source, enabled, path?)` | Toggle dev mode for a source |
+
+**Planned:**
+
+| Tool | Description |
+|---|---|
+| `validate_task(id)` | Static validation with structured errors |
+| `test_task(id)` | Run task tests |
+| `dry_run_task(id)` | Full execution with intercepted HTTP |
+| `commit_task(id, source_id)` | Promote local task to git repo |
+| `list_secrets` | Names of registered secrets |
+| `write_task_file(path, content)` | Write a file into dev source directory |
 
 ### Agent workflow example
 
-When an agent receives "write a task that pings my API every 5 minutes and alerts Slack on failure":
+With the currently implemented tools, an agent can:
 
 ```
-1. list_tasks          → check no similar task exists
-2. list_secrets        → confirm SLACK_TOKEN and API_URL are available
-3. get_js_api          → understand available globals
-4. get_example_tasks   → see real examples for code style reference
-5. write_task_file("api-health-check/task.yaml", ...)
-6. write_task_file("api-health-check/task.js", ...)
-7. write_task_file("api-health-check/task.test.js", ...)
-8. validate_task("api-health-check")   → fix any errors
-9. test_task("api-health-check")       → fix failing tests
-10. dry_run_task("api-health-check")   → verify endpoints and secrets
-11. commit_task("api-health-check", "my-tasks")
+1. list_tasks     → check what already exists
+2. get_task(id)   → read an existing task for reference
+3. run_task(id)   → trigger a run and check the result
 ```
 
-The agent iterates on steps 8–10 until all checks pass, then commits. No human in the loop unless the agent needs clarification.
+When the planned tools are implemented, the full workflow will be:
+
+```
+1. list_tasks → list_secrets → get_task (reference)
+2. write_task_file (task.yaml + task.ts + task.test.ts)
+3. validate_task → test_task → dry_run_task (iterate until clean)
+4. commit_task (promote to git)
+```
 
 ---
 
@@ -1382,30 +1236,26 @@ A skill file gives any AI agent the full context needed to develop dicode tasks 
 
 ### Install
 
+The skill is embedded in the `dicoded` binary at `pkg/agent/skill.md`. To use it with an AI agent, copy it into your project:
+
 ```bash
-# Print skill to stdout (pipe into any agent or LLM)
-dicode agent skill show
-
-# Install for Claude Code
-dicode agent skill install --claude-code
-# writes to ~/.claude/skills/dicode-task-developer.md
-
-# Install to a project's CLAUDE.md
-dicode agent skill show >> CLAUDE.md
+# The skill file is embedded in the binary — extract it from the source
+cat pkg/agent/skill.md >> CLAUDE.md
 ```
+
+CLI commands for `dicode agent skill show/install` are planned but not yet implemented.
 
 ### What the skill teaches the agent
 
-**Mandatory workflow** — the agent must follow this order every time:
-1. `list_tasks` — avoid duplicating existing tasks
-2. `list_secrets` — know what credentials are available before writing code
-3. `get_js_api` — understand available globals and their signatures
-4. `get_example_tasks` — use as few-shot style reference
-5. Write `task.yaml` + `task.js` + `task.test.js` via `write_task_file`
-6. `validate_task` — fix all errors before proceeding
-7. `test_task` — all tests must pass (min: one happy path + one edge case)
-8. `dry_run_task` — verify HTTP calls and secret resolution
-9. `commit_task` — only when steps 6–8 are clean
+**Recommended workflow** (steps 2-9 require planned MCP tools not yet implemented):
+1. `list_tasks` — avoid duplicating existing tasks (implemented)
+2. `list_secrets` — know what credentials are available (planned)
+3. `get_task` — read an existing task for reference (implemented)
+4. Write `task.yaml` + `task.ts` + `task.test.ts` via `write_task_file` (planned)
+5. `validate_task` — fix all errors before proceeding (planned)
+6. `test_task` — all tests must pass (planned)
+7. `dry_run_task` — verify HTTP calls and secret resolution (planned)
+8. `commit_task` — only when steps 5-7 are clean (planned)
 
 **Hard rules the skill enforces:**
 - Never commit if `validate_task` or `test_task` return errors
@@ -1560,33 +1410,21 @@ Before exposing dicode outside localhost:
 The default mode. Runs on your laptop with a tray icon, OS notifications, and automatic startup on login.
 
 ```bash
-# Install the binary
-brew install dicode            # macOS
-scoop install dicode           # Windows
-# or download from releases page
+# Install the binary (download from releases page)
+# Start the daemon
+dicoded
 
-# Start dicode
-dicode
-
-# Install to run automatically on login
-dicode service install
+# Or use the CLI (auto-starts daemon if needed)
+dicode list
 ```
-
-The tray icon right-click menu has a **"Start on login"** toggle. Under the hood this writes a LaunchAgent (macOS), XDG autostart entry (Linux), or Registry key (Windows).
 
 ### Headless server
 
-For VPS, homelab, or any machine without a desktop session. Auto-detected when `$DISPLAY` is absent.
+For VPS, homelab, or any machine without a desktop session. Set `server.tray: false` in config.
 
 ```bash
-# Run directly
-dicode --headless --config /etc/dicode/dicode.yaml
-
-# Install as a system service (systemd on Linux, Windows Service on Windows)
-dicode service install --headless
-dicode service start
-dicode service status
-dicode service logs
+# Run the daemon directly
+dicoded
 ```
 
 ### Docker
@@ -1625,53 +1463,55 @@ The official Docker image sets `DICODE_HEADLESS=true` automatically — no tray,
 
 Webhooks need a publicly reachable URL. If dicode is running on your laptop behind NAT, there's no public URL — until now.
 
-Connect your dicode account and get a stable public URL instantly:
+Enable the relay and get a stable public URL instantly — no accounts, no port forwarding, no ngrok:
 
 ```
-https://dicode.app/u/{your-uid}/hooks/my-task
+https://relay.dicode.app/u/<uuid>/hooks/my-task
 ```
 
-dicode maintains a persistent WebSocket tunnel to `dicode.app`. When a webhook hits your URL, it's forwarded to your local instance in real time. Works behind any NAT, VPN, or firewall. No port forwarding, no ngrok.
+The daemon maintains a persistent WebSocket tunnel to the relay server. When a webhook hits your URL, it's forwarded to your local instance in real time. Works behind any NAT, VPN, or firewall.
 
 ### Setup
 
-```bash
-# Authenticate with dicode.app
-dicode relay login
-
-# Check tunnel status and your webhook URL
-dicode relay status
-# ● Connected  →  https://dicode.app/u/abc123/hooks/
+```yaml
+# dicode.yaml
+relay:
+  enabled: true
+  server_url: wss://relay.dicode.app   # or ws://localhost:5553 for local dev
 ```
 
-Your webhook URL for a task is:
-```
-https://dicode.app/u/{uid}/hooks/{webhook-path-from-task.yaml}
-```
+On first start the daemon generates an ECDSA P-256 keypair and derives a stable UUID from the public key. The relay URL never changes as long as the daemon's database file is preserved.
 
-### Relay limits
+The relay client authenticates via challenge-response (no passwords, no accounts) and automatically reconnects with exponential backoff on disconnect.
 
-| | Free | Pro |
-|---|---|---|
-| Deliveries/month | 500 | Unlimited |
-| URL format | `dicode.app/u/{uid}/...` | `{name}.dicode.app/...` |
-| Payload replay | No | 7 days |
+### What works through the relay
 
-Self-hosted **server** deployments don't need the relay — expose port 8080 directly and use your own domain.
+- Webhook task execution (`/hooks/*`)
+- Webhook task UIs (HTML pages with the `dicode.js` SDK)
+- Asset serving for webhook UIs (CSS, JS, images)
+- dicode.js SDK serving (`/dicode.js`)
+
+### Self-hosted relay
+
+For high-security environments, run your own relay server instead of using `relay.dicode.app`:
+
+- **Go relay server** (`pkg/relay/server.go`) — lightweight, same binary, suitable for single-user self-hosting
+- **Node.js relay server** (`dicode-relay` repo) — production-grade with OAuth broker, multi-client support, status dashboard
+
+Self-hosted server deployments that expose port 8080 directly don't need the relay at all.
 
 ---
 
-## Service Management
+## Service Management (planned)
+
+OS service management (`dicode service install/start/stop/status/logs`) is designed but the CLI commands are not yet implemented. For now, run `dicoded` directly or manage it with systemd/launchd manually:
 
 ```bash
-dicode service install            # install as OS service / startup item
-dicode service install --headless # headless mode (no tray, for servers)
-dicode service start
-dicode service stop
-dicode service restart
-dicode service status
-dicode service logs
-dicode service uninstall
+# Run directly
+dicoded
+
+# Or with systemd (create a unit file manually)
+sudo systemctl start dicoded
 ```
 
 ---
@@ -1683,12 +1523,12 @@ Dicode is **open source and free to self-host** — no feature limits on the cor
 | | Self-hosted | Cloud Free | Cloud Pro | Team | Enterprise |
 |---|---|---|---|---|---|
 | Price | Free | Free | ~$12/mo | ~$20/seat/mo | Custom |
-| Git repos | Public only | Public only | Public + Private | Public + Private | Public + Private |
+| Git repos | Unlimited | Public only | Public + Private | Public + Private | Public + Private |
 | Database | SQLite | SQLite | Managed | Managed | BYO (Postgres/MySQL) |
 | Tasks | Unlimited | 3 | Unlimited | Unlimited | Unlimited |
 | Runs/month | Unlimited | 100 | Unlimited | Unlimited | Unlimited |
 | AI generations | BYO API key | 10 | Unlimited | Unlimited | Custom model |
-| Webhook relay | 500/mo | 500/mo | Unlimited + custom domain | Unlimited | Self-managed |
+| Webhook relay | Self-hosted or dicode.app | dicode.app | Unlimited + custom domain | Unlimited | Self-managed |
 | Users | 1 | 1 | 1 | Unlimited | Unlimited |
 | RBAC + audit log | — | — | — | ✅ | ✅ |
 | SSO / SAML | — | — | — | — | ✅ |
@@ -1704,27 +1544,37 @@ See [BUSINESSPLAN.md](./BUSINESSPLAN.md) for full business model documentation.
 
 ```
 dicode/
-├── cmd/dicode/         # binary entrypoint, CLI subcommands
+├── cmd/
+│   ├── dicode/         # CLI binary — thin dispatcher, auto-starts daemon
+│   └── dicoded/        # daemon binary — full component wiring
 ├── pkg/
-│   ├── config/         # config loading
+│   ├── config/         # config loading + validation
 │   ├── task/           # task spec (task.yaml) + content hashing
-│   ├── runtime/js/     # goja JS runtime + injected globals
+│   ├── taskset/        # hierarchical task composition (TaskSet manifests)
 │   ├── source/         # Source interface, git + local implementations
-│   ├── trigger/        # cron, webhook, manual, chain trigger engine
-│   ├── registry/       # in-memory task registry + sqlite run log
-│   ├── db/             # database abstraction (sqlite / postgres / mysql)
-│   ├── secrets/        # provider chain, local encrypted store, env fallback
-│   ├── notify/         # Notifier interface, ntfy, gotify, desktop, noop
-│   ├── tray/           # system tray icon (systray)
-│   ├── onboarding/     # first-run wizard (config generation, local vs git choice)
-│   ├── relay/          # WebSocket tunnel client (dicode.app relay)
-│   ├── service/        # OS service management (systemd, LaunchAgent, WinSvc)
-│   ├── testing/        # task test harness (mock globals, assert, runTask)
-│   ├── mcp/            # MCP server (wraps registry, runner, secrets)
-│   ├── agent/          # agent skill file (embedded markdown)
-│   ├── store/          # task store installer (dicode task install)
-│   ├── ai/             # Claude API integration + prompt builder
-│   └── webui/          # HTTP server, REST API, HTMX frontend
+│   ├── trigger/        # cron, webhook, manual, chain, daemon trigger engine
+│   ├── registry/       # in-memory task registry + sqlite run log + reconciler
+│   ├── runtime/
+│   │   ├── deno/       # Deno TypeScript/JS runtime (auto-installs deno binary)
+│   │   ├── docker/     # Docker container runtime (live logs, kill, orphan cleanup)
+│   │   ├── podman/     # Podman container runtime (rootless)
+│   │   └── python/     # Python runtime (uv, PEP 723 inline deps)
+│   ├── ipc/            # unified IPC: per-run task sockets + CLI control socket
+│   ├── db/             # database abstraction (sqlite implemented; postgres/mysql stubs)
+│   ├── secrets/        # provider chain: local encrypted (ChaCha20) + env fallback
+│   ├── relay/          # WebSocket relay client + self-hosted server
+│   ├── mcp/            # MCP server (JSON-RPC 2.0) + MCP client for daemon tasks
+│   ├── agent/          # embedded agent skill file (markdown)
+│   ├── notify/         # Notifier interface + ntfy provider
+│   ├── tray/           # system tray icon (fyne.io/systray)
+│   ├── onboarding/     # first-run config generation
+│   ├── webui/          # HTTP server, REST API, auth, WebSocket hub
+│   └── service/        # OS service management (interface defined, impls planned)
+├── tasks/
+│   ├── buildin/        # built-in tasks (webui, tray, alert, notify)
+│   ├── auth/           # OAuth task (broker mode planned)
+│   └── examples/       # 13 example tasks (all runtimes and trigger types)
+├── docs/               # comprehensive documentation (33 files)
 ├── dicode.yaml         # example config
 └── go.mod
 ```
@@ -1740,7 +1590,9 @@ dicode/
 | Auto-sync from git | ✅ | manual deploy | ❌ | ❌ |
 | AI task generation | ✅ | ✅ | ❌ | ❌ |
 | Code-first tasks | ✅ | ✅ | partial | ✅ |
-| Task sharing / store | ✅ | ❌ | ❌ | ❌ |
+| Multi-runtime (TS/Python/Docker) | ✅ | ✅ | ❌ | partial |
+| MCP server for AI agents | ✅ | ❌ | ❌ | ❌ |
+| Webhook relay (no ngrok) | ✅ | ❌ | ❌ | ❌ |
 | Self-contained (no infra) | ✅ | ❌ | ❌ | ❌ |
 
 ---

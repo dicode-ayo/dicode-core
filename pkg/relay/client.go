@@ -17,8 +17,6 @@ import (
 	"math"
 	mathrand "math/rand/v2"
 	"net/http"
-	"net/http/httptest"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -40,17 +38,21 @@ const (
 )
 
 // Client maintains a persistent WebSocket connection to a relay server and
-// forwards incoming webhook requests through a local http.Handler.
+// forwards incoming webhook requests to the local daemon HTTP server.
 type Client struct {
-	serverURL string
-	identity  *Identity
-	handler   http.Handler
-	log       *zap.Logger
+	serverURL   string
+	identity    *Identity
+	localPort   int
+	log         *zap.Logger
+	localClient *http.Client
+
+	hookMu      sync.RWMutex
+	hookBaseURL string // set after successful handshake from welcome message
 }
 
 // NewClient creates a relay client. serverURL must be a wss:// URL.
 // In test/dev environments ws:// is accepted but a warning is logged.
-func NewClient(serverURL string, identity *Identity, handler http.Handler, log *zap.Logger) *Client {
+func NewClient(serverURL string, identity *Identity, localPort int, log *zap.Logger) *Client {
 	if !strings.HasPrefix(serverURL, "wss://") && !strings.HasPrefix(serverURL, "ws://") {
 		log.Error("relay: serverURL must start with wss:// or ws://", zap.String("url", serverURL))
 	} else if strings.HasPrefix(serverURL, "ws://") {
@@ -58,11 +60,21 @@ func NewClient(serverURL string, identity *Identity, handler http.Handler, log *
 			zap.String("url", serverURL))
 	}
 	return &Client{
-		serverURL: serverURL,
-		identity:  identity,
-		handler:   handler,
-		log:       log,
+		serverURL:   serverURL,
+		identity:    identity,
+		localPort:   localPort,
+		log:         log,
+		localClient: &http.Client{Timeout: 25 * time.Second},
 	}
+}
+
+// HookBaseURL returns the relay hook base URL received from the server after a
+// successful handshake (e.g. "https://relay.dicode.app/u/<uuid>/hooks/").
+// Returns empty string if not yet connected.
+func (c *Client) HookBaseURL() string {
+	c.hookMu.RLock()
+	defer c.hookMu.RUnlock()
+	return c.hookBaseURL
 }
 
 // Run connects to the relay server and maintains the connection until ctx is
@@ -106,6 +118,10 @@ func jitter(d time.Duration) time.Duration {
 }
 
 func (c *Client) runOnce(ctx context.Context) error {
+	c.hookMu.Lock()
+	c.hookBaseURL = ""
+	c.hookMu.Unlock()
+
 	// Apply a timeout to the dial + handshake phase.
 	dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
 	defer cancel()
@@ -182,6 +198,9 @@ func (c *Client) handshake(ctx context.Context, conn *websocket.Conn, sendMu *sy
 		if err := json.Unmarshal(data, &w); err != nil {
 			return fmt.Errorf("parse welcome: %w", err)
 		}
+		c.hookMu.Lock()
+		c.hookBaseURL = w.URL
+		c.hookMu.Unlock()
 		c.log.Info("relay connected", zap.String("url", w.URL))
 		return nil
 	case msgError:
@@ -253,35 +272,47 @@ func (c *Client) dispatchRequest(req requestMsg) responseMsg {
 		}
 	}
 
-	u := &url.URL{Scheme: "http", Host: "relay", Path: req.Path}
-	httpReq, err := http.NewRequestWithContext(context.Background(), req.Method, u.String(), bytes.NewReader(body))
+	// Only forward requests to /hooks/ and /dicode.js paths — reject anything
+	// else to limit blast radius if the relay server is compromised.
+	if !strings.HasPrefix(req.Path, "/hooks/") && req.Path != "/dicode.js" {
+		return errorResponse(req.ID, http.StatusForbidden)
+	}
+
+	targetURL := fmt.Sprintf("http://localhost:%d%s", c.localPort, req.Path)
+	httpReq, err := http.NewRequestWithContext(context.Background(), req.Method, targetURL, bytes.NewReader(body))
 	if err != nil {
 		return errorResponse(req.ID, http.StatusBadRequest)
 	}
 	for k, vals := range req.Headers {
+		if http.CanonicalHeaderKey(k) == "X-Relay-Base" {
+			continue
+		}
 		for _, v := range vals {
 			httpReq.Header.Add(k, v)
 		}
 	}
 
-	rec := httptest.NewRecorder()
-	c.handler.ServeHTTP(rec, httpReq)
+	// Set X-Relay-Base using the client's known UUID — no URL parsing needed.
+	httpReq.Header.Set("X-Relay-Base", "/u/"+c.identity.UUID)
 
-	result := rec.Result()
-	var respBody []byte
-	if result.Body != nil {
-		buf := new(bytes.Buffer)
-		_, _ = buf.ReadFrom(result.Body)
-		_ = result.Body.Close()
-		respBody = buf.Bytes()
+	resp, err := c.localClient.Do(httpReq)
+	if err != nil {
+		c.log.Warn("relay: local request failed", zap.Error(err))
+		return errorResponse(req.ID, http.StatusBadGateway)
 	}
+	defer resp.Body.Close()
 
-	headers := filterResponseHeaders(result.Header)
+	var respBody []byte
+	buf := new(bytes.Buffer)
+	_, _ = buf.ReadFrom(io.LimitReader(resp.Body, maxBodySize))
+	respBody = buf.Bytes()
+
+	headers := filterResponseHeaders(resp.Header)
 
 	return responseMsg{
 		Type:    msgResponse,
 		ID:      req.ID,
-		Status:  result.StatusCode,
+		Status:  resp.StatusCode,
 		Headers: headers,
 		Body:    base64.StdEncoding.EncodeToString(respBody),
 	}

@@ -10,8 +10,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -50,11 +52,14 @@ func TestHandshakeSuccess(t *testing.T) {
 	id := newTestIdentity(t)
 	log := noopLogger()
 
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	localSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-	})
+	}))
+	defer localSrv.Close()
+	_, portStr, _ := net.SplitHostPort(localSrv.Listener.Addr().String())
+	port, _ := strconv.Atoi(portStr)
 
-	client := NewClient(wsURL, id, handler, log)
+	client := NewClient(wsURL, id, port, log)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -91,8 +96,11 @@ func TestHandshakeWrongKey(t *testing.T) {
 	}
 
 	log := noopLogger()
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
-	client := NewClient(wsURL, tamperedID, handler, log)
+	localSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer localSrv.Close()
+	_, portStr, _ := net.SplitHostPort(localSrv.Listener.Addr().String())
+	port, _ := strconv.Atoi(portStr)
+	client := NewClient(wsURL, tamperedID, port, log)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -182,13 +190,16 @@ func TestWebhookForwarding(t *testing.T) {
 	id := newTestIdentity(t)
 
 	received := make(chan string, 1)
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	localSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		received <- r.URL.Path
 		w.WriteHeader(http.StatusOK)
 		_, _ = fmt.Fprint(w, `{"ok":true}`)
-	})
+	}))
+	defer localSrv.Close()
+	_, portStr, _ := net.SplitHostPort(localSrv.Listener.Addr().String())
+	port, _ := strconv.Atoi(portStr)
 
-	client := NewClient(wsURL, id, handler, log)
+	client := NewClient(wsURL, id, port, log)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -240,7 +251,7 @@ func TestAutoReconnect(t *testing.T) {
 
 	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
 
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	localSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/hooks/ping" {
 			select {
 			case connectedCh <- struct{}{}:
@@ -248,9 +259,12 @@ func TestAutoReconnect(t *testing.T) {
 			}
 		}
 		w.WriteHeader(http.StatusOK)
-	})
+	}))
+	defer localSrv.Close()
+	_, portStr, _ := net.SplitHostPort(localSrv.Listener.Addr().String())
+	port, _ := strconv.Atoi(portStr)
 
-	client := NewClient(wsURL, id, handler, log)
+	client := NewClient(wsURL, id, port, log)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
@@ -294,6 +308,49 @@ func TestAutoReconnect(t *testing.T) {
 
 	// Verify the client reconnects and the webhook reaches the handler again.
 	pingUntilConnected("reconnect after drop")
+}
+
+func TestRelayBaseHeader(t *testing.T) {
+	log := noopLogger()
+	srv := NewServer("https://relay.example.com", log)
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
+	id := newTestIdentity(t)
+
+	receivedHeader := make(chan string, 1)
+	localSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedHeader <- r.Header.Get("X-Relay-Base")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer localSrv.Close()
+	_, portStr, _ := net.SplitHostPort(localSrv.Listener.Addr().String())
+	port, _ := strconv.Atoi(portStr)
+
+	client := NewClient(wsURL, id, port, log)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	go func() { _ = client.Run(ctx) }()
+	time.Sleep(300 * time.Millisecond)
+
+	hookPath := fmt.Sprintf("%s/u/%s/hooks/test", ts.URL, id.UUID)
+	resp, err := http.Post(hookPath, "application/json", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+
+	select {
+	case hdr := <-receivedHeader:
+		expected := "/u/" + id.UUID
+		if hdr != expected {
+			t.Fatalf("X-Relay-Base = %q, want %q", hdr, expected)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout")
+	}
 }
 
 func isContextError(err error) bool {

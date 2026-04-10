@@ -1,25 +1,44 @@
+# dicode configuration
+# Generated on first run. Edit this file to change settings.
+# Restart dicode after making changes.
+#
+# Path variables — use these in any path field instead of absolute paths:
+#   ${HOME}      — user home directory
+#   ${CONFIGDIR} — directory containing this dicode.yaml file
+#   ${DATADIR}   — resolved data_dir (default: ~/.dicode)
+#   ~/           — also expanded to home directory
+
 ai:
-    api_key_env: OPENAI_API_KEY
-    base_url: ""
-    model: gpt-4o
-data_dir: /home/dr14/.dicode
+  api_key_env: OPENAI_API_KEY
+  base_url: ""
+  model: gpt-4o
+data_dir: ${HOME}/.dicode
 database:
-    path: /home/dr14/.dicode/data.db
-    type: sqlite
+  path: ${DATADIR}/data.db
+  type: sqlite
+relay:
+  enabled: true
+  server_url: ws://localhost:5553
 log_level: info
 runtimes:
-    python:
-        version: 0.7.3
+  python:
+    version: 0.7.3
 secrets:
-    providers:
-        - type: local
-        - type: env
+  providers:
+    - type: local
+    - type: env
 server:
-    mcp: true
-    port: 8080
-    secret: ""
-    tray: true
+  mcp: true
+  port: 8080
+  secret: ""
+  tray: true
 sources:
-    - name: examples
-      path: /home/dr14/dicode/examples/taskset.yaml
-      type: local
+  - name: buildin
+    path: ${CONFIGDIR}/tasks/buildin/taskset.yaml
+    type: local
+  - name: auth
+    path: ${CONFIGDIR}/tasks/auth/taskset.yaml
+    type: local
+  - name: examples
+    path: ${CONFIGDIR}/tasks/examples/taskset.yaml
+    type: local

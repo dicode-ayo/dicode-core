@@ -346,7 +346,7 @@ spec:
 	r := NewResolver(t.TempDir(), false, logger)
 	configDefaults := &Defaults{
 		Timeout: 120 * time.Second,
-		Env:     []string{"RUNTIME_ENV=backend"},
+		Env:     []task.EnvEntry{{Name: "RUNTIME_ENV", Value: "backend"}},
 	}
 	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, configDefaults, nil)
 	if err != nil {

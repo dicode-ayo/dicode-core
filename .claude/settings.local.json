@@ -10,12 +10,31 @@
       "mcp__chrome-devtools__*",
       "Bash(make run:*)",
       "Bash(make build:*)",
-      "Bash(make test:*)"
+      "Bash(make test:*)",
+      "Bash(git stash:*)",
+      "Bash(dpkg:*)",
+      "Bash(grep -n \"type Registry\" /workspaces/dicode-core/pkg/registry/*.go)",
+      "Bash(gh pr:*)",
+      "Bash(go test:*)",
+      "Bash(go build:*)",
+      "Bash(grep:*)",
+      "Bash(curl -s \"https://esm.sh/ansi-to-html@0.7.2\")",
+      "Bash(npm info:*)",
+      "Bash(cat)",
+      "Bash(node /tmp/verify_escape.js)",
+      "Read(//workspaces/dicode-relay/**)",
+      "Bash(npx tsc:*)",
+      "Read(//usr/bin/**)",
+      "Read(//snap/**)",
+      "Bash(curl -s http://localhost:8080/hooks/system-dashboard)",
+      "Bash(curl:*)",
+      "Bash(npm list:*)",
+      "Bash(timeout 8 node:*)"
     ]
   },
-  "autoMemoryDirectory": "/home/dr14/dicode/.claude/memory",
   "enabledMcpjsonServers": [
     "chrome-devtools",
     "playwright"
-  ]
+  ],
+  "autoMemoryDirectory": "/home/dr14/dicode/.claude/memory"
 }

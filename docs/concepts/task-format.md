@@ -35,16 +35,16 @@ apiVersion: dicode/v1
 kind: Task
 name: Morning Email Digest
 description: Fetches unread emails and posts a summary to Slack
-runtime: js
+runtime: deno
 
 trigger:
   cron: "0 8 * * 1-5"   # weekdays at 8am
 
 params:
-  - name: slack_channel
+  slack_channel:
     description: Slack channel to post digest
     default: "#general"
-  - name: max_emails
+  max_emails:
     description: Maximum emails to include
     default: "20"
 

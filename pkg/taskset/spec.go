@@ -4,9 +4,11 @@
 package taskset
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/dicode/dicode/pkg/task"
+	"gopkg.in/yaml.v3"
 )
 
 // Ref points to a yaml file (kind: Task or kind: TaskSet).
@@ -51,7 +53,8 @@ func (r *Ref) effectivePoll() time.Duration {
 type Defaults struct {
 	Timeout time.Duration `yaml:"timeout,omitempty"`
 	Retry   *RetryConfig  `yaml:"retry,omitempty"`
-	Env     []string      `yaml:"env,omitempty"`
+	// Env accepts full EnvEntry mappings or bare "KEY" / "KEY=value" strings.
+	Env []task.EnvEntry `yaml:"env,omitempty"`
 	// Trigger sets a fallback trigger for any entry that has none.
 	Trigger *TriggerPatch      `yaml:"trigger,omitempty"`
 	Notify  *task.NotifyConfig `yaml:"notify,omitempty"`
@@ -76,23 +79,72 @@ type TriggerPatch struct {
 }
 
 // ParamOverride patches the default (and optionally required) of a named param.
+// It decodes from either a mapping form  {name: x, default: y}  or a scalar
+// "key: value" pair inside a YAML mapping — see ParamOverrides below.
 type ParamOverride struct {
 	Name     string `yaml:"name"`
 	Default  string `yaml:"default"`
 	Required *bool  `yaml:"required,omitempty"`
 }
 
+// ParamOverrides is a list of ParamOverride values that can be written in two
+// equivalent YAML forms:
+//
+//	# concise map (name → default):
+//	params:
+//	  provider: google
+//	  scope: "user,repo"
+//
+//	# explicit list (required: supported):
+//	params:
+//	  - { name: scope, default: "user,repo", required: true }
+type ParamOverrides []ParamOverride
+
+func (p *ParamOverrides) UnmarshalYAML(value *yaml.Node) error {
+	switch value.Kind {
+	case yaml.MappingNode:
+		// map form: each key/value pair → ParamOverride{Name: key, Default: value}
+		if len(value.Content)%2 != 0 {
+			return fmt.Errorf("params mapping has odd number of nodes")
+		}
+		*p = make(ParamOverrides, 0, len(value.Content)/2)
+		for i := 0; i < len(value.Content); i += 2 {
+			*p = append(*p, ParamOverride{
+				Name:    value.Content[i].Value,
+				Default: value.Content[i+1].Value,
+			})
+		}
+		return nil
+	case yaml.SequenceNode:
+		// list form: decode as []ParamOverride normally
+		type plain []ParamOverride
+		var list plain
+		if err := value.Decode(&list); err != nil {
+			return err
+		}
+		*p = ParamOverrides(list)
+		return nil
+	default:
+		return fmt.Errorf("params must be a mapping or sequence, got %v", value.Tag)
+	}
+}
+
 // Overrides is a patch applied to a resolved task or to a nested TaskSet entry.
 // Fields are applied in the three-level override cascade; later layers win.
 type Overrides struct {
-	Enabled *bool              `yaml:"enabled,omitempty"`
-	Trigger *TriggerPatch      `yaml:"trigger,omitempty"`
-	Params  []ParamOverride    `yaml:"params,omitempty"`
-	Env     []string           `yaml:"env,omitempty"`
-	Timeout time.Duration      `yaml:"timeout,omitempty"`
-	Retry   *RetryConfig       `yaml:"retry,omitempty"`
-	Runtime string             `yaml:"runtime,omitempty"`
-	Notify  *task.NotifyConfig `yaml:"notify,omitempty"`
+	Enabled     *bool          `yaml:"enabled,omitempty"`
+	Name        string         `yaml:"name,omitempty"`        // replaces spec.Name
+	Description string         `yaml:"description,omitempty"` // replaces spec.Description
+	Trigger     *TriggerPatch  `yaml:"trigger,omitempty"`
+	Params      ParamOverrides `yaml:"params,omitempty"`
+	// Env accepts full EnvEntry mappings (name/secret/from/value/optional) or bare "KEY" / "KEY=value" strings.
+	Env     []task.EnvEntry         `yaml:"env,omitempty"`
+	Net     []string                `yaml:"net,omitempty"` // replaces permissions.net
+	Timeout time.Duration           `yaml:"timeout,omitempty"`
+	Retry   *RetryConfig            `yaml:"retry,omitempty"`
+	Runtime string                  `yaml:"runtime,omitempty"`
+	Notify  *task.NotifyConfig      `yaml:"notify,omitempty"`
+	Dicode  *task.DicodePermissions `yaml:"dicode,omitempty"` // replaces permissions.dicode
 
 	// For task_set entries only — Deprecated: Defaults cross-boundary cascade is no longer applied.
 	// Use per-entry overrides.entries[key] to patch nested tasks explicitly.

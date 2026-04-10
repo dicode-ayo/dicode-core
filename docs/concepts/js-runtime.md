@@ -1,5 +1,7 @@
 # JS Runtime
 
+> **Deprecated**: This document describes the original goja-based JS runtime (`pkg/runtime/js/`), which was the MVP task execution engine. The primary runtimes are now **Deno** (TypeScript/JavaScript) and **Python** (uv). See [Deno Runtime](../deno-runtime.md) and [Python Runtime](../python-runtime.md) for the current SDKs. The goja runtime remains in the codebase but new tasks should use `runtime: deno` or `runtime: python`.
+
 Tasks run as JavaScript files inside a sandboxed [goja](https://github.com/dop251/goja) runtime. goja is a pure Go ES2020 engine — no CGo, no system Node.js required, runs everywhere Go runs.
 
 ---

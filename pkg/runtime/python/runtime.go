@@ -32,10 +32,12 @@ import (
 	"bufio"
 	"context"
 	_ "embed"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -185,6 +187,11 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 		case entry.Secret != "":
 			val, err := e.secrets.Resolve(ctx, entry.Secret)
 			if err != nil {
+				var notFound *secrets.NotFoundError
+				if entry.Optional && errors.As(err, &notFound) {
+					resolved[entry.Name] = ""
+					break
+				}
 				status = registry.StatusFailure
 				result.Error = fmt.Errorf("resolve secret %q for env %q: %w", entry.Secret, entry.Name, err)
 				return result, nil
@@ -271,7 +278,10 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 	}
 
 	// Stream uv/Python stderr to registry logs in real-time.
+	var wg sync.WaitGroup
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {
 			_ = e.reg.AppendLog(context.Background(), runID, "warn", scanner.Text())
@@ -312,6 +322,7 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 		}
 	}
 
+	wg.Wait()
 	return result, nil
 }
 

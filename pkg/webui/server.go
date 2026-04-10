@@ -23,6 +23,7 @@ import (
 	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/mcp"
 	"github.com/dicode/dicode/pkg/registry"
+	"github.com/dicode/dicode/pkg/relay"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	denoruntime "github.com/dicode/dicode/pkg/runtime/deno"
 	"github.com/dicode/dicode/pkg/secrets"
@@ -143,6 +144,7 @@ type Server struct {
 	sourceMgr          *SourceManager       // nil if not wired
 	dataDir            string               // ~/.dicode or cfg.DataDir
 	gateway            *ipc.Gateway
+	relayClient        *relay.Client
 	managedRuntimes    []pkgruntime.ManagedRuntime
 	sessions           *sessionStore
 	dbSessions         *dbSessionStore  // persistent sessions / trusted devices
@@ -156,6 +158,12 @@ type Server struct {
 	log                *zap.Logger
 	port               int
 	srv                *http.Server
+}
+
+// SetRelayClient stores a reference to the relay client so the API can expose
+// the relay hook base URL to the web UI.
+func (s *Server) SetRelayClient(rc *relay.Client) {
+	s.relayClient = rc
 }
 
 // SetManagedRuntimes registers the list of managed runtimes (Deno, Python, …)
@@ -439,9 +447,19 @@ func (s *Server) Start(ctx context.Context) error {
 		defer cancel()
 		_ = s.srv.Shutdown(shutCtx)
 	}()
-	s.log.Info("webui listening", zap.Int("port", s.port))
-	if err := s.srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		return err
+	certFile := s.cfg.Server.TLSCertFile
+	keyFile := s.cfg.Server.TLSKeyFile
+	if certFile != "" && keyFile != "" {
+		s.log.Info("webui listening (HTTPS)", zap.Int("port", s.port),
+			zap.String("hint", fmt.Sprintf("set DICODE_BASE_URL secret to https://YOUR_HOST:%d", s.port)))
+		if err := s.srv.ListenAndServeTLS(certFile, keyFile); err != nil && err != http.ErrServerClosed {
+			return err
+		}
+	} else {
+		s.log.Info("webui listening", zap.Int("port", s.port))
+		if err := s.srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			return err
+		}
 	}
 	return nil
 }
@@ -811,7 +829,15 @@ func (s *Server) apiDeleteSecret(w http.ResponseWriter, r *http.Request) {
 // --- REST API handlers ---
 
 func (s *Server) apiGetConfig(w http.ResponseWriter, r *http.Request) {
-	jsonOK(w, s.cfg)
+	type configResponse struct {
+		*config.Config
+		RelayHookBaseURL string `json:"relay_hook_base_url,omitempty"`
+	}
+	resp := configResponse{Config: s.cfg}
+	if s.relayClient != nil {
+		resp.RelayHookBaseURL = s.relayClient.HookBaseURL()
+	}
+	jsonOK(w, resp)
 }
 
 // TaskListItem is the shape returned by GET /api/tasks.

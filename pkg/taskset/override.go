@@ -1,8 +1,6 @@
 package taskset
 
 import (
-	"strings"
-
 	"github.com/dicode/dicode/pkg/task"
 )
 
@@ -20,6 +18,12 @@ func applyOverrides(base *task.Spec, layers ...*Overrides) *task.Spec {
 }
 
 func applyLayer(spec *task.Spec, o *Overrides) {
+	if o.Name != "" {
+		spec.Name = o.Name
+	}
+	if o.Description != "" {
+		spec.Description = o.Description
+	}
 	if o.Trigger != nil {
 		applyTriggerPatch(&spec.Trigger, o.Trigger)
 	}
@@ -27,9 +31,13 @@ func applyLayer(spec *task.Spec, o *Overrides) {
 		mergeParams(&spec.Params, o.Params)
 	}
 	if len(o.Env) > 0 {
-		// Convert override env strings (KEY or KEY=VALUE) into EnvEntry objects
-		// and merge them into permissions.env by name (overlay wins).
-		spec.Permissions.Env = mergeEnvEntries(spec.Permissions.Env, envStringsToEntries(o.Env))
+		spec.Permissions.Env = mergeEnvEntries(spec.Permissions.Env, o.Env)
+	}
+	if len(o.Net) > 0 {
+		spec.Permissions.Net = o.Net
+	}
+	if o.Dicode != nil {
+		spec.Permissions.Dicode = mergeDicodePerms(spec.Permissions.Dicode, o.Dicode)
 	}
 	if o.Timeout != 0 {
 		spec.Timeout = o.Timeout
@@ -89,7 +97,7 @@ func applyTriggerPatch(t *task.TriggerConfig, p *TriggerPatch) {
 // mergeParams merges param overrides into the base list by name.
 // If a param with the same name exists, its default (and optionally required) is patched.
 // If no matching param exists, a new one is appended.
-func mergeParams(params *[]task.Param, overrides []ParamOverride) {
+func mergeParams(params *task.Params, overrides []ParamOverride) {
 	for _, po := range overrides {
 		found := false
 		for i := range *params {
@@ -112,58 +120,6 @@ func mergeParams(params *[]task.Param, overrides []ParamOverride) {
 	}
 }
 
-// mergeEnv merges env entries by key (the part before '=').
-// Overlay entries overwrite base entries with the same key; order is preserved.
-func mergeEnv(base, overlay []string) []string {
-	// Track key → value and insertion order.
-	m := make(map[string]string, len(base)+len(overlay))
-	order := make([]string, 0, len(base)+len(overlay))
-
-	for _, e := range base {
-		k := envKey(e)
-		if _, seen := m[k]; !seen {
-			order = append(order, k)
-		}
-		m[k] = e
-	}
-	for _, e := range overlay {
-		k := envKey(e)
-		if _, seen := m[k]; !seen {
-			order = append(order, k)
-		}
-		m[k] = e
-	}
-
-	out := make([]string, 0, len(order))
-	for _, k := range order {
-		out = append(out, m[k])
-	}
-	return out
-}
-
-// envKey returns the key portion of a KEY=value entry, or the whole string if
-// no '=' is present (bare variable name reference).
-func envKey(e string) string {
-	if i := strings.IndexByte(e, '='); i >= 0 {
-		return e[:i]
-	}
-	return e
-}
-
-// envStringsToEntries converts legacy []string env entries (KEY or KEY=value)
-// into []task.EnvEntry for merging into permissions.env.
-func envStringsToEntries(ss []string) []task.EnvEntry {
-	out := make([]task.EnvEntry, 0, len(ss))
-	for _, s := range ss {
-		if i := strings.IndexByte(s, '='); i >= 0 {
-			out = append(out, task.EnvEntry{Name: s[:i], Value: s[i+1:]})
-		} else {
-			out = append(out, task.EnvEntry{Name: s})
-		}
-	}
-	return out
-}
-
 // mergeEnvEntries merges overlay entries into base by Name (overlay wins).
 func mergeEnvEntries(base, overlay []task.EnvEntry) []task.EnvEntry {
 	m := make(map[string]int, len(base))
@@ -181,6 +137,37 @@ func mergeEnvEntries(base, overlay []task.EnvEntry) []task.EnvEntry {
 		}
 	}
 	return out
+}
+
+// mergeDicodePerms merges overlay on top of base, with overlay winning non-zero fields.
+func mergeDicodePerms(base, overlay *task.DicodePermissions) *task.DicodePermissions {
+	if overlay == nil {
+		return base
+	}
+	if base == nil {
+		c := *overlay
+		return &c
+	}
+	out := *base
+	if len(overlay.Tasks) > 0 {
+		out.Tasks = overlay.Tasks
+	}
+	if len(overlay.MCP) > 0 {
+		out.MCP = overlay.MCP
+	}
+	if overlay.ListTasks {
+		out.ListTasks = true
+	}
+	if overlay.GetRuns {
+		out.GetRuns = true
+	}
+	if overlay.GetConfig {
+		out.GetConfig = true
+	}
+	if overlay.SecretsWrite {
+		out.SecretsWrite = true
+	}
+	return &out
 }
 
 // defaultsToOverrides converts a Defaults block into an Overrides that can be
@@ -241,6 +228,10 @@ func copySpec(s *task.Spec) *task.Spec {
 		out.Permissions.Run = make([]string, len(s.Permissions.Run))
 		copy(out.Permissions.Run, s.Permissions.Run)
 	}
+	if s.Permissions.Net != nil {
+		out.Permissions.Net = make([]string, len(s.Permissions.Net))
+		copy(out.Permissions.Net, s.Permissions.Net)
+	}
 	if s.Trigger.Chain != nil {
 		chain := *s.Trigger.Chain
 		out.Trigger.Chain = &chain
@@ -252,6 +243,10 @@ func copySpec(s *task.Spec) *task.Spec {
 	if s.Notify != nil {
 		n := *s.Notify
 		out.Notify = &n
+	}
+	if s.Permissions.Dicode != nil {
+		d := *s.Permissions.Dicode
+		out.Permissions.Dicode = &d
 	}
 	return &out
 }
