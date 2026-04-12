@@ -108,7 +108,7 @@ class DcSecurity extends LitElement {
           </thead>
           <tbody>
             ${this._devices.length === 0 ? html`
-              <tr><td colspan="5" style="text-align:center;color:#888">No trusted devices.</td></tr>
+              <tr><td colspan="5" style="text-align:center;color:var(--muted)">No trusted devices.</td></tr>
             ` : this._devices.map(d => html`
               <tr>
                 <td style="font-size:0.8rem;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title=${d.label}>
@@ -118,7 +118,7 @@ class DcSecurity extends LitElement {
                 <td style="font-size:0.8rem">${this._fmtDate(d.last_seen)}</td>
                 <td style="font-size:0.8rem">${this._fmtDate(d.expires_at)}</td>
                 <td style="text-align:right">
-                  <button class="btn btn-sm" style="background:#dc3545"
+                  <button class="btn btn-sm" style="background:var(--red)"
                     @click=${() => this._revokeDevice(d.id)}>Revoke</button>
                 </td>
               </tr>
@@ -135,11 +135,11 @@ class DcSecurity extends LitElement {
       </p>
 
       ${this._newKeyRaw ? html`
-        <div class="card" style="background:#d1e7dd;margin-bottom:1rem">
+        <div class="card" style="background:rgba(166, 227, 161, .15);margin-bottom:var(--space-md)">
           <p style="font-size:0.85rem;font-weight:600;margin-bottom:0.4rem">
             ✓ New API key created — copy it now, it won't be shown again.
           </p>
-          <div style="display:flex;gap:0.5rem;align-items:center">
+          <div style="display:flex;gap:var(--space-sm);align-items:center">
             <code style="font-size:0.82rem;word-break:break-all;flex:1">${this._newKeyRaw}</code>
             <button class="btn btn-sm" @click=${() => this._copyKey()}>Copy</button>
             <button class="btn btn-sm secondary" @click=${() => this._newKeyRaw = ''}>Dismiss</button>
@@ -147,9 +147,9 @@ class DcSecurity extends LitElement {
         </div>
       ` : ''}
 
-      <div class="card" style="margin-bottom:1rem">
+      <div class="card" style="margin-bottom:var(--space-md)">
         <h2 style="margin-bottom:0.75rem">Create API Key</h2>
-        <div style="display:flex;gap:0.5rem">
+        <div style="display:flex;gap:var(--space-sm)">
           <input
             placeholder="Key name (e.g. Claude Desktop)"
             class="input"
@@ -169,14 +169,14 @@ class DcSecurity extends LitElement {
           </thead>
           <tbody>
             ${this._keys.length === 0 ? html`
-              <tr><td colspan="4" style="text-align:center;color:#888">No API keys.</td></tr>
+              <tr><td colspan="4" style="text-align:center;color:var(--muted)">No API keys.</td></tr>
             ` : this._keys.map(k => html`
               <tr>
                 <td>${k.name}</td>
                 <td><code style="font-size:0.82rem">${k.prefix}</code></td>
                 <td style="font-size:0.82rem">${k.last_used ? this._fmtDate(k.last_used) : '—'}</td>
                 <td style="text-align:right">
-                  <button class="btn btn-sm" style="background:#dc3545"
+                  <button class="btn btn-sm" style="background:var(--red)"
                     @click=${() => this._revokeKey(k.id)}>Revoke</button>
                 </td>
               </tr>
@@ -186,13 +186,13 @@ class DcSecurity extends LitElement {
       `}
 
       <!-- ── Danger Zone ─────────────────────────────────────── -->
-      <h2 style="margin-top:2rem;color:#842029">Danger Zone</h2>
-      <div class="card" style="border:1px solid #f5c2c7">
+      <h2 style="margin-top:2rem;color:var(--red)">Danger Zone</h2>
+      <div class="card" style="border:1px solid var(--red)">
         <p style="font-size:0.85rem;margin-bottom:0.75rem">
           Revoke <strong>all</strong> active sessions and trusted devices on this server.
           Every browser will need to re-authenticate.
         </p>
-        <button class="btn" style="background:#dc3545" @click=${() => this._logoutAll()}>
+        <button class="btn" style="background:var(--red)" @click=${() => this._logoutAll()}>
           Revoke all sessions &amp; devices
         </button>
       </div>

@@ -1,7 +1,7 @@
 import { LitElement, html } from 'https://esm.sh/lit@3';
 import { wsOn } from '../lib/ws.js';
 
-const LEVEL_COLOR = { DEBUG: '#89b4fa', INFO: '#a6e3a1', WARN: '#f9e2af', ERROR: '#f38ba8' };
+const LEVEL_COLOR = { DEBUG: 'var(--blue2)', INFO: 'var(--green)', WARN: 'var(--yellow)', ERROR: 'var(--red)' };
 
 class DcLogBar extends LitElement {
   createRenderRoot() { return this; }
@@ -64,18 +64,18 @@ class DcLogBar extends LitElement {
 
   render() {
     const statusText  = this._connected ? '● connected'    : '● disconnected';
-    const statusColor = this._connected ? '#a6e3a1'        : '#f38ba8';
+    const statusColor = this._connected ? 'var(--green)'        : 'var(--red)';
 
     return html`
-      <div style="position:fixed;bottom:0;left:0;right:0;background:#1a1a2e;color:#cdd6f4;font-family:monospace;font-size:0.78rem;z-index:100;border-top:1px solid #333;">
+      <div style="position:fixed;bottom:0;left:0;right:0;background:var(--bg-alt);color:var(--lavender);font-family:monospace;font-size:0.78rem;z-index:100;border-top:1px solid var(--border);">
         <div @click=${() => this._toggle()}
-          style="padding:0.3rem 1rem;cursor:pointer;background:#16213e;display:flex;align-items:center;gap:0.5rem;user-select:none;">
+          style="padding:0.3rem 1rem;cursor:pointer;background:var(--bg-accent);display:flex;align-items:center;gap:var(--space-sm);user-select:none;">
           <span>${this._open ? '▼' : '▶'}</span> App Logs
           <span style="margin-left:0.5rem;font-size:0.7rem;color:${statusColor}">${statusText}</span>
-          <span id="logcount" style="margin-left:auto;font-size:0.7rem;color:#666"></span>
+          <span id="logcount" style="margin-left:auto;font-size:0.7rem;color:var(--muted)"></span>
         </div>
         <pre id="logconsole"
-          style="display:${this._open ? 'block' : 'none'};height:200px;overflow-y:auto;padding:0.5rem 1rem;margin:0;white-space:pre-wrap;word-break:break-all"></pre>
+          style="display:${this._open ? 'block' : 'none'};height:200px;overflow-y:auto;padding:var(--space-sm) 1rem;margin:0;white-space:pre-wrap;word-break:break-all"></pre>
       </div>
       <div style="height:2rem"></div>`;
   }

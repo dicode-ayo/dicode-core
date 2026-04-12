@@ -73,15 +73,15 @@ class DcAuthOverlay extends LitElement {
     return html`
       <div style="
         position:fixed;inset:0;z-index:9999;
-        background:rgba(0,0,0,0.55);backdrop-filter:blur(2px);
+        background:var(--overlay-bg);backdrop-filter:blur(2px);
         display:flex;align-items:center;justify-content:center;
       ">
         <div style="
-          background:#fff;border-radius:10px;padding:2rem 2.25rem;
-          width:100%;max-width:380px;box-shadow:0 8px 32px rgba(0,0,0,.25);
+          background:var(--card-bg);border-radius:var(--radius-md);padding:var(--space-xl) 2.25rem;
+          width:100%;max-width:380px;box-shadow:0 8px 32px var(--shadow);
         ">
           <div style="font-size:1.5rem;margin-bottom:0.25rem">&#9889; dicode</div>
-          <p style="color:#555;font-size:0.9rem;margin-bottom:1.25rem">
+          <p style="color:var(--muted);font-size:0.9rem;margin-bottom:1.25rem">
             Enter your passphrase to continue.
           </p>
 
@@ -90,18 +90,18 @@ class DcAuthOverlay extends LitElement {
             type="password"
             placeholder="Passphrase"
             class="input"
-            style="width:100%;margin-bottom:0.75rem;font-size:1rem;padding:0.5rem 0.6rem"
+            style="width:100%;margin-bottom:0.75rem;font-size:1rem;padding:var(--space-sm) 0.6rem"
             @keydown=${this._onKeydown}
             ?disabled=${this._loading}
           >
 
-          <label style="display:flex;align-items:center;gap:0.5rem;font-size:0.85rem;color:#555;margin-bottom:1rem;cursor:pointer">
+          <label style="display:flex;align-items:center;gap:var(--space-sm);font-size:0.85rem;color:var(--muted);margin-bottom:var(--space-md);cursor:pointer">
             <input id="auth-trust" type="checkbox" style="width:auto">
             Trust this browser for 30 days
           </label>
 
           ${this._error ? html`
-            <p style="color:#dc3545;font-size:0.85rem;margin-bottom:0.75rem">${this._error}</p>
+            <p style="color:var(--red);font-size:0.85rem;margin-bottom:0.75rem">${this._error}</p>
           ` : ''}
 
           <button

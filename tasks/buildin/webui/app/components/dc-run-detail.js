@@ -126,12 +126,12 @@ class DcRunDetail extends LitElement {
     if (retval) { try { displayRV = JSON.stringify(JSON.parse(retval), null, 2); } catch(_) {} }
 
     return html`
-      <div style="margin-bottom:1rem">
+      <div style="margin-bottom:var(--space-md)">
         <a href="tasks/${encodeURIComponent(taskID)}">← ${taskName}</a>
       </div>
 
       <div class="card">
-        <div style="display:flex;gap:1rem;align-items:center;flex-wrap:wrap">
+        <div style="display:flex;gap:var(--space-md);align-items:center;flex-wrap:wrap">
           <span class="badge badge-${status}">${status}</span>
           <strong>${taskName}</strong>
           ${trigSrc ? html`<span class="meta badge badge-manual">${trigSrc}</span>` : ''}
@@ -140,7 +140,7 @@ class DcRunDetail extends LitElement {
           <span class="meta">${this._duration || (finishedAt ? fmtDuration(startedAt, finishedAt) : isRunning ? 'running…' : '—')}</span>
           <a href="/runs/${this.runid}/result" target="_blank" class="btn btn-sm secondary" style="margin-left:auto">Result ↗</a>
           ${isRunning ? html`
-            <button class="btn" style="background:#dc3545" @click=${() => this._kill()}>Kill</button>` : ''}
+            <button class="btn" style="background:var(--red)" @click=${() => this._kill()}>Kill</button>` : ''}
         </div>
       </div>
 
@@ -152,14 +152,14 @@ class DcRunDetail extends LitElement {
           ${otype === 'text/html'
             ? html`<iframe .srcdoc=${ocontent}
                 sandbox="allow-scripts allow-same-origin"
-                style="width:100%;border:none;border-radius:6px;display:block"
+                style="width:100%;border:none;border-radius:var(--radius-sm);display:block"
                 @load=${e => { e.target.style.height = (e.target.contentDocument.body.scrollHeight + 32) + 'px'; }}>
               </iframe>`
-            : html`<pre style="margin:0;border-radius:6px">${ocontent}</pre>`}
+            : html`<pre style="margin:0;border-radius:var(--radius-sm)">${ocontent}</pre>`}
         </div>` : retval ? html`
         <h2>Return value</h2>
         <div class="card" style="padding:0">
-          <pre style="margin:0;border-radius:6px">${displayRV}</pre>
+          <pre style="margin:0;border-radius:var(--radius-sm)">${displayRV}</pre>
         </div>` : ''}
 
       <h2>Logs</h2>
