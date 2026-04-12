@@ -1,0 +1,262 @@
+/* ╔═══════════════════════════════════════════════════════════════════════════╗
+ * ║                                                                           ║
+ * ║                    dicode Design System — theme.css                       ║
+ * ║                                                                           ║
+ * ║  Single source of truth for colors, spacing, typography, radii, shadows,  ║
+ * ║  transitions, and z-index used across dicode-site, dicode-core WebUI,     ║
+ * ║  and dicode-relay.                                                        ║
+ * ║                                                                           ║
+ * ║  To use in another project:                                               ║
+ * ║                                                                           ║
+ * ║    <link rel="stylesheet"                                                 ║
+ * ║          href="https://dicode-ayo.github.io/dicode-site/theme.css">       ║
+ * ║                                                                           ║
+ * ║  Or copy this file into your project and @import it.                      ║
+ * ║                                                                           ║
+ * ║  Then set the theme at page load:                                         ║
+ * ║                                                                           ║
+ * ║    document.documentElement.setAttribute("data-theme", "dark");           ║
+ * ║    document.documentElement.setAttribute("data-theme", "light");          ║
+ * ║                                                                           ║
+ * ║  Docs: https://dicode-ayo.github.io/dicode-site/theme.html                ║
+ * ╚═══════════════════════════════════════════════════════════════════════════╝
+ */
+
+/* ─── DARK MODE (default) ─────────────────────────────────────────────────── */
+
+:root {
+  /* ━━━ BACKGROUNDS ━━━ */
+  --bg:                #0d0d1a;    /* page background */
+  --bg-alt:            #1a1a2e;    /* alternate section */
+  --bg-accent:         #16213e;    /* third tier / gradient stop */
+  --card-bg:           rgba(255, 255, 255, .04);    /* card surface */
+  --overlay-bg:        rgba(13, 13, 26, .85);       /* modal/sheet overlay */
+
+  /* ━━━ FOREGROUND ━━━ */
+  --text:              #e8eaf0;    /* body text */
+  --heading:           #ffffff;    /* h1-h6 */
+  --muted:             #8b93a8;    /* secondary text, labels */
+  --lavender:          #cdd6f4;    /* tertiary accent text */
+
+  /* ━━━ BRAND ━━━ */
+  --blue:              #0d6efd;    /* primary action */
+  --blue2:             #3a8bfd;    /* primary hover */
+  --sky:               #a0c4ff;    /* accent text, pills, tags */
+  --green:             #a6e3a1;    /* success */
+  --yellow:            #f9e2af;    /* warning */
+  --red:               #f38ba8;    /* error / destructive */
+
+  /* ━━━ BORDERS ━━━ */
+  --border:            rgba(160, 196, 255, .15);    /* default */
+  --border-strong:     rgba(160, 196, 255, .35);    /* hover/focus */
+  --border-dashed:     rgba(13, 110, 253, .5);      /* special/dashed */
+
+  /* ━━━ NAVIGATION ━━━ */
+  --nav-bg:            rgba(13, 13, 26, .8);
+  --nav-bg-scrolled:   rgba(13, 13, 26, .97);
+
+  /* ━━━ TINTS (used for icon bgs, callouts) ━━━ */
+  --blue-tint:         rgba(13, 110, 253, .12);
+  --blue-tint-strong:  rgba(13, 110, 253, .18);
+
+  /* ━━━ HERO GLOW (radial gradients) ━━━ */
+  --hero-glow-1:       rgba(13, 110, 253, .35);
+  --hero-glow-2:       rgba(13, 110, 253, .12);
+
+  /* ━━━ SHADOWS ━━━ */
+  --shadow-sm:         0 2px 8px rgba(0, 0, 0, .2);
+  --shadow:            0 4px 16px rgba(0, 0, 0, .3);
+  --shadow-card:       0 12px 40px rgba(0, 0, 0, .4);
+  --shadow-strong:     0 16px 48px rgba(0, 0, 0, .4);
+  --shadow-glow:       0 4px 24px rgba(13, 110, 253, .4);
+  --shadow-glow-lg:    0 8px 32px rgba(13, 110, 253, .5);
+
+  /* ━━━ CODE BLOCKS (theme-aware syntax highlighting) ━━━ */
+  --code-bg:           #1e1e2e;
+  --code-text:         #e8eaf0;
+  --code-border:       rgba(160, 196, 255, .15);
+  --code-filename:     #8b93a8;
+  --code-kw:           #89b4fa;
+  --code-str:          #a6e3a1;
+  --code-cmt:          #585b70;
+  --code-fn:           #cba6f7;
+  --code-num:          #fab387;
+  --code-prop:         #f38ba8;
+}
+
+/* ─── LIGHT MODE ──────────────────────────────────────────────────────────── */
+
+:root[data-theme="light"] {
+  /* Backgrounds */
+  --bg:                #f7f8fc;
+  --bg-alt:            #eef1f8;
+  --bg-accent:         #e5e9f3;
+  --card-bg:           rgba(13, 13, 26, .03);
+  --overlay-bg:        rgba(13, 13, 26, .4);
+
+  /* Foreground */
+  --text:              #1a1a2e;
+  --heading:           #0d0d1a;
+  --muted:             #5c6680;
+  --lavender:          #4c6ef5;
+
+  /* Brand — saturated versions for contrast on light bg */
+  --sky:               #0d6efd;
+  --green:             #16a34a;
+  --yellow:            #ca8a04;
+  --red:               #dc2626;
+
+  /* Borders */
+  --border:            rgba(13, 13, 26, .1);
+  --border-strong:     rgba(13, 13, 26, .2);
+  --border-dashed:     rgba(13, 110, 253, .5);
+
+  /* Navigation */
+  --nav-bg:            rgba(247, 248, 252, .85);
+  --nav-bg-scrolled:   rgba(247, 248, 252, .97);
+
+  /* Tints */
+  --blue-tint:         rgba(13, 110, 253, .08);
+  --blue-tint-strong:  rgba(13, 110, 253, .12);
+
+  /* Hero glow — softer */
+  --hero-glow-1:       rgba(13, 110, 253, .18);
+  --hero-glow-2:       rgba(13, 110, 253, .08);
+
+  /* Shadows — darker tint for depth on light bg */
+  --shadow-sm:         0 2px 8px rgba(13, 13, 26, .06);
+  --shadow:            0 4px 16px rgba(13, 13, 26, .08);
+  --shadow-card:       0 12px 40px rgba(13, 13, 26, .12);
+  --shadow-strong:     0 16px 48px rgba(13, 13, 26, .15);
+  --shadow-glow:       0 4px 24px rgba(13, 110, 253, .25);
+  --shadow-glow-lg:    0 8px 32px rgba(13, 110, 253, .35);
+
+  /* Code — GitHub-style */
+  --code-bg:           #f6f8fa;
+  --code-text:         #24292f;
+  --code-border:       rgba(13, 13, 26, .12);
+  --code-filename:     #6e7781;
+  --code-kw:           #cf222e;
+  --code-str:          #0a3069;
+  --code-cmt:          #6e7781;
+  --code-fn:           #8250df;
+  --code-num:          #0550ae;
+  --code-prop:         #116329;
+}
+
+/* ─── SPACING SCALE ────────────────────────────────────────────────────────
+ *  Based on a 4px/0.25rem grid. Use these for padding, margin, gap.
+ */
+
+:root {
+  --space-0:     0;
+  --space-xs:    .25rem;   /*  4px */
+  --space-sm:    .5rem;    /*  8px */
+  --space-md:    1rem;     /* 16px */
+  --space-lg:    1.5rem;   /* 24px */
+  --space-xl:    2rem;     /* 32px */
+  --space-2xl:   3rem;     /* 48px */
+  --space-3xl:   4rem;     /* 64px */
+  --space-4xl:   6rem;     /* 96px */
+  --space-5xl:   8rem;     /* 128px */
+}
+
+/* ─── TYPOGRAPHY ──────────────────────────────────────────────────────────── */
+
+:root {
+  --font-sans:   system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono:   "Fira Code", "Cascadia Code", ui-monospace, SFMono-Regular,
+                 Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+
+  /* Font sizes — fluid clamp() for hero headings */
+  --text-xs:     .72rem;    /* 11.5px */
+  --text-sm:     .82rem;    /* 13px */
+  --text-base:   .9rem;     /* 14.4px — body */
+  --text-md:     1rem;      /* 16px */
+  --text-lg:     1.15rem;   /* 18.4px */
+  --text-xl:     1.4rem;    /* 22.4px */
+  --text-2xl:    1.8rem;    /* 28.8px */
+  --text-3xl:    2.4rem;    /* 38.4px */
+  --text-4xl:    clamp(2rem, 4vw, 2.8rem);          /* section titles */
+  --text-5xl:    clamp(2.6rem, 6vw, 5rem);          /* hero h1 */
+
+  /* Font weights */
+  --font-normal:     400;
+  --font-medium:     500;
+  --font-semibold:   600;
+  --font-bold:       700;
+  --font-extrabold:  800;
+
+  /* Line heights */
+  --leading-tight:    1.1;
+  --leading-snug:     1.3;
+  --leading-normal:   1.6;
+  --leading-relaxed:  1.75;
+
+  /* Letter spacing */
+  --tracking-tight:   -.03em;
+  --tracking-normal:  0;
+  --tracking-wide:    .06em;
+  --tracking-wider:   .1em;
+}
+
+/* ─── RADII ───────────────────────────────────────────────────────────────── */
+
+:root {
+  --radius-sm:    6px;      /* tags, small buttons */
+  --radius:       14px;     /* cards, inputs (legacy name) */
+  --radius-md:    10px;     /* buttons */
+  --radius-lg:    20px;     /* large cards, modals */
+  --radius-pill:  9999px;   /* pills, circular badges */
+  --radius-full:  50%;      /* avatars, dots */
+}
+
+/* ─── TRANSITIONS ─────────────────────────────────────────────────────────── */
+
+:root {
+  --ease:              cubic-bezier(.4, 0, .2, 1);
+  --ease-out:          cubic-bezier(0, 0, .2, 1);
+  --ease-in-out:       cubic-bezier(.4, 0, .6, 1);
+
+  --duration-fast:     150ms;
+  --duration:          250ms;
+  --duration-slow:     400ms;
+  --duration-slower:   650ms;
+
+  /* Shorthand timing for common use */
+  --transition-fast:   all var(--duration-fast) var(--ease);
+  --transition:        all var(--duration) var(--ease);
+  --transition-slow:   all var(--duration-slow) var(--ease);
+}
+
+/* ─── Z-INDEX SCALE ───────────────────────────────────────────────────────── */
+
+:root {
+  --z-base:         0;
+  --z-dropdown:     10;
+  --z-sticky:       20;
+  --z-fixed:        30;
+  --z-overlay:      40;
+  --z-modal:        50;
+  --z-nav:          100;
+  --z-hamburger:    110;
+  --z-toast:        500;
+  --z-tooltip:      1000;
+}
+
+/* ─── BREAKPOINTS (for reference — use in @media queries) ─────────────────── */
+
+:root {
+  --breakpoint-sm:    380px;   /* small phones */
+  --breakpoint-md:    640px;   /* large phones */
+  --breakpoint-lg:    768px;   /* tablets */
+  --breakpoint-xl:    900px;   /* small laptops */
+  --breakpoint-2xl:   1120px;  /* desktops — max container width */
+}
+
+/* ─── SMOOTH THEME TRANSITIONS ────────────────────────────────────────────── */
+
+html {
+  transition: background-color var(--duration) var(--ease),
+              color var(--duration) var(--ease);
+}
