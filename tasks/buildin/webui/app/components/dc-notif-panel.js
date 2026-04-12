@@ -106,7 +106,7 @@ class DcNotifPanel extends LitElement {
 
       <!-- Inbox panel -->
       ${this._open ? html`
-        <div style="display:block;position:fixed;top:48px;right:0;width:340px;max-height:480px;overflow-y:auto;background:var(--card-bg);border:1px solid var(--border);border-radius:var(--radius-sm) 0 0 6px;box-shadow:-2px 2px 8px var(--shadow);z-index:200">
+        <div style="display:block;position:fixed;top:48px;right:0;width:340px;max-height:480px;overflow-y:auto;background:var(--bg-alt);border:1px solid var(--border);border-radius:var(--radius-md) 0 0 var(--radius-md);box-shadow:var(--shadow);z-index:200">
           <div style="display:flex;align-items:center;padding:var(--space-sm) var(--space-md);border-bottom:1px solid var(--border);background:var(--bg-alt)">
             <strong style="font-size:0.9rem">Notifications</strong>
             <button @click=${() => this._clear()} style="margin-left:auto;background:none;border:none;cursor:pointer;color:var(--muted);font-size:0.8rem">Clear</button>
