@@ -52,6 +52,7 @@ const (
 	CapCLILogs    = "cli.logs"    // fetch log entries for a run
 	CapCLIStatus  = "cli.status"  // daemon health and uptime
 	CapCLISecrets = "cli.secrets" // list / set / delete secrets
+	CapCLIRelay   = "cli.relay"   // claim this daemon to a relay user account
 )
 
 // cliCaps is the full capability set granted to every CLI client.
@@ -62,6 +63,7 @@ func cliCaps() []string {
 		CapCLILogs,
 		CapCLIStatus,
 		CapCLISecrets,
+		CapCLIRelay,
 	}
 }
 

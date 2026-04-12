@@ -84,6 +84,11 @@ type Request struct {
 	RunID       string `json:"runID,omitempty"`
 	StringValue string `json:"stringValue,omitempty"` // cli.secrets.set value
 	Follow      bool   `json:"follow,omitempty"`      // cli.logs — reserved for streaming
+
+	// cli.relay.login
+	ClaimToken string `json:"claimToken,omitempty"`
+	Label      string `json:"label,omitempty"`
+	BaseURL    string `json:"baseURL,omitempty"` // optional override
 }
 
 // Response is an outbound message to a connected client.
@@ -148,10 +153,28 @@ type LogEntry struct {
 
 // DaemonStatus is the cli.status response.
 type DaemonStatus struct {
-	Version   string `json:"version"`
-	UptimeSec int64  `json:"uptimeSec"`
-	TaskCount int    `json:"taskCount"`
-	RunCount  int    `json:"runCount"` // runs in the last 24h
+	Version   string      `json:"version"`
+	UptimeSec int64       `json:"uptimeSec"`
+	TaskCount int         `json:"taskCount"`
+	RunCount  int         `json:"runCount"` // runs in the last 24h
+	Relay     RelayStatus `json:"relay"`
+}
+
+// RelayStatus describes the daemon's relay linkage state, surfaced by
+// cli.status so `dicode status` can tell users whether they're linked to a
+// relay user account.
+type RelayStatus struct {
+	Enabled     bool   `json:"enabled"`
+	UUID        string `json:"uuid,omitempty"`
+	Linked      bool   `json:"linked"`
+	GithubLogin string `json:"githubLogin,omitempty"`
+	ClaimedAt   string `json:"claimedAt,omitempty"`
+}
+
+// RelayLoginResult is the cli.relay.login response body.
+type RelayLoginResult struct {
+	UUID        string `json:"uuid"`
+	GithubLogin string `json:"githubLogin,omitempty"`
 }
 
 // RunResult is returned by EngineRunner.WaitRun.

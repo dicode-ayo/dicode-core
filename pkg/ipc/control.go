@@ -40,6 +40,32 @@ type ControlServer struct {
 
 	startedAt time.Time
 	version   string
+
+	// relayHooks provides optional accessors for the daemon's relay identity
+	// and claim actions. Wired by the daemon after the relay client is built;
+	// nil when the relay feature is disabled.
+	relayHooks RelayHooks
+}
+
+// RelayHooks is the ControlServer's interface to the relay subsystem. Passing
+// these in via SetRelayHooks keeps ControlServer ignorant of pkg/relay, which
+// avoids an import cycle and keeps IPC tests side-effect-free.
+type RelayHooks struct {
+	// Status returns the current linkage state for cli.status. Must be safe to
+	// call with nil receiver state and must never return an error that blocks
+	// the status response — return (RelayStatus{}, nil) on best effort.
+	Status func(ctx context.Context) (RelayStatus, error)
+
+	// Login performs the daemon claim flow. Returns the resulting user login
+	// and UUID on success, or a descriptive error otherwise. Must never log
+	// the claim token.
+	Login func(ctx context.Context, claimToken, label, baseURLOverride string) (RelayLoginResult, error)
+}
+
+// SetRelayHooks wires the relay accessors into the control server. Call this
+// after NewControlServer if the daemon has initialised its relay identity.
+func (cs *ControlServer) SetRelayHooks(h RelayHooks) {
+	cs.relayHooks = h
 }
 
 // NewControlServer creates a ControlServer. Call Start to begin accepting
@@ -214,6 +240,9 @@ func (cs *ControlServer) dispatch(ctx context.Context, req Request) (any, error)
 	case "cli.relay.trust_broker":
 		return cs.handleTrustBroker(ctx)
 
+	case "cli.relay.login":
+		return cs.handleRelayLogin(ctx, req)
+
 	default:
 		return nil, fmt.Errorf("unknown method: %s", req.Method)
 	}
@@ -221,11 +250,28 @@ func (cs *ControlServer) dispatch(ctx context.Context, req Request) (any, error)
 
 func (cs *ControlServer) handlePing() DaemonStatus {
 	all := cs.reg.All()
-	return DaemonStatus{
+	status := DaemonStatus{
 		Version:   cs.version,
 		UptimeSec: int64(time.Since(cs.startedAt).Seconds()),
 		TaskCount: len(all),
 	}
+	if cs.relayHooks.Status != nil {
+		// Best effort — never block ping on a relay status failure.
+		if rs, err := cs.relayHooks.Status(context.Background()); err == nil {
+			status.Relay = rs
+		}
+	}
+	return status
+}
+
+func (cs *ControlServer) handleRelayLogin(ctx context.Context, req Request) (any, error) {
+	if cs.relayHooks.Login == nil {
+		return nil, errors.New("relay is not enabled on this daemon")
+	}
+	if req.ClaimToken == "" {
+		return nil, errors.New("claimToken required")
+	}
+	return cs.relayHooks.Login(ctx, req.ClaimToken, req.Label, req.BaseURL)
 }
 
 func (cs *ControlServer) handleList() ([]TaskSummary, error) {
