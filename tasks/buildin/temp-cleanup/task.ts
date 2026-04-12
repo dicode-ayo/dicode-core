@@ -35,10 +35,13 @@ function parseRunID(name: string): string | null {
 }
 
 async function collectRunningRunIDs(dicode: Dicode): Promise<Set<string>> {
+  // ListRuns returns a nil slice when a task has no runs, which serializes
+  // to JSON null — coerce to [] so the for-of loops are safe.
   const running = new Set<string>();
-  const tasks = (await dicode.list_tasks()) as TaskSummary[];
+  const tasks = ((await dicode.list_tasks()) as TaskSummary[] | null) ?? [];
   for (const t of tasks) {
-    const runs = (await dicode.get_runs(t.id, { limit: 100 })) as Run[];
+    const runs =
+      ((await dicode.get_runs(t.id, { limit: 100 })) as Run[] | null) ?? [];
     for (const r of runs) {
       if (r.Status === "running") running.add(r.ID);
     }
@@ -47,11 +50,16 @@ async function collectRunningRunIDs(dicode: Dicode): Promise<Set<string>> {
 }
 
 export default async function main({ dicode }: DicodeSdk) {
+  // Record scan start before any registry query. Files created after this
+  // point belong to runs that may not appear in our running set (race with
+  // task launch); we protect them via an mtime lower bound.
+  const scanStart = Date.now();
   const running = await collectRunningRunIDs(dicode);
 
   let scanned = 0;
   let deleted = 0;
   let skipped = 0;
+  let tooNew = 0;
 
   for await (const entry of Deno.readDir(TEMP_DIR)) {
     if (!entry.isFile) continue;
@@ -64,6 +72,13 @@ export default async function main({ dicode }: DicodeSdk) {
     }
     const path = `${TEMP_DIR}/${entry.name}`;
     try {
+      const stat = await Deno.stat(path);
+      if (stat.mtime && stat.mtime.getTime() >= scanStart) {
+        // File was created or touched after we queried the registry — a run
+        // may have started for it that we never saw. Leave it for next cycle.
+        tooNew++;
+        continue;
+      }
       await Deno.remove(path);
       deleted++;
     } catch (err) {
@@ -71,6 +86,7 @@ export default async function main({ dicode }: DicodeSdk) {
     }
   }
 
-  console.log("temp-cleanup", { scanned, deleted, skipped, running: running.size });
-  return { scanned, deleted, skipped, running: running.size };
+  const summary = { scanned, deleted, skipped, tooNew, running: running.size };
+  console.log("temp-cleanup", summary);
+  return summary;
 }
