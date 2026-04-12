@@ -1143,6 +1143,128 @@ func TestFireAsync_ShutdownUnblocksWaiting(t *testing.T) {
 	close(holdCh)
 }
 
+// TestFireAsync_KillQueuedRun verifies that killing a run while it is parked
+// on the concurrency semaphore honors the kill immediately: the run is
+// finalized as `cancelled` in the registry and the runFinishedHook fires so
+// websocket subscribers see a matching started/finished pair.
+func TestFireAsync_KillQueuedRun(t *testing.T) {
+	d, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer d.Close()
+	reg := registry.New(d)
+
+	holdCh := make(chan struct{})
+	acquiredCh := make(chan struct{})
+	var acquiredOnce sync.Once
+	fakeExec := &fakeExecutor{
+		fn: func() {
+			acquiredOnce.Do(func() { close(acquiredCh) })
+			<-holdCh
+		},
+	}
+
+	eng := New(reg, fakeExec, zap.NewNop())
+	eng.SetMaxConcurrentTasks(1)
+
+	// Record finished-hook invocations so we can assert a matching
+	// started/finished pair fired for the cancelled run.
+	type finishRecord struct {
+		runID, status string
+	}
+	finishedCh := make(chan finishRecord, 2)
+	eng.SetRunFinishedHook(func(_, runID, status, _ string, _ int64, _, _ bool) {
+		finishedCh <- finishRecord{runID: runID, status: status}
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	eng.shutdownMu.Lock()
+	eng.shutdownCtx = ctx
+	eng.shutdownMu.Unlock()
+
+	dir := t.TempDir()
+	spec1 := writeTask(t, dir, "kill-task-1", `return 1`, task.TriggerConfig{Manual: true})
+	spec2 := writeTask(t, dir, "kill-task-2", `return 1`, task.TriggerConfig{Manual: true})
+	_ = reg.Register(spec1)
+	_ = reg.Register(spec2)
+
+	// Task 1 occupies the sole semaphore slot.
+	run1ID, err := eng.fireAsync(ctx, spec1, pkgruntime.RunOptions{}, "test")
+	if err != nil {
+		t.Fatalf("fireAsync 1: %v", err)
+	}
+	select {
+	case <-acquiredCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for task 1 to acquire semaphore")
+	}
+
+	// Task 2 parks on the semaphore waiting.
+	run2ID, err := eng.fireAsync(ctx, spec2, pkgruntime.RunOptions{}, "test")
+	if err != nil {
+		t.Fatalf("fireAsync 2: %v", err)
+	}
+
+	// Poll until task 2 shows up as waiting.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && eng.WaitingTasks() == 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if eng.WaitingTasks() != 1 {
+		t.Fatalf("expected WaitingTasks=1 after fireAsync 2, got %d", eng.WaitingTasks())
+	}
+
+	// Kill the queued run. The kill must be honored immediately.
+	if !eng.KillRun(run2ID) {
+		t.Fatal("KillRun returned false — run2 not found in runCancels")
+	}
+
+	// The finished hook for run2 should fire with status=cancelled.
+	var sawRun2 bool
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && !sawRun2 {
+		select {
+		case rec := <-finishedCh:
+			if rec.runID == run2ID {
+				if rec.status != registry.StatusCancelled {
+					t.Errorf("run2 finished hook status = %q, want %q", rec.status, registry.StatusCancelled)
+				}
+				sawRun2 = true
+			}
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	if !sawRun2 {
+		t.Fatal("runFinishedHook did not fire for the killed queued run")
+	}
+
+	// Registry row for run2 must be persisted as cancelled.
+	run2, err := reg.GetRun(context.Background(), run2ID)
+	if err != nil {
+		t.Fatalf("GetRun run2: %v", err)
+	}
+	if run2.Status != registry.StatusCancelled {
+		t.Errorf("run2.Status = %q, want %q", run2.Status, registry.StatusCancelled)
+	}
+
+	// Waiter counter drops to 0 via the deferred decrement when the goroutine
+	// actually returns — that happens after finalizeCancelled fires the hook,
+	// so poll briefly rather than asserting immediately.
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && eng.WaitingTasks() != 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if eng.WaitingTasks() != 0 {
+		t.Errorf("WaitingTasks after kill = %d, want 0", eng.WaitingTasks())
+	}
+
+	// Cleanup: let run 1 finish.
+	close(holdCh)
+	_ = run1ID
+}
+
 // fakeExecutor is a minimal pkgruntime.Executor for testing.
 type fakeExecutor struct {
 	fn func()

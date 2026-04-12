@@ -1203,6 +1203,30 @@ func (e *Engine) runTask(runCtx context.Context, spec *task.Spec, opts pkgruntim
 	return status, result
 }
 
+// finalizeCancelled closes out a run that was cancelled before ever executing
+// — e.g. user killed it while queued on the concurrency semaphore, or the
+// daemon is shutting down. It updates the registry row and fires the finished
+// hook so websocket subscribers see a matching started/finished pair.
+// Safe to call even on the hot shutdown path: the DB write is bounded by a
+// short timeout so a stuck SQLite connection cannot block the goroutine.
+func (e *Engine) finalizeCancelled(spec *task.Spec, opts pkgruntime.RunOptions, source string) {
+	finishCtx, finishCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer finishCancel()
+	if err := e.registry.FinishRun(finishCtx, opts.RunID, registry.StatusCancelled); err != nil {
+		e.log.Error("failed to finalize cancelled queued run",
+			zap.String("run", opts.RunID),
+			zap.String("task", spec.ID),
+			zap.Error(err))
+	}
+	if h := e.runFinishedHook; h != nil {
+		// Duration is 0 — the run never executed. The notifier (wired via
+		// a separate path in runTask) only fires on Success/Failure, so
+		// cancelled runs do not send spurious notifications.
+		notifyOnSuccess, notifyOnFailure := e.resolveNotify(spec)
+		h(spec.ID, opts.RunID, registry.StatusCancelled, source, 0, notifyOnSuccess, notifyOnFailure)
+	}
+}
+
 // fireAsync pre-creates the run record, starts execution in a goroutine,
 // and returns the run ID immediately.
 //
@@ -1231,16 +1255,29 @@ func (e *Engine) fireAsync(ctx context.Context, spec *task.Spec, opts pkgruntime
 				shutDone = shutCtx.Done()
 			}
 
+			// Increment the "parked waiting for a slot" counter. Each select
+			// case below must decrement exactly once: "waiting" ends when
+			// either the slot is acquired or the goroutine aborts — NOT
+			// when the run itself finishes. A single deferred decrement
+			// here would wrongly keep the counter inflated for the entire
+			// lifetime of successfully-acquired runs.
 			e.taskWaiting.Add(1)
 			select {
 			case e.taskSem <- struct{}{}:
+				e.taskWaiting.Add(-1)
 				// Slot acquired; release when done.
-				e.taskWaiting.Add(-1)
 				defer func() { <-e.taskSem }()
-			case <-shutDone:
+			case <-runCtx.Done():
+				// User killed (or gave up on) the queued run before a slot
+				// freed. Finalize it as cancelled so the websocket finished
+				// event fires and the DB row doesn't stay stuck in `running`.
 				e.taskWaiting.Add(-1)
-				// Engine is shutting down; mark the run as cancelled and abort.
-				_ = e.registry.FinishRun(context.Background(), opts.RunID, registry.StatusCancelled)
+				e.finalizeCancelled(spec, opts, source)
+				return
+			case <-shutDone:
+				// Engine is shutting down; finalize as cancelled and abort.
+				e.taskWaiting.Add(-1)
+				e.finalizeCancelled(spec, opts, source)
 				return
 			}
 		}
