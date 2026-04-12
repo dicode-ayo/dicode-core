@@ -48,25 +48,25 @@ class DcSecrets extends LitElement {
     const secrets = this._secrets || [];
     return html`
       <h1>Secrets</h1>
-      <div class="card" style="margin-bottom:1rem">
+      <div class="card" style="margin-bottom:var(--space-md)">
         <h2 style="margin-bottom:0.75rem">Add Secret</h2>
-        <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
+        <div style="display:flex;gap:var(--space-sm);flex-wrap:wrap">
           <input id="secret-key" placeholder="KEY_NAME" class="input" style="font-family:monospace">
           <input id="secret-value" type="password" placeholder="value" class="input" style="flex:1;min-width:200px">
           <button class="btn" @click=${() => this._add()}>Add</button>
         </div>
       </div>
-      ${this._status ? html`<p style="color:red;margin-bottom:1rem">${this._status}</p>` : ''}
+      ${this._status ? html`<p style="color:red;margin-bottom:var(--space-md)">${this._status}</p>` : ''}
       <table>
         <thead><tr><th>Key</th><th></th></tr></thead>
         <tbody>
           ${secrets.length === 0 ? html`
-            <tr><td colspan="2" style="text-align:center;color:#888">No secrets stored.</td></tr>
+            <tr><td colspan="2" style="text-align:center;color:var(--muted)">No secrets stored.</td></tr>
           ` : secrets.map(k => html`
             <tr>
               <td><code>${k}</code></td>
               <td style="text-align:right">
-                <button class="btn btn-sm" style="background:#dc3545" @click=${() => this._delete(k)}>Delete</button>
+                <button class="btn btn-sm" style="background:var(--red)" @click=${() => this._delete(k)}>Delete</button>
               </td>
             </tr>`)}
         </tbody>
