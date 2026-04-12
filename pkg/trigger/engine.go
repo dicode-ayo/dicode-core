@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -32,6 +33,9 @@ import (
 	"go.uber.org/zap"
 )
 
+// ErrRunNotFound is returned by WaitRun when no run record exists for the given ID.
+var ErrRunNotFound = errors.New("run not found")
+
 // Engine coordinates all trigger types and fires task runs.
 type Engine struct {
 	registry  *registry.Registry
@@ -44,6 +48,7 @@ type Engine struct {
 	webhooks    map[string]string       // webhook path → taskID
 
 	runCancels sync.Map // runID → context.CancelFunc
+	runDone    sync.Map // runID (string) → chan struct{}, closed when the run reaches a terminal state
 
 	shutdownMu  sync.RWMutex
 	shutdownCtx context.Context
@@ -493,33 +498,46 @@ func (e *Engine) FireManual(ctx context.Context, taskID string, params map[strin
 	return e.fireAsync(context.Background(), spec, pkgruntime.RunOptions{Params: params}, "manual")
 }
 
-// WaitRun polls until the run identified by runID reaches a terminal state,
+// WaitRun blocks until the run identified by runID reaches a terminal state,
 // then returns a RunResult. Implements ipc.EngineRunner.
+//
+// Channel lifecycle: startRun() registers a chan struct{} in runDone keyed by
+// runID. The cleanup func (deferred in fireAsync/fireSync via startRun) closes
+// that channel once the run goroutine finishes. WaitRun selects on the channel
+// so it is woken up immediately rather than polling.
+//
+// Race: if WaitRun is called after the channel has already been closed and
+// deleted (i.e. the run finished before the caller reached this function), the
+// Load will return ok==false. In that case we fall through to a single DB read
+// to return the final status.
 func (e *Engine) WaitRun(ctx context.Context, runID string) (ipc.RunResult, error) {
-	for {
-		run, err := e.registry.GetRun(ctx, runID)
-		if err != nil {
-			return ipc.RunResult{}, err
+	if v, ok := e.runDone.Load(runID); ok {
+		// Run is in progress — wait for the completion channel to be closed.
+		select {
+		case <-v.(chan struct{}):
+			// Channel closed: run has finished. Fall through to DB read below.
+		case <-ctx.Done():
+			return ipc.RunResult{}, ctx.Err()
 		}
-		switch run.Status {
-		case registry.StatusRunning:
-			select {
-			case <-ctx.Done():
-				return ipc.RunResult{}, ctx.Err()
-			case <-time.After(500 * time.Millisecond):
-			}
-			continue
-		}
-		var returnValue interface{}
-		if run.ReturnValue != "" {
-			_ = json.Unmarshal([]byte(run.ReturnValue), &returnValue)
-		}
-		return ipc.RunResult{
-			RunID:       runID,
-			Status:      run.Status,
-			ReturnValue: returnValue,
-		}, nil
 	}
+	// Either the channel was never present (run already finished before we
+	// arrived) or it was just closed. Either way, fetch the final record.
+	run, err := e.registry.GetRun(ctx, runID)
+	if err != nil {
+		if errors.Is(err, registry.ErrRunNotFound) {
+			return ipc.RunResult{}, ErrRunNotFound
+		}
+		return ipc.RunResult{}, err
+	}
+	var returnValue interface{}
+	if run.ReturnValue != "" {
+		_ = json.Unmarshal([]byte(run.ReturnValue), &returnValue)
+	}
+	return ipc.RunResult{
+		RunID:       runID,
+		Status:      run.Status,
+		ReturnValue: returnValue,
+	}, nil
 }
 
 // KillRun cancels a running task by its run ID.
@@ -1043,9 +1061,19 @@ func (e *Engine) startRun(spec *task.Spec, opts *pkgruntime.RunOptions, source s
 	var cancel context.CancelFunc
 	runCtx, cancel = context.WithCancel(context.Background())
 	e.runCancels.Store(opts.RunID, cancel)
+
+	// Register a completion channel for WaitRun. The channel is closed (not
+	// sent to) so that multiple concurrent waiters are all unblocked at once.
+	doneCh := make(chan struct{})
+	e.runDone.Store(opts.RunID, doneCh)
+
 	cleanup = func() {
 		e.runCancels.Delete(opts.RunID)
 		cancel()
+		// Signal all waiters that the run has finished, then remove the entry.
+		if v, ok := e.runDone.LoadAndDelete(opts.RunID); ok {
+			close(v.(chan struct{}))
+		}
 	}
 	return runCtx, cleanup, nil
 }
