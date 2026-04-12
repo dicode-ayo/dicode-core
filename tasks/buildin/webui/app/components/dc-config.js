@@ -1,5 +1,6 @@
 import { LitElement, html } from 'https://esm.sh/lit@3';
 import { get, post, del } from '../lib/api.js';
+import { monacoTheme } from '../lib/theme.js';
 
 class DcConfig extends LitElement {
   createRenderRoot() { return this; } // Monaco needs direct DOM access
@@ -25,12 +26,17 @@ class DcConfig extends LitElement {
 
   disconnectedCallback() {
     super.disconnectedCallback();
+    window.removeEventListener('dicode-theme-change', this._onThemeChange);
     if (this._editor) { this._editor.dispose(); this._editor = null; }
   }
 
   connectedCallback() {
     super.connectedCallback();
     this._load();
+    this._onThemeChange = () => {
+      if (window.monaco) window.monaco.editor.setTheme(monacoTheme());
+    };
+    window.addEventListener('dicode-theme-change', this._onThemeChange);
   }
 
   async _load() {
@@ -50,7 +56,7 @@ class DcConfig extends LitElement {
     require(['vs/editor/editor.main'], () => {
       this._editor = monaco.editor.create(container, {
         value: this._raw?.content || '',
-        language: 'yaml', theme: 'vs-dark', fontSize: 13, minimap: { enabled: false },
+        language: 'yaml', theme: monacoTheme(), fontSize: 13, minimap: { enabled: false },
       });
     });
   }

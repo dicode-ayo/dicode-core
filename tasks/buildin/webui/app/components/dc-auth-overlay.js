@@ -77,8 +77,9 @@ class DcAuthOverlay extends LitElement {
         display:flex;align-items:center;justify-content:center;
       ">
         <div style="
-          background:var(--card-bg);border-radius:var(--radius-md);padding:var(--space-xl) 2.25rem;
-          width:100%;max-width:380px;box-shadow:0 8px 32px var(--shadow);
+          background:var(--bg-alt);border:1px solid var(--border);
+          border-radius:var(--radius-lg);padding:var(--space-xl) 2.25rem;
+          width:100%;max-width:380px;box-shadow:var(--shadow-strong);
         ">
           <div style="font-size:1.5rem;margin-bottom:0.25rem">&#9889; dicode</div>
           <p style="color:var(--muted);font-size:0.9rem;margin-bottom:1.25rem">

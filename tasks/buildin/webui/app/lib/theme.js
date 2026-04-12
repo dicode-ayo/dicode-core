@@ -25,6 +25,14 @@ export function getCurrentTheme() {
   return getStoredTheme() ?? getSystemTheme();
 }
 
+// Monaco has two built-in themes that match our palette closely enough
+// for text-heavy editors. Components that embed monaco should call
+// monacoTheme() when creating the editor and also subscribe to
+// `dicode-theme-change` so they can call monaco.editor.setTheme() live.
+export function monacoTheme() {
+  return getCurrentTheme() === 'light' ? 'vs' : 'vs-dark';
+}
+
 export function applyTheme(theme) {
   document.documentElement.setAttribute('data-theme', theme);
   document.documentElement.style.colorScheme = theme;

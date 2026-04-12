@@ -6,6 +6,7 @@ import { wsOn } from '../lib/ws.js';
 import { navigate } from '../lib/router.js';
 import { fmtTime, fmtDuration } from '../lib/utils.js';
 import { relayHookBaseURL, webhookURL } from '../lib/config.js';
+import { monacoTheme } from '../lib/theme.js';
 
 marked.use({ gfm: true, breaks: true });
 
@@ -48,10 +49,15 @@ class DcTaskDetail extends LitElement {
   connectedCallback() {
     super.connectedCallback();
     this._load();
+    this._onThemeChange = () => {
+      if (window.monaco) window.monaco.editor.setTheme(monacoTheme());
+    };
+    window.addEventListener('dicode-theme-change', this._onThemeChange);
   }
 
   disconnectedCallback() {
     super.disconnectedCallback();
+    window.removeEventListener('dicode-theme-change', this._onThemeChange);
     this._cleanup();
   }
 
@@ -138,7 +144,7 @@ class DcTaskDetail extends LitElement {
             monaco.languages.typescript.javascriptDefaults.addExtraLib(dts, 'file:///dicode-sdk.d.ts');
           }
           this._editor = monaco.editor.create(container, {
-            value: content, language: lang, theme: 'vs-dark',
+            value: content, language: lang, theme: monacoTheme(),
             fontSize: 13, minimap: { enabled: false }, scrollBeyondLastLine: false,
           });
         });
