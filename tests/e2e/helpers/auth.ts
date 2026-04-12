@@ -8,7 +8,7 @@
 import { APIRequestContext } from '@playwright/test';
 
 export const TEST_PASSPHRASE = 'test-passphrase-12345';
-export const BASE_URL = 'http://localhost:8765';
+export const BASE_URL = 'http://localhost:8080';
 
 /**
  * Login via POST /api/secrets/unlock and return the session cookie value.
