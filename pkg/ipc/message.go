@@ -86,11 +86,13 @@ type OutputResult struct {
 // IsSet reports whether any output was recorded.
 func (o *OutputResult) IsSet() bool { return o != nil && o.ContentType != "" }
 
-// EngineRunner allows the IPC server to fire and await task runs.
-// Implemented by the trigger engine; injected to avoid import cycles.
+// EngineRunner allows the IPC server to fire and await task runs, and to
+// query live concurrency state. Implemented by the trigger engine; injected
+// to avoid import cycles.
 type EngineRunner interface {
 	FireManual(ctx context.Context, taskID string, params map[string]string) (string, error)
 	WaitRun(ctx context.Context, runID string) (RunResult, error)
+	ActiveRunCount() int
 }
 
 // HTTPInboundRequest is a server-initiated push to a daemon task that has
@@ -137,4 +139,20 @@ type RunResult struct {
 	RunID       string `json:"runID"`
 	Status      string `json:"status"`
 	ReturnValue any    `json:"returnValue"`
+}
+
+// MetricsSnapshot is the cli.metrics response.
+// Fields sourced from /proc are omitted on non-Linux platforms.
+type MetricsSnapshot struct {
+	Daemon struct {
+		HeapAllocMB float64 `json:"heap_alloc_mb"`
+		HeapSysMB   float64 `json:"heap_sys_mb"`
+		Goroutines  int     `json:"goroutines"`
+		CPUMs       *int64  `json:"cpu_ms,omitempty"`
+	} `json:"daemon"`
+	Tasks struct {
+		ActiveTasks int     `json:"active_tasks"`
+		ChildRSSMB  float64 `json:"children_rss_mb,omitempty"`
+		ChildCPUMs  *int64  `json:"children_cpu_ms,omitempty"`
+	} `json:"tasks"`
 }

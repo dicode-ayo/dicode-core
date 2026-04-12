@@ -27,6 +27,19 @@ import (
 	"go.uber.org/zap"
 )
 
+// activePIDs tracks PIDs of all currently running Deno subprocesses.
+var activePIDs sync.Map // map[int]struct{}
+
+// ActivePIDs returns the PIDs of all currently running Deno subprocesses.
+func ActivePIDs() []int {
+	var pids []int
+	activePIDs.Range(func(k, _ any) bool {
+		pids = append(pids, k.(int))
+		return true
+	})
+	return pids
+}
+
 //go:embed sdk/shim.ts
 var shimContent string
 
@@ -279,6 +292,11 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		result.Error = fmt.Errorf("start deno: %w", err)
 		return result, nil
 	}
+
+	// Register PID so metrics can aggregate child process resource usage.
+	pid := cmd.Process.Pid
+	activePIDs.Store(pid, struct{}{})
+	defer activePIDs.Delete(pid)
 
 	// Stream stdout (console.log/info) as "info" and stderr (console.error +
 	// Deno runtime errors) as "error" in the run log.

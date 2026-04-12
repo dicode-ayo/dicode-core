@@ -22,6 +22,7 @@ import (
 	"github.com/dicode/dicode/pkg/config"
 	"github.com/dicode/dicode/pkg/db"
 	"github.com/dicode/dicode/pkg/ipc"
+	"github.com/dicode/dicode/pkg/metrics"
 	"github.com/dicode/dicode/pkg/notify"
 	"github.com/dicode/dicode/pkg/onboarding"
 	"github.com/dicode/dicode/pkg/registry"
@@ -178,7 +179,18 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	// 9. Control socket for CLI clients.
 	socketPath := filepath.Join(dataDir, "daemon.sock")
 	tokenPath := filepath.Join(dataDir, "daemon.token")
-	ctrlSrv, err := ipc.NewControlServer(socketPath, tokenPath, reg, eng, localSecrets, version, log)
+	mp := ipc.MetricsProvider{
+		ReadDaemon: func() (float64, float64, int, *int64) {
+			dm := metrics.ReadDaemonMetrics()
+			return dm.HeapAllocMB, dm.HeapSysMB, dm.Goroutines, dm.CPUMs
+		},
+		ActivePIDs: denoruntime.ActivePIDs,
+		ReadChildren: func(pids []int, activeTasks int) (float64, *int64) {
+			cm := metrics.ReadChildMetrics(pids, activeTasks)
+			return cm.ChildRSSMB, cm.ChildCPUMs
+		},
+	}
+	ctrlSrv, err := ipc.NewControlServer(socketPath, tokenPath, reg, eng, localSecrets, mp, version, log)
 	if err != nil {
 		return fmt.Errorf("build control server: %w", err)
 	}
