@@ -66,8 +66,9 @@ type Engine struct {
 
 	db db.DB // optional — enables cron-job persistence and missed-run catchup
 
-	taskSem chan struct{} // nil = unlimited; capacity = MaxConcurrentTasks
-	started atomic.Bool   // set to true by Start(); guards SetMaxConcurrentTasks
+	taskSem     chan struct{} // nil = unlimited; capacity = MaxConcurrentTasks
+	taskWaiting atomic.Int64  // goroutines parked waiting for a semaphore slot
+	started     atomic.Bool   // set to true by Start(); guards SetMaxConcurrentTasks
 
 	runFinishedHook func(taskID, runID, status, triggerSource string, durationMs int64, notifyOnSuccess, notifyOnFailure bool)
 	runStartedHook  func(taskID, runID, triggerSource string)
@@ -119,6 +120,29 @@ func (e *Engine) SetMaxConcurrentTasks(n int) {
 	} else {
 		e.taskSem = nil
 	}
+}
+
+// MaxConcurrentTasks returns the configured concurrency cap, or 0 if unlimited.
+func (e *Engine) MaxConcurrentTasks() int {
+	if e.taskSem == nil {
+		return 0
+	}
+	return cap(e.taskSem)
+}
+
+// ActiveTaskSlots returns the number of semaphore slots currently held by
+// running task goroutines. Returns 0 when no cap is configured.
+func (e *Engine) ActiveTaskSlots() int {
+	if e.taskSem == nil {
+		return 0
+	}
+	return len(e.taskSem)
+}
+
+// WaitingTasks returns the number of task goroutines currently parked waiting
+// for a semaphore slot to free. Always 0 when no cap is configured.
+func (e *Engine) WaitingTasks() int {
+	return int(e.taskWaiting.Load())
 }
 
 // SetRunStartedHook registers a callback invoked when a run starts.
@@ -1207,11 +1231,14 @@ func (e *Engine) fireAsync(ctx context.Context, spec *task.Spec, opts pkgruntime
 				shutDone = shutCtx.Done()
 			}
 
+			e.taskWaiting.Add(1)
 			select {
 			case e.taskSem <- struct{}{}:
 				// Slot acquired; release when done.
+				e.taskWaiting.Add(-1)
 				defer func() { <-e.taskSem }()
 			case <-shutDone:
+				e.taskWaiting.Add(-1)
 				// Engine is shutting down; mark the run as cancelled and abort.
 				_ = e.registry.FinishRun(context.Background(), opts.RunID, registry.StatusCancelled)
 				return

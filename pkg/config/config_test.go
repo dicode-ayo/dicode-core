@@ -70,3 +70,26 @@ database:
 		t.Errorf("database.path = %q, want %q", cfg.Database.Path, wantDB)
 	}
 }
+
+func TestLoadExecutionMaxConcurrentTasks(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "dicode.yaml")
+
+	content := `
+sources:
+  - type: local
+    path: ${CONFIGDIR}/tasks
+execution:
+  max_concurrent_tasks: 8
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Execution.MaxConcurrentTasks != 8 {
+		t.Errorf("Execution.MaxConcurrentTasks = %d, want 8", cfg.Execution.MaxConcurrentTasks)
+	}
+}

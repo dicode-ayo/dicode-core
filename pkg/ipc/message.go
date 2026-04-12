@@ -105,6 +105,9 @@ type EngineRunner interface {
 	FireManual(ctx context.Context, taskID string, params map[string]string) (string, error)
 	WaitRun(ctx context.Context, runID string) (RunResult, error)
 	ActiveRunCount() int
+	ActiveTaskSlots() int
+	MaxConcurrentTasks() int
+	WaitingTasks() int
 }
 
 // HTTPInboundRequest is a server-initiated push to a daemon task that has
@@ -163,8 +166,11 @@ type MetricsSnapshot struct {
 		CPUMs       *int64  `json:"cpu_ms,omitempty"`
 	} `json:"daemon"`
 	Tasks struct {
-		ActiveTasks int     `json:"active_tasks"`
-		ChildRSSMB  float64 `json:"children_rss_mb,omitempty"`
-		ChildCPUMs  *int64  `json:"children_cpu_ms,omitempty"`
+		ActiveTasks        int     `json:"active_tasks"`
+		ChildRSSMB         float64 `json:"children_rss_mb,omitempty"`
+		ChildCPUMs         *int64  `json:"children_cpu_ms,omitempty"`
+		ActiveTaskSlots    int     `json:"active_task_slots"`
+		MaxConcurrentTasks int     `json:"max_concurrent_tasks"`
+		WaitingTasks       int     `json:"waiting_tasks"`
 	} `json:"tasks"`
 }

@@ -234,14 +234,19 @@ func buildRuntimes(
 	}
 	eng := trigger.New(reg, denoRT, log)
 	eng.SetDB(database)
+	// Config value first, env var overrides it. 0 = unlimited.
+	maxConcurrent := cfg.Execution.MaxConcurrentTasks
 	if v := os.Getenv("DICODE_MAX_CONCURRENT_TASKS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
-			// Negative values and overflow are handled inside SetMaxConcurrentTasks.
-			eng.SetMaxConcurrentTasks(n)
+			maxConcurrent = n
 		} else {
 			log.Warn("DICODE_MAX_CONCURRENT_TASKS: invalid integer value — ignoring",
 				zap.String("value", v), zap.Error(err))
 		}
+	}
+	if maxConcurrent != 0 {
+		// Negative values and overflow are handled inside SetMaxConcurrentTasks.
+		eng.SetMaxConcurrentTasks(maxConcurrent)
 	}
 	denoRT.SetEngine(eng)
 	denoRT.SetGateway(gateway)

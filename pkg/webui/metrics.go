@@ -14,9 +14,14 @@ func (s *Server) apiMetrics(w http.ResponseWriter, r *http.Request) {
 	activeTasks := s.engine.ActiveRunCount()
 	pids := denoruntime.ActivePIDs()
 
+	tasks := metrics.ReadChildMetrics(pids, activeTasks)
+	tasks.ActiveTaskSlots = s.engine.ActiveTaskSlots()
+	tasks.MaxConcurrentTasks = s.engine.MaxConcurrentTasks()
+	tasks.WaitingTasks = s.engine.WaitingTasks()
+
 	m := metrics.Metrics{
 		Daemon: metrics.ReadDaemonMetrics(),
-		Tasks:  metrics.ReadChildMetrics(pids, activeTasks),
+		Tasks:  tasks,
 	}
 
 	w.Header().Set("Content-Type", "application/json")

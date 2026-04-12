@@ -377,8 +377,14 @@ func TestAPI_Metrics_OK(t *testing.T) {
 	if _, ok := m["daemon"]; !ok {
 		t.Error("missing 'daemon' key in metrics response")
 	}
-	if _, ok := m["tasks"]; !ok {
-		t.Error("missing 'tasks' key in metrics response")
+	tasks, ok := m["tasks"].(map[string]interface{})
+	if !ok {
+		t.Fatal("missing or non-object 'tasks' key in metrics response")
+	}
+	for _, key := range []string{"active_task_slots", "max_concurrent_tasks", "waiting_tasks"} {
+		if _, ok := tasks[key]; !ok {
+			t.Errorf("missing %q in tasks metrics response", key)
+		}
 	}
 }
 
