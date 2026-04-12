@@ -234,20 +234,28 @@ func buildRuntimes(
 	}
 	eng := trigger.New(reg, denoRT, log)
 	eng.SetDB(database)
-	// Config value first, env var overrides it. 0 = unlimited.
+	// Config value first, env var overrides when set. 0 = unlimited. Always
+	// call SetMaxConcurrentTasks so an env override of "0" correctly clears
+	// a config-set cap, and so operators get observable confirmation of
+	// which source (config vs env) won.
 	maxConcurrent := cfg.Execution.MaxConcurrentTasks
+	source := "config"
 	if v := os.Getenv("DICODE_MAX_CONCURRENT_TASKS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			maxConcurrent = n
+			source = "env"
 		} else {
-			log.Warn("DICODE_MAX_CONCURRENT_TASKS: invalid integer value — ignoring",
-				zap.String("value", v), zap.Error(err))
+			log.Error("DICODE_MAX_CONCURRENT_TASKS: invalid integer value — falling back to config",
+				zap.String("value", v),
+				zap.Int("using_config_value", maxConcurrent),
+				zap.Error(err))
 		}
 	}
-	if maxConcurrent != 0 {
-		// Negative values and overflow are handled inside SetMaxConcurrentTasks.
-		eng.SetMaxConcurrentTasks(maxConcurrent)
-	}
+	// Negative values and overflow are handled inside SetMaxConcurrentTasks.
+	eng.SetMaxConcurrentTasks(maxConcurrent)
+	log.Info("task concurrency configured",
+		zap.Int("max_concurrent_tasks", maxConcurrent),
+		zap.String("source", source))
 	denoRT.SetEngine(eng)
 	denoRT.SetGateway(gateway)
 	denoRT.SetSecretsManager(secretsMgr)

@@ -44,7 +44,7 @@ Requires authentication when `server.auth: true` is set in `dicode.yaml`. Return
 
 | Field | Type | Description |
 |---|---|---|
-| `active_tasks` | int | Number of task runs currently in progress |
+| `active_tasks` | int | Number of task runs currently in progress. **Includes runs queued on the concurrency semaphore** — subtract `waiting_tasks` to get the count of runs actually executing |
 | `children_rss_mb` | float | Aggregate RSS of all active Deno child processes (MB) — **Linux only**, omitted otherwise |
 | `children_cpu_ms` | int | Aggregate CPU time (user+sys) of all active Deno child processes (ms) — **Linux only**, omitted otherwise |
 | `max_concurrent_tasks` | int | Configured concurrency cap (`execution.max_concurrent_tasks`). `0` means unlimited |

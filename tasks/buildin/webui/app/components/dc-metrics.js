@@ -94,8 +94,14 @@ class DcMetrics extends LitElement {
           <table style="width:100%">
             <tbody>
               ${this._row('Active runs',    tasks.active_tasks)}
-              ${tasks.queued != null
-                ? this._row('Queued (semaphore)', tasks.queued)
+              ${tasks.max_concurrent_tasks > 0
+                ? this._row(
+                    'Concurrency slots',
+                    `${tasks.active_task_slots} / ${tasks.max_concurrent_tasks}`,
+                  )
+                : this._row('Concurrency cap', 'unlimited')}
+              ${tasks.waiting_tasks > 0
+                ? this._row('Waiting for slot', tasks.waiting_tasks)
                 : ''}
               ${tasks.children_rss_mb
                 ? this._row('Child RSS (Deno)', this._fmtMB(tasks.children_rss_mb))
