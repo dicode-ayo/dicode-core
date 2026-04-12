@@ -134,6 +134,16 @@ func (e *Engine) resolveNotify(spec *task.Spec) (onSuccess, onFailure bool) {
 	return
 }
 
+// ActiveRunCount returns the number of task runs currently in progress.
+func (e *Engine) ActiveRunCount() int {
+	n := 0
+	e.runCancels.Range(func(_, _ any) bool {
+		n++
+		return true
+	})
+	return n
+}
+
 // RegisterExecutor registers an executor for the given runtime name.
 // Call this before Start to wire in Docker, subprocess, or custom runtimes.
 func (e *Engine) RegisterExecutor(rt task.Runtime, exec pkgruntime.Executor) {

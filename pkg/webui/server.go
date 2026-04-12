@@ -405,6 +405,9 @@ func (s *Server) Handler() http.Handler {
 			r.Patch("/sources/{name}/dev", s.apiSetDevMode)
 			r.Get("/sources/{name}/branches", s.apiListSourceBranches)
 
+			// Metrics
+			r.Get("/metrics", s.apiMetrics)
+
 			// Managed runtime lifecycle
 			r.Get("/runtimes", s.apiListRuntimes)
 			r.Post("/runtimes/{name}/install", s.apiInstallRuntime)
