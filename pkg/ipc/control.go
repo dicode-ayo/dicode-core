@@ -341,6 +341,9 @@ type MetricsProvider struct {
 func (cs *ControlServer) handleMetrics() MetricsSnapshot {
 	var snap MetricsSnapshot
 	snap.Tasks.ActiveTasks = cs.engine.ActiveRunCount()
+	snap.Tasks.ActiveTaskSlots = cs.engine.ActiveTaskSlots()
+	snap.Tasks.MaxConcurrentTasks = cs.engine.MaxConcurrentTasks()
+	snap.Tasks.WaitingTasks = cs.engine.WaitingTasks()
 
 	if cs.metricsProvider.ReadDaemon != nil {
 		heapAlloc, heapSys, goroutines, cpuMs := cs.metricsProvider.ReadDaemon()
