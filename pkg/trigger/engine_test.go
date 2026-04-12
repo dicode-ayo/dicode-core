@@ -732,6 +732,44 @@ func TestSetMaxConcurrentTasks_SetAndReset(t *testing.T) {
 	}
 }
 
+// TestConcurrencyGetters verifies the public accessors used by /api/metrics
+// report consistent values for unlimited, configured-but-idle, and reset states.
+func TestConcurrencyGetters(t *testing.T) {
+	d, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer d.Close()
+	reg := registry.New(d)
+	eng := New(reg, nil, zap.NewNop())
+
+	// Unlimited defaults.
+	if got := eng.MaxConcurrentTasks(); got != 0 {
+		t.Errorf("MaxConcurrentTasks() default = %d, want 0", got)
+	}
+	if got := eng.ActiveTaskSlots(); got != 0 {
+		t.Errorf("ActiveTaskSlots() default = %d, want 0", got)
+	}
+	if got := eng.WaitingTasks(); got != 0 {
+		t.Errorf("WaitingTasks() default = %d, want 0", got)
+	}
+
+	// Configured but idle.
+	eng.SetMaxConcurrentTasks(5)
+	if got := eng.MaxConcurrentTasks(); got != 5 {
+		t.Errorf("MaxConcurrentTasks() = %d, want 5", got)
+	}
+	if got := eng.ActiveTaskSlots(); got != 0 {
+		t.Errorf("ActiveTaskSlots() idle = %d, want 0", got)
+	}
+
+	// Reset clears cap.
+	eng.SetMaxConcurrentTasks(0)
+	if got := eng.MaxConcurrentTasks(); got != 0 {
+		t.Errorf("MaxConcurrentTasks() after reset = %d, want 0", got)
+	}
+}
+
 // TestFireAsync_ConcurrencyLimit verifies that with MaxConcurrentTasks=2 at
 // most 2 task goroutines execute simultaneously.
 func TestFireAsync_ConcurrencyLimit(t *testing.T) {
