@@ -3,6 +3,7 @@ package registry
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -12,6 +13,9 @@ import (
 	"github.com/dicode/dicode/pkg/task"
 	"github.com/google/uuid"
 )
+
+// ErrRunNotFound is returned by GetRun when no run record exists for the given ID.
+var ErrRunNotFound = errors.New("run not found")
 
 // RunStatus values.
 const (
@@ -192,7 +196,7 @@ func (r *Registry) GetRun(ctx context.Context, runID string) (*Run, error) {
 		return nil, fmt.Errorf("get run %s: %w", runID, err)
 	}
 	if run == nil {
-		return nil, fmt.Errorf("run %s not found", runID)
+		return nil, fmt.Errorf("run %s: %w", runID, ErrRunNotFound)
 	}
 	return run, nil
 }
