@@ -4,7 +4,7 @@ database:
   type: sqlite
 log_level: info
 server:
-  port: 8765
+  port: 8080
   auth: true
   secret: test-passphrase-12345
   mcp: false
