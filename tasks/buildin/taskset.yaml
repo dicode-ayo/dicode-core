@@ -19,3 +19,7 @@ spec:
     webui:
       ref:
         path: ./webui/task.yaml
+
+    temp-cleanup:
+      ref:
+        path: ./temp-cleanup/task.yaml

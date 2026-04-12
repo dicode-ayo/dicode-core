@@ -1,0 +1,30 @@
+apiVersion: dicode/v1
+kind: Task
+name: "Temp File Cleanup"
+description: |
+  Deletes orphaned task temp files from the OS temp directory. Every
+  dicode task runtime writes its wrapper/shim to a file named
+  dicode-<kind>-<runID>__*.<ext>. A defer removes the file on normal
+  exit, but a daemon crash or SIGKILL can leave files behind.
+
+  This task lists currently-running runs via the dicode SDK and deletes
+  any temp file whose embedded run_id is not in the running set. Files
+  with unparseable names (legacy or manual) are left alone.
+runtime: deno
+
+trigger:
+  cron: "*/10 * * * *"  # every 10 minutes
+
+permissions:
+  fs:
+    - path: /tmp
+      permission: rw
+  dicode:
+    list_tasks: true
+    get_runs: true
+
+timeout: 60s
+
+notify:
+  on_success: false
+  on_failure: true

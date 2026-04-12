@@ -245,7 +245,7 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 		return result, nil
 	}
 
-	tmpFile, err := os.CreateTemp("", "dicode-task-*.py")
+	tmpFile, err := os.CreateTemp("", "dicode-task-"+runID+"__*.py")
 	if err != nil {
 		status = registry.StatusFailure
 		result.Error = fmt.Errorf("create temp file: %w", err)

@@ -210,7 +210,9 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	debug := rt.log.Core().Enabled(zap.DebugLevel)
 
 	// Write the shim as a proper ES module to a temp file.
-	shimFile, err := os.CreateTemp("", "dicode-shim-*.ts")
+	// Run ID is embedded between the prefix and the __<random> suffix so the
+	// tasks/buildin/temp-cleanup builtin can correlate orphaned files with runs.
+	shimFile, err := os.CreateTemp("", "dicode-shim-"+runID+"__*.ts")
 	if err != nil {
 		status = registry.StatusFailure
 		result.Error = fmt.Errorf("create shim file: %w", err)
@@ -229,7 +231,7 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	shimFile.Close()
 
 	// Write the wrapper that imports both and calls the user's exported main().
-	runnerFile, err := os.CreateTemp("", "dicode-runner-*.ts")
+	runnerFile, err := os.CreateTemp("", "dicode-runner-"+runID+"__*.ts")
 	if err != nil {
 		status = registry.StatusFailure
 		result.Error = fmt.Errorf("create runner file: %w", err)
