@@ -32,11 +32,11 @@ import * as path from 'path';
 import * as os from 'os';
 
 export const REPO_ROOT = path.resolve(__dirname, '../../..');
-export const BINARY = path.join(REPO_ROOT, 'dicode');
+export const BINARY = path.join(REPO_ROOT, 'dicoded');
 const FIXTURES_DIR = path.join(REPO_ROOT, 'tests/e2e/fixtures');
 const TASKS_DIR = path.join(FIXTURES_DIR, 'tasks');
 
-const PORT = 8765;
+const PORT = 8080;
 const BASE_URL = `http://localhost:${PORT}`;
 
 // File used to hand off state (PID, temp dir) from setup → teardown.
@@ -52,8 +52,8 @@ interface E2EState {
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
 function buildBinary(): void {
-  console.log('[e2e] Building dicode binary…');
-  execSync('go build -o dicode ./cmd/dicode', {
+  console.log('[e2e] Building dicoded daemon binary…');
+  execSync('go build -o dicoded ./cmd/dicoded', {
     cwd: REPO_ROOT,
     stdio: 'inherit',
     env: { ...process.env },
