@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"runtime"
@@ -11,6 +12,10 @@ import (
 
 	"github.com/dicode/dicode/pkg/ipc"
 )
+
+// maxPastedClaimTokenLen caps what we accept from stdin paste so a
+// malicious or accidental 1MB paste doesn't bloat the IPC frame.
+const maxPastedClaimTokenLen = 1024
 
 // cmdRelay dispatches `dicode relay <subcommand>`.
 func cmdRelay(c *ipc.ControlClient, args []string) error {
@@ -65,6 +70,10 @@ func cmdRelayLogin(c *ipc.ControlClient, args []string) error {
 		return err
 	}
 
+	if warning := plaintextBaseURLWarning(*baseURLFlag); warning != "" {
+		fmt.Fprintln(os.Stderr, warning)
+	}
+
 	token := *tokenFlag
 	if token == "" {
 		dashURL := buildDashboardURL(*baseURLFlag)
@@ -84,6 +93,9 @@ func cmdRelayLogin(c *ipc.ControlClient, args []string) error {
 		if token == "" {
 			return fmt.Errorf("claim token required")
 		}
+	}
+	if len(token) > maxPastedClaimTokenLen {
+		return fmt.Errorf("claim token exceeds %d bytes", maxPastedClaimTokenLen)
 	}
 
 	resp, err := c.Send(ipc.Request{
@@ -135,10 +147,39 @@ func openInBrowser(url string) error {
 	return cmd.Start()
 }
 
-// shortUUID returns an abbreviated uuid for terminal output.
+// shortUUID returns an abbreviated uuid for terminal output. Uses ASCII
+// ellipsis so output is safe on legacy Windows consoles / cp1252 pipes.
 func shortUUID(u string) string {
 	if len(u) <= 12 {
 		return u
 	}
-	return u[:12] + "…"
+	return u[:12] + "..."
+}
+
+// plaintextBaseURLWarning returns a warning string when the supplied base
+// URL is plaintext http AND not pointing at a local development host.
+// Returns the empty string when the URL is https, empty, or localhost-only.
+func plaintextBaseURLWarning(baseURL string) string {
+	if baseURL == "" {
+		return ""
+	}
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		return ""
+	}
+	if parsed.Scheme != "http" {
+		return ""
+	}
+	host := parsed.Hostname()
+	switch host {
+	case "", "localhost", "127.0.0.1", "::1":
+		return ""
+	}
+	if strings.HasSuffix(host, ".localhost") {
+		return ""
+	}
+	return fmt.Sprintf(
+		"warning: relay base URL is plaintext http, use https in production: %s",
+		baseURL,
+	)
 }

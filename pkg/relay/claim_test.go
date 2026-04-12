@@ -9,8 +9,8 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
-	"math/big"
 	mrand "math/rand"
 	"net/http"
 	"net/http/httptest"
@@ -123,20 +123,34 @@ func TestBuildClaimSignature_ErrorCases(t *testing.T) {
 	if _, err := BuildClaimSignature(tooShort, "tok"); err == nil {
 		t.Fatalf("expected error for uuid not 32 bytes")
 	}
-	// Ensure the placeholder import stays used even if we later prune cases.
-	_ = new(big.Int)
+	oversize := strings.Repeat("a", maxClaimTokenLen+1)
+	if _, err := BuildClaimSignature(id, oversize); err == nil {
+		t.Fatalf("expected error for oversized claim token")
+	}
 }
 
 // fakeDB is a minimal in-memory db.DB implementation for claim tests.
+// Tx snapshots and rolls back on error so we can exercise the atomicity
+// contract of persistClaimFlags.
 type fakeDB struct {
-	store map[string]string
+	store     map[string]string
+	failAfter int // if > 0, Exec fails on the n-th kv write (1-indexed)
+	execCount int
 }
 
 func newFakeDB() *fakeDB                     { return &fakeDB{store: map[string]string{}} }
 func (f *fakeDB) Ping(context.Context) error { return nil }
 func (f *fakeDB) Close() error               { return nil }
 func (f *fakeDB) Tx(ctx context.Context, fn func(tx db.DB) error) error {
-	return fn(f)
+	snapshot := make(map[string]string, len(f.store))
+	for k, v := range f.store {
+		snapshot[k] = v
+	}
+	if err := fn(f); err != nil {
+		f.store = snapshot
+		return err
+	}
+	return nil
 }
 func (f *fakeDB) Exec(_ context.Context, sql string, args ...any) error {
 	if !strings.Contains(sql, "INSERT OR REPLACE INTO kv") {
@@ -144,6 +158,10 @@ func (f *fakeDB) Exec(_ context.Context, sql string, args ...any) error {
 	}
 	if len(args) != 2 {
 		return nil
+	}
+	f.execCount++
+	if f.failAfter > 0 && f.execCount == f.failAfter {
+		return errors.New("simulated write failure")
 	}
 	key, _ := args[0].(string)
 	val, _ := args[1].(string)
@@ -277,7 +295,7 @@ func TestClaim_ErrorMapping(t *testing.T) {
 			if err == nil {
 				t.Fatalf("expected error")
 			}
-			if !errorsIs(err, tc.want) {
+			if !errors.Is(err, tc.want) {
 				t.Fatalf("error mapping mismatch: got %v want %v", err, tc.want)
 			}
 		})
@@ -304,19 +322,43 @@ func TestClaim_RejectsEmptyBaseURL(t *testing.T) {
 	}
 }
 
-// errorsIs unwraps with the stdlib unwrap convention; a local shim to avoid
-// a second errors import cluttering the file.
-func errorsIs(err, target error) bool {
-	for err != nil {
-		if err == target {
-			return true
-		}
-		type unwrapper interface{ Unwrap() error }
-		u, ok := err.(unwrapper)
-		if !ok {
-			return false
-		}
-		err = u.Unwrap()
+func TestPersistClaimFlags_AtomicRollback(t *testing.T) {
+	fake := newFakeDB()
+	fake.failAfter = 2 // second write fails → whole tx rolls back
+
+	err := persistClaimFlags(context.Background(), fake, &ClaimResult{
+		UUID:        "u",
+		GithubLogin: "octocat",
+	})
+	if err == nil {
+		t.Fatalf("expected simulated write failure")
 	}
-	return false
+	// Nothing should have been committed: if the first write survived, we
+	// would have a half-claimed daemon with status=ok but no user/at.
+	if _, ok := fake.store[kvKeyRelayClaimStatus]; ok {
+		t.Fatalf("claim_status leaked out of aborted tx: %+v", fake.store)
+	}
+	if len(fake.store) != 0 {
+		t.Fatalf("expected empty store after rollback, got %+v", fake.store)
+	}
+}
+
+func TestPersistClaimFlags_HappyPathCommits(t *testing.T) {
+	fake := newFakeDB()
+	err := persistClaimFlags(context.Background(), fake, &ClaimResult{
+		UUID:        "u",
+		GithubLogin: "octocat",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if fake.store[kvKeyRelayClaimStatus] != "ok" {
+		t.Fatalf("status not committed: %+v", fake.store)
+	}
+	if fake.store[kvKeyRelayClaimUser] != "octocat" {
+		t.Fatalf("user not committed: %+v", fake.store)
+	}
+	if fake.store[kvKeyRelayClaimAt] == "" {
+		t.Fatalf("at not committed: %+v", fake.store)
+	}
 }

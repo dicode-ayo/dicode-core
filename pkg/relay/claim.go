@@ -25,6 +25,11 @@ const (
 	kvKeyRelayClaimAt     = "relay.claim_at"
 
 	claimRequestTimeout = 20 * time.Second
+
+	// maxClaimTokenLen caps the claim token to avoid wasting work hashing
+	// unbounded paste buffers. Real tokens are short signed payloads well
+	// under this limit.
+	maxClaimTokenLen = 1024
 )
 
 // BuildClaimSignature signs the canonical claim preimage with the daemon's
@@ -43,6 +48,9 @@ func BuildClaimSignature(identity *Identity, claimToken string) (string, error) 
 	}
 	if claimToken == "" {
 		return "", errors.New("claim: empty claim token")
+	}
+	if len(claimToken) > maxClaimTokenLen {
+		return "", fmt.Errorf("claim: token exceeds %d bytes", maxClaimTokenLen)
 	}
 
 	uuidBytes, err := hex.DecodeString(identity.UUID)
@@ -211,6 +219,10 @@ func mapClaimError(status int, body []byte) error {
 	return base
 }
 
+// persistClaimFlags writes the three kv flags atomically. Running them
+// outside a transaction would risk leaving the daemon half-claimed
+// (relay.claim_status=ok without a matching user/at) if the second or
+// third write failed mid-flight.
 func persistClaimFlags(ctx context.Context, database db.DB, result *ClaimResult) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	pairs := [][2]string{
@@ -218,15 +230,17 @@ func persistClaimFlags(ctx context.Context, database db.DB, result *ClaimResult)
 		{kvKeyRelayClaimUser, result.GithubLogin},
 		{kvKeyRelayClaimAt, now},
 	}
-	for _, p := range pairs {
-		if err := database.Exec(ctx,
-			`INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)`,
-			p[0], p[1],
-		); err != nil {
-			return err
+	return database.Tx(ctx, func(tx db.DB) error {
+		for _, p := range pairs {
+			if err := tx.Exec(ctx,
+				`INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)`,
+				p[0], p[1],
+			); err != nil {
+				return err
+			}
 		}
-	}
-	return nil
+		return nil
+	})
 }
 
 // LoadClaimStatus returns the persisted claim state, or an empty status if

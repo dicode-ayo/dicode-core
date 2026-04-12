@@ -51,10 +51,35 @@ func TestShortUUID(t *testing.T) {
 	}
 	long := strings.Repeat("a", 64)
 	got := shortUUID(long)
-	if !strings.HasSuffix(got, "…") {
-		t.Fatalf("expected ellipsis suffix, got %q", got)
+	if !strings.HasSuffix(got, "...") {
+		t.Fatalf("expected ASCII ellipsis suffix, got %q", got)
 	}
-	if len(got) > 16 {
+	if len(got) > 20 {
 		t.Fatalf("shortened uuid too long: %q", got)
+	}
+}
+
+func TestPlaintextBaseURLWarning(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"empty", "", false},
+		{"https", "https://relay.dicode.app", false},
+		{"localhost", "http://localhost:5553", false},
+		{"127.0.0.1", "http://127.0.0.1:5553", false},
+		{"ipv6 loopback", "http://[::1]:5553", false},
+		{"*.localhost", "http://dev.localhost:5553", false},
+		{"plain http", "http://relay.example.com", true},
+		{"malformed", "::::not a url::::", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := plaintextBaseURLWarning(tc.in) != ""
+			if got != tc.want {
+				t.Fatalf("plaintextBaseURLWarning(%q) warned=%v want=%v", tc.in, got, tc.want)
+			}
+		})
 	}
 }
