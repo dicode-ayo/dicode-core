@@ -7,17 +7,19 @@ class DcMetrics extends LitElement {
   createRenderRoot() { return this; }
 
   static properties = {
-    _data:    { state: true },
-    _error:   { state: true },
-    _loading: { state: true },
+    _data:        { state: true },
+    _error:       { state: true },
+    _loading:     { state: true },
+    _lastUpdated: { state: true },
   };
 
   constructor() {
     super();
-    this._data    = null;
-    this._error   = null;
-    this._loading = true;
-    this._timer   = null;
+    this._data        = null;
+    this._error       = null;
+    this._loading     = true;
+    this._lastUpdated = null;
+    this._timer       = null;
   }
 
   connectedCallback() {
@@ -33,13 +35,21 @@ class DcMetrics extends LitElement {
 
   async _poll() {
     try {
-      this._data    = await get('/api/metrics');
-      this._error   = null;
-      this._loading = false;
+      this._data        = await get('/api/metrics');
+      this._error       = null;
+      this._loading     = false;
+      this._lastUpdated = new Date();
     } catch (e) {
       this._error   = e.message;
       this._loading = false;
     }
+  }
+
+  _fmtTime(d) {
+    if (!d) return '';
+    return d.toLocaleTimeString(undefined, {
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    });
   }
 
   _fmt(v, unit = '') {
@@ -61,17 +71,22 @@ class DcMetrics extends LitElement {
 
   render() {
     if (this._loading) return html`<div class="meta">Loading…</div>`;
-    if (this._error)   return html`<p style="color:red">Error: ${this._error}</p>`;
+    if (this._error)   return html`<p style="color:var(--red)">Error: ${this._error}</p>`;
 
     const { daemon, tasks } = this._data;
 
     return html`
-      <div style="display:flex;align-items:center;gap:1rem;margin-bottom:1.25rem">
+      <div style="display:flex;align-items:center;gap:var(--space-md);margin-bottom:var(--space-md);flex-wrap:wrap">
         <h1 style="margin:0">Metrics</h1>
-        <span class="meta" style="font-size:0.8rem">auto-refreshes every ${POLL_INTERVAL_MS / 1000}s</span>
+        <span class="meta">auto-refreshes every ${POLL_INTERVAL_MS / 1000}s</span>
+        ${this._lastUpdated
+          ? html`<span class="meta" style="margin-left:auto;font-variant-numeric:tabular-nums">
+              updated ${this._fmtTime(this._lastUpdated)}
+            </span>`
+          : ''}
       </div>
 
-      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1rem">
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:var(--space-md)">
 
         <!-- Tasks card -->
         <div class="card">

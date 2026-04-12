@@ -236,7 +236,7 @@ class DcTaskDetail extends LitElement {
       <label>Path<br>
         <input id="trig-webhook" class="input" .value=${webhook} style="width:100%;margin-top:0.25rem">
       </label>
-      ${fullURL ? html`<div style="margin-top:0.5rem;font-size:0.85rem;color:var(--text-2,#888)">
+      ${fullURL ? html`<div style="margin-top:0.5rem;font-size:0.85rem;color:var(--muted)">
         Relay URL: <code style="user-select:all;word-break:break-all">${fullURL}</code>
       </div>` : ''}`;
     }
@@ -264,29 +264,29 @@ class DcTaskDetail extends LitElement {
     const testFile   = task.test_file   || scriptFile.replace(/\.(ts|js)$/, '.test.$1');
 
     return html`
-      <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:0.5rem">
+      <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:var(--space-sm)">
         <h1 style="margin:0">${task.name}</h1>
         <button class="btn" @click=${() => this._run()}>&#9654; Run now</button>
-        <button class="btn" style="background:#495057" @click=${() => this._openEditor()}>&#9998; Edit code</button>
+        <button class="btn" style="background:var(--muted)" @click=${() => this._openEditor()}>&#9998; Edit code</button>
       </div>
       ${task.description ? html`<div class="task-desc">${unsafeHTML(marked.parse(task.description))}</div>` : ''}
 
-      <div class="card" style="margin-bottom:1rem;display:flex;align-items:center;gap:0.75rem">
+      <div class="card" style="margin-bottom:var(--space-md);display:flex;align-items:center;gap:0.75rem">
         <span style="font-size:0.85rem"><strong>Trigger:</strong> ${task.trigger_label || 'manual'}</span>
-        <button class="btn btn-sm" style="background:#495057;margin-left:auto"
+        <button class="btn btn-sm" style="background:var(--muted);margin-left:auto"
           @click=${() => { this._triggerOpen = !this._triggerOpen; }}>&#9998; Edit trigger</button>
       </div>
 
       ${this._triggerOpen ? html`
-        <div class="card" style="margin-bottom:1rem">
+        <div class="card" style="margin-bottom:var(--space-md)">
           <h2 style="margin-bottom:0.75rem">Edit Trigger</h2>
-          <div style="display:flex;gap:0.5rem;margin-bottom:1rem;flex-wrap:wrap">
+          <div style="display:flex;gap:var(--space-sm);margin-bottom:var(--space-md);flex-wrap:wrap">
             ${['manual','cron','webhook','chain','daemon'].map(t => html`
               <button class="btn btn-sm ${t === this._triggerType ? '' : 'secondary'}"
                 @click=${() => { this._triggerType = t; }}>${t}</button>`)}
           </div>
           ${this._triggerFields()}
-          <div style="display:flex;gap:0.5rem;margin-top:1rem">
+          <div style="display:flex;gap:var(--space-sm);margin-top:1rem">
             <button class="btn" @click=${() => this._saveTrigger()}>Save</button>
             <button class="btn secondary" @click=${() => { this._triggerOpen = false; }}>Cancel</button>
           </div>
@@ -294,41 +294,41 @@ class DcTaskDetail extends LitElement {
 
       ${this._editorOpen ? html`
         <div class="card" style="margin-top:1.5rem;padding:0.75rem">
-          <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.5rem;flex-wrap:wrap">
+          <div style="display:flex;align-items:center;gap:var(--space-sm);margin-bottom:var(--space-sm);flex-wrap:wrap">
             <button class="btn btn-sm" @click=${() => this._loadEditorFile(scriptFile)}>${scriptFile}</button>
             ${task.test_exists ? html`
               <button class="btn btn-sm secondary" @click=${() => this._loadEditorFile(testFile)}>${testFile}</button>` : ''}
-            <div style="margin-left:auto;display:flex;gap:0.5rem;align-items:center">
+            <div style="margin-left:auto;display:flex;gap:var(--space-sm);align-items:center">
               <span style="font-size:0.8rem">${this._editorStatus}</span>
               <button class="btn btn-sm" @click=${() => this._saveEditor()}>&#128190; Save</button>
-              <button class="btn btn-sm" style="background:#7c3aed" @click=${() => { this._aiOpen = !this._aiOpen; }}>&#129302; AI</button>
+              <button class="btn btn-sm" style="background:var(--lavender)" @click=${() => { this._aiOpen = !this._aiOpen; }}>&#129302; AI</button>
               <button class="btn btn-sm secondary" @click=${() => this._closeEditor()}>✕ Close</button>
             </div>
           </div>
           <div style="display:flex;gap:0.75rem;align-items:stretch">
-            <div id="monaco-container" style="flex:1;min-width:0;height:440px;border-radius:4px;overflow:hidden"></div>
+            <div id="monaco-container" style="flex:1;min-width:0;height:440px;border-radius:var(--radius-sm);overflow:hidden"></div>
             ${this._aiOpen ? html`
-              <div style="width:360px;flex-shrink:0;display:flex;flex-direction:column;background:#13131f;border-radius:6px;border:1px solid #2a2a4a;overflow:hidden">
-                <div style="padding:0.5rem 0.75rem;background:#1a1a2e;border-bottom:1px solid #2a2a4a">
-                  <span style="color:#a0c4ff;font-weight:600;font-size:0.85rem">&#129302; AI Task Dev</span>
+              <div style="width:360px;flex-shrink:0;display:flex;flex-direction:column;background:var(--bg-alt);border-radius:var(--radius-sm);border:1px solid var(--border);overflow:hidden">
+                <div style="padding:var(--space-sm) 0.75rem;background:var(--bg-alt);border-bottom:1px solid var(--border)">
+                  <span style="color:var(--sky);font-weight:600;font-size:0.85rem">&#129302; AI Task Dev</span>
                 </div>
-                <div id="ai-history" style="flex:1;overflow-y:auto;padding:0.75rem;font-size:0.8rem;color:#cdd6f4;min-height:240px;max-height:300px;line-height:1.5">
+                <div id="ai-history" style="flex:1;overflow-y:auto;padding:0.75rem;font-size:0.8rem;color:var(--lavender);min-height:240px;max-height:300px;line-height:1.5">
                   ${this._aiHistory.map(m => html`
-                    <div style="margin-bottom:0.5rem">
-                      <strong style="color:${m.role === 'user' ? '#a0c4ff' : '#a6e3a1'}">${m.role === 'user' ? 'You' : 'AI'}:</strong>
+                    <div style="margin-bottom:var(--space-sm)">
+                      <strong style="color:${m.role === 'user' ? 'var(--sky)' : 'var(--green)'}">${m.role === 'user' ? 'You' : 'AI'}:</strong>
                       ${m.text}
                     </div>`)}
                 </div>
-                <div style="padding:0.2rem 0.75rem;font-size:0.7rem;color:#7c7ca8;border-top:1px solid #2a2a4a;min-height:1.4rem;font-family:monospace">
+                <div style="padding:0.2rem 0.75rem;font-size:0.7rem;color:var(--muted);border-top:1px solid var(--border);min-height:1.4rem;font-family:monospace">
                   ${this._aiStatus}
                 </div>
-                <div style="padding:0.5rem;border-top:1px solid #2a2a4a;display:flex;flex-direction:column;gap:0.4rem">
+                <div style="padding:var(--space-sm);border-top:1px solid var(--border);display:flex;flex-direction:column;gap:0.4rem">
                   <textarea id="ai-input"
                     placeholder="Describe the task… (Ctrl+Enter to send)"
-                    style="width:100%;background:#0e0e1a;color:#cdd6f4;border:1px solid #2a2a4a;border-radius:4px;padding:0.45rem 0.5rem;font-size:0.78rem;resize:none;height:72px;font-family:system-ui,sans-serif;outline:none;box-sizing:border-box"
+                    style="width:100%;background:var(--bg);color:var(--lavender);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.45rem 0.5rem;font-size:0.78rem;resize:none;height:72px;font-family:system-ui,sans-serif;outline:none;box-sizing:border-box"
                     @keydown=${e => { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { this._aiSend(); e.preventDefault(); } }}>
                   </textarea>
-                  <button class="btn btn-sm" style="background:#7c3aed" @click=${() => this._aiSend()}>Send</button>
+                  <button class="btn btn-sm" style="background:var(--lavender)" @click=${() => this._aiSend()}>Send</button>
                 </div>
               </div>` : ''}
           </div>
@@ -339,7 +339,7 @@ class DcTaskDetail extends LitElement {
         <thead><tr><th>Run ID</th><th>Status</th><th>Started</th><th>Duration</th><th></th></tr></thead>
         <tbody>
           ${!this._runs?.length ? html`
-            <tr><td colspan="5" style="text-align:center;color:#888">No runs yet.</td></tr>
+            <tr><td colspan="5" style="text-align:center;color:var(--muted)">No runs yet.</td></tr>
           ` : this._runs.map(r => html`
             <tr>
               <td><a href="runs/${r.ID}">${r.ID.slice(0,8)}</a></td>
