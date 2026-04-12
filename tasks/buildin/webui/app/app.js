@@ -1,7 +1,11 @@
 import { wsConnect } from './lib/ws.js';
 import { navigate, route, render } from './lib/router.js';
 import { setAuthOverlay } from './lib/api.js';
+import { initTheme } from './lib/theme.js';
 
+initTheme();
+
+import './components/dc-theme-toggle.js';
 import './components/dc-auth-overlay.js';
 import './components/dc-task-list.js';
 import './components/dc-task-detail.js';

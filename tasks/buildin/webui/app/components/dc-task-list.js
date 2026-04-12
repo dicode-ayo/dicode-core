@@ -107,19 +107,19 @@ class DcTaskList extends LitElement {
     const isNamespaced = groups.some(([ns]) => ns !== '');
 
     return html`
-      <div style="display:flex;align-items:center;gap:1rem;margin-bottom:1rem">
+      <div style="display:flex;align-items:center;gap:var(--space-md);margin-bottom:var(--space-md)">
         <h1 style="margin:0">Tasks</h1>
       </div>
       ${this._tasks.length === 0 ? html`
-        <div class="card" style="text-align:center;color:#888;padding:2rem">
+        <div class="card" style="text-align:center;color:var(--muted);padding:var(--space-xl)">
           No tasks found. Add tasks to your data directory.
         </div>
       ` : isNamespaced ? html`
         ${groups.map(([ns, tasks]) => html`
           <div style="margin-bottom:1.25rem">
             ${ns ? html`
-              <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.4rem">
-                <span style="font-size:0.78rem;font-weight:700;color:#7c3aed;text-transform:uppercase;letter-spacing:0.05em">${ns}</span>
+              <div style="display:flex;align-items:center;gap:var(--space-sm);margin-bottom:0.4rem">
+                <span style="font-size:0.78rem;font-weight:700;color:var(--lavender);text-transform:uppercase;letter-spacing:0.05em">${ns}</span>
                 <span class="meta">(${tasks.length})</span>
               </div>` : ''}
             <table>
