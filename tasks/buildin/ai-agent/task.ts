@@ -130,9 +130,12 @@ export default async function main({ params, kv, dicode }: DicodeSdk) {
     .map((s) => s.trim())
     .filter(Boolean);
 
-  const model = (await params.get("model")) ?? "gpt-4o";
-  const baseURL = (await params.get("base_url")) || undefined;
-  const apiKeyEnv = (await params.get("api_key_env")) ?? "OPENAI_API_KEY";
+  // Provider config. Defaults match task.yaml, but we repeat them here so
+  // the task is robust to the yaml defaults not being merged (and so anyone
+  // reading task.ts can see the effective defaults in one place).
+  const model = (await params.get("model")) || "llama3.2";
+  const baseURL = (await params.get("base_url")) || "http://localhost:11434/v1";
+  const apiKeyEnv = (await params.get("api_key_env")) || "OLLAMA_API_KEY";
   const systemPromptBase = (await params.get("system_prompt")) ?? "";
   const maxHistoryTokens = Number((await params.get("max_history_tokens")) ?? "80000");
   const compactionModel = (await params.get("compaction_model")) || model;
@@ -141,7 +144,7 @@ export default async function main({ params, kv, dicode }: DicodeSdk) {
   // requires a non-empty apiKey string. If base_url looks local and the env
   // var isn't set, fall back to a placeholder so the task works out of the
   // box. Hosted providers still require a real key.
-  const isLocal = !!baseURL && /^https?:\/\/(localhost|127\.0\.0\.1)/i.test(baseURL);
+  const isLocal = /^https?:\/\/(localhost|127\.0\.0\.1)/i.test(baseURL);
   let apiKey = Deno.env.get(apiKeyEnv);
   if (!apiKey) {
     if (isLocal) {
@@ -150,6 +153,8 @@ export default async function main({ params, kv, dicode }: DicodeSdk) {
       throw new Error(`${apiKeyEnv} not set in task environment`);
     }
   }
+
+  console.log(`ai-agent: provider → model=${model} baseURL=${baseURL} (local=${isLocal})`);
 
   const client = new OpenAI({ apiKey, baseURL });
 
