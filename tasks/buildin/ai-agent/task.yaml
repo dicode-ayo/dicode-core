@@ -65,16 +65,23 @@ params:
     description: "Model used for compaction summaries. Empty = same as main model."
 
 permissions:
-  # API keys for common providers. Add more via taskset overrides if you run
-  # a provider not listed here (each entry allowlists the env var for reading).
-  # OLLAMA_API_KEY is a dummy: Ollama does not authenticate, but the OpenAI
-  # SDK demands a non-empty api_key string, so the task reads a placeholder.
+  # Env vars the task can read. Includes:
+  # - API keys for common providers (OPENAI_, ANTHROPIC_, OLLAMA_)
+  # - OpenAI SDK internal probes: the npm:openai constructor reads
+  #   OPENAI_ORG_ID, OPENAI_PROJECT_ID, and OPENAI_BASE_URL unconditionally
+  #   at init time regardless of what we pass to new OpenAI({...}). Any of
+  #   these NOT in the allowlist causes Deno to throw NotCapable the moment
+  #   the client is constructed. Not allowlisting them is a harder sandbox,
+  #   but breaks the SDK. Safe: they're read but not written or leaked.
   env:
     - OPENAI_API_KEY
+    - OPENAI_ORG_ID
+    - OPENAI_PROJECT_ID
+    - OPENAI_BASE_URL
     - ANTHROPIC_API_KEY
     - OLLAMA_API_KEY
-  # Network allowlist. Covers the common hosted OpenAI-compatible providers
-  # plus localhost for local runtimes (Ollama, LM Studio, self-hosted gateways).
+  # Network allowlist: hosted providers plus localhost for local runtimes
+  # (Ollama, LM Studio). Deno accepts host:port entries.
   net:
     - api.openai.com
     - api.anthropic.com
