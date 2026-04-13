@@ -137,8 +137,19 @@ export default async function main({ params, kv, dicode }: DicodeSdk) {
   const maxHistoryTokens = Number((await params.get("max_history_tokens")) ?? "80000");
   const compactionModel = (await params.get("compaction_model")) || model;
 
-  const apiKey = Deno.env.get(apiKeyEnv);
-  if (!apiKey) throw new Error(`${apiKeyEnv} not set in task environment`);
+  // Local runtimes (Ollama, LM Studio) don't authenticate, but the OpenAI SDK
+  // requires a non-empty apiKey string. If base_url looks local and the env
+  // var isn't set, fall back to a placeholder so the task works out of the
+  // box. Hosted providers still require a real key.
+  const isLocal = !!baseURL && /^https?:\/\/(localhost|127\.0\.0\.1)/i.test(baseURL);
+  let apiKey = Deno.env.get(apiKeyEnv);
+  if (!apiKey) {
+    if (isLocal) {
+      apiKey = "ollama"; // placeholder accepted by Ollama, LM Studio, etc.
+    } else {
+      throw new Error(`${apiKeyEnv} not set in task environment`);
+    }
+  }
 
   const client = new OpenAI({ apiKey, baseURL });
 

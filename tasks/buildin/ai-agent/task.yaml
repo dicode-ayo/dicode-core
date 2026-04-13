@@ -33,19 +33,21 @@ params:
     default: ""
     description: "Comma-separated task ids the agent may call as tools. Empty = all tasks except self."
 
-  # Provider config — defaults bake the task personality, callers can override per-run
+  # Provider config — defaults target a local Ollama install so the task works
+  # out of the box on a dev laptop. Callers (or the taskset file, or per-request
+  # params) can override for hosted providers.
   model:
     type: string
-    default: "gpt-4o"
+    default: "llama3.2"
     description: "Chat model id passed to the OpenAI-compatible API."
   base_url:
     type: string
-    default: ""
+    default: "http://localhost:11434/v1"
     description: "OpenAI-compatible base URL. Empty = default (OpenAI)."
   api_key_env:
     type: string
-    default: "OPENAI_API_KEY"
-    description: "Name of the env var holding the API key."
+    default: "OLLAMA_API_KEY"
+    description: "Name of the env var holding the API key. For Ollama this is a placeholder (the SDK requires a non-empty key but Ollama ignores it)."
   system_prompt:
     type: string
     default: |
@@ -65,16 +67,22 @@ params:
 permissions:
   # API keys for common providers. Add more via taskset overrides if you run
   # a provider not listed here (each entry allowlists the env var for reading).
+  # OLLAMA_API_KEY is a dummy: Ollama does not authenticate, but the OpenAI
+  # SDK demands a non-empty api_key string, so the task reads a placeholder.
   env:
     - OPENAI_API_KEY
     - ANTHROPIC_API_KEY
-  # Network allowlist covers the common OpenAI-compatible providers. If you
-  # point base_url at something else (Ollama, LM Studio, a self-hosted
-  # gateway), override this via taskset to add the host.
+    - OLLAMA_API_KEY
+  # Network allowlist. Covers the common hosted OpenAI-compatible providers
+  # plus localhost for local runtimes (Ollama, LM Studio, self-hosted gateways).
   net:
     - api.openai.com
     - api.anthropic.com
     - generativelanguage.googleapis.com
+    - localhost:11434     # Ollama default
+    - 127.0.0.1:11434
+    - localhost:1234      # LM Studio default
+    - 127.0.0.1:1234
   dicode:
     list_tasks: true
     get_config: true
