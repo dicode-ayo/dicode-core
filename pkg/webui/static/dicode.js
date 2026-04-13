@@ -113,7 +113,8 @@
           };
 
           if (contentType.indexOf('application/json') !== -1) {
-            try { result.returnValue = body; } catch (e) { /* keep raw */ }
+            try { result.returnValue = JSON.parse(body); }
+            catch (e) { result.returnValue = null; }
           }
 
           if (handlers.onFinish) handlers.onFinish(result);
