@@ -154,7 +154,10 @@ export default async function main({ params, kv, dicode }: DicodeSdk) {
     }
   }
 
-  console.log(`ai-agent: provider → model=${model} baseURL=${baseURL} (local=${isLocal})`);
+  console.log(
+    `ai-agent[${new Date().toISOString()}]: provider → model=${model} ` +
+      `baseURL=${baseURL} (local=${isLocal}) session=${sessionId.slice(0, 8)}`,
+  );
 
   const client = new OpenAI({ apiKey, baseURL });
 
