@@ -12,7 +12,11 @@ runtime: deno
 
 trigger:
   webhook: /hooks/ai
-  auth: true
+  # auth: true intentionally omitted — see issue on auth UX for auth-protected
+  # webhook tasks. With auth enabled, unauthenticated GETs to /hooks/ai get
+  # bounced to / → /hooks/webui by the catch-all redirect, making the chat
+  # page effectively inaccessible from a fresh browser. Re-enable once the
+  # auth flow is fixed.
 
 params:
   # Per-call inputs
