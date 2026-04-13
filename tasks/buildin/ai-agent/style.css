@@ -1,0 +1,121 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: system-ui, sans-serif;
+  background: #1e1e2e;
+  color: #cdd6f4;
+  min-height: 100vh;
+  display: flex;
+  justify-content: center;
+  padding: 2rem 1rem;
+}
+
+.chat {
+  background: #181825;
+  border: 1px solid #313244;
+  border-radius: 12px;
+  width: 100%;
+  max-width: 720px;
+  height: calc(100vh - 4rem);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid #313244;
+}
+
+header h1 {
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+#new-chat {
+  background: #313244;
+  color: #cdd6f4;
+  border: 1px solid #45475a;
+  border-radius: 6px;
+  padding: .375rem .75rem;
+  font-size: .8125rem;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background .15s;
+}
+#new-chat:hover { background: #45475a; }
+
+.messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: .75rem;
+}
+
+.bubble {
+  max-width: 85%;
+  padding: .625rem .875rem;
+  border-radius: 12px;
+  font-size: .9375rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.bubble.user {
+  align-self: flex-end;
+  background: #89b4fa;
+  color: #1e1e2e;
+  border-bottom-right-radius: 2px;
+}
+
+.bubble.assistant {
+  align-self: flex-start;
+  background: #313244;
+  color: #cdd6f4;
+  border-bottom-left-radius: 2px;
+}
+
+#prompt-form {
+  display: flex;
+  gap: .625rem;
+  padding: 1rem 1.25rem;
+  border-top: 1px solid #313244;
+  background: #11111b;
+}
+
+#prompt {
+  flex: 1;
+  background: #313244;
+  border: 1px solid #45475a;
+  border-radius: 8px;
+  color: #cdd6f4;
+  padding: .625rem .75rem;
+  font-size: .9375rem;
+  font-family: inherit;
+  outline: none;
+  resize: none;
+  transition: border-color .15s;
+}
+#prompt:focus { border-color: #89b4fa; }
+
+#send {
+  align-self: flex-end;
+  background: #89b4fa;
+  color: #1e1e2e;
+  border: none;
+  border-radius: 8px;
+  padding: .625rem 1.25rem;
+  font-size: .9375rem;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: opacity .15s;
+}
+#send:hover { opacity: .9; }
+#send:disabled { opacity: .5; cursor: not-allowed; }
