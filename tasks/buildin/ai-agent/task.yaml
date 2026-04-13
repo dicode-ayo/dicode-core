@@ -1,0 +1,84 @@
+apiVersion: dicode/v1
+kind: Task
+name: "AI Agent"
+description: >
+  Chat with an AI agent that can call other dicode tasks as tools.
+  Persists conversation history keyed by session_id in KV; compacts older
+  turns into a running summary once history exceeds max_history_tokens.
+  Provider is configured via task params (model, base_url, api_key_env);
+  defaults target OpenAI but any OpenAI-compatible endpoint works
+  (Anthropic, Ollama, LM Studio, Together, etc.).
+runtime: deno
+
+trigger:
+  webhook: /hooks/ai
+  auth: true
+
+params:
+  # Per-call inputs
+  prompt:
+    type: string
+    required: true
+    description: "User message to send to the agent."
+  session_id:
+    type: string
+    default: ""
+    description: "Conversation id. Empty on first turn — agent auto-generates and returns it."
+  skills:
+    type: string
+    default: ""
+    description: "Comma-separated task ids the agent may call as tools. Empty = all tasks except self."
+
+  # Provider config — defaults bake the task personality, callers can override per-run
+  model:
+    type: string
+    default: "gpt-4o"
+    description: "Chat model id passed to the OpenAI-compatible API."
+  base_url:
+    type: string
+    default: ""
+    description: "OpenAI-compatible base URL. Empty = default (OpenAI)."
+  api_key_env:
+    type: string
+    default: "OPENAI_API_KEY"
+    description: "Name of the env var holding the API key."
+  system_prompt:
+    type: string
+    default: |
+      You are a helpful assistant embedded in dicode. You can call other
+      dicode tasks as tools. Prefer tools when the user asks for data or
+      actions; answer directly when they ask a general question.
+    description: "System prompt prepended to every conversation."
+  max_history_tokens:
+    type: number
+    default: "80000"
+    description: "Rough token budget for conversation history. Exceeding triggers lazy compaction."
+  compaction_model:
+    type: string
+    default: ""
+    description: "Model used for compaction summaries. Empty = same as main model."
+
+permissions:
+  # API keys for common providers. Add more via taskset overrides if you run
+  # a provider not listed here (each entry allowlists the env var for reading).
+  env:
+    - OPENAI_API_KEY
+    - ANTHROPIC_API_KEY
+  # Network allowlist covers the common OpenAI-compatible providers. If you
+  # point base_url at something else (Ollama, LM Studio, a self-hosted
+  # gateway), override this via taskset to add the host.
+  net:
+    - api.openai.com
+    - api.anthropic.com
+    - generativelanguage.googleapis.com
+  dicode:
+    list_tasks: true
+    get_config: true
+    tasks:
+      - "*"
+
+timeout: 300s
+
+notify:
+  on_success: false
+  on_failure: false
