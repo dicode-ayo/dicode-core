@@ -21,8 +21,10 @@ import (
 // context like REPO_ROOT and SKILLS_DIR. Task-level code does not know about
 // sources, so those vars cannot live here.
 const (
-	VarTaskDir = "TASK_DIR" // absolute path to the task's own directory
-	VarHome    = "HOME"     // user home directory
+	VarTaskDir    = "TASK_DIR"    // absolute path to the task's own directory
+	VarHome       = "HOME"        // user home directory
+	VarSourceRoot = "SOURCE_ROOT" // absolute path to the source root (tasks dir / taskset.yaml dir). Injected by the source loader; empty when a task is loaded outside of a source context.
+	VarSkillsDir  = "SKILLS_DIR"  // convention: ${SOURCE_ROOT}/skills. Lets skill-aware tasks reference the shared md directory without hardcoding the "skills" subdir.
 )
 
 // expandString replaces ${VAR} references in s using the provided vars map,
@@ -74,15 +76,29 @@ func expandSpec(spec *Spec, vars map[string]string) {
 	}
 }
 
-// builtinVars returns the template var map for a task loaded from dir.
+// builtinVars returns the template var map for a task loaded from dir, with
+// any extra vars merged in (extras take precedence over builtins). Pass nil
+// for extras when loading a task outside of a source context.
+//
 // Keep this in sync with the Var* constants above and with docs/task-yaml.md
 // (once that doc exists).
-func builtinVars(taskDir string) map[string]string {
+func builtinVars(taskDir string, extras map[string]string) map[string]string {
 	vars := map[string]string{
 		VarTaskDir: taskDir,
 	}
 	if home, err := os.UserHomeDir(); err == nil {
 		vars[VarHome] = home
+	}
+	// Convenience: if the caller supplies SOURCE_ROOT but not SKILLS_DIR,
+	// auto-derive it. Lets source loaders stay minimal — they only need to
+	// set the primitive SOURCE_ROOT and the convention follows.
+	if root, ok := extras[VarSourceRoot]; ok {
+		if _, set := extras[VarSkillsDir]; !set {
+			vars[VarSkillsDir] = root + "/skills"
+		}
+	}
+	for k, v := range extras {
+		vars[k] = v
 	}
 	return vars
 }

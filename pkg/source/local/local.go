@@ -176,15 +176,20 @@ func (s *LocalSource) diff() ([]source.Event, error) {
 
 	var events []source.Event
 
+	// Vars injected into task.yaml template expansion for every task under
+	// this source. SOURCE_ROOT is the source's absolute root; SKILLS_DIR is
+	// auto-derived by the task loader (see pkg/task/template.go).
+	extras := map[string]string{task.VarSourceRoot: s.path}
+
 	for id, hash := range current {
 		dir := filepath.Join(s.path, id)
 		if _, ok := prev[id]; !ok {
 			events = append(events, source.Event{
-				Kind: source.EventAdded, TaskID: id, TaskDir: dir, Source: s.id,
+				Kind: source.EventAdded, TaskID: id, TaskDir: dir, Source: s.id, ExtraVars: extras,
 			})
 		} else if prev[id] != hash {
 			events = append(events, source.Event{
-				Kind: source.EventUpdated, TaskID: id, TaskDir: dir, Source: s.id,
+				Kind: source.EventUpdated, TaskID: id, TaskDir: dir, Source: s.id, ExtraVars: extras,
 			})
 		}
 	}

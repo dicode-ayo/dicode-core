@@ -347,6 +347,18 @@ func (s *Source) resolve(ctx context.Context) ([]*ResolvedTask, error) {
 		rootRef = &Ref{Path: devRootPath}
 	}
 
+	// Inject source-level template vars (SOURCE_ROOT) so task.yaml can
+	// reference the source root via ${SOURCE_ROOT} / ${SKILLS_DIR}. For a
+	// TaskSet source, "source root" is the directory containing the root
+	// taskset.yaml — for a git source the local clone dir, for a local
+	// source the absolute path. For git refs before clone, rootRef.Path
+	// may be empty; the resolver tolerates a nil/empty ExtraVars map.
+	if !rootRef.IsGit() && rootRef.Path != "" {
+		s.resolver.SetExtraVars(map[string]string{
+			task.VarSourceRoot: filepath.Dir(rootRef.Path),
+		})
+	}
+
 	return s.resolver.Resolve(ctx, s.namespace, rootRef, configDefaults, nil)
 }
 
