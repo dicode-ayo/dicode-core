@@ -632,6 +632,76 @@ Examples: `morning-email-check`, `github-release-notifier`, `backup-database`
 
 ---
 
+## Template variables
+
+Selected fields in `task.yaml` support `${VAR}` substitution, resolved at task-load time. Syntax is the standard shell form — no escaping, no pipes, no conditionals — just drop-in replacement.
+
+### Supported fields
+
+Template expansion runs over a tight allowlist, not every string field:
+
+- `permissions.fs[].path`
+- `trigger.webhook_secret`
+- `permissions.env[].from`, `.secret`, `.value` (the indirection keys)
+
+Everything else — `name`, `description`, `params.*.default`, `system_prompt` defaults — is taken literally. This is deliberate: expansion in descriptive strings usually hides bugs rather than enabling them.
+
+### Built-in variables
+
+Always available inside a task:
+
+| Variable | Value |
+| --- | --- |
+| `${TASK_DIR}` | Absolute path to this task's own directory |
+| `${HOME}` | User home directory (best-effort — may be unset in restricted environments) |
+
+Injected by the source loader on every task it loads:
+
+| Variable | Value |
+| --- | --- |
+| `${SOURCE_ROOT}` | Absolute path to the source root (`tasks/` dir for local sources; clone dir for git sources; taskset.yaml dir for taskset sources) |
+| `${SKILLS_DIR}` | Convention: `${SOURCE_ROOT}/skills`. Auto-derived if `SOURCE_ROOT` is set and `SKILLS_DIR` is not. |
+
+### Resolution order
+
+1. Built-in variables (above), highest priority
+2. Process environment (`os.Getenv`)
+3. **Unresolved** — the literal `${VAR}` is left in place so bugs surface loudly instead of silently collapsing to an empty string
+
+### Examples
+
+Give a task read access to the shared skills directory regardless of where the source lives:
+
+```yaml
+permissions:
+  fs:
+    - path: "${SKILLS_DIR}"
+      permission: r
+```
+
+Reference a webhook secret from the process environment (closing the historical docs/reality gap where this was documented but never actually expanded):
+
+```yaml
+trigger:
+  webhook: /hooks/github
+  webhook_secret: "${GITHUB_WEBHOOK_SECRET}"
+permissions:
+  env:
+    - GITHUB_WEBHOOK_SECRET
+```
+
+Compose a secrets-store key from a per-environment prefix:
+
+```yaml
+permissions:
+  env:
+    - name: DB_PASSWORD
+      secret: "${DEPLOY_ENV}_db_password"
+    - DEPLOY_ENV
+```
+
+---
+
 ## File layout rules
 
 - `task.yaml` is always required. A folder without it is ignored.
