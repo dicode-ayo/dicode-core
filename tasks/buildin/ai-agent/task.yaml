@@ -2,24 +2,24 @@ apiVersion: dicode/v1
 kind: Task
 name: "AI Agent"
 description: >
-  Chat with an AI agent that can call other dicode tasks as tools.
-  Persists conversation history keyed by session_id in KV; compacts older
-  turns into a running summary once history exceeds max_history_tokens.
-  Provider is configured via task params (model, base_url, api_key_env);
-  defaults target OpenAI but any OpenAI-compatible endpoint works
-  (Anthropic, Ollama, LM Studio, Together, etc.).
-runtime: deno
+  Generic AI chat agent. Talks to any OpenAI-compatible chat completions
+  endpoint (OpenAI, Anthropic, Ollama, LM Studio, Groq, OpenRouter, Together,
+  …), lets the model call other dicode tasks as TOOLS, and loads markdown
+  SKILLS into the system prompt for domain context.
 
+  This buildin ships locked down: no network, no provider defaults, no
+  provider API keys in env. Everything must be provided by the caller or
+  by a sibling taskset override (see tasks/examples/ai-agent-*). This keeps
+  the buildin generic and safe; provider-specific policy lives with the
+  provider-specific task.
+runtime: deno
 trigger:
   webhook: /hooks/ai
-  # auth: true intentionally omitted — see issue on auth UX for auth-protected
-  # webhook tasks. With auth enabled, unauthenticated GETs to /hooks/ai get
-  # bounced to / → /hooks/webui by the catch-all redirect, making the chat
-  # page effectively inaccessible from a fresh browser. Re-enable once the
-  # auth flow is fixed.
+  # auth: true intentionally omitted — see #96 (auth UX for protected webhook
+  # tasks). Re-enable once the auth flow lands.
 
 params:
-  # Per-call inputs
+  # ─── Per-call inputs ───────────────────────────────────────────────────────
   prompt:
     type: string
     required: true
@@ -27,34 +27,49 @@ params:
   session_id:
     type: string
     default: ""
-    description: "Conversation id. Empty on first turn — agent auto-generates and returns it."
+    description: "Conversation id. Empty = auto-generate and return in response."
+
+  # ─── Tools (were previously called "skills") ───────────────────────────────
+  # Tools are other dicode tasks the model can call via dicode.run_task().
+  # Filter by comma-separated task ids; empty = all permitted tasks except self.
+  tools:
+    type: string
+    default: ""
+    description: "Comma-separated dicode task ids the agent may call as tools. Empty = all permitted tasks except self."
+
+  # ─── Skills (new: md files loaded into the system prompt) ──────────────────
+  # Skills are markdown files providing domain context or instructions that
+  # get eager-loaded into the system prompt. Names match filenames under the
+  # skills directory without .md. E.g. skills="dicode-basics,github" loads
+  # dicode-basics.md and github.md.
   skills:
     type: string
     default: ""
-    description: "Comma-separated task ids the agent may call as tools. Empty = all tasks except self."
+    description: "Comma-separated skill md file names (without .md) to concatenate into the system prompt."
 
-  # Provider config — defaults target a local Ollama install so the task works
-  # out of the box on a dev laptop. Callers (or the taskset file, or per-request
-  # params) can override for hosted providers.
+  # ─── Provider config ───────────────────────────────────────────────────────
+  # No defaults. Caller (taskset override, curl, or dicode.run_task) MUST
+  # supply model + base_url + api_key_env, or the task returns a structured
+  # "not configured" response the UI can act on.
   model:
     type: string
-    default: "llama3.2"
-    description: "Chat model id passed to the OpenAI-compatible API."
+    default: ""
+    description: "Chat model id. REQUIRED — empty = task returns 'not configured'."
   base_url:
     type: string
-    default: "http://localhost:11434/v1"
-    description: "OpenAI-compatible base URL. Empty = default (OpenAI)."
+    default: ""
+    description: "OpenAI-compatible base URL. REQUIRED."
   api_key_env:
     type: string
-    default: "OLLAMA_API_KEY"
-    description: "Name of the env var holding the API key. For Ollama this is a placeholder (the SDK requires a non-empty key but Ollama ignores it)."
+    default: ""
+    description: "Env var holding the API key. Required for hosted providers; ignored for localhost URLs (a placeholder is used)."
   system_prompt:
     type: string
     default: |
       You are a helpful assistant embedded in dicode. You can call other
       dicode tasks as tools. Prefer tools when the user asks for data or
       actions; answer directly when they ask a general question.
-    description: "System prompt prepended to every conversation."
+    description: "System prompt prepended to every conversation. Loaded skills are appended after this."
   max_history_tokens:
     type: number
     default: "80000"
@@ -65,34 +80,33 @@ params:
     description: "Model used for compaction summaries. Empty = same as main model."
 
 permissions:
-  # Env vars the task can read. Includes:
-  # - API keys for common providers (OPENAI_, ANTHROPIC_, OLLAMA_)
-  # - OpenAI SDK internal probes: the npm:openai constructor reads
-  #   OPENAI_ORG_ID, OPENAI_PROJECT_ID, and OPENAI_BASE_URL unconditionally
-  #   at init time regardless of what we pass to new OpenAI({...}). Any of
-  #   these NOT in the allowlist causes Deno to throw NotCapable the moment
-  #   the client is constructed. Not allowlisting them is a harder sandbox,
-  #   but breaks the SDK. Safe: they're read but not written or leaked.
+  # ─── Env ──────────────────────────────────────────────────────────────────
+  # Only the env vars the OpenAI SDK itself probes at construct time. NO
+  # provider API keys here — each provider-specific override task adds its
+  # own (OPENAI_API_KEY, OLLAMA_API_KEY, …).
   env:
-    - OPENAI_API_KEY
     - OPENAI_ORG_ID
     - OPENAI_PROJECT_ID
     - OPENAI_BASE_URL
-    - ANTHROPIC_API_KEY
-    - OLLAMA_API_KEY
-  # Network allowlist: hosted providers plus localhost for local runtimes
-  # (Ollama, LM Studio). Deno accepts host:port entries.
-  net:
-    - api.openai.com
-    - api.anthropic.com
-    - generativelanguage.googleapis.com
-    - localhost:11434     # Ollama default
-    - 127.0.0.1:11434
-    - localhost:1234      # LM Studio default
-    - 127.0.0.1:1234
+    - OPENAI_LOG
+    - DEBUG
+
+  # ─── Network ──────────────────────────────────────────────────────────────
+  # Empty list = deny all. The buildin cannot reach any network. Provider
+  # tasks override to widen. This is the "as restrictive as possible" part.
+  net: []
+
+  # ─── Filesystem ───────────────────────────────────────────────────────────
+  # Read access to the repo's shared skills directory so the task can load
+  # md files referenced by the "skills" param. Relative paths resolve against
+  # the task's own directory, so ../../skills points at tasks/skills.
+  fs:
+    - path: ../../skills
+      permission: r
+
+  # ─── Dicode runtime APIs ──────────────────────────────────────────────────
   dicode:
     list_tasks: true
-    get_config: true
     tasks:
       - "*"
 

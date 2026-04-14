@@ -117,6 +117,41 @@ async function compactIfNeeded(
   session.messages = recent;
 }
 
+// Resolve the repo-shared skills directory. Relative path resolves against
+// the task's own directory (tasks/buildin/ai-agent/), so ../../skills points
+// at tasks/skills/. Keep in sync with permissions.fs in task.yaml.
+const SKILLS_DIR = new URL("../../skills/", import.meta.url).pathname;
+
+async function loadSkills(names: string[]): Promise<string> {
+  if (names.length === 0) return "";
+  const chunks: string[] = [];
+  for (const name of names) {
+    // Defensive: disallow path traversal. Skill names are filenames only.
+    if (name.includes("/") || name.includes("..") || name.includes("\\")) {
+      chunks.push(`# skill:${name}\n(rejected: invalid skill name)\n`);
+      continue;
+    }
+    const path = `${SKILLS_DIR}${name}.md`;
+    try {
+      const body = await Deno.readTextFile(path);
+      chunks.push(`# skill:${name}\n${body.trim()}`);
+    } catch (e) {
+      chunks.push(
+        `# skill:${name}\n(not loaded: ${e instanceof Error ? e.message : String(e)})`,
+      );
+    }
+  }
+  return chunks.join("\n\n");
+}
+
+interface NotConfiguredResponse {
+  session_id: string;
+  reply: null;
+  error: "not_configured";
+  missing: string[];
+  hint: string;
+}
+
 export default async function main({ params, kv, dicode }: DicodeSdk) {
   const prompt = (await params.get("prompt")) ?? "";
   if (!prompt) throw new Error("prompt param is required");
@@ -125,27 +160,56 @@ export default async function main({ params, kv, dicode }: DicodeSdk) {
   let sessionId = (await params.get("session_id")) ?? "";
   if (!sessionId) sessionId = crypto.randomUUID();
 
-  const skills = ((await params.get("skills")) ?? "")
+  // Tools: dicode task ids the agent may call. Empty = all except self.
+  const toolFilter = ((await params.get("tools")) ?? "")
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
 
-  // Provider config. Defaults match task.yaml, but we repeat them here so
-  // the task is robust to the yaml defaults not being merged (and so anyone
-  // reading task.ts can see the effective defaults in one place).
-  const model = (await params.get("model")) || "llama3.2";
-  const baseURL = (await params.get("base_url")) || "http://localhost:11434/v1";
-  const apiKeyEnv = (await params.get("api_key_env")) || "OLLAMA_API_KEY";
+  // Skills: md file names (without .md) to concatenate into the system prompt.
+  const skillNames = ((await params.get("skills")) ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  // Provider config. No defaults in task.ts — the buildin is generic and
+  // restrictive; provider-specific sibling tasks set defaults via taskset
+  // overrides. If required fields are missing, return a structured
+  // not_configured response instead of throwing.
+  const model = (await params.get("model")) ?? "";
+  const baseURL = (await params.get("base_url")) ?? "";
+  const apiKeyEnv = (await params.get("api_key_env")) ?? "";
   const systemPromptBase = (await params.get("system_prompt")) ?? "";
   const maxHistoryTokens = Number((await params.get("max_history_tokens")) ?? "80000");
   const compactionModel = (await params.get("compaction_model")) || model;
+
+  const missing: string[] = [];
+  if (!model) missing.push("model");
+  if (!baseURL) missing.push("base_url");
+  // api_key_env is optional for local URLs (handled below), but flag it as
+  // missing for non-local URLs so the caller gets a clear error.
+  const isLocal = /^https?:\/\/(localhost|127\.0\.0\.1)/i.test(baseURL);
+  if (!isLocal && !apiKeyEnv) missing.push("api_key_env");
+
+  if (missing.length > 0) {
+    const response: NotConfiguredResponse = {
+      session_id: sessionId,
+      reply: null,
+      error: "not_configured",
+      missing,
+      hint:
+        "This is the generic ai-agent buildin. It has no provider configured. " +
+        "Either pass model/base_url/api_key_env as params, or use a " +
+        "provider-specific sibling task (e.g. examples/ai-agent-ollama).",
+    };
+    return response;
+  }
 
   // Local runtimes (Ollama, LM Studio) don't authenticate, but the OpenAI SDK
   // requires a non-empty apiKey string. If base_url looks local and the env
   // var isn't set, fall back to a placeholder so the task works out of the
   // box. Hosted providers still require a real key.
-  const isLocal = /^https?:\/\/(localhost|127\.0\.0\.1)/i.test(baseURL);
-  let apiKey = Deno.env.get(apiKeyEnv);
+  let apiKey = apiKeyEnv ? Deno.env.get(apiKeyEnv) : undefined;
   if (!apiKey) {
     if (isLocal) {
       apiKey = "ollama"; // placeholder accepted by Ollama, LM Studio, etc.
@@ -154,9 +218,13 @@ export default async function main({ params, kv, dicode }: DicodeSdk) {
     }
   }
 
+  // Load skills eagerly and splice them into the system prompt.
+  const skillsBlob = await loadSkills(skillNames);
+
   console.log(
     `ai-agent[${new Date().toISOString()}]: provider → model=${model} ` +
-      `baseURL=${baseURL} (local=${isLocal}) session=${sessionId.slice(0, 8)}`,
+      `baseURL=${baseURL} (local=${isLocal}) session=${sessionId.slice(0, 8)} ` +
+      `tools=${toolFilter.length || "*"} skills=${skillNames.length}`,
   );
 
   const client = new OpenAI({ apiKey, baseURL });
@@ -170,11 +238,11 @@ export default async function main({ params, kv, dicode }: DicodeSdk) {
     updated_at: Date.now(),
   };
 
-  // Build tool list from list_tasks(), filtered by skills
+  // Build tool list from list_tasks(), filtered by toolFilter
   const allTasks = ((await dicode.list_tasks()) as TaskSummary[]) ?? [];
   const selfId = "buildin/ai-agent";
-  const filtered = skills.length
-    ? allTasks.filter((t) => skills.includes(t.id))
+  const filtered = toolFilter.length
+    ? allTasks.filter((t) => toolFilter.includes(t.id))
     : allTasks.filter((t) => t.id !== selfId);
 
   // Maintain a map from mangled tool name → original task id, so we can
@@ -202,9 +270,10 @@ export default async function main({ params, kv, dicode }: DicodeSdk) {
   while (iterations++ < MAX_TOOL_ITERATIONS) {
     await compactIfNeeded(session, maxHistoryTokens, client, compactionModel);
 
-    const systemPrompt = session.summary
-      ? `${systemPromptBase}\n\nPrior conversation summary:\n${session.summary}`
-      : systemPromptBase;
+    const parts: string[] = [systemPromptBase];
+    if (skillsBlob) parts.push(skillsBlob);
+    if (session.summary) parts.push(`Prior conversation summary:\n${session.summary}`);
+    const systemPrompt = parts.filter(Boolean).join("\n\n");
 
     // deno-lint-ignore no-explicit-any
     const apiMessages: any[] = [
