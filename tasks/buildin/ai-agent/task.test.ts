@@ -1,21 +1,21 @@
 /**
- * task.test.ts — unit tests for the AI Agent task.
+ * task.test.ts — unit tests for the AI Agent buildin.
  *
- * Uses the dicode task test harness globals (test, params, env, kv, http,
- * assert, runTask). Each test() gets a fresh mock state.
+ * The buildin is generic: no provider defaults. Every test that exercises
+ * the chat path must set model/base_url/api_key_env (just like a sibling
+ * preset task — see tasks/examples/taskset.yaml — would do via overrides).
  *
- * We mock the OpenAI chat completions endpoint so no real API calls are
- * made, and we mock dicode.list_tasks / dicode.run_task to verify the
- * tool-use loop.
+ * Uses the dicode task test harness globals: test, params, env, kv, http,
+ * assert, runTask. Each test() gets a fresh mock state.
  */
 
-// Helper: build a minimal OpenAI chat completion response body.
+// Minimal OpenAI chat completion response body.
 function completion(content: string, tool_calls?: unknown[]) {
   return {
     id: "chatcmpl-test",
     object: "chat.completion",
     created: 0,
-    model: "gpt-4o",
+    model: "llama3.2",
     choices: [
       {
         index: 0,
@@ -27,11 +27,41 @@ function completion(content: string, tool_calls?: unknown[]) {
   };
 }
 
-test("first turn auto-generates a session_id and returns reply", async () => {
+// Shortcut: wire the agent at a local Ollama-like endpoint. No real API key
+// needed — the task uses a placeholder for localhost URLs.
+function useLocal() {
+  params.set("model", "llama3.2");
+  params.set("base_url", "http://localhost:11434/v1");
+  params.set("api_key_env", "OLLAMA_API_KEY");
+}
+
+// Shortcut: wire the agent at OpenAI proper. Needs a real (mocked) key.
+function useOpenAI() {
   env.set("OPENAI_API_KEY", "sk-test");
+  params.set("model", "gpt-4o-mini");
+  params.set("base_url", "https://api.openai.com/v1");
+  params.set("api_key_env", "OPENAI_API_KEY");
+}
+
+test("returns not_configured when no provider params are set", async () => {
+  params.set("prompt", "hello");
+  // intentionally no model / base_url / api_key_env
+
+  const result = await runTask();
+
+  assert.equal(result.error, "not_configured");
+  assert.equal(result.reply, null);
+  assert.ok(result.session_id);
+  // Should list model and base_url as missing at minimum
+  assert.ok(result.missing.includes("model"));
+  assert.ok(result.missing.includes("base_url"));
+});
+
+test("first turn auto-generates a session_id and returns reply", async () => {
+  useLocal();
   params.set("prompt", "hello");
 
-  http.mock("POST", "https://api.openai.com/v1/chat/completions", {
+  http.mock("POST", "http://localhost:11434/v1/chat/completions", {
     status: 200,
     body: completion("hi there"),
   });
@@ -40,15 +70,14 @@ test("first turn auto-generates a session_id and returns reply", async () => {
 
   assert.ok(result.session_id);
   assert.equal(result.reply, "hi there");
-  assert.httpCalled("POST", "https://api.openai.com/v1/chat/completions");
+  assert.httpCalled("POST", "http://localhost:11434/v1/chat/completions");
 });
 
 test("provided session_id is echoed back and history is preserved in kv", async () => {
-  env.set("OPENAI_API_KEY", "sk-test");
+  useLocal();
   params.set("prompt", "second message");
   params.set("session_id", "fixed-session-123");
 
-  // Pre-seed kv with a prior turn so we can verify the task appends to it.
   kv.set("chat:fixed-session-123", {
     messages: [
       { role: "user", content: "first message" },
@@ -58,7 +87,7 @@ test("provided session_id is echoed back and history is preserved in kv", async 
     updated_at: 0,
   });
 
-  http.mock("POST", "https://api.openai.com/v1/chat/completions", {
+  http.mock("POST", "http://localhost:11434/v1/chat/completions", {
     status: 200,
     body: completion("second reply"),
   });
@@ -70,15 +99,11 @@ test("provided session_id is echoed back and history is preserved in kv", async 
 });
 
 test("tool-use loop calls run_task and feeds result back to model", async () => {
-  env.set("OPENAI_API_KEY", "sk-test");
+  useLocal();
   params.set("prompt", "use the hello tool");
 
-  // list_tasks returns one callable task.
-  // (assumes the harness exposes a dicode.mock API; if not, tool list is empty
-  // and this test degrades to asserting a plain reply — still meaningful.)
-
   // First model call → tool_calls. Second → plain reply.
-  http.mockOnce("POST", "https://api.openai.com/v1/chat/completions", {
+  http.mockOnce("POST", "http://localhost:11434/v1/chat/completions", {
     status: 200,
     body: completion("", [
       {
@@ -88,7 +113,7 @@ test("tool-use loop calls run_task and feeds result back to model", async () => 
       },
     ]),
   });
-  http.mockOnce("POST", "https://api.openai.com/v1/chat/completions", {
+  http.mockOnce("POST", "http://localhost:11434/v1/chat/completions", {
     status: 200,
     body: completion("done"),
   });
@@ -98,27 +123,30 @@ test("tool-use loop calls run_task and feeds result back to model", async () => 
   assert.equal(result.reply, "done");
 });
 
-test("throws when api key env var is not set", async () => {
-  // OPENAI_API_KEY intentionally not set
+test("throws when api key env var is not set (hosted provider)", async () => {
+  // Configure openai base_url but do not set OPENAI_API_KEY
   params.set("prompt", "hi");
+  params.set("model", "gpt-4o-mini");
+  params.set("base_url", "https://api.openai.com/v1");
+  params.set("api_key_env", "OPENAI_API_KEY");
+  // intentionally no env.set("OPENAI_API_KEY", ...)
 
   await assert.throws(() => runTask(), /OPENAI_API_KEY not set/);
 });
 
 test("throws when prompt is empty", async () => {
-  env.set("OPENAI_API_KEY", "sk-test");
+  useLocal();
   // prompt intentionally not set
 
   await assert.throws(() => runTask(), /prompt param is required/);
 });
 
 test("compaction fires when history exceeds max_history_tokens", async () => {
-  env.set("OPENAI_API_KEY", "sk-test");
+  useLocal();
   params.set("prompt", "new question");
   params.set("session_id", "compact-test");
   params.set("max_history_tokens", "10"); // tiny budget forces compaction
 
-  // Seed a long history so estimateTokens > 10
   const bigText = "x".repeat(500);
   kv.set("chat:compact-test", {
     messages: [
@@ -134,11 +162,11 @@ test("compaction fires when history exceeds max_history_tokens", async () => {
   });
 
   // First call = compaction summary, second call = the actual response.
-  http.mockOnce("POST", "https://api.openai.com/v1/chat/completions", {
+  http.mockOnce("POST", "http://localhost:11434/v1/chat/completions", {
     status: 200,
     body: completion("- user asked about stuff\n- assistant replied"),
   });
-  http.mockOnce("POST", "https://api.openai.com/v1/chat/completions", {
+  http.mockOnce("POST", "http://localhost:11434/v1/chat/completions", {
     status: 200,
     body: completion("final answer"),
   });
@@ -146,6 +174,18 @@ test("compaction fires when history exceeds max_history_tokens", async () => {
   const result = await runTask();
 
   assert.equal(result.reply, "final answer");
-  // Two chat completion calls: one for compaction, one for the real turn.
+});
+
+test("openai provider round-trip works with real key", async () => {
+  useOpenAI();
+  params.set("prompt", "hello");
+
+  http.mock("POST", "https://api.openai.com/v1/chat/completions", {
+    status: 200,
+    body: completion("hi there"),
+  });
+
+  const result = await runTask();
+  assert.equal(result.reply, "hi there");
   assert.httpCalled("POST", "https://api.openai.com/v1/chat/completions");
 });

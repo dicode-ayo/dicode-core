@@ -50,3 +50,70 @@ spec:
     github-push-webhook:
       ref:
         path: ./github-push-webhook/task.yaml
+
+    # ─── AI agent, provider-specific presets ─────────────────────────────────
+    # These reuse the buildin/ai-agent task.ts, overriding only the bits that
+    # differ per provider: param defaults, network allowlist, env allowlist.
+    # No code is duplicated; the override layer patches the spec in memory
+    # before the runtime spawns.
+
+    ai-agent-ollama:
+      ref:
+        path: ../buildin/ai-agent/task.yaml
+      overrides:
+        name: "AI Agent (Ollama)"
+        description: >
+          AI agent preset wired to a local Ollama install. Assumes Ollama is
+          running on 127.0.0.1:11434. Change the model param to any tag you
+          have pulled locally (`ollama list`).
+        trigger:
+          webhook: /hooks/ai/ollama
+        params:
+          model: "llama3.2"
+          base_url: "http://localhost:11434/v1"
+          api_key_env: "OLLAMA_API_KEY"
+        env:
+          - OLLAMA_API_KEY
+        net:
+          # Ollama only — stays local.
+          - localhost:11434
+          - 127.0.0.1:11434
+
+    ai-agent-openai:
+      ref:
+        path: ../buildin/ai-agent/task.yaml
+      overrides:
+        name: "AI Agent (OpenAI)"
+        description: >
+          AI agent preset wired to the OpenAI API. Set OPENAI_API_KEY in
+          your dicode environment or secrets store before using.
+        trigger:
+          webhook: /hooks/ai/openai
+        params:
+          model: "gpt-4o-mini"
+          base_url: "https://api.openai.com/v1"
+          api_key_env: "OPENAI_API_KEY"
+        env:
+          - OPENAI_API_KEY
+        net:
+          - api.openai.com
+
+    ai-agent-groq:
+      ref:
+        path: ../buildin/ai-agent/task.yaml
+      overrides:
+        name: "AI Agent (Groq)"
+        description: >
+          AI agent preset wired to Groq's OpenAI-compatible API. Free tier
+          is generous; grab a key at console.groq.com. Set GROQ_API_KEY in
+          your dicode environment before using.
+        trigger:
+          webhook: /hooks/ai/groq
+        params:
+          model: "llama-3.3-70b-versatile"
+          base_url: "https://api.groq.com/openai/v1"
+          api_key_env: "GROQ_API_KEY"
+        env:
+          - GROQ_API_KEY
+        net:
+          - api.groq.com
