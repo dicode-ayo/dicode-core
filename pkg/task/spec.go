@@ -292,6 +292,11 @@ func LoadDir(dir string) (*Spec, error) {
 	spec.TaskDir = dir
 	spec.ID = filepath.Base(dir)
 
+	// Expand ${VAR} template references in paths, secrets, and env indirection
+	// keys. Kept intentionally narrow — see expandSpec for the allowlist and
+	// pkg/task/template.go for the resolution rules.
+	expandSpec(&spec, builtinVars(dir))
+
 	if spec.Runtime == "" || spec.Runtime == "js" {
 		spec.Runtime = RuntimeDeno
 	}
