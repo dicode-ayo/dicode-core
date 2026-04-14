@@ -123,7 +123,7 @@ func (rc *Reconciler) handle(ev source.Event) {
 			spec.ID = ev.TaskID
 		} else {
 			var err error
-			spec, err = task.LoadDir(ev.TaskDir)
+			spec, err = task.LoadDirWithVars(ev.TaskDir, ev.ExtraVars)
 			if err != nil {
 				rc.log.Warn("failed to load task",
 					zap.String("task", ev.TaskID),

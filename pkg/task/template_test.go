@@ -114,7 +114,7 @@ func TestExpandSpec_EnvEntryIndirection(t *testing.T) {
 }
 
 func TestBuiltinVars(t *testing.T) {
-	vars := builtinVars("/repo/tasks/myagent")
+	vars := builtinVars("/repo/tasks/myagent", nil)
 	if vars[VarTaskDir] != "/repo/tasks/myagent" {
 		t.Errorf("TASK_DIR not set correctly: %q", vars[VarTaskDir])
 	}
@@ -122,5 +122,69 @@ func TestBuiltinVars(t *testing.T) {
 	// have it. We don't want to flake on that.
 	if home, ok := vars[VarHome]; ok && home == "" {
 		t.Errorf("HOME set but empty")
+	}
+}
+
+func TestBuiltinVars_SourceRootDerivesSkillsDir(t *testing.T) {
+	extras := map[string]string{VarSourceRoot: "/repo/tasks"}
+	vars := builtinVars("/repo/tasks/myagent", extras)
+
+	if vars[VarSourceRoot] != "/repo/tasks" {
+		t.Errorf("SOURCE_ROOT not passed through: %q", vars[VarSourceRoot])
+	}
+	if vars[VarSkillsDir] != "/repo/tasks/skills" {
+		t.Errorf("SKILLS_DIR not auto-derived: %q", vars[VarSkillsDir])
+	}
+}
+
+func TestBuiltinVars_ExplicitSkillsDirWins(t *testing.T) {
+	extras := map[string]string{
+		VarSourceRoot: "/repo/tasks",
+		VarSkillsDir:  "/elsewhere/md",
+	}
+	vars := builtinVars("/repo/tasks/myagent", extras)
+
+	if vars[VarSkillsDir] != "/elsewhere/md" {
+		t.Errorf("explicit SKILLS_DIR not honoured: %q", vars[VarSkillsDir])
+	}
+}
+
+func TestLoadDirWithVars_ExpandsSourceRoot(t *testing.T) {
+	dir := t.TempDir()
+	yaml := `
+apiVersion: dicode/v1
+kind: Task
+name: test
+runtime: deno
+trigger:
+  manual: true
+permissions:
+  fs:
+    - path: "${SOURCE_ROOT}/skills"
+      permission: r
+    - path: "${SKILLS_DIR}/extra"
+      permission: r
+`
+	if err := os.WriteFile(dir+"/task.yaml", []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Create task.ts to satisfy validation.
+	if err := os.WriteFile(dir+"/task.ts", []byte("export default async function main() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	spec, err := LoadDirWithVars(dir, map[string]string{VarSourceRoot: "/fake/source"})
+	if err != nil {
+		t.Fatalf("LoadDirWithVars: %v", err)
+	}
+
+	if len(spec.Permissions.FS) != 2 {
+		t.Fatalf("expected 2 FS entries, got %d", len(spec.Permissions.FS))
+	}
+	if spec.Permissions.FS[0].Path != "/fake/source/skills" {
+		t.Errorf("FS[0] = %q, want /fake/source/skills", spec.Permissions.FS[0].Path)
+	}
+	if spec.Permissions.FS[1].Path != "/fake/source/skills/extra" {
+		t.Errorf("FS[1] = %q, want /fake/source/skills/extra", spec.Permissions.FS[1].Path)
 	}
 }

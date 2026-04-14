@@ -272,7 +272,23 @@ type Spec struct {
 }
 
 // LoadDir reads a task from its directory (expects task.yaml and task.<ext>).
+// Equivalent to LoadDirWithVars(dir, nil). Use LoadDirWithVars from source
+// loaders that know about per-source context (SOURCE_ROOT, SKILLS_DIR, …).
 func LoadDir(dir string) (*Spec, error) {
+	return LoadDirWithVars(dir, nil)
+}
+
+// LoadDirWithVars reads a task from its directory, expanding ${VAR} references
+// in the spec using built-in variables merged with the caller-supplied extras.
+// Pass nil for extras when loading a task outside of a source context.
+//
+// Supported extras include:
+//   - SOURCE_ROOT: absolute path to the source root (source loaders set this)
+//   - SKILLS_DIR:  absolute path to the shared skills directory
+//     (auto-derived as SOURCE_ROOT/skills if SOURCE_ROOT is set and SKILLS_DIR isn't)
+//
+// See pkg/task/template.go for the full variable set and resolution rules.
+func LoadDirWithVars(dir string, extras map[string]string) (*Spec, error) {
 	specPath := filepath.Join(dir, "task.yaml")
 	f, err := os.Open(specPath)
 	if err != nil {
@@ -295,7 +311,7 @@ func LoadDir(dir string) (*Spec, error) {
 	// Expand ${VAR} template references in paths, secrets, and env indirection
 	// keys. Kept intentionally narrow — see expandSpec for the allowlist and
 	// pkg/task/template.go for the resolution rules.
-	expandSpec(&spec, builtinVars(dir))
+	expandSpec(&spec, builtinVars(dir, extras))
 
 	if spec.Runtime == "" || spec.Runtime == "js" {
 		spec.Runtime = RuntimeDeno

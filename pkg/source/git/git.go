@@ -247,15 +247,20 @@ func (g *GitSource) diff() ([]source.Event, error) {
 
 	var events []source.Event
 
+	// Vars injected into task.yaml template expansion for every task under
+	// this source. SOURCE_ROOT is the clone directory; SKILLS_DIR is
+	// auto-derived by the task loader (see pkg/task/template.go).
+	extras := map[string]string{task.VarSourceRoot: g.localDir}
+
 	for id, hash := range current {
 		dir := filepath.Join(g.localDir, id)
 		if _, ok := prev[id]; !ok {
 			events = append(events, source.Event{
-				Kind: source.EventAdded, TaskID: id, TaskDir: dir, Source: g.id,
+				Kind: source.EventAdded, TaskID: id, TaskDir: dir, Source: g.id, ExtraVars: extras,
 			})
 		} else if prev[id] != hash {
 			events = append(events, source.Event{
-				Kind: source.EventUpdated, TaskID: id, TaskDir: dir, Source: g.id,
+				Kind: source.EventUpdated, TaskID: id, TaskDir: dir, Source: g.id, ExtraVars: extras,
 			})
 		}
 	}

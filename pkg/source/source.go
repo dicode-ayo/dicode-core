@@ -27,6 +27,11 @@ type Event struct {
 	// The reconciler uses it directly instead of calling task.LoadDir(TaskDir).
 	// Set by taskset sources; nil for plain git/local sources.
 	Spec *task.Spec
+	// ExtraVars carries per-source template variables injected into
+	// task.yaml's ${VAR} expansion at load time. Sources populate this with
+	// e.g. SOURCE_ROOT (the source's root path) so tasks can reference
+	// shared directories without hardcoding a path. nil = no extras.
+	ExtraVars map[string]string
 }
 
 // Source is anything that can produce task change events.

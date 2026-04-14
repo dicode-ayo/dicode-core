@@ -117,9 +117,12 @@ async function compactIfNeeded(
   session.messages = recent;
 }
 
-// Resolve the repo-shared skills directory. Relative path resolves against
-// the task's own directory (tasks/buildin/ai-agent/), so ../../skills points
-// at tasks/skills/. Keep in sync with permissions.fs in task.yaml.
+// Resolve the shared skills directory. Computed at runtime via
+// import.meta.url so the task works from any source — relative to the
+// task's own location (<source>/buildin/ai-agent/), ../../skills hops
+// out to <source>/skills. The corresponding FS read permission in
+// task.yaml uses the ${SKILLS_DIR} template var so the sandbox grants
+// access to exactly the same path.
 const SKILLS_DIR = new URL("../../skills/", import.meta.url).pathname;
 
 async function loadSkills(names: string[]): Promise<string> {

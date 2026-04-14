@@ -97,13 +97,13 @@ permissions:
   net: []
 
   # ─── Filesystem ───────────────────────────────────────────────────────────
-  # Read access to the repo's shared skills directory so the task can load
-  # md files referenced by the "skills" param. ${TASK_DIR} is a built-in
-  # template variable expanded at task-load time; for this buildin task it
-  # resolves to tasks/buildin/ai-agent/, and the ../../ hops out to
-  # tasks/skills/. See pkg/task/template.go for the full variable set.
+  # Read access to the source's shared skills directory so the task can load
+  # md files referenced by the "skills" param. ${SKILLS_DIR} is injected by
+  # the source loader and resolves to <source-root>/skills, so this task
+  # works across local, git, and taskset sources without path hacks.
+  # See pkg/task/template.go for the full template variable set.
   fs:
-    - path: "${TASK_DIR}/../../skills"
+    - path: "${SKILLS_DIR}"
       permission: r
 
   # ─── Dicode runtime APIs ──────────────────────────────────────────────────

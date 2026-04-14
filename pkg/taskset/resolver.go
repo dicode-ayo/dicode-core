@@ -27,8 +27,9 @@ type Resolver struct {
 	devMode bool
 	log     *zap.Logger
 
-	mu     sync.Mutex
-	clones map[repoKey]string // (url, branch) → absolute local dir
+	mu        sync.Mutex
+	clones    map[repoKey]string // (url, branch) → absolute local dir
+	extraVars map[string]string  // template vars injected into every LoadDir call (e.g. SOURCE_ROOT)
 }
 
 // NewResolver creates a Resolver.
@@ -54,6 +55,22 @@ func (r *Resolver) DevMode() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.devMode
+}
+
+// SetExtraVars sets the template variables injected into task.yaml ${VAR}
+// expansion for every task resolved by this Resolver. Sources call this
+// before Resolve to inject source-level context (e.g. SOURCE_ROOT). Passing
+// nil clears any previously set vars.
+func (r *Resolver) SetExtraVars(vars map[string]string) {
+	r.mu.Lock()
+	r.extraVars = vars
+	r.mu.Unlock()
+}
+
+func (r *Resolver) getExtraVars() map[string]string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.extraVars
 }
 
 // Resolve walks the TaskSet rooted at tsRef with the given namespace prefix.
@@ -165,7 +182,7 @@ func (r *Resolver) resolveBody(
 				continue
 			}
 			taskDir := filepath.Dir(localPath)
-			spec, err := task.LoadDir(taskDir)
+			spec, err := task.LoadDirWithVars(taskDir, r.getExtraVars())
 			if err != nil {
 				r.log.Warn("taskset: failed to load task",
 					zap.String("entry", fullID), zap.Error(err))
