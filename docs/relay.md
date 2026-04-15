@@ -106,6 +106,27 @@ client.
 
 ---
 
+## OAuth broker
+
+When connected to a relay that exposes the OAuth broker (the default at
+`relay.dicode.app`), the daemon gains two built-in tasks that perform the
+authorization flow without any provider-side app registration:
+
+- `buildin/auth-start` — generates a signed `/auth/:provider` URL via
+  `dicode.oauth.build_auth_url` and prints it for the user to open.
+- `buildin/auth-relay` — receives the encrypted token delivery on the
+  reserved `/hooks/oauth-complete` path and writes the resulting
+  credentials straight into secrets via `dicode.oauth.store_token`.
+
+Plaintext tokens never reach task code: decrypt, parse, and `secrets.Set`
+all happen in Go-process memory. The full flow, security model, and
+failure modes are documented in [oauth.md](./oauth.md).
+
+If the relay is disabled, the broker primitives return "not configured"
+and you should use the local OAuth flow instead (see the same doc).
+
+---
+
 ## Self-hosting the relay server
 
 The relay server is included in the dicode repository (`pkg/relay/server.go`).
