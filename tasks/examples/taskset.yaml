@@ -56,6 +56,14 @@ spec:
     # differ per provider: param defaults, network allowlist, env allowlist.
     # No code is duplicated; the override layer patches the spec in memory
     # before the runtime spawns.
+    #
+    # ⚠  SECURITY: these presets are UNAUTHENTICATED (trigger.auth is not
+    #    set). Any origin in the browser can POST to /hooks/ai/<provider>
+    #    and spend the configured API budget. This is intentional for the
+    #    local-dev chat UI — the auth-UX blocker is tracked in #96, which
+    #    is a P0 blocker on the alpha release epic (#82). Do NOT expose
+    #    these webhooks on a daemon reachable from untrusted networks
+    #    until auth: true is wired up.
 
     ai-agent-ollama:
       ref:
@@ -71,9 +79,11 @@ spec:
         params:
           model: "llama3.2"
           base_url: "http://localhost:11434/v1"
-          api_key_env: "OLLAMA_API_KEY"
-        env:
-          - OLLAMA_API_KEY
+          # api_key_env deliberately omitted — Ollama does not authenticate.
+          # Inheriting the buildin default ("") tells task.ts to send a
+          # placeholder apiKey (required by the OpenAI SDK). If you run an
+          # authenticated Ollama proxy, override api_key_env here with the
+          # env-var name holding your key.
         net:
           # Ollama only — stays local.
           - localhost:11434

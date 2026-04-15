@@ -189,3 +189,50 @@ test("openai provider round-trip works with real key", async () => {
   assert.equal(result.reply, "hi there");
   assert.httpCalled("POST", "https://api.openai.com/v1/chat/completions");
 });
+
+test("self-id filter excludes only the exact task_id, not prefix matches", async () => {
+  // Self-recursion prevention must compare task ids for EXACT equality, not
+  // prefix or substring. Previously used a regex on "/ai-agent(-|$)/" which
+  // would wrongly exclude things like "team/ai-agent-helper". With
+  // dicode.task_id the filter is a simple !== check — this test guards
+  // against regressing back to prefix matching.
+  useLocal();
+  params.set("prompt", "hi");
+
+  dicode.task_id = "buildin/ai-agent";
+  dicode.list_tasks = async () => [
+    { id: "buildin/ai-agent" },       // self — must be excluded
+    { id: "buildin/ai-agent-helper" }, // looks like self, must NOT be excluded
+    { id: "team/ai-agent" },           // matches basename, must NOT be excluded
+    { id: "other/something" },
+  ];
+
+  http.mock("POST", "http://localhost:11434/v1/chat/completions", {
+    status: 200,
+    body: completion("ok"),
+  });
+
+  await runTask();
+
+  // Capture the tools array the agent sent to the model on the last call.
+  const sent = http.lastRequestBody("POST", "http://localhost:11434/v1/chat/completions");
+  const toolNames: string[] = (sent.tools ?? []).map(
+    (t: { function: { name: string } }) => t.function.name,
+  );
+
+  assert.ok(!toolNames.includes("task_buildin_ai_agent"), "self must be excluded");
+  assert.ok(toolNames.includes("task_buildin_ai_agent_helper"), "look-alike sibling must NOT be excluded");
+  assert.ok(toolNames.includes("task_team_ai_agent"), "name collision in a different namespace must NOT be excluded");
+  assert.ok(toolNames.includes("task_other_something"), "unrelated task must remain");
+});
+
+test("refuses to run when dicode.task_id is empty", async () => {
+  // A handshake regression that wipes task_id must not silently disable the
+  // self-recursion guard above. The task throws a descriptive error so
+  // operators see the misconfiguration immediately.
+  useLocal();
+  params.set("prompt", "hi");
+  dicode.task_id = "";
+
+  await assert.throws(() => runTask(), /dicode\.task_id is empty/);
+});

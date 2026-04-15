@@ -50,6 +50,23 @@ function taskIdToToolName(id: string): string {
   return "task_" + id.replace(/[^a-zA-Z0-9_-]/g, "_");
 }
 
+// Map a dicode param type to a JSON Schema type. Unknown types fall back
+// to "string" so the tool schema is always valid even for param types we
+// don't explicitly recognise.
+function dicodeTypeToJsonSchemaType(t: string | undefined): string {
+  switch (t) {
+    case "number":
+    case "integer":
+    case "boolean":
+      return t;
+    case "array":
+    case "object":
+      return t;
+    default:
+      return "string";
+  }
+}
+
 // Convert dicode param list to a JSON Schema object for an OpenAI tool.
 function paramsToJsonSchema(
   params: TaskSummary["params"],
@@ -58,10 +75,15 @@ function paramsToJsonSchema(
   const required: string[] = [];
   if (params) {
     for (const p of params) {
-      properties[p.name] = {
-        type: p.type === "number" ? "number" : p.type === "boolean" ? "boolean" : "string",
+      const prop: Record<string, unknown> = {
+        type: dicodeTypeToJsonSchemaType(p.type),
         description: p.description ?? "",
       };
+      // JSON Schema requires `items` on array types. We don't have
+      // element-type info from dicode params, so fall back to string —
+      // the agent can coerce at call time.
+      if (prop.type === "array") prop.items = { type: "string" };
+      properties[p.name] = prop;
       if (p.required) required.push(p.name);
     }
   }
@@ -73,21 +95,36 @@ function paramsToJsonSchema(
   };
 }
 
+interface CompactionConfig {
+  maxHistoryTokens: number; // trigger threshold (estimated tokens)
+  keepTurns: number;        // last N turns kept verbatim; older turns get summarized
+  summaryMaxTokens: number; // max_tokens budget for the summary call
+  model: string;            // model used to generate the summary
+}
+
 // Strip summarized turns and replace with a single system "summary" entry.
 async function compactIfNeeded(
   session: SessionState,
-  maxTokens: number,
+  cfg: CompactionConfig,
   client: OpenAI,
-  compactionModel: string,
 ): Promise<void> {
-  if (estimateTokens(session.messages, session.summary) <= maxTokens) return;
+  if (estimateTokens(session.messages, session.summary) <= cfg.maxHistoryTokens) return;
 
-  // Keep the last 4 turns verbatim; summarize everything older.
-  const keep = 4;
-  if (session.messages.length <= keep) return;
+  if (session.messages.length <= cfg.keepTurns) {
+    // Budget already exceeded but we have nothing to compact — a single
+    // turn is larger than the whole history budget. Log so an operator
+    // can diagnose; the next API call will likely fail with a context
+    // length error, which is the right signal to the caller.
+    console.warn(
+      `ai-agent: history over budget (~${estimateTokens(session.messages, session.summary)} tokens > ${cfg.maxHistoryTokens}) ` +
+        `but only ${session.messages.length} turns present; skipping compaction. ` +
+        `Consider raising max_history_tokens or splitting the prompt.`,
+    );
+    return;
+  }
 
-  const older = session.messages.slice(0, -keep);
-  const recent = session.messages.slice(-keep);
+  const older = session.messages.slice(0, -cfg.keepTurns);
+  const recent = session.messages.slice(-cfg.keepTurns);
 
   const transcript = older
     .map((m) => `${m.role.toUpperCase()}: ${m.content}`)
@@ -95,7 +132,7 @@ async function compactIfNeeded(
 
   const previousSummary = session.summary ?? "";
   const summaryResp = await client.chat.completions.create({
-    model: compactionModel,
+    model: cfg.model,
     messages: [
       {
         role: "system",
@@ -110,37 +147,51 @@ async function compactIfNeeded(
           : `Summarize these turns:\n${transcript}`,
       },
     ],
-    max_tokens: 1024,
+    max_tokens: cfg.summaryMaxTokens,
   });
 
   session.summary = summaryResp.choices[0]?.message?.content ?? previousSummary;
   session.messages = recent;
 }
 
-// Resolve the shared skills directory. Computed at runtime via
-// import.meta.url so the task works from any source — relative to the
-// task's own location (<source>/buildin/ai-agent/), ../../skills hops
-// out to <source>/skills. The corresponding FS read permission in
-// task.yaml uses the ${SKILLS_DIR} template var so the sandbox grants
-// access to exactly the same path.
-const SKILLS_DIR = new URL("../../skills/", import.meta.url).pathname;
+// Whitelist for skill file basenames: alphanumerics, dash, underscore, dot
+// (for sub-extensions like "github.push"). No slashes, no leading dot, no
+// empty string, no path traversal sequences.
+const SKILL_NAME_RE = /^[A-Za-z0-9_][A-Za-z0-9_.\-]*$/;
 
-async function loadSkills(names: string[]): Promise<string> {
+async function loadSkills(skillsDir: string, names: string[]): Promise<string> {
   if (names.length === 0) return "";
+  if (!skillsDir) {
+    // Loud: a request for skills with no directory configured is almost
+    // certainly a misconfiguration, not a user expectation. The model
+    // also sees a clear marker so it doesn't hallucinate around it.
+    console.error(
+      `ai-agent: skills requested but skills_dir is empty; nothing loaded: ${names.join(", ")}`,
+    );
+    return `# skills\n(skills_dir is empty; nothing loaded: ${names.join(", ")})`;
+  }
+  const base = skillsDir.endsWith("/") ? skillsDir : skillsDir + "/";
   const chunks: string[] = [];
   for (const name of names) {
-    // Defensive: disallow path traversal. Skill names are filenames only.
-    if (name.includes("/") || name.includes("..") || name.includes("\\")) {
+    // Defensive: skill names must be plain filenames. Reject path separators,
+    // traversal sequences, empty strings, and anything starting with '.'
+    // (blocks `.env`-style probes).
+    if (!SKILL_NAME_RE.test(name) || name.includes("..")) {
+      console.error(`ai-agent: rejected invalid skill name ${JSON.stringify(name)}`);
       chunks.push(`# skill:${name}\n(rejected: invalid skill name)\n`);
       continue;
     }
-    const path = `${SKILLS_DIR}${name}.md`;
+    const path = `${base}${name}.md`;
     try {
       const body = await Deno.readTextFile(path);
       chunks.push(`# skill:${name}\n${body.trim()}`);
     } catch (e) {
+      // Log the full path so operators can distinguish a user typo
+      // (wrong name) from a permissions/path misconfig (wrong skills_dir).
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error(`ai-agent: failed to load skill ${name} from ${path}: ${msg}`);
       chunks.push(
-        `# skill:${name}\n(not loaded: ${e instanceof Error ? e.message : String(e)})`,
+        `# skill:${name}\n(not loaded: ${msg})`,
       );
     }
   }
@@ -156,6 +207,18 @@ interface NotConfiguredResponse {
 }
 
 export default async function main({ params, kv, dicode }: DicodeSdk) {
+  // Self-identity check before anything else. dicode.task_id is populated
+  // from the IPC handshake and is used below to exclude this task from its
+  // own tool list. An empty value would silently turn that filter into a
+  // no-op, letting the agent call itself as a tool and recurse up to
+  // max_tool_iterations deep per turn. Fail loud instead.
+  if (!dicode.task_id) {
+    throw new Error(
+      "ai-agent: dicode.task_id is empty — refusing to run without a self-identity. " +
+        "This indicates the IPC handshake did not populate task_id; check the dicode daemon version.",
+    );
+  }
+
   const prompt = (await params.get("prompt")) ?? "";
   if (!prompt) throw new Error("prompt param is required");
 
@@ -183,16 +246,20 @@ export default async function main({ params, kv, dicode }: DicodeSdk) {
   const baseURL = (await params.get("base_url")) ?? "";
   const apiKeyEnv = (await params.get("api_key_env")) ?? "";
   const systemPromptBase = (await params.get("system_prompt")) ?? "";
-  const maxHistoryTokens = Number((await params.get("max_history_tokens")) ?? "80000");
+  const maxHistoryTokens = Number(await params.get("max_history_tokens"));
   const compactionModel = (await params.get("compaction_model")) || model;
+
+  // Tunables — all have task.yaml defaults, no fallbacks here. Fail loud
+  // if the caller sends empty/non-numeric values rather than silently
+  // substituting different magic numbers from two sources.
+  const maxToolIterations = Number(await params.get("max_tool_iterations"));
+  const responseMaxTokens = Number(await params.get("response_max_tokens"));
+  const compactionMaxTokens = Number(await params.get("compaction_max_tokens"));
+  const compactionKeepTurns = Number(await params.get("compaction_keep_turns"));
 
   const missing: string[] = [];
   if (!model) missing.push("model");
   if (!baseURL) missing.push("base_url");
-  // api_key_env is optional for local URLs (handled below), but flag it as
-  // missing for non-local URLs so the caller gets a clear error.
-  const isLocal = /^https?:\/\/(localhost|127\.0\.0\.1)/i.test(baseURL);
-  if (!isLocal && !apiKeyEnv) missing.push("api_key_env");
 
   if (missing.length > 0) {
     const response: NotConfiguredResponse = {
@@ -208,26 +275,41 @@ export default async function main({ params, kv, dicode }: DicodeSdk) {
     return response;
   }
 
-  // Local runtimes (Ollama, LM Studio) don't authenticate, but the OpenAI SDK
-  // requires a non-empty apiKey string. If base_url looks local and the env
-  // var isn't set, fall back to a placeholder so the task works out of the
-  // box. Hosted providers still require a real key.
-  let apiKey = apiKeyEnv ? Deno.env.get(apiKeyEnv) : undefined;
-  if (!apiKey) {
-    if (isLocal) {
-      apiKey = "ollama"; // placeholder accepted by Ollama, LM Studio, etc.
-    } else {
-      throw new Error(`${apiKeyEnv} not set in task environment`);
+  // API key resolution is purely param-driven, with no URL sniffing.
+  //
+  //   api_key_env == ""      → provider does not authenticate (Ollama,
+  //                             LM Studio, any OpenAI-compat server that
+  //                             ignores the key). Pass a non-empty literal
+  //                             because the OpenAI SDK rejects "".
+  //   api_key_env == "FOO"   → FOO must be present in the task env, else
+  //                             throw. No fallback, no URL-based exceptions
+  //                             — the caller explicitly asked for a key.
+  let apiKey: string;
+  if (!apiKeyEnv) {
+    apiKey = "unused";
+  } else {
+    const fromEnv = Deno.env.get(apiKeyEnv);
+    if (!fromEnv) {
+      throw new Error(
+        `${apiKeyEnv} not set in task environment (api_key_env="${apiKeyEnv}"). ` +
+          `For providers that don't authenticate, leave api_key_env empty.`,
+      );
     }
+    apiKey = fromEnv;
   }
 
-  // Load skills eagerly and splice them into the system prompt.
-  const skillsBlob = await loadSkills(skillNames);
+  // Load skills eagerly and splice them into the system prompt. The
+  // directory comes from the skills_dir param, whose default is populated
+  // by template expansion at task-load time (${TASK_SET_DIR}/../skills by
+  // default; see docs/task-template-vars.md).
+  const skillsDir = (await params.get("skills_dir")) ?? "";
+  const skillsBlob = await loadSkills(skillsDir, skillNames);
 
   console.log(
-    `ai-agent[${new Date().toISOString()}]: provider → model=${model} ` +
-      `baseURL=${baseURL} (local=${isLocal}) session=${sessionId.slice(0, 8)} ` +
-      `tools=${toolFilter.length || "*"} skills=${skillNames.length}`,
+    `ai-agent[${new Date().toISOString()}]: task=${dicode.task_id} ` +
+      `run=${dicode.run_id.slice(0, 8)} model=${model} baseURL=${baseURL} ` +
+      `session=${sessionId.slice(0, 8)} tools=${toolFilter.length || "*"} ` +
+      `skills=${skillNames.length}`,
   );
 
   const client = new OpenAI({ apiKey, baseURL });
@@ -241,12 +323,17 @@ export default async function main({ params, kv, dicode }: DicodeSdk) {
     updated_at: Date.now(),
   };
 
-  // Build tool list from list_tasks(), filtered by toolFilter
+  // Build tool list from list_tasks(), filtered by toolFilter. When no
+  // explicit allowlist is supplied we exclude exactly this task's own id
+  // (sourced from the SDK handshake) to prevent one-step self-recursion.
+  // Presets that reuse this task.ts under a different id (ai-agent-ollama,
+  // ai-agent-openai, …) get the correct exclusion for free because each
+  // run reports its own namespaced task_id.
   const allTasks = ((await dicode.list_tasks()) as TaskSummary[]) ?? [];
-  const selfId = "buildin/ai-agent";
+  const selfID = dicode.task_id;
   const filtered = toolFilter.length
     ? allTasks.filter((t) => toolFilter.includes(t.id))
-    : allTasks.filter((t) => t.id !== selfId);
+    : allTasks.filter((t) => t.id !== selfID);
 
   // Maintain a map from mangled tool name → original task id, so we can
   // resolve tool_calls from the model back to the real task.
@@ -267,82 +354,120 @@ export default async function main({ params, kv, dicode }: DicodeSdk) {
   // Append user turn
   session.messages.push({ role: "user", content: prompt });
 
-  const MAX_TOOL_ITERATIONS = 10;
-  let iterations = 0;
+  const compactionCfg: CompactionConfig = {
+    maxHistoryTokens,
+    keepTurns: compactionKeepTurns,
+    summaryMaxTokens: compactionMaxTokens,
+    model: compactionModel,
+  };
 
-  while (iterations++ < MAX_TOOL_ITERATIONS) {
-    await compactIfNeeded(session, maxHistoryTokens, client, compactionModel);
-
-    const parts: string[] = [systemPromptBase];
-    if (skillsBlob) parts.push(skillsBlob);
-    if (session.summary) parts.push(`Prior conversation summary:\n${session.summary}`);
-    const systemPrompt = parts.filter(Boolean).join("\n\n");
-
-    // deno-lint-ignore no-explicit-any
-    const apiMessages: any[] = [
-      { role: "system", content: systemPrompt },
-      ...session.messages.map((m) => {
-        // deno-lint-ignore no-explicit-any
-        const out: any = { role: m.role, content: m.content };
-        if (m.tool_calls) out.tool_calls = m.tool_calls;
-        if (m.tool_call_id) out.tool_call_id = m.tool_call_id;
-        if (m.name) out.name = m.name;
-        return out;
-      }),
-    ];
-
-    const resp = await client.chat.completions.create({
-      model,
-      messages: apiMessages,
-      tools: tools.length ? tools : undefined,
-      max_tokens: 4096,
-    });
-
-    const choice = resp.choices[0]?.message;
-    if (!choice) throw new Error("empty response from model");
-
-    session.messages.push({
-      role: "assistant",
-      content: choice.content ?? "",
-      tool_calls: choice.tool_calls as unknown[] | undefined,
-    });
-
-    if (!choice.tool_calls || choice.tool_calls.length === 0) {
-      break; // terminal assistant turn
-    }
-
-    // Execute each tool call and append the result as a "tool" message
-    for (const call of choice.tool_calls) {
-      if (call.type !== "function") continue;
-      const taskId = toolNameToTaskId[call.function.name];
-      let result: unknown;
-      if (!taskId) {
-        result = { error: `unknown tool: ${call.function.name}` };
-      } else {
-        try {
-          const parsed = call.function.arguments
-            ? JSON.parse(call.function.arguments)
-            : {};
-          // dicode.run_task expects Record<string, string> — stringify non-string values
-          const stringified: Record<string, string> = {};
-          for (const [k, v] of Object.entries(parsed)) {
-            stringified[k] = typeof v === "string" ? v : JSON.stringify(v);
-          }
-          result = await dicode.run_task(taskId, stringified);
-        } catch (e) {
-          result = { error: e instanceof Error ? e.message : String(e) };
-        }
+  // The entire agent loop is wrapped in try/finally so the session — and
+  // all the tool round-trips it successfully completed — is persisted to
+  // KV even if an API call, tool dispatch, or compaction throws. Before
+  // this guard, a single rate-limit blip mid-loop silently discarded the
+  // whole turn plus any prior successful tool calls.
+  try {
+    let iterations = 0;
+    while (iterations++ < maxToolIterations) {
+      // A compaction failure (e.g. the summary model is rate-limited) is
+      // non-fatal: the next request will likely surface a context-length
+      // error from the main model, which is a clearer signal than tearing
+      // down the whole turn here. Log loudly so operators can diagnose.
+      try {
+        await compactIfNeeded(session, compactionCfg, client);
+      } catch (e) {
+        console.error(
+          `ai-agent: compaction failed, continuing uncompacted: ${e instanceof Error ? e.message : String(e)}`,
+        );
       }
-      session.messages.push({
-        role: "tool",
-        tool_call_id: call.id,
-        content: JSON.stringify(result ?? null),
+
+      const parts: string[] = [systemPromptBase];
+      if (skillsBlob) parts.push(skillsBlob);
+      if (session.summary) parts.push(`Prior conversation summary:\n${session.summary}`);
+      const systemPrompt = parts.filter(Boolean).join("\n\n");
+
+      // deno-lint-ignore no-explicit-any
+      const apiMessages: any[] = [
+        { role: "system", content: systemPrompt },
+        ...session.messages.map((m) => {
+          // deno-lint-ignore no-explicit-any
+          const out: any = { role: m.role, content: m.content };
+          if (m.tool_calls) out.tool_calls = m.tool_calls;
+          if (m.tool_call_id) out.tool_call_id = m.tool_call_id;
+          if (m.name) out.name = m.name;
+          return out;
+        }),
+      ];
+
+      const resp = await client.chat.completions.create({
+        model,
+        messages: apiMessages,
+        tools: tools.length ? tools : undefined,
+        max_tokens: responseMaxTokens,
       });
+
+      const choice = resp.choices[0]?.message;
+      if (!choice) throw new Error("empty response from model");
+
+      session.messages.push({
+        role: "assistant",
+        content: choice.content ?? "",
+        tool_calls: choice.tool_calls as unknown[] | undefined,
+      });
+
+      if (!choice.tool_calls || choice.tool_calls.length === 0) {
+        break; // terminal assistant turn
+      }
+
+      // Execute each tool call and append the result as a "tool" message.
+      // Tool failures are caught per-call so one broken tool can't derail
+      // the whole turn, but we also console.error the failure so the
+      // operator sees which tool broke. The model still receives the
+      // error as a structured result and can recover on the next turn.
+      for (const call of choice.tool_calls) {
+        if (call.type !== "function") continue;
+        const taskId = toolNameToTaskId[call.function.name];
+        let result: unknown;
+        if (!taskId) {
+          console.error(`ai-agent: unknown tool '${call.function.name}' requested`);
+          result = { error: `unknown tool: ${call.function.name}` };
+        } else {
+          try {
+            const parsed = call.function.arguments
+              ? JSON.parse(call.function.arguments)
+              : {};
+            // dicode.run_task expects Record<string, string> — stringify non-string values
+            const stringified: Record<string, string> = {};
+            for (const [k, v] of Object.entries(parsed)) {
+              stringified[k] = typeof v === "string" ? v : JSON.stringify(v);
+            }
+            result = await dicode.run_task(taskId, stringified);
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            console.error(`ai-agent: tool call failed task=${taskId} call=${call.id}: ${msg}`);
+            result = { error: msg };
+          }
+        }
+        session.messages.push({
+          role: "tool",
+          tool_call_id: call.id,
+          content: JSON.stringify(result ?? null),
+        });
+      }
+    }
+  } finally {
+    session.updated_at = Date.now();
+    // Best-effort persistence. If KV itself is broken the task was going
+    // to fail anyway, and we don't want the KV error to shadow the real
+    // error from the loop body. Log and move on.
+    try {
+      await kv.set(key, session);
+    } catch (e) {
+      console.error(
+        `ai-agent: failed to persist session ${sessionId.slice(0, 8)} to KV: ${e instanceof Error ? e.message : String(e)}`,
+      );
     }
   }
-
-  session.updated_at = Date.now();
-  await kv.set(key, session);
 
   const last = session.messages[session.messages.length - 1];
   const reply = last?.role === "assistant" ? last.content : "";
