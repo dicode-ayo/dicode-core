@@ -7,7 +7,7 @@ import (
 
 func TestExpandString_BuiltinVar(t *testing.T) {
 	vars := map[string]string{VarTaskDir: "/tmp/mytask"}
-	got := expandString("${TASK_DIR}/../../skills", vars)
+	got := expandString("${TASK_DIR}/../../skills", vars, true)
 	want := "/tmp/mytask/../../skills"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
@@ -16,7 +16,7 @@ func TestExpandString_BuiltinVar(t *testing.T) {
 
 func TestExpandString_ProcessEnvFallback(t *testing.T) {
 	t.Setenv("FOO_TEST_VAR", "bar")
-	got := expandString("${FOO_TEST_VAR}/baz", map[string]string{})
+	got := expandString("${FOO_TEST_VAR}/baz", map[string]string{}, true)
 	if got != "bar/baz" {
 		t.Errorf("got %q, want %q", got, "bar/baz")
 	}
@@ -26,7 +26,7 @@ func TestExpandString_UnknownVarIsPreserved(t *testing.T) {
 	// Unknown vars must NOT collapse to empty string. Keeping the literal
 	// makes bugs obvious and gives downstream code a chance to warn.
 	os.Unsetenv("DICODE_TEMPLATE_UNKNOWN_TEST")
-	got := expandString("${DICODE_TEMPLATE_UNKNOWN_TEST}/tail", map[string]string{})
+	got := expandString("${DICODE_TEMPLATE_UNKNOWN_TEST}/tail", map[string]string{}, true)
 	if got != "${DICODE_TEMPLATE_UNKNOWN_TEST}/tail" {
 		t.Errorf("got %q, want the literal to be preserved", got)
 	}
@@ -35,7 +35,7 @@ func TestExpandString_UnknownVarIsPreserved(t *testing.T) {
 func TestExpandString_BuiltinBeatsProcessEnv(t *testing.T) {
 	t.Setenv("TASK_DIR", "/shouldnt/win")
 	vars := map[string]string{VarTaskDir: "/from/builtin"}
-	got := expandString("${TASK_DIR}/x", vars)
+	got := expandString("${TASK_DIR}/x", vars, true)
 	if got != "/from/builtin/x" {
 		t.Errorf("got %q, want builtin to win", got)
 	}
@@ -43,14 +43,29 @@ func TestExpandString_BuiltinBeatsProcessEnv(t *testing.T) {
 
 func TestExpandString_NoDollarSign_IsNoop(t *testing.T) {
 	in := "/plain/path/with/no/template"
-	if got := expandString(in, map[string]string{"X": "y"}); got != in {
+	if got := expandString(in, map[string]string{"X": "y"}, true); got != in {
 		t.Errorf("got %q, want %q", got, in)
 	}
 }
 
 func TestExpandString_Empty(t *testing.T) {
-	if got := expandString("", map[string]string{"X": "y"}); got != "" {
+	if got := expandString("", map[string]string{"X": "y"}, true); got != "" {
 		t.Errorf("got %q, want empty", got)
+	}
+}
+
+// When envFallback is false, process env lookups must NOT happen — unknown
+// vars stay literal. Guards the exfiltration fix for EnvEntry.Value.
+func TestExpandString_NoEnvFallback(t *testing.T) {
+	t.Setenv("DICODE_TEMPLATE_SECRET_TEST", "should-not-leak")
+	got := expandString("${DICODE_TEMPLATE_SECRET_TEST}/tail", map[string]string{}, false)
+	if got != "${DICODE_TEMPLATE_SECRET_TEST}/tail" {
+		t.Errorf("env value leaked despite envFallback=false: %q", got)
+	}
+	// Builtins still resolve even when env fallback is off.
+	got = expandString("${X}/tail", map[string]string{"X": "ok"}, false)
+	if got != "ok/tail" {
+		t.Errorf("builtin not honoured: %q", got)
 	}
 }
 
@@ -113,6 +128,90 @@ func TestExpandSpec_EnvEntryIndirection(t *testing.T) {
 	}
 }
 
+// SECURITY: EnvEntry.Value must NOT pull from process env under any
+// circumstances. It is a literal value injected into the task sandbox, so
+// env-fallback expansion here would let any task.yaml exfiltrate daemon
+// environment variables by writing `value: "${SOME_SECRET}"`.
+func TestExpandSpec_EnvEntryValue_NoEnvExfiltration(t *testing.T) {
+	t.Setenv("DICODE_DAEMON_SECRET_TEST", "super-sensitive")
+	spec := &Spec{
+		Permissions: Permissions{
+			Env: []EnvEntry{
+				{Name: "LEAK", Value: "${DICODE_DAEMON_SECRET_TEST}"},
+			},
+		},
+	}
+	expandSpec(spec, map[string]string{})
+
+	if spec.Permissions.Env[0].Value == "super-sensitive" {
+		t.Fatalf("env value exfiltrated via EnvEntry.Value: %q", spec.Permissions.Env[0].Value)
+	}
+	// The literal ${…} should be preserved so operators notice the mistake.
+	if spec.Permissions.Env[0].Value != "${DICODE_DAEMON_SECRET_TEST}" {
+		t.Errorf("Value = %q, want literal preserved", spec.Permissions.Env[0].Value)
+	}
+}
+
+// Builtins and extras DO apply to EnvEntry.Value — only the env fallback
+// is suppressed. This keeps the taskset override use case working:
+// `overrides.env: [{name: FOO, value: "${TASK_DIR}/marker"}]`.
+func TestExpandSpec_EnvEntryValue_BuiltinsStillExpand(t *testing.T) {
+	spec := &Spec{
+		Permissions: Permissions{
+			Env: []EnvEntry{
+				{Name: "MARKER", Value: "${TASK_DIR}/marker"},
+			},
+		},
+	}
+	expandSpec(spec, map[string]string{VarTaskDir: "/repo/task"})
+
+	if spec.Permissions.Env[0].Value != "/repo/task/marker" {
+		t.Errorf("builtin did not expand: %q", spec.Permissions.Env[0].Value)
+	}
+}
+
+// Builtins and extras apply to Param.Default — lets task.yaml surface
+// loader-provided paths (${TASK_SET_DIR}, ${TASK_DIR}, …) as parameter
+// defaults that task code then reads via params.get().
+func TestExpandSpec_ParamDefault_BuiltinsExpand(t *testing.T) {
+	spec := &Spec{
+		Params: Params{
+			{Name: "shared_dir", Default: "${TASK_SET_DIR}/shared"},
+			{Name: "local_dir", Default: "${TASK_DIR}/local"},
+		},
+	}
+	expandSpec(spec, map[string]string{
+		VarTaskSetDir: "/repo/tasks",
+		VarTaskDir:    "/repo/tasks/agent",
+	})
+
+	if spec.Params[0].Default != "/repo/tasks/shared" {
+		t.Errorf("TASK_SET_DIR not expanded in param default: %q", spec.Params[0].Default)
+	}
+	if spec.Params[1].Default != "/repo/tasks/agent/local" {
+		t.Errorf("TASK_DIR not expanded in param default: %q", spec.Params[1].Default)
+	}
+}
+
+// Same exfiltration guard as EnvEntry.Value: Param.Default is readable from
+// task code at runtime, so env fallback must not leak daemon secrets.
+func TestExpandSpec_ParamDefault_NoEnvExfiltration(t *testing.T) {
+	t.Setenv("DICODE_DAEMON_SECRET_TEST", "super-sensitive")
+	spec := &Spec{
+		Params: Params{
+			{Name: "leak", Default: "${DICODE_DAEMON_SECRET_TEST}"},
+		},
+	}
+	expandSpec(spec, map[string]string{})
+
+	if spec.Params[0].Default == "super-sensitive" {
+		t.Fatalf("daemon env exfiltrated via Param.Default: %q", spec.Params[0].Default)
+	}
+	if spec.Params[0].Default != "${DICODE_DAEMON_SECRET_TEST}" {
+		t.Errorf("Default = %q, want literal preserved", spec.Params[0].Default)
+	}
+}
+
 func TestBuiltinVars(t *testing.T) {
 	vars := builtinVars("/repo/tasks/myagent", nil)
 	if vars[VarTaskDir] != "/repo/tasks/myagent" {
@@ -125,31 +224,19 @@ func TestBuiltinVars(t *testing.T) {
 	}
 }
 
-func TestBuiltinVars_SourceRootDerivesSkillsDir(t *testing.T) {
-	extras := map[string]string{VarSourceRoot: "/repo/tasks"}
+func TestBuiltinVars_TaskSetDirPassedThrough(t *testing.T) {
+	extras := map[string]string{VarTaskSetDir: "/repo/tasks"}
 	vars := builtinVars("/repo/tasks/myagent", extras)
 
-	if vars[VarSourceRoot] != "/repo/tasks" {
-		t.Errorf("SOURCE_ROOT not passed through: %q", vars[VarSourceRoot])
+	if vars[VarTaskSetDir] != "/repo/tasks" {
+		t.Errorf("TASK_SET_DIR not passed through: %q", vars[VarTaskSetDir])
 	}
-	if vars[VarSkillsDir] != "/repo/tasks/skills" {
-		t.Errorf("SKILLS_DIR not auto-derived: %q", vars[VarSkillsDir])
+	if vars[VarTaskDir] != "/repo/tasks/myagent" {
+		t.Errorf("TASK_DIR wrong: %q", vars[VarTaskDir])
 	}
 }
 
-func TestBuiltinVars_ExplicitSkillsDirWins(t *testing.T) {
-	extras := map[string]string{
-		VarSourceRoot: "/repo/tasks",
-		VarSkillsDir:  "/elsewhere/md",
-	}
-	vars := builtinVars("/repo/tasks/myagent", extras)
-
-	if vars[VarSkillsDir] != "/elsewhere/md" {
-		t.Errorf("explicit SKILLS_DIR not honoured: %q", vars[VarSkillsDir])
-	}
-}
-
-func TestLoadDirWithVars_ExpandsSourceRoot(t *testing.T) {
+func TestLoadDirWithVars_ExpandsTaskSetDir(t *testing.T) {
 	dir := t.TempDir()
 	yaml := `
 apiVersion: dicode/v1
@@ -160,9 +247,9 @@ trigger:
   manual: true
 permissions:
   fs:
-    - path: "${SOURCE_ROOT}/skills"
+    - path: "${TASK_SET_DIR}/skills"
       permission: r
-    - path: "${SKILLS_DIR}/extra"
+    - path: "${TASK_DIR}/local"
       permission: r
 `
 	if err := os.WriteFile(dir+"/task.yaml", []byte(yaml), 0o644); err != nil {
@@ -173,7 +260,7 @@ permissions:
 		t.Fatal(err)
 	}
 
-	spec, err := LoadDirWithVars(dir, map[string]string{VarSourceRoot: "/fake/source"})
+	spec, err := LoadDirWithVars(dir, map[string]string{VarTaskSetDir: "/fake/source"})
 	if err != nil {
 		t.Fatalf("LoadDirWithVars: %v", err)
 	}
@@ -184,7 +271,7 @@ permissions:
 	if spec.Permissions.FS[0].Path != "/fake/source/skills" {
 		t.Errorf("FS[0] = %q, want /fake/source/skills", spec.Permissions.FS[0].Path)
 	}
-	if spec.Permissions.FS[1].Path != "/fake/source/skills/extra" {
-		t.Errorf("FS[1] = %q, want /fake/source/skills/extra", spec.Permissions.FS[1].Path)
+	if spec.Permissions.FS[1].Path != dir+"/local" {
+		t.Errorf("FS[1] = %q, want %s/local", spec.Permissions.FS[1].Path, dir)
 	}
 }

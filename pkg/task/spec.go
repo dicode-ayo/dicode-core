@@ -273,7 +273,7 @@ type Spec struct {
 
 // LoadDir reads a task from its directory (expects task.yaml and task.<ext>).
 // Equivalent to LoadDirWithVars(dir, nil). Use LoadDirWithVars from source
-// loaders that know about per-source context (SOURCE_ROOT, SKILLS_DIR, …).
+// loaders that know about per-source context (TASK_SET_DIR, …).
 func LoadDir(dir string) (*Spec, error) {
 	return LoadDirWithVars(dir, nil)
 }
@@ -282,12 +282,13 @@ func LoadDir(dir string) (*Spec, error) {
 // in the spec using built-in variables merged with the caller-supplied extras.
 // Pass nil for extras when loading a task outside of a source context.
 //
-// Supported extras include:
-//   - SOURCE_ROOT: absolute path to the source root (source loaders set this)
-//   - SKILLS_DIR:  absolute path to the shared skills directory
-//     (auto-derived as SOURCE_ROOT/skills if SOURCE_ROOT is set and SKILLS_DIR isn't)
+// Typical extras:
+//   - TASK_SET_DIR: directory of the root taskset.yaml for taskset sources,
+//     or the source root for raw local/git sources. Injected automatically
+//     by pkg/taskset/resolver.Resolve and by pkg/source/{local,git}.
 //
-// See pkg/task/template.go for the full variable set and resolution rules.
+// See pkg/task/template.go and docs/task-template-vars.md for the full
+// variable set and resolution rules.
 func LoadDirWithVars(dir string, extras map[string]string) (*Spec, error) {
 	specPath := filepath.Join(dir, "task.yaml")
 	f, err := os.Open(specPath)

@@ -652,30 +652,31 @@ Always available inside a task:
 
 | Variable | Value |
 | --- | --- |
-| `${TASK_DIR}` | Absolute path to this task's own directory |
+| `${TASK_DIR}` | Absolute path to this task's own directory (the one holding `task.yaml`) |
 | `${HOME}` | User home directory (best-effort — may be unset in restricted environments) |
 
 Injected by the source loader on every task it loads:
 
 | Variable | Value |
 | --- | --- |
-| `${SOURCE_ROOT}` | Absolute path to the source root (`tasks/` dir for local sources; clone dir for git sources; taskset.yaml dir for taskset sources) |
-| `${SKILLS_DIR}` | Convention: `${SOURCE_ROOT}/skills`. Auto-derived if `SOURCE_ROOT` is set and `SKILLS_DIR` is not. |
+| `${TASK_SET_DIR}` | Absolute path to the directory containing the root `taskset.yaml` of the source that loaded this task. Unset when the task is loaded outside of a source context (raw local folder source, unit test). |
+
+See [../task-template-vars.md](../task-template-vars.md) for the per-field expansion policy (which task.yaml fields actually get `${VAR}` substituted, and the env-fallback rules that protect against daemon-secret exfiltration).
 
 ### Resolution order
 
 1. Built-in variables (above), highest priority
-2. Process environment (`os.Getenv`)
+2. Process environment (`os.Getenv`) — only for fields where env fallback is safe; see the linked policy doc
 3. **Unresolved** — the literal `${VAR}` is left in place so bugs surface loudly instead of silently collapsing to an empty string
 
 ### Examples
 
-Give a task read access to the shared skills directory regardless of where the source lives:
+Give a task read access to a shared skills directory one level above the taskset:
 
 ```yaml
 permissions:
   fs:
-    - path: "${SKILLS_DIR}"
+    - path: "${TASK_SET_DIR}/../skills"
       permission: r
 ```
 

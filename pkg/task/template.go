@@ -1,39 +1,52 @@
 package task
 
 import (
+	"maps"
 	"os"
 	"strings"
 )
 
-// Template variables available inside task.yaml as ${VAR}. These are resolved
-// at spec-load time (in LoadDir). The resolution order is:
+// Template variables available inside task.yaml as ${VAR}. Resolved at
+// spec-load time (in LoadDir). Resolution order:
 //
-//  1. Built-in variables provided by the loader (TASK_DIR, HOME, ...).
-//  2. Process environment (os.Getenv).
-//  3. Unresolved — the literal ${VAR} is left in place so downstream code can
-//     log / warn / handle it, rather than silently replacing with "" and
-//     producing a mysterious empty-string bug.
+//  1. Built-in variables provided by the loader (TASK_DIR, TASK_SET_DIR,
+//     HOME, …) merged with caller-supplied extras.
+//  2. Process environment (os.Getenv) — fallback only for fields whose
+//     expanded value is not readable from task code. See expandSpec for
+//     the per-field policy.
+//  3. Unresolved — the literal ${VAR} is left in place so downstream code
+//     can log/warn, rather than silently replacing with "" and producing a
+//     mysterious empty-string bug.
 //
-// This matches the syntax used by pkg/config/config.go (expandVars) and the
-// ${WEBHOOK_SECRET} convention already documented for trigger.webhook_secret.
-//
-// Future work: the source loader can widen the built-in set with per-source
-// context like REPO_ROOT and SKILLS_DIR. Task-level code does not know about
-// sources, so those vars cannot live here.
+// See docs/task-template-vars.md for the end-user reference.
 const (
-	VarTaskDir    = "TASK_DIR"    // absolute path to the task's own directory
-	VarHome       = "HOME"        // user home directory
-	VarSourceRoot = "SOURCE_ROOT" // absolute path to the source root (tasks dir / taskset.yaml dir). Injected by the source loader; empty when a task is loaded outside of a source context.
-	VarSkillsDir  = "SKILLS_DIR"  // convention: ${SOURCE_ROOT}/skills. Lets skill-aware tasks reference the shared md directory without hardcoding the "skills" subdir.
+	// VarTaskDir is the absolute path to the task's own directory
+	// (i.e. the directory containing its task.yaml).
+	VarTaskDir = "TASK_DIR"
+
+	// VarHome is the daemon-process user's home directory.
+	VarHome = "HOME"
+
+	// VarTaskSetDir is the absolute path to the directory containing the
+	// root taskset.yaml of the source that loaded this task. Injected by
+	// the source loader; absent when a task is loaded outside of a source
+	// context (e.g. a raw local folder source or a unit test).
+	VarTaskSetDir = "TASK_SET_DIR"
 )
 
-// expandString replaces ${VAR} references in s using the provided vars map,
-// falling back to process env, and leaving unresolved references literal.
+// expandString replaces ${VAR} references in s using the provided vars map
+// and, when envFallback is true, the process environment. Unknown references
+// are left literal rather than collapsing to "".
 //
 // Unlike os.ExpandEnv, this function does NOT replace ${VAR} with "" when
 // VAR is unknown. Leaving the literal makes debugging obvious and avoids
 // silently producing broken paths like "/foo//bar" or "".
-func expandString(s string, vars map[string]string) string {
+//
+// IMPORTANT: envFallback must be false for any field whose expanded value
+// is readable from inside the task sandbox. Otherwise a task.yaml from an
+// untrusted source could exfiltrate daemon secrets by naming them as a
+// template variable and reading the field at runtime.
+func expandString(s string, vars map[string]string, envFallback bool) string {
 	if s == "" || !strings.Contains(s, "${") {
 		return s
 	}
@@ -41,8 +54,10 @@ func expandString(s string, vars map[string]string) string {
 		if v, ok := vars[name]; ok {
 			return v
 		}
-		if v, ok := os.LookupEnv(name); ok {
-			return v
+		if envFallback {
+			if v, ok := os.LookupEnv(name); ok {
+				return v
+			}
 		}
 		// Unknown — re-emit the literal. os.Expand strips the ${…} wrapper
 		// when calling the mapper, so we have to add it back.
@@ -55,24 +70,48 @@ func expandString(s string, vars map[string]string) string {
 // well-defined set — we do NOT expand every string field, because most
 // fields (name, description, system_prompt defaults, ...) should be taken
 // literally.
+//
+// Env-fallback policy (see expandString for the rationale):
+//
+//   - Fields whose expanded value stays server-side and is NOT readable from
+//     task code get envFallback=true: webhook_secret (used by the webhook
+//     handler to compute HMAC; task code never sees it), fs.path (consumed
+//     by the Deno permission set), env.from / env.secret (both are host-side
+//     lookup keys, not values injected into the sandbox).
+//
+//   - Fields whose expanded value IS readable from task code
+//     (permissions.env[].value, params[].default) get envFallback=false.
+//     Enabling env fallback on those would be a direct exfiltration
+//     primitive: any task.yaml could name a daemon secret as a template
+//     variable and read it back at runtime. Builtins + caller extras only.
 func expandSpec(spec *Spec, vars map[string]string) {
 	// trigger.webhook_secret: historically documented as supporting ${VAR}
-	// but the expansion was never implemented. Closing that gap.
-	spec.Trigger.WebhookSecret = expandString(spec.Trigger.WebhookSecret, vars)
+	// and this PR closes that long-standing gap. Env fallback is the whole
+	// point — users set WEBHOOK_SECRET=… in the daemon env and reference it
+	// from task.yaml.
+	spec.Trigger.WebhookSecret = expandString(spec.Trigger.WebhookSecret, vars, true)
 
-	// permissions.fs[].path: the primary motivation for this change — tasks
-	// need to reference shared directories relative to known locations.
+	// permissions.fs[].path: tasks need to reference shared directories
+	// relative to known locations. Env fallback lets `${HOME}/shared` keep
+	// working even if a caller forgets to populate HOME as a builtin.
 	for i := range spec.Permissions.FS {
-		spec.Permissions.FS[i].Path = expandString(spec.Permissions.FS[i].Path, vars)
+		spec.Permissions.FS[i].Path = expandString(spec.Permissions.FS[i].Path, vars, true)
 	}
 
-	// permissions.env[].from and .secret: the indirection keys for host env
-	// rename and secrets-store lookup. Both are identifiers that might want
-	// to be built from a prefix + task-local value.
+	// permissions.env[].from and .secret: indirection keys for host env
+	// rename and secrets-store lookup. Both are identifiers, not values —
+	// expanding them never leaks a secret into task-visible state.
 	for i := range spec.Permissions.Env {
-		spec.Permissions.Env[i].From = expandString(spec.Permissions.Env[i].From, vars)
-		spec.Permissions.Env[i].Secret = expandString(spec.Permissions.Env[i].Secret, vars)
-		spec.Permissions.Env[i].Value = expandString(spec.Permissions.Env[i].Value, vars)
+		spec.Permissions.Env[i].From = expandString(spec.Permissions.Env[i].From, vars, true)
+		spec.Permissions.Env[i].Secret = expandString(spec.Permissions.Env[i].Secret, vars, true)
+		spec.Permissions.Env[i].Value = expandString(spec.Permissions.Env[i].Value, vars, false)
+	}
+
+	// params[].default: lets task.yaml surface loader-provided paths
+	// (${TASK_SET_DIR}, ${TASK_DIR}, …) as parameter defaults that task
+	// code reads via params.get().
+	for i := range spec.Params {
+		spec.Params[i].Default = expandString(spec.Params[i].Default, vars, false)
 	}
 }
 
@@ -80,8 +119,7 @@ func expandSpec(spec *Spec, vars map[string]string) {
 // any extra vars merged in (extras take precedence over builtins). Pass nil
 // for extras when loading a task outside of a source context.
 //
-// Keep this in sync with the Var* constants above and with docs/task-yaml.md
-// (once that doc exists).
+// Keep this in sync with the Var* constants above and docs/task-template-vars.md.
 func builtinVars(taskDir string, extras map[string]string) map[string]string {
 	vars := map[string]string{
 		VarTaskDir: taskDir,
@@ -89,16 +127,6 @@ func builtinVars(taskDir string, extras map[string]string) map[string]string {
 	if home, err := os.UserHomeDir(); err == nil {
 		vars[VarHome] = home
 	}
-	// Convenience: if the caller supplies SOURCE_ROOT but not SKILLS_DIR,
-	// auto-derive it. Lets source loaders stay minimal — they only need to
-	// set the primitive SOURCE_ROOT and the convention follows.
-	if root, ok := extras[VarSourceRoot]; ok {
-		if _, set := extras[VarSkillsDir]; !set {
-			vars[VarSkillsDir] = root + "/skills"
-		}
-	}
-	for k, v := range extras {
-		vars[k] = v
-	}
+	maps.Copy(vars, extras)
 	return vars
 }

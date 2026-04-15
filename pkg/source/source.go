@@ -29,8 +29,9 @@ type Event struct {
 	Spec *task.Spec
 	// ExtraVars carries per-source template variables injected into
 	// task.yaml's ${VAR} expansion at load time. Sources populate this with
-	// e.g. SOURCE_ROOT (the source's root path) so tasks can reference
-	// shared directories without hardcoding a path. nil = no extras.
+	// e.g. TASK_SET_DIR (the source's root path) so tasks can reference
+	// shared directories without hardcoding a path. nil = no extras. See
+	// docs/task-template-vars.md for the full variable set.
 	ExtraVars map[string]string
 }
 
