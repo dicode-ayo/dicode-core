@@ -96,7 +96,11 @@ func controlTestEnv(t *testing.T, mp MetricsProvider) (net.Conn, func()) {
 // must carry empty task_id / run_id strings — but the fields must be
 // PRESENT on the wire so the shim-side decoder always sees them. This
 // pairs with the non-omitempty encoding in message.go:handshakeResp.
-func TestControl_Handshake_OmitsTaskAndRunID(t *testing.T) {
+//
+// The "Emits" name is load-bearing: a prior name ("Omits…") suggested the
+// fields could be absent and readers would "fix" it by asserting absence,
+// which is the opposite of what we want.
+func TestControl_Handshake_EmitsEmptyTaskAndRunIDFields(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()

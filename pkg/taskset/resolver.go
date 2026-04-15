@@ -105,12 +105,12 @@ func (r *Resolver) Resolve(ctx context.Context, namespace string, tsRef *Ref, co
 // withTaskSetDir returns a copy of base with VarTaskSetDir set to
 // filepath.Dir(tsPath) unless the caller already provided one (explicit
 // caller override always wins). Returns a fresh map — never mutates base.
+//
+// tsPath is always non-empty by construction: Resolve calls resolveRef
+// first, which errors out before this helper can see an empty path.
 func withTaskSetDir(base map[string]string, tsPath string) map[string]string {
 	out := make(map[string]string, len(base)+1)
 	maps.Copy(out, base)
-	if tsPath == "" {
-		return out
-	}
 	if _, set := out[task.VarTaskSetDir]; !set {
 		out[task.VarTaskSetDir] = filepath.Dir(tsPath)
 	}

@@ -219,9 +219,16 @@
                 output.textContent = data.body;
               }
             },
-            onError: function () {
+            onError: function (err) {
               if (btn) { btn.disabled = false; }
-              if (output) { output.textContent = 'Connection error — is dicode running?'; }
+              if (!output) return;
+              // Surface the actual error message. fetch() can reject for
+              // reasons other than "daemon is down" — aborted stream,
+              // decoder error, CORS. Hard-coding "is dicode running?"
+              // sends operators chasing a red herring when the body read
+              // failed mid-transfer.
+              var msg = (err && (err.message || String(err))) || 'unknown error';
+              output.textContent = 'Connection error: ' + msg;
             }
           }).catch(function () {
             if (btn) { btn.disabled = false; }
