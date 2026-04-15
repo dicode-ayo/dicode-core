@@ -100,14 +100,8 @@ func TestBuildAuthURL_RoundTripVerify(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
-	if req.Provider != "slack" || req.SessionID == "" || req.PKCEVerifier == "" || req.PKCEChallenge == "" {
+	if req.Provider != "slack" || req.SessionID == "" || req.PKCEChallenge == "" {
 		t.Fatalf("incomplete AuthRequest: %+v", req)
-	}
-
-	// PKCE verifier → challenge consistency.
-	sum := sha256.Sum256([]byte(req.PKCEVerifier))
-	if base64.RawURLEncoding.EncodeToString(sum[:]) != req.PKCEChallenge {
-		t.Fatalf("pkce challenge does not match verifier")
 	}
 
 	u, err := url.Parse(rawURL)

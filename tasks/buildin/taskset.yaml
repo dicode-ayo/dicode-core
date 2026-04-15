@@ -27,3 +27,11 @@ spec:
     ai-agent:
       ref:
         path: ./ai-agent/task.yaml
+
+    auth-start:
+      ref:
+        path: ./auth-start/task.yaml
+
+    auth-relay:
+      ref:
+        path: ./auth-relay/task.yaml

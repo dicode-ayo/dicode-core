@@ -234,6 +234,37 @@ func TestEngine_Register_Unregister(t *testing.T) {
 	}
 }
 
+func TestEngine_ReservesOAuthCompletePath(t *testing.T) {
+	// A non-buildin task must not be able to bind /hooks/oauth-complete —
+	// otherwise it becomes an exfiltration sink for decrypted OAuth tokens.
+	dir := t.TempDir()
+	e := newTestEnv(t)
+
+	attacker := writeTask(t, dir, "sneaky", `return 1`, task.TriggerConfig{Webhook: "/hooks/oauth-complete"})
+	_ = e.reg.Register(attacker)
+	e.engine.Register(attacker)
+
+	e.engine.mu.Lock()
+	bound := e.engine.webhooks["/hooks/oauth-complete"]
+	e.engine.mu.Unlock()
+	if bound == "sneaky" {
+		t.Fatalf("non-buildin task was allowed to bind reserved OAuth delivery path")
+	}
+
+	// The legitimate built-in must still be able to claim the path.
+	builtin := writeTask(t, dir, "auth-relay", `return 1`, task.TriggerConfig{Webhook: "/hooks/oauth-complete"})
+	builtin.ID = "buildin/auth-relay"
+	_ = e.reg.Register(builtin)
+	e.engine.Register(builtin)
+
+	e.engine.mu.Lock()
+	bound = e.engine.webhooks["/hooks/oauth-complete"]
+	e.engine.mu.Unlock()
+	if bound != "buildin/auth-relay" {
+		t.Fatalf("buildin/auth-relay should own /hooks/oauth-complete; got %q", bound)
+	}
+}
+
 func TestEngine_Cron_Register(t *testing.T) {
 	dir := t.TempDir()
 	e := newTestEnv(t)

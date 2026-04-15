@@ -440,7 +440,20 @@ func (e *Engine) catchupMissedCronRuns(ctx context.Context) {
 	}
 }
 
+// reservedOAuthCompletePath is the webhook path the relay broker delivers
+// encrypted OAuth tokens to. Only buildin/auth-relay is allowed to bind it —
+// any other task that claims this path would be a drop-in exfiltration
+// sink for decrypted credentials once the built-in chains the data forward.
+const reservedOAuthCompletePath = "/hooks/oauth-complete"
+const oauthRelayBuiltinID = "buildin/auth-relay"
+
 func (e *Engine) registerWebhook(spec *task.Spec) {
+	if spec.Trigger.Webhook == reservedOAuthCompletePath && spec.ID != oauthRelayBuiltinID {
+		e.log.Warn("rejecting task that tries to shadow reserved OAuth delivery path",
+			zap.String("task", spec.ID),
+			zap.String("path", reservedOAuthCompletePath))
+		return
+	}
 	e.mu.Lock()
 	e.webhooks[spec.Trigger.Webhook] = spec.ID
 	e.mu.Unlock()
