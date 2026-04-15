@@ -227,6 +227,21 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 					zap.String("expected_scheme", "wss:// or ws://"))
 			}
 			g.Go(func() error { pending.StartSweep(ctx); return nil })
+			// Identity rotation via `dicode relay rotate-identity`. The
+			// callback regenerates BOTH the sign and decrypt keypairs
+			// atomically (split identity, issue #104) and invalidates any
+			// outstanding OAuth sessions (they were encrypted to the old
+			// DecryptKey). The running relay WSS connection keeps the old
+			// in-memory identity until the daemon restarts — documented
+			// in the RelayRotateResult warning returned to the CLI.
+			ctrlSrv.SetRelayIdentityRotator(func(ctx context.Context) (string, error) {
+				newID, err := relay.RotateIdentity(ctx, database)
+				if err != nil {
+					return "", err
+				}
+				pending.Clear()
+				return newID.UUID, nil
+			})
 			g.Go(func() error { return rc.Run(ctx) })
 		}
 	}

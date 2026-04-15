@@ -19,6 +19,19 @@ import (
 	"go.uber.org/zap"
 )
 
+// RelayIdentityRotator rotates the daemon's relay identity on demand.
+// It is implemented by main.go (which owns the db handle, the pending
+// store, and the running relay client) and passed into ControlServer so
+// the cli.relay.rotate_identity handler can trigger a rotation without
+// ControlServer needing direct access to any of those pieces.
+//
+// The returned string is the new UUID. The rotator is responsible for:
+//   - generating + persisting a fresh keypair in the daemon DB
+//   - invalidating any in-memory state tied to the old key (pending
+//     OAuth sessions, running relay WSS connection)
+//   - returning cleanly even if the relay client is currently dialing
+type RelayIdentityRotator func(ctx context.Context) (newUUID string, err error)
+
 // ControlServer is the daemon's persistent control socket. It listens at a
 // fixed path (dataDir/daemon.sock) and accepts connections from the dicode CLI.
 //
@@ -35,7 +48,8 @@ type ControlServer struct {
 	engine          EngineRunner
 	secrets         secrets.Manager // nil if no local provider configured
 	metricsProvider MetricsProvider
-	database        db.DB // for broker pubkey trust pinning; nil in tests
+	database        db.DB                // for broker pubkey trust pinning; nil in tests
+	rotateRelay     RelayIdentityRotator // nil if relay not enabled
 	log             *zap.Logger
 
 	startedAt time.Time
@@ -214,6 +228,9 @@ func (cs *ControlServer) dispatch(ctx context.Context, req Request) (any, error)
 	case "cli.relay.trust_broker":
 		return cs.handleTrustBroker(ctx)
 
+	case "cli.relay.rotate_identity":
+		return cs.handleRelayRotate(ctx)
+
 	default:
 		return nil, fmt.Errorf("unknown method: %s", req.Method)
 	}
@@ -385,6 +402,41 @@ func (cs *ControlServer) handleTrustBroker(ctx context.Context) (any, error) {
 	return map[string]string{
 		"status":  "ok",
 		"message": "Broker pubkey pin cleared. Restart the daemon (or wait for reconnect) to accept the new broker key.",
+	}, nil
+}
+
+// SetRelayIdentityRotator wires the rotation callback. The ControlServer
+// owns nothing except the function; main.go constructs a closure that holds
+// the db, pending store, and relay client, and passes it in after relay
+// initialization. Passing nil (or not calling this at all) leaves
+// cli.relay.rotate_identity disabled.
+func (cs *ControlServer) SetRelayIdentityRotator(fn RelayIdentityRotator) {
+	cs.rotateRelay = fn
+}
+
+// RelayRotateResult is returned over the control socket after a successful
+// rotation. The new UUID is surfaced so the CLI can print it; the warning
+// reminds the operator that live webhook URLs pointing at the old UUID are
+// now dead.
+type RelayRotateResult struct {
+	NewUUID string `json:"new_uuid"`
+	Warning string `json:"warning"`
+}
+
+func (cs *ControlServer) handleRelayRotate(ctx context.Context) (any, error) {
+	if cs.rotateRelay == nil {
+		return nil, fmt.Errorf("relay not enabled on this daemon")
+	}
+	newUUID, err := cs.rotateRelay(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("rotate: %w", err)
+	}
+	cs.log.Warn("relay identity rotated",
+		zap.String("new_uuid", newUUID),
+	)
+	return RelayRotateResult{
+		NewUUID: newUUID,
+		Warning: "Old UUID is permanently invalidated. Any public webhook URLs you previously shared under the old UUID will stop working. Restart the daemon to activate the new identity on the WSS relay connection.",
 	}, nil
 }
 

@@ -197,6 +197,68 @@ func encodeECPrivateKeyPEM(key *ecdsa.PrivateKey) (string, error) {
 	})), nil
 }
 
+// RotateIdentity generates a fresh pair of P-256 keypairs (SignKey +
+// DecryptKey), overwrites BOTH stored identity rows in a single transaction,
+// and returns the new Identity.
+//
+// Both keys are rotated atomically: if one leaks, the other must be assumed
+// leaked too (same process memory, same SQLite file, same backup). Rotating
+// only one would leave a half-compromised surface with no operator-visible
+// signal. The tx guarantees either both rows are replaced or neither is —
+// the Identity the daemon will load on next boot is never a mix of old/new.
+//
+// The old keys are unrecoverable after this call. The UUID changes (it is
+// derived from the new SignKey pubkey), so any public webhook URL the
+// operator previously shared under the old UUID becomes permanently invalid;
+// downstream consumers must be re-wired to the new
+// relay.dicode.app/u/<new-uuid> base. Live WSS connections held by an
+// in-memory Identity from before the rotation are not affected in this
+// process — the caller is responsible for tearing them down and
+// re-connecting with the new identity (typically by restarting the daemon).
+func RotateIdentity(ctx context.Context, database db.DB) (*Identity, error) {
+	signKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("generate relay sign key: %w", err)
+	}
+	decryptKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("generate relay decrypt key: %w", err)
+	}
+
+	signPEM, err := encodeECPrivateKeyPEM(signKey)
+	if err != nil {
+		return nil, err
+	}
+	decryptPEM, err := encodeECPrivateKeyPEM(decryptKey)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := database.Tx(ctx, func(tx db.DB) error {
+		if err := tx.Exec(ctx,
+			`INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)`,
+			kvKeyRelayPrivateKey, signPEM,
+		); err != nil {
+			return fmt.Errorf("store relay sign key: %w", err)
+		}
+		if err := tx.Exec(ctx,
+			`INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)`,
+			kvKeyRelayDecryptPrivateKey, decryptPEM,
+		); err != nil {
+			return fmt.Errorf("store relay decrypt key: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
+	return &Identity{
+		SignKey:    signKey,
+		DecryptKey: decryptKey,
+		UUID:       deriveUUID(&signKey.PublicKey),
+	}, nil
+}
+
 func generateAndStoreSignKey(ctx context.Context, database db.DB) (*ecdsa.PrivateKey, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
