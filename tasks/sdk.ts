@@ -26,6 +26,12 @@ export interface MCP {
 }
 
 export interface Dicode {
+  // Fully-namespaced id of the currently-running task (e.g. "buildin/ai-agent").
+  // Populated from the IPC handshake; lets task code self-identify without
+  // guessing from directory names.
+  task_id: string;
+  // Id of the current run (uuid).
+  run_id: string;
   run_task(taskID: string, params?: Record<string, string>): Promise<unknown>;
   list_tasks(): Promise<unknown[]>;
   get_runs(taskID: string, opts?: { limit?: number }): Promise<unknown[]>;
