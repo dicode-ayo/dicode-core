@@ -12,6 +12,7 @@ import (
 	"github.com/dicode/dicode/pkg/db"
 	mcpclient "github.com/dicode/dicode/pkg/mcp/client"
 	"github.com/dicode/dicode/pkg/registry"
+	"github.com/dicode/dicode/pkg/relay"
 	"github.com/dicode/dicode/pkg/secrets"
 	"github.com/dicode/dicode/pkg/task"
 	"go.uber.org/zap"
@@ -33,8 +34,11 @@ type Server struct {
 	input    any
 	spec     *task.Spec
 	engine   EngineRunner
-	secrets  secrets.Manager // optional; enables dicode.secrets_set / dicode.secrets_delete
-	log      *zap.Logger
+	secrets      secrets.Manager         // optional; enables dicode.secrets_set / dicode.secrets_delete
+	oauthID      *relay.Identity         // optional; enables dicode.oauth.* for the auth built-ins
+	oauthURL     string                  // broker base URL, e.g. "https://relay.dicode.app"
+	oauthPending *relay.PendingSessions  // tracks outstanding /auth/:provider flows by session id
+	log          *zap.Logger
 
 	aiBaseURL string
 	aiModel   string
@@ -100,6 +104,21 @@ func New(
 // can call dicode.secrets_set() and dicode.secrets_delete().
 func (s *Server) SetSecrets(m secrets.Manager) { s.secrets = m }
 
+// SetOAuthBroker wires the daemon's relay identity (used to sign /auth URLs
+// and decrypt token deliveries) plus the broker base URL and the
+// daemon-wide PendingSessions store. The task-side dicode.oauth.* API is
+// inert until this is set, so the auth-relay built-in task must gracefully
+// degrade when the relay client is not enabled in dicode.yaml.
+//
+// pending is shared across all per-run ipc.Server instances so that an
+// auth-start run and the subsequent auth-complete webhook run can correlate
+// on session id.
+func (s *Server) SetOAuthBroker(id *relay.Identity, baseURL string, pending *relay.PendingSessions) {
+	s.oauthID = id
+	s.oauthURL = baseURL
+	s.oauthPending = pending
+}
+
 // Start creates the Unix socket and begins accepting connections.
 // Returns the socket path and a capability token to pass to the subprocess.
 func (s *Server) Start(ctx context.Context) (socketPath, token string, err error) {
@@ -136,6 +155,12 @@ func (s *Server) Start(ctx context.Context) (socketPath, token string, err error
 		}
 		if dp.SecretsWrite {
 			caps = append(caps, CapSecretsWrite)
+		}
+		if dp.OAuthInit {
+			caps = append(caps, CapOAuthInit)
+		}
+		if dp.OAuthStore {
+			caps = append(caps, CapOAuthStore)
 		}
 	}
 	if s.spec != nil && s.spec.Trigger.Daemon && s.gateway != nil {
@@ -533,6 +558,89 @@ func (s *Server) handleConn(conn net.Conn) {
 				continue
 			}
 			reply(req.ID, true, "")
+
+		// ── dicode.oauth.* ────────────────────────────────────────────────
+		// Two purpose-specific primitives, each gated by its own capability.
+		// Neither exposes raw sign-with-identity-key or raw-decrypt — the
+		// payload layouts are hardcoded so a compromised task cannot coax
+		// the identity key into signing a WSS handshake digest or acting
+		// as a decryption oracle for ciphertexts the broker never issued.
+
+		case "dicode.oauth.build_auth_url":
+			if !hasCap(caps, CapOAuthInit) {
+				reply(req.ID, nil, "ipc: permission denied (oauth.init)")
+				continue
+			}
+			if s.oauthID == nil || s.oauthURL == "" || s.oauthPending == nil {
+				reply(req.ID, nil, "ipc: oauth broker not configured on this daemon")
+				continue
+			}
+			if req.Provider == "" {
+				reply(req.ID, nil, "ipc: provider required")
+				continue
+			}
+			url, authReq, err := relay.BuildAuthURL(s.oauthURL, s.oauthID, req.Provider, req.Scope, time.Now().Unix())
+			if err != nil {
+				reply(req.ID, nil, err.Error())
+				continue
+			}
+			// Track this flow so store_token can validate the delivery's
+			// session id against a request we actually issued.
+			s.oauthPending.Add(authReq)
+			reply(req.ID, map[string]any{
+				"url":        url,
+				"session_id": authReq.SessionID,
+				"provider":   authReq.Provider,
+				"timestamp":  authReq.Timestamp,
+				"relay_uuid": s.oauthID.UUID,
+			}, "")
+
+		case "dicode.oauth.store_token":
+			if !hasCap(caps, CapOAuthStore) {
+				reply(req.ID, nil, "ipc: permission denied (oauth.store)")
+				continue
+			}
+			if s.oauthID == nil || s.oauthPending == nil {
+				reply(req.ID, nil, "ipc: oauth broker not configured on this daemon")
+				continue
+			}
+			if s.secrets == nil {
+				reply(req.ID, nil, "ipc: no secrets provider configured")
+				continue
+			}
+			if len(req.Envelope) == 0 {
+				reply(req.ID, nil, "ipc: envelope required")
+				continue
+			}
+			var env relay.OAuthTokenDeliveryPayload
+			if err := json.Unmarshal(req.Envelope, &env); err != nil {
+				reply(req.ID, nil, "ipc: decode envelope: "+err.Error())
+				continue
+			}
+			authReq, err := s.oauthPending.Take(env.SessionID)
+			if err != nil {
+				reply(req.ID, nil, "ipc: unknown or expired session")
+				continue
+			}
+			plaintext, err := relay.DecryptOAuthToken(s.oauthID, &env)
+			if err != nil {
+				reply(req.ID, nil, "ipc: decrypt failed")
+				continue
+			}
+			written, err := storeOAuthToken(context.Background(), s.secrets, authReq.Provider, plaintext)
+			// Best-effort zeroization; Go can't guarantee it but this shrinks
+			// the window in process memory regardless.
+			for i := range plaintext {
+				plaintext[i] = 0
+			}
+			if err != nil {
+				reply(req.ID, nil, "ipc: store secret: "+err.Error())
+				continue
+			}
+			reply(req.ID, map[string]any{
+				"provider": authReq.Provider,
+				"secrets":  written,
+			}, "")
 
 		// ── mcp.* ─────────────────────────────────────────────────────────
 

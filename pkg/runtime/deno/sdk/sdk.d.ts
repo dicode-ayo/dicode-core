@@ -32,6 +32,26 @@ declare interface MCP {
   call:       (name: string, tool: string, args?: Record<string, unknown>) => Promise<unknown>;
 }
 
+declare interface OAuthAuthURL {
+  url:        string;
+  session_id: string;
+  provider:   string;
+  timestamp:  number;
+  relay_uuid: string;
+}
+
+declare interface OAuthStoreResult {
+  provider: string;
+  secrets:  string[];
+}
+
+declare interface DicodeOAuth {
+  /** Requires permissions.dicode.oauth_init. Signs the daemon's side of a /auth/:provider URL via the relay broker. */
+  build_auth_url: (provider: string, scope?: string) => Promise<OAuthAuthURL>;
+  /** Requires permissions.dicode.oauth_store. Decrypts an incoming token envelope and writes the resulting credentials to secrets. Plaintext never crosses the IPC boundary. */
+  store_token:    (envelope: unknown)                => Promise<OAuthStoreResult>;
+}
+
 declare interface Dicode {
   /** Fully-namespaced id of the currently-running task (e.g. "buildin/ai-agent"). */
   task_id:        string;
@@ -43,6 +63,7 @@ declare interface Dicode {
   get_config:     (section: string)                                  => Promise<unknown>;
   secrets_set:    (key: string, value: string)                       => Promise<void>;
   secrets_delete: (key: string)                                       => Promise<void>;
+  oauth:          DicodeOAuth;
 }
 
 /** All SDK globals passed to your task's main() function. */

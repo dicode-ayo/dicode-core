@@ -1,0 +1,36 @@
+apiVersion: dicode/v1
+kind: Task
+name: "OAuth — Start Flow"
+description: >
+  Starts an OAuth authorization flow by asking the dicode relay broker for a
+  signed /auth/:provider URL. The task prints the URL; the user opens it in
+  a browser and authorizes with the provider. The eventual token delivery
+  lands on /hooks/oauth-complete where buildin/auth-relay decrypts it and
+  writes the credentials to the secrets store.
+
+  This task requires the relay client to be enabled in dicode.yaml. If the
+  relay is not configured, dicode.oauth.build_auth_url returns an error.
+runtime: deno
+
+trigger:
+  manual: true
+
+params:
+  provider:
+    type: string
+    required: true
+    description: "OAuth provider key (slack, github, google, notion, ...)"
+  scope:
+    type: string
+    default: ""
+    description: "Optional space-separated scope override; empty uses broker default"
+
+permissions:
+  dicode:
+    oauth_init: true
+
+timeout: 10s
+
+notify:
+  on_success: false
+  on_failure: true
