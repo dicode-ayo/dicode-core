@@ -27,9 +27,8 @@ type Resolver struct {
 	devMode bool
 	log     *zap.Logger
 
-	mu        sync.Mutex
-	clones    map[repoKey]string // (url, branch) → absolute local dir
-	extraVars map[string]string  // template vars injected into every LoadDir call (e.g. SOURCE_ROOT)
+	mu     sync.Mutex
+	clones map[repoKey]string // (url, branch) → absolute local dir
 }
 
 // NewResolver creates a Resolver.
@@ -57,22 +56,6 @@ func (r *Resolver) DevMode() bool {
 	return r.devMode
 }
 
-// SetExtraVars sets the template variables injected into task.yaml ${VAR}
-// expansion for every task resolved by this Resolver. Sources call this
-// before Resolve to inject source-level context (e.g. SOURCE_ROOT). Passing
-// nil clears any previously set vars.
-func (r *Resolver) SetExtraVars(vars map[string]string) {
-	r.mu.Lock()
-	r.extraVars = vars
-	r.mu.Unlock()
-}
-
-func (r *Resolver) getExtraVars() map[string]string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.extraVars
-}
-
 // Resolve walks the TaskSet rooted at tsRef with the given namespace prefix.
 //
 // The override precedence is three levels (lowest to highest):
@@ -87,7 +70,12 @@ func (r *Resolver) getExtraVars() map[string]string {
 // parentOverrides carries per-entry patches from the parent TaskSet (level 3).
 // Passing parentOverrides.Defaults is also deprecated and now a no-op; only
 // Entries is honoured.
-func (r *Resolver) Resolve(ctx context.Context, namespace string, tsRef *Ref, configDefaults *Defaults, parentOverrides *Overrides) ([]*ResolvedTask, error) {
+//
+// extraVars is the per-resolve template-variable set injected into every
+// task.yaml ${VAR} expansion (e.g. SOURCE_ROOT). Pass nil when no
+// source-level context is available. The map is treated as read-only —
+// the resolver does not mutate or retain it.
+func (r *Resolver) Resolve(ctx context.Context, namespace string, tsRef *Ref, configDefaults *Defaults, parentOverrides *Overrides, extraVars map[string]string) ([]*ResolvedTask, error) {
 	tsPath, err := r.resolveRef(ctx, tsRef, "")
 	if err != nil {
 		return nil, fmt.Errorf("resolve ref for namespace %q: %w", namespace, err)
@@ -98,7 +86,7 @@ func (r *Resolver) Resolve(ctx context.Context, namespace string, tsRef *Ref, co
 		return nil, err
 	}
 
-	return r.resolveBody(ctx, namespace, tsPath, ts, configDefaults, parentOverrides)
+	return r.resolveBody(ctx, namespace, tsPath, ts, configDefaults, parentOverrides, extraVars)
 }
 
 func (r *Resolver) resolveBody(
@@ -107,6 +95,7 @@ func (r *Resolver) resolveBody(
 	ts *TaskSetSpec,
 	configDefaults *Defaults,
 	parentOverrides *Overrides,
+	extraVars map[string]string,
 ) ([]*ResolvedTask, error) {
 	// Deprecation warnings for removed precedence levels.
 	if defaultsNonEmpty(configDefaults) {
@@ -182,7 +171,7 @@ func (r *Resolver) resolveBody(
 				continue
 			}
 			taskDir := filepath.Dir(localPath)
-			spec, err := task.LoadDirWithVars(taskDir, r.getExtraVars())
+			spec, err := task.LoadDirWithVars(taskDir, extraVars)
 			if err != nil {
 				r.log.Warn("taskset: failed to load task",
 					zap.String("entry", fullID), zap.Error(err))
@@ -205,7 +194,7 @@ func (r *Resolver) resolveBody(
 			if parentEntryOverride != nil {
 				nestedOverrides = mergeOverrides(parentEntryOverride, nestedOverrides)
 			}
-			nested, err := r.resolveNestedRef(ctx, fullID, localPath, nestedOverrides)
+			nested, err := r.resolveNestedRef(ctx, fullID, localPath, nestedOverrides, extraVars)
 			if err != nil {
 				r.log.Warn("taskset: failed to resolve nested taskset",
 					zap.String("entry", fullID), zap.Error(err))
@@ -222,14 +211,14 @@ func (r *Resolver) resolveBody(
 	return results, nil
 }
 
-func (r *Resolver) resolveNestedRef(ctx context.Context, namespace, tsPath string, overrides *Overrides) ([]*ResolvedTask, error) {
+func (r *Resolver) resolveNestedRef(ctx context.Context, namespace, tsPath string, overrides *Overrides, extraVars map[string]string) ([]*ResolvedTask, error) {
 	ts, err := LoadTaskSet(tsPath)
 	if err != nil {
 		return nil, err
 	}
 	// Pass nil for configDefaults: deprecation warnings are emitted once at the
 	// public Resolve entry point; nested sets do not re-emit them.
-	return r.resolveBody(ctx, namespace, tsPath, ts, nil, overrides)
+	return r.resolveBody(ctx, namespace, tsPath, ts, nil, overrides, extraVars)
 }
 
 // resolveRef returns the absolute local path to the yaml file pointed to by ref.

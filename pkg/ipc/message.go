@@ -10,10 +10,18 @@ type handshakeReq struct {
 	Token string `json:"token"`
 }
 
-// handshakeResp is the server's reply to a successful handshake.
+// handshakeResp is the server's reply to a successful handshake. In
+// addition to the protocol version and capability list, the server echoes
+// the TaskID and RunID of the context that accepted the connection so the
+// shim can expose them as dicode.task_id / dicode.run_id. That removes the
+// need for task code to guess its own identity (previously a source of
+// brittle prefix-matching when a task had to exclude itself from a tool
+// list).
 type handshakeResp struct {
-	Proto int      `json:"proto"`
-	Caps  []string `json:"caps"`
+	Proto  int      `json:"proto"`
+	Caps   []string `json:"caps"`
+	TaskID string   `json:"task_id,omitempty"`
+	RunID  string   `json:"run_id,omitempty"`
 }
 
 // handshakeErr is the server's reply when the handshake fails. The server

@@ -135,7 +135,7 @@ spec:
 
 	r := newResolver(t)
 	rootRef := &Ref{Path: tsPath}
-	results, err := r.Resolve(context.Background(), "infra", rootRef, nil, nil)
+	results, err := r.Resolve(context.Background(), "infra", rootRef, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -171,7 +171,7 @@ spec:
 `
 	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
 	r := newResolver(t)
-	results, err := r.Resolve(context.Background(), "team", &Ref{Path: tsPath}, nil, nil)
+	results, err := r.Resolve(context.Background(), "team", &Ref{Path: tsPath}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
@@ -206,7 +206,7 @@ spec:
 `
 	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
 	r := newResolver(t)
-	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil)
+	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
@@ -242,7 +242,7 @@ spec:
 `
 	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
 	r := newResolver(t)
-	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil)
+	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
@@ -276,7 +276,7 @@ spec:
 			"deploy": {Enabled: boolPtr(false)},
 		},
 	}
-	results, err := r.Resolve(context.Background(), "infra/backend", &Ref{Path: tsPath}, nil, parentOverrides)
+	results, err := r.Resolve(context.Background(), "infra/backend", &Ref{Path: tsPath}, nil, parentOverrides, nil)
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
@@ -306,7 +306,7 @@ spec:
 `
 	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
 	r := newResolver(t)
-	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil)
+	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
@@ -348,7 +348,7 @@ spec:
 		Timeout: 120 * time.Second,
 		Env:     []task.EnvEntry{{Name: "RUNTIME_ENV", Value: "backend"}},
 	}
-	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, configDefaults, nil)
+	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, configDefaults, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
@@ -392,7 +392,7 @@ spec:
 `
 	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
 	r := newResolver(t)
-	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil)
+	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
@@ -433,7 +433,7 @@ spec:
 	rootPath := writeTaskSetFile(t, rootDir, "taskset.yaml", rootTS)
 
 	r := newResolver(t)
-	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: rootPath}, nil, nil)
+	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: rootPath}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
@@ -486,7 +486,7 @@ spec:
 	rootPath := writeTaskSetFile(t, rootDir, "taskset.yaml", rootTS)
 
 	r := newResolver(t)
-	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: rootPath}, nil, nil)
+	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: rootPath}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
@@ -521,7 +521,7 @@ spec:
 `
 	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
 	r := newResolver(t)
-	results, err := r.Resolve(context.Background(), "ns", &Ref{Path: tsPath}, nil, nil)
+	results, err := r.Resolve(context.Background(), "ns", &Ref{Path: tsPath}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
@@ -556,7 +556,7 @@ spec:
 
 	// dev mode OFF — should use remote (0 8)
 	r := NewResolver(t.TempDir(), false, zap.NewNop())
-	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil)
+	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
@@ -566,7 +566,7 @@ spec:
 
 	// dev mode ON — should use dev ref (0 1)
 	rDev := NewResolver(t.TempDir(), true, zap.NewNop())
-	resultsDev, err := rDev.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil)
+	resultsDev, err := rDev.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
@@ -594,7 +594,7 @@ spec:
 `
 	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
 	r := newResolver(t)
-	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil)
+	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}

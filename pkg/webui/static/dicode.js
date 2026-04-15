@@ -15,6 +15,22 @@
  *
  *   Level 3 — Full API: use dicode.execute(params, { onFinish }).
  *     Full control over rendering and error handling.
+ *
+ *     Result shape passed to onFinish(result) and to the returned Promise:
+ *
+ *       {
+ *         runId:       string,   // "X-Run-Id" header from the response
+ *         status:      "success" | "failure",
+ *         contentType: string,   // full Content-Type header
+ *         body:        string,   // always the raw response body
+ *         returnValue: any,      // parsed object for application/json, null otherwise
+ *         parseError:  string | null  // error message if JSON parsing failed
+ *       }
+ *
+ *     Note: prior to the JSON-parse fix, `returnValue` was the raw body
+ *     string for application/json responses. It is now the parsed object,
+ *     or null on parse failure. Callers that need the raw text in all
+ *     cases should read `result.body`.
  */
 (function () {
   'use strict';
@@ -108,13 +124,20 @@
             runId: runId,
             status: status >= 200 && status < 300 ? 'success' : 'failure',
             contentType: contentType,
-            body: body,
-            returnValue: null
+            body: body,           // always the raw response string
+            returnValue: null,    // parsed object for application/json, else null
+            parseError: null      // error message if JSON parsing failed
           };
 
           if (contentType.indexOf('application/json') !== -1) {
-            try { result.returnValue = JSON.parse(body); }
-            catch (e) { result.returnValue = null; }
+            try {
+              result.returnValue = JSON.parse(body);
+            } catch (e) {
+              result.returnValue = null;
+              result.parseError = (e && e.message) || String(e);
+              // The raw body is still on result.body for callers that want
+              // to fall back to manual parsing or show the unparsed text.
+            }
           }
 
           if (handlers.onFinish) handlers.onFinish(result);

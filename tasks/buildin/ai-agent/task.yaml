@@ -29,15 +29,16 @@ params:
     default: ""
     description: "Conversation id. Empty = auto-generate and return in response."
 
-  # ─── Tools (were previously called "skills") ───────────────────────────────
+  # ─── Tools ─────────────────────────────────────────────────────────────────
   # Tools are other dicode tasks the model can call via dicode.run_task().
-  # Filter by comma-separated task ids; empty = all permitted tasks except self.
+  # Filter by comma-separated task ids; empty = all permitted tasks except
+  # the ai-agent family.
   tools:
     type: string
     default: ""
-    description: "Comma-separated dicode task ids the agent may call as tools. Empty = all permitted tasks except self."
+    description: "Comma-separated dicode task ids the agent may call as tools. Empty = all permitted tasks except the ai-agent family."
 
-  # ─── Skills (new: md files loaded into the system prompt) ──────────────────
+  # ─── Skills ────────────────────────────────────────────────────────────────
   # Skills are markdown files providing domain context or instructions that
   # get eager-loaded into the system prompt. Names match filenames under the
   # skills directory without .md. E.g. skills="dicode-basics,github" loads
@@ -46,6 +47,16 @@ params:
     type: string
     default: ""
     description: "Comma-separated skill md file names (without .md) to concatenate into the system prompt."
+
+  # Directory the `skills` param resolves against. The default is populated
+  # at task-load time via template expansion: ${TASK_SET_DIR} is the dir of
+  # this source's root taskset.yaml, so `../skills` lands on the shared
+  # skills directory alongside the taskset. Override per-run to point at a
+  # different pool. See docs/task-template-vars.md for the full var list.
+  skills_dir:
+    type: string
+    default: "${TASK_SET_DIR}/../skills"
+    description: "Absolute path to the directory holding skill .md files. Defaults to <task-set>/../skills."
 
   # ─── Provider config ───────────────────────────────────────────────────────
   # No defaults. Caller (taskset override, curl, or dicode.run_task) MUST
@@ -78,6 +89,24 @@ params:
     type: string
     default: ""
     description: "Model used for compaction summaries. Empty = same as main model."
+  compaction_keep_turns:
+    type: number
+    default: "4"
+    description: "Number of most-recent turns kept verbatim during compaction; older turns are summarized."
+  compaction_max_tokens:
+    type: number
+    default: "1024"
+    description: "max_tokens budget for the compaction-summary LLM call."
+
+  # ─── Agent-loop tunables ───────────────────────────────────────────────────
+  max_tool_iterations:
+    type: number
+    default: "10"
+    description: "Upper bound on the agent's tool-use loop. Prevents runaway tool-calling."
+  response_max_tokens:
+    type: number
+    default: "4096"
+    description: "max_tokens budget for each chat-completion call."
 
 permissions:
   # ─── Env ──────────────────────────────────────────────────────────────────
@@ -97,13 +126,11 @@ permissions:
   net: []
 
   # ─── Filesystem ───────────────────────────────────────────────────────────
-  # Read access to the source's shared skills directory so the task can load
-  # md files referenced by the "skills" param. ${SKILLS_DIR} is injected by
-  # the source loader and resolves to <source-root>/skills, so this task
-  # works across local, git, and taskset sources without path hacks.
-  # See pkg/task/template.go for the full template variable set.
+  # Read access to the shared skills directory so the task can load md files
+  # referenced by the "skills" param. Mirrors the `skills_dir` param default.
+  # See docs/task-template-vars.md for the available template variables.
   fs:
-    - path: "${SKILLS_DIR}"
+    - path: "${TASK_SET_DIR}/../skills"
       permission: r
 
   # ─── Dicode runtime APIs ──────────────────────────────────────────────────
