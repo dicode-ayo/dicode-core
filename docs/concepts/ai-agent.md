@@ -116,8 +116,6 @@ The shared skills directory is configured through the `skills_dir` param, whose 
 
 A starter skill ships at `tasks/skills/dicode-basics.md` covering core dicode concepts an agent should know to be useful.
 
-> **Note on authenticated Ollama proxies**: the `ai-agent-ollama` preset in `tasks/examples/taskset.yaml` omits `api_key_env`, which tells the agent to send a placeholder API key (Ollama ignores it). If you run an *authenticated* Ollama proxy, override `api_key_env` in your own taskset to the env var holding your key — otherwise the real key is silently dropped and the proxy returns 401.
-
 ---
 
 ## Provider presets
@@ -131,6 +129,8 @@ Three ready-to-use presets live in `tasks/examples/taskset.yaml`:
 | `ai-agent-ollama` | `/hooks/ai/ollama` | `llama3.2` | Local via `localhost:11434`. No key needed. |
 | `ai-agent-openai` | `/hooks/ai/openai` | `gpt-4o-mini` | Needs `OPENAI_API_KEY` in the daemon env. |
 | `ai-agent-groq` | `/hooks/ai/groq` | `llama-3.3-70b-versatile` | Needs `GROQ_API_KEY`. Free tier is generous. |
+
+> **Authenticated Ollama proxies**: the `ai-agent-ollama` preset omits `api_key_env`, so the agent sends the literal string `unused` as its API key (Ollama itself ignores it, the OpenAI SDK just needs something non-empty). If you front Ollama with an *authenticated* reverse proxy, override `api_key_env` in your own taskset — otherwise the agent sends `unused` instead of your key and the proxy returns 401.
 
 Each preset reuses the same `task.ts` via taskset `overrides` — zero code duplication. The override pattern is reusable: copy an existing preset and swap `model` / `base_url` / `api_key_env` / `permissions.net` to point at whatever provider you want.
 

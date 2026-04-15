@@ -50,6 +50,24 @@ function taskIdToToolName(id: string): string {
   return "task_" + id.replace(/[^a-zA-Z0-9_-]/g, "_");
 }
 
+// Parse a numeric param into a finite positive integer, throwing a clear
+// error on anything else. Every numeric tunable has a task.yaml default,
+// but the runtime's param-merge only applies defaults when the param is
+// absent — a caller passing "" or "garbage" overrides the default and
+// Number() would collapse it to 0 or NaN, silently breaking the agent
+// (a `while (0 < NaN)` loop never runs; a `<= NaN` compaction check never
+// fires). Fail loud so misconfigurations can't masquerade as empty replies
+// or runaway history growth.
+function parsePositiveInt(raw: string | null, name: string): number {
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0 || Math.floor(n) !== n) {
+    throw new Error(
+      `ai-agent: param ${name} must be a positive integer, got ${JSON.stringify(raw)}`,
+    );
+  }
+  return n;
+}
+
 // Map a dicode param type to a JSON Schema type. Unknown types fall back
 // to "string" so the tool schema is always valid even for param types we
 // don't explicitly recognise.
@@ -246,16 +264,20 @@ export default async function main({ params, kv, dicode }: DicodeSdk) {
   const baseURL = (await params.get("base_url")) ?? "";
   const apiKeyEnv = (await params.get("api_key_env")) ?? "";
   const systemPromptBase = (await params.get("system_prompt")) ?? "";
-  const maxHistoryTokens = Number(await params.get("max_history_tokens"));
   const compactionModel = (await params.get("compaction_model")) || model;
 
-  // Tunables — all have task.yaml defaults, no fallbacks here. Fail loud
-  // if the caller sends empty/non-numeric values rather than silently
-  // substituting different magic numbers from two sources.
-  const maxToolIterations = Number(await params.get("max_tool_iterations"));
-  const responseMaxTokens = Number(await params.get("response_max_tokens"));
-  const compactionMaxTokens = Number(await params.get("compaction_max_tokens"));
-  const compactionKeepTurns = Number(await params.get("compaction_keep_turns"));
+  // Tunables. Every one has a task.yaml default, but the runtime merges
+  // defaults only when the param was absent — a caller passing an explicit
+  // empty or non-numeric value overrides the default and Number() collapses
+  // it to 0 or NaN, which then silently breaks the loop (e.g.
+  // `while(0 < NaN)` never runs, `estimateTokens <= NaN` never compacts).
+  // Validate explicitly so a bad param surfaces as a loud error instead of
+  // an empty reply or runaway history.
+  const maxHistoryTokens = parsePositiveInt(await params.get("max_history_tokens"), "max_history_tokens");
+  const maxToolIterations = parsePositiveInt(await params.get("max_tool_iterations"), "max_tool_iterations");
+  const responseMaxTokens = parsePositiveInt(await params.get("response_max_tokens"), "response_max_tokens");
+  const compactionMaxTokens = parsePositiveInt(await params.get("compaction_max_tokens"), "compaction_max_tokens");
+  const compactionKeepTurns = parsePositiveInt(await params.get("compaction_keep_turns"), "compaction_keep_turns");
 
   const missing: string[] = [];
   if (!model) missing.push("model");
