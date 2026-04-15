@@ -24,14 +24,15 @@ import (
 // (see dicode-relay src/broker/crypto.ts).
 const hkdfInfo = "dicode-oauth-token"
 
-// AuthRequest is the data the daemon needs to track for a pending OAuth flow.
-// The relay broker stores its own copy keyed by SessionID; the daemon keeps
-// PKCEVerifier locally so the verifier never crosses the network.
+// AuthRequest is the data the daemon needs to track for a pending OAuth
+// flow. The challenge is retained only because it's part of the signed
+// payload the broker verifies — the daemon never runs the code exchange
+// itself (Grant on the relay handles PKCE upstream), so no verifier is
+// stored here.
 type AuthRequest struct {
 	Provider      string
 	SessionID     string // UUID v4, with dashes
-	PKCEVerifier  string // base64url, no padding
-	PKCEChallenge string // base64url(sha256(verifier))
+	PKCEChallenge string // base64url(sha256(random verifier)) — bound into the signed payload
 	Timestamp     int64  // unix seconds
 }
 
@@ -91,22 +92,24 @@ func SignAuthPayload(priv *ecdsa.PrivateKey, payload []byte) (string, error) {
 	return base64.StdEncoding.EncodeToString(sig), nil
 }
 
-// generatePKCE returns a fresh PKCE verifier (32 random bytes, base64url) and
-// the matching S256 challenge.
-func generatePKCE() (verifier, challenge string, err error) {
+// generatePKCEChallenge returns a fresh base64url S256 challenge. The
+// underlying verifier is intentionally discarded: the daemon never completes
+// the code exchange itself — Grant on the relay side runs its own PKCE
+// against the upstream provider. Our challenge exists solely to bind the
+// daemon's signed payload to a value that cannot be swapped in the URL.
+func generatePKCEChallenge() (string, error) {
 	var raw [32]byte
 	if _, err := io.ReadFull(rand.Reader, raw[:]); err != nil {
-		return "", "", fmt.Errorf("read random: %w", err)
+		return "", fmt.Errorf("read random: %w", err)
 	}
-	verifier = base64.RawURLEncoding.EncodeToString(raw[:])
+	verifier := base64.RawURLEncoding.EncodeToString(raw[:])
 	sum := sha256.Sum256([]byte(verifier))
-	challenge = base64.RawURLEncoding.EncodeToString(sum[:])
-	return verifier, challenge, nil
+	return base64.RawURLEncoding.EncodeToString(sum[:]), nil
 }
 
-// BuildAuthURL constructs a signed `/auth/:provider` URL pointing at the relay
-// broker. The returned AuthRequest carries the session id and PKCE verifier
-// that the daemon must remember to correlate the eventual token delivery.
+// BuildAuthURL constructs a signed `/auth/:provider` URL pointing at the
+// relay broker and returns the matching AuthRequest for the daemon-side
+// pending store.
 //
 //	baseURL  e.g. "https://relay.dicode.app"
 //	scope    optional space-separated scope override (empty = use broker default)
@@ -118,7 +121,7 @@ func BuildAuthURL(baseURL string, identity *Identity, provider, scope string, no
 		return "", nil, fmt.Errorf("provider required")
 	}
 
-	verifier, challenge, err := generatePKCE()
+	challenge, err := generatePKCEChallenge()
 	if err != nil {
 		return "", nil, err
 	}
@@ -152,7 +155,6 @@ func BuildAuthURL(baseURL string, identity *Identity, provider, scope string, no
 	return u.String(), &AuthRequest{
 		Provider:      provider,
 		SessionID:     sessionID,
-		PKCEVerifier:  verifier,
 		PKCEChallenge: challenge,
 		Timestamp:     now,
 	}, nil
@@ -182,8 +184,14 @@ func DecryptOAuthToken(identity *Identity, payload *OAuthTokenDeliveryPayload) (
 	if payload == nil {
 		return nil, fmt.Errorf("payload required")
 	}
-	if payload.Type != "" && payload.Type != "oauth_token_delivery" {
-		return nil, fmt.Errorf("unexpected payload type: %s", payload.Type)
+	// Require an explicit, known type tag. The relay broker always sets
+	// Type="oauth_token_delivery"; accepting envelopes with an empty type
+	// would let a future (or malicious) sender of any other encrypted-to-
+	// this-daemon ciphertext reuse the same decrypt path. Until the relay
+	// and daemon both support binding Type as GCM AAD (coordinated change,
+	// tracked separately), requiring a non-empty tag is the best we can do.
+	if payload.Type != "oauth_token_delivery" {
+		return nil, fmt.Errorf("unexpected payload type: %q", payload.Type)
 	}
 
 	ephBytes, err := base64.StdEncoding.DecodeString(payload.EphemeralPubkey)

@@ -191,7 +191,7 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 			return cm.ChildRSSMB, cm.ChildCPUMs
 		},
 	}
-	ctrlSrv, err := ipc.NewControlServer(socketPath, tokenPath, reg, eng, localSecrets, mp, version, log, database)
+	ctrlSrv, err := ipc.NewControlServer(socketPath, tokenPath, reg, eng, localSecrets, mp, version, log)
 	if err != nil {
 		return fmt.Errorf("build control server: %w", err)
 	}
@@ -209,7 +209,7 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 		if err != nil {
 			log.Warn("relay: identity init failed, relay disabled", zap.Error(err))
 		} else {
-			rc := relay.NewClient(cfg.Relay.ServerURL, id, port, database, log)
+			rc := relay.NewClient(cfg.Relay.ServerURL, id, port, log)
 			srv.SetRelayClient(rc)
 			// Wire the daemon's relay identity into the deno runtime so
 			// the auth-start and auth-relay built-in tasks can drive the
@@ -217,15 +217,9 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 			// across runs so auth-start and auth-relay correlate by
 			// session id. The broker speaks HTTPS at the same host as the
 			// WSS relay endpoint.
-			pending := relay.NewPendingSessions()
 			if brokerURL := deriveBrokerBaseURL(cfg.Relay.ServerURL); brokerURL != "" {
-				denoRT.SetOAuthBroker(id, brokerURL, pending, rc.BrokerPubkey)
-			} else {
-				log.Warn("relay: could not derive broker base URL from server_url — OAuth broker disabled",
-					zap.String("server_url", cfg.Relay.ServerURL),
-					zap.String("expected_scheme", "wss:// or ws://"))
+				denoRT.SetOAuthBroker(id, brokerURL, relay.NewPendingSessions())
 			}
-			g.Go(func() error { pending.StartSweep(ctx); return nil })
 			g.Go(func() error { return rc.Run(ctx) })
 		}
 	}

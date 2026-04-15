@@ -80,7 +80,7 @@ func startOAuthServer(t *testing.T) *oauthEnv {
 	identity := newOAuthIdentity(t)
 	pending := relay.NewPendingSessions()
 	secretsMgr := newMemSecrets()
-	srv.SetOAuthBroker(identity, "https://relay.dicode.app", pending, nil)
+	srv.SetOAuthBroker(identity, "https://relay.dicode.app", pending)
 	srv.SetSecrets(secretsMgr)
 
 	socketPath, token, err := srv.Start(context.Background())
@@ -144,7 +144,7 @@ func TestServer_OAuth_BuildAuthURL_DeniedWithoutInit(t *testing.T) {
 	spec := specWithDicode("leaky", &task.DicodePermissions{OAuthStore: true})
 	runID := fmt.Sprintf("test-%d", time.Now().UnixNano())
 	srv := New(runID, spec.ID, env.secret, env.reg, env.db, nil, nil, zap.NewNop(), spec, nil, "", "", "")
-	srv.SetOAuthBroker(newOAuthIdentity(t), "https://relay.dicode.app", relay.NewPendingSessions(), nil)
+	srv.SetOAuthBroker(newOAuthIdentity(t), "https://relay.dicode.app", relay.NewPendingSessions())
 	socketPath, token, err := srv.Start(context.Background())
 	if err != nil {
 		t.Fatalf("Start: %v", err)
@@ -326,7 +326,7 @@ func sealForDaemon(t *testing.T, identity *relay.Identity, sessionID string, pla
 	}
 	block, _ := aes.NewCipher(encKey)
 	aead, _ := cipher.NewGCM(block)
-	ct := aead.Seal(nil, iv, plaintext, []byte("oauth_token_delivery"))
+	ct := aead.Seal(nil, iv, plaintext, nil)
 	return &relay.OAuthTokenDeliveryPayload{
 		Type:            "oauth_token_delivery",
 		SessionID:       sessionID,

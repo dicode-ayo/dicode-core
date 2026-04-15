@@ -1,7 +1,6 @@
 package relay
 
 import (
-	"context"
 	"errors"
 	"sync"
 	"time"
@@ -60,11 +59,10 @@ func (s *PendingSessions) Add(req *AuthRequest) {
 // struct — it will not be returned to anyone else. If no matching entry
 // exists (or the entry has expired) Take returns ErrPendingNotFound.
 //
-// Take is the correct primitive for /hooks/oauth-complete handling: it
-// enforces single-use binding of a delivery to a request the daemon
-// actually issued. Evicting on read (even if downstream decrypt/parse/
-// store later fails) guarantees that a token-delivery envelope cannot be
-// replayed to trigger repeated decryptions of the same ciphertext.
+// Take is the correct primitive for /hooks/oauth-complete handling: the
+// delivery is single-use, so we want to evict on read even if downstream
+// decrypt/parse/store later fails (a failed delivery must not leave the
+// session re-usable as a decryption oracle).
 func (s *PendingSessions) Take(sessionID string) (*AuthRequest, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -101,20 +99,4 @@ func (s *PendingSessions) Len() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.byID)
-}
-
-// StartSweep runs SweepExpired on a ticker until ctx is cancelled.
-// Safe to call from a background goroutine at daemon startup; the method
-// returns when the context is done.
-func (s *PendingSessions) StartSweep(ctx context.Context) {
-	ticker := time.NewTicker(time.Minute)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			s.SweepExpired()
-		}
-	}
 }

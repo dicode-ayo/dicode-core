@@ -84,7 +84,6 @@ type Runtime struct {
 	oauthIdentity  *relay.Identity
 	oauthURL       string
 	oauthPending   *relay.PendingSessions
-	brokerPubkeyFn func() string
 }
 
 // New creates a Deno Runtime. It ensures the Deno binary is present in the
@@ -116,11 +115,10 @@ func (rt *Runtime) SetSecretsManager(m secrets.Manager) { rt.secretsManager = m 
 // built-in tasks can use dicode.oauth.*. All three are required together;
 // passing nil leaves the oauth API inert and tasks will receive a
 // "not configured" error.
-func (rt *Runtime) SetOAuthBroker(id *relay.Identity, baseURL string, pending *relay.PendingSessions, brokerPubkeyFn func() string) {
+func (rt *Runtime) SetOAuthBroker(id *relay.Identity, baseURL string, pending *relay.PendingSessions) {
 	rt.oauthIdentity = id
 	rt.oauthURL = baseURL
 	rt.oauthPending = pending
-	rt.brokerPubkeyFn = brokerPubkeyFn
 }
 
 // SetAIConfig configures the AI provider details passed to tasks via dicode.get_config.
@@ -217,7 +215,7 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	srv.SetGateway(rt.gateway)
 	srv.SetSecrets(rt.secretsManager)
 	if rt.oauthIdentity != nil {
-		srv.SetOAuthBroker(rt.oauthIdentity, rt.oauthURL, rt.oauthPending, rt.brokerPubkeyFn)
+		srv.SetOAuthBroker(rt.oauthIdentity, rt.oauthURL, rt.oauthPending)
 	}
 	socketPath, token, err := srv.Start(execCtx)
 	if err != nil {
