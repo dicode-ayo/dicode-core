@@ -637,6 +637,19 @@ func (s *Server) handleConn(conn net.Conn) {
 				reply(req.ID, nil, "ipc: store secret: "+err.Error())
 				continue
 			}
+			// Structured audit entry. Fields are deliberately metadata-only
+			// so that an operator tailing the run log can trace which task
+			// run received which delivery without the token ever touching
+			// an observability pipeline.
+			if s.log != nil {
+				s.log.Info("oauth token delivered",
+					zap.String("task", s.taskID),
+					zap.String("run", s.runID),
+					zap.String("provider", authReq.Provider),
+					zap.String("session", authReq.SessionID),
+					zap.Strings("secrets", written),
+				)
+			}
 			reply(req.ID, map[string]any{
 				"provider": authReq.Provider,
 				"secrets":  written,
