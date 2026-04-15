@@ -38,10 +38,15 @@ function refresh() {
         return;
       }
 
-      var info;
-      try { info = JSON.parse(data.returnValue || data.body); } catch (e) {
-        statusEl.textContent = 'Could not parse result';
-        return;
+      // dicode.execute() parses application/json bodies into an object on
+      // data.returnValue. Fall back to parsing data.body for tasks that
+      // return a non-JSON content type but a JSON body anyway.
+      var info = data.returnValue;
+      if (!info) {
+        try { info = JSON.parse(data.body); } catch (e) {
+          statusEl.textContent = 'Could not parse result';
+          return;
+        }
       }
       renderTiles(info);
       statusEl.textContent = 'Last refreshed ' + new Date().toLocaleTimeString();

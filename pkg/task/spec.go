@@ -272,7 +272,24 @@ type Spec struct {
 }
 
 // LoadDir reads a task from its directory (expects task.yaml and task.<ext>).
+// Equivalent to LoadDirWithVars(dir, nil). Use LoadDirWithVars from source
+// loaders that know about per-source context (TASK_SET_DIR, …).
 func LoadDir(dir string) (*Spec, error) {
+	return LoadDirWithVars(dir, nil)
+}
+
+// LoadDirWithVars reads a task from its directory, expanding ${VAR} references
+// in the spec using built-in variables merged with the caller-supplied extras.
+// Pass nil for extras when loading a task outside of a source context.
+//
+// Typical extras:
+//   - TASK_SET_DIR: directory of the root taskset.yaml for taskset sources,
+//     or the source root for raw local/git sources. Injected automatically
+//     by pkg/taskset/resolver.Resolve and by pkg/source/{local,git}.
+//
+// See pkg/task/template.go and docs/task-template-vars.md for the full
+// variable set and resolution rules.
+func LoadDirWithVars(dir string, extras map[string]string) (*Spec, error) {
 	specPath := filepath.Join(dir, "task.yaml")
 	f, err := os.Open(specPath)
 	if err != nil {
@@ -291,6 +308,11 @@ func LoadDir(dir string) (*Spec, error) {
 
 	spec.TaskDir = dir
 	spec.ID = filepath.Base(dir)
+
+	// Expand ${VAR} template references in paths, secrets, and env indirection
+	// keys. Kept intentionally narrow — see expandSpec for the allowlist and
+	// pkg/task/template.go for the resolution rules.
+	expandSpec(&spec, builtinVars(dir, extras))
 
 	if spec.Runtime == "" || spec.Runtime == "js" {
 		spec.Runtime = RuntimeDeno

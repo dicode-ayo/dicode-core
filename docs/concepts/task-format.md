@@ -632,6 +632,77 @@ Examples: `morning-email-check`, `github-release-notifier`, `backup-database`
 
 ---
 
+## Template variables
+
+Selected fields in `task.yaml` support `${VAR}` substitution, resolved at task-load time. Syntax is the standard shell form — no escaping, no pipes, no conditionals — just drop-in replacement.
+
+### Supported fields
+
+Template expansion runs over a tight allowlist, not every string field:
+
+- `permissions.fs[].path`
+- `trigger.webhook_secret`
+- `permissions.env[].from`, `.secret`, `.value` (the indirection keys)
+
+Everything else — `name`, `description`, `params.*.default`, `system_prompt` defaults — is taken literally. This is deliberate: expansion in descriptive strings usually hides bugs rather than enabling them.
+
+### Built-in variables
+
+Always available inside a task:
+
+| Variable | Value |
+| --- | --- |
+| `${TASK_DIR}` | Absolute path to this task's own directory (the one holding `task.yaml`) |
+| `${HOME}` | User home directory (best-effort — may be unset in restricted environments) |
+
+Injected by the source loader on every task it loads:
+
+| Variable | Value |
+| --- | --- |
+| `${TASK_SET_DIR}` | Absolute path to the directory containing the root `taskset.yaml` of the source that loaded this task. Unset when the task is loaded outside of a source context (raw local folder source, unit test). |
+
+See [../task-template-vars.md](../task-template-vars.md) for the per-field expansion policy (which task.yaml fields actually get `${VAR}` substituted, and the env-fallback rules that protect against daemon-secret exfiltration).
+
+### Resolution order
+
+1. Built-in variables (above), highest priority
+2. Process environment (`os.Getenv`) — only for fields where env fallback is safe; see the linked policy doc
+3. **Unresolved** — the literal `${VAR}` is left in place so bugs surface loudly instead of silently collapsing to an empty string
+
+### Examples
+
+Give a task read access to a shared skills directory one level above the taskset:
+
+```yaml
+permissions:
+  fs:
+    - path: "${TASK_SET_DIR}/../skills"
+      permission: r
+```
+
+Reference a webhook secret from the process environment (closing the historical docs/reality gap where this was documented but never actually expanded):
+
+```yaml
+trigger:
+  webhook: /hooks/github
+  webhook_secret: "${GITHUB_WEBHOOK_SECRET}"
+permissions:
+  env:
+    - GITHUB_WEBHOOK_SECRET
+```
+
+Compose a secrets-store key from a per-environment prefix:
+
+```yaml
+permissions:
+  env:
+    - name: DB_PASSWORD
+      secret: "${DEPLOY_ENV}_db_password"
+    - DEPLOY_ENV
+```
+
+---
+
 ## File layout rules
 
 - `task.yaml` is always required. A folder without it is ignored.

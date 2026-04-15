@@ -628,6 +628,19 @@ The AI can read the current file content and write files directly using a `write
 
 Works with any OpenAI-compatible endpoint — OpenAI, Anthropic (Claude), Ollama, or any other provider that speaks the OpenAI API format.
 
+### Chat with an agent that calls your tasks
+
+Dicode ships a built-in **ai-agent** task that gives you a full chat interface where the model can call any of your other dicode tasks as tools. Open `/hooks/ai` in the dashboard to start a conversation; the agent discovers every registered task, builds an OpenAI-compatible tool schema from each task's params, and invokes them on your behalf via `dicode.run_task()`.
+
+Two vocabulary pieces worth knowing:
+
+- **Tools** are other dicode tasks the agent can execute. Any task becomes a tool automatically — no extra registration.
+- **Skills** are plain markdown files under `tasks/skills/` that get loaded into the agent's system prompt. Use them to teach the agent domain context, conventions, or workflows it wouldn't infer from task descriptions alone.
+
+The built-in ships provider-agnostic — no network, no API keys. Choose your provider via taskset overrides (see `tasks/examples/taskset.yaml` for working Ollama / OpenAI / Groq presets), or pass `model` / `base_url` / `api_key_env` as params per request. Conversation history is persisted per `session_id` in the task's KV store and compacted into a running summary once it exceeds a configurable token budget.
+
+See [docs/concepts/ai-agent.md](docs/concepts/ai-agent.md) for the full design.
+
 ---
 
 ## Task Store (planned)
@@ -1571,7 +1584,8 @@ dicode/
 │   ├── webui/          # HTTP server, REST API, auth, WebSocket hub
 │   └── service/        # OS service management (interface defined, impls planned)
 ├── tasks/
-│   ├── buildin/        # built-in tasks (webui, tray, alert, notify)
+│   ├── buildin/        # built-in tasks (webui, tray, alert, notify, ai-agent)
+│   ├── skills/         # shared markdown "skills" loaded into agent prompts
 │   ├── auth/           # OAuth task (broker mode planned)
 │   └── examples/       # 13 example tasks (all runtimes and trigger types)
 ├── docs/               # comprehensive documentation (33 files)

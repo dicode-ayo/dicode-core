@@ -1,0 +1,146 @@
+apiVersion: dicode/v1
+kind: Task
+name: "AI Agent"
+description: >
+  Generic AI chat agent. Talks to any OpenAI-compatible chat completions
+  endpoint (OpenAI, Anthropic, Ollama, LM Studio, Groq, OpenRouter, Together,
+  …), lets the model call other dicode tasks as TOOLS, and loads markdown
+  SKILLS into the system prompt for domain context.
+
+  This buildin ships locked down: no network, no provider defaults, no
+  provider API keys in env. Everything must be provided by the caller or
+  by a sibling taskset override (see tasks/examples/ai-agent-*). This keeps
+  the buildin generic and safe; provider-specific policy lives with the
+  provider-specific task.
+runtime: deno
+trigger:
+  webhook: /hooks/ai
+  # auth: true intentionally omitted — see #96 (auth UX for protected webhook
+  # tasks). Re-enable once the auth flow lands.
+
+params:
+  # ─── Per-call inputs ───────────────────────────────────────────────────────
+  prompt:
+    type: string
+    required: true
+    description: "User message to send to the agent."
+  session_id:
+    type: string
+    default: ""
+    description: "Conversation id. Empty = auto-generate and return in response."
+
+  # ─── Tools ─────────────────────────────────────────────────────────────────
+  # Tools are other dicode tasks the model can call via dicode.run_task().
+  # Filter by comma-separated task ids; empty = all permitted tasks except
+  # the ai-agent family.
+  tools:
+    type: string
+    default: ""
+    description: "Comma-separated dicode task ids the agent may call as tools. Empty = all permitted tasks except the ai-agent family."
+
+  # ─── Skills ────────────────────────────────────────────────────────────────
+  # Skills are markdown files providing domain context or instructions that
+  # get eager-loaded into the system prompt. Names match filenames under the
+  # skills directory without .md. E.g. skills="dicode-basics,github" loads
+  # dicode-basics.md and github.md.
+  skills:
+    type: string
+    default: ""
+    description: "Comma-separated skill md file names (without .md) to concatenate into the system prompt."
+
+  # Directory the `skills` param resolves against. The default is populated
+  # at task-load time via template expansion: ${TASK_SET_DIR} is the dir of
+  # this source's root taskset.yaml, so `../skills` lands on the shared
+  # skills directory alongside the taskset. Override per-run to point at a
+  # different pool. See docs/task-template-vars.md for the full var list.
+  skills_dir:
+    type: string
+    default: "${TASK_SET_DIR}/../skills"
+    description: "Absolute path to the directory holding skill .md files. Defaults to <task-set>/../skills."
+
+  # ─── Provider config ───────────────────────────────────────────────────────
+  # No defaults. Caller (taskset override, curl, or dicode.run_task) MUST
+  # supply model + base_url + api_key_env, or the task returns a structured
+  # "not configured" response the UI can act on.
+  model:
+    type: string
+    default: ""
+    description: "Chat model id. REQUIRED — empty = task returns 'not configured'."
+  base_url:
+    type: string
+    default: ""
+    description: "OpenAI-compatible base URL. REQUIRED."
+  api_key_env:
+    type: string
+    default: ""
+    description: "Env var holding the API key. Leave empty for providers that do not authenticate — a placeholder is sent (the OpenAI SDK requires a non-empty string). Set to an env-var name to require it at run time."
+  system_prompt:
+    type: string
+    default: |
+      You are a helpful assistant embedded in dicode. You can call other
+      dicode tasks as tools. Prefer tools when the user asks for data or
+      actions; answer directly when they ask a general question.
+    description: "System prompt prepended to every conversation. Loaded skills are appended after this."
+  max_history_tokens:
+    type: number
+    default: "80000"
+    description: "Rough token budget for conversation history. Exceeding triggers lazy compaction."
+  compaction_model:
+    type: string
+    default: ""
+    description: "Model used for compaction summaries. Empty = same as main model."
+  compaction_keep_turns:
+    type: number
+    default: "4"
+    description: "Number of most-recent turns kept verbatim during compaction; older turns are summarized."
+  compaction_max_tokens:
+    type: number
+    default: "1024"
+    description: "max_tokens budget for the compaction-summary LLM call."
+
+  # ─── Agent-loop tunables ───────────────────────────────────────────────────
+  max_tool_iterations:
+    type: number
+    default: "10"
+    description: "Upper bound on the agent's tool-use loop. Prevents runaway tool-calling."
+  response_max_tokens:
+    type: number
+    default: "4096"
+    description: "max_tokens budget for each chat-completion call."
+
+permissions:
+  # ─── Env ──────────────────────────────────────────────────────────────────
+  # Only the env vars the OpenAI SDK itself probes at construct time. NO
+  # provider API keys here — each provider-specific override task adds its
+  # own (OPENAI_API_KEY, OLLAMA_API_KEY, …).
+  env:
+    - OPENAI_ORG_ID
+    - OPENAI_PROJECT_ID
+    - OPENAI_BASE_URL
+    - OPENAI_LOG
+    - DEBUG
+
+  # ─── Network ──────────────────────────────────────────────────────────────
+  # Empty list = deny all. The buildin cannot reach any network. Provider
+  # tasks override to widen. This is the "as restrictive as possible" part.
+  net: []
+
+  # ─── Filesystem ───────────────────────────────────────────────────────────
+  # Read access to the shared skills directory so the task can load md files
+  # referenced by the "skills" param. Mirrors the `skills_dir` param default.
+  # See docs/task-template-vars.md for the available template variables.
+  fs:
+    - path: "${TASK_SET_DIR}/../skills"
+      permission: r
+
+  # ─── Dicode runtime APIs ──────────────────────────────────────────────────
+  dicode:
+    list_tasks: true
+    tasks:
+      - "*"
+
+timeout: 300s
+
+notify:
+  on_success: false
+  on_failure: false

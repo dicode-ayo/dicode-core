@@ -347,7 +347,11 @@ func (s *Source) resolve(ctx context.Context) ([]*ResolvedTask, error) {
 		rootRef = &Ref{Path: devRootPath}
 	}
 
-	return s.resolver.Resolve(ctx, s.namespace, rootRef, configDefaults, nil)
+	// TASK_SET_DIR is injected by Resolver.Resolve itself from the resolved
+	// root taskset.yaml path, so the source loader no longer needs to know
+	// about it. Pass nil for extraVars — if a future source type needs to
+	// layer additional vars, build them here.
+	return s.resolver.Resolve(ctx, s.namespace, rootRef, configDefaults, nil, nil)
 }
 
 func (s *Source) loadConfigDefaults() (*Defaults, error) {

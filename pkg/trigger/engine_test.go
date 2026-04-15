@@ -417,6 +417,64 @@ func TestEngine_WebhookHandler_AssetUnknownTypeBlocked(t *testing.T) {
 	}
 }
 
+// Regression test for the webhook longest-prefix match. Two tasks are
+// registered at overlapping hook paths: a shallow one at /hooks/ai and a
+// deeper one at /hooks/ai/openai. A request for /hooks/ai/openai/chat.js
+// must resolve against the DEEPER task, not whichever entry Go's
+// randomised map iteration happens to visit first. Without the longest-
+// prefix walk in WebhookHandler, this test would be flaky in exactly the
+// way production was before the fix.
+func TestEngine_WebhookHandler_NestedLongestPrefix(t *testing.T) {
+	dir := t.TempDir()
+	eng, reg := newMinimalEngine(t)
+
+	const shallowCSS = `body{color:red}`
+	const deepCSS = `body{color:blue}`
+
+	shallow := writeUITask(t, dir, "ai", task.TriggerConfig{Webhook: "/hooks/ai"}, map[string]string{
+		"index.html": `<html></html>`,
+		"style.css":  shallowCSS,
+	})
+	_ = reg.Register(shallow)
+	eng.Register(shallow)
+
+	deep := writeUITask(t, dir, "ai-openai", task.TriggerConfig{Webhook: "/hooks/ai/openai"}, map[string]string{
+		"index.html": `<html></html>`,
+		"style.css":  deepCSS,
+	})
+	_ = reg.Register(deep)
+	eng.Register(deep)
+
+	handler := eng.WebhookHandler()
+
+	// Loop the assertion to smoke out any latent map-iteration-order
+	// dependency. 50 iterations is well past the point where a biased
+	// iteration would fail at least once.
+	for i := range 50 {
+		// Deeper path must bind to the deeper task's asset.
+		req := httptest.NewRequest(http.MethodGet, "/hooks/ai/openai/style.css", nil)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("iter %d: /hooks/ai/openai/style.css → %d: %s", i, w.Code, w.Body.String())
+		}
+		if got := w.Body.String(); got != deepCSS {
+			t.Fatalf("iter %d: /hooks/ai/openai/style.css served %q, want deep task's %q", i, got, deepCSS)
+		}
+
+		// Shallow path (no openai segment) must still bind to the shallow task.
+		req = httptest.NewRequest(http.MethodGet, "/hooks/ai/style.css", nil)
+		w = httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("iter %d: /hooks/ai/style.css → %d: %s", i, w.Code, w.Body.String())
+		}
+		if got := w.Body.String(); got != shallowCSS {
+			t.Fatalf("iter %d: /hooks/ai/style.css served %q, want shallow task's %q", i, got, shallowCSS)
+		}
+	}
+}
+
 func TestEngine_WebhookHandler_FormPOST(t *testing.T) {
 	dir := t.TempDir()
 	e := newTestEnv(t)
