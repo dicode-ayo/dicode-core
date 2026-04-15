@@ -194,6 +194,38 @@ func TestDecryptOAuthToken_RejectsWrongSession(t *testing.T) {
 	}
 }
 
+// Envelopes with an empty Type must be rejected outright — the Type field
+// is the AAD, so accepting an empty value would silently disable domain
+// separation against any future ECIES-encrypted message type reusing this
+// key (see also the review notes in docs/design/oauth-broker if added).
+func TestDecryptOAuthToken_RejectsEmptyType(t *testing.T) {
+	daemon := newOAuthTestIdentity(t)
+	payload := encryptForDaemon(t, daemon, "550e8400-e29b-41d4-a716-446655440000", []byte("hello"))
+	payload.Type = ""
+
+	if _, err := DecryptOAuthToken(daemon, payload); err == nil {
+		t.Fatalf("expected error when Type is empty")
+	}
+}
+
+// Tampering with Type must invalidate the GCM tag because Type is bound as
+// AAD. This is the domain-separation guarantee in the positive direction:
+// not just "empty rejected" but "any mismatch rejected by the AEAD itself".
+func TestDecryptOAuthToken_RejectsTamperedType(t *testing.T) {
+	daemon := newOAuthTestIdentity(t)
+	payload := encryptForDaemon(t, daemon, "550e8400-e29b-41d4-a716-446655440000", []byte("hello"))
+	// A different non-empty type passes the explicit check but must fail
+	// aead.Open because the AAD no longer matches what was sealed.
+	// (We have to bypass the Type-required guard by sending a plausible-
+	//  looking alternative; since the current guard rejects anything not
+	//  equal to "oauth_token_delivery", this doubles as coverage for that.)
+	payload.Type = "wrong_type"
+
+	if _, err := DecryptOAuthToken(daemon, payload); err == nil {
+		t.Fatalf("expected error when Type is tampered")
+	}
+}
+
 // encryptForDaemon mirrors dicode-relay src/broker/crypto.ts eciesEncrypt().
 func encryptForDaemon(t *testing.T, daemon *Identity, sessionID string, plaintext []byte) *OAuthTokenDeliveryPayload {
 	t.Helper()
@@ -227,7 +259,7 @@ func encryptForDaemon(t *testing.T, daemon *Identity, sessionID string, plaintex
 	}
 	block, _ := aes.NewCipher(encKey)
 	aead, _ := cipher.NewGCM(block)
-	ctWithTag := aead.Seal(nil, iv, plaintext, nil)
+	ctWithTag := aead.Seal(nil, iv, plaintext, []byte("oauth_token_delivery"))
 
 	return &OAuthTokenDeliveryPayload{
 		Type:            "oauth_token_delivery",

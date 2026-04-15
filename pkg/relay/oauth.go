@@ -184,12 +184,11 @@ func DecryptOAuthToken(identity *Identity, payload *OAuthTokenDeliveryPayload) (
 	if payload == nil {
 		return nil, fmt.Errorf("payload required")
 	}
-	// Require an explicit, known type tag. The relay broker always sets
-	// Type="oauth_token_delivery"; accepting envelopes with an empty type
-	// would let a future (or malicious) sender of any other encrypted-to-
-	// this-daemon ciphertext reuse the same decrypt path. Until the relay
-	// and daemon both support binding Type as GCM AAD (coordinated change,
-	// tracked separately), requiring a non-empty tag is the best we can do.
+	// Require an explicit, known type tag. The tag is also bound into the
+	// GCM authenticated data below, so a mismatch (or tampering in transit)
+	// makes aead.Open fail. This is domain separation: the daemon identity
+	// key can never be asked to decrypt a future ciphertext that reuses
+	// this same ECIES scheme under a different Type label.
 	if payload.Type != "oauth_token_delivery" {
 		return nil, fmt.Errorf("unexpected payload type: %q", payload.Type)
 	}
@@ -246,7 +245,9 @@ func DecryptOAuthToken(identity *Identity, payload *OAuthTokenDeliveryPayload) (
 		return nil, fmt.Errorf("gcm: %w", err)
 	}
 	// crypto/cipher GCM expects ct || tag, which matches the broker layout.
-	pt, err := aead.Open(nil, iv, ctWithTag, nil)
+	// Type is passed as AAD — the broker binds the same bytes on encrypt,
+	// so any mismatch (or in-transit tampering of Type) makes Open fail.
+	pt, err := aead.Open(nil, iv, ctWithTag, []byte(payload.Type))
 	if err != nil {
 		return nil, fmt.Errorf("aes-gcm open: %w", err)
 	}
