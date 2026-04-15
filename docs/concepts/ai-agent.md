@@ -112,9 +112,11 @@ curl -X POST http://localhost:8080/hooks/ai \
 
 Skills are loaded eagerly — every name you pass is read and concatenated into the system prompt for the entire turn. Missing or unreadable skills produce a placeholder in the prompt instead of failing the request.
 
-The shared skills directory is resolved via the `${SKILLS_DIR}` template variable injected by the source loader (see [task-format.md](task-format.md#template-variables)). For a local source at `~/dicode-tasks/`, `${SKILLS_DIR}` is `~/dicode-tasks/skills/`.
+The shared skills directory is configured through the `skills_dir` param, whose default is `${TASK_SET_DIR}/../skills` — expanded at task-load time to a sibling `skills/` directory next to the taskset that loaded the ai-agent. Override per-run to point at a different pool. See [../task-template-vars.md](../task-template-vars.md) for the full list of template variables available in task.yaml.
 
 A starter skill ships at `tasks/skills/dicode-basics.md` covering core dicode concepts an agent should know to be useful.
+
+> **Note on authenticated Ollama proxies**: the `ai-agent-ollama` preset in `tasks/examples/taskset.yaml` omits `api_key_env`, which tells the agent to send a placeholder API key (Ollama ignores it). If you run an *authenticated* Ollama proxy, override `api_key_env` in your own taskset to the env var holding your key — otherwise the real key is silently dropped and the proxy returns 401.
 
 ---
 
