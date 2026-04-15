@@ -326,7 +326,7 @@ func sealForDaemon(t *testing.T, identity *relay.Identity, sessionID string, pla
 	}
 	block, _ := aes.NewCipher(encKey)
 	aead, _ := cipher.NewGCM(block)
-	ct := aead.Seal(nil, iv, plaintext, nil)
+	ct := aead.Seal(nil, iv, plaintext, []byte("oauth_token_delivery"))
 	return &relay.OAuthTokenDeliveryPayload{
 		Type:            "oauth_token_delivery",
 		SessionID:       sessionID,
