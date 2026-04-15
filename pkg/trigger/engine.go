@@ -713,12 +713,24 @@ func (e *Engine) WebhookHandler() http.Handler {
 		taskID, ok := e.webhooks[path]
 		var assetPath, matchedHook string
 		if !ok {
-			// Prefix match — request is for a static asset belonging to a webhook UI.
-			for hookPath, tid := range e.webhooks {
-				if strings.HasPrefix(path, hookPath+"/") {
+			// No exact match — the request is for a static asset under some
+			// webhook UI. Walk up one path segment at a time doing exact
+			// map lookups, so the most-specific parent hook wins. This
+			// matters when both `/hooks/ai` and `/hooks/ai/openai` are
+			// registered: `/hooks/ai/openai/chat.js` must bind to the
+			// preset, not to the buildin. Exact map lookups (rather than
+			// iterating e.webhooks with strings.HasPrefix) are also
+			// immune to Go's randomised map iteration order.
+			for candidate := path; ; {
+				idx := strings.LastIndex(candidate, "/")
+				if idx <= 0 {
+					break
+				}
+				candidate = candidate[:idx]
+				if tid, found := e.webhooks[candidate]; found {
 					taskID = tid
-					matchedHook = hookPath
-					assetPath = path[len(hookPath)+1:]
+					matchedHook = candidate
+					assetPath = path[len(candidate)+1:]
 					ok = true
 					break
 				}
