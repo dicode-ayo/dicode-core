@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dicode/dicode/pkg/db"
@@ -65,6 +66,10 @@ type Engine struct {
 
 	db db.DB // optional — enables cron-job persistence and missed-run catchup
 
+	taskSem     chan struct{} // nil = unlimited; capacity = MaxConcurrentTasks
+	taskWaiting atomic.Int64  // goroutines parked waiting for a semaphore slot
+	started     atomic.Bool   // set to true by Start(); guards SetMaxConcurrentTasks
+
 	runFinishedHook func(taskID, runID, status, triggerSource string, durationMs int64, notifyOnSuccess, notifyOnFailure bool)
 	runStartedHook  func(taskID, runID, triggerSource string)
 }
@@ -90,6 +95,54 @@ func New(r *registry.Registry, defaultExec pkgruntime.Executor, log *zap.Logger)
 // detects missed runs on startup (e.g. after a process restart).
 func (e *Engine) SetDB(d db.DB) {
 	e.db = d
+}
+
+// SetMaxConcurrentTasks configures a semaphore that limits how many task
+// goroutines run concurrently. n == 0 (the default) means unlimited.
+// Must be called before Start(); calls after Start() are ignored with a warning.
+func (e *Engine) SetMaxConcurrentTasks(n int) {
+	if e.started.Load() {
+		e.log.Warn("SetMaxConcurrentTasks called after Start — ignoring; configure before Start()")
+		return
+	}
+	if n < 0 {
+		e.log.Warn("SetMaxConcurrentTasks: negative value treated as unlimited", zap.Int("n", n))
+		n = 0
+	}
+	const maxConcurrentTasksLimit = 10000
+	if n > maxConcurrentTasksLimit {
+		e.log.Warn("SetMaxConcurrentTasks: value exceeds maximum, capping",
+			zap.Int("requested", n), zap.Int("cap", maxConcurrentTasksLimit))
+		n = maxConcurrentTasksLimit
+	}
+	if n > 0 {
+		e.taskSem = make(chan struct{}, n)
+	} else {
+		e.taskSem = nil
+	}
+}
+
+// MaxConcurrentTasks returns the configured concurrency cap, or 0 if unlimited.
+func (e *Engine) MaxConcurrentTasks() int {
+	if e.taskSem == nil {
+		return 0
+	}
+	return cap(e.taskSem)
+}
+
+// ActiveTaskSlots returns the number of semaphore slots currently held by
+// running task goroutines. Returns 0 when no cap is configured.
+func (e *Engine) ActiveTaskSlots() int {
+	if e.taskSem == nil {
+		return 0
+	}
+	return len(e.taskSem)
+}
+
+// WaitingTasks returns the number of task goroutines currently parked waiting
+// for a semaphore slot to free. Always 0 when no cap is configured.
+func (e *Engine) WaitingTasks() int {
+	return int(e.taskWaiting.Load())
 }
 
 // SetRunStartedHook registers a callback invoked when a run starts.
@@ -159,6 +212,7 @@ func (e *Engine) RegisterExecutor(rt task.Runtime, exec pkgruntime.Executor) {
 
 // Start begins scheduling and runs until ctx is cancelled.
 func (e *Engine) Start(ctx context.Context) error {
+	e.started.Store(true)
 	e.shutdownMu.Lock()
 	e.shutdownCtx = ctx
 	e.shutdownMu.Unlock()
@@ -1149,8 +1203,36 @@ func (e *Engine) runTask(runCtx context.Context, spec *task.Spec, opts pkgruntim
 	return status, result
 }
 
+// finalizeCancelled closes out a run that was cancelled before ever executing
+// — e.g. user killed it while queued on the concurrency semaphore, or the
+// daemon is shutting down. It updates the registry row and fires the finished
+// hook so websocket subscribers see a matching started/finished pair.
+// Safe to call even on the hot shutdown path: the DB write is bounded by a
+// short timeout so a stuck SQLite connection cannot block the goroutine.
+func (e *Engine) finalizeCancelled(spec *task.Spec, opts pkgruntime.RunOptions, source string) {
+	finishCtx, finishCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer finishCancel()
+	if err := e.registry.FinishRun(finishCtx, opts.RunID, registry.StatusCancelled); err != nil {
+		e.log.Error("failed to finalize cancelled queued run",
+			zap.String("run", opts.RunID),
+			zap.String("task", spec.ID),
+			zap.Error(err))
+	}
+	if h := e.runFinishedHook; h != nil {
+		// Duration is 0 — the run never executed. The notifier (wired via
+		// a separate path in runTask) only fires on Success/Failure, so
+		// cancelled runs do not send spurious notifications.
+		notifyOnSuccess, notifyOnFailure := e.resolveNotify(spec)
+		h(spec.ID, opts.RunID, registry.StatusCancelled, source, 0, notifyOnSuccess, notifyOnFailure)
+	}
+}
+
 // fireAsync pre-creates the run record, starts execution in a goroutine,
 // and returns the run ID immediately.
+//
+// When a MaxConcurrentTasks semaphore is configured, the goroutine blocks
+// until a slot is available or the shutdown context is cancelled — ensuring
+// shutdown never deadlocks waiting tasks.
 func (e *Engine) fireAsync(ctx context.Context, spec *task.Spec, opts pkgruntime.RunOptions, source string) (string, error) {
 	opts.RunID = uuid.New().String()
 
@@ -1161,6 +1243,45 @@ func (e *Engine) fireAsync(ctx context.Context, spec *task.Spec, opts pkgruntime
 
 	go func() {
 		defer cleanup()
+
+		// Daemon tasks are long-running; they must not consume semaphore slots
+		// or they would permanently starve webhook/cron tasks.
+		if e.taskSem != nil && !spec.Trigger.Daemon {
+			// Build a done channel that is nil (blocks forever) when the engine
+			// has not yet started — nil channels never select, which is safe.
+			var shutDone <-chan struct{}
+			shutCtx := e.getShutdownCtx()
+			if shutCtx != nil {
+				shutDone = shutCtx.Done()
+			}
+
+			// Increment the "parked waiting for a slot" counter. Each select
+			// case below must decrement exactly once: "waiting" ends when
+			// either the slot is acquired or the goroutine aborts — NOT
+			// when the run itself finishes. A single deferred decrement
+			// here would wrongly keep the counter inflated for the entire
+			// lifetime of successfully-acquired runs.
+			e.taskWaiting.Add(1)
+			select {
+			case e.taskSem <- struct{}{}:
+				e.taskWaiting.Add(-1)
+				// Slot acquired; release when done.
+				defer func() { <-e.taskSem }()
+			case <-runCtx.Done():
+				// User killed (or gave up on) the queued run before a slot
+				// freed. Finalize it as cancelled so the websocket finished
+				// event fires and the DB row doesn't stay stuck in `running`.
+				e.taskWaiting.Add(-1)
+				e.finalizeCancelled(spec, opts, source)
+				return
+			case <-shutDone:
+				// Engine is shutting down; finalize as cancelled and abort.
+				e.taskWaiting.Add(-1)
+				e.finalizeCancelled(spec, opts, source)
+				return
+			}
+		}
+
 		e.runTask(runCtx, spec, opts, source)
 	}()
 

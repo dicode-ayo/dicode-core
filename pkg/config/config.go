@@ -29,6 +29,16 @@ type DefaultsConfig struct {
 	OnFailureChain string `yaml:"on_failure_chain,omitempty"`
 }
 
+// ExecutionConfig tunes how task runs are dispatched by the trigger engine.
+type ExecutionConfig struct {
+	// MaxConcurrentTasks caps how many task goroutines run in parallel.
+	// 0 (default) = unlimited. Extra invocations queue inside the daemon
+	// and run as slots free. Daemon-trigger tasks bypass the limit so
+	// long-runners can't starve webhook/cron tasks.
+	// The DICODE_MAX_CONCURRENT_TASKS env var overrides this value when set.
+	MaxConcurrentTasks int `yaml:"max_concurrent_tasks,omitempty"`
+}
+
 // RelayConfig configures the WebSocket relay client.
 // The relay allows a local dicode instance to receive webhooks from external
 // services (GitHub, Slack, etc.) without port forwarding.
@@ -46,6 +56,7 @@ type Config struct {
 	AI            AIConfig                 `yaml:"ai"`
 	Defaults      DefaultsConfig           `yaml:"defaults"`
 	Runtimes      map[string]RuntimeConfig `yaml:"runtimes,omitempty"`
+	Execution     ExecutionConfig          `yaml:"execution,omitempty"`
 	Relay         RelayConfig              `yaml:"relay,omitempty"`
 	LogLevel      string                   `yaml:"log_level"`
 	DataDir       string                   `yaml:"data_dir"`

@@ -2,11 +2,14 @@ package trigger
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -873,4 +876,403 @@ func TestWaitRun_ContextCancellation(t *testing.T) {
 	if elapsed > 500*time.Millisecond {
 		t.Errorf("WaitRun did not respect context timeout: elapsed %v", elapsed)
 	}
+}
+
+// TestSetMaxConcurrentTasks_Unlimited verifies that the default (0) semaphore
+// setting leaves taskSem nil, preserving backwards-compatible unlimited behaviour.
+func TestSetMaxConcurrentTasks_Unlimited(t *testing.T) {
+	d, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer d.Close()
+	reg := registry.New(d)
+	eng := New(reg, nil, zap.NewNop())
+
+	// Default: no semaphore.
+	if eng.taskSem != nil {
+		t.Fatal("expected taskSem to be nil by default (unlimited)")
+	}
+
+	// Explicitly set to 0 → still nil.
+	eng.SetMaxConcurrentTasks(0)
+	if eng.taskSem != nil {
+		t.Fatal("expected taskSem to be nil after SetMaxConcurrentTasks(0)")
+	}
+}
+
+// TestSetMaxConcurrentTasks_SetAndReset verifies that SetMaxConcurrentTasks
+// correctly sets and clears the semaphore channel.
+func TestSetMaxConcurrentTasks_SetAndReset(t *testing.T) {
+	d, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer d.Close()
+	reg := registry.New(d)
+	eng := New(reg, nil, zap.NewNop())
+
+	eng.SetMaxConcurrentTasks(3)
+	if eng.taskSem == nil {
+		t.Fatal("expected taskSem to be non-nil after SetMaxConcurrentTasks(3)")
+	}
+	if cap(eng.taskSem) != 3 {
+		t.Fatalf("expected semaphore capacity 3, got %d", cap(eng.taskSem))
+	}
+
+	// Resetting to 0 clears the semaphore.
+	eng.SetMaxConcurrentTasks(0)
+	if eng.taskSem != nil {
+		t.Fatal("expected taskSem to be nil after SetMaxConcurrentTasks(0)")
+	}
+}
+
+// TestConcurrencyGetters verifies the public accessors used by /api/metrics
+// report consistent values for unlimited, configured-but-idle, and reset states.
+func TestConcurrencyGetters(t *testing.T) {
+	d, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer d.Close()
+	reg := registry.New(d)
+	eng := New(reg, nil, zap.NewNop())
+
+	// Unlimited defaults.
+	if got := eng.MaxConcurrentTasks(); got != 0 {
+		t.Errorf("MaxConcurrentTasks() default = %d, want 0", got)
+	}
+	if got := eng.ActiveTaskSlots(); got != 0 {
+		t.Errorf("ActiveTaskSlots() default = %d, want 0", got)
+	}
+	if got := eng.WaitingTasks(); got != 0 {
+		t.Errorf("WaitingTasks() default = %d, want 0", got)
+	}
+
+	// Configured but idle.
+	eng.SetMaxConcurrentTasks(5)
+	if got := eng.MaxConcurrentTasks(); got != 5 {
+		t.Errorf("MaxConcurrentTasks() = %d, want 5", got)
+	}
+	if got := eng.ActiveTaskSlots(); got != 0 {
+		t.Errorf("ActiveTaskSlots() idle = %d, want 0", got)
+	}
+
+	// Reset clears cap.
+	eng.SetMaxConcurrentTasks(0)
+	if got := eng.MaxConcurrentTasks(); got != 0 {
+		t.Errorf("MaxConcurrentTasks() after reset = %d, want 0", got)
+	}
+}
+
+// TestFireAsync_ConcurrencyLimit verifies that with MaxConcurrentTasks=2 at
+// most 2 task goroutines execute simultaneously.
+func TestFireAsync_ConcurrencyLimit(t *testing.T) {
+	d, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer d.Close()
+	reg := registry.New(d)
+
+	const limit = 2
+	const total = 5
+
+	// inflight tracks how many tasks are running concurrently.
+	var inflight atomic.Int32
+	var maxSeen atomic.Int32
+
+	// blockCh gates each task: send a value to unblock one goroutine.
+	blockCh := make(chan struct{}, total)
+
+	// atLimitCh is closed when inflight first reaches the concurrency limit,
+	// giving the test a reliable signal without sleeping.
+	atLimitCh := make(chan struct{})
+	var atLimitOnce sync.Once
+
+	// Build a fake executor that records concurrency.
+	fakeExec := &fakeExecutor{
+		fn: func() {
+			cur := inflight.Add(1)
+			defer inflight.Add(-1)
+			// Record the peak.
+			for {
+				old := maxSeen.Load()
+				if cur <= old || maxSeen.CompareAndSwap(old, cur) {
+					break
+				}
+			}
+			// Signal the test once we have reached the semaphore limit.
+			if cur >= int32(limit) {
+				atLimitOnce.Do(func() { close(atLimitCh) })
+			}
+			// Block until the test unblocks us.
+			<-blockCh
+		},
+	}
+
+	eng := New(reg, fakeExec, zap.NewNop())
+	eng.SetMaxConcurrentTasks(limit)
+
+	// Provide a shutdown context so fireAsync can select on it.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	eng.shutdownMu.Lock()
+	eng.shutdownCtx = ctx
+	eng.shutdownMu.Unlock()
+
+	dir := t.TempDir()
+	var specs []*task.Spec
+	for i := range total {
+		id := fmt.Sprintf("sem-task-%d", i)
+		specs = append(specs, writeTask(t, dir, id, `return 1`, task.TriggerConfig{Manual: true}))
+		if err := reg.Register(specs[i]); err != nil {
+			t.Fatalf("Register: %v", err)
+		}
+	}
+
+	// Fire all tasks asynchronously.
+	for i := range total {
+		if _, err := eng.fireAsync(ctx, specs[i], pkgruntime.RunOptions{}, "test"); err != nil {
+			t.Fatalf("fireAsync %d: %v", i, err)
+		}
+	}
+
+	// Wait until the semaphore is full before unblocking tasks.
+	select {
+	case <-atLimitCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for inflight tasks to reach concurrency limit")
+	}
+
+	// Unblock all tasks.
+	for range total {
+		blockCh <- struct{}{}
+	}
+
+	// Wait for all goroutines to drain.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if inflight.Load() == 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if maxSeen.Load() > int32(limit) {
+		t.Errorf("concurrency limit exceeded: saw %d concurrent tasks (limit %d)", maxSeen.Load(), limit)
+	}
+}
+
+// TestFireAsync_ShutdownUnblocksWaiting verifies that cancelling the shutdown
+// context releases goroutines that are blocked waiting for a semaphore slot.
+func TestFireAsync_ShutdownUnblocksWaiting(t *testing.T) {
+	d, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer d.Close()
+	reg := registry.New(d)
+
+	holdCh := make(chan struct{})
+	// acquiredCh is closed by the first task once it has acquired the semaphore
+	// slot, giving the test a reliable signal without sleeping.
+	acquiredCh := make(chan struct{})
+	var acquiredOnce sync.Once
+
+	fakeExec := &fakeExecutor{
+		fn: func() {
+			// Signal that the semaphore slot has been acquired.
+			acquiredOnce.Do(func() { close(acquiredCh) })
+			// Block until test releases.
+			<-holdCh
+		},
+	}
+
+	eng := New(reg, fakeExec, zap.NewNop())
+	eng.SetMaxConcurrentTasks(1) // Only 1 slot.
+
+	ctx, cancel := context.WithCancel(context.Background())
+	eng.shutdownMu.Lock()
+	eng.shutdownCtx = ctx
+	eng.shutdownMu.Unlock()
+
+	dir := t.TempDir()
+	spec1 := writeTask(t, dir, "shutdown-task-1", `return 1`, task.TriggerConfig{Manual: true})
+	spec2 := writeTask(t, dir, "shutdown-task-2", `return 1`, task.TriggerConfig{Manual: true})
+	_ = reg.Register(spec1)
+	_ = reg.Register(spec2)
+
+	// Fire task 1 — it will occupy the sole semaphore slot.
+	if _, err := eng.fireAsync(ctx, spec1, pkgruntime.RunOptions{}, "test"); err != nil {
+		t.Fatalf("fireAsync 1: %v", err)
+	}
+
+	// Wait until task 1 has acquired the semaphore before firing task 2.
+	select {
+	case <-acquiredCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for task 1 to acquire semaphore")
+	}
+
+	// Fire task 2 — it will block waiting for a slot.
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, _ = eng.fireAsync(ctx, spec2, pkgruntime.RunOptions{}, "test")
+	}()
+
+	// Cancel the shutdown context — task 2's goroutine should unblock.
+	cancel()
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Good: shutdown unblocked the waiting goroutine.
+	case <-time.After(3 * time.Second):
+		t.Fatal("shutdown did not unblock the waiting task goroutine")
+	}
+
+	// Unblock task 1 so the goroutine can exit cleanly.
+	close(holdCh)
+}
+
+// TestFireAsync_KillQueuedRun verifies that killing a run while it is parked
+// on the concurrency semaphore honors the kill immediately: the run is
+// finalized as `cancelled` in the registry and the runFinishedHook fires so
+// websocket subscribers see a matching started/finished pair.
+func TestFireAsync_KillQueuedRun(t *testing.T) {
+	d, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer d.Close()
+	reg := registry.New(d)
+
+	holdCh := make(chan struct{})
+	acquiredCh := make(chan struct{})
+	var acquiredOnce sync.Once
+	fakeExec := &fakeExecutor{
+		fn: func() {
+			acquiredOnce.Do(func() { close(acquiredCh) })
+			<-holdCh
+		},
+	}
+
+	eng := New(reg, fakeExec, zap.NewNop())
+	eng.SetMaxConcurrentTasks(1)
+
+	// Record finished-hook invocations so we can assert a matching
+	// started/finished pair fired for the cancelled run.
+	type finishRecord struct {
+		runID, status string
+	}
+	finishedCh := make(chan finishRecord, 2)
+	eng.SetRunFinishedHook(func(_, runID, status, _ string, _ int64, _, _ bool) {
+		finishedCh <- finishRecord{runID: runID, status: status}
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	eng.shutdownMu.Lock()
+	eng.shutdownCtx = ctx
+	eng.shutdownMu.Unlock()
+
+	dir := t.TempDir()
+	spec1 := writeTask(t, dir, "kill-task-1", `return 1`, task.TriggerConfig{Manual: true})
+	spec2 := writeTask(t, dir, "kill-task-2", `return 1`, task.TriggerConfig{Manual: true})
+	_ = reg.Register(spec1)
+	_ = reg.Register(spec2)
+
+	// Task 1 occupies the sole semaphore slot.
+	run1ID, err := eng.fireAsync(ctx, spec1, pkgruntime.RunOptions{}, "test")
+	if err != nil {
+		t.Fatalf("fireAsync 1: %v", err)
+	}
+	select {
+	case <-acquiredCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for task 1 to acquire semaphore")
+	}
+
+	// Task 2 parks on the semaphore waiting.
+	run2ID, err := eng.fireAsync(ctx, spec2, pkgruntime.RunOptions{}, "test")
+	if err != nil {
+		t.Fatalf("fireAsync 2: %v", err)
+	}
+
+	// Poll until task 2 shows up as waiting.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && eng.WaitingTasks() == 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if eng.WaitingTasks() != 1 {
+		t.Fatalf("expected WaitingTasks=1 after fireAsync 2, got %d", eng.WaitingTasks())
+	}
+
+	// Kill the queued run. The kill must be honored immediately.
+	if !eng.KillRun(run2ID) {
+		t.Fatal("KillRun returned false — run2 not found in runCancels")
+	}
+
+	// The finished hook for run2 should fire with status=cancelled.
+	var sawRun2 bool
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && !sawRun2 {
+		select {
+		case rec := <-finishedCh:
+			if rec.runID == run2ID {
+				if rec.status != registry.StatusCancelled {
+					t.Errorf("run2 finished hook status = %q, want %q", rec.status, registry.StatusCancelled)
+				}
+				sawRun2 = true
+			}
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	if !sawRun2 {
+		t.Fatal("runFinishedHook did not fire for the killed queued run")
+	}
+
+	// Registry row for run2 must be persisted as cancelled.
+	run2, err := reg.GetRun(context.Background(), run2ID)
+	if err != nil {
+		t.Fatalf("GetRun run2: %v", err)
+	}
+	if run2.Status != registry.StatusCancelled {
+		t.Errorf("run2.Status = %q, want %q", run2.Status, registry.StatusCancelled)
+	}
+
+	// Waiter counter drops to 0 via the deferred decrement when the goroutine
+	// actually returns — that happens after finalizeCancelled fires the hook,
+	// so poll briefly rather than asserting immediately.
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && eng.WaitingTasks() != 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if eng.WaitingTasks() != 0 {
+		t.Errorf("WaitingTasks after kill = %d, want 0", eng.WaitingTasks())
+	}
+
+	// Cleanup: let run 1 finish.
+	close(holdCh)
+	_ = run1ID
+}
+
+// fakeExecutor is a minimal pkgruntime.Executor for testing.
+type fakeExecutor struct {
+	fn func()
+}
+
+func (f *fakeExecutor) Execute(_ context.Context, _ *task.Spec, opts pkgruntime.RunOptions) (*pkgruntime.RunResult, error) {
+	if f.fn != nil {
+		f.fn()
+	}
+	return &pkgruntime.RunResult{}, nil
 }

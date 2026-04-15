@@ -26,6 +26,15 @@ type ChildMetrics struct {
 	// ChildCPUMs is the aggregate CPU time of all active child processes in ms.
 	// Pointer so zero CPU is preserved and nil indicates non-Linux.
 	ChildCPUMs *int64 `json:"children_cpu_ms,omitempty"` // Linux only
+
+	// ActiveTaskSlots is the number of semaphore slots currently held by
+	// running task goroutines. 0 when no concurrency cap is configured.
+	ActiveTaskSlots int `json:"active_task_slots"`
+	// MaxConcurrentTasks is the configured concurrency cap. 0 = unlimited.
+	MaxConcurrentTasks int `json:"max_concurrent_tasks"`
+	// WaitingTasks is the number of task goroutines parked waiting for a
+	// free semaphore slot. Always 0 when no cap is configured.
+	WaitingTasks int `json:"waiting_tasks"`
 }
 
 // Metrics is the top-level response for GET /api/metrics.
