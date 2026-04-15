@@ -207,7 +207,12 @@ func (s *Server) handleConn(conn net.Conn) {
 		_ = writeMsg(conn, handshakeErr{Error: "ipc: token run ID mismatch"})
 		return
 	}
-	if err := writeMsg(conn, handshakeResp{Proto: 1, Caps: claims.Caps}); err != nil {
+	if err := writeMsg(conn, handshakeResp{
+		Proto:  1,
+		Caps:   claims.Caps,
+		TaskID: s.taskID,
+		RunID:  s.runID,
+	}); err != nil {
 		return
 	}
 	caps := claims.Caps

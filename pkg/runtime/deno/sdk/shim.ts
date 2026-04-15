@@ -32,6 +32,8 @@ interface IpcResponse {
 interface HandshakeResponse {
   proto: number;
   caps: string[];
+  task_id?: string;
+  run_id?: string;
   error?: string;
 }
 
@@ -64,6 +66,12 @@ export interface MCP {
 }
 
 export interface Dicode {
+  // task_id: the fully-namespaced id of the currently-running task (e.g.
+  // "buildin/ai-agent"). Populated from the IPC handshake so task code can
+  // self-identify without guessing from its directory name.
+  task_id:        string;
+  // run_id: the id of the current run (uuid). Same source as task_id.
+  run_id:         string;
   run_task:       (taskID: string, params?: Record<string, string>)  => Promise<unknown>;
   list_tasks:     ()                                                   => Promise<unknown>;
   get_runs:       (taskID: string, opts?: { limit?: number })         => Promise<unknown>;
@@ -216,6 +224,8 @@ const mcp: MCP = {
 // ── dicode ────────────────────────────────────────────────────────────────────
 
 const dicode: Dicode = {
+  task_id:        __hsResp__.task_id ?? "",
+  run_id:         __hsResp__.run_id ?? "",
   run_task:       (taskID, params)  => __call__({ method: "dicode.run_task",       taskID, params: params ?? {} }),
   list_tasks:     ()                => __call__({ method: "dicode.list_tasks" }),
   get_runs:       (taskID, opts)    => __call__({ method: "dicode.get_runs",        taskID, limit: opts?.limit ?? 10 }),

@@ -33,6 +33,10 @@ declare interface MCP {
 }
 
 declare interface Dicode {
+  /** Fully-namespaced id of the currently-running task (e.g. "buildin/ai-agent"). */
+  task_id:        string;
+  /** Id of the current run (uuid). */
+  run_id:         string;
   run_task:       (taskID: string, params?: Record<string, string>) => Promise<unknown>;
   list_tasks:     ()                                                 => Promise<unknown>;
   get_runs:       (taskID: string, opts?: { limit?: number })        => Promise<unknown>;
