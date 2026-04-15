@@ -7,7 +7,6 @@ import (
 	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/x509"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -25,15 +24,14 @@ import (
 // (see dicode-relay src/broker/crypto.ts).
 const hkdfInfo = "dicode-oauth-token"
 
-// AuthRequest is the data the daemon needs to track for a pending OAuth
-// flow. The challenge is retained only because it's part of the signed
-// payload the broker verifies — the daemon never runs the code exchange
-// itself (Grant on the relay handles PKCE upstream), so no verifier is
-// stored here.
+// AuthRequest is the data the daemon needs to track for a pending OAuth flow.
+// The relay broker stores its own copy keyed by SessionID; the daemon keeps
+// PKCEVerifier locally so the verifier never crosses the network.
 type AuthRequest struct {
 	Provider      string
 	SessionID     string // UUID v4, with dashes
-	PKCEChallenge string // base64url(sha256(random verifier)) — bound into the signed payload
+	PKCEVerifier  string // base64url, no padding
+	PKCEChallenge string // base64url(sha256(verifier))
 	Timestamp     int64  // unix seconds
 }
 
@@ -93,24 +91,22 @@ func SignAuthPayload(priv *ecdsa.PrivateKey, payload []byte) (string, error) {
 	return base64.StdEncoding.EncodeToString(sig), nil
 }
 
-// generatePKCEChallenge returns a fresh base64url S256 challenge. The
-// underlying verifier is intentionally discarded: the daemon never completes
-// the code exchange itself — Grant on the relay side runs its own PKCE
-// against the upstream provider. Our challenge exists solely to bind the
-// daemon's signed payload to a value that cannot be swapped in the URL.
-func generatePKCEChallenge() (string, error) {
+// generatePKCE returns a fresh PKCE verifier (32 random bytes, base64url) and
+// the matching S256 challenge.
+func generatePKCE() (verifier, challenge string, err error) {
 	var raw [32]byte
 	if _, err := io.ReadFull(rand.Reader, raw[:]); err != nil {
-		return "", fmt.Errorf("read random: %w", err)
+		return "", "", fmt.Errorf("read random: %w", err)
 	}
-	verifier := base64.RawURLEncoding.EncodeToString(raw[:])
+	verifier = base64.RawURLEncoding.EncodeToString(raw[:])
 	sum := sha256.Sum256([]byte(verifier))
-	return base64.RawURLEncoding.EncodeToString(sum[:]), nil
+	challenge = base64.RawURLEncoding.EncodeToString(sum[:])
+	return verifier, challenge, nil
 }
 
-// BuildAuthURL constructs a signed `/auth/:provider` URL pointing at the
-// relay broker and returns the matching AuthRequest for the daemon-side
-// pending store.
+// BuildAuthURL constructs a signed `/auth/:provider` URL pointing at the relay
+// broker. The returned AuthRequest carries the session id and PKCE verifier
+// that the daemon must remember to correlate the eventual token delivery.
 //
 //	baseURL  e.g. "https://relay.dicode.app"
 //	scope    optional space-separated scope override (empty = use broker default)
@@ -122,7 +118,7 @@ func BuildAuthURL(baseURL string, identity *Identity, provider, scope string, no
 		return "", nil, fmt.Errorf("provider required")
 	}
 
-	challenge, err := generatePKCEChallenge()
+	verifier, challenge, err := generatePKCE()
 	if err != nil {
 		return "", nil, err
 	}
@@ -156,27 +152,21 @@ func BuildAuthURL(baseURL string, identity *Identity, provider, scope string, no
 	return u.String(), &AuthRequest{
 		Provider:      provider,
 		SessionID:     sessionID,
+		PKCEVerifier:  verifier,
 		PKCEChallenge: challenge,
 		Timestamp:     now,
 	}, nil
 }
 
-// OAuthDeliveryType is the wire-format type tag on token delivery envelopes.
-// It is used both as the explicit guard in DecryptOAuthToken and as AES-GCM
-// AAD on both ends (relay: eciesEncrypt, daemon: aead.Open). Keep in sync
-// with dicode-relay src/broker/crypto.ts.
-const OAuthDeliveryType = "oauth_token_delivery"
-
 // OAuthTokenDeliveryPayload is the JSON body the broker POSTs to
 // /hooks/oauth-complete on the daemon, wrapped in the relay request envelope.
 // It mirrors OAuthTokenDeliveryPayload in dicode-relay src/relay/protocol.ts.
 type OAuthTokenDeliveryPayload struct {
-	Type            string `json:"type"`                        // must equal OAuthDeliveryType
-	SessionID       string `json:"session_id"`                  // matches the original AuthRequest
-	EphemeralPubkey string `json:"ephemeral_pubkey"`            // base64 std, 65-byte uncompressed P-256
-	Ciphertext      string `json:"ciphertext"`                  // base64 std, AES-256-GCM ct || 16-byte tag
-	Nonce           string `json:"nonce"`                       // base64 std, 12 bytes
-	BrokerSig       string `json:"broker_sig,omitempty"`        // base64 ECDSA sig over sha256(type||session_id||eph||ct||nonce)
+	Type            string `json:"type"`             // always "oauth_token_delivery"
+	SessionID       string `json:"session_id"`       // matches the original AuthRequest
+	EphemeralPubkey string `json:"ephemeral_pubkey"` // base64 std, 65-byte uncompressed P-256
+	Ciphertext      string `json:"ciphertext"`       // base64 std, AES-256-GCM ct || 16-byte tag
+	Nonce           string `json:"nonce"`            // base64 std, 12 bytes
 }
 
 // DecryptOAuthToken decrypts an OAuthTokenDeliveryPayload using the daemon's
@@ -192,13 +182,8 @@ func DecryptOAuthToken(identity *Identity, payload *OAuthTokenDeliveryPayload) (
 	if payload == nil {
 		return nil, fmt.Errorf("payload required")
 	}
-	// Require an explicit, known type tag. The tag is also bound into the
-	// GCM authenticated data below, so a mismatch (or tampering in transit)
-	// makes aead.Open fail. This is domain separation: the daemon identity
-	// key can never be asked to decrypt a future ciphertext that reuses
-	// this same ECIES scheme under a different Type label.
-	if payload.Type != OAuthDeliveryType {
-		return nil, fmt.Errorf("unexpected payload type: %q", payload.Type)
+	if payload.Type != "" && payload.Type != "oauth_token_delivery" {
+		return nil, fmt.Errorf("unexpected payload type: %s", payload.Type)
 	}
 
 	ephBytes, err := base64.StdEncoding.DecodeString(payload.EphemeralPubkey)
@@ -253,61 +238,11 @@ func DecryptOAuthToken(identity *Identity, payload *OAuthTokenDeliveryPayload) (
 		return nil, fmt.Errorf("gcm: %w", err)
 	}
 	// crypto/cipher GCM expects ct || tag, which matches the broker layout.
-	// Type is passed as AAD — the broker binds the same bytes on encrypt,
-	// so any mismatch (or in-transit tampering of Type) makes Open fail.
-	pt, err := aead.Open(nil, iv, ctWithTag, []byte(payload.Type))
+	pt, err := aead.Open(nil, iv, ctWithTag, nil)
 	if err != nil {
 		return nil, fmt.Errorf("aes-gcm open: %w", err)
 	}
 	return pt, nil
-}
-
-// VerifyBrokerSig verifies the broker's ECDSA signature over the delivery
-// envelope's immutable fields. brokerPubkeyBase64 is the base64-encoded SPKI
-// DER public key received (and TOFU-pinned) from the relay's welcome message.
-//
-// The signed payload is sha256(type || session_id || ephemeral_pubkey ||
-// ciphertext || nonce) — identical concatenation order on both sides.
-func VerifyBrokerSig(brokerPubkeyBase64 string, payload *OAuthTokenDeliveryPayload) error {
-	if brokerPubkeyBase64 == "" {
-		return fmt.Errorf("no broker pubkey pinned — cannot verify delivery authenticity")
-	}
-	if payload.BrokerSig == "" {
-		return fmt.Errorf("delivery envelope missing broker_sig — broker may be outdated")
-	}
-	pubDER, err := base64.StdEncoding.DecodeString(brokerPubkeyBase64)
-	if err != nil {
-		return fmt.Errorf("decode broker pubkey: %w", err)
-	}
-
-	// Reconstruct the exact digest the broker signed.
-	h := sha256.New()
-	h.Write([]byte(payload.Type))
-	h.Write([]byte(payload.SessionID))
-	h.Write([]byte(payload.EphemeralPubkey))
-	h.Write([]byte(payload.Ciphertext))
-	h.Write([]byte(payload.Nonce))
-	digest := h.Sum(nil)
-
-	sigBytes, err := base64.StdEncoding.DecodeString(payload.BrokerSig)
-	if err != nil {
-		return fmt.Errorf("decode broker sig: %w", err)
-	}
-
-	// Parse the SPKI DER public key.
-	pub, err := x509.ParsePKIXPublicKey(pubDER)
-	if err != nil {
-		return fmt.Errorf("parse broker pubkey: %w", err)
-	}
-	ecPub, ok := pub.(*ecdsa.PublicKey)
-	if !ok {
-		return fmt.Errorf("broker pubkey is not ECDSA")
-	}
-
-	if !ecdsa.VerifyASN1(ecPub, digest, sigBytes) {
-		return fmt.Errorf("broker signature verification failed — envelope may have been tampered with or forged")
-	}
-	return nil
 }
 
 // ecdsaToECDH converts a P-256 ECDSA private key to a crypto/ecdh private key
