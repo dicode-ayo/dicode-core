@@ -253,6 +253,110 @@ func TestControl_Metrics_NoProvider_ReturnsZeros(t *testing.T) {
 	}
 }
 
+func TestControl_RelayRotate_NotEnabled(t *testing.T) {
+	t.Parallel()
+
+	conn, cleanup := controlTestEnv(t, MetricsProvider{})
+	defer cleanup()
+
+	// No rotator wired → expect a clear error, not a crash.
+	if err := writeMsg(conn, Request{ID: "r1", Method: "cli.relay.rotate_identity"}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	var resp struct {
+		ID    string `json:"id"`
+		Error string `json:"error"`
+	}
+	if err := readMsg(conn, &resp); err != nil {
+		t.Fatalf("recv: %v", err)
+	}
+	if resp.Error == "" {
+		t.Error("expected error when no rotator is wired")
+	}
+}
+
+func TestControl_RelayRotate_InvokesRotator(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "ctrl.sock")
+	tokenPath := filepath.Join(dir, "ctrl.token")
+
+	cs, err := NewControlServer(socketPath, tokenPath, nil, &mockEngine{}, nil, MetricsProvider{}, "test", zap.NewNop(), nil)
+	if err != nil {
+		t.Fatalf("NewControlServer: %v", err)
+	}
+
+	called := 0
+	cs.SetRelayIdentityRotator(func(_ context.Context) (string, error) {
+		called++
+		return "newuuid123", nil
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { defer close(done); _ = cs.Start(ctx) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(socketPath); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("control socket never appeared")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	tok, err := os.ReadFile(tokenPath)
+	if err != nil {
+		t.Fatalf("token: %v", err)
+	}
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	if err := writeMsg(conn, handshakeReq{Token: string(tok)}); err != nil {
+		t.Fatalf("handshake send: %v", err)
+	}
+	var hs struct {
+		Proto int `json:"proto"`
+	}
+	if err := readMsg(conn, &hs); err != nil {
+		t.Fatalf("handshake recv: %v", err)
+	}
+
+	if err := writeMsg(conn, Request{ID: "r1", Method: "cli.relay.rotate_identity"}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	var resp struct {
+		ID     string            `json:"id"`
+		Error  string            `json:"error"`
+		Result RelayRotateResult `json:"result"`
+	}
+	if err := readMsg(conn, &resp); err != nil {
+		t.Fatalf("recv: %v", err)
+	}
+	if resp.Error != "" {
+		t.Fatalf("unexpected error: %s", resp.Error)
+	}
+	if resp.Result.NewUUID != "newuuid123" {
+		t.Fatalf("new uuid mismatch: %+v", resp.Result)
+	}
+	if resp.Result.Warning == "" {
+		t.Error("expected a warning message to be surfaced")
+	}
+	if called != 1 {
+		t.Errorf("rotator called %d times, expected 1", called)
+	}
+
+	cancel()
+	<-done
+}
+
 func TestControl_UnknownMethod_ReturnsError(t *testing.T) {
 	t.Parallel()
 

@@ -113,6 +113,37 @@ func TestUncompressedPublicKey(t *testing.T) {
 	}
 }
 
+func TestRotateIdentity(t *testing.T) {
+	ctx := context.Background()
+	database := openTestDB(t)
+
+	orig, err := LoadOrGenerateIdentity(ctx, database)
+	if err != nil {
+		t.Fatalf("initial load: %v", err)
+	}
+
+	rotated, err := RotateIdentity(ctx, database)
+	if err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+	if rotated.UUID == orig.UUID {
+		t.Fatalf("rotation produced the same UUID")
+	}
+	if rotated.PrivateKey.D.Cmp(orig.PrivateKey.D) == 0 {
+		t.Fatalf("rotation kept the same private scalar")
+	}
+
+	// A subsequent LoadOrGenerate must return the rotated key, not the
+	// original — the rotation is persistent.
+	reloaded, err := LoadOrGenerateIdentity(ctx, database)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if reloaded.UUID != rotated.UUID {
+		t.Fatalf("reload returned %s, expected rotated %s", reloaded.UUID, rotated.UUID)
+	}
+}
+
 func TestDeriveUUID(t *testing.T) {
 	ctx := context.Background()
 	database := openTestDB(t)

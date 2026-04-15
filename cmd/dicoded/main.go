@@ -191,7 +191,7 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 			return cm.ChildRSSMB, cm.ChildCPUMs
 		},
 	}
-	ctrlSrv, err := ipc.NewControlServer(socketPath, tokenPath, reg, eng, localSecrets, mp, version, log)
+	ctrlSrv, err := ipc.NewControlServer(socketPath, tokenPath, reg, eng, localSecrets, mp, version, log, database)
 	if err != nil {
 		return fmt.Errorf("build control server: %w", err)
 	}
@@ -209,7 +209,7 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 		if err != nil {
 			log.Warn("relay: identity init failed, relay disabled", zap.Error(err))
 		} else {
-			rc := relay.NewClient(cfg.Relay.ServerURL, id, port, log)
+			rc := relay.NewClient(cfg.Relay.ServerURL, id, port, database, log)
 			srv.SetRelayClient(rc)
 			// Wire the daemon's relay identity into the deno runtime so
 			// the auth-start and auth-relay built-in tasks can drive the
@@ -217,9 +217,24 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 			// across runs so auth-start and auth-relay correlate by
 			// session id. The broker speaks HTTPS at the same host as the
 			// WSS relay endpoint.
+			pending := relay.NewPendingSessions()
 			if brokerURL := deriveBrokerBaseURL(cfg.Relay.ServerURL); brokerURL != "" {
-				denoRT.SetOAuthBroker(id, brokerURL, relay.NewPendingSessions())
+				denoRT.SetOAuthBroker(id, brokerURL, pending)
 			}
+			// Identity rotation via `dicode relay rotate-identity`. The
+			// callback regenerates the keypair and invalidates any
+			// outstanding OAuth sessions (they were encrypted to the old
+			// key). The running relay WSS connection keeps the old
+			// in-memory identity until the daemon restarts — documented
+			// in the RelayRotateResult warning returned to the CLI.
+			ctrlSrv.SetRelayIdentityRotator(func(ctx context.Context) (string, error) {
+				newID, err := relay.RotateIdentity(ctx, database)
+				if err != nil {
+					return "", err
+				}
+				pending.Clear()
+				return newID.UUID, nil
+			})
 			g.Go(func() error { return rc.Run(ctx) })
 		}
 	}
