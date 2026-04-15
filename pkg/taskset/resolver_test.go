@@ -135,7 +135,7 @@ spec:
 
 	r := newResolver(t)
 	rootRef := &Ref{Path: tsPath}
-	results, err := r.Resolve(context.Background(), "infra", rootRef, nil, nil)
+	results, err := r.Resolve(context.Background(), "infra", rootRef, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -171,7 +171,7 @@ spec:
 `
 	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
 	r := newResolver(t)
-	results, err := r.Resolve(context.Background(), "team", &Ref{Path: tsPath}, nil, nil)
+	results, err := r.Resolve(context.Background(), "team", &Ref{Path: tsPath}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
@@ -206,7 +206,7 @@ spec:
 `
 	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
 	r := newResolver(t)
-	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil)
+	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
@@ -242,7 +242,7 @@ spec:
 `
 	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
 	r := newResolver(t)
-	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil)
+	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
@@ -276,7 +276,7 @@ spec:
 			"deploy": {Enabled: boolPtr(false)},
 		},
 	}
-	results, err := r.Resolve(context.Background(), "infra/backend", &Ref{Path: tsPath}, nil, parentOverrides)
+	results, err := r.Resolve(context.Background(), "infra/backend", &Ref{Path: tsPath}, nil, parentOverrides, nil)
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
@@ -306,7 +306,7 @@ spec:
 `
 	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
 	r := newResolver(t)
-	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil)
+	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
@@ -348,7 +348,7 @@ spec:
 		Timeout: 120 * time.Second,
 		Env:     []task.EnvEntry{{Name: "RUNTIME_ENV", Value: "backend"}},
 	}
-	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, configDefaults, nil)
+	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, configDefaults, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
@@ -392,7 +392,7 @@ spec:
 `
 	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
 	r := newResolver(t)
-	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil)
+	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
@@ -433,7 +433,7 @@ spec:
 	rootPath := writeTaskSetFile(t, rootDir, "taskset.yaml", rootTS)
 
 	r := newResolver(t)
-	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: rootPath}, nil, nil)
+	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: rootPath}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
@@ -486,7 +486,7 @@ spec:
 	rootPath := writeTaskSetFile(t, rootDir, "taskset.yaml", rootTS)
 
 	r := newResolver(t)
-	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: rootPath}, nil, nil)
+	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: rootPath}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
@@ -521,7 +521,7 @@ spec:
 `
 	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
 	r := newResolver(t)
-	results, err := r.Resolve(context.Background(), "ns", &Ref{Path: tsPath}, nil, nil)
+	results, err := r.Resolve(context.Background(), "ns", &Ref{Path: tsPath}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
@@ -556,7 +556,7 @@ spec:
 
 	// dev mode OFF — should use remote (0 8)
 	r := NewResolver(t.TempDir(), false, zap.NewNop())
-	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil)
+	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
@@ -566,7 +566,7 @@ spec:
 
 	// dev mode ON — should use dev ref (0 1)
 	rDev := NewResolver(t.TempDir(), true, zap.NewNop())
-	resultsDev, err := rDev.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil)
+	resultsDev, err := rDev.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
@@ -594,7 +594,7 @@ spec:
 `
 	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
 	r := newResolver(t)
-	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil)
+	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
@@ -645,5 +645,130 @@ func TestMergeOverrides_EntriesMerged(t *testing.T) {
 	}
 	if got.Entries["y"] == nil {
 		t.Error("y from b missing")
+	}
+}
+
+// Resolver.Resolve injects TASK_SET_DIR from the resolved root taskset
+// path, regardless of whether the source loader supplied extraVars.
+// Regression guard for the git-source bug where TASK_SET_DIR was only
+// injected for local sources, leaving literal ${TASK_SET_DIR} in every
+// task.yaml resolved from a git clone.
+func TestResolver_InjectsTaskSetDirFromRoot(t *testing.T) {
+	repoDir := t.TempDir()
+	taskDir := filepath.Join(repoDir, "fstask")
+	if err := os.MkdirAll(taskDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// task.yaml references ${TASK_SET_DIR} in both an fs permission and a
+	// param default — the two fields that expandSpec actually touches.
+	taskYAML := `kind: Task
+apiVersion: dicode/v1
+name: fstask
+runtime: deno
+trigger:
+  manual: true
+params:
+  shared_dir:
+    type: string
+    default: "${TASK_SET_DIR}/shared"
+    description: ""
+permissions:
+  fs:
+    - path: "${TASK_SET_DIR}/pool"
+      permission: r
+`
+	writeFile(t, taskDir, "task.yaml", taskYAML)
+	writeFile(t, taskDir, "task.js", "// task")
+
+	tsContent := `kind: TaskSet
+apiVersion: dicode/v1
+metadata:
+  name: infra
+spec:
+  entries:
+    fstask:
+      ref:
+        path: ` + filepath.Join(taskDir, "task.yaml") + `
+`
+	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
+	wantDir := filepath.Dir(tsPath)
+
+	r := newResolver(t)
+	// Pass nil extraVars — the resolver itself must derive TASK_SET_DIR.
+	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+
+	spec := results[0].Spec
+	if len(spec.Permissions.FS) != 1 {
+		t.Fatalf("want 1 fs entry, got %d", len(spec.Permissions.FS))
+	}
+	if got, want := spec.Permissions.FS[0].Path, wantDir+"/pool"; got != want {
+		t.Errorf("fs.path: got %q, want %q (literal ${TASK_SET_DIR} survived expansion)", got, want)
+	}
+
+	// Find the shared_dir param and assert its default was expanded.
+	var sharedDefault string
+	for _, p := range spec.Params {
+		if p.Name == "shared_dir" {
+			sharedDefault = p.Default
+			break
+		}
+	}
+	if got, want := sharedDefault, wantDir+"/shared"; got != want {
+		t.Errorf("params[shared_dir].default: got %q, want %q", got, want)
+	}
+}
+
+// Caller-supplied extraVars override the resolver's TASK_SET_DIR
+// derivation. Useful for tests or for future source types that want to
+// override the "root taskset dir" convention.
+func TestResolver_CallerExtraVarsOverrideTaskSetDir(t *testing.T) {
+	repoDir := t.TempDir()
+	taskDir := filepath.Join(repoDir, "fstask")
+	if err := os.MkdirAll(taskDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	taskYAML := `kind: Task
+apiVersion: dicode/v1
+name: fstask
+runtime: deno
+trigger:
+  manual: true
+permissions:
+  fs:
+    - path: "${TASK_SET_DIR}/pool"
+      permission: r
+`
+	writeFile(t, taskDir, "task.yaml", taskYAML)
+	writeFile(t, taskDir, "task.js", "// task")
+
+	tsContent := `kind: TaskSet
+apiVersion: dicode/v1
+metadata:
+  name: infra
+spec:
+  entries:
+    fstask:
+      ref:
+        path: ` + filepath.Join(taskDir, "task.yaml") + `
+`
+	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
+
+	r := newResolver(t)
+	caller := map[string]string{task.VarTaskSetDir: "/caller/wins"}
+	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil, caller)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+	if got, want := results[0].Spec.Permissions.FS[0].Path, "/caller/wins/pool"; got != want {
+		t.Errorf("fs.path: got %q, want %q — caller extraVars should override resolver derivation", got, want)
 	}
 }
