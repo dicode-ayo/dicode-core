@@ -209,6 +209,43 @@ func TestHandshake_WrongRunID(t *testing.T) {
 	}
 }
 
+// Regression guard: the task-channel handshake response must carry the
+// taskID and runID the server was constructed with. The shim surfaces
+// these as dicode.task_id / dicode.run_id, and task code (e.g. ai-agent)
+// uses task_id as its self-identity for recursion guards. An empty or
+// missing value silently disables those guards — see message.go for why
+// the struct fields are intentionally NOT omitempty.
+func TestHandshake_TaskChannelReturnsTaskAndRunID(t *testing.T) {
+	e := newTestEnv(t)
+	runID := fmt.Sprintf("run-%d", time.Now().UnixNano())
+	const taskID = "buildin/ai-agent"
+
+	srv := New(runID, taskID, e.secret, e.reg, e.db, nil, nil, zap.NewNop(), nil, nil, "", "", "")
+	socketPath, token, err := srv.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(srv.Stop)
+
+	conn := dial(t, socketPath)
+	defer conn.Close()
+
+	sendMsg(t, conn, handshakeReq{Token: token})
+	resp := recvMsg(t, conn)
+	if errMsg, ok := resp["error"].(string); ok {
+		t.Fatalf("handshake rejected: %s", errMsg)
+	}
+
+	gotTaskID, _ := resp["task_id"].(string)
+	if gotTaskID != taskID {
+		t.Errorf("handshake task_id: got %q, want %q", gotTaskID, taskID)
+	}
+	gotRunID, _ := resp["run_id"].(string)
+	if gotRunID != runID {
+		t.Errorf("handshake run_id: got %q, want %q", gotRunID, runID)
+	}
+}
+
 // ── protocol tests ────────────────────────────────────────────────────────────
 
 func TestServer_Params(t *testing.T) {

@@ -92,6 +92,80 @@ func controlTestEnv(t *testing.T, mp MetricsProvider) (net.Conn, func()) {
 	return conn, cleanup
 }
 
+// The CLI control channel has no task context, so its handshake response
+// must carry empty task_id / run_id strings — but the fields must be
+// PRESENT on the wire so the shim-side decoder always sees them. This
+// pairs with the non-omitempty encoding in message.go:handshakeResp.
+//
+// The "Emits" name is load-bearing: a prior name ("Omits…") suggested the
+// fields could be absent and readers would "fix" it by asserting absence,
+// which is the opposite of what we want.
+func TestControl_Handshake_EmitsEmptyTaskAndRunIDFields(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "ctrl.sock")
+	tokenPath := filepath.Join(dir, "ctrl.token")
+
+	cs, err := NewControlServer(socketPath, tokenPath, nil, &mockEngine{}, nil, MetricsProvider{}, "test", zap.NewNop())
+	if err != nil {
+		t.Fatalf("NewControlServer: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = cs.Start(ctx) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(socketPath); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("control socket never appeared")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	tok, err := os.ReadFile(tokenPath)
+	if err != nil {
+		t.Fatalf("read token: %v", err)
+	}
+
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	if err := writeMsg(conn, handshakeReq{Token: string(tok)}); err != nil {
+		t.Fatalf("handshake send: %v", err)
+	}
+	// Decode as a map to prove the fields are present, even if empty.
+	var raw map[string]any
+	if err := readMsg(conn, &raw); err != nil {
+		t.Fatalf("handshake recv: %v", err)
+	}
+	if errMsg, ok := raw["error"].(string); ok && errMsg != "" {
+		t.Fatalf("handshake rejected: %s", errMsg)
+	}
+
+	// Keys must exist (non-omitempty encoding) and be empty strings
+	// (no task context on the control channel).
+	got, ok := raw["task_id"]
+	if !ok {
+		t.Errorf("handshake response missing task_id field; expected empty string")
+	} else if got != "" {
+		t.Errorf("control handshake task_id: got %q, want empty", got)
+	}
+	got, ok = raw["run_id"]
+	if !ok {
+		t.Errorf("handshake response missing run_id field; expected empty string")
+	} else if got != "" {
+		t.Errorf("control handshake run_id: got %q, want empty", got)
+	}
+}
+
 func TestControl_Metrics_ReturnsSnapshot(t *testing.T) {
 	t.Parallel()
 

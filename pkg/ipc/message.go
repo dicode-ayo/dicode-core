@@ -10,10 +10,22 @@ type handshakeReq struct {
 	Token string `json:"token"`
 }
 
-// handshakeResp is the server's reply to a successful handshake.
+// handshakeResp is the server's reply to a successful handshake. In
+// addition to the protocol version and capability list, the server echoes
+// the TaskID and RunID of the context that accepted the connection so the
+// shim can expose them as dicode.task_id / dicode.run_id.
+//
+// These fields are intentionally NOT omitempty: task code uses task_id as
+// its self-identity for operations like tool-recursion guards, and an
+// empty task_id silently disables those guards. Forcing the wire to carry
+// the value every time makes "missing task_id" a loud, detectable event.
+// The CLI control channel fills both with "" — the task-side shim treats
+// an empty task_id as a hard error.
 type handshakeResp struct {
-	Proto int      `json:"proto"`
-	Caps  []string `json:"caps"`
+	Proto  int      `json:"proto"`
+	Caps   []string `json:"caps"`
+	TaskID string   `json:"task_id"`
+	RunID  string   `json:"run_id"`
 }
 
 // handshakeErr is the server's reply when the handshake fails. The server

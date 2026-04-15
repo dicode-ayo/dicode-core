@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Agent</title>
+  <link rel="stylesheet" href="style.css">
+  <!-- dicode.js is injected by the server and exposes window.dicode -->
+  <!-- chat.js runs after dicode.js is available (defer keeps load order
+       and keeps it non-blocking). Inline scripts are blocked by CSP. -->
+  <script src="chat.js" defer></script>
+</head>
+<body>
+<div class="chat">
+  <header>
+    <h1>AI Agent</h1>
+    <button id="new-chat" type="button">New chat</button>
+  </header>
+
+  <div id="messages" class="messages" aria-live="polite"></div>
+
+  <!-- method="POST" as a zero-JS fallback: if chat.js fails to load or CSP
+       still blocks it, the browser at least POSTs to /hooks/ai and the
+       server runs one turn (the webhook handler accepts form-encoded too).
+       With chat.js working, the submit is intercepted and this is irrelevant. -->
+  <form id="prompt-form" method="POST">
+    <textarea id="prompt" name="prompt" rows="3" placeholder="Message…" required></textarea>
+    <button type="submit" id="send">Send</button>
+  </form>
+</div>
+</body>
+</html>

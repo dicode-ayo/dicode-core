@@ -23,3 +23,7 @@ spec:
     temp-cleanup:
       ref:
         path: ./temp-cleanup/task.yaml
+
+    ai-agent:
+      ref:
+        path: ./ai-agent/task.yaml

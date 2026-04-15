@@ -15,6 +15,22 @@
  *
  *   Level 3 — Full API: use dicode.execute(params, { onFinish }).
  *     Full control over rendering and error handling.
+ *
+ *     Result shape passed to onFinish(result) and to the returned Promise:
+ *
+ *       {
+ *         runId:       string,   // "X-Run-Id" header from the response
+ *         status:      "success" | "failure",
+ *         contentType: string,   // full Content-Type header
+ *         body:        string,   // always the raw response body
+ *         returnValue: any,      // parsed object for application/json, null otherwise
+ *         parseError:  string | null  // error message if JSON parsing failed
+ *       }
+ *
+ *     Note: prior to the JSON-parse fix, `returnValue` was the raw body
+ *     string for application/json responses. It is now the parsed object,
+ *     or null on parse failure. Callers that need the raw text in all
+ *     cases should read `result.body`.
  */
 (function () {
   'use strict';
@@ -108,12 +124,28 @@
             runId: runId,
             status: status >= 200 && status < 300 ? 'success' : 'failure',
             contentType: contentType,
-            body: body,
-            returnValue: null
+            body: body,           // always the raw response string
+            returnValue: null,    // parsed object for application/json, else null
+            parseError: null      // error message if JSON parsing failed
           };
 
           if (contentType.indexOf('application/json') !== -1) {
-            try { result.returnValue = body; } catch (e) { /* keep raw */ }
+            try {
+              result.returnValue = JSON.parse(body);
+            } catch (e) {
+              result.returnValue = null;
+              result.parseError = (e && e.message) || String(e);
+              // Log immediately — callers using the Level-3 Promise API
+              // who forget to check parseError will at least see the
+              // failure in devtools, and it can't be mistaken for a valid
+              // `null` return from a task that legitimately returned null.
+              if (window.console && console.error) {
+                console.error(
+                  'dicode.execute: failed to parse application/json response for run ' +
+                    runId + ': ' + result.parseError,
+                );
+              }
+            }
           }
 
           if (handlers.onFinish) handlers.onFinish(result);
@@ -170,6 +202,15 @@
               if (btn) { btn.disabled = false; }
               if (!output) return;
 
+              // JSON parse failure: don't silently render raw broken
+              // JSON into the output pane — the user has no way to tell
+              // a parse failure from a task that returned `null`.
+              if (data.parseError) {
+                output.textContent =
+                  'Task returned malformed JSON (' + data.parseError + '):\n\n' + data.body;
+                return;
+              }
+
               // Task output.html() → render as HTML (trusted task-author content).
               // Everything else → plain text.
               if (data.contentType && data.contentType.indexOf('text/html') !== -1) {
@@ -178,9 +219,16 @@
                 output.textContent = data.body;
               }
             },
-            onError: function () {
+            onError: function (err) {
               if (btn) { btn.disabled = false; }
-              if (output) { output.textContent = 'Connection error — is dicode running?'; }
+              if (!output) return;
+              // Surface the actual error message. fetch() can reject for
+              // reasons other than "daemon is down" — aborted stream,
+              // decoder error, CORS. Hard-coding "is dicode running?"
+              // sends operators chasing a red herring when the body read
+              // failed mid-transfer.
+              var msg = (err && (err.message || String(err))) || 'unknown error';
+              output.textContent = 'Connection error: ' + msg;
             }
           }).catch(function () {
             if (btn) { btn.disabled = false; }

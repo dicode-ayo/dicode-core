@@ -52,6 +52,14 @@ type Server struct {
 }
 
 // New creates a Server (not yet started).
+//
+// Both runID and taskID are required and MUST be non-empty. They flow
+// into the issued IPC token's Identity claim and into the handshake
+// response's task_id / run_id fields; an empty task_id would silently
+// disable self-identity checks in task code (see the comment on
+// handshakeResp in message.go). Construction-time enforcement keeps
+// the invariant local to the boundary rather than relying on every
+// consumer to re-validate.
 func New(
 	runID, taskID string,
 	secret []byte,
@@ -64,6 +72,12 @@ func New(
 	engine EngineRunner,
 	aiBaseURL, aiModel, aiAPIKey string,
 ) *Server {
+	if runID == "" {
+		panic("ipc.New: runID must not be empty")
+	}
+	if taskID == "" {
+		panic("ipc.New: taskID must not be empty")
+	}
 	return &Server{
 		runID:     runID,
 		taskID:    taskID,
@@ -207,7 +221,12 @@ func (s *Server) handleConn(conn net.Conn) {
 		_ = writeMsg(conn, handshakeErr{Error: "ipc: token run ID mismatch"})
 		return
 	}
-	if err := writeMsg(conn, handshakeResp{Proto: 1, Caps: claims.Caps}); err != nil {
+	if err := writeMsg(conn, handshakeResp{
+		Proto:  1,
+		Caps:   claims.Caps,
+		TaskID: s.taskID,
+		RunID:  s.runID,
+	}); err != nil {
 		return
 	}
 	caps := claims.Caps
