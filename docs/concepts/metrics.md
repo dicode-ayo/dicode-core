@@ -23,7 +23,10 @@ Requires authentication when `server.auth: true` is set in `dicode.yaml`. Return
   "tasks": {
     "active_tasks": 5,
     "children_rss_mb": 310.5,
-    "children_cpu_ms": 4800
+    "children_cpu_ms": 4800,
+    "max_concurrent_tasks": 8,
+    "active_task_slots": 5,
+    "waiting_tasks": 0
   }
 }
 ```
@@ -41,9 +44,12 @@ Requires authentication when `server.auth: true` is set in `dicode.yaml`. Return
 
 | Field | Type | Description |
 |---|---|---|
-| `active_tasks` | int | Number of task runs currently in progress |
+| `active_tasks` | int | Number of task runs currently in progress. **Includes runs queued on the concurrency semaphore** — subtract `waiting_tasks` to get the count of runs actually executing |
 | `children_rss_mb` | float | Aggregate RSS of all active Deno child processes (MB) — **Linux only**, omitted otherwise |
 | `children_cpu_ms` | int | Aggregate CPU time (user+sys) of all active Deno child processes (ms) — **Linux only**, omitted otherwise |
+| `max_concurrent_tasks` | int | Configured concurrency cap (`execution.max_concurrent_tasks`). `0` means unlimited |
+| `active_task_slots` | int | Semaphore slots currently held by running task goroutines. `0` when no cap is configured |
+| `waiting_tasks` | int | Task goroutines parked waiting for a free semaphore slot. Non-zero values indicate backpressure — consider raising `max_concurrent_tasks` |
 
 ## Platform notes
 

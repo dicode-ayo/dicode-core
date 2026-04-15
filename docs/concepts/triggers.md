@@ -191,6 +191,36 @@ A 2-second back-off is applied between restarts to prevent tight loops on immedi
 
 ---
 
+## Concurrency limit
+
+By default dicode spawns a goroutine for every task invocation with no upper bound. Under sustained load this can cause goroutine storms and amplified SQLite write contention.
+
+Cap how many task goroutines run in parallel via config:
+
+```yaml
+execution:
+  max_concurrent_tasks: 8
+```
+
+…or via env var (overrides the config value):
+
+```bash
+DICODE_MAX_CONCURRENT_TASKS=8 dicoded
+```
+
+- `0` (default) — unlimited, backwards-compatible behaviour.
+- `N > 0` — at most N tasks execute concurrently. Additional invocations queue inside the daemon and run as slots become free.
+- **Daemon tasks bypass the cap** so long-running daemons don't starve webhook/cron tasks.
+- **Synchronous webhook responses bypass the cap** — tasks fired via `fireSync` (webhooks that return a response to the HTTP caller) are not subject to the semaphore, so sync clients can never deadlock waiting for a slot. Only async triggers (cron, async webhooks, chained `dicode.trigger()` calls) count against the limit.
+- **Killing a queued run** — cancelling a run that is still waiting on a slot honors the kill immediately; the run is finalized as `cancelled` and the websocket `run:finished` event fires so the UI stays in sync.
+- **Shutdown safety:** queued goroutines are unblocked when the daemon shuts down, finalized as `cancelled`, and their DB rows updated under a bounded timeout, so a full slot queue never causes a hang on `SIGTERM`.
+
+Runtime visibility of the cap is exposed via [GET /api/metrics](metrics.md) —
+the `tasks` object includes `max_concurrent_tasks`, `active_task_slots`, and
+`waiting_tasks`.
+
+---
+
 ## Trigger constraints
 
 - Exactly one trigger per task. Multiple triggers are not supported (use `dicode.trigger()` from a task for complex dispatch logic).
