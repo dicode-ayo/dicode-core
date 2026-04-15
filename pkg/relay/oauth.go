@@ -1,0 +1,255 @@
+package relay
+
+import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/ecdh"
+	"crypto/ecdsa"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/binary"
+	"encoding/hex"
+	"fmt"
+	"io"
+	"net/url"
+	"strings"
+
+	"github.com/google/uuid"
+	"golang.org/x/crypto/hkdf"
+)
+
+// hkdfInfo is the fixed info string used when deriving the AES key for
+// OAuth token delivery. It must match the relay broker
+// (see dicode-relay src/broker/crypto.ts).
+const hkdfInfo = "dicode-oauth-token"
+
+// AuthRequest is the data the daemon needs to track for a pending OAuth flow.
+// The relay broker stores its own copy keyed by SessionID; the daemon keeps
+// PKCEVerifier locally so the verifier never crosses the network.
+type AuthRequest struct {
+	Provider      string
+	SessionID     string // UUID v4, with dashes
+	PKCEVerifier  string // base64url, no padding
+	PKCEChallenge string // base64url(sha256(verifier))
+	Timestamp     int64  // unix seconds
+}
+
+// BuildAuthSignedPayload returns the byte sequence the daemon must sign when
+// initiating an OAuth flow via the broker. It must mirror buildSignedPayload()
+// in dicode-relay src/broker/crypto.ts exactly:
+//
+//	sha256(
+//	  session_id_bytes      // 16 bytes, UUID v4 hex-decoded (dashes stripped)
+//	  pkce_challenge_bytes  // base64url-decoded
+//	  relay_uuid_bytes      // 32 bytes, hex-decoded
+//	  provider_utf8_bytes
+//	  timestamp_be_uint64   // 8 bytes
+//	)
+func BuildAuthSignedPayload(sessionID, pkceChallenge, relayUUID, provider string, timestamp int64) ([]byte, error) {
+	sidHex := strings.ReplaceAll(sessionID, "-", "")
+	sidBytes, err := hex.DecodeString(sidHex)
+	if err != nil {
+		return nil, fmt.Errorf("session id: %w", err)
+	}
+	if len(sidBytes) != 16 {
+		return nil, fmt.Errorf("session id must decode to 16 bytes, got %d", len(sidBytes))
+	}
+
+	challengeBytes, err := base64.RawURLEncoding.DecodeString(pkceChallenge)
+	if err != nil {
+		return nil, fmt.Errorf("pkce challenge: %w", err)
+	}
+
+	relayBytes, err := hex.DecodeString(relayUUID)
+	if err != nil {
+		return nil, fmt.Errorf("relay uuid: %w", err)
+	}
+	if len(relayBytes) != 32 {
+		return nil, fmt.Errorf("relay uuid must decode to 32 bytes, got %d", len(relayBytes))
+	}
+
+	var ts [8]byte
+	binary.BigEndian.PutUint64(ts[:], uint64(timestamp))
+
+	h := sha256.New()
+	h.Write(sidBytes)
+	h.Write(challengeBytes)
+	h.Write(relayBytes)
+	h.Write([]byte(provider))
+	h.Write(ts[:])
+	return h.Sum(nil), nil
+}
+
+// SignAuthPayload signs the precomputed payload with the daemon's ECDSA P-256
+// private key and returns the standard-base64-encoded ASN.1 DER signature.
+func SignAuthPayload(priv *ecdsa.PrivateKey, payload []byte) (string, error) {
+	sig, err := ecdsa.SignASN1(rand.Reader, priv, payload)
+	if err != nil {
+		return "", fmt.Errorf("ecdsa sign: %w", err)
+	}
+	return base64.StdEncoding.EncodeToString(sig), nil
+}
+
+// generatePKCE returns a fresh PKCE verifier (32 random bytes, base64url) and
+// the matching S256 challenge.
+func generatePKCE() (verifier, challenge string, err error) {
+	var raw [32]byte
+	if _, err := io.ReadFull(rand.Reader, raw[:]); err != nil {
+		return "", "", fmt.Errorf("read random: %w", err)
+	}
+	verifier = base64.RawURLEncoding.EncodeToString(raw[:])
+	sum := sha256.Sum256([]byte(verifier))
+	challenge = base64.RawURLEncoding.EncodeToString(sum[:])
+	return verifier, challenge, nil
+}
+
+// BuildAuthURL constructs a signed `/auth/:provider` URL pointing at the relay
+// broker. The returned AuthRequest carries the session id and PKCE verifier
+// that the daemon must remember to correlate the eventual token delivery.
+//
+//	baseURL  e.g. "https://relay.dicode.app"
+//	scope    optional space-separated scope override (empty = use broker default)
+func BuildAuthURL(baseURL string, identity *Identity, provider, scope string, now int64) (string, *AuthRequest, error) {
+	if identity == nil || identity.PrivateKey == nil {
+		return "", nil, fmt.Errorf("identity required")
+	}
+	if provider == "" {
+		return "", nil, fmt.Errorf("provider required")
+	}
+
+	verifier, challenge, err := generatePKCE()
+	if err != nil {
+		return "", nil, err
+	}
+
+	sessionID := uuid.NewString()
+
+	payload, err := BuildAuthSignedPayload(sessionID, challenge, identity.UUID, provider, now)
+	if err != nil {
+		return "", nil, err
+	}
+	sig, err := SignAuthPayload(identity.PrivateKey, payload)
+	if err != nil {
+		return "", nil, err
+	}
+
+	u, err := url.Parse(strings.TrimRight(baseURL, "/") + "/auth/" + url.PathEscape(provider))
+	if err != nil {
+		return "", nil, fmt.Errorf("parse base url: %w", err)
+	}
+	q := u.Query()
+	q.Set("session", sessionID)
+	q.Set("challenge", challenge)
+	q.Set("relay_uuid", identity.UUID)
+	q.Set("sig", sig)
+	q.Set("timestamp", fmt.Sprintf("%d", now))
+	if scope != "" {
+		q.Set("scope", scope)
+	}
+	u.RawQuery = q.Encode()
+
+	return u.String(), &AuthRequest{
+		Provider:      provider,
+		SessionID:     sessionID,
+		PKCEVerifier:  verifier,
+		PKCEChallenge: challenge,
+		Timestamp:     now,
+	}, nil
+}
+
+// OAuthTokenDeliveryPayload is the JSON body the broker POSTs to
+// /hooks/oauth-complete on the daemon, wrapped in the relay request envelope.
+// It mirrors OAuthTokenDeliveryPayload in dicode-relay src/relay/protocol.ts.
+type OAuthTokenDeliveryPayload struct {
+	Type            string `json:"type"`             // always "oauth_token_delivery"
+	SessionID       string `json:"session_id"`       // matches the original AuthRequest
+	EphemeralPubkey string `json:"ephemeral_pubkey"` // base64 std, 65-byte uncompressed P-256
+	Ciphertext      string `json:"ciphertext"`       // base64 std, AES-256-GCM ct || 16-byte tag
+	Nonce           string `json:"nonce"`            // base64 std, 12 bytes
+}
+
+// DecryptOAuthToken decrypts an OAuthTokenDeliveryPayload using the daemon's
+// long-lived private key. It performs ECDH against the broker's ephemeral
+// public key, derives a 32-byte AES-256 key via HKDF-SHA256 (with the session
+// id as salt and "dicode-oauth-token" as info), and finally AES-256-GCM
+// decrypts the payload. The 16-byte GCM auth tag is appended to the ciphertext
+// per the broker convention; this function splits it back off.
+func DecryptOAuthToken(identity *Identity, payload *OAuthTokenDeliveryPayload) ([]byte, error) {
+	if identity == nil || identity.PrivateKey == nil {
+		return nil, fmt.Errorf("identity required")
+	}
+	if payload == nil {
+		return nil, fmt.Errorf("payload required")
+	}
+	if payload.Type != "" && payload.Type != "oauth_token_delivery" {
+		return nil, fmt.Errorf("unexpected payload type: %s", payload.Type)
+	}
+
+	ephBytes, err := base64.StdEncoding.DecodeString(payload.EphemeralPubkey)
+	if err != nil {
+		return nil, fmt.Errorf("decode ephemeral pubkey: %w", err)
+	}
+	curve := ecdh.P256()
+	ephPub, err := curve.NewPublicKey(ephBytes)
+	if err != nil {
+		return nil, fmt.Errorf("parse ephemeral pubkey: %w", err)
+	}
+
+	// Convert the long-lived ECDSA key to an ECDH key on the same curve.
+	daemonECDH, err := ecdsaToECDH(identity.PrivateKey)
+	if err != nil {
+		return nil, fmt.Errorf("convert daemon key: %w", err)
+	}
+
+	shared, err := daemonECDH.ECDH(ephPub)
+	if err != nil {
+		return nil, fmt.Errorf("ecdh: %w", err)
+	}
+
+	encKey := make([]byte, 32)
+	kdf := hkdf.New(sha256.New, shared, []byte(payload.SessionID), []byte(hkdfInfo))
+	if _, err := io.ReadFull(kdf, encKey); err != nil {
+		return nil, fmt.Errorf("hkdf: %w", err)
+	}
+
+	iv, err := base64.StdEncoding.DecodeString(payload.Nonce)
+	if err != nil {
+		return nil, fmt.Errorf("decode nonce: %w", err)
+	}
+	if len(iv) != 12 {
+		return nil, fmt.Errorf("nonce must be 12 bytes, got %d", len(iv))
+	}
+
+	ctWithTag, err := base64.StdEncoding.DecodeString(payload.Ciphertext)
+	if err != nil {
+		return nil, fmt.Errorf("decode ciphertext: %w", err)
+	}
+	if len(ctWithTag) < 16 {
+		return nil, fmt.Errorf("ciphertext too short for gcm tag")
+	}
+
+	block, err := aes.NewCipher(encKey)
+	if err != nil {
+		return nil, fmt.Errorf("aes: %w", err)
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("gcm: %w", err)
+	}
+	// crypto/cipher GCM expects ct || tag, which matches the broker layout.
+	pt, err := aead.Open(nil, iv, ctWithTag, nil)
+	if err != nil {
+		return nil, fmt.Errorf("aes-gcm open: %w", err)
+	}
+	return pt, nil
+}
+
+// ecdsaToECDH converts a P-256 ECDSA private key to a crypto/ecdh private key
+// so it can participate in ECDH against the broker's ephemeral key.
+func ecdsaToECDH(priv *ecdsa.PrivateKey) (*ecdh.PrivateKey, error) {
+	if name := priv.PublicKey.Curve.Params().Name; name != "P-256" {
+		return nil, fmt.Errorf("only P-256 supported, got %s", name)
+	}
+	return ecdh.P256().NewPrivateKey(priv.D.FillBytes(make([]byte, 32)))
+}
