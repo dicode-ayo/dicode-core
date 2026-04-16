@@ -7,6 +7,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -170,11 +171,12 @@ const OAuthDeliveryType = "oauth_token_delivery"
 // /hooks/oauth-complete on the daemon, wrapped in the relay request envelope.
 // It mirrors OAuthTokenDeliveryPayload in dicode-relay src/relay/protocol.ts.
 type OAuthTokenDeliveryPayload struct {
-	Type            string `json:"type"`             // must equal OAuthDeliveryType
-	SessionID       string `json:"session_id"`       // matches the original AuthRequest
-	EphemeralPubkey string `json:"ephemeral_pubkey"` // base64 std, 65-byte uncompressed P-256
-	Ciphertext      string `json:"ciphertext"`       // base64 std, AES-256-GCM ct || 16-byte tag
-	Nonce           string `json:"nonce"`            // base64 std, 12 bytes
+	Type            string `json:"type"`                        // must equal OAuthDeliveryType
+	SessionID       string `json:"session_id"`                  // matches the original AuthRequest
+	EphemeralPubkey string `json:"ephemeral_pubkey"`            // base64 std, 65-byte uncompressed P-256
+	Ciphertext      string `json:"ciphertext"`                  // base64 std, AES-256-GCM ct || 16-byte tag
+	Nonce           string `json:"nonce"`                       // base64 std, 12 bytes
+	BrokerSig       string `json:"broker_sig,omitempty"`        // base64 ECDSA sig over sha256(type||session_id||eph||ct||nonce)
 }
 
 // DecryptOAuthToken decrypts an OAuthTokenDeliveryPayload using the daemon's
@@ -258,6 +260,54 @@ func DecryptOAuthToken(identity *Identity, payload *OAuthTokenDeliveryPayload) (
 		return nil, fmt.Errorf("aes-gcm open: %w", err)
 	}
 	return pt, nil
+}
+
+// VerifyBrokerSig verifies the broker's ECDSA signature over the delivery
+// envelope's immutable fields. brokerPubkeyBase64 is the base64-encoded SPKI
+// DER public key received (and TOFU-pinned) from the relay's welcome message.
+//
+// The signed payload is sha256(type || session_id || ephemeral_pubkey ||
+// ciphertext || nonce) — identical concatenation order on both sides.
+func VerifyBrokerSig(brokerPubkeyBase64 string, payload *OAuthTokenDeliveryPayload) error {
+	if brokerPubkeyBase64 == "" {
+		return fmt.Errorf("no broker pubkey pinned — cannot verify delivery authenticity")
+	}
+	if payload.BrokerSig == "" {
+		return fmt.Errorf("delivery envelope missing broker_sig — broker may be outdated")
+	}
+	pubDER, err := base64.StdEncoding.DecodeString(brokerPubkeyBase64)
+	if err != nil {
+		return fmt.Errorf("decode broker pubkey: %w", err)
+	}
+
+	// Reconstruct the exact digest the broker signed.
+	h := sha256.New()
+	h.Write([]byte(payload.Type))
+	h.Write([]byte(payload.SessionID))
+	h.Write([]byte(payload.EphemeralPubkey))
+	h.Write([]byte(payload.Ciphertext))
+	h.Write([]byte(payload.Nonce))
+	digest := h.Sum(nil)
+
+	sigBytes, err := base64.StdEncoding.DecodeString(payload.BrokerSig)
+	if err != nil {
+		return fmt.Errorf("decode broker sig: %w", err)
+	}
+
+	// Parse the SPKI DER public key.
+	pub, err := x509.ParsePKIXPublicKey(pubDER)
+	if err != nil {
+		return fmt.Errorf("parse broker pubkey: %w", err)
+	}
+	ecPub, ok := pub.(*ecdsa.PublicKey)
+	if !ok {
+		return fmt.Errorf("broker pubkey is not ECDSA")
+	}
+
+	if !ecdsa.VerifyASN1(ecPub, digest, sigBytes) {
+		return fmt.Errorf("broker signature verification failed — envelope may have been tampered with or forged")
+	}
+	return nil
 }
 
 // ecdsaToECDH converts a P-256 ECDSA private key to a crypto/ecdh private key

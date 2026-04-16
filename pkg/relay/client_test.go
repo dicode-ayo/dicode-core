@@ -59,7 +59,7 @@ func TestHandshakeSuccess(t *testing.T) {
 	_, portStr, _ := net.SplitHostPort(localSrv.Listener.Addr().String())
 	port, _ := strconv.Atoi(portStr)
 
-	client := NewClient(wsURL, id, port, log)
+	client := NewClient(wsURL, id, port, nil, log)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -100,7 +100,7 @@ func TestHandshakeWrongKey(t *testing.T) {
 	defer localSrv.Close()
 	_, portStr, _ := net.SplitHostPort(localSrv.Listener.Addr().String())
 	port, _ := strconv.Atoi(portStr)
-	client := NewClient(wsURL, tamperedID, port, log)
+	client := NewClient(wsURL, tamperedID, port, nil, log)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -199,7 +199,7 @@ func TestWebhookForwarding(t *testing.T) {
 	_, portStr, _ := net.SplitHostPort(localSrv.Listener.Addr().String())
 	port, _ := strconv.Atoi(portStr)
 
-	client := NewClient(wsURL, id, port, log)
+	client := NewClient(wsURL, id, port, nil, log)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -264,7 +264,7 @@ func TestAutoReconnect(t *testing.T) {
 	_, portStr, _ := net.SplitHostPort(localSrv.Listener.Addr().String())
 	port, _ := strconv.Atoi(portStr)
 
-	client := NewClient(wsURL, id, port, log)
+	client := NewClient(wsURL, id, port, nil, log)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
@@ -328,7 +328,7 @@ func TestRelayBaseHeader(t *testing.T) {
 	_, portStr, _ := net.SplitHostPort(localSrv.Listener.Addr().String())
 	port, _ := strconv.Atoi(portStr)
 
-	client := NewClient(wsURL, id, port, log)
+	client := NewClient(wsURL, id, port, nil, log)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 

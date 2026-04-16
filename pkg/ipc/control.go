@@ -11,7 +11,9 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/dicode/dicode/pkg/db"
 	"github.com/dicode/dicode/pkg/registry"
+	"github.com/dicode/dicode/pkg/relay"
 	"github.com/dicode/dicode/pkg/secrets"
 	"github.com/dicode/dicode/pkg/task"
 	"go.uber.org/zap"
@@ -33,6 +35,7 @@ type ControlServer struct {
 	engine          EngineRunner
 	secrets         secrets.Manager // nil if no local provider configured
 	metricsProvider MetricsProvider
+	database        db.DB           // for broker pubkey trust pinning; nil in tests
 	log             *zap.Logger
 
 	startedAt time.Time
@@ -50,6 +53,7 @@ func NewControlServer(
 	mp MetricsProvider,
 	version string,
 	log *zap.Logger,
+	database db.DB,
 ) (*ControlServer, error) {
 	secret := make([]byte, 32)
 	if _, err := rand.Read(secret); err != nil {
@@ -64,6 +68,7 @@ func NewControlServer(
 		engine:          engine,
 		secrets:         secretsMgr,
 		metricsProvider: mp,
+		database:        database,
 		log:             log,
 		startedAt:       time.Now(),
 		version:         version,
@@ -205,6 +210,9 @@ func (cs *ControlServer) dispatch(ctx context.Context, req Request) (any, error)
 
 	case "cli.metrics":
 		return cs.handleMetrics(), nil
+
+	case "cli.relay.trust_broker":
+		return cs.handleTrustBroker(ctx)
 
 	default:
 		return nil, fmt.Errorf("unknown method: %s", req.Method)
@@ -361,6 +369,23 @@ func (cs *ControlServer) handleMetrics() MetricsSnapshot {
 	}
 
 	return snap
+}
+
+// handleTrustBroker deletes the TOFU-pinned broker pubkey so the next relay
+// reconnect will re-pin whatever the broker announces. This is the recovery
+// path when the broker operator rotates their signing key.
+func (cs *ControlServer) handleTrustBroker(ctx context.Context) (any, error) {
+	if cs.database == nil {
+		return nil, fmt.Errorf("database not available")
+	}
+	if err := relay.ReplaceBrokerPubkey(ctx, cs.database, ""); err != nil {
+		return nil, fmt.Errorf("clear broker pubkey: %w", err)
+	}
+	cs.log.Warn("broker pubkey pin cleared — next relay reconnect will TOFU-pin the new key")
+	return map[string]string{
+		"status":  "ok",
+		"message": "Broker pubkey pin cleared. Restart the daemon (or wait for reconnect) to accept the new broker key.",
+	}, nil
 }
 
 // triggerLabel returns a human-readable trigger description for a task spec.
