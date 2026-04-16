@@ -35,9 +35,10 @@ type Server struct {
 	spec     *task.Spec
 	engine   EngineRunner
 	secrets      secrets.Manager         // optional; enables dicode.secrets_set / dicode.secrets_delete
-	oauthID      *relay.Identity         // optional; enables dicode.oauth.* for the auth built-ins
-	oauthURL     string                  // broker base URL, e.g. "https://relay.dicode.app"
-	oauthPending *relay.PendingSessions  // tracks outstanding /auth/:provider flows by session id
+	oauthID         *relay.Identity         // optional; enables dicode.oauth.* for the auth built-ins
+	oauthURL        string                  // broker base URL, e.g. "https://relay.dicode.app"
+	oauthPending    *relay.PendingSessions  // tracks outstanding /auth/:provider flows by session id
+	brokerPubkeyFn  func() string           // returns the TOFU-pinned broker pubkey (base64 SPKI DER)
 	log          *zap.Logger
 
 	aiBaseURL string
@@ -113,10 +114,11 @@ func (s *Server) SetSecrets(m secrets.Manager) { s.secrets = m }
 // pending is shared across all per-run ipc.Server instances so that an
 // auth-start run and the subsequent auth-complete webhook run can correlate
 // on session id.
-func (s *Server) SetOAuthBroker(id *relay.Identity, baseURL string, pending *relay.PendingSessions) {
+func (s *Server) SetOAuthBroker(id *relay.Identity, baseURL string, pending *relay.PendingSessions, brokerPubkeyFn func() string) {
 	s.oauthID = id
 	s.oauthURL = baseURL
 	s.oauthPending = pending
+	s.brokerPubkeyFn = brokerPubkeyFn
 }
 
 // Start creates the Unix socket and begins accepting connections.
@@ -616,6 +618,18 @@ func (s *Server) handleConn(conn net.Conn) {
 			if err := json.Unmarshal(req.Envelope, &env); err != nil {
 				reply(req.ID, nil, "ipc: decode envelope: "+err.Error())
 				continue
+			}
+			// Verify broker authenticity before consuming the pending
+			// session or touching any crypto. If the broker pubkey is
+			// pinned (TOFU on first connect), a forged envelope from a
+			// local process or MitM is rejected here.
+			if s.brokerPubkeyFn != nil {
+				if bpk := s.brokerPubkeyFn(); bpk != "" {
+					if err := relay.VerifyBrokerSig(bpk, &env); err != nil {
+						reply(req.ID, nil, "ipc: "+err.Error())
+						continue
+					}
+				}
 			}
 			authReq, err := s.oauthPending.Take(env.SessionID)
 			if err != nil {
