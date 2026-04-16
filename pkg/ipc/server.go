@@ -642,11 +642,18 @@ func (s *Server) handleConn(conn net.Conn) {
 			// run received which delivery without the token ever touching
 			// an observability pipeline.
 			if s.log != nil {
+				// Truncate session id to first 8 chars — enough for
+				// correlation, avoids persisting the full signed-payload
+				// component in long-term log storage.
+				sid := authReq.SessionID
+				if len(sid) > 8 {
+					sid = sid[:8]
+				}
 				s.log.Info("oauth token delivered",
 					zap.String("task", s.taskID),
 					zap.String("run", s.runID),
 					zap.String("provider", authReq.Provider),
-					zap.String("session", authReq.SessionID),
+					zap.String("session", sid),
 					zap.Strings("secrets", written),
 				)
 			}

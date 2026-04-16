@@ -217,9 +217,15 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 			// across runs so auth-start and auth-relay correlate by
 			// session id. The broker speaks HTTPS at the same host as the
 			// WSS relay endpoint.
+			pending := relay.NewPendingSessions()
 			if brokerURL := deriveBrokerBaseURL(cfg.Relay.ServerURL); brokerURL != "" {
-				denoRT.SetOAuthBroker(id, brokerURL, relay.NewPendingSessions())
+				denoRT.SetOAuthBroker(id, brokerURL, pending)
+			} else {
+				log.Warn("relay: could not derive broker base URL from server_url — OAuth broker disabled",
+					zap.String("server_url", cfg.Relay.ServerURL),
+					zap.String("expected_scheme", "wss:// or ws://"))
 			}
+			g.Go(func() error { pending.StartSweep(ctx); return nil })
 			g.Go(func() error { return rc.Run(ctx) })
 		}
 	}

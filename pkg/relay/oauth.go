@@ -160,11 +160,17 @@ func BuildAuthURL(baseURL string, identity *Identity, provider, scope string, no
 	}, nil
 }
 
+// OAuthDeliveryType is the wire-format type tag on token delivery envelopes.
+// It is used both as the explicit guard in DecryptOAuthToken and as AES-GCM
+// AAD on both ends (relay: eciesEncrypt, daemon: aead.Open). Keep in sync
+// with dicode-relay src/broker/crypto.ts.
+const OAuthDeliveryType = "oauth_token_delivery"
+
 // OAuthTokenDeliveryPayload is the JSON body the broker POSTs to
 // /hooks/oauth-complete on the daemon, wrapped in the relay request envelope.
 // It mirrors OAuthTokenDeliveryPayload in dicode-relay src/relay/protocol.ts.
 type OAuthTokenDeliveryPayload struct {
-	Type            string `json:"type"`             // always "oauth_token_delivery"
+	Type            string `json:"type"`             // must equal OAuthDeliveryType
 	SessionID       string `json:"session_id"`       // matches the original AuthRequest
 	EphemeralPubkey string `json:"ephemeral_pubkey"` // base64 std, 65-byte uncompressed P-256
 	Ciphertext      string `json:"ciphertext"`       // base64 std, AES-256-GCM ct || 16-byte tag
@@ -189,7 +195,7 @@ func DecryptOAuthToken(identity *Identity, payload *OAuthTokenDeliveryPayload) (
 	// makes aead.Open fail. This is domain separation: the daemon identity
 	// key can never be asked to decrypt a future ciphertext that reuses
 	// this same ECIES scheme under a different Type label.
-	if payload.Type != "oauth_token_delivery" {
+	if payload.Type != OAuthDeliveryType {
 		return nil, fmt.Errorf("unexpected payload type: %q", payload.Type)
 	}
 
