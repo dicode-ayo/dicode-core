@@ -132,7 +132,7 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	gateway := ipc.NewGateway()
 
 	// 6. Managed runtimes + trigger engine.
-	managedRuntimes, eng, err := buildRuntimes(ctx, cfg, reg, secretsChain, localSecrets, database, log, gateway)
+	managedRuntimes, eng, denoRT, err := buildRuntimes(ctx, cfg, reg, secretsChain, localSecrets, database, log, gateway)
 	if err != nil {
 		return err
 	}
@@ -191,7 +191,7 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 			return cm.ChildRSSMB, cm.ChildCPUMs
 		},
 	}
-	ctrlSrv, err := ipc.NewControlServer(socketPath, tokenPath, reg, eng, localSecrets, mp, version, log)
+	ctrlSrv, err := ipc.NewControlServer(socketPath, tokenPath, reg, eng, localSecrets, mp, version, log, database)
 	if err != nil {
 		return fmt.Errorf("build control server: %w", err)
 	}
@@ -209,8 +209,23 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 		if err != nil {
 			log.Warn("relay: identity init failed, relay disabled", zap.Error(err))
 		} else {
-			rc := relay.NewClient(cfg.Relay.ServerURL, id, port, log)
+			rc := relay.NewClient(cfg.Relay.ServerURL, id, port, database, log)
 			srv.SetRelayClient(rc)
+			// Wire the daemon's relay identity into the deno runtime so
+			// the auth-start and auth-relay built-in tasks can drive the
+			// broker flow via dicode.oauth.*. Pending sessions are shared
+			// across runs so auth-start and auth-relay correlate by
+			// session id. The broker speaks HTTPS at the same host as the
+			// WSS relay endpoint.
+			pending := relay.NewPendingSessions()
+			if brokerURL := deriveBrokerBaseURL(cfg.Relay.ServerURL); brokerURL != "" {
+				denoRT.SetOAuthBroker(id, brokerURL, pending, rc.BrokerPubkey)
+			} else {
+				log.Warn("relay: could not derive broker base URL from server_url — OAuth broker disabled",
+					zap.String("server_url", cfg.Relay.ServerURL),
+					zap.String("expected_scheme", "wss:// or ws://"))
+			}
+			g.Go(func() error { pending.StartSweep(ctx); return nil })
 			g.Go(func() error { return rc.Run(ctx) })
 		}
 	}
@@ -227,10 +242,10 @@ func buildRuntimes(
 	database db.DB,
 	log *zap.Logger,
 	gateway *ipc.Gateway,
-) ([]pkgruntime.ManagedRuntime, *trigger.Engine, error) {
+) ([]pkgruntime.ManagedRuntime, *trigger.Engine, *denoruntime.Runtime, error) {
 	denoRT, err := denoruntime.New(reg, secretsChain, database, log)
 	if err != nil {
-		return nil, nil, fmt.Errorf("init deno runtime: %w", err)
+		return nil, nil, nil, fmt.Errorf("init deno runtime: %w", err)
 	}
 	eng := trigger.New(reg, denoRT, log)
 	eng.SetDB(database)
@@ -317,7 +332,21 @@ func buildRuntimes(
 		}
 	}
 
-	return managed, eng, nil
+	return managed, eng, denoRT, nil
+}
+
+// deriveBrokerBaseURL converts a relay WSS URL (e.g. wss://relay.dicode.app)
+// into the matching HTTPS broker base URL. Returns empty if the input scheme
+// is not ws/wss.
+func deriveBrokerBaseURL(wsURL string) string {
+	switch {
+	case strings.HasPrefix(wsURL, "wss://"):
+		return "https://" + strings.TrimPrefix(wsURL, "wss://")
+	case strings.HasPrefix(wsURL, "ws://"):
+		return "http://" + strings.TrimPrefix(wsURL, "ws://")
+	default:
+		return ""
+	}
 }
 
 func buildSecretsChain(cfg *config.Config, dataDir string, database db.DB, log *zap.Logger) (secrets.Chain, secrets.Manager) {

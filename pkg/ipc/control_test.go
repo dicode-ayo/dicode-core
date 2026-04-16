@@ -24,7 +24,7 @@ func controlTestEnv(t *testing.T, mp MetricsProvider) (net.Conn, func()) {
 	log := zap.NewNop()
 	eng := &mockEngine{}
 
-	cs, err := NewControlServer(socketPath, tokenPath, nil, eng, nil, mp, "test", log)
+	cs, err := NewControlServer(socketPath, tokenPath, nil, eng, nil, mp, "test", log, nil)
 	if err != nil {
 		t.Fatalf("NewControlServer: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestControl_Handshake_EmitsEmptyTaskAndRunIDFields(t *testing.T) {
 	socketPath := filepath.Join(dir, "ctrl.sock")
 	tokenPath := filepath.Join(dir, "ctrl.token")
 
-	cs, err := NewControlServer(socketPath, tokenPath, nil, &mockEngine{}, nil, MetricsProvider{}, "test", zap.NewNop())
+	cs, err := NewControlServer(socketPath, tokenPath, nil, &mockEngine{}, nil, MetricsProvider{}, "test", zap.NewNop(), nil)
 	if err != nil {
 		t.Fatalf("NewControlServer: %v", err)
 	}

@@ -1504,6 +1504,18 @@ The relay client authenticates via challenge-response (no passwords, no accounts
 - Asset serving for webhook UIs (CSS, JS, images)
 - dicode.js SDK serving (`/dicode.js`)
 
+### OAuth broker (relay required)
+
+When the relay is enabled, two built-in tasks handle the full OAuth dance for 14+ providers without requiring you to register an app with the provider:
+
+```sh
+dicode run buildin/auth-start provider=slack
+# prints a signed /auth/slack URL — open it in a browser
+# after consent, tokens land in SLACK_ACCESS_TOKEN (and friends)
+```
+
+The relay broker runs the code exchange on its side, ECIES-encrypts the token bundle to your daemon's P-256 public key, and forwards it over the existing WSS tunnel to a reserved `/hooks/oauth-complete` path. Plaintext tokens never cross the JS runtime — decrypt, parse, and secrets-write all happen in Go-process memory. See [docs/oauth.md](docs/oauth.md#broker-flow-relay-required) for the threat model and the full list of supported providers.
+
 ### Self-hosted relay
 
 For high-security environments, run your own relay server instead of using `relay.dicode.app`:
@@ -1586,7 +1598,7 @@ dicode/
 ├── tasks/
 │   ├── buildin/        # built-in tasks (webui, tray, alert, notify, ai-agent)
 │   ├── skills/         # shared markdown "skills" loaded into agent prompts
-│   ├── auth/           # OAuth task (broker mode planned)
+│   ├── auth/           # legacy per-provider OAuth tasks (self-hosted flow)
 │   └── examples/       # 13 example tasks (all runtimes and trigger types)
 ├── docs/               # comprehensive documentation (33 files)
 ├── dicode.yaml         # example config

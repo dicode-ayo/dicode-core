@@ -21,6 +21,7 @@ import (
 	denopkg "github.com/dicode/dicode/pkg/deno"
 	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/registry"
+	"github.com/dicode/dicode/pkg/relay"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	"github.com/dicode/dicode/pkg/secrets"
 	"github.com/dicode/dicode/pkg/task"
@@ -80,6 +81,10 @@ type Runtime struct {
 	aiBaseURL      string
 	aiModel        string
 	aiAPIKey       string
+	oauthIdentity  *relay.Identity
+	oauthURL       string
+	oauthPending   *relay.PendingSessions
+	brokerPubkeyFn func() string
 }
 
 // New creates a Deno Runtime. It ensures the Deno binary is present in the
@@ -105,6 +110,18 @@ func (rt *Runtime) SetGateway(g *ipc.Gateway) { rt.gateway = g }
 // SetSecretsManager wires the secrets manager so tasks with permissions.dicode.secrets_write
 // can call dicode.secrets_set() and dicode.secrets_delete().
 func (rt *Runtime) SetSecretsManager(m secrets.Manager) { rt.secretsManager = m }
+
+// SetOAuthBroker wires the daemon's relay identity, broker base URL, and
+// the daemon-wide PendingSessions store so the auth-start and auth-relay
+// built-in tasks can use dicode.oauth.*. All three are required together;
+// passing nil leaves the oauth API inert and tasks will receive a
+// "not configured" error.
+func (rt *Runtime) SetOAuthBroker(id *relay.Identity, baseURL string, pending *relay.PendingSessions, brokerPubkeyFn func() string) {
+	rt.oauthIdentity = id
+	rt.oauthURL = baseURL
+	rt.oauthPending = pending
+	rt.brokerPubkeyFn = brokerPubkeyFn
+}
 
 // SetAIConfig configures the AI provider details passed to tasks via dicode.get_config.
 func (rt *Runtime) SetAIConfig(baseURL, model, apiKey string) {
@@ -199,6 +216,9 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	srv := ipc.New(runID, spec.ID, rt.secret, rt.registry, rt.db, mergedParams, opts.Input, rt.log, spec, rt.engine, rt.aiBaseURL, rt.aiModel, rt.aiAPIKey)
 	srv.SetGateway(rt.gateway)
 	srv.SetSecrets(rt.secretsManager)
+	if rt.oauthIdentity != nil {
+		srv.SetOAuthBroker(rt.oauthIdentity, rt.oauthURL, rt.oauthPending, rt.brokerPubkeyFn)
+	}
 	socketPath, token, err := srv.Start(execCtx)
 	if err != nil {
 		status = registry.StatusFailure

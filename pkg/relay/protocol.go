@@ -25,8 +25,9 @@ type helloMsg struct {
 }
 
 type welcomeMsg struct {
-	Type string `json:"type"`
-	URL  string `json:"url"`
+	Type         string `json:"type"`
+	URL          string `json:"url"`
+	BrokerPubkey string `json:"broker_pubkey,omitempty"` // base64 SPKI DER — TOFU-pinned by the daemon
 }
 
 type errorMsg struct {

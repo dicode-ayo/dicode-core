@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/dicode/dicode/pkg/db"
 	"go.uber.org/zap"
 )
 
@@ -43,16 +44,28 @@ type Client struct {
 	serverURL   string
 	identity    *Identity
 	localPort   int
+	db          db.DB // for TOFU broker pubkey pinning
 	log         *zap.Logger
 	localClient *http.Client
 
 	hookMu      sync.RWMutex
 	hookBaseURL string // set after successful handshake from welcome message
+
+	brokerMu     sync.RWMutex
+	brokerPubkey string // cached pinned broker pubkey (base64 SPKI DER)
+}
+
+// BrokerPubkey returns the currently pinned broker public key (base64 SPKI DER).
+// Returns "" if the broker hasn't announced one yet.
+func (c *Client) BrokerPubkey() string {
+	c.brokerMu.RLock()
+	defer c.brokerMu.RUnlock()
+	return c.brokerPubkey
 }
 
 // NewClient creates a relay client. serverURL must be a wss:// URL.
 // In test/dev environments ws:// is accepted but a warning is logged.
-func NewClient(serverURL string, identity *Identity, localPort int, log *zap.Logger) *Client {
+func NewClient(serverURL string, identity *Identity, localPort int, database db.DB, log *zap.Logger) *Client {
 	if !strings.HasPrefix(serverURL, "wss://") && !strings.HasPrefix(serverURL, "ws://") {
 		log.Error("relay: serverURL must start with wss:// or ws://", zap.String("url", serverURL))
 	} else if strings.HasPrefix(serverURL, "ws://") {
@@ -63,6 +76,7 @@ func NewClient(serverURL string, identity *Identity, localPort int, log *zap.Log
 		serverURL:   serverURL,
 		identity:    identity,
 		localPort:   localPort,
+		db:          database,
 		log:         log,
 		localClient: &http.Client{Timeout: 25 * time.Second},
 	}
@@ -201,6 +215,32 @@ func (c *Client) handshake(ctx context.Context, conn *websocket.Conn, sendMu *sy
 		c.hookMu.Lock()
 		c.hookBaseURL = w.URL
 		c.hookMu.Unlock()
+
+		// TOFU broker pubkey pinning: on first connect, store the broker's
+		// signing pubkey. On reconnect, verify it hasn't changed.
+		if w.BrokerPubkey != "" && c.db != nil {
+			result, err := CheckAndPinBrokerPubkey(ctx, c.db, w.BrokerPubkey)
+			if err != nil {
+				return fmt.Errorf("broker pubkey pin: %w", err)
+			}
+			switch result {
+			case BrokerPubkeyPinNew:
+				c.log.Info("relay: pinned broker signing key (trust-on-first-use)",
+					zap.String("pubkey", w.BrokerPubkey[:16]+"…"))
+			case BrokerPubkeyPinMatch:
+				// Expected path on reconnect — nothing to log.
+			case BrokerPubkeyPinMismatch:
+				return fmt.Errorf(
+					"relay: BROKER PUBKEY CHANGED — the relay server presented a different signing key "+
+						"than the one pinned on first connect. If the relay operator rotated their key, "+
+						"run `dicode relay trust-broker --yes` to accept the new key. "+
+						"Connection rejected to prevent token substitution attacks")
+			}
+			c.brokerMu.Lock()
+			c.brokerPubkey = w.BrokerPubkey
+			c.brokerMu.Unlock()
+		}
+
 		c.log.Info("relay connected", zap.String("url", w.URL))
 		return nil
 	case msgError:

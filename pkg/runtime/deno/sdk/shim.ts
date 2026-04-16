@@ -65,6 +65,28 @@ export interface MCP {
   call:       (name: string, tool: string, args?: Record<string, unknown>) => Promise<unknown>;
 }
 
+export interface OAuthAuthURL {
+  url:        string;
+  session_id: string;
+  provider:   string;
+  timestamp:  number;
+  relay_uuid: string;
+}
+
+export interface OAuthStoreResult {
+  provider: string;
+  secrets:  string[];
+}
+
+// OAuth broker bridge — only functional inside the auth-start (oauth_init)
+// and auth-relay (oauth_store) built-in tasks. Plaintext tokens never cross
+// this boundary: store_token decrypts, parses, and writes to secrets
+// entirely daemon-side, and only returns which secret names were written.
+export interface DicodeOAuth {
+  build_auth_url: (provider: string, scope?: string) => Promise<OAuthAuthURL>;
+  store_token:    (envelope: unknown)                => Promise<OAuthStoreResult>;
+}
+
 export interface Dicode {
   // task_id: the fully-namespaced id of the currently-running task (e.g.
   // "buildin/ai-agent"). Populated from the IPC handshake so task code can
@@ -78,6 +100,7 @@ export interface Dicode {
   get_config:     (section: string)                                    => Promise<unknown>;
   secrets_set:    (key: string, value: string)                        => Promise<void>;
   secrets_delete: (key: string)                                        => Promise<void>;
+  oauth:          DicodeOAuth;
 }
 
 // ── connection ────────────────────────────────────────────────────────────────
@@ -232,6 +255,12 @@ const dicode: Dicode = {
   get_config:     (section)         => __call__({ method: "dicode.get_config",      section }),
   secrets_set:    (key, value)      => __call__({ method: "dicode.secrets_set",     key, stringValue: value }) as Promise<void>,
   secrets_delete: (key)             => __call__({ method: "dicode.secrets_delete",  key }) as Promise<void>,
+  oauth: {
+    build_auth_url: (provider, scope) =>
+      __call__({ method: "dicode.oauth.build_auth_url", provider, scope: scope ?? "" }) as Promise<OAuthAuthURL>,
+    store_token: (envelope) =>
+      __call__({ method: "dicode.oauth.store_token", envelope }) as Promise<OAuthStoreResult>,
+  },
 };
 
 // ── exports ───────────────────────────────────────────────────────────────────
