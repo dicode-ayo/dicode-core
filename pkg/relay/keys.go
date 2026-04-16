@@ -2,6 +2,7 @@ package relay
 
 import (
 	"context"
+	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -39,17 +40,18 @@ func marshalUncompressed(pub *ecdsa.PublicKey) []byte {
 	return b
 }
 
-// unmarshalUncompressed parses a 65-byte uncompressed P-256 point without
-// relying on the deprecated elliptic.Unmarshal.
+// unmarshalUncompressed parses a 65-byte uncompressed P-256 point.
+// Uses crypto/ecdh for on-curve validation (elliptic.IsOnCurve is deprecated).
 func unmarshalUncompressed(b []byte) (*ecdsa.PublicKey, error) {
 	if len(b) != 65 || b[0] != 0x04 {
 		return nil, fmt.Errorf("invalid uncompressed public key (len=%d)", len(b))
 	}
+	// Validate via ecdh.P256().NewPublicKey which performs an on-curve check.
+	if _, err := ecdh.P256().NewPublicKey(b); err != nil {
+		return nil, fmt.Errorf("public key point is not on P-256 curve: %w", err)
+	}
 	x := new(big.Int).SetBytes(b[1:33])
 	y := new(big.Int).SetBytes(b[33:65])
-	if !elliptic.P256().IsOnCurve(x, y) {
-		return nil, fmt.Errorf("public key point is not on P-256 curve")
-	}
 	return &ecdsa.PublicKey{Curve: elliptic.P256(), X: x, Y: y}, nil
 }
 
