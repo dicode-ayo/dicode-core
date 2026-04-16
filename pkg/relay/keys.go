@@ -105,13 +105,13 @@ func parseIdentity(pemData string) (*Identity, error) {
 // RotateIdentity generates a fresh P-256 keypair, overwrites the stored
 // identity in the database, and returns the new Identity.
 //
-// The old key is unrecoverable after this call. Any public webhook URL the
-// operator previously shared under the old UUID becomes permanently invalid;
-// downstream consumers must be re-wired to the new relay.dicode.app/u/<new>
-// base. Live WSS connections held by an in-memory Identity from before the
-// rotation are not affected in this process — the caller is responsible for
-// tearing them down and re-connecting with the new identity (typically by
-// restarting the daemon).
+// The old key is removed from the database after this call. Callers
+// holding an in-memory *Identity pointer retain the old key until they
+// are torn down — this is by design (the running relay WSS connection
+// keeps working until daemon restart). Any public webhook URL the
+// operator previously shared under the old UUID becomes permanently
+// invalid; downstream consumers must be re-wired to the new
+// relay.dicode.app/u/<new> base.
 func RotateIdentity(ctx context.Context, database db.DB) (*Identity, error) {
 	return generateAndStore(ctx, database)
 }

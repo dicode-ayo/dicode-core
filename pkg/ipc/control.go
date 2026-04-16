@@ -431,12 +431,15 @@ func (cs *ControlServer) handleRelayRotate(ctx context.Context) (any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("rotate: %w", err)
 	}
-	cs.log.Warn("relay identity rotated",
+	// The rotator closure in main.go emits a detailed audit entry with
+	// old_uuid, new_uuid, and dropped_sessions. We log here too for the
+	// control-socket-level audit trail (separate from the relay-level one).
+	cs.log.Warn("relay identity rotated via control socket",
 		zap.String("new_uuid", newUUID),
 	)
 	return RelayRotateResult{
 		NewUUID: newUUID,
-		Warning: "Old UUID is permanently invalidated. Any public webhook URLs you previously shared under the old UUID will stop working. Restart the daemon to activate the new identity on the WSS relay connection.",
+		Warning: "Old UUID is permanently invalidated. Any public webhook URLs you previously shared under the old UUID will stop working. IMPORTANT: the running relay WSS connection still uses the old key in memory. An attacker who has the old key can impersonate this daemon until you restart. Restart the daemon now to complete the rotation.",
 	}, nil
 }
 
