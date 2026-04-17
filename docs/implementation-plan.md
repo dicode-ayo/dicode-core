@@ -671,24 +671,21 @@ Wire into WebUI `/generate` endpoint. Show diff, let user confirm, write to loca
 
 ---
 
-## Milestone 15 — Webhook relay 🔧
+## Milestone 15 — Webhook relay ✅ (client)
 
 **Goal**: public webhook URLs for laptop users.
 
-### `pkg/relay/relay.go` — implement WebSocket tunnel
+**Implemented** (PR #79, hardened in #80):
 
-```go
-func (c *Client) Start(ctx context.Context, handler WebhookHandler) error
-```
+- `pkg/relay/client.go` — persistent WSS connection with ECDSA P-256 challenge-response authentication, exponential backoff reconnection (1s → 60s), transparent HTTP proxy to local daemon
+- `pkg/relay/server.go` — Go relay server for self-hosting and integration tests
+- `pkg/relay/keys.go` — `LoadOrGenerateIdentity()` persists P-256 keypair in SQLite, derives stable UUID from public key
+- Security: path whitelist (`/hooks/*` + `/dicode.js`), `X-Relay-Base` header injection, hop-by-hop header filtering, 5 MB body limit
+- 16 client tests + key tests
 
-Logic:
-1. Connect to `wss://relay.dicode.app` with token in Authorization header
-2. Server assigns stable URL `dicode.app/u/{uid}/hooks/{path}`
-3. On incoming webhook: relay server sends it over WebSocket
-4. Client calls `handler(w, r)` — forwarded to local trigger engine
-5. Response streamed back over WebSocket
+**Production relay server**: separate Node.js service (`dicode-relay` repo) with OAuth broker support for 14+ providers.
 
-**Deliverable**: webhooks work on laptops without port forwarding.
+**Deliverable**: webhooks work on laptops without port forwarding. ✅
 
 ---
 
@@ -838,8 +835,16 @@ Milestones 0–7 are the **MVP** — ✅ all complete. Everything after is addit
 - Live log HTMX fix (`hx-select="#run-status-card"`)
 - Daemon trigger in the trigger editor UI
 - Nginx example daemon task
+- Max concurrent tasks semaphore in `fireAsync()` (configurable, default 10) (#74)
+- `WaitRun()` replaced polling loop with channel-based notification (#73)
+- Concurrency metrics endpoint (`GET /api/metrics`) — active tasks, memory, CPU (#75)
+- Design system `theme.css` with design tokens (#92)
+- Built-in temp file cleanup task (#91)
+- Built-in ai-agent chat task with tool-calling, template vars, KV-backed conversation history (#98)
+- OAuth broker daemon plumbing — `auth-start`/`auth-complete` built-in tasks, AAD provider (#100)
+- Transparent relay proxy with `X-Relay-Base` header injection (#80)
 
-**Test coverage**: 62+ tests across db, secrets, source/local, registry, runtime/js, trigger, and webui packages.
+**Test coverage**: 100+ tests across db, secrets, source/local, registry, runtime/deno, trigger, taskset, ipc, webui, relay, config, metrics, and task packages.
 
 ---
 
