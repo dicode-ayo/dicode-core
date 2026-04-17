@@ -323,7 +323,7 @@ CLI dispatcher + daemon mode in one binary:
 |---|---|
 | `go.mod` | ✅ All dependencies declared and resolved |
 | `dicode.yaml` | ✅ Example config with all sections and comments |
-| `LICENSE` | ✅ Apache-2.0 license |
+| `LICENSE` | ✅ AGPL-3.0 license |
 | `README.md` | ✅ Comprehensive user documentation |
 | `docs/` | ✅ This documentation tree |
 | `docs/security-plan.md` | ✅ Security design document (phases 1–4 implemented + hardened) |

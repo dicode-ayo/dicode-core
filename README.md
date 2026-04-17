@@ -1622,4 +1622,6 @@ dicode/
 
 ## License
 
-Apache-2.0
+AGPL-3.0 — see [LICENSE](LICENSE).
+
+The full engine is open source and free to self-host. The AGPL copyleft ensures the code stays open: you can use, modify, and deploy dicode freely, but if you offer it as a network service, you must share your modifications under the same license. This prevents cloud providers from strip-mining the code into a proprietary offering while keeping it fully open for self-hosters and contributors.

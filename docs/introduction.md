@@ -58,8 +58,8 @@ Runs on a developer's laptop (with a tray icon) or a headless VPS. SQLite is emb
 **4. Testing is a first-class citizen**
 Every task can have a `task.test.js` with mocked HTTP globals. The CI integration runs `dicode task validate --all && dicode task test --all` on every push. AI generates tests alongside task code.
 
-**5. Open core, always free for self-hosters**
-The full engine is open source (Apache 2.0). Cloud hosting, team collaboration, and enterprise features are paid. Self-hosted users never hit artificial feature limits.
+**5. Open source, always free for self-hosters**
+The full engine is open source (AGPL-3.0). Cloud tiers gate execution volume and user seats, never features. Self-hosted users get everything, forever.
 
 ---
 
