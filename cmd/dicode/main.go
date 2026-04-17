@@ -1,7 +1,7 @@
-// dicode is the dicode CLI.
+// dicode is a single binary that serves as both the CLI and the daemon.
 //
-// It connects to a running dicoded daemon over the control socket and dispatches
-// commands. If the daemon is not running it is started automatically.
+// CLI subcommands connect to the daemon over a control socket. If the daemon
+// is not running it is auto-started via "dicode daemon" in the background.
 //
 // Usage:
 //
@@ -21,6 +21,7 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"net"
 	"os"
@@ -29,6 +30,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dicode/dicode/pkg/daemon"
 	"github.com/dicode/dicode/pkg/ipc"
 )
 
@@ -42,6 +44,17 @@ func main() {
 
 	if os.Args[1] == "version" {
 		fmt.Printf("dicode %s\n", version)
+		return
+	}
+
+	// The daemon subcommand runs the full engine in-process.
+	// It must be handled before ensureDaemon — the daemon IS the daemon.
+	if os.Args[1] == "daemon" {
+		fs := flag.NewFlagSet("daemon", flag.ExitOnError)
+		configPath := fs.String("config", "dicode.yaml", "path to config file")
+		fs.Parse(os.Args[2:])
+		daemon.Version = version
+		daemon.Run(*configPath)
 		return
 	}
 
@@ -277,7 +290,8 @@ func cmdSecrets(c *ipc.ControlClient, args []string) error {
 	return nil
 }
 
-// ensureDaemon starts dicoded in the background if the socket is not reachable.
+// ensureDaemon starts the daemon in the background if the socket is not reachable.
+// It re-execs the current binary with the "daemon" subcommand.
 func ensureDaemon(socketPath string) error {
 	if isDaemonRunning(socketPath) {
 		return nil
@@ -285,18 +299,9 @@ func ensureDaemon(socketPath string) error {
 	// Remove a stale socket file so the new daemon can bind cleanly.
 	_ = os.Remove(socketPath)
 
-	// Locate the dicoded binary next to the dicode binary.
 	self, err := os.Executable()
 	if err != nil {
-		return err
-	}
-	dicoded := filepath.Join(filepath.Dir(self), "dicoded")
-	if _, err := os.Stat(dicoded); err != nil {
-		// Fall back to PATH.
-		dicoded, err = exec.LookPath("dicoded")
-		if err != nil {
-			return fmt.Errorf("dicoded binary not found; start the daemon manually")
-		}
+		return fmt.Errorf("resolve executable path: %w", err)
 	}
 
 	// Log daemon stderr to dataDir/daemon.log so startup failures are diagnosable.
@@ -306,7 +311,7 @@ func ensureDaemon(socketPath string) error {
 		logFile = nil // non-fatal: proceed without log capture
 	}
 
-	cmd := exec.Command(dicoded)
+	cmd := exec.Command(self, "daemon")
 	cmd.Stdin = nil
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
@@ -314,7 +319,7 @@ func ensureDaemon(socketPath string) error {
 		if logFile != nil {
 			logFile.Close()
 		}
-		return fmt.Errorf("start dicoded: %w", err)
+		return fmt.Errorf("start daemon: %w", err)
 	}
 	if logFile != nil {
 		go func() { _ = cmd.Wait(); logFile.Close() }()
@@ -374,6 +379,7 @@ func usage() {
 	fmt.Fprintf(os.Stderr, `Usage: dicode <command> [args...]
 
 Commands:
+  daemon [-config dicode.yaml]    start the daemon (usually auto-started)
   run <task-id> [key=value ...]   trigger a task and wait for the result
   list                            list registered tasks
   logs <run-id>                   show logs for a run
