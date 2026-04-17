@@ -53,8 +53,7 @@ func main() {
 		fs := flag.NewFlagSet("daemon", flag.ExitOnError)
 		configPath := fs.String("config", "dicode.yaml", "path to config file")
 		fs.Parse(os.Args[2:])
-		daemon.Version = version
-		daemon.Run(*configPath)
+		daemon.Run(*configPath, version)
 		return
 	}
 

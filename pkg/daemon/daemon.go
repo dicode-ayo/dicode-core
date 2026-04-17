@@ -40,12 +40,9 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// Version is set by the CLI binary before calling Run.
-var Version = "dev"
-
 // Run starts the daemon process. It blocks until the context is cancelled
 // (via signal) or a fatal error occurs. configPath is the path to dicode.yaml.
-func Run(configPath string) {
+func Run(configPath, version string) {
 	// First-run onboarding: if no config exists, generate a default one.
 	if onboarding.Required(configPath) {
 		fmt.Println("Welcome to dicode! No config found — creating a local-only setup.")
@@ -75,17 +72,17 @@ func Run(configPath string) {
 	}
 	defer logger.Sync()
 
-	logger.Info("dicode daemon starting", zap.String("version", Version))
+	logger.Info("dicode daemon starting", zap.String("version", version))
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	if err := run(ctx, cancel, cfg, configPath, logBroadcaster, logger); err != nil {
+	if err := run(ctx, cancel, cfg, configPath, version, logBroadcaster, logger); err != nil {
 		logger.Fatal("dicode daemon exited with error", zap.Error(err))
 	}
 }
 
-func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, configPath string, logBroadcaster *webui.LogBroadcaster, log *zap.Logger) error {
+func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, configPath, version string, logBroadcaster *webui.LogBroadcaster, log *zap.Logger) error {
 	// 1. Open database.
 	database, err := db.Open(db.Config{
 		Type:   cfg.Database.Type,
@@ -184,7 +181,7 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 			return cm.ChildRSSMB, cm.ChildCPUMs
 		},
 	}
-	ctrlSrv, err := ipc.NewControlServer(socketPath, tokenPath, reg, eng, localSecrets, mp, Version, log, database)
+	ctrlSrv, err := ipc.NewControlServer(socketPath, tokenPath, reg, eng, localSecrets, mp, version, log, database)
 	if err != nil {
 		return fmt.Errorf("build control server: %w", err)
 	}
