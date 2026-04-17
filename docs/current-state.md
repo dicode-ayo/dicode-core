@@ -102,7 +102,7 @@ WebSocket relay client and self-hosting server for receiving webhooks behind NAT
 - `keys.go` — `Identity` struct: P-256 keypair generation, `LoadOrGenerateIdentity(ctx, db)` persists private key in SQLite `kv` table (key: `relay.private_key`). UUID derived as `hex(sha256(uncompressed_pubkey))` — stable across restarts.
 - Tests: `client_test.go` (16 tests), `keys_test.go`, `helpers_test.go`
 
-**Wiring**: `cmd/dicoded/main.go` starts the relay client when `relay.enabled: true` and `relay.server_url` is set. The `webui.Server` receives the relay client via `SetRelayClient()` to expose the hook base URL to the frontend.
+**Wiring**: `pkg/daemon/daemon.go` starts the relay client when `relay.enabled: true` and `relay.server_url` is set. The `webui.Server` receives the relay client via `SetRelayClient()` to expose the hook base URL to the frontend.
 
 **Production relay server**: The production relay server is a separate TypeScript/Node.js service in the `dicode-relay` repository. It implements the same protocol with additional features: OAuth broker (Grant + Express), ECIES token encryption, status dashboard, and support for 14 OAuth providers. The Go `relay.Server` is kept for self-hosting and testing scenarios.
 
