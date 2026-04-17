@@ -23,9 +23,27 @@ builds:
     ldflags:
       - -s -w -X main.version={{.Version}}
 
+  - id: dicoded
+    main: ./cmd/dicoded/
+    binary: dicoded
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
 archives:
   - id: dicode
-    builds: [dicode]
+    builds: [dicode, dicoded]
     name_template: "dicode-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
     format_overrides:
       - goos: windows

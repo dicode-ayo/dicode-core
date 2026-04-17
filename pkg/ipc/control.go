@@ -35,7 +35,7 @@ type ControlServer struct {
 	engine          EngineRunner
 	secrets         secrets.Manager // nil if no local provider configured
 	metricsProvider MetricsProvider
-	database        db.DB           // for broker pubkey trust pinning; nil in tests
+	database        db.DB // for broker pubkey trust pinning; nil in tests
 	log             *zap.Logger
 
 	startedAt time.Time

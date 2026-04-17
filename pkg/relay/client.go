@@ -231,9 +231,9 @@ func (c *Client) handshake(ctx context.Context, conn *websocket.Conn, sendMu *sy
 				// Expected path on reconnect — nothing to log.
 			case BrokerPubkeyPinMismatch:
 				return fmt.Errorf(
-					"relay: BROKER PUBKEY CHANGED — the relay server presented a different signing key "+
-						"than the one pinned on first connect. If the relay operator rotated their key, "+
-						"run `dicode relay trust-broker --yes` to accept the new key. "+
+					"relay: BROKER PUBKEY CHANGED — the relay server presented a different signing key " +
+						"than the one pinned on first connect. If the relay operator rotated their key, " +
+						"run `dicode relay trust-broker --yes` to accept the new key. " +
 						"Connection rejected to prevent token substitution attacks")
 			}
 			c.brokerMu.Lock()

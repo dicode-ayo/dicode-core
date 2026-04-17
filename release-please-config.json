@@ -2,8 +2,7 @@
   "release-type": "go",
   "packages": {
     ".": {
-      "release-type": "go",
-      "package-name": "dicode"
+      "release-type": "go"
     }
   },
   "bump-minor-pre-major": true,

@@ -30,7 +30,7 @@ type memSecrets struct {
 	data map[string]string
 }
 
-func newMemSecrets() *memSecrets                    { return &memSecrets{data: map[string]string{}} }
+func newMemSecrets() *memSecrets { return &memSecrets{data: map[string]string{}} }
 func (m *memSecrets) List(_ context.Context) ([]string, error) {
 	out := make([]string, 0, len(m.data))
 	for k := range m.data {

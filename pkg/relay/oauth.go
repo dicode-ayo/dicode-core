@@ -171,12 +171,12 @@ const OAuthDeliveryType = "oauth_token_delivery"
 // /hooks/oauth-complete on the daemon, wrapped in the relay request envelope.
 // It mirrors OAuthTokenDeliveryPayload in dicode-relay src/relay/protocol.ts.
 type OAuthTokenDeliveryPayload struct {
-	Type            string `json:"type"`                        // must equal OAuthDeliveryType
-	SessionID       string `json:"session_id"`                  // matches the original AuthRequest
-	EphemeralPubkey string `json:"ephemeral_pubkey"`            // base64 std, 65-byte uncompressed P-256
-	Ciphertext      string `json:"ciphertext"`                  // base64 std, AES-256-GCM ct || 16-byte tag
-	Nonce           string `json:"nonce"`                       // base64 std, 12 bytes
-	BrokerSig       string `json:"broker_sig,omitempty"`        // base64 ECDSA sig over sha256(type||session_id||eph||ct||nonce)
+	Type            string `json:"type"`                 // must equal OAuthDeliveryType
+	SessionID       string `json:"session_id"`           // matches the original AuthRequest
+	EphemeralPubkey string `json:"ephemeral_pubkey"`     // base64 std, 65-byte uncompressed P-256
+	Ciphertext      string `json:"ciphertext"`           // base64 std, AES-256-GCM ct || 16-byte tag
+	Nonce           string `json:"nonce"`                // base64 std, 12 bytes
+	BrokerSig       string `json:"broker_sig,omitempty"` // base64 ECDSA sig over sha256(type||session_id||eph||ct||nonce)
 }
 
 // DecryptOAuthToken decrypts an OAuthTokenDeliveryPayload using the daemon's
