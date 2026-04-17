@@ -20,4 +20,16 @@ RUN go install golang.org/x/tools/gopls@latest \
     && go install golang.org/x/tools/cmd/goimports@latest \
     && chown -R vscode:vscode /go
 
+# Install Oh My Zsh with git plugin for the vscode user
+RUN su vscode -c 'sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended' \
+    && sed -i 's/^plugins=(git)/plugins=(git gitfast git-extras)/' /home/vscode/.zshrc
+
+# Install Playwright's Chrome and its OS dependencies (for MCP browser tools)
+RUN npx playwright install --with-deps chrome
+
+# Install cloudflared for Cloudflare Tunnel access
+RUN curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb -o /tmp/cloudflared.deb \
+    && dpkg -i /tmp/cloudflared.deb \
+    && rm /tmp/cloudflared.deb
+
 WORKDIR /workspace

@@ -29,7 +29,12 @@
       "Bash(curl -s http://localhost:8080/hooks/system-dashboard)",
       "Bash(curl:*)",
       "Bash(npm list:*)",
-      "Bash(timeout 8 node:*)"
+      "Bash(timeout 8 node:*)",
+      "Bash(gh api *)",
+      "Bash(snap list *)",
+      "Bash(flatpak list *)",
+      "Bash(systemctl --user status xdg-desktop-portal xdg-desktop-portal-gnome)",
+      "Bash(systemctl --user status wireplumber)"
     ]
   },
   "enabledMcpjsonServers": [
