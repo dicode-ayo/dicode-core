@@ -16,6 +16,7 @@
 //	secrets list                    list secret keys
 //	secrets set <key> <value>       store a secret
 //	secrets delete <key>            delete a secret
+//	relay login [--token=...] [--label=...]  claim this daemon to a relay user
 //	version                         print version and exit
 package main
 
@@ -94,43 +95,11 @@ func dispatch(c *ipc.ControlClient, args []string) error {
 		return cmdSecrets(c, args[1:])
 	case "relay":
 		if len(args) < 2 {
-			return fmt.Errorf("usage: dicode relay <trust-broker> --yes")
+			return fmt.Errorf("usage: dicode relay <login|trust-broker> [flags]")
 		}
 		return cmdRelay(c, args[1:])
 	default:
 		return fmt.Errorf("unknown command %q — run 'dicode' for usage", args[0])
-	}
-}
-
-func cmdRelay(c *ipc.ControlClient, args []string) error {
-	switch args[0] {
-	case "trust-broker":
-		force := false
-		for _, a := range args[1:] {
-			switch a {
-			case "--yes", "-y":
-				force = true
-			default:
-				return fmt.Errorf("unknown flag %q — usage: dicode relay trust-broker --yes", a)
-			}
-		}
-		if !force {
-			fmt.Fprintln(os.Stderr, "This will clear the pinned broker signing key.")
-			fmt.Fprintln(os.Stderr, "The next relay reconnect will trust-on-first-use the broker's current key.")
-			fmt.Fprintln(os.Stderr, "Re-run with --yes to confirm.")
-			return fmt.Errorf("aborted")
-		}
-		resp, err := c.Send(ipc.Request{Method: "cli.relay.trust_broker"})
-		if err != nil {
-			return err
-		}
-		if resp.Error != "" {
-			return fmt.Errorf("%s", resp.Error)
-		}
-		fmt.Println("Broker pubkey pin cleared. Restart the daemon to accept the new broker key.")
-		return nil
-	default:
-		return fmt.Errorf("unknown relay subcommand %q", args[0])
 	}
 }
 
@@ -225,9 +194,33 @@ func cmdStatus(c *ipc.ControlClient, taskID string) error {
 	if resp.Error != "" {
 		return fmt.Errorf("%s", resp.Error)
 	}
+	// When querying the daemon (no taskID), render a compact human summary
+	// including the relay linkage line. Otherwise keep the raw run payload.
+	if taskID == "" {
+		var ds ipc.DaemonStatus
+		if err := remarshal(resp.Result, &ds); err == nil && ds.Version != "" {
+			fmt.Printf("dicode %s — uptime %ds, %d tasks\n", ds.Version, ds.UptimeSec, ds.TaskCount)
+			fmt.Println(formatRelayStatusLine(ds.Relay))
+			return nil
+		}
+	}
 	out, _ := json.MarshalIndent(resp.Result, "", "  ")
 	fmt.Println(string(out))
 	return nil
+}
+
+// formatRelayStatusLine renders the relay linkage state for `dicode status`.
+func formatRelayStatusLine(rs ipc.RelayStatus) string {
+	if !rs.Enabled {
+		return "Relay: disabled"
+	}
+	if !rs.Linked {
+		return "Relay: not linked (run `dicode relay login`)"
+	}
+	if rs.GithubLogin != "" {
+		return fmt.Sprintf("Relay: linked to @%s", rs.GithubLogin)
+	}
+	return "Relay: linked"
 }
 
 func cmdSecrets(c *ipc.ControlClient, args []string) error {
@@ -381,6 +374,8 @@ Commands:
   secrets list                    list secret keys
   secrets set <key> <value>       store a secret
   secrets delete <key>            delete a secret
+  relay login [flags]             claim this daemon to a relay user account
+                                  flags: --token, --label, --base-url, --no-browser
   version                         print version
 `)
 }

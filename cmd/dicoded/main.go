@@ -226,6 +226,7 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 					zap.String("expected_scheme", "wss:// or ws://"))
 			}
 			g.Go(func() error { pending.StartSweep(ctx); return nil })
+			ctrlSrv.SetRelayHooks(buildRelayHooks(cfg.Relay.ServerURL, id, database))
 			g.Go(func() error { return rc.Run(ctx) })
 		}
 	}
