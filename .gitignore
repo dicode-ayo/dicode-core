@@ -1,6 +1,5 @@
 dicode
-dicoded
 node_modules/
-.playwright-mcp/dicoded
+.playwright-mcp/
 .worktrees/
 !.claude/memory/

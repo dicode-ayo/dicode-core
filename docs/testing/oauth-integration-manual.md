@@ -1,7 +1,7 @@
 # OAuth Broker Integration Test — Manual Runbook
 
 End-to-end test of the relay broker OAuth flow between a local
-`dicode-relay` (TypeScript) and `dicoded` (Go). Exercises the full
+`dicode-relay` (TypeScript) and `dicode daemon` (Go). Exercises the full
 chain: WSS handshake → `build_auth_url` → browser consent → Grant
 callback → ECIES encrypt + broker sign → WSS delivery → daemon
 decrypt + verify + `store_token` → secrets written.
@@ -74,7 +74,7 @@ grep -A2 'relay:' dicode.yaml
 #   server_url: ws://localhost:5553
 
 # Start the daemon
-./dicoded
+./dicode daemon
 ```
 
 **Expected output (look for these lines):**

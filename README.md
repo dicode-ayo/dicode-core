@@ -24,7 +24,7 @@ That's it. The task appears in your dashboard within seconds.
 
 Tasks are TypeScript (Deno), Python (uv), Docker containers, or Podman containers. You can write them yourself or have AI generate them. All approaches produce the same artifact: a folder with `task.yaml` + script.
 
-dicode runs as two binaries: `dicoded` (daemon — runs all long-lived components) and `dicode` (CLI — thin dispatcher that auto-starts the daemon and communicates over a Unix socket).
+dicode is a single binary. Run `dicode daemon` to start the engine, or use any CLI subcommand — the daemon is auto-started in the background if it isn't already running.
 
 ---
 
@@ -44,7 +44,7 @@ dicode runs as two binaries: `dicoded` (daemon — runs all long-lived component
                        │  git pull (every 30s or on push webhook)
                        ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  dicoded (daemon)                                               │
+│  dicode daemon                                                  │
 │                                                                 │
 │  ┌─────────────┐   ┌──────────────┐   ┌──────────────────────┐ │
 │  │ Reconciler  │──▶│   Registry   │──▶│   Trigger Engine     │ │
@@ -1249,7 +1249,7 @@ A skill file gives any AI agent the full context needed to develop dicode tasks 
 
 ### Install
 
-The skill is embedded in the `dicoded` binary at `pkg/agent/skill.md`. To use it with an AI agent, copy it into your project:
+The skill is embedded in the `dicode` binary at `pkg/agent/skill.md`. To use it with an AI agent, copy it into your project:
 
 ```bash
 # The skill file is embedded in the binary — extract it from the source
@@ -1425,7 +1425,7 @@ The default mode. Runs on your laptop with a tray icon, OS notifications, and au
 ```bash
 # Install the binary (download from releases page)
 # Start the daemon
-dicoded
+dicode daemon
 
 # Or use the CLI (auto-starts daemon if needed)
 dicode list
@@ -1437,7 +1437,7 @@ For VPS, homelab, or any machine without a desktop session. Set `server.tray: fa
 
 ```bash
 # Run the daemon directly
-dicoded
+dicode daemon
 ```
 
 ### Docker
@@ -1529,14 +1529,14 @@ Self-hosted server deployments that expose port 8080 directly don't need the rel
 
 ## Service Management (planned)
 
-OS service management (`dicode service install/start/stop/status/logs`) is designed but the CLI commands are not yet implemented. For now, run `dicoded` directly or manage it with systemd/launchd manually:
+OS service management (`dicode service install/start/stop/status/logs`) is designed but the CLI commands are not yet implemented. For now, run `dicode daemon` directly or manage it with systemd/launchd manually:
 
 ```bash
 # Run directly
-dicoded
+dicode daemon
 
 # Or with systemd (create a unit file manually)
-sudo systemctl start dicoded
+sudo systemctl start dicode
 ```
 
 ---
@@ -1568,8 +1568,7 @@ Dicode is **open source and free to self-host** — no feature limits on the cor
 ```
 dicode/
 ├── cmd/
-│   ├── dicode/         # CLI binary — thin dispatcher, auto-starts daemon
-│   └── dicoded/        # daemon binary — full component wiring
+│   └── dicode/         # single binary — CLI + daemon mode
 ├── pkg/
 │   ├── config/         # config loading + validation
 │   ├── task/           # task spec (task.yaml) + content hashing

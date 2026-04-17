@@ -22,7 +22,7 @@ relay:
 **2. Start the daemon:**
 
 ```
-dicoded -config dicode.yaml
+dicode daemon --config dicode.yaml
 ```
 
 On first start the daemon generates a P-256 keypair, stores it in the local

@@ -38,7 +38,7 @@ Branch: [`feat/oauth-relay-rotation`](../../../../tree/feat/oauth-relay-rotation
   and a dispatch case for `cli.relay.rotate_identity`.
 - `pkg/ipc/control_test.go` — `TestControl_RelayRotate_NotEnabled` and
   `TestControl_RelayRotate_InvokesRotator`.
-- `cmd/dicoded/main.go` — inside the `if cfg.Relay.Enabled` block,
+- `pkg/daemon/daemon.go` — inside the `if cfg.Relay.Enabled` block,
   wires a closure that calls `relay.RotateIdentity` and
   `PendingSessions.Clear` on demand.
 - `cmd/dicode/main.go` — new `relay rotate-identity` subcommand behind

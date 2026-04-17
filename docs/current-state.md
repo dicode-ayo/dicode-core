@@ -102,7 +102,7 @@ WebSocket relay client and self-hosting server for receiving webhooks behind NAT
 - `keys.go` — `Identity` struct: P-256 keypair generation, `LoadOrGenerateIdentity(ctx, db)` persists private key in SQLite `kv` table (key: `relay.private_key`). UUID derived as `hex(sha256(uncompressed_pubkey))` — stable across restarts.
 - Tests: `client_test.go` (16 tests), `keys_test.go`, `helpers_test.go`
 
-**Wiring**: `cmd/dicoded/main.go` starts the relay client when `relay.enabled: true` and `relay.server_url` is set. The `webui.Server` receives the relay client via `SetRelayClient()` to expose the hook base URL to the frontend.
+**Wiring**: `pkg/daemon/daemon.go` starts the relay client when `relay.enabled: true` and `relay.server_url` is set. The `webui.Server` receives the relay client via `SetRelayClient()` to expose the hook base URL to the frontend.
 
 **Production relay server**: The production relay server is a separate TypeScript/Node.js service in the `dicode-relay` repository. It implements the same protocol with additional features: OAuth broker (Grant + Express), ECIES token encryption, status dashboard, and support for 14 OAuth providers. The Go `relay.Server` is kept for self-hosting and testing scenarios.
 
@@ -245,22 +245,23 @@ Injected before every Python task script via `buildWrapper()`. Updated for unifi
 - Full `_async` variants on all globals: `log.*_async`, `params.get_async/all_async`, `kv.*_async`, `dicode.*_async` (including `get_config_async`), `mcp.*_async`
 - Globals: `log`, `params`, `env`, `kv`, `input`, `output`, **`dicode`**, **`mcp`**
 
-### `cmd/dicoded/main.go` ✅ (daemon binary)
+### `pkg/daemon/` ✅
 
-The full daemon process — extracted from the old monolith. Starts all long-running components:
+The daemon process logic, invoked via `dicode daemon`. Exported entry point: `daemon.Run(configPath)`.
 
 - Full component wiring: db → secrets → registry → Deno runtime → Docker/Podman/Python runtimes → trigger engine → reconciler → HTTP gateway → webui → control socket → tray
 - `NewControlServer(socketPath, tokenPath, ...)` — creates the CLI control socket and writes `daemon.token`
 - `buildSecretsChain(cfg, dataDir, database, log)` returns `(secrets.Chain, secrets.Manager)` — the `Manager` is passed to both `webui.New()` and `NewControlServer()`
 - Startup sequence: `CleanupOrphanedContainers` → `CleanupStaleRuns` → build runtimes → build sources → build webui → build control socket → run errgroup (reconciler + engine + webui + control socket + tray)
-- `make run` builds and starts this binary
+- `make run` builds and runs `dicode daemon`
 
-### `cmd/dicode/main.go` ✅ (CLI binary)
+### `cmd/dicode/main.go` ✅ (single binary)
 
-Thin command dispatcher — no runtime or database initialisation:
+CLI dispatcher + daemon mode in one binary:
 
-- Subcommands: `run <task-id> [key=value ...]`, `list`, `logs <run-id>`, `status [task-id]`, `secrets {list,set,delete}`, `version`
-- **Auto-start**: if `~/.dicode/daemon.sock` is not connectable, locates `dicoded` (next to `dicode` binary, then `$PATH`), starts it in the background, redirects stderr to `~/.dicode/daemon.log`, polls for the socket (8 second timeout)
+- Subcommands: `daemon [-config dicode.yaml]`, `run <task-id> [key=value ...]`, `list`, `logs <run-id>`, `status [task-id]`, `secrets {list,set,delete}`, `version`
+- `daemon` subcommand calls `pkg/daemon.Run()` — starts the full engine in-process
+- **Auto-start**: if `~/.dicode/daemon.sock` is not connectable, re-execs itself (`dicode daemon`) in the background, redirects stderr to `~/.dicode/daemon.log`, polls for the socket (8 second timeout)
 - Reads `~/.dicode/daemon.token` and calls `ipc.Dial()` to connect
 - `DICODE_DATA_DIR` env var overrides the default data directory
 
@@ -334,8 +335,8 @@ Thin command dispatcher — no runtime or database initialisation:
 ## Build
 
 ```bash
-make build   # compiles both ./dicode (CLI) and ./dicoded (daemon)
-make run     # builds and starts dicoded — web UI on :8080, control socket at ~/.dicode/daemon.sock
+make build   # compiles ./dicode binary
+make run     # builds and runs dicode daemon — web UI on :8080, control socket at ~/.dicode/daemon.sock
 make test    # go test ./...
 make lint    # go fmt + go vet
 make clean   # removes both binaries

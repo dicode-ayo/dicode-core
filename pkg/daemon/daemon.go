@@ -1,16 +1,10 @@
-// dicoded is the dicode daemon process.
-//
-// It runs the task engine, reconciler, runtimes, HTTP gateway, web UI, and
-// the control socket that the dicode CLI connects to.
-//
-// Usage:
-//
-//	dicoded [-config dicode.yaml]
-package main
+// Package daemon implements the dicode daemon process. It runs the task
+// engine, reconciler, runtimes, HTTP gateway, web UI, and the control
+// socket that the dicode CLI connects to.
+package daemon
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"os"
 	"os/signal"
@@ -46,13 +40,9 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-var version = "dev"
-
-func main() {
-	var configPath string
-	flag.StringVar(&configPath, "config", "dicode.yaml", "path to config file")
-	flag.Parse()
-
+// Run starts the daemon process. It blocks until the context is cancelled
+// (via signal) or a fatal error occurs. configPath is the path to dicode.yaml.
+func Run(configPath, version string) {
 	// First-run onboarding: if no config exists, generate a default one.
 	if onboarding.Required(configPath) {
 		fmt.Println("Welcome to dicode! No config found — creating a local-only setup.")
@@ -82,17 +72,17 @@ func main() {
 	}
 	defer logger.Sync()
 
-	logger.Info("dicoded starting", zap.String("version", version))
+	logger.Info("dicode daemon starting", zap.String("version", version))
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	if err := run(ctx, cancel, cfg, configPath, logBroadcaster, logger); err != nil {
-		logger.Fatal("dicoded exited with error", zap.Error(err))
+	if err := run(ctx, cancel, cfg, configPath, version, logBroadcaster, logger); err != nil {
+		logger.Fatal("dicode daemon exited with error", zap.Error(err))
 	}
 }
 
-func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, configPath string, logBroadcaster *webui.LogBroadcaster, log *zap.Logger) error {
+func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, configPath, version string, logBroadcaster *webui.LogBroadcaster, log *zap.Logger) error {
 	// 1. Open database.
 	database, err := db.Open(db.Config{
 		Type:   cfg.Database.Type,

@@ -205,7 +205,7 @@ execution:
 …or via env var (overrides the config value):
 
 ```bash
-DICODE_MAX_CONCURRENT_TASKS=8 dicoded
+DICODE_MAX_CONCURRENT_TASKS=8 dicode daemon
 ```
 
 - `0` (default) — unlimited, backwards-compatible behaviour.

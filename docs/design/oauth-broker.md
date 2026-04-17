@@ -36,7 +36,7 @@ PR #79 introduced a Go relay server (`pkg/relay/server.go`). However:
 - One repo, one `Dockerfile`, one deployment.
 - TypeScript with strict mode gives type safety across the protocol boundary.
 
-**What stays Go:** the relay **client** inside `cmd/dicoded`. It speaks a
+**What stays Go:** the relay **client** inside `pkg/daemon`. It speaks a
 JSON-over-WebSocket protocol and does not care what language the server is
 written in. The protocol spec and client code from PR #79 are kept unchanged.
 Only `server.go` is replaced by `src/relay/server.ts`.

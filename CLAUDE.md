@@ -21,7 +21,7 @@ Run a single test package: `go test ./pkg/registry/... -timeout 60s -run TestNam
 
 **dicode** is a single Go binary: a GitOps-style task orchestrator that watches a git repo of JavaScript/Docker task scripts and executes them on cron schedules, webhooks, or manual triggers.
 
-**Startup sequence** (`cmd/dicode/main.go`):
+**Startup sequence** (`pkg/daemon/daemon.go`, invoked via `dicode daemon`):
 1. Load `dicode.yaml` config (or run first-launch onboarding)
 2. Init SQLite database (`pkg/db`)
 3. Set up secrets chain (`pkg/secrets`) — encrypted SQLite → env vars
