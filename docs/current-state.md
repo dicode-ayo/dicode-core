@@ -1,6 +1,6 @@
 # Current State
 
-> Last updated: 2026-04-09 — Relay client restored and hardened (`pkg/relay`): ECDSA P-256 identity, transparent HTTP proxy to local daemon, X-Relay-Base header injection, path restriction (`/hooks/*` + `/dicode.js`), hop-by-hop header filtering; `dicode-relay` (Node.js) is the production relay server; Go `relay.Server` kept for self-hosting and integration tests; config variables (`${HOME}`, `${DATADIR}`, `${CONFIGDIR}`) in `dicode.yaml`
+> Last updated: 2026-04-17 — OAuth broker daemon plumbing (#100), ai-agent builtin chat task (#98), design system theme.css (#92), temp file cleanup task (#91), concurrency semaphore (#74), WaitRun channel notifications (#73), concurrency metrics endpoint (#75), transparent relay proxy (#80)
 
 This document describes exactly what exists in the codebase today — what is fully implemented, what is stubbed with interfaces and TODOs, and what exists only as documentation.
 
@@ -106,6 +106,12 @@ WebSocket relay client and self-hosting server for receiving webhooks behind NAT
 
 **Production relay server**: The production relay server is a separate TypeScript/Node.js service in the `dicode-relay` repository. It implements the same protocol with additional features: OAuth broker (Grant + Express), ECIES token encryption, status dashboard, and support for 14 OAuth providers. The Go `relay.Server` is kept for self-hosting and testing scenarios.
 
+**OAuth broker plumbing** (PR #100): daemon-side built-in tasks (`buildin/auth-start`, `buildin/auth-complete`) handle the OAuth dance via the relay broker. `auth-start` generates a signed `/auth/<provider>` URL; `auth-complete` receives ECIES-encrypted tokens at `/hooks/oauth-complete`, decrypts in Go memory, and stores them in the secrets chain. AAD (Azure AD) provider binding added. See `docs/oauth.md`.
+
+### `pkg/metrics/` ✅
+
+- `metrics.go` — `Collector` struct: exposes `GET /api/metrics` endpoint with active task count, memory usage (RSS), CPU percentage, goroutine count. Updated on each run start/finish via `Inc()`/`Dec()` on the active counter.
+
 ### `pkg/service/` 🟡
 
 - `service.go` — `Manager` interface (Install, Uninstall, Start, Stop, Restart, Status, Logs)
@@ -146,10 +152,10 @@ WebSocket relay client and self-hosting server for receiving webhooks behind NAT
 ### `pkg/trigger/` ✅
 
 - `engine.go` — cron (robfig/cron), webhook, manual `FireManual()`, chain `FireChain()`, daemon lifecycle
-  - `fireAsync(ctx, spec, opts, source)` — pre-generates runID, starts goroutine, returns immediately
+  - `fireAsync(ctx, spec, opts, source)` — pre-generates runID, starts goroutine, returns immediately; **max concurrent tasks** enforced via semaphore (configurable, default 10)
   - `dispatch(ctx, spec, opts) string` — routes to JS or Docker runtime, returns final status string
   - `KillRun(runID)` — cancels run via `runCancels sync.Map`
-  - **`WaitRun(ctx, runID) (RunResult, error)`** — polls `registry.GetRun` every 500ms until terminal status; used by `EngineRunner` for `dicode.run_task` blocking calls from within task scripts
+  - **`WaitRun(ctx, runID) (RunResult, error)`** — channel-based notification (replaced polling loop); used by `EngineRunner` for `dicode.run_task` blocking calls from within task scripts
   - **`SetDefaultsOnFailureChain(id string)`** — sets the config-level global failure handler; called from `cmd/dicode/main.go` when `defaults.on_failure_chain` is set
   - **`on_failure_chain` logic** — after each run, if the run failed, the spec's `OnFailureChain` (or the global default) is invoked with `input: { taskID, runID, status, output }`; per-task `on_failure_chain: ""` disables the global default
   - Daemon: `startDaemon`, `onDaemonRunFinished` with restart policy (always/on-failure/never)
@@ -276,6 +282,19 @@ Thin command dispatcher — no runtime or database initialisation:
 | **`failure-monitor/`** | **on_failure_chain** | **deno** — AI-powered failure diagnosis; receives `{ taskID, runID, status }` via `input` |
 | **`task-creator/`** | **webhook (auth)** | **deno** — AI generates `task.yaml` + `task.ts` from a plain-language description |
 
+**Built-in tasks** (`tasks/buildin/`):
+
+| Task | Description |
+| --- | --- |
+| `webui` | Dashboard SPA (served at `/hooks/webui`) |
+| `tray` | System tray icon (daemon) |
+| `alert` | Browser notification relay |
+| `notify` | Push notification dispatcher |
+| `ai-agent` | Chat interface with tool-calling — discovers all registered tasks as tools, supports `task.yaml` template variables for provider config, conversation history with KV-backed compaction |
+| `auth-start` | OAuth broker: generates signed relay URL for 14+ providers |
+| `auth-complete` | OAuth broker: receives ECIES-encrypted tokens, decrypts, stores in secrets |
+| `tmp-cleanup` | Periodic cleanup of orphaned temp files in `/tmp/dicode-*` |
+
 `examples/webui/` is the full dicode dashboard SPA. It ships as a self-contained webhook task: `index.html` + Lit/LitElement components under `app/`. The engine injects `<base href="/hooks/webui/">` and the dicode SDK on every GET. Auth is enforced client-side by `dc-auth-overlay` (intercepts 401s from the REST API). Any unauthenticated REST call shows the login modal without a page redirect.
 
 ---
@@ -293,8 +312,7 @@ Thin command dispatcher — no runtime or database initialisation:
 | `pkg/runtime/js/globals/server.go` | `server` global (daemon tasks serving HTTP) |
 | MCP tools: `validate_task`, `test_task`, `dry_run_task`, `commit_task` | Advanced agent workflow tools |
 | Multi-user RBAC | `users` table, argon2id passwords, role-based access (north star) |
-| OAuth token delivery handler in `pkg/relay/client.go` | ECIES decryption of tokens forwarded by dicode-relay broker (design in `docs/design/oauth-broker.md`) |
-| `tasks/auth/_oauth-app/task.ts` broker mode | Open browser to dicode-relay OAuth broker when relay is connected (`config.relay.broker_url`) |
+| OAuth token delivery: ECIES decryption in `pkg/relay/client.go` | Client-side ECIES decryption of broker-forwarded tokens (daemon plumbing in PR #100, ECIES decrypt handler TBD) |
 
 ---
 
@@ -304,7 +322,7 @@ Thin command dispatcher — no runtime or database initialisation:
 |---|---|
 | `go.mod` | ✅ All dependencies declared and resolved |
 | `dicode.yaml` | ✅ Example config with all sections and comments |
-| `BUSINESSPLAN.md` | ✅ Full business model documentation |
+| `LICENSE` | ✅ Apache-2.0 license |
 | `README.md` | ✅ Comprehensive user documentation |
 | `docs/` | ✅ This documentation tree |
 | `docs/security-plan.md` | ✅ Security design document (phases 1–4 implemented + hardened) |
@@ -327,6 +345,8 @@ make clean   # removes both binaries
 
 ## Test coverage
 
-94+ tests across: db, secrets, source/local, registry, runtime/js, trigger (including HMAC), taskset, ipc (including gateway + control socket), webui (including auth), and relay (client, keys) packages.
+100+ tests across: db, secrets, source/local, registry, runtime/deno, trigger (including HMAC), taskset, ipc (including gateway + control socket), webui (including auth), relay (client, keys), config, metrics, and task packages.
 
-All packages compile with `go test -race ./...` as of 2026-04-09.
+All packages compile with `go test -race ./...` as of 2026-04-17.
+
+E2E test suites (Playwright) cover core UI flows, file changes, webhooks, config, and auth (PRs #18–#20).

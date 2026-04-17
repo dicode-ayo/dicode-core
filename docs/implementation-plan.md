@@ -1,6 +1,6 @@
 # Implementation Plan
 
-> Last updated: 2026-04-09
+> Last updated: 2026-04-17
 
 This document is the ordered build roadmap. Each milestone produces something runnable. Work top-to-bottom; later milestones depend on earlier ones.
 
@@ -20,7 +20,15 @@ This document is the ordered build roadmap. Each milestone produces something ru
 
 **Webhook Relay ✅ Complete (client-side).** `pkg/relay` implements a WebSocket relay client with ECDSA P-256 cryptographic identity (PR #79). The client connects to a relay server, authenticates via challenge-response, and transparently proxies HTTP requests to the local daemon. Security hardened: path whitelist (`/hooks/*` + `/dicode.js`), `X-Relay-Base` header injection for relay-aware SDK URLs, hop-by-hop header filtering, 5 MB body limit. Go `relay.Server` available for self-hosting/tests. Production relay server is a separate Node.js service (`dicode-relay` repo) with OAuth broker support. Config variables (`${HOME}`, `${DATADIR}`, `${CONFIGDIR}`) added to `dicode.yaml`.
 
-**OAuth Broker 🔧 In progress.** The production relay server (`dicode-relay`) implements the full OAuth broker: Grant middleware for 14 providers, ECIES token encryption, PKCE binding, session management. What remains: Go client-side ECIES decryption handler in `pkg/relay/client.go`, `config.relay.broker_url` field, and broker mode in `tasks/auth/_oauth-app/task.ts`. Design in `docs/design/oauth-broker.md`.
+**OAuth Broker 🔧 In progress.** The production relay server (`dicode-relay`) implements the full OAuth broker: Grant middleware for 14 providers, ECIES token encryption, PKCE binding, session management. Daemon-side plumbing landed in PR #100: `buildin/auth-start` and `buildin/auth-complete` tasks, AAD provider binding. What remains: Go client-side ECIES decryption handler in `pkg/relay/client.go`. Design in `docs/design/oauth-broker.md`.
+
+**Performance & Scalability enhancements (partial).** Max concurrent tasks semaphore in `fireAsync()` (#74), `WaitRun()` replaced polling with channel notification (#73), concurrency metrics endpoint (#75). Deno process pool (#77) and batch log writes (#76) are open PRs.
+
+**Built-in AI Agent ✅ Complete.** `tasks/buildin/ai-agent/` — chat task with tool-calling loop; discovers registered tasks as tools, `task.yaml` template variables for provider config, KV-backed conversation history with compaction (#98).
+
+**Design System ✅ Complete.** `theme.css` design tokens adopted across the WebUI SPA (#92).
+
+**Temp File Cleanup ✅ Complete.** Built-in task for periodic cleanup of orphaned `/tmp/dicode-*` files (#91).
 
 ---
 
@@ -30,7 +38,7 @@ This document is the ordered build roadmap. Each milestone produces something ru
 
 ```bash
 mise use go@1.23
-cd /home/dr14/dicode
+cd /path/to/dicode
 go mod tidy
 go build ./...   # should compile with zero errors (all stubs are valid Go)
 ```
@@ -447,9 +455,11 @@ Startup sequence:
 
 ---
 
-## Milestone 9 — Testing harness 🔲
+## Milestone 9 — Testing harness 🔧
 
 **Goal**: `dicode task test` works.
+
+**E2E tests (Playwright)**: implemented in PRs #18–#20. Cover core UI flows, file changes, webhooks, HMAC, config, and auth. Infrastructure in `tests/e2e/` with fixtures and helpers. Issue #99 tracks wiring the Deno test harness for built-in task tests.
 
 ### `pkg/testing/harness.go`
 
@@ -469,24 +479,19 @@ func RunTests(spec *task.Spec) (*TestResult, error)
 
 ---
 
-## Milestone 10 — Secrets sqlite backend 🔧
+## Milestone 10 — Secrets sqlite backend ✅
 
 **Goal**: `dicode secrets` CLI commands work with persistent encrypted storage.
 
-This unblocks `LocalProvider.Set/Get/Delete/List` (already written, just missing the sqlite backing).
+**Implemented**: sqlite backend and LocalProvider (M1), Web UI secrets manager (M6 post-MVP), and CLI subcommands via control socket (`cli.secrets.{list,set,delete}` in `pkg/ipc/control.go`).
 
-- Implement `localDB` interface in `pkg/secrets/local.go` using `pkg/db/sqlite.go`
-- Add `secrets` subcommand to `main.go`:
-  ```bash
-  dicode secrets set SLACK_TOKEN xoxb-...
-  dicode secrets get SLACK_TOKEN
-  dicode secrets list
-  dicode secrets delete SLACK_TOKEN
-  ```
+```bash
+dicode secrets set SLACK_TOKEN xoxb-...
+dicode secrets list
+dicode secrets delete SLACK_TOKEN
+```
 
-**Deliverable**: secrets stored encrypted in sqlite, resolved at task runtime.
-
-**Partial**: sqlite backend and LocalProvider are fully implemented (M1). Web UI secrets manager is fully implemented (M6 post-MVP). Missing: `secrets` subcommand wired into `main.go` CLI.
+**Deliverable**: secrets stored encrypted in sqlite, resolved at task runtime. ✅
 
 ---
 
@@ -616,23 +621,25 @@ See [Security Developer Reference](./concepts/security.md) for full implementati
 
 **Goal**: AI agents can develop tasks via MCP tools.
 
-### `pkg/mcp/server.go` — implement all tools
+### `pkg/mcp/server.go`
 
-Wire existing components into MCP handlers:
-- `list_tasks` → `registry.All()`
-- `get_task` → read task files from disk
-- `validate_task` → `task.LoadDir()` + `js.Compile()`
+**Implemented tools** (5 of 12):
+- `list_tasks` → `registry.All()` ✅
+- `get_task` → read task files from disk ✅
+- `run_task` → `engine.FireManual()` ✅
+- `list_sources` → source manager ✅
+- `switch_dev_mode` → toggle dev mode per source ✅
+
+**Remaining tools** (planned):
+- `validate_task` → `task.LoadDir()` + compile check
 - `test_task` → `testing.RunTests()`
 - `dry_run_task` → `runtime.Run()` with HTTP interception
-- `run_task` → `engine.FireManual()`
-- `get_run_log` → `registry.GetRun()` + logs
 - `commit_task` → `git.CommitAndPush()`
 - `write_task_file` → write to local source dir
 - `list_secrets` → `secrets.List()` (names only)
-- `get_js_api` → return JS globals reference markdown
-- `get_example_tasks` → return embedded example tasks
+- `get_run_log` → `registry.GetRun()` + logs
 
-**Deliverable**: Claude Code (or any MCP agent) can develop dicode tasks end-to-end.
+**Deliverable**: Claude Code (or any MCP agent) can develop dicode tasks end-to-end. Core workflow (list → read → run) works today.
 
 ---
 
@@ -808,13 +815,13 @@ On first run (no config):
 | 6 | Browser UI | ✅ Done |
 | 7 | **Full local-only mode** — end-to-end working binary | ✅ Done |
 | 8 | Git-backed tasks | ✅ Done |
-| 9 | `dicode task test` | 🔲 Not started |
-| 10 | `dicode secrets` CLI | 🔧 Backend + Web UI done, CLI subcommand missing |
+| 9 | `dicode task test` | 🔧 E2E Playwright tests implemented; unit test harness not started |
+| 10 | `dicode secrets` CLI | ✅ Done (via control socket: `cli.secrets.{list,set,delete}`) |
 | 11 | Push notifications | 🔧 ntfy done, gotify/desktop missing |
 | 12 | System tray | ✅ Done |
-| 13 | AI agent development via MCP | 🔧 Stub only |
+| 13 | AI agent development via MCP | 🔧 Core tools done (`list_tasks`, `get_task`, `run_task`, `list_sources`, `switch_dev_mode`); advanced tools planned |
 | 14 | AI task generation in WebUI | ✅ Done (AI chat in editor) |
-| 15 | Public webhook URLs on laptops | 🔧 Stub only |
+| 15 | Public webhook URLs on laptops | ✅ Client done (ECDSA identity, transparent proxy); server in separate repo |
 | 16 | Run on startup | 🔧 Interface only |
 | 17 | Community task install | 🔲 Not started |
 | 18 | Daemon task lifecycle + Docker executor | 🔧 Daemon ✅, Docker ✅, `server` global 🔲 |

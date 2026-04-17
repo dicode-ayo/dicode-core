@@ -1,7 +1,6 @@
 dicode
-!.claude/settings.local.json
-!.claude/memory/
-.playwright-mcp/dicoded
 dicoded
-
+node_modules/
+.playwright-mcp/dicoded
 .worktrees/
+!.claude/memory/

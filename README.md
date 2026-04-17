@@ -1130,12 +1130,12 @@ The testing and validation system is designed with four layers. Not all are impl
 
 | Layer | Command | What it catches | Status |
 |---|---|---|---|
+| E2E tests | Playwright | Full UI + API integration regressions | ✅ Implemented |
 | Static validation | `dicode task validate` | Schema errors, syntax, chain cycles | Planned |
 | Unit tests | `dicode task test` | Logic bugs, wrong HTTP calls, bad return values | Planned |
 | Dry run | `dicode task run --dry-run` | Secret resolution, correct endpoints | Planned |
-| CI | auto on push | Regressions before merge | Planned |
 
-> **Note**: The CLI commands above (`task validate`, `task test`, `task run --dry-run`, `ci init`) are not yet implemented. Current CLI supports: `run`, `list`, `logs`, `status`, `secrets`, `version`.
+> **Note**: E2E tests use Playwright and cover core UI flows, file changes, webhooks, config, and auth. The CLI commands above (`task validate`, `task test`, `task run --dry-run`) are not yet implemented. Current CLI supports: `run`, `list`, `logs`, `status`, `secrets`, `version`.
 
 ---
 
@@ -1277,7 +1277,7 @@ CLI commands for `dicode agent skill show/install` are planned but not yet imple
 - Never hardcode secrets — use `env.VARIABLE_NAME`; declare in `task.yaml env:`
 - Keep tasks single-purpose — one task, one responsibility
 - Output size under 1MB — tasks are not a data pipeline
-- Use `http.get/post/...` — `fetch()` is not available
+- Deno tasks use native `fetch()`; Python tasks use any HTTP library declared in inline deps
 
 **Common mistakes the skill prevents:**
 - Forgetting to declare env vars in `task.yaml env:` (they resolve as `undefined`)
@@ -1395,7 +1395,7 @@ Generate keys from the **Security** page. Keys are stored as SHA-256 hashes; the
 
 ### Task isolation
 
-Each task run gets a fresh JS runtime instance. Tasks share no memory. The JS environment is sandboxed — there is no `exec` or direct network binding available. Tasks can only make outbound HTTP calls and read env vars explicitly listed in `task.yaml`.
+Each task run gets a fresh runtime instance (Deno subprocess for TypeScript, uv subprocess for Python, container for Docker/Podman). Tasks share no memory. Tasks can only make outbound network calls and read env vars explicitly listed in `task.yaml`.
 
 **Environment variables**: Tasks can only access env vars they declare in their `task.yaml` `env:` list. Undeclared vars are not visible even if set on the host.
 
@@ -1561,8 +1561,6 @@ Dicode is **open source and free to self-host** — no feature limits on the cor
 
 **Self-hosted users**: bring your own Anthropic API key for unlimited AI generations. Private git repos require a paid plan only on `dicode.cloud` — self-hosted has no such restriction.
 
-See [BUSINESSPLAN.md](./BUSINESSPLAN.md) for full business model documentation.
-
 ---
 
 ## Project Structure
@@ -1625,4 +1623,4 @@ dicode/
 
 ## License
 
-MIT
+Apache-2.0
