@@ -159,8 +159,8 @@ type FSEntry struct {
 // an authorize URL — surfaces as the original task's failure, which the UI
 // can render as a "setup required" call to action.
 type IfMissing struct {
-	Task   string            `yaml:"task"              json:"task"`              // fully-qualified task id, e.g. "auth/openrouter-oauth"
-	Params map[string]string `yaml:"params,omitempty"  json:"params,omitempty"`  // params forwarded to the prereq task (optional)
+	Task   string            `yaml:"task"              json:"task"`             // fully-qualified task id, e.g. "auth/openrouter-oauth"
+	Params map[string]string `yaml:"params,omitempty"  json:"params,omitempty"` // params forwarded to the prereq task (optional)
 }
 
 // EnvEntry declares one environment variable the task is allowed to access.

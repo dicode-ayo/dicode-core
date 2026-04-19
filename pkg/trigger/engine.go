@@ -68,7 +68,7 @@ type Engine struct {
 
 	db db.DB // optional — enables cron-job persistence and missed-run catchup
 
-	secrets     secrets.Chain       // optional — enables if_missing prereq resolution at dispatch time
+	secrets      secrets.Chain      // optional — enables if_missing prereq resolution at dispatch time
 	prereqFlight singleflight.Group // collapses concurrent prereq runs keyed on secret name, so parallel webhook calls with the same missing secret don't each spawn a duplicate prereq (OAuth flow, refresh-token rotation, etc.)
 
 	taskSem     chan struct{} // nil = unlimited; capacity = MaxConcurrentTasks
