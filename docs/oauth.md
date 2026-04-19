@@ -205,6 +205,30 @@ permissions:
 
 The OAuth task checks token validity first. If the token needs refreshing it silently rotates it and the chain runs with a fresh token. If re-authorization is needed, the chain fails with a desktop notification and a logged URL to open.
 
+### 5. Automate first-time setup with `if_missing`
+
+Chain triggers are great for keeping existing tokens fresh, but they assume the token is already there. For *first-run* setup — e.g. a user opens the chat UI for the first time and there's no `OPENROUTER_API_KEY` stored yet — attach an `if_missing:` directive directly to the env entry:
+
+```yaml
+# ai-agent-openrouter preset
+permissions:
+  env:
+    - name: OPENROUTER_API_KEY
+      secret: OPENROUTER_API_KEY
+      if_missing:
+        task: auth/openrouter-oauth
+```
+
+Behavior on dispatch:
+
+1. Engine checks whether `OPENROUTER_API_KEY` resolves from the secrets store.
+2. Present → main task runs immediately.
+3. Missing → engine synchronously fires `auth/openrouter-oauth` in chain mode. If the prereq completes and the secret is now present, the main task runs. If the prereq throws with an authorize URL, that error becomes the main task's failure — the UI surfaces a clickable setup link.
+
+The same task doubles as the setup flow and the silent refresh path; once the secret is stored, `if_missing` is a no-op and subsequent dispatches skip straight to the main task. Chain triggers (#4 above) and `if_missing` compose — chain for ongoing refresh of a known-good token, `if_missing` for the one-time setup that happens before there's anything to refresh.
+
+See [task-format.md § permissions.env](concepts/task-format.md#permissionsenv--environment-variables) for the full form reference.
+
 ---
 
 ## Provider table
@@ -226,6 +250,7 @@ The OAuth task checks token validity first. If the token needs refreshing it sil
 | `auth/notion-oauth` | Notion | Secret only | Permanent | `NOTION_CLIENT_ID`, `NOTION_CLIENT_SECRET` |
 | `auth/stripe-oauth` | Stripe Connect | Secret only | Until revoked | `STRIPE_CLIENT_ID`, `STRIPE_SECRET_KEY` |
 | `auth/looker-oauth` | Looker | PKCE (+ optional secret) | 1 h (no refresh) | `LOOKER_CLIENT_ID`, `LOOKER_INSTANCE` |
+| `auth/openrouter-oauth` | OpenRouter | PKCE, no client registration | Until revoked (API key) | *(none — zero setup)* |
 
 ### Flow types explained
 

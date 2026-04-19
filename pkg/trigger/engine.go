@@ -28,6 +28,7 @@ import (
 	"github.com/dicode/dicode/pkg/notify"
 	"github.com/dicode/dicode/pkg/registry"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
+	"github.com/dicode/dicode/pkg/secrets"
 	"github.com/dicode/dicode/pkg/task"
 	"github.com/google/uuid"
 	"github.com/robfig/cron/v3"
@@ -66,6 +67,8 @@ type Engine struct {
 
 	db db.DB // optional — enables cron-job persistence and missed-run catchup
 
+	secrets secrets.Chain // optional — enables if_missing prereq resolution at dispatch time
+
 	taskSem     chan struct{} // nil = unlimited; capacity = MaxConcurrentTasks
 	taskWaiting atomic.Int64  // goroutines parked waiting for a semaphore slot
 	started     atomic.Bool   // set to true by Start(); guards SetMaxConcurrentTasks
@@ -95,6 +98,14 @@ func New(r *registry.Registry, defaultExec pkgruntime.Executor, log *zap.Logger)
 // detects missed runs on startup (e.g. after a process restart).
 func (e *Engine) SetDB(d db.DB) {
 	e.db = d
+}
+
+// SetSecrets wires the secrets chain into the engine. Required for the
+// `env[].if_missing` prereq mechanism: before dispatching a task, the engine
+// consults the chain to check whether each if_missing-guarded secret is
+// present, and runs the declared prereq task when it isn't.
+func (e *Engine) SetSecrets(s secrets.Chain) {
+	e.secrets = s
 }
 
 // SetMaxConcurrentTasks configures a semaphore that limits how many task
@@ -1324,6 +1335,68 @@ func (e *Engine) fireSync(spec *task.Spec, opts pkgruntime.RunOptions, source st
 	return opts.RunID, result, nil
 }
 
+// resolveIfMissing scans the task's env entries for `if_missing` directives
+// and, for any whose target secret is not present in the secrets chain,
+// synchronously runs the declared prereq task in chain mode. If the prereq
+// succeeds and the secret is now resolvable, dispatch continues normally.
+// If the prereq fails, its error — typically an OAuth flow's "open this URL
+// to authorize" message — bubbles up as the original task's failure so the
+// UI can surface a setup call-to-action.
+//
+// No-ops when: secrets chain is not wired, the entry has no `if_missing`
+// directive, or the secret already resolves. Non-secret-backed entries
+// (From/Value/bare) are ignored — if_missing only applies to `secret:`.
+func (e *Engine) resolveIfMissing(ctx context.Context, spec *task.Spec) error {
+	if e.secrets == nil {
+		return nil
+	}
+	for _, entry := range spec.Permissions.Env {
+		if entry.IfMissing == nil || entry.IfMissing.Task == "" || entry.Secret == "" {
+			continue
+		}
+		if _, err := e.secrets.Resolve(ctx, entry.Secret); err == nil {
+			continue // secret already present
+		} else {
+			var notFound *secrets.NotFoundError
+			if !errors.As(err, &notFound) {
+				return fmt.Errorf("check secret %q for env %q: %w", entry.Secret, entry.Name, err)
+			}
+		}
+
+		prereqID := entry.IfMissing.Task
+		prereqSpec, ok := e.registry.Get(prereqID)
+		if !ok {
+			return fmt.Errorf("if_missing task %q for secret %q is not registered", prereqID, entry.Secret)
+		}
+
+		e.log.Info("if_missing: running prereq",
+			zap.String("task", spec.ID),
+			zap.String("secret", entry.Secret),
+			zap.String("prereq", prereqID),
+		)
+
+		// Chain-mode input: non-nil empty map so the prereq task's
+		// `input !== null` check treats this as a programmatic invocation
+		// (silent refresh path), not an interactive UI click.
+		chainInput := map[string]any{}
+		_, result, err := e.fireSync(prereqSpec, pkgruntime.RunOptions{
+			Input:  chainInput,
+			Params: entry.IfMissing.Params,
+		}, "if_missing")
+		if err != nil {
+			return fmt.Errorf("fire if_missing task %q: %w", prereqID, err)
+		}
+		if result != nil && result.Error != nil {
+			return fmt.Errorf("if_missing task %q failed: %w", prereqID, result.Error)
+		}
+
+		if _, err := e.secrets.Resolve(ctx, entry.Secret); err != nil {
+			return fmt.Errorf("if_missing task %q ran but secret %q is still unset: %w", prereqID, entry.Secret, err)
+		}
+	}
+	return nil
+}
+
 // dispatch routes a run to the appropriate executor and returns the final status and result.
 func (e *Engine) dispatch(ctx context.Context, spec *task.Spec, opts pkgruntime.RunOptions) (string, *pkgruntime.RunResult) {
 	e.mu.Lock()
@@ -1337,6 +1410,15 @@ func (e *Engine) dispatch(ctx context.Context, spec *task.Spec, opts pkgruntime.
 		)
 		_ = e.registry.FinishRun(context.Background(), opts.RunID, registry.StatusFailure)
 		return registry.StatusFailure, &pkgruntime.RunResult{Error: fmt.Errorf("no executor for runtime %s", spec.Runtime)}
+	}
+
+	if err := e.resolveIfMissing(ctx, spec); err != nil {
+		e.log.Warn("if_missing prereq unsatisfied",
+			zap.String("task", spec.ID),
+			zap.Error(err),
+		)
+		_ = e.registry.FinishRun(context.Background(), opts.RunID, registry.StatusFailure)
+		return registry.StatusFailure, &pkgruntime.RunResult{Error: err}
 	}
 
 	result, err := exec.Execute(ctx, spec, opts)

@@ -433,6 +433,13 @@ Four forms, with clear source distinction:
 | `secret:` | secrets store key | Secrets store | Resolve encrypted secret, inject as the given name; **fails if not found** |
 | `value:` | — | Literal | Inject a fixed string (used by taskset override layers) |
 
+Two modifiers apply on top:
+
+| Modifier | Applies to | Effect |
+| --- | --- | --- |
+| `optional: true` | `secret:` | Missing secret injects empty string instead of failing the run |
+| `if_missing: { task: ... }` | `secret:` | Runs a prereq task (typically an OAuth flow) to populate the secret before dispatch |
+
 **`from:` vs `secret:` — the key distinction:**
 - `from:` reads **only** from the host OS environment (`os.Getenv`). Use it to rename a host env var or make the mapping explicit.
 - `secret:` reads **only** from the dicode secrets store (set via `dicode secrets set`). Run fails immediately if the key is not in the store.
@@ -519,6 +526,25 @@ export default async function main({ env }) {
   const level   = await env.get("LOG_LEVEL")     // literal "info"
 }
 ```
+
+#### Example 5 — `if_missing`: run a prereq task when a secret is absent
+
+Useful when a secret is populated by an interactive flow (OAuth, device-code, etc.). If the secret is already in the store, the entry resolves normally and `if_missing` is a no-op. If it's missing, the trigger engine fires the declared prereq task in chain mode *before* the main task dispatches; if the prereq succeeds the secret is re-resolved and the main task runs.
+
+```yaml
+# ai-agent-openrouter — needs OPENROUTER_API_KEY, sourced via an OAuth flow
+permissions:
+  env:
+    - name: OPENROUTER_API_KEY
+      secret: OPENROUTER_API_KEY
+      if_missing:
+        task: auth/openrouter-oauth
+        # params: { ... }       # optional, forwarded to the prereq task
+```
+
+If the prereq itself fails — for example an OAuth task throwing *"Open this URL to authorize: …"* — that error becomes the main task's failure, letting the UI (or the chat-bubble `renderError` helper) surface a clickable setup link. The same task can be both the first-time setup flow and the silent refresh path: well-designed OAuth tasks check expiry first, refresh silently when possible, and only throw the authorize URL when user action is actually required.
+
+Only `secret:`-backed entries honor `if_missing:`. On a `from:`, `value:`, or bare entry the directive is silently ignored — there's no secret to check for presence in the first place.
 
 ### `permissions.fs` — filesystem access (Deno only)
 

@@ -152,6 +152,9 @@ spec:
           base_url: "https://openrouter.ai/api/v1"
           api_key_env: "OPENROUTER_API_KEY"
         env:
-          - { name: OPENROUTER_API_KEY, secret: OPENROUTER_API_KEY }
+          - name: OPENROUTER_API_KEY
+            secret: OPENROUTER_API_KEY
+            if_missing:
+              task: auth/openrouter-oauth
         net:
           - openrouter.ai
