@@ -110,6 +110,71 @@ header h1 {
   overflow-x: auto;
 }
 
+.bubble.error .err-log a {
+  color: #89b4fa;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.bubble.error .err-log a:hover {
+  color: #b4befe;
+}
+
+.bubble.setup {
+  align-self: flex-start;
+  max-width: 90%;
+  background: #1e2030;
+  color: #cdd6f4;
+  border-left: 3px solid #89b4fa;
+  border-bottom-left-radius: 2px;
+  padding: 1rem 1.125rem;
+}
+
+.bubble.setup .setup-title {
+  color: #89b4fa;
+  font-weight: 600;
+  font-size: .9375rem;
+  margin-bottom: .5rem;
+}
+
+.bubble.setup .setup-desc {
+  font-size: .875rem;
+  line-height: 1.5;
+  color: #a6adc8;
+  margin-bottom: .875rem;
+}
+
+.bubble.setup .setup-btn {
+  display: inline-block;
+  padding: .5rem .875rem;
+  background: #89b4fa;
+  color: #1e1e2e;
+  border-radius: 6px;
+  font-weight: 600;
+  font-size: .875rem;
+  text-decoration: none;
+  transition: background 120ms ease;
+}
+
+.bubble.setup .setup-btn:hover {
+  background: #b4befe;
+}
+
+.bubble.setup .setup-status {
+  margin-top: .75rem;
+  font-size: .8125rem;
+  color: #a6adc8;
+  min-height: 1.2em;
+}
+
+.bubble.setup .setup-status.waiting {
+  color: #f9e2af;
+}
+
+.bubble.setup .setup-status.ok {
+  color: #a6e3a1;
+}
+
 #prompt-form {
   display: flex;
   gap: .625rem;

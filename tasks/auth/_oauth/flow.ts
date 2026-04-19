@@ -200,6 +200,12 @@ export function authorizeHtml(opts: {
 }
 
 export function successHtml(name: string, secrets: string[]): string {
+  // The inline script broadcasts completion on the "dicode-secrets" channel
+  // so peer tabs waiting for this auth (chat UI, tool UIs) can react
+  // immediately without polling. Payload is the list of secrets that were
+  // stored — consumers match on secret name to know whether this signal is
+  // relevant to them.
+  const payload = JSON.stringify({ type: "stored", keys: secrets });
   return `
 <div style="font-family:system-ui,sans-serif;padding:2rem;max-width:480px">
   <h2 style="color:#1a7f37">${name} OAuth complete</h2>
@@ -208,5 +214,18 @@ export function successHtml(name: string, secrets: string[]): string {
   <p style="color:#666;font-size:.9em">
     Use in other tasks via <code>env: [{ name: TOKEN, secret: ${secrets[0]} }]</code>
   </p>
-</div>`;
+  <p style="color:#666;font-size:.9em" id="auto-close-hint">
+    You can close this tab.
+  </p>
+</div>
+<script>
+  (function () {
+    try {
+      var ch = new BroadcastChannel("dicode-secrets");
+      ch.postMessage(${payload});
+      ch.close();
+    } catch (_) { /* BroadcastChannel not supported — caller will fall back */ }
+    try { window.opener && window.opener.postMessage(${payload}, "*"); } catch (_) {}
+  })();
+</script>`;
 }

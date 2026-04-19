@@ -1394,12 +1394,12 @@ func (e *Engine) resolveIfMissing(ctx context.Context, spec *task.Spec, parentRu
 			// clickable setup link. Without this, callers only see
 			// "exit status 1" with no actionable context.
 			e.copyPrereqLogs(ctx, prereqRunID, parentRunID, prereqID)
-			return fmt.Errorf("if_missing task %q failed: %w", prereqID, result.Error)
+			return fmt.Errorf("if_missing: secret %q requires setup via task %q: %w", entry.Secret, prereqID, result.Error)
 		}
 
 		if _, err := e.secrets.Resolve(ctx, entry.Secret); err != nil {
 			e.copyPrereqLogs(ctx, prereqRunID, parentRunID, prereqID)
-			return fmt.Errorf("if_missing task %q ran but secret %q is still unset: %w", prereqID, entry.Secret, err)
+			return fmt.Errorf("if_missing: secret %q requires setup via task %q (ran but still unset): %w", entry.Secret, prereqID, err)
 		}
 	}
 	return nil
