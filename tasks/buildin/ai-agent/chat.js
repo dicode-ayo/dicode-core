@@ -151,24 +151,25 @@
     el.className = "bubble error";
     el.textContent = "";
 
-    var title = "Task failed";
-    var logs = null;
+    // Prefer the logs array (has full context, including replayed prereq
+    // lines). Fall back to the error string, then to the raw body for
+    // non-JSON responses (connection errors, malformed replies, etc.).
+    var text = null;
     try {
       var data = JSON.parse(body);
       if (data && typeof data === "object") {
-        if (data.error) title = String(data.error);
-        if (Array.isArray(data.logs) && data.logs.length) logs = data.logs;
+        if (Array.isArray(data.logs) && data.logs.length) {
+          text = data.logs.join("\n");
+        } else if (typeof data.error === "string") {
+          text = data.error;
+        }
       }
-    } catch (_) { /* not JSON — use raw body as log */ }
-
-    var $title = document.createElement("div");
-    $title.className = "err-title";
-    $title.textContent = title;
-    el.appendChild($title);
+    } catch (_) { /* not JSON */ }
+    if (text == null) text = body || "unknown error";
 
     var $log = document.createElement("pre");
     $log.className = "err-log";
-    appendTextWithLinks($log, stripAnsi(logs ? logs.join("\n") : (body || "")));
+    appendTextWithLinks($log, stripAnsi(text));
     el.appendChild($log);
 
     el.scrollIntoView({ block: "end", behavior: "smooth" });
