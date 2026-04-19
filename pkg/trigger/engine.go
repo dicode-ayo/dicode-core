@@ -1346,7 +1346,7 @@ func (e *Engine) fireSync(spec *task.Spec, opts pkgruntime.RunOptions, source st
 // No-ops when: secrets chain is not wired, the entry has no `if_missing`
 // directive, or the secret already resolves. Non-secret-backed entries
 // (From/Value/bare) are ignored — if_missing only applies to `secret:`.
-func (e *Engine) resolveIfMissing(ctx context.Context, spec *task.Spec) error {
+func (e *Engine) resolveIfMissing(ctx context.Context, spec *task.Spec, parentRunID string) error {
 	if e.secrets == nil {
 		return nil
 	}
@@ -1379,22 +1379,47 @@ func (e *Engine) resolveIfMissing(ctx context.Context, spec *task.Spec) error {
 		// `input !== null` check treats this as a programmatic invocation
 		// (silent refresh path), not an interactive UI click.
 		chainInput := map[string]any{}
-		_, result, err := e.fireSync(prereqSpec, pkgruntime.RunOptions{
-			Input:  chainInput,
-			Params: entry.IfMissing.Params,
+		prereqRunID, result, err := e.fireSync(prereqSpec, pkgruntime.RunOptions{
+			ParentRunID: parentRunID,
+			Input:       chainInput,
+			Params:      entry.IfMissing.Params,
 		}, "if_missing")
 		if err != nil {
 			return fmt.Errorf("fire if_missing task %q: %w", prereqID, err)
 		}
 		if result != nil && result.Error != nil {
+			// Replay the prereq's logs into the parent run so the webhook
+			// response surfaces whatever the prereq printed — typically an
+			// "Open this URL to authorize" line the chat UI can render as a
+			// clickable setup link. Without this, callers only see
+			// "exit status 1" with no actionable context.
+			e.copyPrereqLogs(ctx, prereqRunID, parentRunID, prereqID)
 			return fmt.Errorf("if_missing task %q failed: %w", prereqID, result.Error)
 		}
 
 		if _, err := e.secrets.Resolve(ctx, entry.Secret); err != nil {
+			e.copyPrereqLogs(ctx, prereqRunID, parentRunID, prereqID)
 			return fmt.Errorf("if_missing task %q ran but secret %q is still unset: %w", prereqID, entry.Secret, err)
 		}
 	}
 	return nil
+}
+
+// copyPrereqLogs fetches a prereq run's log entries and appends them to the
+// parent run's log, prefixed so they're visibly attributed. Best-effort:
+// logging is a diagnostic aid and must never break the calling path.
+func (e *Engine) copyPrereqLogs(ctx context.Context, prereqRunID, parentRunID, prereqID string) {
+	if parentRunID == "" || prereqRunID == "" {
+		return
+	}
+	logs, err := e.registry.GetRunLogs(ctx, prereqRunID)
+	if err != nil {
+		return
+	}
+	prefix := "[prereq " + prereqID + "] "
+	for _, le := range logs {
+		_ = e.registry.AppendLog(ctx, parentRunID, le.Level, prefix+le.Message)
+	}
 }
 
 // dispatch routes a run to the appropriate executor and returns the final status and result.
@@ -1412,7 +1437,7 @@ func (e *Engine) dispatch(ctx context.Context, spec *task.Spec, opts pkgruntime.
 		return registry.StatusFailure, &pkgruntime.RunResult{Error: fmt.Errorf("no executor for runtime %s", spec.Runtime)}
 	}
 
-	if err := e.resolveIfMissing(ctx, spec); err != nil {
+	if err := e.resolveIfMissing(ctx, spec, opts.RunID); err != nil {
 		e.log.Warn("if_missing prereq unsatisfied",
 			zap.String("task", spec.ID),
 			zap.Error(err),
