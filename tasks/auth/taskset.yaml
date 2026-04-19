@@ -497,3 +497,9 @@ spec:
           - { name: LOOKER_ACCESS_TOKEN, secret: LOOKER_ACCESS_TOKEN, optional: true }
         net:
           - "*"
+
+    # ── Non-standard PKCE (no client_id, callback_url as request param) ──────
+
+    openrouter-oauth:
+      ref:
+        path: ./openrouter-oauth/task.yaml

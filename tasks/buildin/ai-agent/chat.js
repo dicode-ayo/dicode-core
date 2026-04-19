@@ -20,6 +20,40 @@
     return el;
   }
 
+  // Strip ANSI SGR escape sequences (\u001b[...m) from terminal output.
+  var ANSI_RE = /\u001b\[[\d;]*m/g;
+  function stripAnsi(s) { return String(s).replace(ANSI_RE, ""); }
+
+  // Render a task-failure response into a bubble. Parses the structured
+  // { error, logs, runId, status } body when present and cleans ANSI codes
+  // from log lines. textContent only — no innerHTML.
+  function renderError(el, body) {
+    el.className = "bubble error";
+    el.textContent = "";
+
+    var title = "Task failed";
+    var logs = null;
+    try {
+      var data = JSON.parse(body);
+      if (data && typeof data === "object") {
+        if (data.error) title = String(data.error);
+        if (Array.isArray(data.logs) && data.logs.length) logs = data.logs;
+      }
+    } catch (_) { /* not JSON — use raw body as log */ }
+
+    var $title = document.createElement("div");
+    $title.className = "err-title";
+    $title.textContent = title;
+    el.appendChild($title);
+
+    var $log = document.createElement("pre");
+    $log.className = "err-log";
+    $log.textContent = stripAnsi(logs ? logs.join("\n") : (body || ""));
+    el.appendChild($log);
+
+    el.scrollIntoView({ block: "end", behavior: "smooth" });
+  }
+
   function clearMessages() {
     while ($messages.firstChild) {
       $messages.removeChild($messages.firstChild);
@@ -43,7 +77,7 @@
       }
 
       if (result.status !== "success" || !payload) {
-        pending.textContent = "Error: " + (result.body || "unknown error");
+        renderError(pending, result.body || "unknown error");
         return;
       }
 
@@ -54,7 +88,7 @@
 
       pending.textContent = payload.reply || "(no reply)";
     }).catch(function (e) {
-      pending.textContent = "Connection error — is dicode running? (" + e.message + ")";
+      renderError(pending, "Connection error — is dicode running? (" + e.message + ")");
     }).then(function () {
       $send.disabled = false;
       $prompt.value = "";

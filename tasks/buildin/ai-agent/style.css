@@ -81,6 +81,35 @@ header h1 {
   border-bottom-left-radius: 2px;
 }
 
+.bubble.error {
+  align-self: flex-start;
+  max-width: 95%;
+  background: #2a1a1f;
+  color: #f5c2c7;
+  border-left: 3px solid #f38ba8;
+  border-bottom-left-radius: 2px;
+}
+
+.bubble.error .err-title {
+  color: #f38ba8;
+  font-weight: 600;
+  margin-bottom: .5rem;
+}
+
+.bubble.error .err-log {
+  margin: 0;
+  padding: .5rem .625rem;
+  background: #1e1e2e;
+  color: #cdd6f4;
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: .8125rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
+}
+
 #prompt-form {
   display: flex;
   gap: .625rem;

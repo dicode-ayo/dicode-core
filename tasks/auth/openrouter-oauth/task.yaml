@@ -1,0 +1,38 @@
+apiVersion: dicode/v1
+kind: Task
+name: OpenRouter OAuth
+description: |
+  OpenRouter PKCE flow — no client_id, no app registration, no secret.
+  The authorization redirect carries `callback_url` as a request parameter,
+  and the token exchange returns a long-lived API key (not an OAuth
+  access/refresh pair). Stores `OPENROUTER_API_KEY`.
+
+  ## Zero setup
+
+  Click **Run now**. Redirect: `http://localhost:8080/hooks/openrouter-oauth`.
+
+  Use the stored key in other tasks via:
+      env: [{ name: OPENAI_API_KEY, secret: OPENROUTER_API_KEY }]
+runtime: deno
+
+trigger:
+  webhook: /hooks/openrouter-oauth
+
+permissions:
+  env:
+    - DICODE_BASE_URL
+    - OPENROUTER_API_KEY
+  net:
+    - openrouter.ai
+  fs:
+    - path: ../_oauth
+      permission: r
+  dicode:
+    secrets_write: true
+    tasks:
+      - buildin/notifications
+
+env:
+  - { name: OPENROUTER_API_KEY, secret: OPENROUTER_API_KEY, optional: true }
+
+timeout: 30s
