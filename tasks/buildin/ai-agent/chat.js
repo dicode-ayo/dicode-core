@@ -14,21 +14,46 @@
   // The OAuth success HTML broadcasts on "dicode-secrets" when a secret is
   // stored. Tabs with a pending setup card register their retry callback
   // under the expected secret name; the handler below fires it.
-  var pendingSetups = {}; // secretName → retryFn
+  //
+  // `Object.create(null)` yields a prototype-less map so attacker-controlled
+  // keys like "__proto__" or "constructor" can't dispatch to inherited
+  // methods — addresses the CodeQL "Unvalidated dynamic method call" finding.
+  var pendingSetups = Object.create(null); // secretName → retryFn
+  var SETUP_TTL_MS = 15 * 60 * 1000;       // abandon stale registrations after 15 min
+
+  // BroadcastChannel is inherently same-origin, so no origin check needed.
   try {
     var _ch = new BroadcastChannel("dicode-secrets");
     _ch.onmessage = function (ev) { handleSecretsStored(ev.data); };
   } catch (_) { /* BroadcastChannel unsupported — user can retry manually */ }
-  // Fallback for browsers/configs where window.opener is set on the OAuth tab.
-  window.addEventListener("message", function (ev) { handleSecretsStored(ev.data); });
+  // window.postMessage fallback for window.opener-based delivery. ALWAYS check
+  // event.origin — without it, any cross-origin popup or iframe could fake a
+  // completion and trigger an unwanted retry.
+  window.addEventListener("message", function (ev) {
+    if (ev.origin !== window.location.origin) return;
+    handleSecretsStored(ev.data);
+  });
   function handleSecretsStored(d) {
     if (!d || d.type !== "stored" || !Array.isArray(d.keys)) return;
     d.keys.forEach(function (k) {
-      var fn = pendingSetups[k];
-      if (fn) {
-        delete pendingSetups[k];
-        fn();
+      if (typeof k !== "string") return;
+      // hasOwn check is belt-and-suspenders with Object.create(null), but
+      // makes the intent explicit: only fire retries we registered ourselves.
+      if (!Object.prototype.hasOwnProperty.call(pendingSetups, k)) return;
+      var entry = pendingSetups[k];
+      delete pendingSetups[k];
+      if (entry && typeof entry.fn === "function") {
+        if (entry.ttlTimer) clearTimeout(entry.ttlTimer);
+        entry.fn();
       }
+    });
+  }
+
+  function clearPendingSetups() {
+    Object.keys(pendingSetups).forEach(function (k) {
+      var entry = pendingSetups[k];
+      if (entry && entry.ttlTimer) clearTimeout(entry.ttlTimer);
+      delete pendingSetups[k];
     });
   }
 
@@ -68,9 +93,35 @@
     }
   }
 
+  // Known-provider display names — naive title-casing yields "Openrouter" or
+  // "Github" which look wrong. Fall through to the naive form for unknown
+  // providers so new tasks still render without requiring a code change here.
+  var PROVIDER_DISPLAY_NAMES = {
+    openrouter: "OpenRouter",
+    github:     "GitHub",
+    gitlab:     "GitLab",
+    google:     "Google",
+    slack:      "Slack",
+    spotify:    "Spotify",
+    linear:     "Linear",
+    discord:    "Discord",
+    notion:     "Notion",
+    airtable:   "Airtable",
+    confluence: "Atlassian",
+    salesforce: "Salesforce",
+    stripe:     "Stripe",
+    azure:      "Azure",
+    office365:  "Office 365",
+    looker:     "Looker",
+  };
+
   // Inspect a failure body for the engine's if_missing marker. If present,
   // also pull the authorize URL out of the replayed prereq logs. Returns
   // { taskId, providerName, secret, authUrl } or null.
+  //
+  // NOTE: the error prefix matched below is a stable contract with the
+  // engine — see pkg/trigger/engine.go resolveIfMissing. Both sides must
+  // move together if the format ever changes.
   function detectSetup(body) {
     var data;
     try { data = JSON.parse(body); } catch (_) { return null; }
@@ -87,11 +138,9 @@
     var urlMatch = stripAnsi(logBlob).match(/https?:\/\/[^\s]+/);
     if (!urlMatch) return null;
 
-    // Title-case a provider display name from the task id.
-    //   auth/openrouter-oauth → OpenRouter
-    //   auth/google-oauth     → Google
     var slug = taskId.replace(/^auth\//, "").replace(/-oauth$/, "");
-    var providerName = slug.charAt(0).toUpperCase() + slug.slice(1);
+    var providerName = PROVIDER_DISPLAY_NAMES[slug] ||
+      (slug.charAt(0).toUpperCase() + slug.slice(1));
 
     return {
       taskId: taskId,
@@ -132,10 +181,19 @@
     // Register the retry so the BroadcastChannel handler can fire it the
     // moment the secret is stored. Last registration for this secret wins —
     // if the user kicks off multiple setup attempts we only retry once.
-    pendingSetups[info.secret] = function () {
-      $status.textContent = "\u2713 Authorized \u2014 retrying\u2026";
-      $status.className = "setup-status ok";
-      setTimeout(retryFn, 300);
+    // A TTL guards against abandoned flows leaking closures over detached
+    // DOM nodes; if the user never completes auth we drop the registration.
+    var prev = pendingSetups[info.secret];
+    if (prev && prev.ttlTimer) clearTimeout(prev.ttlTimer);
+    pendingSetups[info.secret] = {
+      fn: function () {
+        $status.textContent = "\u2713 Authorized \u2014 retrying\u2026";
+        $status.className = "setup-status ok";
+        setTimeout(retryFn, 300);
+      },
+      ttlTimer: setTimeout(function () {
+        delete pendingSetups[info.secret];
+      }, SETUP_TTL_MS),
     };
 
     $btn.addEventListener("click", function () {
@@ -238,6 +296,7 @@
     sessionId = "";
     localStorage.removeItem(STORAGE_KEY);
     clearMessages();
+    clearPendingSetups();
     $prompt.focus();
   });
 

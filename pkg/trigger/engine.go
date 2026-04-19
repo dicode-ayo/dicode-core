@@ -33,6 +33,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/robfig/cron/v3"
 	"go.uber.org/zap"
+	"golang.org/x/sync/singleflight"
 )
 
 // ErrRunNotFound is returned by WaitRun when no run record exists for the given ID.
@@ -67,7 +68,8 @@ type Engine struct {
 
 	db db.DB // optional — enables cron-job persistence and missed-run catchup
 
-	secrets secrets.Chain // optional — enables if_missing prereq resolution at dispatch time
+	secrets     secrets.Chain       // optional — enables if_missing prereq resolution at dispatch time
+	prereqFlight singleflight.Group // collapses concurrent prereq runs keyed on secret name, so parallel webhook calls with the same missing secret don't each spawn a duplicate prereq (OAuth flow, refresh-token rotation, etc.)
 
 	taskSem     chan struct{} // nil = unlimited; capacity = MaxConcurrentTasks
 	taskWaiting atomic.Int64  // goroutines parked waiting for a semaphore slot
@@ -1335,13 +1337,39 @@ func (e *Engine) fireSync(spec *task.Spec, opts pkgruntime.RunOptions, source st
 	return opts.RunID, result, nil
 }
 
+// ifMissingPrereqTimeout bounds how long resolveIfMissing will wait for a
+// single prereq task to complete. The prereq's own spec-level Timeout is
+// respected first; this is an engine-level ceiling so a wedged prereq (slow
+// DNS, stuck upstream, etc.) can't block the webhook caller indefinitely.
+const ifMissingPrereqTimeout = 60 * time.Second
+
+// ifMissingErrorFormat is the prefix used by the errors resolveIfMissing
+// returns when a prereq is missing/failed. UI consumers (notably
+// tasks/buildin/ai-agent/chat.js `detectSetup`) regex-match this prefix
+// to render a "Set up <Provider>" card instead of a raw error log.
+//
+// STABLE INTERFACE — do not rephrase without updating every consumer.
+//
+//	if_missing: secret %q requires setup via task %q[: wrapped-error]
+//	if_missing: secret %q requires setup via task %q (ran but still unset)[: wrapped-error]
+const ifMissingErrorFormat = `if_missing: secret %q requires setup via task %q`
+
 // resolveIfMissing scans the task's env entries for `if_missing` directives
 // and, for any whose target secret is not present in the secrets chain,
 // synchronously runs the declared prereq task in chain mode. If the prereq
 // succeeds and the secret is now resolvable, dispatch continues normally.
 // If the prereq fails, its error — typically an OAuth flow's "open this URL
 // to authorize" message — bubbles up as the original task's failure so the
-// UI can surface a setup call-to-action.
+// UI can surface a setup call-to-action (see ifMissingErrorFormat).
+//
+// Concurrency: parallel calls with the same secret are collapsed via
+// singleflight, so N webhook calls with the same missing secret yield one
+// prereq run, not N. The shared result is returned to all callers — each
+// then re-resolves the secret independently to decide whether to proceed.
+//
+// Timeout: the prereq's own spec Timeout applies first; an engine-level
+// ifMissingPrereqTimeout (60s) bounds total wait to protect the HTTP caller
+// even if a misconfigured prereq declared a higher timeout.
 //
 // No-ops when: secrets chain is not wired, the entry has no `if_missing`
 // directive, or the secret already resolves. Non-secret-backed entries
@@ -1375,31 +1403,59 @@ func (e *Engine) resolveIfMissing(ctx context.Context, spec *task.Spec, parentRu
 			zap.String("prereq", prereqID),
 		)
 
-		// Chain-mode input: non-nil empty map so the prereq task's
-		// `input !== null` check treats this as a programmatic invocation
-		// (silent refresh path), not an interactive UI click.
-		chainInput := map[string]any{}
-		prereqRunID, result, err := e.fireSync(prereqSpec, pkgruntime.RunOptions{
-			ParentRunID: parentRunID,
-			Input:       chainInput,
-			Params:      entry.IfMissing.Params,
-		}, "if_missing")
-		if err != nil {
-			return fmt.Errorf("fire if_missing task %q: %w", prereqID, err)
+		prereqCtx, cancel := context.WithTimeout(ctx, ifMissingPrereqTimeout)
+		params := entry.IfMissing.Params
+		sfKey := "if_missing:" + entry.Secret
+		res, sfErr, _ := e.prereqFlight.Do(sfKey, func() (any, error) {
+			// Chain-mode input: non-nil empty map so the prereq task's
+			// `input !== null` check treats this as a programmatic
+			// invocation (silent refresh path), not an interactive UI click.
+			chainInput := map[string]any{}
+			prereqRunID, result, fireErr := e.fireSync(prereqSpec, pkgruntime.RunOptions{
+				ParentRunID: parentRunID,
+				Input:       chainInput,
+				Params:      params,
+			}, "if_missing")
+			return prereqFlightResult{runID: prereqRunID, result: result}, firstNonNil(fireErr, prereqCtx.Err())
+		})
+		cancel()
+
+		if sfErr != nil {
+			return fmt.Errorf("fire if_missing task %q: %w", prereqID, sfErr)
 		}
-		if result != nil && result.Error != nil {
+		pfr := res.(prereqFlightResult)
+		if pfr.result != nil && pfr.result.Error != nil {
 			// Replay the prereq's logs into the parent run so the webhook
 			// response surfaces whatever the prereq printed — typically an
 			// "Open this URL to authorize" line the chat UI can render as a
 			// clickable setup link. Without this, callers only see
 			// "exit status 1" with no actionable context.
-			e.copyPrereqLogs(ctx, prereqRunID, parentRunID, prereqID)
-			return fmt.Errorf("if_missing: secret %q requires setup via task %q: %w", entry.Secret, prereqID, result.Error)
+			e.copyPrereqLogs(ctx, pfr.runID, parentRunID, prereqID)
+			return fmt.Errorf(ifMissingErrorFormat+": %w", entry.Secret, prereqID, pfr.result.Error)
 		}
 
 		if _, err := e.secrets.Resolve(ctx, entry.Secret); err != nil {
-			e.copyPrereqLogs(ctx, prereqRunID, parentRunID, prereqID)
-			return fmt.Errorf("if_missing: secret %q requires setup via task %q (ran but still unset): %w", entry.Secret, prereqID, err)
+			e.copyPrereqLogs(ctx, pfr.runID, parentRunID, prereqID)
+			return fmt.Errorf(ifMissingErrorFormat+" (ran but still unset): %w", entry.Secret, prereqID, err)
+		}
+	}
+	return nil
+}
+
+// prereqFlightResult is the shared payload stored in singleflight so all
+// callers waiting on the same secret get the same (runID, result) pair.
+type prereqFlightResult struct {
+	runID  string
+	result *pkgruntime.RunResult
+}
+
+// firstNonNil returns the first non-nil error, letting a context-cancel
+// surface from resolveIfMissing's timeout even when fireSync itself
+// returned a nil error (because the executor observed the context fine).
+func firstNonNil(errs ...error) error {
+	for _, e := range errs {
+		if e != nil {
+			return e
 		}
 	}
 	return nil

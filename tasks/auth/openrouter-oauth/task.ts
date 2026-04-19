@@ -30,8 +30,13 @@ export default async function main({ input, output, kv, dicode }: DicodeSdk) {
     if (!verifier) {
       return output.html(`<p style="color:red">PKCE verifier missing — click Run to restart.</p>`);
     }
-    if (expectedState && inp?.state && expectedState !== inp.state) {
-      return output.html(`<p style="color:red">State mismatch — possible CSRF. Restart.</p>`);
+    // Strict state validation: we always kv.set STATE_KV_KEY before the
+    // redirect, so if either side is missing or they differ we reject.
+    // A lenient form (short-circuiting when either side was falsy) would
+    // let a callback with no `state` bypass CSRF entirely; PKCE alone
+    // mitigates today but defense-in-depth costs nothing here.
+    if (!expectedState || inp?.state !== expectedState) {
+      return output.html(`<p style="color:red">OAuth state mismatch — possible CSRF. Restart.</p>`);
     }
 
     await kv.delete(VERIFIER_KV_KEY);
