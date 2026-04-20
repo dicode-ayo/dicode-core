@@ -12,6 +12,7 @@ import (
 	"github.com/dicode/dicode/pkg/db"
 	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/registry"
+	"github.com/dicode/dicode/pkg/task"
 	"github.com/dicode/dicode/pkg/trigger"
 	"go.uber.org/zap"
 )
@@ -518,5 +519,52 @@ func TestAuth_DeviceToken_Rotation(t *testing.T) {
 	_, ok3 := store.renewFromDevice(ctx, newDevToken, "127.0.0.1")
 	if !ok3 {
 		t.Error("new rotated device token should be accepted")
+	}
+}
+
+// TestWebhookAuthGuard_LongestPrefixWins is a regression test for the auth
+// bypass where a public webhook at /hooks/ai would shadow the authenticated
+// /hooks/ai/dicodai preset because the guard took the first prefix match from
+// a registry sorted by task ID. Under the fix, the guard must pick the
+// longest-prefix match — otherwise the `auth: true` override silently drops.
+func TestWebhookAuthGuard_LongestPrefixWins(t *testing.T) {
+	srv := newAuthServer(t, "hunter2")
+
+	// Register two specs with overlapping webhook prefixes. The ID order
+	// matters: "ai-agent" sorts before "dicodai" alphabetically, so the
+	// bug-producing iteration order is exactly what registry.All()
+	// produces on real deployments.
+	if err := srv.registry.Register(&task.Spec{
+		ID:      "buildin/ai-agent",
+		Trigger: task.TriggerConfig{Webhook: "/hooks/ai", WebhookAuth: false},
+	}); err != nil {
+		t.Fatalf("register ai-agent: %v", err)
+	}
+	if err := srv.registry.Register(&task.Spec{
+		ID:      "buildin/dicodai",
+		Trigger: task.TriggerConfig{Webhook: "/hooks/ai/dicodai", WebhookAuth: true},
+	}); err != nil {
+		t.Fatalf("register dicodai: %v", err)
+	}
+
+	h := srv.Handler()
+
+	// Request to the longer, protected path must be rejected without a
+	// session even though a shorter, public webhook exists.
+	req := httptest.NewRequest(http.MethodPost, "/hooks/ai/dicodai", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("POST /hooks/ai/dicodai without session: expected 401, got %d", w.Code)
+	}
+
+	// Request to the shorter, public path must NOT be rejected for lack of
+	// a session — the guard's longest-prefix rule must not accidentally
+	// flip public webhooks into protected ones either.
+	req = httptest.NewRequest(http.MethodPost, "/hooks/ai", nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code == http.StatusUnauthorized {
+		t.Errorf("POST /hooks/ai without session: public webhook should pass through, got 401")
 	}
 }
