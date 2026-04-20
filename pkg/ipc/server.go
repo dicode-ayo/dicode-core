@@ -54,6 +54,13 @@ type Server struct {
 	mu     sync.Mutex
 	output *OutputResult
 	retCh  chan any
+
+	// log buffer – accumulate log entries and flush in batches to reduce
+	// per-line SQLite write-lock pressure (see flushLogs / flushLogsNow).
+	logMu        sync.Mutex
+	logBuf       []registry.PendingLogEntry
+	logFlushCh   chan struct{} // closed when Stop is called
+	logFlushDone chan struct{} // closed by flushLogs goroutine after final drain
 }
 
 // New creates a Server (not yet started).
@@ -84,20 +91,22 @@ func New(
 		panic("ipc.New: taskID must not be empty")
 	}
 	return &Server{
-		runID:     runID,
-		taskID:    taskID,
-		secret:    secret,
-		registry:  reg,
-		db:        database,
-		params:    params,
-		input:     input,
-		spec:      spec,
-		engine:    engine,
-		log:       log,
-		aiBaseURL: aiBaseURL,
-		aiModel:   aiModel,
-		aiAPIKey:  aiAPIKey,
-		retCh:     make(chan any, 1),
+		runID:        runID,
+		taskID:       taskID,
+		secret:       secret,
+		registry:     reg,
+		db:           database,
+		params:       params,
+		input:        input,
+		spec:         spec,
+		engine:       engine,
+		log:          log,
+		aiBaseURL:    aiBaseURL,
+		aiModel:      aiModel,
+		aiAPIKey:     aiAPIKey,
+		retCh:        make(chan any, 1),
+		logFlushCh:   make(chan struct{}),
+		logFlushDone: make(chan struct{}),
 	}
 }
 
@@ -177,11 +186,25 @@ func (s *Server) Start(ctx context.Context) (socketPath, token string, err error
 	}
 
 	go s.accept()
+	go s.flushLogs()
 	return socketPath, token, nil
 }
 
-// Stop closes the listener and removes the socket file.
+// Stop signals the flush goroutine to perform a final drain, waits for it to
+// finish, then closes the listener and removes the socket file.
+// The goroutine is always the last writer so there is no race between a
+// ticker-triggered flush and Stop's own drain.
 func (s *Server) Stop() {
+	// Signal the flush goroutine to do a final drain and exit.
+	select {
+	case <-s.logFlushCh:
+		// already closed
+	default:
+		close(s.logFlushCh)
+	}
+	// Wait for the goroutine to complete the final flush before tearing down.
+	<-s.logFlushDone
+
 	if s.listener != nil {
 		_ = s.listener.Close()
 	}
@@ -289,7 +312,7 @@ func (s *Server) handleConn(conn net.Conn) {
 			if level == "" {
 				level = "info"
 			}
-			_ = s.registry.AppendLog(context.Background(), s.runID, level, req.Message)
+			s.bufferLog(level, req.Message)
 
 		case "kv.set":
 			if !hasCap(caps, CapKVWrite) {
@@ -812,4 +835,104 @@ func (s *Server) getMCPPort(taskID string) (int, error) {
 		return 0, fmt.Errorf("ipc: task %q does not declare mcp_port", taskID)
 	}
 	return spec.MCPPort, nil
+}
+
+// ── log buffering ─────────────────────────────────────────────────────────────
+
+const (
+	logFlushInterval = 200 * time.Millisecond
+	logFlushSize     = 50
+	logBufMaxSize    = 1000 // hard cap to prevent unbounded memory growth
+)
+
+// bufferLog enqueues a log entry. If the buffer reaches logFlushSize the
+// batch is flushed immediately (inline) to bound memory use. If the buffer
+// would exceed logBufMaxSize a synchronous flush is triggered first to
+// prevent unbounded memory growth from a high-frequency logging task.
+func (s *Server) bufferLog(level, message string) {
+	// Whitelist the level to prevent log injection via crafted IPC messages.
+	switch level {
+	case "debug", "info", "warn", "error":
+		// valid
+	default:
+		level = "info"
+	}
+
+	entry := registry.PendingLogEntry{
+		RunID:   s.runID,
+		Level:   level,
+		Message: message,
+		TsMs:    time.Now().UnixMilli(),
+	}
+
+	s.logMu.Lock()
+	// If we are at the hard cap, flush synchronously before appending so the
+	// buffer never grows beyond logBufMaxSize entries.
+	var capBatch []registry.PendingLogEntry
+	if len(s.logBuf) >= logBufMaxSize {
+		capBatch = s.logBuf
+		s.logBuf = nil
+	}
+	s.logBuf = append(s.logBuf, entry)
+	flush := len(s.logBuf) >= logFlushSize
+	var batch []registry.PendingLogEntry
+	if flush {
+		batch = s.logBuf
+		s.logBuf = nil
+	}
+	s.logMu.Unlock()
+
+	if capBatch != nil {
+		if err := s.registry.BulkAppendLogs(context.Background(), capBatch); err != nil {
+			s.log.Error("ipc: bulk log flush (cap)", zap.String("run", s.runID), zap.Error(err))
+		}
+	}
+	if flush {
+		if err := s.registry.BulkAppendLogs(context.Background(), batch); err != nil {
+			s.log.Error("ipc: bulk log flush (size threshold)", zap.String("run", s.runID), zap.Error(err))
+		}
+	}
+}
+
+// flushLogsNow drains the buffer and writes all pending entries to the DB.
+// Safe to call from any goroutine.
+func (s *Server) flushLogsNow(ctx context.Context) {
+	s.logMu.Lock()
+	batch := s.logBuf
+	s.logBuf = nil
+	s.logMu.Unlock()
+
+	if len(batch) == 0 {
+		return
+	}
+	if err := s.registry.BulkAppendLogs(ctx, batch); err != nil {
+		s.log.Error("ipc: bulk log flush", zap.String("run", s.runID), zap.Error(err))
+	}
+}
+
+// flushLogs is the background goroutine that periodically flushes the log
+// buffer. It exits when logFlushCh is closed (Stop) or ctx is cancelled,
+// performing a final drain in both cases so no buffered entries are lost.
+// It signals logFlushDone before returning so Stop() can synchronise.
+func (s *Server) flushLogs() {
+	defer close(s.logFlushDone)
+	ticker := time.NewTicker(logFlushInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			s.flushLogsNow(context.Background())
+		case <-s.logFlushCh:
+			// Stop() was called — do one final drain then exit.
+			// The goroutine is the sole writer here, so there is no
+			// race with Stop() flushing independently.
+			s.flushLogsNow(context.Background())
+			return
+		case <-s.ctx.Done():
+			// Context cancelled (error path that skips Stop) — drain
+			// before exiting to avoid goroutine leak.
+			s.flushLogsNow(context.Background())
+			return
+		}
+	}
 }

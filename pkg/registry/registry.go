@@ -163,6 +163,55 @@ func (r *Registry) AppendLog(ctx context.Context, runID, level, msg string) erro
 	return nil
 }
 
+// PendingLogEntry holds a log line waiting to be flushed to the DB.
+// It captures the timestamp at enqueue time so ordering is preserved even
+// if the flush goroutine is delayed.
+type PendingLogEntry struct {
+	RunID   string
+	Level   string
+	Message string
+	TsMs    int64 // Unix milliseconds, captured at enqueue time
+}
+
+// BulkAppendLogs inserts a batch of log entries in a single transaction.
+// Entries may belong to different run IDs; insertion order within the batch is
+// preserved by the AUTOINCREMENT rowid assigned by SQLite.
+func (r *Registry) BulkAppendLogs(ctx context.Context, entries []PendingLogEntry) error {
+	if len(entries) == 0 {
+		return nil
+	}
+
+	// Always use the bulk path (even for a single entry) so that the
+	// pre-captured TsMs is written instead of time.Now() from AppendLog.
+	// Wrap all inserts in a single transaction so they land atomically
+	// and only one fsync is needed per batch.
+	err := r.db.Tx(ctx, func(tx db.DB) error {
+		for _, e := range entries {
+			if err := tx.Exec(ctx,
+				`INSERT INTO run_logs (run_id, ts, level, message) VALUES (?, ?, ?, ?)`,
+				e.RunID, e.TsMs, e.Level, e.Message,
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	// Fire the log hook (if any) for each entry after the transaction commits.
+	r.logMu.Lock()
+	hook := r.logHook
+	r.logMu.Unlock()
+	if hook != nil {
+		for _, e := range entries {
+			hook(e.RunID, e.Level, e.Message, e.TsMs)
+		}
+	}
+	return nil
+}
+
 // GetRun fetches a run record by ID.
 func (r *Registry) GetRun(ctx context.Context, runID string) (*Run, error) {
 	var run *Run
