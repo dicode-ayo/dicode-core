@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"io"
 	"net/http"
 	"net/url"
@@ -876,15 +877,21 @@ func (s *Server) loginError(w http.ResponseWriter, r *http.Request, msg string, 
 		jsonErr(w, msg, code)
 		return
 	}
-	csrf, err := issueCSRFToken(w)
+	csrf, err := s.issueCSRFToken(w)
 	if err != nil {
 		s.log.Error("login error render: failed to issue csrf token", zap.Error(err))
 		jsonErr(w, msg, code)
 		return
 	}
+	body, err := renderLoginPage(s.loginTitle(safeNext), safeNext, csrf, msg)
+	if err != nil {
+		s.log.Error("login error render: template execute", zap.Error(err))
+		jsonErr(w, msg, code)
+		return
+	}
 	setLoginPageHeaders(w)
 	w.WriteHeader(code)
-	_, _ = w.Write(renderLoginPage(s.loginTitle(safeNext), safeNext, csrf, msg))
+	_, _ = w.Write(body)
 }
 
 func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
@@ -893,14 +900,20 @@ func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 		s.log.Warn("rejecting unsafe next on login page", zap.String("next", next))
 		next = ""
 	}
-	csrf, err := issueCSRFToken(w)
+	csrf, err := s.issueCSRFToken(w)
 	if err != nil {
 		s.log.Error("login page: failed to issue csrf token", zap.Error(err))
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	body, err := renderLoginPage(s.loginTitle(next), next, csrf, "")
+	if err != nil {
+		s.log.Error("login page: template execute", zap.Error(err))
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
 	setLoginPageHeaders(w)
-	_, _ = w.Write(renderLoginPage(s.loginTitle(next), next, csrf, ""))
+	_, _ = w.Write(body)
 }
 
 // isFormRequest returns true when the request body is a browser-style form
@@ -932,7 +945,13 @@ const csrfCookie = "dicode_csrf"
 // The double-submit pattern: the cookie travels only on same-origin requests
 // (SameSite=Strict), so a cross-site POST cannot include the cookie — and
 // without it validateCSRF rejects the request.
-func issueCSRFToken(w http.ResponseWriter) (string, error) {
+//
+// The Secure attribute is set whenever TLS is configured (cfg.Server.TLSCert
+// non-empty). Set it unconditionally and plain-HTTP localhost loses the
+// cookie entirely, breaking the login flow; skip it and HTTPS deployments
+// are vulnerable to cookie leak over any downgrade. Conditional on TLS
+// config is the pragmatic middle ground.
+func (s *Server) issueCSRFToken(w http.ResponseWriter) (string, error) {
 	token, err := randomToken()
 	if err != nil {
 		return "", err
@@ -942,6 +961,7 @@ func issueCSRFToken(w http.ResponseWriter) (string, error) {
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
+		Secure:   s.cfg.Server.TLSCertFile != "",
 		SameSite: http.SameSiteStrictMode,
 	})
 	return token, nil
@@ -999,30 +1019,52 @@ func (s *Server) loginTitle(next string) string {
 	return "Sign in to dicode"
 }
 
-func renderLoginPage(title, next, csrf, errMsg string) []byte {
+// loginPageTpl is compiled once at init time. html/template applies context-
+// aware auto-escaping so every {{.X}} is safe in its surrounding markup:
+// .Title goes into <title> (body text), .Err into body text, .Next and .CSRF
+// into attribute values. Static analysers (CodeQL go/reflected-xss) recognise
+// html/template as a sanitising sink.
+var loginPageTpl = template.Must(template.New("login").Parse(`<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{.Title}}</title>
+<style>` + loginCSS + `</style>
+</head>
+<body>
+<main class="dc-login">
+<form method="post" action="/api/auth/login" enctype="application/x-www-form-urlencoded">
+<h1>{{.Title}}</h1>
+{{if .Err}}<p class="dc-err" role="alert">{{.Err}}</p>{{end}}
+<label>Password<input type="password" name="password" autocomplete="current-password" autofocus required></label>
+<label class="dc-check"><input type="checkbox" name="trust" value="1">Trust this browser</label>
+<input type="hidden" name="next" value="{{.Next}}">
+<input type="hidden" name="_csrf" value="{{.CSRF}}">
+<button type="submit">Sign in</button>
+</form>
+</main>
+</body>
+</html>`))
+
+type loginPageData struct {
+	Title string
+	Next  string
+	CSRF  string
+	Err   string
+}
+
+// renderLoginPage produces the login form HTML with contextual auto-escaping
+// via html/template. Returns nil + error only on template execution failure,
+// which indicates a bug in the template itself (not a user-input issue).
+func renderLoginPage(title, next, csrf, errMsg string) ([]byte, error) {
 	var b strings.Builder
-	b.WriteString(`<!doctype html><html lang="en"><head><meta charset="utf-8">`)
-	b.WriteString(`<meta name="viewport" content="width=device-width,initial-scale=1">`)
-	b.WriteString(`<title>`)
-	b.WriteString(htmlEscape(title))
-	b.WriteString(`</title><style>`)
-	b.WriteString(loginCSS)
-	b.WriteString(`</style></head><body><main class="dc-login"><form method="post" action="/api/auth/login" enctype="application/x-www-form-urlencoded"><h1>`)
-	b.WriteString(htmlEscape(title))
-	b.WriteString(`</h1>`)
-	if errMsg != "" {
-		b.WriteString(`<p class="dc-err" role="alert">`)
-		b.WriteString(htmlEscape(errMsg))
-		b.WriteString(`</p>`)
+	if err := loginPageTpl.Execute(&b, loginPageData{
+		Title: title, Next: next, CSRF: csrf, Err: errMsg,
+	}); err != nil {
+		return nil, err
 	}
-	b.WriteString(`<label>Password<input type="password" name="password" autocomplete="current-password" autofocus required></label>`)
-	b.WriteString(`<label class="dc-check"><input type="checkbox" name="trust" value="1">Trust this browser</label>`)
-	b.WriteString(`<input type="hidden" name="next" value="`)
-	b.WriteString(htmlEscape(next))
-	b.WriteString(`"><input type="hidden" name="_csrf" value="`)
-	b.WriteString(htmlEscape(csrf))
-	b.WriteString(`"><button type="submit">Sign in</button></form></main></body></html>`)
-	return []byte(b.String())
+	return []byte(b.String()), nil
 }
 
 const loginCSS = `body{margin:0;font:16px/1.4 system-ui,sans-serif;background:#0f1115;color:#e6e8eb;display:grid;place-items:center;min-height:100vh}` +
@@ -1036,17 +1078,6 @@ const loginCSS = `body{margin:0;font:16px/1.4 system-ui,sans-serif;background:#0
 	`.dc-login button{margin-top:0.5rem;padding:0.65rem;background:#3b82f6;border:0;color:#fff;font:inherit;font-weight:600;border-radius:4px;cursor:pointer}` +
 	`.dc-login button:hover{background:#2563eb}` +
 	`.dc-err{margin:0 0 0.5rem;padding:0.5rem 0.7rem;background:#3a1a1a;border:1px solid #6b2424;color:#fca5a5;border-radius:4px;font-size:0.85rem}`
-
-func htmlEscape(s string) string {
-	r := strings.NewReplacer(
-		"&", "&amp;",
-		"<", "&lt;",
-		">", "&gt;",
-		`"`, "&quot;",
-		"'", "&#39;",
-	)
-	return r.Replace(s)
-}
 
 func (s *Server) apiListSecrets(w http.ResponseWriter, r *http.Request) {
 	if s.secretsMgr == nil {
