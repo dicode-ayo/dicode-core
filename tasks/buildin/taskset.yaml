@@ -46,6 +46,10 @@ spec:
           before using.
         trigger:
           webhook: /hooks/ai/dicodai
+          # auth: true — the chat panel in dc-task-detail is always served
+          # inside an authenticated dicode session, so gate the webhook too
+          # to keep unauthenticated callers off the OpenAI billing surface.
+          auth: true
         params:
           skills: "dicode-task-dev,dicode-basics"
           model: "gpt-4o"

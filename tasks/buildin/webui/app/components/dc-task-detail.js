@@ -193,15 +193,10 @@ class DcTaskDetail extends LitElement {
     const aiMsg = { role: 'ai', text: '' };
     this._aiHistory = [...this._aiHistory, aiMsg];
 
-    // Gather context for the agent: current task id and current editor buffer.
-    // We ship these as extra JSON fields alongside the required `prompt`.
-    // The ai-agent task exposes its file-writing as a "tool" that the model
-    // chooses to call, NOT as an automatic side-effect of every reply — so
-    // the chat now surfaces the agent's text reply only. Users copy code
-    // back into the editor manually (or ask the agent to use write_task_file
-    // tool once that permission is granted). This is the trade-off for
-    // replacing the bespoke SSE streaming endpoint with the generic
-    // ai-agent task-based webhook.
+    // Path is coupled to the `dicodai` buildin taskset entry
+    // (tasks/buildin/taskset.yaml). Fork and override there if you need
+    // to point this UI at a different provider/preset.
+    // Agent replies are text-only — paste code back into the editor manually.
     const ctx = {
       task_id: this.taskid,
     };

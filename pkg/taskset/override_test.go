@@ -165,6 +165,32 @@ func TestApplyTriggerPatch_NilFieldsNotApplied(t *testing.T) {
 	}
 }
 
+func TestApplyTriggerPatch_WebhookAuth(t *testing.T) {
+	// Setting auth: true on a webhook override must flip WebhookAuth — this
+	// is what the dicodai preset relies on to gate /hooks/ai/dicodai behind
+	// the dicode session cookie.
+	tr := task.TriggerConfig{Webhook: "/hooks/ai/dicodai"}
+	applyTriggerPatch(&tr, &TriggerPatch{Auth: boolPtr(true)})
+	if !tr.WebhookAuth {
+		t.Error("WebhookAuth should be true after auth patch")
+	}
+	// Flipping it back off must also work.
+	applyTriggerPatch(&tr, &TriggerPatch{Auth: boolPtr(false)})
+	if tr.WebhookAuth {
+		t.Error("WebhookAuth should be false after auth:false patch")
+	}
+}
+
+func TestApplyTriggerPatch_AuthNilPreservesWebhookAuth(t *testing.T) {
+	// A nil Auth pointer must not clobber an existing WebhookAuth value —
+	// otherwise a webhook-only patch would silently disable auth.
+	tr := task.TriggerConfig{Webhook: "/hooks/x", WebhookAuth: true}
+	applyTriggerPatch(&tr, &TriggerPatch{Webhook: strPtr("/hooks/y")})
+	if !tr.WebhookAuth {
+		t.Error("WebhookAuth should be preserved when Auth is nil")
+	}
+}
+
 // ── applyOverrides ────────────────────────────────────────────────────────────
 
 func TestApplyOverrides_SingleLayer(t *testing.T) {

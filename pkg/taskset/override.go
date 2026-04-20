@@ -68,6 +68,9 @@ func applyTriggerPatch(t *task.TriggerConfig, p *TriggerPatch) {
 		t.Chain = nil
 		t.Daemon = false
 	}
+	if p.Auth != nil {
+		t.WebhookAuth = *p.Auth
+	}
 	if p.Manual != nil {
 		t.Manual = *p.Manual
 		t.Cron = ""

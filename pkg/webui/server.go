@@ -1291,12 +1291,6 @@ func (s *Server) persistConfig() error {
 		doc = make(map[string]any)
 	}
 
-	// The legacy top-level "ai:" block is no longer written back — direct-AI
-	// support has been removed. If it survives in the user's file from a
-	// previous version we leave it alone (YAML round-trip preserves unknown
-	// keys) and simply stop emitting it ourselves.
-	delete(doc, "ai")
-
 	doc["log_level"] = s.cfg.LogLevel
 
 	serverMap, _ := doc["server"].(map[string]any)

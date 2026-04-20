@@ -2,7 +2,7 @@
 # dependencies = ["httpx>=0.27"]
 # ///
 #
-# hello-python — showcases the async Python SDK globals added in PR #52:
+# hello-python — showcases the async Python SDK globals:
 #   - async def main() entry point (auto-detected by the runtime)
 #   - kv.*_async, params.*_async, log.*_async, output.*_async
 #   - httpx async HTTP call as a realistic async dependency example

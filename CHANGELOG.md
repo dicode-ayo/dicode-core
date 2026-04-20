@@ -1,22 +1,5 @@
 # Changelog
 
-## Unreleased
-
-### ⚠ BREAKING CHANGES
-
-- The direct-AI Go implementation has been removed. All AI functionality now runs through the `buildin/ai-agent` task and its presets.
-  - Removed the SSE streaming endpoint `POST /api/tasks/{id}/ai/stream` (`pkg/webui/ai.go`).
-  - Removed the embedded `pkg/agent/skill.md` package — moved to `tasks/skills/dicode-task-dev.md` so it can be loaded as an ai-agent skill.
-  - Removed the `ai:` block from `dicode.yaml`. Extra AI config in your YAML is silently ignored; drop it on your next edit.
-  - Removed the `dicode.get_config("ai")` IPC method and the `permissions.dicode.get_config` flag. Tasks needing provider config should declare their own params or env.
-  - Removed the `/api/settings/ai` REST endpoint and the AI tab from the WebUI configuration page.
-
-### Features
-
-- Added the `buildin/dicodai` preset: an `ai-agent` override preloaded with the `dicode-task-dev` and `dicode-basics` skills and tuned for task development. Defaults to OpenAI's `gpt-4o`; only `OPENAI_API_KEY` is required.
-- The task-detail AI chat panel now routes to `/hooks/ai/dicodai`, returning the agent's text reply. File edits are no longer written automatically — copy code back to the editor manually.
-- Added `tasks/skills/dicode-task-dev.md` alongside `dicode-basics.md`; the ai-agent taskset discovers both via `${TASK_SET_DIR}/../skills` by default.
-
 ## [0.0.4](https://github.com/dicode-ayo/dicode-core/compare/v0.0.3...v0.0.4) (2026-04-17)
 
 
