@@ -19,16 +19,24 @@ import (
 	"golang.org/x/crypto/hkdf"
 )
 
-// newOAuthTestIdentity creates a fresh in-memory P-256 identity (no DB writes).
+// newOAuthTestIdentity creates a fresh in-memory split-key identity
+// (no DB writes). SignKey and DecryptKey are deliberately independent so
+// tests exercise the post-#104 invariant that signing and decryption happen
+// under disjoint keys.
 func newOAuthTestIdentity(t *testing.T) *Identity {
 	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	signKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		t.Fatalf("generate key: %v", err)
+		t.Fatalf("generate sign key: %v", err)
+	}
+	decryptKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate decrypt key: %v", err)
 	}
 	return &Identity{
-		PrivateKey: key,
-		UUID:       deriveUUID(&key.PublicKey),
+		SignKey:    signKey,
+		DecryptKey: decryptKey,
+		UUID:       deriveUUID(&signKey.PublicKey),
 	}
 }
 
@@ -134,7 +142,7 @@ func TestBuildAuthURL_RoundTripVerify(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode sig: %v", err)
 	}
-	if !ecdsa.VerifyASN1(&id.PrivateKey.PublicKey, payload, sigBytes) {
+	if !ecdsa.VerifyASN1(&id.SignKey.PublicKey, payload, sigBytes) {
 		t.Fatalf("signature verification failed")
 	}
 }
@@ -230,8 +238,9 @@ func TestDecryptOAuthToken_RejectsTamperedType(t *testing.T) {
 func encryptForDaemon(t *testing.T, daemon *Identity, sessionID string, plaintext []byte) *OAuthTokenDeliveryPayload {
 	t.Helper()
 
-	// Daemon's long-lived public key as a crypto/ecdh peer key.
-	daemonPubBytes := daemon.UncompressedPublicKey()
+	// Daemon's DecryptKey public key as a crypto/ecdh peer key (post-#104
+	// the broker encrypts against DecryptKey, not SignKey).
+	daemonPubBytes := daemon.DecryptPublicKey()
 	daemonPub, err := ecdh.P256().NewPublicKey(daemonPubBytes)
 	if err != nil {
 		t.Fatalf("daemon pub: %v", err)

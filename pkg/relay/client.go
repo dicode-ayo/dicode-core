@@ -53,6 +53,26 @@ type Client struct {
 
 	brokerMu     sync.RWMutex
 	brokerPubkey string // cached pinned broker pubkey (base64 SPKI DER)
+
+	// protoMu guards brokerProtocol. The value is 0 until the first successful
+	// handshake; after that it reflects the broker's advertised `protocol`
+	// field in the welcome message. A value < 2 means the broker has not
+	// been upgraded for issue #104 and OAuth IPC paths must be refused.
+	protoMu        sync.RWMutex
+	brokerProtocol int
+}
+
+// SupportsOAuth reports whether the currently connected broker has announced
+// a protocol version recent enough for the split sign/decrypt key scheme
+// (issue #104). The OAuth IPC dispatch in pkg/ipc consults this before
+// handing out auth URLs or accepting token-delivery envelopes so the daemon
+// never decrypts against the wrong key on an out-of-date broker.
+//
+// Returns false until the first successful handshake completes.
+func (c *Client) SupportsOAuth() bool {
+	c.protoMu.RLock()
+	defer c.protoMu.RUnlock()
+	return c.brokerProtocol >= 2
 }
 
 // BrokerPubkey returns the currently pinned broker public key (base64 SPKI DER).
@@ -136,6 +156,13 @@ func (c *Client) runOnce(ctx context.Context) error {
 	c.hookBaseURL = ""
 	c.hookMu.Unlock()
 
+	// Reset the broker protocol version on every reconnect so SupportsOAuth
+	// only returns true while a broker is actually connected and after the
+	// handshake has observed its advertised protocol.
+	c.protoMu.Lock()
+	c.brokerProtocol = 0
+	c.protoMu.Unlock()
+
 	// Apply a timeout to the dial + handshake phase.
 	dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
 	defer cancel()
@@ -176,19 +203,21 @@ func (c *Client) handshake(ctx context.Context, conn *websocket.Conn, sendMu *sy
 	}
 
 	ts := time.Now().Unix()
-	sig, err := signChallenge(c.identity.PrivateKey, nonceBytes, ts)
+	sig, err := signChallenge(c.identity.SignKey, nonceBytes, ts)
 	if err != nil {
 		return fmt.Errorf("sign challenge: %w", err)
 	}
 
-	pubKeyB64 := base64.StdEncoding.EncodeToString(c.identity.UncompressedPublicKey())
+	signPubB64 := base64.StdEncoding.EncodeToString(c.identity.SignPublicKey())
+	decryptPubB64 := base64.StdEncoding.EncodeToString(c.identity.DecryptPublicKey())
 
 	hello, err := encodeMsg(helloMsg{
-		Type:      msgHello,
-		UUID:      c.identity.UUID,
-		PubKey:    pubKeyB64,
-		Sig:       base64.StdEncoding.EncodeToString(sig),
-		Timestamp: ts,
+		Type:          msgHello,
+		UUID:          c.identity.UUID,
+		PubKey:        signPubB64,
+		DecryptPubKey: decryptPubB64,
+		Sig:           base64.StdEncoding.EncodeToString(sig),
+		Timestamp:     ts,
 	})
 	if err != nil {
 		return fmt.Errorf("encode hello: %w", err)
@@ -215,6 +244,21 @@ func (c *Client) handshake(ctx context.Context, conn *websocket.Conn, sendMu *sy
 		c.hookMu.Lock()
 		c.hookBaseURL = w.URL
 		c.hookMu.Unlock()
+
+		// Broker protocol version (issue #104). An advertised protocol < 2
+		// (or an absent field) means the broker does not understand the
+		// split sign/decrypt key and will encrypt OAuth deliveries to the
+		// SignKey pubkey, which the daemon cannot decrypt with DecryptKey.
+		// The WSS relay path is unaffected — it only uses SignKey for the
+		// ECDSA handshake, which the broker can still verify.
+		c.protoMu.Lock()
+		c.brokerProtocol = w.Protocol
+		c.protoMu.Unlock()
+		if w.Protocol < 2 {
+			c.log.Warn("relay: broker advertises pre-split protocol — OAuth IPC paths disabled",
+				zap.Int("broker_protocol", w.Protocol),
+				zap.Int("required", 2))
+		}
 
 		// TOFU broker pubkey pinning: on first connect, store the broker's
 		// signing pubkey. On reconnect, verify it hasn't changed.
