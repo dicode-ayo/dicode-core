@@ -4,13 +4,14 @@ name: WebUI Example
 description: |
   A full-featured web dashboard served as a webhook task. Demonstrates the
   dicode webhook UI pattern: open /hooks/webui in a browser to see the SPA;
-  the dicode.js SDK is injected automatically. Auth is enforced client-side
-  via the dc-auth-overlay component — unauthenticated API calls receive 401
-  and the overlay prompts for login without a full redirect.
+  the dicode.js SDK is injected automatically. Auth is enforced at the
+  webhook layer (trigger.auth: true) — unauthenticated browser GETs are
+  redirected to /login?next=/hooks/webui with a return-to-origin flow.
 runtime: deno
 
 trigger:
   webhook: /hooks/webui
+  auth: true
 
 params:
   action:

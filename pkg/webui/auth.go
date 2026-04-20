@@ -46,7 +46,36 @@ func (s *Server) webhookAuthGuard(w http.ResponseWriter, r *http.Request, next h
 		jsonErr(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	escaped := url.QueryEscape(r.URL.RequestURI())
+	http.Redirect(w, r, "/login?next="+escaped, http.StatusSeeOther)
+}
+
+// isSafeNextPath returns true when next is a same-origin, path-only URL
+// suitable for use as a redirect target. Rejects empty strings, non-leading-
+// slash values, protocol-relative URLs (//foo), URLs containing a backslash
+// (Windows-style separator confusion), and anything with a scheme or host.
+// This is a same-origin check, not a path-normalisation check: validated
+// values may still contain %-encoded bytes that are URI-legal but surprising
+// (e.g. %00). Callers writing validated values into filesystem paths or
+// logs must apply their own escaping.
+func isSafeNextPath(next string) bool {
+	if next == "" || next[0] != '/' {
+		return false
+	}
+	if strings.HasPrefix(next, "//") || strings.HasPrefix(next, "/\\") {
+		return false
+	}
+	if strings.ContainsAny(next, "\\\r\n") {
+		return false
+	}
+	u, err := url.Parse(next)
+	if err != nil {
+		return false
+	}
+	if u.Scheme != "" || u.Host != "" || u.Opaque != "" {
+		return false
+	}
+	return true
 }
 
 // hasValidSession returns true if r carries a valid in-memory session cookie
@@ -178,6 +207,7 @@ func isPublicPath(path string) bool {
 	switch {
 	case path == "/api/auth/login",
 		path == "/api/auth/refresh",
+		path == "/login",
 		path == "/dicode.js",
 		path == "/dicode-oauth-broadcast.js",
 		strings.HasPrefix(path, "/hooks/"):

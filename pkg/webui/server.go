@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"io"
 	"net/http"
 	"net/url"
@@ -310,6 +311,7 @@ func (s *Server) Handler() http.Handler {
 	// Auth endpoints — always public (login flow must be reachable without session).
 	r.Post("/api/auth/login", s.apiSecretsUnlock)
 	r.Post("/api/auth/refresh", s.apiAuthRefresh)
+	r.Get("/login", s.handleLoginPage)
 
 	// Webhook passthrough — auth via per-task HMAC secret or optional session cookie.
 	// When a task sets trigger.auth: true, a valid dicode session is required for
@@ -600,6 +602,37 @@ var allowedFiles = map[string]bool{
 	"index.html": true, "style.css": true, "script.js": true,
 }
 
+// safeTaskFilePath resolves filename inside taskDir with belt-and-suspenders
+// path validation. Callers already gate on allowedFiles (an exact-match
+// allowlist), but this function adds a second layer that static analysers
+// recognise as a path-injection sanitiser:
+//
+//  1. Reject filenames containing any path separator or parent reference.
+//  2. After Clean+Join, assert the absolute result is still rooted in the
+//     absolute form of taskDir (filepath.Rel returns a path with no leading
+//     "..").
+//
+// Returns an error when the candidate escapes taskDir.
+func safeTaskFilePath(taskDir, filename string) (string, error) {
+	if filename == "" ||
+		strings.ContainsAny(filename, `/\`) ||
+		filename == "." || filename == ".." ||
+		filepath.Base(filename) != filename ||
+		filepath.Clean(filename) != filename {
+		return "", fmt.Errorf("invalid filename")
+	}
+	absDir, err := filepath.Abs(taskDir)
+	if err != nil {
+		return "", fmt.Errorf("task dir abs: %w", err)
+	}
+	joined := filepath.Join(absDir, filename)
+	rel, err := filepath.Rel(absDir, joined)
+	if err != nil || rel == "." || strings.HasPrefix(rel, "..") || strings.ContainsRune(rel, filepath.Separator) {
+		return "", fmt.Errorf("path escapes task dir")
+	}
+	return joined, nil
+}
+
 func (s *Server) apiGetFile(w http.ResponseWriter, r *http.Request) {
 	id, filename := taskIDParam(r), chi.URLParam(r, "filename")
 	if !allowedFiles[filename] {
@@ -611,7 +644,12 @@ func (s *Server) apiGetFile(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "task not found", http.StatusNotFound)
 		return
 	}
-	b, err := os.ReadFile(filepath.Join(spec.TaskDir, filename))
+	path, err := safeTaskFilePath(spec.TaskDir, filename)
+	if err != nil {
+		jsonErr(w, "invalid filename", http.StatusBadRequest)
+		return
+	}
+	b, err := os.ReadFile(path)
 	if err != nil {
 		jsonErr(w, "file not found", http.StatusNotFound)
 		return
@@ -632,6 +670,11 @@ func (s *Server) apiSaveFile(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "task not found", http.StatusNotFound)
 		return
 	}
+	path, err := safeTaskFilePath(spec.TaskDir, filename)
+	if err != nil {
+		jsonErr(w, "invalid filename", http.StatusBadRequest)
+		return
+	}
 
 	// Accept either plain text body or form value "content"
 	var content string
@@ -647,7 +690,7 @@ func (s *Server) apiSaveFile(w http.ResponseWriter, r *http.Request) {
 		content = r.FormValue("content")
 	}
 
-	if err := os.WriteFile(filepath.Join(spec.TaskDir, filename), []byte(content), 0600); err != nil {
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
 		jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -741,9 +784,13 @@ func (s *Server) apiSaveTrigger(w http.ResponseWriter, r *http.Request) {
 
 const sessionCookie = "dicode_secrets_sess"
 
-// apiSecretsUnlock accepts {"password":"...","trust":true} and issues a
-// session cookie. When trust=true a long-lived device cookie is also issued so
-// the browser is remembered across restarts (trusted-browser feature).
+// apiSecretsUnlock accepts {"password":"...","trust":true,"next":"/path"} and
+// issues a session cookie. When trust=true a long-lived device cookie is also
+// issued so the browser is remembered across restarts (trusted-browser feature).
+// HTML form posts (Content-Type application/x-www-form-urlencoded) receive a
+// 303 redirect to the validated next path (or /hooks/webui). JSON posts always
+// receive a JSON response; when next is present and safe it is echoed back so
+// the SPA can navigate to it.
 func (s *Server) apiSecretsUnlock(w http.ResponseWriter, r *http.Request) {
 	ip := clientIP(r, s.cfg.Server.TrustProxy)
 	if !s.limiter.allow(ip) {
@@ -751,34 +798,286 @@ func (s *Server) apiSecretsUnlock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var body struct {
-		Password string `json:"password"`
-		Trust    bool   `json:"trust"` // request a long-lived device token
+	isForm := isFormRequest(r)
+
+	var password, nextPath string
+	var trust bool
+	if isForm {
+		if err := r.ParseForm(); err != nil {
+			s.loginError(w, r, "invalid form", http.StatusBadRequest, "")
+			return
+		}
+		if !validateCSRF(r) {
+			s.log.Warn("login form rejected: csrf token missing or mismatch",
+				zap.String("ip", ip))
+			s.loginError(w, r, "session expired — please reload the login page", http.StatusForbidden, "")
+			return
+		}
+		password = r.PostFormValue("password")
+		trust = r.PostFormValue("trust") != ""
+		nextPath = r.PostFormValue("next")
+	} else {
+		var body struct {
+			Password string `json:"password"`
+			Trust    bool   `json:"trust"`
+			Next     string `json:"next,omitempty"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			jsonErr(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		password = body.Password
+		trust = body.Trust
+		nextPath = body.Next
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		jsonErr(w, "invalid JSON", http.StatusBadRequest)
-		return
+
+	safeNext := ""
+	if nextPath != "" {
+		if isSafeNextPath(nextPath) {
+			safeNext = nextPath
+		} else {
+			s.log.Warn("rejecting unsafe next path on login", zap.String("next", nextPath))
+		}
 	}
 
 	expected := s.resolvePassphrase(r.Context())
-	if expected != "" && subtle.ConstantTimeCompare([]byte(body.Password), []byte(expected)) != 1 {
-		jsonErr(w, "incorrect password", http.StatusUnauthorized)
+	if expected != "" && subtle.ConstantTimeCompare([]byte(password), []byte(expected)) != 1 {
+		s.loginError(w, r, "incorrect password", http.StatusUnauthorized, safeNext)
 		return
 	}
 
 	token := s.sessions.issue()
 	setSessionCookie(w, token)
 
-	// Issue a trusted-device token when the client explicitly requests it.
-	if body.Trust && s.dbSessions != nil {
+	if trust && s.dbSessions != nil {
 		ua := r.Header.Get("User-Agent")
 		if devToken, err := s.dbSessions.issueDeviceToken(r.Context(), ip, ua); err == nil {
 			setDeviceCookie(w, devToken)
 		}
 	}
 
-	jsonOK(w, map[string]string{"status": "ok"})
+	if isForm {
+		target := safeNext
+		if target == "" {
+			target = "/hooks/webui"
+		}
+		http.Redirect(w, r, target, http.StatusSeeOther)
+		return
+	}
+
+	resp := map[string]string{"status": "ok"}
+	if safeNext != "" {
+		resp["next"] = safeNext
+	}
+	jsonOK(w, resp)
 }
+
+func (s *Server) loginError(w http.ResponseWriter, r *http.Request, msg string, code int, safeNext string) {
+	if !isFormRequest(r) {
+		jsonErr(w, msg, code)
+		return
+	}
+	csrf, err := s.issueCSRFToken(w)
+	if err != nil {
+		s.log.Error("login error render: failed to issue csrf token", zap.Error(err))
+		jsonErr(w, msg, code)
+		return
+	}
+	body, err := renderLoginPage(s.loginTitle(safeNext), safeNext, csrf, msg)
+	if err != nil {
+		s.log.Error("login error render: template execute", zap.Error(err))
+		jsonErr(w, msg, code)
+		return
+	}
+	setLoginPageHeaders(w)
+	w.WriteHeader(code)
+	_, _ = w.Write(body)
+}
+
+func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
+	next := r.URL.Query().Get("next")
+	if next != "" && !isSafeNextPath(next) {
+		s.log.Warn("rejecting unsafe next on login page", zap.String("next", next))
+		next = ""
+	}
+	csrf, err := s.issueCSRFToken(w)
+	if err != nil {
+		s.log.Error("login page: failed to issue csrf token", zap.Error(err))
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	body, err := renderLoginPage(s.loginTitle(next), next, csrf, "")
+	if err != nil {
+		s.log.Error("login page: template execute", zap.Error(err))
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	setLoginPageHeaders(w)
+	_, _ = w.Write(body)
+}
+
+// isFormRequest returns true when the request body is a browser-style form
+// submission (application/x-www-form-urlencoded or multipart/form-data).
+func isFormRequest(r *http.Request) bool {
+	ct := r.Header.Get("Content-Type")
+	return strings.HasPrefix(ct, "application/x-www-form-urlencoded") ||
+		strings.HasPrefix(ct, "multipart/form-data")
+}
+
+// setLoginPageHeaders applies defence-in-depth headers on any response that
+// renders the login form. Clickjacking prevention (XFO + frame-ancestors),
+// no-referrer to keep the `next` path from leaking to upstream origins, and
+// a CSP that allows only same-origin subresources plus inline styles.
+func setLoginPageHeaders(w http.ResponseWriter) {
+	h := w.Header()
+	h.Set("Content-Type", "text/html; charset=utf-8")
+	h.Set("X-Frame-Options", "DENY")
+	h.Set("Content-Security-Policy",
+		"default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'none'; "+
+			"img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+	h.Set("Referrer-Policy", "no-referrer")
+}
+
+const csrfCookie = "dicode_csrf"
+
+// issueCSRFToken generates a fresh CSRF token, sets it as a same-site cookie,
+// and returns the raw value for embedding in a form's hidden _csrf field.
+// The double-submit pattern: the cookie travels only on same-origin requests
+// (SameSite=Strict), so a cross-site POST cannot include the cookie — and
+// without it validateCSRF rejects the request.
+//
+// The Secure attribute is set whenever TLS is configured (cfg.Server.TLSCert
+// non-empty). Set it unconditionally and plain-HTTP localhost loses the
+// cookie entirely, breaking the login flow; skip it and HTTPS deployments
+// are vulnerable to cookie leak over any downgrade. Conditional on TLS
+// config is the pragmatic middle ground.
+func (s *Server) issueCSRFToken(w http.ResponseWriter) (string, error) {
+	token, err := randomToken()
+	if err != nil {
+		return "", err
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     csrfCookie,
+		Value:    token,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   s.cfg.Server.TLSCertFile != "",
+		SameSite: http.SameSiteStrictMode,
+	})
+	return token, nil
+}
+
+// validateCSRF enforces the double-submit cookie on a form POST. The cookie
+// value (set by a prior /login GET) must match the form's _csrf field.
+// Call only after r.ParseForm() has run. Constant-time compare.
+func validateCSRF(r *http.Request) bool {
+	c, err := r.Cookie(csrfCookie)
+	if err != nil || c.Value == "" {
+		return false
+	}
+	got := r.PostFormValue("_csrf")
+	if got == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(c.Value), []byte(got)) == 1
+}
+
+func (s *Server) loginTitle(next string) string {
+	if next == "" {
+		return "Sign in to dicode"
+	}
+	path := next
+	if i := strings.IndexAny(path, "?#"); i >= 0 {
+		path = path[:i]
+	}
+	if !strings.HasPrefix(path, "/hooks/") {
+		return "Sign in to dicode"
+	}
+	slug := strings.TrimPrefix(path, "/hooks/")
+	if i := strings.Index(slug, "/"); i >= 0 {
+		slug = slug[:i]
+	}
+	if slug == "" {
+		return "Sign in to dicode"
+	}
+	for _, spec := range s.registry.All() {
+		wp := spec.Trigger.Webhook
+		if wp == "" {
+			continue
+		}
+		if wp == "/hooks/"+slug || strings.HasPrefix(wp, "/hooks/"+slug+"/") {
+			label := spec.Name
+			if label == "" {
+				label = spec.ID
+			}
+			if spec.Description != "" {
+				return "Sign in to " + label + " — " + spec.Description
+			}
+			return "Sign in to " + label
+		}
+	}
+	return "Sign in to dicode"
+}
+
+// loginPageTpl is compiled once at init time. html/template applies context-
+// aware auto-escaping so every {{.X}} is safe in its surrounding markup:
+// .Title goes into <title> (body text), .Err into body text, .Next and .CSRF
+// into attribute values. Static analysers (CodeQL go/reflected-xss) recognise
+// html/template as a sanitising sink.
+var loginPageTpl = template.Must(template.New("login").Parse(`<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{.Title}}</title>
+<style>` + loginCSS + `</style>
+</head>
+<body>
+<main class="dc-login">
+<form method="post" action="/api/auth/login" enctype="application/x-www-form-urlencoded">
+<h1>{{.Title}}</h1>
+{{if .Err}}<p class="dc-err" role="alert">{{.Err}}</p>{{end}}
+<label>Password<input type="password" name="password" autocomplete="current-password" autofocus required></label>
+<label class="dc-check"><input type="checkbox" name="trust" value="1">Trust this browser</label>
+<input type="hidden" name="next" value="{{.Next}}">
+<input type="hidden" name="_csrf" value="{{.CSRF}}">
+<button type="submit">Sign in</button>
+</form>
+</main>
+</body>
+</html>`))
+
+type loginPageData struct {
+	Title string
+	Next  string
+	CSRF  string
+	Err   string
+}
+
+// renderLoginPage produces the login form HTML with contextual auto-escaping
+// via html/template. Returns nil + error only on template execution failure,
+// which indicates a bug in the template itself (not a user-input issue).
+func renderLoginPage(title, next, csrf, errMsg string) ([]byte, error) {
+	var b strings.Builder
+	if err := loginPageTpl.Execute(&b, loginPageData{
+		Title: title, Next: next, CSRF: csrf, Err: errMsg,
+	}); err != nil {
+		return nil, err
+	}
+	return []byte(b.String()), nil
+}
+
+const loginCSS = `body{margin:0;font:16px/1.4 system-ui,sans-serif;background:#0f1115;color:#e6e8eb;display:grid;place-items:center;min-height:100vh}` +
+	`.dc-login{width:100%;max-width:360px;padding:2rem}` +
+	`.dc-login h1{font-size:1.25rem;margin:0 0 1.25rem;font-weight:600}` +
+	`.dc-login form{display:flex;flex-direction:column;gap:0.75rem}` +
+	`.dc-login label{display:flex;flex-direction:column;gap:0.25rem;font-size:0.85rem;color:#9aa1ab}` +
+	`.dc-login input[type=password]{padding:0.6rem 0.7rem;border:1px solid #2a2f38;background:#181b21;color:#e6e8eb;border-radius:4px;font:inherit}` +
+	`.dc-login input[type=password]:focus{outline:2px solid #3b82f6;border-color:transparent}` +
+	`.dc-login .dc-check{flex-direction:row;align-items:center;gap:0.5rem;color:#cbd0d7}` +
+	`.dc-login button{margin-top:0.5rem;padding:0.65rem;background:#3b82f6;border:0;color:#fff;font:inherit;font-weight:600;border-radius:4px;cursor:pointer}` +
+	`.dc-login button:hover{background:#2563eb}` +
+	`.dc-err{margin:0 0 0.5rem;padding:0.5rem 0.7rem;background:#3a1a1a;border:1px solid #6b2424;color:#fca5a5;border-radius:4px;font-size:0.85rem}`
 
 func (s *Server) apiListSecrets(w http.ResponseWriter, r *http.Request) {
 	if s.secretsMgr == nil {

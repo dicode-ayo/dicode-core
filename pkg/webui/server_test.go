@@ -2,10 +2,13 @@ package webui
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -299,7 +302,7 @@ func TestWebhook_AuthTask_BlocksUnauthenticated(t *testing.T) {
 
 	h := srv.Handler()
 
-	// Unauthenticated GET with browser Accept header → redirect to / (which redirects to /hooks/webui).
+	// Unauthenticated GET with browser Accept header → redirect to /login with next pointing back at the original path.
 	getReq := httptest.NewRequest(http.MethodGet, "/hooks/priv", nil)
 	getReq.Header.Set("Accept", "text/html,application/xhtml+xml,*/*")
 	getW := httptest.NewRecorder()
@@ -307,8 +310,8 @@ func TestWebhook_AuthTask_BlocksUnauthenticated(t *testing.T) {
 	if getW.Code != http.StatusSeeOther {
 		t.Errorf("unauthenticated browser GET: expected 303, got %d", getW.Code)
 	}
-	if loc := getW.Header().Get("Location"); loc != "/" {
-		t.Errorf("unauthenticated browser GET: expected redirect to /, got %q", loc)
+	if loc := getW.Header().Get("Location"); loc != "/login?next=%2Fhooks%2Fpriv" {
+		t.Errorf("unauthenticated browser GET: expected redirect to /login?next=%%2Fhooks%%2Fpriv, got %q", loc)
 	}
 
 	// Unauthenticated GET without browser Accept header → 401 JSON.
@@ -455,6 +458,451 @@ func TestAPI_Metrics_Concurrent(t *testing.T) {
 	for i, code := range codes {
 		if code != http.StatusOK {
 			t.Errorf("goroutine %d: expected 200, got %d", i, code)
+		}
+	}
+}
+
+// TestWebhookAuth_RedirectsToLoginWithNext reproduces dicode-core#96: an unauth
+// browser GET to an auth-protected webhook path must redirect to /login with
+// the original URI preserved in ?next=..., NOT to / (which then rolls to
+// /hooks/webui, stranding the user).
+func TestWebhookAuth_RedirectsToLoginWithNext(t *testing.T) {
+	srv := newAuthServer(t, "hunter2")
+	registerWebhookTask(t, srv.registry, srv, "ai-hook", "/hooks/ai", true)
+	h := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/hooks/ai", nil)
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,*/*")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303, got %d", w.Code)
+	}
+	loc := w.Header().Get("Location")
+	if loc != "/login?next=%2Fhooks%2Fai" {
+		t.Fatalf("expected Location=/login?next=%%2Fhooks%%2Fai, got %q", loc)
+	}
+	if loc == "/hooks/webui" || loc == "/" {
+		t.Fatalf("bug #96 regression: unauthenticated webhook redirected to %q", loc)
+	}
+}
+
+func TestWebhookAuth_RedirectsPreservesQueryAndFragment(t *testing.T) {
+	srv := newAuthServer(t, "hunter2")
+	registerWebhookTask(t, srv.registry, srv, "ai-hook", "/hooks/ai", true)
+	h := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/hooks/ai?q=1&r=2", nil)
+	req.Header.Set("Accept", "text/html")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	loc := w.Header().Get("Location")
+	if loc != "/login?next=%2Fhooks%2Fai%3Fq%3D1%26r%3D2" {
+		t.Fatalf("query string not preserved in next: got %q", loc)
+	}
+}
+
+func TestLoginPage_Served_WhenPathIsPublic(t *testing.T) {
+	srv := newAuthServer(t, "hunter2")
+	h := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/login", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	body := w.Body.String()
+	if !contains(body, `action="/api/auth/login"`) {
+		t.Error("login form must POST to /api/auth/login")
+	}
+	if !contains(body, `name="password"`) {
+		t.Error("login form must contain a password field")
+	}
+	if !contains(body, `name="next"`) {
+		t.Error("login form must contain a hidden next field")
+	}
+	if !contains(body, `name="_csrf"`) {
+		t.Error("login form must contain a hidden _csrf field")
+	}
+	var csrfSet bool
+	for _, c := range w.Result().Cookies() {
+		if c.Name == csrfCookie {
+			csrfSet = true
+			if !c.HttpOnly {
+				t.Error("csrf cookie must be HttpOnly")
+			}
+			if c.SameSite != http.SameSiteStrictMode {
+				t.Error("csrf cookie must be SameSite=Strict")
+			}
+		}
+	}
+	if !csrfSet {
+		t.Error("csrf cookie must be issued on /login GET")
+	}
+}
+
+// prepareLoginPost performs a GET /login to obtain a CSRF cookie and token,
+// then builds a POST request carrying both. Returned request has the cookie
+// attached and the form body includes the matching _csrf field.
+func prepareLoginPost(t *testing.T, h http.Handler, form url.Values) *http.Request {
+	t.Helper()
+	getReq := httptest.NewRequest(http.MethodGet, "/login", nil)
+	getW := httptest.NewRecorder()
+	h.ServeHTTP(getW, getReq)
+	if getW.Code != http.StatusOK {
+		t.Fatalf("prepareLoginPost: GET /login returned %d", getW.Code)
+	}
+	var csrfCookieVal string
+	for _, c := range getW.Result().Cookies() {
+		if c.Name == csrfCookie {
+			csrfCookieVal = c.Value
+		}
+	}
+	if csrfCookieVal == "" {
+		t.Fatal("prepareLoginPost: no csrf cookie on /login GET")
+	}
+	token := extractCSRFFromHTML(t, getW.Body.String())
+	if token == "" {
+		t.Fatal("prepareLoginPost: no _csrf field in rendered form")
+	}
+	if form == nil {
+		form = url.Values{}
+	}
+	form.Set("_csrf", token)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(&http.Cookie{Name: csrfCookie, Value: csrfCookieVal})
+	return req
+}
+
+// extractCSRFFromHTML pulls the hidden _csrf value from the rendered login form.
+func extractCSRFFromHTML(t *testing.T, body string) string {
+	t.Helper()
+	const marker = `name="_csrf" value="`
+	i := strings.Index(body, marker)
+	if i < 0 {
+		return ""
+	}
+	rest := body[i+len(marker):]
+	end := strings.Index(rest, `"`)
+	if end < 0 {
+		return ""
+	}
+	return rest[:end]
+}
+
+func TestLoginPage_ShowsTaskNameForWebhookNext(t *testing.T) {
+	srv := newAuthServer(t, "hunter2")
+	spec := registerWebhookTask(t, srv.registry, srv, "ai-hook", "/hooks/ai", true)
+	spec.Name = "AI Assistant"
+	spec.Description = "Chat with your tasks"
+	h := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/login?next=%2Fhooks%2Fai", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	body := w.Body.String()
+	if !contains(body, "AI Assistant") {
+		t.Errorf("expected task name in login page, got:\n%s", body)
+	}
+	if !contains(body, "Chat with your tasks") {
+		t.Errorf("expected task description in login page, got:\n%s", body)
+	}
+}
+
+func TestLoginPage_GenericTitleForUnknownNext(t *testing.T) {
+	srv := newAuthServer(t, "hunter2")
+	h := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/login", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if !contains(w.Body.String(), "Sign in to dicode") {
+		t.Error("expected generic fallback title")
+	}
+}
+
+func TestLogin_FormPost_RedirectsToNext(t *testing.T) {
+	srv := newAuthServer(t, "hunter2")
+	registerWebhookTask(t, srv.registry, srv, "ai-hook", "/hooks/ai", true)
+	h := srv.Handler()
+
+	form := url.Values{}
+	form.Set("password", "hunter2")
+	form.Set("next", "/hooks/ai")
+
+	req := prepareLoginPost(t, h, form)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303, got %d: %s", w.Code, w.Body)
+	}
+	if loc := w.Header().Get("Location"); loc != "/hooks/ai" {
+		t.Errorf("expected Location=/hooks/ai, got %q", loc)
+	}
+	var foundSession bool
+	for _, c := range w.Result().Cookies() {
+		if c.Name == sessionCookie {
+			foundSession = true
+		}
+	}
+	if !foundSession {
+		t.Error("expected a session cookie to be set on form login")
+	}
+}
+
+func TestLogin_FormPost_Trust_IssuesDeviceCookie(t *testing.T) {
+	srv := newAuthServer(t, "hunter2")
+	registerWebhookTask(t, srv.registry, srv, "ai-hook", "/hooks/ai", true)
+	h := srv.Handler()
+
+	form := url.Values{}
+	form.Set("password", "hunter2")
+	form.Set("trust", "1")
+	form.Set("next", "/hooks/ai")
+
+	req := prepareLoginPost(t, h, form)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303, got %d: %s", w.Code, w.Body)
+	}
+	var foundSession, foundDevice bool
+	for _, c := range w.Result().Cookies() {
+		if c.Name == sessionCookie {
+			foundSession = true
+		}
+		if c.Name == deviceCookie {
+			foundDevice = true
+		}
+	}
+	if !foundSession {
+		t.Error("expected session cookie on trusted form login")
+	}
+	if !foundDevice {
+		t.Error("expected device cookie on trusted form login")
+	}
+}
+
+func TestLogin_FormPost_WrongPassword_RendersErrorHTML(t *testing.T) {
+	srv := newAuthServer(t, "hunter2")
+	h := srv.Handler()
+
+	form := url.Values{}
+	form.Set("password", "nope")
+	form.Set("next", "/hooks/ai")
+
+	req := prepareLoginPost(t, h, form)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Errorf("expected HTML response, got Content-Type=%q", ct)
+	}
+	if !contains(w.Body.String(), "incorrect password") {
+		t.Error("expected error message in HTML body")
+	}
+}
+
+func TestLogin_FormPost_MissingCSRFCookie_Rejected(t *testing.T) {
+	srv := newAuthServer(t, "hunter2")
+	h := srv.Handler()
+
+	form := url.Values{}
+	form.Set("password", "hunter2")
+	form.Set("_csrf", "decafbad") // form has a value, cookie missing
+
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", w.Code, w.Body)
+	}
+	for _, c := range w.Result().Cookies() {
+		if c.Name == sessionCookie {
+			t.Error("session cookie must not be issued when CSRF check fails")
+		}
+	}
+}
+
+func TestLogin_FormPost_CSRFMismatch_Rejected(t *testing.T) {
+	srv := newAuthServer(t, "hunter2")
+	h := srv.Handler()
+
+	form := url.Values{}
+	form.Set("password", "hunter2")
+	form.Set("_csrf", "not-the-cookie-value")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(&http.Cookie{Name: csrfCookie, Value: "cookie-value"})
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", w.Code, w.Body)
+	}
+	for _, c := range w.Result().Cookies() {
+		if c.Name == sessionCookie {
+			t.Error("session cookie must not be issued when CSRF mismatches")
+		}
+	}
+}
+
+func TestLogin_JSONPost_EchoesSafeNext(t *testing.T) {
+	srv := newAuthServer(t, "hunter2")
+	h := srv.Handler()
+
+	body := strings.NewReader(`{"password":"hunter2","next":"/hooks/ai"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body)
+	}
+	var resp map[string]string
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp["next"] != "/hooks/ai" {
+		t.Errorf("expected next=/hooks/ai in response, got %q", resp["next"])
+	}
+}
+
+func TestLogin_FormPost_OpenRedirect_Attempts_FallbackToDefault(t *testing.T) {
+	srv := newAuthServer(t, "hunter2")
+	h := srv.Handler()
+
+	abuses := []string{
+		"//evil.com",
+		"//evil.com/foo",
+		"///evil.com",
+		"https://evil.com/",
+		"http://evil.com/foo",
+		"javascript:alert(1)",
+		"/\\evil.com",
+		"/path\\with\\backslash",
+		"\\/evil.com",
+		"/\r\nLocation:http://evil",
+	}
+	for i, bad := range abuses {
+		form := url.Values{}
+		form.Set("password", "hunter2")
+		form.Set("next", bad)
+
+		req := prepareLoginPost(t, h, form)
+		req.RemoteAddr = fmt.Sprintf("10.9.0.%d:1234", i+1)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+
+		if w.Code != http.StatusSeeOther {
+			t.Errorf("next=%q: expected 303 (fallback), got %d", bad, w.Code)
+			continue
+		}
+		loc := w.Header().Get("Location")
+		if loc != "/hooks/webui" {
+			t.Errorf("next=%q: expected fallback to /hooks/webui, got %q (open redirect!)", bad, loc)
+		}
+	}
+}
+
+func TestLoginPage_SetsSecurityHeaders(t *testing.T) {
+	srv := newAuthServer(t, "hunter2")
+	h := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/login", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if got := w.Header().Get("X-Frame-Options"); got != "DENY" {
+		t.Errorf("X-Frame-Options: want DENY, got %q", got)
+	}
+	csp := w.Header().Get("Content-Security-Policy")
+	if !strings.Contains(csp, "frame-ancestors 'none'") {
+		t.Errorf("CSP must set frame-ancestors 'none', got %q", csp)
+	}
+	if !strings.Contains(csp, "script-src 'none'") {
+		t.Errorf("CSP must set script-src 'none' on login page, got %q", csp)
+	}
+	if got := w.Header().Get("Referrer-Policy"); got != "no-referrer" {
+		t.Errorf("Referrer-Policy: want no-referrer, got %q", got)
+	}
+}
+
+func TestLogin_JSONPost_OpenRedirect_Dropped(t *testing.T) {
+	srv := newAuthServer(t, "hunter2")
+	h := srv.Handler()
+
+	body := strings.NewReader(`{"password":"hunter2","next":"//evil.com/steal"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]string
+	_ = json.NewDecoder(w.Body).Decode(&resp)
+	if _, ok := resp["next"]; ok {
+		t.Errorf("unsafe next must not be echoed, got %q", resp["next"])
+	}
+}
+
+func TestLoginPage_RejectsUnsafeNextInQueryString(t *testing.T) {
+	srv := newAuthServer(t, "hunter2")
+	h := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/login?next=%2F%2Fevil.com", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if contains(w.Body.String(), "evil.com") {
+		t.Error("unsafe next leaked into rendered login page")
+	}
+	if !contains(w.Body.String(), `name="next" value=""`) {
+		t.Error("expected empty hidden next field when next is unsafe")
+	}
+}
+
+func TestIsSafeNextPath(t *testing.T) {
+	ok := []string{"/", "/hooks/ai", "/hooks/ai/sub", "/hooks/ai?x=1", "/hooks/ai#frag"}
+	for _, p := range ok {
+		if !isSafeNextPath(p) {
+			t.Errorf("expected safe: %q", p)
+		}
+	}
+	bad := []string{
+		"", "foo", "foo/bar", "//evil.com", "///evil.com",
+		"http://evil.com", "https://evil.com", "javascript:alert(1)",
+		"/\\evil.com", "/foo\\bar", "\\/evil.com",
+		"/foo\r\nLocation:x",
+	}
+	for _, p := range bad {
+		if isSafeNextPath(p) {
+			t.Errorf("expected unsafe: %q", p)
 		}
 	}
 }

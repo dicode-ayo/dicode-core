@@ -144,6 +144,12 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 			webhookPaths[spec.ID] = spec.Trigger.Webhook
 			webhookMu.Unlock()
 		}
+		if spec.Trigger.WebhookAuth && !cfg.Server.Auth {
+			log.Warn("task declares trigger.auth:true but server.auth is disabled — any password logs in",
+				zap.String("task", spec.ID),
+				zap.String("webhook", spec.Trigger.Webhook),
+				zap.String("hint", "set server.auth: true in dicode.yaml to require a real passphrase"))
+		}
 	}
 	rec.OnUnregister = func(id string) {
 		webhookMu.Lock()
