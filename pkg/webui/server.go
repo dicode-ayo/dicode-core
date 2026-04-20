@@ -756,15 +756,19 @@ func (s *Server) apiSecretsUnlock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ct := r.Header.Get("Content-Type")
-	isForm := strings.HasPrefix(ct, "application/x-www-form-urlencoded") ||
-		strings.HasPrefix(ct, "multipart/form-data")
+	isForm := isFormRequest(r)
 
 	var password, nextPath string
 	var trust bool
 	if isForm {
 		if err := r.ParseForm(); err != nil {
 			s.loginError(w, r, "invalid form", http.StatusBadRequest, "")
+			return
+		}
+		if !validateCSRF(r) {
+			s.log.Warn("login form rejected: csrf token missing or mismatch",
+				zap.String("ip", ip))
+			s.loginError(w, r, "session expired — please reload the login page", http.StatusForbidden, "")
 			return
 		}
 		password = r.PostFormValue("password")
@@ -827,16 +831,19 @@ func (s *Server) apiSecretsUnlock(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) loginError(w http.ResponseWriter, r *http.Request, msg string, code int, safeNext string) {
-	ct := r.Header.Get("Content-Type")
-	isForm := strings.HasPrefix(ct, "application/x-www-form-urlencoded") ||
-		strings.HasPrefix(ct, "multipart/form-data")
-	if !isForm {
+	if !isFormRequest(r) {
 		jsonErr(w, msg, code)
 		return
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	csrf, err := issueCSRFToken(w)
+	if err != nil {
+		s.log.Error("login error render: failed to issue csrf token", zap.Error(err))
+		jsonErr(w, msg, code)
+		return
+	}
+	setLoginPageHeaders(w)
 	w.WriteHeader(code)
-	_, _ = w.Write(renderLoginPage(s.loginTitle(safeNext), safeNext, msg))
+	_, _ = w.Write(renderLoginPage(s.loginTitle(safeNext), safeNext, csrf, msg))
 }
 
 func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
@@ -845,8 +852,73 @@ func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 		s.log.Warn("rejecting unsafe next on login page", zap.String("next", next))
 		next = ""
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write(renderLoginPage(s.loginTitle(next), next, ""))
+	csrf, err := issueCSRFToken(w)
+	if err != nil {
+		s.log.Error("login page: failed to issue csrf token", zap.Error(err))
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	setLoginPageHeaders(w)
+	_, _ = w.Write(renderLoginPage(s.loginTitle(next), next, csrf, ""))
+}
+
+// isFormRequest returns true when the request body is a browser-style form
+// submission (application/x-www-form-urlencoded or multipart/form-data).
+func isFormRequest(r *http.Request) bool {
+	ct := r.Header.Get("Content-Type")
+	return strings.HasPrefix(ct, "application/x-www-form-urlencoded") ||
+		strings.HasPrefix(ct, "multipart/form-data")
+}
+
+// setLoginPageHeaders applies defence-in-depth headers on any response that
+// renders the login form. Clickjacking prevention (XFO + frame-ancestors),
+// no-referrer to keep the `next` path from leaking to upstream origins, and
+// a CSP that allows only same-origin subresources plus inline styles.
+func setLoginPageHeaders(w http.ResponseWriter) {
+	h := w.Header()
+	h.Set("Content-Type", "text/html; charset=utf-8")
+	h.Set("X-Frame-Options", "DENY")
+	h.Set("Content-Security-Policy",
+		"default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'none'; "+
+			"img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+	h.Set("Referrer-Policy", "no-referrer")
+}
+
+const csrfCookie = "dicode_csrf"
+
+// issueCSRFToken generates a fresh CSRF token, sets it as a same-site cookie,
+// and returns the raw value for embedding in a form's hidden _csrf field.
+// The double-submit pattern: the cookie travels only on same-origin requests
+// (SameSite=Strict), so a cross-site POST cannot include the cookie — and
+// without it validateCSRF rejects the request.
+func issueCSRFToken(w http.ResponseWriter) (string, error) {
+	token, err := randomToken()
+	if err != nil {
+		return "", err
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     csrfCookie,
+		Value:    token,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+	})
+	return token, nil
+}
+
+// validateCSRF enforces the double-submit cookie on a form POST. The cookie
+// value (set by a prior /login GET) must match the form's _csrf field.
+// Call only after r.ParseForm() has run. Constant-time compare.
+func validateCSRF(r *http.Request) bool {
+	c, err := r.Cookie(csrfCookie)
+	if err != nil || c.Value == "" {
+		return false
+	}
+	got := r.PostFormValue("_csrf")
+	if got == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(c.Value), []byte(got)) == 1
 }
 
 func (s *Server) loginTitle(next string) string {
@@ -886,7 +958,7 @@ func (s *Server) loginTitle(next string) string {
 	return "Sign in to dicode"
 }
 
-func renderLoginPage(title, next, errMsg string) []byte {
+func renderLoginPage(title, next, csrf, errMsg string) []byte {
 	var b strings.Builder
 	b.WriteString(`<!doctype html><html lang="en"><head><meta charset="utf-8">`)
 	b.WriteString(`<meta name="viewport" content="width=device-width,initial-scale=1">`)
@@ -906,6 +978,8 @@ func renderLoginPage(title, next, errMsg string) []byte {
 	b.WriteString(`<label class="dc-check"><input type="checkbox" name="trust" value="1">Trust this browser</label>`)
 	b.WriteString(`<input type="hidden" name="next" value="`)
 	b.WriteString(htmlEscape(next))
+	b.WriteString(`"><input type="hidden" name="_csrf" value="`)
+	b.WriteString(htmlEscape(csrf))
 	b.WriteString(`"><button type="submit">Sign in</button></form></main></body></html>`)
 	return []byte(b.String())
 }

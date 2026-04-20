@@ -50,10 +50,14 @@ func (s *Server) webhookAuthGuard(w http.ResponseWriter, r *http.Request, next h
 	http.Redirect(w, r, "/login?next="+escaped, http.StatusSeeOther)
 }
 
-// isSafeNextPath returns true when next is a path-only URL on this origin.
-// Rejects empty strings, non-leading-slash values, protocol-relative URLs
-// (//foo), URLs containing a backslash (Windows-style separator confusion),
-// and anything with a scheme or host.
+// isSafeNextPath returns true when next is a same-origin, path-only URL
+// suitable for use as a redirect target. Rejects empty strings, non-leading-
+// slash values, protocol-relative URLs (//foo), URLs containing a backslash
+// (Windows-style separator confusion), and anything with a scheme or host.
+// This is a same-origin check, not a path-normalisation check: validated
+// values may still contain %-encoded bytes that are URI-legal but surprising
+// (e.g. %00). Callers writing validated values into filesystem paths or
+// logs must apply their own escaping.
 func isSafeNextPath(next string) bool {
 	if next == "" || next[0] != '/' {
 		return false
