@@ -601,6 +601,37 @@ var allowedFiles = map[string]bool{
 	"index.html": true, "style.css": true, "script.js": true,
 }
 
+// safeTaskFilePath resolves filename inside taskDir with belt-and-suspenders
+// path validation. Callers already gate on allowedFiles (an exact-match
+// allowlist), but this function adds a second layer that static analysers
+// recognise as a path-injection sanitiser:
+//
+//  1. Reject filenames containing any path separator or parent reference.
+//  2. After Clean+Join, assert the absolute result is still rooted in the
+//     absolute form of taskDir (filepath.Rel returns a path with no leading
+//     "..").
+//
+// Returns an error when the candidate escapes taskDir.
+func safeTaskFilePath(taskDir, filename string) (string, error) {
+	if filename == "" ||
+		strings.ContainsAny(filename, `/\`) ||
+		filename == "." || filename == ".." ||
+		filepath.Base(filename) != filename ||
+		filepath.Clean(filename) != filename {
+		return "", fmt.Errorf("invalid filename")
+	}
+	absDir, err := filepath.Abs(taskDir)
+	if err != nil {
+		return "", fmt.Errorf("task dir abs: %w", err)
+	}
+	joined := filepath.Join(absDir, filename)
+	rel, err := filepath.Rel(absDir, joined)
+	if err != nil || rel == "." || strings.HasPrefix(rel, "..") || strings.ContainsRune(rel, filepath.Separator) {
+		return "", fmt.Errorf("path escapes task dir")
+	}
+	return joined, nil
+}
+
 func (s *Server) apiGetFile(w http.ResponseWriter, r *http.Request) {
 	id, filename := taskIDParam(r), chi.URLParam(r, "filename")
 	if !allowedFiles[filename] {
@@ -612,7 +643,12 @@ func (s *Server) apiGetFile(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "task not found", http.StatusNotFound)
 		return
 	}
-	b, err := os.ReadFile(filepath.Join(spec.TaskDir, filename))
+	path, err := safeTaskFilePath(spec.TaskDir, filename)
+	if err != nil {
+		jsonErr(w, "invalid filename", http.StatusBadRequest)
+		return
+	}
+	b, err := os.ReadFile(path)
 	if err != nil {
 		jsonErr(w, "file not found", http.StatusNotFound)
 		return
@@ -633,6 +669,11 @@ func (s *Server) apiSaveFile(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "task not found", http.StatusNotFound)
 		return
 	}
+	path, err := safeTaskFilePath(spec.TaskDir, filename)
+	if err != nil {
+		jsonErr(w, "invalid filename", http.StatusBadRequest)
+		return
+	}
 
 	// Accept either plain text body or form value "content"
 	var content string
@@ -648,7 +689,7 @@ func (s *Server) apiSaveFile(w http.ResponseWriter, r *http.Request) {
 		content = r.FormValue("content")
 	}
 
-	if err := os.WriteFile(filepath.Join(spec.TaskDir, filename), []byte(content), 0600); err != nil {
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
 		jsonErr(w, "save failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
