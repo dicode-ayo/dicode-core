@@ -78,9 +78,6 @@ type Runtime struct {
 	secret         []byte
 	engine         ipc.EngineRunner
 	gateway        *ipc.Gateway
-	aiBaseURL      string
-	aiModel        string
-	aiAPIKey       string
 	oauthIdentity  *relay.Identity
 	oauthURL       string
 	oauthPending   *relay.PendingSessions
@@ -121,13 +118,6 @@ func (rt *Runtime) SetOAuthBroker(id *relay.Identity, baseURL string, pending *r
 	rt.oauthURL = baseURL
 	rt.oauthPending = pending
 	rt.brokerPubkeyFn = brokerPubkeyFn
-}
-
-// SetAIConfig configures the AI provider details passed to tasks via dicode.get_config.
-func (rt *Runtime) SetAIConfig(baseURL, model, apiKey string) {
-	rt.aiBaseURL = baseURL
-	rt.aiModel = model
-	rt.aiAPIKey = apiKey
 }
 
 // Run executes a task script and returns the result.
@@ -213,7 +203,7 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 
 	mergedParams := mergeParams(spec.Params, opts.Params)
 
-	srv := ipc.New(runID, spec.ID, rt.secret, rt.registry, rt.db, mergedParams, opts.Input, rt.log, spec, rt.engine, rt.aiBaseURL, rt.aiModel, rt.aiAPIKey)
+	srv := ipc.New(runID, spec.ID, rt.secret, rt.registry, rt.db, mergedParams, opts.Input, rt.log, spec, rt.engine)
 	srv.SetGateway(rt.gateway)
 	srv.SetSecrets(rt.secretsManager)
 	if rt.oauthIdentity != nil {

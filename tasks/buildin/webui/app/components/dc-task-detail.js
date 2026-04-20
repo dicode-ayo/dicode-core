@@ -25,6 +25,7 @@ class DcTaskDetail extends LitElement {
     _aiOpen:          { state: true },
     _aiHistory:       { state: true },
     _aiStatus:        { state: true },
+    _aiSessionId:     { state: true },
     _currentFile:     { state: true },
   };
 
@@ -33,7 +34,7 @@ class DcTaskDetail extends LitElement {
     this._task = null; this._runs = null; this._error = null;
     this._triggerOpen = false; this._triggerType = 'manual';
     this._editorOpen = false; this._editorStatus = ''; this._currentFile = null;
-    this._aiOpen = false; this._aiHistory = []; this._aiStatus = '';
+    this._aiOpen = false; this._aiHistory = []; this._aiStatus = ''; this._aiSessionId = '';
     this._editor = null;
     this._relayBase = '';
     this._offStarted = null; this._offFinished = null;
@@ -192,31 +193,43 @@ class DcTaskDetail extends LitElement {
     const aiMsg = { role: 'ai', text: '' };
     this._aiHistory = [...this._aiHistory, aiMsg];
 
-    const res = await fetch(`/api/tasks/${encodeURIComponent(this.taskid)}/ai/stream`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: msg }),
-    });
-
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop();
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        try {
-          const d = JSON.parse(line.slice(6));
-          if (d.type === 'chunk') { aiMsg.text += d.text; this._aiHistory = [...this._aiHistory]; }
-          if (d.type === 'file_write' && this._editor && d.filename === this._currentFile) {
-            this._editor.setValue(d.content);
-          }
-        } catch(_) {}
-      }
+    // Gather context for the agent: current task id and current editor buffer.
+    // We ship these as extra JSON fields alongside the required `prompt`.
+    // The ai-agent task exposes its file-writing as a "tool" that the model
+    // chooses to call, NOT as an automatic side-effect of every reply — so
+    // the chat now surfaces the agent's text reply only. Users copy code
+    // back into the editor manually (or ask the agent to use write_task_file
+    // tool once that permission is granted). This is the trade-off for
+    // replacing the bespoke SSE streaming endpoint with the generic
+    // ai-agent task-based webhook.
+    const ctx = {
+      task_id: this.taskid,
+    };
+    if (this._editor && this._currentFile) {
+      ctx.current_file = this._currentFile;
+      ctx.current_file_content = this._editor.getValue();
     }
+
+    let reply = '';
+    try {
+      const res = await fetch('/hooks/ai/dicodai', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt: msg,
+          session_id: this._aiSessionId || '',
+          ...ctx,
+        }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      this._aiSessionId = data.session_id || this._aiSessionId || '';
+      reply = data.reply == null ? '(no reply — check dicodai provider config)' : String(data.reply);
+    } catch (e) {
+      reply = `Error: ${e.message}`;
+    }
+    aiMsg.text = reply;
+    this._aiHistory = [...this._aiHistory];
     this._aiStatus = '';
     this.updateComplete.then(() => {
       const h = this.querySelector('#ai-history');

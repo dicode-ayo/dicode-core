@@ -41,10 +41,6 @@ type Server struct {
 	brokerPubkeyFn func() string          // returns the TOFU-pinned broker pubkey (base64 SPKI DER)
 	log            *zap.Logger
 
-	aiBaseURL string
-	aiModel   string
-	aiAPIKey  string
-
 	gateway *Gateway // optional; enables http.register for daemon tasks
 
 	ctx        context.Context
@@ -82,7 +78,6 @@ func New(
 	log *zap.Logger,
 	spec *task.Spec,
 	engine EngineRunner,
-	aiBaseURL, aiModel, aiAPIKey string,
 ) *Server {
 	if runID == "" {
 		panic("ipc.New: runID must not be empty")
@@ -101,9 +96,6 @@ func New(
 		spec:         spec,
 		engine:       engine,
 		log:          log,
-		aiBaseURL:    aiBaseURL,
-		aiModel:      aiModel,
-		aiAPIKey:     aiAPIKey,
 		retCh:        make(chan any, 1),
 		logFlushCh:   make(chan struct{}),
 		logFlushDone: make(chan struct{}),
@@ -160,9 +152,6 @@ func (s *Server) Start(ctx context.Context) (socketPath, token string, err error
 		}
 		if dp.GetRuns {
 			caps = append(caps, CapRunsList)
-		}
-		if dp.GetConfig {
-			caps = append(caps, CapConfigRead)
 		}
 		if dp.SecretsWrite {
 			caps = append(caps, CapSecretsWrite)
@@ -525,24 +514,6 @@ func (s *Server) handleConn(conn net.Conn) {
 				continue
 			}
 			reply(req.ID, runs, "")
-
-		case "dicode.get_config":
-			if !hasCap(caps, CapConfigRead) {
-				reply(req.ID, nil, "ipc: permission denied (config.read)")
-				continue
-			}
-			if req.Section != "ai" {
-				reply(req.ID, nil, fmt.Sprintf("ipc: unsupported config section %q", req.Section))
-				continue
-			}
-			// apiKey is never sent to task scripts — it must be fetched
-			// from the environment or secrets store by the task itself.
-			// Returning it here would expose the credential to any task
-			// regardless of whether it needs AI access.
-			reply(req.ID, map[string]string{
-				"baseURL": s.aiBaseURL,
-				"model":   s.aiModel,
-			}, "")
 
 		// ── dicode.secrets_* ──────────────────────────────────────────────
 

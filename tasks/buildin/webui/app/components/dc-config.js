@@ -9,7 +9,6 @@ class DcConfig extends LitElement {
     _cfg:       { state: true },
     _raw:       { state: true },
     _error:     { state: true },
-    _aiStatus:  { state: true },
     _srvStatus: { state: true },
     _srcStatus: { state: true },
     _cfgStatus: { state: true },
@@ -19,7 +18,7 @@ class DcConfig extends LitElement {
   constructor() {
     super();
     this._cfg = null; this._raw = null; this._error = null;
-    this._aiStatus = ''; this._srvStatus = ''; this._srcStatus = ''; this._cfgStatus = '';
+    this._srvStatus = ''; this._srcStatus = ''; this._cfgStatus = '';
     this._srcType = 'local';
     this._editor = null;
   }
@@ -59,19 +58,6 @@ class DcConfig extends LitElement {
         language: 'yaml', theme: monacoTheme(), fontSize: 13, minimap: { enabled: false },
       });
     });
-  }
-
-  async _saveAI() {
-    this._aiStatus = 'Saving…';
-    try {
-      await post('/api/settings/ai', {
-        base_url:    this.querySelector('#ai-base-url')?.value,
-        model:       this.querySelector('#ai-model')?.value,
-        api_key_env: this.querySelector('#ai-key-env')?.value,
-        api_key:     this.querySelector('#ai-key-val')?.value,
-      });
-      this._aiStatus = 'Saved ✓'; setTimeout(() => { this._aiStatus = ''; }, 2000);
-    } catch(e) { this._aiStatus = 'Error: ' + e.message; }
   }
 
   async _saveServer() {
@@ -121,7 +107,6 @@ class DcConfig extends LitElement {
     if (this._error) return html`<p style="color:red">Error: ${this._error}</p>`;
     if (!this._cfg) return html`<div class="meta">Loading…</div>`;
 
-    const ai      = this._cfg.AI      || this._cfg.ai      || {};
     const srv     = this._cfg.Server  || this._cfg.server  || {};
     const db      = this._cfg.Database|| this._cfg.database|| {};
     const sources = this._cfg.Sources || this._cfg.sources || [];
@@ -130,30 +115,6 @@ class DcConfig extends LitElement {
 
     return html`
       <h1>Configuration</h1>
-
-      <!-- AI -->
-      <div class="card">
-        <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:0.75rem">
-          <h2 style="margin:0">AI</h2>
-          <span style="font-size:0.82rem;color:var(--muted)">${this._aiStatus}</span>
-        </div>
-        <div class="cfg-form">
-          <div class="field"><label>Endpoint (base URL)</label>
-            <input id="ai-base-url" .value=${ai.BaseURL || ai.base_url || ''} placeholder="leave blank for OpenAI">
-            <div class="hint">OpenAI: leave blank &nbsp;|&nbsp; Claude: https://api.anthropic.com/v1 &nbsp;|&nbsp; Ollama: http://localhost:11434/v1</div>
-          </div>
-          <div class="field"><label>Model</label>
-            <input id="ai-model" .value=${ai.Model || ai.model || ''} placeholder="gpt-4o">
-          </div>
-          <div class="field"><label>API key env var</label>
-            <input id="ai-key-env" .value=${ai.APIKeyEnv || ai.api_key_env || ''} placeholder="OPENAI_API_KEY">
-          </div>
-          <div class="field"><label>API key (direct value)</label>
-            <input id="ai-key-val" type="password" placeholder="paste to set; leave blank to keep current">
-          </div>
-          <button class="btn" @click=${() => this._saveAI()}>&#128190; Save AI settings</button>
-        </div>
-      </div>
 
       <!-- Server -->
       <div class="card">

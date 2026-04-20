@@ -533,22 +533,17 @@ Wire notifier into JS runtime's `notify` global and trigger engine (on-failure/o
 
 ---
 
-## Post-MVP — AI chat in task editor ✅
+## Post-MVP — AI chat in task editor ✅ (refactored)
 
 **Goal**: AI-powered task development directly in the Monaco editor.
 
-**Implemented**: `pkg/webui/ai.go` — OpenAI-compatible Chat Completions streaming endpoint.
+**Implemented via task-based AI**: the direct Go SSE endpoint (`pkg/webui/ai.go`) has been removed. The WebUI task-detail "AI" chat panel now POSTs to the `buildin/dicodai` webhook (`/hooks/ai/dicodai`) — a preset override of `buildin/ai-agent` preloaded with the `dicode-task-dev` and `dicode-basics` skills and defaulting to OpenAI.
 
-- Uses `github.com/openai/openai-go` SDK — compatible with OpenAI, Claude (via `api.anthropic.com/v1`), Ollama (`localhost:11434/v1`), and any OpenAI-compatible endpoint
-- `POST /api/tasks/{id}/ai/stream` — SSE endpoint; browser connects via `fetch` + `ReadableStream` (EventSource doesn't support POST)
-- Agentic loop: up to 6 turns; first turn streams, follow-up turns synchronous
-- `write_file` tool — AI writes `task.js`, `task.yaml`, `task.test.js` live to disk as tokens stream. Files update in the Monaco editor in real time via `file` SSE events
-- `ChatCompletionAccumulator.JustFinishedToolCall()` with `ParallelToolCalls: false` — fires file writes the instant each tool call finishes streaming
-- System prompt includes `pkg/agent/skill.md` + current file contents for full context
-- Monaco editor split layout: editor on left, AI chat panel on right (hidden until toggled). Purple **🤖 AI** button in toolbar. Ctrl+Enter to send
-- Minimal Markdown renderer for AI responses (code fences, inline code, bold)
+- `buildin/ai-agent` is a generic OpenAI-compatible chat agent (see `tasks/buildin/ai-agent/`) with tool-use loop, skill loading, and per-session conversation persistence in KV.
+- `buildin/dicodai` is a preset (in `tasks/buildin/taskset.yaml`) that preloads the task-developer skill and wires sensible OpenAI defaults.
+- The AI chat panel surfaces the agent's text reply only. File writes are no longer automatic — users copy code back to the editor manually.
 
-**Config UI**: AI settings editable in `/config` — endpoint, model, API key env var, direct API key value. Persisted to `dicode.yaml` without losing other keys.
+**Config**: the standalone `ai:` block in `dicode.yaml` was removed. Provider config lives per-task as ai-agent params (`model`, `base_url`, `api_key_env`) and can be overridden via taskset overrides. The `OPENAI_API_KEY` environment variable is all the `dicodai` preset needs to work.
 
 ---
 
@@ -916,4 +911,4 @@ The agent task gets the failed run logs as context and attempts a fix.
 | `task.yaml` agent fields | `agent.prompt`, `agent.skills`, `agent.mcp[]`, `agent.allowed_tasks[]` |
 | MCP scope enforcement | Per-task MCP allowlist enforced by a proxy in the engine |
 | `dicode.stream()` global | WebSocket subscription global for daemon tasks watching events |
-| Agent skill update | Add `runtime: agent` docs + security notes to `pkg/agent/skill.md` |
+| Agent skill update | Add `runtime: agent` docs + security notes to `tasks/skills/dicode-task-dev.md` |

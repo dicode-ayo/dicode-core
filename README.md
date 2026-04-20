@@ -379,7 +379,6 @@ Run and await other tasks, inspect the registry, and read config. Requires `secu
 const result = await dicode.run_task("send-report", { channel: "#ops" })
 const tasks = await dicode.list_tasks()
 const runs = await dicode.get_runs("send-report", { limit: 5 })
-const ai = await dicode.get_config("ai")   // { baseURL, model, apiKey }
 
 // Secrets management (Deno only)
 await dicode.secrets_set("MY_TOKEN", "new-value")
@@ -391,7 +390,6 @@ await dicode.secrets_delete("OLD_TOKEN")
 result = dicode.run_task("send-report", {"channel": "#ops"})
 tasks = dicode.list_tasks()
 runs = dicode.get_runs("send-report", limit=5)
-ai = dicode.get_config("ai")
 ```
 
 ```yaml
@@ -622,11 +620,9 @@ When editing an existing task, the Monaco editor has a built-in AI panel. Ask qu
 
 > "Rewrite this to batch the API calls in groups of 10"
 > "Add error handling for rate limit responses"
-> "Write a task.test.js for this"
+> "Write a task.test.ts for this"
 
-The AI can read the current file content and write files directly using a `write_file` tool — changes appear in the editor instantly. The conversation streams in real time via SSE.
-
-Works with any OpenAI-compatible endpoint — OpenAI, Anthropic (Claude), Ollama, or any other provider that speaks the OpenAI API format.
+The panel calls the `buildin/dicodai` task (an `ai-agent` preset preloaded with the `dicode-task-dev` and `dicode-basics` skills, defaulting to OpenAI). With `OPENAI_API_KEY` set in your environment it works out of the box. The current task id and the file you're editing are sent along as context, and the agent's text reply appears in the chat — copy any generated code back into the editor yourself. Swap providers by overriding the dicodai preset in your own taskset, just like the `ai-agent-openai` / `ai-agent-ollama` / `ai-agent-groq` examples.
 
 ### Chat with an agent that calls your tasks
 
@@ -958,9 +954,6 @@ const tasks = await dicode.list_tasks()
 
 // Fetch recent run history for a specific task
 const runs = await dicode.get_runs("nightly-backup", { limit: 5 })
-
-// Get AI provider config (resolved server-side — API key never exposed to git)
-const ai = await dicode.get_config("ai")
 ```
 
 ### `dicode` global reference
@@ -970,7 +963,6 @@ const ai = await dicode.get_config("ai")
 | `run_task(id, params?)` | `await dicode.run_task(...)` | `dicode.run_task(...)` | Run another task and await its result |
 | `list_tasks()` | `await dicode.list_tasks()` | `dicode.list_tasks()` | List all registered tasks |
 | `get_runs(id, opts?)` | `await dicode.get_runs(...)` | `dicode.get_runs(...)` | Fetch recent run history |
-| `get_config(section)` | `await dicode.get_config(...)` | `dicode.get_config(...)` | Read daemon config (e.g. AI settings) |
 | `secrets_set(key, val)` | `await dicode.secrets_set(...)` | — | Store a secret (Deno only) |
 | `secrets_delete(key)` | `await dicode.secrets_delete(...)` | — | Delete a secret (Deno only) |
 
@@ -1249,14 +1241,13 @@ A skill file gives any AI agent the full context needed to develop dicode tasks 
 
 ### Install
 
-The skill is embedded in the `dicode` binary at `pkg/agent/skill.md`. To use it with an AI agent, copy it into your project:
+The skill lives at `tasks/skills/dicode-task-dev.md`. It is loaded automatically by the `buildin/dicodai` task (a preset of `buildin/ai-agent` preloaded with `dicode-task-dev,dicode-basics`) so the WebUI chat panel already benefits from it. To use it with a separate AI agent (Claude Code, your own chat UI, etc.) copy it into your project:
 
 ```bash
-# The skill file is embedded in the binary — extract it from the source
-cat pkg/agent/skill.md >> CLAUDE.md
+cat tasks/skills/dicode-task-dev.md >> CLAUDE.md
 ```
 
-CLI commands for `dicode agent skill show/install` are planned but not yet implemented.
+Add more skills by dropping markdown files with YAML frontmatter into `tasks/skills/` and listing them in the ai-agent's `skills` param.
 
 ### What the skill teaches the agent
 
@@ -1586,15 +1577,14 @@ dicode/
 │   ├── secrets/        # provider chain: local encrypted (ChaCha20) + env fallback
 │   ├── relay/          # WebSocket relay client + self-hosted server
 │   ├── mcp/            # MCP server (JSON-RPC 2.0) + MCP client for daemon tasks
-│   ├── agent/          # embedded agent skill file (markdown)
 │   ├── notify/         # Notifier interface + ntfy provider
 │   ├── tray/           # system tray icon (fyne.io/systray)
 │   ├── onboarding/     # first-run config generation
 │   ├── webui/          # HTTP server, REST API, auth, WebSocket hub
 │   └── service/        # OS service management (interface defined, impls planned)
 ├── tasks/
-│   ├── buildin/        # built-in tasks (webui, tray, alert, notify, ai-agent)
-│   ├── skills/         # shared markdown "skills" loaded into agent prompts
+│   ├── buildin/        # built-in tasks (webui, tray, alert, notify, ai-agent, dicodai)
+│   ├── skills/         # shared markdown "skills" loaded into agent prompts (dicode-basics, dicode-task-dev)
 │   ├── auth/           # legacy per-provider OAuth tasks (self-hosted flow)
 │   └── examples/       # 13 example tasks (all runtimes and trigger types)
 ├── docs/               # comprehensive documentation (33 files)

@@ -161,9 +161,6 @@ func mergeDicodePerms(base, overlay *task.DicodePermissions) *task.DicodePermiss
 	if overlay.GetRuns {
 		out.GetRuns = true
 	}
-	if overlay.GetConfig {
-		out.GetConfig = true
-	}
 	if overlay.SecretsWrite {
 		out.SecretsWrite = true
 	}

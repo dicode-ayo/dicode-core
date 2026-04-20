@@ -5,7 +5,6 @@
 # hello-python — showcases the async Python SDK globals added in PR #52:
 #   - async def main() entry point (auto-detected by the runtime)
 #   - kv.*_async, params.*_async, log.*_async, output.*_async
-#   - dicode.get_config_async (returns baseURL + model, no apiKey)
 #   - httpx async HTTP call as a realistic async dependency example
 
 import httpx
@@ -24,10 +23,6 @@ async def main():
         await log.info_async(f"Previous run greeted: {prev}")
     await kv.set_async("previous_name", name)
 
-    # dicode.get_config — safe: returns baseURL + model only, no apiKey.
-    ai_cfg = await dicode.get_config_async("ai")
-    await log.info_async(f"AI config: model={ai_cfg.get('model')}, baseURL={ai_cfg.get('baseURL')}")
-
     # Async HTTP call with httpx (PEP 723 inline dep above).
     async with httpx.AsyncClient(timeout=5) as client:
         resp = await client.get("https://httpbin.org/get", params={"name": name})
@@ -43,4 +38,4 @@ async def main():
         data={"name": name, "count": count},
     )
 
-    return {"greeting": greeting, "origin": origin, "aiModel": ai_cfg.get("model")}
+    return {"greeting": greeting, "origin": origin}

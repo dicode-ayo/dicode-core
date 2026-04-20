@@ -1,3 +1,8 @@
+---
+name: dicode-task-dev
+description: Mandatory workflow, rules, and conventions for developing dicode tasks — trigger/permissions schema, test format, and common mistakes.
+---
+
 # Dicode Task Developer
 
 You are an AI agent developing automation tasks for a dicode instance.
@@ -80,7 +85,6 @@ permissions:
       - "github-mcp"
     list_tasks: true               # allow dicode.list_tasks()
     get_runs: true                 # allow dicode.get_runs()
-    get_config: true               # allow dicode.get_config()
     secrets_write: true            # allow dicode.secrets_set() and dicode.secrets_delete() — write-only
 ```
 
@@ -184,11 +188,6 @@ const tasks = await dicode.list_tasks()
 
 // Get recent run history (requires permissions.dicode.get_runs: true)
 const runs = await dicode.get_runs("send-report", { limit: 5 })
-
-// Get AI provider config — returns baseURL and model only, never the API key
-// (requires permissions.dicode.get_config: true)
-const ai = await dicode.get_config("ai")
-// { baseURL, model }
 
 // Write or replace a secret (requires permissions.dicode.secrets_write: true)
 // Tasks can NEVER read secrets back — use permissions.env for secret injection
@@ -312,7 +311,6 @@ spec:
 | Calling `dicode.run_task()` without `permissions.dicode.tasks` | Add `permissions.dicode.tasks` listing callable task IDs; calls are blocked otherwise |
 | Calling `mcp.call()` without `permissions.dicode.mcp` | Add `permissions.dicode.mcp` listing the daemon task IDs |
 | Calling `dicode.list_tasks()` without `permissions.dicode.list_tasks: true` | Add `permissions.dicode.list_tasks: true`; denied by default |
-| Calling `dicode.get_config()` without `permissions.dicode.get_config: true` | Add `permissions.dicode.get_config: true`; denied by default |
 | Using `security:` top-level field | `security:` is removed — use `permissions.dicode:` instead |
 | Calling `dicode.secrets_set()` without `permissions.dicode.secrets_write: true` | Add `permissions.dicode.secrets_write: true`; denied by default |
 | Trying to read a secret via `dicode.secrets_get()` | No such method — secrets are injected at startup via `permissions.env`; tasks never read them at runtime |

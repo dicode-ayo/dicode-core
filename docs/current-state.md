@@ -27,7 +27,6 @@ Full configuration loading. All structs defined and validated:
 - `SecretsConfig`, `SecretProviderConfig`
 - `NotificationsConfig`, `NotifyProviderConfig`
 - `ServerConfig` — port, secret, **auth** (global auth wall), **allowed_origins** (CORS allowlist), **trust_proxy** (XFF trust flag), MCP, tray
-- `AIConfig` — `BaseURL`, `Model`, `APIKey`, `APIKeyEnv`
 - **`DefaultsConfig`** — `OnFailureChain string` — global failure handler task ID
 - `applyDefaults()` with sensible defaults for all fields
 - `validate()` checking required fields per source type
@@ -86,11 +85,6 @@ Full TaskSet architecture — hierarchical task composition inspired by ArgoCD A
 - **Auth**: protected by `requireAPIKey` middleware when `server.auth: true`. Bearer token format: `dck_<32 random bytes hex>`.
 - `New(registry, sourceLister)` constructor.
 - **`pkg/mcp/client/`** — lightweight HTTP JSON-RPC 2.0 MCP client: `New(port int)`, `ListTools(ctx)`, `Call(ctx, tool, args)`. Used by the socket server to proxy `mcp.list_tools` / `mcp.call` requests from task scripts to daemon MCP tasks.
-
-### `pkg/agent/` ✅
-
-- `skill.go` — `//go:embed skill.md` + exported `Skill` string
-- `skill.md` — complete agent skill document (workflow, rules, globals reference, test format, common mistakes)
 
 ### `pkg/relay/` ✅
 
@@ -232,7 +226,7 @@ Unified IPC protocol replacing the old per-runtime `pkg/runtime/deno/server/`. T
 Injected before every Deno task script. Updated for unified IPC protocol:
 - Length-prefix framing (`readExact` + 4-byte LE header) replaces newline-delimited reads
 - Handshake on connect: reads `DICODE_TOKEN` from env, sends to server, validates response
-- All globals unchanged: `log`, `params`, `env`, `kv`, `input`, `output`, **`dicode`** (`run_task`, `list_tasks`, `get_runs`, `get_config`), **`mcp`** (`list_tools`, `call`)
+- All globals unchanged: `log`, `params`, `env`, `kv`, `input`, `output`, **`dicode`** (`run_task`, `list_tasks`, `get_runs`), **`mcp`** (`list_tools`, `call`)
 
 ### `pkg/runtime/python/sdk/dicode_sdk.py` ✅
 
@@ -242,7 +236,7 @@ Injected before every Python task script via `buildWrapper()`. Updated for unifi
 - Handshake on connect: sends `DICODE_TOKEN`, validates server response
 - `async def main()` detected via `asyncio.iscoroutinefunction` and run with `asyncio.run()`; return value captured as `result`; writer closed gracefully after `_set_return`
 - `_call_async(req)` — bridges `_async_call` into the caller's event loop via `asyncio.wrap_future`; no thread pool
-- Full `_async` variants on all globals: `log.*_async`, `params.get_async/all_async`, `kv.*_async`, `dicode.*_async` (including `get_config_async`), `mcp.*_async`
+- Full `_async` variants on all globals: `log.*_async`, `params.get_async/all_async`, `kv.*_async`, `dicode.*_async`, `mcp.*_async`
 - Globals: `log`, `params`, `env`, `kv`, `input`, `output`, **`dicode`**, **`mcp`**
 
 ### `pkg/daemon/` ✅
@@ -328,7 +322,7 @@ CLI dispatcher + daemon mode in one binary:
 | `docs/` | ✅ This documentation tree |
 | `docs/security-plan.md` | ✅ Security design document (phases 1–4 implemented + hardened) |
 | `docs/concepts/security.md` | ✅ Security developer reference (implementation details, DB schema, config reference) |
-| `pkg/agent/skill.md` | ✅ Agent skill document |
+| `tasks/skills/dicode-task-dev.md` | ✅ Agent skill document (consumed by `buildin/ai-agent` and the `dicodai` preset via the `skills` param) |
 
 ---
 

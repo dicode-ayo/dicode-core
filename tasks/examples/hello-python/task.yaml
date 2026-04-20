@@ -3,8 +3,8 @@ kind: Task
 name: Hello Python
 description: |
   Async Python task showcasing PR #52 SDK additions: async def main(),
-  params/kv/log/output *_async variants, dicode.get_config_async, and
-  PEP 723 inline dependencies (httpx).
+  params/kv/log/output *_async variants, and PEP 723 inline dependencies
+  (httpx).
 runtime: python
 
 trigger:
