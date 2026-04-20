@@ -151,6 +151,18 @@ type FSEntry struct {
 	Permission string `yaml:"permission"` // "r" | "w" | "rw"
 }
 
+// IfMissing declares a prereq task to run when a secret-backed env entry is
+// not present in the secrets store at dispatch time. The trigger engine fires
+// the prereq synchronously in chain mode before invoking the runtime; if it
+// succeeds, env resolution retries. If the prereq also fails (e.g. an OAuth
+// flow needs interactive user authorization), its error — typically carrying
+// an authorize URL — surfaces as the original task's failure, which the UI
+// can render as a "setup required" call to action.
+type IfMissing struct {
+	Task   string            `yaml:"task"              json:"task"`             // fully-qualified task id, e.g. "auth/openrouter-oauth"
+	Params map[string]string `yaml:"params,omitempty"  json:"params,omitempty"` // params forwarded to the prereq task (optional)
+}
+
 // EnvEntry declares one environment variable the task is allowed to access.
 // Supports four forms in YAML:
 //
@@ -166,12 +178,16 @@ type FSEntry struct {
 //   - secret: → secrets store only; run fails if key not found
 //   - from:   → host OS environment only (os.Getenv); injected as entry.Name
 //   - bare name (no secret/from/value) → allowlisted in --allow-env; script reads it from host env at runtime
+//
+// The optional `if_missing:` directive (only meaningful alongside `secret:`)
+// runs a prereq task when the secret is absent. See the IfMissing type.
 type EnvEntry struct {
-	Name     string `yaml:"name"               json:"name"`
-	From     string `yaml:"from,omitempty"     json:"from,omitempty"`     // host OS env var name to read and inject as Name
-	Secret   string `yaml:"secret,omitempty"   json:"secret,omitempty"`   // secrets store key to resolve and inject as Name
-	Value    string `yaml:"value,omitempty"    json:"value,omitempty"`    // literal value injection (taskset overrides)
-	Optional bool   `yaml:"optional,omitempty" json:"optional,omitempty"` // if true, missing secret → empty string instead of failure
+	Name      string     `yaml:"name"                  json:"name"`
+	From      string     `yaml:"from,omitempty"        json:"from,omitempty"`       // host OS env var name to read and inject as Name
+	Secret    string     `yaml:"secret,omitempty"      json:"secret,omitempty"`     // secrets store key to resolve and inject as Name
+	Value     string     `yaml:"value,omitempty"       json:"value,omitempty"`      // literal value injection (taskset overrides)
+	Optional  bool       `yaml:"optional,omitempty"    json:"optional,omitempty"`   // if true, missing secret → empty string instead of failure
+	IfMissing *IfMissing `yaml:"if_missing,omitempty"  json:"if_missing,omitempty"` // prereq task to run when Secret is absent
 }
 
 // UnmarshalYAML allows EnvEntry to decode from a plain string, "KEY=VALUE" string, or a mapping.

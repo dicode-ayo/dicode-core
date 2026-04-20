@@ -179,6 +179,7 @@ func isPublicPath(path string) bool {
 	case path == "/api/auth/login",
 		path == "/api/auth/refresh",
 		path == "/dicode.js",
+		path == "/dicode-oauth-broadcast.js",
 		strings.HasPrefix(path, "/hooks/"):
 		return true
 	}

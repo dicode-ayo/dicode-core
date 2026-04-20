@@ -339,6 +339,20 @@ func (s *Server) Handler() http.Handler {
 		_, _ = w.Write(b)
 	})
 
+	// dicode-oauth-broadcast.js — loaded from OAuth success pages to signal
+	// peer tabs that a secret has been stored. Public: the script carries
+	// no capabilities beyond posting a BroadcastChannel message whose
+	// contents are read from its own query string. See source for details.
+	r.Get("/dicode-oauth-broadcast.js", func(w http.ResponseWriter, req *http.Request) {
+		b, err := staticFS.ReadFile("static/dicode-oauth-broadcast.js")
+		if err != nil {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+		_, _ = w.Write(b)
+	})
+
 	// Everything below this point requires a valid session when auth is enabled.
 	r.Group(func(r chi.Router) {
 		r.Use(s.requireAuth)

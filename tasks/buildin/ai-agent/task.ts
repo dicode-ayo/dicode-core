@@ -421,12 +421,40 @@ export default async function main({ params, kv, dicode }: DicodeSdk) {
         }),
       ];
 
-      const resp = await client.chat.completions.create({
-        model,
-        messages: apiMessages,
-        tools: tools.length ? tools : undefined,
-        max_tokens: responseMaxTokens,
-      });
+      let resp;
+      try {
+        resp = await client.chat.completions.create({
+          model,
+          messages: apiMessages,
+          tools: tools.length ? tools : undefined,
+          max_tokens: responseMaxTokens,
+        });
+      } catch (e) {
+        // OpenAI SDK APIError carries the parsed response body and rate-limit
+        // headers. Log them before rethrowing so operators can distinguish
+        // "our-key quota exhausted" (x-ratelimit-remaining:0) from "upstream
+        // provider 429/503" (message contains "Provider returned error") from
+        // "malformed request" (400 + schema details).
+        const err = e as {
+          status?: number;
+          message?: string;
+          error?: unknown;
+          headers?: Record<string, string>;
+        };
+        if (err && typeof err === "object" && err.status) {
+          const rlHeaders: Record<string, string> = {};
+          if (err.headers) {
+            for (const [k, v] of Object.entries(err.headers)) {
+              if (/^(x-ratelimit-|retry-after$)/i.test(k)) rlHeaders[k] = v;
+            }
+          }
+          console.error(
+            `ai-agent: upstream ${err.status} — body=${JSON.stringify(err.error)} ` +
+              `rlHeaders=${JSON.stringify(rlHeaders)}`,
+          );
+        }
+        throw e;
+      }
 
       const choice = resp.choices[0]?.message;
       if (!choice) throw new Error("empty response from model");

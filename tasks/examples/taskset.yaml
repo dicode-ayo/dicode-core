@@ -127,3 +127,34 @@ spec:
           - GROQ_API_KEY
         net:
           - api.groq.com
+
+    ai-agent-openrouter:
+      ref:
+        path: ../buildin/ai-agent/task.yaml
+      overrides:
+        name: "AI Agent (OpenRouter — free)"
+        description: >
+          AI agent preset wired to OpenRouter with a free model that supports
+          tool calling. Authenticate once via the "OpenRouter OAuth" task
+          (auth/openrouter-oauth) — no app registration, no paste. The stored
+          OPENROUTER_API_KEY secret flows in automatically.
+
+          Default model is meta-llama/llama-3.3-70b-instruct:free — hosted
+          across multiple OpenRouter providers so it rarely 503s on free tier.
+          Swap via the `model` param for qwen/qwen3-coder:free (best for code),
+          qwen/qwen3-next-80b-a3b-instruct:free (262k ctx), or
+          openai/gpt-oss-120b:free (when the popular model isn't throttled).
+          Full list: https://openrouter.ai/models?max_price=0
+        trigger:
+          webhook: /hooks/ai/openrouter
+        params:
+          model: "meta-llama/llama-3.3-70b-instruct:free"
+          base_url: "https://openrouter.ai/api/v1"
+          api_key_env: "OPENROUTER_API_KEY"
+        env:
+          - name: OPENROUTER_API_KEY
+            secret: OPENROUTER_API_KEY
+            if_missing:
+              task: auth/openrouter-oauth
+        net:
+          - openrouter.ai

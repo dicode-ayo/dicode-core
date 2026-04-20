@@ -5,7 +5,7 @@ VERSION ?= dev
 GO      := $(shell which go 2>/dev/null || echo $(HOME)/.local/share/mise/shims/go)
 GOFLAGS := -ldflags "-X main.version=$(VERSION)"
 
-.PHONY: build test test-verbose test-race lint fmt clean run tidy help
+.PHONY: build test test-verbose test-race lint fmt format format-check clean run tidy help
 
 ## build: compile the dicode binary
 build:
@@ -34,6 +34,18 @@ tidy:
 ## fmt: format all Go source files
 fmt:
 	$(GO) fmt ./...
+
+## format: alias for fmt
+format: fmt
+
+## format-check: fail if any Go source file needs formatting (matches CI)
+format-check:
+	@unformatted=$$(gofmt -l .); \
+	if [ -n "$$unformatted" ]; then \
+		echo "The following files need formatting (run 'make format'):"; \
+		echo "$$unformatted"; \
+		exit 1; \
+	fi
 
 ## lint: format and vet all Go source files
 lint: fmt

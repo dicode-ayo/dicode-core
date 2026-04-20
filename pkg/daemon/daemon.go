@@ -239,6 +239,7 @@ func buildRuntimes(
 	}
 	eng := trigger.New(reg, denoRT, log)
 	eng.SetDB(database)
+	eng.SetSecrets(secretsChain)
 	// Config value first, env var overrides when set. 0 = unlimited. Always
 	// call SetMaxConcurrentTasks so an env override of "0" correctly clears
 	// a config-set cap, and so operators get observable confirmation of

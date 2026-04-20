@@ -200,6 +200,12 @@ export function authorizeHtml(opts: {
 }
 
 export function successHtml(name: string, secrets: string[]): string {
+  // Peer tabs waiting on this auth (chat UI, tool UIs) get notified via the
+  // /dicode-oauth-broadcast.js helper, which fires a BroadcastChannel
+  // message and an optional window.opener.postMessage. The helper must be
+  // loaded as an external script — the webui's CSP blocks inline <script>,
+  // so an inline version silently fails.
+  const keysParam = encodeURIComponent(secrets.join(","));
   return `
 <div style="font-family:system-ui,sans-serif;padding:2rem;max-width:480px">
   <h2 style="color:#1a7f37">${name} OAuth complete</h2>
@@ -208,5 +214,7 @@ export function successHtml(name: string, secrets: string[]): string {
   <p style="color:#666;font-size:.9em">
     Use in other tasks via <code>env: [{ name: TOKEN, secret: ${secrets[0]} }]</code>
   </p>
-</div>`;
+  <p style="color:#666;font-size:.9em">You can close this tab.</p>
+</div>
+<script src="/dicode-oauth-broadcast.js?keys=${keysParam}" defer></script>`;
 }
