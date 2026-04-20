@@ -310,6 +310,7 @@ func (s *Server) Handler() http.Handler {
 	// Auth endpoints — always public (login flow must be reachable without session).
 	r.Post("/api/auth/login", s.apiSecretsUnlock)
 	r.Post("/api/auth/refresh", s.apiAuthRefresh)
+	r.Get("/login", s.handleLoginPage)
 
 	// Webhook passthrough — auth via per-task HMAC secret or optional session cookie.
 	// When a task sets trigger.auth: true, a valid dicode session is required for
@@ -741,9 +742,13 @@ func (s *Server) apiSaveTrigger(w http.ResponseWriter, r *http.Request) {
 
 const sessionCookie = "dicode_secrets_sess"
 
-// apiSecretsUnlock accepts {"password":"...","trust":true} and issues a
-// session cookie. When trust=true a long-lived device cookie is also issued so
-// the browser is remembered across restarts (trusted-browser feature).
+// apiSecretsUnlock accepts {"password":"...","trust":true,"next":"/path"} and
+// issues a session cookie. When trust=true a long-lived device cookie is also
+// issued so the browser is remembered across restarts (trusted-browser feature).
+// HTML form posts (Content-Type application/x-www-form-urlencoded) receive a
+// 303 redirect to the validated next path (or /hooks/webui). JSON posts always
+// receive a JSON response; when next is present and safe it is echoed back so
+// the SPA can navigate to it.
 func (s *Server) apiSecretsUnlock(w http.ResponseWriter, r *http.Request) {
 	ip := clientIP(r, s.cfg.Server.TrustProxy)
 	if !s.limiter.allow(ip) {
@@ -751,33 +756,181 @@ func (s *Server) apiSecretsUnlock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var body struct {
-		Password string `json:"password"`
-		Trust    bool   `json:"trust"` // request a long-lived device token
+	ct := r.Header.Get("Content-Type")
+	isForm := strings.HasPrefix(ct, "application/x-www-form-urlencoded") ||
+		strings.HasPrefix(ct, "multipart/form-data")
+
+	var password, nextPath string
+	var trust bool
+	if isForm {
+		if err := r.ParseForm(); err != nil {
+			s.loginError(w, r, "invalid form", http.StatusBadRequest, "")
+			return
+		}
+		password = r.PostFormValue("password")
+		trust = r.PostFormValue("trust") != ""
+		nextPath = r.PostFormValue("next")
+	} else {
+		var body struct {
+			Password string `json:"password"`
+			Trust    bool   `json:"trust"`
+			Next     string `json:"next,omitempty"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			jsonErr(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		password = body.Password
+		trust = body.Trust
+		nextPath = body.Next
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		jsonErr(w, "invalid JSON", http.StatusBadRequest)
-		return
+
+	safeNext := ""
+	if nextPath != "" {
+		if isSafeNextPath(nextPath) {
+			safeNext = nextPath
+		} else {
+			s.log.Warn("rejecting unsafe next path on login", zap.String("next", nextPath))
+		}
 	}
 
 	expected := s.resolvePassphrase(r.Context())
-	if expected != "" && subtle.ConstantTimeCompare([]byte(body.Password), []byte(expected)) != 1 {
-		jsonErr(w, "incorrect password", http.StatusUnauthorized)
+	if expected != "" && subtle.ConstantTimeCompare([]byte(password), []byte(expected)) != 1 {
+		s.loginError(w, r, "incorrect password", http.StatusUnauthorized, safeNext)
 		return
 	}
 
 	token := s.sessions.issue()
 	setSessionCookie(w, token)
 
-	// Issue a trusted-device token when the client explicitly requests it.
-	if body.Trust && s.dbSessions != nil {
+	if trust && s.dbSessions != nil {
 		ua := r.Header.Get("User-Agent")
 		if devToken, err := s.dbSessions.issueDeviceToken(r.Context(), ip, ua); err == nil {
 			setDeviceCookie(w, devToken)
 		}
 	}
 
-	jsonOK(w, map[string]string{"status": "ok"})
+	if isForm {
+		target := safeNext
+		if target == "" {
+			target = "/hooks/webui"
+		}
+		http.Redirect(w, r, target, http.StatusSeeOther)
+		return
+	}
+
+	resp := map[string]string{"status": "ok"}
+	if safeNext != "" {
+		resp["next"] = safeNext
+	}
+	jsonOK(w, resp)
+}
+
+func (s *Server) loginError(w http.ResponseWriter, r *http.Request, msg string, code int, safeNext string) {
+	ct := r.Header.Get("Content-Type")
+	isForm := strings.HasPrefix(ct, "application/x-www-form-urlencoded") ||
+		strings.HasPrefix(ct, "multipart/form-data")
+	if !isForm {
+		jsonErr(w, msg, code)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(code)
+	_, _ = w.Write(renderLoginPage(s.loginTitle(safeNext), safeNext, msg))
+}
+
+func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
+	next := r.URL.Query().Get("next")
+	if next != "" && !isSafeNextPath(next) {
+		s.log.Warn("rejecting unsafe next on login page", zap.String("next", next))
+		next = ""
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write(renderLoginPage(s.loginTitle(next), next, ""))
+}
+
+func (s *Server) loginTitle(next string) string {
+	if next == "" {
+		return "Sign in to dicode"
+	}
+	path := next
+	if i := strings.IndexAny(path, "?#"); i >= 0 {
+		path = path[:i]
+	}
+	if !strings.HasPrefix(path, "/hooks/") {
+		return "Sign in to dicode"
+	}
+	slug := strings.TrimPrefix(path, "/hooks/")
+	if i := strings.Index(slug, "/"); i >= 0 {
+		slug = slug[:i]
+	}
+	if slug == "" {
+		return "Sign in to dicode"
+	}
+	for _, spec := range s.registry.All() {
+		wp := spec.Trigger.Webhook
+		if wp == "" {
+			continue
+		}
+		if wp == "/hooks/"+slug || strings.HasPrefix(wp, "/hooks/"+slug+"/") {
+			label := spec.Name
+			if label == "" {
+				label = spec.ID
+			}
+			if spec.Description != "" {
+				return "Sign in to " + label + " — " + spec.Description
+			}
+			return "Sign in to " + label
+		}
+	}
+	return "Sign in to dicode"
+}
+
+func renderLoginPage(title, next, errMsg string) []byte {
+	var b strings.Builder
+	b.WriteString(`<!doctype html><html lang="en"><head><meta charset="utf-8">`)
+	b.WriteString(`<meta name="viewport" content="width=device-width,initial-scale=1">`)
+	b.WriteString(`<title>`)
+	b.WriteString(htmlEscape(title))
+	b.WriteString(`</title><style>`)
+	b.WriteString(loginCSS)
+	b.WriteString(`</style></head><body><main class="dc-login"><form method="post" action="/api/auth/login" enctype="application/x-www-form-urlencoded"><h1>`)
+	b.WriteString(htmlEscape(title))
+	b.WriteString(`</h1>`)
+	if errMsg != "" {
+		b.WriteString(`<p class="dc-err" role="alert">`)
+		b.WriteString(htmlEscape(errMsg))
+		b.WriteString(`</p>`)
+	}
+	b.WriteString(`<label>Password<input type="password" name="password" autocomplete="current-password" autofocus required></label>`)
+	b.WriteString(`<label class="dc-check"><input type="checkbox" name="trust" value="1">Trust this browser</label>`)
+	b.WriteString(`<input type="hidden" name="next" value="`)
+	b.WriteString(htmlEscape(next))
+	b.WriteString(`"><button type="submit">Sign in</button></form></main></body></html>`)
+	return []byte(b.String())
+}
+
+const loginCSS = `body{margin:0;font:16px/1.4 system-ui,sans-serif;background:#0f1115;color:#e6e8eb;display:grid;place-items:center;min-height:100vh}` +
+	`.dc-login{width:100%;max-width:360px;padding:2rem}` +
+	`.dc-login h1{font-size:1.25rem;margin:0 0 1.25rem;font-weight:600}` +
+	`.dc-login form{display:flex;flex-direction:column;gap:0.75rem}` +
+	`.dc-login label{display:flex;flex-direction:column;gap:0.25rem;font-size:0.85rem;color:#9aa1ab}` +
+	`.dc-login input[type=password]{padding:0.6rem 0.7rem;border:1px solid #2a2f38;background:#181b21;color:#e6e8eb;border-radius:4px;font:inherit}` +
+	`.dc-login input[type=password]:focus{outline:2px solid #3b82f6;border-color:transparent}` +
+	`.dc-login .dc-check{flex-direction:row;align-items:center;gap:0.5rem;color:#cbd0d7}` +
+	`.dc-login button{margin-top:0.5rem;padding:0.65rem;background:#3b82f6;border:0;color:#fff;font:inherit;font-weight:600;border-radius:4px;cursor:pointer}` +
+	`.dc-login button:hover{background:#2563eb}` +
+	`.dc-err{margin:0 0 0.5rem;padding:0.5rem 0.7rem;background:#3a1a1a;border:1px solid #6b2424;color:#fca5a5;border-radius:4px;font-size:0.85rem}`
+
+func htmlEscape(s string) string {
+	r := strings.NewReplacer(
+		"&", "&amp;",
+		"<", "&lt;",
+		">", "&gt;",
+		`"`, "&quot;",
+		"'", "&#39;",
+	)
+	return r.Replace(s)
 }
 
 func (s *Server) apiListSecrets(w http.ResponseWriter, r *http.Request) {
