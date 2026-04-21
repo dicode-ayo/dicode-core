@@ -73,10 +73,10 @@ func (s *Server) apiAIChat(w http.ResponseWriter, r *http.Request) {
 	// endpoint as a proxy to arbitrary /api routes. Webhooks MUST live
 	// under /hooks/; anything else points at infrastructure paths the
 	// ai-agent runtime cannot legitimately handle.
-	if !strings.HasPrefix(spec.Trigger.Webhook, "/hooks/") {
-		s.log.Warn("ai chat: configured task webhook is not under /hooks/",
+	if !strings.HasPrefix(spec.Trigger.Webhook, webhookPathPrefix) {
+		s.log.Warn("ai chat: configured task webhook is not under "+webhookPathPrefix,
 			zap.String("task", taskID), zap.String("webhook", spec.Trigger.Webhook))
-		jsonErr(w, "ai task webhook must be under /hooks/", http.StatusInternalServerError)
+		jsonErr(w, "ai task webhook must be under "+webhookPathPrefix, http.StatusInternalServerError)
 		return
 	}
 
@@ -114,6 +114,13 @@ func (s *Server) apiAIChat(w http.ResponseWriter, r *http.Request) {
 	// reconciler lag between registry.Register and gateway wiring at
 	// startup. Surface that as a retry-after-style 503 so the UI can
 	// show a targeted "try again" rather than a generic "not found".
+	//
+	// Caveat: today the task runtime has no way to emit a 404 of its own
+	// (tasks return JSON reply payloads via output.*, not HTTP statuses).
+	// If a future output.status() global lands, this blanket remap will
+	// mask legitimate user-emitted 404s — switch to an explicit probe
+	// (e.g. presence of a run-id header the task runner injects) at that
+	// point.
 	if rec.Code == http.StatusNotFound {
 		s.log.Warn("ai chat: forward returned 404 — webhook registered but gateway not wired yet",
 			zap.String("task", taskID), zap.String("webhook", spec.Trigger.Webhook))

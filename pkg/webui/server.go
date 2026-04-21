@@ -107,6 +107,14 @@ const (
 	unlockLockoutTTL  = 15 * time.Minute // extended lockout after max attempts
 )
 
+// webhookPathPrefix is the URL prefix every webhook-triggered task's HTTP
+// surface lives under. Anything outside it is infrastructure or SPA routing
+// — the /api/ai/chat forward guard, webhookAuthGuard's public-path carve-out,
+// the /hooks/* mux entry, and the slug-to-task resolver all share this.
+// Keep the trailing slash to enforce boundary matching (TrimPrefix + HasPrefix
+// semantics require it).
+const webhookPathPrefix = "/hooks/"
+
 func newUnlockLimiter() *unlockLimiter {
 	return &unlockLimiter{entries: make(map[string]*limitEntry)}
 }
@@ -318,7 +326,7 @@ func (s *Server) Handler() http.Handler {
 	// both GET (serving the task UI) and POST (running the task). Public webhooks
 	// (no auth: true) remain fully open.
 	webhookHandler := func(w http.ResponseWriter, req *http.Request) {
-		req.URL.Path = "/hooks/" + chi.URLParam(req, "*")
+		req.URL.Path = webhookPathPrefix + chi.URLParam(req, "*")
 		s.webhookAuthGuard(w, req, s.gateway)
 	}
 	r.Get("/hooks/*", webhookHandler)
@@ -988,10 +996,10 @@ func (s *Server) loginTitle(next string) string {
 	if i := strings.IndexAny(path, "?#"); i >= 0 {
 		path = path[:i]
 	}
-	if !strings.HasPrefix(path, "/hooks/") {
+	if !strings.HasPrefix(path, webhookPathPrefix) {
 		return "Sign in to dicode"
 	}
-	slug := strings.TrimPrefix(path, "/hooks/")
+	slug := strings.TrimPrefix(path, webhookPathPrefix)
 	if i := strings.Index(slug, "/"); i >= 0 {
 		slug = slug[:i]
 	}
@@ -1003,7 +1011,7 @@ func (s *Server) loginTitle(next string) string {
 		if wp == "" {
 			continue
 		}
-		if wp == "/hooks/"+slug || strings.HasPrefix(wp, "/hooks/"+slug+"/") {
+		if wp == webhookPathPrefix+slug || strings.HasPrefix(wp, webhookPathPrefix+slug+"/") {
 			label := spec.Name
 			if label == "" {
 				label = spec.ID
