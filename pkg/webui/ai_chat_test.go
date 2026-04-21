@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -285,14 +286,48 @@ func TestAISettings_SaveAndReadBack(t *testing.T) {
 		t.Errorf("non-webhook task: expected 400, got %d", w.Code)
 	}
 
-	// Accept: registered task with /hooks/ prefix. Skipping actual file
-	// persistence — persistConfig needs a real cfgPath; this test covers
-	// the happy-path validation + in-memory assignment, which is enough
-	// for the handler's contract. persistConfig has its own coverage
-	// path via TestAISettings_PersistsToYAML below when the env provides
-	// a writable config file.
+	// Accept: registered task with /hooks/ prefix. persistConfig needs a
+	// writable dicode.yaml — point the server at a temp file first so the
+	// 200 happy-path runs the full read-modify-write round-trip rather
+	// than bailing out at file-write time.
+	tmp := t.TempDir() + "/dicode.yaml"
+	if err := os.WriteFile(tmp, []byte("log_level: info\n"), 0o600); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	srv.cfgPath = tmp
+
 	if srv.cfg.AI.Task != "buildin/dicodai" {
 		t.Fatalf("precondition: AI.Task = %q, want buildin/dicodai", srv.cfg.AI.Task)
+	}
+	if w := save(t, map[string]any{"task": "other/echo"}); w.Code != http.StatusOK {
+		t.Fatalf("happy path: expected 200, got %d: %s", w.Code, w.Body)
+	}
+	if srv.cfg.AI.Task != "other/echo" {
+		t.Errorf("cfg.AI.Task after save = %q, want other/echo", srv.cfg.AI.Task)
+	}
+	persisted, err := os.ReadFile(tmp)
+	if err != nil {
+		t.Fatalf("read back config: %v", err)
+	}
+	if !strings.Contains(string(persisted), "other/echo") {
+		t.Errorf("persisted yaml should contain the new task id:\n%s", persisted)
+	}
+
+	// Saving the default back must clean the ai: block out of the file
+	// (mirrors the applyDefaults-fills-in-default contract — the file
+	// shouldn't carry redundant explicit defaults).
+	if err := srv.registry.Register(&task.Spec{
+		ID:      "buildin/dicodai",
+		Trigger: task.TriggerConfig{Webhook: "/hooks/ai/dicodai"},
+	}); err != nil {
+		t.Fatalf("register dicodai: %v", err)
+	}
+	if w := save(t, map[string]any{"task": "buildin/dicodai"}); w.Code != http.StatusOK {
+		t.Fatalf("revert to default: expected 200, got %d: %s", w.Code, w.Body)
+	}
+	persisted, _ = os.ReadFile(tmp)
+	if strings.Contains(string(persisted), "task:") {
+		t.Errorf("ai.task should be absent after revert to default; got:\n%s", persisted)
 	}
 }
 

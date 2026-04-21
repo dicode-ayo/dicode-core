@@ -1643,15 +1643,23 @@ func (s *Server) persistConfig() error {
 	// Serialise ai.task only when it diverges from the default so the
 	// generated file stays minimal — the default lives in applyDefaults
 	// and users who never touch this setting shouldn't see a stray block.
+	// Mirror the serverMap / sources / runtimes pattern: mutate just the
+	// key we own and leave any sibling `ai.*` keys untouched, so a future
+	// AI config knob a user has handwritten survives a Save round-trip.
+	aiMap, _ := doc["ai"].(map[string]any)
 	if s.cfg.AI.Task != "" && s.cfg.AI.Task != "buildin/dicodai" {
-		aiMap, _ := doc["ai"].(map[string]any)
 		if aiMap == nil {
 			aiMap = map[string]any{}
 		}
 		aiMap["task"] = s.cfg.AI.Task
 		doc["ai"] = aiMap
-	} else {
-		delete(doc, "ai")
+	} else if aiMap != nil {
+		delete(aiMap, "task")
+		if len(aiMap) == 0 {
+			delete(doc, "ai")
+		} else {
+			doc["ai"] = aiMap
+		}
 	}
 
 	serverMap, _ := doc["server"].(map[string]any)
