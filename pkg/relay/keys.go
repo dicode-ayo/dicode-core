@@ -216,6 +216,12 @@ func encodeECPrivateKeyPEM(key *ecdsa.PrivateKey) (string, error) {
 // process — the caller is responsible for tearing them down and
 // re-connecting with the new identity (typically by restarting the daemon).
 func RotateIdentity(ctx context.Context, database db.DB) (*Identity, error) {
+	// Order is deliberate: generate both keys and encode both PEMs BEFORE
+	// opening the transaction, so the tx only wraps DB writes. Moving the
+	// ecdsa.GenerateKey or PEM encoding inside the tx would hold the SQLite
+	// write lock across entropy reads and CPU-bound ASN.1 marshalling, which
+	// blocks concurrent readers for no reason. Fail-fast on generation is
+	// also cheaper than opening a tx we'd then have to roll back.
 	signKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, fmt.Errorf("generate relay sign key: %w", err)
@@ -234,6 +240,9 @@ func RotateIdentity(ctx context.Context, database db.DB) (*Identity, error) {
 		return nil, err
 	}
 
+	// Atomicity: both INSERT OR REPLACEs share one transaction. On any DB
+	// error, neither row is updated — the daemon never loads a mixed
+	// old/new identity on next boot. Do not split these into separate tx's.
 	if err := database.Tx(ctx, func(tx db.DB) error {
 		if err := tx.Exec(ctx,
 			`INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)`,

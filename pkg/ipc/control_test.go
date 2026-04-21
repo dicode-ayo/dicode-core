@@ -3,9 +3,11 @@ package ipc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -351,6 +353,91 @@ func TestControl_RelayRotate_InvokesRotator(t *testing.T) {
 	}
 	if called != 1 {
 		t.Errorf("rotator called %d times, expected 1", called)
+	}
+
+	cancel()
+	<-done
+}
+
+// TestControl_RelayRotate_RotatorError_SurfacesVerbatim ensures that when the
+// injected rotator returns an error, the control socket surfaces the error
+// string to the client (wrapped as "rotate: <err>") and does NOT populate
+// RelayRotateResult.NewUUID. Catches regressions in handleRelayRotate's
+// error-wrapping path.
+func TestControl_RelayRotate_RotatorError_SurfacesVerbatim(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "ctrl.sock")
+	tokenPath := filepath.Join(dir, "ctrl.token")
+
+	cs, err := NewControlServer(socketPath, tokenPath, nil, &mockEngine{}, nil, MetricsProvider{}, "test", zap.NewNop(), nil)
+	if err != nil {
+		t.Fatalf("NewControlServer: %v", err)
+	}
+
+	cs.SetRelayIdentityRotator(func(_ context.Context) (string, error) {
+		return "", errors.New("db locked")
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { defer close(done); _ = cs.Start(ctx) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(socketPath); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("control socket never appeared")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	tok, err := os.ReadFile(tokenPath)
+	if err != nil {
+		t.Fatalf("token: %v", err)
+	}
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	if err := writeMsg(conn, handshakeReq{Token: string(tok)}); err != nil {
+		t.Fatalf("handshake send: %v", err)
+	}
+	var hs struct {
+		Proto int `json:"proto"`
+	}
+	if err := readMsg(conn, &hs); err != nil {
+		t.Fatalf("handshake recv: %v", err)
+	}
+
+	if err := writeMsg(conn, Request{ID: "r1", Method: "cli.relay.rotate_identity"}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	var resp struct {
+		ID     string            `json:"id"`
+		Error  string            `json:"error"`
+		Result RelayRotateResult `json:"result"`
+	}
+	if err := readMsg(conn, &resp); err != nil {
+		t.Fatalf("recv: %v", err)
+	}
+	if resp.Error == "" {
+		t.Fatal("expected error when rotator returns an error")
+	}
+	if !strings.Contains(resp.Error, "db locked") {
+		t.Errorf("error should surface rotator error verbatim, got %q", resp.Error)
+	}
+	if resp.Result.NewUUID != "" {
+		t.Errorf("result should be empty on rotator error, got NewUUID=%q", resp.Result.NewUUID)
+	}
+	if resp.Result.Warning != "" {
+		t.Errorf("result should be empty on rotator error, got Warning=%q", resp.Result.Warning)
 	}
 
 	cancel()

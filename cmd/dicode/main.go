@@ -144,8 +144,11 @@ func cmdRelay(c *ipc.ControlClient, args []string) error {
 	case "rotate-identity":
 		force := false
 		for _, a := range args[1:] {
-			if a == "--yes" || a == "-y" {
+			switch a {
+			case "--yes", "-y":
 				force = true
+			default:
+				return fmt.Errorf("unknown flag %q — usage: dicode relay rotate-identity --yes", a)
 			}
 		}
 		if !force {

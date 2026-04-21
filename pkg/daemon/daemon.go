@@ -235,11 +235,17 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 			// in-memory identity until the daemon restarts — documented
 			// in the RelayRotateResult warning returned to the CLI.
 			ctrlSrv.SetRelayIdentityRotator(func(ctx context.Context) (string, error) {
-				// Clear pending sessions first: a post-rotation daemon
-				// cannot decrypt them (encrypted to the old pubkey), so
-				// dropping them is the only honest outcome. If the DB
-				// write then fails, we've lost in-flight flows but that
-				// is correct — they'd fail to decrypt anyway.
+				// Invariant: pending.Clear() MUST run before
+				// relay.RotateIdentity(). A post-rotation daemon cannot
+				// decrypt envelopes bound to the old DecryptKey, so dropping
+				// them up front is the only honest outcome — a partial-
+				// success state where the DB still has old rows and pending
+				// is already empty is still correct (next rotate retry will
+				// converge). Swapping this order would leave a window where
+				// rotation succeeds in the DB but an in-flight delivery
+				// arrives against the NEW DecryptKey while pending still
+				// references the old session, producing a silent decrypt
+				// failure rather than a clear "session expired" retry path.
 				dropped := pending.Clear()
 				oldUUID := id.UUID
 				newID, err := relay.RotateIdentity(ctx, database)
