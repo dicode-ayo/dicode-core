@@ -533,14 +533,17 @@ func (cs *ControlServer) handleRelayRotate(ctx context.Context) (any, error) {
 }
 
 // relayRotateWarning is the operator-facing message surfaced to the CLI after
-// a successful rotation. It documents the two non-obvious consequences:
-// (a) UUID invalidation breaks every shared webhook URL, and (b) the still-
+// a successful rotation. It documents the three non-obvious consequences:
+// (a) UUID invalidation breaks every shared webhook URL, (b) the still-
 // connected WSS session holds the OLD identity in memory until the daemon is
-// restarted, so a stolen old key remains impersonation-capable for that window.
+// restarted (so a stolen old key remains impersonation-capable for that
+// window), and (c) dicode.oauth.* IPC is now refused until restart (issue
+// #144) to avoid handing out new URLs signed under the retired identity.
 const relayRotateWarning = "Old UUID is permanently invalidated. " +
 	"Any public webhook URLs you previously shared under the old UUID will stop working. " +
 	"IMPORTANT: the running relay WSS connection still uses the old key in memory. " +
 	"An attacker who has the old key can impersonate this daemon until you restart. " +
+	"dicode.oauth.build_auth_url / store_token are refused until the daemon restarts. " +
 	"Restart the daemon now to complete the rotation."
 
 // triggerLabel returns a human-readable trigger description for a task spec.

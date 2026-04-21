@@ -69,20 +69,21 @@ type RunResult struct {
 
 // Runtime executes task scripts with Deno.
 type Runtime struct {
-	registry        *registry.Registry
-	secrets         secrets.Chain
-	secretsManager  secrets.Manager // optional; wired for dicode.secrets_set/delete
-	db              db.DB
-	log             *zap.Logger
-	denoPath        string
-	secret          []byte
-	engine          ipc.EngineRunner
-	gateway         *ipc.Gateway
-	oauthIdentity   *relay.Identity
-	oauthURL        string
-	oauthPending    *relay.PendingSessions
-	brokerPubkeyFn  func() string
-	supportsOAuthFn func() bool
+	registry         *registry.Registry
+	secrets          secrets.Chain
+	secretsManager   secrets.Manager // optional; wired for dicode.secrets_set/delete
+	db               db.DB
+	log              *zap.Logger
+	denoPath         string
+	secret           []byte
+	engine           ipc.EngineRunner
+	gateway          *ipc.Gateway
+	oauthIdentity    *relay.Identity
+	oauthURL         string
+	oauthPending     *relay.PendingSessions
+	brokerPubkeyFn   func() string
+	supportsOAuthFn  func() bool
+	rotationActiveFn func() bool
 }
 
 // New creates a Deno Runtime. It ensures the Deno binary is present in the
@@ -122,12 +123,20 @@ func (rt *Runtime) SetSecretsManager(m secrets.Manager) { rt.secretsManager = m 
 // real relay.Client). In production the daemon wires rc.SupportsOAuth so
 // that an old broker cleanly disables the OAuth flows instead of silently
 // failing to decrypt.
-func (rt *Runtime) SetOAuthBroker(id *relay.Identity, baseURL string, pending *relay.PendingSessions, brokerPubkeyFn func() string, supportsOAuthFn func() bool) {
+//
+// rotationActiveFn (issue #144) is an optional predicate reporting whether
+// a `dicode relay rotate-identity` has swapped the DB keys. The in-memory
+// Identity passed here is NOT replaced by rotation; until the daemon
+// restarts, signing a new auth URL under it would contradict the operator's
+// stated intent. Non-nil + true refuses the OAuth IPC methods with an
+// actionable error. Nil leaves the path unchecked (test fixtures).
+func (rt *Runtime) SetOAuthBroker(id *relay.Identity, baseURL string, pending *relay.PendingSessions, brokerPubkeyFn func() string, supportsOAuthFn func() bool, rotationActiveFn func() bool) {
 	rt.oauthIdentity = id
 	rt.oauthURL = baseURL
 	rt.oauthPending = pending
 	rt.brokerPubkeyFn = brokerPubkeyFn
 	rt.supportsOAuthFn = supportsOAuthFn
+	rt.rotationActiveFn = rotationActiveFn
 }
 
 // Run executes a task script and returns the result.
@@ -217,7 +226,7 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	srv.SetGateway(rt.gateway)
 	srv.SetSecrets(rt.secretsManager)
 	if rt.oauthIdentity != nil {
-		srv.SetOAuthBroker(rt.oauthIdentity, rt.oauthURL, rt.oauthPending, rt.brokerPubkeyFn, rt.supportsOAuthFn)
+		srv.SetOAuthBroker(rt.oauthIdentity, rt.oauthURL, rt.oauthPending, rt.brokerPubkeyFn, rt.supportsOAuthFn, rt.rotationActiveFn)
 	}
 	socketPath, token, err := srv.Start(execCtx)
 	if err != nil {

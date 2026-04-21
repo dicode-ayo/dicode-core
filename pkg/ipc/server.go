@@ -24,6 +24,18 @@ import (
 // the fix so operators know what to upgrade without digging through logs.
 const oauthBrokerProtocolErr = "ipc: broker does not support split-key OAuth — upgrade dicode-relay to protocol >= 2"
 
+// oauthRotationInProgressErr is the operator-facing error returned when a task
+// invokes dicode.oauth.* after `dicode relay rotate-identity` has swapped the
+// DB keys but the daemon has not yet been restarted. The rotated daemon still
+// holds the OLD in-memory Identity pointer, so a new flow would be issued
+// under the old SignKey — contradicting the rotation contract. Refuse here
+// and tell the operator exactly what to do.
+//
+// Covers both build_auth_url (would sign a URL under the old key) and
+// store_token (would persist a token that was encrypted to the old
+// DecryptKey by the mid-flight broker session).
+const oauthRotationInProgressErr = "ipc: relay rotation in progress — restart the daemon to complete rotation before issuing or accepting OAuth tokens"
+
 // Server is a per-run Unix socket server that bridges a task subprocess and
 // the Go host using the unified IPC protocol.
 //
@@ -34,19 +46,20 @@ type Server struct {
 	taskID string
 	secret []byte // daemon-level HMAC secret for token verification
 
-	registry        *registry.Registry
-	db              db.DB
-	params          map[string]string
-	input           any
-	spec            *task.Spec
-	engine          EngineRunner
-	secrets         secrets.Manager        // optional; enables dicode.secrets_set / dicode.secrets_delete
-	oauthID         *relay.Identity        // optional; enables dicode.oauth.* for the auth built-ins
-	oauthURL        string                 // broker base URL, e.g. "https://relay.dicode.app"
-	oauthPending    *relay.PendingSessions // tracks outstanding /auth/:provider flows by session id
-	brokerPubkeyFn  func() string          // returns the TOFU-pinned broker pubkey (base64 SPKI DER)
-	supportsOAuthFn func() bool            // issue #104: reports broker protocol >= 2; nil means unchecked
-	log             *zap.Logger
+	registry         *registry.Registry
+	db               db.DB
+	params           map[string]string
+	input            any
+	spec             *task.Spec
+	engine           EngineRunner
+	secrets          secrets.Manager        // optional; enables dicode.secrets_set / dicode.secrets_delete
+	oauthID          *relay.Identity        // optional; enables dicode.oauth.* for the auth built-ins
+	oauthURL         string                 // broker base URL, e.g. "https://relay.dicode.app"
+	oauthPending     *relay.PendingSessions // tracks outstanding /auth/:provider flows by session id
+	brokerPubkeyFn   func() string          // returns the TOFU-pinned broker pubkey (base64 SPKI DER)
+	supportsOAuthFn  func() bool            // issue #104: reports broker protocol >= 2; nil means unchecked
+	rotationActiveFn func() bool            // issue #144: reports whether a relay-identity rotation has started; nil means unchecked
+	log              *zap.Logger
 
 	gateway *Gateway // optional; enables http.register for daemon tasks
 
@@ -129,12 +142,20 @@ func (s *Server) SetSecrets(m secrets.Manager) { s.secrets = m }
 // rather than silently failing at decrypt time. Passing nil leaves the IPC
 // path unchecked — appropriate for test fixtures that don't run a full
 // relay client.
-func (s *Server) SetOAuthBroker(id *relay.Identity, baseURL string, pending *relay.PendingSessions, brokerPubkeyFn func() string, supportsOAuthFn func() bool) {
+//
+// rotationActiveFn (issue #144) is consulted alongside supportsOAuthFn. If
+// non-nil and it returns true, the same two OAuth methods are refused with
+// an error telling the operator to restart the daemon to complete the
+// rotation. Lives on the daemon (not the per-run Server) because Servers
+// are recreated per task invocation but the rotation state persists for
+// the daemon process lifetime.
+func (s *Server) SetOAuthBroker(id *relay.Identity, baseURL string, pending *relay.PendingSessions, brokerPubkeyFn func() string, supportsOAuthFn func() bool, rotationActiveFn func() bool) {
 	s.oauthID = id
 	s.oauthURL = baseURL
 	s.oauthPending = pending
 	s.brokerPubkeyFn = brokerPubkeyFn
 	s.supportsOAuthFn = supportsOAuthFn
+	s.rotationActiveFn = rotationActiveFn
 }
 
 // Start creates the Unix socket and begins accepting connections.
@@ -586,6 +607,20 @@ func (s *Server) handleConn(conn net.Conn) {
 				reply(req.ID, nil, "ipc: oauth broker not configured on this daemon")
 				continue
 			}
+			// Issue #144: refuse after `dicode relay rotate-identity` has
+			// swapped the DB keys. The in-memory s.oauthID still points at
+			// the OLD SignKey until the daemon restarts; issuing a new
+			// URL under it would contradict the rotation contract the
+			// operator just signed off on.
+			//
+			// Checked BEFORE the #104 protocol gate because rotation-in-
+			// progress is the more immediate actionable condition (restart
+			// the daemon) — telling the operator to "upgrade dicode-relay"
+			// when they've just run `rotate-identity` would be misleading.
+			if s.rotationActiveFn != nil && s.rotationActiveFn() {
+				reply(req.ID, nil, oauthRotationInProgressErr)
+				continue
+			}
 			// Issue #104: refuse OAuth flows when the connected broker has not
 			// advertised protocol >= 2. A pre-split broker would encrypt the
 			// delivery to the SignKey pubkey, which DecryptOAuthToken cannot
@@ -624,6 +659,16 @@ func (s *Server) handleConn(conn net.Conn) {
 			}
 			if s.oauthID == nil || s.oauthPending == nil {
 				reply(req.ID, nil, "ipc: oauth broker not configured on this daemon")
+				continue
+			}
+			// Issue #144: refuse delivery after rotation. A post-rotation
+			// delivery was issued under the old SignKey and encrypted to
+			// the old DecryptKey; accepting it here would persist a token
+			// tied to an identity the operator has explicitly retired.
+			// Checked before the #104 protocol gate — see the rationale on
+			// build_auth_url above.
+			if s.rotationActiveFn != nil && s.rotationActiveFn() {
+				reply(req.ID, nil, oauthRotationInProgressErr)
 				continue
 			}
 			// Issue #104 — see the note on dicode.oauth.build_auth_url.
