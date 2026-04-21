@@ -245,20 +245,17 @@ func (c *Client) handshake(ctx context.Context, conn *websocket.Conn, sendMu *sy
 		c.hookBaseURL = w.URL
 		c.hookMu.Unlock()
 
-		// Broker protocol version (issue #104). An advertised protocol < 2
-		// (or an absent field) means the broker does not understand the
-		// split sign/decrypt key and will encrypt OAuth deliveries to the
-		// SignKey pubkey, which the daemon cannot decrypt with DecryptKey.
-		// The WSS relay path is unaffected — it only uses SignKey for the
-		// ECDSA handshake, which the broker can still verify.
+		// Broker protocol version (issue #104). Protocol 2 commits the broker
+		// to honouring the split sign/decrypt keys. Refuse the connection
+		// outright if the broker advertises anything lower — encrypting OAuth
+		// deliveries to the SignKey pubkey would silently produce undecryptable
+		// payloads.
+		if w.Protocol < 2 {
+			return fmt.Errorf("broker protocol %d too old — require >= 2 (upgrade dicode-relay)", w.Protocol)
+		}
 		c.protoMu.Lock()
 		c.brokerProtocol = w.Protocol
 		c.protoMu.Unlock()
-		if w.Protocol < 2 {
-			c.log.Warn("relay: broker advertises pre-split protocol — OAuth IPC paths disabled",
-				zap.Int("broker_protocol", w.Protocol),
-				zap.Int("required", 2))
-		}
 
 		// TOFU broker pubkey pinning: on first connect, store the broker's
 		// signing pubkey. On reconnect, verify it hasn't changed.
