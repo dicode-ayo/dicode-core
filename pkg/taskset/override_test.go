@@ -191,6 +191,34 @@ func TestApplyTriggerPatch_AuthNilPreservesWebhookAuth(t *testing.T) {
 	}
 }
 
+// TestApplyTriggerPatch_TypeSwitchClearsAuth ensures switching away from a
+// webhook trigger clears WebhookAuth alongside Webhook itself. Otherwise a
+// stale `auth: true` would silently reappear the next time the trigger is
+// switched back to a webhook in a later override layer — a footgun that
+// produces "why isn't my auth working" well after the config looks clean.
+func TestApplyTriggerPatch_TypeSwitchClearsAuth(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		patch *TriggerPatch
+	}{
+		{"Cron", &TriggerPatch{Cron: strPtr("0 * * * *")}},
+		{"Manual", &TriggerPatch{Manual: boolPtr(true)}},
+		{"Chain", &TriggerPatch{Chain: &task.ChainTrigger{From: "upstream", On: "success"}}},
+		{"Daemon", &TriggerPatch{Daemon: boolPtr(true)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := task.TriggerConfig{Webhook: "/hooks/x", WebhookAuth: true}
+			applyTriggerPatch(&tr, tc.patch)
+			if tr.Webhook != "" {
+				t.Errorf("%s patch should clear Webhook, got %q", tc.name, tr.Webhook)
+			}
+			if tr.WebhookAuth {
+				t.Errorf("%s patch should clear WebhookAuth alongside Webhook", tc.name)
+			}
+		})
+	}
+}
+
 // ── applyOverrides ────────────────────────────────────────────────────────────
 
 func TestApplyOverrides_SingleLayer(t *testing.T) {

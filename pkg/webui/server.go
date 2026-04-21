@@ -451,7 +451,7 @@ func (s *Server) Start(ctx context.Context) error {
 		Handler:           s.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       120 * time.Second,
-		// WriteTimeout is intentionally 0: WebSocket, SSE and AI stream endpoints write indefinitely.
+		// WriteTimeout is intentionally 0: WebSocket and SSE endpoints write indefinitely.
 	}
 	go func() {
 		<-ctx.Done()

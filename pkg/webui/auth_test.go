@@ -568,3 +568,69 @@ func TestWebhookAuthGuard_LongestPrefixWins(t *testing.T) {
 		t.Errorf("POST /hooks/ai without session: public webhook should pass through, got 401")
 	}
 }
+
+// TestWebhookAuthGuard_LongestPrefixWins_Inverse is the symmetric case:
+// the SHORT webhook is protected and the LONG one is public. Longest-prefix
+// must still win — i.e. a request to the long path must pass through
+// unauthenticated because the longer, more specific spec is public. This
+// guards against a future regression that accidentally returns the first
+// (shorter, protected) match from registry ordering.
+func TestWebhookAuthGuard_LongestPrefixWins_Inverse(t *testing.T) {
+	srv := newAuthServer(t, "hunter2")
+
+	if err := srv.registry.Register(&task.Spec{
+		ID:      "buildin/ai-agent",
+		Trigger: task.TriggerConfig{Webhook: "/hooks/ai", WebhookAuth: true},
+	}); err != nil {
+		t.Fatalf("register ai-agent: %v", err)
+	}
+	if err := srv.registry.Register(&task.Spec{
+		ID:      "buildin/dicodai",
+		Trigger: task.TriggerConfig{Webhook: "/hooks/ai/dicodai", WebhookAuth: false},
+	}); err != nil {
+		t.Fatalf("register dicodai: %v", err)
+	}
+
+	h := srv.Handler()
+
+	// Long, public path: pass through without a session.
+	req := httptest.NewRequest(http.MethodPost, "/hooks/ai/dicodai", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code == http.StatusUnauthorized {
+		t.Errorf("POST /hooks/ai/dicodai: longer-public-wins expected, got 401")
+	}
+
+	// Short, protected path: rejected without a session.
+	req = httptest.NewRequest(http.MethodPost, "/hooks/ai", nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("POST /hooks/ai: protected webhook expected 401, got %d", w.Code)
+	}
+}
+
+// TestWebhookAuthGuard_TrailingSlashPattern covers the exact class of drift
+// between the auth guard and the gateway that the shared PathMatches helper
+// was introduced to prevent. A webhook registered with a trailing slash
+// must still match a longer request path — otherwise `auth: true` would
+// silently drop for the misconfigured registration while the gateway
+// still dispatched the request.
+func TestWebhookAuthGuard_TrailingSlashPattern(t *testing.T) {
+	srv := newAuthServer(t, "hunter2")
+
+	if err := srv.registry.Register(&task.Spec{
+		ID:      "buildin/trailing",
+		Trigger: task.TriggerConfig{Webhook: "/hooks/trail/", WebhookAuth: true},
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	h := srv.Handler()
+	req := httptest.NewRequest(http.MethodPost, "/hooks/trail/sub", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("trailing-slash pattern must still gate nested paths: got %d", w.Code)
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/dicode/dicode/pkg/ipc"
 	"go.uber.org/zap"
 )
 
@@ -19,17 +20,18 @@ import (
 // `/hooks/ai/dicodai` and silently drop `auth: true` at the door.
 func (s *Server) webhookAuthGuard(w http.ResponseWriter, r *http.Request, next http.Handler) {
 	var requiresAuth bool
-	var bestLen int
+	var bestLen = -1
 	for _, spec := range s.registry.All() {
 		wp := spec.Trigger.Webhook
-		if wp == "" {
+		if wp == "" || !ipc.PathMatches(wp, r.URL.Path) {
 			continue
 		}
-		if r.URL.Path != wp && !strings.HasPrefix(r.URL.Path, wp+"/") {
-			continue
-		}
-		if len(wp) > bestLen {
-			bestLen = len(wp)
+		// Compare normalised pattern length so a trailing slash on the
+		// registered webhook cannot artificially shorten the match and
+		// shadow a longer protected path.
+		l := len(strings.TrimSuffix(wp, "/"))
+		if l > bestLen {
+			bestLen = l
 			requiresAuth = spec.Trigger.WebhookAuth
 		}
 	}
