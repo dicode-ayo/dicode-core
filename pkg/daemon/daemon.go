@@ -235,17 +235,23 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 			// in-memory identity until the daemon restarts — documented
 			// in the RelayRotateResult warning returned to the CLI.
 			ctrlSrv.SetRelayIdentityRotator(func(ctx context.Context) (string, error) {
-				// Invariant: pending.Clear() MUST run before
-				// relay.RotateIdentity(). A post-rotation daemon cannot
-				// decrypt envelopes bound to the old DecryptKey, so dropping
-				// them up front is the only honest outcome — a partial-
-				// success state where the DB still has old rows and pending
-				// is already empty is still correct (next rotate retry will
-				// converge). Swapping this order would leave a window where
-				// rotation succeeds in the DB but an in-flight delivery
-				// arrives against the NEW DecryptKey while pending still
-				// references the old session, producing a silent decrypt
-				// failure rather than a clear "session expired" retry path.
+				// Invariant: pending.Clear() runs BEFORE relay.RotateIdentity().
+				// Operator intent of rotation is "the old identity is dead from
+				// this point forward", so every in-flight flow issued against
+				// the old identity must be invalidated at the same moment as
+				// the DB swap. If Rotate ran first, the window between Rotate
+				// and Clear would leave in-flight flows still completing
+				// against the old DecryptKey (the broker has it in
+				// session.pubkey, unchanged by DB rotation) — inconsistent
+				// with the operator's mental model of rotation as a hard
+				// cutover.
+				//
+				// Note: the `id` pointer captured in denoRT.SetOAuthBroker
+				// above is NOT replaced here. The running daemon continues
+				// using the old in-memory identity for WSS + ECIES decrypt
+				// until a restart. This is the hazard relayRotateWarning
+				// calls out — the rotation point is "DB + pending cutover";
+				// the running-connection cutover is at restart.
 				dropped := pending.Clear()
 				oldUUID := id.UUID
 				newID, err := relay.RotateIdentity(ctx, database)
