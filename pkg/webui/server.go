@@ -107,6 +107,14 @@ const (
 	unlockLockoutTTL  = 15 * time.Minute // extended lockout after max attempts
 )
 
+// webhookPathPrefix is the URL prefix every webhook-triggered task's HTTP
+// surface lives under. Anything outside it is infrastructure or SPA routing
+// — the /api/ai/chat forward guard, webhookAuthGuard's public-path carve-out,
+// the /hooks/* mux entry, and the slug-to-task resolver all share this.
+// Keep the trailing slash to enforce boundary matching (TrimPrefix + HasPrefix
+// semantics require it).
+const webhookPathPrefix = "/hooks/"
+
 func newUnlockLimiter() *unlockLimiter {
 	return &unlockLimiter{entries: make(map[string]*limitEntry)}
 }
@@ -318,7 +326,7 @@ func (s *Server) Handler() http.Handler {
 	// both GET (serving the task UI) and POST (running the task). Public webhooks
 	// (no auth: true) remain fully open.
 	webhookHandler := func(w http.ResponseWriter, req *http.Request) {
-		req.URL.Path = "/hooks/" + chi.URLParam(req, "*")
+		req.URL.Path = webhookPathPrefix + chi.URLParam(req, "*")
 		s.webhookAuthGuard(w, req, s.gateway)
 	}
 	r.Get("/hooks/*", webhookHandler)
@@ -407,6 +415,7 @@ func (s *Server) Handler() http.Handler {
 
 			// Settings
 			r.Post("/settings/server", s.apiSaveServerSettings)
+			r.Post("/settings/ai", s.apiSaveAISettings)
 			r.Post("/settings/sources", s.apiAddSource)
 			r.Delete("/settings/sources/{idx}", s.apiRemoveSource)
 			r.Get("/settings/sources/git/branches", s.apiListGitBranches)
@@ -418,6 +427,9 @@ func (s *Server) Handler() http.Handler {
 
 			// Metrics
 			r.Get("/metrics", s.apiMetrics)
+
+			// AI chat — forwards to the task named by cfg.AI.Task.
+			r.Post("/ai/chat", s.apiAIChat)
 
 			// Managed runtime lifecycle
 			r.Get("/runtimes", s.apiListRuntimes)
@@ -985,10 +997,10 @@ func (s *Server) loginTitle(next string) string {
 	if i := strings.IndexAny(path, "?#"); i >= 0 {
 		path = path[:i]
 	}
-	if !strings.HasPrefix(path, "/hooks/") {
+	if !strings.HasPrefix(path, webhookPathPrefix) {
 		return "Sign in to dicode"
 	}
-	slug := strings.TrimPrefix(path, "/hooks/")
+	slug := strings.TrimPrefix(path, webhookPathPrefix)
 	if i := strings.Index(slug, "/"); i >= 0 {
 		slug = slug[:i]
 	}
@@ -1000,7 +1012,7 @@ func (s *Server) loginTitle(next string) string {
 		if wp == "" {
 			continue
 		}
-		if wp == "/hooks/"+slug || strings.HasPrefix(wp, "/hooks/"+slug+"/") {
+		if wp == webhookPathPrefix+slug || strings.HasPrefix(wp, webhookPathPrefix+slug+"/") {
 			label := spec.Name
 			if label == "" {
 				label = spec.ID
@@ -1332,6 +1344,42 @@ func (s *Server) apiKillRun(w http.ResponseWriter, r *http.Request) {
 
 // --- Settings handlers ---
 
+// apiSaveAISettings persists the ai.task config pointer. Validation mirrors
+// the /api/ai/chat forward guard: the task must be registered AND have a
+// webhook under /hooks/ — anything else would be saved only to fail every
+// subsequent chat call with the same structured error.
+func (s *Server) apiSaveAISettings(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Task string `json:"task"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonErr(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	task := strings.TrimSpace(body.Task)
+	if task == "" {
+		jsonErr(w, "task id is required", http.StatusBadRequest)
+		return
+	}
+	spec, ok := s.registry.Get(task)
+	if !ok {
+		jsonErr(w, "task not found: "+task, http.StatusBadRequest)
+		return
+	}
+	if !strings.HasPrefix(spec.Trigger.Webhook, webhookPathPrefix) {
+		jsonErr(w, "task must have a webhook trigger under "+webhookPathPrefix, http.StatusBadRequest)
+		return
+	}
+	s.cfg.AI.Task = task
+	if err := s.persistConfig(); err != nil {
+		s.log.Warn("settings persist failed", zap.Error(err))
+		jsonErr(w, "saved in memory but could not write file: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.log.Info("ai settings updated", zap.String("task", task))
+	jsonOK(w, map[string]string{"status": "ok"})
+}
+
 func (s *Server) apiSaveServerSettings(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		LogLevel string `json:"log_level"`
@@ -1591,6 +1639,28 @@ func (s *Server) persistConfig() error {
 	}
 
 	doc["log_level"] = s.cfg.LogLevel
+
+	// Serialise ai.task only when it diverges from the default so the
+	// generated file stays minimal — the default lives in applyDefaults
+	// and users who never touch this setting shouldn't see a stray block.
+	// Mirror the serverMap / sources / runtimes pattern: mutate just the
+	// key we own and leave any sibling `ai.*` keys untouched, so a future
+	// AI config knob a user has handwritten survives a Save round-trip.
+	aiMap, _ := doc["ai"].(map[string]any)
+	if s.cfg.AI.Task != "" && s.cfg.AI.Task != "buildin/dicodai" {
+		if aiMap == nil {
+			aiMap = map[string]any{}
+		}
+		aiMap["task"] = s.cfg.AI.Task
+		doc["ai"] = aiMap
+	} else if aiMap != nil {
+		delete(aiMap, "task")
+		if len(aiMap) == 0 {
+			delete(doc, "ai")
+		} else {
+			doc["ai"] = aiMap
+		}
+	}
 
 	serverMap, _ := doc["server"].(map[string]any)
 	if serverMap == nil {

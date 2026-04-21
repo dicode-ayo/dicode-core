@@ -11,6 +11,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dicode/dicode/pkg/db"
+	"github.com/dicode/dicode/pkg/registry"
+	"github.com/dicode/dicode/pkg/task"
 	"go.uber.org/zap"
 )
 
@@ -26,7 +29,7 @@ func controlTestEnv(t *testing.T, mp MetricsProvider) (net.Conn, func()) {
 	log := zap.NewNop()
 	eng := &mockEngine{}
 
-	cs, err := NewControlServer(socketPath, tokenPath, nil, eng, nil, mp, "test", log, nil)
+	cs, err := NewControlServer(socketPath, tokenPath, nil, eng, nil, mp, "test", log, nil, "")
 	if err != nil {
 		t.Fatalf("NewControlServer: %v", err)
 	}
@@ -109,7 +112,7 @@ func TestControl_Handshake_EmitsEmptyTaskAndRunIDFields(t *testing.T) {
 	socketPath := filepath.Join(dir, "ctrl.sock")
 	tokenPath := filepath.Join(dir, "ctrl.token")
 
-	cs, err := NewControlServer(socketPath, tokenPath, nil, &mockEngine{}, nil, MetricsProvider{}, "test", zap.NewNop(), nil)
+	cs, err := NewControlServer(socketPath, tokenPath, nil, &mockEngine{}, nil, MetricsProvider{}, "test", zap.NewNop(), nil, "")
 	if err != nil {
 		t.Fatalf("NewControlServer: %v", err)
 	}
@@ -255,6 +258,237 @@ func TestControl_Metrics_NoProvider_ReturnsZeros(t *testing.T) {
 	}
 }
 
+// TestControl_AI_FiresConfiguredTask_AndReturnsReply is the happy path for
+// `dicode ai`: the control server reads cfg.AI.Task, fires the engine, and
+// extracts {session_id, reply} from the run's return value.
+func TestControl_AI_FiresConfiguredTask_AndReturnsReply(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "ctrl.sock")
+	tokenPath := filepath.Join(dir, "ctrl.token")
+
+	d, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("db: %v", err)
+	}
+	defer d.Close()
+	reg := registry.New(d)
+	if err := reg.Register(&task.Spec{ID: "buildin/dicodai", Name: "dicodai"}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	eng := &mockEngine{
+		runID: "run-ai-1",
+		result: RunResult{
+			RunID:  "run-ai-1",
+			Status: "success",
+			ReturnValue: map[string]any{
+				"session_id": "sess-abc",
+				"reply":      "hello from the agent",
+			},
+		},
+	}
+
+	cs, err := NewControlServer(socketPath, tokenPath, reg, eng, nil, MetricsProvider{}, "test", zap.NewNop(), nil, "buildin/dicodai")
+	if err != nil {
+		t.Fatalf("NewControlServer: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = cs.Start(ctx) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(socketPath); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("socket never appeared")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	tok, err := os.ReadFile(tokenPath)
+	if err != nil {
+		t.Fatalf("read token: %v", err)
+	}
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	if err := writeMsg(conn, handshakeReq{Token: string(tok)}); err != nil {
+		t.Fatalf("handshake send: %v", err)
+	}
+	var hs map[string]any
+	if err := readMsg(conn, &hs); err != nil {
+		t.Fatalf("handshake recv: %v", err)
+	}
+
+	if err := writeMsg(conn, Request{ID: "ai1", Method: "cli.ai", Prompt: "hello"}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	var resp struct {
+		ID     string          `json:"id"`
+		Result json.RawMessage `json:"result"`
+		Error  string          `json:"error"`
+	}
+	if err := readMsg(conn, &resp); err != nil {
+		t.Fatalf("recv: %v", err)
+	}
+	if resp.Error != "" {
+		t.Fatalf("unexpected error: %s", resp.Error)
+	}
+	var got AIResult
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Reply != "hello from the agent" {
+		t.Errorf("Reply = %q, want %q", got.Reply, "hello from the agent")
+	}
+	if got.SessionID != "sess-abc" {
+		t.Errorf("SessionID = %q, want %q", got.SessionID, "sess-abc")
+	}
+	if got.TaskID != "buildin/dicodai" {
+		t.Errorf("TaskID = %q, want %q", got.TaskID, "buildin/dicodai")
+	}
+}
+
+// TestControl_AI_NumericSessionID verifies the fmt.Sprint-based relaxation
+// in handleAI: alternative tasks that emit session_id as a JSON number (very
+// common when ids are represented as u64 server-side) round-trip to the CLI
+// as a string instead of being silently dropped — which would have meant a
+// fresh session every turn.
+func TestControl_AI_NumericSessionID(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "ctrl.sock")
+	tokenPath := filepath.Join(dir, "ctrl.token")
+
+	d, _ := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	defer d.Close()
+	reg := registry.New(d)
+	if err := reg.Register(&task.Spec{ID: "buildin/dicodai", Name: "dicodai"}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	eng := &mockEngine{
+		runID: "run-ai-num-1",
+		result: RunResult{
+			RunID:  "run-ai-num-1",
+			Status: "success",
+			ReturnValue: map[string]any{
+				"session_id": float64(42), // JSON numbers decode to float64
+				"reply":      "numeric session test",
+			},
+		},
+	}
+
+	cs, err := NewControlServer(socketPath, tokenPath, reg, eng, nil, MetricsProvider{}, "test", zap.NewNop(), nil, "buildin/dicodai")
+	if err != nil {
+		t.Fatalf("NewControlServer: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = cs.Start(ctx) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(socketPath); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("socket never appeared")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	tok, _ := os.ReadFile(tokenPath)
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	_ = writeMsg(conn, handshakeReq{Token: string(tok)})
+	var hs map[string]any
+	_ = readMsg(conn, &hs)
+
+	_ = writeMsg(conn, Request{ID: "ai1", Method: "cli.ai", Prompt: "hello"})
+	var resp struct {
+		ID     string          `json:"id"`
+		Result json.RawMessage `json:"result"`
+		Error  string          `json:"error"`
+	}
+	_ = readMsg(conn, &resp)
+	if resp.Error != "" {
+		t.Fatalf("unexpected error: %s", resp.Error)
+	}
+	var got AIResult
+	_ = json.Unmarshal(resp.Result, &got)
+	if got.SessionID != "42" {
+		t.Errorf("numeric session_id should stringify to %q, got %q", "42", got.SessionID)
+	}
+	if got.Reply != "numeric session test" {
+		t.Errorf("Reply = %q, want %q", got.Reply, "numeric session test")
+	}
+}
+
+// TestControl_AI_NoDefault_NoOverride_ReturnsError rejects the request when
+// neither cfg.AI.Task nor req.TaskID is set — the daemon has nothing to fire.
+func TestControl_AI_NoDefault_NoOverride_ReturnsError(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "ctrl.sock")
+	tokenPath := filepath.Join(dir, "ctrl.token")
+
+	d, _ := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	defer d.Close()
+	reg := registry.New(d)
+
+	cs, err := NewControlServer(socketPath, tokenPath, reg, &mockEngine{}, nil, MetricsProvider{}, "test", zap.NewNop(), nil, "")
+	if err != nil {
+		t.Fatalf("NewControlServer: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = cs.Start(ctx) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(socketPath); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("socket never appeared")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	tok, _ := os.ReadFile(tokenPath)
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	_ = writeMsg(conn, handshakeReq{Token: string(tok)})
+	var hs map[string]any
+	_ = readMsg(conn, &hs)
+
+	_ = writeMsg(conn, Request{ID: "ai1", Method: "cli.ai", Prompt: "hello"})
+	var resp struct {
+		ID    string `json:"id"`
+		Error string `json:"error"`
+	}
+	_ = readMsg(conn, &resp)
+	if resp.Error == "" {
+		t.Error("expected error when no ai task is configured")
+	}
+}
+
 func TestControl_RelayRotate_NotEnabled(t *testing.T) {
 	t.Parallel()
 
@@ -284,7 +518,7 @@ func TestControl_RelayRotate_InvokesRotator(t *testing.T) {
 	socketPath := filepath.Join(dir, "ctrl.sock")
 	tokenPath := filepath.Join(dir, "ctrl.token")
 
-	cs, err := NewControlServer(socketPath, tokenPath, nil, &mockEngine{}, nil, MetricsProvider{}, "test", zap.NewNop(), nil)
+	cs, err := NewControlServer(socketPath, tokenPath, nil, &mockEngine{}, nil, MetricsProvider{}, "test", zap.NewNop(), nil, "")
 	if err != nil {
 		t.Fatalf("NewControlServer: %v", err)
 	}
@@ -371,7 +605,7 @@ func TestControl_RelayRotate_RotatorError_SurfacesVerbatim(t *testing.T) {
 	socketPath := filepath.Join(dir, "ctrl.sock")
 	tokenPath := filepath.Join(dir, "ctrl.token")
 
-	cs, err := NewControlServer(socketPath, tokenPath, nil, &mockEngine{}, nil, MetricsProvider{}, "test", zap.NewNop(), nil)
+	cs, err := NewControlServer(socketPath, tokenPath, nil, &mockEngine{}, nil, MetricsProvider{}, "test", zap.NewNop(), nil, "")
 	if err != nil {
 		t.Fatalf("NewControlServer: %v", err)
 	}

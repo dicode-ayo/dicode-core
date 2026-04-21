@@ -220,7 +220,7 @@ func isPublicPath(path string) bool {
 		path == "/login",
 		path == "/dicode.js",
 		path == "/dicode-oauth-broadcast.js",
-		strings.HasPrefix(path, "/hooks/"):
+		strings.HasPrefix(path, webhookPathPrefix):
 		return true
 	}
 	return false
@@ -231,7 +231,7 @@ func isPublicPath(path string) bool {
 func isAPIRequest(r *http.Request) bool {
 	if strings.HasPrefix(r.URL.Path, "/api/") ||
 		strings.HasPrefix(r.URL.Path, "/mcp") ||
-		strings.HasPrefix(r.URL.Path, "/hooks/") ||
+		strings.HasPrefix(r.URL.Path, webhookPathPrefix) ||
 		r.URL.Path == "/ws" {
 		return true
 	}

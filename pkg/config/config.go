@@ -47,6 +47,17 @@ type RelayConfig struct {
 	ServerURL string `yaml:"server_url"` // wss://relay.dicode.app
 }
 
+// AIConfig points the WebUI and CLI at a single task for AI operations.
+// The task must have a webhook trigger — /api/ai/chat forwards requests to it,
+// and `dicode ai` fires it through the engine.
+type AIConfig struct {
+	// Task is the task id invoked for AI operations in the WebUI and CLI.
+	// Defaults to "buildin/dicodai" — a preset of buildin/ai-agent preloaded
+	// with the dicode-task-dev skill. Point it at any ai-agent override to
+	// swap providers, skills, or model without changing code.
+	Task string `yaml:"task,omitempty"`
+}
+
 type Config struct {
 	Sources       []SourceConfig           `yaml:"sources"`
 	Database      DatabaseConfig           `yaml:"database"`
@@ -57,6 +68,7 @@ type Config struct {
 	Runtimes      map[string]RuntimeConfig `yaml:"runtimes,omitempty"`
 	Execution     ExecutionConfig          `yaml:"execution,omitempty"`
 	Relay         RelayConfig              `yaml:"relay,omitempty"`
+	AI            AIConfig                 `yaml:"ai,omitempty"`
 	LogLevel      string                   `yaml:"log_level"`
 	DataDir       string                   `yaml:"data_dir"`
 }
@@ -278,6 +290,14 @@ func applyDefaults(cfg *Config, configDir string) {
 	}
 	if cfg.LogLevel == "" {
 		cfg.LogLevel = "info"
+	}
+	// AI.Task defaults to the buildin/dicodai preset so out-of-the-box
+	// WebUI + CLI AI flows work without configuration. Empty-string and
+	// absent both resolve to the default — there is no "explicitly
+	// disabled" state today. If a future version needs one, switch to
+	// *string and test for nil instead of empty.
+	if cfg.AI.Task == "" {
+		cfg.AI.Task = "buildin/dicodai"
 	}
 	// DataDir default is set earlier during variable expansion.
 }

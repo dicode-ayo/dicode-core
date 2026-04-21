@@ -52,13 +52,20 @@ type ControlServer struct {
 	rotateRelay     RelayIdentityRotator // nil if relay not enabled
 	log             *zap.Logger
 
+	// defaultAITask is cfg.AI.Task — the task id that `dicode ai` fires when
+	// the client doesn't supply --task. Empty when the daemon was started
+	// without config (tests).
+	defaultAITask string
+
 	startedAt time.Time
 	version   string
 }
 
 // NewControlServer creates a ControlServer. Call Start to begin accepting
 // connections. socketPath is the Unix socket path; tokenPath is where the CLI
-// token is written.
+// token is written. defaultAITask is cfg.AI.Task — resolved at daemon startup
+// so the control server can fire the right task when the CLI invokes `dicode ai`
+// without --task.
 func NewControlServer(
 	socketPath, tokenPath string,
 	reg *registry.Registry,
@@ -68,6 +75,7 @@ func NewControlServer(
 	version string,
 	log *zap.Logger,
 	database db.DB,
+	defaultAITask string,
 ) (*ControlServer, error) {
 	secret := make([]byte, 32)
 	if _, err := rand.Read(secret); err != nil {
@@ -84,6 +92,7 @@ func NewControlServer(
 		metricsProvider: mp,
 		database:        database,
 		log:             log,
+		defaultAITask:   defaultAITask,
 		startedAt:       time.Now(),
 		version:         version,
 	}
@@ -227,6 +236,9 @@ func (cs *ControlServer) dispatch(ctx context.Context, req Request) (any, error)
 
 	case "cli.relay.trust_broker":
 		return cs.handleTrustBroker(ctx)
+
+	case "cli.ai":
+		return cs.handleAI(ctx, req)
 
 	case "cli.relay.rotate_identity":
 		return cs.handleRelayRotate(ctx)
@@ -386,6 +398,79 @@ func (cs *ControlServer) handleMetrics() MetricsSnapshot {
 	}
 
 	return snap
+}
+
+// handleAI fires the task pointed at by cfg.AI.Task (or an explicit override
+// in req.TaskID) with {prompt, session_id} as params, waits for the run to
+// finish, and extracts {session_id, reply} from the return value. The task
+// must return either a JSON object with "session_id" / "reply" fields, a
+// bare string (treated as the reply with an empty session id), or any other
+// value (marshalled back into reply as JSON text).
+func (cs *ControlServer) handleAI(ctx context.Context, req Request) (AIResult, error) {
+	if req.Prompt == "" {
+		return AIResult{}, errors.New("prompt required")
+	}
+	taskID := req.TaskID
+	if taskID == "" {
+		taskID = cs.defaultAITask
+	}
+	if taskID == "" {
+		return AIResult{}, errors.New("no ai task configured — set ai.task in dicode.yaml or pass --task")
+	}
+	if _, ok := cs.reg.Get(taskID); !ok {
+		return AIResult{}, fmt.Errorf("ai task %q not registered", taskID)
+	}
+
+	params := map[string]string{"prompt": req.Prompt}
+	if req.SessionID != "" {
+		params["session_id"] = req.SessionID
+	}
+
+	runID, err := cs.engine.FireManual(ctx, taskID, params)
+	if err != nil {
+		return AIResult{}, err
+	}
+	run, err := cs.engine.WaitRun(ctx, runID)
+	if err != nil {
+		return AIResult{}, err
+	}
+	out := AIResult{
+		TaskID:    taskID,
+		RunID:     run.RunID,
+		SessionID: req.SessionID,
+	}
+	if run.Status != "success" {
+		// Surface the run id in the error so the CLI user can jump straight
+		// to `dicode logs <run-id>` — the control-socket dispatch loop only
+		// serialises `out` when err == nil, so TaskID/RunID on out would
+		// otherwise be dropped on failure.
+		return out, fmt.Errorf("task run %s finished with status %s — see 'dicode logs %s'",
+			run.RunID, run.Status, run.RunID)
+	}
+
+	// Extract reply + session_id from the return value. Accept both the full
+	// ai-agent envelope {session_id, reply} and simpler shapes so alternative
+	// tasks don't have to match the buildin schema exactly.
+	switch v := run.ReturnValue.(type) {
+	case nil:
+		// nothing to do — empty reply.
+	case string:
+		out.Reply = v
+	case map[string]any:
+		if s, ok := v["reply"].(string); ok {
+			out.Reply = s
+		}
+		// Accept session_id as any scalar — alternative tasks may emit numeric
+		// ids that would otherwise be silently dropped (and the user would
+		// see a fresh session every turn). fmt.Sprint is nil-safe.
+		if sid, ok := v["session_id"]; ok && sid != nil {
+			out.SessionID = fmt.Sprint(sid)
+		}
+	default:
+		b, _ := json.Marshal(v)
+		out.Reply = string(b)
+	}
+	return out, nil
 }
 
 // handleTrustBroker deletes the TOFU-pinned broker pubkey so the next relay

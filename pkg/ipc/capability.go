@@ -51,6 +51,7 @@ const (
 	CapCLILogs        = "cli.logs"         // fetch log entries for a run
 	CapCLIStatus      = "cli.status"       // daemon health and uptime
 	CapCLISecrets     = "cli.secrets"      // list / set / delete secrets
+	CapCLIAI          = "cli.ai"           // fire the configured ai task with a prompt
 	CapCLIRelayRotate = "cli.relay.rotate" // rotate the relay identity (irreversible)
 )
 
@@ -62,6 +63,7 @@ func cliCaps() []string {
 		CapCLILogs,
 		CapCLIStatus,
 		CapCLISecrets,
+		CapCLIAI,
 		CapCLIRelayRotate,
 	}
 }

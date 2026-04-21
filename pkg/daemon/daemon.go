@@ -187,7 +187,7 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 			return cm.ChildRSSMB, cm.ChildCPUMs
 		},
 	}
-	ctrlSrv, err := ipc.NewControlServer(socketPath, tokenPath, reg, eng, localSecrets, mp, version, log, database)
+	ctrlSrv, err := ipc.NewControlServer(socketPath, tokenPath, reg, eng, localSecrets, mp, version, log, database, cfg.AI.Task)
 	if err != nil {
 		return fmt.Errorf("build control server: %w", err)
 	}

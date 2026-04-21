@@ -13,6 +13,7 @@
 //	list                            list all registered tasks
 //	logs <run-id>                   fetch log lines for a run
 //	status [task-id]                daemon health or latest run for a task
+//	ai <prompt> [flags]             run the configured AI task with a prompt
 //	secrets list                    list secret keys
 //	secrets set <key> <value>       store a secret
 //	secrets delete <key>            delete a secret
@@ -109,6 +110,8 @@ func dispatch(c *ipc.ControlClient, args []string) error {
 			return fmt.Errorf("usage: dicode relay <trust-broker|rotate-identity> [--yes]")
 		}
 		return cmdRelay(c, args[1:])
+	case "ai":
+		return cmdAI(c, args[1:])
 	default:
 		return fmt.Errorf("unknown command %q — run 'dicode' for usage", args[0])
 	}
@@ -321,6 +324,94 @@ func cmdSecrets(c *ipc.ControlClient, args []string) error {
 	return nil
 }
 
+// cmdAI implements `dicode ai <prompt> [--session-id ID] [--task TASK_ID]`.
+//
+// Flags may appear anywhere before `--`: `dicode ai "what failed?"`, `dicode ai
+// --session-id abc "what failed?"`, and `dicode ai hello --session-id abc
+// world` all work — every non-flag argument is joined on spaces to form the
+// prompt. A `--` sentinel terminates flag parsing so prompts that literally
+// start with `--task` or `--session-id` can still be passed:
+//
+//	dicode ai -- --task is not a flag here
+//
+// Output: the `reply` field goes to stdout. On the first turn (when no
+// --session-id was provided) the generated `session_id` is written to stderr
+// on its own line prefixed with `session: ` so the user can copy-paste it
+// into the next turn without it polluting reply-consuming pipelines.
+func cmdAI(c *ipc.ControlClient, args []string) error {
+	var sessionID, taskID string
+	var positional []string
+	parseFlags := true
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if parseFlags && a == "--" {
+			parseFlags = false
+			continue
+		}
+		if !parseFlags {
+			positional = append(positional, a)
+			continue
+		}
+		switch a {
+		case "--session-id", "-s":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--session-id requires a value")
+			}
+			sessionID = args[i+1]
+			i++
+		case "--task":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--task requires a value")
+			}
+			taskID = args[i+1]
+			i++
+		case "--help", "-h":
+			fmt.Fprintln(os.Stderr, "Usage: dicode ai <prompt> [--session-id ID] [--task TASK_ID]")
+			return nil
+		default:
+			// Support --session-id=value / --task=value.
+			if strings.HasPrefix(a, "--session-id=") {
+				sessionID = strings.TrimPrefix(a, "--session-id=")
+				continue
+			}
+			if strings.HasPrefix(a, "--task=") {
+				taskID = strings.TrimPrefix(a, "--task=")
+				continue
+			}
+			positional = append(positional, a)
+		}
+	}
+	if len(positional) == 0 {
+		return fmt.Errorf("usage: dicode ai <prompt> [--session-id ID] [--task TASK_ID]")
+	}
+	prompt := strings.Join(positional, " ")
+
+	resp, err := c.Send(ipc.Request{
+		Method:    "cli.ai",
+		Prompt:    prompt,
+		SessionID: sessionID,
+		TaskID:    taskID, // empty → daemon uses cfg.AI.Task
+	})
+	if err != nil {
+		return err
+	}
+	if resp.Error != "" {
+		return fmt.Errorf("%s", resp.Error)
+	}
+	var result ipc.AIResult
+	if err := remarshal(resp.Result, &result); err != nil {
+		return err
+	}
+	// Emit session_id to stderr on first turn so pipelines that consume the
+	// reply on stdout stay clean. When the caller already passed --session-id
+	// we skip this — they already have the id.
+	if sessionID == "" && result.SessionID != "" {
+		fmt.Fprintf(os.Stderr, "session: %s\n", result.SessionID)
+	}
+	fmt.Println(result.Reply)
+	return nil
+}
+
 // ensureDaemon starts the daemon in the background if the socket is not reachable.
 // It re-execs the current binary with the "daemon" subcommand.
 func ensureDaemon(socketPath string) error {
@@ -415,6 +506,8 @@ Commands:
   list                            list registered tasks
   logs <run-id>                   show logs for a run
   status [task-id]                daemon health or task's latest run
+  ai <prompt> [flags]             run the configured AI task with a prompt
+                                  flags: --session-id ID, --task TASK_ID
   secrets list                    list secret keys
   secrets set <key> <value>       store a secret
   secrets delete <key>            delete a secret

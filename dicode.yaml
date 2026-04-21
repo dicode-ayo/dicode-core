@@ -16,6 +16,8 @@ relay:
   enabled: true
   server_url: ws://localhost:5553
 log_level: info
+# ai:
+#   task: buildin/dicodai  # task id invoked for AI operations (webui + CLI)
 runtimes:
   python:
     version: 0.7.3
