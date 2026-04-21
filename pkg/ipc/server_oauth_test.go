@@ -5,16 +5,14 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdh"
-	"crypto/ecdsa"
-	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -47,15 +45,12 @@ func (m *memSecrets) Name() string { return "mem" }
 
 var _ secrets.Manager = (*memSecrets)(nil)
 
+// newOAuthIdentity delegates to relay.NewTestIdentity so the struct shape of
+// relay.Identity stays an implementation detail of the relay package (see
+// issue #104).
 func newOAuthIdentity(t *testing.T) *relay.Identity {
 	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("keygen: %v", err)
-	}
-	pubBytes := append([]byte{0x04}, append(key.PublicKey.X.FillBytes(make([]byte, 32)), key.PublicKey.Y.FillBytes(make([]byte, 32))...)...)
-	sum := sha256.Sum256(pubBytes)
-	return &relay.Identity{PrivateKey: key, UUID: hex.EncodeToString(sum[:])}
+	return relay.NewTestIdentity(t)
 }
 
 type oauthEnv struct {
@@ -80,7 +75,9 @@ func startOAuthServer(t *testing.T) *oauthEnv {
 	identity := newOAuthIdentity(t)
 	pending := relay.NewPendingSessions()
 	secretsMgr := newMemSecrets()
-	srv.SetOAuthBroker(identity, "https://relay.dicode.app", pending, nil)
+	// supportsOAuthFn=nil so existing tests that pre-date #104 still exercise
+	// the happy path without having to fake a handshake.
+	srv.SetOAuthBroker(identity, "https://relay.dicode.app", pending, nil, nil)
 	srv.SetSecrets(secretsMgr)
 
 	socketPath, token, err := srv.Start(context.Background())
@@ -144,7 +141,7 @@ func TestServer_OAuth_BuildAuthURL_DeniedWithoutInit(t *testing.T) {
 	spec := specWithDicode("leaky", &task.DicodePermissions{OAuthStore: true})
 	runID := fmt.Sprintf("test-%d", time.Now().UnixNano())
 	srv := New(runID, spec.ID, env.secret, env.reg, env.db, nil, nil, zap.NewNop(), spec, nil)
-	srv.SetOAuthBroker(newOAuthIdentity(t), "https://relay.dicode.app", relay.NewPendingSessions(), nil)
+	srv.SetOAuthBroker(newOAuthIdentity(t), "https://relay.dicode.app", relay.NewPendingSessions(), nil, nil)
 	socketPath, token, err := srv.Start(context.Background())
 	if err != nil {
 		t.Fatalf("Start: %v", err)
@@ -301,10 +298,73 @@ func TestServer_OAuth_NotConfigured(t *testing.T) {
 	}
 }
 
+// TestServer_OAuth_RefusesWhenBrokerProtocolOld covers decision 3 of the
+// issue #104 review: when the connected broker has advertised a protocol
+// version < 2 (captured here by supportsOAuthFn=false), both
+// dicode.oauth.build_auth_url and dicode.oauth.store_token must refuse
+// the request with the clear "upgrade dicode-relay to protocol >= 2"
+// error rather than silently proceeding to a mismatched-key decrypt.
+func TestServer_OAuth_RefusesWhenBrokerProtocolOld(t *testing.T) {
+	env := newTestEnv(t)
+	spec := specWithDicode("auth-relay", &task.DicodePermissions{OAuthInit: true, OAuthStore: true})
+	runID := fmt.Sprintf("test-%d", time.Now().UnixNano())
+	srv := New(runID, spec.ID, env.secret, env.reg, env.db, nil, nil, zap.NewNop(), spec, nil)
+
+	id := newOAuthIdentity(t)
+	pending := relay.NewPendingSessions()
+	secretsMgr := newMemSecrets()
+	// supportsOAuthFn always false — simulating a broker still on protocol 1.
+	srv.SetOAuthBroker(id, "https://relay.dicode.app", pending, nil, func() bool { return false })
+	srv.SetSecrets(secretsMgr)
+
+	socketPath, token, err := srv.Start(context.Background())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(srv.Stop)
+	conn := dial(t, socketPath)
+	t.Cleanup(func() { conn.Close() })
+	doHandshake(t, conn, token)
+
+	// build_auth_url must be refused with the clear upgrade message.
+	sendMsg(t, conn, map[string]any{"id": "1", "method": "dicode.oauth.build_auth_url", "provider": "slack"})
+	resp := recvMsg(t, conn)
+	errStr, _ := resp["error"].(string)
+	if errStr == "" {
+		t.Fatal("expected broker-protocol error, got none")
+	}
+	if !strings.Contains(errStr, "protocol") || !strings.Contains(errStr, "2") {
+		t.Fatalf("expected operator-actionable protocol error, got: %q", errStr)
+	}
+	// The pending store must not have grown — the gate is pre-enqueue.
+	if pending.Len() != 0 {
+		t.Fatalf("pending session unexpectedly registered: len=%d", pending.Len())
+	}
+
+	// store_token is also refused, even before decryption is attempted. We
+	// pass a deliberately malformed envelope — the gate must short-circuit
+	// before any decode happens.
+	sendMsg(t, conn, map[string]any{
+		"id":       "2",
+		"method":   "dicode.oauth.store_token",
+		"envelope": json.RawMessage(`{}`),
+	})
+	resp2 := recvMsg(t, conn)
+	errStr2, _ := resp2["error"].(string)
+	if errStr2 == "" {
+		t.Fatal("expected broker-protocol error on store_token, got none")
+	}
+	if !strings.Contains(errStr2, "protocol") {
+		t.Fatalf("expected protocol error on store_token, got: %q", errStr2)
+	}
+}
+
 // sealForDaemon mirrors dicode-relay src/broker/crypto.ts eciesEncrypt.
+// Post-#104 the broker encrypts against the daemon's DecryptKey pubkey —
+// mirror that here so the test actually exercises the production code path.
 func sealForDaemon(t *testing.T, identity *relay.Identity, sessionID string, plaintext []byte) *relay.OAuthTokenDeliveryPayload {
 	t.Helper()
-	daemonPub, err := ecdh.P256().NewPublicKey(identity.UncompressedPublicKey())
+	daemonPub, err := ecdh.P256().NewPublicKey(identity.DecryptPublicKey())
 	if err != nil {
 		t.Fatalf("daemon pub: %v", err)
 	}

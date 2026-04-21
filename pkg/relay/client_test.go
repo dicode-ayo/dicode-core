@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"go.uber.org/zap"
 )
 
 // newTestServer starts an in-process relay server and returns its URL and a
@@ -40,7 +41,7 @@ func newTestIdentity(t *testing.T) *Identity {
 	t.Helper()
 	ctx := context.Background()
 	database := openTestDB(t)
-	id, err := LoadOrGenerateIdentity(ctx, database)
+	id, err := LoadOrGenerateIdentity(ctx, database, zap.NewNop())
 	if err != nil {
 		t.Fatalf("generate identity: %v", err)
 	}
@@ -91,7 +92,8 @@ func TestHandshakeWrongKey(t *testing.T) {
 	// ...then create a different identity and use its key but id1's UUID.
 	id2 := newTestIdentity(t)
 	tamperedID := &Identity{
-		PrivateKey: id2.PrivateKey, // wrong key
+		SignKey:    id2.SignKey,    // wrong sign key
+		DecryptKey: id2.DecryptKey, // any valid decrypt key; irrelevant for handshake
 		UUID:       id1.UUID,       // mismatched UUID
 	}
 
@@ -152,7 +154,7 @@ func TestHandshakeReplayedTimestamp(t *testing.T) {
 
 	// Use a timestamp 60 seconds in the past (outside ±30 s window).
 	staleTS := time.Now().Unix() - 60
-	sig, err := signChallenge(id.PrivateKey, nonceBytes, staleTS)
+	sig, err := signChallenge(id.SignKey, nonceBytes, staleTS)
 	if err != nil {
 		t.Fatalf("sign: %v", err)
 	}
@@ -160,7 +162,7 @@ func TestHandshakeReplayedTimestamp(t *testing.T) {
 	hello, _ := encodeMsg(helloMsg{
 		Type:      msgHello,
 		UUID:      id.UUID,
-		PubKey:    base64.StdEncoding.EncodeToString(id.UncompressedPublicKey()),
+		PubKey:    base64.StdEncoding.EncodeToString(id.SignPublicKey()),
 		Sig:       base64.StdEncoding.EncodeToString(sig),
 		Timestamp: staleTS,
 	})
@@ -394,11 +396,11 @@ func TestNonceReplay(t *testing.T) {
 	nonce1, _ := hex.DecodeString(ch1.Nonce)
 
 	ts1 := time.Now().Unix()
-	sig1, _ := signChallenge(id.PrivateKey, nonce1, ts1)
+	sig1, _ := signChallenge(id.SignKey, nonce1, ts1)
 	hello1, _ := encodeMsg(helloMsg{
 		Type:      msgHello,
 		UUID:      id.UUID,
-		PubKey:    base64.StdEncoding.EncodeToString(id.UncompressedPublicKey()),
+		PubKey:    base64.StdEncoding.EncodeToString(id.SignPublicKey()),
 		Sig:       base64.StdEncoding.EncodeToString(sig1),
 		Timestamp: ts1,
 	})
@@ -430,11 +432,11 @@ func TestNonceReplay(t *testing.T) {
 
 	// Re-use nonce1 (which was already consumed).
 	ts2 := time.Now().Unix()
-	sig2, _ := signChallenge(id.PrivateKey, nonce1, ts2)
+	sig2, _ := signChallenge(id.SignKey, nonce1, ts2)
 	hello2, _ := encodeMsg(helloMsg{
 		Type:      msgHello,
 		UUID:      id.UUID,
-		PubKey:    base64.StdEncoding.EncodeToString(id.UncompressedPublicKey()),
+		PubKey:    base64.StdEncoding.EncodeToString(id.SignPublicKey()),
 		Sig:       base64.StdEncoding.EncodeToString(sig2),
 		Timestamp: ts2,
 	})
@@ -560,13 +562,13 @@ func TestWrongUUID(t *testing.T) {
 	nonceBytes, _ := hex.DecodeString(ch.Nonce)
 
 	ts2 := time.Now().Unix()
-	sig, _ := signChallenge(id.PrivateKey, nonceBytes, ts2)
+	sig, _ := signChallenge(id.SignKey, nonceBytes, ts2)
 
 	// Send a valid pubkey but a wrong UUID (all-zeros).
 	hello, _ := encodeMsg(helloMsg{
 		Type:      msgHello,
 		UUID:      strings.Repeat("0", 64),
-		PubKey:    base64.StdEncoding.EncodeToString(id.UncompressedPublicKey()),
+		PubKey:    base64.StdEncoding.EncodeToString(id.SignPublicKey()),
 		Sig:       base64.StdEncoding.EncodeToString(sig),
 		Timestamp: ts2,
 	})

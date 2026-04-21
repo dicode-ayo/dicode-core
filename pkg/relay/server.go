@@ -107,7 +107,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	welcomeURL := fmt.Sprintf("%s/u/%s/hooks/", s.host, sc.uuid)
-	welcomeData, _ := encodeMsg(welcomeMsg{Type: msgWelcome, URL: welcomeURL})
+	welcomeData, _ := encodeMsg(welcomeMsg{Type: msgWelcome, URL: welcomeURL, Protocol: 2})
 	if err := sc.write(ctx, welcomeData); err != nil {
 		return
 	}

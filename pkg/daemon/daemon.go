@@ -201,7 +201,7 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 
 	// 11. Relay client — optional, enabled via config.
 	if cfg.Relay.Enabled && cfg.Relay.ServerURL != "" {
-		id, err := relay.LoadOrGenerateIdentity(ctx, database)
+		id, err := relay.LoadOrGenerateIdentity(ctx, database, log)
 		if err != nil {
 			log.Warn("relay: identity init failed, relay disabled", zap.Error(err))
 		} else {
@@ -213,9 +213,14 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 			// across runs so auth-start and auth-relay correlate by
 			// session id. The broker speaks HTTPS at the same host as the
 			// WSS relay endpoint.
+			//
+			// rc.SupportsOAuth is passed as a gating function (issue #104):
+			// pre-split brokers advertise protocol < 2, in which case the
+			// IPC layer refuses OAuth flows with a clear operator error
+			// rather than silently failing to decrypt the delivery.
 			pending := relay.NewPendingSessions()
 			if brokerURL := deriveBrokerBaseURL(cfg.Relay.ServerURL); brokerURL != "" {
-				denoRT.SetOAuthBroker(id, brokerURL, pending, rc.BrokerPubkey)
+				denoRT.SetOAuthBroker(id, brokerURL, pending, rc.BrokerPubkey, rc.SupportsOAuth)
 			} else {
 				log.Warn("relay: could not derive broker base URL from server_url — OAuth broker disabled",
 					zap.String("server_url", cfg.Relay.ServerURL),

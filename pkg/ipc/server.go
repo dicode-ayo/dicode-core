@@ -18,6 +18,12 @@ import (
 	"go.uber.org/zap"
 )
 
+// oauthBrokerProtocolErr is the operator-facing error returned when a task
+// invokes dicode.oauth.* against a broker whose welcome message did not
+// advertise protocol >= 2 (issue #104). The message intentionally names
+// the fix so operators know what to upgrade without digging through logs.
+const oauthBrokerProtocolErr = "ipc: broker does not support split-key OAuth — upgrade dicode-relay to protocol >= 2"
+
 // Server is a per-run Unix socket server that bridges a task subprocess and
 // the Go host using the unified IPC protocol.
 //
@@ -28,18 +34,19 @@ type Server struct {
 	taskID string
 	secret []byte // daemon-level HMAC secret for token verification
 
-	registry       *registry.Registry
-	db             db.DB
-	params         map[string]string
-	input          any
-	spec           *task.Spec
-	engine         EngineRunner
-	secrets        secrets.Manager        // optional; enables dicode.secrets_set / dicode.secrets_delete
-	oauthID        *relay.Identity        // optional; enables dicode.oauth.* for the auth built-ins
-	oauthURL       string                 // broker base URL, e.g. "https://relay.dicode.app"
-	oauthPending   *relay.PendingSessions // tracks outstanding /auth/:provider flows by session id
-	brokerPubkeyFn func() string          // returns the TOFU-pinned broker pubkey (base64 SPKI DER)
-	log            *zap.Logger
+	registry        *registry.Registry
+	db              db.DB
+	params          map[string]string
+	input           any
+	spec            *task.Spec
+	engine          EngineRunner
+	secrets         secrets.Manager        // optional; enables dicode.secrets_set / dicode.secrets_delete
+	oauthID         *relay.Identity        // optional; enables dicode.oauth.* for the auth built-ins
+	oauthURL        string                 // broker base URL, e.g. "https://relay.dicode.app"
+	oauthPending    *relay.PendingSessions // tracks outstanding /auth/:provider flows by session id
+	brokerPubkeyFn  func() string          // returns the TOFU-pinned broker pubkey (base64 SPKI DER)
+	supportsOAuthFn func() bool            // issue #104: reports broker protocol >= 2; nil means unchecked
+	log             *zap.Logger
 
 	gateway *Gateway // optional; enables http.register for daemon tasks
 
@@ -115,11 +122,19 @@ func (s *Server) SetSecrets(m secrets.Manager) { s.secrets = m }
 // pending is shared across all per-run ipc.Server instances so that an
 // auth-start run and the subsequent auth-complete webhook run can correlate
 // on session id.
-func (s *Server) SetOAuthBroker(id *relay.Identity, baseURL string, pending *relay.PendingSessions, brokerPubkeyFn func() string) {
+//
+// supportsOAuthFn (issue #104) is consulted immediately before every OAuth
+// IPC dispatch. If non-nil and it returns false, dicode.oauth.build_auth_url
+// and dicode.oauth.store_token are refused with a clear operator error
+// rather than silently failing at decrypt time. Passing nil leaves the IPC
+// path unchecked — appropriate for test fixtures that don't run a full
+// relay client.
+func (s *Server) SetOAuthBroker(id *relay.Identity, baseURL string, pending *relay.PendingSessions, brokerPubkeyFn func() string, supportsOAuthFn func() bool) {
 	s.oauthID = id
 	s.oauthURL = baseURL
 	s.oauthPending = pending
 	s.brokerPubkeyFn = brokerPubkeyFn
+	s.supportsOAuthFn = supportsOAuthFn
 }
 
 // Start creates the Unix socket and begins accepting connections.
@@ -571,6 +586,17 @@ func (s *Server) handleConn(conn net.Conn) {
 				reply(req.ID, nil, "ipc: oauth broker not configured on this daemon")
 				continue
 			}
+			// Issue #104: refuse OAuth flows when the connected broker has not
+			// advertised protocol >= 2. A pre-split broker would encrypt the
+			// delivery to the SignKey pubkey, which DecryptOAuthToken cannot
+			// open with the DecryptKey — the failure would only surface on
+			// the callback, after the user has already completed the upstream
+			// consent. Refusing here turns a silent crypto failure into an
+			// actionable operator message.
+			if s.supportsOAuthFn != nil && !s.supportsOAuthFn() {
+				reply(req.ID, nil, oauthBrokerProtocolErr)
+				continue
+			}
 			if req.Provider == "" {
 				reply(req.ID, nil, "ipc: provider required")
 				continue
@@ -598,6 +624,14 @@ func (s *Server) handleConn(conn net.Conn) {
 			}
 			if s.oauthID == nil || s.oauthPending == nil {
 				reply(req.ID, nil, "ipc: oauth broker not configured on this daemon")
+				continue
+			}
+			// Issue #104 — see the note on dicode.oauth.build_auth_url.
+			// Reject store_token against a pre-split broker so a stale
+			// session delivered just after a downgrade can't coerce a
+			// mismatched-key decrypt attempt.
+			if s.supportsOAuthFn != nil && !s.supportsOAuthFn() {
+				reply(req.ID, nil, oauthBrokerProtocolErr)
 				continue
 			}
 			if s.secrets == nil {
