@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -189,6 +190,45 @@ func TestAIChat_RequiresAuth(t *testing.T) {
 
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("expected 401 without session, got %d", w.Code)
+	}
+	// Shape-check the body so a future refactor that accidentally takes
+	// /api/ai/chat out of the authenticated group doesn't pass this test
+	// via some other incidental 401 (e.g. a handler that required state
+	// the test never set up).
+	if !strings.Contains(w.Body.String(), "unauthorized") {
+		t.Errorf("expected unauthorized body from requireAuth, got %q", w.Body.String())
+	}
+}
+
+// TestAIChat_RejectsNonHookWebhook guards against /api/ai/chat being used as
+// an authenticated proxy to arbitrary /api routes — and against infinite
+// self-dispatch if a misconfiguration points ai.task at a task whose webhook
+// is /api/ai/chat itself. Only /hooks/-prefixed webhooks are forwardable.
+func TestAIChat_RejectsNonHookWebhook(t *testing.T) {
+	srv, _ := newAIServer(t, "bad/task")
+	if err := srv.registry.Register(&task.Spec{
+		ID:      "bad/task",
+		Trigger: task.TriggerConfig{Webhook: "/api/ai/chat"},
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	body, _ := json.Marshal(map[string]any{"prompt": "loop me"})
+	req := httptest.NewRequest(http.MethodPost, "/api/ai/chat", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	cookie := login(t, srv.Handler(), "hunter2", false)
+	if cookie == nil {
+		t.Fatal("login failed")
+	}
+	req.AddCookie(cookie)
+
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 for non-/hooks/ webhook, got %d: %s", w.Code, w.Body)
+	}
+	if !strings.Contains(w.Body.String(), "/hooks/") {
+		t.Errorf("error body should name the /hooks/ prefix requirement, got %q", w.Body.String())
 	}
 }
 

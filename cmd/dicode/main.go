@@ -294,10 +294,13 @@ func cmdSecrets(c *ipc.ControlClient, args []string) error {
 
 // cmdAI implements `dicode ai <prompt> [--session-id ID] [--task TASK_ID]`.
 //
-// The prompt is everything after the flags: `dicode ai "what failed?"` works,
-// as does `dicode ai --session-id abc "what failed?"`. The first non-flag
-// argument and anything after it is joined on spaces to form the prompt so
-// the user doesn't have to quote every multi-word prompt on the shell.
+// Flags may appear anywhere before `--`: `dicode ai "what failed?"`, `dicode ai
+// --session-id abc "what failed?"`, and `dicode ai hello --session-id abc
+// world` all work — every non-flag argument is joined on spaces to form the
+// prompt. A `--` sentinel terminates flag parsing so prompts that literally
+// start with `--task` or `--session-id` can still be passed:
+//
+//	dicode ai -- --task is not a flag here
 //
 // Output: the `reply` field goes to stdout. On the first turn (when no
 // --session-id was provided) the generated `session_id` is written to stderr
@@ -306,8 +309,17 @@ func cmdSecrets(c *ipc.ControlClient, args []string) error {
 func cmdAI(c *ipc.ControlClient, args []string) error {
 	var sessionID, taskID string
 	var positional []string
+	parseFlags := true
 	for i := 0; i < len(args); i++ {
 		a := args[i]
+		if parseFlags && a == "--" {
+			parseFlags = false
+			continue
+		}
+		if !parseFlags {
+			positional = append(positional, a)
+			continue
+		}
 		switch a {
 		case "--session-id", "-s":
 			if i+1 >= len(args) {

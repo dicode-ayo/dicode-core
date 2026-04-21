@@ -292,7 +292,10 @@ func applyDefaults(cfg *Config, configDir string) {
 		cfg.LogLevel = "info"
 	}
 	// AI.Task defaults to the buildin/dicodai preset so out-of-the-box
-	// WebUI + CLI AI flows work without configuration.
+	// WebUI + CLI AI flows work without configuration. Empty-string and
+	// absent both resolve to the default — there is no "explicitly
+	// disabled" state today. If a future version needs one, switch to
+	// *string and test for nil instead of empty.
 	if cfg.AI.Task == "" {
 		cfg.AI.Task = "buildin/dicodai"
 	}

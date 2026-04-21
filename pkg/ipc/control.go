@@ -423,7 +423,12 @@ func (cs *ControlServer) handleAI(ctx context.Context, req Request) (AIResult, e
 		SessionID: req.SessionID,
 	}
 	if run.Status != "success" {
-		return out, fmt.Errorf("task run %s finished with status %s", run.RunID, run.Status)
+		// Surface the run id in the error so the CLI user can jump straight
+		// to `dicode logs <run-id>` — the control-socket dispatch loop only
+		// serialises `out` when err == nil, so TaskID/RunID on out would
+		// otherwise be dropped on failure.
+		return out, fmt.Errorf("task run %s finished with status %s — see 'dicode logs %s'",
+			run.RunID, run.Status, run.RunID)
 	}
 
 	// Extract reply + session_id from the return value. Accept both the full
@@ -438,8 +443,11 @@ func (cs *ControlServer) handleAI(ctx context.Context, req Request) (AIResult, e
 		if s, ok := v["reply"].(string); ok {
 			out.Reply = s
 		}
-		if s, ok := v["session_id"].(string); ok {
-			out.SessionID = s
+		// Accept session_id as any scalar — alternative tasks may emit numeric
+		// ids that would otherwise be silently dropped (and the user would
+		// see a fresh session every turn). fmt.Sprint is nil-safe.
+		if sid, ok := v["session_id"]; ok && sid != nil {
+			out.SessionID = fmt.Sprint(sid)
 		}
 	default:
 		b, _ := json.Marshal(v)

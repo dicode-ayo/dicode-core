@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
@@ -23,9 +24,9 @@ import (
 // dispatching through the full router keeps the forward identical to what a
 // browser would do hitting /hooks/<task> directly. The caller has already
 // passed requireAuth (this handler lives inside the authenticated group);
-// the forwarded sub-request inherits the session cookie via r.Clone, so when
-// a forwarded-to task has trigger.auth:true the inner webhookAuthGuard also
-// passes.
+// the forwarded sub-request inherits the session cookie via r.Header.Clone(),
+// so when a forwarded-to task has trigger.auth:true the inner
+// webhookAuthGuard also passes.
 func (s *Server) apiAIChat(w http.ResponseWriter, r *http.Request) {
 	// Read the body once so we can replay it on the forwarded request.
 	body, err := io.ReadAll(r.Body)
@@ -68,6 +69,16 @@ func (s *Server) apiAIChat(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "configured ai task has no webhook trigger", http.StatusInternalServerError)
 		return
 	}
+	// Guard against self-dispatch recursion and against using the AI
+	// endpoint as a proxy to arbitrary /api routes. Webhooks MUST live
+	// under /hooks/; anything else points at infrastructure paths the
+	// ai-agent runtime cannot legitimately handle.
+	if !strings.HasPrefix(spec.Trigger.Webhook, "/hooks/") {
+		s.log.Warn("ai chat: configured task webhook is not under /hooks/",
+			zap.String("task", taskID), zap.String("webhook", spec.Trigger.Webhook))
+		jsonErr(w, "ai task webhook must be under /hooks/", http.StatusInternalServerError)
+		return
+	}
 
 	// Build the internal forwarded request. Preserve method (POST), headers
 	// (cookies, content-type), and body; rewrite the URL to the webhook path.
@@ -85,6 +96,10 @@ func (s *Server) apiAIChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fwdReq.Header = r.Header.Clone()
+	// Content-Length from the outer request no longer matches — the body is
+	// re-wrapped in a bytes.Reader and net/http will recompute it. Stripping
+	// avoids confusing any future out-of-process proxy that might honour it.
+	fwdReq.Header.Del("Content-Length")
 	if fwdReq.Header.Get("Content-Type") == "" {
 		fwdReq.Header.Set("Content-Type", "application/json")
 	}
@@ -93,6 +108,18 @@ func (s *Server) apiAIChat(w http.ResponseWriter, r *http.Request) {
 
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, fwdReq)
+
+	// A 404 from the inner router means the webhook path resolved to a
+	// registered spec but nothing in the gateway claimed it — typically
+	// reconciler lag between registry.Register and gateway wiring at
+	// startup. Surface that as a retry-after-style 503 so the UI can
+	// show a targeted "try again" rather than a generic "not found".
+	if rec.Code == http.StatusNotFound {
+		s.log.Warn("ai chat: forward returned 404 — webhook registered but gateway not wired yet",
+			zap.String("task", taskID), zap.String("webhook", spec.Trigger.Webhook))
+		jsonErr(w, "ai task webhook not yet wired — retry in a moment", http.StatusServiceUnavailable)
+		return
+	}
 
 	// Propagate the inner response. Content-Type defaults to JSON since the
 	// ai-agent buildin always returns JSON; copy the recorded one when set.
