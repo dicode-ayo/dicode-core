@@ -12,13 +12,14 @@ class DcConfig extends LitElement {
     _srvStatus: { state: true },
     _srcStatus: { state: true },
     _cfgStatus: { state: true },
+    _aiStatus:  { state: true },
     _srcType:   { state: true },
   };
 
   constructor() {
     super();
     this._cfg = null; this._raw = null; this._error = null;
-    this._srvStatus = ''; this._srcStatus = ''; this._cfgStatus = '';
+    this._srvStatus = ''; this._srcStatus = ''; this._cfgStatus = ''; this._aiStatus = '';
     this._srcType = 'local';
     this._editor = null;
   }
@@ -58,6 +59,17 @@ class DcConfig extends LitElement {
         language: 'yaml', theme: monacoTheme(), fontSize: 13, minimap: { enabled: false },
       });
     });
+  }
+
+  async _saveAI() {
+    this._aiStatus = 'Saving…';
+    try {
+      const task = this.querySelector('#ai-task')?.value.trim();
+      if (!task) { this._aiStatus = 'Enter a task id'; return; }
+      await post('/api/settings/ai', { task });
+      this._aiStatus = 'Saved ✓'; setTimeout(() => { this._aiStatus = ''; }, 2000);
+      this._load();
+    } catch(e) { this._aiStatus = 'Error: ' + e.message; }
   }
 
   async _saveServer() {
@@ -112,9 +124,31 @@ class DcConfig extends LitElement {
     const sources = this._cfg.Sources || this._cfg.sources || [];
     const logLevel = this._cfg.LogLevel || this._cfg.log_level || 'info';
     const tray    = srv.Tray != null ? srv.Tray : (srv.tray != null ? srv.tray : true);
+    const aiCfg   = this._cfg.AI || this._cfg.ai || {};
+    const aiTask  = aiCfg.Task || aiCfg.task || 'buildin/dicodai';
 
     return html`
       <h1>Configuration</h1>
+
+      <!-- AI -->
+      <div class="card">
+        <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:0.75rem">
+          <h2 style="margin:0">AI</h2>
+          <span style="font-size:0.82rem;color:var(--muted)">${this._aiStatus}</span>
+        </div>
+        <div class="cfg-form">
+          <div class="field"><label>AI task</label>
+            <input id="ai-task" .value=${aiTask} placeholder="buildin/dicodai">
+            <div class="hint">
+              Task id that powers both the task-detail AI chat panel and <code>dicode ai</code>.
+              Must have a webhook trigger under <code>/hooks/</code>. Defaults to
+              <code>buildin/dicodai</code> — point at any ai-agent preset to switch providers
+              (e.g. <code>examples/ai-agent-ollama</code>, <code>examples/ai-agent-groq</code>).
+            </div>
+          </div>
+          <button class="btn" @click=${() => this._saveAI()}>&#128190; Save AI settings</button>
+        </div>
+      </div>
 
       <!-- Server -->
       <div class="card">

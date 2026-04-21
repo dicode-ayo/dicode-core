@@ -678,7 +678,6 @@ func TestControl_RelayRotate_RotatorError_SurfacesVerbatim(t *testing.T) {
 	<-done
 }
 
-
 func TestControl_UnknownMethod_ReturnsError(t *testing.T) {
 	t.Parallel()
 
