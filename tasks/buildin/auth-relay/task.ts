@@ -6,7 +6,7 @@
 // secrets. The plaintext credentials are never returned to JS — the IPC
 // call only reports which secret names were written.
 
-export default async function main() {
+export default async function main({ input, dicode }: DicodeSdk) {
   // input is the decoded webhook request body; the relay broker always
   // sends a JSON OAuthTokenDeliveryPayload, so trust the shape.
   const envelope = input;
