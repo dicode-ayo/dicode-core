@@ -51,6 +51,7 @@ const (
 	CapCLILogs    = "cli.logs"    // fetch log entries for a run
 	CapCLIStatus  = "cli.status"  // daemon health and uptime
 	CapCLISecrets = "cli.secrets" // list / set / delete secrets
+	CapCLIAI      = "cli.ai"      // fire the configured ai task with a prompt
 )
 
 // cliCaps is the full capability set granted to every CLI client.
@@ -61,6 +62,7 @@ func cliCaps() []string {
 		CapCLILogs,
 		CapCLIStatus,
 		CapCLISecrets,
+		CapCLIAI,
 	}
 }
 

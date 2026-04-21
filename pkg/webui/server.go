@@ -419,6 +419,9 @@ func (s *Server) Handler() http.Handler {
 			// Metrics
 			r.Get("/metrics", s.apiMetrics)
 
+			// AI chat — forwards to the task named by cfg.AI.Task.
+			r.Post("/ai/chat", s.apiAIChat)
+
 			// Managed runtime lifecycle
 			r.Get("/runtimes", s.apiListRuntimes)
 			r.Post("/runtimes/{name}/install", s.apiInstallRuntime)

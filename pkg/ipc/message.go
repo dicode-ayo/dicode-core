@@ -84,6 +84,10 @@ type Request struct {
 	RunID       string `json:"runID,omitempty"`
 	StringValue string `json:"stringValue,omitempty"` // cli.secrets.set value
 	Follow      bool   `json:"follow,omitempty"`      // cli.logs — reserved for streaming
+
+	// cli.ai — prompt, optional session_id, optional task id override.
+	Prompt    string `json:"prompt,omitempty"`
+	SessionID string `json:"sessionID,omitempty"`
 }
 
 // Response is an outbound message to a connected client.
@@ -159,6 +163,17 @@ type RunResult struct {
 	RunID       string `json:"runID"`
 	Status      string `json:"status"`
 	ReturnValue any    `json:"returnValue"`
+}
+
+// AIResult is the cli.ai response. reply is the text surfaced to the user;
+// session_id is echoed back so the CLI can persist it for follow-up turns.
+// TaskID is the task id that was actually fired — useful in case the caller
+// asked for the configured default and wants to know what ran.
+type AIResult struct {
+	TaskID    string `json:"taskID"`
+	RunID     string `json:"runID"`
+	SessionID string `json:"sessionID"`
+	Reply     string `json:"reply"`
 }
 
 // MetricsSnapshot is the cli.metrics response.

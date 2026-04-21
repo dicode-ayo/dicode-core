@@ -118,6 +118,34 @@ A starter skill ships at `tasks/skills/dicode-basics.md` covering core dicode co
 
 ---
 
+## Picking the task the WebUI and CLI use
+
+The WebUI's in-task AI chat panel and the `dicode ai` CLI both forward to a
+single configurable task, named by `ai.task` in `dicode.yaml`:
+
+```yaml
+ai:
+  task: buildin/dicodai   # default — change to any ai-agent preset
+```
+
+When omitted the default is `buildin/dicodai`, a preset of `buildin/ai-agent`
+preloaded with the `dicode-task-dev` skill. Point `ai.task` at any preset
+(e.g. `examples/ai-agent-ollama`) to swap providers, skills, or model without
+changing code.
+
+Two surfaces read this setting:
+
+- `POST /api/ai/chat` — used by the WebUI chat panel. Forwards the JSON body
+  to the configured task's webhook and returns its response. Requires a valid
+  dicode session (gated by `requireAuth` when `server.auth: true`).
+- `dicode ai "<prompt>" [--session-id ID] [--task TASK_ID]` — fires the
+  configured task through the engine over the CLI control socket. Use
+  `--task` to override for a single invocation; use `--session-id` to continue
+  an existing conversation. The first turn's generated session id is printed
+  to stderr as `session: <id>` so it doesn't pollute reply-consuming pipes.
+
+---
+
 ## Provider presets
 
 The buildin ships **maximally restrictive**: empty `permissions.net`, no provider env vars, no defaults for `model` / `base_url` / `api_key_env`. On its own, hitting `/hooks/ai` returns `not_configured`. This keeps the buildin generic and safe — provider-specific policy (which hosts to reach, which env vars to read) lives with the provider-specific task.

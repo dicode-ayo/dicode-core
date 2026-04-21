@@ -193,9 +193,9 @@ class DcTaskDetail extends LitElement {
     const aiMsg = { role: 'ai', text: '' };
     this._aiHistory = [...this._aiHistory, aiMsg];
 
-    // Path is coupled to the `dicodai` buildin taskset entry
-    // (tasks/buildin/taskset.yaml). Fork and override there if you need
-    // to point this UI at a different provider/preset.
+    // /api/ai/chat forwards to the task named by ai.task in dicode.yaml
+    // (default: buildin/dicodai). Point ai.task at any preset to swap
+    // providers, skills, or model without touching this component.
     // Agent replies are text-only — paste code back into the editor manually.
     const ctx = {
       task_id: this.taskid,
@@ -207,7 +207,7 @@ class DcTaskDetail extends LitElement {
 
     let reply = '';
     try {
-      const res = await fetch('/hooks/ai/dicodai', {
+      const res = await fetch('/api/ai/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

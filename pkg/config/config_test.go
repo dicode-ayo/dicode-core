@@ -96,6 +96,55 @@ sources:
 	}
 }
 
+// TestLoad_AITaskDefault ensures an empty ai: block falls back to the
+// buildin/dicodai default so zero-config installs keep the WebUI chat panel
+// and `dicode ai` wired up without edits to dicode.yaml.
+func TestLoad_AITaskDefault(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "dicode.yaml")
+
+	content := `
+sources:
+  - type: local
+    path: ${CONFIGDIR}/tasks
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AI.Task != "buildin/dicodai" {
+		t.Errorf("AI.Task default = %q, want %q", cfg.AI.Task, "buildin/dicodai")
+	}
+}
+
+// TestLoad_AITaskOverride ensures a user-supplied ai.task survives the YAML
+// round-trip without being clobbered by applyDefaults.
+func TestLoad_AITaskOverride(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "dicode.yaml")
+
+	content := `
+ai:
+  task: examples/ai-agent-ollama
+sources:
+  - type: local
+    path: ${CONFIGDIR}/tasks
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AI.Task != "examples/ai-agent-ollama" {
+		t.Errorf("AI.Task = %q, want %q", cfg.AI.Task, "examples/ai-agent-ollama")
+	}
+}
+
 func TestLoadExecutionMaxConcurrentTasks(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "dicode.yaml")
