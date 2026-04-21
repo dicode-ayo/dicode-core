@@ -66,23 +66,6 @@ runs = dicode.get_runs("morning-email-check", limit=5)
 
 ---
 
-### `dicode.get_config()`
-
-Read daemon config sections (e.g. AI provider settings). The API key is resolved server-side and never exposed to git.
-
-```typescript
-// Deno
-const ai = await dicode.get_config("ai")
-// { baseURL, model, apiKey }
-```
-
-```python
-# Python
-ai = dicode.get_config("ai")
-```
-
----
-
 ### `dicode.secrets_set()` / `dicode.secrets_delete()` (Deno only)
 
 Manage secrets from within a task.
@@ -115,7 +98,6 @@ Not available in the Python SDK.
 | `run_task(id, params?)` | `await dicode.run_task(...)` | `dicode.run_task(...)` | Implemented |
 | `list_tasks()` | `await dicode.list_tasks()` | `dicode.list_tasks()` | Implemented |
 | `get_runs(id, opts?)` | `await dicode.get_runs(...)` | `dicode.get_runs(...)` | Implemented |
-| `get_config(section)` | `await dicode.get_config(...)` | `dicode.get_config(...)` | Implemented |
 | `secrets_set(key, val)` | `await dicode.secrets_set(...)` | — | Implemented (Deno only) |
 | `secrets_delete(key)` | `await dicode.secrets_delete(...)` | — | Implemented (Deno only) |
 | `progress(msg, data)` | — | — | Planned |

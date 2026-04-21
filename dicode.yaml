@@ -8,10 +8,6 @@
 #   ${DATADIR}   — resolved data_dir (default: ~/.dicode)
 #   ~/           — also expanded to home directory
 
-ai:
-  api_key_env: OPENAI_API_KEY
-  base_url: ""
-  model: gpt-4o
 data_dir: ${HOME}/.dicode
 database:
   path: ${DATADIR}/data.db

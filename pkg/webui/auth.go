@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/dicode/dicode/pkg/ipc"
 	"go.uber.org/zap"
 )
 
@@ -12,17 +13,26 @@ import (
 // path has trigger.auth: true. If it does, and the request carries no valid
 // dicode session, the request is rejected (401 JSON for API callers, redirect
 // for browsers). Public webhooks (no auth: true) pass through unchanged.
+//
+// The match is longest-prefix so overlapping paths resolve to the most specific
+// spec — the gateway already routes this way, and the auth decision must agree.
+// With a short-prefix-wins loop, a public `/hooks/ai` would shadow a private
+// `/hooks/ai/dicodai` and silently drop `auth: true` at the door.
 func (s *Server) webhookAuthGuard(w http.ResponseWriter, r *http.Request, next http.Handler) {
-	// Find the spec whose webhook path is a prefix-match for r.URL.Path.
 	var requiresAuth bool
+	var bestLen = -1
 	for _, spec := range s.registry.All() {
 		wp := spec.Trigger.Webhook
-		if wp == "" {
+		if wp == "" || !ipc.PathMatches(wp, r.URL.Path) {
 			continue
 		}
-		if r.URL.Path == wp || strings.HasPrefix(r.URL.Path, wp+"/") {
+		// Compare normalised pattern length so a trailing slash on the
+		// registered webhook cannot artificially shorten the match and
+		// shadow a longer protected path.
+		l := len(strings.TrimSuffix(wp, "/"))
+		if l > bestLen {
+			bestLen = l
 			requiresAuth = spec.Trigger.WebhookAuth
-			break
 		}
 	}
 

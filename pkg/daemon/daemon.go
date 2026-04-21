@@ -271,11 +271,6 @@ func buildRuntimes(
 	denoRT.SetEngine(eng)
 	denoRT.SetGateway(gateway)
 	denoRT.SetSecretsManager(secretsMgr)
-	aiAPIKey := cfg.AI.APIKey
-	if aiAPIKey == "" && cfg.AI.APIKeyEnv != "" {
-		aiAPIKey = os.Getenv(cfg.AI.APIKeyEnv)
-	}
-	denoRT.SetAIConfig(cfg.AI.BaseURL, cfg.AI.Model, aiAPIKey)
 	if cfg.Defaults.OnFailureChain != "" {
 		eng.SetDefaultsOnFailureChain(cfg.Defaults.OnFailureChain)
 	}

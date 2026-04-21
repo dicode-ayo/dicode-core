@@ -111,7 +111,7 @@ func TestServer_HTTPRegister_And_Respond(t *testing.T) {
 	// Start an IPC server for a daemon task with the gateway attached.
 	runID := fmt.Sprintf("test-%d", time.Now().UnixNano())
 	spec := &task.Spec{ID: "my-daemon", Trigger: task.TriggerConfig{Daemon: true}}
-	srv := New(runID, "my-daemon", e.secret, e.reg, e.db, nil, nil, zap.NewNop(), spec, nil, "", "", "")
+	srv := New(runID, "my-daemon", e.secret, e.reg, e.db, nil, nil, zap.NewNop(), spec, nil)
 	srv.SetGateway(g)
 	socketPath, token, err := srv.Start(context.Background())
 	if err != nil {
@@ -262,7 +262,7 @@ func TestServer_HTTPRegister_RequiresDaemonSpec(t *testing.T) {
 
 	// Non-daemon task — should NOT get CapHTTPRegister.
 	runID := fmt.Sprintf("test-%d", time.Now().UnixNano())
-	srv := New(runID, "regular-task", e.secret, e.reg, e.db, nil, nil, zap.NewNop(), nil, nil, "", "", "")
+	srv := New(runID, "regular-task", e.secret, e.reg, e.db, nil, nil, zap.NewNop(), nil, nil)
 	srv.SetGateway(g)
 	socketPath, token, err := srv.Start(context.Background())
 	if err != nil {

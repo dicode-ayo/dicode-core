@@ -110,13 +110,13 @@ func newTestEnv(t *testing.T) *testEnv {
 // start creates a server with default params/input and performs the handshake.
 func (e *testEnv) start(t *testing.T, params map[string]string, input any) (net.Conn, *Server) {
 	t.Helper()
-	return e.startWithSpec(t, params, input, nil, nil, "", "", "")
+	return e.startWithSpec(t, params, input, nil, nil)
 }
 
-func (e *testEnv) startWithSpec(t *testing.T, params map[string]string, input any, spec *task.Spec, eng EngineRunner, aiBaseURL, aiModel, aiAPIKey string) (net.Conn, *Server) {
+func (e *testEnv) startWithSpec(t *testing.T, params map[string]string, input any, spec *task.Spec, eng EngineRunner) (net.Conn, *Server) {
 	t.Helper()
 	runID := fmt.Sprintf("test-%d", time.Now().UnixNano())
-	srv := New(runID, "test-task", e.secret, e.reg, e.db, params, input, zap.NewNop(), spec, eng, aiBaseURL, aiModel, aiAPIKey)
+	srv := New(runID, "test-task", e.secret, e.reg, e.db, params, input, zap.NewNop(), spec, eng)
 	socketPath, token, err := srv.Start(context.Background())
 	if err != nil {
 		t.Fatalf("Start: %v", err)
@@ -172,7 +172,7 @@ func TestToken_Malformed(t *testing.T) {
 func TestHandshake_InvalidToken(t *testing.T) {
 	e := newTestEnv(t)
 	runID := fmt.Sprintf("test-%d", time.Now().UnixNano())
-	srv := New(runID, "test-task", e.secret, e.reg, e.db, nil, nil, zap.NewNop(), nil, nil, "", "", "")
+	srv := New(runID, "test-task", e.secret, e.reg, e.db, nil, nil, zap.NewNop(), nil, nil)
 	socketPath, _, err := srv.Start(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -192,7 +192,7 @@ func TestHandshake_InvalidToken(t *testing.T) {
 func TestHandshake_WrongRunID(t *testing.T) {
 	e := newTestEnv(t)
 	runID := fmt.Sprintf("test-%d", time.Now().UnixNano())
-	srv := New(runID, "test-task", e.secret, e.reg, e.db, nil, nil, zap.NewNop(), nil, nil, "", "", "")
+	srv := New(runID, "test-task", e.secret, e.reg, e.db, nil, nil, zap.NewNop(), nil, nil)
 	socketPath, _, err := srv.Start(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -223,7 +223,7 @@ func TestHandshake_TaskChannelReturnsTaskAndRunID(t *testing.T) {
 	runID := fmt.Sprintf("run-%d", time.Now().UnixNano())
 	const taskID = "buildin/ai-agent"
 
-	srv := New(runID, taskID, e.secret, e.reg, e.db, nil, nil, zap.NewNop(), nil, nil, "", "", "")
+	srv := New(runID, taskID, e.secret, e.reg, e.db, nil, nil, zap.NewNop(), nil, nil)
 	socketPath, token, err := srv.Start(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -391,7 +391,7 @@ func TestServer_KV_Namespacing(t *testing.T) {
 
 	makeConn := func(taskID string) net.Conn {
 		runID := fmt.Sprintf("run-%s", taskID)
-		srv := New(runID, taskID, e.secret, e.reg, e.db, nil, nil, zap.NewNop(), nil, nil, "", "", "")
+		srv := New(runID, taskID, e.secret, e.reg, e.db, nil, nil, zap.NewNop(), nil, nil)
 		sp, _, err := srv.Start(context.Background())
 		if err != nil {
 			t.Fatalf("Start %s: %v", taskID, err)
@@ -513,7 +513,7 @@ func TestServer_CapDenied_KVRead(t *testing.T) {
 	// Issue a token without kv.read; kv.get should be denied.
 	e := newTestEnv(t)
 	runID := fmt.Sprintf("test-%d", time.Now().UnixNano())
-	srv := New(runID, "test-task", e.secret, e.reg, e.db, nil, nil, zap.NewNop(), nil, nil, "", "", "")
+	srv := New(runID, "test-task", e.secret, e.reg, e.db, nil, nil, zap.NewNop(), nil, nil)
 	socketPath, _, err := srv.Start(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -562,7 +562,7 @@ func TestServer_Dicode_ListTasks(t *testing.T) {
 	_ = e.reg.Register(&task.Spec{ID: "send-report", Name: "Send Report"})
 
 	spec := specWithDicode("caller", &task.DicodePermissions{ListTasks: true})
-	conn, _ := e.startWithSpec(t, nil, nil, spec, nil, "", "", "")
+	conn, _ := e.startWithSpec(t, nil, nil, spec, nil)
 	sendMsg(t, conn, map[string]any{"id": "1", "method": "dicode.list_tasks"})
 	resp := recvMsg(t, conn)
 
@@ -572,55 +572,6 @@ func TestServer_Dicode_ListTasks(t *testing.T) {
 	}
 	if len(tasks) != 2 {
 		t.Errorf("expected 2 tasks, got %d", len(tasks))
-	}
-}
-
-func TestServer_Dicode_GetConfig_Denied(t *testing.T) {
-	// get_config is denied when permissions.dicode.get_config is not set.
-	e := newTestEnv(t)
-	conn, _ := e.start(t, nil, nil)
-
-	sendMsg(t, conn, map[string]any{"id": "1", "method": "dicode.get_config", "section": "ai"})
-	resp := recvMsg(t, conn)
-	if resp["error"] == nil {
-		t.Errorf("expected permission denied for dicode.get_config without get_config cap")
-	}
-}
-
-func TestServer_Dicode_GetConfig(t *testing.T) {
-	e := newTestEnv(t)
-	spec := specWithDicode("caller", &task.DicodePermissions{GetConfig: true})
-	conn, _ := e.startWithSpec(t, nil, nil, spec, nil, "https://api.openai.com/v1", "gpt-4o", "sk-test")
-
-	sendMsg(t, conn, map[string]any{"id": "1", "method": "dicode.get_config", "section": "ai"})
-	resp := recvMsg(t, conn)
-
-	result, ok := resp["result"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected object, got %T", resp["result"])
-	}
-	if result["model"] != "gpt-4o" {
-		t.Errorf("model: %v", result["model"])
-	}
-	if result["baseURL"] != "https://api.openai.com/v1" {
-		t.Errorf("baseURL: %v", result["baseURL"])
-	}
-	// apiKey must never be returned to task scripts (security: credential exposure).
-	if _, present := result["apiKey"]; present {
-		t.Errorf("apiKey must not be returned by get_config: %v", result["apiKey"])
-	}
-}
-
-func TestServer_Dicode_GetConfig_UnknownSection(t *testing.T) {
-	e := newTestEnv(t)
-	spec := specWithDicode("caller", &task.DicodePermissions{GetConfig: true})
-	conn, _ := e.startWithSpec(t, nil, nil, spec, nil, "", "", "")
-
-	sendMsg(t, conn, map[string]any{"id": "1", "method": "dicode.get_config", "section": "storage"})
-	resp := recvMsg(t, conn)
-
-	if resp["error"] == nil {
-		t.Errorf("expected error for unknown section")
 	}
 }
 
@@ -650,7 +601,7 @@ func TestServer_Dicode_RunTask_Denied_NoSpec(t *testing.T) {
 func TestServer_Dicode_RunTask_Denied_NotAllowed(t *testing.T) {
 	e := newTestEnv(t)
 	spec := specWithDicode("caller", &task.DicodePermissions{Tasks: []string{"permitted-task"}})
-	conn, _ := e.startWithSpec(t, nil, nil, spec, nil, "", "", "")
+	conn, _ := e.startWithSpec(t, nil, nil, spec, nil)
 
 	sendMsg(t, conn, map[string]any{"id": "1", "method": "dicode.run_task", "taskID": "forbidden-task"})
 	resp := recvMsg(t, conn)
@@ -663,7 +614,7 @@ func TestServer_Dicode_RunTask(t *testing.T) {
 	e := newTestEnv(t)
 	eng := &mockEngine{runID: "run-abc", result: RunResult{RunID: "run-abc", Status: "success"}}
 	spec := specWithDicode("caller", &task.DicodePermissions{Tasks: []string{"target-task"}})
-	conn, _ := e.startWithSpec(t, nil, nil, spec, eng, "", "", "")
+	conn, _ := e.startWithSpec(t, nil, nil, spec, eng)
 
 	sendMsg(t, conn, map[string]any{"id": "1", "method": "dicode.run_task", "taskID": "target-task"})
 	resp := recvMsg(t, conn)
@@ -684,7 +635,7 @@ func TestServer_Dicode_RunTask_Wildcard(t *testing.T) {
 	e := newTestEnv(t)
 	eng := &mockEngine{runID: "run-1", result: RunResult{RunID: "run-1", Status: "success"}}
 	spec := specWithDicode("caller", &task.DicodePermissions{Tasks: []string{"*"}})
-	conn, _ := e.startWithSpec(t, nil, nil, spec, eng, "", "", "")
+	conn, _ := e.startWithSpec(t, nil, nil, spec, eng)
 
 	sendMsg(t, conn, map[string]any{"id": "1", "method": "dicode.run_task", "taskID": "any-task"})
 	resp := recvMsg(t, conn)
@@ -711,7 +662,7 @@ func TestServer_MCP_ListTools_NoPort(t *testing.T) {
 	_ = e.reg.Register(&task.Spec{ID: "github-mcp"}) // MCPPort = 0
 
 	spec := specWithDicode("caller", &task.DicodePermissions{MCP: []string{"github-mcp"}})
-	conn, _ := e.startWithSpec(t, nil, nil, spec, nil, "", "", "")
+	conn, _ := e.startWithSpec(t, nil, nil, spec, nil)
 
 	sendMsg(t, conn, map[string]any{"id": "1", "method": "mcp.list_tools", "mcpName": "github-mcp"})
 	resp := recvMsg(t, conn)
@@ -731,7 +682,7 @@ func TestServer_MCP_ListTools_Success(t *testing.T) {
 	e := newTestEnv(t)
 	_ = e.reg.Register(&task.Spec{ID: "github-mcp", MCPPort: port})
 	spec := specWithDicode("caller", &task.DicodePermissions{MCP: []string{"github-mcp"}})
-	conn, _ := e.startWithSpec(t, nil, nil, spec, nil, "", "", "")
+	conn, _ := e.startWithSpec(t, nil, nil, spec, nil)
 
 	sendMsg(t, conn, map[string]any{"id": "1", "method": "mcp.list_tools", "mcpName": "github-mcp"})
 	resp := recvMsg(t, conn)
@@ -762,7 +713,7 @@ func TestServer_MCP_Call_Success(t *testing.T) {
 	e := newTestEnv(t)
 	_ = e.reg.Register(&task.Spec{ID: "github-mcp", MCPPort: port})
 	spec := specWithDicode("caller", &task.DicodePermissions{MCP: []string{"github-mcp"}})
-	conn, _ := e.startWithSpec(t, nil, nil, spec, nil, "", "", "")
+	conn, _ := e.startWithSpec(t, nil, nil, spec, nil)
 
 	sendMsg(t, conn, map[string]any{
 		"id":      "1",
@@ -785,7 +736,7 @@ func TestServer_Dicode_GetRuns(t *testing.T) {
 	e := newTestEnv(t)
 	_ = e.reg.Register(&task.Spec{ID: "hello-cron", Name: "Hello Cron"})
 	spec := specWithDicode("caller", &task.DicodePermissions{GetRuns: true})
-	conn, _ := e.startWithSpec(t, nil, nil, spec, nil, "", "", "")
+	conn, _ := e.startWithSpec(t, nil, nil, spec, nil)
 
 	sendMsg(t, conn, map[string]any{"id": "1", "method": "dicode.get_runs", "taskID": "hello-cron"})
 	resp := recvMsg(t, conn)
@@ -799,7 +750,7 @@ func TestServer_MCP_Denied_WrongName(t *testing.T) {
 	// Task has mcp cap for "github-mcp" but tries to call "other-mcp" — should be denied.
 	e := newTestEnv(t)
 	spec := specWithDicode("caller", &task.DicodePermissions{MCP: []string{"github-mcp"}})
-	conn, _ := e.startWithSpec(t, nil, nil, spec, nil, "", "", "")
+	conn, _ := e.startWithSpec(t, nil, nil, spec, nil)
 
 	sendMsg(t, conn, map[string]any{"id": "1", "method": "mcp.list_tools", "mcpName": "other-mcp"})
 	resp := recvMsg(t, conn)
@@ -811,7 +762,7 @@ func TestServer_MCP_Denied_WrongName(t *testing.T) {
 func TestServer_MCP_Call_Denied_WrongName(t *testing.T) {
 	e := newTestEnv(t)
 	spec := specWithDicode("caller", &task.DicodePermissions{MCP: []string{"github-mcp"}})
-	conn, _ := e.startWithSpec(t, nil, nil, spec, nil, "", "", "")
+	conn, _ := e.startWithSpec(t, nil, nil, spec, nil)
 
 	sendMsg(t, conn, map[string]any{
 		"id": "1", "method": "mcp.call", "mcpName": "other-mcp", "tool": "search",
@@ -833,7 +784,7 @@ func TestServer_MCP_Wildcard(t *testing.T) {
 	e := newTestEnv(t)
 	_ = e.reg.Register(&task.Spec{ID: "any-mcp", MCPPort: port})
 	spec := specWithDicode("caller", &task.DicodePermissions{MCP: []string{"*"}})
-	conn, _ := e.startWithSpec(t, nil, nil, spec, nil, "", "", "")
+	conn, _ := e.startWithSpec(t, nil, nil, spec, nil)
 
 	sendMsg(t, conn, map[string]any{"id": "1", "method": "mcp.list_tools", "mcpName": "any-mcp"})
 	resp := recvMsg(t, conn)
@@ -871,7 +822,7 @@ func (m *mockSecrets) Delete(_ context.Context, key string) error {
 func (e *testEnv) startWithSecrets(t *testing.T, spec *task.Spec, mgr *mockSecrets) (net.Conn, *Server) {
 	t.Helper()
 	runID := fmt.Sprintf("test-%d", time.Now().UnixNano())
-	srv := New(runID, "test-task", e.secret, e.reg, e.db, nil, nil, zap.NewNop(), spec, nil, "", "", "")
+	srv := New(runID, "test-task", e.secret, e.reg, e.db, nil, nil, zap.NewNop(), spec, nil)
 	srv.SetSecrets(mgr)
 	socketPath, token, err := srv.Start(context.Background())
 	if err != nil {
@@ -996,7 +947,7 @@ func TestHandshake_NoHandshakeSent(t *testing.T) {
 	// connection with a valid token.
 	e := newTestEnv(t)
 	runID := fmt.Sprintf("test-%d", time.Now().UnixNano())
-	srv := New(runID, "test-task", e.secret, e.reg, e.db, nil, nil, zap.NewNop(), nil, nil, "", "", "")
+	srv := New(runID, "test-task", e.secret, e.reg, e.db, nil, nil, zap.NewNop(), nil, nil)
 	socketPath, token, err := srv.Start(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -1024,7 +975,7 @@ func TestServer_CapDenied_KVWrite_Silent(t *testing.T) {
 	// dropped — the key must NOT appear in a subsequent kv.get.
 	e := newTestEnv(t)
 	runID := fmt.Sprintf("test-%d", time.Now().UnixNano())
-	srv := New(runID, "test-task", e.secret, e.reg, e.db, nil, nil, zap.NewNop(), nil, nil, "", "", "")
+	srv := New(runID, "test-task", e.secret, e.reg, e.db, nil, nil, zap.NewNop(), nil, nil)
 	socketPath, _, err := srv.Start(context.Background())
 	if err != nil {
 		t.Fatal(err)

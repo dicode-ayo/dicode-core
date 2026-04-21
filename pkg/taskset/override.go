@@ -54,9 +54,13 @@ func applyLayer(spec *task.Spec, o *Overrides) {
 // Because a task may only have one trigger type, setting any trigger type
 // clears the others (preserving the single-trigger invariant).
 func applyTriggerPatch(t *task.TriggerConfig, p *TriggerPatch) {
+	// Switching to a non-webhook trigger must also drop WebhookAuth —
+	// otherwise a stale `auth: true` would resurface if the trigger is
+	// later switched back to a webhook.
 	if p.Cron != nil {
 		t.Cron = *p.Cron
 		t.Webhook = ""
+		t.WebhookAuth = false
 		t.Manual = false
 		t.Chain = nil
 		t.Daemon = false
@@ -68,10 +72,14 @@ func applyTriggerPatch(t *task.TriggerConfig, p *TriggerPatch) {
 		t.Chain = nil
 		t.Daemon = false
 	}
+	if p.Auth != nil {
+		t.WebhookAuth = *p.Auth
+	}
 	if p.Manual != nil {
 		t.Manual = *p.Manual
 		t.Cron = ""
 		t.Webhook = ""
+		t.WebhookAuth = false
 		t.Chain = nil
 		t.Daemon = false
 	}
@@ -79,6 +87,7 @@ func applyTriggerPatch(t *task.TriggerConfig, p *TriggerPatch) {
 		t.Chain = p.Chain
 		t.Cron = ""
 		t.Webhook = ""
+		t.WebhookAuth = false
 		t.Manual = false
 		t.Daemon = false
 	}
@@ -86,6 +95,7 @@ func applyTriggerPatch(t *task.TriggerConfig, p *TriggerPatch) {
 		t.Daemon = *p.Daemon
 		t.Cron = ""
 		t.Webhook = ""
+		t.WebhookAuth = false
 		t.Manual = false
 		t.Chain = nil
 	}
@@ -160,9 +170,6 @@ func mergeDicodePerms(base, overlay *task.DicodePermissions) *task.DicodePermiss
 	}
 	if overlay.GetRuns {
 		out.GetRuns = true
-	}
-	if overlay.GetConfig {
-		out.GetConfig = true
 	}
 	if overlay.SecretsWrite {
 		out.SecretsWrite = true

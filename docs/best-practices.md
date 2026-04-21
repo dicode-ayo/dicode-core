@@ -137,39 +137,6 @@ r.db.Exec(ctx, `INSERT INTO runs ... VALUES (?, ?, ?, ?, ?)`, id, taskID, ...)
 query := "SELECT * FROM runs WHERE id = '" + userInput + "'"
 ```
 
-#### SSRF prevention
-
-The `handleAIStream` handler calls an external API at a URL from config (`cfg.AI.BaseURL`). If this URL can be set via the UI (`/api/settings/ai`), validate it against an allowlist of acceptable prefixes before using it in the HTTP client. Never let arbitrary user-supplied URLs be used as HTTP endpoints.
-
-```go
-// Suggested guard for apiSaveAISettings
-allowed := []string{
-    "https://api.openai.com/",
-    "https://api.anthropic.com/",
-    "http://localhost:",
-    "http://127.0.0.1:",
-}
-func isAllowedBaseURL(u string) bool {
-    for _, prefix := range allowed {
-        if strings.HasPrefix(u, prefix) { return true }
-    }
-    return false
-}
-```
-
-#### Secrets in config
-
-`AIConfig.APIKey` is stored in `dicode.yaml` and serialised into `apiGetConfig`. The `/api/config` endpoint returns the full `Config` struct including `AIKey`. Ensure this endpoint is either gated behind authentication or the `APIKey` field is redacted before serialisation.
-
-```go
-// Add a MarshalJSON or use a view-model struct without the key field
-type aiConfigView struct {
-    BaseURL   string `json:"base_url"`
-    Model     string `json:"model"`
-    APIKeySet bool   `json:"api_key_set"` // only signal presence, never the value
-}
-```
-
 ---
 
 ### 1.3 HTTP Server Security
@@ -498,10 +465,6 @@ func (cfg *Config) validate() error {
     // ... existing source validation
 }
 ```
-
-#### Never store secrets in config structs that get serialised
-
-`AIConfig.APIKey` is exported and tagged `yaml:"api_key,omitempty"`. It will be included in `yaml.Marshal` output and in `apiGetConfig` JSON responses. Add a custom marshaller or use a separate secrets-only struct.
 
 #### Environment variable expansion
 
@@ -1549,7 +1512,6 @@ Preload critical fonts:
 | Area | Issue | Severity | Reference |
 |------|-------|----------|-----------|
 | Go | No HTTP server timeouts | High | §1.3 |
-| Go | `AIConfig.APIKey` exposed in `/api/config` | High | §1.2, §1.8 |
 | Go | No CSRF protection on mutation endpoints | High | §2.11 |
 | Go | No rate limiting on sensitive endpoints | Medium | §1.3 |
 | Go | HTMX loaded from CDN without SRI hash | Medium | §2.6 |

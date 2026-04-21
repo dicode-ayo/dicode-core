@@ -255,8 +255,6 @@ type DicodePermissions struct {
 	ListTasks bool `yaml:"list_tasks,omitempty" json:"list_tasks,omitempty"`
 	// GetRuns enables dicode.get_runs().
 	GetRuns bool `yaml:"get_runs,omitempty" json:"get_runs,omitempty"`
-	// GetConfig enables dicode.get_config().
-	GetConfig bool `yaml:"get_config,omitempty" json:"get_config,omitempty"`
 	// SecretsWrite enables dicode.secrets_set() and dicode.secrets_delete().
 	// Tasks may write or overwrite secrets but never read them back.
 	SecretsWrite bool `yaml:"secrets_write,omitempty" json:"secrets_write,omitempty"`

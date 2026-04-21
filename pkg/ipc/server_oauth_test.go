@@ -76,7 +76,7 @@ func startOAuthServer(t *testing.T) *oauthEnv {
 	spec := specWithDicode("auth-relay", &task.DicodePermissions{OAuthInit: true, OAuthStore: true})
 
 	runID := fmt.Sprintf("test-%d", time.Now().UnixNano())
-	srv := New(runID, spec.ID, env.secret, env.reg, env.db, nil, nil, zap.NewNop(), spec, nil, "", "", "")
+	srv := New(runID, spec.ID, env.secret, env.reg, env.db, nil, nil, zap.NewNop(), spec, nil)
 	identity := newOAuthIdentity(t)
 	pending := relay.NewPendingSessions()
 	secretsMgr := newMemSecrets()
@@ -143,7 +143,7 @@ func TestServer_OAuth_BuildAuthURL_DeniedWithoutInit(t *testing.T) {
 	// Spec has OAuthStore but NOT OAuthInit — build_auth_url must be rejected.
 	spec := specWithDicode("leaky", &task.DicodePermissions{OAuthStore: true})
 	runID := fmt.Sprintf("test-%d", time.Now().UnixNano())
-	srv := New(runID, spec.ID, env.secret, env.reg, env.db, nil, nil, zap.NewNop(), spec, nil, "", "", "")
+	srv := New(runID, spec.ID, env.secret, env.reg, env.db, nil, nil, zap.NewNop(), spec, nil)
 	srv.SetOAuthBroker(newOAuthIdentity(t), "https://relay.dicode.app", relay.NewPendingSessions(), nil)
 	socketPath, token, err := srv.Start(context.Background())
 	if err != nil {
@@ -284,7 +284,7 @@ func TestServer_OAuth_NotConfigured(t *testing.T) {
 	spec := specWithDicode("auth-relay", &task.DicodePermissions{OAuthInit: true})
 	runID := fmt.Sprintf("test-%d", time.Now().UnixNano())
 	// Do NOT call SetOAuthBroker — oauth.* should report not-configured.
-	srv := New(runID, spec.ID, env.secret, env.reg, env.db, nil, nil, zap.NewNop(), spec, nil, "", "", "")
+	srv := New(runID, spec.ID, env.secret, env.reg, env.db, nil, nil, zap.NewNop(), spec, nil)
 	socketPath, token, err := srv.Start(context.Background())
 	if err != nil {
 		t.Fatalf("Start: %v", err)

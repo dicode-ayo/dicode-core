@@ -371,9 +371,6 @@ func (s *Server) Handler() http.Handler {
 		r.Post("/api/tasks/{id}/files/{filename}", s.apiSaveFile)
 		r.Post("/api/tasks/{id}/trigger", s.apiSaveTrigger)
 
-		// AI chat — streams SSE, writes task files live
-		r.Post("/api/tasks/{id}/ai/stream", s.handleAIStream)
-
 		r.Route("/api", func(r chi.Router) {
 			r.Get("/config", s.apiGetConfig)
 			r.Get("/config/raw", s.apiGetConfigRaw)
@@ -386,7 +383,6 @@ func (s *Server) Handler() http.Handler {
 			r.Get("/tasks/{id}/files/{filename}", s.apiGetFile)
 			r.Post("/tasks/{id}/files/{filename}", s.apiSaveFile)
 			r.Post("/tasks/{id}/trigger", s.apiSaveTrigger)
-			r.Post("/tasks/{id}/ai/stream", s.handleAIStream)
 
 			r.Get("/runs/{runID}", s.apiGetRun)
 			r.Get("/runs/{runID}/logs", s.apiGetLogs)
@@ -410,7 +406,6 @@ func (s *Server) Handler() http.Handler {
 			r.Post("/auth/passphrase", s.apiChangePassphrase)
 
 			// Settings
-			r.Post("/settings/ai", s.apiSaveAISettings)
 			r.Post("/settings/server", s.apiSaveServerSettings)
 			r.Post("/settings/sources", s.apiAddSource)
 			r.Delete("/settings/sources/{idx}", s.apiRemoveSource)
@@ -458,7 +453,7 @@ func (s *Server) Start(ctx context.Context) error {
 		Handler:           s.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       120 * time.Second,
-		// WriteTimeout is intentionally 0: WebSocket, SSE and AI stream endpoints write indefinitely.
+		// WriteTimeout is intentionally 0: WebSocket and SSE endpoints write indefinitely.
 	}
 	go func() {
 		<-ctx.Done()
@@ -1337,35 +1332,6 @@ func (s *Server) apiKillRun(w http.ResponseWriter, r *http.Request) {
 
 // --- Settings handlers ---
 
-func (s *Server) apiSaveAISettings(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		BaseURL     string `json:"base_url"`
-		Model       string `json:"model"`
-		APIKeyEnv   string `json:"api_key_env"`
-		APIKey      string `json:"api_key"`
-		ClearAPIKey bool   `json:"clear_api_key"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		jsonErr(w, "bad request", http.StatusBadRequest)
-		return
-	}
-	s.cfg.AI.BaseURL = strings.TrimSpace(body.BaseURL)
-	s.cfg.AI.Model = strings.TrimSpace(body.Model)
-	s.cfg.AI.APIKeyEnv = strings.TrimSpace(body.APIKeyEnv)
-	if body.APIKey != "" {
-		s.cfg.AI.APIKey = body.APIKey
-	} else if body.ClearAPIKey {
-		s.cfg.AI.APIKey = ""
-	}
-	if err := s.persistConfig(); err != nil {
-		s.log.Warn("settings persist failed", zap.Error(err))
-		jsonErr(w, "saved in memory but could not write file: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	s.log.Info("AI settings updated", zap.String("model", s.cfg.AI.Model), zap.String("base_url", s.cfg.AI.BaseURL))
-	jsonOK(w, map[string]string{"status": "ok"})
-}
-
 func (s *Server) apiSaveServerSettings(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		LogLevel string `json:"log_level"`
@@ -1623,16 +1589,6 @@ func (s *Server) persistConfig() error {
 	if doc == nil {
 		doc = make(map[string]any)
 	}
-
-	aiMap := map[string]any{
-		"base_url":    s.cfg.AI.BaseURL,
-		"model":       s.cfg.AI.Model,
-		"api_key_env": s.cfg.AI.APIKeyEnv,
-	}
-	if s.cfg.AI.APIKey != "" {
-		aiMap["api_key"] = s.cfg.AI.APIKey
-	}
-	doc["ai"] = aiMap
 
 	doc["log_level"] = s.cfg.LogLevel
 

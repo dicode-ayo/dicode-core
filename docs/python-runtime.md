@@ -176,10 +176,6 @@ tasks = dicode.list_tasks()
 
 # Get recent run history
 runs = dicode.get_runs("send-report", limit=5)
-
-# Get AI provider config (resolved server-side)
-ai = dicode.get_config("ai")
-# ai: { "baseURL": ..., "model": ..., "apiKey": ... }
 ```
 
 ```yaml

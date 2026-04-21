@@ -71,6 +71,31 @@ database:
 	}
 }
 
+// TestLoad_IgnoresLegacyAIBlock ensures a legacy top-level `ai:` key from an
+// older dicode.yaml parses cleanly after AIConfig was removed. yaml.v3 silently
+// drops unknown keys when unmarshalling into a typed struct, so this should
+// not return an error.
+func TestLoad_IgnoresLegacyAIBlock(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "dicode.yaml")
+
+	content := `
+ai:
+  api_key_env: OPENAI_API_KEY
+  base_url: ""
+  model: gpt-4o
+sources:
+  - type: local
+    path: ${CONFIGDIR}/tasks
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(cfgPath); err != nil {
+		t.Fatalf("legacy ai: block should be silently ignored, got %v", err)
+	}
+}
+
 func TestLoadExecutionMaxConcurrentTasks(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "dicode.yaml")

@@ -84,7 +84,6 @@ permissions:
 | `permissions.dicode.mcp` | list of strings | | MCP daemon task IDs the script may call via `mcp.call()`; use `["*"]` for all |
 | `permissions.dicode.list_tasks` | bool | | Allow `dicode.list_tasks()` |
 | `permissions.dicode.get_runs` | bool | | Allow `dicode.get_runs()` |
-| `permissions.dicode.get_config` | bool | | Allow `dicode.get_config()` |
 | `permissions.dicode.secrets_write` | bool | | Allow `dicode.secrets_set()` and `dicode.secrets_delete()` — write-only, no read |
 | `params` | list | | Input parameters with defaults |
 | `params[].name` | string | | Parameter name |
@@ -590,18 +589,16 @@ All `dicode.*` and `mcp.*` globals are **denied by default**. Each capability mu
 | `mcp: ["daemon-id"]` | `mcp.list_tools()` and `mcp.call()` for the listed MCP daemon task IDs; `["*"]` allows all |
 | `list_tasks: true` | `dicode.list_tasks()` |
 | `get_runs: true` | `dicode.get_runs()` |
-| `get_config: true` | `dicode.get_config("ai")` (returns `baseURL` and `model` only — never the API key) |
 | `secrets_write: true` | `dicode.secrets_set(key, value)` and `dicode.secrets_delete(key)` — **write-only**, tasks can never read secrets back |
 
 ```yaml
-# An agent task that can call other tasks and read AI config:
+# An agent task that can call other tasks:
 permissions:
   dicode:
     tasks:
       - send-report      # only this task ID is callable
       - notify-slack
     list_tasks: true     # can enumerate registered tasks
-    get_config: true     # can read AI provider config
 
 # Allow all task IDs and all MCP daemons:
 permissions:

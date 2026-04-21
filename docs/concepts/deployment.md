@@ -235,10 +235,6 @@ Subcommands:
   dicode secrets list
   dicode secrets delete <key>
 
-  dicode agent skill show                Print skill to stdout
-  dicode agent skill install             Write to ~/.dicode/skill.md
-  dicode agent skill install --claude-code  Write to Claude Code skills dir
-
   dicode ci init --github|--gitlab       Generate CI workflow file
 
   dicode service install [--headless]    Install as system service

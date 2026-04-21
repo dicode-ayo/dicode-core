@@ -48,7 +48,6 @@ Run a single test package: `go test ./pkg/registry/... -timeout 60s -run TestNam
 | `pkg/runtime/js/globals` | Inject `http`, `kv`, `log`, `params`, `env`, `fs`, `output`, `notify` |
 | `pkg/runtime/docker` | Pull image, run container, stream logs, clean up |
 | `pkg/webui` | chi router, HTMX templates, REST API, WebSocket log streaming |
-| `pkg/webui/ai` | Call OpenAI-compatible API to generate task code from prompts |
 | `pkg/mcp` | MCP server exposing tools for AI agents to develop/test/deploy tasks |
 | `pkg/secrets` | AES-encrypted SQLite store + env var fallback |
 | `pkg/task` | Parse `task.yaml`, validate spec, compute content hash |

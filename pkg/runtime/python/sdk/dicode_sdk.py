@@ -13,7 +13,7 @@
 #   Fire-and-forget (no id):    log, kv.set, kv.delete, output
 #   Request/response (id req):  params, input, kv.get, kv.list, return,
 #                               dicode.run_task, dicode.list_tasks,
-#                               dicode.get_runs, dicode.get_config,
+#                               dicode.get_runs,
 #                               mcp.list_tools, mcp.call
 import asyncio
 import json
@@ -297,12 +297,6 @@ class _Dicode:
     def get_runs(self, task_id, limit=10):
         return _call({"method": "dicode.get_runs", "taskID": task_id,
                       "limit": limit}) or []
-
-    def get_config(self, section):
-        return _call({"method": "dicode.get_config", "section": section})
-
-    async def get_config_async(self, section):
-        return await _call_async({"method": "dicode.get_config", "section": section})
 
     async def run_task_async(self, task_id, params=None):
         return await _call_async({"method": "dicode.run_task", "taskID": task_id,

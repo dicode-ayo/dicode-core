@@ -150,7 +150,7 @@ System:
 You are a dicode task developer. Generate task.yaml, task.js, and task.test.js.
 
 ## JS Runtime Reference
-[globals reference from pkg/agent/skill.md]
+[globals reference from tasks/skills/dicode-task-dev.md]
 
 ## Example tasks
 [2-3 curated examples]

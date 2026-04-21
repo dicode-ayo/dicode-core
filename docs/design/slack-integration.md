@@ -530,8 +530,9 @@ existing auth-start / auth-relay path with no protocol changes.
 **2. Manifest template** embedded in the task. Small JSON literal with
 substituted values for `name`, `request_url`, `bot_scopes`, and
 optionally `home_tab_enabled`. The Request URL is the user's own relay URL
-(`https://relay.dicode.app/u/<uuid>/hooks/slack-events`), read from
-`dicode.get_config()` at task run time.
+(`https://relay.dicode.app/u/<uuid>/hooks/slack-events`), passed in as a
+param and injected at task-load time (e.g. through the task's taskset
+override or resolved from an env var declared in `permissions.env`).
 
 **3. Chain-trigger filter by OAuth provider.** The existing chain trigger
 system fires on task completion. The install-complete task needs to

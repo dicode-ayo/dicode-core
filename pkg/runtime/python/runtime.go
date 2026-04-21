@@ -65,9 +65,6 @@ type Runtime struct {
 	secret         []byte
 	engine         ipc.EngineRunner
 	gateway        *ipc.Gateway
-	aiBaseURL      string
-	aiModel        string
-	aiAPIKey       string
 }
 
 // SetEngine configures the engine runner used for dicode.run_task calls.
@@ -79,13 +76,6 @@ func (rt *Runtime) SetGateway(g *ipc.Gateway) { rt.gateway = g }
 // SetSecretsManager wires the secrets manager so tasks with permissions.dicode.secrets_write
 // can call dicode.secrets_set() and dicode.secrets_delete().
 func (rt *Runtime) SetSecretsManager(m secrets.Manager) { rt.secretsManager = m }
-
-// SetAIConfig configures the AI provider details passed to tasks via dicode.get_config.
-func (rt *Runtime) SetAIConfig(baseURL, model, apiKey string) {
-	rt.aiBaseURL = baseURL
-	rt.aiModel = model
-	rt.aiAPIKey = apiKey
-}
 
 // New creates a Python Runtime manager.
 func New(reg *registry.Registry, sc secrets.Chain, database db.DB, log *zap.Logger) (*Runtime, error) {
@@ -139,9 +129,6 @@ func (rt *Runtime) NewExecutor(binaryPath string) pkgruntime.Executor {
 		secret:         rt.secret,
 		engine:         rt.engine,
 		gateway:        rt.gateway,
-		aiBaseURL:      rt.aiBaseURL,
-		aiModel:        rt.aiModel,
-		aiAPIKey:       rt.aiAPIKey,
 	}
 }
 
@@ -157,9 +144,6 @@ type executor struct {
 	secret         []byte
 	engine         ipc.EngineRunner
 	gateway        *ipc.Gateway
-	aiBaseURL      string
-	aiModel        string
-	aiAPIKey       string
 }
 
 // Execute implements runtime.Executor.
@@ -226,7 +210,7 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 
 	mergedParams := mergeParams(spec.Params, opts.Params)
 
-	srv := ipc.New(runID, spec.ID, e.secret, e.reg, e.db, mergedParams, opts.Input, e.log, spec, e.engine, e.aiBaseURL, e.aiModel, e.aiAPIKey)
+	srv := ipc.New(runID, spec.ID, e.secret, e.reg, e.db, mergedParams, opts.Input, e.log, spec, e.engine)
 	srv.SetGateway(e.gateway)
 	srv.SetSecrets(e.secretsManager)
 	socketPath, token, err := srv.Start(execCtx)

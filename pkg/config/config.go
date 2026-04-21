@@ -53,7 +53,6 @@ type Config struct {
 	Secrets       SecretsConfig            `yaml:"secrets"`
 	Notifications NotificationsConfig      `yaml:"notifications"`
 	Server        ServerConfig             `yaml:"server"`
-	AI            AIConfig                 `yaml:"ai"`
 	Defaults      DefaultsConfig           `yaml:"defaults"`
 	Runtimes      map[string]RuntimeConfig `yaml:"runtimes,omitempty"`
 	Execution     ExecutionConfig          `yaml:"execution,omitempty"`
@@ -168,23 +167,6 @@ type ServerConfig struct {
 	TLSKeyFile     string   `yaml:"tls_key,omitempty"`         // path to TLS private key (PEM)
 }
 
-type AIConfig struct {
-	// BaseURL is the OpenAI-compatible API endpoint.
-	// Leave empty for OpenAI (https://api.openai.com/v1).
-	// Use "https://api.anthropic.com/v1" for Claude.
-	// Use "http://localhost:11434/v1" for Ollama.
-	BaseURL string `yaml:"base_url"`
-	// Model name as accepted by the chosen endpoint.
-	Model string `yaml:"model"`
-	// APIKeyEnv is the env var that holds the API key.
-	// Leave empty for Ollama (no key needed).
-	APIKeyEnv string `yaml:"api_key_env"`
-	// APIKey is a direct API key value. If set it takes precedence over APIKeyEnv.
-	// Stored in dicode.yaml — only use for local/trusted setups.
-	// json:"-" prevents it from appearing in /api/config HTTP responses.
-	APIKey string `yaml:"api_key,omitempty" json:"-"`
-}
-
 // Load reads and parses the config file at path, then applies defaults.
 func Load(path string) (*Config, error) {
 	f, err := os.Open(path)
@@ -293,13 +275,6 @@ func applyDefaults(cfg *Config, configDir string) {
 	}
 	if cfg.Database.Type == "sqlite" && cfg.Database.Path == "" {
 		cfg.Database.Path = cfg.DataDir + "/data.db"
-	}
-	// AI defaults — OpenAI-compatible, works with OpenAI / Claude / Ollama.
-	if cfg.AI.Model == "" {
-		cfg.AI.Model = "gpt-4o"
-	}
-	if cfg.AI.APIKeyEnv == "" {
-		cfg.AI.APIKeyEnv = "OPENAI_API_KEY"
 	}
 	if cfg.LogLevel == "" {
 		cfg.LogLevel = "info"

@@ -155,10 +155,6 @@ const tasks = await dicode.list_tasks()
 
 // Get recent run history for a task
 const runs = await dicode.get_runs("send-report", { limit: 5 })
-
-// Get AI provider config (resolved server-side)
-const ai = await dicode.get_config("ai")
-// ai: { baseURL, model, apiKey }
 ```
 
 **task.yaml security config:**
@@ -232,10 +228,12 @@ security:
 // task.ts
 import OpenAI from "npm:openai"
 
-const ai = await dicode.get_config("ai")
+// Read provider config from task params (see the ai-agent task for the
+// canonical pattern). Declare OPENAI_API_KEY in permissions.env.
+const apiKey = await env.get("OPENAI_API_KEY") ?? "ollama"
 const client = new OpenAI({
-  baseURL: ai.baseURL || undefined,
-  apiKey: ai.apiKey || "ollama",
+  baseURL: params.base_url || undefined,
+  apiKey,
 })
 
 const allTasks = await dicode.list_tasks()

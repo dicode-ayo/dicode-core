@@ -28,6 +28,54 @@ spec:
       ref:
         path: ./ai-agent/task.yaml
 
+    # ─── dicodai: AI Agent preset for dicode task development ──────────────
+    # Override of ai-agent preloaded with the dicode-task-dev + dicode-basics
+    # skills and wired to OpenAI as the default provider. Users only need to
+    # set OPENAI_API_KEY for the task-detail "AI" chat in the WebUI to work.
+    # All provider params (model, base_url, api_key_env) can be overridden
+    # by users via their own taskset overrides or dicode.yaml params.
+    dicodai:
+      ref:
+        path: ./ai-agent/task.yaml
+      overrides:
+        name: "Dicodai (Task Dev AI)"
+        description: >
+          AI agent preset that helps users develop dicode tasks. Preloaded
+          with the dicode-task-dev and dicode-basics skills, defaulting to
+          OpenAI's gpt-4o. Set OPENAI_API_KEY in your dicode environment
+          before using.
+        trigger:
+          webhook: /hooks/ai/dicodai
+          # auth: true — the chat panel in dc-task-detail is always served
+          # inside an authenticated dicode session, so gate the webhook too
+          # to keep unauthenticated callers off the OpenAI billing surface.
+          auth: true
+        params:
+          skills: "dicode-task-dev,dicode-basics"
+          model: "gpt-4o"
+          base_url: "https://api.openai.com/v1"
+          api_key_env: "OPENAI_API_KEY"
+          system_prompt: |
+            You are an AI agent embedded in dicode helping users build
+            automation tasks. Users ask you to design, write, and debug
+            dicode tasks — small TypeScript (or Python, Docker) programs
+            triggered by webhooks, cron, manual runs, or chain events.
+
+            Follow the mandatory workflow from the dicode-task-dev skill:
+            inspect existing tasks and secrets first, write task.yaml +
+            task.ts + task.test.ts together, validate and test before
+            committing. Respect the trigger/permissions schema exactly —
+            no hardcoded secrets, one trigger per task, always test.
+
+            When the user pastes a task.yaml / task.ts / task.test.ts,
+            review it against the skill's rules and reply with concrete
+            fixes or a rewritten file. Keep answers focused; the user
+            copies code back to their editor manually.
+        env:
+          - OPENAI_API_KEY
+        net:
+          - api.openai.com
+
     auth-start:
       ref:
         path: ./auth-start/task.yaml

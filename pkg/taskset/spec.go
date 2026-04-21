@@ -72,6 +72,7 @@ type RetryConfig struct {
 type TriggerPatch struct {
 	Cron    *string            `yaml:"cron,omitempty"`
 	Webhook *string            `yaml:"webhook,omitempty"`
+	Auth    *bool              `yaml:"auth,omitempty"`
 	Manual  *bool              `yaml:"manual,omitempty"`
 	Chain   *task.ChainTrigger `yaml:"chain,omitempty"`
 	Daemon  *bool              `yaml:"daemon,omitempty"`

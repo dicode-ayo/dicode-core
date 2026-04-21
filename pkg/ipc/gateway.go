@@ -76,7 +76,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	g.mu.RLock()
 	var matched http.Handler
 	for _, route := range g.routes {
-		if pathMatches(route.pattern, r.URL.Path) {
+		if PathMatches(route.pattern, r.URL.Path) {
 			matched = route.handler
 			break // routes are sorted longest-first; first match wins
 		}
@@ -90,9 +90,14 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	http.NotFound(w, r)
 }
 
-// pathMatches reports whether urlPath is matched by pattern.
-// A pattern matches if urlPath equals it, or starts with pattern+"/" .
-func pathMatches(pattern, urlPath string) bool {
+// PathMatches reports whether urlPath is matched by pattern.
+// A pattern matches if urlPath equals it, or starts with pattern+"/" — with
+// any trailing slash on the pattern normalised away first so "/hooks/foo/"
+// and "/hooks/foo" both match "/hooks/foo/bar". Exported so webhook auth
+// gates outside this package can share the same rule; drift between the
+// gateway (dispatches) and an auth guard (decides whether to dispatch) has
+// been the source of one security bug already.
+func PathMatches(pattern, urlPath string) bool {
 	if urlPath == pattern {
 		return true
 	}
