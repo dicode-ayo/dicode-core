@@ -424,6 +424,59 @@ func TestServer_OAuth_RefusesWhenRotationInProgress(t *testing.T) {
 	}
 }
 
+// TestServer_OAuth_RotationErrorOutranksProtocolError verifies the gate
+// priority documented on build_auth_url: when a daemon is mid-rotation AND
+// connected to a broker on an old protocol, the operator sees the rotation
+// error (the actionable one — restart the daemon) rather than the protocol
+// error (true but misleading — "upgrade dicode-relay" is not the fix).
+// Mirrors TestServer_OAuth_RefusesWhenRotationInProgress but with
+// supportsOAuthFn=false so both gates would fire on their own.
+func TestServer_OAuth_RotationErrorOutranksProtocolError(t *testing.T) {
+	env := newTestEnv(t)
+	spec := specWithDicode("auth-relay", &task.DicodePermissions{OAuthInit: true, OAuthStore: true})
+	runID := fmt.Sprintf("test-%d", time.Now().UnixNano())
+	srv := New(runID, spec.ID, env.secret, env.reg, env.db, nil, nil, zap.NewNop(), spec, nil)
+
+	id := newOAuthIdentity(t)
+	pending := relay.NewPendingSessions()
+	secretsMgr := newMemSecrets()
+	// Both gates would refuse independently. Rotation must win.
+	srv.SetOAuthBroker(id, "https://relay.dicode.app", pending, nil,
+		func() bool { return false }, // supportsOAuthFn — would trip the #104 gate
+		func() bool { return true },  // rotationActiveFn — would trip the #144 gate
+	)
+	srv.SetSecrets(secretsMgr)
+
+	socketPath, token, err := srv.Start(context.Background())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(srv.Stop)
+	conn := dial(t, socketPath)
+	t.Cleanup(func() { conn.Close() })
+	doHandshake(t, conn, token)
+
+	for _, method := range []string{"dicode.oauth.build_auth_url", "dicode.oauth.store_token"} {
+		sendMsg(t, conn, map[string]any{
+			"id":       method,
+			"method":   method,
+			"provider": "slack",
+			"envelope": json.RawMessage(`{}`),
+		})
+		resp := recvMsg(t, conn)
+		errStr, _ := resp["error"].(string)
+		if errStr == "" {
+			t.Fatalf("%s: expected refusal, got none", method)
+		}
+		if !strings.Contains(errStr, "rotation") {
+			t.Fatalf("%s: expected rotation error to outrank protocol error, got: %q", method, errStr)
+		}
+		if strings.Contains(errStr, "upgrade dicode-relay") {
+			t.Fatalf("%s: rotation should win over protocol gate, got protocol error: %q", method, errStr)
+		}
+	}
+}
+
 // sealForDaemon mirrors dicode-relay src/broker/crypto.ts eciesEncrypt.
 // Post-#104 the broker encrypts against the daemon's DecryptKey pubkey —
 // mirror that here so the test actually exercises the production code path.
