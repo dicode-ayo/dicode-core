@@ -511,6 +511,7 @@ Commands:
   secrets list                    list secret keys
   secrets set <key> <value>       store a secret
   secrets delete <key>            delete a secret
+  relay trust-broker --yes        clear the pinned broker signing key (TOFU re-pin on reconnect)
   relay rotate-identity --yes     rotate the daemon's relay identity (irreversible)
   version                         print version
 `)

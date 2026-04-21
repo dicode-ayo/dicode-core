@@ -1304,9 +1304,13 @@ curl http://localhost:8080/api/runs/<run-id>
 # Stream live logs for a running task
 curl http://localhost:8080/api/runs/<run-id>/stream   # Server-Sent Events
 
-# Generate a task from a prompt
-curl -X POST http://localhost:8080/api/ai/generate \
+# Ask the configured AI task (default: buildin/dicodai) to generate a task
+# Requires an authenticated session cookie — easier via the CLI:
+#   dicode ai "ping my API every 5 minutes"
+# Or the REST API once logged in:
+curl -X POST http://localhost:8080/api/ai/chat \
   -H "Content-Type: application/json" \
+  -H "Cookie: dicode_secrets_sess=<your-session>" \
   -d '{"prompt": "ping my API every 5 minutes"}'
 
 # Force an immediate git sync

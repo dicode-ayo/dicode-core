@@ -76,8 +76,9 @@ func startOAuthServer(t *testing.T) *oauthEnv {
 	pending := relay.NewPendingSessions()
 	secretsMgr := newMemSecrets()
 	// supportsOAuthFn=nil so existing tests that pre-date #104 still exercise
-	// the happy path without having to fake a handshake.
-	srv.SetOAuthBroker(identity, "https://relay.dicode.app", pending, nil, nil)
+	// the happy path without having to fake a handshake. rotationActiveFn=nil
+	// leaves the #144 gate unchecked for the same reason.
+	srv.SetOAuthBroker(identity, "https://relay.dicode.app", pending, nil, nil, nil)
 	srv.SetSecrets(secretsMgr)
 
 	socketPath, token, err := srv.Start(context.Background())
@@ -141,7 +142,7 @@ func TestServer_OAuth_BuildAuthURL_DeniedWithoutInit(t *testing.T) {
 	spec := specWithDicode("leaky", &task.DicodePermissions{OAuthStore: true})
 	runID := fmt.Sprintf("test-%d", time.Now().UnixNano())
 	srv := New(runID, spec.ID, env.secret, env.reg, env.db, nil, nil, zap.NewNop(), spec, nil)
-	srv.SetOAuthBroker(newOAuthIdentity(t), "https://relay.dicode.app", relay.NewPendingSessions(), nil, nil)
+	srv.SetOAuthBroker(newOAuthIdentity(t), "https://relay.dicode.app", relay.NewPendingSessions(), nil, nil, nil)
 	socketPath, token, err := srv.Start(context.Background())
 	if err != nil {
 		t.Fatalf("Start: %v", err)
@@ -314,7 +315,7 @@ func TestServer_OAuth_RefusesWhenBrokerProtocolOld(t *testing.T) {
 	pending := relay.NewPendingSessions()
 	secretsMgr := newMemSecrets()
 	// supportsOAuthFn always false — simulating a broker still on protocol 1.
-	srv.SetOAuthBroker(id, "https://relay.dicode.app", pending, nil, func() bool { return false })
+	srv.SetOAuthBroker(id, "https://relay.dicode.app", pending, nil, func() bool { return false }, nil)
 	srv.SetSecrets(secretsMgr)
 
 	socketPath, token, err := srv.Start(context.Background())
@@ -356,6 +357,70 @@ func TestServer_OAuth_RefusesWhenBrokerProtocolOld(t *testing.T) {
 	}
 	if !strings.Contains(errStr2, "protocol") {
 		t.Fatalf("expected protocol error on store_token, got: %q", errStr2)
+	}
+}
+
+// TestServer_OAuth_RefusesWhenRotationInProgress covers issue #144: after
+// `dicode relay rotate-identity --yes` swaps the DB keys, the daemon's
+// in-memory Identity still points at the OLD SignKey/DecryptKey until the
+// process restarts. Issuing a new /auth URL under that identity would
+// contradict the rotation contract (operator was told the old identity is
+// dead). The IPC layer must refuse both OAuth methods with a clear
+// "restart required" error until the daemon cycles.
+func TestServer_OAuth_RefusesWhenRotationInProgress(t *testing.T) {
+	env := newTestEnv(t)
+	spec := specWithDicode("auth-relay", &task.DicodePermissions{OAuthInit: true, OAuthStore: true})
+	runID := fmt.Sprintf("test-%d", time.Now().UnixNano())
+	srv := New(runID, spec.ID, env.secret, env.reg, env.db, nil, nil, zap.NewNop(), spec, nil)
+
+	id := newOAuthIdentity(t)
+	pending := relay.NewPendingSessions()
+	secretsMgr := newMemSecrets()
+	// supportsOAuthFn returns true (broker is protocol-2); rotationActiveFn
+	// returns true (rotation has happened, daemon hasn't restarted).
+	srv.SetOAuthBroker(id, "https://relay.dicode.app", pending, nil,
+		func() bool { return true },
+		func() bool { return true },
+	)
+	srv.SetSecrets(secretsMgr)
+
+	socketPath, token, err := srv.Start(context.Background())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(srv.Stop)
+	conn := dial(t, socketPath)
+	t.Cleanup(func() { conn.Close() })
+	doHandshake(t, conn, token)
+
+	// build_auth_url must be refused with the rotation-in-progress message.
+	sendMsg(t, conn, map[string]any{"id": "1", "method": "dicode.oauth.build_auth_url", "provider": "slack"})
+	resp := recvMsg(t, conn)
+	errStr, _ := resp["error"].(string)
+	if errStr == "" {
+		t.Fatal("expected rotation-in-progress error, got none")
+	}
+	if !strings.Contains(errStr, "rotation") || !strings.Contains(errStr, "restart") {
+		t.Fatalf("expected operator-actionable rotation error, got: %q", errStr)
+	}
+	// Gate must be pre-enqueue — no pending session added.
+	if pending.Len() != 0 {
+		t.Fatalf("pending session unexpectedly registered during rotation: len=%d", pending.Len())
+	}
+
+	// store_token must also refuse, short-circuiting before any decrypt.
+	sendMsg(t, conn, map[string]any{
+		"id":       "2",
+		"method":   "dicode.oauth.store_token",
+		"envelope": json.RawMessage(`{}`),
+	})
+	resp2 := recvMsg(t, conn)
+	errStr2, _ := resp2["error"].(string)
+	if errStr2 == "" {
+		t.Fatal("expected rotation-in-progress error on store_token, got none")
+	}
+	if !strings.Contains(errStr2, "rotation") {
+		t.Fatalf("expected rotation error on store_token, got: %q", errStr2)
 	}
 }
 

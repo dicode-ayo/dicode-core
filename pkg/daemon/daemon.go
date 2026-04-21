@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/dicode/dicode/pkg/config"
@@ -218,9 +219,19 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 			// pre-split brokers advertise protocol < 2, in which case the
 			// IPC layer refuses OAuth flows with a clear operator error
 			// rather than silently failing to decrypt the delivery.
+			//
+			// rotationActive (issue #144) is flipped true by the rotator
+			// closure below after `relay.RotateIdentity` succeeds. Until
+			// the daemon restarts (which reconstructs denoRT and re-reads
+			// Identity), the in-memory `id` still points at the OLD keys;
+			// the IPC layer refuses new OAuth flows so the operator isn't
+			// silently handed URLs signed under the identity they just
+			// retired.
 			pending := relay.NewPendingSessions()
+			var rotationActive atomic.Bool
+			rotationActiveFn := func() bool { return rotationActive.Load() }
 			if brokerURL := deriveBrokerBaseURL(cfg.Relay.ServerURL); brokerURL != "" {
-				denoRT.SetOAuthBroker(id, brokerURL, pending, rc.BrokerPubkey, rc.SupportsOAuth)
+				denoRT.SetOAuthBroker(id, brokerURL, pending, rc.BrokerPubkey, rc.SupportsOAuth, rotationActiveFn)
 			} else {
 				log.Warn("relay: could not derive broker base URL from server_url — OAuth broker disabled",
 					zap.String("server_url", cfg.Relay.ServerURL),
@@ -252,12 +263,18 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 				// until a restart. This is the hazard relayRotateWarning
 				// calls out — the rotation point is "DB + pending cutover";
 				// the running-connection cutover is at restart.
+				//
+				// rotationActive (issue #144) flips true AFTER the DB swap
+				// succeeds so the IPC layer starts refusing dicode.oauth.*
+				// immediately. A failed rotation leaves the flag clear,
+				// keeping OAuth flows working against the unchanged identity.
 				dropped := pending.Clear()
 				oldUUID := id.UUID
 				newID, err := relay.RotateIdentity(ctx, database)
 				if err != nil {
 					return "", err
 				}
+				rotationActive.Store(true)
 				log.Warn("relay identity rotated",
 					zap.String("old_uuid", oldUUID),
 					zap.String("new_uuid", newID.UUID),
