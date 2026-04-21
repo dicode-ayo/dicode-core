@@ -5,7 +5,7 @@
 // so this task cannot be coaxed into signing a payload of the wrong shape.
 // It only gets to pick the provider and an optional scope override.
 
-export default async function main() {
+export default async function main({ params, dicode, output }: DicodeSdk) {
   const provider = (await params.get("provider")) ?? "";
   const scope = (await params.get("scope")) ?? "";
   if (!provider) throw new Error("provider parameter is required");
