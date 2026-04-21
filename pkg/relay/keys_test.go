@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/dicode/dicode/pkg/db"
+	"go.uber.org/zap"
 )
 
 func openTestDB(t *testing.T) db.DB {
@@ -27,13 +28,16 @@ func TestGenerateIdentity(t *testing.T) {
 	ctx := context.Background()
 	database := openTestDB(t)
 
-	id, err := LoadOrGenerateIdentity(ctx, database)
+	id, err := LoadOrGenerateIdentity(ctx, database, zap.NewNop())
 	if err != nil {
 		t.Fatalf("generate identity: %v", err)
 	}
 
-	if id.PrivateKey == nil {
-		t.Fatal("nil private key")
+	if id.SignKey == nil {
+		t.Fatal("nil sign key")
+	}
+	if id.DecryptKey == nil {
+		t.Fatal("nil decrypt key")
 	}
 	if id.UUID == "" {
 		t.Fatal("empty UUID")
@@ -47,13 +51,13 @@ func TestUUIDDeterministic(t *testing.T) {
 	ctx := context.Background()
 	database := openTestDB(t)
 
-	id1, err := LoadOrGenerateIdentity(ctx, database)
+	id1, err := LoadOrGenerateIdentity(ctx, database, zap.NewNop())
 	if err != nil {
 		t.Fatalf("first load: %v", err)
 	}
 
 	// Load again — must return the same UUID.
-	id2, err := LoadOrGenerateIdentity(ctx, database)
+	id2, err := LoadOrGenerateIdentity(ctx, database, zap.NewNop())
 	if err != nil {
 		t.Fatalf("second load: %v", err)
 	}
@@ -67,35 +71,37 @@ func TestKeyRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	database := openTestDB(t)
 
-	id1, err := LoadOrGenerateIdentity(ctx, database)
+	id1, err := LoadOrGenerateIdentity(ctx, database, zap.NewNop())
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}
 
-	id2, err := LoadOrGenerateIdentity(ctx, database)
+	id2, err := LoadOrGenerateIdentity(ctx, database, zap.NewNop())
 	if err != nil {
 		t.Fatalf("reload: %v", err)
 	}
 
-	// Public keys must match.
-	pub1 := id1.PrivateKey.PublicKey
-	pub2 := id2.PrivateKey.PublicKey
-
-	if pub1.X.Cmp(pub2.X) != 0 || pub1.Y.Cmp(pub2.Y) != 0 {
-		t.Fatal("public key changed after round-trip")
+	// Both public keys (sign and decrypt) must round-trip identically.
+	if id1.SignKey.PublicKey.X.Cmp(id2.SignKey.PublicKey.X) != 0 ||
+		id1.SignKey.PublicKey.Y.Cmp(id2.SignKey.PublicKey.Y) != 0 {
+		t.Fatal("sign public key changed after round-trip")
+	}
+	if id1.DecryptKey.PublicKey.X.Cmp(id2.DecryptKey.PublicKey.X) != 0 ||
+		id1.DecryptKey.PublicKey.Y.Cmp(id2.DecryptKey.PublicKey.Y) != 0 {
+		t.Fatal("decrypt public key changed after round-trip")
 	}
 }
 
-func TestUncompressedPublicKey(t *testing.T) {
+func TestSignPublicKey(t *testing.T) {
 	ctx := context.Background()
 	database := openTestDB(t)
 
-	id, err := LoadOrGenerateIdentity(ctx, database)
+	id, err := LoadOrGenerateIdentity(ctx, database, zap.NewNop())
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}
 
-	raw := id.UncompressedPublicKey()
+	raw := id.SignPublicKey()
 	if len(raw) != 65 {
 		t.Fatalf("uncompressed key must be 65 bytes, got %d", len(raw))
 	}
@@ -103,13 +109,82 @@ func TestUncompressedPublicKey(t *testing.T) {
 		t.Fatalf("uncompressed key must start with 0x04, got 0x%02x", raw[0])
 	}
 
-	// Must round-trip through unmarshalUncompressed.
+	// Must round-trip through unmarshalUncompressed and match SignKey.
 	pub, err := unmarshalUncompressed(raw)
 	if err != nil {
 		t.Fatalf("unmarshalUncompressed failed: %v", err)
 	}
-	if pub.X.Cmp(id.PrivateKey.PublicKey.X) != 0 || pub.Y.Cmp(id.PrivateKey.PublicKey.Y) != 0 {
-		t.Fatal("round-trip public key mismatch")
+	if pub.X.Cmp(id.SignKey.PublicKey.X) != 0 || pub.Y.Cmp(id.SignKey.PublicKey.Y) != 0 {
+		t.Fatal("round-trip sign public key mismatch")
+	}
+}
+
+func TestDecryptPublicKey(t *testing.T) {
+	ctx := context.Background()
+	database := openTestDB(t)
+
+	id, err := LoadOrGenerateIdentity(ctx, database, zap.NewNop())
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+
+	raw := id.DecryptPublicKey()
+	if len(raw) != 65 {
+		t.Fatalf("uncompressed key must be 65 bytes, got %d", len(raw))
+	}
+	if raw[0] != 0x04 {
+		t.Fatalf("uncompressed key must start with 0x04, got 0x%02x", raw[0])
+	}
+
+	pub, err := unmarshalUncompressed(raw)
+	if err != nil {
+		t.Fatalf("unmarshalUncompressed failed: %v", err)
+	}
+	if pub.X.Cmp(id.DecryptKey.PublicKey.X) != 0 || pub.Y.Cmp(id.DecryptKey.PublicKey.Y) != 0 {
+		t.Fatal("round-trip decrypt public key mismatch")
+	}
+}
+
+func TestRotateIdentity(t *testing.T) {
+	ctx := context.Background()
+	database := openTestDB(t)
+
+	orig, err := LoadOrGenerateIdentity(ctx, database, nil)
+	if err != nil {
+		t.Fatalf("initial load: %v", err)
+	}
+
+	rotated, err := RotateIdentity(ctx, database)
+	if err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+	if rotated.UUID == orig.UUID {
+		t.Fatalf("rotation produced the same UUID")
+	}
+	if rotated.SignKey.D.Cmp(orig.SignKey.D) == 0 {
+		t.Fatalf("rotation kept the same SignKey scalar")
+	}
+	if rotated.DecryptKey.D.Cmp(orig.DecryptKey.D) == 0 {
+		t.Fatalf("rotation kept the same DecryptKey scalar")
+	}
+	if rotated.SignKey.D.Cmp(rotated.DecryptKey.D) == 0 {
+		t.Fatalf("rotated SignKey and DecryptKey are the same scalar")
+	}
+
+	// A subsequent LoadOrGenerate must return the rotated keys, not the
+	// originals — the rotation is persistent on both rows.
+	reloaded, err := LoadOrGenerateIdentity(ctx, database, nil)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if reloaded.UUID != rotated.UUID {
+		t.Fatalf("reload returned UUID %s, expected rotated %s", reloaded.UUID, rotated.UUID)
+	}
+	if reloaded.SignKey.D.Cmp(rotated.SignKey.D) != 0 {
+		t.Fatalf("reload returned a different SignKey than rotated")
+	}
+	if reloaded.DecryptKey.D.Cmp(rotated.DecryptKey.D) != 0 {
+		t.Fatalf("reload returned a different DecryptKey than rotated")
 	}
 }
 
@@ -117,13 +192,14 @@ func TestDeriveUUID(t *testing.T) {
 	ctx := context.Background()
 	database := openTestDB(t)
 
-	id, err := LoadOrGenerateIdentity(ctx, database)
+	id, err := LoadOrGenerateIdentity(ctx, database, zap.NewNop())
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}
 
-	// Recompute UUID manually.
-	expected := deriveUUID(&id.PrivateKey.PublicKey)
+	// The UUID is derived from the SignKey pubkey only — the DecryptKey
+	// has no effect on the URL prefix (issue #104).
+	expected := deriveUUID(&id.SignKey.PublicKey)
 	if id.UUID != expected {
 		t.Fatalf("UUID mismatch: got %s, want %s", id.UUID, expected)
 	}

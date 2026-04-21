@@ -115,7 +115,7 @@ func generatePKCEChallenge() (string, error) {
 //	baseURL  e.g. "https://relay.dicode.app"
 //	scope    optional space-separated scope override (empty = use broker default)
 func BuildAuthURL(baseURL string, identity *Identity, provider, scope string, now int64) (string, *AuthRequest, error) {
-	if identity == nil || identity.PrivateKey == nil {
+	if identity == nil || identity.SignKey == nil {
 		return "", nil, fmt.Errorf("identity required")
 	}
 	if provider == "" {
@@ -133,7 +133,7 @@ func BuildAuthURL(baseURL string, identity *Identity, provider, scope string, no
 	if err != nil {
 		return "", nil, err
 	}
-	sig, err := SignAuthPayload(identity.PrivateKey, payload)
+	sig, err := SignAuthPayload(identity.SignKey, payload)
 	if err != nil {
 		return "", nil, err
 	}
@@ -186,7 +186,7 @@ type OAuthTokenDeliveryPayload struct {
 // decrypts the payload. The 16-byte GCM auth tag is appended to the ciphertext
 // per the broker convention; this function splits it back off.
 func DecryptOAuthToken(identity *Identity, payload *OAuthTokenDeliveryPayload) ([]byte, error) {
-	if identity == nil || identity.PrivateKey == nil {
+	if identity == nil || identity.DecryptKey == nil {
 		return nil, fmt.Errorf("identity required")
 	}
 	if payload == nil {
@@ -211,8 +211,11 @@ func DecryptOAuthToken(identity *Identity, payload *OAuthTokenDeliveryPayload) (
 		return nil, fmt.Errorf("parse ephemeral pubkey: %w", err)
 	}
 
-	// Convert the long-lived ECDSA key to an ECDH key on the same curve.
-	daemonECDH, err := ecdsaToECDH(identity.PrivateKey)
+	// Convert the long-lived DecryptKey (ECDSA type, P-256 curve) to an ECDH
+	// key so it can participate in ECDH against the broker's ephemeral key.
+	// #104: the SignKey must never take this code path — ECDSA-only domain
+	// separation is exactly what the split buys us.
+	daemonECDH, err := ecdsaToECDH(identity.DecryptKey)
 	if err != nil {
 		return nil, fmt.Errorf("convert daemon key: %w", err)
 	}

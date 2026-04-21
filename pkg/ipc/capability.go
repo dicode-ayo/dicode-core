@@ -46,12 +46,13 @@ const (
 	CapSecretsWrite  = "secrets.write"
 
 	// CLI capabilities — granted to dicode CLI clients on the control socket.
-	CapCLIRun     = "cli.run"     // trigger a task run and stream its output
-	CapCLIList    = "cli.list"    // list tasks and their last-run status
-	CapCLILogs    = "cli.logs"    // fetch log entries for a run
-	CapCLIStatus  = "cli.status"  // daemon health and uptime
-	CapCLISecrets = "cli.secrets" // list / set / delete secrets
-	CapCLIAI      = "cli.ai"      // fire the configured ai task with a prompt
+	CapCLIRun         = "cli.run"          // trigger a task run and stream its output
+	CapCLIList        = "cli.list"         // list tasks and their last-run status
+	CapCLILogs        = "cli.logs"         // fetch log entries for a run
+	CapCLIStatus      = "cli.status"       // daemon health and uptime
+	CapCLISecrets     = "cli.secrets"      // list / set / delete secrets
+	CapCLIAI          = "cli.ai"           // fire the configured ai task with a prompt
+	CapCLIRelayRotate = "cli.relay.rotate" // rotate the relay identity (irreversible)
 )
 
 // cliCaps is the full capability set granted to every CLI client.
@@ -63,6 +64,7 @@ func cliCaps() []string {
 		CapCLIStatus,
 		CapCLISecrets,
 		CapCLIAI,
+		CapCLIRelayRotate,
 	}
 }
 

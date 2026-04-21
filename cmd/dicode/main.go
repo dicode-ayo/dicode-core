@@ -107,7 +107,7 @@ func dispatch(c *ipc.ControlClient, args []string) error {
 		return cmdSecrets(c, args[1:])
 	case "relay":
 		if len(args) < 2 {
-			return fmt.Errorf("usage: dicode relay <trust-broker> --yes")
+			return fmt.Errorf("usage: dicode relay <trust-broker|rotate-identity> [--yes]")
 		}
 		return cmdRelay(c, args[1:])
 	case "ai":
@@ -143,6 +143,38 @@ func cmdRelay(c *ipc.ControlClient, args []string) error {
 			return fmt.Errorf("%s", resp.Error)
 		}
 		fmt.Println("Broker pubkey pin cleared. Restart the daemon to accept the new broker key.")
+		return nil
+	case "rotate-identity":
+		force := false
+		for _, a := range args[1:] {
+			switch a {
+			case "--yes", "-y":
+				force = true
+			default:
+				return fmt.Errorf("unknown flag %q — usage: dicode relay rotate-identity --yes", a)
+			}
+		}
+		if !force {
+			fmt.Fprintln(os.Stderr, "This will permanently invalidate the current relay identity.")
+			fmt.Fprintln(os.Stderr, "Any public webhook URLs under the old UUID will stop working.")
+			fmt.Fprintln(os.Stderr, "Re-run with --yes to confirm.")
+			return fmt.Errorf("aborted")
+		}
+		resp, err := c.Send(ipc.Request{Method: "cli.relay.rotate_identity"})
+		if err != nil {
+			return err
+		}
+		if resp.Error != "" {
+			return fmt.Errorf("%s", resp.Error)
+		}
+		var result ipc.RelayRotateResult
+		if err := remarshal(resp.Result, &result); err != nil {
+			return err
+		}
+		fmt.Printf("new relay uuid: %s\n", result.NewUUID)
+		if result.Warning != "" {
+			fmt.Fprintln(os.Stderr, result.Warning)
+		}
 		return nil
 	default:
 		return fmt.Errorf("unknown relay subcommand %q", args[0])
@@ -479,6 +511,7 @@ Commands:
   secrets list                    list secret keys
   secrets set <key> <value>       store a secret
   secrets delete <key>            delete a secret
+  relay rotate-identity --yes     rotate the daemon's relay identity (irreversible)
   version                         print version
 `)
 }

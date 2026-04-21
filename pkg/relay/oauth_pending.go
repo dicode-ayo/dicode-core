@@ -118,3 +118,15 @@ func (s *PendingSessions) StartSweep(ctx context.Context) {
 		}
 	}
 }
+
+// Clear drops every pending session. Called on relay-identity rotation:
+// the outstanding flows were issued under the old DecryptKey and any
+// arriving token delivery will be encrypted to that key, so the rotated
+// daemon identity cannot decrypt them.
+func (s *PendingSessions) Clear() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := len(s.byID)
+	s.byID = make(map[string]*AuthRequest)
+	return n
+}
