@@ -30,7 +30,11 @@ const oauthBrokerProtocolErr = "ipc: broker does not support split-key OAuth —
 // holds the OLD in-memory Identity pointer, so a new flow would be issued
 // under the old SignKey — contradicting the rotation contract. Refuse here
 // and tell the operator exactly what to do.
-const oauthRotationInProgressErr = "ipc: relay rotation in progress — restart the daemon to complete rotation before issuing new OAuth URLs"
+//
+// Covers both build_auth_url (would sign a URL under the old key) and
+// store_token (would persist a token that was encrypted to the old
+// DecryptKey by the mid-flight broker session).
+const oauthRotationInProgressErr = "ipc: relay rotation in progress — restart the daemon to complete rotation before issuing or accepting OAuth tokens"
 
 // Server is a per-run Unix socket server that bridges a task subprocess and
 // the Go host using the unified IPC protocol.
@@ -603,6 +607,20 @@ func (s *Server) handleConn(conn net.Conn) {
 				reply(req.ID, nil, "ipc: oauth broker not configured on this daemon")
 				continue
 			}
+			// Issue #144: refuse after `dicode relay rotate-identity` has
+			// swapped the DB keys. The in-memory s.oauthID still points at
+			// the OLD SignKey until the daemon restarts; issuing a new
+			// URL under it would contradict the rotation contract the
+			// operator just signed off on.
+			//
+			// Checked BEFORE the #104 protocol gate because rotation-in-
+			// progress is the more immediate actionable condition (restart
+			// the daemon) — telling the operator to "upgrade dicode-relay"
+			// when they've just run `rotate-identity` would be misleading.
+			if s.rotationActiveFn != nil && s.rotationActiveFn() {
+				reply(req.ID, nil, oauthRotationInProgressErr)
+				continue
+			}
 			// Issue #104: refuse OAuth flows when the connected broker has not
 			// advertised protocol >= 2. A pre-split broker would encrypt the
 			// delivery to the SignKey pubkey, which DecryptOAuthToken cannot
@@ -612,15 +630,6 @@ func (s *Server) handleConn(conn net.Conn) {
 			// actionable operator message.
 			if s.supportsOAuthFn != nil && !s.supportsOAuthFn() {
 				reply(req.ID, nil, oauthBrokerProtocolErr)
-				continue
-			}
-			// Issue #144: refuse after `dicode relay rotate-identity` has
-			// swapped the DB keys. The in-memory s.oauthID still points at
-			// the OLD SignKey until the daemon restarts; issuing a new
-			// URL under it would contradict the rotation contract the
-			// operator just signed off on.
-			if s.rotationActiveFn != nil && s.rotationActiveFn() {
-				reply(req.ID, nil, oauthRotationInProgressErr)
 				continue
 			}
 			if req.Provider == "" {
@@ -652,20 +661,22 @@ func (s *Server) handleConn(conn net.Conn) {
 				reply(req.ID, nil, "ipc: oauth broker not configured on this daemon")
 				continue
 			}
+			// Issue #144: refuse delivery after rotation. A post-rotation
+			// delivery was issued under the old SignKey and encrypted to
+			// the old DecryptKey; accepting it here would persist a token
+			// tied to an identity the operator has explicitly retired.
+			// Checked before the #104 protocol gate — see the rationale on
+			// build_auth_url above.
+			if s.rotationActiveFn != nil && s.rotationActiveFn() {
+				reply(req.ID, nil, oauthRotationInProgressErr)
+				continue
+			}
 			// Issue #104 — see the note on dicode.oauth.build_auth_url.
 			// Reject store_token against a pre-split broker so a stale
 			// session delivered just after a downgrade can't coerce a
 			// mismatched-key decrypt attempt.
 			if s.supportsOAuthFn != nil && !s.supportsOAuthFn() {
 				reply(req.ID, nil, oauthBrokerProtocolErr)
-				continue
-			}
-			// Issue #144: refuse delivery after rotation. A post-rotation
-			// delivery was issued under the old SignKey and encrypted to
-			// the old DecryptKey; accepting it here would persist a token
-			// tied to an identity the operator has explicitly retired.
-			if s.rotationActiveFn != nil && s.rotationActiveFn() {
-				reply(req.ID, nil, oauthRotationInProgressErr)
 				continue
 			}
 			if s.secrets == nil {

@@ -268,6 +268,15 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 				// succeeds so the IPC layer starts refusing dicode.oauth.*
 				// immediately. A failed rotation leaves the flag clear,
 				// keeping OAuth flows working against the unchanged identity.
+				//
+				// Trade-off: there is a sub-microsecond window between
+				// RotateIdentity returning nil and Store(true) below where
+				// a concurrent OAuth IPC call could pass the gate and get a
+				// URL signed under the old identity. Flipping the flag first
+				// would require rolling back on error (re-setting to false);
+				// the current order trades that race for simpler failure
+				// semantics. Do not move the Store earlier without adding
+				// the rollback path.
 				dropped := pending.Clear()
 				oldUUID := id.UUID
 				newID, err := relay.RotateIdentity(ctx, database)
