@@ -227,6 +227,44 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 					zap.String("expected_scheme", "wss:// or ws://"))
 			}
 			g.Go(func() error { pending.StartSweep(ctx); return nil })
+			// Identity rotation via `dicode relay rotate-identity`. The
+			// callback regenerates BOTH the sign and decrypt keypairs
+			// atomically (split identity, issue #104) and invalidates any
+			// outstanding OAuth sessions (they were encrypted to the old
+			// DecryptKey). The running relay WSS connection keeps the old
+			// in-memory identity until the daemon restarts — documented
+			// in the RelayRotateResult warning returned to the CLI.
+			ctrlSrv.SetRelayIdentityRotator(func(ctx context.Context) (string, error) {
+				// Invariant: pending.Clear() runs BEFORE relay.RotateIdentity().
+				// Operator intent of rotation is "the old identity is dead from
+				// this point forward", so every in-flight flow issued against
+				// the old identity must be invalidated at the same moment as
+				// the DB swap. If Rotate ran first, the window between Rotate
+				// and Clear would leave in-flight flows still completing
+				// against the old DecryptKey (the broker has it in
+				// session.pubkey, unchanged by DB rotation) — inconsistent
+				// with the operator's mental model of rotation as a hard
+				// cutover.
+				//
+				// Note: the `id` pointer captured in denoRT.SetOAuthBroker
+				// above is NOT replaced here. The running daemon continues
+				// using the old in-memory identity for WSS + ECIES decrypt
+				// until a restart. This is the hazard relayRotateWarning
+				// calls out — the rotation point is "DB + pending cutover";
+				// the running-connection cutover is at restart.
+				dropped := pending.Clear()
+				oldUUID := id.UUID
+				newID, err := relay.RotateIdentity(ctx, database)
+				if err != nil {
+					return "", err
+				}
+				log.Warn("relay identity rotated",
+					zap.String("old_uuid", oldUUID),
+					zap.String("new_uuid", newID.UUID),
+					zap.Int("dropped_sessions", dropped),
+				)
+				return newID.UUID, nil
+			})
 			g.Go(func() error { return rc.Run(ctx) })
 		}
 	}

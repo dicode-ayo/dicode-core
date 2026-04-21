@@ -145,6 +145,49 @@ func TestDecryptPublicKey(t *testing.T) {
 	}
 }
 
+func TestRotateIdentity(t *testing.T) {
+	ctx := context.Background()
+	database := openTestDB(t)
+
+	orig, err := LoadOrGenerateIdentity(ctx, database, nil)
+	if err != nil {
+		t.Fatalf("initial load: %v", err)
+	}
+
+	rotated, err := RotateIdentity(ctx, database)
+	if err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+	if rotated.UUID == orig.UUID {
+		t.Fatalf("rotation produced the same UUID")
+	}
+	if rotated.SignKey.D.Cmp(orig.SignKey.D) == 0 {
+		t.Fatalf("rotation kept the same SignKey scalar")
+	}
+	if rotated.DecryptKey.D.Cmp(orig.DecryptKey.D) == 0 {
+		t.Fatalf("rotation kept the same DecryptKey scalar")
+	}
+	if rotated.SignKey.D.Cmp(rotated.DecryptKey.D) == 0 {
+		t.Fatalf("rotated SignKey and DecryptKey are the same scalar")
+	}
+
+	// A subsequent LoadOrGenerate must return the rotated keys, not the
+	// originals — the rotation is persistent on both rows.
+	reloaded, err := LoadOrGenerateIdentity(ctx, database, nil)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if reloaded.UUID != rotated.UUID {
+		t.Fatalf("reload returned UUID %s, expected rotated %s", reloaded.UUID, rotated.UUID)
+	}
+	if reloaded.SignKey.D.Cmp(rotated.SignKey.D) != 0 {
+		t.Fatalf("reload returned a different SignKey than rotated")
+	}
+	if reloaded.DecryptKey.D.Cmp(rotated.DecryptKey.D) != 0 {
+		t.Fatalf("reload returned a different DecryptKey than rotated")
+	}
+}
+
 func TestDeriveUUID(t *testing.T) {
 	ctx := context.Background()
 	database := openTestDB(t)
