@@ -318,8 +318,12 @@ func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config
 func (s *Server) Handler() http.Handler {
 	r := chi.NewRouter()
 	r.Use(useEncodedPath)
+	// RequestLogger must wrap Recoverer: chi's Recoverer reads the LogEntry
+	// from the request context that RequestLogger installs, and routes panics
+	// to its Panic method. Reversing the order silently drops panic logging.
+	r.Use(middleware.RequestID)
+	r.Use(middleware.RequestLogger(&zapLogFormatter{log: s.log}))
 	r.Use(middleware.Recoverer)
-	r.Use(middleware.Logger)
 	r.Use(securityHeaders)
 
 	// Auth endpoints — always public (login flow must be reachable without session).

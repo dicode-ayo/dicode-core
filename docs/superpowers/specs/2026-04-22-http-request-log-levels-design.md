@@ -67,20 +67,15 @@ func (e *zapLogEntry) Panic(v interface{}, stack []byte) {
 
 ### Wire-up in `pkg/webui/server.go`
 
-Replace line 322:
-
-```go
-r.Use(middleware.Logger)
-```
-
-with:
+Replace the bare `r.Use(middleware.Logger)` with:
 
 ```go
 r.Use(middleware.RequestID)
 r.Use(middleware.RequestLogger(&zapLogFormatter{log: s.log}))
+r.Use(middleware.Recoverer)
 ```
 
-`RequestID` must precede `RequestLogger` so `GetReqID` resolves inside `NewLogEntry`. Both sit *after* `middleware.Recoverer` — the recoverer calls our `Panic` via the formatter.
+**Ordering is load-bearing.** `RequestID` must precede `RequestLogger` so `GetReqID` resolves inside `NewLogEntry`. `RequestLogger` must precede `Recoverer` because chi's `Recoverer` reads the `LogEntry` from the request context (populated by `RequestLogger`) to route panics through our `Panic` method — reverse the order and panics fall through to chi's `PrintPrettyStack` on stderr, bypassing zap entirely.
 
 ### Level semantics
 
@@ -94,7 +89,7 @@ r.Use(middleware.RequestLogger(&zapLogFormatter{log: s.log}))
 ### What stays unchanged
 
 - Existing `s.log.Info/Warn/Error` call sites inside handlers (login flow, config save, etc.) — untouched.
-- `middleware.Recoverer` ordering — remains first; our logger entry's `Panic` gets called by it.
+- `middleware.Recoverer` still catches panics and writes 500; only its position in the stack changes (inner to `RequestLogger`).
 - `securityHeaders` and the rest of the chain — unchanged.
 
 ## Testing
