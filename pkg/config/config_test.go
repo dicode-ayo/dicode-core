@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -142,6 +143,99 @@ sources:
 	}
 	if cfg.AI.Task != "examples/ai-agent-ollama" {
 		t.Errorf("AI.Task = %q, want %q", cfg.AI.Task, "examples/ai-agent-ollama")
+	}
+}
+
+// TestResolvedBrokerURL_Override exercises the explicit RelayConfig.BrokerURL
+// path: when set it wins over any derivation from ServerURL.
+func TestResolvedBrokerURL_Override(t *testing.T) {
+	r := RelayConfig{
+		ServerURL: "wss://relay.dicode.app",
+		BrokerURL: "https://oauth.dicode.app",
+	}
+	if got := r.ResolvedBrokerURL(); got != "https://oauth.dicode.app" {
+		t.Errorf("ResolvedBrokerURL() = %q, want override https://oauth.dicode.app", got)
+	}
+}
+
+// TestResolvedBrokerURL_DerivesFromServerURL covers the default path:
+// BrokerURL empty → swap ws[s] → http[s] on the ServerURL host.
+func TestResolvedBrokerURL_DerivesFromServerURL(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		serverURL string
+		want      string
+	}{
+		{"wss → https", "wss://relay.dicode.app", "https://relay.dicode.app"},
+		{"ws → http", "ws://localhost:5553", "http://localhost:5553"},
+		{"empty server_url → empty", "", ""},
+		{"http scheme rejected at derivation", "http://oops", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := RelayConfig{ServerURL: tc.serverURL}
+			if got := r.ResolvedBrokerURL(); got != tc.want {
+				t.Errorf("ResolvedBrokerURL(%q) = %q, want %q", tc.serverURL, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestLoad_RelayBrokerURL_Roundtrip ensures the BrokerURL field parses from
+// YAML and survives through Load() validation.
+func TestLoad_RelayBrokerURL_Roundtrip(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "dicode.yaml")
+
+	content := `
+sources:
+  - type: local
+    path: ${CONFIGDIR}/tasks
+relay:
+  enabled: true
+  server_url: wss://relay.example.com
+  broker_url: https://broker.example.com
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Relay.BrokerURL != "https://broker.example.com" {
+		t.Errorf("Relay.BrokerURL = %q, want https://broker.example.com", cfg.Relay.BrokerURL)
+	}
+	if got := cfg.Relay.ResolvedBrokerURL(); got != "https://broker.example.com" {
+		t.Errorf("ResolvedBrokerURL() = %q, want the explicit broker_url", got)
+	}
+}
+
+// TestLoad_RelayBrokerURL_RejectsMalformed covers the validator: anything
+// that's not http:// or https:// fails at Load() time with a clear error.
+func TestLoad_RelayBrokerURL_RejectsMalformed(t *testing.T) {
+	for _, bad := range []string{
+		"broker.dicode.app",       // no scheme
+		"ftp://broker.dicode.app", // non-http scheme
+		"wss://broker.dicode.app", // WSS — user probably meant server_url
+	} {
+		t.Run(bad, func(t *testing.T) {
+			dir := t.TempDir()
+			cfgPath := filepath.Join(dir, "dicode.yaml")
+			content := fmt.Sprintf(`
+sources:
+  - type: local
+    path: ${CONFIGDIR}/tasks
+relay:
+  enabled: true
+  broker_url: %q
+`, bad)
+			if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Load(cfgPath); err == nil {
+				t.Errorf("Load(broker_url=%q): expected error, got nil", bad)
+			}
+		})
 	}
 }
 

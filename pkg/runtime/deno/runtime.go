@@ -301,9 +301,9 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	}
 	runnerFile.Close()
 
-	args := buildDenoArgs(spec, socketPath, shimPath, runnerPath)
+	args := buildDenoArgs(spec, socketPath, shimPath, runnerPath, rt.oauthURL)
 	cmd := exec.CommandContext(execCtx, rt.denoPath, args...) //nolint:gosec
-	cmd.Env = buildEnv(resolved, socketPath, token)
+	cmd.Env = buildEnv(resolved, socketPath, token, rt.oauthURL)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -413,7 +413,7 @@ func expandHome(p string) string {
 	return p
 }
 
-func buildDenoArgs(spec *task.Spec, socketPath, shimPath, runnerPath string) []string {
+func buildDenoArgs(spec *task.Spec, socketPath, shimPath, runnerPath, brokerURL string) []string {
 	args := []string{"run"}
 
 	// Network: omit = unrestricted (--allow-net); empty list = deny all; named hosts = allowlist.
@@ -432,7 +432,13 @@ func buildDenoArgs(spec *task.Spec, socketPath, shimPath, runnerPath string) []s
 
 	// Env: always allow the internal IPC vars plus HOME/DENO_DIR/XDG_CACHE_HOME
 	// (required by deno.land/x/cache for vendored binary downloads).
+	// DICODE_BROKER_URL (issue #84) is daemon-provided infrastructure —
+	// auto-allowed when a broker URL is configured so auth tasks don't
+	// need to redeclare it in permissions.env.
 	envVars := []string{"DICODE_SOCKET", "DICODE_TOKEN", "HOME", "DENO_DIR", "XDG_CACHE_HOME"}
+	if brokerURL != "" {
+		envVars = append(envVars, "DICODE_BROKER_URL")
+	}
 	for _, e := range spec.Permissions.Env {
 		envVars = append(envVars, e.Name)
 	}
@@ -480,10 +486,16 @@ func buildDenoArgs(spec *task.Spec, socketPath, shimPath, runnerPath string) []s
 	return args
 }
 
-func buildEnv(resolved map[string]string, socketPath, token string) []string {
+func buildEnv(resolved map[string]string, socketPath, token, brokerURL string) []string {
 	// Inherit the host environment so Deno can locate its cache (DENO_DIR etc).
 	// The --allow-env flag separately controls which vars the JS script can read.
 	env := append(os.Environ(), "DICODE_SOCKET="+socketPath, "DICODE_TOKEN="+token)
+	// DICODE_BROKER_URL (issue #84) — daemon-resolved OAuth broker base URL.
+	// Injected only when configured so tasks can distinguish "broker disabled"
+	// from "broker at the default".
+	if brokerURL != "" {
+		env = append(env, "DICODE_BROKER_URL="+brokerURL)
+	}
 	for k, v := range resolved {
 		env = append(env, k+"="+v)
 	}

@@ -45,6 +45,32 @@ type ExecutionConfig struct {
 type RelayConfig struct {
 	Enabled   bool   `yaml:"enabled"`
 	ServerURL string `yaml:"server_url"` // wss://relay.dicode.app
+	// BrokerURL overrides the OAuth broker base URL. When empty, the daemon
+	// derives it from ServerURL by swapping the scheme (wss://host →
+	// https://host). Set this when the broker runs on a different host than
+	// the WSS relay endpoint, or during local development to point at a
+	// broker on a non-TLS port (e.g. http://localhost:5553). Must be http://
+	// or https:// when set.
+	BrokerURL string `yaml:"broker_url,omitempty"`
+}
+
+// ResolvedBrokerURL returns the HTTP(S) OAuth broker base URL that the
+// daemon should use for signing /auth URLs and receiving ECIES-encrypted
+// token deliveries. If BrokerURL is set it wins; otherwise the URL is
+// derived from ServerURL. Returns empty when neither yields a usable URL —
+// the daemon treats that as "OAuth broker disabled".
+func (r RelayConfig) ResolvedBrokerURL() string {
+	if r.BrokerURL != "" {
+		return r.BrokerURL
+	}
+	switch {
+	case strings.HasPrefix(r.ServerURL, "wss://"):
+		return "https://" + strings.TrimPrefix(r.ServerURL, "wss://")
+	case strings.HasPrefix(r.ServerURL, "ws://"):
+		return "http://" + strings.TrimPrefix(r.ServerURL, "ws://")
+	default:
+		return ""
+	}
 }
 
 // AIConfig points the WebUI and CLI at a single task for AI operations.
@@ -317,6 +343,12 @@ func (cfg *Config) validate() error {
 			return fmt.Errorf("sources[%d]: type is required (git or local)", i)
 		default:
 			return fmt.Errorf("sources[%d]: unknown type %q (valid: git, local)", i, s.Type)
+		}
+	}
+	if cfg.Relay.BrokerURL != "" {
+		if !strings.HasPrefix(cfg.Relay.BrokerURL, "http://") &&
+			!strings.HasPrefix(cfg.Relay.BrokerURL, "https://") {
+			return fmt.Errorf("relay.broker_url: must start with http:// or https://, got %q", cfg.Relay.BrokerURL)
 		}
 	}
 	return nil
