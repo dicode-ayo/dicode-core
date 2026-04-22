@@ -139,6 +139,46 @@ test.describe('File Change Detection', () => {
     fs.writeFileSync(taskJsPath, originalJs, 'utf8');
   });
 
+  test('fsnotify pickup latency is within budget (< 1500 ms)', async ({ request }) => {
+    // dicode.app claims "Save a file — live in 100ms via fsnotify."
+    // Issue #125 wants <200ms, acknowledging CI jitter. We assert a looser
+    // <1500ms bound here as a regression gate — the actual measured delta
+    // is logged so the budget can be tightened once CI numbers stabilise.
+    const taskYamlPath = path.join(tasksDir(), 'hello-manual', 'task.yaml');
+    const originalYaml = fs.readFileSync(taskYamlPath, 'utf8');
+
+    const marker = `latency-probe-${Date.now()}`;
+    const updatedYaml = originalYaml.replace(
+      /description:.*$/m,
+      `description: ${marker}`,
+    );
+
+    const startedAt = Date.now();
+    fs.writeFileSync(taskYamlPath, updatedYaml, 'utf8');
+
+    const deadline = startedAt + 5_000;
+    let seenAt = 0;
+    while (Date.now() < deadline) {
+      const res = await request.get(`/api/tasks/${encodeURIComponent(MANUAL_TASK_ID)}`);
+      if (res.ok()) {
+        const body = await res.json() as { description?: string };
+        if (body.description?.includes(marker)) {
+          seenAt = Date.now();
+          break;
+        }
+      }
+      await new Promise((r) => setTimeout(r, 25));
+    }
+
+    // Restore before assertions so a failure doesn't leave the fixture mutated.
+    fs.writeFileSync(taskYamlPath, originalYaml, 'utf8');
+
+    expect(seenAt).toBeGreaterThan(0); // reconciler did pick it up
+    const latencyMs = seenAt - startedAt;
+    console.log(`[latency] fsnotify pickup: ${latencyMs}ms`);
+    expect(latencyMs).toBeLessThan(1500);
+  });
+
   test('file edit is idempotent — restoring original brings task back', async ({ request }) => {
     const taskYamlPath = path.join(tasksDir(), 'hello-manual', 'task.yaml');
     const originalYaml = fs.readFileSync(taskYamlPath, 'utf8');
