@@ -7,7 +7,12 @@
  *
  * Uses the dicode task test harness globals: test, params, env, kv, http,
  * assert, runTask. Each test() gets a fresh mock state.
+ *
+ * Run with:
+ *   make test-tasks
  */
+import { setupHarness } from "../../sdk-test.ts";
+await setupHarness(import.meta.url);
 
 // Minimal OpenAI chat completion response body.
 function completion(content: string, tool_calls?: unknown[]) {
@@ -27,12 +32,13 @@ function completion(content: string, tool_calls?: unknown[]) {
   };
 }
 
-// Shortcut: wire the agent at a local Ollama-like endpoint. No real API key
-// needed — the task uses a placeholder for localhost URLs.
+// Shortcut: wire the agent at a local Ollama-like endpoint. The task still
+// enforces that api_key_env is a real env var, so we stub a placeholder.
 function useLocal() {
   params.set("model", "llama3.2");
   params.set("base_url", "http://localhost:11434/v1");
   params.set("api_key_env", "OLLAMA_API_KEY");
+  env.set("OLLAMA_API_KEY", "stub-for-local");
 }
 
 // Shortcut: wire the agent at OpenAI proper. Needs a real (mocked) key.
@@ -220,9 +226,11 @@ test("self-id filter excludes only the exact task_id, not prefix matches", async
     (t: { function: { name: string } }) => t.function.name,
   );
 
-  assert.ok(!toolNames.includes("task_buildin_ai_agent"), "self must be excluded");
-  assert.ok(toolNames.includes("task_buildin_ai_agent_helper"), "look-alike sibling must NOT be excluded");
-  assert.ok(toolNames.includes("task_team_ai_agent"), "name collision in a different namespace must NOT be excluded");
+  // Tool name mangling (pkg taskIdToToolName) replaces `/` with `_` and
+  // leaves `-` alone: task_buildin_ai-agent-helper, not …_helper.
+  assert.ok(!toolNames.includes("task_buildin_ai-agent"), "self must be excluded");
+  assert.ok(toolNames.includes("task_buildin_ai-agent-helper"), "look-alike sibling must NOT be excluded");
+  assert.ok(toolNames.includes("task_team_ai-agent"), "name collision in a different namespace must NOT be excluded");
   assert.ok(toolNames.includes("task_other_something"), "unrelated task must remain");
 });
 

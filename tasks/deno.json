@@ -1,5 +1,9 @@
 {
+  "nodeModulesDir": "auto",
   "compilerOptions": {
     "lib": ["deno.window"]
+  },
+  "tasks": {
+    "test": "deno test --allow-all tasks/buildin/*/task.test.ts"
   }
 }

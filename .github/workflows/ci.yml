@@ -24,6 +24,19 @@ jobs:
       - name: Run tests
         run: go test -timeout 300s -race ./...
 
+  test-tasks:
+    name: Test tasks (Deno)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - name: Run Deno tests for tasks/buildin/*
+        run: deno test --allow-all --config=tasks/deno.json 'tasks/buildin/**/task.test.ts'
+
   lint:
     name: Lint
     runs-on: ubuntu-latest

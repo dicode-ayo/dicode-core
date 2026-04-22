@@ -8,17 +8,30 @@ import (
 	"path/filepath"
 )
 
-// Hash computes a content hash over task.yaml and the script file.
+// hashedScriptFiles are the script filenames folded into the content hash
+// alongside task.yaml. Kept deterministic (alphabetical) so Hash is stable
+// across invocations. Must cover every extension ScriptPath may resolve —
+// missing one means script edits of that kind go undetected by the
+// reconciler (see #157 for the historic miss on task.ts, the Deno default).
+var hashedScriptFiles = []string{
+	"task.js",
+	"task.mjs",
+	"task.ts",
+}
+
+// Hash computes a content hash over task.yaml and the task's script file
+// (any of the extensions in hashedScriptFiles).
 // Used by the reconciler to detect task changes.
 func Hash(dir string) (string, error) {
 	h := sha256.New()
 
-	for _, name := range []string{"task.yaml", "task.js"} {
+	names := append([]string{"task.yaml"}, hashedScriptFiles...)
+	for _, name := range names {
 		path := filepath.Join(dir, name)
 		data, err := os.ReadFile(path)
 		if err != nil {
 			if os.IsNotExist(err) {
-				continue // task.js may not exist yet during generation
+				continue // a given task only uses one script extension; missing ones are expected
 			}
 			return "", fmt.Errorf("hash %s: %w", path, err)
 		}
