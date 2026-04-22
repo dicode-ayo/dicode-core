@@ -93,14 +93,11 @@ func TestHash_ChangesOnScriptEdit(t *testing.T) {
 	}
 }
 
-// TestHash_IncludesTsEdit is a regression gate for the bug tracked in #157:
-// pkg/task/hash.go currently only reads task.yaml + task.js, so editing a
-// Deno task's task.ts (the project default) produces the same hash and the
-// reconciler never re-registers. This test is skipped until #157 is fixed;
-// it's here so the fix can flip `t.Skip` → real assertion in one line.
-func TestHash_IncludesTsEdit(t *testing.T) {
-	t.Skip("#157: hash.go does not include task.ts — Deno script edits go undetected")
-
+// TestHash_ChangesOn_TsEdit was a regression gate for #157 and is now
+// live after pkg/task/hash.go was extended to fold task.ts into the
+// digest. Editing an existing Deno task's task.ts must change the hash so
+// the reconciler picks up the update and re-registers.
+func TestHash_ChangesOn_TsEdit(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "hello")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -123,7 +120,37 @@ func TestHash_IncludesTsEdit(t *testing.T) {
 		t.Fatalf("after: %v", err)
 	}
 	if before == after {
-		t.Fatalf("Hash ignored task.ts edit (#157): before == after == %q", before)
+		t.Fatalf("Hash ignored task.ts edit: before == after == %q", before)
+	}
+}
+
+// TestHash_ChangesOn_MjsEdit pairs with the .ts test for the other ESM
+// extension ScriptPath resolves. Regression gate against the same class
+// of "allowlist forgets an extension" bug.
+func TestHash_ChangesOn_MjsEdit(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "hello")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "task.yaml"), []byte("name: hello\n"), 0644); err != nil {
+		t.Fatalf("write yaml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "task.mjs"), []byte("v1"), 0644); err != nil {
+		t.Fatalf("write mjs v1: %v", err)
+	}
+	before, err := Hash(dir)
+	if err != nil {
+		t.Fatalf("before: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "task.mjs"), []byte("v2"), 0644); err != nil {
+		t.Fatalf("write mjs v2: %v", err)
+	}
+	after, err := Hash(dir)
+	if err != nil {
+		t.Fatalf("after: %v", err)
+	}
+	if before == after {
+		t.Fatalf("Hash ignored task.mjs edit: before == after == %q", before)
 	}
 }
 

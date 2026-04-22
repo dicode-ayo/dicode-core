@@ -2,11 +2,13 @@
  * task.test.ts — unit tests for the WebUI Example task.
  *
  * Run with:
- *   dicode task test examples/webui
+ *   make test-tasks
  *
  * Each test() block runs in its own isolated runtime. Globals
  * (params, env, log, …) are reset between tests automatically.
  */
+import { setupHarness } from "../../sdk-test.ts";
+await setupHarness(import.meta.url);
 
 test("ping returns pong", async () => {
   params.set("action", "ping");

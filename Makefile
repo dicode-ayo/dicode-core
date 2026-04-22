@@ -6,7 +6,8 @@ GO      := $(shell which go 2>/dev/null || echo $(HOME)/.local/share/mise/shims/
 GOFLAGS := -ldflags "-X main.version=$(VERSION)"
 
 .PHONY: build test test-verbose test-race lint fmt format format-check clean run tidy help \
-	test-e2e test-e2e-unauth test-e2e-auth test-e2e-headed test-e2e-ui test-e2e-install
+	test-e2e test-e2e-unauth test-e2e-auth test-e2e-headed test-e2e-ui test-e2e-install \
+	test-tasks
 
 ## build: compile the dicode binary
 build:
@@ -81,6 +82,15 @@ test-e2e-headed:
 test-e2e-ui:
 	TEST_WEBHOOK_SECRET=$(E2E_WEBHOOK_SECRET) \
 		npx playwright test --ui
+
+# Deno binary dicode uses internally — installed under ~/.cache/dicode/deno/
+# by the managed-runtime bootstrap. Fall back to $PATH.
+DENO := $(shell ls -1t $(HOME)/.cache/dicode/deno/*/deno 2>/dev/null | head -1 || which deno 2>/dev/null)
+
+## test-tasks: run Deno unit tests for tasks/buildin/*/task.test.ts
+test-tasks:
+	@test -n "$(DENO)" || { echo "deno not found — install or run dicode daemon once to bootstrap"; exit 1; }
+	$(DENO) test --allow-all --config=tasks/deno.json 'tasks/buildin/**/task.test.ts'
 
 ## clean: remove compiled binary
 clean:
