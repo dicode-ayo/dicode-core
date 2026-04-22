@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,9 +12,14 @@ import (
 	"time"
 )
 
-const testBrowserHome = "/home/wizard"
+const (
+	testBrowserHome = "/home/wizard"
+	testToken       = "test-token-abc"
+)
 
-func postJSON(t *testing.T, handler http.Handler, path string, body any) *httptest.ResponseRecorder {
+func noopApply(Result) error { return nil }
+
+func postJSONWithToken(t *testing.T, handler http.Handler, path, token string, body any) *httptest.ResponseRecorder {
 	t.Helper()
 	buf, err := json.Marshal(body)
 	if err != nil {
@@ -21,13 +27,16 @@ func postJSON(t *testing.T, handler http.Handler, path string, body any) *httpte
 	}
 	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(buf))
 	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("X-Setup-Token", token)
+	}
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	return rec
 }
 
 func TestBuildWizardHandler_GetIndex_ServesHTML(t *testing.T) {
-	h, _ := buildWizardHandler(testBrowserHome)
+	h, _ := buildWizardHandler(testBrowserHome, testToken, noopApply)
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -45,7 +54,7 @@ func TestBuildWizardHandler_GetIndex_ServesHTML(t *testing.T) {
 }
 
 func TestBuildWizardHandler_PostApply_FillsResult(t *testing.T) {
-	h, resCh := buildWizardHandler(testBrowserHome)
+	h, resCh := buildWizardHandler(testBrowserHome, testToken, noopApply)
 
 	payload := map[string]any{
 		"tasksets": map[string]bool{
@@ -57,7 +66,7 @@ func TestBuildWizardHandler_PostApply_FillsResult(t *testing.T) {
 		"data_dir":        "/var/dicode",
 		"port":            9091,
 	}
-	rec := postJSON(t, h, "/setup/apply", payload)
+	rec := postJSONWithToken(t, h, "/setup/apply", testToken, payload)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("POST /setup/apply status = %d; want 200. body=%q", rec.Code, rec.Body.String())
@@ -96,15 +105,73 @@ func TestBuildWizardHandler_PostApply_FillsResult(t *testing.T) {
 }
 
 func TestBuildWizardHandler_PostApply_RejectsBadJSON(t *testing.T) {
-	h, _ := buildWizardHandler(testBrowserHome)
+	h, _ := buildWizardHandler(testBrowserHome, testToken, noopApply)
 	req := httptest.NewRequest(http.MethodPost, "/setup/apply",
 		strings.NewReader(`{not-json`))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Setup-Token", testToken)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("status = %d; want 400", rec.Code)
+	}
+}
+
+// TestBuildWizardHandler_PostApply_RequiresToken guards against the
+// loopback-local-attacker race: a process sniffing /proc/net/tcp must not
+// be able to win the submit without the token embedded in the URL that
+// was opened in the user's browser.
+func TestBuildWizardHandler_PostApply_RequiresToken(t *testing.T) {
+	h, resCh := buildWizardHandler(testBrowserHome, testToken, noopApply)
+	payload := map[string]any{
+		"tasksets": map[string]bool{"buildin": true},
+		"port":     8080,
+	}
+
+	// No token header → 403.
+	noTok := postJSONWithToken(t, h, "/setup/apply", "", payload)
+	if noTok.Code != http.StatusForbidden {
+		t.Errorf("no-token status = %d; want 403", noTok.Code)
+	}
+
+	// Wrong token → 403.
+	badTok := postJSONWithToken(t, h, "/setup/apply", "wrong", payload)
+	if badTok.Code != http.StatusForbidden {
+		t.Errorf("bad-token status = %d; want 403", badTok.Code)
+	}
+
+	// No result pushed to channel from either rejected attempt.
+	select {
+	case got := <-resCh:
+		t.Fatalf("channel received Result despite token rejection: %+v", got)
+	default:
+	}
+}
+
+// TestBuildWizardHandler_Apply_Failure_Returns500 guards against the
+// "user got a passphrase but config never wrote" race.
+func TestBuildWizardHandler_Apply_Failure_Returns500(t *testing.T) {
+	boom := errors.New("write-config failed")
+	failApply := func(Result) error { return boom }
+	h, resCh := buildWizardHandler(testBrowserHome, testToken, failApply)
+
+	payload := map[string]any{
+		"tasksets": map[string]bool{"buildin": true},
+		"port":     8080,
+	}
+	rec := postJSONWithToken(t, h, "/setup/apply", testToken, payload)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d; want 500", rec.Code)
+	}
+
+	// On apply failure, no result is pushed to the channel — caller must
+	// be able to retry or clean up without a stuck receiver.
+	select {
+	case got := <-resCh:
+		t.Fatalf("channel received Result despite apply failure: %+v", got)
+	default:
 	}
 }
 
@@ -115,7 +182,7 @@ func TestRunBrowser_ContextCancel_ShutsDown(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		_, _ = RunBrowser(ctx, testBrowserHome)
+		_, _ = RunBrowser(ctx, testBrowserHome, noopApply)
 		close(done)
 	}()
 

@@ -50,3 +50,32 @@ func TestRenderConfig_LoadsCleanly(t *testing.T) {
 		}
 	}
 }
+
+// TestWriteConfig_FileAndParentArePrivate guards the dashboard
+// passphrase (embedded as server.secret) from other users on shared
+// hosts: the config file must be 0600 and its parent dir must be 0700.
+func TestWriteConfig_FileAndParentArePrivate(t *testing.T) {
+	dir := t.TempDir()
+	parent := filepath.Join(dir, "nested", "dir")
+	cfg := filepath.Join(parent, "dicode.yaml")
+
+	if err := WriteConfig(cfg, "dummy: true\n"); err != nil {
+		t.Fatalf("WriteConfig: %v", err)
+	}
+
+	fi, err := os.Stat(cfg)
+	if err != nil {
+		t.Fatalf("stat file: %v", err)
+	}
+	if mode := fi.Mode().Perm(); mode != 0o600 {
+		t.Errorf("config file perm = %o; want 0600", mode)
+	}
+
+	di, err := os.Stat(parent)
+	if err != nil {
+		t.Fatalf("stat parent: %v", err)
+	}
+	if mode := di.Mode().Perm(); mode != 0o700 {
+		t.Errorf("parent dir perm = %o; want 0700", mode)
+	}
+}

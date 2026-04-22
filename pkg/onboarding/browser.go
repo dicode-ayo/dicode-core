@@ -2,13 +2,17 @@ package onboarding
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
 	"runtime"
 	"time"
@@ -18,9 +22,13 @@ import (
 var wizardFS embed.FS
 
 // buildWizardHandler wires the static wizard assets and the /setup/* API
-// routes. It returns the handler plus a channel that fires exactly once
-// with the Result a user submits via POST /setup/apply.
-func buildWizardHandler(home string) (http.Handler, <-chan Result) {
+// routes. POST /setup/apply is gated by a single-use token that must be
+// echoed as X-Setup-Token; callers obtain it from the URL query string
+// the server prints to stdout (and opens in the browser). apply is
+// invoked inside /setup/apply with the submitted Result, atomically with
+// the passphrase being returned: on non-nil error the passphrase is NOT
+// sent to the client and the channel is not fed.
+func buildWizardHandler(home, token string, apply func(Result) error) (http.Handler, <-chan Result) {
 	resCh := make(chan Result, 1)
 	mux := http.NewServeMux()
 
@@ -28,7 +36,6 @@ func buildWizardHandler(home string) (http.Handler, <-chan Result) {
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
-			// Serve static assets at their own paths (e.g. /setup/main.js).
 			http.NotFound(w, r)
 			return
 		}
@@ -78,6 +85,13 @@ func buildWizardHandler(home string) (http.Handler, <-chan Result) {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		// Constant-time compare to avoid leaking the token via timing.
+		got := r.Header.Get("X-Setup-Token")
+		if len(got) != len(token) || subtle.ConstantTimeCompare([]byte(got), []byte(token)) != 1 {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+
 		var payload struct {
 			TaskSets      map[string]bool `json:"tasksets"`
 			LocalTasksDir string          `json:"local_tasks_dir"`
@@ -91,6 +105,11 @@ func buildWizardHandler(home string) (http.Handler, <-chan Result) {
 			return
 		}
 
+		// Clamp / validate.
+		if payload.Port < 1 || payload.Port > 65535 {
+			payload.Port = defaultPort
+		}
+
 		res := Result{
 			TaskSetsEnabled: payload.TaskSets,
 			LocalTasksDir:   payload.LocalTasksDir,
@@ -101,8 +120,12 @@ func buildWizardHandler(home string) (http.Handler, <-chan Result) {
 		if res.DataDir == "" {
 			res.DataDir = home + "/.dicode"
 		}
-		if res.Port == 0 {
-			res.Port = defaultPort
+
+		// Apply (persist) BEFORE returning the passphrase so the client
+		// never sees a credential the daemon didn't store.
+		if err := apply(res); err != nil {
+			http.Error(w, "apply: "+err.Error(), http.StatusInternalServerError)
+			return
 		}
 
 		select {
@@ -119,10 +142,16 @@ func buildWizardHandler(home string) (http.Handler, <-chan Result) {
 
 // RunBrowser starts an ephemeral HTTP wizard on a random loopback port,
 // points the user's browser at it, and blocks until the user submits the
-// form or ctx is cancelled. Gives the client ~60s after submit to read
-// the success page before shutting the listener down.
-func RunBrowser(ctx context.Context, home string) (Result, error) {
-	handler, resCh := buildWizardHandler(home)
+// form or ctx is cancelled. apply is called inside /setup/apply atomically
+// with the passphrase response (see buildWizardHandler). The post-submit
+// listener lingers up to 60s to let the client render the success page,
+// or until ctx is cancelled, whichever comes first.
+func RunBrowser(ctx context.Context, home string, apply func(Result) error) (Result, error) {
+	token, err := newSetupToken()
+	if err != nil {
+		return Result{}, fmt.Errorf("token: %w", err)
+	}
+	handler, resCh := buildWizardHandler(home, token, apply)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -135,9 +164,11 @@ func RunBrowser(ctx context.Context, home string) (Result, error) {
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(ln) }()
 
-	url := "http://" + ln.Addr().String()
+	url := fmt.Sprintf("http://%s/?t=%s", ln.Addr().String(), token)
 	fmt.Printf("Open your browser to %s\n", url)
-	_ = openBrowser(url) // best effort
+	if err := openBrowser(url); err != nil {
+		fmt.Fprintf(os.Stderr, "(could not auto-launch browser: %v — open the URL above manually)\n", err)
+	}
 
 	shutdown := func() {
 		sctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -147,8 +178,14 @@ func RunBrowser(ctx context.Context, home string) (Result, error) {
 
 	select {
 	case res := <-resCh:
-		// Let the client render the passphrase page, then tear the server down.
-		time.AfterFunc(60*time.Second, shutdown)
+		// Let the client render the passphrase page, then tear down.
+		// The AfterFunc is bound to ctx so a daemon shutdown during the
+		// 60s window doesn't leak the listener.
+		timer := time.AfterFunc(60*time.Second, shutdown)
+		context.AfterFunc(ctx, func() {
+			timer.Stop()
+			shutdown()
+		})
 		return res, nil
 	case <-ctx.Done():
 		shutdown()
@@ -159,6 +196,14 @@ func RunBrowser(ctx context.Context, home string) (Result, error) {
 		}
 		return Result{}, fmt.Errorf("serve: %w", err)
 	}
+}
+
+func newSetupToken() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b[:]), nil
 }
 
 func openBrowser(url string) error {
@@ -179,3 +224,4 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
 }
+

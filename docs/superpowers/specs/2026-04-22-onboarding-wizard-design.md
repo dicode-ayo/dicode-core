@@ -164,9 +164,17 @@ TTY detection: `golang.org/x/term.IsTerminal(os.Stdin.Fd())`. Display detection 
 
 ### Browser wizard
 
+Loopback is **not** a per-user trust boundary on Linux — `/proc/net/tcp` leaks any listener to any local user. The wizard defends against a local-race-to-submit attack with a single-use token:
+
+- `RunBrowser` generates a random 128-bit hex token, embeds it in the URL (`http://127.0.0.1:<port>/?t=<token>`), and opens the browser to that URL.
+- The embedded JS reads `?t=` from `window.location.search` and sends it back as `X-Setup-Token` on the POST to `/setup/apply`.
+- The handler constant-time-compares `X-Setup-Token` against the token; mismatch → 403.
+
+Additionally, `/setup/apply` calls the caller-supplied `apply(Result)` function **before** returning the passphrase, so the client never sees a credential the daemon hasn't stored. If `apply` fails → 500, no passphrase in response, nothing on the channel.
+
 ```go
 // pkg/onboarding/browser.go
-func RunBrowser(ctx context.Context) (Result, error) {
+func RunBrowser(ctx context.Context, home string, apply func(Result) error) (Result, error) {
     ln, err := net.Listen("tcp", "127.0.0.1:0")  // random port
     if err != nil { return Result{}, err }
     defer ln.Close()

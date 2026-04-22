@@ -39,22 +39,37 @@ func Run(ctx context.Context, configPath string, opts RunOptions) error {
 		return fmt.Errorf("pick surface: %w", err)
 	}
 
+	// The browser surface needs to persist the config atomically with
+	// returning the passphrase to the client — otherwise a write failure
+	// leaves the user with a credential we never stored. For CLI/silent
+	// paths the same function is used after gathering the Result so both
+	// code paths go through identical persistence.
+	apply := func(r Result) error { return WriteConfig(configPath, RenderConfig(r)) }
+
 	var res Result
 	switch surface {
 	case SurfaceSilent:
 		res = defaultResult(opts.Home)
+		if err := apply(res); err != nil {
+			return fmt.Errorf("write config: %w", err)
+		}
 	case SurfaceCLI:
 		res, err = RunCLI(opts.In, opts.Out, opts.Home)
+		if err != nil {
+			return fmt.Errorf("wizard: %w", err)
+		}
+		if err := apply(res); err != nil {
+			return fmt.Errorf("write config: %w", err)
+		}
 	case SurfaceBrowser:
-		res, err = RunBrowser(ctx, opts.Home)
-	}
-	if err != nil {
-		return fmt.Errorf("wizard: %w", err)
+		// apply runs INSIDE /setup/apply before the passphrase is handed
+		// back to the browser — no re-apply here.
+		res, err = RunBrowser(ctx, opts.Home, apply)
+		if err != nil {
+			return fmt.Errorf("wizard: %w", err)
+		}
 	}
 
-	if err := WriteConfig(configPath, RenderConfig(res)); err != nil {
-		return fmt.Errorf("write config: %w", err)
-	}
 	PrintSuccess(opts.Out, res, configPath)
 	return nil
 }
@@ -78,10 +93,12 @@ func defaultResult(home string) Result {
 
 
 // WriteConfig writes the generated config to configPath, creating parent
-// directories as needed.
+// directories as needed. The file contains server.secret in plaintext, so
+// it is written 0600 under a 0700 parent dir — on shared hosts this
+// prevents other local users from reading the dashboard passphrase.
 func WriteConfig(configPath, content string) error {
-	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
 		return err
 	}
-	return os.WriteFile(configPath, []byte(content), 0644)
+	return os.WriteFile(configPath, []byte(content), 0o600)
 }

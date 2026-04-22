@@ -1,4 +1,9 @@
 (async () => {
+  // Token from the URL gates /setup/apply. Fails-closed if absent so a
+  // local attacker scanning /proc/net/tcp for the random port can't win
+  // the submit race.
+  const token = new URLSearchParams(window.location.search).get("t") || "";
+
   const presets = await fetch("/setup/presets").then((r) => r.json());
   const defaults = await fetch("/setup/defaults").then((r) => r.json());
 
@@ -49,7 +54,10 @@
 
     const res = await fetch("/setup/apply", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "X-Setup-Token": token,
+      },
       body: JSON.stringify(payload),
     });
     if (!res.ok) {
