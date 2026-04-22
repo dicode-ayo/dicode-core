@@ -7,6 +7,9 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/base64"
+	"fmt"
+	"net"
+	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
@@ -44,27 +47,6 @@ func generateBrokerPubkeyB64(t *testing.T) string {
 	return base64.StdEncoding.EncodeToString(der)
 }
 
-// newTOFUTestDB opens an in-memory SQLite DB with the kv table the
-// CheckAndPinBrokerPubkey / ReplaceBrokerPubkey helpers operate on.
-// Returns the DB plus a cleanup registered via t.Cleanup.
-func newTOFUTestDB(t *testing.T) db.DB {
-	t.Helper()
-	database, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	t.Cleanup(func() { _ = database.Close() })
-
-	// The kv table is created by the daemon's migrations, but pkg/relay
-	// tests don't run them — create the minimal schema inline.
-	if err := database.Exec(context.Background(),
-		`CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
-	); err != nil {
-		t.Fatalf("create kv table: %v", err)
-	}
-	return database
-}
-
 // setupTOFURelay spins up a relay Server advertising the given broker pubkey
 // and returns the httptest wrapper + the ws:// URL the client should dial.
 func setupTOFURelay(t *testing.T, brokerPubB64 string) (*httptest.Server, string, *Server) {
@@ -92,26 +74,29 @@ func waitForPubkey(t *testing.T, c *Client, want string, deadline time.Duration,
 	t.Fatalf("%s: BrokerPubkey() = %q, want %q after %s", msg, c.BrokerPubkey(), want, deadline)
 }
 
-// localLoopback runs a trivial HTTP server on a random local port and
-// returns its port. Used as the daemon's forwarding target — we only
-// care that the daemon's relay.Client is up, not about request handling.
+// loopbackPort extracts the port number from an httptest.Server listener
+// address. Unlike a bare string split this handles IPv6 literals correctly.
+func loopbackPort(t *testing.T, addr string) int {
+	t.Helper()
+	_, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("split host/port %q: %v", addr, err)
+	}
+	p, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("parse port %q: %v", portStr, err)
+	}
+	return p
+}
+
+// localLoopback runs a trivial no-op HTTP server on a random local port and
+// returns the port. For tests that just need the daemon's relay.Client to
+// have a forwarding target but don't care about request handling.
 func localLoopback(t *testing.T) int {
 	t.Helper()
 	ls := httptest.NewServer(nil)
 	t.Cleanup(ls.Close)
-	_, portStr, _ := splitHostPort(ls.Listener.Addr().String())
-	p, _ := strconv.Atoi(portStr)
-	return p
-}
-
-// splitHostPort is a local alias so we don't drag net.SplitHostPort through
-// every test body.
-func splitHostPort(addr string) (string, string, error) {
-	parts := strings.SplitN(addr, ":", 2)
-	if len(parts) != 2 {
-		return addr, "", nil
-	}
-	return parts[0], parts[1], nil
+	return loopbackPort(t, ls.Listener.Addr().String())
 }
 
 // ---------------------------------------------------------------------------
@@ -121,7 +106,7 @@ func splitHostPort(addr string) (string, string, error) {
 func TestTOFU_PinOnFirstConnect(t *testing.T) {
 	brokerPub := generateBrokerPubkeyB64(t)
 	_, wsURL, _ := setupTOFURelay(t, brokerPub)
-	database := newTOFUTestDB(t)
+	database := openTestDB(t)
 
 	// Pre-assertion: no pin.
 	got, err := LoadBrokerPubkey(context.Background(), database)
@@ -155,41 +140,106 @@ func TestTOFU_PinOnFirstConnect(t *testing.T) {
 // Scenario 3: reconnect after network drop succeeds without re-pinning
 // ---------------------------------------------------------------------------
 
+// TestTOFU_PinPreservedAcrossReconnects proves two things that have to hold
+// together: (a) the daemon successfully re-handshakes after a dropped
+// connection, and (b) the TOFU pin is not re-written on that successful
+// reconnect. Proving a reconnect *happened* matters — the client's
+// in-memory BrokerPubkey and the DB pin both survive disconnect on their
+// own, so asserting on their values alone is a trivial passing test.
+// Following the `TestAutoReconnect` pattern we ping through the relay's
+// public webhook URL; the local daemon-side handler signals a fresh hit,
+// confirming the full WS tunnel is live end-to-end on each iteration.
 func TestTOFU_PinPreservedAcrossReconnects(t *testing.T) {
 	brokerPub := generateBrokerPubkeyB64(t)
-	ts, wsURL, _ := setupTOFURelay(t, brokerPub)
-	database := newTOFUTestDB(t)
+	ts, wsURL, srv := setupTOFURelay(t, brokerPub)
+	database := openTestDB(t)
 
-	client := NewClient(wsURL, newTestIdentity(t), localLoopback(t), database, noopLogger())
+	// Local daemon-side HTTP server: signals on every /hooks/ping hit so
+	// the test can observe when a fresh WS tunnel actually carries
+	// traffic end-to-end (not just when a welcome was received).
+	pinged := make(chan struct{}, 10)
+	localSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/hooks/ping" {
+			select {
+			case pinged <- struct{}{}:
+			default:
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(localSrv.Close)
+	port := loopbackPort(t, localSrv.Listener.Addr().String())
+
+	id := newTestIdentity(t)
+	client := NewClient(wsURL, id, port, database, noopLogger())
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	go func() { _ = client.Run(ctx) }()
 
 	waitForPubkey(t, client, brokerPub, 5*time.Second, "initial connect")
 
-	// Snapshot the DB pin — must not change on reconnect.
-	before, err := LoadBrokerPubkey(context.Background(), database)
-	if err != nil {
-		t.Fatalf("load pin: %v", err)
+	// pingUntilDelivered polls /hooks/ping through the public relay URL
+	// until the daemon-local handler signals receipt, confirming a live
+	// WS tunnel. Fails the test on deadline.
+	pingUntilDelivered := func(label string) {
+		t.Helper()
+		hookURL := fmt.Sprintf("%s/u/%s/hooks/ping", ts.URL, id.UUID)
+		deadline := time.After(5 * time.Second)
+		for {
+			select {
+			case <-deadline:
+				t.Fatalf("%s: webhook never reached daemon via relay", label)
+			case <-pinged:
+				return
+			default:
+			}
+			resp, err := http.Post(hookURL, "application/json", strings.NewReader("{}"))
+			if resp != nil {
+				resp.Body.Close()
+			}
+			_ = err
+			time.Sleep(100 * time.Millisecond)
+		}
 	}
 
-	// Drop the active connection; httptest.Server stays up, so the
-	// daemon's backoff reconnect lands a fresh handshake.
-	ts.CloseClientConnections()
+	// First iteration: prove the tunnel is live.
+	pingUntilDelivered("pre-drop")
 
-	// Wait for the client to reconnect — BrokerPubkey is cleared to ""
-	// between connections? No — client.go only sets it on welcome, and
-	// doesn't clear on disconnect. So we watch for a log-level signal
-	// that reconnect happened. Simplest: poll the stored pin is still
-	// the same value and wait a short while to confirm no regression.
-	time.Sleep(1500 * time.Millisecond) // past the 1s initial backoff
+	// Drain any stragglers from the first ping before we measure the
+	// second — `pingUntilDelivered` loops until it sees at least one
+	// signal, but extra retries may have queued up.
+	for {
+		select {
+		case <-pinged:
+			continue
+		default:
+		}
+		break
+	}
 
-	after, err := LoadBrokerPubkey(context.Background(), database)
+	// Drop the tunnel. httptest.Server.CloseClientConnections is a no-op
+	// on hijacked WS connections; severAllWS reaches into the server's
+	// client registry and closes each active ws.Conn directly, forcing
+	// the daemon's read loop to return and runOnce to exit. Run's
+	// backoff-and-retry cycle then lands a fresh handshake.
+	severAllWS(srv)
+
+	// Second iteration: prove the tunnel comes back. The fact that a
+	// NEW ping propagates (after the old connection was severed) is the
+	// cross-component signal that a reconnect actually happened.
+	pingUntilDelivered("post-drop — reconnect must have completed")
+
+	// Invariant under test: the TOFU pin must have stayed put across
+	// the reconnect. CheckAndPinBrokerPubkey should have returned
+	// BrokerPubkeyPinMatch (not PinNew) — a stored value of anything
+	// other than brokerPub would mean the DB was re-written on the
+	// re-handshake, which breaks the whole TOFU guarantee.
+	stored, err := LoadBrokerPubkey(context.Background(), database)
 	if err != nil {
 		t.Fatalf("load pin after reconnect: %v", err)
 	}
-	if before != after {
-		t.Fatalf("pin changed across reconnect: before=%q after=%q", before, after)
+	if stored != brokerPub {
+		t.Fatalf("pin changed across reconnect: got %q, want %q", stored, brokerPub)
 	}
 	if client.BrokerPubkey() != brokerPub {
 		t.Fatalf("client.BrokerPubkey() = %q after reconnect, want %q",
@@ -228,7 +278,7 @@ func TestTOFU_RefusesAfterBrokerKeyRotation(t *testing.T) {
 		t.Fatal("freshly generated keys should differ; test assumption violated")
 	}
 	_, wsURL, srv := setupTOFURelay(t, origPub)
-	database := newTOFUTestDB(t)
+	database := openTestDB(t)
 
 	// Daemon 1 pins origPub.
 	_, cancel1 := startDaemonAndWait(t, wsURL, database, origPub, 5*time.Second)
@@ -274,7 +324,7 @@ func TestTOFU_TrustBrokerClearsPinAndRepins(t *testing.T) {
 	origPub := generateBrokerPubkeyB64(t)
 	newPub := generateBrokerPubkeyB64(t)
 	_, wsURL, srv := setupTOFURelay(t, origPub)
-	database := newTOFUTestDB(t)
+	database := openTestDB(t)
 
 	// Daemon 1 pins origPub.
 	_, cancel1 := startDaemonAndWait(t, wsURL, database, origPub, 5*time.Second)
