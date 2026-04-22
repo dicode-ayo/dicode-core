@@ -9,6 +9,12 @@ on:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
+# Least-privilege GITHUB_TOKEN. The job only needs read access to check out
+# the source; artifact upload uses its own implicit grant (actions: write) via
+# actions/upload-artifact and does not require repo-level write scopes.
+permissions:
+  contents: read
+
 jobs:
   e2e:
     name: Playwright E2E
