@@ -158,6 +158,29 @@ func TestResolvedBrokerURL_Override(t *testing.T) {
 	}
 }
 
+// TestResolvedBrokerURL_StripsTrailingSlash ensures callers can safely
+// concatenate "/auth/..." onto the returned URL without producing a "//"
+// double-slash, regardless of whether the operator put a trailing slash
+// in broker_url: or the derivation path happens to introduce one.
+func TestResolvedBrokerURL_StripsTrailingSlash(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		r    RelayConfig
+		want string
+	}{
+		{"override with trailing slash", RelayConfig{BrokerURL: "https://broker.dicode.app/"}, "https://broker.dicode.app"},
+		{"override with multiple trailing slashes", RelayConfig{BrokerURL: "https://broker.dicode.app///"}, "https://broker.dicode.app"},
+		{"derived: wss with trailing slash", RelayConfig{ServerURL: "wss://relay.dicode.app/"}, "https://relay.dicode.app"},
+		{"override without trailing slash unchanged", RelayConfig{BrokerURL: "https://broker.dicode.app"}, "https://broker.dicode.app"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.r.ResolvedBrokerURL(); got != tc.want {
+				t.Errorf("ResolvedBrokerURL() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestResolvedBrokerURL_DerivesFromServerURL covers the default path:
 // BrokerURL empty → swap ws[s] → http[s] on the ServerURL host.
 func TestResolvedBrokerURL_DerivesFromServerURL(t *testing.T) {
@@ -211,12 +234,15 @@ relay:
 }
 
 // TestLoad_RelayBrokerURL_RejectsMalformed covers the validator: anything
-// that's not http:// or https:// fails at Load() time with a clear error.
+// that's not http:// or https://, or missing a host, fails at Load() time
+// with a clear error.
 func TestLoad_RelayBrokerURL_RejectsMalformed(t *testing.T) {
 	for _, bad := range []string{
 		"broker.dicode.app",       // no scheme
 		"ftp://broker.dicode.app", // non-http scheme
 		"wss://broker.dicode.app", // WSS — user probably meant server_url
+		"https://",                // missing host
+		"http://",                 // missing host
 	} {
 		t.Run(bad, func(t *testing.T) {
 			dir := t.TempDir()

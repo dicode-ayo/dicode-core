@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -59,18 +60,24 @@ type RelayConfig struct {
 // token deliveries. If BrokerURL is set it wins; otherwise the URL is
 // derived from ServerURL. Returns empty when neither yields a usable URL —
 // the daemon treats that as "OAuth broker disabled".
+//
+// The returned URL never has a trailing slash so callers can safely
+// concatenate `+ "/auth/" + provider` without producing a "//" double-
+// slash. Operators writing broker_url: https://host/ in dicode.yaml get
+// the slash stripped here.
 func (r RelayConfig) ResolvedBrokerURL() string {
-	if r.BrokerURL != "" {
-		return r.BrokerURL
-	}
+	var raw string
 	switch {
+	case r.BrokerURL != "":
+		raw = r.BrokerURL
 	case strings.HasPrefix(r.ServerURL, "wss://"):
-		return "https://" + strings.TrimPrefix(r.ServerURL, "wss://")
+		raw = "https://" + strings.TrimPrefix(r.ServerURL, "wss://")
 	case strings.HasPrefix(r.ServerURL, "ws://"):
-		return "http://" + strings.TrimPrefix(r.ServerURL, "ws://")
+		raw = "http://" + strings.TrimPrefix(r.ServerURL, "ws://")
 	default:
 		return ""
 	}
+	return strings.TrimRight(raw, "/")
 }
 
 // AIConfig points the WebUI and CLI at a single task for AI operations.
@@ -346,9 +353,15 @@ func (cfg *Config) validate() error {
 		}
 	}
 	if cfg.Relay.BrokerURL != "" {
-		if !strings.HasPrefix(cfg.Relay.BrokerURL, "http://") &&
-			!strings.HasPrefix(cfg.Relay.BrokerURL, "https://") {
-			return fmt.Errorf("relay.broker_url: must start with http:// or https://, got %q", cfg.Relay.BrokerURL)
+		u, err := url.Parse(cfg.Relay.BrokerURL)
+		if err != nil {
+			return fmt.Errorf("relay.broker_url: %w", err)
+		}
+		if u.Scheme != "http" && u.Scheme != "https" {
+			return fmt.Errorf("relay.broker_url: must use http:// or https://, got scheme %q", u.Scheme)
+		}
+		if u.Host == "" {
+			return fmt.Errorf("relay.broker_url: missing host in %q", cfg.Relay.BrokerURL)
 		}
 	}
 	return nil
