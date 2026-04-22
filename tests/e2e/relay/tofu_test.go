@@ -3,10 +3,7 @@
 package relay_e2e
 
 import (
-	"bytes"
 	"context"
-	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -51,18 +48,41 @@ func openTOFUDB(t *testing.T) db.DB {
 	return database
 }
 
+// daemon bundles a running relay.Client + its cancel + a `done` channel
+// that closes once the goroutine running Client.Run has returned.
+type daemon struct {
+	client *relay.Client
+	cancel context.CancelFunc
+	done   <-chan struct{}
+}
+
+// stop cancels the daemon's context and waits for the Run goroutine to
+// return. Sequential-daemon tests MUST call stop (not just cancel)
+// before starting the next daemon on the same database, otherwise the
+// outgoing goroutine can still be mid-handshake when the next one
+// starts — shared SQLite writes stay serialised but error-path
+// ordering becomes racy.
+func (d *daemon) stop(t *testing.T) {
+	t.Helper()
+	d.cancel()
+	select {
+	case <-d.done:
+	case <-time.After(5 * time.Second):
+		t.Log("daemon: Run did not exit within 5s after cancel")
+	}
+}
+
 // startDaemonAgainst wires a real relay.Client to h.wsBase, using the
 // given db (for TOFU pin persistence across daemon lifecycles) and
 // identity. If waitForWelcome is true, blocks until the handshake
-// completes (HookBaseURL populated). Returns the client + a cancel
-// to stop the Run loop.
+// completes (HookBaseURL populated).
 func startDaemonAgainst(
 	t *testing.T,
 	h *relayHandle,
 	database db.DB,
 	identity *relay.Identity,
 	waitForWelcome bool,
-) (*relay.Client, context.CancelFunc) {
+) *daemon {
 	t.Helper()
 
 	// Any-200 HTTP server stands in for the daemon's local webhook handler.
@@ -80,7 +100,15 @@ func startDaemonAgainst(
 	client := relay.NewClient(h.wsBase, identity, localPort, database, logger)
 
 	runCtx, cancel := context.WithCancel(context.Background())
-	go func() { _ = client.Run(runCtx) }()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if err := client.Run(runCtx); err != nil {
+			// Run only returns nil on ctx cancel; any other error is surprising
+			// and worth surfacing in test logs so failures aren't mysterious.
+			t.Logf("daemon: Run returned: %v", err)
+		}
+	}()
 
 	if waitForWelcome {
 		waitUntil(t, 15*time.Second, func() bool {
@@ -88,7 +116,7 @@ func startDaemonAgainst(
 		}, "daemon never received welcome")
 	}
 
-	return client, cancel
+	return &daemon{client: client, cancel: cancel, done: done}
 }
 
 // loadPin reads the stored broker pubkey from the daemon's TOFU table.
@@ -124,10 +152,10 @@ func TestTOFU_PinOnFirstConnect(t *testing.T) {
 		t.Fatalf("pre-connect pin = %q, want empty", got)
 	}
 
-	client, cancel := startDaemonAgainst(t, h, database, relay.NewTestIdentity(t), true)
-	defer cancel()
+	d := startDaemonAgainst(t, h, database, relay.NewTestIdentity(t), true)
+	defer d.stop(t)
 
-	if got := client.BrokerPubkey(); got != wantPub {
+	if got := d.client.BrokerPubkey(); got != wantPub {
 		t.Fatalf("client.BrokerPubkey() = %q, want %q", got, wantPub)
 	}
 	if got := loadPin(t, database); got != wantPub {
@@ -135,78 +163,19 @@ func TestTOFU_PinOnFirstConnect(t *testing.T) {
 	}
 }
 
-// -----------------------------------------------------------------------------
-// Scenario 3 — reconnect after broker bounce preserves the pin
-// -----------------------------------------------------------------------------
-//
-// Forces a reconnect by stopping and starting the SAME container
-// (testcontainers-go preserves the mapped port across Stop/Start on the same
-// handle). If the daemon re-pinned on every successful handshake instead of
-// only on PinNew, the stored key would get overwritten by a re-advertised
-// (identical) value — which is semantically a no-op today, but would break
-// the invariant the moment the broker ever hands out a slightly different
-// encoding of "the same key" (e.g. whitespace, encoding drift). Mutation-
-// verified: forcing a re-pin on PinMatch would still pass this test because
-// the replacement is identical; the real blast-radius check is scenario 4.
-// Keep scenario 3 as a "did the daemon actually reconnect" sanity assertion.
-
-func TestTOFU_PinPreservedAcrossReconnect(t *testing.T) {
-	t.Parallel()
-	keyPEM := mustGenerateBrokerKeyPEM(t)
-	wantPub, err := brokerPubB64FromPEM(keyPEM)
-	if err != nil {
-		t.Fatalf("derive pubkey: %v", err)
-	}
-
-	h, _ := startRelayWithKey(t, keyPEM)
-	defer h.terminate(t)
-
-	database := openTOFUDB(t)
-	client, cancel := startDaemonAgainst(t, h, database, relay.NewTestIdentity(t), true)
-	defer cancel()
-
-	if got := loadPin(t, database); got != wantPub {
-		t.Fatalf("initial pin = %q, want %q", got, wantPub)
-	}
-
-	// Stop then start the same container. testcontainers preserves the
-	// mapped port on the same handle, so the daemon's wsBase still points
-	// at a reachable endpoint once the container is back up.
-	stopCtx, stopCancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer stopCancel()
-	stopTimeout := 5 * time.Second
-	if err := h.container.Stop(stopCtx, &stopTimeout); err != nil {
-		t.Fatalf("stop container: %v", err)
-	}
-
-	// While the container is down the daemon's Run loop retries with backoff.
-	// Give it a brief moment to notice the disconnect.
-	time.Sleep(500 * time.Millisecond)
-
-	startCtx, startCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer startCancel()
-	if err := h.container.Start(startCtx); err != nil {
-		t.Fatalf("start container: %v", err)
-	}
-	// Re-wait for relay readiness via log — testcontainers' WaitingFor
-	// from the initial create doesn't re-run on Start.
-	readyCtx, readyCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer readyCancel()
-	if err := waitForLog(readyCtx, h, "dicode-relay listening"); err != nil {
-		t.Fatalf("wait for relay ready after restart: %v", err)
-	}
-
-	// Daemon's Run loop should reconnect within a few backoff cycles. The
-	// relay is still advertising wantPub, so the handshake completes and
-	// BrokerPubkey stays populated.
-	waitUntil(t, 30*time.Second, func() bool {
-		return client.BrokerPubkey() == wantPub
-	}, "daemon did not reconnect and re-observe the broker pubkey")
-
-	if got := loadPin(t, database); got != wantPub {
-		t.Fatalf("post-reconnect pin = %q, want %q", got, wantPub)
-	}
-}
+// Note on scenario 3 ("reconnect preserves pin"): deliberately NOT shipped in
+// this file. The most faithful implementation — Stop+Start the same container
+// and observe the daemon's internal reconnect — is unreliable on CI because
+// the daemon's exponential backoff doubles on each failed dial during the
+// container-down window, easily pushing the first successful reconnect past
+// any reasonable test timeout. And the semantic it was guarding —
+// CheckAndPinBrokerPubkey's PinMatch branch must not overwrite — is currently
+// a tautology: the PinMatch path has zero DB writes to begin with. Scenarios
+// 4 and 5 exercise the DB-writing branches end-to-end (PinMismatch rejects,
+// ReplaceBrokerPubkey reassigns); they're the load-bearing tests. If future
+// work adds metadata writes to PinMatch (e.g. last-seen-at), reintroduce this
+// scenario via a non-backoff-dependent harness (container exec to restart
+// just the Node process, or direct socket sever on the daemon's Client).
 
 // -----------------------------------------------------------------------------
 // Scenario 4 — reconnect refuses when broker presents a different key
@@ -229,16 +198,20 @@ func TestTOFU_RefusesAfterRotation(t *testing.T) {
 		t.Fatal("freshly generated keys should differ")
 	}
 
-	// First daemon against a relay serving origPub: pins origPub, then stops.
+	// First daemon against a relay serving origPub: pins origPub, then
+	// stops. stop() waits for the Run goroutine to exit so we don't
+	// share the database with a still-running daemon-1 when daemon-2
+	// starts — avoids a race on the shared kv table even though
+	// SQLite serialises individual writes.
 	h1, _ := startRelayWithKey(t, origPEM)
 	database := openTOFUDB(t)
-	_, cancel1 := startDaemonAgainst(t, h1, database, relay.NewTestIdentity(t), true)
+	d1 := startDaemonAgainst(t, h1, database, relay.NewTestIdentity(t), true)
 	if got := loadPin(t, database); got != origPub {
-		cancel1()
+		d1.stop(t)
 		h1.terminate(t)
 		t.Fatalf("initial pin = %q, want %q", got, origPub)
 	}
-	cancel1()
+	d1.stop(t)
 	h1.terminate(t)
 
 	// Rotate: brand new container advertising newPub.
@@ -247,14 +220,14 @@ func TestTOFU_RefusesAfterRotation(t *testing.T) {
 
 	// Fresh daemon against h2 sharing the SAME db. Handshake should loop
 	// in PinMismatch — never complete — so waitForWelcome=false.
-	client, cancel2 := startDaemonAgainst(t, h2, database, relay.NewTestIdentity(t), false)
-	defer cancel2()
+	d2 := startDaemonAgainst(t, h2, database, relay.NewTestIdentity(t), false)
+	defer d2.stop(t)
 
 	// A few backoff cycles are enough to exercise the mismatch path
 	// multiple times without flaking.
 	deadline := time.Now().Add(4 * time.Second)
 	for time.Now().Before(deadline) {
-		if client.BrokerPubkey() == newPub {
+		if d2.client.BrokerPubkey() == newPub {
 			t.Fatalf("client accepted rotated broker pubkey: BrokerPubkey() = %q; "+
 				"the mismatch branch of CheckAndPinBrokerPubkey must abort the "+
 				"handshake before updating the cached pubkey", newPub)
@@ -287,16 +260,17 @@ func TestTOFU_TrustBrokerClearsPinAndRepins(t *testing.T) {
 		t.Fatalf("derive newPub: %v", err)
 	}
 
-	// Pin origPub via daemon1.
+	// Pin origPub via daemon1; stop it (and wait for its goroutine to
+	// exit) before daemon2 starts against the same database.
 	h1, _ := startRelayWithKey(t, origPEM)
 	database := openTOFUDB(t)
-	_, cancel1 := startDaemonAgainst(t, h1, database, relay.NewTestIdentity(t), true)
+	d1 := startDaemonAgainst(t, h1, database, relay.NewTestIdentity(t), true)
 	if got := loadPin(t, database); got != origPub {
-		cancel1()
+		d1.stop(t)
 		h1.terminate(t)
 		t.Fatalf("initial pin = %q, want %q", got, origPub)
 	}
-	cancel1()
+	d1.stop(t)
 	h1.terminate(t)
 
 	// Rotate, then simulate the CLI: operator inspects the new key and
@@ -310,38 +284,13 @@ func TestTOFU_TrustBrokerClearsPinAndRepins(t *testing.T) {
 		t.Fatalf("ReplaceBrokerPubkey (simulated trust-broker CLI): %v", err)
 	}
 
-	client, cancel2 := startDaemonAgainst(t, h2, database, relay.NewTestIdentity(t), true)
-	defer cancel2()
+	d2 := startDaemonAgainst(t, h2, database, relay.NewTestIdentity(t), true)
+	defer d2.stop(t)
 
-	if got := client.BrokerPubkey(); got != newPub {
+	if got := d2.client.BrokerPubkey(); got != newPub {
 		t.Fatalf("post-trust-broker BrokerPubkey() = %q, want %q", got, newPub)
 	}
 	if got := loadPin(t, database); got != newPub {
 		t.Fatalf("post-trust-broker pin = %q, want %q", got, newPub)
-	}
-}
-
-// waitForLog polls container logs until the given substring appears or ctx is
-// cancelled. Used after Container.Start to re-establish readiness — the
-// original WaitingFor matcher only fires on the initial create.
-func waitForLog(ctx context.Context, h *relayHandle, needle string) error {
-	nb := []byte(needle)
-	for {
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("waiting for %q: %w", needle, ctx.Err())
-		default:
-		}
-		reader, err := h.container.Logs(ctx)
-		if err != nil {
-			time.Sleep(200 * time.Millisecond)
-			continue
-		}
-		data, _ := io.ReadAll(reader)
-		_ = reader.Close()
-		if bytes.Contains(data, nb) {
-			return nil
-		}
-		time.Sleep(200 * time.Millisecond)
 	}
 }
