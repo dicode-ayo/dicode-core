@@ -1,0 +1,32 @@
+# Minimal relay config for the e2e suite. Mounted into the container at
+# /app/relay.yaml by testcontainers-go. The mock provider is injected by
+# the DICODE_E2E_MOCK_PROVIDER=1 env var (see Dockerfile.relay) — we don't
+# register it here.
+#
+# base_url points at loopback-inside-the-container. The daemon doesn't
+# dial this URL, only the broker uses it as Grant's `origin`; for the
+# mock provider the test bypasses Grant so the value is inert.
+
+server:
+  port: 5553
+  base_url: http://localhost:5553
+  tls:
+    cert_file: ""
+    key_file: ""
+
+status:
+  password: e2e
+
+relay:
+  timestamp_tolerance_s: 30
+  ping_interval_ms: 30000
+  pong_timeout_ms: 10000
+  request_timeout_ms: 30000
+  nonce_ttl_ms: 60000
+
+broker:
+  session_ttl_ms: 300000
+  signing_key_file: ""
+  # No real providers — the e2e mock provider is registered automatically
+  # when DICODE_E2E_MOCK_PROVIDER=1 is set.
+  providers: {}

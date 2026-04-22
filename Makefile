@@ -7,7 +7,7 @@ GOFLAGS := -ldflags "-X main.version=$(VERSION)"
 
 .PHONY: build test test-verbose test-race lint fmt format format-check clean run tidy help \
 	test-e2e test-e2e-unauth test-e2e-auth test-e2e-headed test-e2e-ui test-e2e-install \
-	test-tasks
+	test-tasks test-e2e-relay
 
 ## build: compile the dicode binary
 build:
@@ -86,6 +86,11 @@ test-e2e-ui:
 # Deno binary dicode uses internally — installed under ~/.cache/dicode/deno/
 # by the managed-runtime bootstrap. Fall back to $PATH.
 DENO := $(shell ls -1t $(HOME)/.cache/dicode/deno/*/deno 2>/dev/null | head -1 || which deno 2>/dev/null)
+
+## test-e2e-relay: run Go + testcontainers e2e suite against a real dicode-relay image (requires Docker)
+test-e2e-relay:
+	@command -v docker >/dev/null 2>&1 || { echo "docker binary not found — install Docker Desktop or Engine first"; exit 1; }
+	$(GO) test -tags e2e -timeout 180s ./tests/e2e/relay/...
 
 ## test-tasks: run Deno unit tests for tasks/buildin/*/task.test.ts
 test-tasks:

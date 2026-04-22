@@ -95,12 +95,16 @@ func TestAuthURL_UsesSignKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode sig: %v", err)
 	}
-	if !ecdsaVerify(id.SignPublicKey(), payload, sig) {
+	// Double-hash before VerifyASN1 to match SignAuthPayload's signing
+	// shape — the broker-side verify is Node's createVerify which hashes
+	// internally, so the wire sig is over sha256(sha256(fields)).
+	outer := sha256.Sum256(payload)
+	if !ecdsaVerify(id.SignPublicKey(), outer[:], sig) {
 		t.Fatal("URL signature does not verify under SignKey — BuildAuthURL may be signing with DecryptKey")
 	}
 	// And crucially: it must NOT verify under DecryptKey. This is the
 	// distinctness invariant on the sign side of the split.
-	if ecdsaVerify(id.DecryptPublicKey(), payload, sig) {
+	if ecdsaVerify(id.DecryptPublicKey(), outer[:], sig) {
 		t.Fatal("URL signature unexpectedly verifies under DecryptKey — SignKey and DecryptKey may be aliased")
 	}
 }

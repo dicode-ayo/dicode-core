@@ -134,7 +134,10 @@ func TestBuildAuthURL_RoundTripVerify(t *testing.T) {
 	}
 
 	// Verify signature with the daemon's public key — exercising the same
-	// code path the relay broker uses.
+	// code path the relay broker uses. The broker's verify is Node's
+	// `createVerify("SHA256").update(payload).verify(sig)`, which hashes
+	// the input one more time internally; our daemon mirrors that by
+	// double-hashing before SignASN1, so the same shape works here.
 	payload, err := BuildAuthSignedPayload(q.Get("session"), q.Get("challenge"), q.Get("relay_uuid"), "slack", 1_700_000_000)
 	if err != nil {
 		t.Fatalf("rebuild payload: %v", err)
@@ -143,7 +146,8 @@ func TestBuildAuthURL_RoundTripVerify(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode sig: %v", err)
 	}
-	if !ecdsa.VerifyASN1(&id.SignKey.PublicKey, payload, sigBytes) {
+	outer := sha256.Sum256(payload)
+	if !ecdsa.VerifyASN1(&id.SignKey.PublicKey, outer[:], sigBytes) {
 		t.Fatalf("signature verification failed")
 	}
 }
@@ -510,5 +514,67 @@ func TestVerifyBrokerSig_RejectsMissingSig(t *testing.T) {
 
 	if err := VerifyBrokerSig(brokerPubB64, payload); err == nil {
 		t.Fatal("VerifyBrokerSig must reject envelopes missing broker_sig")
+	}
+}
+
+// TestSignAuthPayload_MatchesNodeVerify_Shape simulates the Node broker's
+// `createVerify("SHA256").update(payload).verify(pubkey, sig)` verification
+// pattern in pure Go and asserts that SignAuthPayload produces a sig the
+// broker will accept. The test exists because the daemon's internal unit
+// tests (which use the matching Go-side shape) can't catch a hash-depth
+// drift between the two implementations — that class of bug already bit
+// the delivery direction in #151/#152, this test is the symmetric guard
+// on the /auth/:provider direction.
+//
+// Node's createVerify is the same shape as Go's
+//
+//	ecdsa.VerifyASN1(pub, sha256(payload), sig)
+//
+// because createVerify hashes its update input before comparing against
+// the signature's embedded digest. So the broker expects a signature over
+// sha256(sha256(fields)), and SignAuthPayload MUST sign that double-hash
+// to interop with the live broker.
+func TestSignAuthPayload_MatchesNodeVerify_Shape(t *testing.T) {
+	id := newOAuthTestIdentity(t)
+
+	payload, err := BuildAuthSignedPayload(
+		"550e8400-e29b-41d4-a716-446655440000",
+		"a7lOP0q2e5KwHlfd_YV7v6JzCs0JgRHWbxxtcY1u0bM", // base64url 32 bytes
+		id.UUID,
+		"github",
+		1_700_000_000,
+	)
+	if err != nil {
+		t.Fatalf("BuildAuthSignedPayload: %v", err)
+	}
+	sigB64, err := SignAuthPayload(id.SignKey, payload)
+	if err != nil {
+		t.Fatalf("SignAuthPayload: %v", err)
+	}
+	sig, err := base64.StdEncoding.DecodeString(sigB64)
+	if err != nil {
+		t.Fatalf("decode sig: %v", err)
+	}
+
+	// The broker verification shape, reproduced in Go:
+	//   digest_that_must_match_sig = sha256(sha256(fields)) = sha256(payload)
+	outer := sha256.Sum256(payload)
+	if !ecdsa.VerifyASN1(&id.SignKey.PublicKey, outer[:], sig) {
+		t.Fatal("daemon-produced sig does NOT verify under the Node-createVerify shape " +
+			"(sha256 wrap) — broker will reject /auth/:provider requests at runtime. " +
+			"Either SignAuthPayload drifted back to single-hash or buildSignedPayload " +
+			"changed field ordering. See #151/#152 for the mirror on the delivery path.")
+	}
+
+	// Negative: a sig over the single-hash (what we used to produce) must
+	// NOT verify under the double-hash expectation — catches a regression
+	// if someone reverts SignAuthPayload to the pre-fix shape.
+	sigSingleHash, err := ecdsa.SignASN1(rand.Reader, id.SignKey, payload)
+	if err != nil {
+		t.Fatalf("single-hash sign: %v", err)
+	}
+	if ecdsa.VerifyASN1(&id.SignKey.PublicKey, outer[:], sigSingleHash) {
+		t.Fatal("single-hash sig unexpectedly verified under double-hash expectation — " +
+			"assertion above is a false positive")
 	}
 }

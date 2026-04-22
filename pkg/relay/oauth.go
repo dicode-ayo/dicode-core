@@ -85,8 +85,19 @@ func BuildAuthSignedPayload(sessionID, pkceChallenge, relayUUID, provider string
 
 // SignAuthPayload signs the precomputed payload with the daemon's ECDSA P-256
 // private key and returns the standard-base64-encoded ASN.1 DER signature.
+//
+// The signing shape is:  ecdsa.SignASN1(priv, sha256(payload))
+//
+// i.e., the 32-byte payload (already sha256(fields) from BuildAuthSignedPayload)
+// is hashed ONE MORE TIME before signing. This matches Node's
+// `createSign("SHA256").update(payload).sign()` on the broker-verify side —
+// Node's createVerify internally hashes its update input before comparing
+// against the embedded digest, so the broker expects a sig over
+// sha256(sha256(fields)). Mirrors the symmetric fix on the broker-sig
+// delivery path (dicode-core#152 / dicode-relay#152).
 func SignAuthPayload(priv *ecdsa.PrivateKey, payload []byte) (string, error) {
-	sig, err := ecdsa.SignASN1(rand.Reader, priv, payload)
+	outer := sha256.Sum256(payload)
+	sig, err := ecdsa.SignASN1(rand.Reader, priv, outer[:])
 	if err != nil {
 		return "", fmt.Errorf("ecdsa sign: %w", err)
 	}

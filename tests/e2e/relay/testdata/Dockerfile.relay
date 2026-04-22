@@ -1,0 +1,8 @@
+# Single source of truth for the dicode-relay version used by the e2e suite.
+# testcontainers-go builds this file via `FromDockerfile`. The published
+# image refuses to start without a relay.yaml; we COPY a minimal one in
+# here so the image is fully self-contained at start time (no post-start
+# file-copy race). Dependabot's docker ecosystem watches the FROM line
+# and opens weekly bump PRs.
+FROM dicodeayo/dicode-relay:0.1.2
+COPY relay.yaml /app/relay.yaml
