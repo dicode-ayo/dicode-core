@@ -11,6 +11,7 @@
 import { test, expect } from '@playwright/test';
 import * as fs from 'fs';
 import * as path from 'path';
+import { gotoWebui, navigateInSpa, waitForTaskDetail } from './helpers/webui';
 
 const MANUAL_TASK_ID = 'e2e-tests/hello-manual';
 const CRON_TASK_ID = 'e2e-tests/hello-cron';
@@ -48,7 +49,7 @@ test.describe('File Change Detection', () => {
     const taskJsPath = path.join(tasksDir(), 'hello-manual', 'task.js');
 
     // Write a new version of task.js with a distinctive message.
-    const newContent = `log.info('updated by file-change test');\nreturn { message: 'updated message' };\n`;
+    const newContent = `export default async function main() {\n  console.log('updated by file-change test');\n  return { message: 'updated message' };\n}\n`;
     fs.writeFileSync(taskJsPath, newContent, 'utf8');
 
     // Wait a moment for the reconciler's fsnotify to pick up the change.
@@ -82,7 +83,7 @@ test.describe('File Change Detection', () => {
     expect(messages).toContain('updated by file-change test');
 
     // Restore original content for subsequent tests.
-    const original = `log.info('hello from test manual task');\nreturn { message: 'hello from test' };\n`;
+    const original = `export default async function main() {\n  console.log('hello from test manual task');\n  return { message: 'hello from test' };\n}\n`;
     fs.writeFileSync(taskJsPath, original, 'utf8');
   });
 
@@ -119,20 +120,17 @@ test.describe('File Change Detection', () => {
     const originalJs = fs.readFileSync(taskJsPath, 'utf8');
 
     // Modify the cron task script.
-    const updatedJs = `const time = new Date().toISOString();\nlog.info('cron updated ' + time);\nreturn { time, updated: true };\n`;
+    const updatedJs = `export default async function main() {\n  const time = new Date().toISOString();\n  console.log('cron updated ' + time);\n  return { time, updated: true };\n}\n`;
     fs.writeFileSync(taskJsPath, updatedJs, 'utf8');
 
     // Wait briefly for reconciler.
     await new Promise((r) => setTimeout(r, 2500));
 
-    // Navigate to task detail — the reconciler broadcasts tasks:changed via WS
-    // so the UI should reflect any metadata changes.
-    await page.goto(`/tasks/${encodeURIComponent(CRON_TASK_ID)}`);
-    await page.waitForSelector('dc-task-detail', { timeout: 10_000 });
-    await page.waitForFunction(() => {
-      const el = document.querySelector('dc-task-detail');
-      return el && !el.textContent?.includes('Loading');
-    }, { timeout: 15_000 });
+    // Navigate to task detail via the SPA — the reconciler broadcasts
+    // tasks:changed via WS so the UI should reflect any metadata changes.
+    await gotoWebui(page);
+    await navigateInSpa(page, `/tasks/${CRON_TASK_ID}`);
+    await waitForTaskDetail(page);
 
     // Task should still be present and visible after file change.
     await expect(page.locator('h1', { hasText: 'Hello Cron' })).toBeVisible();

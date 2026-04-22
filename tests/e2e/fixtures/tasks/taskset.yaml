@@ -16,3 +16,6 @@ spec:
     hello-webhook-secure:
       ref:
         path: FIXTURES_TASKS_DIR/hello-webhook-secure/task.yaml
+    webui:
+      ref:
+        path: BUILDIN_WEBUI_TASK_YAML

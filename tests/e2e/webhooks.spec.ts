@@ -11,6 +11,7 @@
  */
 
 import { test, expect } from '@playwright/test';
+import { gotoWebui, navigateInSpa, waitForRunDetail } from './helpers/webui';
 
 const WEBHOOK_PATH = '/hooks/test-webhook';
 const WEBHOOK_TASK_ID = 'e2e-tests/hello-webhook';
@@ -75,8 +76,8 @@ test.describe('Open Webhook', () => {
 
     const runRes = await request.get(`/api/runs/${runId}`);
     expect(runRes.ok()).toBe(true);
-    const run = await runRes.json() as { task_id: string; status?: string; Status?: string };
-    expect(run.task_id).toBe(WEBHOOK_TASK_ID);
+    const run = await runRes.json() as { task_id?: string; TaskID?: string; status?: string; Status?: string };
+    expect(run.task_id || run.TaskID).toBe(WEBHOOK_TASK_ID);
     const status = run.status || run.Status;
     expect(['success', 'failure', 'running']).toContain(status);
   });
@@ -102,13 +103,10 @@ test.describe('Open Webhook', () => {
       await new Promise((r2) => setTimeout(r2, 500));
     }
 
-    // Navigate to run detail.
-    await page.goto(`/runs/${runId}`);
-    await page.waitForSelector('dc-run-detail', { timeout: 10_000 });
-    await page.waitForFunction(() => {
-      const el = document.querySelector('dc-run-detail');
-      return el && !el.textContent?.includes('Loading');
-    }, { timeout: 15_000 });
+    // Navigate to run detail via the SPA.
+    await gotoWebui(page);
+    await navigateInSpa(page, `/runs/${runId}`);
+    await waitForRunDetail(page);
 
     await expect(page.locator('.badge-success')).toBeVisible();
   });

@@ -26,17 +26,20 @@
  *   DICODE_E2E_TASKS_DIR    — absolute path to the copied tasks/ subdir
  */
 
-import { execSync, spawn } from 'child_process';
+import { execFileSync, spawn } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 
 export const REPO_ROOT = path.resolve(__dirname, '../../..');
-export const BINARY = path.join(REPO_ROOT, 'dicoded');
+export const BINARY = path.join(REPO_ROOT, 'dicode');
 const FIXTURES_DIR = path.join(REPO_ROOT, 'tests/e2e/fixtures');
 const TASKS_DIR = path.join(FIXTURES_DIR, 'tasks');
 
-const PORT = 8080;
+// Fixed path for the Playwright storage state — see writeAuthState below.
+export const AUTH_STATE_PATH = path.join(REPO_ROOT, 'tests/e2e/.auth-state.json');
+
+const PORT = 8765;
 const BASE_URL = `http://localhost:${PORT}`;
 
 // File used to hand off state (PID, temp dir) from setup → teardown.
@@ -52,8 +55,8 @@ interface E2EState {
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
 function buildBinary(): void {
-  console.log('[e2e] Building dicoded daemon binary…');
-  execSync('go build -o dicoded ./cmd/dicoded', {
+  console.log('[e2e] Building dicode binary…');
+  execFileSync('go', ['build', '-o', 'dicode', './cmd/dicode'], {
     cwd: REPO_ROOT,
     stdio: 'inherit',
     env: { ...process.env },
@@ -68,12 +71,15 @@ function ensureBinary(): void {
   }
   // Rebuild if any Go source is newer than the binary.
   try {
-    const result = execSync(
-      `find ${REPO_ROOT} -name "*.go" -newer ${BINARY} -not -path "*/vendor/*" | head -1`,
+    const out = execFileSync(
+      'find',
+      [REPO_ROOT, '-name', '*.go', '-newer', BINARY, '-not', '-path', '*/vendor/*'],
       { cwd: REPO_ROOT, encoding: 'utf8' },
-    ).trim();
-    if (result) {
-      console.log(`[e2e] Source file newer than binary (${result}) — rebuilding.`);
+    )
+      .split('\n')
+      .find((l) => l.trim());
+    if (out) {
+      console.log(`[e2e] Source file newer than binary (${out}) — rebuilding.`);
       buildBinary();
     }
   } catch {
@@ -96,15 +102,18 @@ function copyDirSync(src: string, dest: string): void {
 
 /**
  * Copy task fixtures into tempDir/tasks/ and write a resolved taskset.yaml
- * (all FIXTURES_TASKS_DIR placeholders replaced with the real path).
+ * (FIXTURES_TASKS_DIR and BUILDIN_WEBUI_TASK_YAML placeholders substituted).
  * Returns the path to the written taskset.yaml.
  */
 function writeTaskset(tempDir: string): { tasksetPath: string; tasksDir: string } {
   const tasksDir = path.join(tempDir, 'tasks');
   copyDirSync(TASKS_DIR, tasksDir);
 
+  const buildinWebuiTaskYaml = path.join(REPO_ROOT, 'tasks/buildin/webui/task.yaml');
   const template = fs.readFileSync(path.join(TASKS_DIR, 'taskset.yaml'), 'utf8');
-  const content = template.replace(/FIXTURES_TASKS_DIR/g, tasksDir);
+  const content = template
+    .replace(/FIXTURES_TASKS_DIR/g, tasksDir)
+    .replace(/BUILDIN_WEBUI_TASK_YAML/g, buildinWebuiTaskYaml);
   const tasksetPath = path.join(tempDir, 'taskset.yaml');
   fs.writeFileSync(tasksetPath, content, 'utf8');
   return { tasksetPath, tasksDir };
@@ -162,12 +171,19 @@ export async function setup(): Promise<void> {
   const serverEnv: NodeJS.ProcessEnv = {
     ...process.env,
     HOME: process.env.HOME ?? os.homedir(),
+    // Soft memory ceiling on the Go daemon — prevents runaway heap growth
+    // when the webui task spawns many Deno subprocesses for browser assets.
+    GOMEMLIMIT: process.env.GOMEMLIMIT ?? '512MiB',
+    // Disable the unlock-endpoint rate limiter: auth.spec.ts fires many
+    // login attempts in quick succession and would otherwise trip the
+    // 5-per-minute cap mid-suite.
+    DICODE_DISABLE_UNLOCK_LIMITER: '1',
   };
   if (process.env.TEST_WEBHOOK_SECRET) {
     serverEnv.TEST_WEBHOOK_SECRET = process.env.TEST_WEBHOOK_SECRET;
   }
 
-  const child = spawn(BINARY, ['--config', configPath], {
+  const child = spawn(BINARY, ['daemon', '--config', configPath], {
     cwd: REPO_ROOT,
     env: serverEnv,
     detached: false,
@@ -202,6 +218,57 @@ export async function setup(): Promise<void> {
 
   await waitForReady(BASE_URL);
   console.log('[e2e] dicode is ready.');
+
+  // Seed a logged-in storage state file. The webui task has trigger.auth: true
+  // so even in the "unauthenticated" project (server.auth=false, no passphrase),
+  // browser GETs to /hooks/webui must carry a session cookie. Empty-passphrase
+  // POST to /api/auth/login is accepted when no passphrase is configured.
+  //
+  // Written to a FIXED path (under the project) so playwright.config.ts can
+  // reference it at config-load time — globalSetup runs after config eval,
+  // so an env-var-based path wouldn't work.
+  const loginPassword = authMode === 'authenticated' ? 'test-passphrase-12345' : '';
+  await writeAuthState(BASE_URL, loginPassword, AUTH_STATE_PATH);
+  console.log(`[e2e] auth state: ${AUTH_STATE_PATH}`);
+}
+
+async function writeAuthState(baseURL: string, password: string, outPath: string): Promise<void> {
+  const res = await fetch(`${baseURL}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password }),
+  });
+  if (!res.ok) {
+    throw new Error(`[e2e] login failed: ${res.status} ${await res.text()}`);
+  }
+  // Parse Set-Cookie headers — Node's fetch returns them via getSetCookie().
+  type FetchHeaders = Headers & { getSetCookie?: () => string[] };
+  const setCookies = (res.headers as FetchHeaders).getSetCookie?.() ?? [];
+  const url = new URL(baseURL);
+  const cookies = setCookies.map((raw) => parseSetCookie(raw, url.hostname));
+  const state = { cookies, origins: [] };
+  fs.writeFileSync(outPath, JSON.stringify(state, null, 2), 'utf8');
+}
+
+function parseSetCookie(raw: string, defaultDomain: string) {
+  const parts = raw.split(';').map((s) => s.trim());
+  const [name, ...valueParts] = parts[0].split('=');
+  const value = valueParts.join('=');
+  const attrs: Record<string, string | boolean> = {};
+  for (const p of parts.slice(1)) {
+    const [k, ...rest] = p.split('=');
+    attrs[k.toLowerCase()] = rest.length ? rest.join('=') : true;
+  }
+  return {
+    name,
+    value,
+    domain: (attrs['domain'] as string) ?? defaultDomain,
+    path: (attrs['path'] as string) ?? '/',
+    expires: -1,
+    httpOnly: !!attrs['httponly'],
+    secure: !!attrs['secure'],
+    sameSite: ((attrs['samesite'] as string) ?? 'Lax') as 'Strict' | 'Lax' | 'None',
+  };
 }
 
 export async function teardown(): Promise<void> {
@@ -228,5 +295,6 @@ export async function teardown(): Promise<void> {
     fs.rmSync(state.tempDir, { recursive: true, force: true });
   }
   fs.rmSync(STATE_FILE, { force: true });
+  fs.rmSync(AUTH_STATE_PATH, { force: true });
   console.log('[e2e] Cleanup complete.');
 }

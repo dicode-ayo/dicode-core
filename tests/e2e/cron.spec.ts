@@ -10,6 +10,7 @@
  */
 
 import { test, expect } from '@playwright/test';
+import { gotoWebui, navigateInSpa, waitForTaskDetail } from './helpers/webui';
 
 const CRON_TASK_ID = 'e2e-tests/hello-cron';
 
@@ -80,9 +81,7 @@ test.describe('Cron Tasks', () => {
   });
 
   test('task list shows last run status after cron fires', async ({ page }) => {
-    // Wait a bit for cron to fire then check the UI.
-    await page.goto('/');
-    await page.waitForSelector('dc-task-list', { timeout: 10_000 });
+    await gotoWebui(page);
 
     // Poll the UI until last_run_status is populated for the cron task.
     await page.waitForFunction(
@@ -91,7 +90,6 @@ test.describe('Cron Tasks', () => {
         for (const row of rows) {
           const text = row.textContent ?? '';
           if (text.includes(taskIDPrefix)) {
-            // Check for a status badge in the row.
             return !!row.querySelector('.badge');
           }
         }
@@ -101,18 +99,14 @@ test.describe('Cron Tasks', () => {
       { timeout: 90_000, polling: 3000 },
     );
 
-    // The badge for the cron task row should now show success.
     const cronRow = page.locator('tr', { hasText: 'hello-cron' });
     await expect(cronRow.locator('.badge')).toBeVisible();
   });
 
   test('cron task detail shows trigger label with cron expression', async ({ page }) => {
-    await page.goto(`/tasks/${encodeURIComponent(CRON_TASK_ID)}`);
-    await page.waitForSelector('dc-task-detail', { timeout: 10_000 });
-    await page.waitForFunction(() => {
-      const el = document.querySelector('dc-task-detail');
-      return el && !el.textContent?.includes('Loading');
-    }, { timeout: 15_000 });
+    await gotoWebui(page);
+    await navigateInSpa(page, `/tasks/${CRON_TASK_ID}`);
+    await waitForTaskDetail(page);
 
     // Trigger card should mention cron.
     const triggerCard = page.locator('.card', { hasText: 'Trigger:' });

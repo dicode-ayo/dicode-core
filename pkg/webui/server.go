@@ -120,6 +120,12 @@ func newUnlockLimiter() *unlockLimiter {
 }
 
 func (l *unlockLimiter) allow(ip string) bool {
+	// Test/dev escape hatch: disable the limiter entirely when this env is set.
+	// Prod never sets it; e2e tests rapid-fire many login attempts from one IP
+	// and would otherwise trip the 5-per-minute cap mid-suite.
+	if os.Getenv("DICODE_DISABLE_UNLOCK_LIMITER") == "1" {
+		return true
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := time.Now()

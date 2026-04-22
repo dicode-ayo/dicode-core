@@ -36,8 +36,8 @@ jobs:
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
 
-      - name: Run unauthenticated e2e tests
-        run: npx playwright test --project=unauthenticated
+      - name: Run unauthenticated + webui e2e tests
+        run: npx playwright test --project=unauthenticated --project=webui
 
       - name: Run authenticated e2e tests
         run: npx playwright test --project=authenticated

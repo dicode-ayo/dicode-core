@@ -1,7 +1,13 @@
 import { defineConfig, devices } from '@playwright/test';
 import path from 'path';
 
-const BASE_URL = process.env.DICODE_URL || 'http://localhost:8080';
+const BASE_URL = process.env.DICODE_URL || 'http://localhost:8765';
+
+// Written by global-setup.ts (helpers/dicode-server.ts -> writeAuthState).
+// Must match AUTH_STATE_PATH in that file. Fixed path lets Playwright's
+// per-project `use.storageState` resolve at config-load time — globalSetup
+// runs AFTER config eval, so an env-var-based path wouldn't work.
+const AUTH_STATE = path.join(__dirname, 'tests/e2e/.auth-state.json');
 
 export default defineConfig({
   testDir: './tests/e2e',
@@ -22,23 +28,26 @@ export default defineConfig({
   },
 
   projects: [
-    // ── unauthenticated ────────────────────────────────────────────────────────
-    // Starts dicode with auth disabled. Covers the bulk of UI and API tests.
-    // Run:  npx playwright test --project=unauthenticated
+    // ── webui ─────────────────────────────────────────────────────────────────
+    // Browser tests for the SPA at /hooks/webui (which has trigger.auth: true).
+    // Uses the seeded session from global-setup.
     {
       name: 'webui',
       testMatch: ['**/webui-task.spec.ts'],
       use: {
         ...devices['Desktop Chrome'],
         baseURL: BASE_URL,
+        storageState: AUTH_STATE,
       },
     },
+
+    // ── unauthenticated ────────────────────────────────────────────────────────
+    // server.auth=false, no passphrase. API tests do not need a session, but
+    // UI tests do (webui task is auth-gated). Loading storageState is harmless
+    // for API-only specs and required for UI ones.
     {
       name: 'unauthenticated',
       testMatch: [
-        '**/task-list.spec.ts',
-        '**/task-detail.spec.ts',
-        '**/run-detail.spec.ts',
         '**/file-change.spec.ts',
         '**/webhooks.spec.ts',
         '**/webhooks-secure.spec.ts',
@@ -48,11 +57,13 @@ export default defineConfig({
       use: {
         ...devices['Desktop Chrome'],
         baseURL: BASE_URL,
+        storageState: AUTH_STATE,
       },
     },
 
     // ── authenticated ─────────────────────────────────────────────────────────
-    // Starts dicode with auth enabled (passphrase = test-passphrase-12345).
+    // server.auth=true, passphrase = test-passphrase-12345.
+    // No storageState — auth.spec.ts tests the login flow itself.
     // Run:  DICODE_AUTH_MODE=authenticated npx playwright test --project=authenticated
     {
       name: 'authenticated',

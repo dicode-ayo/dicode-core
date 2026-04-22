@@ -1,2 +1,4 @@
-log.info('hello from test manual task');
-return { message: 'hello from test' };
+export default async function main() {
+  console.log('hello from test manual task');
+  return { message: 'hello from test' };
+}

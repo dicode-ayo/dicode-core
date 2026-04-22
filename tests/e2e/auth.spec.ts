@@ -4,21 +4,21 @@
  * Authentication tests — runs against the 'authenticated' project which starts
  * dicode with server.auth: true and server.secret: test-passphrase-12345.
  *
- * Key auth behaviours verified:
+ * Covers the redirect-to-/login flow added in dicode-core#96/#131:
  * - Unauthenticated API calls → 401
  * - Wrong passphrase → 401
  * - Correct passphrase → 200 + session cookie
  * - Authenticated calls succeed
- * - UI redirects to auth overlay when not logged in
- * - After login task list is accessible
- * - Webhooks bypass the auth wall (no session needed)
- * - Passphrase change endpoint exists and works
+ * - Browser GET /hooks/webui without session → 303 → /login?next=/hooks/webui
+ * - /login renders an HTML form
+ * - After login the SPA at /hooks/webui loads
+ * - Webhooks bypass the auth wall
+ * - /api/auth/passphrase reports the source
+ * - /api/auth/logout invalidates the session
  */
 
 import { test, expect } from '@playwright/test';
 import { TEST_PASSPHRASE, login } from './helpers/auth';
-
-const BASE_URL = 'http://localhost:8080';
 
 test.describe('Authentication', () => {
   test('unauthenticated GET /api/tasks → 401', async ({ request }) => {
@@ -31,16 +31,16 @@ test.describe('Authentication', () => {
     expect(res.status()).toBe(401);
   });
 
-  test('POST /api/secrets/unlock with wrong passphrase → 401', async ({ request }) => {
-    const res = await request.post('/api/secrets/unlock', {
+  test('POST /api/auth/login with wrong passphrase → 401', async ({ request }) => {
+    const res = await request.post('/api/auth/login', {
       data: { password: 'completely-wrong-passphrase' },
       headers: { 'Content-Type': 'application/json' },
     });
     expect(res.status()).toBe(401);
   });
 
-  test('POST /api/secrets/unlock with correct passphrase → 200', async ({ request }) => {
-    const res = await request.post('/api/secrets/unlock', {
+  test('POST /api/auth/login with correct passphrase → 200', async ({ request }) => {
+    const res = await request.post('/api/auth/login', {
       data: { password: TEST_PASSPHRASE },
       headers: { 'Content-Type': 'application/json' },
     });
@@ -50,7 +50,7 @@ test.describe('Authentication', () => {
   });
 
   test('session cookie is set after successful login', async ({ request }) => {
-    const res = await request.post('/api/secrets/unlock', {
+    const res = await request.post('/api/auth/login', {
       data: { password: TEST_PASSPHRASE },
       headers: { 'Content-Type': 'application/json' },
     });
@@ -60,10 +60,7 @@ test.describe('Authentication', () => {
   });
 
   test('authenticated request to /api/tasks succeeds', async ({ request }) => {
-    // Login first.
     await login(request, TEST_PASSPHRASE);
-
-    // Now the request context has the session cookie — subsequent calls succeed.
     const res = await request.get('/api/tasks');
     expect(res.ok()).toBe(true);
     const tasks = await res.json() as unknown[];
@@ -71,75 +68,51 @@ test.describe('Authentication', () => {
   });
 
   test('webhooks bypass auth wall (no session required)', async ({ request }) => {
-    // Do NOT login — issue a fresh request context without session.
-    // The /hooks/* paths are always public.
     const res = await request.post('/hooks/test-webhook', {
       headers: { 'Content-Type': 'application/json' },
       data: { auth_test: true },
     });
-    // Should not be 401 — webhooks are public.
     expect(res.status()).not.toBe(401);
     expect(res.status()).not.toBe(403);
   });
 
-  test('static assets bypass auth wall', async ({ request }) => {
-    // /app/* static files must be reachable without a session (needed to render login).
-    const res = await request.get('/app/app.js');
-    expect(res.status()).not.toBe(401);
-    expect(res.status()).not.toBe(403);
+  test('UI: GET /hooks/webui without session redirects to /login with next', async ({ request }) => {
+    // Browser-style GET (Accept: text/html) — webhookAuthGuard sends 303 → /login?next=...
+    // Use maxRedirects: 0 to inspect the redirect itself.
+    const res = await request.get('/hooks/webui', {
+      headers: { Accept: 'text/html' },
+      maxRedirects: 0,
+    });
+    expect(res.status()).toBe(303);
+    const loc = res.headers()['location'] ?? '';
+    expect(loc).toMatch(/^\/login\?next=/);
+    expect(decodeURIComponent(loc)).toContain('/hooks/webui');
   });
 
-  test('UI: visiting / shows auth overlay when not logged in', async ({ page }) => {
-    await page.goto('/');
-    // The auth overlay should appear — it's a fixed overlay element.
-    await page.waitForSelector('dc-auth-overlay', { timeout: 15_000 });
-    // The overlay becomes visible when the API returns 401.
-    await page.waitForFunction(() => {
-      const overlay = document.querySelector('dc-auth-overlay');
-      if (!overlay) return false;
-      // _visible property drives display; check for the password input rendered.
-      return !!overlay.querySelector('#auth-pw');
-    }, { timeout: 15_000 });
-
-    await expect(page.locator('#auth-pw')).toBeVisible({ timeout: 10_000 });
+  test('UI: /login renders an HTML form with a password input', async ({ page }) => {
+    await page.goto('/login');
+    await expect(page.locator('input[type=password], input[name=password]').first()).toBeVisible();
   });
 
-  test('UI: incorrect passphrase shows error message', async ({ page }) => {
-    await page.goto('/');
-    await page.waitForSelector('#auth-pw', { timeout: 15_000 });
-
-    await page.fill('#auth-pw', 'wrong-passphrase');
-    await page.locator('dc-auth-overlay button', { hasText: 'Sign in' }).click();
-
-    // An error message should appear.
-    await page.waitForFunction(() => {
-      const overlay = document.querySelector('dc-auth-overlay');
-      return overlay?.textContent?.includes('Incorrect') || overlay?.textContent?.includes('incorrect');
-    }, { timeout: 10_000 });
-    await expect(page.locator('dc-auth-overlay')).toContainText(/[Ii]ncorrect/);
+  test('UI: submitting /login form with wrong passphrase shows error', async ({ page }) => {
+    await page.goto('/login');
+    await page.fill('input[name=password]', 'completely-wrong-passphrase');
+    await page.locator('form button[type=submit], form input[type=submit]').first().click({ force: true });
+    await expect(page.locator('body')).toContainText(/[Ii]ncorrect|[Ii]nvalid|[Ww]rong/);
   });
 
-  test('UI: correct passphrase dismisses overlay and shows task list', async ({ page }) => {
-    await page.goto('/');
-    await page.waitForSelector('#auth-pw', { timeout: 15_000 });
+  test('UI: submitting /login form with correct passphrase loads SPA', async ({ page }) => {
+    await page.goto('/login?next=' + encodeURIComponent('/hooks/webui'));
+    await page.fill('input[name=password]', TEST_PASSPHRASE);
+    await page.locator('form button[type=submit], form input[type=submit]').first().click({ force: true });
 
-    await page.fill('#auth-pw', TEST_PASSPHRASE);
-    await page.locator('dc-auth-overlay button', { hasText: 'Sign in' }).click();
-
-    // Overlay should disappear and task list should render.
-    await page.waitForFunction(() => {
-      const overlay = document.querySelector('dc-auth-overlay');
-      // Overlay hidden = no #auth-pw visible
-      return !overlay?.querySelector('#auth-pw');
-    }, { timeout: 10_000 });
-
-    // Task list should be loading.
+    // Form post → 303 → /hooks/webui → SPA loads.
+    await page.waitForURL(/\/hooks\/webui/, { timeout: 10_000 });
     await page.waitForSelector('dc-task-list', { timeout: 15_000 });
     await page.waitForFunction(() => {
       const el = document.querySelector('dc-task-list');
-      return el && !el.textContent?.includes('Loading');
+      return !!el && !el.textContent?.includes('Loading');
     }, { timeout: 20_000 });
-
     await expect(page.locator('h1', { hasText: 'Tasks' })).toBeVisible();
   });
 
@@ -148,22 +121,19 @@ test.describe('Authentication', () => {
     const res = await request.get('/api/auth/passphrase');
     expect(res.ok()).toBe(true);
     const body = await res.json() as { source: string };
-    // In auth mode with server.secret set in YAML, source should be "yaml".
+    // server.secret comes from YAML in this fixture.
     expect(body.source).toBe('yaml');
   });
 
   test('POST /api/auth/logout invalidates session', async ({ request }) => {
     await login(request, TEST_PASSPHRASE);
 
-    // Verify we are logged in.
     const tasksRes = await request.get('/api/tasks');
     expect(tasksRes.ok()).toBe(true);
 
-    // Logout.
     const logoutRes = await request.post('/api/auth/logout');
     expect(logoutRes.ok()).toBe(true);
 
-    // Now the session should be invalid.
     const afterRes = await request.get('/api/tasks');
     expect(afterRes.status()).toBe(401);
   });

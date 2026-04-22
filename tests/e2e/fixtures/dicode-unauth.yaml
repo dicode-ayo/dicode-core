@@ -3,11 +3,12 @@ database:
   path: TEMP_DATA_DIR/data.db
   type: sqlite
 log_level: info
+execution:
+  max_concurrent_tasks: 2
 server:
-  port: 8080
+  port: 8765
   auth: false
   mcp: false
-  tray: false
 sources:
   - name: e2e-tests
     type: local
