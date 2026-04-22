@@ -140,29 +140,36 @@ func cmdTaskTest(c *ipc.ControlClient, taskID string) error {
 	if err != nil {
 		return err
 	}
-	// Partial results come back even when the daemon reports an error
-	// (e.g. failing tests produce a populated Result with Error=""), so
-	// we print the payload first and surface the error only if no output.
+
+	// The daemon returns a populated Result AND sometimes a non-empty
+	// resp.Error (e.g. failing tests produce real output but the handler
+	// flags them). Prefer the structured payload when we have one; fall
+	// back to the error string when we don't.
 	var r ipc.TaskTestResult
+	hasPayload := false
 	if resp.Result != nil {
-		if rerr := remarshal(resp.Result, &r); rerr == nil && (r.Output != "" || r.Failed > 0 || r.Passed > 0) {
-			fmt.Print(r.Output)
-			if !strings.HasSuffix(r.Output, "\n") {
-				fmt.Println()
-			}
-			fmt.Printf("%s: %d passed, %d failed", r.TaskID, r.Passed, r.Failed)
-			if r.Skipped > 0 {
-				fmt.Printf(", %d skipped", r.Skipped)
-			}
-			fmt.Printf(" (runtime=%s, %dms)\n", r.Runtime, r.DurMs)
-			if r.Failed > 0 || r.ExitCode != 0 {
-				return fmt.Errorf("%d test(s) failed", r.Failed)
-			}
-			return nil
+		if rerr := remarshal(resp.Result, &r); rerr == nil {
+			hasPayload = r.Output != "" || r.Failed > 0 || r.Passed > 0
 		}
 	}
-	if resp.Error != "" {
-		return fmt.Errorf("%s", resp.Error)
+	if !hasPayload {
+		if resp.Error != "" {
+			return fmt.Errorf("%s", resp.Error)
+		}
+		return nil
+	}
+
+	fmt.Print(r.Output)
+	if !strings.HasSuffix(r.Output, "\n") {
+		fmt.Println()
+	}
+	fmt.Printf("%s: %d passed, %d failed", r.TaskID, r.Passed, r.Failed)
+	if r.Skipped > 0 {
+		fmt.Printf(", %d skipped", r.Skipped)
+	}
+	fmt.Printf(" (runtime=%s, %dms)\n", r.Runtime, r.DurMs)
+	if r.Failed > 0 || r.ExitCode != 0 {
+		return fmt.Errorf("%d test(s) failed", r.Failed)
 	}
 	return nil
 }

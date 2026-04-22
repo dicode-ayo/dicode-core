@@ -64,6 +64,11 @@ func Run(ctx context.Context, spec *task.Spec) (Result, error) {
 	}
 
 	switch spec.Runtime {
+	// The "" and "js" aliases are defensive — pkg/task.applyDefaults
+	// normalizes both to RuntimeDeno at spec-load time, so the registry
+	// never hands us a non-normalized value. Keeping the aliases matches
+	// pkg/task/spec.go:validate and protects direct callers who construct
+	// a task.Spec without going through the loader.
 	case task.RuntimeDeno, "", "js":
 		return runDeno(ctx, spec, testFile)
 	default:
@@ -94,7 +99,7 @@ var denoSummaryRe = regexp.MustCompile(`(\d+)\s+passed(?:\s*\([\d\w]+\))?\s*\|\s
 // repo so `npm:...` imports resolve in-process.
 func denoConfigPath(taskDir string) string {
 	dir := filepath.Clean(taskDir)
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		candidate := filepath.Join(dir, "tasks", "deno.json")
 		if _, err := os.Stat(candidate); err == nil {
 			return candidate
