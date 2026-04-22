@@ -20,8 +20,14 @@ import (
 // what the broker does in dicode-relay/src/broker.
 
 // verifyChallenge is the broker-side verifier. Inline here so the tests
-// stay in-package; mirrors exactly what the broker does on receipt of a
-// hello message.
+// stay in-package; mirrors what the broker does on receipt of a hello
+// message.
+//
+// NOTE: production verification happens in the separate dicode-relay
+// repository (Node/TypeScript). If the broker adds fields to the signed
+// digest (e.g. a domain separator, broker_id, or protocol-version tag),
+// update this function to match OR these tests will keep passing while
+// real handshakes break.
 func verifyChallenge(pub *ecdsa.PublicKey, nonce []byte, ts int64, sig []byte) bool {
 	var tsBuf [8]byte
 	binary.BigEndian.PutUint64(tsBuf[:], uint64(ts))
