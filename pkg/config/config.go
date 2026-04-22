@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -45,6 +46,38 @@ type ExecutionConfig struct {
 type RelayConfig struct {
 	Enabled   bool   `yaml:"enabled"`
 	ServerURL string `yaml:"server_url"` // wss://relay.dicode.app
+	// BrokerURL overrides the OAuth broker base URL. When empty, the daemon
+	// derives it from ServerURL by swapping the scheme (wss://host →
+	// https://host). Set this when the broker runs on a different host than
+	// the WSS relay endpoint, or during local development to point at a
+	// broker on a non-TLS port (e.g. http://localhost:5553). Must be http://
+	// or https:// when set.
+	BrokerURL string `yaml:"broker_url,omitempty"`
+}
+
+// ResolvedBrokerURL returns the HTTP(S) OAuth broker base URL that the
+// daemon should use for signing /auth URLs and receiving ECIES-encrypted
+// token deliveries. If BrokerURL is set it wins; otherwise the URL is
+// derived from ServerURL. Returns empty when neither yields a usable URL —
+// the daemon treats that as "OAuth broker disabled".
+//
+// The returned URL never has a trailing slash so callers can safely
+// concatenate `+ "/auth/" + provider` without producing a "//" double-
+// slash. Operators writing broker_url: https://host/ in dicode.yaml get
+// the slash stripped here.
+func (r RelayConfig) ResolvedBrokerURL() string {
+	var raw string
+	switch {
+	case r.BrokerURL != "":
+		raw = r.BrokerURL
+	case strings.HasPrefix(r.ServerURL, "wss://"):
+		raw = "https://" + strings.TrimPrefix(r.ServerURL, "wss://")
+	case strings.HasPrefix(r.ServerURL, "ws://"):
+		raw = "http://" + strings.TrimPrefix(r.ServerURL, "ws://")
+	default:
+		return ""
+	}
+	return strings.TrimRight(raw, "/")
 }
 
 // AIConfig points the WebUI and CLI at a single task for AI operations.
@@ -317,6 +350,18 @@ func (cfg *Config) validate() error {
 			return fmt.Errorf("sources[%d]: type is required (git or local)", i)
 		default:
 			return fmt.Errorf("sources[%d]: unknown type %q (valid: git, local)", i, s.Type)
+		}
+	}
+	if cfg.Relay.BrokerURL != "" {
+		u, err := url.Parse(cfg.Relay.BrokerURL)
+		if err != nil {
+			return fmt.Errorf("relay.broker_url: %w", err)
+		}
+		if u.Scheme != "http" && u.Scheme != "https" {
+			return fmt.Errorf("relay.broker_url: must use http:// or https://, got scheme %q", u.Scheme)
+		}
+		if u.Host == "" {
+			return fmt.Errorf("relay.broker_url: missing host in %q", cfg.Relay.BrokerURL)
 		}
 	}
 	return nil

@@ -230,12 +230,13 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 			pending := relay.NewPendingSessions()
 			var rotationActive atomic.Bool
 			rotationActiveFn := func() bool { return rotationActive.Load() }
-			if brokerURL := deriveBrokerBaseURL(cfg.Relay.ServerURL); brokerURL != "" {
+			if brokerURL := cfg.Relay.ResolvedBrokerURL(); brokerURL != "" {
 				denoRT.SetOAuthBroker(id, brokerURL, pending, rc.BrokerPubkey, rc.SupportsOAuth, rotationActiveFn)
 			} else {
-				log.Warn("relay: could not derive broker base URL from server_url — OAuth broker disabled",
+				log.Warn("relay: no broker URL (neither relay.broker_url nor a parsable relay.server_url) — OAuth broker disabled",
 					zap.String("server_url", cfg.Relay.ServerURL),
-					zap.String("expected_scheme", "wss:// or ws://"))
+					zap.String("broker_url", cfg.Relay.BrokerURL),
+					zap.String("hint", "set relay.broker_url: https://... in dicode.yaml, or use server_url: wss://..."))
 			}
 			g.Go(func() error { pending.StartSweep(ctx); return nil })
 			// Identity rotation via `dicode relay rotate-identity`. The
@@ -394,20 +395,6 @@ func buildRuntimes(
 	}
 
 	return managed, eng, denoRT, nil
-}
-
-// deriveBrokerBaseURL converts a relay WSS URL (e.g. wss://relay.dicode.app)
-// into the matching HTTPS broker base URL. Returns empty if the input scheme
-// is not ws/wss.
-func deriveBrokerBaseURL(wsURL string) string {
-	switch {
-	case strings.HasPrefix(wsURL, "wss://"):
-		return "https://" + strings.TrimPrefix(wsURL, "wss://")
-	case strings.HasPrefix(wsURL, "ws://"):
-		return "http://" + strings.TrimPrefix(wsURL, "ws://")
-	default:
-		return ""
-	}
 }
 
 func buildSecretsChain(cfg *config.Config, dataDir string, database db.DB, log *zap.Logger) (secrets.Chain, secrets.Manager) {

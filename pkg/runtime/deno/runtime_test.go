@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -453,6 +454,71 @@ func TestRuntime_Timeout(t *testing.T) {
 	if r.Error == nil {
 		t.Fatal("expected timeout error")
 	}
+}
+
+// TestBuildEnv_InjectsBrokerURL covers issue #84: when the daemon has a
+// resolved broker URL, buildEnv must export it to the Deno subprocess as
+// DICODE_BROKER_URL. When empty (relay disabled or ServerURL unparsable),
+// the variable must NOT be present — tasks then distinguish "broker
+// disabled" from "broker at default" by checking Deno.env.get().
+func TestBuildEnv_InjectsBrokerURL(t *testing.T) {
+	t.Run("injected when non-empty", func(t *testing.T) {
+		env := buildEnv(nil, "/tmp/sock", "tok", "https://broker.dicode.app")
+		var found string
+		for _, kv := range env {
+			if strings.HasPrefix(kv, "DICODE_BROKER_URL=") {
+				found = kv
+				break
+			}
+		}
+		if found != "DICODE_BROKER_URL=https://broker.dicode.app" {
+			t.Errorf("expected DICODE_BROKER_URL injection, got %q among env", found)
+		}
+	})
+
+	t.Run("omitted when empty", func(t *testing.T) {
+		env := buildEnv(nil, "/tmp/sock", "tok", "")
+		for _, kv := range env {
+			if strings.HasPrefix(kv, "DICODE_BROKER_URL=") {
+				t.Errorf("DICODE_BROKER_URL must not be injected when broker URL is empty, got %q", kv)
+			}
+		}
+	})
+}
+
+// TestBuildDenoArgs_AllowsBrokerURL ensures DICODE_BROKER_URL is added to
+// --allow-env (auto-granted, like DICODE_SOCKET) when configured, so auth
+// tasks can Deno.env.get() it without declaring it in permissions.env.
+func TestBuildDenoArgs_AllowsBrokerURL(t *testing.T) {
+	spec := &task.Spec{
+		ID:      "probe",
+		Runtime: task.RuntimeDeno,
+		Trigger: task.TriggerConfig{Manual: true},
+	}
+	findAllowEnv := func(args []string) string {
+		for _, a := range args {
+			if strings.HasPrefix(a, "--allow-env=") {
+				return a
+			}
+		}
+		return ""
+	}
+
+	t.Run("allowlist includes DICODE_BROKER_URL when set", func(t *testing.T) {
+		args := buildDenoArgs(spec, "/tmp/sock", "/tmp/shim", "/tmp/runner", "https://b")
+		allow := findAllowEnv(args)
+		if !strings.Contains(allow, "DICODE_BROKER_URL") {
+			t.Errorf("--allow-env must include DICODE_BROKER_URL when broker URL set, got %q", allow)
+		}
+	})
+
+	t.Run("allowlist omits DICODE_BROKER_URL when empty", func(t *testing.T) {
+		args := buildDenoArgs(spec, "/tmp/sock", "/tmp/shim", "/tmp/runner", "")
+		allow := findAllowEnv(args)
+		if strings.Contains(allow, "DICODE_BROKER_URL") {
+			t.Errorf("--allow-env must not include DICODE_BROKER_URL when unset, got %q", allow)
+		}
+	})
 }
 
 // mockSecretProvider for env tests.
