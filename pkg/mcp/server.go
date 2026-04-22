@@ -13,6 +13,7 @@ import (
 	"net/http"
 
 	"github.com/dicode/dicode/pkg/registry"
+	"github.com/dicode/dicode/pkg/tasktest"
 )
 
 // SourceLister is satisfied by *webui.SourceManager.
@@ -177,6 +178,13 @@ func (s *Server) methodToolsList(req rpcRequest) rpcResponse {
 				"id": map[string]any{"type": "string", "description": "Namespaced task ID"},
 			}, "id"),
 		},
+		{
+			Name:        "test_task",
+			Description: "Run the task's sibling test file (task.test.ts / .js / .mjs) through its runtime and return structured pass/fail counts plus the full stdout+stderr. Deno runtime only for now; other runtimes return a clear 'not yet supported' error.",
+			InputSchema: jsonSchema(map[string]any{
+				"id": map[string]any{"type": "string", "description": "Namespaced task ID (same as list_tasks returns)"},
+			}, "id"),
+		},
 	}
 	return rpcOK(req.ID, map[string]any{"tools": tools})
 }
@@ -201,6 +209,8 @@ func (s *Server) methodToolsCall(ctx context.Context, req rpcRequest) rpcRespons
 		return s.toolRunTask(ctx, req.ID, params.Arguments)
 	case "get_task":
 		return s.toolGetTask(req.ID, params.Arguments)
+	case "test_task":
+		return s.toolTestTask(ctx, req.ID, params.Arguments)
 	default:
 		return rpcErr(req.ID, -32601, fmt.Sprintf("unknown tool: %s", params.Name))
 	}
@@ -292,6 +302,46 @@ func (s *Server) toolGetTask(id any, raw json.RawMessage) rpcResponse {
 	}
 	b, _ := json.MarshalIndent(spec, "", "  ")
 	return textResult(id, string(b))
+}
+
+func (s *Server) toolTestTask(ctx context.Context, id any, raw json.RawMessage) rpcResponse {
+	var args struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return rpcErr(id, -32602, "invalid arguments: "+err.Error())
+	}
+	if args.ID == "" {
+		return rpcErr(id, -32602, "id is required")
+	}
+	if s.registry == nil {
+		return rpcErr(id, -32603, "registry not available")
+	}
+	spec, ok := s.registry.Get(args.ID)
+	if !ok {
+		return rpcErr(id, -32603, fmt.Sprintf("task %q not found", args.ID))
+	}
+	res, runErr := tasktest.Run(ctx, spec)
+	// Return structured JSON alongside the output text so MCP clients can
+	// read counts programmatically without having to re-parse the stdout.
+	payload := map[string]any{
+		"taskID":     res.TaskID,
+		"runtime":    res.Runtime,
+		"testFile":   res.TestFile,
+		"passed":     res.Passed,
+		"failed":     res.Failed,
+		"skipped":    res.Skipped,
+		"durationMs": res.Duration.Milliseconds(),
+		"exitCode":   res.ExitCode,
+	}
+	if res.Error != "" {
+		payload["error"] = res.Error
+	} else if runErr != nil {
+		payload["error"] = runErr.Error()
+	}
+	b, _ := json.MarshalIndent(payload, "", "  ")
+	text := fmt.Sprintf("%s\n\n--- summary ---\n%s\n", res.Output, string(b))
+	return textResult(id, text)
 }
 
 // --- helpers ---

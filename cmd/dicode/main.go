@@ -14,6 +14,7 @@
 //	logs <run-id>                   fetch log lines for a run
 //	status [task-id]                daemon health or latest run for a task
 //	ai <prompt> [flags]             run the configured AI task with a prompt
+//	task test <task-id>             run the task's sibling task.test.* through its runtime
 //	secrets list                    list secret keys
 //	secrets set <key> <value>       store a secret
 //	secrets delete <key>            delete a secret
@@ -112,9 +113,58 @@ func dispatch(c *ipc.ControlClient, args []string) error {
 		return cmdRelay(c, args[1:])
 	case "ai":
 		return cmdAI(c, args[1:])
+	case "task":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: dicode task <test> <task-id>")
+		}
+		return cmdTask(c, args[1:])
 	default:
 		return fmt.Errorf("unknown command %q — run 'dicode' for usage", args[0])
 	}
+}
+
+func cmdTask(c *ipc.ControlClient, args []string) error {
+	switch args[0] {
+	case "test":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: dicode task test <task-id>")
+		}
+		return cmdTaskTest(c, args[1])
+	default:
+		return fmt.Errorf("unknown task subcommand %q — supported: test", args[0])
+	}
+}
+
+func cmdTaskTest(c *ipc.ControlClient, taskID string) error {
+	resp, err := c.Send(ipc.Request{Method: "cli.task.test", TaskID: taskID})
+	if err != nil {
+		return err
+	}
+	// Partial results come back even when the daemon reports an error
+	// (e.g. failing tests produce a populated Result with Error=""), so
+	// we print the payload first and surface the error only if no output.
+	var r ipc.TaskTestResult
+	if resp.Result != nil {
+		if rerr := remarshal(resp.Result, &r); rerr == nil && (r.Output != "" || r.Failed > 0 || r.Passed > 0) {
+			fmt.Print(r.Output)
+			if !strings.HasSuffix(r.Output, "\n") {
+				fmt.Println()
+			}
+			fmt.Printf("%s: %d passed, %d failed", r.TaskID, r.Passed, r.Failed)
+			if r.Skipped > 0 {
+				fmt.Printf(", %d skipped", r.Skipped)
+			}
+			fmt.Printf(" (runtime=%s, %dms)\n", r.Runtime, r.DurMs)
+			if r.Failed > 0 || r.ExitCode != 0 {
+				return fmt.Errorf("%d test(s) failed", r.Failed)
+			}
+			return nil
+		}
+	}
+	if resp.Error != "" {
+		return fmt.Errorf("%s", resp.Error)
+	}
+	return nil
 }
 
 func cmdRelay(c *ipc.ControlClient, args []string) error {
@@ -508,6 +558,7 @@ Commands:
   status [task-id]                daemon health or task's latest run
   ai <prompt> [flags]             run the configured AI task with a prompt
                                   flags: --session-id ID, --task TASK_ID
+  task test <task-id>             run the task's sibling task.test.* through its runtime
   secrets list                    list secret keys
   secrets set <key> <value>       store a secret
   secrets delete <key>            delete a secret
