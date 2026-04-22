@@ -1,0 +1,8 @@
+apiVersion: dicode/v1
+kind: Task
+name: Hello Manual
+description: A simple manual task for e2e testing.
+runtime: deno
+trigger:
+  manual: true
+timeout: 10s

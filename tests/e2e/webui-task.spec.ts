@@ -92,15 +92,16 @@ test.describe('WebUI dashboard — Task List', () => {
   });
 
   test('clicking a task row navigates to task detail', async ({ page }) => {
-    // Click any task link in the table
+    // dc-task-list re-renders on every WS run:* event (cron fires every
+    // minute in the fixtures) so the <a> can be "not stable" for Playwright's
+    // actionability check. force:true bypasses that — the @click handler
+    // does its own pushState via navigate().
     const taskLink = page.locator('td a').first();
-    const href = await taskLink.getAttribute('href');
-    await taskLink.click();
+    await taskLink.click({ force: true });
 
-    // Should navigate to /tasks/... route (pushState — URL changes client-side)
     await page.waitForFunction(
       (prefix) => location.pathname.startsWith(prefix),
-      '/tasks/',
+      WEBUI_URL + '/tasks/',
       { timeout: 10_000 },
     );
     await page.waitForSelector('dc-task-detail', { timeout: 10_000 });
@@ -122,7 +123,7 @@ test.describe('WebUI dashboard — Task Detail', () => {
         firstTaskID = tasks[0].id;
       }
     }
-    await ctx.dispose();
+    await ctx.close();
   });
 
   test('task detail page shows task name', async ({ page }) => {
@@ -183,7 +184,7 @@ test.describe('WebUI dashboard — Run Detail', () => {
       const manual = tasks.find((t: { trigger_label?: string }) => t.trigger_label === 'manual');
       firstTaskID = (manual || tasks[0])?.id;
     }
-    await ctx.dispose();
+    await ctx.close();
   });
 
   test('triggering a run navigates to run detail', async ({ page }) => {
@@ -198,14 +199,11 @@ test.describe('WebUI dashboard — Run Detail', () => {
       return el && !el.textContent?.includes('Loading');
     }, { timeout: 15_000 });
 
-    await page.locator('button', { hasText: 'Run now' }).click();
+    await page.locator('button', { hasText: 'Run now' }).click({ force: true });
 
-    // Should navigate to /hooks/webui/runs/{runID} client-side
-    await page.waitForFunction(
-      (base) => location.pathname.startsWith(base + '/runs/'),
-      WEBUI_URL,
-      { timeout: 15_000 },
-    );
+    // Should navigate to /hooks/webui/runs/{runID} client-side.
+    // waitForURL is more robust than waitForFunction against Lit re-renders.
+    await page.waitForURL(/\/hooks\/webui\/runs\//, { timeout: 15_000 });
     await page.waitForSelector('dc-run-detail', { timeout: 10_000 });
     await expect(page.locator('.badge').first()).toBeVisible();
   });
@@ -242,7 +240,7 @@ test.describe('WebUI dashboard — Navigation', () => {
   });
 
   test('nav link to Sources navigates client-side', async ({ page }) => {
-    await page.locator('nav a', { hasText: 'Sources' }).click();
+    await page.locator('nav a', { hasText: 'Sources' }).click({ force: true });
     await page.waitForFunction(
       (base) => location.pathname.startsWith(base + '/sources'),
       WEBUI_URL,
@@ -252,7 +250,7 @@ test.describe('WebUI dashboard — Navigation', () => {
   });
 
   test('nav link to Config navigates client-side', async ({ page }) => {
-    await page.locator('nav a', { hasText: 'Config' }).click();
+    await page.locator('nav a', { hasText: 'Config' }).click({ force: true });
     await page.waitForFunction(
       (base) => location.pathname.startsWith(base + '/config'),
       WEBUI_URL,
@@ -262,11 +260,9 @@ test.describe('WebUI dashboard — Navigation', () => {
   });
 
   test('nav link Tasks returns to task list', async ({ page }) => {
-    // First navigate away
-    await page.locator('nav a', { hasText: 'Config' }).click();
+    await page.locator('nav a', { hasText: 'Config' }).click({ force: true });
     await page.waitForSelector('dc-config', { timeout: 10_000 });
-    // Then click Tasks
-    await page.locator('nav a', { hasText: 'Tasks' }).first().click();
+    await page.locator('nav a', { hasText: 'Tasks' }).first().click({ force: true });
     await page.waitForSelector('dc-task-list', { timeout: 10_000 });
   });
 });

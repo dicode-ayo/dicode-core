@@ -5,7 +5,8 @@ VERSION ?= dev
 GO      := $(shell which go 2>/dev/null || echo $(HOME)/.local/share/mise/shims/go)
 GOFLAGS := -ldflags "-X main.version=$(VERSION)"
 
-.PHONY: build test test-verbose test-race lint fmt format format-check clean run tidy help
+.PHONY: build test test-verbose test-race lint fmt format format-check clean run tidy help \
+	test-e2e test-e2e-unauth test-e2e-auth test-e2e-headed test-e2e-ui test-e2e-install
 
 ## build: compile the dicode binary
 build:
@@ -50,6 +51,36 @@ format-check:
 ## lint: format and vet all Go source files
 lint: fmt
 	$(GO) vet ./...
+
+E2E_WEBHOOK_SECRET ?= e2e-test-webhook-secret-xyz
+
+## test-e2e-install: install npm deps + Playwright Chromium (one-time)
+test-e2e-install:
+	npm install
+	npx playwright install chromium
+
+## test-e2e-unauth: run unauthenticated + webui Playwright projects (~3 min)
+test-e2e-unauth:
+	TEST_WEBHOOK_SECRET=$(E2E_WEBHOOK_SECRET) \
+		npx playwright test --project=unauthenticated --project=webui
+
+## test-e2e-auth: run authenticated Playwright project (~20 s)
+test-e2e-auth:
+	DICODE_AUTH_MODE=authenticated \
+		npx playwright test --project=authenticated
+
+## test-e2e: full Playwright suite — unauth + webui + auth (~3.5 min)
+test-e2e: test-e2e-unauth test-e2e-auth
+
+## test-e2e-headed: run e2e tests in headed mode (shows browser)
+test-e2e-headed:
+	TEST_WEBHOOK_SECRET=$(E2E_WEBHOOK_SECRET) \
+		npx playwright test --project=unauthenticated --project=webui --headed
+
+## test-e2e-ui: open Playwright UI mode
+test-e2e-ui:
+	TEST_WEBHOOK_SECRET=$(E2E_WEBHOOK_SECRET) \
+		npx playwright test --ui
 
 ## clean: remove compiled binary
 clean:

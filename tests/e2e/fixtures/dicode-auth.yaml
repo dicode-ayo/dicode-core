@@ -1,0 +1,17 @@
+data_dir: TEMP_DATA_DIR
+database:
+  path: TEMP_DATA_DIR/data.db
+  type: sqlite
+log_level: info
+execution:
+  max_concurrent_tasks: 2
+server:
+  port: 8765
+  auth: true
+  secret: test-passphrase-12345
+  mcp: false
+sources:
+  - name: e2e-tests
+    type: local
+    path: TEMP_TASKSET_PATH
+    watch: true

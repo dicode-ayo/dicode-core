@@ -2,4 +2,8 @@ dicode
 node_modules/
 .playwright-mcp/
 .worktrees/
+playwright-report/
+test-results/
+.playwright/
+tests/e2e/.auth-state.json
 !.claude/memory/
