@@ -1,0 +1,79 @@
+name: E2E Relay
+
+# Runs the Go + testcontainers-go relay e2e suite (tests/e2e/relay) only on
+# PRs that touch the relay surface. The relay image tag is pinned in
+# tests/e2e/relay/testdata/Dockerfile.relay (tracked by Dependabot) — this
+# workflow defers to that file and does not duplicate the version.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'pkg/relay/**'
+      - 'pkg/ipc/**'
+      - 'pkg/runtime/deno/**'
+      - 'cmd/dicode/**'
+      - 'tasks/buildin/auth-start/**'
+      - 'tasks/buildin/auth-relay/**'
+      - 'tests/e2e/relay/**'
+      - '.github/workflows/e2e-relay.yml'
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+# Least-privilege GITHUB_TOKEN. Only needs read access to check out source;
+# actions/upload-artifact uses its own implicit grant.
+permissions:
+  contents: read
+
+jobs:
+  e2e-relay:
+    name: E2E (relay)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Pre-pull relay image
+        # Parse the FROM line in Dockerfile.relay so docker's layer cache is
+        # warm before testcontainers-go builds the wrapper image. Keeps
+        # wall-clock timing predictable across runs.
+        run: |
+          set -euo pipefail
+          image=$(awk '/^FROM /{print $2; exit}' tests/e2e/relay/testdata/Dockerfile.relay)
+          echo "Pre-pulling ${image}"
+          docker pull "${image}"
+
+      - name: Run e2e relay suite
+        run: make test-e2e-relay
+
+      - name: Collect container logs
+        if: failure()
+        run: |
+          set -eu
+          mkdir -p /tmp/e2e-relay-logs
+          # testcontainers-go usually reaps containers on clean exit but
+          # leaves them around on failure; grab logs + inspect for each.
+          docker ps -a --format '{{.ID}} {{.Image}} {{.Names}}' \
+            | tee /tmp/e2e-relay-logs/containers.txt
+          while read -r id image name; do
+            [ -z "${id}" ] && continue
+            docker logs "${id}" > "/tmp/e2e-relay-logs/${id}-${name}.log" 2>&1 || true
+            docker inspect "${id}" > "/tmp/e2e-relay-logs/${id}-${name}.inspect.json" 2>&1 || true
+          done < <(docker ps -a --format '{{.ID}} {{.Image}} {{.Names}}')
+
+      - name: Upload container logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-relay-logs-${{ github.run_id }}
+          path: /tmp/e2e-relay-logs/
+          retention-days: 7
+          if-no-files-found: ignore
