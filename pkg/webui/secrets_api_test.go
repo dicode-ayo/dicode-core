@@ -247,6 +247,40 @@ func TestAPI_ListSecrets_AfterSetDoesNotIncludeValues(t *testing.T) {
 	}
 }
 
+// TestAPI_Metrics_NeverLeaksSecretValuesOrNames addresses #126 item 4:
+// no metrics/telemetry path may return a stored secret's key OR value.
+// The /api/metrics handler today is structurally incapable of leaking
+// (it reports heap/CPU/task-slot counters only), but this test pins
+// that invariant — any future field that accidentally plumbs a secret
+// through metric labels would fail here. Cheap guard against a class of
+// bugs that would otherwise require code review to catch every time.
+func TestAPI_Metrics_NeverLeaksSecretValuesOrNames(t *testing.T) {
+	srv, mgr := newSecretsTestServer(t)
+
+	// Plant a secret with both a distinctive key and a distinctive value
+	// so either one surfacing in the metrics response would trip the test.
+	const leakyKey = "METRICS_LEAK_GUARD_KEY"
+	const leakyVal = "METRICS_LEAK_GUARD_VALUE_shouldneverappear"
+	if err := mgr.Set(context.Background(), leakyKey, leakyVal); err != nil {
+		t.Fatalf("seed secret: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/metrics", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /api/metrics: status %d, body=%s", w.Code, w.Body.String())
+	}
+
+	body := w.Body.String()
+	if strings.Contains(body, leakyVal) {
+		t.Errorf("metrics response leaks secret VALUE: %s", body)
+	}
+	if strings.Contains(body, leakyKey) {
+		t.Errorf("metrics response leaks secret KEY: %s", body)
+	}
+}
+
 // sanity: ensure the Handler serves the secrets routes at all. Guards against
 // regressions where the group is mounted under a different path prefix.
 func TestAPI_SecretsRoute_Exists(t *testing.T) {

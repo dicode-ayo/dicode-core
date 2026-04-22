@@ -164,6 +164,13 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 	// - entry.From   → read from host OS env (os.Getenv); inject as entry.Name
 	// - bare name    → passthrough only, no injection needed
 	resolved := make(map[string]string, len(spec.Permissions.Env))
+	// Track secret-sourced env values so the run-log redactor catches them
+	// if a task writes them to stderr or via the IPC `log` method (which
+	// the Python SDK wraps as `log.info` / `log.error` / etc.). Symmetric
+	// to the deno runtime — plain Value= and host-env From= are NOT
+	// redacted because over-redaction would nuke common env values from
+	// every log line for no security benefit.
+	resolvedSecrets := make(map[string]string)
 	for _, entry := range spec.Permissions.Env {
 		switch {
 		case entry.Value != "":
@@ -181,10 +188,12 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 				return result, nil
 			}
 			resolved[entry.Name] = val
+			resolvedSecrets[entry.Name] = val
 		case entry.From != "":
 			resolved[entry.Name] = os.Getenv(entry.From)
 		}
 	}
+	redactor := secrets.NewRedactor(resolvedSecrets)
 
 	// Read the user's task.py.
 	scriptPath := spec.ScriptPath()
@@ -213,6 +222,7 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 	srv := ipc.New(runID, spec.ID, e.secret, e.reg, e.db, mergedParams, opts.Input, e.log, spec, e.engine)
 	srv.SetGateway(e.gateway)
 	srv.SetSecrets(e.secretsManager)
+	srv.SetRedactor(redactor)
 	socketPath, token, err := srv.Start(execCtx)
 	if err != nil {
 		status = registry.StatusFailure
@@ -268,7 +278,7 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 		defer wg.Done()
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {
-			_ = e.reg.AppendLog(context.Background(), runID, "warn", scanner.Text())
+			_ = e.reg.AppendLog(context.Background(), runID, "warn", redactor.RedactString(scanner.Text()))
 		}
 	}()
 

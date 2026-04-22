@@ -8,11 +8,13 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/dicode/dicode/pkg/db"
 	"github.com/dicode/dicode/pkg/registry"
+	"github.com/dicode/dicode/pkg/secrets"
 	"github.com/dicode/dicode/pkg/task"
 	"go.uber.org/zap"
 )
@@ -293,6 +295,74 @@ func TestServer_Input_Null(t *testing.T) {
 
 	if resp["result"] != nil {
 		t.Errorf("expected null input, got %v", resp["result"])
+	}
+}
+
+// TestServer_Log_RedactsSecretValue addresses dicode-core#126: the IPC
+// `log` method must strip env-injected secret values before persisting.
+// Without this, a task calling `log.info("token: " + value)` via the
+// Python SDK — which wires `dicode_sdk.py:155` straight onto the `log`
+// IPC method — would leak the value verbatim into the run-log table,
+// bypassing the stdout/stderr redactor the runtime wrappers install.
+func TestServer_Log_RedactsSecretValue(t *testing.T) {
+	const secretValue = "s3cr3t-p@ssw0rd-xyz"
+
+	e := newTestEnv(t)
+	runID := fmt.Sprintf("test-%d", time.Now().UnixNano())
+	srv := New(runID, "test-task", e.secret, e.reg, e.db, nil, nil, zap.NewNop(), nil, nil)
+	srv.SetRedactor(secrets.NewRedactor(map[string]string{"MY_TOKEN": secretValue}))
+
+	socketPath, token, err := srv.Start(context.Background())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(srv.Stop)
+	conn := dial(t, socketPath)
+	t.Cleanup(func() { conn.Close() })
+	doHandshake(t, conn, token)
+
+	sendMsg(t, conn, map[string]any{
+		"method":  "log",
+		"level":   "info",
+		"message": "secret leak attempt: " + secretValue + " trailing",
+	})
+	time.Sleep(20 * time.Millisecond)
+	srv.Stop()
+
+	logs, err := e.reg.GetRunLogs(context.Background(), srv.runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) == 0 {
+		t.Fatal("expected log entry")
+	}
+	if strings.Contains(logs[0].Message, secretValue) {
+		t.Errorf("raw secret leaked through IPC log handler: %q", logs[0].Message)
+	}
+	wantMarker := "secret leak attempt: " + secrets.RedactionMarker + " trailing"
+	if logs[0].Message != wantMarker {
+		t.Errorf("unexpected redacted form: got %q, want %q", logs[0].Message, wantMarker)
+	}
+}
+
+// TestServer_Log_NilRedactorIsPassThrough pins the nil-safe contract —
+// a server with no redactor wired (existing callers, legacy tests) must
+// keep logging unmodified.
+func TestServer_Log_NilRedactorIsPassThrough(t *testing.T) {
+	e := newTestEnv(t)
+	conn, srv := e.start(t, nil, nil)
+
+	const msg = "token=abc123 (not a secret to this server)"
+	sendMsg(t, conn, map[string]any{"method": "log", "level": "info", "message": msg})
+	time.Sleep(20 * time.Millisecond)
+	srv.Stop()
+
+	logs, err := e.reg.GetRunLogs(context.Background(), srv.runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) == 0 || logs[0].Message != msg {
+		t.Errorf("nil-redactor pass-through broken: logs=%+v", logs)
 	}
 }
 

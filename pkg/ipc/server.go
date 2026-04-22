@@ -61,6 +61,14 @@ type Server struct {
 	rotationActiveFn func() bool            // issue #144: reports whether a relay-identity rotation has started; nil means unchecked
 	log              *zap.Logger
 
+	// redactor strips secret values from inbound log messages before they
+	// hit the run log. Nil is safe (no redaction). Wired via SetRedactor
+	// after construction; runtimes that resolve env-sourced secrets should
+	// build a redactor from the resolved set and install it here so tasks
+	// calling `dicode.log` (the IPC log method, used by the Python SDK)
+	// get the same leak-protection as tasks printing to stdout/stderr.
+	redactor *secrets.Redactor
+
 	gateway *Gateway // optional; enables http.register for daemon tasks
 
 	ctx        context.Context
@@ -125,6 +133,12 @@ func New(
 // SetSecrets attaches the secrets manager so tasks with permissions.dicode.secrets_write
 // can call dicode.secrets_set() and dicode.secrets_delete().
 func (s *Server) SetSecrets(m secrets.Manager) { s.secrets = m }
+
+// SetRedactor installs a log-message redactor. Messages received via the
+// IPC "log" method are passed through r.RedactString before being
+// persisted to the run log, matching the protection stdout/stderr piping
+// already gets from runtime wrappers. Nil is safe (no redaction).
+func (s *Server) SetRedactor(r *secrets.Redactor) { s.redactor = r }
 
 // SetOAuthBroker wires the daemon's relay identity (used to sign /auth URLs
 // and decrypt token deliveries) plus the broker base URL and the
@@ -337,7 +351,10 @@ func (s *Server) handleConn(conn net.Conn) {
 			if level == "" {
 				level = "info"
 			}
-			s.bufferLog(level, req.Message)
+			// Redact env-injected secret values from the message before
+			// buffering. Nil redactor is pass-through — safe default for
+			// callers that haven't wired one (tests, legacy runtimes).
+			s.bufferLog(level, s.redactor.RedactString(req.Message))
 
 		case "kv.set":
 			if !hasCap(caps, CapKVWrite) {

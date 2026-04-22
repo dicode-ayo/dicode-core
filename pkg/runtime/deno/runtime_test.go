@@ -528,3 +528,114 @@ func (m mockSecretProvider) Name() string { return "mock" }
 func (m mockSecretProvider) Get(_ context.Context, key string) (string, error) {
 	return m[key], nil
 }
+
+// TestRuntime_LogRedaction_SecretValue addresses #126 item 3: a task that
+// writes a known secret value to stdout/stderr must have that value
+// redacted from the persisted run log. Catches regressions if the
+// stdout/stderr pipe wiring ever bypasses secrets.Redactor (e.g. adding
+// a second scanner that forgets to redact).
+func TestRuntime_LogRedaction_SecretValue(t *testing.T) {
+	const secretValue = "s3cr3t-p@ssw0rd-xyz"
+
+	e := newTestEnv(t)
+	e.rt.secrets = secrets.Chain{mockSecretProvider{"my_key": secretValue}}
+	spec := &task.Spec{
+		ID: "log-redact", Name: "log-redact", Runtime: task.RuntimeDeno,
+		Trigger: task.TriggerConfig{Manual: true}, Timeout: 30 * time.Second,
+		Permissions: task.Permissions{
+			Env: []task.EnvEntry{{Name: "MY_TOKEN", Secret: "my_key"}},
+		},
+	}
+	// Log the secret on both stdout (console.log) and stderr (console.error)
+	// so the redaction wiring on both pipes is exercised in one run.
+	r := e.runSpec(t, `
+		export default async function main() {
+			const v = Deno.env.get("MY_TOKEN");
+			console.log("stdout: " + v);
+			console.error("stderr: " + v);
+			return "ok";
+		}
+	`, spec)
+	if r.Error != nil {
+		t.Fatalf("error: %v", r.Error)
+	}
+
+	// The secret value MUST NOT appear in any log line.
+	for _, l := range r.Logs {
+		if strings.Contains(l.Message, secretValue) {
+			t.Errorf("log redaction failed — raw secret leaked on level %q: %q",
+				l.Level, l.Message)
+		}
+	}
+	// And the redaction marker MUST appear on both levels — guards against
+	// the "nothing was logged at all" failure mode looking like a pass.
+	var foundInfo, foundErr bool
+	for _, l := range r.Logs {
+		if strings.Contains(l.Message, secrets.RedactionMarker) {
+			switch l.Level {
+			case "info":
+				foundInfo = true
+			case "error":
+				foundErr = true
+			}
+		}
+	}
+	if !foundInfo {
+		t.Errorf("expected a redacted info-level log line, got: %+v", r.Logs)
+	}
+	if !foundErr {
+		t.Errorf("expected a redacted error-level log line, got: %+v", r.Logs)
+	}
+}
+
+// TestRuntime_LogRedaction_OnlyActualSecrets addresses an edge case of #126
+// item 3: plain-value env entries (entry.Value=...) and host-pass-through
+// entries (entry.From=...) are NOT secrets and must NOT be redacted. Otherwise
+// the redactor would wipe common env values from every task log.
+func TestRuntime_LogRedaction_OnlyActualSecrets(t *testing.T) {
+	const plainValue = "plain-config-value"
+	t.Setenv("DICODE_PLAIN_TEST_VAR", plainValue)
+
+	e := newTestEnv(t)
+	spec := &task.Spec{
+		ID: "log-redact-plain", Name: "log-redact-plain", Runtime: task.RuntimeDeno,
+		Trigger: task.TriggerConfig{Manual: true}, Timeout: 30 * time.Second,
+		Permissions: task.Permissions{
+			Env: []task.EnvEntry{
+				{Name: "PLAIN_INLINE", Value: plainValue},
+				{Name: "PLAIN_HOST", From: "DICODE_PLAIN_TEST_VAR"},
+			},
+		},
+	}
+	r := e.runSpec(t, `
+		export default async function main() {
+			console.log("inline: " + Deno.env.get("PLAIN_INLINE"));
+			console.log("host: "   + Deno.env.get("PLAIN_HOST"));
+			return "ok";
+		}
+	`, spec)
+	if r.Error != nil {
+		t.Fatalf("error: %v", r.Error)
+	}
+
+	var sawInline, sawHost bool
+	for _, l := range r.Logs {
+		if strings.Contains(l.Message, plainValue) {
+			switch {
+			case strings.HasPrefix(l.Message, "inline: "):
+				sawInline = true
+			case strings.HasPrefix(l.Message, "host: "):
+				sawHost = true
+			}
+		}
+		if strings.Contains(l.Message, secrets.RedactionMarker) {
+			t.Errorf("plain env value was incorrectly redacted: %q", l.Message)
+		}
+	}
+	if !sawInline {
+		t.Errorf("expected inline-value log to pass through unchanged, got: %+v", r.Logs)
+	}
+	if !sawHost {
+		t.Errorf("expected host-pass-through log to pass through unchanged, got: %+v", r.Logs)
+	}
+}

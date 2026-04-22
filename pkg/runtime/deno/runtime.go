@@ -180,6 +180,13 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	// - entry.From   → read from host OS env (os.Getenv); inject as entry.Name
 	// - bare name    → allowlisted via --allow-env; script reads from host env at runtime
 	resolved := make(map[string]string, len(spec.Permissions.Env))
+	// Track values sourced from secrets only — these are the strings the
+	// log redactor will strip from task stdout/stderr before they reach
+	// the run log. Plain Value= entries and From= host-env values are
+	// excluded: they're not secrets by the spec's own definition, and
+	// over-redaction (wiping e.g. a common host env value from every
+	// log line) would destroy log readability for no security benefit.
+	resolvedSecrets := make(map[string]string)
 	for _, entry := range spec.Permissions.Env {
 		switch {
 		case entry.Value != "":
@@ -198,11 +205,13 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 				return result, nil
 			}
 			resolved[entry.Name] = val
+			resolvedSecrets[entry.Name] = val
 		case entry.From != "":
 			resolved[entry.Name] = os.Getenv(entry.From)
 			// bare name: --allow-env only, no injection
 		}
 	}
+	redactor := secrets.NewRedactor(resolvedSecrets)
 
 	taskPath := spec.ScriptPath()
 	if taskPath == "" {
@@ -225,6 +234,7 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	srv := ipc.New(runID, spec.ID, rt.secret, rt.registry, rt.db, mergedParams, opts.Input, rt.log, spec, rt.engine)
 	srv.SetGateway(rt.gateway)
 	srv.SetSecrets(rt.secretsManager)
+	srv.SetRedactor(redactor)
 	if rt.oauthIdentity != nil {
 		srv.SetOAuthBroker(rt.oauthIdentity, rt.oauthURL, rt.oauthPending, rt.brokerPubkeyFn, rt.supportsOAuthFn, rt.rotationActiveFn)
 	}
@@ -339,14 +349,14 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		defer wg.Done()
 		scanner := bufio.NewScanner(stdout)
 		for scanner.Scan() {
-			_ = rt.registry.AppendLog(context.Background(), runID, "info", scanner.Text())
+			_ = rt.registry.AppendLog(context.Background(), runID, "info", redactor.RedactString(scanner.Text()))
 		}
 	}()
 	go func() {
 		defer wg.Done()
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {
-			_ = rt.registry.AppendLog(context.Background(), runID, "error", scanner.Text())
+			_ = rt.registry.AppendLog(context.Background(), runID, "error", redactor.RedactString(scanner.Text()))
 		}
 	}()
 
