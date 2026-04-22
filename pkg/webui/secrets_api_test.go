@@ -132,15 +132,21 @@ func TestAPI_ListSecrets_ReturnsKeysOnly(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &keys); err != nil {
 		t.Fatalf("decode body: %v (body=%q)", err, body)
 	}
-	sort.Strings(keys)
-	want := []string{"api_key", "db_password", "webhook_secret"}
+	// Set-based assertion — the real LocalProvider doesn't guarantee an
+	// ordering (SQLite scan order varies), so the test must not depend on
+	// the mock's `sort.Strings` helper.
+	want := map[string]bool{"api_key": true, "db_password": true, "webhook_secret": true}
 	if len(keys) != len(want) {
 		t.Fatalf("keys = %v, want %v", keys, want)
 	}
-	for i, k := range want {
-		if keys[i] != k {
-			t.Errorf("keys[%d] = %q, want %q", i, keys[i], k)
+	for _, k := range keys {
+		if !want[k] {
+			t.Errorf("unexpected key %q in response", k)
 		}
+		delete(want, k)
+	}
+	if len(want) > 0 {
+		t.Errorf("missing keys in response: %v", want)
 	}
 }
 
