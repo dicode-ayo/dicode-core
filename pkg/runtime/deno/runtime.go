@@ -234,6 +234,7 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	srv := ipc.New(runID, spec.ID, rt.secret, rt.registry, rt.db, mergedParams, opts.Input, rt.log, spec, rt.engine)
 	srv.SetGateway(rt.gateway)
 	srv.SetSecrets(rt.secretsManager)
+	srv.SetRedactor(redactor)
 	if rt.oauthIdentity != nil {
 		srv.SetOAuthBroker(rt.oauthIdentity, rt.oauthURL, rt.oauthPending, rt.brokerPubkeyFn, rt.supportsOAuthFn, rt.rotationActiveFn)
 	}
