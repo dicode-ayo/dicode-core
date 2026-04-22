@@ -173,15 +173,26 @@ func TestCall_RPCError(t *testing.T) {
 }
 
 func TestCall_ConnectionRefused(t *testing.T) {
-	// Point at a port that's very unlikely to have a server on it. Using port
-	// 1 (tcpmux) on localhost is the closed-port standby in net tests — the
-	// kernel returns ECONNREFUSED immediately with no retry delay.
-	client := New(1)
-	// Short ctx deadline so a hypothetical firewall-drop doesn't stall us.
+	// Bind an httptest server to grab an ephemeral port, then close it so we
+	// point Client at a guaranteed-closed local port. More robust than
+	// hardcoding port 1 (tcpmux), which can return EACCES/EPERM on restricted
+	// CI sandboxes instead of the ECONNREFUSED we want.
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("parse test server URL: %v", err)
+	}
+	port, err := strconv.Atoi(u.Port())
+	if err != nil {
+		t.Fatalf("parse test server port: %v", err)
+	}
+	srv.Close()
+
+	client := New(port)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	_, err := client.ListTools(ctx)
+	_, err = client.ListTools(ctx)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
