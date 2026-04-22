@@ -235,6 +235,22 @@ func TestDecryptOAuthToken_RejectsTamperedType(t *testing.T) {
 	}
 }
 
+// TestDecryptOAuthToken_RejectsWrongRecipient covers #124 item 3 "wrong
+// recipient fails". Encrypt a payload targeting daemon A's decrypt pubkey,
+// then attempt to decrypt with daemon B's identity. ECDH over B's private
+// key + the ephemeral pubkey derives a different shared secret, so HKDF
+// produces a different AES key — GCM's Open must reject the tag.
+func TestDecryptOAuthToken_RejectsWrongRecipient(t *testing.T) {
+	daemonA := newOAuthTestIdentity(t)
+	daemonB := newOAuthTestIdentity(t)
+
+	payload := encryptForDaemon(t, daemonA, "550e8400-e29b-41d4-a716-446655440000", []byte("for-A-only"))
+
+	if _, err := DecryptOAuthToken(daemonB, payload); err == nil {
+		t.Fatal("payload encrypted for daemon A decrypted successfully with daemon B — recipient binding broken")
+	}
+}
+
 // encryptForDaemon mirrors dicode-relay src/broker/crypto.ts eciesEncrypt().
 func encryptForDaemon(t *testing.T, daemon *Identity, sessionID string, plaintext []byte) *OAuthTokenDeliveryPayload {
 	t.Helper()
