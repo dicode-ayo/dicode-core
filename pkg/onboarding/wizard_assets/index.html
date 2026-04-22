@@ -35,6 +35,16 @@
   <p class="lede">One-time setup. Tasks and secrets live on your machine.</p>
 
   <form id="f">
+    <fieldset>
+      <legend>Setup PIN</legend>
+      <div class="row">
+        <label for="pin">Enter the 6-digit PIN from your terminal</label>
+        <input type="text" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="off"
+               name="pin" id="pin" placeholder="000000" required />
+        <p id="pinErr" style="color:#f38b8b;margin:.4rem 0 0;display:none"></p>
+      </div>
+    </fieldset>
+
     <fieldset id="tasksets">
       <legend>Curated task collections</legend>
       <!-- rendered by main.js from the preset list exposed at /setup/presets -->

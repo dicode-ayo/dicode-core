@@ -14,12 +14,16 @@ import (
 
 const (
 	testBrowserHome = "/home/wizard"
-	testToken       = "test-token-abc"
+	testPIN         = "123456"
 )
 
 func noopApply(Result) error { return nil }
 
-func postJSONWithToken(t *testing.T, handler http.Handler, path, token string, body any) *httptest.ResponseRecorder {
+// testGate returns a pinGate pre-seeded with testPIN and a generous
+// attempt budget so unrelated tests don't accidentally hit lockout.
+func testGate() *pinGate { return newPinGate(testPIN, 5) }
+
+func postJSONWithPIN(t *testing.T, handler http.Handler, path, pin string, body any) *httptest.ResponseRecorder {
 	t.Helper()
 	buf, err := json.Marshal(body)
 	if err != nil {
@@ -27,8 +31,8 @@ func postJSONWithToken(t *testing.T, handler http.Handler, path, token string, b
 	}
 	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(buf))
 	req.Header.Set("Content-Type", "application/json")
-	if token != "" {
-		req.Header.Set("X-Setup-Token", token)
+	if pin != "" {
+		req.Header.Set("X-Setup-Pin", pin)
 	}
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -36,7 +40,7 @@ func postJSONWithToken(t *testing.T, handler http.Handler, path, token string, b
 }
 
 func TestBuildWizardHandler_GetIndex_ServesHTML(t *testing.T) {
-	h, _ := buildWizardHandler(testBrowserHome, testToken, noopApply)
+	h, _ := buildWizardHandler(testBrowserHome, testGate(), noopApply)
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -54,7 +58,7 @@ func TestBuildWizardHandler_GetIndex_ServesHTML(t *testing.T) {
 }
 
 func TestBuildWizardHandler_PostApply_FillsResult(t *testing.T) {
-	h, resCh := buildWizardHandler(testBrowserHome, testToken, noopApply)
+	h, resCh := buildWizardHandler(testBrowserHome, testGate(), noopApply)
 
 	payload := map[string]any{
 		"tasksets": map[string]bool{
@@ -66,7 +70,7 @@ func TestBuildWizardHandler_PostApply_FillsResult(t *testing.T) {
 		"data_dir":        "/var/dicode",
 		"port":            9091,
 	}
-	rec := postJSONWithToken(t, h, "/setup/apply", testToken, payload)
+	rec := postJSONWithPIN(t, h, "/setup/apply", testPIN, payload)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("POST /setup/apply status = %d; want 200. body=%q", rec.Code, rec.Body.String())
@@ -105,11 +109,11 @@ func TestBuildWizardHandler_PostApply_FillsResult(t *testing.T) {
 }
 
 func TestBuildWizardHandler_PostApply_RejectsBadJSON(t *testing.T) {
-	h, _ := buildWizardHandler(testBrowserHome, testToken, noopApply)
+	h, _ := buildWizardHandler(testBrowserHome, testGate(), noopApply)
 	req := httptest.NewRequest(http.MethodPost, "/setup/apply",
 		strings.NewReader(`{not-json`))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Setup-Token", testToken)
+	req.Header.Set("X-Setup-Pin", testPIN)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
@@ -118,34 +122,57 @@ func TestBuildWizardHandler_PostApply_RejectsBadJSON(t *testing.T) {
 	}
 }
 
-// TestBuildWizardHandler_PostApply_RequiresToken guards against the
-// loopback-local-attacker race: a process sniffing /proc/net/tcp must not
-// be able to win the submit without the token embedded in the URL that
-// was opened in the user's browser.
-func TestBuildWizardHandler_PostApply_RequiresToken(t *testing.T) {
-	h, resCh := buildWizardHandler(testBrowserHome, testToken, noopApply)
+// TestBuildWizardHandler_PostApply_RequiresPIN guards against local
+// attackers that can read /proc/<pid>/cmdline: the PIN lives only on the
+// user's controlling terminal, so a process without terminal access
+// cannot supply it.
+func TestBuildWizardHandler_PostApply_RequiresPIN(t *testing.T) {
+	h, resCh := buildWizardHandler(testBrowserHome, testGate(), noopApply)
 	payload := map[string]any{
 		"tasksets": map[string]bool{"buildin": true},
 		"port":     8080,
 	}
 
-	// No token header → 403.
-	noTok := postJSONWithToken(t, h, "/setup/apply", "", payload)
-	if noTok.Code != http.StatusForbidden {
-		t.Errorf("no-token status = %d; want 403", noTok.Code)
+	// No PIN header → 403.
+	noPIN := postJSONWithPIN(t, h, "/setup/apply", "", payload)
+	if noPIN.Code != http.StatusForbidden {
+		t.Errorf("no-PIN status = %d; want 403", noPIN.Code)
 	}
 
-	// Wrong token → 403.
-	badTok := postJSONWithToken(t, h, "/setup/apply", "wrong", payload)
-	if badTok.Code != http.StatusForbidden {
-		t.Errorf("bad-token status = %d; want 403", badTok.Code)
+	// Wrong PIN → 403.
+	badPIN := postJSONWithPIN(t, h, "/setup/apply", "000000", payload)
+	if badPIN.Code != http.StatusForbidden {
+		t.Errorf("bad-PIN status = %d; want 403", badPIN.Code)
 	}
 
 	// No result pushed to channel from either rejected attempt.
 	select {
 	case got := <-resCh:
-		t.Fatalf("channel received Result despite token rejection: %+v", got)
+		t.Fatalf("channel received Result despite PIN rejection: %+v", got)
 	default:
+	}
+}
+
+// TestBuildWizardHandler_PostApply_LocksOutAfterMaxAttempts ensures
+// brute-force attempts can't enumerate the 6-digit PIN.
+func TestBuildWizardHandler_PostApply_LocksOutAfterMaxAttempts(t *testing.T) {
+	gate := newPinGate(testPIN, 3) // tight budget for the test
+	h, _ := buildWizardHandler(testBrowserHome, gate, noopApply)
+	payload := map[string]any{
+		"tasksets": map[string]bool{"buildin": true},
+		"port":     8080,
+	}
+	// Exhaust the budget with wrong PINs.
+	for i := 0; i < 3; i++ {
+		rec := postJSONWithPIN(t, h, "/setup/apply", "999999", payload)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("attempt %d: status = %d; want 403", i, rec.Code)
+		}
+	}
+	// Even the correct PIN is now rejected.
+	rec := postJSONWithPIN(t, h, "/setup/apply", testPIN, payload)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("correct-PIN-after-lockout status = %d; want 403", rec.Code)
 	}
 }
 
@@ -154,13 +181,13 @@ func TestBuildWizardHandler_PostApply_RequiresToken(t *testing.T) {
 func TestBuildWizardHandler_Apply_Failure_Returns500(t *testing.T) {
 	boom := errors.New("write-config failed")
 	failApply := func(Result) error { return boom }
-	h, resCh := buildWizardHandler(testBrowserHome, testToken, failApply)
+	h, resCh := buildWizardHandler(testBrowserHome, testGate(), failApply)
 
 	payload := map[string]any{
 		"tasksets": map[string]bool{"buildin": true},
 		"port":     8080,
 	}
-	rec := postJSONWithToken(t, h, "/setup/apply", testToken, payload)
+	rec := postJSONWithPIN(t, h, "/setup/apply", testPIN, payload)
 
 	if rec.Code != http.StatusInternalServerError {
 		t.Errorf("status = %d; want 500", rec.Code)

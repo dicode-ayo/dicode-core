@@ -164,11 +164,12 @@ TTY detection: `golang.org/x/term.IsTerminal(os.Stdin.Fd())`. Display detection 
 
 ### Browser wizard
 
-Loopback is **not** a per-user trust boundary on Linux — `/proc/net/tcp` leaks any listener to any local user. The wizard defends against a local-race-to-submit attack with a single-use token:
+Loopback is **not** a per-user trust boundary on Linux — `/proc/net/tcp` leaks any listener to any local user, and `/proc/<pid>/cmdline` leaks any argv passed to a child process (e.g. `xdg-open <url>`). To close both channels the wizard uses a PIN entered by the user, not a URL-embedded secret:
 
-- `RunBrowser` generates a random 128-bit hex token, embeds it in the URL (`http://127.0.0.1:<port>/?t=<token>`), and opens the browser to that URL.
-- The embedded JS reads `?t=` from `window.location.search` and sends it back as `X-Setup-Token` on the POST to `/setup/apply`.
-- The handler constant-time-compares `X-Setup-Token` against the token; mismatch → 403.
+- `RunBrowser` generates a 6-digit PIN via `GeneratePIN()` (uniform via rejection sampling on `crypto/rand`). The PIN is printed to the daemon's controlling terminal — a surface another local UID cannot read.
+- The browser is opened to a bare `http://127.0.0.1:<port>/`. No secret in argv, no secret in stdout-captured URLs.
+- The wizard page asks the user to type the PIN and sends it back on POST `/setup/apply` as `X-Setup-Pin`.
+- `/setup/apply` gates on a `pinGate` that does constant-time compare and enforces **5 wrong-PIN attempts max** before locking the session (subsequent requests, even with the correct PIN, return 403). Brute-force probability per session: 5 / 10^6 ≈ 5e-6.
 
 Additionally, `/setup/apply` calls the caller-supplied `apply(Result)` function **before** returning the passphrase, so the client never sees a credential the daemon hasn't stored. If `apply` fails → 500, no passphrase in response, nothing on the channel.
 

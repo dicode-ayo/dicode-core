@@ -1,9 +1,4 @@
 (async () => {
-  // Token from the URL gates /setup/apply. Fails-closed if absent so a
-  // local attacker scanning /proc/net/tcp for the random port can't win
-  // the submit race.
-  const token = new URLSearchParams(window.location.search).get("t") || "";
-
   const presets = await fetch("/setup/presets").then((r) => r.json());
   const defaults = await fetch("/setup/defaults").then((r) => r.json());
 
@@ -52,14 +47,23 @@
       port: Number(form.elements.port.value) || 8080,
     };
 
+    const pin = form.elements.pin.value.trim();
+    const pinErr = document.getElementById("pinErr");
+    pinErr.style.display = "none";
+
     const res = await fetch("/setup/apply", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-Setup-Token": token,
+        "X-Setup-Pin": pin,
       },
       body: JSON.stringify(payload),
     });
+    if (res.status === 403) {
+      pinErr.textContent = "Incorrect PIN. Check the daemon's terminal and try again (session locks after several wrong attempts).";
+      pinErr.style.display = "block";
+      return;
+    }
     if (!res.ok) {
       alert("setup failed: " + res.status + " " + (await res.text()));
       return;

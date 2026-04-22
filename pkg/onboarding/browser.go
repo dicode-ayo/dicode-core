@@ -2,10 +2,7 @@ package onboarding
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/subtle"
 	"embed"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,13 +19,14 @@ import (
 var wizardFS embed.FS
 
 // buildWizardHandler wires the static wizard assets and the /setup/* API
-// routes. POST /setup/apply is gated by a single-use token that must be
-// echoed as X-Setup-Token; callers obtain it from the URL query string
-// the server prints to stdout (and opens in the browser). apply is
+// routes. POST /setup/apply is gated by a PIN supplied in the X-Setup-Pin
+// header; the PIN lives only on the daemon's controlling terminal, never
+// in process argv or an externally-reachable URL, which closes the
+// /proc/<pid>/cmdline leak a URL-embedded token would carry. apply is
 // invoked inside /setup/apply with the submitted Result, atomically with
 // the passphrase being returned: on non-nil error the passphrase is NOT
 // sent to the client and the channel is not fed.
-func buildWizardHandler(home, token string, apply func(Result) error) (http.Handler, <-chan Result) {
+func buildWizardHandler(home string, gate *pinGate, apply func(Result) error) (http.Handler, <-chan Result) {
 	resCh := make(chan Result, 1)
 	mux := http.NewServeMux()
 
@@ -85,9 +83,9 @@ func buildWizardHandler(home, token string, apply func(Result) error) (http.Hand
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		// Constant-time compare to avoid leaking the token via timing.
-		got := r.Header.Get("X-Setup-Token")
-		if len(got) != len(token) || subtle.ConstantTimeCompare([]byte(got), []byte(token)) != 1 {
+		// PIN gate: constant-time compare + bounded attempts (enforced
+		// inside pinGate.Check).
+		if !gate.Check(r.Header.Get("X-Setup-Pin")) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
@@ -147,11 +145,12 @@ func buildWizardHandler(home, token string, apply func(Result) error) (http.Hand
 // listener lingers up to 60s to let the client render the success page,
 // or until ctx is cancelled, whichever comes first.
 func RunBrowser(ctx context.Context, home string, apply func(Result) error) (Result, error) {
-	token, err := newSetupToken()
-	if err != nil {
-		return Result{}, fmt.Errorf("token: %w", err)
-	}
-	handler, resCh := buildWizardHandler(home, token, apply)
+	pin := GeneratePIN()
+	// 5 wrong-PIN attempts locks the session; the user restarts the
+	// daemon to retry. At 6 digits that leaves a brute-force probability
+	// of 5 / 10^6 ≈ 5e-6 per session.
+	gate := newPinGate(pin, 5)
+	handler, resCh := buildWizardHandler(home, gate, apply)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -164,8 +163,13 @@ func RunBrowser(ctx context.Context, home string, apply func(Result) error) (Res
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(ln) }()
 
-	url := fmt.Sprintf("http://%s/?t=%s", ln.Addr().String(), token)
-	fmt.Printf("Open your browser to %s\n", url)
+	url := "http://" + ln.Addr().String() + "/"
+	// Print the PIN to the daemon's controlling terminal. It is NOT in
+	// the URL (which goes through argv to xdg-open/open/start and is
+	// world-readable via /proc/<pid>/cmdline on Linux) — the user types
+	// it into the browser instead.
+	fmt.Printf("\n  dicode setup PIN: %s\n", pin)
+	fmt.Printf("  Open your browser to %s and enter the PIN above.\n\n", url)
 	if err := openBrowser(url); err != nil {
 		fmt.Fprintf(os.Stderr, "(could not auto-launch browser: %v — open the URL above manually)\n", err)
 	}
@@ -196,14 +200,6 @@ func RunBrowser(ctx context.Context, home string, apply func(Result) error) (Res
 		}
 		return Result{}, fmt.Errorf("serve: %w", err)
 	}
-}
-
-func newSetupToken() (string, error) {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(b[:]), nil
 }
 
 func openBrowser(url string) error {
