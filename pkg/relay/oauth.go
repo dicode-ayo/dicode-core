@@ -284,13 +284,28 @@ func VerifyBrokerSig(brokerPubkeyBase64 string, payload *OAuthTokenDeliveryPaylo
 	}
 
 	// Reconstruct the exact digest the broker signed.
-	h := sha256.New()
-	h.Write([]byte(payload.Type))
-	h.Write([]byte(payload.SessionID))
-	h.Write([]byte(payload.EphemeralPubkey))
-	h.Write([]byte(payload.Ciphertext))
-	h.Write([]byte(payload.Nonce))
-	digest := h.Sum(nil)
+	//
+	// The Node broker builds a signature payload via
+	// dicode-relay/src/broker/signing.ts:buildDeliverySignaturePayload
+	// — which returns sha256(type || session || eph || ct || nonce) as
+	// 32 bytes — and then passes THAT to createSign("SHA256").update().sign().
+	// Node's createSign SHA-256-hashes its input again before signing, so
+	// the actual signed digest is sha256(sha256(fields)).
+	//
+	// ecdsa.VerifyASN1 treats its third argument as the already-hashed
+	// message to verify against, so we must hand it the two-layer digest
+	// to match. Handing the one-layer inner digest would verify against
+	// sha256(fields) while Node signed sha256(sha256(fields)) — mismatch,
+	// verification always fails. See #151 for the full trace.
+	innerH := sha256.New()
+	innerH.Write([]byte(payload.Type))
+	innerH.Write([]byte(payload.SessionID))
+	innerH.Write([]byte(payload.EphemeralPubkey))
+	innerH.Write([]byte(payload.Ciphertext))
+	innerH.Write([]byte(payload.Nonce))
+	outerH := sha256.New()
+	outerH.Write(innerH.Sum(nil))
+	digest := outerH.Sum(nil)
 
 	sigBytes, err := base64.StdEncoding.DecodeString(payload.BrokerSig)
 	if err != nil {

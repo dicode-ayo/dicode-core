@@ -8,6 +8,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -276,5 +277,222 @@ func encryptForDaemon(t *testing.T, daemon *Identity, sessionID string, plaintex
 		EphemeralPubkey: base64.StdEncoding.EncodeToString(eph.PublicKey().Bytes()),
 		Ciphertext:      base64.StdEncoding.EncodeToString(ctWithTag),
 		Nonce:           base64.StdEncoding.EncodeToString(iv),
+	}
+}
+
+// TestVerifyBrokerSig_AcceptsNodeStyleDoubleHash covers issue #151: the
+// Node broker constructs the sig payload as sha256(type||session||eph||ct||
+// nonce) and passes that to createSign("SHA256").update().sign() — which
+// hashes the input AGAIN before signing. Actual signed digest:
+// sha256(sha256(fields)). VerifyBrokerSig must accept this — without the
+// fix, every real OAuth delivery would fail verification.
+//
+// We can't run Node from a Go test, so we simulate its behaviour with
+// pure Go primitives: compute the inner pre-hash, then sign the outer
+// sha256(innerDigest) with ecdsa.SignASN1. The resulting signature has
+// the exact bit shape Node would emit.
+func TestVerifyBrokerSig_AcceptsNodeStyleDoubleHash(t *testing.T) {
+	// Fresh broker keypair + its SPKI/DER public in base64 (the wire format
+	// the daemon pins via TOFU and passes to VerifyBrokerSig).
+	brokerPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("broker keygen: %v", err)
+	}
+	pubDER, err := x509.MarshalPKIXPublicKey(&brokerPriv.PublicKey)
+	if err != nil {
+		t.Fatalf("marshal pub: %v", err)
+	}
+	brokerPubB64 := base64.StdEncoding.EncodeToString(pubDER)
+
+	payload := &OAuthTokenDeliveryPayload{
+		Type:            "oauth_token_delivery",
+		SessionID:       "550e8400-e29b-41d4-a716-446655440000",
+		EphemeralPubkey: base64.StdEncoding.EncodeToString(make([]byte, 65)),
+		Ciphertext:      base64.StdEncoding.EncodeToString([]byte("ciphertext+tag")),
+		Nonce:           base64.StdEncoding.EncodeToString(make([]byte, 12)),
+	}
+
+	// Simulate Node's createSign("SHA256").update(innerDigest).sign():
+	//  - innerDigest = sha256(type || session || eph || ct || nonce)
+	//  - Node then hashes innerDigest one more time via its own SHA-256
+	//    pre-sign pass, so the value actually fed into ECDSA is
+	//    outerDigest = sha256(innerDigest).
+	innerHasher := sha256.New()
+	innerHasher.Write([]byte(payload.Type))
+	innerHasher.Write([]byte(payload.SessionID))
+	innerHasher.Write([]byte(payload.EphemeralPubkey))
+	innerHasher.Write([]byte(payload.Ciphertext))
+	innerHasher.Write([]byte(payload.Nonce))
+	outerDigest := sha256.Sum256(innerHasher.Sum(nil))
+
+	sig, err := ecdsa.SignASN1(rand.Reader, brokerPriv, outerDigest[:])
+	if err != nil {
+		t.Fatalf("simulate node sign: %v", err)
+	}
+	payload.BrokerSig = base64.StdEncoding.EncodeToString(sig)
+
+	if err := VerifyBrokerSig(brokerPubB64, payload); err != nil {
+		t.Fatalf("VerifyBrokerSig rejected a valid Node-style signature: %v", err)
+	}
+}
+
+// TestVerifyBrokerSig_RejectsSingleHashSignature guards against a
+// regression of #151. A sig produced against the one-layer digest
+// sha256(fields) — which is what the daemon used to verify against
+// before the fix — must NOT validate: Node doesn't produce that shape,
+// so any signature of that shape is either a bug or a forgery.
+func TestVerifyBrokerSig_RejectsSingleHashSignature(t *testing.T) {
+	brokerPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("broker keygen: %v", err)
+	}
+	pubDER, err := x509.MarshalPKIXPublicKey(&brokerPriv.PublicKey)
+	if err != nil {
+		t.Fatalf("marshal pub: %v", err)
+	}
+	brokerPubB64 := base64.StdEncoding.EncodeToString(pubDER)
+
+	payload := &OAuthTokenDeliveryPayload{
+		Type:            "oauth_token_delivery",
+		SessionID:       "550e8400-e29b-41d4-a716-446655440000",
+		EphemeralPubkey: base64.StdEncoding.EncodeToString(make([]byte, 65)),
+		Ciphertext:      base64.StdEncoding.EncodeToString([]byte("ciphertext+tag")),
+		Nonce:           base64.StdEncoding.EncodeToString(make([]byte, 12)),
+	}
+
+	// Sign the ONE-layer digest — the shape that the pre-#151 daemon
+	// expected but that Node never actually produces.
+	h := sha256.New()
+	h.Write([]byte(payload.Type))
+	h.Write([]byte(payload.SessionID))
+	h.Write([]byte(payload.EphemeralPubkey))
+	h.Write([]byte(payload.Ciphertext))
+	h.Write([]byte(payload.Nonce))
+	singleDigest := h.Sum(nil)
+
+	sig, err := ecdsa.SignASN1(rand.Reader, brokerPriv, singleDigest)
+	if err != nil {
+		t.Fatalf("sign single-hash: %v", err)
+	}
+	payload.BrokerSig = base64.StdEncoding.EncodeToString(sig)
+
+	if err := VerifyBrokerSig(brokerPubB64, payload); err == nil {
+		t.Fatal("VerifyBrokerSig must reject single-layer-hash signatures (pre-#151 shape)")
+	}
+}
+
+// TestVerifyBrokerSig_RejectsTamperedPayload confirms bit-flips in any of
+// the five signed fields invalidate the signature. Uses the correct
+// Node-style double-hash so the baseline signature would otherwise pass.
+func TestVerifyBrokerSig_RejectsTamperedPayload(t *testing.T) {
+	brokerPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("broker keygen: %v", err)
+	}
+	pubDER, err := x509.MarshalPKIXPublicKey(&brokerPriv.PublicKey)
+	if err != nil {
+		t.Fatalf("marshal pub: %v", err)
+	}
+	brokerPubB64 := base64.StdEncoding.EncodeToString(pubDER)
+
+	sign := func(p *OAuthTokenDeliveryPayload) {
+		h := sha256.New()
+		h.Write([]byte(p.Type))
+		h.Write([]byte(p.SessionID))
+		h.Write([]byte(p.EphemeralPubkey))
+		h.Write([]byte(p.Ciphertext))
+		h.Write([]byte(p.Nonce))
+		outer := sha256.Sum256(h.Sum(nil))
+		sig, err := ecdsa.SignASN1(rand.Reader, brokerPriv, outer[:])
+		if err != nil {
+			t.Fatalf("sign: %v", err)
+		}
+		p.BrokerSig = base64.StdEncoding.EncodeToString(sig)
+	}
+
+	base := OAuthTokenDeliveryPayload{
+		Type:            "oauth_token_delivery",
+		SessionID:       "550e8400-e29b-41d4-a716-446655440000",
+		EphemeralPubkey: base64.StdEncoding.EncodeToString(make([]byte, 65)),
+		Ciphertext:      base64.StdEncoding.EncodeToString([]byte("ciphertext+tag")),
+		Nonce:           base64.StdEncoding.EncodeToString(make([]byte, 12)),
+	}
+	sign(&base)
+
+	// Sanity: baseline signature verifies. If this fails we're not even
+	// exercising the tamper detection below.
+	if err := VerifyBrokerSig(brokerPubB64, &base); err != nil {
+		t.Fatalf("baseline signature unexpectedly failed: %v", err)
+	}
+
+	for _, mutation := range []struct {
+		name  string
+		apply func(p *OAuthTokenDeliveryPayload)
+	}{
+		{"Type", func(p *OAuthTokenDeliveryPayload) { p.Type = "oauth_token_delivery_v2" }},
+		{"SessionID", func(p *OAuthTokenDeliveryPayload) {
+			p.SessionID = "660e8400-e29b-41d4-a716-446655440000"
+		}},
+		{"EphemeralPubkey", func(p *OAuthTokenDeliveryPayload) {
+			p.EphemeralPubkey = base64.StdEncoding.EncodeToString(make([]byte, 64))
+		}},
+		{"Ciphertext", func(p *OAuthTokenDeliveryPayload) {
+			p.Ciphertext = base64.StdEncoding.EncodeToString([]byte("different+tag"))
+		}},
+		{"Nonce", func(p *OAuthTokenDeliveryPayload) {
+			p.Nonce = base64.StdEncoding.EncodeToString(make([]byte, 11))
+		}},
+	} {
+		t.Run(mutation.name, func(t *testing.T) {
+			mutated := base
+			mutation.apply(&mutated)
+			if err := VerifyBrokerSig(brokerPubB64, &mutated); err == nil {
+				t.Errorf("VerifyBrokerSig accepted a tampered payload (field: %s)", mutation.name)
+			}
+		})
+	}
+}
+
+// TestVerifyBrokerSig_RejectsEmptyPinnedPubkey covers the no-TOFU-pin-yet
+// branch: VerifyBrokerSig refuses if it has no pinned broker key to verify
+// against. Guards against a future refactor accidentally falling through
+// to a VerifyASN1 call with a nil key.
+func TestVerifyBrokerSig_RejectsEmptyPinnedPubkey(t *testing.T) {
+	payload := &OAuthTokenDeliveryPayload{
+		Type:            "oauth_token_delivery",
+		SessionID:       "550e8400-e29b-41d4-a716-446655440000",
+		EphemeralPubkey: base64.StdEncoding.EncodeToString(make([]byte, 65)),
+		Ciphertext:      base64.StdEncoding.EncodeToString([]byte("ct")),
+		Nonce:           base64.StdEncoding.EncodeToString(make([]byte, 12)),
+		BrokerSig:       "not-empty-but-unverifiable",
+	}
+
+	if err := VerifyBrokerSig("", payload); err == nil {
+		t.Fatal("VerifyBrokerSig must reject when no broker pubkey is pinned")
+	}
+}
+
+// TestVerifyBrokerSig_RejectsMissingSig covers #103's invariant: an
+// envelope with no broker_sig is never accepted, regardless of the pinned
+// pubkey.
+func TestVerifyBrokerSig_RejectsMissingSig(t *testing.T) {
+	brokerPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("broker keygen: %v", err)
+	}
+	pubDER, _ := x509.MarshalPKIXPublicKey(&brokerPriv.PublicKey)
+	brokerPubB64 := base64.StdEncoding.EncodeToString(pubDER)
+
+	payload := &OAuthTokenDeliveryPayload{
+		Type:            "oauth_token_delivery",
+		SessionID:       "550e8400-e29b-41d4-a716-446655440000",
+		EphemeralPubkey: base64.StdEncoding.EncodeToString(make([]byte, 65)),
+		Ciphertext:      base64.StdEncoding.EncodeToString([]byte("ct")),
+		Nonce:           base64.StdEncoding.EncodeToString(make([]byte, 12)),
+		// BrokerSig intentionally left empty.
+	}
+
+	if err := VerifyBrokerSig(brokerPubB64, payload); err == nil {
+		t.Fatal("VerifyBrokerSig must reject envelopes missing broker_sig")
 	}
 }
