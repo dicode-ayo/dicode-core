@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"net/http"
+	"testing"
 
 	"github.com/coder/websocket"
 	"go.uber.org/zap"
@@ -16,20 +17,16 @@ func dialWS(ctx context.Context, url string) (*websocket.Conn, *http.Response, e
 	return websocket.Dial(ctx, url, nil)
 }
 
-// severAllWS closes every active WebSocket connection currently tracked by
-// the Server. Used by reconnect tests — httptest.Server.CloseClientConnections
-// is a no-op on hijacked (upgraded) connections, so it does NOT force a
-// daemon-side reconnect on its own. Reaching into the server's client map
-// and closing each WS forces the daemon's read loop to return and runOnce
-// to exit, which is what triggers Run's reconnect cycle.
-func severAllWS(s *Server) {
-	s.mu.Lock()
-	conns := make([]*websocket.Conn, 0, len(s.clients))
-	for _, sc := range s.clients {
-		conns = append(conns, sc.conn)
+// newTestIdentity generates a fresh identity backed by an in-memory SQLite DB.
+// Multiple tests across the package need one; keeping the helper here avoids
+// a test-file-to-test-file dependency.
+func newTestIdentity(t *testing.T) *Identity {
+	t.Helper()
+	ctx := context.Background()
+	database := openTestDB(t)
+	id, err := LoadOrGenerateIdentity(ctx, database, zap.NewNop())
+	if err != nil {
+		t.Fatalf("generate identity: %v", err)
 	}
-	s.mu.Unlock()
-	for _, c := range conns {
-		_ = c.CloseNow()
-	}
+	return id
 }
