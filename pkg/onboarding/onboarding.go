@@ -28,6 +28,7 @@ type RunOptions struct {
 	Out        io.Writer
 	Home       string              // used to render default ~/dicode-tasks, ~/.dicode
 	Env        func(string) string // typically os.Getenv
+	Port       int                 // optional --port override; 0 = use default 8080
 }
 
 // Run is the single entry point called by the daemon when no config exists.
@@ -49,12 +50,12 @@ func Run(ctx context.Context, configPath string, opts RunOptions) error {
 	var res Result
 	switch surface {
 	case SurfaceSilent:
-		res = defaultResult(opts.Home)
+		res = defaultResult(opts.Home, opts.Port)
 		if err := apply(res); err != nil {
 			return fmt.Errorf("write config: %w", err)
 		}
 	case SurfaceCLI:
-		res, err = RunCLI(opts.In, opts.Out, opts.Home)
+		res, err = RunCLI(opts.In, opts.Out, opts.Home, opts.Port)
 		if err != nil {
 			return fmt.Errorf("wizard: %w", err)
 		}
@@ -64,7 +65,7 @@ func Run(ctx context.Context, configPath string, opts RunOptions) error {
 	case SurfaceBrowser:
 		// apply runs INSIDE /setup/apply before the passphrase is handed
 		// back to the browser — no re-apply here.
-		res, err = RunBrowser(ctx, opts.Home, apply)
+		res, err = RunBrowser(ctx, opts.Home, opts.Port, apply)
 		if err != nil {
 			return fmt.Errorf("wizard: %w", err)
 		}
@@ -74,10 +75,11 @@ func Run(ctx context.Context, configPath string, opts RunOptions) error {
 	return nil
 }
 
-// defaultResult produces the Result used for non-interactive / silent runs:
-// all curated tasksets on, default paths under home, port 8080, generated
-// passphrase.
-func defaultResult(home string) Result {
+// defaultResult produces the Result used for non-interactive / silent
+// runs: all curated tasksets on, default paths under home, generated
+// passphrase. port, when non-zero, overrides the default 8080 — so
+// systemd/Docker installs started with --port honor the flag.
+func defaultResult(home string, port int) Result {
 	enabled := make(map[string]bool, len(TaskSetPresets))
 	for _, p := range TaskSetPresets {
 		enabled[p.Name] = p.DefaultOn
@@ -86,7 +88,7 @@ func defaultResult(home string) Result {
 		TaskSetsEnabled: enabled,
 		LocalTasksDir:   home + "/dicode-tasks",
 		DataDir:         home + "/.dicode",
-		Port:            defaultPort,
+		Port:            portOr(port, defaultPort),
 		Passphrase:      GeneratePassphrase(),
 	}
 }

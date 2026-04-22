@@ -12,15 +12,17 @@ const defaultPort = 8080
 
 // RunCLI walks the user through the wizard on stdin/stdout via a linear
 // series of prompts. home is used to render default paths
-// (~/dicode-tasks, ~/.dicode).
-func RunCLI(in io.Reader, out io.Writer, home string) (Result, error) {
+// (~/dicode-tasks, ~/.dicode). port, if non-zero, overrides the default
+// 8080 prompt value in the advanced section — useful when the daemon
+// was started with an explicit --port flag for multi-instance setups.
+func RunCLI(in io.Reader, out io.Writer, home string, port int) (Result, error) {
 	scanner := bufio.NewScanner(in)
 
 	res := Result{
 		TaskSetsEnabled: make(map[string]bool, len(TaskSetPresets)),
 		LocalTasksDir:   home + "/dicode-tasks",
 		DataDir:         home + "/.dicode",
-		Port:            defaultPort,
+		Port:            portOr(port, defaultPort),
 		Passphrase:      GeneratePassphrase(),
 	}
 
@@ -95,4 +97,12 @@ func alt(s string) string {
 		return "n"
 	}
 	return "y"
+}
+
+// portOr returns override when it names a valid port, otherwise fallback.
+func portOr(override, fallback int) int {
+	if override > 0 && override <= 65535 {
+		return override
+	}
+	return fallback
 }

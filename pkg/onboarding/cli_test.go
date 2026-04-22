@@ -23,7 +23,7 @@ func TestRunCLI_AllDefaults_AllPresetsOn(t *testing.T) {
 		"", // local tasks dir default
 		"", // advanced? default (n)
 	)
-	res, err := RunCLI(in, &bytes.Buffer{}, testHome)
+	res, err := RunCLI(in, &bytes.Buffer{}, testHome, 0)
 	if err != nil {
 		t.Fatalf("RunCLI: %v", err)
 	}
@@ -54,7 +54,7 @@ func TestRunCLI_DisableExamples(t *testing.T) {
 		"",  // local dir default
 		"",  // advanced no
 	)
-	res, err := RunCLI(in, &bytes.Buffer{}, testHome)
+	res, err := RunCLI(in, &bytes.Buffer{}, testHome, 0)
 	if err != nil {
 		t.Fatalf("RunCLI: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestRunCLI_SkipLocalDir(t *testing.T) {
 		"skip", // explicit "skip" → empty LocalTasksDir
 		"",     // advanced no
 	)
-	res, err := RunCLI(in, &bytes.Buffer{}, testHome)
+	res, err := RunCLI(in, &bytes.Buffer{}, testHome, 0)
 	if err != nil {
 		t.Fatalf("RunCLI: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestRunCLI_CustomLocalDir(t *testing.T) {
 		"/opt/tasks",
 		"",
 	)
-	res, err := RunCLI(in, &bytes.Buffer{}, testHome)
+	res, err := RunCLI(in, &bytes.Buffer{}, testHome, 0)
 	if err != nil {
 		t.Fatalf("RunCLI: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestRunCLI_AdvancedOverrides(t *testing.T) {
 		"/var/dicode", // data dir
 		"9090",        // port
 	)
-	res, err := RunCLI(in, &bytes.Buffer{}, testHome)
+	res, err := RunCLI(in, &bytes.Buffer{}, testHome, 0)
 	if err != nil {
 		t.Fatalf("RunCLI: %v", err)
 	}
@@ -122,7 +122,7 @@ func TestRunCLI_ExplicitAcceptCapitalY(t *testing.T) {
 		"",
 		"",
 	)
-	res, err := RunCLI(in, &bytes.Buffer{}, testHome)
+	res, err := RunCLI(in, &bytes.Buffer{}, testHome, 0)
 	if err != nil {
 		t.Fatalf("RunCLI: %v", err)
 	}
@@ -130,5 +130,44 @@ func TestRunCLI_ExplicitAcceptCapitalY(t *testing.T) {
 		if !res.TaskSetsEnabled[p.Name] {
 			t.Errorf("preset %q should be enabled with 'Y'", p.Name)
 		}
+	}
+}
+
+// TestRunCLI_PortOverride_AppliesToDefault ensures that when the daemon
+// is started with an explicit --port flag, the wizard uses that value as
+// the pre-filled default in the advanced prompt AND as the final
+// server.port when the user skips advanced entirely.
+func TestRunCLI_PortOverride_AppliesToDefault(t *testing.T) {
+	in := scriptedStdin(
+		"", "", "", // all presets
+		"", // local dir default
+		"", // skip advanced
+	)
+	res, err := RunCLI(in, &bytes.Buffer{}, testHome, 18080)
+	if err != nil {
+		t.Fatalf("RunCLI: %v", err)
+	}
+	if res.Port != 18080 {
+		t.Errorf("Port = %d; want 18080 (from --port override)", res.Port)
+	}
+}
+
+// TestRunCLI_PortOverride_AdvancedCanStillChange confirms the override
+// seeds the default but doesn't lock the user out of changing it at the
+// advanced prompt.
+func TestRunCLI_PortOverride_AdvancedCanStillChange(t *testing.T) {
+	in := scriptedStdin(
+		"", "", "",
+		"",     // local dir default
+		"y",    // advanced? yes
+		"",     // data dir default
+		"9191", // override the override
+	)
+	res, err := RunCLI(in, &bytes.Buffer{}, testHome, 18080)
+	if err != nil {
+		t.Fatalf("RunCLI: %v", err)
+	}
+	if res.Port != 9191 {
+		t.Errorf("Port = %d; want 9191 (user's advanced answer beats --port)", res.Port)
 	}
 }

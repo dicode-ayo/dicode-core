@@ -26,7 +26,8 @@ var wizardFS embed.FS
 // invoked inside /setup/apply with the submitted Result, atomically with
 // the passphrase being returned: on non-nil error the passphrase is NOT
 // sent to the client and the channel is not fed.
-func buildWizardHandler(home string, gate *pinGate, apply func(Result) error) (http.Handler, <-chan Result) {
+func buildWizardHandler(home string, gate *pinGate, defaultPortOverride int, apply func(Result) error) (http.Handler, <-chan Result) {
+	portDefault := portOr(defaultPortOverride, defaultPort)
 	resCh := make(chan Result, 1)
 	mux := http.NewServeMux()
 
@@ -74,7 +75,7 @@ func buildWizardHandler(home string, gate *pinGate, apply func(Result) error) (h
 		writeJSON(w, http.StatusOK, map[string]any{
 			"local_tasks_dir": home + "/dicode-tasks",
 			"data_dir":        home + "/.dicode",
-			"port":            defaultPort,
+			"port":            portDefault,
 		})
 	})
 
@@ -111,7 +112,7 @@ func buildWizardHandler(home string, gate *pinGate, apply func(Result) error) (h
 
 		// Clamp / validate.
 		if payload.Port < 1 || payload.Port > 65535 {
-			payload.Port = defaultPort
+			payload.Port = portDefault
 		}
 
 		res := Result{
@@ -150,13 +151,18 @@ func buildWizardHandler(home string, gate *pinGate, apply func(Result) error) (h
 // with the passphrase response (see buildWizardHandler). The post-submit
 // listener lingers up to 60s to let the client render the success page,
 // or until ctx is cancelled, whichever comes first.
-func RunBrowser(ctx context.Context, home string, apply func(Result) error) (Result, error) {
+//
+// port, when non-zero, seeds the "HTTP port" default shown on the wizard
+// page and becomes the final server.port in the generated dicode.yaml.
+// The wizard's own listener always uses a random port so an in-use
+// --port value can't block the user from reaching the setup screen.
+func RunBrowser(ctx context.Context, home string, port int, apply func(Result) error) (Result, error) {
 	pin := GeneratePIN()
 	// 5 wrong-PIN attempts locks the session; the user restarts the
 	// daemon to retry. At 6 digits that leaves a brute-force probability
 	// of 5 / 10^6 ≈ 5e-6 per session.
 	gate := newPinGate(pin, 5)
-	handler, resCh := buildWizardHandler(home, gate, apply)
+	handler, resCh := buildWizardHandler(home, gate, port, apply)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

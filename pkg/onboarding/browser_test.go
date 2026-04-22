@@ -40,7 +40,7 @@ func postJSONWithPIN(t *testing.T, handler http.Handler, path, pin string, body 
 }
 
 func TestBuildWizardHandler_GetIndex_ServesHTML(t *testing.T) {
-	h, _ := buildWizardHandler(testBrowserHome, testGate(), noopApply)
+	h, _ := buildWizardHandler(testBrowserHome, testGate(), 0, noopApply)
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -58,7 +58,7 @@ func TestBuildWizardHandler_GetIndex_ServesHTML(t *testing.T) {
 }
 
 func TestBuildWizardHandler_PostApply_FillsResult(t *testing.T) {
-	h, resCh := buildWizardHandler(testBrowserHome, testGate(), noopApply)
+	h, resCh := buildWizardHandler(testBrowserHome, testGate(), 0, noopApply)
 
 	payload := map[string]any{
 		"tasksets": map[string]bool{
@@ -109,7 +109,7 @@ func TestBuildWizardHandler_PostApply_FillsResult(t *testing.T) {
 }
 
 func TestBuildWizardHandler_PostApply_RejectsBadJSON(t *testing.T) {
-	h, _ := buildWizardHandler(testBrowserHome, testGate(), noopApply)
+	h, _ := buildWizardHandler(testBrowserHome, testGate(), 0, noopApply)
 	req := httptest.NewRequest(http.MethodPost, "/setup/apply",
 		strings.NewReader(`{not-json`))
 	req.Header.Set("Content-Type", "application/json")
@@ -127,7 +127,7 @@ func TestBuildWizardHandler_PostApply_RejectsBadJSON(t *testing.T) {
 // user's controlling terminal, so a process without terminal access
 // cannot supply it.
 func TestBuildWizardHandler_PostApply_RequiresPIN(t *testing.T) {
-	h, resCh := buildWizardHandler(testBrowserHome, testGate(), noopApply)
+	h, resCh := buildWizardHandler(testBrowserHome, testGate(), 0, noopApply)
 	payload := map[string]any{
 		"tasksets": map[string]bool{"buildin": true},
 		"port":     8080,
@@ -162,7 +162,7 @@ func TestBuildWizardHandler_PostApply_RequiresPIN(t *testing.T) {
 // — even with the correct PIN — returns 423.
 func TestBuildWizardHandler_PostApply_LocksOutAfterMaxAttempts(t *testing.T) {
 	gate := newPinGate(testPIN, 3)
-	h, _ := buildWizardHandler(testBrowserHome, gate, noopApply)
+	h, _ := buildWizardHandler(testBrowserHome, gate, 0, noopApply)
 	payload := map[string]any{
 		"tasksets": map[string]bool{"buildin": true},
 		"port":     8080,
@@ -191,7 +191,7 @@ func TestBuildWizardHandler_PostApply_LocksOutAfterMaxAttempts(t *testing.T) {
 func TestBuildWizardHandler_Apply_Failure_Returns500(t *testing.T) {
 	boom := errors.New("write-config failed")
 	failApply := func(Result) error { return boom }
-	h, resCh := buildWizardHandler(testBrowserHome, testGate(), failApply)
+	h, resCh := buildWizardHandler(testBrowserHome, testGate(), 0, failApply)
 
 	payload := map[string]any{
 		"tasksets": map[string]bool{"buildin": true},
@@ -219,7 +219,7 @@ func TestRunBrowser_ContextCancel_ShutsDown(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		_, _ = RunBrowser(ctx, testBrowserHome, noopApply)
+		_, _ = RunBrowser(ctx, testBrowserHome, 0, noopApply)
 		close(done)
 	}()
 

@@ -19,7 +19,7 @@ func TestRenderConfig_LoadsCleanly(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "dicode.yaml")
 
-	r := defaultResult(dir)
+	r := defaultResult(dir, 0)
 	yaml := RenderConfig(r)
 	if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
 		t.Fatalf("write: %v", err)

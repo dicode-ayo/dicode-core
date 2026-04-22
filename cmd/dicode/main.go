@@ -54,8 +54,9 @@ func main() {
 	if os.Args[1] == "daemon" {
 		fs := flag.NewFlagSet("daemon", flag.ExitOnError)
 		configPath := fs.String("config", "dicode.yaml", "path to config file")
+		port := fs.Int("port", 0, "HTTP port (0 = use default 8080 or whatever the wizard picks)")
 		fs.Parse(os.Args[2:])
-		daemon.Run(*configPath, version)
+		daemon.Run(*configPath, *port, version)
 		return
 	}
 

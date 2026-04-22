@@ -44,8 +44,11 @@ import (
 )
 
 // Run starts the daemon process. It blocks until the context is cancelled
-// (via signal) or a fatal error occurs. configPath is the path to dicode.yaml.
-func Run(configPath, version string) {
+// (via signal) or a fatal error occurs. configPath is the path to
+// dicode.yaml; portOverride, when non-zero, is propagated to the
+// onboarding wizard (seeds the advanced default and silent fallback) so
+// `dicode daemon --port=N` writes server.port: N on first run.
+func Run(configPath string, portOverride int, version string) {
 	// Signal-aware context covers both onboarding and the main daemon loop
 	// so Ctrl-C during the wizard cancels the ephemeral HTTP listener.
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -61,6 +64,7 @@ func Run(configPath, version string) {
 			Out:        os.Stdout,
 			Home:       home,
 			Env:        os.Getenv,
+			Port:       portOverride,
 		}
 		if err := onboarding.Run(ctx, configPath, opts); err != nil {
 			fmt.Fprintf(os.Stderr, "onboarding failed: %v\n", err)
