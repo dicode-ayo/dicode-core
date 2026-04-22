@@ -141,12 +141,12 @@ func startRelay(t *testing.T) *relayHandle {
 // the WS connection, the local HTTP server the relay forwards into, and the
 // identity + db backing them.
 type daemonHandle struct {
-	client     *relay.Client
-	identity   *relay.Identity
-	localPort  int
-	localSrv   *httptest.Server
-	cancelRun  context.CancelFunc
-	runErrCh   chan error
+	client    *relay.Client
+	identity  *relay.Identity
+	localPort int
+	localSrv  *httptest.Server
+	cancelRun context.CancelFunc
+	runErrCh  chan error
 }
 
 func (d *daemonHandle) stop(t *testing.T) {
