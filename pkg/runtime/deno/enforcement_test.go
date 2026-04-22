@@ -98,9 +98,16 @@ func TestEnforcement_Fs_ReadDenied(t *testing.T) {
 	if r.ReturnValue == "allowed" || r.ReturnValue == "should-not-be-readable" {
 		t.Errorf("undeclared read path was allowed — sandbox bypass: got %v", r.ReturnValue)
 	}
-	// Deno's permission denial surfaces as NotCapable.
-	if got, ok := r.ReturnValue.(string); ok && !strings.Contains(got, "NotCapable") && got != "error" {
-		t.Logf("note: expected NotCapable-flavoured error, got %q", got)
+	// Deno's permission denial surfaces as a NotCapable error. Anything
+	// else (compile error, missing file at a surprising layer, etc.) is
+	// a different failure mode that would silently satisfy the "not
+	// allowed" assertion above and mask a real regression where the
+	// sandbox stopped denying. Require the specific error class.
+	got, ok := r.ReturnValue.(string)
+	if !ok {
+		t.Errorf("unexpected return value type: %T %v", r.ReturnValue, r.ReturnValue)
+	} else if !strings.Contains(got, "NotCapable") {
+		t.Errorf("expected NotCapable-flavoured sandbox denial, got %q", got)
 	}
 }
 
@@ -222,5 +229,13 @@ func TestEnforcement_Apis_RunTaskDenied(t *testing.T) {
 	}
 	if !strings.HasPrefix(got, "rejected:") {
 		t.Errorf("expected 'rejected:<reason>', got %q", got)
+	}
+	// The IPC server replies with the specific string
+	// "ipc: permission denied (tasks.trigger)" when CapTaskTrigger is
+	// absent (see pkg/ipc/server.go:505). Substring-matching that text
+	// keeps this assertion from accepting "rejected: some other error"
+	// if the task code itself threw before reaching the IPC boundary.
+	if !strings.Contains(got, "tasks.trigger") {
+		t.Errorf("expected error to cite the 'tasks.trigger' capability gate, got %q", got)
 	}
 }
