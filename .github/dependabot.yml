@@ -19,3 +19,14 @@ updates:
     groups:
       go-deps:
         patterns: ["*"]
+
+  # Track the dicode-relay image tag used by the e2e test suite. The
+  # `FROM` line in tests/e2e/relay/testdata/Dockerfile.relay is the
+  # single source of truth — tests build it on the fly via
+  # testcontainers-go's `FromDockerfile`, so a dependabot bump here is
+  # picked up by the next test run with no code change.
+  - package-ecosystem: docker
+    directory: /tests/e2e/relay/testdata
+    schedule:
+      interval: weekly
+      day: monday
