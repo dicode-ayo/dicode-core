@@ -21,6 +21,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -67,9 +68,19 @@ func (h *relayHandle) terminate(t *testing.T) {
 }
 
 // startRelay builds and runs the relay container from testdata/Dockerfile.relay
-// with the e2e mock provider enabled. Returns a handle to the running
-// container and its mapped endpoints.
+// with the e2e mock provider enabled and a fresh broker signing key.
+// Returns a handle to the running container and its mapped endpoints.
 func startRelay(t *testing.T) *relayHandle {
+	t.Helper()
+	h, _ := startRelayWithKey(t, mustGenerateBrokerKeyPEM(t))
+	return h
+}
+
+// startRelayWithKey is startRelay parameterised by broker signing key.
+// Returns the handle plus the base64 SPKI DER pubkey the relay will advertise
+// in welcomes — tests that exercise TOFU need to match that value against
+// what the daemon pins.
+func startRelayWithKey(t *testing.T, brokerKeyPEM string) (*relayHandle, string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
@@ -103,11 +114,9 @@ func startRelay(t *testing.T) *relayHandle {
 				"NODE_ENV": "test",
 				// The container runs as USER dicode and cannot write to
 				// /app, so the relay's default auto-generate-to-cwd path
-				// fails with EACCES. Inject a pre-baked ECDSA P-256 PEM
-				// via env instead; also gives tests control over the
-				// broker sig key for scenarios 3/7 (split-key regression
-				// + TOFU rotation).
-				"BROKER_SIGNING_KEY": mustGenerateBrokerKeyPEM(t),
+				// fails with EACCES. Inject the broker signing key via env
+				// instead; TOFU rotation tests swap this across containers.
+				"BROKER_SIGNING_KEY": brokerKeyPEM,
 			},
 			WaitingFor: wait.ForLog("dicode-relay listening").WithStartupTimeout(60 * time.Second),
 		},
@@ -130,11 +139,17 @@ func startRelay(t *testing.T) *relayHandle {
 		t.Fatalf("mapped port: %v", err)
 	}
 
+	pubB64, err := brokerPubB64FromPEM(brokerKeyPEM)
+	if err != nil {
+		container.Terminate(ctx) //nolint:errcheck
+		t.Fatalf("derive broker pubkey from PEM: %v", err)
+	}
+
 	return &relayHandle{
 		container: container,
 		httpBase:  fmt.Sprintf("http://%s:%s", host, port.Port()),
 		wsBase:    fmt.Sprintf("ws://%s:%s", host, port.Port()),
-	}
+	}, pubB64
 }
 
 // daemonHandle bundles the pieces of a running daemon: the relay.Client driving
@@ -231,16 +246,18 @@ func TestHappyPath_HandshakeAndForward(t *testing.T) {
 	h := startRelay(t)
 	defer h.terminate(t)
 
-	// Local HTTP handler the daemon stands behind. Echoes the request path
-	// so the test can assert the forwarded path was preserved end-to-end.
+	// Local HTTP handler the daemon stands behind. Echoes the request path,
+	// method, body and the X-Relay-Base header so the test can assert on
+	// the full shape of what the daemon's dispatchRequest forwards.
 	mux := http.NewServeMux()
 	mux.HandleFunc("/hooks/e2e-echo", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		body, _ := io.ReadAll(r.Body)
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"path":   r.URL.Path,
-			"method": r.Method,
-			"body":   string(body),
+			"path":         r.URL.Path,
+			"method":       r.Method,
+			"body":         string(body),
+			"x_relay_base": r.Header.Get("X-Relay-Base"),
 		})
 	})
 
@@ -283,9 +300,10 @@ func TestHappyPath_HandshakeAndForward(t *testing.T) {
 		t.Fatalf("hook forward status = %d; want 200; body=%s", resp.StatusCode, respBody)
 	}
 	var echoed struct {
-		Path   string `json:"path"`
-		Method string `json:"method"`
-		Body   string `json:"body"`
+		Path       string `json:"path"`
+		Method     string `json:"method"`
+		Body       string `json:"body"`
+		XRelayBase string `json:"x_relay_base"`
 	}
 	if err := json.Unmarshal(respBody, &echoed); err != nil {
 		t.Fatalf("decode echo: %v; body=%s", err, respBody)
@@ -298,6 +316,14 @@ func TestHappyPath_HandshakeAndForward(t *testing.T) {
 	}
 	if echoed.Body != string(reqBody) {
 		t.Errorf("forwarded body = %q; want %q", echoed.Body, string(reqBody))
+	}
+	// dispatchRequest in pkg/relay/client.go sets X-Relay-Base to
+	// "/u/<uuid>" so tasks handling the forward can build absolute URLs.
+	// Previously covered by TestRelayBaseHeader against the in-process stub;
+	// now asserted here against the real relay.
+	wantRelayBase := "/u/" + d.identity.UUID
+	if echoed.XRelayBase != wantRelayBase {
+		t.Errorf("X-Relay-Base = %q; want %q", echoed.XRelayBase, wantRelayBase)
 	}
 }
 
@@ -435,8 +461,7 @@ func TestOAuthHappyPath_MockProvider(t *testing.T) {
 // key in PKCS8 PEM form, suitable for the relay's BROKER_SIGNING_KEY env
 // var. Each test gets its own key — the container-baked public half ends
 // up TOFU-pinned by the daemon during handshake, and tests that need to
-// rotate the broker key (scenarios 3/7) can re-invoke this and restart
-// the container.
+// rotate the broker key can re-invoke this and restart the container.
 func mustGenerateBrokerKeyPEM(t *testing.T) string {
 	t.Helper()
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -448,6 +473,29 @@ func mustGenerateBrokerKeyPEM(t *testing.T) string {
 		t.Fatalf("marshal pkcs8: %v", err)
 	}
 	return string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}))
+}
+
+// brokerPubB64FromPEM derives the base64-encoded SPKI DER public key that
+// the relay will advertise in welcome messages from a PKCS#8 PEM private key.
+// The daemon stores this same shape in its TOFU pin table.
+func brokerPubB64FromPEM(keyPEM string) (string, error) {
+	block, _ := pem.Decode([]byte(keyPEM))
+	if block == nil {
+		return "", fmt.Errorf("no PEM block found")
+	}
+	priv, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		return "", fmt.Errorf("parse pkcs8: %w", err)
+	}
+	ecPriv, ok := priv.(*ecdsa.PrivateKey)
+	if !ok {
+		return "", fmt.Errorf("private key is not *ecdsa.PrivateKey")
+	}
+	pubDER, err := x509.MarshalPKIXPublicKey(&ecPriv.PublicKey)
+	if err != nil {
+		return "", fmt.Errorf("marshal PKIX pubkey: %w", err)
+	}
+	return base64.StdEncoding.EncodeToString(pubDER), nil
 }
 
 // waitUntil polls cond every 50ms until it returns true or the deadline
