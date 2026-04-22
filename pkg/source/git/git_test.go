@@ -11,7 +11,6 @@ import (
 	gogitconfig "github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
-	"github.com/go-git/go-git/v5/plumbing/transport"
 	"go.uber.org/zap"
 
 	"github.com/dicode/dicode/pkg/source"
@@ -107,12 +106,11 @@ func (r *seededRepo) addCommit(t *testing.T, taskID, msg string) {
 	}
 }
 
-// push sends the current branch to origin. On first call this also creates
-// main on the bare side.
+// push sends the current branch to origin.
 func (r *seededRepo) push(t *testing.T) {
 	t.Helper()
 	err := r.wt.Push(&gogit.PushOptions{RemoteName: "origin"})
-	if err != nil && err != gogit.NoErrAlreadyUpToDate && err != transport.ErrEmptyRemoteRepository {
+	if err != nil && err != gogit.NoErrAlreadyUpToDate {
 		t.Fatalf("push: %v", err)
 	}
 }
@@ -253,8 +251,9 @@ func TestGitSource_SyncTriggersImmediatePull(t *testing.T) {
 	// localDir is derived from sha256(url)[:8]; we don't reach into that,
 	// just walk repos/ looking for beta.
 	found := false
-	_ = filepath.Walk(betaPath, func(p string, info os.FileInfo, err error) error {
+	if err := filepath.Walk(betaPath, func(p string, info os.FileInfo, err error) error {
 		if err != nil {
+			t.Logf("walk %s: %v", p, err)
 			return nil
 		}
 		if info.IsDir() && info.Name() == "beta" {
@@ -263,7 +262,9 @@ func TestGitSource_SyncTriggersImmediatePull(t *testing.T) {
 			}
 		}
 		return nil
-	})
+	}); err != nil {
+		t.Logf("filepath.Walk returned: %v", err)
+	}
 	if !found {
 		t.Errorf("beta/task.yaml not found in local clone under %s", betaPath)
 	}

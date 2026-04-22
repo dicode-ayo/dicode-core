@@ -93,6 +93,40 @@ func TestHash_ChangesOnScriptEdit(t *testing.T) {
 	}
 }
 
+// TestHash_IncludesTsEdit is a regression gate for the bug tracked in #157:
+// pkg/task/hash.go currently only reads task.yaml + task.js, so editing a
+// Deno task's task.ts (the project default) produces the same hash and the
+// reconciler never re-registers. This test is skipped until #157 is fixed;
+// it's here so the fix can flip `t.Skip` → real assertion in one line.
+func TestHash_IncludesTsEdit(t *testing.T) {
+	t.Skip("#157: hash.go does not include task.ts — Deno script edits go undetected")
+
+	dir := filepath.Join(t.TempDir(), "hello")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "task.yaml"), []byte("name: hello\n"), 0644); err != nil {
+		t.Fatalf("write yaml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "task.ts"), []byte("v1"), 0644); err != nil {
+		t.Fatalf("write ts v1: %v", err)
+	}
+	before, err := Hash(dir)
+	if err != nil {
+		t.Fatalf("before: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "task.ts"), []byte("v2"), 0644); err != nil {
+		t.Fatalf("write ts v2: %v", err)
+	}
+	after, err := Hash(dir)
+	if err != nil {
+		t.Fatalf("after: %v", err)
+	}
+	if before == after {
+		t.Fatalf("Hash ignored task.ts edit (#157): before == after == %q", before)
+	}
+}
+
 // TestHash_FilenameInjectionBarrier guards the "include filename as
 // separator" comment in hash.go: hash(A_yaml + B_js) must not collide with
 // hash(A_yaml + B_js_content_as_yaml), i.e. shuffling bytes across files
