@@ -69,8 +69,8 @@ func TestRunCLI_DisableExamples(t *testing.T) {
 func TestRunCLI_SkipLocalDir(t *testing.T) {
 	in := scriptedStdin(
 		"y", "y", "y", // all presets
-		"skip",         // explicit "skip" → empty LocalTasksDir
-		"",             // advanced no
+		"skip", // explicit "skip" → empty LocalTasksDir
+		"",     // advanced no
 	)
 	res, err := RunCLI(in, &bytes.Buffer{}, testHome)
 	if err != nil {
@@ -99,10 +99,10 @@ func TestRunCLI_CustomLocalDir(t *testing.T) {
 func TestRunCLI_AdvancedOverrides(t *testing.T) {
 	in := scriptedStdin(
 		"y", "y", "y",
-		"",             // local dir default
-		"y",            // advanced? yes
-		"/var/dicode",  // data dir
-		"9090",         // port
+		"",            // local dir default
+		"y",           // advanced? yes
+		"/var/dicode", // data dir
+		"9090",        // port
 	)
 	res, err := RunCLI(in, &bytes.Buffer{}, testHome)
 	if err != nil {

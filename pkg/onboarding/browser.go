@@ -84,8 +84,14 @@ func buildWizardHandler(home string, gate *pinGate, apply func(Result) error) (h
 			return
 		}
 		// PIN gate: constant-time compare + bounded attempts (enforced
-		// inside pinGate.Check).
+		// inside pinGate.Check). After the budget is exhausted the gate
+		// stays locked until daemon restart; distinguish it from a
+		// single wrong attempt so the UI can tell the user what to do.
 		if !gate.Check(r.Header.Get("X-Setup-Pin")) {
+			if gate.Locked() {
+				http.Error(w, "locked: too many wrong PINs, restart the daemon", http.StatusLocked)
+				return
+			}
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
@@ -164,12 +170,13 @@ func RunBrowser(ctx context.Context, home string, apply func(Result) error) (Res
 	go func() { serveErr <- srv.Serve(ln) }()
 
 	url := "http://" + ln.Addr().String() + "/"
-	// Print the PIN to the daemon's controlling terminal. It is NOT in
-	// the URL (which goes through argv to xdg-open/open/start and is
-	// world-readable via /proc/<pid>/cmdline on Linux) — the user types
-	// it into the browser instead.
-	fmt.Printf("\n  dicode setup PIN: %s\n", pin)
-	fmt.Printf("  Open your browser to %s and enter the PIN above.\n\n", url)
+	// Print the PIN to the user's controlling terminal (/dev/tty when
+	// available, stdout otherwise). The PIN is NOT in the URL (argv to
+	// xdg-open/open/start is world-readable via /proc/<pid>/cmdline on
+	// Linux) — the user types it into the browser instead.
+	if err := printPINSecret(os.Stdout, pin, url); err != nil {
+		fmt.Fprintf(os.Stderr, "(could not print PIN: %v)\n", err)
+	}
 	if err := openBrowser(url); err != nil {
 		fmt.Fprintf(os.Stderr, "(could not auto-launch browser: %v — open the URL above manually)\n", err)
 	}
@@ -220,4 +227,3 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
 }
-

@@ -68,3 +68,12 @@ func (g *pinGate) Check(got string) bool {
 	}
 	return ok
 }
+
+// Locked reports whether the gate has exhausted its attempt budget.
+// Callers use it to distinguish "wrong PIN, try again" from
+// "session locked, restart the daemon" in user-facing messages.
+func (g *pinGate) Locked() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.attempts >= g.maxAttempts
+}

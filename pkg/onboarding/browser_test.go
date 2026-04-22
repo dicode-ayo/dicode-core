@@ -154,25 +154,35 @@ func TestBuildWizardHandler_PostApply_RequiresPIN(t *testing.T) {
 }
 
 // TestBuildWizardHandler_PostApply_LocksOutAfterMaxAttempts ensures
-// brute-force attempts can't enumerate the 6-digit PIN.
+// brute-force attempts can't enumerate the 6-digit PIN AND that the
+// handler distinguishes "wrong PIN" (403) from "locked" (423) so the
+// UI can tell the user to restart the daemon instead of retrying
+// forever. With maxAttempts=3, attempts 1 and 2 return 403; the 3rd
+// wrong attempt trips the lock and returns 423; any subsequent request
+// — even with the correct PIN — returns 423.
 func TestBuildWizardHandler_PostApply_LocksOutAfterMaxAttempts(t *testing.T) {
-	gate := newPinGate(testPIN, 3) // tight budget for the test
+	gate := newPinGate(testPIN, 3)
 	h, _ := buildWizardHandler(testBrowserHome, gate, noopApply)
 	payload := map[string]any{
 		"tasksets": map[string]bool{"buildin": true},
 		"port":     8080,
 	}
-	// Exhaust the budget with wrong PINs.
-	for i := 0; i < 3; i++ {
+	// Attempts 1 and 2: wrong PIN, still under the cap → 403.
+	for i := 0; i < 2; i++ {
 		rec := postJSONWithPIN(t, h, "/setup/apply", "999999", payload)
 		if rec.Code != http.StatusForbidden {
 			t.Fatalf("attempt %d: status = %d; want 403", i, rec.Code)
 		}
 	}
-	// Even the correct PIN is now rejected.
-	rec := postJSONWithPIN(t, h, "/setup/apply", testPIN, payload)
-	if rec.Code != http.StatusForbidden {
-		t.Errorf("correct-PIN-after-lockout status = %d; want 403", rec.Code)
+	// Attempt 3: wrong PIN trips the cap → 423.
+	rec := postJSONWithPIN(t, h, "/setup/apply", "999999", payload)
+	if rec.Code != http.StatusLocked {
+		t.Errorf("lockout-triggering attempt status = %d; want 423", rec.Code)
+	}
+	// Correct PIN post-lockout: still 423.
+	rec = postJSONWithPIN(t, h, "/setup/apply", testPIN, payload)
+	if rec.Code != http.StatusLocked {
+		t.Errorf("correct-PIN-after-lockout status = %d; want 423", rec.Code)
 	}
 }
 

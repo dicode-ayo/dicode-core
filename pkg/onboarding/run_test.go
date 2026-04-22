@@ -96,8 +96,8 @@ func TestRun_CLI_DrivesWizard(t *testing.T) {
 
 	in := scriptedStdin(
 		"y", "y", "y", // all presets
-		"",             // default local dir
-		"",             // skip advanced
+		"", // default local dir
+		"", // skip advanced
 	)
 	opts := RunOptions{
 		IsTTY: true, HasDisplay: false, // TTY + no display → CLI

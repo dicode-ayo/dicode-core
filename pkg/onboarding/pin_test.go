@@ -67,3 +67,15 @@ func TestPinGate_CorrectResetsNothing(t *testing.T) {
 		t.Error("correct PIN should be accepted while under lockout limit")
 	}
 }
+
+func TestPinGate_Locked_DistinguishesFromWrong(t *testing.T) {
+	g := newPinGate("123456", 2)
+	if g.Locked() {
+		t.Error("fresh gate should not be locked")
+	}
+	g.Check("000000")
+	g.Check("000001")
+	if !g.Locked() {
+		t.Error("gate should be locked after attempts exhausted")
+	}
+}

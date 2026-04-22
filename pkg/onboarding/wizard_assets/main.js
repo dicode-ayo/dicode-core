@@ -60,8 +60,14 @@
       body: JSON.stringify(payload),
     });
     if (res.status === 403) {
-      pinErr.textContent = "Incorrect PIN. Check the daemon's terminal and try again (session locks after several wrong attempts).";
+      pinErr.textContent = "Incorrect PIN. Check the daemon's terminal and try again.";
       pinErr.style.display = "block";
+      return;
+    }
+    if (res.status === 423) {
+      pinErr.textContent = "Session locked — too many wrong PINs. Restart the dicode daemon to get a new PIN.";
+      pinErr.style.display = "block";
+      form.elements.pin.disabled = true;
       return;
     }
     if (!res.ok) {
@@ -74,8 +80,12 @@
     const done = document.getElementById("done");
     done.hidden = false;
     document.getElementById("pass").textContent = passphrase;
+    // Build the dashboard URL from an explicitly-clamped integer port so
+    // it can never be a script URL or carry meta-characters.
+    const safePort = Math.max(1, Math.min(65535, Math.trunc(Number(payload.port)) || 8080));
+    const dashUrl = "http://localhost:" + safePort;
     const dash = document.getElementById("dashUrl");
-    dash.textContent = "http://localhost:" + payload.port;
-    dash.href = dash.textContent;
+    dash.textContent = dashUrl;
+    dash.href = dashUrl;
   });
 })();

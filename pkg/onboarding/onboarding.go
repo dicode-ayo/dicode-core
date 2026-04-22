@@ -91,7 +91,6 @@ func defaultResult(home string) Result {
 	}
 }
 
-
 // WriteConfig writes the generated config to configPath, creating parent
 // directories as needed. The file contains server.secret in plaintext, so
 // it is written 0600 under a 0700 parent dir — on shared hosts this
