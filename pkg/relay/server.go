@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -33,6 +34,13 @@ type Server struct {
 	log            *zap.Logger
 	host           string // e.g. "https://relay.example.com"
 	originPatterns []string
+
+	// brokerPubkey is the base64 SPKI DER the server advertises to connecting
+	// clients in the welcome message (for TOFU pinning). Zero-value empty
+	// string means "no pubkey advertised" — the Node dicode-relay always
+	// ships a key, but this Go server does not require one; a self-hosted
+	// Go relay opts in via SetBrokerPubkey.
+	brokerPubkey atomic.Pointer[string]
 
 	mu      sync.Mutex
 	clients map[string]*serverConn // uuid → conn
@@ -61,6 +69,21 @@ func NewServer(host string, log *zap.Logger, originPatterns ...string) *Server {
 // ServeHTTP implements http.Handler so the server can be embedded in tests.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
+}
+
+// SetBrokerPubkey updates the broker signing public key advertised in welcome
+// messages. Safe to call at any time; the new value applies to subsequent
+// welcomes only (already-established connections keep whatever they saw).
+//
+// Used for:
+//   - Self-hosted Go relays that want clients to pin their signing key
+//   - Tests that need to simulate broker key rotation between connects
+//
+// keyBase64 is expected to be a base64-encoded SPKI DER public key — the
+// same shape the Node dicode-relay advertises. An empty string clears
+// the advertised key (welcome.broker_pubkey will be omitted).
+func (s *Server) SetBrokerPubkey(keyBase64 string) {
+	s.brokerPubkey.Store(&keyBase64)
 }
 
 // serverConn represents one authenticated client connection.
@@ -107,7 +130,11 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	welcomeURL := fmt.Sprintf("%s/u/%s/hooks/", s.host, sc.uuid)
-	welcomeData, _ := encodeMsg(welcomeMsg{Type: msgWelcome, URL: welcomeURL, Protocol: 2})
+	welcome := welcomeMsg{Type: msgWelcome, URL: welcomeURL, Protocol: 2}
+	if p := s.brokerPubkey.Load(); p != nil && *p != "" {
+		welcome.BrokerPubkey = *p
+	}
+	welcomeData, _ := encodeMsg(welcome)
 	if err := sc.write(ctx, welcomeData); err != nil {
 		return
 	}
