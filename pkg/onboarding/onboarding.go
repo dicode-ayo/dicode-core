@@ -71,6 +71,17 @@ func Run(ctx context.Context, configPath string, opts RunOptions) error {
 		}
 	}
 
+	// Make sure the local tasks directory exists; without this the
+	// daemon's source layer refuses to start on the generated config
+	// ("no such file or directory"). No-op when the user picked
+	// "skip" — an empty LocalTasksDir means no local source entry, so
+	// there's nothing to create.
+	if res.LocalTasksDir != "" {
+		if err := os.MkdirAll(res.LocalTasksDir, 0o755); err != nil {
+			return fmt.Errorf("create local tasks dir: %w", err)
+		}
+	}
+
 	PrintSuccess(opts.Out, res, configPath)
 	return nil
 }

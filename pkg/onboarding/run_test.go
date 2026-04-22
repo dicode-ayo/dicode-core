@@ -138,3 +138,59 @@ func TestRun_EnvOverride_Silent_SkipsPrompts(t *testing.T) {
 		t.Errorf("config not written: %v", err)
 	}
 }
+
+// TestRun_Silent_CreatesLocalTasksDir guards a regression the earlier
+// onboarding path protected against: the generated YAML points at
+// ~/dicode-tasks, and the daemon's source layer refuses to start if
+// that dir doesn't exist. Onboarding must create it when the Result
+// includes a LocalTasksDir so `dicode daemon` can proceed immediately
+// after first-run setup.
+func TestRun_Silent_CreatesLocalTasksDir(t *testing.T) {
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "dicode.yaml")
+
+	opts := RunOptions{
+		IsTTY: false, HasDisplay: false,
+		In:   strings.NewReader(""),
+		Out:  &bytes.Buffer{},
+		Home: dir,
+		Env:  emptyEnv,
+	}
+	if err := Run(context.Background(), cfg, opts); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	tasksDir := filepath.Join(dir, "dicode-tasks")
+	fi, err := os.Stat(tasksDir)
+	if err != nil {
+		t.Fatalf("tasks dir not created: %v", err)
+	}
+	if !fi.IsDir() {
+		t.Errorf("%s is not a directory", tasksDir)
+	}
+}
+
+// TestRun_CLI_EmptyLocalTasksDir_NoDir confirms the "skip local source"
+// path does NOT create a stray directory.
+func TestRun_CLI_EmptyLocalTasksDir_NoDir(t *testing.T) {
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "dicode.yaml")
+
+	opts := RunOptions{
+		IsTTY: true, HasDisplay: false, // CLI surface
+		In: strings.NewReader(strings.Join([]string{
+			"", "", "", // all presets default
+			"skip", // local dir: skip
+			"",     // advanced no
+		}, "\n") + "\n"),
+		Out:  &bytes.Buffer{},
+		Home: dir,
+		Env:  emptyEnv,
+	}
+	if err := Run(context.Background(), cfg, opts); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "dicode-tasks")); !os.IsNotExist(err) {
+		t.Errorf("expected no dicode-tasks dir after 'skip'; stat err=%v", err)
+	}
+}
