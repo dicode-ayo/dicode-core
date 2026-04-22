@@ -453,6 +453,25 @@ func TestVerifyBrokerSig_RejectsTamperedPayload(t *testing.T) {
 	}
 }
 
+// TestVerifyBrokerSig_RejectsEmptyPinnedPubkey covers the no-TOFU-pin-yet
+// branch: VerifyBrokerSig refuses if it has no pinned broker key to verify
+// against. Guards against a future refactor accidentally falling through
+// to a VerifyASN1 call with a nil key.
+func TestVerifyBrokerSig_RejectsEmptyPinnedPubkey(t *testing.T) {
+	payload := &OAuthTokenDeliveryPayload{
+		Type:            "oauth_token_delivery",
+		SessionID:       "550e8400-e29b-41d4-a716-446655440000",
+		EphemeralPubkey: base64.StdEncoding.EncodeToString(make([]byte, 65)),
+		Ciphertext:      base64.StdEncoding.EncodeToString([]byte("ct")),
+		Nonce:           base64.StdEncoding.EncodeToString(make([]byte, 12)),
+		BrokerSig:       "not-empty-but-unverifiable",
+	}
+
+	if err := VerifyBrokerSig("", payload); err == nil {
+		t.Fatal("VerifyBrokerSig must reject when no broker pubkey is pinned")
+	}
+}
+
 // TestVerifyBrokerSig_RejectsMissingSig covers #103's invariant: an
 // envelope with no broker_sig is never accepted, regardless of the pinned
 // pubkey.

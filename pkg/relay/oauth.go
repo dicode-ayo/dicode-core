@@ -297,14 +297,15 @@ func VerifyBrokerSig(brokerPubkeyBase64 string, payload *OAuthTokenDeliveryPaylo
 	// to match. Handing the one-layer inner digest would verify against
 	// sha256(fields) while Node signed sha256(sha256(fields)) — mismatch,
 	// verification always fails. See #151 for the full trace.
-	inner := sha256.New()
-	inner.Write([]byte(payload.Type))
-	inner.Write([]byte(payload.SessionID))
-	inner.Write([]byte(payload.EphemeralPubkey))
-	inner.Write([]byte(payload.Ciphertext))
-	inner.Write([]byte(payload.Nonce))
-	outer := sha256.Sum256(inner.Sum(nil))
-	digest := outer[:]
+	innerH := sha256.New()
+	innerH.Write([]byte(payload.Type))
+	innerH.Write([]byte(payload.SessionID))
+	innerH.Write([]byte(payload.EphemeralPubkey))
+	innerH.Write([]byte(payload.Ciphertext))
+	innerH.Write([]byte(payload.Nonce))
+	outerH := sha256.New()
+	outerH.Write(innerH.Sum(nil))
+	digest := outerH.Sum(nil)
 
 	sigBytes, err := base64.StdEncoding.DecodeString(payload.BrokerSig)
 	if err != nil {
