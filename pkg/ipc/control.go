@@ -16,6 +16,7 @@ import (
 	"github.com/dicode/dicode/pkg/relay"
 	"github.com/dicode/dicode/pkg/secrets"
 	"github.com/dicode/dicode/pkg/task"
+	"github.com/dicode/dicode/pkg/tasktest"
 	"go.uber.org/zap"
 )
 
@@ -242,6 +243,9 @@ func (cs *ControlServer) dispatch(ctx context.Context, req Request) (any, error)
 
 	case "cli.relay.rotate_identity":
 		return cs.handleRelayRotate(ctx)
+
+	case "cli.task.test":
+		return cs.handleTaskTest(ctx, req)
 
 	default:
 		return nil, fmt.Errorf("unknown method: %s", req.Method)
@@ -530,6 +534,58 @@ func (cs *ControlServer) handleRelayRotate(ctx context.Context) (any, error) {
 		NewUUID: newUUID,
 		Warning: relayRotateWarning,
 	}, nil
+}
+
+// TaskTestResult mirrors pkg/tasktest.Result for the control-socket wire
+// shape. Defined here (not imported) so pkg/ipc has no dep on pkg/tasktest,
+// keeping the IPC message surface stable if the executor's internals evolve.
+type TaskTestResult struct {
+	TaskID   string `json:"taskID"`
+	Runtime  string `json:"runtime"`
+	TestFile string `json:"testFile"`
+	Passed   int    `json:"passed"`
+	Failed   int    `json:"failed"`
+	Skipped  int    `json:"skipped"`
+	DurMs    int64  `json:"durationMs"`
+	ExitCode int    `json:"exitCode"`
+	Output   string `json:"output"`
+	Error    string `json:"error,omitempty"`
+}
+
+// handleTaskTest resolves the task from the registry, locates its sibling
+// test file, and invokes the appropriate runtime's test runner. Phase 1
+// supports the Deno runtime only; other runtimes return a clear error.
+func (cs *ControlServer) handleTaskTest(ctx context.Context, req Request) (TaskTestResult, error) {
+	if req.TaskID == "" {
+		return TaskTestResult{}, errors.New("taskID required")
+	}
+	spec, ok := cs.reg.Get(req.TaskID)
+	if !ok {
+		return TaskTestResult{}, fmt.Errorf("task %q not found", req.TaskID)
+	}
+	// tasktest.Run returns both a partial Result and err on certain paths
+	// (e.g. unsupported runtime, deno-not-available). Convert the Result to
+	// the wire shape regardless so the CLI can surface the partial info.
+	res, err := tasktest.Run(ctx, spec)
+	wire := TaskTestResult{
+		TaskID:   res.TaskID,
+		Runtime:  res.Runtime,
+		TestFile: res.TestFile,
+		Passed:   res.Passed,
+		Failed:   res.Failed,
+		Skipped:  res.Skipped,
+		DurMs:    res.Duration.Milliseconds(),
+		ExitCode: res.ExitCode,
+		Output:   res.Output,
+		Error:    res.Error,
+	}
+	if err != nil {
+		if wire.Error == "" {
+			wire.Error = err.Error()
+		}
+		return wire, err
+	}
+	return wire, nil
 }
 
 // relayRotateWarning is the operator-facing message surfaced to the CLI after
