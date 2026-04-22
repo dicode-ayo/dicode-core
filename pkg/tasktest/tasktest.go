@@ -26,16 +26,16 @@ import (
 // are parsed from Deno's summary line so machine callers don't have to
 // re-parse the text.
 type Result struct {
-	TaskID     string        `json:"taskID"`
-	Runtime    string        `json:"runtime"`
-	Passed     int           `json:"passed"`
-	Failed     int           `json:"failed"`
-	Skipped    int           `json:"skipped"`
-	Duration   time.Duration `json:"durationNs"`
-	ExitCode   int           `json:"exitCode"`
-	Output     string        `json:"output"`
-	TestFile   string        `json:"testFile"`
-	Error      string        `json:"error,omitempty"`
+	TaskID   string        `json:"taskID"`
+	Runtime  string        `json:"runtime"`
+	Passed   int           `json:"passed"`
+	Failed   int           `json:"failed"`
+	Skipped  int           `json:"skipped"`
+	Duration time.Duration `json:"durationNs"`
+	ExitCode int           `json:"exitCode"`
+	Output   string        `json:"output"`
+	TestFile string        `json:"testFile"`
+	Error    string        `json:"error,omitempty"`
 }
 
 // ErrNoTestFile signals that the task has no sibling test file.
@@ -90,8 +90,9 @@ func findTestFile(spec *task.Spec) (string, error) {
 }
 
 // denoSummaryRe matches Deno 2.x's summary line:
-//   "ok | 7 passed | 0 failed (80ms)"
-//   "FAILED | 5 passed | 2 failed | 1 ignored (2s)"
+//
+//	"ok | 7 passed | 0 failed (80ms)"
+//	"FAILED | 5 passed | 2 failed | 1 ignored (2s)"
 var denoSummaryRe = regexp.MustCompile(`(\d+)\s+passed(?:\s*\([\d\w]+\))?\s*\|\s*(\d+)\s+failed(?:\s*\|\s*(\d+)\s+ignored)?`)
 
 // denoConfigPath looks for tasks/deno.json walking up from the task dir
