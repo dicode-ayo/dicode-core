@@ -1,6 +1,8 @@
 package relay
 
 import (
+	"context"
+	"errors"
 	"sync"
 	"time"
 )
@@ -62,12 +64,20 @@ func (c *Client) markConnected() {
 // the transition reflects a clean shutdown — the Connected flag flips
 // but the previous error and retry counter are preserved so the UI
 // doesn't lie about the final state.
+//
+// Context-cancelation errors (context.Canceled, DeadlineExceeded) are
+// treated as shutdown noise: they only flip Connected off without
+// touching LastError/ReconnectAttempts, so a real prior transport
+// error ("auth failed", "dial: connection refused") remains visible in
+// /api/relay/status as the reason the relay went offline.
 func (c *Client) markDisconnected(err error) {
 	c.status.mu.Lock()
 	defer c.status.mu.Unlock()
 	c.status.connected = false
 	c.status.since = time.Now()
-	if err == nil {
+	if err == nil ||
+		errors.Is(err, context.Canceled) ||
+		errors.Is(err, context.DeadlineExceeded) {
 		return
 	}
 	c.status.lastError = sanitizeErrorString(err.Error())

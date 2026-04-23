@@ -1,7 +1,9 @@
 package relay
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -85,6 +87,30 @@ func TestClient_MarkConnected_ResetsReconnectCount(t *testing.T) {
 	c.markConnected()
 	if n := c.Status().ReconnectAttempts; n != 0 {
 		t.Errorf("ReconnectAttempts after connect = %d; want 0 (counter should reset)", n)
+	}
+}
+
+// TestClient_MarkDisconnected_ContextCanceled_IsFiltered guards
+// against the round-2 LOW: on daemon shutdown, websocket.Dial etc.
+// return wrapped `context.Canceled` errors which would otherwise
+// clobber a real prior LastError like "auth failed" with the far less
+// useful "dial relay: context canceled". Context errors must not touch
+// the status tracker — neither the error string nor the retry counter.
+func TestClient_MarkDisconnected_ContextCanceled_IsFiltered(t *testing.T) {
+	c := newTestClient(t)
+	c.markDisconnected(errors.New("auth failed"))
+	beforeAttempts := c.Status().ReconnectAttempts
+
+	// Simulate "dial relay: context canceled" landing in the error branch.
+	wrapped := fmt.Errorf("dial relay: %w", context.Canceled)
+	c.markDisconnected(wrapped)
+
+	s := c.Status()
+	if s.LastError != "auth failed" {
+		t.Errorf("LastError = %q; context-canceled error should have been filtered, prior real error preserved", s.LastError)
+	}
+	if s.ReconnectAttempts != beforeAttempts {
+		t.Errorf("ReconnectAttempts = %d; want %d (filtered call should not bump counter)", s.ReconnectAttempts, beforeAttempts)
 	}
 }
 
