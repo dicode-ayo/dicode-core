@@ -129,10 +129,13 @@ and you should use the local OAuth flow instead (see the same doc).
 
 ## Self-hosting the relay server
 
-The relay server is included in the dicode repository (`pkg/relay/server.go`).
-To run a standalone relay server, build and run the `relay-server` binary
-(coming soon as a separate `cmd/relay-server`). Configure clients to point at
-your server:
+The relay server lives in a separate repository:
+[dicode-ayo/dicode-relay](https://github.com/dicode-ayo/dicode-relay) — a
+single-process TypeScript/Node.js 22 service that combines the WebSocket
+tunnel and the OAuth broker. A ready-to-run Docker image is published via
+the repo's release pipeline (see the relay repo's `Dockerfile`).
+
+Configure clients to point at your self-hosted instance:
 
 ```yaml
 relay:
@@ -140,5 +143,10 @@ relay:
   server_url: wss://relay.example.com
 ```
 
-The relay server requires no database; nonce state is kept in memory.
-TLS termination should be handled by a reverse proxy (nginx, Caddy, etc.).
+The relay server requires no database; nonce state and client registry are
+kept in memory. TLS termination should be handled by a reverse proxy
+(nginx, Caddy, etc.) in front of the Node process.
+
+> Historically the daemon repository carried a Go relay implementation at
+> `pkg/relay/server.go`. It was dropped in favour of the TypeScript relay —
+> see [`docs/design/oauth-broker.md`](design/oauth-broker.md) for rationale.

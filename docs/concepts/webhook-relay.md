@@ -142,11 +142,11 @@ The production relay server is a separate TypeScript/Node.js service (`dicode-re
 
 ### Self-hosted
 
-The Go relay server (`pkg/relay/server.go`) can run standalone for environments where you control the infrastructure:
+The relay server lives at [dicode-ayo/dicode-relay](https://github.com/dicode-ayo/dicode-relay) — a Node.js service that can run standalone for environments where you control the infrastructure:
 - Same protocol, same handshake verification
 - In-memory nonce store, client registry
-- No OAuth broker -- just plain webhook forwarding
-- Designed for embedding in tests and single-user self-hosting
+- Optional OAuth broker (configurable via `relay.yaml`)
+- Published as a Docker image; suitable for embedding in tests and single-user self-hosting
 
 | | Hosted | Self-hosted |
 |---|---|---|
