@@ -1466,7 +1466,8 @@ func (s *Server) apiAddSource(w http.ResponseWriter, r *http.Request) {
 	if s.reconciler != nil {
 		switch sc.Type {
 		case config.SourceTypeLocal:
-			ls, err := local.New(sc.Path, sc.Path, s.log)
+			watchEnabled := sc.Watch == nil || *sc.Watch
+			ls, err := local.New(sc.Path, sc.Path, watchEnabled, s.log)
 			if err != nil {
 				jsonErr(w, "create local source: "+err.Error(), http.StatusInternalServerError)
 				return

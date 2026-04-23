@@ -469,7 +469,10 @@ func buildSources(cfg *config.Config, dataDir string, log *zap.Logger) ([]source
 		}
 		switch sc.Type {
 		case config.SourceTypeLocal:
-			s, err := local.New(sc.Path, sc.Path, log)
+			// Watch is a *bool pointer after #177; applyDefaults guarantees
+			// it's non-nil here, but treat nil as "watch enabled" defensively.
+			watchEnabled := sc.Watch == nil || *sc.Watch
+			s, err := local.New(sc.Path, sc.Path, watchEnabled, log)
 			if err != nil {
 				return nil, nil, fmt.Errorf("local source %q: %w", sc.Path, err)
 			}

@@ -29,7 +29,7 @@ func writeTask(t *testing.T, dir, name string) {
 
 func newTestSource(t *testing.T, dir string) *LocalSource {
 	t.Helper()
-	s, err := New("test", dir, zap.NewNop())
+	s, err := New("test", dir, true, zap.NewNop())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
