@@ -28,12 +28,13 @@ func newAuthServer(t *testing.T, passphrase string) *Server {
 
 	reg := registry.New(d)
 	eng := trigger.New(reg, nil, zap.NewNop())
+	mcpOn := true
 	cfg := &config.Config{
 		Server: config.ServerConfig{
 			Port:   8080,
 			Auth:   true,
 			Secret: passphrase,
-			MCP:    true,
+			MCP:    &mcpOn,
 		},
 	}
 	srv, err := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())

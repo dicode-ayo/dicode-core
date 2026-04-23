@@ -287,3 +287,64 @@ execution:
 		t.Errorf("Execution.MaxConcurrentTasks = %d, want 8", cfg.Execution.MaxConcurrentTasks)
 	}
 }
+
+// Regression for #177: `watch: false` and `mcp: false` in YAML must survive
+// applyDefaults. Previously both fields were `bool` with a default-flip
+// (`if !x { x = true }`) that made explicit false a no-op.
+func TestLoadWatchAndMCPRespectExplicitFalse(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "dicode.yaml")
+
+	content := `
+server:
+  port: 8080
+  mcp: false
+sources:
+  - type: local
+    path: ${CONFIGDIR}/tasks
+    watch: false
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Server.MCP == nil || *cfg.Server.MCP {
+		t.Errorf("Server.MCP = %v, want explicit false", cfg.Server.MCP)
+	}
+	if len(cfg.Sources) != 1 {
+		t.Fatalf("want 1 source, got %d", len(cfg.Sources))
+	}
+	if cfg.Sources[0].Watch == nil || *cfg.Sources[0].Watch {
+		t.Errorf("Sources[0].Watch = %v, want explicit false", cfg.Sources[0].Watch)
+	}
+}
+
+func TestLoadWatchAndMCPDefaultsToTrueWhenUnset(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "dicode.yaml")
+
+	content := `
+sources:
+  - type: local
+    path: ${CONFIGDIR}/tasks
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Server.MCP == nil || !*cfg.Server.MCP {
+		t.Errorf("Server.MCP = %v, want default true when unset", cfg.Server.MCP)
+	}
+	if len(cfg.Sources) != 1 {
+		t.Fatalf("want 1 source, got %d", len(cfg.Sources))
+	}
+	if cfg.Sources[0].Watch == nil || !*cfg.Sources[0].Watch {
+		t.Errorf("Sources[0].Watch = %v, want default true when unset", cfg.Sources[0].Watch)
+	}
+}
