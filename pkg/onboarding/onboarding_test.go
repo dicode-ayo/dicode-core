@@ -9,17 +9,18 @@ import (
 	"github.com/dicode/dicode/pkg/config"
 )
 
-// TestDefaultLocalConfig_LoadsCleanly writes the first-run template to a temp
-// file, runs it through config.Load, and asserts defaults land where the
-// docs claim. Guards against drift between the onboarding template and the
-// Config struct — in particular, keys for fields that have since been
-// removed (the old direct-AI block: model, api_key_env, base_url) would
-// silently survive an unmarshal but then mislead the operator.
-func TestDefaultLocalConfig_LoadsCleanly(t *testing.T) {
+// TestRenderConfig_LoadsCleanly writes the first-run output through the
+// real config.Load path and asserts defaults land where the docs claim.
+// Guards against drift between the onboarding template and the Config
+// struct — e.g., keys for fields that have since been removed (the old
+// direct-AI block: model, api_key_env, base_url) would silently survive
+// an unmarshal but then mislead the operator.
+func TestRenderConfig_LoadsCleanly(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "dicode.yaml")
 
-	yaml := DefaultLocalConfig(filepath.Join(dir, "tasks"), filepath.Join(dir, "data"))
+	r := defaultResult(dir, 0)
+	yaml := RenderConfig(r)
 	if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -29,13 +30,12 @@ func TestDefaultLocalConfig_LoadsCleanly(t *testing.T) {
 		t.Fatalf("generated config failed to load: %v", err)
 	}
 
-	// ai.task should default to buildin/dicodai — the template ships it
-	// commented out so applyDefaults fills it in.
+	// ai.task should default to buildin/dicodai — config applyDefaults
+	// fills it in when the template omits the block.
 	if cfg.AI.Task != "buildin/dicodai" {
 		t.Errorf("AI.Task = %q, want %q (default should land)", cfg.AI.Task, "buildin/dicodai")
 	}
 
-	// Sanity: basic sections parsed.
 	if len(cfg.Sources) == 0 {
 		t.Error("sources should not be empty")
 	}
@@ -43,11 +43,39 @@ func TestDefaultLocalConfig_LoadsCleanly(t *testing.T) {
 		t.Errorf("Database.Type = %q, want sqlite", cfg.Database.Type)
 	}
 
-	// Guard: the old direct-AI keys must NOT appear in the template —
-	// they'd parse without error but never do anything now.
+	// Guard: the old direct-AI keys must NOT appear in the template.
 	for _, stale := range []string{"api_key_env:", "base_url:", "model:"} {
 		if strings.Contains(yaml, stale) {
 			t.Errorf("template still contains stale direct-AI key %q; remove it", stale)
 		}
+	}
+}
+
+// TestWriteConfig_FileAndParentArePrivate guards the dashboard
+// passphrase (embedded as server.secret) from other users on shared
+// hosts: the config file must be 0600 and its parent dir must be 0700.
+func TestWriteConfig_FileAndParentArePrivate(t *testing.T) {
+	dir := t.TempDir()
+	parent := filepath.Join(dir, "nested", "dir")
+	cfg := filepath.Join(parent, "dicode.yaml")
+
+	if err := WriteConfig(cfg, "dummy: true\n"); err != nil {
+		t.Fatalf("WriteConfig: %v", err)
+	}
+
+	fi, err := os.Stat(cfg)
+	if err != nil {
+		t.Fatalf("stat file: %v", err)
+	}
+	if mode := fi.Mode().Perm(); mode != 0o600 {
+		t.Errorf("config file perm = %o; want 0600", mode)
+	}
+
+	di, err := os.Stat(parent)
+	if err != nil {
+		t.Fatalf("stat parent: %v", err)
+	}
+	if mode := di.Mode().Perm(); mode != 0o700 {
+		t.Errorf("parent dir perm = %o; want 0700", mode)
 	}
 }

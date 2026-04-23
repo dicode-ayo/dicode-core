@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -39,23 +40,35 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/term"
 )
 
 // Run starts the daemon process. It blocks until the context is cancelled
-// (via signal) or a fatal error occurs. configPath is the path to dicode.yaml.
-func Run(configPath, version string) {
-	// First-run onboarding: if no config exists, generate a default one.
+// (via signal) or a fatal error occurs. configPath is the path to
+// dicode.yaml; portOverride, when non-zero, is propagated to the
+// onboarding wizard (seeds the advanced default and silent fallback) so
+// `dicode daemon --port=N` writes server.port: N on first run.
+func Run(configPath string, portOverride int, version string) {
+	// Signal-aware context covers both onboarding and the main daemon loop
+	// so Ctrl-C during the wizard cancels the ephemeral HTTP listener.
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	// First-run onboarding: if no config exists, run the wizard.
 	if onboarding.Required(configPath) {
-		fmt.Println("Welcome to dicode! No config found — creating a local-only setup.")
 		home, _ := os.UserHomeDir()
-		content := onboarding.DefaultLocalConfig(home+"/dicode-tasks", home+"/.dicode")
-		if err := onboarding.WriteConfig(configPath, content); err != nil {
-			fmt.Fprintf(os.Stderr, "failed to write config: %v\n", err)
-			os.Exit(1)
+		opts := onboarding.RunOptions{
+			IsTTY:      term.IsTerminal(int(os.Stdin.Fd())),
+			HasDisplay: hasDisplay(),
+			In:         os.Stdin,
+			Out:        os.Stdout,
+			Home:       home,
+			Env:        os.Getenv,
+			Port:       portOverride,
 		}
-		fmt.Printf("Created %s\n", configPath)
-		if err := os.MkdirAll(home+"/dicode-tasks", 0755); err != nil {
-			fmt.Fprintf(os.Stderr, "failed to create tasks dir: %v\n", err)
+		if err := onboarding.Run(ctx, configPath, opts); err != nil {
+			fmt.Fprintf(os.Stderr, "onboarding failed: %v\n", err)
+			os.Exit(1)
 		}
 	}
 
@@ -75,11 +88,22 @@ func Run(configPath, version string) {
 
 	logger.Info("dicode daemon starting", zap.String("version", version))
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
-
 	if err := run(ctx, cancel, cfg, configPath, version, logBroadcaster, logger); err != nil {
 		logger.Fatal("dicode daemon exited with error", zap.Error(err))
+	}
+}
+
+// hasDisplay is a best-effort detector for whether a GUI is reachable.
+// On darwin/windows we assume yes whenever the process has a TTY (the
+// caller checks that separately). On Linux we require an X or Wayland
+// server to be advertised, since headless servers commonly have a TTY
+// but no way to open a browser.
+func hasDisplay() bool {
+	switch runtime.GOOS {
+	case "darwin", "windows":
+		return true
+	default:
+		return os.Getenv("DISPLAY") != "" || os.Getenv("WAYLAND_DISPLAY") != ""
 	}
 }
 

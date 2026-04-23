@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>dicode setup</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, -apple-system, Segoe UI, sans-serif; margin: 0; background: #0b0d10; color: #e7e9ee; }
+  main { max-width: 640px; margin: 2rem auto; padding: 0 1rem; }
+  h1 { font-size: 1.4rem; margin: 0 0 0.25rem; }
+  p.lede { color: #a5abb6; margin: 0 0 1.5rem; }
+  fieldset { border: 1px solid #2a3038; border-radius: 10px; padding: 1rem 1.25rem 1.25rem; margin: 0 0 1rem; background: #121519; }
+  legend { padding: 0 0.5rem; font-weight: 600; }
+  label.preset { display: grid; grid-template-columns: auto 1fr; gap: 0.6rem 0.75rem; align-items: start; padding: 0.35rem 0; }
+  label.preset input { margin-top: 0.2rem; }
+  label.preset strong { display: block; }
+  label.preset small { color: #9aa1ac; }
+  .row { margin: 0.6rem 0; }
+  .row label { display: block; font-size: 0.9rem; margin-bottom: 0.25rem; color: #c3c8d1; }
+  input[type=text], input[type=number] { width: 100%; padding: 0.55rem 0.65rem; border-radius: 8px; border: 1px solid #2a3038; background: #0f1216; color: inherit; font: inherit; }
+  details.advanced { border-top: 1px dashed #2a3038; padding-top: 0.75rem; }
+  details.advanced summary { cursor: pointer; color: #c3c8d1; }
+  button { background: #3860ff; color: white; border: none; border-radius: 8px; padding: 0.65rem 1.1rem; font: inherit; font-weight: 600; cursor: pointer; }
+  button:hover { background: #4a70ff; }
+  .success { background: #0d2f1c; border: 1px solid #14613a; padding: 1rem 1.25rem; border-radius: 10px; }
+  .pass { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: #000; color: #fff; padding: 0.6rem 0.8rem; border-radius: 6px; word-break: break-all; user-select: all; font-size: 1.05rem; }
+  .copy { margin-left: 0.5rem; background: #2a3038; }
+  .copy:hover { background: #3a414b; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Welcome to dicode</h1>
+  <p class="lede">One-time setup. Tasks and secrets live on your machine.</p>
+
+  <form id="f">
+    <fieldset>
+      <legend>Setup PIN</legend>
+      <div class="row">
+        <label for="pin">Enter the 6-digit PIN from your terminal</label>
+        <input type="text" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="off"
+               name="pin" id="pin" placeholder="000000" required />
+        <p id="pinErr" style="color:#f38b8b;margin:.4rem 0 0;display:none"></p>
+      </div>
+    </fieldset>
+
+    <fieldset id="tasksets">
+      <legend>Curated task collections</legend>
+      <!-- rendered by main.js from the preset list exposed at /setup/presets -->
+    </fieldset>
+
+    <fieldset>
+      <legend>Your own tasks</legend>
+      <div class="row">
+        <label for="local">Local tasks directory (leave blank to skip for now)</label>
+        <input type="text" name="local_tasks_dir" id="local" />
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Advanced</legend>
+      <details class="advanced">
+        <summary>Data directory and HTTP port</summary>
+        <div class="row">
+          <label for="ddir">Data directory</label>
+          <input type="text" name="data_dir" id="ddir" />
+        </div>
+        <div class="row">
+          <label for="port">HTTP port</label>
+          <input type="number" name="port" id="port" min="1" max="65535" value="8080" />
+        </div>
+      </details>
+    </fieldset>
+
+    <button type="submit">Write config &amp; start dicode</button>
+  </form>
+
+  <section id="done" class="success" hidden>
+    <h2>Setup complete</h2>
+    <p>dicode will start in a moment. Your dashboard:<br />
+      <a id="dashUrl" href="#"></a>
+    </p>
+    <p><strong>Dashboard passphrase</strong> (copy now, shown once):</p>
+    <p><code id="pass" class="pass"></code>
+       <button type="button" class="copy" onclick="navigator.clipboard.writeText(document.getElementById('pass').textContent)">Copy</button></p>
+    <p style="color:#a5abb6;font-size:.9rem">Change later by editing <code>server.secret</code> in your <code>dicode.yaml</code>.</p>
+  </section>
+</main>
+<script src="/setup/main.js"></script>
+</body>
+</html>
