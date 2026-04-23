@@ -43,11 +43,14 @@ func cloneOrPull(ctx context.Context, dir, url, branch, tokenEnv string) error {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("mkdir: %w", err)
 	}
+	// Full clone (no Depth). A shallow clone costs bandwidth once but
+	// fails PullContext with "object not found" the first time the remote
+	// advances past the shallow tip — go-git can't compute a merge base
+	// when the parent commits aren't in the local object DB. See #175.
 	opts := &gogit.CloneOptions{
 		URL:           url,
 		ReferenceName: plumbing.NewBranchReferenceName(branch),
 		SingleBranch:  true,
-		Depth:         1,
 	}
 	if auth != nil {
 		opts.Auth = auth
