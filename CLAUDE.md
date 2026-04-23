@@ -66,7 +66,7 @@ tasks/my-task/
 └── task.test.js   # optional unit tests with mocked globals
 ```
 
-Task SDK surface (Deno `dicode` global / Python `dicode` module): `kv`, `log`, `params`, `env`, `output`, `notify`, `mcp`, plus a `fetch`-compatible HTTP client. See `pkg/runtime/deno/sdk/shim.ts` and `pkg/runtime/python/sdk/dicode_sdk.py` for the authoritative shapes.
+Task SDK surface (Deno `dicode` global / Python `dicode` module): `kv`, `log`, `params`, `env`, `output`, `mcp`. Deno tasks also get the platform's native `fetch`; Python tasks use stdlib (`urllib`, `requests`, etc.) — there is no HTTP helper on the `dicode` module itself. See `pkg/runtime/deno/sdk/shim.ts` and `pkg/runtime/python/sdk/dicode_sdk.py` for the authoritative shapes.
 
 ## Key Design Constraints
 
