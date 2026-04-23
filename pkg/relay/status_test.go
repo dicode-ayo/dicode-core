@@ -87,3 +87,29 @@ func TestClient_MarkConnected_ResetsReconnectCount(t *testing.T) {
 		t.Errorf("ReconnectAttempts after connect = %d; want 0 (counter should reset)", n)
 	}
 }
+
+// TestClient_MarkDisconnected_NilErr_DoesNotOverwrite covers the
+// "clean shutdown" path: when Run exits because ctx is cancelled we
+// call markDisconnected(nil) to flip the pill to offline, but we must
+// NOT clobber a previously-recorded real error or bump the retry
+// counter.
+func TestClient_MarkDisconnected_NilErr_PreservesContext(t *testing.T) {
+	c := newTestClient(t)
+	c.markConnected()
+	c.markDisconnected(errors.New("boom"))
+	if c.Status().ReconnectAttempts != 1 {
+		t.Fatalf("precondition: ReconnectAttempts = %d; want 1", c.Status().ReconnectAttempts)
+	}
+	// Simulate the Run-exits-on-ctx.Done path: err is nil.
+	c.markDisconnected(nil)
+	s := c.Status()
+	if s.Connected {
+		t.Error("Connected should be false after nil-err disconnect")
+	}
+	if s.LastError != "boom" {
+		t.Errorf("LastError = %q; nil-err disconnect must preserve the prior error", s.LastError)
+	}
+	if s.ReconnectAttempts != 1 {
+		t.Errorf("ReconnectAttempts = %d; nil-err disconnect must not bump the counter", s.ReconnectAttempts)
+	}
+}

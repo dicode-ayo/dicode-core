@@ -120,13 +120,21 @@ func (c *Client) Run(ctx context.Context) error {
 	backoff := time.Second
 	const maxBackoff = 60 * time.Second
 
+	// On any exit path (clean shutdown OR final error), flip the status
+	// pill to offline so the UI doesn't report a stale "connected"
+	// after the daemon quit. A nil error preserves prior LastError /
+	// ReconnectAttempts so debug info isn't erased on the way out.
+	defer c.markDisconnected(nil)
+
 	for {
 		connectedAt := time.Now()
 		if err := c.runOnce(ctx); err != nil {
+			// Record the transport error BEFORE checking ctx so real
+			// failures racing with cancellation still land in Status().
+			c.markDisconnected(err)
 			if ctx.Err() != nil {
 				return nil
 			}
-			c.markDisconnected(err)
 			c.log.Warn("relay disconnected, reconnecting", zap.Error(err), zap.Duration("backoff", backoff))
 		}
 

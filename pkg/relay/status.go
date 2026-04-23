@@ -56,16 +56,20 @@ func (c *Client) markConnected() {
 	c.status.reconnectAttempts = 0
 }
 
-// markDisconnected records a connection-loop error and ticks the
-// reconnect counter. The counter is purely for the UI — the actual
-// backoff lives in Run.
+// markDisconnected records a connection-loop transition. When err is
+// non-nil, the error is stored and the reconnect counter bumps (this
+// is the normal "runOnce returned an error" case). When err is nil,
+// the transition reflects a clean shutdown — the Connected flag flips
+// but the previous error and retry counter are preserved so the UI
+// doesn't lie about the final state.
 func (c *Client) markDisconnected(err error) {
 	c.status.mu.Lock()
 	defer c.status.mu.Unlock()
 	c.status.connected = false
 	c.status.since = time.Now()
-	if err != nil {
-		c.status.lastError = err.Error()
+	if err == nil {
+		return
 	}
+	c.status.lastError = sanitizeErrorString(err.Error())
 	c.status.reconnectAttempts++
 }

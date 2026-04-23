@@ -30,15 +30,17 @@ func (s *Source) PullStatus() PullStatus {
 }
 
 // recordPull writes the result of a Pull attempt. err nil marks
-// success; a non-nil err captures the error message and flips OK off.
-// On success the previous error is cleared.
+// success; a non-nil err captures the error message (with URL
+// userinfo stripped — operators embed PATs in source URLs and we'd
+// otherwise echo them through /api/sources to every authenticated
+// viewer) and flips OK off. On success the previous error is cleared.
 func (s *Source) recordPull(err error) {
 	s.pullStatus.mu.Lock()
 	defer s.pullStatus.mu.Unlock()
 	s.pullStatus.ps.LastPullAt = time.Now()
 	if err != nil {
 		s.pullStatus.ps.OK = false
-		s.pullStatus.ps.Error = err.Error()
+		s.pullStatus.ps.Error = sanitizeErrorString(err.Error())
 		return
 	}
 	s.pullStatus.ps.OK = true
