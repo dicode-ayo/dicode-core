@@ -85,7 +85,7 @@ func (g *GitSource) Start(ctx context.Context) (<-chan source.Event, error) {
 	}
 
 	ch := make(chan source.Event, 32)
-	if err := g.syncAndEmit(ch); err != nil {
+	if err := g.syncAndEmit(ctx, ch); err != nil {
 		g.log.Warn("git source: initial scan failed", zap.String("url", g.url), zap.Error(err))
 	}
 
@@ -115,7 +115,7 @@ func (g *GitSource) poll(ctx context.Context, ch chan<- source.Event) {
 				g.log.Warn("git source: pull failed", zap.String("url", g.url), zap.Error(err))
 				continue
 			}
-			if err := g.syncAndEmit(ch); err != nil {
+			if err := g.syncAndEmit(ctx, ch); err != nil {
 				g.log.Warn("git source: scan failed", zap.String("url", g.url), zap.Error(err))
 			}
 		}
@@ -182,7 +182,14 @@ func (g *GitSource) httpAuth() *http.BasicAuth {
 	return &http.BasicAuth{Username: "git", Password: token}
 }
 
-func (g *GitSource) syncAndEmit(ch chan<- source.Event) error {
+// syncAndEmit computes a diff against the previous snapshot and sends events.
+//
+// Events are sent with a blocking select guarded by ctx.Done: under
+// back-pressure the poller parks until the consumer drains or shutdown
+// begins. A non-blocking send would silently drop events — because diff()
+// has already advanced the snapshot, a dropped event is permanent
+// (no next poll would re-emit it). See #178.
+func (g *GitSource) syncAndEmit(ctx context.Context, ch chan<- source.Event) error {
 	events, err := g.diff()
 	if err != nil {
 		return err
@@ -190,8 +197,8 @@ func (g *GitSource) syncAndEmit(ch chan<- source.Event) error {
 	for _, ev := range events {
 		select {
 		case ch <- ev:
-		default:
-			g.log.Warn("git source: event channel full, dropping", zap.String("task", ev.TaskID))
+		case <-ctx.Done():
+			return nil
 		}
 	}
 	return nil

@@ -201,3 +201,72 @@ func TestLocalSource_EmptyDir(t *testing.T) {
 		t.Fatalf("expected no events for empty dir, got %v", evs)
 	}
 }
+
+// Regression for #178: syncAndEmit must block (not silently drop) when the
+// event channel is full. Before the fix, a full channel caused events to be
+// dropped permanently because diff() had already advanced the snapshot.
+func TestLocalSource_SyncAndEmit_BlocksOnFullChannel(t *testing.T) {
+	dir := t.TempDir()
+	writeTask(t, dir, "alpha")
+	s := newTestSource(t, dir)
+
+	// Zero-capacity channel — any send blocks until drained.
+	ch := make(chan source.Event)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- s.syncAndEmit(ctx, ch)
+	}()
+
+	// syncAndEmit should be blocked on the send.
+	select {
+	case err := <-done:
+		t.Fatalf("syncAndEmit returned before any receive (err=%v); event would have been dropped pre-#178", err)
+	case <-time.After(50 * time.Millisecond):
+		// Expected: blocked.
+	}
+
+	// Drain one event; syncAndEmit should now return cleanly.
+	select {
+	case <-ch:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("no event available on channel")
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("syncAndEmit: %v", err)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("syncAndEmit did not return after drain")
+	}
+}
+
+func TestLocalSource_SyncAndEmit_UnblocksOnCtxCancel(t *testing.T) {
+	dir := t.TempDir()
+	writeTask(t, dir, "alpha")
+	s := newTestSource(t, dir)
+
+	ch := make(chan source.Event)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan error, 1)
+	go func() {
+		done <- s.syncAndEmit(ctx, ch)
+	}()
+
+	// Let the goroutine park on the send.
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("syncAndEmit on ctx-cancel: %v", err)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("syncAndEmit did not return after ctx cancel")
+	}
+}

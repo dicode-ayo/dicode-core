@@ -50,7 +50,7 @@ func (s *LocalSource) Start(ctx context.Context) (<-chan source.Event, error) {
 	ch := make(chan source.Event, 32)
 
 	// Initial scan — emit Added for every task already on disk.
-	if err := s.syncAndEmit(ch); err != nil {
+	if err := s.syncAndEmit(ctx, ch); err != nil {
 		close(ch)
 		return nil, err
 	}
@@ -119,7 +119,7 @@ func (s *LocalSource) watch(ctx context.Context, watcher *fsnotify.Watcher, ch c
 
 	fire := func() {
 		timerC = nil
-		if err := s.syncAndEmit(ch); err != nil {
+		if err := s.syncAndEmit(ctx, ch); err != nil {
 			s.log.Warn("local source sync error", zap.String("path", s.path), zap.Error(err))
 		}
 	}
@@ -145,7 +145,13 @@ func (s *LocalSource) watch(ctx context.Context, watcher *fsnotify.Watcher, ch c
 }
 
 // syncAndEmit computes a diff against the previous snapshot and sends events.
-func (s *LocalSource) syncAndEmit(ch chan<- source.Event) error {
+//
+// Events are sent with a blocking select guarded by ctx.Done: under
+// back-pressure the watcher parks until the consumer drains or shutdown
+// begins. A non-blocking send would silently drop events — because diff()
+// has already advanced the snapshot, a dropped event is permanent
+// (no next poll would re-emit it). See #178.
+func (s *LocalSource) syncAndEmit(ctx context.Context, ch chan<- source.Event) error {
 	events, err := s.diff()
 	if err != nil {
 		return err
@@ -153,9 +159,8 @@ func (s *LocalSource) syncAndEmit(ch chan<- source.Event) error {
 	for _, ev := range events {
 		select {
 		case ch <- ev:
-		default:
-			s.log.Warn("local source event channel full, dropping event",
-				zap.String("task", ev.TaskID))
+		case <-ctx.Done():
+			return nil
 		}
 	}
 	return nil
