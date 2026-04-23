@@ -430,6 +430,9 @@ func (s *Server) Handler() http.Handler {
 			r.Delete("/settings/sources/{idx}", s.apiRemoveSource)
 			r.Get("/settings/sources/git/branches", s.apiListGitBranches)
 
+			// Relay status (#87) — returns {"enabled":false} when disabled.
+			r.Get("/relay/status", s.apiRelayStatus)
+
 			// Source management (taskset model)
 			r.Get("/sources", s.apiListSources)
 			r.Patch("/sources/{name}/dev", s.apiSetDevMode)

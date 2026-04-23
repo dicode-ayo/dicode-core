@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/dicode/dicode/pkg/registry"
 	"github.com/dicode/dicode/pkg/tasktest"
@@ -34,6 +35,14 @@ type SourceEntry struct {
 	Branch  string `json:"branch,omitempty"`
 	DevMode bool   `json:"dev_mode"`
 	DevPath string `json:"dev_path,omitempty"`
+
+	// Pull-health fields — populated for live taskset git sources; zero
+	// for local sources or taskset sources that haven't attempted a pull
+	// yet. The frontend uses these to render a per-source status dot in
+	// the task list. See #87.
+	LastPullAt    time.Time `json:"last_pull_at,omitempty"`
+	LastPullOK    bool      `json:"last_pull_ok,omitempty"`
+	LastPullError string    `json:"last_pull_error,omitempty"`
 }
 
 // Server is the MCP server. Mount it with Handler() on your HTTP router.

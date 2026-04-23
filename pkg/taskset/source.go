@@ -38,6 +38,11 @@ type Source struct {
 	ch          chan source.Event   // live channel set by Start; nil before Start
 	devRootPath string              // non-empty overrides rootRef.Path in dev mode
 	watchRoot   string              // directory watched by fsnotify; set in Start
+
+	// pullStatus tracks the outcome of the most recent git pull; exposed
+	// via PullStatus() for the webui source-health dot. Zero-value means
+	// "never attempted" (local sources, or before Start).
+	pullStatus pullStatusState
 }
 
 type taskSnap struct {
@@ -93,6 +98,7 @@ func (s *Source) Start(ctx context.Context) (<-chan source.Event, error) {
 
 	// Determine (and cache) the local directory to watch.
 	watchRoot, err := s.resolver.Pull(ctx, s.rootRef)
+	s.recordPull(err)
 	if err != nil {
 		s.log.Warn("taskset source: initial clone/pull failed",
 			zap.String("id", s.id), zap.Error(err))
@@ -219,7 +225,9 @@ func (s *Source) watch(ctx context.Context, ch chan<- source.Event) {
 		case <-pullTickC:
 			// Fetch from remote. If the pull actually changed files on disk,
 			// fsnotify will fire and trigger syncAndEmit via the debounce path.
-			if _, err := s.resolver.Pull(ctx, s.rootRef); err != nil {
+			_, err := s.resolver.Pull(ctx, s.rootRef)
+			s.recordPull(err)
+			if err != nil {
 				s.log.Warn("taskset source: pull failed",
 					zap.String("id", s.id), zap.Error(err))
 			}
@@ -260,7 +268,9 @@ func (s *Source) pollFallback(ctx context.Context, ch chan<- source.Event) {
 			return
 		case <-ticker.C:
 			if s.rootRef.IsGit() {
-				if _, err := s.resolver.Pull(ctx, s.rootRef); err != nil {
+				_, err := s.resolver.Pull(ctx, s.rootRef)
+				s.recordPull(err)
+				if err != nil {
 					s.log.Warn("taskset source: pull failed",
 						zap.String("id", s.id), zap.Error(err))
 				}

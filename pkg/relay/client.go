@@ -60,6 +60,9 @@ type Client struct {
 	// been upgraded for issue #104 and OAuth IPC paths must be refused.
 	protoMu        sync.RWMutex
 	brokerProtocol int
+
+	// status is the UI-facing connection-health snapshot; see Status().
+	status statusState
 }
 
 // SupportsOAuth reports whether the currently connected broker has announced
@@ -123,6 +126,7 @@ func (c *Client) Run(ctx context.Context) error {
 			if ctx.Err() != nil {
 				return nil
 			}
+			c.markDisconnected(err)
 			c.log.Warn("relay disconnected, reconnecting", zap.Error(err), zap.Duration("backoff", backoff))
 		}
 
@@ -180,6 +184,7 @@ func (c *Client) runOnce(ctx context.Context) error {
 		return fmt.Errorf("handshake: %w", err)
 	}
 	cancel() // handshake done — release the dial timeout
+	c.markConnected()
 
 	return c.serve(ctx, conn, &sendMu)
 }

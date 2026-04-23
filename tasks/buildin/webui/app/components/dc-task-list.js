@@ -8,13 +8,15 @@ class DcTaskList extends LitElement {
   createRenderRoot() { return this; }
 
   static properties = {
-    _tasks:  { state: true },
-    _error:  { state: true },
+    _tasks:   { state: true },
+    _sources: { state: true },
+    _error:   { state: true },
   };
 
   constructor() {
     super();
     this._tasks = null;
+    this._sources = new Map(); // source name → entry (with pull-health fields)
     this._error = null;
     this._relayBase = '';
     this._offFinished = null;
@@ -49,8 +51,13 @@ class DcTaskList extends LitElement {
 
   async _load() {
     try {
-      const [tasks, base] = await Promise.all([get('/api/tasks'), relayHookBaseURL()]);
+      const [tasks, sources, base] = await Promise.all([
+        get('/api/tasks'),
+        get('/api/sources').catch(() => []), // sources endpoint is optional; don't fail the page
+        relayHookBaseURL(),
+      ]);
       this._tasks = tasks;
+      this._sources = new Map((sources || []).map(s => [s.name, s]));
       this._relayBase = base;
     } catch(e) {
       this._error = e.message;
@@ -79,6 +86,22 @@ class DcTaskList extends LitElement {
       if (b === '') return 1;
       return a.localeCompare(b);
     });
+  }
+
+  // _pullDot renders a small colored dot in a source-group header
+  // reflecting the last pull outcome. Returns nothing for local
+  // sources or sources that haven't attempted a pull.
+  _pullDot(ns) {
+    const src = this._sources.get(ns);
+    if (!src || !src.last_pull_at) return '';
+    const ok = src.last_pull_ok;
+    const color = ok ? '#3fb950' : '#f85149';
+    const label = ok ? 'OK' : (src.last_pull_error || 'error');
+    const when = new Date(src.last_pull_at).toLocaleString();
+    const tip = `last pull: ${when} · ${label}`;
+    return html`<span
+      title=${tip}
+      style="display:inline-block;width:0.55rem;height:0.55rem;border-radius:50%;background:${color};cursor:help"></span>`;
   }
 
   _taskRow(t) {
@@ -119,6 +142,7 @@ class DcTaskList extends LitElement {
           <div style="margin-bottom:1.25rem">
             ${ns ? html`
               <div style="display:flex;align-items:center;gap:var(--space-sm);margin-bottom:0.4rem">
+                ${this._pullDot(ns)}
                 <span style="font-size:0.78rem;font-weight:700;color:var(--lavender);text-transform:uppercase;letter-spacing:0.05em">${ns}</span>
                 <span class="meta">(${tasks.length})</span>
               </div>` : ''}

@@ -71,6 +71,10 @@ func (m *SourceManager) List() []mcp.SourceEntry {
 			info.Type = "taskset"
 			info.DevMode = src.DevMode()
 			info.DevPath = src.DevRootPath()
+			ps := src.PullStatus()
+			info.LastPullAt = ps.LastPullAt
+			info.LastPullOK = ps.OK
+			info.LastPullError = ps.Error
 		} else if sc.URL != "" {
 			info.Type = "git"
 		} else {
