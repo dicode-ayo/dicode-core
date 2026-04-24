@@ -89,16 +89,32 @@ class DcTaskList extends LitElement {
   }
 
   // _pullDot renders a small colored dot in a source-group header
-  // reflecting the last pull outcome. Returns nothing for local
-  // sources or sources that haven't attempted a pull.
+  // reflecting the last pull outcome.
+  //   green = last pull OK
+  //   red   = last pull failed (tooltip shows the error)
+  //   grey  = no pull attempted yet OR never seen by /api/sources
+  // Local sources (type: local) have nothing to pull, so they skip
+  // the dot entirely.
   _pullDot(ns) {
     const src = this._sources.get(ns);
-    if (!src || !src.last_pull_at) return '';
-    const ok = src.last_pull_ok;
-    const color = ok ? '#3fb950' : '#f85149';
-    const label = ok ? 'OK' : (src.last_pull_error || 'error');
-    const when = new Date(src.last_pull_at).toLocaleString();
-    const tip = `last pull: ${when} · ${label}`;
+    if (src && src.type === 'local') return '';
+
+    let color = '#8c96a3'; // grey default: unknown / pending
+    let tip = 'no pull data yet';
+
+    if (src && src.last_pull_at) {
+      const when = new Date(src.last_pull_at).toLocaleString();
+      if (src.last_pull_ok) {
+        color = '#3fb950';
+        tip = `last pull: ${when} · OK`;
+      } else {
+        color = '#f85149';
+        tip = `last pull: ${when} · ${src.last_pull_error || 'error'}`;
+      }
+    } else if (!src) {
+      tip = 'source not registered with /api/sources';
+    }
+
     return html`<span
       title=${tip}
       style="display:inline-block;width:0.55rem;height:0.55rem;border-radius:50%;background:${color};cursor:help"></span>`;

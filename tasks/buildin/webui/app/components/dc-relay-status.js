@@ -30,6 +30,7 @@ class DcRelayStatus extends LitElement {
     }
     .pill.ok  { background: rgba(46, 160, 67, 0.14); color: #3fb950; border-color: rgba(46, 160, 67, 0.35); }
     .pill.err { background: rgba(248, 81, 73, 0.14); color: #f85149; border-color: rgba(248, 81, 73, 0.35); }
+    .pill.off { background: rgba(140, 150, 163, 0.10); color: #8c96a3; border-color: rgba(140, 150, 163, 0.28); }
     .dot { width: 0.55rem; height: 0.55rem; border-radius: 50%; background: currentColor; }
   `;
 
@@ -76,7 +77,15 @@ class DcRelayStatus extends LitElement {
 
   render() {
     const s = this._status;
-    if (!s || !s.enabled) return html``;
+    // Always render the pill — a grey "off" state for disabled relays
+    // gives operators a stable spot to click through and surfaces
+    // misconfiguration ("I thought I enabled it?") instead of hiding it.
+    if (!s) {
+      return html`<span class="pill off" title="loading relay status…"><span class="dot"></span>Relay: …</span>`;
+    }
+    if (!s.enabled) {
+      return html`<span class="pill off" title="relay disabled in config; set relay.enabled: true in dicode.yaml"><span class="dot"></span>Relay: off</span>`;
+    }
     const cls = s.connected ? 'ok' : 'err';
     const label = s.connected ? 'Relay' : 'Relay offline';
     return html`<span class="pill ${cls}" title=${this._tooltip()}>
