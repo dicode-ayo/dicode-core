@@ -22,11 +22,12 @@ func newAuthServerNoDB(t *testing.T, passphrase string) *Server {
 	t.Helper()
 	reg := registry.New(nil)
 	eng := trigger.New(reg, nil, zap.NewNop())
+	mcpOn := true
 	cfg := &config.Config{Server: config.ServerConfig{
 		Port:   8080,
 		Auth:   true,
 		Secret: passphrase,
-		MCP:    true,
+		MCP:    &mcpOn,
 	}}
 	srv := &Server{
 		registry: reg,

@@ -451,7 +451,9 @@ func (s *Server) Handler() http.Handler {
 		})
 
 		// MCP endpoint — requires API key when auth is enabled.
-		if s.cfg == nil || s.cfg.Server.MCP {
+		// MCP is a *bool pointer; nil means "unset" (treated as default enabled
+		// when cfg is present — applyDefaults fills this in).
+		if s.cfg == nil || s.cfg.Server.MCP == nil || *s.cfg.Server.MCP {
 			mcpSrv := mcp.New(s.registry, s.sourceMgr)
 			r.With(s.requireAPIKey).Mount("/mcp", mcpSrv.Handler())
 		}
@@ -1437,7 +1439,8 @@ func (s *Server) apiAddSource(w http.ResponseWriter, r *http.Request) {
 			jsonErr(w, "path is required for local source", http.StatusBadRequest)
 			return
 		}
-		sc = config.SourceConfig{Type: config.SourceTypeLocal, Path: path, Watch: true}
+		watchTrue := true
+		sc = config.SourceConfig{Type: config.SourceTypeLocal, Path: path, Watch: &watchTrue}
 	case config.SourceTypeGit:
 		url := strings.TrimSpace(body.URL)
 		if url == "" {
@@ -1463,7 +1466,8 @@ func (s *Server) apiAddSource(w http.ResponseWriter, r *http.Request) {
 	if s.reconciler != nil {
 		switch sc.Type {
 		case config.SourceTypeLocal:
-			ls, err := local.New(sc.Path, sc.Path, s.log)
+			watchEnabled := sc.Watch == nil || *sc.Watch
+			ls, err := local.New(sc.Path, sc.Path, watchEnabled, s.log)
 			if err != nil {
 				jsonErr(w, "create local source: "+err.Error(), http.StatusInternalServerError)
 				return

@@ -175,8 +175,11 @@ type SourceConfig struct {
 	Auth         SourceAuth    `yaml:"auth,omitempty"`
 
 	// Local source fields
-	Path  string `yaml:"path,omitempty"`  // absolute path to taskset.yaml (local) or tasks dir (legacy)
-	Watch bool   `yaml:"watch,omitempty"` // enable fsnotify (default true for local)
+	Path string `yaml:"path,omitempty"` // absolute path to taskset.yaml (local) or tasks dir (legacy)
+	// Watch enables fsnotify on the local source. Nil means "unset — apply
+	// default"; an explicit `watch: false` in YAML preserves false so the
+	// user can opt out. Default (nil → true) is applied in applyDefaults.
+	Watch *bool `yaml:"watch,omitempty"`
 
 	// TaskSet fields (new model)
 	// Name is the root namespace segment for all tasks from this source.
@@ -207,7 +210,7 @@ type ServerConfig struct {
 	Auth           bool     `yaml:"auth"`                      // enable global auth wall (default: false)
 	AllowedOrigins []string `yaml:"allowed_origins,omitempty"` // CORS allowlist; empty = same-origin only
 	TrustProxy     bool     `yaml:"trust_proxy,omitempty"`     // trust X-Forwarded-For from upstream proxy
-	MCP            bool     `yaml:"mcp"`                       // expose MCP endpoint at /mcp (default: true)
+	MCP            *bool    `yaml:"mcp,omitempty"`             // expose MCP endpoint at /mcp; nil → default true, explicit false opts out
 	TLSCertFile    string   `yaml:"tls_cert,omitempty"`        // path to TLS certificate (PEM); enables HTTPS when set with tls_key
 	TLSKeyFile     string   `yaml:"tls_key,omitempty"`         // path to TLS private key (PEM)
 }
@@ -294,18 +297,24 @@ func applyDefaults(cfg *Config, configDir string) {
 			}
 		}
 		if s.Type == SourceTypeLocal {
-			// Watch defaults to true for local sources
-			if !s.Watch {
-				s.Watch = true
+			// Watch defaults to true for local sources. A pointer lets us
+			// distinguish "unset" (nil → apply default true) from "explicitly
+			// false" (user opted out) — the previous non-pointer form made
+			// `watch: false` a no-op.
+			if s.Watch == nil {
+				t := true
+				s.Watch = &t
 			}
 		}
 	}
 	if cfg.Server.Port == 0 {
 		cfg.Server.Port = 8080
 	}
-	// MCP defaults to enabled
-	if !cfg.Server.MCP {
-		cfg.Server.MCP = true
+	// MCP defaults to enabled. Pointer lets us distinguish unset (nil → true)
+	// from explicit false (opt-out).
+	if cfg.Server.MCP == nil {
+		t := true
+		cfg.Server.MCP = &t
 	}
 	// Default secret providers if none configured
 	if len(cfg.Secrets.Providers) == 0 {

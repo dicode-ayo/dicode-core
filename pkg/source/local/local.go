@@ -19,8 +19,9 @@ const debounce = 150 * time.Millisecond
 
 // LocalSource watches a local directory for task changes.
 type LocalSource struct {
-	id   string
-	path string // absolute path to the tasks directory
+	id           string
+	path         string // absolute path to the tasks directory
+	watchEnabled bool   // whether to run fsnotify; false = poll-only via explicit Sync()
 
 	mu       sync.Mutex
 	snapshot map[string]string // taskID → hash at last sync
@@ -28,17 +29,20 @@ type LocalSource struct {
 	log *zap.Logger
 }
 
-// New creates a LocalSource for the given directory.
-func New(id, path string, log *zap.Logger) (*LocalSource, error) {
+// New creates a LocalSource for the given directory. If watchEnabled is
+// false, Start performs the initial scan but does not set up fsnotify —
+// callers must drive updates explicitly via Sync().
+func New(id, path string, watchEnabled bool, log *zap.Logger) (*LocalSource, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return nil, err
 	}
 	return &LocalSource{
-		id:       id,
-		path:     abs,
-		snapshot: make(map[string]string),
-		log:      log,
+		id:           id,
+		path:         abs,
+		watchEnabled: watchEnabled,
+		snapshot:     make(map[string]string),
+		log:          log,
 	}, nil
 }
 
@@ -53,6 +57,17 @@ func (s *LocalSource) Start(ctx context.Context) (<-chan source.Event, error) {
 	if err := s.syncAndEmit(ctx, ch); err != nil {
 		close(ch)
 		return nil, err
+	}
+
+	// If watch is disabled, don't spin up fsnotify. Callers drive updates
+	// via Sync(). Channel stays open for the initial scan's events and is
+	// closed when ctx cancels.
+	if !s.watchEnabled {
+		go func() {
+			<-ctx.Done()
+			close(ch)
+		}()
+		return ch, nil
 	}
 
 	watcher, err := fsnotify.NewWatcher()

@@ -29,7 +29,7 @@ func writeTask(t *testing.T, dir, name string) {
 
 func newTestSource(t *testing.T, dir string) *LocalSource {
 	t.Helper()
-	s, err := New("test", dir, zap.NewNop())
+	s, err := New("test", dir, true, zap.NewNop())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -268,5 +268,44 @@ func TestLocalSource_SyncAndEmit_UnblocksOnCtxCancel(t *testing.T) {
 		}
 	case <-time.After(200 * time.Millisecond):
 		t.Fatal("syncAndEmit did not return after ctx cancel")
+	}
+}
+
+// Regression for #177: with watchEnabled=false, Start must perform the
+// initial scan but must NOT set up fsnotify. Adding a new task after Start
+// should produce no events until something calls Sync() explicitly.
+func TestLocalSource_WatchDisabled_NoFsNotifyEvents(t *testing.T) {
+	dir := t.TempDir()
+	writeTask(t, dir, "initial")
+
+	s, err := New("test", dir, false, zap.NewNop())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ch, err := s.Start(ctx)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Initial scan is still expected to emit the existing task.
+	initial := collectEvents(ch, 100*time.Millisecond)
+	if len(initial) != 1 {
+		t.Fatalf("initial scan: want 1 event, got %d (%v)", len(initial), initial)
+	}
+
+	// Add a task AFTER Start. With fsnotify disabled, this must NOT trigger
+	// an event — only an explicit Sync() would pick it up.
+	writeTask(t, dir, "late")
+	evs := collectEvents(ch, 300*time.Millisecond)
+	if len(evs) != 0 {
+		t.Fatalf("watch=false should suppress fsnotify events, but got %d (%v)", len(evs), evs)
+	}
+
+	// Sanity: Sync() still works for callers driving updates manually.
+	if err := s.Sync(ctx); err != nil {
+		t.Fatalf("Sync: %v", err)
 	}
 }
