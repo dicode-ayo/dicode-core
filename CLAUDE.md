@@ -27,7 +27,7 @@ Run a single test package: `go test ./pkg/registry/... -timeout 60s -run TestNam
 3. Set up secrets chain (`pkg/secrets`) — encrypted SQLite → env vars
 4. Init sources (`pkg/source`) — git repos or local folders
 5. Create registry (`pkg/registry`) — in-memory task state + SQLite run log
-6. Init runtimes (`pkg/runtime/js`, `pkg/runtime/docker`)
+6. Init runtimes (`pkg/runtime/deno`, `pkg/runtime/python`, `pkg/runtime/docker`, `pkg/runtime/podman`)
 7. Start trigger engine (`pkg/trigger`) — cron, webhook, manual, daemon, chaining
 8. Start web UI + REST API (`pkg/webui`)
 9. Start MCP server (`pkg/mcp`) — AI agent integration
@@ -44,9 +44,10 @@ Run a single test package: `go test ./pkg/registry/... -timeout 60s -run TestNam
 | `pkg/registry` | In-memory task map; SQLite run/log persistence |
 | `pkg/registry/reconciler` | Diff sources against registry, drive add/remove/update |
 | `pkg/trigger` | Schedule/fire tasks; supports cron, webhook, manual, chain, daemon |
-| `pkg/runtime/js` | Execute JS tasks via goja sandbox (one isolated runtime per run) |
-| `pkg/runtime/js/globals` | Inject `http`, `kv`, `log`, `params`, `env`, `fs`, `output`, `notify` |
+| `pkg/runtime/deno` | Execute JS/TS tasks via a Deno subprocess with restrictive `--allow-*` flags; SDK shim embedded from `pkg/runtime/deno/sdk/shim.ts` |
+| `pkg/runtime/python` | Execute Python tasks via a `uv`-provisioned interpreter subprocess; SDK embedded from `pkg/runtime/python/sdk/dicode_sdk.py` |
 | `pkg/runtime/docker` | Pull image, run container, stream logs, clean up |
+| `pkg/runtime/podman` | Rootless container execution via podman CLI |
 | `pkg/webui` | chi router, HTMX templates, REST API, WebSocket log streaming |
 | `pkg/mcp` | MCP server exposing tools for AI agents to develop/test/deploy tasks |
 | `pkg/secrets` | AES-encrypted SQLite store + env var fallback |
@@ -65,11 +66,11 @@ tasks/my-task/
 └── task.test.js   # optional unit tests with mocked globals
 ```
 
-`task.js` globals: `http`, `kv`, `log`, `params`, `env`, `fs`, `output`, `notify`
+Task SDK surface (Deno `dicode` global / Python `dicode` module): `kv`, `log`, `params`, `env`, `output`, `mcp`. Deno tasks also get the platform's native `fetch`; Python tasks use stdlib (`urllib`, `requests`, etc.) — there is no HTTP helper on the `dicode` module itself. See `pkg/runtime/deno/sdk/shim.ts` and `pkg/runtime/python/sdk/dicode_sdk.py` for the authoritative shapes.
 
 ## Key Design Constraints
 
 - **No external database** — SQLite embedded via `modernc.org/sqlite` (pure Go, no CGO for Linux builds)
 - **No git binary** — `go-git/v5` for all git operations
-- **JS sandbox** — goja (ES5+, not Node.js); each task run gets a fresh isolated runtime
+- **JS/TS sandbox** — Deno subprocess per run; sandboxing via Deno's `--allow-net`/`--allow-env`/`--allow-read`/`--allow-write` permission flags derived from the task's declared permissions. The daemon communicates with the task over a unix-domain socket (`pkg/ipc`) so SDK calls like `dicode.kv.set()` go through the Go control plane, not raw `fetch`.
 - **Graceful shutdown** — cancels running tasks, stops daemon loops, flushes logs before exit
