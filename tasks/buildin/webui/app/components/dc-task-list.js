@@ -11,6 +11,7 @@ class DcTaskList extends LitElement {
     _tasks:   { state: true },
     _sources: { state: true },
     _error:   { state: true },
+    _filter:  { state: true },
   };
 
   constructor() {
@@ -18,6 +19,7 @@ class DcTaskList extends LitElement {
     this._tasks = null;
     this._sources = new Map(); // source name → entry (with pull-health fields)
     this._error = null;
+    this._filter = '';
     this._relayBase = '';
     this._offFinished = null;
     this._offStarted = null;
@@ -71,21 +73,37 @@ class DcTaskList extends LitElement {
     } catch(e) { alert('Failed to run task: ' + e.message); }
   }
 
-  // Group tasks by top-level namespace segment.
-  // Tasks without '/' in their ID go in the '' (ungrouped) bucket.
+  // Group tasks by top-level namespace segment, applying the active
+  // filter as a case-insensitive substring match against ID, name, and
+  // trigger label. Tasks without '/' in their ID go in the '' bucket.
+  // Empty groups are omitted from the result.
   _grouped() {
+    const q = this._filter.trim().toLowerCase();
+    const match = (t) => {
+      if (!q) return true;
+      return (
+        t.id.toLowerCase().includes(q) ||
+        (t.name || '').toLowerCase().includes(q) ||
+        (t.trigger_label || '').toLowerCase().includes(q)
+      );
+    };
+
     const map = new Map();
     for (const t of this._tasks) {
+      if (!match(t)) continue;
       const ns = t.id.includes('/') ? t.id.split('/')[0] : '';
       if (!map.has(ns)) map.set(ns, []);
       map.get(ns).push(t);
     }
-    // Sort: ungrouped first, then namespaces alphabetically
     return [...map.entries()].sort(([a], [b]) => {
       if (a === '') return -1;
       if (b === '') return 1;
       return a.localeCompare(b);
     });
+  }
+
+  _matchingCount() {
+    return this._grouped().reduce((n, [, ts]) => n + ts.length, 0);
   }
 
   // _pullDot renders a small colored dot in a source-group header
@@ -182,13 +200,31 @@ class DcTaskList extends LitElement {
     const groups = this._grouped();
     const isNamespaced = groups.some(([ns]) => ns !== '');
 
+    const matching = this._matchingCount();
+    const noMatches = this._filter && matching === 0;
+
     return html`
       <div style="display:flex;align-items:center;gap:var(--space-md);margin-bottom:var(--space-md)">
         <h1 style="margin:0">Tasks</h1>
+        <span class="meta" style="flex:0 0 auto">
+          ${this._filter ? `${matching} / ${this._tasks.length}` : ''}
+        </span>
+        <div style="flex:1"></div>
+        <input type="search"
+          placeholder="Filter by id, name, or trigger…"
+          .value=${this._filter}
+          @input=${e => this._filter = e.target.value}
+          style="min-width:14rem;padding:0.35rem 0.6rem;border-radius:6px;
+                 border:1px solid var(--border);background:var(--bg-alt);
+                 color:inherit;font:inherit" />
       </div>
       ${this._tasks.length === 0 ? html`
         <div class="card" style="text-align:center;color:var(--muted);padding:var(--space-xl)">
           No tasks found. Add tasks to your data directory.
+        </div>
+      ` : noMatches ? html`
+        <div class="card" style="text-align:center;color:var(--muted);padding:var(--space-xl)">
+          No tasks match “${this._filter}”.
         </div>
       ` : isNamespaced ? html`
         ${groups.map(([ns, tasks]) => html`
