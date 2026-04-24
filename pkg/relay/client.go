@@ -56,8 +56,12 @@ type Client struct {
 
 	// protoMu guards brokerProtocol. The value is 0 until the first successful
 	// handshake; after that it reflects the broker's advertised `protocol`
-	// field in the welcome message. A value < 2 means the broker has not
-	// been upgraded for issue #104 and OAuth IPC paths must be refused.
+	// field in the welcome message. The handshake gate refuses brokers below
+	// BrokerProtocolMin (currently 3 — #104 split sign/decrypt keys + #195
+	// protobuf-es wire format), so a non-zero value is always sufficient for
+	// OAuth. SupportsOAuth compares against BrokerProtocolMin rather than a
+	// literal so relaxing the gate in the future does not silently grant
+	// OAuth to brokers that do not meet the new floor.
 	protoMu        sync.RWMutex
 	brokerProtocol int
 
@@ -75,7 +79,7 @@ type Client struct {
 func (c *Client) SupportsOAuth() bool {
 	c.protoMu.RLock()
 	defer c.protoMu.RUnlock()
-	return c.brokerProtocol >= 2
+	return c.brokerProtocol >= BrokerProtocolMin
 }
 
 // BrokerPubkey returns the currently pinned broker public key (base64 SPKI DER).
