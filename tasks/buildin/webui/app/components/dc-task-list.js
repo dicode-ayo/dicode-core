@@ -120,10 +120,19 @@ class DcTaskList extends LitElement {
       style="display:inline-block;width:0.55rem;height:0.55rem;border-radius:50%;background:${color};cursor:help"></span>`;
   }
 
-  _taskRow(t) {
+  // displayID strips the namespace prefix (e.g. "examples/hello-cron"
+  // → "hello-cron") so the task name isn't redundant with the source
+  // group heading. The link's href still uses the full id.
+  _displayID(id, ns) {
+    if (ns && id.startsWith(ns + '/')) return id.slice(ns.length + 1);
+    return id;
+  }
+
+  _taskRow(t, ns) {
+    const shown = this._displayID(t.id, ns);
     return html`
       <tr>
-        <td><a href="/tasks/${t.id}" @click=${e => { e.preventDefault(); navigate('/tasks/' + t.id); }}>${t.id}</a></td>
+        <td><a href="/tasks/${t.id}" @click=${e => { e.preventDefault(); navigate('/tasks/' + t.id); }}>${shown}</a></td>
         <td>${t.name}</td>
         <td>${t.trigger?.Webhook
           ? html`<a href="${webhookURL(this._relayBase, t.trigger.Webhook)}" target="_blank" class="meta">${t.trigger_label}</a>`
@@ -136,6 +145,34 @@ class DcTaskList extends LitElement {
           : '—'}</td>
         <td><button class="btn btn-sm" @click=${() => this._run(t.id)}>&#9654; Run</button></td>
       </tr>`;
+  }
+
+  // _pullSummary renders the inline "last pull …" text next to the
+  // source-group count. Nothing for local sources.
+  _pullSummary(ns) {
+    const src = this._sources.get(ns);
+    if (!src || src.type === 'local') return '';
+    if (!src.last_pull_at) {
+      return html`<span class="meta">· last pull: —</span>`;
+    }
+    const rel = this._relTime(src.last_pull_at);
+    if (src.last_pull_ok) {
+      return html`<span class="meta">· last pull: ${rel}</span>`;
+    }
+    return html`<span class="meta" style="color:#f85149"
+      title=${src.last_pull_error || 'error'}>· last pull: ${rel} · failed</span>`;
+  }
+
+  _relTime(iso) {
+    const t = new Date(iso).getTime();
+    if (!t) return '—';
+    const s = Math.max(0, Math.round((Date.now() - t) / 1000));
+    if (s < 30) return 'just now';
+    if (s < 90) return '1m ago';
+    if (s < 3600) return `${Math.round(s / 60)}m ago`;
+    if (s < 5400) return '1h ago';
+    if (s < 86400) return `${Math.round(s / 3600)}h ago`;
+    return `${Math.round(s / 86400)}d ago`;
   }
 
   render() {
@@ -161,17 +198,18 @@ class DcTaskList extends LitElement {
                 ${this._pullDot(ns)}
                 <span style="font-size:0.78rem;font-weight:700;color:var(--lavender);text-transform:uppercase;letter-spacing:0.05em">${ns}</span>
                 <span class="meta">(${tasks.length})</span>
+                ${this._pullSummary(ns)}
               </div>` : ''}
             <table>
               <thead><tr><th>ID</th><th>Name</th><th>Trigger</th><th>Last Run</th><th>Status</th><th></th></tr></thead>
-              <tbody>${tasks.map(t => this._taskRow(t))}</tbody>
+              <tbody>${tasks.map(t => this._taskRow(t, ns))}</tbody>
             </table>
           </div>
         `)}
       ` : html`
         <table>
           <thead><tr><th>ID</th><th>Name</th><th>Trigger</th><th>Last Run</th><th>Status</th><th></th></tr></thead>
-          <tbody>${this._tasks.map(t => this._taskRow(t))}</tbody>
+          <tbody>${this._tasks.map(t => this._taskRow(t, ''))}</tbody>
         </table>
       `}`;
   }
