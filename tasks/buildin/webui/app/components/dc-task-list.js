@@ -8,10 +8,11 @@ class DcTaskList extends LitElement {
   createRenderRoot() { return this; }
 
   static properties = {
-    _tasks:   { state: true },
-    _sources: { state: true },
-    _error:   { state: true },
-    _filter:  { state: true },
+    _tasks:     { state: true },
+    _sources:   { state: true },
+    _error:     { state: true },
+    _filter:    { state: true },
+    _collapsed: { state: true },
   };
 
   constructor() {
@@ -20,10 +21,34 @@ class DcTaskList extends LitElement {
     this._sources = new Map(); // source name → entry (with pull-health fields)
     this._error = null;
     this._filter = '';
+    // Persisted collapse state: set of namespace keys that are folded shut.
+    this._collapsed = this._loadCollapsed();
     this._relayBase = '';
     this._offFinished = null;
     this._offStarted = null;
     this._offChanged = null;
+  }
+
+  _loadCollapsed() {
+    try {
+      const raw = localStorage.getItem('dicode.task-list.collapsed');
+      return new Set(raw ? JSON.parse(raw) : []);
+    } catch {
+      return new Set();
+    }
+  }
+
+  _saveCollapsed() {
+    try {
+      localStorage.setItem('dicode.task-list.collapsed', JSON.stringify([...this._collapsed]));
+    } catch { /* quota — ignore */ }
+  }
+
+  _toggleGroup(ns) {
+    const next = new Set(this._collapsed);
+    if (next.has(ns)) next.delete(ns); else next.add(ns);
+    this._collapsed = next;
+    this._saveCollapsed();
   }
 
   connectedCallback() {
@@ -227,21 +252,32 @@ class DcTaskList extends LitElement {
           No tasks match “${this._filter}”.
         </div>
       ` : isNamespaced ? html`
-        ${groups.map(([ns, tasks]) => html`
+        ${groups.map(([ns, tasks]) => {
+          const collapsed = ns && this._collapsed.has(ns);
+          return html`
           <div style="margin-bottom:1.25rem">
             ${ns ? html`
-              <div style="display:flex;align-items:center;gap:var(--space-sm);margin-bottom:0.4rem">
+              <div role="button" tabindex="0"
+                aria-expanded=${collapsed ? 'false' : 'true'}
+                @click=${() => this._toggleGroup(ns)}
+                @keydown=${e => {
+                  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this._toggleGroup(ns); }
+                }}
+                style="display:flex;align-items:center;gap:var(--space-sm);margin-bottom:0.4rem;cursor:pointer;user-select:none"
+                title=${collapsed ? 'Expand group' : 'Collapse group'}>
+                <span style="display:inline-block;width:0.8rem;text-align:center;color:var(--muted);transition:transform 0.1s ease;transform:rotate(${collapsed ? '-90' : '0'}deg)">▾</span>
                 ${this._pullDot(ns)}
                 <span style="font-size:0.78rem;font-weight:700;color:var(--lavender);text-transform:uppercase;letter-spacing:0.05em">${ns}</span>
                 <span class="meta">(${tasks.length})</span>
                 ${this._pullSummary(ns)}
               </div>` : ''}
-            <table>
-              <thead><tr><th>ID</th><th>Name</th><th>Trigger</th><th>Last Run</th><th>Status</th><th></th></tr></thead>
-              <tbody>${tasks.map(t => this._taskRow(t, ns))}</tbody>
-            </table>
+            ${collapsed ? '' : html`
+              <table>
+                <thead><tr><th>ID</th><th>Name</th><th>Trigger</th><th>Last Run</th><th>Status</th><th></th></tr></thead>
+                <tbody>${tasks.map(t => this._taskRow(t, ns))}</tbody>
+              </table>`}
           </div>
-        `)}
+        `;})}
       ` : html`
         <table>
           <thead><tr><th>ID</th><th>Name</th><th>Trigger</th><th>Last Run</th><th>Status</th><th></th></tr></thead>
