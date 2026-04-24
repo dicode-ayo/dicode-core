@@ -545,6 +545,10 @@ func TestLoginPage_Served_WhenPathIsPublic(t *testing.T) {
 	}
 }
 
+// csrfCookie is the cookie name set by gorilla/csrf middleware. Kept here
+// (not in server.go) as a test helper so tests can assert on a stable name.
+const csrfCookie = "dicode_csrf"
+
 // prepareLoginPost performs a GET /login to obtain a CSRF cookie and token,
 // then builds a POST request carrying both. Returned request has the cookie
 // attached and the form body includes the matching _csrf field.
