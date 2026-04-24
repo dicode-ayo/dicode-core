@@ -105,22 +105,10 @@ func NewControlServer(
 		return nil, fmt.Errorf("control: issue token: %w", err)
 	}
 	cs.token = tok
-	if err := writeTokenFile(tokenPath, tok); err != nil {
+	if err := writeCLITokenFile(tokenPath, tok); err != nil {
 		return nil, fmt.Errorf("control: write token file: %w", err)
 	}
 	return cs, nil
-}
-
-// writeTokenFile writes the token to path atomically (tmp + rename, mode 0600).
-func writeTokenFile(path, token string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		return err
-	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(token), 0600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
 }
 
 // Start begins accepting connections. It removes any stale socket file first.
@@ -171,12 +159,23 @@ func (cs *ControlServer) handleConn(ctx context.Context, conn net.Conn) {
 	if err := readMsg(conn, &hs); err != nil {
 		return
 	}
-	claims, err := VerifyToken(cs.secret, hs.Token)
-	if err != nil || claims.Identity != "cli" {
-		_ = writeMsg(conn, handshakeErr{Error: "invalid token"})
-		return
+
+	// On Linux, SO_PEERCRED on a 0600 socket is strictly more secure than a
+	// token file on disk — the kernel fills ucred at connect() time, so the
+	// check is race-safe, and there is no credential to steal via filesystem
+	// access. When the peer UID matches the daemon UID, grant full CLI caps
+	// without requiring a token. Non-Linux (peerCredSupported == false) and
+	// same-host UID-mismatch cases fall through to token verification.
+	caps := cliCaps()
+	if match, _ := peerUIDMatches(conn); !match {
+		claims, err := VerifyToken(cs.secret, hs.Token)
+		if err != nil || claims.Identity != "cli" {
+			_ = writeMsg(conn, handshakeErr{Error: "invalid token"})
+			return
+		}
+		caps = claims.Caps
 	}
-	_ = writeMsg(conn, handshakeResp{Proto: 1, Caps: claims.Caps})
+	_ = writeMsg(conn, handshakeResp{Proto: 1, Caps: caps})
 	_ = conn.SetDeadline(time.Time{})
 
 	// Derive a per-connection context so that when the client disconnects,

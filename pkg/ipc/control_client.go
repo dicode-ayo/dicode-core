@@ -3,7 +3,6 @@ package ipc
 import (
 	"fmt"
 	"net"
-	"os"
 	"time"
 )
 
@@ -16,10 +15,12 @@ type ControlClient struct {
 	caps []string
 }
 
-// Dial connects to the daemon control socket at socketPath and authenticates
-// using the token stored in tokenPath. Returns a ready-to-use ControlClient.
+// Dial connects to the daemon control socket at socketPath and authenticates.
+// On Linux, authentication happens via SO_PEERCRED (UID match) — tokenPath is
+// ignored and may not exist on disk. On other platforms, the token is read
+// from tokenPath and sent in the handshake.
 func Dial(socketPath, tokenPath string) (*ControlClient, error) {
-	tok, err := os.ReadFile(tokenPath)
+	tok, err := readCLITokenFile(tokenPath)
 	if err != nil {
 		return nil, fmt.Errorf("read token file %s: %w", tokenPath, err)
 	}
@@ -30,7 +31,7 @@ func Dial(socketPath, tokenPath string) (*ControlClient, error) {
 	}
 
 	c := &ControlClient{conn: conn}
-	if err := c.handshake(string(tok)); err != nil {
+	if err := c.handshake(tok); err != nil {
 		conn.Close()
 		return nil, err
 	}
