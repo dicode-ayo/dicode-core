@@ -7,7 +7,7 @@ GOFLAGS := -ldflags "-X main.version=$(VERSION)"
 
 .PHONY: build test test-verbose test-race lint fmt format format-check clean run tidy help \
 	test-e2e test-e2e-unauth test-e2e-auth test-e2e-headed test-e2e-ui test-e2e-install \
-	test-tasks test-e2e-relay
+	test-tasks test-e2e-relay proto proto-tools
 
 ## build: compile the dicode binary
 build:
@@ -96,6 +96,17 @@ test-e2e-relay:
 test-tasks:
 	@test -n "$(DENO)" || { echo "deno not found — install or run dicode daemon once to bootstrap"; exit 1; }
 	$(DENO) test --allow-all --config=tasks/deno.json 'tasks/buildin/**/task.test.ts'
+
+## proto-tools: install buf + protoc-gen-go (idempotent, needed by `make proto`)
+proto-tools:
+	$(GO) install github.com/bufbuild/buf/cmd/buf@latest
+	$(GO) install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+
+## proto: regenerate pkg/relay/pb from proto/relay.proto
+proto:
+	@command -v buf >/dev/null 2>&1 || { echo "buf not found on PATH — run 'make proto-tools' first"; exit 1; }
+	buf lint proto
+	buf generate
 
 ## clean: remove compiled binary
 clean:

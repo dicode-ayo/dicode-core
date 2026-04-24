@@ -1,79 +1,83 @@
 package relay
 
-import "encoding/json"
+import (
+	"fmt"
 
-const (
-	msgChallenge = "challenge"
-	msgHello     = "hello"
-	msgWelcome   = "welcome"
-	msgError     = "error"
-	msgRequest   = "request"
-	msgResponse  = "response"
+	relaypb "github.com/dicode/dicode/pkg/relay/pb"
+	"google.golang.org/protobuf/encoding/protojson"
 )
 
-type challengeMsg struct {
-	Type  string `json:"type"`
-	Nonce string `json:"nonce"`
+// BrokerProtocolMin is the lowest broker protocol version this daemon will
+// accept. Lower values mean the broker predates the current wire format
+// (#104 split sign/decrypt keys + the #195 protobuf-es refactor). Version 3
+// is mandatory — earlier brokers produced a different on-wire shape for
+// `headers` and `timestamp` that the generated types cannot decode.
+const BrokerProtocolMin = 3
+
+// marshalOpts is a shared protojson configuration for all outbound messages.
+// EmitUnpopulated: false keeps the on-wire JSON identical across builds — we
+// don't want a zero-valued optional field to appear on the wire as a null or
+// explicit empty.
+var marshalOpts = protojson.MarshalOptions{
+	UseProtoNames:   true, // emit fields as declared (snake_case in the proto)
+	EmitUnpopulated: false,
 }
 
-type helloMsg struct {
-	Type string `json:"type"`
-	UUID string `json:"uuid"`
-	// PubKey is the base64-encoded uncompressed SignKey public key (65 bytes).
-	// The broker uses it both to verify the ECDSA handshake signature and —
-	// on pre-#104 brokers — as the ECIES recipient for OAuth deliveries.
-	PubKey string `json:"pubkey"`
-	// DecryptPubKey is the base64-encoded uncompressed DecryptKey public key
-	// (65 bytes). Post-#104 brokers encrypt OAuth deliveries against this
-	// key instead of PubKey. The field is always populated by post-#104
-	// daemons; pre-#104 brokers ignore it and fall back to PubKey.
-	DecryptPubKey string `json:"decrypt_pubkey,omitempty"`
-	Sig           string `json:"sig"`
-	Timestamp     int64  `json:"timestamp"`
+// unmarshalOpts is permissive on unknown fields so that newer-relay → older-
+// daemon hops don't fail hard when the relay adds a field the daemon doesn't
+// yet know about. Mismatches on required fields still surface as errors.
+var unmarshalOpts = protojson.UnmarshalOptions{
+	DiscardUnknown: true,
 }
 
-type welcomeMsg struct {
-	Type         string `json:"type"`
-	URL          string `json:"url"`
-	BrokerPubkey string `json:"broker_pubkey,omitempty"` // base64 SPKI DER — TOFU-pinned by the daemon
-	// Protocol is the broker's wire-protocol version. A value >= 2 means the
-	// broker understands the split sign/decrypt key scheme (issue #104) and
-	// will encrypt OAuth deliveries to the daemon's DecryptKey pubkey.
-	// Protocol 1 (or an absent field) means the broker is pre-#104 and the
-	// daemon must refuse OAuth IPC flows to avoid silent decrypt failures.
-	Protocol int `json:"protocol,omitempty"`
+// encodeClientMessage marshals a ClientMessage envelope to JSON bytes for
+// sending over the WSS tunnel.
+func encodeClientMessage(msg *relaypb.ClientMessage) ([]byte, error) {
+	return marshalOpts.Marshal(msg)
 }
 
-type errorMsg struct {
-	Type    string `json:"type"`
-	Message string `json:"message"`
+// encodeServerMessage mirrors encodeClientMessage for server→daemon frames.
+// Used only in tests in this package; production server-side code lives in
+// dicode-relay.
+func encodeServerMessage(msg *relaypb.ServerMessage) ([]byte, error) {
+	return marshalOpts.Marshal(msg)
 }
 
-type requestMsg struct {
-	Type    string              `json:"type"`
-	ID      string              `json:"id"`
-	Method  string              `json:"method"`
-	Path    string              `json:"path"`
-	Headers map[string][]string `json:"headers"`
-	Body    string              `json:"body"` // base64
-}
-
-type responseMsg struct {
-	Type    string              `json:"type"`
-	ID      string              `json:"id"`
-	Status  int                 `json:"status"`
-	Headers map[string][]string `json:"headers"`
-	Body    string              `json:"body"` // base64
-}
-
-func encodeMsg(v any) ([]byte, error) {
-	return json.Marshal(v)
-}
-
-func msgType(data []byte) string {
-	var m struct {
-		Type string `json:"type"`
+// decodeServerMessage unmarshals a WSS frame into a ServerMessage envelope.
+// The caller dispatches on msg.GetKind().
+func decodeServerMessage(data []byte) (*relaypb.ServerMessage, error) {
+	var msg relaypb.ServerMessage
+	if err := unmarshalOpts.Unmarshal(data, &msg); err != nil {
+		return nil, fmt.Errorf("decode server message: %w", err)
 	}
-	_ = json.Unmarshal(data, &m)
-	return m.Type
+	return &msg, nil
+}
+
+// headersFromHTTP converts a Go http.Header (map[string][]string) into the
+// wire representation — each value slice wrapped in a HeaderValues message
+// so it can be the value type of a proto3 map.
+func headersFromHTTP(h map[string][]string) map[string]*relaypb.HeaderValues {
+	if len(h) == 0 {
+		return nil
+	}
+	out := make(map[string]*relaypb.HeaderValues, len(h))
+	for k, vals := range h {
+		out[k] = &relaypb.HeaderValues{Values: vals}
+	}
+	return out
+}
+
+// headersToHTTP is the inverse of headersFromHTTP, used on received Request
+// messages when feeding the incoming headers into a Go http.Request.
+func headersToHTTP(h map[string]*relaypb.HeaderValues) map[string][]string {
+	if len(h) == 0 {
+		return nil
+	}
+	out := make(map[string][]string, len(h))
+	for k, hv := range h {
+		if hv != nil {
+			out[k] = hv.Values
+		}
+	}
+	return out
 }

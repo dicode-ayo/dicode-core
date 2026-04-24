@@ -1,0 +1,137 @@
+// Protocol schema for the dicode relay WebSocket tunnel.
+//
+// Single source of truth, generated on both sides:
+//   - dicode-core (Go)    via protoc-gen-go → pkg/relay/pb/*.pb.go
+//   - dicode-relay (Node) via protoc-gen-es → src/relay/pb/*.ts
+//
+// Wire format is JSON (WebSocket text frames). protojson (Go) and
+// @bufbuild/protobuf's fromJson/toJson (Node) produce matching output.
+//
+// Protocol version: 3 (first generated-from-proto release). Bumping from v2
+// is mandatory because two on-wire shapes changed:
+//   - headers: previously a JSON object with string-array values, now nested
+//     through HeaderValues. Proto3 maps cannot hold repeated values directly.
+//   - timestamp: kept as int32 to keep protojson emitting it as a JSON number
+//     instead of a quoted string (its default encoding for int64).
+//
+// Both sides MUST reject connections where the peer advertises protocol < 3.
+
+syntax = "proto3";
+
+package dicode.relay.v1;
+
+option go_package = "github.com/dicode/dicode/pkg/relay/pb;relaypb";
+
+// ServerMessage is any message the relay server sends to the daemon.
+// Wire form: a JSON object with one key identifying the variant, e.g.
+//   {"challenge": {"nonce": "..."}}.
+message ServerMessage {
+  oneof kind {
+    Challenge challenge = 1;
+    Welcome welcome = 2;
+    Error error = 3;
+    Request request = 4;
+  }
+}
+
+// ClientMessage is any message the daemon sends to the relay server.
+message ClientMessage {
+  oneof kind {
+    Hello hello = 1;
+    Response response = 2;
+  }
+}
+
+// Challenge is the first frame the server sends: a 32-byte random nonce
+// hex-encoded (64 lowercase hex chars).
+message Challenge {
+  string nonce = 1;
+}
+
+// Hello is the daemon's handshake reply. The daemon signs
+// sha256(nonce_bytes || timestamp_be_uint64) with its ECDSA P-256 signing key.
+message Hello {
+  // hex(sha256(uncompressed_pubkey)) — 64 lowercase hex chars.
+  string uuid = 1;
+  // Base64 std-encoded 65-byte uncompressed P-256 public key (0x04 || X || Y).
+  // Used for ECDSA verification (WSS handshake + /auth/:provider sigs).
+  string pubkey = 2;
+  // Base64 std-encoded 65-byte uncompressed P-256 public key (0x04 || X || Y).
+  // Used as the ECIES recipient on OAuth token delivery (dicode-core#104).
+  // Required — every daemon now ships with a split sign/decrypt identity.
+  string decrypt_pubkey = 3;
+  // Base64 std-encoded ECDSA P-256 ASN.1 DER signature.
+  string sig = 4;
+  // Unix timestamp in seconds. int32 keeps the JSON encoding a number.
+  int32 timestamp = 5;
+}
+
+// Welcome acknowledges a successful handshake and hands the daemon its
+// publicly reachable tunnel URL plus the broker's long-lived signing pubkey
+// for TOFU pinning.
+message Welcome {
+  // Full WSS URL for this client, e.g. wss://relay.dicode.app/u/<uuid>/hooks/
+  string url = 1;
+  // Base64-encoded SPKI DER public key the broker uses to sign delivery
+  // envelopes. Absent for brokers that don't support OAuth delivery.
+  optional string broker_pubkey = 2;
+  // Protocol version announced by the broker. v3 means "types generated from
+  // proto". Daemons that require >= 3 for OAuth read this on welcome.
+  optional int32 protocol = 3;
+}
+
+// Error is any server-side rejection mid-session (bad signature, stale
+// timestamp, registry conflict, etc.). After sending Error the server closes
+// the connection.
+message Error {
+  string message = 1;
+}
+
+// Request is an inbound HTTP request forwarded to the daemon.
+message Request {
+  // UUIDv4 used to correlate the response.
+  string id = 1;
+  string method = 2;
+  string path = 3;
+  map<string, HeaderValues> headers = 4;
+  // Base64-encoded request body bytes.
+  string body = 5;
+}
+
+// Response is the daemon's reply to a forwarded request.
+message Response {
+  // Matches the `id` from the corresponding Request.
+  string id = 1;
+  int32 status = 2;
+  map<string, HeaderValues> headers = 3;
+  // Base64-encoded response body bytes.
+  string body = 4;
+}
+
+// HeaderValues wraps a list of strings so it can be the value type of a
+// proto3 map (which does not allow repeated values directly). Both
+// protojson and protobuf-es emit the inner `values` field on the wire.
+message HeaderValues {
+  repeated string values = 1;
+}
+
+// OAuthTokenDelivery is the body of the `/hooks/oauth-complete` webhook the
+// broker forwards to the daemon after a successful OAuth exchange. It is
+// transported inside a Request.body (base64-encoded JSON); this message type
+// itself is not a ServerMessage variant.
+//
+// The ciphertext has the 16-byte AES-GCM authentication tag appended; the
+// daemon must split the last 16 bytes off before passing to aesGCM.Open.
+message OAuthTokenDelivery {
+  string session_id = 1;
+  // Base64-encoded uncompressed P-256 ephemeral public key (65 bytes).
+  string ephemeral_pubkey = 2;
+  // Base64-encoded ciphertext with auth tag appended.
+  string ciphertext = 3;
+  // Base64-encoded 12-byte AES-GCM nonce (IV).
+  string nonce = 4;
+  // Base64-encoded ECDSA P-256 signature over
+  // sha256(session_id || ephemeral_pubkey || ciphertext || nonce). Signed by
+  // the broker's long-lived key announced in Welcome.broker_pubkey.
+  optional string broker_sig = 5;
+}

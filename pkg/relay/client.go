@@ -11,7 +11,6 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"math"
@@ -23,6 +22,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/dicode/dicode/pkg/db"
+	relaypb "github.com/dicode/dicode/pkg/relay/pb"
 	"go.uber.org/zap"
 )
 
@@ -202,15 +202,16 @@ func (c *Client) handshake(ctx context.Context, conn *websocket.Conn, sendMu *sy
 	if err != nil {
 		return fmt.Errorf("read challenge: %w", err)
 	}
-	if msgType(data) != msgChallenge {
-		return fmt.Errorf("expected challenge, got %q", msgType(data))
-	}
-	var ch challengeMsg
-	if err := json.Unmarshal(data, &ch); err != nil {
+	sm, err := decodeServerMessage(data)
+	if err != nil {
 		return fmt.Errorf("parse challenge: %w", err)
 	}
+	ch := sm.GetChallenge()
+	if ch == nil {
+		return fmt.Errorf("expected challenge, got %T", sm.GetKind())
+	}
 
-	nonceBytes, err := hex.DecodeString(ch.Nonce)
+	nonceBytes, err := hex.DecodeString(ch.GetNonce())
 	if err != nil || len(nonceBytes) != 32 {
 		return fmt.Errorf("invalid nonce")
 	}
@@ -221,16 +222,18 @@ func (c *Client) handshake(ctx context.Context, conn *websocket.Conn, sendMu *sy
 		return fmt.Errorf("sign challenge: %w", err)
 	}
 
-	signPubB64 := base64.StdEncoding.EncodeToString(c.identity.SignPublicKey())
-	decryptPubB64 := base64.StdEncoding.EncodeToString(c.identity.DecryptPublicKey())
-
-	hello, err := encodeMsg(helloMsg{
-		Type:          msgHello,
-		UUID:          c.identity.UUID,
-		PubKey:        signPubB64,
-		DecryptPubKey: decryptPubB64,
-		Sig:           base64.StdEncoding.EncodeToString(sig),
-		Timestamp:     ts,
+	hello, err := encodeClientMessage(&relaypb.ClientMessage{
+		Kind: &relaypb.ClientMessage_Hello{
+			Hello: &relaypb.Hello{
+				Uuid:          c.identity.UUID,
+				Pubkey:        base64.StdEncoding.EncodeToString(c.identity.SignPublicKey()),
+				DecryptPubkey: base64.StdEncoding.EncodeToString(c.identity.DecryptPublicKey()),
+				Sig:           base64.StdEncoding.EncodeToString(sig),
+				// Timestamp is int32 on the wire (valid through 2038, avoids
+				// protojson's default int64→string quoting).
+				Timestamp: int32(ts),
+			},
+		},
 	})
 	if err != nil {
 		return fmt.Errorf("encode hello: %w", err)
@@ -248,39 +251,41 @@ func (c *Client) handshake(ctx context.Context, conn *websocket.Conn, sendMu *sy
 		return fmt.Errorf("read welcome: %w", err)
 	}
 
-	switch msgType(data) {
-	case msgWelcome:
-		var w welcomeMsg
-		if err := json.Unmarshal(data, &w); err != nil {
-			return fmt.Errorf("parse welcome: %w", err)
-		}
+	sm, err = decodeServerMessage(data)
+	if err != nil {
+		return fmt.Errorf("parse welcome: %w", err)
+	}
+
+	switch k := sm.GetKind().(type) {
+	case *relaypb.ServerMessage_Welcome:
+		w := k.Welcome
 		c.hookMu.Lock()
-		c.hookBaseURL = w.URL
+		c.hookBaseURL = w.GetUrl()
 		c.hookMu.Unlock()
 
-		// Broker protocol version (issue #104). Protocol 2 commits the broker
-		// to honouring the split sign/decrypt keys. Refuse the connection
-		// outright if the broker advertises anything lower — encrypting OAuth
-		// deliveries to the SignKey pubkey would silently produce undecryptable
-		// payloads.
-		if w.Protocol < 2 {
-			return fmt.Errorf("broker protocol %d too old — require >= 2 (upgrade dicode-relay)", w.Protocol)
+		// Broker protocol version (#104, #195). v3 commits the broker to the
+		// split sign/decrypt keys AND the generated-from-proto wire format.
+		// Refuse the connection if the broker advertises anything lower —
+		// wire shapes for headers/timestamp differ.
+		proto := int(w.GetProtocol())
+		if proto < BrokerProtocolMin {
+			return fmt.Errorf("broker protocol %d too old — require >= %d (upgrade dicode-relay)", proto, BrokerProtocolMin)
 		}
 		c.protoMu.Lock()
-		c.brokerProtocol = w.Protocol
+		c.brokerProtocol = proto
 		c.protoMu.Unlock()
 
 		// TOFU broker pubkey pinning: on first connect, store the broker's
 		// signing pubkey. On reconnect, verify it hasn't changed.
-		if w.BrokerPubkey != "" && c.db != nil {
-			result, err := CheckAndPinBrokerPubkey(ctx, c.db, w.BrokerPubkey)
+		if bp := w.GetBrokerPubkey(); bp != "" && c.db != nil {
+			result, err := CheckAndPinBrokerPubkey(ctx, c.db, bp)
 			if err != nil {
 				return fmt.Errorf("broker pubkey pin: %w", err)
 			}
 			switch result {
 			case BrokerPubkeyPinNew:
 				c.log.Info("relay: pinned broker signing key (trust-on-first-use)",
-					zap.String("pubkey", w.BrokerPubkey[:16]+"…"))
+					zap.String("pubkey", bp[:16]+"…"))
 			case BrokerPubkeyPinMatch:
 				// Expected path on reconnect — nothing to log.
 			case BrokerPubkeyPinMismatch:
@@ -291,18 +296,16 @@ func (c *Client) handshake(ctx context.Context, conn *websocket.Conn, sendMu *sy
 						"Connection rejected to prevent token substitution attacks")
 			}
 			c.brokerMu.Lock()
-			c.brokerPubkey = w.BrokerPubkey
+			c.brokerPubkey = bp
 			c.brokerMu.Unlock()
 		}
 
-		c.log.Info("relay connected", zap.String("url", w.URL))
+		c.log.Info("relay connected", zap.String("url", w.GetUrl()))
 		return nil
-	case msgError:
-		var e errorMsg
-		_ = json.Unmarshal(data, &e)
-		return fmt.Errorf("relay rejected handshake: %s", e.Message)
+	case *relaypb.ServerMessage_Error:
+		return fmt.Errorf("relay rejected handshake: %s", k.Error.GetMessage())
 	default:
-		return fmt.Errorf("unexpected message type %q after hello", msgType(data))
+		return fmt.Errorf("unexpected message type %T after hello", sm.GetKind())
 	}
 }
 
@@ -316,14 +319,14 @@ func (c *Client) serve(ctx context.Context, conn *websocket.Conn, sendMu *sync.M
 			return fmt.Errorf("read: %w", err)
 		}
 
-		if msgType(data) != msgRequest {
-			c.log.Warn("relay: unexpected message type", zap.String("type", msgType(data)))
+		sm, err := decodeServerMessage(data)
+		if err != nil {
+			c.log.Warn("relay: parse server message", zap.Error(err))
 			continue
 		}
-
-		var req requestMsg
-		if err := json.Unmarshal(data, &req); err != nil {
-			c.log.Warn("relay: parse request", zap.Error(err))
+		req := sm.GetRequest()
+		if req == nil {
+			c.log.Warn("relay: unexpected message type", zap.String("type", fmt.Sprintf("%T", sm.GetKind())))
 			continue
 		}
 
@@ -331,9 +334,11 @@ func (c *Client) serve(ctx context.Context, conn *websocket.Conn, sendMu *sync.M
 	}
 }
 
-func (c *Client) handleRequest(ctx context.Context, conn *websocket.Conn, sendMu *sync.Mutex, req requestMsg) {
+func (c *Client) handleRequest(ctx context.Context, conn *websocket.Conn, sendMu *sync.Mutex, req *relaypb.Request) {
 	resp := c.dispatchRequest(req)
-	out, err := encodeMsg(resp)
+	out, err := encodeClientMessage(&relaypb.ClientMessage{
+		Kind: &relaypb.ClientMessage_Response{Response: resp},
+	})
 	if err != nil {
 		c.log.Error("relay: encode response", zap.Error(err))
 		return
@@ -346,42 +351,46 @@ func (c *Client) handleRequest(ctx context.Context, conn *websocket.Conn, sendMu
 	}
 }
 
-func (c *Client) dispatchRequest(req requestMsg) responseMsg {
+func (c *Client) dispatchRequest(req *relaypb.Request) *relaypb.Response {
 	var body []byte
-	if req.Body != "" {
+	if b := req.GetBody(); b != "" {
 		// Limit base64-decoded body to maxBodySize to avoid memory exhaustion.
 		// The base64 string itself can be at most ~4/3 * maxBodySize.
 		maxB64 := int64(maxBodySize * 4 / 3)
-		limited := io.LimitReader(strings.NewReader(req.Body), maxB64+1)
+		limited := io.LimitReader(strings.NewReader(b), maxB64+1)
 		b64Data, err := io.ReadAll(limited)
 		if err != nil || int64(len(b64Data)) > maxB64 {
-			return errorResponse(req.ID, http.StatusRequestEntityTooLarge)
+			return errorResponse(req.GetId(), http.StatusRequestEntityTooLarge)
 		}
 		body, err = base64.StdEncoding.DecodeString(string(b64Data))
 		if err != nil {
-			return errorResponse(req.ID, http.StatusBadRequest)
+			return errorResponse(req.GetId(), http.StatusBadRequest)
 		}
 		if len(body) > maxBodySize {
-			return errorResponse(req.ID, http.StatusRequestEntityTooLarge)
+			return errorResponse(req.GetId(), http.StatusRequestEntityTooLarge)
 		}
 	}
 
 	// Only forward requests to /hooks/ and /dicode.js paths — reject anything
 	// else to limit blast radius if the relay server is compromised.
-	if !strings.HasPrefix(req.Path, "/hooks/") && req.Path != "/dicode.js" {
-		return errorResponse(req.ID, http.StatusForbidden)
+	path := req.GetPath()
+	if !strings.HasPrefix(path, "/hooks/") && path != "/dicode.js" {
+		return errorResponse(req.GetId(), http.StatusForbidden)
 	}
 
-	targetURL := fmt.Sprintf("http://localhost:%d%s", c.localPort, req.Path)
-	httpReq, err := http.NewRequestWithContext(context.Background(), req.Method, targetURL, bytes.NewReader(body))
+	targetURL := fmt.Sprintf("http://localhost:%d%s", c.localPort, path)
+	httpReq, err := http.NewRequestWithContext(context.Background(), req.GetMethod(), targetURL, bytes.NewReader(body))
 	if err != nil {
-		return errorResponse(req.ID, http.StatusBadRequest)
+		return errorResponse(req.GetId(), http.StatusBadRequest)
 	}
-	for k, vals := range req.Headers {
+	for k, hv := range req.GetHeaders() {
 		if http.CanonicalHeaderKey(k) == "X-Relay-Base" {
 			continue
 		}
-		for _, v := range vals {
+		if hv == nil {
+			continue
+		}
+		for _, v := range hv.GetValues() {
 			httpReq.Header.Add(k, v)
 		}
 	}
@@ -392,7 +401,7 @@ func (c *Client) dispatchRequest(req requestMsg) responseMsg {
 	resp, err := c.localClient.Do(httpReq)
 	if err != nil {
 		c.log.Warn("relay: local request failed", zap.Error(err))
-		return errorResponse(req.ID, http.StatusBadGateway)
+		return errorResponse(req.GetId(), http.StatusBadGateway)
 	}
 	defer resp.Body.Close()
 
@@ -401,13 +410,10 @@ func (c *Client) dispatchRequest(req requestMsg) responseMsg {
 	_, _ = buf.ReadFrom(io.LimitReader(resp.Body, maxBodySize))
 	respBody = buf.Bytes()
 
-	headers := filterResponseHeaders(resp.Header)
-
-	return responseMsg{
-		Type:    msgResponse,
-		ID:      req.ID,
-		Status:  resp.StatusCode,
-		Headers: headers,
+	return &relaypb.Response{
+		Id:      req.GetId(),
+		Status:  int32(resp.StatusCode),
+		Headers: headersFromHTTP(filterResponseHeaders(resp.Header)),
 		Body:    base64.StdEncoding.EncodeToString(respBody),
 	}
 }
@@ -439,13 +445,10 @@ func filterResponseHeaders(h http.Header) map[string][]string {
 	return out
 }
 
-func errorResponse(id string, status int) responseMsg {
-	return responseMsg{
-		Type:    msgResponse,
-		ID:      id,
-		Status:  status,
-		Headers: map[string][]string{},
-		Body:    "",
+func errorResponse(id string, status int) *relaypb.Response {
+	return &relaypb.Response{
+		Id:     id,
+		Status: int32(status),
 	}
 }
 

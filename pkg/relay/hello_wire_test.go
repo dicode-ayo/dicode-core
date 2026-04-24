@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +14,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	relaypb "github.com/dicode/dicode/pkg/relay/pb"
 )
 
 // TestHello_AdvertisesBothKeys drives Client.handshake against a minimal
@@ -23,7 +23,7 @@ import (
 // match the daemon's keys — this is the wire-level guarantee of the
 // #104 split on the daemon-to-broker side.
 func TestHello_AdvertisesBothKeys(t *testing.T) {
-	captured := make(chan helloMsg, 1)
+	captured := make(chan *relaypb.Hello, 1)
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
@@ -40,7 +40,11 @@ func TestHello_AdvertisesBothKeys(t *testing.T) {
 		// Send a minimal challenge so the client proceeds to send hello.
 		nonce := make([]byte, 32)
 		_, _ = rand.Read(nonce)
-		ch, _ := encodeMsg(challengeMsg{Type: msgChallenge, Nonce: hex.EncodeToString(nonce)})
+		ch, _ := encodeServerMessage(&relaypb.ServerMessage{
+			Kind: &relaypb.ServerMessage_Challenge{
+				Challenge: &relaypb.Challenge{Nonce: hex.EncodeToString(nonce)},
+			},
+		})
 		if err := conn.Write(ctx, websocket.MessageText, ch); err != nil {
 			return
 		}
@@ -50,9 +54,14 @@ func TestHello_AdvertisesBothKeys(t *testing.T) {
 		if err != nil {
 			return
 		}
-		var h helloMsg
-		if err := json.Unmarshal(data, &h); err != nil {
+		var cm relaypb.ClientMessage
+		if err := unmarshalOpts.Unmarshal(data, &cm); err != nil {
 			t.Errorf("parse hello: %v", err)
+			return
+		}
+		h := cm.GetHello()
+		if h == nil {
+			t.Errorf("expected hello, got %T", cm.GetKind())
 			return
 		}
 		select {
@@ -60,8 +69,14 @@ func TestHello_AdvertisesBothKeys(t *testing.T) {
 		default:
 		}
 
-		// Send a welcome with protocol 2 so Client.SupportsOAuth would be true.
-		w2, _ := encodeMsg(welcomeMsg{Type: msgWelcome, URL: "https://example.test/u/x/hooks/", Protocol: 2})
+		// Send a welcome with protocol BrokerProtocolMin so the handshake
+		// settles and SupportsOAuth flips true.
+		proto := int32(BrokerProtocolMin)
+		w2, _ := encodeServerMessage(&relaypb.ServerMessage{
+			Kind: &relaypb.ServerMessage_Welcome{
+				Welcome: &relaypb.Welcome{Url: "https://example.test/u/x/hooks/", Protocol: &proto},
+			},
+		})
 		_ = conn.Write(ctx, websocket.MessageText, w2)
 
 		// Keep the connection up briefly so the client settles past handshake.
@@ -89,23 +104,23 @@ func TestHello_AdvertisesBothKeys(t *testing.T) {
 	case h := <-captured:
 		// Verify pubkey matches SignPublicKey.
 		wantSign := base64.StdEncoding.EncodeToString(id.SignPublicKey())
-		if h.PubKey != wantSign {
+		if h.GetPubkey() != wantSign {
 			t.Fatalf("hello.pubkey does not match SignPublicKey\n got=%s\nwant=%s",
-				h.PubKey, wantSign)
+				h.GetPubkey(), wantSign)
 		}
 		// Verify decrypt_pubkey matches DecryptPublicKey and is not empty.
 		wantDecrypt := base64.StdEncoding.EncodeToString(id.DecryptPublicKey())
-		if h.DecryptPubKey == "" {
+		if h.GetDecryptPubkey() == "" {
 			t.Fatal("hello.decrypt_pubkey is empty — new daemons must advertise it")
 		}
-		if h.DecryptPubKey != wantDecrypt {
+		if h.GetDecryptPubkey() != wantDecrypt {
 			t.Fatalf("hello.decrypt_pubkey does not match DecryptPublicKey\n got=%s\nwant=%s",
-				h.DecryptPubKey, wantDecrypt)
+				h.GetDecryptPubkey(), wantDecrypt)
 		}
-		// And crucially, the two fields must be different values: if they
-		// were equal the split would have been silently defeated (two
-		// references to the same key).
-		if h.PubKey == h.DecryptPubKey {
+		// And crucially, the two fields must be different values: if they were
+		// equal the split would have been silently defeated (two references to
+		// the same key).
+		if h.GetPubkey() == h.GetDecryptPubkey() {
 			t.Fatal("hello.pubkey == hello.decrypt_pubkey — SignKey and DecryptKey collapsed to one key")
 		}
 	case <-time.After(2 * time.Second):
