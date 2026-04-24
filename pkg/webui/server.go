@@ -991,8 +991,10 @@ func isFormRequest(r *http.Request) bool {
 
 // setLoginPageHeaders applies defence-in-depth headers on any response that
 // renders the login form. Clickjacking prevention (XFO + frame-ancestors),
-// no-referrer to keep the `next` path from leaking to upstream origins, and
-// a CSP that allows only same-origin subresources plus inline styles.
+// a referrer policy that keeps the `next` path from leaking cross-origin
+// but preserves the Origin header on same-origin POSTs (gorilla/csrf rejects
+// Origin: null, which Chrome sends when the policy is `no-referrer`), and a
+// CSP that allows only same-origin subresources plus inline styles.
 func setLoginPageHeaders(w http.ResponseWriter) {
 	h := w.Header()
 	h.Set("Content-Type", "text/html; charset=utf-8")
@@ -1000,7 +1002,7 @@ func setLoginPageHeaders(w http.ResponseWriter) {
 	h.Set("Content-Security-Policy",
 		"default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'none'; "+
 			"img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
-	h.Set("Referrer-Policy", "no-referrer")
+	h.Set("Referrer-Policy", "strict-origin-when-cross-origin")
 }
 
 func (s *Server) loginTitle(next string) string {

@@ -847,8 +847,12 @@ func TestLoginPage_SetsSecurityHeaders(t *testing.T) {
 	if !strings.Contains(csp, "script-src 'none'") {
 		t.Errorf("CSP must set script-src 'none' on login page, got %q", csp)
 	}
-	if got := w.Header().Get("Referrer-Policy"); got != "no-referrer" {
-		t.Errorf("Referrer-Policy: want no-referrer, got %q", got)
+	// Referrer-Policy must preserve the Origin header on same-origin POSTs —
+	// `no-referrer` makes Chrome send Origin: null, which gorilla/csrf then
+	// rejects as "origin invalid". `strict-origin-when-cross-origin` keeps
+	// the anti-leak property cross-origin while letting the login form work.
+	if got := w.Header().Get("Referrer-Policy"); got != "strict-origin-when-cross-origin" {
+		t.Errorf("Referrer-Policy: want strict-origin-when-cross-origin, got %q", got)
 	}
 }
 
