@@ -9,13 +9,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bep/debounce"
 	"github.com/dicode/dicode/pkg/source"
 	"github.com/dicode/dicode/pkg/task"
 	"github.com/fsnotify/fsnotify"
 	"go.uber.org/zap"
 )
 
-const debounce = 150 * time.Millisecond
+const debounceInterval = 150 * time.Millisecond
 
 // LocalSource watches a local directory for task changes.
 type LocalSource struct {
@@ -119,21 +120,13 @@ func (s *LocalSource) watch(ctx context.Context, watcher *fsnotify.Watcher, ch c
 	defer watcher.Close()
 	defer close(ch)
 
-	var (
-		timer  *time.Timer
-		timerC <-chan time.Time
-	)
-
-	resetTimer := func() {
-		if timer != nil {
-			timer.Stop()
-		}
-		timer = time.NewTimer(debounce)
-		timerC = timer.C
-	}
-
+	// bep/debounce runs the callback in its own goroutine after the quiet
+	// period elapses. syncAndEmit is safe to call concurrently with itself —
+	// s.diff() serialises the snapshot transition under s.mu, and the event
+	// channel send is guarded by ctx.Done. See pkg/source/local/local_test.go
+	// for the race-detector-backed coverage.
+	debounced := debounce.New(debounceInterval)
 	fire := func() {
-		timerC = nil
 		if err := s.syncAndEmit(ctx, ch); err != nil {
 			s.log.Warn("local source sync error", zap.String("path", s.path), zap.Error(err))
 		}
@@ -152,9 +145,7 @@ func (s *LocalSource) watch(ctx context.Context, watcher *fsnotify.Watcher, ch c
 			if !ok {
 				return
 			}
-			resetTimer()
-		case <-timerC:
-			fire()
+			debounced(fire)
 		}
 	}
 }
@@ -194,31 +185,27 @@ func (s *LocalSource) diff() ([]source.Event, error) {
 	s.snapshot = current
 	s.mu.Unlock()
 
-	var events []source.Event
-
 	// Vars injected into task.yaml template expansion for every task under
 	// this source. See pkg/task/template.go and docs/task-template-vars.md.
 	extras := map[string]string{task.VarTaskSetDir: s.path}
 
-	for id, hash := range current {
-		dir := filepath.Join(s.path, id)
-		if _, ok := prev[id]; !ok {
-			events = append(events, source.Event{
-				Kind: source.EventAdded, TaskID: id, TaskDir: dir, Source: s.id, ExtraVars: extras,
-			})
-		} else if prev[id] != hash {
-			events = append(events, source.Event{
-				Kind: source.EventUpdated, TaskID: id, TaskDir: dir, Source: s.id, ExtraVars: extras,
-			})
-		}
-	}
+	added, updated, removed := source.DiffSnapshots(prev, current, func(h string) string { return h })
 
-	for id := range prev {
-		if _, ok := current[id]; !ok {
-			events = append(events, source.Event{
-				Kind: source.EventRemoved, TaskID: id, TaskDir: filepath.Join(s.path, id), Source: s.id,
-			})
-		}
+	events := make([]source.Event, 0, len(added)+len(updated)+len(removed))
+	for _, id := range added {
+		events = append(events, source.Event{
+			Kind: source.EventAdded, TaskID: id, TaskDir: filepath.Join(s.path, id), Source: s.id, ExtraVars: extras,
+		})
+	}
+	for _, id := range updated {
+		events = append(events, source.Event{
+			Kind: source.EventUpdated, TaskID: id, TaskDir: filepath.Join(s.path, id), Source: s.id, ExtraVars: extras,
+		})
+	}
+	for _, id := range removed {
+		events = append(events, source.Event{
+			Kind: source.EventRemoved, TaskID: id, TaskDir: filepath.Join(s.path, id), Source: s.id,
+		})
 	}
 
 	return events, nil

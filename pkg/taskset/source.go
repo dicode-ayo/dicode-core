@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bep/debounce"
 	"github.com/dicode/dicode/pkg/source"
 	"github.com/dicode/dicode/pkg/task"
 	"github.com/fsnotify/fsnotify"
@@ -174,17 +175,18 @@ func (s *Source) watch(ctx context.Context, ch chan<- source.Event) {
 
 	s.addWatchDirs(watcher)
 
-	const debounce = 150 * time.Millisecond
-	var (
-		timer  *time.Timer
-		timerC <-chan time.Time
-	)
-	resetTimer := func() {
-		if timer != nil {
-			timer.Stop()
+	// bep/debounce runs the callback in its own goroutine after the quiet
+	// period elapses. syncAndEmit is safe to call concurrently — s.mu
+	// serialises the snapshot transition, and the event send is guarded by
+	// ctx.Done. addWatchDirs takes s.mu internally.
+	const debounceInterval = 150 * time.Millisecond
+	debounced := debounce.New(debounceInterval)
+	fire := func() {
+		if err := s.syncAndEmit(ctx, ch); err != nil {
+			s.log.Warn("taskset source: sync failed",
+				zap.String("id", s.id), zap.Error(err))
 		}
-		timer = time.NewTimer(debounce)
-		timerC = timer.C
+		s.addWatchDirs(watcher)
 	}
 
 	// Pull ticker — only for git sources; nil for local.
@@ -213,15 +215,7 @@ func (s *Source) watch(ctx context.Context, ch chan<- source.Event) {
 			if !ok {
 				return
 			}
-			resetTimer()
-		case <-timerC:
-			// Debounce fired: files changed (from a local edit or a git pull).
-			timerC = nil
-			if err := s.syncAndEmit(ctx, ch); err != nil {
-				s.log.Warn("taskset source: sync failed",
-					zap.String("id", s.id), zap.Error(err))
-			}
-			s.addWatchDirs(watcher)
+			debounced(fire)
 		case <-pullTickC:
 			// Fetch from remote. If the pull actually changed files on disk,
 			// fsnotify will fire and trigger syncAndEmit via the debounce path.
@@ -303,31 +297,24 @@ func (s *Source) syncAndEmit(ctx context.Context, ch chan<- source.Event) error 
 	s.snapshot = current
 	s.mu.Unlock()
 
-	for id, cur := range current {
-		var ev source.Event
-		ev.TaskID = id
-		ev.TaskDir = cur.taskDir
-		ev.Source = s.id
-		ev.Spec = cur.spec
+	added, updated, removed := source.DiffSnapshots(prev, current, func(t taskSnap) string { return t.specHash })
 
-		if _, exists := prev[id]; !exists {
-			ev.Kind = source.EventAdded
-		} else if prev[id].specHash != cur.specHash {
-			ev.Kind = source.EventUpdated
-		} else {
-			continue
-		}
-		s.send(ch, ev)
+	for _, id := range added {
+		cur := current[id]
+		s.send(ch, source.Event{
+			Kind: source.EventAdded, TaskID: id, TaskDir: cur.taskDir, Source: s.id, Spec: cur.spec,
+		})
 	}
-
-	for id := range prev {
-		if _, exists := current[id]; !exists {
-			s.send(ch, source.Event{
-				Kind:   source.EventRemoved,
-				TaskID: id,
-				Source: s.id,
-			})
-		}
+	for _, id := range updated {
+		cur := current[id]
+		s.send(ch, source.Event{
+			Kind: source.EventUpdated, TaskID: id, TaskDir: cur.taskDir, Source: s.id, Spec: cur.spec,
+		})
+	}
+	for _, id := range removed {
+		s.send(ch, source.Event{
+			Kind: source.EventRemoved, TaskID: id, Source: s.id,
+		})
 	}
 	return nil
 }

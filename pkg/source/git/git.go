@@ -252,30 +252,27 @@ func (g *GitSource) diff() ([]source.Event, error) {
 	g.snapshot = current
 	g.mu.Unlock()
 
-	var events []source.Event
-
 	// Vars injected into task.yaml template expansion for every task under
 	// this source. See pkg/task/template.go and docs/task-template-vars.md.
 	extras := map[string]string{task.VarTaskSetDir: g.localDir}
 
-	for id, hash := range current {
-		dir := filepath.Join(g.localDir, id)
-		if _, ok := prev[id]; !ok {
-			events = append(events, source.Event{
-				Kind: source.EventAdded, TaskID: id, TaskDir: dir, Source: g.id, ExtraVars: extras,
-			})
-		} else if prev[id] != hash {
-			events = append(events, source.Event{
-				Kind: source.EventUpdated, TaskID: id, TaskDir: dir, Source: g.id, ExtraVars: extras,
-			})
-		}
+	added, updated, removed := source.DiffSnapshots(prev, current, func(h string) string { return h })
+
+	events := make([]source.Event, 0, len(added)+len(updated)+len(removed))
+	for _, id := range added {
+		events = append(events, source.Event{
+			Kind: source.EventAdded, TaskID: id, TaskDir: filepath.Join(g.localDir, id), Source: g.id, ExtraVars: extras,
+		})
 	}
-	for id := range prev {
-		if _, ok := current[id]; !ok {
-			events = append(events, source.Event{
-				Kind: source.EventRemoved, TaskID: id, TaskDir: filepath.Join(g.localDir, id), Source: g.id,
-			})
-		}
+	for _, id := range updated {
+		events = append(events, source.Event{
+			Kind: source.EventUpdated, TaskID: id, TaskDir: filepath.Join(g.localDir, id), Source: g.id, ExtraVars: extras,
+		})
+	}
+	for _, id := range removed {
+		events = append(events, source.Event{
+			Kind: source.EventRemoved, TaskID: id, TaskDir: filepath.Join(g.localDir, id), Source: g.id,
+		})
 	}
 	return events, nil
 }
