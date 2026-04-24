@@ -1525,12 +1525,9 @@ The relay broker runs the code exchange on its side, ECIES-encrypts the token bu
 
 ### Self-hosted relay
 
-For high-security environments, run your own relay server instead of using `relay.dicode.app`:
+For high-security environments, run your own relay server instead of using `relay.dicode.app`. The relay lives in a separate repository: [dicode-ayo/dicode-relay](https://github.com/dicode-ayo/dicode-relay) — a Node.js service that combines the WebSocket tunnel, OAuth broker, multi-client support, and a status dashboard. It ships as a Docker image; see the relay repo for deployment details.
 
-- **Go relay server** (`pkg/relay/server.go`) — lightweight, same binary, suitable for single-user self-hosting
-- **Node.js relay server** (`dicode-relay` repo) — production-grade with OAuth broker, multi-client support, status dashboard
-
-Self-hosted server deployments that expose port 8080 directly don't need the relay at all.
+Self-hosted daemons that expose port 8080 directly don't need the relay at all.
 
 ---
 

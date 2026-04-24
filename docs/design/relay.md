@@ -188,6 +188,9 @@ within 10 seconds of a ping.
 | Privacy | Relay sees plaintext payloads | You see your own payloads |
 
 For high-security environments, self-host the relay server inside your network
-perimeter. The Go relay server implementation (`pkg/relay/server.go`) can run
-standalone. The production relay server is a separate Node.js service
-(`dicode-relay` repo) that adds OAuth broker support and multi-client features.
+perimeter. The relay server lives in a separate repo
+([`dicode-ayo/dicode-relay`](https://github.com/dicode-ayo/dicode-relay)) —
+a Node.js service with WebSocket tunnel + OAuth broker support. An earlier
+Go implementation at `pkg/relay/server.go` was removed in favour of the
+TypeScript service; see [`docs/design/oauth-broker.md`](oauth-broker.md) for
+the rationale.
