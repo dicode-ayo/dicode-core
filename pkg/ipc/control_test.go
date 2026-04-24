@@ -55,7 +55,7 @@ func controlTestEnv(t *testing.T, mp MetricsProvider) (net.Conn, func()) {
 	}
 
 	// Read the token the server wrote.
-	tok, err := os.ReadFile(tokenPath)
+	tok, err := readCLITokenFile(tokenPath)
 	if err != nil {
 		cancel()
 		t.Fatalf("read token: %v", err)
@@ -132,7 +132,7 @@ func TestControl_Handshake_EmitsEmptyTaskAndRunIDFields(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 
-	tok, err := os.ReadFile(tokenPath)
+	tok, err := readCLITokenFile(tokenPath)
 	if err != nil {
 		t.Fatalf("read token: %v", err)
 	}
@@ -309,7 +309,7 @@ func TestControl_AI_FiresConfiguredTask_AndReturnsReply(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 
-	tok, err := os.ReadFile(tokenPath)
+	tok, err := readCLITokenFile(tokenPath)
 	if err != nil {
 		t.Fatalf("read token: %v", err)
 	}
@@ -405,7 +405,7 @@ func TestControl_AI_NumericSessionID(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 
-	tok, _ := os.ReadFile(tokenPath)
+	tok, _ := readCLITokenFile(tokenPath)
 	conn, err := net.Dial("unix", socketPath)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
@@ -468,7 +468,7 @@ func TestControl_AI_NoDefault_NoOverride_ReturnsError(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 
-	tok, _ := os.ReadFile(tokenPath)
+	tok, _ := readCLITokenFile(tokenPath)
 	conn, err := net.Dial("unix", socketPath)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
@@ -545,7 +545,7 @@ func TestControl_RelayRotate_InvokesRotator(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 
-	tok, err := os.ReadFile(tokenPath)
+	tok, err := readCLITokenFile(tokenPath)
 	if err != nil {
 		t.Fatalf("token: %v", err)
 	}
@@ -630,7 +630,7 @@ func TestControl_RelayRotate_RotatorError_SurfacesVerbatim(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 
-	tok, err := os.ReadFile(tokenPath)
+	tok, err := readCLITokenFile(tokenPath)
 	if err != nil {
 		t.Fatalf("token: %v", err)
 	}
