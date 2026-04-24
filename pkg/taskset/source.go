@@ -175,18 +175,20 @@ func (s *Source) watch(ctx context.Context, ch chan<- source.Event) {
 
 	s.addWatchDirs(watcher)
 
-	// bep/debounce runs the callback in its own goroutine after the quiet
-	// period elapses. syncAndEmit is safe to call concurrently — s.mu
-	// serialises the snapshot transition, and the event send is guarded by
-	// ctx.Done. addWatchDirs takes s.mu internally.
+	// bep/debounce schedules its callback in a detached goroutine with no
+	// Stop() in v1.2.1. To keep watcher and channel mutation panic-free on
+	// shutdown we use the debouncer only to coalesce events, and hand the
+	// actual fire back into this goroutine via a cap-1 signal channel.
+	// fireSig is never closed; a late post-shutdown trigger becomes a
+	// harmless no-op when the buffer is already full.
 	const debounceInterval = 150 * time.Millisecond
 	debounced := debounce.New(debounceInterval)
-	fire := func() {
-		if err := s.syncAndEmit(ctx, ch); err != nil {
-			s.log.Warn("taskset source: sync failed",
-				zap.String("id", s.id), zap.Error(err))
+	fireSig := make(chan struct{}, 1)
+	trigger := func() {
+		select {
+		case fireSig <- struct{}{}:
+		default:
 		}
-		s.addWatchDirs(watcher)
 	}
 
 	// Pull ticker — only for git sources; nil for local.
@@ -215,7 +217,13 @@ func (s *Source) watch(ctx context.Context, ch chan<- source.Event) {
 			if !ok {
 				return
 			}
-			debounced(fire)
+			debounced(trigger)
+		case <-fireSig:
+			if err := s.syncAndEmit(ctx, ch); err != nil {
+				s.log.Warn("taskset source: sync failed",
+					zap.String("id", s.id), zap.Error(err))
+			}
+			s.addWatchDirs(watcher)
 		case <-pullTickC:
 			// Fetch from remote. If the pull actually changed files on disk,
 			// fsnotify will fire and trigger syncAndEmit via the debounce path.

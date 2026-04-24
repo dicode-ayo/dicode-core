@@ -120,15 +120,20 @@ func (s *LocalSource) watch(ctx context.Context, watcher *fsnotify.Watcher, ch c
 	defer watcher.Close()
 	defer close(ch)
 
-	// bep/debounce runs the callback in its own goroutine after the quiet
-	// period elapses. syncAndEmit is safe to call concurrently with itself —
-	// s.diff() serialises the snapshot transition under s.mu, and the event
-	// channel send is guarded by ctx.Done. See pkg/source/local/local_test.go
-	// for the race-detector-backed coverage.
+	// bep/debounce schedules its callback via time.AfterFunc in a detached
+	// goroutine and has no Stop() in v1.2.1 — so a callback scheduled just
+	// before shutdown can fire after this goroutine exits and the event
+	// channel is closed. To keep the send path panic-free we use the
+	// debouncer only to coalesce events, and hand the actual fire back into
+	// the select loop via a cap-1 signal channel. fireSig is never closed,
+	// so a late post-shutdown send becomes a harmless no-op (buffer already
+	// full → default branch).
 	debounced := debounce.New(debounceInterval)
-	fire := func() {
-		if err := s.syncAndEmit(ctx, ch); err != nil {
-			s.log.Warn("local source sync error", zap.String("path", s.path), zap.Error(err))
+	fireSig := make(chan struct{}, 1)
+	trigger := func() {
+		select {
+		case fireSig <- struct{}{}:
+		default:
 		}
 	}
 
@@ -145,7 +150,11 @@ func (s *LocalSource) watch(ctx context.Context, watcher *fsnotify.Watcher, ch c
 			if !ok {
 				return
 			}
-			debounced(fire)
+			debounced(trigger)
+		case <-fireSig:
+			if err := s.syncAndEmit(ctx, ch); err != nil {
+				s.log.Warn("local source sync error", zap.String("path", s.path), zap.Error(err))
+			}
 		}
 	}
 }
