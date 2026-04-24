@@ -1,0 +1,141 @@
+package relay
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"testing"
+	"time"
+
+	"go.uber.org/zap"
+)
+
+func newTestClient(t *testing.T) *Client {
+	t.Helper()
+	return NewClient("ws://test.example", nil, 0, nil, zap.NewNop())
+}
+
+func TestClient_Status_ZeroValue(t *testing.T) {
+	c := newTestClient(t)
+	s := c.Status()
+	if !s.Enabled {
+		t.Error("Status.Enabled should be true for any constructed Client")
+	}
+	if s.Connected {
+		t.Error("Status.Connected should be false before handshake")
+	}
+	if s.RemoteURL != "ws://test.example" {
+		t.Errorf("Status.RemoteURL = %q; want ws://test.example", s.RemoteURL)
+	}
+	if s.ReconnectAttempts != 0 {
+		t.Errorf("Status.ReconnectAttempts = %d; want 0", s.ReconnectAttempts)
+	}
+}
+
+func TestClient_MarkConnected_UpdatesStatus(t *testing.T) {
+	c := newTestClient(t)
+	before := time.Now()
+	c.markConnected()
+	s := c.Status()
+	if !s.Connected {
+		t.Error("Connected should be true after markConnected")
+	}
+	if s.Since.Before(before) {
+		t.Errorf("Since = %v; should be >= %v", s.Since, before)
+	}
+	if s.LastError != "" {
+		t.Errorf("LastError = %q; should be cleared on connect", s.LastError)
+	}
+}
+
+func TestClient_MarkDisconnected_SetsError(t *testing.T) {
+	c := newTestClient(t)
+	c.markConnected() // start from a known-good state
+	want := errors.New("boom")
+	c.markDisconnected(want)
+
+	s := c.Status()
+	if s.Connected {
+		t.Error("Connected should be false after markDisconnected")
+	}
+	if s.LastError != want.Error() {
+		t.Errorf("LastError = %q; want %q", s.LastError, want.Error())
+	}
+	if s.ReconnectAttempts != 1 {
+		t.Errorf("ReconnectAttempts = %d; want 1", s.ReconnectAttempts)
+	}
+}
+
+func TestClient_MarkDisconnected_Counts(t *testing.T) {
+	c := newTestClient(t)
+	for i := 0; i < 3; i++ {
+		c.markDisconnected(errors.New("retry"))
+	}
+	s := c.Status()
+	if s.ReconnectAttempts != 3 {
+		t.Errorf("ReconnectAttempts = %d; want 3", s.ReconnectAttempts)
+	}
+}
+
+func TestClient_MarkConnected_ResetsReconnectCount(t *testing.T) {
+	c := newTestClient(t)
+	c.markDisconnected(errors.New("one"))
+	c.markDisconnected(errors.New("two"))
+	if n := c.Status().ReconnectAttempts; n != 2 {
+		t.Fatalf("precondition: ReconnectAttempts = %d; want 2", n)
+	}
+	c.markConnected()
+	if n := c.Status().ReconnectAttempts; n != 0 {
+		t.Errorf("ReconnectAttempts after connect = %d; want 0 (counter should reset)", n)
+	}
+}
+
+// TestClient_MarkDisconnected_ContextCanceled_IsFiltered guards
+// against the round-2 LOW: on daemon shutdown, websocket.Dial etc.
+// return wrapped `context.Canceled` errors which would otherwise
+// clobber a real prior LastError like "auth failed" with the far less
+// useful "dial relay: context canceled". Context errors must not touch
+// the status tracker — neither the error string nor the retry counter.
+func TestClient_MarkDisconnected_ContextCanceled_IsFiltered(t *testing.T) {
+	c := newTestClient(t)
+	c.markDisconnected(errors.New("auth failed"))
+	beforeAttempts := c.Status().ReconnectAttempts
+
+	// Simulate "dial relay: context canceled" landing in the error branch.
+	wrapped := fmt.Errorf("dial relay: %w", context.Canceled)
+	c.markDisconnected(wrapped)
+
+	s := c.Status()
+	if s.LastError != "auth failed" {
+		t.Errorf("LastError = %q; context-canceled error should have been filtered, prior real error preserved", s.LastError)
+	}
+	if s.ReconnectAttempts != beforeAttempts {
+		t.Errorf("ReconnectAttempts = %d; want %d (filtered call should not bump counter)", s.ReconnectAttempts, beforeAttempts)
+	}
+}
+
+// TestClient_MarkDisconnected_NilErr_DoesNotOverwrite covers the
+// "clean shutdown" path: when Run exits because ctx is cancelled we
+// call markDisconnected(nil) to flip the pill to offline, but we must
+// NOT clobber a previously-recorded real error or bump the retry
+// counter.
+func TestClient_MarkDisconnected_NilErr_PreservesContext(t *testing.T) {
+	c := newTestClient(t)
+	c.markConnected()
+	c.markDisconnected(errors.New("boom"))
+	if c.Status().ReconnectAttempts != 1 {
+		t.Fatalf("precondition: ReconnectAttempts = %d; want 1", c.Status().ReconnectAttempts)
+	}
+	// Simulate the Run-exits-on-ctx.Done path: err is nil.
+	c.markDisconnected(nil)
+	s := c.Status()
+	if s.Connected {
+		t.Error("Connected should be false after nil-err disconnect")
+	}
+	if s.LastError != "boom" {
+		t.Errorf("LastError = %q; nil-err disconnect must preserve the prior error", s.LastError)
+	}
+	if s.ReconnectAttempts != 1 {
+		t.Errorf("ReconnectAttempts = %d; nil-err disconnect must not bump the counter", s.ReconnectAttempts)
+	}
+}

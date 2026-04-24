@@ -71,6 +71,16 @@ func (m *SourceManager) List() []mcp.SourceEntry {
 			info.Type = "taskset"
 			info.DevMode = src.DevMode()
 			info.DevPath = src.DevRootPath()
+			ps := src.PullStatus()
+			// Only populate the pull-health fields when a pull has
+			// actually been attempted — leaving them nil lets the
+			// frontend's `if (!src.last_pull_at)` guard suppress the dot.
+			if !ps.LastPullAt.IsZero() {
+				t := ps.LastPullAt
+				info.LastPullAt = &t
+				info.LastPullOK = ps.OK
+				info.LastPullError = ps.Error
+			}
 		} else if sc.URL != "" {
 			info.Type = "git"
 		} else {
