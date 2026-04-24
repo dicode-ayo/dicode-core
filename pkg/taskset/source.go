@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bep/debounce"
 	"github.com/dicode/dicode/pkg/source"
 	"github.com/dicode/dicode/pkg/task"
 	"github.com/fsnotify/fsnotify"
@@ -174,17 +175,20 @@ func (s *Source) watch(ctx context.Context, ch chan<- source.Event) {
 
 	s.addWatchDirs(watcher)
 
-	const debounce = 150 * time.Millisecond
-	var (
-		timer  *time.Timer
-		timerC <-chan time.Time
-	)
-	resetTimer := func() {
-		if timer != nil {
-			timer.Stop()
+	// bep/debounce schedules its callback in a detached goroutine with no
+	// Stop() in v1.2.1. To keep watcher and channel mutation panic-free on
+	// shutdown we use the debouncer only to coalesce events, and hand the
+	// actual fire back into this goroutine via a cap-1 signal channel.
+	// fireSig is never closed; a late post-shutdown trigger becomes a
+	// harmless no-op when the buffer is already full.
+	const debounceInterval = 150 * time.Millisecond
+	debounced := debounce.New(debounceInterval)
+	fireSig := make(chan struct{}, 1)
+	trigger := func() {
+		select {
+		case fireSig <- struct{}{}:
+		default:
 		}
-		timer = time.NewTimer(debounce)
-		timerC = timer.C
 	}
 
 	// Pull ticker — only for git sources; nil for local.
@@ -213,10 +217,8 @@ func (s *Source) watch(ctx context.Context, ch chan<- source.Event) {
 			if !ok {
 				return
 			}
-			resetTimer()
-		case <-timerC:
-			// Debounce fired: files changed (from a local edit or a git pull).
-			timerC = nil
+			debounced(trigger)
+		case <-fireSig:
 			if err := s.syncAndEmit(ctx, ch); err != nil {
 				s.log.Warn("taskset source: sync failed",
 					zap.String("id", s.id), zap.Error(err))
@@ -303,31 +305,24 @@ func (s *Source) syncAndEmit(ctx context.Context, ch chan<- source.Event) error 
 	s.snapshot = current
 	s.mu.Unlock()
 
-	for id, cur := range current {
-		var ev source.Event
-		ev.TaskID = id
-		ev.TaskDir = cur.taskDir
-		ev.Source = s.id
-		ev.Spec = cur.spec
+	added, updated, removed := source.DiffSnapshots(prev, current, func(t taskSnap) string { return t.specHash })
 
-		if _, exists := prev[id]; !exists {
-			ev.Kind = source.EventAdded
-		} else if prev[id].specHash != cur.specHash {
-			ev.Kind = source.EventUpdated
-		} else {
-			continue
-		}
-		s.send(ch, ev)
+	for _, id := range added {
+		cur := current[id]
+		s.send(ch, source.Event{
+			Kind: source.EventAdded, TaskID: id, TaskDir: cur.taskDir, Source: s.id, Spec: cur.spec,
+		})
 	}
-
-	for id := range prev {
-		if _, exists := current[id]; !exists {
-			s.send(ch, source.Event{
-				Kind:   source.EventRemoved,
-				TaskID: id,
-				Source: s.id,
-			})
-		}
+	for _, id := range updated {
+		cur := current[id]
+		s.send(ch, source.Event{
+			Kind: source.EventUpdated, TaskID: id, TaskDir: cur.taskDir, Source: s.id, Spec: cur.spec,
+		})
+	}
+	for _, id := range removed {
+		s.send(ch, source.Event{
+			Kind: source.EventRemoved, TaskID: id, Source: s.id,
+		})
 	}
 	return nil
 }

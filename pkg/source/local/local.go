@@ -9,13 +9,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bep/debounce"
 	"github.com/dicode/dicode/pkg/source"
 	"github.com/dicode/dicode/pkg/task"
 	"github.com/fsnotify/fsnotify"
 	"go.uber.org/zap"
 )
 
-const debounce = 150 * time.Millisecond
+const debounceInterval = 150 * time.Millisecond
 
 // LocalSource watches a local directory for task changes.
 type LocalSource struct {
@@ -119,23 +120,20 @@ func (s *LocalSource) watch(ctx context.Context, watcher *fsnotify.Watcher, ch c
 	defer watcher.Close()
 	defer close(ch)
 
-	var (
-		timer  *time.Timer
-		timerC <-chan time.Time
-	)
-
-	resetTimer := func() {
-		if timer != nil {
-			timer.Stop()
-		}
-		timer = time.NewTimer(debounce)
-		timerC = timer.C
-	}
-
-	fire := func() {
-		timerC = nil
-		if err := s.syncAndEmit(ctx, ch); err != nil {
-			s.log.Warn("local source sync error", zap.String("path", s.path), zap.Error(err))
+	// bep/debounce schedules its callback via time.AfterFunc in a detached
+	// goroutine and has no Stop() in v1.2.1 — so a callback scheduled just
+	// before shutdown can fire after this goroutine exits and the event
+	// channel is closed. To keep the send path panic-free we use the
+	// debouncer only to coalesce events, and hand the actual fire back into
+	// the select loop via a cap-1 signal channel. fireSig is never closed,
+	// so a late post-shutdown send becomes a harmless no-op (buffer already
+	// full → default branch).
+	debounced := debounce.New(debounceInterval)
+	fireSig := make(chan struct{}, 1)
+	trigger := func() {
+		select {
+		case fireSig <- struct{}{}:
+		default:
 		}
 	}
 
@@ -152,9 +150,11 @@ func (s *LocalSource) watch(ctx context.Context, watcher *fsnotify.Watcher, ch c
 			if !ok {
 				return
 			}
-			resetTimer()
-		case <-timerC:
-			fire()
+			debounced(trigger)
+		case <-fireSig:
+			if err := s.syncAndEmit(ctx, ch); err != nil {
+				s.log.Warn("local source sync error", zap.String("path", s.path), zap.Error(err))
+			}
 		}
 	}
 }
@@ -194,31 +194,27 @@ func (s *LocalSource) diff() ([]source.Event, error) {
 	s.snapshot = current
 	s.mu.Unlock()
 
-	var events []source.Event
-
 	// Vars injected into task.yaml template expansion for every task under
 	// this source. See pkg/task/template.go and docs/task-template-vars.md.
 	extras := map[string]string{task.VarTaskSetDir: s.path}
 
-	for id, hash := range current {
-		dir := filepath.Join(s.path, id)
-		if _, ok := prev[id]; !ok {
-			events = append(events, source.Event{
-				Kind: source.EventAdded, TaskID: id, TaskDir: dir, Source: s.id, ExtraVars: extras,
-			})
-		} else if prev[id] != hash {
-			events = append(events, source.Event{
-				Kind: source.EventUpdated, TaskID: id, TaskDir: dir, Source: s.id, ExtraVars: extras,
-			})
-		}
-	}
+	added, updated, removed := source.DiffSnapshots(prev, current, func(h string) string { return h })
 
-	for id := range prev {
-		if _, ok := current[id]; !ok {
-			events = append(events, source.Event{
-				Kind: source.EventRemoved, TaskID: id, TaskDir: filepath.Join(s.path, id), Source: s.id,
-			})
-		}
+	events := make([]source.Event, 0, len(added)+len(updated)+len(removed))
+	for _, id := range added {
+		events = append(events, source.Event{
+			Kind: source.EventAdded, TaskID: id, TaskDir: filepath.Join(s.path, id), Source: s.id, ExtraVars: extras,
+		})
+	}
+	for _, id := range updated {
+		events = append(events, source.Event{
+			Kind: source.EventUpdated, TaskID: id, TaskDir: filepath.Join(s.path, id), Source: s.id, ExtraVars: extras,
+		})
+	}
+	for _, id := range removed {
+		events = append(events, source.Event{
+			Kind: source.EventRemoved, TaskID: id, TaskDir: filepath.Join(s.path, id), Source: s.id,
+		})
 	}
 
 	return events, nil
