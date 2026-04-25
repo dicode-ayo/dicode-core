@@ -4,7 +4,6 @@ package webui
 import (
 	"context"
 	"crypto/rand"
-	"crypto/subtle"
 	"embed"
 	"encoding/hex"
 	"encoding/json"
@@ -166,7 +165,7 @@ type Server struct {
 	dbSessions         *dbSessionStore  // persistent sessions / trusted devices
 	apiKeys            *apiKeyStore     // MCP / programmatic API keys
 	passphraseStore    *passphraseStore // auth passphrase persisted in DB
-	cachedPassphrase   string           // in-memory cache of resolved passphrase; invalidated on change
+	cachedPassphrase   string           // in-memory cache of stored DB value (bcrypt hash, or legacy plaintext during migration); invalidated on change
 	cachedPassphraseMu sync.RWMutex
 	limiter            *unlockLimiter
 	logs               *LogBroadcaster
@@ -914,10 +913,14 @@ func (s *Server) apiSecretsUnlock(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	expected := s.resolvePassphrase(r.Context())
-	if expected != "" && subtle.ConstantTimeCompare([]byte(password), []byte(expected)) != 1 {
-		s.loginError(w, r, "incorrect password", http.StatusUnauthorized, safeNext)
-		return
+	// Auth is enabled but no passphrase has been configured yet (bootstrap
+	// state) — accept any password, mirroring the previous behaviour. The
+	// /security UI will force one to be set as soon as the operator logs in.
+	if s.passphraseSource(r.Context()) != passphraseSourceNone {
+		if !s.verifyPassphrase(r.Context(), password) {
+			s.loginError(w, r, "incorrect password", http.StatusUnauthorized, safeNext)
+			return
+		}
 	}
 
 	token := s.sessions.issue()
