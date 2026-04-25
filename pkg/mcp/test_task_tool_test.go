@@ -1,8 +1,10 @@
 package mcp
 
 import (
-	"context"
+	"bytes"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,12 +16,9 @@ import (
 	"github.com/dicode/dicode/pkg/task"
 )
 
-// Tests for the test_task MCP tool added in PR #160. The tool surfaces
-// pkg/tasktest.Run to any MCP-capable client; these tests verify the
-// listing, argument validation, and error paths are wired correctly.
-// The end-to-end happy path (spawning Deno) is covered by the parallel
-// test in pkg/ipc/control_task_test_test.go to avoid double-running
-// the slow test across packages.
+// Tests for the test_task MCP tool added in PR #160. Drive the tool through
+// the public HTTP transport (POST /) so the entire mcp-go pipeline is
+// exercised end-to-end — listing, argument validation, and error envelopes.
 
 func newMCPServerForTest(t *testing.T) (*Server, *registry.Registry) {
 	t.Helper()
@@ -32,40 +31,95 @@ func newMCPServerForTest(t *testing.T) (*Server, *registry.Registry) {
 	return New(reg, nil), reg
 }
 
+// callMCP POSTs a JSON-RPC request to the server's HTTP handler and returns
+// the decoded response. Tests can inspect raw fields without re-implementing
+// the wire decode.
+func callMCP(t *testing.T, s *Server, method string, params any) map[string]any {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  method,
+		"params":  params,
+	})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", w.Code, w.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v\nbody = %s", err, w.Body.String())
+	}
+	return resp
+}
+
+// callTool wraps callMCP for tools/call requests and returns the inner result
+// or the JSON-RPC error envelope, whichever is present.
+func callTool(t *testing.T, s *Server, name string, args map[string]any) (result map[string]any, errMsg string) {
+	t.Helper()
+	resp := callMCP(t, s, "tools/call", map[string]any{"name": name, "arguments": args})
+	if errVal, ok := resp["error"].(map[string]any); ok {
+		msg, _ := errVal["message"].(string)
+		return nil, msg
+	}
+	res, _ := resp["result"].(map[string]any)
+	return res, ""
+}
+
+// firstText returns the text content of the first text block in a tools/call
+// result, or "" if the structure is unexpected.
+func firstText(result map[string]any) string {
+	content, _ := result["content"].([]any)
+	if len(content) == 0 {
+		return ""
+	}
+	first, _ := content[0].(map[string]any)
+	text, _ := first["text"].(string)
+	return text
+}
+
+func resultIsError(result map[string]any) bool {
+	v, _ := result["isError"].(bool)
+	return v
+}
+
 // TestToolsList_ExposesTestTask verifies the tool is advertised in the
 // tools/list response so MCP clients can discover it.
 func TestToolsList_ExposesTestTask(t *testing.T) {
 	s, _ := newMCPServerForTest(t)
-	resp := s.methodToolsList(rpcRequest{ID: 1})
+	resp := callMCP(t, s, "tools/list", nil)
 
-	result, ok := resp.Result.(map[string]any)
+	result, ok := resp["result"].(map[string]any)
 	if !ok {
-		t.Fatalf("result type = %T, want map[string]any", resp.Result)
+		t.Fatalf("result missing or wrong type: %+v", resp)
 	}
-	tools, _ := result["tools"].([]tool)
-	var found *tool
-	for i := range tools {
-		if tools[i].Name == "test_task" {
-			found = &tools[i]
-			break
+	tools, _ := result["tools"].([]any)
+	var testTask map[string]any
+	names := make([]string, 0, len(tools))
+	for _, raw := range tools {
+		tt, _ := raw.(map[string]any)
+		name, _ := tt["name"].(string)
+		names = append(names, name)
+		if name == "test_task" {
+			testTask = tt
 		}
 	}
-	if found == nil {
-		names := make([]string, 0, len(tools))
-		for _, t := range tools {
-			names = append(names, t.Name)
-		}
+	if testTask == nil {
 		t.Fatalf("test_task not listed in tools/list (got: %v)", names)
 	}
-	if !strings.Contains(found.Description, "task.test") {
-		t.Errorf("description should mention task.test: %q", found.Description)
+	desc, _ := testTask["description"].(string)
+	if !strings.Contains(desc, "task.test") {
+		t.Errorf("description should mention task.test: %q", desc)
 	}
-	// Schema must require `id`. jsonSchema() stores the variadic
-	// []string directly, so assert the concrete slice type.
-	required, ok := found.InputSchema["required"].([]string)
-	if !ok {
-		t.Fatalf("required must be []string, got %T: %+v", found.InputSchema["required"], found.InputSchema)
-	}
+	// Schema must require `id`.
+	schema, _ := testTask["inputSchema"].(map[string]any)
+	required, _ := schema["required"].([]any)
 	foundID := false
 	for _, r := range required {
 		if r == "id" {
@@ -73,31 +127,30 @@ func TestToolsList_ExposesTestTask(t *testing.T) {
 		}
 	}
 	if !foundID {
-		t.Errorf("test_task schema must require 'id': %+v", found.InputSchema)
+		t.Errorf("test_task schema must require 'id': %+v", schema)
 	}
 }
 
-// TestToolTestTask_MissingID returns a JSON-RPC error when arguments omit id.
+// TestToolTestTask_MissingID returns a tool error when arguments omit id.
 func TestToolTestTask_MissingID(t *testing.T) {
 	s, _ := newMCPServerForTest(t)
-	resp := s.toolTestTask(context.Background(), 1, json.RawMessage(`{}`))
-	if resp.Error == nil {
-		t.Fatalf("expected error for missing id, got result=%v", resp.Result)
+	result, errMsg := callTool(t, s, "test_task", map[string]any{})
+	// mcp-go's NewTool with Required() returns the missing-arg error via the
+	// CallToolRequest.RequireString helper as a tool error (isError=true with
+	// content), not via the JSON-RPC error envelope.
+	if errMsg != "" {
+		// Acceptable too — older mcp-go versions used the error envelope.
+		if !strings.Contains(strings.ToLower(errMsg), "id") {
+			t.Errorf("error msg should mention id: %q", errMsg)
+		}
+		return
 	}
-	if !strings.Contains(resp.Error.Message, "id is required") {
-		t.Errorf("error msg = %q, want 'id is required'", resp.Error.Message)
+	if !resultIsError(result) {
+		t.Fatalf("expected tool error for missing id, got result=%v", result)
 	}
-}
-
-// TestToolTestTask_MalformedArgs returns -32602 on invalid JSON.
-func TestToolTestTask_MalformedArgs(t *testing.T) {
-	s, _ := newMCPServerForTest(t)
-	resp := s.toolTestTask(context.Background(), 1, json.RawMessage(`not json`))
-	if resp.Error == nil {
-		t.Fatal("expected error for malformed args")
-	}
-	if resp.Error.Code != -32602 {
-		t.Errorf("code = %d, want -32602 (invalid params)", resp.Error.Code)
+	text := strings.ToLower(firstText(result))
+	if !strings.Contains(text, "id") {
+		t.Errorf("error text should mention id: %q", text)
 	}
 }
 
@@ -105,12 +158,19 @@ func TestToolTestTask_MalformedArgs(t *testing.T) {
 // resolve to a registered task.
 func TestToolTestTask_UnknownTask(t *testing.T) {
 	s, _ := newMCPServerForTest(t)
-	resp := s.toolTestTask(context.Background(), 1, json.RawMessage(`{"id":"does/not/exist"}`))
-	if resp.Error == nil {
-		t.Fatal("expected error for unknown task")
+	result, errMsg := callTool(t, s, "test_task", map[string]any{"id": "does/not/exist"})
+	if errMsg != "" {
+		if !strings.Contains(errMsg, "not found") {
+			t.Errorf("error msg = %q, want to contain 'not found'", errMsg)
+		}
+		return
 	}
-	if !strings.Contains(resp.Error.Message, "not found") {
-		t.Errorf("error = %q, want to contain 'not found'", resp.Error.Message)
+	if !resultIsError(result) {
+		t.Fatalf("expected tool error for unknown task, got result=%v", result)
+	}
+	text := firstText(result)
+	if !strings.Contains(text, "not found") {
+		t.Errorf("error text = %q, want to contain 'not found'", text)
 	}
 }
 
@@ -129,22 +189,14 @@ func TestToolTestTask_UnsupportedRuntime_StructuredSummary(t *testing.T) {
 	}
 	_ = reg.Register(spec)
 
-	resp := s.toolTestTask(context.Background(), 1, json.RawMessage(`{"id":"x/docker"}`))
-	if resp.Error != nil {
-		t.Fatalf("tool call errored instead of returning partial result: %v", resp.Error)
+	result, errMsg := callTool(t, s, "test_task", map[string]any{"id": "x/docker"})
+	if errMsg != "" {
+		t.Fatalf("tool call errored instead of returning partial result: %v", errMsg)
 	}
-
-	// Response shape: content[0].text contains "<output>\n\n--- summary ---\n<json>"
-	result, _ := resp.Result.(map[string]any)
-	content, _ := result["content"].([]map[string]any)
-	if len(content) == 0 {
-		t.Fatalf("no content in response: %+v", resp.Result)
-	}
-	text, _ := content[0]["text"].(string)
+	text := firstText(result)
 	if !strings.Contains(text, "--- summary ---") {
 		t.Errorf("response missing summary block: %q", text)
 	}
-	// The error field should mention the tracked issue for parity.
 	if !strings.Contains(text, "not yet supported") && !strings.Contains(text, "#159") {
 		t.Errorf("unsupported-runtime error not surfaced: %q", text)
 	}

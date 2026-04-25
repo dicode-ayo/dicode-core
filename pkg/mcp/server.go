@@ -2,19 +2,22 @@
 // Any MCP-capable agent (Claude Code, Cursor, custom agents) can connect to
 // the endpoint at /mcp and use these tools to develop, test, and deploy tasks.
 //
-// Protocol: JSON-RPC 2.0 over HTTP POST (stateless request/response).
-// Clients send a single JSON-RPC message; the server replies synchronously.
+// Transport: JSON-RPC 2.0 over HTTP POST. Protocol plumbing is delegated to
+// github.com/mark3labs/mcp-go; this file only declares tools and wires their
+// handlers to dicode internals (registry, source manager, tasktest).
 package mcp
 
 import (
 	"context"
 	"encoding/json"
-	"fmt"
+	"io"
 	"net/http"
 	"time"
 
 	"github.com/dicode/dicode/pkg/registry"
 	"github.com/dicode/dicode/pkg/tasktest"
+	"github.com/mark3labs/mcp-go/mcp"
+	mcpserver "github.com/mark3labs/mcp-go/server"
 )
 
 // SourceLister is satisfied by *webui.SourceManager.
@@ -54,286 +57,206 @@ type SourceEntry struct {
 type Server struct {
 	registry  *registry.Registry
 	sourceMgr SourceLister // nil when not wired
+	mcp       *mcpserver.MCPServer
 }
 
 // New constructs an MCP server with the given registry and optional source manager.
 func New(reg *registry.Registry, sourceMgr SourceLister) *Server {
-	return &Server{registry: reg, sourceMgr: sourceMgr}
+	s := &Server{
+		registry:  reg,
+		sourceMgr: sourceMgr,
+		mcp: mcpserver.NewMCPServer(
+			"dicode", "dev",
+			mcpserver.WithToolCapabilities(false),
+		),
+	}
+	s.registerTools()
+	return s
 }
 
 // Handler returns an http.Handler that serves MCP JSON-RPC 2.0 at the mounted path.
 func (s *Server) Handler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", s.handleRPC)
-	return mux
+	return http.HandlerFunc(s.handleHTTP)
 }
 
 // Shutdown gracefully stops the MCP server.
 func (s *Server) Shutdown(_ context.Context) error { return nil }
 
-// --- JSON-RPC 2.0 types ---
-
-type rpcRequest struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      any             `json:"id"`
-	Method  string          `json:"method"`
-	Params  json.RawMessage `json:"params,omitempty"`
-}
-
-type rpcResponse struct {
-	JSONRPC string    `json:"jsonrpc"`
-	ID      any       `json:"id"`
-	Result  any       `json:"result,omitempty"`
-	Error   *rpcError `json:"error,omitempty"`
-}
-
-type rpcError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
-}
-
-func rpcOK(id any, result any) rpcResponse {
-	return rpcResponse{JSONRPC: "2.0", ID: id, Result: result}
-}
-
-func rpcErr(id any, code int, msg string) rpcResponse {
-	return rpcResponse{JSONRPC: "2.0", ID: id, Error: &rpcError{Code: code, Message: msg}}
-}
-
-// handleRPC is the single JSON-RPC 2.0 dispatcher.
-func (s *Server) handleRPC(w http.ResponseWriter, r *http.Request) {
+// handleHTTP wraps mcp-go's request handler in dicode's plain JSON-RPC-over-HTTP
+// transport. mcp-go's bundled SSE/streamable HTTP servers are richer but the
+// existing dicode CLI consumer speaks plain POST — keeping the transport
+// surface stable avoids a synchronized client/server upgrade.
+func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	if r.Method == http.MethodGet {
-		// Convenience: GET /mcp returns server info.
-		json.NewEncoder(w).Encode(map[string]string{ //nolint:errcheck
+		// Convenience: GET /mcp returns server info for liveness probes.
+		_ = json.NewEncoder(w).Encode(map[string]string{
 			"name":     "dicode",
 			"version":  "dev",
-			"protocol": "mcp/2024-11-05",
+			"protocol": mcp.LATEST_PROTOCOL_VERSION,
 		})
 		return
 	}
-
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
 
-	var req rpcRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		json.NewEncoder(w).Encode(rpcErr(nil, -32700, "parse error")) //nolint:errcheck
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-
-	var resp rpcResponse
-	switch req.Method {
-	case "initialize":
-		resp = s.methodInitialize(req)
-	case "tools/list":
-		resp = s.methodToolsList(req)
-	case "tools/call":
-		resp = s.methodToolsCall(r.Context(), req)
-	default:
-		resp = rpcErr(req.ID, -32601, fmt.Sprintf("method not found: %s", req.Method))
-	}
-
-	json.NewEncoder(w).Encode(resp) //nolint:errcheck
+	resp := s.mcp.HandleMessage(r.Context(), body)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// --- MCP method handlers ---
-
-func (s *Server) methodInitialize(req rpcRequest) rpcResponse {
-	return rpcOK(req.ID, map[string]any{
-		"protocolVersion": "2024-11-05",
-		"capabilities":    map[string]any{"tools": map[string]any{}},
-		"serverInfo":      map[string]any{"name": "dicode", "version": "dev"},
-	})
-}
-
-// tool describes one MCP tool for the tools/list response.
-type tool struct {
-	Name        string         `json:"name"`
-	Description string         `json:"description"`
-	InputSchema map[string]any `json:"inputSchema"`
-}
-
-func (s *Server) methodToolsList(req rpcRequest) rpcResponse {
-	tools := []tool{
-		{
-			Name:        "list_tasks",
-			Description: "List all registered tasks with their IDs, trigger types, and last run status.",
-			InputSchema: jsonSchema(map[string]any{}),
-		},
-		{
-			Name:        "list_sources",
-			Description: "List all configured task sources (git, local, taskset) with their current dev mode state.",
-			InputSchema: jsonSchema(map[string]any{}),
-		},
-		{
-			Name:        "switch_dev_mode",
-			Description: "Enable or disable dev mode for a named taskset source. When enabled with a local_path, dicode resolves tasks from that local directory instead of the git ref — ideal for developing new tasks locally.",
-			InputSchema: jsonSchema(map[string]any{
-				"source":     map[string]any{"type": "string", "description": "Source name (from list_sources)"},
-				"enabled":    map[string]any{"type": "boolean", "description": "true to enable dev mode, false to disable"},
-				"local_path": map[string]any{"type": "string", "description": "Absolute path to a local taskset.yaml file. Required when enabling dev mode without a dev_ref configured on the source."},
-			}, "source", "enabled"),
-		},
-		{
-			Name:        "run_task",
-			Description: "Trigger a manual run of a task by ID.",
-			InputSchema: jsonSchema(map[string]any{
-				"id": map[string]any{"type": "string", "description": "Namespaced task ID, e.g. infra/backend/deploy"},
-			}, "id"),
-		},
-		{
-			Name:        "get_task",
-			Description: "Get the full spec and last run info for a task.",
-			InputSchema: jsonSchema(map[string]any{
-				"id": map[string]any{"type": "string", "description": "Namespaced task ID"},
-			}, "id"),
-		},
-		{
-			Name:        "test_task",
-			Description: "Run the task's sibling test file (task.test.ts / .js / .mjs) through its runtime and return structured pass/fail counts plus the full stdout+stderr. Deno runtime only for now; other runtimes return a clear 'not yet supported' error.",
-			InputSchema: jsonSchema(map[string]any{
-				"id": map[string]any{"type": "string", "description": "Namespaced task ID (same as list_tasks returns)"},
-			}, "id"),
-		},
-	}
-	return rpcOK(req.ID, map[string]any{"tools": tools})
-}
-
-func (s *Server) methodToolsCall(ctx context.Context, req rpcRequest) rpcResponse {
-	var params struct {
-		Name      string          `json:"name"`
-		Arguments json.RawMessage `json:"arguments"`
-	}
-	if err := json.Unmarshal(req.Params, &params); err != nil {
-		return rpcErr(req.ID, -32602, "invalid params: "+err.Error())
-	}
-
-	switch params.Name {
-	case "list_tasks":
-		return s.toolListTasks(req.ID)
-	case "list_sources":
-		return s.toolListSources(req.ID)
-	case "switch_dev_mode":
-		return s.toolSwitchDevMode(ctx, req.ID, params.Arguments)
-	case "run_task":
-		return s.toolRunTask(ctx, req.ID, params.Arguments)
-	case "get_task":
-		return s.toolGetTask(req.ID, params.Arguments)
-	case "test_task":
-		return s.toolTestTask(ctx, req.ID, params.Arguments)
-	default:
-		return rpcErr(req.ID, -32601, fmt.Sprintf("unknown tool: %s", params.Name))
-	}
+// registerTools wires every dicode capability into the mcp-go tool registry.
+// New tools go here; the handler functions below them carry the actual logic.
+func (s *Server) registerTools() {
+	s.mcp.AddTool(
+		mcp.NewTool("list_tasks",
+			mcp.WithDescription("List all registered tasks with their IDs, trigger types, and last run status."),
+		),
+		s.toolListTasks,
+	)
+	s.mcp.AddTool(
+		mcp.NewTool("list_sources",
+			mcp.WithDescription("List all configured task sources (git, local, taskset) with their current dev mode state."),
+		),
+		s.toolListSources,
+	)
+	s.mcp.AddTool(
+		mcp.NewTool("switch_dev_mode",
+			mcp.WithDescription("Enable or disable dev mode for a named taskset source. When enabled with a local_path, dicode resolves tasks from that local directory instead of the git ref — ideal for developing new tasks locally."),
+			mcp.WithString("source",
+				mcp.Required(),
+				mcp.Description("Source name (from list_sources)"),
+			),
+			mcp.WithBoolean("enabled",
+				mcp.Required(),
+				mcp.Description("true to enable dev mode, false to disable"),
+			),
+			mcp.WithString("local_path",
+				mcp.Description("Absolute path to a local taskset.yaml file. Required when enabling dev mode without a dev_ref configured on the source."),
+			),
+		),
+		s.toolSwitchDevMode,
+	)
+	s.mcp.AddTool(
+		mcp.NewTool("run_task",
+			mcp.WithDescription("Trigger a manual run of a task by ID."),
+			mcp.WithString("id", mcp.Required(), mcp.Description("Namespaced task ID, e.g. infra/backend/deploy")),
+		),
+		s.toolRunTask,
+	)
+	s.mcp.AddTool(
+		mcp.NewTool("get_task",
+			mcp.WithDescription("Get the full spec and last run info for a task."),
+			mcp.WithString("id", mcp.Required(), mcp.Description("Namespaced task ID")),
+		),
+		s.toolGetTask,
+	)
+	s.mcp.AddTool(
+		mcp.NewTool("test_task",
+			mcp.WithDescription("Run the task's sibling test file (task.test.ts / .js / .mjs) through its runtime and return structured pass/fail counts plus the full stdout+stderr. Deno runtime only for now; other runtimes return a clear 'not yet supported' error."),
+			mcp.WithString("id", mcp.Required(), mcp.Description("Namespaced task ID (same as list_tasks returns)")),
+		),
+		s.toolTestTask,
+	)
 }
 
 // --- Tool implementations ---
 
-func (s *Server) toolListTasks(id any) rpcResponse {
+func (s *Server) toolListTasks(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	if s.registry == nil {
-		return textResult(id, "No registry available.")
+		return mcp.NewToolResultText("No registry available."), nil
 	}
 	specs := s.registry.All()
 	if len(specs) == 0 {
-		return textResult(id, "No tasks registered.")
+		return mcp.NewToolResultText("No tasks registered."), nil
 	}
 	b, _ := json.MarshalIndent(specs, "", "  ")
-	return textResult(id, string(b))
+	return mcp.NewToolResultText(string(b)), nil
 }
 
-func (s *Server) toolListSources(id any) rpcResponse {
+func (s *Server) toolListSources(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	if s.sourceMgr == nil {
-		return textResult(id, "Source manager not available.")
+		return mcp.NewToolResultText("Source manager not available."), nil
 	}
 	entries := s.sourceMgr.List()
 	b, _ := json.MarshalIndent(entries, "", "  ")
-	return textResult(id, string(b))
+	return mcp.NewToolResultText(string(b)), nil
 }
 
-func (s *Server) toolSwitchDevMode(ctx context.Context, id any, raw json.RawMessage) rpcResponse {
-	var args struct {
-		Source    string `json:"source"`
-		Enabled   bool   `json:"enabled"`
-		LocalPath string `json:"local_path"`
+func (s *Server) toolSwitchDevMode(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	source, err := req.RequireString("source")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
 	}
-	if err := json.Unmarshal(raw, &args); err != nil {
-		return rpcErr(id, -32602, "invalid arguments: "+err.Error())
+	enabled, err := req.RequireBool("enabled")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
 	}
-	if args.Source == "" {
-		return rpcErr(id, -32602, "source is required")
+	localPath := ""
+	if v, ok := req.GetArguments()["local_path"].(string); ok {
+		localPath = v
 	}
 	if s.sourceMgr == nil {
-		return rpcErr(id, -32603, "source manager not available")
+		return mcp.NewToolResultError("source manager not available"), nil
 	}
-	if err := s.sourceMgr.SetDevMode(ctx, args.Source, args.Enabled, args.LocalPath); err != nil {
-		return rpcErr(id, -32603, err.Error())
+	if err := s.sourceMgr.SetDevMode(ctx, source, enabled, localPath); err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
 	}
-	msg := fmt.Sprintf("Dev mode %s for source %q", onOff(args.Enabled), args.Source)
-	if args.LocalPath != "" {
-		msg += fmt.Sprintf(" (local path: %s)", args.LocalPath)
+	msg := "Dev mode " + onOff(enabled) + " for source \"" + source + "\""
+	if localPath != "" {
+		msg += " (local path: " + localPath + ")"
 	}
-	return textResult(id, msg)
+	return mcp.NewToolResultText(msg), nil
 }
 
-func (s *Server) toolRunTask(ctx context.Context, id any, raw json.RawMessage) rpcResponse {
-	var args struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal(raw, &args); err != nil {
-		return rpcErr(id, -32602, "invalid arguments: "+err.Error())
-	}
-	if args.ID == "" {
-		return rpcErr(id, -32602, "id is required")
+func (s *Server) toolRunTask(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	id, err := req.RequireString("id")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
 	}
 	if s.registry == nil {
-		return rpcErr(id, -32603, "registry not available")
+		return mcp.NewToolResultError("registry not available"), nil
 	}
-	if _, ok := s.registry.Get(args.ID); !ok {
-		return rpcErr(id, -32603, fmt.Sprintf("task %q not found", args.ID))
+	if _, ok := s.registry.Get(id); !ok {
+		return mcp.NewToolResultError("task \"" + id + "\" not found"), nil
 	}
-	return textResult(id, fmt.Sprintf("Use POST /api/tasks/%s/run to trigger this task.", args.ID))
+	return mcp.NewToolResultText("Use POST /api/tasks/" + id + "/run to trigger this task."), nil
 }
 
-func (s *Server) toolGetTask(id any, raw json.RawMessage) rpcResponse {
-	var args struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal(raw, &args); err != nil {
-		return rpcErr(id, -32602, "invalid arguments: "+err.Error())
-	}
-	if args.ID == "" {
-		return rpcErr(id, -32602, "id is required")
+func (s *Server) toolGetTask(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	id, err := req.RequireString("id")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
 	}
 	if s.registry == nil {
-		return rpcErr(id, -32603, "registry not available")
+		return mcp.NewToolResultError("registry not available"), nil
 	}
-	spec, ok := s.registry.Get(args.ID)
+	spec, ok := s.registry.Get(id)
 	if !ok {
-		return rpcErr(id, -32603, fmt.Sprintf("task %q not found", args.ID))
+		return mcp.NewToolResultError("task \"" + id + "\" not found"), nil
 	}
 	b, _ := json.MarshalIndent(spec, "", "  ")
-	return textResult(id, string(b))
+	return mcp.NewToolResultText(string(b)), nil
 }
 
-func (s *Server) toolTestTask(ctx context.Context, id any, raw json.RawMessage) rpcResponse {
-	var args struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal(raw, &args); err != nil {
-		return rpcErr(id, -32602, "invalid arguments: "+err.Error())
-	}
-	if args.ID == "" {
-		return rpcErr(id, -32602, "id is required")
+func (s *Server) toolTestTask(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	id, err := req.RequireString("id")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
 	}
 	if s.registry == nil {
-		return rpcErr(id, -32603, "registry not available")
+		return mcp.NewToolResultError("registry not available"), nil
 	}
-	spec, ok := s.registry.Get(args.ID)
+	spec, ok := s.registry.Get(id)
 	if !ok {
-		return rpcErr(id, -32603, fmt.Sprintf("task %q not found", args.ID))
+		return mcp.NewToolResultError("task \"" + id + "\" not found"), nil
 	}
 	res, runErr := tasktest.Run(ctx, spec)
 	// Return structured JSON alongside the output text so MCP clients can
@@ -354,30 +277,10 @@ func (s *Server) toolTestTask(ctx context.Context, id any, raw json.RawMessage) 
 		payload["error"] = runErr.Error()
 	}
 	b, _ := json.MarshalIndent(payload, "", "  ")
-	text := fmt.Sprintf("%s\n\n--- summary ---\n%s\n", res.Output, string(b))
-	return textResult(id, text)
+	return mcp.NewToolResultText(res.Output + "\n\n--- summary ---\n" + string(b) + "\n"), nil
 }
 
 // --- helpers ---
-
-func textResult(id any, text string) rpcResponse {
-	return rpcOK(id, map[string]any{
-		"content": []map[string]any{
-			{"type": "text", "text": text},
-		},
-	})
-}
-
-func jsonSchema(props map[string]any, required ...string) map[string]any {
-	s := map[string]any{
-		"type":       "object",
-		"properties": props,
-	}
-	if len(required) > 0 {
-		s["required"] = required
-	}
-	return s
-}
 
 func onOff(b bool) string {
 	if b {
