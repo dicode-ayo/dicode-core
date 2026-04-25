@@ -110,10 +110,12 @@ function writeTaskset(tempDir: string): { tasksetPath: string; tasksDir: string 
   copyDirSync(TASKS_DIR, tasksDir);
 
   const buildinWebuiTaskYaml = path.join(REPO_ROOT, 'tasks/buildin/webui/task.yaml');
+  const buildinMcpTaskYaml = path.join(REPO_ROOT, 'tasks/buildin/mcp/task.yaml');
   const template = fs.readFileSync(path.join(TASKS_DIR, 'taskset.yaml'), 'utf8');
   const content = template
     .replace(/FIXTURES_TASKS_DIR/g, tasksDir)
-    .replace(/BUILDIN_WEBUI_TASK_YAML/g, buildinWebuiTaskYaml);
+    .replace(/BUILDIN_WEBUI_TASK_YAML/g, buildinWebuiTaskYaml)
+    .replace(/BUILDIN_MCP_TASK_YAML/g, buildinMcpTaskYaml);
   const tasksetPath = path.join(tempDir, 'taskset.yaml');
   fs.writeFileSync(tasksetPath, content, 'utf8');
   return { tasksetPath, tasksDir };

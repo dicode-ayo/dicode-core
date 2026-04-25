@@ -83,3 +83,7 @@ spec:
     auth-relay:
       ref:
         path: ./auth-relay/task.yaml
+
+    mcp:
+      ref:
+        path: ./mcp/task.yaml
