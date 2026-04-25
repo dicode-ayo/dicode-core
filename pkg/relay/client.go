@@ -13,13 +13,12 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"math"
-	mathrand "math/rand/v2"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/cenkalti/backoff/v4"
 	"github.com/coder/websocket"
 	"github.com/dicode/dicode/pkg/db"
 	relaypb "github.com/dicode/dicode/pkg/relay/pb"
@@ -118,11 +117,26 @@ func (c *Client) HookBaseURL() string {
 	return c.hookBaseURL
 }
 
+// newReconnectBackoff returns the exponential backoff used between relay
+// reconnect attempts. Configured to match the prior hand-rolled math:
+// 1s initial, 60s cap, ±20% jitter, no overall deadline.
+func newReconnectBackoff() *backoff.ExponentialBackOff {
+	b := backoff.NewExponentialBackOff()
+	b.InitialInterval = time.Second
+	b.MaxInterval = 60 * time.Second
+	b.RandomizationFactor = 0.2
+	b.Multiplier = 2
+	// Run forever — the relay reconnect loop is supervised by ctx, not
+	// by an elapsed-time deadline. NextBackOff() must never return Stop.
+	b.MaxElapsedTime = 0
+	b.Reset()
+	return b
+}
+
 // Run connects to the relay server and maintains the connection until ctx is
 // cancelled. Reconnects with exponential backoff on disconnect.
 func (c *Client) Run(ctx context.Context) error {
-	backoff := time.Second
-	const maxBackoff = 60 * time.Second
+	bo := newReconnectBackoff()
 
 	// On any exit path (clean shutdown OR final error), flip the status
 	// pill to offline so the UI doesn't report a stale "connected"
@@ -132,39 +146,41 @@ func (c *Client) Run(ctx context.Context) error {
 
 	for {
 		connectedAt := time.Now()
-		if err := c.runOnce(ctx); err != nil {
+		runErr := c.runOnce(ctx)
+		if runErr != nil {
 			// Record the transport error BEFORE checking ctx so real
 			// failures racing with cancellation still land in Status().
-			c.markDisconnected(err)
+			c.markDisconnected(runErr)
 			if ctx.Err() != nil {
 				return nil
 			}
-			c.log.Warn("relay disconnected, reconnecting", zap.Error(err), zap.Duration("backoff", backoff))
 		}
 
 		// Reset backoff if the connection was stable long enough.
+		// Reset() rewinds both the next interval AND the elapsed-time
+		// counter, so a long-lived connection that finally drops will
+		// retry from the 1s floor again. Behaviorally equivalent to the
+		// hand-rolled `backoff = time.Second` reset; see
+		// TestNewReconnectBackoff_ResetRewindsToFloor for the contract.
 		if time.Since(connectedAt) >= stableConnectionThreshold {
-			backoff = time.Second
+			bo.Reset()
 		}
 
-		t := time.NewTimer(jitter(backoff))
+		wait := bo.NextBackOff()
+		if runErr != nil {
+			// Logged after NextBackOff() so the line carries the actual
+			// next-attempt delay — useful for diagnosing flapping in prod.
+			c.log.Warn("relay disconnected, reconnecting",
+				zap.Error(runErr), zap.Duration("backoff", wait))
+		}
+		t := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
 			t.Stop()
 			return nil
 		case <-t.C:
 		}
-
-		backoff = time.Duration(math.Min(float64(backoff*2), float64(maxBackoff)))
 	}
-}
-
-// jitter returns d ±20%.
-func jitter(d time.Duration) time.Duration {
-	f := float64(d)
-	delta := f * 0.2
-	offset := (mathrand.Float64()*2 - 1) * delta
-	return time.Duration(f + offset)
 }
 
 func (c *Client) runOnce(ctx context.Context) error {

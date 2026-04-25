@@ -6,6 +6,7 @@ package git
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cenkalti/backoff/v4"
 	"github.com/dicode/dicode/pkg/source"
 	"github.com/dicode/dicode/pkg/task"
 	gogit "github.com/go-git/go-git/v5"
@@ -24,7 +26,15 @@ import (
 	"go.uber.org/zap"
 )
 
-const defaultPoll = 30 * time.Second
+const (
+	defaultPoll = 30 * time.Second
+
+	// cloneRetryMaxElapsed caps total time spent on bounded retries inside
+	// cloneOrPull. Long enough to ride out a transient hiccup, short enough
+	// that the next poll tick happens roughly on schedule even if every
+	// attempt fails.
+	cloneRetryMaxElapsed = 30 * time.Second
+)
 
 // GitSource clones + polls a remote repository and emits task change events.
 type GitSource struct {
@@ -40,6 +50,11 @@ type GitSource struct {
 
 	mu       sync.Mutex
 	snapshot map[string]string // taskID → hash
+
+	// cloneOrPullOp, when non-nil, is invoked by cloneOrPull instead of
+	// the production tryCloneOrPull path. Tests use this to verify retry
+	// behaviour without standing up a real git server.
+	cloneOrPullOp cloneOrPullFn
 
 	log *zap.Logger
 }
@@ -94,6 +109,11 @@ func (g *GitSource) Start(ctx context.Context) (<-chan source.Event, error) {
 }
 
 // Sync triggers an immediate pull + rescan.
+//
+// May block up to cloneRetryMaxElapsed (~30s) on transient failures, since
+// the underlying clone-or-pull retries with exponential backoff. Callers on
+// interactive paths (UI buttons, request handlers) should pass a ctx with a
+// shorter deadline if they need to fail fast.
 func (g *GitSource) Sync(ctx context.Context) error {
 	if err := g.cloneOrPull(ctx); err != nil {
 		return err
@@ -122,7 +142,46 @@ func (g *GitSource) poll(ctx context.Context, ch chan<- source.Event) {
 	}
 }
 
+// cloneOrPullFn is the function signature cloneOrPull invokes for the actual
+// network call. Extracted to a field so tests can inject a mock and verify
+// retry behaviour without standing up a real git server.
+type cloneOrPullFn func(ctx context.Context) error
+
 func (g *GitSource) cloneOrPull(ctx context.Context) error {
+	op := g.cloneOrPullOp
+	if op == nil {
+		op = g.tryCloneOrPull
+	}
+
+	bo := backoff.NewExponentialBackOff()
+	bo.InitialInterval = 500 * time.Millisecond
+	bo.MaxInterval = 5 * time.Second
+	bo.RandomizationFactor = 0.2
+	bo.Multiplier = 2
+	bo.MaxElapsedTime = cloneRetryMaxElapsed
+	bo.Reset()
+
+	bctx := backoff.WithContext(bo, ctx)
+
+	return backoff.Retry(func() error {
+		err := op(ctx)
+		if err == nil {
+			return nil
+		}
+		// Don't burn cycles retrying broken config: auth failures and
+		// "repo not found" are operator errors, not transient ones.
+		// Wrap in backoff.Permanent so Retry surfaces them immediately.
+		if isPermanentGitError(err) {
+			return backoff.Permanent(err)
+		}
+		return err
+	}, bctx)
+}
+
+// tryCloneOrPull executes a single clone-or-pull attempt against the remote.
+// Returns nil on success or NoErrAlreadyUpToDate; any other error indicates
+// a failure the caller (cloneOrPull) may want to retry.
+func (g *GitSource) tryCloneOrPull(ctx context.Context) error {
 	auth := g.httpAuth()
 
 	// If the local dir already contains a repo, pull; otherwise clone.
@@ -168,6 +227,26 @@ func (g *GitSource) cloneOrPull(ctx context.Context) error {
 		return fmt.Errorf("clone: %w", err)
 	}
 	return nil
+}
+
+// isPermanentGitError reports whether err is a configuration-style failure
+// that retrying cannot fix. The poll loop will re-attempt on the next tick
+// regardless; classifying these as Permanent just avoids burning the
+// 30-second retry budget every poll interval.
+//
+// Conservatively scoped: only the unambiguous "your credentials/URL are
+// wrong" sentinels from go-git's transport layer. Everything else (network
+// timeout, 5xx, packfile decode error mid-clone, partial response, …) is
+// treated as transient.
+func isPermanentGitError(err error) bool {
+	switch {
+	case errors.Is(err, gogittransport.ErrAuthenticationRequired),
+		errors.Is(err, gogittransport.ErrAuthorizationFailed),
+		errors.Is(err, gogittransport.ErrInvalidAuthMethod),
+		errors.Is(err, gogittransport.ErrRepositoryNotFound):
+		return true
+	}
+	return false
 }
 
 // httpAuth returns HTTP basic-auth credentials if a token env var is set.
