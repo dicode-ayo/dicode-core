@@ -13,27 +13,35 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	relaypb "github.com/dicode/dicode/pkg/relay/pb"
 )
 
 // TestClient_RefusesConnection_WhenBrokerProtocolOld covers the daemon-side
-// half of the version gate from decision 3 in the #104 review: the client
-// reads the broker's `protocol` field in the welcome message and refuses the
-// connection outright when it is below 2. No silent fallback — the broker must
-// be upgraded to honour the split sign/decrypt key model.
+// half of the version gate: the client reads the broker's `protocol` field in
+// the welcome message and refuses the connection outright when it is below
+// BrokerProtocolMin. No silent fallback — the broker must be upgraded.
 //
-// Three welcome variants:
-//   - no protocol field at all (legacy pre-#104 broker) → connection refused
-//   - protocol: 1 (explicit pre-split)                  → connection refused
-//   - protocol: 2 (post-split)                          → connection accepted
+// Protocol 3 is the current floor (#195 protobuf-es migration). Earlier
+// values represent older brokers that produced a different on-wire shape.
 func TestClient_RefusesConnection_WhenBrokerProtocolOld(t *testing.T) {
+	helper := func(proto *int32) *relaypb.Welcome {
+		w := &relaypb.Welcome{Url: "https://x/u/x/hooks/"}
+		if proto != nil {
+			w.Protocol = proto
+		}
+		return w
+	}
+	two := int32(2)
+	three := int32(3)
+
 	cases := []struct {
 		name          string
-		welcome       welcomeMsg
+		welcome       *relaypb.Welcome
 		wantHandshake bool // true = runOnce should complete the handshake successfully
 	}{
-		{"no protocol field", welcomeMsg{Type: msgWelcome, URL: "https://x/u/x/hooks/"}, false},
-		{"protocol 1", welcomeMsg{Type: msgWelcome, URL: "https://x/u/x/hooks/", Protocol: 1}, false},
-		{"protocol 2", welcomeMsg{Type: msgWelcome, URL: "https://x/u/x/hooks/", Protocol: 2}, true},
+		{"no protocol field", helper(nil), false},
+		{"protocol 2", helper(&two), false},
+		{"protocol 3", helper(&three), true},
 	}
 
 	for _, tc := range cases {
@@ -53,12 +61,18 @@ func TestClient_RefusesConnection_WhenBrokerProtocolOld(t *testing.T) {
 
 				nonce := make([]byte, 32)
 				_, _ = rand.Read(nonce)
-				ch, _ := encodeMsg(challengeMsg{Type: msgChallenge, Nonce: hex.EncodeToString(nonce)})
+				ch, _ := encodeServerMessage(&relaypb.ServerMessage{
+					Kind: &relaypb.ServerMessage_Challenge{
+						Challenge: &relaypb.Challenge{Nonce: hex.EncodeToString(nonce)},
+					},
+				})
 				_ = conn.Write(ctx, websocket.MessageText, ch)
 
 				_, _, _ = conn.Read(ctx)
 
-				w2, _ := encodeMsg(welcome)
+				w2, _ := encodeServerMessage(&relaypb.ServerMessage{
+					Kind: &relaypb.ServerMessage_Welcome{Welcome: welcome},
+				})
 				_ = conn.Write(ctx, websocket.MessageText, w2)
 
 				time.Sleep(150 * time.Millisecond)
@@ -89,8 +103,9 @@ func TestClient_RefusesConnection_WhenBrokerProtocolOld(t *testing.T) {
 			}()
 
 			if tc.wantHandshake {
-				// protocol 2 — wait for the handshake to complete, confirmed by
-				// the hookBaseURL being set and SupportsOAuth flipping to true.
+				// Protocol >= BrokerProtocolMin — wait for the handshake to
+				// complete, confirmed by hookBaseURL being set and
+				// SupportsOAuth flipping to true.
 				deadline := time.After(2 * time.Second)
 				for {
 					select {
@@ -99,7 +114,7 @@ func TestClient_RefusesConnection_WhenBrokerProtocolOld(t *testing.T) {
 					case <-time.After(25 * time.Millisecond):
 						if client.HookBaseURL() != "" {
 							if !client.SupportsOAuth() {
-								t.Fatalf("protocol 2 broker: SupportsOAuth should be true after handshake")
+								t.Fatalf("protocol %d broker: SupportsOAuth should be true after handshake", welcome.GetProtocol())
 							}
 							cancel()
 							<-errCh
@@ -108,8 +123,9 @@ func TestClient_RefusesConnection_WhenBrokerProtocolOld(t *testing.T) {
 					}
 				}
 			} else {
-				// protocol < 2 — runOnce must return an error containing the
-				// "upgrade dicode-relay" hint; SupportsOAuth must stay false.
+				// Protocol < BrokerProtocolMin — runOnce must return an error
+				// containing the "upgrade dicode-relay" hint; SupportsOAuth
+				// must stay false.
 				select {
 				case err := <-errCh:
 					if err == nil {
@@ -122,7 +138,7 @@ func TestClient_RefusesConnection_WhenBrokerProtocolOld(t *testing.T) {
 					t.Fatal("runOnce did not return within 2s")
 				}
 				if client.SupportsOAuth() {
-					t.Fatalf("SupportsOAuth must remain false when broker protocol < 2")
+					t.Fatalf("SupportsOAuth must remain false when broker protocol < %d", BrokerProtocolMin)
 				}
 			}
 		})

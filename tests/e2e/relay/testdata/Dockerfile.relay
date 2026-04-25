@@ -4,5 +4,5 @@
 # here so the image is fully self-contained at start time (no post-start
 # file-copy race). Dependabot's docker ecosystem watches the FROM line
 # and opens weekly bump PRs.
-FROM dicodeayo/dicode-relay:0.1.2
+FROM dicodeayo/dicode-relay:0.1.3
 COPY relay.yaml /app/relay.yaml
