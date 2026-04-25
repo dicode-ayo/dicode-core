@@ -1,0 +1,33 @@
+apiVersion: dicode/v1
+kind: Task
+name: "MCP Server"
+description: >
+  Model Context Protocol (MCP) server, exposed as a dicode task. Implements
+  JSON-RPC 2.0 over HTTP POST: any MCP-capable agent (Claude Code, Claude
+  Desktop, Cursor, custom agents) can connect to /mcp (or /hooks/mcp) and
+  invoke dicode tools — list/get/run tasks, etc. Replaces the old pkg/mcp
+  Go server, which was a thin JSON-RPC dispatcher around the same
+  capabilities the dicode SDK and HTTP API already expose to tasks.
+runtime: deno
+trigger:
+  webhook: /hooks/mcp
+  # No auth: true — the wrapping /mcp URL in pkg/webui requires an API key
+  # before forwarding here. Direct /hooks/mcp posts (loopback only in
+  # practice, since the webhook router lives behind the same web port) are
+  # also acceptable: the surface is read-mostly and run_task is gated by
+  # permissions.dicode.tasks below.
+
+permissions:
+  env: []
+  net: []
+  fs: []
+  dicode:
+    list_tasks: true
+    tasks:
+      - "*"
+
+timeout: 60s
+
+notify:
+  on_success: false
+  on_failure: false

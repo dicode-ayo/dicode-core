@@ -29,9 +29,8 @@ Run a single test package: `go test ./pkg/registry/... -timeout 60s -run TestNam
 5. Create registry (`pkg/registry`) — in-memory task state + SQLite run log
 6. Init runtimes (`pkg/runtime/deno`, `pkg/runtime/python`, `pkg/runtime/docker`, `pkg/runtime/podman`)
 7. Start trigger engine (`pkg/trigger`) — cron, webhook, manual, daemon, chaining
-8. Start web UI + REST API (`pkg/webui`)
-9. Start MCP server (`pkg/mcp`) — AI agent integration
-10. Start reconciler loop (`pkg/registry/reconciler`) — syncs sources every 30s
+8. Start web UI + REST API (`pkg/webui`) — serves a `/mcp` URL that forwards to the buildin/mcp task
+9. Start reconciler loop (`pkg/registry/reconciler`) — syncs sources every 30s
 
 **Reconciler loop**: polls sources, computes per-task content hash, diffs against registry. New task → register. Removed → deregister. Changed hash → reload. No restart needed after git push.
 
@@ -48,8 +47,8 @@ Run a single test package: `go test ./pkg/registry/... -timeout 60s -run TestNam
 | `pkg/runtime/python` | Execute Python tasks via a `uv`-provisioned interpreter subprocess; SDK embedded from `pkg/runtime/python/sdk/dicode_sdk.py` |
 | `pkg/runtime/docker` | Pull image, run container, stream logs, clean up |
 | `pkg/runtime/podman` | Rootless container execution via podman CLI |
-| `pkg/webui` | chi router, HTMX templates, REST API, WebSocket log streaming |
-| `pkg/mcp` | MCP server exposing tools for AI agents to develop/test/deploy tasks |
+| `pkg/webui` | chi router, HTMX templates, REST API, WebSocket log streaming; `/mcp` forwards to the buildin/mcp dicode task |
+| `pkg/mcp/client` | Generic JSON-RPC 2.0 MCP client used by the dicode SDK's `mcp.list_tools` / `mcp.call` to reach external MCP servers |
 | `pkg/secrets` | AES-encrypted SQLite store + env var fallback |
 | `pkg/task` | Parse `task.yaml`, validate spec, compute content hash |
 | `pkg/notify` | Push notifications on failure (ntfy.sh) |
