@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/dicode/dicode/pkg/config"
@@ -14,6 +15,7 @@ import (
 	"github.com/dicode/dicode/pkg/registry"
 	"github.com/dicode/dicode/pkg/trigger"
 	"go.uber.org/zap"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // newAuthServerNoDB builds a server with auth enabled but no DB — simulates
@@ -59,20 +61,44 @@ func TestPassphraseStore_GetEmpty(t *testing.T) {
 	}
 }
 
-func TestPassphraseStore_SetAndGet(t *testing.T) {
+func TestPassphraseStore_SetAndGet_RawValue(t *testing.T) {
 	d, _ := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
 	defer d.Close()
 
 	ps := newPassphraseStore(d)
-	if err := ps.set(context.Background(), "my-secret-pass"); err != nil {
+	if err := ps.set(context.Background(), "raw-value"); err != nil {
 		t.Fatalf("set: %v", err)
 	}
 	val, err := ps.get(context.Background())
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if val != "my-secret-pass" {
-		t.Errorf("expected %q, got %q", "my-secret-pass", val)
+	if val != "raw-value" {
+		t.Errorf("expected %q, got %q", "raw-value", val)
+	}
+}
+
+func TestPassphraseStore_SetHashed_StoresBcryptHash(t *testing.T) {
+	d, _ := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	defer d.Close()
+
+	ps := newPassphraseStore(d)
+	if err := ps.setHashed(context.Background(), "my-secret-pass"); err != nil {
+		t.Fatalf("setHashed: %v", err)
+	}
+	val, err := ps.get(context.Background())
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if !looksLikeBcryptHash(val) {
+		t.Fatalf("stored value should be a bcrypt hash, got %q", val)
+	}
+	// Plaintext must not appear anywhere in the stored value.
+	if strings.Contains(val, "my-secret-pass") {
+		t.Errorf("plaintext leaked into stored value: %q", val)
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(val), []byte("my-secret-pass")); err != nil {
+		t.Errorf("bcrypt compare against stored hash failed: %v", err)
 	}
 }
 
@@ -81,36 +107,65 @@ func TestPassphraseStore_Overwrite(t *testing.T) {
 	defer d.Close()
 
 	ps := newPassphraseStore(d)
-	_ = ps.set(context.Background(), "first")
-	_ = ps.set(context.Background(), "second")
+	_ = ps.setHashed(context.Background(), "first-pass-1234")
+	_ = ps.setHashed(context.Background(), "second-pass-5678")
 
 	val, _ := ps.get(context.Background())
-	if val != "second" {
-		t.Errorf("expected %q after overwrite, got %q", "second", val)
+	if !looksLikeBcryptHash(val) {
+		t.Fatalf("expected bcrypt hash, got %q", val)
+	}
+	// Verify the *second* passphrase wins.
+	if err := bcrypt.CompareHashAndPassword([]byte(val), []byte("second-pass-5678")); err != nil {
+		t.Errorf("expected second hash to verify, got: %v", err)
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(val), []byte("first-pass-1234")); err == nil {
+		t.Error("first passphrase should not verify against the overwritten hash")
 	}
 }
 
-// ── resolvePassphrase priority ────────────────────────────────────────────────
+func TestLooksLikeBcryptHash(t *testing.T) {
+	cases := map[string]bool{
+		"$2a$12$abcdef":       true,
+		"$2b$10$abcdef":       true,
+		"$2y$12$abcdef":       true,
+		"":                    false,
+		"plaintext-pass":      false,
+		"$2x$12$weirdvariant": false,
+		"prefix$2a$12$x":      false,
+	}
+	for in, want := range cases {
+		if got := looksLikeBcryptHash(in); got != want {
+			t.Errorf("looksLikeBcryptHash(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
 
-func TestResolvePassphrase_YAMLOverrideTakesPrecedence(t *testing.T) {
+// ── verifyPassphrase / passphraseSource priority ─────────────────────────────
+
+func TestVerifyPassphrase_YAMLOverrideTakesPrecedence(t *testing.T) {
 	d, _ := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
 	defer d.Close()
-
-	ps := newPassphraseStore(d)
-	_ = ps.set(context.Background(), "db-passphrase")
 
 	reg := registry.New(d)
 	eng := trigger.New(reg, nil, zap.NewNop())
 	cfg := &config.Config{Server: config.ServerConfig{Auth: true, Secret: "yaml-passphrase"}}
 	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
 
-	got := srv.resolvePassphrase(context.Background())
-	if got != "yaml-passphrase" {
-		t.Errorf("YAML override should take precedence, got %q", got)
+	// Even if the DB has a (different) bcrypt hash, the YAML override wins.
+	_ = srv.passphraseStore.setHashed(context.Background(), "db-passphrase")
+
+	if !srv.verifyPassphrase(context.Background(), "yaml-passphrase") {
+		t.Error("YAML passphrase should verify when set in config.Server.Secret")
+	}
+	if srv.verifyPassphrase(context.Background(), "db-passphrase") {
+		t.Error("DB passphrase should not verify while YAML override is active")
+	}
+	if got := srv.passphraseSource(context.Background()); got != passphraseSourceYAML {
+		t.Errorf("source = %q, want %q", got, passphraseSourceYAML)
 	}
 }
 
-func TestResolvePassphrase_DBUsedWhenNoYAML(t *testing.T) {
+func TestVerifyPassphrase_DBHashUsedWhenNoYAML(t *testing.T) {
 	d, _ := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
 	defer d.Close()
 
@@ -119,15 +174,20 @@ func TestResolvePassphrase_DBUsedWhenNoYAML(t *testing.T) {
 	cfg := &config.Config{Server: config.ServerConfig{Auth: true, Secret: ""}}
 	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
 
-	_ = srv.passphraseStore.set(context.Background(), "stored-pass")
+	_ = srv.passphraseStore.setHashed(context.Background(), "stored-pass")
 
-	got := srv.resolvePassphrase(context.Background())
-	if got != "stored-pass" {
-		t.Errorf("expected DB passphrase, got %q", got)
+	if !srv.verifyPassphrase(context.Background(), "stored-pass") {
+		t.Error("verifyPassphrase should accept the correct DB-hashed passphrase")
+	}
+	if srv.verifyPassphrase(context.Background(), "wrong-pass") {
+		t.Error("verifyPassphrase should reject a wrong passphrase")
+	}
+	if got := srv.passphraseSource(context.Background()); got != passphraseSourceDB {
+		t.Errorf("source = %q, want %q", got, passphraseSourceDB)
 	}
 }
 
-func TestResolvePassphrase_EmptyWhenNeitherSet(t *testing.T) {
+func TestVerifyPassphrase_EmptyWhenNeitherSet(t *testing.T) {
 	d, _ := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
 	defer d.Close()
 
@@ -136,15 +196,95 @@ func TestResolvePassphrase_EmptyWhenNeitherSet(t *testing.T) {
 	cfg := &config.Config{Server: config.ServerConfig{Auth: true}}
 	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
 
-	got := srv.resolvePassphrase(context.Background())
-	if got != "" {
-		t.Errorf("expected empty passphrase, got %q", got)
+	if srv.verifyPassphrase(context.Background(), "anything") {
+		t.Error("verifyPassphrase should reject any candidate when nothing is configured")
+	}
+	if got := srv.passphraseSource(context.Background()); got != passphraseSourceNone {
+		t.Errorf("source = %q, want %q", got, passphraseSourceNone)
+	}
+}
+
+func TestVerifyPassphrase_RejectsEmptyCandidate(t *testing.T) {
+	d, _ := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	defer d.Close()
+
+	reg := registry.New(d)
+	eng := trigger.New(reg, nil, zap.NewNop())
+	cfg := &config.Config{Server: config.ServerConfig{Auth: true, Secret: "yaml"}}
+	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
+
+	if srv.verifyPassphrase(context.Background(), "") {
+		t.Error("empty candidate must never verify")
+	}
+}
+
+// ── lazy migration: legacy plaintext → bcrypt on next successful login ───────
+
+func TestVerifyPassphrase_LazyMigrationFromLegacyPlaintext(t *testing.T) {
+	d, _ := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	defer d.Close()
+
+	reg := registry.New(d)
+	eng := trigger.New(reg, nil, zap.NewNop())
+	cfg := &config.Config{Server: config.ServerConfig{Auth: true}}
+	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
+
+	// Simulate an existing pre-bcrypt deployment: plaintext value in DB.
+	if err := srv.passphraseStore.set(context.Background(), "legacy-plaintext-pass"); err != nil {
+		t.Fatalf("set legacy: %v", err)
+	}
+
+	// First successful login: must verify AND rehash.
+	if !srv.verifyPassphrase(context.Background(), "legacy-plaintext-pass") {
+		t.Fatal("legacy plaintext passphrase should verify")
+	}
+
+	// DB now contains a bcrypt hash, not plaintext.
+	stored, err := srv.passphraseStore.get(context.Background())
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if !looksLikeBcryptHash(stored) {
+		t.Fatalf("expected DB to be rehashed to bcrypt, still got %q", stored)
+	}
+	if strings.Contains(stored, "legacy-plaintext-pass") {
+		t.Errorf("plaintext leaked into rehashed value: %q", stored)
+	}
+
+	// Subsequent verification must keep working against the new hash.
+	if !srv.verifyPassphrase(context.Background(), "legacy-plaintext-pass") {
+		t.Error("post-migration verify should still accept the same plaintext")
+	}
+	if srv.verifyPassphrase(context.Background(), "wrong") {
+		t.Error("post-migration verify should reject wrong passphrase")
+	}
+}
+
+func TestVerifyPassphrase_LegacyMismatchDoesNotMigrate(t *testing.T) {
+	d, _ := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	defer d.Close()
+
+	reg := registry.New(d)
+	eng := trigger.New(reg, nil, zap.NewNop())
+	cfg := &config.Config{Server: config.ServerConfig{Auth: true}}
+	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
+
+	_ = srv.passphraseStore.set(context.Background(), "legacy-plaintext-pass")
+
+	if srv.verifyPassphrase(context.Background(), "wrong-attempt") {
+		t.Fatal("wrong passphrase should not verify against legacy plaintext")
+	}
+
+	// DB must still be the plaintext — no rehash on a failed attempt.
+	stored, _ := srv.passphraseStore.get(context.Background())
+	if stored != "legacy-plaintext-pass" {
+		t.Errorf("legacy plaintext should be untouched on failed attempt, got %q", stored)
 	}
 }
 
 // ── ensurePassphrase auto-generation ─────────────────────────────────────────
 
-func TestEnsurePassphrase_GeneratesWhenMissing(t *testing.T) {
+func TestEnsurePassphrase_GeneratesAndStoresHash(t *testing.T) {
 	d, _ := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
 	defer d.Close()
 
@@ -159,10 +299,11 @@ func TestEnsurePassphrase_GeneratesWhenMissing(t *testing.T) {
 
 	stored, _ := srv.passphraseStore.get(context.Background())
 	if stored == "" {
-		t.Error("expected passphrase to be auto-generated and stored")
+		t.Fatal("expected passphrase to be auto-generated and stored")
 	}
-	if len(stored) < 20 {
-		t.Errorf("auto-generated passphrase too short: %q", stored)
+	// Must be a bcrypt hash, not raw base64 plaintext.
+	if !looksLikeBcryptHash(stored) {
+		t.Errorf("auto-generated passphrase must be stored as bcrypt hash, got %q", stored)
 	}
 }
 
@@ -175,14 +316,38 @@ func TestEnsurePassphrase_DoesNotOverwriteExisting(t *testing.T) {
 	cfg := &config.Config{Server: config.ServerConfig{Auth: true}}
 	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
 
-	_ = srv.passphraseStore.set(context.Background(), "already-set")
+	_ = srv.passphraseStore.setHashed(context.Background(), "already-set-1234")
+	before, _ := srv.passphraseStore.get(context.Background())
+
 	if err := srv.ensurePassphrase(context.Background()); err != nil {
 		t.Fatalf("ensurePassphrase: %v", err)
 	}
 
-	stored, _ := srv.passphraseStore.get(context.Background())
-	if stored != "already-set" {
-		t.Errorf("existing passphrase should not be overwritten, got %q", stored)
+	after, _ := srv.passphraseStore.get(context.Background())
+	if after != before {
+		t.Errorf("existing passphrase hash should not be overwritten\n before: %q\n after:  %q", before, after)
+	}
+}
+
+func TestEnsurePassphrase_DoesNotOverwriteLegacyPlaintext(t *testing.T) {
+	// If the DB already holds a legacy plaintext value, ensurePassphrase
+	// must leave it alone — the migration happens lazily on the next login.
+	d, _ := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	defer d.Close()
+
+	reg := registry.New(d)
+	eng := trigger.New(reg, nil, zap.NewNop())
+	cfg := &config.Config{Server: config.ServerConfig{Auth: true}}
+	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
+
+	_ = srv.passphraseStore.set(context.Background(), "legacy-plaintext-pass")
+
+	if err := srv.ensurePassphrase(context.Background()); err != nil {
+		t.Fatalf("ensurePassphrase: %v", err)
+	}
+	after, _ := srv.passphraseStore.get(context.Background())
+	if after != "legacy-plaintext-pass" {
+		t.Errorf("legacy plaintext should be left intact for lazy migration, got %q", after)
 	}
 }
 
@@ -228,11 +393,11 @@ func TestEnsurePassphrase_NoopWhenYAMLOverridePresent(t *testing.T) {
 
 func TestPassphraseAPI_StatusEndpoint(t *testing.T) {
 	srv := newAuthServer(t, "") // auth enabled, no YAML secret
-	// Manually set a DB passphrase
-	_ = srv.passphraseStore.set(context.Background(), "test-pass")
+	// Manually set a DB passphrase via the hashed path.
+	_ = srv.passphraseStore.setHashed(context.Background(), "test-pass-1234")
 
 	h := srv.Handler()
-	cookie := login(t, h, "test-pass", false)
+	cookie := login(t, h, "test-pass-1234", false)
 	if cookie == nil {
 		t.Fatal("login failed")
 	}
@@ -254,7 +419,7 @@ func TestPassphraseAPI_StatusEndpoint(t *testing.T) {
 
 func TestPassphraseAPI_ChangePassphrase(t *testing.T) {
 	srv := newAuthServer(t, "")
-	_ = srv.passphraseStore.set(context.Background(), "old-passphrase-here")
+	_ = srv.passphraseStore.setHashed(context.Background(), "old-passphrase-here")
 
 	h := srv.Handler()
 	cookie := login(t, h, "old-passphrase-here", false)
@@ -274,6 +439,12 @@ func TestPassphraseAPI_ChangePassphrase(t *testing.T) {
 		t.Fatalf("expected 200 on passphrase change, got %d: %s", w.Code, w.Body)
 	}
 
+	// New value must be stored as a bcrypt hash, not plaintext.
+	stored, _ := srv.passphraseStore.get(context.Background())
+	if !looksLikeBcryptHash(stored) {
+		t.Errorf("expected new passphrase to be stored as bcrypt hash, got %q", stored)
+	}
+
 	// Old passphrase must be rejected.
 	oldCookie := login(t, h, "old-passphrase-here", false)
 	if oldCookie != nil {
@@ -287,9 +458,41 @@ func TestPassphraseAPI_ChangePassphrase(t *testing.T) {
 	}
 }
 
+func TestPassphraseAPI_ChangeFromLegacyPlaintext(t *testing.T) {
+	// An operator on a pre-bcrypt deployment can rotate via the API; the
+	// "current" they supply is plaintext, which must verify against the
+	// legacy plaintext DB value, and the new value must land as a bcrypt hash.
+	srv := newAuthServer(t, "")
+	_ = srv.passphraseStore.set(context.Background(), "legacy-plain-1234")
+
+	h := srv.Handler()
+	cookie := login(t, h, "legacy-plain-1234", false)
+	if cookie == nil {
+		t.Fatal("legacy login should still work pre-rotation")
+	}
+
+	body, _ := json.Marshal(map[string]string{"current": "legacy-plain-1234", "passphrase": "rotated-passphrase-99"})
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/passphrase", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 on rotation from legacy plaintext, got %d: %s", w.Code, w.Body)
+	}
+
+	stored, _ := srv.passphraseStore.get(context.Background())
+	if !looksLikeBcryptHash(stored) {
+		t.Errorf("rotated value should be a bcrypt hash, got %q", stored)
+	}
+	if login(t, h, "rotated-passphrase-99", false) == nil {
+		t.Error("rotated passphrase should authenticate")
+	}
+}
+
 func TestPassphraseAPI_ChangeRequiresSession(t *testing.T) {
 	srv := newAuthServer(t, "")
-	_ = srv.passphraseStore.set(context.Background(), "existing-pass-1234")
+	_ = srv.passphraseStore.setHashed(context.Background(), "existing-pass-1234")
 	h := srv.Handler()
 
 	body, _ := json.Marshal(map[string]string{"current": "existing-pass-1234", "passphrase": "new-pass-should-fail"})
@@ -306,7 +509,7 @@ func TestPassphraseAPI_ChangeRequiresSession(t *testing.T) {
 
 func TestPassphraseAPI_ChangeTooShortRejected(t *testing.T) {
 	srv := newAuthServer(t, "")
-	_ = srv.passphraseStore.set(context.Background(), "existing-long-pass-1234")
+	_ = srv.passphraseStore.setHashed(context.Background(), "existing-long-pass-1234")
 	h := srv.Handler()
 
 	cookie := login(t, h, "existing-long-pass-1234", false)
@@ -328,7 +531,7 @@ func TestPassphraseAPI_ChangeTooShortRejected(t *testing.T) {
 
 func TestPassphraseAPI_WrongCurrentRejected(t *testing.T) {
 	srv := newAuthServer(t, "")
-	_ = srv.passphraseStore.set(context.Background(), "correct-current-pass-123")
+	_ = srv.passphraseStore.setHashed(context.Background(), "correct-current-pass-123")
 	h := srv.Handler()
 
 	cookie := login(t, h, "correct-current-pass-123", false)
