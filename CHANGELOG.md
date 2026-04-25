@@ -1,5 +1,55 @@
 # Changelog
 
+## [0.1.0](https://github.com/dicode-ayo/dicode-core/compare/v0.0.4...v0.1.0) (2026-04-25)
+
+
+### ⚠ BREAKING CHANGES
+
+* remove direct-AI Go code, port dev skill to task-based skills ([#134](https://github.com/dicode-ayo/dicode-core/issues/134))
+
+### Features
+
+* **config,runtime:** add RelayConfig.BrokerURL + inject DICODE_BROKER_URL ([#84](https://github.com/dicode-ayo/dicode-core/issues/84)) ([#149](https://github.com/dicode-ayo/dicode-core/issues/149)) ([0b83b27](https://github.com/dicode-ayo/dicode-core/commit/0b83b27278cea36edbd5cfeb654ad371804ca5ff))
+* **config,webui,cli:** add ai.task pointer, /api/ai/chat, and dicode ai CLI ([#140](https://github.com/dicode-ayo/dicode-core/issues/140)) ([41fe089](https://github.com/dicode-ayo/dicode-core/commit/41fe089d3f9bc593fe33b7677f0f4b7ae7c8647b))
+* **e2e:** revive Playwright stack — replaces [#18](https://github.com/dicode-ayo/dicode-core/issues/18)/[#19](https://github.com/dicode-ayo/dicode-core/issues/19)/[#20](https://github.com/dicode-ayo/dicode-core/issues/20) ([#150](https://github.com/dicode-ayo/dicode-core/issues/150)) ([92a53fd](https://github.com/dicode-ayo/dicode-core/commit/92a53fddaeb81d3c20581f966f3dbcc6a3172c19))
+* **onboarding:** first-run wizard — CLI + browser, curated tasksets (closes [#85](https://github.com/dicode-ayo/dicode-core/issues/85)) ([#170](https://github.com/dicode-ayo/dicode-core/issues/170)) ([2b58c79](https://github.com/dicode-ayo/dicode-core/commit/2b58c792a383bb2e13ebd027d590c35738f6b1a4))
+* **relay:** rotate-identity CLI — split-key aware (replaces [#101](https://github.com/dicode-ayo/dicode-core/issues/101)) ([#141](https://github.com/dicode-ayo/dicode-core/issues/141)) ([e156f45](https://github.com/dicode-ayo/dicode-core/commit/e156f45c0001853cdf63bba5b3286edd50ad39d6))
+* **tasktest:** CLI + IPC + MCP surface for running task tests (Phase 1, Deno) ([#160](https://github.com/dicode-ayo/dicode-core/issues/160)) ([919998e](https://github.com/dicode-ayo/dicode-core/commit/919998e0f67ff5eba47dea8fc2a2e38cdbe9fbc2))
+* **webui,relay,taskset:** relay + per-source status in task list (closes [#87](https://github.com/dicode-ayo/dicode-core/issues/87)) ([#181](https://github.com/dicode-ayo/dicode-core/issues/181)) ([f58e72d](https://github.com/dicode-ayo/dicode-core/commit/f58e72dfb90c3afdbc42592b6afa678e8f57bbe0))
+* **webui:** zap-based HTTP request logger (closes [#23](https://github.com/dicode-ayo/dicode-core/issues/23)) ([#167](https://github.com/dicode-ayo/dicode-core/issues/167)) ([2e28c39](https://github.com/dicode-ayo/dicode-core/commit/2e28c39c7d6333f344c396f71a5afad235c706e5))
+* zero-paste OAuth onboarding via env.if_missing + OpenRouter provider ([#117](https://github.com/dicode-ayo/dicode-core/issues/117)) ([6db1b30](https://github.com/dicode-ayo/dicode-core/commit/6db1b303b8b6f1ea7acabf12ed3938e22bacee65))
+
+
+### Bug Fixes
+
+* **buildin:** restore auth-start + auth-relay to working order ([#147](https://github.com/dicode-ayo/dicode-core/issues/147)) ([#148](https://github.com/dicode-ayo/dicode-core/issues/148)) ([0fc087f](https://github.com/dicode-ayo/dicode-core/commit/0fc087f90d42d47913e47a8a41fcbc532078c962))
+* **config:** honor watch:false and mcp:false in YAML ([#182](https://github.com/dicode-ayo/dicode-core/issues/182)) ([09cf2d7](https://github.com/dicode-ayo/dicode-core/commit/09cf2d7098709c03063641e1ded07491b0c17b40))
+* **relay:** refuse OAuth IPC during rotation + doc cleanup ([#144](https://github.com/dicode-ayo/dicode-core/issues/144) + [#143](https://github.com/dicode-ayo/dicode-core/issues/143) + [#145](https://github.com/dicode-ayo/dicode-core/issues/145)) ([#146](https://github.com/dicode-ayo/dicode-core/issues/146)) ([0c2bd65](https://github.com/dicode-ayo/dicode-core/commit/0c2bd654a37d276510d883a00c9c0a8adf49b832))
+* **relay:** split Identity into SignKey + DecryptKey + require broker protocol 2 ([#104](https://github.com/dicode-ayo/dicode-core/issues/104)) ([#135](https://github.com/dicode-ayo/dicode-core/issues/135)) ([d801230](https://github.com/dicode-ayo/dicode-core/commit/d80123049e47fdeef400331829066e110b73dd27))
+* **relay:** VerifyBrokerSig — match Node's double-hash signing shape ([#151](https://github.com/dicode-ayo/dicode-core/issues/151)) ([#152](https://github.com/dicode-ayo/dicode-core/issues/152)) ([fb6f713](https://github.com/dicode-ayo/dicode-core/commit/fb6f7137e3214726f286a87e8c585fc655347b9a))
+* **source:** block-with-ctx instead of dropping events on full channel ([#183](https://github.com/dicode-ayo/dicode-core/issues/183)) ([237a7b3](https://github.com/dicode-ayo/dicode-core/commit/237a7b325d9221aa8b2ea3a37282078b02220536))
+* **taskset:** full clone instead of shallow (closes [#175](https://github.com/dicode-ayo/dicode-core/issues/175)) ([#176](https://github.com/dicode-ayo/dicode-core/issues/176)) ([3c392b0](https://github.com/dicode-ayo/dicode-core/commit/3c392b02fc16265916a334bd45ad65349e4e3f55))
+* **webui:** redirect unauth webhook access to /login with return-to-origin ([#96](https://github.com/dicode-ayo/dicode-core/issues/96)) ([#131](https://github.com/dicode-ayo/dicode-core/issues/131)) ([fae727a](https://github.com/dicode-ayo/dicode-core/commit/fae727abf474d4254f03cd712236d0ac73a9d2b8))
+
+
+### Performance Improvements
+
+* batch log writes to SQLite instead of per-line inserts ([#76](https://github.com/dicode-ayo/dicode-core/issues/76)) ([2c81e21](https://github.com/dicode-ayo/dicode-core/commit/2c81e216bead26d3024651c2aaa13ff3d6bdbbb0))
+
+
+### Documentation
+
+* **claude:** correct runtime architecture description ([#185](https://github.com/dicode-ayo/dicode-core/issues/185)) ([9aa4fd8](https://github.com/dicode-ayo/dicode-core/commit/9aa4fd87dc46d4f49a49e18aec6d7a1539fae449))
+* **proto:** add proto/README explaining the dual-side regen workflow ([#205](https://github.com/dicode-ayo/dicode-core/issues/205)) ([da4ce5a](https://github.com/dicode-ayo/dicode-core/commit/da4ce5a01c426903621a729e2bd75a977e2f8757))
+* **relay:** point self-host sections at dicode-relay repo ([#184](https://github.com/dicode-ayo/dicode-core/issues/184)) ([e4755be](https://github.com/dicode-ayo/dicode-core/commit/e4755be5f30c22fecdd3ddd654d5202592a5334f))
+* **testing/e2e:** [#137](https://github.com/dicode-ayo/dicode-core/issues/137) Phase B coverage audit — close out all 7 scenarios ([#173](https://github.com/dicode-ayo/dicode-core/issues/173)) ([46b56aa](https://github.com/dicode-ayo/dicode-core/commit/46b56aab21c5f649b52b03a72917ccf2bba5d30f))
+* update readme ([db53ab7](https://github.com/dicode-ayo/dicode-core/commit/db53ab7a808ebc23e067c77a4487ee302d713f55))
+
+
+### Miscellaneous
+
+* remove direct-AI Go code, port dev skill to task-based skills ([#134](https://github.com/dicode-ayo/dicode-core/issues/134)) ([32dd0e6](https://github.com/dicode-ayo/dicode-core/commit/32dd0e65393a1a8f2dd2c34276f932d1b116d2a8))
+
 ## [0.0.4](https://github.com/dicode-ayo/dicode-core/compare/v0.0.3...v0.0.4) (2026-04-17)
 
 
