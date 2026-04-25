@@ -29,7 +29,7 @@ Run a single test package: `go test ./pkg/registry/... -timeout 60s -run TestNam
 5. Create registry (`pkg/registry`) — in-memory task state + SQLite run log
 6. Init runtimes (`pkg/runtime/deno`, `pkg/runtime/python`, `pkg/runtime/docker`, `pkg/runtime/podman`)
 7. Start trigger engine (`pkg/trigger`) — cron, webhook, manual, daemon, chaining
-8. Start web UI + REST API (`pkg/webui`) — serves a `/mcp` URL that forwards to the buildin/mcp task
+8. Start web UI + REST API (`pkg/webui`) — serves an API-key-gated `/mcp` URL that forwards to the buildin/mcp task. The buildin task uses `trigger.auth: true` so direct `/hooks/mcp` posts require a session — only the forwarder (which bypasses `webhookAuthGuard`) lets API-key callers through.
 9. Start reconciler loop (`pkg/registry/reconciler`) — syncs sources every 30s
 
 **Reconciler loop**: polls sources, computes per-task content hash, diffs against registry. New task → register. Removed → deregister. Changed hash → reload. No restart needed after git push.

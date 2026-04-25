@@ -192,3 +192,20 @@ test.describe('MCP — JSON-RPC dispatch', () => {
     expect(body.id).toBeNull();
   });
 });
+
+test.describe('MCP — auth model', () => {
+  // Regression: previously POST /hooks/mcp was reachable without any auth,
+  // bypassing the API-key gate on /mcp on the same port. Setting auth: true
+  // on the buildin task closes the bypass — the /mcp forwarder calls the
+  // gateway directly and is unaffected.
+  test('direct POST /hooks/mcp is rejected (no session)', async ({ request }) => {
+    // Strip the seeded session cookie so this call is genuinely
+    // unauthenticated. The unauthenticated project loads a session via
+    // storageState by default to satisfy /hooks/webui (auth: true).
+    const res = await request.post('/hooks/mcp', {
+      headers: { 'Content-Type': 'application/json', Cookie: '' },
+      data: { jsonrpc: '2.0', id: 1, method: 'initialize' },
+    });
+    expect(res.status()).toBe(401);
+  });
+});

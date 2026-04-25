@@ -11,11 +11,13 @@ description: >
 runtime: deno
 trigger:
   webhook: /hooks/mcp
-  # No auth: true — the wrapping /mcp URL in pkg/webui requires an API key
-  # before forwarding here. Direct /hooks/mcp posts (loopback only in
-  # practice, since the webhook router lives behind the same web port) are
-  # also acceptable: the surface is read-mostly and run_task is gated by
-  # permissions.dicode.tasks below.
+  # auth: true closes the bypass where a remote caller could skip the
+  # /mcp API-key gate by posting straight to /hooks/mcp on the same web
+  # port. The /mcp URL forwarder in pkg/webui calls the gateway directly
+  # (not through webhookAuthGuard), so MCP clients posting to /mcp with a
+  # Bearer API key are unaffected — only direct /hooks/mcp posts now
+  # require a dicode session, which MCP clients don't have.
+  auth: true
 
 permissions:
   env: []
