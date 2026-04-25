@@ -920,7 +920,17 @@ func (s *Server) apiSecretsUnlock(w http.ResponseWriter, r *http.Request) {
 	// Auth is enabled but no passphrase has been configured yet (bootstrap
 	// state) — accept any password, mirroring the previous behaviour. The
 	// /security UI will force one to be set as soon as the operator logs in.
-	if s.passphraseSource(r.Context()) != passphraseSourceNone {
+	//
+	// passphraseSourceUnknown means the DB read failed; we deliberately do
+	// NOT treat that as bootstrap (which would accept any password). Reject
+	// the login with 503 so the operator can investigate the outage rather
+	// than silently letting anyone in.
+	src := s.passphraseSource(r.Context())
+	if src == passphraseSourceUnknown {
+		s.loginError(w, r, "service temporarily unavailable", http.StatusServiceUnavailable, safeNext)
+		return
+	}
+	if src != passphraseSourceNone {
 		if !s.verifyPassphrase(r.Context(), password) {
 			s.loginError(w, r, "incorrect password", http.StatusUnauthorized, safeNext)
 			return
