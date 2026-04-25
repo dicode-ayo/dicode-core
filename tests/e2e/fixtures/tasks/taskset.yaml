@@ -19,3 +19,6 @@ spec:
     webui:
       ref:
         path: BUILDIN_WEBUI_TASK_YAML
+    mcp:
+      ref:
+        path: BUILDIN_MCP_TASK_YAML

@@ -53,6 +53,7 @@ export default defineConfig({
         '**/webhooks-secure.spec.ts',
         '**/cron.spec.ts',
         '**/config.spec.ts',
+        '**/mcp.spec.ts',
       ],
       use: {
         ...devices['Desktop Chrome'],

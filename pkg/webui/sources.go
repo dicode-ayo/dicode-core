@@ -8,21 +8,36 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/dicode/dicode/pkg/config"
-	"github.com/dicode/dicode/pkg/mcp"
 	gitSource "github.com/dicode/dicode/pkg/source/git"
 	"github.com/dicode/dicode/pkg/taskset"
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
 )
 
-// SourceInfo is the JSON representation of a source for the API.
-// It is an alias of mcp.SourceEntry so SourceManager directly satisfies mcp.SourceLister.
-type SourceInfo = mcp.SourceEntry
+// SourceInfo is the JSON representation of a source for the API and for the
+// MCP task that consumes /api/sources. LastPullAt is a pointer because
+// `time.Time` + `omitempty` does NOT omit the zero value — it serializes as
+// "0001-01-01T00:00:00Z", which is truthy in JS and causes the frontend to
+// render a spurious status dot for every local / never-pulled source.
+type SourceInfo struct {
+	Name    string `json:"name"`
+	Type    string `json:"type"`
+	URL     string `json:"url,omitempty"`
+	Path    string `json:"path,omitempty"`
+	Branch  string `json:"branch,omitempty"`
+	DevMode bool   `json:"dev_mode"`
+	DevPath string `json:"dev_path,omitempty"`
+
+	LastPullAt    *time.Time `json:"last_pull_at,omitempty"`
+	LastPullOK    bool       `json:"last_pull_ok,omitempty"`
+	LastPullError string     `json:"last_pull_error,omitempty"`
+}
 
 // SourceManager tracks taskset sources by name and provides dev mode control.
-// It is the single point of truth for source state visible to the REST API and MCP.
+// It is the single point of truth for source state visible to the REST API.
 type SourceManager struct {
 	mu       sync.RWMutex
 	cfg      *config.Config
@@ -53,15 +68,14 @@ func (m *SourceManager) Register(name string, src *taskset.Source) {
 }
 
 // List returns info for all configured sources including their live dev mode state.
-// Satisfies mcp.SourceLister.
-func (m *SourceManager) List() []mcp.SourceEntry {
+func (m *SourceManager) List() []SourceInfo {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	out := make([]mcp.SourceEntry, 0, len(m.cfg.Sources))
+	out := make([]SourceInfo, 0, len(m.cfg.Sources))
 	for _, sc := range m.cfg.Sources {
 		name := sourceName(sc)
-		info := mcp.SourceEntry{
+		info := SourceInfo{
 			Name:   name,
 			URL:    sc.URL,
 			Path:   sc.Path,

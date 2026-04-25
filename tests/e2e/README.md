@@ -1,8 +1,8 @@
 # e2e tests
 
 Playwright suite covering the REST API, webhook triggers, cron, file-change
-reconciliation, the SPA at `/hooks/webui`, and the auth flow. 60 tests,
-~3.5 min end-to-end.
+reconciliation, the SPA at `/hooks/webui`, the auth flow, and the MCP
+JSON-RPC surface. 70 tests, ~3.5 min end-to-end.
 
 ## One-time setup
 
@@ -110,7 +110,7 @@ The authenticated project is a separate server start, hence a separate
 
 ## Test inventory
 
-60 tests total: 33 in `unauthenticated` + 14 in `webui` + 13 in `authenticated`.
+70 tests total: 43 in `unauthenticated` + 14 in `webui` + 13 in `authenticated`.
 
 ### [webhooks.spec.ts](webhooks.spec.ts) — Open Webhook (8 tests)
 
@@ -167,6 +167,24 @@ changes up via fsnotify.
 | 2 | editing task.yaml (description) is reflected in API response | `/api/tasks/{id}.description` updates within 20 s. |
 | 3 | UI reflects file changes after reconciler picks them up | `dc-task-detail` still resolves after a task script rewrite. |
 | 4 | file edit is idempotent — restoring original brings task back | Undoing the edit restores the original description. |
+
+### [mcp.spec.ts](mcp.spec.ts) — MCP JSON-RPC surface (10 tests)
+
+Covers the buildin/mcp dicode task served at `/mcp` (via the API-key-gated
+forwarder in pkg/webui that re-dispatches to `/hooks/mcp`).
+
+| # | Test | Verifies |
+|---|---|---|
+| 1 | GET /mcp returns server-info JSON | Legacy probe compat with the old pkg/mcp Go server. |
+| 2 | initialize returns capabilities + protocolVersion | MCP `initialize` round-trip with `2024-11-05`. |
+| 3 | tools/list returns the six expected tool definitions | Surface parity with the old Go server. |
+| 4 | tools/call list_tasks returns dicode task list | The buildin task list is reachable through the SDK. |
+| 5 | tools/call get_task returns the spec for a known task | Single-task lookup via `dicode.list_tasks` + filter. |
+| 6 | tools/call get_task with unknown id returns -32603 | Errors are returned in JSON-RPC envelopes, not HTTP errors. |
+| 7 | tools/call list_sources returns a hint | Tools without SDK access surface a /api/sources hint. |
+| 8 | unknown method returns -32601 | Method-not-found path. |
+| 9 | tools/call with unknown tool name returns -32603 | Tool-not-found path. |
+| 10 | empty body returns parse error -32700 with id:null | Parse-error response shape per JSON-RPC 2.0. |
 
 ### [config.spec.ts](config.spec.ts) — Config API + UI (9 tests)
 

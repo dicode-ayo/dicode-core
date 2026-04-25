@@ -22,7 +22,6 @@ import (
 	"github.com/dicode/dicode/pkg/config"
 	"github.com/dicode/dicode/pkg/db"
 	"github.com/dicode/dicode/pkg/ipc"
-	"github.com/dicode/dicode/pkg/mcp"
 	"github.com/dicode/dicode/pkg/registry"
 	"github.com/dicode/dicode/pkg/relay"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
@@ -31,6 +30,7 @@ import (
 	gitSource "github.com/dicode/dicode/pkg/source/git"
 	"github.com/dicode/dicode/pkg/source/local"
 	"github.com/dicode/dicode/pkg/task"
+	"github.com/dicode/dicode/pkg/tasktest"
 	"github.com/dicode/dicode/pkg/trigger"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -451,6 +451,7 @@ func (s *Server) Handler() http.Handler {
 			r.Get("/tasks", s.apiListTasks)
 			r.Get("/tasks/{id}", s.apiGetTask)
 			r.Post("/tasks/{id}/run", s.apiRunTask)
+			r.Post("/tasks/{id}/test", s.apiTestTask)
 			r.Get("/tasks/{id}/runs", s.apiListRuns)
 			r.Get("/tasks/{id}/files/{filename}", s.apiGetFile)
 			r.Post("/tasks/{id}/files/{filename}", s.apiSaveFile)
@@ -504,12 +505,15 @@ func (s *Server) Handler() http.Handler {
 			r.Delete("/runtimes/{name}", s.apiRemoveRuntime)
 		})
 
-		// MCP endpoint — requires API key when auth is enabled.
-		// MCP is a *bool pointer; nil means "unset" (treated as default enabled
-		// when cfg is present — applyDefaults fills this in).
+		// MCP endpoint — API-key gated; the actual JSON-RPC dispatch lives in
+		// the buildin/mcp dicode task (tasks/buildin/mcp/task.ts). This URL
+		// stays mounted for backwards compatibility with existing MCP client
+		// configurations: GET returns a small server-info doc; POST forwards
+		// the request body to /hooks/mcp through the trigger engine's
+		// webhook handler. MCP is a *bool pointer; nil = default enabled
+		// once applyDefaults has filled it in.
 		if s.cfg == nil || s.cfg.Server.MCP == nil || *s.cfg.Server.MCP {
-			mcpSrv := mcp.New(s.registry, s.sourceMgr)
-			r.With(s.requireAPIKey).Mount("/mcp", mcpSrv.Handler())
+			r.With(s.requireAPIKey).HandleFunc("/mcp", s.handleMCP)
 		}
 
 		// Redirect root and unmatched GET routes to the webui webhook task.
@@ -1272,6 +1276,63 @@ func (s *Server) apiRunTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOK(w, map[string]string{"runId": runID})
+}
+
+// apiTestTask runs a task's sibling test file via tasktest.Run and returns the
+// structured result. Mirrors the cli.task.test IPC handler in pkg/ipc/control.go
+// so the buildin MCP task (and any other HTTP caller) can drive task tests
+// without going through the CLI control socket. Phase 1 supports the Deno
+// runtime only; other runtimes return a clear error in the result body.
+func (s *Server) apiTestTask(w http.ResponseWriter, r *http.Request) {
+	id := taskIDParam(r)
+	spec, ok := s.registry.Get(id)
+	if !ok {
+		jsonErr(w, fmt.Sprintf("task %q not found", id), http.StatusNotFound)
+		return
+	}
+	res, runErr := tasktest.Run(r.Context(), spec)
+	body := map[string]any{
+		"taskID":     res.TaskID,
+		"runtime":    res.Runtime,
+		"testFile":   res.TestFile,
+		"passed":     res.Passed,
+		"failed":     res.Failed,
+		"skipped":    res.Skipped,
+		"durationMs": res.Duration.Milliseconds(),
+		"exitCode":   res.ExitCode,
+		"output":     res.Output,
+	}
+	if res.Error != "" {
+		body["error"] = res.Error
+	} else if runErr != nil {
+		body["error"] = runErr.Error()
+	}
+	jsonOK(w, body)
+}
+
+// handleMCP is the public /mcp endpoint. The actual JSON-RPC dispatch lives
+// in the buildin/mcp dicode task; this handler exists so the historical
+// /mcp URL keeps working without forcing every MCP client to be reconfigured
+// to /hooks/mcp. GET returns a small server-info doc (so a curl probe still
+// succeeds the way the old Go MCP server did); POST rewrites the URL path
+// and re-enters the trigger engine's webhook dispatch via the gateway.
+func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"name":     "dicode",
+			"version":  "dev",
+			"protocol": "mcp/2024-11-05",
+		})
+		return
+	}
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "GET, POST")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	r.URL.Path = "/hooks/mcp"
+	s.gateway.ServeHTTP(w, r)
 }
 
 func (s *Server) apiListRuns(w http.ResponseWriter, r *http.Request) {
