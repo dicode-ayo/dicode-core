@@ -83,8 +83,12 @@ func TestPassphraseStore_SetHashed_StoresBcryptHash(t *testing.T) {
 	defer d.Close()
 
 	ps := newPassphraseStore(d)
-	if err := ps.setHashed(context.Background(), "my-secret-pass"); err != nil {
+	hash, err := ps.setHashed(context.Background(), "my-secret-pass")
+	if err != nil {
 		t.Fatalf("setHashed: %v", err)
+	}
+	if !looksLikeBcryptHash(hash) {
+		t.Fatalf("setHashed must return the bcrypt hash; got %q", hash)
 	}
 	val, err := ps.get(context.Background())
 	if err != nil {
@@ -107,8 +111,8 @@ func TestPassphraseStore_Overwrite(t *testing.T) {
 	defer d.Close()
 
 	ps := newPassphraseStore(d)
-	_ = ps.setHashed(context.Background(), "first-pass-1234")
-	_ = ps.setHashed(context.Background(), "second-pass-5678")
+	_, _ = ps.setHashed(context.Background(), "first-pass-1234")
+	_, _ = ps.setHashed(context.Background(), "second-pass-5678")
 
 	val, _ := ps.get(context.Background())
 	if !looksLikeBcryptHash(val) {
@@ -125,9 +129,15 @@ func TestPassphraseStore_Overwrite(t *testing.T) {
 
 func TestLooksLikeBcryptHash(t *testing.T) {
 	cases := map[string]bool{
-		"$2a$12$abcdef":       true,
-		"$2b$10$abcdef":       true,
-		"$2y$12$abcdef":       true,
+		// Modern variants — $2a$ is what golang.org/x/crypto/bcrypt emits.
+		"$2a$12$abcdef": true,
+		"$2b$10$abcdef": true,
+		"$2y$12$abcdef": true,
+		// Pre-2002 OpenBSD variant. Vanishingly rare in the wild, but
+		// bcrypt.CompareHashAndPassword accepts it; misclassifying it as
+		// legacy plaintext would force a needless rehash and lock out the
+		// account for one login on a stricter comparator.
+		"$2$10$abcdef":        true,
 		"":                    false,
 		"plaintext-pass":      false,
 		"$2x$12$weirdvariant": false,
@@ -152,7 +162,7 @@ func TestVerifyPassphrase_YAMLOverrideTakesPrecedence(t *testing.T) {
 	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
 
 	// Even if the DB has a (different) bcrypt hash, the YAML override wins.
-	_ = srv.passphraseStore.setHashed(context.Background(), "db-passphrase")
+	_, _ = srv.passphraseStore.setHashed(context.Background(), "db-passphrase")
 
 	if !srv.verifyPassphrase(context.Background(), "yaml-passphrase") {
 		t.Error("YAML passphrase should verify when set in config.Server.Secret")
@@ -174,7 +184,7 @@ func TestVerifyPassphrase_DBHashUsedWhenNoYAML(t *testing.T) {
 	cfg := &config.Config{Server: config.ServerConfig{Auth: true, Secret: ""}}
 	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
 
-	_ = srv.passphraseStore.setHashed(context.Background(), "stored-pass")
+	_, _ = srv.passphraseStore.setHashed(context.Background(), "stored-pass")
 
 	if !srv.verifyPassphrase(context.Background(), "stored-pass") {
 		t.Error("verifyPassphrase should accept the correct DB-hashed passphrase")
@@ -316,7 +326,7 @@ func TestEnsurePassphrase_DoesNotOverwriteExisting(t *testing.T) {
 	cfg := &config.Config{Server: config.ServerConfig{Auth: true}}
 	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
 
-	_ = srv.passphraseStore.setHashed(context.Background(), "already-set-1234")
+	_, _ = srv.passphraseStore.setHashed(context.Background(), "already-set-1234")
 	before, _ := srv.passphraseStore.get(context.Background())
 
 	if err := srv.ensurePassphrase(context.Background()); err != nil {
@@ -394,7 +404,7 @@ func TestEnsurePassphrase_NoopWhenYAMLOverridePresent(t *testing.T) {
 func TestPassphraseAPI_StatusEndpoint(t *testing.T) {
 	srv := newAuthServer(t, "") // auth enabled, no YAML secret
 	// Manually set a DB passphrase via the hashed path.
-	_ = srv.passphraseStore.setHashed(context.Background(), "test-pass-1234")
+	_, _ = srv.passphraseStore.setHashed(context.Background(), "test-pass-1234")
 
 	h := srv.Handler()
 	cookie := login(t, h, "test-pass-1234", false)
@@ -419,7 +429,7 @@ func TestPassphraseAPI_StatusEndpoint(t *testing.T) {
 
 func TestPassphraseAPI_ChangePassphrase(t *testing.T) {
 	srv := newAuthServer(t, "")
-	_ = srv.passphraseStore.setHashed(context.Background(), "old-passphrase-here")
+	_, _ = srv.passphraseStore.setHashed(context.Background(), "old-passphrase-here")
 
 	h := srv.Handler()
 	cookie := login(t, h, "old-passphrase-here", false)
@@ -492,7 +502,7 @@ func TestPassphraseAPI_ChangeFromLegacyPlaintext(t *testing.T) {
 
 func TestPassphraseAPI_ChangeRequiresSession(t *testing.T) {
 	srv := newAuthServer(t, "")
-	_ = srv.passphraseStore.setHashed(context.Background(), "existing-pass-1234")
+	_, _ = srv.passphraseStore.setHashed(context.Background(), "existing-pass-1234")
 	h := srv.Handler()
 
 	body, _ := json.Marshal(map[string]string{"current": "existing-pass-1234", "passphrase": "new-pass-should-fail"})
@@ -509,7 +519,7 @@ func TestPassphraseAPI_ChangeRequiresSession(t *testing.T) {
 
 func TestPassphraseAPI_ChangeTooShortRejected(t *testing.T) {
 	srv := newAuthServer(t, "")
-	_ = srv.passphraseStore.setHashed(context.Background(), "existing-long-pass-1234")
+	_, _ = srv.passphraseStore.setHashed(context.Background(), "existing-long-pass-1234")
 	h := srv.Handler()
 
 	cookie := login(t, h, "existing-long-pass-1234", false)
@@ -531,7 +541,7 @@ func TestPassphraseAPI_ChangeTooShortRejected(t *testing.T) {
 
 func TestPassphraseAPI_WrongCurrentRejected(t *testing.T) {
 	srv := newAuthServer(t, "")
-	_ = srv.passphraseStore.setHashed(context.Background(), "correct-current-pass-123")
+	_, _ = srv.passphraseStore.setHashed(context.Background(), "correct-current-pass-123")
 	h := srv.Handler()
 
 	cookie := login(t, h, "correct-current-pass-123", false)
@@ -596,5 +606,142 @@ func TestGenerateRandomPassphrase_Unique(t *testing.T) {
 	b, _ := generateRandomPassphrase()
 	if a == b {
 		t.Error("two generated passphrases should not be equal")
+	}
+}
+
+// ── DB-error fail-closed paths ────────────────────────────────────────────────
+//
+// failingDB wraps a real DB but rejects every Query — used to drive the
+// "passphrase row read failed transiently" branch on the verify, source, and
+// change paths. We don't pass nil for a missing method because passphraseStore
+// only ever calls Query / Exec.
+type failingDB struct {
+	db.DB
+	queryErr error
+	execErr  error
+}
+
+func (f *failingDB) Query(_ context.Context, _ string, _ []any, _ func(db.Scanner) error) error {
+	return f.queryErr
+}
+
+func (f *failingDB) Exec(_ context.Context, _ string, _ ...any) error {
+	return f.execErr
+}
+
+// invalidateCache clears the in-process passphrase cache so the next read goes
+// through to the (failing) DB.
+func invalidateCache(s *Server) {
+	s.cachedPassphraseMu.Lock()
+	s.cachedPassphrase = ""
+	s.cachedPassphraseMu.Unlock()
+}
+
+func TestVerifyPassphrase_DBErrorFailsClosed(t *testing.T) {
+	srv := newAuthServer(t, "")
+	_, _ = srv.passphraseStore.setHashed(context.Background(), "stored-pass-1234")
+
+	srv.passphraseStore = newPassphraseStore(&failingDB{queryErr: context.DeadlineExceeded})
+	invalidateCache(srv)
+
+	if srv.verifyPassphrase(context.Background(), "stored-pass-1234") {
+		t.Fatal("verifyPassphrase must fail closed when the DB read errors")
+	}
+}
+
+func TestPassphraseSource_DBErrorReturnsUnknown(t *testing.T) {
+	srv := newAuthServer(t, "")
+	_, _ = srv.passphraseStore.setHashed(context.Background(), "stored-pass-1234")
+
+	srv.passphraseStore = newPassphraseStore(&failingDB{queryErr: context.DeadlineExceeded})
+	invalidateCache(srv)
+
+	if got := srv.passphraseSource(context.Background()); got != passphraseSourceUnknown {
+		t.Errorf("passphraseSource on db error = %q; want %q", got, passphraseSourceUnknown)
+	}
+}
+
+// TestApiSecretsUnlock_DBErrorRejects exercises the regression that originally
+// motivated this whole patch: a transient DB outage previously made
+// `passphraseSource` return `none`, and `apiSecretsUnlock`'s bootstrap
+// fast-path then accepted ANY password. Now it must reject with 503.
+func TestApiSecretsUnlock_DBErrorRejects(t *testing.T) {
+	srv := newAuthServer(t, "")
+	_, _ = srv.passphraseStore.setHashed(context.Background(), "stored-pass-1234")
+
+	srv.passphraseStore = newPassphraseStore(&failingDB{queryErr: context.DeadlineExceeded})
+	invalidateCache(srv)
+
+	h := srv.Handler()
+	body, _ := json.Marshal(map[string]any{"password": "anything-at-all"})
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 on DB outage, got %d (body: %s)", w.Code, w.Body.String())
+	}
+	for _, c := range w.Result().Cookies() {
+		if c.Name == sessionCookie && c.Value != "" {
+			t.Errorf("must not issue a session cookie under db outage; got %q", c.Value)
+		}
+	}
+}
+
+func TestApiChangePassphrase_DBErrorRejects(t *testing.T) {
+	srv := newAuthServer(t, "")
+	_, _ = srv.passphraseStore.setHashed(context.Background(), "old-pass-here-123")
+
+	h := srv.Handler()
+	cookie := login(t, h, "old-pass-here-123", false)
+	if cookie == nil {
+		t.Fatal("pre-outage login should succeed")
+	}
+
+	srv.passphraseStore = newPassphraseStore(&failingDB{queryErr: context.DeadlineExceeded})
+	invalidateCache(srv)
+
+	body, _ := json.Marshal(map[string]string{
+		"current":    "old-pass-here-123",
+		"passphrase": "new-pass-here-1234567",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/passphrase", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 on DB outage, got %d (body: %s)", w.Code, w.Body.String())
+	}
+}
+
+// ── bcrypt input length cap ──────────────────────────────────────────────────
+
+func TestPassphraseAPI_ChangeRejectsLongerThanBcryptLimit(t *testing.T) {
+	srv := newAuthServer(t, "")
+	_, _ = srv.passphraseStore.setHashed(context.Background(), "current-pass-1234567")
+
+	h := srv.Handler()
+	cookie := login(t, h, "current-pass-1234567", false)
+	if cookie == nil {
+		t.Fatal("login failed")
+	}
+
+	// 73 bytes — one over bcrypt's silent-truncation threshold.
+	tooLong := strings.Repeat("a", 73)
+	body, _ := json.Marshal(map[string]string{
+		"current":    "current-pass-1234567",
+		"passphrase": tooLong,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/passphrase", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("73-byte passphrase should be rejected with 400, got %d (body: %s)", w.Code, w.Body.String())
 	}
 }

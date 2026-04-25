@@ -76,14 +76,18 @@ func (p *passphraseStore) set(ctx context.Context, value string) error {
 }
 
 // setHashed hashes the given plaintext passphrase with bcrypt and stores the
-// result. This is the only call sites should use when persisting a
+// result, returning the hash so callers can warm in-process caches without a
+// second DB read. This is the only call sites should use when persisting a
 // passphrase from the UI or from auto-generation.
-func (p *passphraseStore) setHashed(ctx context.Context, plaintext string) error {
+func (p *passphraseStore) setHashed(ctx context.Context, plaintext string) (string, error) {
 	hash, err := bcrypt.GenerateFromPassword([]byte(plaintext), bcryptCost)
 	if err != nil {
-		return fmt.Errorf("hash passphrase: %w", err)
+		return "", fmt.Errorf("hash passphrase: %w", err)
 	}
-	return p.set(ctx, string(hash))
+	if err := p.set(ctx, string(hash)); err != nil {
+		return "", err
+	}
+	return string(hash), nil
 }
 
 // generateRandomPassphrase produces a cryptographically random passphrase
@@ -96,11 +100,17 @@ func generateRandomPassphrase() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
-// looksLikeBcryptHash reports whether v has one of the bcrypt prefixes
-// ($2a$/$2b$/$2y$). Used to distinguish hashed from legacy-plaintext values
-// during the lazy migration window.
+// looksLikeBcryptHash reports whether v has a bcrypt-style prefix. Used to
+// distinguish hashed from legacy-plaintext values during the lazy migration
+// window. Covers $2a$ (most common), $2b$, $2y$ (PHP variant), and the
+// pre-2002 $2$ Blowfish prefix; bcrypt.CompareHashAndPassword accepts all
+// of them, so misclassifying any as legacy plaintext would force a needless
+// rehash and lock us out for one login on a strict comparator.
 func looksLikeBcryptHash(v string) bool {
-	return strings.HasPrefix(v, "$2a$") || strings.HasPrefix(v, "$2b$") || strings.HasPrefix(v, "$2y$")
+	return strings.HasPrefix(v, "$2a$") ||
+		strings.HasPrefix(v, "$2b$") ||
+		strings.HasPrefix(v, "$2y$") ||
+		strings.HasPrefix(v, "$2$")
 }
 
 // verifyPassphrase checks a candidate passphrase against the configured
@@ -133,7 +143,11 @@ func (s *Server) verifyPassphrase(ctx context.Context, candidate string) bool {
 		return subtle.ConstantTimeCompare([]byte(candidate), []byte(s.cfg.Server.Secret)) == 1
 	}
 
-	stored := s.cachedDBValue(ctx)
+	stored, err := s.cachedDBValue(ctx)
+	if err != nil {
+		s.log.Error("verifyPassphrase: db read failed; failing closed", zap.Error(err))
+		return false
+	}
 	if stored == "" {
 		return false
 	}
@@ -147,14 +161,14 @@ func (s *Server) verifyPassphrase(ctx context.Context, candidate string) bool {
 		return false
 	}
 	if s.passphraseStore != nil {
-		if err := s.passphraseStore.setHashed(ctx, candidate); err != nil {
+		if hash, err := s.passphraseStore.setHashed(ctx, candidate); err != nil {
 			s.log.Warn("lazy bcrypt migration: failed to rehash legacy passphrase; will retry on next login",
 				zap.Error(err))
 		} else {
-			// Refresh the cache to the new hash so subsequent logins skip the
-			// legacy branch immediately.
+			// Warm the cache with the new hash so subsequent logins skip the
+			// legacy branch immediately, without a second DB round-trip.
 			s.cachedPassphraseMu.Lock()
-			s.cachedPassphrase = ""
+			s.cachedPassphrase = hash
 			s.cachedPassphraseMu.Unlock()
 			s.log.Info("auth passphrase migrated from legacy plaintext to bcrypt hash")
 		}
@@ -163,29 +177,33 @@ func (s *Server) verifyPassphrase(ctx context.Context, candidate string) bool {
 }
 
 // cachedDBValue returns the DB-stored passphrase value (hash or legacy
-// plaintext), reading from cache if warm and falling back to the DB. Callers
-// must not assume plaintext.
-func (s *Server) cachedDBValue(ctx context.Context) string {
+// plaintext), reading from cache if warm and falling back to the DB.
+//
+// Returns ("", nil) when no passphrase is configured (or the store is nil).
+// Returns ("", err) when the DB read fails — callers MUST distinguish this
+// from "" to avoid fail-open behavior. A swallowed DB error here previously
+// allowed apiSecretsUnlock to bypass authentication during a transient DB
+// outage; that bug was fixed alongside the bcrypt migration.
+func (s *Server) cachedDBValue(ctx context.Context) (string, error) {
 	if s.passphraseStore == nil {
-		return ""
+		return "", nil
 	}
 	s.cachedPassphraseMu.RLock()
 	cached := s.cachedPassphrase
 	s.cachedPassphraseMu.RUnlock()
 	if cached != "" {
-		return cached
+		return cached, nil
 	}
 	val, err := s.passphraseStore.get(ctx)
 	if err != nil {
-		s.log.Error("failed to read passphrase from DB", zap.Error(err))
-		return ""
+		return "", fmt.Errorf("read passphrase from db: %w", err)
 	}
 	if val != "" {
 		s.cachedPassphraseMu.Lock()
 		s.cachedPassphrase = val
 		s.cachedPassphraseMu.Unlock()
 	}
-	return val
+	return val, nil
 }
 
 // resolvePassphraseSource describes where the active passphrase comes from.
@@ -197,15 +215,31 @@ const (
 	passphraseSourceNone resolvePassphraseSource = "none"
 	passphraseSourceYAML resolvePassphraseSource = "yaml"
 	passphraseSourceDB   resolvePassphraseSource = "db"
+	// passphraseSourceUnknown is returned only when the underlying DB read
+	// failed; callers must treat it as "passphrase configured but
+	// unavailable" so login/secrets-change endpoints fail closed under a
+	// transient outage. Distinct from "none" specifically to prevent the
+	// bootstrap fast-path (which intentionally accepts any password when
+	// no passphrase has been set yet) from being entered on an error.
+	passphraseSourceUnknown resolvePassphraseSource = "unknown"
 )
 
 // passphraseSource reports where the effective passphrase lives. It does not
 // return the value because, post-bcrypt, the DB no longer contains plaintext.
+//
+// Returns passphraseSourceUnknown if the DB read fails — never silently
+// returns passphraseSourceNone on a transient error, which would let
+// apiSecretsUnlock skip the verify check and accept any password.
 func (s *Server) passphraseSource(ctx context.Context) resolvePassphraseSource {
 	if s.cfg.Server.Secret != "" {
 		return passphraseSourceYAML
 	}
-	if s.cachedDBValue(ctx) != "" {
+	val, err := s.cachedDBValue(ctx)
+	if err != nil {
+		s.log.Error("passphraseSource: db read failed; treating as unknown (fail-closed)", zap.Error(err))
+		return passphraseSourceUnknown
+	}
+	if val != "" {
 		return passphraseSourceDB
 	}
 	return passphraseSourceNone
@@ -244,16 +278,14 @@ func (s *Server) ensurePassphrase(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := s.passphraseStore.setHashed(ctx, plaintext); err != nil {
+	hash, err := s.passphraseStore.setHashed(ctx, plaintext)
+	if err != nil {
 		return fmt.Errorf("store passphrase: %w", err)
 	}
 	// Cache the hash so the next login validates against it directly.
-	hash, err := s.passphraseStore.get(ctx)
-	if err == nil && hash != "" {
-		s.cachedPassphraseMu.Lock()
-		s.cachedPassphrase = hash
-		s.cachedPassphraseMu.Unlock()
-	}
+	s.cachedPassphraseMu.Lock()
+	s.cachedPassphrase = hash
+	s.cachedPassphraseMu.Unlock()
 
 	// Print the plaintext clearly to stdout — this is the operator's only
 	// chance to see it. After this function returns, the plaintext is gone.
@@ -307,26 +339,45 @@ func (s *Server) apiChangePassphrase(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "passphrase must be at least 16 characters", http.StatusBadRequest)
 		return
 	}
+	// bcrypt silently truncates inputs longer than 72 bytes — reject with a
+	// clear error rather than letting the user think the extra characters
+	// are protecting them. (UTF-8: len() is byte length, so a few emoji can
+	// blow this fast.)
+	if len(body.Passphrase) > 72 {
+		jsonErr(w, "passphrase must be at most 72 bytes (bcrypt limit)", http.StatusBadRequest)
+		return
+	}
 
 	// Require the current passphrase to prevent a stolen session from rotating
 	// the credential without knowing the existing secret. Skip only when no
 	// passphrase is set yet (bootstrap: first-time setup from a valid session).
-	if s.cachedDBValue(r.Context()) != "" {
+	// On DB error treat as "configured" — refusing to identify the bootstrap
+	// case fails closed and matches apiSecretsUnlock's behavior.
+	stored, err := s.cachedDBValue(r.Context())
+	if err != nil {
+		s.log.Error("apiChangePassphrase: db read failed; failing closed", zap.Error(err))
+		jsonErr(w, "service temporarily unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if stored != "" {
 		if !s.verifyPassphrase(r.Context(), body.Current) {
 			jsonErr(w, "current passphrase is incorrect", http.StatusUnauthorized)
 			return
 		}
 	}
 
-	if err := s.passphraseStore.setHashed(r.Context(), body.Passphrase); err != nil {
+	hash, err := s.passphraseStore.setHashed(r.Context(), body.Passphrase)
+	if err != nil {
 		s.log.Error("failed to store passphrase", zap.Error(err))
 		jsonErr(w, "failed to store passphrase", http.StatusInternalServerError)
 		return
 	}
 
-	// Invalidate the cache so the next verifyPassphrase reloads the new hash.
+	// Warm the cache with the new hash directly — saves a DB read on the
+	// next verifyPassphrase and keeps observable state consistent with the
+	// just-completed write.
 	s.cachedPassphraseMu.Lock()
-	s.cachedPassphrase = ""
+	s.cachedPassphrase = hash
 	s.cachedPassphraseMu.Unlock()
 
 	// Invalidate all current sessions — everyone must re-login with the new passphrase.
