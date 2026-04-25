@@ -109,6 +109,11 @@ func (g *GitSource) Start(ctx context.Context) (<-chan source.Event, error) {
 }
 
 // Sync triggers an immediate pull + rescan.
+//
+// May block up to cloneRetryMaxElapsed (~30s) on transient failures, since
+// the underlying clone-or-pull retries with exponential backoff. Callers on
+// interactive paths (UI buttons, request handlers) should pass a ctx with a
+// shorter deadline if they need to fail fast.
 func (g *GitSource) Sync(ctx context.Context) error {
 	if err := g.cloneOrPull(ctx); err != nil {
 		return err

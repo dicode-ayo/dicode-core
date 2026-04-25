@@ -133,6 +133,12 @@ func TestCloneOrPull_BoundedByMaxElapsed(t *testing.T) {
 	if elapsed > 2*cloneRetryMaxElapsed {
 		t.Errorf("retry took %v; expected <= %v", elapsed, 2*cloneRetryMaxElapsed)
 	}
+	// Lower bound is 2 attempts (not a higher number) because backoff jitter
+	// can push the first wait to ~750ms and the second to ~1.5s, leaving
+	// only ~3 attempts in the 30s budget at the worst end of the band.
+	// If InitialInterval is ever bumped meaningfully, this floor will need
+	// to drop — but never below 2, otherwise the test no longer proves
+	// retries happened at all.
 	if calls.Load() < 2 {
 		t.Errorf("expected at least 2 attempts; got %d", calls.Load())
 	}

@@ -146,25 +146,33 @@ func (c *Client) Run(ctx context.Context) error {
 
 	for {
 		connectedAt := time.Now()
-		if err := c.runOnce(ctx); err != nil {
+		runErr := c.runOnce(ctx)
+		if runErr != nil {
 			// Record the transport error BEFORE checking ctx so real
 			// failures racing with cancellation still land in Status().
-			c.markDisconnected(err)
+			c.markDisconnected(runErr)
 			if ctx.Err() != nil {
 				return nil
 			}
-			c.log.Warn("relay disconnected, reconnecting", zap.Error(err))
 		}
 
 		// Reset backoff if the connection was stable long enough.
 		// Reset() rewinds both the next interval AND the elapsed-time
 		// counter, so a long-lived connection that finally drops will
-		// retry from the 1s floor again.
+		// retry from the 1s floor again. Behaviorally equivalent to the
+		// hand-rolled `backoff = time.Second` reset; see
+		// TestNewReconnectBackoff_ResetRewindsToFloor for the contract.
 		if time.Since(connectedAt) >= stableConnectionThreshold {
 			bo.Reset()
 		}
 
 		wait := bo.NextBackOff()
+		if runErr != nil {
+			// Logged after NextBackOff() so the line carries the actual
+			// next-attempt delay — useful for diagnosing flapping in prod.
+			c.log.Warn("relay disconnected, reconnecting",
+				zap.Error(runErr), zap.Duration("backoff", wait))
+		}
 		t := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():

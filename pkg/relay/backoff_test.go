@@ -31,6 +31,21 @@ func TestNewReconnectBackoff_Defaults(t *testing.T) {
 	}
 }
 
+// TestNewReconnectBackoff_FirstCallReturnsInitialInterval pins the contract
+// that the very first NextBackOff() returns ~InitialInterval, not zero.
+// Old hand-rolled code started at `time.Second` before jitter; a future swap
+// to a backoff implementation that started at 0 would make the first
+// reconnect attempt fire instantly, hammering a flapping relay.
+func TestNewReconnectBackoff_FirstCallReturnsInitialInterval(t *testing.T) {
+	bo := newReconnectBackoff()
+	d := bo.NextBackOff()
+	const lo = time.Duration(float64(time.Second) * 0.8)
+	const hi = time.Duration(float64(time.Second) * 1.2)
+	if d < lo || d > hi {
+		t.Errorf("first NextBackOff() = %v; want in [%v, %v] (1s ±20%%)", d, lo, hi)
+	}
+}
+
 // TestNewReconnectBackoff_NeverStops drives the backoff well past any
 // plausible elapsed-time budget and verifies NextBackOff() never returns
 // the sentinel Stop value. Defends against a future MaxElapsedTime tweak
