@@ -3,6 +3,7 @@ package ipc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -93,6 +94,42 @@ func TestListOAuthStatus_MalformedName(t *testing.T) {
 	}
 }
 
+// TestListOAuthStatus_MalformedNameMidBatch confirms that a malformed name
+// occurring partway through a batch fails the whole call rather than
+// returning partial results for the providers that came before it.
+// This locks down the failure semantics; a future refactor that "skipped
+// and continued" past bad names would change which info is exposed and
+// is therefore caught here.
+func TestListOAuthStatus_MalformedNameMidBatch(t *testing.T) {
+	chain := chainFromMem(newMemSecrets())
+
+	out, err := listOAuthStatus(context.Background(), chain, []string{"github", "x;y", "slack"})
+	if err == nil {
+		t.Fatalf("expected error for malformed mid-batch, got %d entries", len(out))
+	}
+	if out != nil {
+		t.Fatalf("expected nil result on error, got %v", out)
+	}
+}
+
+// TestListOAuthStatus_ContextCanceled confirms that context cancellation
+// propagates and aborts the batch, instead of silently returning false
+// has_token=false rows for every remaining provider.
+func TestListOAuthStatus_ContextCanceled(t *testing.T) {
+	chain := chainFromMem(newMemSecrets())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel before the call
+
+	_, err := listOAuthStatus(ctx, chain, []string{"github", "slack"})
+	if err == nil {
+		t.Fatalf("expected context error, got nil")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+}
+
 func TestListOAuthStatus_OversizeBatch(t *testing.T) {
 	chain := chainFromMem(newMemSecrets())
 
@@ -140,5 +177,8 @@ type memProvider struct{ ms *memSecrets }
 
 func (m memProvider) Name() string { return "memProvider" }
 func (m memProvider) Get(ctx context.Context, key string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	return m.ms.Get(ctx, key)
 }

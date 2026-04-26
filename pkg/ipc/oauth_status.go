@@ -43,18 +43,27 @@ func listOAuthStatus(ctx context.Context, chain secrets.Chain, providers []strin
 		if err != nil {
 			return nil, fmt.Errorf("provider %q: %w", p, err)
 		}
-		access := resolveOrEmpty(ctx, chain, prefix+"_ACCESS_TOKEN")
+		access, err := resolveOrEmpty(ctx, chain, prefix+"_ACCESS_TOKEN")
+		if err != nil {
+			return nil, err
+		}
 		entry := ProviderStatus{
 			Provider: p,
 			HasToken: access != "",
 		}
-		if v := resolveOrEmpty(ctx, chain, prefix+"_EXPIRES_AT"); v != "" {
+		if v, err := resolveOrEmpty(ctx, chain, prefix+"_EXPIRES_AT"); err != nil {
+			return nil, err
+		} else if v != "" {
 			entry.ExpiresAt = &v
 		}
-		if v := resolveOrEmpty(ctx, chain, prefix+"_SCOPE"); v != "" {
+		if v, err := resolveOrEmpty(ctx, chain, prefix+"_SCOPE"); err != nil {
+			return nil, err
+		} else if v != "" {
 			entry.Scope = &v
 		}
-		if v := resolveOrEmpty(ctx, chain, prefix+"_TOKEN_TYPE"); v != "" {
+		if v, err := resolveOrEmpty(ctx, chain, prefix+"_TOKEN_TYPE"); err != nil {
+			return nil, err
+		} else if v != "" {
 			entry.TokenType = &v
 		}
 		out = append(out, entry)
@@ -62,21 +71,30 @@ func listOAuthStatus(ctx context.Context, chain secrets.Chain, providers []strin
 	return out, nil
 }
 
-// resolveOrEmpty wraps Chain.Resolve so a NotFoundError becomes empty string.
-// Provider-error cases (network down, etc.) are also tolerated as empty for
-// status-reporting purposes — the caller only needs presence/absence, and a
-// transient backend hiccup should not fail the whole dashboard.
-func resolveOrEmpty(ctx context.Context, chain secrets.Chain, key string) string {
+// resolveOrEmpty wraps Chain.Resolve so a NotFoundError becomes empty string,
+// and a transient provider-side backend error (e.g. a momentary blip in an
+// upstream secrets backend) is also tolerated as empty — status reads are
+// best-effort and a single hiccup must not fail the whole dashboard.
+//
+// Context-cancellation errors (context.Canceled, context.DeadlineExceeded)
+// are NOT tolerated: they propagate to the caller so the loop can stop and
+// the caller learns the request was abandoned, instead of receiving false-
+// negative has_token=false entries for every remaining provider.
+func resolveOrEmpty(ctx context.Context, chain secrets.Chain, key string) (string, error) {
 	if chain == nil {
-		return ""
+		return "", nil
 	}
 	v, err := chain.Resolve(ctx, key)
 	if err != nil {
 		var notFound *secrets.NotFoundError
 		if errors.As(err, &notFound) {
-			return ""
+			return "", nil
 		}
-		return ""
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return "", err
+		}
+		// Tolerate any other provider error (e.g. transient backend) as empty.
+		return "", nil
 	}
-	return v
+	return v, nil
 }
