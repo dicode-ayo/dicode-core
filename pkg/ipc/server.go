@@ -212,6 +212,9 @@ func (s *Server) Start(ctx context.Context) (socketPath, token string, err error
 		if dp.OAuthStore {
 			caps = append(caps, CapOAuthStore)
 		}
+		if dp.OAuthStatus {
+			caps = append(caps, CapOAuthStatus)
+		}
 	}
 	if s.spec != nil && s.spec.Trigger.Daemon && s.gateway != nil {
 		caps = append(caps, CapHTTPRegister)
