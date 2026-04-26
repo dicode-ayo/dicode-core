@@ -86,10 +86,16 @@ export interface ProviderStatus {
   token_type?: string;
 }
 
-// OAuth broker bridge — only functional inside the auth-start (oauth_init)
-// and auth-relay (oauth_store) built-in tasks. Plaintext tokens never cross
-// this boundary: store_token decrypts, parses, and writes to secrets
-// entirely daemon-side, and only returns which secret names were written.
+// OAuth broker bridge.
+// - build_auth_url and store_token are functional only inside the auth-start
+//   (oauth_init) and auth-relay (oauth_store) built-in tasks respectively.
+// - list_status is callable from any task that opts in via permissions.dicode.oauth_status
+//   (e.g. the auth-providers dashboard); it returns metadata only and never
+//   surfaces plaintext tokens.
+// Plaintext tokens never cross this boundary: store_token decrypts, parses, and
+// writes to secrets entirely daemon-side, and only returns which secret names
+// were written; list_status reads <P>_ACCESS_TOKEN only to set a presence flag
+// and discards the value.
 export interface DicodeOAuth {
   build_auth_url: (provider: string, scope?: string) => Promise<OAuthAuthURL>;
   store_token:    (envelope: unknown)                => Promise<OAuthStoreResult>;
