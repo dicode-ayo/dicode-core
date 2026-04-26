@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/dicode/dicode/pkg/config"
@@ -714,6 +716,108 @@ func TestApiChangePassphrase_DBErrorRejects(t *testing.T) {
 
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503 on DB outage, got %d (body: %s)", w.Code, w.Body.String())
+	}
+}
+
+// ── concurrent lazy migration (#209) ─────────────────────────────────────────
+//
+// Two simultaneous successful logins on a legacy plaintext passphrase must
+// produce exactly one bcrypt computation and one DB write. Without the
+// singleflight-backed migrator a race could land two writes (idempotent on
+// the row, but doubling bcrypt CPU and emitting two "migrated" audit-log
+// entries when one is correct).
+
+// countingDB wraps a real DB and tallies how many times the passphrase row
+// was written. We only care about Exec calls that include the passphraseKVKey
+// — there are other kv writes in the broader test setup (and we don't want
+// to count the initial seed write the test itself does).
+type countingDB struct {
+	db.DB
+	mu        sync.Mutex
+	writes    int
+	countOnly string // only count Exec calls whose args include this string
+}
+
+func (c *countingDB) Exec(ctx context.Context, query string, args ...any) error {
+	if c.countOnly != "" {
+		for _, a := range args {
+			if s, ok := a.(string); ok && s == c.countOnly {
+				c.mu.Lock()
+				c.writes++
+				c.mu.Unlock()
+				break
+			}
+		}
+	}
+	return c.DB.Exec(ctx, query, args...)
+}
+
+func (c *countingDB) writeCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.writes
+}
+
+func TestVerifyPassphrase_ConcurrentLegacyMigration_SingleWrite(t *testing.T) {
+	d, _ := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	defer d.Close()
+
+	reg := registry.New(d)
+	eng := trigger.New(reg, nil, zap.NewNop())
+	cfg := &config.Config{Server: config.ServerConfig{Auth: true, BcryptCost: bcrypt.MinCost}}
+	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
+
+	// Seed the legacy plaintext value via the underlying DB directly so the
+	// counting wrapper doesn't see this write.
+	if err := srv.passphraseStore.set(context.Background(), "legacy-plain-pass-pp"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Now swap the store's DB for a counting wrapper. The migrator's writes
+	// (via setHashed → Exec INSERT…ON CONFLICT) will be counted.
+	cdb := &countingDB{DB: d, countOnly: passphraseKVKey}
+	srv.passphraseStore = newPassphraseStore(cdb)
+
+	// Race N goroutines on the same valid legacy plaintext.
+	const N = 16
+	var (
+		wg     sync.WaitGroup
+		ready  sync.WaitGroup
+		start  = make(chan struct{})
+		oks    int32
+	)
+	wg.Add(N)
+	ready.Add(N)
+	for i := 0; i < N; i++ {
+		go func() {
+			defer wg.Done()
+			ready.Done()
+			<-start // line everyone up at the same instant
+			if srv.verifyPassphrase(context.Background(), "legacy-plain-pass-pp") {
+				atomic.AddInt32(&oks, 1)
+			}
+		}()
+	}
+	ready.Wait()
+	close(start)
+	wg.Wait()
+
+	if oks != N {
+		t.Fatalf("all %d concurrent verifications should succeed, got %d", N, oks)
+	}
+
+	// The whole point of the singleflight migrator: at most ONE bcrypt+write
+	// for N concurrent valid logins. We allow 1 here. Allowing 0 would be
+	// wrong — exactly one goroutine must have done the migration. >1 means
+	// the race is unfixed.
+	if got := cdb.writeCount(); got != 1 {
+		t.Errorf("expected exactly 1 migration write under N=%d concurrent legacy logins, got %d", N, got)
+	}
+
+	// And the post-race state must be a bcrypt hash, not the legacy plaintext.
+	stored, _ := srv.passphraseStore.get(context.Background())
+	if !looksLikeBcryptHash(stored) {
+		t.Errorf("expected DB to be migrated to bcrypt, got %q", stored)
 	}
 }
 
