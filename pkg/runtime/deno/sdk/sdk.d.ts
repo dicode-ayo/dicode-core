@@ -45,11 +45,21 @@ declare interface OAuthStoreResult {
   secrets:  string[];
 }
 
+declare interface ProviderStatus {
+  provider:    string;
+  has_token:   boolean;
+  expires_at?: string;
+  scope?:      string;
+  token_type?: string;
+}
+
 declare interface DicodeOAuth {
   /** Requires permissions.dicode.oauth_init. Signs the daemon's side of a /auth/:provider URL via the relay broker. */
   build_auth_url: (provider: string, scope?: string) => Promise<OAuthAuthURL>;
   /** Requires permissions.dicode.oauth_store. Decrypts an incoming token envelope and writes the resulting credentials to secrets. Plaintext never crosses the IPC boundary. */
   store_token:    (envelope: unknown)                => Promise<OAuthStoreResult>;
+  /** Requires permissions.dicode.oauth_status. Returns connection-state metadata (presence, expiry, scope) for the provider names supplied. Plaintext access/refresh tokens are never returned. */
+  list_status:    (providers: string[])              => Promise<ProviderStatus[]>;
 }
 
 declare interface Dicode {
