@@ -16,9 +16,11 @@ import (
 	"github.com/dicode/dicode/pkg/tasktest"
 )
 
-// registerTaskWithTest writes a task.yaml + task.ts + task.test.ts under a
-// temp dir and registers the resulting spec. The test file is whatever the
-// caller hands in so different scenarios can pass/fail/hang as needed.
+// registerTaskWithTest writes a task.ts + task.test.ts under a temp dir and
+// registers a directly-constructed task.Spec — the on-disk task.yaml is
+// intentionally NOT written because tasktest.Run discovers the test file via
+// spec.TaskDir and uses the in-memory spec for runtime/params; writing a
+// YAML that's never parsed would only invite drift between the two.
 //
 // The task carries a single optional string param "label" so the validator
 // path has something to chew on in the schema-mismatch test.
@@ -28,13 +30,6 @@ func registerTaskWithTest(t *testing.T, reg *registry.Registry, id, taskScript, 
 	td := filepath.Join(dir, id)
 	if err := os.MkdirAll(td, 0755); err != nil {
 		t.Fatalf("mkdir: %v", err)
-	}
-	yaml := "name: " + id + "\n" +
-		"trigger:\n  manual: true\n" +
-		"runtime: deno\n" +
-		"params:\n  label:\n    type: string\n    description: optional label\n"
-	if err := os.WriteFile(filepath.Join(td, "task.yaml"), []byte(yaml), 0644); err != nil {
-		t.Fatalf("write task.yaml: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(td, "task.ts"), []byte(taskScript), 0644); err != nil {
 		t.Fatalf("write task.ts: %v", err)
@@ -238,6 +233,111 @@ func TestAPI_TestTask_Timeout(t *testing.T) {
 	}
 	if resp.Status != "timeout" {
 		t.Errorf("status: got %q, want timeout", resp.Status)
+	}
+}
+
+// TestAPI_TestTask_ErroredStatus covers the buildTestTaskResponse "errored"
+// branch. Registers a task whose runtime is "docker" — tasktest.Run rejects
+// non-deno runtimes with *ErrUnsupportedRuntime today, which surfaces as a
+// non-nil runErr with res.ExitCode == 0 (no subprocess ran). The handler
+// must return 200 (per #208: 200 on completion regardless) with status set
+// to "errored" and the error message in the body.
+func TestAPI_TestTask_ErroredStatus(t *testing.T) {
+	srv, reg := newTestServer(t)
+	dir := t.TempDir()
+	td := filepath.Join(dir, "docker-task")
+	if err := os.MkdirAll(td, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Test file presence is required so we don't trip ErrNoTestFile first.
+	if err := os.WriteFile(filepath.Join(td, "task.test.ts"), []byte(passingTest), 0644); err != nil {
+		t.Fatal(err)
+	}
+	spec := &task.Spec{
+		ID:      "docker-task",
+		Name:    "docker-task",
+		Runtime: task.RuntimeDocker,
+		Trigger: task.TriggerConfig{Manual: true},
+		Timeout: 5 * time.Second,
+		TaskDir: td,
+	}
+	if err := reg.Register(spec); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks/docker-task/test", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 (errored is still 'completed'), got %d: %s", w.Code, w.Body.String())
+	}
+	var resp testTaskResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Status != "errored" {
+		t.Errorf("status: got %q, want errored", resp.Status)
+	}
+	if resp.Error == "" {
+		t.Error("error field must be populated on errored status")
+	}
+}
+
+// TestAPI_TestTask_TimeoutCapClamps verifies that an absurd timeout_s value
+// is silently clamped to testTaskMaxTimeout. We override the cap to 2 seconds
+// for the duration of the test so the assertion finishes fast — production
+// code must never mutate testTaskMaxTimeout, but the test harness may.
+//
+// The strategy: register a hanging task, send timeout_s = 86400 (24h), and
+// assert the request returns within a wall-clock bound that is well below
+// 24h but well above the lowered cap, so we know clamping (not the original
+// timeout_s) is what fired.
+func TestAPI_TestTask_TimeoutCapClamps(t *testing.T) {
+	original := testTaskMaxTimeout
+	testTaskMaxTimeout = 2 * time.Second
+	t.Cleanup(func() { testTaskMaxTimeout = original })
+
+	srv, reg := newTestServer(t)
+	registerTaskWithTest(t, reg, "clamp-task", "", hangingTest)
+
+	body := `{"timeout_s": 86400}` // 24h — must be clamped to 2s
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks/clamp-task/test", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	start := time.Now()
+	srv.Handler().ServeHTTP(w, req)
+	elapsed := time.Since(start)
+
+	// Generous upper bound: 2s cap + Deno spawn + cleanup. Anything close
+	// to 24h would prove the cap was bypassed.
+	if elapsed > 30*time.Second {
+		t.Fatalf("timeout was not clamped: ran for %v (cap is %v)", elapsed, testTaskMaxTimeout)
+	}
+	if w.Code != http.StatusRequestTimeout {
+		t.Errorf("expected 408 after clamp fired, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestAPI_TestTask_OversizedBody verifies the MaxBytesReader cap rejects
+// payloads larger than testTaskMaxBodyBytes with a 4xx — the request must
+// not be allowed to drain arbitrary memory before json.Decode notices.
+func TestAPI_TestTask_OversizedBody(t *testing.T) {
+	srv, reg := newTestServer(t)
+	registerTaskWithTest(t, reg, "big-body-task", "", passingTest)
+
+	// Build a JSON payload larger than the 64KB cap. The shape is valid;
+	// the size is the only thing that should fail the decode.
+	huge := strings.Repeat("a", testTaskMaxBodyBytes+1024)
+	body := `{"params": {"label": "` + huge + `"}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks/big-body-task/test", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest && w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 400 or 413, got %d: %s", w.Code, w.Body.String())
 	}
 }
 

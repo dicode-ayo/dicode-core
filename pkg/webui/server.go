@@ -1286,6 +1286,18 @@ func (s *Server) apiRunTask(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]string{"runId": runID})
 }
 
+// Hardening caps for apiTestTask. testTaskMaxBodyBytes bounds the request
+// payload so a misbehaving caller can't stream gigabytes of JSON; the cap is
+// well above any realistic params payload but small enough to fail fast.
+// testTaskMaxTimeout caps the runner subprocess lifetime so an authenticated
+// caller can't pin a Deno process indefinitely with a giant timeout_s value.
+//
+// testTaskMaxTimeout is a var (not a const) so the test suite can override
+// it to keep TimeoutCapClamps fast. Production code must never mutate it.
+const testTaskMaxBodyBytes = 64 * 1024
+
+var testTaskMaxTimeout = 5 * time.Minute
+
 // testTaskRequest is the optional JSON body accepted by apiTestTask.
 //
 // Both fields are optional: an empty body, an empty {} object, or any
@@ -1353,9 +1365,12 @@ func (s *Server) apiTestTask(w http.ResponseWriter, r *http.Request) {
 
 	// Body is optional. An empty body is the common case for "just run the
 	// tests with defaults" — guard the decode against a zero-length stream
-	// so we don't return 422 on the happy path.
+	// so we don't return 422 on the happy path. Cap the body so a misbehaving
+	// or malicious caller cannot stream gigabytes of JSON at the daemon
+	// (req.Params is unbounded by shape — only the byte count protects us).
 	var req testTaskRequest
 	if r.Body != nil {
+		r.Body = http.MaxBytesReader(w, r.Body, testTaskMaxBodyBytes)
 		dec := json.NewDecoder(r.Body)
 		if err := dec.Decode(&req); err != nil && err != io.EOF {
 			jsonErr(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
@@ -1363,7 +1378,21 @@ func (s *Server) apiTestTask(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Clamp timeout_s to a safe upper bound. Without this an authenticated
+	// caller could pin a runner subprocess for arbitrarily long; the ceiling
+	// is generous (5 minutes) so legitimate slow test suites still fit.
+	// Negative values are silently treated as "use parent ctx" (timeout=0).
 	timeout := time.Duration(req.TimeoutS) * time.Second
+	if timeout > testTaskMaxTimeout {
+		timeout = testTaskMaxTimeout
+	}
+	if timeout < 0 {
+		timeout = 0
+	}
+	// TODO(#208 follow-up): wire `coerced` (the validated string-typed params)
+	// into tasktest.Run so the runner actually receives them. Today the
+	// validator gates the call but the params themselves never reach Deno
+	// — see the testTaskRequest godoc.
 	res, _, runErr := tasktest.RunByID(r.Context(), s.registry, id, req.Params, timeout)
 
 	// Map tasktest's typed errors to HTTP status codes per #208 acceptance.
