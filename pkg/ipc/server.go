@@ -46,13 +46,17 @@ type Server struct {
 	taskID string
 	secret []byte // daemon-level HMAC secret for token verification
 
-	registry         *registry.Registry
-	db               db.DB
-	params           map[string]string
-	input            any
-	spec             *task.Spec
-	engine           EngineRunner
-	secrets          secrets.Manager        // optional; enables dicode.secrets_set / dicode.secrets_delete
+	registry *registry.Registry
+	db       db.DB
+	params   map[string]string
+	input    any
+	spec     *task.Spec
+	engine   EngineRunner
+	secrets  secrets.Manager // optional; enables dicode.secrets_set / dicode.secrets_delete
+	// secretsChain (read path) is used by dicode.oauth.list_status to walk
+	// the env-fallback chain. SetSecretsChain wires it; nil means the
+	// daemon has no chain configured (tests with read-only flows).
+	secretsChain     secrets.Chain
 	oauthID          *relay.Identity        // optional; enables dicode.oauth.* for the auth built-ins
 	oauthURL         string                 // broker base URL, e.g. "https://relay.dicode.app"
 	oauthPending     *relay.PendingSessions // tracks outstanding /auth/:provider flows by session id
@@ -133,6 +137,8 @@ func New(
 // SetSecrets attaches the secrets manager so tasks with permissions.dicode.secrets_write
 // can call dicode.secrets_set() and dicode.secrets_delete().
 func (s *Server) SetSecrets(m secrets.Manager) { s.secrets = m }
+
+func (s *Server) SetSecretsChain(c secrets.Chain) { s.secretsChain = c }
 
 // SetRedactor installs a log-message redactor. Messages received via the
 // IPC "log" method are passed through r.RedactString before being
