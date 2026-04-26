@@ -554,18 +554,17 @@ type TaskTestResult struct {
 // handleTaskTest resolves the task from the registry, locates its sibling
 // test file, and invokes the appropriate runtime's test runner. Phase 1
 // supports the Deno runtime only; other runtimes return a clear error.
+//
+// Goes through tasktest.RunByID so the CLI control socket and the REST
+// endpoint (POST /api/tasks/{id}/test) share a single code path — the
+// "shared-helper invariant" tested in pkg/webui/server_task_test_test.go.
+// The CLI does not currently surface params or per-call timeouts, so both
+// are passed as zero/nil; the daemon's parent ctx still bounds the run.
 func (cs *ControlServer) handleTaskTest(ctx context.Context, req Request) (TaskTestResult, error) {
 	if req.TaskID == "" {
 		return TaskTestResult{}, errors.New("taskID required")
 	}
-	spec, ok := cs.reg.Get(req.TaskID)
-	if !ok {
-		return TaskTestResult{}, fmt.Errorf("task %q not found", req.TaskID)
-	}
-	// tasktest.Run returns both a partial Result and err on certain paths
-	// (e.g. unsupported runtime, deno-not-available). Convert the Result to
-	// the wire shape regardless so the CLI can surface the partial info.
-	res, err := tasktest.Run(ctx, spec)
+	res, _, err := tasktest.RunByID(ctx, cs.reg, req.TaskID, nil, 0)
 	wire := TaskTestResult{
 		TaskID:   res.TaskID,
 		Runtime:  res.Runtime,
@@ -579,6 +578,11 @@ func (cs *ControlServer) handleTaskTest(ctx context.Context, req Request) (TaskT
 		Error:    res.Error,
 	}
 	if err != nil {
+		// Preserve the legacy error wording for the "task not found" path
+		// so CLI users see the same message they did pre-refactor.
+		if errors.Is(err, tasktest.ErrTaskNotFound) {
+			return wire, fmt.Errorf("task %q not found", req.TaskID)
+		}
 		if wire.Error == "" {
 			wire.Error = err.Error()
 		}
