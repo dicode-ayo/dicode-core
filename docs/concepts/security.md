@@ -44,6 +44,60 @@ The effective passphrase is resolved in this order on every auth check:
 3. ""                    — bootstrap state (see auto-generation below)
 ```
 
+### Passphrase storage — bcrypt hashing
+
+The DB-backed passphrase (source #2 above) is stored as a **bcrypt hash**, not
+plaintext. The work factor defaults to 12 (~300ms per hash on 2024 server
+hardware) and is tunable via:
+
+```yaml
+server:
+  bcrypt_cost: 12          # default; valid range 4–14
+```
+
+Lower the cost on resource-constrained devices (e.g. `bcrypt_cost: 10` on a Pi
+Zero) where ~300ms per login is too slow; raise it on beefy boxes that can
+afford >1s logins. Values outside 4–14 are rejected at config-load time —
+bcrypt accepts up to 31, but anything above ~14 is multi-second and offers
+no practical security gain for a single-user passphrase while risking
+operator self-lockout from a typo'd config.
+
+**bcrypt 72-byte caveat**: bcrypt silently truncates passwords longer than
+72 bytes. To prevent operators from believing their 100-character passphrase
+is fully protecting them, `POST /api/auth/passphrase` rejects inputs longer
+than 72 bytes with `400 Bad Request`. UTF-8 length is byte-counted — a few
+emoji can blow this fast.
+
+**Lazy migration from legacy plaintext**: deployments that pre-date this
+change have a plaintext value in `kv["auth.passphrase"]`. The shape is
+detected by `looksLikeBcryptHash` (`$2a$`, `$2b$`, `$2y$`, `$2$` prefixes);
+anything else is treated as legacy plaintext. On the next **successful**
+login the value is rehashed and overwritten — no operator action required,
+no passphrase reset, no downtime.
+
+Migration semantics:
+
+- Failed login attempts never trigger a rehash (the legacy plaintext is the
+  authoritative source until a real success).
+- Rehash failures are logged at WARN and swallowed — the operator's already-
+  authenticated session is not denied because of a transient DB issue. The
+  next successful login will retry.
+- Concurrent successful logins on the same legacy plaintext are collapsed by
+  a `singleflight.Group` so exactly one bcrypt computation + DB write
+  happens per migration event, no matter how many goroutines race in.
+- The in-process cache (`Server.cachedPassphrase`) is warmed with the new
+  hash so subsequent verifications skip both the legacy branch and the DB
+  read.
+
+**Fail-closed on DB read errors**: a transient DB outage (or context
+deadline, or anything else that makes the `kv` query error) causes
+`passphraseSource()` to return `passphraseSourceUnknown` rather than
+`passphraseSourceNone`. This is load-bearing: the bootstrap fast-path in
+`apiSecretsUnlock` accepts any password when no passphrase is set yet, so
+silently returning "none" on an error would let any login through during
+an outage. The login and passphrase-change endpoints both translate
+`passphraseSourceUnknown` → `503 Service Unavailable`.
+
 **Auto-generation on first boot**: if `server.auth: true` and no passphrase is set (neither YAML nor DB), dicode generates a cryptographically random 43-character passphrase (32 random bytes, base64url) and prints it to stdout once:
 
 ```text
@@ -477,6 +531,7 @@ All security-relevant fields in `ServerConfig`:
 | `allowed_origins` | []string | `[]` | CORS allowlist — empty = same-origin only |
 | `trust_proxy` | bool | `false` | Trust `X-Forwarded-For` (set when behind a reverse proxy) |
 | `mcp` | bool | `true` | Expose MCP endpoint at `/mcp` |
+| `bcrypt_cost` | int | `12` | bcrypt work factor for the stored passphrase hash; valid range 4–14 |
 
 ---
 
@@ -496,7 +551,11 @@ All security-relevant fields in `ServerConfig`:
 | Session tokens are random | `crypto/rand`, 32 bytes, never passphrase-derived |
 | Device tokens stored as hash | SHA-256 in SQLite, raw value only in cookie |
 | API keys stored as hash | SHA-256 in SQLite, raw value returned once |
-| Password comparison is constant-time | `crypto/subtle.ConstantTimeCompare` |
+| Stored passphrase is hashed | bcrypt at cost 12 (configurable 4–14), embedded cost lets verification keep working across cost changes |
+| Lazy migration from legacy plaintext | On next successful login; race-free via `singleflight.Group` so concurrent logins yield one bcrypt + one write |
+| 72-byte bcrypt limit enforced | API rejects passphrases > 72 bytes with `400` rather than silently truncating |
+| Fail-closed on DB read errors | `passphraseSourceUnknown` → `503` from login + change endpoints; bootstrap fast-path never reached on transient outage |
+| Password comparison is constant-time | `crypto/subtle.ConstantTimeCompare` (YAML), `bcrypt.CompareHashAndPassword` (DB hashes) |
 | Webhook signatures are constant-time | `hmac.Equal` |
 | CSRF protection | `SameSite=Strict` on all cookies |
 | Clickjacking protection | `X-Frame-Options: SAMEORIGIN` |
@@ -506,4 +565,4 @@ All security-relevant fields in `ServerConfig`:
 | Brute force protection | 5 attempts/IP, then 15-min lockout |
 | Replay attack protection | 5-minute timestamp window on signed webhooks |
 | CORS misconfiguration guard | Origins validated with `url.Parse()` at startup |
-| Passphrase rotation requires current | `crypto/subtle.ConstantTimeCompare` on `current` field |
+| Passphrase rotation requires current | bcrypt verify on `current` field |
