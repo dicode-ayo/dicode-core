@@ -1368,10 +1368,14 @@ func (s *Server) apiTestTask(w http.ResponseWriter, r *http.Request) {
 	// so we don't return 422 on the happy path. Cap the body so a misbehaving
 	// or malicious caller cannot stream gigabytes of JSON at the daemon
 	// (req.Params is unbounded by shape — only the byte count protects us).
+	// DisallowUnknownFields keeps the closed-schema posture symmetric with
+	// the params validator: top-level typos surface as 400 rather than being
+	// silently ignored.
 	var req testTaskRequest
 	if r.Body != nil {
 		r.Body = http.MaxBytesReader(w, r.Body, testTaskMaxBodyBytes)
 		dec := json.NewDecoder(r.Body)
+		dec.DisallowUnknownFields()
 		if err := dec.Decode(&req); err != nil && err != io.EOF {
 			jsonErr(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 			return

@@ -320,6 +320,28 @@ func TestAPI_TestTask_TimeoutCapClamps(t *testing.T) {
 	}
 }
 
+// TestAPI_TestTask_UnknownTopLevelKeyRejected pins the
+// DisallowUnknownFields posture on the request decoder. A typo'd top-level
+// field (e.g. `timeout` instead of `timeout_s`) must surface as a 400 with
+// a descriptive error rather than being silently ignored.
+func TestAPI_TestTask_UnknownTopLevelKeyRejected(t *testing.T) {
+	srv, reg := newTestServer(t)
+	registerTaskWithTest(t, reg, "strict-decode-task", "", passingTest)
+
+	body := `{"timeout": 5, "params": {}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks/strict-decode-task/test", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for unknown top-level key, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "timeout") {
+		t.Errorf("expected error message to mention the offending key, got %s", w.Body.String())
+	}
+}
+
 // TestAPI_TestTask_OversizedBody verifies the MaxBytesReader cap rejects
 // payloads larger than testTaskMaxBodyBytes with a 4xx — the request must
 // not be allowed to drain arbitrary memory before json.Decode notices.
