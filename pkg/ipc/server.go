@@ -777,6 +777,22 @@ func (s *Server) handleConn(conn net.Conn) {
 				"secrets":  written,
 			}, "")
 
+		case "dicode.oauth.list_status":
+			if !hasCap(caps, CapOAuthStatus) {
+				reply(req.ID, nil, "ipc: permission denied (oauth.status)")
+				continue
+			}
+			if s.secretsChain == nil {
+				reply(req.ID, nil, "ipc: secrets chain not configured")
+				continue
+			}
+			out, err := listOAuthStatus(context.Background(), s.secretsChain, req.Providers)
+			if err != nil {
+				reply(req.ID, nil, err.Error())
+				continue
+			}
+			reply(req.ID, out, "")
+
 		// ── mcp.* ─────────────────────────────────────────────────────────
 
 		case "mcp.list_tools":
