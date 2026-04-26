@@ -786,9 +786,9 @@ func (s *Server) handleConn(conn net.Conn) {
 				reply(req.ID, nil, "ipc: secrets chain not configured")
 				continue
 			}
-			out, err := listOAuthStatus(context.Background(), s.secretsChain, req.Providers)
+			out, err := listOAuthStatus(s.ctx, s.secretsChain, req.Providers)
 			if err != nil {
-				reply(req.ID, nil, err.Error())
+				reply(req.ID, nil, "ipc: list status: "+err.Error())
 				continue
 			}
 			reply(req.ID, out, "")
