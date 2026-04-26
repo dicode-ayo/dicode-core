@@ -19,12 +19,13 @@ import (
 const (
 	passphraseKVKey = "auth.passphrase"
 
-	// bcryptCost is the work factor used when hashing a stored passphrase.
-	// bcrypt.DefaultCost is 10 (~80ms on a 2024 server CPU). 12 raises that
-	// to ~300ms — still tolerable for an interactive login on the rate-limited
-	// /api/auth/login endpoint and gives meaningful headroom against offline
-	// attacks if the SQLite DB ever leaks.
-	bcryptCost = 12
+	// defaultBcryptCost is the work factor used when no operator override is
+	// supplied via server.bcrypt_cost. bcrypt.DefaultCost is 10 (~80ms on a
+	// 2024 server CPU). 12 raises that to ~300ms — still tolerable for an
+	// interactive login on the rate-limited /api/auth/login endpoint and
+	// gives meaningful headroom against offline attacks if the SQLite DB
+	// ever leaks. Operators can tune via server.bcrypt_cost (range 4–14).
+	defaultBcryptCost = 12
 )
 
 // passphraseStore persists the server auth passphrase in the SQLite kv table.
@@ -75,12 +76,20 @@ func (p *passphraseStore) set(ctx context.Context, value string) error {
 	)
 }
 
-// setHashed hashes the given plaintext passphrase with bcrypt and stores the
-// result, returning the hash so callers can warm in-process caches without a
-// second DB read. This is the only call sites should use when persisting a
-// passphrase from the UI or from auto-generation.
-func (p *passphraseStore) setHashed(ctx context.Context, plaintext string) (string, error) {
-	hash, err := bcrypt.GenerateFromPassword([]byte(plaintext), bcryptCost)
+// setHashed hashes the given plaintext passphrase with bcrypt at the given
+// cost factor and stores the result, returning the hash so callers can warm
+// in-process caches without a second DB read. This is the only call sites
+// should use when persisting a passphrase from the UI or from auto-generation.
+//
+// cost must be in bcrypt's accepted range (MinCost=4 .. MaxCost=31). When
+// cost <= 0, defaultBcryptCost is used so test helpers and a hypothetical
+// zero-config caller can't accidentally drop work factor to bcrypt's
+// silent-fallback DefaultCost (10).
+func (p *passphraseStore) setHashed(ctx context.Context, plaintext string, cost int) (string, error) {
+	if cost <= 0 {
+		cost = defaultBcryptCost
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(plaintext), cost)
 	if err != nil {
 		return "", fmt.Errorf("hash passphrase: %w", err)
 	}
@@ -161,7 +170,7 @@ func (s *Server) verifyPassphrase(ctx context.Context, candidate string) bool {
 		return false
 	}
 	if s.passphraseStore != nil {
-		if hash, err := s.passphraseStore.setHashed(ctx, candidate); err != nil {
+		if hash, err := s.passphraseStore.setHashed(ctx, candidate, s.cfg.Server.BcryptCost); err != nil {
 			s.log.Warn("lazy bcrypt migration: failed to rehash legacy passphrase; will retry on next login",
 				zap.Error(err))
 		} else {
@@ -278,7 +287,7 @@ func (s *Server) ensurePassphrase(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	hash, err := s.passphraseStore.setHashed(ctx, plaintext)
+	hash, err := s.passphraseStore.setHashed(ctx, plaintext, s.cfg.Server.BcryptCost)
 	if err != nil {
 		return fmt.Errorf("store passphrase: %w", err)
 	}
@@ -366,7 +375,7 @@ func (s *Server) apiChangePassphrase(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	hash, err := s.passphraseStore.setHashed(r.Context(), body.Passphrase)
+	hash, err := s.passphraseStore.setHashed(r.Context(), body.Passphrase, s.cfg.Server.BcryptCost)
 	if err != nil {
 		s.log.Error("failed to store passphrase", zap.Error(err))
 		jsonErr(w, "failed to store passphrase", http.StatusInternalServerError)

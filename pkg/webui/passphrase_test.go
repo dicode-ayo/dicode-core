@@ -83,7 +83,7 @@ func TestPassphraseStore_SetHashed_StoresBcryptHash(t *testing.T) {
 	defer d.Close()
 
 	ps := newPassphraseStore(d)
-	hash, err := ps.setHashed(context.Background(), "my-secret-pass")
+	hash, err := ps.setHashed(context.Background(), "my-secret-pass", bcrypt.MinCost)
 	if err != nil {
 		t.Fatalf("setHashed: %v", err)
 	}
@@ -111,8 +111,8 @@ func TestPassphraseStore_Overwrite(t *testing.T) {
 	defer d.Close()
 
 	ps := newPassphraseStore(d)
-	_, _ = ps.setHashed(context.Background(), "first-pass-1234")
-	_, _ = ps.setHashed(context.Background(), "second-pass-5678")
+	_, _ = ps.setHashed(context.Background(), "first-pass-1234", bcrypt.MinCost)
+	_, _ = ps.setHashed(context.Background(), "second-pass-5678", bcrypt.MinCost)
 
 	val, _ := ps.get(context.Background())
 	if !looksLikeBcryptHash(val) {
@@ -162,7 +162,7 @@ func TestVerifyPassphrase_YAMLOverrideTakesPrecedence(t *testing.T) {
 	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
 
 	// Even if the DB has a (different) bcrypt hash, the YAML override wins.
-	_, _ = srv.passphraseStore.setHashed(context.Background(), "db-passphrase")
+	_, _ = srv.passphraseStore.setHashed(context.Background(), "db-passphrase", bcrypt.MinCost)
 
 	if !srv.verifyPassphrase(context.Background(), "yaml-passphrase") {
 		t.Error("YAML passphrase should verify when set in config.Server.Secret")
@@ -184,7 +184,7 @@ func TestVerifyPassphrase_DBHashUsedWhenNoYAML(t *testing.T) {
 	cfg := &config.Config{Server: config.ServerConfig{Auth: true, Secret: ""}}
 	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
 
-	_, _ = srv.passphraseStore.setHashed(context.Background(), "stored-pass")
+	_, _ = srv.passphraseStore.setHashed(context.Background(), "stored-pass", bcrypt.MinCost)
 
 	if !srv.verifyPassphrase(context.Background(), "stored-pass") {
 		t.Error("verifyPassphrase should accept the correct DB-hashed passphrase")
@@ -326,7 +326,7 @@ func TestEnsurePassphrase_DoesNotOverwriteExisting(t *testing.T) {
 	cfg := &config.Config{Server: config.ServerConfig{Auth: true}}
 	srv, _ := New(8080, reg, eng, cfg, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
 
-	_, _ = srv.passphraseStore.setHashed(context.Background(), "already-set-1234")
+	_, _ = srv.passphraseStore.setHashed(context.Background(), "already-set-1234", bcrypt.MinCost)
 	before, _ := srv.passphraseStore.get(context.Background())
 
 	if err := srv.ensurePassphrase(context.Background()); err != nil {
@@ -404,7 +404,7 @@ func TestEnsurePassphrase_NoopWhenYAMLOverridePresent(t *testing.T) {
 func TestPassphraseAPI_StatusEndpoint(t *testing.T) {
 	srv := newAuthServer(t, "") // auth enabled, no YAML secret
 	// Manually set a DB passphrase via the hashed path.
-	_, _ = srv.passphraseStore.setHashed(context.Background(), "test-pass-1234")
+	_, _ = srv.passphraseStore.setHashed(context.Background(), "test-pass-1234", bcrypt.MinCost)
 
 	h := srv.Handler()
 	cookie := login(t, h, "test-pass-1234", false)
@@ -429,7 +429,7 @@ func TestPassphraseAPI_StatusEndpoint(t *testing.T) {
 
 func TestPassphraseAPI_ChangePassphrase(t *testing.T) {
 	srv := newAuthServer(t, "")
-	_, _ = srv.passphraseStore.setHashed(context.Background(), "old-passphrase-here")
+	_, _ = srv.passphraseStore.setHashed(context.Background(), "old-passphrase-here", bcrypt.MinCost)
 
 	h := srv.Handler()
 	cookie := login(t, h, "old-passphrase-here", false)
@@ -502,7 +502,7 @@ func TestPassphraseAPI_ChangeFromLegacyPlaintext(t *testing.T) {
 
 func TestPassphraseAPI_ChangeRequiresSession(t *testing.T) {
 	srv := newAuthServer(t, "")
-	_, _ = srv.passphraseStore.setHashed(context.Background(), "existing-pass-1234")
+	_, _ = srv.passphraseStore.setHashed(context.Background(), "existing-pass-1234", bcrypt.MinCost)
 	h := srv.Handler()
 
 	body, _ := json.Marshal(map[string]string{"current": "existing-pass-1234", "passphrase": "new-pass-should-fail"})
@@ -519,7 +519,7 @@ func TestPassphraseAPI_ChangeRequiresSession(t *testing.T) {
 
 func TestPassphraseAPI_ChangeTooShortRejected(t *testing.T) {
 	srv := newAuthServer(t, "")
-	_, _ = srv.passphraseStore.setHashed(context.Background(), "existing-long-pass-1234")
+	_, _ = srv.passphraseStore.setHashed(context.Background(), "existing-long-pass-1234", bcrypt.MinCost)
 	h := srv.Handler()
 
 	cookie := login(t, h, "existing-long-pass-1234", false)
@@ -541,7 +541,7 @@ func TestPassphraseAPI_ChangeTooShortRejected(t *testing.T) {
 
 func TestPassphraseAPI_WrongCurrentRejected(t *testing.T) {
 	srv := newAuthServer(t, "")
-	_, _ = srv.passphraseStore.setHashed(context.Background(), "correct-current-pass-123")
+	_, _ = srv.passphraseStore.setHashed(context.Background(), "correct-current-pass-123", bcrypt.MinCost)
 	h := srv.Handler()
 
 	cookie := login(t, h, "correct-current-pass-123", false)
@@ -639,7 +639,7 @@ func invalidateCache(s *Server) {
 
 func TestVerifyPassphrase_DBErrorFailsClosed(t *testing.T) {
 	srv := newAuthServer(t, "")
-	_, _ = srv.passphraseStore.setHashed(context.Background(), "stored-pass-1234")
+	_, _ = srv.passphraseStore.setHashed(context.Background(), "stored-pass-1234", bcrypt.MinCost)
 
 	srv.passphraseStore = newPassphraseStore(&failingDB{queryErr: context.DeadlineExceeded})
 	invalidateCache(srv)
@@ -651,7 +651,7 @@ func TestVerifyPassphrase_DBErrorFailsClosed(t *testing.T) {
 
 func TestPassphraseSource_DBErrorReturnsUnknown(t *testing.T) {
 	srv := newAuthServer(t, "")
-	_, _ = srv.passphraseStore.setHashed(context.Background(), "stored-pass-1234")
+	_, _ = srv.passphraseStore.setHashed(context.Background(), "stored-pass-1234", bcrypt.MinCost)
 
 	srv.passphraseStore = newPassphraseStore(&failingDB{queryErr: context.DeadlineExceeded})
 	invalidateCache(srv)
@@ -667,7 +667,7 @@ func TestPassphraseSource_DBErrorReturnsUnknown(t *testing.T) {
 // fast-path then accepted ANY password. Now it must reject with 503.
 func TestApiSecretsUnlock_DBErrorRejects(t *testing.T) {
 	srv := newAuthServer(t, "")
-	_, _ = srv.passphraseStore.setHashed(context.Background(), "stored-pass-1234")
+	_, _ = srv.passphraseStore.setHashed(context.Background(), "stored-pass-1234", bcrypt.MinCost)
 
 	srv.passphraseStore = newPassphraseStore(&failingDB{queryErr: context.DeadlineExceeded})
 	invalidateCache(srv)
@@ -691,7 +691,7 @@ func TestApiSecretsUnlock_DBErrorRejects(t *testing.T) {
 
 func TestApiChangePassphrase_DBErrorRejects(t *testing.T) {
 	srv := newAuthServer(t, "")
-	_, _ = srv.passphraseStore.setHashed(context.Background(), "old-pass-here-123")
+	_, _ = srv.passphraseStore.setHashed(context.Background(), "old-pass-here-123", bcrypt.MinCost)
 
 	h := srv.Handler()
 	cookie := login(t, h, "old-pass-here-123", false)
@@ -717,11 +717,74 @@ func TestApiChangePassphrase_DBErrorRejects(t *testing.T) {
 	}
 }
 
+// ── configurable bcrypt cost (#209) ──────────────────────────────────────────
+
+// The server.bcrypt_cost YAML knob must reach GenerateFromPassword at every
+// hashing site (apiChangePassphrase, ensurePassphrase, lazy migration). We
+// inspect the resulting hash via bcrypt.Cost — it returns the cost embedded
+// in the hash header — to assert the wire-up rather than mocking.
+func TestApiChangePassphrase_HonorsConfiguredBcryptCost(t *testing.T) {
+	srv := newAuthServer(t, "")
+	srv.cfg.Server.BcryptCost = 5 // intentionally non-default; still > MinCost
+	_, _ = srv.passphraseStore.setHashed(context.Background(), "old-pass-here-123", bcrypt.MinCost)
+
+	h := srv.Handler()
+	cookie := login(t, h, "old-pass-here-123", false)
+	if cookie == nil {
+		t.Fatal("login failed")
+	}
+
+	body, _ := json.Marshal(map[string]string{
+		"current":    "old-pass-here-123",
+		"passphrase": "new-strong-passphrase-123",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/passphrase", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	stored, _ := srv.passphraseStore.get(context.Background())
+	cost, err := bcrypt.Cost([]byte(stored))
+	if err != nil {
+		t.Fatalf("bcrypt.Cost: %v", err)
+	}
+	if cost != 5 {
+		t.Errorf("stored hash cost = %d, want 5 (configured)", cost)
+	}
+}
+
+// setHashed must treat cost <= 0 as "use the package default" — protects
+// against test helpers and hand-built Config structs that skip applyDefaults.
+// Without this we'd silently pass 0 to bcrypt, which falls back to its own
+// DefaultCost (10) — close to what we want, but we prefer the documented
+// constant we control.
+func TestSetHashed_ZeroCostFallsBackToDefault(t *testing.T) {
+	d, _ := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	defer d.Close()
+
+	ps := newPassphraseStore(d)
+	hash, err := ps.setHashed(context.Background(), "pp-default-cost", 0)
+	if err != nil {
+		t.Fatalf("setHashed: %v", err)
+	}
+	cost, err := bcrypt.Cost([]byte(hash))
+	if err != nil {
+		t.Fatalf("bcrypt.Cost: %v", err)
+	}
+	if cost != defaultBcryptCost {
+		t.Errorf("hash cost = %d, want %d (defaultBcryptCost)", cost, defaultBcryptCost)
+	}
+}
+
 // ── bcrypt input length cap ──────────────────────────────────────────────────
 
 func TestPassphraseAPI_ChangeRejectsLongerThanBcryptLimit(t *testing.T) {
 	srv := newAuthServer(t, "")
-	_, _ = srv.passphraseStore.setHashed(context.Background(), "current-pass-1234567")
+	_, _ = srv.passphraseStore.setHashed(context.Background(), "current-pass-1234567", bcrypt.MinCost)
 
 	h := srv.Handler()
 	cookie := login(t, h, "current-pass-1234567", false)

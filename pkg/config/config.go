@@ -213,6 +213,13 @@ type ServerConfig struct {
 	MCP            *bool    `yaml:"mcp,omitempty"`             // expose MCP endpoint at /mcp; nil → default true, explicit false opts out
 	TLSCertFile    string   `yaml:"tls_cert,omitempty"`        // path to TLS certificate (PEM); enables HTTPS when set with tls_key
 	TLSKeyFile     string   `yaml:"tls_key,omitempty"`         // path to TLS private key (PEM)
+	// BcryptCost is the work factor used when hashing the stored auth
+	// passphrase. Valid range 4–14. 0 means "unset" → defaults to 12 in
+	// applyDefaults. Higher = slower login but stronger against offline attacks
+	// if the SQLite DB ever leaks; lower can be useful on very small devices
+	// (e.g. Raspberry Pi Zero) where the default ~300ms login is too slow.
+	// Values outside 4–14 are rejected by validate.
+	BcryptCost int `yaml:"bcrypt_cost,omitempty"`
 }
 
 // Load reads and parses the config file at path, then applies defaults.
@@ -316,6 +323,14 @@ func applyDefaults(cfg *Config, configDir string) {
 		t := true
 		cfg.Server.MCP = &t
 	}
+	// BcryptCost defaults to 12 — ~300ms per hash on a 2024 server CPU.
+	// Operators can override via server.bcrypt_cost in dicode.yaml; validate()
+	// enforces the 4–14 range. We keep the unset → default mapping in
+	// applyDefaults rather than at the call site so every consumer sees the
+	// resolved value.
+	if cfg.Server.BcryptCost == 0 {
+		cfg.Server.BcryptCost = 12
+	}
 	// Default secret providers if none configured
 	if len(cfg.Secrets.Providers) == 0 {
 		cfg.Secrets.Providers = []SecretProviderConfig{
@@ -372,6 +387,14 @@ func (cfg *Config) validate() error {
 		if u.Host == "" {
 			return fmt.Errorf("relay.broker_url: missing host in %q", cfg.Relay.BrokerURL)
 		}
+	}
+	// bcrypt cost: x/crypto/bcrypt's MinCost = 4, MaxCost = 31, but anything
+	// above ~14 is multi-second per login on commodity hardware and serves no
+	// practical purpose for a single-user passphrase. Cap at 14 to prevent
+	// operators from accidentally locking themselves out (or causing a
+	// mid-attempt timeout) by setting 20 "to be safe".
+	if cfg.Server.BcryptCost != 0 && (cfg.Server.BcryptCost < 4 || cfg.Server.BcryptCost > 14) {
+		return fmt.Errorf("server.bcrypt_cost: must be between 4 and 14, got %d", cfg.Server.BcryptCost)
 	}
 	return nil
 }
