@@ -162,8 +162,8 @@ type Server struct {
 	relayClient        *relay.Client
 	managedRuntimes    []pkgruntime.ManagedRuntime
 	sessions           *sessionStore
-	dbSessions         *dbSessionStore  // persistent sessions / trusted devices
-	apiKeys            *apiKeyStore     // MCP / programmatic API keys
+	dbSessions         *dbSessionStore    // persistent sessions / trusted devices
+	apiKeys            *apiKeyStore       // MCP / programmatic API keys
 	passphraseStore    *passphraseStore   // auth passphrase persisted in DB
 	cachedPassphrase   string             // in-memory cache of stored DB value (bcrypt hash, or legacy plaintext during migration); invalidated on change
 	cachedPassphraseMu sync.RWMutex       // guards cachedPassphrase

@@ -781,10 +781,10 @@ func TestVerifyPassphrase_ConcurrentLegacyMigration_SingleWrite(t *testing.T) {
 	// Race N goroutines on the same valid legacy plaintext.
 	const N = 16
 	var (
-		wg     sync.WaitGroup
-		ready  sync.WaitGroup
-		start  = make(chan struct{})
-		oks    int32
+		wg    sync.WaitGroup
+		ready sync.WaitGroup
+		start = make(chan struct{})
+		oks   int32
 	)
 	wg.Add(N)
 	ready.Add(N)
