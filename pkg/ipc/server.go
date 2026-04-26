@@ -138,6 +138,8 @@ func New(
 // can call dicode.secrets_set() and dicode.secrets_delete().
 func (s *Server) SetSecrets(m secrets.Manager) { s.secrets = m }
 
+// SetSecretsChain attaches the read-side chain (env-fallback aware) used by
+// dicode.oauth.list_status to introspect provider connection metadata.
 func (s *Server) SetSecretsChain(c secrets.Chain) { s.secretsChain = c }
 
 // SetRedactor installs a log-message redactor. Messages received via the
