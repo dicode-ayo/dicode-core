@@ -39,6 +39,7 @@ const (
 	CapMCPCall     = "mcp.call"      // mcp.list_tools, mcp.call — also checked against allowed_mcp
 	CapOAuthInit   = "oauth.init"    // dicode.oauth.build_auth_url — for the auth-start built-in task
 	CapOAuthStore  = "oauth.store"   // dicode.oauth.store_token — for the auth-relay built-in task
+	CapOAuthStatus = "oauth.status"  // dicode.oauth.list_status — for the auth-providers built-in task
 
 	// Reserved for CLI and WebUI clients (not issued to task shims today).
 	CapHTTPRegister  = "http.register" // register HTTP handler routes (issue #54)
