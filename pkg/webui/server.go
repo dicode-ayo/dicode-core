@@ -164,9 +164,10 @@ type Server struct {
 	sessions           *sessionStore
 	dbSessions         *dbSessionStore  // persistent sessions / trusted devices
 	apiKeys            *apiKeyStore     // MCP / programmatic API keys
-	passphraseStore    *passphraseStore // auth passphrase persisted in DB
-	cachedPassphrase   string           // in-memory cache of stored DB value (bcrypt hash, or legacy plaintext during migration); invalidated on change
-	cachedPassphraseMu sync.RWMutex
+	passphraseStore    *passphraseStore   // auth passphrase persisted in DB
+	cachedPassphrase   string             // in-memory cache of stored DB value (bcrypt hash, or legacy plaintext during migration); invalidated on change
+	cachedPassphraseMu sync.RWMutex       // guards cachedPassphrase
+	migrateGroup       passphraseMigrator // collapses concurrent legacy-passphrase migrations to one bcrypt+write
 	limiter            *unlockLimiter
 	logs               *LogBroadcaster
 	ws                 *WSHub

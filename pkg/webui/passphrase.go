@@ -14,6 +14,7 @@ import (
 	"github.com/dicode/dicode/pkg/db"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/bcrypt"
+	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -122,6 +123,23 @@ func looksLikeBcryptHash(v string) bool {
 		strings.HasPrefix(v, "$2$")
 }
 
+// passphraseMigrator collapses concurrent legacy-plaintext → bcrypt migration
+// attempts into a single bcrypt computation + DB write. Without it, two valid
+// logins racing on the same plaintext would each compute a fresh ~300ms hash
+// and INSERT…ON CONFLICT each other, doubling CPU and producing two audit-log
+// "migrated" entries when one is correct. With it, the second caller blocks
+// briefly on the first's hash result and shares it.
+//
+// singleflight.Group is safe for concurrent use and zero-value ready, so the
+// embedding into Server needs no initialisation. We always key on the kvKey
+// constant (there's only one passphrase per server) — using the candidate
+// plaintext as the key would leak information into the global key space and
+// gain nothing since concurrent attempts on different plaintexts can't both
+// be valid.
+type passphraseMigrator struct {
+	g singleflight.Group
+}
+
 // verifyPassphrase checks a candidate passphrase against the configured
 // authentication source and returns true if it matches. It is the only
 // function that should be used to authenticate a user-supplied passphrase.
@@ -170,19 +188,72 @@ func (s *Server) verifyPassphrase(ctx context.Context, candidate string) bool {
 		return false
 	}
 	if s.passphraseStore != nil {
-		if hash, err := s.passphraseStore.setHashed(ctx, candidate, s.cfg.Server.BcryptCost); err != nil {
-			s.log.Warn("lazy bcrypt migration: failed to rehash legacy passphrase; will retry on next login",
-				zap.Error(err))
-		} else {
-			// Warm the cache with the new hash so subsequent logins skip the
-			// legacy branch immediately, without a second DB round-trip.
-			s.cachedPassphraseMu.Lock()
-			s.cachedPassphrase = hash
-			s.cachedPassphraseMu.Unlock()
-			s.log.Info("auth passphrase migrated from legacy plaintext to bcrypt hash")
-		}
+		s.migrateLegacyPlaintext(ctx, candidate)
 	}
 	return true
+}
+
+// migrateLegacyPlaintext rehashes a verified legacy-plaintext passphrase to
+// bcrypt and warms the cache. It is safe under concurrent successful logins
+// on the same plaintext: singleflight collapses the bcrypt + DB write to a
+// single execution and the duplicate callers receive the same hash without
+// re-computing or re-writing.
+//
+// Any error is logged at WARN and swallowed — the caller has already verified
+// the passphrase, so failing the migration must NOT fail the login. The next
+// successful login will retry; in the meantime the legacy plaintext stays
+// readable and verifiable.
+//
+// Caller must hold no locks: the singleflight callback re-acquires
+// cachedPassphraseMu for the cache warm-up.
+func (s *Server) migrateLegacyPlaintext(ctx context.Context, plaintext string) {
+	// Re-check cache inside the singleflight key path: if a concurrent
+	// migrator already wrote the bcrypt hash, the cache will reflect it and
+	// we can skip the rehash entirely. This isn't strictly necessary for
+	// correctness (singleflight already collapses concurrent calls) but it
+	// prevents an unnecessary bcrypt CPU burn for late arrivals that come
+	// in just after the in-flight migration completes.
+	s.cachedPassphraseMu.RLock()
+	cached := s.cachedPassphrase
+	s.cachedPassphraseMu.RUnlock()
+	if looksLikeBcryptHash(cached) {
+		return
+	}
+
+	// singleflight key is the constant kvKey — there's only one passphrase
+	// per server, so all concurrent migrations on this server must share a
+	// single in-flight execution.
+	_, err, _ := s.migrateGroup.g.Do(passphraseKVKey, func() (any, error) {
+		// Inside the singleflight: re-check one more time so the SECOND of
+		// two truly concurrent callers (both passed the outer cache check
+		// before either entered Do) doesn't redo the work the FIRST one is
+		// finishing — this is the case singleflight.Do already guarantees
+		// once both are inside Do, but the re-check tightens the window for
+		// callers that arrive while the first's write has propagated to the
+		// cache via warm-up but the singleflight key has just been released.
+		s.cachedPassphraseMu.RLock()
+		cached := s.cachedPassphrase
+		s.cachedPassphraseMu.RUnlock()
+		if looksLikeBcryptHash(cached) {
+			return cached, nil
+		}
+
+		hash, err := s.passphraseStore.setHashed(ctx, plaintext, s.cfg.Server.BcryptCost)
+		if err != nil {
+			return "", err
+		}
+		// Warm the cache with the new hash so subsequent logins skip the
+		// legacy branch immediately, without a second DB round-trip.
+		s.cachedPassphraseMu.Lock()
+		s.cachedPassphrase = hash
+		s.cachedPassphraseMu.Unlock()
+		s.log.Info("auth passphrase migrated from legacy plaintext to bcrypt hash")
+		return hash, nil
+	})
+	if err != nil {
+		s.log.Warn("lazy bcrypt migration: failed to rehash legacy passphrase; will retry on next login",
+			zap.Error(err))
+	}
 }
 
 // cachedDBValue returns the DB-stored passphrase value (hash or legacy
