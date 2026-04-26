@@ -71,7 +71,9 @@ package ipc
 
 import (
     "context"
+    "errors"
     "fmt"
+
     "github.com/dicode/dicode/pkg/secrets"
 )
 
@@ -85,7 +87,11 @@ type ProviderStatus struct {
     TokenType *string `json:"token_type,omitempty"`
 }
 
-func listOAuthStatus(ctx context.Context, mgr secrets.Manager, providers []string) ([]ProviderStatus, error) {
+// listOAuthStatus reads OAuth status metadata via the provided secrets.Chain.
+// Chain (not Manager) is the right interface here: it walks the env-var
+// fallback provider, so a token set via the host env shows up as connected
+// just like one written to the encrypted local store.
+func listOAuthStatus(ctx context.Context, chain secrets.Chain, providers []string) ([]ProviderStatus, error) {
     if len(providers) > maxStatusBatchSize {
         return nil, fmt.Errorf("too many providers: %d > %d", len(providers), maxStatusBatchSize)
     }
@@ -97,25 +103,47 @@ func listOAuthStatus(ctx context.Context, mgr secrets.Manager, providers []strin
         }
         // Resolve the four metadata keys; absence is fine and yields a
         // partial entry. Plaintext tokens are never read into ProviderStatus.
-        access, _ := mgr.Resolve(ctx, prefix+"_ACCESS_TOKEN")
+        access := resolveOrEmpty(ctx, chain, prefix+"_ACCESS_TOKEN")
         entry := ProviderStatus{
             Provider: p,
             HasToken: access != "",
         }
-        if v, _ := mgr.Resolve(ctx, prefix+"_EXPIRES_AT"); v != "" {
+        if v := resolveOrEmpty(ctx, chain, prefix+"_EXPIRES_AT"); v != "" {
             entry.ExpiresAt = &v
         }
-        if v, _ := mgr.Resolve(ctx, prefix+"_SCOPE"); v != "" {
+        if v := resolveOrEmpty(ctx, chain, prefix+"_SCOPE"); v != "" {
             entry.Scope = &v
         }
-        if v, _ := mgr.Resolve(ctx, prefix+"_TOKEN_TYPE"); v != "" {
+        if v := resolveOrEmpty(ctx, chain, prefix+"_TOKEN_TYPE"); v != "" {
             entry.TokenType = &v
         }
         out = append(out, entry)
     }
     return out, nil
 }
+
+// resolveOrEmpty wraps Chain.Resolve so a NotFound becomes empty string.
+// Provider-error cases (network down, etc.) are also tolerated as empty for
+// status-reporting purposes; the caller only needs presence/absence.
+func resolveOrEmpty(ctx context.Context, chain secrets.Chain, key string) string {
+    v, err := chain.Resolve(ctx, key)
+    if err != nil {
+        var notFound *secrets.NotFoundError
+        if errors.As(err, &notFound) {
+            return ""
+        }
+        return ""
+    }
+    return v
+}
 ```
+
+The `secrets.Chain` is already constructed by the daemon at boot
+([`pkg/daemon/daemon.go:133`](../../../pkg/daemon/daemon.go) calls
+`buildSecretsChain`) and threaded into the deno runtime
+([`pkg/runtime/deno/runtime.go:73`](../../../pkg/runtime/deno/runtime.go)).
+Wiring it into the IPC server is one extra setter call (see "Touched
+files" below).
 
 `sanitizeProviderPrefix` is the existing helper at
 [`pkg/ipc/oauth_store.go:128`](../../../pkg/ipc/oauth_store.go) — it
@@ -213,25 +241,15 @@ permissions:
   dicode:
     oauth_status: true
     tasks:
-      # Explicit list — `taskAllowed` (pkg/ipc/server.go:870) supports
-      # only "*" or exact match, not glob, so each callable task ID is
-      # listed by name. The set mirrors the entries in
-      # tasks/auth/taskset.yaml plus the standalone openrouter task.
-      - "auth/github-oauth"
-      - "auth/google-oauth"
-      - "auth/slack-oauth"
-      - "auth/spotify-oauth"
-      - "auth/linear-oauth"
-      - "auth/discord-oauth"
-      - "auth/gitlab-oauth"
-      - "auth/airtable-oauth"
-      - "auth/notion-oauth"
-      - "auth/confluence-oauth"
-      - "auth/salesforce-oauth"
-      - "auth/stripe-oauth"
-      - "auth/office365-oauth"
-      - "auth/azure-oauth"
-      - "auth/openrouter-oauth"
+      # Only auth-start needs to be reachable: it takes a provider param
+      # and returns { url, session_id }. The per-provider auth/*-oauth
+      # tasks return HTML via handleAuthNeeded (tasks/auth/_oauth/flow.ts)
+      # which is fine for browser triggers but not callable as a JSON
+      # contract from another task. OpenRouter is the standalone
+      # exception (no relay broker) — for that provider the SPA opens
+      # /hooks/openrouter-oauth directly in a new tab (the user clicks
+      # "Authorize" on the task's own page; same UX as today).
+      - "buildin/auth-start"
 
 timeout: 30s
 
@@ -252,15 +270,38 @@ interface ProviderMeta {
   taskId: string;   // task to run on Connect
 }
 
+interface ProviderMeta {
+  key:        string;   // matches list_status `provider`
+  label:      string;
+  color:      string;   // brand colour
+  // standalone === true means the provider is NOT relay-broker-backed; the
+  // Connect button opens /hooks/<webhook> in a new tab (the per-provider
+  // task renders an "Authorize with X" page). Currently only OpenRouter.
+  standalone?: { webhookPath: string };
+}
+
 const KNOWN: ProviderMeta[] = [
-  { key: "github",   label: "GitHub",     color: "#24292e", taskId: "auth/github-oauth" },
-  { key: "google",   label: "Google",     color: "#4285f4", taskId: "auth/google-oauth" },
-  // ... 13 more
-  { key: "openrouter", label: "OpenRouter", color: "#9b50e1", taskId: "auth/openrouter-oauth" },
+  { key: "github",     label: "GitHub",     color: "#24292e" },
+  { key: "google",     label: "Google",     color: "#4285f4" },
+  { key: "slack",      label: "Slack",      color: "#4a154b" },
+  { key: "spotify",    label: "Spotify",    color: "#1db954" },
+  { key: "linear",     label: "Linear",     color: "#5e6ad2" },
+  { key: "discord",    label: "Discord",    color: "#5865f2" },
+  { key: "gitlab",     label: "GitLab",     color: "#fc6d26" },
+  { key: "airtable",   label: "Airtable",   color: "#fcb400" },
+  { key: "notion",     label: "Notion",     color: "#000000" },
+  { key: "confluence", label: "Confluence", color: "#0052cc" },
+  { key: "salesforce", label: "Salesforce", color: "#00a1e0" },
+  { key: "stripe",     label: "Stripe",     color: "#635bff" },
+  { key: "office365",  label: "Office365",  color: "#d83b01" },
+  { key: "azure",      label: "Azure",      color: "#0078d4" },
+  { key: "openrouter", label: "OpenRouter", color: "#6467f2",
+    standalone: { webhookPath: "/hooks/openrouter-oauth" } },
 ];
 
-export default async function main({ params, input, dicode, output }: DicodeSdk) {
-  const requested = ((await params.get("providers")) ?? "").split(",").map(s => s.trim()).filter(Boolean);
+export default async function main({ params, input, dicode }: DicodeSdk) {
+  const requested = ((await params.get("providers")) ?? "")
+    .split(",").map(s => s.trim()).filter(Boolean);
   if (requested.length > 64) throw new Error("at most 64 providers");
 
   const inp = (input ?? null) as Record<string, unknown> | null;
@@ -276,8 +317,18 @@ export default async function main({ params, input, dicode, output }: DicodeSdk)
     const p = String(inp?.provider ?? "");
     const m = KNOWN.find(k => k.key === p);
     if (!m) throw new Error(`unknown provider: ${p}`);
-    const result = await dicode.run_task(m.taskId);
-    return { provider: p, url: (result?.result as any)?.url, session_id: (result?.result as any)?.session_id };
+
+    if (m.standalone) {
+      // Open the task's own webhook page; user clicks "Authorize" there.
+      const baseURL = (Deno.env.get("DICODE_BASE_URL") ?? "http://localhost:8080").replace(/\/$/, "");
+      return { provider: p, url: `${baseURL}${m.standalone.webhookPath}` };
+    }
+
+    // Relay-broker provider: auth-start signs the /auth/:provider URL.
+    const run = await dicode.run_task("buildin/auth-start", { provider: p });
+    const ret = (run as { returnValue?: { url?: string; session_id?: string } })?.returnValue;
+    if (!ret?.url) throw new Error(`buildin/auth-start did not return a url for ${p}`);
+    return { provider: p, url: ret.url, session_id: ret.session_id };
   }
 
   throw new Error(`unknown action: ${action}`);
@@ -319,12 +370,15 @@ be reverted later.
 
 ## Data flow — Connect
 
+### Relay-broker provider (e.g. github)
+
 ```
 1.  user clicks Connect on "github" card
 2.  SPA → POST /hooks/auth-providers   { action: "connect", provider: "github" }
-3.  task.ts looks up KNOWN["github"] → taskId "auth/github-oauth"
-4.  dicode.run_task("auth/github-oauth")
-       → returns { result: { url, session_id } }   (already the contract of the auth/github-oauth + auth-start tasks)
+3.  task.ts looks up KNOWN["github"] → no `standalone` flag
+4.  dicode.run_task("buildin/auth-start", { provider: "github" })
+       → returns RunResult.returnValue = { url, session_id }
+       (auth-start's main() already returns this exact shape)
 5.  task.ts → JSON { url, session_id }
 6.  SPA → window.open(url, "_blank")
 7.  user authorises in the new tab
@@ -332,18 +386,30 @@ be reverted later.
 9.  SPA's 5 s poll picks up the new <P>_ACCESS_TOKEN and flips the card to "Connected"
 ```
 
-`dicode.run_task` already requires the calling task to declare the
-target task ID under `permissions.dicode.tasks`. The current
-`taskAllowed` implementation supports only `"*"` or exact match
-(no glob), so all 15 callable task IDs are listed explicitly in the
-auth-providers `task.yaml` (see snippet above). Adding glob support
-to `taskAllowed` is plausible but out of scope here — the explicit
-list is a clearer audit trail anyway.
+### Standalone provider (OpenRouter)
+
+```
+1.  user clicks Connect on "openrouter" card
+2.  SPA → POST /hooks/auth-providers   { action: "connect", provider: "openrouter" }
+3.  task.ts looks up KNOWN["openrouter"] → standalone.webhookPath
+4.  task.ts → JSON { url: "${baseURL}/hooks/openrouter-oauth" }
+5.  SPA → window.open(url, "_blank")
+6.  openrouter-oauth task GET-runs in the new tab; renders authorize-button HTML
+7.  user clicks "Authorize with OpenRouter" → upstream consent → callback writes secret
+8.  SPA's 5 s poll picks up OPENROUTER_ACCESS_TOKEN and flips the card to "Connected"
+```
 
 The `auth-relay` task (already shipped) is the receiver of the relay
 broker's encrypted token delivery; it persists `<P>_ACCESS_TOKEN`,
 `<P>_REFRESH_TOKEN`, `<P>_EXPIRES_AT`, `<P>_SCOPE`, `<P>_TOKEN_TYPE`
 via `dicode.oauth.store_token`. No change there.
+
+`dicode.run_task` requires the calling task to declare the target task
+ID under `permissions.dicode.tasks`. The current `taskAllowed`
+implementation supports only `"*"` or exact match (no glob), and we
+only need to call `buildin/auth-start`, so the auth-providers
+`task.yaml` lists exactly that one entry. Adding glob support to
+`taskAllowed` is plausible but out of scope here.
 
 ## Error handling
 
@@ -415,12 +481,17 @@ existing tests for `oauth_init` and `oauth_store`.
 
 1. `action=list` with two providers → calls `dicode.oauth.list_status`
    with the right array; merges with KNOWN and returns array of cards.
-2. `action=connect` with a known provider → calls
-   `dicode.run_task("auth/<p>-oauth")`; returns `{ provider, url,
-   session_id }`.
-3. `action=connect` with an unknown key → throws.
-4. `params.providers` empty → returns empty list (no IPC call).
-5. `params.providers` containing > 64 entries → throws.
+2. `action=connect` with a relay-broker provider (`github`) → calls
+   `dicode.run_task("buildin/auth-start", { provider: "github" })` and
+   returns `{ provider, url, session_id }` from the run's
+   `returnValue`.
+3. `action=connect` with `openrouter` (standalone) → does **not** call
+   `dicode.run_task`; returns `{ provider: "openrouter", url:
+   "<base>/hooks/openrouter-oauth" }`.
+4. `action=connect` with an unknown key → throws.
+5. `action=connect` where `auth-start` returns no url → throws.
+6. `params.providers` empty → returns empty list (no IPC call).
+7. `params.providers` containing > 64 entries → throws.
 
 ### Playwright e2e
 
@@ -472,6 +543,12 @@ Modified:
   [`pkg/ipc/server.go:619`](../../../pkg/ipc/server.go) and
   [`pkg/ipc/server.go:673`](../../../pkg/ipc/server.go)) that gates on
   `hasCap(caps, CapOAuthStatus)`.
+- `pkg/ipc/server.go` — also add a `secretsChain secrets.Chain` field
+  + `SetSecretsChain(c secrets.Chain)` setter alongside the existing
+  `SetSecrets(m secrets.Manager)` ([`pkg/ipc/server.go:135`](../../../pkg/ipc/server.go)).
+- `pkg/runtime/deno/runtime.go` — call `srv.SetSecretsChain(rt.secrets)`
+  alongside the existing `srv.SetSecrets(rt.secretsManager)` at
+  [`pkg/runtime/deno/runtime.go:236`](../../../pkg/runtime/deno/runtime.go).
 - `pkg/runtime/deno/sdk/{shim.ts,sdk.d.ts}` — typed `list_status`.
 - `tasks/buildin/taskset.yaml` — register the new builtin entry.
 - `tasks/auth/openrouter-oauth/task.ts` — rename `OPENROUTER_API_KEY` →
@@ -499,5 +576,7 @@ the security pass:
 - `permissions.dicode.oauth_status` defaults to denied and is checked at
   dispatch.
 - `tasks/buildin/auth-providers/task.yaml` has `trigger.auth: true`.
-- The Connect flow's `run_task` is constrained to the
-  `permissions.dicode.tasks: ["auth/*"]` glob.
+- The Connect flow's `run_task` is constrained to a single allowed
+  target — `buildin/auth-start` — via
+  `permissions.dicode.tasks`. No other task is callable from
+  auth-providers.
