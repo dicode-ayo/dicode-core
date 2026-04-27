@@ -62,6 +62,7 @@ interface State {
   httpCalls: HttpCall[];
   taskModuleUrl: string;
   dicode: MockDicode;
+  input: unknown;
 }
 
 function freshDicode(): MockDicode {
@@ -85,6 +86,7 @@ const state: State = {
   httpCalls: [],
   taskModuleUrl: "",
   dicode: freshDicode(),
+  input: undefined,
 };
 
 function resetMocks() {
@@ -97,9 +99,11 @@ function resetMocks() {
   state.httpMocks = [];
   state.httpCalls = [];
   state.dicode = freshDicode();
+  state.input = undefined;
   // Re-expose the fresh mutable object under globalThis.dicode so tests
   // picking it up after resetMocks see the cleared defaults.
-  (globalThis as unknown as { dicode: MockDicode }).dicode = state.dicode;
+  (globalThis as unknown as { dicode: MockDicode; input: unknown }).dicode = state.dicode;
+  (globalThis as unknown as { input: unknown }).input = undefined;
 }
 
 // ─── SDK mocks (shape matches DicodeSdk in tasks/sdk.ts) ─────────────────
@@ -296,10 +300,13 @@ let taskMain: ((sdk: unknown) => unknown) | null = null;
 // deno-lint-ignore no-explicit-any
 async function runTask(): Promise<any> {
   if (!taskMain) throw new Error("runTask: setupHarness(import.meta.url) must be awaited before test() runs");
+  // Pull the freshest globalThis.input so tests can assign it directly
+  // without going through a setter — matches the documented harness API.
+  const liveInput = (globalThis as unknown as { input: unknown }).input;
   const sdk = {
     params,
     kv,
-    input: undefined,
+    input: liveInput ?? state.input,
     output: { html: async () => {}, text: async () => {}, image: async () => {}, file: async () => {} },
     mcp: { list_tools: async () => [], call: async () => ({}) },
     dicode: state.dicode,
@@ -357,6 +364,7 @@ export async function setupHarness(testFileUrl: string): Promise<void> {
     assert,
     runTask,
     dicode: state.dicode,
+    input: undefined,
   });
 
   const mod = await import(state.taskModuleUrl);
@@ -385,6 +393,8 @@ declare global {
   var runTask: () => Promise<any>;
   // deno-lint-ignore no-var
   var dicode: MockDicode;
+  // deno-lint-ignore no-var
+  var input: unknown;
 }
 
 // Re-export realFetch so tests that explicitly want real network can grab it.
