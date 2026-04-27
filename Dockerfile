@@ -29,6 +29,11 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     go build -trimpath -buildvcs=false -ldflags "-s -w -X main.version=${VERSION}" \
       -o /out/dicode ./cmd/dicode
 
+# Stub directory copied into the runtime stage as /data so the mount
+# point exists with nonroot ownership. Distroless has no shell, so we
+# can't mkdir/chown at runtime — pre-staging here is the only way.
+RUN mkdir -p /out/data
+
 # --- Runtime stage --------------------------------------------------------
 FROM gcr.io/distroless/static-debian12:nonroot
 LABEL org.opencontainers.image.title="dicode-core" \
@@ -41,9 +46,18 @@ LABEL org.opencontainers.image.title="dicode-core" \
 
 COPY --from=build /out/dicode /usr/local/bin/dicode
 
-# The daemon honors DICODE_DATA_DIR (cmd/dicode/main.go) for SQLite,
-# sources, and run logs. Setting it here aligns the VOLUME with the
-# default state path so `-v vol:/data` works without further config.
+# Pre-create /data owned by nonroot (UID 65532). When Docker first
+# populates a named volume, it copies ownership from the image's mount
+# point — without this, the volume would be owned by root and the
+# nonroot daemon couldn't write SQLite/sources/run logs into it. The
+# numeric UID is unambiguous and doesn't depend on /etc/passwd lookups
+# inside distroless.
+COPY --from=build --chown=65532:65532 /out/data /data
+
+# The daemon honors DICODE_DATA_DIR for SQLite, sources, and run logs
+# (resolved by pkg/daemon.resolveDataDir + pkg/onboarding.defaultResult).
+# Setting it here aligns the VOLUME with the default state path so
+# `-v vol:/data` works without further config.
 ENV DICODE_DATA_DIR=/data
 VOLUME ["/data"]
 
