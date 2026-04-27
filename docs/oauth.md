@@ -207,21 +207,21 @@ The OAuth task checks token validity first. If the token needs refreshing it sil
 
 ### 5. Automate first-time setup with `if_missing`
 
-Chain triggers are great for keeping existing tokens fresh, but they assume the token is already there. For *first-run* setup — e.g. a user opens the chat UI for the first time and there's no `OPENROUTER_API_KEY` stored yet — attach an `if_missing:` directive directly to the env entry:
+Chain triggers are great for keeping existing tokens fresh, but they assume the token is already there. For *first-run* setup — e.g. a user opens the chat UI for the first time and there's no `OPENROUTER_ACCESS_TOKEN` stored yet — attach an `if_missing:` directive directly to the env entry:
 
 ```yaml
 # ai-agent-openrouter preset
 permissions:
   env:
-    - name: OPENROUTER_API_KEY
-      secret: OPENROUTER_API_KEY
+    - name: OPENROUTER_ACCESS_TOKEN
+      secret: OPENROUTER_ACCESS_TOKEN
       if_missing:
         task: auth/openrouter-oauth
 ```
 
 Behavior on dispatch:
 
-1. Engine checks whether `OPENROUTER_API_KEY` resolves from the secrets store.
+1. Engine checks whether `OPENROUTER_ACCESS_TOKEN` resolves from the secrets store.
 2. Present → main task runs immediately.
 3. Missing → engine synchronously fires `auth/openrouter-oauth` in chain mode. If the prereq completes and the secret is now present, the main task runs. If the prereq throws with an authorize URL, that error becomes the main task's failure — the UI surfaces a clickable setup link.
 
