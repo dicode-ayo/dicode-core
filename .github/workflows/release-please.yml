@@ -58,6 +58,11 @@ jobs:
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created }}
     runs-on: ubuntu-latest
+    # Per-tag serialization: a workflow_dispatch re-run on the same tag
+    # queues behind the in-flight publish rather than racing the registry.
+    concurrency:
+      group: publish-docker-${{ needs.release-please.outputs.tag_name }}
+      cancel-in-progress: false
     permissions:
       contents: write   # softprops/action-gh-release append
       packages: write   # ghcr.io push
@@ -115,19 +120,30 @@ jobs:
         env:
           VERSION: ${{ steps.meta.outputs.version }}
         run: |
+          set -u
+          # Idempotent cleanup (handles re-runs on the same runner) + trap so
+          # the container is removed even if curl/docker exit unexpectedly.
+          docker rm -f smoke >/dev/null 2>&1 || true
+          trap 'docker rm -f smoke >/dev/null 2>&1 || true' EXIT
+
           IMAGE="ghcr.io/dicode-ayo/dicode-core:${VERSION}"
           docker run -d --name smoke -p 8080:8080 "$IMAGE"
+
           for i in $(seq 1 30); do
             if curl -fsS http://localhost:8080/healthz; then
               echo "✓ healthz OK after ${i}s"
-              docker rm -f smoke
               exit 0
             fi
             sleep 1
           done
+
           echo "✗ /healthz never returned 200"
-          docker logs smoke
-          docker rm -f smoke
+          echo "--- container state ---"
+          docker inspect smoke --format '{{json .State}}' || true
+          echo "--- port mapping ---"
+          docker port smoke || true
+          echo "--- last 200 log lines ---"
+          docker logs --tail=200 smoke || true
           exit 1
 
       # release-please created the GitHub Release at PR-merge time with the
