@@ -21,7 +21,7 @@ const (
 	FromKindTask
 )
 
-// parseFrom splits an EnvEntry.From string into (kind, target). Whitespace
+// ParseFrom splits an EnvEntry.From string into (kind, target). Whitespace
 // is trimmed. An empty string yields (FromKindEnv, "") so callers can
 // detect the no-from case.
 //
@@ -35,7 +35,7 @@ const (
 // Unknown prefixes (e.g. "foo:bar") are treated as bare names so existing
 // task.yaml files containing colons in env var names continue to load.
 // The reconciler is responsible for catching truly malformed names.
-func parseFrom(s string) (FromKind, string) {
+func ParseFrom(s string) (FromKind, string) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return FromKindEnv, ""
@@ -48,7 +48,3 @@ func parseFrom(s string) (FromKind, string) {
 	}
 	return FromKindEnv, s
 }
-
-// ParseFrom is the exported counterpart of parseFrom for callers outside
-// pkg/task (e.g. the reconciler validates from: task:<id> references).
-func ParseFrom(s string) (FromKind, string) { return parseFrom(s) }

@@ -22,9 +22,9 @@ func TestParseFrom(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotKind, gotTgt := parseFrom(tt.in)
+			gotKind, gotTgt := ParseFrom(tt.in)
 			if gotKind != tt.wantKind || gotTgt != tt.wantTgt {
-				t.Errorf("parseFrom(%q) = (%d, %q), want (%d, %q)",
+				t.Errorf("ParseFrom(%q) = (%d, %q), want (%d, %q)",
 					tt.in, gotKind, gotTgt, tt.wantKind, tt.wantTgt)
 			}
 		})
