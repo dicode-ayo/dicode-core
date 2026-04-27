@@ -531,11 +531,11 @@ export default async function main({ env }) {
 Useful when a secret is populated by an interactive flow (OAuth, device-code, etc.). If the secret is already in the store, the entry resolves normally and `if_missing` is a no-op. If it's missing, the trigger engine fires the declared prereq task in chain mode *before* the main task dispatches; if the prereq succeeds the secret is re-resolved and the main task runs.
 
 ```yaml
-# ai-agent-openrouter — needs OPENROUTER_API_KEY, sourced via an OAuth flow
+# ai-agent-openrouter — needs OPENROUTER_ACCESS_TOKEN, sourced via an OAuth flow
 permissions:
   env:
-    - name: OPENROUTER_API_KEY
-      secret: OPENROUTER_API_KEY
+    - name: OPENROUTER_ACCESS_TOKEN
+      secret: OPENROUTER_ACCESS_TOKEN
       if_missing:
         task: auth/openrouter-oauth
         # params: { ... }       # optional, forwarded to the prereq task

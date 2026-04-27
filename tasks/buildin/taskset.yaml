@@ -87,3 +87,7 @@ spec:
     mcp:
       ref:
         path: ./mcp/task.yaml
+
+    auth-providers:
+      ref:
+        path: ./auth-providers/task.yaml

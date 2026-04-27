@@ -513,3 +513,77 @@ func sealForDaemon(t *testing.T, identity *relay.Identity, sessionID string, pla
 		Nonce:           base64.StdEncoding.EncodeToString(iv),
 	}
 }
+
+// TestServer_OAuth_ListStatus_DeniedWithoutPermission proves the dispatcher
+// rejects oauth.list_status when the calling spec lacks OAuthStatus, mirroring
+// the existing OAuthInit/OAuthStore denial tests.
+func TestServer_OAuth_ListStatus_DeniedWithoutPermission(t *testing.T) {
+	env := newTestEnv(t)
+	// Spec has OAuthStore (so something dicode.oauth.* is allowed) but NOT
+	// OAuthStatus — list_status must be rejected.
+	spec := specWithDicode("leaky", &task.DicodePermissions{OAuthStore: true})
+	runID := fmt.Sprintf("test-%d", time.Now().UnixNano())
+	srv := New(runID, spec.ID, env.secret, env.reg, env.db, nil, nil, zap.NewNop(), spec, nil)
+	srv.SetSecretsChain(secrets.Chain{}) // empty chain is fine; the cap check fires first
+	socketPath, token, err := srv.Start(context.Background())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(srv.Stop)
+
+	conn := dial(t, socketPath)
+	t.Cleanup(func() { conn.Close() })
+	_ = doHandshake(t, conn, token)
+
+	sendMsg(t, conn, map[string]any{
+		"id":        "1",
+		"method":    "dicode.oauth.list_status",
+		"providers": []string{"github"},
+	})
+	resp := recvMsg(t, conn)
+	errMsg, _ := resp["error"].(string)
+	if errMsg == "" || !strings.Contains(errMsg, "permission denied") {
+		t.Fatalf("expected permission denied error, got %v", resp)
+	}
+}
+
+// TestServer_OAuth_ListStatus_HappyPath spins up a server with OAuthStatus
+// granted and a populated chain; verifies a single provider returns has_token=true.
+func TestServer_OAuth_ListStatus_HappyPath(t *testing.T) {
+	env := newTestEnv(t)
+	spec := specWithDicode("auth-providers", &task.DicodePermissions{OAuthStatus: true})
+	runID := fmt.Sprintf("test-%d", time.Now().UnixNano())
+	srv := New(runID, spec.ID, env.secret, env.reg, env.db, nil, nil, zap.NewNop(), spec, nil)
+
+	ms := newMemSecrets()
+	_ = ms.Set(context.Background(), "GITHUB_ACCESS_TOKEN", "x")
+	srv.SetSecretsChain(secrets.Chain{memProvider{ms}})
+
+	socketPath, token, err := srv.Start(context.Background())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(srv.Stop)
+
+	conn := dial(t, socketPath)
+	t.Cleanup(func() { conn.Close() })
+	_ = doHandshake(t, conn, token)
+
+	sendMsg(t, conn, map[string]any{
+		"id":        "1",
+		"method":    "dicode.oauth.list_status",
+		"providers": []string{"github"},
+	})
+	resp := recvMsg(t, conn)
+	if resp["error"] != nil {
+		t.Fatalf("unexpected error: %v", resp["error"])
+	}
+	arr, ok := resp["result"].([]any)
+	if !ok || len(arr) != 1 {
+		t.Fatalf("bad result: %T %v", resp["result"], resp["result"])
+	}
+	first := arr[0].(map[string]any)
+	if first["provider"] != "github" || first["has_token"] != true {
+		t.Fatalf("bad entry: %+v", first)
+	}
+}

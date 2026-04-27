@@ -46,13 +46,17 @@ type Server struct {
 	taskID string
 	secret []byte // daemon-level HMAC secret for token verification
 
-	registry         *registry.Registry
-	db               db.DB
-	params           map[string]string
-	input            any
-	spec             *task.Spec
-	engine           EngineRunner
-	secrets          secrets.Manager        // optional; enables dicode.secrets_set / dicode.secrets_delete
+	registry *registry.Registry
+	db       db.DB
+	params   map[string]string
+	input    any
+	spec     *task.Spec
+	engine   EngineRunner
+	secrets  secrets.Manager // optional; enables dicode.secrets_set / dicode.secrets_delete
+	// secretsChain (read path) is used by dicode.oauth.list_status to walk
+	// the env-fallback chain. SetSecretsChain wires it; nil means the
+	// daemon has no chain configured (tests with read-only flows).
+	secretsChain     secrets.Chain
 	oauthID          *relay.Identity        // optional; enables dicode.oauth.* for the auth built-ins
 	oauthURL         string                 // broker base URL, e.g. "https://relay.dicode.app"
 	oauthPending     *relay.PendingSessions // tracks outstanding /auth/:provider flows by session id
@@ -134,6 +138,10 @@ func New(
 // can call dicode.secrets_set() and dicode.secrets_delete().
 func (s *Server) SetSecrets(m secrets.Manager) { s.secrets = m }
 
+// SetSecretsChain attaches the read-side chain (env-fallback aware) used by
+// dicode.oauth.list_status to introspect provider connection metadata.
+func (s *Server) SetSecretsChain(c secrets.Chain) { s.secretsChain = c }
+
 // SetRedactor installs a log-message redactor. Messages received via the
 // IPC "log" method are passed through r.RedactString before being
 // persisted to the run log, matching the protection stdout/stderr piping
@@ -211,6 +219,9 @@ func (s *Server) Start(ctx context.Context) (socketPath, token string, err error
 		}
 		if dp.OAuthStore {
 			caps = append(caps, CapOAuthStore)
+		}
+		if dp.OAuthStatus {
+			caps = append(caps, CapOAuthStatus)
 		}
 	}
 	if s.spec != nil && s.spec.Trigger.Daemon && s.gateway != nil {
@@ -765,6 +776,22 @@ func (s *Server) handleConn(conn net.Conn) {
 				"provider": authReq.Provider,
 				"secrets":  written,
 			}, "")
+
+		case "dicode.oauth.list_status":
+			if !hasCap(caps, CapOAuthStatus) {
+				reply(req.ID, nil, "ipc: permission denied (oauth.status)")
+				continue
+			}
+			if s.secretsChain == nil {
+				reply(req.ID, nil, "ipc: secrets chain not configured")
+				continue
+			}
+			out, err := listOAuthStatus(s.ctx, s.secretsChain, req.Providers)
+			if err != nil {
+				reply(req.ID, nil, "ipc: list status: "+err.Error())
+				continue
+			}
+			reply(req.ID, out, "")
 
 		// ── mcp.* ─────────────────────────────────────────────────────────
 

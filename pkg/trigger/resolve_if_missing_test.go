@@ -140,9 +140,9 @@ func (r *resolveEnv) startParentRun(t *testing.T, ctx context.Context) string {
 
 func TestResolveIfMissing_SecretPresent_SkipsPrereq(t *testing.T) {
 	env := newResolveEnv(t)
-	env.secrets.set("OPENROUTER_API_KEY", "already-here")
+	env.secrets.set("OPENROUTER_ACCESS_TOKEN", "already-here")
 
-	spec := parentSpec("OPENROUTER_API_KEY", "auth/openrouter-oauth")
+	spec := parentSpec("OPENROUTER_ACCESS_TOKEN", "auth/openrouter-oauth")
 	env.registerPrereq(t, "auth/openrouter-oauth")
 
 	if err := env.eng.resolveIfMissing(context.Background(), spec, ""); err != nil {
@@ -184,11 +184,11 @@ func TestResolveIfMissing_PrereqSucceeds_SecretNowPresent(t *testing.T) {
 	env.registerPrereq(t, "auth/openrouter-oauth")
 	// Simulate the prereq populating the secret as a side-effect.
 	env.exec.run = func(context.Context) *pkgruntime.RunResult {
-		env.secrets.set("OPENROUTER_API_KEY", "got-it")
+		env.secrets.set("OPENROUTER_ACCESS_TOKEN", "got-it")
 		return &pkgruntime.RunResult{}
 	}
 
-	spec := parentSpec("OPENROUTER_API_KEY", "auth/openrouter-oauth")
+	spec := parentSpec("OPENROUTER_ACCESS_TOKEN", "auth/openrouter-oauth")
 	runID := env.startParentRun(t, context.Background())
 
 	if err := env.eng.resolveIfMissing(context.Background(), spec, runID); err != nil {
@@ -208,7 +208,7 @@ func TestResolveIfMissing_PrereqSucceedsButSecretStillUnset(t *testing.T) {
 		return &pkgruntime.RunResult{}
 	}
 
-	spec := parentSpec("OPENROUTER_API_KEY", "auth/openrouter-oauth")
+	spec := parentSpec("OPENROUTER_ACCESS_TOKEN", "auth/openrouter-oauth")
 	runID := env.startParentRun(t, context.Background())
 
 	err := env.eng.resolveIfMissing(context.Background(), spec, runID)
@@ -217,7 +217,7 @@ func TestResolveIfMissing_PrereqSucceedsButSecretStillUnset(t *testing.T) {
 	}
 	// Stable error format — the UI's detectSetup depends on this exact prefix.
 	// See chat.js::detectSetup for the consumer regex.
-	if !strings.Contains(err.Error(), `if_missing: secret "OPENROUTER_API_KEY" requires setup via task "auth/openrouter-oauth"`) {
+	if !strings.Contains(err.Error(), `if_missing: secret "OPENROUTER_ACCESS_TOKEN" requires setup via task "auth/openrouter-oauth"`) {
 		t.Errorf("error must use stable if_missing format, got: %v", err)
 	}
 	if !strings.Contains(err.Error(), "ran but still unset") {
@@ -233,7 +233,7 @@ func TestResolveIfMissing_PrereqFails_StableErrorFormat(t *testing.T) {
 		return &pkgruntime.RunResult{Error: prereqErr}
 	}
 
-	spec := parentSpec("OPENROUTER_API_KEY", "auth/openrouter-oauth")
+	spec := parentSpec("OPENROUTER_ACCESS_TOKEN", "auth/openrouter-oauth")
 	runID := env.startParentRun(t, context.Background())
 
 	err := env.eng.resolveIfMissing(context.Background(), spec, runID)
@@ -241,7 +241,7 @@ func TestResolveIfMissing_PrereqFails_StableErrorFormat(t *testing.T) {
 		t.Fatal("expected error when prereq fails")
 	}
 	// Stable prefix — UI consumers regex-match on this.
-	wantPrefix := `if_missing: secret "OPENROUTER_API_KEY" requires setup via task "auth/openrouter-oauth"`
+	wantPrefix := `if_missing: secret "OPENROUTER_ACCESS_TOKEN" requires setup via task "auth/openrouter-oauth"`
 	if !strings.HasPrefix(err.Error(), wantPrefix) {
 		t.Errorf("error must start with stable prefix %q, got: %v", wantPrefix, err)
 	}
@@ -262,11 +262,11 @@ func TestResolveIfMissing_Singleflight_CollapsesConcurrentCalls(t *testing.T) {
 	release := make(chan struct{})
 	env.exec.run = func(ctx context.Context) *pkgruntime.RunResult {
 		<-release
-		env.secrets.set("OPENROUTER_API_KEY", "filled-after-wait")
+		env.secrets.set("OPENROUTER_ACCESS_TOKEN", "filled-after-wait")
 		return &pkgruntime.RunResult{}
 	}
 
-	spec := parentSpec("OPENROUTER_API_KEY", "auth/openrouter-oauth")
+	spec := parentSpec("OPENROUTER_ACCESS_TOKEN", "auth/openrouter-oauth")
 
 	const callers = 5
 	errs := make(chan error, callers)

@@ -271,6 +271,10 @@ type DicodePermissions struct {
 	// secrets store — plaintext never reaches task code, so a careless
 	// console.log cannot leak a token.
 	OAuthStore bool `yaml:"oauth_store,omitempty" json:"oauth_store,omitempty"`
+	// OAuthStatus enables dicode.oauth.list_status().
+	// Returns connection-state metadata (presence flag, expiry, scope) for the
+	// provider names the caller passes — never plaintext tokens.
+	OAuthStatus bool `yaml:"oauth_status,omitempty" json:"oauth_status,omitempty"`
 }
 
 // Spec is parsed from task.yaml.
