@@ -348,3 +348,76 @@ sources:
 		t.Errorf("Sources[0].Watch = %v, want default true when unset", cfg.Sources[0].Watch)
 	}
 }
+
+// ── server.bcrypt_cost (#209) ─────────────────────────────────────────────────
+
+// Default cost (12) when omitted. The webui passphrase store reads this value
+// directly, so an absent YAML entry must produce a usable default rather than
+// silently falling back to bcrypt's package-default of 10.
+func TestLoad_BcryptCost_DefaultIs12WhenUnset(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "dicode.yaml")
+	content := `
+sources:
+  - type: local
+    path: ${CONFIGDIR}/tasks
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Server.BcryptCost != 12 {
+		t.Errorf("Server.BcryptCost = %d, want default 12", cfg.Server.BcryptCost)
+	}
+}
+
+func TestLoad_BcryptCost_AcceptsValidOverride(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "dicode.yaml")
+	content := `
+sources:
+  - type: local
+    path: ${CONFIGDIR}/tasks
+server:
+  bcrypt_cost: 10
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Server.BcryptCost != 10 {
+		t.Errorf("Server.BcryptCost = %d, want 10 (operator override)", cfg.Server.BcryptCost)
+	}
+}
+
+// Out-of-range values must be rejected at Load time so the operator finds out
+// at startup rather than discovering at first login that bcrypt is rejecting
+// the cost. We cap at 14 to prevent pathological values like 20 (~minutes
+// per login) that would functionally lock a user out.
+func TestLoad_BcryptCost_RejectsOutOfRange(t *testing.T) {
+	for _, bad := range []int{1, 2, 3, 15, 20, 31} {
+		t.Run(fmt.Sprintf("cost=%d", bad), func(t *testing.T) {
+			dir := t.TempDir()
+			cfgPath := filepath.Join(dir, "dicode.yaml")
+			content := fmt.Sprintf(`
+sources:
+  - type: local
+    path: ${CONFIGDIR}/tasks
+server:
+  bcrypt_cost: %d
+`, bad)
+			if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Load(cfgPath); err == nil {
+				t.Errorf("Load(bcrypt_cost=%d): expected error, got nil", bad)
+			}
+		})
+	}
+}

@@ -4,7 +4,6 @@ package webui
 import (
 	"context"
 	"crypto/rand"
-	"crypto/subtle"
 	"embed"
 	"encoding/hex"
 	"encoding/json"
@@ -163,11 +162,12 @@ type Server struct {
 	relayClient        *relay.Client
 	managedRuntimes    []pkgruntime.ManagedRuntime
 	sessions           *sessionStore
-	dbSessions         *dbSessionStore  // persistent sessions / trusted devices
-	apiKeys            *apiKeyStore     // MCP / programmatic API keys
-	passphraseStore    *passphraseStore // auth passphrase persisted in DB
-	cachedPassphrase   string           // in-memory cache of resolved passphrase; invalidated on change
-	cachedPassphraseMu sync.RWMutex
+	dbSessions         *dbSessionStore    // persistent sessions / trusted devices
+	apiKeys            *apiKeyStore       // MCP / programmatic API keys
+	passphraseStore    *passphraseStore   // auth passphrase persisted in DB
+	cachedPassphrase   string             // in-memory cache of stored DB value (bcrypt hash, or legacy plaintext during migration); invalidated on change
+	cachedPassphraseMu sync.RWMutex       // guards cachedPassphrase
+	migrateGroup       passphraseMigrator // collapses concurrent legacy-passphrase migrations to one bcrypt+write
 	limiter            *unlockLimiter
 	logs               *LogBroadcaster
 	ws                 *WSHub
@@ -918,10 +918,24 @@ func (s *Server) apiSecretsUnlock(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	expected := s.resolvePassphrase(r.Context())
-	if expected != "" && subtle.ConstantTimeCompare([]byte(password), []byte(expected)) != 1 {
-		s.loginError(w, r, "incorrect password", http.StatusUnauthorized, safeNext)
+	// Auth is enabled but no passphrase has been configured yet (bootstrap
+	// state) — accept any password, mirroring the previous behaviour. The
+	// /security UI will force one to be set as soon as the operator logs in.
+	//
+	// passphraseSourceUnknown means the DB read failed; we deliberately do
+	// NOT treat that as bootstrap (which would accept any password). Reject
+	// the login with 503 so the operator can investigate the outage rather
+	// than silently letting anyone in.
+	src := s.passphraseSource(r.Context())
+	if src == passphraseSourceUnknown {
+		s.loginError(w, r, "service temporarily unavailable", http.StatusServiceUnavailable, safeNext)
 		return
+	}
+	if src != passphraseSourceNone {
+		if !s.verifyPassphrase(r.Context(), password) {
+			s.loginError(w, r, "incorrect password", http.StatusUnauthorized, safeNext)
+			return
+		}
 	}
 
 	token := s.sessions.issue()
