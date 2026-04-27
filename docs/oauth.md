@@ -81,14 +81,24 @@ const res = await fetch("https://slack.com/api/auth.test", {
 
 ### Task-level API
 
-Two IPC primitives back the built-ins. You almost never call them directly — use `dicode run buildin/auth-start` and the built-in webhook task — but they are available to any task that declares the matching permission:
+Three IPC primitives back the built-ins. You almost never call them directly — use `dicode run buildin/auth-start` and the built-in webhook task — but they are available to any task that declares the matching permission:
 
 ```yaml
 permissions:
   dicode:
-    oauth_init:  true   # grants dicode.oauth.build_auth_url
-    oauth_store: true   # grants dicode.oauth.store_token
+    oauth_init:   true   # grants dicode.oauth.build_auth_url
+    oauth_store:  true   # grants dicode.oauth.store_token
+    oauth_status: true   # grants dicode.oauth.list_status
 ```
+
+- `oauth_init`: enables `dicode.oauth.build_auth_url(provider, scope?)`.
+  Reserved for the built-in `auth-start` task.
+- `oauth_store`: enables `dicode.oauth.store_token(envelope)`.
+  Reserved for the built-in `auth-relay` task.
+- `oauth_status`: enables `dicode.oauth.list_status(providers)`. Returns
+  connection-state metadata (presence, expiry, scope, token type) for
+  the provider names supplied — never plaintext tokens. Used by the
+  built-in `auth-providers` dashboard task.
 
 ```ts
 // build_auth_url: create a signed /auth/:provider URL
@@ -100,7 +110,11 @@ const result = await dicode.oauth.store_token(input);
 // result.secrets is the list of secret names written; plaintext stays in Go.
 ```
 
-Both primitives are inert on daemons where `relay.enabled: false`, so the built-ins degrade cleanly when the relay is not configured.
+Each is independently gated; granting one does not grant the others. The
+`oauth_init` and `oauth_store` primitives are inert on daemons where
+`relay.enabled: false`, so the built-ins degrade cleanly when the relay
+is not configured. `oauth_status` reads only from the local secrets
+store and works regardless of relay configuration.
 
 ### Failure modes
 
@@ -228,6 +242,34 @@ Behavior on dispatch:
 The same task doubles as the setup flow and the silent refresh path; once the secret is stored, `if_missing` is a no-op and subsequent dispatches skip straight to the main task. Chain triggers (#4 above) and `if_missing` compose — chain for ongoing refresh of a known-good token, `if_missing` for the one-time setup that happens before there's anything to refresh.
 
 See [task-format.md § permissions.env](concepts/task-format.md#permissionsenv--environment-variables) for the full form reference.
+
+---
+
+## Dashboard
+
+The built-in `auth-providers` task at `/hooks/auth-providers` provides a
+single-page dashboard for managing every OAuth provider connection at
+once. It lists each provider's connection state (Connected, Not
+connected, Expires in 42m, Expired), shows the granted scope when
+known, and offers a Connect / Reconnect button per row that kicks off
+the appropriate OAuth flow:
+
+- **Relay-broker providers** (github, google, slack, …): clicking
+  Connect runs `buildin/auth-start` which returns a signed
+  `/auth/:provider` URL; the dashboard opens it in a new tab.
+- **OpenRouter** (the only standalone PKCE provider): clicking
+  Connect opens `/hooks/openrouter-oauth` directly, where the user
+  clicks an "Authorize with OpenRouter" button.
+
+Once the token lands in the secrets store, the next 5 s poll flips the
+card to "Connected" automatically.
+
+Reach the dashboard via the webui task list (Tasks → Auth Providers →
+"open webhook UI"), or directly at `http://localhost:8080/hooks/auth-providers`.
+
+The dashboard never exposes plaintext tokens — only metadata
+(presence flag, expiry, scope, token type) is fetched from the daemon.
+The underlying primitive is `dicode.oauth.list_status()` (see below).
 
 ---
 
