@@ -249,7 +249,7 @@ Multi-arch images are published for `linux/amd64` and `linux/arm64`. The image
 is also mirrored on GHCR: `ghcr.io/dicode-ayo/dicode-core`.
 ```
 
-**`docs-src/getting-started/index.md`** — add a "Run with Docker" subsection mirroring the README content, plus a `docker-compose.yml` example for users who want auto-restart and named env-file mounting.
+**`docs-src/getting-started/index.md`** — *correction (2026-04-27): this file lives in the separate dicode-site repo, not dicode-core.* A mirror section with a `docker-compose.yml` example is filed as a follow-up PR against dicode-site; this spec's PR only updates the dicode-core README.
 
 ## Data flow
 

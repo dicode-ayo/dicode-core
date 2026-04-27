@@ -651,7 +651,11 @@ git commit -m "docs(readme): add Run with Docker section"
 
 ---
 
-## Task 7: Add Docker quick-start to `docs-src/getting-started/index.md`
+## Task 7: Add Docker quick-start to `docs-src/getting-started/index.md` — DROPPED (wrong repo)
+
+**Note (2026-04-27):** the user-facing docs site lives in the **dicode-site** repository, not dicode-core. The `docs-src/getting-started/index.md` path exists only there. Mirroring this section into the docs-site getting-started page is a separate PR on the dicode-site repo, filed as a follow-up. The README change (Task 6) is the only docs surface inside dicode-core.
+
+The original Task 7 text follows for reference:
 
 **Files:**
 - Modify: `docs-src/getting-started/index.md`
