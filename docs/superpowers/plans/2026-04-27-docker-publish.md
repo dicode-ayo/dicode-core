@@ -344,7 +344,7 @@ EOF
 #   ALPINE_VERSION — alpine base for the builder stage
 #   VERSION        — semver string stamped into the binary via -ldflags
 ARG GO_VERSION=1.25
-ARG ALPINE_VERSION=3.20
+ARG ALPINE_VERSION=3.21   # golang:1.25 ships alpine3.21+ only — 3.20 tag does not exist
 
 # --- Build stage ----------------------------------------------------------
 # Run on the host's native arch ($BUILDPLATFORM); cross-compile via

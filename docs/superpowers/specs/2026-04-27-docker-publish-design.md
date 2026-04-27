@@ -42,7 +42,7 @@ Multi-stage, cross-compiled, distroless runtime:
 ```dockerfile
 # syntax=docker/dockerfile:1.7
 ARG GO_VERSION=1.25
-ARG ALPINE_VERSION=3.20
+ARG ALPINE_VERSION=3.21   # golang:1.25 ships alpine3.21+ only — 3.20 tag does not exist
 
 FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine${ALPINE_VERSION} AS build
 ARG TARGETOS
