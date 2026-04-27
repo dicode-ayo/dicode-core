@@ -10,7 +10,11 @@
 // "do something" requests (list-with-side-effect-free is debatable, but the
 // uniform method keeps the wrapper trivial).
 
-const ENDPOINT = window.location.pathname.replace(/\/$/, "") || "/hooks/auth-providers";
+// The trigger engine registers the webhook at exactly this path; pinning
+// avoids breakage if the SPA grows client-side routing later (the auto-
+// derived `window.location.pathname` would become e.g.
+// `/hooks/auth-providers/some-route` and POST to a non-existent target).
+const ENDPOINT = "/hooks/auth-providers";
 
 async function postJson(body) {
   const res = await fetch(ENDPOINT, {
