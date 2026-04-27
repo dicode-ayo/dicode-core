@@ -98,6 +98,27 @@ func Run(configPath string, portOverride int, version string) {
 // caller checks that separately). On Linux we require an X or Wayland
 // server to be advertised, since headless servers commonly have a TTY
 // but no way to open a browser.
+// resolveDataDir picks the directory the daemon uses for SQLite, sources,
+// and run logs. Resolution order: cfg.DataDir → DICODE_DATA_DIR env var →
+// $HOME/.dicode. The env-var fallback is what makes the Docker image's
+// `ENV DICODE_DATA_DIR=/data` actually redirect state into the mounted
+// volume on the very first run, before onboarding has written a config
+// (the onboarding default also honors the env var, so the generated
+// dicode.yaml bakes the same path in for subsequent starts).
+func resolveDataDir(cfg *config.Config) (string, error) {
+	if cfg.DataDir != "" {
+		return cfg.DataDir, nil
+	}
+	if d := os.Getenv("DICODE_DATA_DIR"); d != "" {
+		return d, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("cannot determine home directory: %w", err)
+	}
+	return home + "/.dicode", nil
+}
+
 func hasDisplay() bool {
 	switch runtime.GOOS {
 	case "darwin", "windows":
@@ -120,13 +141,9 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	defer database.Close()
 
 	// 2. Resolve data directory.
-	dataDir := cfg.DataDir
-	if dataDir == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return fmt.Errorf("cannot determine home directory: %w", err)
-		}
-		dataDir = home + "/.dicode"
+	dataDir, err := resolveDataDir(cfg)
+	if err != nil {
+		return err
 	}
 
 	// 3. Build secrets chain.
