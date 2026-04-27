@@ -164,20 +164,27 @@ type IfMissing struct {
 }
 
 // EnvEntry declares one environment variable the task is allowed to access.
-// Supports four forms in YAML:
+// Supports five forms in YAML:
 //
 //   - HOME                          # bare name: allowlist $HOME from host env, same name
 //   - name: API_KEY                 # rename from host env: read $GH_TOKEN, expose as API_KEY
 //     from: GH_TOKEN
+//   - name: TOKEN                   # explicit env prefix (equivalent to bare)
+//     from: env:GH_TOKEN
+//   - name: PG_URL                  # provider-task lookup: spawn task "doppler" to resolve PG_URL
+//     from: task:doppler
 //   - name: DB_PASS                 # secret injection: resolve "db_password" from secrets store
 //     secret: db_password
 //   - name: LOG_LEVEL               # literal value (used by taskset overrides)
 //     value: "info"
 //
 // Lookup rules:
-//   - secret: → secrets store only; run fails if key not found
-//   - from:   → host OS environment only (os.Getenv); injected as entry.Name
-//   - bare name (no secret/from/value) → allowlisted in --allow-env; script reads it from host env at runtime
+//   - secret:        → secrets store only; run fails if key not found
+//   - from: env:NAME → host OS environment only (os.Getenv); injected as entry.Name
+//   - from: task:ID  → provider task ID; resolver spawns ID once per consumer
+//                      launch (batched across all task: entries with the same ID)
+//   - from: bare     → identical to from: env:bare (backwards compat)
+//   - bare entry     → allowlisted in --allow-env; script reads it from host env at runtime
 //
 // The optional `if_missing:` directive (only meaningful alongside `secret:`)
 // runs a prereq task when the secret is absent. See the IfMissing type.
