@@ -17,6 +17,7 @@ class DcProvidersPage extends LitElement {
     this._rows = null;
     this._status = "loading";
     this._timer = null;
+    this._inFlight = false;
   }
 
   connectedCallback() {
@@ -32,12 +33,16 @@ class DcProvidersPage extends LitElement {
   }
 
   async _refresh() {
+    if (this._inFlight) return;       // skip overlap on slow networks
+    this._inFlight = true;
     try {
       const rows = await api.list();
       this._rows = Array.isArray(rows) ? rows : [];
       this._status = "ready";
     } catch (err) {
       this._status = `error: ${err.message || err}`;
+    } finally {
+      this._inFlight = false;
     }
   }
 
