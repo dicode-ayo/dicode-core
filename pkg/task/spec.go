@@ -284,6 +284,17 @@ type DicodePermissions struct {
 	OAuthStatus bool `yaml:"oauth_status,omitempty" json:"oauth_status,omitempty"`
 }
 
+// ProviderConfig declares secret-provider settings on a task that
+// implements the issue #119 provider contract (calls dicode.output(map,
+// { secret: true }) with a flat Record<string,string>).
+//
+// CacheTTL controls how long resolved values are cached. Zero (the
+// default) disables caching. Cache key is (provider-task-id,
+// secret-name); entries are busted when the task content hash changes.
+type ProviderConfig struct {
+	CacheTTL time.Duration `yaml:"cache_ttl,omitempty" json:"cache_ttl,omitempty"`
+}
+
 // Spec is parsed from task.yaml.
 type Spec struct {
 	Name        string        `yaml:"name"        json:"name"`
@@ -302,6 +313,12 @@ type Spec struct {
 	// OnFailureChain overrides the global defaults.on_failure_chain for this task.
 	// nil = inherit global default, "" = disable, "task-id" = custom target.
 	OnFailureChain *string `yaml:"on_failure_chain,omitempty" json:"on_failure_chain,omitempty"`
+
+	// Provider declares this task as a secret provider implementing the
+	// issue #119 contract. nil = not a provider; non-nil = provider with
+	// the given config. The reconciler uses this to gate cache_ttl
+	// validation; the resolver uses it to look up the TTL.
+	Provider *ProviderConfig `yaml:"provider,omitempty" json:"provider,omitempty"`
 
 	// TaskDir is the directory path of the task in the repo (not stored in YAML).
 	TaskDir string `yaml:"-" json:"-"`
