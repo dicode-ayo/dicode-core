@@ -22,3 +22,6 @@ spec:
     mcp:
       ref:
         path: BUILDIN_MCP_TASK_YAML
+    auth-providers:
+      ref:
+        path: BUILDIN_AUTH_PROVIDERS_TASK_YAML

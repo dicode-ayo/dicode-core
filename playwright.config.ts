@@ -68,7 +68,7 @@ export default defineConfig({
     // Run:  DICODE_AUTH_MODE=authenticated npx playwright test --project=authenticated
     {
       name: 'authenticated',
-      testMatch: ['**/auth.spec.ts'],
+      testMatch: ['**/auth.spec.ts', '**/auth-providers.spec.ts'],
       use: {
         ...devices['Desktop Chrome'],
         baseURL: BASE_URL,
