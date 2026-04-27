@@ -1,0 +1,46 @@
+apiVersion: dicode/v1
+kind: Task
+name: "Auth Providers"
+description: |
+  Dashboard listing every OAuth provider known to this dicode instance,
+  with connection state and a Connect button. Connect for relay-broker
+  providers (github, google, slack, ...) calls buildin/auth-start to
+  obtain a signed /auth/:provider URL. Connect for OpenRouter (the only
+  standalone PKCE provider) opens /hooks/openrouter-oauth directly,
+  which renders an "Authorize with OpenRouter" page.
+
+  Open in a browser via the Tasks list → Auth Providers → "open
+  webhook UI" — or directly at /hooks/auth-providers.
+
+runtime: deno
+
+trigger:
+  webhook: /hooks/auth-providers
+  auth: true
+
+params:
+  providers:
+    type: string
+    default: "github,google,slack,spotify,linear,discord,gitlab,airtable,notion,confluence,salesforce,stripe,office365,azure,openrouter"
+    description: |
+      Comma-separated provider keys to display. Override to subset.
+      Each key must satisfy [a-z0-9_]{2,}.
+
+permissions:
+  env:
+    - DICODE_BASE_URL  # used to build the standalone openrouter URL
+  dicode:
+    oauth_status: true
+    tasks:
+      # Only auth-start is callable. The per-provider auth/<p>-oauth tasks
+      # return HTML (not a JSON {url} contract) so they cannot be invoked
+      # programmatically; auth-start is the canonical "give me a signed
+      # /auth/:provider URL" task. OpenRouter is the standalone exception
+      # and is handled with a direct webhook URL, not run_task.
+      - "buildin/auth-start"
+
+timeout: 30s
+
+notify:
+  on_success: false
+  on_failure: false
