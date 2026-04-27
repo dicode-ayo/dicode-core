@@ -55,8 +55,13 @@ class DcProvidersPage extends LitElement {
       if (!out?.url) throw new Error("provider task did not return a url");
       window.open(out.url, "_blank", "noopener");
     } catch (err) {
+      const msg = err.message || String(err);
       if (typeof card.setError === "function") {
-        card.setError(err.message || String(err));
+        card.setError(msg);
+      } else {
+        // Fallback: show the error at the page level so it's never silently swallowed
+        // even if a future re-architecture changes the event source.
+        this._status = `error: ${msg}`;
       }
     }
   }
