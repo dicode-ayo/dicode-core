@@ -21,7 +21,7 @@ trigger:
 params:
   providers:
     type: string
-    default: "github,google,slack,spotify,linear,discord,gitlab,airtable,notion,confluence,salesforce,stripe,office365,azure,openrouter"
+    default: "github,google,slack,spotify,linear,discord,gitlab,airtable,notion,confluence,salesforce,stripe,office365,azure,looker,openrouter"
     description: |
       Comma-separated provider keys to display. Override to subset.
       Each key must satisfy [a-z0-9_]{2,}.

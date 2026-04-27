@@ -10,6 +10,13 @@ interface ProviderMeta {
   standalone?: { webhookPath: string };
 }
 
+// KNOWN must stay in sync with the providers in tasks/auth/taskset.yaml.
+// Adding a provider there means appending one row here (key/label/color),
+// and vice versa. The colors here mirror the per-provider `color` params
+// in that taskset; they are duplicated for now because the SPA renders the
+// list before the per-provider task runs, so the dashboard cannot read
+// them from the taskset directly. If the duplication becomes painful,
+// extract a shared providers.json.
 const KNOWN: ProviderMeta[] = [
   { key: "github",     label: "GitHub",     color: "#24292e" },
   { key: "google",     label: "Google",     color: "#4285f4" },
@@ -25,6 +32,7 @@ const KNOWN: ProviderMeta[] = [
   { key: "stripe",     label: "Stripe",     color: "#635bff" },
   { key: "office365",  label: "Office365",  color: "#d83b01" },
   { key: "azure",      label: "Azure",      color: "#0078d4" },
+  { key: "looker",     label: "Looker",     color: "#4285f4" },
   { key: "openrouter", label: "OpenRouter", color: "#6467f2",
     standalone: { webhookPath: "/hooks/openrouter-oauth" } },
 ];
