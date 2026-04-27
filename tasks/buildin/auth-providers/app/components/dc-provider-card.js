@@ -62,7 +62,13 @@ class DcProviderCard extends LitElement {
     // Icon path is per-provider; safeProviderKey ensures only the lowercase
     // alnum/underscore characters from the daemon-sanitized provider name
     // can appear in the URL — no traversal, no protocol-injection.
-    const iconUrl = `url("app/icons/${safeProviderKey(row.provider)}.svg")`;
+    //
+    // Use an absolute path rooted at the daemon-injected hook base (read from
+    // <meta name="dicode-hook">). Relative URLs ("app/icons/...") set as
+    // CSS custom properties in inline style are resolved against the
+    // CONSUMING stylesheet's location, not the document base — that produced
+    // a doubled "app/app/" prefix when used inside theme.css.
+    const iconUrl = `url("${HOOK_BASE}/app/icons/${safeProviderKey(row.provider)}.svg")`;
     const brand = safeColor(meta.color);
     return html`
       <span class="provider-icon"
@@ -86,6 +92,16 @@ class DcProviderCard extends LitElement {
     `;
   }
 }
+
+// HOOK_BASE is the URL prefix of this task's webhook (e.g. /hooks/auth-providers,
+// or /u/<relay-uuid>/hooks/auth-providers when served through the relay).
+// Read from the <meta name="dicode-hook"> tag the trigger engine injects into
+// every webhook UI; falls back to the canonical literal if the tag is missing.
+const HOOK_BASE = (() => {
+  const m = document.querySelector('meta[name="dicode-hook"]');
+  const v = m?.getAttribute("content");
+  return v && /^[/A-Za-z0-9_\-]+$/.test(v) ? v.replace(/\/$/, "") : "/hooks/auth-providers";
+})();
 
 // safeColor returns the input only if it's a hex color literal (#rgb,
 // #rrggbb, or #rrggbbaa). Anything else falls back to a neutral grey.
