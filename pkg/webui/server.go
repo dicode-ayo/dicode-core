@@ -7,6 +7,7 @@ import (
 	"embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"io"
@@ -451,7 +452,6 @@ func (s *Server) Handler() http.Handler {
 			r.Get("/tasks", s.apiListTasks)
 			r.Get("/tasks/{id}", s.apiGetTask)
 			r.Post("/tasks/{id}/run", s.apiRunTask)
-			r.Post("/tasks/{id}/test", s.apiTestTask)
 			r.Get("/tasks/{id}/runs", s.apiListRuns)
 			r.Get("/tasks/{id}/files/{filename}", s.apiGetFile)
 			r.Post("/tasks/{id}/files/{filename}", s.apiSaveFile)
@@ -521,6 +521,14 @@ func (s *Server) Handler() http.Handler {
 			http.Redirect(w, r, "/hooks/webui", http.StatusFound)
 		})
 	})
+
+	// Task test endpoint (#208) — API-key gated, mounted OUTSIDE the
+	// session-auth group so external automation (CI scripts, MCP clients)
+	// can drive the test harness with a Bearer token without first
+	// establishing a browser session. The requireAPIKey middleware is a
+	// no-op when server.auth is false, so the unauthenticated dev mode
+	// continues to work the same way as before.
+	r.With(s.requireAPIKey).Post("/api/tasks/{id}/test", s.apiTestTask)
 
 	return r
 }
@@ -1292,36 +1300,197 @@ func (s *Server) apiRunTask(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]string{"runId": runID})
 }
 
-// apiTestTask runs a task's sibling test file via tasktest.Run and returns the
-// structured result. Mirrors the cli.task.test IPC handler in pkg/ipc/control.go
-// so the buildin MCP task (and any other HTTP caller) can drive task tests
-// without going through the CLI control socket. Phase 1 supports the Deno
-// runtime only; other runtimes return a clear error in the result body.
+// Hardening caps for apiTestTask. testTaskMaxBodyBytes bounds the request
+// payload so a misbehaving caller can't stream gigabytes of JSON; the cap is
+// well above any realistic params payload but small enough to fail fast.
+// testTaskMaxTimeout caps the runner subprocess lifetime so an authenticated
+// caller can't pin a Deno process indefinitely with a giant timeout_s value.
+//
+// testTaskMaxTimeout is a var (not a const) so the test suite can override
+// it to keep TimeoutCapClamps fast. Production code must never mutate it.
+const testTaskMaxBodyBytes = 64 * 1024
+
+var testTaskMaxTimeout = 5 * time.Minute
+
+// testTaskRequest is the optional JSON body accepted by apiTestTask.
+//
+// Both fields are optional: an empty body, an empty {} object, or any
+// missing field is treated as "use the task's defaults". Params are
+// validated against the task.yaml `params` schema before the runner is
+// invoked — schema mismatches return 422 with per-field detail.
+type testTaskRequest struct {
+	Params   map[string]any `json:"params,omitempty"`
+	TimeoutS int            `json:"timeout_s,omitempty"`
+}
+
+// testTaskResponse is the wire shape returned on completion (200) regardless
+// of whether the task itself passed. Field names follow #208's spec —
+// snake_case here even though most other webui responses use camelCase,
+// because this endpoint is designed for external automation callers (MCP
+// clients, CI scripts) where snake_case is more idiomatic.
+//
+// Fields:
+//   - status:       "passed" | "failed" | "errored"
+//   - exit_code:    runner process exit code
+//   - stdout:       combined stdout+stderr from the runner (named stdout for
+//     compatibility with the issue spec; the runner intermixes streams).
+//   - stderr:       always "" today — Deno's `deno test` interleaves streams
+//     into a single buffer and we don't currently split them. Kept in the
+//     response shape so future runtime backends (Python, Docker) can supply it.
+//   - duration_ms:  wall-clock duration of the runner subprocess in ms
+//   - run_id:       opaque correlation ID for this test invocation; surface in
+//     logs / future audit trail. Not stored in the runs table because test
+//     invocations are intentionally separate from the production run log.
+type testTaskResponse struct {
+	Status     string `json:"status"`
+	ExitCode   int    `json:"exit_code"`
+	Stdout     string `json:"stdout"`
+	Stderr     string `json:"stderr"`
+	DurationMs int64  `json:"duration_ms"`
+	RunID      string `json:"run_id"`
+	// Diagnostic fields preserved from the underlying tasktest.Result so
+	// callers can inspect counts / file path without re-parsing stdout.
+	TestFile string `json:"test_file,omitempty"`
+	Passed   int    `json:"passed"`
+	Failed   int    `json:"failed"`
+	Skipped  int    `json:"skipped"`
+	Error    string `json:"error,omitempty"`
+}
+
+// apiTestTask runs a task's sibling test file via tasktest.RunByID and
+// returns a structured result. Closes #208.
+//
+// Authentication: requireAPIKey (Bearer); mirrors /mcp's auth posture so
+// the same API key works across both surfaces.
+//
+// Body (optional): {"params": {...}, "timeout_s": int}. params are validated
+// against the task's declared schema (422 on mismatch, with per-field detail).
+// timeout_s caps the runner subprocess lifetime; on expiry the handler
+// returns 408 with whatever output was captured before cancellation.
+//
+// Status codes:
+//   - 200 — runner completed (regardless of test pass/fail; see status field)
+//   - 401 — bad/missing API key (handled upstream by requireAPIKey)
+//   - 404 — task ID not registered
+//   - 408 — runner timed out
+//   - 422 — params payload failed schema validation
 func (s *Server) apiTestTask(w http.ResponseWriter, r *http.Request) {
 	id := taskIDParam(r)
-	spec, ok := s.registry.Get(id)
-	if !ok {
+
+	// Body is optional. An empty body is the common case for "just run the
+	// tests with defaults" — guard the decode against a zero-length stream
+	// so we don't return 422 on the happy path. Cap the body so a misbehaving
+	// or malicious caller cannot stream gigabytes of JSON at the daemon
+	// (req.Params is unbounded by shape — only the byte count protects us).
+	// DisallowUnknownFields keeps the closed-schema posture symmetric with
+	// the params validator: top-level typos surface as 400 rather than being
+	// silently ignored.
+	var req testTaskRequest
+	if r.Body != nil {
+		r.Body = http.MaxBytesReader(w, r.Body, testTaskMaxBodyBytes)
+		dec := json.NewDecoder(r.Body)
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&req); err != nil && err != io.EOF {
+			jsonErr(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+
+	// Clamp timeout_s to a safe upper bound. Without this an authenticated
+	// caller could pin a runner subprocess for arbitrarily long; the ceiling
+	// is generous (5 minutes) so legitimate slow test suites still fit.
+	// Negative values are silently treated as "use parent ctx" (timeout=0).
+	timeout := time.Duration(req.TimeoutS) * time.Second
+	if timeout > testTaskMaxTimeout {
+		timeout = testTaskMaxTimeout
+	}
+	if timeout < 0 {
+		timeout = 0
+	}
+	// TODO(#208 follow-up): wire `coerced` (the validated string-typed params)
+	// into tasktest.Run so the runner actually receives them. Today the
+	// validator gates the call but the params themselves never reach Deno
+	// — see the testTaskRequest godoc.
+	res, _, runErr := tasktest.RunByID(r.Context(), s.registry, id, req.Params, timeout)
+
+	// Map tasktest's typed errors to HTTP status codes per #208 acceptance.
+	switch {
+	case errors.Is(runErr, tasktest.ErrTaskNotFound):
 		jsonErr(w, fmt.Sprintf("task %q not found", id), http.StatusNotFound)
 		return
+	case errors.Is(runErr, tasktest.ErrTimeout):
+		// Surface the partial result alongside the 408 so callers see what
+		// the runner managed to capture before the deadline tripped. The
+		// status code is still authoritative ("did this complete?"); the
+		// body carries forensic detail.
+		body := buildTestTaskResponse(res, runErr, randomRunID())
+		body.Status = "timeout"
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusRequestTimeout)
+		_ = json.NewEncoder(w).Encode(body)
+		return
 	}
-	res, runErr := tasktest.Run(r.Context(), spec)
-	body := map[string]any{
-		"taskID":     res.TaskID,
-		"runtime":    res.Runtime,
-		"testFile":   res.TestFile,
-		"passed":     res.Passed,
-		"failed":     res.Failed,
-		"skipped":    res.Skipped,
-		"durationMs": res.Duration.Milliseconds(),
-		"exitCode":   res.ExitCode,
-		"output":     res.Output,
+	var paramsErr *tasktest.ErrParamsInvalid
+	if errors.As(runErr, &paramsErr) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error":  "invalid params",
+			"fields": paramsErr.FieldErrors,
+		})
+		return
 	}
-	if res.Error != "" {
-		body["error"] = res.Error
-	} else if runErr != nil {
-		body["error"] = runErr.Error()
+
+	// Successful completion — including failed tests. Per #208, 200 means
+	// "the runner completed and we have a verdict to return"; the verdict
+	// itself lives in the body's `status` field.
+	jsonOK(w, buildTestTaskResponse(res, runErr, randomRunID()))
+}
+
+// buildTestTaskResponse maps a tasktest.Result + runErr into the HTTP wire
+// shape. status is derived from exit code + parsed counts:
+//   - "errored" if Result.Error non-empty or runErr non-nil and not a clean
+//     non-zero exit (e.g. spawn failure, deno-not-installed)
+//   - "failed"  if exitCode != 0 OR Failed > 0
+//   - "passed"  otherwise
+func buildTestTaskResponse(res tasktest.Result, runErr error, runID string) testTaskResponse {
+	resp := testTaskResponse{
+		ExitCode:   res.ExitCode,
+		Stdout:     res.Output,
+		Stderr:     "", // see godoc on testTaskResponse.Stderr
+		DurationMs: res.Duration.Milliseconds(),
+		RunID:      runID,
+		TestFile:   res.TestFile,
+		Passed:     res.Passed,
+		Failed:     res.Failed,
+		Skipped:    res.Skipped,
+		Error:      res.Error,
 	}
-	jsonOK(w, body)
+	switch {
+	case res.Error != "" || (runErr != nil && res.ExitCode == 0):
+		resp.Status = "errored"
+		if resp.Error == "" && runErr != nil {
+			resp.Error = runErr.Error()
+		}
+	case res.ExitCode != 0 || res.Failed > 0:
+		resp.Status = "failed"
+	default:
+		resp.Status = "passed"
+	}
+	return resp
+}
+
+// randomRunID returns an opaque correlation ID for a test invocation. Not a
+// registry run ID — test invocations are deliberately kept off the runs
+// table so they don't pollute history dashboards.
+func randomRunID() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		// Extremely unlikely (crypto/rand on Linux). Falling back to a
+		// timestamp-derived ID keeps the response shape valid.
+		return fmt.Sprintf("ts-%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b)
 }
 
 // handleMCP is the public /mcp endpoint. The actual JSON-RPC dispatch lives
