@@ -1,0 +1,91 @@
+/*
+ * theme.css — local copy of the webui theme tokens so the auth-providers
+ * page can stand alone (no shared asset path between built-in tasks).
+ */
+:root[data-theme="dark"] {
+  --bg:        #0f1115;
+  --surface:   #181b22;
+  --border:    #2a2e38;
+  --text:      #e6e8ee;
+  --muted:     #a1a8b6;
+  --accent:    #4f8cff;
+  --pill-ok:   #1a7f37;
+  --pill-warn: #b88200;
+  --pill-err:  #b3261e;
+  --space-sm:  .5rem;
+  --space-md:  1rem;
+}
+
+:root[data-theme="light"] {
+  --bg:        #ffffff;
+  --surface:   #f6f7f9;
+  --border:    #d8dde5;
+  --text:      #14171c;
+  --muted:     #5a6473;
+  --accent:    #0a66ff;
+  --pill-ok:   #1a7f37;
+  --pill-warn: #b88200;
+  --pill-err:  #b3261e;
+  --space-sm:  .5rem;
+  --space-md:  1rem;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+dc-providers-page {
+  display: block;
+  padding: 1.5rem 2rem;
+}
+
+dc-provider-card {
+  display: block;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem;
+}
+
+.providers-grid {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 1rem;
+}
+
+.pill {
+  display: inline-block;
+  color: white;
+  border-radius: 999px;
+  padding: .1rem .55rem;
+  font-size: .75em;
+  font-weight: 600;
+  margin-left: .5rem;
+}
+
+.color-dot {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  vertical-align: middle;
+  margin-right: .35rem;
+}
+
+.btn {
+  background: var(--accent);
+  color: white;
+  border: 0;
+  border-radius: 6px;
+  padding: .4rem .8rem;
+  cursor: pointer;
+  font-weight: 600;
+}
+.btn:hover { filter: brightness(1.1); }
