@@ -181,3 +181,27 @@ func TestResolve_BarePrefixIsHostEnv(t *testing.T) {
 		t.Errorf("host-env values must NOT be flagged secret")
 	}
 }
+
+func TestResolve_ProviderReturnsNilMap(t *testing.T) {
+	reg := &fakeRegistry{specs: map[string]*task.Spec{
+		"misconfigured": newProviderSpec("misconfigured", 0),
+	}}
+	runner := &fakeRunnerNilMap{}
+	r := New(reg, secrets.Chain{}, runner)
+	r.Now = func() time.Time { return time.Unix(0, 0) }
+
+	consumer := newSpec("consumer", []task.EnvEntry{
+		{Name: "PG_URL", From: "task:misconfigured"},
+	})
+	_, err := r.Resolve(context.Background(), consumer)
+	var mis *ErrProviderMisconfigured
+	if !errors.As(err, &mis) {
+		t.Fatalf("expected ErrProviderMisconfigured, got %T %v", err, err)
+	}
+}
+
+type fakeRunnerNilMap struct{}
+
+func (fakeRunnerNilMap) Run(ctx context.Context, providerID string, reqs []ProviderRequest) (*ProviderResult, error) {
+	return &ProviderResult{Values: nil}, nil
+}
