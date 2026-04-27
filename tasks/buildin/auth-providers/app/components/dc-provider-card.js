@@ -57,19 +57,29 @@ class DcProviderCard extends LitElement {
     const buttonLabel = row.has_token ? "Reconnect" : "Connect";
     return html`
       <div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.5rem">
-        <span class="color-dot" style="background:${meta.color}"></span>
+        <span class="color-dot" aria-hidden="true" style="background:${safeColor(meta.color)}"></span>
         <strong>${meta.label}</strong>
         ${this._pill(row)}
       </div>
       ${row.scope ? html`
         <p style="color:var(--muted);margin:.25rem 0;font-size:.85em">scope: <code>${row.scope}</code></p>
       ` : ""}
-      <button class="btn" @click=${() => this._onConnect()}>${buttonLabel}</button>
+      <button class="btn"
+              aria-label="${buttonLabel} ${meta.label}"
+              @click=${() => this._onConnect()}>${buttonLabel}</button>
       ${this.error ? html`
         <p style="color:var(--pill-err);font-size:.85em;margin:.5rem 0 0">${this.error}</p>
       ` : ""}
     `;
   }
+}
+
+// safeColor returns the input only if it's a hex color literal (#rgb,
+// #rrggbb, or #rrggbbaa). Anything else falls back to a neutral grey.
+// Defends against future contributors loading meta.color from
+// untrusted config — Lit's html`` does NOT escape CSS inside style="".
+function safeColor(c) {
+  return /^#[0-9a-f]{3,8}$/i.test(c ?? "") ? c : "#888";
 }
 
 function humanDelta(ms) {
