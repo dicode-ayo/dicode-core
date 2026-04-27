@@ -5,6 +5,7 @@
 :root[data-theme="dark"] {
   --bg:        #0f1115;
   --surface:   #181b22;
+  --surface-2: #1f2330;
   --border:    #2a2e38;
   --text:      #e6e8ee;
   --muted:     #a1a8b6;
@@ -19,6 +20,7 @@
 :root[data-theme="light"] {
   --bg:        #ffffff;
   --surface:   #f6f7f9;
+  --surface-2: #ffffff;
   --border:    #d8dde5;
   --text:      #14171c;
   --muted:     #5a6473;
@@ -41,42 +43,103 @@ html, body {
 dc-providers-page {
   display: block;
   padding: 1.5rem 2rem;
+  max-width: 880px;
+  margin: 0 auto;
 }
 
-dc-provider-card {
-  display: block;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 1rem;
+dc-providers-page header h1 {
+  margin: 0 0 .25rem;
+  font-size: 1.4rem;
 }
 
+/* One provider per row. */
 .providers-grid {
   list-style: none;
   margin: 0;
   padding: 0;
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  display: flex;
+  flex-direction: column;
+  gap: .5rem;
+}
+
+.providers-grid li {
+  margin: 0;
+}
+
+dc-provider-card {
+  display: flex;
+  align-items: center;
   gap: 1rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: .75rem 1rem;
+  min-height: 56px;
+}
+
+/* Icon column — square brand-colored monochrome SVG via mask-image. */
+.provider-icon {
+  flex: 0 0 36px;
+  width: 36px;
+  height: 36px;
+  background-color: var(--brand, var(--muted));
+  -webkit-mask: var(--icon-url) center / 24px 24px no-repeat;
+          mask: var(--icon-url) center / 24px 24px no-repeat;
+}
+
+/* Middle column — label + scope. */
+.provider-main {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: .15rem;
+  min-width: 0;
+}
+
+.provider-name {
+  font-weight: 600;
+  font-size: .95rem;
+  line-height: 1.2;
+}
+
+.provider-scope {
+  color: var(--muted);
+  font-size: .8em;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.provider-scope code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: .9em;
+}
+
+.provider-error {
+  color: var(--pill-err);
+  font-size: .8em;
+  line-height: 1.3;
+  margin-top: .15rem;
+}
+
+/* Right column — status pill + button. */
+.provider-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: .75rem;
 }
 
 .pill {
   display: inline-block;
   color: white;
   border-radius: 999px;
-  padding: .1rem .55rem;
-  font-size: .75em;
+  padding: .15rem .6rem;
+  font-size: .72em;
   font-weight: 600;
-  margin-left: .5rem;
-}
-
-.color-dot {
-  display: inline-block;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  vertical-align: middle;
-  margin-right: .35rem;
+  letter-spacing: .01em;
+  white-space: nowrap;
 }
 
 .btn {
@@ -84,9 +147,11 @@ dc-provider-card {
   color: white;
   border: 0;
   border-radius: 6px;
-  padding: .4rem .8rem;
+  padding: .4rem .9rem;
   cursor: pointer;
   font-weight: 600;
+  font-size: .85em;
+  white-space: nowrap;
 }
 .btn:hover { filter: brightness(1.1); }
 .btn:focus-visible {

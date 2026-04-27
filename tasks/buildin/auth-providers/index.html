@@ -4,23 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Auth Providers — dicode</title>
-  <script>
-    (function () {
-      try {
-        var stored = localStorage.getItem('dicode-theme');
-        var theme =
-          stored === 'light' || stored === 'dark'
-            ? stored
-            : (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches)
-              ? 'light'
-              : 'dark';
-        document.documentElement.setAttribute('data-theme', theme);
-        document.documentElement.style.colorScheme = theme;
-      } catch (e) {
-        document.documentElement.setAttribute('data-theme', 'dark');
-      }
-    })();
-  </script>
+  <script src="app/theme-init.js"></script>
   <link rel="stylesheet" href="app/theme.css">
 </head>
 <body>

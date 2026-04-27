@@ -1,12 +1,16 @@
 import { LitElement, html } from "https://esm.sh/lit@3";
 
-// dc-provider-card — one row in the providers list. Renders label,
-// color dot, status pill, expiry, scope, and a Connect/Reconnect button.
+// dc-provider-card — one row in the providers list. Three columns:
+//   icon (brand-colored monochrome SVG via mask-image)
+//   main (label + scope or error)
+//   actions (status pill + Connect/Reconnect button)
 // On Connect click, dispatches a "connect" CustomEvent with detail.provider.
 //
 // Lit's html`` template literal auto-escapes interpolated values, so
 // arbitrary strings inside ${row.scope}, ${meta.label}, etc. cannot
-// inject HTML or script content.
+// inject HTML or script content. The two `style="..."` interpolations
+// (icon's --brand and --icon-url) go through safeColor() and a fixed
+// per-row asset path respectively.
 class DcProviderCard extends LitElement {
   // Render into the light DOM so theme.css variables apply directly.
   createRenderRoot() { return this; }
@@ -55,21 +59,30 @@ class DcProviderCard extends LitElement {
     if (!row) return html``;
     const meta = row.meta || { label: row.provider, color: "#888" };
     const buttonLabel = row.has_token ? "Reconnect" : "Connect";
+    // Icon path is per-provider; safeProviderKey ensures only the lowercase
+    // alnum/underscore characters from the daemon-sanitized provider name
+    // can appear in the URL — no traversal, no protocol-injection.
+    const iconUrl = `url("app/icons/${safeProviderKey(row.provider)}.svg")`;
+    const brand = safeColor(meta.color);
     return html`
-      <div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.5rem">
-        <span class="color-dot" aria-hidden="true" style="background:${safeColor(meta.color)}"></span>
-        <strong>${meta.label}</strong>
-        ${this._pill(row)}
+      <span class="provider-icon"
+            aria-hidden="true"
+            style="--brand:${brand};--icon-url:${iconUrl}"></span>
+      <div class="provider-main">
+        <span class="provider-name">${meta.label}</span>
+        ${row.scope ? html`
+          <span class="provider-scope">scope: <code>${row.scope}</code></span>
+        ` : ""}
+        ${this.error ? html`
+          <span class="provider-error">${this.error}</span>
+        ` : ""}
       </div>
-      ${row.scope ? html`
-        <p style="color:var(--muted);margin:.25rem 0;font-size:.85em">scope: <code>${row.scope}</code></p>
-      ` : ""}
-      <button class="btn"
-              aria-label="${buttonLabel} ${meta.label}"
-              @click=${() => this._onConnect()}>${buttonLabel}</button>
-      ${this.error ? html`
-        <p style="color:var(--pill-err);font-size:.85em;margin:.5rem 0 0">${this.error}</p>
-      ` : ""}
+      <div class="provider-actions">
+        ${this._pill(row)}
+        <button class="btn"
+                aria-label="${buttonLabel} ${meta.label}"
+                @click=${() => this._onConnect()}>${buttonLabel}</button>
+      </div>
     `;
   }
 }
@@ -80,6 +93,14 @@ class DcProviderCard extends LitElement {
 // untrusted config — Lit's html`` does NOT escape CSS inside style="".
 function safeColor(c) {
   return /^#[0-9a-f]{3,8}$/i.test(c ?? "") ? c : "#888";
+}
+
+// safeProviderKey constrains the value to lowercase a-z, 0-9, underscore —
+// the daemon's sanitizeProviderPrefix already uppercases similar input,
+// but we re-validate client-side before interpolating into a URL because
+// Lit does not auto-escape inside CSS string values like url("...").
+function safeProviderKey(k) {
+  return /^[a-z0-9_]{2,}$/.test(k ?? "") ? k : "unknown";
 }
 
 function humanDelta(ms) {
