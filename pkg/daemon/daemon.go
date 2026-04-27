@@ -192,6 +192,7 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	if port == 0 {
 		port = 8080
 	}
+	webui.Version = version
 	srv, err := webui.New(port, reg, eng, cfg, configPath, localSecrets, rec, sourceMgr, dataDir, logBroadcaster, log, database, gateway)
 	if err != nil {
 		return fmt.Errorf("build webui: %w", err)
