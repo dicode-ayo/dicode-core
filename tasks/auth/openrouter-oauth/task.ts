@@ -11,7 +11,7 @@ import { generatePKCE, generateState, handleAuthNeeded, successHtml } from "../_
 const AUTH_URL         = "https://openrouter.ai/auth";
 const TOKEN_URL        = "https://openrouter.ai/api/v1/auth/keys";
 const REDIRECT_SUFFIX  = "openrouter-oauth";
-const SECRET_KEY       = "OPENROUTER_API_KEY";
+const SECRET_KEY       = "OPENROUTER_ACCESS_TOKEN";
 const VERIFIER_KV_KEY  = "openrouter_oauth_verifier";
 const STATE_KV_KEY     = "openrouter_oauth_state";
 
