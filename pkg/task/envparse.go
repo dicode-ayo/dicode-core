@@ -48,3 +48,7 @@ func parseFrom(s string) (FromKind, string) {
 	}
 	return FromKindEnv, s
 }
+
+// ParseFrom is the exported counterpart of parseFrom for callers outside
+// pkg/task (e.g. the reconciler validates from: task:<id> references).
+func ParseFrom(s string) (FromKind, string) { return parseFrom(s) }
