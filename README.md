@@ -10,6 +10,20 @@ That's it. The task appears in your dashboard within seconds.
 
 ---
 
+> [!WARNING]
+> **Alpha software — not yet human security-reviewed.**
+>
+> dicode (and the companion [dicode-relay](https://github.com/dicode-ayo/dicode-relay)) was written by AI. The crypto-adjacent code paths — ECDSA P-256 handshake, ECIES (ECDH + AES-256-GCM + HKDF-SHA256) token delivery, TOFU broker pubkey pinning, ECDSA-signed delivery envelopes, OAuth broker flow — have **not** undergone human security review yet. Current tests pass and the design looks sensible, but "sensible on paper, reviewed only by the AI co-author" is not the bar to assume for software handling OAuth tokens and tunneling inbound HTTP on your behalf.
+>
+> What this means for v0.1.0 alpha users:
+> - Use it with **throwaway OAuth apps** in development only.
+> - **Do not** connect a production daemon to `relay.dicode.app` with long-lived secrets.
+> - **Expect breaking protocol changes** as the crypto surface is audited.
+>
+> Tracked in epic [#189](https://github.com/dicode-ayo/dicode-core/issues/189). Pre-GA hardening migrations in [#192](https://github.com/dicode-ayo/dicode-core/issues/192).
+
+---
+
 ## What it is
 
 `dicode` is a single Go binary that:

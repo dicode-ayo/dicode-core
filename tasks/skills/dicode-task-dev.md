@@ -21,13 +21,13 @@ Follow this order every time — no exceptions:
    - `<task-id>/task.ts`   — task logic (TypeScript for `runtime: deno`; use `task.py` for `runtime: python`)
    - `<task-id>/task.test.ts` — unit tests (required, no exceptions)
 6. `validate_task("<task-id>")` — fix ALL errors before proceeding
-7. `test_task("<task-id>")` — ALL tests must pass before proceeding
+7. Run the task's tests — ALL tests must pass before proceeding. From the CLI: `dicode task test <task-id>` (or `make test-tasks` for the full sweep). From the HTTP API: `POST /api/tasks/{id}/test`. Deno runtime only today; Python + Docker parity tracked in [#159](https://github.com/dicode-ayo/dicode-core/issues/159).
 8. `dry_run_task("<task-id>")` — verify HTTP calls and secret resolution
 9. `commit_task("<task-id>", "<source-id>")` — only when 6–8 are clean
 
 ## Hard rules
 
-- **Never commit** if `validate_task` or `test_task` return any errors
+- **Never commit** if `validate_task` returns any errors or task tests fail
 - **Always write `task.test.ts`** — a task without tests will not be committed
 - `task.ts` **must return a JSON-serializable value** — required for chain triggers
 - **Never hardcode secrets** — use `env.get("VAR")` in the script; declare the var in `permissions.env`

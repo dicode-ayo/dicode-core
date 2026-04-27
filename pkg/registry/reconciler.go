@@ -107,7 +107,16 @@ func (rc *Reconciler) startSource(src source.Source) error {
 
 	go func() {
 		for ev := range ch {
-			rc.merged <- ev
+			// Without the ctx select, a slow main loop plus a closed merged
+			// reader during shutdown would block this goroutine forever
+			// holding source events. ctx is the parent context, not the
+			// per-source srcCtx, so this drains naturally on full reconciler
+			// shutdown rather than per-source cancellation.
+			select {
+			case rc.merged <- ev:
+			case <-ctx.Done():
+				return
+			}
 		}
 	}()
 	return nil
