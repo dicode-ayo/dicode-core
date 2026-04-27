@@ -12,8 +12,8 @@ tokens.
 
 A second, larger feature — a generic "task contributes a webui sub-page" mechanism
 that would let the auth-providers task (and future ones) surface as a first-class
-nav entry inside the existing webui SPA — is **deferred** to a follow-up so
-this PR stays focused. See [`docs/followups/auth-providers-webui-nav.md`](../../followups/auth-providers-webui-nav.md).
+nav entry inside the existing webui SPA — is **deferred** to a follow-up.
+Tracked at [#222](https://github.com/dicode-ayo/dicode-core/issues/222).
 
 ## User-visible outcome
 
@@ -515,8 +515,8 @@ Coverage target: same 90 % line target the rest of `pkg/ipc/` enforces.
   invalidating the upstream grant (silent footgun) or require N
   per-provider implementations. Out of scope; can be added later as a
   per-provider "Open provider settings" link.
-- **Iframing inside the webui shell.** Captured in
-  [`docs/followups/auth-providers-webui-nav.md`](../../followups/auth-providers-webui-nav.md).
+- **Iframing inside the webui shell.** Tracked at
+  [#222](https://github.com/dicode-ayo/dicode-core/issues/222).
 - **Auto-refresh visibility.** The auth-relay task already auto-refreshes
   `<P>_ACCESS_TOKEN` when `<P>_EXPIRES_AT` approaches; the dashboard
   shows the latest stored expiry but doesn't currently expose refresh
@@ -529,7 +529,6 @@ New:
 - `pkg/ipc/oauth_status.go` (handler) + `pkg/ipc/oauth_status_test.go`
 - `tasks/buildin/auth-providers/{task.yaml,task.ts,task.test.ts,index.html,app/...}`
 - `tests/e2e/auth-providers.spec.ts`
-- `docs/followups/auth-providers-webui-nav.md`
 
 Modified:
 - `pkg/task/spec.go` — add `OAuthStatus bool` to `DicodePermissions`
