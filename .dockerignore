@@ -16,4 +16,3 @@ dicode
 playwright.config.ts
 tests/e2e
 *.md
-!README.md

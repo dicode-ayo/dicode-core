@@ -26,19 +26,25 @@ COPY . .
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-    go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
+    go build -trimpath -buildvcs=false -ldflags "-s -w -X main.version=${VERSION}" \
       -o /out/dicode ./cmd/dicode
 
 # --- Runtime stage --------------------------------------------------------
 FROM gcr.io/distroless/static-debian12:nonroot
-LABEL org.opencontainers.image.source="https://github.com/dicode-ayo/dicode-core"
-LABEL org.opencontainers.image.description="dicode — GitOps task orchestrator"
-LABEL org.opencontainers.image.licenses="Apache-2.0"
+LABEL org.opencontainers.image.title="dicode-core" \
+      org.opencontainers.image.description="dicode — GitOps task orchestrator" \
+      org.opencontainers.image.url="https://github.com/dicode-ayo/dicode-core" \
+      org.opencontainers.image.documentation="https://github.com/dicode-ayo/dicode-core#readme" \
+      org.opencontainers.image.source="https://github.com/dicode-ayo/dicode-core" \
+      org.opencontainers.image.vendor="dicode-ayo" \
+      org.opencontainers.image.licenses="AGPL-3.0-only"
 
 COPY --from=build /out/dicode /usr/local/bin/dicode
 
-# /data is the conventional mount point for SQLite state; users override
-# `--data-dir` or set DICODE_DATA_DIR to relocate.
+# The daemon honors DICODE_DATA_DIR (cmd/dicode/main.go) for SQLite,
+# sources, and run logs. Setting it here aligns the VOLUME with the
+# default state path so `-v vol:/data` works without further config.
+ENV DICODE_DATA_DIR=/data
 VOLUME ["/data"]
 
 EXPOSE 8080
