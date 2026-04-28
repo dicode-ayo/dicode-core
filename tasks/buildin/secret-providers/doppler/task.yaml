@@ -1,0 +1,42 @@
+apiVersion: dicode/v1
+kind: Task
+name: "Doppler Secret Provider"
+description: >
+  Resolves secrets from a Doppler workspace by calling the Doppler REST API
+  (https://docs.doppler.com/reference/api). Reads requests from
+  dicode.params.requests = [{ name, optional }, ...] and emits the resolved
+  flat map via dicode.output(map, { secret: true }).
+
+  Bootstrap: set DOPPLER_TOKEN via `dicode secrets set DOPPLER_TOKEN dp.st.xxx`
+  (workspace service token). The token is injected via permissions.env so
+  daemon redaction strips it from any accidental log line.
+
+runtime: deno
+
+trigger:
+  manual: true
+
+params:
+  requests:
+    type: string
+    required: true
+    description: >
+      JSON-encoded array of {name, optional} request objects. The daemon
+      env-resolver passes this automatically; users should not call this
+      task directly.
+
+permissions:
+  env:
+    - name: DOPPLER_TOKEN
+      secret: DOPPLER_TOKEN
+  net:
+    - api.doppler.com
+
+provider:
+  cache_ttl: 5m
+
+timeout: 10s
+
+notify:
+  on_success: false
+  on_failure: true
