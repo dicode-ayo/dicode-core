@@ -21,6 +21,14 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # Deno is required for pkg/runtime/deno integration tests (e.g.
+      # TestRun_SecretOutputRoutedToChannel). Without it those tests t.Skip
+      # silently and a regression in the runtime IPC path goes uncaught.
+      # See issue #237.
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
       - name: Run tests
         run: go test -timeout 300s -race ./...
 
