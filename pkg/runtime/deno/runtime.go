@@ -84,6 +84,11 @@ type Runtime struct {
 	brokerPubkeyFn   func() string
 	supportsOAuthFn  func() bool
 	rotationActiveFn func() bool
+	// secretOutputCh is opt-in: when set, every Run wires it into the
+	// per-run IPC server so a provider task's dicode.output(..., {secret:
+	// true}) call is routed to the resolver awaiting it. Nil leaves the
+	// path inert (current behavior).
+	secretOutputCh chan map[string]string
 }
 
 // New creates a Deno Runtime. It ensures the Deno binary is present in the
@@ -109,6 +114,13 @@ func (rt *Runtime) SetGateway(g *ipc.Gateway) { rt.gateway = g }
 // SetSecretsManager wires the secrets manager so tasks with permissions.dicode.secrets_write
 // can call dicode.secrets_set() and dicode.secrets_delete().
 func (rt *Runtime) SetSecretsManager(m secrets.Manager) { rt.secretsManager = m }
+
+// SetSecretOutputChannel wires the channel that receives provider tasks'
+// secret maps. Called by the trigger engine before invoking Run when the
+// task is being launched in "provider" mode.
+func (rt *Runtime) SetSecretOutputChannel(ch chan map[string]string) {
+	rt.secretOutputCh = ch
+}
 
 // SetOAuthBroker wires the daemon's relay identity, broker base URL, and
 // the daemon-wide PendingSessions store so the auth-start and auth-relay
@@ -236,6 +248,9 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	srv.SetSecrets(rt.secretsManager)
 	srv.SetSecretsChain(rt.secrets)
 	srv.SetRedactor(redactor)
+	if rt.secretOutputCh != nil {
+		srv.SetSecretOutput(rt.secretOutputCh)
+	}
 	if rt.oauthIdentity != nil {
 		srv.SetOAuthBroker(rt.oauthIdentity, rt.oauthURL, rt.oauthPending, rt.brokerPubkeyFn, rt.supportsOAuthFn, rt.rotationActiveFn)
 	}
