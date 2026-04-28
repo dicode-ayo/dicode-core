@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"os"
 	"testing"
 
 	"github.com/dicode/dicode/pkg/config"
@@ -44,14 +43,9 @@ func TestResolveDataDir(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.envVal == "" {
-				// t.Setenv("", "") is invalid; use Unsetenv for clarity.
-				if err := os.Unsetenv("DICODE_DATA_DIR"); err != nil {
-					t.Fatalf("unsetenv: %v", err)
-				}
-			} else {
-				t.Setenv("DICODE_DATA_DIR", tc.envVal)
-			}
+			// t.Setenv auto-restores the prior value on test teardown.
+			// Empty string is treated as unset by os.Getenv (returns "").
+			t.Setenv("DICODE_DATA_DIR", tc.envVal)
 			if tc.homeDir != "" {
 				t.Setenv("HOME", tc.homeDir)
 			}
