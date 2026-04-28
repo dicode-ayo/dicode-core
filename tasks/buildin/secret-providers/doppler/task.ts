@@ -15,7 +15,7 @@
 // absent in the output map; required misses surface as a thrown error
 // which the trigger engine renders as required_secret_missing.
 
-import type { DicodeSdk, Output as BaseOutput } from "../../../../sdk.ts";
+import type { DicodeSdk } from "../../../../sdk.ts";
 
 interface SecretRequest { name: string; optional: boolean; }
 
@@ -23,17 +23,7 @@ interface DopplerSecretsResp {
   secrets: Record<string, { computed: string }>;
 }
 
-// The Bundle E SDK shim makes `output` callable in addition to the
-// .html/.text/.image/.file methods, but tasks/sdk.ts hasn't been updated
-// to reflect that yet. Locally extend the Output type so the provider
-// entry-point typechecks against the runtime shape.
-type ProviderOutput = BaseOutput & {
-  (value: Record<string, string>, opts: { secret: true }): Promise<void>;
-};
-
-type ProviderSdk = Omit<DicodeSdk, "output"> & { output: ProviderOutput };
-
-export default async function main({ params, output }: ProviderSdk) {
+export default async function main({ params, output }: DicodeSdk) {
   const reqsJSON = (await params.get("requests")) ?? "[]";
   const requests: SecretRequest[] = JSON.parse(reqsJSON);
 

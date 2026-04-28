@@ -13,7 +13,17 @@ export interface KV {
   list(prefix?: string): Promise<Record<string, unknown>>;
 }
 
+// Provider-task entry point (issue #119): callable form for secret
+// providers. The daemon treats `value` as a flat Record<string,string>,
+// routes it to the resolver awaiting this task, and feeds the values to
+// the run-log redactor. The non-callable methods preserve the legacy
+// structured-output API.
+export interface SecretOutputOptions {
+  secret: true;
+}
+
 export interface Output {
+  (value: Record<string, string>, opts: SecretOutputOptions): Promise<void>;
   html(content: string, opts?: { data?: unknown }): Promise<void>;
   text(content: string): Promise<void>;
   image(mime: string, content: string): Promise<void>;
