@@ -1,0 +1,44 @@
+Thanks for installing {{ .Chart.Name }} {{ .Chart.Version }} (dicode-core {{ .Chart.AppVersion }}).
+
+1. Wait for the pod to become ready:
+
+   kubectl --namespace {{ .Release.Namespace }} rollout status deploy/{{ include "dicode.fullname" . }}
+
+2. Open the dashboard via port-forward:
+
+   kubectl --namespace {{ .Release.Namespace }} port-forward svc/{{ include "dicode.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+   open http://localhost:{{ .Values.service.port }}
+
+{{- if .Values.ingress.enabled }}
+
+   Or visit your Ingress hosts directly:
+   {{- range .Values.ingress.hosts }}
+     - http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}{{ (index .paths 0).path }}
+   {{- end }}
+{{- end }}
+
+3. Health probe (also used by liveness/readiness):
+
+   curl http://localhost:{{ .Values.service.port }}/healthz
+   # => {"status":"ok","version":"{{ .Chart.AppVersion }}"}
+
+{{- if .Values.persistence.enabled }}
+
+NOTE: The PersistentVolumeClaim that backs /data is annotated with
+`helm.sh/resource-policy: keep`, so `helm uninstall` will NOT delete
+your SQLite database, master key, or dicode.yaml. Remove it manually
+if you want a clean wipe:
+
+   kubectl --namespace {{ .Release.Namespace }} delete pvc {{ include "dicode.dataClaimName" . }}
+{{- end }}
+
+{{- if gt (int .Values.replicaCount) 1 }}
+
+WARNING: replicaCount is {{ .Values.replicaCount }}. The dicode daemon
+does NOT yet support leader election, so multiple replicas may run
+cron triggers more than once. Set replicaCount to 1 unless you've
+sharded the daemons by source.
+{{- end }}
+
+For every chart parameter, see:
+  https://github.com/dicode-ayo/dicode-core/tree/main/deploy/helm/dicode/README.md

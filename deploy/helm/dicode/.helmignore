@@ -1,0 +1,27 @@
+# Patterns to ignore when packaging Helm charts.
+# Operates like .gitignore. The default boilerplate plus the dicode
+# repo's local dev artifacts that should never end up inside a chart
+# tarball.
+.DS_Store
+.git/
+.gitignore
+.bzr/
+.bzrignore
+.hg/
+.hgignore
+.svn/
+*.swp
+*.bak
+*.tmp
+*.orig
+*~
+# IDE
+.idea/
+.vscode/
+# OWNERS
+OWNERS
+# helm-docs / chart-testing scratch files
+.cr-release-packages/
+ci/
+# In-tree test outputs that some users vendor
+tests/
