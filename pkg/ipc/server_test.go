@@ -1267,3 +1267,69 @@ func TestServer_Log_BufCap(t *testing.T) {
 	logs, _ := e.reg.GetRunLogs(context.Background(), srv.runID)
 	t.Fatalf("expected at least %d entries after cap-flush, got %d", logBufMaxSize, len(logs))
 }
+
+// ── secret output (issue #119) ────────────────────────────────────────────────
+
+// TestServer_SecretOutputRoutedAndRedacted verifies that an `output` request
+// with `secret: true` routes the flat map to the channel wired by
+// SetSecretOutput, and persists a run-log entry with key names but a
+// [redacted] placeholder rather than the raw value.
+func TestServer_SecretOutputRoutedAndRedacted(t *testing.T) {
+	e := newTestEnv(t)
+	runID := fmt.Sprintf("test-%d", time.Now().UnixNano())
+	srv := New(runID, "test-task", e.secret, e.reg, e.db, nil, nil, zap.NewNop(), nil, nil)
+
+	out := make(chan map[string]string, 1)
+	srv.SetSecretOutput(out)
+
+	socketPath, token, err := srv.Start(context.Background())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(srv.Stop)
+	conn := dial(t, socketPath)
+	t.Cleanup(func() { conn.Close() })
+	doHandshake(t, conn, token)
+
+	sendMsg(t, conn, map[string]any{
+		"method":    "output",
+		"secret":    true,
+		"secretMap": map[string]string{"PG_URL": "postgres://x"},
+	})
+
+	select {
+	case got := <-out:
+		if got["PG_URL"] != "postgres://x" {
+			t.Errorf("got = %#v", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("secret map not routed to channel")
+	}
+
+	// AppendLog writes synchronously, but the IPC handler runs in a
+	// separate goroutine — wait briefly for the handler to enqueue the
+	// log row before reading.
+	deadline := time.Now().Add(2 * time.Second)
+	var logs []*registry.LogEntry
+	for time.Now().Before(deadline) {
+		logs, _ = e.reg.GetRunLogs(context.Background(), srv.runID)
+		if len(logs) > 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	found := false
+	for _, l := range logs {
+		if strings.Contains(l.Message, "[redacted]") {
+			found = true
+			if strings.Contains(l.Message, "postgres://x") {
+				t.Errorf("plaintext leaked into log: %q", l.Message)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected [redacted] log entry; got %d entries", len(logs))
+	}
+}
+
