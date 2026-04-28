@@ -83,6 +83,14 @@ type Server struct {
 	output *OutputResult
 	retCh  chan any
 
+	// secretOut, when non-nil, receives the flat map produced by a
+	// provider task calling dicode.output(map, { secret: true }). The
+	// resolver waiting on the consumer's launch sets this via
+	// SetSecretOutput; once received, the same values are also fed into
+	// s.redactor for run-log scrubbing and the run log records key
+	// names with [redacted] placeholders only.
+	secretOut chan map[string]string
+
 	// log buffer – accumulate log entries and flush in batches to reduce
 	// per-line SQLite write-lock pressure (see flushLogs / flushLogsNow).
 	logMu        sync.Mutex
@@ -147,6 +155,13 @@ func (s *Server) SetSecretsChain(c secrets.Chain) { s.secretsChain = c }
 // persisted to the run log, matching the protection stdout/stderr piping
 // already gets from runtime wrappers. Nil is safe (no redaction).
 func (s *Server) SetRedactor(r *secrets.Redactor) { s.redactor = r }
+
+// SetSecretOutput wires the channel that receives a provider task's
+// secret map. Call BEFORE Start. Buffer >=1 is required so the IPC
+// goroutine does not block on the channel send.
+func (s *Server) SetSecretOutput(ch chan map[string]string) {
+	s.secretOut = ch
+}
 
 // SetOAuthBroker wires the daemon's relay identity (used to sign /auth URLs
 // and decrypt token deliveries) plus the broker base URL and the
@@ -398,6 +413,51 @@ func (s *Server) handleConn(conn net.Conn) {
 
 		case "output":
 			if !hasCap(caps, CapOutputWrite) {
+				continue
+			}
+			if req.Secret {
+				if !hasCap(caps, CapOutputSecret) {
+					continue
+				}
+				// Flat map: decode SecretMap as map[string]string. Reject
+				// nested objects per issue #119.
+				var sm map[string]string
+				if err := json.Unmarshal(req.SecretMap, &sm); err != nil {
+					s.log.Warn("ipc: secret output: not a flat string map",
+						zap.String("run", s.runID),
+						zap.Error(err),
+					)
+					continue
+				}
+				// Replace the run's redactor with a new one carrying
+				// these values. Prior redactor values (from secrets
+				// resolved at consumer-launch time) are NOT preserved
+				// here — the existing redactor doesn't expose its
+				// inner values. This is acceptable because a provider
+				// task is itself a CHILD run; its redactor only needs
+				// to scrub the values the provider just returned.
+				s.mu.Lock()
+				s.redactor = secrets.NewRedactor(sm)
+				s.mu.Unlock()
+
+				// Persist key names + [redacted] placeholders to the run
+				// log so operators can audit which secrets the provider
+				// returned without leaking values.
+				keys := make([]string, 0, len(sm))
+				for k := range sm {
+					keys = append(keys, k)
+				}
+				_ = s.registry.AppendLog(context.Background(), s.runID, "info",
+					fmt.Sprintf("[dicode] secret output: %v = [redacted]", keys))
+
+				if s.secretOut != nil {
+					select {
+					case s.secretOut <- sm:
+					default:
+						s.log.Warn("ipc: secretOut channel full or unread",
+							zap.String("run", s.runID))
+					}
+				}
 				continue
 			}
 			var data any
