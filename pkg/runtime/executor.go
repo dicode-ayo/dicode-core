@@ -4,6 +4,7 @@ package runtime
 import (
 	"context"
 
+	"github.com/dicode/dicode/pkg/runtime/envresolve"
 	"github.com/dicode/dicode/pkg/task"
 )
 
@@ -13,6 +14,15 @@ type RunOptions struct {
 	ParentRunID string
 	Params      map[string]string
 	Input       interface{}
+
+	// PreResolvedEnv, when set, is the result of an env-resolver pass run
+	// by the trigger engine before dispatch. The runtime uses these values
+	// directly instead of calling the resolver itself, avoiding the
+	// double-resolve that would otherwise re-spawn provider tasks.
+	//
+	// When nil (e.g. legacy callers, tests that bypass the engine), the
+	// runtime falls back to its own inline-resolver path.
+	PreResolvedEnv *envresolve.Resolved
 }
 
 // RunResult is returned by every Executor.

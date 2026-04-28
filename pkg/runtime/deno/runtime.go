@@ -56,6 +56,12 @@ type RunOptions struct {
 	Params      map[string]string
 	Input       interface{}
 	ParentRunID string
+
+	// PreResolvedEnv, when set, is the result of an env-resolver pass run
+	// by the trigger engine before dispatch (issue #235). Run uses these
+	// values directly instead of constructing its own resolver. Nil falls
+	// back to the inline resolver path.
+	PreResolvedEnv *envresolve.Resolved
 }
 
 // RunResult is returned by Run.
@@ -197,15 +203,23 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		}
 	}()
 
-	// Resolve declared env permissions via the shared resolver. Provider
-	// tasks (from: task:<id>) are spawned and batched at most once per
-	// provider per launch; legacy paths (secret:, env:NAME, bare) are
-	// preserved.
-	resolvedRes, err := rt.envresolver().Resolve(ctx, spec)
-	if err != nil {
-		status = registry.StatusFailure
-		result.Error = err
-		return result, nil
+	// Resolve declared env permissions. When the trigger engine ran
+	// preflight (issue #235), it forwards the *Resolved here so we don't
+	// re-spawn provider tasks. When opts.PreResolvedEnv is nil (legacy
+	// callers, tests that bypass the engine), fall back to inline
+	// resolution. Provider tasks (from: task:<id>) are spawned and batched
+	// at most once per provider per launch; legacy paths (secret:,
+	// env:NAME, bare) are preserved.
+	var resolvedRes *envresolve.Resolved
+	if opts.PreResolvedEnv != nil {
+		resolvedRes = opts.PreResolvedEnv
+	} else {
+		resolvedRes, err = rt.envresolver().Resolve(ctx, spec)
+		if err != nil {
+			status = registry.StatusFailure
+			result.Error = err
+			return result, nil
+		}
 	}
 	resolved := resolvedRes.Env
 	redactor := secrets.NewRedactor(resolvedRes.Secrets)
@@ -524,10 +538,11 @@ func (rt *Runtime) envresolver() *envresolve.Resolver {
 // Execute implements runtime.Executor.
 func (rt *Runtime) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime.RunOptions) (*pkgruntime.RunResult, error) {
 	result, err := rt.Run(ctx, spec, RunOptions{
-		RunID:       opts.RunID,
-		ParentRunID: opts.ParentRunID,
-		Params:      opts.Params,
-		Input:       opts.Input,
+		RunID:          opts.RunID,
+		ParentRunID:    opts.ParentRunID,
+		Params:         opts.Params,
+		Input:          opts.Input,
+		PreResolvedEnv: opts.PreResolvedEnv,
 	})
 	if err != nil {
 		return nil, err

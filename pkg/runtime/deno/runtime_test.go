@@ -12,6 +12,7 @@ import (
 
 	"github.com/dicode/dicode/pkg/db"
 	"github.com/dicode/dicode/pkg/registry"
+	"github.com/dicode/dicode/pkg/runtime/envresolve"
 	"github.com/dicode/dicode/pkg/secrets"
 	"github.com/dicode/dicode/pkg/task"
 	"go.uber.org/zap"
@@ -134,6 +135,55 @@ func TestRuntime_Log(t *testing.T) {
 }
 
 // ── permissions tests ─────────────────────────────────────────────────────────
+
+// failingProviderRunner fails the test the moment the runtime invokes it.
+// Used to pin issue #235: when opts.PreResolvedEnv is set, the runtime must
+// reuse that value and must NOT construct its own resolver (which would
+// double-spawn provider tasks).
+type failingProviderRunner struct{ t *testing.T }
+
+func (f failingProviderRunner) Run(_ context.Context, providerID string, _ []envresolve.ProviderRequest) (*envresolve.ProviderResult, error) {
+	f.t.Errorf("regression #235: runtime invoked provider runner for %q despite opts.PreResolvedEnv being set", providerID)
+	return &envresolve.ProviderResult{Values: map[string]string{}}, nil
+}
+
+// TestRuntime_PreResolvedEnv_BypassesResolver: when the trigger engine has
+// already run preflight and threaded *Resolved through opts.PreResolvedEnv,
+// the runtime must use that value directly instead of running the resolver
+// (which would re-spawn provider tasks). Verifies (a) no provider call is
+// made and (b) the consumer's env actually contains the pre-resolved value.
+func TestRuntime_PreResolvedEnv_BypassesResolver(t *testing.T) {
+	e := newTestEnv(t)
+	// Wire a runner that fails the test on any call. With PreResolvedEnv
+	// set, the runtime must never reach the resolver.
+	e.rt.SetProviderRunner(failingProviderRunner{t: t})
+
+	spec := &task.Spec{
+		ID: "preresolved-bypass", Name: "preresolved-bypass", Runtime: task.RuntimeDeno,
+		Trigger: task.TriggerConfig{Manual: true}, Timeout: 30 * time.Second,
+		Permissions: task.Permissions{
+			// from: task:<id> — would normally trigger a provider call. With
+			// PreResolvedEnv it must be skipped.
+			Env: []task.EnvEntry{{Name: "PG_URL", From: "task:doppler"}},
+		},
+	}
+	pre := &envresolve.Resolved{
+		Env:     map[string]string{"PG_URL": "postgres://from-preresolved"},
+		Secrets: map[string]string{"PG_URL": "postgres://from-preresolved"},
+	}
+
+	r := e.runSpec(t,
+		`export default async function main() { return Deno.env.get("PG_URL") ?? null }`,
+		spec,
+		RunOptions{PreResolvedEnv: pre},
+	)
+	if r.Error != nil {
+		t.Fatalf("error: %v", r.Error)
+	}
+	if r.ReturnValue != "postgres://from-preresolved" {
+		t.Errorf("expected pre-resolved value, got %v", r.ReturnValue)
+	}
+}
 
 // TestRuntime_Env_BarePassthrough: bare name allowlists the var so the script
 // can read it from the host env — no injection, no secrets.

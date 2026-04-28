@@ -185,15 +185,24 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 		}
 	}()
 
-	// Resolve declared env permissions via the shared resolver. Provider
-	// tasks (from: task:<id>) are spawned and batched at most once per
-	// provider per launch; legacy paths (secret:, env:NAME, bare) are
-	// preserved.
-	resolvedRes, err := envresolve.New(e.reg, e.secrets, e.providerRunner).Resolve(ctx, spec)
-	if err != nil {
-		status = registry.StatusFailure
-		result.Error = err
-		return result, nil
+	// Resolve declared env permissions. When the trigger engine ran
+	// preflight (issue #235), it forwards the *Resolved here so we don't
+	// re-spawn provider tasks. When opts.PreResolvedEnv is nil (legacy
+	// callers, tests that bypass the engine), fall back to inline
+	// resolution. Provider tasks (from: task:<id>) are spawned and batched
+	// at most once per provider per launch; legacy paths (secret:,
+	// env:NAME, bare) are preserved.
+	var resolvedRes *envresolve.Resolved
+	var err error
+	if opts.PreResolvedEnv != nil {
+		resolvedRes = opts.PreResolvedEnv
+	} else {
+		resolvedRes, err = envresolve.New(e.reg, e.secrets, e.providerRunner).Resolve(ctx, spec)
+		if err != nil {
+			status = registry.StatusFailure
+			result.Error = err
+			return result, nil
+		}
 	}
 	resolved := resolvedRes.Env
 	redactor := secrets.NewRedactor(resolvedRes.Secrets)
