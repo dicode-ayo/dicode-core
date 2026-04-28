@@ -204,6 +204,27 @@ Start local, add git when you're ready — no rework required. Add a git source 
 
 ---
 
+## Run with Docker
+
+```sh
+docker pull dicodeayo/dicode-core:latest
+docker run -d --name dicode \
+  -p 8080:8080 \
+  -v dicode-data:/data \
+  dicodeayo/dicode-core:latest
+```
+
+Open http://localhost:8080. SQLite, encrypted secrets, source clones, and
+the generated `dicode.yaml` all live under `/data` in the named volume
+`dicode-data`, so the dashboard passphrase, registered tasks, and run
+history survive `docker rm` + `docker run` against the same volume.
+
+Multi-arch images are published for `linux/amd64` and `linux/arm64` and
+mirrored on GHCR: `ghcr.io/dicode-ayo/dicode-core`. Pin to a specific
+release: `dicodeayo/dicode-core:0.1.1` (or `:0.1` / `:0`).
+
+---
+
 ## Task Format
 
 Every task lives in its own directory inside the `tasks/` folder of your git repo:

@@ -90,15 +90,24 @@ func Run(ctx context.Context, configPath string, opts RunOptions) error {
 // runs: all curated tasksets on, default paths under home, generated
 // passphrase. port, when non-zero, overrides the default 8080 — so
 // systemd/Docker installs started with --port honor the flag.
+//
+// DataDir defers to the DICODE_DATA_DIR env var when set. This is what
+// makes the Docker image's `ENV DICODE_DATA_DIR=/data` bake `/data` into
+// the generated dicode.yaml on first launch, so SQLite + sources land in
+// the mounted volume instead of the container's writable layer.
 func defaultResult(home string, port int) Result {
 	enabled := make(map[string]bool, len(TaskSetPresets))
 	for _, p := range TaskSetPresets {
 		enabled[p.Name] = p.DefaultOn
 	}
+	dataDir := home + "/.dicode"
+	if d := os.Getenv("DICODE_DATA_DIR"); d != "" {
+		dataDir = d
+	}
 	return Result{
 		TaskSetsEnabled: enabled,
 		LocalTasksDir:   home + "/dicode-tasks",
-		DataDir:         home + "/.dicode",
+		DataDir:         dataDir,
 		Port:            portOr(port, defaultPort),
 		Passphrase:      GeneratePassphrase(),
 	}

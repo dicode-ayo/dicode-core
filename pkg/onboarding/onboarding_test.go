@@ -51,6 +51,32 @@ func TestRenderConfig_LoadsCleanly(t *testing.T) {
 	}
 }
 
+// TestDefaultResult_HonorsDataDirEnv guards the Docker image's data
+// volume contract: `ENV DICODE_DATA_DIR=/data` only persists state if
+// silent onboarding writes that path into the generated dicode.yaml.
+// Without this, SQLite + sources would land in the container's writable
+// layer and `docker rm` would wipe everything (PR #227 bug).
+func TestDefaultResult_HonorsDataDirEnv(t *testing.T) {
+	t.Run("env set overrides home default", func(t *testing.T) {
+		t.Setenv("DICODE_DATA_DIR", "/data")
+		r := defaultResult("/home/nonroot", 0)
+		if r.DataDir != "/data" {
+			t.Errorf("DataDir = %q, want %q (env should win)", r.DataDir, "/data")
+		}
+	})
+
+	t.Run("env unset falls back to home", func(t *testing.T) {
+		if err := os.Unsetenv("DICODE_DATA_DIR"); err != nil {
+			t.Fatalf("unsetenv: %v", err)
+		}
+		r := defaultResult("/home/nonroot", 0)
+		want := "/home/nonroot/.dicode"
+		if r.DataDir != want {
+			t.Errorf("DataDir = %q, want %q (home fallback)", r.DataDir, want)
+		}
+	})
+}
+
 // TestWriteConfig_FileAndParentArePrivate guards the dashboard
 // passphrase (embedded as server.secret) from other users on shared
 // hosts: the config file must be 0600 and its parent dir must be 0700.

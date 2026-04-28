@@ -149,6 +149,10 @@ func (l *unlockLimiter) allow(ip string) bool {
 //go:embed static
 var staticFS embed.FS
 
+// Version is the build-stamped version reported by GET /healthz. Set by
+// pkg/daemon before calling webui.New(). Defaults to "dev" when unset.
+var Version = "dev"
+
 // Server is the HTTP server for the web UI and REST API.
 type Server struct {
 	registry           *registry.Registry
@@ -385,6 +389,18 @@ func (s *Server) Handler() http.Handler {
 		lr.Get("/login", s.handleLoginPage)
 	})
 	r.Post("/api/auth/refresh", s.apiAuthRefresh)
+
+	// /healthz: unauthenticated liveness probe. Used by Docker smoke tests,
+	// Kubernetes liveness/readiness probes, and uptime monitors. Must remain
+	// outside the auth-required group.
+	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"status":  "ok",
+			"version": Version,
+		})
+	})
 
 	// Webhook passthrough — auth via per-task HMAC secret or optional session cookie.
 	// When a task sets trigger.auth: true, a valid dicode session is required for
