@@ -135,6 +135,47 @@ services:
 
 ---
 
+## Kubernetes (Helm)
+
+A Helm chart ships in [`deploy/helm/dicode`](https://github.com/dicode-ayo/dicode-core/tree/main/deploy/helm/dicode). Requires Kubernetes ≥ 1.27 and Helm ≥ 3.8.
+
+```bash
+git clone https://github.com/dicode-ayo/dicode-core.git
+cd dicode-core
+helm install dicode ./deploy/helm/dicode \
+  --create-namespace --namespace dicode \
+  --set secret.create=true \
+  --set secret.values.ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY
+```
+
+Then port-forward and open the dashboard:
+
+```bash
+kubectl -n dicode port-forward svc/dicode 8080:8080
+open http://localhost:8080
+```
+
+Run the bundled connection test:
+
+```bash
+helm test dicode --namespace dicode
+```
+
+**Defaults:**
+- Single replica, `Recreate` rollout strategy
+- 5 GiB PVC at `/data` (SQLite database, master key, `dicode.yaml`)
+- `runAsNonRoot` UID 65532, `readOnlyRootFilesystem`, drops all capabilities, `seccompProfile: RuntimeDefault`
+- Liveness + readiness probes on the unauth `/healthz` route
+
+**Notes:**
+- The PVC is annotated `helm.sh/resource-policy: keep`, so `helm uninstall` does NOT delete your task data. Remove it manually with `kubectl delete pvc dicode-data` if you want a clean wipe.
+- `replicaCount > 1` is **not** yet supported — the daemon has no leader election, so multiple replicas may run cron triggers more than once.
+- Both `ghcr.io/dicode-ayo/dicode-core` and `dicodeayo/dicode-core` (Docker Hub) are published on every release-please tag; the chart pulls from GHCR by default.
+
+See [`deploy/helm/dicode/README.md`](https://github.com/dicode-ayo/dicode-core/tree/main/deploy/helm/dicode/README.md) for every chart parameter, ingress / secret / config examples, and the publishing roadmap.
+
+---
+
 ## Configuration reference
 
 ### `dicode.yaml`
