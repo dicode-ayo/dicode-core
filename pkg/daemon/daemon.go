@@ -383,6 +383,12 @@ func buildRuntimes(
 	denoRT.SetEngine(eng)
 	denoRT.SetGateway(gateway)
 	denoRT.SetSecretsManager(secretsMgr)
+	// Issue #119: engine implements envresolve.ProviderRunner so the
+	// runtimes' env resolvers can spawn provider tasks back through it.
+	// SetDenoRuntime/SetPythonRuntime let the engine swap the runtime's
+	// per-run secretOutputCh for each provider invocation.
+	eng.SetDenoRuntime(denoRT)
+	denoRT.SetProviderRunner(eng)
 	if cfg.Defaults.OnFailureChain != "" {
 		eng.SetDefaultsOnFailureChain(cfg.Defaults.OnFailureChain)
 	}
@@ -419,6 +425,8 @@ func buildRuntimes(
 	}
 	pythonMgr.SetGateway(gateway)
 	pythonMgr.SetSecretsManager(secretsMgr)
+	eng.SetPythonRuntime(pythonMgr)
+	pythonMgr.SetProviderRunner(eng)
 	managed = append(managed, pythonMgr)
 
 	if rc, ok := cfg.Runtimes["python"]; ok && !rc.Disabled {

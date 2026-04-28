@@ -28,6 +28,7 @@ import (
 	"github.com/dicode/dicode/pkg/notify"
 	"github.com/dicode/dicode/pkg/registry"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
+	"github.com/dicode/dicode/pkg/runtime/envresolve"
 	"github.com/dicode/dicode/pkg/secrets"
 	"github.com/dicode/dicode/pkg/task"
 	"github.com/google/uuid"
@@ -77,6 +78,34 @@ type Engine struct {
 
 	runFinishedHook func(taskID, runID, status, triggerSource string, durationMs int64, notifyOnSuccess, notifyOnFailure bool)
 	runStartedHook  func(taskID, runID, triggerSource string)
+
+	// denoRuntime / pythonRuntime are typed runtime handles needed by the
+	// Engine's ProviderRunner implementation (issue #119). The engine swaps
+	// the per-runtime SecretOutputChannel per provider invocation. Wired in
+	// daemon.go via SetDenoRuntime / SetPythonRuntime to avoid an import
+	// cycle with the runtime packages.
+	denoRuntime   DenoRuntimeAPI
+	pythonRuntime PythonRuntimeAPI
+
+	// providerRunMu serializes Engine.Run invocations so concurrent provider
+	// resolutions don't clobber each other's secretOutputCh on the runtime.
+	// MVP-quality: a per-run channel registry would allow parallelism but
+	// requires runtime changes; revisit when contention shows up.
+	providerRunMu sync.Mutex
+}
+
+// DenoRuntimeAPI is the minimal subset of *deno.Runtime the engine's
+// ProviderRunner implementation depends on. Defined here (not imported)
+// to keep pkg/trigger free of pkg/runtime/deno; daemon.go wires the real
+// runtime via SetDenoRuntime.
+type DenoRuntimeAPI interface {
+	SetSecretOutputChannel(ch chan map[string]string)
+}
+
+// PythonRuntimeAPI is the minimal subset of *python.Runtime the engine's
+// ProviderRunner implementation depends on. Mirrors DenoRuntimeAPI.
+type PythonRuntimeAPI interface {
+	SetSecretOutputChannel(ch chan map[string]string)
 }
 
 // New creates a trigger Engine with a default Deno executor.
@@ -109,6 +138,14 @@ func (e *Engine) SetDB(d db.DB) {
 func (e *Engine) SetSecrets(s secrets.Chain) {
 	e.secrets = s
 }
+
+// SetDenoRuntime wires the deno runtime so the engine can act as a
+// ProviderRunner — swapping the per-run SecretOutputChannel before
+// firing a provider task and clearing it after.
+func (e *Engine) SetDenoRuntime(r DenoRuntimeAPI) { e.denoRuntime = r }
+
+// SetPythonRuntime wires the python runtime; mirror of SetDenoRuntime.
+func (e *Engine) SetPythonRuntime(r PythonRuntimeAPI) { e.pythonRuntime = r }
 
 // SetMaxConcurrentTasks configures a semaphore that limits how many task
 // goroutines run concurrently. n == 0 (the default) means unlimited.
@@ -618,6 +655,101 @@ func (e *Engine) WaitRun(ctx context.Context, runID string) (ipc.RunResult, erro
 		Status:      run.Status,
 		ReturnValue: returnValue,
 	}, nil
+}
+
+// Run satisfies envresolve.ProviderRunner. It spawns the provider task
+// synchronously and waits for it to finish; the secret map is collected
+// over the IPC channel pre-wired into the runtime by SetSecretOutputChannel.
+//
+// Concurrency: serialized through providerRunMu because the runtime's
+// secretOutputCh is single-slot global state. MVP-quality — see
+// providerRunMu doc on the Engine struct.
+//
+// Errors:
+//   - ctx.Err() if the caller context expires
+//   - error if the spawn fails or the run errors out
+//   - error if the run finished without sending a map (provider didn't
+//     call output(..., {secret: true}))
+func (e *Engine) Run(ctx context.Context, providerID string, reqs []envresolve.ProviderRequest) (*envresolve.ProviderResult, error) {
+	spec, ok := e.registry.Get(providerID)
+	if !ok {
+		return nil, fmt.Errorf("provider task %q not registered", providerID)
+	}
+
+	e.providerRunMu.Lock()
+	defer e.providerRunMu.Unlock()
+
+	ch := make(chan map[string]string, 1)
+	switch spec.Runtime {
+	case task.RuntimeDeno, "", "js":
+		if e.denoRuntime == nil {
+			return nil, fmt.Errorf("deno runtime not wired to engine")
+		}
+		e.denoRuntime.SetSecretOutputChannel(ch)
+		defer e.denoRuntime.SetSecretOutputChannel(nil)
+	default:
+		if e.pythonRuntime == nil {
+			return nil, fmt.Errorf("python runtime not wired to engine (runtime=%q)", spec.Runtime)
+		}
+		e.pythonRuntime.SetSecretOutputChannel(ch)
+		defer e.pythonRuntime.SetSecretOutputChannel(nil)
+	}
+
+	reqJSON, _ := json.Marshal(map[string]any{"requests": reqs})
+	runID, err := e.fireAsync(ctx, spec, pkgruntime.RunOptions{
+		Params: map[string]string{"requests": string(reqJSON)},
+	}, "provider")
+	if err != nil {
+		return nil, fmt.Errorf("fire provider %q: %w", providerID, err)
+	}
+	res, werr := e.WaitRun(ctx, runID)
+	if werr != nil {
+		return nil, fmt.Errorf("wait provider %q: %w", providerID, werr)
+	}
+	if res.Status != registry.StatusSuccess {
+		return nil, fmt.Errorf("provider %q run %s: %s", providerID, runID, res.Status)
+	}
+
+	// The buffered (cap=1) channel was populated when the IPC server
+	// observed the dicode.output(..., {secret:true}) call — by the time
+	// WaitRun returns success the value is already enqueued. A short
+	// non-blocking read with a tiny safety timeout diagnoses providers
+	// that completed without ever calling output(secret).
+	select {
+	case sm := <-ch:
+		return &envresolve.ProviderResult{Values: sm}, nil
+	case <-time.After(50 * time.Millisecond):
+		return nil, fmt.Errorf("provider %q completed without secret output (did it call dicode.output(map, { secret: true })?)", providerID)
+	}
+}
+
+// preflightEnv runs the env resolver once before dispatch so that typed
+// provider failures (provider_unavailable / required_secret_missing /
+// provider_misconfigured) can be recorded as the run's fail_reason
+// instead of surfacing as opaque dispatch errors. Returns ("", "") on
+// success or non-typed error — the resolver runs again inside the
+// runtime, but that's acceptable for MVP (issue #119).
+func (e *Engine) preflightEnv(ctx context.Context, spec *task.Spec) (status, reason string) {
+	// Skip preflight when secrets chain isn't wired (test fixtures) or
+	// when the spec has no env entries the resolver could fail on.
+	if e.secrets == nil || len(spec.Permissions.Env) == 0 {
+		return "", ""
+	}
+	r := envresolve.New(e.registry, e.secrets, e)
+	if _, err := r.Resolve(ctx, spec); err != nil {
+		var pu *envresolve.ErrProviderUnavailable
+		var rsm *envresolve.ErrRequiredSecretMissing
+		var mis *envresolve.ErrProviderMisconfigured
+		switch {
+		case errors.As(err, &pu):
+			return registry.StatusFailure, "provider_unavailable: " + pu.ProviderID
+		case errors.As(err, &rsm):
+			return registry.StatusFailure, "required_secret_missing: " + rsm.Key + " from " + rsm.ProviderID
+		case errors.As(err, &mis):
+			return registry.StatusFailure, "provider_misconfigured: " + mis.ProviderID
+		}
+	}
+	return "", ""
 }
 
 // KillRun cancels a running task by its run ID.
@@ -1181,7 +1313,25 @@ func (e *Engine) runTask(runCtx context.Context, spec *task.Spec, opts pkgruntim
 	)
 
 	start := time.Now()
-	status, result := e.dispatch(runCtx, spec, opts)
+
+	// Preflight env-resolver: typed envresolve failures
+	// (provider_unavailable / required_secret_missing / provider_misconfigured)
+	// are recorded as the run's fail_reason BEFORE dispatch so the operator
+	// gets a categorized reason instead of an opaque executor error. On
+	// preflight success this is a no-op (resolver returns nil); the runtime
+	// then re-resolves with its own cache before spawning the consumer.
+	var status string
+	var result *pkgruntime.RunResult
+	if preStatus, preReason := e.preflightEnv(runCtx, spec); preStatus != "" {
+		_ = e.registry.FinishRunWithReason(context.Background(), opts.RunID, preStatus, preReason)
+		// dispatch normally fires FireChain; on the preflight short-circuit
+		// we replicate it so chain triggers still observe the failure.
+		go e.FireChain(context.Background(), spec.ID, opts.RunID, preStatus, nil)
+		status = preStatus
+		result = &pkgruntime.RunResult{RunID: opts.RunID, Error: errors.New(preReason)}
+	} else {
+		status, result = e.dispatch(runCtx, spec, opts)
+	}
 	elapsed := time.Since(start)
 
 	runFields := []zap.Field{
