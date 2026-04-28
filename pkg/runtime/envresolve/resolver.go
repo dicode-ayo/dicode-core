@@ -2,6 +2,7 @@ package envresolve
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -103,7 +104,7 @@ func (r *Resolver) Resolve(ctx context.Context, spec *task.Spec) (*Resolved, err
 			val, err := r.Secrets.Resolve(ctx, e.Secret)
 			if err != nil {
 				var notFound *secrets.NotFoundError
-				if e.Optional && asSecretNotFound(err, &notFound) {
+				if e.Optional && errors.As(err, &notFound) {
 					out.Env[e.Name] = ""
 					continue
 				}
@@ -128,30 +129,30 @@ func (r *Resolver) Resolve(ctx context.Context, spec *task.Spec) (*Resolved, err
 			// fully bare → no injection (allowlist only); leave unset.
 		}
 	}
-	for providerID, entries := range byProvider {
-		if err := r.resolveProvider(ctx, providerID, entries, out); err != nil {
+	providerIDs := make([]string, 0, len(byProvider))
+	for id := range byProvider {
+		providerIDs = append(providerIDs, id)
+	}
+	sort.Strings(providerIDs)
+	for _, providerID := range providerIDs {
+		if err := r.resolveProvider(ctx, providerID, byProvider[providerID], out); err != nil {
 			return nil, err
 		}
 	}
 	return out, nil
 }
 
-// asSecretNotFound is a tiny shim so we don't import errors here just for errors.As.
-func asSecretNotFound(err error, target **secrets.NotFoundError) bool {
-	if e, ok := err.(*secrets.NotFoundError); ok {
-		*target = e
-		return true
-	}
-	return false
-}
-
-// resolveProvider handles one provider's batch.
+// resolveProvider handles one provider's batch. It mutates the entries
+// slice via sort.SliceStable; safe because callers (Resolve) always
+// build entries fresh per call.
 func (r *Resolver) resolveProvider(
 	ctx context.Context,
 	providerID string,
 	entries []taskEntry,
 	out *Resolved,
 ) error {
+	// Single registry snapshot per Resolve call; cross-call registry
+	// updates are handled by the cache's content-hash mismatch path.
 	spec, ok := r.Registry.Get(providerID)
 	if !ok {
 		return &ErrProviderUnavailable{
@@ -194,6 +195,11 @@ func (r *Resolver) resolveProvider(
 		if spec.Provider != nil {
 			ttl = spec.Provider.CacheTTL
 		}
+		// Empty values are cached intentionally. A provider that returns
+		// {"KEY": ""} is asserting the secret deliberately maps to empty;
+		// we preserve that intent rather than treating empty as "not found".
+		// Providers that mean "not found" should omit the key from the map
+		// (the required/optional check handles that path below).
 		for _, m := range misses {
 			if v, present := fetched[m.Name]; present {
 				r.Cache.put(providerID, m.Name, providerHash, v, ttl, now)
