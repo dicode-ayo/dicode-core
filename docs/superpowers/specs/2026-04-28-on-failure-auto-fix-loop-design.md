@@ -21,7 +21,7 @@ In scope:
 
 1. Persisted, encrypted run inputs with parameterizable retention and pluggable storage.
 2. Replay primitive that re-fires a failed run with its persisted input.
-3. Dev mode extension that lets the engine clone-and-checkout a worktree on a named branch.
+3. Dev mode extension that lets the engine clone the source on a named branch into a fresh per-fix directory.
 4. Chain trigger that can pass parameters to the chained task.
 5. SDK additions exposing what auto-fix needs over the unix-socket IPC: `tasks.test`, `sources.set_dev_mode`, `git.commit_push`, plus the run-input plumbing (replay, get_input, list_expired, delete_input, pin/unpin).
 6. A buildin `auto-fix` taskset entry (override of `buildin/dicodai`) that consumes the failure context, iterates fix → validate → push, and either merges to main (autonomous) or opens a PR (review).
@@ -69,10 +69,10 @@ Out of scope (deferred):
 └─────────────────┘
 
 ┌────────────────────┐
-│ dev-worktrees-     │  cron, mirrors temp-cleanup
-│ cleanup task       │  removes orphan worktrees
-│ (buildin)          │  whose runID is no longer
-└────────────────────┘  pinned in `runs`
+│ dev-clones-cleanup │  cron, mirrors temp-cleanup
+│ task (buildin)     │  rm -rf orphan clone dirs
+│                    │  whose runID is no longer
+└────────────────────┘  in the running set
 ```
 
 ### 3.2 Existing primitives reused (not in scope to change)
@@ -81,8 +81,8 @@ Out of scope (deferred):
 - **`buildin/dicodai`** — a TaskSet `overrides:` entry defined in [`tasks/buildin/taskset.yaml:32-`](../../tasks/buildin/taskset.yaml#L32) that overrides `ai-agent` with the `dicode-task-dev` + `dicode-basics` skills preloaded.
 - **`pkg/secrets/local.go`** ChaCha20-Poly1305 + Argon2id — reused (with a per-purpose Argon2id salt) for run-input encryption. See § 4.1.
 - **`pkg/tasktest.Run`** — runs `task.test.{ts,js}` via `pkg/tasktest`. Wrapped by a new `dicode.tasks.test` SDK call.
-- **`pkg/source/git`** + go-git — used for clone/worktree/commit/push. Wrapped by a new `dicode.git.commit_push` SDK call. Honours dicode's "no git binary" constraint ([CLAUDE.md key constraints](../../CLAUDE.md)).
-- **`temp-cleanup` cron pattern** — replicated for both run-input retention and dev-worktree orphan cleanup.
+- **`pkg/source/git`** + go-git — used for clone, commit, push. **Worktrees (`git worktree add`) are NOT used** — go-git v5.18 (`go.mod:13`) does not implement them. Each fix gets its own fresh clone instead (see § 4.4). Pure go-git, no `git` binary anywhere. Honours dicode's "no git binary" constraint ([CLAUDE.md key constraints](../../CLAUDE.md)).
+- **`temp-cleanup` cron pattern** — replicated for both run-input retention and dev-clone orphan cleanup.
 - **"Delegate I/O to a swappable task" pattern** — same shape as the secret-provider design (separately tracked). Here it is exposed as a config field (`defaults.run_inputs.storage_task`, `params.pr_task`) pointing at any task that satisfies the contract.
 
 ### 3.3 What MCP is — and is not — used for here
@@ -123,7 +123,9 @@ This is documented as the introduction of dicode's first migration step. A real 
 
 **Nonce:** 24-byte random per row (XChaCha20-Poly1305 nonce size).
 
-**AEAD additional data:** `runID || ":" || input_stored_at_string`. Binds the ciphertext to its row identity — a copy-paste of the blob into a different row's storage key fails decryption.
+**AEAD additional data (AAD):** fixed-width binary concat — `runID_uuid_bytes (16B) || input_stored_at (8B big-endian uint64)`. No string separator (avoids ambiguity if a runID ever contains `:`). Binds the ciphertext to its row identity — a copy-paste of the blob into a different row's storage key fails decryption.
+
+`input_stored_at` is **write-once**: the engine sets it on the initial `INSERT` of the row's input columns and never updates it post-store. If a re-store is somehow needed (e.g. backfill), the new ciphertext must be re-encrypted with the new AAD.
 
 **On-disk blob layout** (handed to the storage task as base64):
 
@@ -139,16 +141,25 @@ The engine assembles a structured `PersistedInput`:
 
 ```go
 type PersistedInput struct {
-    Source      string                 `json:"source"`        // webhook | cron | manual | chain | daemon | replay
+    Source      string                 `json:"source"`                  // webhook | cron | manual | chain | daemon | replay
     Method      string                 `json:"method,omitempty"`        // webhook only
     Path        string                 `json:"path,omitempty"`          // webhook only
-    Headers     map[string]string      `json:"headers,omitempty"`       // webhook only, post-redaction
-    Query       map[string]string      `json:"query,omitempty"`         // webhook only, post-redaction
+    Headers     map[string][]string    `json:"headers,omitempty"`       // webhook; multi-valued for HTTP fidelity; post-redaction
+    Query       map[string][]string    `json:"query,omitempty"`         // webhook; same shape; post-redaction
     Body        json.RawMessage        `json:"body,omitempty"`          // webhook only, see body policy below
-    BodyKind    string                 `json:"body_kind,omitempty"`     // "json" | "form" | "binary" | "text" | "omitted"
-    BodyHash    string                 `json:"body_hash,omitempty"`     // sha256 hex; present when body is omitted/binary
+    BodyKind    string                 `json:"body_kind,omitempty"`     // "json" | "form" | "multipart" | "binary" | "text" | "omitted"
+    BodyHash    string                 `json:"body_hash,omitempty"`     // sha256 hex; present when body is omitted/binary/multipart
+    BodyParts   []PartMeta             `json:"body_parts,omitempty"`    // multipart: per-part metadata (no values)
     Params      map[string]any         `json:"params,omitempty"`        // post-redaction (recursive)
     RedactedFields []string            `json:"redacted_fields,omitempty"` // dotted paths that were redacted
+}
+
+type PartMeta struct {
+    Name        string `json:"name"`                   // form-field name; redacted to "<redacted>" if name matches deny-list
+    Kind        string `json:"kind"`                   // "field" | "file"
+    Filename    string `json:"filename,omitempty"`     // file parts only; redacted via filename rules
+    ContentType string `json:"content_type,omitempty"`
+    Size        int64  `json:"size"`
 }
 ```
 
@@ -167,14 +178,16 @@ Match rule: a field's name is redacted if it equals (case-insensitive) any item 
 
 **Per-bucket redaction:**
 
-- **Headers:** lowercase the header name, apply the match rule. Redacted values are replaced with `"<redacted>"`. Header names recorded in `RedactedFields` as `headers.<name>`.
-- **Query:** same rule. `RedactedFields` entries as `query.<name>`.
+- **Headers** (`map[string][]string`): lowercase the header name, apply the match rule. *Every value* in the slice is replaced with `"<redacted>"` if the name matches (single-valued substitution preserves length information without leaking content). Header names recorded in `RedactedFields` as `headers.<name>`.
+- **Query** (`map[string][]string`): same rule. `RedactedFields` entries as `query.<name>`.
 - **Params:** recursive walk over `map[string]any` and nested maps; lists are walked positionally. `RedactedFields` entries as dotted paths (`params.user.token`, `params.items[3].secret`).
-- **Body:**
-  - `application/json` → walk like Params, store post-redaction as JSON.
-  - `application/x-www-form-urlencoded` → parse, treat as `map[string][]string`, walk, re-encode.
-  - `multipart/form-data` → store metadata (field names, file presence, sizes) but not values; `BodyKind = "omitted"`, `BodyHash` set.
-  - Any other content type (binary, plain text, XML, …) → `BodyKind = "binary"` or `"text"`, `BodyHash` set, body itself omitted unless `persist_inputs.body_full_textual: true` per-task. This is conservative-by-default.
+- **Body** (content-type-driven):
+  - `application/json` → walk like Params, store post-redaction as JSON. `BodyKind = "json"`.
+  - `application/x-www-form-urlencoded` → parse, treat as `map[string][]string`, walk, re-encode. `BodyKind = "form"`.
+  - `multipart/form-data` → walk parts; store `BodyParts[]` with name/kind/filename/content-type/size only; **values are not persisted**. `BodyKind = "multipart"`, `BodyHash` set on the raw body for forensic comparison if needed.
+  - Any other content type (binary, plain text, XML, …) → `BodyKind = "binary"` or `"text"`, `BodyHash` set, body itself omitted **by default**.
+
+**`body_full_textual: true` foot-gun warning:** setting this on a task makes the engine persist the verbatim text body (XML, plain-text, etc.) WITHOUT redaction — name-based redaction can't reach unstructured content. Tasks setting this option are explicitly accepting that the body may contain credentials. Documented in §8 and surfaced as a warning at config load (`auto_fix.body_full_textual: true` AND `run_inputs.enabled: true` triggers a startup WARN log: *"task X persists raw textual bodies — confirm this is intentional"*). Best practice: pair with `auto_fix.include_input: false` so the auto-fix agent's prompt doesn't see the raw body either.
 
 **Per-task / global controls:**
 
@@ -199,8 +212,11 @@ run_inputs:
 ```yaml
 # task.yaml
 auto_fix:
-  include_input: false  # input is persisted (replay still works for humans), but auto-fix sees only logs+output
+  include_input: false             # input is persisted (replay still works for humans), but auto-fix sees only logs+output
+  show_redacted_field_names: true  # default true; set false to also withhold the *names* of redacted fields
 ```
+
+The `show_redacted_field_names` knob handles the edge case where field names are themselves sensitive (e.g., a header named `X-CustomerId-Token-Foo` reveals the existence of a customer-specific token endpoint). Default is `true` because in most cases knowing what was redacted helps the agent reason about the failure without giving up secret values. Set to `false` for tasks where the field topology itself is private; the agent then sees a redaction *count* but not *names*.
 
 #### 4.1.4 Storage task contract
 
@@ -278,21 +294,20 @@ notify:
 
 Logic: `dicode.runs.list_expired({ exclude_pinned: true })` returns runIDs whose `input_stored_at + retention < now`. For each, call `dicode.runs.delete_input(runID)` — core looks up the storage key, calls the configured storage task's `delete` op, clears the row's input columns. Pinned rows are skipped.
 
-A second cleanup buildin handles dev-mode worktrees (analogous and independent):
+A second cleanup buildin handles dev-mode clones (analogous and independent):
 
 ```yaml
-# tasks/buildin/dev-worktrees-cleanup/task.yaml
+# tasks/buildin/dev-clones-cleanup/task.yaml
 apiVersion: dicode/v1
 kind: Task
-name: "Dev-worktree orphan sweep"
+name: "Dev-clone orphan sweep"
 runtime: deno
 trigger:
   cron: "*/15 * * * *"
 permissions:
   fs:
-    - path: "${DATADIR}/dev-worktrees"
+    - path: "${DATADIR}/dev-clones"
       permission: rw
-  run: ["git"]   # only `git worktree prune/remove`; documented narrow purpose
   dicode:
     list_runs: true
 timeout: 60s
@@ -300,9 +315,9 @@ notify:
   on_failure: true
 ```
 
-Logic: list directory entries under `${DATADIR}/dev-worktrees/<source>/<runID>`, cross-check against running auto-fix runs (`dicode.list_runs({ status: "running", task_id_prefix: "auto-fix" })`); any worktree dir whose `<runID>` is not in the running set is removed via `git worktree remove --force` + branch retained on disk.
+Logic: list directory entries under `${DATADIR}/dev-clones/<source>/<runID>`, cross-check against running auto-fix runs (`dicode.list_runs({ status: "running", task_id_prefix: "auto-fix" })`); any clone dir whose `<runID>` is not in the running set is removed via Deno's `Deno.remove(path, { recursive: true })`. **No `git` binary involved** — clones are plain directories from the daemon's perspective and `rm -rf` (via Deno fs APIs) is sufficient. The dicode "no git binary" constraint holds throughout.
 
-(`run: ["git"]` here is a deliberate narrow exception — only the cleanup task uses git binary, and only for worktree pruning. The auto-fix task itself uses `dicode.git.commit_push`, which goes through go-git in core. See § 4.6.4 for rationale.)
+The branches the cleanup task removes are *local-only* clone directories. Remote branches are not touched — the auto-fix flow already pushed them (or chose not to), and remote branch lifecycle is the user's responsibility (PR merge → delete branch, or manual cleanup).
 
 ### 4.3 Replay primitive
 
@@ -343,27 +358,31 @@ func (s *Source) SetDevMode(ctx context.Context, enabled bool, opts DevModeOpts)
 
 type DevModeOpts struct {
     LocalPath string  // existing: point at user's local checkout
-    Branch    string  // new: engine clones a worktree on this branch
+    Branch    string  // new: engine creates a fresh clone on this branch
     Base      string  // new: branch to fork from when Branch doesn't exist (default: source's tracked branch)
+    RunID     string  // new: tag the clone dir with the auto-fix run ID, used for cleanup
 }
 ```
+
+**Why a fresh clone, not a `git worktree`:** go-git v5 does not implement `git worktree add` (`Worktree.Add` stages files — it's the `git add` semantics). Per-fix fresh clones keep dicode pure-go-git with zero dependency on a `git` binary. Disk cost is acceptable: fix branches are short-lived and the dev-clones-cleanup task (§ 4.2) sweeps them.
 
 Engine behavior when `enabled=true, Branch != ""`:
 
 1. Resolve the source's git URL (must be a git source; error if local-only).
-2. Compute worktree path: `${DATADIR}/dev-worktrees/<sourceName>/<branch-sanitized>/`.
-3. If worktree doesn't exist: use go-git to add a worktree on `<branch>`. If branch doesn't exist locally: create from `Base` (default = the source's tracked branch); if it doesn't exist remotely either, that's fine — push will create it.
-4. Set `s.devRootPath = <path>/<root entry yaml>`, `s.resolver.SetDevMode(true)`, trigger immediate sync.
+2. **Validate the branch name** (see § 4.6.3): must satisfy `git check-ref-format`, must start with the configured `branch_prefix` literal (no glob/regex), must not contain `..`, leading `-`, control chars, or `~`/`^`/`:`/`?`/`*`/`[`/`\`. Reject invalid names with `ErrInvalidBranchName`.
+3. Compute clone path: `${DATADIR}/dev-clones/<sourceName>/<RunID>/`. The directory name is the run ID (UUID, sanitized by construction), NOT the branch name — so traversal-style branch names cannot escape the data dir even if validation is bypassed.
+4. `go-git Clone` the repo into the path with `CheckoutBranch: <Branch>`. If the branch doesn't exist remotely, clone the source's tracked branch and create `<Branch>` locally from `Base` (default = source's tracked branch). Push will create the remote branch on the way out.
+5. Set `s.devRootPath = <clonePath>/<root entry yaml>`, `s.resolver.SetDevMode(true)`, trigger immediate sync.
 
-Engine behavior when `enabled=false` *and* the source was previously in worktree-mode:
+Engine behavior when `enabled=false` *and* the source was previously in clone-mode:
 
 1. Disable dev-ref substitution (existing behavior).
-2. Use go-git to remove the worktree.
-3. The branch ref itself is *retained* (commits made by the agent live on disk and are pushed to remote on the way out).
+2. `Deno.remove(clonePath, { recursive: true })` (or Go-side `os.RemoveAll`).
+3. The branch ref on the *remote* is retained if it was pushed; this is what makes review-mode PRs work.
 
-Concurrency: at most one dev-mode-with-branch session per source at a time. A second `SetDevMode(enabled=true, Branch=...)` on a source that's already in worktree-mode returns `ErrDevModeBusy`. Auto-fix engine serialises via the per-task `max_concurrent` guard (§ 4.7).
+Concurrency: at most one dev-mode-with-branch session per source at a time. A second `SetDevMode(enabled=true, Branch=...)` on a source that's already in clone-mode returns `ErrDevModeBusy`. Auto-fix engine serialises via the per-task `max_concurrent` guard (§ 4.7).
 
-Crash safety: see the `dev-worktrees-cleanup` buildin in § 4.2.
+Crash safety: see the `dev-clones-cleanup` buildin in § 4.2.
 
 **SDK exposure** (new):
 
@@ -400,6 +419,14 @@ defaults:
 ```
 
 Backwards-compatibility: bare string remains valid, equivalent to `{ task: <string>, params: {} }`.
+
+**Merge semantics:** per-task `on_failure_chain` **fully replaces** `defaults.on_failure_chain` (no deep-merge). If a task wants the global default with one tweak, it must restate the full block. This is the same shape every other override in dicode uses (e.g., `notify`) and avoids the surprise where a per-task `params: { mode: autonomous }` silently inherits an unrelated default's `params: { max_iterations: 10 }`.
+
+**Validation order at config-load:**
+
+1. Parse the config.
+2. For every task, if `on_failure_chain` is set, validate its `params` against the reserved-key list and the autonomous-at-defaults rule. Validation errors here fail the entire config load (the daemon refuses to start) — same severity as a syntax error.
+3. Resolve the chain target: the named task must exist after the resolver completes, OR the config-load reports a structured error. Today the resolver runs after config parsing; this introduces a second config-validation pass once tasks are resolved.
 
 Same shape on per-task override:
 
@@ -450,9 +477,9 @@ auto-fix:
   overrides:
     name: "Auto-fix on failure"
     description: |
-      Diagnoses a failed task run, edits source on a worktree, validates via
-      task tests + replay, and either merges to main (autonomous) or opens a
-      PR (review). Fired by setting `on_failure_chain: auto-fix`.
+      Diagnoses a failed task run, edits source in a per-fix clone, validates
+      via task tests + replay, and either merges to main (autonomous) or
+      opens a PR (review). Fired by setting `on_failure_chain: auto-fix`.
     trigger:
       manual: true              # fired by on_failure_chain dispatcher, not user
     params:
@@ -479,11 +506,17 @@ auto-fix:
       tasks:
         - git-pr                  # static literal; users override to point elsewhere
     permissions_fs:
-      - path: "${DATADIR}/dev-worktrees"
+      - path: "${DATADIR}/dev-clones"
         permission: rw
 ```
 
-(Exact override merging semantics follow the existing `Resolver` in [pkg/taskset/resolver.go](../../pkg/taskset/resolver.go); implementation must verify whether overrides extend `permissions.dicode.{tasks,*flags}` and `permissions.fs` correctly, and add the merge if not. This is a small clarification, not a redesign.)
+**Override mechanism extension required:** the existing TaskSet `Overrides` struct in [pkg/taskset/spec.go:135-155](../../pkg/taskset/spec.go#L135) and the `mergeDicodePerms` helper in [pkg/taskset/override.go:153-178](../../pkg/taskset/override.go#L153) merge a fixed set of dicode permission flags and do not accept `permissions.fs` overrides. This work expands them:
+
+- Add `Fs []FsPermission` to the `Overrides` struct (full-replace at the entry level).
+- Add the new dicode permission flags listed below to `mergeDicodePerms`.
+- Extend `permissions.dicode.tasks` merge to be a *union* (so the override entry can append `git-pr` to whatever ai-agent already declares).
+
+These are localized changes to two files (`spec.go`, `override.go`) plus tests, not a new mechanism. Tracked as part of child issue (4) acceptance criteria.
 
 **Auto-fix-specific config** (`mode`, `max_iterations`, `max_iteration_seconds`, `max_tokens`, `branch_prefix`, `pr_task`, `base_branch`) does NOT live in `params:` declarations — it arrives via the **chain trigger params merge** described in § 4.5. The engine fires `auto-fix` with an input map of `{ taskID, runID, status, output, _chain_depth, mode, max_iterations, ... }`. The `dicode-auto-fix` skill prompt instructs the agent to read these from the input map.
 
@@ -497,15 +530,15 @@ The agent loop is implemented as a new buildin skill (`dicode-auto-fix`, a markd
 4. Generate fix branch name (review: `${branch_prefix}${runID}`; autonomous: `base_branch || sourceTrackedBranch`).
 5. `dicode.sources.set_dev_mode(<source>, { enabled: true, branch: <fixBranch>, base: <base> })`.
 6. Iterate (capped at `max_iterations`, each iteration capped at `max_iteration_seconds`):
-   - Read failing task's source files via `Deno.readTextFile` from the worktree path.
-   - Edit via `Deno.writeTextFile` to the same worktree path. (Permissions: `fs.rw: ${DATADIR}/dev-worktrees`.) The agent's edit scope is enforced by the path it writes to — cross-task edits are explicitly out of scope and the loop's prompt forbids them.
+   - Read failing task's source files via `Deno.readTextFile` from the clone path.
+   - Edit via `Deno.writeTextFile` to the same clone path. (Permissions: `fs.rw: ${DATADIR}/dev-clones`.) The agent's edit scope is enforced by the path it writes to — cross-task edits are explicitly out of scope and the loop's prompt forbids them.
    - Validate by inline YAML/schema parse.
    - Test via `dicode.tasks.test(<failingTaskID>)` (runs `task.test.{ts,js}` if present; if absent, the agent is instructed to write one as part of the fix).
    - Replay via `dicode.runs.replay(<failedRunID>)`. Wait for the new run to finish; check status.
    - If both green → exit loop.
 7. On success: `dicode.git.commit_push(<source>, <message>, branch=<fixBranch>)`. Engine validates the branch matches the `branch_prefix` allow-list (or is the source's tracked branch in autonomous mode), refuses force-push.
 8. If `mode == "review"`: invoke the PR task via `dicode.run_task(params.pr_task, { source_id, branch: fixBranch, base: base, title, body })`.
-9. `dicode.sources.set_dev_mode(<source>, { enabled: false })` — engine removes the worktree; branch retained.
+9. `dicode.sources.set_dev_mode(<source>, { enabled: false })` — engine removes the local clone; remote branch retained.
 10. Unpin the failed run's input.
 
 Loop terminator conditions:
@@ -518,9 +551,13 @@ Loop terminator conditions:
 
 #### 4.6.1 Why no shell-out to `git`
 
-dicode's "no git binary" key constraint ([CLAUDE.md](../../CLAUDE.md)) says the daemon uses go-git for all git operations. The auto-fix task respects this by routing commit/push through a new `dicode.git.commit_push` SDK call that the Go core implements via go-git.
+dicode's "no git binary" key constraint ([CLAUDE.md](../../CLAUDE.md)) says the daemon uses go-git for all git operations. The auto-fix task respects this end-to-end:
 
-The single deliberate exception is the `dev-worktrees-cleanup` task (§ 4.2), which uses `git worktree prune` because go-git's worktree support is more limited and cleanup is a sysadmin operation rather than user-facing. This is documented at the task and limited to that one task's permissions.
+- **Clone (per-fix workspace):** go-git `Clone` into `${DATADIR}/dev-clones/<source>/<runID>/`. Pure go-git, no `git` binary.
+- **Commit + push:** new `dicode.git.commit_push` SDK call wrapping go-git's `Add`/`Commit`/`Push`.
+- **Cleanup:** plain filesystem `rm -rf` on the clone dir (Deno fs APIs in the cleanup task; `os.RemoveAll` on the Go side).
+
+There is **no exception** to the no-git-binary rule. (An earlier draft of this spec proposed using `git worktree` for isolation; that has been replaced by the per-fix fresh-clone model — see § 4.4 — because go-git v5 does not implement `git worktree add`.)
 
 #### 4.6.2 git_commit_push contract
 
@@ -528,16 +565,37 @@ The single deliberate exception is the `dev-worktrees-cleanup` task (§ 4.2), wh
 dicode.git.commit_push(sourceID: string, opts: {
     message: string,
     branch?: string,        // default: source's currently-active dev mode branch (if any)
-    files?: string[],       // default: all tracked changes in the worktree
+    files?: string[],       // default: all tracked changes in the clone
     allow_main: boolean,    // default false; must be true for autonomous mode
 }): Promise<{ commit: string, pushed: boolean }>
 ```
 
 Engine enforces:
 
-- The branch must match `${branch_prefix}*` patterns (read from per-task config) OR equal the source's tracked branch when `allow_main=true`.
+- The branch name passes the validation in § 4.6.3 (`git check-ref-format` + `branch_prefix` literal-prefix match, OR equals the source's tracked branch when `allow_main=true`).
+- The match against `branch_prefix` is **literal prefix** (`strings.HasPrefix(branch, prefix)` after both sides are validated), NOT a glob — `fix/` matches `fix/abc-123` but never `fix-abc-123` or `prefix-fix/abc`.
 - Never `--force`. A diverged branch causes the call to error out; the driver's recovery is to abandon the loop with a structured error.
 - Push uses the source's existing auth (env-injected forge token, same as reconciler pulls).
+
+#### 4.6.3 Branch name validation and path safety
+
+A central function in core (`pkg/taskset.ValidateBranchName(branch, prefix string) error`) enforces:
+
+1. **`git check-ref-format`-equivalent** (Go-side reimplementation; `pkg/source/git` already needs ref validation):
+   - No path components starting with `.`
+   - No double-dot `..`
+   - No control characters (ASCII < 0x20), `:`, `?`, `[`, `\`, `^`, `~`, space
+   - No leading or trailing `/`
+   - No `//`
+   - Not equal to `@`
+   - No trailing `.lock`
+2. **Literal prefix match** against the per-task `branch_prefix` config (default `"fix/"`). Glob/regex characters in `branch_prefix` are rejected at config-load time; only `[A-Za-z0-9_./-]+` is allowed.
+3. **Path-component sanitization for the clone dir is unnecessary** because the clone dir name is the *run ID* (UUID), not the branch name. The branch is materialised inside the clone via `git checkout`, where git itself enforces ref-format rules. A malicious `branch_prefix` (e.g., `../`) is rejected at config-load.
+
+This validation is invoked at:
+- Config load (validates `branch_prefix` per task).
+- `dicode.sources.set_dev_mode` (validates `Branch` against the resolved per-task `branch_prefix`).
+- `dicode.git.commit_push` (re-validates the branch in case the agent drifted).
 
 ### 4.7 Loop guardrails (engine-level)
 
@@ -583,7 +641,7 @@ permissions:
                                   # to {contents:write, pull_requests:write} on the
                                   # specific repo; do NOT reuse an admin token.
   fs:
-    - path: "${DATADIR}/dev-worktrees"
+    - path: "${DATADIR}/dev-clones"
       permission: r
 timeout: 60s
 ```
@@ -606,13 +664,13 @@ A webhook task `process-payment` fails with a 500 from a downstream API.
 2. **t=0+1s:** task runs, fails. `FireChain` checks `defaults.on_failure_chain` — set to `{ task: auto-fix, params: { mode: review } }`.
 3. Engine fires `auto-fix` with input `{ taskID: "process-payment", runID: "<id>", status: "failure", output: <500 body>, mode: "review", _chain_depth: 1 }`.
 4. **t=0+2s:** `auto-fix` driver pins input via `dicode.runs.pin_input("<id>")`, picks branch `fix/<runID>`, calls `dicode.sources.set_dev_mode("user-tasks", { enabled: true, branch: "fix/<runID>", base: "main" })`.
-5. Engine: go-git `Worktree.Checkout` on `${DATADIR}/dev-worktrees/user-tasks/fix-<runID>/` (created from main since branch didn't exist), resolver swaps source root, registry reloads tasks from worktree.
-6. **t=0+5s:** driver builds prompt with failure context (`{ logs, output, input, redacted_fields: ["headers.authorization", "headers.x-stripe-signature"] }`) plus reads task source via `Deno.readTextFile`. Hands off to the underlying `ai-agent` runtime. Agent reads logs, sees "500 from upstream", proposes adding a retry-with-backoff. Calls `Deno.writeTextFile` to the worktree's `process-payment/task.ts`.
+5. Engine: go-git `Clone` into `${DATADIR}/dev-clones/user-tasks/<autoFixRunID>/`, checks out `fix/<runID>` (created locally from main since branch didn't exist remotely). Resolver swaps source root to the clone, registry reloads tasks from the clone.
+6. **t=0+5s:** driver builds prompt with failure context (`{ logs, output, input, redacted_fields: ["headers.authorization", "headers.x-stripe-signature"] }`) plus reads task source via `Deno.readTextFile`. Hands off to the underlying `ai-agent` runtime. Agent reads logs, sees "500 from upstream", proposes adding a retry-with-backoff. Calls `Deno.writeTextFile` to the clone's `process-payment/task.ts`.
 7. Agent calls `dicode.tasks.test("process-payment")` — sees no test; writes `task.test.ts` with a regression test for the 500 case using a mocked fetch; reruns — passes.
-8. Agent calls `dicode.runs.replay("<id>")` — engine decrypts the original webhook body (sans Stripe signature), fires a new run on the worktree code with retry. The replay run does NOT fire `on_failure_chain` (we suppressed it for `triggerSource == "replay"`). Replay run passes (no auth check exercised because of redaction; agent was warned via `redacted_fields`).
+8. Agent calls `dicode.runs.replay("<id>")` — engine decrypts the original webhook body (sans Stripe signature), fires a new run against the cloned source with retry. The replay run does NOT fire `on_failure_chain` (we suppressed it for `triggerSource == "replay"`). Replay run passes (no auth check exercised because of redaction; agent was warned via `redacted_fields`).
 9. Agent calls `dicode.git.commit_push("user-tasks", { message: "auto-fix: process-payment retry on 5xx", branch: "fix/<runID>" })`. Engine validates `fix/<runID>` matches `${branch_prefix}*`, runs go-git `Add` + `Commit` + `Push` (no `--force`).
 10. Driver invokes the PR task via `dicode.run_task("git-pr", { source_id, branch: "fix/<runID>", base: "main", title, body })`. `gh pr create` returns URL.
-11. Driver calls `dicode.sources.set_dev_mode("user-tasks", { enabled: false })`. Engine removes worktree, source resumes pulling main.
+11. Driver calls `dicode.sources.set_dev_mode("user-tasks", { enabled: false })`. Engine `os.RemoveAll`s the clone dir, source resumes pulling main.
 12. Driver unpins via `dicode.runs.unpin_input("<id>")`, returns `{ ok: true, pr_url: "..." }`.
 13. Operator gets notification "auto-fix opened PR <url> for process-payment runID=...". Reviews, sees the PR mentions "redacted_fields contained Stripe signature — please verify the retry logic doesn't bypass signature validation" in the auto-generated body. Reviews carefully and merges. Reconciler picks up the change on the next poll.
 
@@ -624,7 +682,7 @@ Filed under epic [#207](https://github.com/dicode-ayo/dicode-core/issues/207); t
 
 2. **Auto-fix SDK surface** — `dicode.runs.replay`, `dicode.tasks.test`, `dicode.sources.set_dev_mode` (with branch+base support), `dicode.git.commit_push` (go-git, refspec scoping, no `--force`). REST mirrors. Permissions for each (`runs_replay`, `tasks_test`, `sources_set_dev_mode`, `git_commit_push`). Depends on (1) for replay's input read.
 
-3. **Dev mode `branch` lifecycle + `on_failure_chain` parameter passing** — `SetDevMode` opts struct with `Branch`/`Base`, go-git worktree create/remove, dev-worktrees-cleanup buildin, `on_failure_chain` structured form with reserved-key + autonomous-at-defaults config-load errors. Independent of (1) and (2) — usable by humans without auto-fix.
+3. **Dev mode `branch` lifecycle + `on_failure_chain` parameter passing** — `SetDevMode` opts struct with `Branch`/`Base`/`RunID`, go-git clone create/remove, branch-name validator (`pkg/taskset.ValidateBranchName`), `dev-clones-cleanup` buildin, `on_failure_chain` structured form with reserved-key + autonomous-at-defaults config-load errors. Independent of (1) and (2) — usable by humans without auto-fix.
 
 4. **Auto-fix taskset override + git-pr buildin + engine guardrails + auto-fix skill** — add `auto-fix` to `tasks/buildin/taskset.yaml` as a `dicodai` override, `git-pr` reference impl, the engine-side guardrails (cooldown, concurrency, chain depth, storm circuit breaker, replay→chain suppression, push refspec scoping), the `dicode-auto-fix` skill markdown. Depends on (1), (2), (3).
 
@@ -635,9 +693,9 @@ Recommend shipping in this order so v0.2.0 can include (1)+(2)+(3) — replay-fr
 ## 7. Open questions / explicitly deferred
 
 - **Auto-revert on monitoring signals from a successful deploy.** The LP "When AI is wrong" copy implies that a *successful* deploy that subsequently breaks production is also auto-fixed. v1 covers the on-failure path only; revert-on-regression is a follow-up under the same epic.
-- **Multi-task fixes.** v1 restricts the agent to writing inside the failed task's directory. A failure rooted in a *dependency* task is detectable by the agent (it can read other tasks' source) but the fix would have to be outside its write scope. v1 punts this with a clear error from the prompt and the worktree's path-scoped permissions.
+- **Multi-task fixes.** v1 restricts the agent to writing inside the failed task's directory. A failure rooted in a *dependency* task is detectable by the agent (it can read other tasks' source) but the fix would have to be outside its write scope. v1 punts this with a clear error from the prompt and the clone's path-scoped permissions.
 - **Forge auth UX.** `git-pr` ships with `GH_TOKEN_AUTOFIX` env. A first-launch onboarding step that prompts for a fine-grained PAT (similar to the OpenAI key prompt) is desirable but out of scope here.
-- **WebUI surfacing.** The fix worktree's branch and the in-flight auto-fix's progress should appear in the WebUI runs view. Concrete UI design is deferred.
+- **WebUI surfacing.** The fix branch and the in-flight auto-fix's progress should appear in the WebUI runs view. Concrete UI design is deferred.
 - **Cost telemetry.** Token spend per auto-fix should be aggregated and surfaced. Deferred — first ship the loop, then add accounting.
 - **Subcommand-scoped `gh` shim.** Wrapping `gh` invocation to whitelist `pr create` / `pr view` / `pr list` only. Hardening, not v1.
 - **MCP-tool extensions** (`write_task_file`, `validate_task`, `commit_task`, `dry_run_task`, `read_task_file`) for external agents. Tracked separately under epic #207.
@@ -649,12 +707,14 @@ Recommend shipping in this order so v0.2.0 can include (1)+(2)+(3) — replay-fr
 - AEAD additional data binds each ciphertext to its `runID + stored_at`. Splicing across rows fails decryption.
 - Header/query/body redaction is name-based deny-list with substring matching on `signature`, `token`, `secret`, `password`, `key`. Over-redaction is the safe failure mode. Users with sensitive non-standard field names set `auto_fix.include_input: false` per task.
 - Multipart and binary bodies are stored as `BodyKind + BodyHash`, not contents.
-- The agent runs with a curated SDK permission set (`runs_replay`, `tasks_test`, `git_commit_push`, etc.). It cannot escalate to filesystem or network access beyond what the override declares. Worktree path-scoping prevents cross-task edits.
+- The agent runs with a curated SDK permission set (`runs_replay`, `tasks_test`, `git_commit_push`, etc.). It cannot escalate to filesystem or network access beyond what the override declares. Clone path-scoping (the clone dir is named by the auto-fix run ID, a UUID) prevents cross-task and cross-fix edits.
 - **Autonomous mode requires per-task opt-in.** A `defaults.on_failure_chain.params.mode: autonomous` is a config-load error. Users must explicitly opt each task in by setting `on_failure_chain.params.mode: autonomous` in that task's `task.yaml`. Documented in onboarding: pair with branch protection on the source's tracked branch — the agent should never be the only review for direct-to-main pushes.
 - `git-pr` uses `permissions.run: [gh]`. Rationale + threat model documented in § 4.8. Recommend a fine-grained PAT.
-- `dev-worktrees-cleanup` uses `permissions.run: [git]` for `git worktree prune` only. Documented narrow exception to the "no git binary" constraint, isolated to one task.
-- Replay-fidelity: a replay validates against post-redaction input, not the original sender's request. The agent prompt explicitly surfaces `redacted_fields`. PRs include a "redacted fields were [...]" line in their body so reviewers can sanity-check the agent's reasoning.
+- The "no git binary" constraint is honoured end-to-end: clone, commit, push, and cleanup all go through go-git or plain filesystem operations. There is no `permissions.run: [git]` anywhere in the auto-fix path.
+- Replay-fidelity: a replay validates against post-redaction input, not the original sender's request. The agent prompt explicitly surfaces `redacted_fields` (when `auto_fix.show_redacted_field_names: true`, the default). PRs include a "redacted fields were [...]" line in their body so reviewers can sanity-check the agent's reasoning. For tasks where field names are themselves sensitive, set `auto_fix.show_redacted_field_names: false`.
+- `body_full_textual: true` bypasses name-based redaction and is logged at config-load (see § 4.1.3). This is documented as a deliberate footgun: tasks with non-sensitive textual bodies (internal cron heartbeats, RSS payloads, etc.) opt in; tasks with possibly-sensitive XML/text bodies stay at the conservative default.
 - Stale pin recovery on engine startup prevents indefinite `input_pinned = 1` lingering from a crashed driver.
+- `triggerSource` is a typed enum on the Go side (not a string compared at the call site), so the replay-suppression check (`triggerSource == "replay"` in the spec text) is type-safe at impl time. Tracked as a small implementation detail in child issue (3).
 
 ## 9. Landing-page mapping
 
