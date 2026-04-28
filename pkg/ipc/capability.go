@@ -32,6 +32,13 @@ const (
 	CapOutputWrite = "output.write"
 	CapReturn      = "return"
 
+	// CapOutputSecret allows a task to call dicode.output(map, {
+	// secret: true }) — flagging values for daemon-side redaction and
+	// (for provider tasks) routing to the env-resolver waiting on the
+	// caller side. Granted to every task token by default; the cap exists
+	// only so future denial policies can revoke it.
+	CapOutputSecret = "output.secret"
+
 	// Conditionally granted to tasks based on security config.
 	CapTaskTrigger = "tasks.trigger" // dicode.run_task — also checked against allowed_tasks list
 	CapTasksList   = "tasks.list"    // dicode.list_tasks
@@ -81,5 +88,6 @@ func defaultTaskCaps() []string {
 		CapKVWrite,
 		CapOutputWrite,
 		CapReturn,
+		CapOutputSecret,
 	}
 }
