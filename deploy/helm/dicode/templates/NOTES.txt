@@ -15,6 +15,15 @@ Thanks for installing {{ .Chart.Name }} {{ .Chart.Version }} (dicode-core {{ .Ch
    {{- range .Values.ingress.hosts }}
      - http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}{{ (index .paths 0).path }}
    {{- end }}
+
+{{- if not .Values.ingress.tls }}
+
+   ⚠️  WARNING: ingress.tls is empty — the dashboard is reachable over
+   plain HTTP. The dashboard authenticates with a single shared
+   passphrase, which travels in cleartext over the wire. Configure
+   ingress.tls (and an ingress controller that enforces HTTPS) before
+   exposing this beyond a private network.
+{{- end }}
 {{- end }}
 
 3. Health probe (also used by liveness/readiness):
