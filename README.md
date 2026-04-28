@@ -214,9 +214,10 @@ docker run -d --name dicode \
   dicodeayo/dicode-core:latest
 ```
 
-Open http://localhost:8080. SQLite state persists in the named volume
-`dicode-data`, so you can `docker stop` / `docker start` without losing
-runs or registered tasks.
+Open http://localhost:8080. SQLite, encrypted secrets, source clones, and
+the generated `dicode.yaml` all live under `/data` in the named volume
+`dicode-data`, so the dashboard passphrase, registered tasks, and run
+history survive `docker rm` + `docker run` against the same volume.
 
 Multi-arch images are published for `linux/amd64` and `linux/arm64` and
 mirrored on GHCR: `ghcr.io/dicode-ayo/dicode-core`. Pin to a specific

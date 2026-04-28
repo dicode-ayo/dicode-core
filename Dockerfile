@@ -64,4 +64,10 @@ VOLUME ["/data"]
 EXPOSE 8080
 USER nonroot:nonroot
 ENTRYPOINT ["/usr/local/bin/dicode"]
-CMD ["daemon"]
+# Pin --config to the volume so first-run onboarding writes dicode.yaml
+# alongside SQLite + secrets. Without this, --config defaults to the
+# relative `dicode.yaml`, which resolves against the daemon's CWD
+# (/home/nonroot inside distroless) and gets a fresh passphrase + new
+# server.secret on every `docker rm && docker run` — orphaning the
+# encrypted master.key in the volume.
+CMD ["daemon", "--config", "/data/dicode.yaml"]
