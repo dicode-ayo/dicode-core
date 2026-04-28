@@ -32,7 +32,6 @@ import (
 	"bufio"
 	"context"
 	_ "embed"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -45,6 +44,7 @@ import (
 	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/registry"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
+	"github.com/dicode/dicode/pkg/runtime/envresolve"
 	"github.com/dicode/dicode/pkg/secrets"
 	"github.com/dicode/dicode/pkg/task"
 	uvpkg "github.com/dicode/dicode/pkg/uv"
@@ -70,6 +70,10 @@ type Runtime struct {
 	// True) call is routed to the resolver awaiting it. Nil leaves the
 	// path inert (current behavior).
 	secretOutputCh chan map[string]string
+	// providerRunner is wired by the trigger engine at daemon startup so
+	// the env resolver can spawn provider tasks for from: task:<id>
+	// entries. Nil disables provider lookups; legacy paths still work.
+	providerRunner envresolve.ProviderRunner
 }
 
 // SetEngine configures the engine runner used for dicode.run_task calls.
@@ -87,6 +91,13 @@ func (rt *Runtime) SetSecretsManager(m secrets.Manager) { rt.secretsManager = m 
 // the task is being launched in "provider" mode.
 func (rt *Runtime) SetSecretOutputChannel(ch chan map[string]string) {
 	rt.secretOutputCh = ch
+}
+
+// SetProviderRunner wires the env-resolver's provider invocation. The
+// trigger engine implements ProviderRunner and registers itself here at
+// daemon startup. Nil disables provider task: lookups.
+func (rt *Runtime) SetProviderRunner(p envresolve.ProviderRunner) {
+	rt.providerRunner = p
 }
 
 // New creates a Python Runtime manager.
@@ -142,6 +153,7 @@ func (rt *Runtime) NewExecutor(binaryPath string) pkgruntime.Executor {
 		engine:         rt.engine,
 		gateway:        rt.gateway,
 		secretOutputCh: rt.secretOutputCh,
+		providerRunner: rt.providerRunner,
 	}
 }
 
@@ -158,6 +170,7 @@ type executor struct {
 	engine         ipc.EngineRunner
 	gateway        *ipc.Gateway
 	secretOutputCh chan map[string]string
+	providerRunner envresolve.ProviderRunner
 }
 
 // Execute implements runtime.Executor.
@@ -172,42 +185,18 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 		}
 	}()
 
-	// Resolve only env vars explicitly declared in permissions.env.
-	// - entry.Value  → literal (taskset override); inject directly
-	// - entry.Secret → look up in secrets store; fail if not found
-	// - entry.From   → read from host OS env (os.Getenv); inject as entry.Name
-	// - bare name    → passthrough only, no injection needed
-	resolved := make(map[string]string, len(spec.Permissions.Env))
-	// Track secret-sourced env values so the run-log redactor catches them
-	// if a task writes them to stderr or via the IPC `log` method (which
-	// the Python SDK wraps as `log.info` / `log.error` / etc.). Symmetric
-	// to the deno runtime — plain Value= and host-env From= are NOT
-	// redacted because over-redaction would nuke common env values from
-	// every log line for no security benefit.
-	resolvedSecrets := make(map[string]string)
-	for _, entry := range spec.Permissions.Env {
-		switch {
-		case entry.Value != "":
-			resolved[entry.Name] = entry.Value
-		case entry.Secret != "":
-			val, err := e.secrets.Resolve(ctx, entry.Secret)
-			if err != nil {
-				var notFound *secrets.NotFoundError
-				if entry.Optional && errors.As(err, &notFound) {
-					resolved[entry.Name] = ""
-					break
-				}
-				status = registry.StatusFailure
-				result.Error = fmt.Errorf("resolve secret %q for env %q: %w", entry.Secret, entry.Name, err)
-				return result, nil
-			}
-			resolved[entry.Name] = val
-			resolvedSecrets[entry.Name] = val
-		case entry.From != "":
-			resolved[entry.Name] = os.Getenv(entry.From)
-		}
+	// Resolve declared env permissions via the shared resolver. Provider
+	// tasks (from: task:<id>) are spawned and batched at most once per
+	// provider per launch; legacy paths (secret:, env:NAME, bare) are
+	// preserved.
+	resolvedRes, err := envresolve.New(e.reg, e.secrets, e.providerRunner).Resolve(ctx, spec)
+	if err != nil {
+		status = registry.StatusFailure
+		result.Error = err
+		return result, nil
 	}
-	redactor := secrets.NewRedactor(resolvedSecrets)
+	resolved := resolvedRes.Env
+	redactor := secrets.NewRedactor(resolvedRes.Secrets)
 
 	// Read the user's task.py.
 	scriptPath := spec.ScriptPath()
