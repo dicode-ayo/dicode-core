@@ -1333,3 +1333,36 @@ func TestServer_SecretOutputRoutedAndRedacted(t *testing.T) {
 	}
 }
 
+// TestServer_SecretOutputRejectsNestedMap verifies that a SecretMap whose
+// values are objects (rather than strings) is logged-and-dropped: nothing
+// arrives on the SetSecretOutput channel.
+func TestServer_SecretOutputRejectsNestedMap(t *testing.T) {
+	e := newTestEnv(t)
+	runID := fmt.Sprintf("test-%d", time.Now().UnixNano())
+	srv := New(runID, "test-task", e.secret, e.reg, e.db, nil, nil, zap.NewNop(), nil, nil)
+
+	out := make(chan map[string]string, 1)
+	srv.SetSecretOutput(out)
+
+	socketPath, token, err := srv.Start(context.Background())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(srv.Stop)
+	conn := dial(t, socketPath)
+	t.Cleanup(func() { conn.Close() })
+	doHandshake(t, conn, token)
+
+	sendMsg(t, conn, map[string]any{
+		"method":    "output",
+		"secret":    true,
+		"secretMap": map[string]any{"PG": map[string]string{"URL": "x"}},
+	})
+
+	select {
+	case got := <-out:
+		t.Fatalf("nested map was accepted: %#v", got)
+	case <-time.After(200 * time.Millisecond):
+		// success — server logged-and-dropped.
+	}
+}
