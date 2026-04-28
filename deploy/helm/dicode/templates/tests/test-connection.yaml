@@ -1,0 +1,43 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "dicode.fullname" . }}-test-connection
+  labels:
+    {{- include "dicode.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: test
+    # Auto-clean on success but keep failed pods around so users can
+    # see why the test broke.
+    helm.sh/hook-delete-policy: hook-succeeded,before-hook-creation
+spec:
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: wget
+      image: busybox:1.36
+      imagePullPolicy: IfNotPresent
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop:
+            - ALL
+      command: ["sh", "-c"]
+      args:
+        - >-
+          set -eu;
+          out=$(wget -qO- "http://{{ include "dicode.fullname" . }}:{{ .Values.service.port }}/healthz");
+          echo "$out";
+          echo "$out" | grep -q '"status":"ok"'
+      resources:
+        limits:
+          cpu: 100m
+          memory: 64Mi
+        requests:
+          cpu: 10m
+          memory: 16Mi

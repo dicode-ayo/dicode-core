@@ -23,5 +23,5 @@ OWNERS
 # helm-docs / chart-testing scratch files
 .cr-release-packages/
 ci/
-# In-tree test outputs that some users vendor
-tests/
+# Note: do NOT exclude templates/tests/ — that's the standard
+# location for `helm test` resources (the bundled connection probe).
