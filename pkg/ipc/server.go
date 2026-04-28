@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dicode/dicode/pkg/db"
@@ -66,12 +68,20 @@ type Server struct {
 	log              *zap.Logger
 
 	// redactor strips secret values from inbound log messages before they
-	// hit the run log. Nil is safe (no redaction). Wired via SetRedactor
-	// after construction; runtimes that resolve env-sourced secrets should
-	// build a redactor from the resolved set and install it here so tasks
-	// calling `dicode.log` (the IPC log method, used by the Python SDK)
-	// get the same leak-protection as tasks printing to stdout/stderr.
-	redactor *secrets.Redactor
+	// hit the run log. Nil load is safe (no redaction; RedactString is
+	// nil-receiver safe). Wired via SetRedactor after construction;
+	// runtimes that resolve env-sourced secrets should build a redactor
+	// from the resolved set and install it here so tasks calling
+	// `dicode.log` (the IPC log method, used by the Python SDK) get the
+	// same leak-protection as tasks printing to stdout/stderr.
+	//
+	// Stored as atomic.Pointer because Bundle D's secret-output handler
+	// can REPLACE the redactor mid-run (when a provider task calls
+	// dicode.output(map, { secret: true })) while the log handler is
+	// concurrently READING it from another connection's goroutine. A
+	// plain pointer with mu-protected writes alone would still permit
+	// torn reads under the Go memory model.
+	redactor atomic.Pointer[secrets.Redactor]
 
 	gateway *Gateway // optional; enables http.register for daemon tasks
 
@@ -154,12 +164,16 @@ func (s *Server) SetSecretsChain(c secrets.Chain) { s.secretsChain = c }
 // IPC "log" method are passed through r.RedactString before being
 // persisted to the run log, matching the protection stdout/stderr piping
 // already gets from runtime wrappers. Nil is safe (no redaction).
-func (s *Server) SetRedactor(r *secrets.Redactor) { s.redactor = r }
+func (s *Server) SetRedactor(r *secrets.Redactor) { s.redactor.Store(r) }
 
 // SetSecretOutput wires the channel that receives a provider task's
 // secret map. Call BEFORE Start. Buffer >=1 is required so the IPC
 // goroutine does not block on the channel send.
 func (s *Server) SetSecretOutput(ch chan map[string]string) {
+	// SAFETY: the field is read inside the goroutine spawned by Start;
+	// calling SetSecretOutput before Start establishes the happens-before
+	// edge via go's goroutine-launch semantics. Calling after Start is
+	// unsupported and will race.
 	s.secretOut = ch
 }
 
@@ -378,9 +392,11 @@ func (s *Server) handleConn(conn net.Conn) {
 				level = "info"
 			}
 			// Redact env-injected secret values from the message before
-			// buffering. Nil redactor is pass-through — safe default for
-			// callers that haven't wired one (tests, legacy runtimes).
-			s.bufferLog(level, s.redactor.RedactString(req.Message))
+			// buffering. Nil redactor is pass-through — RedactString is
+			// safe on a nil receiver (see pkg/secrets/redactor.go), so a
+			// nil load from atomic.Pointer is fine and we don't need to
+			// guard the call.
+			s.bufferLog(level, s.redactor.Load().RedactString(req.Message))
 
 		case "kv.set":
 			if !hasCap(caps, CapKVWrite) {
@@ -436,17 +452,21 @@ func (s *Server) handleConn(conn net.Conn) {
 				// inner values. This is acceptable because a provider
 				// task is itself a CHILD run; its redactor only needs
 				// to scrub the values the provider just returned.
-				s.mu.Lock()
-				s.redactor = secrets.NewRedactor(sm)
-				s.mu.Unlock()
+				//
+				// atomic.Store synchronises with the atomic.Load on the
+				// "log" hot path; no mutex needed here.
+				s.redactor.Store(secrets.NewRedactor(sm))
 
 				// Persist key names + [redacted] placeholders to the run
 				// log so operators can audit which secrets the provider
-				// returned without leaking values.
+				// returned without leaking values. Sort the keys so the
+				// log line is deterministic across runs (map iteration
+				// order is randomised).
 				keys := make([]string, 0, len(sm))
 				for k := range sm {
 					keys = append(keys, k)
 				}
+				sort.Strings(keys)
 				_ = s.registry.AppendLog(context.Background(), s.runID, "info",
 					fmt.Sprintf("[dicode] secret output: %v = [redacted]", keys))
 
