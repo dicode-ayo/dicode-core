@@ -113,6 +113,7 @@ func (s *SQLiteDB) migrate() error {
 		`ALTER TABLE runs ADD COLUMN return_value TEXT`,
 		`ALTER TABLE runs ADD COLUMN output_content_type TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE runs ADD COLUMN output_content TEXT`,
+		`ALTER TABLE runs ADD COLUMN fail_reason TEXT NOT NULL DEFAULT ''`,
 	} {
 		_, _ = s.db.Exec(stmt)
 	}

@@ -39,6 +39,12 @@ type Run struct {
 	// Structured output produced by output.html() / output.text().
 	OutputContentType string
 	OutputContent     string
+
+	// FailureReason is a typed reason string set when Status == StatusFailure.
+	// Format: "<category>: <detail>", e.g. "provider_unavailable: doppler"
+	// or "required_secret_missing: PG_URL from doppler". Empty for non-failed
+	// runs and for failures from the legacy code path that doesn't set a reason.
+	FailureReason string
 }
 
 // LogEntry is one log line from a run.
@@ -138,6 +144,17 @@ func (r *Registry) FinishRun(ctx context.Context, runID, status string) error {
 	)
 }
 
+// FinishRunWithReason updates run status, finished_at, AND fail_reason.
+// Used by the trigger engine when env resolution fails with a typed
+// envresolve error before the consumer process is even spawned.
+func (r *Registry) FinishRunWithReason(ctx context.Context, runID, status, reason string) error {
+	now := time.Now().UnixMilli()
+	return r.db.Exec(ctx,
+		`UPDATE runs SET status = ?, finished_at = ?, fail_reason = ? WHERE id = ?`,
+		status, now, reason, runID,
+	)
+}
+
 // SetLogHook registers a function called after each log entry is written.
 func (r *Registry) SetLogHook(fn func(runID, level, msg string, ts int64)) {
 	r.logMu.Lock()
@@ -217,7 +234,8 @@ func (r *Registry) GetRun(ctx context.Context, runID string) (*Run, error) {
 	var run *Run
 	err := r.db.Query(ctx,
 		`SELECT id, task_id, status, started_at, finished_at, parent_run_id, trigger_source,
-		        COALESCE(return_value, ''), COALESCE(output_content_type, ''), COALESCE(output_content, '')
+		        COALESCE(return_value, ''), COALESCE(output_content_type, ''), COALESCE(output_content, ''),
+		        COALESCE(fail_reason, '')
 		 FROM runs WHERE id = ?`,
 		[]any{runID},
 		func(rows db.Scanner) error {
@@ -226,7 +244,7 @@ func (r *Registry) GetRun(ctx context.Context, runID string) (*Run, error) {
 				var startedMs int64
 				var finishedMs *int64
 				var parentID *string
-				if err := rows.Scan(&run.ID, &run.TaskID, &run.Status, &startedMs, &finishedMs, &parentID, &run.TriggerSource, &run.ReturnValue, &run.OutputContentType, &run.OutputContent); err != nil {
+				if err := rows.Scan(&run.ID, &run.TaskID, &run.Status, &startedMs, &finishedMs, &parentID, &run.TriggerSource, &run.ReturnValue, &run.OutputContentType, &run.OutputContent, &run.FailureReason); err != nil {
 					return err
 				}
 				run.StartedAt = time.UnixMilli(startedMs)
@@ -255,7 +273,8 @@ func (r *Registry) ListRuns(ctx context.Context, taskID string, limit int) ([]*R
 	var runs []*Run
 	err := r.db.Query(ctx,
 		`SELECT id, task_id, status, started_at, finished_at, parent_run_id, trigger_source,
-		        COALESCE(return_value, ''), COALESCE(output_content_type, ''), COALESCE(output_content, '')
+		        COALESCE(return_value, ''), COALESCE(output_content_type, ''), COALESCE(output_content, ''),
+		        COALESCE(fail_reason, '')
 		 FROM runs WHERE task_id = ? ORDER BY started_at DESC LIMIT ?`,
 		[]any{taskID, limit},
 		func(rows db.Scanner) error {
@@ -264,7 +283,7 @@ func (r *Registry) ListRuns(ctx context.Context, taskID string, limit int) ([]*R
 				var startedMs int64
 				var finishedMs *int64
 				var parentID *string
-				if err := rows.Scan(&run.ID, &run.TaskID, &run.Status, &startedMs, &finishedMs, &parentID, &run.TriggerSource, &run.ReturnValue, &run.OutputContentType, &run.OutputContent); err != nil {
+				if err := rows.Scan(&run.ID, &run.TaskID, &run.Status, &startedMs, &finishedMs, &parentID, &run.TriggerSource, &run.ReturnValue, &run.OutputContentType, &run.OutputContent, &run.FailureReason); err != nil {
 					return err
 				}
 				run.StartedAt = time.UnixMilli(startedMs)
