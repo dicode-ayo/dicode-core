@@ -65,6 +65,11 @@ type Runtime struct {
 	secret         []byte
 	engine         ipc.EngineRunner
 	gateway        *ipc.Gateway
+	// secretOutputCh is opt-in: when set, every Execute wires it into the
+	// per-run IPC server so a provider task's dicode.output(..., secret=
+	// True) call is routed to the resolver awaiting it. Nil leaves the
+	// path inert (current behavior).
+	secretOutputCh chan map[string]string
 }
 
 // SetEngine configures the engine runner used for dicode.run_task calls.
@@ -76,6 +81,13 @@ func (rt *Runtime) SetGateway(g *ipc.Gateway) { rt.gateway = g }
 // SetSecretsManager wires the secrets manager so tasks with permissions.dicode.secrets_write
 // can call dicode.secrets_set() and dicode.secrets_delete().
 func (rt *Runtime) SetSecretsManager(m secrets.Manager) { rt.secretsManager = m }
+
+// SetSecretOutputChannel wires the channel that receives provider tasks'
+// secret maps. Called by the trigger engine before invoking Execute when
+// the task is being launched in "provider" mode.
+func (rt *Runtime) SetSecretOutputChannel(ch chan map[string]string) {
+	rt.secretOutputCh = ch
+}
 
 // New creates a Python Runtime manager.
 func New(reg *registry.Registry, sc secrets.Chain, database db.DB, log *zap.Logger) (*Runtime, error) {
@@ -129,6 +141,7 @@ func (rt *Runtime) NewExecutor(binaryPath string) pkgruntime.Executor {
 		secret:         rt.secret,
 		engine:         rt.engine,
 		gateway:        rt.gateway,
+		secretOutputCh: rt.secretOutputCh,
 	}
 }
 
@@ -144,6 +157,7 @@ type executor struct {
 	secret         []byte
 	engine         ipc.EngineRunner
 	gateway        *ipc.Gateway
+	secretOutputCh chan map[string]string
 }
 
 // Execute implements runtime.Executor.
@@ -223,6 +237,9 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 	srv.SetGateway(e.gateway)
 	srv.SetSecrets(e.secretsManager)
 	srv.SetRedactor(redactor)
+	if e.secretOutputCh != nil {
+		srv.SetSecretOutput(e.secretOutputCh)
+	}
 	socketPath, token, err := srv.Start(execCtx)
 	if err != nil {
 		status = registry.StatusFailure
