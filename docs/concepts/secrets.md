@@ -53,30 +53,106 @@ SLACK_TOKEN=xoxb-... dicode
 # or set in systemd unit, Docker env, etc.
 ```
 
-### Future providers
+### Future native providers
 
-All use the same `Provider` interface — no task code changes needed when you switch providers:
+Native Go providers (vault, aws-secrets-manager, gcp-secret-manager) remain
+on the roadmap but are not the recommended integration path. Most users
+should reach for **provider tasks** instead — see below.
 
-| Type | Description |
-|---|---|
-| `vault` | HashiCorp Vault (kv-v2 or kv-v1) |
-| `aws-secrets-manager` | AWS Secrets Manager |
-| `gcp-secret-manager` | GCP Secret Manager |
-| `doppler` | Doppler secrets platform |
-| `1password` | 1Password Connect |
-| `infisical` | Infisical open-source secrets manager |
+---
 
-Example (future):
+## Provider tasks (task: prefix)
+
+For Doppler, 1Password, HashiCorp Vault, and other external secret stores,
+dicode resolves secrets by spawning a normal task that calls the upstream
+API. No daemon release is required to add a new provider — ship a task
+folder and reference it from `from: task:<id>`.
+
+### Consumer side — `from: task:<provider-id>`
+
 ```yaml
-secrets:
-  providers:
-    - type: local
-    - type: vault
-      address: https://vault.example.com
-      token_env: VAULT_TOKEN
-      mount: secret
-    - type: env
+# tasks/my-app/task.yaml
+name: "My App"
+runtime: deno
+trigger:
+  cron: "*/5 * * * *"
+permissions:
+  env:
+    - name: PG_URL
+      from: task:secret-providers/doppler   # resolved via the doppler provider task
+    - name: REDIS_URL
+      from: task:secret-providers/doppler   # batched: one spawn for both
+      optional: true
+    - name: LOG_LEVEL
+      from: env:LOG_LEVEL                   # explicit host env
 ```
+
+The daemon groups every `from: task:<id>` entry by provider, spawns each
+provider once per consumer launch, caches the result with the provider's
+declared TTL, and merges the resolved values into the consumer's process
+environment before launching it.
+
+### Provider side — `dicode.output(map, { secret: true })`
+
+A provider is any task that emits its resolved secrets via the secret-flag
+overload of `output`:
+
+```yaml
+# tasks/buildin/secret-providers/doppler/task.yaml
+name: "Doppler Secret Provider"
+runtime: deno
+trigger:
+  manual: true
+permissions:
+  env:
+    - name: DOPPLER_TOKEN
+      secret: DOPPLER_TOKEN     # bootstrap once via `dicode secrets set DOPPLER_TOKEN ...`
+  net:
+    - api.doppler.com
+provider:
+  cache_ttl: 5m                  # 0 / omitted = no caching
+```
+
+```typescript
+// task.ts
+export default async function main({ params, output }: DicodeSdk) {
+  const reqs = JSON.parse(await params.get("requests") ?? "[]");
+  const out: Record<string, string> = {};
+  // ... call upstream, populate `out` ...
+  await output(out, { secret: true });
+}
+```
+
+Daemon-side semantics for `secret: true`:
+
+- Run-log records keys with `[redacted]` placeholders only — values never hit disk.
+- Values feed the run-log redactor on the consumer launch (so a `console.log`
+  of a resolved value is scrubbed).
+- The map is returned to the resolver awaiting this provider call.
+- Output must be a flat `Record<string, string>` — the daemon refuses
+  nested objects.
+
+### Failure modes
+
+| Reason | When it fires |
+|---|---|
+| `provider_unavailable: <id>` | provider task crashed, timed out, or returned no map |
+| `required_secret_missing: <KEY> from <id>` | provider returned a map but a non-optional KEY was absent |
+| `provider_misconfigured: <id>` | task referenced via `task:<id>` is not a provider (missing `secret: true` flag) |
+
+All three are recorded as the consumer run's `fail_reason` and trigger
+the configured `on_failure_chain`. The provider's own run also fires its
+own chain on its own crash.
+
+### Built-in providers
+
+| Path | Upstream | Bootstrap secret |
+|---|---|---|
+| `buildin/secret-providers/doppler` | Doppler REST API | `DOPPLER_TOKEN` |
+
+More providers (`buildin/secret-providers/onepassword`, `vault`, …) ship
+under the same path. Authoring your own takes a `task.yaml` + `task.ts`
+pair — see [task-format](task-format.md).
 
 ---
 
