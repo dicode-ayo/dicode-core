@@ -3,8 +3,8 @@
 // Contract:
 //   input params:
 //     requests: JSON-encoded [{name: string, optional: boolean}, ...]
-//                (the trigger engine wraps the array in {"requests": [...]}
-//                via json.Marshal — we accept both shapes defensively)
+//                (a bare JSON array — the trigger engine encodes the request
+//                list directly at params["requests"])
 //   env (declared in permissions.env):
 //     DOPPLER_TOKEN: workspace service token (set via `dicode secrets set`)
 //   output:
@@ -33,19 +33,9 @@ type ProviderOutput = BaseOutput & {
 
 type ProviderSdk = Omit<DicodeSdk, "output"> & { output: ProviderOutput };
 
-function parseRequests(raw: string | null): SecretRequest[] {
-  const text = raw ?? "[]";
-  const parsed: unknown = JSON.parse(text);
-  // Engine wraps as {"requests": [...]}; accept that shape or a bare array.
-  if (Array.isArray(parsed)) return parsed as SecretRequest[];
-  if (parsed && typeof parsed === "object" && Array.isArray((parsed as { requests?: unknown }).requests)) {
-    return (parsed as { requests: SecretRequest[] }).requests;
-  }
-  throw new Error(`doppler: invalid requests payload: ${text}`);
-}
-
 export default async function main({ params, output }: ProviderSdk) {
-  const requests = parseRequests(await params.get("requests"));
+  const reqsJSON = (await params.get("requests")) ?? "[]";
+  const requests: SecretRequest[] = JSON.parse(reqsJSON);
 
   const token = Deno.env.get("DOPPLER_TOKEN");
   if (!token) {

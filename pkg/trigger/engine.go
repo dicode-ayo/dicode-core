@@ -695,7 +695,7 @@ func (e *Engine) Run(ctx context.Context, providerID string, reqs []envresolve.P
 		defer e.pythonRuntime.SetSecretOutputChannel(nil)
 	}
 
-	reqJSON, _ := json.Marshal(map[string]any{"requests": reqs})
+	reqJSON, _ := json.Marshal(reqs)
 	runID, err := e.fireAsync(ctx, spec, pkgruntime.RunOptions{
 		Params: map[string]string{"requests": string(reqJSON)},
 	}, "provider")

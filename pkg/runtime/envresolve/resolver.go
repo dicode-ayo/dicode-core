@@ -28,9 +28,10 @@ type ProviderResult struct {
 // provider task. The real implementation is the trigger engine, but the
 // resolver tests inject a fake.
 //
-// Run must spawn the provider task with params {"requests": [...]} and
-// block until it returns. A non-nil error means the run did not complete
-// successfully (timeout, crash, missing secret: true flag, etc.).
+// The runner spawns the provider task with the request list JSON-encoded
+// at params["requests"] (a bare JSON array of {name, optional} objects),
+// and blocks until it returns. A non-nil error means the run did not
+// complete successfully (timeout, crash, missing secret: true flag, etc.).
 type ProviderRunner interface {
 	Run(ctx context.Context, providerID string, reqs []ProviderRequest) (*ProviderResult, error)
 }
