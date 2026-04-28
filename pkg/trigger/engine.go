@@ -726,30 +726,41 @@ func (e *Engine) Run(ctx context.Context, providerID string, reqs []envresolve.P
 // preflightEnv runs the env resolver once before dispatch so that typed
 // provider failures (provider_unavailable / required_secret_missing /
 // provider_misconfigured) can be recorded as the run's fail_reason
-// instead of surfacing as opaque dispatch errors. Returns ("", "") on
-// success or non-typed error — the resolver runs again inside the
-// runtime, but that's acceptable for MVP (issue #119).
-func (e *Engine) preflightEnv(ctx context.Context, spec *task.Spec) (status, reason string) {
+// instead of surfacing as opaque dispatch errors.
+//
+// On success, it returns the *Resolved so dispatch can hand it to the
+// runtime via RunOptions.PreResolvedEnv, ensuring provider tasks fire
+// exactly once per consumer launch instead of twice (issue #235).
+//
+// Return contract:
+//   - success: (resolved, "", "")
+//   - typed envresolve failure: (nil, registry.StatusFailure, "<reason>")
+//   - non-typed error or skipped (no secrets chain / no env entries):
+//     (nil, "", "") — dispatch proceeds and the runtime resolves inline.
+func (e *Engine) preflightEnv(ctx context.Context, spec *task.Spec) (*envresolve.Resolved, string, string) {
 	// Skip preflight when secrets chain isn't wired (test fixtures) or
 	// when the spec has no env entries the resolver could fail on.
 	if e.secrets == nil || len(spec.Permissions.Env) == 0 {
-		return "", ""
+		return nil, "", ""
 	}
 	r := envresolve.New(e.registry, e.secrets, e)
-	if _, err := r.Resolve(ctx, spec); err != nil {
+	resolved, err := r.Resolve(ctx, spec)
+	if err != nil {
 		var pu *envresolve.ErrProviderUnavailable
 		var rsm *envresolve.ErrRequiredSecretMissing
 		var mis *envresolve.ErrProviderMisconfigured
 		switch {
 		case errors.As(err, &pu):
-			return registry.StatusFailure, "provider_unavailable: " + pu.ProviderID
+			return nil, registry.StatusFailure, "provider_unavailable: " + pu.ProviderID
 		case errors.As(err, &rsm):
-			return registry.StatusFailure, "required_secret_missing: " + rsm.Key + " from " + rsm.ProviderID
+			return nil, registry.StatusFailure, "required_secret_missing: " + rsm.Key + " from " + rsm.ProviderID
 		case errors.As(err, &mis):
-			return registry.StatusFailure, "provider_misconfigured: " + mis.ProviderID
+			return nil, registry.StatusFailure, "provider_misconfigured: " + mis.ProviderID
 		}
+		// Non-typed error: let dispatch surface it normally.
+		return nil, "", ""
 	}
-	return "", ""
+	return resolved, "", ""
 }
 
 // KillRun cancels a running task by its run ID.
@@ -1317,12 +1328,17 @@ func (e *Engine) runTask(runCtx context.Context, spec *task.Spec, opts pkgruntim
 	// Preflight env-resolver: typed envresolve failures
 	// (provider_unavailable / required_secret_missing / provider_misconfigured)
 	// are recorded as the run's fail_reason BEFORE dispatch so the operator
-	// gets a categorized reason instead of an opaque executor error. On
-	// preflight success this is a no-op (resolver returns nil); the runtime
-	// then re-resolves with its own cache before spawning the consumer.
+	// gets a categorized reason instead of an opaque executor error.
+	//
+	// On preflight success the *Resolved is forwarded to the runtime via
+	// opts.PreResolvedEnv so provider tasks fire exactly once per consumer
+	// launch (issue #235). When preflight is skipped (no secrets chain /
+	// no env entries) preResolved is nil and the runtime falls back to its
+	// inline-resolver path.
 	var status string
 	var result *pkgruntime.RunResult
-	if preStatus, preReason := e.preflightEnv(runCtx, spec); preStatus != "" {
+	preResolved, preStatus, preReason := e.preflightEnv(runCtx, spec)
+	if preStatus != "" {
 		_ = e.registry.FinishRunWithReason(context.Background(), opts.RunID, preStatus, preReason)
 		// dispatch normally fires FireChain; on the preflight short-circuit
 		// we replicate it so chain triggers still observe the failure.
@@ -1330,6 +1346,7 @@ func (e *Engine) runTask(runCtx context.Context, spec *task.Spec, opts pkgruntim
 		status = preStatus
 		result = &pkgruntime.RunResult{RunID: opts.RunID, Error: errors.New(preReason)}
 	} else {
+		opts.PreResolvedEnv = preResolved
 		status, result = e.dispatch(runCtx, spec, opts)
 	}
 	elapsed := time.Since(start)
