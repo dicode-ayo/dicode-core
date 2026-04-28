@@ -7,7 +7,6 @@ import (
 	"bufio"
 	"context"
 	_ "embed"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -23,6 +22,7 @@ import (
 	"github.com/dicode/dicode/pkg/registry"
 	"github.com/dicode/dicode/pkg/relay"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
+	"github.com/dicode/dicode/pkg/runtime/envresolve"
 	"github.com/dicode/dicode/pkg/secrets"
 	"github.com/dicode/dicode/pkg/task"
 	"go.uber.org/zap"
@@ -89,6 +89,10 @@ type Runtime struct {
 	// true}) call is routed to the resolver awaiting it. Nil leaves the
 	// path inert (current behavior).
 	secretOutputCh chan map[string]string
+	// providerRunner is wired by the trigger engine at daemon startup so
+	// the env resolver can spawn provider tasks for from: task:<id>
+	// entries. Nil disables provider lookups; legacy paths still work.
+	providerRunner envresolve.ProviderRunner
 }
 
 // New creates a Deno Runtime. It ensures the Deno binary is present in the
@@ -120,6 +124,13 @@ func (rt *Runtime) SetSecretsManager(m secrets.Manager) { rt.secretsManager = m 
 // task is being launched in "provider" mode.
 func (rt *Runtime) SetSecretOutputChannel(ch chan map[string]string) {
 	rt.secretOutputCh = ch
+}
+
+// SetProviderRunner wires the env-resolver's provider invocation. The
+// trigger engine implements ProviderRunner and registers itself here at
+// daemon startup. Nil disables provider task: lookups.
+func (rt *Runtime) SetProviderRunner(p envresolve.ProviderRunner) {
+	rt.providerRunner = p
 }
 
 // SetOAuthBroker wires the daemon's relay identity, broker base URL, and
@@ -186,44 +197,18 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		}
 	}()
 
-	// Resolve only env vars explicitly declared in permissions.env.
-	// - entry.Value  → literal (taskset override); inject directly
-	// - entry.Secret → look up in secrets store; fail if not found
-	// - entry.From   → read from host OS env (os.Getenv); inject as entry.Name
-	// - bare name    → allowlisted via --allow-env; script reads from host env at runtime
-	resolved := make(map[string]string, len(spec.Permissions.Env))
-	// Track values sourced from secrets only — these are the strings the
-	// log redactor will strip from task stdout/stderr before they reach
-	// the run log. Plain Value= entries and From= host-env values are
-	// excluded: they're not secrets by the spec's own definition, and
-	// over-redaction (wiping e.g. a common host env value from every
-	// log line) would destroy log readability for no security benefit.
-	resolvedSecrets := make(map[string]string)
-	for _, entry := range spec.Permissions.Env {
-		switch {
-		case entry.Value != "":
-			resolved[entry.Name] = entry.Value
-		case entry.Secret != "":
-			val, err := rt.secrets.Resolve(ctx, entry.Secret)
-			if err != nil {
-				var notFound *secrets.NotFoundError
-				if entry.Optional && errors.As(err, &notFound) {
-					// optional secret not set — inject empty string so Deno.env.get() returns null
-					resolved[entry.Name] = ""
-					break
-				}
-				status = registry.StatusFailure
-				result.Error = fmt.Errorf("resolve secret %q for env %q: %w", entry.Secret, entry.Name, err)
-				return result, nil
-			}
-			resolved[entry.Name] = val
-			resolvedSecrets[entry.Name] = val
-		case entry.From != "":
-			resolved[entry.Name] = os.Getenv(entry.From)
-			// bare name: --allow-env only, no injection
-		}
+	// Resolve declared env permissions via the shared resolver. Provider
+	// tasks (from: task:<id>) are spawned and batched at most once per
+	// provider per launch; legacy paths (secret:, env:NAME, bare) are
+	// preserved.
+	resolvedRes, err := rt.envresolver().Resolve(ctx, spec)
+	if err != nil {
+		status = registry.StatusFailure
+		result.Error = err
+		return result, nil
 	}
-	redactor := secrets.NewRedactor(resolvedSecrets)
+	resolved := resolvedRes.Env
+	redactor := secrets.NewRedactor(resolvedRes.Secrets)
 
 	taskPath := spec.ScriptPath()
 	if taskPath == "" {
@@ -526,6 +511,14 @@ func buildEnv(resolved map[string]string, socketPath, token, brokerURL string) [
 		env = append(env, k+"="+v)
 	}
 	return env
+}
+
+// envresolver lazily constructs the env resolver. Wired with the daemon's
+// secret chain + a provider runner that calls back into the trigger
+// engine. Nil engine (test harness with no providers) yields a resolver
+// that errors on any from: task:<id> entry.
+func (rt *Runtime) envresolver() *envresolve.Resolver {
+	return envresolve.New(rt.registry, rt.secrets, rt.providerRunner)
 }
 
 // Execute implements runtime.Executor.
