@@ -1,0 +1,129 @@
+name: Helm chart
+
+# No untrusted GitHub-event inputs are interpolated into `run:` blocks
+# (only `github.event.{push,pull_request}` triggers; no issue/PR
+# titles, no comment bodies, no head_ref, no commit messages used in
+# shell). All `run:` commands operate on files already at HEAD via
+# actions/checkout. Reviewed against
+# https://github.blog/security/vulnerability-research/how-to-catch-github-actions-workflow-injections-before-attackers-do/
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'deploy/helm/**'
+      - '.github/workflows/helm-lint.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'deploy/helm/**'
+      - '.github/workflows/helm-lint.yml'
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: helm lint + render + validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.4
+
+      - name: Install kubeconform
+        run: |
+          set -eu
+          KUBECONFORM_VERSION=v0.6.7
+          curl -fsSL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+            | tar -xz -C /usr/local/bin kubeconform
+          kubeconform -v
+
+      - name: helm dependency build
+        # No-op today (chart has no deps), but keeps the workflow
+        # forward-compatible.
+        run: helm dependency build deploy/helm/dicode
+
+      - name: helm lint --strict (default values)
+        run: helm lint --strict deploy/helm/dicode
+
+      - name: helm template (default values)
+        run: |
+          helm template smoke deploy/helm/dicode > /tmp/manifests-default.yaml
+          echo "rendered $(wc -l < /tmp/manifests-default.yaml) lines"
+
+      - name: kubeconform (default values)
+        run: |
+          kubeconform -strict -summary -kubernetes-version 1.31.0 \
+            -schema-location default \
+            /tmp/manifests-default.yaml
+
+      - name: helm lint --strict (extras enabled)
+        run: |
+          helm lint --strict deploy/helm/dicode \
+            --set ingress.enabled=true \
+            --set 'ingress.hosts[0].host=dicode.example.com' \
+            --set 'ingress.hosts[0].paths[0].path=/' \
+            --set 'ingress.hosts[0].paths[0].pathType=Prefix' \
+            --set secret.create=true \
+            --set 'secret.values.DICODE_PASSPHRASE=demo'
+
+      - name: helm template (extras enabled)
+        run: |
+          helm template smoke deploy/helm/dicode \
+            --set ingress.enabled=true \
+            --set 'ingress.hosts[0].host=dicode.example.com' \
+            --set 'ingress.hosts[0].paths[0].path=/' \
+            --set 'ingress.hosts[0].paths[0].pathType=Prefix' \
+            --set secret.create=true \
+            --set 'secret.values.DICODE_PASSPHRASE=demo' > /tmp/manifests-extras.yaml
+
+      - name: kubeconform (extras enabled)
+        run: |
+          kubeconform -strict -summary -kubernetes-version 1.31.0 \
+            -schema-location default \
+            /tmp/manifests-extras.yaml
+
+      - name: helm template (test hook)
+        run: |
+          helm template smoke deploy/helm/dicode \
+            -s templates/tests/test-connection.yaml > /tmp/manifests-test.yaml
+
+      - name: kubeconform (test hook)
+        run: |
+          kubeconform -strict -summary -kubernetes-version 1.31.0 \
+            -schema-location default \
+            /tmp/manifests-test.yaml
+
+      - name: schema rejects negative replicaCount
+        run: |
+          if helm template smoke deploy/helm/dicode --set replicaCount=-1 > /dev/null 2>&1; then
+            echo "FAIL: values.schema.json should have rejected replicaCount=-1"
+            exit 1
+          fi
+          echo "OK: schema correctly rejected replicaCount=-1"
+
+      - name: schema rejects out-of-range service.port
+        run: |
+          if helm template smoke deploy/helm/dicode --set service.port=70000 > /dev/null 2>&1; then
+            echo "FAIL: values.schema.json should have rejected service.port=70000"
+            exit 1
+          fi
+          echo "OK: schema correctly rejected service.port=70000"
+
+      - name: schema rejects unknown top-level key
+        run: |
+          if helm template smoke deploy/helm/dicode --set bogus=true > /dev/null 2>&1; then
+            echo "FAIL: values.schema.json should have rejected unknown 'bogus' key"
+            exit 1
+          fi
+          echo "OK: schema correctly rejected unknown 'bogus' key"
+
+      - name: helm package (smoke)
+        run: helm package deploy/helm/dicode -d /tmp
