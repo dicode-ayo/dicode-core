@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 )
 
@@ -86,6 +87,56 @@ func TestSQLiteDB_Tx_Rollback(t *testing.T) {
 }
 
 var errRollback = &UnsupportedBackendError{Type: "rollback-test"}
+
+func TestSQLiteDB_RunsHasInputColumns(t *testing.T) {
+	d := newTestDB(t).(*SQLiteDB)
+	ctx := context.Background()
+	rows, err := d.db.QueryContext(ctx, `PRAGMA table_info(runs)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	cols := map[string]string{}
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			t.Fatal(err)
+		}
+		cols[name] = ctype
+	}
+	wantCols := []string{
+		"input_storage_key",
+		"input_size",
+		"input_stored_at",
+		"input_pinned",
+		"input_redacted_fields",
+	}
+	for _, want := range wantCols {
+		if _, ok := cols[want]; !ok {
+			t.Errorf("runs missing column %q", want)
+		}
+	}
+}
+
+func TestSQLiteDB_Migrate_Idempotent(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "test.db")
+
+	d1, err := openSQLite(path)
+	if err != nil {
+		t.Fatalf("first open: %v", err)
+	}
+	d1.Close()
+
+	d2, err := openSQLite(path)
+	if err != nil {
+		t.Fatalf("second open: %v", err)
+	}
+	d2.Close()
+}
 
 func TestSQLiteDB_Schema(t *testing.T) {
 	db := newTestDB(t)
