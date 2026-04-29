@@ -383,7 +383,7 @@ func buildRuntimes(
 	denoRT.SetEngine(eng)
 	denoRT.SetGateway(gateway)
 	denoRT.SetSecretsManager(secretsMgr)
-	if cfg.Defaults.OnFailureChain != "" {
+	if !cfg.Defaults.OnFailureChain.IsZero() {
 		eng.SetDefaultsOnFailureChain(cfg.Defaults.OnFailureChain)
 	}
 	if p := cfg.Notifications.Provider; p != nil {

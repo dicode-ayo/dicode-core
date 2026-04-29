@@ -64,7 +64,7 @@ type Engine struct {
 	notifyOnSuccess bool
 	notifyOnFailure bool
 
-	defaultsOnFailureChain string // from config.Defaults.OnFailureChain
+	defaultsOnFailureChain task.OnFailureChainSpec // from config.Defaults.OnFailureChain
 
 	db db.DB // optional — enables cron-job persistence and missed-run catchup
 
@@ -183,10 +183,10 @@ func (e *Engine) SetNotifyDefaults(onSuccess, onFailure bool) {
 	e.notifyOnFailure = onFailure
 }
 
-// SetDefaultsOnFailureChain sets the global task ID to fire when any task fails.
+// SetDefaultsOnFailureChain sets the global on_failure_chain to fire when any task fails.
 // Corresponds to config.Defaults.OnFailureChain. Per-task on_failure_chain overrides this.
-func (e *Engine) SetDefaultsOnFailureChain(taskID string) {
-	e.defaultsOnFailureChain = taskID
+func (e *Engine) SetDefaultsOnFailureChain(spec task.OnFailureChainSpec) {
+	e.defaultsOnFailureChain = spec
 }
 
 // resolveNotify returns the effective notification flags for a task spec,
@@ -654,12 +654,13 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 
 	// Config-level default on_failure_chain.
 	if runStatus == "failure" {
-		targetID := e.defaultsOnFailureChain
+		chainSpec := e.defaultsOnFailureChain
 		if failedSpec, ok := e.registry.Get(completedTaskID); ok {
 			if failedSpec.OnFailureChain != nil {
-				targetID = *failedSpec.OnFailureChain // "" disables, "other-id" overrides
+				chainSpec = *failedSpec.OnFailureChain // per-task fully replaces defaults
 			}
 		}
+		targetID := chainSpec.Task
 		if targetID != "" && targetID != completedTaskID {
 			if targetSpec, ok := e.registry.Get(targetID); ok {
 				e.log.Info("on_failure_chain trigger",
