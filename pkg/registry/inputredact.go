@@ -2,6 +2,7 @@ package registry
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 )
 
@@ -90,4 +91,72 @@ func shouldRedactName(name string) bool {
 		}
 	}
 	return false
+}
+
+// redactHeaders walks an HTTP-style map[string][]string. For each key whose
+// name matches the deny-list, every value in the slice is replaced with the
+// redactPlaceholder. Names of redacted keys are recorded as "headers.<name>"
+// in `redacted`.
+//
+// Returns a NEW map; does not mutate the input.
+func redactHeaders(in map[string][]string, redacted *[]string) map[string][]string {
+	return redactStringSliceMap(in, "headers", redacted)
+}
+
+// redactQuery is the same as redactHeaders but with the "query." path prefix.
+func redactQuery(in map[string][]string, redacted *[]string) map[string][]string {
+	return redactStringSliceMap(in, "query", redacted)
+}
+
+// redactStringSliceMap is the shared implementation for header/query
+// redaction. Single-valued substitution preserves length information without
+// leaking content.
+func redactStringSliceMap(in map[string][]string, prefix string, redacted *[]string) map[string][]string {
+	if len(in) == 0 {
+		return in
+	}
+	out := make(map[string][]string, len(in))
+	for name, vals := range in {
+		if shouldRedactName(name) {
+			redactedVals := make([]string, len(vals))
+			for i := range redactedVals {
+				redactedVals[i] = redactPlaceholder
+			}
+			out[name] = redactedVals
+			*redacted = append(*redacted, prefix+"."+name)
+		} else {
+			// Defensive copy: never share the input slice.
+			out[name] = append([]string(nil), vals...)
+		}
+	}
+	return out
+}
+
+// redactParams recursively walks a generic value (typically map[string]any
+// from JSON) replacing values for keys whose names match the deny-list.
+// Lists are walked positionally with [N] in the path. Returns a new value;
+// does NOT mutate the input.
+func redactParams(v any, path string, redacted *[]string) any {
+	switch x := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, child := range x {
+			childPath := path + "." + k
+			if shouldRedactName(k) {
+				out[k] = redactPlaceholder
+				*redacted = append(*redacted, childPath)
+				continue
+			}
+			out[k] = redactParams(child, childPath, redacted)
+		}
+		return out
+	case []any:
+		out := make([]any, len(x))
+		for i, child := range x {
+			out[i] = redactParams(child, fmt.Sprintf("%s[%d]", path, i), redacted)
+		}
+		return out
+	default:
+		return v
+	}
 }
