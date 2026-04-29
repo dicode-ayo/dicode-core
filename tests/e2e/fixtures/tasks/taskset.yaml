@@ -25,6 +25,9 @@ spec:
     loop-target:
       ref:
         path: FIXTURES_TASKS_DIR/loop-target/task.yaml
+    persistence-test:
+      ref:
+        path: FIXTURES_TASKS_DIR/persistence-test/task.yaml
     webui:
       ref:
         path: BUILDIN_WEBUI_TASK_YAML
@@ -34,3 +37,9 @@ spec:
     auth-providers:
       ref:
         path: BUILDIN_AUTH_PROVIDERS_TASK_YAML
+    local-storage:
+      ref:
+        path: BUILDIN_LOCAL_STORAGE_TASK_YAML
+    run-inputs-cleanup:
+      ref:
+        path: BUILDIN_RUN_INPUTS_CLEANUP_TASK_YAML
