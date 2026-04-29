@@ -246,9 +246,24 @@ func (cs *ControlServer) dispatch(ctx context.Context, req Request) (any, error)
 	case "cli.task.test":
 		return cs.handleTaskTest(ctx, req)
 
+	case "cli.auth.reset_passphrase":
+		return nil, cs.handleAuthResetPassphrase(ctx)
+
 	default:
 		return nil, fmt.Errorf("unknown method: %s", req.Method)
 	}
+}
+
+// handleAuthResetPassphrase deletes the stored WebUI passphrase from the
+// kv table. The next daemon restart re-enters onboarding so the operator
+// can set a fresh one. The kv key ("auth.passphrase") mirrors the
+// constant in pkg/webui/passphrase.go — keep them in sync if either
+// changes.
+func (cs *ControlServer) handleAuthResetPassphrase(ctx context.Context) error {
+	if cs.database == nil {
+		return errors.New("daemon has no database handle (test build?)")
+	}
+	return cs.database.Exec(ctx, `DELETE FROM kv WHERE key = ?`, "auth.passphrase")
 }
 
 func (cs *ControlServer) handlePing() DaemonStatus {

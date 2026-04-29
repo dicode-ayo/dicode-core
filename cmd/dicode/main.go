@@ -119,8 +119,35 @@ func dispatch(c *ipc.ControlClient, args []string) error {
 			return fmt.Errorf("usage: dicode task <test> <task-id>")
 		}
 		return cmdTask(c, args[1:])
+	case "auth":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: dicode auth <reset-passphrase>")
+		}
+		return cmdAuth(c, args[1:])
 	default:
 		return fmt.Errorf("unknown command %q — run 'dicode' for usage", args[0])
+	}
+}
+
+// cmdAuth implements `dicode auth <subcommand>`. Today only
+// reset-passphrase is exposed — clears the stored WebUI passphrase so
+// the next daemon restart re-enters the onboarding wizard and lets the
+// operator set a new one. API keys are managed via the WebUI; resetting
+// them programmatically is out of scope.
+func cmdAuth(c *ipc.ControlClient, args []string) error {
+	switch args[0] {
+	case "reset-passphrase":
+		resp, err := c.Send(ipc.Request{Method: "cli.auth.reset_passphrase"})
+		if err != nil {
+			return err
+		}
+		if resp.Error != "" {
+			return fmt.Errorf("%s", resp.Error)
+		}
+		fmt.Println("WebUI passphrase cleared. Restart dicode and complete onboarding to set a new one.")
+		return nil
+	default:
+		return fmt.Errorf("unknown auth subcommand %q", args[0])
 	}
 }
 
