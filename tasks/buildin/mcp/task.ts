@@ -127,7 +127,22 @@ const TOOLS: ToolDef[] = [
         enabled: { type: "boolean", description: "true to enable" },
         local_path: {
           type: "string",
-          description: "Absolute path to a local taskset.yaml (when enabling)",
+          description: "Absolute path to a local taskset.yaml (when enabling local-path mode)",
+        },
+        branch: {
+          type: "string",
+          description:
+            "Branch name to clone-and-checkout (when enabling clone-mode). Mutually exclusive with local_path.",
+        },
+        base: {
+          type: "string",
+          description:
+            "Branch to fork from when `branch` does not exist remotely. Defaults to source's tracked branch.",
+        },
+        run_id: {
+          type: "string",
+          description:
+            "Identifier for the per-fix clone directory; required with branch.",
         },
       },
       ["source", "enabled"],
@@ -191,10 +206,11 @@ async function dispatchTool(
     case "switch_dev_mode": {
       const src = String(args.source ?? "");
       if (!src) throw new Error("source is required");
-      const enabled = Boolean(args.enabled);
-      const localPath = String(args.local_path ?? "");
-      const body: Record<string, unknown> = { enabled };
-      if (localPath) body.local_path = localPath;
+      const body: Record<string, unknown> = { enabled: Boolean(args.enabled) };
+      for (const k of ["local_path", "branch", "base", "run_id"]) {
+        const v = args[k];
+        if (typeof v === "string" && v) body[k] = v;
+      }
       return textContent(
         `Dev-mode switching is not exposed via the dicode task SDK. ` +
           `Call \`PATCH /api/sources/${src}/dev\` with body ` +
