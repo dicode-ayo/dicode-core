@@ -160,3 +160,38 @@ spec:
 		t.Errorf("HEAD = %q, want fix/test-1", got)
 	}
 }
+
+func TestSetDevMode_Branch_DisableRemovesClone(t *testing.T) {
+	remoteDir := newFixtureRemote(t, "main", map[string]string{
+		"taskset.yaml": `apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: fixture
+spec:
+  entries: {}
+`,
+	})
+	src := newTestSourceWithRemote(t, "ns", remoteDir, "main")
+	ctx := context.Background()
+	runID := "run-disable-1"
+
+	if err := src.SetDevMode(ctx, true, DevModeOpts{
+		Branch: "fix/disable", Base: "main", RunID: runID,
+	}); err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	clonePath := filepath.Join(src.DataDir(), "dev-clones", src.Namespace(), runID)
+	if _, err := os.Stat(clonePath); err != nil {
+		t.Fatalf("clone dir missing after enable: %v", err)
+	}
+
+	if err := src.SetDevMode(ctx, false, DevModeOpts{}); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	if _, err := os.Stat(clonePath); !os.IsNotExist(err) {
+		t.Errorf("clone dir still exists after disable; err = %v", err)
+	}
+	if src.DevMode() {
+		t.Error("DevMode() = true after disable")
+	}
+}

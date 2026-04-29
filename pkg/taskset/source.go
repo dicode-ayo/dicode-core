@@ -164,6 +164,26 @@ func (s *Source) SetDevMode(ctx context.Context, enabled bool, opts DevModeOpts)
 		}
 		return nil
 	}
+	if !enabled {
+		// If we were in clone-mode, remove the clone directory and clear runID.
+		s.mu.Lock()
+		runID := s.cloneRunID
+		s.cloneRunID = ""
+		s.mu.Unlock()
+		if runID != "" {
+			clonePath := filepath.Join(s.dataDir, "dev-clones", s.namespace, runID)
+			if err := os.RemoveAll(clonePath); err != nil {
+				// Log but don't fail — orphan sweep (dev-clones-cleanup
+				// buildin, Task 13) retries. Disable must always succeed.
+				s.log.Warn("dev-clones disable: removeall failed",
+					zap.String("source", s.namespace),
+					zap.String("path", clonePath),
+					zap.Error(err),
+				)
+			}
+		}
+	}
+
 	// existing LocalPath / disable path:
 	s.resolver.SetDevMode(enabled)
 	s.mu.Lock()
