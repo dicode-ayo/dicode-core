@@ -132,12 +132,18 @@ func dispatch(c *ipc.ControlClient, args []string) error {
 // printResetBanner emits the new passphrase to stdout in the same
 // banner shape as pkg/webui/passphrase.go ensurePassphrase, so the
 // operator can record it. Operator-terminal output is the contract;
-// not a log call.
+// not a log call. The lgtm suppression below is intentional — CodeQL's
+// go/clear-text-logging query treats every fmt.Printf of an upstream
+// "passphrase"-named value as a leak, but here the print IS the
+// purpose: this is the only moment the operator can capture the
+// rotated value. The same pattern lives unsuppressed in
+// pkg/webui/passphrase.go ensurePassphrase only because it routes
+// through a local named "plaintext" rather than a struct field.
 func printResetBanner(value string) {
 	fmt.Println("╔══════════════════════════════════════════════════════════════╗")
 	fmt.Println("║  dicode — auth passphrase reset                              ║")
 	fmt.Println("║                                                              ║")
-	fmt.Printf("║  %s  ║\n", value)
+	fmt.Printf("║  %s  ║\n", value) // lgtm[go/clear-text-logging] intentional operator-terminal display, not a log
 	fmt.Println("║                                                              ║")
 	fmt.Println("║  Restart dicode (Ctrl-C and `make run` again) for this to    ║")
 	fmt.Println("║  take effect — the running WebUI still caches the previous   ║")
