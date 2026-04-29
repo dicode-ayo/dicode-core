@@ -224,3 +224,52 @@ func TestFireChain_SuppressesChainOfChains(t *testing.T) {
 		t.Errorf("chain-of-chains: auto-fix-loop ran %d times (want 1): %v", len(runs), ids)
 	}
 }
+
+// TestFireChain_SetsParentRunIDOnChainedRun verifies that the chained run's
+// ParentRunID field is set to the failing run's ID. This is required for the
+// WebUI run-tree view and for downstream correlation (e.g. the auto-fix loop's
+// runs.replay primitive in #234 looks up parent runs).
+func TestFireChain_SetsParentRunIDOnChainedRun(t *testing.T) {
+	dir := t.TempDir()
+	e := newTestEnv(t)
+
+	// Chain target: echo input back so the run reaches success.
+	chainTarget := writeTask(t, dir, "chain-target-parent",
+		`export default async function main({ input }) { return input }`,
+		task.TriggerConfig{Manual: true})
+	_ = e.reg.Register(chainTarget)
+
+	// Failing task whose failure will fire the on_failure_chain.
+	failing := writeTask(t, dir, "user-task-parent",
+		`export default async function main() { throw new Error("intentional") }`,
+		task.TriggerConfig{Manual: true})
+	_ = e.reg.Register(failing)
+
+	// Configure defaults.on_failure_chain pointing at chain-target-parent.
+	if err := e.engine.SetDefaultsOnFailureChain(task.OnFailureChainSpec{
+		Task: "chain-target-parent",
+	}); err != nil {
+		t.Fatalf("SetDefaultsOnFailureChain: %v", err)
+	}
+
+	// Fire the failing task and wait for terminal state.
+	failedRunID, err := e.engine.FireManual(context.Background(), "user-task-parent", nil)
+	if err != nil {
+		t.Fatalf("FireManual: %v", err)
+	}
+	primary := waitForTerminal(t, e.engine, failedRunID, 30*time.Second)
+	if primary.Status != "failure" {
+		t.Fatalf("primary run status = %q, want failure", primary.Status)
+	}
+
+	// Wait for the chained run to complete.
+	chainedRun := waitForRunOfTask(t, e.engine, "chain-target-parent", 30*time.Second)
+	if chainedRun == nil {
+		t.Fatal("chain-target-parent was not fired within the timeout")
+	}
+
+	// Assert that ParentRunID was threaded through from the failing run.
+	if chainedRun.ParentRunID != failedRunID {
+		t.Errorf("ParentRunID = %q, want %q", chainedRun.ParentRunID, failedRunID)
+	}
+}

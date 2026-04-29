@@ -143,20 +143,17 @@ async function fireAndWaitForRun(
 }
 
 /**
- * Poll GET /api/tasks/{id}/runs for a chain-fired run that was triggered after
- * `afterMs` (ms since epoch). The on_failure_chain implementation does not
- * currently set ParentRunID on the chained run, so we correlate by:
- *   1. TriggerSource === "chain" (or "Chain")
- *   2. StartedAt > afterMs
+ * Poll GET /api/tasks/{id}/runs for the chained run whose parent_run_id
+ * matches parentRunID. ParentRunID is now set by FireChain on all chain-fired
+ * runs, so this is the primary (and authoritative) correlation key.
  *
  * Returns the first matching run once it appears, up to timeoutMs.
  */
 async function waitForChainedRun(
   request: import('@playwright/test').APIRequestContext,
   taskID: string,
-  _parentRunID: string, // kept for future use when ParentRunID is wired
+  parentRunID: string,
   timeoutMs = 20_000,
-  afterMs = 0,
 ): Promise<Run> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -165,33 +162,13 @@ async function waitForChainedRun(
     );
     if (res.ok()) {
       const runs = (await res.json()) as Run[];
-      // Prefer a run with matching ParentRunID (for forward compat), fall
-      // back to TriggerSource=="chain" with StartedAt after the trigger time.
-      const byParent = runs.find((r) => runParentID(r) === _parentRunID);
-      if (byParent) return byParent;
-      const byChainSource = runs.find((r) => {
-        const src = (
-          (r.TriggerSource ?? r.trigger_source) as string | undefined
-        )?.toLowerCase();
-        if (src !== 'chain') return false;
-        if (afterMs > 0) {
-          // Only include runs started after the trigger time.
-          const startedAt =
-            (r as unknown as Record<string, unknown>).StartedAt ??
-            (r as unknown as Record<string, unknown>).started_at;
-          if (typeof startedAt === 'string') {
-            const ts = Date.parse(startedAt);
-            return ts >= afterMs;
-          }
-        }
-        return true;
-      });
-      if (byChainSource) return byChainSource;
+      const match = runs.find((r) => runParentID(r) === parentRunID);
+      if (match) return match;
     }
     await new Promise((r) => setTimeout(r, 400));
   }
   throw new Error(
-    `No chained run of ${taskID} appeared within ${timeoutMs}ms`,
+    `No chained run of ${taskID} with parent_run_id=${parentRunID} appeared within ${timeoutMs}ms`,
   );
 }
 
@@ -624,23 +601,17 @@ test.describe('Group 8: on_failure_chain structured form + params merge', () => 
   test(
     'will-fail fires chain-target with user params + reserved keys in input',
     async ({ request }) => {
-      const triggerTimeMs = Date.now();
-
       // 1. Fire will-fail and wait for failure.
       const failedRun = await fireAndWaitForRun(request, 'e2e-tests/will-fail');
       const failedRunID = runID(failedRun);
       expect(runStatus(failedRun)).toBe('failure');
 
-      // 2. Poll chain-target/runs for a chain-fired run after triggerTimeMs.
-      // Note: the on_failure_chain engine does not currently set ParentRunID on
-      // the chained run — we correlate by TriggerSource == "chain" and start
-      // time instead.
+      // 2. Poll chain-target/runs for the chained run by parent_run_id.
       const chainedRun = await waitForChainedRun(
         request,
         'e2e-tests/chain-target',
-        failedRunID, // used for ParentRunID lookup when available
+        failedRunID,
         20_000,
-        triggerTimeMs,
       );
       expect(chainedRun).toBeDefined();
 
@@ -724,7 +695,6 @@ test.describe('Group 9: chain-of-chains suppression', () => {
         'e2e-tests/will-fail',
         runID(triggerRun),
         15_000,
-        triggerTimeMs,
       );
       expect(willFailChainedRun).toBeDefined();
       const willFailChainedRunID = runID(willFailChainedRun);

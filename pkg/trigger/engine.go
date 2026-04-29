@@ -658,7 +658,10 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 			zap.String("to", spec.ID),
 			zap.String("on", on),
 		)
-		go e.fireAsync(ctx, spec, pkgruntime.RunOptions{Input: output}, "chain") //nolint:errcheck
+		go e.fireAsync(ctx, spec, pkgruntime.RunOptions{ //nolint:errcheck
+			ParentRunID: runID,
+			Input:       output,
+		}, "chain")
 	}
 
 	// Config-level default on_failure_chain.
@@ -713,7 +716,8 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 				// TODO(#238): increment from incoming run input; current always-1 means chain-of-chains can recurse.
 				input["_chain_depth"] = 1
 				go e.fireAsync(ctx, targetSpec, pkgruntime.RunOptions{ //nolint:errcheck
-					Input: input,
+					ParentRunID: runID,
+					Input:       input,
 				}, "chain")
 			}
 		}
