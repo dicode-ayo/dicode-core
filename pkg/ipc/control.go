@@ -12,12 +12,14 @@ import (
 	"time"
 
 	"github.com/dicode/dicode/pkg/db"
+	"github.com/dicode/dicode/pkg/onboarding"
 	"github.com/dicode/dicode/pkg/registry"
 	"github.com/dicode/dicode/pkg/relay"
 	"github.com/dicode/dicode/pkg/secrets"
 	"github.com/dicode/dicode/pkg/task"
 	"github.com/dicode/dicode/pkg/tasktest"
 	"go.uber.org/zap"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // RelayIdentityRotator rotates the daemon's relay identity on demand.
@@ -247,23 +249,43 @@ func (cs *ControlServer) dispatch(ctx context.Context, req Request) (any, error)
 		return cs.handleTaskTest(ctx, req)
 
 	case "cli.auth.reset_passphrase":
-		return nil, cs.handleAuthResetPassphrase(ctx)
+		return cs.handleAuthResetPassphrase(ctx)
 
 	default:
 		return nil, fmt.Errorf("unknown method: %s", req.Method)
 	}
 }
 
-// handleAuthResetPassphrase deletes the stored WebUI passphrase from the
-// kv table. The next daemon restart re-enters onboarding so the operator
-// can set a fresh one. The kv key ("auth.passphrase") mirrors the
-// constant in pkg/webui/passphrase.go — keep them in sync if either
-// changes.
-func (cs *ControlServer) handleAuthResetPassphrase(ctx context.Context) error {
+// AuthResetPassphraseResult carries the freshly-generated plaintext back
+// to the CLI so the operator can record it. The plaintext lives only in
+// this response; the daemon stores the bcrypt hash.
+type AuthResetPassphraseResult struct {
+	Passphrase string `json:"passphrase"`
+}
+
+// handleAuthResetPassphrase generates a fresh WebUI passphrase, stores
+// its bcrypt hash in the kv table at key "auth.passphrase" (matching the
+// constant in pkg/webui/passphrase.go), and returns the plaintext to the
+// caller. The running WebUI's in-memory cache still holds the previous
+// value — a daemon restart picks up the new hash via ensurePassphrase
+// and warms the cache. CLI surfaces that restart instruction.
+func (cs *ControlServer) handleAuthResetPassphrase(ctx context.Context) (any, error) {
 	if cs.database == nil {
-		return errors.New("daemon has no database handle (test build?)")
+		return nil, errors.New("daemon has no database handle (test build?)")
 	}
-	return cs.database.Exec(ctx, `DELETE FROM kv WHERE key = ?`, "auth.passphrase")
+	plaintext := onboarding.GeneratePassphrase()
+	hash, err := bcrypt.GenerateFromPassword([]byte(plaintext), bcrypt.DefaultCost)
+	if err != nil {
+		return nil, fmt.Errorf("hash passphrase: %w", err)
+	}
+	if err := cs.database.Exec(ctx,
+		`INSERT INTO kv (key, value) VALUES (?, ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+		"auth.passphrase", string(hash),
+	); err != nil {
+		return nil, fmt.Errorf("store passphrase hash: %w", err)
+	}
+	return AuthResetPassphraseResult{Passphrase: plaintext}, nil
 }
 
 func (cs *ControlServer) handlePing() DaemonStatus {

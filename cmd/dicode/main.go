@@ -130,10 +130,12 @@ func dispatch(c *ipc.ControlClient, args []string) error {
 }
 
 // cmdAuth implements `dicode auth <subcommand>`. Today only
-// reset-passphrase is exposed — clears the stored WebUI passphrase so
-// the next daemon restart re-enters the onboarding wizard and lets the
-// operator set a new one. API keys are managed via the WebUI; resetting
-// them programmatically is out of scope.
+// reset-passphrase is exposed — generates a fresh WebUI passphrase,
+// stores its bcrypt hash in the daemon's kv store, and prints the
+// plaintext so the operator can record it. The running WebUI's cached
+// passphrase still holds the previous value, so a daemon restart is
+// required for the new one to take effect. API keys are managed via the
+// WebUI keys panel; resetting them programmatically is out of scope.
 func cmdAuth(c *ipc.ControlClient, args []string) error {
 	switch args[0] {
 	case "reset-passphrase":
@@ -144,7 +146,19 @@ func cmdAuth(c *ipc.ControlClient, args []string) error {
 		if resp.Error != "" {
 			return fmt.Errorf("%s", resp.Error)
 		}
-		fmt.Println("WebUI passphrase cleared. Restart dicode and complete onboarding to set a new one.")
+		var result ipc.AuthResetPassphraseResult
+		if err := remarshal(resp.Result, &result); err != nil {
+			return fmt.Errorf("decode reset result: %w", err)
+		}
+		fmt.Println("╔══════════════════════════════════════════════════════════════╗")
+		fmt.Println("║  dicode — auth passphrase reset                              ║")
+		fmt.Println("║                                                              ║")
+		fmt.Printf("║  %s  ║\n", result.Passphrase)
+		fmt.Println("║                                                              ║")
+		fmt.Println("║  Restart dicode (Ctrl-C and `make run` again) for this to    ║")
+		fmt.Println("║  take effect — the running WebUI still caches the previous   ║")
+		fmt.Println("║  hash. After restart, log in at /security with this value.   ║")
+		fmt.Println("╚══════════════════════════════════════════════════════════════╝")
 		return nil
 	default:
 		return fmt.Errorf("unknown auth subcommand %q", args[0])
