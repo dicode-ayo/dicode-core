@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -13,6 +14,8 @@ import (
 	"github.com/dicode/dicode/pkg/source"
 	"github.com/dicode/dicode/pkg/task"
 	"github.com/fsnotify/fsnotify"
+	gogit "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
 	"go.uber.org/zap"
 )
 
@@ -34,11 +37,18 @@ type Source struct {
 	pollInterval time.Duration
 	log          *zap.Logger
 
+	// dataDir is the daemon's base data directory (e.g. ~/.dicode).
+	// It mirrors the resolver's private dataDir and is kept here so that
+	// clone-mode (enableClone) can compute its own subdirectory paths
+	// without reaching into the resolver's internals.
+	dataDir string
+
 	mu          sync.Mutex
 	snapshot    map[string]taskSnap // namespaced taskID → snapshot
 	ch          chan source.Event   // live channel set by Start; nil before Start
 	devRootPath string              // non-empty overrides rootRef.Path in dev mode
 	watchRoot   string              // directory watched by fsnotify; set in Start
+	cloneRunID  string              // non-empty while a dev-mode clone is active
 
 	// pullStatus tracks the outcome of the most recent git pull; exposed
 	// via PullStatus() for the webui source-health dot. Zero-value means
@@ -77,6 +87,7 @@ func NewSource(
 		namespace:    namespace,
 		rootRef:      rootRef,
 		configPath:   configPath,
+		dataDir:      dataDir,
 		resolver:     NewResolver(dataDir, devMode, log),
 		pollInterval: pollInterval,
 		log:          log,
@@ -140,6 +151,20 @@ func (s *Source) SetDevMode(ctx context.Context, enabled bool, opts DevModeOpts)
 	if opts.LocalPath != "" && opts.Branch != "" {
 		return fmt.Errorf("DevModeOpts: LocalPath and Branch are mutually exclusive")
 	}
+	if enabled && opts.Branch != "" {
+		if err := s.enableClone(ctx, opts); err != nil {
+			return err
+		}
+		s.resolver.SetDevMode(true)
+		s.mu.Lock()
+		ch := s.ch
+		s.mu.Unlock()
+		if ch != nil {
+			return s.syncAndEmit(ctx, ch)
+		}
+		return nil
+	}
+	// existing LocalPath / disable path:
 	s.resolver.SetDevMode(enabled)
 	s.mu.Lock()
 	s.devRootPath = opts.LocalPath
@@ -154,6 +179,79 @@ func (s *Source) SetDevMode(ctx context.Context, enabled bool, opts DevModeOpts)
 	return s.syncAndEmit(ctx, ch)
 }
 
+// enableClone clones this source's git repo into ${dataDir}/dev-clones/<namespace>/<runID>/
+// and switches devRootPath to point at the cloned taskset.yaml. If opts.Branch
+// doesn't exist remotely, it is created locally from opts.Base (or the source's
+// tracked branch). Pure go-git — no `git` binary.
+func (s *Source) enableClone(ctx context.Context, opts DevModeOpts) error {
+	if opts.RunID == "" {
+		return fmt.Errorf("DevModeOpts.RunID required when Branch is set")
+	}
+	if err := ValidateBranchName(opts.Branch, ""); err != nil {
+		return fmt.Errorf("validate branch: %w", err)
+	}
+	if s.rootRef == nil || s.rootRef.URL == "" {
+		return fmt.Errorf("clone-mode requires a git source (rootRef.URL is empty)")
+	}
+
+	clonePath := filepath.Join(s.dataDir, "dev-clones", s.namespace, opts.RunID)
+	if err := os.MkdirAll(filepath.Dir(clonePath), 0o755); err != nil {
+		return fmt.Errorf("mkdir parent: %w", err)
+	}
+
+	cloneOpts := &gogit.CloneOptions{
+		URL: s.rootRef.URL,
+	}
+	repo, err := gogit.PlainCloneContext(ctx, clonePath, false, cloneOpts)
+	if err != nil {
+		return fmt.Errorf("clone: %w", err)
+	}
+
+	wt, err := repo.Worktree()
+	if err != nil {
+		return fmt.Errorf("worktree: %w", err)
+	}
+
+	branchRef := plumbing.NewBranchReferenceName(opts.Branch)
+	co := &gogit.CheckoutOptions{Branch: branchRef}
+	if err := wt.Checkout(co); err != nil {
+		// branch doesn't exist — create it locally from Base
+		base := opts.Base
+		if base == "" {
+			base = s.rootRef.Branch
+		}
+		if base == "" {
+			return fmt.Errorf("checkout %q failed and no base branch resolvable: %w", opts.Branch, err)
+		}
+		// Try local branch ref first, then fall back to remote tracking ref.
+		baseHash, resolveErr := repo.ResolveRevision(plumbing.Revision(plumbing.NewBranchReferenceName(base)))
+		if resolveErr != nil {
+			remoteRef := plumbing.NewRemoteReferenceName("origin", base)
+			baseHash, resolveErr = repo.ResolveRevision(plumbing.Revision(remoteRef))
+			if resolveErr != nil {
+				return fmt.Errorf("resolve base %q: %w", base, resolveErr)
+			}
+		}
+		if err := repo.Storer.SetReference(plumbing.NewHashReference(branchRef, *baseHash)); err != nil {
+			return fmt.Errorf("create branch %q: %w", opts.Branch, err)
+		}
+		if err := wt.Checkout(co); err != nil {
+			return fmt.Errorf("checkout %q after create: %w", opts.Branch, err)
+		}
+	}
+
+	// devRootPath points at the cloned root taskset.yaml.
+	rootEntry := s.rootRef.Path
+	if rootEntry == "" {
+		rootEntry = "taskset.yaml"
+	}
+	s.mu.Lock()
+	s.devRootPath = filepath.Join(clonePath, rootEntry)
+	s.cloneRunID = opts.RunID
+	s.mu.Unlock()
+	return nil
+}
+
 // DevMode reports whether dev mode is currently active.
 func (s *Source) DevMode() bool { return s.resolver.DevMode() }
 
@@ -163,6 +261,12 @@ func (s *Source) DevRootPath() string {
 	defer s.mu.Unlock()
 	return s.devRootPath
 }
+
+// DataDir returns the daemon data directory used for source clones.
+func (s *Source) DataDir() string { return s.dataDir }
+
+// Namespace returns this source's root namespace segment.
+func (s *Source) Namespace() string { return s.namespace }
 
 // Sync triggers an immediate re-resolution without emitting events.
 func (s *Source) Sync(ctx context.Context) error {

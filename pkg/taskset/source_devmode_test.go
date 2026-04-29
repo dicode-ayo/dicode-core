@@ -2,8 +2,84 @@ package taskset
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
+
+	gogit "github.com/go-git/go-git/v5"
+	gogitconfig "github.com/go-git/go-git/v5/config"
+	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/object"
+	"go.uber.org/zap"
 )
+
+// newFixtureRemote creates a bare-ish git repo at a tempdir with a single
+// commit on the given branch containing the provided files. Returns the repo's
+// directory path (suitable as a `URL` for go-git PlainClone via file://).
+func newFixtureRemote(t *testing.T, branch string, files map[string]string) string {
+	t.Helper()
+
+	bareDir := filepath.Join(t.TempDir(), "bare.git")
+	if _, err := gogit.PlainInitWithOptions(bareDir, &gogit.PlainInitOptions{
+		Bare:        true,
+		InitOptions: gogit.InitOptions{DefaultBranch: plumbing.NewBranchReferenceName(branch)},
+	}); err != nil {
+		t.Fatalf("newFixtureRemote: init bare: %v", err)
+	}
+
+	wtPath := filepath.Join(t.TempDir(), "seed-wt")
+	wt, err := gogit.PlainInitWithOptions(wtPath, &gogit.PlainInitOptions{
+		InitOptions: gogit.InitOptions{DefaultBranch: plumbing.NewBranchReferenceName(branch)},
+	})
+	if err != nil {
+		t.Fatalf("newFixtureRemote: init wt: %v", err)
+	}
+	if _, err := wt.CreateRemote(&gogitconfig.RemoteConfig{
+		Name: "origin",
+		URLs: []string{bareDir},
+	}); err != nil {
+		t.Fatalf("newFixtureRemote: create remote: %v", err)
+	}
+
+	tree, err := wt.Worktree()
+	if err != nil {
+		t.Fatalf("newFixtureRemote: worktree: %v", err)
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(wtPath, name), []byte(content), 0o644); err != nil {
+			t.Fatalf("newFixtureRemote: write %s: %v", name, err)
+		}
+		if _, err := tree.Add(name); err != nil {
+			t.Fatalf("newFixtureRemote: add %s: %v", name, err)
+		}
+	}
+	if _, err := tree.Commit("initial", &gogit.CommitOptions{
+		Author: &object.Signature{Name: "t", Email: "t@t", When: time.Now()},
+	}); err != nil {
+		t.Fatalf("newFixtureRemote: commit: %v", err)
+	}
+	if err := wt.Push(&gogit.PushOptions{RemoteName: "origin"}); err != nil && err != gogit.NoErrAlreadyUpToDate {
+		t.Fatalf("newFixtureRemote: push: %v", err)
+	}
+
+	return "file://" + bareDir
+}
+
+// newTestSourceWithRemote constructs a Source pointing at the given git remote URL.
+func newTestSourceWithRemote(t *testing.T, namespace, remoteURL, branch string) *Source {
+	t.Helper()
+	return NewSource(
+		remoteURL,
+		namespace,
+		&Ref{URL: remoteURL, Branch: branch},
+		"",
+		t.TempDir(),
+		false,
+		30*time.Second,
+		zap.NewNop(),
+	)
+}
 
 func TestSetDevMode_LocalPath_StillWorks(t *testing.T) {
 	src := newTestSource(t, "ns", "/tmp/fixture-taskset.yaml")
@@ -34,5 +110,53 @@ func TestSetDevMode_RejectsBothLocalPathAndBranch(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error for both LocalPath and Branch set")
+	}
+}
+
+func TestSetDevMode_Branch_ClonesRepo(t *testing.T) {
+	remoteDir := newFixtureRemote(t, "main", map[string]string{
+		"taskset.yaml": `apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: fixture
+spec:
+  entries: {}
+`,
+	})
+
+	src := newTestSourceWithRemote(t, "ns", remoteDir, "main")
+	ctx := context.Background()
+	runID := "run-test-1"
+	if err := src.SetDevMode(ctx, true, DevModeOpts{
+		Branch: "fix/test-1",
+		Base:   "main",
+		RunID:  runID,
+	}); err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	if !src.DevMode() {
+		t.Fatal("DevMode() = false after enable")
+	}
+
+	wantPath := filepath.Join(src.DataDir(), "dev-clones", src.Namespace(), runID, "taskset.yaml")
+	if got := src.DevRootPath(); got != wantPath {
+		t.Errorf("DevRootPath = %q, want %q", got, wantPath)
+	}
+	if _, err := os.Stat(wantPath); err != nil {
+		t.Errorf("clone taskset.yaml missing: %v", err)
+	}
+
+	// Branch should be checked out as fix/test-1 in the local clone
+	cloneDir := filepath.Dir(wantPath)
+	repo, err := gogit.PlainOpen(cloneDir)
+	if err != nil {
+		t.Fatalf("open clone repo: %v", err)
+	}
+	head, err := repo.Head()
+	if err != nil {
+		t.Fatalf("repo.Head: %v", err)
+	}
+	if got := head.Name().Short(); got != "fix/test-1" {
+		t.Errorf("HEAD = %q, want fix/test-1", got)
 	}
 }
