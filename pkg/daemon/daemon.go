@@ -176,6 +176,35 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 		return err
 	}
 
+	// 6a. Run-input persistence (Task 14): wire InputStore when enabled.
+	if cfg.Defaults.RunInputs.IsEnabled() {
+		var deriver secrets.SubKeyDeriver
+		for _, p := range secretsChain {
+			if d, ok := p.(secrets.SubKeyDeriver); ok {
+				deriver = d
+				break
+			}
+		}
+		if deriver == nil {
+			log.Warn("run-input persistence: no SubKeyDeriver available in secrets chain — persistence disabled")
+		} else {
+			key, err := deriver.DeriveSubKey("dicode/run-inputs/v1")
+			if err != nil {
+				log.Warn("run-input persistence: sub-key derive failed", zap.Error(err))
+			} else {
+				runner := trigger.NewInputStoreTaskRunner(eng)
+				is := registry.NewInputStore(registry.NewInputCrypto(key), runner, cfg.Defaults.RunInputs.StorageTask)
+				eng.SetInputStore(is)
+				log.Info("run-input persistence enabled",
+					zap.Duration("retention", cfg.Defaults.RunInputs.Retention),
+					zap.String("storage_task", cfg.Defaults.RunInputs.StorageTask),
+				)
+			}
+		}
+	} else {
+		log.Info("run-input persistence disabled by config")
+	}
+
 	// 7. Sources + reconciler.
 	sources, sourceMgr, err := buildSources(cfg, dataDir, log)
 	if err != nil {
@@ -198,6 +227,13 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 				zap.String("task", spec.ID),
 				zap.String("webhook", spec.Trigger.Webhook),
 				zap.String("hint", "set server.auth: true in dicode.yaml to require a real passphrase"))
+		}
+		// body_full_textual footgun: warn when a task opts in to persisting
+		// raw textual bodies verbatim. Name-based redaction cannot reach
+		// unstructured content; operators should confirm this is intentional.
+		if spec.RunInputs != nil && spec.RunInputs.BodyFullTextual != nil && *spec.RunInputs.BodyFullTextual {
+			log.Warn("task persists raw textual bodies — confirm this is intentional",
+				zap.String("task", spec.ID))
 		}
 	}
 	rec.OnUnregister = func(id string) {

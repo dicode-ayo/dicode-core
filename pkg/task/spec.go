@@ -331,10 +331,13 @@ type Spec struct {
 	// validation; the resolver uses it to look up the TTL.
 	Provider *ProviderConfig `yaml:"provider,omitempty" json:"provider,omitempty"`
 
-	// RunInputs configures per-task input persistence. Full schema lands in #233 Task 14;
-	// this placeholder lets the local-storage and run-inputs-cleanup tasks opt out today.
-	// TODO(Task14): expand RunInputsTaskOverride with storage backend, retention, etc.
+	// RunInputs configures per-task input persistence. Overrides the global
+	// defaults.run_inputs from dicode.yaml for this task only.
 	RunInputs *RunInputsTaskOverride `yaml:"run_inputs,omitempty" json:"run_inputs,omitempty"`
+
+	// AutoFix configures how the auto-fix loop sees this task's input.
+	// Independent of RunInputs (which controls persistence). Used by #238.
+	AutoFix *AutoFixConfig `yaml:"auto_fix,omitempty" json:"auto_fix,omitempty"`
 
 	// TaskDir is the directory path of the task in the repo (not stored in YAML).
 	TaskDir string `yaml:"-" json:"-"`
@@ -343,11 +346,25 @@ type Spec struct {
 }
 
 // RunInputsTaskOverride is the per-task override for run-input persistence.
-// Full schema is added in Task 14. For now only Enabled is present so that
-// built-in tasks (local-storage, run-inputs-cleanup) can opt out via
-// run_inputs: enabled: false in their task.yaml.
 type RunInputsTaskOverride struct {
-	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	Enabled         *bool         `yaml:"enabled,omitempty"          json:"enabled,omitempty"`
+	Retention       time.Duration `yaml:"retention,omitempty"        json:"retention,omitempty"`
+	BodyFullTextual *bool         `yaml:"body_full_textual,omitempty" json:"body_full_textual,omitempty"`
+}
+
+// AutoFixConfig configures how the auto-fix loop sees this task's input.
+// Independent of run_inputs (which controls persistence). Used by #238.
+type AutoFixConfig struct {
+	// IncludeInput controls whether the auto-fix agent sees the task's
+	// persisted input in its prompt. Default true. Set to false for tasks
+	// whose inputs contain sensitive data the agent should not see.
+	IncludeInput *bool `yaml:"include_input,omitempty" json:"include_input,omitempty"`
+
+	// ShowRedactedFieldNames controls whether the agent sees a list of
+	// redacted field names (e.g. "Authorization", "headers.x-api-key").
+	// Default true. Set to false for tasks where field-name topology is
+	// itself sensitive.
+	ShowRedactedFieldNames *bool `yaml:"show_redacted_field_names,omitempty" json:"show_redacted_field_names,omitempty"`
 }
 
 // LoadDir reads a task from its directory (expects task.yaml and task.<ext>).

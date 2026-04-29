@@ -30,6 +30,39 @@ type DefaultsConfig struct {
 	// Accepts a bare task ID or a structured `{task, params}` form.
 	// Per-task on_failure_chain field can override or disable this.
 	OnFailureChain task.OnFailureChainSpec `yaml:"on_failure_chain,omitempty"`
+
+	// RunInputs configures run-input persistence. See spec § 4.1.
+	RunInputs RunInputsConfig `yaml:"run_inputs,omitempty"`
+}
+
+// RunInputsConfig is the global default for run-input persistence (#233).
+type RunInputsConfig struct {
+	// Enabled toggles persistence globally. Default (nil → true) applied in
+	// applyDefaults. Set to false to disable for the entire daemon.
+	Enabled *bool `yaml:"enabled,omitempty"`
+
+	// Retention is the maximum age of a persisted input. Older blobs are
+	// swept by the run-inputs-cleanup buildin. Default 30d applied in
+	// applyDefaults.
+	Retention time.Duration `yaml:"retention,omitempty"`
+
+	// StorageTask is the task ID of the configured storage backend.
+	// Default "buildin/local-storage" applied in applyDefaults.
+	StorageTask string `yaml:"storage_task,omitempty"`
+
+	// BodyFullTextual opts in to persisting non-JSON textual bodies
+	// verbatim (XML, plain-text). Footgun: name-based redaction can't
+	// reach unstructured content; persisted bodies may contain credentials.
+	// Default false.
+	BodyFullTextual bool `yaml:"body_full_textual,omitempty"`
+}
+
+// IsEnabled returns the effective Enabled value (nil → true).
+func (c RunInputsConfig) IsEnabled() bool {
+	if c.Enabled == nil {
+		return true
+	}
+	return *c.Enabled
 }
 
 // ExecutionConfig tunes how task runs are dispatched by the trigger engine.
@@ -357,6 +390,13 @@ func applyDefaults(cfg *Config, configDir string) {
 	// *string and test for nil instead of empty.
 	if cfg.AI.Task == "" {
 		cfg.AI.Task = "buildin/dicodai"
+	}
+	// RunInputs defaults: 30-day retention, local-storage backend.
+	if cfg.Defaults.RunInputs.Retention == 0 {
+		cfg.Defaults.RunInputs.Retention = 30 * 24 * time.Hour
+	}
+	if cfg.Defaults.RunInputs.StorageTask == "" {
+		cfg.Defaults.RunInputs.StorageTask = "buildin/local-storage"
 	}
 	// DataDir default is set earlier during variable expansion.
 }
