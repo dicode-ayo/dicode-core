@@ -17,6 +17,7 @@ import (
 	"github.com/dicode/dicode/pkg/relay"
 	"github.com/dicode/dicode/pkg/secrets"
 	"github.com/dicode/dicode/pkg/task"
+	"github.com/dicode/dicode/pkg/taskset"
 	"github.com/dicode/dicode/pkg/tasktest"
 	"go.uber.org/zap"
 )
@@ -87,6 +88,7 @@ type Server struct {
 	gateway    *Gateway             // optional; enables http.register for daemon tasks
 	inputStore *registry.InputStore // optional; enables dicode.runs.delete_input blob deletion
 	replayer   *registry.Replayer   // optional; enables dicode.runs.replay
+	sourceMgr  SourceDevModeSetter  // optional; enables dicode.sources.set_dev_mode
 
 	ctx        context.Context
 	socketPath string
@@ -273,6 +275,9 @@ func (s *Server) Start(ctx context.Context) (socketPath, token string, err error
 		if dp.TasksTest {
 			caps = append(caps, CapTasksTest)
 		}
+		if dp.SourcesSetDevMode {
+			caps = append(caps, CapSourcesSetDevMode)
+		}
 	}
 	if s.spec != nil && s.spec.Trigger.Daemon && s.gateway != nil {
 		caps = append(caps, CapHTTPRegister)
@@ -325,6 +330,18 @@ func (s *Server) SetInputStore(is *registry.InputStore) { s.inputStore = is }
 // SetReplayer attaches the Replayer so tasks with RunsReplay permission
 // can call dicode.runs.replay. nil disables (dispatch returns error).
 func (s *Server) SetReplayer(r *registry.Replayer) { s.replayer = r }
+
+// SourceDevModeSetter is satisfied by webui.SourceManager. Defined in
+// pkg/ipc so the daemon can wire the source manager without forcing
+// pkg/ipc to import pkg/webui (which would invert the established
+// dependency direction).
+type SourceDevModeSetter interface {
+	SetDevMode(ctx context.Context, name string, enabled bool, opts taskset.DevModeOpts) error
+}
+
+// SetSourceManager attaches a SourceDevModeSetter (typically *webui.SourceManager)
+// for dicode.sources.set_dev_mode dispatch. nil disables.
+func (s *Server) SetSourceManager(m SourceDevModeSetter) { s.sourceMgr = m }
 
 // ReturnCh receives the task return value once the subprocess sends "return".
 func (s *Server) ReturnCh() <-chan any { return s.retCh }
@@ -840,6 +857,31 @@ func (s *Server) handleConn(conn net.Conn) {
 				continue
 			}
 			reply(req.ID, result, "")
+
+		case "dicode.sources.set_dev_mode":
+			if !hasCap(caps, CapSourcesSetDevMode) {
+				reply(req.ID, nil, "ipc: permission denied (sources.set_dev_mode)")
+				continue
+			}
+			if s.sourceMgr == nil {
+				reply(req.ID, nil, "ipc: source manager not available")
+				continue
+			}
+			if req.Name == "" {
+				reply(req.ID, nil, "ipc: name required")
+				continue
+			}
+			opts := taskset.DevModeOpts{
+				LocalPath: req.LocalPath,
+				Branch:    req.Branch,
+				Base:      req.Base,
+				RunID:     req.DevRunID,
+			}
+			if err := s.sourceMgr.SetDevMode(s.ctx, req.Name, req.Enabled, opts); err != nil {
+				reply(req.ID, nil, err.Error())
+				continue
+			}
+			reply(req.ID, map[string]any{"ok": true}, "")
 
 		// ── dicode.secrets_* ──────────────────────────────────────────────
 

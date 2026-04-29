@@ -1576,3 +1576,69 @@ func TestIPC_TasksTest_GrantedByCap(t *testing.T) {
 		t.Errorf("expected CapTasksTest in caps when TasksTest=true, got %v", caps)
 	}
 }
+
+// TestIPC_SourcesSetDevMode_RequiresCap verifies that a task spec WITHOUT
+// permissions.dicode.sources_set_dev_mode: true cannot call
+// dicode.sources.set_dev_mode — it must receive "permission denied".
+func TestIPC_SourcesSetDevMode_RequiresCap(t *testing.T) {
+	e := newTestEnv(t)
+
+	spec := &task.Spec{
+		Permissions: task.Permissions{
+			Dicode: &task.DicodePermissions{
+				// SourcesSetDevMode deliberately omitted.
+			},
+		},
+	}
+
+	conn, _ := e.startWithSpec(t, nil, nil, spec, nil)
+
+	sendMsg(t, conn, map[string]any{
+		"id":     "sources-1",
+		"method": "dicode.sources.set_dev_mode",
+		"name":   "some-source",
+	})
+	resp := recvMsg(t, conn)
+	errMsg, _ := resp["error"].(string)
+	if !strings.Contains(errMsg, "permission denied") {
+		t.Errorf("expected permission denied error, got: %q (full resp: %#v)", errMsg, resp)
+	}
+}
+
+// TestIPC_SourcesSetDevMode_GrantedByCap verifies that when SourcesSetDevMode
+// is set in the spec, CapSourcesSetDevMode appears in the handshake caps.
+func TestIPC_SourcesSetDevMode_GrantedByCap(t *testing.T) {
+	e := newTestEnv(t)
+
+	spec := &task.Spec{
+		Permissions: task.Permissions{
+			Dicode: &task.DicodePermissions{
+				SourcesSetDevMode: true,
+			},
+		},
+	}
+
+	runID := fmt.Sprintf("cap-sources-set-dev-mode-%d", time.Now().UnixNano())
+	srv := New(runID, "sec-test-task", e.secret, e.reg, e.db, nil, nil, zap.NewNop(), spec, nil)
+	socketPath, token, err := srv.Start(context.Background())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(srv.Stop)
+
+	conn := dial(t, socketPath)
+	t.Cleanup(func() { conn.Close() })
+	caps := doHandshake(t, conn, token)
+
+	has := func(cap string) bool {
+		for _, c := range caps {
+			if c == cap {
+				return true
+			}
+		}
+		return false
+	}
+	if !has(CapSourcesSetDevMode) {
+		t.Errorf("expected CapSourcesSetDevMode in caps when SourcesSetDevMode=true, got %v", caps)
+	}
+}

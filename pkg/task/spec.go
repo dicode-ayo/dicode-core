@@ -297,6 +297,9 @@ type DicodePermissions struct {
 	// TasksTest enables dicode.tasks.test() — runs a task's sibling test file
 	// via pkg/tasktest.
 	TasksTest bool `yaml:"tasks_test,omitempty" json:"tasks_test,omitempty"`
+	// SourcesSetDevMode enables dicode.sources.set_dev_mode() — toggles dev
+	// mode (incl. clone-mode) on a configured taskset source.
+	SourcesSetDevMode bool `yaml:"sources_set_dev_mode,omitempty" json:"sources_set_dev_mode,omitempty"`
 }
 
 // ProviderConfig declares secret-provider settings on a task that

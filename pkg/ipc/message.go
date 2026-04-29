@@ -96,6 +96,14 @@ type Request struct {
 	// dicode.runs.* — run-input retention management (#233)
 	BeforeTs int64 `json:"before_ts,omitempty"` // dicode.runs.list_expired: unix timestamp cutoff
 
+	// dicode.sources.set_dev_mode — toggles dev mode on a configured source (#234)
+	Name      string `json:"name,omitempty"`       // source name
+	Enabled   bool   `json:"enabled,omitempty"`    // true to enable
+	LocalPath string `json:"local_path,omitempty"` // local-path mode
+	Branch    string `json:"branch,omitempty"`     // clone-mode branch
+	Base      string `json:"base,omitempty"`       // clone-mode base branch
+	DevRunID  string `json:"run_id,omitempty"`     // clone-mode per-fix run ID
+
 	// cli.ai — prompt, optional session_id, optional task id override.
 	Prompt    string `json:"prompt,omitempty"`
 	SessionID string `json:"sessionID,omitempty"`

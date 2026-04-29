@@ -137,6 +137,15 @@ export interface Dicode {
   tasks: {
     test: (taskID: string) => Promise<unknown>;
   };
+  sources: {
+    set_dev_mode: (name: string, opts: {
+      enabled: boolean;
+      local_path?: string;
+      branch?: string;
+      base?: string;
+      run_id?: string;
+    }) => Promise<unknown>;
+  };
 }
 
 // ── connection ────────────────────────────────────────────────────────────────
@@ -331,6 +340,18 @@ const dicode: Dicode = {
   tasks: {
     test: (taskID) =>
       __call__({ method: "dicode.tasks.test", taskID }),
+  },
+  sources: {
+    set_dev_mode: (name, opts) =>
+      __call__({
+        method: "dicode.sources.set_dev_mode",
+        name,
+        enabled: opts.enabled,
+        local_path: opts.local_path ?? "",
+        branch: opts.branch ?? "",
+        base: opts.base ?? "",
+        run_id: opts.run_id ?? "",
+      }),
   },
 };
 
