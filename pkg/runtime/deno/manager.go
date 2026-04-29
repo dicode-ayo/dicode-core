@@ -43,8 +43,13 @@ func (rt *Runtime) Install(_ context.Context, version string) error {
 // The new executor shares the registry, secrets, db, and logger with this
 // Runtime — and propagates the issue #119 provider channels so the
 // trigger-engine dispatch path actually sees the wired runner / sink.
+//
+// The executor holds a parent back-reference so that a late SetInputStore call
+// on the manager (which happens in daemon.go after buildRuntimes returns) is
+// visible to all executors via effectiveInputStore().
 func (rt *Runtime) NewExecutor(binaryPath string) pkgruntime.Executor {
 	return &Runtime{
+		parent:         rt,
 		registry:       rt.registry,
 		secrets:        rt.secrets,
 		db:             rt.db,

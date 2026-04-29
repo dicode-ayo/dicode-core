@@ -150,10 +150,10 @@ func (rt *Runtime) Install(_ context.Context, version string) error {
 func (rt *Runtime) NewExecutor(binaryPath string) pkgruntime.Executor {
 	return &executor{
 		uvPath:         binaryPath,
+		parent:         rt,
 		reg:            rt.reg,
 		secrets:        rt.secrets,
 		secretsManager: rt.secretsManager,
-		inputStore:     rt.inputStore,
 		db:             rt.db,
 		log:            rt.log,
 		secret:         rt.secret,
@@ -168,10 +168,13 @@ func (rt *Runtime) NewExecutor(binaryPath string) pkgruntime.Executor {
 
 type executor struct {
 	uvPath         string
+	parent         *Runtime // back-reference for live lookups (inputStore, etc.)
 	reg            *registry.Registry
 	secrets        secrets.Chain
 	secretsManager secrets.Manager
-	inputStore     *registry.InputStore
+	// inputStore is not snapshotted here; read live from parent.inputStore
+	// so late SetInputStore calls (daemon wires it after buildRuntimes) are
+	// visible to all executors without any extra bookkeeping.
 	db             db.DB
 	log            *zap.Logger
 	secret         []byte
@@ -242,7 +245,7 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 	srv := ipc.New(runID, spec.ID, e.secret, e.reg, e.db, mergedParams, opts.Input, e.log, spec, e.engine)
 	srv.SetGateway(e.gateway)
 	srv.SetSecrets(e.secretsManager)
-	srv.SetInputStore(e.inputStore)
+	srv.SetInputStore(e.parent.inputStore)
 	srv.SetRedactor(redactor)
 	if e.secretOutputCh != nil {
 		srv.SetSecretOutput(e.secretOutputCh)

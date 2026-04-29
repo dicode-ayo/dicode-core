@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/dicode/dicode/pkg/registry"
 	"github.com/dicode/dicode/pkg/runtime/envresolve"
 )
 
@@ -13,6 +14,22 @@ type fakeProviderRunner struct{}
 
 func (fakeProviderRunner) Run(_ context.Context, _ string, _ []envresolve.ProviderRequest) (*envresolve.ProviderResult, error) {
 	return &envresolve.ProviderResult{Values: map[string]string{}}, nil
+}
+
+// fakeTaskRunner satisfies registry.TaskRunner for InputStore construction.
+type fakeTaskRunner struct{}
+
+func (fakeTaskRunner) RunTaskSync(_ context.Context, _ string, _ map[string]string) (any, error) {
+	return map[string]any{"ok": true}, nil
+}
+
+// newTestInputStore builds a minimal InputStore backed by a deterministic key.
+func newTestInputStore() *registry.InputStore {
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i + 1)
+	}
+	return registry.NewInputStore(registry.NewInputCrypto(key), fakeTaskRunner{}, "fake-storage")
 }
 
 // TestNewExecutor_PropagatesProviderFields pins the contract that
@@ -36,5 +53,57 @@ func TestNewExecutor_PropagatesProviderFields(t *testing.T) {
 	}
 	if exec.providerRunner != parent.providerRunner {
 		t.Errorf("providerRunner not propagated: got %v, want %v", exec.providerRunner, parent.providerRunner)
+	}
+}
+
+// TestNewExecutor_SeesLateInputStore is a regression test for the bug fixed in
+// issue #233 pass-2: NewExecutor runs inside buildRuntimes BEFORE the daemon's
+// SetInputStore call, so any snapshot of inputStore taken at construction time
+// would permanently be nil. The fix uses a parent back-reference so the live
+// value is read at IPC server creation time.
+//
+// This test constructs an executor BEFORE calling SetInputStore on the parent,
+// then verifies that effectiveInputStore() returns the store that was set
+// afterwards — proving the live-lookup path works end-to-end.
+func TestNewExecutor_SeesLateInputStore(t *testing.T) {
+	parent := &Runtime{}
+
+	exec, ok := parent.NewExecutor("/usr/bin/deno").(*Runtime)
+	if !ok {
+		t.Fatalf("NewExecutor did not return *Runtime")
+	}
+
+	// Sanity: before SetInputStore, both parent and executor see nil.
+	if got := exec.effectiveInputStore(); got != nil {
+		t.Errorf("expected nil before SetInputStore; got %v", got)
+	}
+
+	// Now wire the store — AFTER the executor was created, mirroring the
+	// daemon ordering that triggered the original bug.
+	is := newTestInputStore()
+	parent.SetInputStore(is)
+
+	// The executor must pick it up via the parent back-reference.
+	if got := exec.effectiveInputStore(); got != is {
+		t.Errorf("executor did not pick up late-set InputStore: got %v, want %v", got, is)
+	}
+}
+
+// TestManagerRuntime_EffectiveInputStore_NilParent verifies that the
+// manager-owned Runtime (parent == nil) reads its own inputStore field, i.e.
+// SetInputStore on the manager-level object is immediately visible through
+// effectiveInputStore() without requiring a parent.
+func TestManagerRuntime_EffectiveInputStore_NilParent(t *testing.T) {
+	rt := &Runtime{} // parent is nil — this is the manager-owned instance
+
+	if rt.effectiveInputStore() != nil {
+		t.Error("expected nil before SetInputStore")
+	}
+
+	is := newTestInputStore()
+	rt.SetInputStore(is)
+
+	if got := rt.effectiveInputStore(); got != is {
+		t.Errorf("manager runtime: effectiveInputStore() = %v, want %v", got, is)
 	}
 }
