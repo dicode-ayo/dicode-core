@@ -1,0 +1,56 @@
+apiVersion: dicode/v1
+kind: Task
+name: "Dev-clone Orphan Sweep"
+description: |
+  Removes per-fix dev-mode clone directories whose run ID is no longer
+  in the set of currently-running auto-fix runs. Mirrors temp-cleanup's
+  pattern. No git binary — clones are plain dirs from the daemon's
+  perspective; rm -rf via Deno.remove is sufficient.
+
+runtime: deno
+
+trigger:
+  cron: "*/15 * * * *"   # every 15 minutes
+
+params:
+  dev_clones_root:
+    type: string
+    # ${HOME} is a built-in template variable expanded at spec-load time.
+    # task.ts also reads DICODE_DATA_DIR (injected via permissions.env) and
+    # prefers it over this default — Docker deployments (ENV DICODE_DATA_DIR=/data)
+    # therefore use the correct path without any configuration.
+    default: "${HOME}/.dicode/dev-clones"
+    description: >
+      Root directory containing per-fix clone dirs
+      (layout: <root>/<sourceName>/<runID>/). Defaults to the standard
+      ~/.dicode/dev-clones location. Override if your daemon uses a
+      non-standard data_dir and DICODE_DATA_DIR is not set in the env.
+
+permissions:
+  fs:
+    # Cover the default ~/.dicode/dev-clones path. The ${HOME} variable is
+    # always expanded at load time.
+    - path: "${HOME}/.dicode/dev-clones"
+      permission: rw
+    # Also cover ${DICODE_DATA_DIR}/dev-clones for non-default data-dir
+    # deployments (e.g. Docker with ENV DICODE_DATA_DIR=/data). This entry
+    # expands via envFallback at load time; if DICODE_DATA_DIR is unset in
+    # the daemon process it stays literal and acts as a harmless no-op.
+    - path: "${DICODE_DATA_DIR}/dev-clones"
+      permission: rw
+  env:
+    # Inject DICODE_DATA_DIR so task.ts can compute the correct root path
+    # regardless of the compiled-in default. Value is the daemon process's
+    # DICODE_DATA_DIR env var; empty string if not set (task.ts falls back
+    # to the params.dev_clones_root default).
+    - name: DICODE_DATA_DIR
+      from: DICODE_DATA_DIR
+  dicode:
+    list_tasks: false
+    get_runs: true
+
+timeout: 60s
+
+notify:
+  on_success: false
+  on_failure: true
