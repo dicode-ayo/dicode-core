@@ -180,6 +180,43 @@ func TestReconciler_OnRegisterCallback(t *testing.T) {
 	}
 }
 
+func TestReconciler_RejectsUnknownTaskProvider(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	d, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { d.Close() })
+	reg := New(d)
+
+	consumer := &task.Spec{
+		ID:   "consumer",
+		Name: "consumer",
+		Permissions: task.Permissions{
+			Env: []task.EnvEntry{{Name: "PG_URL", From: "task:nonexistent-provider"}},
+		},
+		Trigger: task.TriggerConfig{Manual: true},
+	}
+
+	rc := NewReconciler(reg, nil, zap.NewNop())
+	rc.runCtx = ctx
+	rc.merged = make(chan source.Event, 1)
+
+	rc.handle(source.Event{
+		Kind:    source.EventAdded,
+		TaskID:  "consumer",
+		Spec:    consumer,
+		Source:  "test",
+		TaskDir: "",
+	})
+
+	if _, ok := reg.Get("consumer"); ok {
+		t.Fatalf("consumer with unknown task: provider should NOT have been registered")
+	}
+}
+
 func TestReconciler_MultipleSources(t *testing.T) {
 	dir := t.TempDir()
 	td1 := writeTask(t, dir, "src1-task")

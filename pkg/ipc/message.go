@@ -54,6 +54,13 @@ type Request struct {
 	Content     string          `json:"content,omitempty"`
 	Data        json.RawMessage `json:"data,omitempty"`
 
+	// Secret/SecretMap (issue #119): when Secret is true, ContentType/
+	// Content/Data are ignored and SecretMap (a flat map[string]string)
+	// carries the resolved provider response. Values feed the run-log
+	// redactor + the resolver awaiting the provider's run.
+	Secret    bool            `json:"secret,omitempty"`
+	SecretMap json.RawMessage `json:"secretMap,omitempty"`
+
 	// dicode.*
 	TaskID  string          `json:"taskID,omitempty"`
 	Limit   int             `json:"limit,omitempty"`

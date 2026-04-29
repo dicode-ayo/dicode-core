@@ -142,6 +142,14 @@ func (rc *Reconciler) handle(ev source.Event) {
 				return
 			}
 		}
+		if err := rc.validateTaskProviders(spec); err != nil {
+			rc.log.Warn("task references unknown provider",
+				zap.String("task", ev.TaskID),
+				zap.String("source", ev.Source),
+				zap.Error(err),
+			)
+			return
+		}
 		if err := rc.registry.Register(spec); err != nil {
 			rc.log.Error("failed to register task", zap.String("task", ev.TaskID), zap.Error(err))
 			return
@@ -161,4 +169,31 @@ func (rc *Reconciler) handle(ev source.Event) {
 			rc.OnUnregister(ev.TaskID)
 		}
 	}
+}
+
+// validateTaskProviders inspects every EnvEntry whose From has the
+// "task:" prefix and confirms the referenced provider task is already
+// registered. Issue #119: a misspelled provider must not silently fall
+// through to a runtime spawn failure on every consumer launch.
+//
+// Order dependency: provider tasks must reconcile before their consumers.
+// The buildin source registers providers first because they live under
+// tasks/buildin/secret-providers/* and the taskset.yaml entry order is
+// preserved. For multi-source setups, a transient miss on first
+// reconciler pass causes the consumer to be skipped; the next sync (30s
+// later, or on the source's next event) retries.
+func (rc *Reconciler) validateTaskProviders(spec *task.Spec) error {
+	for _, e := range spec.Permissions.Env {
+		kind, target := task.ParseFrom(e.From)
+		if kind != task.FromKindTask {
+			continue
+		}
+		if target == "" {
+			return fmt.Errorf("env entry %q: from: task: target is empty", e.Name)
+		}
+		if _, ok := rc.registry.Get(target); !ok {
+			return fmt.Errorf("env entry %q: provider task %q not registered", e.Name, target)
+		}
+	}
+	return nil
 }

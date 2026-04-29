@@ -20,11 +20,21 @@ declare interface OutputOptions {
   data?: Record<string, unknown> | null;
 }
 
+/** Secret output flag — daemon treats value as a flat Record<string,string>,
+ *  routes it to the resolver awaiting this task, and redacts the values from
+ *  the run log. Issue #119. */
+declare interface SecretOutputOptions {
+  secret: true;
+}
+
 declare interface Output {
   html:  (content: string, opts?: OutputOptions)        => Promise<void>;
   text:  (content: string)                              => Promise<void>;
   image: (mime: string | null, content: string)         => Promise<void>;
   file:  (name: string, content: string, mime?: string) => Promise<void>;
+  /** Provider-task entry point (issue #119). Throws synchronously if `value`
+   *  is not a flat Record<string,string>. */
+  (value: Record<string, string>, opts: SecretOutputOptions): Promise<void>;
 }
 
 declare interface MCP {

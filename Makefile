@@ -7,7 +7,7 @@ GOFLAGS := -ldflags "-X main.version=$(VERSION)"
 
 .PHONY: build test test-verbose test-race lint fmt format format-check clean run tidy help \
 	test-e2e test-e2e-unauth test-e2e-auth test-e2e-headed test-e2e-ui test-e2e-install \
-	test-tasks test-e2e-relay proto proto-tools
+	test-tasks test-e2e-relay proto proto-tools reset-passphrase
 
 ## build: compile the dicode binary
 build:
@@ -16,6 +16,12 @@ build:
 ## run: build and run the daemon (Ctrl-C to stop)
 run: build
 	./$(BINARY) daemon
+
+## reset-passphrase: clear the WebUI passphrase from the daemon's kv store
+##                   (next daemon restart re-enters onboarding). Daemon
+##                   must be running. Does NOT touch API keys.
+reset-passphrase: build
+	./$(BINARY) auth reset-passphrase
 
 ## test: run all tests
 test:

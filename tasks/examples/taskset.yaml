@@ -51,6 +51,12 @@ spec:
       ref:
         path: ./github-push-webhook/task.yaml
 
+    # Issue #119 end-to-end demo: resolves PG_URL / REDIS_URL via the
+    # buildin/secret-providers/doppler provider task. Manual trigger.
+    doppler-secret-demo:
+      ref:
+        path: ./doppler-secret-demo/task.yaml
+
     # ─── AI agent, provider-specific presets ─────────────────────────────────
     # These reuse the buildin/ai-agent task.ts, overriding only the bits that
     # differ per provider: param defaults, network allowlist, env allowlist.

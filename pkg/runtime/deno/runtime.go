@@ -7,7 +7,6 @@ import (
 	"bufio"
 	"context"
 	_ "embed"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -23,6 +22,7 @@ import (
 	"github.com/dicode/dicode/pkg/registry"
 	"github.com/dicode/dicode/pkg/relay"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
+	"github.com/dicode/dicode/pkg/runtime/envresolve"
 	"github.com/dicode/dicode/pkg/secrets"
 	"github.com/dicode/dicode/pkg/task"
 	"go.uber.org/zap"
@@ -56,6 +56,12 @@ type RunOptions struct {
 	Params      map[string]string
 	Input       interface{}
 	ParentRunID string
+
+	// PreResolvedEnv, when set, is the result of an env-resolver pass run
+	// by the trigger engine before dispatch (issue #235). Run uses these
+	// values directly instead of constructing its own resolver. Nil falls
+	// back to the inline resolver path.
+	PreResolvedEnv *envresolve.Resolved
 }
 
 // RunResult is returned by Run.
@@ -84,6 +90,15 @@ type Runtime struct {
 	brokerPubkeyFn   func() string
 	supportsOAuthFn  func() bool
 	rotationActiveFn func() bool
+	// secretOutputCh is opt-in: when set, every Run wires it into the
+	// per-run IPC server so a provider task's dicode.output(..., {secret:
+	// true}) call is routed to the resolver awaiting it. Nil leaves the
+	// path inert (current behavior).
+	secretOutputCh chan map[string]string
+	// providerRunner is wired by the trigger engine at daemon startup so
+	// the env resolver can spawn provider tasks for from: task:<id>
+	// entries. Nil disables provider lookups; legacy paths still work.
+	providerRunner envresolve.ProviderRunner
 }
 
 // New creates a Deno Runtime. It ensures the Deno binary is present in the
@@ -109,6 +124,20 @@ func (rt *Runtime) SetGateway(g *ipc.Gateway) { rt.gateway = g }
 // SetSecretsManager wires the secrets manager so tasks with permissions.dicode.secrets_write
 // can call dicode.secrets_set() and dicode.secrets_delete().
 func (rt *Runtime) SetSecretsManager(m secrets.Manager) { rt.secretsManager = m }
+
+// SetSecretOutputChannel wires the channel that receives provider tasks'
+// secret maps. Called by the trigger engine before invoking Run when the
+// task is being launched in "provider" mode.
+func (rt *Runtime) SetSecretOutputChannel(ch chan map[string]string) {
+	rt.secretOutputCh = ch
+}
+
+// SetProviderRunner wires the env-resolver's provider invocation. The
+// trigger engine implements ProviderRunner and registers itself here at
+// daemon startup. Nil disables provider task: lookups.
+func (rt *Runtime) SetProviderRunner(p envresolve.ProviderRunner) {
+	rt.providerRunner = p
+}
 
 // SetOAuthBroker wires the daemon's relay identity, broker base URL, and
 // the daemon-wide PendingSessions store so the auth-start and auth-relay
@@ -174,44 +203,26 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		}
 	}()
 
-	// Resolve only env vars explicitly declared in permissions.env.
-	// - entry.Value  → literal (taskset override); inject directly
-	// - entry.Secret → look up in secrets store; fail if not found
-	// - entry.From   → read from host OS env (os.Getenv); inject as entry.Name
-	// - bare name    → allowlisted via --allow-env; script reads from host env at runtime
-	resolved := make(map[string]string, len(spec.Permissions.Env))
-	// Track values sourced from secrets only — these are the strings the
-	// log redactor will strip from task stdout/stderr before they reach
-	// the run log. Plain Value= entries and From= host-env values are
-	// excluded: they're not secrets by the spec's own definition, and
-	// over-redaction (wiping e.g. a common host env value from every
-	// log line) would destroy log readability for no security benefit.
-	resolvedSecrets := make(map[string]string)
-	for _, entry := range spec.Permissions.Env {
-		switch {
-		case entry.Value != "":
-			resolved[entry.Name] = entry.Value
-		case entry.Secret != "":
-			val, err := rt.secrets.Resolve(ctx, entry.Secret)
-			if err != nil {
-				var notFound *secrets.NotFoundError
-				if entry.Optional && errors.As(err, &notFound) {
-					// optional secret not set — inject empty string so Deno.env.get() returns null
-					resolved[entry.Name] = ""
-					break
-				}
-				status = registry.StatusFailure
-				result.Error = fmt.Errorf("resolve secret %q for env %q: %w", entry.Secret, entry.Name, err)
-				return result, nil
-			}
-			resolved[entry.Name] = val
-			resolvedSecrets[entry.Name] = val
-		case entry.From != "":
-			resolved[entry.Name] = os.Getenv(entry.From)
-			// bare name: --allow-env only, no injection
+	// Resolve declared env permissions. When the trigger engine ran
+	// preflight (issue #235), it forwards the *Resolved here so we don't
+	// re-spawn provider tasks. When opts.PreResolvedEnv is nil (legacy
+	// callers, tests that bypass the engine), fall back to inline
+	// resolution. Provider tasks (from: task:<id>) are spawned and batched
+	// at most once per provider per launch; legacy paths (secret:,
+	// env:NAME, bare) are preserved.
+	var resolvedRes *envresolve.Resolved
+	if opts.PreResolvedEnv != nil {
+		resolvedRes = opts.PreResolvedEnv
+	} else {
+		resolvedRes, err = rt.envresolver().Resolve(ctx, spec)
+		if err != nil {
+			status = registry.StatusFailure
+			result.Error = err
+			return result, nil
 		}
 	}
-	redactor := secrets.NewRedactor(resolvedSecrets)
+	resolved := resolvedRes.Env
+	redactor := secrets.NewRedactor(resolvedRes.Secrets)
 
 	taskPath := spec.ScriptPath()
 	if taskPath == "" {
@@ -236,6 +247,9 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	srv.SetSecrets(rt.secretsManager)
 	srv.SetSecretsChain(rt.secrets)
 	srv.SetRedactor(redactor)
+	if rt.secretOutputCh != nil {
+		srv.SetSecretOutput(rt.secretOutputCh)
+	}
 	if rt.oauthIdentity != nil {
 		srv.SetOAuthBroker(rt.oauthIdentity, rt.oauthURL, rt.oauthPending, rt.brokerPubkeyFn, rt.supportsOAuthFn, rt.rotationActiveFn)
 	}
@@ -513,13 +527,22 @@ func buildEnv(resolved map[string]string, socketPath, token, brokerURL string) [
 	return env
 }
 
+// envresolver lazily constructs the env resolver. Wired with the daemon's
+// secret chain + a provider runner that calls back into the trigger
+// engine. Nil engine (test harness with no providers) yields a resolver
+// that errors on any from: task:<id> entry.
+func (rt *Runtime) envresolver() *envresolve.Resolver {
+	return envresolve.New(rt.registry, rt.secrets, rt.providerRunner)
+}
+
 // Execute implements runtime.Executor.
 func (rt *Runtime) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime.RunOptions) (*pkgruntime.RunResult, error) {
 	result, err := rt.Run(ctx, spec, RunOptions{
-		RunID:       opts.RunID,
-		ParentRunID: opts.ParentRunID,
-		Params:      opts.Params,
-		Input:       opts.Input,
+		RunID:          opts.RunID,
+		ParentRunID:    opts.ParentRunID,
+		Params:         opts.Params,
+		Input:          opts.Input,
+		PreResolvedEnv: opts.PreResolvedEnv,
 	})
 	if err != nil {
 		return nil, err

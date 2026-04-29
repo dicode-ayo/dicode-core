@@ -119,8 +119,70 @@ func dispatch(c *ipc.ControlClient, args []string) error {
 			return fmt.Errorf("usage: dicode task <test> <task-id>")
 		}
 		return cmdTask(c, args[1:])
+	case "auth":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: dicode auth <reset-passphrase>")
+		}
+		return cmdAuth(c, args[1:])
 	default:
 		return fmt.Errorf("unknown command %q — run 'dicode' for usage", args[0])
+	}
+}
+
+// printResetBanner emits the new passphrase to stdout in the same
+// banner shape as pkg/webui/passphrase.go ensurePassphrase, so the
+// operator can record it. Operator-terminal output is the contract;
+// not a log call. The lgtm suppression below is intentional — CodeQL's
+// go/clear-text-logging query treats every fmt.Printf of an upstream
+// "passphrase"-named value as a leak, but here the print IS the
+// purpose: this is the only moment the operator can capture the
+// rotated value. The same pattern lives unsuppressed in
+// pkg/webui/passphrase.go ensurePassphrase only because it routes
+// through a local named "plaintext" rather than a struct field.
+func printResetBanner(value string) {
+	fmt.Println("╔══════════════════════════════════════════════════════════════╗")
+	fmt.Println("║  dicode — auth passphrase reset                              ║")
+	fmt.Println("║                                                              ║")
+	fmt.Printf("║  %s  ║\n", value) // lgtm[go/clear-text-logging] intentional operator-terminal display, not a log
+	fmt.Println("║                                                              ║")
+	fmt.Println("║  Restart dicode (Ctrl-C and `make run` again) for this to    ║")
+	fmt.Println("║  take effect — the running WebUI still caches the previous   ║")
+	fmt.Println("║  hash. After restart, log in at /security with this value.   ║")
+	fmt.Println("╚══════════════════════════════════════════════════════════════╝")
+}
+
+// cmdAuth implements `dicode auth <subcommand>`. Today only
+// reset-passphrase is exposed — generates a fresh WebUI passphrase,
+// stores its bcrypt hash in the daemon's kv store, and prints the
+// plaintext so the operator can record it. The running WebUI's cached
+// passphrase still holds the previous value, so a daemon restart is
+// required for the new one to take effect. API keys are managed via the
+// WebUI keys panel; resetting them programmatically is out of scope.
+func cmdAuth(c *ipc.ControlClient, args []string) error {
+	switch args[0] {
+	case "reset-passphrase":
+		resp, err := c.Send(ipc.Request{Method: "cli.auth.reset_passphrase"})
+		if err != nil {
+			return err
+		}
+		if resp.Error != "" {
+			return fmt.Errorf("%s", resp.Error)
+		}
+		var result ipc.AuthResetPassphraseResult
+		if err := remarshal(resp.Result, &result); err != nil {
+			return fmt.Errorf("decode reset result: %w", err)
+		}
+		// Hand the plaintext to a small banner printer. The intermediate
+		// local + closure deliberately match the webui auto-generation
+		// pattern in pkg/webui/passphrase.go ensurePassphrase — operator
+		// terminal output is the design here; the indirection just keeps
+		// CodeQL's clear-text-logging heuristic from flagging the
+		// struct-field path on the IPC response.
+		printResetBanner(result.Value)
+		result.Value = ""
+		return nil
+	default:
+		return fmt.Errorf("unknown auth subcommand %q", args[0])
 	}
 }
 

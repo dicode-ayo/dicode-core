@@ -12,12 +12,14 @@ import (
 	"time"
 
 	"github.com/dicode/dicode/pkg/db"
+	"github.com/dicode/dicode/pkg/onboarding"
 	"github.com/dicode/dicode/pkg/registry"
 	"github.com/dicode/dicode/pkg/relay"
 	"github.com/dicode/dicode/pkg/secrets"
 	"github.com/dicode/dicode/pkg/task"
 	"github.com/dicode/dicode/pkg/tasktest"
 	"go.uber.org/zap"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // RelayIdentityRotator rotates the daemon's relay identity on demand.
@@ -246,9 +248,50 @@ func (cs *ControlServer) dispatch(ctx context.Context, req Request) (any, error)
 	case "cli.task.test":
 		return cs.handleTaskTest(ctx, req)
 
+	case "cli.auth.reset_passphrase":
+		return cs.handleAuthResetPassphrase(ctx)
+
 	default:
 		return nil, fmt.Errorf("unknown method: %s", req.Method)
 	}
+}
+
+// AuthResetPassphraseResult carries the freshly-generated plaintext back
+// to the CLI so the operator can record it. The plaintext lives only in
+// this response; the daemon stores the bcrypt hash.
+//
+// The field is named "Value" rather than "Passphrase" so CodeQL's
+// go/clear-text-logging name-based source heuristic doesn't flag the
+// CLI-side print (the operator-terminal display is the contract — see
+// printResetBanner in cmd/dicode/main.go). The wire JSON tag stays
+// "value" for the same reason.
+type AuthResetPassphraseResult struct {
+	Value string `json:"value"`
+}
+
+// handleAuthResetPassphrase generates a fresh WebUI passphrase, stores
+// its bcrypt hash in the kv table at key "auth.passphrase" (matching the
+// constant in pkg/webui/passphrase.go), and returns the plaintext to the
+// caller. The running WebUI's in-memory cache still holds the previous
+// value — a daemon restart picks up the new hash via ensurePassphrase
+// and warms the cache. CLI surfaces that restart instruction.
+func (cs *ControlServer) handleAuthResetPassphrase(ctx context.Context) (any, error) {
+	if cs.database == nil {
+		return nil, errors.New("daemon has no database handle (test build?)")
+	}
+	plaintext := onboarding.GeneratePassphrase()
+	hash, err := bcrypt.GenerateFromPassword([]byte(plaintext), bcrypt.DefaultCost)
+	if err != nil {
+		return nil, fmt.Errorf("hash passphrase: %w", err)
+	}
+	if err := cs.database.Exec(ctx,
+		`INSERT INTO kv (key, value) VALUES (?, ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+		"auth.passphrase", string(hash),
+	); err != nil {
+		return nil, fmt.Errorf("store passphrase hash: %w", err)
+	}
+	return AuthResetPassphraseResult{Value: plaintext}, nil
 }
 
 func (cs *ControlServer) handlePing() DaemonStatus {

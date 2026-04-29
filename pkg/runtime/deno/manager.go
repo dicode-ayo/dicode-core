@@ -40,13 +40,17 @@ func (rt *Runtime) Install(_ context.Context, version string) error {
 }
 
 // NewExecutor returns a new Deno Executor that uses the binary at binaryPath.
-// The new executor shares the registry, secrets, db, and logger with this Runtime.
+// The new executor shares the registry, secrets, db, and logger with this
+// Runtime — and propagates the issue #119 provider channels so the
+// trigger-engine dispatch path actually sees the wired runner / sink.
 func (rt *Runtime) NewExecutor(binaryPath string) pkgruntime.Executor {
 	return &Runtime{
-		registry: rt.registry,
-		secrets:  rt.secrets,
-		db:       rt.db,
-		log:      rt.log,
-		denoPath: binaryPath,
+		registry:       rt.registry,
+		secrets:        rt.secrets,
+		db:             rt.db,
+		log:            rt.log,
+		denoPath:       binaryPath,
+		secretOutputCh: rt.secretOutputCh,
+		providerRunner: rt.providerRunner,
 	}
 }

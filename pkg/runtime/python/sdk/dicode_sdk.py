@@ -256,7 +256,35 @@ input = _call({"method": "input"})
 
 # ── output ────────────────────────────────────────────────────────────────────
 
+
 class _Output:
+    """
+    Callable + method object. Calling output({...}, secret=True) flags the
+    map for daemon-side redaction + provider-response routing (issue #119).
+    Method calls (output.html, output.text, ...) preserve the legacy
+    structured-output API.
+    """
+
+    def __call__(self, value, secret=False):
+        if not secret:
+            raise TypeError(
+                "output(value) requires secret=True. "
+                "Use output.html / output.text / output.image / output.file "
+                "for non-secret structured output."
+            )
+        if not isinstance(value, dict):
+            raise TypeError("output(map, secret=True): value must be a dict")
+        for k, v in value.items():
+            if not isinstance(k, str):
+                raise TypeError(
+                    f"output(map, secret=True): key {k!r} is not a string"
+                )
+            if not isinstance(v, str):
+                raise TypeError(
+                    f"output(map, secret=True): value for {k!r} is not a string"
+                )
+        _fire({"method": "output", "secret": True, "secretMap": value})
+
     def html(self, content, data=None):
         _fire({"method": "output", "contentType": "text/html",
                "content": content, "data": data})

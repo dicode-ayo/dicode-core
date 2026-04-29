@@ -53,11 +53,22 @@ export interface OutputOptions {
   data?: Record<string, unknown> | null;
 }
 
+// Secret output flag — when true, the daemon treats `value` as a flat
+// Record<string, string> and routes it to the resolver awaiting this
+// task. Values are also fed to the run-log redactor and the run log
+// records keys with [redacted] placeholders only. Issue #119.
+export interface SecretOutputOptions {
+  secret: true;
+}
+
 export interface Output {
   html:  (content: string, opts?: OutputOptions) => Promise<void>;
   text:  (content: string)                        => Promise<void>;
   image: (mime: string | null, content: string)   => Promise<void>;
   file:  (name: string, content: string, mime?: string) => Promise<void>;
+  // Provider-task entry point (issue #119). Throws synchronously if
+  // `value` is not a flat Record<string,string>.
+  (value: Record<string, string>, opts: SecretOutputOptions): Promise<void>;
 }
 
 export interface MCP {
@@ -238,12 +249,28 @@ const input = await __call__({ method: "input" });
 
 // ── output ────────────────────────────────────────────────────────────────────
 
-const output: Output = {
-  html:  (content, opts) => __fire__({ method: "output", contentType: "text/html",                    content, data: opts?.data ?? null }),
-  text:  (content)       => __fire__({ method: "output", contentType: "text/plain",                   content }),
-  image: (mime, content) => __fire__({ method: "output", contentType: mime ?? "image/png",            content }),
-  file:  (name, content, mime) => __fire__({ method: "output", contentType: mime ?? "application/octet-stream", content, data: { filename: name } }),
+function __outputCallable__(value: Record<string, string>, _opts: SecretOutputOptions): Promise<void> {
+  // Validate flat string map up front so the failure surface is the
+  // SDK call site, not "the daemon dropped it silently".
+  for (const [k, v] of Object.entries(value)) {
+    if (typeof v !== "string") {
+      return Promise.reject(new Error(
+        `dicode.output(map, { secret: true }): value for key ${JSON.stringify(k)} is not a string`));
+    }
+  }
+  return __fire__({ method: "output", secret: true, secretMap: value });
+}
+
+const __outputObj__ = {
+  html:  (content: string, opts?: OutputOptions) => __fire__({ method: "output", contentType: "text/html",                     content, data: opts?.data ?? null }),
+  text:  (content: string)                       => __fire__({ method: "output", contentType: "text/plain",                    content }),
+  image: (mime: string | null, content: string)  => __fire__({ method: "output", contentType: mime ?? "image/png",             content }),
+  file:  (name: string, content: string, mime?: string) => __fire__({ method: "output", contentType: mime ?? "application/octet-stream", content, data: { filename: name } }),
 };
+
+// Synthesize a callable+method object. JavaScript functions ARE objects,
+// so attach the four methods as properties on the function.
+const output: Output = Object.assign(__outputCallable__, __outputObj__) as unknown as Output;
 
 // ── return ────────────────────────────────────────────────────────────────────
 

@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dicode/dicode/pkg/db"
@@ -66,12 +68,20 @@ type Server struct {
 	log              *zap.Logger
 
 	// redactor strips secret values from inbound log messages before they
-	// hit the run log. Nil is safe (no redaction). Wired via SetRedactor
-	// after construction; runtimes that resolve env-sourced secrets should
-	// build a redactor from the resolved set and install it here so tasks
-	// calling `dicode.log` (the IPC log method, used by the Python SDK)
-	// get the same leak-protection as tasks printing to stdout/stderr.
-	redactor *secrets.Redactor
+	// hit the run log. Nil load is safe (no redaction; RedactString is
+	// nil-receiver safe). Wired via SetRedactor after construction;
+	// runtimes that resolve env-sourced secrets should build a redactor
+	// from the resolved set and install it here so tasks calling
+	// `dicode.log` (the IPC log method, used by the Python SDK) get the
+	// same leak-protection as tasks printing to stdout/stderr.
+	//
+	// Stored as atomic.Pointer because Bundle D's secret-output handler
+	// can REPLACE the redactor mid-run (when a provider task calls
+	// dicode.output(map, { secret: true })) while the log handler is
+	// concurrently READING it from another connection's goroutine. A
+	// plain pointer with mu-protected writes alone would still permit
+	// torn reads under the Go memory model.
+	redactor atomic.Pointer[secrets.Redactor]
 
 	gateway *Gateway // optional; enables http.register for daemon tasks
 
@@ -82,6 +92,14 @@ type Server struct {
 	mu     sync.Mutex
 	output *OutputResult
 	retCh  chan any
+
+	// secretOut, when non-nil, receives the flat map produced by a
+	// provider task calling dicode.output(map, { secret: true }). The
+	// resolver waiting on the consumer's launch sets this via
+	// SetSecretOutput; once received, the same values are also fed into
+	// s.redactor for run-log scrubbing and the run log records key
+	// names with [redacted] placeholders only.
+	secretOut chan map[string]string
 
 	// log buffer – accumulate log entries and flush in batches to reduce
 	// per-line SQLite write-lock pressure (see flushLogs / flushLogsNow).
@@ -146,7 +164,18 @@ func (s *Server) SetSecretsChain(c secrets.Chain) { s.secretsChain = c }
 // IPC "log" method are passed through r.RedactString before being
 // persisted to the run log, matching the protection stdout/stderr piping
 // already gets from runtime wrappers. Nil is safe (no redaction).
-func (s *Server) SetRedactor(r *secrets.Redactor) { s.redactor = r }
+func (s *Server) SetRedactor(r *secrets.Redactor) { s.redactor.Store(r) }
+
+// SetSecretOutput wires the channel that receives a provider task's
+// secret map. Call BEFORE Start. Buffer >=1 is required so the IPC
+// goroutine does not block on the channel send.
+func (s *Server) SetSecretOutput(ch chan map[string]string) {
+	// SAFETY: the field is read inside the goroutine spawned by Start;
+	// calling SetSecretOutput before Start establishes the happens-before
+	// edge via go's goroutine-launch semantics. Calling after Start is
+	// unsupported and will race.
+	s.secretOut = ch
+}
 
 // SetOAuthBroker wires the daemon's relay identity (used to sign /auth URLs
 // and decrypt token deliveries) plus the broker base URL and the
@@ -363,9 +392,11 @@ func (s *Server) handleConn(conn net.Conn) {
 				level = "info"
 			}
 			// Redact env-injected secret values from the message before
-			// buffering. Nil redactor is pass-through — safe default for
-			// callers that haven't wired one (tests, legacy runtimes).
-			s.bufferLog(level, s.redactor.RedactString(req.Message))
+			// buffering. Nil redactor is pass-through — RedactString is
+			// safe on a nil receiver (see pkg/secrets/redactor.go), so a
+			// nil load from atomic.Pointer is fine and we don't need to
+			// guard the call.
+			s.bufferLog(level, s.redactor.Load().RedactString(req.Message))
 
 		case "kv.set":
 			if !hasCap(caps, CapKVWrite) {
@@ -398,6 +429,55 @@ func (s *Server) handleConn(conn net.Conn) {
 
 		case "output":
 			if !hasCap(caps, CapOutputWrite) {
+				continue
+			}
+			if req.Secret {
+				if !hasCap(caps, CapOutputSecret) {
+					continue
+				}
+				// Flat map: decode SecretMap as map[string]string. Reject
+				// nested objects per issue #119.
+				var sm map[string]string
+				if err := json.Unmarshal(req.SecretMap, &sm); err != nil {
+					s.log.Warn("ipc: secret output: not a flat string map",
+						zap.String("run", s.runID),
+						zap.Error(err),
+					)
+					continue
+				}
+				// Replace the run's redactor with a new one carrying
+				// these values. Prior redactor values (from secrets
+				// resolved at consumer-launch time) are NOT preserved
+				// here — the existing redactor doesn't expose its
+				// inner values. This is acceptable because a provider
+				// task is itself a CHILD run; its redactor only needs
+				// to scrub the values the provider just returned.
+				//
+				// atomic.Store synchronises with the atomic.Load on the
+				// "log" hot path; no mutex needed here.
+				s.redactor.Store(secrets.NewRedactor(sm))
+
+				// Persist key names + [redacted] placeholders to the run
+				// log so operators can audit which secrets the provider
+				// returned without leaking values. Sort the keys so the
+				// log line is deterministic across runs (map iteration
+				// order is randomised).
+				keys := make([]string, 0, len(sm))
+				for k := range sm {
+					keys = append(keys, k)
+				}
+				sort.Strings(keys)
+				_ = s.registry.AppendLog(context.Background(), s.runID, "info",
+					fmt.Sprintf("[dicode] secret output: %v = [redacted]", keys))
+
+				if s.secretOut != nil {
+					select {
+					case s.secretOut <- sm:
+					default:
+						s.log.Warn("ipc: secretOut channel full or unread",
+							zap.String("run", s.runID))
+					}
+				}
 				continue
 			}
 			var data any
