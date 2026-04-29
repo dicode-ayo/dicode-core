@@ -2,6 +2,7 @@ package task
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -69,5 +70,58 @@ func TestOnFailureChainSpec_IsZero(t *testing.T) {
 	nonZero := OnFailureChainSpec{Task: "auto-fix"}
 	if nonZero.IsZero() {
 		t.Error("non-empty Task should not be zero")
+	}
+}
+
+func TestOnFailureChainSpec_Validate_ReservedKeyCollision(t *testing.T) {
+	cases := []string{"taskID", "runID", "status", "output", "_chain_depth"}
+	for _, key := range cases {
+		t.Run(key, func(t *testing.T) {
+			s := OnFailureChainSpec{
+				Task:   "auto-fix",
+				Params: map[string]any{key: "x"},
+			}
+			err := s.Validate()
+			if err == nil {
+				t.Fatal("expected error for reserved key collision")
+			}
+			if !strings.Contains(err.Error(), "reserved") {
+				t.Errorf("error %q should mention 'reserved'", err)
+			}
+		})
+	}
+}
+
+func TestOnFailureChainSpec_ValidateAtDefaults_RejectsAutonomous(t *testing.T) {
+	s := OnFailureChainSpec{
+		Task:   "auto-fix",
+		Params: map[string]any{"mode": "autonomous"},
+	}
+	err := s.ValidateAtDefaults()
+	if err == nil {
+		t.Fatal("expected error for autonomous-at-defaults")
+	}
+	if !strings.Contains(err.Error(), "autonomous") {
+		t.Errorf("error %q should mention 'autonomous'", err)
+	}
+}
+
+func TestOnFailureChainSpec_Validate_AcceptsAutonomousAtTaskLevel(t *testing.T) {
+	s := OnFailureChainSpec{
+		Task:   "auto-fix",
+		Params: map[string]any{"mode": "autonomous"},
+	}
+	if err := s.Validate(); err != nil {
+		t.Errorf("per-task autonomous should be accepted by Validate(); got %v", err)
+	}
+}
+
+func TestOnFailureChainSpec_ValidateAtDefaults_AcceptsReview(t *testing.T) {
+	s := OnFailureChainSpec{
+		Task:   "auto-fix",
+		Params: map[string]any{"mode": "review"},
+	}
+	if err := s.ValidateAtDefaults(); err != nil {
+		t.Errorf("review at defaults should be accepted; got %v", err)
 	}
 }

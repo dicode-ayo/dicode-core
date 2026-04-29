@@ -398,5 +398,8 @@ func (cfg *Config) validate() error {
 	if cfg.Server.BcryptCost != 0 && (cfg.Server.BcryptCost < 4 || cfg.Server.BcryptCost > 14) {
 		return fmt.Errorf("server.bcrypt_cost: must be between 4 and 14, got %d", cfg.Server.BcryptCost)
 	}
+	if err := cfg.Defaults.OnFailureChain.ValidateAtDefaults(); err != nil {
+		return fmt.Errorf("defaults.on_failure_chain: %w", err)
+	}
 	return nil
 }

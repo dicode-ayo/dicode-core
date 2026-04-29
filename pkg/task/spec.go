@@ -433,6 +433,11 @@ func (s *Spec) validate() error {
 	if triggers > 1 {
 		return fmt.Errorf("only one trigger type is allowed per task")
 	}
+	if s.OnFailureChain != nil {
+		if err := s.OnFailureChain.Validate(); err != nil {
+			return fmt.Errorf("on_failure_chain: %w", err)
+		}
+	}
 	switch s.Runtime {
 	case RuntimeDeno, "js", "":
 		// ok — "js" is a legacy alias for "deno"
