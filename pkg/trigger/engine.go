@@ -668,13 +668,26 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 					zap.String("to", targetID),
 					zap.String("run", runID),
 				)
+				// Build input. Reserved keys (taskID, runID, status, output,
+				// _chain_depth) are populated by the engine and are NOT
+				// user-overridable. Config-load validation (#236 Task 11)
+				// rejects any chainSpec.Params containing these keys, so we
+				// can safely overlay user params first and then stamp the
+				// reserved keys — collisions cannot reach here in a
+				// well-validated config. _chain_depth is always 1 in v1;
+				// deeper chain-depth tracking belongs to engine guardrails
+				// (#238).
+				input := map[string]any{}
+				for k, v := range chainSpec.Params {
+					input[k] = v
+				}
+				input["taskID"] = completedTaskID
+				input["runID"] = runID
+				input["status"] = runStatus
+				input["output"] = output
+				input["_chain_depth"] = 1
 				go e.fireAsync(ctx, targetSpec, pkgruntime.RunOptions{ //nolint:errcheck
-					Input: map[string]interface{}{
-						"taskID": completedTaskID,
-						"runID":  runID,
-						"status": runStatus,
-						"output": output,
-					},
+					Input: input,
 				}, "chain")
 			}
 		}
