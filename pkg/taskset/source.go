@@ -118,15 +118,33 @@ func (s *Source) Start(ctx context.Context) (<-chan source.Event, error) {
 	return ch, nil
 }
 
+// DevModeOpts configures dev-mode activation. LocalPath and Branch are mutually
+// exclusive. Branch (and Base/RunID) are honoured by the clone-mode work in
+// Tasks 3-5; this task only introduces the struct.
+type DevModeOpts struct {
+	LocalPath string // existing: point at a user's local taskset.yaml checkout
+	Branch    string // future (Task 3): create a per-fix clone on this branch
+	Base      string // future (Task 3): branch to fork from when Branch is unknown remotely
+	RunID     string // future (Task 3): clone-dir name component
+}
+
 // SetDevMode enables or disables dev mode for this source.
-// localPath, when non-empty, overrides the root entry point to that local yaml path.
-// Triggers an immediate re-sync so changes are reflected in the registry.
-func (s *Source) SetDevMode(ctx context.Context, enabled bool, localPath string) error {
+//
+// Modes:
+//   - enabled=true, opts.LocalPath != "" : point dev-ref resolution at the
+//     given local path (existing human-dev workflow).
+//   - enabled=true, opts.Branch    != "" : clone-mode (introduced in Task 3
+//     of the dev-mode-branch-lifecycle plan; not yet implemented).
+//   - enabled=false : revert.
+func (s *Source) SetDevMode(ctx context.Context, enabled bool, opts DevModeOpts) error {
+	if opts.LocalPath != "" && opts.Branch != "" {
+		return fmt.Errorf("DevModeOpts: LocalPath and Branch are mutually exclusive")
+	}
 	s.resolver.SetDevMode(enabled)
 	s.mu.Lock()
-	s.devRootPath = localPath
-	if enabled && localPath != "" {
-		s.watchRoot = filepath.Dir(localPath)
+	s.devRootPath = opts.LocalPath
+	if enabled && opts.LocalPath != "" {
+		s.watchRoot = filepath.Dir(opts.LocalPath)
 	}
 	ch := s.ch
 	s.mu.Unlock()
