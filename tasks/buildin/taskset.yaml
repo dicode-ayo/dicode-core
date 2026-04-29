@@ -24,6 +24,10 @@ spec:
       ref:
         path: ./temp-cleanup/task.yaml
 
+    dev-clones-cleanup:
+      ref:
+        path: ./dev-clones-cleanup/task.yaml
+
     ai-agent:
       ref:
         path: ./ai-agent/task.yaml

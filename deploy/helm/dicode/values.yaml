@@ -1,0 +1,221 @@
+# Default values for the dicode chart.
+# Every key has a default that produces a working install on a cluster
+# with a default StorageClass. See README.md for a full parameter
+# reference.
+
+# -- Container image. Image runs as UID 65532 (distroless `nonroot`),
+# exposes port 8080, sets `DICODE_DATA_DIR=/data`, and runs
+# `daemon --config /data/dicode.yaml` by default.
+image:
+  # -- Image repository. Both `ghcr.io/dicode-ayo/dicode-core` and
+  # `dicodeayo/dicode-core` (Docker Hub) are published on every
+  # release-please tag.
+  repository: ghcr.io/dicode-ayo/dicode-core
+  # -- Image tag. When empty, the chart's `appVersion` is used so
+  # `helm upgrade` after a release-please tag pulls the matching image
+  # automatically. Override with a specific tag (e.g. `v0.1.0`) to pin.
+  tag: ""
+  # -- Image pull policy.
+  pullPolicy: IfNotPresent
+
+# -- Pull secrets for private registries.
+imagePullSecrets: []
+# - name: my-registry-creds
+
+# -- Replica count. The daemon does NOT yet support leader election,
+# so `replicaCount > 1` may run cron triggers more than once and is
+# unsupported. Tracking issue: https://github.com/dicode-ayo/dicode-core/issues/215
+replicaCount: 1
+
+# -- Override the chart name in resource names.
+nameOverride: ""
+
+# -- Override the fully-qualified resource name (`<release>-<chart>`).
+fullnameOverride: ""
+
+# -- ServiceAccount.
+serviceAccount:
+  # -- Create a dedicated ServiceAccount for the daemon.
+  create: true
+  # -- Annotations to add to the ServiceAccount (e.g. for IRSA / Workload Identity).
+  annotations: {}
+  # -- ServiceAccount name. When empty, `dicode.fullname` is used.
+  name: ""
+
+# -- Pod-level security context. Defaults align with distroless
+# `nonroot` (UID 65532) shipped by the Dockerfile.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- Container-level security context. `readOnlyRootFilesystem: true`
+# is paired with an EmptyDir at `/tmp` (always mounted by the
+# Deployment template).
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  capabilities:
+    drop:
+      - ALL
+
+# -- Service.
+service:
+  # -- Service type: ClusterIP, NodePort, LoadBalancer.
+  type: ClusterIP
+  # -- Port the service listens on (and the container's `http` port).
+  port: 8080
+  # -- Service annotations (e.g. for cloud LBs).
+  annotations: {}
+
+# -- Ingress.
+ingress:
+  # -- Render an Ingress resource.
+  enabled: false
+  # -- IngressClass name (e.g. `nginx`, `traefik`).
+  className: ""
+  # -- Ingress annotations.
+  annotations: {}
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+  # -- Hosts. Each host has a list of paths.
+  hosts:
+    - host: dicode.local
+      paths:
+        - path: /
+          pathType: Prefix
+  # -- TLS configuration.
+  tls: []
+    # - secretName: dicode-tls
+    #   hosts:
+    #     - dicode.example.com
+
+# -- Persistence (PVC backing /data: SQLite, master.key, dicode.yaml).
+# When disabled, an emptyDir is used and ALL state is lost on pod
+# restart — only useful for ephemeral demos.
+persistence:
+  # -- Provision a PVC at /data.
+  enabled: true
+  # -- StorageClass. "" = default StorageClass; "-" = no StorageClass
+  # (use this on PVs that you've pre-bound). Any other value is used
+  # as-is.
+  storageClass: ""
+  # -- Access modes.
+  accessModes:
+    - ReadWriteOnce
+  # -- Volume size.
+  size: 5Gi
+  # -- Annotations on the PVC. The chart always adds
+  # `helm.sh/resource-policy: keep` so `helm uninstall` does not
+  # delete your task data.
+  annotations: {}
+  # -- When non-empty, mounts an existing PVC instead of creating one.
+  existingClaim: ""
+
+# -- Resource requests/limits. The defaults are conservative starting
+# points; bump CPU if you run many concurrent tasks.
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+# -- Liveness probe. Hits the `/healthz` route which bypasses auth.
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  initialDelaySeconds: 15
+  periodSeconds: 20
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+# -- Readiness probe.
+readinessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+# -- Optional dicode.yaml. When non-empty, the chart writes a
+# ConfigMap and mounts it at /data/dicode.yaml. When empty, the
+# daemon's first-run onboarding writes its own.
+#
+# IMPORTANT: do not also keep an existing dicode.yaml inside the PVC
+# while setting this value — the ConfigMap mount will shadow it on
+# every restart, which is confusing. Either let onboarding write the
+# file (leave this empty) or manage it via the chart (set this).
+config: ""
+# config: |
+#   data_dir: /data
+#   server:
+#     port: 8080
+#     mcp: true
+#   sources:
+#     - type: git
+#       id: main
+#       url: https://github.com/me/my-tasks
+#       branch: main
+#       poll_interval: 60s
+
+# -- Secret containing the daemon passphrase, AI provider keys, OAuth
+# creds, etc. Mounted as envFrom so each key becomes an environment
+# variable. Either let the chart create the Secret (`secret.create:
+# true` + `secret.values`) or point at one you manage externally
+# (`secret.existingSecret`).
+secret:
+  # -- Render a Secret from `secret.values`.
+  create: false
+  # -- Map of env-var name -> value. Rendered into a Secret with these
+  # keys, base64-encoded. Use existingSecret instead if you don't want
+  # the values to live in your `helm install` invocation history.
+  values: {}
+    # DICODE_PASSPHRASE: change-me-in-production
+    # ANTHROPIC_API_KEY: sk-ant-...
+    # OPENAI_API_KEY: sk-...
+    # GITHUB_TOKEN: ghp_...
+  # -- Use a Secret you manage externally. When non-empty, the chart
+  # skips creating its own Secret.
+  existingSecret: ""
+
+# -- Extra environment variables (literal name/value pairs). Useful
+# for non-secret toggles like DICODE_HEADLESS.
+env: []
+  # - name: DICODE_HEADLESS
+  #   value: "true"
+  # - name: DICODE_LOG_LEVEL
+  #   value: info
+
+# -- Extra envFrom sources merged into the container env. Useful when
+# you split secrets across multiple Kubernetes Secrets.
+envFrom: []
+  # - secretRef:
+  #     name: my-other-secret
+  # - configMapRef:
+  #     name: my-config
+
+# -- Pod scheduling.
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# -- Pod annotations (e.g. for sidecar injectors).
+podAnnotations: {}
+
+# -- Extra labels on every pod.
+podLabels: {}
+
+# -- Termination grace period. The daemon flushes SQLite and stops
+# running tasks gracefully on SIGTERM; 60s is the lower bound below
+# which long-running tasks will be hard-killed.
+terminationGracePeriodSeconds: 60

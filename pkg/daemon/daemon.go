@@ -389,8 +389,10 @@ func buildRuntimes(
 	// per-run secretOutputCh for each provider invocation.
 	eng.SetDenoRuntime(denoRT)
 	denoRT.SetProviderRunner(eng)
-	if cfg.Defaults.OnFailureChain != "" {
-		eng.SetDefaultsOnFailureChain(cfg.Defaults.OnFailureChain)
+	if !cfg.Defaults.OnFailureChain.IsZero() {
+		if err := eng.SetDefaultsOnFailureChain(cfg.Defaults.OnFailureChain); err != nil {
+			return nil, nil, nil, fmt.Errorf("set on_failure_chain defaults: %w", err)
+		}
 	}
 	if p := cfg.Notifications.Provider; p != nil {
 		eng.SetNotifier(notify.NewNotifier(p.Type, p.URL, p.Topic, p.TokenEnv))

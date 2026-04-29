@@ -54,6 +54,7 @@ export default defineConfig({
         '**/cron.spec.ts',
         '**/config.spec.ts',
         '**/mcp.spec.ts',
+        '**/dev-mode-clone.spec.ts',
       ],
       use: {
         ...devices['Desktop Chrome'],

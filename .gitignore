@@ -1,4 +1,8 @@
-dicode
+# The compiled `dicode` binary lives at the repo root. We don't want
+# to commit it, but we DO want to commit `deploy/helm/dicode/` (the
+# Helm chart directory whose name happens to collide).
+/dicode
+!deploy/helm/dicode/
 node_modules/
 .playwright-mcp/
 .worktrees/

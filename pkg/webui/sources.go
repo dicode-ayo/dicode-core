@@ -106,8 +106,7 @@ func (m *SourceManager) List() []SourceInfo {
 }
 
 // SetDevMode enables or disables dev mode for the named taskset source.
-// localPath, if non-empty, overrides the root entry point for the duration of dev mode.
-func (m *SourceManager) SetDevMode(ctx context.Context, name string, enabled bool, localPath string) error {
+func (m *SourceManager) SetDevMode(ctx context.Context, name string, enabled bool, opts taskset.DevModeOpts) error {
 	m.mu.RLock()
 	src, ok := m.tasksets[name]
 	m.mu.RUnlock()
@@ -117,9 +116,10 @@ func (m *SourceManager) SetDevMode(ctx context.Context, name string, enabled boo
 	m.log.Info("dev mode toggled",
 		zap.String("source", name),
 		zap.Bool("enabled", enabled),
-		zap.String("local_path", localPath),
+		zap.String("local_path", opts.LocalPath),
+		zap.String("branch", opts.Branch),
 	)
-	return src.SetDevMode(ctx, enabled, localPath)
+	return src.SetDevMode(ctx, enabled, opts)
 }
 
 // ListBranches returns remote branches for the named git source.
@@ -164,6 +164,9 @@ func (s *Server) apiSetDevMode(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Enabled   bool   `json:"enabled"`
 		LocalPath string `json:"local_path"`
+		Branch    string `json:"branch"`
+		Base      string `json:"base"`
+		RunID     string `json:"run_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonErr(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
@@ -173,7 +176,12 @@ func (s *Server) apiSetDevMode(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "source manager not configured", http.StatusServiceUnavailable)
 		return
 	}
-	if err := s.sourceMgr.SetDevMode(r.Context(), name, body.Enabled, body.LocalPath); err != nil {
+	if err := s.sourceMgr.SetDevMode(r.Context(), name, body.Enabled, taskset.DevModeOpts{
+		LocalPath: body.LocalPath,
+		Branch:    body.Branch,
+		Base:      body.Base,
+		RunID:     body.RunID,
+	}); err != nil {
 		jsonErr(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -181,6 +189,9 @@ func (s *Server) apiSetDevMode(w http.ResponseWriter, r *http.Request) {
 		"source":     name,
 		"dev_mode":   body.Enabled,
 		"local_path": body.LocalPath,
+		"branch":     body.Branch,
+		"base":       body.Base,
+		"run_id":     body.RunID,
 	})
 }
 

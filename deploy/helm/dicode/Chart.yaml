@@ -1,0 +1,26 @@
+apiVersion: v2
+name: dicode
+description: GitOps task orchestrator that runs JS/TS/Python/Docker tasks on cron, webhook, and chained triggers.
+type: application
+# version: chart version. Bumped when the chart's structure changes.
+version: 0.1.0
+# appVersion: tracks the dicode-core release. Bumped on every
+# release-please cut so the chart and image stay in lockstep when
+# image.tag is left empty.
+appVersion: "0.1.0"
+kubeVersion: ">=1.27.0-0"
+keywords:
+  - gitops
+  - orchestrator
+  - cron
+  - webhook
+  - dicode
+  - automation
+home: https://github.com/dicode-ayo/dicode-core
+sources:
+  - https://github.com/dicode-ayo/dicode-core
+maintainers:
+  - name: dicode-ayo
+    url: https://github.com/dicode-ayo
+annotations:
+  category: Automation

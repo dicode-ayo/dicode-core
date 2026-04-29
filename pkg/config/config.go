@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dicode/dicode/pkg/task"
 	"gopkg.in/yaml.v3"
 )
 
@@ -25,9 +26,10 @@ type RuntimeConfig struct {
 
 // DefaultsConfig holds task-level defaults that apply globally unless overridden per-task.
 type DefaultsConfig struct {
-	// OnFailureChain is the task ID to fire whenever any task fails.
+	// OnFailureChain is the chain target to fire whenever any task fails.
+	// Accepts a bare task ID or a structured `{task, params}` form.
 	// Per-task on_failure_chain field can override or disable this.
-	OnFailureChain string `yaml:"on_failure_chain,omitempty"`
+	OnFailureChain task.OnFailureChainSpec `yaml:"on_failure_chain,omitempty"`
 }
 
 // ExecutionConfig tunes how task runs are dispatched by the trigger engine.
@@ -395,6 +397,9 @@ func (cfg *Config) validate() error {
 	// mid-attempt timeout) by setting 20 "to be safe".
 	if cfg.Server.BcryptCost != 0 && (cfg.Server.BcryptCost < 4 || cfg.Server.BcryptCost > 14) {
 		return fmt.Errorf("server.bcrypt_cost: must be between 4 and 14, got %d", cfg.Server.BcryptCost)
+	}
+	if err := cfg.Defaults.OnFailureChain.ValidateAtDefaults(); err != nil {
+		return fmt.Errorf("defaults.on_failure_chain: %w", err)
 	}
 	return nil
 }
