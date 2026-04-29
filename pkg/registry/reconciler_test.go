@@ -50,7 +50,7 @@ func newTestReconciler(t *testing.T, sources ...source.Source) (*Registry, *Reco
 	}
 	t.Cleanup(func() { d.Close() })
 	r := New(d)
-	rec := NewReconciler(r, sources, zap.NewNop())
+	rec := NewReconciler(r, sources, "", zap.NewNop())
 	return r, rec
 }
 
@@ -200,7 +200,7 @@ func TestReconciler_RejectsUnknownTaskProvider(t *testing.T) {
 		Trigger: task.TriggerConfig{Manual: true},
 	}
 
-	rc := NewReconciler(reg, nil, zap.NewNop())
+	rc := NewReconciler(reg, nil, "", zap.NewNop())
 	rc.runCtx = ctx
 	rc.merged = make(chan source.Event, 1)
 
@@ -239,5 +239,60 @@ func TestReconciler_MultipleSources(t *testing.T) {
 	}
 	if _, ok := reg.Get("src2-task"); !ok {
 		t.Error("src2-task not registered")
+	}
+}
+
+func TestReconciler_InjectsDATADIR(t *testing.T) {
+	dataDir := "/var/lib/dicode-test"
+	// The reconciler derives spec.ID from filepath.Base(ev.TaskDir), so the
+	// task directory name must match the event's TaskID.
+	taskDir := filepath.Join(t.TempDir(), "dummy")
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	taskYAML := `name: dummy
+runtime: deno
+trigger:
+  manual: true
+permissions:
+  fs:
+    - path: "${DATADIR}/some-subdir"
+      permission: rw
+`
+	if err := os.WriteFile(filepath.Join(taskDir, "task.yaml"), []byte(taskYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(taskDir, "task.ts"), []byte("export default async function main() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fs := newFakeSource("test")
+
+	d, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { d.Close() })
+	reg := New(d)
+	rc := NewReconciler(reg, []source.Source{fs}, dataDir, zap.NewNop())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go rc.Run(ctx)
+
+	fs.ch <- source.Event{Kind: source.EventAdded, TaskID: "dummy", TaskDir: taskDir, Source: "test"}
+	time.Sleep(100 * time.Millisecond)
+
+	spec, ok := reg.Get("dummy")
+	if !ok {
+		t.Fatal("task not registered")
+	}
+	if len(spec.Permissions.FS) == 0 {
+		t.Fatal("expected at least one FS permission entry")
+	}
+	want := dataDir + "/some-subdir"
+	if spec.Permissions.FS[0].Path != want {
+		t.Errorf("FS[0].Path = %q, want %q (${DATADIR} was not expanded)", spec.Permissions.FS[0].Path, want)
 	}
 }

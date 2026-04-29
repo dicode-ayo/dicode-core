@@ -1,0 +1,8 @@
+apiVersion: dicode/v1
+kind: Task
+name: Persistence Test Webhook
+description: Fixture webhook for run-input persistence e2e tests (#233).
+runtime: js
+trigger:
+  webhook: /hooks/persistence-test
+timeout: 10s

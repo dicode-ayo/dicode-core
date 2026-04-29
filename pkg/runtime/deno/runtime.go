@@ -75,9 +75,17 @@ type RunResult struct {
 
 // Runtime executes task scripts with Deno.
 type Runtime struct {
+	// parent is non-nil when this Runtime was created by NewExecutor (i.e. it
+	// is acting as a per-version executor rather than the manager-owned
+	// instance). effectiveInputStore reads from parent.inputStore so that a
+	// late SetInputStore call on the manager propagates to all executors
+	// without extra bookkeeping. Nil means "I am the manager; use my own
+	// inputStore field directly."
+	parent           *Runtime
 	registry         *registry.Registry
 	secrets          secrets.Chain
-	secretsManager   secrets.Manager // optional; wired for dicode.secrets_set/delete
+	secretsManager   secrets.Manager      // optional; wired for dicode.secrets_set/delete
+	inputStore       *registry.InputStore // optional; wired for dicode.runs.delete_input / get_input
 	db               db.DB
 	log              *zap.Logger
 	denoPath         string
@@ -99,6 +107,17 @@ type Runtime struct {
 	// the env resolver can spawn provider tasks for from: task:<id>
 	// entries. Nil disables provider lookups; legacy paths still work.
 	providerRunner envresolve.ProviderRunner
+}
+
+// effectiveInputStore returns the live InputStore to use for this runtime
+// instance. When this Runtime is a per-version executor (parent != nil) it
+// reads from the parent so that a daemon-level SetInputStore call that runs
+// after NewExecutor is still visible here.
+func (rt *Runtime) effectiveInputStore() *registry.InputStore {
+	if rt.parent != nil {
+		return rt.parent.inputStore
+	}
+	return rt.inputStore
 }
 
 // New creates a Deno Runtime. It ensures the Deno binary is present in the
@@ -124,6 +143,11 @@ func (rt *Runtime) SetGateway(g *ipc.Gateway) { rt.gateway = g }
 // SetSecretsManager wires the secrets manager so tasks with permissions.dicode.secrets_write
 // can call dicode.secrets_set() and dicode.secrets_delete().
 func (rt *Runtime) SetSecretsManager(m secrets.Manager) { rt.secretsManager = m }
+
+// SetInputStore wires the InputStore so the per-run IPC server can serve
+// dicode.runs.delete_input and dicode.runs.get_input calls. Must be called
+// before any Run; mirrors the SetEngine / SetGateway pattern.
+func (rt *Runtime) SetInputStore(is *registry.InputStore) { rt.inputStore = is }
 
 // SetSecretOutputChannel wires the channel that receives provider tasks'
 // secret maps. Called by the trigger engine before invoking Run when the
@@ -245,6 +269,7 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	srv := ipc.New(runID, spec.ID, rt.secret, rt.registry, rt.db, mergedParams, opts.Input, rt.log, spec, rt.engine)
 	srv.SetGateway(rt.gateway)
 	srv.SetSecrets(rt.secretsManager)
+	srv.SetInputStore(rt.effectiveInputStore())
 	srv.SetSecretsChain(rt.secrets)
 	srv.SetRedactor(redactor)
 	if rt.secretOutputCh != nil {

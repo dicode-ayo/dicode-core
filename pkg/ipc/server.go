@@ -83,7 +83,8 @@ type Server struct {
 	// torn reads under the Go memory model.
 	redactor atomic.Pointer[secrets.Redactor]
 
-	gateway *Gateway // optional; enables http.register for daemon tasks
+	gateway    *Gateway             // optional; enables http.register for daemon tasks
+	inputStore *registry.InputStore // optional; enables dicode.runs.delete_input blob deletion
 
 	ctx        context.Context
 	socketPath string
@@ -252,6 +253,18 @@ func (s *Server) Start(ctx context.Context) (socketPath, token string, err error
 		if dp.OAuthStatus {
 			caps = append(caps, CapOAuthStatus)
 		}
+		if dp.RunsListExpired {
+			caps = append(caps, CapRunsListExpired)
+		}
+		if dp.RunsDeleteInput {
+			caps = append(caps, CapRunsDeleteInput)
+		}
+		if dp.RunsPinInput {
+			caps = append(caps, CapRunsPinInput)
+		}
+		if dp.RunsUnpinInput {
+			caps = append(caps, CapRunsUnpinInput)
+		}
 	}
 	if s.spec != nil && s.spec.Trigger.Daemon && s.gateway != nil {
 		caps = append(caps, CapHTTPRegister)
@@ -295,6 +308,11 @@ func (s *Server) Stop() {
 // SetGateway attaches the HTTP gateway so daemon tasks can call http.register.
 // Must be called before Start.
 func (s *Server) SetGateway(g *Gateway) { s.gateway = g }
+
+// SetInputStore attaches the InputStore so tasks with RunsDeleteInput permission
+// can call dicode.runs.delete_input() to remove the blob before clearing the
+// runs row. Must be called before Start.
+func (s *Server) SetInputStore(is *registry.InputStore) { s.inputStore = is }
 
 // ReturnCh receives the task return value once the subprocess sends "return".
 func (s *Server) ReturnCh() <-chan any { return s.retCh }
@@ -658,6 +676,117 @@ func (s *Server) handleConn(conn net.Conn) {
 				continue
 			}
 			reply(req.ID, runs, "")
+
+		// ── dicode.runs.* (retention management) ─────────────────────────
+
+		case "dicode.runs.list_expired":
+			if !hasCap(caps, CapRunsListExpired) {
+				reply(req.ID, nil, "ipc: permission denied (runs.list_expired)")
+				continue
+			}
+			beforeTs := req.BeforeTs
+			if beforeTs == 0 {
+				beforeTs = time.Now().Unix()
+			}
+			rows, err := s.registry.ListExpiredInputs(s.ctx, beforeTs)
+			if err != nil {
+				reply(req.ID, nil, err.Error())
+				continue
+			}
+			reply(req.ID, rows, "")
+
+		case "dicode.runs.delete_input":
+			if !hasCap(caps, CapRunsDeleteInput) {
+				reply(req.ID, nil, "ipc: permission denied (runs.delete_input)")
+				continue
+			}
+			if req.RunID == "" {
+				reply(req.ID, nil, "ipc: runID required")
+				continue
+			}
+			run, err := s.registry.GetRun(s.ctx, req.RunID)
+			if err != nil {
+				reply(req.ID, nil, err.Error())
+				continue
+			}
+			if run.InputStorageKey != "" && s.inputStore != nil {
+				if err := s.inputStore.Delete(s.ctx, run.InputStorageKey); err != nil {
+					// Sanitized log only — the full error chain may transit
+					// env-resolver internals where CodeQL flags a secretKey
+					// taint as go/clear-text-logging false-positive.
+					_ = err
+					s.log.Warn("delete_input: storage delete failed; will still clear columns",
+						zap.String("run", req.RunID),
+						zap.String("error_class", "storage_delete"))
+				}
+			}
+			if err := s.registry.ClearRunInput(s.ctx, req.RunID); err != nil {
+				reply(req.ID, nil, err.Error())
+				continue
+			}
+			reply(req.ID, map[string]any{"ok": true}, "")
+
+		case "dicode.runs.pin_input":
+			if !hasCap(caps, CapRunsPinInput) {
+				reply(req.ID, nil, "ipc: permission denied (runs.pin_input)")
+				continue
+			}
+			if req.RunID == "" {
+				reply(req.ID, nil, "ipc: runID required")
+				continue
+			}
+			if err := s.registry.PinRunInput(s.ctx, req.RunID); err != nil {
+				reply(req.ID, nil, err.Error())
+				continue
+			}
+			reply(req.ID, map[string]any{"ok": true}, "")
+
+		case "dicode.runs.unpin_input":
+			if !hasCap(caps, CapRunsUnpinInput) {
+				reply(req.ID, nil, "ipc: permission denied (runs.unpin_input)")
+				continue
+			}
+			if req.RunID == "" {
+				reply(req.ID, nil, "ipc: runID required")
+				continue
+			}
+			if err := s.registry.UnpinRunInput(s.ctx, req.RunID); err != nil {
+				reply(req.ID, nil, err.Error())
+				continue
+			}
+			reply(req.ID, map[string]any{"ok": true}, "")
+
+		case "dicode.runs.get_input":
+			// Internal-only: gated behind CapRunsGetInput which is not granted
+			// to any task today. Wired now so #234's auto-fix driver can use it
+			// once the capability is granted to that task.
+			if !hasCap(caps, CapRunsGetInput) {
+				reply(req.ID, nil, "ipc: permission denied (runs.get_input)")
+				continue
+			}
+			if req.RunID == "" {
+				reply(req.ID, nil, "ipc: runID required")
+				continue
+			}
+			if s.inputStore == nil {
+				reply(req.ID, nil, "ipc: input store not configured")
+				continue
+			}
+			run, err := s.registry.GetRun(s.ctx, req.RunID)
+			if err != nil {
+				reply(req.ID, nil, err.Error())
+				continue
+			}
+			if run.InputStorageKey == "" {
+				reply(req.ID, nil, "ipc: no persisted input for run "+req.RunID)
+				continue
+			}
+			fetched, err := s.inputStore.Fetch(s.ctx, req.RunID, run.InputStorageKey, run.InputStoredAt)
+			if err != nil {
+				reply(req.ID, nil, err.Error())
+				continue
+			}
+			reply(req.ID, fetched, "")
 
 		// ── dicode.secrets_* ──────────────────────────────────────────────
 

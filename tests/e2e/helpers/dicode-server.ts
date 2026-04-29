@@ -112,12 +112,16 @@ function writeTaskset(tempDir: string): { tasksetPath: string; tasksDir: string 
   const buildinWebuiTaskYaml = path.join(REPO_ROOT, 'tasks/buildin/webui/task.yaml');
   const buildinMcpTaskYaml = path.join(REPO_ROOT, 'tasks/buildin/mcp/task.yaml');
   const buildinAuthProvidersTaskYaml = path.join(REPO_ROOT, 'tasks/buildin/auth-providers/task.yaml');
+  const buildinLocalStorageTaskYaml = path.join(REPO_ROOT, 'tasks/buildin/local-storage/task.yaml');
+  const buildinRunInputsCleanupTaskYaml = path.join(REPO_ROOT, 'tasks/buildin/run-inputs-cleanup/task.yaml');
   const template = fs.readFileSync(path.join(TASKS_DIR, 'taskset.yaml'), 'utf8');
   const content = template
     .replace(/FIXTURES_TASKS_DIR/g, tasksDir)
     .replace(/BUILDIN_WEBUI_TASK_YAML/g, buildinWebuiTaskYaml)
     .replace(/BUILDIN_MCP_TASK_YAML/g, buildinMcpTaskYaml)
-    .replace(/BUILDIN_AUTH_PROVIDERS_TASK_YAML/g, buildinAuthProvidersTaskYaml);
+    .replace(/BUILDIN_AUTH_PROVIDERS_TASK_YAML/g, buildinAuthProvidersTaskYaml)
+    .replace(/BUILDIN_LOCAL_STORAGE_TASK_YAML/g, buildinLocalStorageTaskYaml)
+    .replace(/BUILDIN_RUN_INPUTS_CLEANUP_TASK_YAML/g, buildinRunInputsCleanupTaskYaml);
   const tasksetPath = path.join(tempDir, 'taskset.yaml');
   fs.writeFileSync(tasksetPath, content, 'utf8');
   return { tasksetPath, tasksDir };

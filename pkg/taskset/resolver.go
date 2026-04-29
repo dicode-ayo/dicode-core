@@ -199,7 +199,21 @@ func (r *Resolver) resolveBody(
 				continue
 			}
 			taskDir := filepath.Dir(localPath)
-			spec, err := task.LoadDirWithVars(taskDir, extraVars)
+			extras := extraVars
+			if extras == nil {
+				extras = make(map[string]string, 1)
+			}
+			if _, ok := extras[task.VarDataDir]; !ok && r.dataDir != "" {
+				// Don't clobber a caller-supplied DATADIR (allows tests to override).
+				// Clone before mutate — extraVars may be shared across loop iterations.
+				cloned := make(map[string]string, len(extras)+1)
+				for k, v := range extras {
+					cloned[k] = v
+				}
+				cloned[task.VarDataDir] = r.dataDir
+				extras = cloned
+			}
+			spec, err := task.LoadDirWithVars(taskDir, extras)
 			if err != nil {
 				r.log.Warn("taskset: failed to load task",
 					zap.String("entry", fullID), zap.Error(err))

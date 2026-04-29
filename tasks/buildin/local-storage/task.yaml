@@ -1,0 +1,46 @@
+apiVersion: dicode/v1
+kind: Task
+name: "Local Storage (run inputs)"
+description: |
+  Default backend for run-input persistence (#233). Stores opaque
+  base64-encoded ciphertext blobs in ${DATADIR}/run-inputs/<key>.bin.
+  Core does the encryption; this task only sees ciphertext.
+
+runtime: deno
+
+trigger:
+  manual: true
+
+params:
+  op:
+    type: string
+    required: true
+    description: "Operation: put | get | delete"
+  key:
+    type: string
+    required: true
+    description: "Storage key, expected shape: run-inputs/<runID>"
+  value:
+    type: string
+    default: ""
+    description: "Base64-encoded ciphertext blob (put only)"
+  root:
+    type: string
+    default: "${DATADIR}/run-inputs"
+    description: "Storage root directory (overridable for tests)"
+
+permissions:
+  fs:
+    - path: "${DATADIR}/run-inputs"
+      permission: rw
+
+# Self-opt-out from input persistence to avoid recursion: this task IS the
+# storage backend; persisting its own params would loop indefinitely.
+run_inputs:
+  enabled: false
+
+timeout: 30s
+
+notify:
+  on_success: false
+  on_failure: true

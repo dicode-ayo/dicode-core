@@ -282,6 +282,15 @@ type DicodePermissions struct {
 	// Returns connection-state metadata (presence flag, expiry, scope) for the
 	// provider names the caller passes — never plaintext tokens.
 	OAuthStatus bool `yaml:"oauth_status,omitempty" json:"oauth_status,omitempty"`
+
+	// RunsListExpired enables dicode.runs.list_expired().
+	RunsListExpired bool `yaml:"runs_list_expired,omitempty" json:"runs_list_expired,omitempty"`
+	// RunsDeleteInput enables dicode.runs.delete_input().
+	RunsDeleteInput bool `yaml:"runs_delete_input,omitempty" json:"runs_delete_input,omitempty"`
+	// RunsPinInput enables dicode.runs.pin_input().
+	RunsPinInput bool `yaml:"runs_pin_input,omitempty" json:"runs_pin_input,omitempty"`
+	// RunsUnpinInput enables dicode.runs.unpin_input().
+	RunsUnpinInput bool `yaml:"runs_unpin_input,omitempty" json:"runs_unpin_input,omitempty"`
 }
 
 // ProviderConfig declares secret-provider settings on a task that
@@ -320,10 +329,40 @@ type Spec struct {
 	// validation; the resolver uses it to look up the TTL.
 	Provider *ProviderConfig `yaml:"provider,omitempty" json:"provider,omitempty"`
 
+	// RunInputs configures per-task input persistence. Overrides the global
+	// defaults.run_inputs from dicode.yaml for this task only.
+	RunInputs *RunInputsTaskOverride `yaml:"run_inputs,omitempty" json:"run_inputs,omitempty"`
+
+	// AutoFix configures how the auto-fix loop sees this task's input.
+	// Independent of RunInputs (which controls persistence). Used by #238.
+	AutoFix *AutoFixConfig `yaml:"auto_fix,omitempty" json:"auto_fix,omitempty"`
+
 	// TaskDir is the directory path of the task in the repo (not stored in YAML).
 	TaskDir string `yaml:"-" json:"-"`
 	// ID is derived from the directory name (not stored in YAML).
 	ID string `yaml:"-" json:"id"`
+}
+
+// RunInputsTaskOverride is the per-task override for run-input persistence.
+type RunInputsTaskOverride struct {
+	Enabled         *bool         `yaml:"enabled,omitempty"          json:"enabled,omitempty"`
+	Retention       time.Duration `yaml:"retention,omitempty"        json:"retention,omitempty"`
+	BodyFullTextual *bool         `yaml:"body_full_textual,omitempty" json:"body_full_textual,omitempty"`
+}
+
+// AutoFixConfig configures how the auto-fix loop sees this task's input.
+// Independent of run_inputs (which controls persistence). Used by #238.
+type AutoFixConfig struct {
+	// IncludeInput controls whether the auto-fix agent sees the task's
+	// persisted input in its prompt. Default true. Set to false for tasks
+	// whose inputs contain sensitive data the agent should not see.
+	IncludeInput *bool `yaml:"include_input,omitempty" json:"include_input,omitempty"`
+
+	// ShowRedactedFieldNames controls whether the agent sees a list of
+	// redacted field names (e.g. "Authorization", "headers.x-api-key").
+	// Default true. Set to false for tasks where field-name topology is
+	// itself sensitive.
+	ShowRedactedFieldNames *bool `yaml:"show_redacted_field_names,omitempty" json:"show_redacted_field_names,omitempty"`
 }
 
 // LoadDir reads a task from its directory (expects task.yaml and task.<ext>).

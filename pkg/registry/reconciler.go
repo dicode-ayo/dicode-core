@@ -14,6 +14,7 @@ import (
 type Reconciler struct {
 	registry *Registry
 	sources  []source.Source
+	dataDir  string
 	log      *zap.Logger
 
 	// OnRegister is called after a task is registered (used by trigger engine).
@@ -29,10 +30,14 @@ type Reconciler struct {
 }
 
 // NewReconciler creates a Reconciler for the given registry and sources.
-func NewReconciler(r *Registry, sources []source.Source, log *zap.Logger) *Reconciler {
+// dataDir is the daemon's data directory (config.DataDir); it is injected as
+// the ${DATADIR} template variable when loading task specs so buildin tasks
+// can reference shared paths under the data dir.
+func NewReconciler(r *Registry, sources []source.Source, dataDir string, log *zap.Logger) *Reconciler {
 	return &Reconciler{
 		registry: r,
 		sources:  sources,
+		dataDir:  dataDir,
 		log:      log,
 		cancels:  make(map[string]context.CancelFunc),
 	}
@@ -132,7 +137,21 @@ func (rc *Reconciler) handle(ev source.Event) {
 			spec.ID = ev.TaskID
 		} else {
 			var err error
-			spec, err = task.LoadDirWithVars(ev.TaskDir, ev.ExtraVars)
+			extras := ev.ExtraVars
+			if extras == nil {
+				extras = make(map[string]string, 1)
+			}
+			if _, ok := extras[task.VarDataDir]; !ok && rc.dataDir != "" {
+				// Don't clobber a source-supplied DATADIR (allows tests to override).
+				// Clone before mutate — ev.ExtraVars may be shared across event consumers.
+				cloned := make(map[string]string, len(extras)+1)
+				for k, v := range extras {
+					cloned[k] = v
+				}
+				cloned[task.VarDataDir] = rc.dataDir
+				extras = cloned
+			}
+			spec, err = task.LoadDirWithVars(ev.TaskDir, extras)
 			if err != nil {
 				rc.log.Warn("failed to load task",
 					zap.String("task", ev.TaskID),

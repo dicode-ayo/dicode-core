@@ -1,0 +1,37 @@
+apiVersion: dicode/v1
+kind: Task
+name: "Run-input retention sweep"
+description: |
+  Hourly cleanup of expired run-input blobs. Calls runs.list_expired to
+  find unpinned rows past retention, then runs.delete_input for each.
+  Mirrors the temp-cleanup pattern.
+
+  retention_seconds defaults to 30 days (2592000s); the daemon overrides
+  this via dicode.yaml's defaults.run_inputs.retention (Task 14, future).
+
+runtime: deno
+
+trigger:
+  cron: "17 * * * *"   # hourly at :17
+
+params:
+  retention_seconds:
+    type: number
+    default: "2592000"   # 30 days
+    description: "Retain inputs for at most this many seconds. Daemon overrides via dicode.yaml."
+
+permissions:
+  dicode:
+    runs_list_expired: true
+    runs_delete_input: true
+
+# Self-opt-out from input persistence to avoid storing this task's own
+# params on every cron tick.
+run_inputs:
+  enabled: false
+
+timeout: 120s
+
+notify:
+  on_success: false
+  on_failure: true

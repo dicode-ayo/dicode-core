@@ -55,6 +55,7 @@ export default defineConfig({
         '**/config.spec.ts',
         '**/mcp.spec.ts',
         '**/dev-mode-clone.spec.ts',
+        '**/run-input-persistence.spec.ts',
       ],
       use: {
         ...devices['Desktop Chrome'],

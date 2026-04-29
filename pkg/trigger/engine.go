@@ -93,6 +93,11 @@ type Engine struct {
 	// MVP-quality: a per-run channel registry would allow parallelism but
 	// requires runtime changes; revisit when contention shows up.
 	providerRunMu sync.Mutex
+
+	// inputStore persists run inputs at run-start (Task 10). nil = disabled.
+	// Set via SetInputStore after the daemon has initialised secrets so the
+	// derived sub-key is available.
+	inputStore *registry.InputStore
 }
 
 // DenoRuntimeAPI is the minimal subset of *deno.Runtime the engine's
@@ -147,6 +152,11 @@ func (e *Engine) SetDenoRuntime(r DenoRuntimeAPI) { e.denoRuntime = r }
 
 // SetPythonRuntime wires the python runtime; mirror of SetDenoRuntime.
 func (e *Engine) SetPythonRuntime(r PythonRuntimeAPI) { e.pythonRuntime = r }
+
+// SetInputStore wires the InputStore so every run's input is persisted at
+// run-start. Called by the daemon after secrets are available (so the derived
+// sub-key exists). When nil (the default), input persistence is a no-op.
+func (e *Engine) SetInputStore(s *registry.InputStore) { e.inputStore = s }
 
 // SetMaxConcurrentTasks configures a semaphore that limits how many task
 // goroutines run concurrently. n == 0 (the default) means unlimited.
@@ -1118,12 +1128,26 @@ func (e *Engine) WebhookHandler() http.Handler {
 		// raw input being available as the `input` global (RunOptions.Input).
 		params := flatStringMap(input)
 
+		// Build the WebhookContext so the persistence layer can apply
+		// content-type-aware redaction to the raw body and populate
+		// Method/Path/Headers/Query on the stored PersistedInput.
+		// For GET requests body is nil; body was already read above for
+		// POST/PUT/etc. and is safe to reference here.
+		webhookCtx := &pkgruntime.WebhookContext{
+			Method:      r.Method,
+			Path:        r.URL.Path,
+			Headers:     r.Header,
+			Query:       r.URL.Query(),
+			RawBody:     body,
+			ContentType: r.Header.Get("Content-Type"),
+		}
+
 		// Default: wait for the run to finish and return the result inline.
 		// Pass ?wait=false to fire-and-forget (returns runId immediately).
 		async := r.URL.Query().Get("wait") == "false"
 
 		if async {
-			runID, err := e.fireAsync(r.Context(), spec, pkgruntime.RunOptions{Input: input, Params: params}, "webhook")
+			runID, err := e.fireAsync(r.Context(), spec, pkgruntime.RunOptions{Input: input, Params: params, WebhookCtx: webhookCtx}, "webhook")
 			if err != nil {
 				http.Error(w, "task failed to start", http.StatusInternalServerError)
 				return
@@ -1134,7 +1158,7 @@ func (e *Engine) WebhookHandler() http.Handler {
 			return
 		}
 
-		runID, result, err := e.fireSync(spec, pkgruntime.RunOptions{Input: input, Params: params}, "webhook")
+		runID, result, err := e.fireSync(spec, pkgruntime.RunOptions{Input: input, Params: params, WebhookCtx: webhookCtx}, "webhook")
 		if err != nil {
 			http.Error(w, "task failed to start", http.StatusInternalServerError)
 			return
@@ -1334,6 +1358,56 @@ func (e *Engine) startRun(spec *task.Spec, opts *pkgruntime.RunOptions, source s
 	if _, err = e.registry.StartRunWithID(context.Background(), opts.RunID, spec.ID, opts.ParentRunID, source); err != nil {
 		return nil, nil, fmt.Errorf("start run record: %w", err)
 	}
+
+	// Best-effort input persistence. Failures do not block the run — the
+	// auto-fix loop (#234) handles missing inputs via ErrInputUnavailable.
+	if e.inputStore != nil && e.shouldPersistInput(spec) {
+		var web *registry.WebhookFields
+		if opts.WebhookCtx != nil {
+			bft := false
+			if spec.RunInputs != nil && spec.RunInputs.BodyFullTextual != nil {
+				bft = *spec.RunInputs.BodyFullTextual
+			}
+			web = &registry.WebhookFields{
+				Method:          opts.WebhookCtx.Method,
+				Path:            opts.WebhookCtx.Path,
+				Headers:         opts.WebhookCtx.Headers,
+				Query:           opts.WebhookCtx.Query,
+				RawBody:         opts.WebhookCtx.RawBody,
+				ContentType:     opts.WebhookCtx.ContentType,
+				BodyFullTextual: bft,
+			}
+		}
+		in := registry.BuildPersistedInputFromRunOpts(source, opts.Params, opts.Input, web)
+		key, size, storedAt, perr := e.inputStore.Persist(context.Background(), opts.RunID, in)
+		if perr != nil {
+			// Log only a sanitized error category. The full perr chain may
+			// transit env-resolver internals where CodeQL tracks a
+			// secretKey taint label; emitting it raw causes a false-positive
+			// go/clear-text-logging alert. The category is enough for ops to
+			// triage; full error is available via the failed task's own logs.
+			e.log.Warn("run-input persist failed",
+				zap.String("run", opts.RunID),
+				zap.String("task", spec.ID),
+				zap.String("error_class", "persist"),
+			)
+		} else {
+			// Bound RAM exposure: RawBody is no longer needed now that the
+			// blob has been persisted. Nil it out so the slice can be GC'd
+			// rather than held for the full run lifetime.
+			if opts.WebhookCtx != nil {
+				opts.WebhookCtx.RawBody = nil
+			}
+			if serr := e.registry.SetRunInput(context.Background(), opts.RunID, key, size, storedAt, in.RedactedFields); serr != nil {
+				e.log.Warn("run-input set columns failed",
+					zap.String("run", opts.RunID),
+					zap.String("task", spec.ID),
+					zap.Error(serr),
+				)
+			}
+		}
+	}
+
 	if h := e.runStartedHook; h != nil {
 		h(spec.ID, opts.RunID, source)
 	}
@@ -1357,6 +1431,25 @@ func (e *Engine) startRun(spec *task.Spec, opts *pkgruntime.RunOptions, source s
 		}
 	}
 	return runCtx, cleanup, nil
+}
+
+// shouldPersistInput returns true when the run's input should be persisted.
+// It enforces two recursion guards and respects the per-task opt-out flag.
+func (e *Engine) shouldPersistInput(spec *task.Spec) bool {
+	// Per-task opt-out: run_inputs.enabled: false in task.yaml.
+	if spec.RunInputs != nil && spec.RunInputs.Enabled != nil && !*spec.RunInputs.Enabled {
+		return false
+	}
+	// Recursion guard: never persist the storage task's own inputs.
+	if e.inputStore != nil && spec.ID == e.inputStore.StorageTaskID() {
+		return false
+	}
+	// Recursion guard: cleanup task runs periodically with the same retention
+	// config; persisting it every cron tick is pointless and loops.
+	if spec.ID == "buildin/run-inputs-cleanup" {
+		return false
+	}
+	return true
 }
 
 // runTask executes a task synchronously and handles all post-run bookkeeping

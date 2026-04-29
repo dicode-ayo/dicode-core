@@ -5,6 +5,12 @@ database:
 log_level: info
 execution:
   max_concurrent_tasks: 2
+defaults:
+  run_inputs:
+    # The e2e fixture taskset registers tasks under the "e2e-tests" namespace,
+    # so the storage backend task ID is e2e-tests/local-storage rather than
+    # the default buildin/local-storage.
+    storage_task: e2e-tests/local-storage
 server:
   port: 8765
   auth: false

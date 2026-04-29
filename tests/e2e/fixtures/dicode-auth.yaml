@@ -5,6 +5,10 @@ database:
 log_level: info
 execution:
   max_concurrent_tasks: 2
+defaults:
+  run_inputs:
+    # The e2e fixture taskset registers tasks under the "e2e-tests" namespace.
+    storage_task: e2e-tests/local-storage
 server:
   port: 8765
   auth: true

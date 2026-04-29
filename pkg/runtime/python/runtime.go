@@ -59,7 +59,8 @@ var sdkContent string
 type Runtime struct {
 	reg            *registry.Registry
 	secrets        secrets.Chain
-	secretsManager secrets.Manager // optional; wired for dicode.secrets_set/delete
+	secretsManager secrets.Manager      // optional; wired for dicode.secrets_set/delete
+	inputStore     *registry.InputStore // optional; wired for dicode.runs.delete_input / get_input
 	db             db.DB
 	log            *zap.Logger
 	secret         []byte
@@ -85,6 +86,11 @@ func (rt *Runtime) SetGateway(g *ipc.Gateway) { rt.gateway = g }
 // SetSecretsManager wires the secrets manager so tasks with permissions.dicode.secrets_write
 // can call dicode.secrets_set() and dicode.secrets_delete().
 func (rt *Runtime) SetSecretsManager(m secrets.Manager) { rt.secretsManager = m }
+
+// SetInputStore wires the InputStore so the per-run IPC server can serve
+// dicode.runs.delete_input and dicode.runs.get_input calls. Must be called
+// before any Execute; mirrors the SetEngine / SetGateway pattern.
+func (rt *Runtime) SetInputStore(is *registry.InputStore) { rt.inputStore = is }
 
 // SetSecretOutputChannel wires the channel that receives provider tasks'
 // secret maps. Called by the trigger engine before invoking Execute when
@@ -144,6 +150,7 @@ func (rt *Runtime) Install(_ context.Context, version string) error {
 func (rt *Runtime) NewExecutor(binaryPath string) pkgruntime.Executor {
 	return &executor{
 		uvPath:         binaryPath,
+		parent:         rt,
 		reg:            rt.reg,
 		secrets:        rt.secrets,
 		secretsManager: rt.secretsManager,
@@ -161,9 +168,13 @@ func (rt *Runtime) NewExecutor(binaryPath string) pkgruntime.Executor {
 
 type executor struct {
 	uvPath         string
+	parent         *Runtime // back-reference for live lookups (inputStore, etc.)
 	reg            *registry.Registry
 	secrets        secrets.Chain
 	secretsManager secrets.Manager
+	// inputStore is not snapshotted here; read live from parent.inputStore
+	// so late SetInputStore calls (daemon wires it after buildRuntimes) are
+	// visible to all executors without any extra bookkeeping.
 	db             db.DB
 	log            *zap.Logger
 	secret         []byte
@@ -234,6 +245,7 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 	srv := ipc.New(runID, spec.ID, e.secret, e.reg, e.db, mergedParams, opts.Input, e.log, spec, e.engine)
 	srv.SetGateway(e.gateway)
 	srv.SetSecrets(e.secretsManager)
+	srv.SetInputStore(e.parent.inputStore)
 	srv.SetRedactor(redactor)
 	if e.secretOutputCh != nil {
 		srv.SetSecretOutput(e.secretOutputCh)

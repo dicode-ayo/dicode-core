@@ -3,6 +3,7 @@ package registry
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -45,6 +46,14 @@ type Run struct {
 	// or "required_secret_missing: PG_URL from doppler". Empty for non-failed
 	// runs and for failures from the legacy code path that doesn't set a reason.
 	FailureReason string
+
+	// Input persistence fields — set by the trigger engine via SetRunInput
+	// immediately after the run row is created (Task 10).
+	InputStorageKey     string   // storage key passed to the storage task ("run-inputs/<runID>")
+	InputSize           int      // ciphertext byte size
+	InputStoredAt       int64    // unix timestamp the blob was stored (AAD-bound)
+	InputRedactedFields []string // dotted paths of any redacted fields
+	InputPinned         int      // 1 = pinned (excluded from retention cleanup)
 }
 
 // LogEntry is one log line from a run.
@@ -235,7 +244,9 @@ func (r *Registry) GetRun(ctx context.Context, runID string) (*Run, error) {
 	err := r.db.Query(ctx,
 		`SELECT id, task_id, status, started_at, finished_at, parent_run_id, trigger_source,
 		        COALESCE(return_value, ''), COALESCE(output_content_type, ''), COALESCE(output_content, ''),
-		        COALESCE(fail_reason, '')
+		        COALESCE(fail_reason, ''),
+		        COALESCE(input_storage_key, ''), COALESCE(input_size, 0), COALESCE(input_stored_at, 0),
+		        COALESCE(input_redacted_fields, ''), COALESCE(input_pinned, 0)
 		 FROM runs WHERE id = ?`,
 		[]any{runID},
 		func(rows db.Scanner) error {
@@ -244,7 +255,13 @@ func (r *Registry) GetRun(ctx context.Context, runID string) (*Run, error) {
 				var startedMs int64
 				var finishedMs *int64
 				var parentID *string
-				if err := rows.Scan(&run.ID, &run.TaskID, &run.Status, &startedMs, &finishedMs, &parentID, &run.TriggerSource, &run.ReturnValue, &run.OutputContentType, &run.OutputContent, &run.FailureReason); err != nil {
+				var redactedFieldsJSON string
+				if err := rows.Scan(
+					&run.ID, &run.TaskID, &run.Status, &startedMs, &finishedMs, &parentID,
+					&run.TriggerSource, &run.ReturnValue, &run.OutputContentType, &run.OutputContent,
+					&run.FailureReason,
+					&run.InputStorageKey, &run.InputSize, &run.InputStoredAt, &redactedFieldsJSON, &run.InputPinned,
+				); err != nil {
 					return err
 				}
 				run.StartedAt = time.UnixMilli(startedMs)
@@ -254,6 +271,9 @@ func (r *Registry) GetRun(ctx context.Context, runID string) (*Run, error) {
 				}
 				if parentID != nil {
 					run.ParentRunID = *parentID
+				}
+				if redactedFieldsJSON != "" && redactedFieldsJSON != "null" {
+					_ = json.Unmarshal([]byte(redactedFieldsJSON), &run.InputRedactedFields)
 				}
 			}
 			return nil
@@ -266,6 +286,24 @@ func (r *Registry) GetRun(ctx context.Context, runID string) (*Run, error) {
 		return nil, fmt.Errorf("run %s: %w", runID, ErrRunNotFound)
 	}
 	return run, nil
+}
+
+// SetRunInput updates the runs row with the persistence handle after the input
+// blob has been stored. Called by the trigger engine immediately after Persist
+// succeeds.
+func (r *Registry) SetRunInput(ctx context.Context, runID, storageKey string, size int, storedAt int64, redactedFields []string) error {
+	rfJSON, err := json.Marshal(redactedFields)
+	if err != nil {
+		return fmt.Errorf("marshal redacted_fields: %w", err)
+	}
+	if err := r.db.Exec(ctx,
+		`UPDATE runs SET input_storage_key = ?, input_size = ?, input_stored_at = ?, input_redacted_fields = ?
+		 WHERE id = ?`,
+		storageKey, size, storedAt, string(rfJSON), runID,
+	); err != nil {
+		return fmt.Errorf("update runs: %w", err)
+	}
+	return nil
 }
 
 // ListRuns returns the most recent runs for a task (newest first).
@@ -367,4 +405,96 @@ func (r *Registry) getRunLogsQuery(ctx context.Context, runID string, sinceID in
 		},
 	)
 	return logs, err
+}
+
+// ── Run-input retention management ───────────────────────────────────────────
+
+// ExpiredInput identifies a run whose persisted input is past retention.
+type ExpiredInput struct {
+	RunID      string `json:"runID"`
+	StorageKey string `json:"storageKey"`
+	StoredAt   int64  `json:"storedAt"`
+}
+
+// ListExpiredInputs returns rows whose input_stored_at < beforeUnix and which
+// aren't pinned. Used by the run-inputs-cleanup buildin (#233 Task 12).
+func (r *Registry) ListExpiredInputs(ctx context.Context, beforeUnix int64) ([]ExpiredInput, error) {
+	var out []ExpiredInput
+	err := r.db.Query(ctx,
+		`SELECT id, input_storage_key, input_stored_at FROM runs
+		 WHERE input_storage_key IS NOT NULL
+		   AND input_storage_key != ''
+		   AND input_stored_at < ?
+		   AND input_pinned = 0`,
+		[]any{beforeUnix},
+		func(rows db.Scanner) error {
+			for rows.Next() {
+				var e ExpiredInput
+				if err := rows.Scan(&e.RunID, &e.StorageKey, &e.StoredAt); err != nil {
+					return err
+				}
+				out = append(out, e)
+			}
+			return nil
+		},
+	)
+	return out, err
+}
+
+// ClearRunInput nulls the input_storage_key/size/stored_at/redacted_fields
+// columns on a row. The caller is responsible for deleting the actual blob
+// from the storage task (typically via InputStore.Delete) BEFORE calling
+// this — the column clear is the authoritative "input gone" signal.
+func (r *Registry) ClearRunInput(ctx context.Context, runID string) error {
+	return r.db.Exec(ctx,
+		`UPDATE runs SET input_storage_key = NULL, input_size = NULL,
+		                  input_stored_at = NULL, input_redacted_fields = NULL
+		 WHERE id = ?`, runID)
+}
+
+// PinRunInput sets input_pinned = 1 on the given run.
+func (r *Registry) PinRunInput(ctx context.Context, runID string) error {
+	return r.db.Exec(ctx, `UPDATE runs SET input_pinned = 1 WHERE id = ?`, runID)
+}
+
+// UnpinRunInput sets input_pinned = 0 on the given run.
+func (r *Registry) UnpinRunInput(ctx context.Context, runID string) error {
+	return r.db.Exec(ctx, `UPDATE runs SET input_pinned = 0 WHERE id = ?`, runID)
+}
+
+// SweepStalePins clears input_pinned on any row whose pin is no longer
+// load-bearing — i.e., the run's status is not "running" anymore. Returns
+// the number of rows cleared.
+//
+// Called at engine startup to recover from daemons that crashed mid-fix
+// before unpinning. A pinned + finished row would otherwise prevent the
+// retention sweep from ever collecting that input blob.
+func (r *Registry) SweepStalePins(ctx context.Context) (int, error) {
+	// SQLite doesn't return RowsAffected through the DB.Exec wrapper without
+	// an extra round-trip. Count first, then update — one extra query is
+	// fine at startup.
+	var n int
+	err := r.db.Query(ctx,
+		`SELECT COUNT(*) FROM runs WHERE input_pinned = 1 AND status != ?`,
+		[]any{StatusRunning},
+		func(rows db.Scanner) error {
+			if rows.Next() {
+				return rows.Scan(&n)
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		return 0, err
+	}
+	if n == 0 {
+		return 0, nil
+	}
+	if err := r.db.Exec(ctx,
+		`UPDATE runs SET input_pinned = 0 WHERE input_pinned = 1 AND status != ?`,
+		StatusRunning,
+	); err != nil {
+		return 0, err
+	}
+	return n, nil
 }

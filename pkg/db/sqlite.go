@@ -142,7 +142,29 @@ func (s *SQLiteDB) migrate() error {
 			expires_at INTEGER
 		);
 	`)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Incremental migrations on `runs` (introduced for #233 — first usage of
+	// ALTER TABLE in dicode's schema). Each entry is idempotent.
+	runsMigrations := []struct {
+		name string
+		ddl  string
+	}{
+		{"input_storage_key", "TEXT"},
+		{"input_size", "INTEGER"},
+		{"input_stored_at", "INTEGER"},
+		{"input_pinned", "INTEGER NOT NULL DEFAULT 0"},
+		{"input_redacted_fields", "TEXT"},
+	}
+	ctx := context.Background()
+	for _, m := range runsMigrations {
+		if err := addColumnIfMissing(ctx, s.db, "runs", m.name, m.ddl); err != nil {
+			return fmt.Errorf("migrate runs.%s: %w", m.name, err)
+		}
+	}
+	return nil
 }
 
 func (s *SQLiteDB) Ping(ctx context.Context) error {

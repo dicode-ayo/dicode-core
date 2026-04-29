@@ -159,14 +159,52 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	} else if len(stale) > 0 {
 		log.Info("cancelled stale runs from previous session", zap.Strings("tasks", stale))
 	}
+	if n, err := reg.SweepStalePins(ctx); err == nil {
+		if n > 0 {
+			log.Info("cleared stale input pins at startup", zap.Int("count", n))
+		}
+	} else {
+		log.Warn("sweep stale input pins failed", zap.Error(err))
+	}
 
 	// 5. HTTP gateway.
 	gateway := ipc.NewGateway()
 
 	// 6. Managed runtimes + trigger engine.
-	managedRuntimes, eng, denoRT, err := buildRuntimes(ctx, cfg, reg, secretsChain, localSecrets, database, log, gateway)
+	managedRuntimes, eng, denoRT, pythonRT, err := buildRuntimes(ctx, cfg, reg, secretsChain, localSecrets, database, log, gateway)
 	if err != nil {
 		return err
+	}
+
+	// 6a. Run-input persistence (Task 14): wire InputStore when enabled.
+	if cfg.Defaults.RunInputs.IsEnabled() {
+		var deriver secrets.SubKeyDeriver
+		for _, p := range secretsChain {
+			if d, ok := p.(secrets.SubKeyDeriver); ok {
+				deriver = d
+				break
+			}
+		}
+		if deriver == nil {
+			log.Warn("run-input persistence: no SubKeyDeriver available in secrets chain — persistence disabled")
+		} else {
+			key, err := deriver.DeriveSubKey("dicode/run-inputs/v1")
+			if err != nil {
+				log.Warn("run-input persistence: sub-key derive failed", zap.Error(err))
+			} else {
+				runner := trigger.NewInputStoreTaskRunner(eng)
+				is := registry.NewInputStore(registry.NewInputCrypto(key), runner, cfg.Defaults.RunInputs.StorageTask)
+				eng.SetInputStore(is)
+				denoRT.SetInputStore(is)
+				pythonRT.SetInputStore(is)
+				log.Info("run-input persistence enabled",
+					zap.Duration("retention", cfg.Defaults.RunInputs.Retention),
+					zap.String("storage_task", cfg.Defaults.RunInputs.StorageTask),
+				)
+			}
+		}
+	} else {
+		log.Info("run-input persistence disabled by config")
 	}
 
 	// 7. Sources + reconciler.
@@ -174,11 +212,32 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	if err != nil {
 		return fmt.Errorf("build sources: %w", err)
 	}
-	rec := registry.NewReconciler(reg, sources, log)
+	rec := registry.NewReconciler(reg, sources, dataDir, log)
 	webhookH := eng.WebhookHandler()
 	var webhookMu sync.Mutex
 	webhookPaths := make(map[string]string)
+	// bodyFullTextualWarned tracks which task IDs have already had their
+	// body_full_textual WARN emitted. The reconciler may re-register the same
+	// task on each reload cycle; without deduplication the WARN fires every
+	// 30 s, flooding the log. LoadOrStore ensures at most one WARN per task ID
+	// per daemon lifetime.
+	var bodyFullTextualWarned sync.Map
 	rec.OnRegister = func(spec *task.Spec) {
+		// Override buildin/run-inputs-cleanup's retention_seconds default to
+		// match dicode.yaml's defaults.run_inputs.retention. This must happen
+		// before eng.Register so the engine sees the correct default when
+		// building the param map for the next cron fire. We mutate the spec
+		// slice element in place; the reconciler replaces the spec on each
+		// reload, so the override is re-applied on every registration.
+		if spec.ID == "buildin/run-inputs-cleanup" && cfg.Defaults.RunInputs.Retention > 0 {
+			retStr := fmt.Sprintf("%d", int64(cfg.Defaults.RunInputs.Retention.Seconds()))
+			for i := range spec.Params {
+				if spec.Params[i].Name == "retention_seconds" {
+					spec.Params[i].Default = retStr
+					break
+				}
+			}
+		}
 		eng.Register(spec)
 		if spec.Trigger.Webhook != "" {
 			gateway.Register(spec.Trigger.Webhook, webhookH)
@@ -191,6 +250,15 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 				zap.String("task", spec.ID),
 				zap.String("webhook", spec.Trigger.Webhook),
 				zap.String("hint", "set server.auth: true in dicode.yaml to require a real passphrase"))
+		}
+		// body_full_textual footgun: warn once per task ID when a task opts in
+		// to persisting raw textual bodies verbatim. Name-based redaction cannot
+		// reach unstructured content; operators should confirm this is intentional.
+		if spec.RunInputs != nil && spec.RunInputs.BodyFullTextual != nil && *spec.RunInputs.BodyFullTextual {
+			if _, alreadyWarned := bodyFullTextualWarned.LoadOrStore(spec.ID, struct{}{}); !alreadyWarned {
+				log.Warn("task persists raw textual bodies — confirm this is intentional",
+					zap.String("task", spec.ID))
+			}
 		}
 	}
 	rec.OnUnregister = func(id string) {
@@ -350,10 +418,10 @@ func buildRuntimes(
 	database db.DB,
 	log *zap.Logger,
 	gateway *ipc.Gateway,
-) ([]pkgruntime.ManagedRuntime, *trigger.Engine, *denoruntime.Runtime, error) {
+) ([]pkgruntime.ManagedRuntime, *trigger.Engine, *denoruntime.Runtime, *pythonruntime.Runtime, error) {
 	denoRT, err := denoruntime.New(reg, secretsChain, database, log)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("init deno runtime: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("init deno runtime: %w", err)
 	}
 	eng := trigger.New(reg, denoRT, log)
 	eng.SetDB(database)
@@ -391,7 +459,7 @@ func buildRuntimes(
 	denoRT.SetProviderRunner(eng)
 	if !cfg.Defaults.OnFailureChain.IsZero() {
 		if err := eng.SetDefaultsOnFailureChain(cfg.Defaults.OnFailureChain); err != nil {
-			return nil, nil, nil, fmt.Errorf("set on_failure_chain defaults: %w", err)
+			return nil, nil, nil, nil, fmt.Errorf("set on_failure_chain defaults: %w", err)
 		}
 	}
 	if p := cfg.Notifications.Provider; p != nil {
@@ -446,7 +514,7 @@ func buildRuntimes(
 		}
 	}
 
-	return managed, eng, denoRT, nil
+	return managed, eng, denoRT, pythonMgr, nil
 }
 
 func buildSecretsChain(cfg *config.Config, dataDir string, database db.DB, log *zap.Logger) (secrets.Chain, secrets.Manager) {

@@ -32,6 +32,13 @@ const (
 	// the source loader; absent when a task is loaded outside of a source
 	// context (e.g. a raw local folder source or a unit test).
 	VarTaskSetDir = "TASK_SET_DIR"
+
+	// VarDataDir is the absolute path to the daemon's data directory
+	// (config.DataDir, e.g. ~/.dicode). Injected by the reconciler
+	// and the taskset resolver before each task.LoadDir call so tasks can
+	// reference shared paths under the data dir from permissions.fs.path
+	// and params.default fields.
+	VarDataDir = "DATADIR"
 )
 
 // expandString replaces ${VAR} references in s using the provided vars map

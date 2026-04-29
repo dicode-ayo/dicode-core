@@ -99,3 +99,11 @@ spec:
     secret-providers/doppler:
       ref:
         path: ./secret-providers/doppler/task.yaml
+
+    local-storage:
+      ref:
+        path: ./local-storage/task.yaml
+
+    run-inputs-cleanup:
+      ref:
+        path: ./run-inputs-cleanup/task.yaml
