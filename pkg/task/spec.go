@@ -291,6 +291,9 @@ type DicodePermissions struct {
 	RunsPinInput bool `yaml:"runs_pin_input,omitempty" json:"runs_pin_input,omitempty"`
 	// RunsUnpinInput enables dicode.runs.unpin_input().
 	RunsUnpinInput bool `yaml:"runs_unpin_input,omitempty" json:"runs_unpin_input,omitempty"`
+	// RunsReplay enables dicode.runs.replay() — re-fires a previously
+	// persisted run with its stored input.
+	RunsReplay bool `yaml:"runs_replay,omitempty" json:"runs_replay,omitempty"`
 }
 
 // ProviderConfig declares secret-provider settings on a task that

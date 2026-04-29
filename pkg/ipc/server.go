@@ -85,6 +85,7 @@ type Server struct {
 
 	gateway    *Gateway             // optional; enables http.register for daemon tasks
 	inputStore *registry.InputStore // optional; enables dicode.runs.delete_input blob deletion
+	replayer   *registry.Replayer   // optional; enables dicode.runs.replay
 
 	ctx        context.Context
 	socketPath string
@@ -265,6 +266,9 @@ func (s *Server) Start(ctx context.Context) (socketPath, token string, err error
 		if dp.RunsUnpinInput {
 			caps = append(caps, CapRunsUnpinInput)
 		}
+		if dp.RunsReplay {
+			caps = append(caps, CapRunsReplay)
+		}
 	}
 	if s.spec != nil && s.spec.Trigger.Daemon && s.gateway != nil {
 		caps = append(caps, CapHTTPRegister)
@@ -313,6 +317,10 @@ func (s *Server) SetGateway(g *Gateway) { s.gateway = g }
 // can call dicode.runs.delete_input() to remove the blob before clearing the
 // runs row. Must be called before Start.
 func (s *Server) SetInputStore(is *registry.InputStore) { s.inputStore = is }
+
+// SetReplayer attaches the Replayer so tasks with RunsReplay permission
+// can call dicode.runs.replay. nil disables (dispatch returns error).
+func (s *Server) SetReplayer(r *registry.Replayer) { s.replayer = r }
 
 // ReturnCh receives the task return value once the subprocess sends "return".
 func (s *Server) ReturnCh() <-chan any { return s.retCh }
@@ -787,6 +795,26 @@ func (s *Server) handleConn(conn net.Conn) {
 				continue
 			}
 			reply(req.ID, fetched, "")
+
+		case "dicode.runs.replay":
+			if !hasCap(caps, CapRunsReplay) {
+				reply(req.ID, nil, "ipc: permission denied (runs.replay)")
+				continue
+			}
+			if s.replayer == nil {
+				reply(req.ID, nil, "ipc: replayer not configured")
+				continue
+			}
+			if req.RunID == "" {
+				reply(req.ID, nil, "ipc: runID required")
+				continue
+			}
+			newRunID, err := s.replayer.Replay(s.ctx, req.RunID, req.TaskID)
+			if err != nil {
+				reply(req.ID, nil, err.Error())
+				continue
+			}
+			reply(req.ID, map[string]any{"run_id": newRunID}, "")
 
 		// ── dicode.secrets_* ──────────────────────────────────────────────
 

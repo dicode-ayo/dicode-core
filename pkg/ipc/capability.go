@@ -58,6 +58,7 @@ const (
 	// from any task.yaml YAML field — tasks cannot self-grant decrypted
 	// cross-task input access via their permission spec.
 	CapRunsGetInput = "runs.get_input"
+	CapRunsReplay   = "runs.replay" // dicode.runs.replay — re-fire a persisted run
 
 	// Reserved for CLI and WebUI clients (not issued to task shims today).
 	CapHTTPRegister  = "http.register" // register HTTP handler routes (issue #54)

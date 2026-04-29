@@ -132,6 +132,7 @@ export interface Dicode {
     pin_input:    (runID: string)                 => Promise<unknown>;
     unpin_input:  (runID: string)                 => Promise<unknown>;
     get_input:    (runID: string)                 => Promise<unknown>;
+    replay:       (runID: string, taskName?: string) => Promise<unknown>;
   };
 }
 
@@ -321,6 +322,8 @@ const dicode: Dicode = {
       __call__({ method: "dicode.runs.unpin_input", runID }),
     get_input: (runID) =>
       __call__({ method: "dicode.runs.get_input", runID }),
+    replay: (runID, taskName) =>
+      __call__({ method: "dicode.runs.replay", runID, taskID: taskName ?? "" }),
   },
 };
 
