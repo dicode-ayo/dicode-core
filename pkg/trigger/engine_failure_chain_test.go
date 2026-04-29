@@ -31,9 +31,11 @@ func waitForRunOfTask(t *testing.T, e *Engine, taskID string, timeout time.Durat
 	return nil
 }
 
-// ptrString is a helper because task.Spec.OnFailureChain is *string so ""
-// disables the default and nil uses the default.
-func ptrString(s string) *string { return &s }
+// ptrSpec is a helper because task.Spec.OnFailureChain is *task.OnFailureChainSpec so
+// {task: ""} disables the default and nil uses the default.
+func ptrSpec(taskID string) *task.OnFailureChainSpec {
+	return &task.OnFailureChainSpec{Task: taskID}
+}
 
 // TestEngine_SetDefaultsOnFailureChain_FiresFallbackOnFailure verifies that
 // after SetDefaultsOnFailureChain("fallback-task"), a failing run of any
@@ -52,7 +54,9 @@ func TestEngine_SetDefaultsOnFailureChain_FiresFallbackOnFailure(t *testing.T) {
 		task.TriggerConfig{Manual: true})
 	_ = e.reg.Register(failing)
 
-	e.engine.SetDefaultsOnFailureChain("fallback-task")
+	if err := e.engine.SetDefaultsOnFailureChain(task.OnFailureChainSpec{Task: "fallback-task"}); err != nil {
+		t.Fatalf("SetDefaultsOnFailureChain: %v", err)
+	}
 
 	runID, err := e.engine.FireManual(context.Background(), "failing-task", nil)
 	if err != nil {
@@ -88,7 +92,9 @@ func TestEngine_SetDefaultsOnFailureChain_NotFiredOnSuccess(t *testing.T) {
 		task.TriggerConfig{Manual: true})
 	_ = e.reg.Register(ok)
 
-	e.engine.SetDefaultsOnFailureChain("noop-fallback")
+	if err := e.engine.SetDefaultsOnFailureChain(task.OnFailureChainSpec{Task: "noop-fallback"}); err != nil {
+		t.Fatalf("SetDefaultsOnFailureChain: %v", err)
+	}
 
 	runID, err := e.engine.FireManual(context.Background(), "ok-task", nil)
 	if err != nil {
@@ -130,10 +136,12 @@ func TestEngine_OnFailureChain_PerTaskOverride(t *testing.T) {
 	failing := writeTask(t, dir, "failing-with-override",
 		`export default async function main() { throw new Error("boom") }`,
 		task.TriggerConfig{Manual: true})
-	failing.OnFailureChain = ptrString("task-fallback")
+	failing.OnFailureChain = ptrSpec("task-fallback")
 	_ = e.reg.Register(failing)
 
-	e.engine.SetDefaultsOnFailureChain("global-fallback")
+	if err := e.engine.SetDefaultsOnFailureChain(task.OnFailureChainSpec{Task: "global-fallback"}); err != nil {
+		t.Fatalf("SetDefaultsOnFailureChain: %v", err)
+	}
 
 	runID, err := e.engine.FireManual(context.Background(), "failing-with-override", nil)
 	if err != nil {
@@ -173,10 +181,12 @@ func TestEngine_OnFailureChain_EmptyStringDisablesDefault(t *testing.T) {
 	failing := writeTask(t, dir, "opt-out-task",
 		`export default async function main() { throw new Error("boom") }`,
 		task.TriggerConfig{Manual: true})
-	failing.OnFailureChain = ptrString("")
+	failing.OnFailureChain = ptrSpec("")
 	_ = e.reg.Register(failing)
 
-	e.engine.SetDefaultsOnFailureChain("global-fallback-disabled")
+	if err := e.engine.SetDefaultsOnFailureChain(task.OnFailureChainSpec{Task: "global-fallback-disabled"}); err != nil {
+		t.Fatalf("SetDefaultsOnFailureChain: %v", err)
+	}
 
 	runID, err := e.engine.FireManual(context.Background(), "opt-out-task", nil)
 	if err != nil {
@@ -201,7 +211,7 @@ func TestEngine_OnFailureChain_NoLoopSelfReference(t *testing.T) {
 	self := writeTask(t, dir, "self-loop",
 		`export default async function main() { throw new Error("always fails") }`,
 		task.TriggerConfig{Manual: true})
-	self.OnFailureChain = ptrString("self-loop")
+	self.OnFailureChain = ptrSpec("self-loop")
 	_ = e.reg.Register(self)
 
 	runID, err := e.engine.FireManual(context.Background(), "self-loop", nil)

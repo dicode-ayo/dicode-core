@@ -16,6 +16,15 @@ spec:
     hello-webhook-secure:
       ref:
         path: FIXTURES_TASKS_DIR/hello-webhook-secure/task.yaml
+    chain-target:
+      ref:
+        path: FIXTURES_TASKS_DIR/chain-target/task.yaml
+    will-fail:
+      ref:
+        path: FIXTURES_TASKS_DIR/will-fail/task.yaml
+    loop-target:
+      ref:
+        path: FIXTURES_TASKS_DIR/loop-target/task.yaml
     webui:
       ref:
         path: BUILDIN_WEBUI_TASK_YAML

@@ -4,8 +4,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,8 +16,14 @@ import (
 	"github.com/dicode/dicode/pkg/source"
 	"github.com/dicode/dicode/pkg/task"
 	"github.com/fsnotify/fsnotify"
+	gogit "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
 	"go.uber.org/zap"
 )
+
+// ErrDevModeBusy is returned by SetDevMode when clone-mode is already active on
+// this source and a second enable call is attempted.
+var ErrDevModeBusy = errors.New("dev-mode clone-mode already active on this source")
 
 // Source implements source.Source using a TaskSet yaml file as its entry point.
 // It resolves the full task tree on startup and on each change cycle, diffs the
@@ -34,11 +43,18 @@ type Source struct {
 	pollInterval time.Duration
 	log          *zap.Logger
 
+	// dataDir is the daemon's base data directory (e.g. ~/.dicode).
+	// It mirrors the resolver's private dataDir and is kept here so that
+	// clone-mode (enableClone) can compute its own subdirectory paths
+	// without reaching into the resolver's internals.
+	dataDir string
+
 	mu          sync.Mutex
 	snapshot    map[string]taskSnap // namespaced taskID → snapshot
 	ch          chan source.Event   // live channel set by Start; nil before Start
 	devRootPath string              // non-empty overrides rootRef.Path in dev mode
 	watchRoot   string              // directory watched by fsnotify; set in Start
+	cloneRunID  string              // non-empty while a dev-mode clone is active
 
 	// pullStatus tracks the outcome of the most recent git pull; exposed
 	// via PullStatus() for the webui source-health dot. Zero-value means
@@ -77,6 +93,7 @@ func NewSource(
 		namespace:    namespace,
 		rootRef:      rootRef,
 		configPath:   configPath,
+		dataDir:      dataDir,
 		resolver:     NewResolver(dataDir, devMode, log),
 		pollInterval: pollInterval,
 		log:          log,
@@ -118,15 +135,92 @@ func (s *Source) Start(ctx context.Context) (<-chan source.Event, error) {
 	return ch, nil
 }
 
+// DevModeOpts configures dev-mode activation. LocalPath and Branch are mutually
+// exclusive.
+type DevModeOpts struct {
+	LocalPath string // point at a user's local taskset.yaml checkout
+	Branch    string // create a per-fix clone checked out to this branch
+	Base      string // branch to fork from when Branch is unknown remotely
+	RunID     string // clone-dir name component (validated by ValidateRunID)
+}
+
 // SetDevMode enables or disables dev mode for this source.
-// localPath, when non-empty, overrides the root entry point to that local yaml path.
-// Triggers an immediate re-sync so changes are reflected in the registry.
-func (s *Source) SetDevMode(ctx context.Context, enabled bool, localPath string) error {
+//
+// Modes:
+//   - enabled=true, opts.LocalPath != "" : point dev-ref resolution at the
+//     given local path (existing human-dev workflow).
+//   - enabled=true, opts.Branch    != "" : clone-mode — clones the source
+//     repo into a per-run subdirectory of the data-dir and checks out the
+//     requested branch.
+//   - enabled=false : revert to the primary source ref.
+func (s *Source) SetDevMode(ctx context.Context, enabled bool, opts DevModeOpts) error {
+	if opts.LocalPath != "" && opts.Branch != "" {
+		return fmt.Errorf("DevModeOpts: LocalPath and Branch are mutually exclusive")
+	}
+	if enabled && opts.Branch != "" {
+		const reserveSentinel = "__pending__"
+		s.mu.Lock()
+		if s.cloneRunID != "" {
+			s.mu.Unlock()
+			return ErrDevModeBusy
+		}
+		// Reserve the slot atomically. enableClone will overwrite with opts.RunID
+		// on success; on failure we clear it back to "" below.
+		s.cloneRunID = reserveSentinel
+		s.mu.Unlock()
+
+		if err := s.enableClone(ctx, opts); err != nil {
+			s.mu.Lock()
+			s.cloneRunID = ""
+			s.mu.Unlock()
+			return err
+		}
+		s.resolver.SetDevMode(true)
+		s.mu.Lock()
+		ch := s.ch
+		s.mu.Unlock()
+		if ch != nil {
+			return s.syncAndEmit(ctx, ch)
+		}
+		return nil
+	}
+	if !enabled {
+		// If we were in clone-mode, remove the clone directory and clear runID.
+		s.mu.Lock()
+		runID := s.cloneRunID
+		s.cloneRunID = ""
+		s.mu.Unlock()
+		if runID != "" {
+			// runID was validated by ValidateRunID at enableClone time before
+			// being assigned to s.cloneRunID, so it's already safe. We re-check
+			// here for static-analysis clarity and as defense in depth against
+			// any future code path that might bypass the validator.
+			cloneRoot := filepath.Join(s.dataDir, "dev-clones", s.namespace)
+			clonePath := filepath.Join(cloneRoot, runID)
+			cleanClonePath := filepath.Clean(clonePath)
+			if cleanClonePath != clonePath || !strings.HasPrefix(cleanClonePath+string(filepath.Separator), cloneRoot+string(filepath.Separator)) {
+				s.log.Warn("dev-clones disable: clone path escapes data dir; refusing to remove",
+					zap.String("source", s.namespace),
+					zap.String("path", clonePath),
+				)
+			} else if err := os.RemoveAll(clonePath); err != nil {
+				// Log but don't fail — the dev-clones-cleanup buildin task
+				// will sweep the orphan on its next run. Disable must always succeed.
+				s.log.Warn("dev-clones disable: removeall failed",
+					zap.String("source", s.namespace),
+					zap.String("path", clonePath),
+					zap.Error(err),
+				)
+			}
+		}
+	}
+
+	// existing LocalPath / disable path:
 	s.resolver.SetDevMode(enabled)
 	s.mu.Lock()
-	s.devRootPath = localPath
-	if enabled && localPath != "" {
-		s.watchRoot = filepath.Dir(localPath)
+	s.devRootPath = opts.LocalPath
+	if enabled && opts.LocalPath != "" {
+		s.watchRoot = filepath.Dir(opts.LocalPath)
 	}
 	ch := s.ch
 	s.mu.Unlock()
@@ -134,6 +228,95 @@ func (s *Source) SetDevMode(ctx context.Context, enabled bool, localPath string)
 		return nil // not started yet; will take effect on next Start
 	}
 	return s.syncAndEmit(ctx, ch)
+}
+
+// enableClone clones this source's git repo into ${dataDir}/dev-clones/<namespace>/<runID>/
+// and switches devRootPath to point at the cloned taskset.yaml. If opts.Branch
+// doesn't exist remotely, it is created locally from opts.Base (or the source's
+// tracked branch). Pure go-git — no `git` binary.
+func (s *Source) enableClone(ctx context.Context, opts DevModeOpts) error {
+	if opts.RunID == "" {
+		return fmt.Errorf("DevModeOpts.RunID required when Branch is set")
+	}
+	if err := ValidateRunID(opts.RunID); err != nil {
+		return fmt.Errorf("validate run id: %w", err)
+	}
+	// TODO(#238): pass per-task branch_prefix once auto-fix override wires it.
+	// branch_prefix enforcement is deferred to #238 (auto-fix taskset override
+	// where the prefix config is wired). Local format validity is sufficient here.
+	if err := ValidateBranchName(opts.Branch, ""); err != nil {
+		return fmt.Errorf("validate branch: %w", err)
+	}
+	if s.rootRef == nil || s.rootRef.URL == "" {
+		return fmt.Errorf("clone-mode requires a git source (rootRef.URL is empty)")
+	}
+
+	// Build the clone path defensively. ValidateRunID above already rejects
+	// any opts.RunID containing '/', '..', or other traversal characters
+	// (regex: ^[A-Za-z0-9_-]{1,64}$), but we re-verify the joined result is
+	// rooted at the expected parent directory so static analysers (CodeQL)
+	// can see the safety property without tracing through ValidateRunID.
+	cloneRoot := filepath.Join(s.dataDir, "dev-clones", s.namespace)
+	clonePath := filepath.Join(cloneRoot, opts.RunID)
+	cleanClonePath := filepath.Clean(clonePath)
+	if cleanClonePath != clonePath || !strings.HasPrefix(cleanClonePath+string(filepath.Separator), cloneRoot+string(filepath.Separator)) {
+		return fmt.Errorf("clone path escapes data dir: %q", clonePath)
+	}
+	if err := os.MkdirAll(cloneRoot, 0o755); err != nil {
+		return fmt.Errorf("mkdir parent: %w", err)
+	}
+
+	cloneOpts := &gogit.CloneOptions{
+		URL: s.rootRef.URL,
+	}
+	repo, err := gogit.PlainCloneContext(ctx, clonePath, false, cloneOpts)
+	if err != nil {
+		return fmt.Errorf("clone: %w", err)
+	}
+
+	wt, err := repo.Worktree()
+	if err != nil {
+		return fmt.Errorf("worktree: %w", err)
+	}
+
+	branchRef := plumbing.NewBranchReferenceName(opts.Branch)
+	co := &gogit.CheckoutOptions{Branch: branchRef}
+	if err := wt.Checkout(co); err != nil {
+		// branch doesn't exist — create it locally from Base
+		base := opts.Base
+		if base == "" {
+			base = s.rootRef.Branch
+		}
+		if base == "" {
+			return fmt.Errorf("checkout %q failed and no base branch resolvable: %w", opts.Branch, err)
+		}
+		// Try local branch ref first, then fall back to remote tracking ref.
+		baseHash, resolveErr := repo.ResolveRevision(plumbing.Revision(plumbing.NewBranchReferenceName(base)))
+		if resolveErr != nil {
+			remoteRef := plumbing.NewRemoteReferenceName("origin", base)
+			baseHash, resolveErr = repo.ResolveRevision(plumbing.Revision(remoteRef))
+			if resolveErr != nil {
+				return fmt.Errorf("resolve base %q: %w", base, resolveErr)
+			}
+		}
+		if err := repo.Storer.SetReference(plumbing.NewHashReference(branchRef, *baseHash)); err != nil {
+			return fmt.Errorf("create branch %q: %w", opts.Branch, err)
+		}
+		if err := wt.Checkout(co); err != nil {
+			return fmt.Errorf("checkout %q after create: %w", opts.Branch, err)
+		}
+	}
+
+	// devRootPath points at the cloned root taskset.yaml.
+	rootEntry := s.rootRef.Path
+	if rootEntry == "" {
+		rootEntry = "taskset.yaml"
+	}
+	s.mu.Lock()
+	s.devRootPath = filepath.Join(clonePath, rootEntry)
+	s.cloneRunID = opts.RunID
+	s.mu.Unlock()
+	return nil
 }
 
 // DevMode reports whether dev mode is currently active.
@@ -145,6 +328,12 @@ func (s *Source) DevRootPath() string {
 	defer s.mu.Unlock()
 	return s.devRootPath
 }
+
+// DataDir returns the daemon data directory used for source clones.
+func (s *Source) DataDir() string { return s.dataDir }
+
+// Namespace returns this source's root namespace segment.
+func (s *Source) Namespace() string { return s.namespace }
 
 // Sync triggers an immediate re-resolution without emitting events.
 func (s *Source) Sync(ctx context.Context) error {

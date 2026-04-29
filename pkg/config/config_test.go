@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -419,5 +420,49 @@ server:
 				t.Errorf("Load(bcrypt_cost=%d): expected error, got nil", bad)
 			}
 		})
+	}
+}
+
+func TestConfigLoad_RejectsAutonomousAtDefaults(t *testing.T) {
+	yaml := `
+defaults:
+  on_failure_chain:
+    task: auto-fix
+    params:
+      mode: autonomous
+`
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "dicode.yaml")
+	if err := os.WriteFile(path, []byte(yaml), 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load accepted autonomous-at-defaults; want error")
+	}
+	if !strings.Contains(err.Error(), "autonomous") {
+		t.Errorf("error = %v; want mention of autonomous", err)
+	}
+}
+
+func TestConfigLoad_RejectsReservedKeyCollision(t *testing.T) {
+	yaml := `
+defaults:
+  on_failure_chain:
+    task: auto-fix
+    params:
+      taskID: somehow
+`
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "dicode.yaml")
+	if err := os.WriteFile(path, []byte(yaml), 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load accepted reserved-key collision; want error")
+	}
+	if !strings.Contains(err.Error(), "reserved") {
+		t.Errorf("error = %v; want mention of reserved", err)
 	}
 }

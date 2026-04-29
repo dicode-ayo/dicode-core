@@ -293,8 +293,8 @@ type Spec struct {
 	// MCPPort declares that this daemon task exposes an MCP server on the given port.
 	MCPPort int `yaml:"mcp_port,omitempty" json:"mcp_port,omitempty"`
 	// OnFailureChain overrides the global defaults.on_failure_chain for this task.
-	// nil = inherit global default, "" = disable, "task-id" = custom target.
-	OnFailureChain *string `yaml:"on_failure_chain,omitempty" json:"on_failure_chain,omitempty"`
+	// Set to {task: ""} to disable the global default for this task only.
+	OnFailureChain *OnFailureChainSpec `yaml:"on_failure_chain,omitempty" json:"on_failure_chain,omitempty"`
 
 	// TaskDir is the directory path of the task in the repo (not stored in YAML).
 	TaskDir string `yaml:"-" json:"-"`
@@ -432,6 +432,11 @@ func (s *Spec) validate() error {
 	}
 	if triggers > 1 {
 		return fmt.Errorf("only one trigger type is allowed per task")
+	}
+	if s.OnFailureChain != nil {
+		if err := s.OnFailureChain.Validate(); err != nil {
+			return fmt.Errorf("on_failure_chain: %w", err)
+		}
 	}
 	switch s.Runtime {
 	case RuntimeDeno, "js", "":

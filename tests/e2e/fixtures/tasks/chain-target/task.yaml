@@ -1,0 +1,8 @@
+apiVersion: dicode/v1
+kind: Task
+name: Chain Target
+description: Echo task used by on_failure_chain e2e tests. Returns its full input.
+runtime: js
+trigger:
+  manual: true
+timeout: 10s
