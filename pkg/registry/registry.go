@@ -461,3 +461,40 @@ func (r *Registry) PinRunInput(ctx context.Context, runID string) error {
 func (r *Registry) UnpinRunInput(ctx context.Context, runID string) error {
 	return r.db.Exec(ctx, `UPDATE runs SET input_pinned = 0 WHERE id = ?`, runID)
 }
+
+// SweepStalePins clears input_pinned on any row whose pin is no longer
+// load-bearing — i.e., the run's status is not "running" anymore. Returns
+// the number of rows cleared.
+//
+// Called at engine startup to recover from daemons that crashed mid-fix
+// before unpinning. A pinned + finished row would otherwise prevent the
+// retention sweep from ever collecting that input blob.
+func (r *Registry) SweepStalePins(ctx context.Context) (int, error) {
+	// SQLite doesn't return RowsAffected through the DB.Exec wrapper without
+	// an extra round-trip. Count first, then update — one extra query is
+	// fine at startup.
+	var n int
+	err := r.db.Query(ctx,
+		`SELECT COUNT(*) FROM runs WHERE input_pinned = 1 AND status != ?`,
+		[]any{StatusRunning},
+		func(rows db.Scanner) error {
+			if rows.Next() {
+				return rows.Scan(&n)
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		return 0, err
+	}
+	if n == 0 {
+		return 0, nil
+	}
+	if err := r.db.Exec(ctx,
+		`UPDATE runs SET input_pinned = 0 WHERE input_pinned = 1 AND status != ?`,
+		StatusRunning,
+	); err != nil {
+		return 0, err
+	}
+	return n, nil
+}

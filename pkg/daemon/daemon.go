@@ -159,6 +159,13 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	} else if len(stale) > 0 {
 		log.Info("cancelled stale runs from previous session", zap.Strings("tasks", stale))
 	}
+	if n, err := reg.SweepStalePins(ctx); err == nil {
+		if n > 0 {
+			log.Info("cleared stale input pins at startup", zap.Int("count", n))
+		}
+	} else {
+		log.Warn("sweep stale input pins failed", zap.Error(err))
+	}
 
 	// 5. HTTP gateway.
 	gateway := ipc.NewGateway()
