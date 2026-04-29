@@ -38,6 +38,7 @@ func TestValidateBranchName_RejectsBadRefFormat(t *testing.T) {
 		{"leading-slash", "/fix/abc", "fix/"},
 		{"trailing-slash", "fix/abc/", "fix/"},
 		{"double-slash", "fix//abc", "fix/"},
+		{"reflog-sequence", "fix/@{0}", "fix/"},
 		{"trailing-lock", "fix/abc.lock", "fix/"},
 		{"at-sign-only", "@", ""},
 		{"empty", "", ""},

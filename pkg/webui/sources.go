@@ -189,6 +189,9 @@ func (s *Server) apiSetDevMode(w http.ResponseWriter, r *http.Request) {
 		"source":     name,
 		"dev_mode":   body.Enabled,
 		"local_path": body.LocalPath,
+		"branch":     body.Branch,
+		"base":       body.Base,
+		"run_id":     body.RunID,
 	})
 }
 

@@ -33,8 +33,8 @@ func ValidateBranchName(branch, prefix string) error {
 	if strings.HasPrefix(branch, "-") {
 		return fmt.Errorf("%w: leading dash", ErrInvalidBranchName)
 	}
-	if strings.Contains(branch, "..") || strings.Contains(branch, "//") {
-		return fmt.Errorf("%w: '..' or '//'", ErrInvalidBranchName)
+	if strings.Contains(branch, "..") || strings.Contains(branch, "//") || strings.Contains(branch, "@{") {
+		return fmt.Errorf("%w: forbidden sequence", ErrInvalidBranchName)
 	}
 	if strings.HasSuffix(branch, ".lock") {
 		return fmt.Errorf("%w: trailing .lock", ErrInvalidBranchName)
@@ -59,8 +59,11 @@ func ValidateBranchName(branch, prefix string) error {
 	return nil
 }
 
-// ValidateBranchPrefix is called at config-load on each task's branch_prefix
+// ValidateBranchPrefix is invoked at config-load on each task's branch_prefix
 // to reject glob/regex constructs that would make ValidateBranchName ambiguous.
+//
+// Currently exported for use by the auto-fix taskset override (#238); not yet
+// wired into the live config-load path.
 func ValidateBranchPrefix(prefix string) error {
 	if prefix == "" {
 		return nil

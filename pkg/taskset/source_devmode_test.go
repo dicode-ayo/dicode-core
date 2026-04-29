@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -216,5 +217,47 @@ spec:
 	err := src.SetDevMode(ctx, true, DevModeOpts{Branch: "fix/b", Base: "main", RunID: "b"})
 	if !errors.Is(err, ErrDevModeBusy) {
 		t.Errorf("got %v, want ErrDevModeBusy", err)
+	}
+}
+
+func TestSetDevMode_Branch_ConcurrentSecondCallReturnsBusy(t *testing.T) {
+	remoteDir := newFixtureRemote(t, "main", map[string]string{
+		"taskset.yaml": `apiVersion: dicode/v1
+kind: TaskSet
+metadata: {name: fixture}
+spec: {entries: {}}
+`,
+	})
+	src := newTestSourceWithRemote(t, "ns", remoteDir, "main")
+	ctx := context.Background()
+
+	var wg sync.WaitGroup
+	results := make([]error, 2)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		results[0] = src.SetDevMode(ctx, true, DevModeOpts{Branch: "fix/a", Base: "main", RunID: "ra"})
+	}()
+	go func() {
+		defer wg.Done()
+		results[1] = src.SetDevMode(ctx, true, DevModeOpts{Branch: "fix/b", Base: "main", RunID: "rb"})
+	}()
+	wg.Wait()
+
+	// Exactly one nil, exactly one ErrDevModeBusy.
+	nils := 0
+	busies := 0
+	for _, err := range results {
+		switch {
+		case err == nil:
+			nils++
+		case errors.Is(err, ErrDevModeBusy):
+			busies++
+		default:
+			t.Errorf("unexpected error: %v", err)
+		}
+	}
+	if nils != 1 || busies != 1 {
+		t.Errorf("got nils=%d busies=%d, want exactly 1 of each", nils, busies)
 	}
 }

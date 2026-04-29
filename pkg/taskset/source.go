@@ -157,13 +157,21 @@ func (s *Source) SetDevMode(ctx context.Context, enabled bool, opts DevModeOpts)
 		return fmt.Errorf("DevModeOpts: LocalPath and Branch are mutually exclusive")
 	}
 	if enabled && opts.Branch != "" {
+		const reserveSentinel = "__pending__"
 		s.mu.Lock()
-		busy := s.cloneRunID != ""
-		s.mu.Unlock()
-		if busy {
+		if s.cloneRunID != "" {
+			s.mu.Unlock()
 			return ErrDevModeBusy
 		}
+		// Reserve the slot atomically. enableClone will overwrite with opts.RunID
+		// on success; on failure we clear it back to "" below.
+		s.cloneRunID = reserveSentinel
+		s.mu.Unlock()
+
 		if err := s.enableClone(ctx, opts); err != nil {
+			s.mu.Lock()
+			s.cloneRunID = ""
+			s.mu.Unlock()
 			return err
 		}
 		s.resolver.SetDevMode(true)
