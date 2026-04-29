@@ -17,6 +17,7 @@ import (
 	"github.com/dicode/dicode/pkg/relay"
 	"github.com/dicode/dicode/pkg/secrets"
 	"github.com/dicode/dicode/pkg/task"
+	"github.com/dicode/dicode/pkg/tasktest"
 	"go.uber.org/zap"
 )
 
@@ -268,6 +269,9 @@ func (s *Server) Start(ctx context.Context) (socketPath, token string, err error
 		}
 		if dp.RunsReplay {
 			caps = append(caps, CapRunsReplay)
+		}
+		if dp.TasksTest {
+			caps = append(caps, CapTasksTest)
 		}
 	}
 	if s.spec != nil && s.spec.Trigger.Daemon && s.gateway != nil {
@@ -815,6 +819,27 @@ func (s *Server) handleConn(conn net.Conn) {
 				continue
 			}
 			reply(req.ID, map[string]any{"run_id": newRunID}, "")
+
+		case "dicode.tasks.test":
+			if !hasCap(caps, CapTasksTest) {
+				reply(req.ID, nil, "ipc: permission denied (tasks.test)")
+				continue
+			}
+			if req.TaskID == "" {
+				reply(req.ID, nil, "ipc: taskID required")
+				continue
+			}
+			spec, ok := s.registry.Get(req.TaskID)
+			if !ok {
+				reply(req.ID, nil, "task not registered: "+req.TaskID)
+				continue
+			}
+			result, err := tasktest.Run(s.ctx, spec)
+			if err != nil {
+				reply(req.ID, nil, err.Error())
+				continue
+			}
+			reply(req.ID, result, "")
 
 		// ── dicode.secrets_* ──────────────────────────────────────────────
 

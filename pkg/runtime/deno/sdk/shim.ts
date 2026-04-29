@@ -134,6 +134,9 @@ export interface Dicode {
     get_input:    (runID: string)                 => Promise<unknown>;
     replay:       (runID: string, taskName?: string) => Promise<unknown>;
   };
+  tasks: {
+    test: (taskID: string) => Promise<unknown>;
+  };
 }
 
 // ── connection ────────────────────────────────────────────────────────────────
@@ -324,6 +327,10 @@ const dicode: Dicode = {
       __call__({ method: "dicode.runs.get_input", runID }),
     replay: (runID, taskName) =>
       __call__({ method: "dicode.runs.replay", runID, taskID: taskName ?? "" }),
+  },
+  tasks: {
+    test: (taskID) =>
+      __call__({ method: "dicode.tasks.test", taskID }),
   },
 };
 

@@ -294,6 +294,9 @@ type DicodePermissions struct {
 	// RunsReplay enables dicode.runs.replay() — re-fires a previously
 	// persisted run with its stored input.
 	RunsReplay bool `yaml:"runs_replay,omitempty" json:"runs_replay,omitempty"`
+	// TasksTest enables dicode.tasks.test() — runs a task's sibling test file
+	// via pkg/tasktest.
+	TasksTest bool `yaml:"tasks_test,omitempty" json:"tasks_test,omitempty"`
 }
 
 // ProviderConfig declares secret-provider settings on a task that

@@ -59,6 +59,7 @@ const (
 	// cross-task input access via their permission spec.
 	CapRunsGetInput = "runs.get_input"
 	CapRunsReplay   = "runs.replay" // dicode.runs.replay — re-fire a persisted run
+	CapTasksTest    = "tasks.test"  // dicode.tasks.test — run a task's sibling test file
 
 	// Reserved for CLI and WebUI clients (not issued to task shims today).
 	CapHTTPRegister  = "http.register" // register HTTP handler routes (issue #54)

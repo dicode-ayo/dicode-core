@@ -1504,3 +1504,75 @@ func TestIPC_RunsReplay_GrantedByCap(t *testing.T) {
 		t.Errorf("expected CapRunsReplay in caps when RunsReplay=true, got %v", caps)
 	}
 }
+
+// TestIPC_TasksTest_RequiresCap verifies that a task spec WITHOUT
+// permissions.dicode.tasks_test: true cannot call dicode.tasks.test —
+// it must receive "permission denied".
+func TestIPC_TasksTest_RequiresCap(t *testing.T) {
+	e := newTestEnv(t)
+
+	// Build a spec without tasks_test permission.
+	spec := &task.Spec{
+		Permissions: task.Permissions{
+			Dicode: &task.DicodePermissions{
+				RunsListExpired: true,
+				RunsDeleteInput: true,
+				RunsPinInput:    true,
+				RunsUnpinInput:  true,
+				// TasksTest deliberately omitted.
+			},
+		},
+	}
+
+	conn, _ := e.startWithSpec(t, nil, nil, spec, nil)
+
+	// Send a dicode.tasks.test request — should be denied.
+	sendMsg(t, conn, map[string]any{
+		"id":     "tasks-test-1",
+		"method": "dicode.tasks.test",
+		"taskID": "some-task-id",
+	})
+	resp := recvMsg(t, conn)
+	errMsg, _ := resp["error"].(string)
+	if !strings.Contains(errMsg, "permission denied") {
+		t.Errorf("expected permission denied error, got: %q (full resp: %#v)", errMsg, resp)
+	}
+}
+
+// TestIPC_TasksTest_GrantedByCap verifies that when TasksTest is set in the
+// spec, CapTasksTest appears in the handshake capability list.
+func TestIPC_TasksTest_GrantedByCap(t *testing.T) {
+	e := newTestEnv(t)
+
+	spec := &task.Spec{
+		Permissions: task.Permissions{
+			Dicode: &task.DicodePermissions{
+				TasksTest: true,
+			},
+		},
+	}
+
+	runID := fmt.Sprintf("cap-tasks-test-%d", time.Now().UnixNano())
+	srv := New(runID, "sec-test-task", e.secret, e.reg, e.db, nil, nil, zap.NewNop(), spec, nil)
+	socketPath, token, err := srv.Start(context.Background())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(srv.Stop)
+
+	conn := dial(t, socketPath)
+	t.Cleanup(func() { conn.Close() })
+	caps := doHandshake(t, conn, token)
+
+	has := func(cap string) bool {
+		for _, c := range caps {
+			if c == cap {
+				return true
+			}
+		}
+		return false
+	}
+	if !has(CapTasksTest) {
+		t.Errorf("expected CapTasksTest in caps when TasksTest=true, got %v", caps)
+	}
+}
