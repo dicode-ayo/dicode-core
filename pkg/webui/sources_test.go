@@ -2,6 +2,8 @@ package webui
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -34,5 +36,40 @@ func TestSourceManager_List_LocalSource_NoPullFieldsInJSON(t *testing.T) {
 	}
 	if strings.Contains(string(b), "last_pull_error") {
 		t.Errorf("local source JSON should omit last_pull_error; got %s", b)
+	}
+}
+
+// TestApiSetDevMode_DecodesBranchBody verifies that the new branch/base/run_id
+// JSON fields are wired through the handler's decode path without error.
+// With a nil SourceManager (the default newTestServer setup), the handler
+// returns 503 "source manager not configured" AFTER successfully parsing the
+// body. A 400 would mean the JSON parse failed — that's what we guard against.
+func TestApiSetDevMode_DecodesBranchBody(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	body := `{"enabled":true,"branch":"fix/test","base":"main","run_id":"r1"}`
+	req := httptest.NewRequest(http.MethodPatch, "/api/sources/fixture/dev", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code == http.StatusBadRequest {
+		t.Fatalf("got 400 BadRequest; body parse failed for new fields. body=%s", w.Body.String())
+	}
+}
+
+// TestApiSetDevMode_RejectsMalformedJson verifies that malformed JSON in the
+// request body is rejected with 400 BadRequest before any SourceManager check.
+func TestApiSetDevMode_RejectsMalformedJson(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	body := `not-json`
+	req := httptest.NewRequest(http.MethodPatch, "/api/sources/fixture/dev", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("got %d; want 400 BadRequest for malformed body. body=%s", w.Code, w.Body.String())
 	}
 }
