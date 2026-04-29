@@ -1128,12 +1128,26 @@ func (e *Engine) WebhookHandler() http.Handler {
 		// raw input being available as the `input` global (RunOptions.Input).
 		params := flatStringMap(input)
 
+		// Build the WebhookContext so the persistence layer can apply
+		// content-type-aware redaction to the raw body and populate
+		// Method/Path/Headers/Query on the stored PersistedInput.
+		// For GET requests body is nil; body was already read above for
+		// POST/PUT/etc. and is safe to reference here.
+		webhookCtx := &pkgruntime.WebhookContext{
+			Method:      r.Method,
+			Path:        r.URL.Path,
+			Headers:     r.Header,
+			Query:       r.URL.Query(),
+			RawBody:     body,
+			ContentType: r.Header.Get("Content-Type"),
+		}
+
 		// Default: wait for the run to finish and return the result inline.
 		// Pass ?wait=false to fire-and-forget (returns runId immediately).
 		async := r.URL.Query().Get("wait") == "false"
 
 		if async {
-			runID, err := e.fireAsync(r.Context(), spec, pkgruntime.RunOptions{Input: input, Params: params}, "webhook")
+			runID, err := e.fireAsync(r.Context(), spec, pkgruntime.RunOptions{Input: input, Params: params, WebhookCtx: webhookCtx}, "webhook")
 			if err != nil {
 				http.Error(w, "task failed to start", http.StatusInternalServerError)
 				return
@@ -1144,7 +1158,7 @@ func (e *Engine) WebhookHandler() http.Handler {
 			return
 		}
 
-		runID, result, err := e.fireSync(spec, pkgruntime.RunOptions{Input: input, Params: params}, "webhook")
+		runID, result, err := e.fireSync(spec, pkgruntime.RunOptions{Input: input, Params: params, WebhookCtx: webhookCtx}, "webhook")
 		if err != nil {
 			http.Error(w, "task failed to start", http.StatusInternalServerError)
 			return
@@ -1348,7 +1362,23 @@ func (e *Engine) startRun(spec *task.Spec, opts *pkgruntime.RunOptions, source s
 	// Best-effort input persistence. Failures do not block the run — the
 	// auto-fix loop (#234) handles missing inputs via ErrInputUnavailable.
 	if e.inputStore != nil && e.shouldPersistInput(spec) {
-		in := registry.BuildPersistedInputFromRunOpts(source, opts.Params, opts.Input)
+		var web *registry.WebhookFields
+		if opts.WebhookCtx != nil {
+			bft := false
+			if spec.RunInputs != nil && spec.RunInputs.BodyFullTextual != nil {
+				bft = *spec.RunInputs.BodyFullTextual
+			}
+			web = &registry.WebhookFields{
+				Method:          opts.WebhookCtx.Method,
+				Path:            opts.WebhookCtx.Path,
+				Headers:         opts.WebhookCtx.Headers,
+				Query:           opts.WebhookCtx.Query,
+				RawBody:         opts.WebhookCtx.RawBody,
+				ContentType:     opts.WebhookCtx.ContentType,
+				BodyFullTextual: bft,
+			}
+		}
+		in := registry.BuildPersistedInputFromRunOpts(source, opts.Params, opts.Input, web)
 		key, size, storedAt, perr := e.inputStore.Persist(context.Background(), opts.RunID, in)
 		if perr != nil {
 			e.log.Warn("run-input persist failed",

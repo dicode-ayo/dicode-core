@@ -214,6 +214,12 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	webhookH := eng.WebhookHandler()
 	var webhookMu sync.Mutex
 	webhookPaths := make(map[string]string)
+	// bodyFullTextualWarned tracks which task IDs have already had their
+	// body_full_textual WARN emitted. The reconciler may re-register the same
+	// task on each reload cycle; without deduplication the WARN fires every
+	// 30 s, flooding the log. LoadOrStore ensures at most one WARN per task ID
+	// per daemon lifetime.
+	var bodyFullTextualWarned sync.Map
 	rec.OnRegister = func(spec *task.Spec) {
 		eng.Register(spec)
 		if spec.Trigger.Webhook != "" {
@@ -228,12 +234,14 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 				zap.String("webhook", spec.Trigger.Webhook),
 				zap.String("hint", "set server.auth: true in dicode.yaml to require a real passphrase"))
 		}
-		// body_full_textual footgun: warn when a task opts in to persisting
-		// raw textual bodies verbatim. Name-based redaction cannot reach
-		// unstructured content; operators should confirm this is intentional.
+		// body_full_textual footgun: warn once per task ID when a task opts in
+		// to persisting raw textual bodies verbatim. Name-based redaction cannot
+		// reach unstructured content; operators should confirm this is intentional.
 		if spec.RunInputs != nil && spec.RunInputs.BodyFullTextual != nil && *spec.RunInputs.BodyFullTextual {
-			log.Warn("task persists raw textual bodies — confirm this is intentional",
-				zap.String("task", spec.ID))
+			if _, alreadyWarned := bodyFullTextualWarned.LoadOrStore(spec.ID, struct{}{}); !alreadyWarned {
+				log.Warn("task persists raw textual bodies — confirm this is intentional",
+					zap.String("task", spec.ID))
+			}
 		}
 	}
 	rec.OnUnregister = func(id string) {

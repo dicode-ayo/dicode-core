@@ -255,3 +255,35 @@ func TestRedactParams_PrimitiveAndNil(t *testing.T) {
 		t.Errorf("primitives should produce no redaction entries")
 	}
 }
+
+func TestRedactParams_DepthGuard(t *testing.T) {
+	// Build a 100-deep nested map — exceeds maxRedactionDepth (64).
+	var v any = "leaf"
+	for i := 0; i < 100; i++ {
+		v = map[string]any{"k": v}
+	}
+	redacted := []string{}
+	out := redactParams(v, "params", &redacted)
+	// Walk the result and confirm we hit the depth-guard placeholder somewhere
+	// before reaching the leaf.
+	cur := out
+	for i := 0; i < 100; i++ {
+		s, isStr := cur.(string)
+		if isStr {
+			// We reached a string: should be either the depth-guard placeholder
+			// or the original leaf (if depth guard wasn't needed, which can't
+			// happen here since depth 100 > maxRedactionDepth 64).
+			if s != "<redacted-too-deep>" && s != "leaf" {
+				t.Errorf("unexpected string at depth %d: %q", i, s)
+			}
+			return
+		}
+		m, ok := cur.(map[string]any)
+		if !ok {
+			t.Fatalf("unexpected type at depth %d: %T", i, cur)
+		}
+		cur = m["k"]
+	}
+	// If we exit the loop without hitting a string, the depth guard never fired.
+	t.Errorf("depth guard never triggered; walked all 100 levels without hitting placeholder")
+}

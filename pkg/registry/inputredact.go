@@ -6,10 +6,29 @@ import (
 	"strings"
 )
 
+// WebhookFields is the subset of HTTP context the redaction layer needs.
+// Mirrors pkgruntime.WebhookContext to avoid a runtime → registry import edge.
+// The trigger engine maps its WebhookContext into this struct before calling
+// BuildPersistedInputFromRunOpts.
+type WebhookFields struct {
+	Method          string
+	Path            string
+	Headers         map[string][]string
+	Query           map[string][]string
+	RawBody         []byte
+	ContentType     string
+	BodyFullTextual bool
+}
+
 // BuildPersistedInputFromRunOpts is the public helper trigger.Engine uses to
 // build a PersistedInput from a run's source + params + input. Marshalling +
 // redaction happen here so callers don't need direct access to redactParams.
-func BuildPersistedInputFromRunOpts(source string, params map[string]string, input any) PersistedInput {
+//
+// web must be non-nil for webhook-triggered runs; it carries the raw HTTP
+// context so content-type-aware body redaction (Task 7) and header/query
+// redaction (Task 6) are actually invoked. For non-webhook sources (cron,
+// chain, manual, daemon) pass nil and the prior parsed-input fallback applies.
+func BuildPersistedInputFromRunOpts(source string, params map[string]string, input any, web *WebhookFields) PersistedInput {
 	in := PersistedInput{Source: source}
 	redacted := []string{}
 
@@ -22,9 +41,27 @@ func BuildPersistedInputFromRunOpts(source string, params map[string]string, inp
 		in.Params = redactParams(p, "params", &redacted).(map[string]any)
 	}
 
-	// input is interface{} — most commonly a parsed JSON body or chain payload
-	// map. Recurse via redactParams if it's a map; otherwise marshal as-is.
-	if input != nil {
+	if web != nil {
+		// Webhook-triggered run: populate HTTP-level fields with full redaction.
+		in.Method = web.Method
+		in.Path = web.Path
+		if len(web.Headers) > 0 {
+			in.Headers = redactHeaders(web.Headers, &redacted)
+		}
+		if len(web.Query) > 0 {
+			in.Query = redactQuery(web.Query, &redacted)
+		}
+		if len(web.RawBody) > 0 && web.ContentType != "" {
+			body := redactBody(web.RawBody, web.ContentType, web.BodyFullTextual, &redacted)
+			in.BodyKind = body.BodyKind
+			in.Body = body.Body
+			in.BodyHash = body.BodyHash
+			in.BodyParts = body.BodyParts
+		}
+	} else if input != nil {
+		// Non-webhook trigger (chain, manual, cron, daemon): preserve the prior
+		// behaviour of storing the parsed input as redacted JSON. No Method/
+		// Path/Headers/Query because there is no HTTP context here.
 		walked := redactParams(input, "input", &redacted)
 		if raw, err := json.Marshal(walked); err == nil {
 			in.Body = raw
@@ -162,11 +199,22 @@ func redactStringSliceMap(in map[string][]string, prefix string, redacted *[]str
 	return out
 }
 
+// maxRedactionDepth caps recursion in redactParams to avoid stack overflows
+// on adversarially deep JSON structures.
+const maxRedactionDepth = 64
+
 // redactParams recursively walks a generic value (typically map[string]any
 // from JSON) replacing values for keys whose names match the deny-list.
 // Lists are walked positionally with [N] in the path. Returns a new value;
 // does NOT mutate the input.
 func redactParams(v any, path string, redacted *[]string) any {
+	return redactParamsDepth(v, path, redacted, 0)
+}
+
+func redactParamsDepth(v any, path string, redacted *[]string, depth int) any {
+	if depth > maxRedactionDepth {
+		return "<redacted-too-deep>"
+	}
 	switch x := v.(type) {
 	case map[string]any:
 		out := make(map[string]any, len(x))
@@ -177,13 +225,13 @@ func redactParams(v any, path string, redacted *[]string) any {
 				*redacted = append(*redacted, childPath)
 				continue
 			}
-			out[k] = redactParams(child, childPath, redacted)
+			out[k] = redactParamsDepth(child, childPath, redacted, depth+1)
 		}
 		return out
 	case []any:
 		out := make([]any, len(x))
 		for i, child := range x {
-			out[i] = redactParams(child, fmt.Sprintf("%s[%d]", path, i), redacted)
+			out[i] = redactParamsDepth(child, fmt.Sprintf("%s[%d]", path, i), redacted, depth+1)
 		}
 		return out
 	default:

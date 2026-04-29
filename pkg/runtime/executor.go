@@ -8,6 +8,21 @@ import (
 	"github.com/dicode/dicode/pkg/task"
 )
 
+// WebhookContext captures HTTP-level details for a webhook-triggered run.
+// Populated by the trigger engine's webhook handler; nil for other trigger
+// sources (cron, manual, chain, daemon, replay).
+//
+// Used by the run-input persistence layer (#233) to apply content-type-aware
+// redaction to the request body and HTTP headers/query before storing.
+type WebhookContext struct {
+	Method      string
+	Path        string
+	Headers     map[string][]string
+	Query       map[string][]string
+	RawBody     []byte
+	ContentType string
+}
+
 // RunOptions controls a single task execution.
 type RunOptions struct {
 	RunID       string
@@ -23,6 +38,12 @@ type RunOptions struct {
 	// When nil (e.g. legacy callers, tests that bypass the engine), the
 	// runtime falls back to its own inline-resolver path.
 	PreResolvedEnv *envresolve.Resolved
+
+	// WebhookCtx carries the HTTP-level context for webhook-triggered runs.
+	// Nil for all other trigger sources (cron, manual, chain, daemon, replay).
+	// Used by the run-input persistence layer to call content-type-aware
+	// redaction on the raw body and to populate Method/Path/Headers/Query.
+	WebhookCtx *WebhookContext
 }
 
 // RunResult is returned by every Executor.
