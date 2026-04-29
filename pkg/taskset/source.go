@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -190,8 +191,19 @@ func (s *Source) SetDevMode(ctx context.Context, enabled bool, opts DevModeOpts)
 		s.cloneRunID = ""
 		s.mu.Unlock()
 		if runID != "" {
-			clonePath := filepath.Join(s.dataDir, "dev-clones", s.namespace, runID)
-			if err := os.RemoveAll(clonePath); err != nil {
+			// runID was validated by ValidateRunID at enableClone time before
+			// being assigned to s.cloneRunID, so it's already safe. We re-check
+			// here for static-analysis clarity and as defense in depth against
+			// any future code path that might bypass the validator.
+			cloneRoot := filepath.Join(s.dataDir, "dev-clones", s.namespace)
+			clonePath := filepath.Join(cloneRoot, runID)
+			cleanClonePath := filepath.Clean(clonePath)
+			if cleanClonePath != clonePath || !strings.HasPrefix(cleanClonePath+string(filepath.Separator), cloneRoot+string(filepath.Separator)) {
+				s.log.Warn("dev-clones disable: clone path escapes data dir; refusing to remove",
+					zap.String("source", s.namespace),
+					zap.String("path", clonePath),
+				)
+			} else if err := os.RemoveAll(clonePath); err != nil {
 				// Log but don't fail — the dev-clones-cleanup buildin task
 				// will sweep the orphan on its next run. Disable must always succeed.
 				s.log.Warn("dev-clones disable: removeall failed",
@@ -239,8 +251,18 @@ func (s *Source) enableClone(ctx context.Context, opts DevModeOpts) error {
 		return fmt.Errorf("clone-mode requires a git source (rootRef.URL is empty)")
 	}
 
-	clonePath := filepath.Join(s.dataDir, "dev-clones", s.namespace, opts.RunID)
-	if err := os.MkdirAll(filepath.Dir(clonePath), 0o755); err != nil {
+	// Build the clone path defensively. ValidateRunID above already rejects
+	// any opts.RunID containing '/', '..', or other traversal characters
+	// (regex: ^[A-Za-z0-9_-]{1,64}$), but we re-verify the joined result is
+	// rooted at the expected parent directory so static analysers (CodeQL)
+	// can see the safety property without tracing through ValidateRunID.
+	cloneRoot := filepath.Join(s.dataDir, "dev-clones", s.namespace)
+	clonePath := filepath.Join(cloneRoot, opts.RunID)
+	cleanClonePath := filepath.Clean(clonePath)
+	if cleanClonePath != clonePath || !strings.HasPrefix(cleanClonePath+string(filepath.Separator), cloneRoot+string(filepath.Separator)) {
+		return fmt.Errorf("clone path escapes data dir: %q", clonePath)
+	}
+	if err := os.MkdirAll(cloneRoot, 0o755); err != nil {
 		return fmt.Errorf("mkdir parent: %w", err)
 	}
 
