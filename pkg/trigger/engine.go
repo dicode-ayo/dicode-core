@@ -50,8 +50,8 @@ type Engine struct {
 	cronEntries map[string]cron.EntryID // taskID → cron entry
 	webhooks    map[string]string       // webhook path → taskID
 
-	runCancels      sync.Map // runID → context.CancelFunc
-	runDone         sync.Map // runID (string) → chan struct{}, closed when the run reaches a terminal state
+	runCancels       sync.Map // runID → context.CancelFunc
+	runDone          sync.Map // runID (string) → chan struct{}, closed when the run reaches a terminal state
 	runTriggerSource sync.Map // runID (string) → triggerSource (string)
 
 	shutdownMu  sync.RWMutex
