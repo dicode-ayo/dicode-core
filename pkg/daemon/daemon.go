@@ -171,7 +171,7 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	gateway := ipc.NewGateway()
 
 	// 6. Managed runtimes + trigger engine.
-	managedRuntimes, eng, denoRT, err := buildRuntimes(ctx, cfg, reg, secretsChain, localSecrets, database, log, gateway)
+	managedRuntimes, eng, denoRT, pythonRT, err := buildRuntimes(ctx, cfg, reg, secretsChain, localSecrets, database, log, gateway)
 	if err != nil {
 		return err
 	}
@@ -195,6 +195,8 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 				runner := trigger.NewInputStoreTaskRunner(eng)
 				is := registry.NewInputStore(registry.NewInputCrypto(key), runner, cfg.Defaults.RunInputs.StorageTask)
 				eng.SetInputStore(is)
+				denoRT.SetInputStore(is)
+				pythonRT.SetInputStore(is)
 				log.Info("run-input persistence enabled",
 					zap.Duration("retention", cfg.Defaults.RunInputs.Retention),
 					zap.String("storage_task", cfg.Defaults.RunInputs.StorageTask),
@@ -221,6 +223,21 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	// per daemon lifetime.
 	var bodyFullTextualWarned sync.Map
 	rec.OnRegister = func(spec *task.Spec) {
+		// Override buildin/run-inputs-cleanup's retention_seconds default to
+		// match dicode.yaml's defaults.run_inputs.retention. This must happen
+		// before eng.Register so the engine sees the correct default when
+		// building the param map for the next cron fire. We mutate the spec
+		// slice element in place; the reconciler replaces the spec on each
+		// reload, so the override is re-applied on every registration.
+		if spec.ID == "buildin/run-inputs-cleanup" && cfg.Defaults.RunInputs.Retention > 0 {
+			retStr := fmt.Sprintf("%d", int64(cfg.Defaults.RunInputs.Retention.Seconds()))
+			for i := range spec.Params {
+				if spec.Params[i].Name == "retention_seconds" {
+					spec.Params[i].Default = retStr
+					break
+				}
+			}
+		}
 		eng.Register(spec)
 		if spec.Trigger.Webhook != "" {
 			gateway.Register(spec.Trigger.Webhook, webhookH)
@@ -401,10 +418,10 @@ func buildRuntimes(
 	database db.DB,
 	log *zap.Logger,
 	gateway *ipc.Gateway,
-) ([]pkgruntime.ManagedRuntime, *trigger.Engine, *denoruntime.Runtime, error) {
+) ([]pkgruntime.ManagedRuntime, *trigger.Engine, *denoruntime.Runtime, *pythonruntime.Runtime, error) {
 	denoRT, err := denoruntime.New(reg, secretsChain, database, log)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("init deno runtime: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("init deno runtime: %w", err)
 	}
 	eng := trigger.New(reg, denoRT, log)
 	eng.SetDB(database)
@@ -442,7 +459,7 @@ func buildRuntimes(
 	denoRT.SetProviderRunner(eng)
 	if !cfg.Defaults.OnFailureChain.IsZero() {
 		if err := eng.SetDefaultsOnFailureChain(cfg.Defaults.OnFailureChain); err != nil {
-			return nil, nil, nil, fmt.Errorf("set on_failure_chain defaults: %w", err)
+			return nil, nil, nil, nil, fmt.Errorf("set on_failure_chain defaults: %w", err)
 		}
 	}
 	if p := cfg.Notifications.Provider; p != nil {
@@ -497,7 +514,7 @@ func buildRuntimes(
 		}
 	}
 
-	return managed, eng, denoRT, nil
+	return managed, eng, denoRT, pythonMgr, nil
 }
 
 func buildSecretsChain(cfg *config.Config, dataDir string, database db.DB, log *zap.Logger) (secrets.Chain, secrets.Manager) {

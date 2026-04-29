@@ -1366,3 +1366,69 @@ func TestServer_SecretOutputRejectsNestedMap(t *testing.T) {
 		// success — server logged-and-dropped.
 	}
 }
+
+// TestCapRunsGetInput_NotGrantedFromYAML verifies Finding 3 (security):
+// A task.Spec that previously declared permissions.dicode.runs_get_input:true
+// in its YAML must NOT receive CapRunsGetInput during the IPC handshake. The
+// field has been removed from DicodePermissions; this test confirms the
+// cap-derivation path no longer has a YAML opt-in vector for runs.get_input.
+//
+// CapRunsGetInput is reserved for programmatic grant only (e.g., the
+// buildin/auto-fix preset in #238). Allowing any task source to self-grant
+// this capability would expose decrypted cross-task input access.
+func TestCapRunsGetInput_NotGrantedFromYAML(t *testing.T) {
+	e := newTestEnv(t)
+
+	// Build a spec with every dicode permission enabled, including a
+	// hypothetical runs_get_input (the field was removed from
+	// DicodePermissions, so we can only set the remaining ones).
+	spec := &task.Spec{
+		Permissions: task.Permissions{
+			Dicode: &task.DicodePermissions{
+				RunsListExpired: true,
+				RunsDeleteInput: true,
+				RunsPinInput:    true,
+				RunsUnpinInput:  true,
+			},
+		},
+	}
+
+	conn, _ := e.startWithSpec(t, nil, nil, spec, nil)
+
+	// Re-do the handshake to capture the granted caps. We can't reuse the
+	// conn from startWithSpec (which already consumed the handshake), so
+	// we start a fresh server and capture caps at handshake time.
+	e2 := newTestEnv(t)
+	runID := fmt.Sprintf("cap-test-%d", time.Now().UnixNano())
+	srv := New(runID, "sec-test-task", e2.secret, e2.reg, e2.db, nil, nil, zap.NewNop(), spec, nil)
+	socketPath, token, err := srv.Start(context.Background())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(srv.Stop)
+
+	conn2 := dial(t, socketPath)
+	t.Cleanup(func() { conn2.Close() })
+	caps := doHandshake(t, conn2, token)
+
+	for _, c := range caps {
+		if c == CapRunsGetInput {
+			t.Errorf("CapRunsGetInput granted via YAML spec — security regression; caps = %v", caps)
+		}
+	}
+
+	// Sanity: the other caps must be present so we know the derivation ran.
+	has := func(cap string) bool {
+		for _, c := range caps {
+			if c == cap {
+				return true
+			}
+		}
+		return false
+	}
+	if !has(CapRunsDeleteInput) {
+		t.Errorf("expected CapRunsDeleteInput in caps but got %v", caps)
+	}
+
+	_ = conn // suppress unused warning from startWithSpec above
+}

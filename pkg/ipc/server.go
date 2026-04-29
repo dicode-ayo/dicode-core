@@ -83,7 +83,7 @@ type Server struct {
 	// torn reads under the Go memory model.
 	redactor atomic.Pointer[secrets.Redactor]
 
-	gateway    *Gateway         // optional; enables http.register for daemon tasks
+	gateway    *Gateway             // optional; enables http.register for daemon tasks
 	inputStore *registry.InputStore // optional; enables dicode.runs.delete_input blob deletion
 
 	ctx        context.Context
@@ -264,9 +264,6 @@ func (s *Server) Start(ctx context.Context) (socketPath, token string, err error
 		}
 		if dp.RunsUnpinInput {
 			caps = append(caps, CapRunsUnpinInput)
-		}
-		if dp.RunsGetInput {
-			caps = append(caps, CapRunsGetInput)
 		}
 	}
 	if s.spec != nil && s.spec.Trigger.Daemon && s.gateway != nil {

@@ -1386,12 +1386,20 @@ func (e *Engine) startRun(spec *task.Spec, opts *pkgruntime.RunOptions, source s
 				zap.String("task", spec.ID),
 				zap.Error(perr),
 			)
-		} else if serr := e.registry.SetRunInput(context.Background(), opts.RunID, key, size, storedAt, in.RedactedFields); serr != nil {
-			e.log.Warn("run-input set columns failed",
-				zap.String("run", opts.RunID),
-				zap.String("task", spec.ID),
-				zap.Error(serr),
-			)
+		} else {
+			// Bound RAM exposure: RawBody is no longer needed now that the
+			// blob has been persisted. Nil it out so the slice can be GC'd
+			// rather than held for the full run lifetime.
+			if opts.WebhookCtx != nil {
+				opts.WebhookCtx.RawBody = nil
+			}
+			if serr := e.registry.SetRunInput(context.Background(), opts.RunID, key, size, storedAt, in.RedactedFields); serr != nil {
+				e.log.Warn("run-input set columns failed",
+					zap.String("run", opts.RunID),
+					zap.String("task", spec.ID),
+					zap.Error(serr),
+				)
+			}
 		}
 	}
 

@@ -25,6 +25,7 @@ import (
 type testEnv struct {
 	engine *Engine
 	reg    *registry.Registry
+	denoRT *denoruntime.Runtime
 }
 
 func newTestEnv(t *testing.T) *testEnv {
@@ -40,7 +41,7 @@ func newTestEnv(t *testing.T) *testEnv {
 		t.Skipf("deno not available: %v", err)
 	}
 	eng := New(reg, rt, zap.NewNop())
-	return &testEnv{engine: eng, reg: reg}
+	return &testEnv{engine: eng, reg: reg, denoRT: rt}
 }
 
 func writeTask(t *testing.T, dir, id, script string, trigger task.TriggerConfig) *task.Spec {

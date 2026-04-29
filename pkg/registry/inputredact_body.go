@@ -129,6 +129,7 @@ func redactBody(raw []byte, contentType string, bodyFullTextual bool, redacted *
 				return out
 			}
 			out.Body = j
+			out.BodyHash = hash // parity with json/form branches
 		} else {
 			out.BodyHash = hash
 		}

@@ -53,7 +53,11 @@ const (
 	CapRunsDeleteInput = "runs.delete_input" // dicode.runs.delete_input
 	CapRunsPinInput    = "runs.pin_input"    // dicode.runs.pin_input
 	CapRunsUnpinInput  = "runs.unpin_input"  // dicode.runs.unpin_input
-	CapRunsGetInput    = "runs.get_input"    // dicode.runs.get_input — internal-only
+	// CapRunsGetInput is reserved for programmatic grant only (e.g., the
+	// buildin/auto-fix preset in #238). It is intentionally not derivable
+	// from any task.yaml YAML field — tasks cannot self-grant decrypted
+	// cross-task input access via their permission spec.
+	CapRunsGetInput = "runs.get_input"
 
 	// Reserved for CLI and WebUI clients (not issued to task shims today).
 	CapHTTPRegister  = "http.register" // register HTTP handler routes (issue #54)

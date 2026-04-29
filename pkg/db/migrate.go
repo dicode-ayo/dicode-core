@@ -4,7 +4,14 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"regexp"
 )
+
+// identRe matches valid SQL identifiers: ASCII letter or underscore as first
+// character, followed by zero or more ASCII letters, digits, or underscores.
+// Used to validate table and column names before interpolating them into SQL
+// statements. Defense in depth — current callers are all hardcoded constants.
+var identRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // addColumnIfMissing adds a column to a table if it doesn't already exist.
 // Idempotent: calling it again with the same arguments is a no-op.
@@ -19,6 +26,12 @@ import (
 // an internal helper called from migrate() which already holds the underlying
 // connection. Callers from outside pkg/db do not exist by design.
 func addColumnIfMissing(ctx context.Context, db *sql.DB, table, column, ddl string) error {
+	if !identRe.MatchString(table) {
+		return fmt.Errorf("addColumnIfMissing: invalid table identifier %q", table)
+	}
+	if !identRe.MatchString(column) {
+		return fmt.Errorf("addColumnIfMissing: invalid column identifier %q", column)
+	}
 	rows, err := db.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%s)", table))
 	if err != nil {
 		return fmt.Errorf("table_info(%s): %w", table, err)

@@ -77,7 +77,8 @@ type RunResult struct {
 type Runtime struct {
 	registry         *registry.Registry
 	secrets          secrets.Chain
-	secretsManager   secrets.Manager // optional; wired for dicode.secrets_set/delete
+	secretsManager   secrets.Manager      // optional; wired for dicode.secrets_set/delete
+	inputStore       *registry.InputStore // optional; wired for dicode.runs.delete_input / get_input
 	db               db.DB
 	log              *zap.Logger
 	denoPath         string
@@ -124,6 +125,11 @@ func (rt *Runtime) SetGateway(g *ipc.Gateway) { rt.gateway = g }
 // SetSecretsManager wires the secrets manager so tasks with permissions.dicode.secrets_write
 // can call dicode.secrets_set() and dicode.secrets_delete().
 func (rt *Runtime) SetSecretsManager(m secrets.Manager) { rt.secretsManager = m }
+
+// SetInputStore wires the InputStore so the per-run IPC server can serve
+// dicode.runs.delete_input and dicode.runs.get_input calls. Must be called
+// before any Run; mirrors the SetEngine / SetGateway pattern.
+func (rt *Runtime) SetInputStore(is *registry.InputStore) { rt.inputStore = is }
 
 // SetSecretOutputChannel wires the channel that receives provider tasks'
 // secret maps. Called by the trigger engine before invoking Run when the
@@ -245,6 +251,7 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	srv := ipc.New(runID, spec.ID, rt.secret, rt.registry, rt.db, mergedParams, opts.Input, rt.log, spec, rt.engine)
 	srv.SetGateway(rt.gateway)
 	srv.SetSecrets(rt.secretsManager)
+	srv.SetInputStore(rt.inputStore)
 	srv.SetSecretsChain(rt.secrets)
 	srv.SetRedactor(redactor)
 	if rt.secretOutputCh != nil {

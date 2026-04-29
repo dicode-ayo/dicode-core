@@ -21,9 +21,16 @@ import (
 //
 // The raw master is retained (in `masterKey`) so DeriveSubKey can derive
 // purpose-specific sub-keys with different salts. This keeps the master in
-// process memory longer than strictly necessary; mitigated by the fact that
-// the primary derived key was already in memory, and that the master file
-// itself is chmod-600 on disk.
+// process memory longer than strictly necessary.
+//
+// Trade-off: we deliberately do NOT zeroize the master key after deriving
+// sub-keys. The daemon process is privileged (it holds the primary derived
+// key and all sub-keys in memory as well), so retaining the master adds no
+// meaningful escalation surface within the same process. Zeroizing would
+// break DeriveSubKey on subsequent calls (e.g. when new feature areas need
+// their own sub-keys) and add fragile lifecycle management for no practical
+// security gain. The on-disk master.key is chmod-600 and protected by OS
+// DAC; the in-memory copy is bounded to the daemon process lifetime.
 type LocalProvider struct {
 	key       []byte // 32-byte primary derived encryption key (secrets table)
 	masterKey []byte // raw master key, retained for sub-key derivation

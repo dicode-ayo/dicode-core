@@ -100,9 +100,9 @@ type PersistedInput struct {
 // PartMeta describes a single multipart/form-data part. Values are NEVER
 // stored — only structural metadata. Used by body redaction (Task 7).
 type PartMeta struct {
-	Name        string `json:"name"`                   // form-field name (after redaction if name matched)
-	Kind        string `json:"kind"`                   // "field" | "file"
-	Filename    string `json:"filename,omitempty"`     // file parts only; redacted if name matched
+	Name        string `json:"name"`               // form-field name (after redaction if name matched)
+	Kind        string `json:"kind"`               // "field" | "file"
+	Filename    string `json:"filename,omitempty"` // file parts only; redacted if name matched
 	ContentType string `json:"content_type,omitempty"`
 	Size        int64  `json:"size"`
 }
@@ -212,7 +212,7 @@ func redactParams(v any, path string, redacted *[]string) any {
 }
 
 func redactParamsDepth(v any, path string, redacted *[]string, depth int) any {
-	if depth > maxRedactionDepth {
+	if depth >= maxRedactionDepth {
 		return "<redacted-too-deep>"
 	}
 	switch x := v.(type) {

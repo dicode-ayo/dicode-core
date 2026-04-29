@@ -291,8 +291,6 @@ type DicodePermissions struct {
 	RunsPinInput bool `yaml:"runs_pin_input,omitempty" json:"runs_pin_input,omitempty"`
 	// RunsUnpinInput enables dicode.runs.unpin_input().
 	RunsUnpinInput bool `yaml:"runs_unpin_input,omitempty" json:"runs_unpin_input,omitempty"`
-	// RunsGetInput enables dicode.runs.get_input() — internal, used by auto-fix.
-	RunsGetInput bool `yaml:"runs_get_input,omitempty" json:"runs_get_input,omitempty"`
 }
 
 // ProviderConfig declares secret-provider settings on a task that
