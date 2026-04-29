@@ -93,6 +93,11 @@ type Engine struct {
 	// MVP-quality: a per-run channel registry would allow parallelism but
 	// requires runtime changes; revisit when contention shows up.
 	providerRunMu sync.Mutex
+
+	// inputStore persists run inputs at run-start (Task 10). nil = disabled.
+	// Set via SetInputStore after the daemon has initialised secrets so the
+	// derived sub-key is available.
+	inputStore *registry.InputStore
 }
 
 // DenoRuntimeAPI is the minimal subset of *deno.Runtime the engine's
@@ -147,6 +152,11 @@ func (e *Engine) SetDenoRuntime(r DenoRuntimeAPI) { e.denoRuntime = r }
 
 // SetPythonRuntime wires the python runtime; mirror of SetDenoRuntime.
 func (e *Engine) SetPythonRuntime(r PythonRuntimeAPI) { e.pythonRuntime = r }
+
+// SetInputStore wires the InputStore so every run's input is persisted at
+// run-start. Called by the daemon after secrets are available (so the derived
+// sub-key exists). When nil (the default), input persistence is a no-op.
+func (e *Engine) SetInputStore(s *registry.InputStore) { e.inputStore = s }
 
 // SetMaxConcurrentTasks configures a semaphore that limits how many task
 // goroutines run concurrently. n == 0 (the default) means unlimited.
@@ -1334,6 +1344,27 @@ func (e *Engine) startRun(spec *task.Spec, opts *pkgruntime.RunOptions, source s
 	if _, err = e.registry.StartRunWithID(context.Background(), opts.RunID, spec.ID, opts.ParentRunID, source); err != nil {
 		return nil, nil, fmt.Errorf("start run record: %w", err)
 	}
+
+	// Best-effort input persistence. Failures do not block the run — the
+	// auto-fix loop (#234) handles missing inputs via ErrInputUnavailable.
+	if e.inputStore != nil && e.shouldPersistInput(spec) {
+		in := registry.BuildPersistedInputFromRunOpts(source, opts.Params, opts.Input)
+		key, size, storedAt, perr := e.inputStore.Persist(context.Background(), opts.RunID, in)
+		if perr != nil {
+			e.log.Warn("run-input persist failed",
+				zap.String("run", opts.RunID),
+				zap.String("task", spec.ID),
+				zap.Error(perr),
+			)
+		} else if serr := e.registry.SetRunInput(context.Background(), opts.RunID, key, size, storedAt, in.RedactedFields); serr != nil {
+			e.log.Warn("run-input set columns failed",
+				zap.String("run", opts.RunID),
+				zap.String("task", spec.ID),
+				zap.Error(serr),
+			)
+		}
+	}
+
 	if h := e.runStartedHook; h != nil {
 		h(spec.ID, opts.RunID, source)
 	}
@@ -1357,6 +1388,25 @@ func (e *Engine) startRun(spec *task.Spec, opts *pkgruntime.RunOptions, source s
 		}
 	}
 	return runCtx, cleanup, nil
+}
+
+// shouldPersistInput returns true when the run's input should be persisted.
+// It enforces two recursion guards and respects the per-task opt-out flag.
+func (e *Engine) shouldPersistInput(spec *task.Spec) bool {
+	// Per-task opt-out: run_inputs.enabled: false in task.yaml.
+	if spec.RunInputs != nil && spec.RunInputs.Enabled != nil && !*spec.RunInputs.Enabled {
+		return false
+	}
+	// Recursion guard: never persist the storage task's own inputs.
+	if e.inputStore != nil && spec.ID == e.inputStore.StorageTaskID() {
+		return false
+	}
+	// Recursion guard: cleanup task runs periodically with the same retention
+	// config; persisting it every cron tick is pointless and loops.
+	if spec.ID == "buildin/run-inputs-cleanup" {
+		return false
+	}
+	return true
 }
 
 // runTask executes a task synchronously and handles all post-run bookkeeping

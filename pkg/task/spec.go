@@ -320,10 +320,23 @@ type Spec struct {
 	// validation; the resolver uses it to look up the TTL.
 	Provider *ProviderConfig `yaml:"provider,omitempty" json:"provider,omitempty"`
 
+	// RunInputs configures per-task input persistence. Full schema lands in #233 Task 14;
+	// this placeholder lets the local-storage and run-inputs-cleanup tasks opt out today.
+	// TODO(Task14): expand RunInputsTaskOverride with storage backend, retention, etc.
+	RunInputs *RunInputsTaskOverride `yaml:"run_inputs,omitempty" json:"run_inputs,omitempty"`
+
 	// TaskDir is the directory path of the task in the repo (not stored in YAML).
 	TaskDir string `yaml:"-" json:"-"`
 	// ID is derived from the directory name (not stored in YAML).
 	ID string `yaml:"-" json:"id"`
+}
+
+// RunInputsTaskOverride is the per-task override for run-input persistence.
+// Full schema is added in Task 14. For now only Enabled is present so that
+// built-in tasks (local-storage, run-inputs-cleanup) can opt out via
+// run_inputs: enabled: false in their task.yaml.
+type RunInputsTaskOverride struct {
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 }
 
 // LoadDir reads a task from its directory (expects task.yaml and task.<ext>).

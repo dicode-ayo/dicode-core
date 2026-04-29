@@ -113,6 +113,10 @@ func (s *InputStore) Delete(ctx context.Context, key string) error {
 	return nil
 }
 
+// StorageTaskID returns the configured storage-task ID. Used by callers that
+// need to skip persistence for the storage task itself (recursion guard).
+func (s *InputStore) StorageTaskID() string { return s.storageTask }
+
 // timeNow is a test seam allowing tests to freeze time for deterministic
 // stored_at values.
 var timeNow = func() time.Time { return time.Now() }

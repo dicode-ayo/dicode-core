@@ -6,6 +6,36 @@ import (
 	"strings"
 )
 
+// BuildPersistedInputFromRunOpts is the public helper trigger.Engine uses to
+// build a PersistedInput from a run's source + params + input. Marshalling +
+// redaction happen here so callers don't need direct access to redactParams.
+func BuildPersistedInputFromRunOpts(source string, params map[string]string, input any) PersistedInput {
+	in := PersistedInput{Source: source}
+	redacted := []string{}
+
+	// params is map[string]string — wrap into a redactable map.
+	if len(params) > 0 {
+		p := make(map[string]any, len(params))
+		for k, v := range params {
+			p[k] = v
+		}
+		in.Params = redactParams(p, "params", &redacted).(map[string]any)
+	}
+
+	// input is interface{} — most commonly a parsed JSON body or chain payload
+	// map. Recurse via redactParams if it's a map; otherwise marshal as-is.
+	if input != nil {
+		walked := redactParams(input, "input", &redacted)
+		if raw, err := json.Marshal(walked); err == nil {
+			in.Body = raw
+			in.BodyKind = "json"
+		}
+	}
+
+	in.RedactedFields = redacted
+	return in
+}
+
 // PersistedInput is the structured shape of a run input as it lives encrypted
 // at rest. Fields cover the union of webhook (HTTP), manual (params), cron
 // (none), chain (params + parent context), replay (carries persisted input

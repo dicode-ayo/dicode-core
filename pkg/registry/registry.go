@@ -3,6 +3,7 @@ package registry
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -45,6 +46,13 @@ type Run struct {
 	// or "required_secret_missing: PG_URL from doppler". Empty for non-failed
 	// runs and for failures from the legacy code path that doesn't set a reason.
 	FailureReason string
+
+	// Input persistence fields — set by the trigger engine via SetRunInput
+	// immediately after the run row is created (Task 10).
+	InputStorageKey    string   // storage key passed to the storage task ("run-inputs/<runID>")
+	InputSize          int      // ciphertext byte size
+	InputStoredAt      int64    // unix timestamp the blob was stored (AAD-bound)
+	InputRedactedFields []string // dotted paths of any redacted fields
 }
 
 // LogEntry is one log line from a run.
@@ -235,7 +243,9 @@ func (r *Registry) GetRun(ctx context.Context, runID string) (*Run, error) {
 	err := r.db.Query(ctx,
 		`SELECT id, task_id, status, started_at, finished_at, parent_run_id, trigger_source,
 		        COALESCE(return_value, ''), COALESCE(output_content_type, ''), COALESCE(output_content, ''),
-		        COALESCE(fail_reason, '')
+		        COALESCE(fail_reason, ''),
+		        COALESCE(input_storage_key, ''), COALESCE(input_size, 0), COALESCE(input_stored_at, 0),
+		        COALESCE(input_redacted_fields, '')
 		 FROM runs WHERE id = ?`,
 		[]any{runID},
 		func(rows db.Scanner) error {
@@ -244,7 +254,13 @@ func (r *Registry) GetRun(ctx context.Context, runID string) (*Run, error) {
 				var startedMs int64
 				var finishedMs *int64
 				var parentID *string
-				if err := rows.Scan(&run.ID, &run.TaskID, &run.Status, &startedMs, &finishedMs, &parentID, &run.TriggerSource, &run.ReturnValue, &run.OutputContentType, &run.OutputContent, &run.FailureReason); err != nil {
+				var redactedFieldsJSON string
+				if err := rows.Scan(
+					&run.ID, &run.TaskID, &run.Status, &startedMs, &finishedMs, &parentID,
+					&run.TriggerSource, &run.ReturnValue, &run.OutputContentType, &run.OutputContent,
+					&run.FailureReason,
+					&run.InputStorageKey, &run.InputSize, &run.InputStoredAt, &redactedFieldsJSON,
+				); err != nil {
 					return err
 				}
 				run.StartedAt = time.UnixMilli(startedMs)
@@ -254,6 +270,9 @@ func (r *Registry) GetRun(ctx context.Context, runID string) (*Run, error) {
 				}
 				if parentID != nil {
 					run.ParentRunID = *parentID
+				}
+				if redactedFieldsJSON != "" && redactedFieldsJSON != "null" {
+					_ = json.Unmarshal([]byte(redactedFieldsJSON), &run.InputRedactedFields)
 				}
 			}
 			return nil
@@ -266,6 +285,24 @@ func (r *Registry) GetRun(ctx context.Context, runID string) (*Run, error) {
 		return nil, fmt.Errorf("run %s: %w", runID, ErrRunNotFound)
 	}
 	return run, nil
+}
+
+// SetRunInput updates the runs row with the persistence handle after the input
+// blob has been stored. Called by the trigger engine immediately after Persist
+// succeeds.
+func (r *Registry) SetRunInput(ctx context.Context, runID, storageKey string, size int, storedAt int64, redactedFields []string) error {
+	rfJSON, err := json.Marshal(redactedFields)
+	if err != nil {
+		return fmt.Errorf("marshal redacted_fields: %w", err)
+	}
+	if err := r.db.Exec(ctx,
+		`UPDATE runs SET input_storage_key = ?, input_size = ?, input_stored_at = ?, input_redacted_fields = ?
+		 WHERE id = ?`,
+		storageKey, size, storedAt, string(rfJSON), runID,
+	); err != nil {
+		return fmt.Errorf("update runs: %w", err)
+	}
+	return nil
 }
 
 // ListRuns returns the most recent runs for a task (newest first).
