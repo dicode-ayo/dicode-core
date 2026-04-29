@@ -1,0 +1,13 @@
+apiVersion: dicode/v1
+kind: Task
+name: Loop Target
+description: >
+  Failing task used to test chain-of-chains suppression. On failure it chains
+  to will-fail (another failing task). When will-fail runs as a chain-triggered
+  task and also fails, the engine must NOT fire will-fail's own on_failure_chain
+  — that second chain would be suppressed by the runTriggerSource == "chain" guard.
+runtime: js
+trigger:
+  manual: true
+timeout: 10s
+on_failure_chain: e2e-tests/will-fail

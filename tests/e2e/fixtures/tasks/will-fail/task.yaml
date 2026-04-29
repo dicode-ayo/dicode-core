@@ -1,0 +1,16 @@
+apiVersion: dicode/v1
+kind: Task
+name: Will Fail
+description: >
+  Deliberately failing task with on_failure_chain (structured form) for e2e
+  testing. Fires chain-target with user params {color, iterations} merged
+  alongside the engine-reserved keys.
+runtime: js
+trigger:
+  manual: true
+timeout: 10s
+on_failure_chain:
+  task: e2e-tests/chain-target
+  params:
+    color: "blue"
+    iterations: 5
