@@ -66,6 +66,17 @@ type Manager interface {
 	Delete(ctx context.Context, key string) error
 }
 
+// SubKeyDeriver is implemented by providers that can derive purpose-specific
+// 32-byte keys from a master key. Currently only LocalProvider — env-var and
+// future KMS/Vault providers don't have a derivable master.
+//
+// Callers must type-assert: `if d, ok := provider.(SubKeyDeriver); ok { ... }`.
+// A provider that doesn't implement this interface signals that sub-key
+// derivation is unavailable; callers must have a fallback or an error path.
+type SubKeyDeriver interface {
+	DeriveSubKey(context string) ([]byte, error)
+}
+
 // NotFoundError is returned when no provider in the chain has the requested key.
 type NotFoundError struct {
 	Key string
