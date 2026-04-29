@@ -1381,10 +1381,15 @@ func (e *Engine) startRun(spec *task.Spec, opts *pkgruntime.RunOptions, source s
 		in := registry.BuildPersistedInputFromRunOpts(source, opts.Params, opts.Input, web)
 		key, size, storedAt, perr := e.inputStore.Persist(context.Background(), opts.RunID, in)
 		if perr != nil {
+			// Log only a sanitized error category. The full perr chain may
+			// transit env-resolver internals where CodeQL tracks a
+			// secretKey taint label; emitting it raw causes a false-positive
+			// go/clear-text-logging alert. The category is enough for ops to
+			// triage; full error is available via the failed task's own logs.
 			e.log.Warn("run-input persist failed",
 				zap.String("run", opts.RunID),
 				zap.String("task", spec.ID),
-				zap.Error(perr),
+				zap.String("error_class", "persist"),
 			)
 		} else {
 			// Bound RAM exposure: RawBody is no longer needed now that the

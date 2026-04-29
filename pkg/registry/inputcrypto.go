@@ -54,6 +54,14 @@ func (c *InputCrypto) Encrypt(plaintext []byte, runID string, storedAt int64) ([
 	if err != nil {
 		return nil, err
 	}
+	// Bound plaintext so the allocation cannot overflow even on a hostile
+	// caller. dicode webhooks are already capped at 5MB upstream
+	// (webhookMaxBodyBytes); chain/manual triggers could in theory pass
+	// larger inputs but anything above maxPlaintextBytes is a bug.
+	const maxPlaintextBytes = 64 << 20 // 64 MiB
+	if len(plaintext) > maxPlaintextBytes {
+		return nil, fmt.Errorf("plaintext too large: %d bytes (cap %d)", len(plaintext), maxPlaintextBytes)
+	}
 	nonce := make([]byte, aead.NonceSize())
 	if _, err := rand.Read(nonce); err != nil {
 		return nil, fmt.Errorf("nonce: %w", err)
