@@ -236,6 +236,22 @@ func TestBuiltinVars_TaskSetDirPassedThrough(t *testing.T) {
 	}
 }
 
+func TestExpand_DATADIR(t *testing.T) {
+	vars := map[string]string{
+		"DATADIR": "/var/lib/dicode",
+	}
+	got := expandString("${DATADIR}/run-inputs", vars, false)
+	if got != "/var/lib/dicode/run-inputs" {
+		t.Errorf("got %q, want /var/lib/dicode/run-inputs", got)
+	}
+}
+
+func TestVarDataDir_Constant(t *testing.T) {
+	if VarDataDir != "DATADIR" {
+		t.Errorf("VarDataDir = %q, want DATADIR", VarDataDir)
+	}
+}
+
 func TestLoadDirWithVars_ExpandsTaskSetDir(t *testing.T) {
 	dir := t.TempDir()
 	yaml := `

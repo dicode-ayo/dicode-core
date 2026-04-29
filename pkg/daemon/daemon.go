@@ -174,7 +174,7 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	if err != nil {
 		return fmt.Errorf("build sources: %w", err)
 	}
-	rec := registry.NewReconciler(reg, sources, log)
+	rec := registry.NewReconciler(reg, sources, dataDir, log)
 	webhookH := eng.WebhookHandler()
 	var webhookMu sync.Mutex
 	webhookPaths := make(map[string]string)
