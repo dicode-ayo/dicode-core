@@ -32,10 +32,12 @@ func TestFireChain_MergesParamsIntoInput(t *testing.T) {
 	_ = e.reg.Register(failing)
 
 	// Configure defaults.on_failure_chain with user params.
-	e.engine.SetDefaultsOnFailureChain(task.OnFailureChainSpec{
+	if err := e.engine.SetDefaultsOnFailureChain(task.OnFailureChainSpec{
 		Task:   "auto-fix-params",
 		Params: map[string]any{"mode": "review", "max_iterations": 5},
-	})
+	}); err != nil {
+		t.Fatalf("SetDefaultsOnFailureChain: %v", err)
+	}
 
 	// Fire the failing task and wait for it to reach terminal state.
 	runID, err := e.engine.FireManual(context.Background(), "will-fail-params", nil)
@@ -111,10 +113,12 @@ func TestFireChain_PerTaskFullyReplacesDefaults(t *testing.T) {
 	_ = e.reg.Register(differentHandler)
 
 	// Configure DEFAULTS: auto-fix with params {mode: review, max_iterations: 5}.
-	e.engine.SetDefaultsOnFailureChain(task.OnFailureChainSpec{
+	if err := e.engine.SetDefaultsOnFailureChain(task.OnFailureChainSpec{
 		Task:   "auto-fix-replace",
 		Params: map[string]any{"mode": "review", "max_iterations": 5},
-	})
+	}); err != nil {
+		t.Fatalf("SetDefaultsOnFailureChain: %v", err)
+	}
 
 	// Failing task with a PER-TASK on_failure_chain pointing at different-handler
 	// with NO params — full replace, not a merge.
@@ -162,5 +166,61 @@ func TestFireChain_PerTaskFullyReplacesDefaults(t *testing.T) {
 	}
 	if _, ok := input["max_iterations"]; ok {
 		t.Errorf("defaults' max_iterations leaked into per-task chain: input = %#v", input)
+	}
+}
+
+// TestFireChain_SuppressesChainOfChains verifies that when a chain target
+// itself fails with on_failure_chain configured, the engine does NOT fire
+// a second chain — the chain-of-chains suppression guard kicks in.
+func TestFireChain_SuppressesChainOfChains(t *testing.T) {
+	dir := t.TempDir()
+	e := newTestEnv(t)
+
+	// "auto-fix-loop" always fails and has on_failure_chain pointing back
+	// to itself via defaults. Without the guard this would recurse infinitely.
+	autoFixLoop := writeTask(t, dir, "auto-fix-loop",
+		`export default async function main() { throw new Error("always fails") }`,
+		task.TriggerConfig{Manual: true})
+	_ = e.reg.Register(autoFixLoop)
+
+	// Primary task: fails, fires auto-fix-loop via defaults.
+	primary := writeTask(t, dir, "chain-primary",
+		`export default async function main() { throw new Error("primary fails") }`,
+		task.TriggerConfig{Manual: true})
+	_ = e.reg.Register(primary)
+
+	// defaults.on_failure_chain → auto-fix-loop.
+	if err := e.engine.SetDefaultsOnFailureChain(task.OnFailureChainSpec{Task: "auto-fix-loop"}); err != nil {
+		t.Fatalf("SetDefaultsOnFailureChain: %v", err)
+	}
+
+	// Fire the primary task.
+	runID, err := e.engine.FireManual(context.Background(), "chain-primary", nil)
+	if err != nil {
+		t.Fatalf("FireManual: %v", err)
+	}
+	waitForTerminal(t, e.engine, runID, 30*time.Second)
+
+	// auto-fix-loop should be fired exactly once (for the primary failure).
+	// The suppression guard must prevent it from chain-firing again when
+	// auto-fix-loop itself fails.
+	chainRun := waitForRunOfTask(t, e.engine, "auto-fix-loop", 15*time.Second)
+	if chainRun == nil {
+		t.Fatal("auto-fix-loop was never fired for the primary failure")
+	}
+
+	// Give a window for a (suppressed) second chain fire to (incorrectly) land.
+	time.Sleep(3 * time.Second)
+
+	runs, err := e.engine.registry.ListRuns(context.Background(), "auto-fix-loop", 10)
+	if err != nil {
+		t.Fatalf("ListRuns: %v", err)
+	}
+	if len(runs) != 1 {
+		ids := make([]string, 0, len(runs))
+		for _, r := range runs {
+			ids = append(ids, r.ID)
+		}
+		t.Errorf("chain-of-chains: auto-fix-loop ran %d times (want 1): %v", len(runs), ids)
 	}
 }

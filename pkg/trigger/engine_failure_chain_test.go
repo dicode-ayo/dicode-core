@@ -54,7 +54,9 @@ func TestEngine_SetDefaultsOnFailureChain_FiresFallbackOnFailure(t *testing.T) {
 		task.TriggerConfig{Manual: true})
 	_ = e.reg.Register(failing)
 
-	e.engine.SetDefaultsOnFailureChain(task.OnFailureChainSpec{Task: "fallback-task"})
+	if err := e.engine.SetDefaultsOnFailureChain(task.OnFailureChainSpec{Task: "fallback-task"}); err != nil {
+		t.Fatalf("SetDefaultsOnFailureChain: %v", err)
+	}
 
 	runID, err := e.engine.FireManual(context.Background(), "failing-task", nil)
 	if err != nil {
@@ -90,7 +92,9 @@ func TestEngine_SetDefaultsOnFailureChain_NotFiredOnSuccess(t *testing.T) {
 		task.TriggerConfig{Manual: true})
 	_ = e.reg.Register(ok)
 
-	e.engine.SetDefaultsOnFailureChain(task.OnFailureChainSpec{Task: "noop-fallback"})
+	if err := e.engine.SetDefaultsOnFailureChain(task.OnFailureChainSpec{Task: "noop-fallback"}); err != nil {
+		t.Fatalf("SetDefaultsOnFailureChain: %v", err)
+	}
 
 	runID, err := e.engine.FireManual(context.Background(), "ok-task", nil)
 	if err != nil {
@@ -135,7 +139,9 @@ func TestEngine_OnFailureChain_PerTaskOverride(t *testing.T) {
 	failing.OnFailureChain = ptrSpec("task-fallback")
 	_ = e.reg.Register(failing)
 
-	e.engine.SetDefaultsOnFailureChain(task.OnFailureChainSpec{Task: "global-fallback"})
+	if err := e.engine.SetDefaultsOnFailureChain(task.OnFailureChainSpec{Task: "global-fallback"}); err != nil {
+		t.Fatalf("SetDefaultsOnFailureChain: %v", err)
+	}
 
 	runID, err := e.engine.FireManual(context.Background(), "failing-with-override", nil)
 	if err != nil {
@@ -178,7 +184,9 @@ func TestEngine_OnFailureChain_EmptyStringDisablesDefault(t *testing.T) {
 	failing.OnFailureChain = ptrSpec("")
 	_ = e.reg.Register(failing)
 
-	e.engine.SetDefaultsOnFailureChain(task.OnFailureChainSpec{Task: "global-fallback-disabled"})
+	if err := e.engine.SetDefaultsOnFailureChain(task.OnFailureChainSpec{Task: "global-fallback-disabled"}); err != nil {
+		t.Fatalf("SetDefaultsOnFailureChain: %v", err)
+	}
 
 	runID, err := e.engine.FireManual(context.Background(), "opt-out-task", nil)
 	if err != nil {

@@ -46,7 +46,7 @@ permissions:
     - name: DICODE_DATA_DIR
       from: DICODE_DATA_DIR
   dicode:
-    list_tasks: false
+    list_tasks: true
     get_runs: true
 
 timeout: 60s

@@ -54,15 +54,13 @@ test("removes orphan clones, keeps active run", async () => {
 
     env.set("DICODE_DATA_DIR", dataDir);
 
-    // Stub get_runs: "auto-fix" returns one running run; others return empty.
-    dicode.get_runs = async (id: string) => {
-      if (id === "auto-fix") {
-        return [
-          { ID: "run-active-1", Status: "running" },
-          { ID: "run-done-1",   Status: "success" },
-        ];
-      }
-      return [];
+    // Stub list_tasks: return a single task; get_runs returns runs for it.
+    dicode.list_tasks = async () => [{ id: "my-task" }];
+    dicode.get_runs = async (_id: string) => {
+      return [
+        { ID: "run-active-1", Status: "running" },
+        { ID: "run-done-1",   Status: "success" },
+      ];
     };
 
     const result = await runTask() as { ok: boolean; removed: number; kept: number };
@@ -85,8 +83,8 @@ test("returns early with note when dev-clones dir does not exist", async () => {
 
   env.set("DICODE_DATA_DIR", dataDir);
 
-  let getRunsCalled = 0;
-  dicode.get_runs = async () => { getRunsCalled++; return []; };
+  dicode.list_tasks = async () => [{ id: "some-task" }];
+  dicode.get_runs = async () => [];
 
   try {
     const result = await runTask() as { ok: boolean; note?: string };
@@ -101,7 +99,7 @@ test("returns early with note when dev-clones dir does not exist", async () => {
   }
 });
 
-test("swallows task-not-found error from get_runs for unknown task IDs", async () => {
+test("swallows get_runs error for task deregistered between list and get", async () => {
   const dataDir = await Deno.makeTempDir({ prefix: "dc-cleanup-err-" });
   try {
     await makeCloneTree(dataDir, [
@@ -110,9 +108,10 @@ test("swallows task-not-found error from get_runs for unknown task IDs", async (
 
     env.set("DICODE_DATA_DIR", dataDir);
 
-    // Simulate all auto-fix task IDs returning "task not found".
+    // list_tasks returns a task, but get_runs throws (task deregistered between calls).
+    dicode.list_tasks = async () => [{ id: "disappearing-task" }];
     dicode.get_runs = async () => {
-      throw new Error("task not found: auto-fix");
+      throw new Error("task not found: disappearing-task");
     };
 
     const result = await runTask() as { ok: boolean; removed: number };
@@ -134,6 +133,7 @@ test("non-directory entries under source dir are ignored", async () => {
     await Deno.mkdir(`${dataDir}/dev-clones/mysource/real-run`, { recursive: true });
 
     env.set("DICODE_DATA_DIR", dataDir);
+    dicode.list_tasks = async () => [{ id: "some-task" }];
     dicode.get_runs = async () => [];
 
     const result = await runTask() as { ok: boolean; removed: number; kept: number };

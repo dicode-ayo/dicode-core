@@ -135,13 +135,12 @@ func (s *Source) Start(ctx context.Context) (<-chan source.Event, error) {
 }
 
 // DevModeOpts configures dev-mode activation. LocalPath and Branch are mutually
-// exclusive. Branch (and Base/RunID) are honoured by the clone-mode work in
-// Tasks 3-5; this task only introduces the struct.
+// exclusive.
 type DevModeOpts struct {
-	LocalPath string // existing: point at a user's local taskset.yaml checkout
-	Branch    string // future (Task 3): create a per-fix clone on this branch
-	Base      string // future (Task 3): branch to fork from when Branch is unknown remotely
-	RunID     string // future (Task 3): clone-dir name component
+	LocalPath string // point at a user's local taskset.yaml checkout
+	Branch    string // create a per-fix clone checked out to this branch
+	Base      string // branch to fork from when Branch is unknown remotely
+	RunID     string // clone-dir name component (validated by ValidateRunID)
 }
 
 // SetDevMode enables or disables dev mode for this source.
@@ -149,9 +148,10 @@ type DevModeOpts struct {
 // Modes:
 //   - enabled=true, opts.LocalPath != "" : point dev-ref resolution at the
 //     given local path (existing human-dev workflow).
-//   - enabled=true, opts.Branch    != "" : clone-mode (introduced in Task 3
-//     of the dev-mode-branch-lifecycle plan; not yet implemented).
-//   - enabled=false : revert.
+//   - enabled=true, opts.Branch    != "" : clone-mode — clones the source
+//     repo into a per-run subdirectory of the data-dir and checks out the
+//     requested branch.
+//   - enabled=false : revert to the primary source ref.
 func (s *Source) SetDevMode(ctx context.Context, enabled bool, opts DevModeOpts) error {
 	if opts.LocalPath != "" && opts.Branch != "" {
 		return fmt.Errorf("DevModeOpts: LocalPath and Branch are mutually exclusive")
@@ -192,8 +192,8 @@ func (s *Source) SetDevMode(ctx context.Context, enabled bool, opts DevModeOpts)
 		if runID != "" {
 			clonePath := filepath.Join(s.dataDir, "dev-clones", s.namespace, runID)
 			if err := os.RemoveAll(clonePath); err != nil {
-				// Log but don't fail — orphan sweep (dev-clones-cleanup
-				// buildin, Task 13) retries. Disable must always succeed.
+				// Log but don't fail — the dev-clones-cleanup buildin task
+				// will sweep the orphan on its next run. Disable must always succeed.
 				s.log.Warn("dev-clones disable: removeall failed",
 					zap.String("source", s.namespace),
 					zap.String("path", clonePath),
@@ -226,6 +226,12 @@ func (s *Source) enableClone(ctx context.Context, opts DevModeOpts) error {
 	if opts.RunID == "" {
 		return fmt.Errorf("DevModeOpts.RunID required when Branch is set")
 	}
+	if err := ValidateRunID(opts.RunID); err != nil {
+		return fmt.Errorf("validate run id: %w", err)
+	}
+	// TODO(#238): pass per-task branch_prefix once auto-fix override wires it.
+	// branch_prefix enforcement is deferred to #238 (auto-fix taskset override
+	// where the prefix config is wired). Local format validity is sufficient here.
 	if err := ValidateBranchName(opts.Branch, ""); err != nil {
 		return fmt.Errorf("validate branch: %w", err)
 	}

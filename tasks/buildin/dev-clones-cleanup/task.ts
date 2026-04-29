@@ -2,7 +2,8 @@
 //
 // Layout: ${DATADIR}/dev-clones/<sourceName>/<runID>/
 // A clone is orphan iff its <runID> is not in the set of currently-running
-// auto-fix runs. Files/dirs that do not fit the layout are left alone.
+// run IDs (across all registered tasks). Files/dirs that do not fit the
+// layout are left alone.
 //
 // Path resolution (in preference order):
 //   1. DICODE_DATA_DIR env var (injected via permissions.env; covers Docker
@@ -15,20 +16,15 @@ interface Run {
   Status: string;
 }
 
-// Candidate task IDs for the auto-fix feature (#238). Tasks not yet registered
-// produce a "task not found" error from dicode.get_runs; we swallow those and
-// continue so the cleanup still works once any one of them is live.
-const AUTO_FIX_TASK_IDS = ["auto-fix", "auto-fix-review", "auto-fix-autonomous"];
-
 async function collectActiveRunIDs(dicode: Dicode): Promise<Set<string>> {
   const active = new Set<string>();
-  for (const id of AUTO_FIX_TASK_IDS) {
-    let runs: Run[] = [];
+  const tasks = (await dicode.list_tasks()) as Array<{ id: string }>;
+  for (const t of tasks) {
+    let runs: Array<{ ID: string; Status: string }> = [];
     try {
-      runs = (await dicode.get_runs(id, { limit: 100 })) as Run[];
+      runs = (await dicode.get_runs(t.id, { limit: 100 })) as typeof runs;
     } catch {
-      // Task not yet registered (auto-fix #238 not shipped) — skip silently.
-      continue;
+      continue; // task may have been deregistered between list_tasks and get_runs
     }
     for (const r of runs) {
       if (r.Status === "running") active.add(r.ID);

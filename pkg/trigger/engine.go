@@ -50,8 +50,9 @@ type Engine struct {
 	cronEntries map[string]cron.EntryID // taskID → cron entry
 	webhooks    map[string]string       // webhook path → taskID
 
-	runCancels sync.Map // runID → context.CancelFunc
-	runDone    sync.Map // runID (string) → chan struct{}, closed when the run reaches a terminal state
+	runCancels      sync.Map // runID → context.CancelFunc
+	runDone         sync.Map // runID (string) → chan struct{}, closed when the run reaches a terminal state
+	runTriggerSource sync.Map // runID (string) → triggerSource (string)
 
 	shutdownMu  sync.RWMutex
 	shutdownCtx context.Context
@@ -184,9 +185,17 @@ func (e *Engine) SetNotifyDefaults(onSuccess, onFailure bool) {
 }
 
 // SetDefaultsOnFailureChain sets the global on_failure_chain to fire when any task fails.
-// Corresponds to config.Defaults.OnFailureChain. Per-task on_failure_chain overrides this.
-func (e *Engine) SetDefaultsOnFailureChain(spec task.OnFailureChainSpec) {
+// The caller is expected to have run ValidateAtDefaults() on the spec; the
+// daemon does this via cfg.validate() at config-load time. A direct caller
+// that bypasses cfg.validate() must call ValidateAtDefaults manually.
+// Returns an error if the spec violates ValidateAtDefaults rules
+// (reserved-key collision, autonomous-at-defaults).
+func (e *Engine) SetDefaultsOnFailureChain(spec task.OnFailureChainSpec) error {
+	if err := spec.ValidateAtDefaults(); err != nil {
+		return err
+	}
 	e.defaultsOnFailureChain = spec
+	return nil
 }
 
 // resolveNotify returns the effective notification flags for a task spec,
@@ -662,6 +671,20 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 		}
 		targetID := chainSpec.Task
 		if targetID != "" && targetID != completedTaskID {
+			// Chain-of-chains suppression: refuse to fire if the completed run
+			// was itself chain-fired. This prevents infinite recursion when a
+			// chain target also has on_failure_chain set (or fails and would
+			// re-trigger itself via defaults).
+			// TODO(#238): replace with proper _chain_depth tracking.
+			if src, ok := e.runTriggerSource.Load(runID); ok {
+				if srcStr, _ := src.(string); srcStr == "chain" {
+					e.log.Warn("on_failure_chain suppressed: completed run was itself chain-fired (would loop)",
+						zap.String("from", completedTaskID),
+						zap.String("run", runID),
+					)
+					return
+				}
+			}
 			if targetSpec, ok := e.registry.Get(targetID); ok {
 				e.log.Info("on_failure_chain trigger",
 					zap.String("from", completedTaskID),
@@ -674,9 +697,11 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 				// rejects any chainSpec.Params containing these keys, so we
 				// can safely overlay user params first and then stamp the
 				// reserved keys — collisions cannot reach here in a
-				// well-validated config. _chain_depth is always 1 in v1;
-				// deeper chain-depth tracking belongs to engine guardrails
-				// (#238).
+				// well-validated config.
+				// _chain_depth is hardcoded to 1 here; full depth tracking is
+				// engine-level guardrail work tracked in #238. Recursive
+				// fan-out is mitigated for v1 by the chain-of-chains
+				// suppression above (see runTriggerSource).
 				input := map[string]any{}
 				for k, v := range chainSpec.Params {
 					input[k] = v
@@ -685,6 +710,7 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 				input["runID"] = runID
 				input["status"] = runStatus
 				input["output"] = output
+				// TODO(#238): increment from incoming run input; current always-1 means chain-of-chains can recurse.
 				input["_chain_depth"] = 1
 				go e.fireAsync(ctx, targetSpec, pkgruntime.RunOptions{ //nolint:errcheck
 					Input: input,
@@ -1167,6 +1193,7 @@ func (e *Engine) startRun(spec *task.Spec, opts *pkgruntime.RunOptions, source s
 	var cancel context.CancelFunc
 	runCtx, cancel = context.WithCancel(context.Background())
 	e.runCancels.Store(opts.RunID, cancel)
+	e.runTriggerSource.Store(opts.RunID, source)
 
 	// Register a completion channel for WaitRun. The channel is closed (not
 	// sent to) so that multiple concurrent waiters are all unblocked at once.
@@ -1175,6 +1202,7 @@ func (e *Engine) startRun(spec *task.Spec, opts *pkgruntime.RunOptions, source s
 
 	cleanup = func() {
 		e.runCancels.Delete(opts.RunID)
+		e.runTriggerSource.Delete(opts.RunID)
 		cancel()
 		// Signal all waiters that the run has finished, then remove the entry.
 		if v, ok := e.runDone.LoadAndDelete(opts.RunID); ok {

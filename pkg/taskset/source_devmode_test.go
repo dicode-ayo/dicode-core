@@ -220,6 +220,25 @@ spec:
 	}
 }
 
+func TestSetDevMode_Branch_RejectsTraversalRunID(t *testing.T) {
+	remoteDir := newFixtureRemote(t, "main", map[string]string{
+		"taskset.yaml": `apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: fixture
+spec:
+  entries: {}
+`,
+	})
+	src := newTestSourceWithRemote(t, "ns", remoteDir, "main")
+	err := src.SetDevMode(context.Background(), true, DevModeOpts{
+		Branch: "fix/test", Base: "main", RunID: "../escape",
+	})
+	if !errors.Is(err, ErrInvalidRunID) {
+		t.Errorf("got %v, want ErrInvalidRunID", err)
+	}
+}
+
 func TestSetDevMode_Branch_ConcurrentSecondCallReturnsBusy(t *testing.T) {
 	remoteDir := newFixtureRemote(t, "main", map[string]string{
 		"taskset.yaml": `apiVersion: dicode/v1

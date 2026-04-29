@@ -6,6 +6,23 @@ import (
 	"testing"
 )
 
+func TestValidateRunID_Valid(t *testing.T) {
+	for _, s := range []string{"a", "run-1", "abc_123", "0", strings.Repeat("a", 64)} {
+		if err := ValidateRunID(s); err != nil {
+			t.Errorf("ValidateRunID(%q) = %v, want nil", s, err)
+		}
+	}
+}
+
+func TestValidateRunID_Invalid(t *testing.T) {
+	for _, s := range []string{"", "../etc", "a/b", "a..b", "a b", "a\x00b", strings.Repeat("a", 65), "."} {
+		err := ValidateRunID(s)
+		if !errors.Is(err, ErrInvalidRunID) {
+			t.Errorf("ValidateRunID(%q) = %v, want ErrInvalidRunID", s, err)
+		}
+	}
+}
+
 func TestValidateBranchName_Valid(t *testing.T) {
 	cases := []struct{ branch, prefix string }{
 		{"fix/abc-123", "fix/"},
@@ -43,6 +60,9 @@ func TestValidateBranchName_RejectsBadRefFormat(t *testing.T) {
 		{"at-sign-only", "@", ""},
 		{"empty", "", ""},
 		{"dot-leading-component", "fix/.hidden", "fix/"},
+		{"trailing-dot", "fix/foo.", "fix/"},
+		{"trailing-dot-mid-component", "fix/foo./bar", "fix/"},
+		{"component-lock", "fix/foo.lock/bar", "fix/"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
