@@ -185,6 +185,11 @@ type Server struct {
 	// mid-login must reload /login to get a fresh token. Not persisted so a
 	// stolen key cannot outlast a restart.
 	csrfKey []byte
+
+	// replayer fires new runs from persisted inputs. Nil when input persistence
+	// is disabled (SetReplayer not called); the /api/runs/{runID}/replay
+	// endpoint returns 503 in that case.
+	replayer *registry.Replayer
 }
 
 // SetRelayClient stores a reference to the relay client so the API can expose
@@ -192,6 +197,10 @@ type Server struct {
 func (s *Server) SetRelayClient(rc *relay.Client) {
 	s.relayClient = rc
 }
+
+// SetReplayer wires a Replayer for the POST /api/runs/{runID}/replay
+// endpoint. Pass nil to disable (the endpoint will return 503).
+func (s *Server) SetReplayer(r *registry.Replayer) { s.replayer = r }
 
 // SetManagedRuntimes registers the list of managed runtimes (Deno, Python, …)
 // that will appear in the Config UI. Call this after New and before Start.
@@ -476,6 +485,7 @@ func (s *Server) Handler() http.Handler {
 			r.Get("/runs/{runID}", s.apiGetRun)
 			r.Get("/runs/{runID}/logs", s.apiGetLogs)
 			r.Post("/runs/{runID}/kill", s.apiKillRun)
+			r.Post("/runs/{runID}/replay", s.apiReplayRun)
 
 			// Secrets management (protected by main session via requireAuth above).
 			// GET returns key names only — values are never surfaced via API.
@@ -1620,6 +1630,52 @@ func (s *Server) apiKillRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOK(w, map[string]string{"status": "killing"})
+}
+
+// replayRequest is the optional JSON body for POST /api/runs/{runID}/replay.
+type replayRequest struct {
+	TaskName string `json:"task_name"`
+}
+
+// apiReplayRun fires a new run from the persisted input of an existing run.
+// The new run's parent_run_id is set to {runID}; triggerSource = "replay"
+// (engine guard skips on_failure_chain on its failure).
+//
+// Status codes:
+//   - 200 — replay fired; body returns the new run_id.
+//   - 400 — malformed body OR run has no persisted input.
+//   - 404 — run not found OR task_name override task not registered.
+//   - 500 — internal error (decrypt failure, fire failure).
+//   - 503 — replay not available (input persistence disabled / not wired).
+func (s *Server) apiReplayRun(w http.ResponseWriter, r *http.Request) {
+	runID := chi.URLParam(r, "runID")
+
+	var req replayRequest
+	if r.Body != nil && r.ContentLength != 0 {
+		dec := json.NewDecoder(r.Body)
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&req); err != nil && err != io.EOF {
+			jsonErr(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+
+	if s.replayer == nil {
+		jsonErr(w, "replay not available (input persistence disabled)", http.StatusServiceUnavailable)
+		return
+	}
+
+	newRunID, err := s.replayer.Replay(r.Context(), runID, req.TaskName)
+	if err != nil {
+		switch {
+		case errors.Is(err, registry.ErrInputUnavailable):
+			jsonErr(w, "no persisted input for run: "+runID, http.StatusBadRequest)
+		default:
+			jsonErr(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+	jsonOK(w, map[string]any{"run_id": newRunID})
 }
 
 // --- Settings handlers ---
