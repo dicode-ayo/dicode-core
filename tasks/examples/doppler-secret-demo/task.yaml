@@ -1,0 +1,40 @@
+apiVersion: dicode/v1
+kind: Task
+name: Doppler Secret Demo
+description: >
+  Manual-trigger consumer that resolves secrets through the buildin
+  doppler provider task (issue #119). Logs WHICH keys resolved + their
+  lengths — never the values themselves. The redactor in the daemon
+  scrubs any accidental value mention from the run log on top.
+
+  Bootstrap before running:
+    1. `dicode secrets set DOPPLER_TOKEN dp.st.<your-service-token>`
+    2. Make sure your Doppler config has at least PG_URL and REDIS_URL
+       (or change the env list below).
+    3. Trigger this task from the WebUI or via the CLI run command.
+
+  What to look for in the run log:
+    - "PG_URL resolved: length=NN" lines — proves the resolver fetched
+      from Doppler and injected into the consumer process env.
+    - For an end-to-end double-check, the buildin doppler provider's
+      OWN run log should show "[dicode] secret output: [PG_URL ...]
+      = [redacted]" — that's the secret-flagged output landing.
+
+runtime: deno
+
+trigger:
+  manual: true
+
+permissions:
+  env:
+    - name: PG_URL
+      from: task:secret-providers/doppler
+    - name: REDIS_URL
+      from: task:secret-providers/doppler
+      optional: true
+
+timeout: 10s
+
+notify:
+  on_success: false
+  on_failure: true
