@@ -15,7 +15,7 @@
 // absent in the output map; required misses surface as a thrown error
 // which the trigger engine renders as required_secret_missing.
 
-import type { DicodeSdk } from "../../../../sdk.ts";
+import type { DicodeSdk } from "../../../sdk.ts";
 
 interface SecretRequest { name: string; optional: boolean; }
 

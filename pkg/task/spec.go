@@ -182,7 +182,7 @@ type IfMissing struct {
 //   - secret:        → secrets store only; run fails if key not found
 //   - from: env:NAME → host OS environment only (os.Getenv); injected as entry.Name
 //   - from: task:ID  → provider task ID; resolver spawns ID once per consumer
-//                      launch (batched across all task: entries with the same ID)
+//     launch (batched across all task: entries with the same ID)
 //   - from: bare     → identical to from: env:bare (backwards compat)
 //   - bare entry     → allowlisted in --allow-env; script reads it from host env at runtime
 //
