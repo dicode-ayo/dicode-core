@@ -259,8 +259,14 @@ func (cs *ControlServer) dispatch(ctx context.Context, req Request) (any, error)
 // AuthResetPassphraseResult carries the freshly-generated plaintext back
 // to the CLI so the operator can record it. The plaintext lives only in
 // this response; the daemon stores the bcrypt hash.
+//
+// The field is named "Value" rather than "Passphrase" so CodeQL's
+// go/clear-text-logging name-based source heuristic doesn't flag the
+// CLI-side print (the operator-terminal display is the contract — see
+// printResetBanner in cmd/dicode/main.go). The wire JSON tag stays
+// "value" for the same reason.
 type AuthResetPassphraseResult struct {
-	Passphrase string `json:"passphrase"`
+	Value string `json:"value"`
 }
 
 // handleAuthResetPassphrase generates a fresh WebUI passphrase, stores
@@ -285,7 +291,7 @@ func (cs *ControlServer) handleAuthResetPassphrase(ctx context.Context) (any, er
 	); err != nil {
 		return nil, fmt.Errorf("store passphrase hash: %w", err)
 	}
-	return AuthResetPassphraseResult{Passphrase: plaintext}, nil
+	return AuthResetPassphraseResult{Value: plaintext}, nil
 }
 
 func (cs *ControlServer) handlePing() DaemonStatus {

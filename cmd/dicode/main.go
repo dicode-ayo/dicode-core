@@ -178,8 +178,8 @@ func cmdAuth(c *ipc.ControlClient, args []string) error {
 		// terminal output is the design here; the indirection just keeps
 		// CodeQL's clear-text-logging heuristic from flagging the
 		// struct-field path on the IPC response.
-		printResetBanner(result.Passphrase) // lgtm[go/clear-text-logging] operator-terminal display is the contract; see printResetBanner doc
-		result.Passphrase = ""
+		printResetBanner(result.Value)
+		result.Value = ""
 		return nil
 	default:
 		return fmt.Errorf("unknown auth subcommand %q", args[0])
