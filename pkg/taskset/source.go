@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,6 +19,10 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	"go.uber.org/zap"
 )
+
+// ErrDevModeBusy is returned by SetDevMode when clone-mode is already active on
+// this source and a second enable call is attempted.
+var ErrDevModeBusy = errors.New("dev-mode clone-mode already active on this source")
 
 // Source implements source.Source using a TaskSet yaml file as its entry point.
 // It resolves the full task tree on startup and on each change cycle, diffs the
@@ -152,6 +157,12 @@ func (s *Source) SetDevMode(ctx context.Context, enabled bool, opts DevModeOpts)
 		return fmt.Errorf("DevModeOpts: LocalPath and Branch are mutually exclusive")
 	}
 	if enabled && opts.Branch != "" {
+		s.mu.Lock()
+		busy := s.cloneRunID != ""
+		s.mu.Unlock()
+		if busy {
+			return ErrDevModeBusy
+		}
 		if err := s.enableClone(ctx, opts); err != nil {
 			return err
 		}

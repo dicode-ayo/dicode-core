@@ -2,6 +2,7 @@ package taskset
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -193,5 +194,27 @@ spec:
 	}
 	if src.DevMode() {
 		t.Error("DevMode() = true after disable")
+	}
+}
+
+func TestSetDevMode_Branch_RefusesConcurrent(t *testing.T) {
+	remoteDir := newFixtureRemote(t, "main", map[string]string{
+		"taskset.yaml": `apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: fixture
+spec:
+  entries: {}
+`,
+	})
+	src := newTestSourceWithRemote(t, "ns", remoteDir, "main")
+	ctx := context.Background()
+
+	if err := src.SetDevMode(ctx, true, DevModeOpts{Branch: "fix/a", Base: "main", RunID: "a"}); err != nil {
+		t.Fatalf("first enable: %v", err)
+	}
+	err := src.SetDevMode(ctx, true, DevModeOpts{Branch: "fix/b", Base: "main", RunID: "b"})
+	if !errors.Is(err, ErrDevModeBusy) {
+		t.Errorf("got %v, want ErrDevModeBusy", err)
 	}
 }
