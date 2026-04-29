@@ -48,6 +48,13 @@ const (
 	CapOAuthStore  = "oauth.store"   // dicode.oauth.store_token — for the auth-relay built-in task
 	CapOAuthStatus = "oauth.status"  // dicode.oauth.list_status — for the auth-providers built-in task
 
+	// Run-input retention management — gated per-task via permissions.dicode.
+	CapRunsListExpired = "runs.list_expired" // dicode.runs.list_expired
+	CapRunsDeleteInput = "runs.delete_input" // dicode.runs.delete_input
+	CapRunsPinInput    = "runs.pin_input"    // dicode.runs.pin_input
+	CapRunsUnpinInput  = "runs.unpin_input"  // dicode.runs.unpin_input
+	CapRunsGetInput    = "runs.get_input"    // dicode.runs.get_input — internal-only
+
 	// Reserved for CLI and WebUI clients (not issued to task shims today).
 	CapHTTPRegister  = "http.register" // register HTTP handler routes (issue #54)
 	CapSourcesManage = "sources.manage"

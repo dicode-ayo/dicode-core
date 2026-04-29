@@ -93,6 +93,9 @@ type Request struct {
 	StringValue string `json:"stringValue,omitempty"` // cli.secrets.set value
 	Follow      bool   `json:"follow,omitempty"`      // cli.logs — reserved for streaming
 
+	// dicode.runs.* — run-input retention management (#233)
+	BeforeTs int64 `json:"before_ts,omitempty"` // dicode.runs.list_expired: unix timestamp cutoff
+
 	// cli.ai — prompt, optional session_id, optional task id override.
 	Prompt    string `json:"prompt,omitempty"`
 	SessionID string `json:"sessionID,omitempty"`

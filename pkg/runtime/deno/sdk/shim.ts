@@ -126,6 +126,13 @@ export interface Dicode {
   secrets_set:    (key: string, value: string)                        => Promise<void>;
   secrets_delete: (key: string)                                        => Promise<void>;
   oauth:          DicodeOAuth;
+  runs: {
+    list_expired: (opts?: { before_ts?: number }) => Promise<unknown>;
+    delete_input: (runID: string)                 => Promise<unknown>;
+    pin_input:    (runID: string)                 => Promise<unknown>;
+    unpin_input:  (runID: string)                 => Promise<unknown>;
+    get_input:    (runID: string)                 => Promise<unknown>;
+  };
 }
 
 // ── connection ────────────────────────────────────────────────────────────────
@@ -302,6 +309,18 @@ const dicode: Dicode = {
       __call__({ method: "dicode.oauth.store_token", envelope }) as Promise<OAuthStoreResult>,
     list_status: (providers) =>
       __call__({ method: "dicode.oauth.list_status", providers }) as Promise<ProviderStatus[]>,
+  },
+  runs: {
+    list_expired: (opts) =>
+      __call__({ method: "dicode.runs.list_expired", before_ts: opts?.before_ts ?? 0 }),
+    delete_input: (runID) =>
+      __call__({ method: "dicode.runs.delete_input", runID }),
+    pin_input: (runID) =>
+      __call__({ method: "dicode.runs.pin_input", runID }),
+    unpin_input: (runID) =>
+      __call__({ method: "dicode.runs.unpin_input", runID }),
+    get_input: (runID) =>
+      __call__({ method: "dicode.runs.get_input", runID }),
   },
 };
 

@@ -49,10 +49,11 @@ type Run struct {
 
 	// Input persistence fields — set by the trigger engine via SetRunInput
 	// immediately after the run row is created (Task 10).
-	InputStorageKey    string   // storage key passed to the storage task ("run-inputs/<runID>")
-	InputSize          int      // ciphertext byte size
-	InputStoredAt      int64    // unix timestamp the blob was stored (AAD-bound)
+	InputStorageKey     string   // storage key passed to the storage task ("run-inputs/<runID>")
+	InputSize           int      // ciphertext byte size
+	InputStoredAt       int64    // unix timestamp the blob was stored (AAD-bound)
 	InputRedactedFields []string // dotted paths of any redacted fields
+	InputPinned         int      // 1 = pinned (excluded from retention cleanup)
 }
 
 // LogEntry is one log line from a run.
@@ -245,7 +246,7 @@ func (r *Registry) GetRun(ctx context.Context, runID string) (*Run, error) {
 		        COALESCE(return_value, ''), COALESCE(output_content_type, ''), COALESCE(output_content, ''),
 		        COALESCE(fail_reason, ''),
 		        COALESCE(input_storage_key, ''), COALESCE(input_size, 0), COALESCE(input_stored_at, 0),
-		        COALESCE(input_redacted_fields, '')
+		        COALESCE(input_redacted_fields, ''), COALESCE(input_pinned, 0)
 		 FROM runs WHERE id = ?`,
 		[]any{runID},
 		func(rows db.Scanner) error {
@@ -259,7 +260,7 @@ func (r *Registry) GetRun(ctx context.Context, runID string) (*Run, error) {
 					&run.ID, &run.TaskID, &run.Status, &startedMs, &finishedMs, &parentID,
 					&run.TriggerSource, &run.ReturnValue, &run.OutputContentType, &run.OutputContent,
 					&run.FailureReason,
-					&run.InputStorageKey, &run.InputSize, &run.InputStoredAt, &redactedFieldsJSON,
+					&run.InputStorageKey, &run.InputSize, &run.InputStoredAt, &redactedFieldsJSON, &run.InputPinned,
 				); err != nil {
 					return err
 				}
@@ -404,4 +405,59 @@ func (r *Registry) getRunLogsQuery(ctx context.Context, runID string, sinceID in
 		},
 	)
 	return logs, err
+}
+
+// ── Run-input retention management ───────────────────────────────────────────
+
+// ExpiredInput identifies a run whose persisted input is past retention.
+type ExpiredInput struct {
+	RunID      string `json:"runID"`
+	StorageKey string `json:"storageKey"`
+	StoredAt   int64  `json:"storedAt"`
+}
+
+// ListExpiredInputs returns rows whose input_stored_at < beforeUnix and which
+// aren't pinned. Used by the run-inputs-cleanup buildin (#233 Task 12).
+func (r *Registry) ListExpiredInputs(ctx context.Context, beforeUnix int64) ([]ExpiredInput, error) {
+	var out []ExpiredInput
+	err := r.db.Query(ctx,
+		`SELECT id, input_storage_key, input_stored_at FROM runs
+		 WHERE input_storage_key IS NOT NULL
+		   AND input_storage_key != ''
+		   AND input_stored_at < ?
+		   AND input_pinned = 0`,
+		[]any{beforeUnix},
+		func(rows db.Scanner) error {
+			for rows.Next() {
+				var e ExpiredInput
+				if err := rows.Scan(&e.RunID, &e.StorageKey, &e.StoredAt); err != nil {
+					return err
+				}
+				out = append(out, e)
+			}
+			return nil
+		},
+	)
+	return out, err
+}
+
+// ClearRunInput nulls the input_storage_key/size/stored_at/redacted_fields
+// columns on a row. The caller is responsible for deleting the actual blob
+// from the storage task (typically via InputStore.Delete) BEFORE calling
+// this — the column clear is the authoritative "input gone" signal.
+func (r *Registry) ClearRunInput(ctx context.Context, runID string) error {
+	return r.db.Exec(ctx,
+		`UPDATE runs SET input_storage_key = NULL, input_size = NULL,
+		                  input_stored_at = NULL, input_redacted_fields = NULL
+		 WHERE id = ?`, runID)
+}
+
+// PinRunInput sets input_pinned = 1 on the given run.
+func (r *Registry) PinRunInput(ctx context.Context, runID string) error {
+	return r.db.Exec(ctx, `UPDATE runs SET input_pinned = 1 WHERE id = ?`, runID)
+}
+
+// UnpinRunInput sets input_pinned = 0 on the given run.
+func (r *Registry) UnpinRunInput(ctx context.Context, runID string) error {
+	return r.db.Exec(ctx, `UPDATE runs SET input_pinned = 0 WHERE id = ?`, runID)
 }

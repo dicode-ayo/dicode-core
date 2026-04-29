@@ -282,6 +282,17 @@ type DicodePermissions struct {
 	// Returns connection-state metadata (presence flag, expiry, scope) for the
 	// provider names the caller passes — never plaintext tokens.
 	OAuthStatus bool `yaml:"oauth_status,omitempty" json:"oauth_status,omitempty"`
+
+	// RunsListExpired enables dicode.runs.list_expired().
+	RunsListExpired bool `yaml:"runs_list_expired,omitempty" json:"runs_list_expired,omitempty"`
+	// RunsDeleteInput enables dicode.runs.delete_input().
+	RunsDeleteInput bool `yaml:"runs_delete_input,omitempty" json:"runs_delete_input,omitempty"`
+	// RunsPinInput enables dicode.runs.pin_input().
+	RunsPinInput bool `yaml:"runs_pin_input,omitempty" json:"runs_pin_input,omitempty"`
+	// RunsUnpinInput enables dicode.runs.unpin_input().
+	RunsUnpinInput bool `yaml:"runs_unpin_input,omitempty" json:"runs_unpin_input,omitempty"`
+	// RunsGetInput enables dicode.runs.get_input() — internal, used by auto-fix.
+	RunsGetInput bool `yaml:"runs_get_input,omitempty" json:"runs_get_input,omitempty"`
 }
 
 // ProviderConfig declares secret-provider settings on a task that
