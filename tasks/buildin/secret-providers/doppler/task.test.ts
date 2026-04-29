@@ -60,13 +60,11 @@ Deno.test("Doppler provider returns requested secrets", async () => {
     return Promise.reject(new Error("unexpected fetch: " + url));
   };
 
-  const sdk = makeSdk({
-    requests: [
-      { name: "PG_URL", optional: false },
-      { name: "REDIS_URL", optional: true },
-      { name: "MISSING_OPT", optional: true },
-    ],
-  });
+  const sdk = makeSdk([
+    { name: "PG_URL", optional: false },
+    { name: "REDIS_URL", optional: true },
+    { name: "MISSING_OPT", optional: true },
+  ]);
 
   try {
     // deno-lint-ignore no-explicit-any
@@ -113,7 +111,7 @@ Deno.test("Doppler provider throws on required miss", async () => {
     secrets: {},
   }), { status: 200 }));
 
-  const sdk = makeSdk({ requests: [{ name: "PG_URL", optional: false }] });
+  const sdk = makeSdk([{ name: "PG_URL", optional: false }]);
 
   try {
     await assertRejects(
@@ -129,7 +127,7 @@ Deno.test("Doppler provider throws on required miss", async () => {
 
 Deno.test("Doppler provider throws when DOPPLER_TOKEN is missing", async () => {
   Deno.env.delete("DOPPLER_TOKEN");
-  const sdk = makeSdk({ requests: [] });
+  const sdk = makeSdk([]);
   await assertRejects(
     // deno-lint-ignore no-explicit-any
     () => main(sdk as any),
@@ -143,7 +141,7 @@ Deno.test("Doppler provider surfaces non-2xx Doppler API responses", async () =>
   const originalFetch = globalThis.fetch;
   globalThis.fetch = () => Promise.resolve(new Response("forbidden", { status: 403 }));
 
-  const sdk = makeSdk({ requests: [{ name: "X", optional: true }] });
+  const sdk = makeSdk([{ name: "X", optional: true }]);
 
   try {
     await assertRejects(
