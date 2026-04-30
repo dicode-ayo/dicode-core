@@ -107,3 +107,7 @@ spec:
     run-inputs-cleanup:
       ref:
         path: ./run-inputs-cleanup/task.yaml
+
+    git-pr:
+      ref:
+        path: ./git-pr/task.yaml
