@@ -111,3 +111,38 @@ spec:
     git-pr:
       ref:
         path: ./git-pr/task.yaml
+
+    auto-fix:
+      ref:
+        path: ./ai-agent/task.yaml
+      overrides:
+        name: "Auto-fix on failure"
+        description: |
+          Diagnoses a failed task run, edits source in a per-fix clone,
+          validates via task tests + replay, and either merges to main
+          (autonomous) or opens a PR (review). Fired by setting
+          on_failure_chain: auto-fix on a target task or in defaults.
+        trigger:
+          manual: true
+        params:
+          skills: "dicode-task-dev,dicode-basics,dicode-auto-fix"
+          max_tool_iterations: "30"
+        timeout: 1800s
+        notify:
+          on_success: true
+          on_failure: true
+        dicode:
+          runs_replay:           true
+          runs_get_input:        true
+          runs_pin_input:        true
+          runs_unpin_input:      true
+          sources_set_dev_mode:  true
+          tasks_test:            true
+          git_commit_push:       true
+          list_tasks:            true
+          get_runs:              true
+          tasks:
+            - "git-pr"
+        fs:
+          - path: "${DATADIR}/dev-clones"
+            permission: rw
