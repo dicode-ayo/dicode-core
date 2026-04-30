@@ -219,6 +219,12 @@ func (r *Resolver) resolveBody(
 					zap.String("entry", fullID), zap.Error(err))
 				continue
 			}
+			for _, w := range spec.Warnings {
+				r.log.Warn("taskset: task config warning",
+					zap.String("entry", fullID),
+					zap.String("warning", w),
+				)
+			}
 			layers := buildOverrideLayers(ts.Spec.Defaults, parentEntryOverride, entry.Overrides)
 			resolved := applyOverrides(spec, layers...)
 			resolved.ID = fullID

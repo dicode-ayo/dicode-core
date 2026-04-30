@@ -360,6 +360,10 @@ type Spec struct {
 	TaskDir string `yaml:"-" json:"-"`
 	// ID is derived from the directory name (not stored in YAML).
 	ID string `yaml:"-" json:"id"`
+	// Warnings holds non-fatal config-load warnings emitted during validate().
+	// Callers (reconciler, taskset resolver) should log these via their zap
+	// logger after LoadDir / LoadDirWithVars returns.
+	Warnings []string `yaml:"-" json:"-"`
 }
 
 // RunInputsTaskOverride is the per-task override for run-input persistence.
@@ -516,9 +520,11 @@ func (s *Spec) validate() error {
 		return fmt.Errorf("only one trigger type is allowed per task")
 	}
 	if s.OnFailureChain != nil {
-		if err := s.OnFailureChain.Validate(); err != nil {
+		warns, err := s.OnFailureChain.Validate()
+		if err != nil {
 			return fmt.Errorf("on_failure_chain: %w", err)
 		}
+		s.Warnings = append(s.Warnings, warns...)
 	}
 	switch s.Runtime {
 	case RuntimeDeno, "js", "":

@@ -110,24 +110,47 @@ var reservedChainParamKeys = map[string]struct{}{
 	"_chain_depth": {},
 }
 
-// Validate enforces reserved-key constraints. Called from both
-// the defaults site (Defaults.OnFailureChain) and per-task sites
-// (Task.Spec.OnFailureChain).
-func (s OnFailureChainSpec) Validate() error {
+// Validate enforces reserved-key constraints and strips per-task-only fields
+// (MaxConcurrentGlobal, Storm) that must not be set at the individual task
+// level. Called from per-task sites (Spec.validate); not called directly for
+// the defaults block — use ValidateAtDefaults for that.
+//
+// Mutates s in place (zeroes any stripped fields) and returns non-fatal
+// warnings that callers should surface via their structured logger.
+func (s *OnFailureChainSpec) Validate() (warnings []string, err error) {
 	for k := range s.Params {
 		if _, reserved := reservedChainParamKeys[k]; reserved {
-			return fmt.Errorf("on_failure_chain.params: %q is a reserved key (used by the engine)", k)
+			return nil, fmt.Errorf("on_failure_chain.params: %q is a reserved key (used by the engine)", k)
 		}
 	}
-	return nil
+	// MaxConcurrentGlobal and Storm are operator-policy fields that apply only
+	// at the defaults.on_failure_chain level. A per-task value would bypass the
+	// global guard via the full-replace merge in FireChain; zero it out and warn.
+	if s.MaxConcurrentGlobal != 0 {
+		warnings = append(warnings,
+			fmt.Sprintf("on_failure_chain.max_concurrent_global is an operator-policy field and is ignored at the per-task level (task had %d); set it in defaults.on_failure_chain instead", s.MaxConcurrentGlobal))
+		s.MaxConcurrentGlobal = 0
+	}
+	if s.Storm.Rate != 0 || s.Storm.Window != 0 || s.Storm.Suppress != 0 || s.Storm.Scope != "" {
+		warnings = append(warnings,
+			"on_failure_chain.storm is an operator-policy field and is ignored at the per-task level; set it in defaults.on_failure_chain instead")
+		s.Storm = StormSpec{}
+	}
+	return warnings, nil
 }
 
 // ValidateAtDefaults runs at the defaults.on_failure_chain site only.
 // Adds the rule: mode: autonomous is rejected at the defaults level — must be
 // opted into per-task, paired with branch protection on the source's tracked
 // branch.
+//
+// Does NOT strip MaxConcurrentGlobal or Storm — those are valid here.
 func (s OnFailureChainSpec) ValidateAtDefaults() error {
-	if err := s.Validate(); err != nil {
+	// Use a pointer receiver call on a local copy to avoid mutating the caller's
+	// value; at the defaults site stripping is not needed, but we still need the
+	// reserved-key check.
+	copy := s
+	if _, err := copy.Validate(); err != nil {
 		return err
 	}
 	if mode, ok := s.Params["mode"].(string); ok && mode == "autonomous" {

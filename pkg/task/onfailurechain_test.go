@@ -81,7 +81,7 @@ func TestOnFailureChainSpec_Validate_ReservedKeyCollision(t *testing.T) {
 				Task:   "auto-fix",
 				Params: map[string]any{key: "x"},
 			}
-			err := s.Validate()
+			_, err := s.Validate()
 			if err == nil {
 				t.Fatal("expected error for reserved key collision")
 			}
@@ -111,7 +111,7 @@ func TestOnFailureChainSpec_Validate_AcceptsAutonomousAtTaskLevel(t *testing.T) 
 		Task:   "auto-fix",
 		Params: map[string]any{"mode": "autonomous"},
 	}
-	if err := s.Validate(); err != nil {
+	if _, err := s.Validate(); err != nil {
 		t.Errorf("per-task autonomous should be accepted by Validate(); got %v", err)
 	}
 }
@@ -123,5 +123,60 @@ func TestOnFailureChainSpec_ValidateAtDefaults_AcceptsReview(t *testing.T) {
 	}
 	if err := s.ValidateAtDefaults(); err != nil {
 		t.Errorf("review at defaults should be accepted; got %v", err)
+	}
+}
+
+// TestOnFailureChainSpec_StripsGlobalFieldsForPerTask verifies that
+// MaxConcurrentGlobal and Storm are zeroed by Validate() when set at the
+// per-task level, and that a structured warning is returned for each.
+func TestOnFailureChainSpec_StripsGlobalFieldsForPerTask(t *testing.T) {
+	s := OnFailureChainSpec{
+		Task:                "auto-fix",
+		MaxConcurrentGlobal: 5,
+		Storm: StormSpec{
+			Rate:     10,
+			Window:   60 * 1e9, // 60s as nanoseconds
+			Suppress: 300 * 1e9,
+			Scope:    "global",
+		},
+	}
+
+	warns, err := s.Validate()
+	if err != nil {
+		t.Fatalf("Validate() returned unexpected error: %v", err)
+	}
+	if len(warns) != 2 {
+		t.Fatalf("expected 2 warnings (MaxConcurrentGlobal + Storm), got %d: %v", len(warns), warns)
+	}
+	for _, w := range warns {
+		if !strings.Contains(w, "operator-policy") {
+			t.Errorf("warning should mention 'operator-policy'; got %q", w)
+		}
+	}
+	if s.MaxConcurrentGlobal != 0 {
+		t.Errorf("MaxConcurrentGlobal should be zeroed after Validate(); got %d", s.MaxConcurrentGlobal)
+	}
+	if s.Storm != (StormSpec{}) {
+		t.Errorf("Storm should be zeroed after Validate(); got %+v", s.Storm)
+	}
+}
+
+// TestOnFailureChainSpec_ValidateAtDefaults_KeepsGlobalFields verifies that
+// ValidateAtDefaults does NOT strip MaxConcurrentGlobal or Storm — those are
+// valid at the defaults site.
+func TestOnFailureChainSpec_ValidateAtDefaults_KeepsGlobalFields(t *testing.T) {
+	s := OnFailureChainSpec{
+		Task:                "auto-fix",
+		MaxConcurrentGlobal: 5,
+		Storm: StormSpec{
+			Rate:   10,
+			Window: 60 * 1e9,
+		},
+	}
+	if err := s.ValidateAtDefaults(); err != nil {
+		t.Fatalf("ValidateAtDefaults() rejected valid defaults-level spec: %v", err)
+	}
+	if s.MaxConcurrentGlobal != 5 {
+		t.Errorf("ValidateAtDefaults should not zero MaxConcurrentGlobal; got %d", s.MaxConcurrentGlobal)
 	}
 }
