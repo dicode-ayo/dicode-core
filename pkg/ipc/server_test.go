@@ -1642,3 +1642,83 @@ func TestIPC_SourcesSetDevMode_GrantedByCap(t *testing.T) {
 		t.Errorf("expected CapSourcesSetDevMode in caps when SourcesSetDevMode=true, got %v", caps)
 	}
 }
+
+// TestIPC_GitCommitPush_RequiresCap verifies that a task spec WITHOUT
+// permissions.dicode.git_commit_push: true cannot call
+// dicode.git.commit_push — it must receive "permission denied".
+func TestIPC_GitCommitPush_RequiresCap(t *testing.T) {
+	e := newTestEnv(t)
+
+	spec := &task.Spec{
+		Permissions: task.Permissions{
+			Dicode: &task.DicodePermissions{
+				// GitCommitPush deliberately omitted.
+			},
+		},
+	}
+
+	conn, _ := e.startWithSpec(t, nil, nil, spec, nil)
+
+	sendMsg(t, conn, map[string]any{
+		"id":        "git-1",
+		"method":    "dicode.git.commit_push",
+		"source_id": "some-source",
+	})
+	resp := recvMsg(t, conn)
+	errMsg, _ := resp["error"].(string)
+	if !strings.Contains(errMsg, "permission denied") {
+		t.Errorf("expected permission denied error, got: %q (full resp: %#v)", errMsg, resp)
+	}
+}
+
+// TestIPC_GitCommitPush_GrantedByCap verifies that when GitCommitPush is set
+// in the spec, CapGitCommitPush appears in the handshake caps, and that
+// calling the method with no source_id returns "source_id required"
+// (proves we got past the cap gate).
+func TestIPC_GitCommitPush_GrantedByCap(t *testing.T) {
+	e := newTestEnv(t)
+
+	spec := &task.Spec{
+		Permissions: task.Permissions{
+			Dicode: &task.DicodePermissions{
+				GitCommitPush: true,
+			},
+		},
+	}
+
+	runID := fmt.Sprintf("cap-git-commit-push-%d", time.Now().UnixNano())
+	srv := New(runID, "sec-test-task", e.secret, e.reg, e.db, nil, nil, zap.NewNop(), spec, nil)
+	socketPath, token, err := srv.Start(context.Background())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(srv.Stop)
+
+	conn := dial(t, socketPath)
+	t.Cleanup(func() { conn.Close() })
+	caps := doHandshake(t, conn, token)
+
+	has := func(cap string) bool {
+		for _, c := range caps {
+			if c == cap {
+				return true
+			}
+		}
+		return false
+	}
+	if !has(CapGitCommitPush) {
+		t.Errorf("expected CapGitCommitPush in caps when GitCommitPush=true, got %v", caps)
+	}
+
+	// Calling with no source_id must fail with "source_id required" (past cap gate).
+	sendMsg(t, conn, map[string]any{
+		"id":     "git-2",
+		"method": "dicode.git.commit_push",
+		// source_id intentionally omitted
+	})
+	resp := recvMsg(t, conn)
+	errMsg, _ := resp["error"].(string)
+	if !strings.Contains(errMsg, "source_id required") {
+		t.Errorf("expected source_id required error, got: %q (full resp: %#v)", errMsg, resp)
+	}
+}

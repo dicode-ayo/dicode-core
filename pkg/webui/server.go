@@ -556,6 +556,10 @@ func (s *Server) Handler() http.Handler {
 	// continues to work the same way as before.
 	r.With(s.requireAPIKey).Post("/api/tasks/{id}/test", s.apiTestTask)
 
+	// Commit-push endpoint — API-key gated, mounted outside the session-auth
+	// group so IPC tasks and CI scripts can call it with a Bearer token.
+	r.With(s.requireAPIKey).Post("/api/sources/{name}/commit-push", s.apiCommitPush)
+
 	return r
 }
 

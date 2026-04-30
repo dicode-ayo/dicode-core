@@ -104,6 +104,18 @@ func NewSource(
 // ID implements source.Source.
 func (s *Source) ID() string { return s.id }
 
+// RepoPath returns the on-disk path of this source's git repo. For sources in
+// clone-mode (dev-mode clone active) it returns the active clone directory;
+// otherwise it returns the cached pull dir established in Start.
+func (s *Source) RepoPath() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cloneRunID != "" {
+		return filepath.Join(s.dataDir, "dev-clones", s.namespace, s.cloneRunID)
+	}
+	return s.watchRoot
+}
+
 // Start performs an initial resolution, emits events, then watches for changes.
 // For git refs the root repo is cloned eagerly so fsnotify can be set up on the
 // local clone directory immediately. The returned channel is closed when ctx is

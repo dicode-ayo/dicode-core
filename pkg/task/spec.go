@@ -300,6 +300,9 @@ type DicodePermissions struct {
 	// SourcesSetDevMode enables dicode.sources.set_dev_mode() — toggles dev
 	// mode (incl. clone-mode) on a configured taskset source.
 	SourcesSetDevMode bool `yaml:"sources_set_dev_mode,omitempty" json:"sources_set_dev_mode,omitempty"`
+	// GitCommitPush enables dicode.git.commit_push() — wraps
+	// pkg/source/git.CommitPush for add/commit/push from an IPC task. (#234)
+	GitCommitPush bool `yaml:"git_commit_push,omitempty" json:"git_commit_push,omitempty"`
 }
 
 // ProviderConfig declares secret-provider settings on a task that

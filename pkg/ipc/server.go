@@ -16,6 +16,7 @@ import (
 	"github.com/dicode/dicode/pkg/registry"
 	"github.com/dicode/dicode/pkg/relay"
 	"github.com/dicode/dicode/pkg/secrets"
+	gitsource "github.com/dicode/dicode/pkg/source/git"
 	"github.com/dicode/dicode/pkg/task"
 	"github.com/dicode/dicode/pkg/taskset"
 	"github.com/dicode/dicode/pkg/tasktest"
@@ -85,10 +86,11 @@ type Server struct {
 	// torn reads under the Go memory model.
 	redactor atomic.Pointer[secrets.Redactor]
 
-	gateway    *Gateway             // optional; enables http.register for daemon tasks
-	inputStore *registry.InputStore // optional; enables dicode.runs.delete_input blob deletion
-	replayer   *registry.Replayer   // optional; enables dicode.runs.replay
-	sourceMgr  SourceDevModeSetter  // optional; enables dicode.sources.set_dev_mode
+	gateway      *Gateway             // optional; enables http.register for daemon tasks
+	inputStore   *registry.InputStore // optional; enables dicode.runs.delete_input blob deletion
+	replayer     *registry.Replayer   // optional; enables dicode.runs.replay
+	sourceMgr    SourceDevModeSetter  // optional; enables dicode.sources.set_dev_mode
+	repoResolver RepoPathResolver     // optional; enables dicode.git.commit_push
 
 	ctx        context.Context
 	socketPath string
@@ -278,6 +280,9 @@ func (s *Server) Start(ctx context.Context) (socketPath, token string, err error
 		if dp.SourcesSetDevMode {
 			caps = append(caps, CapSourcesSetDevMode)
 		}
+		if dp.GitCommitPush {
+			caps = append(caps, CapGitCommitPush)
+		}
 	}
 	if s.spec != nil && s.spec.Trigger.Daemon && s.gateway != nil {
 		caps = append(caps, CapHTTPRegister)
@@ -342,6 +347,16 @@ type SourceDevModeSetter interface {
 // SetSourceManager attaches a SourceDevModeSetter (typically *webui.SourceManager)
 // for dicode.sources.set_dev_mode dispatch. nil disables.
 func (s *Server) SetSourceManager(m SourceDevModeSetter) { s.sourceMgr = m }
+
+// RepoPathResolver maps a source name to its on-disk repo path. Defined in
+// pkg/ipc to avoid an upward import; satisfied by *webui.SourceManager.
+type RepoPathResolver interface {
+	ResolveRepoPath(sourceName string) (string, error)
+}
+
+// SetRepoResolver attaches a RepoPathResolver (typically *webui.SourceManager)
+// for dicode.git.commit_push dispatch. nil disables.
+func (s *Server) SetRepoResolver(r RepoPathResolver) { s.repoResolver = r }
 
 // ReturnCh receives the task return value once the subprocess sends "return".
 func (s *Server) ReturnCh() <-chan any { return s.retCh }
@@ -882,6 +897,46 @@ func (s *Server) handleConn(conn net.Conn) {
 				continue
 			}
 			reply(req.ID, map[string]any{"ok": true}, "")
+
+		case "dicode.git.commit_push":
+			if !hasCap(caps, CapGitCommitPush) {
+				reply(req.ID, nil, "ipc: permission denied (git.commit_push)")
+				continue
+			}
+			if req.SourceID == "" {
+				reply(req.ID, nil, "ipc: source_id required")
+				continue
+			}
+			if s.repoResolver == nil {
+				reply(req.ID, nil, "ipc: repo resolver not configured")
+				continue
+			}
+			repoPath, err := s.repoResolver.ResolveRepoPath(req.SourceID)
+			if err != nil {
+				reply(req.ID, nil, err.Error())
+				continue
+			}
+			authToken := ""
+			if req.AuthTokenEnv != "" {
+				authToken = os.Getenv(req.AuthTokenEnv)
+			}
+			hash, err := gitsource.CommitPush(s.ctx, repoPath, gitsource.CommitPushOptions{
+				Message:      req.CommitMsg,
+				Branch:       req.Branch,
+				BranchPrefix: req.BranchPrefix,
+				AllowMain:    req.AllowMain,
+				Files:        req.Files,
+				Author: gitsource.Signature{
+					Name:  req.AuthorName,
+					Email: req.AuthorEmail,
+				},
+				AuthToken: authToken,
+			})
+			if err != nil {
+				reply(req.ID, nil, err.Error())
+				continue
+			}
+			reply(req.ID, map[string]any{"commit": hash}, "")
 
 		// ── dicode.secrets_* ──────────────────────────────────────────────
 
