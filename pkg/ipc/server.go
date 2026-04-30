@@ -848,7 +848,14 @@ func (s *Server) handleConn(conn net.Conn) {
 				reply(req.ID, nil, "ipc: runID required")
 				continue
 			}
-			newRunID, err := s.replayer.Replay(s.ctx, req.RunID, req.TaskID)
+			// Look up the calling run's parent_run_id for the lineage check (#246).
+			var callerParentRunID string
+			if s.runID != "" {
+				if callerRun, err := s.registry.GetRun(s.ctx, s.runID); err == nil {
+					callerParentRunID = callerRun.ParentRunID
+				}
+			}
+			newRunID, err := s.replayer.Replay(s.ctx, req.RunID, req.TaskID, s.taskID, callerParentRunID)
 			if err != nil {
 				reply(req.ID, nil, err.Error())
 				continue

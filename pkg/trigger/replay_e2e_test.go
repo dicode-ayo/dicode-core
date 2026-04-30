@@ -53,7 +53,7 @@ func TestReplay_FullPipeline(t *testing.T) {
 
 	// Replay via the Replayer + adapter.
 	replayer := registry.NewReplayer(e.reg, is, NewReplayRunner(e.engine))
-	newRunID, err := replayer.Replay(context.Background(), originalRunID, "")
+	newRunID, err := replayer.Replay(context.Background(), originalRunID, "", "", "")
 	if err != nil {
 		t.Fatalf("Replay: %v", err)
 	}

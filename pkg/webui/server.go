@@ -1673,7 +1673,7 @@ func (s *Server) apiReplayRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	newRunID, err := s.replayer.Replay(r.Context(), runID, req.TaskName)
+	newRunID, err := s.replayer.Replay(r.Context(), runID, req.TaskName, "", "")
 	if err != nil {
 		var taskNotFound *trigger.TaskNotFoundError
 		switch {
