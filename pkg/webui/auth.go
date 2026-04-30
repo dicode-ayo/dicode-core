@@ -107,6 +107,28 @@ func (s *Server) hasValidSession(r *http.Request) bool {
 	return false
 }
 
+// requireSessionOrAPIKey accepts either a session cookie OR a Bearer API key.
+// Used by endpoints that need to be reachable from both the WebUI (cookies)
+// and CLI/CI tooling (Bearer). When server.auth is disabled this is a no-op.
+func (s *Server) requireSessionOrAPIKey(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.cfg.Server.Auth {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if raw := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "); raw != "" && s.apiKeys.validate(r.Context(), raw) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if s.hasValidSession(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Set("WWW-Authenticate", `Bearer realm="dicode"`)
+		jsonErr(w, "unauthorized", http.StatusUnauthorized)
+	})
+}
+
 // requireAuth is a middleware that enforces authentication when server.auth is
 // enabled. API requests receive a 401 JSON response; browser requests are
 // redirected to the login page. Public paths (login endpoint, static assets,

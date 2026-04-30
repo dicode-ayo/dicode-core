@@ -559,10 +559,10 @@ func (s *Server) Handler() http.Handler {
 	// group so IPC tasks and CI scripts can call it with a Bearer token.
 	r.With(s.requireAPIKey).Post("/api/sources/{name}/commit-push", s.apiCommitPush)
 
-	// Replay endpoint — API-key gated for the same reason: machine callers
-	// (auto-fix flows, CI scripts) need to fire a replay without a browser
-	// session. Mirrors apiTestTask / apiCommitPush.
-	r.With(s.requireAPIKey).Post("/api/runs/{runID}/replay", s.apiReplayRun)
+	// Replay endpoint — accepts either a session cookie (WebUI replay button)
+	// or a Bearer API key (CLI / auto-fix scripts). Mounted outside the
+	// session-only group so machine callers without cookies still work.
+	r.With(s.requireSessionOrAPIKey).Post("/api/runs/{runID}/replay", s.apiReplayRun)
 
 	return r
 }
