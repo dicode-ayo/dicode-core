@@ -32,6 +32,16 @@ spec:
       ref:
         path: ./ai-agent/task.yaml
 
+    # ─── ai-agent-claude-cli: Claude.ai subscription via the official CLI ──
+    # Wraps `claude -p` so dicode tasks can drive Claude with the operator's
+    # Pro/Max subscription instead of paying per-token via the API. Requires
+    # the `claude` binary on PATH (or CLAUDE_CLI_PATH) and a CLAUDE_CODE_OAUTH_TOKEN
+    # secret minted via `claude setup-token`. See task README.md for K8s /
+    # Docker / host install paths.
+    ai-agent-claude-cli:
+      ref:
+        path: ./ai-agent-claude-cli/task.yaml
+
     # ─── dicodai: AI Agent preset for dicode task development ──────────────
     # Override of ai-agent preloaded with the dicode-task-dev + dicode-basics
     # skills and wired to OpenAI as the default provider. Users only need to

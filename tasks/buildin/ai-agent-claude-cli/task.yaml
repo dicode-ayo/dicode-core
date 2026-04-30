@@ -1,0 +1,84 @@
+apiVersion: dicode/v1
+kind: Task
+name: "AI Agent (Claude CLI)"
+description: |
+  Wraps the official `claude` CLI (https://code.claude.com) so dicode tasks
+  can drive Claude with the operator's Claude.ai Pro/Max subscription
+  instead of paying per-token via the Anthropic API.
+
+  Auth is via the `CLAUDE_CODE_OAUTH_TOKEN` minted by `claude setup-token`
+  (one-year subscription token). Calls count against the same 5-hour rate
+  windows as interactive Claude Code use.
+
+  Companion to buildin/ai-agent (OpenAI-compatible HTTPS endpoints with
+  per-token API key billing). Use this when you have a Claude subscription
+  and want the LLM cost to live there. See README.md for install paths
+  (host, custom image, K8s init container).
+runtime: deno
+
+trigger:
+  webhook: /hooks/ai-claude
+  # auth: true intentionally omitted — see #96 (auth UX for protected
+  # webhook tasks). Re-enable once the auth flow lands.
+
+params:
+  prompt:
+    type: string
+    required: true
+    description: "User message to send to Claude."
+  session_id:
+    type: string
+    default: ""
+    description: "Conversation id from a prior turn. Empty = new conversation; the new id is returned."
+  model:
+    type: string
+    default: ""
+    description: "Optional model override (e.g. 'sonnet', 'opus'). Empty = CLI default."
+  system_prompt:
+    type: string
+    default: ""
+    description: "Optional text appended to the system prompt via --append-system-prompt."
+  cli_path:
+    type: string
+    default: ""
+    description: |
+      Override the path to the `claude` binary. Empty = look up via PATH (or
+      the CLAUDE_CLI_PATH env var, if declared in permissions.env).
+
+permissions:
+  # Subprocess: only the `claude` binary, plus PATH-resolution helpers.
+  run: ["claude"]
+
+  env:
+    # The OAuth token minted by `claude setup-token`. Store as a dicode
+    # secret named CLAUDE_CODE_OAUTH_TOKEN; this maps it into the task.
+    - name: CLAUDE_CODE_OAUTH_TOKEN
+      from: CLAUDE_CODE_OAUTH_TOKEN
+    # HOME is required so the CLI can read/write its credential cache
+    # at $HOME/.claude/.credentials.json. Without HOME set, it falls
+    # back to '/' and refuses to persist state.
+    - HOME
+    # PATH so the CLI is discoverable when cli_path is left empty.
+    - PATH
+    # Optional override path resolved by task.ts when cli_path param is
+    # empty. Lets operators install claude at a non-standard location
+    # (e.g. /opt/claude/bin/claude) without changing every task.
+    - CLAUDE_CLI_PATH
+
+  fs:
+    # Credential + session state cache. The CLI re-reads the OAuth token
+    # from $HOME/.claude/.credentials.json on every invocation; granting
+    # rw lets it persist refreshed tokens and per-session rollups.
+    - path: "${HOME}/.claude"
+      permission: rw
+
+  # No dicode SDK calls — pure subprocess wrapper. (Add list_tasks /
+  # tasks union if you want this agent to act as a tool-using agent
+  # against other dicode tasks; that requires extra wiring beyond
+  # what claude -p does today.)
+
+timeout: 5m
+
+notify:
+  on_success: false
+  on_failure: true
