@@ -911,6 +911,12 @@ func (s *Server) handleConn(conn net.Conn) {
 				reply(req.ID, nil, "ipc: repo resolver not configured")
 				continue
 			}
+			// Validate auth_token_env against permissions.env to prevent
+			// arbitrary daemon env var exfiltration. Skip when empty (no auth).
+			if req.AuthTokenEnv != "" && !authTokenEnvAllowed(s.spec, req.AuthTokenEnv) {
+				reply(req.ID, nil, fmt.Sprintf("ipc: auth_token_env %q not declared in permissions.env", req.AuthTokenEnv))
+				continue
+			}
 			repoPath, err := s.repoResolver.ResolveRepoPath(req.SourceID)
 			if err != nil {
 				reply(req.ID, nil, err.Error())
@@ -1273,6 +1279,25 @@ func (s *Server) mcpAllowed(name string) bool {
 	}
 	for _, a := range dp.MCP {
 		if a == "*" || a == name {
+			return true
+		}
+	}
+	return false
+}
+
+// authTokenEnvAllowed reports whether envVar is declared in the task's
+// permissions.env list. An entry matches when either:
+//   - entry.From == envVar (the host env var being sourced), or
+//   - entry.From == "" AND entry.Name == envVar (bare name entry).
+func authTokenEnvAllowed(spec *task.Spec, envVar string) bool {
+	if spec == nil {
+		return false
+	}
+	for _, e := range spec.Permissions.Env {
+		if e.From == envVar {
+			return true
+		}
+		if e.From == "" && e.Name == envVar {
 			return true
 		}
 	}

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -226,8 +225,19 @@ type commitPushRequest struct {
 func (s *Server) apiCommitPush(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	var req commitPushRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
 		jsonErr(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	// auth_token_env is not supported via REST — the REST endpoint has no
+	// task-scoped permissions.env to validate against, so any env var name
+	// could exfiltrate daemon secrets. Callers that need auth must use the
+	// dicode.git.commit_push IPC method from a task with the env var declared
+	// in permissions.env.
+	if req.AuthTokenEnv != "" {
+		jsonErr(w, "auth_token_env is only supported via IPC; use the dicode.git.commit_push SDK from a task", http.StatusBadRequest)
 		return
 	}
 	if s.sourceMgr == nil {
@@ -239,10 +249,6 @@ func (s *Server) apiCommitPush(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	authToken := ""
-	if req.AuthTokenEnv != "" {
-		authToken = os.Getenv(req.AuthTokenEnv)
-	}
 	hash, err := gitSource.CommitPush(r.Context(), repoPath, gitSource.CommitPushOptions{
 		Message:      req.Message,
 		Branch:       req.Branch,
@@ -253,7 +259,7 @@ func (s *Server) apiCommitPush(w http.ResponseWriter, r *http.Request) {
 			Name:  req.AuthorName,
 			Email: req.AuthorEmail,
 		},
-		AuthToken: authToken,
+		AuthToken: "", // auth_token_env blocked above for REST callers
 	})
 	if err != nil {
 		jsonErr(w, err.Error(), http.StatusInternalServerError)
