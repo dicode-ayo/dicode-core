@@ -8,12 +8,24 @@ import main from "./task.ts";
 
 const fakeDicode = {} as any;
 
+// makeParams returns an SDK-shaped Params object whose .get() is async,
+// matching pkg/runtime/deno/sdk/shim.ts. The task code awaits these calls;
+// passing a plain Map<string,string> would surface as Promise objects in
+// every await target and break validation in surprising ways.
+function makeParams(entries: Array<[string, string]>) {
+    const m = new Map(entries);
+    return {
+        get: (k: string) => Promise.resolve(m.get(k) ?? null),
+        all: () => Promise.resolve(Object.fromEntries(m)),
+    };
+}
+
 function makeKv() {
     const store = new Map<string, unknown>();
     return {
         store,
         get: (k: string) => Promise.resolve(store.get(k) ?? null),
-        set: (k: string, v: unknown) => { store.set(k, v); },
+        set: (k: string, v: unknown) => { store.set(k, v); return Promise.resolve(); },
     };
 }
 
@@ -40,14 +52,14 @@ ${stubBody}
 
 Deno.test("rejects empty prompt", async () => {
     Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "stub");
-    const r = await main({ params: new Map(), kv: makeKv(), dicode: fakeDicode });
+    const r = await main({ params: makeParams([]), kv: makeKv(), dicode: fakeDicode });
     assertEquals(r.ok, false);
 });
 
 Deno.test("rejects missing OAuth token", async () => {
     Deno.env.delete("CLAUDE_CODE_OAUTH_TOKEN");
     const r = await main({
-        params: new Map([["prompt", "hi"]]),
+        params: makeParams([["prompt", "hi"]]),
         kv: makeKv(), dicode: fakeDicode,
     });
     assertEquals(r.ok, false);
@@ -59,7 +71,7 @@ Deno.test("rejects missing OAuth token", async () => {
 Deno.test("rejects malformed session_id", async () => {
     Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "stub");
     const r = await main({
-        params: new Map([
+        params: makeParams([
             ["prompt", "hi"],
             ["session_id", "../etc/passwd"],
         ]),
@@ -80,7 +92,7 @@ Deno.test("happy path returns reply + session_id", async () => {
 JSON`,
         () =>
             main({
-                params: new Map([["prompt", "say hello"]]),
+                params: makeParams([["prompt", "say hello"]]),
                 kv, dicode: fakeDicode,
             }),
     );
@@ -101,16 +113,13 @@ Deno.test("reuses kv-mapped Claude session on follow-up turns", async () => {
     const dicodeId = "abc-123-uuid";
     kv.store.set("claude:" + dicodeId, "sess-pre-existing");
 
-    // Stub records its argv into stderr so the test can assert --resume
-    // was passed with the mapped Claude session_id.
     const result = await withStubClaude(
-        `echo "ARGS=$*" >&2
-cat <<'JSON'
+        `cat <<'JSON'
 {"type":"result","is_error":false,"result":"continued","session_id":"sess-pre-existing"}
 JSON`,
         () =>
             main({
-                params: new Map([
+                params: makeParams([
                     ["prompt", "continue"],
                     ["session_id", dicodeId],
                 ]),
@@ -119,10 +128,6 @@ JSON`,
     );
     assertEquals(result.ok, true);
     assertEquals(result.session_id, dicodeId);  // dicode id unchanged
-    // We can't see stderr in the result; the mapping check verifies the
-    // engine took the kv path. (A more thorough assertion would require
-    // capturing the spawned process's argv via the stub script — leaving
-    // that to the integration suite to keep this test self-contained.)
 });
 
 Deno.test("rotates Claude session_id mapping when CLI returns a new one", async () => {
@@ -137,7 +142,7 @@ Deno.test("rotates Claude session_id mapping when CLI returns a new one", async 
 JSON`,
         () =>
             main({
-                params: new Map([["prompt", "..."], ["session_id", dicodeId]]),
+                params: makeParams([["prompt", "..."], ["session_id", dicodeId]]),
                 kv, dicode: fakeDicode,
             }),
     );
@@ -152,7 +157,7 @@ Deno.test("surfaces is_error: true responses", async () => {
 JSON`,
         () =>
             main({
-                params: new Map([["prompt", "anything"]]),
+                params: makeParams([["prompt", "anything"]]),
                 kv: makeKv(), dicode: fakeDicode,
             }),
     );
@@ -169,7 +174,7 @@ Deno.test("surfaces non-zero exit code with stderr", async () => {
 exit 2`,
         () =>
             main({
-                params: new Map([["prompt", "anything"]]),
+                params: makeParams([["prompt", "anything"]]),
                 kv: makeKv(), dicode: fakeDicode,
             }),
     );
@@ -186,7 +191,7 @@ Deno.test("redacts OAuth token if it leaks into stderr", async () => {
 exit 1`,
         () =>
             main({
-                params: new Map([["prompt", "anything"]]),
+                params: makeParams([["prompt", "anything"]]),
                 kv: makeKv(), dicode: fakeDicode,
             }),
     );
