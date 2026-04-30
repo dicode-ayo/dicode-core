@@ -112,9 +112,9 @@ type Runtime struct {
 	// effectiveSourceMgr / effectiveRepoResolver read through parent when
 	// non-nil so a single SetX call on the manager propagates to all
 	// executors without extra bookkeeping.
-	replayer     *registry.Replayer       // optional; enables dicode.runs.replay
-	sourceMgr    ipc.SourceDevModeSetter  // optional; enables dicode.sources.set_dev_mode
-	repoResolver ipc.RepoPathResolver     // optional; enables dicode.git.commit_push
+	replayer     *registry.Replayer      // optional; enables dicode.runs.replay
+	sourceMgr    ipc.SourceDevModeSetter // optional; enables dicode.sources.set_dev_mode
+	repoResolver ipc.RepoPathResolver    // optional; enables dicode.git.commit_push
 }
 
 // effectiveInputStore returns the live InputStore to use for this runtime

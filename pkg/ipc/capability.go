@@ -57,9 +57,9 @@ const (
 	// buildin/auto-fix preset in #238). It is intentionally not derivable
 	// from any task.yaml YAML field — tasks cannot self-grant decrypted
 	// cross-task input access via their permission spec.
-	CapRunsGetInput = "runs.get_input"
-	CapRunsReplay   = "runs.replay" // dicode.runs.replay — re-fire a persisted run
-	CapTasksTest    = "tasks.test"  // dicode.tasks.test — run a task's sibling test file
+	CapRunsGetInput      = "runs.get_input"
+	CapRunsReplay        = "runs.replay"          // dicode.runs.replay — re-fire a persisted run
+	CapTasksTest         = "tasks.test"           // dicode.tasks.test — run a task's sibling test file
 	CapSourcesSetDevMode = "sources.set_dev_mode" // dicode.sources.set_dev_mode
 	CapGitCommitPush     = "git.commit_push"      // dicode.git.commit_push (#234)
 

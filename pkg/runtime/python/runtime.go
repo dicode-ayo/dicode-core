@@ -78,9 +78,9 @@ type Runtime struct {
 	// replayer, sourceMgr, repoResolver are wired after buildRuntimes returns
 	// (same late-wiring pattern as inputStore). Executors read these fields
 	// from parent at IPC server creation time.
-	replayer     *registry.Replayer       // optional; enables dicode.runs.replay
-	sourceMgr    ipc.SourceDevModeSetter  // optional; enables dicode.sources.set_dev_mode
-	repoResolver ipc.RepoPathResolver     // optional; enables dicode.git.commit_push
+	replayer     *registry.Replayer      // optional; enables dicode.runs.replay
+	sourceMgr    ipc.SourceDevModeSetter // optional; enables dicode.sources.set_dev_mode
+	repoResolver ipc.RepoPathResolver    // optional; enables dicode.git.commit_push
 }
 
 // SetEngine configures the engine runner used for dicode.run_task calls.
