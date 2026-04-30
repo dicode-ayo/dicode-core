@@ -176,6 +176,10 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 		return err
 	}
 
+	// replayer is built inside the run-input block below (needs the InputStore)
+	// and consumed after webui.New. Declared here so both sites see it.
+	var replayer *registry.Replayer
+
 	// 6a. Run-input persistence (Task 14): wire InputStore when enabled.
 	if cfg.Defaults.RunInputs.IsEnabled() {
 		var deriver secrets.SubKeyDeriver
@@ -197,6 +201,12 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 				eng.SetInputStore(is)
 				denoRT.SetInputStore(is)
 				pythonRT.SetInputStore(is)
+				// Replayer composes InputStore.Fetch + the engine's fireAsync.
+				// Wired after InputStore so dicode.runs.replay finds a populated store.
+				replayer = registry.NewReplayer(reg, is, trigger.NewReplayRunner(eng))
+				denoRT.SetReplayer(replayer)
+				pythonRT.SetReplayer(replayer)
+				// srv.SetReplayer is called below after webui is built.
 				log.Info("run-input persistence enabled",
 					zap.Duration("retention", cfg.Defaults.RunInputs.Retention),
 					zap.String("storage_task", cfg.Defaults.RunInputs.StorageTask),
@@ -212,6 +222,13 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	if err != nil {
 		return fmt.Errorf("build sources: %w", err)
 	}
+	// *webui.SourceManager satisfies both SourceDevModeSetter (Task 6) and
+	// RepoPathResolver (Task 8); wire both interfaces into both runtimes so
+	// per-run IPC servers can serve set_dev_mode and git.commit_push.
+	denoRT.SetSourceManager(sourceMgr)
+	denoRT.SetRepoResolver(sourceMgr)
+	pythonRT.SetSourceManager(sourceMgr)
+	pythonRT.SetRepoResolver(sourceMgr)
 	rec := registry.NewReconciler(reg, sources, dataDir, log)
 	webhookH := eng.WebhookHandler()
 	var webhookMu sync.Mutex
@@ -283,6 +300,9 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 		return fmt.Errorf("build webui: %w", err)
 	}
 	srv.SetManagedRuntimes(managedRuntimes)
+	if replayer != nil {
+		srv.SetReplayer(replayer)
+	}
 
 	// 9. Control socket for CLI clients.
 	socketPath := filepath.Join(dataDir, "daemon.sock")
