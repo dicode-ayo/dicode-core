@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.1.1](https://github.com/dicode-ayo/dicode-core/compare/v0.1.0...v0.1.1) (2026-04-30)
+
+
+### Features
+
+* auto-fix SDK surface (replay / tasks.test / sources.set_dev_mode / git.commit_push) ([#234](https://github.com/dicode-ayo/dicode-core/issues/234)) ([#245](https://github.com/dicode-ayo/dicode-core/issues/245)) ([92b43a7](https://github.com/dicode-ayo/dicode-core/commit/92b43a7a9b1c4abf15a0a74d04a8a93e907ec247))
+* **buildin:** auth-providers dashboard + dicode.oauth.list_status ([#221](https://github.com/dicode-ayo/dicode-core/issues/221)) ([27cef46](https://github.com/dicode-ayo/dicode-core/commit/27cef46f378145e5fb32b258e5a14139a214a618))
+* **deploy:** production-ready Helm chart for dicode-core ([#230](https://github.com/dicode-ayo/dicode-core/issues/230)) ([0f5a841](https://github.com/dicode-ayo/dicode-core/commit/0f5a8414aa8735b62d63d053632ec7f39434d1ee))
+* dev-mode branch lifecycle + on_failure_chain params + branch validator ([#236](https://github.com/dicode-ayo/dicode-core/issues/236)) ([#241](https://github.com/dicode-ayo/dicode-core/issues/241)) ([724e6c2](https://github.com/dicode-ayo/dicode-core/commit/724e6c2ce8c3c0760344f191308a34785299acba))
+* **release:** Dockerfile + dual-publish to Docker Hub & GHCR ([#227](https://github.com/dicode-ayo/dicode-core/issues/227)) ([8512401](https://github.com/dicode-ayo/dicode-core/commit/85124017a742a779cb23e16ff78bee4a880d445d))
+* run-input persistence + encrypted storage + retention sweep ([#233](https://github.com/dicode-ayo/dicode-core/issues/233)) ([#243](https://github.com/dicode-ayo/dicode-core/issues/243)) ([ef66469](https://github.com/dicode-ayo/dicode-core/commit/ef66469ddf3a5d1d6287b106c69228e54b8b24da))
+* **secrets:** task-based secret providers (Doppler reference) — closes [#119](https://github.com/dicode-ayo/dicode-core/issues/119) ([#232](https://github.com/dicode-ayo/dicode-core/issues/232)) ([3b6ecf1](https://github.com/dicode-ayo/dicode-core/commit/3b6ecf157ca0fa164f94c9cfae5bc93dc7bf792f))
+* **webui/auth:** bcrypt passphrase + configurable cost + race-safe migration ([#209](https://github.com/dicode-ayo/dicode-core/issues/209)) ([#219](https://github.com/dicode-ayo/dicode-core/issues/219)) ([c98e4df](https://github.com/dicode-ayo/dicode-core/commit/c98e4dfcaf110c0ac94d715ddb933db478129d5f))
+* **webui:** POST /api/tasks/{id}/test REST endpoint ([#218](https://github.com/dicode-ayo/dicode-core/issues/218)) ([34145a0](https://github.com/dicode-ayo/dicode-core/commit/34145a0caff0c4a7bc223fbc0142761034fd154f))
+
+
+### Documentation
+
+* **spec:** on-failure AI auto-fix loop design ([#228](https://github.com/dicode-ayo/dicode-core/issues/228)) ([#229](https://github.com/dicode-ayo/dicode-core/issues/229)) ([1418ee7](https://github.com/dicode-ayo/dicode-core/commit/1418ee76e98f748b120008c6ae7cbf3d3ce23148))
+
 ## [0.1.0](https://github.com/dicode-ayo/dicode-core/compare/v0.0.4...v0.1.0) (2026-04-25)
 
 
