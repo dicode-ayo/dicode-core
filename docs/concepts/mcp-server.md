@@ -18,21 +18,34 @@ The MCP server is mounted at `http://localhost:8080/mcp`.
 
 **Protocol**: JSON-RPC 2.0 over HTTP. `POST /mcp` dispatches tool calls. `GET /mcp` returns server info.
 
-**Claude Code:** add dicode as an MCP server:
+**Claude Code:** mint an API key in the dashboard (Security → Create API Key — the raw key is shown once), then:
+
 ```bash
-claude mcp add dicode http://localhost:8080/mcp
+claude mcp add --transport http dicode \
+  http://localhost:8080/mcp \
+  --header "Authorization: Bearer dck_<your-key-here>"
+
+# Verify
+claude mcp list
+claude /mcp                        # interactive: pick dicode, see tools
 ```
 
-Or via `.claude/mcp.json`:
+Or hand-edit `.claude/mcp.json`:
 ```json
 {
   "mcpServers": {
     "dicode": {
-      "url": "http://localhost:8080/mcp"
+      "type": "http",
+      "url": "http://localhost:8080/mcp",
+      "headers": {
+        "Authorization": "Bearer dck_<your-key-here>"
+      }
     }
   }
 }
 ```
+
+When `server.auth: false`, the `Authorization` header is optional (the endpoint is open). Production deployments should always run with `server.auth: true` and an API key — see [Authentication](https://dicode.com/concepts/mcp-server#authentication) on the site docs for the full setup.
 
 ---
 
