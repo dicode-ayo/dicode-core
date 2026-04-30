@@ -485,7 +485,6 @@ func (s *Server) Handler() http.Handler {
 			r.Get("/runs/{runID}", s.apiGetRun)
 			r.Get("/runs/{runID}/logs", s.apiGetLogs)
 			r.Post("/runs/{runID}/kill", s.apiKillRun)
-			r.Post("/runs/{runID}/replay", s.apiReplayRun)
 
 			// Secrets management (protected by main session via requireAuth above).
 			// GET returns key names only — values are never surfaced via API.
@@ -559,6 +558,11 @@ func (s *Server) Handler() http.Handler {
 	// Commit-push endpoint — API-key gated, mounted outside the session-auth
 	// group so IPC tasks and CI scripts can call it with a Bearer token.
 	r.With(s.requireAPIKey).Post("/api/sources/{name}/commit-push", s.apiCommitPush)
+
+	// Replay endpoint — API-key gated for the same reason: machine callers
+	// (auto-fix flows, CI scripts) need to fire a replay without a browser
+	// session. Mirrors apiTestTask / apiCommitPush.
+	r.With(s.requireAPIKey).Post("/api/runs/{runID}/replay", s.apiReplayRun)
 
 	return r
 }
@@ -1671,9 +1675,14 @@ func (s *Server) apiReplayRun(w http.ResponseWriter, r *http.Request) {
 
 	newRunID, err := s.replayer.Replay(r.Context(), runID, req.TaskName)
 	if err != nil {
+		var taskNotFound *trigger.TaskNotFoundError
 		switch {
 		case errors.Is(err, registry.ErrInputUnavailable):
 			jsonErr(w, "no persisted input for run: "+runID, http.StatusBadRequest)
+		case errors.Is(err, registry.ErrRunNotFound):
+			jsonErr(w, "run not found: "+runID, http.StatusNotFound)
+		case errors.As(err, &taskNotFound):
+			jsonErr(w, err.Error(), http.StatusNotFound)
 		default:
 			jsonErr(w, err.Error(), http.StatusInternalServerError)
 		}

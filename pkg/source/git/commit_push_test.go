@@ -99,3 +99,38 @@ func TestCommitPush_RefusesEmptyMessage(t *testing.T) {
 		t.Error("expected error for empty commit message")
 	}
 }
+
+// Empty BranchPrefix used to vacuously bypass the prefix guard, leaving
+// AllowMain=true as a permissive global allow. Now an empty prefix is itself
+// only legal when AllowMain=true AND the branch is main/master.
+func TestCommitPush_EmptyPrefixWithoutMainBranchRejected(t *testing.T) {
+	tmp := t.TempDir()
+	if _, err := gogit.PlainInit(tmp, false); err != nil {
+		t.Fatal(err)
+	}
+	_, err := CommitPush(context.Background(), tmp, CommitPushOptions{
+		Message:   "x",
+		Branch:    "feature/foo",
+		AllowMain: true, // does not help — branch isn't main/master
+		Author:    Signature{Name: "T", Email: "t@x"},
+	})
+	if err == nil {
+		t.Error("expected error: empty BranchPrefix + non-main/master branch must be rejected even with AllowMain=true")
+	}
+}
+
+func TestCommitPush_EmptyPrefixNoAllowMainRejected(t *testing.T) {
+	tmp := t.TempDir()
+	if _, err := gogit.PlainInit(tmp, false); err != nil {
+		t.Fatal(err)
+	}
+	_, err := CommitPush(context.Background(), tmp, CommitPushOptions{
+		Message:   "x",
+		Branch:    "main",
+		AllowMain: false,
+		Author:    Signature{Name: "T", Email: "t@x"},
+	})
+	if err == nil {
+		t.Error("expected error: empty BranchPrefix + AllowMain=false must be rejected")
+	}
+}

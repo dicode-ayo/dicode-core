@@ -866,7 +866,11 @@ func (s *Server) handleConn(conn net.Conn) {
 				reply(req.ID, nil, "task not registered: "+req.TaskID)
 				continue
 			}
-			result, err := tasktest.Run(s.ctx, spec)
+			// 5min cap so a hung test suite doesn't wedge the per-task IPC
+			// connection forever — handleConn dispatches sequentially.
+			tctx, cancel := context.WithTimeout(s.ctx, 5*time.Minute)
+			result, err := tasktest.Run(tctx, spec)
+			cancel()
 			if err != nil {
 				reply(req.ID, nil, err.Error())
 				continue

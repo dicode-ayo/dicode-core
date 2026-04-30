@@ -69,8 +69,21 @@ func CommitPush(ctx context.Context, repoPath string, opts CommitPushOptions) (s
 	if opts.Author.Name == "" || opts.Author.Email == "" {
 		return "", fmt.Errorf("author name + email required")
 	}
-	if opts.BranchPrefix != "" && !strings.HasPrefix(opts.Branch, opts.BranchPrefix) && !opts.AllowMain {
-		return "", fmt.Errorf("branch %q does not start with prefix %q (AllowMain=false)", opts.Branch, opts.BranchPrefix)
+	// Branch authorization. Without this guard, BranchPrefix="" + AllowMain=true
+	// would silently allow pushes to any branch — AllowMain is intended as a
+	// narrow exemption for the source's tracked branch, not a global bypass.
+	isMainOrMaster := opts.Branch == "main" || opts.Branch == "master"
+	switch {
+	case opts.BranchPrefix == "":
+		if !(opts.AllowMain && isMainOrMaster) {
+			return "", fmt.Errorf("branch %q rejected: BranchPrefix required (or AllowMain=true with Branch=main/master)", opts.Branch)
+		}
+	case strings.HasPrefix(opts.Branch, opts.BranchPrefix):
+		// allowed
+	case opts.AllowMain && isMainOrMaster:
+		// allowed via main/master exemption
+	default:
+		return "", fmt.Errorf("branch %q does not start with prefix %q (AllowMain=false or Branch is not main/master)", opts.Branch, opts.BranchPrefix)
 	}
 
 	repo, err := gogit.PlainOpen(repoPath)
