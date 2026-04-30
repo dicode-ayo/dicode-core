@@ -44,6 +44,11 @@ type RunOptions struct {
 	// Used by the run-input persistence layer to call content-type-aware
 	// redaction on the raw body and to populate Method/Path/Headers/Query.
 	WebhookCtx *WebhookContext
+
+	// ChainParentTask is the failing-task ID that fired this run via
+	// on_failure_chain. Empty for non-chained runs. Used by the trigger
+	// engine to release the chainGuards slot on completion.
+	ChainParentTask string
 }
 
 // RunResult is returned by every Executor.

@@ -303,3 +303,36 @@ func TestEngine_ChainDepth_StopsAtCeiling(t *testing.T) {
 		t.Errorf("max_depth=2 violated: task-b fired %d times", len(bRuns))
 	}
 }
+
+func TestEngine_OnFailureChain_CooldownSuppressesSecondFire(t *testing.T) {
+	dir := t.TempDir()
+	e := newTestEnv(t)
+
+	fallback := writeTask(t, dir, "fb-cool", `export default async () => "ok"`, task.TriggerConfig{Manual: true})
+	failing := writeTask(t, dir, "f-cool", `throw new Error("fail")`, task.TriggerConfig{Manual: true})
+	_ = e.reg.Register(fallback)
+	_ = e.reg.Register(failing)
+
+	if err := e.engine.SetDefaultsOnFailureChain(task.OnFailureChainSpec{
+		Task: "fb-cool", Cooldown: 10 * time.Minute,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Fire #1: fallback runs.
+	r1, _ := e.engine.FireManual(context.Background(), "f-cool", nil)
+	waitForTerminal(t, e.engine, r1, 30*time.Second)
+	first := waitForRunOfTask(t, e.engine, "fb-cool", 15*time.Second)
+	if first == nil {
+		t.Fatal("first fallback should have fired")
+	}
+
+	// Fire #2: should be suppressed.
+	r2, _ := e.engine.FireManual(context.Background(), "f-cool", nil)
+	waitForTerminal(t, e.engine, r2, 30*time.Second)
+	time.Sleep(2 * time.Second)
+	runs, _ := e.reg.ListRuns(context.Background(), "fb-cool", 10)
+	if len(runs) != 1 {
+		t.Errorf("cooldown should suppress 2nd fire; got %d fb-cool runs", len(runs))
+	}
+}

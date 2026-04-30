@@ -99,6 +99,8 @@ type Engine struct {
 	// Set via SetInputStore after the daemon has initialised secrets so the
 	// derived sub-key is available.
 	inputStore *registry.InputStore
+
+	guards *chainGuards
 }
 
 // DenoRuntimeAPI is the minimal subset of *deno.Runtime the engine's
@@ -126,6 +128,7 @@ func New(r *registry.Registry, defaultExec pkgruntime.Executor, log *zap.Logger)
 		webhooks:    make(map[string]string),
 		daemonRuns:  make(map[string]string),
 		daemonSpecs: make(map[string]*task.Spec),
+		guards:      newChainGuards(),
 	}
 	e.executors[task.RuntimeDeno] = defaultExec
 	return e
@@ -861,6 +864,51 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 				return
 			}
 			if targetSpec, ok := e.registry.Get(targetID); ok {
+				now := time.Now()
+
+				// 1. Storm check — per-source namespace.
+				scope := stormScope(completedTaskID)
+				if e.guards.stormSuppressed(scope, chainSpec.Storm.Suppress, now) {
+					e.log.Warn("on_failure_chain suppressed: storm circuit breaker tripped",
+						zap.String("scope", scope),
+						zap.String("from", completedTaskID),
+					)
+					return
+				}
+
+				// 2. Cooldown check.
+				cd := effectiveCooldown(chainSpec)
+				if e.guards.cooldownActive(completedTaskID, cd, now) {
+					e.log.Warn("on_failure_chain suppressed: cooldown active",
+						zap.String("from", completedTaskID),
+						zap.Duration("cooldown", cd),
+					)
+					return
+				}
+
+				// 3. Concurrency check.
+				perTask := chainSpec.MaxConcurrent
+				if perTask <= 0 {
+					perTask = 1
+				}
+				global := e.defaultsOnFailureChain.MaxConcurrentGlobal
+				if global <= 0 {
+					global = 3
+				}
+				if !e.guards.acquireSlot(completedTaskID, perTask, global) {
+					e.log.Warn("on_failure_chain suppressed: concurrency cap reached",
+						zap.String("from", completedTaskID),
+						zap.Int("cap_per_task", perTask),
+						zap.Int("cap_global", global),
+					)
+					return
+				}
+
+				// 4. Record this fire (cooldown + storm).
+				e.guards.recordChainFire(completedTaskID, now)
+				e.guards.observeChainFire(scope, chainSpec.Storm.Rate, chainSpec.Storm.Window,
+					chainSpec.Storm.Suppress, now)
+
 				e.log.Info("on_failure_chain trigger",
 					zap.String("from", completedTaskID),
 					zap.String("to", targetID),
@@ -883,9 +931,12 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 				input["status"] = runStatus
 				input["output"] = output
 				input["_chain_depth"] = nextDepth
+				// Slot is held until the chained run terminates.
+				// Released in startRun's cleanup via ChainParentTask.
 				go e.fireAsync(ctx, targetSpec, pkgruntime.RunOptions{ //nolint:errcheck
-					ParentRunID: runID,
-					Input:       input,
+					ParentRunID:     runID,
+					Input:           input,
+					ChainParentTask: completedTaskID,
 				}, registry.TriggerChain)
 			}
 		}
@@ -1437,6 +1488,9 @@ func (e *Engine) startRun(spec *task.Spec, opts *pkgruntime.RunOptions, source r
 	e.runDone.Store(opts.RunID, doneCh)
 
 	cleanup = func() {
+		if opts.ChainParentTask != "" {
+			e.guards.releaseSlot(opts.ChainParentTask)
+		}
 		e.runCancels.Delete(opts.RunID)
 		e.runTriggerSource.Delete(opts.RunID)
 		e.runChainDepth.Delete(opts.RunID)
@@ -1872,6 +1926,23 @@ func (e *Engine) dispatch(ctx context.Context, spec *task.Spec, opts pkgruntime.
 
 	e.FireChain(context.Background(), spec.ID, opts.RunID, status, result.ChainInput)
 	return status, result
+}
+
+// stormScope returns the namespace prefix used for per-source storm tracking:
+// everything before the last '/' in taskID, or "global" if there is no slash.
+func stormScope(taskID string) string {
+	if i := strings.LastIndex(taskID, "/"); i > 0 {
+		return taskID[:i]
+	}
+	return "global"
+}
+
+// effectiveCooldown returns the configured cooldown or 10 minutes when zero.
+func effectiveCooldown(s task.OnFailureChainSpec) time.Duration {
+	if s.Cooldown > 0 {
+		return s.Cooldown
+	}
+	return 10 * time.Minute
 }
 
 // triggerSource returns a typed TriggerSource identifying the trigger type of a spec.
