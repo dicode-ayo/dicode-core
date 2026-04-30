@@ -139,7 +139,7 @@ curl -fsSL -X POST http://localhost:8080/hooks/ai-claude \
 {
   "ok": true,
   "reply": "...",                    // model's text
-  "session_id": "sess-...",          // pass back for continuation
+  "session_id": "<uuid>",            // dicode-side id, pass back for continuation
   "model": "claude-sonnet-4",
   "total_cost_usd": 0.0023,          // cumulative across the conversation; subscription users get 0
   "usage": { /* raw CLI usage object */ }
@@ -149,6 +149,14 @@ curl -fsSL -X POST http://localhost:8080/hooks/ai-claude \
 On failure (`ok: false`) the `error` field carries the reason. The OAuth token
 is redacted before being included in any error string, even if the underlying
 CLI ever logs it.
+
+### Session-id mapping
+
+The `session_id` in the response is a **dicode-side UUID**, not the Claude CLI's
+internal id. The task stores `kv["claude:<dicode_uuid>"] = <claude_cli_session_id>`
+and resolves it via `--resume` on subsequent calls. Mirrors `buildin/ai-agent`'s
+session shape so the same chat UI shape works for both presets, and decouples
+the wire format from any future change in Claude's session-id format.
 
 ## Rate limits
 

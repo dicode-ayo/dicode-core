@@ -3,12 +3,17 @@
 // buildin/ai-agent-claude-cli — wraps `claude -p` to call Claude with the
 // operator's Pro/Max subscription instead of an Anthropic API key.
 //
-// Contract: returns { session_id, reply, model, total_cost_usd? } via
-// dicode.output(). The session_id is generated server-side by Claude and
-// can be passed back as session_id on subsequent invocations to continue
-// the conversation.
+// Session-id strategy (mirrors buildin/ai-agent):
+//   - Callers pass a dicode-side session_id (or omit; we generate a UUID).
+//   - We store kv["claude:<dicode_uuid>"] = <claude_cli_session_id> so a
+//     repeat call with the same dicode_uuid resolves to the right Claude
+//     session via --resume. The CLI's session_id never leaks to clients.
+//   - The bare-return shape { session_id, reply, model, ... } matches
+//     buildin/ai-agent so the same chat UI shape works in both presets.
 
 const SESSION_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+// kvKey prefix; keep separate from buildin/ai-agent's "chat:<id>" namespace.
+const KV_PREFIX = "claude:";
 
 interface Params {
     prompt: string;
@@ -30,7 +35,7 @@ interface ClaudeResponse {
     [k: string]: unknown;
 }
 
-export default async function main(opts: { params: Map<string, string>; dicode: any }) {
+export default async function main(opts: { params: Map<string, string>; kv: any; dicode: any }) {
     const params: Params = {
         prompt:        opts.params.get("prompt")        ?? "",
         session_id:    opts.params.get("session_id")    ?? "",
@@ -42,10 +47,26 @@ export default async function main(opts: { params: Map<string, string>; dicode: 
     if (!params.prompt) {
         return { ok: false, error: "prompt is required" };
     }
-    // session_id is opaque to us, but reject anything obviously malformed
-    // before it reaches the CLI's --resume flag (which would 4xx anyway).
+    // session_id shape — dicode side. Reject anything not UUID-shaped so a
+    // hostile caller can't forge a key that hits arbitrary KV entries.
     if (params.session_id && !SESSION_ID_RE.test(params.session_id)) {
         return { ok: false, error: `session_id ${JSON.stringify(params.session_id)} contains invalid characters; expected ^[a-zA-Z0-9_-]{1,64}$` };
+    }
+
+    // dicode-side session id. Generate one if the caller didn't pass one
+    // (matches buildin/ai-agent's UX: first turn returns a fresh uuid).
+    const dicodeSessionId = params.session_id || crypto.randomUUID();
+
+    // Look up the Claude-side session id for this dicode session, if any.
+    // First call: kv miss → no --resume → CLI mints a new Claude session.
+    let claudeSessionId = "";
+    try {
+        const stored = await opts.kv.get(KV_PREFIX + dicodeSessionId);
+        if (typeof stored === "string") claudeSessionId = stored;
+    } catch (_) {
+        // KV miss is fine; a transient KV error is not — but since this is
+        // a one-shot read and a missing entry is indistinguishable from a
+        // string-typed null, we treat any error as "no prior session".
     }
 
     // Refuse to invoke claude without an OAuth token. Without this guard
@@ -74,8 +95,8 @@ export default async function main(opts: { params: Map<string, string>; dicode: 
     // stdout, no interactive shell. --output-format json gives us the
     // structured response (vs. plain text).
     const args = ["-p", params.prompt, "--output-format", "json"];
-    if (params.session_id) {
-        args.push("--resume", params.session_id);
+    if (claudeSessionId) {
+        args.push("--resume", claudeSessionId);
     }
     if (params.model) {
         args.push("--model", params.model);
@@ -125,10 +146,25 @@ export default async function main(opts: { params: Map<string, string>; dicode: 
         return { ok: false, error: parsed.result ?? "claude reported an error", details: parsed };
     }
 
+    // Persist the dicode → claude session id mapping. KV writes are
+    // fire-and-forget per the SDK shim (no ack); the next call with this
+    // dicode_uuid will read it via kv.get above. If the CLI didn't return
+    // a session_id (shouldn't happen in normal flow but defend against it),
+    // we skip the write so a stale mapping isn't introduced.
+    const newClaudeSessionId = parsed.session_id ?? "";
+    if (newClaudeSessionId && newClaudeSessionId !== claudeSessionId) {
+        try {
+            opts.kv.set(KV_PREFIX + dicodeSessionId, newClaudeSessionId);
+        } catch (_) {
+            // KV write failure is non-fatal — the user can retry; worst
+            // case the next call starts a fresh Claude session.
+        }
+    }
+
     return {
         ok:             true,
         reply:          parsed.result ?? "",
-        session_id:     parsed.session_id ?? "",
+        session_id:     dicodeSessionId,                  // dicode-side id, opaque to caller
         model:          parsed.model ?? params.model,
         total_cost_usd: parsed.total_cost_usd ?? 0,
         usage:          parsed.usage ?? null,
