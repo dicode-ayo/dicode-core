@@ -107,6 +107,14 @@ type Runtime struct {
 	// the env resolver can spawn provider tasks for from: task:<id>
 	// entries. Nil disables provider lookups; legacy paths still work.
 	providerRunner envresolve.ProviderRunner
+	// replayer, sourceMgr, repoResolver are wired after buildRuntimes returns
+	// (same late-wiring pattern as inputStore). effectiveReplayer /
+	// effectiveSourceMgr / effectiveRepoResolver read through parent when
+	// non-nil so a single SetX call on the manager propagates to all
+	// executors without extra bookkeeping.
+	replayer     *registry.Replayer      // optional; enables dicode.runs.replay
+	sourceMgr    ipc.SourceDevModeSetter // optional; enables dicode.sources.set_dev_mode
+	repoResolver ipc.RepoPathResolver    // optional; enables dicode.git.commit_push
 }
 
 // effectiveInputStore returns the live InputStore to use for this runtime
@@ -118,6 +126,34 @@ func (rt *Runtime) effectiveInputStore() *registry.InputStore {
 		return rt.parent.inputStore
 	}
 	return rt.inputStore
+}
+
+// effectiveReplayer returns the live Replayer, reading from parent when this
+// is a per-version executor so that a late SetReplayer call on the manager
+// propagates without extra bookkeeping.
+func (rt *Runtime) effectiveReplayer() *registry.Replayer {
+	if rt.parent != nil {
+		return rt.parent.replayer
+	}
+	return rt.replayer
+}
+
+// effectiveSourceMgr returns the live SourceDevModeSetter, reading from parent
+// when this is a per-version executor.
+func (rt *Runtime) effectiveSourceMgr() ipc.SourceDevModeSetter {
+	if rt.parent != nil {
+		return rt.parent.sourceMgr
+	}
+	return rt.sourceMgr
+}
+
+// effectiveRepoResolver returns the live RepoPathResolver, reading from parent
+// when this is a per-version executor.
+func (rt *Runtime) effectiveRepoResolver() ipc.RepoPathResolver {
+	if rt.parent != nil {
+		return rt.parent.repoResolver
+	}
+	return rt.repoResolver
 }
 
 // New creates a Deno Runtime. It ensures the Deno binary is present in the
@@ -148,6 +184,18 @@ func (rt *Runtime) SetSecretsManager(m secrets.Manager) { rt.secretsManager = m 
 // dicode.runs.delete_input and dicode.runs.get_input calls. Must be called
 // before any Run; mirrors the SetEngine / SetGateway pattern.
 func (rt *Runtime) SetInputStore(is *registry.InputStore) { rt.inputStore = is }
+
+// SetReplayer wires the Replayer so the per-run IPC server can serve
+// dicode.runs.replay calls. Mirrors the SetInputStore wiring.
+func (rt *Runtime) SetReplayer(r *registry.Replayer) { rt.replayer = r }
+
+// SetSourceManager wires the source manager so the per-run IPC server can
+// serve dicode.sources.set_dev_mode calls.
+func (rt *Runtime) SetSourceManager(m ipc.SourceDevModeSetter) { rt.sourceMgr = m }
+
+// SetRepoResolver wires the repo-path resolver so the per-run IPC server
+// can serve dicode.git.commit_push calls.
+func (rt *Runtime) SetRepoResolver(r ipc.RepoPathResolver) { rt.repoResolver = r }
 
 // SetSecretOutputChannel wires the channel that receives provider tasks'
 // secret maps. Called by the trigger engine before invoking Run when the
@@ -272,6 +320,13 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	srv.SetInputStore(rt.effectiveInputStore())
 	srv.SetSecretsChain(rt.secrets)
 	srv.SetRedactor(redactor)
+	srv.SetReplayer(rt.effectiveReplayer())
+	if m := rt.effectiveSourceMgr(); m != nil {
+		srv.SetSourceManager(m)
+	}
+	if r := rt.effectiveRepoResolver(); r != nil {
+		srv.SetRepoResolver(r)
+	}
 	if rt.secretOutputCh != nil {
 		srv.SetSecretOutput(rt.secretOutputCh)
 	}

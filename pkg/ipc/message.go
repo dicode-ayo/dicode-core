@@ -96,6 +96,24 @@ type Request struct {
 	// dicode.runs.* — run-input retention management (#233)
 	BeforeTs int64 `json:"before_ts,omitempty"` // dicode.runs.list_expired: unix timestamp cutoff
 
+	// dicode.sources.set_dev_mode — toggles dev mode on a configured source (#234)
+	Name      string `json:"name,omitempty"`       // source name
+	Enabled   bool   `json:"enabled,omitempty"`    // true to enable
+	LocalPath string `json:"local_path,omitempty"` // local-path mode
+	Branch    string `json:"branch,omitempty"`     // clone-mode branch (also reused by git.commit_push)
+	Base      string `json:"base,omitempty"`       // clone-mode base branch
+	DevRunID  string `json:"run_id,omitempty"`     // clone-mode per-fix run ID
+
+	// dicode.git.commit_push — add/commit/push in a source's repo (#234)
+	SourceID     string   `json:"source_id,omitempty"`      // source name to resolve repo path
+	CommitMsg    string   `json:"commit_message,omitempty"` // commit message
+	BranchPrefix string   `json:"branch_prefix,omitempty"`  // branch must start with this
+	AllowMain    bool     `json:"allow_main,omitempty"`     // bypass branch-prefix check
+	Files        []string `json:"files,omitempty"`          // paths to git-add; empty = all tracked
+	AuthorName   string   `json:"author_name,omitempty"`    // commit author name
+	AuthorEmail  string   `json:"author_email,omitempty"`   // commit author email
+	AuthTokenEnv string   `json:"auth_token_env,omitempty"` // env var holding HTTPS auth token
+
 	// cli.ai — prompt, optional session_id, optional task id override.
 	Prompt    string `json:"prompt,omitempty"`
 	SessionID string `json:"sessionID,omitempty"`

@@ -132,6 +132,31 @@ export interface Dicode {
     pin_input:    (runID: string)                 => Promise<unknown>;
     unpin_input:  (runID: string)                 => Promise<unknown>;
     get_input:    (runID: string)                 => Promise<unknown>;
+    replay:       (runID: string, taskName?: string) => Promise<unknown>;
+  };
+  tasks: {
+    test: (taskID: string) => Promise<unknown>;
+  };
+  sources: {
+    set_dev_mode: (name: string, opts: {
+      enabled: boolean;
+      local_path?: string;
+      branch?: string;
+      base?: string;
+      run_id?: string;
+    }) => Promise<unknown>;
+  };
+  git: {
+    commit_push: (sourceID: string, opts: {
+      message: string;
+      branch: string;
+      branch_prefix?: string;
+      allow_main?: boolean;
+      files?: string[];
+      author_name: string;
+      author_email: string;
+      auth_token_env?: string;
+    }) => Promise<{ commit: string }>;
   };
 }
 
@@ -321,6 +346,39 @@ const dicode: Dicode = {
       __call__({ method: "dicode.runs.unpin_input", runID }),
     get_input: (runID) =>
       __call__({ method: "dicode.runs.get_input", runID }),
+    replay: (runID, taskName) =>
+      __call__({ method: "dicode.runs.replay", runID, taskID: taskName ?? "" }),
+  },
+  tasks: {
+    test: (taskID) =>
+      __call__({ method: "dicode.tasks.test", taskID }),
+  },
+  sources: {
+    set_dev_mode: (name, opts) =>
+      __call__({
+        method: "dicode.sources.set_dev_mode",
+        name,
+        enabled: opts.enabled,
+        local_path: opts.local_path ?? "",
+        branch: opts.branch ?? "",
+        base: opts.base ?? "",
+        run_id: opts.run_id ?? "",
+      }),
+  },
+  git: {
+    commit_push: (sourceID, opts) =>
+      __call__({
+        method: "dicode.git.commit_push",
+        source_id: sourceID,
+        commit_message: opts.message,
+        branch: opts.branch,
+        branch_prefix: opts.branch_prefix ?? "",
+        allow_main: opts.allow_main ?? false,
+        files: opts.files ?? [],
+        author_name: opts.author_name,
+        author_email: opts.author_email,
+        auth_token_env: opts.auth_token_env ?? "",
+      }) as Promise<{ commit: string }>,
   },
 };
 

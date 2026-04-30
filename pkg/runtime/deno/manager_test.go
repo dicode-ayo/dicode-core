@@ -4,8 +4,10 @@ import (
 	"context"
 	"testing"
 
+	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/registry"
 	"github.com/dicode/dicode/pkg/runtime/envresolve"
+	"github.com/dicode/dicode/pkg/taskset"
 )
 
 // fakeProviderRunner is a no-op runner used purely to test that the
@@ -105,5 +107,82 @@ func TestManagerRuntime_EffectiveInputStore_NilParent(t *testing.T) {
 
 	if got := rt.effectiveInputStore(); got != is {
 		t.Errorf("manager runtime: effectiveInputStore() = %v, want %v", got, is)
+	}
+}
+
+// fakeSourceDevModeSetter satisfies ipc.SourceDevModeSetter for testing.
+type fakeSourceDevModeSetter struct{}
+
+func (fakeSourceDevModeSetter) SetDevMode(_ context.Context, _ string, _ bool, _ taskset.DevModeOpts) error {
+	return nil
+}
+
+// fakeRepoPathResolver satisfies ipc.RepoPathResolver for testing.
+type fakeRepoPathResolver struct{}
+
+func (fakeRepoPathResolver) ResolveRepoPath(_ string) (string, error) { return "/repo", nil }
+
+// TestRuntime_SetReplayer_Propagates verifies the late-wiring pattern for
+// SetReplayer: an executor created before SetReplayer is called on the parent
+// must see the replayer via effectiveReplayer() (parent back-reference).
+func TestRuntime_SetReplayer_Propagates(t *testing.T) {
+	parent := &Runtime{}
+	exec, ok := parent.NewExecutor("/usr/bin/deno").(*Runtime)
+	if !ok {
+		t.Fatalf("NewExecutor did not return *Runtime")
+	}
+
+	if exec.effectiveReplayer() != nil {
+		t.Error("expected nil before SetReplayer")
+	}
+
+	is := newTestInputStore()
+	r := registry.NewReplayer(registry.New(nil), is, nil)
+	parent.SetReplayer(r)
+
+	if got := exec.effectiveReplayer(); got != r {
+		t.Errorf("executor did not pick up late-set Replayer: got %v, want %v", got, r)
+	}
+}
+
+// TestRuntime_SetSourceManager_Propagates verifies the late-wiring pattern for
+// SetSourceManager: an executor sees the manager via effectiveSourceMgr().
+func TestRuntime_SetSourceManager_Propagates(t *testing.T) {
+	parent := &Runtime{}
+	exec, ok := parent.NewExecutor("/usr/bin/deno").(*Runtime)
+	if !ok {
+		t.Fatalf("NewExecutor did not return *Runtime")
+	}
+
+	if exec.effectiveSourceMgr() != nil {
+		t.Error("expected nil before SetSourceManager")
+	}
+
+	var m ipc.SourceDevModeSetter = fakeSourceDevModeSetter{}
+	parent.SetSourceManager(m)
+
+	if got := exec.effectiveSourceMgr(); got != m {
+		t.Errorf("executor did not pick up late-set SourceManager: got %v, want %v", got, m)
+	}
+}
+
+// TestRuntime_SetRepoResolver_Propagates verifies the late-wiring pattern for
+// SetRepoResolver: an executor sees the resolver via effectiveRepoResolver().
+func TestRuntime_SetRepoResolver_Propagates(t *testing.T) {
+	parent := &Runtime{}
+	exec, ok := parent.NewExecutor("/usr/bin/deno").(*Runtime)
+	if !ok {
+		t.Fatalf("NewExecutor did not return *Runtime")
+	}
+
+	if exec.effectiveRepoResolver() != nil {
+		t.Error("expected nil before SetRepoResolver")
+	}
+
+	var r ipc.RepoPathResolver = fakeRepoPathResolver{}
+	parent.SetRepoResolver(r)
+
+	if got := exec.effectiveRepoResolver(); got != r {
+		t.Errorf("executor did not pick up late-set RepoResolver: got %v, want %v", got, r)
 	}
 }

@@ -75,6 +75,12 @@ type Runtime struct {
 	// the env resolver can spawn provider tasks for from: task:<id>
 	// entries. Nil disables provider lookups; legacy paths still work.
 	providerRunner envresolve.ProviderRunner
+	// replayer, sourceMgr, repoResolver are wired after buildRuntimes returns
+	// (same late-wiring pattern as inputStore). Executors read these fields
+	// from parent at IPC server creation time.
+	replayer     *registry.Replayer      // optional; enables dicode.runs.replay
+	sourceMgr    ipc.SourceDevModeSetter // optional; enables dicode.sources.set_dev_mode
+	repoResolver ipc.RepoPathResolver    // optional; enables dicode.git.commit_push
 }
 
 // SetEngine configures the engine runner used for dicode.run_task calls.
@@ -91,6 +97,18 @@ func (rt *Runtime) SetSecretsManager(m secrets.Manager) { rt.secretsManager = m 
 // dicode.runs.delete_input and dicode.runs.get_input calls. Must be called
 // before any Execute; mirrors the SetEngine / SetGateway pattern.
 func (rt *Runtime) SetInputStore(is *registry.InputStore) { rt.inputStore = is }
+
+// SetReplayer wires the Replayer so the per-run IPC server can serve
+// dicode.runs.replay calls. Mirrors the SetInputStore wiring.
+func (rt *Runtime) SetReplayer(r *registry.Replayer) { rt.replayer = r }
+
+// SetSourceManager wires the source manager so the per-run IPC server can
+// serve dicode.sources.set_dev_mode calls.
+func (rt *Runtime) SetSourceManager(m ipc.SourceDevModeSetter) { rt.sourceMgr = m }
+
+// SetRepoResolver wires the repo-path resolver so the per-run IPC server
+// can serve dicode.git.commit_push calls.
+func (rt *Runtime) SetRepoResolver(r ipc.RepoPathResolver) { rt.repoResolver = r }
 
 // SetSecretOutputChannel wires the channel that receives provider tasks'
 // secret maps. Called by the trigger engine before invoking Execute when
@@ -247,6 +265,13 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 	srv.SetSecrets(e.secretsManager)
 	srv.SetInputStore(e.parent.inputStore)
 	srv.SetRedactor(redactor)
+	srv.SetReplayer(e.parent.replayer)
+	if m := e.parent.sourceMgr; m != nil {
+		srv.SetSourceManager(m)
+	}
+	if r := e.parent.repoResolver; r != nil {
+		srv.SetRepoResolver(r)
+	}
 	if e.secretOutputCh != nil {
 		srv.SetSecretOutput(e.secretOutputCh)
 	}

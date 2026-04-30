@@ -291,6 +291,18 @@ type DicodePermissions struct {
 	RunsPinInput bool `yaml:"runs_pin_input,omitempty" json:"runs_pin_input,omitempty"`
 	// RunsUnpinInput enables dicode.runs.unpin_input().
 	RunsUnpinInput bool `yaml:"runs_unpin_input,omitempty" json:"runs_unpin_input,omitempty"`
+	// RunsReplay enables dicode.runs.replay() — re-fires a previously
+	// persisted run with its stored input.
+	RunsReplay bool `yaml:"runs_replay,omitempty" json:"runs_replay,omitempty"`
+	// TasksTest enables dicode.tasks.test() — runs a task's sibling test file
+	// via pkg/tasktest.
+	TasksTest bool `yaml:"tasks_test,omitempty" json:"tasks_test,omitempty"`
+	// SourcesSetDevMode enables dicode.sources.set_dev_mode() — toggles dev
+	// mode (incl. clone-mode) on a configured taskset source.
+	SourcesSetDevMode bool `yaml:"sources_set_dev_mode,omitempty" json:"sources_set_dev_mode,omitempty"`
+	// GitCommitPush enables dicode.git.commit_push() — wraps
+	// pkg/source/git.CommitPush for add/commit/push from an IPC task. (#234)
+	GitCommitPush bool `yaml:"git_commit_push,omitempty" json:"git_commit_push,omitempty"`
 }
 
 // ProviderConfig declares secret-provider settings on a task that

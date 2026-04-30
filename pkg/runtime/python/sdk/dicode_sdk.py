@@ -314,7 +314,78 @@ output = _Output()
 
 # ── dicode — task orchestration helpers ───────────────────────────────────────
 
+class _Runs:
+    def replay(self, run_id, task_name=None):
+        return _call({"method": "dicode.runs.replay",
+                      "runID": run_id, "taskID": task_name or ""})
+
+    async def replay_async(self, run_id, task_name=None):
+        return await _call_async({"method": "dicode.runs.replay",
+                                  "runID": run_id, "taskID": task_name or ""})
+
+
+class _Tasks:
+    def test(self, task_id):
+        return _call({"method": "dicode.tasks.test", "taskID": task_id})
+
+    async def test_async(self, task_id):
+        return await _call_async({"method": "dicode.tasks.test", "taskID": task_id})
+
+
+class _Sources:
+    def set_dev_mode(self, name, enabled, *, local_path="", branch="",
+                     base="", run_id=""):
+        return _call({"method": "dicode.sources.set_dev_mode",
+                      "name": name, "enabled": enabled,
+                      "local_path": local_path, "branch": branch,
+                      "base": base, "run_id": run_id})
+
+    async def set_dev_mode_async(self, name, enabled, *, local_path="",
+                                  branch="", base="", run_id=""):
+        return await _call_async({"method": "dicode.sources.set_dev_mode",
+                                  "name": name, "enabled": enabled,
+                                  "local_path": local_path, "branch": branch,
+                                  "base": base, "run_id": run_id})
+
+
+class _Git:
+    def commit_push(self, source_id, *, message, branch, author_name,
+                    author_email, branch_prefix="", allow_main=False,
+                    files=None, auth_token_env=""):
+        return _call({"method": "dicode.git.commit_push",
+                      "source_id": source_id,
+                      "commit_message": message,
+                      "branch": branch,
+                      "branch_prefix": branch_prefix,
+                      "allow_main": allow_main,
+                      "files": files or [],
+                      "author_name": author_name,
+                      "author_email": author_email,
+                      "auth_token_env": auth_token_env})
+
+    async def commit_push_async(self, source_id, *, message, branch,
+                                 author_name, author_email,
+                                 branch_prefix="", allow_main=False,
+                                 files=None, auth_token_env=""):
+        return await _call_async({"method": "dicode.git.commit_push",
+                                  "source_id": source_id,
+                                  "commit_message": message,
+                                  "branch": branch,
+                                  "branch_prefix": branch_prefix,
+                                  "allow_main": allow_main,
+                                  "files": files or [],
+                                  "author_name": author_name,
+                                  "author_email": author_email,
+                                  "auth_token_env": auth_token_env})
+
+
 class _Dicode:
+    def __init__(self):
+        self.runs = _Runs()
+        self.tasks = _Tasks()
+        self.sources = _Sources()
+        self.git = _Git()
+
     def run_task(self, task_id, params=None):
         return _call({"method": "dicode.run_task", "taskID": task_id,
                       "params": params or {}})

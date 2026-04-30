@@ -122,6 +122,22 @@ func (m *SourceManager) SetDevMode(ctx context.Context, name string, enabled boo
 	return src.SetDevMode(ctx, enabled, opts)
 }
 
+// ResolveRepoPath returns the on-disk repo path for the named taskset source.
+// Implements ipc.RepoPathResolver.
+func (m *SourceManager) ResolveRepoPath(name string) (string, error) {
+	m.mu.RLock()
+	src, ok := m.tasksets[name]
+	m.mu.RUnlock()
+	if !ok {
+		return "", fmt.Errorf("source %q not found or not a taskset source", name)
+	}
+	p := src.RepoPath()
+	if p == "" {
+		return "", fmt.Errorf("source %q repo path not yet resolved (Start not called?)", name)
+	}
+	return p, nil
+}
+
 // ListBranches returns remote branches for the named git source.
 func (m *SourceManager) ListBranches(ctx context.Context, name string) ([]string, error) {
 	for _, sc := range m.cfg.Sources {
@@ -193,6 +209,63 @@ func (s *Server) apiSetDevMode(w http.ResponseWriter, r *http.Request) {
 		"base":       body.Base,
 		"run_id":     body.RunID,
 	})
+}
+
+type commitPushRequest struct {
+	Message      string   `json:"message"`
+	Branch       string   `json:"branch"`
+	BranchPrefix string   `json:"branch_prefix"`
+	AllowMain    bool     `json:"allow_main"`
+	Files        []string `json:"files"`
+	AuthorName   string   `json:"author_name"`
+	AuthorEmail  string   `json:"author_email"`
+	AuthTokenEnv string   `json:"auth_token_env"`
+}
+
+func (s *Server) apiCommitPush(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	var req commitPushRequest
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		jsonErr(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	// auth_token_env is not supported via REST — the REST endpoint has no
+	// task-scoped permissions.env to validate against, so any env var name
+	// could exfiltrate daemon secrets. Callers that need auth must use the
+	// dicode.git.commit_push IPC method from a task with the env var declared
+	// in permissions.env.
+	if req.AuthTokenEnv != "" {
+		jsonErr(w, "auth_token_env is only supported via IPC; use the dicode.git.commit_push SDK from a task", http.StatusBadRequest)
+		return
+	}
+	if s.sourceMgr == nil {
+		jsonErr(w, "source manager not available", http.StatusServiceUnavailable)
+		return
+	}
+	repoPath, err := s.sourceMgr.ResolveRepoPath(name)
+	if err != nil {
+		jsonErr(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	hash, err := gitSource.CommitPush(r.Context(), repoPath, gitSource.CommitPushOptions{
+		Message:      req.Message,
+		Branch:       req.Branch,
+		BranchPrefix: req.BranchPrefix,
+		AllowMain:    req.AllowMain,
+		Files:        req.Files,
+		Author: gitSource.Signature{
+			Name:  req.AuthorName,
+			Email: req.AuthorEmail,
+		},
+		AuthToken: "", // auth_token_env blocked above for REST callers
+	})
+	if err != nil {
+		jsonErr(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, map[string]any{"commit": hash})
 }
 
 func (s *Server) apiListSourceBranches(w http.ResponseWriter, r *http.Request) {

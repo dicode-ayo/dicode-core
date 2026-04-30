@@ -16,7 +16,10 @@ import (
 	"github.com/dicode/dicode/pkg/registry"
 	"github.com/dicode/dicode/pkg/relay"
 	"github.com/dicode/dicode/pkg/secrets"
+	gitsource "github.com/dicode/dicode/pkg/source/git"
 	"github.com/dicode/dicode/pkg/task"
+	"github.com/dicode/dicode/pkg/taskset"
+	"github.com/dicode/dicode/pkg/tasktest"
 	"go.uber.org/zap"
 )
 
@@ -83,8 +86,11 @@ type Server struct {
 	// torn reads under the Go memory model.
 	redactor atomic.Pointer[secrets.Redactor]
 
-	gateway    *Gateway             // optional; enables http.register for daemon tasks
-	inputStore *registry.InputStore // optional; enables dicode.runs.delete_input blob deletion
+	gateway      *Gateway             // optional; enables http.register for daemon tasks
+	inputStore   *registry.InputStore // optional; enables dicode.runs.delete_input blob deletion
+	replayer     *registry.Replayer   // optional; enables dicode.runs.replay
+	sourceMgr    SourceDevModeSetter  // optional; enables dicode.sources.set_dev_mode
+	repoResolver RepoPathResolver     // optional; enables dicode.git.commit_push
 
 	ctx        context.Context
 	socketPath string
@@ -265,6 +271,18 @@ func (s *Server) Start(ctx context.Context) (socketPath, token string, err error
 		if dp.RunsUnpinInput {
 			caps = append(caps, CapRunsUnpinInput)
 		}
+		if dp.RunsReplay {
+			caps = append(caps, CapRunsReplay)
+		}
+		if dp.TasksTest {
+			caps = append(caps, CapTasksTest)
+		}
+		if dp.SourcesSetDevMode {
+			caps = append(caps, CapSourcesSetDevMode)
+		}
+		if dp.GitCommitPush {
+			caps = append(caps, CapGitCommitPush)
+		}
 	}
 	if s.spec != nil && s.spec.Trigger.Daemon && s.gateway != nil {
 		caps = append(caps, CapHTTPRegister)
@@ -313,6 +331,32 @@ func (s *Server) SetGateway(g *Gateway) { s.gateway = g }
 // can call dicode.runs.delete_input() to remove the blob before clearing the
 // runs row. Must be called before Start.
 func (s *Server) SetInputStore(is *registry.InputStore) { s.inputStore = is }
+
+// SetReplayer attaches the Replayer so tasks with RunsReplay permission
+// can call dicode.runs.replay. nil disables (dispatch returns error).
+func (s *Server) SetReplayer(r *registry.Replayer) { s.replayer = r }
+
+// SourceDevModeSetter is satisfied by webui.SourceManager. Defined in
+// pkg/ipc so the daemon can wire the source manager without forcing
+// pkg/ipc to import pkg/webui (which would invert the established
+// dependency direction).
+type SourceDevModeSetter interface {
+	SetDevMode(ctx context.Context, name string, enabled bool, opts taskset.DevModeOpts) error
+}
+
+// SetSourceManager attaches a SourceDevModeSetter (typically *webui.SourceManager)
+// for dicode.sources.set_dev_mode dispatch. nil disables.
+func (s *Server) SetSourceManager(m SourceDevModeSetter) { s.sourceMgr = m }
+
+// RepoPathResolver maps a source name to its on-disk repo path. Defined in
+// pkg/ipc to avoid an upward import; satisfied by *webui.SourceManager.
+type RepoPathResolver interface {
+	ResolveRepoPath(sourceName string) (string, error)
+}
+
+// SetRepoResolver attaches a RepoPathResolver (typically *webui.SourceManager)
+// for dicode.git.commit_push dispatch. nil disables.
+func (s *Server) SetRepoResolver(r RepoPathResolver) { s.repoResolver = r }
 
 // ReturnCh receives the task return value once the subprocess sends "return".
 func (s *Server) ReturnCh() <-chan any { return s.retCh }
@@ -788,6 +832,122 @@ func (s *Server) handleConn(conn net.Conn) {
 			}
 			reply(req.ID, fetched, "")
 
+		case "dicode.runs.replay":
+			if !hasCap(caps, CapRunsReplay) {
+				reply(req.ID, nil, "ipc: permission denied (runs.replay)")
+				continue
+			}
+			if s.replayer == nil {
+				reply(req.ID, nil, "ipc: replayer not configured")
+				continue
+			}
+			if req.RunID == "" {
+				reply(req.ID, nil, "ipc: runID required")
+				continue
+			}
+			newRunID, err := s.replayer.Replay(s.ctx, req.RunID, req.TaskID)
+			if err != nil {
+				reply(req.ID, nil, err.Error())
+				continue
+			}
+			reply(req.ID, map[string]any{"run_id": newRunID}, "")
+
+		case "dicode.tasks.test":
+			if !hasCap(caps, CapTasksTest) {
+				reply(req.ID, nil, "ipc: permission denied (tasks.test)")
+				continue
+			}
+			if req.TaskID == "" {
+				reply(req.ID, nil, "ipc: taskID required")
+				continue
+			}
+			spec, ok := s.registry.Get(req.TaskID)
+			if !ok {
+				reply(req.ID, nil, "task not registered: "+req.TaskID)
+				continue
+			}
+			// 5min cap so a hung test suite doesn't wedge the per-task IPC
+			// connection forever — handleConn dispatches sequentially.
+			tctx, cancel := context.WithTimeout(s.ctx, 5*time.Minute)
+			result, err := tasktest.Run(tctx, spec)
+			cancel()
+			if err != nil {
+				reply(req.ID, nil, err.Error())
+				continue
+			}
+			reply(req.ID, result, "")
+
+		case "dicode.sources.set_dev_mode":
+			if !hasCap(caps, CapSourcesSetDevMode) {
+				reply(req.ID, nil, "ipc: permission denied (sources.set_dev_mode)")
+				continue
+			}
+			if s.sourceMgr == nil {
+				reply(req.ID, nil, "ipc: source manager not available")
+				continue
+			}
+			if req.Name == "" {
+				reply(req.ID, nil, "ipc: name required")
+				continue
+			}
+			opts := taskset.DevModeOpts{
+				LocalPath: req.LocalPath,
+				Branch:    req.Branch,
+				Base:      req.Base,
+				RunID:     req.DevRunID,
+			}
+			if err := s.sourceMgr.SetDevMode(s.ctx, req.Name, req.Enabled, opts); err != nil {
+				reply(req.ID, nil, err.Error())
+				continue
+			}
+			reply(req.ID, map[string]any{"ok": true}, "")
+
+		case "dicode.git.commit_push":
+			if !hasCap(caps, CapGitCommitPush) {
+				reply(req.ID, nil, "ipc: permission denied (git.commit_push)")
+				continue
+			}
+			if req.SourceID == "" {
+				reply(req.ID, nil, "ipc: source_id required")
+				continue
+			}
+			if s.repoResolver == nil {
+				reply(req.ID, nil, "ipc: repo resolver not configured")
+				continue
+			}
+			// Validate auth_token_env against permissions.env to prevent
+			// arbitrary daemon env var exfiltration. Skip when empty (no auth).
+			if req.AuthTokenEnv != "" && !authTokenEnvAllowed(s.spec, req.AuthTokenEnv) {
+				reply(req.ID, nil, fmt.Sprintf("ipc: auth_token_env %q not declared in permissions.env", req.AuthTokenEnv))
+				continue
+			}
+			repoPath, err := s.repoResolver.ResolveRepoPath(req.SourceID)
+			if err != nil {
+				reply(req.ID, nil, err.Error())
+				continue
+			}
+			authToken := ""
+			if req.AuthTokenEnv != "" {
+				authToken = os.Getenv(req.AuthTokenEnv)
+			}
+			hash, err := gitsource.CommitPush(s.ctx, repoPath, gitsource.CommitPushOptions{
+				Message:      req.CommitMsg,
+				Branch:       req.Branch,
+				BranchPrefix: req.BranchPrefix,
+				AllowMain:    req.AllowMain,
+				Files:        req.Files,
+				Author: gitsource.Signature{
+					Name:  req.AuthorName,
+					Email: req.AuthorEmail,
+				},
+				AuthToken: authToken,
+			})
+			if err != nil {
+				reply(req.ID, nil, err.Error())
+				continue
+			}
+			reply(req.ID, map[string]any{"commit": hash}, "")
+
 		// ── dicode.secrets_* ──────────────────────────────────────────────
 
 		case "dicode.secrets_set":
@@ -1123,6 +1283,25 @@ func (s *Server) mcpAllowed(name string) bool {
 	}
 	for _, a := range dp.MCP {
 		if a == "*" || a == name {
+			return true
+		}
+	}
+	return false
+}
+
+// authTokenEnvAllowed reports whether envVar is declared in the task's
+// permissions.env list. An entry matches when either:
+//   - entry.From == envVar (the host env var being sourced), or
+//   - entry.From == "" AND entry.Name == envVar (bare name entry).
+func authTokenEnvAllowed(spec *task.Spec, envVar string) bool {
+	if spec == nil {
+		return false
+	}
+	for _, e := range spec.Permissions.Env {
+		if e.From == envVar {
+			return true
+		}
+		if e.From == "" && e.Name == envVar {
 			return true
 		}
 	}

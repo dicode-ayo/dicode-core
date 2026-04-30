@@ -106,6 +106,16 @@ class DcRunDetail extends LitElement {
     try { await post(`/api/runs/${this.runid}/kill`); } catch(e) { alert('Kill failed: ' + e.message); }
   }
 
+  async _replay() {
+    try {
+      const res = await post(`/api/runs/${this.runid}/replay`, {});
+      const newID = res?.run_id;
+      if (newID) navigate(`/runs/${newID}`);
+    } catch(e) {
+      alert('Replay failed: ' + e.message);
+    }
+  }
+
   render() {
     if (this._error) return html`<p style="color:red">Error: ${this._error}</p>`;
     if (!this._run) return html`<div class="meta">Loading…</div>`;
@@ -140,7 +150,9 @@ class DcRunDetail extends LitElement {
           <span class="meta">${this._duration || (finishedAt ? fmtDuration(startedAt, finishedAt) : isRunning ? 'running…' : '—')}</span>
           <a href="/runs/${this.runid}/result" target="_blank" class="btn btn-sm secondary" style="margin-left:auto">Result ↗</a>
           ${isRunning ? html`
-            <button class="btn" style="background:var(--red)" @click=${() => this._kill()}>Kill</button>` : ''}
+            <button class="btn" style="background:var(--red)" @click=${() => this._kill()}>Kill</button>`
+            : (status === 'success' || status === 'failure') ? html`
+            <button class="btn btn-sm" @click=${() => this._replay()} title="Re-fire this run with its persisted input">Replay</button>` : ''}
         </div>
       </div>
 
