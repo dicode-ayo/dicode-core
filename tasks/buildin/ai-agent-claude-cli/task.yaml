@@ -50,10 +50,13 @@ permissions:
   run: ["claude"]
 
   env:
-    # The OAuth token minted by `claude setup-token`. Store as a dicode
-    # secret named CLAUDE_CODE_OAUTH_TOKEN; this maps it into the task.
+    # The OAuth token minted by `claude setup-token`. Resolved from the
+    # dicode secrets store (encrypted SQLite + env-var fallback chain) —
+    # NOT directly from the host env. `secret:` is the right verb here;
+    # `from:` would only read host env, which silently misses operators
+    # who stored the token via `dicode secrets set` or the WebUI.
     - name: CLAUDE_CODE_OAUTH_TOKEN
-      from: CLAUDE_CODE_OAUTH_TOKEN
+      secret: CLAUDE_CODE_OAUTH_TOKEN
     # HOME is required so the CLI can read/write its credential cache
     # at $HOME/.claude/.credentials.json. Without HOME set, it falls
     # back to '/' and refuses to persist state.
