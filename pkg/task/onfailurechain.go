@@ -2,6 +2,7 @@ package task
 
 import (
 	"fmt"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -18,8 +19,53 @@ import (
 //
 // The bare-string form is equivalent to {task: <string>, params: nil}.
 type OnFailureChainSpec struct {
-	Task   string         `yaml:"task"`
-	Params map[string]any `yaml:"params,omitempty"`
+	Task   string         `yaml:"task"                     json:"task"`
+	Params map[string]any `yaml:"params,omitempty"         json:"params,omitempty"`
+
+	// MaxDepth caps the number of chained on_failure_chain hops. When the
+	// incoming run's _chain_depth >= MaxDepth, the chain is suppressed with a
+	// structured WARN. Default 2 (see EffectiveMaxDepth).
+	MaxDepth int `yaml:"max_depth,omitempty" json:"max_depth,omitempty"`
+
+	// Cooldown is the minimum wall-clock interval between two on_failure_chain
+	// fires for the same failing task. Default 10m. Zero = unlimited (no cooldown).
+	// Wired by Task 4.
+	Cooldown time.Duration `yaml:"cooldown,omitempty" json:"cooldown,omitempty"`
+
+	// MaxConcurrent caps the number of on_failure_chain runs in flight per
+	// failing task. Default 1. Wired by Task 5.
+	MaxConcurrent int `yaml:"max_concurrent,omitempty" json:"max_concurrent,omitempty"`
+
+	// MaxConcurrentGlobal caps total on_failure_chain runs in flight across all
+	// tasks. Applies only at the defaults.on_failure_chain site; per-task values
+	// are ignored (enforced at config load in a future work item). Default 3.
+	// Wired by Task 6.
+	MaxConcurrentGlobal int `yaml:"max_concurrent_global,omitempty" json:"max_concurrent_global,omitempty"`
+
+	// Storm configures the per-source-namespace circuit breaker. Applies only at
+	// the defaults site. Zero rate = disabled. Wired by Task 7.
+	Storm StormSpec `yaml:"storm,omitempty" json:"storm,omitempty"`
+}
+
+// StormSpec is the failure-storm circuit breaker configuration.
+type StormSpec struct {
+	// Rate is the number of chain fires within Window that trip the breaker.
+	Rate int `yaml:"rate,omitempty" json:"rate,omitempty"`
+	// Window is the observation period for the rate counter.
+	Window time.Duration `yaml:"window,omitempty" json:"window,omitempty"`
+	// Suppress is the duration for which chain fires are suppressed after the
+	// breaker trips.
+	Suppress time.Duration `yaml:"suppress,omitempty" json:"suppress,omitempty"`
+	// Scope is "source" (default) or "global".
+	Scope string `yaml:"scope,omitempty" json:"scope,omitempty"`
+}
+
+// EffectiveMaxDepth returns the configured MaxDepth, or 2 if MaxDepth <= 0.
+func (s OnFailureChainSpec) EffectiveMaxDepth() int {
+	if s.MaxDepth > 0 {
+		return s.MaxDepth
+	}
+	return 2
 }
 
 // UnmarshalYAML decodes either a scalar (bare task ID) or a mapping into the

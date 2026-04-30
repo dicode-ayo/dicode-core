@@ -54,6 +54,7 @@ type Engine struct {
 	runCancels       sync.Map // runID → context.CancelFunc
 	runDone          sync.Map // runID (string) → chan struct{}, closed when the run reaches a terminal state
 	runTriggerSource sync.Map // runID (string) → triggerSource (registry.TriggerSource)
+	runChainDepth    sync.Map // runID (string) → int; _chain_depth from the run's input
 
 	shutdownMu  sync.RWMutex
 	shutdownCtx context.Context
@@ -840,25 +841,31 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 					return
 				}
 			}
-			// Chain-of-chains suppression: refuse to fire if the completed run
-			// was itself chain-fired. This prevents infinite recursion when a
-			// chain target also has on_failure_chain set (or fails and would
-			// re-trigger itself via defaults).
-			// TODO(#238): replace with proper _chain_depth tracking.
-			if src, ok := e.runTriggerSource.Load(runID); ok {
-				if ts, _ := src.(registry.TriggerSource); ts == registry.TriggerChain {
-					e.log.Warn("on_failure_chain suppressed: completed run was itself chain-fired (would loop)",
-						zap.String("from", completedTaskID),
-						zap.String("run", runID),
-					)
-					return
-				}
+			// Depth-tracking ceiling: read the incoming run's chain depth and
+			// refuse to fire when the next hop would exceed MaxDepth (default 2).
+			// This replaces the old chain-of-chains suppression that blocked all
+			// chaining beyond depth 1.
+			incomingDepth := 0
+			if d, ok := e.runChainDepth.Load(runID); ok {
+				incomingDepth, _ = d.(int)
+			}
+			nextDepth := incomingDepth + 1
+			maxDepth := chainSpec.EffectiveMaxDepth()
+			if nextDepth > maxDepth {
+				e.log.Warn("on_failure_chain suppressed: max_depth exceeded",
+					zap.Int("depth", nextDepth),
+					zap.Int("max_depth", maxDepth),
+					zap.String("from", completedTaskID),
+					zap.String("run", runID),
+				)
+				return
 			}
 			if targetSpec, ok := e.registry.Get(targetID); ok {
 				e.log.Info("on_failure_chain trigger",
 					zap.String("from", completedTaskID),
 					zap.String("to", targetID),
 					zap.String("run", runID),
+					zap.Int("depth", nextDepth),
 				)
 				// Build input. Reserved keys (taskID, runID, status, output,
 				// _chain_depth) are populated by the engine and are NOT
@@ -867,10 +874,6 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 				// can safely overlay user params first and then stamp the
 				// reserved keys — collisions cannot reach here in a
 				// well-validated config.
-				// _chain_depth is hardcoded to 1 here; full depth tracking is
-				// engine-level guardrail work tracked in #238. Recursive
-				// fan-out is mitigated for v1 by the chain-of-chains
-				// suppression above (see runTriggerSource).
 				input := map[string]any{}
 				for k, v := range chainSpec.Params {
 					input[k] = v
@@ -879,8 +882,7 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 				input["runID"] = runID
 				input["status"] = runStatus
 				input["output"] = output
-				// TODO(#238): increment from incoming run input; current always-1 means chain-of-chains can recurse.
-				input["_chain_depth"] = 1
+				input["_chain_depth"] = nextDepth
 				go e.fireAsync(ctx, targetSpec, pkgruntime.RunOptions{ //nolint:errcheck
 					ParentRunID: runID,
 					Input:       input,
@@ -1437,6 +1439,7 @@ func (e *Engine) startRun(spec *task.Spec, opts *pkgruntime.RunOptions, source r
 	cleanup = func() {
 		e.runCancels.Delete(opts.RunID)
 		e.runTriggerSource.Delete(opts.RunID)
+		e.runChainDepth.Delete(opts.RunID)
 		cancel()
 		// Signal all waiters that the run has finished, then remove the entry.
 		if v, ok := e.runDone.LoadAndDelete(opts.RunID); ok {
@@ -1584,6 +1587,21 @@ func (e *Engine) fireAsync(ctx context.Context, spec *task.Spec, opts pkgruntime
 	runCtx, cleanup, err := e.startRun(spec, &opts, source)
 	if err != nil {
 		return "", err
+	}
+
+	// If this run carries a _chain_depth in its input (set by FireChain), record
+	// it in runChainDepth so FireChain can read the depth when this run completes.
+	if m, ok := opts.Input.(map[string]any); ok {
+		if d, ok2 := m["_chain_depth"]; ok2 {
+			switch v := d.(type) {
+			case int:
+				e.runChainDepth.Store(opts.RunID, v)
+			case int64:
+				e.runChainDepth.Store(opts.RunID, int(v))
+			case float64:
+				e.runChainDepth.Store(opts.RunID, int(v))
+			}
+		}
 	}
 
 	go func() {

@@ -267,3 +267,39 @@ func TestEngine_OnFailureChain_NoLoopSelfReference(t *testing.T) {
 		t.Errorf("self-loop produced %d runs (want 1): %s", len(runs), strings.Join(ids, ", "))
 	}
 }
+
+// TestEngine_ChainDepth_StopsAtCeiling verifies that on_failure_chain hops are
+// capped at EffectiveMaxDepth() (default 2). A → B → A loop with always-failing
+// tasks must produce at most 2 runs of task-b before the ceiling halts the chain.
+func TestEngine_ChainDepth_StopsAtCeiling(t *testing.T) {
+	dir := t.TempDir()
+	e := newTestEnv(t)
+
+	// Create a chain B → A with always-fail tasks. With max_depth=2, the third
+	// link must be suppressed.
+	a := writeTask(t, dir, "task-a",
+		`export default async () => { throw new Error("a-fail") }`,
+		task.TriggerConfig{Manual: true})
+	a.OnFailureChain = &task.OnFailureChainSpec{Task: "task-b"}
+	_ = e.reg.Register(a)
+
+	b := writeTask(t, dir, "task-b",
+		`export default async () => { throw new Error("b-fail") }`,
+		task.TriggerConfig{Manual: true})
+	b.OnFailureChain = &task.OnFailureChainSpec{Task: "task-a"} // would re-loop without the ceiling
+	_ = e.reg.Register(b)
+
+	runID, err := e.engine.FireManual(context.Background(), "task-a", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForTerminal(t, e.engine, runID, 30*time.Second)
+
+	// Wait for the chain to settle; with depth ceiling=2, we expect at most
+	// 2 distinct runs of task-b and 1 of task-a (the original).
+	time.Sleep(3 * time.Second)
+	bRuns, _ := e.reg.ListRuns(context.Background(), "task-b", 10)
+	if len(bRuns) > 2 {
+		t.Errorf("max_depth=2 violated: task-b fired %d times", len(bRuns))
+	}
+}
