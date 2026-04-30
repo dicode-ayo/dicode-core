@@ -16,4 +16,6 @@ const (
 	TriggerDaemon      TriggerSource = "daemon"
 	TriggerReplay      TriggerSource = "replay"
 	TriggerCronCatchup TriggerSource = "cron-catchup"
+	TriggerProvider    TriggerSource = "provider"
+	TriggerIfMissing   TriggerSource = "if_missing"
 )

@@ -53,7 +53,7 @@ type Engine struct {
 
 	runCancels       sync.Map // runID → context.CancelFunc
 	runDone          sync.Map // runID (string) → chan struct{}, closed when the run reaches a terminal state
-	runTriggerSource sync.Map // runID (string) → triggerSource (string)
+	runTriggerSource sync.Map // runID (string) → triggerSource (registry.TriggerSource)
 
 	shutdownMu  sync.RWMutex
 	shutdownCtx context.Context
@@ -330,7 +330,7 @@ func (e *Engine) Register(spec *task.Spec) {
 	}
 	e.log.Info("task registered",
 		zap.String("task", spec.ID),
-		zap.String("trigger", triggerSource(spec)),
+		zap.String("trigger", string(triggerSource(spec))),
 		zap.String("runtime", string(spec.Runtime)),
 	)
 }
@@ -389,7 +389,7 @@ func (e *Engine) registerCron(spec *task.Spec) {
 		// Advance next_run_at AFTER fireAsync so that a failed dispatch does not
 		// silently advance the schedule and cause the missed run to be invisible
 		// on the next restart.
-		if _, ferr := e.fireAsync(context.Background(), s, pkgruntime.RunOptions{}, "cron"); ferr == nil && e.db != nil {
+		if _, ferr := e.fireAsync(context.Background(), s, pkgruntime.RunOptions{}, registry.TriggerCron); ferr == nil && e.db != nil {
 			if next, nerr := cronNextRun(spec.Trigger.Cron); nerr == nil {
 				if dbErr := e.db.Exec(context.Background(),
 					`UPDATE cron_jobs SET last_run_at=?, next_run_at=? WHERE task_id=?`,
@@ -505,7 +505,7 @@ func (e *Engine) catchupMissedCronRuns(ctx context.Context) {
 			zap.String("task", m.taskID),
 			zap.Time("was_due", time.Unix(m.nextAt, 0)),
 		)
-		e.fireAsync(ctx, spec, pkgruntime.RunOptions{}, "cron-catchup") //nolint:errcheck
+		e.fireAsync(ctx, spec, pkgruntime.RunOptions{}, registry.TriggerCronCatchup) //nolint:errcheck
 	}
 }
 
@@ -541,7 +541,7 @@ func (e *Engine) registerDaemon(spec *task.Spec) {
 }
 
 func (e *Engine) startDaemon(spec *task.Spec) {
-	runID, err := e.fireAsync(context.Background(), spec, pkgruntime.RunOptions{}, "daemon")
+	runID, err := e.fireAsync(context.Background(), spec, pkgruntime.RunOptions{}, registry.TriggerDaemon)
 	if err != nil {
 		e.log.Error("daemon start failed", zap.String("task", spec.ID), zap.Error(err))
 		return
@@ -631,7 +631,7 @@ func (e *Engine) FireManual(ctx context.Context, taskID string, params map[strin
 		return "", fmt.Errorf("task %q not found", taskID)
 	}
 	e.log.Info("manual trigger", zap.String("task", taskID))
-	return e.fireAsync(context.Background(), spec, pkgruntime.RunOptions{Params: params}, "manual")
+	return e.fireAsync(context.Background(), spec, pkgruntime.RunOptions{Params: params}, registry.TriggerManual)
 }
 
 // WaitRun blocks until the run identified by runID reaches a terminal state,
@@ -827,13 +827,26 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 		}
 		targetID := chainSpec.Task
 		if targetID != "" && targetID != completedTaskID {
+			// Replay-source guard: a replay-fired run that fails must not
+			// trigger on_failure_chain — preserves the semantics that replay
+			// is a manual / agent-initiated action with no auto-recovery loop.
+			// (Spec § 4.3 #5.)
+			if src, ok := e.runTriggerSource.Load(runID); ok {
+				if ts, _ := src.(registry.TriggerSource); ts == registry.TriggerReplay {
+					e.log.Debug("on_failure_chain skipped: replay source",
+						zap.String("from", completedTaskID),
+						zap.String("run", runID),
+					)
+					return
+				}
+			}
 			// Chain-of-chains suppression: refuse to fire if the completed run
 			// was itself chain-fired. This prevents infinite recursion when a
 			// chain target also has on_failure_chain set (or fails and would
 			// re-trigger itself via defaults).
 			// TODO(#238): replace with proper _chain_depth tracking.
 			if src, ok := e.runTriggerSource.Load(runID); ok {
-				if srcStr, _ := src.(string); srcStr == "chain" {
+				if ts, _ := src.(registry.TriggerSource); ts == registry.TriggerChain {
 					e.log.Warn("on_failure_chain suppressed: completed run was itself chain-fired (would loop)",
 						zap.String("from", completedTaskID),
 						zap.String("run", runID),
@@ -871,7 +884,7 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 				go e.fireAsync(ctx, targetSpec, pkgruntime.RunOptions{ //nolint:errcheck
 					ParentRunID: runID,
 					Input:       input,
-				}, "chain")
+				}, registry.TriggerChain)
 			}
 		}
 	}
@@ -1147,7 +1160,7 @@ func (e *Engine) WebhookHandler() http.Handler {
 		async := r.URL.Query().Get("wait") == "false"
 
 		if async {
-			runID, err := e.fireAsync(r.Context(), spec, pkgruntime.RunOptions{Input: input, Params: params, WebhookCtx: webhookCtx}, "webhook")
+			runID, err := e.fireAsync(r.Context(), spec, pkgruntime.RunOptions{Input: input, Params: params, WebhookCtx: webhookCtx}, registry.TriggerWebhook)
 			if err != nil {
 				http.Error(w, "task failed to start", http.StatusInternalServerError)
 				return
@@ -1158,7 +1171,7 @@ func (e *Engine) WebhookHandler() http.Handler {
 			return
 		}
 
-		runID, result, err := e.fireSync(spec, pkgruntime.RunOptions{Input: input, Params: params, WebhookCtx: webhookCtx}, "webhook")
+		runID, result, err := e.fireSync(spec, pkgruntime.RunOptions{Input: input, Params: params, WebhookCtx: webhookCtx}, registry.TriggerWebhook)
 		if err != nil {
 			http.Error(w, "task failed to start", http.StatusInternalServerError)
 			return
@@ -1354,8 +1367,8 @@ func (e *Engine) serveTaskAsset(w http.ResponseWriter, r *http.Request, taskDir,
 // startRun creates the DB record, stores the cancel func, fires the started
 // hook, and returns a ready-to-run context. The caller is responsible for
 // calling the returned cleanup func when the run finishes.
-func (e *Engine) startRun(spec *task.Spec, opts *pkgruntime.RunOptions, source string) (runCtx context.Context, cleanup func(), err error) {
-	if _, err = e.registry.StartRunWithID(context.Background(), opts.RunID, spec.ID, opts.ParentRunID, source); err != nil {
+func (e *Engine) startRun(spec *task.Spec, opts *pkgruntime.RunOptions, source registry.TriggerSource) (runCtx context.Context, cleanup func(), err error) {
+	if _, err = e.registry.StartRunWithID(context.Background(), opts.RunID, spec.ID, opts.ParentRunID, string(source)); err != nil {
 		return nil, nil, fmt.Errorf("start run record: %w", err)
 	}
 
@@ -1378,7 +1391,7 @@ func (e *Engine) startRun(spec *task.Spec, opts *pkgruntime.RunOptions, source s
 				BodyFullTextual: bft,
 			}
 		}
-		in := registry.BuildPersistedInputFromRunOpts(source, opts.Params, opts.Input, web)
+		in := registry.BuildPersistedInputFromRunOpts(string(source), opts.Params, opts.Input, web)
 		key, size, storedAt, perr := e.inputStore.Persist(context.Background(), opts.RunID, in)
 		if perr != nil {
 			// Log only a sanitized error category. The full perr chain may
@@ -1409,7 +1422,7 @@ func (e *Engine) startRun(spec *task.Spec, opts *pkgruntime.RunOptions, source s
 	}
 
 	if h := e.runStartedHook; h != nil {
-		h(spec.ID, opts.RunID, source)
+		h(spec.ID, opts.RunID, string(source))
 	}
 	var cancel context.CancelFunc
 	runCtx, cancel = context.WithCancel(context.Background())
@@ -1454,11 +1467,11 @@ func (e *Engine) shouldPersistInput(spec *task.Spec) bool {
 
 // runTask executes a task synchronously and handles all post-run bookkeeping
 // (logging, notifications, hooks, daemon restart). Returns status and result.
-func (e *Engine) runTask(runCtx context.Context, spec *task.Spec, opts pkgruntime.RunOptions, source string) (string, *pkgruntime.RunResult) {
+func (e *Engine) runTask(runCtx context.Context, spec *task.Spec, opts pkgruntime.RunOptions, source registry.TriggerSource) (string, *pkgruntime.RunResult) {
 	e.log.Info("run started",
 		zap.String("task", spec.ID),
 		zap.String("run", opts.RunID),
-		zap.String("trigger", source),
+		zap.String("trigger", string(source)),
 		zap.String("runtime", string(spec.Runtime)),
 	)
 
@@ -1494,7 +1507,7 @@ func (e *Engine) runTask(runCtx context.Context, spec *task.Spec, opts pkgruntim
 		zap.String("task", spec.ID),
 		zap.String("run", opts.RunID),
 		zap.String("status", status),
-		zap.String("trigger", source),
+		zap.String("trigger", string(source)),
 		zap.Duration("duration", elapsed.Truncate(time.Millisecond)),
 	}
 	if status == registry.StatusSuccess {
@@ -1525,7 +1538,7 @@ func (e *Engine) runTask(runCtx context.Context, spec *task.Spec, opts pkgruntim
 	}
 
 	if h := e.runFinishedHook; h != nil {
-		h(spec.ID, opts.RunID, status, source, elapsed.Milliseconds(), notifyOnSuccess, notifyOnFailure)
+		h(spec.ID, opts.RunID, status, string(source), elapsed.Milliseconds(), notifyOnSuccess, notifyOnFailure)
 	}
 
 	if spec.Trigger.Daemon {
@@ -1541,7 +1554,7 @@ func (e *Engine) runTask(runCtx context.Context, spec *task.Spec, opts pkgruntim
 // hook so websocket subscribers see a matching started/finished pair.
 // Safe to call even on the hot shutdown path: the DB write is bounded by a
 // short timeout so a stuck SQLite connection cannot block the goroutine.
-func (e *Engine) finalizeCancelled(spec *task.Spec, opts pkgruntime.RunOptions, source string) {
+func (e *Engine) finalizeCancelled(spec *task.Spec, opts pkgruntime.RunOptions, source registry.TriggerSource) {
 	finishCtx, finishCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer finishCancel()
 	if err := e.registry.FinishRun(finishCtx, opts.RunID, registry.StatusCancelled); err != nil {
@@ -1555,7 +1568,7 @@ func (e *Engine) finalizeCancelled(spec *task.Spec, opts pkgruntime.RunOptions, 
 		// a separate path in runTask) only fires on Success/Failure, so
 		// cancelled runs do not send spurious notifications.
 		notifyOnSuccess, notifyOnFailure := e.resolveNotify(spec)
-		h(spec.ID, opts.RunID, registry.StatusCancelled, source, 0, notifyOnSuccess, notifyOnFailure)
+		h(spec.ID, opts.RunID, registry.StatusCancelled, string(source), 0, notifyOnSuccess, notifyOnFailure)
 	}
 }
 
@@ -1565,7 +1578,7 @@ func (e *Engine) finalizeCancelled(spec *task.Spec, opts pkgruntime.RunOptions, 
 // When a MaxConcurrentTasks semaphore is configured, the goroutine blocks
 // until a slot is available or the shutdown context is cancelled — ensuring
 // shutdown never deadlocks waiting tasks.
-func (e *Engine) fireAsync(ctx context.Context, spec *task.Spec, opts pkgruntime.RunOptions, source string) (string, error) {
+func (e *Engine) fireAsync(ctx context.Context, spec *task.Spec, opts pkgruntime.RunOptions, source registry.TriggerSource) (string, error) {
 	opts.RunID = uuid.New().String()
 
 	runCtx, cleanup, err := e.startRun(spec, &opts, source)
@@ -1624,7 +1637,7 @@ func (e *Engine) fireAsync(ctx context.Context, spec *task.Spec, opts pkgruntime
 // The caller's context is used only for cancellation of the run setup; the
 // run itself uses an independent context so it is not cancelled when the HTTP
 // request context ends mid-execution.
-func (e *Engine) fireSync(spec *task.Spec, opts pkgruntime.RunOptions, source string) (string, *pkgruntime.RunResult, error) {
+func (e *Engine) fireSync(spec *task.Spec, opts pkgruntime.RunOptions, source registry.TriggerSource) (string, *pkgruntime.RunResult, error) {
 	opts.RunID = uuid.New().String()
 
 	runCtx, cleanup, err := e.startRun(spec, &opts, source)
@@ -1843,18 +1856,18 @@ func (e *Engine) dispatch(ctx context.Context, spec *task.Spec, opts pkgruntime.
 	return status, result
 }
 
-// triggerSource returns a short string identifying the trigger type of a spec.
-func triggerSource(spec *task.Spec) string {
+// triggerSource returns a typed TriggerSource identifying the trigger type of a spec.
+func triggerSource(spec *task.Spec) registry.TriggerSource {
 	switch {
 	case spec.Trigger.Cron != "":
-		return "cron"
+		return registry.TriggerCron
 	case spec.Trigger.Webhook != "":
-		return "webhook"
+		return registry.TriggerWebhook
 	case spec.Trigger.Daemon:
-		return "daemon"
+		return registry.TriggerDaemon
 	case spec.Trigger.Chain != nil:
-		return "chain"
+		return registry.TriggerChain
 	default:
-		return "manual"
+		return registry.TriggerManual
 	}
 }

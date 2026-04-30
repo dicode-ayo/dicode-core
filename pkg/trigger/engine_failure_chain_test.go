@@ -201,6 +201,37 @@ func TestEngine_OnFailureChain_EmptyStringDisablesDefault(t *testing.T) {
 	}
 }
 
+// TestEngine_ChainSuppression_UsesTypedReplaySource verifies that a failing run
+// fired with TriggerSource = replay does NOT trigger on_failure_chain. This is
+// a regression guard for the typed-enum migration (Task 2 of #238).
+func TestEngine_ChainSuppression_UsesTypedReplaySource(t *testing.T) {
+	dir := t.TempDir()
+	e := newTestEnv(t)
+
+	fallback := writeTask(t, dir, "fallback", `export default async () => "ok"`, task.TriggerConfig{Manual: true})
+	failing := writeTask(t, dir, "fail", `throw new Error("boom")`, task.TriggerConfig{Manual: true})
+	_ = e.reg.Register(fallback)
+	_ = e.reg.Register(failing)
+
+	if err := e.engine.SetDefaultsOnFailureChain(task.OnFailureChainSpec{Task: "fallback"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Fire the failing task with TriggerSource = replay; assert no chain fires.
+	runner := NewReplayRunner(e.engine)
+	replayedRunID, err := runner.FireForReplay(context.Background(), "fail", "parent-run", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForTerminal(t, e.engine, replayedRunID, 30*time.Second)
+
+	time.Sleep(2 * time.Second)
+	runs, _ := e.reg.ListRuns(context.Background(), "fallback", 5)
+	if len(runs) > 0 {
+		t.Errorf("fallback should not fire when source=replay; got %d runs", len(runs))
+	}
+}
+
 // TestEngine_OnFailureChain_NoLoopSelfReference verifies the engine refuses
 // to chain a task to itself on failure (infinite-loop guard in FireChain:
 // `targetID != completedTaskID`).

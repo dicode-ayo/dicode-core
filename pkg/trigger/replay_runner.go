@@ -32,7 +32,7 @@ func (a *ReplayRunnerAdapter) FireForReplay(ctx context.Context, taskID, parentR
 	return a.engine.fireAsync(ctx, spec, pkgruntime.RunOptions{
 		ParentRunID: parentRunID,
 		Input:       input,
-	}, "replay")
+	}, registry.TriggerReplay)
 }
 
 // TaskNotFoundError signals that the requested replay target task is not
