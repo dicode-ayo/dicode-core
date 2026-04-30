@@ -53,10 +53,8 @@ const (
 	CapRunsDeleteInput = "runs.delete_input" // dicode.runs.delete_input
 	CapRunsPinInput    = "runs.pin_input"    // dicode.runs.pin_input
 	CapRunsUnpinInput  = "runs.unpin_input"  // dicode.runs.unpin_input
-	// CapRunsGetInput is reserved for programmatic grant only (e.g., the
-	// buildin/auto-fix preset in #238). It is intentionally not derivable
-	// from any task.yaml YAML field — tasks cannot self-grant decrypted
-	// cross-task input access via their permission spec.
+	// CapRunsGetInput is granted via permissions.dicode.runs_get_input. Sensitive —
+	// grants cross-task input read. Redaction at write time (#233) bounds the surface.
 	CapRunsGetInput      = "runs.get_input"
 	CapRunsReplay        = "runs.replay"          // dicode.runs.replay — re-fire a persisted run
 	CapTasksTest         = "tasks.test"           // dicode.tasks.test — run a task's sibling test file

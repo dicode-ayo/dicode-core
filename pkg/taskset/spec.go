@@ -141,6 +141,8 @@ type Overrides struct {
 	// Env accepts full EnvEntry mappings (name/secret/from/value/optional) or bare "KEY" / "KEY=value" strings.
 	Env     []task.EnvEntry         `yaml:"env,omitempty"`
 	Net     []string                `yaml:"net,omitempty"` // replaces permissions.net
+	// Fs replaces permissions.fs entirely (matches Net's full-replace pattern).
+	Fs []task.FSEntry `yaml:"fs,omitempty"`
 	Timeout time.Duration           `yaml:"timeout,omitempty"`
 	Retry   *RetryConfig            `yaml:"retry,omitempty"`
 	Runtime string                  `yaml:"runtime,omitempty"`

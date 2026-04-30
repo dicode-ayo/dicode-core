@@ -294,6 +294,13 @@ type DicodePermissions struct {
 	// RunsReplay enables dicode.runs.replay() — re-fires a previously
 	// persisted run with its stored input.
 	RunsReplay bool `yaml:"runs_replay,omitempty" json:"runs_replay,omitempty"`
+	// RunsGetInput enables dicode.runs.get_input() — read another task's
+	// persisted run input. Sensitive: grants cross-task input access.
+	// Persisted inputs are redacted at write time (see #233's deny-list),
+	// so the surface is bounded but still grants visibility into anything
+	// not on the deny-list. Grant only to tasks that legitimately need to
+	// inspect failed runs (auto-fix, audit, replay-tooling).
+	RunsGetInput bool `yaml:"runs_get_input,omitempty" json:"runs_get_input,omitempty"`
 	// TasksTest enables dicode.tasks.test() — runs a task's sibling test file
 	// via pkg/tasktest.
 	TasksTest bool `yaml:"tasks_test,omitempty" json:"tasks_test,omitempty"`

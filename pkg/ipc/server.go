@@ -274,6 +274,9 @@ func (s *Server) Start(ctx context.Context) (socketPath, token string, err error
 		if dp.RunsReplay {
 			caps = append(caps, CapRunsReplay)
 		}
+		if dp.RunsGetInput {
+			caps = append(caps, CapRunsGetInput)
+		}
 		if dp.TasksTest {
 			caps = append(caps, CapTasksTest)
 		}

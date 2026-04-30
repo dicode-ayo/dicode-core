@@ -1367,24 +1367,20 @@ func TestServer_SecretOutputRejectsNestedMap(t *testing.T) {
 	}
 }
 
-// TestCapRunsGetInput_NotGrantedFromYAML verifies Finding 3 (security):
-// A task.Spec that previously declared permissions.dicode.runs_get_input:true
-// in its YAML must NOT receive CapRunsGetInput during the IPC handshake. The
-// field has been removed from DicodePermissions; this test confirms the
-// cap-derivation path no longer has a YAML opt-in vector for runs.get_input.
-//
-// CapRunsGetInput is reserved for programmatic grant only (e.g., the
-// buildin/auto-fix preset in #238). Allowing any task source to self-grant
-// this capability would expose decrypted cross-task input access.
-func TestCapRunsGetInput_NotGrantedFromYAML(t *testing.T) {
+// TestCapRunsGetInput_GrantedFromYAML verifies that a task whose YAML sets
+// permissions.dicode.runs_get_input: true DOES receive CapRunsGetInput during
+// the IPC handshake. RunsGetInput is now YAML-grantable — the redaction layer
+// from #233 bounds the surface, so there is no need to gate it behind a
+// programmatic-only grant. Users can build their own replayer / fixer / auditor
+// tasks without depending on the buildin auto-fix preset.
+func TestCapRunsGetInput_GrantedFromYAML(t *testing.T) {
 	e := newTestEnv(t)
 
-	// Build a spec with every dicode permission enabled, including a
-	// hypothetical runs_get_input (the field was removed from
-	// DicodePermissions, so we can only set the remaining ones).
+	// Build a spec with runs_get_input: true in the YAML-parsed permissions.
 	spec := &task.Spec{
 		Permissions: task.Permissions{
 			Dicode: &task.DicodePermissions{
+				RunsGetInput:    true,
 				RunsListExpired: true,
 				RunsDeleteInput: true,
 				RunsPinInput:    true,
@@ -1411,10 +1407,14 @@ func TestCapRunsGetInput_NotGrantedFromYAML(t *testing.T) {
 	t.Cleanup(func() { conn2.Close() })
 	caps := doHandshake(t, conn2, token)
 
+	found := false
 	for _, c := range caps {
 		if c == CapRunsGetInput {
-			t.Errorf("CapRunsGetInput granted via YAML spec — security regression; caps = %v", caps)
+			found = true
 		}
+	}
+	if !found {
+		t.Errorf("CapRunsGetInput not granted via YAML; caps = %v", caps)
 	}
 
 	// Sanity: the other caps must be present so we know the derivation ran.
