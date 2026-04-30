@@ -42,6 +42,62 @@ echo "https://github.com/example/repo/pull/123"
     }
 });
 
+Deno.test("git-pr: rejects path-traversal source_id", async () => {
+    Deno.env.set("GH_TOKEN", "stub-token");
+    Deno.env.set("DICODE_DATA_DIR", await Deno.makeTempDir());
+    const result = await main({
+        params: new Map(Object.entries({
+            source_id: "../../etc",
+            branch: "fix/abc",
+            base: "main",
+            title: "x",
+            body: "",
+        })),
+    } as any);
+    assertEquals(result.ok, false);
+    if (!String(result.error ?? "").includes("invalid characters")) {
+        throw new Error(`expected invalid-characters error, got ${result.error}`);
+    }
+});
+
+Deno.test("git-pr: refuses to run without GH_TOKEN", async () => {
+    Deno.env.delete("GH_TOKEN");
+    Deno.env.set("DICODE_DATA_DIR", await Deno.makeTempDir());
+    const result = await main({
+        params: new Map(Object.entries({
+            source_id: "user-tasks",
+            branch: "fix/abc",
+            base: "main",
+            title: "x",
+            body: "",
+        })),
+    } as any);
+    assertEquals(result.ok, false);
+    if (!String(result.error ?? "").includes("GH_TOKEN")) {
+        throw new Error(`expected GH_TOKEN error, got ${result.error}`);
+    }
+});
+
+Deno.test("git-pr: rejects clone_path outside dev-clones", async () => {
+    Deno.env.set("GH_TOKEN", "stub-token");
+    const dataDir = await Deno.makeTempDir();
+    Deno.env.set("DICODE_DATA_DIR", dataDir);
+    const result = await main({
+        params: new Map(Object.entries({
+            source_id: "user-tasks",
+            branch: "fix/abc",
+            base: "main",
+            title: "x",
+            body: "",
+            clone_path: "/etc/passwd",
+        })),
+    } as any);
+    assertEquals(result.ok, false);
+    if (!String(result.error ?? "").includes("clone_path must be rooted")) {
+        throw new Error(`expected clone_path-rooted error, got ${result.error}`);
+    }
+});
+
 Deno.test("git-pr: returns ok=false when gh fails", async () => {
     const tmp = await Deno.makeTempDir();
     const ghPath = `${tmp}/gh`;

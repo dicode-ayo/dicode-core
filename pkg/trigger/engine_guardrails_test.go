@@ -80,7 +80,7 @@ func TestChainGuards_StormTrip(t *testing.T) {
 
 	now := time.Now()
 	for i := 0; i < 3; i++ {
-		if g.stormSuppressed(scope, suppress, now) {
+		if g.stormSuppressed(scope, now) {
 			t.Fatalf("breaker tripped early at i=%d", i)
 		}
 		g.observeChainFire(scope, rate, window, suppress, now)
@@ -88,18 +88,18 @@ func TestChainGuards_StormTrip(t *testing.T) {
 
 	// 4th observation in the window trips the breaker.
 	g.observeChainFire(scope, rate, window, suppress, now)
-	if !g.stormSuppressed(scope, suppress, now) {
+	if !g.stormSuppressed(scope, now) {
 		t.Error("breaker should be tripped after 4 fires in window")
 	}
 
 	// 31 minutes later: untripped.
 	later := now.Add(31 * time.Minute)
-	if g.stormSuppressed(scope, suppress, later) {
+	if g.stormSuppressed(scope, later) {
 		t.Error("breaker should clear after suppress duration")
 	}
 
 	// Different scope: independent.
-	if g.stormSuppressed("other-source", suppress, now) {
+	if g.stormSuppressed("other-source", now) {
 		t.Error("storm scope should isolate sources")
 	}
 }

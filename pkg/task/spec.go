@@ -479,6 +479,10 @@ func (s *Spec) Script() (string, error) {
 }
 
 func (s *Spec) validate() error {
+	// Clear stale warnings so re-validation (e.g. on a reloaded spec) starts
+	// from a clean slate; otherwise warnings accumulate across validate
+	// calls.
+	s.Warnings = nil
 	if s.Name == "" {
 		return fmt.Errorf("name is required")
 	}

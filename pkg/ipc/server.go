@@ -804,9 +804,13 @@ func (s *Server) handleConn(conn net.Conn) {
 			reply(req.ID, map[string]any{"ok": true}, "")
 
 		case "dicode.runs.get_input":
-			// Internal-only: gated behind CapRunsGetInput which is not granted
-			// to any task today. Wired now so #234's auto-fix driver can use it
-			// once the capability is granted to that task.
+			// Granted via permissions.dicode.runs_get_input. Subject to a
+			// caller-scope ownership check (#246) symmetric to
+			// dicode.runs.replay: a task may read a run's input only when
+			// (a) the run belongs to the caller's task, OR (b) the caller's
+			// own run was fired with parent_run_id == requested run id —
+			// the auto-fix lineage where a chain-fired task reads its
+			// failed parent.
 			if !hasCap(caps, CapRunsGetInput) {
 				reply(req.ID, nil, "ipc: permission denied (runs.get_input)")
 				continue
@@ -827,6 +831,20 @@ func (s *Server) handleConn(conn net.Conn) {
 			if run.InputStorageKey == "" {
 				reply(req.ID, nil, "ipc: no persisted input for run "+req.RunID)
 				continue
+			}
+			// Ownership / lineage check.
+			if s.taskID != "" {
+				ownsRun := run.TaskID == s.taskID
+				lineageOK := false
+				if !ownsRun && s.runID != "" {
+					if callerRun, cerr := s.registry.GetRun(s.ctx, s.runID); cerr == nil {
+						lineageOK = callerRun.ParentRunID == req.RunID
+					}
+				}
+				if !ownsRun && !lineageOK {
+					reply(req.ID, nil, "ipc: caller task may not read this run's input")
+					continue
+				}
 			}
 			fetched, err := s.inputStore.Fetch(s.ctx, req.RunID, run.InputStorageKey, run.InputStoredAt)
 			if err != nil {

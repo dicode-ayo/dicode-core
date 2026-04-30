@@ -120,7 +120,10 @@ func (g *chainGuards) observeChainFire(scope string, rate int, window, suppress 
 	}
 }
 
-func (g *chainGuards) stormSuppressed(scope string, _ time.Duration, now time.Time) bool {
+// stormSuppressed reports whether scope is in a tripped-breaker suppression
+// window. The suppress duration was applied when the breaker tripped (in
+// observeChainFire); this query just reads the cached deadline.
+func (g *chainGuards) stormSuppressed(scope string, now time.Time) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	until, ok := g.stormSuppressedUntil[scope]

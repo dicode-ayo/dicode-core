@@ -41,7 +41,9 @@ and replay, and either push to main (autonomous) or open a PR (review).
 5. **Commit + push.**
    - `dicode.git.commit_push(<source>, { message, branch: <fixBranch> })`.
 6. **Open the PR (review mode only).**
-   - `dicode.run_task("git-pr", { source_id, branch: fixBranch, base, title, body })`.
+   - `dicode.run_task("git-pr", { source_id, branch: fixBranch, base, title, body, clone_path: <path you cloned into> })`.
+   - Pass `clone_path` explicitly — the legacy first-readDir fallback in
+     `git-pr` is brittle when prior runs left orphan clone directories.
    - Body must mention any redacted_fields you saw — reviewers need that signal.
 7. **Disable dev mode.**
    - `dicode.sources.set_dev_mode(<source>, { enabled: false })` — engine

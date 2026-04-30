@@ -11,11 +11,16 @@ trigger:
   manual: true
 
 params:
-  source_id: { type: string, required: true }
-  branch:    { type: string, required: true }
-  base:      { type: string, default: "main" }
-  title:     { type: string, required: true }
-  body:      { type: string, default: "" }
+  source_id:  { type: string, required: true }
+  branch:     { type: string, required: true }
+  base:       { type: string, default: "main" }
+  title:      { type: string, required: true }
+  body:       { type: string, default: "" }
+  # clone_path is the explicit working directory inside ${DATADIR}/dev-clones/<source_id>/
+  # that the caller (typically the auto-fix skill) wants gh invoked in. Strongly
+  # recommended — the legacy first-readDir fallback is brittle when previous
+  # runs left orphan clones.
+  clone_path: { type: string, default: "" }
 
 permissions:
   run: ["gh"]

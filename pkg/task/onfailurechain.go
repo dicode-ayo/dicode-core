@@ -149,8 +149,8 @@ func (s OnFailureChainSpec) ValidateAtDefaults() error {
 	// Use a pointer receiver call on a local copy to avoid mutating the caller's
 	// value; at the defaults site stripping is not needed, but we still need the
 	// reserved-key check.
-	copy := s
-	if _, err := copy.Validate(); err != nil {
+	scratch := s
+	if _, err := scratch.Validate(); err != nil {
 		return err
 	}
 	if mode, ok := s.Params["mode"].(string); ok && mode == "autonomous" {

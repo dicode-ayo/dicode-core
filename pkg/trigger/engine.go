@@ -868,7 +868,7 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 
 				// 1. Storm check — per-source namespace.
 				scope := stormScope(completedTaskID)
-				if e.guards.stormSuppressed(scope, chainSpec.Storm.Suppress, now) {
+				if e.guards.stormSuppressed(scope, now) {
 					e.log.Warn("on_failure_chain suppressed: storm circuit breaker tripped",
 						zap.String("scope", scope),
 						zap.String("from", completedTaskID),
@@ -904,11 +904,6 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 					return
 				}
 
-				// 4. Record this fire (cooldown + storm).
-				e.guards.recordChainFire(completedTaskID, now)
-				e.guards.observeChainFire(scope, chainSpec.Storm.Rate, chainSpec.Storm.Window,
-					chainSpec.Storm.Suppress, now)
-
 				e.log.Info("on_failure_chain trigger",
 					zap.String("from", completedTaskID),
 					zap.String("to", targetID),
@@ -926,18 +921,48 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 				for k, v := range chainSpec.Params {
 					input[k] = v
 				}
+				// Auto-fix safety default: when the chain target is the
+				// buildin auto-fix preset, force mode=review unless the
+				// operator explicitly set it. Autonomous-by-default would
+				// be a foot-gun (the agent could push directly to main
+				// without human review).
+				if targetID == "buildin/auto-fix" {
+					if _, ok := input["mode"]; !ok {
+						input["mode"] = "review"
+					}
+				}
 				input["taskID"] = completedTaskID
 				input["runID"] = runID
 				input["status"] = runStatus
 				input["output"] = output
 				input["_chain_depth"] = nextDepth
-				// Slot is held until the chained run terminates.
-				// Released in startRun's cleanup via ChainParentTask.
-				go e.fireAsync(ctx, targetSpec, pkgruntime.RunOptions{ //nolint:errcheck
+
+				// Synchronously invoke fireAsync — it returns once startRun
+				// completes, then continues the run on its own goroutine.
+				// Doing this sync (rather than `go fireAsync(...)`) lets us
+				// release the chainGuards slot if startRun fails and avoids
+				// recording cooldown / storm counters for runs that never
+				// executed (false-trip risk under DB flapping).
+				if _, err := e.fireAsync(ctx, targetSpec, pkgruntime.RunOptions{
 					ParentRunID:     runID,
 					Input:           input,
 					ChainParentTask: completedTaskID,
-				}, registry.TriggerChain)
+				}, registry.TriggerChain); err != nil {
+					e.guards.releaseSlot(completedTaskID)
+					e.log.Error("on_failure_chain fireAsync failed; released slot",
+						zap.String("from", completedTaskID),
+						zap.String("to", targetID),
+						zap.Error(err),
+					)
+					return
+				}
+
+				// startRun succeeded. Record cooldown timestamp and storm
+				// fire — both delayed until here so a failed startRun cannot
+				// false-trip the storm breaker or extend the cooldown.
+				e.guards.recordChainFire(completedTaskID, now)
+				e.guards.observeChainFire(scope, chainSpec.Storm.Rate, chainSpec.Storm.Window,
+					chainSpec.Storm.Suppress, now)
 			}
 		}
 	}
@@ -1928,13 +1953,19 @@ func (e *Engine) dispatch(ctx context.Context, spec *task.Spec, opts pkgruntime.
 	return status, result
 }
 
-// stormScope returns the namespace prefix used for per-source storm tracking:
-// everything before the last '/' in taskID, or "global" if there is no slash.
+// stormScope returns the namespace used for per-source storm tracking:
+// everything before the last '/' in taskID, OR taskID itself for a flat
+// (no-slash) task. Flat tasks get their own per-task scope so a single
+// flapping flat task cannot suppress on_failure_chain for unrelated
+// flat tasks under a shared "global" scope.
 func stormScope(taskID string) string {
 	if i := strings.LastIndex(taskID, "/"); i > 0 {
 		return taskID[:i]
 	}
-	return "global"
+	if taskID == "" {
+		return "global"
+	}
+	return taskID
 }
 
 // effectiveCooldown returns the configured cooldown or 10 minutes when zero.
