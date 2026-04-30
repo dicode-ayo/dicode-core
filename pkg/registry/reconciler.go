@@ -161,6 +161,13 @@ func (rc *Reconciler) handle(ev source.Event) {
 				return
 			}
 		}
+		for _, w := range spec.Warnings {
+			rc.log.Warn("task config warning",
+				zap.String("task", ev.TaskID),
+				zap.String("source", ev.Source),
+				zap.String("warning", w),
+			)
+		}
 		if err := rc.validateTaskProviders(spec); err != nil {
 			rc.log.Warn("task references unknown provider",
 				zap.String("task", ev.TaskID),

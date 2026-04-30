@@ -201,6 +201,37 @@ func TestEngine_OnFailureChain_EmptyStringDisablesDefault(t *testing.T) {
 	}
 }
 
+// TestEngine_ChainSuppression_UsesTypedReplaySource verifies that a failing run
+// fired with TriggerSource = replay does NOT trigger on_failure_chain. This is
+// a regression guard for the typed-enum migration (Task 2 of #238).
+func TestEngine_ChainSuppression_UsesTypedReplaySource(t *testing.T) {
+	dir := t.TempDir()
+	e := newTestEnv(t)
+
+	fallback := writeTask(t, dir, "fallback", `export default async () => "ok"`, task.TriggerConfig{Manual: true})
+	failing := writeTask(t, dir, "fail", `throw new Error("boom")`, task.TriggerConfig{Manual: true})
+	_ = e.reg.Register(fallback)
+	_ = e.reg.Register(failing)
+
+	if err := e.engine.SetDefaultsOnFailureChain(task.OnFailureChainSpec{Task: "fallback"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Fire the failing task with TriggerSource = replay; assert no chain fires.
+	runner := NewReplayRunner(e.engine)
+	replayedRunID, err := runner.FireForReplay(context.Background(), "fail", "parent-run", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForTerminal(t, e.engine, replayedRunID, 30*time.Second)
+
+	time.Sleep(2 * time.Second)
+	runs, _ := e.reg.ListRuns(context.Background(), "fallback", 5)
+	if len(runs) > 0 {
+		t.Errorf("fallback should not fire when source=replay; got %d runs", len(runs))
+	}
+}
+
 // TestEngine_OnFailureChain_NoLoopSelfReference verifies the engine refuses
 // to chain a task to itself on failure (infinite-loop guard in FireChain:
 // `targetID != completedTaskID`).
@@ -234,5 +265,74 @@ func TestEngine_OnFailureChain_NoLoopSelfReference(t *testing.T) {
 			ids = append(ids, r.ID)
 		}
 		t.Errorf("self-loop produced %d runs (want 1): %s", len(runs), strings.Join(ids, ", "))
+	}
+}
+
+// TestEngine_ChainDepth_StopsAtCeiling verifies that on_failure_chain hops are
+// capped at EffectiveMaxDepth() (default 2). A → B → A loop with always-failing
+// tasks must produce at most 2 runs of task-b before the ceiling halts the chain.
+func TestEngine_ChainDepth_StopsAtCeiling(t *testing.T) {
+	dir := t.TempDir()
+	e := newTestEnv(t)
+
+	// Create a chain B → A with always-fail tasks. With max_depth=2, the third
+	// link must be suppressed.
+	a := writeTask(t, dir, "task-a",
+		`export default async () => { throw new Error("a-fail") }`,
+		task.TriggerConfig{Manual: true})
+	a.OnFailureChain = &task.OnFailureChainSpec{Task: "task-b"}
+	_ = e.reg.Register(a)
+
+	b := writeTask(t, dir, "task-b",
+		`export default async () => { throw new Error("b-fail") }`,
+		task.TriggerConfig{Manual: true})
+	b.OnFailureChain = &task.OnFailureChainSpec{Task: "task-a"} // would re-loop without the ceiling
+	_ = e.reg.Register(b)
+
+	runID, err := e.engine.FireManual(context.Background(), "task-a", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForTerminal(t, e.engine, runID, 30*time.Second)
+
+	// Wait for the chain to settle; with depth ceiling=2, we expect at most
+	// 2 distinct runs of task-b and 1 of task-a (the original).
+	time.Sleep(3 * time.Second)
+	bRuns, _ := e.reg.ListRuns(context.Background(), "task-b", 10)
+	if len(bRuns) > 2 {
+		t.Errorf("max_depth=2 violated: task-b fired %d times", len(bRuns))
+	}
+}
+
+func TestEngine_OnFailureChain_CooldownSuppressesSecondFire(t *testing.T) {
+	dir := t.TempDir()
+	e := newTestEnv(t)
+
+	fallback := writeTask(t, dir, "fb-cool", `export default async () => "ok"`, task.TriggerConfig{Manual: true})
+	failing := writeTask(t, dir, "f-cool", `throw new Error("fail")`, task.TriggerConfig{Manual: true})
+	_ = e.reg.Register(fallback)
+	_ = e.reg.Register(failing)
+
+	if err := e.engine.SetDefaultsOnFailureChain(task.OnFailureChainSpec{
+		Task: "fb-cool", Cooldown: 10 * time.Minute,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Fire #1: fallback runs.
+	r1, _ := e.engine.FireManual(context.Background(), "f-cool", nil)
+	waitForTerminal(t, e.engine, r1, 30*time.Second)
+	first := waitForRunOfTask(t, e.engine, "fb-cool", 15*time.Second)
+	if first == nil {
+		t.Fatal("first fallback should have fired")
+	}
+
+	// Fire #2: should be suppressed.
+	r2, _ := e.engine.FireManual(context.Background(), "f-cool", nil)
+	waitForTerminal(t, e.engine, r2, 30*time.Second)
+	time.Sleep(2 * time.Second)
+	runs, _ := e.reg.ListRuns(context.Background(), "fb-cool", 10)
+	if len(runs) != 1 {
+		t.Errorf("cooldown should suppress 2nd fire; got %d fb-cool runs", len(runs))
 	}
 }

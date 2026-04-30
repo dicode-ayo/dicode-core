@@ -36,6 +36,9 @@ func applyLayer(spec *task.Spec, o *Overrides) {
 	if len(o.Net) > 0 {
 		spec.Permissions.Net = o.Net
 	}
+	if len(o.Fs) > 0 {
+		spec.Permissions.FS = o.Fs
+	}
 	if o.Dicode != nil {
 		spec.Permissions.Dicode = mergeDicodePerms(spec.Permissions.Dicode, o.Dicode)
 	}
@@ -150,6 +153,8 @@ func mergeEnvEntries(base, overlay []task.EnvEntry) []task.EnvEntry {
 }
 
 // mergeDicodePerms merges overlay on top of base, with overlay winning non-zero fields.
+// Tasks is merged via union (preserving order, deduping) so an override can append
+// entries without clobbering the base list.
 func mergeDicodePerms(base, overlay *task.DicodePermissions) *task.DicodePermissions {
 	if overlay == nil {
 		return base
@@ -160,7 +165,17 @@ func mergeDicodePerms(base, overlay *task.DicodePermissions) *task.DicodePermiss
 	}
 	out := *base
 	if len(overlay.Tasks) > 0 {
-		out.Tasks = overlay.Tasks
+		// UNION (was full-replace) — append unique entries from overlay.
+		existing := make(map[string]struct{}, len(out.Tasks))
+		for _, t := range out.Tasks {
+			existing[t] = struct{}{}
+		}
+		for _, t := range overlay.Tasks {
+			if _, ok := existing[t]; !ok {
+				out.Tasks = append(out.Tasks, t)
+				existing[t] = struct{}{}
+			}
+		}
 	}
 	if len(overlay.MCP) > 0 {
 		out.MCP = overlay.MCP
@@ -173,6 +188,42 @@ func mergeDicodePerms(base, overlay *task.DicodePermissions) *task.DicodePermiss
 	}
 	if overlay.SecretsWrite {
 		out.SecretsWrite = true
+	}
+	if overlay.OAuthInit {
+		out.OAuthInit = true
+	}
+	if overlay.OAuthStore {
+		out.OAuthStore = true
+	}
+	if overlay.OAuthStatus {
+		out.OAuthStatus = true
+	}
+	if overlay.RunsListExpired {
+		out.RunsListExpired = true
+	}
+	if overlay.RunsDeleteInput {
+		out.RunsDeleteInput = true
+	}
+	if overlay.RunsPinInput {
+		out.RunsPinInput = true
+	}
+	if overlay.RunsUnpinInput {
+		out.RunsUnpinInput = true
+	}
+	if overlay.RunsReplay {
+		out.RunsReplay = true
+	}
+	if overlay.RunsGetInput {
+		out.RunsGetInput = true
+	}
+	if overlay.TasksTest {
+		out.TasksTest = true
+	}
+	if overlay.SourcesSetDevMode {
+		out.SourcesSetDevMode = true
+	}
+	if overlay.GitCommitPush {
+		out.GitCommitPush = true
 	}
 	return &out
 }

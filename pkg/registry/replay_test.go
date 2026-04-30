@@ -59,7 +59,7 @@ func TestReplay_FetchesInputAndFires(t *testing.T) {
 	runner := &fakeReplayRunner{}
 	replayer := NewReplayer(r, is, runner)
 
-	newRunID, err := replayer.Replay(ctx, originalRunID, "")
+	newRunID, err := replayer.Replay(ctx, originalRunID, "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +107,7 @@ func TestReplay_TaskNameOverride(t *testing.T) {
 	runner := &fakeReplayRunner{}
 	replayer := NewReplayer(r, is, runner)
 
-	if _, err := replayer.Replay(ctx, originalRunID, "different-task"); err != nil {
+	if _, err := replayer.Replay(ctx, originalRunID, "different-task", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if runner.calls[0].taskID != "different-task" {
@@ -131,7 +131,7 @@ func TestReplay_NoStoredInput_ReturnsErrInputUnavailable(t *testing.T) {
 	runner := &fakeReplayRunner{}
 	replayer := NewReplayer(r, is, runner)
 
-	_, err := replayer.Replay(ctx, originalRunID, "")
+	_, err := replayer.Replay(ctx, originalRunID, "", "", "")
 	if !errors.Is(err, ErrInputUnavailable) {
 		t.Errorf("got %v, want ErrInputUnavailable", err)
 	}
@@ -145,7 +145,7 @@ func TestReplay_RunNotFound(t *testing.T) {
 	runner := &fakeReplayRunner{}
 	replayer := NewReplayer(r, is, runner)
 
-	_, err := replayer.Replay(ctx, uuid.New().String(), "")
+	_, err := replayer.Replay(ctx, uuid.New().String(), "", "", "")
 	if err == nil {
 		t.Error("expected error for unknown run ID")
 	}

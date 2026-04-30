@@ -294,6 +294,13 @@ type DicodePermissions struct {
 	// RunsReplay enables dicode.runs.replay() — re-fires a previously
 	// persisted run with its stored input.
 	RunsReplay bool `yaml:"runs_replay,omitempty" json:"runs_replay,omitempty"`
+	// RunsGetInput enables dicode.runs.get_input() — read another task's
+	// persisted run input. Sensitive: grants cross-task input access.
+	// Persisted inputs are redacted at write time (see #233's deny-list),
+	// so the surface is bounded but still grants visibility into anything
+	// not on the deny-list. Grant only to tasks that legitimately need to
+	// inspect failed runs (auto-fix, audit, replay-tooling).
+	RunsGetInput bool `yaml:"runs_get_input,omitempty" json:"runs_get_input,omitempty"`
 	// TasksTest enables dicode.tasks.test() — runs a task's sibling test file
 	// via pkg/tasktest.
 	TasksTest bool `yaml:"tasks_test,omitempty" json:"tasks_test,omitempty"`
@@ -353,6 +360,10 @@ type Spec struct {
 	TaskDir string `yaml:"-" json:"-"`
 	// ID is derived from the directory name (not stored in YAML).
 	ID string `yaml:"-" json:"id"`
+	// Warnings holds non-fatal config-load warnings emitted during validate().
+	// Callers (reconciler, taskset resolver) should log these via their zap
+	// logger after LoadDir / LoadDirWithVars returns.
+	Warnings []string `yaml:"-" json:"-"`
 }
 
 // RunInputsTaskOverride is the per-task override for run-input persistence.
@@ -468,6 +479,10 @@ func (s *Spec) Script() (string, error) {
 }
 
 func (s *Spec) validate() error {
+	// Clear stale warnings so re-validation (e.g. on a reloaded spec) starts
+	// from a clean slate; otherwise warnings accumulate across validate
+	// calls.
+	s.Warnings = nil
 	if s.Name == "" {
 		return fmt.Errorf("name is required")
 	}
@@ -509,9 +524,11 @@ func (s *Spec) validate() error {
 		return fmt.Errorf("only one trigger type is allowed per task")
 	}
 	if s.OnFailureChain != nil {
-		if err := s.OnFailureChain.Validate(); err != nil {
+		warns, err := s.OnFailureChain.Validate()
+		if err != nil {
 			return fmt.Errorf("on_failure_chain: %w", err)
 		}
+		s.Warnings = append(s.Warnings, warns...)
 	}
 	switch s.Runtime {
 	case RuntimeDeno, "js", "":

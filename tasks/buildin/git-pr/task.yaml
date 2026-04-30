@@ -1,0 +1,41 @@
+apiVersion: dicode/v1
+kind: Task
+name: "Open Pull Request (GitHub)"
+description: |
+  Reference git-pr implementation. Opens a pull request via `gh pr create`
+  in the dev-clone for the given source. Replaceable: users may install
+  their own task and point auto-fix at it via params.pr_task.
+runtime: deno
+
+trigger:
+  manual: true
+
+params:
+  source_id:  { type: string, required: true }
+  branch:     { type: string, required: true }
+  base:       { type: string, default: "main" }
+  title:      { type: string, required: true }
+  body:       { type: string, default: "" }
+  # clone_path is the explicit working directory inside ${DATADIR}/dev-clones/<source_id>/
+  # that the caller (typically the auto-fix skill) wants gh invoked in. Strongly
+  # recommended — the legacy first-readDir fallback is brittle when previous
+  # runs left orphan clones.
+  clone_path: { type: string, default: "" }
+
+permissions:
+  run: ["gh"]
+  env:
+    - name: GH_TOKEN
+      from: GH_TOKEN_AUTOFIX
+    - name: DICODE_DATA_DIR
+      from: DICODE_DATA_DIR
+    - HOME
+  fs:
+    - path: "${DATADIR}/dev-clones"
+      permission: r
+
+timeout: 60s
+
+notify:
+  on_success: false
+  on_failure: true

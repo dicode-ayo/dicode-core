@@ -34,7 +34,7 @@ type Run struct {
 	StartedAt     time.Time
 	FinishedAt    *time.Time
 	ParentRunID   string
-	TriggerSource string
+	TriggerSource TriggerSource
 	ReturnValue   string // JSON-encoded return value; empty if none
 
 	// Structured output produced by output.html() / output.text().
@@ -256,14 +256,16 @@ func (r *Registry) GetRun(ctx context.Context, runID string) (*Run, error) {
 				var finishedMs *int64
 				var parentID *string
 				var redactedFieldsJSON string
+				var tsStr string
 				if err := rows.Scan(
 					&run.ID, &run.TaskID, &run.Status, &startedMs, &finishedMs, &parentID,
-					&run.TriggerSource, &run.ReturnValue, &run.OutputContentType, &run.OutputContent,
+					&tsStr, &run.ReturnValue, &run.OutputContentType, &run.OutputContent,
 					&run.FailureReason,
 					&run.InputStorageKey, &run.InputSize, &run.InputStoredAt, &redactedFieldsJSON, &run.InputPinned,
 				); err != nil {
 					return err
 				}
+				run.TriggerSource = TriggerSource(tsStr)
 				run.StartedAt = time.UnixMilli(startedMs)
 				if finishedMs != nil {
 					t := time.UnixMilli(*finishedMs)
@@ -321,9 +323,11 @@ func (r *Registry) ListRuns(ctx context.Context, taskID string, limit int) ([]*R
 				var startedMs int64
 				var finishedMs *int64
 				var parentID *string
-				if err := rows.Scan(&run.ID, &run.TaskID, &run.Status, &startedMs, &finishedMs, &parentID, &run.TriggerSource, &run.ReturnValue, &run.OutputContentType, &run.OutputContent, &run.FailureReason); err != nil {
+				var tsStr string
+				if err := rows.Scan(&run.ID, &run.TaskID, &run.Status, &startedMs, &finishedMs, &parentID, &tsStr, &run.ReturnValue, &run.OutputContentType, &run.OutputContent, &run.FailureReason); err != nil {
 					return err
 				}
+				run.TriggerSource = TriggerSource(tsStr)
 				run.StartedAt = time.UnixMilli(startedMs)
 				if finishedMs != nil {
 					t := time.UnixMilli(*finishedMs)

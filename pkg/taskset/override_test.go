@@ -1,6 +1,8 @@
 package taskset
 
 import (
+	"reflect"
+	"sort"
 	"testing"
 	"time"
 
@@ -356,6 +358,69 @@ func TestDefaultsToOverrides_Fields(t *testing.T) {
 	}
 	if o.Enabled != nil {
 		t.Error("enabled should not be set from defaults")
+	}
+}
+
+// ── applyOverrides: FS / Tasks union / new bool flags ────────────────────────
+
+func TestApplyOverrides_FSReplace(t *testing.T) {
+	base := &task.Spec{
+		Permissions: task.Permissions{
+			FS: []task.FSEntry{{Path: "/base/path", Permission: "r"}},
+		},
+	}
+	overlay := &Overrides{
+		Fs: []task.FSEntry{{Path: "/clones", Permission: "rw"}},
+	}
+	out := applyOverrides(base, overlay)
+	want := []task.FSEntry{{Path: "/clones", Permission: "rw"}}
+	if !reflect.DeepEqual(out.Permissions.FS, want) {
+		t.Errorf("Fs override: got %+v, want %+v", out.Permissions.FS, want)
+	}
+}
+
+func TestApplyOverrides_DicodeTasksUnion(t *testing.T) {
+	base := &task.Spec{
+		Permissions: task.Permissions{
+			Dicode: &task.DicodePermissions{
+				Tasks: []string{"task-a", "task-b"},
+			},
+		},
+	}
+	overlay := &Overrides{
+		Dicode: &task.DicodePermissions{
+			Tasks: []string{"git-pr", "task-b"}, // task-b duplicate; git-pr is new
+		},
+	}
+	out := applyOverrides(base, overlay)
+	got := out.Permissions.Dicode.Tasks
+	sort.Strings(got)
+	want := []string{"git-pr", "task-a", "task-b"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Tasks union: got %+v, want %+v", got, want)
+	}
+}
+
+func TestApplyOverrides_DicodeNewBoolFlags(t *testing.T) {
+	base := &task.Spec{Permissions: task.Permissions{Dicode: &task.DicodePermissions{}}}
+	overlay := &Overrides{
+		Dicode: &task.DicodePermissions{
+			RunsReplay: true, RunsGetInput: true, TasksTest: true, SourcesSetDevMode: true,
+			GitCommitPush: true, RunsPinInput: true, RunsUnpinInput: true,
+			RunsListExpired: true, RunsDeleteInput: true,
+		},
+	}
+	out := applyOverrides(base, overlay)
+	d := out.Permissions.Dicode
+	for name, v := range map[string]bool{
+		"RunsReplay": d.RunsReplay, "RunsGetInput": d.RunsGetInput, "TasksTest": d.TasksTest,
+		"SourcesSetDevMode": d.SourcesSetDevMode, "GitCommitPush": d.GitCommitPush,
+		"RunsPinInput": d.RunsPinInput, "RunsUnpinInput": d.RunsUnpinInput,
+		"RunsListExpired": d.RunsListExpired, "RunsDeleteInput": d.RunsDeleteInput,
+	} {
+		if !v {
+			t.Errorf("flag %s not propagated by override", name)
+		}
 	}
 }
 

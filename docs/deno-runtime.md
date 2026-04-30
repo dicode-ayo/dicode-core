@@ -289,25 +289,89 @@ while (true) {
 A task can declare a failure handler that runs automatically when it fails:
 
 ```yaml
-on_failure_chain: failure-monitor   # override for this task
+on_failure_chain: failure-monitor   # short form — override for this task
 # on_failure_chain: ""              # disable global default for this task
 ```
 
-A global default can be set in `dicode.yaml`:
+The structured form accepts engine guardrails and chain params:
+
+```yaml
+on_failure_chain:
+  task: buildin/auto-fix
+  params:                           # forwarded into the chained run's input
+    mode: review                    # auto-fix preset: "review" (open PR) | "autonomous" (push)
+    branch_prefix: "fix/"
+  cooldown: 10m                     # min interval between two chain fires for this task; default 10m
+  max_concurrent: 1                 # in-flight chain runs per failing task; default 1
+  max_depth: 2                      # chain hops before suppression; default 2
+```
+
+A global default lives in `dicode.yaml`:
 
 ```yaml
 defaults:
-  on_failure_chain: failure-monitor
+  on_failure_chain:
+    task: failure-monitor
+    max_concurrent_global: 3        # ceiling across ALL tasks; defaults-only
+    storm:                          # circuit-breaker — defaults-only
+      rate: 10                      # if > rate fires
+      window: 1m                    # within window
+      suppress: 30m                 # suppress that source for this duration
 ```
+
+`max_concurrent_global` and `storm` are **operator policy** — only honored at the defaults level. Per-task blocks that set them get a config-load WARN and the fields are zeroed.
+
+Per-task `on_failure_chain` **fully replaces** the defaults block (no deep merge). To inherit + extend, restate the full structure.
 
 The failure handler receives:
 
 ```typescript
 // input to the failure handler task:
-// { taskID, runID, status, output }
-const { taskID, runID } = input
-console.log(`Task ${taskID} failed — run ${runID}`)
+// { taskID, runID, status, output, _chain_depth, ...params }
+export default async function main({ input }: any) {
+  const { taskID, runID, status, _chain_depth } = input
+  console.log(`Task ${taskID} failed (depth ${_chain_depth}) — run ${runID}`)
+}
 ```
+
+A replay-fired run that fails does NOT trigger `on_failure_chain` — replay is human/agent-initiated and has no auto-recovery semantics.
+
+---
+
+## Auto-fix loop (`buildin/auto-fix`)
+
+The `buildin/auto-fix` taskset entry is a preset that overrides `ai-agent` with the `dicode-auto-fix` skill loaded into the system prompt. When a task with `on_failure_chain: buildin/auto-fix` fails, an AI agent diagnoses the failure, edits source on a fix branch in a per-fix clone of the source repo, validates via `dicode.tasks.test` + `dicode.runs.replay`, then either pushes (autonomous) or opens a PR via `buildin/git-pr` (review).
+
+```yaml
+# tasks/my-task/task.yaml
+on_failure_chain:
+  task: buildin/auto-fix
+  params:
+    mode: review                    # default — opens a PR
+    # mode: autonomous              # alternative — pushes directly to tracked branch
+```
+
+Permissions the auto-fix task needs (set via the `buildin/auto-fix` taskset entry — users typically don't touch these):
+
+```yaml
+permissions:
+  env:
+    - GH_TOKEN_AUTOFIX              # fine-grained PAT for git-pr; contents+pull_requests scope
+  fs:
+    - path: "${DATADIR}/dev-clones"
+      permission: rw
+  dicode:
+    runs_get_input: true            # read failed run's persisted input (subject to redaction)
+    runs_replay: true
+    runs_pin_input: true
+    runs_unpin_input: true
+    sources_set_dev_mode: true      # clone the source onto a fix branch
+    tasks_test: true
+    git_commit_push: true
+    tasks: ["git-pr"]               # call buildin/git-pr to open PRs
+```
+
+`runs_get_input` is gated by a lineage check: the auto-fix run can only read inputs of runs whose ID matches its own `parent_run_id` (the failed run that fired it) OR runs of its own task. Users can grant `runs_get_input: true` to other tasks to build their own replayer / fixer / auditor — the redaction layer (deny-listed fields are never persisted) is what bounds the surface.
 
 ---
 

@@ -53,7 +53,8 @@ type Engine struct {
 
 	runCancels       sync.Map // runID → context.CancelFunc
 	runDone          sync.Map // runID (string) → chan struct{}, closed when the run reaches a terminal state
-	runTriggerSource sync.Map // runID (string) → triggerSource (string)
+	runTriggerSource sync.Map // runID (string) → triggerSource (registry.TriggerSource)
+	runChainDepth    sync.Map // runID (string) → int; _chain_depth from the run's input
 
 	shutdownMu  sync.RWMutex
 	shutdownCtx context.Context
@@ -98,6 +99,8 @@ type Engine struct {
 	// Set via SetInputStore after the daemon has initialised secrets so the
 	// derived sub-key is available.
 	inputStore *registry.InputStore
+
+	guards *chainGuards
 }
 
 // DenoRuntimeAPI is the minimal subset of *deno.Runtime the engine's
@@ -125,6 +128,7 @@ func New(r *registry.Registry, defaultExec pkgruntime.Executor, log *zap.Logger)
 		webhooks:    make(map[string]string),
 		daemonRuns:  make(map[string]string),
 		daemonSpecs: make(map[string]*task.Spec),
+		guards:      newChainGuards(),
 	}
 	e.executors[task.RuntimeDeno] = defaultExec
 	return e
@@ -330,7 +334,7 @@ func (e *Engine) Register(spec *task.Spec) {
 	}
 	e.log.Info("task registered",
 		zap.String("task", spec.ID),
-		zap.String("trigger", triggerSource(spec)),
+		zap.String("trigger", string(triggerSource(spec))),
 		zap.String("runtime", string(spec.Runtime)),
 	)
 }
@@ -389,7 +393,7 @@ func (e *Engine) registerCron(spec *task.Spec) {
 		// Advance next_run_at AFTER fireAsync so that a failed dispatch does not
 		// silently advance the schedule and cause the missed run to be invisible
 		// on the next restart.
-		if _, ferr := e.fireAsync(context.Background(), s, pkgruntime.RunOptions{}, "cron"); ferr == nil && e.db != nil {
+		if _, ferr := e.fireAsync(context.Background(), s, pkgruntime.RunOptions{}, registry.TriggerCron); ferr == nil && e.db != nil {
 			if next, nerr := cronNextRun(spec.Trigger.Cron); nerr == nil {
 				if dbErr := e.db.Exec(context.Background(),
 					`UPDATE cron_jobs SET last_run_at=?, next_run_at=? WHERE task_id=?`,
@@ -505,7 +509,7 @@ func (e *Engine) catchupMissedCronRuns(ctx context.Context) {
 			zap.String("task", m.taskID),
 			zap.Time("was_due", time.Unix(m.nextAt, 0)),
 		)
-		e.fireAsync(ctx, spec, pkgruntime.RunOptions{}, "cron-catchup") //nolint:errcheck
+		e.fireAsync(ctx, spec, pkgruntime.RunOptions{}, registry.TriggerCronCatchup) //nolint:errcheck
 	}
 }
 
@@ -541,7 +545,7 @@ func (e *Engine) registerDaemon(spec *task.Spec) {
 }
 
 func (e *Engine) startDaemon(spec *task.Spec) {
-	runID, err := e.fireAsync(context.Background(), spec, pkgruntime.RunOptions{}, "daemon")
+	runID, err := e.fireAsync(context.Background(), spec, pkgruntime.RunOptions{}, registry.TriggerDaemon)
 	if err != nil {
 		e.log.Error("daemon start failed", zap.String("task", spec.ID), zap.Error(err))
 		return
@@ -631,7 +635,7 @@ func (e *Engine) FireManual(ctx context.Context, taskID string, params map[strin
 		return "", fmt.Errorf("task %q not found", taskID)
 	}
 	e.log.Info("manual trigger", zap.String("task", taskID))
-	return e.fireAsync(context.Background(), spec, pkgruntime.RunOptions{Params: params}, "manual")
+	return e.fireAsync(context.Background(), spec, pkgruntime.RunOptions{Params: params}, registry.TriggerManual)
 }
 
 // WaitRun blocks until the run identified by runID reaches a terminal state,
@@ -827,25 +831,84 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 		}
 		targetID := chainSpec.Task
 		if targetID != "" && targetID != completedTaskID {
-			// Chain-of-chains suppression: refuse to fire if the completed run
-			// was itself chain-fired. This prevents infinite recursion when a
-			// chain target also has on_failure_chain set (or fails and would
-			// re-trigger itself via defaults).
-			// TODO(#238): replace with proper _chain_depth tracking.
+			// Replay-source guard: a replay-fired run that fails must not
+			// trigger on_failure_chain — preserves the semantics that replay
+			// is a manual / agent-initiated action with no auto-recovery loop.
+			// (Spec § 4.3 #5.)
 			if src, ok := e.runTriggerSource.Load(runID); ok {
-				if srcStr, _ := src.(string); srcStr == "chain" {
-					e.log.Warn("on_failure_chain suppressed: completed run was itself chain-fired (would loop)",
+				if ts, _ := src.(registry.TriggerSource); ts == registry.TriggerReplay {
+					e.log.Debug("on_failure_chain skipped: replay source",
 						zap.String("from", completedTaskID),
 						zap.String("run", runID),
 					)
 					return
 				}
 			}
+			// Depth-tracking ceiling: read the incoming run's chain depth and
+			// refuse to fire when the next hop would exceed MaxDepth (default 2).
+			// This replaces the old chain-of-chains suppression that blocked all
+			// chaining beyond depth 1.
+			incomingDepth := 0
+			if d, ok := e.runChainDepth.Load(runID); ok {
+				incomingDepth, _ = d.(int)
+			}
+			nextDepth := incomingDepth + 1
+			maxDepth := chainSpec.EffectiveMaxDepth()
+			if nextDepth > maxDepth {
+				e.log.Warn("on_failure_chain suppressed: max_depth exceeded",
+					zap.Int("depth", nextDepth),
+					zap.Int("max_depth", maxDepth),
+					zap.String("from", completedTaskID),
+					zap.String("run", runID),
+				)
+				return
+			}
 			if targetSpec, ok := e.registry.Get(targetID); ok {
+				now := time.Now()
+
+				// 1. Storm check — per-source namespace.
+				scope := stormScope(completedTaskID)
+				if e.guards.stormSuppressed(scope, now) {
+					e.log.Warn("on_failure_chain suppressed: storm circuit breaker tripped",
+						zap.String("scope", scope),
+						zap.String("from", completedTaskID),
+					)
+					return
+				}
+
+				// 2. Cooldown check.
+				cd := effectiveCooldown(chainSpec)
+				if e.guards.cooldownActive(completedTaskID, cd, now) {
+					e.log.Warn("on_failure_chain suppressed: cooldown active",
+						zap.String("from", completedTaskID),
+						zap.Duration("cooldown", cd),
+					)
+					return
+				}
+
+				// 3. Concurrency check.
+				perTask := chainSpec.MaxConcurrent
+				if perTask <= 0 {
+					perTask = 1
+				}
+				global := e.defaultsOnFailureChain.MaxConcurrentGlobal
+				if global <= 0 {
+					global = 3
+				}
+				if !e.guards.acquireSlot(completedTaskID, perTask, global) {
+					e.log.Warn("on_failure_chain suppressed: concurrency cap reached",
+						zap.String("from", completedTaskID),
+						zap.Int("cap_per_task", perTask),
+						zap.Int("cap_global", global),
+					)
+					return
+				}
+
 				e.log.Info("on_failure_chain trigger",
 					zap.String("from", completedTaskID),
 					zap.String("to", targetID),
 					zap.String("run", runID),
+					zap.Int("depth", nextDepth),
 				)
 				// Build input. Reserved keys (taskID, runID, status, output,
 				// _chain_depth) are populated by the engine and are NOT
@@ -854,24 +917,52 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 				// can safely overlay user params first and then stamp the
 				// reserved keys — collisions cannot reach here in a
 				// well-validated config.
-				// _chain_depth is hardcoded to 1 here; full depth tracking is
-				// engine-level guardrail work tracked in #238. Recursive
-				// fan-out is mitigated for v1 by the chain-of-chains
-				// suppression above (see runTriggerSource).
 				input := map[string]any{}
 				for k, v := range chainSpec.Params {
 					input[k] = v
+				}
+				// Auto-fix safety default: when the chain target is the
+				// buildin auto-fix preset, force mode=review unless the
+				// operator explicitly set it. Autonomous-by-default would
+				// be a foot-gun (the agent could push directly to main
+				// without human review).
+				if targetID == "buildin/auto-fix" {
+					if _, ok := input["mode"]; !ok {
+						input["mode"] = "review"
+					}
 				}
 				input["taskID"] = completedTaskID
 				input["runID"] = runID
 				input["status"] = runStatus
 				input["output"] = output
-				// TODO(#238): increment from incoming run input; current always-1 means chain-of-chains can recurse.
-				input["_chain_depth"] = 1
-				go e.fireAsync(ctx, targetSpec, pkgruntime.RunOptions{ //nolint:errcheck
-					ParentRunID: runID,
-					Input:       input,
-				}, "chain")
+				input["_chain_depth"] = nextDepth
+
+				// Synchronously invoke fireAsync — it returns once startRun
+				// completes, then continues the run on its own goroutine.
+				// Doing this sync (rather than `go fireAsync(...)`) lets us
+				// release the chainGuards slot if startRun fails and avoids
+				// recording cooldown / storm counters for runs that never
+				// executed (false-trip risk under DB flapping).
+				if _, err := e.fireAsync(ctx, targetSpec, pkgruntime.RunOptions{
+					ParentRunID:     runID,
+					Input:           input,
+					ChainParentTask: completedTaskID,
+				}, registry.TriggerChain); err != nil {
+					e.guards.releaseSlot(completedTaskID)
+					e.log.Error("on_failure_chain fireAsync failed; released slot",
+						zap.String("from", completedTaskID),
+						zap.String("to", targetID),
+						zap.Error(err),
+					)
+					return
+				}
+
+				// startRun succeeded. Record cooldown timestamp and storm
+				// fire — both delayed until here so a failed startRun cannot
+				// false-trip the storm breaker or extend the cooldown.
+				e.guards.recordChainFire(completedTaskID, now)
+				e.guards.observeChainFire(scope, chainSpec.Storm.Rate, chainSpec.Storm.Window,
+					chainSpec.Storm.Suppress, now)
 			}
 		}
 	}
@@ -1147,7 +1238,7 @@ func (e *Engine) WebhookHandler() http.Handler {
 		async := r.URL.Query().Get("wait") == "false"
 
 		if async {
-			runID, err := e.fireAsync(r.Context(), spec, pkgruntime.RunOptions{Input: input, Params: params, WebhookCtx: webhookCtx}, "webhook")
+			runID, err := e.fireAsync(r.Context(), spec, pkgruntime.RunOptions{Input: input, Params: params, WebhookCtx: webhookCtx}, registry.TriggerWebhook)
 			if err != nil {
 				http.Error(w, "task failed to start", http.StatusInternalServerError)
 				return
@@ -1158,7 +1249,7 @@ func (e *Engine) WebhookHandler() http.Handler {
 			return
 		}
 
-		runID, result, err := e.fireSync(spec, pkgruntime.RunOptions{Input: input, Params: params, WebhookCtx: webhookCtx}, "webhook")
+		runID, result, err := e.fireSync(spec, pkgruntime.RunOptions{Input: input, Params: params, WebhookCtx: webhookCtx}, registry.TriggerWebhook)
 		if err != nil {
 			http.Error(w, "task failed to start", http.StatusInternalServerError)
 			return
@@ -1354,8 +1445,8 @@ func (e *Engine) serveTaskAsset(w http.ResponseWriter, r *http.Request, taskDir,
 // startRun creates the DB record, stores the cancel func, fires the started
 // hook, and returns a ready-to-run context. The caller is responsible for
 // calling the returned cleanup func when the run finishes.
-func (e *Engine) startRun(spec *task.Spec, opts *pkgruntime.RunOptions, source string) (runCtx context.Context, cleanup func(), err error) {
-	if _, err = e.registry.StartRunWithID(context.Background(), opts.RunID, spec.ID, opts.ParentRunID, source); err != nil {
+func (e *Engine) startRun(spec *task.Spec, opts *pkgruntime.RunOptions, source registry.TriggerSource) (runCtx context.Context, cleanup func(), err error) {
+	if _, err = e.registry.StartRunWithID(context.Background(), opts.RunID, spec.ID, opts.ParentRunID, string(source)); err != nil {
 		return nil, nil, fmt.Errorf("start run record: %w", err)
 	}
 
@@ -1378,7 +1469,7 @@ func (e *Engine) startRun(spec *task.Spec, opts *pkgruntime.RunOptions, source s
 				BodyFullTextual: bft,
 			}
 		}
-		in := registry.BuildPersistedInputFromRunOpts(source, opts.Params, opts.Input, web)
+		in := registry.BuildPersistedInputFromRunOpts(string(source), opts.Params, opts.Input, web)
 		key, size, storedAt, perr := e.inputStore.Persist(context.Background(), opts.RunID, in)
 		if perr != nil {
 			// Log only a sanitized error category. The full perr chain may
@@ -1409,7 +1500,7 @@ func (e *Engine) startRun(spec *task.Spec, opts *pkgruntime.RunOptions, source s
 	}
 
 	if h := e.runStartedHook; h != nil {
-		h(spec.ID, opts.RunID, source)
+		h(spec.ID, opts.RunID, string(source))
 	}
 	var cancel context.CancelFunc
 	runCtx, cancel = context.WithCancel(context.Background())
@@ -1422,8 +1513,12 @@ func (e *Engine) startRun(spec *task.Spec, opts *pkgruntime.RunOptions, source s
 	e.runDone.Store(opts.RunID, doneCh)
 
 	cleanup = func() {
+		if opts.ChainParentTask != "" {
+			e.guards.releaseSlot(opts.ChainParentTask)
+		}
 		e.runCancels.Delete(opts.RunID)
 		e.runTriggerSource.Delete(opts.RunID)
+		e.runChainDepth.Delete(opts.RunID)
 		cancel()
 		// Signal all waiters that the run has finished, then remove the entry.
 		if v, ok := e.runDone.LoadAndDelete(opts.RunID); ok {
@@ -1454,11 +1549,11 @@ func (e *Engine) shouldPersistInput(spec *task.Spec) bool {
 
 // runTask executes a task synchronously and handles all post-run bookkeeping
 // (logging, notifications, hooks, daemon restart). Returns status and result.
-func (e *Engine) runTask(runCtx context.Context, spec *task.Spec, opts pkgruntime.RunOptions, source string) (string, *pkgruntime.RunResult) {
+func (e *Engine) runTask(runCtx context.Context, spec *task.Spec, opts pkgruntime.RunOptions, source registry.TriggerSource) (string, *pkgruntime.RunResult) {
 	e.log.Info("run started",
 		zap.String("task", spec.ID),
 		zap.String("run", opts.RunID),
-		zap.String("trigger", source),
+		zap.String("trigger", string(source)),
 		zap.String("runtime", string(spec.Runtime)),
 	)
 
@@ -1494,7 +1589,7 @@ func (e *Engine) runTask(runCtx context.Context, spec *task.Spec, opts pkgruntim
 		zap.String("task", spec.ID),
 		zap.String("run", opts.RunID),
 		zap.String("status", status),
-		zap.String("trigger", source),
+		zap.String("trigger", string(source)),
 		zap.Duration("duration", elapsed.Truncate(time.Millisecond)),
 	}
 	if status == registry.StatusSuccess {
@@ -1525,7 +1620,7 @@ func (e *Engine) runTask(runCtx context.Context, spec *task.Spec, opts pkgruntim
 	}
 
 	if h := e.runFinishedHook; h != nil {
-		h(spec.ID, opts.RunID, status, source, elapsed.Milliseconds(), notifyOnSuccess, notifyOnFailure)
+		h(spec.ID, opts.RunID, status, string(source), elapsed.Milliseconds(), notifyOnSuccess, notifyOnFailure)
 	}
 
 	if spec.Trigger.Daemon {
@@ -1541,7 +1636,7 @@ func (e *Engine) runTask(runCtx context.Context, spec *task.Spec, opts pkgruntim
 // hook so websocket subscribers see a matching started/finished pair.
 // Safe to call even on the hot shutdown path: the DB write is bounded by a
 // short timeout so a stuck SQLite connection cannot block the goroutine.
-func (e *Engine) finalizeCancelled(spec *task.Spec, opts pkgruntime.RunOptions, source string) {
+func (e *Engine) finalizeCancelled(spec *task.Spec, opts pkgruntime.RunOptions, source registry.TriggerSource) {
 	finishCtx, finishCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer finishCancel()
 	if err := e.registry.FinishRun(finishCtx, opts.RunID, registry.StatusCancelled); err != nil {
@@ -1555,7 +1650,7 @@ func (e *Engine) finalizeCancelled(spec *task.Spec, opts pkgruntime.RunOptions, 
 		// a separate path in runTask) only fires on Success/Failure, so
 		// cancelled runs do not send spurious notifications.
 		notifyOnSuccess, notifyOnFailure := e.resolveNotify(spec)
-		h(spec.ID, opts.RunID, registry.StatusCancelled, source, 0, notifyOnSuccess, notifyOnFailure)
+		h(spec.ID, opts.RunID, registry.StatusCancelled, string(source), 0, notifyOnSuccess, notifyOnFailure)
 	}
 }
 
@@ -1565,12 +1660,27 @@ func (e *Engine) finalizeCancelled(spec *task.Spec, opts pkgruntime.RunOptions, 
 // When a MaxConcurrentTasks semaphore is configured, the goroutine blocks
 // until a slot is available or the shutdown context is cancelled — ensuring
 // shutdown never deadlocks waiting tasks.
-func (e *Engine) fireAsync(ctx context.Context, spec *task.Spec, opts pkgruntime.RunOptions, source string) (string, error) {
+func (e *Engine) fireAsync(ctx context.Context, spec *task.Spec, opts pkgruntime.RunOptions, source registry.TriggerSource) (string, error) {
 	opts.RunID = uuid.New().String()
 
 	runCtx, cleanup, err := e.startRun(spec, &opts, source)
 	if err != nil {
 		return "", err
+	}
+
+	// If this run carries a _chain_depth in its input (set by FireChain), record
+	// it in runChainDepth so FireChain can read the depth when this run completes.
+	if m, ok := opts.Input.(map[string]any); ok {
+		if d, ok2 := m["_chain_depth"]; ok2 {
+			switch v := d.(type) {
+			case int:
+				e.runChainDepth.Store(opts.RunID, v)
+			case int64:
+				e.runChainDepth.Store(opts.RunID, int(v))
+			case float64:
+				e.runChainDepth.Store(opts.RunID, int(v))
+			}
+		}
 	}
 
 	go func() {
@@ -1624,7 +1734,7 @@ func (e *Engine) fireAsync(ctx context.Context, spec *task.Spec, opts pkgruntime
 // The caller's context is used only for cancellation of the run setup; the
 // run itself uses an independent context so it is not cancelled when the HTTP
 // request context ends mid-execution.
-func (e *Engine) fireSync(spec *task.Spec, opts pkgruntime.RunOptions, source string) (string, *pkgruntime.RunResult, error) {
+func (e *Engine) fireSync(spec *task.Spec, opts pkgruntime.RunOptions, source registry.TriggerSource) (string, *pkgruntime.RunResult, error) {
 	opts.RunID = uuid.New().String()
 
 	runCtx, cleanup, err := e.startRun(spec, &opts, source)
@@ -1843,18 +1953,41 @@ func (e *Engine) dispatch(ctx context.Context, spec *task.Spec, opts pkgruntime.
 	return status, result
 }
 
-// triggerSource returns a short string identifying the trigger type of a spec.
-func triggerSource(spec *task.Spec) string {
+// stormScope returns the namespace used for per-source storm tracking:
+// everything before the last '/' in taskID, OR taskID itself for a flat
+// (no-slash) task. Flat tasks get their own per-task scope so a single
+// flapping flat task cannot suppress on_failure_chain for unrelated
+// flat tasks under a shared "global" scope.
+func stormScope(taskID string) string {
+	if i := strings.LastIndex(taskID, "/"); i > 0 {
+		return taskID[:i]
+	}
+	if taskID == "" {
+		return "global"
+	}
+	return taskID
+}
+
+// effectiveCooldown returns the configured cooldown or 10 minutes when zero.
+func effectiveCooldown(s task.OnFailureChainSpec) time.Duration {
+	if s.Cooldown > 0 {
+		return s.Cooldown
+	}
+	return 10 * time.Minute
+}
+
+// triggerSource returns a typed TriggerSource identifying the trigger type of a spec.
+func triggerSource(spec *task.Spec) registry.TriggerSource {
 	switch {
 	case spec.Trigger.Cron != "":
-		return "cron"
+		return registry.TriggerCron
 	case spec.Trigger.Webhook != "":
-		return "webhook"
+		return registry.TriggerWebhook
 	case spec.Trigger.Daemon:
-		return "daemon"
+		return registry.TriggerDaemon
 	case spec.Trigger.Chain != nil:
-		return "chain"
+		return registry.TriggerChain
 	default:
-		return "manual"
+		return registry.TriggerManual
 	}
 }
