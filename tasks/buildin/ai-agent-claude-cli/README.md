@@ -140,6 +140,25 @@ curl -fsSL -X POST http://localhost:8080/hooks/ai-claude \
 | `model` | string | `""` | E.g. `sonnet`, `opus`. Empty = CLI default. |
 | `system_prompt` | string | `""` | Appended via `--append-system-prompt`. |
 | `cli_path` | string | `""` | Override binary path. Empty = `CLAUDE_CLI_PATH` env, then `PATH` lookup. |
+| `skills` | string | `""` | Comma-separated skill markdown filenames (without `.md`). Each is copied from `skills_dir` into a per-invocation `.claude/skills/` that the Claude CLI loads automatically. |
+| `skills_dir` | string | `${TASK_SET_DIR}/../skills` | Where the skill md files live. |
+| `enable_mcp` | bool | `true` | Wire dicode's `/mcp` endpoint into a per-invocation `.claude/mcp.json` so Claude can call dicode tasks as MCP tools. Requires `DICODE_MCP_API_KEY` (populated by `dicode mcp install`). |
+| `mcp_url` | string | `http://localhost:8080/mcp` | dicode MCP endpoint URL written into `.claude/mcp.json`. |
+
+### Skills + MCP wiring
+
+On every invocation, the task creates `${DICODE_DATA_DIR}/tmp/claude-cli/<uuid>/.claude/`,
+populates it with skill markdowns + `mcp.json`, and runs `claude -p` with that
+as its CWD. Claude CLI honors `.claude/` for project-local config, so the
+skills become loadable instructions and the MCP server becomes a tool surface
+the agent can call. The directory is removed in a `finally` block on task
+exit; orphans (from a crashed task) are swept by `buildin/temp-cleanup` on
+its schedule.
+
+The `DICODE_MCP_API_KEY` secret is auto-populated by `dicode mcp install` —
+the same key the operator's local Claude Code uses, so one install command
+wires both consumers. Run `dicode mcp install` once after first daemon
+startup; the agent task picks up the secret without further setup.
 
 ## Output
 

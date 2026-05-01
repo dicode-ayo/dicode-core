@@ -50,6 +50,29 @@ params:
     description: |
       Override the path to the `claude` binary. Empty = look up via PATH (or
       the CLAUDE_CLI_PATH env var, if declared in permissions.env).
+  skills:
+    type: string
+    default: ""
+    description: |
+      Comma-separated skill markdown filenames (without .md). Each is copied
+      from skills_dir into a per-invocation .claude/skills/ that the Claude
+      CLI loads automatically. Mirrors buildin/ai-agent's `skills` param.
+  skills_dir:
+    type: string
+    default: "${TASK_SET_DIR}/../skills"
+    description: "Where the skill md files live."
+  enable_mcp:
+    type: bool
+    default: true
+    description: |
+      Wire dicode's /mcp endpoint into a per-invocation .claude/mcp.json so
+      Claude can call dicode tasks as MCP tools. Requires DICODE_MCP_API_KEY
+      in the secrets store — populated automatically by `dicode mcp install`.
+      Set to false to skip even when the secret is present.
+  mcp_url:
+    type: string
+    default: "http://localhost:8080/mcp"
+    description: "dicode MCP endpoint URL written into .claude/mcp.json."
 
 permissions:
   # Subprocess: only the `claude` binary, plus PATH-resolution helpers.
@@ -73,12 +96,33 @@ permissions:
     # empty. Lets operators install claude at a non-standard location
     # (e.g. /opt/claude/bin/claude) without changing every task.
     - CLAUDE_CLI_PATH
+    # Resolved at runtime when building the per-invocation .claude/
+    # working directory under ${DATADIR}/tmp/claude-cli/<uuid>/.
+    - name: DICODE_DATA_DIR
+      from: DICODE_DATA_DIR
+    # Stashed by `dicode mcp install` (cmd/dicode/main.go cmdMCP). When
+    # set + enable_mcp:true, task.ts writes a .claude/mcp.json pointing
+    # at the dicode /mcp endpoint with this key as the Bearer header.
+    # Empty = MCP wiring is skipped (Claude still runs, just without
+    # dicode-task tool access).
+    - name: DICODE_MCP_API_KEY
+      secret: DICODE_MCP_API_KEY
 
   fs:
     # Credential + session state cache. The CLI re-reads the OAuth token
     # from $HOME/.claude/.credentials.json on every invocation; granting
     # rw lets it persist refreshed tokens and per-session rollups.
     - path: "${HOME}/.claude"
+      permission: rw
+    # Read-only access to the shared skills directory. task.ts copies
+    # files referenced by the `skills` param into the per-invocation
+    # .claude/skills/ subfolder; Claude CLI picks them up automatically.
+    - path: "${TASK_SET_DIR}/../skills"
+      permission: r
+    # Per-invocation working directory. task.ts mkdirs a uuid-named
+    # subfolder, populates .claude/{mcp.json, skills/*.md}, and runs
+    # `claude -p` with cwd = that subfolder. Cleaned up on task exit.
+    - path: "${DATADIR}/tmp/claude-cli"
       permission: rw
 
   # No dicode SDK calls — pure subprocess wrapper. (Add list_tasks /

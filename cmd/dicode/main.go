@@ -232,6 +232,13 @@ func cmdMCP(c *ipc.ControlClient, args []string) error {
 	// dashboard input shapes don't normally produce slashes.
 	keyName := "dicode-cli/mcp/" + *name
 
+	// secretName is where install also stashes the raw key in the
+	// daemon's secrets store. The buildin/ai-agent-claude-cli task reads
+	// it via permissions.env to wire up its own .claude/mcp.json — same
+	// key as the operator's local Claude Code, so one install command
+	// connects both. Uninstall deletes it.
+	const secretName = "DICODE_MCP_API_KEY"
+
 	switch sub {
 	case "install":
 		k := resolveAPIKey(*key)
@@ -251,6 +258,17 @@ func cmdMCP(c *ipc.ControlClient, args []string) error {
 			k = minted
 			fmt.Fprintf(os.Stderr, "dicode: minted API key %q in the daemon (rotates on every install)\n", keyName)
 		}
+		// Stash the raw key as a secret so the buildin/ai-agent-claude-cli
+		// task can read it via permissions.env without a second mint. Same
+		// key serves the operator's local Claude Code AND the in-task
+		// agent — one install, two consumers. Non-fatal if it fails: the
+		// operator's `claude mcp add` step still works; only the in-task
+		// MCP wiring is degraded.
+		if err := setSecret(c, secretName, k); err != nil {
+			fmt.Fprintf(os.Stderr, "dicode: warning: store secret %q: %v (Claude Code is wired but the buildin agent task won't auto-find the key)\n", secretName, err)
+		} else {
+			fmt.Fprintf(os.Stderr, "dicode: stored API key as secret %q for in-task MCP use\n", secretName)
+		}
 		argv := []string{
 			"mcp", "add", "--transport", "http", *name, *url,
 			"--header", "Authorization: Bearer " + k,
@@ -261,12 +279,16 @@ func cmdMCP(c *ipc.ControlClient, args []string) error {
 		}
 		return runClaude(argv, "install", *name)
 	case "uninstall":
-		// Revoke the daemon-side key first, then drop the local Claude
-		// MCP entry. Either side may already be missing — both are
-		// idempotent. We continue past errors here so the operator can
-		// always finish a partial install.
+		// Revoke the daemon-side key first, drop the stashed secret
+		// (so the buildin task no longer resolves it), then drop the
+		// local Claude MCP entry. Each step may already have been done
+		// out of band — all idempotent. We continue past errors so a
+		// partially-installed setup can always be cleaned up.
 		if err := revokeAPIKeyByName(c, keyName); err != nil {
 			fmt.Fprintf(os.Stderr, "dicode: warning: revoke api key %q: %v (continuing)\n", keyName, err)
+		}
+		if err := deleteSecret(c, secretName); err != nil {
+			fmt.Fprintf(os.Stderr, "dicode: warning: delete secret %q: %v (continuing)\n", secretName, err)
 		}
 		argv := []string{"mcp", "remove", *name}
 		if *printOnly {
@@ -317,6 +339,34 @@ func mintAPIKey(c *ipc.ControlClient, name string) (string, error) {
 // name. Idempotent — the daemon returns nil even when no rows matched.
 func revokeAPIKeyByName(c *ipc.ControlClient, name string) error {
 	resp, err := c.Send(ipc.Request{Method: "cli.api_keys.revoke_by_name", Name: name})
+	if err != nil {
+		return err
+	}
+	if resp.Error != "" {
+		return fmt.Errorf("%s", resp.Error)
+	}
+	return nil
+}
+
+// setSecret stores `value` under `key` in the daemon's secrets store.
+// Same dispatch as `dicode secrets set` from the CLI; reused here so
+// `dicode mcp install` can stash the minted API key for the buildin
+// agent task to pick up.
+func setSecret(c *ipc.ControlClient, key, value string) error {
+	resp, err := c.Send(ipc.Request{Method: "cli.secrets.set", Key: key, StringValue: value})
+	if err != nil {
+		return err
+	}
+	if resp.Error != "" {
+		return fmt.Errorf("%s", resp.Error)
+	}
+	return nil
+}
+
+// deleteSecret removes the value at `key` from the daemon's secrets store.
+// Idempotent on the daemon side; we still surface any error to the caller.
+func deleteSecret(c *ipc.ControlClient, key string) error {
+	resp, err := c.Send(ipc.Request{Method: "cli.secrets.delete", Key: key})
 	if err != nil {
 		return err
 	}

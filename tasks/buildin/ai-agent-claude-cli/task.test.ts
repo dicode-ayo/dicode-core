@@ -39,14 +39,24 @@ async function withStubClaude<T>(
 ${stubBody}
 `);
     await Deno.chmod(stub, 0o755);
-    const origPath = Deno.env.get("PATH") ?? "";
+    const origPath    = Deno.env.get("PATH") ?? "";
+    const origDataDir = Deno.env.get("DICODE_DATA_DIR");
     Deno.env.set("PATH", `${tmp}:${origPath}`);
     Deno.env.set("CLAUDE_CLI_PATH", stub);
+    // DICODE_DATA_DIR drives the per-invocation .claude/ workdir in
+    // task.ts. Pin it to the same per-test tempdir so workdirs are
+    // created and cleaned up under our control.
+    Deno.env.set("DICODE_DATA_DIR", tmp);
     try {
         return await fn();
     } finally {
         Deno.env.set("PATH", origPath);
         Deno.env.delete("CLAUDE_CLI_PATH");
+        if (origDataDir === undefined) {
+            Deno.env.delete("DICODE_DATA_DIR");
+        } else {
+            Deno.env.set("DICODE_DATA_DIR", origDataDir);
+        }
     }
 }
 
@@ -243,5 +253,81 @@ Deno.test("redacts token in JSON-parse-failure path too", async () => {
     assertEquals(result.ok, false);
     if (String(result.error ?? "").includes("supersecret-token-xyz")) {
         throw new Error(`OAuth token leaked via stdout/JSON-parse path: ${result.error}`);
+    }
+});
+
+Deno.test("writes .claude/mcp.json when DICODE_MCP_API_KEY is set", async () => {
+    Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "stub");
+    Deno.env.set("DICODE_MCP_API_KEY", "dck_test_mcp_key");
+    // Stub records cwd into a sentinel file so we can read it back AFTER
+    // the task's finally-block runs (which removes the workdir). The
+    // sentinel writes to /tmp/<pwd-basename> which survives cleanup.
+    const sentinelDir = await Deno.makeTempDir();
+    const sentinel = `${sentinelDir}/cwd-recorded`;
+    const result: any = await withStubClaude(
+        `cat "$PWD/.claude/mcp.json" > ${sentinel} 2>/dev/null || true
+cat <<'JSON'
+{"type":"result","is_error":false,"result":"ok","session_id":"s"}
+JSON`,
+        () =>
+            main({
+                params: makeParams([["prompt", "hi"]]),
+                kv: makeKv(), dicode: fakeDicode,
+            }),
+    );
+    assertEquals(result.ok, true);
+    const recorded = await Deno.readTextFile(sentinel);
+    const cfg = JSON.parse(recorded);
+    if (!cfg.mcpServers?.dicode?.headers?.Authorization?.includes("dck_test_mcp_key")) {
+        throw new Error(`expected dicode MCP key in .claude/mcp.json, got ${recorded}`);
+    }
+    Deno.env.delete("DICODE_MCP_API_KEY");
+});
+
+Deno.test("skips MCP wiring when DICODE_MCP_API_KEY is empty", async () => {
+    Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "stub");
+    Deno.env.delete("DICODE_MCP_API_KEY");
+    const sentinelDir = await Deno.makeTempDir();
+    const sentinel = `${sentinelDir}/mcp-exists`;
+    const result: any = await withStubClaude(
+        `[ -f "$PWD/.claude/mcp.json" ] && echo "yes" > ${sentinel} || echo "no" > ${sentinel}
+cat <<'JSON'
+{"type":"result","is_error":false,"result":"ok","session_id":"s"}
+JSON`,
+        () =>
+            main({
+                params: makeParams([["prompt", "hi"]]),
+                kv: makeKv(), dicode: fakeDicode,
+            }),
+    );
+    assertEquals(result.ok, true);
+    const recorded = (await Deno.readTextFile(sentinel)).trim();
+    assertEquals(recorded, "no");
+});
+
+Deno.test("rejects path-traversal in skills param", async () => {
+    Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "stub");
+    const skillsDir = await Deno.makeTempDir();
+    const sentinelDir = await Deno.makeTempDir();
+    const sentinel = `${sentinelDir}/skills-listed`;
+    const result: any = await withStubClaude(
+        `ls "$PWD/.claude/skills" > ${sentinel} 2>/dev/null || echo "(empty)" > ${sentinel}
+cat <<'JSON'
+{"type":"result","is_error":false,"result":"ok","session_id":"s"}
+JSON`,
+        () =>
+            main({
+                params: makeParams([
+                    ["prompt", "hi"],
+                    ["skills", "../../etc/passwd,legit-skill"],
+                    ["skills_dir", skillsDir],
+                ]),
+                kv: makeKv(), dicode: fakeDicode,
+            }),
+    );
+    assertEquals(result.ok, true);
+    const listed = (await Deno.readTextFile(sentinel)).trim();
+    if (listed.includes("passwd")) {
+        throw new Error(`path-traversal slipped through; .claude/skills lists: ${listed}`);
     }
 });
