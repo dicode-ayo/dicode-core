@@ -70,6 +70,7 @@ export default async function main({ params, kv }: SDK) {
     const skillsDir     = (await params.get("skills_dir"))    ?? "";
     const enableMcp     = ((await params.get("enable_mcp"))   ?? "true").toLowerCase() !== "false";
     const mcpURL        = (await params.get("mcp_url"))       ?? "http://localhost:8080/mcp";
+    const workdirBase   = (await params.get("workdir_base"))  ?? "";
 
     if (!prompt) {
         return fail("prompt is required");
@@ -133,61 +134,76 @@ export default async function main({ params, kv }: SDK) {
     // Per-invocation working directory. Claude CLI honors a project-local
     // `.claude/` dir at the invocation cwd: `.claude/mcp.json` configures
     // additional MCP servers, `.claude/skills/*.md` are loaded as skills.
-    // We use a uuid-named subfolder under ${DATADIR}/tmp/claude-cli/ so
-    // each turn is isolated.
+    // We use a uuid-named subfolder under workdir_base so each turn is
+    // isolated.
+    //
+    // workdir_base resolves via the ${DATADIR} template variable at
+    // spec-load time (see task.yaml), so we don't depend on
+    // DICODE_DATA_DIR being set in the spawned env — the daemon's
+    // actual data dir is baked in regardless of host env state.
     //
     // Cleanup is handled out-of-band by buildin/temp-cleanup, which
     // sweeps ${DATADIR}/tmp/<task>/<uuid>/ leaves older than 1 hour on
     // its 10-minute cron. Doing it inline (try/finally on every turn)
     // is redundant work and complicates the happy path; the cron is the
     // source of truth.
-    const dataDir = Deno.env.get("DICODE_DATA_DIR") ??
-                    `${Deno.env.get("HOME") ?? "/root"}/.dicode`;
-    const workdir = `${dataDir}/tmp/claude-cli/${crypto.randomUUID()}`;
+    if (!workdirBase) {
+        return fail("workdir_base param is empty; expected the default ${DATADIR}/tmp/claude-cli to resolve at spec-load time");
+    }
+    const workdir = `${workdirBase}/${crypto.randomUUID()}`;
     const claudeDir = `${workdir}/.claude`;
 
-    await Deno.mkdir(`${claudeDir}/skills`, { recursive: true });
-
-    // MCP wiring: write .claude/mcp.json so Claude can call dicode tasks
-    // as MCP tools. The API key is the same one the operator's local
-    // Claude Code uses (stashed by `dicode mcp install`); empty = skip
-    // and let Claude run without dicode-task tool access.
+    // Wrap setup in a try/catch so any unexpected error (NotCapable when
+    // permissions.fs is mis-scoped, ENOSPC, an immutable mount, …) comes
+    // back to the caller as a structured { ok: false, error } via fail()
+    // rather than as an uncaught Deno promise rejection that the runtime
+    // surfaces only in the run log.
     let mcpWired = false;
-    const mcpKey = Deno.env.get("DICODE_MCP_API_KEY") ?? "";
-    if (enableMcp && mcpKey) {
-        const mcpConfig = {
-            mcpServers: {
-                dicode: {
-                    type: "http",
-                    url:  mcpURL,
-                    headers: { Authorization: `Bearer ${mcpKey}` },
-                },
-            },
-        };
-        await Deno.writeTextFile(`${claudeDir}/mcp.json`, JSON.stringify(mcpConfig));
-        mcpWired = true;
-    }
-
-    // Skills wiring: copy each named skill file from skills_dir into
-    // .claude/skills/. Names are validated against a strict regex to
-    // defang any attempt at traversal via "../" or absolute paths.
     let skillsWired = 0;
-    if (skillsParam && skillsDir) {
-        const names = skillsParam.split(",").map((s) => s.trim()).filter(Boolean);
-        for (const name of names) {
-            if (!SAFE_SKILL_NAME.test(name)) {
-                console.warn(`ai-agent-claude-cli: skipping skill ${JSON.stringify(name)} (invalid name)`);
-                continue;
-            }
-            const src = `${skillsDir}/${name}.md`;
-            const dst = `${claudeDir}/skills/${name}.md`;
-            try {
-                await Deno.copyFile(src, dst);
-                skillsWired++;
-            } catch (e) {
-                console.warn(`ai-agent-claude-cli: skipping skill ${name}: ${e instanceof Error ? e.message : String(e)}`);
+    const mcpKey = Deno.env.get("DICODE_MCP_API_KEY") ?? "";
+    try {
+        await Deno.mkdir(`${claudeDir}/skills`, { recursive: true });
+
+        // MCP wiring: write .claude/mcp.json so Claude can call dicode tasks
+        // as MCP tools. The API key is the same one the operator's local
+        // Claude Code uses (stashed by `dicode mcp install`); empty = skip
+        // and let Claude run without dicode-task tool access.
+        if (enableMcp && mcpKey) {
+            const mcpConfig = {
+                mcpServers: {
+                    dicode: {
+                        type: "http",
+                        url:  mcpURL,
+                        headers: { Authorization: `Bearer ${mcpKey}` },
+                    },
+                },
+            };
+            await Deno.writeTextFile(`${claudeDir}/mcp.json`, JSON.stringify(mcpConfig));
+            mcpWired = true;
+        }
+
+        // Skills wiring: copy each named skill file from skills_dir into
+        // .claude/skills/. Names are validated against a strict regex to
+        // defang any attempt at traversal via "../" or absolute paths.
+        if (skillsParam && skillsDir) {
+            const names = skillsParam.split(",").map((s) => s.trim()).filter(Boolean);
+            for (const name of names) {
+                if (!SAFE_SKILL_NAME.test(name)) {
+                    console.warn(`ai-agent-claude-cli: skipping skill ${JSON.stringify(name)} (invalid name)`);
+                    continue;
+                }
+                const src = `${skillsDir}/${name}.md`;
+                const dst = `${claudeDir}/skills/${name}.md`;
+                try {
+                    await Deno.copyFile(src, dst);
+                    skillsWired++;
+                } catch (e) {
+                    console.warn(`ai-agent-claude-cli: skipping skill ${name}: ${e instanceof Error ? e.message : String(e)}`);
+                }
             }
         }
+    } catch (e) {
+        return fail(`workdir setup failed at ${workdir}: ${e instanceof Error ? e.message : String(e)}`);
     }
 
     console.log(`ai-agent-claude-cli: invoking ${cliPath} (resume=${claudeSessionId ? claudeSessionId.slice(0, 8) + "…" : "no"}, model=${model || "default"}, dicode_session=${dicodeSessionId.slice(0, 8)}…, mcp=${mcpWired ? "on" : "off"}, skills=${skillsWired})`);

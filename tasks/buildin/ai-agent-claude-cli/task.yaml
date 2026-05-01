@@ -73,6 +73,16 @@ params:
     type: string
     default: "http://localhost:8080/mcp"
     description: "dicode MCP endpoint URL written into .claude/mcp.json."
+  workdir_base:
+    type: string
+    default: "${DATADIR}/tmp/claude-cli"
+    description: |
+      Per-invocation .claude/ workdirs are created under this directory
+      as `${workdir_base}/<uuid>/.claude/...`. Default uses the
+      ${DATADIR} template variable, resolved at spec-load time, so the
+      task does not depend on DICODE_DATA_DIR being set in the spawned
+      env (which would silently fall through to "/" if the host hasn't
+      exported it). Override only if you need a non-default location.
 
 permissions:
   # Subprocess: only the `claude` binary, plus PATH-resolution helpers.
@@ -96,10 +106,6 @@ permissions:
     # empty. Lets operators install claude at a non-standard location
     # (e.g. /opt/claude/bin/claude) without changing every task.
     - CLAUDE_CLI_PATH
-    # Resolved at runtime when building the per-invocation .claude/
-    # working directory under ${DATADIR}/tmp/claude-cli/<uuid>/.
-    - name: DICODE_DATA_DIR
-      from: DICODE_DATA_DIR
     # Stashed by `dicode mcp install` (cmd/dicode/main.go cmdMCP). When
     # set + enable_mcp:true, task.ts writes a .claude/mcp.json pointing
     # at the dicode /mcp endpoint with this key as the Bearer header.
