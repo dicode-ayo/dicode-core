@@ -158,10 +158,12 @@ class DcSecurity extends LitElement {
             <button class="btn btn-sm secondary" @click=${() => this._newKeyRaw = ''}>Dismiss</button>
           </div>
 
-          <!-- Connect to Claude Code: pre-filled `claude mcp add` command. The
-               command is the same one `dicode mcp install` would run. Operators
-               with the `claude` CLI on PATH can paste this straight into a
-               terminal and they're connected. -->
+          <!-- Connect to Claude Code: pre-filled "claude mcp add" command,
+               same shape that "dicode mcp install" would run. Operators with
+               the "claude" CLI on PATH can paste this straight into a terminal
+               and they are connected. NOTE: backticks are forbidden inside
+               this comment because it sits inside a lit-html tagged template
+               literal that uses backticks as its delimiter. -->
           <details style="margin-top:0.75rem">
             <summary style="cursor:pointer;font-size:0.85rem;font-weight:600">
               ▸ Connect to Claude Code (one-liner)
