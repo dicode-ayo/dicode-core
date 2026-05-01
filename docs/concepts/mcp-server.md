@@ -18,21 +18,65 @@ The MCP server is mounted at `http://localhost:8080/mcp`.
 
 **Protocol**: JSON-RPC 2.0 over HTTP. `POST /mcp` dispatches tool calls. `GET /mcp` returns server info.
 
-**Claude Code:** add dicode as an MCP server:
-```bash
-claude mcp add dicode http://localhost:8080/mcp
-```
+**Claude Code:** three ways, pick whichever:
 
-Or via `.claude/mcp.json`:
+1. **Dashboard one-click** — Security → Create API Key. The success card has a "Connect to Claude Code" expander with the install command pre-filled with the new key. Copy + paste, done.
+
+2. **`dicode mcp install`** — zero-touch: mints a fresh API key in the daemon and runs `claude mcp add` for you:
+
+   ```bash
+   dicode mcp install
+   # → mints API key "mcp-dicode" in the daemon, runs:
+   #     claude mcp add --transport http dicode http://localhost:8080/mcp \
+   #       --header "Authorization: Bearer dck_..."
+
+   # Variants
+   dicode mcp uninstall                   # revokes the key + runs `claude mcp remove dicode`
+   dicode mcp print-config                # prints the equivalent command + .claude/mcp.json
+   dicode mcp install --key dck_xxx       # opt-out: use a key you already have, skip minting
+
+   # Re-running install rotates the key (revokes the old one with the same name first).
+   ```
+
+   **Threat model.** `dicode mcp install` mints API keys via the daemon's
+   control socket. The control socket is gated by a token at
+   `${DATADIR}/daemon.token` (mode 0600, owned by the daemon's user).
+   Anyone with read access to that file can already drive the daemon
+   end-to-end (e.g. `dicode secrets set` arbitrary values), so minting
+   API keys is not a new trust boundary — it's the same boundary,
+   different verb. The audit log (`Info`-level on every mint and
+   revoke) is the new persistent visibility into key creation.
+   CLI-managed keys are namespaced under `dicode-cli/` so the
+   idempotent revoke path can't sweep dashboard-created keys.
+
+3. **Manual** — mint a key in the dashboard, then:
+
+   ```bash
+   claude mcp add --transport http dicode \
+     http://localhost:8080/mcp \
+     --header "Authorization: Bearer dck_<your-key-here>"
+
+   # Verify
+   claude mcp list
+   claude /mcp                        # interactive: pick dicode, see tools
+   ```
+
+Or hand-edit `.claude/mcp.json`:
 ```json
 {
   "mcpServers": {
     "dicode": {
-      "url": "http://localhost:8080/mcp"
+      "type": "http",
+      "url": "http://localhost:8080/mcp",
+      "headers": {
+        "Authorization": "Bearer dck_<your-key-here>"
+      }
     }
   }
 }
 ```
+
+When `server.auth: false`, the `Authorization` header is optional (the endpoint is open). Production deployments should always run with `server.auth: true` and an API key — see [Authentication](https://dicode.com/concepts/mcp-server#authentication) on the site docs for the full setup.
 
 ---
 

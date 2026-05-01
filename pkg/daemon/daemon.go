@@ -322,6 +322,10 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	if err != nil {
 		return fmt.Errorf("build control server: %w", err)
 	}
+	// Wire API-key minting so `dicode mcp install` and friends can
+	// auto-generate keys via the control socket. The webui Server holds
+	// the apiKeyStore; control just dispatches.
+	ctrlSrv.SetAPIKeyMinter(srv)
 
 	// 10. Run everything concurrently.
 	g, ctx := errgroup.WithContext(ctx)

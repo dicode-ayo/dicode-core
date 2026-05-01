@@ -373,6 +373,10 @@ permissions:
 
 `runs_get_input` is gated by a lineage check: the auto-fix run can only read inputs of runs whose ID matches its own `parent_run_id` (the failed run that fired it) OR runs of its own task. Users can grant `runs_get_input: true` to other tasks to build their own replayer / fixer / auditor — the redaction layer (deny-listed fields are never persisted) is what bounds the surface.
 
+### LLM backend choice
+
+The auto-fix preset uses `buildin/ai-agent` (OpenAI-compatible HTTPS endpoints, per-token API key billing) by default. To switch to your Claude.ai Pro/Max subscription instead, declare a sibling override that swaps the underlying agent task — see the [Claude CLI agent docs](./claude-cli-agent.md) for the recipe.
+
 ---
 
 ## npm / jsr imports

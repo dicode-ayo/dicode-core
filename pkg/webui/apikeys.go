@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -121,6 +122,24 @@ func (s *apiKeyStore) list(ctx context.Context) ([]APIKeyInfo, error) {
 // Revoke deletes an API key by ID.
 func (s *apiKeyStore) revoke(ctx context.Context, id string) error {
 	return s.db.Exec(ctx, `DELETE FROM api_keys WHERE id = ?`, id)
+}
+
+// cliManagedKeyPrefix scopes API-key names that the CLI is allowed to
+// revoke-by-name. The slash-separated structure is the marker for
+// "tool-managed"; the dashboard's free-form name field can produce
+// slashes too, but operators don't typically choose names of this
+// shape, so the chance of collision is vanishingly small.
+const cliManagedKeyPrefix = "dicode-cli/"
+
+// revokeByName deletes API keys with the given exact name. Restricted
+// to the CLI-managed namespace (`dicode-cli/...`) so a CLI install
+// flow can't accidentally sweep dashboard-created keys that happen to
+// share a friendly name. Returns nil when no rows matched (idempotent).
+func (s *apiKeyStore) revokeByName(ctx context.Context, name string) error {
+	if !strings.HasPrefix(name, cliManagedKeyPrefix) {
+		return fmt.Errorf("revokeByName refused: name %q is not in the CLI-managed namespace %q", name, cliManagedKeyPrefix)
+	}
+	return s.db.Exec(ctx, `DELETE FROM api_keys WHERE name = ?`, name)
 }
 
 // APIKeyInfo is the public representation of an API key.
