@@ -28,12 +28,12 @@ const (
 
 // Run is a single execution record.
 type Run struct {
-	ID            string
-	TaskID        string
-	Status        string
-	StartedAt     time.Time
-	FinishedAt    *time.Time
-	ParentRunID   string
+	ID          string
+	TaskID      string
+	Status      string
+	StartedAt   time.Time
+	FinishedAt  *time.Time
+	ParentRunID string
 	// Group is a free-text label set by the task itself via dicode.set_group().
 	// Used by the WebUI to collapse same-group siblings in the run list (#114).
 	// Column name on disk is `run_group` because GROUP is a SQL keyword.
