@@ -194,20 +194,20 @@ func cmdAuth(c *ipc.ControlClient, args []string) error {
 // cmdMCP implements `dicode mcp <subcommand>`. Three operator-friendly
 // helpers around the official `claude mcp` machinery:
 //
-//   install      — mints a fresh API key in the daemon (named
-//                   "mcp-<server-name>"), then runs `claude mcp add
-//                   --transport http <name> <url> --header
-//                   "Authorization: Bearer <key>"`. Re-running rotates
-//                   the key (revokes the old one with the same name
-//                   first, mints a new one). Pass --key to skip the
-//                   mint and use a key you already have.
+//	install      — mints a fresh API key in the daemon (named
+//	                "mcp-<server-name>"), then runs `claude mcp add
+//	                --transport http <name> <url> --header
+//	                "Authorization: Bearer <key>"`. Re-running rotates
+//	                the key (revokes the old one with the same name
+//	                first, mints a new one). Pass --key to skip the
+//	                mint and use a key you already have.
 //
-//   uninstall    — revokes the API key on the daemon side and runs
-//                   `claude mcp remove <name>`. Idempotent.
+//	uninstall    — revokes the API key on the daemon side and runs
+//	                `claude mcp remove <name>`. Idempotent.
 //
-//   print-config — prints the install command + the equivalent
-//                   .claude/mcp.json snippet, no shell-out, no key
-//                   minting. Useful for docs / scripting / inspection.
+//	print-config — prints the install command + the equivalent
+//	                .claude/mcp.json snippet, no shell-out, no key
+//	                minting. Useful for docs / scripting / inspection.
 //
 // All three accept --name (default "dicode") and --url (default
 // "http://localhost:8080/mcp"). The dicode-side key name is
