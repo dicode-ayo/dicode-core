@@ -134,23 +134,28 @@ export default async function main({ params, kv }: SDK) {
     // Per-invocation working directory. Claude CLI honors a project-local
     // `.claude/` dir at the invocation cwd: `.claude/mcp.json` configures
     // additional MCP servers, `.claude/skills/*.md` are loaded as skills.
-    // We use a uuid-named subfolder under workdir_base so each turn is
-    // isolated.
+    //
+    // The workdir is keyed on the *dicode* session_id (which is already
+    // shape-validated by SESSION_ID_RE above), NOT a fresh per-invocation
+    // uuid. Reason: Claude CLI's conversation state is cwd-scoped — a
+    // `--resume <claude_session_id>` invocation can only find sessions
+    // that were created in the same working directory. If we used a
+    // fresh uuid each turn, every `--resume` would fail with "No
+    // conversation found".
     //
     // workdir_base resolves via the ${DATADIR} template variable at
     // spec-load time (see task.yaml), so we don't depend on
-    // DICODE_DATA_DIR being set in the spawned env — the daemon's
-    // actual data dir is baked in regardless of host env state.
+    // DICODE_DATA_DIR being set in the spawned env.
     //
     // Cleanup is handled out-of-band by buildin/temp-cleanup, which
-    // sweeps ${DATADIR}/tmp/<task>/<uuid>/ leaves older than 1 hour on
-    // its 10-minute cron. Doing it inline (try/finally on every turn)
-    // is redundant work and complicates the happy path; the cron is the
-    // source of truth.
+    // sweeps ${DATADIR}/tmp/<task>/<uuid>/ leaves older than 1 hour
+    // on its 10-minute cron. Active sessions keep their workdir mtime
+    // fresh (we rewrite mcp.json + skills on every turn) so they're
+    // never preempted; idle sessions are reaped after the TTL.
     if (!workdirBase) {
         return fail("workdir_base param is empty; expected the default ${DATADIR}/tmp/claude-cli to resolve at spec-load time");
     }
-    const workdir = `${workdirBase}/${crypto.randomUUID()}`;
+    const workdir = `${workdirBase}/${dicodeSessionId}`;
     const claudeDir = `${workdir}/.claude`;
 
     // Wrap setup in a try/catch so any unexpected error (NotCapable when
