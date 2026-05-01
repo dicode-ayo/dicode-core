@@ -12,8 +12,18 @@ const fakeDicode = {} as any;
 // matching pkg/runtime/deno/sdk/shim.ts. The task code awaits these calls;
 // passing a plain Map<string,string> would surface as Promise objects in
 // every await target and break validation in surprising ways.
+//
+// workdir_base is template-resolved at spec-load (${DATADIR}/...) in
+// production but unit tests don't go through that path. Inject a
+// sensible default rooted at DICODE_DATA_DIR (set by withStubClaude
+// for every test that proceeds past validation) so individual tests
+// don't have to thread the param through every call site.
 function makeParams(entries: Array<[string, string]>) {
     const m = new Map(entries);
+    if (!m.has("workdir_base")) {
+        const dataDir = Deno.env.get("DICODE_DATA_DIR") ?? "";
+        if (dataDir) m.set("workdir_base", `${dataDir}/tmp/claude-cli`);
+    }
     return {
         get: (k: string) => Promise.resolve(m.get(k) ?? null),
         all: () => Promise.resolve(Object.fromEntries(m)),
