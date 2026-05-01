@@ -27,6 +27,9 @@ class DcTaskDetail extends LitElement {
     _aiStatus:        { state: true },
     _aiSessionId:     { state: true },
     _currentFile:     { state: true },
+    _showPrereqs:     { state: true },
+    _expanded:        { state: true }, // Set<runID> — top-level rows with children currently expanded
+    _children:        { state: true }, // Map<parentRunID, Run[]> — lazily-fetched child rows
   };
 
   constructor() {
@@ -35,6 +38,9 @@ class DcTaskDetail extends LitElement {
     this._triggerOpen = false; this._triggerType = 'manual';
     this._editorOpen = false; this._editorStatus = ''; this._currentFile = null;
     this._aiOpen = false; this._aiHistory = []; this._aiStatus = ''; this._aiSessionId = '';
+    this._showPrereqs = false;
+    this._expanded = new Set();
+    this._children = new Map();
     this._editor = null;
     this._relayBase = '';
     this._offStarted = null; this._offFinished = null;
@@ -232,6 +238,126 @@ class DcTaskDetail extends LitElement {
     });
   }
 
+  // ── Run-list grouping (#114) ────────────────────────────────────────────
+  // The flat list of runs returned by /api/tasks/{id}/runs is collapsed by
+  // two rules so the user sees one row per logical event:
+  //
+  //   1. Hide rows whose ParentRunID is set — those are sub-runs (a prereq
+  //      run from `if_missing`, or a sub-task fired via dicode.run_task).
+  //      A toggle restores the flat view for debugging.
+  //   2. Collapse consecutive top-level rows with the same non-empty Group
+  //      into one row ("N runs in this session, last 3m ago"). Tasks tag
+  //      themselves via dicode.set_group() — see the ai-agent buildin (#112).
+  //
+  // The result is a list of "items" where each item is either:
+  //   { kind: 'single', run }              — one row
+  //   { kind: 'group',  runs: [...] }      — collapse of consecutive same-group runs
+  _buildRunItems() {
+    const all = this._runs || [];
+    if (this._showPrereqs) return all.map(run => ({ kind: 'single', run }));
+
+    const top = all.filter(r => !(r.ParentRunID || r.parent_run_id));
+    const items = [];
+    for (const run of top) {
+      const group = run.Group || run.group;
+      const last = items[items.length - 1];
+      if (group && last && last.kind === 'group' && (last.runs[0].Group || last.runs[0].group) === group) {
+        last.runs.push(run);
+        continue;
+      }
+      if (group) {
+        items.push({ kind: 'group', runs: [run] });
+      } else {
+        items.push({ kind: 'single', run });
+      }
+    }
+    return items;
+  }
+
+  // _toggleExpand expands or collapses an inline children panel. On first
+  // expand it lazily fetches /api/runs?parent=<id>; subsequent toggles flip
+  // the visibility without re-fetching.
+  async _toggleExpand(runID) {
+    const next = new Set(this._expanded);
+    if (next.has(runID)) {
+      next.delete(runID);
+      this._expanded = next;
+      return;
+    }
+    next.add(runID);
+    this._expanded = next;
+    if (!this._children.has(runID)) {
+      try {
+        const kids = await get(`/api/runs?parent=${encodeURIComponent(runID)}&limit=50`);
+        const cm = new Map(this._children);
+        cm.set(runID, kids || []);
+        this._children = cm;
+      } catch (e) {
+        const cm = new Map(this._children);
+        cm.set(runID, []);
+        this._children = cm;
+      }
+    }
+  }
+
+  _renderRunRow(r, opts) {
+    const indent = opts?.indent || 0;
+    const hint   = opts?.hint;
+    const expandedKid = !!opts?.isChild;
+    const padding = indent ? `padding-left:${indent * 1.5}rem` : '';
+    const expanded = this._expanded.has(r.ID);
+    const kids = this._children.get(r.ID) || [];
+    const showExpand = !expandedKid; // sub-rows don't recurse further by default
+    return html`
+      <tr>
+        <td style=${padding}>
+          ${showExpand ? html`<button class="btn btn-sm secondary"
+            style="padding:0 .35rem;margin-right:.35rem;font-family:monospace"
+            title="Show child runs"
+            @click=${() => this._toggleExpand(r.ID)}>${expanded ? '▾' : '▸'}</button>` : ''}
+          <a href="runs/${r.ID}">${r.ID.slice(0,8)}</a>
+          ${hint ? html`<span class="meta" style="margin-left:.5rem">${hint}</span>` : ''}
+        </td>
+        <td><span class="badge badge-${r.Status}">${r.Status}</span></td>
+        <td class="meta">${fmtTime(r.StartedAt)}</td>
+        <td class="meta">${fmtDuration(r.StartedAt, r.FinishedAt)}</td>
+        <td>${(r.OutputContentType || r.ReturnValue) ? html`
+          <a href="/runs/${r.ID}/result" target="_blank"
+             class="btn btn-sm secondary">Result</a>` : ''}</td>
+      </tr>
+      ${expanded ? (kids.length ? kids.map(kid => this._renderRunRow(kid, { indent: indent + 1, isChild: true })) : html`
+        <tr><td colspan="5" class="meta" style="padding-left:${(indent + 1) * 1.5}rem">No sub-runs.</td></tr>
+      `) : ''}`;
+  }
+
+  _renderGroupRow(item) {
+    const head = item.runs[0];
+    const group = head.Group || head.group;
+    const expanded = this._expanded.has(`group:${group}`);
+    const last = head; // newest first per ListRuns ORDER BY
+    return html`
+      <tr>
+        <td>
+          <button class="btn btn-sm secondary"
+            style="padding:0 .35rem;margin-right:.35rem;font-family:monospace"
+            title="Expand session"
+            @click=${() => {
+              const next = new Set(this._expanded);
+              const key = `group:${group}`;
+              next.has(key) ? next.delete(key) : next.add(key);
+              this._expanded = next;
+            }}>${expanded ? '▾' : '▸'}</button>
+          <strong>${group}</strong>
+          <span class="meta" style="margin-left:.5rem">${item.runs.length} runs</span>
+        </td>
+        <td><span class="badge badge-${last.Status}">${last.Status}</span></td>
+        <td class="meta">last ${fmtTime(last.StartedAt)}</td>
+        <td class="meta">—</td>
+        <td></td>
+      </tr>
+      ${expanded ? item.runs.map(r => this._renderRunRow(r, { indent: 1 })) : ''}`;
+  }
+
   _triggerFields() {
     const t = this._task?.trigger || this._task?.Trigger || {};
     const type = this._triggerType;
@@ -348,22 +474,23 @@ class DcTaskDetail extends LitElement {
           </div>
         </div>` : ''}
 
-      <h2>Recent runs</h2>
+      <div style="display:flex;align-items:baseline;gap:var(--space-md);margin-top:var(--space-lg)">
+        <h2 style="margin:0">Recent runs</h2>
+        <label class="meta" style="margin-left:auto;cursor:pointer">
+          <input type="checkbox"
+            .checked=${this._showPrereqs}
+            @change=${e => { this._showPrereqs = e.target.checked; }}>
+          Show prereq runs
+        </label>
+      </div>
       <table>
         <thead><tr><th>Run ID</th><th>Status</th><th>Started</th><th>Duration</th><th></th></tr></thead>
         <tbody>
           ${!this._runs?.length ? html`
             <tr><td colspan="5" style="text-align:center;color:var(--muted)">No runs yet.</td></tr>
-          ` : this._runs.map(r => html`
-            <tr>
-              <td><a href="runs/${r.ID}">${r.ID.slice(0,8)}</a></td>
-              <td><span class="badge badge-${r.Status}">${r.Status}</span></td>
-              <td class="meta">${fmtTime(r.StartedAt)}</td>
-              <td class="meta">${fmtDuration(r.StartedAt, r.FinishedAt)}</td>
-              <td>${(r.OutputContentType || r.ReturnValue) ? html`
-                <a href="/runs/${r.ID}/result" target="_blank"
-                   class="btn btn-sm secondary">Result</a>` : ''}</td>
-            </tr>`)}
+          ` : this._buildRunItems().map(item => item.kind === 'group'
+              ? this._renderGroupRow(item)
+              : this._renderRunRow(item.run))}
         </tbody>
       </table>`;
   }
