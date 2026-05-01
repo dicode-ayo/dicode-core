@@ -35,12 +35,20 @@
 
   // textContent / createElement only — never innerHTML. Model output is
   // untrusted; URL detection still has to escape via document fragments.
+  // The split regex already restricts capture to `https?://...`, but we
+  // re-validate the matched chunk before assignment to .href because:
+  //   - CodeQL's "DOM text reinterpreted as HTML" check doesn't trace
+  //     the regex narrowing through .split, and would otherwise flag
+  //     this site as a javascript:-URL XSS surface.
+  //   - Defense in depth: any future regex change that loosens the
+  //     capture group must explicitly opt back into the validation.
   var URL_SPLIT_RE = /(https?:\/\/[^\s<>"'()]+)/g;
+  var SAFE_URL_RE  = /^https?:\/\//i;
   function appendTextWithLinks(parent, text) {
     var parts = String(text).split(URL_SPLIT_RE);
     for (var i = 0; i < parts.length; i++) {
       var chunk = parts[i];
-      if (i % 2 === 1) {
+      if (i % 2 === 1 && SAFE_URL_RE.test(chunk)) {
         var a = document.createElement("a");
         a.href = chunk;
         a.target = "_blank";
@@ -48,6 +56,8 @@
         a.textContent = chunk;
         parent.appendChild(a);
       } else if (chunk) {
+        // Anything that doesn't match SAFE_URL_RE — including potential
+        // javascript:/data:/file: URLs — is rendered as plain text only.
         parent.appendChild(document.createTextNode(chunk));
       }
     }

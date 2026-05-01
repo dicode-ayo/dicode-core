@@ -376,9 +376,15 @@ func runClaude(claudeArgs []string, action, name string) error {
 // header value (Authorization: Bearer ...) is the only argument that
 // realistically contains spaces, so we shell-quote it. Other args are
 // known-safe (URLs, transport literals, the server name).
+//
+// The slice grows via append without a pre-allocated capacity hint —
+// CodeQL's "size computation may overflow" heuristic flags any
+// `make(..., len(x)+N)` pattern even when the input is structurally
+// bounded (here argv is at most a dozen entries built from typed
+// flags). Letting append handle growth keeps it quiet without
+// papering over a real concern.
 func formatClaudeCmd(argv []string) string {
-	parts := make([]string, 0, len(argv)+1)
-	parts = append(parts, "claude")
+	parts := []string{"claude"}
 	for _, a := range argv {
 		if strings.ContainsAny(a, " '\"\\$") {
 			// shell-quote with single quotes; escape any embedded singles.
