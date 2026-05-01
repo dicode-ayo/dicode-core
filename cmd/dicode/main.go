@@ -124,6 +124,11 @@ func dispatch(c *ipc.ControlClient, args []string) error {
 			return fmt.Errorf("usage: dicode auth <reset-passphrase>")
 		}
 		return cmdAuth(c, args[1:])
+	case "mcp":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: dicode mcp <install|uninstall|print-config> [flags]")
+		}
+		return cmdMCP(args[1:])
 	default:
 		return fmt.Errorf("unknown command %q — run 'dicode' for usage", args[0])
 	}
@@ -184,6 +189,163 @@ func cmdAuth(c *ipc.ControlClient, args []string) error {
 	default:
 		return fmt.Errorf("unknown auth subcommand %q", args[0])
 	}
+}
+
+// cmdMCP implements `dicode mcp <subcommand>`. Three operator-friendly
+// helpers around the official `claude mcp` machinery:
+//
+//   install      — runs `claude mcp add --transport http <name> <url>
+//                   --header "Authorization: Bearer <key>"`. The key is
+//                   read from the --key flag, the DICODE_API_KEY env var,
+//                   or stdin (in that order). Falls back to printing the
+//                   command if `claude` is not on PATH.
+//
+//   uninstall    — runs `claude mcp remove <name>`.
+//
+//   print-config — prints the install command + the equivalent
+//                   .claude/mcp.json snippet, no shell-out. Useful for
+//                   docs / scripting / hand-editing.
+//
+// All three accept --name (default "dicode") and --url (default
+// "http://localhost:8080/mcp"). The CLI does not call into the daemon
+// for any of this — it's pure local tooling around the host's `claude`
+// binary, so it works even when the daemon is offline.
+func cmdMCP(args []string) error {
+	fs := flag.NewFlagSet("mcp", flag.ExitOnError)
+	name := fs.String("name", "dicode", "MCP server name as it will appear in `claude mcp list`")
+	url := fs.String("url", "http://localhost:8080/mcp", "dicode MCP endpoint")
+	key := fs.String("key", "", "dicode API key (Bearer). Falls back to DICODE_API_KEY env var, then prompts on stdin.")
+	printOnly := fs.Bool("print", false, "print the command instead of running it")
+
+	sub := args[0]
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+
+	switch sub {
+	case "install":
+		k := resolveAPIKey(*key)
+		if k == "" {
+			return fmt.Errorf("API key required: pass --key, set DICODE_API_KEY, or pipe via stdin. Mint one in the WebUI Security page.")
+		}
+		argv := []string{
+			"mcp", "add", "--transport", "http", *name, *url,
+			"--header", "Authorization: Bearer " + k,
+		}
+		if *printOnly {
+			fmt.Println(formatClaudeCmd(argv))
+			return nil
+		}
+		return runClaude(argv, "install", *name, argv)
+	case "uninstall":
+		argv := []string{"mcp", "remove", *name}
+		if *printOnly {
+			fmt.Println(formatClaudeCmd(argv))
+			return nil
+		}
+		return runClaude(argv, "uninstall", *name, argv)
+	case "print-config":
+		k := resolveAPIKey(*key)
+		if k == "" {
+			k = "<api-key>"
+		}
+		argv := []string{
+			"mcp", "add", "--transport", "http", *name, *url,
+			"--header", "Authorization: Bearer " + k,
+		}
+		fmt.Println("# CLI:")
+		fmt.Println(formatClaudeCmd(argv))
+		fmt.Println()
+		fmt.Println("# .claude/mcp.json:")
+		fmt.Println(mcpJSONSnippet(*name, *url, k))
+		return nil
+	default:
+		return fmt.Errorf("unknown mcp subcommand %q — supported: install | uninstall | print-config", sub)
+	}
+}
+
+// resolveAPIKey returns the first non-empty source: --key flag, the
+// DICODE_API_KEY env var, or one read from stdin (when stdin is a
+// pipe — interactive prompts would deadlock the test harness).
+func resolveAPIKey(flagVal string) string {
+	if flagVal != "" {
+		return flagVal
+	}
+	if v := os.Getenv("DICODE_API_KEY"); v != "" {
+		return v
+	}
+	stat, err := os.Stdin.Stat()
+	if err == nil && stat.Mode()&os.ModeCharDevice == 0 {
+		// stdin is a pipe — read up to the first newline.
+		var b [4096]byte
+		n, _ := os.Stdin.Read(b[:])
+		return strings.TrimSpace(string(b[:n]))
+	}
+	return ""
+}
+
+// runClaude invokes the local `claude` binary with the given argv.
+// When `claude` is not on PATH, prints the would-have-run command and
+// a hint, returning a non-zero error so the caller knows nothing
+// happened. Output and stderr are wired through to the operator's
+// terminal so `claude mcp add`'s own diagnostics are visible.
+func runClaude(claudeArgs []string, action, name string, fullArgv []string) error {
+	if _, err := exec.LookPath("claude"); err != nil {
+		fmt.Fprintln(os.Stderr, "dicode: `claude` binary not found on PATH.")
+		fmt.Fprintln(os.Stderr, "        Install via https://install.claude.ai or `npm i -g @anthropic-ai/claude-code`,")
+		fmt.Fprintln(os.Stderr, "        then re-run, or copy this command into a host where `claude` is available:")
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintln(os.Stderr, "  "+formatClaudeCmd(fullArgv))
+		return fmt.Errorf("claude binary not found")
+	}
+	cmd := exec.Command("claude", claudeArgs...) // #nosec G204 — claudeArgs is built from typed flags + Bearer header, no user shell injection.
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("claude mcp %s: %w", action, err)
+	}
+	fmt.Fprintf(os.Stderr, "dicode: %sed MCP server %q. Try `claude mcp list` to verify.\n", action, name)
+	return nil
+}
+
+// formatClaudeCmd renders argv as a copy-pasteable shell line. The
+// header value (Authorization: Bearer ...) is the only argument that
+// realistically contains spaces, so we shell-quote it. Other args are
+// known-safe (URLs, transport literals, the server name).
+func formatClaudeCmd(argv []string) string {
+	parts := make([]string, 0, len(argv)+1)
+	parts = append(parts, "claude")
+	for _, a := range argv {
+		if strings.ContainsAny(a, " '\"\\$") {
+			// shell-quote with single quotes; escape any embedded singles.
+			parts = append(parts, "'"+strings.ReplaceAll(a, "'", `'\''`)+"'")
+		} else {
+			parts = append(parts, a)
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+// mcpJSONSnippet returns the .claude/mcp.json shape for the given
+// server name, URL, and key. Hand-editable equivalent of the
+// `claude mcp add` command above.
+func mcpJSONSnippet(name, url, key string) string {
+	doc := map[string]any{
+		"mcpServers": map[string]any{
+			name: map[string]any{
+				"type": "http",
+				"url":  url,
+				"headers": map[string]any{
+					"Authorization": "Bearer " + key,
+				},
+			},
+		},
+	}
+	b, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return "(json marshal failed: " + err.Error() + ")"
+	}
+	return string(b)
 }
 
 func cmdTask(c *ipc.ControlClient, args []string) error {
@@ -634,6 +796,9 @@ Commands:
   secrets delete <key>            delete a secret
   relay trust-broker --yes        clear the pinned broker signing key (TOFU re-pin on reconnect)
   relay rotate-identity --yes     rotate the daemon's relay identity (irreversible)
+  mcp install [--key K]           register dicode's MCP endpoint with local Claude Code
+  mcp uninstall                   reverse — runs 'claude mcp remove dicode'
+  mcp print-config                print the install command + .claude/mcp.json snippet
   version                         print version
 `)
 }

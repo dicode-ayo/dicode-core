@@ -18,17 +18,34 @@ The MCP server is mounted at `http://localhost:8080/mcp`.
 
 **Protocol**: JSON-RPC 2.0 over HTTP. `POST /mcp` dispatches tool calls. `GET /mcp` returns server info.
 
-**Claude Code:** mint an API key in the dashboard (Security → Create API Key — the raw key is shown once), then:
+**Claude Code:** three ways, pick whichever:
 
-```bash
-claude mcp add --transport http dicode \
-  http://localhost:8080/mcp \
-  --header "Authorization: Bearer dck_<your-key-here>"
+1. **Dashboard one-click** — Security → Create API Key. The success card has a "Connect to Claude Code" expander with the install command pre-filled with the new key. Copy + paste, done.
 
-# Verify
-claude mcp list
-claude /mcp                        # interactive: pick dicode, see tools
-```
+2. **`dicode mcp install`** — runs the install for you given a key:
+
+   ```bash
+   dicode mcp install --key dck_<your-key-here>
+   # or pipe it:
+   echo "dck_..." | dicode mcp install
+   # or:  DICODE_API_KEY=dck_... dicode mcp install
+
+   # variants
+   dicode mcp uninstall                   # reverses (claude mcp remove)
+   dicode mcp print-config                # prints command + .claude/mcp.json snippet
+   ```
+
+3. **Manual** — mint a key in the dashboard, then:
+
+   ```bash
+   claude mcp add --transport http dicode \
+     http://localhost:8080/mcp \
+     --header "Authorization: Bearer dck_<your-key-here>"
+
+   # Verify
+   claude mcp list
+   claude /mcp                        # interactive: pick dicode, see tools
+   ```
 
 Or hand-edit `.claude/mcp.json`:
 ```json

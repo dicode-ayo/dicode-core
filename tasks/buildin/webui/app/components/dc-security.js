@@ -84,6 +84,19 @@ class DcSecurity extends LitElement {
     navigator.clipboard.writeText(this._newKeyRaw).catch(() => {});
   }
 
+  // The CLI shape mirrors `dicode mcp install` so what the operator
+  // sees here is what the dicode CLI would run on their behalf. URL
+  // is rendered against window.location so reverse-proxy + custom-port
+  // setups produce a working command without manual editing.
+  _claudeMcpAddCmd(rawKey) {
+    const url = window.location.origin + '/mcp';
+    return `claude mcp add --transport http dicode ${url} --header 'Authorization: Bearer ${rawKey}'`;
+  }
+
+  _copyClaudeCmd() {
+    navigator.clipboard.writeText(this._claudeMcpAddCmd(this._newKeyRaw)).catch(() => {});
+  }
+
   render() {
     return html`
       <h1>Security</h1>
@@ -144,6 +157,25 @@ class DcSecurity extends LitElement {
             <button class="btn btn-sm" @click=${() => this._copyKey()}>Copy</button>
             <button class="btn btn-sm secondary" @click=${() => this._newKeyRaw = ''}>Dismiss</button>
           </div>
+
+          <!-- Connect to Claude Code: pre-filled `claude mcp add` command. The
+               command is the same one `dicode mcp install` would run. Operators
+               with the `claude` CLI on PATH can paste this straight into a
+               terminal and they're connected. -->
+          <details style="margin-top:0.75rem">
+            <summary style="cursor:pointer;font-size:0.85rem;font-weight:600">
+              ▸ Connect to Claude Code (one-liner)
+            </summary>
+            <div style="margin-top:0.5rem;display:flex;gap:var(--space-sm);align-items:center">
+              <code style="font-size:0.78rem;word-break:break-all;flex:1;background:rgba(0,0,0,.2);padding:0.5rem;border-radius:4px">${this._claudeMcpAddCmd(this._newKeyRaw)}</code>
+              <button class="btn btn-sm" @click=${() => this._copyClaudeCmd()}>Copy</button>
+            </div>
+            <p class="meta" style="font-size:0.75rem;margin-top:0.4rem">
+              Requires the official <code>claude</code> CLI on PATH (<code>npm i -g @anthropic-ai/claude-code</code> or
+              <code>curl -fsSL https://install.claude.ai | bash</code>). Equivalent to
+              <code>dicode mcp install --key ${this._newKeyRaw.slice(0, 8)}…</code>.
+            </p>
+          </details>
         </div>
       ` : ''}
 
