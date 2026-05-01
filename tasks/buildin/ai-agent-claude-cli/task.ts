@@ -134,83 +134,78 @@ export default async function main({ params, kv }: SDK) {
     // `.claude/` dir at the invocation cwd: `.claude/mcp.json` configures
     // additional MCP servers, `.claude/skills/*.md` are loaded as skills.
     // We use a uuid-named subfolder under ${DATADIR}/tmp/claude-cli/ so
-    // each turn is isolated and cleanup is straightforward.
+    // each turn is isolated.
+    //
+    // Cleanup is handled out-of-band by buildin/temp-cleanup, which
+    // sweeps ${DATADIR}/tmp/<task>/<uuid>/ leaves older than 1 hour on
+    // its 10-minute cron. Doing it inline (try/finally on every turn)
+    // is redundant work and complicates the happy path; the cron is the
+    // source of truth.
     const dataDir = Deno.env.get("DICODE_DATA_DIR") ??
                     `${Deno.env.get("HOME") ?? "/root"}/.dicode`;
     const workdir = `${dataDir}/tmp/claude-cli/${crypto.randomUUID()}`;
     const claudeDir = `${workdir}/.claude`;
 
+    await Deno.mkdir(`${claudeDir}/skills`, { recursive: true });
+
+    // MCP wiring: write .claude/mcp.json so Claude can call dicode tasks
+    // as MCP tools. The API key is the same one the operator's local
+    // Claude Code uses (stashed by `dicode mcp install`); empty = skip
+    // and let Claude run without dicode-task tool access.
     let mcpWired = false;
-    let skillsWired = 0;
-    try {
-        await Deno.mkdir(`${claudeDir}/skills`, { recursive: true });
-
-        // MCP wiring: write .claude/mcp.json so Claude can call dicode tasks
-        // as MCP tools. The API key is the same one the operator's local
-        // Claude Code uses (stashed by `dicode mcp install`); empty = skip
-        // and let Claude run without dicode-task tool access.
-        const mcpKey = Deno.env.get("DICODE_MCP_API_KEY") ?? "";
-        if (enableMcp && mcpKey) {
-            const mcpConfig = {
-                mcpServers: {
-                    dicode: {
-                        type: "http",
-                        url:  mcpURL,
-                        headers: { Authorization: `Bearer ${mcpKey}` },
-                    },
+    const mcpKey = Deno.env.get("DICODE_MCP_API_KEY") ?? "";
+    if (enableMcp && mcpKey) {
+        const mcpConfig = {
+            mcpServers: {
+                dicode: {
+                    type: "http",
+                    url:  mcpURL,
+                    headers: { Authorization: `Bearer ${mcpKey}` },
                 },
-            };
-            await Deno.writeTextFile(`${claudeDir}/mcp.json`, JSON.stringify(mcpConfig));
-            mcpWired = true;
-        }
+            },
+        };
+        await Deno.writeTextFile(`${claudeDir}/mcp.json`, JSON.stringify(mcpConfig));
+        mcpWired = true;
+    }
 
-        // Skills wiring: copy each named skill file from skills_dir into
-        // .claude/skills/. Names are validated against a strict regex to
-        // defang any attempt at traversal via "../" or absolute paths.
-        if (skillsParam && skillsDir) {
-            const names = skillsParam.split(",").map((s) => s.trim()).filter(Boolean);
-            for (const name of names) {
-                if (!SAFE_SKILL_NAME.test(name)) {
-                    console.warn(`ai-agent-claude-cli: skipping skill ${JSON.stringify(name)} (invalid name)`);
-                    continue;
-                }
-                const src = `${skillsDir}/${name}.md`;
-                const dst = `${claudeDir}/skills/${name}.md`;
-                try {
-                    await Deno.copyFile(src, dst);
-                    skillsWired++;
-                } catch (e) {
-                    console.warn(`ai-agent-claude-cli: skipping skill ${name}: ${e instanceof Error ? e.message : String(e)}`);
-                }
+    // Skills wiring: copy each named skill file from skills_dir into
+    // .claude/skills/. Names are validated against a strict regex to
+    // defang any attempt at traversal via "../" or absolute paths.
+    let skillsWired = 0;
+    if (skillsParam && skillsDir) {
+        const names = skillsParam.split(",").map((s) => s.trim()).filter(Boolean);
+        for (const name of names) {
+            if (!SAFE_SKILL_NAME.test(name)) {
+                console.warn(`ai-agent-claude-cli: skipping skill ${JSON.stringify(name)} (invalid name)`);
+                continue;
+            }
+            const src = `${skillsDir}/${name}.md`;
+            const dst = `${claudeDir}/skills/${name}.md`;
+            try {
+                await Deno.copyFile(src, dst);
+                skillsWired++;
+            } catch (e) {
+                console.warn(`ai-agent-claude-cli: skipping skill ${name}: ${e instanceof Error ? e.message : String(e)}`);
             }
         }
-
-        console.log(`ai-agent-claude-cli: invoking ${cliPath} (resume=${claudeSessionId ? claudeSessionId.slice(0, 8) + "…" : "no"}, model=${model || "default"}, dicode_session=${dicodeSessionId.slice(0, 8)}…, mcp=${mcpWired ? "on" : "off"}, skills=${skillsWired})`);
-
-        const cmd = new Deno.Command(cliPath, {
-            args,
-            env: {
-                CLAUDE_CODE_OAUTH_TOKEN: oauthToken,
-                HOME: Deno.env.get("HOME") ?? "/root",
-                PATH: Deno.env.get("PATH") ?? "/usr/local/bin:/usr/bin:/bin",
-            },
-            cwd: workdir,
-            stdin: "null",
-            stdout: "piped",
-            stderr: "piped",
-        });
-
-        return await runClaudeAndDecode(cmd, oauthToken, mcpKey, kv, dicodeSessionId, claudeSessionId, model);
-    } finally {
-        // Best-effort cleanup. Failures here are non-fatal — the
-        // tmp-cleanup buildin task sweeps orphans on a schedule. We
-        // still log so an operator can investigate persistent leaks.
-        try {
-            await Deno.remove(workdir, { recursive: true });
-        } catch (e) {
-            console.warn(`ai-agent-claude-cli: cleanup of ${workdir} failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
-        }
     }
+
+    console.log(`ai-agent-claude-cli: invoking ${cliPath} (resume=${claudeSessionId ? claudeSessionId.slice(0, 8) + "…" : "no"}, model=${model || "default"}, dicode_session=${dicodeSessionId.slice(0, 8)}…, mcp=${mcpWired ? "on" : "off"}, skills=${skillsWired})`);
+
+    const cmd = new Deno.Command(cliPath, {
+        args,
+        env: {
+            CLAUDE_CODE_OAUTH_TOKEN: oauthToken,
+            HOME: Deno.env.get("HOME") ?? "/root",
+            PATH: Deno.env.get("PATH") ?? "/usr/local/bin:/usr/bin:/bin",
+        },
+        cwd: workdir,
+        stdin: "null",
+        stdout: "piped",
+        stderr: "piped",
+    });
+
+    return await runClaudeAndDecode(cmd, oauthToken, mcpKey, kv, dicodeSessionId, claudeSessionId, model);
 }
 
 // runClaudeAndDecode is the post-setup half of main: spawn claude,

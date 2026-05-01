@@ -151,9 +151,12 @@ On every invocation, the task creates `${DICODE_DATA_DIR}/tmp/claude-cli/<uuid>/
 populates it with skill markdowns + `mcp.json`, and runs `claude -p` with that
 as its CWD. Claude CLI honors `.claude/` for project-local config, so the
 skills become loadable instructions and the MCP server becomes a tool surface
-the agent can call. The directory is removed in a `finally` block on task
-exit; orphans (from a crashed task) are swept by `buildin/temp-cleanup` on
-its schedule.
+the agent can call.
+
+Cleanup is **out-of-band**: `buildin/temp-cleanup` sweeps any leaf directory
+under `${DICODE_DATA_DIR}/tmp/<task>/<uuid>/` that's older than 1 hour, every
+10 minutes via cron. The agent task itself doesn't try/finally-clean — the
+cron is the source of truth and avoids redundant work on the hot path.
 
 The `DICODE_MCP_API_KEY` secret is auto-populated by `dicode mcp install` —
 the same key the operator's local Claude Code uses, so one install command
