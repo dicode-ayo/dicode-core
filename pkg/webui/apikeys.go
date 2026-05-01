@@ -123,6 +123,14 @@ func (s *apiKeyStore) revoke(ctx context.Context, id string) error {
 	return s.db.Exec(ctx, `DELETE FROM api_keys WHERE id = ?`, id)
 }
 
+// revokeByName deletes API keys with the given exact name. Used by the
+// CLI's `dicode mcp uninstall` to clean up keys it minted earlier.
+// Returns nil if no rows matched (the operator may have already revoked
+// it via the dashboard — uninstall should be idempotent).
+func (s *apiKeyStore) revokeByName(ctx context.Context, name string) error {
+	return s.db.Exec(ctx, `DELETE FROM api_keys WHERE name = ?`, name)
+}
+
 // APIKeyInfo is the public representation of an API key.
 type APIKeyInfo struct {
 	ID        string     `json:"id"`

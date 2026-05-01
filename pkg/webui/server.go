@@ -202,6 +202,32 @@ func (s *Server) SetRelayClient(rc *relay.Client) {
 // endpoint. Pass nil to disable (the endpoint will return 503).
 func (s *Server) SetReplayer(r *registry.Replayer) { s.replayer = r }
 
+// MintAPIKey implements ipc.APIKeyMinter. Generates a new API key with
+// the given name and returns the raw value (which is shown once and
+// must be captured by the caller). Used by the CLI for `dicode mcp
+// install` to create a key for Claude Code's MCP config without
+// requiring the operator to mint one in the dashboard manually.
+func (s *Server) MintAPIKey(ctx context.Context, name string) (ipc.APIKeyMintResult, error) {
+	raw, info, err := s.apiKeys.generate(ctx, name)
+	if err != nil {
+		return ipc.APIKeyMintResult{}, err
+	}
+	return ipc.APIKeyMintResult{
+		Key:       raw,
+		ID:        info.ID,
+		Name:      info.Name,
+		Prefix:    info.Prefix,
+		CreatedAt: info.CreatedAt.Unix(),
+	}, nil
+}
+
+// RevokeAPIKeyByName implements ipc.APIKeyMinter. Idempotent: returns
+// nil even when no key matched (the dashboard may have revoked it
+// already).
+func (s *Server) RevokeAPIKeyByName(ctx context.Context, name string) error {
+	return s.apiKeys.revokeByName(ctx, name)
+}
+
 // SetManagedRuntimes registers the list of managed runtimes (Deno, Python, …)
 // that will appear in the Config UI. Call this after New and before Start.
 func (s *Server) SetManagedRuntimes(runtimes []pkgruntime.ManagedRuntime) {

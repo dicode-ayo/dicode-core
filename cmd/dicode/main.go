@@ -128,7 +128,7 @@ func dispatch(c *ipc.ControlClient, args []string) error {
 		if len(args) < 2 {
 			return fmt.Errorf("usage: dicode mcp <install|uninstall|print-config> [flags]")
 		}
-		return cmdMCP(args[1:])
+		return cmdMCP(c, args[1:])
 	default:
 		return fmt.Errorf("unknown command %q — run 'dicode' for usage", args[0])
 	}
@@ -194,27 +194,30 @@ func cmdAuth(c *ipc.ControlClient, args []string) error {
 // cmdMCP implements `dicode mcp <subcommand>`. Three operator-friendly
 // helpers around the official `claude mcp` machinery:
 //
-//   install      — runs `claude mcp add --transport http <name> <url>
-//                   --header "Authorization: Bearer <key>"`. The key is
-//                   read from the --key flag, the DICODE_API_KEY env var,
-//                   or stdin (in that order). Falls back to printing the
-//                   command if `claude` is not on PATH.
+//   install      — mints a fresh API key in the daemon (named
+//                   "mcp-<server-name>"), then runs `claude mcp add
+//                   --transport http <name> <url> --header
+//                   "Authorization: Bearer <key>"`. Re-running rotates
+//                   the key (revokes the old one with the same name
+//                   first, mints a new one). Pass --key to skip the
+//                   mint and use a key you already have.
 //
-//   uninstall    — runs `claude mcp remove <name>`.
+//   uninstall    — revokes the API key on the daemon side and runs
+//                   `claude mcp remove <name>`. Idempotent.
 //
 //   print-config — prints the install command + the equivalent
-//                   .claude/mcp.json snippet, no shell-out. Useful for
-//                   docs / scripting / hand-editing.
+//                   .claude/mcp.json snippet, no shell-out, no key
+//                   minting. Useful for docs / scripting / inspection.
 //
 // All three accept --name (default "dicode") and --url (default
-// "http://localhost:8080/mcp"). The CLI does not call into the daemon
-// for any of this — it's pure local tooling around the host's `claude`
-// binary, so it works even when the daemon is offline.
-func cmdMCP(args []string) error {
+// "http://localhost:8080/mcp"). The dicode-side key name is
+// "mcp-<server-name>" so each MCP-server alias gets its own key — pass
+// distinct --name values per host if you want per-host keys.
+func cmdMCP(c *ipc.ControlClient, args []string) error {
 	fs := flag.NewFlagSet("mcp", flag.ExitOnError)
 	name := fs.String("name", "dicode", "MCP server name as it will appear in `claude mcp list`")
 	url := fs.String("url", "http://localhost:8080/mcp", "dicode MCP endpoint")
-	key := fs.String("key", "", "dicode API key (Bearer). Falls back to DICODE_API_KEY env var, then prompts on stdin.")
+	key := fs.String("key", "", "dicode API key (Bearer). Empty = mint a fresh one via the daemon (recommended).")
 	printOnly := fs.Bool("print", false, "print the command instead of running it")
 
 	sub := args[0]
@@ -222,11 +225,26 @@ func cmdMCP(args []string) error {
 		return err
 	}
 
+	keyName := "mcp-" + *name
+
 	switch sub {
 	case "install":
 		k := resolveAPIKey(*key)
 		if k == "" {
-			return fmt.Errorf("API key required: pass --key, set DICODE_API_KEY, or pipe via stdin. Mint one in the WebUI Security page.")
+			// Zero-touch path: revoke any previous key with this name
+			// (idempotent — revoke returns nil for a name that doesn't
+			// exist), then mint a fresh one. Rotating on every install
+			// is intentional: the raw value of an existing key isn't
+			// recoverable (only its hash is stored), so we can't reuse.
+			if err := revokeAPIKeyByName(c, keyName); err != nil {
+				return fmt.Errorf("revoke previous key (idempotent cleanup): %w", err)
+			}
+			minted, err := mintAPIKey(c, keyName)
+			if err != nil {
+				return fmt.Errorf("mint api key via daemon: %w", err)
+			}
+			k = minted
+			fmt.Fprintf(os.Stderr, "dicode: minted API key %q in the daemon (rotates on every install)\n", keyName)
 		}
 		argv := []string{
 			"mcp", "add", "--transport", "http", *name, *url,
@@ -238,6 +256,13 @@ func cmdMCP(args []string) error {
 		}
 		return runClaude(argv, "install", *name, argv)
 	case "uninstall":
+		// Revoke the daemon-side key first, then drop the local Claude
+		// MCP entry. Either side may already be missing — both are
+		// idempotent. We continue past errors here so the operator can
+		// always finish a partial install.
+		if err := revokeAPIKeyByName(c, keyName); err != nil {
+			fmt.Fprintf(os.Stderr, "dicode: warning: revoke api key %q: %v (continuing)\n", keyName, err)
+		}
 		argv := []string{"mcp", "remove", *name}
 		if *printOnly {
 			fmt.Println(formatClaudeCmd(argv))
@@ -264,9 +289,43 @@ func cmdMCP(args []string) error {
 	}
 }
 
+// mintAPIKey asks the daemon to generate a fresh API key with the given
+// name and returns the raw value. The daemon stores only the hash so
+// the raw value is never recoverable after this — caller must use it
+// immediately.
+func mintAPIKey(c *ipc.ControlClient, name string) (string, error) {
+	resp, err := c.Send(ipc.Request{Method: "cli.api_keys.create", Name: name})
+	if err != nil {
+		return "", err
+	}
+	if resp.Error != "" {
+		return "", fmt.Errorf("%s", resp.Error)
+	}
+	var out ipc.APIKeyMintResult
+	if err := remarshal(resp.Result, &out); err != nil {
+		return "", fmt.Errorf("decode mint result: %w", err)
+	}
+	return out.Key, nil
+}
+
+// revokeAPIKeyByName asks the daemon to delete any API key with the given
+// name. Idempotent — the daemon returns nil even when no rows matched.
+func revokeAPIKeyByName(c *ipc.ControlClient, name string) error {
+	resp, err := c.Send(ipc.Request{Method: "cli.api_keys.revoke_by_name", Name: name})
+	if err != nil {
+		return err
+	}
+	if resp.Error != "" {
+		return fmt.Errorf("%s", resp.Error)
+	}
+	return nil
+}
+
 // resolveAPIKey returns the first non-empty source: --key flag, the
 // DICODE_API_KEY env var, or one read from stdin (when stdin is a
-// pipe — interactive prompts would deadlock the test harness).
+// pipe — interactive prompts would deadlock the test harness). Used
+// for the explicit-key opt-out path; the default install flow mints
+// via the daemon and never goes through here.
 func resolveAPIKey(flagVal string) string {
 	if flagVal != "" {
 		return flagVal
@@ -796,8 +855,8 @@ Commands:
   secrets delete <key>            delete a secret
   relay trust-broker --yes        clear the pinned broker signing key (TOFU re-pin on reconnect)
   relay rotate-identity --yes     rotate the daemon's relay identity (irreversible)
-  mcp install [--key K]           register dicode's MCP endpoint with local Claude Code
-  mcp uninstall                   reverse — runs 'claude mcp remove dicode'
+  mcp install                     mint an API key + run 'claude mcp add' (zero-touch)
+  mcp uninstall                   revoke the key + run 'claude mcp remove dicode'
   mcp print-config                print the install command + .claude/mcp.json snippet
   version                         print version
 `)

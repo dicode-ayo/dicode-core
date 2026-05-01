@@ -194,6 +194,16 @@ type RunResult struct {
 	ReturnValue any    `json:"returnValue"`
 }
 
+// APIKeyMintResult is the cli.api_keys.create response. The raw `Key` is
+// returned exactly once — the daemon stores only its hash.
+type APIKeyMintResult struct {
+	Key       string `json:"key"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Prefix    string `json:"prefix"`
+	CreatedAt int64  `json:"created_at"`
+}
+
 // AIResult is the cli.ai response. reply is the text surfaced to the user;
 // session_id is echoed back so the CLI can persist it for follow-up turns.
 // TaskID is the task id that was actually fired — useful in case the caller

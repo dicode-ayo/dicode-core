@@ -53,6 +53,7 @@ type ControlServer struct {
 	metricsProvider MetricsProvider
 	database        db.DB                // for broker pubkey trust pinning; nil in tests
 	rotateRelay     RelayIdentityRotator // nil if relay not enabled
+	apiKeys         APIKeyMinter         // nil if webui not wired (tests)
 	log             *zap.Logger
 
 	// defaultAITask is cfg.AI.Task — the task id that `dicode ai` fires when
@@ -251,9 +252,51 @@ func (cs *ControlServer) dispatch(ctx context.Context, req Request) (any, error)
 	case "cli.auth.reset_passphrase":
 		return cs.handleAuthResetPassphrase(ctx)
 
+	case "cli.api_keys.create":
+		return cs.handleAPIKeyCreate(ctx, req)
+
+	case "cli.api_keys.revoke_by_name":
+		return nil, cs.handleAPIKeyRevokeByName(ctx, req)
+
 	default:
 		return nil, fmt.Errorf("unknown method: %s", req.Method)
 	}
+}
+
+// APIKeyMinter is the narrow surface the control server uses to mint
+// and revoke API keys on behalf of CLI clients. Implemented by
+// webui.Server (which owns the apiKeyStore). Defined here so pkg/ipc
+// doesn't need to import pkg/webui — same pattern as
+// SourceDevModeSetter / RepoPathResolver in the per-task IPC server.
+type APIKeyMinter interface {
+	MintAPIKey(ctx context.Context, name string) (APIKeyMintResult, error)
+	RevokeAPIKeyByName(ctx context.Context, name string) error
+}
+
+// SetAPIKeyMinter wires the API-key minter for cli.api_keys.* dispatch.
+// Called from the daemon at startup once the webui Server is built.
+// Nil leaves the methods returning a clear error (tests / configurations
+// without webui).
+func (cs *ControlServer) SetAPIKeyMinter(m APIKeyMinter) { cs.apiKeys = m }
+
+func (cs *ControlServer) handleAPIKeyCreate(ctx context.Context, req Request) (any, error) {
+	if cs.apiKeys == nil {
+		return nil, fmt.Errorf("api-key minter not configured")
+	}
+	if req.Name == "" {
+		return nil, fmt.Errorf("name required")
+	}
+	return cs.apiKeys.MintAPIKey(ctx, req.Name)
+}
+
+func (cs *ControlServer) handleAPIKeyRevokeByName(ctx context.Context, req Request) error {
+	if cs.apiKeys == nil {
+		return fmt.Errorf("api-key minter not configured")
+	}
+	if req.Name == "" {
+		return fmt.Errorf("name required")
+	}
+	return cs.apiKeys.RevokeAPIKeyByName(ctx, req.Name)
 }
 
 // AuthResetPassphraseResult carries the freshly-generated plaintext back
