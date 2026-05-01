@@ -13,3 +13,4 @@ tests/e2e/.auth-state.json
 # Top-level Deno lockfile — only tasks/deno.lock is authoritative.
 /deno.lock
 !.claude/memory/
+__pycache__/
