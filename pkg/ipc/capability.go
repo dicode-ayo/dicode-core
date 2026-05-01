@@ -31,6 +31,10 @@ const (
 	CapKVWrite     = "kv.write"
 	CapOutputWrite = "output.write"
 	CapReturn      = "return"
+	// CapSetGroup allows a task to label its own run via dicode.set_group()
+	// (#116). Self-affecting and granted to every task token by default; the
+	// cap exists only so future denial policies can revoke it.
+	CapSetGroup = "set_group"
 
 	// CapOutputSecret allows a task to call dicode.output(map, {
 	// secret: true }) — flagging values for daemon-side redaction and
@@ -102,5 +106,6 @@ func defaultTaskCaps() []string {
 		CapOutputWrite,
 		CapReturn,
 		CapOutputSecret,
+		CapSetGroup,
 	}
 }

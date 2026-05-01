@@ -123,6 +123,10 @@ export interface Dicode {
   run_task:       (taskID: string, params?: Record<string, string>)  => Promise<unknown>;
   list_tasks:     ()                                                   => Promise<unknown>;
   get_runs:       (taskID: string, opts?: { limit?: number })         => Promise<unknown>;
+  // set_group labels the current run with a free-text string used by the
+  // WebUI to collapse same-group siblings (#116). Last write wins; only
+  // affects the current run.
+  set_group:      (label: string)                                      => Promise<void>;
   secrets_set:    (key: string, value: string)                        => Promise<void>;
   secrets_delete: (key: string)                                        => Promise<void>;
   oauth:          DicodeOAuth;
@@ -325,6 +329,7 @@ const dicode: Dicode = {
   run_task:       (taskID, params)  => __call__({ method: "dicode.run_task",       taskID, params: params ?? {} }),
   list_tasks:     ()                => __call__({ method: "dicode.list_tasks" }),
   get_runs:       (taskID, opts)    => __call__({ method: "dicode.get_runs",        taskID, limit: opts?.limit ?? 10 }),
+  set_group:      (label)           => __call__({ method: "dicode.set_group",       group: String(label ?? "") }) as Promise<void>,
   secrets_set:    (key, value)      => __call__({ method: "dicode.secrets_set",     key, stringValue: value }) as Promise<void>,
   secrets_delete: (key)             => __call__({ method: "dicode.secrets_delete",  key }) as Promise<void>,
   oauth: {

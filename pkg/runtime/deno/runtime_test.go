@@ -461,6 +461,31 @@ func TestRuntime_RunRecord(t *testing.T) {
 	}
 }
 
+// #116: dicode.set_group writes the label through IPC and lands on the runs row.
+func TestRuntime_SetGroup_Persists(t *testing.T) {
+	e := newTestEnv(t)
+	r := e.runSpec(t, `export default async function main({ dicode }) {
+		await dicode.set_group("chat-42")
+		return "ok"
+	}`, &task.Spec{
+		ID:      "set-group-task",
+		Name:    "set-group-task",
+		Runtime: task.RuntimeDeno,
+		Trigger: task.TriggerConfig{Manual: true},
+		Timeout: 30 * time.Second,
+	})
+	if r.Error != nil {
+		t.Fatalf("script error: %v", r.Error)
+	}
+	run, err := e.reg.GetRun(context.Background(), r.RunID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if run.Group != "chat-42" {
+		t.Errorf("Group = %q, want chat-42", run.Group)
+	}
+}
+
 func TestRuntime_ScriptError(t *testing.T) {
 	e := newTestEnv(t)
 	r := e.run(t, `throw new Error("boom")`, RunOptions{})
