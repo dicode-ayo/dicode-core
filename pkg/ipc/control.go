@@ -286,7 +286,18 @@ func (cs *ControlServer) handleAPIKeyCreate(ctx context.Context, req Request) (a
 	if req.Name == "" {
 		return nil, fmt.Errorf("name required")
 	}
-	return cs.apiKeys.MintAPIKey(ctx, req.Name)
+	res, err := cs.apiKeys.MintAPIKey(ctx, req.Name)
+	if err != nil {
+		cs.log.Warn("api key mint failed via control socket",
+			zap.String("name", req.Name), zap.Error(err))
+		return nil, err
+	}
+	// Audit trail: name + prefix only. The raw key is never logged —
+	// it lives in the response and the daemon discards its in-memory
+	// copy after the IPC reply is written.
+	cs.log.Info("api key minted via control socket",
+		zap.String("name", res.Name), zap.String("id", res.ID), zap.String("prefix", res.Prefix))
+	return res, nil
 }
 
 func (cs *ControlServer) handleAPIKeyRevokeByName(ctx context.Context, req Request) error {
@@ -296,7 +307,13 @@ func (cs *ControlServer) handleAPIKeyRevokeByName(ctx context.Context, req Reque
 	if req.Name == "" {
 		return fmt.Errorf("name required")
 	}
-	return cs.apiKeys.RevokeAPIKeyByName(ctx, req.Name)
+	if err := cs.apiKeys.RevokeAPIKeyByName(ctx, req.Name); err != nil {
+		cs.log.Warn("api key revoke-by-name failed via control socket",
+			zap.String("name", req.Name), zap.Error(err))
+		return err
+	}
+	cs.log.Info("api key revoked via control socket", zap.String("name", req.Name))
+	return nil
 }
 
 // AuthResetPassphraseResult carries the freshly-generated plaintext back

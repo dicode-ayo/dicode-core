@@ -225,7 +225,12 @@ func cmdMCP(c *ipc.ControlClient, args []string) error {
 		return err
 	}
 
-	keyName := "mcp-" + *name
+	// CLI-managed key names are namespaced under "dicode-cli/mcp/" so the
+	// idempotent revoke-by-name in install/uninstall can't accidentally
+	// sweep a dashboard-created key that happens to share a friendly name.
+	// The slash-separated structure is the marker for "tool-managed";
+	// dashboard input shapes don't normally produce slashes.
+	keyName := "dicode-cli/mcp/" + *name
 
 	switch sub {
 	case "install":
@@ -254,7 +259,7 @@ func cmdMCP(c *ipc.ControlClient, args []string) error {
 			fmt.Println(formatClaudeCmd(argv))
 			return nil
 		}
-		return runClaude(argv, "install", *name, argv)
+		return runClaude(argv, "install", *name)
 	case "uninstall":
 		// Revoke the daemon-side key first, then drop the local Claude
 		// MCP entry. Either side may already be missing — both are
@@ -268,7 +273,7 @@ func cmdMCP(c *ipc.ControlClient, args []string) error {
 			fmt.Println(formatClaudeCmd(argv))
 			return nil
 		}
-		return runClaude(argv, "uninstall", *name, argv)
+		return runClaude(argv, "uninstall", *name)
 	case "print-config":
 		k := resolveAPIKey(*key)
 		if k == "" {
@@ -348,13 +353,13 @@ func resolveAPIKey(flagVal string) string {
 // a hint, returning a non-zero error so the caller knows nothing
 // happened. Output and stderr are wired through to the operator's
 // terminal so `claude mcp add`'s own diagnostics are visible.
-func runClaude(claudeArgs []string, action, name string, fullArgv []string) error {
+func runClaude(claudeArgs []string, action, name string) error {
 	if _, err := exec.LookPath("claude"); err != nil {
 		fmt.Fprintln(os.Stderr, "dicode: `claude` binary not found on PATH.")
 		fmt.Fprintln(os.Stderr, "        Install via https://install.claude.ai or `npm i -g @anthropic-ai/claude-code`,")
 		fmt.Fprintln(os.Stderr, "        then re-run, or copy this command into a host where `claude` is available:")
 		fmt.Fprintln(os.Stderr)
-		fmt.Fprintln(os.Stderr, "  "+formatClaudeCmd(fullArgv))
+		fmt.Fprintln(os.Stderr, "  "+formatClaudeCmd(claudeArgs))
 		return fmt.Errorf("claude binary not found")
 	}
 	cmd := exec.Command("claude", claudeArgs...) // #nosec G204 — claudeArgs is built from typed flags + Bearer header, no user shell injection.

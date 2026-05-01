@@ -88,6 +88,15 @@ export default async function main({ params, kv }: SDK) {
 
     // Look up the Claude-side session id for this dicode session, if any.
     // First call: kv miss → no --resume → CLI mints a new Claude session.
+    //
+    // Concurrency note: two browser tabs sharing the same localStorage
+    // dicode_uuid will fire simultaneous `claude --resume <same-id>`
+    // subprocesses. The Claude CLI's behaviour under concurrent writes
+    // to the same session is undefined; the kv-set ordering at the
+    // bottom of this function is non-deterministic. Same pre-existing
+    // pattern as buildin/ai-agent. Mitigation if this becomes a problem:
+    // a per-session lock via kv.set with a TTL'd lease, or a fresh
+    // dicode_uuid per browser tab.
     let claudeSessionId = "";
     try {
         const stored = await kv.get(KV_PREFIX + dicodeSessionId);

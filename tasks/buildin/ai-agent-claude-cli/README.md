@@ -17,6 +17,14 @@ endpoints, per-token API key billing). Pick one:
 
 ## Setup
 
+> **Run with `server.auth: true`.** The webhook (`/hooks/ai-claude`)
+> is unauthenticated by default — pending [#96](https://github.com/dicode-ayo/dicode-core/issues/96)
+> for per-task webhook auth. Until that lands, anyone who can reach the
+> daemon's port can invoke the operator's Claude subscription quota.
+> Setting `server.auth: true` in `dicode.yaml` gates the whole HTTP
+> surface behind the session-cookie + API-key auth chain, which is the
+> recommended posture for any deployment beyond a personal laptop.
+
 ### 1. Mint a Claude OAuth token
 
 On any machine where you've signed into Claude Code with your Pro/Max account:
