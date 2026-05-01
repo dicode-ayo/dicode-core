@@ -52,13 +52,13 @@ ${stubBody}
 
 Deno.test("rejects empty prompt", async () => {
     Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "stub");
-    const r = await main({ params: makeParams([]), kv: makeKv(), dicode: fakeDicode });
+    const r: any = await main({ params: makeParams([]), kv: makeKv(), dicode: fakeDicode });
     assertEquals(r.ok, false);
 });
 
 Deno.test("rejects missing OAuth token", async () => {
     Deno.env.delete("CLAUDE_CODE_OAUTH_TOKEN");
-    const r = await main({
+    const r: any = await main({
         params: makeParams([["prompt", "hi"]]),
         kv: makeKv(), dicode: fakeDicode,
     });
@@ -70,7 +70,7 @@ Deno.test("rejects missing OAuth token", async () => {
 
 Deno.test("rejects malformed session_id", async () => {
     Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "stub");
-    const r = await main({
+    const r: any = await main({
         params: makeParams([
             ["prompt", "hi"],
             ["session_id", "../etc/passwd"],
@@ -86,7 +86,7 @@ Deno.test("rejects malformed session_id", async () => {
 Deno.test("happy path returns reply + session_id", async () => {
     Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "stub");
     const kv = makeKv();
-    const result = await withStubClaude(
+    const result: any = await withStubClaude(
         `cat <<'JSON'
 {"type":"result","subtype":"success","is_error":false,"result":"hello world","session_id":"sess-abc123","model":"claude-sonnet-4","total_cost_usd":0.001}
 JSON`,
@@ -113,7 +113,7 @@ Deno.test("reuses kv-mapped Claude session on follow-up turns", async () => {
     const dicodeId = "abc-123-uuid";
     kv.store.set("claude:" + dicodeId, "sess-pre-existing");
 
-    const result = await withStubClaude(
+    const result: any = await withStubClaude(
         `cat <<'JSON'
 {"type":"result","is_error":false,"result":"continued","session_id":"sess-pre-existing"}
 JSON`,
@@ -151,7 +151,7 @@ JSON`,
 
 Deno.test("surfaces is_error: true responses", async () => {
     Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "stub");
-    const result = await withStubClaude(
+    const result: any = await withStubClaude(
         `cat <<'JSON'
 {"type":"result","is_error":true,"result":"rate limited"}
 JSON`,
@@ -169,7 +169,7 @@ JSON`,
 
 Deno.test("surfaces non-zero exit code with stderr", async () => {
     Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "stub");
-    const result = await withStubClaude(
+    const result: any = await withStubClaude(
         `echo "auth failed: bad token" >&2
 exit 2`,
         () =>
@@ -186,7 +186,7 @@ exit 2`,
 
 Deno.test("redacts OAuth token if it leaks into stderr", async () => {
     Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "supersecret-token-xyz");
-    const result = await withStubClaude(
+    const result: any = await withStubClaude(
         `echo "diagnostic: token=supersecret-token-xyz failed" >&2
 exit 1`,
         () =>
@@ -209,7 +209,7 @@ Deno.test("redacts every occurrence of the token, not just the first", async () 
     // ever logs the OAuth token twice (or more), the trailing copies
     // would have leaked through. Use of replaceAll defends against that.
     Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "supersecret-token-xyz");
-    const result = await withStubClaude(
+    const result: any = await withStubClaude(
         `echo "first: supersecret-token-xyz; second: supersecret-token-xyz" >&2
 exit 1`,
         () =>
@@ -232,7 +232,7 @@ exit 1`,
 
 Deno.test("redacts token in JSON-parse-failure path too", async () => {
     Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "supersecret-token-xyz");
-    const result = await withStubClaude(
+    const result: any = await withStubClaude(
         `echo "non-JSON output mentioning supersecret-token-xyz somehow"`,
         () =>
             main({
