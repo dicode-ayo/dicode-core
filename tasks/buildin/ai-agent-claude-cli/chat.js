@@ -36,28 +36,39 @@
   // textContent / createElement only — never innerHTML. Model output is
   // untrusted; URL detection still has to escape via document fragments.
   // The split regex already restricts capture to `https?://...`, but we
-  // re-validate the matched chunk before assignment to .href because:
-  //   - CodeQL's "DOM text reinterpreted as HTML" check doesn't trace
-  //     the regex narrowing through .split, and would otherwise flag
-  //     this site as a javascript:-URL XSS surface.
-  //   - Defense in depth: any future regex change that loosens the
-  //     capture group must explicitly opt back into the validation.
+  // re-validate via the URL parser before assignment to .href:
+  //   - new URL(chunk) throws on anything malformed, including the
+  //     javascript:/data:/file:/vbscript:/etc. schemes once the regex
+  //     is bypassed via a future loosening.
+  //   - We then gate on parsed.protocol so only http/https reach .href.
+  //   - CodeQL recognizes URL-parser-with-protocol-check as a
+  //     sanitizer for the "DOM text reinterpreted as HTML" alert; a
+  //     plain regex .test() is not modeled as narrowing.
   var URL_SPLIT_RE = /(https?:\/\/[^\s<>"'()]+)/g;
-  var SAFE_URL_RE  = /^https?:\/\//i;
+  function safeURL(chunk) {
+    try {
+      var u = new URL(chunk);
+      if (u.protocol === "http:" || u.protocol === "https:") {
+        return u.href;
+      }
+    } catch (_) { /* malformed — fall through to null */ }
+    return null;
+  }
   function appendTextWithLinks(parent, text) {
     var parts = String(text).split(URL_SPLIT_RE);
     for (var i = 0; i < parts.length; i++) {
       var chunk = parts[i];
-      if (i % 2 === 1 && SAFE_URL_RE.test(chunk)) {
+      var safeHref = i % 2 === 1 ? safeURL(chunk) : null;
+      if (safeHref !== null) {
         var a = document.createElement("a");
-        a.href = chunk;
+        a.href = safeHref;
         a.target = "_blank";
         a.rel = "noopener noreferrer";
         a.textContent = chunk;
         parent.appendChild(a);
       } else if (chunk) {
-        // Anything that doesn't match SAFE_URL_RE — including potential
-        // javascript:/data:/file: URLs — is rendered as plain text only.
+        // Anything not http(s) — javascript:, data:, file:, malformed
+        // — renders as plain text via createTextNode.
         parent.appendChild(document.createTextNode(chunk));
       }
     }
