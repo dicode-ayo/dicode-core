@@ -145,19 +145,28 @@ export default async function main({ params, kv }: SDK) {
     const stdout = new TextDecoder().decode(out.stdout).trim();
     const stderr = new TextDecoder().decode(out.stderr).trim();
 
+    // redact strips the OAuth token (and any prefix-substring of it) from
+    // any stream we surface back to the caller. Uses replaceAll so a
+    // multi-occurrence leak (e.g. CLI repeats the diagnostic) is fully
+    // scrubbed; String.replace would only catch the first match.
+    const redact = (s: string) =>
+        oauthToken ? s.replaceAll(oauthToken, "<redacted>") : s;
+
     if (!out.success) {
         // Surface stderr for operator debugging; don't leak the OAuth
         // token even if the CLI ever logs it (it shouldn't, but defense
         // in depth).
-        const safeErr = stderr.replace(oauthToken, "<redacted>");
-        return fail(`claude exited ${out.code}: ${safeErr || "(no stderr)"}`);
+        return fail(`claude exited ${out.code}: ${redact(stderr) || "(no stderr)"}`);
     }
 
     let parsed: ClaudeResponse;
     try {
         parsed = JSON.parse(stdout);
     } catch (_e) {
-        return fail(`claude returned non-JSON output: ${stdout.slice(0, 500)}`);
+        // stdout is normally JSON; if Claude ever logs an OAuth-token-
+        // bearing diagnostic to stdout instead, the redact() guard keeps
+        // it out of the run log.
+        return fail(`claude returned non-JSON output: ${redact(stdout.slice(0, 500))}`);
     }
 
     if (parsed.is_error) {

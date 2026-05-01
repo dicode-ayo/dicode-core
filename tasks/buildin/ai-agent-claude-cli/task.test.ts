@@ -203,3 +203,45 @@ exit 1`,
         throw new Error(`expected <redacted> placeholder, got ${result.error}`);
     }
 });
+
+Deno.test("redacts every occurrence of the token, not just the first", async () => {
+    // Regression: String.replace only swaps the first match. If Claude
+    // ever logs the OAuth token twice (or more), the trailing copies
+    // would have leaked through. Use of replaceAll defends against that.
+    Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "supersecret-token-xyz");
+    const result = await withStubClaude(
+        `echo "first: supersecret-token-xyz; second: supersecret-token-xyz" >&2
+exit 1`,
+        () =>
+            main({
+                params: makeParams([["prompt", "anything"]]),
+                kv: makeKv(), dicode: fakeDicode,
+            }),
+    );
+    assertEquals(result.ok, false);
+    const err = String(result.error ?? "");
+    if (err.includes("supersecret-token-xyz")) {
+        throw new Error(`OAuth token leaked (one occurrence missed): ${err}`);
+    }
+    // Both occurrences should be replaced; expect "<redacted>" twice.
+    const matches = err.match(/<redacted>/g) ?? [];
+    if (matches.length < 2) {
+        throw new Error(`expected 2 <redacted> placeholders, got ${matches.length} in: ${err}`);
+    }
+});
+
+Deno.test("redacts token in JSON-parse-failure path too", async () => {
+    Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "supersecret-token-xyz");
+    const result = await withStubClaude(
+        `echo "non-JSON output mentioning supersecret-token-xyz somehow"`,
+        () =>
+            main({
+                params: makeParams([["prompt", "anything"]]),
+                kv: makeKv(), dicode: fakeDicode,
+            }),
+    );
+    assertEquals(result.ok, false);
+    if (String(result.error ?? "").includes("supersecret-token-xyz")) {
+        throw new Error(`OAuth token leaked via stdout/JSON-parse path: ${result.error}`);
+    }
+});

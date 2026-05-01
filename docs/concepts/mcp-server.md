@@ -38,6 +38,17 @@ The MCP server is mounted at `http://localhost:8080/mcp`.
    # Re-running install rotates the key (revokes the old one with the same name first).
    ```
 
+   **Threat model.** `dicode mcp install` mints API keys via the daemon's
+   control socket. The control socket is gated by a token at
+   `${DATADIR}/daemon.token` (mode 0600, owned by the daemon's user).
+   Anyone with read access to that file can already drive the daemon
+   end-to-end (e.g. `dicode secrets set` arbitrary values), so minting
+   API keys is not a new trust boundary — it's the same boundary,
+   different verb. The audit log (`Info`-level on every mint and
+   revoke) is the new persistent visibility into key creation.
+   CLI-managed keys are namespaced under `dicode-cli/` so the
+   idempotent revoke path can't sweep dashboard-created keys.
+
 3. **Manual** — mint a key in the dashboard, then:
 
    ```bash

@@ -88,6 +88,14 @@ class DcSecurity extends LitElement {
   // sees here is what the dicode CLI would run on their behalf. URL
   // is rendered against window.location so reverse-proxy + custom-port
   // setups produce a working command without manual editing.
+  //
+  // Shell-injection invariant: rawKey is daemon-generated as
+  // `apiKeyPrefix("dck_") + 64 hex chars` (see pkg/webui/apikeys.go).
+  // No shell-special characters are structurally possible in that
+  // alphabet, so the single-quoted Bearer header is safe. Lit's text
+  // interpolation also escapes the displayed value as a text node so
+  // there's no XSS surface either. If the key alphabet ever widens,
+  // revisit this and consider explicit shell-quoting.
   _claudeMcpAddCmd(rawKey) {
     const url = window.location.origin + '/mcp';
     return `claude mcp add --transport http dicode ${url} --header 'Authorization: Bearer ${rawKey}'`;
