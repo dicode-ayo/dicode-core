@@ -33,10 +33,12 @@ class FakeServer:
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.sock.bind(path)
         self.sock.listen(1)
-        self.sock.settimeout(2.0)
+        # Match the SDK's own connect timeout (10s) so we don't fail under CI load.
+        self.sock.settimeout(10.0)
 
         self.received = []
         self.received_lock = threading.Lock()
+        self.handshake = None
         self.handlers = {}
         self.input_value = None
         self.caps = ["log", "params.read", "kv.read", "kv.write",
@@ -88,6 +90,7 @@ class FakeServer:
             handshake = self._read(client)
             if handshake is None:
                 return
+            self.handshake = handshake
             self._write(client, {"proto": 1, "caps": self.caps})
 
             first = self._read(client)
@@ -139,6 +142,7 @@ class FakeServer:
 
 class SDKTestBase(unittest.TestCase):
     def setUp(self):
+        self._saved_env = {k: os.environ.get(k) for k in ("DICODE_SOCKET", "DICODE_TOKEN")}
         self.tmpdir = tempfile.mkdtemp(prefix="dicode-sdk-test-")
         self.socket_path = os.path.join(self.tmpdir, "ipc.sock")
         self.server = FakeServer(self.socket_path)
@@ -152,6 +156,11 @@ class SDKTestBase(unittest.TestCase):
             self._shutdown_sdk(sdk)
         self.server.stop()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
+        for k, v in self._saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
     @staticmethod
     def _shutdown_sdk(sdk):
@@ -176,6 +185,15 @@ class SDKTestBase(unittest.TestCase):
     def load_sdk(self):
         sys.modules.pop("dicode_sdk", None)
         return importlib.import_module("dicode_sdk")
+
+
+class HandshakeTests(SDKTestBase):
+    def test_handshake_sends_token(self):
+        # The SDK's only auth boundary against the daemon (on non-Linux peers,
+        # where SO_PEERCRED is unavailable) is the token in the first frame.
+        # Importing the SDK with our fake server records that frame.
+        self.load_sdk()
+        self.assertEqual(self.server.handshake, {"token": "test-token"})
 
 
 class LogTests(SDKTestBase):
