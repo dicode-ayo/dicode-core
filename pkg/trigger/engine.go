@@ -638,6 +638,23 @@ func (e *Engine) FireManual(ctx context.Context, taskID string, params map[strin
 	return e.fireAsync(context.Background(), spec, pkgruntime.RunOptions{Params: params}, registry.TriggerManual)
 }
 
+// FireFromTask triggers a task as a child of an in-flight run. Used by the
+// dicode.run_task IPC handler so the new run's parent_run_id (#116) points
+// at the caller. Falls back to a plain manual fire when parentRunID is "".
+func (e *Engine) FireFromTask(ctx context.Context, taskID, parentRunID string, params map[string]string) (string, error) {
+	if parentRunID == "" {
+		return e.FireManual(ctx, taskID, params)
+	}
+	spec, ok := e.registry.Get(taskID)
+	if !ok {
+		return "", fmt.Errorf("task %q not found", taskID)
+	}
+	e.log.Info("subtask trigger", zap.String("task", taskID), zap.String("parent", parentRunID))
+	return e.fireAsync(context.Background(), spec,
+		pkgruntime.RunOptions{Params: params, ParentRunID: parentRunID},
+		registry.TriggerManual)
+}
+
 // WaitRun blocks until the run identified by runID reaches a terminal state,
 // then returns a RunResult. Implements ipc.EngineRunner.
 //

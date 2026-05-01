@@ -34,6 +34,10 @@ type Run struct {
 	StartedAt     time.Time
 	FinishedAt    *time.Time
 	ParentRunID   string
+	// Group is a free-text label set by the task itself via dicode.set_group().
+	// Used by the WebUI to collapse same-group siblings in the run list (#114).
+	// Column name on disk is `run_group` because GROUP is a SQL keyword.
+	Group         string
 	TriggerSource TriggerSource
 	ReturnValue   string // JSON-encoded return value; empty if none
 
@@ -246,7 +250,8 @@ func (r *Registry) GetRun(ctx context.Context, runID string) (*Run, error) {
 		        COALESCE(return_value, ''), COALESCE(output_content_type, ''), COALESCE(output_content, ''),
 		        COALESCE(fail_reason, ''),
 		        COALESCE(input_storage_key, ''), COALESCE(input_size, 0), COALESCE(input_stored_at, 0),
-		        COALESCE(input_redacted_fields, ''), COALESCE(input_pinned, 0)
+		        COALESCE(input_redacted_fields, ''), COALESCE(input_pinned, 0),
+		        COALESCE(run_group, '')
 		 FROM runs WHERE id = ?`,
 		[]any{runID},
 		func(rows db.Scanner) error {
@@ -262,6 +267,7 @@ func (r *Registry) GetRun(ctx context.Context, runID string) (*Run, error) {
 					&tsStr, &run.ReturnValue, &run.OutputContentType, &run.OutputContent,
 					&run.FailureReason,
 					&run.InputStorageKey, &run.InputSize, &run.InputStoredAt, &redactedFieldsJSON, &run.InputPinned,
+					&run.Group,
 				); err != nil {
 					return err
 				}
@@ -290,6 +296,12 @@ func (r *Registry) GetRun(ctx context.Context, runID string) (*Run, error) {
 	return run, nil
 }
 
+// SetRunGroup labels a run with a free-text group string (#116). Last write
+// wins; intended to be called by the running task itself via dicode.set_group().
+func (r *Registry) SetRunGroup(ctx context.Context, runID, group string) error {
+	return r.db.Exec(ctx, `UPDATE runs SET run_group = ? WHERE id = ?`, group, runID)
+}
+
 // SetRunInput updates the runs row with the persistence handle after the input
 // blob has been stored. Called by the trigger engine immediately after Persist
 // succeeds.
@@ -310,13 +322,37 @@ func (r *Registry) SetRunInput(ctx context.Context, runID, storageKey string, si
 
 // ListRuns returns the most recent runs for a task (newest first).
 func (r *Registry) ListRuns(ctx context.Context, taskID string, limit int) ([]*Run, error) {
+	return r.queryRuns(ctx,
+		`WHERE task_id = ? ORDER BY started_at DESC LIMIT ?`,
+		[]any{taskID, limit})
+}
+
+// ListChildren returns runs whose parent_run_id == parentID, newest first (#116).
+func (r *Registry) ListChildren(ctx context.Context, parentRunID string, limit int) ([]*Run, error) {
+	return r.queryRuns(ctx,
+		`WHERE parent_run_id = ? ORDER BY started_at DESC LIMIT ?`,
+		[]any{parentRunID, limit})
+}
+
+// ListByGroup returns runs for a task with the given group label, newest first (#116).
+// taskID scopes the query because group labels are task-local — the same label
+// from different tasks must not collide.
+func (r *Registry) ListByGroup(ctx context.Context, taskID, group string, limit int) ([]*Run, error) {
+	return r.queryRuns(ctx,
+		`WHERE task_id = ? AND run_group = ? ORDER BY started_at DESC LIMIT ?`,
+		[]any{taskID, group, limit})
+}
+
+// queryRuns runs a `SELECT … FROM runs <whereAndLimitClause>` and decodes rows
+// into Run structs. The clause must include any ORDER BY / LIMIT.
+func (r *Registry) queryRuns(ctx context.Context, whereAndLimit string, args []any) ([]*Run, error) {
 	var runs []*Run
 	err := r.db.Query(ctx,
 		`SELECT id, task_id, status, started_at, finished_at, parent_run_id, trigger_source,
 		        COALESCE(return_value, ''), COALESCE(output_content_type, ''), COALESCE(output_content, ''),
-		        COALESCE(fail_reason, '')
-		 FROM runs WHERE task_id = ? ORDER BY started_at DESC LIMIT ?`,
-		[]any{taskID, limit},
+		        COALESCE(fail_reason, ''), COALESCE(run_group, '')
+		 FROM runs `+whereAndLimit,
+		args,
 		func(rows db.Scanner) error {
 			for rows.Next() {
 				run := &Run{}
@@ -324,7 +360,7 @@ func (r *Registry) ListRuns(ctx context.Context, taskID string, limit int) ([]*R
 				var finishedMs *int64
 				var parentID *string
 				var tsStr string
-				if err := rows.Scan(&run.ID, &run.TaskID, &run.Status, &startedMs, &finishedMs, &parentID, &tsStr, &run.ReturnValue, &run.OutputContentType, &run.OutputContent, &run.FailureReason); err != nil {
+				if err := rows.Scan(&run.ID, &run.TaskID, &run.Status, &startedMs, &finishedMs, &parentID, &tsStr, &run.ReturnValue, &run.OutputContentType, &run.OutputContent, &run.FailureReason, &run.Group); err != nil {
 					return err
 				}
 				run.TriggerSource = TriggerSource(tsStr)

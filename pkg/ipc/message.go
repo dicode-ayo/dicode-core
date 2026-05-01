@@ -96,6 +96,9 @@ type Request struct {
 	// dicode.runs.* — run-input retention management (#233)
 	BeforeTs int64 `json:"before_ts,omitempty"` // dicode.runs.list_expired: unix timestamp cutoff
 
+	// dicode.set_group — free-text label for the caller's run (#116).
+	Group string `json:"group,omitempty"`
+
 	// dicode.sources.set_dev_mode — toggles dev mode on a configured source (#234)
 	Name      string `json:"name,omitempty"`       // source name
 	Enabled   bool   `json:"enabled,omitempty"`    // true to enable
@@ -141,6 +144,9 @@ func (o *OutputResult) IsSet() bool { return o != nil && o.ContentType != "" }
 // to avoid import cycles.
 type EngineRunner interface {
 	FireManual(ctx context.Context, taskID string, params map[string]string) (string, error)
+	// FireFromTask is FireManual with a parent run ID — used by dicode.run_task
+	// so the IPC server can stamp the caller's run ID on the new run (#116).
+	FireFromTask(ctx context.Context, taskID, parentRunID string, params map[string]string) (string, error)
 	WaitRun(ctx context.Context, runID string) (RunResult, error)
 	ActiveRunCount() int
 	ActiveTaskSlots() int

@@ -157,12 +157,26 @@ func (s *SQLiteDB) migrate() error {
 		{"input_stored_at", "INTEGER"},
 		{"input_pinned", "INTEGER NOT NULL DEFAULT 0"},
 		{"input_redacted_fields", "TEXT"},
+		// Run grouping (#116) — free-text label set by the task itself via
+		// dicode.set_group(). Column is `run_group` (not `group`) because the
+		// latter is a SQL keyword and our migrate helper rejects quoted idents.
+		{"run_group", "TEXT NOT NULL DEFAULT ''"},
 	}
 	ctx := context.Background()
 	for _, m := range runsMigrations {
 		if err := addColumnIfMissing(ctx, s.db, "runs", m.name, m.ddl); err != nil {
 			return fmt.Errorf("migrate runs.%s: %w", m.name, err)
 		}
+	}
+
+	// Indexes supporting #116 run-grouping filters. CREATE INDEX IF NOT EXISTS
+	// is idempotent so this is safe to run on every startup.
+	_, err = s.db.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_runs_parent_run_id ON runs(parent_run_id);
+		CREATE INDEX IF NOT EXISTS idx_runs_task_run_group ON runs(task_id, run_group);
+	`)
+	if err != nil {
+		return fmt.Errorf("migrate run-grouping indexes: %w", err)
 	}
 	return nil
 }

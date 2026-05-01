@@ -482,6 +482,10 @@ func (s *Server) Handler() http.Handler {
 			r.Post("/tasks/{id}/files/{filename}", s.apiSaveFile)
 			r.Post("/tasks/{id}/trigger", s.apiSaveTrigger)
 
+			// /api/runs (collection): supports filtering by parent or by
+			// (group + task), per #116. /api/tasks/{id}/runs above remains
+			// the canonical "list a task's runs" endpoint.
+			r.Get("/runs", s.apiQueryRuns)
 			r.Get("/runs/{runID}", s.apiGetRun)
 			r.Get("/runs/{runID}/logs", s.apiGetLogs)
 			r.Post("/runs/{runID}/kill", s.apiKillRun)
@@ -1550,6 +1554,45 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	}
 	r.URL.Path = "/hooks/mcp"
 	s.gateway.ServeHTTP(w, r)
+}
+
+// apiQueryRuns handles GET /api/runs with one of two filter modes (#116):
+//   - ?parent=<runID>          → list child runs of <runID>
+//   - ?group=<label>&task=<id> → list same-group siblings for a task
+//
+// Either filter is required; group requires task to scope the lookup since
+// labels are task-local.
+func (s *Server) apiQueryRuns(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	limit := 50
+	if v := q.Get("limit"); v != "" {
+		fmt.Sscanf(v, "%d", &limit)
+	}
+	parent := q.Get("parent")
+	group := q.Get("group")
+	taskID := q.Get("task")
+	if parent == "" && group == "" {
+		jsonErr(w, "missing filter: provide ?parent=<id> or ?group=<label>&task=<id>", http.StatusBadRequest)
+		return
+	}
+	if group != "" && taskID == "" {
+		jsonErr(w, "?group requires ?task=<id>", http.StatusBadRequest)
+		return
+	}
+	var (
+		runs []*registry.Run
+		err  error
+	)
+	if parent != "" {
+		runs, err = s.registry.ListChildren(r.Context(), parent, limit)
+	} else {
+		runs, err = s.registry.ListByGroup(r.Context(), taskID, group, limit)
+	}
+	if err != nil {
+		jsonErr(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, runs)
 }
 
 func (s *Server) apiListRuns(w http.ResponseWriter, r *http.Request) {

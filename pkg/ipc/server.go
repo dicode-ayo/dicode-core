@@ -656,6 +656,21 @@ func (s *Server) handleConn(conn net.Conn) {
 
 		// ── dicode.* ──────────────────────────────────────────────────────
 
+		case "dicode.set_group":
+			if !hasCap(caps, CapSetGroup) {
+				reply(req.ID, nil, "ipc: permission denied (set_group)")
+				continue
+			}
+			if s.runID == "" {
+				reply(req.ID, nil, "ipc: set_group requires an active run context")
+				continue
+			}
+			if err := s.registry.SetRunGroup(context.Background(), s.runID, req.Group); err != nil {
+				reply(req.ID, nil, err.Error())
+				continue
+			}
+			reply(req.ID, true, "")
+
 		case "dicode.run_task":
 			if !hasCap(caps, CapTaskTrigger) {
 				reply(req.ID, nil, "ipc: permission denied (tasks.trigger)")
@@ -673,7 +688,10 @@ func (s *Server) handleConn(conn net.Conn) {
 			if len(req.Params) > 0 {
 				_ = json.Unmarshal(req.Params, &callParams)
 			}
-			runID, err := s.engine.FireManual(s.ctx, req.TaskID, callParams)
+			// Pass s.runID as the parent so the new run is linked to the
+			// caller (#116). When the caller is the CLI control socket
+			// s.runID is "" and FireFromTask falls back to a plain manual.
+			runID, err := s.engine.FireFromTask(s.ctx, req.TaskID, s.runID, callParams)
 			if err != nil {
 				reply(req.ID, nil, err.Error())
 				continue

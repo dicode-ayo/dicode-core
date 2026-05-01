@@ -22,12 +22,17 @@ import (
 // ── test helpers ─────────────────────────────────────────────────────────────
 
 type mockEngine struct {
-	runID  string
-	result RunResult
-	err    error
+	runID    string
+	result   RunResult
+	err      error
+	parentRX string // observed parent runID on the last FireFromTask call
 }
 
 func (m *mockEngine) FireManual(_ context.Context, _ string, _ map[string]string) (string, error) {
+	return m.runID, m.err
+}
+func (m *mockEngine) FireFromTask(_ context.Context, _ string, parentRunID string, _ map[string]string) (string, error) {
+	m.parentRX = parentRunID
 	return m.runID, m.err
 }
 func (m *mockEngine) WaitRun(_ context.Context, _ string) (RunResult, error) {
@@ -711,6 +716,66 @@ func TestServer_Dicode_RunTask_Wildcard(t *testing.T) {
 	resp := recvMsg(t, conn)
 	if resp["error"] != nil {
 		t.Errorf("wildcard should allow any task, got: %v", resp["error"])
+	}
+}
+
+// ── #116 run grouping tests ──────────────────────────────────────────────────
+
+// TestServer_Dicode_RunTask_ParentLinkage verifies that dicode.run_task
+// passes the caller's runID as the new run's parent, so child runs are
+// correctly linked back to the running task that triggered them.
+func TestServer_Dicode_RunTask_ParentLinkage(t *testing.T) {
+	e := newTestEnv(t)
+	eng := &mockEngine{runID: "child-run", result: RunResult{RunID: "child-run", Status: "success"}}
+	spec := specWithDicode("caller", &task.DicodePermissions{Tasks: []string{"target-task"}})
+	conn, srv := e.startWithSpec(t, nil, nil, spec, eng)
+
+	sendMsg(t, conn, map[string]any{"id": "1", "method": "dicode.run_task", "taskID": "target-task"})
+	resp := recvMsg(t, conn)
+	if resp["error"] != nil {
+		t.Fatalf("unexpected error: %v", resp["error"])
+	}
+	if eng.parentRX == "" {
+		t.Fatal("FireFromTask never received a parent runID")
+	}
+	if eng.parentRX != srv.runID {
+		t.Errorf("parent runID = %q, want %q", eng.parentRX, srv.runID)
+	}
+}
+
+// TestServer_Dicode_SetGroup_Persists writes a group via the IPC method
+// and reads it back through the registry to verify last-write-wins.
+func TestServer_Dicode_SetGroup_Persists(t *testing.T) {
+	e := newTestEnv(t)
+	conn, srv := e.start(t, nil, nil)
+
+	// The server doesn't auto-create a runs row; do it ourselves so the
+	// UPDATE has a target. (In production fireAsync inserts the row before
+	// the task starts.)
+	if _, err := e.reg.StartRunWithID(context.Background(), srv.runID, "test-task", "", "manual"); err != nil {
+		t.Fatalf("StartRunWithID: %v", err)
+	}
+
+	sendMsg(t, conn, map[string]any{"id": "1", "method": "dicode.set_group", "group": "chat-7"})
+	resp := recvMsg(t, conn)
+	if resp["error"] != nil {
+		t.Fatalf("set_group error: %v", resp["error"])
+	}
+
+	got, err := e.reg.GetRun(context.Background(), srv.runID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if got.Group != "chat-7" {
+		t.Errorf("Group = %q, want chat-7", got.Group)
+	}
+
+	// Last write wins.
+	sendMsg(t, conn, map[string]any{"id": "2", "method": "dicode.set_group", "group": "chat-9"})
+	_ = recvMsg(t, conn)
+	got, _ = e.reg.GetRun(context.Background(), srv.runID)
+	if got.Group != "chat-9" {
+		t.Errorf("Group after overwrite = %q, want chat-9", got.Group)
 	}
 }
 

@@ -397,6 +397,11 @@ class _Dicode:
         return _call({"method": "dicode.get_runs", "taskID": task_id,
                       "limit": limit}) or []
 
+    def set_group(self, label):
+        # Label the current run with a free-text group string (#116). Used
+        # by the WebUI to collapse same-group siblings. Last write wins.
+        _call({"method": "dicode.set_group", "group": str(label or "")})
+
     async def run_task_async(self, task_id, params=None):
         return await _call_async({"method": "dicode.run_task", "taskID": task_id,
                                   "params": params or {}})
@@ -407,6 +412,9 @@ class _Dicode:
     async def get_runs_async(self, task_id, limit=10):
         return await _call_async({"method": "dicode.get_runs", "taskID": task_id,
                                   "limit": limit}) or []
+
+    async def set_group_async(self, label):
+        await _call_async({"method": "dicode.set_group", "group": str(label or "")})
 
 
 dicode = _Dicode()

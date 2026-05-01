@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -160,6 +161,84 @@ func TestAPI_ListRuns(t *testing.T) {
 	_ = json.NewDecoder(w2.Body).Decode(&runs)
 	if len(runs) == 0 {
 		t.Error("expected at least one run")
+	}
+}
+
+// #116: GET /api/runs?parent=<id> and ?group=<label>&task=<id>.
+func TestAPI_QueryRuns_ByParentAndGroup(t *testing.T) {
+	srv, reg := newTestServer(t)
+	ctx := context.Background()
+
+	parentID, err := reg.StartRun(ctx, "task-a", "")
+	if err != nil {
+		t.Fatalf("StartRun parent: %v", err)
+	}
+	c1, _ := reg.StartRun(ctx, "child-task", parentID)
+	c2, _ := reg.StartRun(ctx, "child-task", parentID)
+	// Unrelated run — must not appear in parent= results.
+	_, _ = reg.StartRun(ctx, "other-task", "")
+
+	// Group label "g1" on two task-a runs and one task-b run; the group
+	// query must scope by task to filter out the cross-task hit.
+	a1, _ := reg.StartRun(ctx, "task-a", "")
+	a2, _ := reg.StartRun(ctx, "task-a", "")
+	b1, _ := reg.StartRun(ctx, "task-b", "")
+	for _, id := range []string{a1, a2, b1} {
+		if err := reg.SetRunGroup(ctx, id, "g1"); err != nil {
+			t.Fatalf("SetRunGroup: %v", err)
+		}
+	}
+
+	// ── parent filter ─────────────────────────────────────────────────────
+	req := httptest.NewRequest(http.MethodGet, "/api/runs?parent="+parentID, nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("parent query: status %d body=%s", w.Code, w.Body.String())
+	}
+	var children []map[string]any
+	_ = json.NewDecoder(w.Body).Decode(&children)
+	if len(children) != 2 {
+		t.Fatalf("expected 2 children, got %d (%v)", len(children), children)
+	}
+	got := map[string]bool{}
+	for _, r := range children {
+		got[r["ID"].(string)] = true
+	}
+	if !got[c1] || !got[c2] {
+		t.Errorf("missing child IDs: %v", got)
+	}
+
+	// ── group + task filter ────────────────────────────────────────────────
+	req = httptest.NewRequest(http.MethodGet, "/api/runs?group=g1&task=task-a", nil)
+	w = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("group query: status %d body=%s", w.Code, w.Body.String())
+	}
+	var siblings []map[string]any
+	_ = json.NewDecoder(w.Body).Decode(&siblings)
+	if len(siblings) != 2 {
+		t.Fatalf("expected 2 siblings, got %d (%v)", len(siblings), siblings)
+	}
+	for _, r := range siblings {
+		if r["TaskID"] != "task-a" {
+			t.Errorf("got task %v in task-a group", r["TaskID"])
+		}
+	}
+
+	// ── error cases ────────────────────────────────────────────────────────
+	req = httptest.NewRequest(http.MethodGet, "/api/runs", nil)
+	w = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("missing-filter: expected 400, got %d", w.Code)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/api/runs?group=g1", nil)
+	w = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("group-without-task: expected 400, got %d", w.Code)
 	}
 }
 

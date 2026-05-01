@@ -172,6 +172,96 @@ func TestRegistry_ParentRunID(t *testing.T) {
 	}
 }
 
+// ── #116 run grouping ─────────────────────────────────────────────────────────
+
+func TestRegistry_SetRunGroup(t *testing.T) {
+	t.Parallel()
+	r := newTestRegistry(t)
+	ctx := context.Background()
+
+	runID, _ := r.StartRun(ctx, "task-g", "")
+	if err := r.SetRunGroup(ctx, runID, "chat-42"); err != nil {
+		t.Fatalf("SetRunGroup: %v", err)
+	}
+	got, err := r.GetRun(ctx, runID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if got.Group != "chat-42" {
+		t.Errorf("Group = %q, want %q", got.Group, "chat-42")
+	}
+
+	// Last write wins.
+	if err := r.SetRunGroup(ctx, runID, "chat-99"); err != nil {
+		t.Fatalf("SetRunGroup overwrite: %v", err)
+	}
+	got, _ = r.GetRun(ctx, runID)
+	if got.Group != "chat-99" {
+		t.Errorf("Group after overwrite = %q, want chat-99", got.Group)
+	}
+}
+
+func TestRegistry_ListChildren(t *testing.T) {
+	t.Parallel()
+	r := newTestRegistry(t)
+	ctx := context.Background()
+
+	parentID, _ := r.StartRun(ctx, "parent", "")
+	c1, _ := r.StartRun(ctx, "child-task", parentID)
+	c2, _ := r.StartRun(ctx, "child-task", parentID)
+	// An unrelated run that must NOT appear.
+	_, _ = r.StartRun(ctx, "other", "")
+
+	kids, err := r.ListChildren(ctx, parentID, 10)
+	if err != nil {
+		t.Fatalf("ListChildren: %v", err)
+	}
+	if len(kids) != 2 {
+		t.Fatalf("len(kids) = %d, want 2", len(kids))
+	}
+	got := map[string]bool{kids[0].ID: true, kids[1].ID: true}
+	if !got[c1] || !got[c2] {
+		t.Errorf("missing child IDs in result: %+v", got)
+	}
+}
+
+func TestRegistry_ListByGroup(t *testing.T) {
+	t.Parallel()
+	r := newTestRegistry(t)
+	ctx := context.Background()
+
+	a1, _ := r.StartRun(ctx, "task-a", "")
+	a2, _ := r.StartRun(ctx, "task-a", "")
+	b1, _ := r.StartRun(ctx, "task-b", "")
+	_ = a2
+	// task-a runs share group "g1"; task-b uses the same label but different
+	// task, so it must be excluded.
+	for _, id := range []string{a1, a2} {
+		if err := r.SetRunGroup(ctx, id, "g1"); err != nil {
+			t.Fatalf("SetRunGroup: %v", err)
+		}
+	}
+	if err := r.SetRunGroup(ctx, b1, "g1"); err != nil {
+		t.Fatalf("SetRunGroup b1: %v", err)
+	}
+
+	siblings, err := r.ListByGroup(ctx, "task-a", "g1", 10)
+	if err != nil {
+		t.Fatalf("ListByGroup: %v", err)
+	}
+	if len(siblings) != 2 {
+		t.Fatalf("len(siblings) = %d, want 2", len(siblings))
+	}
+	for _, s := range siblings {
+		if s.TaskID != "task-a" {
+			t.Errorf("got run from task %q in task-a group", s.TaskID)
+		}
+		if s.Group != "g1" {
+			t.Errorf("got group %q, want g1", s.Group)
+		}
+	}
+}
+
 // ── BulkAppendLogs tests ──────────────────────────────────────────────────────
 
 func TestRegistry_BulkAppendLogs_Empty(t *testing.T) {
