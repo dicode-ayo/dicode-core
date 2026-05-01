@@ -244,6 +244,12 @@ export default async function main({ params, kv, dicode }: DicodeSdk) {
   let sessionId = (await params.get("session_id")) ?? "";
   if (!sessionId) sessionId = crypto.randomUUID();
 
+  // Tag the run so the WebUI collapses every turn of a single chat into
+  // one expandable row in the run list (#112). Tool-call children are
+  // already linked via parent_run_id by the engine (#116), so the run
+  // detail view can render this turn as a timeline of sub-runs (#113).
+  await dicode.set_group(`chat:${sessionId}`);
+
   // Tools: dicode task ids the agent may call. Empty = all except self.
   const toolFilter = ((await params.get("tools")) ?? "")
     .split(",")

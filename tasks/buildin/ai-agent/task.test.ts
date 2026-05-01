@@ -79,6 +79,25 @@ test("first turn auto-generates a session_id and returns reply", async () => {
   assert.httpCalled("POST", "http://localhost:11434/v1/chat/completions");
 });
 
+test("tags the run with the chat session group so the WebUI can collapse turns", async () => {
+  // #112: every chat turn calls dicode.set_group(`chat:<sessionId>`) so all
+  // turns of one conversation collapse into one expandable row in the run
+  // list, while a new session_id produces a new group row.
+  useLocal();
+  params.set("prompt", "hello");
+  params.set("session_id", "abc-12345");
+
+  http.mock("POST", "http://localhost:11434/v1/chat/completions", {
+    status: 200,
+    body: completion("hi"),
+  });
+
+  await runTask();
+
+  const calls = (dicode as Record<string, unknown>)._setGroupCalls as string[];
+  assert.equal(calls, ["chat:abc-12345"]);
+});
+
 test("provided session_id is echoed back and history is preserved in kv", async () => {
   useLocal();
   params.set("prompt", "second message");

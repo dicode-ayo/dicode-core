@@ -66,6 +66,7 @@ interface State {
 }
 
 function freshDicode(): MockDicode {
+  const groups: string[] = [];
   return {
     task_id: "test/task",
     run_id: "test-run",
@@ -74,6 +75,13 @@ function freshDicode(): MockDicode {
     get_runs: async () => [],
     secrets_set: async () => {},
     secrets_delete: async () => {},
+    // set_group records each call so tests can assert on the labels written.
+    // Last write wins in production; the array preserves call ordering for
+    // tests that need it.
+    set_group: async (label: string) => {
+      groups.push(String(label ?? ""));
+    },
+    _setGroupCalls: groups,
   };
 }
 
