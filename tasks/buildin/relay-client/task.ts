@@ -63,8 +63,7 @@ export default async function main(sdk: DicodeSdk): Promise<void> {
     tofuCheckAndPin,
     log: console,
     onStatus: (s) => {
-      // Status is reported via console; daemon Task D2 wires kv-based status.
-      console.log("relay-client status:", JSON.stringify(s));
+      void sdk.kv.set("status", s);
     },
   });
 

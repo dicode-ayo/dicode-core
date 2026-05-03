@@ -23,7 +23,6 @@ import (
 	"github.com/dicode/dicode/pkg/db"
 	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/registry"
-	"github.com/dicode/dicode/pkg/relay"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	denoruntime "github.com/dicode/dicode/pkg/runtime/deno"
 	"github.com/dicode/dicode/pkg/secrets"
@@ -164,7 +163,7 @@ type Server struct {
 	sourceMgr          *SourceManager       // nil if not wired
 	dataDir            string               // ~/.dicode or cfg.DataDir
 	gateway            *ipc.Gateway
-	relayClient        *relay.Client
+	db                 db.DB
 	managedRuntimes    []pkgruntime.ManagedRuntime
 	sessions           *sessionStore
 	dbSessions         *dbSessionStore    // persistent sessions / trusted devices
@@ -190,12 +189,6 @@ type Server struct {
 	// is disabled (SetReplayer not called); the /api/runs/{runID}/replay
 	// endpoint returns 503 in that case.
 	replayer *registry.Replayer
-}
-
-// SetRelayClient stores a reference to the relay client so the API can expose
-// the relay hook base URL to the web UI.
-func (s *Server) SetRelayClient(rc *relay.Client) {
-	s.relayClient = rc
 }
 
 // SetReplayer wires a Replayer for the POST /api/runs/{runID}/replay
@@ -279,6 +272,7 @@ func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config
 		port:            port,
 		gateway:         gateway,
 		csrfKey:         csrfKey,
+		db:              database,
 	}
 
 	// Wire run started hook → broadcast run:started
@@ -1267,8 +1261,12 @@ func (s *Server) apiGetConfig(w http.ResponseWriter, r *http.Request) {
 		RelayHookBaseURL string `json:"relay_hook_base_url,omitempty"`
 	}
 	resp := configResponse{Config: s.cfg}
-	if s.relayClient != nil {
-		resp.RelayHookBaseURL = s.relayClient.HookBaseURL()
+	if raw, _ := readKvJSON(r.Context(), s.db, "buildin/relay-client:status"); raw != nil {
+		var st struct {
+			HookBaseURL string `json:"hook_base_url"`
+		}
+		_ = json.Unmarshal(raw, &st)
+		resp.RelayHookBaseURL = st.HookBaseURL
 	}
 	jsonOK(w, resp)
 }
