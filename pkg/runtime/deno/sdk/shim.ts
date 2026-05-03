@@ -76,43 +76,6 @@ export interface MCP {
   call:       (name: string, tool: string, args?: Record<string, unknown>) => Promise<unknown>;
 }
 
-export interface OAuthAuthURL {
-  url:        string;
-  session_id: string;
-  provider:   string;
-  timestamp:  number;
-  relay_uuid: string;
-}
-
-export interface OAuthStoreResult {
-  provider: string;
-  secrets:  string[];
-}
-
-export interface ProviderStatus {
-  provider:    string;
-  has_token:   boolean;
-  expires_at?: string;
-  scope?:      string;
-  token_type?: string;
-}
-
-// OAuth broker bridge.
-// - build_auth_url and store_token are functional only inside the auth-start
-//   (oauth_init) and auth-relay (oauth_store) built-in tasks respectively.
-// - list_status is callable from any task that opts in via permissions.dicode.oauth_status
-//   (e.g. the auth-providers dashboard); it returns metadata only and never
-//   surfaces plaintext tokens.
-// Plaintext tokens never cross this boundary: store_token decrypts, parses, and
-// writes to secrets entirely daemon-side, and only returns which secret names
-// were written; list_status reads <P>_ACCESS_TOKEN only to set a presence flag
-// and discards the value.
-export interface DicodeOAuth {
-  build_auth_url: (provider: string, scope?: string) => Promise<OAuthAuthURL>;
-  store_token:    (envelope: unknown)                => Promise<OAuthStoreResult>;
-  list_status:    (providers: string[])              => Promise<ProviderStatus[]>;
-}
-
 export interface DicodeCrypto {
   encrypt: (context: string, plaintext: Uint8Array) => Promise<Uint8Array>;
   decrypt: (context: string, ciphertext: Uint8Array) => Promise<Uint8Array>;
@@ -131,10 +94,9 @@ export interface Dicode {
   // set_group labels the current run with a free-text string used by the
   // WebUI to collapse same-group siblings (#116). Last write wins; only
   // affects the current run.
-  set_group:      (label: string)                                      => Promise<void>;
-  secrets_set:    (key: string, value: string)                        => Promise<void>;
-  secrets_delete: (key: string)                                        => Promise<void>;
-  oauth:          DicodeOAuth;
+  set_group:      (label: string)      => Promise<void>;
+  secrets_set:    (key: string, value: string) => Promise<void>;
+  secrets_delete: (key: string)                => Promise<void>;
   crypto:         DicodeCrypto;
   runs: {
     list_expired: (opts?: { before_ts?: number }) => Promise<unknown>;
@@ -353,14 +315,6 @@ const dicode: Dicode = {
   set_group:      (label)           => __call__({ method: "dicode.set_group",       group: String(label ?? "") }) as Promise<void>,
   secrets_set:    (key, value)      => __call__({ method: "dicode.secrets_set",     key, stringValue: value }) as Promise<void>,
   secrets_delete: (key)             => __call__({ method: "dicode.secrets_delete",  key }) as Promise<void>,
-  oauth: {
-    build_auth_url: (provider, scope) =>
-      __call__({ method: "dicode.oauth.build_auth_url", provider, scope: scope ?? "" }) as Promise<OAuthAuthURL>,
-    store_token: (envelope) =>
-      __call__({ method: "dicode.oauth.store_token", envelope }) as Promise<OAuthStoreResult>,
-    list_status: (providers) =>
-      __call__({ method: "dicode.oauth.list_status", providers }) as Promise<ProviderStatus[]>,
-  },
   runs: {
     list_expired: (opts) =>
       __call__({ method: "dicode.runs.list_expired", before_ts: opts?.before_ts ?? 0 }),

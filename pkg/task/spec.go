@@ -265,24 +265,6 @@ type DicodePermissions struct {
 	// SecretsWrite enables dicode.secrets_set() and dicode.secrets_delete().
 	// Tasks may write or overwrite secrets but never read them back.
 	SecretsWrite bool `yaml:"secrets_write,omitempty" json:"secrets_write,omitempty"`
-	// OAuthInit enables dicode.oauth.build_auth_url(). Reserved for the
-	// auth-start built-in task. Granting this lets the task construct a
-	// signed /auth/:provider URL using the daemon's relay identity; the
-	// payload layout is hardcoded in Go so this primitive cannot be coaxed
-	// into producing signatures for other message types (e.g. WSS
-	// handshakes).
-	OAuthInit bool `yaml:"oauth_init,omitempty" json:"oauth_init,omitempty"`
-	// OAuthStore enables dicode.oauth.store_token(). Reserved for the
-	// auth-relay built-in task. The primitive decrypts an incoming token
-	// envelope and writes the resulting credentials directly into the
-	// secrets store — plaintext never reaches task code, so a careless
-	// console.log cannot leak a token.
-	OAuthStore bool `yaml:"oauth_store,omitempty" json:"oauth_store,omitempty"`
-	// OAuthStatus enables dicode.oauth.list_status().
-	// Returns connection-state metadata (presence flag, expiry, scope) for the
-	// provider names the caller passes — never plaintext tokens.
-	OAuthStatus bool `yaml:"oauth_status,omitempty" json:"oauth_status,omitempty"`
-
 	// RunsListExpired enables dicode.runs.list_expired().
 	RunsListExpired bool `yaml:"runs_list_expired,omitempty" json:"runs_list_expired,omitempty"`
 	// RunsDeleteInput enables dicode.runs.delete_input().

@@ -48,9 +48,6 @@ const (
 	CapTasksList   = "tasks.list"    // dicode.list_tasks
 	CapRunsList    = "runs.list"     // dicode.get_runs
 	CapMCPCall     = "mcp.call"      // mcp.list_tools, mcp.call — also checked against allowed_mcp
-	CapOAuthInit   = "oauth.init"    // dicode.oauth.build_auth_url — for the auth-start built-in task
-	CapOAuthStore  = "oauth.store"   // dicode.oauth.store_token — for the auth-relay built-in task
-	CapOAuthStatus = "oauth.status"  // dicode.oauth.list_status — for the auth-providers built-in task
 
 	// Run-input retention management — gated per-task via permissions.dicode.
 	CapRunsListExpired = "runs.list_expired" // dicode.runs.list_expired
@@ -76,13 +73,12 @@ const (
 	CapSecretsWrite  = "secrets.write"
 
 	// CLI capabilities — granted to dicode CLI clients on the control socket.
-	CapCLIRun         = "cli.run"          // trigger a task run and stream its output
-	CapCLIList        = "cli.list"         // list tasks and their last-run status
-	CapCLILogs        = "cli.logs"         // fetch log entries for a run
-	CapCLIStatus      = "cli.status"       // daemon health and uptime
-	CapCLISecrets     = "cli.secrets"      // list / set / delete secrets
-	CapCLIAI          = "cli.ai"           // fire the configured ai task with a prompt
-	CapCLIRelayRotate = "cli.relay.rotate" // rotate the relay identity (irreversible)
+	CapCLIRun     = "cli.run"     // trigger a task run and stream its output
+	CapCLIList    = "cli.list"    // list tasks and their last-run status
+	CapCLILogs    = "cli.logs"    // fetch log entries for a run
+	CapCLIStatus  = "cli.status"  // daemon health and uptime
+	CapCLISecrets = "cli.secrets" // list / set / delete secrets
+	CapCLIAI      = "cli.ai"      // fire the configured ai task with a prompt
 )
 
 // cliCaps is the full capability set granted to every CLI client.
@@ -94,7 +90,6 @@ func cliCaps() []string {
 		CapCLIStatus,
 		CapCLISecrets,
 		CapCLIAI,
-		CapCLIRelayRotate,
 	}
 }
 

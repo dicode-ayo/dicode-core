@@ -21,7 +21,6 @@ import (
 	denopkg "github.com/dicode/dicode/pkg/deno"
 	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/registry"
-	"github.com/dicode/dicode/pkg/relay"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	"github.com/dicode/dicode/pkg/runtime/envresolve"
 	"github.com/dicode/dicode/pkg/secrets"
@@ -82,23 +81,17 @@ type Runtime struct {
 	// late SetInputStore call on the manager propagates to all executors
 	// without extra bookkeeping. Nil means "I am the manager; use my own
 	// inputStore field directly."
-	parent           *Runtime
-	registry         *registry.Registry
-	secrets          secrets.Chain
-	secretsManager   secrets.Manager      // optional; wired for dicode.secrets_set/delete
-	inputStore       *registry.InputStore // optional; wired for dicode.runs.delete_input / get_input
-	db               db.DB
-	log              *zap.Logger
-	denoPath         string
-	secret           []byte
-	engine           ipc.EngineRunner
-	gateway          *ipc.Gateway
-	oauthIdentity    *relay.Identity
-	oauthURL         string
-	oauthPending     *relay.PendingSessions
-	brokerPubkeyFn   func() string
-	supportsOAuthFn  func() bool
-	rotationActiveFn func() bool
+	parent         *Runtime
+	registry       *registry.Registry
+	secrets        secrets.Chain
+	secretsManager secrets.Manager      // optional; wired for dicode.secrets_set/delete
+	inputStore     *registry.InputStore // optional; wired for dicode.runs.delete_input / get_input
+	db             db.DB
+	log            *zap.Logger
+	denoPath       string
+	secret         []byte
+	engine         ipc.EngineRunner
+	gateway        *ipc.Gateway
 	// secretOutputCh is opt-in: when set, every Run wires it into the
 	// per-run IPC server so a provider task's dicode.output(..., {secret:
 	// true}) call is routed to the resolver awaiting it. Nil leaves the
@@ -231,35 +224,6 @@ func (rt *Runtime) SetProviderRunner(p envresolve.ProviderRunner) {
 	rt.providerRunner = p
 }
 
-// SetOAuthBroker wires the daemon's relay identity, broker base URL, and
-// the daemon-wide PendingSessions store so the auth-start and auth-relay
-// built-in tasks can use dicode.oauth.*. All three are required together;
-// passing nil leaves the oauth API inert and tasks will receive a
-// "not configured" error.
-//
-// supportsOAuthFn (issue #104) is an optional predicate reporting whether
-// the currently-connected broker advertises a protocol version new enough
-// to understand the split sign/decrypt key scheme. If nil the OAuth IPC
-// paths are always enabled (suitable for test harnesses that don't have a
-// real relay.Client). In production the daemon wires rc.SupportsOAuth so
-// that an old broker cleanly disables the OAuth flows instead of silently
-// failing to decrypt.
-//
-// rotationActiveFn (issue #144) is an optional predicate reporting whether
-// a `dicode relay rotate-identity` has swapped the DB keys. The in-memory
-// Identity passed here is NOT replaced by rotation; until the daemon
-// restarts, signing a new auth URL under it would contradict the operator's
-// stated intent. Non-nil + true refuses the OAuth IPC methods with an
-// actionable error. Nil leaves the path unchecked (test fixtures).
-func (rt *Runtime) SetOAuthBroker(id *relay.Identity, baseURL string, pending *relay.PendingSessions, brokerPubkeyFn func() string, supportsOAuthFn func() bool, rotationActiveFn func() bool) {
-	rt.oauthIdentity = id
-	rt.oauthURL = baseURL
-	rt.oauthPending = pending
-	rt.brokerPubkeyFn = brokerPubkeyFn
-	rt.supportsOAuthFn = supportsOAuthFn
-	rt.rotationActiveFn = rotationActiveFn
-}
-
 // Run executes a task script and returns the result.
 func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*RunResult, error) {
 	if opts.Params == nil {
@@ -350,9 +314,6 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	if rt.secretOutputCh != nil {
 		srv.SetSecretOutput(rt.secretOutputCh)
 	}
-	if rt.oauthIdentity != nil {
-		srv.SetOAuthBroker(rt.oauthIdentity, rt.oauthURL, rt.oauthPending, rt.brokerPubkeyFn, rt.supportsOAuthFn, rt.rotationActiveFn)
-	}
 	if d := rt.effectiveCryptoDeriver(); d != nil {
 		srv.SetCryptoHandler(d)
 	}
@@ -429,9 +390,9 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	}
 	runnerFile.Close()
 
-	args := buildDenoArgs(spec, socketPath, shimPath, runnerPath, rt.oauthURL)
+	args := buildDenoArgs(spec, socketPath, shimPath, runnerPath)
 	cmd := exec.CommandContext(execCtx, rt.denoPath, args...) //nolint:gosec
-	cmd.Env = buildEnv(resolved, socketPath, token, rt.oauthURL)
+	cmd.Env = buildEnv(resolved, socketPath, token)
 
 	var wg sync.WaitGroup
 	if spec.Silent {
@@ -551,7 +512,7 @@ func expandHome(p string) string {
 	return p
 }
 
-func buildDenoArgs(spec *task.Spec, socketPath, shimPath, runnerPath, brokerURL string) []string {
+func buildDenoArgs(spec *task.Spec, socketPath, shimPath, runnerPath string) []string {
 	args := []string{"run"}
 
 	// Network: omit = unrestricted (--allow-net); empty list = deny all; named hosts = allowlist.
@@ -570,13 +531,7 @@ func buildDenoArgs(spec *task.Spec, socketPath, shimPath, runnerPath, brokerURL 
 
 	// Env: always allow the internal IPC vars plus HOME/DENO_DIR/XDG_CACHE_HOME
 	// (required by deno.land/x/cache for vendored binary downloads).
-	// DICODE_BROKER_URL (issue #84) is daemon-provided infrastructure —
-	// auto-allowed when a broker URL is configured so auth tasks don't
-	// need to redeclare it in permissions.env.
 	envVars := []string{"DICODE_SOCKET", "DICODE_TOKEN", "HOME", "DENO_DIR", "XDG_CACHE_HOME"}
-	if brokerURL != "" {
-		envVars = append(envVars, "DICODE_BROKER_URL")
-	}
 	for _, e := range spec.Permissions.Env {
 		envVars = append(envVars, e.Name)
 	}
@@ -624,16 +579,10 @@ func buildDenoArgs(spec *task.Spec, socketPath, shimPath, runnerPath, brokerURL 
 	return args
 }
 
-func buildEnv(resolved map[string]string, socketPath, token, brokerURL string) []string {
+func buildEnv(resolved map[string]string, socketPath, token string) []string {
 	// Inherit the host environment so Deno can locate its cache (DENO_DIR etc).
 	// The --allow-env flag separately controls which vars the JS script can read.
 	env := append(os.Environ(), "DICODE_SOCKET="+socketPath, "DICODE_TOKEN="+token)
-	// DICODE_BROKER_URL (issue #84) — daemon-resolved OAuth broker base URL.
-	// Injected only when configured so tasks can distinguish "broker disabled"
-	// from "broker at the default".
-	if brokerURL != "" {
-		env = append(env, "DICODE_BROKER_URL="+brokerURL)
-	}
 	for k, v := range resolved {
 		env = append(env, k+"="+v)
 	}
