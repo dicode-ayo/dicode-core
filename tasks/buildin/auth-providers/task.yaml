@@ -30,7 +30,6 @@ permissions:
   env:
     - DICODE_BASE_URL  # used to build the standalone openrouter URL
   dicode:
-    oauth_status: true
     tasks:
       # Only auth-start is callable. The per-provider auth/<p>-oauth tasks
       # return HTML (not a JSON {url} contract) so they cannot be invoked

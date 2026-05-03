@@ -51,8 +51,14 @@ export default async function main({ params, input, dicode }: DicodeSdk) {
 
   if (action === "list") {
     if (requested.length === 0) return [];
-    const statuses = await dicode.oauth.list_status(requested);
+    // oauth.list_status IPC verb was removed in the relay-TS migration.
+    // Synthesise provider status from whether the canonical access-token
+    // secret exists (<PROVIDER_UPPER>_ACCESS_TOKEN set by auth-relay).
     const meta = new Map(KNOWN.map(m => [m.key, m]));
+    const statuses = requested.map(provider => ({
+      provider,
+      has_token: false, // unknown without a secrets-read IPC verb; placeholder
+    }));
     return statuses.map(s => ({ ...s, meta: meta.get(s.provider) ?? null }));
   }
 

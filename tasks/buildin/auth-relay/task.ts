@@ -78,6 +78,20 @@ export default async function main({ input, dicode }: DicodeSdk) {
     written.push(secretName);
   }
 
+  // Delete pending record to prevent replay. Best-effort — if delete fails
+  // the record is harmless (just leaks until cleanup), but the security
+  // benefit comes from making it unavailable for replays.
+  try {
+    await dicode.run_task(storageTask, {
+      op: "delete",
+      key: `oauth-pending/${envelope.session_id}`,
+      prefix: "oauth-pending/",
+      root,
+    });
+  } catch {
+    // Ignore — log nothing because the task is silent: true.
+  }
+
   return {
     ok: true,
     provider,

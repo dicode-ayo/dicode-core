@@ -40,11 +40,7 @@ type Server struct {
 	spec     *task.Spec
 	engine   EngineRunner
 	secrets  secrets.Manager // optional; enables dicode.secrets_set / dicode.secrets_delete
-	// secretsChain (read path) is used to walk the env-fallback chain.
-	// SetSecretsChain wires it; nil means the daemon has no chain configured
-	// (tests with read-only flows).
-	secretsChain secrets.Chain
-	log          *zap.Logger
+	log      *zap.Logger
 
 	// redactor strips secret values from inbound log messages before they
 	// hit the run log. Nil load is safe (no redaction; RedactString is
@@ -139,10 +135,6 @@ func New(
 // SetSecrets attaches the secrets manager so tasks with permissions.dicode.secrets_write
 // can call dicode.secrets_set() and dicode.secrets_delete().
 func (s *Server) SetSecrets(m secrets.Manager) { s.secrets = m }
-
-// SetSecretsChain attaches the read-side chain (env-fallback aware) used by
-// dicode.oauth.list_status to introspect provider connection metadata.
-func (s *Server) SetSecretsChain(c secrets.Chain) { s.secretsChain = c }
 
 // SetRedactor installs a log-message redactor. Messages received via the
 // IPC "log" method are passed through r.RedactString before being

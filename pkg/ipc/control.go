@@ -561,23 +561,30 @@ func (cs *ControlServer) handleAI(ctx context.Context, req Request) (AIResult, e
 	return out, nil
 }
 
-// handleTrustBroker deletes the TOFU-pinned broker pubkey so the next relay
+// handleTrustBroker clears the TOFU-pinned broker pubkey so the next relay
 // reconnect will re-pin whatever the broker announces. This is the recovery
 // path when the broker operator rotates their signing key.
+//
+// NOTE: after the relay-TS migration the broker pin is stored as an encrypted
+// blob in relay-store/relay/broker-pin/v1 by the relay-client task, not in
+// the SQLite kv table. This handler now returns a deprecation notice directing
+// operators to delete the file directly. The kv-row clear is kept as a no-op
+// fallback for any legacy row that might still be present.
 func (cs *ControlServer) handleTrustBroker(ctx context.Context) (any, error) {
-	if cs.database == nil {
-		return nil, fmt.Errorf("database not available")
+	if cs.database != nil {
+		// Best-effort: clear any legacy kv row (harmless if absent).
+		_ = cs.database.Exec(ctx,
+			`DELETE FROM kv WHERE key = ?`,
+			"relay.broker_pubkey",
+		)
 	}
-	if err := cs.database.Exec(ctx,
-		`INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)`,
-		"relay.broker_pubkey", "",
-	); err != nil {
-		return nil, fmt.Errorf("clear broker pubkey: %w", err)
-	}
-	cs.log.Warn("broker pubkey pin cleared — next relay reconnect will TOFU-pin the new key")
+	cs.log.Warn("relay trust-broker: broker pin is now stored in relay-store/relay/broker-pin/v1 — " +
+		"delete that file and restart the daemon to force TOFU re-pin")
 	return map[string]string{
-		"status":  "ok",
-		"message": "Broker pubkey pin cleared. Restart the daemon (or wait for reconnect) to accept the new broker key.",
+		"status": "ok",
+		"message": "Legacy kv pin cleared. The relay-client task stores the broker pin at " +
+			"<DATADIR>/relay-store/relay/broker-pin/v1 — delete that file and restart the daemon " +
+			"to force TOFU re-pin on the next broker connection.",
 	}, nil
 }
 

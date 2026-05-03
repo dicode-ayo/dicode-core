@@ -9,26 +9,14 @@
 import { setupHarness } from "../../sdk-test.ts";
 await setupHarness(import.meta.url);
 
-test("list action returns merged status + meta for each provider", async () => {
+test("list action returns merged meta for each provider (has_token=false, no oauth IPC)", async () => {
   params.set("providers", "github,openrouter");
-
-  let calledWith: string[] | null = null;
-  dicode.oauth = {
-    list_status: async (arr: string[]) => {
-      calledWith = arr;
-      return [
-        { provider: "github",     has_token: true,  expires_at: "2026-12-31T00:00:00Z", scope: "user repo" },
-        { provider: "openrouter", has_token: false },
-      ];
-    },
-  };
 
   const result = await runTask() as Array<Record<string, unknown>>;
 
-  assert.equal(JSON.stringify(calledWith), JSON.stringify(["github", "openrouter"]));
   assert.equal(result.length, 2);
   assert.equal(result[0].provider, "github");
-  assert.equal(result[0].has_token, true);
+  assert.equal(result[0].has_token, false); // placeholder — no read IPC yet
   const meta0 = result[0].meta as Record<string, unknown>;
   assert.equal(meta0.label, "GitHub");
   const meta1 = result[1].meta as Record<string, unknown>;
@@ -86,27 +74,17 @@ test("connect when auth-start returns no url throws", async () => {
   await assert.throws(() => runTask(), /did not return a url/);
 });
 
-test("empty providers param yields empty list (no list_status call)", async () => {
+test("empty providers param yields empty list", async () => {
   params.set("providers", "");
-  let called = 0;
-  dicode.oauth = {
-    list_status: async () => { called += 1; return []; },
-  };
 
   const result = await runTask() as unknown[];
 
-  assert.equal(called, 0);
   assert.equal(result.length, 0);
 });
 
-test("more than 64 providers throws before any IPC call", async () => {
+test("more than 64 providers throws before any work", async () => {
   const big = Array.from({ length: 65 }, (_, i) => `p${i}`).join(",");
   params.set("providers", big);
-  let called = 0;
-  dicode.oauth = {
-    list_status: async () => { called += 1; return []; },
-  };
 
   await assert.throws(() => runTask(), /at most 64 providers/);
-  assert.equal(called, 0);
 });

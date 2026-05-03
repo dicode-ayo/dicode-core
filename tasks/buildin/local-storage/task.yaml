@@ -39,6 +39,8 @@ permissions:
   fs:
     - path: "${DATADIR}/run-inputs"
       permission: rw
+    - path: "${DATADIR}/relay-store"
+      permission: rw
 
 # Self-opt-out from input persistence to avoid recursion: this task IS the
 # storage backend; persisting its own params would loop indefinitely.

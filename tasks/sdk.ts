@@ -35,22 +35,11 @@ export interface MCP {
   call(name: string, tool: string, args?: Record<string, unknown>): Promise<unknown>;
 }
 
-export interface ProviderStatus {
-  provider:    string;
-  has_token:   boolean;
-  expires_at?: string;
-  scope?:      string;
-  token_type?: string;
-}
-
-// OAuth broker bridge surface available on the dicode SDK. build_auth_url
-// and store_token are reserved for buildin/auth-start and buildin/auth-relay;
-// list_status is read-only metadata for any task that opts in via
-// permissions.dicode.oauth_status.
-export interface DicodeOAuth {
-  build_auth_url(provider: string, scope?: string): Promise<unknown>;
-  store_token(envelope: unknown): Promise<unknown>;
-  list_status(providers: string[]): Promise<ProviderStatus[]>;
+export interface DicodeCrypto {
+  /** Encrypt arbitrary bytes under a context string. Requires permissions.dicode.crypto. */
+  encrypt(context: string, plaintext: Uint8Array): Promise<Uint8Array>;
+  /** Decrypt a blob produced by encrypt() under the same context. */
+  decrypt(context: string, ciphertext: Uint8Array): Promise<Uint8Array>;
 }
 
 export interface Dicode {
@@ -65,7 +54,7 @@ export interface Dicode {
   get_runs(taskID: string, opts?: { limit?: number }): Promise<unknown[]>;
   secrets_set(key: string, value: string): Promise<void>;
   secrets_delete(key: string): Promise<void>;
-  oauth: DicodeOAuth;
+  crypto: DicodeCrypto;
 }
 
 export interface DicodeSdk {

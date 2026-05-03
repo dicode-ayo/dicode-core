@@ -35,12 +35,10 @@ export default async function main(sdk: DicodeSdk): Promise<void> {
   const storageTask = Deno.env.get("DICODE_STORAGE_TASK") ?? "buildin/local-storage";
 
   if (!url) {
-    console.error("relay-client: DICODE_RELAY_SERVER_URL not set; exiting");
-    return;
+    throw new Error("relay-client: DICODE_RELAY_SERVER_URL not set");
   }
   if (!Number.isFinite(localPort) || localPort <= 0) {
-    console.error(`relay-client: DICODE_RELAY_LOCAL_PORT invalid (${portStr}); exiting`);
-    return;
+    throw new Error(`relay-client: DICODE_RELAY_LOCAL_PORT invalid (${portStr})`);
   }
 
   // ── identity load-or-generate ───────────────────────────────────────

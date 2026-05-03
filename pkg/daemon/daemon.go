@@ -317,6 +317,30 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 				return fmt.Errorf("setenv DICODE_RELAY_BROKER_URL: %w", err)
 			}
 		}
+
+		// Migration warning: existing users upgrading from the Go relay client
+		// have a legacy identity row at "relay.private_key". The new TS task
+		// regenerates fresh identity (different UUID, breaks existing webhook
+		// URLs). Warn the operator at boot if we see the legacy row.
+		var hasLegacy bool
+		_ = database.Query(ctx, `SELECT 1 FROM kv WHERE key = ?`,
+			[]any{"relay.private_key"},
+			func(rows db.Scanner) error {
+				if rows.Next() {
+					hasLegacy = true
+				}
+				return nil
+			},
+		)
+		if hasLegacy {
+			log.Warn(
+				"relay: legacy identity row detected — the new relay-client task " +
+					"generates a fresh identity, which means the daemon UUID will " +
+					"change and existing webhook URLs will stop working. To preserve " +
+					"the old UUID, file a migration request; otherwise reissue any " +
+					"webhook URLs after the daemon stabilises.",
+			)
+		}
 	}
 
 	webui.Version = version

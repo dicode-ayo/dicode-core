@@ -1,5 +1,42 @@
 # Changelog
 
+## [Unreleased]
+
+### Breaking
+
+- **Relay client migrated from Go to TypeScript task.** Existing users with
+  relay enabled will see a new daemon UUID on first boot of this version.
+  Existing webhook URLs (`https://relay.dicode.app/u/<old-uuid>/hooks/...`)
+  stop working; reissue them as needed.
+
+  The legacy SQLite kv row at `relay.private_key` is no longer used; the
+  new identity blob lives at `<DATADIR>/relay-store/relay/identity/v1.bin`,
+  encrypted at rest via `dicode.crypto`.
+
+- **`dicode relay rotate-identity` CLI removed.** New rotation procedure:
+  stop the daemon, delete `<DATADIR>/relay-store/relay/identity/v1.bin`,
+  restart. The relay-client task regenerates the identity on next boot.
+
+### Removed
+
+- `pkg/relay/` package (Go WSS client).
+- `pkg/ipc/oauth_*.go` IPC verbs (`build_auth_url`, `store_token`,
+  `list_status`). Replaced by `dicode.crypto.{encrypt, decrypt}` +
+  task-side composition.
+- `proto/relay.proto` and generated protobuf code.
+- `tests/e2e/relay/`.
+- `dicode.oauth.*` SDK methods (build_auth_url, store_token, list_status).
+- `permissions.dicode.{oauth_init, oauth_store, oauth_status}`.
+
+### Added
+
+- `dicode.crypto.{encrypt, decrypt}` IPC verb pair (context-scoped sub-key
+  derivation, AES-GCM with AAD-bound context).
+- `silent: true` task.yaml flag (detaches stdout/stderr from log capture
+  for tasks handling plaintext credentials).
+- `tasks/buildin/relay-client/` daemon task.
+- Configurable `prefix` param on `tasks/buildin/local-storage/`.
+
 ## [0.1.0](https://github.com/dicode-ayo/dicode-core/compare/v0.0.4...v0.1.0) (2026-04-25)
 
 

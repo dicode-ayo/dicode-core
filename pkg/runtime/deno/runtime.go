@@ -302,7 +302,6 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	srv.SetGateway(rt.gateway)
 	srv.SetSecrets(rt.secretsManager)
 	srv.SetInputStore(rt.effectiveInputStore())
-	srv.SetSecretsChain(rt.secrets)
 	srv.SetRedactor(redactor)
 	srv.SetReplayer(rt.effectiveReplayer())
 	if m := rt.effectiveSourceMgr(); m != nil {
