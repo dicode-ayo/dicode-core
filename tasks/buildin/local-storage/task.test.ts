@@ -62,6 +62,72 @@ test("rejects key without run-inputs/ prefix", async () => {
   assert.ok(res.error && res.error.includes("must start with"));
 });
 
+test("rejects prefix without trailing slash", async () => {
+  const root = await Deno.makeTempDir();
+  params.set("op", "put");
+  params.set("key", "foo/abc");
+  params.set("value", btoa("x"));
+  params.set("root", root);
+  params.set("prefix", "foo");
+  const res = await runTask() as { ok: boolean; error?: string };
+  assert.equal(res.ok, false);
+  assert.ok(res.error && res.error.includes("prefix must end with '/'"));
+});
+
+test("rejects key when prefix does not match", async () => {
+  const root = await Deno.makeTempDir();
+  params.set("op", "put");
+  params.set("key", "bar/x");
+  params.set("value", btoa("x"));
+  params.set("root", root);
+  params.set("prefix", "foo/");
+  const res = await runTask() as { ok: boolean; error?: string };
+  assert.equal(res.ok, false);
+  assert.ok(res.error && res.error.includes("must start with"));
+});
+
+test("custom prefix: put + get + delete", async () => {
+  const root = await Deno.makeTempDir();
+  const value = btoa("relay identity bytes");
+
+  // put
+  params.set("op", "put");
+  params.set("key", "relay/identity");
+  params.set("value", value);
+  params.set("root", root);
+  params.set("prefix", "relay/");
+  let res = await runTask() as { ok: boolean };
+  assert.equal(res.ok, true);
+
+  // get
+  params.set("op", "get");
+  params.set("key", "relay/identity");
+  params.set("value", "");
+  params.set("root", root);
+  params.set("prefix", "relay/");
+  res = await runTask() as { ok: boolean; value: string };
+  assert.equal(res.ok, true);
+  assert.equal((res as any).value, value);
+
+  // delete
+  params.set("op", "delete");
+  params.set("key", "relay/identity");
+  params.set("root", root);
+  params.set("prefix", "relay/");
+  res = await runTask() as { ok: boolean };
+  assert.equal(res.ok, true);
+
+  // get after delete returns empty
+  params.set("op", "get");
+  params.set("key", "relay/identity");
+  params.set("value", "");
+  params.set("root", root);
+  params.set("prefix", "relay/");
+  res = await runTask() as { ok: boolean; value: string };
+  assert.equal(res.ok, true);
+  assert.equal((res as any).value, "");
+});
+
 test("put requires value", async () => {
   const root = await Deno.makeTempDir();
   params.set("op", "put");
