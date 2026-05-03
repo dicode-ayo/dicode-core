@@ -1,0 +1,33 @@
+apiVersion: dicode/v1
+kind: Task
+name: "Relay Client"
+description: >
+  Maintains the WebSocket tunnel to the dicode relay broker so the daemon
+  can receive webhooks without a public port. Identity (split P-256 sign +
+  decrypt keys) and TOFU broker pin live encrypted-at-rest in the
+  configured storage task; sub-keys are derived via dicode.crypto and
+  never cross IPC.
+
+runtime: deno
+
+trigger:
+  daemon: true
+
+permissions:
+  net:
+    - "*"
+  env:
+    - DICODE_RELAY_SERVER_URL
+    - DICODE_RELAY_LOCAL_PORT
+    - DICODE_STORAGE_TASK
+    - DICODE_DATADIR
+  dicode:
+    crypto:
+      - "dicode/relay-identity/v1"
+      - "dicode/relay-broker-pin/v1"
+    tasks:
+      - buildin/local-storage
+
+notify:
+  on_success: false
+  on_failure: true
