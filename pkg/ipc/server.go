@@ -187,6 +187,9 @@ func (s *Server) Start(ctx context.Context) (socketPath, token string, err error
 		if dp.SecretsWrite {
 			caps = append(caps, CapSecretsWrite)
 		}
+		if dp.SecretsHas {
+			caps = append(caps, CapSecretsHas)
+		}
 		if dp.RunsListExpired {
 			caps = append(caps, CapRunsListExpired)
 		}
@@ -971,6 +974,35 @@ func (s *Server) handleConn(conn net.Conn) {
 				continue
 			}
 			reply(req.ID, true, "")
+
+		case "dicode.secrets.has":
+			// Presence-only check — never returns the value. Requires
+			// permissions.dicode.secrets_has: true (CapSecretsHas).
+			if !hasCap(caps, CapSecretsHas) {
+				reply(req.ID, nil, "ipc: permission denied (secrets.has)")
+				continue
+			}
+			if s.secrets == nil {
+				reply(req.ID, nil, "ipc: no secrets provider configured")
+				continue
+			}
+			if req.Key == "" {
+				reply(req.ID, nil, "ipc: key required")
+				continue
+			}
+			keys, err := s.secrets.List(context.Background())
+			if err != nil {
+				reply(req.ID, nil, err.Error())
+				continue
+			}
+			found := false
+			for _, k := range keys {
+				if k == req.Key {
+					found = true
+					break
+				}
+			}
+			reply(req.ID, found, "")
 
 		// ── mcp.* ─────────────────────────────────────────────────────────
 

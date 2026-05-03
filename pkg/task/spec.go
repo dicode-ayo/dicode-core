@@ -265,6 +265,10 @@ type DicodePermissions struct {
 	// SecretsWrite enables dicode.secrets_set() and dicode.secrets_delete().
 	// Tasks may write or overwrite secrets but never read them back.
 	SecretsWrite bool `yaml:"secrets_write,omitempty" json:"secrets_write,omitempty"`
+	// SecretsHas enables dicode.secrets.has(key) — a boolean presence check.
+	// Returns true/false only; never returns the secret value. Distinct from
+	// SecretsWrite so tasks can check presence without write rights.
+	SecretsHas bool `yaml:"secrets_has,omitempty" json:"secrets_has,omitempty"`
 	// RunsListExpired enables dicode.runs.list_expired().
 	RunsListExpired bool `yaml:"runs_list_expired,omitempty" json:"runs_list_expired,omitempty"`
 	// RunsDeleteInput enables dicode.runs.delete_input().

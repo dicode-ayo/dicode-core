@@ -81,6 +81,12 @@ export interface DicodeCrypto {
   decrypt: (context: string, ciphertext: Uint8Array) => Promise<Uint8Array>;
 }
 
+export interface DicodeSecrets {
+  // has returns true if a secret with the given key exists in the secrets
+  // store. Never returns the value. Requires permissions.dicode.secrets_has.
+  has: (key: string) => Promise<boolean>;
+}
+
 export interface Dicode {
   // task_id: the fully-namespaced id of the currently-running task (e.g.
   // "buildin/ai-agent"). Populated from the IPC handshake so task code can
@@ -97,6 +103,7 @@ export interface Dicode {
   set_group:      (label: string)      => Promise<void>;
   secrets_set:    (key: string, value: string) => Promise<void>;
   secrets_delete: (key: string)                => Promise<void>;
+  secrets:        DicodeSecrets;
   crypto:         DicodeCrypto;
   runs: {
     list_expired: (opts?: { before_ts?: number }) => Promise<unknown>;
@@ -315,6 +322,9 @@ const dicode: Dicode = {
   set_group:      (label)           => __call__({ method: "dicode.set_group",       group: String(label ?? "") }) as Promise<void>,
   secrets_set:    (key, value)      => __call__({ method: "dicode.secrets_set",     key, stringValue: value }) as Promise<void>,
   secrets_delete: (key)             => __call__({ method: "dicode.secrets_delete",  key }) as Promise<void>,
+  secrets: {
+    has: (key) => __call__({ method: "dicode.secrets.has", key }) as Promise<boolean>,
+  },
   runs: {
     list_expired: (opts) =>
       __call__({ method: "dicode.runs.list_expired", before_ts: opts?.before_ts ?? 0 }),
