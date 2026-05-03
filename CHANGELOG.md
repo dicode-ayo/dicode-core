@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Known regressions
+
+- **`auth-providers` UI shows no connected providers** even when tokens
+  are written. The legacy `dicode.oauth.list_status` IPC verb is gone;
+  `auth-providers/task.ts` hardcodes `has_token: false` until a generic
+  secrets-presence SDK surface lands. Tracked in #255. Tokens ARE being
+  written correctly by `auth-relay`; only the indicator is regressed.
+
 ### Breaking
 
 - **Relay client migrated from Go to TypeScript task.** Existing users with
