@@ -65,6 +65,11 @@ const (
 	CapSourcesSetDevMode = "sources.set_dev_mode" // dicode.sources.set_dev_mode
 	CapGitCommitPush     = "git.commit_push"      // dicode.git.commit_push (#234)
 
+	// CapCryptoCall gates dicode.crypto.encrypt() and dicode.crypto.decrypt().
+	// Granted if Permissions.Dicode.Crypto is non-empty. Per-call enforcement
+	// of the context allow-list happens in the dispatch case.
+	CapCryptoCall = "crypto.call"
+
 	// Reserved for CLI and WebUI clients (not issued to task shims today).
 	CapHTTPRegister  = "http.register" // register HTTP handler routes (issue #54)
 	CapSourcesManage = "sources.manage"

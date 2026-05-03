@@ -72,6 +72,15 @@ declare interface DicodeOAuth {
   list_status:    (providers: string[])              => Promise<ProviderStatus[]>;
 }
 
+declare interface DicodeCrypto {
+  /** Encrypt arbitrary bytes under a context string. The context is bound
+   *  into AEAD AAD; blobs from one context cannot be decrypted under another.
+   *  Requires permissions.dicode.crypto: ["context", ...]. */
+  encrypt: (context: string, plaintext: Uint8Array) => Promise<Uint8Array>;
+  /** Decrypt a blob produced by encrypt() under the same context. */
+  decrypt: (context: string, ciphertext: Uint8Array) => Promise<Uint8Array>;
+}
+
 declare interface Dicode {
   /** Fully-namespaced id of the currently-running task (e.g. "buildin/ai-agent"). */
   task_id:        string;
@@ -83,6 +92,7 @@ declare interface Dicode {
   secrets_set:    (key: string, value: string)                       => Promise<void>;
   secrets_delete: (key: string)                                       => Promise<void>;
   oauth:          DicodeOAuth;
+  crypto:         DicodeCrypto;
 }
 
 /** All SDK globals passed to your task's main() function. */

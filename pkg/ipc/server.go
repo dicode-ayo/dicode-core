@@ -2,6 +2,7 @@ package ipc
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -91,6 +92,7 @@ type Server struct {
 	replayer     *registry.Replayer   // optional; enables dicode.runs.replay
 	sourceMgr    SourceDevModeSetter  // optional; enables dicode.sources.set_dev_mode
 	repoResolver RepoPathResolver     // optional; enables dicode.git.commit_push
+	crypto       *cryptoHandler       // optional; enables dicode.crypto.{encrypt, decrypt}
 
 	ctx        context.Context
 	socketPath string
@@ -286,6 +288,9 @@ func (s *Server) Start(ctx context.Context) (socketPath, token string, err error
 		if dp.GitCommitPush {
 			caps = append(caps, CapGitCommitPush)
 		}
+		if len(dp.Crypto) > 0 {
+			caps = append(caps, CapCryptoCall)
+		}
 	}
 	if s.spec != nil && s.spec.Trigger.Daemon && s.gateway != nil {
 		caps = append(caps, CapHTTPRegister)
@@ -360,6 +365,13 @@ type RepoPathResolver interface {
 // SetRepoResolver attaches a RepoPathResolver (typically *webui.SourceManager)
 // for dicode.git.commit_push dispatch. nil disables.
 func (s *Server) SetRepoResolver(r RepoPathResolver) { s.repoResolver = r }
+
+// SetCryptoHandler installs a generic encrypt/decrypt handler used by
+// dicode.crypto.{encrypt, decrypt}. Daemon wires this in at boot once
+// secrets.LocalProvider is initialised.
+func (s *Server) SetCryptoHandler(d SubKeyDeriver) {
+	s.crypto = newCryptoHandler(d)
+}
 
 // ReturnCh receives the task return value once the subprocess sends "return".
 func (s *Server) ReturnCh() <-chan any { return s.retCh }
@@ -1293,6 +1305,58 @@ func (s *Server) handleConn(conn net.Conn) {
 				}
 			}
 
+		// ── dicode.crypto.* ──────────────────────────────────────────────
+
+		case "dicode.crypto.encrypt":
+			if !hasCap(caps, CapCryptoCall) {
+				reply(req.ID, nil, "ipc: permission denied (crypto.call)")
+				continue
+			}
+			if s.crypto == nil {
+				reply(req.ID, nil, "ipc: crypto handler not initialised")
+				continue
+			}
+			if !s.cryptoContextAllowed(req.Context) {
+				reply(req.ID, nil, fmt.Sprintf("ipc: context %q not in permissions.dicode.crypto", req.Context))
+				continue
+			}
+			pt, err := base64.StdEncoding.DecodeString(req.PlaintextB64)
+			if err != nil {
+				reply(req.ID, nil, fmt.Sprintf("invalid plaintext_b64: %v", err))
+				continue
+			}
+			ct, err := s.crypto.Encrypt(req.Context, pt)
+			if err != nil {
+				reply(req.ID, nil, err.Error())
+				continue
+			}
+			reply(req.ID, map[string]string{"ciphertext_b64": base64.StdEncoding.EncodeToString(ct)}, "")
+
+		case "dicode.crypto.decrypt":
+			if !hasCap(caps, CapCryptoCall) {
+				reply(req.ID, nil, "ipc: permission denied (crypto.call)")
+				continue
+			}
+			if s.crypto == nil {
+				reply(req.ID, nil, "ipc: crypto handler not initialised")
+				continue
+			}
+			if !s.cryptoContextAllowed(req.Context) {
+				reply(req.ID, nil, fmt.Sprintf("ipc: context %q not in permissions.dicode.crypto", req.Context))
+				continue
+			}
+			ct, err := base64.StdEncoding.DecodeString(req.CiphertextB64)
+			if err != nil {
+				reply(req.ID, nil, fmt.Sprintf("invalid ciphertext_b64: %v", err))
+				continue
+			}
+			pt, err := s.crypto.Decrypt(req.Context, ct)
+			if err != nil {
+				reply(req.ID, nil, err.Error())
+				continue
+			}
+			reply(req.ID, map[string]string{"plaintext_b64": base64.StdEncoding.EncodeToString(pt)}, "")
+
 		default:
 			if req.ID != "" {
 				reply(req.ID, nil, fmt.Sprintf("ipc: unknown method %q", req.Method))
@@ -1329,6 +1393,22 @@ func (s *Server) mcpAllowed(name string) bool {
 	}
 	for _, a := range dp.MCP {
 		if a == "*" || a == name {
+			return true
+		}
+	}
+	return false
+}
+
+// cryptoContextAllowed reports whether the requested context string is
+// allowed by this task's permissions.dicode.crypto list. Mirrors the
+// taskAllowed pattern used by dicode.run_task.
+func (s *Server) cryptoContextAllowed(ctx string) bool {
+	dp := dicodePerms(s.spec)
+	if dp == nil {
+		return false
+	}
+	for _, allowed := range dp.Crypto {
+		if allowed == "*" || allowed == ctx {
 			return true
 		}
 	}

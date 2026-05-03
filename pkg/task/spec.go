@@ -310,6 +310,16 @@ type DicodePermissions struct {
 	// GitCommitPush enables dicode.git.commit_push() — wraps
 	// pkg/source/git.CommitPush for add/commit/push from an IPC task. (#234)
 	GitCommitPush bool `yaml:"git_commit_push,omitempty" json:"git_commit_push,omitempty"`
+
+	// Crypto enables dicode.crypto.encrypt() and dicode.crypto.decrypt() and
+	// lists the context strings the task is allowed to use. The context is
+	// bound into the AEAD's AAD, so a task with crypto: ["foo"] cannot decrypt
+	// a blob produced under context "bar" — domain separation is enforced
+	// cryptographically, not just at the access-control layer.
+	//
+	// Use ["*"] to allow all contexts (intended for admin/utility tasks only;
+	// every named-context task should list its contexts explicitly).
+	Crypto []string `yaml:"crypto,omitempty" json:"crypto,omitempty"`
 }
 
 // ProviderConfig declares secret-provider settings on a task that

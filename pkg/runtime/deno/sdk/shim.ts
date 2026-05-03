@@ -113,6 +113,11 @@ export interface DicodeOAuth {
   list_status:    (providers: string[])              => Promise<ProviderStatus[]>;
 }
 
+export interface DicodeCrypto {
+  encrypt: (context: string, plaintext: Uint8Array) => Promise<Uint8Array>;
+  decrypt: (context: string, ciphertext: Uint8Array) => Promise<Uint8Array>;
+}
+
 export interface Dicode {
   // task_id: the fully-namespaced id of the currently-running task (e.g.
   // "buildin/ai-agent"). Populated from the IPC handshake so task code can
@@ -130,6 +135,7 @@ export interface Dicode {
   secrets_set:    (key: string, value: string)                        => Promise<void>;
   secrets_delete: (key: string)                                        => Promise<void>;
   oauth:          DicodeOAuth;
+  crypto:         DicodeCrypto;
   runs: {
     list_expired: (opts?: { before_ts?: number }) => Promise<unknown>;
     delete_input: (runID: string)                 => Promise<unknown>;
@@ -254,6 +260,21 @@ function __fire__(req: IpcRequest): Promise<void> {
 
 // console.log/info/warn/error/debug go to stdout/stderr as normal.
 // The runtime captures stdout as "info" and stderr as "error" in the run log.
+
+// ── base64 helpers (used by dicode.crypto) ───────────────────────────────────
+
+function __b64enc__(bytes: Uint8Array): string {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
+}
+
+function __b64dec__(s: string): Uint8Array {
+  const bin = atob(s);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
 
 // ── params ────────────────────────────────────────────────────────────────────
 
@@ -384,6 +405,24 @@ const dicode: Dicode = {
         author_email: opts.author_email,
         auth_token_env: opts.auth_token_env ?? "",
       }) as Promise<{ commit: string }>,
+  },
+  crypto: {
+    encrypt: async (context, plaintext) => {
+      const res = await __call__({
+        method: "dicode.crypto.encrypt",
+        context,
+        plaintext_b64: __b64enc__(plaintext),
+      }) as { ciphertext_b64: string };
+      return __b64dec__(res.ciphertext_b64);
+    },
+    decrypt: async (context, ciphertext) => {
+      const res = await __call__({
+        method: "dicode.crypto.decrypt",
+        context,
+        ciphertext_b64: __b64enc__(ciphertext),
+      }) as { plaintext_b64: string };
+      return __b64dec__(res.plaintext_b64);
+    },
   },
 };
 

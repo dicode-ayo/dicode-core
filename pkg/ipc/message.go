@@ -120,6 +120,11 @@ type Request struct {
 	// cli.ai — prompt, optional session_id, optional task id override.
 	Prompt    string `json:"prompt,omitempty"`
 	SessionID string `json:"sessionID,omitempty"`
+
+	// dicode.crypto.{encrypt, decrypt} inputs
+	Context       string `json:"context,omitempty"`
+	PlaintextB64  string `json:"plaintext_b64,omitempty"`
+	CiphertextB64 string `json:"ciphertext_b64,omitempty"`
 }
 
 // Response is an outbound message to a connected client.
