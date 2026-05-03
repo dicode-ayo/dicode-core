@@ -1,19 +1,64 @@
 // buildin/auth-start — kicks off an OAuth flow via the dicode relay broker.
 //
-// The daemon-side dicode.oauth.build_auth_url primitive bakes the entire
-// /auth/:provider payload layout in Go (BuildAuthURL in pkg/relay/oauth.go),
-// so this task cannot be coaxed into signing a payload of the wrong shape.
-// It only gets to pick the provider and an optional scope override.
+// Loads the daemon's relay identity (encrypted blob via dicode.crypto +
+// the configured storage task), signs an /auth/:provider URL via the
+// dicode-relay/client library's buildAuthURL, and returns the URL.
+//
+// PKCE: a fresh verifier is generated per invocation; only the challenge
+// (sha256 of verifier, base64url) is included in the signed payload to
+// the broker. The verifier is discarded — the broker performs the PKCE
+// exchange with the upstream provider, not the daemon.
+
+import {
+  Identity,
+  buildAuthURL,
+  type StoredIdentity,
+} from "npm:dicode-relay@^0.1.4/client";
+
+const IDENTITY_CTX = "dicode/relay-identity/v1";
+const PREFIX       = "relay/";
+const ID_KEY       = "relay/identity/v1";
+
+function b64decode(s: string): Uint8Array {
+  return Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+}
+
+function b64urlEncode(bytes: Uint8Array): string {
+  let s = "";
+  for (const b of bytes) s += String.fromCharCode(b);
+  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
 
 export default async function main({ params, dicode, output }: DicodeSdk) {
-  const provider = (await params.get("provider")) ?? "";
-  const scope = (await params.get("scope")) ?? "";
+  const provider = String((await params.get("provider")) ?? "");
+  const scope    = String((await params.get("scope"))    ?? "");
   if (!provider) throw new Error("provider parameter is required");
 
-  const result = await dicode.oauth.build_auth_url(provider, scope);
+  const brokerURL = Deno.env.get("DICODE_RELAY_BROKER_URL");
+  if (!brokerURL) {
+    throw new Error("relay broker URL not configured (DICODE_RELAY_BROKER_URL)");
+  }
+
+  // 1. Load identity (blob is encrypted at rest; decrypt happens here).
+  const identity = await loadIdentity(dicode);
+
+  // 2. Generate PKCE verifier + challenge.
+  const verifier  = crypto.randomUUID() + crypto.randomUUID();
+  const challenge = b64urlEncode(
+    new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))),
+  );
+
+  // 3. Build the signed URL.
+  const result = await buildAuthURL({
+    provider,
+    scope:     scope || undefined,
+    identity,
+    brokerURL,
+    challenge,
+  });
 
   const lines = [
-    `OAuth flow started for ${result.provider}.`,
+    `OAuth flow started for ${provider}.`,
     ``,
     `Open this URL in a browser to authorize:`,
     ``,
@@ -22,13 +67,36 @@ export default async function main({ params, dicode, output }: DicodeSdk) {
     `Once you complete the provider's consent screen, the dicode relay will`,
     `deliver the encrypted token to this daemon. buildin/auth-relay will`,
     `decrypt it and write the credentials to your secrets store under`,
-    `${result.provider.toUpperCase()}_ACCESS_TOKEN (and _REFRESH_TOKEN, _EXPIRES_AT if applicable).`,
+    `${provider.toUpperCase()}_ACCESS_TOKEN (and _REFRESH_TOKEN, _EXPIRES_AT if applicable).`,
     ``,
-    `Session: ${result.session_id}`,
+    `Session: ${result.sessionId}`,
   ];
   const html = `<pre>${lines.map(escapeHtml).join("\n")}</pre>`;
   await output.html(html);
-  return { url: result.url, session_id: result.session_id };
+  return { url: result.url, session_id: result.sessionId };
+}
+
+async function loadIdentity(dicode: DicodeSdk["dicode"]): Promise<Identity> {
+  const datadir = Deno.env.get("DICODE_DATADIR") ?? ".";
+  const root = `${datadir}/relay-store`;
+  const storageTask = Deno.env.get("DICODE_STORAGE_TASK") ?? "buildin/local-storage";
+
+  const res = (await dicode.run_task(storageTask, {
+    op: "get",
+    key: ID_KEY,
+    prefix: PREFIX,
+    root,
+  })) as { ok: boolean; value?: string; error?: string };
+
+  if (!res.ok || !res.value) {
+    throw new Error(
+      "relay identity not found in storage — has the relay-client task started yet?",
+    );
+  }
+  const ct = b64decode(res.value);
+  const pt = await dicode.crypto.decrypt(IDENTITY_CTX, ct);
+  const stored = JSON.parse(new TextDecoder().decode(pt)) as StoredIdentity;
+  return await Identity.import(stored);
 }
 
 function escapeHtml(s: string): string {
