@@ -114,6 +114,15 @@ spec:
       ref:
         path: ./local-storage/task.yaml
 
+    # ─── relay-client: WebSocket tunnel daemon task ──────────────────────────
+    # Maintains the persistent WSS connection to the relay broker so the daemon
+    # can receive webhooks without a public port. Only active when relay.enabled
+    # is true in dicode.yaml (DICODE_RELAY_SERVER_URL env var is set by the
+    # daemon when relay is configured).
+    relay-client:
+      ref:
+        path: ./relay-client/task.yaml
+
     run-inputs-cleanup:
       ref:
         path: ./run-inputs-cleanup/task.yaml

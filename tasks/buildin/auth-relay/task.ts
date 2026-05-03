@@ -26,8 +26,8 @@ const IDENTITY_CTX   = "dicode/relay-identity/v1";
 const BROKER_PIN_CTX = "dicode/relay-broker-pin/v1";
 const PENDING_CTX    = "dicode/oauth-pending/v1";
 const PREFIX         = "relay/";
-const ID_KEY         = "relay/identity/v1";
-const BROKER_PIN_KEY = "relay/broker-pin/v1";
+const ID_KEY         = "relay/identity-v1";
+const BROKER_PIN_KEY = "relay/broker-pin-v1";
 
 function b64decode(s: string): Uint8Array {
   return Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
@@ -99,14 +99,22 @@ export default async function main({ input, dicode }: DicodeSdk) {
   };
 }
 
+// dicode.run_task returns a RunResult envelope: { runID, status, returnValue }.
+// Unwrap it to get the storage task's actual return value.
+function unwrapRunResult(raw: unknown): { ok: boolean; value?: string; error?: string } {
+  const envelope = raw as { returnValue?: unknown };
+  const rv = envelope?.returnValue ?? raw;
+  return rv as { ok: boolean; value?: string; error?: string };
+}
+
 async function loadIdentity(
   dicode: DicodeSdk["dicode"],
   storageTask: string,
   root: string,
 ): Promise<Identity> {
-  const res = (await dicode.run_task(storageTask, {
+  const res = unwrapRunResult(await dicode.run_task(storageTask, {
     op: "get", key: ID_KEY, prefix: PREFIX, root,
-  })) as { ok: boolean; value?: string; error?: string };
+  }));
   if (!res.ok || !res.value) {
     throw new Error("relay identity not found — has the relay-client task started?");
   }
@@ -121,9 +129,9 @@ async function loadBrokerPin(
   storageTask: string,
   root: string,
 ): Promise<string | null> {
-  const res = (await dicode.run_task(storageTask, {
+  const res = unwrapRunResult(await dicode.run_task(storageTask, {
     op: "get", key: BROKER_PIN_KEY, prefix: PREFIX, root,
-  })) as { ok: boolean; value?: string };
+  }));
   if (!res.ok || !res.value) return null;
   const ct = b64decode(res.value);
   const pt = await dicode.crypto.decrypt(BROKER_PIN_CTX, ct);
@@ -136,12 +144,12 @@ async function resolveProvider(
   root: string,
   sessionId: string,
 ): Promise<string> {
-  const res = (await dicode.run_task(storageTask, {
+  const res = unwrapRunResult(await dicode.run_task(storageTask, {
     op:     "get",
     key:    `oauth-pending/${sessionId}`,
     prefix: "oauth-pending/",
     root,
-  })) as { ok: boolean; value?: string };
+  }));
   if (!res.ok || !res.value) {
     throw new Error("oauth-pending record not found — session expired or never started");
   }

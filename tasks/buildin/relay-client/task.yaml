@@ -21,6 +21,10 @@ permissions:
     - DICODE_RELAY_LOCAL_PORT
     - DICODE_STORAGE_TASK
     - DICODE_DATADIR
+    # ws (npm) checks these at import time to decide whether to load optional
+    # native addons. Deno's --allow-env sandbox blocks access unless declared.
+    - WS_NO_BUFFER_UTIL
+    - WS_NO_UTF_8_VALIDATE
   dicode:
     crypto:
       - "dicode/relay-identity/v1"

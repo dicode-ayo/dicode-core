@@ -14,8 +14,8 @@ import {
 const IDENTITY_CTX   = "dicode/relay-identity/v1";
 const BROKER_PIN_CTX = "dicode/relay-broker-pin/v1";
 const PREFIX         = "relay/";
-const ID_KEY         = "relay/identity/v1";
-const BROKER_PIN_KEY = "relay/broker-pin/v1";
+const ID_KEY         = "relay/identity-v1";
+const BROKER_PIN_KEY = "relay/broker-pin-v1";
 const ROOT_DEFAULT   = "relay-store"; // appended under the storage task's data dir
 
 function b64encode(bytes: Uint8Array): string {
@@ -97,17 +97,26 @@ async function loadOrGenerateIdentity(
   return id;
 }
 
+// dicode.run_task returns a RunResult envelope: { runID, status, returnValue }.
+// Unwrap it to get the storage task's actual return value.
+function unwrapRunResult(raw: unknown): { ok: boolean; value?: string; error?: string } {
+  const envelope = raw as { returnValue?: unknown };
+  const rv = envelope?.returnValue ?? raw;
+  return rv as { ok: boolean; value?: string; error?: string };
+}
+
 async function fetchBlob(
   sdk: DicodeSdk,
   storageTask: string,
   key: string,
 ): Promise<Uint8Array | null> {
-  const res = (await sdk.dicode.run_task(storageTask, {
+  const raw = await sdk.dicode.run_task(storageTask, {
     op: "get",
     key,
     prefix: PREFIX,
     root: rootFor(),
-  })) as { ok: boolean; value?: string; error?: string };
+  });
+  const res = unwrapRunResult(raw);
   if (!res.ok) {
     throw new Error(`storage get failed: ${res.error ?? "unknown"}`);
   }
@@ -121,13 +130,14 @@ async function putBlob(
   key: string,
   bytes: Uint8Array,
 ): Promise<void> {
-  const res = (await sdk.dicode.run_task(storageTask, {
+  const raw = await sdk.dicode.run_task(storageTask, {
     op: "put",
     key,
     value: b64encode(bytes),
     prefix: PREFIX,
     root: rootFor(),
-  })) as { ok: boolean; error?: string };
+  });
+  const res = unwrapRunResult(raw);
   if (!res.ok) throw new Error(`storage put failed: ${res.error ?? "unknown"}`);
 }
 

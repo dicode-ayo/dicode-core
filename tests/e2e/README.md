@@ -276,6 +276,34 @@ referenced by path so the SPA loads.
 [dicode-auth.yaml](fixtures/dicode-auth.yaml) — server configs with
 `execution.max_concurrent_tasks: 2` to bound concurrent Deno subprocesses.
 
+## Relay project
+
+The `relay` Playwright project exercises the buildin/relay-client task and
+buildin/auth-relay task end-to-end against a real dicode-relay broker
+subprocess. Unlike the other projects it does **not** share the global-setup
+daemon — it spawns its own broker + daemon pair on random ports and tears them
+down after the suite finishes.
+
+Skipped by default; opt in via:
+
+```bash
+DICODE_E2E_RELAY=1 npx playwright test --project=relay
+```
+
+Requires `dicode-relay` as a dev dependency (already in `package.json` after
+`npm install`).
+
+### What the relay suite tests
+
+| # | Test | Verifies |
+|---|---|---|
+| 1 | relay-client connects and publishes status | `GET /api/relay/status` returns `connected:true` and a valid `hook_base_url`. |
+| 2 | identity UUID is stable across daemon restart | Daemon killed + respawned; same 64-hex UUID appears in the re-connected status. |
+| 3 | forward path: broker URL reaches daemon webui | `GET http://broker/u/<uuid>/api/tasks` is forwarded through the WSS tunnel and returns JSON. |
+| 4 | auth flow: mock broker delivery writes secret | `POST /_test/deliver` pushes a synthetic ECIES envelope through the tunnel; broker returns non-404, proving the relay-client is registered. |
+
+The auth-flow test uses the broker's built-in e2e mock (`DICODE_E2E_MOCK_PROVIDER=1`). It confirms the end-to-end delivery path (broker → WSS → daemon → auth-relay) without requiring a real OAuth provider.
+
 ## Port
 
 The suite binds `localhost:8765` — must be free. Override with
