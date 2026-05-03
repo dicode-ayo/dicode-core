@@ -15,12 +15,19 @@ import {
   type StoredIdentity,
 } from "npm:dicode-relay@^0.1.4/client";
 
-const IDENTITY_CTX = "dicode/relay-identity/v1";
-const PREFIX       = "relay/";
-const ID_KEY       = "relay/identity/v1";
+const IDENTITY_CTX   = "dicode/relay-identity/v1";
+const PENDING_CTX    = "dicode/oauth-pending/v1";
+const PREFIX         = "relay/";
+const ID_KEY         = "relay/identity/v1";
 
 function b64decode(s: string): Uint8Array {
   return Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+}
+
+function b64encode(bytes: Uint8Array): string {
+  let s = "";
+  for (const b of bytes) s += String.fromCharCode(b);
+  return btoa(s);
 }
 
 function b64urlEncode(bytes: Uint8Array): string {
@@ -39,8 +46,12 @@ export default async function main({ params, dicode, output }: DicodeSdk) {
     throw new Error("relay broker URL not configured (DICODE_RELAY_BROKER_URL)");
   }
 
+  const datadir     = Deno.env.get("DICODE_DATADIR") ?? ".";
+  const root        = `${datadir}/relay-store`;
+  const storageTask = Deno.env.get("DICODE_STORAGE_TASK") ?? "buildin/local-storage";
+
   // 1. Load identity (blob is encrypted at rest; decrypt happens here).
-  const identity = await loadIdentity(dicode);
+  const identity = await loadIdentity(dicode, storageTask, root);
 
   // 2. Generate PKCE verifier + challenge.
   const verifier  = crypto.randomUUID() + crypto.randomUUID();
@@ -55,6 +66,21 @@ export default async function main({ params, dicode, output }: DicodeSdk) {
     identity,
     brokerURL,
     challenge,
+  });
+
+  // 4. Persist {sessionId → provider} so auth-relay can resolve the provider
+  //    on callback. Encrypted at rest for hygiene; not security-critical.
+  await dicode.run_task(storageTask, {
+    op:     "put",
+    key:    `oauth-pending/${result.sessionId}`,
+    value:  b64encode(
+      await dicode.crypto.encrypt(
+        PENDING_CTX,
+        new TextEncoder().encode(JSON.stringify({ provider })),
+      ),
+    ),
+    prefix: "oauth-pending/",
+    root,
   });
 
   const lines = [
@@ -76,11 +102,11 @@ export default async function main({ params, dicode, output }: DicodeSdk) {
   return { url: result.url, session_id: result.sessionId };
 }
 
-async function loadIdentity(dicode: DicodeSdk["dicode"]): Promise<Identity> {
-  const datadir = Deno.env.get("DICODE_DATADIR") ?? ".";
-  const root = `${datadir}/relay-store`;
-  const storageTask = Deno.env.get("DICODE_STORAGE_TASK") ?? "buildin/local-storage";
-
+async function loadIdentity(
+  dicode: DicodeSdk["dicode"],
+  storageTask: string,
+  root: string,
+): Promise<Identity> {
   const res = (await dicode.run_task(storageTask, {
     op: "get",
     key: ID_KEY,
