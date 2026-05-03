@@ -13,7 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 
 	"github.com/dicode/dicode/pkg/config"
@@ -23,7 +22,6 @@ import (
 	"github.com/dicode/dicode/pkg/notify"
 	"github.com/dicode/dicode/pkg/onboarding"
 	"github.com/dicode/dicode/pkg/registry"
-	"github.com/dicode/dicode/pkg/relay"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	denoruntime "github.com/dicode/dicode/pkg/runtime/deno"
 	dockerruntime "github.com/dicode/dicode/pkg/runtime/docker"
@@ -294,6 +292,33 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	if port == 0 {
 		port = 8080
 	}
+
+	// 8.5. Export relay-related config to process env so the buildin tasks
+	// (relay-client, auth-start, auth-relay) can read them via Deno.env.get.
+	// These tasks declare the var names in permissions.env; Deno's allow-env
+	// flag exposes them to the task subprocess.
+	if err := os.Setenv("DICODE_DATADIR", dataDir); err != nil {
+		return fmt.Errorf("setenv DICODE_DATADIR: %w", err)
+	}
+	if cfg.Defaults.RunInputs.StorageTask != "" {
+		if err := os.Setenv("DICODE_STORAGE_TASK", cfg.Defaults.RunInputs.StorageTask); err != nil {
+			return fmt.Errorf("setenv DICODE_STORAGE_TASK: %w", err)
+		}
+	}
+	if cfg.Relay.Enabled && cfg.Relay.ServerURL != "" {
+		if err := os.Setenv("DICODE_RELAY_SERVER_URL", cfg.Relay.ServerURL); err != nil {
+			return fmt.Errorf("setenv DICODE_RELAY_SERVER_URL: %w", err)
+		}
+		if err := os.Setenv("DICODE_RELAY_LOCAL_PORT", fmt.Sprintf("%d", port)); err != nil {
+			return fmt.Errorf("setenv DICODE_RELAY_LOCAL_PORT: %w", err)
+		}
+		if brokerURL := cfg.Relay.ResolvedBrokerURL(); brokerURL != "" {
+			if err := os.Setenv("DICODE_RELAY_BROKER_URL", brokerURL); err != nil {
+				return fmt.Errorf("setenv DICODE_RELAY_BROKER_URL: %w", err)
+			}
+		}
+	}
+
 	webui.Version = version
 	srv, err := webui.New(port, reg, eng, cfg, configPath, localSecrets, rec, sourceMgr, dataDir, logBroadcaster, log, database, gateway)
 	if err != nil {
@@ -327,6 +352,25 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	// the apiKeyStore; control just dispatches.
 	ctrlSrv.SetAPIKeyMinter(srv)
 
+	// Wire the generic dicode.crypto.{encrypt, decrypt} IPC verb so buildin
+	// tasks (relay-client, auth-start, auth-relay) can encrypt/decrypt blobs
+	// via DeriveSubKey-derived sub-keys. Sub-keys never cross IPC; only the
+	// encrypt/decrypt operations are exposed.
+	{
+		var cryptoDeriver secrets.SubKeyDeriver
+		for _, p := range secretsChain {
+			if d, ok := p.(secrets.SubKeyDeriver); ok {
+				cryptoDeriver = d
+				break
+			}
+		}
+		if cryptoDeriver == nil {
+			log.Warn("crypto IPC handler: no SubKeyDeriver available in secrets chain — dicode.crypto.{encrypt,decrypt} disabled")
+		} else {
+			denoRT.SetCryptoHandler(cryptoDeriver)
+		}
+	}
+
 	// 10. Run everything concurrently.
 	g, ctx := errgroup.WithContext(ctx)
 	g.Go(func() error { return rec.Run(ctx) })
@@ -334,101 +378,10 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	g.Go(func() error { return srv.Start(ctx) })
 	g.Go(func() error { return ctrlSrv.Start(ctx) })
 
-	// 11. Relay client — optional, enabled via config.
-	if cfg.Relay.Enabled && cfg.Relay.ServerURL != "" {
-		id, err := relay.LoadOrGenerateIdentity(ctx, database, log)
-		if err != nil {
-			log.Warn("relay: identity init failed, relay disabled", zap.Error(err))
-		} else {
-			rc := relay.NewClient(cfg.Relay.ServerURL, id, port, database, log)
-			srv.SetRelayClient(rc)
-			// Wire the daemon's relay identity into the deno runtime so
-			// the auth-start and auth-relay built-in tasks can drive the
-			// broker flow via dicode.oauth.*. Pending sessions are shared
-			// across runs so auth-start and auth-relay correlate by
-			// session id. The broker speaks HTTPS at the same host as the
-			// WSS relay endpoint.
-			//
-			// rc.SupportsOAuth is passed as a gating function (issue #104):
-			// pre-split brokers advertise protocol < 2, in which case the
-			// IPC layer refuses OAuth flows with a clear operator error
-			// rather than silently failing to decrypt the delivery.
-			//
-			// rotationActive (issue #144) is flipped true by the rotator
-			// closure below after `relay.RotateIdentity` succeeds. Until
-			// the daemon restarts (which reconstructs denoRT and re-reads
-			// Identity), the in-memory `id` still points at the OLD keys;
-			// the IPC layer refuses new OAuth flows so the operator isn't
-			// silently handed URLs signed under the identity they just
-			// retired.
-			pending := relay.NewPendingSessions()
-			var rotationActive atomic.Bool
-			rotationActiveFn := func() bool { return rotationActive.Load() }
-			if brokerURL := cfg.Relay.ResolvedBrokerURL(); brokerURL != "" {
-				denoRT.SetOAuthBroker(id, brokerURL, pending, rc.BrokerPubkey, rc.SupportsOAuth, rotationActiveFn)
-			} else {
-				log.Warn("relay: no broker URL (neither relay.broker_url nor a parsable relay.server_url) — OAuth broker disabled",
-					zap.String("server_url", cfg.Relay.ServerURL),
-					zap.String("broker_url", cfg.Relay.BrokerURL),
-					zap.String("hint", "set relay.broker_url: https://... in dicode.yaml, or use server_url: wss://..."))
-			}
-			g.Go(func() error { pending.StartSweep(ctx); return nil })
-			// Identity rotation via `dicode relay rotate-identity`. The
-			// callback regenerates BOTH the sign and decrypt keypairs
-			// atomically (split identity, issue #104) and invalidates any
-			// outstanding OAuth sessions (they were encrypted to the old
-			// DecryptKey). The running relay WSS connection keeps the old
-			// in-memory identity until the daemon restarts — documented
-			// in the RelayRotateResult warning returned to the CLI.
-			ctrlSrv.SetRelayIdentityRotator(func(ctx context.Context) (string, error) {
-				// Invariant: pending.Clear() runs BEFORE relay.RotateIdentity().
-				// Operator intent of rotation is "the old identity is dead from
-				// this point forward", so every in-flight flow issued against
-				// the old identity must be invalidated at the same moment as
-				// the DB swap. If Rotate ran first, the window between Rotate
-				// and Clear would leave in-flight flows still completing
-				// against the old DecryptKey (the broker has it in
-				// session.pubkey, unchanged by DB rotation) — inconsistent
-				// with the operator's mental model of rotation as a hard
-				// cutover.
-				//
-				// Note: the `id` pointer captured in denoRT.SetOAuthBroker
-				// above is NOT replaced here. The running daemon continues
-				// using the old in-memory identity for WSS + ECIES decrypt
-				// until a restart. This is the hazard relayRotateWarning
-				// calls out — the rotation point is "DB + pending cutover";
-				// the running-connection cutover is at restart.
-				//
-				// rotationActive (issue #144) flips true AFTER the DB swap
-				// succeeds so the IPC layer starts refusing dicode.oauth.*
-				// immediately. A failed rotation leaves the flag clear,
-				// keeping OAuth flows working against the unchanged identity.
-				//
-				// Trade-off: there is a sub-microsecond window between
-				// RotateIdentity returning nil and Store(true) below where
-				// a concurrent OAuth IPC call could pass the gate and get a
-				// URL signed under the old identity. Flipping the flag first
-				// would require rolling back on error (re-setting to false);
-				// the current order trades that race for simpler failure
-				// semantics. Do not move the Store earlier without adding
-				// the rollback path.
-				dropped := pending.Clear()
-				oldUUID := id.UUID
-				newID, err := relay.RotateIdentity(ctx, database)
-				if err != nil {
-					return "", err
-				}
-				rotationActive.Store(true)
-				log.Warn("relay identity rotated",
-					zap.String("old_uuid", oldUUID),
-					zap.String("new_uuid", newID.UUID),
-					zap.Int("dropped_sessions", dropped),
-				)
-				return newID.UUID, nil
-			})
-			g.Go(func() error { return rc.Run(ctx) })
-		}
-	}
+	// Relay client now runs as the buildin/relay-client daemon task, which
+	// reconciler-launches automatically when cfg.Relay.Enabled = true.
+	// Daemon-level wiring (env vars + crypto handler) is set above; nothing
+	// to do here.
 
 	return g.Wait()
 }

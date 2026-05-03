@@ -116,6 +116,10 @@ type Runtime struct {
 	replayer     *registry.Replayer      // optional; enables dicode.runs.replay
 	sourceMgr    ipc.SourceDevModeSetter // optional; enables dicode.sources.set_dev_mode
 	repoResolver ipc.RepoPathResolver    // optional; enables dicode.git.commit_push
+	// cryptoDeriver enables dicode.crypto.{encrypt, decrypt} for tasks that
+	// declare permissions.dicode.crypto. Wired at daemon boot via
+	// SetCryptoHandler; reads through parent in per-version executors.
+	cryptoDeriver ipc.SubKeyDeriver // optional; nil disables crypto IPC
 }
 
 // effectiveInputStore returns the live InputStore to use for this runtime
@@ -197,6 +201,21 @@ func (rt *Runtime) SetSourceManager(m ipc.SourceDevModeSetter) { rt.sourceMgr = 
 // SetRepoResolver wires the repo-path resolver so the per-run IPC server
 // can serve dicode.git.commit_push calls.
 func (rt *Runtime) SetRepoResolver(r ipc.RepoPathResolver) { rt.repoResolver = r }
+
+// SetCryptoHandler wires the SubKeyDeriver so per-run IPC servers can serve
+// dicode.crypto.{encrypt, decrypt} calls. Must be called before any Run;
+// mirrors the SetEngine / SetGateway pattern.
+func (rt *Runtime) SetCryptoHandler(d ipc.SubKeyDeriver) { rt.cryptoDeriver = d }
+
+// effectiveCryptoDeriver returns the live SubKeyDeriver, reading through
+// parent when this is a per-version executor so a daemon-level
+// SetCryptoHandler call propagates without extra bookkeeping.
+func (rt *Runtime) effectiveCryptoDeriver() ipc.SubKeyDeriver {
+	if rt.parent != nil {
+		return rt.parent.cryptoDeriver
+	}
+	return rt.cryptoDeriver
+}
 
 // SetSecretOutputChannel wires the channel that receives provider tasks'
 // secret maps. Called by the trigger engine before invoking Run when the
@@ -333,6 +352,9 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	}
 	if rt.oauthIdentity != nil {
 		srv.SetOAuthBroker(rt.oauthIdentity, rt.oauthURL, rt.oauthPending, rt.brokerPubkeyFn, rt.supportsOAuthFn, rt.rotationActiveFn)
+	}
+	if d := rt.effectiveCryptoDeriver(); d != nil {
+		srv.SetCryptoHandler(d)
 	}
 	socketPath, token, err := srv.Start(execCtx)
 	if err != nil {
