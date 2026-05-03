@@ -342,6 +342,13 @@ type Spec struct {
 	// Set to {task: ""} to disable the global default for this task only.
 	OnFailureChain *OnFailureChainSpec `yaml:"on_failure_chain,omitempty" json:"on_failure_chain,omitempty"`
 
+	// Silent, when true, detaches the task's stdout and stderr from the run-log
+	// capture pipes (sends them to io.Discard). Use for tasks that handle
+	// plaintext credentials so a careless console.log cannot leak them into
+	// the run log. Combine with permissions.{net,fs,env}: [] to remove every
+	// exfiltration channel.
+	Silent bool `yaml:"silent,omitempty" json:"silent,omitempty"`
+
 	// Provider declares this task as a secret provider implementing the
 	// issue #119 contract. nil = not a provider; non-nil = provider with
 	// the given config. The reconciler uses this to gate cache_ttl

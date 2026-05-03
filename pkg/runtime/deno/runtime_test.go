@@ -714,3 +714,29 @@ func TestRuntime_LogRedaction_OnlyActualSecrets(t *testing.T) {
 		t.Errorf("expected host-pass-through log to pass through unchanged, got: %+v", r.Logs)
 	}
 }
+
+// TestRuntime_Silent_DropsStdoutStderr verifies that when spec.Silent is true,
+// stdout and stderr from the task process are not captured into the run log.
+func TestRuntime_Silent_DropsStdoutStderr(t *testing.T) {
+	e := newTestEnv(t)
+	spec := &task.Spec{
+		ID:      "test-silent",
+		Name:    "test-silent",
+		Runtime: task.RuntimeDeno,
+		Trigger: task.TriggerConfig{Manual: true},
+		Timeout: 30 * time.Second,
+		Silent:  true,
+	}
+	r := e.runSpec(t,
+		`console.log("LOUD"); console.error("LOUDER"); export default async () => null;`,
+		spec,
+	)
+	if r.Error != nil {
+		t.Fatalf("silent task returned error: %v", r.Error)
+	}
+	for _, l := range r.Logs {
+		if strings.Contains(l.Message, "LOUD") {
+			t.Errorf("silent task leaked stdout/stderr into run log: %q", l.Message)
+		}
+	}
+}

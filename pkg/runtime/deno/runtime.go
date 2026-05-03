@@ -8,6 +8,7 @@ import (
 	"context"
 	_ "embed"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -410,50 +411,60 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	cmd := exec.CommandContext(execCtx, rt.denoPath, args...) //nolint:gosec
 	cmd.Env = buildEnv(resolved, socketPath, token, rt.oauthURL)
 
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		status = registry.StatusFailure
-		result.Error = err
-		return result, nil
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		status = registry.StatusFailure
-		result.Error = err
-		return result, nil
-	}
-
-	if err := cmd.Start(); err != nil {
-		status = registry.StatusFailure
-		result.Error = fmt.Errorf("start deno: %w", err)
-		return result, nil
+	var wg sync.WaitGroup
+	if spec.Silent {
+		// Discard stdout/stderr entirely — no AppendLog calls. Use io.Discard
+		// so the task process doesn't block on a full pipe buffer either.
+		cmd.Stdout = io.Discard
+		cmd.Stderr = io.Discard
+		if err := cmd.Start(); err != nil {
+			status = registry.StatusFailure
+			result.Error = fmt.Errorf("start deno: %w", err)
+			return result, nil
+		}
+	} else {
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			status = registry.StatusFailure
+			result.Error = err
+			return result, nil
+		}
+		stderr, err := cmd.StderrPipe()
+		if err != nil {
+			status = registry.StatusFailure
+			result.Error = err
+			return result, nil
+		}
+		if err := cmd.Start(); err != nil {
+			status = registry.StatusFailure
+			result.Error = fmt.Errorf("start deno: %w", err)
+			return result, nil
+		}
+		// Stream stdout (console.log/info) as "info" and stderr (console.error +
+		// Deno runtime errors) as "error" in the run log.
+		// wg ensures all log lines are flushed before Run returns, avoiding the race
+		// where the caller fetches logs immediately after exit and sees an empty list.
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			scanner := bufio.NewScanner(stdout)
+			for scanner.Scan() {
+				_ = rt.registry.AppendLog(context.Background(), runID, "info", redactor.RedactString(scanner.Text()))
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			scanner := bufio.NewScanner(stderr)
+			for scanner.Scan() {
+				_ = rt.registry.AppendLog(context.Background(), runID, "error", redactor.RedactString(scanner.Text()))
+			}
+		}()
 	}
 
 	// Register PID so metrics can aggregate child process resource usage.
 	pid := cmd.Process.Pid
 	activePIDs.Store(pid, struct{}{})
 	defer activePIDs.Delete(pid)
-
-	// Stream stdout (console.log/info) as "info" and stderr (console.error +
-	// Deno runtime errors) as "error" in the run log.
-	// wg ensures all log lines are flushed before Run returns, avoiding the race
-	// where the caller fetches logs immediately after exit and sees an empty list.
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		scanner := bufio.NewScanner(stdout)
-		for scanner.Scan() {
-			_ = rt.registry.AppendLog(context.Background(), runID, "info", redactor.RedactString(scanner.Text()))
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		scanner := bufio.NewScanner(stderr)
-		for scanner.Scan() {
-			_ = rt.registry.AppendLog(context.Background(), runID, "error", redactor.RedactString(scanner.Text()))
-		}
-	}()
 
 	doneCh := make(chan error, 1)
 	go func() { doneCh <- cmd.Wait() }()
