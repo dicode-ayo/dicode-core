@@ -172,13 +172,24 @@
 
 ## [Unreleased]
 
-### Known regressions
+### Fixed
 
-- **`auth-providers` UI shows no connected providers** even when tokens
-  are written. The legacy `dicode.oauth.list_status` IPC verb is gone;
-  `auth-providers/task.ts` hardcodes `has_token: false` until a generic
-  secrets-presence SDK surface lands. Tracked in #255. Tokens ARE being
-  written correctly by `auth-relay`; only the indicator is regressed.
+- **`auth-providers` UI now correctly shows connected providers** via the new
+  `dicode.secrets.has` IPC verb (closes #255). Previously the `has_token`
+  field was hardcoded `false` for every provider; tokens written by
+  `auth-relay` are now reflected immediately.
+
+### Added
+
+- **`dicode.secrets.has(key)` IPC verb** — cap-gated boolean presence check;
+  never returns the secret value. Enable with
+  `permissions.dicode.secrets_has: true` in `task.yaml`. Symmetric with
+  `secrets_write` so tasks can check presence without write rights.
+- **Provider list now sourced dynamically from the dicode-relay broker's
+  `GET /providers` endpoint** (requires dicode-relay >= 0.1.5). Eliminates
+  the hardcoded provider list maintenance burden — adding or removing a
+  provider in `relay.yaml` is immediately reflected without a dicode-core
+  release.
 
 ### Breaking
 

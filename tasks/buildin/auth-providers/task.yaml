@@ -3,11 +3,16 @@ kind: Task
 name: "Auth Providers"
 description: |
   Dashboard listing every OAuth provider known to this dicode instance,
-  with connection state and a Connect button. Connect for relay-broker
-  providers (github, google, slack, ...) calls buildin/auth-start to
-  obtain a signed /auth/:provider URL. Connect for OpenRouter (the only
-  standalone PKCE provider) opens /hooks/openrouter-oauth directly,
-  which renders an "Authorize with OpenRouter" page.
+  with connection state and a Connect button.
+
+  The provider catalogue is fetched dynamically from the dicode-relay broker's
+  GET /providers endpoint (requires dicode-relay >= 0.1.5). Connection status
+  is determined per-provider via dicode.secrets.has(<PROVIDER>_ACCESS_TOKEN).
+
+  Connect for relay-broker providers (github, google, slack, ...) calls
+  buildin/auth-start to obtain a signed /auth/:provider URL. Connect for
+  OpenRouter (the only standalone PKCE provider) opens /hooks/openrouter-oauth
+  directly, which renders an "Authorize with OpenRouter" page.
 
   Open in a browser via the Tasks list → Auth Providers → "open
   webhook UI" — or directly at /hooks/auth-providers.
@@ -21,15 +26,20 @@ trigger:
 params:
   providers:
     type: string
-    default: "github,google,slack,spotify,linear,discord,gitlab,airtable,notion,confluence,salesforce,stripe,office365,azure,looker,openrouter"
+    default: ""
     description: |
-      Comma-separated provider keys to display. Override to subset.
-      Each key must satisfy [a-z0-9_]{2,}.
+      Comma-separated provider keys to display. Leave empty to return all
+      providers reported by the broker (plus OpenRouter standalone).
+      Override to subset (e.g. "github,slack").
 
 permissions:
   env:
-    - DICODE_BASE_URL  # used to build the standalone openrouter URL
+    - DICODE_BASE_URL          # used to build the standalone openrouter URL
+    - DICODE_RELAY_BROKER_URL  # broker base URL; required for the list action
+  net:
+    - "*"  # broker URL is config-driven; wildcard matches relay-client pattern
   dicode:
+    secrets_has: true  # dicode.secrets.has — presence check for <PROVIDER>_ACCESS_TOKEN
     tasks:
       # Only auth-start is callable. The per-provider auth/<p>-oauth tasks
       # return HTML (not a JSON {url} contract) so they cannot be invoked

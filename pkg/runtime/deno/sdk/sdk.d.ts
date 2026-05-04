@@ -51,6 +51,12 @@ declare interface DicodeCrypto {
   decrypt: (context: string, ciphertext: Uint8Array) => Promise<Uint8Array>;
 }
 
+declare interface DicodeSecrets {
+  /** Returns true if a secret with the given key exists in the store.
+   *  Never returns the value. Requires permissions.dicode.secrets_has: true. */
+  has: (key: string) => Promise<boolean>;
+}
+
 declare interface Dicode {
   /** Fully-namespaced id of the currently-running task (e.g. "buildin/ai-agent"). */
   task_id:        string;
@@ -61,6 +67,8 @@ declare interface Dicode {
   get_runs:       (taskID: string, opts?: { limit?: number })        => Promise<unknown>;
   secrets_set:    (key: string, value: string) => Promise<void>;
   secrets_delete: (key: string)                => Promise<void>;
+  /** Secrets presence API. Requires permissions.dicode.secrets_has: true. */
+  secrets:        DicodeSecrets;
   crypto:         DicodeCrypto;
 }
 
