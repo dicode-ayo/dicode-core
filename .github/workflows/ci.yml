@@ -32,7 +32,7 @@ jobs:
       # Python is required for the dicode_sdk.py unit tests
       # (TestPythonSDK in pkg/runtime/python). Without it the wrapper
       # t.Skip's silently and SDK regressions go uncaught. See issue #39.
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
