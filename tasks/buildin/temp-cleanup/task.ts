@@ -53,7 +53,10 @@ async function collectRunningRunIDs(dicode: Dicode): Promise<Set<string>> {
   const running = new Set<string>();
   const tasks = (await dicode.list_tasks()) as TaskSummary[];
   for (const t of tasks) {
-    const runs = (await dicode.get_runs(t.id, { limit: 100 })) as Run[];
+    // dicode.get_runs returns null (not an empty array) when a task has no
+    // runs yet, or when the task was deregistered between list_tasks and
+    // get_runs. Coerce to [] so the iteration is always safe.
+    const runs = ((await dicode.get_runs(t.id, { limit: 100 })) ?? []) as Run[];
     for (const r of runs) {
       if (r.Status === "running") running.add(r.ID);
     }

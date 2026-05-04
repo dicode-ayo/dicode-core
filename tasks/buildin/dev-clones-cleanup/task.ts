@@ -22,7 +22,8 @@ async function collectActiveRunIDs(dicode: Dicode): Promise<Set<string>> {
   for (const t of tasks) {
     let runs: Array<{ ID: string; Status: string }> = [];
     try {
-      runs = (await dicode.get_runs(t.id, { limit: 100 })) as typeof runs;
+      // get_runs returns null (not []) when the task has no runs.
+      runs = ((await dicode.get_runs(t.id, { limit: 100 })) ?? []) as typeof runs;
     } catch {
       continue; // task may have been deregistered between list_tasks and get_runs
     }

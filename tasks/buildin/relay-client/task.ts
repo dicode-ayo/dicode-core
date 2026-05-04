@@ -28,7 +28,37 @@ function b64decode(s: string): Uint8Array {
   return Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
 }
 
+// Initial + max delay for the task-level outer-loop backoff. The npm
+// RelayClient.run() loops internally with WSS-level exp backoff, so this
+// outer loop only fires when something throws OUTSIDE the WSS lifecycle:
+// missing env vars, storage-task failure, decrypt failure during identity
+// load, etc. Such errors are usually persistent (config issue) — fast
+// retries waste cycles. Cap matches the WSS-level cap for symmetry.
+const OUTER_BACKOFF_INITIAL_MS = 5_000;
+const OUTER_BACKOFF_MAX_MS = 60_000;
+
 export default async function main(sdk: DicodeSdk): Promise<void> {
+  let backoff = OUTER_BACKOFF_INITIAL_MS;
+
+  // Outer loop: never exit. task.yaml has restart: never so engine won't
+  // re-spawn this task — instead, transient failures (storage hiccup,
+  // missing config the operator is about to fix, etc.) are absorbed here
+  // with exponential backoff. The only way out is daemon shutdown.
+  while (true) {
+    try {
+      await runOnce(sdk);
+      // runOnce only returns on RelayClient.run() returning, which only
+      // happens on AbortSignal — i.e. clean daemon shutdown. Exit cleanly.
+      return;
+    } catch (err) {
+      console.error(`relay-client: top-level error, retrying in ${Math.round(backoff / 1000)}s:`, err);
+      await new Promise((r) => setTimeout(r, backoff));
+      backoff = Math.min(backoff * 2, OUTER_BACKOFF_MAX_MS);
+    }
+  }
+}
+
+async function runOnce(sdk: DicodeSdk): Promise<void> {
   const url = Deno.env.get("DICODE_RELAY_SERVER_URL");
   const portStr = Deno.env.get("DICODE_RELAY_LOCAL_PORT") ?? "";
   const localPort = Number(portStr);
