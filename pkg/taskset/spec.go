@@ -162,6 +162,11 @@ type Entry struct {
 	Ref       *Ref       `yaml:"ref,omitempty"`
 	Inline    *task.Spec `yaml:"inline,omitempty"`
 	Overrides *Overrides `yaml:"overrides,omitempty"`
+	// Enabled is a top-level shortcut for `overrides.enabled`. Useful for
+	// one-liner toggling (`enabled: false`) without nesting under overrides.
+	// Conflicts with `overrides.enabled` if both are set — the loader rejects
+	// that ambiguity rather than picking a winner. Default (omitted) is true.
+	Enabled *bool `yaml:"enabled,omitempty"`
 }
 
 // TaskSetSpec is parsed from a yaml file with kind: TaskSet.

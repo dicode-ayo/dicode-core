@@ -100,6 +100,20 @@ func validateTaskSet(ts *TaskSetSpec, path string) error {
 		if entry.Ref != nil && entry.Ref.Path == "" {
 			return fmt.Errorf("%s: entry %q: ref.path is required", path, key)
 		}
+
+		// Lift the top-level `enabled` shortcut into overrides.enabled so all
+		// downstream code (resolver, override merging) sees one canonical
+		// path. Reject conflicts rather than picking a silent winner.
+		if entry.Enabled != nil {
+			if entry.Overrides != nil && entry.Overrides.Enabled != nil {
+				return fmt.Errorf("%s: entry %q: top-level `enabled` conflicts with `overrides.enabled` — set one or the other", path, key)
+			}
+			if entry.Overrides == nil {
+				entry.Overrides = &Overrides{}
+			}
+			entry.Overrides.Enabled = entry.Enabled
+			entry.Enabled = nil
+		}
 	}
 	return nil
 }

@@ -61,6 +61,21 @@ trigger:
 
 > **Deprecated:** `kind:Config spec.defaults` and `overrides.defaults` from parent TaskSets are no longer applied to the override stack. Migrate shared defaults to `dicode.yaml defaults:` instead.
 
+**Disabling an entry** — set `enabled: false` to skip a task without deleting its definition. Useful for temporarily turning off a buildin or bisecting a misbehaving task:
+
+```yaml
+spec:
+  entries:
+    relay-client:
+      enabled: false        # one-liner shortcut; default is true when omitted
+      ref:
+        path: ./relay-client/task.yaml
+```
+
+The longer nested form (`overrides.enabled: false`) is equivalent and still supported; setting both is a parse error.
+
+A parent TaskSet can also flip an entry's enabled state via its own `overrides.entries.<key>.enabled` (parent wins over child). This lets a higher-level TaskSet disable a buildin task in a child without forking the child.
+
 **`kind:Config`** — optional shared defaults file:
 
 ```yaml
