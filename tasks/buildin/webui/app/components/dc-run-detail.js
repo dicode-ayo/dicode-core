@@ -16,12 +16,15 @@ class DcRunDetail extends LitElement {
     _error:    { state: true },
     _status:   { state: true },
     _duration: { state: true },
+    _parent:   { state: true }, // Run record for ParentRunID, or null (#115)
+    _children: { state: true }, // child Run[] for the Sub-runs panel (#115)
   };
 
   constructor() {
     super();
     this._run = null; this._logs = []; this._error = null;
     this._status = null; this._duration = null;
+    this._parent = null; this._children = null;
     this._offLog = null; this._offFinished = null;
   }
 
@@ -51,7 +54,12 @@ class DcRunDetail extends LitElement {
     if (!this.runid) return;
     this._run = null; this._logs = []; this._error = null;
     this._status = null; this._duration = null;
+    this._parent = null; this._children = null;
     try {
+      // Children fetch is fire-and-forget — failure here shouldn't block the
+      // main run/logs load (Sub-runs panel just stays empty).
+      const childrenP = get(`/api/runs?parent=${encodeURIComponent(this.runid)}&limit=50`)
+        .catch(() => []);
       const [run, logs] = await Promise.all([
         get(`/api/runs/${this.runid}`),
         get(`/api/runs/${this.runid}/logs`),
@@ -64,6 +72,16 @@ class DcRunDetail extends LitElement {
         time: fmtTime(l.ts),
       }));
       this._status = run.status || run.Status;
+      this._children = await childrenP;
+
+      // #115: if this run has a parent, fetch the parent's record too so the
+      // back-link can show the parent task name instead of just an ID prefix.
+      const parentID = run.ParentRunID || run.parent_run_id;
+      if (parentID) {
+        try { this._parent = await get(`/api/runs/${encodeURIComponent(parentID)}`); }
+        catch (_) { this._parent = { ID: parentID }; }
+      }
+
       if (this._status === 'running') this._wireWS();
 
       await this.updateComplete;
@@ -135,10 +153,25 @@ class DcRunDetail extends LitElement {
     let displayRV = retval;
     if (retval) { try { displayRV = JSON.stringify(JSON.parse(retval), null, 2); } catch(_) {} }
 
+    // #115: parent + children panels — only render when there's something
+    // to show. The data is loaded once in _load(); empty arrays render
+    // nothing so an isolated run looks identical to the pre-#115 view.
+    const parent = this._parent;
+    const parentTask = parent?.task_name || parent?.TaskName || parent?.task_id || parent?.TaskID;
+    const children = this._children || [];
+
     return html`
       <div style="margin-bottom:var(--space-md)">
         <a href="tasks/${encodeURIComponent(taskID)}">← ${taskName}</a>
       </div>
+
+      ${parent ? html`
+        <div class="card" style="margin-bottom:var(--space-md);display:flex;gap:var(--space-md);align-items:center">
+          <span class="meta">Parent run</span>
+          <a href="/runs/${parent.ID || parent.id}">
+            ${parentTask ? `${parentTask} · ` : ''}<code>${(parent.ID || parent.id || '').slice(0,8)}</code>
+          </a>
+        </div>` : ''}
 
       <div class="card">
         <div style="display:flex;gap:var(--space-md);align-items:center;flex-wrap:wrap">
@@ -155,6 +188,21 @@ class DcRunDetail extends LitElement {
             <button class="btn btn-sm" @click=${() => this._replay()} title="Re-fire this run with its persisted input">Replay</button>` : ''}
         </div>
       </div>
+
+      ${children.length ? html`
+        <h2 style="margin-top:var(--space-lg)">Sub-runs <span class="meta">(${children.length})</span></h2>
+        <table>
+          <thead><tr><th>Run</th><th>Status</th><th>Started</th><th>Duration</th></tr></thead>
+          <tbody>
+            ${children.map(c => html`
+              <tr>
+                <td><a href="/runs/${c.ID}">${(c.TaskID || '?')} · <code>${c.ID.slice(0,8)}</code></a></td>
+                <td><span class="badge badge-${c.Status}">${c.Status}</span></td>
+                <td class="meta">${fmtTime(c.StartedAt)}</td>
+                <td class="meta">${fmtDuration(c.StartedAt, c.FinishedAt)}</td>
+              </tr>`)}
+          </tbody>
+        </table>` : ''}
 
       ${otype ? html`
         <div style="margin-bottom:.5rem">
