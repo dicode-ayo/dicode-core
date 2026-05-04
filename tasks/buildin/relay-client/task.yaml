@@ -12,6 +12,12 @@ runtime: deno
 
 trigger:
   daemon: true
+  # Disable engine-level auto-restart. The npm:dicode-relay/client RelayClient
+  # already does exponential backoff for WSS reconnects internally, and the
+  # task's main loop wraps fatal config/storage errors in its own backoff.
+  # Engine-level "always" would tight-loop on a config error (e.g. missing
+  # env var) — the in-task loop avoids the wasted Deno startup + IPC handshake.
+  restart: never
 
 permissions:
   net:
