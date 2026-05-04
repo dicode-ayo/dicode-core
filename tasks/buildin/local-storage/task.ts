@@ -1,22 +1,25 @@
-// Local Storage backend for run-input persistence (#233).
+// Local Storage — generic filesystem-backed blob store.
 //
-// Stores base64-encoded ciphertext blobs as files under a fixed root.
-// Core does encryption/redaction; this task is a dumb byte store.
+// Stores base64-encoded ciphertext blobs as files under a configurable
+// root. The required `prefix` param scopes keys to a domain (e.g.
+// "run-inputs/" for #233 input persistence, "relay/" for relay-client
+// identity). Core encryption/redaction happens upstream; this task is
+// a dumb byte store.
 
 interface PutResult { ok: true }
 interface GetResult { ok: true; value: string }
 interface DeleteResult { ok: true }
 interface ErrorResult { ok: false; error: string }
 
-const KEY_PREFIX = "run-inputs/";
-
-function fileFor(root: string, key: string): string {
-  // Key is "run-inputs/<runID>" by convention. Strip the prefix; the
-  // remainder must be a single safe path component.
-  if (!key.startsWith(KEY_PREFIX)) {
-    throw new Error(`storage key must start with ${JSON.stringify(KEY_PREFIX)}: ${key}`);
+function fileFor(root: string, prefix: string, key: string): string {
+  // Strip the caller-supplied prefix; the remainder must be a single safe path component.
+  if (!prefix.endsWith("/")) {
+    throw new Error(`prefix must end with '/': ${JSON.stringify(prefix)}`);
   }
-  const safeKey = key.slice(KEY_PREFIX.length);
+  if (!key.startsWith(prefix)) {
+    throw new Error(`storage key must start with ${JSON.stringify(prefix)}: ${key}`);
+  }
+  const safeKey = key.slice(prefix.length);
   if (!safeKey || safeKey.includes("/") || safeKey.includes("\\") || safeKey.includes("..")) {
     throw new Error(`invalid storage key: ${key}`);
   }
@@ -38,13 +41,14 @@ export default async function main({ params }: DicodeSdk):
   const op = String((await params.get("op")) ?? "");
   const key = String((await params.get("key")) ?? "");
   const root = String((await params.get("root")) ?? "");
+  const prefix = String((await params.get("prefix")) ?? "run-inputs/");
 
   if (!op || !key) return { ok: false, error: "op and key required" };
   if (!root) return { ok: false, error: "root required (set DATADIR)" };
 
   try {
     await Deno.mkdir(root, { recursive: true });
-    const path = fileFor(root, key);
+    const path = fileFor(root, prefix, key);
 
     if (op === "put") {
       const value = String((await params.get("value")) ?? "");

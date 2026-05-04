@@ -42,34 +42,13 @@ declare interface MCP {
   call:       (name: string, tool: string, args?: Record<string, unknown>) => Promise<unknown>;
 }
 
-declare interface OAuthAuthURL {
-  url:        string;
-  session_id: string;
-  provider:   string;
-  timestamp:  number;
-  relay_uuid: string;
-}
-
-declare interface OAuthStoreResult {
-  provider: string;
-  secrets:  string[];
-}
-
-declare interface ProviderStatus {
-  provider:    string;
-  has_token:   boolean;
-  expires_at?: string;
-  scope?:      string;
-  token_type?: string;
-}
-
-declare interface DicodeOAuth {
-  /** Requires permissions.dicode.oauth_init. Signs the daemon's side of a /auth/:provider URL via the relay broker. */
-  build_auth_url: (provider: string, scope?: string) => Promise<OAuthAuthURL>;
-  /** Requires permissions.dicode.oauth_store. Decrypts an incoming token envelope and writes the resulting credentials to secrets. Plaintext never crosses the IPC boundary. */
-  store_token:    (envelope: unknown)                => Promise<OAuthStoreResult>;
-  /** Requires permissions.dicode.oauth_status. Returns connection-state metadata (presence, expiry, scope) for the provider names supplied. Plaintext access/refresh tokens are never returned. */
-  list_status:    (providers: string[])              => Promise<ProviderStatus[]>;
+declare interface DicodeCrypto {
+  /** Encrypt arbitrary bytes under a context string. The context is bound
+   *  into AEAD AAD; blobs from one context cannot be decrypted under another.
+   *  Requires permissions.dicode.crypto: ["context", ...]. */
+  encrypt: (context: string, plaintext: Uint8Array) => Promise<Uint8Array>;
+  /** Decrypt a blob produced by encrypt() under the same context. */
+  decrypt: (context: string, ciphertext: Uint8Array) => Promise<Uint8Array>;
 }
 
 declare interface Dicode {
@@ -80,9 +59,9 @@ declare interface Dicode {
   run_task:       (taskID: string, params?: Record<string, string>) => Promise<unknown>;
   list_tasks:     ()                                                 => Promise<unknown>;
   get_runs:       (taskID: string, opts?: { limit?: number })        => Promise<unknown>;
-  secrets_set:    (key: string, value: string)                       => Promise<void>;
-  secrets_delete: (key: string)                                       => Promise<void>;
-  oauth:          DicodeOAuth;
+  secrets_set:    (key: string, value: string) => Promise<void>;
+  secrets_delete: (key: string)                => Promise<void>;
+  crypto:         DicodeCrypto;
 }
 
 /** All SDK globals passed to your task's main() function. */

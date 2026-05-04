@@ -51,8 +51,17 @@ export default async function main({ params, input, dicode }: DicodeSdk) {
 
   if (action === "list") {
     if (requested.length === 0) return [];
-    const statuses = await dicode.oauth.list_status(requested);
+    // TODO(#255): Restore real has_token detection. The legacy
+    // dicode.oauth.list_status IPC verb was deleted in the relay-TS
+    // migration; this branch hardcodes has_token: false until a generic
+    // secrets-presence SDK surface (e.g. dicode.secrets.has) is added.
+    // Tokens ARE being written correctly by auth-relay — only the UI
+    // indication is regressed.
     const meta = new Map(KNOWN.map(m => [m.key, m]));
+    const statuses = requested.map(provider => ({
+      provider,
+      has_token: false, // see TODO(#255) above
+    }));
     return statuses.map(s => ({ ...s, meta: meta.get(s.provider) ?? null }));
   }
 

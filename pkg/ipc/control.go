@@ -14,26 +14,12 @@ import (
 	"github.com/dicode/dicode/pkg/db"
 	"github.com/dicode/dicode/pkg/onboarding"
 	"github.com/dicode/dicode/pkg/registry"
-	"github.com/dicode/dicode/pkg/relay"
 	"github.com/dicode/dicode/pkg/secrets"
 	"github.com/dicode/dicode/pkg/task"
 	"github.com/dicode/dicode/pkg/tasktest"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/bcrypt"
 )
-
-// RelayIdentityRotator rotates the daemon's relay identity on demand.
-// It is implemented by main.go (which owns the db handle, the pending
-// store, and the running relay client) and passed into ControlServer so
-// the cli.relay.rotate_identity handler can trigger a rotation without
-// ControlServer needing direct access to any of those pieces.
-//
-// The returned string is the new UUID. The rotator is responsible for:
-//   - generating + persisting a fresh keypair in the daemon DB
-//   - invalidating any in-memory state tied to the old key (pending
-//     OAuth sessions, running relay WSS connection)
-//   - returning cleanly even if the relay client is currently dialing
-type RelayIdentityRotator func(ctx context.Context) (newUUID string, err error)
 
 // ControlServer is the daemon's persistent control socket. It listens at a
 // fixed path (dataDir/daemon.sock) and accepts connections from the dicode CLI.
@@ -51,9 +37,8 @@ type ControlServer struct {
 	engine          EngineRunner
 	secrets         secrets.Manager // nil if no local provider configured
 	metricsProvider MetricsProvider
-	database        db.DB                // for broker pubkey trust pinning; nil in tests
-	rotateRelay     RelayIdentityRotator // nil if relay not enabled
-	apiKeys         APIKeyMinter         // nil if webui not wired (tests)
+	database        db.DB        // for broker pubkey trust pinning; nil in tests
+	apiKeys         APIKeyMinter // nil if webui not wired (tests)
 	log             *zap.Logger
 
 	// defaultAITask is cfg.AI.Task — the task id that `dicode ai` fires when
@@ -242,9 +227,6 @@ func (cs *ControlServer) dispatch(ctx context.Context, req Request) (any, error)
 
 	case "cli.ai":
 		return cs.handleAI(ctx, req)
-
-	case "cli.relay.rotate_identity":
-		return cs.handleRelayRotate(ctx)
 
 	case "cli.task.test":
 		return cs.handleTaskTest(ctx, req)
@@ -579,62 +561,30 @@ func (cs *ControlServer) handleAI(ctx context.Context, req Request) (AIResult, e
 	return out, nil
 }
 
-// handleTrustBroker deletes the TOFU-pinned broker pubkey so the next relay
+// handleTrustBroker clears the TOFU-pinned broker pubkey so the next relay
 // reconnect will re-pin whatever the broker announces. This is the recovery
 // path when the broker operator rotates their signing key.
-func (cs *ControlServer) handleTrustBroker(ctx context.Context) (any, error) {
-	if cs.database == nil {
-		return nil, fmt.Errorf("database not available")
-	}
-	if err := relay.ReplaceBrokerPubkey(ctx, cs.database, ""); err != nil {
-		return nil, fmt.Errorf("clear broker pubkey: %w", err)
-	}
-	cs.log.Warn("broker pubkey pin cleared — next relay reconnect will TOFU-pin the new key")
-	return map[string]string{
-		"status":  "ok",
-		"message": "Broker pubkey pin cleared. Restart the daemon (or wait for reconnect) to accept the new broker key.",
-	}, nil
-}
-
-// SetRelayIdentityRotator wires the rotation callback. The ControlServer
-// owns nothing except the function; main.go constructs a closure that holds
-// the db, pending store, and relay client, and passes it in after relay
-// initialization. Passing nil (or not calling this at all) leaves
-// cli.relay.rotate_identity disabled.
 //
-// Must be called before Start(). There is no synchronisation on the field;
-// swapping the rotator after the control socket is accepting connections is
-// not supported.
-func (cs *ControlServer) SetRelayIdentityRotator(fn RelayIdentityRotator) {
-	cs.rotateRelay = fn
-}
-
-// RelayRotateResult is returned over the control socket after a successful
-// rotation. The new UUID is surfaced so the CLI can print it; the warning
-// reminds the operator that live webhook URLs pointing at the old UUID are
-// now dead.
-type RelayRotateResult struct {
-	NewUUID string `json:"new_uuid"`
-	Warning string `json:"warning"`
-}
-
-func (cs *ControlServer) handleRelayRotate(ctx context.Context) (any, error) {
-	if cs.rotateRelay == nil {
-		return nil, fmt.Errorf("relay not enabled on this daemon")
+// NOTE: after the relay-TS migration the broker pin is stored as an encrypted
+// blob in relay-store/relay/broker-pin/v1 by the relay-client task, not in
+// the SQLite kv table. This handler now returns a deprecation notice directing
+// operators to delete the file directly. The kv-row clear is kept as a no-op
+// fallback for any legacy row that might still be present.
+func (cs *ControlServer) handleTrustBroker(ctx context.Context) (any, error) {
+	if cs.database != nil {
+		// Best-effort: clear any legacy kv row (harmless if absent).
+		_ = cs.database.Exec(ctx,
+			`DELETE FROM kv WHERE key = ?`,
+			"relay.broker_pubkey",
+		)
 	}
-	newUUID, err := cs.rotateRelay(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("rotate: %w", err)
-	}
-	// The rotator closure in main.go emits a detailed audit entry with
-	// old_uuid, new_uuid, and dropped_sessions. We log here too for the
-	// control-socket-level audit trail (separate from the relay-level one).
-	cs.log.Warn("relay identity rotated via control socket",
-		zap.String("new_uuid", newUUID),
-	)
-	return RelayRotateResult{
-		NewUUID: newUUID,
-		Warning: relayRotateWarning,
+	cs.log.Warn("relay trust-broker: broker pin is now stored in relay-store/relay/broker-pin/v1 — " +
+		"delete that file and restart the daemon to force TOFU re-pin")
+	return map[string]string{
+		"status": "ok",
+		"message": "Legacy kv pin cleared. The relay-client task stores the broker pin at " +
+			"<DATADIR>/relay-store/relay/broker-pin/v1 — delete that file and restart the daemon " +
+			"to force TOFU re-pin on the next broker connection.",
 	}, nil
 }
 
@@ -693,20 +643,6 @@ func (cs *ControlServer) handleTaskTest(ctx context.Context, req Request) (TaskT
 	}
 	return wire, nil
 }
-
-// relayRotateWarning is the operator-facing message surfaced to the CLI after
-// a successful rotation. It documents the three non-obvious consequences:
-// (a) UUID invalidation breaks every shared webhook URL, (b) the still-
-// connected WSS session holds the OLD identity in memory until the daemon is
-// restarted (so a stolen old key remains impersonation-capable for that
-// window), and (c) dicode.oauth.* IPC is now refused until restart (issue
-// #144) to avoid handing out new URLs signed under the retired identity.
-const relayRotateWarning = "Old UUID is permanently invalidated. " +
-	"Any public webhook URLs you previously shared under the old UUID will stop working. " +
-	"IMPORTANT: the running relay WSS connection still uses the old key in memory. " +
-	"An attacker who has the old key can impersonate this daemon until you restart. " +
-	"dicode.oauth.build_auth_url / store_token are refused until the daemon restarts. " +
-	"Restart the daemon now to complete the rotation."
 
 // triggerLabel returns a human-readable trigger description for a task spec.
 func triggerLabel(s *task.Spec) string {

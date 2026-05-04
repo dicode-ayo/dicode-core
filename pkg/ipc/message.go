@@ -72,12 +72,6 @@ type Request struct {
 	Tool    string          `json:"tool,omitempty"`
 	Args    json.RawMessage `json:"args,omitempty"`
 
-	// dicode.oauth.* — exposed only to the auth-relay/auth-start/auth-providers built-in tasks
-	Provider  string          `json:"provider,omitempty"`  // oauth.build_auth_url
-	Scope     string          `json:"scope,omitempty"`     // oauth.build_auth_url — optional scope override
-	Envelope  json.RawMessage `json:"envelope,omitempty"`  // oauth.store_token — OAuthTokenDeliveryPayload JSON
-	Providers []string        `json:"providers,omitempty"` // oauth.list_status — caller-supplied provider keys
-
 	// http.register (daemon tasks register an HTTP pattern with the gateway)
 	Pattern  string `json:"pattern,omitempty"`
 	StreamID string `json:"streamID,omitempty"`
@@ -120,6 +114,11 @@ type Request struct {
 	// cli.ai — prompt, optional session_id, optional task id override.
 	Prompt    string `json:"prompt,omitempty"`
 	SessionID string `json:"sessionID,omitempty"`
+
+	// dicode.crypto.{encrypt, decrypt} inputs
+	Context       string `json:"context,omitempty"`
+	PlaintextB64  string `json:"plaintext_b64,omitempty"`
+	CiphertextB64 string `json:"ciphertext_b64,omitempty"`
 }
 
 // Response is an outbound message to a connected client.

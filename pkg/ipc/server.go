@@ -2,6 +2,7 @@ package ipc
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -14,7 +15,6 @@ import (
 	"github.com/dicode/dicode/pkg/db"
 	mcpclient "github.com/dicode/dicode/pkg/mcp/client"
 	"github.com/dicode/dicode/pkg/registry"
-	"github.com/dicode/dicode/pkg/relay"
 	"github.com/dicode/dicode/pkg/secrets"
 	gitsource "github.com/dicode/dicode/pkg/source/git"
 	"github.com/dicode/dicode/pkg/task"
@@ -22,24 +22,6 @@ import (
 	"github.com/dicode/dicode/pkg/tasktest"
 	"go.uber.org/zap"
 )
-
-// oauthBrokerProtocolErr is the operator-facing error returned when a task
-// invokes dicode.oauth.* against a broker whose welcome message did not
-// advertise protocol >= 2 (issue #104). The message intentionally names
-// the fix so operators know what to upgrade without digging through logs.
-const oauthBrokerProtocolErr = "ipc: broker does not support split-key OAuth — upgrade dicode-relay to protocol >= 2"
-
-// oauthRotationInProgressErr is the operator-facing error returned when a task
-// invokes dicode.oauth.* after `dicode relay rotate-identity` has swapped the
-// DB keys but the daemon has not yet been restarted. The rotated daemon still
-// holds the OLD in-memory Identity pointer, so a new flow would be issued
-// under the old SignKey — contradicting the rotation contract. Refuse here
-// and tell the operator exactly what to do.
-//
-// Covers both build_auth_url (would sign a URL under the old key) and
-// store_token (would persist a token that was encrypted to the old
-// DecryptKey by the mid-flight broker session).
-const oauthRotationInProgressErr = "ipc: relay rotation in progress — restart the daemon to complete rotation before issuing or accepting OAuth tokens"
 
 // Server is a per-run Unix socket server that bridges a task subprocess and
 // the Go host using the unified IPC protocol.
@@ -58,17 +40,7 @@ type Server struct {
 	spec     *task.Spec
 	engine   EngineRunner
 	secrets  secrets.Manager // optional; enables dicode.secrets_set / dicode.secrets_delete
-	// secretsChain (read path) is used by dicode.oauth.list_status to walk
-	// the env-fallback chain. SetSecretsChain wires it; nil means the
-	// daemon has no chain configured (tests with read-only flows).
-	secretsChain     secrets.Chain
-	oauthID          *relay.Identity        // optional; enables dicode.oauth.* for the auth built-ins
-	oauthURL         string                 // broker base URL, e.g. "https://relay.dicode.app"
-	oauthPending     *relay.PendingSessions // tracks outstanding /auth/:provider flows by session id
-	brokerPubkeyFn   func() string          // returns the TOFU-pinned broker pubkey (base64 SPKI DER)
-	supportsOAuthFn  func() bool            // issue #104: reports broker protocol >= 2; nil means unchecked
-	rotationActiveFn func() bool            // issue #144: reports whether a relay-identity rotation has started; nil means unchecked
-	log              *zap.Logger
+	log      *zap.Logger
 
 	// redactor strips secret values from inbound log messages before they
 	// hit the run log. Nil load is safe (no redaction; RedactString is
@@ -91,6 +63,7 @@ type Server struct {
 	replayer     *registry.Replayer   // optional; enables dicode.runs.replay
 	sourceMgr    SourceDevModeSetter  // optional; enables dicode.sources.set_dev_mode
 	repoResolver RepoPathResolver     // optional; enables dicode.git.commit_push
+	crypto       *cryptoHandler       // optional; enables dicode.crypto.{encrypt, decrypt}
 
 	ctx        context.Context
 	socketPath string
@@ -163,10 +136,6 @@ func New(
 // can call dicode.secrets_set() and dicode.secrets_delete().
 func (s *Server) SetSecrets(m secrets.Manager) { s.secrets = m }
 
-// SetSecretsChain attaches the read-side chain (env-fallback aware) used by
-// dicode.oauth.list_status to introspect provider connection metadata.
-func (s *Server) SetSecretsChain(c secrets.Chain) { s.secretsChain = c }
-
 // SetRedactor installs a log-message redactor. Messages received via the
 // IPC "log" method are passed through r.RedactString before being
 // persisted to the run log, matching the protection stdout/stderr piping
@@ -182,38 +151,6 @@ func (s *Server) SetSecretOutput(ch chan map[string]string) {
 	// edge via go's goroutine-launch semantics. Calling after Start is
 	// unsupported and will race.
 	s.secretOut = ch
-}
-
-// SetOAuthBroker wires the daemon's relay identity (used to sign /auth URLs
-// and decrypt token deliveries) plus the broker base URL and the
-// daemon-wide PendingSessions store. The task-side dicode.oauth.* API is
-// inert until this is set, so the auth-relay built-in task must gracefully
-// degrade when the relay client is not enabled in dicode.yaml.
-//
-// pending is shared across all per-run ipc.Server instances so that an
-// auth-start run and the subsequent auth-complete webhook run can correlate
-// on session id.
-//
-// supportsOAuthFn (issue #104) is consulted immediately before every OAuth
-// IPC dispatch. If non-nil and it returns false, dicode.oauth.build_auth_url
-// and dicode.oauth.store_token are refused with a clear operator error
-// rather than silently failing at decrypt time. Passing nil leaves the IPC
-// path unchecked — appropriate for test fixtures that don't run a full
-// relay client.
-//
-// rotationActiveFn (issue #144) is consulted alongside supportsOAuthFn. If
-// non-nil and it returns true, the same two OAuth methods are refused with
-// an error telling the operator to restart the daemon to complete the
-// rotation. Lives on the daemon (not the per-run Server) because Servers
-// are recreated per task invocation but the rotation state persists for
-// the daemon process lifetime.
-func (s *Server) SetOAuthBroker(id *relay.Identity, baseURL string, pending *relay.PendingSessions, brokerPubkeyFn func() string, supportsOAuthFn func() bool, rotationActiveFn func() bool) {
-	s.oauthID = id
-	s.oauthURL = baseURL
-	s.oauthPending = pending
-	s.brokerPubkeyFn = brokerPubkeyFn
-	s.supportsOAuthFn = supportsOAuthFn
-	s.rotationActiveFn = rotationActiveFn
 }
 
 // Start creates the Unix socket and begins accepting connections.
@@ -250,15 +187,6 @@ func (s *Server) Start(ctx context.Context) (socketPath, token string, err error
 		if dp.SecretsWrite {
 			caps = append(caps, CapSecretsWrite)
 		}
-		if dp.OAuthInit {
-			caps = append(caps, CapOAuthInit)
-		}
-		if dp.OAuthStore {
-			caps = append(caps, CapOAuthStore)
-		}
-		if dp.OAuthStatus {
-			caps = append(caps, CapOAuthStatus)
-		}
 		if dp.RunsListExpired {
 			caps = append(caps, CapRunsListExpired)
 		}
@@ -285,6 +213,9 @@ func (s *Server) Start(ctx context.Context) (socketPath, token string, err error
 		}
 		if dp.GitCommitPush {
 			caps = append(caps, CapGitCommitPush)
+		}
+		if len(dp.Crypto) > 0 {
+			caps = append(caps, CapCryptoCall)
 		}
 	}
 	if s.spec != nil && s.spec.Trigger.Daemon && s.gateway != nil {
@@ -360,6 +291,13 @@ type RepoPathResolver interface {
 // SetRepoResolver attaches a RepoPathResolver (typically *webui.SourceManager)
 // for dicode.git.commit_push dispatch. nil disables.
 func (s *Server) SetRepoResolver(r RepoPathResolver) { s.repoResolver = r }
+
+// SetCryptoHandler installs a generic encrypt/decrypt handler used by
+// dicode.crypto.{encrypt, decrypt}. Daemon wires this in at boot once
+// secrets.LocalProvider is initialised.
+func (s *Server) SetCryptoHandler(d SubKeyDeriver) {
+	s.crypto = newCryptoHandler(d)
+}
 
 // ReturnCh receives the task return value once the subprocess sends "return".
 func (s *Server) ReturnCh() <-chan any { return s.retCh }
@@ -1034,180 +972,6 @@ func (s *Server) handleConn(conn net.Conn) {
 			}
 			reply(req.ID, true, "")
 
-		// ── dicode.oauth.* ────────────────────────────────────────────────
-		// Two purpose-specific primitives, each gated by its own capability.
-		// Neither exposes raw sign-with-identity-key or raw-decrypt — the
-		// payload layouts are hardcoded so a compromised task cannot coax
-		// the identity key into signing a WSS handshake digest or acting
-		// as a decryption oracle for ciphertexts the broker never issued.
-
-		case "dicode.oauth.build_auth_url":
-			if !hasCap(caps, CapOAuthInit) {
-				reply(req.ID, nil, "ipc: permission denied (oauth.init)")
-				continue
-			}
-			if s.oauthID == nil || s.oauthURL == "" || s.oauthPending == nil {
-				reply(req.ID, nil, "ipc: oauth broker not configured on this daemon")
-				continue
-			}
-			// Issue #144: refuse after `dicode relay rotate-identity` has
-			// swapped the DB keys. The in-memory s.oauthID still points at
-			// the OLD SignKey until the daemon restarts; issuing a new
-			// URL under it would contradict the rotation contract the
-			// operator just signed off on.
-			//
-			// Checked BEFORE the #104 protocol gate because rotation-in-
-			// progress is the more immediate actionable condition (restart
-			// the daemon) — telling the operator to "upgrade dicode-relay"
-			// when they've just run `rotate-identity` would be misleading.
-			if s.rotationActiveFn != nil && s.rotationActiveFn() {
-				reply(req.ID, nil, oauthRotationInProgressErr)
-				continue
-			}
-			// Issue #104: refuse OAuth flows when the connected broker has not
-			// advertised protocol >= 2. A pre-split broker would encrypt the
-			// delivery to the SignKey pubkey, which DecryptOAuthToken cannot
-			// open with the DecryptKey — the failure would only surface on
-			// the callback, after the user has already completed the upstream
-			// consent. Refusing here turns a silent crypto failure into an
-			// actionable operator message.
-			if s.supportsOAuthFn != nil && !s.supportsOAuthFn() {
-				reply(req.ID, nil, oauthBrokerProtocolErr)
-				continue
-			}
-			if req.Provider == "" {
-				reply(req.ID, nil, "ipc: provider required")
-				continue
-			}
-			url, authReq, err := relay.BuildAuthURL(s.oauthURL, s.oauthID, req.Provider, req.Scope, time.Now().Unix())
-			if err != nil {
-				reply(req.ID, nil, err.Error())
-				continue
-			}
-			// Track this flow so store_token can validate the delivery's
-			// session id against a request we actually issued.
-			s.oauthPending.Add(authReq)
-			reply(req.ID, map[string]any{
-				"url":        url,
-				"session_id": authReq.SessionID,
-				"provider":   authReq.Provider,
-				"timestamp":  authReq.Timestamp,
-				"relay_uuid": s.oauthID.UUID,
-			}, "")
-
-		case "dicode.oauth.store_token":
-			if !hasCap(caps, CapOAuthStore) {
-				reply(req.ID, nil, "ipc: permission denied (oauth.store)")
-				continue
-			}
-			if s.oauthID == nil || s.oauthPending == nil {
-				reply(req.ID, nil, "ipc: oauth broker not configured on this daemon")
-				continue
-			}
-			// Issue #144: refuse delivery after rotation. A post-rotation
-			// delivery was issued under the old SignKey and encrypted to
-			// the old DecryptKey; accepting it here would persist a token
-			// tied to an identity the operator has explicitly retired.
-			// Checked before the #104 protocol gate — see the rationale on
-			// build_auth_url above.
-			if s.rotationActiveFn != nil && s.rotationActiveFn() {
-				reply(req.ID, nil, oauthRotationInProgressErr)
-				continue
-			}
-			// Issue #104 — see the note on dicode.oauth.build_auth_url.
-			// Reject store_token against a pre-split broker so a stale
-			// session delivered just after a downgrade can't coerce a
-			// mismatched-key decrypt attempt.
-			if s.supportsOAuthFn != nil && !s.supportsOAuthFn() {
-				reply(req.ID, nil, oauthBrokerProtocolErr)
-				continue
-			}
-			if s.secrets == nil {
-				reply(req.ID, nil, "ipc: no secrets provider configured")
-				continue
-			}
-			if len(req.Envelope) == 0 {
-				reply(req.ID, nil, "ipc: envelope required")
-				continue
-			}
-			var env relay.OAuthTokenDeliveryPayload
-			if err := json.Unmarshal(req.Envelope, &env); err != nil {
-				reply(req.ID, nil, "ipc: decode envelope: "+err.Error())
-				continue
-			}
-			// Verify broker authenticity before consuming the pending
-			// session or touching any crypto. If the broker pubkey is
-			// pinned (TOFU on first connect), a forged envelope from a
-			// local process or MitM is rejected here.
-			if s.brokerPubkeyFn != nil {
-				if bpk := s.brokerPubkeyFn(); bpk != "" {
-					if err := relay.VerifyBrokerSig(bpk, &env); err != nil {
-						reply(req.ID, nil, "ipc: "+err.Error())
-						continue
-					}
-				}
-			}
-			authReq, err := s.oauthPending.Take(env.SessionID)
-			if err != nil {
-				reply(req.ID, nil, "ipc: unknown or expired session")
-				continue
-			}
-			plaintext, err := relay.DecryptOAuthToken(s.oauthID, &env)
-			if err != nil {
-				reply(req.ID, nil, "ipc: decrypt failed")
-				continue
-			}
-			written, err := storeOAuthToken(context.Background(), s.secrets, authReq.Provider, plaintext)
-			// Best-effort zeroization; Go can't guarantee it but this shrinks
-			// the window in process memory regardless.
-			for i := range plaintext {
-				plaintext[i] = 0
-			}
-			if err != nil {
-				reply(req.ID, nil, "ipc: store secret: "+err.Error())
-				continue
-			}
-			// Structured audit entry. Fields are deliberately metadata-only
-			// so that an operator tailing the run log can trace which task
-			// run received which delivery without the token ever touching
-			// an observability pipeline.
-			if s.log != nil {
-				// Truncate session id to first 8 chars — enough for
-				// correlation, avoids persisting the full signed-payload
-				// component in long-term log storage.
-				sid := authReq.SessionID
-				if len(sid) > 8 {
-					sid = sid[:8]
-				}
-				s.log.Info("oauth token delivered",
-					zap.String("task", s.taskID),
-					zap.String("run", s.runID),
-					zap.String("provider", authReq.Provider),
-					zap.String("session", sid),
-					zap.Strings("secrets", written),
-				)
-			}
-			reply(req.ID, map[string]any{
-				"provider": authReq.Provider,
-				"secrets":  written,
-			}, "")
-
-		case "dicode.oauth.list_status":
-			if !hasCap(caps, CapOAuthStatus) {
-				reply(req.ID, nil, "ipc: permission denied (oauth.status)")
-				continue
-			}
-			if s.secretsChain == nil {
-				reply(req.ID, nil, "ipc: secrets chain not configured")
-				continue
-			}
-			out, err := listOAuthStatus(s.ctx, s.secretsChain, req.Providers)
-			if err != nil {
-				reply(req.ID, nil, "ipc: list status: "+err.Error())
-				continue
-			}
-			reply(req.ID, out, "")
-
 		// ── mcp.* ─────────────────────────────────────────────────────────
 
 		case "mcp.list_tools":
@@ -1293,6 +1057,58 @@ func (s *Server) handleConn(conn net.Conn) {
 				}
 			}
 
+		// ── dicode.crypto.* ──────────────────────────────────────────────
+
+		case "dicode.crypto.encrypt":
+			if !hasCap(caps, CapCryptoCall) {
+				reply(req.ID, nil, "ipc: permission denied (crypto.call)")
+				continue
+			}
+			if s.crypto == nil {
+				reply(req.ID, nil, "ipc: crypto handler not initialised")
+				continue
+			}
+			if !s.cryptoContextAllowed(req.Context) {
+				reply(req.ID, nil, fmt.Sprintf("ipc: context %q not in permissions.dicode.crypto", req.Context))
+				continue
+			}
+			pt, err := base64.StdEncoding.DecodeString(req.PlaintextB64)
+			if err != nil {
+				reply(req.ID, nil, fmt.Sprintf("invalid plaintext_b64: %v", err))
+				continue
+			}
+			ct, err := s.crypto.Encrypt(req.Context, pt)
+			if err != nil {
+				reply(req.ID, nil, err.Error())
+				continue
+			}
+			reply(req.ID, map[string]string{"ciphertext_b64": base64.StdEncoding.EncodeToString(ct)}, "")
+
+		case "dicode.crypto.decrypt":
+			if !hasCap(caps, CapCryptoCall) {
+				reply(req.ID, nil, "ipc: permission denied (crypto.call)")
+				continue
+			}
+			if s.crypto == nil {
+				reply(req.ID, nil, "ipc: crypto handler not initialised")
+				continue
+			}
+			if !s.cryptoContextAllowed(req.Context) {
+				reply(req.ID, nil, fmt.Sprintf("ipc: context %q not in permissions.dicode.crypto", req.Context))
+				continue
+			}
+			ct, err := base64.StdEncoding.DecodeString(req.CiphertextB64)
+			if err != nil {
+				reply(req.ID, nil, fmt.Sprintf("invalid ciphertext_b64: %v", err))
+				continue
+			}
+			pt, err := s.crypto.Decrypt(req.Context, ct)
+			if err != nil {
+				reply(req.ID, nil, err.Error())
+				continue
+			}
+			reply(req.ID, map[string]string{"plaintext_b64": base64.StdEncoding.EncodeToString(pt)}, "")
+
 		default:
 			if req.ID != "" {
 				reply(req.ID, nil, fmt.Sprintf("ipc: unknown method %q", req.Method))
@@ -1329,6 +1145,22 @@ func (s *Server) mcpAllowed(name string) bool {
 	}
 	for _, a := range dp.MCP {
 		if a == "*" || a == name {
+			return true
+		}
+	}
+	return false
+}
+
+// cryptoContextAllowed reports whether the requested context string is
+// allowed by this task's permissions.dicode.crypto list. Mirrors the
+// taskAllowed pattern used by dicode.run_task.
+func (s *Server) cryptoContextAllowed(ctx string) bool {
+	dp := dicodePerms(s.spec)
+	if dp == nil {
+		return false
+	}
+	for _, allowed := range dp.Crypto {
+		if allowed == "*" || allowed == ctx {
 			return true
 		}
 	}

@@ -3,22 +3,39 @@ kind: Task
 name: "OAuth — Token Relay Sink"
 description: >
   Receives encrypted OAuth token deliveries from the dicode relay broker on
-  /hooks/oauth-complete, asks the daemon to decrypt + parse + persist the
-  token bundle via dicode.oauth.store_token, and returns. Plaintext tokens
-  never cross the JS boundary: the primitive writes straight to the
-  secrets store in Go-process memory, so a console.log mistake here cannot
-  leak a credential.
+  /hooks/oauth-complete. Verifies broker_sig, ECIES-decrypts, and writes
+  the resulting tokens to the secrets store.
 
-  This path is reserved by the trigger engine — no other task can bind
-  /hooks/oauth-complete.
+  Locked down to make plaintext leakage physically impossible:
+    - silent: true (stdout/stderr → io.Discard)
+    - permissions.net: [] (no outbound)
+    - permissions.fs: [] (no disk write)
+    - permissions.env: minimum read-only config vars
+  Only output channels are dicode.secrets_set and the storage task (which
+  sees only ciphertexts). No /hooks/oauth-complete handler other than this
+  is permitted (reserved by the trigger engine).
+
 runtime: deno
 
 trigger:
   webhook: /hooks/oauth-complete
 
+silent: true
+
 permissions:
+  net: []
+  fs:  []
+  env:
+    - DICODE_DATADIR
+    - DICODE_STORAGE_TASK
   dicode:
-    oauth_store: true
+    crypto:
+      - "dicode/relay-identity/v1"
+      - "dicode/relay-broker-pin/v1"
+      - "dicode/oauth-pending/v1"
+    tasks:
+      - buildin/local-storage
+    secrets_write: true
 
 timeout: 10s
 

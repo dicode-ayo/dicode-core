@@ -265,24 +265,6 @@ type DicodePermissions struct {
 	// SecretsWrite enables dicode.secrets_set() and dicode.secrets_delete().
 	// Tasks may write or overwrite secrets but never read them back.
 	SecretsWrite bool `yaml:"secrets_write,omitempty" json:"secrets_write,omitempty"`
-	// OAuthInit enables dicode.oauth.build_auth_url(). Reserved for the
-	// auth-start built-in task. Granting this lets the task construct a
-	// signed /auth/:provider URL using the daemon's relay identity; the
-	// payload layout is hardcoded in Go so this primitive cannot be coaxed
-	// into producing signatures for other message types (e.g. WSS
-	// handshakes).
-	OAuthInit bool `yaml:"oauth_init,omitempty" json:"oauth_init,omitempty"`
-	// OAuthStore enables dicode.oauth.store_token(). Reserved for the
-	// auth-relay built-in task. The primitive decrypts an incoming token
-	// envelope and writes the resulting credentials directly into the
-	// secrets store — plaintext never reaches task code, so a careless
-	// console.log cannot leak a token.
-	OAuthStore bool `yaml:"oauth_store,omitempty" json:"oauth_store,omitempty"`
-	// OAuthStatus enables dicode.oauth.list_status().
-	// Returns connection-state metadata (presence flag, expiry, scope) for the
-	// provider names the caller passes — never plaintext tokens.
-	OAuthStatus bool `yaml:"oauth_status,omitempty" json:"oauth_status,omitempty"`
-
 	// RunsListExpired enables dicode.runs.list_expired().
 	RunsListExpired bool `yaml:"runs_list_expired,omitempty" json:"runs_list_expired,omitempty"`
 	// RunsDeleteInput enables dicode.runs.delete_input().
@@ -310,6 +292,16 @@ type DicodePermissions struct {
 	// GitCommitPush enables dicode.git.commit_push() — wraps
 	// pkg/source/git.CommitPush for add/commit/push from an IPC task. (#234)
 	GitCommitPush bool `yaml:"git_commit_push,omitempty" json:"git_commit_push,omitempty"`
+
+	// Crypto enables dicode.crypto.encrypt() and dicode.crypto.decrypt() and
+	// lists the context strings the task is allowed to use. The context is
+	// bound into the AEAD's AAD, so a task with crypto: ["foo"] cannot decrypt
+	// a blob produced under context "bar" — domain separation is enforced
+	// cryptographically, not just at the access-control layer.
+	//
+	// Use ["*"] to allow all contexts (intended for admin/utility tasks only;
+	// every named-context task should list its contexts explicitly).
+	Crypto []string `yaml:"crypto,omitempty" json:"crypto,omitempty"`
 }
 
 // ProviderConfig declares secret-provider settings on a task that
@@ -341,6 +333,13 @@ type Spec struct {
 	// OnFailureChain overrides the global defaults.on_failure_chain for this task.
 	// Set to {task: ""} to disable the global default for this task only.
 	OnFailureChain *OnFailureChainSpec `yaml:"on_failure_chain,omitempty" json:"on_failure_chain,omitempty"`
+
+	// Silent, when true, detaches the task's stdout and stderr from the run-log
+	// capture pipes (sends them to io.Discard). Use for tasks that handle
+	// plaintext credentials so a careless console.log cannot leak them into
+	// the run log. Combine with permissions.{net,fs,env}: [] to remove every
+	// exfiltration channel.
+	Silent bool `yaml:"silent,omitempty" json:"silent,omitempty"`
 
 	// Provider declares this task as a secret provider implementing the
 	// issue #119 contract. nil = not a provider; non-nil = provider with

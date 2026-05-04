@@ -76,6 +76,19 @@ export default defineConfig({
         baseURL: BASE_URL,
       },
     },
+
+    // ── relay ─────────────────────────────────────────────────────────────────
+    // Self-contained tests for the TS relay-client + auth-relay integration.
+    // Spawns its own broker + daemon subprocess pair (random ports, no global
+    // setup daemon involved). Skipped unless DICODE_E2E_RELAY=1 is set.
+    // Run:  DICODE_E2E_RELAY=1 npx playwright test --project=relay
+    {
+      name: 'relay',
+      testMatch: ['**/relay.spec.ts'],
+      use: {
+        ...devices['Desktop Chrome'],
+      },
+    },
   ],
 
   // Global setup builds the binary, writes temp configs, and starts dicode.

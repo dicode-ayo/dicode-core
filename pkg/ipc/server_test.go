@@ -1787,3 +1787,96 @@ func TestIPC_GitCommitPush_GrantedByCap(t *testing.T) {
 		t.Errorf("expected source_id required error, got: %q (full resp: %#v)", errMsg, resp)
 	}
 }
+
+// ── dicode.crypto.* tests ─────────────────────────────────────────────────────
+
+func TestServer_CryptoEncrypt_RequiresCap(t *testing.T) {
+	// Task with no Crypto permission — must get "permission denied".
+	e := newTestEnv(t)
+	conn, _ := e.start(t, nil, nil) // no spec = no dicode perms
+	sendMsg(t, conn, map[string]any{
+		"id":            "c1",
+		"method":        "dicode.crypto.encrypt",
+		"context":       "test/v1",
+		"plaintext_b64": base64.StdEncoding.EncodeToString([]byte("hello")),
+	})
+	resp := recvMsg(t, conn)
+	errMsg, _ := resp["error"].(string)
+	if !strings.Contains(errMsg, "permission denied") {
+		t.Errorf("expected permission denied, got: %q", errMsg)
+	}
+}
+
+func TestServer_CryptoEncrypt_ContextNotAllowed(t *testing.T) {
+	// Task has Crypto:["allowed"] but requests context "denied".
+	e := newTestEnv(t)
+	spec := specWithDicode("caller", &task.DicodePermissions{Crypto: []string{"allowed"}})
+	conn, srv := e.startWithSpec(t, nil, nil, spec, nil)
+	srv.SetCryptoHandler(stubDeriver{})
+
+	sendMsg(t, conn, map[string]any{
+		"id":            "c2",
+		"method":        "dicode.crypto.encrypt",
+		"context":       "denied",
+		"plaintext_b64": base64.StdEncoding.EncodeToString([]byte("hello")),
+	})
+	resp := recvMsg(t, conn)
+	errMsg, _ := resp["error"].(string)
+	if !strings.Contains(errMsg, "not in permissions.dicode.crypto") {
+		t.Errorf("expected context-not-allowed error, got: %q", errMsg)
+	}
+}
+
+func TestServer_Crypto_RoundTrip(t *testing.T) {
+	// Task has Crypto:["test/v1"] — encrypt then decrypt must round-trip.
+	e := newTestEnv(t)
+	spec := specWithDicode("caller", &task.DicodePermissions{Crypto: []string{"test/v1"}})
+	conn, srv := e.startWithSpec(t, nil, nil, spec, nil)
+	srv.SetCryptoHandler(stubDeriver{})
+
+	plaintext := []byte("round-trip plaintext")
+
+	// Encrypt
+	sendMsg(t, conn, map[string]any{
+		"id":            "enc1",
+		"method":        "dicode.crypto.encrypt",
+		"context":       "test/v1",
+		"plaintext_b64": base64.StdEncoding.EncodeToString(plaintext),
+	})
+	encResp := recvMsg(t, conn)
+	if encResp["error"] != nil {
+		t.Fatalf("encrypt error: %v", encResp["error"])
+	}
+	result, ok := encResp["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("encrypt result not object: %T", encResp["result"])
+	}
+	ciphertextB64, _ := result["ciphertext_b64"].(string)
+	if ciphertextB64 == "" {
+		t.Fatal("ciphertext_b64 missing from encrypt result")
+	}
+
+	// Decrypt
+	sendMsg(t, conn, map[string]any{
+		"id":             "dec1",
+		"method":         "dicode.crypto.decrypt",
+		"context":        "test/v1",
+		"ciphertext_b64": ciphertextB64,
+	})
+	decResp := recvMsg(t, conn)
+	if decResp["error"] != nil {
+		t.Fatalf("decrypt error: %v", decResp["error"])
+	}
+	decResult, ok := decResp["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("decrypt result not object: %T", decResp["result"])
+	}
+	plaintextB64, _ := decResult["plaintext_b64"].(string)
+	gotPT, err := base64.StdEncoding.DecodeString(plaintextB64)
+	if err != nil {
+		t.Fatalf("base64 decode plaintext: %v", err)
+	}
+	if string(gotPT) != string(plaintext) {
+		t.Errorf("round-trip mismatch: got %q, want %q", gotPT, plaintext)
+	}
+}
