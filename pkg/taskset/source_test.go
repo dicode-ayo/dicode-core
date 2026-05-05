@@ -326,3 +326,72 @@ spec:
 		t.Errorf("Enabled = true, want false (parent override should disable)")
 	}
 }
+
+// TestSource_RefreshAfterSetParentOverrides verifies that updating parent
+// overrides via SetParentOverrides causes a fresh resolve+emit cycle on the
+// already-running source — the user-facing path for the task enable/disable
+// toggle in dc-task-list.
+func TestSource_RefreshAfterSetParentOverrides(t *testing.T) {
+	repoDir := t.TempDir()
+	taskDir := writeTaskDir(t, repoDir, "deploy")
+
+	tsContent := `
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: buildin
+spec:
+  entries:
+    deploy:
+      ref:
+        path: ` + filepath.Join(taskDir, "task.yaml") + `
+`
+	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
+
+	src := NewSource(
+		"src-id", "buildin",
+		&Ref{Path: tsPath},
+		"", t.TempDir(), false, time.Hour, // long poll so only refresh signal fires
+		zaptest.NewLogger(t),
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	ch, err := src.Start(ctx)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Drain the initial Added event for "buildin/deploy".
+	select {
+	case ev := <-ch:
+		if ev.Kind != source.EventAdded {
+			t.Fatalf("first event kind = %v, want Added", ev.Kind)
+		}
+		if !ev.Spec.Enabled {
+			t.Fatal("initial spec should be Enabled=true")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for initial Added event")
+	}
+
+	// Now operator disables the task via dicode.yaml override.
+	src.SetParentOverrides(&Overrides{
+		Entries: map[string]*Overrides{
+			"deploy": {Enabled: boolPtr(false)},
+		},
+	})
+
+	select {
+	case ev := <-ch:
+		if ev.Kind != source.EventUpdated {
+			t.Fatalf("second event kind = %v, want Updated", ev.Kind)
+		}
+		if ev.Spec.Enabled {
+			t.Error("post-refresh spec.Enabled = true, want false")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for refresh-driven Updated event")
+	}
+}

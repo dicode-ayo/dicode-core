@@ -52,6 +52,7 @@ type Source struct {
 	mu          sync.Mutex
 	snapshot    map[string]taskSnap // namespaced taskID → snapshot
 	ch          chan source.Event   // live channel set by Start; nil before Start
+	refresh     chan struct{}       // signals an out-of-band re-resolve; set by Start
 	devRootPath string              // non-empty overrides rootRef.Path in dev mode
 	watchRoot   string              // directory watched by fsnotify; set in Start
 	cloneRunID  string              // non-empty while a dev-mode clone is active
@@ -141,6 +142,7 @@ func (s *Source) Start(ctx context.Context) (<-chan source.Event, error) {
 	ch := make(chan source.Event, 64)
 	s.mu.Lock()
 	s.ch = ch
+	s.refresh = make(chan struct{}, 1)
 	s.mu.Unlock()
 
 	// Determine (and cache) the local directory to watch.
@@ -370,6 +372,24 @@ func (s *Source) Sync(ctx context.Context) error {
 	return err
 }
 
+// SetParentOverrides updates the source's entry-level overrides and signals
+// an out-of-band re-resolve. Safe to call on a running source. Used by
+// PATCH /api/tasks/{id}/overrides to apply toggle changes without waiting
+// for the next poll tick.
+func (s *Source) SetParentOverrides(ov *Overrides) {
+	s.mu.Lock()
+	s.parentOverrides = ov
+	refresh := s.refresh
+	s.mu.Unlock()
+	if refresh == nil {
+		return // not started yet; will take effect on Start's initial resolve
+	}
+	select {
+	case refresh <- struct{}{}:
+	default: // signal already pending; coalesce
+	}
+}
+
 // watch is the unified file-watching loop for both local and git sources.
 //
 //   - For local sources:  fsnotify reacts directly to edits; a background
@@ -442,6 +462,11 @@ func (s *Source) watch(ctx context.Context, ch chan<- source.Event) {
 					zap.String("id", s.id), zap.Error(err))
 			}
 			s.addWatchDirs(watcher)
+		case <-s.refresh:
+			if err := s.syncAndEmit(ctx, ch); err != nil {
+				s.log.Warn("taskset: refresh-driven syncAndEmit failed",
+					zap.String("id", s.id), zap.Error(err))
+			}
 		case <-pullTickC:
 			// Fetch from remote. If the pull actually changed files on disk,
 			// fsnotify will fire and trigger syncAndEmit via the debounce path.
@@ -486,6 +511,11 @@ func (s *Source) pollFallback(ctx context.Context, ch chan<- source.Event) {
 		select {
 		case <-ctx.Done():
 			return
+		case <-s.refresh:
+			if err := s.syncAndEmit(ctx, ch); err != nil {
+				s.log.Warn("taskset: refresh-driven syncAndEmit failed",
+					zap.String("id", s.id), zap.Error(err))
+			}
 		case <-ticker.C:
 			if s.rootRef.IsGit() {
 				_, err := s.resolver.Pull(ctx, s.rootRef)
