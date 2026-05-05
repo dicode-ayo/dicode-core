@@ -15,8 +15,9 @@ server:
   port: 8765
   auth: false
   mcp: true
-sources:
-  - name: e2e-tests
-    type: local
-    path: TEMP_TASKSET_PATH
-    watch: true
+spec:
+  entries:
+    e2e-tests:
+      ref:
+        path: TEMP_TASKSET_PATH
+        watch: true
