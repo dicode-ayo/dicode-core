@@ -23,6 +23,7 @@ export default defineConfig({
   reporter: [['html', { open: 'never' }], ['list']],
   use: {
     baseURL: BASE_URL,
+    headless: true,
     screenshot: 'only-on-failure',
     trace: 'retain-on-failure',
   },
