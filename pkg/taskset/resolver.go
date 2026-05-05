@@ -148,8 +148,13 @@ func (r *Resolver) resolveBody(
 			parentEntryOverride = parentOverrides.Entries[key]
 		}
 
-		// Determine enabled state; entry override wins over parent.
+		// Determine enabled state.
+		// Precedence (highest wins): parentEntryOverride.Enabled >
+		// entry.Overrides.Enabled > entry.Enabled shortcut > default true.
 		enabled := true
+		if entry.Enabled != nil {
+			enabled = *entry.Enabled
+		}
 		if entry.Overrides != nil && entry.Overrides.Enabled != nil {
 			enabled = *entry.Overrides.Enabled
 		}
@@ -158,13 +163,11 @@ func (r *Resolver) resolveBody(
 		}
 
 		if entry.Inline != nil {
-			if !enabled {
-				continue
-			}
 			layers := buildOverrideLayers(ts.Spec.Defaults, parentEntryOverride, entry.Overrides)
 			resolved := applyOverrides(entry.Inline, layers...)
 			resolved.ID = fullID
 			resolved.TaskDir = filepath.Dir(tsPath)
+			resolved.Enabled = enabled
 			results = append(results, &ResolvedTask{
 				Spec:    resolved,
 				ID:      fullID,
@@ -195,9 +198,6 @@ func (r *Resolver) resolveBody(
 
 		switch kind {
 		case KindTask:
-			if !enabled {
-				continue
-			}
 			taskDir := filepath.Dir(localPath)
 			extras := extraVars
 			if extras == nil {
@@ -228,6 +228,7 @@ func (r *Resolver) resolveBody(
 			layers := buildOverrideLayers(ts.Spec.Defaults, parentEntryOverride, entry.Overrides)
 			resolved := applyOverrides(spec, layers...)
 			resolved.ID = fullID
+			resolved.Enabled = enabled
 			results = append(results, &ResolvedTask{
 				Spec:    resolved,
 				ID:      fullID,
@@ -235,9 +236,9 @@ func (r *Resolver) resolveBody(
 			})
 
 		case KindTaskSet:
-			// Build the overrides context for the nested set.
-			// entry.Overrides carries per-entry patches for children; parentEntryOverride
-			// is the parent's patch for this entry — merge them (entry wins on conflict).
+			// A disabled TaskSet entry propagates disabled to all its children.
+			// Resolve the sub-tree so tasks remain visible in the API; the
+			// engine skips scheduling for any task where Enabled == false.
 			nestedOverrides := entry.Overrides
 			if parentEntryOverride != nil {
 				nestedOverrides = mergeOverrides(parentEntryOverride, nestedOverrides)
@@ -247,6 +248,13 @@ func (r *Resolver) resolveBody(
 				r.log.Warn("taskset: failed to resolve nested taskset",
 					zap.String("entry", fullID), zap.Error(err))
 				continue
+			}
+			// If this entry is disabled, propagate disabled to all its children
+			// so the whole sub-tree stays visible in the API but is not scheduled.
+			if !enabled {
+				for _, rt := range nested {
+					rt.Spec.Enabled = false
+				}
 			}
 			results = append(results, nested...)
 
