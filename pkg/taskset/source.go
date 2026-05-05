@@ -60,6 +60,18 @@ type Source struct {
 	// via PullStatus() for the webui source-health dot. Zero-value means
 	// "never attempted" (local sources, or before Start).
 	pullStatus pullStatusState
+
+	parentOverrides *Overrides // overrides applied at the dicode.yaml entry level
+}
+
+// SourceOption configures a Source at construction time.
+type SourceOption func(*Source)
+
+// WithParentOverrides binds the dicode.yaml entry-level overrides to the
+// source so the resolver applies them on every resolve. Without this the
+// daemon-built source would silently drop spec.entries.<src>.overrides.
+func WithParentOverrides(ov *Overrides) SourceOption {
+	return func(s *Source) { s.parentOverrides = ov }
 }
 
 type taskSnap struct {
@@ -84,11 +96,12 @@ func NewSource(
 	devMode bool,
 	pollInterval time.Duration,
 	log *zap.Logger,
+	opts ...SourceOption,
 ) *Source {
 	if pollInterval == 0 {
 		pollInterval = 30 * time.Second
 	}
-	return &Source{
+	s := &Source{
 		id:           id,
 		namespace:    namespace,
 		rootRef:      rootRef,
@@ -99,6 +112,10 @@ func NewSource(
 		log:          log,
 		snapshot:     make(map[string]taskSnap),
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // ID implements source.Source.
@@ -557,7 +574,12 @@ func (s *Source) resolve(ctx context.Context) ([]*ResolvedTask, error) {
 	// root taskset.yaml path, so the source loader no longer needs to know
 	// about it. Pass nil for extraVars — if a future source type needs to
 	// layer additional vars, build them here.
-	return s.resolver.Resolve(ctx, s.namespace, rootRef, configDefaults, nil, nil)
+	// parentOverrides is read under mu because a follow-up commit will add
+	// SetParentOverrides for hot reload from PATCH /api/tasks/{id}/overrides.
+	s.mu.Lock()
+	parent := s.parentOverrides
+	s.mu.Unlock()
+	return s.resolver.Resolve(ctx, s.namespace, rootRef, configDefaults, parent, nil)
 }
 
 func (s *Source) loadConfigDefaults() (*Defaults, error) {

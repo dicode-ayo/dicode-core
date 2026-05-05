@@ -9,6 +9,7 @@ import (
 
 	"github.com/dicode/dicode/pkg/source"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest"
 )
 
 func newTestSource(t *testing.T, namespace, tsPath string) *Source {
@@ -275,5 +276,53 @@ spec:
 	em := envMap(spec.Permissions.Env)
 	if em["RUNTIME"] == "prod" {
 		t.Errorf("deprecated kind:Config defaults should not be applied: found RUNTIME=prod")
+	}
+}
+
+// TestSource_ParentOverridesApplied verifies that overrides passed via
+// NewSource (originating from dicode.yaml's spec.entries.<src>.overrides)
+// are honoured by the resolver — closes the latent gap where a daemon-
+// initialised Source dropped entry.Overrides before plumbing them into
+// resolve.
+func TestSource_ParentOverridesApplied(t *testing.T) {
+	repoDir := t.TempDir()
+	taskDir := writeTaskDir(t, repoDir, "deploy")
+
+	tsContent := `
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: buildin
+spec:
+  entries:
+    deploy:
+      ref:
+        path: ` + filepath.Join(taskDir, "task.yaml") + `
+`
+	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
+
+	parent := &Overrides{
+		Entries: map[string]*Overrides{
+			"deploy": {Enabled: boolPtr(false)},
+		},
+	}
+
+	src := NewSource(
+		"src-id", "buildin",
+		&Ref{Path: tsPath},
+		"", t.TempDir(), false, 0,
+		zaptest.NewLogger(t),
+		WithParentOverrides(parent),
+	)
+
+	tasks, err := src.resolve(context.Background())
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("want 1 task, got %d", len(tasks))
+	}
+	if tasks[0].Spec.Enabled {
+		t.Errorf("Enabled = true, want false (parent override should disable)")
 	}
 }

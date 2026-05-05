@@ -557,8 +557,7 @@ func buildSources(cfg *config.Config, dataDir string, log *zap.Logger) ([]source
 		if entry == nil || entry.Ref == nil {
 			continue
 		}
-		ref := entry.Ref
-		ts := buildTaskSetSourceFromEntry(name, ref, dataDir, log)
+		ts := buildTaskSetSourceFromEntry(name, entry, dataDir, log)
 		sources = append(sources, ts)
 		tasksetSources[name] = ts
 	}
@@ -567,15 +566,21 @@ func buildSources(cfg *config.Config, dataDir string, log *zap.Logger) ([]source
 	return sources, sourceMgr, nil
 }
 
-func buildTaskSetSourceFromEntry(name string, ref *taskset.Ref, dataDir string, log *zap.Logger) *taskset.Source {
+func buildTaskSetSourceFromEntry(name string, entry *taskset.Entry, dataDir string, log *zap.Logger) *taskset.Source {
 	// The entry key is the namespace. The ref points at the taskset.yaml.
 	// applyDefaults has already expanded ${VAR} and set branch/poll defaults.
+	ref := entry.Ref
 	id := ref.URL
 	if id == "" {
 		id = ref.Path
 	}
-	var pollInterval = ref.PollInterval
-	return taskset.NewSource(id, name, ref, "", dataDir, false, pollInterval, log)
+	pollInterval := ref.PollInterval
+
+	var opts []taskset.SourceOption
+	if entry.Overrides != nil {
+		opts = append(opts, taskset.WithParentOverrides(entry.Overrides))
+	}
+	return taskset.NewSource(id, name, ref, "", dataDir, false, pollInterval, log, opts...)
 }
 
 func buildLogger(level string, broadcast *webui.LogBroadcaster) (*zap.Logger, error) {
