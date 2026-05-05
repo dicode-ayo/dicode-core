@@ -65,6 +65,16 @@ func (m *SourceManager) Register(name string, src *taskset.Source) {
 	m.tasksets[name] = src
 }
 
+// Get returns the live taskset.Source for a source name, or (nil, false) if
+// the name is unknown. Used by apiPatchTaskOverrides to signal a refresh
+// after writing a new override to dicode.yaml.
+func (m *SourceManager) Get(name string) (*taskset.Source, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	src, ok := m.tasksets[name]
+	return src, ok
+}
+
 // List returns info for all configured sources including their live dev mode state.
 func (m *SourceManager) List() []SourceInfo {
 	m.mu.RLock()

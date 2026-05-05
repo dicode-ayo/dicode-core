@@ -42,6 +42,27 @@ import (
 // SecretsManager is an alias for secrets.Manager kept for call-site clarity.
 type SecretsManager = secrets.Manager
 
+// allowedOverrideJSONFields lists the top-level keys accepted in a
+// PATCH /api/tasks/{id}/overrides body. Mirrors the yaml tags on
+// taskset.Overrides — keep in sync if Overrides gains fields.
+var allowedOverrideJSONFields = map[string]bool{
+	"enabled":     true,
+	"name":        true,
+	"description": true,
+	"trigger":     true,
+	"params":      true,
+	"env":         true,
+	"net":         true,
+	"fs":          true,
+	"timeout":     true,
+	"retry":       true,
+	"runtime":     true,
+	"notify":      true,
+	"dicode":      true,
+	"defaults":    true,
+	"entries":     true,
+}
+
 // sessionStore holds in-memory session tokens for the secrets page.
 type sessionStore struct {
 	mu     sync.Mutex
@@ -502,6 +523,11 @@ func (s *Server) Handler() http.Handler {
 			r.Get("/tasks/{id}/files/{filename}", s.apiGetFile)
 			r.Post("/tasks/{id}/files/{filename}", s.apiSaveFile)
 			r.Post("/tasks/{id}/trigger", s.apiSaveTrigger)
+			// Generic overrides patch endpoint. Wildcard route (rather than
+			// {id}/overrides) accepts namespaced task IDs containing slashes
+			// like "buildin/relay-client" without requiring the caller to
+			// percent-encode the separator.
+			r.Patch("/tasks/*", s.apiPatchTaskOverrides)
 
 			// /api/runs (collection): supports filtering by parent or by
 			// (group + task), per #116. /api/tasks/{id}/runs above remains
@@ -1361,6 +1387,138 @@ func (s *Server) apiRunTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOK(w, map[string]string{"runId": runID})
+}
+
+// apiPatchTaskOverrides accepts an RFC 7396 JSON Merge Patch against the
+// taskset.Overrides yaml fields for the named task. Today the toggle UI
+// sends {"enabled": false}; future param/env/timeout UIs reuse the same
+// endpoint without backend changes.
+//
+// Route shape: PATCH /api/tasks/* — the wildcard captures the namespaced
+// task ID followed by /overrides (e.g. "buildin/relay-client/overrides").
+//
+// Status codes:
+//   - 200 — patch applied, dicode.yaml updated
+//   - 400 — bad JSON, unknown field, or missing task id
+//   - 404 — task not registered
+//   - 409 — config file mtime changed since stat (concurrent edit)
+//   - 422 — ancestor source disabled (enabling a child of a disabled source)
+//   - 500 — config write or stat failed
+func (s *Server) apiPatchTaskOverrides(w http.ResponseWriter, r *http.Request) {
+	// The wildcard route stores the captured remainder under chi param "*".
+	// URL-decode (frontend may percent-encode the slashes via
+	// encodeURIComponent), then strip the trailing /overrides to recover the
+	// task ID itself.
+	rest, err := url.PathUnescape(chi.URLParam(r, "*"))
+	if err != nil {
+		rest = chi.URLParam(r, "*")
+	}
+	if !strings.HasSuffix(rest, "/overrides") {
+		jsonErr(w, "expected path .../overrides", http.StatusBadRequest)
+		return
+	}
+	id := strings.TrimSuffix(rest, "/overrides")
+	if id == "" {
+		jsonErr(w, "missing task id", http.StatusBadRequest)
+		return
+	}
+
+	if _, ok := s.registry.Get(id); !ok {
+		jsonErr(w, "task not found", http.StatusNotFound)
+		return
+	}
+
+	source, _, ok := config.SplitTaskID(id)
+	if !ok {
+		jsonErr(w, "task id has no source separator", http.StatusBadRequest)
+		return
+	}
+
+	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 64*1024))
+	if err != nil {
+		jsonErr(w, "read body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	var patch map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &patch); err != nil {
+		jsonErr(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	for k := range patch {
+		if !allowedOverrideJSONFields[k] {
+			jsonErr(w, "unknown override field: "+k, http.StatusBadRequest)
+			return
+		}
+	}
+
+	// 422: ancestor source disabled. Surface the actionable error rather
+	// than writing a useless override.
+	if enabledRaw, ok := patch["enabled"]; ok {
+		var enabled *bool
+		if string(enabledRaw) != "null" {
+			var b bool
+			if err := json.Unmarshal(enabledRaw, &b); err != nil {
+				jsonErr(w, "enabled must be bool or null", http.StatusBadRequest)
+				return
+			}
+			enabled = &b
+		}
+		if enabled != nil && *enabled {
+			// LiftEntryEnabled (called by config.applyDefaults during Load)
+			// has already moved any top-level entry.Enabled shortcut into
+			// entry.Overrides.Enabled, so that's the only field to check.
+			if entry := s.cfg.Spec.Entries[source]; entry != nil &&
+				entry.Overrides != nil && entry.Overrides.Enabled != nil && !*entry.Overrides.Enabled {
+				jsonErr(w, "source "+source+" is disabled — enable the source first",
+					http.StatusUnprocessableEntity)
+				return
+			}
+		}
+	}
+
+	fi, err := os.Stat(s.cfgPath)
+	if err != nil {
+		jsonErr(w, "stat config: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if err := config.MergeTaskOverride(s.cfgPath, id, raw, fi.ModTime()); err != nil {
+		if errors.Is(err, config.ErrConcurrentModification) {
+			jsonErr(w, "config file modified externally", http.StatusConflict)
+			return
+		}
+		jsonErr(w, "write override: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Reload dicode.yaml into memory so the running daemon reflects the
+	// change without a restart.
+	//
+	// NOTE: s.cfg is not currently mutex-protected — apiSaveConfigRaw,
+	// apiAddSource, and others mutate it without synchronisation, so
+	// concurrent reads (e.g. apiGetConfig) can race with this assignment.
+	// Pre-existing systemic gap, tracked in issue #264. Adding a mutex
+	// here without sweeping the other handlers would only paper over it.
+	updated, loadErr := config.Load(s.cfgPath)
+	if loadErr != nil {
+		s.log.Warn("config reload after override patch failed",
+			zap.String("task", id), zap.Error(loadErr))
+	} else {
+		s.cfg.Spec = updated.Spec
+		if s.sourceMgr != nil {
+			if src, ok := s.sourceMgr.Get(source); ok {
+				if entry := updated.Spec.Entries[source]; entry != nil {
+					src.SetParentOverrides(entry.Overrides)
+				}
+			}
+		}
+	}
+
+	jsonOK(w, map[string]any{
+		"id":        id,
+		"overrides": patch,
+	})
 }
 
 // Hardening caps for apiTestTask. testTaskMaxBodyBytes bounds the request

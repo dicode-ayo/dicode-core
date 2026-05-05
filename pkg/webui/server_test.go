@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -1190,5 +1191,159 @@ func TestPersistConfig_OverridesAndTagsSurviveRoundTrip(t *testing.T) {
 				t.Errorf("reloaded config: tags: missing %q in %v", want, reloadedEntry.Tags)
 			}
 		}
+	}
+}
+
+// newTestServerWithConfigPath returns the server plus the absolute path of
+// the dicode.yaml it has been wired to write to. Used by patch-overrides
+// tests that need to verify the file on disk.
+func newTestServerWithConfigPath(t *testing.T) (*Server, string) {
+	t.Helper()
+	srv, _ := newTestServer(t)
+	cfgPath := filepath.Join(t.TempDir(), "dicode.yaml")
+	srv.cfgPath = cfgPath
+	yaml := `apiVersion: dicode/v1
+spec:
+  entries:
+    buildin:
+      ref:
+        path: /tmp/buildin/taskset.yaml
+log_level: info
+`
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0o600); err != nil {
+		t.Fatalf("seed cfg: %v", err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load seed: %v", err)
+	}
+	srv.cfg = cfg
+	return srv, cfgPath
+}
+
+// TestPatchTaskOverrides_HappyPath toggles enabled via the REST API and
+// confirms the dicode.yaml round-trips through config.Load.
+func TestPatchTaskOverrides_HappyPath(t *testing.T) {
+	srv, cfgPath := newTestServerWithConfigPath(t)
+
+	srv.registry.Register(&task.Spec{ID: "buildin/relay-client", Enabled: true})
+
+	body := bytes.NewBufferString(`{"enabled": false}`)
+	req := httptest.NewRequest(http.MethodPatch, "/api/tasks/buildin/relay-client/overrides", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !strings.Contains(string(raw), "enabled: false") {
+		t.Errorf("dicode.yaml missing override; got:\n%s", raw)
+	}
+
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load after PATCH: %v", err)
+	}
+	entry := cfg.Spec.Entries["buildin"]
+	if entry == nil || entry.Overrides == nil || entry.Overrides.Entries["relay-client"] == nil {
+		t.Fatalf("expected buildin.overrides.entries.relay-client; got %+v", entry)
+	}
+	got := entry.Overrides.Entries["relay-client"].Enabled
+	if got == nil || *got != false {
+		t.Errorf("enabled = %v, want false", got)
+	}
+}
+
+func TestPatchTaskOverrides_UnknownTaskReturns404(t *testing.T) {
+	srv, _ := newTestServerWithConfigPath(t)
+	req := httptest.NewRequest(http.MethodPatch, "/api/tasks/buildin/does-not-exist/overrides",
+		bytes.NewBufferString(`{"enabled": false}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body = %s", w.Code, w.Body.String())
+	}
+}
+
+func TestPatchTaskOverrides_BadJSONReturns400(t *testing.T) {
+	srv, _ := newTestServerWithConfigPath(t)
+	srv.registry.Register(&task.Spec{ID: "buildin/x", Enabled: true})
+	req := httptest.NewRequest(http.MethodPatch, "/api/tasks/buildin/x/overrides",
+		bytes.NewBufferString(`not json`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+}
+
+func TestPatchTaskOverrides_UnknownFieldReturns400(t *testing.T) {
+	srv, _ := newTestServerWithConfigPath(t)
+	srv.registry.Register(&task.Spec{ID: "buildin/x", Enabled: true})
+	req := httptest.NewRequest(http.MethodPatch, "/api/tasks/buildin/x/overrides",
+		bytes.NewBufferString(`{"unknownField": true}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", w.Code, w.Body.String())
+	}
+}
+
+func TestPatchTaskOverrides_AncestorDisabledReturns422(t *testing.T) {
+	srv, cfgPath := newTestServerWithConfigPath(t)
+
+	yamlContent := `apiVersion: dicode/v1
+spec:
+  entries:
+    buildin:
+      ref:
+        path: /tmp/buildin/taskset.yaml
+      enabled: false
+log_level: info
+`
+	if err := os.WriteFile(cfgPath, []byte(yamlContent), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	srv.cfg = cfg
+
+	srv.registry.Register(&task.Spec{ID: "buildin/x", Enabled: false})
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/tasks/buildin/x/overrides",
+		bytes.NewBufferString(`{"enabled": true}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body = %s", w.Code, w.Body.String())
+	}
+}
+
+// TestPatchTaskOverrides_WrongSuffix guards the wildcard route's suffix check.
+// /tasks/* matches any path under /api/tasks/, so a PATCH without the
+// /overrides suffix must be rejected with 400 — otherwise we'd silently
+// accept arbitrary task-modifying paths.
+func TestPatchTaskOverrides_WrongSuffix(t *testing.T) {
+	srv, _ := newTestServerWithConfigPath(t)
+	srv.registry.Register(&task.Spec{ID: "buildin/x", Enabled: true})
+	req := httptest.NewRequest(http.MethodPatch, "/api/tasks/buildin/x",
+		bytes.NewBufferString(`{"enabled": false}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", w.Code, w.Body.String())
 	}
 }
