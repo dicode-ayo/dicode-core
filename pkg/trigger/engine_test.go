@@ -58,6 +58,7 @@ func writeTask(t *testing.T, dir, id, script string, trigger task.TriggerConfig)
 		Trigger: trigger,
 		Timeout: 30 * time.Second,
 		TaskDir: td,
+		Enabled: true,
 	}
 	return spec
 }
@@ -321,6 +322,7 @@ func writeUITask(t *testing.T, dir, id string, trigger task.TriggerConfig, extra
 		Runtime: task.RuntimeDeno,
 		Trigger: trigger,
 		TaskDir: td,
+		Enabled: true,
 	}
 }
 
@@ -1307,4 +1309,75 @@ func (f *fakeExecutor) Execute(_ context.Context, _ *task.Spec, opts pkgruntime.
 		f.fn()
 	}
 	return &pkgruntime.RunResult{}, nil
+}
+
+// ── Item 7: disabled-task semantics ──────────────────────────────────────────
+
+// TestEngine_DisabledTask_NoCronScheduled verifies that a task with Enabled=false
+// does NOT get a cron entry registered when passed to engine.Register.
+func TestEngine_DisabledTask_NoCronScheduled(t *testing.T) {
+	dir := t.TempDir()
+	e := newTestEnv(t)
+
+	spec := writeTask(t, dir, "disabled-cron", `return 1`, task.TriggerConfig{Cron: "* * * * *"})
+	spec.Enabled = false
+	_ = e.reg.Register(spec)
+	e.engine.Register(spec)
+
+	e.engine.mu.Lock()
+	_, hasCron := e.engine.cronEntries[spec.ID]
+	e.engine.mu.Unlock()
+
+	if hasCron {
+		t.Errorf("disabled task should NOT have a cron entry scheduled")
+	}
+}
+
+// TestEngine_DisabledTask_NoWebhookRegistered verifies that a task with Enabled=false
+// does NOT get a webhook route registered.
+func TestEngine_DisabledTask_NoWebhookRegistered(t *testing.T) {
+	dir := t.TempDir()
+	e := newTestEnv(t)
+
+	spec := writeTask(t, dir, "disabled-webhook", `return 1`, task.TriggerConfig{Webhook: "/hooks/disabled-hook"})
+	spec.Enabled = false
+	_ = e.reg.Register(spec)
+	e.engine.Register(spec)
+
+	e.engine.mu.Lock()
+	_, hasWebhook := e.engine.webhooks["/hooks/disabled-hook"]
+	e.engine.mu.Unlock()
+
+	if hasWebhook {
+		t.Errorf("disabled task should NOT have a webhook route registered")
+	}
+
+	// Also confirm the webhook returns 404.
+	handler := e.engine.WebhookHandler()
+	req := httptest.NewRequest(http.MethodPost, "/hooks/disabled-hook", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("disabled webhook should return 404, got %d", w.Code)
+	}
+}
+
+// TestEngine_DisabledTask_NoDaemonSpawned verifies that a task with Enabled=false
+// does NOT get registered as a daemon (no daemonSpecs entry).
+func TestEngine_DisabledTask_NoDaemonSpawned(t *testing.T) {
+	dir := t.TempDir()
+	e := newTestEnv(t)
+
+	spec := writeTask(t, dir, "disabled-daemon", `export default async function main() { while(true) { await new Promise(r=>setTimeout(r,1000)) } }`, task.TriggerConfig{Daemon: true})
+	spec.Enabled = false
+	_ = e.reg.Register(spec)
+	e.engine.Register(spec)
+
+	e.engine.daemonMu.Lock()
+	_, hasDaemon := e.engine.daemonSpecs[spec.ID]
+	e.engine.daemonMu.Unlock()
+
+	if hasDaemon {
+		t.Errorf("disabled task should NOT be registered as a daemon")
+	}
 }

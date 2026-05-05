@@ -61,6 +61,7 @@ func registerTask(t *testing.T, reg *registry.Registry, id, script string) *task
 		Trigger: task.TriggerConfig{Manual: true},
 		Timeout: 5 * time.Second,
 		TaskDir: td,
+		Enabled: true,
 	}
 	_ = reg.Register(spec)
 	return spec
@@ -1005,4 +1006,80 @@ func containsStr(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// ── Item 8: API visibility of disabled tasks ──────────────────────────────────
+
+// TestAPI_ListTasks_DisabledTaskVisible verifies that a task with Enabled=false
+// appears in the GET /api/tasks response with "enabled":false. Disabled tasks
+// must remain visible in the API so operators can see what they've turned off.
+func TestAPI_ListTasks_DisabledTaskVisible(t *testing.T) {
+	srv, reg := newTestServer(t)
+
+	// Register one enabled and one disabled task.
+	_ = registerTask(t, reg, "enabled-task", `return 1`)
+	disabledSpec := registerTask(t, reg, "disabled-task", `return 1`)
+	disabledSpec.Enabled = false
+	// Re-register with Enabled=false so the registry holds the updated spec.
+	_ = reg.Register(disabledSpec)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var tasks []map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&tasks); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(tasks) != 2 {
+		t.Errorf("expected 2 tasks (enabled + disabled), got %d", len(tasks))
+	}
+
+	// Find the disabled task and assert enabled=false in the JSON.
+	var foundDisabled bool
+	for _, task := range tasks {
+		if task["id"] == "disabled-task" {
+			foundDisabled = true
+			enabled, ok := task["enabled"]
+			if !ok {
+				t.Error("disabled task: 'enabled' field missing from JSON")
+			} else if enabledBool, _ := enabled.(bool); enabledBool {
+				t.Errorf("disabled task: expected enabled=false, got enabled=true")
+			}
+		}
+	}
+	if !foundDisabled {
+		t.Error("disabled-task not found in /api/tasks response")
+	}
+}
+
+// TestAPI_GetTask_DisabledTaskVisible verifies that GET /api/tasks/{id} returns
+// a disabled task with "enabled":false in the response.
+func TestAPI_GetTask_DisabledTaskVisible(t *testing.T) {
+	srv, reg := newTestServer(t)
+
+	spec := registerTask(t, reg, "off-task", `return 1`)
+	spec.Enabled = false
+	_ = reg.Register(spec)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/off-task", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body)
+	}
+	var detail map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&detail); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	enabled, ok := detail["enabled"]
+	if !ok {
+		t.Error("'enabled' field missing from /api/tasks/{id} response")
+	} else if enabledBool, _ := enabled.(bool); enabledBool {
+		t.Errorf("expected enabled=false for disabled task, got enabled=true")
+	}
 }

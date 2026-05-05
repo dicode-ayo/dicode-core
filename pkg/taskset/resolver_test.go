@@ -224,6 +224,8 @@ spec:
 }
 
 func TestResolver_DisabledEntrySkipped(t *testing.T) {
+	// Disabled tasks now remain in results (Enabled=false) for API visibility.
+	// The trigger engine skips scheduling them; the registry keeps them visible.
 	repoDir := t.TempDir()
 	taskDir := writeTaskDir(t, repoDir, "deploy")
 
@@ -246,13 +248,17 @@ spec:
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
-	if len(results) != 0 {
-		t.Errorf("disabled task should not appear: %v", results)
+	if len(results) != 1 {
+		t.Fatalf("disabled task should appear with Enabled=false: got %d results", len(results))
+	}
+	if results[0].Spec.Enabled {
+		t.Errorf("disabled task should have Enabled=false, got Enabled=true")
 	}
 }
 
 func TestResolver_ParentEntryPatchDisables(t *testing.T) {
 	// Task is enabled in taskset.yaml but parent patches it to disabled.
+	// The task remains in results with Enabled=false for API visibility.
 	repoDir := t.TempDir()
 	taskDir := writeTaskDir(t, repoDir, "deploy")
 
@@ -280,8 +286,11 @@ spec:
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
-	if len(results) != 0 {
-		t.Errorf("parent disabled task should not appear: got %d results", len(results))
+	if len(results) != 1 {
+		t.Fatalf("parent-disabled task should appear with Enabled=false: got %d results", len(results))
+	}
+	if results[0].Spec.Enabled {
+		t.Errorf("parent-disabled task should have Enabled=false, got Enabled=true")
 	}
 }
 
@@ -770,5 +779,125 @@ spec:
 	}
 	if got, want := results[0].Spec.Permissions.FS[0].Path, "/caller/wins/pool"; got != want {
 		t.Errorf("fs.path: got %q, want %q — caller extraVars should override resolver derivation", got, want)
+	}
+}
+
+// ── Item 6: root-level spec.entries override cascade ─────────────────────────
+
+// TestResolver_RootSpecEntryOverrideCascades verifies that an override applied
+// at the dicode.yaml spec.entries level (simulated via parentOverrides) propagates
+// into the inner TaskSet at the highest precedence. This mirrors the real
+// dicode.yaml spec.entries.<name>.overrides.entries.<inner> mechanism.
+//
+// Setup: inner TaskSet has entry "deploy" with timeout 30s. A parent override
+// sets timeout 5m. The resolved task should have timeout 5m.
+func TestResolver_RootSpecEntryOverrideCascades(t *testing.T) {
+	repoDir := t.TempDir()
+	taskDir := writeTaskDir(t, repoDir, "deploy")
+
+	// Inner taskset with a short default timeout for the entry.
+	tsContent := `
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: buildin
+spec:
+  entries:
+    deploy:
+      ref:
+        path: ` + filepath.Join(taskDir, "task.yaml") + `
+`
+	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
+
+	r := newResolver(t)
+	// Parent override: spec.entries["buildin"].overrides.entries["deploy"].timeout = 5m
+	// This is the highest-precedence layer — it should win over anything in the taskset.
+	parentOverrides := &Overrides{
+		Entries: map[string]*Overrides{
+			"deploy": {
+				Timeout: 5 * time.Minute,
+			},
+		},
+	}
+	results, err := r.Resolve(context.Background(), "buildin", &Ref{Path: tsPath}, nil, parentOverrides, nil)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+	if results[0].Spec.Timeout != 5*time.Minute {
+		t.Errorf("timeout = %v, want 5m (root spec.entries override should cascade)", results[0].Spec.Timeout)
+	}
+}
+
+// TestResolver_RootSpecEntryDisablesInnerTask verifies that
+// spec.entries.<name>.overrides.entries.<inner>.enabled=false applied at the
+// dicode.yaml level (via parentOverrides) marks the inner task Enabled=false.
+func TestResolver_RootSpecEntryDisablesInnerTask(t *testing.T) {
+	repoDir := t.TempDir()
+	taskDir := writeTaskDir(t, repoDir, "relay-client")
+
+	tsContent := `
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: buildin
+spec:
+  entries:
+    relay-client:
+      ref:
+        path: ` + filepath.Join(taskDir, "task.yaml") + `
+`
+	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
+
+	r := newResolver(t)
+	// Operator disables relay-client at the dicode.yaml level:
+	//   spec.entries.buildin.overrides.entries.relay-client.enabled: false
+	parentOverrides := &Overrides{
+		Entries: map[string]*Overrides{
+			"relay-client": {Enabled: boolPtr(false)},
+		},
+	}
+	results, err := r.Resolve(context.Background(), "buildin", &Ref{Path: tsPath}, nil, parentOverrides, nil)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("want 1 result (Enabled=false), got %d", len(results))
+	}
+	if results[0].Spec.Enabled {
+		t.Errorf("relay-client should be Enabled=false via root spec.entries override")
+	}
+}
+
+// TestResolver_EnabledDefaultsTrue confirms that tasks without any enabled
+// override have Spec.Enabled == true after resolution.
+func TestResolver_EnabledDefaultsTrue(t *testing.T) {
+	repoDir := t.TempDir()
+	taskDir := writeTaskDir(t, repoDir, "hello")
+
+	tsContent := `
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: examples
+spec:
+  entries:
+    hello:
+      ref:
+        path: ` + filepath.Join(taskDir, "task.yaml") + `
+`
+	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
+	r := newResolver(t)
+	results, err := r.Resolve(context.Background(), "examples", &Ref{Path: tsPath}, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+	if !results[0].Spec.Enabled {
+		t.Errorf("task without enabled override should default to Enabled=true")
 	}
 }
