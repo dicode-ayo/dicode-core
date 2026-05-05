@@ -399,7 +399,10 @@ func (cfg *Config) validate() error {
 		}
 		if entry.Ref != nil {
 			if entry.Ref.IsGit() {
-				// URL is present (checked by IsGit) — nothing more to validate here.
+				// URL is present (checked by IsGit); validate its scheme.
+				if err := taskset.ValidateRefURL("dicode.yaml", name, entry.Ref.URL); err != nil {
+					return err
+				}
 			} else if entry.Ref.Path == "" {
 				return fmt.Errorf("spec.entries[%q]: ref.path is required for local entries", name)
 			}

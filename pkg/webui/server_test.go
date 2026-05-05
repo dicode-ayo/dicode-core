@@ -1156,4 +1156,39 @@ func TestPersistConfig_OverridesAndTagsSurviveRoundTrip(t *testing.T) {
 	if !strings.Contains(content, "backend") {
 		t.Errorf("persisted YAML missing tag 'backend'; got:\n%s", content)
 	}
+
+	// Full re-parse: load the persisted file via config.Load() and assert that
+	// the parsed struct carries the original overrides and tags — not just raw
+	// bytes. This exercises the persist → YAML → parse round-trip end to end.
+	reloaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("config.Load after persist: %v", err)
+	}
+	reloadedEntry := reloaded.Spec.Entries["myrepo"]
+	if reloadedEntry == nil {
+		t.Fatal("reloaded config: spec.entries[myrepo] missing")
+	}
+	if reloadedEntry.Overrides == nil {
+		t.Fatal("reloaded config: spec.entries[myrepo].overrides is nil")
+	}
+	if reloadedEntry.Overrides.Enabled == nil || *reloadedEntry.Overrides.Enabled != false {
+		t.Errorf("reloaded config: overrides.enabled: got %v, want false", reloadedEntry.Overrides.Enabled)
+	}
+	if reloadedEntry.Overrides.Name != "My Repo Override" {
+		t.Errorf("reloaded config: overrides.name: got %q, want %q", reloadedEntry.Overrides.Name, "My Repo Override")
+	}
+	wantTags := []string{"team-a", "backend"}
+	if len(reloadedEntry.Tags) != len(wantTags) {
+		t.Errorf("reloaded config: tags: got %v, want %v", reloadedEntry.Tags, wantTags)
+	} else {
+		tagSet := make(map[string]bool, len(reloadedEntry.Tags))
+		for _, tag := range reloadedEntry.Tags {
+			tagSet[tag] = true
+		}
+		for _, want := range wantTags {
+			if !tagSet[want] {
+				t.Errorf("reloaded config: tags: missing %q in %v", want, reloadedEntry.Tags)
+			}
+		}
+	}
 }
