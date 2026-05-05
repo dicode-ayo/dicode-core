@@ -27,8 +27,8 @@ import (
 	denoruntime "github.com/dicode/dicode/pkg/runtime/deno"
 	"github.com/dicode/dicode/pkg/secrets"
 	gitSource "github.com/dicode/dicode/pkg/source/git"
-	"github.com/dicode/dicode/pkg/source/local"
 	"github.com/dicode/dicode/pkg/task"
+	"github.com/dicode/dicode/pkg/taskset"
 	"github.com/dicode/dicode/pkg/tasktest"
 	"github.com/dicode/dicode/pkg/trigger"
 	"github.com/go-chi/chi/v5"
@@ -1822,7 +1822,7 @@ func (s *Server) apiSaveServerSettings(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) apiAddSource(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Type     string `json:"type"`
+		Name     string `json:"name"`
 		Path     string `json:"path"`
 		URL      string `json:"url"`
 		Branch   string `json:"branch"`
@@ -1832,69 +1832,58 @@ func (s *Server) apiAddSource(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	var sc config.SourceConfig
-	switch config.SourceType(body.Type) {
-	case config.SourceTypeLocal:
-		path := strings.TrimSpace(body.Path)
-		if path == "" {
-			jsonErr(w, "path is required for local source", http.StatusBadRequest)
-			return
-		}
-		watchTrue := true
-		sc = config.SourceConfig{Type: config.SourceTypeLocal, Path: path, Watch: &watchTrue}
-	case config.SourceTypeGit:
-		url := strings.TrimSpace(body.URL)
-		if url == "" {
-			jsonErr(w, "url is required for git source", http.StatusBadRequest)
-			return
-		}
+
+	name := strings.TrimSpace(body.Name)
+	if name == "" {
+		jsonErr(w, "name is required", http.StatusBadRequest)
+		return
+	}
+
+	var ref taskset.Ref
+	if url := strings.TrimSpace(body.URL); url != "" {
 		branch := body.Branch
 		if branch == "" {
 			branch = "main"
 		}
-		sc = config.SourceConfig{
-			Type:         config.SourceTypeGit,
+		ref = taskset.Ref{
 			URL:          url,
 			Branch:       branch,
 			PollInterval: 30 * 1e9,
-			Auth:         config.SourceAuth{TokenEnv: body.TokenEnv},
+			Auth:         taskset.RefAuth{TokenEnv: body.TokenEnv},
 		}
-	default:
-		jsonErr(w, "type must be 'local' or 'git'", http.StatusBadRequest)
+	} else if path := strings.TrimSpace(body.Path); path != "" {
+		watchTrue := true
+		ref = taskset.Ref{Path: path, Watch: &watchTrue}
+	} else {
+		jsonErr(w, "either url or path is required", http.StatusBadRequest)
 		return
 	}
 
+	entry := &taskset.Entry{Ref: &ref}
+
+	id := ref.URL
+	if id == "" {
+		id = ref.Path
+	}
+	ts := taskset.NewSource(id, name, &ref, "", s.dataDir, false, ref.PollInterval, s.log)
 	if s.reconciler != nil {
-		switch sc.Type {
-		case config.SourceTypeLocal:
-			watchEnabled := sc.Watch == nil || *sc.Watch
-			ls, err := local.New(sc.Path, sc.Path, watchEnabled, s.log)
-			if err != nil {
-				jsonErr(w, "create local source: "+err.Error(), http.StatusInternalServerError)
-				return
-			}
-			if err := s.reconciler.AddSource(ls); err != nil {
-				jsonErr(w, "start source: "+err.Error(), http.StatusInternalServerError)
-				return
-			}
-		case config.SourceTypeGit:
-			gs, err := gitSource.New(s.dataDir, sc.URL, sc.Branch, sc.PollInterval, sc.Auth.TokenEnv, sc.Auth.SSHKey, s.log)
-			if err != nil {
-				jsonErr(w, "create git source: "+err.Error(), http.StatusInternalServerError)
-				return
-			}
-			if err := s.reconciler.AddSource(gs); err != nil {
-				jsonErr(w, "start source: "+err.Error(), http.StatusInternalServerError)
-				return
-			}
+		if err := s.reconciler.AddSource(ts); err != nil {
+			jsonErr(w, "start source: "+err.Error(), http.StatusInternalServerError)
+			return
 		}
 	}
+	if s.sourceMgr != nil {
+		s.sourceMgr.Register(name, ts)
+	}
 
-	s.cfg.Sources = append(s.cfg.Sources, sc)
+	if s.cfg.Spec.Entries == nil {
+		s.cfg.Spec.Entries = make(map[string]*taskset.Entry)
+	}
+	s.cfg.Spec.Entries[name] = entry
 	if err := s.persistConfig(); err != nil {
 		s.log.Warn("source persist failed", zap.Error(err))
 	}
-	s.log.Info("source added", zap.String("type", body.Type))
+	s.log.Info("source added", zap.String("name", name))
 	jsonOK(w, map[string]string{"status": "ok"})
 }
 
@@ -1914,26 +1903,29 @@ func (s *Server) apiListGitBranches(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) apiRemoveSource(w http.ResponseWriter, r *http.Request) {
-	idxStr := chi.URLParam(r, "idx")
-	idx := 0
-	if _, err := fmt.Sscanf(idxStr, "%d", &idx); err != nil || idx < 0 || idx >= len(s.cfg.Sources) {
-		jsonErr(w, "invalid index", http.StatusBadRequest)
+	// The route parameter is now the source name (was previously a numeric index).
+	name := chi.URLParam(r, "idx") // reuse the :idx slot — value is now a name
+	if name == "" {
+		jsonErr(w, "source name is required", http.StatusBadRequest)
 		return
 	}
-	sc := s.cfg.Sources[idx]
-	if s.reconciler != nil {
-		switch sc.Type {
-		case config.SourceTypeLocal:
-			s.reconciler.RemoveSource(sc.Path)
-		case config.SourceTypeGit:
-			s.reconciler.RemoveSource(sc.URL)
-		}
+	entry := s.cfg.Spec.Entries[name]
+	if entry == nil {
+		jsonErr(w, "source not found", http.StatusNotFound)
+		return
 	}
-	s.cfg.Sources = append(s.cfg.Sources[:idx], s.cfg.Sources[idx+1:]...)
+	if s.reconciler != nil && entry.Ref != nil {
+		id := entry.Ref.URL
+		if id == "" {
+			id = entry.Ref.Path
+		}
+		s.reconciler.RemoveSource(id)
+	}
+	delete(s.cfg.Spec.Entries, name)
 	if err := s.persistConfig(); err != nil {
 		s.log.Warn("source persist failed", zap.Error(err))
 	}
-	s.log.Info("source removed", zap.Int("idx", idx))
+	s.log.Info("source removed", zap.String("name", name))
 	jsonOK(w, map[string]string{"status": "ok"})
 }
 
@@ -2108,32 +2100,47 @@ func (s *Server) persistConfig() error {
 		delete(doc, "runtimes")
 	}
 
-	if len(s.cfg.Sources) > 0 {
-		var srcs []map[string]any
-		for _, sc := range s.cfg.Sources {
-			m := map[string]any{"type": string(sc.Type)}
-			switch sc.Type {
-			case config.SourceTypeLocal:
-				m["path"] = sc.Path
-			case config.SourceTypeGit:
-				m["url"] = sc.URL
-				if sc.Branch != "" {
-					m["branch"] = sc.Branch
-				}
-				if sc.PollInterval > 0 {
-					m["poll_interval"] = sc.PollInterval.String()
-				}
-				if sc.Auth.TokenEnv != "" {
-					m["auth"] = map[string]any{"type": "token", "token_env": sc.Auth.TokenEnv}
-				} else if sc.Auth.SSHKey != "" {
-					m["auth"] = map[string]any{"type": "ssh", "ssh_key": sc.Auth.SSHKey}
-				}
+	// Persist spec.entries as the new `spec:` block in the YAML document.
+	if len(s.cfg.Spec.Entries) > 0 {
+		specEntries := make(map[string]any, len(s.cfg.Spec.Entries))
+		for name, entry := range s.cfg.Spec.Entries {
+			if entry == nil || entry.Ref == nil {
+				continue
 			}
-			srcs = append(srcs, m)
+			ref := entry.Ref
+			refMap := map[string]any{}
+			if ref.URL != "" {
+				refMap["url"] = ref.URL
+			}
+			if ref.Path != "" {
+				refMap["path"] = ref.Path
+			}
+			if ref.Branch != "" {
+				refMap["branch"] = ref.Branch
+			}
+			if ref.PollInterval > 0 {
+				refMap["poll_interval"] = ref.PollInterval.String()
+			}
+			if ref.Auth.TokenEnv != "" {
+				refMap["auth"] = map[string]any{"token_env": ref.Auth.TokenEnv}
+			} else if ref.Auth.SSHKey != "" {
+				refMap["auth"] = map[string]any{"ssh_key": ref.Auth.SSHKey}
+			}
+			specEntries[name] = map[string]any{"ref": refMap}
 		}
-		doc["sources"] = srcs
+		specBlock, _ := doc["spec"].(map[string]any)
+		if specBlock == nil {
+			specBlock = map[string]any{}
+		}
+		specBlock["entries"] = specEntries
+		doc["spec"] = specBlock
 	} else {
-		doc["sources"] = []any{}
+		if specBlock, ok := doc["spec"].(map[string]any); ok {
+			delete(specBlock, "entries")
+			if len(specBlock) == 0 {
+				delete(doc, "spec")
+			}
+		}
 	}
 
 	out, err := yaml.Marshal(doc)

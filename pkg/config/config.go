@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -9,7 +10,21 @@ import (
 	"time"
 
 	"github.com/dicode/dicode/pkg/task"
+	"github.com/dicode/dicode/pkg/taskset"
 	"gopkg.in/yaml.v3"
+)
+
+// ErrLegacySourcesFormat is returned by Load when the config file contains the
+// legacy `sources:` array. Operators must migrate to the new `spec.entries`
+// shape — see https://github.com/dicode-ayo/dicode-core/issues/261 and
+// docs/concepts/sources.md for a side-by-side migration guide.
+var ErrLegacySourcesFormat = errors.New(
+	"dicode.yaml: legacy `sources` array detected. The format changed: declare\n" +
+		"sources as `spec.entries` instead. See\n" +
+		"https://github.com/dicode-ayo/dicode-core/issues/261\n" +
+		"or docs/concepts/sources.md for the migration. The translation is\n" +
+		"mechanical — each `sources[]` entry becomes a `spec.entries.<name>`\n" +
+		"with the source's fields nested under `ref`.",
 )
 
 // RuntimeConfig configures a managed runtime executor.
@@ -127,7 +142,24 @@ type AIConfig struct {
 }
 
 type Config struct {
-	Sources       []SourceConfig           `yaml:"sources"`
+	// Spec is the root TaskSet defined inline in dicode.yaml. Its entries
+	// declare every source the daemon loads. Overrides on these entries
+	// propagate down to the referenced TaskSet using the standard
+	// parent.overrides.entries mechanism — see pkg/taskset/resolver.go.
+	//
+	// Example:
+	//   spec:
+	//     entries:
+	//       buildin:
+	//         ref:
+	//           path: ${CONFIGDIR}/tasks/buildin/taskset.yaml
+	//       examples:
+	//         ref:
+	//           url: https://github.com/org/examples
+	//           branch: main
+	//           poll_interval: 5m
+	//           auth: { token_env: GITHUB_TOKEN }
+	Spec          taskset.TaskSetBody      `yaml:"spec"`
 	Database      DatabaseConfig           `yaml:"database"`
 	Secrets       SecretsConfig            `yaml:"secrets"`
 	Notifications NotificationsConfig      `yaml:"notifications"`
@@ -190,55 +222,6 @@ type NotifyProviderConfig struct {
 	TokenEnv string `yaml:"token_env"` // env var holding auth token
 }
 
-// SourceType identifies the kind of task source.
-type SourceType string
-
-const (
-	SourceTypeGit   SourceType = "git"
-	SourceTypeLocal SourceType = "local"
-)
-
-// SourceConfig describes one task source — either a remote git repo or a
-// local path pointing to a taskset.yaml (or kind: Task yaml).
-type SourceConfig struct {
-	Type SourceType `yaml:"type"` // "git" | "local"
-
-	// Git source fields
-	URL          string        `yaml:"url,omitempty"`
-	Branch       string        `yaml:"branch,omitempty"`
-	PollInterval time.Duration `yaml:"poll_interval,omitempty"`
-	Auth         SourceAuth    `yaml:"auth,omitempty"`
-
-	// Local source fields
-	Path string `yaml:"path,omitempty"` // absolute path to taskset.yaml (local) or tasks dir (legacy)
-	// Watch enables fsnotify on the local source. Nil means "unset — apply
-	// default"; an explicit `watch: false` in YAML preserves false so the
-	// user can opt out. Default (nil → true) is applied in applyDefaults.
-	Watch *bool `yaml:"watch,omitempty"`
-
-	// TaskSet fields (new model)
-	// Name is the root namespace segment for all tasks from this source.
-	// Defaults to the last segment of URL or Path.
-	Name string `yaml:"name,omitempty"`
-	// EntryPath is the path within the git repo (or absolute path for local)
-	// to the entry yaml file. Defaults to "taskset.yaml".
-	EntryPath string `yaml:"entry_path,omitempty"`
-	// ConfigPath is the path to an optional kind:Config yaml file.
-	// For git sources: path within the repo. For local: absolute path.
-	// Defaults to "dicode-config.yaml" alongside the entry file.
-	ConfigPath string `yaml:"config_path,omitempty"`
-
-	// Shared / future
-	Tags []string `yaml:"tags,omitempty"`
-}
-
-// SourceAuth holds credentials for a git source.
-type SourceAuth struct {
-	Type     string `yaml:"type"`      // "token" | "ssh"
-	TokenEnv string `yaml:"token_env"` // env var name holding the token
-	SSHKey   string `yaml:"ssh_key"`   // path to SSH private key file
-}
-
 type ServerConfig struct {
 	Port           int      `yaml:"port"`
 	Secret         string   `yaml:"secret" json:"-"`           // optional passphrase; excluded from JSON API
@@ -259,14 +242,22 @@ type ServerConfig struct {
 
 // Load reads and parses the config file at path, then applies defaults.
 func Load(path string) (*Config, error) {
-	f, err := os.Open(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("open config: %w", err)
 	}
-	defer f.Close()
+
+	// Probe for the old `sources:` array before decoding into Config.
+	// Fail fast with a clear migration error instead of silently dropping sources.
+	var probe struct {
+		Sources any `yaml:"sources"`
+	}
+	if err := yaml.Unmarshal(data, &probe); err == nil && probe.Sources != nil {
+		return nil, ErrLegacySourcesFormat
+	}
 
 	var cfg Config
-	if err := yaml.NewDecoder(f).Decode(&cfg); err != nil {
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
@@ -324,29 +315,26 @@ func applyDefaults(cfg *Config, configDir string) {
 	vars["DATADIR"] = cfg.DataDir
 
 	cfg.Database.Path = expand(cfg.Database.Path)
-	for i := range cfg.Sources {
-		cfg.Sources[i].Path = expand(cfg.Sources[i].Path)
-	}
 
-	for i := range cfg.Sources {
-		s := &cfg.Sources[i]
-		if s.Type == SourceTypeGit {
-			if s.Branch == "" {
-				s.Branch = "main"
+	// Expand ${VAR} in ref paths for spec.entries.
+	for _, entry := range cfg.Spec.Entries {
+		if entry == nil || entry.Ref == nil {
+			continue
+		}
+		entry.Ref.Path = expand(entry.Ref.Path)
+		// Apply defaults for git refs.
+		if entry.Ref.IsGit() {
+			if entry.Ref.Branch == "" {
+				entry.Ref.Branch = "main"
 			}
-			if s.PollInterval == 0 {
-				s.PollInterval = 30 * time.Second
+			if entry.Ref.PollInterval == 0 {
+				entry.Ref.PollInterval = 30 * time.Second
 			}
 		}
-		if s.Type == SourceTypeLocal {
-			// Watch defaults to true for local sources. A pointer lets us
-			// distinguish "unset" (nil → apply default true) from "explicitly
-			// false" (user opted out) — the previous non-pointer form made
-			// `watch: false` a no-op.
-			if s.Watch == nil {
-				t := true
-				s.Watch = &t
-			}
+		// Watch defaults to true for local refs.
+		if !entry.Ref.IsGit() && entry.Ref.Watch == nil {
+			t := true
+			entry.Ref.Watch = &t
 		}
 	}
 	if cfg.Server.Port == 0 {
@@ -402,20 +390,19 @@ func applyDefaults(cfg *Config, configDir string) {
 }
 
 func (cfg *Config) validate() error {
-	for i, s := range cfg.Sources {
-		switch s.Type {
-		case SourceTypeGit:
-			if s.URL == "" {
-				return fmt.Errorf("sources[%d]: url is required for git source", i)
+	for name, entry := range cfg.Spec.Entries {
+		if entry == nil {
+			return fmt.Errorf("spec.entries[%q]: entry must not be null", name)
+		}
+		if entry.Ref == nil && entry.Inline == nil {
+			return fmt.Errorf("spec.entries[%q]: either ref or inline must be set", name)
+		}
+		if entry.Ref != nil {
+			if entry.Ref.IsGit() {
+				// URL is present (checked by IsGit) — nothing more to validate here.
+			} else if entry.Ref.Path == "" {
+				return fmt.Errorf("spec.entries[%q]: ref.path is required for local entries", name)
 			}
-		case SourceTypeLocal:
-			if s.Path == "" {
-				return fmt.Errorf("sources[%d]: path is required for local source", i)
-			}
-		case "":
-			return fmt.Errorf("sources[%d]: type is required (git or local)", i)
-		default:
-			return fmt.Errorf("sources[%d]: unknown type %q (valid: git, local)", i, s.Type)
 		}
 	}
 	if cfg.Relay.BrokerURL != "" {

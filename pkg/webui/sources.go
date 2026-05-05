@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -72,14 +70,18 @@ func (m *SourceManager) List() []SourceInfo {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	out := make([]SourceInfo, 0, len(m.cfg.Sources))
-	for _, sc := range m.cfg.Sources {
-		name := sourceName(sc)
+	entries := m.cfg.Spec.Entries
+	out := make([]SourceInfo, 0, len(entries))
+	for name, entry := range entries {
+		if entry == nil || entry.Ref == nil {
+			continue
+		}
+		ref := entry.Ref
 		info := SourceInfo{
 			Name:   name,
-			URL:    sc.URL,
-			Path:   sc.Path,
-			Branch: sc.Branch,
+			URL:    ref.URL,
+			Path:   ref.Path,
+			Branch: ref.Branch,
 		}
 		if src, ok := m.tasksets[name]; ok {
 			info.Type = "taskset"
@@ -95,7 +97,7 @@ func (m *SourceManager) List() []SourceInfo {
 				info.LastPullOK = ps.OK
 				info.LastPullError = ps.Error
 			}
-		} else if sc.URL != "" {
+		} else if ref.IsGit() {
 			info.Type = "git"
 		} else {
 			info.Type = "local"
@@ -140,29 +142,11 @@ func (m *SourceManager) ResolveRepoPath(name string) (string, error) {
 
 // ListBranches returns remote branches for the named git source.
 func (m *SourceManager) ListBranches(ctx context.Context, name string) ([]string, error) {
-	for _, sc := range m.cfg.Sources {
-		if sourceName(sc) == name && sc.URL != "" {
-			return gitSource.ListBranches(ctx, sc.URL, sc.Auth.TokenEnv)
-		}
+	entry := m.cfg.Spec.Entries[name]
+	if entry == nil || entry.Ref == nil || !entry.Ref.IsGit() {
+		return nil, fmt.Errorf("source %q not found or not a git source", name)
 	}
-	return nil, fmt.Errorf("source %q not found or not a git source", name)
-}
-
-// sourceName derives the canonical name for a SourceConfig (same logic as buildTaskSetSource).
-func sourceName(sc config.SourceConfig) string {
-	if sc.Name != "" {
-		return sc.Name
-	}
-	base := sc.URL
-	if base == "" {
-		base = sc.Path
-	}
-	base = strings.TrimRight(base, "/")
-	name := filepath.Base(base)
-	if ext := filepath.Ext(name); ext == ".yaml" || ext == ".yml" {
-		name = strings.TrimSuffix(name, ext)
-	}
-	return name
+	return gitSource.ListBranches(ctx, entry.Ref.URL, entry.Ref.Auth.TokenEnv)
 }
 
 // --- HTTP handlers ---

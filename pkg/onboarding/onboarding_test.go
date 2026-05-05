@@ -36,8 +36,8 @@ func TestRenderConfig_LoadsCleanly(t *testing.T) {
 		t.Errorf("AI.Task = %q, want %q (default should land)", cfg.AI.Task, "buildin/dicodai")
 	}
 
-	if len(cfg.Sources) == 0 {
-		t.Error("sources should not be empty")
+	if len(cfg.Spec.Entries) == 0 {
+		t.Error("spec.entries should not be empty")
 	}
 	if cfg.Database.Type != "sqlite" {
 		t.Errorf("Database.Type = %q, want sqlite", cfg.Database.Type)

@@ -41,11 +41,14 @@ func TestLoadWithVars(t *testing.T) {
 	cfgPath := filepath.Join(dir, "dicode.yaml")
 
 	content := `
-sources:
-  - type: local
-    path: ${HOME}/my-tasks
-  - type: local
-    path: ${CONFIGDIR}/tasks
+spec:
+  entries:
+    my-tasks:
+      ref:
+        path: ${HOME}/my-tasks
+    tasks:
+      ref:
+        path: ${CONFIGDIR}/tasks
 database:
   type: sqlite
   path: ${DATADIR}/test.db
@@ -61,15 +64,48 @@ database:
 
 	home, _ := os.UserHomeDir()
 
-	if cfg.Sources[0].Path != home+"/my-tasks" {
-		t.Errorf("sources[0].path = %q, want %q", cfg.Sources[0].Path, home+"/my-tasks")
+	myTasksEntry := cfg.Spec.Entries["my-tasks"]
+	if myTasksEntry == nil || myTasksEntry.Ref == nil {
+		t.Fatal("spec.entries[my-tasks] not found")
 	}
-	if cfg.Sources[1].Path != dir+"/tasks" {
-		t.Errorf("sources[1].path = %q, want %q", cfg.Sources[1].Path, dir+"/tasks")
+	if myTasksEntry.Ref.Path != home+"/my-tasks" {
+		t.Errorf("spec.entries[my-tasks].ref.path = %q, want %q", myTasksEntry.Ref.Path, home+"/my-tasks")
 	}
+
+	tasksEntry := cfg.Spec.Entries["tasks"]
+	if tasksEntry == nil || tasksEntry.Ref == nil {
+		t.Fatal("spec.entries[tasks] not found")
+	}
+	if tasksEntry.Ref.Path != dir+"/tasks" {
+		t.Errorf("spec.entries[tasks].ref.path = %q, want %q", tasksEntry.Ref.Path, dir+"/tasks")
+	}
+
 	wantDB := home + "/.dicode/test.db"
 	if cfg.Database.Path != wantDB {
 		t.Errorf("database.path = %q, want %q", cfg.Database.Path, wantDB)
+	}
+}
+
+// TestLoad_RejectsLegacySources ensures the old `sources:` array is rejected
+// at load time with a clear error pointing at the migration guide.
+func TestLoad_RejectsLegacySources(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "dicode.yaml")
+
+	content := `
+sources:
+  - type: local
+    path: /tmp/tasks
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(cfgPath)
+	if err == nil {
+		t.Fatal("Load accepted legacy sources array; want error")
+	}
+	if !strings.Contains(err.Error(), "spec.entries") {
+		t.Errorf("error = %v; want mention of spec.entries", err)
 	}
 }
 
@@ -86,9 +122,11 @@ ai:
   api_key_env: OPENAI_API_KEY
   base_url: ""
   model: gpt-4o
-sources:
-  - type: local
-    path: ${CONFIGDIR}/tasks
+spec:
+  entries:
+    local:
+      ref:
+        path: ${CONFIGDIR}/tasks
 `
 	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
@@ -106,9 +144,11 @@ func TestLoad_AITaskDefault(t *testing.T) {
 	cfgPath := filepath.Join(dir, "dicode.yaml")
 
 	content := `
-sources:
-  - type: local
-    path: ${CONFIGDIR}/tasks
+spec:
+  entries:
+    local:
+      ref:
+        path: ${CONFIGDIR}/tasks
 `
 	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
@@ -131,9 +171,11 @@ func TestLoad_AITaskOverride(t *testing.T) {
 	content := `
 ai:
   task: examples/ai-agent-ollama
-sources:
-  - type: local
-    path: ${CONFIGDIR}/tasks
+spec:
+  entries:
+    local:
+      ref:
+        path: ${CONFIGDIR}/tasks
 `
 	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
@@ -211,9 +253,11 @@ func TestLoad_RelayBrokerURL_Roundtrip(t *testing.T) {
 	cfgPath := filepath.Join(dir, "dicode.yaml")
 
 	content := `
-sources:
-  - type: local
-    path: ${CONFIGDIR}/tasks
+spec:
+  entries:
+    local:
+      ref:
+        path: ${CONFIGDIR}/tasks
 relay:
   enabled: true
   server_url: wss://relay.example.com
@@ -249,9 +293,11 @@ func TestLoad_RelayBrokerURL_RejectsMalformed(t *testing.T) {
 			dir := t.TempDir()
 			cfgPath := filepath.Join(dir, "dicode.yaml")
 			content := fmt.Sprintf(`
-sources:
-  - type: local
-    path: ${CONFIGDIR}/tasks
+spec:
+  entries:
+    local:
+      ref:
+        path: ${CONFIGDIR}/tasks
 relay:
   enabled: true
   broker_url: %q
@@ -271,9 +317,11 @@ func TestLoadExecutionMaxConcurrentTasks(t *testing.T) {
 	cfgPath := filepath.Join(dir, "dicode.yaml")
 
 	content := `
-sources:
-  - type: local
-    path: ${CONFIGDIR}/tasks
+spec:
+  entries:
+    local:
+      ref:
+        path: ${CONFIGDIR}/tasks
 execution:
   max_concurrent_tasks: 8
 `
@@ -292,6 +340,7 @@ execution:
 // Regression for #177: `watch: false` and `mcp: false` in YAML must survive
 // applyDefaults. Previously both fields were `bool` with a default-flip
 // (`if !x { x = true }`) that made explicit false a no-op.
+// With the new spec.entries shape, watch lives on spec.entries.<name>.ref.watch.
 func TestLoadWatchAndMCPRespectExplicitFalse(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "dicode.yaml")
@@ -300,10 +349,12 @@ func TestLoadWatchAndMCPRespectExplicitFalse(t *testing.T) {
 server:
   port: 8080
   mcp: false
-sources:
-  - type: local
-    path: ${CONFIGDIR}/tasks
-    watch: false
+spec:
+  entries:
+    local:
+      ref:
+        path: ${CONFIGDIR}/tasks
+        watch: false
 `
 	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
@@ -315,11 +366,12 @@ sources:
 	if cfg.Server.MCP == nil || *cfg.Server.MCP {
 		t.Errorf("Server.MCP = %v, want explicit false", cfg.Server.MCP)
 	}
-	if len(cfg.Sources) != 1 {
-		t.Fatalf("want 1 source, got %d", len(cfg.Sources))
+	localEntry := cfg.Spec.Entries["local"]
+	if localEntry == nil || localEntry.Ref == nil {
+		t.Fatal("spec.entries[local] not found")
 	}
-	if cfg.Sources[0].Watch == nil || *cfg.Sources[0].Watch {
-		t.Errorf("Sources[0].Watch = %v, want explicit false", cfg.Sources[0].Watch)
+	if localEntry.Ref.Watch == nil || *localEntry.Ref.Watch {
+		t.Errorf("Spec.Entries[local].Ref.Watch = %v, want explicit false", localEntry.Ref.Watch)
 	}
 }
 
@@ -328,9 +380,11 @@ func TestLoadWatchAndMCPDefaultsToTrueWhenUnset(t *testing.T) {
 	cfgPath := filepath.Join(dir, "dicode.yaml")
 
 	content := `
-sources:
-  - type: local
-    path: ${CONFIGDIR}/tasks
+spec:
+  entries:
+    local:
+      ref:
+        path: ${CONFIGDIR}/tasks
 `
 	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
@@ -342,11 +396,12 @@ sources:
 	if cfg.Server.MCP == nil || !*cfg.Server.MCP {
 		t.Errorf("Server.MCP = %v, want default true when unset", cfg.Server.MCP)
 	}
-	if len(cfg.Sources) != 1 {
-		t.Fatalf("want 1 source, got %d", len(cfg.Sources))
+	localEntry := cfg.Spec.Entries["local"]
+	if localEntry == nil || localEntry.Ref == nil {
+		t.Fatal("spec.entries[local] not found")
 	}
-	if cfg.Sources[0].Watch == nil || !*cfg.Sources[0].Watch {
-		t.Errorf("Sources[0].Watch = %v, want default true when unset", cfg.Sources[0].Watch)
+	if localEntry.Ref.Watch == nil || !*localEntry.Ref.Watch {
+		t.Errorf("Spec.Entries[local].Ref.Watch = %v, want default true when unset", localEntry.Ref.Watch)
 	}
 }
 
@@ -359,9 +414,11 @@ func TestLoad_BcryptCost_DefaultIs12WhenUnset(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "dicode.yaml")
 	content := `
-sources:
-  - type: local
-    path: ${CONFIGDIR}/tasks
+spec:
+  entries:
+    local:
+      ref:
+        path: ${CONFIGDIR}/tasks
 `
 	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
@@ -379,9 +436,11 @@ func TestLoad_BcryptCost_AcceptsValidOverride(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "dicode.yaml")
 	content := `
-sources:
-  - type: local
-    path: ${CONFIGDIR}/tasks
+spec:
+  entries:
+    local:
+      ref:
+        path: ${CONFIGDIR}/tasks
 server:
   bcrypt_cost: 10
 `
@@ -399,17 +458,18 @@ server:
 
 // Out-of-range values must be rejected at Load time so the operator finds out
 // at startup rather than discovering at first login that bcrypt is rejecting
-// the cost. We cap at 14 to prevent pathological values like 20 (~minutes
-// per login) that would functionally lock a user out.
+// the cost. We cap at 14 to prevent operators from accidentally locking themselves out.
 func TestLoad_BcryptCost_RejectsOutOfRange(t *testing.T) {
 	for _, bad := range []int{1, 2, 3, 15, 20, 31} {
 		t.Run(fmt.Sprintf("cost=%d", bad), func(t *testing.T) {
 			dir := t.TempDir()
 			cfgPath := filepath.Join(dir, "dicode.yaml")
 			content := fmt.Sprintf(`
-sources:
-  - type: local
-    path: ${CONFIGDIR}/tasks
+spec:
+  entries:
+    local:
+      ref:
+        path: ${CONFIGDIR}/tasks
 server:
   bcrypt_cost: %d
 `, bad)
