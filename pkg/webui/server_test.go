@@ -21,6 +21,7 @@ import (
 	denoruntime "github.com/dicode/dicode/pkg/runtime/deno"
 	"github.com/dicode/dicode/pkg/secrets"
 	"github.com/dicode/dicode/pkg/task"
+	"github.com/dicode/dicode/pkg/taskset"
 	"github.com/dicode/dicode/pkg/trigger"
 	"go.uber.org/zap"
 )
@@ -1081,5 +1082,78 @@ func TestAPI_GetTask_DisabledTaskVisible(t *testing.T) {
 		t.Error("'enabled' field missing from /api/tasks/{id} response")
 	} else if enabledBool, _ := enabled.(bool); enabledBool {
 		t.Errorf("expected enabled=false for disabled task, got enabled=true")
+	}
+}
+
+// TestPersistConfig_OverridesAndTagsSurviveRoundTrip is a regression guard for
+// Fix 2 of PR #262: persistConfig previously serialised only the `ref` block,
+// silently dropping `overrides` and `tags` on every web-UI save.
+func TestPersistConfig_OverridesAndTagsSurviveRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "dicode.yaml")
+
+	// Write a minimal dicode.yaml to disk so persistConfig has a file to round-trip.
+	initial := "log_level: info\nspec:\n  entries: {}\n"
+	if err := os.WriteFile(cfgPath, []byte(initial), 0600); err != nil {
+		t.Fatalf("write initial cfg: %v", err)
+	}
+
+	enabled := false
+	cfg := &config.Config{
+		LogLevel: "info",
+	}
+	cfg.Spec.Entries = map[string]*taskset.Entry{
+		"myrepo": {
+			Ref: &taskset.Ref{Path: "/tmp/myrepo"},
+			Overrides: &taskset.Overrides{
+				Enabled: &enabled,
+				Name:    "My Repo Override",
+			},
+			Tags: []string{"team-a", "backend"},
+		},
+	}
+
+	d, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("db: %v", err)
+	}
+	defer d.Close()
+
+	rt, err := denoruntime.New(registry.New(d), secrets.Chain{}, d, zap.NewNop())
+	if err != nil {
+		t.Skipf("deno not available: %v", err)
+	}
+	reg := registry.New(d)
+	eng := trigger.New(reg, rt, zap.NewNop())
+
+	srv, err := New(8080, reg, eng, cfg, cfgPath, nil, nil, nil, dir, NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := srv.persistConfig(); err != nil {
+		t.Fatalf("persistConfig: %v", err)
+	}
+
+	// Re-load the written YAML and verify overrides + tags are present.
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	content := string(raw)
+	if !strings.Contains(content, "overrides:") {
+		t.Errorf("persisted YAML missing 'overrides:' block; got:\n%s", content)
+	}
+	if !strings.Contains(content, "My Repo Override") {
+		t.Errorf("persisted YAML missing override name value; got:\n%s", content)
+	}
+	if !strings.Contains(content, "tags:") {
+		t.Errorf("persisted YAML missing 'tags:' block; got:\n%s", content)
+	}
+	if !strings.Contains(content, "team-a") {
+		t.Errorf("persisted YAML missing tag 'team-a'; got:\n%s", content)
+	}
+	if !strings.Contains(content, "backend") {
+		t.Errorf("persisted YAML missing tag 'backend'; got:\n%s", content)
 	}
 }

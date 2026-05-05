@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -531,7 +532,7 @@ func (s *Server) Handler() http.Handler {
 			r.Post("/settings/server", s.apiSaveServerSettings)
 			r.Post("/settings/ai", s.apiSaveAISettings)
 			r.Post("/settings/sources", s.apiAddSource)
-			r.Delete("/settings/sources/{idx}", s.apiRemoveSource)
+			r.Delete("/settings/sources/{name}", s.apiRemoveSource)
 			r.Get("/settings/sources/git/branches", s.apiListGitBranches)
 
 			// Relay status (#87) — returns {"enabled":false} when disabled.
@@ -1903,8 +1904,7 @@ func (s *Server) apiListGitBranches(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) apiRemoveSource(w http.ResponseWriter, r *http.Request) {
-	// The route parameter is now the source name (was previously a numeric index).
-	name := chi.URLParam(r, "idx") // reuse the :idx slot — value is now a name
+	name := chi.URLParam(r, "name")
 	if name == "" {
 		jsonErr(w, "source name is required", http.StatusBadRequest)
 		return
@@ -2101,32 +2101,35 @@ func (s *Server) persistConfig() error {
 	}
 
 	// Persist spec.entries as the new `spec:` block in the YAML document.
+	// Entries are marshalled via yaml.Marshal so that all fields (ref, overrides,
+	// tags, inline) round-trip without the serialiser needing to know about every
+	// field individually. Keys are sorted for deterministic output — non-sorted
+	// map iteration produces noisy git diffs on every save.
 	if len(s.cfg.Spec.Entries) > 0 {
+		entryKeys := make([]string, 0, len(s.cfg.Spec.Entries))
+		for k := range s.cfg.Spec.Entries {
+			entryKeys = append(entryKeys, k)
+		}
+		sort.Strings(entryKeys)
+
 		specEntries := make(map[string]any, len(s.cfg.Spec.Entries))
-		for name, entry := range s.cfg.Spec.Entries {
-			if entry == nil || entry.Ref == nil {
+		for _, name := range entryKeys {
+			entry := s.cfg.Spec.Entries[name]
+			if entry == nil {
 				continue
 			}
-			ref := entry.Ref
-			refMap := map[string]any{}
-			if ref.URL != "" {
-				refMap["url"] = ref.URL
+			// Round-trip via yaml.Marshal → yaml.Unmarshal into map[string]any so
+			// that all Entry fields (ref, overrides, tags, inline) are preserved
+			// without enumerating them here.
+			entryYAML, err := yaml.Marshal(entry)
+			if err != nil {
+				return fmt.Errorf("marshal entry %q: %w", name, err)
 			}
-			if ref.Path != "" {
-				refMap["path"] = ref.Path
+			var entryMap map[string]any
+			if err := yaml.Unmarshal(entryYAML, &entryMap); err != nil {
+				return fmt.Errorf("unmarshal entry %q: %w", name, err)
 			}
-			if ref.Branch != "" {
-				refMap["branch"] = ref.Branch
-			}
-			if ref.PollInterval > 0 {
-				refMap["poll_interval"] = ref.PollInterval.String()
-			}
-			if ref.Auth.TokenEnv != "" {
-				refMap["auth"] = map[string]any{"token_env": ref.Auth.TokenEnv}
-			} else if ref.Auth.SSHKey != "" {
-				refMap["auth"] = map[string]any{"ssh_key": ref.Auth.SSHKey}
-			}
-			specEntries[name] = map[string]any{"ref": refMap}
+			specEntries[name] = entryMap
 		}
 		specBlock, _ := doc["spec"].(map[string]any)
 		if specBlock == nil {

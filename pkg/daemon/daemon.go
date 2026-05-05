@@ -558,11 +558,7 @@ func buildSources(cfg *config.Config, dataDir string, log *zap.Logger) ([]source
 			continue
 		}
 		ref := entry.Ref
-		var overrides *taskset.Overrides
-		if entry.Overrides != nil {
-			overrides = entry.Overrides
-		}
-		ts := buildTaskSetSourceFromEntry(name, ref, overrides, dataDir, log)
+		ts := buildTaskSetSourceFromEntry(name, ref, dataDir, log)
 		sources = append(sources, ts)
 		tasksetSources[name] = ts
 	}
@@ -571,7 +567,7 @@ func buildSources(cfg *config.Config, dataDir string, log *zap.Logger) ([]source
 	return sources, sourceMgr, nil
 }
 
-func buildTaskSetSourceFromEntry(name string, ref *taskset.Ref, _ *taskset.Overrides, dataDir string, log *zap.Logger) *taskset.Source {
+func buildTaskSetSourceFromEntry(name string, ref *taskset.Ref, dataDir string, log *zap.Logger) *taskset.Source {
 	// The entry key is the namespace. The ref points at the taskset.yaml.
 	// applyDefaults has already expanded ${VAR} and set branch/poll defaults.
 	id := ref.URL

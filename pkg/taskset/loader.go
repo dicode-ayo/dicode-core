@@ -83,6 +83,30 @@ func LoadConfig(path string) (*ConfigSpec, error) {
 	return &cs, nil
 }
 
+// LiftEntryEnabled normalises the top-level `enabled` shortcut on every entry
+// in the provided map. After the call each entry.Enabled is nil and the value
+// lives exclusively in entry.Overrides.Enabled. If both are set on the same
+// entry an error is returned so callers never silently pick a winner.
+//
+// This is extracted as a package-level helper so that both validateTaskSet and
+// pkg/config's validate() can call it without duplicating the logic.
+func LiftEntryEnabled(entries map[string]*Entry) error {
+	for key, entry := range entries {
+		if entry == nil || entry.Enabled == nil {
+			continue
+		}
+		if entry.Overrides != nil && entry.Overrides.Enabled != nil {
+			return fmt.Errorf("entry %q: top-level `enabled` conflicts with `overrides.enabled` — set one or the other", key)
+		}
+		if entry.Overrides == nil {
+			entry.Overrides = &Overrides{}
+		}
+		entry.Overrides.Enabled = entry.Enabled
+		entry.Enabled = nil
+	}
+	return nil
+}
+
 func validateTaskSet(ts *TaskSetSpec, path string) error {
 	if ts.Spec.Entries == nil {
 		return fmt.Errorf("%s: spec.entries is required", path)
@@ -100,20 +124,11 @@ func validateTaskSet(ts *TaskSetSpec, path string) error {
 		if entry.Ref != nil && entry.Ref.Path == "" {
 			return fmt.Errorf("%s: entry %q: ref.path is required", path, key)
 		}
-
-		// Lift the top-level `enabled` shortcut into overrides.enabled so all
-		// downstream code (resolver, override merging) sees one canonical
-		// path. Reject conflicts rather than picking a silent winner.
-		if entry.Enabled != nil {
-			if entry.Overrides != nil && entry.Overrides.Enabled != nil {
-				return fmt.Errorf("%s: entry %q: top-level `enabled` conflicts with `overrides.enabled` — set one or the other", path, key)
-			}
-			if entry.Overrides == nil {
-				entry.Overrides = &Overrides{}
-			}
-			entry.Overrides.Enabled = entry.Enabled
-			entry.Enabled = nil
-		}
+	}
+	// Lift the top-level `enabled` shortcut into overrides.enabled so all
+	// downstream code (resolver, override merging) sees one canonical path.
+	if err := LiftEntryEnabled(ts.Spec.Entries); err != nil {
+		return fmt.Errorf("%s: %w", path, err)
 	}
 	return nil
 }

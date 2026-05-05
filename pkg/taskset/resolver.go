@@ -150,11 +150,11 @@ func (r *Resolver) resolveBody(
 
 		// Determine enabled state.
 		// Precedence (highest wins): parentEntryOverride.Enabled >
-		// entry.Overrides.Enabled > entry.Enabled shortcut > default true.
+		// entry.Overrides.Enabled > default true.
+		// Note: the top-level `entry.Enabled` shortcut is always lifted into
+		// entry.Overrides.Enabled by LiftEntryEnabled during load/validate, so
+		// there is no need to check entry.Enabled here.
 		enabled := true
-		if entry.Enabled != nil {
-			enabled = *entry.Enabled
-		}
 		if entry.Overrides != nil && entry.Overrides.Enabled != nil {
 			enabled = *entry.Overrides.Enabled
 		}

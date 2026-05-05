@@ -405,6 +405,13 @@ func (cfg *Config) validate() error {
 			}
 		}
 	}
+	// Lift the top-level `enabled` shortcut into overrides.enabled so that all
+	// downstream code (resolver, override merging) sees one canonical path.
+	// The same lift is applied by validateTaskSet for TaskSet files — both call
+	// the shared helper to stay DRY.
+	if err := taskset.LiftEntryEnabled(cfg.Spec.Entries); err != nil {
+		return fmt.Errorf("spec.entries: %w", err)
+	}
 	if cfg.Relay.BrokerURL != "" {
 		u, err := url.Parse(cfg.Relay.BrokerURL)
 		if err != nil {
