@@ -21,6 +21,9 @@ type Ref struct {
 	Auth         RefAuth       `yaml:"auth,omitempty"`
 	// DevRef is substituted in place of this ref when dev mode is active.
 	DevRef *Ref `yaml:"dev_ref,omitempty"`
+	// Watch enables fsnotify on local refs. Nil means "unset — apply default true".
+	// Explicit `watch: false` opts out of live reload for this entry.
+	Watch *bool `yaml:"watch,omitempty"`
 }
 
 // RefAuth holds optional credentials for a git ref.
@@ -167,6 +170,9 @@ type Entry struct {
 	// Conflicts with `overrides.enabled` if both are set — the loader rejects
 	// that ambiguity rather than picking a winner. Default (omitted) is true.
 	Enabled *bool `yaml:"enabled,omitempty"`
+	// Tags are UI grouping labels for this entry. Used by the API and web UI to
+	// filter or group tasks by source membership.
+	Tags []string `yaml:"tags,omitempty"`
 }
 
 // TaskSetSpec is parsed from a yaml file with kind: TaskSet.
