@@ -86,9 +86,9 @@ class DcConfig extends LitElement {
     } catch(e) { this._srvStatus = 'Error: ' + e.message; }
   }
 
-  async _removeSource(idx) {
+  async _removeSource(name) {
     if (!confirm('Remove this source?')) return;
-    try { await del(`/api/settings/sources/${idx}`); this._load(); }
+    try { await del(`/api/settings/sources/${name}`); this._load(); }
     catch(e) { this._srcStatus = 'Error: ' + e.message; }
   }
 
@@ -207,7 +207,7 @@ class DcConfig extends LitElement {
                 <td><span class="badge badge-manual">${s.Type || s.type || ''}</span></td>
                 <td style="word-break:break-all">${s.Path || s.path || s.URL || s.url || ''}</td>
                 <td class="meta">${(s.Type || s.type) === 'git' ? `branch: ${s.Branch || s.branch || ''}` : `watch: ${s.Watch || s.watch || false}`}</td>
-                <td><button class="btn btn-sm" style="background:var(--red)" @click=${() => this._removeSource(i)}>Remove</button></td>
+                <td><button class="btn btn-sm" style="background:var(--red)" @click=${() => this._removeSource(s.name)}>Remove</button></td>
               </tr>`)}
           </tbody>
         </table>

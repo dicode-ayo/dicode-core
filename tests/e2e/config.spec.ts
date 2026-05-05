@@ -32,15 +32,29 @@ test.describe('Config API', () => {
     expect(server).not.toHaveProperty('secret');
   });
 
-  test('GET /api/config returns sources array including e2e-tests', async ({ request }) => {
+  test('GET /api/config exposes spec.entries including e2e-tests', async ({ request }) => {
     const res = await request.get('/api/config');
     expect(res.ok()).toBe(true);
     const cfg = await res.json() as Record<string, unknown>;
-    const sources = (cfg.Sources || cfg.sources) as Array<Record<string, unknown>>;
-    expect(Array.isArray(sources)).toBe(true);
-    const e2e = sources.find((s) => (s.Name || s.name) === 'e2e-tests');
+    const spec = (cfg.Spec || cfg.spec) as Record<string, unknown>;
+    expect(spec).toBeTruthy();
+    const entries = (spec.Entries || spec.entries) as Record<string, Record<string, unknown>>;
+    expect(entries).toBeTruthy();
+    const e2e = entries['e2e-tests'];
     expect(e2e).toBeTruthy();
-    expect(e2e!.Type || e2e!.type).toBe('local');
+    const ref = (e2e.Ref || e2e.ref) as Record<string, unknown>;
+    expect(ref).toBeTruthy();
+    expect(typeof (ref.Path || ref.path)).toBe('string');
+  });
+
+  test('GET /api/sources lists e2e-tests as a taskset source', async ({ request }) => {
+    const res = await request.get('/api/sources');
+    expect(res.ok()).toBe(true);
+    const sources = await res.json() as Array<Record<string, unknown>>;
+    expect(Array.isArray(sources)).toBe(true);
+    const e2e = sources.find((s) => (s.name || s.Name) === 'e2e-tests');
+    expect(e2e).toBeTruthy();
+    expect(e2e!.type || e2e!.Type).toBe('taskset');
   });
 
   test('GET /api/config/raw returns YAML content', async ({ request }) => {

@@ -71,18 +71,60 @@ func Run(ctx context.Context, configPath string, opts RunOptions) error {
 		}
 	}
 
-	// Make sure the local tasks directory exists; without this the
-	// daemon's source layer refuses to start on the generated config
-	// ("no such file or directory"). No-op when the user picked
+	// Scaffold the local tasks directory so the source loader can resolve
+	// the generated `local` entry on first boot. No-op when the user picked
 	// "skip" — an empty LocalTasksDir means no local source entry, so
 	// there's nothing to create.
 	if res.LocalTasksDir != "" {
-		if err := os.MkdirAll(res.LocalTasksDir, 0o755); err != nil {
-			return fmt.Errorf("create local tasks dir: %w", err)
+		if err := scaffoldLocalTaskSet(res.LocalTasksDir); err != nil {
+			return err
 		}
 	}
 
 	PrintSuccess(opts.Out, res, configPath)
+	return nil
+}
+
+// starterTaskSetYAML is dropped into a freshly-created local tasks dir on
+// first run. The empty entries map is intentional: the source resolver
+// requires `spec.entries` to be present (even if empty) and rejects a
+// missing file with a startup-blocking error. Users add their own entries
+// here as they create tasks.
+const starterTaskSetYAML = `apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: local
+spec:
+  # Add your tasks here. Each entry is keyed by the namespace segment
+  # under which the referenced task or taskset is registered.
+  # Example:
+  #   hello:
+  #     ref:
+  #       path: ./hello/task.yaml
+  entries: {}
+`
+
+// scaffoldLocalTaskSet creates dir (if missing) and writes a starter
+// taskset.yaml inside it (if missing). Without the starter file the
+// daemon's source loader would fail on "open <dir>/taskset.yaml: no such
+// file or directory" the first time it tries to resolve the local source,
+// blocking startup before the wizard's success banner has any meaning.
+//
+// Existing taskset.yaml files are left untouched so a returning user who
+// wiped only dicode.yaml does not lose their work.
+func scaffoldLocalTaskSet(dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create local tasks dir: %w", err)
+	}
+	tsPath := filepath.Join(dir, "taskset.yaml")
+	if _, err := os.Stat(tsPath); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("stat %s: %w", tsPath, err)
+	}
+	if err := os.WriteFile(tsPath, []byte(starterTaskSetYAML), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", tsPath, err)
+	}
 	return nil
 }
 

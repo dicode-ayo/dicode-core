@@ -30,13 +30,17 @@ server:
   port: 8080
   secret: ""
   tray: true
-sources:
-  - name: buildin
-    path: ${CONFIGDIR}/tasks/buildin/taskset.yaml
-    type: local
-  - name: auth
-    path: ${CONFIGDIR}/tasks/auth/taskset.yaml
-    type: local
-  - name: examples
-    path: ${CONFIGDIR}/tasks/examples/taskset.yaml
-    type: local
+spec:
+  entries:
+    buildin:
+      ref:
+        path: ${CONFIGDIR}/tasks/buildin/taskset.yaml
+        watch: true
+    auth:
+      ref:
+        path: ${CONFIGDIR}/tasks/auth/taskset.yaml
+        watch: true
+    examples:
+      ref:
+        path: ${CONFIGDIR}/tasks/examples/taskset.yaml
+        watch: true

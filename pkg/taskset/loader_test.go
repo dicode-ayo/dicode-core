@@ -3,6 +3,7 @@ package taskset
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -186,7 +187,94 @@ spec:
 	}
 }
 
+// TestLoadTaskSet_EntryRefMissingPath checks that:
+//   - a git ref (URL non-empty) with no path is valid — the source manager
+//     treats an empty path as "taskset.yaml at the repo root".
+//   - a local ref (URL empty) with no path is still rejected.
 func TestLoadTaskSet_EntryRefMissingPath(t *testing.T) {
+	dir := t.TempDir()
+
+	// Git ref with empty path — must succeed.
+	gitContent := `
+kind: TaskSet
+apiVersion: dicode/v1
+metadata:
+  name: x
+spec:
+  entries:
+    root-ref:
+      ref:
+        url: https://github.com/org/repo
+`
+	p := writeFile(t, dir, "ts_git.yaml", gitContent)
+	if _, err := LoadTaskSet(p); err != nil {
+		t.Errorf("git ref with empty path should be valid, got: %v", err)
+	}
+
+	// Local ref with empty path — must be rejected.
+	localContent := `
+kind: TaskSet
+apiVersion: dicode/v1
+metadata:
+  name: x
+spec:
+  entries:
+    bad:
+      ref: {}
+`
+	p2 := writeFile(t, dir, "ts_local.yaml", localContent)
+	_, err := LoadTaskSet(p2)
+	if err == nil {
+		t.Fatal("expected error for local ref missing path")
+	}
+	if !strings.Contains(err.Error(), "ref.path is required for local refs") {
+		t.Errorf("expected 'ref.path is required for local refs' in error, got: %v", err)
+	}
+}
+
+func TestLoadTaskSet_EntryEnabledShortcut(t *testing.T) {
+	dir := t.TempDir()
+	content := `
+kind: TaskSet
+apiVersion: dicode/v1
+metadata:
+  name: x
+spec:
+  entries:
+    on-task:
+      enabled: true
+      inline:
+        name: a
+        runtime: deno
+        trigger: { manual: true }
+        timeout: 5s
+    off-task:
+      enabled: false
+      inline:
+        name: b
+        runtime: deno
+        trigger: { manual: true }
+        timeout: 5s
+`
+	p := writeFile(t, dir, "ts.yaml", content)
+	ts, err := LoadTaskSet(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	on := ts.Spec.Entries["on-task"]
+	if on.Enabled != nil {
+		t.Errorf("on-task: Enabled should be lifted to Overrides.Enabled, got top-level set")
+	}
+	if on.Overrides == nil || on.Overrides.Enabled == nil || *on.Overrides.Enabled != true {
+		t.Errorf("on-task: expected overrides.enabled=true after lift, got %+v", on.Overrides)
+	}
+	off := ts.Spec.Entries["off-task"]
+	if off.Overrides == nil || off.Overrides.Enabled == nil || *off.Overrides.Enabled != false {
+		t.Errorf("off-task: expected overrides.enabled=false after lift, got %+v", off.Overrides)
+	}
+}
+
+func TestLoadTaskSet_EntryEnabledConflict(t *testing.T) {
 	dir := t.TempDir()
 	content := `
 kind: TaskSet
@@ -196,13 +284,72 @@ metadata:
 spec:
   entries:
     bad:
-      ref:
-        url: https://github.com/org/repo
+      enabled: false
+      overrides:
+        enabled: true
+      inline:
+        name: a
+        runtime: deno
+        trigger: { manual: true }
+        timeout: 5s
 `
 	p := writeFile(t, dir, "ts.yaml", content)
 	_, err := LoadTaskSet(p)
 	if err == nil {
-		t.Fatal("expected error for ref missing path")
+		t.Fatal("expected conflict error when both top-level enabled and overrides.enabled are set")
+	}
+	if !strings.Contains(err.Error(), "conflicts with `overrides.enabled`") {
+		t.Errorf("expected conflict error, got: %v", err)
+	}
+}
+
+func TestLoadTaskSet_RefURLSchemes(t *testing.T) {
+	dir := t.TempDir()
+
+	mkYAML := func(u string) string {
+		return `
+kind: TaskSet
+apiVersion: dicode/v1
+metadata:
+  name: x
+spec:
+  entries:
+    entry:
+      ref:
+        url: ` + u + `
+`
+	}
+
+	allowed := []string{
+		"https://github.com/org/repo",
+		"http://internal.corp/tasks",
+		"ssh://git@github.com/org/repo.git",
+		"git://github.com/org/repo.git",
+		"git@github.com:org/repo.git",       // SSH shorthand
+		"git@gitlab.com:group/subgroup.git", // SSH shorthand with subgroup
+	}
+	for _, u := range allowed {
+		t.Run("allowed:"+u, func(t *testing.T) {
+			p := writeFile(t, dir, "ts_allowed.yaml", mkYAML(u))
+			if _, err := LoadTaskSet(p); err != nil {
+				t.Errorf("expected %q to be allowed, got error: %v", u, err)
+			}
+		})
+	}
+
+	rejected := []string{
+		"file:///etc/passwd",
+		"file://localhost/tmp/tasks",
+		"/tmp/local-path",
+	}
+	for _, u := range rejected {
+		t.Run("rejected:"+u, func(t *testing.T) {
+			p := writeFile(t, dir, "ts_rejected.yaml", mkYAML(u))
+			_, err := LoadTaskSet(p)
+			if err == nil {
+				t.Errorf("expected %q to be rejected, got nil error", u)
+			}
+		})
 	}
 }
 

@@ -1,8 +1,8 @@
 package onboarding
 
 // TaskSetPreset describes one curated git-backed taskset that the first-run
-// wizard offers. Each preset maps to a single entry under `sources:` in the
-// generated dicode.yaml.
+// wizard offers. Each preset maps to a single entry under `spec.entries` in
+// the generated dicode.yaml.
 type TaskSetPreset struct {
 	Name      string // unique namespace segment; used as the source's `name`
 	Label     string // shown in the UI

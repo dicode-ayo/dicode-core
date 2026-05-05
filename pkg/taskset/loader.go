@@ -2,7 +2,9 @@ package taskset
 
 import (
 	"fmt"
+	"net/url"
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -83,6 +85,67 @@ func LoadConfig(path string) (*ConfigSpec, error) {
 	return &cs, nil
 }
 
+// LiftEntryEnabled normalises the top-level `enabled` shortcut on every entry
+// in the provided map. After the call each entry.Enabled is nil and the value
+// lives exclusively in entry.Overrides.Enabled. If both are set on the same
+// entry an error is returned so callers never silently pick a winner.
+//
+// This is extracted as a package-level helper so that both validateTaskSet and
+// pkg/config's validate() can call it without duplicating the logic.
+func LiftEntryEnabled(entries map[string]*Entry) error {
+	for key, entry := range entries {
+		if entry == nil || entry.Enabled == nil {
+			continue
+		}
+		if entry.Overrides != nil && entry.Overrides.Enabled != nil {
+			return fmt.Errorf("entry %q: top-level `enabled` conflicts with `overrides.enabled` — set one or the other", key)
+		}
+		if entry.Overrides == nil {
+			entry.Overrides = &Overrides{}
+		}
+		entry.Overrides.Enabled = entry.Enabled
+		entry.Enabled = nil
+	}
+	return nil
+}
+
+// ValidateRefURL validates the scheme of a git ref URL.
+// It accepts http, https, ssh, and git schemes, plus the SSH shorthand
+// form (git@host:path) which url.Parse would misparse as a relative URL
+// with scheme "". The SSH shorthand is detected by the SCP-style
+// user@host:path pattern: the URL must contain no "://" (which would mean
+// it already has an explicit scheme), and the colon separating host from
+// path must follow the "@".
+func ValidateRefURL(filePath, key, rawURL string) error {
+	// Detect the SCP-style SSH shorthand: user@host:path (e.g. git@github.com:org/repo.git).
+	// These look like relative paths to url.Parse (Scheme=""), so we handle them
+	// explicitly before calling url.Parse.
+	// Guard: skip if the URL already has an explicit scheme (contains "://").
+	if !strings.Contains(rawURL, "://") {
+		if at := strings.Index(rawURL, "@"); at > 0 {
+			afterAt := rawURL[at+1:]
+			if colon := strings.Index(afterAt, ":"); colon > 0 {
+				// Ensure no "/" before the ":" — a slash means it's a path
+				// separator, not the SCP host:path separator.
+				hostPart := afterAt[:colon]
+				if !strings.Contains(hostPart, "/") {
+					return nil // valid SSH shorthand
+				}
+			}
+		}
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("%s: entry %q: invalid ref.url: %w", filePath, key, err)
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http", "https", "ssh", "git":
+		return nil
+	default:
+		return fmt.Errorf("%s: entry %q: ref.url must use scheme http, https, ssh, or git (got %q)", filePath, key, u.Scheme)
+	}
+}
+
 func validateTaskSet(ts *TaskSetSpec, path string) error {
 	if ts.Spec.Entries == nil {
 		return fmt.Errorf("%s: spec.entries is required", path)
@@ -97,9 +160,19 @@ func validateTaskSet(ts *TaskSetSpec, path string) error {
 		if entry.Ref != nil && entry.Inline != nil {
 			return fmt.Errorf("%s: entry %q: ref and inline are mutually exclusive", path, key)
 		}
-		if entry.Ref != nil && entry.Ref.Path == "" {
-			return fmt.Errorf("%s: entry %q: ref.path is required", path, key)
+		if entry.Ref != nil && entry.Ref.URL == "" && entry.Ref.Path == "" {
+			return fmt.Errorf("%s: entry %q: ref.path is required for local refs", path, key)
 		}
+		if entry.Ref != nil && entry.Ref.URL != "" {
+			if err := ValidateRefURL(path, key, entry.Ref.URL); err != nil {
+				return err
+			}
+		}
+	}
+	// Lift the top-level `enabled` shortcut into overrides.enabled so all
+	// downstream code (resolver, override merging) sees one canonical path.
+	if err := LiftEntryEnabled(ts.Spec.Entries); err != nil {
+		return fmt.Errorf("%s: %w", path, err)
 	}
 	return nil
 }

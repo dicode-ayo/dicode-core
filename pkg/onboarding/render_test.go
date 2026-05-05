@@ -6,16 +6,22 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// renderedEntry captures one spec.entries entry from the generated YAML.
+type renderedEntry struct {
+	Ref struct {
+		URL    string `yaml:"url"`
+		Branch string `yaml:"branch"`
+		Path   string `yaml:"path"`
+	} `yaml:"ref"`
+}
+
 // renderedConfig captures just the pieces of the generated YAML we assert on.
+// The new shape uses spec.entries (a map keyed by source name) instead of the
+// old sources[] array.
 type renderedConfig struct {
-	Sources []struct {
-		Type      string `yaml:"type"`
-		Name      string `yaml:"name"`
-		URL       string `yaml:"url"`
-		Branch    string `yaml:"branch"`
-		EntryPath string `yaml:"entry_path"`
-		Path      string `yaml:"path"`
-	} `yaml:"sources"`
+	Spec struct {
+		Entries map[string]renderedEntry `yaml:"entries"`
+	} `yaml:"spec"`
 	Server struct {
 		Auth   bool   `yaml:"auth"`
 		Secret string `yaml:"secret"`
@@ -51,13 +57,13 @@ func TestRenderConfig_AllTasksetsEnabled_ThreeGitSources(t *testing.T) {
 	rc := parseRendered(t, RenderConfig(r))
 
 	gitCount := 0
-	for _, s := range rc.Sources {
-		if s.Type == "git" {
+	for _, e := range rc.Spec.Entries {
+		if e.Ref.URL != "" {
 			gitCount++
 		}
 	}
 	if gitCount != 3 {
-		t.Errorf("git sources = %d; want 3", gitCount)
+		t.Errorf("git entries = %d; want 3", gitCount)
 	}
 }
 
@@ -72,16 +78,16 @@ func TestRenderConfig_AllTasksetsEnabled_IncludesLocalSource(t *testing.T) {
 	rc := parseRendered(t, RenderConfig(r))
 
 	localCount := 0
-	for _, s := range rc.Sources {
-		if s.Type == "local" {
+	for _, e := range rc.Spec.Entries {
+		if e.Ref.URL == "" && e.Ref.Path != "" {
 			localCount++
-			if s.Path != "/home/user/dicode-tasks" {
-				t.Errorf("local path = %q; want /home/user/dicode-tasks", s.Path)
+			if e.Ref.Path != "/home/user/dicode-tasks" {
+				t.Errorf("local path = %q; want /home/user/dicode-tasks", e.Ref.Path)
 			}
 		}
 	}
 	if localCount != 1 {
-		t.Errorf("local sources = %d; want 1", localCount)
+		t.Errorf("local entries = %d; want 1", localCount)
 	}
 }
 
@@ -116,13 +122,13 @@ func TestRenderConfig_PartialSelection_DropsUnselected(t *testing.T) {
 	rc := parseRendered(t, RenderConfig(r))
 
 	var gitNames []string
-	for _, s := range rc.Sources {
-		if s.Type == "git" {
-			gitNames = append(gitNames, s.Name)
+	for name, e := range rc.Spec.Entries {
+		if e.Ref.URL != "" {
+			gitNames = append(gitNames, name)
 		}
 	}
 	if len(gitNames) != 1 || gitNames[0] != "buildin" {
-		t.Errorf("git source names = %v; want [buildin]", gitNames)
+		t.Errorf("git entry names = %v; want [buildin]", gitNames)
 	}
 }
 
@@ -136,9 +142,9 @@ func TestRenderConfig_EmptyLocalTasksDir_OmitsLocalSource(t *testing.T) {
 	}
 	rc := parseRendered(t, RenderConfig(r))
 
-	for _, s := range rc.Sources {
-		if s.Type == "local" {
-			t.Errorf("unexpected local source %+v when LocalTasksDir is empty", s)
+	for name, e := range rc.Spec.Entries {
+		if e.Ref.URL == "" && e.Ref.Path != "" {
+			t.Errorf("unexpected local entry %q when LocalTasksDir is empty", name)
 		}
 	}
 }
@@ -152,33 +158,24 @@ func TestRenderConfig_GitSourceFieldsMatchPreset(t *testing.T) {
 	}
 	rc := parseRendered(t, RenderConfig(r))
 
-	var found bool
-	for _, s := range rc.Sources {
-		if s.Type != "git" {
-			continue
-		}
-		found = true
-		var preset TaskSetPreset
-		for _, p := range TaskSetPresets {
-			if p.Name == "buildin" {
-				preset = p
-				break
-			}
-		}
-		if s.Name != preset.Name {
-			t.Errorf("name = %q; want %q", s.Name, preset.Name)
-		}
-		if s.URL != preset.URL {
-			t.Errorf("url = %q; want %q", s.URL, preset.URL)
-		}
-		if s.Branch != preset.Branch {
-			t.Errorf("branch = %q; want %q", s.Branch, preset.Branch)
-		}
-		if s.EntryPath != preset.EntryPath {
-			t.Errorf("entry_path = %q; want %q", s.EntryPath, preset.EntryPath)
+	e, found := rc.Spec.Entries["buildin"]
+	if !found {
+		t.Fatal("buildin entry not found in spec.entries")
+	}
+	var preset TaskSetPreset
+	for _, p := range TaskSetPresets {
+		if p.Name == "buildin" {
+			preset = p
+			break
 		}
 	}
-	if !found {
-		t.Error("no git source found in output")
+	if e.Ref.URL != preset.URL {
+		t.Errorf("url = %q; want %q", e.Ref.URL, preset.URL)
+	}
+	if e.Ref.Branch != preset.Branch {
+		t.Errorf("branch = %q; want %q", e.Ref.Branch, preset.Branch)
+	}
+	if e.Ref.Path != preset.EntryPath {
+		t.Errorf("path = %q; want %q", e.Ref.Path, preset.EntryPath)
 	}
 }

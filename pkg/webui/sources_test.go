@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/dicode/dicode/pkg/config"
+	"github.com/dicode/dicode/pkg/taskset"
 	"go.uber.org/zap"
 )
 
@@ -20,10 +21,10 @@ import (
 // `omitempty` emits `"0001-01-01T00:00:00Z"`, which is truthy in JS.
 // Using a *time.Time pointer fixes it.
 func TestSourceManager_List_LocalSource_NoPullFieldsInJSON(t *testing.T) {
-	cfg := &config.Config{
-		Sources: []config.SourceConfig{
-			{Type: config.SourceTypeLocal, Path: "/tmp/tasks"},
-		},
+	watchTrue := true
+	cfg := &config.Config{}
+	cfg.Spec.Entries = map[string]*taskset.Entry{
+		"tasks": {Ref: &taskset.Ref{Path: "/tmp/tasks", Watch: &watchTrue}},
 	}
 	m := NewSourceManager(cfg, nil, t.TempDir(), zap.NewNop())
 

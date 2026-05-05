@@ -14,8 +14,9 @@ server:
   auth: true
   secret: test-passphrase-12345
   mcp: false
-sources:
-  - name: e2e-tests
-    type: local
-    path: TEMP_TASKSET_PATH
-    watch: true
+spec:
+  entries:
+    e2e-tests:
+      ref:
+        path: TEMP_TASKSET_PATH
+        watch: true

@@ -33,10 +33,13 @@ func TestRun_Silent_WritesParseableYAML(t *testing.T) {
 	}
 
 	var parsed struct {
-		Sources []struct {
-			Type string `yaml:"type"`
-			Name string `yaml:"name"`
-		} `yaml:"sources"`
+		Spec struct {
+			Entries map[string]struct {
+				Ref struct {
+					URL string `yaml:"url"`
+				} `yaml:"ref"`
+			} `yaml:"entries"`
+		} `yaml:"spec"`
 		Server struct {
 			Auth   bool   `yaml:"auth"`
 			Secret string `yaml:"secret"`
@@ -47,15 +50,15 @@ func TestRun_Silent_WritesParseableYAML(t *testing.T) {
 	}
 
 	// Silent default enables all three presets.
-	gitNames := map[string]bool{}
-	for _, s := range parsed.Sources {
-		if s.Type == "git" {
-			gitNames[s.Name] = true
-		}
-	}
+	// Each preset becomes a git entry (URL non-empty) keyed by its name.
 	for _, p := range TaskSetPresets {
-		if !gitNames[p.Name] {
-			t.Errorf("silent default missing preset %q", p.Name)
+		e, ok := parsed.Spec.Entries[p.Name]
+		if !ok {
+			t.Errorf("silent default missing preset entry %q", p.Name)
+			continue
+		}
+		if e.Ref.URL == "" {
+			t.Errorf("silent default entry %q has empty ref.url", p.Name)
 		}
 	}
 	if !parsed.Server.Auth {

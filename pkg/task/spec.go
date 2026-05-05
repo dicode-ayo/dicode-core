@@ -355,6 +355,14 @@ type Spec struct {
 	// Independent of RunInputs (which controls persistence). Used by #238.
 	AutoFix *AutoFixConfig `yaml:"auto_fix,omitempty" json:"auto_fix,omitempty"`
 
+	// Enabled is false when this task has been disabled via an override or
+	// entry-level `enabled: false`. Disabled tasks remain in the registry and
+	// appear in the API (with enabled:false) but are not scheduled, spawned,
+	// or registered as webhooks by the trigger engine.
+	// Default is true; the resolver sets it to true on load and flips it
+	// when an override says false.
+	Enabled bool `yaml:"-" json:"enabled"`
+
 	// TaskDir is the directory path of the task in the repo (not stored in YAML).
 	TaskDir string `yaml:"-" json:"-"`
 	// ID is derived from the directory name (not stored in YAML).
@@ -424,6 +432,9 @@ func LoadDirWithVars(dir string, extras map[string]string) (*Spec, error) {
 
 	spec.TaskDir = dir
 	spec.ID = filepath.Base(dir)
+	// Default Enabled to true; the taskset resolver may flip it to false if
+	// an override or entry-level `enabled: false` is in effect.
+	spec.Enabled = true
 
 	// Expand ${VAR} template references in paths, secrets, and env indirection
 	// keys. Kept intentionally narrow — see expandSpec for the allowlist and

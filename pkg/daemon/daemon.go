@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
-	"strings"
 	"sync"
 	"syscall"
 
@@ -29,8 +28,6 @@ import (
 	pythonruntime "github.com/dicode/dicode/pkg/runtime/python"
 	"github.com/dicode/dicode/pkg/secrets"
 	"github.com/dicode/dicode/pkg/source"
-	gitSource "github.com/dicode/dicode/pkg/source/git"
-	"github.com/dicode/dicode/pkg/source/local"
 	"github.com/dicode/dicode/pkg/task"
 	"github.com/dicode/dicode/pkg/taskset"
 	"github.com/dicode/dicode/pkg/trigger"
@@ -554,97 +551,31 @@ func buildSources(cfg *config.Config, dataDir string, log *zap.Logger) ([]source
 	tasksetSources := make(map[string]*taskset.Source)
 	var sources []source.Source
 
-	for _, sc := range cfg.Sources {
-		if sc.Name != "" || sc.EntryPath != "" {
-			ts, err := buildTaskSetSource(sc, dataDir, log)
-			if err != nil {
-				return nil, nil, err
-			}
-			sources = append(sources, ts)
-			tasksetSources[sourceNameFor(sc)] = ts
+	// Each entry in cfg.Spec.Entries is a named source. The entry key is the
+	// namespace; entry.Ref is the source descriptor (local path or git URL).
+	for name, entry := range cfg.Spec.Entries {
+		if entry == nil || entry.Ref == nil {
 			continue
 		}
-		switch sc.Type {
-		case config.SourceTypeLocal:
-			// Watch is a *bool pointer after #177; applyDefaults guarantees
-			// it's non-nil here, but treat nil as "watch enabled" defensively.
-			watchEnabled := sc.Watch == nil || *sc.Watch
-			s, err := local.New(sc.Path, sc.Path, watchEnabled, log)
-			if err != nil {
-				return nil, nil, fmt.Errorf("local source %q: %w", sc.Path, err)
-			}
-			sources = append(sources, s)
-		case config.SourceTypeGit:
-			gs, err := gitSource.New(dataDir, sc.URL, sc.Branch, sc.PollInterval, sc.Auth.TokenEnv, sc.Auth.SSHKey, log)
-			if err != nil {
-				return nil, nil, fmt.Errorf("git source %q: %w", sc.URL, err)
-			}
-			sources = append(sources, gs)
-		default:
-			return nil, nil, fmt.Errorf("unknown source type %q", sc.Type)
-		}
+		ref := entry.Ref
+		ts := buildTaskSetSourceFromEntry(name, ref, dataDir, log)
+		sources = append(sources, ts)
+		tasksetSources[name] = ts
 	}
 
 	sourceMgr := webui.NewSourceManager(cfg, tasksetSources, dataDir, log)
 	return sources, sourceMgr, nil
 }
 
-func sourceNameFor(sc config.SourceConfig) string {
-	if sc.Name != "" {
-		return sc.Name
-	}
-	base := sc.URL
-	if base == "" {
-		base = sc.Path
-	}
-	base = strings.TrimRight(base, "/")
-	name := filepath.Base(base)
-	if ext := filepath.Ext(name); ext == ".yaml" || ext == ".yml" {
-		name = strings.TrimSuffix(name, ext)
-	}
-	return name
-}
-
-func buildTaskSetSource(sc config.SourceConfig, dataDir string, log *zap.Logger) (*taskset.Source, error) {
-	namespace := sc.Name
-	if namespace == "" {
-		base := sc.URL
-		if base == "" {
-			base = sc.Path
-		}
-		base = strings.TrimRight(base, "/")
-		namespace = filepath.Base(base)
-		if ext := filepath.Ext(namespace); ext == ".yaml" || ext == ".yml" {
-			namespace = strings.TrimSuffix(namespace, ext)
-		}
-	}
-
-	var rootRef *taskset.Ref
-	if sc.URL != "" {
-		entryPath := sc.EntryPath
-		if entryPath == "" {
-			entryPath = "taskset.yaml"
-		}
-		rootRef = &taskset.Ref{
-			URL:          sc.URL,
-			Branch:       sc.Branch,
-			Path:         entryPath,
-			PollInterval: sc.PollInterval,
-			Auth:         taskset.RefAuth{TokenEnv: sc.Auth.TokenEnv, SSHKey: sc.Auth.SSHKey},
-		}
-	} else {
-		entryPath := sc.Path
-		if sc.EntryPath != "" {
-			entryPath = sc.EntryPath
-		}
-		rootRef = &taskset.Ref{Path: entryPath}
-	}
-
-	id := sc.URL
+func buildTaskSetSourceFromEntry(name string, ref *taskset.Ref, dataDir string, log *zap.Logger) *taskset.Source {
+	// The entry key is the namespace. The ref points at the taskset.yaml.
+	// applyDefaults has already expanded ${VAR} and set branch/poll defaults.
+	id := ref.URL
 	if id == "" {
-		id = sc.Path
+		id = ref.Path
 	}
-	return taskset.NewSource(id, namespace, rootRef, sc.ConfigPath, dataDir, false, sc.PollInterval, log), nil
+	var pollInterval = ref.PollInterval
+	return taskset.NewSource(id, name, ref, "", dataDir, false, pollInterval, log)
 }
 
 func buildLogger(level string, broadcast *webui.LogBroadcaster) (*zap.Logger, error) {

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/dicode/dicode/pkg/config"
+	"github.com/dicode/dicode/pkg/taskset"
 )
 
 // TestRenderConfig_LoadsCleanly writes the first-run output through the
@@ -36,8 +37,8 @@ func TestRenderConfig_LoadsCleanly(t *testing.T) {
 		t.Errorf("AI.Task = %q, want %q (default should land)", cfg.AI.Task, "buildin/dicodai")
 	}
 
-	if len(cfg.Sources) == 0 {
-		t.Error("sources should not be empty")
+	if len(cfg.Spec.Entries) == 0 {
+		t.Error("spec.entries should not be empty")
 	}
 	if cfg.Database.Type != "sqlite" {
 		t.Errorf("Database.Type = %q, want sqlite", cfg.Database.Type)
@@ -75,6 +76,61 @@ func TestDefaultResult_HonorsDataDirEnv(t *testing.T) {
 			t.Errorf("DataDir = %q, want %q (home fallback)", r.DataDir, want)
 		}
 	})
+}
+
+// TestScaffoldLocalTaskSet_CreatesParseableStarter writes the starter
+// taskset.yaml into a fresh dir and verifies it loads through the real
+// taskset.LoadTaskSet path. Without this guard, drift between the starter
+// template and the loader's validation rules would show up as a startup
+// failure on every fresh install.
+func TestScaffoldLocalTaskSet_CreatesParseableStarter(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "tasks")
+	if err := scaffoldLocalTaskSet(dir); err != nil {
+		t.Fatalf("scaffoldLocalTaskSet: %v", err)
+	}
+
+	tsPath := filepath.Join(dir, "taskset.yaml")
+	if _, err := os.Stat(tsPath); err != nil {
+		t.Fatalf("starter taskset.yaml not created: %v", err)
+	}
+
+	ts, err := taskset.LoadTaskSet(tsPath)
+	if err != nil {
+		t.Fatalf("LoadTaskSet on starter: %v", err)
+	}
+	if ts.Spec.Entries == nil {
+		t.Error("starter spec.entries should be a non-nil empty map")
+	}
+	if len(ts.Spec.Entries) != 0 {
+		t.Errorf("starter spec.entries should be empty, got %d", len(ts.Spec.Entries))
+	}
+}
+
+// TestScaffoldLocalTaskSet_DoesNotClobberExisting protects user data on a
+// re-run: if a returning user wipes dicode.yaml but keeps their tasks dir,
+// re-running onboarding must NOT overwrite their existing taskset.yaml.
+func TestScaffoldLocalTaskSet_DoesNotClobberExisting(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "tasks")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	tsPath := filepath.Join(dir, "taskset.yaml")
+	const userContent = "kind: TaskSet\napiVersion: dicode/v1\nmetadata:\n  name: mine\nspec:\n  entries:\n    foo:\n      ref:\n        path: ./foo/task.yaml\n"
+	if err := os.WriteFile(tsPath, []byte(userContent), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	if err := scaffoldLocalTaskSet(dir); err != nil {
+		t.Fatalf("scaffoldLocalTaskSet: %v", err)
+	}
+
+	got, err := os.ReadFile(tsPath)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(got) != userContent {
+		t.Errorf("starter overwrote user content; got:\n%s\nwant:\n%s", got, userContent)
+	}
 }
 
 // TestWriteConfig_FileAndParentArePrivate guards the dashboard

@@ -21,6 +21,7 @@ import (
 	denoruntime "github.com/dicode/dicode/pkg/runtime/deno"
 	"github.com/dicode/dicode/pkg/secrets"
 	"github.com/dicode/dicode/pkg/task"
+	"github.com/dicode/dicode/pkg/taskset"
 	"github.com/dicode/dicode/pkg/trigger"
 	"go.uber.org/zap"
 )
@@ -61,6 +62,7 @@ func registerTask(t *testing.T, reg *registry.Registry, id, script string) *task
 		Trigger: task.TriggerConfig{Manual: true},
 		Timeout: 5 * time.Second,
 		TaskDir: td,
+		Enabled: true,
 	}
 	_ = reg.Register(spec)
 	return spec
@@ -1005,4 +1007,188 @@ func containsStr(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// ── Item 8: API visibility of disabled tasks ──────────────────────────────────
+
+// TestAPI_ListTasks_DisabledTaskVisible verifies that a task with Enabled=false
+// appears in the GET /api/tasks response with "enabled":false. Disabled tasks
+// must remain visible in the API so operators can see what they've turned off.
+func TestAPI_ListTasks_DisabledTaskVisible(t *testing.T) {
+	srv, reg := newTestServer(t)
+
+	// Register one enabled and one disabled task.
+	_ = registerTask(t, reg, "enabled-task", `return 1`)
+	disabledSpec := registerTask(t, reg, "disabled-task", `return 1`)
+	disabledSpec.Enabled = false
+	// Re-register with Enabled=false so the registry holds the updated spec.
+	_ = reg.Register(disabledSpec)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var tasks []map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&tasks); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(tasks) != 2 {
+		t.Errorf("expected 2 tasks (enabled + disabled), got %d", len(tasks))
+	}
+
+	// Find the disabled task and assert enabled=false in the JSON.
+	var foundDisabled bool
+	for _, task := range tasks {
+		if task["id"] == "disabled-task" {
+			foundDisabled = true
+			enabled, ok := task["enabled"]
+			if !ok {
+				t.Error("disabled task: 'enabled' field missing from JSON")
+			} else if enabledBool, _ := enabled.(bool); enabledBool {
+				t.Errorf("disabled task: expected enabled=false, got enabled=true")
+			}
+		}
+	}
+	if !foundDisabled {
+		t.Error("disabled-task not found in /api/tasks response")
+	}
+}
+
+// TestAPI_GetTask_DisabledTaskVisible verifies that GET /api/tasks/{id} returns
+// a disabled task with "enabled":false in the response.
+func TestAPI_GetTask_DisabledTaskVisible(t *testing.T) {
+	srv, reg := newTestServer(t)
+
+	spec := registerTask(t, reg, "off-task", `return 1`)
+	spec.Enabled = false
+	_ = reg.Register(spec)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/off-task", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body)
+	}
+	var detail map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&detail); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	enabled, ok := detail["enabled"]
+	if !ok {
+		t.Error("'enabled' field missing from /api/tasks/{id} response")
+	} else if enabledBool, _ := enabled.(bool); enabledBool {
+		t.Errorf("expected enabled=false for disabled task, got enabled=true")
+	}
+}
+
+// TestPersistConfig_OverridesAndTagsSurviveRoundTrip is a regression guard for
+// Fix 2 of PR #262: persistConfig previously serialised only the `ref` block,
+// silently dropping `overrides` and `tags` on every web-UI save.
+func TestPersistConfig_OverridesAndTagsSurviveRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "dicode.yaml")
+
+	// Write a minimal dicode.yaml to disk so persistConfig has a file to round-trip.
+	initial := "log_level: info\nspec:\n  entries: {}\n"
+	if err := os.WriteFile(cfgPath, []byte(initial), 0600); err != nil {
+		t.Fatalf("write initial cfg: %v", err)
+	}
+
+	enabled := false
+	cfg := &config.Config{
+		LogLevel: "info",
+	}
+	cfg.Spec.Entries = map[string]*taskset.Entry{
+		"myrepo": {
+			Ref: &taskset.Ref{Path: "/tmp/myrepo"},
+			Overrides: &taskset.Overrides{
+				Enabled: &enabled,
+				Name:    "My Repo Override",
+			},
+			Tags: []string{"team-a", "backend"},
+		},
+	}
+
+	d, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("db: %v", err)
+	}
+	defer d.Close()
+
+	rt, err := denoruntime.New(registry.New(d), secrets.Chain{}, d, zap.NewNop())
+	if err != nil {
+		t.Skipf("deno not available: %v", err)
+	}
+	reg := registry.New(d)
+	eng := trigger.New(reg, rt, zap.NewNop())
+
+	srv, err := New(8080, reg, eng, cfg, cfgPath, nil, nil, nil, dir, NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := srv.persistConfig(); err != nil {
+		t.Fatalf("persistConfig: %v", err)
+	}
+
+	// Re-load the written YAML and verify overrides + tags are present.
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	content := string(raw)
+	if !strings.Contains(content, "overrides:") {
+		t.Errorf("persisted YAML missing 'overrides:' block; got:\n%s", content)
+	}
+	if !strings.Contains(content, "My Repo Override") {
+		t.Errorf("persisted YAML missing override name value; got:\n%s", content)
+	}
+	if !strings.Contains(content, "tags:") {
+		t.Errorf("persisted YAML missing 'tags:' block; got:\n%s", content)
+	}
+	if !strings.Contains(content, "team-a") {
+		t.Errorf("persisted YAML missing tag 'team-a'; got:\n%s", content)
+	}
+	if !strings.Contains(content, "backend") {
+		t.Errorf("persisted YAML missing tag 'backend'; got:\n%s", content)
+	}
+
+	// Full re-parse: load the persisted file via config.Load() and assert that
+	// the parsed struct carries the original overrides and tags — not just raw
+	// bytes. This exercises the persist → YAML → parse round-trip end to end.
+	reloaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("config.Load after persist: %v", err)
+	}
+	reloadedEntry := reloaded.Spec.Entries["myrepo"]
+	if reloadedEntry == nil {
+		t.Fatal("reloaded config: spec.entries[myrepo] missing")
+	}
+	if reloadedEntry.Overrides == nil {
+		t.Fatal("reloaded config: spec.entries[myrepo].overrides is nil")
+	}
+	if reloadedEntry.Overrides.Enabled == nil || *reloadedEntry.Overrides.Enabled != false {
+		t.Errorf("reloaded config: overrides.enabled: got %v, want false", reloadedEntry.Overrides.Enabled)
+	}
+	if reloadedEntry.Overrides.Name != "My Repo Override" {
+		t.Errorf("reloaded config: overrides.name: got %q, want %q", reloadedEntry.Overrides.Name, "My Repo Override")
+	}
+	wantTags := []string{"team-a", "backend"}
+	if len(reloadedEntry.Tags) != len(wantTags) {
+		t.Errorf("reloaded config: tags: got %v, want %v", reloadedEntry.Tags, wantTags)
+	} else {
+		tagSet := make(map[string]bool, len(reloadedEntry.Tags))
+		for _, tag := range reloadedEntry.Tags {
+			tagSet[tag] = true
+		}
+		for _, want := range wantTags {
+			if !tagSet[want] {
+				t.Errorf("reloaded config: tags: missing %q in %v", want, reloadedEntry.Tags)
+			}
+		}
+	}
 }

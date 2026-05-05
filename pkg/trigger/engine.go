@@ -323,6 +323,16 @@ func (e *Engine) Start(ctx context.Context) error {
 func (e *Engine) Register(spec *task.Spec) {
 	e.Unregister(spec.ID)
 
+	// Disabled tasks are kept in the registry for API visibility but must not
+	// be scheduled, spawned as daemons, or registered as webhook endpoints.
+	if !spec.Enabled {
+		e.log.Info("task registered (disabled — no triggers scheduled)",
+			zap.String("task", spec.ID),
+			zap.String("runtime", string(spec.Runtime)),
+		)
+		return
+	}
+
 	if spec.Trigger.Cron != "" {
 		e.registerCron(spec)
 	}

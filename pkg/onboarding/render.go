@@ -17,9 +17,9 @@ type Result struct {
 }
 
 // RenderConfig generates a dicode.yaml document from the wizard's Result.
-// The output includes a commented header, the selected git sources, an
-// optional local source, and server.auth + server.secret filled from the
-// generated passphrase.
+// The output uses the new spec.entries shape: each source is an entry under
+// spec.entries keyed by its name. The local tasks dir (if set) appears as a
+// "local" entry pointing at the user's tasks directory.
 func RenderConfig(r Result) string {
 	var b strings.Builder
 
@@ -32,28 +32,31 @@ func RenderConfig(r Result) string {
 #   ${DATADIR}   — resolved data_dir (default: ~/.dicode)
 
 # ---------------------------------------------------------------------------
-# Task sources — where dicode looks for tasks.
+# Task sources — declared as spec.entries. Each entry key is the namespace
+# for the tasks it contains. The ref block points at a taskset.yaml.
 # ---------------------------------------------------------------------------
-sources:
+spec:
+  entries:
 `)
 
 	for _, p := range TaskSetPresets {
 		if !r.TaskSetsEnabled[p.Name] {
 			continue
 		}
-		fmt.Fprintf(&b, `  - type: git
-    name: %s
-    url: %s
-    branch: %s
-    entry_path: %s
-    poll_interval: 30s
+		fmt.Fprintf(&b, `    %s:
+      ref:
+        url: %s
+        branch: %s
+        path: %s
+        poll_interval: 30s
 `, p.Name, p.URL, p.Branch, p.EntryPath)
 	}
 
 	if r.LocalTasksDir != "" {
-		fmt.Fprintf(&b, `  - type: local
-    path: %s
-    watch: true
+		fmt.Fprintf(&b, `    local:
+      ref:
+        path: %s
+        watch: true
 `, r.LocalTasksDir)
 	}
 
