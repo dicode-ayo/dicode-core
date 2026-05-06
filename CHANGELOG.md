@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.1.1](https://github.com/dicode-ayo/dicode-core/compare/v0.1.0...v0.1.1) (2026-05-06)
+
+
+### Features
+
+* **ai-agent:** set_group so chat conversations collapse in the run list ([#112](https://github.com/dicode-ayo/dicode-core/issues/112), [#113](https://github.com/dicode-ayo/dicode-core/issues/113)) ([#251](https://github.com/dicode-ayo/dicode-core/issues/251)) ([21dd4a9](https://github.com/dicode-ayo/dicode-core/commit/21dd4a98ffa045a57d63a3608145425764c12db3))
+* auto-fix loop — engine guardrails + git-pr + dicode-auto-fix skill + auto-fix taskset entry ([#238](https://github.com/dicode-ayo/dicode-core/issues/238)) ([#247](https://github.com/dicode-ayo/dicode-core/issues/247)) ([9044612](https://github.com/dicode-ayo/dicode-core/commit/90446125cc92ffe96fb89a393f1223d159eb885f))
+* auto-fix SDK surface (replay / tasks.test / sources.set_dev_mode / git.commit_push) ([#234](https://github.com/dicode-ayo/dicode-core/issues/234)) ([#245](https://github.com/dicode-ayo/dicode-core/issues/245)) ([92b43a7](https://github.com/dicode-ayo/dicode-core/commit/92b43a7a9b1c4abf15a0a74d04a8a93e907ec247))
+* **buildin:** ai-agent-claude-cli — drive Claude via subscription, not API ([#248](https://github.com/dicode-ayo/dicode-core/issues/248)) ([6c63723](https://github.com/dicode-ayo/dicode-core/commit/6c63723a62146c02e105be1674e4b4aba8bc2e73))
+* **buildin:** auth-providers dashboard + dicode.oauth.list_status ([#221](https://github.com/dicode-ayo/dicode-core/issues/221)) ([27cef46](https://github.com/dicode-ayo/dicode-core/commit/27cef46f378145e5fb32b258e5a14139a214a618))
+* **deploy:** production-ready Helm chart for dicode-core ([#230](https://github.com/dicode-ayo/dicode-core/issues/230)) ([0f5a841](https://github.com/dicode-ayo/dicode-core/commit/0f5a8414aa8735b62d63d053632ec7f39434d1ee))
+* dev-mode branch lifecycle + on_failure_chain params + branch validator ([#236](https://github.com/dicode-ayo/dicode-core/issues/236)) ([#241](https://github.com/dicode-ayo/dicode-core/issues/241)) ([724e6c2](https://github.com/dicode-ayo/dicode-core/commit/724e6c2ce8c3c0760344f191308a34785299acba))
+* dicode.yaml as inline-root TaskSet (hard cut from sources array) ([#262](https://github.com/dicode-ayo/dicode-core/issues/262)) ([541ebdf](https://github.com/dicode-ayo/dicode-core/commit/541ebdf4b2d25175a45ca561ca3c0968b5f71391))
+* PATCH /api/tasks/{id}/overrides + enable/disable toggle UI ([#265](https://github.com/dicode-ayo/dicode-core/issues/265)) ([b6a5f1f](https://github.com/dicode-ayo/dicode-core/commit/b6a5f1fc9590f90166a045dcf8e71685439cc185))
+* **release:** Dockerfile + dual-publish to Docker Hub & GHCR ([#227](https://github.com/dicode-ayo/dicode-core/issues/227)) ([8512401](https://github.com/dicode-ayo/dicode-core/commit/85124017a742a779cb23e16ff78bee4a880d445d))
+* run grouping ([#116](https://github.com/dicode-ayo/dicode-core/issues/116)) — parent_run_id + group + set_group SDK + REST filters ([#250](https://github.com/dicode-ayo/dicode-core/issues/250)) ([9804dec](https://github.com/dicode-ayo/dicode-core/commit/9804dec41307f7d76b149cff6036cae9b2d70b4b))
+* run-input persistence + encrypted storage + retention sweep ([#233](https://github.com/dicode-ayo/dicode-core/issues/233)) ([#243](https://github.com/dicode-ayo/dicode-core/issues/243)) ([ef66469](https://github.com/dicode-ayo/dicode-core/commit/ef66469ddf3a5d1d6287b106c69228e54b8b24da))
+* **secrets:** task-based secret providers (Doppler reference) — closes [#119](https://github.com/dicode-ayo/dicode-core/issues/119) ([#232](https://github.com/dicode-ayo/dicode-core/issues/232)) ([3b6ecf1](https://github.com/dicode-ayo/dicode-core/commit/3b6ecf157ca0fa164f94c9cfae5bc93dc7bf792f))
+* **webui/auth:** bcrypt passphrase + configurable cost + race-safe migration ([#209](https://github.com/dicode-ayo/dicode-core/issues/209)) ([#219](https://github.com/dicode-ayo/dicode-core/issues/219)) ([c98e4df](https://github.com/dicode-ayo/dicode-core/commit/c98e4dfcaf110c0ac94d715ddb933db478129d5f))
+* **webui:** collapse run list + parent/sub-runs in run detail ([#114](https://github.com/dicode-ayo/dicode-core/issues/114), [#115](https://github.com/dicode-ayo/dicode-core/issues/115)) ([#252](https://github.com/dicode-ayo/dicode-core/issues/252)) ([e11104e](https://github.com/dicode-ayo/dicode-core/commit/e11104e2e3e0ef9f4f2b282ecb365789b62bdbc4))
+* **webui:** dc-toast listener wires up the missing toast sink ([#266](https://github.com/dicode-ayo/dicode-core/issues/266)) ([0cf2370](https://github.com/dicode-ayo/dicode-core/commit/0cf23707c5844aa8668197d5df0814808b8ba381))
+* **webui:** POST /api/tasks/{id}/test REST endpoint ([#218](https://github.com/dicode-ayo/dicode-core/issues/218)) ([34145a0](https://github.com/dicode-ayo/dicode-core/commit/34145a0caff0c4a7bc223fbc0142761034fd154f))
+
+
+### Bug Fixes
+
+* **buildin:** cleanup tasks null-tolerance + relay-client restart backoff ([#260](https://github.com/dicode-ayo/dicode-core/issues/260)) ([ecf9197](https://github.com/dicode-ayo/dicode-core/commit/ecf9197a2f2c3b45c32cda4c5db300370cf1183a))
+* **webui:** protect Server.cfg with sync.RWMutex (closes [#264](https://github.com/dicode-ayo/dicode-core/issues/264)) ([#267](https://github.com/dicode-ayo/dicode-core/issues/267)) ([18cc222](https://github.com/dicode-ayo/dicode-core/commit/18cc222d58426340ec9f3c749be83b1355b817f0))
+
+
+### Documentation
+
+* **spec:** on-failure AI auto-fix loop design ([#228](https://github.com/dicode-ayo/dicode-core/issues/228)) ([#229](https://github.com/dicode-ayo/dicode-core/issues/229)) ([1418ee7](https://github.com/dicode-ayo/dicode-core/commit/1418ee76e98f748b120008c6ae7cbf3d3ce23148))
+
 ## [Unreleased]
 
 ### Known regressions
