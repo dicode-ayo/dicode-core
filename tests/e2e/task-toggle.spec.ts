@@ -80,4 +80,24 @@ test.describe('Task enable/disable toggle', () => {
       headers: { 'Content-Type': 'application/json' },
     });
   });
+
+  test('dc-toast surfaces a visible message when the API rejects a toggle', async ({ page }) => {
+    await gotoWebui(page);
+    // dc-toast is appended to <body> on app boot but renders nothing until a
+    // 'dc-toast' event arrives — the empty element has 0 size, which fails
+    // the default 'visible' state of waitForSelector. Wait for attachment
+    // instead, then dispatch the event and assert the inner toast div renders.
+    await page.waitForSelector('dc-toast', { timeout: 15_000, state: 'attached' });
+
+    await page.evaluate(() => {
+      window.dispatchEvent(new CustomEvent('dc-toast', {
+        detail: { message: 'Toggle failed: simulated', kind: 'error' },
+      }));
+    });
+
+    const toast = page.locator('dc-toast .toast');
+    await expect(toast).toBeVisible({ timeout: 5_000 });
+    await expect(toast).toContainText('Toggle failed: simulated');
+    await expect(toast).toHaveClass(/error/);
+  });
 });
