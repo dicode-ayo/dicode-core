@@ -750,7 +750,7 @@ func (s *Server) apiSaveConfigRaw(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := os.WriteFile(s.cfgPath, []byte(content), 0600); err != nil {
+	if err := config.AtomicWriteFile(s.cfgPath, []byte(content), 0600); err != nil {
 		jsonErr(w, "write config: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -2024,7 +2024,16 @@ func (s *Server) apiAddSource(w http.ResponseWriter, r *http.Request) {
 	if id == "" {
 		id = ref.Path
 	}
-	ts := taskset.NewSource(id, name, &ref, "", s.dataDir, false, ref.PollInterval, s.log)
+	// Match the daemon's buildTaskSetSourceFromEntry: forward entry.Overrides
+	// so the source applies any future overrides patched in via the REST API.
+	// entry.Overrides is always nil for a freshly constructed entry today;
+	// the guard is defensive in case a future code path (e.g. clone-with-
+	// overrides) populates it before this call.
+	var opts []taskset.SourceOption
+	if entry.Overrides != nil {
+		opts = append(opts, taskset.WithParentOverrides(entry.Overrides))
+	}
+	ts := taskset.NewSource(id, name, &ref, "", s.dataDir, false, ref.PollInterval, s.log, opts...)
 	if s.reconciler != nil {
 		if err := s.reconciler.AddSource(ts); err != nil {
 			jsonErr(w, "start source: "+err.Error(), http.StatusInternalServerError)
@@ -2308,7 +2317,7 @@ func (s *Server) persistConfig() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(s.cfgPath, out, 0600)
+	return config.AtomicWriteFile(s.cfgPath, out, 0600)
 }
 
 // --- helpers ---

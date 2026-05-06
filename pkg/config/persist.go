@@ -115,12 +115,23 @@ func MergeTaskOverride(path, taskID string, patch json.RawMessage, expectedMtime
 		return fmt.Errorf("marshal: %w", err)
 	}
 
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".dicode.yaml.tmp.*")
+	return AtomicWriteFile(path, out, fi.Mode().Perm())
+}
+
+// AtomicWriteFile writes data to path using a same-directory temp file and
+// rename, so a crash mid-write leaves the original untouched. perm is the
+// file mode applied before rename — pass the original file's perm to
+// preserve it across replacements. perm=0 will leave the written file
+// unreadable; callers should pass at minimum 0o400 or the original perm.
+//
+// Used by MergeTaskOverride and webui's persistConfig / apiSaveConfigRaw.
+func AtomicWriteFile(path string, data []byte, perm os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp.*")
 	if err != nil {
 		return fmt.Errorf("create tmp: %w", err)
 	}
 	tmpPath := tmp.Name()
-	if _, err := tmp.Write(out); err != nil {
+	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
 		os.Remove(tmpPath)
 		return fmt.Errorf("write tmp: %w", err)
@@ -129,7 +140,7 @@ func MergeTaskOverride(path, taskID string, patch json.RawMessage, expectedMtime
 		os.Remove(tmpPath)
 		return fmt.Errorf("close tmp: %w", err)
 	}
-	if err := os.Chmod(tmpPath, fi.Mode().Perm()); err != nil {
+	if err := os.Chmod(tmpPath, perm); err != nil {
 		os.Remove(tmpPath)
 		return fmt.Errorf("chmod tmp: %w", err)
 	}
