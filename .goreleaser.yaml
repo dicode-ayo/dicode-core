@@ -35,9 +35,13 @@ checksum:
   name_template: "dicode-{{ .Version }}-checksums.txt"
 
 release:
-  # Upload to the GitHub release that release-please already created.
+  # Upload to the GitHub release that release-please already created+published.
+  # release-please runs first and publishes the release immediately (no draft);
+  # GoReleaser then attaches binaries via release-asset uploads. The repo's
+  # immutable-releases setting must be off, otherwise GitHub blocks asset
+  # uploads on already-published releases.
   # GORELEASER_CURRENT_TAG is set by the workflow to the tag release-please created.
-  use_existing_draft: true
+  mode: append
 
 changelog:
   disable: true  # release-please manages the changelog

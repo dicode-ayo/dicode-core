@@ -58,15 +58,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GORELEASER_CURRENT_TAG: ${{ needs.release-please.outputs.tag_name }}
 
-      # GoReleaser with use_existing_draft: true uploads to the draft but
-      # does NOT promote it to published. Flip the draft flag explicitly so
-      # the release becomes the public latest with binaries attached.
-      - name: Publish GitHub Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
-          REPO: ${{ github.repository }}
-        run: gh release edit "$TAG_NAME" --draft=false --repo "$REPO"
 
   publish-docker:
     name: Publish Docker image
