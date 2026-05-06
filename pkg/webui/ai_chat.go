@@ -50,10 +50,12 @@ func (s *Server) apiAIChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.cfgMu.RLock()
 	taskID := ""
 	if s.cfg != nil {
 		taskID = s.cfg.AI.Task
 	}
+	s.cfgMu.RUnlock()
 	if taskID == "" {
 		jsonErr(w, "ai task not configured or not registered", http.StatusServiceUnavailable)
 		return

@@ -176,8 +176,14 @@ var Version = "dev"
 
 // Server is the HTTP server for the web UI and REST API.
 type Server struct {
-	registry           *registry.Registry
-	engine             *trigger.Engine
+	registry *registry.Registry
+	engine   *trigger.Engine
+	// cfg is mutated by apiSaveConfigRaw, apiSaveAISettings, apiSaveServerSettings,
+	// apiAddSource, apiRemoveSource, apiSaveRuntime, apiPatchTaskOverrides, and
+	// concurrently read by every handler that touches configuration. Guard all
+	// access with cfgMu — RLock for reads, Lock for writes. cfgPath is set once
+	// at construction and is read without locking.
+	cfgMu              sync.RWMutex
 	cfg                *config.Config
 	cfgPath            string               // path to dicode.yaml; empty in tests
 	secretsMgr         SecretsManager       // nil if local provider not configured
@@ -380,6 +386,13 @@ func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config
 		s.ws.recentLogs = logs.Recent
 	}
 
+	// Bind the cfg mutex into the SourceManager so its cfg reads serialise
+	// with our writers. SourceManager is constructed in daemon initialisation
+	// before the Server, hence the late-bind setter.
+	if sourceMgr != nil {
+		sourceMgr.BindCfgMutex(&s.cfgMu)
+	}
+
 	return s, nil
 }
 
@@ -403,7 +416,9 @@ func (s *Server) Handler() http.Handler {
 	// /api/auth/login is exempted in csrfGuard below because it follows a
 	// different threat model (same-origin fetch with credentials; no cookie
 	// to forge in a cross-origin form).
+	s.cfgMu.RLock()
 	tlsConfigured := s.cfg.Server.TLSCertFile != ""
+	s.cfgMu.RUnlock()
 	csrfProtect := csrf.Protect(
 		s.csrfKey,
 		csrf.CookieName("dicode_csrf"),
@@ -588,7 +603,10 @@ func (s *Server) Handler() http.Handler {
 		// the request body to /hooks/mcp through the trigger engine's
 		// webhook handler. MCP is a *bool pointer; nil = default enabled
 		// once applyDefaults has filled it in.
-		if s.cfg == nil || s.cfg.Server.MCP == nil || *s.cfg.Server.MCP {
+		s.cfgMu.RLock()
+		mcpEnabled := s.cfg == nil || s.cfg.Server.MCP == nil || *s.cfg.Server.MCP
+		s.cfgMu.RUnlock()
+		if mcpEnabled {
 			r.With(s.requireAPIKey).HandleFunc("/mcp", s.handleMCP)
 		}
 
@@ -639,8 +657,10 @@ func (s *Server) Start(ctx context.Context) error {
 		defer cancel()
 		_ = s.srv.Shutdown(shutCtx)
 	}()
+	s.cfgMu.RLock()
 	certFile := s.cfg.Server.TLSCertFile
 	keyFile := s.cfg.Server.TLSKeyFile
+	s.cfgMu.RUnlock()
 	if certFile != "" && keyFile != "" {
 		s.log.Info("webui listening (HTTPS)", zap.Int("port", s.port),
 			zap.String("hint", fmt.Sprintf("set DICODE_BASE_URL secret to https://YOUR_HOST:%d", s.port)))
@@ -757,7 +777,9 @@ func (s *Server) apiSaveConfigRaw(w http.ResponseWriter, r *http.Request) {
 
 	// Hot-reload config into memory (best-effort; server restart needed for port changes).
 	if newCfg, err := config.Load(s.cfgPath); err == nil {
+		s.cfgMu.Lock()
 		s.cfg = newCfg
+		s.cfgMu.Unlock()
 	} else {
 		s.log.Warn("config reload after raw save failed", zap.Error(err))
 	}
@@ -965,7 +987,10 @@ const sessionCookie = "dicode_secrets_sess"
 // receive a JSON response; when next is present and safe it is echoed back so
 // the SPA can navigate to it.
 func (s *Server) apiSecretsUnlock(w http.ResponseWriter, r *http.Request) {
-	ip := clientIP(r, s.cfg.Server.TrustProxy)
+	s.cfgMu.RLock()
+	trustProxy := s.cfg.Server.TrustProxy
+	s.cfgMu.RUnlock()
+	ip := clientIP(r, trustProxy)
 	if !s.limiter.allow(ip) {
 		jsonErr(w, "too many unlock attempts — try again in a minute", http.StatusTooManyRequests)
 		return
@@ -1287,15 +1312,23 @@ func (s *Server) apiGetConfig(w http.ResponseWriter, r *http.Request) {
 		*config.Config
 		RelayHookBaseURL string `json:"relay_hook_base_url,omitempty"`
 	}
-	resp := configResponse{Config: s.cfg}
+	// Read relay hook URL from the KV store before acquiring cfgMu — the
+	// query doesn't touch s.cfg, so keeping it outside the read lock avoids
+	// blocking writers across a SQLite round-trip.
+	var relayHookBaseURL string
 	if raw, _ := readKvJSON(r.Context(), s.db, "buildin/relay-client:status"); raw != nil {
 		var st struct {
 			HookBaseURL string `json:"hook_base_url"`
 		}
 		_ = json.Unmarshal(raw, &st)
-		resp.RelayHookBaseURL = st.HookBaseURL
+		relayHookBaseURL = st.HookBaseURL
 	}
-	jsonOK(w, resp)
+	// Hold the read lock across JSON marshalling — jsonOK encodes synchronously
+	// and configResponse embeds *config.Config, which means the encoder walks
+	// the live cfg's nested maps/slices.
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
+	jsonOK(w, configResponse{Config: s.cfg, RelayHookBaseURL: relayHookBaseURL})
 }
 
 // TaskListItem is the shape returned by GET /api/tasks.
@@ -1468,8 +1501,14 @@ func (s *Server) apiPatchTaskOverrides(w http.ResponseWriter, r *http.Request) {
 			// LiftEntryEnabled (called by config.applyDefaults during Load)
 			// has already moved any top-level entry.Enabled shortcut into
 			// entry.Overrides.Enabled, so that's the only field to check.
+			s.cfgMu.RLock()
+			ancestorDisabled := false
 			if entry := s.cfg.Spec.Entries[source]; entry != nil &&
 				entry.Overrides != nil && entry.Overrides.Enabled != nil && !*entry.Overrides.Enabled {
+				ancestorDisabled = true
+			}
+			s.cfgMu.RUnlock()
+			if ancestorDisabled {
 				jsonErr(w, "source "+source+" is disabled — enable the source first",
 					http.StatusUnprocessableEntity)
 				return
@@ -1493,19 +1532,16 @@ func (s *Server) apiPatchTaskOverrides(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Reload dicode.yaml into memory so the running daemon reflects the
-	// change without a restart.
-	//
-	// NOTE: s.cfg is not currently mutex-protected — apiSaveConfigRaw,
-	// apiAddSource, and others mutate it without synchronisation, so
-	// concurrent reads (e.g. apiGetConfig) can race with this assignment.
-	// Pre-existing systemic gap, tracked in issue #264. Adding a mutex
-	// here without sweeping the other handlers would only paper over it.
+	// change without a restart. cfgMu serialises this with concurrent
+	// readers (apiGetConfig, etc.) and other writers.
 	updated, loadErr := config.Load(s.cfgPath)
 	if loadErr != nil {
 		s.log.Warn("config reload after override patch failed",
 			zap.String("task", id), zap.Error(loadErr))
 	} else {
+		s.cfgMu.Lock()
 		s.cfg.Spec = updated.Spec
+		s.cfgMu.Unlock()
 		if s.sourceMgr != nil {
 			if src, ok := s.sourceMgr.Get(source); ok {
 				if entry := updated.Spec.Entries[source]; entry != nil {
@@ -1945,8 +1981,11 @@ func (s *Server) apiSaveAISettings(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "task must have a webhook trigger under "+webhookPathPrefix, http.StatusBadRequest)
 		return
 	}
+	s.cfgMu.Lock()
 	s.cfg.AI.Task = task
-	if err := s.persistConfig(); err != nil {
+	err := s.persistConfigLocked()
+	s.cfgMu.Unlock()
+	if err != nil {
 		s.log.Warn("settings persist failed", zap.Error(err))
 		jsonErr(w, "saved in memory but could not write file: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -1964,13 +2003,16 @@ func (s *Server) apiSaveServerSettings(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "bad request", http.StatusBadRequest)
 		return
 	}
+	s.cfgMu.Lock()
 	if body.LogLevel != "" {
 		s.cfg.LogLevel = body.LogLevel
 	}
 	if body.Secret != "" {
 		s.cfg.Server.Secret = body.Secret
 	}
-	if err := s.persistConfig(); err != nil {
+	err := s.persistConfigLocked()
+	s.cfgMu.Unlock()
+	if err != nil {
 		s.log.Warn("settings persist failed", zap.Error(err))
 		jsonErr(w, "saved in memory but could not write file: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -2044,12 +2086,15 @@ func (s *Server) apiAddSource(w http.ResponseWriter, r *http.Request) {
 		s.sourceMgr.Register(name, ts)
 	}
 
+	s.cfgMu.Lock()
 	if s.cfg.Spec.Entries == nil {
 		s.cfg.Spec.Entries = make(map[string]*taskset.Entry)
 	}
 	s.cfg.Spec.Entries[name] = entry
-	if err := s.persistConfig(); err != nil {
-		s.log.Warn("source persist failed", zap.Error(err))
+	persistErr := s.persistConfigLocked()
+	s.cfgMu.Unlock()
+	if persistErr != nil {
+		s.log.Warn("source persist failed", zap.Error(persistErr))
 	}
 	s.log.Info("source added", zap.String("name", name))
 	jsonOK(w, map[string]string{"status": "ok"})
@@ -2076,11 +2121,17 @@ func (s *Server) apiRemoveSource(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "source name is required", http.StatusBadRequest)
 		return
 	}
+	s.cfgMu.Lock()
 	entry := s.cfg.Spec.Entries[name]
 	if entry == nil {
+		s.cfgMu.Unlock()
 		jsonErr(w, "source not found", http.StatusNotFound)
 		return
 	}
+	delete(s.cfg.Spec.Entries, name)
+	persistErr := s.persistConfigLocked()
+	s.cfgMu.Unlock()
+
 	if s.reconciler != nil && entry.Ref != nil {
 		id := entry.Ref.URL
 		if id == "" {
@@ -2088,9 +2139,8 @@ func (s *Server) apiRemoveSource(w http.ResponseWriter, r *http.Request) {
 		}
 		s.reconciler.RemoveSource(id)
 	}
-	delete(s.cfg.Spec.Entries, name)
-	if err := s.persistConfig(); err != nil {
-		s.log.Warn("source persist failed", zap.Error(err))
+	if persistErr != nil {
+		s.log.Warn("source persist failed", zap.Error(persistErr))
 	}
 	s.log.Info("source removed", zap.String("name", name))
 	jsonOK(w, map[string]string{"status": "ok"})
@@ -2108,12 +2158,16 @@ type RuntimeInfo struct {
 }
 
 func (s *Server) apiListRuntimes(w http.ResponseWriter, r *http.Request) {
+	s.cfgMu.RLock()
+	pinnedVersions := make(map[string]string, len(s.cfg.Runtimes))
+	for name, rc := range s.cfg.Runtimes {
+		pinnedVersions[name] = rc.Version
+	}
+	s.cfgMu.RUnlock()
+
 	var out []RuntimeInfo
 	for _, mgr := range s.managedRuntimes {
-		version := ""
-		if rc, ok := s.cfg.Runtimes[mgr.Name()]; ok {
-			version = rc.Version
-		}
+		version := pinnedVersions[mgr.Name()]
 		effectiveVersion := version
 		if effectiveVersion == "" {
 			effectiveVersion = mgr.DefaultVersion()
@@ -2150,7 +2204,10 @@ func (s *Server) apiInstallRuntime(w http.ResponseWriter, r *http.Request) {
 	}
 	version := strings.TrimSpace(r.FormValue("version"))
 	if version == "" {
-		if rc, ok := s.cfg.Runtimes[name]; ok && rc.Version != "" {
+		s.cfgMu.RLock()
+		rc, ok := s.cfg.Runtimes[name]
+		s.cfgMu.RUnlock()
+		if ok && rc.Version != "" {
 			version = rc.Version
 		} else {
 			version = mgr.DefaultVersion()
@@ -2164,14 +2221,17 @@ func (s *Server) apiInstallRuntime(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.cfgMu.Lock()
 	if s.cfg.Runtimes == nil {
 		s.cfg.Runtimes = make(map[string]config.RuntimeConfig)
 	}
-	rc := s.cfg.Runtimes[name]
-	rc.Version = version
-	s.cfg.Runtimes[name] = rc
-	if err := s.persistConfig(); err != nil {
-		s.log.Warn("runtime config persist failed", zap.Error(err))
+	rcUpdate := s.cfg.Runtimes[name]
+	rcUpdate.Version = version
+	s.cfg.Runtimes[name] = rcUpdate
+	persistErr := s.persistConfigLocked()
+	s.cfgMu.Unlock()
+	if persistErr != nil {
+		s.log.Warn("runtime config persist failed", zap.Error(persistErr))
 	}
 
 	if path, err := mgr.BinaryPath(version); err == nil {
@@ -2188,17 +2248,23 @@ func (s *Server) apiRemoveRuntime(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "deno is required and cannot be removed", http.StatusBadRequest)
 		return
 	}
+	s.cfgMu.Lock()
 	if s.cfg.Runtimes != nil {
 		delete(s.cfg.Runtimes, name)
 	}
-	if err := s.persistConfig(); err != nil {
-		s.log.Warn("runtime config persist failed", zap.Error(err))
+	persistErr := s.persistConfigLocked()
+	s.cfgMu.Unlock()
+	if persistErr != nil {
+		s.log.Warn("runtime config persist failed", zap.Error(persistErr))
 	}
 	jsonOK(w, map[string]string{"status": "ok"})
 }
 
 // persistConfig writes the current in-memory config back to dicode.yaml.
-func (s *Server) persistConfig() error {
+// persistConfigLocked serialises the in-memory cfg back to dicode.yaml.
+// CALLER MUST HOLD s.cfgMu.Lock — this function reads every cfg field
+// without re-acquiring the mutex.
+func (s *Server) persistConfigLocked() error {
 	if s.cfgPath == "" {
 		return nil
 	}
