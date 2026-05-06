@@ -36,8 +36,13 @@ type SourceInfo struct {
 
 // SourceManager tracks taskset sources by name and provides dev mode control.
 // It is the single point of truth for source state visible to the REST API.
+//
+// cfgMu protects reads of cfg fields (Spec.Entries) — it is shared with the
+// Server so writers there serialise correctly with readers here. Pass nil
+// only in tests that don't exercise concurrent cfg mutations.
 type SourceManager struct {
 	mu       sync.RWMutex
+	cfgMu    *sync.RWMutex
 	cfg      *config.Config
 	tasksets map[string]*taskset.Source // source name → live taskset.Source
 	dataDir  string
@@ -46,6 +51,8 @@ type SourceManager struct {
 
 // NewSourceManager creates a SourceManager.
 // tasksetSources maps source name to the live *taskset.Source (may be nil map for non-taskset setups).
+// The cfg mutex is bound separately via BindCfgMutex once the Server is built;
+// chicken-and-egg between daemon initialisation order is why we don't take it here.
 func NewSourceManager(cfg *config.Config, tasksetSources map[string]*taskset.Source, dataDir string, log *zap.Logger) *SourceManager {
 	if tasksetSources == nil {
 		tasksetSources = make(map[string]*taskset.Source)
@@ -55,6 +62,26 @@ func NewSourceManager(cfg *config.Config, tasksetSources map[string]*taskset.Sou
 		tasksets: tasksetSources,
 		dataDir:  dataDir,
 		log:      log,
+	}
+}
+
+// BindCfgMutex wires the Server's cfg mutex into this SourceManager so reads
+// of m.cfg.Spec.Entries serialise with concurrent writers. Call once, after
+// the Server has been constructed and before the HTTP handler is exposed.
+func (m *SourceManager) BindCfgMutex(mu *sync.RWMutex) {
+	m.cfgMu = mu
+}
+
+// rLockCfg / rUnlockCfg let SourceManager methods uniformly acquire the
+// shared cfg lock; they're no-ops if cfgMu is nil (test setups).
+func (m *SourceManager) rLockCfg() {
+	if m.cfgMu != nil {
+		m.cfgMu.RLock()
+	}
+}
+func (m *SourceManager) rUnlockCfg() {
+	if m.cfgMu != nil {
+		m.cfgMu.RUnlock()
 	}
 }
 
@@ -80,6 +107,8 @@ func (m *SourceManager) List() []SourceInfo {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
+	m.rLockCfg()
+	defer m.rUnlockCfg()
 	entries := m.cfg.Spec.Entries
 	out := make([]SourceInfo, 0, len(entries))
 	for name, entry := range entries {
@@ -152,11 +181,16 @@ func (m *SourceManager) ResolveRepoPath(name string) (string, error) {
 
 // ListBranches returns remote branches for the named git source.
 func (m *SourceManager) ListBranches(ctx context.Context, name string) ([]string, error) {
+	m.rLockCfg()
 	entry := m.cfg.Spec.Entries[name]
 	if entry == nil || entry.Ref == nil || !entry.Ref.IsGit() {
+		m.rUnlockCfg()
 		return nil, fmt.Errorf("source %q not found or not a git source", name)
 	}
-	return gitSource.ListBranches(ctx, entry.Ref.URL, entry.Ref.Auth.TokenEnv)
+	url := entry.Ref.URL
+	tokenEnv := entry.Ref.Auth.TokenEnv
+	m.rUnlockCfg()
+	return gitSource.ListBranches(ctx, url, tokenEnv)
 }
 
 // --- HTTP handlers ---

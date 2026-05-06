@@ -1132,8 +1132,11 @@ func TestPersistConfig_OverridesAndTagsSurviveRoundTrip(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	if err := srv.persistConfig(); err != nil {
-		t.Fatalf("persistConfig: %v", err)
+	srv.cfgMu.Lock()
+	persistErr := srv.persistConfigLocked()
+	srv.cfgMu.Unlock()
+	if persistErr != nil {
+		t.Fatalf("persistConfigLocked: %v", persistErr)
 	}
 
 	// Re-load the written YAML and verify overrides + tags are present.
@@ -1346,4 +1349,46 @@ func TestPatchTaskOverrides_WrongSuffix(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body = %s", w.Code, w.Body.String())
 	}
+}
+
+// TestServer_CfgConcurrentReadWrite hammers the cfg with parallel readers
+// (GET /api/config) and writers (PATCH /api/tasks/{id}/overrides) to verify
+// cfgMu correctly serialises them. Run with -race to catch unsynchronised
+// access. Without the mutex this test would flag a data race on s.cfg.Spec.
+func TestServer_CfgConcurrentReadWrite(t *testing.T) {
+	srv, _ := newTestServerWithConfigPath(t)
+	srv.registry.Register(&task.Spec{ID: "buildin/x", Enabled: true})
+	h := srv.Handler()
+
+	const iterations = 50
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Reader: GET /api/config in a tight loop.
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			req := httptest.NewRequest(http.MethodGet, "/api/config", nil)
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+		}
+	}()
+
+	// Writer: alternate PATCH enabled=false / enabled=true.
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			body := `{"enabled":false}`
+			if i%2 == 1 {
+				body = `{"enabled":true}`
+			}
+			req := httptest.NewRequest(http.MethodPatch, "/api/tasks/buildin/x/overrides",
+				bytes.NewBufferString(body))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+		}
+	}()
+
+	wg.Wait()
 }
