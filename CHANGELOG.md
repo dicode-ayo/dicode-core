@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/dicode-ayo/dicode-core/compare/v0.2.0...v0.2.1) (2026-05-06)
+
+
+### Bug Fixes
+
+* **release:** revert draft-mode now that immutable releases is off ([#274](https://github.com/dicode-ayo/dicode-core/issues/274)) ([3ef96a5](https://github.com/dicode-ayo/dicode-core/commit/3ef96a5e69f5cde951edd5c146b678fec5607301))
+
 ## [0.2.0](https://github.com/dicode-ayo/dicode-core/compare/v0.1.2...v0.2.0) (2026-05-06)
 
 
