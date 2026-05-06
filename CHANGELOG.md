@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/dicode-ayo/dicode-core/compare/v0.1.1...v0.1.2) (2026-05-06)
+
+
+### Bug Fixes
+
+* **release:** create GitHub releases as drafts + fix chain-params test flake ([#269](https://github.com/dicode-ayo/dicode-core/issues/269)) ([bb4bf8b](https://github.com/dicode-ayo/dicode-core/commit/bb4bf8b04114db2f908f41617ebefc06042f9aa4))
+
 ## [0.1.1](https://github.com/dicode-ayo/dicode-core/compare/v0.1.0...v0.1.1) (2026-05-06)
 
 
