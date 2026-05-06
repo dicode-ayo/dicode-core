@@ -18,6 +18,7 @@ import './components/dc-log-bar.js';
 import './components/dc-notif-panel.js';
 import './components/dc-metrics.js';
 import './components/dc-relay-status.js';
+import './components/dc-toast.js';
 
 // ── Auth overlay ──────────────────────────────────────────────────────────────
 // Inject a single <dc-auth-overlay> into the document body. The API client
@@ -26,6 +27,12 @@ import './components/dc-relay-status.js';
 const authOverlay = document.createElement('dc-auth-overlay');
 document.body.appendChild(authOverlay);
 setAuthOverlay(authOverlay);
+
+// ── Toast container ───────────────────────────────────────────────────────────
+// Single <dc-toast> sink for window-dispatched 'dc-toast' CustomEvents (used
+// by dc-task-list's enable/disable toggle and any future user-actionable
+// notifications).
+document.body.appendChild(document.createElement('dc-toast'));
 
 // ── Router ────────────────────────────────────────────────────────────────────
 const app = document.getElementById('app');

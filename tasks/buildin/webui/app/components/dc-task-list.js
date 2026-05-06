@@ -282,7 +282,7 @@ class DcTaskList extends LitElement {
   }
 
   _toast(msg) {
-    window.dispatchEvent(new CustomEvent('dc-toast', { detail: { message: msg } }));
+    window.dispatchEvent(new CustomEvent('dc-toast', { detail: { message: msg, kind: 'error' } }));
     console.warn('[task-toggle]', msg);
   }
 
