@@ -31,6 +31,35 @@ func waitForRunOfTask(t *testing.T, e *Engine, taskID string, timeout time.Durat
 	return nil
 }
 
+// pollReturnValue waits for run.ReturnValue to be populated. The runtime's
+// deferred FinishRun commits status before the engine wrapper's SetRunResult
+// commits the return_value, so a fast reader can see status=success with an
+// empty ReturnValue. Tests that read return_value should call this after
+// waitForRunOfTask returns terminal status.
+//
+// Returns the populated value, or fails the test if it never lands within
+// the timeout. (Tasks that legitimately return undefined will fail-timeout
+// here — those tests should not call pollReturnValue.)
+func pollReturnValue(t *testing.T, e *Engine, runID string, timeout time.Duration) string {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		r, err := e.registry.GetRun(context.Background(), runID)
+		if err != nil {
+			lastErr = err
+		} else if r.ReturnValue != "" {
+			return r.ReturnValue
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if lastErr != nil {
+		t.Fatalf("return_value never populated for run %s within %s; last GetRun error: %v", runID, timeout, lastErr)
+	}
+	t.Fatalf("return_value never populated for run %s within %s", runID, timeout)
+	return ""
+}
+
 // ptrSpec is a helper because task.Spec.OnFailureChain is *task.OnFailureChainSpec so
 // {task: ""} disables the default and nil uses the default.
 func ptrSpec(taskID string) *task.OnFailureChainSpec {

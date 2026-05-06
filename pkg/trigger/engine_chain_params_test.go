@@ -59,9 +59,13 @@ func TestFireChain_MergesParamsIntoInput(t *testing.T) {
 	}
 
 	// Decode the return value — the chain target echoed `input` back.
+	// Poll for return_value: the runtime's deferred FinishRun commits before
+	// the engine wrapper's SetRunResult, so a fast reader can see status=success
+	// with an empty ReturnValue.
+	returnValue := pollReturnValue(t, e.engine, got.ID, 5*time.Second)
 	var input map[string]any
-	if err := json.Unmarshal([]byte(got.ReturnValue), &input); err != nil {
-		t.Fatalf("unmarshal return value %q: %v", got.ReturnValue, err)
+	if err := json.Unmarshal([]byte(returnValue), &input); err != nil {
+		t.Fatalf("unmarshal return value %q: %v", returnValue, err)
 	}
 
 	// Reserved keys must be present.
@@ -149,9 +153,13 @@ func TestFireChain_PerTaskFullyReplacesDefaults(t *testing.T) {
 	}
 
 	// Decode the return value — the chain target echoed `input` back.
+	// Poll for return_value: the runtime's deferred FinishRun commits before
+	// the engine wrapper's SetRunResult, so a fast reader can see status=success
+	// with an empty ReturnValue.
+	returnValue := pollReturnValue(t, e.engine, got.ID, 5*time.Second)
 	var input map[string]any
-	if err := json.Unmarshal([]byte(got.ReturnValue), &input); err != nil {
-		t.Fatalf("unmarshal return value %q: %v", got.ReturnValue, err)
+	if err := json.Unmarshal([]byte(returnValue), &input); err != nil {
+		t.Fatalf("unmarshal return value %q: %v", returnValue, err)
 	}
 
 	// Reserved keys must be present (the engine always injects these).
