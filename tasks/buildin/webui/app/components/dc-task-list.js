@@ -8,11 +8,12 @@ class DcTaskList extends LitElement {
   createRenderRoot() { return this; }
 
   static properties = {
-    _tasks:     { state: true },
-    _sources:   { state: true },
-    _error:     { state: true },
-    _filter:    { state: true },
-    _collapsed: { state: true },
+    _tasks:         { state: true },
+    _sources:       { state: true },
+    _error:         { state: true },
+    _filter:        { state: true },
+    _collapsed:     { state: true },
+    _togglePending: { state: true },
   };
 
   constructor() {
@@ -27,6 +28,7 @@ class DcTaskList extends LitElement {
     this._offFinished = null;
     this._offStarted = null;
     this._offChanged = null;
+    this._togglePending = new Set();
   }
 
   _loadCollapsed() {
@@ -173,9 +175,12 @@ class DcTaskList extends LitElement {
 
   _taskRow(t, ns) {
     const shown = this._displayID(t.id, ns);
+    const id = t.id;
+    const disabled = t.enabled === false;
+    const pending = this._togglePending.has(id);
     return html`
-      <tr>
-        <td><a href="/tasks/${t.id}" @click=${e => { e.preventDefault(); navigate('/tasks/' + t.id); }}>${shown}</a></td>
+      <tr class=${disabled ? 'disabled' : ''} data-task-id=${id}>
+        <td><a href="/tasks/${t.id}" @click=${e => { e.preventDefault(); navigate('/tasks/' + t.id); }}>${shown}</a>${disabled ? html`<span class="badge-paused">paused</span>` : ''}</td>
         <td>${t.name}</td>
         <td>${t.trigger?.Webhook
           ? html`<a href="${webhookURL(this._relayBase, t.trigger.Webhook)}" target="_blank" class="meta">${t.trigger_label}</a>`
@@ -186,7 +191,20 @@ class DcTaskList extends LitElement {
         <td>${t.last_run_status
           ? html`<span class="badge badge-${t.last_run_status}">${t.last_run_status}</span>`
           : '—'}</td>
-        <td><button class="btn btn-sm" @click=${() => this._run(t.id)}>&#9654; Run</button></td>
+        <td style="white-space:nowrap">
+          <button class=${`toggle-btn ${disabled ? 'off' : 'on'}`}
+                  title=${disabled ? 'Enable task' : 'Disable task'}
+                  ?disabled=${pending}
+                  @click=${(e) => this._onToggle(e, t)}>
+            ${disabled
+              ? html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <circle cx="12" cy="12" r="9"/>
+                  <line x1="6" y1="6" x2="18" y2="18"/>
+                </svg>`
+              : html`<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="9"/></svg>`}
+          </button>
+          <button class="btn btn-sm" @click=${() => this._run(t.id)}>&#9654; Run</button>
+        </td>
       </tr>`;
   }
 
@@ -218,6 +236,56 @@ class DcTaskList extends LitElement {
     return `${Math.round(s / 86400)}d ago`;
   }
 
+  async _onToggle(e, task) {
+    e.stopPropagation();
+    const id = task.id;
+    if (!id) return;
+    const next = !(task.enabled === false ? false : true);
+
+    this._togglePending = new Set([...this._togglePending, id]);
+    task.enabled = next;
+    this.requestUpdate();
+
+    try {
+      const res = await fetch(`/api/tasks/${id}/overrides`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: next }),
+      });
+      if (res.status === 409) {
+        this._toast('Config changed externally — reloading');
+        await this._load();
+        return;
+      }
+      if (res.status === 422) {
+        const body = await res.json().catch(() => ({}));
+        this._toast(body.error || 'Cannot toggle: ancestor source is disabled');
+        task.enabled = !next;
+        return;
+      }
+      if (!res.ok) {
+        const body = await res.text();
+        this._toast(`Toggle failed: ${body || res.statusText}`);
+        task.enabled = !next;
+        return;
+      }
+      // 200 — keep optimistic state, _load polling will reconcile.
+    } catch (err) {
+      this._toast(`Toggle failed: ${err.message}`);
+      task.enabled = !next;
+    } finally {
+      const next2 = new Set(this._togglePending);
+      next2.delete(id);
+      this._togglePending = next2;
+      this.requestUpdate();
+    }
+  }
+
+  _toast(msg) {
+    window.dispatchEvent(new CustomEvent('dc-toast', { detail: { message: msg } }));
+    console.warn('[task-toggle]', msg);
+  }
+
   render() {
     if (this._error) return html`<p style="color:red">Error: ${this._error}</p>`;
     if (!this._tasks) return html`<div class="meta">Loading…</div>`;
@@ -229,6 +297,32 @@ class DcTaskList extends LitElement {
     const noMatches = this._filter && matching === 0;
 
     return html`
+      <style>
+        dc-task-list tr.disabled { opacity: 0.55; }
+        dc-task-list tr.disabled td { font-style: italic; }
+        dc-task-list .badge-paused {
+          display: inline-block;
+          margin-left: 0.5rem;
+          padding: 0 0.4rem;
+          font-size: 0.7rem;
+          border-radius: 3px;
+          background: var(--badge-bg, #2a2a2a);
+          color: var(--badge-fg, #aaa);
+          vertical-align: middle;
+        }
+        dc-task-list .toggle-btn {
+          background: none;
+          border: none;
+          cursor: pointer;
+          padding: 0.25rem;
+          color: var(--muted);
+          vertical-align: middle;
+        }
+        dc-task-list .toggle-btn:disabled { cursor: wait; }
+        dc-task-list .toggle-btn.on  { color: var(--accent, #4caf50); }
+        dc-task-list .toggle-btn.off { color: var(--muted, #888); }
+        dc-task-list .toggle-btn svg { display: inline-block; width: 18px; height: 18px; vertical-align: middle; }
+      </style>
       <div style="display:flex;align-items:center;gap:var(--space-md);margin-bottom:var(--space-md)">
         <h1 style="margin:0">Tasks</h1>
         <span class="meta" style="flex:0 0 auto">
