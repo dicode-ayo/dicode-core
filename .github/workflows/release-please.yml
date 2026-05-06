@@ -39,6 +39,11 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          # Required: release-please created the v0.X.Y tag earlier in this
+          # workflow run; checkout v4+ does NOT fetch tags even with
+          # fetch-depth: 0 unless this is set, which makes GoReleaser fail
+          # with "git tag <X> was not made against commit <Y>".
+          fetch-tags: true
 
       - uses: actions/setup-go@v6
         with:
