@@ -58,49 +58,11 @@ spec:
   # ──────────────────────────────────────────────────────────────────────────
   entries:
     # ── Broker-gap providers (PKCE + secret) ─────────────────────────────────
-    # office365 and looker are NOT in the dicode-relay broker config today.
-    # They run as direct daemon → provider OAuth, with credentials the
-    # operator stores in their secrets.
-
-    office365-oauth:
-      ref:
-        path: ./_oauth-app/task.yaml
-      overrides:
-        name: Office 365 OAuth
-        description: |
-          Microsoft identity platform OAuth 2.0 — PKCE + client secret.
-          Covers all **Microsoft Graph** APIs: Mail, Calendar, Teams, OneDrive, SharePoint, and more.
-
-          ## Azure App Registration
-
-          1. [portal.azure.com](https://portal.azure.com) → **Azure Active Directory** → App registrations → **New registration**
-             - Redirect URI: `http://localhost:8080/hooks/office365-oauth`
-          2. **Certificates & secrets** → Client secrets → New client secret → copy the **Value**
-          3. **API permissions** → Microsoft Graph → Delegated → add your scopes
-          4. Store credentials:
-             ```
-             dicode secret set OFFICE365_CLIENT_ID     <application-id>
-             dicode secret set OFFICE365_CLIENT_SECRET <client-secret-value>
-             ```
-        trigger:
-          webhook: /hooks/office365-oauth
-        params:
-          provider:          office365
-          scope:             "offline_access User.Read Mail.Read Calendars.Read"
-          token_lifetime:    expires
-          color:             "#0078D4"
-          client_id_env:     CLIENT_ID
-          client_secret_env: CLIENT_SECRET
-          access_token_env:  OFFICE365_ACCESS_TOKEN
-          refresh_token_env: OFFICE365_REFRESH_TOKEN
-        env:
-          - { name: CLIENT_ID,               secret: OFFICE365_CLIENT_ID }
-          - { name: CLIENT_SECRET,           secret: OFFICE365_CLIENT_SECRET }
-          - { name: OFFICE365_ACCESS_TOKEN,  secret: OFFICE365_ACCESS_TOKEN,  optional: true }
-          - { name: OFFICE365_REFRESH_TOKEN, secret: OFFICE365_REFRESH_TOKEN, optional: true }
-        net:
-          - login.microsoftonline.com
-          - graph.microsoft.com
+    # looker is NOT in the dicode-relay broker config today (the broker
+    # carries the other 14 providers — github, slack, google, spotify,
+    # linear, discord, gitlab, airtable, notion, confluence, salesforce,
+    # stripe, office365, azure). looker runs as direct daemon → provider
+    # OAuth, with credentials the operator stores in their secrets.
 
     looker-oauth:
       ref:

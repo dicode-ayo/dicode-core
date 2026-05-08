@@ -193,13 +193,13 @@
 
 ### Breaking
 
-- **`tasks/auth/taskset.yaml` per-provider entries removed.** 13 broker-
+- **`tasks/auth/taskset.yaml` per-provider entries removed.** 14 broker-
   redundant entries (github, slack, google, spotify, linear, discord,
-  gitlab, airtable, notion, confluence, salesforce, stripe, azure) were
-  deleted; the dicode-relay broker (>= 0.1.5) is now the single source of
-  truth for these via `buildin/auth-{providers,start,relay}`. The kept
-  entries are `office365-oauth` and `looker-oauth` (broker doesn't carry
-  them) and `openrouter-oauth` (standalone PKCE, broker can't proxy).
+  gitlab, airtable, notion, confluence, salesforce, stripe, office365,
+  azure) were deleted; the dicode-relay broker (>= 0.1.5) is now the
+  single source of truth for these via `buildin/auth-{providers,start,relay}`.
+  The kept entries are `looker-oauth` (broker gap — not in `relay.yaml`)
+  and `openrouter-oauth` (standalone PKCE, broker can't proxy).
   Operators with `/hooks/<provider>-oauth` callback URLs registered at
   GitHub/Google/Slack/etc. for their own OAuth apps have two migration
   paths: (a) switch to the broker flow — no callback re-registration

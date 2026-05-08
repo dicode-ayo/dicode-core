@@ -10,9 +10,9 @@ description: |
 
   Do not run this task directly — it has no built-in provider config.
   Instantiate it via a taskset entry with provider-specific overrides. The
-  `office365-oauth` and `looker-oauth` entries in this same taskset are
-  working examples; copy one as a starting point. See `../taskset.yaml`
-  header for a step-by-step `my-google-oauth` BYO walkthrough.
+  `looker-oauth` entry in this same taskset is a working example; copy
+  it as a starting point. See `../taskset.yaml` header for a step-by-step
+  `my-google-oauth` BYO walkthrough.
 runtime: deno
 trigger:
   webhook: /hooks/oauth
