@@ -42,6 +42,7 @@ type localDB interface {
 	GetEncrypted(key string) (ciphertext []byte, nonce []byte, found bool, err error)
 	SetEncrypted(key string, ciphertext []byte, nonce []byte) error
 	Delete(key string) error
+	Has(ctx context.Context, key string) (bool, error)
 	List() ([]string, error)
 }
 
@@ -93,6 +94,10 @@ func (l *LocalProvider) Set(_ context.Context, key, value string) error {
 
 func (l *LocalProvider) Delete(_ context.Context, key string) error {
 	return l.db.Delete(key)
+}
+
+func (l *LocalProvider) Has(ctx context.Context, key string) (bool, error) {
+	return l.db.Has(ctx, key)
 }
 
 func (l *LocalProvider) List(_ context.Context) ([]string, error) {

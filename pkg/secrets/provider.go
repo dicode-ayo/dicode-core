@@ -62,6 +62,11 @@ func (c Chain) ResolveAll(ctx context.Context, keys []string) (map[string]string
 // (list, set, delete). Satisfied by *LocalProvider.
 type Manager interface {
 	List(ctx context.Context) ([]string, error)
+	// Has reports whether key exists in the store. Cheaper than List+scan
+	// for callers that only need a presence check (e.g. the
+	// dicode.secrets.has IPC verb). Implementations should issue a single
+	// point query rather than enumerating all keys.
+	Has(ctx context.Context, key string) (bool, error)
 	Set(ctx context.Context, key, value string) error
 	Delete(ctx context.Context, key string) error
 }

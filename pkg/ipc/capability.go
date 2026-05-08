@@ -71,6 +71,11 @@ const (
 	CapHTTPRegister  = "http.register" // register HTTP handler routes (issue #54)
 	CapSourcesManage = "sources.manage"
 	CapSecretsWrite  = "secrets.write"
+	// CapSecretsHas allows a task to call dicode.secrets.has(key) — a
+	// boolean presence check. Never returns the value. Symmetric with
+	// SecretsWrite but a distinct cap so tasks can check presence without
+	// write rights.
+	CapSecretsHas = "secrets.has"
 
 	// CLI capabilities — granted to dicode CLI clients on the control socket.
 	CapCLIRun     = "cli.run"     // trigger a task run and stream its output

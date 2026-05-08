@@ -1,80 +1,125 @@
 import type { DicodeSdk } from "../../sdk.ts";
 
-interface ProviderMeta {
-  key:        string;
-  label:      string;
-  color:      string;
-  // standalone === true means the provider is NOT relay-broker-backed.
-  // The Connect button opens the webhook URL directly; the per-provider
-  // task renders an "Authorize with X" page. Currently only OpenRouter.
-  standalone?: { webhookPath: string };
+// BrokerProvider is the shape returned by the relay broker's GET /providers
+// endpoint (dicode-relay >= 0.1.5).
+interface BrokerProvider {
+  key:             string;
+  pkce:            boolean;
+  scopes:          string[];
+  secret_required: boolean;
+  configured:      boolean;
 }
 
-// KNOWN must stay in sync with the providers in tasks/auth/taskset.yaml.
-// Adding a provider there means appending one row here (key/label/color),
-// and vice versa. The colors here mirror the per-provider `color` params
-// in that taskset; they are duplicated for now because the SPA renders the
-// list before the per-provider task runs, so the dashboard cannot read
-// them from the taskset directly. If the duplication becomes painful,
-// extract a shared providers.json.
-const KNOWN: ProviderMeta[] = [
-  { key: "github",     label: "GitHub",     color: "#24292e" },
-  { key: "google",     label: "Google",     color: "#4285f4" },
-  { key: "slack",      label: "Slack",      color: "#4a154b" },
-  { key: "spotify",    label: "Spotify",    color: "#1db954" },
-  { key: "linear",     label: "Linear",     color: "#5e6ad2" },
-  { key: "discord",    label: "Discord",    color: "#5865f2" },
-  { key: "gitlab",     label: "GitLab",     color: "#fc6d26" },
-  { key: "airtable",   label: "Airtable",   color: "#fcb400" },
-  { key: "notion",     label: "Notion",     color: "#000000" },
-  { key: "confluence", label: "Confluence", color: "#0052cc" },
-  { key: "salesforce", label: "Salesforce", color: "#00a1e0" },
-  { key: "stripe",     label: "Stripe",     color: "#635bff" },
-  { key: "office365",  label: "Office365",  color: "#d83b01" },
-  { key: "azure",      label: "Azure",      color: "#0078d4" },
-  { key: "looker",     label: "Looker",     color: "#4285f4" },
-  { key: "openrouter", label: "OpenRouter", color: "#6467f2",
-    standalone: { webhookPath: "/hooks/openrouter-oauth" } },
-];
+// fetchBrokerProviders retrieves the provider catalogue from the relay broker.
+// The endpoint is unauthenticated and returns no secret values.
+async function fetchBrokerProviders(brokerURL: string): Promise<BrokerProvider[]> {
+  const base = brokerURL.replace(/\/$/, "");
+  const res = await fetch(`${base}/providers`);
+  if (!res.ok) {
+    throw new Error(`broker /providers returned ${res.status}: ${await res.text()}`);
+  }
+  return await res.json() as BrokerProvider[];
+}
 
-const MAX_PROVIDERS = 64;
+// checkConnected returns true when the provider's access token is present in
+// the secrets store. Convention: auth-relay/task.ts writes
+// <PROVIDER_UPPER>_ACCESS_TOKEN.  Closes #255.
+//
+// IPC errors are logged and degrade to has_token=false per-provider rather
+// than failing the whole list — one misconfigured provider should not blank
+// the dashboard for every other provider. The error is surfaced in run logs
+// so operators can investigate (typical cause: missing
+// permissions.dicode.secrets_has on a forked task).
+async function checkConnected(dicode: DicodeSdk["dicode"], providerKey: string): Promise<boolean> {
+  const secretName = providerKey.toUpperCase() + "_ACCESS_TOKEN";
+  try {
+    return await dicode.secrets.has(secretName);
+  } catch (err) {
+    console.error(
+      `auth-providers: dicode.secrets.has(${secretName}) failed; reporting has_token=false. ` +
+      `Cause: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return false;
+  }
+}
+
+// STANDALONE maps provider keys that are NOT relay-broker-backed to their
+// webhook path. These providers use PKCE directly without the broker, so they
+// do not appear in the broker's /providers response but must still be listable
+// when the task is invoked with their key in the `providers` param.
+const STANDALONE: Record<string, { webhookPath: string; label: string; color: string }> = {
+  openrouter: {
+    webhookPath: "/hooks/openrouter-oauth",
+    label: "OpenRouter",
+    color: "#6467f2",
+  },
+};
 
 export default async function main({ params, input, dicode }: DicodeSdk) {
-  const requested = ((await params.get("providers")) ?? "")
-    .split(",").map(s => s.trim()).filter(Boolean);
-  if (requested.length > MAX_PROVIDERS) {
-    throw new Error(`at most ${MAX_PROVIDERS} providers`);
-  }
-
   const inp = (input ?? null) as Record<string, unknown> | null;
   const action = (inp?.action ?? "list") as string;
 
   if (action === "list") {
-    if (requested.length === 0) return [];
-    // TODO(#255): Restore real has_token detection. The legacy
-    // dicode.oauth.list_status IPC verb was deleted in the relay-TS
-    // migration; this branch hardcodes has_token: false until a generic
-    // secrets-presence SDK surface (e.g. dicode.secrets.has) is added.
-    // Tokens ARE being written correctly by auth-relay — only the UI
-    // indication is regressed.
-    const meta = new Map(KNOWN.map(m => [m.key, m]));
-    const statuses = requested.map(provider => ({
-      provider,
-      has_token: false, // see TODO(#255) above
-    }));
-    return statuses.map(s => ({ ...s, meta: meta.get(s.provider) ?? null }));
+    const requested = new Set(
+      ((await params.get("providers")) ?? "")
+        .split(",").map(s => s.trim()).filter(Boolean),
+    );
+
+    // Broker URL is optional. When relay is disabled in dicode.yaml the env
+    // var is unset; fall back to the STANDALONE catalogue so users running
+    // BYO-without-relay still get a useful answer instead of a 5xx.
+    const brokerURL = Deno.env.get("DICODE_RELAY_BROKER_URL");
+    let withStatus: Array<BrokerProvider & { has_token: boolean }> = [];
+    if (brokerURL) {
+      const brokerProviders = await fetchBrokerProviders(brokerURL);
+      const filtered = requested.size === 0
+        ? brokerProviders
+        : brokerProviders.filter(p => requested.has(p.key));
+      withStatus = await Promise.all(filtered.map(async (p) => ({
+        ...p,
+        has_token: await checkConnected(dicode, p.key),
+      })));
+    }
+
+    // Append standalone providers if explicitly requested.
+    const standaloneEntries = await Promise.all(
+      Object.entries(STANDALONE)
+        .filter(([key]) => requested.size === 0 || requested.has(key))
+        .map(async ([key, meta]) => ({
+          key,
+          pkce: true,
+          scopes: [] as string[],
+          secret_required: false,
+          configured: true, // standalone never requires broker config
+          has_token: await checkConnected(dicode, key),
+          label: meta.label,
+          color: meta.color,
+          standalone: { webhookPath: meta.webhookPath },
+        })),
+    );
+
+    return [...withStatus, ...standaloneEntries];
   }
 
   if (action === "connect") {
     const p = String(inp?.provider ?? "");
-    const m = KNOWN.find(k => k.key === p);
-    if (!m) throw new Error(`unknown provider: ${p}`);
 
-    if (m.standalone) {
+    // Standalone provider: return the webhook URL directly.
+    const standalone = STANDALONE[p];
+    if (standalone) {
       const baseURL = (Deno.env.get("DICODE_BASE_URL") ?? "http://localhost:8080").replace(/\/$/, "");
-      return { provider: p, url: `${baseURL}${m.standalone.webhookPath}` };
+      return { provider: p, url: `${baseURL}${standalone.webhookPath}` };
     }
 
+    // Relay-broker provider: delegate to buildin/auth-start. Pre-empt the
+    // less-friendly "relay disabled" error the auth-start task surfaces
+    // when the broker isn't reachable.
+    if (!Deno.env.get("DICODE_RELAY_BROKER_URL")) {
+      throw new Error(
+        `provider '${p}' requires the relay broker. Enable relay in dicode.yaml ` +
+        `or instantiate a BYO OAuth task in your own taskset (see auth/_oauth-app).`,
+      );
+    }
     const run = await dicode.run_task("buildin/auth-start", { provider: p });
     const ret = (run as { returnValue?: { url?: string; session_id?: string } })?.returnValue;
     if (!ret?.url) throw new Error(`buildin/auth-start did not return a url for ${p}`);

@@ -172,16 +172,33 @@
 
 ## [Unreleased]
 
-### Known regressions
+### Fixed
 
-- **`auth-providers` UI shows no connected providers** even when tokens
-  are written. The legacy `dicode.oauth.list_status` IPC verb is gone;
-  `auth-providers/task.ts` hardcodes `has_token: false` until a generic
-  secrets-presence SDK surface lands. Tracked in #255. Tokens ARE being
-  written correctly by `auth-relay`; only the indicator is regressed.
+- **`auth-providers` UI now correctly shows connected providers** via the new
+  `dicode.secrets.has` IPC verb (closes #255). Previously the `has_token`
+  field was hardcoded `false` for every provider; tokens written by
+  `auth-relay` are now reflected immediately.
+
+### Added
+
+- **`dicode.secrets.has(key)` IPC verb** — cap-gated boolean presence check;
+  never returns the secret value. Enable with
+  `permissions.dicode.secrets_has: true` in `task.yaml`. Symmetric with
+  `secrets_write` so tasks can check presence without write rights.
+- **Provider list now sourced dynamically from the dicode-relay broker's
+  `GET /providers` endpoint** (requires dicode-relay >= 0.1.5). Eliminates
+  the hardcoded provider list maintenance burden — adding or removing a
+  provider in `relay.yaml` is immediately reflected without a dicode-core
+  release.
 
 ### Breaking
 
+- **`buildin/auth-providers` `providers` param default changed** from a
+  hardcoded 16-key list to `""` (= "all"). With the new broker-backed
+  catalogue, an empty `providers` parameter now returns every provider the
+  broker reports plus the `STANDALONE` entries (currently `openrouter`).
+  Callers that depended on the previous fixed list must pass the explicit
+  comma-separated subset they want.
 - **Relay client migrated from Go to TypeScript task.** Existing users with
   relay enabled will see a new daemon UUID on first boot of this version.
   Existing webhook URLs (`https://relay.dicode.app/u/<old-uuid>/hooks/...`)

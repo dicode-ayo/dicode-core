@@ -944,6 +944,10 @@ func (m *mockSecrets) List(_ context.Context) ([]string, error) {
 	}
 	return keys, nil
 }
+func (m *mockSecrets) Has(_ context.Context, key string) (bool, error) {
+	_, ok := m.store[key]
+	return ok, nil
+}
 func (m *mockSecrets) Set(_ context.Context, key, value string) error {
 	m.store[key] = value
 	return nil
@@ -1052,6 +1056,94 @@ func TestServer_Dicode_SecretsSet_EmptyKey(t *testing.T) {
 	resp := recvMsg(t, conn)
 	if resp["error"] == nil {
 		t.Errorf("expected error for empty key")
+	}
+}
+
+// ── dicode.secrets.has tests ─────────────────────────────────────────────────
+
+func TestServer_Dicode_SecretsHas_Denied(t *testing.T) {
+	e := newTestEnv(t)
+	// No secrets_has permission — should be denied.
+	conn, _ := e.start(t, nil, nil)
+
+	sendMsg(t, conn, map[string]any{"id": "1", "method": "dicode.secrets.has", "key": "FOO"})
+	resp := recvMsg(t, conn)
+	if resp["error"] == nil {
+		t.Errorf("expected permission denied for dicode.secrets.has without secrets_has cap")
+	}
+}
+
+func TestServer_Dicode_SecretsHas_Present(t *testing.T) {
+	e := newTestEnv(t)
+	mgr := newMockSecrets()
+	mgr.store["MY_TOKEN"] = "secret123"
+	spec := specWithDicode("caller", &task.DicodePermissions{SecretsHas: true})
+	conn, _ := e.startWithSecrets(t, spec, mgr)
+
+	sendMsg(t, conn, map[string]any{"id": "1", "method": "dicode.secrets.has", "key": "MY_TOKEN"})
+	resp := recvMsg(t, conn)
+	if resp["error"] != nil {
+		t.Fatalf("unexpected error: %v", resp["error"])
+	}
+	if resp["result"] != true {
+		t.Errorf("expected result=true for present key, got %v", resp["result"])
+	}
+}
+
+func TestServer_Dicode_SecretsHas_Absent(t *testing.T) {
+	e := newTestEnv(t)
+	mgr := newMockSecrets()
+	spec := specWithDicode("caller", &task.DicodePermissions{SecretsHas: true})
+	conn, _ := e.startWithSecrets(t, spec, mgr)
+
+	sendMsg(t, conn, map[string]any{"id": "1", "method": "dicode.secrets.has", "key": "MISSING_KEY"})
+	resp := recvMsg(t, conn)
+	if resp["error"] != nil {
+		t.Fatalf("unexpected error: %v", resp["error"])
+	}
+	if resp["result"] != false {
+		t.Errorf("expected result=false for absent key, got %v", resp["result"])
+	}
+}
+
+func TestServer_Dicode_SecretsHas_EmptyKey(t *testing.T) {
+	e := newTestEnv(t)
+	mgr := newMockSecrets()
+	spec := specWithDicode("caller", &task.DicodePermissions{SecretsHas: true})
+	conn, _ := e.startWithSecrets(t, spec, mgr)
+
+	sendMsg(t, conn, map[string]any{"id": "1", "method": "dicode.secrets.has"})
+	resp := recvMsg(t, conn)
+	if resp["error"] == nil {
+		t.Errorf("expected error for empty key")
+	}
+}
+
+// TestServer_Dicode_SecretsHas_IndependentOfWrite confirms that SecretsHas and
+// SecretsWrite are independent caps — presence check works without write rights.
+func TestServer_Dicode_SecretsHas_IndependentOfWrite(t *testing.T) {
+	e := newTestEnv(t)
+	mgr := newMockSecrets()
+	mgr.store["TOKEN"] = "actual-secret-value"
+	// Grant only SecretsHas, NOT SecretsWrite.
+	spec := specWithDicode("caller", &task.DicodePermissions{SecretsHas: true, SecretsWrite: false})
+	conn, _ := e.startWithSecrets(t, spec, mgr)
+
+	// Confirm has works.
+	sendMsg(t, conn, map[string]any{"id": "1", "method": "dicode.secrets.has", "key": "TOKEN"})
+	resp := recvMsg(t, conn)
+	if resp["error"] != nil {
+		t.Fatalf("unexpected error: %v", resp["error"])
+	}
+	if resp["result"] != true {
+		t.Errorf("expected result=true, got %v", resp["result"])
+	}
+
+	// Confirm write is still denied.
+	sendMsg(t, conn, map[string]any{"id": "2", "method": "dicode.secrets_set", "key": "TOKEN", "stringValue": "new"})
+	resp2 := recvMsg(t, conn)
+	if resp2["error"] == nil {
+		t.Errorf("expected write denied when only secrets_has is granted")
 	}
 }
 
