@@ -193,6 +193,20 @@
 
 ### Breaking
 
+- **`tasks/auth/taskset.yaml` per-provider entries removed.** 13 broker-
+  redundant entries (github, slack, google, spotify, linear, discord,
+  gitlab, airtable, notion, confluence, salesforce, stripe, azure) were
+  deleted; the dicode-relay broker (>= 0.1.5) is now the single source of
+  truth for these via `buildin/auth-{providers,start,relay}`. The kept
+  entries are `office365-oauth` and `looker-oauth` (broker doesn't carry
+  them) and `openrouter-oauth` (standalone PKCE, broker can't proxy).
+  Operators with `/hooks/<provider>-oauth` callback URLs registered at
+  GitHub/Google/Slack/etc. for their own OAuth apps have two migration
+  paths: (a) switch to the broker flow — no callback re-registration
+  needed; (b) instantiate `auth/_oauth-app/task.yaml` from their own
+  taskset with a fresh `/hooks/<their-name>-oauth` route and re-register
+  the callback. See `docs/oauth.md` and the header of
+  `tasks/auth/taskset.yaml` for the BYO walkthrough.
 - **`buildin/auth-providers` `providers` param default changed** from a
   hardcoded 16-key list to `""` (= "all"). With the new broker-backed
   catalogue, an empty `providers` parameter now returns every provider the
