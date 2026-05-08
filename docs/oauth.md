@@ -7,7 +7,7 @@ Two flows are supported. Pick the one that matches your deployment:
 | Flow | When to use | Requires |
 |---|---|---|
 | **Broker flow** (`buildin/auth-start`) | Default when the daemon is connected to a dicode relay. The broker hosts shared OAuth app credentials for the providers it knows about (github, slack, google, spotify, linear, discord, gitlab, airtable, notion, confluence, salesforce, stripe, office365, azure as of dicode-relay@0.1.5). | `relay.enabled: true` in `dicode.yaml` |
-| **BYO flow** (`auth/_oauth-app` instantiated in your taskset, plus the per-provider entries in `auth/taskset.yaml`) | Self-hosted / air-gapped installs, providers the broker doesn't carry (e.g. looker), or any provider you'd rather drive with your own OAuth app | You register an app with the provider and set `<PROVIDER>_CLIENT_ID` / `<PROVIDER>_CLIENT_SECRET` secrets |
+| **BYO flow** (instantiate `auth/_oauth-app` from your own taskset) | Self-hosted / air-gapped installs, providers the broker doesn't carry (e.g. Looker), or any provider you'd rather drive with your own OAuth app. Auto-discovered by the dashboard via the `template: dicode.io/oauth-app` marker — no per-task config in this repo. | You register an app with the provider and set `<PROVIDER>_CLIENT_ID` / `<PROVIDER>_CLIENT_SECRET` secrets |
 
 The rest of this document covers both. The broker flow is the simpler of the two and is the recommended default for developer machines.
 
@@ -167,17 +167,17 @@ Browser                   dicode                    Provider
 
 ### 1. Open the dashboard
 
-Navigate to **Tasks → Auth Providers** in the web UI (or visit `/hooks/auth-providers` directly). Each provider gets a row with a **Connect** button. Connect for broker-backed providers fires `buildin/auth-start`; Connect for looker fires the BYO entry in `auth/taskset.yaml`; Connect for openrouter opens its standalone webhook page.
+Navigate to **Tasks → Auth Providers** in the web UI (or visit `/hooks/auth-providers` directly). Each provider gets a row with a **Connect** button. Connect for broker-backed providers fires `buildin/auth-start`; Connect for openrouter opens its standalone webhook page; Connect for any BYO entry you instantiated from `_oauth-app` opens that entry's webhook.
 
 For broker-backed providers (github, slack, google, spotify, linear, discord, gitlab, airtable, notion, confluence, salesforce, stripe, office365, azure) you do NOT need to register your own OAuth app — the broker has one. Just click Connect.
 
 ### 2. Store your credentials (BYO providers only)
 
-For looker, or any provider you've added to your own taskset:
+For any provider you've added to your own taskset by instantiating `_oauth-app`:
 
 ```sh
-dicode secret set LOOKER_CLIENT_ID  <client-id>
-dicode secret set LOOKER_INSTANCE   <your-host>.cloud.looker.com
+dicode secret set MY_PROVIDER_CLIENT_ID     <client-id>
+dicode secret set MY_PROVIDER_CLIENT_SECRET <client-secret>   # if needed
 ```
 
 Then click Connect — it will redirect you to the provider's authorization screen.
@@ -210,15 +210,15 @@ permissions:
 To ensure a fresh token before a task runs, chain the OAuth task. For broker-backed providers, chain from `buildin/auth-start`. For BYO providers, chain from the BYO entry in your taskset:
 
 ```yaml
-# my-looker-task/task.yaml
+# my-task/task.yaml — chain after a BYO _oauth-app entry you instantiated
 trigger:
   chain:
-    from: auth/looker-oauth   # BYO entry in tasks/auth/taskset.yaml
+    from: my-tasks/my-looker-oauth   # your own BYO entry
     on: success
 permissions:
   env:
-    - name: LOOKER_ACCESS_TOKEN
-      secret: LOOKER_ACCESS_TOKEN
+    - name: MY_LOOKER_ACCESS_TOKEN
+      secret: MY_LOOKER_ACCESS_TOKEN
 ```
 
 The OAuth task checks token validity first. If the token needs refreshing it silently rotates it and the chain runs with a fresh token. If re-authorization is needed, the chain fails with a desktop notification and a logged URL to open.
@@ -302,16 +302,15 @@ The relay broker handles these providers — no per-provider task entry needed l
 | `office365` | PKCE + secret | 1 h (auto-refreshed) |
 | `azure` | PKCE + secret | 1 h (auto-refreshed) |
 
-### Local `auth/taskset.yaml` entries (BYO + standalone)
-
-These run as direct daemon → provider OAuth, with credentials the operator stores in their own secrets store.
+### Local `auth/taskset.yaml` entries (standalone)
 
 | Task ID | Provider | Flow | Token lifetime | Secrets to set |
 |---|---|---|---|---|
-| `auth/looker-oauth` | Looker | PKCE (+ optional secret) | 1 h (no refresh) | `LOOKER_CLIENT_ID`, `LOOKER_INSTANCE` |
 | `auth/openrouter-oauth` | OpenRouter | PKCE, no client registration | Until revoked (API key) | *(none — zero setup)* |
 
-Need a provider that's not in either table? Instantiate `auth/_oauth-app/task.yaml` from your own taskset with provider-specific overrides — see the walkthrough in `tasks/auth/taskset.yaml` header.
+### BYO entries (auto-discovered)
+
+For any provider you instantiate from `auth/_oauth-app/task.yaml` in your own taskset, the dashboard discovers it via the `template: dicode.io/oauth-app` marker — no entry to add to either table above. See the walkthrough in `tasks/auth/taskset.yaml` header for the full pattern (Looker, self-hosted GitLab, niche enterprise IdPs, etc.).
 
 ### Flow types explained
 

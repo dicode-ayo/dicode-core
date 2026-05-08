@@ -9,10 +9,13 @@ description: |
   flows, plus silent refresh and chain-aware notification.
 
   Do not run this task directly — it has no built-in provider config.
-  Instantiate it via a taskset entry with provider-specific overrides. The
-  `looker-oauth` entry in this same taskset is a working example; copy
-  it as a starting point. See `../taskset.yaml` header for a step-by-step
-  `my-google-oauth` BYO walkthrough.
+  Instantiate it via a taskset entry in your OWN taskset with provider-
+  specific overrides. See `../taskset.yaml` header for a step-by-step
+  `my-looker-oauth` BYO walkthrough.
+
+  Once instantiated, the dashboard's auth-providers panel auto-discovers
+  the entry via the `template: dicode.io/oauth-app` marker — no
+  configuration needed on the panel side.
 runtime: deno
 trigger:
   webhook: /hooks/oauth

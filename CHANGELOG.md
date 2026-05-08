@@ -193,13 +193,17 @@
 
 ### Breaking
 
-- **`tasks/auth/taskset.yaml` per-provider entries removed.** 14 broker-
-  redundant entries (github, slack, google, spotify, linear, discord,
-  gitlab, airtable, notion, confluence, salesforce, stripe, office365,
-  azure) were deleted; the dicode-relay broker (>= 0.1.5) is now the
-  single source of truth for these via `buildin/auth-{providers,start,relay}`.
-  The kept entries are `looker-oauth` (broker gap — not in `relay.yaml`)
-  and `openrouter-oauth` (standalone PKCE, broker can't proxy).
+- **`tasks/auth/taskset.yaml` per-provider entries removed.** All 15
+  `_oauth-app` inheritor entries (github, slack, google, spotify, linear,
+  discord, gitlab, airtable, notion, confluence, salesforce, stripe,
+  office365, azure, looker) were deleted. The dicode-relay broker (>= 0.1.5)
+  handles the first 14 end-to-end via `buildin/auth-{providers,start,relay}`;
+  for any provider the broker doesn't carry (looker, plus anything BYO),
+  operators instantiate `_oauth-app/task.yaml` from their own taskset and
+  the dashboard's auth-providers panel auto-discovers it via the new
+  `template: dicode.io/oauth-app` marker. The only entry that remains in
+  this taskset is `openrouter-oauth` — a standalone non-broker PKCE flow
+  that uses a callback URL request param, so the broker can't proxy it.
   Operators with `/hooks/<provider>-oauth` callback URLs registered at
   GitHub/Google/Slack/etc. for their own OAuth apps have two migration
   paths: (a) switch to the broker flow — no callback re-registration
