@@ -24,13 +24,21 @@ async function fetchBrokerProviders(brokerURL: string): Promise<BrokerProvider[]
 // checkConnected returns true when the provider's access token is present in
 // the secrets store. Convention: auth-relay/task.ts writes
 // <PROVIDER_UPPER>_ACCESS_TOKEN.  Closes #255.
+//
+// IPC errors are logged and degrade to has_token=false per-provider rather
+// than failing the whole list — one misconfigured provider should not blank
+// the dashboard for every other provider. The error is surfaced in run logs
+// so operators can investigate (typical cause: missing
+// permissions.dicode.secrets_has on a forked task).
 async function checkConnected(dicode: DicodeSdk["dicode"], providerKey: string): Promise<boolean> {
   const secretName = providerKey.toUpperCase() + "_ACCESS_TOKEN";
   try {
     return await dicode.secrets.has(secretName);
-  } catch {
-    // Fallback to false if the IPC call fails (e.g. during tests or when
-    // secrets_has permission is not granted).
+  } catch (err) {
+    console.error(
+      `auth-providers: dicode.secrets.has(${secretName}) failed; reporting has_token=false. ` +
+      `Cause: ${err instanceof Error ? err.message : String(err)}`,
+    );
     return false;
   }
 }

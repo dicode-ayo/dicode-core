@@ -990,17 +990,10 @@ func (s *Server) handleConn(conn net.Conn) {
 				reply(req.ID, nil, "ipc: key required")
 				continue
 			}
-			keys, err := s.secrets.List(context.Background())
+			found, err := s.secrets.Has(context.Background(), req.Key)
 			if err != nil {
 				reply(req.ID, nil, err.Error())
 				continue
-			}
-			found := false
-			for _, k := range keys {
-				if k == req.Key {
-					found = true
-					break
-				}
 			}
 			reply(req.ID, found, "")
 

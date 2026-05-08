@@ -193,6 +193,12 @@
 
 ### Breaking
 
+- **`buildin/auth-providers` `providers` param default changed** from a
+  hardcoded 16-key list to `""` (= "all"). With the new broker-backed
+  catalogue, an empty `providers` parameter now returns every provider the
+  broker reports plus the `STANDALONE` entries (currently `openrouter`).
+  Callers that depended on the previous fixed list must pass the explicit
+  comma-separated subset they want.
 - **Relay client migrated from Go to TypeScript task.** Existing users with
   relay enabled will see a new daemon UUID on first boot of this version.
   Existing webhook URLs (`https://relay.dicode.app/u/<old-uuid>/hooks/...`)

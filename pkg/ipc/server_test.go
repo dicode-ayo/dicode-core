@@ -944,6 +944,10 @@ func (m *mockSecrets) List(_ context.Context) ([]string, error) {
 	}
 	return keys, nil
 }
+func (m *mockSecrets) Has(_ context.Context, key string) (bool, error) {
+	_, ok := m.store[key]
+	return ok, nil
+}
 func (m *mockSecrets) Set(_ context.Context, key, value string) error {
 	m.store[key] = value
 	return nil

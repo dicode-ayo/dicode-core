@@ -49,6 +49,24 @@ func (s *SQLiteSecretDB) Delete(key string) error {
 	)
 }
 
+// Has issues a single point query and reports whether key exists. Cheaper
+// than List+scan for callers that only need a presence check.
+func (s *SQLiteSecretDB) Has(ctx context.Context, key string) (bool, error) {
+	var found bool
+	err := s.db.Query(ctx,
+		`SELECT 1 FROM secrets WHERE key = ? LIMIT 1`,
+		[]any{key},
+		func(rows db.Scanner) error {
+			found = rows.Next()
+			return nil
+		},
+	)
+	if err != nil {
+		return false, fmt.Errorf("secrets has %q: %w", key, err)
+	}
+	return found, nil
+}
+
 func (s *SQLiteSecretDB) List() ([]string, error) {
 	var keys []string
 	err := s.db.Query(context.Background(),

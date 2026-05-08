@@ -78,6 +78,39 @@ func TestSQLiteSecretDB_List(t *testing.T) {
 	}
 }
 
+func TestSQLiteSecretDB_Has(t *testing.T) {
+	sdb := newTestSecretDB(t)
+	n := []byte("nonce00000000000000000000000")
+
+	if err := sdb.SetEncrypted("PRESENT", []byte("ct"), n); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+
+	got, err := sdb.Has(context.Background(), "PRESENT")
+	if err != nil {
+		t.Fatalf("has(present): %v", err)
+	}
+	if !got {
+		t.Errorf("expected Has(PRESENT) = true")
+	}
+
+	got, err = sdb.Has(context.Background(), "ABSENT")
+	if err != nil {
+		t.Fatalf("has(absent): %v", err)
+	}
+	if got {
+		t.Errorf("expected Has(ABSENT) = false")
+	}
+
+	if err := sdb.Delete("PRESENT"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	got, _ = sdb.Has(context.Background(), "PRESENT")
+	if got {
+		t.Errorf("expected Has after Delete = false")
+	}
+}
+
 func TestLocalProvider_RoundTrip(t *testing.T) {
 	sdb := newTestSecretDB(t)
 	dir := t.TempDir()

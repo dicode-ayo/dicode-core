@@ -41,6 +41,13 @@ func (m *inMemSecretsMgr) List(_ context.Context) ([]string, error) {
 	return keys, nil
 }
 
+func (m *inMemSecretsMgr) Has(_ context.Context, key string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.data[key]
+	return ok, nil
+}
+
 func (m *inMemSecretsMgr) Set(_ context.Context, key, value string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
