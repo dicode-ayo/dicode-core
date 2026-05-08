@@ -2,8 +2,17 @@ apiVersion: dicode/v1
 kind: Task
 name: OAuth
 description: |
-  Generic OAuth 2.0 task — configured entirely through taskset overrides.
-  Do not use this task directly; instantiate it via a taskset entry with overrides.
+  Generic OAuth 2.0 task — the BYO entry point for any provider that the
+  dicode-relay broker does not handle for you (e.g. self-hosted GitLab,
+  niche enterprise IdPs, or any provider you would rather not route through
+  the broker). Supports PKCE-only, PKCE + client secret, and secret-only
+  flows, plus silent refresh and chain-aware notification.
+
+  Do not run this task directly — it has no built-in provider config.
+  Instantiate it via a taskset entry with provider-specific overrides. The
+  `office365-oauth` and `looker-oauth` entries in this same taskset are
+  working examples; copy one as a starting point. See `../taskset.yaml`
+  header for a step-by-step `my-google-oauth` BYO walkthrough.
 runtime: deno
 trigger:
   webhook: /hooks/oauth

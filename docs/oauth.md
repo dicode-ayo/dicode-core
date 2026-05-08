@@ -1,15 +1,17 @@
 # OAuth Integration
 
-dicode ships a built-in OAuth 2.0 system that handles the full authorization flow for 15 providers out of the box. Once authorized, tokens are stored as secrets and automatically refreshed — your tasks just read them from the environment.
+dicode handles the full OAuth 2.0 authorization flow for any provider. Once authorized, tokens are stored as secrets and automatically refreshed — your tasks just read them from the environment.
 
 Two flows are supported. Pick the one that matches your deployment:
 
 | Flow | When to use | Requires |
 |---|---|---|
-| **Broker flow** (`buildin/auth-start`) | Default when the daemon is connected to a dicode relay. Zero OAuth app registration. | `relay.enabled: true` in `dicode.yaml` |
-| **Local flow** (`auth/<provider>-oauth` tasks) | Self-hosted deployments, air-gapped installs, or when you want to use your own OAuth app | You register the OAuth app with the provider and set `<PROVIDER>_CLIENT_ID` / `_CLIENT_SECRET` secrets |
+| **Broker flow** (`buildin/auth-start`) | Default when the daemon is connected to a dicode relay. The broker hosts shared OAuth app credentials for the providers it knows about (github, slack, google, spotify, linear, discord, gitlab, airtable, notion, confluence, salesforce, stripe, azure as of dicode-relay@0.1.5). | `relay.enabled: true` in `dicode.yaml` |
+| **BYO flow** (`auth/_oauth-app` instantiated in your taskset, plus the per-provider entries in `auth/taskset.yaml`) | Self-hosted / air-gapped installs, providers the broker doesn't carry (e.g. office365, looker), or any provider you'd rather drive with your own OAuth app | You register an app with the provider and set `<PROVIDER>_CLIENT_ID` / `<PROVIDER>_CLIENT_SECRET` secrets |
 
 The rest of this document covers both. The broker flow is the simpler of the two and is the recommended default for developer machines.
+
+> **Migration note (2026-05).** Earlier dicode releases shipped per-provider entries `auth/github-oauth`, `auth/google-oauth`, `auth/slack-oauth`, etc. for every broker-backed provider. Those entries were removed once the broker became the single source of truth — the broker flow above replaces them. Operators who relied on `/hooks/<provider>-oauth` callbacks for broker-backed providers must move to the broker flow (no callback URL re-registration needed) or instantiate `_oauth-app` themselves with their own provider config (see the BYO walkthrough in [tasks/auth/taskset.yaml](../tasks/auth/taskset.yaml)).
 
 ---
 
@@ -163,20 +165,22 @@ Browser                   dicode                    Provider
 
 ## Quick start
 
-### 1. Open the task in the web UI
+### 1. Open the dashboard
 
-Navigate to the task for your provider (e.g. `auth/github-oauth`) and click **Run now**.
+Navigate to **Tasks → Auth Providers** in the web UI (or visit `/hooks/auth-providers` directly). Each provider gets a row with a **Connect** button. Connect for broker-backed providers fires `buildin/auth-start`; Connect for office365/looker fires the matching BYO entry in `auth/taskset.yaml`; Connect for openrouter opens its standalone webhook page.
 
-For providers that support **zero-setup** (Slack, Spotify, Linear, Salesforce, Discord, Confluence), dicode uses a shared built-in app — just click the authorize button and you're done.
+For broker-backed providers (github, slack, google, spotify, linear, discord, gitlab, airtable, notion, confluence, salesforce, stripe, azure) you do NOT need to register your own OAuth app — the broker has one. Just click Connect.
 
-### 2. Store your credentials (providers that require your own app)
+### 2. Store your credentials (BYO providers only)
+
+For office365, looker, or any provider you've added to your own taskset:
 
 ```sh
-dicode secret set GOOGLE_CLIENT_ID     <client-id>
-dicode secret set GOOGLE_CLIENT_SECRET <client-secret>
+dicode secret set OFFICE365_CLIENT_ID     <client-id>
+dicode secret set OFFICE365_CLIENT_SECRET <client-secret>
 ```
 
-Then run the task — it will redirect you to the provider's authorization screen.
+Then click Connect — it will redirect you to the provider's authorization screen.
 
 ### 3. Use the token in your tasks
 
@@ -203,18 +207,18 @@ permissions:
 
 ### 4. Automate token refresh with chain triggers
 
-To ensure a fresh token before a task runs, chain the OAuth task:
+To ensure a fresh token before a task runs, chain the OAuth task. For broker-backed providers, chain from `buildin/auth-start`. For BYO providers, chain from the BYO entry in your taskset:
 
 ```yaml
-# my-gmail-task/task.yaml
+# my-office365-task/task.yaml
 trigger:
   chain:
-    from: auth/google-oauth
+    from: auth/office365-oauth   # BYO entry in tasks/auth/taskset.yaml
     on: success
 permissions:
   env:
-    - name: GOOGLE_ACCESS_TOKEN
-      secret: GOOGLE_ACCESS_TOKEN
+    - name: OFFICE365_ACCESS_TOKEN
+      secret: OFFICE365_ACCESS_TOKEN
 ```
 
 The OAuth task checks token validity first. If the token needs refreshing it silently rotates it and the chain runs with a fresh token. If re-authorization is needed, the chain fails with a desktop notification and a logged URL to open.
@@ -275,24 +279,39 @@ The underlying primitive is `dicode.oauth.list_status()` (see below).
 
 ## Provider table
 
+The authoritative provider list comes from two sources at runtime: the relay broker's `GET /providers` endpoint (live list — query it via the dashboard) and the local `auth/taskset.yaml` entries below.
+
+### Broker-backed (`buildin/auth-start`)
+
+The relay broker handles these providers — no per-provider task entry needed locally. Connect from the dashboard or run `dicode run buildin/auth-start provider=<key>`. The full live list is at `<broker>/providers`; the snapshot below is current as of `dicode-relay@0.1.5`.
+
+| Provider | Flow | Token lifetime |
+|---|---|---|
+| `github` | PKCE + secret | Permanent |
+| `slack` | PKCE only | Permanent |
+| `google` | PKCE + secret | 1 h (auto-refreshed) |
+| `spotify` | PKCE only | 1 h (auto-refreshed) |
+| `linear` | PKCE only | Long-lived |
+| `discord` | PKCE only | ~1 week (auto-refreshed) |
+| `gitlab` | PKCE + secret | 2 h (auto-refreshed) |
+| `airtable` | PKCE + secret | 1 h (auto-refreshed) |
+| `notion` | Secret only | Permanent |
+| `confluence` | PKCE only | 1 h (auto-refreshed) |
+| `salesforce` | PKCE only | Permanent |
+| `stripe` | Secret only | Until revoked |
+| `azure` | PKCE + secret | 1 h (auto-refreshed) |
+
+### Local `auth/taskset.yaml` entries (BYO + standalone)
+
+These run as direct daemon → provider OAuth, with credentials the operator stores in their own secrets store.
+
 | Task ID | Provider | Flow | Token lifetime | Secrets to set |
-|---------|----------|------|----------------|----------------|
-| `auth/google-oauth` | Google | PKCE + secret | 1 h (auto-refreshed) | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` |
-| `auth/slack-oauth` | Slack | PKCE only | Permanent | `SLACK_CLIENT_ID` *(optional — built-in app works)* |
-| `auth/github-oauth` | GitHub | PKCE + secret | Permanent | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` |
-| `auth/spotify-oauth` | Spotify | PKCE only | 1 h (auto-refreshed) | `SPOTIFY_CLIENT_ID` *(optional — built-in app works)* |
-| `auth/linear-oauth` | Linear | PKCE only | Long-lived | `LINEAR_CLIENT_ID` *(optional — built-in app works)* |
-| `auth/discord-oauth` | Discord | PKCE only | ~1 week (auto-refreshed) | `DISCORD_CLIENT_ID` *(optional — built-in app works)* |
-| `auth/confluence-oauth` | Atlassian (Confluence / Jira) | PKCE only | 1 h (auto-refreshed) | `CONFLUENCE_CLIENT_ID` *(optional — built-in app works)* |
-| `auth/salesforce-oauth` | Salesforce | PKCE only | Permanent | `SALESFORCE_CLIENT_ID` *(optional — built-in app works)* |
-| `auth/airtable-oauth` | Airtable | PKCE + secret | 1 h (auto-refreshed) | `AIRTABLE_CLIENT_ID`, `AIRTABLE_CLIENT_SECRET` |
-| `auth/gitlab-oauth` | GitLab | PKCE + secret | 2 h (auto-refreshed) | `GITLAB_CLIENT_ID`, `GITLAB_CLIENT_SECRET` |
-| `auth/azure-oauth` | Microsoft Azure AD | PKCE + secret | 1 h (auto-refreshed) | `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET` |
+|---|---|---|---|---|
 | `auth/office365-oauth` | Office 365 / Microsoft Graph | PKCE + secret | 1 h (auto-refreshed) | `OFFICE365_CLIENT_ID`, `OFFICE365_CLIENT_SECRET` |
-| `auth/notion-oauth` | Notion | Secret only | Permanent | `NOTION_CLIENT_ID`, `NOTION_CLIENT_SECRET` |
-| `auth/stripe-oauth` | Stripe Connect | Secret only | Until revoked | `STRIPE_CLIENT_ID`, `STRIPE_SECRET_KEY` |
 | `auth/looker-oauth` | Looker | PKCE (+ optional secret) | 1 h (no refresh) | `LOOKER_CLIENT_ID`, `LOOKER_INSTANCE` |
 | `auth/openrouter-oauth` | OpenRouter | PKCE, no client registration | Until revoked (API key) | *(none — zero setup)* |
+
+Need a provider that's not in either table? Instantiate `auth/_oauth-app/task.yaml` from your own taskset with provider-specific overrides — see the walkthrough in `tasks/auth/taskset.yaml` header.
 
 ### Flow types explained
 
