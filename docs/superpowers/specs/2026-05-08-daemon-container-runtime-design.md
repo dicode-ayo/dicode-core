@@ -195,20 +195,37 @@ Configurable via `daemon_container.network`:
 
 ## Architecture & Code Layout
 
+The HTTP-proxy and probe machinery is intentionally factored into a driver-agnostic package so that future consumers (deno/python daemon scripts that listen on a port — see Future Work) can reuse it without a containers dependency.
+
 ```
 pkg/trigger/engine.go
    ├── on task-register: if DaemonContainer != nil, instantiate manager
    ├── containerManagers map[taskID]*Manager
    └── webhook handler routes to manager.Dispatch() before falling through to one-shot path
 
-pkg/runtime/daemoncontainer/   ← NEW package, driver-agnostic
-   ├── manager.go              FSM, mutex, max_concurrent semaphore, ready-wait channel,
+pkg/trigger/httpproxy/         ← NEW. Driver-agnostic HTTP proxy + probes.
+   ├── proxy.go                net/http/httputil.ReverseProxy with HMAC strip,
+   │                           path pin, hop-by-hop strip, pass_through toggle.
+   │                           Parameterized over a Target (URL + http.RoundTripper).
+   ├── probes.go               readiness probes: HTTPProbe, TCPOpenProbe, LogProbe.
+   │                           Driver-agnostic; LogProbe takes a "log source" func.
+   └── dispatcher.go           "block until ready or ready_timeout, then forward"
+                               gating wrapper around proxy.go.
+
+pkg/runtime/daemoncontainer/   ← NEW. Container-specific lifecycle.
+   ├── manager.go              FSM (Pulling / Starting / Ready / Degraded /
+   │                           CrashLooping / Stopping / Stopped), mutex,
+   │                           max_concurrent semaphore, ready-wait channel,
    │                           idle timer, crash-loop detector, restart backoff
-   ├── readiness.go            probe types: http / log / exec / tcp-open / docker-healthcheck
-   ├── transport_http.go       net/http/httputil.ReverseProxy with HMAC strip,
-   │                           path pin, hop-by-hop strip, pass_through toggle
    ├── transport_exec.go       docker exec wrapper: pinned argv, stdin = body,
    │                           env = params, captures stdout/stderr/exit
+   ├── http_adapter.go         wires httpproxy.Dispatcher into the container
+   │                           manager (passes ContainerHandle.HTTPRoundTripper()
+   │                           and the container-name URL as the proxy Target)
+   ├── exec_probe.go           ExecProbe (container-specific; uses
+   │                           ContainerHandle.Exec to run the probe argv)
+   ├── healthcheck_probe.go    DockerHealthCheckProbe (queries docker for
+   │                           HEALTHCHECK status)
    └── state.go                state machine types
 
 pkg/runtime/executor.go        leave existing Executor interface alone; add:
@@ -241,6 +258,22 @@ type ContainerHandle interface {
 ```
 
 The seam between driver-agnostic logic (`pkg/runtime/daemoncontainer/`) and driver-specific code (`pkg/runtime/docker/daemon.go`, future `pkg/runtime/podman/daemon.go`).
+
+### `httpproxy` reuse seam
+
+The dispatcher in `pkg/trigger/httpproxy/dispatcher.go` accepts:
+
+```go
+type Target struct {
+    URL          *url.URL          // e.g. http://dicode-task-<id>:8080
+    RoundTripper http.RoundTripper // dial method (docker network, or net.Dial for localhost)
+    Readiness    Probe             // HTTPProbe / TCPOpenProbe / LogProbe / custom
+    PathPin      string            // forward.path
+    PassThrough  bool
+}
+```
+
+`pkg/runtime/daemoncontainer/http_adapter.go` constructs a `Target` whose `RoundTripper` routes via `ContainerHandle.HTTPRoundTripper()` and whose `URL` host is the container name. A future deno/python daemon adapter (Future Work below) would construct a `Target` whose `RoundTripper` is `http.DefaultTransport` and whose `URL` is `http://127.0.0.1:<port>` — same dispatcher, same probes, same proxy code.
 
 ### Concurrency primitives in `manager.go`
 
@@ -317,13 +350,13 @@ State machine state is in-memory only. Webhook callers see 503 during the boot w
 
 Most of the design is driver-agnostic by deliberate construction.
 
-**Free for podman** (everything in `pkg/runtime/daemoncontainer/`):
+**Free for podman** (everything in `pkg/trigger/httpproxy/` and `pkg/runtime/daemoncontainer/`):
 
-- Whole FSM (states, transitions, crash-loop detection, restart backoff)
+- HTTP reverse proxy + dispatcher + HTTP/TCP/Log probes (`pkg/trigger/httpproxy/`)
+- Whole FSM — states, transitions, crash-loop detection, restart backoff (`pkg/runtime/daemoncontainer/manager.go`)
 - Per-manager mutex and `max_concurrent` semaphore
 - Idle TTL timer
-- HTTP transport (reverse proxy is just `http.RoundTripper`)
-- All readiness probe types — expressed against `ContainerHandle`, no driver-specific code
+- Exec probe (driver-agnostic at the probe level; takes a `CommandRunner` that the docker/podman handle satisfies)
 - All metrics & logs
 
 **Needs podman-specific implementation** (`pkg/runtime/podman/daemon.go`):
@@ -334,6 +367,47 @@ Most of the design is driver-agnostic by deliberate construction.
 - **Risk: rootless podman networking.** Slirp4netns has different semantics for "internal-only" ports. Needs verification that internal-network-only routing works between peer containers without host port binding. If broken, ship rootful first with documented caveat.
 
 **Estimate:** ~1 week if rootless behaves; ~2 weeks if rootless edge cases force compromise. Separate PR after docker lands.
+
+## Future Work
+
+### HTTP webhook routes for deno/python daemon tasks
+
+Existing daemon tasks (`runtime: deno|python` with `daemon: true`) run a long-lived script in dicode's process namespace; they have no per-webhook interaction model today. The HTTP transport designed here applies to them with no fundamental change: a deno or python script can `Deno.serve()` / `app.run()` on a localhost port, declare an `http:` block on the task, and dicode forwards webhooks via the same `pkg/trigger/httpproxy/` reverse-proxy with HMAC-strip + path-pin + readiness-gating.
+
+**Architectural fit (already accommodated in v1):**
+- `pkg/trigger/httpproxy/` is driver-agnostic by construction. The dispatcher takes a `Target{URL, RoundTripper, Readiness, PathPin, PassThrough}`; nothing in it assumes a container.
+- For deno/python: `URL = http://127.0.0.1:<port>`, `RoundTripper = http.DefaultTransport`, probes are HTTP/TCP/Log (no exec probe; no in-process `eval` analog).
+- The deno/python daemon's existing lifecycle (managed by `pkg/trigger/engine.go`) supplies the `Ready`/`NotReady` signal that gates the dispatcher. No container FSM needed.
+
+**Spec sketch:**
+
+```yaml
+tasks:
+  embed-deno:
+    runtime: deno
+    daemon: true
+    code: |
+      Deno.serve({ port: 8123, hostname: "127.0.0.1" }, handler)
+    http:
+      port: 8123
+      forward: { path: /api }
+      pass_through: true
+      readiness:
+        http: { path: /healthz, expect: 200 }
+    triggers:
+      - webhook: { path: /embed }
+```
+
+**Footgun mitigation:** a careless script that binds to `0.0.0.0` exposes the port publicly. Counter with a dicode-provided helper per runtime — `dicode.serve(handler)` for deno, equivalent for python — that auto-binds to `127.0.0.1` on a port chosen by dicode and passed via env. Documented as the recommended path; raw `Deno.serve`/`app.run()` still works but the user owns the binding.
+
+**Tracked separately** — companion issue (link added once filed). Not in v1 scope; v1 focuses on the docker daemon-container substrate and the reusable `httpproxy` package that the follow-up will consume.
+
+### Other follow-ups
+
+- **Podman driver** (~1–2 weeks; rootless networking risk noted above)
+- **`target_container` cross-task sharing** — one daemon container, multiple webhook tasks dispatching into it
+- **Streaming responses** — chunked / SSE / WebSocket pass-through (current v1 buffers fully)
+- **Multi-replica daemon containers** — load-balance webhook traffic across N replicas of the same image
 
 ## Open Questions Deferred to Implementation
 
