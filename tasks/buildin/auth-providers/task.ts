@@ -52,31 +52,26 @@ export default async function main({ params, input, dicode }: DicodeSdk) {
   const action = (inp?.action ?? "list") as string;
 
   if (action === "list") {
-    const brokerURL = Deno.env.get("DICODE_RELAY_BROKER_URL");
-    if (!brokerURL) {
-      throw new Error(
-        "DICODE_RELAY_BROKER_URL not set — relay must be enabled in dicode.yaml",
-      );
-    }
-
-    // Fetch provider catalogue from the broker (single source of truth).
-    const brokerProviders = await fetchBrokerProviders(brokerURL);
-
-    // Determine which broker providers to include: either all, or the
-    // subset requested via the `providers` param.
     const requested = new Set(
       ((await params.get("providers")) ?? "")
         .split(",").map(s => s.trim()).filter(Boolean),
     );
-    const filtered = requested.size === 0
-      ? brokerProviders
-      : brokerProviders.filter(p => requested.has(p.key));
 
-    // Enrich with has_token via dicode.secrets.has.
-    const withStatus = await Promise.all(filtered.map(async (p) => ({
-      ...p,
-      has_token: await checkConnected(dicode, p.key),
-    })));
+    // Broker URL is optional. When relay is disabled in dicode.yaml the env
+    // var is unset; fall back to the STANDALONE catalogue so users running
+    // BYO-without-relay still get a useful answer instead of a 5xx.
+    const brokerURL = Deno.env.get("DICODE_RELAY_BROKER_URL");
+    let withStatus: Array<BrokerProvider & { has_token: boolean }> = [];
+    if (brokerURL) {
+      const brokerProviders = await fetchBrokerProviders(brokerURL);
+      const filtered = requested.size === 0
+        ? brokerProviders
+        : brokerProviders.filter(p => requested.has(p.key));
+      withStatus = await Promise.all(filtered.map(async (p) => ({
+        ...p,
+        has_token: await checkConnected(dicode, p.key),
+      })));
+    }
 
     // Append standalone providers if explicitly requested.
     const standaloneEntries = await Promise.all(
@@ -108,7 +103,15 @@ export default async function main({ params, input, dicode }: DicodeSdk) {
       return { provider: p, url: `${baseURL}${standalone.webhookPath}` };
     }
 
-    // Relay-broker provider: delegate to buildin/auth-start.
+    // Relay-broker provider: delegate to buildin/auth-start. Pre-empt the
+    // less-friendly "relay disabled" error the auth-start task surfaces
+    // when the broker isn't reachable.
+    if (!Deno.env.get("DICODE_RELAY_BROKER_URL")) {
+      throw new Error(
+        `provider '${p}' requires the relay broker. Enable relay in dicode.yaml ` +
+        `or instantiate a BYO OAuth task in your own taskset (see auth/_oauth-app).`,
+      );
+    }
     const run = await dicode.run_task("buildin/auth-start", { provider: p });
     const ret = (run as { returnValue?: { url?: string; session_id?: string } })?.returnValue;
     if (!ret?.url) throw new Error(`buildin/auth-start did not return a url for ${p}`);
