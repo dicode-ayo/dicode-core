@@ -40,8 +40,9 @@ class DcNotifPanel extends LitElement {
   }
 
   _addNotif(evt) {
-    const should = evt.status === 'success' ? evt.notifyOnSuccess : evt.notifyOnFailure;
-    if (!should) return;
+    // In-browser inbox + SW push fire on failures only — task-level
+    // `on_failure_chain` is the route for richer / cross-channel delivery.
+    if (evt.status !== 'failure') return;
     const list = this._load();
     list.push({ ts: Date.now(), runID: evt.runID, taskName: evt.taskName, taskID: evt.taskID, status: evt.status, durationMs: evt.durationMs });
     this._save(list);

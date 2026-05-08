@@ -2,11 +2,9 @@
 self.addEventListener('message', function(e) {
   if (!e.data || e.data.type !== 'run:complete') return;
   var d = e.data;
-  var should = d.status === 'success' ? d.notifyOnSuccess : d.notifyOnFailure;
-  if (!should) return;
-  var icon = d.status === 'success' ? '✓' : '✗';
+  if (d.status !== 'failure') return;
   var secs = (d.durationMs / 1000).toFixed(1);
-  var body = icon + ' ' + d.status + ' — ' + secs + 's';
+  var body = '✗ failure — ' + secs + 's';
   if (d.triggerSource && d.triggerSource !== 'manual') {
     body += ' (' + d.triggerSource + ')';
   }
