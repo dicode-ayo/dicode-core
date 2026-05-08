@@ -196,33 +196,6 @@ await fs.delete("~/reports/old.txt")
 
 ---
 
-### `notify` — send notifications
-
-```javascript
-await notify.send("Email digest sent", {
-  priority: "low",
-  tags: ["email"]
-})
-
-await notify.send("API is DOWN", {
-  priority: "urgent",
-  tags: ["alert", "warning"]
-})
-```
-
-Routes through the notification provider configured in `dicode.yaml` (ntfy, gotify, etc.) and fires OS desktop notification if running locally.
-
-**Options:**
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `priority` | string | `"default"` | `min`, `low`, `default`, `high`, `urgent` |
-| `tags` | array | `[]` | Tag strings (provider-specific) |
-| `actions` | array | | Action buttons (provider-specific) |
-
-If no notification provider is configured, `notify.send()` is a no-op (no error thrown).
-
----
-
 ### `input` — chain input
 
 Available when a task is triggered by a chain or a webhook. Contains the output value of the preceding task (chain) or the parsed POST body (webhook).

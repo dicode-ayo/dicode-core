@@ -150,7 +150,6 @@ Runs the task with:
 - **Real execution** of the task script
 - **Intercepted HTTP** — all outbound calls are logged but not sent
 - **No KV writes** — KV reads return current values, writes are logged and discarded
-- **No notifications** — `notify.send()` is logged and discarded
 
 Useful for verifying that secret resolution works and the task targets the right endpoints before a live run.
 

@@ -27,6 +27,21 @@ var ErrLegacySourcesFormat = errors.New(
 		"with the source's fields nested under `ref`.",
 )
 
+// ErrLegacyNotificationsBlock is returned by Load when the config file
+// contains the removed `notifications:` block. The daemon-side notification
+// subsystem (#279) was deleted; notifications are now delivered by tasks
+// via `defaults.on_failure_chain`. Failing fast here prevents the silent
+// "alerts go to /dev/null" footgun where YAML's tolerant decode would
+// otherwise drop the block without comment.
+var ErrLegacyNotificationsBlock = errors.New(
+	"dicode.yaml: legacy `notifications` block detected. The daemon-side\n" +
+		"notification subsystem was removed (#279). Notifications are now\n" +
+		"delivered by tasks: point `defaults.on_failure_chain` at\n" +
+		"`buildin/alert`, `buildin/notifications`, or any task you write\n" +
+		"yourself for ntfy / Slack / Discord / email / etc. Remove the\n" +
+		"`notifications:` block from your config to continue.",
+)
+
 // RuntimeConfig configures a managed runtime executor.
 // The Version field pins the interpreter version that dicode downloads;
 // leave it empty to use the default version bundled with this release.
@@ -215,13 +230,21 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("open config: %w", err)
 	}
 
-	// Probe for the old `sources:` array before decoding into Config.
-	// Fail fast with a clear migration error instead of silently dropping sources.
+	// Probe for removed top-level keys before decoding into Config. Fail
+	// fast with a clear migration error instead of silently dropping the
+	// block — yaml.v3 does not enforce KnownFields by default, so an
+	// unrecognised key would otherwise vanish without comment.
 	var probe struct {
-		Sources any `yaml:"sources"`
+		Sources       any `yaml:"sources"`
+		Notifications any `yaml:"notifications"`
 	}
-	if err := yaml.Unmarshal(data, &probe); err == nil && probe.Sources != nil {
-		return nil, ErrLegacySourcesFormat
+	if err := yaml.Unmarshal(data, &probe); err == nil {
+		if probe.Sources != nil {
+			return nil, ErrLegacySourcesFormat
+		}
+		if probe.Notifications != nil {
+			return nil, ErrLegacyNotificationsBlock
+		}
 	}
 
 	var cfg Config
