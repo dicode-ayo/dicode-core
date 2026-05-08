@@ -31,7 +31,3 @@ run_inputs:
   enabled: false
 
 timeout: 120s
-
-notify:
-  on_success: false
-  on_failure: true

@@ -36,7 +36,3 @@ provider:
   cache_ttl: 5m
 
 timeout: 10s
-
-notify:
-  on_success: false
-  on_failure: true

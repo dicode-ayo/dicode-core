@@ -61,9 +61,6 @@ func applyLayer(spec *task.Spec, o *Overrides) {
 	if o.Runtime != "" {
 		spec.Runtime = task.Runtime(o.Runtime)
 	}
-	if o.Notify != nil {
-		spec.Notify = mergeNotify(spec.Notify, o.Notify)
-	}
 }
 
 // applyTriggerPatch patches only the non-nil fields of p into t.
@@ -243,27 +240,7 @@ func defaultsToOverrides(d *Defaults) *Overrides {
 		Retry:   d.Retry,
 		Env:     d.Env,
 		Trigger: d.Trigger,
-		Notify:  d.Notify,
 	}
-}
-
-// mergeNotify merges overlay on top of base; non-nil pointer fields in overlay win.
-func mergeNotify(base, overlay *task.NotifyConfig) *task.NotifyConfig {
-	if overlay == nil {
-		return base
-	}
-	if base == nil {
-		n := *overlay
-		return &n
-	}
-	out := *base
-	if overlay.OnSuccess != nil {
-		out.OnSuccess = overlay.OnSuccess
-	}
-	if overlay.OnFailure != nil {
-		out.OnFailure = overlay.OnFailure
-	}
-	return &out
 }
 
 // copySpec returns a deep copy of s so that override layers never mutate the
@@ -316,10 +293,6 @@ func copySpec(s *task.Spec) *task.Spec {
 	if s.Docker != nil {
 		docker := *s.Docker
 		out.Docker = &docker
-	}
-	if s.Notify != nil {
-		n := *s.Notify
-		out.Notify = &n
 	}
 	if s.Permissions.Dicode != nil {
 		d := *s.Permissions.Dicode

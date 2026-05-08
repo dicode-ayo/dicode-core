@@ -51,7 +51,6 @@ Run a single test package: `go test ./pkg/registry/... -timeout 60s -run TestNam
 | `pkg/mcp/client` | Generic JSON-RPC 2.0 MCP client used by the dicode SDK's `mcp.list_tools` / `mcp.call` to reach external MCP servers |
 | `pkg/secrets` | AES-encrypted SQLite store + env var fallback |
 | `pkg/task` | Parse `task.yaml`, validate spec, compute content hash |
-| `pkg/notify` | Push notifications on failure (ntfy.sh) |
 | `pkg/relay` | WebSocket tunnel for public webhook URLs |
 
 ## Task Format

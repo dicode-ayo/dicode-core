@@ -137,7 +137,3 @@ permissions:
   # what claude -p does today.)
 
 timeout: 5m
-
-notify:
-  on_success: false
-  on_failure: true

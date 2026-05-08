@@ -140,7 +140,3 @@ permissions:
       - "*"
 
 timeout: 300s
-
-notify:
-  on_success: false
-  on_failure: false

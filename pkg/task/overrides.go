@@ -21,7 +21,6 @@ type Defaults struct {
 	Env []EnvEntry `yaml:"env,omitempty"`
 	// Trigger sets a fallback trigger for any entry that has none.
 	Trigger *TriggerPatch `yaml:"trigger,omitempty"`
-	Notify  *NotifyConfig `yaml:"notify,omitempty"`
 }
 
 // RetryConfig defines automatic retry behaviour for task runs.
@@ -117,7 +116,6 @@ type Overrides struct {
 	Timeout time.Duration      `yaml:"timeout,omitempty"`
 	Retry   *RetryConfig       `yaml:"retry,omitempty"`
 	Runtime string             `yaml:"runtime,omitempty"`
-	Notify  *NotifyConfig      `yaml:"notify,omitempty"`
 	Dicode  *DicodePermissions `yaml:"dicode,omitempty"` // replaces permissions.dicode
 
 	// For task_set entries only — Deprecated: Defaults cross-boundary cascade is no longer applied.
@@ -136,7 +134,7 @@ type Overrides struct {
 // operator typos and prevents silent footguns.
 //
 // Allowed at a per-edge site: Params (minus reserved keys), Env, Net, Fs,
-// Timeout, Notify, Dicode, Runtime.
+// Timeout, Dicode, Runtime.
 //
 // The site string names the offending location (e.g.
 // "trigger.before[0].overrides (task \"render\")") so operators can find it

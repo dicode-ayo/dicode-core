@@ -159,18 +159,17 @@ type Config struct {
 	//           branch: main
 	//           poll_interval: 5m
 	//           auth: { token_env: GITHUB_TOKEN }
-	Spec          taskset.TaskSetBody      `yaml:"spec"`
-	Database      DatabaseConfig           `yaml:"database"`
-	Secrets       SecretsConfig            `yaml:"secrets"`
-	Notifications NotificationsConfig      `yaml:"notifications"`
-	Server        ServerConfig             `yaml:"server"`
-	Defaults      DefaultsConfig           `yaml:"defaults"`
-	Runtimes      map[string]RuntimeConfig `yaml:"runtimes,omitempty"`
-	Execution     ExecutionConfig          `yaml:"execution,omitempty"`
-	Relay         RelayConfig              `yaml:"relay,omitempty"`
-	AI            AIConfig                 `yaml:"ai,omitempty"`
-	LogLevel      string                   `yaml:"log_level"`
-	DataDir       string                   `yaml:"data_dir"`
+	Spec      taskset.TaskSetBody      `yaml:"spec"`
+	Database  DatabaseConfig           `yaml:"database"`
+	Secrets   SecretsConfig            `yaml:"secrets"`
+	Server    ServerConfig             `yaml:"server"`
+	Defaults  DefaultsConfig           `yaml:"defaults"`
+	Runtimes  map[string]RuntimeConfig `yaml:"runtimes,omitempty"`
+	Execution ExecutionConfig          `yaml:"execution,omitempty"`
+	Relay     RelayConfig              `yaml:"relay,omitempty"`
+	AI        AIConfig                 `yaml:"ai,omitempty"`
+	LogLevel  string                   `yaml:"log_level"`
+	DataDir   string                   `yaml:"data_dir"`
 }
 
 // DatabaseConfig selects the storage backend.
@@ -189,37 +188,6 @@ type SecretProviderConfig struct {
 	Type     string `yaml:"type"`      // "local" | "env" | "vault" | ...
 	Address  string `yaml:"address"`   // vault address
 	TokenEnv string `yaml:"token_env"` // env var holding token
-}
-
-type NotificationsConfig struct {
-	// OnFailure sends a notification when a task run fails. Defaults to true.
-	OnFailure *bool `yaml:"on_failure,omitempty"`
-	// OnSuccess sends a notification when a task run succeeds. Defaults to false.
-	OnSuccess *bool                 `yaml:"on_success,omitempty"`
-	Provider  *NotifyProviderConfig `yaml:"provider,omitempty"`
-}
-
-// NotifyOnFailure returns the effective on_failure value (defaults to true).
-func (n *NotificationsConfig) NotifyOnFailure() bool {
-	if n.OnFailure == nil {
-		return true
-	}
-	return *n.OnFailure
-}
-
-// NotifyOnSuccess returns the effective on_success value (defaults to false).
-func (n *NotificationsConfig) NotifyOnSuccess() bool {
-	if n.OnSuccess == nil {
-		return false
-	}
-	return *n.OnSuccess
-}
-
-type NotifyProviderConfig struct {
-	Type     string `yaml:"type"`      // "ntfy" | "gotify" | "pushover" | "telegram"
-	URL      string `yaml:"url"`       // provider base URL
-	Topic    string `yaml:"topic"`     // ntfy topic / gotify app token / etc.
-	TokenEnv string `yaml:"token_env"` // env var holding auth token
 }
 
 type ServerConfig struct {

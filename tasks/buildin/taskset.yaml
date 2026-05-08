@@ -159,9 +159,6 @@ spec:
           skills: "dicode-task-dev,dicode-basics,dicode-auto-fix"
           max_tool_iterations: "30"
         timeout: 1800s
-        notify:
-          on_success: true
-          on_failure: true
         dicode:
           runs_replay:           true
           runs_get_input:        true

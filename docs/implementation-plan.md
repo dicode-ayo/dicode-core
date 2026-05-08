@@ -495,22 +495,11 @@ dicode secrets delete SLACK_TOKEN
 
 ---
 
-## Milestone 11 — Notifications 🔧
+## Milestone 11 — Notifications ✅
 
-**Goal**: task failure/success push notifications.
+**Goal**: task failure/success notifications.
 
-### `pkg/notify/gotify.go`
-Gotify HTTP implementation (similar to ntfy).
-
-### `pkg/notify/desktop.go`
-OS desktop notifications:
-- Linux: `libnotify` via `beeep` or direct D-Bus call
-- macOS: `osascript` or `NSUserNotification` via CGo (optional, can skip for headless)
-- Windows: Toast notification via `go-toast`
-
-Wire notifier into JS runtime's `notify` global and trigger engine (on-failure/on-success).
-
-**Deliverable**: task failures send push notifications to mobile and/or desktop.
+Delivered as tasks rather than a daemon-side subsystem. `defaults.on_failure_chain` (and per-task `on_failure_chain`) fires any task on failure; `buildin/notifications` covers native desktop (notify-send / osascript / powershell) and `buildin/alert` is a chain-friendly wrapper. Custom delivery (ntfy, Slack, email, …) is just another task.
 
 ---
 
