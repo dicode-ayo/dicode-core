@@ -1,6 +1,8 @@
 package task
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -791,4 +793,34 @@ func equalSlice(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// TestLoadDir_RejectsLegacyNotify ensures the removed per-task `notify:`
+// field is rejected at load time. yaml.v3 would otherwise drop it silently
+// and the task author would lose alerts they think are still configured
+// (#279).
+func TestLoadDir_RejectsLegacyNotify(t *testing.T) {
+	dir := t.TempDir()
+	src := strings.TrimSpace(`
+name: legacy-notify-task
+runtime: deno
+trigger: { manual: true }
+notify:
+  on_success: false
+  on_failure: true
+`) + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "task.yaml"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "task.ts"), []byte("export default async function main() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := LoadDirWithVars(dir, nil)
+	if err == nil {
+		t.Fatal("LoadDirWithVars accepted legacy notify block; want error")
+	}
+	if !strings.Contains(err.Error(), "on_failure_chain") {
+		t.Errorf("error = %v; want mention of on_failure_chain migration", err)
+	}
 }

@@ -169,6 +169,63 @@ func TestLoadTaskSet_MissingEntries(t *testing.T) {
 	}
 }
 
+// TestLoadTaskSet_RejectsLegacyNotify_AtDefaults ensures a top-level
+// `defaults.notify:` block is rejected at load time (#279).
+func TestLoadTaskSet_RejectsLegacyNotify_AtDefaults(t *testing.T) {
+	dir := t.TempDir()
+	content := `
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: test
+spec:
+  defaults:
+    notify:
+      on_success: false
+      on_failure: true
+  entries:
+    sample:
+      ref:
+        path: ./sample
+`
+	p := writeFile(t, dir, "ts.yaml", content)
+	_, err := LoadTaskSet(p)
+	if err == nil {
+		t.Fatal("LoadTaskSet accepted legacy defaults.notify; want error")
+	}
+	if !strings.Contains(err.Error(), "on_failure_chain") {
+		t.Errorf("error = %v; want mention of on_failure_chain migration", err)
+	}
+}
+
+// TestLoadTaskSet_RejectsLegacyNotify_NestedOverride ensures a notify
+// block buried under entries.<key>.overrides is also caught (#279).
+func TestLoadTaskSet_RejectsLegacyNotify_NestedOverride(t *testing.T) {
+	dir := t.TempDir()
+	content := `
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: test
+spec:
+  entries:
+    sample:
+      ref:
+        path: ./sample
+      overrides:
+        notify:
+          on_failure: true
+`
+	p := writeFile(t, dir, "ts.yaml", content)
+	_, err := LoadTaskSet(p)
+	if err == nil {
+		t.Fatal("LoadTaskSet accepted nested overrides.notify; want error")
+	}
+	if !strings.Contains(err.Error(), "on_failure_chain") {
+		t.Errorf("error = %v; want mention of on_failure_chain migration", err)
+	}
+}
+
 func TestLoadTaskSet_EntryMissingRefAndInline(t *testing.T) {
 	dir := t.TempDir()
 	content := `
