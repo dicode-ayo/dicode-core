@@ -337,7 +337,6 @@ Not available in MVP — planned post-MVP. See [Web UI & API](./webui-api.md#web
 | `output` | ✅ | Typed return values (html, text, image, file) |
 | `fs` | ✅ | Filesystem access (only when declared in task.yaml) |
 | `input` | ✅ | Chain / webhook payload |
-| `notify` | ✅ | Push notifications |
 | `dicode` | ✅ | Orchestrator API (progress, trigger, isRunning, query methods) |
 | `server` | 🔮 | HTTP serving for daemon tasks (post-MVP) |
 

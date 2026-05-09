@@ -62,8 +62,9 @@ const degraded = res.body.components.filter(c =>
 
 if (degraded.length > 0) {
   const names = degraded.map(c => c.name).join(", ")
-  await notify.send(`Stripe degraded: ${names}`, { priority: "high" })
   log.warn(`Stripe components degraded: ${names}`)
+  // Throw to fail the run; on_failure_chain will fire your alert task.
+  throw new Error(`Stripe degraded: ${names}`)
 } else {
   log.info("Stripe operational")
 }

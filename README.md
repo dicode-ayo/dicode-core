@@ -573,14 +573,11 @@ secrets:
     #   address: https://vault.example.com
     #   token_env: VAULT_TOKEN
 
-notifications:
-  on_failure: true                        # push notification on any task failure
-  on_success: false
-  provider:
-    type: ntfy                            # ntfy | gotify | pushover | telegram
-    url: https://ntfy.sh                  # or self-hosted ntfy instance
-    topic: my-dicode-alerts               # your private ntfy topic
-    token_env: NTFY_TOKEN                 # optional auth token env var
+defaults:
+  on_failure_chain: buildin/alert         # fire any task on failure — point at
+                                          # buildin/alert (desktop), buildin/notifications,
+                                          # or any task you write yourself for
+                                          # ntfy / Slack / Discord / email / etc.
 
 server:
   port: 8080                              # web UI + API port (default: 8080)
@@ -890,47 +887,29 @@ Tasks without explicit `secrets:` entries continue to use the provider chain —
 
 ## Notifications
 
-dicode can push notifications to your phone or desktop when tasks fail, succeed, or need your attention.
+Notifications are delivered by **tasks**, not a daemon-side subsystem. Point `defaults.on_failure_chain` (or any per-task `on_failure_chain`) at a task that emits the alert — desktop, ntfy, Slack, Discord, email, anything you can reach over HTTP.
 
-### System-level notifications (automatic)
+### Buildins
 
-Configure in `dicode.yaml` — no task code required:
+| Task | Surface | Notes |
+|---|---|---|
+| `buildin/notifications` | Native OS desktop (`notify-send` / `osascript` / `powershell`) | No external service. Works offline. |
+| `buildin/alert` | Wrapper that calls `buildin/notifications` via `dicode.run_task` | Demonstrates the chain pattern; copy and adapt for ntfy / Slack / etc. |
+
+Wire it up:
 
 ```yaml
-notifications:
-  on_failure: true    # notify when any task run fails (default: true)
-  on_success: false   # notify on success (default: false)
-  provider:
-    type: ntfy              # ntfy | gotify | pushover | telegram
-    url: https://ntfy.sh    # use ntfy.sh or point to your self-hosted instance
-    topic: my-dicode-alerts # your private topic name
-    token_env: NTFY_TOKEN   # optional: env var holding auth token
+defaults:
+  on_failure_chain: buildin/alert
 ```
 
-Install the [ntfy app](https://ntfy.sh) on your phone, subscribe to your topic, and you'll receive push notifications instantly when tasks fail.
+### Custom delivery (ntfy / Slack / Discord / email / …)
 
-**Why ntfy?** It's [Apache 2.0 licensed](https://github.com/binwiederheer/ntfy), self-hostable, has iOS and Android apps, and supports action buttons for approval gates. The API is a single HTTP POST.
+Write a task that POSTs to your provider, then point `defaults.on_failure_chain` (or per-task `on_failure_chain`) at it. The chain target receives the failed run's metadata as input — see [Auto-fix loop](docs/concepts/auto-fix.md) for the full chain semantics, cooldown, concurrency caps, and storm circuit breaker.
 
-### Task-level notifications (north star)
+### Desktop integration & system tray
 
-A `notify` global for sending notifications from within task scripts is planned but not yet implemented in the Deno/Python SDKs. System-level notifications (on task failure/success) work automatically via the config above.
-
-### Supported providers
-
-| Provider | License | Self-host | Action buttons |
-|---|---|---|---|
-| ntfy | Apache 2.0 | ✅ | ✅ |
-| Gotify | MIT | ✅ | ❌ |
-| Pushover | Commercial | ❌ | ✅ |
-| Telegram | — | ❌ | ✅ |
-
-All providers implement the same Go interface — switching provider requires only a config change, no task code changes.
-
-### Desktop notifications & system tray
-
-When running dicode locally, you also get native OS integration.
-
-**Desktop notifications** are planned but not yet implemented. Mobile push (ntfy) works now.
+`buildin/notifications` already drives native OS notifications via `notify-send` (Linux) / `osascript` (macOS) / `powershell` (Windows).
 
 **System tray icon** gives you quick access to the dashboard without opening a browser.
 
@@ -953,10 +932,6 @@ server:
 ```
 
 The tray runs as a built-in Deno daemon task (`tasks/buildin/tray/`) using a portable systray helper binary — no CGo or GTK required. Works on Linux, macOS, and Windows. Disabled when running headless (`server.tray: false`).
-
-### Approval gates (planned)
-
-A future `notify.ask()` API will pause a task mid-execution and wait for a human decision via push notification. The run would be stored as `suspended` in SQLite and resumed when the user responds. See [docs/concepts/notifications.md](docs/concepts/notifications.md) for the design.
 
 ---
 
@@ -1625,13 +1600,12 @@ dicode/
 │   ├── secrets/        # provider chain: local encrypted (ChaCha20) + env fallback
 │   ├── relay/          # WebSocket relay client + self-hosted server
 │   ├── mcp/            # MCP server (JSON-RPC 2.0) + MCP client for daemon tasks
-│   ├── notify/         # Notifier interface + ntfy provider
 │   ├── tray/           # system tray icon (fyne.io/systray)
 │   ├── onboarding/     # first-run config generation
 │   ├── webui/          # HTTP server, REST API, auth, WebSocket hub
 │   └── service/        # OS service management (interface defined, impls planned)
 ├── tasks/
-│   ├── buildin/        # built-in tasks (webui, tray, alert, notify, ai-agent, dicodai)
+│   ├── buildin/        # built-in tasks (webui, tray, alert, notifications, ai-agent, dicodai)
 │   ├── skills/         # shared markdown "skills" loaded into agent prompts (dicode-basics, dicode-task-dev)
 │   ├── auth/           # legacy per-provider OAuth tasks (self-hosted flow)
 │   └── examples/       # 13 example tasks (all runtimes and trigger types)

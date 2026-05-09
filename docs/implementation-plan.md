@@ -189,7 +189,6 @@ Each call to `Run()`:
 | `kv` | `globals/kv.go` | MVP |
 | `output` | `globals/output.go` | MVP |
 | `fs` | `globals/fs.go` | MVP |
-| `notify` | `globals/notify.go` | Post-MVP |
 | `input` | `globals/input.go` | Post-MVP (chain) |
 | `dicode` | `dicode.go` | Post-MVP (progress, trigger, isRunning, query methods) |
 | `server` | `globals/server.go` | North star (daemon tasks) |

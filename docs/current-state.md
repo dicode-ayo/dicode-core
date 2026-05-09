@@ -275,8 +275,8 @@ CLI dispatcher + daemon mode in one binary:
 | --- | --- |
 | `webui` | Dashboard SPA (served at `/hooks/webui`) |
 | `tray` | System tray icon (daemon) |
-| `alert` | Browser notification relay |
-| `notify` | Push notification dispatcher |
+| `notifications` | Native OS desktop notification (`notify-send` / `osascript` / `powershell`) |
+| `alert` | Chain-friendly wrapper that calls `buildin/notifications` via `dicode.run_task` |
 | `ai-agent` | Chat interface with tool-calling — discovers all registered tasks as tools, supports `task.yaml` template variables for provider config, conversation history with KV-backed compaction |
 | `auth-start` | OAuth broker: generates signed relay URL for 14+ providers |
 | `auth-complete` | OAuth broker: receives ECIES-encrypted tokens, decrypts, stores in secrets |
