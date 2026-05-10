@@ -43,10 +43,11 @@ async function checkConnected(dicode: DicodeSdk["dicode"], providerKey: string):
   }
 }
 
-// STANDALONE maps provider keys that are NOT relay-broker-backed to their
-// webhook path. These providers use PKCE directly without the broker, so they
-// do not appear in the broker's /providers response but must still be listable
-// when the task is invoked with their key in the `providers` param.
+// STANDALONE maps provider keys that are NOT relay-broker-backed AND NOT
+// instantiated from the _oauth-app template. Today this is just openrouter,
+// which has its own bespoke task (no template marker). Anything inherited
+// from _oauth-app is auto-discovered via list_tasks below — no need to
+// hardcode it here.
 const STANDALONE: Record<string, { webhookPath: string; label: string; color: string }> = {
   openrouter: {
     webhookPath: "/hooks/openrouter-oauth",
@@ -54,6 +55,72 @@ const STANDALONE: Record<string, { webhookPath: string; label: string; color: st
     color: "#6467f2",
   },
 };
+
+// OAUTH_APP_TEMPLATE is the marker set in tasks/auth/_oauth-app/task.yaml.
+// Every taskset entry that inherits via `ref.path: ./_oauth-app/task.yaml`
+// gets this propagated onto its merged spec by the resolver. The dashboard
+// uses it to surface BYO OAuth tasks without hardcoding an allowlist —
+// operators with their own taskset entry just appear automatically.
+const OAUTH_APP_TEMPLATE = "dicode.io/oauth-app";
+
+// paramDefault returns the default value of a named param from a list_tasks
+// summary's params field. The IPC server passes through task.Params (a list
+// of Param structs) verbatim; we only need the default value (set via
+// taskset overrides per provider).
+function paramDefault(params: unknown, name: string): string {
+  if (!Array.isArray(params)) return "";
+  for (const p of params) {
+    if (p && typeof p === "object" && (p as { name?: string }).name === name) {
+      return String((p as { default?: unknown }).default ?? "");
+    }
+  }
+  return "";
+}
+
+// scanInheritors enumerates every registered task whose merged spec carries
+// the `dicode.io/oauth-app` template marker, and shapes each as a
+// dashboard-style provider entry. Returns the same canonical shape the
+// STANDALONE branch emits so the panel renders them identically.
+async function scanInheritors(
+  dicode: DicodeSdk["dicode"],
+  requested: Set<string>,
+): Promise<Array<Record<string, unknown>>> {
+  let tasks: Array<{
+    id: string; name: string; template?: string; webhook?: string;
+    enabled: boolean; params?: unknown;
+  }>;
+  try {
+    tasks = await dicode.list_tasks();
+  } catch (err) {
+    console.error(
+      `auth-providers: dicode.list_tasks failed; BYO OAuth tasks will not appear ` +
+      `in the panel. Cause: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return [];
+  }
+
+  const out: Array<Record<string, unknown>> = [];
+  for (const t of tasks) {
+    if (t.template !== OAUTH_APP_TEMPLATE) continue;
+    if (!t.enabled) continue;                     // skip disabled inheritors
+    const key = paramDefault(t.params, "provider");
+    if (!key) continue;                           // misconfigured BYO entry
+    if (requested.size > 0 && !requested.has(key)) continue;
+    if (!t.webhook) continue;                     // need a webhook to Connect
+    out.push({
+      key,
+      pkce: true,
+      scopes: [] as string[],
+      secret_required: paramDefault(t.params, "client_secret_env") !== "",
+      configured: true,
+      has_token: await checkConnected(dicode, key),
+      label: t.name,
+      color: paramDefault(t.params, "color") || "#666",
+      standalone: { webhookPath: t.webhook },
+    });
+  }
+  return out;
+}
 
 export default async function main({ params, input, dicode }: DicodeSdk) {
   const inp = (input ?? null) as Record<string, unknown> | null;
@@ -98,17 +165,53 @@ export default async function main({ params, input, dicode }: DicodeSdk) {
         })),
     );
 
-    return [...withStatus, ...standaloneEntries];
+    // Auto-discovered BYO OAuth tasks (anything inheriting the _oauth-app
+    // template from a taskset entry — built-in office365/looker, plus any
+    // user-supplied entry from their own taskset).
+    const inheritorEntries = await scanInheritors(dicode, requested);
+
+    // Dedup by key. Precedence: broker > standalone > inheritors. The broker
+    // is centrally managed and harder for an operator to misconfigure, so a
+    // user's BYO `github` entry (mistake or intentional) does not shadow the
+    // broker's. Standalone wins over inheritors so an operator who explicitly
+    // ships an `openrouter-oauth` task in their taskset cannot accidentally
+    // double-list it.
+    const seen = new Set<string>();
+    const result: Array<Record<string, unknown>> = [];
+    for (const e of [...withStatus, ...standaloneEntries, ...inheritorEntries]) {
+      const k = (e as { key?: string }).key;
+      if (!k || seen.has(k)) continue;
+      seen.add(k);
+      result.push(e as Record<string, unknown>);
+    }
+    return result;
   }
 
   if (action === "connect") {
     const p = String(inp?.provider ?? "");
+    const baseURL = (Deno.env.get("DICODE_BASE_URL") ?? "http://localhost:8080").replace(/\/$/, "");
 
-    // Standalone provider: return the webhook URL directly.
+    // Standalone provider (e.g. openrouter): return the webhook URL directly.
     const standalone = STANDALONE[p];
     if (standalone) {
-      const baseURL = (Deno.env.get("DICODE_BASE_URL") ?? "http://localhost:8080").replace(/\/$/, "");
       return { provider: p, url: `${baseURL}${standalone.webhookPath}` };
+    }
+
+    // Auto-discovered _oauth-app inheritor (built-in office365/looker, or
+    // any user BYO entry): open the inherited webhook directly.
+    try {
+      const tasks = await dicode.list_tasks();
+      for (const t of tasks) {
+        if (t.template !== OAUTH_APP_TEMPLATE || !t.enabled || !t.webhook) continue;
+        if (paramDefault(t.params, "provider") === p) {
+          return { provider: p, url: `${baseURL}${t.webhook}` };
+        }
+      }
+    } catch (err) {
+      console.error(
+        `auth-providers: dicode.list_tasks failed during connect; falling back to broker. ` +
+        `Cause: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
 
     // Relay-broker provider: delegate to buildin/auth-start. Pre-empt the

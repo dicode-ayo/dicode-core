@@ -114,6 +114,7 @@ function writeTaskset(tempDir: string): { tasksetPath: string; tasksDir: string 
   const buildinAuthProvidersTaskYaml = path.join(REPO_ROOT, 'tasks/buildin/auth-providers/task.yaml');
   const buildinLocalStorageTaskYaml = path.join(REPO_ROOT, 'tasks/buildin/local-storage/task.yaml');
   const buildinRunInputsCleanupTaskYaml = path.join(REPO_ROOT, 'tasks/buildin/run-inputs-cleanup/task.yaml');
+  const authOauthAppTaskYaml = path.join(REPO_ROOT, 'tasks/auth/_oauth-app/task.yaml');
   const template = fs.readFileSync(path.join(TASKS_DIR, 'taskset.yaml'), 'utf8');
   const content = template
     .replace(/FIXTURES_TASKS_DIR/g, tasksDir)
@@ -121,7 +122,8 @@ function writeTaskset(tempDir: string): { tasksetPath: string; tasksDir: string 
     .replace(/BUILDIN_MCP_TASK_YAML/g, buildinMcpTaskYaml)
     .replace(/BUILDIN_AUTH_PROVIDERS_TASK_YAML/g, buildinAuthProvidersTaskYaml)
     .replace(/BUILDIN_LOCAL_STORAGE_TASK_YAML/g, buildinLocalStorageTaskYaml)
-    .replace(/BUILDIN_RUN_INPUTS_CLEANUP_TASK_YAML/g, buildinRunInputsCleanupTaskYaml);
+    .replace(/BUILDIN_RUN_INPUTS_CLEANUP_TASK_YAML/g, buildinRunInputsCleanupTaskYaml)
+    .replace(/AUTH_OAUTH_APP_TASK_YAML/g, authOauthAppTaskYaml);
   const tasksetPath = path.join(tempDir, 'taskset.yaml');
   fs.writeFileSync(tasksetPath, content, 'utf8');
   return { tasksetPath, tasksDir };

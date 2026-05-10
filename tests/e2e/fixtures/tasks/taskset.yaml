@@ -43,3 +43,25 @@ spec:
     run-inputs-cleanup:
       ref:
         path: BUILDIN_RUN_INPUTS_CLEANUP_TASK_YAML
+
+    # BYO OAuth fixture: instantiates the generic _oauth-app task with
+    # provider-specific overrides. Used by auth-providers.spec.ts to
+    # confirm the dashboard auto-discovers _oauth-app inheritors via
+    # the `template: dicode.io/oauth-app` marker.
+    fixture-oauth:
+      ref:
+        path: AUTH_OAUTH_APP_TASK_YAML
+      overrides:
+        name: Fixture OAuth
+        trigger:
+          webhook: /hooks/fixture-oauth
+        params:
+          provider:          fixture
+          scope:             "test:read"
+          token_lifetime:    expires
+          color:             "#abc123"
+          client_id_env:     CLIENT_ID
+          access_token_env:  FIXTURE_ACCESS_TOKEN
+        env:
+          - { name: CLIENT_ID,            secret: FIXTURE_CLIENT_ID,    optional: true }
+          - { name: FIXTURE_ACCESS_TOKEN, secret: FIXTURE_ACCESS_TOKEN, optional: true }
