@@ -1,35 +1,39 @@
 /**
  * task.test.ts — unit tests for buildin/relay-server.
  *
- * Exercises three cases the spec called out:
+ * Exercises four cases:
  *   1. base_url param missing → task body throws before touching the relay.
- *   2. broker signing-key file pinned in relay.yaml but not on disk →
- *      startServer rejects (the published relay's loadBrokerSigningKey()
- *      does an unconditional readFileSync when the YAML pins a path, even
- *      under dryRun, so this is the real "required artefact missing"
- *      failure mode surfaced by 0.1.6).
- *   3. valid base_url + ${DICODE_DATADIR}/relay/broker-signing.key staged
+ *   2. DICODE_DATADIR unset → ensureSigningKey throws with a clear error.
+ *   3. ensureSigningKey on a fresh datadir creates a readable PKCS8 PEM at
+ *      ${DICODE_DATADIR}/relay/broker-signing.key with mode 0o600.
+ *   4. ensureSigningKey is idempotent — when the file already exists it
+ *      neither regenerates nor throws.
+ *   5. valid base_url + ${DICODE_DATADIR}/relay/broker-signing.key staged
  *      on disk + STATUS_PASSWORD set → startServer({dryRun:true}) resolves.
  *
- * Cases 1 and 2 exercise the task body (./task.ts) via a hand-rolled SDK
- * mock — the harness in tasks/sdk-test.ts would dynamically re-import
- * task.ts and lose env determinism between cases. Case 3 calls startServer
- * directly so it stays decoupled from the supervisor's signal-handling
- * scaffolding, which would otherwise leak Deno.addSignalListener handles
- * into the test runner.
+ * Case 1 exercises the task body (./task.ts) via a hand-rolled SDK mock —
+ * the harness in tasks/sdk-test.ts would dynamically re-import task.ts and
+ * lose env determinism between cases. Cases 2-4 call the exported
+ * ensureSigningKey directly. Case 5 calls startServer directly so it stays
+ * decoupled from the supervisor's signal-handling scaffolding, which would
+ * otherwise leak Deno.addSignalListener handles into the test runner.
  *
  * Note (deviation from spec): the spec called for a "STATUS_PASSWORD
  * missing → throws" case. The published 0.1.6 relay's loadConfig() does
  * not throw on unresolved ${VAR} — it logs a warning and collapses to "".
- * The actual hard-failure surface for missing required artefacts is the
- * broker signing-key file, hence case 2 above.
+ * Under 0.1.7+ the relay also throws ENOENT if the signing key file is
+ * missing — but the supervisor now pre-creates it (see ensureSigningKey),
+ * so the "missing required artefact" failure mode is no longer reachable
+ * from the task body's happy path.
  */
 
-import { assertRejects } from "jsr:@std/assert@1";
-import { generateKeyPairSync } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { assertEquals, assertRejects, assertThrows } from "jsr:@std/assert@1";
+import { createPrivateKey, generateKeyPairSync } from "node:crypto";
+import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { startServer } from "npm:dicode-relay@^0.1.6/start";
+
+import { ensureSigningKey } from "./task.ts";
 
 // Doppler-fed env vars that the daemon would otherwise populate. We clear
 // all of them before each test so fixtures are deterministic regardless of
@@ -140,24 +144,52 @@ Deno.test("rejects when base_url param is missing", async () => {
   );
 });
 
+Deno.test("ensureSigningKey throws when DICODE_DATADIR is unset", () => {
+  clearRelayEnv();
+  Deno.env.delete("DICODE_DATADIR");
+  assertThrows(() => ensureSigningKey(), Error, "DICODE_DATADIR");
+});
+
 Deno.test(
-  "rejects when broker signing-key file pinned in relay.yaml is missing",
-  async () => {
+  "ensureSigningKey on fresh datadir creates a loadable PKCS8 PEM at 0o600",
+  () => {
     clearRelayEnv();
-    Deno.env.set("STATUS_PASSWORD", "test-pw");
-    // DICODE_DATADIR points at a tempdir but we intentionally do NOT
-    // seed broker-signing.key — startServer's loadBrokerSigningKey does
-    // a readFileSync against the YAML-pinned path and surfaces ENOENT.
     const datadir = Deno.makeTempDirSync({ prefix: "dicode-relay-test-" });
     Deno.env.set("DICODE_DATADIR", datadir);
 
-    const { default: main } = await import("./task.ts");
-    const sdk = makeSdk({ base_url: "https://relay.example.com" });
+    ensureSigningKey();
 
-    await assertRejects(
-      // deno-lint-ignore no-explicit-any
-      () => main(sdk as any),
-    );
+    const keyPath = join(datadir, "relay", "broker-signing.key");
+    const pem = readFileSync(keyPath, "utf8");
+    // Sanity: PEM is PKCS8 (header reads "PRIVATE KEY", not "EC PRIVATE KEY"
+    // which would be SEC1) and parses as a P-256 key via node:crypto, which
+    // is what relay's loadBrokerSigningKey() does internally.
+    if (!pem.includes("BEGIN PRIVATE KEY")) {
+      throw new Error(
+        `expected PKCS8 PEM header at ${keyPath}, got:\n${pem.slice(0, 80)}`,
+      );
+    }
+    createPrivateKey(pem); // throws if malformed
+
+    // 0o600 = owner rw only. Linux honours this; on macOS the umask may
+    // widen the result but the mode bits we asked for should still be set.
+    const mode = statSync(keyPath).mode & 0o777;
+    assertEquals(mode, 0o600);
+  },
+);
+
+Deno.test(
+  "ensureSigningKey is idempotent — preserves existing key on subsequent calls",
+  () => {
+    clearRelayEnv();
+    const datadir = stageDatadirWithSigningKey();
+    const keyPath = join(datadir, "relay", "broker-signing.key");
+    const before = readFileSync(keyPath, "utf8");
+
+    ensureSigningKey(); // must not throw, must not regenerate.
+
+    const after = readFileSync(keyPath, "utf8");
+    assertEquals(after, before);
   },
 );
 
