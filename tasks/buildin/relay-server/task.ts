@@ -10,7 +10,7 @@
 // startup, so this task body just surfaces base_url as BASE_URL and hands
 // off to the relay's library entry point. No subprocess, no shell-out.
 
-import { startServer } from "npm:dicode-relay@^0.2/start";
+import { startServer } from "npm:dicode-relay@^0.1.6/start";
 import type { DicodeSdk } from "../../sdk.ts";
 
 export default async function main({ params }: DicodeSdk): Promise<void> {

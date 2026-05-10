@@ -4,7 +4,9 @@
     "jsr:@std/assert@1": "1.0.19",
     "jsr:@std/internal@^1.0.12": "1.0.13",
     "jsr:@std/yaml@1": "1.1.0",
+    "npm:@types/node@*": "22.15.15",
     "npm:dicode-relay@~0.1.4": "0.1.4",
+    "npm:dicode-relay@~0.1.6": "0.1.6",
     "npm:openai@4": "4.104.0"
   },
   "jsr": {
@@ -156,6 +158,21 @@
     },
     "dicode-relay@0.1.4": {
       "integrity": "sha512-bA+t9UYj6jWW1DMv+vaLiUw5/7RGdHX8rLjYTlJT2SSDVS1CGcsq1ypNdbVTQiyfHnsKvvOw+Ju/rHyM3qPKfA==",
+      "dependencies": [
+        "@bufbuild/protobuf",
+        "express",
+        "express-basic-auth",
+        "grant",
+        "js-yaml",
+        "lru-cache",
+        "uuid@14.0.0",
+        "ws",
+        "zod"
+      ],
+      "bin": true
+    },
+    "dicode-relay@0.1.6": {
+      "integrity": "sha512-9Ja5NzASzLvEeIAqus9wNiAt9Ln+WDTe9i6I/LW1gnSYsVLV3yos8ReTu+qfYibUsRiy5E+2S4TUHYUB3w8xvQ==",
       "dependencies": [
         "@bufbuild/protobuf",
         "express",

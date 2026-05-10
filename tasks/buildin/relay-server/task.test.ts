@@ -1,35 +1,35 @@
 /**
  * task.test.ts — unit tests for buildin/relay-server.
  *
- * All three cases below need to import ./task.ts, which transitively imports
- * `npm:dicode-relay@^0.2/start`. That entry point ships in dicode-relay 0.2.0,
- * tracked in dicode-ayo/dicode-relay#70 — until 0.2.0 is on npm the dynamic
- * import fails before any assertion runs.
+ * Exercises three cases the spec called out:
+ *   1. base_url param missing → task body throws before touching the relay.
+ *   2. broker signing-key file pinned in relay.yaml but not on disk →
+ *      startServer rejects (the published relay's loadBrokerSigningKey()
+ *      does an unconditional readFileSync when the YAML pins a path, even
+ *      under dryRun, so this is the real "required artefact missing"
+ *      failure mode surfaced by 0.1.6).
+ *   3. valid base_url + ${DICODE_DATADIR}/relay/broker-signing.key staged
+ *      on disk + STATUS_PASSWORD set → startServer({dryRun:true}) resolves.
  *
- * Strategy: gate every dynamic import behind `RELAY_PRERELEASE_PATH`. When
- * unset (the default in CI today), each test logs a skip-and-pass note.
- * When set to a local dicode-relay checkout's `src/start.ts`, the dynamic
- * import resolves via Deno's npm shim against that path and the cases run
- * end-to-end.
+ * Cases 1 and 2 exercise the task body (./task.ts) via a hand-rolled SDK
+ * mock — the harness in tasks/sdk-test.ts would dynamically re-import
+ * task.ts and lose env determinism between cases. Case 3 calls startServer
+ * directly so it stays decoupled from the supervisor's signal-handling
+ * scaffolding, which would otherwise leak Deno.addSignalListener handles
+ * into the test runner.
  *
- *   RELAY_PRERELEASE_PATH=/abs/path/to/dicode-relay deno test --allow-all \
- *     tasks/buildin/relay-server/task.test.ts
- *
- * TODO(dicode-relay#70): once 0.2.0 is published, drop the gate and let the
- * cases run unconditionally — the structure of each case is already
- * production-shaped.
- *
- * The harness in tasks/sdk-test.ts dynamically imports task.ts at
- * setupHarness time, so we cannot use it here; instead we hand-roll
- * minimal SDK mocks per test (same approach as the doppler provider).
+ * Note (deviation from spec): the spec called for a "STATUS_PASSWORD
+ * missing → throws" case. The published 0.1.6 relay's loadConfig() does
+ * not throw on unresolved ${VAR} — it logs a warning and collapses to "".
+ * The actual hard-failure surface for missing required artefacts is the
+ * broker signing-key file, hence case 2 above.
  */
 
 import { assertRejects } from "jsr:@std/assert@1";
-
-const RELAY_PRERELEASE_PATH = Deno.env.get("RELAY_PRERELEASE_PATH");
-const PRERELEASE_SKIP_MSG =
-  "skipped: set RELAY_PRERELEASE_PATH=<path-to-dicode-relay checkout> " +
-  "to run (gated on dicode-relay#70 publishing 0.2.0)";
+import { generateKeyPairSync } from "node:crypto";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { startServer } from "npm:dicode-relay@^0.1.6/start";
 
 // Doppler-fed env vars that the daemon would otherwise populate. We clear
 // all of them before each test so fixtures are deterministic regardless of
@@ -59,10 +59,33 @@ const RELAY_ENV_VARS = [
   "AZURE_CLIENT_ID",
   "AZURE_CLIENT_SECRET",
   "BASE_URL",
+  "BROKER_SIGNING_KEY",
+  "BROKER_SIGNING_KEY_FILE",
 ];
 
 function clearRelayEnv(): void {
   for (const k of RELAY_ENV_VARS) Deno.env.delete(k);
+}
+
+/**
+ * Create a fresh DICODE_DATADIR under a unique temp dir, seed it with a
+ * valid ECDSA P-256 broker signing key at ${DICODE_DATADIR}/relay/
+ * broker-signing.key, and export DICODE_DATADIR so the YAML's
+ * ${DICODE_DATADIR}/relay/broker-signing.key reference resolves to it.
+ */
+function stageDatadirWithSigningKey(): string {
+  const datadir = Deno.makeTempDirSync({ prefix: "dicode-relay-test-" });
+  mkdirSync(join(datadir, "relay"), { recursive: true });
+  const { privateKey } = generateKeyPairSync("ec", {
+    namedCurve: "prime256v1",
+    publicKeyEncoding: { type: "spki", format: "pem" },
+    privateKeyEncoding: { type: "pkcs8", format: "pem" },
+  });
+  writeFileSync(join(datadir, "relay", "broker-signing.key"), privateKey, {
+    mode: 0o600,
+  });
+  Deno.env.set("DICODE_DATADIR", datadir);
+  return datadir;
 }
 
 interface MockSdk {
@@ -102,13 +125,9 @@ function makeSdk(paramValues: Record<string, string>): MockSdk {
 }
 
 Deno.test("rejects when base_url param is missing", async () => {
-  if (!RELAY_PRERELEASE_PATH) {
-    console.log(PRERELEASE_SKIP_MSG);
-    return;
-  }
   clearRelayEnv();
   Deno.env.set("STATUS_PASSWORD", "test-pw");
-  Deno.env.set("DICODE_DATADIR", "/tmp/dicode-test-datadir");
+  stageDatadirWithSigningKey();
 
   const { default: main } = await import("./task.ts");
   const sdk = makeSdk({}); // base_url intentionally unset.
@@ -121,46 +140,35 @@ Deno.test("rejects when base_url param is missing", async () => {
   );
 });
 
-Deno.test("rejects when STATUS_PASSWORD is missing", async () => {
-  if (!RELAY_PRERELEASE_PATH) {
-    console.log(PRERELEASE_SKIP_MSG);
-    return;
-  }
-  clearRelayEnv();
-  Deno.env.set("DICODE_DATADIR", "/tmp/dicode-test-datadir");
-  // STATUS_PASSWORD intentionally unset — relay's loadConfig() resolves
-  // ${STATUS_PASSWORD} from process.env and must throw on miss.
-
-  const { default: main } = await import("./task.ts");
-  const sdk = makeSdk({ base_url: "https://relay.example.com" });
-
-  await assertRejects(
-    // deno-lint-ignore no-explicit-any
-    () => main(sdk as any),
-  );
-});
-
 Deno.test(
-  "valid base_url + required env → startServer({dryRun:true}) resolves",
+  "rejects when broker signing-key file pinned in relay.yaml is missing",
   async () => {
-    if (!RELAY_PRERELEASE_PATH) {
-      console.log(PRERELEASE_SKIP_MSG);
-      return;
-    }
     clearRelayEnv();
     Deno.env.set("STATUS_PASSWORD", "test-pw");
-    Deno.env.set("DICODE_DATADIR", "/tmp/dicode-test-datadir");
+    // DICODE_DATADIR points at a tempdir but we intentionally do NOT
+    // seed broker-signing.key — startServer's loadBrokerSigningKey does
+    // a readFileSync against the YAML-pinned path and surfaces ENOENT.
+    const datadir = Deno.makeTempDirSync({ prefix: "dicode-relay-test-" });
+    Deno.env.set("DICODE_DATADIR", datadir);
 
-    const { startServer } = await import(
-      "npm:dicode-relay@^0.2/start"
-    ) as {
-      startServer: (opts: {
-        configPath: string;
-        dryRun: boolean;
-      }) => Promise<{ close: () => Promise<void> }>;
-    };
+    const { default: main } = await import("./task.ts");
+    const sdk = makeSdk({ base_url: "https://relay.example.com" });
 
+    await assertRejects(
+      // deno-lint-ignore no-explicit-any
+      () => main(sdk as any),
+    );
+  },
+);
+
+Deno.test(
+  "valid base_url + staged datadir → startServer({dryRun:true}) resolves",
+  async () => {
+    clearRelayEnv();
+    Deno.env.set("STATUS_PASSWORD", "test-pw");
+    stageDatadirWithSigningKey();
     Deno.env.set("BASE_URL", "https://relay.example.com");
+
     const configPath = new URL("./relay.yaml", import.meta.url).pathname;
     const handle = await startServer({ configPath, dryRun: true });
     await handle.close();
