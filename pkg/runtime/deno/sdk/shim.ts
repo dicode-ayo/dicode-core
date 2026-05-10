@@ -87,6 +87,23 @@ export interface DicodeSecrets {
   has: (key: string) => Promise<boolean>;
 }
 
+// TaskSummary is what dicode.list_tasks() returns per task. The IPC server
+// trims the spec to fields already exposed via /api/tasks; filesystem paths
+// and permission details are deliberately not surfaced.
+export interface TaskSummary {
+  id:           string;
+  name:         string;
+  description?: string;
+  params?:      unknown;
+  // template: optional namespaced marker (e.g. "dicode.io/oauth-app").
+  // Set in the base task.yaml; propagates to every entry that inherits
+  // via ref.path. Use this to discover template instances at runtime.
+  template?:    string;
+  // webhook: webhook path for tasks with a webhook trigger.
+  webhook?:     string;
+  enabled:      boolean;
+}
+
 export interface Dicode {
   // task_id: the fully-namespaced id of the currently-running task (e.g.
   // "buildin/ai-agent"). Populated from the IPC handshake so task code can
@@ -95,7 +112,7 @@ export interface Dicode {
   // run_id: the id of the current run (uuid). Same source as task_id.
   run_id:         string;
   run_task:       (taskID: string, params?: Record<string, string>)  => Promise<unknown>;
-  list_tasks:     ()                                                   => Promise<unknown>;
+  list_tasks:     ()                                                   => Promise<TaskSummary[]>;
   get_runs:       (taskID: string, opts?: { limit?: number })         => Promise<unknown>;
   // set_group labels the current run with a free-text string used by the
   // WebUI to collapse same-group siblings (#116). Last write wins; only
@@ -317,7 +334,7 @@ const dicode: Dicode = {
   task_id:        __hsResp__.task_id ?? "",
   run_id:         __hsResp__.run_id ?? "",
   run_task:       (taskID, params)  => __call__({ method: "dicode.run_task",       taskID, params: params ?? {} }),
-  list_tasks:     ()                => __call__({ method: "dicode.list_tasks" }),
+  list_tasks:     ()                => __call__({ method: "dicode.list_tasks" }) as Promise<TaskSummary[]>,
   get_runs:       (taskID, opts)    => __call__({ method: "dicode.get_runs",        taskID, limit: opts?.limit ?? 10 }),
   set_group:      (label)           => __call__({ method: "dicode.set_group",       group: String(label ?? "") }) as Promise<void>,
   secrets_set:    (key, value)      => __call__({ method: "dicode.secrets_set",     key, stringValue: value }) as Promise<void>,

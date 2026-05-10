@@ -113,6 +113,46 @@ test.describe('Auth Providers dashboard', () => {
     expect(text.toLowerCase()).toContain('relay');
   });
 
+  test('list auto-discovers _oauth-app inheritors via the template marker', async ({ request }) => {
+    // The fixture taskset registers `fixture-oauth`, an instance of
+    // tasks/auth/_oauth-app/task.yaml with `provider: fixture` overrides.
+    // Because _oauth-app is marked `template: dicode.io/oauth-app`, the
+    // dashboard scans `dicode.list_tasks()` and includes it automatically —
+    // no hardcoded entry in the auth-providers task code.
+    await login(request, TEST_PASSPHRASE);
+    const res = await request.post('/hooks/auth-providers', {
+      headers: { 'Content-Type': 'application/json' },
+      data: { action: 'list' },
+    });
+    expect(res.ok()).toBe(true);
+    const body = await res.json() as { result: Array<Record<string, unknown>> } | Array<Record<string, unknown>>;
+    const rows = Array.isArray(body) ? body : body.result;
+    const fixture = rows.find(r => r.key === 'fixture');
+    expect(fixture).toBeDefined();
+    expect(fixture).toMatchObject({
+      key:             'fixture',
+      pkce:            true,
+      configured:      true,
+      has_token:       false,
+      label:           'Fixture OAuth',
+      color:           '#abc123',
+      secret_required: false,
+    });
+    expect(fixture?.standalone).toMatchObject({ webhookPath: '/hooks/fixture-oauth' });
+  });
+
+  test('connect routes _oauth-app inheritors to their webhook', async ({ request }) => {
+    await login(request, TEST_PASSPHRASE);
+    const res = await request.post('/hooks/auth-providers', {
+      headers: { 'Content-Type': 'application/json' },
+      data: { action: 'connect', provider: 'fixture' },
+    });
+    expect(res.ok()).toBe(true);
+    const body = await res.json() as { result: { url?: string } } | { url?: string };
+    const out = (body as { result: { url?: string } }).result ?? body as { url?: string };
+    expect(out.url).toContain('/hooks/fixture-oauth');
+  });
+
   test('connect with standalone openrouter returns the webhook URL', async ({ request }) => {
     await login(request, TEST_PASSPHRASE);
     const res = await request.post('/hooks/auth-providers', {

@@ -650,6 +650,67 @@ func TestServer_Dicode_ListTasks(t *testing.T) {
 	}
 }
 
+// TestServer_Dicode_ListTasks_TemplateAndWebhook confirms that the IPC
+// summary surfaces Spec.Template, Spec.Trigger.Webhook, and Spec.Enabled —
+// the fields buildin/auth-providers needs to auto-detect _oauth-app
+// inheritors without hardcoding a per-task allowlist.
+func TestServer_Dicode_ListTasks_TemplateAndWebhook(t *testing.T) {
+	e := newTestEnv(t)
+	_ = e.reg.Register(&task.Spec{
+		ID:       "auth/google-oauth",
+		Name:     "Google OAuth",
+		Template: "dicode.io/oauth-app",
+		Trigger:  task.TriggerConfig{Webhook: "/hooks/google-oauth"},
+		Enabled:  true,
+	})
+	_ = e.reg.Register(&task.Spec{
+		ID:      "auth/disabled-oauth",
+		Name:    "Disabled OAuth",
+		Enabled: false, // intentionally not template-marked; default false-zero
+	})
+
+	spec := specWithDicode("caller", &task.DicodePermissions{ListTasks: true})
+	conn, _ := e.startWithSpec(t, nil, nil, spec, nil)
+	sendMsg(t, conn, map[string]any{"id": "1", "method": "dicode.list_tasks"})
+	resp := recvMsg(t, conn)
+
+	tasks, ok := resp["result"].([]any)
+	if !ok {
+		t.Fatalf("expected array, got %T", resp["result"])
+	}
+	if len(tasks) != 2 {
+		t.Fatalf("expected 2 tasks, got %d", len(tasks))
+	}
+
+	byID := map[string]map[string]any{}
+	for _, raw := range tasks {
+		m, ok := raw.(map[string]any)
+		if !ok {
+			t.Fatalf("expected map, got %T", raw)
+		}
+		byID[m["id"].(string)] = m
+	}
+
+	g := byID["auth/google-oauth"]
+	if g["template"] != "dicode.io/oauth-app" {
+		t.Errorf("expected template=dicode.io/oauth-app, got %v", g["template"])
+	}
+	if g["webhook"] != "/hooks/google-oauth" {
+		t.Errorf("expected webhook=/hooks/google-oauth, got %v", g["webhook"])
+	}
+	if g["enabled"] != true {
+		t.Errorf("expected enabled=true, got %v", g["enabled"])
+	}
+
+	d := byID["auth/disabled-oauth"]
+	if _, hasTemplate := d["template"]; hasTemplate {
+		t.Errorf("expected no template field on un-marked task; got %v", d["template"])
+	}
+	if d["enabled"] != false {
+		t.Errorf("expected enabled=false, got %v", d["enabled"])
+	}
+}
+
 func TestServer_Dicode_GetRuns_Denied(t *testing.T) {
 	e := newTestEnv(t)
 	conn, _ := e.start(t, nil, nil)

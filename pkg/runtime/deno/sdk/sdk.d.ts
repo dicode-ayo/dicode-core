@@ -57,13 +57,31 @@ declare interface DicodeSecrets {
   has: (key: string) => Promise<boolean>;
 }
 
+/** Summary returned for one task by `dicode.list_tasks()`. The IPC server
+ *  trims the spec to fields already visible in /api/tasks; filesystem paths
+ *  and permission details are deliberately not exposed. */
+declare interface TaskSummary {
+  id:           string;
+  name:         string;
+  description?: string;
+  params?:      unknown;
+  /** Optional namespaced template marker (e.g. "dicode.io/oauth-app").
+   *  Set in the base task.yaml; propagates to every entry that inherits
+   *  via `ref.path`. Use this to discover instances of a template at runtime
+   *  without hardcoding a per-task allowlist. */
+  template?:    string;
+  /** Webhook path for tasks with a webhook trigger (e.g. "/hooks/google-oauth"). */
+  webhook?:     string;
+  enabled:      boolean;
+}
+
 declare interface Dicode {
   /** Fully-namespaced id of the currently-running task (e.g. "buildin/ai-agent"). */
   task_id:        string;
   /** Id of the current run (uuid). */
   run_id:         string;
   run_task:       (taskID: string, params?: Record<string, string>) => Promise<unknown>;
-  list_tasks:     ()                                                 => Promise<unknown>;
+  list_tasks:     ()                                                 => Promise<TaskSummary[]>;
   get_runs:       (taskID: string, opts?: { limit?: number })        => Promise<unknown>;
   secrets_set:    (key: string, value: string) => Promise<void>;
   secrets_delete: (key: string)                => Promise<void>;

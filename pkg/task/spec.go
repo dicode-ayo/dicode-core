@@ -84,11 +84,11 @@ type TriggerConfig struct {
 
 // Param defines a user-configurable input for a task.
 type Param struct {
-	Name        string `yaml:"name"`
-	Type        string `yaml:"type"` // "string" | "number" | "boolean" | "cron"
-	Default     string `yaml:"default"`
-	Description string `yaml:"description"`
-	Required    bool   `yaml:"required"`
+	Name        string `yaml:"name"        json:"name"`
+	Type        string `yaml:"type"        json:"type,omitempty"` // "string" | "number" | "boolean" | "cron"
+	Default     string `yaml:"default"     json:"default,omitempty"`
+	Description string `yaml:"description" json:"description,omitempty"`
+	Required    bool   `yaml:"required"    json:"required,omitempty"`
 }
 
 // Params is a list of Param values that can be written in two equivalent YAML forms:
@@ -366,6 +366,15 @@ type Spec struct {
 	// Default is true; the resolver sets it to true on load and flips it
 	// when an override says false.
 	Enabled bool `yaml:"-" json:"enabled"`
+
+	// Template is an optional, namespaced identifier declaring that this
+	// task is an instance of a generic template. Set in the BASE task.yaml;
+	// the resolver propagates it to every entry that inherits via `ref.path`
+	// because the field is part of the merged spec like any other.
+	// Format: reverse-DNS prefix + slash + slug, e.g. "dicode.io/oauth-app".
+	// Used today by `buildin/auth-providers` to surface BYO OAuth tasks in
+	// the dashboard without hardcoding a per-task allowlist.
+	Template string `yaml:"template,omitempty" json:"template,omitempty"`
 
 	// TaskDir is the directory path of the task in the repo (not stored in YAML).
 	TaskDir string `yaml:"-" json:"-"`

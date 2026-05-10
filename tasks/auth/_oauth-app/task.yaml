@@ -1,6 +1,10 @@
 apiVersion: dicode/v1
 kind: Task
 name: OAuth
+# Template marker — propagates to every taskset entry that inherits via
+# ref.path: ./_oauth-app/task.yaml. The dashboard's auth-providers panel
+# uses this to auto-list BYO OAuth tasks (no hardcoded allowlist).
+template: dicode.io/oauth-app
 description: |
   Generic OAuth 2.0 task — the BYO entry point for any provider that the
   dicode-relay broker does not handle for you (e.g. self-hosted GitLab,

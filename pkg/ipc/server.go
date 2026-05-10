@@ -649,11 +649,19 @@ func (s *Server) handleConn(conn net.Conn) {
 				reply(req.ID, nil, "ipc: permission denied (tasks.list)")
 				continue
 			}
+			// Summary intentionally trimmed: id, name, description, params,
+			// template, webhook, enabled. NOT exposed: TaskDir (filesystem
+			// leakage), Permissions (could hint at secret env-var names),
+			// Trigger.WebhookSecret (would defeat HMAC auth). The fields
+			// here are all already visible via the WebUI's /api/tasks JSON.
 			type taskSummary struct {
 				ID          string `json:"id"`
 				Name        string `json:"name"`
 				Description string `json:"description,omitempty"`
 				Params      any    `json:"params,omitempty"`
+				Template    string `json:"template,omitempty"`
+				Webhook     string `json:"webhook,omitempty"`
+				Enabled     bool   `json:"enabled"`
 			}
 			all := s.registry.All()
 			summaries := make([]taskSummary, 0, len(all))
@@ -663,6 +671,9 @@ func (s *Server) handleConn(conn net.Conn) {
 					Name:        sp.Name,
 					Description: sp.Description,
 					Params:      sp.Params,
+					Template:    sp.Template,
+					Webhook:     sp.Trigger.Webhook,
+					Enabled:     sp.Enabled,
 				})
 			}
 			reply(req.ID, summaries, "")

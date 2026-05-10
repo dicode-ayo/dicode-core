@@ -40,6 +40,7 @@ permissions:
     - "*"  # broker URL is config-driven; wildcard matches relay-client pattern
   dicode:
     secrets_has: true  # dicode.secrets.has — presence check for <PROVIDER>_ACCESS_TOKEN
+    list_tasks:  true  # dicode.list_tasks   — auto-discover _oauth-app inheritors
     tasks:
       # Only auth-start is callable. The per-provider auth/<p>-oauth tasks
       # return HTML (not a JSON {url} contract) so they cannot be invoked
