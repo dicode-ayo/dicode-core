@@ -193,6 +193,24 @@
 
 ### Breaking
 
+- **`tasks/auth/taskset.yaml` per-provider entries removed.** All 15
+  `_oauth-app` inheritor entries (github, slack, google, spotify, linear,
+  discord, gitlab, airtable, notion, confluence, salesforce, stripe,
+  office365, azure, looker) were deleted. The dicode-relay broker (>= 0.1.5)
+  handles the first 14 end-to-end via `buildin/auth-{providers,start,relay}`;
+  for any provider the broker doesn't carry (looker, plus anything BYO),
+  operators instantiate `_oauth-app/task.yaml` from their own taskset and
+  the dashboard's auth-providers panel auto-discovers it via the new
+  `template: dicode.io/oauth-app` marker. The only entry that remains in
+  this taskset is `openrouter-oauth` — a standalone non-broker PKCE flow
+  that uses a callback URL request param, so the broker can't proxy it.
+  Operators with `/hooks/<provider>-oauth` callback URLs registered at
+  GitHub/Google/Slack/etc. for their own OAuth apps have two migration
+  paths: (a) switch to the broker flow — no callback re-registration
+  needed; (b) instantiate `auth/_oauth-app/task.yaml` from their own
+  taskset with a fresh `/hooks/<their-name>-oauth` route and re-register
+  the callback. See `docs/oauth.md` and the header of
+  `tasks/auth/taskset.yaml` for the BYO walkthrough.
 - **`buildin/auth-providers` `providers` param default changed** from a
   hardcoded 16-key list to `""` (= "all"). With the new broker-backed
   catalogue, an empty `providers` parameter now returns every provider the
