@@ -123,6 +123,18 @@ spec:
       ref:
         path: ./relay-client/task.yaml
 
+    # ─── relay-server: in-process dicode-relay supervisor ────────────────────
+    # Runs dicode-relay under the daemon's Deno runtime with OAuth client
+    # secrets + the status password sourced from Doppler via
+    # buildin/secret-providers/doppler. base_url is supplied via task params
+    # (set per-host with `dicode tasks override buildin/relay-server --param
+    # base_url=https://...`). See tasks/buildin/relay-server/task.yaml for the
+    # full env contract and tasks/buildin/relay-server/relay.yaml for the
+    # shipped config template.
+    relay-server:
+      ref:
+        path: ./relay-server/task.yaml
+
     run-inputs-cleanup:
       ref:
         path: ./run-inputs-cleanup/task.yaml
