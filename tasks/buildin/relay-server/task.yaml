@@ -29,10 +29,24 @@ params:
 permissions:
   net:
     - "*"
+  fs:
+    # The relay's loadBrokerSigningKey() writes ${DICODE_DATADIR}/relay/broker-signing.key
+    # on first start (and reads it on subsequent starts) so existing sessions
+    # survive task restarts. Scope is the relay/ subdir only — not all of
+    # DATADIR — so a buggy relay can't clobber the daemon's SQLite or secrets
+    # store. The reconciler expands ${DATADIR} at task-load time (see
+    # pkg/task/template.go); paths are then plumbed into --allow-read/-write.
+    - path: "${DATADIR}/relay"
+      permission: rw
   env:
     # Read-only platform vars (no `from:`) — provided by the daemon at task spawn.
     - DICODE_DATADIR
     - DICODE_VERSION
+    # Set by task.ts from the `base_url` param so the relay's loadConfig()
+    # can resolve ${BASE_URL} in relay.yaml. Bare entry (no `from:`) — this
+    # is a non-secret runtime var the task body writes itself via Deno.env.set,
+    # not a value the daemon resolves.
+    - BASE_URL
 
     # Required secret — task fails fast if absent from Doppler.
     - name: STATUS_PASSWORD
