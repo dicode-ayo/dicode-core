@@ -1,0 +1,141 @@
+apiVersion: dicode/v1
+kind: Task
+name: "Relay Server"
+description: >
+  Runs dicode-relay in-process under the daemon's Deno runtime. OAuth client
+  secrets and the status password come from Doppler via the existing
+  buildin/secret-providers/doppler task.
+
+  Set the public base_url via task overrides:
+    dicode tasks override buildin/relay-server --param base_url=https://relay.example.com
+  (or via the WebUI overrides dialog).
+
+runtime: deno
+
+trigger:
+  daemon: true
+  restart: always
+
+params:
+  base_url:
+    type: string
+    required: true
+    description: >
+      Public URL the relay is reachable at (used as the OAuth callback origin).
+      No default — override per-host via:
+        dicode tasks override buildin/relay-server --param base_url=https://...
+      Example: https://relay.example.com (or your Cloudflare Tunnel hostname).
+
+permissions:
+  net:
+    - "*"
+  fs:
+    # The relay's loadBrokerSigningKey() writes ${DICODE_DATADIR}/relay/broker-signing.key
+    # on first start (and reads it on subsequent starts) so existing sessions
+    # survive task restarts. Scope is the relay/ subdir only — not all of
+    # DATADIR — so a buggy relay can't clobber the daemon's SQLite or secrets
+    # store. The reconciler expands ${DATADIR} at task-load time (see
+    # pkg/task/template.go); paths are then plumbed into --allow-read/-write.
+    - path: "${DATADIR}/relay"
+      permission: rw
+  env:
+    # Read-only platform vars (no `from:`) — provided by the daemon at task spawn.
+    - DICODE_DATADIR
+    - DICODE_VERSION
+    # Set by task.ts from the `base_url` param so the relay's loadConfig()
+    # can resolve ${BASE_URL} in relay.yaml. Bare entry (no `from:`) — this
+    # is a non-secret runtime var the task body writes itself via Deno.env.set,
+    # not a value the daemon resolves.
+    - BASE_URL
+
+    # Required secret — task fails fast if absent from Doppler.
+    - name: STATUS_PASSWORD
+      from: task:secret-providers/doppler
+
+    # OAuth providers — all optional. The relay silently skips any provider
+    # whose client_id resolves to empty, so a partial Doppler config still
+    # starts a working relay with only the providers you populated.
+    # Provider set mirrors relay.yaml.example (dicode-ayo/dicode-relay).
+    - name: GITHUB_CLIENT_ID
+      from: task:secret-providers/doppler
+      optional: true
+    - name: GITHUB_CLIENT_SECRET
+      from: task:secret-providers/doppler
+      optional: true
+
+    - name: SLACK_CLIENT_ID
+      from: task:secret-providers/doppler
+      optional: true
+
+    - name: GOOGLE_CLIENT_ID
+      from: task:secret-providers/doppler
+      optional: true
+    - name: GOOGLE_CLIENT_SECRET
+      from: task:secret-providers/doppler
+      optional: true
+
+    - name: SPOTIFY_CLIENT_ID
+      from: task:secret-providers/doppler
+      optional: true
+
+    - name: LINEAR_CLIENT_ID
+      from: task:secret-providers/doppler
+      optional: true
+
+    - name: DISCORD_CLIENT_ID
+      from: task:secret-providers/doppler
+      optional: true
+
+    - name: GITLAB_CLIENT_ID
+      from: task:secret-providers/doppler
+      optional: true
+    - name: GITLAB_CLIENT_SECRET
+      from: task:secret-providers/doppler
+      optional: true
+
+    - name: AIRTABLE_CLIENT_ID
+      from: task:secret-providers/doppler
+      optional: true
+    - name: AIRTABLE_CLIENT_SECRET
+      from: task:secret-providers/doppler
+      optional: true
+
+    - name: NOTION_CLIENT_ID
+      from: task:secret-providers/doppler
+      optional: true
+    - name: NOTION_CLIENT_SECRET
+      from: task:secret-providers/doppler
+      optional: true
+
+    - name: CONFLUENCE_CLIENT_ID
+      from: task:secret-providers/doppler
+      optional: true
+
+    - name: SALESFORCE_CLIENT_ID
+      from: task:secret-providers/doppler
+      optional: true
+
+    - name: STRIPE_CLIENT_ID
+      from: task:secret-providers/doppler
+      optional: true
+    - name: STRIPE_CLIENT_SECRET
+      from: task:secret-providers/doppler
+      optional: true
+
+    - name: OFFICE365_CLIENT_ID
+      from: task:secret-providers/doppler
+      optional: true
+    - name: OFFICE365_CLIENT_SECRET
+      from: task:secret-providers/doppler
+      optional: true
+
+    - name: AZURE_CLIENT_ID
+      from: task:secret-providers/doppler
+      optional: true
+    - name: AZURE_CLIENT_SECRET
+      from: task:secret-providers/doppler
+      optional: true
+
+notify:
+  on_success: false
+  on_failure: true
