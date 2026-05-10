@@ -28,12 +28,18 @@ export default async function main({ params }: DicodeSdk): Promise<void> {
   const configPath = new URL("./relay.yaml", import.meta.url).pathname;
   const handle = await startServer({ configPath });
 
+  // First buildin to use Deno.addSignalListener directly: the relay's
+  // startServer returns a long-lived http.Server rather than an abortable
+  // promise, so we have to bridge OS signals to handle.close() manually.
+  // Future buildins that expose AbortSignal should prefer that pattern.
+  //
+  // No explicit Deno.exit(0): handle.close() tears down the http.Server,
+  // which fires the `close` event below, which resolves main(). Exiting
+  // explicitly bypasses the daemon engine's "task returned" accounting
+  // (compare relay-client/task.ts) and short-circuits any in-flight
+  // microtasks the relay's close() queued.
   const shutdown = async () => {
-    try {
-      await handle.close();
-    } finally {
-      Deno.exit(0);
-    }
+    await handle.close();
   };
   Deno.addSignalListener("SIGTERM", shutdown);
   Deno.addSignalListener("SIGINT", shutdown);
