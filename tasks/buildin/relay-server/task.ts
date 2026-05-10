@@ -10,7 +10,7 @@
 // startup, so this task body just surfaces base_url as BASE_URL and hands
 // off to the relay's library entry point. No subprocess, no shell-out.
 
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { generateKeyPairSync } from "node:crypto";
 import { startServer } from "npm:dicode-relay@^0.1.6/start";
@@ -38,7 +38,13 @@ export function ensureSigningKey(): void {
     );
   }
   const keyPath = join(dataDir, "relay", "broker-signing.key");
-  if (existsSync(keyPath)) return;
+  if (existsSync(keyPath)) {
+    // Tighten perms for keys that may have been written 0o644 by relay
+    // 0.1.6's now-removed auto-generate path before this supervisor took
+    // over the bootstrap responsibility. Idempotent on already-0o600 files.
+    chmodSync(keyPath, 0o600);
+    return;
+  }
   mkdirSync(dirname(keyPath), { recursive: true });
   const { privateKey } = generateKeyPairSync("ec", {
     namedCurve: "prime256v1",
@@ -49,7 +55,19 @@ export function ensureSigningKey(): void {
     privateKeyEncoding: { type: "pkcs8", format: "pem" },
   });
   // With privateKeyEncoding set, `privateKey` is a PKCS8 PEM string.
-  writeFileSync(keyPath, privateKey, { mode: 0o600 });
+  // flag: "wx" fails loudly if another writer raced us — better than
+  // silently clobbering and leaving two daemons disagreeing on the broker
+  // pubkey. The `restart: always` policy means a clean re-dispatch will
+  // short-circuit on existsSync above.
+  try {
+    writeFileSync(keyPath, privateKey, { flag: "wx", mode: 0o600 });
+  } catch (err) {
+    throw new Error(
+      `[relay-server] failed to write broker signing key at ${keyPath}: ` +
+        `${err instanceof Error ? err.message : String(err)}. ` +
+        `Check that DICODE_DATADIR (${dataDir}) is writable and has space.`,
+    );
+  }
   console.warn(
     `[relay-server] generated new broker signing key at ${keyPath} (first-run bootstrap)`,
   );
