@@ -116,6 +116,25 @@ Containers are named `dicode-<runID>`. On startup, dicode removes any containers
 
 ---
 
+## Hardening fields
+
+The `docker:` section supports container-isolation fields that map to podman CLI flags:
+
+| Field | Podman flag |
+| --- | --- |
+| `network_mode` | `--network` |
+| `extra_hosts` | `--add-host` (repeated) |
+| `cap_drop` / `cap_add` | `--cap-drop` / `--cap-add` |
+| `security_opt` | `--security-opt` |
+| `read_only` | `--read-only` |
+| `user` | `--user` |
+
+A startup warning is emitted for values that visibly weaken isolation — `network_mode: host`, `cap_add` of `SYS_ADMIN`/`SYS_PTRACE`/`SYS_MODULE`/`ALL`, and `security_opt` disabling seccomp/AppArmor/SELinux. The task still runs; the warning surfaces in the UI so reviewers notice.
+
+See [Task Format → Container fields reference](./concepts/task-format.md#container-fields-reference) for the full schema and a hardened-defaults example.
+
+---
+
 ## Configuration reference
 
 No `dicode.yaml` entry is required. Podman is registered automatically if the binary is found in `PATH` at startup.

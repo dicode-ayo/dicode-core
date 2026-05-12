@@ -116,6 +116,9 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	if cfg.WorkingDir != "" {
 		containerCfg.WorkingDir = cfg.WorkingDir
 	}
+	if cfg.User != "" {
+		containerCfg.User = cfg.User
+	}
 	var envList []string
 	for k, v := range cfg.EnvVars {
 		envList = append(envList, k+"="+v)
@@ -140,9 +143,15 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	containerCfg.ExposedPorts = exposedPorts
 
 	hostCfg := &container.HostConfig{
-		Binds:        cfg.Volumes,
-		PortBindings: portBindings,
-		AutoRemove:   false,
+		Binds:          cfg.Volumes,
+		PortBindings:   portBindings,
+		AutoRemove:     false,
+		NetworkMode:    container.NetworkMode(cfg.NetworkMode),
+		ExtraHosts:     cfg.ExtraHosts,
+		CapAdd:         cfg.CapAdd,
+		CapDrop:        cfg.CapDrop,
+		SecurityOpt:    cfg.SecurityOpt,
+		ReadonlyRootfs: cfg.ReadOnly,
 	}
 
 	created, err := dc.ContainerCreate(ctx, containerCfg, hostCfg, nil, nil, "")

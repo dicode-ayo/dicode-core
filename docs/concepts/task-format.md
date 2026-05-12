@@ -284,6 +284,30 @@ Use **Edit code** on the task page to edit the Dockerfile directly in the web UI
 | `docker.working_dir` | string | Container working directory |
 | `docker.env_vars` | map | Literal environment variables injected into container |
 | `docker.pull_policy` | string | `missing` (default), `always`, `never`. Ignored when using `build`. |
+| `docker.network_mode` | string | Container network — `bridge` (default for docker), `host`, `none`, or a user-defined network name. `host` collapses isolation; a startup warning is emitted. |
+| `docker.extra_hosts` | list | Extra `/etc/hosts` entries — `"<name>:<ip>"`. Use `host.docker.internal:host-gateway` to reach host services from a bridge-networked container. |
+| `docker.cap_drop` | list | Linux capabilities to drop, e.g. `[ALL]`. |
+| `docker.cap_add` | list | Linux capabilities to re-add after `cap_drop`. Granting `SYS_ADMIN`, `SYS_PTRACE`, `SYS_MODULE`, or `ALL` emits a warning — these can enable container escape. |
+| `docker.security_opt` | list | Container security options, e.g. `["no-new-privileges:true"]`. Disabling sandbox layers (`seccomp=unconfined`, `apparmor=unconfined`, `label=disable`) emits a warning. |
+| `docker.read_only` | bool | Mount the container rootfs read-only. Pair with explicit tmpfs/volumes for any paths that need writes. |
+| `docker.user` | string | Run the container as `<uid>[:<gid>]` or `<name>[:<group>]`. Overrides the image's `USER` directive. |
+
+#### Hardened defaults
+
+For daemon tasks that don't need root or host networking, a defense-in-depth baseline:
+
+```yaml
+docker:
+  image: cloudflare/cloudflared:latest
+  network_mode: bridge
+  extra_hosts: ["host.docker.internal:host-gateway"]
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  read_only: true
+  user: "65532:65532"   # nonroot
+```
+
+This keeps services bound to `127.0.0.1` on the host unreachable from the container, drops every capability, blocks setuid escalation, and runs unprivileged.
 
 **Live logs** — container stdout/stderr is streamed line-by-line to the run log as it runs.
 

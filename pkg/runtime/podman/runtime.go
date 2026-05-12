@@ -267,6 +267,27 @@ func (e *executor) buildArgs(cfg *task.DockerConfig, imageTag, containerName, ru
 	if cfg.WorkingDir != "" {
 		args = append(args, "--workdir", cfg.WorkingDir)
 	}
+	if cfg.NetworkMode != "" {
+		args = append(args, "--network", cfg.NetworkMode)
+	}
+	for _, h := range cfg.ExtraHosts {
+		args = append(args, "--add-host", h)
+	}
+	for _, c := range cfg.CapDrop {
+		args = append(args, "--cap-drop", c)
+	}
+	for _, c := range cfg.CapAdd {
+		args = append(args, "--cap-add", c)
+	}
+	for _, o := range cfg.SecurityOpt {
+		args = append(args, "--security-opt", o)
+	}
+	if cfg.ReadOnly {
+		args = append(args, "--read-only")
+	}
+	if cfg.User != "" {
+		args = append(args, "--user", cfg.User)
+	}
 	// Pull policy only applies when using a pre-built image (not a local build).
 	if cfg.Build == nil {
 		switch cfg.PullPolicy {

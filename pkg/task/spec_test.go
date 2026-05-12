@@ -80,3 +80,160 @@ provider:
 		t.Fatalf("CacheTTL = %v, want 5m", s.Provider.CacheTTL)
 	}
 }
+
+func TestDockerConfig_HardeningFields_Parse(t *testing.T) {
+	src := strings.TrimSpace(`
+name: tunnel
+runtime: docker
+trigger:
+  daemon: true
+docker:
+  image: cloudflare/cloudflared:latest
+  network_mode: bridge
+  extra_hosts:
+    - host.docker.internal:host-gateway
+    - api.local:10.0.0.5
+  cap_drop: [ALL]
+  security_opt:
+    - "no-new-privileges:true"
+  read_only: true
+  user: "65532:65532"
+`)
+	var s Spec
+	if err := yaml.NewDecoder(strings.NewReader(src)).Decode(&s); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if s.Docker == nil {
+		t.Fatalf("Docker was nil")
+	}
+	d := s.Docker
+	if d.NetworkMode != "bridge" {
+		t.Errorf("NetworkMode = %q, want bridge", d.NetworkMode)
+	}
+	if got, want := d.ExtraHosts, []string{"host.docker.internal:host-gateway", "api.local:10.0.0.5"}; !equalSlice(got, want) {
+		t.Errorf("ExtraHosts = %v, want %v", got, want)
+	}
+	if got, want := d.CapDrop, []string{"ALL"}; !equalSlice(got, want) {
+		t.Errorf("CapDrop = %v, want %v", got, want)
+	}
+	if got, want := d.SecurityOpt, []string{"no-new-privileges:true"}; !equalSlice(got, want) {
+		t.Errorf("SecurityOpt = %v, want %v", got, want)
+	}
+	if !d.ReadOnly {
+		t.Errorf("ReadOnly = false, want true")
+	}
+	if d.User != "65532:65532" {
+		t.Errorf("User = %q, want 65532:65532", d.User)
+	}
+}
+
+func TestDockerConfig_HardeningFields_DefaultsZero(t *testing.T) {
+	src := strings.TrimSpace(`
+name: minimal
+runtime: docker
+trigger: { manual: true }
+docker:
+  image: alpine
+`)
+	var s Spec
+	if err := yaml.NewDecoder(strings.NewReader(src)).Decode(&s); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	d := s.Docker
+	if d.NetworkMode != "" || len(d.ExtraHosts) != 0 || len(d.CapDrop) != 0 ||
+		len(d.SecurityOpt) != 0 || d.ReadOnly || d.User != "" {
+		t.Errorf("hardening fields should be zero-valued when omitted, got %+v", d)
+	}
+}
+
+func TestDockerConfig_HardeningWarnings(t *testing.T) {
+	cases := []struct {
+		name      string
+		yaml      string
+		mustMatch []string // substrings that must appear in s.Warnings
+	}{
+		{
+			name: "network_mode host warns",
+			yaml: `
+name: t
+runtime: docker
+trigger: { manual: true }
+docker:
+  image: alpine
+  network_mode: host
+`,
+			mustMatch: []string{"network_mode: host"},
+		},
+		{
+			name: "cap_add SYS_ADMIN warns",
+			yaml: `
+name: t
+runtime: docker
+trigger: { manual: true }
+docker:
+  image: alpine
+  cap_add: [SYS_ADMIN]
+`,
+			mustMatch: []string{"SYS_ADMIN"},
+		},
+		{
+			name: "seccomp unconfined warns",
+			yaml: `
+name: t
+runtime: docker
+trigger: { manual: true }
+docker:
+  image: alpine
+  security_opt: ["seccomp=unconfined"]
+`,
+			mustMatch: []string{"seccomp=unconfined"},
+		},
+		{
+			name: "hardened config has no warnings",
+			yaml: `
+name: t
+runtime: docker
+trigger: { manual: true }
+docker:
+  image: alpine
+  network_mode: bridge
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  read_only: true
+`,
+			mustMatch: nil,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var s Spec
+			if err := yaml.NewDecoder(strings.NewReader(strings.TrimSpace(tc.yaml))).Decode(&s); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if err := s.validate(); err != nil {
+				t.Fatalf("validate: %v", err)
+			}
+			joined := strings.Join(s.Warnings, "|")
+			for _, want := range tc.mustMatch {
+				if !strings.Contains(joined, want) {
+					t.Errorf("missing warning containing %q; got %v", want, s.Warnings)
+				}
+			}
+			if len(tc.mustMatch) == 0 && len(s.Warnings) != 0 {
+				t.Errorf("expected no warnings, got %v", s.Warnings)
+			}
+		})
+	}
+}
+
+func equalSlice(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
