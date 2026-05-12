@@ -61,6 +61,17 @@ type DockerConfig struct {
 	WorkingDir string            `yaml:"working_dir,omitempty"` // container working dir
 	EnvVars    map[string]string `yaml:"env_vars,omitempty"`    // extra env vars (literal)
 	PullPolicy string            `yaml:"pull_policy,omitempty"` // "always" | "missing" (default) | "never"
+
+	// Network / isolation
+	NetworkMode string   `yaml:"network_mode,omitempty"` // "host" | "bridge" | "none" | "<custom-network>"
+	ExtraHosts  []string `yaml:"extra_hosts,omitempty"`  // "<name>:<ip-or-host-gateway>"
+
+	// Hardening
+	CapDrop     []string `yaml:"cap_drop,omitempty"`     // e.g. ["ALL"]
+	CapAdd      []string `yaml:"cap_add,omitempty"`      // e.g. ["NET_BIND_SERVICE"] — re-add after CapDrop
+	SecurityOpt []string `yaml:"security_opt,omitempty"` // e.g. ["no-new-privileges:true"]
+	ReadOnly    bool     `yaml:"read_only,omitempty"`    // mount container rootfs read-only
+	User        string   `yaml:"user,omitempty"`         // "<uid>[:<gid>]" or "<name>[:<group>]"
 }
 
 // ChainTrigger fires a task when another task completes.
