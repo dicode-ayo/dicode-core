@@ -9,24 +9,37 @@ Extend dicode-core's task model to support a new "daemon container" execution mo
 
 This is distinct from existing daemon tasks (`runtime: deno|python` with `daemon: true`), which run a long-lived script in dicode's own process namespace. This design adds a parallel mechanism for containerized daemons whose interface to webhooks is not "stdout of one long-running script" but "per-request exec or HTTP into a persistent container".
 
-## Scope of This Issue (#280, v1)
+## Unified Abstraction: HTTP-Routable Daemon Tasks
 
-To narrow the PR, **#280 ships HTTP transport only.** The `docker exec` transport is designed here in full but deferred to follow-up **#292** to keep #280's diff reviewable. All other substrate (FSM, lifecycle, docker `ContainerHandle`, networking, readiness probes, idle TTL, crash-loop, restart policy) lands in #280; #292 then adds only the exec transport file, exec probe, and a spec validation lift.
+A daemon task's webhook-routing requirement is the same whether the task runs as a docker container, a deno script, or a python script: an HMAC-verified webhook arrives, dicode forwards it to a long-lived process listening on a port, the response goes back. The proxy logic (HMAC-strip, path-pin, hop-by-hop strip, readiness gating, max_concurrent) doesn't care what runtime supplies the port.
 
-| In #280 (PR1) | Deferred to #292 (PR2) |
-|---|---|
-| `pkg/trigger/httpproxy/` package (proxy, HTTP/TCP/Log probes, dispatcher) | — |
-| `pkg/runtime/daemoncontainer/` manager: FSM, mutex, semaphore, idle timer, crash-loop, restart backoff | — |
-| `pkg/runtime/daemoncontainer/http_adapter.go` | — |
-| `pkg/runtime/docker/daemon.go` — full `ContainerHandle` impl (`Start`/`Exec`/`Stop`/`WaitExit`/`NetworkAttach`) | — |
-| Per-task & named docker networks, label-based reap | — |
-| `daemon_container.http:` block in spec, fully validated | — |
-| `daemon_container.exec:` block — **parsed but rejected** with "exec transport deferred to #292" | `daemon_container.exec:` validation lifted |
-| — | `pkg/runtime/daemoncontainer/transport_exec.go` |
-| — | `pkg/runtime/daemoncontainer/exec_probe.go` |
-| HTTP transport tests (unit + integration + E2E) | Exec transport tests |
+We elevate the `http:` block to **top-level on any daemon task** (not nested under `daemon_container`), and introduce an `HTTPDaemonAdapter` interface that each runtime implements to materialize the dispatch target. The same `pkg/trigger/httpproxy/` package serves all consumers.
 
-The exec transport sections below remain in this spec for design coherence (so the substrate built in #280 fits exec cleanly when #292 lands).
+```go
+type HTTPDaemonAdapter interface {
+    Target(port int) httpproxy.Target          // URL + RoundTripper
+    LivenessHint() <-chan LivenessState         // optional fast-fail signal
+}
+```
+
+- **Docker adapter:** `URL = http://<container-name>:<port>`, RoundTripper routes via docker network, LivenessHint wired to container FSM (`CrashLooping` → fail fast).
+- **Deno/Python adapter:** `URL = http://127.0.0.1:<port>`, RoundTripper = `http.DefaultTransport`, LivenessHint wired to the daemon-task's "script alive" state.
+
+`pkg/trigger/httpproxy/` knows only about adapters; it never imports docker or deno or python packages.
+
+## Restructured Implementation Plan (Epic)
+
+This work is delivered as three sequenced PRs under a tracking epic. The original two-issue plan (#280 + #282) was inverted after recognizing that the deno/python consumer is the smaller validator of the httpproxy substrate.
+
+| PR | Issue | Scope | Estimate |
+|---|---|---|---|
+| **PR1** | **#282** (rescoped) | `pkg/trigger/httpproxy/` package + top-level `http:` spec block + `HTTPDaemonAdapter` interface + **deno/python adapter** + `dicode.serve()` helper packages (npm + PyPI). Purely additive to existing daemon-task plumbing; no docker, no new lifecycle. | ~1 week |
+| **PR2** | **#280** (further narrowed) | Docker daemon-container substrate: FSM, lifecycle, idle TTL, crash-loop, restart, docker `ContainerHandle`, per-task & named networks, label reaping, docker `HTTPDaemonAdapter` impl. Consumes the httpproxy package validated in PR1. | ~2 weeks |
+| **PR3** | **#292** | Docker exec transport: `transport_exec.go`, `exec_probe.go`, lift exec-block validation rejection. | ~1 week |
+
+**Dependency order:** PR1 → PR2 → PR3. PR1 must land before PR2 because PR2 consumes the `pkg/trigger/httpproxy/` package and `HTTPDaemonAdapter` interface that PR1 establishes.
+
+The remainder of this spec describes the full design across all three PRs. Each section notes which PR it belongs to where the boundary is non-obvious.
 
 ## Goals
 
@@ -50,64 +63,77 @@ The exec transport sections below remain in this spec for design coherence (so t
 
 A new `daemon_container` block on a docker-runtime task:
 
+The `http:` block is **top-level on any daemon task** (added in PR1, used by both PR1 and PR2). The `daemon_container:` block holds docker-specific lifecycle config (added in PR2). The `exec:` block is nested under `daemon_container.exec` (added in PR3).
+
 ```yaml
+# Docker daemon container — full picture across all three PRs
 tasks:
-  embed-server:
+  embed-docker:
     runtime: docker
     image: my/embed:v1
-    daemon_container:
+    daemon_container:                 # PR2 — container-specific lifecycle
       start: at-register              # at-register | lazy | lazy-with-idle-ttl
       idle_timeout: 10m               # only when start == lazy-with-idle-ttl
-      ready_timeout: 30s              # webhook waits up to this for state==Ready
-      max_concurrent: 0               # 0 = transport default (1 for exec, unbounded for http)
       network: auto                   # auto | <named-network> | none
-
-      # Pick exactly one of `http` or `exec`. Transport is inferred from which is present.
-
-      http:
-        port: 8080                    # container port — internal-only, never published to host
-        forward:
-          path: /embed                # required; literal pin, NOT caller-controlled
-        pass_through: true            # forward container status verbatim (vs. envelope-wrap)
-        request_timeout: 60s          # duration of the forwarded HTTP call once ready
-        readiness:
-          # one of: http | log (omit → defaults to TCP port open)
-          http: { path: /healthz, expect: 200 }
-          # log: "Server listening on"
-          initial_delay: 0s
-          period: 1s
-          timeout: 30s
-
-      exec:                           # DEFERRED to #292 — parsed but rejected in #280
-        command: ["/app/handle"]      # fixed argv; webhook params reach via env, body via stdin
+      restart: on-failure             # reuses existing daemon restart policy
+      exec:                           # PR3 — docker exec transport
+        command: ["/app/handle"]
         exec_timeout: 60s
         readiness:
-          # one of: exec | log (omit → defaults to "container running")
           exec: ["test", "-f", "/tmp/ready"]
           # log: "Ready"
           initial_delay: 0s
           period: 1s
           timeout: 30s
-
+    http:                             # PR1 — top-level, any daemon task
+      port: 8080                      # container port — internal-only, never published to host
+      forward:
+        path: /embed                  # required; literal pin, NOT caller-controlled
+      pass_through: true              # forward upstream status verbatim
+      ready_timeout: 30s              # webhook waits up to this for upstream ready
+      request_timeout: 60s            # duration of the forwarded HTTP call once ready
+      max_concurrent: 0               # 0 = unbounded
+      readiness:
+        # one of: http | log (omit → defaults to TCP port open)
+        http: { path: /healthz, expect: 200 }
+        # log: "Server listening on"
+        initial_delay: 0s
+        period: 1s
+        timeout: 30s
     triggers:
       - webhook:
           path: /embed
           method: POST                # existing trigger-level method allowlist applies
-    restart: on-failure               # reuses existing daemon restart policy
+
+# Deno daemon script — same http: block, no daemon_container
+  embed-deno:
+    runtime: deno
+    daemon: true
+    code: |
+      import { serve } from "@dicode/daemon"
+      serve((req) => new Response("hi"))    // binds 127.0.0.1, port from DICODE_HTTP_PORT
+    http:                             # PR1
+      port: 8123
+      forward: { path: /api }
+      pass_through: true
+      ready_timeout: 30s
+      readiness:
+        http: { path: /healthz, expect: 200 }
+    triggers:
+      - webhook: { path: /embed, method: POST }
 ```
 
 **Validation rules** (enforced at config load):
 
-- Exactly one of `http` or `exec` is set.
-- `http.port` required when `http` is set.
-- `http.forward.path` required when `http` is set; must begin with `/`.
-- `exec.command` required when `exec` is set; non-empty argv.
-- **#280 only:** any `exec:` block is rejected with `"exec transport not yet implemented; tracked in #292"`. Lifted when #292 lands.
+- `http:` requires the task to be a daemon: either `daemon: true` for a script runtime, or `daemon_container:` for `runtime: docker`. Non-daemon tasks with `http:` are rejected.
+- `http.port` required when `http:` is set; `http.forward.path` required and must begin with `/`.
+- `daemon_container:` is only valid when `runtime: docker`.
+- `daemon_container.network: none` forbids `http:` (no IP routing possible).
+- `daemon_container.exec.command` required when `exec:` is set; non-empty argv.
+- **PR2-only:** the `daemon_container.exec:` block parses but is rejected with `"exec transport not yet implemented; tracked in #292"`. Lifted in PR3.
 - `idle_timeout` only meaningful when `start == lazy-with-idle-ttl`; ignored otherwise.
-- `network: none` forbids `http` transport (no IP routing possible).
-- `runtime` must be `docker` (v1; `podman` added in follow-up without spec changes).
 
-All existing docker-runtime config (volumes, env, secrets, image pull policy, resource limits) applies identically and is unchanged.
+All existing runtime-specific config (volumes/env/secrets/image-pull for docker; code/entrypoint for deno/python; etc.) applies identically and is unchanged.
 
 ## Lifecycle State Machine
 
@@ -218,57 +244,118 @@ Configurable via `daemon_container.network`:
 
 ## Architecture & Code Layout
 
-The HTTP-proxy and probe machinery is intentionally factored into a driver-agnostic package so that future consumers (deno/python daemon scripts that listen on a port — see Future Work) can reuse it without a containers dependency.
+Packages are split so each PR owns a coherent layer.
 
 ```
-pkg/trigger/engine.go
-   ├── on task-register: if DaemonContainer != nil, instantiate manager
-   ├── containerManagers map[taskID]*Manager
-   └── webhook handler routes to manager.Dispatch() before falling through to one-shot path
+─── PR1 (#282) ───────────────────────────────────────────────────────────────
 
-pkg/trigger/httpproxy/         ← NEW. Driver-agnostic HTTP proxy + probes.
+pkg/trigger/httpproxy/         NEW. Driver-agnostic HTTP proxy + probes +
+   │                           HTTPDaemonAdapter contract.
    ├── proxy.go                net/http/httputil.ReverseProxy with HMAC strip,
    │                           path pin, hop-by-hop strip, pass_through toggle.
    │                           Parameterized over a Target (URL + http.RoundTripper).
    ├── probes.go               readiness probes: HTTPProbe, TCPOpenProbe, LogProbe.
    │                           Driver-agnostic; LogProbe takes a "log source" func.
-   └── dispatcher.go           "block until ready or ready_timeout, then forward"
-                               gating wrapper around proxy.go.
+   ├── dispatcher.go           "block until ready or ready_timeout, then forward"
+   │                           gating wrapper around proxy.go; respects LivenessHint.
+   └── adapter.go              HTTPDaemonAdapter interface + Target / LivenessState
+                               types. The seam runtime adapters implement.
 
-pkg/runtime/daemoncontainer/   ← NEW. Container-specific lifecycle.
+pkg/trigger/engine.go          extension: at task-register, if task has http: block,
+                               look up the runtime's HTTPDaemonAdapter, build the
+                               dispatcher, register it on the task's webhook route.
+
+pkg/task/spec.go               add top-level HTTP struct (port, forward, pass_through,
+                               ready_timeout, request_timeout, max_concurrent,
+                               readiness); validation in (s *Spec).Validate().
+
+pkg/runtime/deno/, pkg/runtime/python/
+   └── http_adapter.go         each implements HTTPDaemonAdapter:
+                                 Target → http://127.0.0.1:<port>
+                                 RoundTripper → http.DefaultTransport
+                                 LivenessHint → existing daemon-task lifecycle state
+
+dicode-deno-helpers/daemon     NEW npm package — `serve(handler)` auto-binds
+                               to 127.0.0.1, port from DICODE_HTTP_PORT env.
+dicode-python-helpers/daemon   NEW PyPI package — equivalent for python.
+
+─── PR2 (#280) ───────────────────────────────────────────────────────────────
+
+pkg/runtime/daemoncontainer/   NEW. Container-specific lifecycle.
    ├── manager.go              FSM (Pulling / Starting / Ready / Degraded /
    │                           CrashLooping / Stopping / Stopped), mutex,
-   │                           max_concurrent semaphore, ready-wait channel,
    │                           idle timer, crash-loop detector, restart backoff
-   ├── http_adapter.go         wires httpproxy.Dispatcher into the container
-   │                           manager (passes ContainerHandle.HTTPRoundTripper()
-   │                           and the container-name URL as the proxy Target)
-   ├── transport_exec.go       (#292) docker exec wrapper: pinned argv,
-   │                           stdin = body, env = params, captures stdout/
-   │                           stderr/exit
-   ├── exec_probe.go           (#292) ExecProbe — uses ContainerHandle.Exec
-   │                           to run the probe argv
+   ├── http_adapter.go         implements httpproxy.HTTPDaemonAdapter:
+   │                             Target → http://<container-name>:<port>
+   │                             RoundTripper → routes via ContainerHandle network
+   │                             LivenessHint → manager FSM state
    ├── healthcheck_probe.go    DockerHealthCheckProbe (queries docker for
    │                           HEALTHCHECK status)
    └── state.go                state machine types
 
-pkg/runtime/executor.go        leave existing Executor interface alone; add:
-                               ContainerHandle interface beside it
+pkg/runtime/executor.go        add ContainerHandle interface alongside existing
+                               Executor.
 
 pkg/runtime/docker/
    ├── docker.go               existing one-shot path, unchanged
    └── daemon.go               NEW: ContainerHandle impl using Docker Go SDK,
-                               per-task network create/attach/destroy, label-based reap
+                               per-task network create/attach/destroy, label-based
+                               reap.
 
-pkg/task/spec.go               add DaemonContainer struct with HTTPTransport,
-                               ExecTransport, ReadinessProbe sub-structs;
-                               validation in (s *Spec).Validate()
+pkg/task/spec.go               extend with DaemonContainer struct (start,
+                               idle_timeout, network, restart); validation including
+                               "exec block rejected" rule.
 
-pkg/runtime/podman/            (deferred follow-up)
+─── PR3 (#292) ───────────────────────────────────────────────────────────────
+
+pkg/runtime/daemoncontainer/
+   ├── transport_exec.go       NEW: docker exec wrapper: pinned argv, stdin = body,
+   │                           env = params, captures stdout/stderr/exit
+   └── exec_probe.go           NEW: ExecProbe — uses ContainerHandle.Exec to run
+                               the probe argv
+
+pkg/task/spec.go               lift the "exec block rejected" validation rule.
+
+─── Deferred (no PR yet) ─────────────────────────────────────────────────────
+
+pkg/runtime/podman/
    └── daemon.go               ContainerHandle impl shelling out to podman CLI
 ```
 
-### `ContainerHandle` interface (new abstraction)
+### `HTTPDaemonAdapter` seam (PR1)
+
+`pkg/trigger/httpproxy/adapter.go`:
+
+```go
+type Target struct {
+    URL          *url.URL          // e.g. http://dicode-task-<id>:8080  or  http://127.0.0.1:8123
+    RoundTripper http.RoundTripper // docker-network RT, or http.DefaultTransport
+    PathPin      string            // forward.path
+    PassThrough  bool
+    Readiness    Probe             // HTTPProbe / TCPOpenProbe / LogProbe / custom
+}
+
+type LivenessState int
+const (
+    LivenessUnknown LivenessState = iota
+    LivenessAlive
+    LivenessTransientDown   // dispatcher should keep waiting
+    LivenessPermanentDown   // dispatcher should fail fast (e.g. CrashLooping, restart: never & Stopped)
+)
+
+type HTTPDaemonAdapter interface {
+    Target(port int, pathPin string, pt bool) Target
+    LivenessHint() <-chan LivenessState   // optional; nil channel means "no hint, just probe"
+}
+```
+
+The dispatcher consults `LivenessHint` (if provided) before each readiness probe attempt. `LivenessPermanentDown` causes immediate 503 with diagnostic rather than waiting `ready_timeout`.
+
+Two implementations:
+- **`pkg/runtime/daemoncontainer/http_adapter.go` (PR2):** `Target` routes via `ContainerHandle.HTTPRoundTripper()` with URL = container-name; `LivenessHint` wired to the container manager's FSM state.
+- **`pkg/runtime/deno/http_adapter.go` and `pkg/runtime/python/http_adapter.go` (PR1):** `Target` URL = `http://127.0.0.1:<port>`, RoundTripper = `http.DefaultTransport`; `LivenessHint` wired to the existing daemon-task lifecycle (alive vs. between-restarts).
+
+### `ContainerHandle` interface (PR2)
 
 ```go
 type ContainerHandle interface {
@@ -281,23 +368,7 @@ type ContainerHandle interface {
 }
 ```
 
-The seam between driver-agnostic logic (`pkg/runtime/daemoncontainer/`) and driver-specific code (`pkg/runtime/docker/daemon.go`, future `pkg/runtime/podman/daemon.go`).
-
-### `httpproxy` reuse seam
-
-The dispatcher in `pkg/trigger/httpproxy/dispatcher.go` accepts:
-
-```go
-type Target struct {
-    URL          *url.URL          // e.g. http://dicode-task-<id>:8080
-    RoundTripper http.RoundTripper // dial method (docker network, or net.Dial for localhost)
-    Readiness    Probe             // HTTPProbe / TCPOpenProbe / LogProbe / custom
-    PathPin      string            // forward.path
-    PassThrough  bool
-}
-```
-
-`pkg/runtime/daemoncontainer/http_adapter.go` constructs a `Target` whose `RoundTripper` routes via `ContainerHandle.HTTPRoundTripper()` and whose `URL` host is the container name. A future deno/python daemon adapter (Future Work below) would construct a `Target` whose `RoundTripper` is `http.DefaultTransport` and whose `URL` is `http://127.0.0.1:<port>` — same dispatcher, same probes, same proxy code.
+The seam between container-lifecycle logic (`pkg/runtime/daemoncontainer/`) and driver-specific code (`pkg/runtime/docker/daemon.go`, future `pkg/runtime/podman/daemon.go`).
 
 ### Concurrency primitives in `manager.go`
 
@@ -346,29 +417,40 @@ State machine state is in-memory only. Webhook callers see 503 during the boot w
 
 ## Testing Strategy
 
-**Unit tests** (`pkg/runtime/daemoncontainer/`, no docker required):
+**PR1 unit tests** (`pkg/trigger/httpproxy/`, no docker required):
 
+- Proxy: header strip (HMAC, hop-by-hop), path pin, `pass_through` modes, body verbatim — against `httptest.Server` + a fake `HTTPDaemonAdapter`
+- Probes: HTTP (mock server), TCP-open (`net.Listen`), Log (regex against a fake log source)
+- Dispatcher: `ready_timeout` wait + cancel, `max_concurrent` semaphore, `LivenessHint` fast-fail
+- Deno/python adapter unit tests with stubbed lifecycle signal
+
+**PR1 integration tests:**
+- Real deno daemon binding to 127.0.0.1, declares `http:` block, webhook arrives → forwarded → response asserted
+- Same for python
+- `dicode.serve()` helpers tested against the binding contract (port from env, host 127.0.0.1)
+
+**PR2 unit tests** (`pkg/runtime/daemoncontainer/`, no docker required):
 - FSM transitions for every (state, event) pair
-- Readiness probe types: HTTP probe (mock server), log probe (regex matching), TCP-open probe (net.Listen), exec probe (fake `ContainerHandle.Exec`)
-- HTTP transport: header strip, path pin, hop-by-hop strip, `pass_through` modes (against `httptest.Server` + a fake `ContainerHandle.HTTPRoundTripper`)
-- Exec transport: stdin/env/argv pinning, exit code propagation, timeout cancellation
-- Concurrency: `max_concurrent` semaphore enforcement; ready-wait channel correctness under racing webhooks
 - Crash-loop detector: timing-windowed counter, backoff escalation
+- Healthcheck probe via fake docker inspect
+- Concurrency: ready-wait channel correctness under racing webhooks
+- Docker `HTTPDaemonAdapter`'s `LivenessHint` emits correct states for FSM transitions
 
-**Integration tests** (real docker, in CI):
-
-- Tiny test images: `alpine` + `python -m http.server` for HTTP transport; `alpine` + `sleep infinity` + simple shell scripts for exec
+**PR2 integration tests** (real docker, in CI):
+- Tiny test images: `alpine` + `python -m http.server` for HTTP
 - All `start` modes (`at-register`, `lazy`, `lazy-with-idle-ttl` with short TTL)
 - All probe types end-to-end
-- Crash induction (exit 1 in init) → CrashLooping, then fix → Ready
+- Crash induction (exit 1 in init) → CrashLooping → recover → Ready
 - Idle TTL eviction → next webhook restarts container
-- Restart policy permutations (`always` / `on-failure` / `never`) crossed with normal exit and crash exit
-- Network modes: `auto`, named (with a peer container in the same network), `none` (exec-only)
+- Restart policy permutations
+- Network modes: `auto`, named (with a peer container in the same network), `none`
 
-**E2E tests:**
+**PR3 tests:**
+- Unit: exec probe against fake `ContainerHandle.Exec`; transport with mocked exec
+- Integration (real docker): alpine + shell scripts covering exit-0 / exit-1 / stdin echo / env injection / timeout / `max_concurrent` gating
 
-- Existing trigger-engine test patterns extended: declare a daemon-container task in test config, hit the webhook, assert response shape
-- Multi-task scenario on a shared named network: two daemon-container tasks plus a sidecar verifying inter-container DNS works
+**E2E (spanning PRs):**
+- Mixed scenario after PR2: deno daemon (PR1) + docker daemon container (PR2) on the same shared named network, both reachable from dicode, separate webhooks dispatch into each correctly
 
 ## Podman Inheritance
 
@@ -392,46 +474,12 @@ Most of the design is driver-agnostic by deliberate construction.
 
 **Estimate:** ~1 week if rootless behaves; ~2 weeks if rootless edge cases force compromise. Separate PR after docker lands.
 
-## Future Work
+## Future Work (beyond the epic)
 
-### HTTP webhook routes for deno/python daemon tasks
-
-Existing daemon tasks (`runtime: deno|python` with `daemon: true`) run a long-lived script in dicode's process namespace; they have no per-webhook interaction model today. The HTTP transport designed here applies to them with no fundamental change: a deno or python script can `Deno.serve()` / `app.run()` on a localhost port, declare an `http:` block on the task, and dicode forwards webhooks via the same `pkg/trigger/httpproxy/` reverse-proxy with HMAC-strip + path-pin + readiness-gating.
-
-**Architectural fit (already accommodated in v1):**
-- `pkg/trigger/httpproxy/` is driver-agnostic by construction. The dispatcher takes a `Target{URL, RoundTripper, Readiness, PathPin, PassThrough}`; nothing in it assumes a container.
-- For deno/python: `URL = http://127.0.0.1:<port>`, `RoundTripper = http.DefaultTransport`, probes are HTTP/TCP/Log (no exec probe; no in-process `eval` analog).
-- The deno/python daemon's existing lifecycle (managed by `pkg/trigger/engine.go`) supplies the `Ready`/`NotReady` signal that gates the dispatcher. No container FSM needed.
-
-**Spec sketch:**
-
-```yaml
-tasks:
-  embed-deno:
-    runtime: deno
-    daemon: true
-    code: |
-      Deno.serve({ port: 8123, hostname: "127.0.0.1" }, handler)
-    http:
-      port: 8123
-      forward: { path: /api }
-      pass_through: true
-      readiness:
-        http: { path: /healthz, expect: 200 }
-    triggers:
-      - webhook: { path: /embed }
-```
-
-**Footgun mitigation:** a careless script that binds to `0.0.0.0` exposes the port publicly. Counter with a dicode-provided helper per runtime — `dicode.serve(handler)` for deno, equivalent for python — that auto-binds to `127.0.0.1` on a port chosen by dicode and passed via env. Documented as the recommended path; raw `Deno.serve`/`app.run()` still works but the user owns the binding.
-
-**Tracked separately** — companion issue (link added once filed). Not in v1 scope; v1 focuses on the docker daemon-container substrate and the reusable `httpproxy` package that the follow-up will consume.
-
-### Other follow-ups
-
-- **Podman driver** (~1–2 weeks; rootless networking risk noted above)
-- **`target_container` cross-task sharing** — one daemon container, multiple webhook tasks dispatching into it
-- **Streaming responses** — chunked / SSE / WebSocket pass-through (current v1 buffers fully)
-- **Multi-replica daemon containers** — load-balance webhook traffic across N replicas of the same image
+- **Podman driver** (~1–2 weeks; rootless networking risk noted in "Podman Inheritance"). New `ContainerHandle` impl + adapter in `pkg/runtime/podman/`; reuses the entire PR1 + PR2 substrate.
+- **`target_container` cross-task sharing** — one daemon container, multiple webhook tasks dispatching into it. Decouples container lifecycle from webhook surface.
+- **Streaming responses** — chunked / SSE / WebSocket pass-through (current design buffers fully).
+- **Multi-replica daemon containers** — load-balance webhook traffic across N replicas of the same image.
 
 ## Open Questions Deferred to Implementation
 
@@ -447,16 +495,24 @@ tasks:
 
 ## Effort Estimate
 
-**#280 (this issue, HTTP only):**
-- `pkg/trigger/httpproxy/` (proxy + HTTP/TCP/Log probes + dispatcher): ~3 days
-- `pkg/runtime/daemoncontainer/` manager + FSM + http_adapter + state machine: ~5 days
-- Docker `ContainerHandle` impl + network management + label reaping: ~1 week
-- Trigger-engine integration + spec validation (incl. exec-block reject): ~2 days
-- Tests (unit + integration + E2E, HTTP transport only): ~5 days
-- Documentation: ~2 days
-- **Total #280: ~2.5 weeks**
+**PR1 (#282) — httpproxy substrate + deno/python adapter (~1 week):**
+- `pkg/trigger/httpproxy/` package (proxy, HTTP/TCP/Log probes, dispatcher, adapter interface): ~3 days
+- Top-level `http:` spec block + validation + trigger-engine wiring: ~1 day
+- Deno + python `HTTPDaemonAdapter` impls: ~1 day
+- `dicode-deno-helpers/daemon` (npm) + `dicode-python-helpers/daemon` (PyPI): ~1 day
+- Tests + docs: ~1 day
 
-**Follow-up issues:**
-- **#292** — exec transport: ~1 week after #280 lands
-- **#282** — deno/python HTTP routes (reuses `httpproxy`): ~1.5 weeks after #280 lands
-- Podman driver: ~1–2 weeks (independent of exec/deno follow-ups)
+**PR2 (#280) — docker daemon-container substrate (~2 weeks):**
+- `pkg/runtime/daemoncontainer/` manager + FSM + state machine + healthcheck probe: ~5 days
+- Docker `ContainerHandle` impl + network management + label reaping: ~5 days
+- Docker `HTTPDaemonAdapter` impl + trigger-engine integration: ~1 day
+- Spec validation (incl. exec-block reject): ~1 day
+- Tests (unit + integration + E2E): ~3 days
+
+**PR3 (#292) — docker exec transport (~1 week):**
+- `transport_exec.go` + `exec_probe.go`: ~3 days
+- Spec validation lift + tests: ~2 days
+
+**Total epic: ~4 weeks across three reviewable PRs.**
+
+**Out-of-epic follow-ups:** Podman driver (~1–2 weeks, independent).
