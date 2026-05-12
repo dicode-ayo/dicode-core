@@ -9,10 +9,29 @@ Extend dicode-core's task model to support a new "daemon container" execution mo
 
 This is distinct from existing daemon tasks (`runtime: deno|python` with `daemon: true`), which run a long-lived script in dicode's own process namespace. This design adds a parallel mechanism for containerized daemons whose interface to webhooks is not "stdout of one long-running script" but "per-request exec or HTTP into a persistent container".
 
+## Scope of This Issue (#280, v1)
+
+To narrow the PR, **#280 ships HTTP transport only.** The `docker exec` transport is designed here in full but deferred to follow-up **#292** to keep #280's diff reviewable. All other substrate (FSM, lifecycle, docker `ContainerHandle`, networking, readiness probes, idle TTL, crash-loop, restart policy) lands in #280; #292 then adds only the exec transport file, exec probe, and a spec validation lift.
+
+| In #280 (PR1) | Deferred to #292 (PR2) |
+|---|---|
+| `pkg/trigger/httpproxy/` package (proxy, HTTP/TCP/Log probes, dispatcher) | — |
+| `pkg/runtime/daemoncontainer/` manager: FSM, mutex, semaphore, idle timer, crash-loop, restart backoff | — |
+| `pkg/runtime/daemoncontainer/http_adapter.go` | — |
+| `pkg/runtime/docker/daemon.go` — full `ContainerHandle` impl (`Start`/`Exec`/`Stop`/`WaitExit`/`NetworkAttach`) | — |
+| Per-task & named docker networks, label-based reap | — |
+| `daemon_container.http:` block in spec, fully validated | — |
+| `daemon_container.exec:` block — **parsed but rejected** with "exec transport deferred to #292" | `daemon_container.exec:` validation lifted |
+| — | `pkg/runtime/daemoncontainer/transport_exec.go` |
+| — | `pkg/runtime/daemoncontainer/exec_probe.go` |
+| HTTP transport tests (unit + integration + E2E) | Exec transport tests |
+
+The exec transport sections below remain in this spec for design coherence (so the substrate built in #280 fits exec cleanly when #292 lands).
+
 ## Goals
 
 - Single declarative spec extension on docker-runtime tasks for daemon-container behavior.
-- Two transport modes: `docker exec` for stateful exec-style invocation, and reverse-proxy HTTP for HTTP-shaped containers.
+- Two transport modes: `docker exec` for stateful exec-style invocation, and reverse-proxy HTTP for HTTP-shaped containers. **HTTP ships in #280; exec ships in #292.**
 - Three lifecycle modes: `at-register`, `lazy`, `lazy-with-idle-ttl`.
 - Configurable concurrency, ready/request timeouts, restart policy, and readiness probes.
 - Security boundary: caller cannot control which path or argv reaches the container; HMAC verified at the trigger layer; container ports never bound to the host.
@@ -20,7 +39,8 @@ This is distinct from existing daemon tasks (`runtime: deno|python` with `daemon
 
 ## Non-Goals (v1)
 
-- **Arbitrary-command exec from the webhook payload.** Argv is spec-pinned.
+- **`exec` transport** — designed here, deferred to **#292**. The `daemon_container.exec:` spec block parses but is rejected at validation in #280.
+- **Arbitrary-command exec from the webhook payload.** Argv is spec-pinned (relevant to #292).
 - **Cross-task container sharing via `target_container`.** Single-task → single-container in v1; named-network sharing is supported, but reusing one container across tasks is a follow-up.
 - **Streaming responses to the webhook caller.** Sync request → fully buffered response.
 - **Multi-replica daemon containers** (one image, N containers, load-balanced).
@@ -58,7 +78,7 @@ tasks:
           period: 1s
           timeout: 30s
 
-      exec:
+      exec:                           # DEFERRED to #292 — parsed but rejected in #280
         command: ["/app/handle"]      # fixed argv; webhook params reach via env, body via stdin
         exec_timeout: 60s
         readiness:
@@ -82,6 +102,7 @@ tasks:
 - `http.port` required when `http` is set.
 - `http.forward.path` required when `http` is set; must begin with `/`.
 - `exec.command` required when `exec` is set; non-empty argv.
+- **#280 only:** any `exec:` block is rejected with `"exec transport not yet implemented; tracked in #292"`. Lifted when #292 lands.
 - `idle_timeout` only meaningful when `start == lazy-with-idle-ttl`; ignored otherwise.
 - `network: none` forbids `http` transport (no IP routing possible).
 - `runtime` must be `docker` (v1; `podman` added in follow-up without spec changes).
@@ -161,6 +182,8 @@ Dicode acts as a thin reverse proxy. The caller crafts a normal HTTP request; di
 
 ### exec transport — pinned argv with stdin/env
 
+> **Deferred to #292.** Designed here for substrate coherence; not implemented in #280. The `daemon_container.exec:` block is parsed but rejected at validation until #292 lands.
+
 There is no equivalent "just proxy" mode; exec is shaped differently from HTTP. Convention:
 
 1. Caller hits the dicode webhook trigger; HMAC verified; webhook params extracted (existing flow).
@@ -217,13 +240,14 @@ pkg/runtime/daemoncontainer/   ← NEW. Container-specific lifecycle.
    │                           CrashLooping / Stopping / Stopped), mutex,
    │                           max_concurrent semaphore, ready-wait channel,
    │                           idle timer, crash-loop detector, restart backoff
-   ├── transport_exec.go       docker exec wrapper: pinned argv, stdin = body,
-   │                           env = params, captures stdout/stderr/exit
    ├── http_adapter.go         wires httpproxy.Dispatcher into the container
    │                           manager (passes ContainerHandle.HTTPRoundTripper()
    │                           and the container-name URL as the proxy Target)
-   ├── exec_probe.go           ExecProbe (container-specific; uses
-   │                           ContainerHandle.Exec to run the probe argv)
+   ├── transport_exec.go       (#292) docker exec wrapper: pinned argv,
+   │                           stdin = body, env = params, captures stdout/
+   │                           stderr/exit
+   ├── exec_probe.go           (#292) ExecProbe — uses ContainerHandle.Exec
+   │                           to run the probe argv
    ├── healthcheck_probe.go    DockerHealthCheckProbe (queries docker for
    │                           HEALTHCHECK status)
    └── state.go                state machine types
@@ -423,10 +447,16 @@ tasks:
 
 ## Effort Estimate
 
-- Driver-agnostic manager + transports + readiness + state machine: ~1 week
+**#280 (this issue, HTTP only):**
+- `pkg/trigger/httpproxy/` (proxy + HTTP/TCP/Log probes + dispatcher): ~3 days
+- `pkg/runtime/daemoncontainer/` manager + FSM + http_adapter + state machine: ~5 days
 - Docker `ContainerHandle` impl + network management + label reaping: ~1 week
-- Trigger-engine integration + spec validation: ~3 days
-- Tests (unit + integration + E2E): ~1 week
+- Trigger-engine integration + spec validation (incl. exec-block reject): ~2 days
+- Tests (unit + integration + E2E, HTTP transport only): ~5 days
 - Documentation: ~2 days
-- **Total v1 (docker-only): ~3 weeks**
-- Podman follow-up: +1–2 weeks
+- **Total #280: ~2.5 weeks**
+
+**Follow-up issues:**
+- **#292** — exec transport: ~1 week after #280 lands
+- **#282** — deno/python HTTP routes (reuses `httpproxy`): ~1.5 weeks after #280 lands
+- Podman driver: ~1–2 weeks (independent of exec/deno follow-ups)
