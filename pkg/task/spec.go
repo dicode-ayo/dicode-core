@@ -580,10 +580,37 @@ func (s *Spec) validate() error {
 		default:
 			return fmt.Errorf("docker.pull_policy must be always, missing, or never")
 		}
+		s.Warnings = append(s.Warnings, dockerHardeningWarnings(s.Docker)...)
 	default:
 		// Any other non-empty runtime is accepted; executor presence is checked at run time.
 	}
 	return nil
+}
+
+// dockerHardeningWarnings flags container settings that visibly weaken
+// isolation. These aren't errors — operators can explicitly opt in — but they
+// should surface in the UI so reviewers notice.
+func dockerHardeningWarnings(d *DockerConfig) []string {
+	var warns []string
+	if d.NetworkMode == "host" {
+		warns = append(warns, "docker.network_mode: host shares the host network namespace; the container can reach every loopback service")
+	}
+	for _, c := range d.CapAdd {
+		switch strings.ToUpper(c) {
+		case "SYS_ADMIN", "SYS_PTRACE", "SYS_MODULE", "ALL":
+			warns = append(warns, fmt.Sprintf("docker.cap_add includes %s — this can enable container escape", c))
+		}
+	}
+	for _, o := range d.SecurityOpt {
+		lower := strings.ToLower(o)
+		switch {
+		case strings.HasPrefix(lower, "seccomp=unconfined"),
+			strings.HasPrefix(lower, "apparmor=unconfined"),
+			lower == "label=disable":
+			warns = append(warns, fmt.Sprintf("docker.security_opt %q disables a kernel sandbox layer", o))
+		}
+	}
+	return warns
 }
 
 // ChainOn returns the normalized "on" condition for a chain trigger.

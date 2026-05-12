@@ -84,32 +84,29 @@ func TestBuildArgs_HardeningPrecedesImage(t *testing.T) {
 	// podman parses subsequent hardening flags as the container's command args.
 	cfg := &task.DockerConfig{
 		Image:       "alpine",
-		NetworkMode: "host",
+		NetworkMode: "bridge",
+		ExtraHosts:  []string{"host.docker.internal:host-gateway"},
+		CapDrop:     []string{"ALL"},
+		CapAdd:      []string{"NET_BIND_SERVICE"},
+		SecurityOpt: []string{"no-new-privileges:true"},
 		ReadOnly:    true,
+		User:        "65532:65532",
 		Command:     []string{"echo", "hi"},
 	}
 	e := &executor{podmanPath: "/usr/bin/podman"}
 	args := e.buildArgs(cfg, "alpine", "dicode-run1", "run1", "task1")
 
-	imageIdx := -1
-	for i, a := range args {
-		if a == "alpine" {
-			imageIdx = i
-			break
-		}
-	}
+	imageIdx := slices.Index(args, "alpine")
 	if imageIdx < 0 {
 		t.Fatalf("image tag not found in args: %v", args)
 	}
-	for _, flag := range []string{"--network", "--read-only"} {
-		idx := -1
-		for i, a := range args {
-			if a == flag {
-				idx = i
-				break
-			}
+	for _, flag := range []string{"--network", "--add-host", "--cap-drop", "--cap-add", "--security-opt", "--read-only", "--user"} {
+		idx := slices.Index(args, flag)
+		if idx < 0 {
+			t.Errorf("%s missing from args: %v", flag, args)
+			continue
 		}
-		if idx < 0 || idx >= imageIdx {
+		if idx >= imageIdx {
 			t.Errorf("%s must appear before image tag (at %d); args=%v", flag, imageIdx, args)
 		}
 	}
