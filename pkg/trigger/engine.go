@@ -69,6 +69,10 @@ type Engine struct {
 	// never has to wait on a long preflight dispatch holding daemonMu.
 	daemonStates *daemonStateMap
 
+	// restartGates is a per-daemon at-most-one-in-flight lock for prereq-
+	// driven restarts. See daemon_state.go for the coalescing rationale.
+	restartGates *restartGate
+
 	notifier        notify.Notifier
 	notifyOnSuccess bool
 	notifyOnFailure bool
@@ -135,6 +139,7 @@ func New(r *registry.Registry, defaultExec pkgruntime.Executor, log *zap.Logger)
 		daemonRuns:   make(map[string]string),
 		daemonSpecs:  make(map[string]*task.Spec),
 		daemonStates: newDaemonStateMap(),
+		restartGates: newRestartGate(),
 		guards:       newChainGuards(),
 	}
 	e.executors[task.RuntimeDeno] = defaultExec
@@ -958,6 +963,15 @@ func (e *Engine) KillRun(runID string) bool {
 // FireChain checks if any tasks declare a chain trigger from completedTaskID,
 // and fires the global on_failure_chain if configured.
 func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatus string, output interface{}) {
+	// Preflight restart hook: when a task that some daemon lists in
+	// trigger.before finishes with status=success, restart that daemon so
+	// it picks up newly-rendered config / freshly-rotated secrets. Failure
+	// or cancel does NOT trigger a restart — see the failure-semantics
+	// commit and tests for the rationale.
+	if runStatus == registry.StatusSuccess {
+		e.notifyPrereqCompletion(completedTaskID)
+	}
+
 	// Declared chain triggers.
 	for _, spec := range e.registry.All() {
 		chain := spec.Trigger.Chain
