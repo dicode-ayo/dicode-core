@@ -103,6 +103,80 @@ func TestAPI_GetTask(t *testing.T) {
 	}
 }
 
+// TestAPI_GetTask_DaemonState verifies that GET /api/tasks/{id} for a
+// daemon task includes the engine's current DaemonState in the response.
+// Operators viewing a daemon detail page need this to distinguish
+// "stopped", "waiting on render preflight", "preflight failed", and
+// "running" — a single boolean isn't enough.
+func TestAPI_GetTask_DaemonState(t *testing.T) {
+	srv, reg := newTestServer(t)
+
+	// Register a daemon task in the registry. We don't fire it via the
+	// engine — we only need the task detail handler to read DaemonState
+	// off the engine and surface it. The default (no entry in the engine's
+	// state map) is "stopped".
+	dir := t.TempDir()
+	td := filepath.Join(dir, "my-daemon")
+	_ = os.MkdirAll(td, 0755)
+	_ = os.WriteFile(filepath.Join(td, "task.yaml"),
+		[]byte("name: my-daemon\nruntime: docker\ntrigger:\n  daemon: true\ndocker: { image: alpine }\n"), 0644)
+	spec := &task.Spec{
+		ID:      "my-daemon",
+		Name:    "my-daemon",
+		Runtime: task.RuntimeDocker,
+		Docker:  &task.DockerConfig{Image: "alpine"},
+		Trigger: task.TriggerConfig{Daemon: true, Restart: "never"},
+		Enabled: true,
+		TaskDir: td,
+	}
+	if err := reg.Register(spec); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/my-daemon", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body)
+	}
+
+	var detail map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&detail); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	got, ok := detail["daemon_state"]
+	if !ok {
+		t.Fatalf("daemon_state field missing from response: %v", detail)
+	}
+	if got != "stopped" {
+		t.Errorf("daemon_state = %v, want \"stopped\"", got)
+	}
+}
+
+// TestAPI_GetTask_NonDaemonOmitsDaemonState verifies that the daemon_state
+// field is omitted (or empty) for non-daemon tasks — there's no
+// meaningful state to report, and surfacing "stopped" on every cron task
+// would confuse operators.
+func TestAPI_GetTask_NonDaemonOmitsDaemonState(t *testing.T) {
+	srv, reg := newTestServer(t)
+	registerTask(t, reg, "manual-task", `return 1`)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/manual-task", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body)
+	}
+
+	var detail map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&detail); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got, ok := detail["daemon_state"]; ok && got != "" {
+		t.Errorf("daemon_state should be empty/omitted for non-daemon, got %q", got)
+	}
+}
+
 func TestAPI_GetTask_NotFound(t *testing.T) {
 	srv, _ := newTestServer(t)
 
