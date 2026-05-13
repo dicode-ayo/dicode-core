@@ -66,6 +66,30 @@ func TestRegister_BeforeDaemonRejected(t *testing.T) {
 // impossible to write. The validator comment in validateBeforeRefs
 // captures this reasoning so future readers don't add a redundant check.
 
+// TestDaemonState_Default verifies that DaemonState() returns the zero
+// value (DaemonStopped) for unknown task IDs and for daemons that haven't
+// been started yet — operators viewing the WebUI before the engine has
+// fired the preflight should see "stopped", not a blank field.
+func TestDaemonState_Default(t *testing.T) {
+	e := newTestEnv(t)
+	if got := e.engine.DaemonState("unknown"); got != DaemonStopped {
+		t.Errorf("unknown daemon state = %q, want stopped", got)
+	}
+}
+
+// TestDaemonState_SetGet verifies that setDaemonState/DaemonState round-trip
+// the five enum values without contention.
+func TestDaemonState_SetGet(t *testing.T) {
+	e := newTestEnv(t)
+	states := []DaemonState{DaemonPrereqRunning, DaemonPrereqFailed, DaemonRunning, DaemonStopping, DaemonStopped}
+	for _, want := range states {
+		e.engine.setDaemonState("d", want)
+		if got := e.engine.DaemonState("d"); got != want {
+			t.Errorf("setDaemonState(%q) → DaemonState = %q, want %q", want, got, want)
+		}
+	}
+}
+
 // TestRegister_BeforeValid_NonDaemonTarget exercises the happy path: a
 // daemon with a `before:` list referencing a one-shot task that exists in
 // the registry registers without error.
