@@ -195,7 +195,10 @@ func (p *preflightExec) Execute(ctx context.Context, spec *task.Spec, opts pkgru
 
 // newPreflightEnv returns a test engine + reg + controllable executor for
 // the preflight gating tests. Tasks complete synchronously (or block, for
-// marked daemons) without spawning Deno.
+// marked daemons) without spawning Deno or Docker — we register the same
+// preflightExec for both the deno and docker runtimes so daemon specs
+// (which are typically runtime: docker for container daemons) dispatch
+// without needing the real docker manager.
 func newPreflightEnv(t *testing.T) (*Engine, *registry.Registry, *preflightExec) {
 	t.Helper()
 	d, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
@@ -206,6 +209,7 @@ func newPreflightEnv(t *testing.T) (*Engine, *registry.Registry, *preflightExec)
 	reg := registry.New(d)
 	exec := newPreflightExec(reg)
 	eng := New(reg, exec, zap.NewNop())
+	eng.RegisterExecutor(task.RuntimeDocker, exec)
 	return eng, reg, exec
 }
 
@@ -449,6 +453,111 @@ func TestPreflight_RestartCoalesces(t *testing.T) {
 	}
 	if daemonRuns > 2 {
 		t.Errorf("expected at most 2 daemon runs (first boot + one coalesced restart), got %d", daemonRuns)
+	}
+}
+
+// TestPreflight_PrereqFailureBlocksFirstStart verifies that a daemon
+// whose preflight fails on the very first attempt:
+//
+//   - does NOT have its daemon-task fired,
+//   - ends up in state=DaemonPrereqFailed (operator-facing diagnosis).
+//
+// The default 'restart: always' would otherwise mask the failure by
+// retrying forever — preflight failure is a config-level error and
+// should surface, not loop.
+func TestPreflight_PrereqFailureBlocksFirstStart(t *testing.T) {
+	eng, reg, exec := newPreflightEnv(t)
+
+	prereq := makeOneShotSpec("render")
+	if err := reg.Register(prereq); err != nil {
+		t.Fatal(err)
+	}
+	// Make render fail.
+	exec.setFn("render", func(string, string) string { return registry.StatusFailure })
+
+	daemon := makeDaemonSpec("d", []string{"render"})
+	if err := reg.Register(daemon); err != nil {
+		t.Fatal(err)
+	}
+	exec.markDaemon("d")
+
+	if err := eng.Register(daemon); err != nil {
+		t.Fatalf("eng.Register: %v", err)
+	}
+
+	// Wait until the engine has finished its preflight attempt and
+	// settled into PrereqFailed.
+	waitUntil(t, 5*time.Second, func() bool {
+		return eng.DaemonState("d") == DaemonPrereqFailed
+	}, "daemon never reached PrereqFailed")
+
+	// No daemon run should have been recorded.
+	runs, _ := reg.ListRuns(context.Background(), "d", 10)
+	for _, r := range runs {
+		if r.TriggerSource == registry.TriggerDaemon {
+			t.Errorf("daemon run %s was fired despite failed prereq", r.ID)
+		}
+	}
+}
+
+// TestPreflight_PrereqFailureLeavesRunningDaemonAlone verifies that a
+// prereq failure that happens AFTER the daemon is already up does not
+// disturb the running daemon. Rationale: an in-flight credential rotator
+// that hits a transient API error shouldn't take down a long-running
+// service. The daemon keeps using the last-known-good config; the
+// failure is visible in the prereq's run log.
+func TestPreflight_PrereqFailureLeavesRunningDaemonAlone(t *testing.T) {
+	eng, reg, exec := newPreflightEnv(t)
+
+	prereq := makeOneShotSpec("render")
+	if err := reg.Register(prereq); err != nil {
+		t.Fatal(err)
+	}
+	// First attempt succeeds (so the daemon comes up). We'll flip to
+	// failure after the daemon is Running.
+	exec.setFn("render", func(string, string) string { return registry.StatusSuccess })
+
+	daemon := makeDaemonSpec("d", []string{"render"})
+	if err := reg.Register(daemon); err != nil {
+		t.Fatal(err)
+	}
+	exec.markDaemon("d")
+
+	if err := eng.Register(daemon); err != nil {
+		t.Fatalf("eng.Register: %v", err)
+	}
+	waitUntil(t, 5*time.Second, func() bool {
+		return eng.DaemonState("d") == DaemonRunning
+	}, "daemon never came up")
+
+	// Capture the current daemon run ID. The same run should still own
+	// the registry slot when the test ends.
+	eng.daemonMu.Lock()
+	originalRunID := eng.daemonRuns["d"]
+	eng.daemonMu.Unlock()
+	if originalRunID == "" {
+		t.Fatal("daemon has no recorded run ID after Running state")
+	}
+
+	// Flip render to failure and re-fire it.
+	exec.setFn("render", func(string, string) string { return registry.StatusFailure })
+	if _, err := eng.FireManual(context.Background(), "render", nil); err != nil {
+		t.Fatalf("FireManual: %v", err)
+	}
+
+	// Give the engine time to (incorrectly) attempt a restart. A 1s
+	// settle window is generous given the engine doesn't sleep between
+	// FireChain and queueDaemonRestart.
+	time.Sleep(1 * time.Second)
+
+	if got := eng.DaemonState("d"); got != DaemonRunning {
+		t.Errorf("daemon state after prereq failure = %q, want running", got)
+	}
+	eng.daemonMu.Lock()
+	currentRunID := eng.daemonRuns["d"]
+	eng.daemonMu.Unlock()
+	if currentRunID != originalRunID {
+		t.Errorf("daemon run ID changed: was %q, now %q (the engine restarted on a failed prereq)", originalRunID, currentRunID)
 	}
 }
 
