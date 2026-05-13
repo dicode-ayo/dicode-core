@@ -154,15 +154,18 @@ func (p *preflightExec) setFn(taskID string, fn func(taskID, runID string) strin
 	p.fns[taskID] = fn
 }
 
-func (p *preflightExec) markDaemon(taskID string) chan struct{} {
-	ch := make(chan struct{})
+// markDaemon flags a task ID as a long-running daemon. Subsequent Execute
+// calls for that task block until the run's context is cancelled (i.e.
+// until KillRun is invoked or the engine shuts down).
+func (p *preflightExec) markDaemon(taskID string) {
 	p.mu.Lock()
-	p.daemon[taskID] = ch
+	if p.daemon[taskID] == nil {
+		p.daemon[taskID] = make(chan struct{})
+	}
 	p.mu.Unlock()
-	return ch
 }
 
-func (p *preflightExec) Execute(_ context.Context, spec *task.Spec, opts pkgruntime.RunOptions) (*pkgruntime.RunResult, error) {
+func (p *preflightExec) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime.RunOptions) (*pkgruntime.RunResult, error) {
 	p.runs.Add(1)
 	p.mu.Lock()
 	daemonCh := p.daemon[spec.ID]
@@ -170,8 +173,11 @@ func (p *preflightExec) Execute(_ context.Context, spec *task.Spec, opts pkgrunt
 	p.mu.Unlock()
 
 	if daemonCh != nil {
-		// Long-running daemon: block until released.
-		<-daemonCh
+		// Long-running daemon: block until the run's context is cancelled
+		// (KillRun path). FinishRun(Success) before returning so onDaemon-
+		// RunFinished doesn't treat the daemon as crashed. Mirrors how a
+		// real daemon exits gracefully on shutdown.
+		<-ctx.Done()
 		_ = p.reg.FinishRun(context.Background(), opts.RunID, registry.StatusSuccess)
 		return &pkgruntime.RunResult{}, nil
 	}
@@ -250,20 +256,20 @@ func TestPreflight_DaemonWaitsForPrereqSuccess(t *testing.T) {
 		t.Fatalf("reg.Register prereq: %v", err)
 	}
 
-	// Daemon: blocks until released.
+	// Daemon: blocks until released. restart:never so the executor's
+	// eventual exit doesn't loop the test.
 	daemon := &task.Spec{
 		ID:      "d",
 		Name:    "d",
 		Runtime: task.RuntimeDocker,
 		Docker:  &task.DockerConfig{Image: "alpine"},
-		Trigger: task.TriggerConfig{Daemon: true, Before: []string{"render"}},
+		Trigger: task.TriggerConfig{Daemon: true, Before: []string{"render"}, Restart: "never"},
 		Enabled: true,
 	}
 	if err := reg.Register(daemon); err != nil {
 		t.Fatalf("reg.Register daemon: %v", err)
 	}
-	releaseDaemon := exec.markDaemon("d")
-	defer close(releaseDaemon)
+	exec.markDaemon("d")
 
 	if err := eng.Register(daemon); err != nil {
 		t.Fatalf("eng.Register daemon: %v", err)
@@ -290,14 +296,13 @@ func TestPreflight_NoBefore_StartsImmediately(t *testing.T) {
 		Name:    "d-noprereq",
 		Runtime: task.RuntimeDocker,
 		Docker:  &task.DockerConfig{Image: "alpine"},
-		Trigger: task.TriggerConfig{Daemon: true}, // no Before
+		Trigger: task.TriggerConfig{Daemon: true, Restart: "never"}, // no Before
 		Enabled: true,
 	}
 	if err := reg.Register(daemon); err != nil {
 		t.Fatalf("reg.Register: %v", err)
 	}
-	releaseDaemon := exec.markDaemon("d-noprereq")
-	defer close(releaseDaemon)
+	exec.markDaemon("d-noprereq")
 
 	if err := eng.Register(daemon); err != nil {
 		t.Fatalf("eng.Register: %v", err)
@@ -315,7 +320,11 @@ func makeDaemonSpec(id string, before []string) *task.Spec {
 		Name:    id,
 		Runtime: task.RuntimeDocker,
 		Docker:  &task.DockerConfig{Image: "alpine"},
-		Trigger: task.TriggerConfig{Daemon: true, Before: before},
+		// restart: never so a clean executor exit doesn't trigger the
+		// existing "always restart" hook AND the prereq-driven restart
+		// path together (would double-count daemon runs in the
+		// coalescing test).
+		Trigger: task.TriggerConfig{Daemon: true, Before: before, Restart: "never"},
 		Enabled: true,
 	}
 }
@@ -327,6 +336,119 @@ func makeOneShotSpec(id string) *task.Spec {
 		Runtime: task.RuntimeDeno,
 		Trigger: task.TriggerConfig{Manual: true},
 		Enabled: true,
+	}
+}
+
+// TestPreflight_DaemonRestartsOnPrereqRerun verifies that re-running a
+// prereq task after the daemon is up triggers a restart: the daemon's
+// current run is killed, preflight re-runs, and the daemon comes back up.
+//
+// Asserted by counting daemon-task runs in the registry — must transition
+// from 1 to 2 after the prereq is re-fired.
+func TestPreflight_DaemonRestartsOnPrereqRerun(t *testing.T) {
+	eng, reg, exec := newPreflightEnv(t)
+
+	prereq := makeOneShotSpec("render")
+	if err := reg.Register(prereq); err != nil {
+		t.Fatal(err)
+	}
+
+	daemon := makeDaemonSpec("d", []string{"render"})
+	if err := reg.Register(daemon); err != nil {
+		t.Fatal(err)
+	}
+	// markDaemon makes the executor block until the run's context is
+	// cancelled. KillRun (invoked by queueDaemonRestart) is the cancel
+	// trigger.
+	exec.markDaemon("d")
+
+	if err := eng.Register(daemon); err != nil {
+		t.Fatalf("eng.Register: %v", err)
+	}
+
+	// Wait for daemon's first run to be active.
+	waitUntil(t, 5*time.Second, func() bool {
+		return eng.DaemonState("d") == DaemonRunning
+	}, "daemon never reached Running for first start")
+
+	// Re-fire the prereq. The success completion notifies the engine,
+	// which should KillRun the current daemon run, re-run preflight, and
+	// start a fresh daemon run.
+	if _, err := eng.FireManual(context.Background(), "render", nil); err != nil {
+		t.Fatalf("FireManual prereq: %v", err)
+	}
+
+	// Wait for a second daemon run to appear AND reach Running.
+	waitUntil(t, 10*time.Second, func() bool {
+		runs, _ := reg.ListRuns(context.Background(), "d", 10)
+		var daemonRuns int
+		for _, r := range runs {
+			if r.TriggerSource == registry.TriggerDaemon {
+				daemonRuns++
+			}
+		}
+		return daemonRuns >= 2 && eng.DaemonState("d") == DaemonRunning
+	}, "daemon never restarted after prereq re-run")
+}
+
+// TestPreflight_RestartCoalesces verifies that two rapid prereq re-runs
+// produce AT MOST one extra daemon restart — the second prereq completion
+// arriving while a restart is already in flight is coalesced. Without
+// coalescing, busy prereq schedules (e.g. credential rotators on a short
+// cron) would thrash the daemon.
+func TestPreflight_RestartCoalesces(t *testing.T) {
+	eng, reg, exec := newPreflightEnv(t)
+
+	prereq := makeOneShotSpec("render")
+	if err := reg.Register(prereq); err != nil {
+		t.Fatal(err)
+	}
+	daemon := makeDaemonSpec("d", []string{"render"})
+	if err := reg.Register(daemon); err != nil {
+		t.Fatal(err)
+	}
+	exec.markDaemon("d")
+
+	if err := eng.Register(daemon); err != nil {
+		t.Fatalf("eng.Register: %v", err)
+	}
+	waitUntil(t, 5*time.Second, func() bool {
+		return eng.DaemonState("d") == DaemonRunning
+	}, "first start")
+
+	// Fire prereq twice in rapid succession. The second fire must be
+	// coalesced into the first restart (restartGate.tryAcquire returns
+	// false on the second attempt while the first is still in flight).
+	for i := 0; i < 2; i++ {
+		if _, err := eng.FireManual(context.Background(), "render", nil); err != nil {
+			t.Fatalf("FireManual prereq: %v", err)
+		}
+	}
+
+	// After the restart settles, total daemon runs should be 2 — first
+	// boot plus one coalesced restart. Wait briefly to allow any erroneous
+	// second restart to manifest.
+	waitUntil(t, 10*time.Second, func() bool {
+		runs, _ := reg.ListRuns(context.Background(), "d", 10)
+		var daemonRuns int
+		for _, r := range runs {
+			if r.TriggerSource == registry.TriggerDaemon {
+				daemonRuns++
+			}
+		}
+		return daemonRuns >= 2 && eng.DaemonState("d") == DaemonRunning
+	}, "restart never completed")
+	time.Sleep(500 * time.Millisecond)
+
+	runs, _ := reg.ListRuns(context.Background(), "d", 10)
+	var daemonRuns int
+	for _, r := range runs {
+		if r.TriggerSource == registry.TriggerDaemon {
+			daemonRuns++
+		}
+	}
+	if daemonRuns > 2 {
+		t.Errorf("expected at most 2 daemon runs (first boot + one coalesced restart), got %d", daemonRuns)
 	}
 }
 

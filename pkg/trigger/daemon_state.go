@@ -1,6 +1,14 @@
 package trigger
 
-import "sync"
+import (
+	"context"
+	"slices"
+	"sync"
+	"time"
+
+	"github.com/dicode/dicode/pkg/task"
+	"go.uber.org/zap"
+)
 
 // DaemonState describes the preflight/lifecycle phase of a daemon task as
 // observed by the trigger engine. Surfaced via Engine.DaemonState so the
@@ -85,4 +93,104 @@ func (e *Engine) DaemonState(taskID string) DaemonState {
 // to DaemonStopped removes the entry from the map.
 func (e *Engine) setDaemonState(taskID string, s DaemonState) {
 	e.daemonStates.set(taskID, s)
+}
+
+// notifyPrereqCompletion is the post-success hook the engine calls from
+// FireChain when ANY task finishes with status=success. It walks the
+// registered daemons and queues a restart for each one that lists
+// completedTaskID in its trigger.before.
+//
+// Coalescing: at most one restart per daemon is in flight at any time —
+// concurrent prereq completions are dropped via restartGate.tryAcquire.
+// This prevents thrash when a daemon depends on a prereq that's on a
+// short cron (credential rotation, periodic config render, etc.).
+func (e *Engine) notifyPrereqCompletion(completedTaskID string) {
+	for _, spec := range e.registry.All() {
+		if !spec.Trigger.Daemon {
+			continue
+		}
+		if !slices.Contains(spec.Trigger.Before, completedTaskID) {
+			continue
+		}
+		// Only attempt a restart if the daemon was actually up. Restarting
+		// a daemon we never managed to start (e.g. PrereqFailed on first
+		// boot) would race with the in-flight first-boot path; the
+		// prereq's success will fall through to the normal startDaemon
+		// path via the next registration cycle.
+		state := e.DaemonState(spec.ID)
+		if state != DaemonRunning {
+			e.log.Debug("prereq completion ignored — daemon not Running",
+				zap.String("daemon", spec.ID),
+				zap.String("prereq", completedTaskID),
+				zap.String("state", string(state)),
+			)
+			continue
+		}
+		e.queueDaemonRestart(spec)
+	}
+}
+
+// queueDaemonRestart performs the stop-then-start cycle for a daemon
+// whose trigger.before has just been re-satisfied. Holds a per-daemon
+// lock (sync.Map keyed on task ID) so a flurry of prereq completions
+// produces at most ONE outstanding restart. Subsequent calls during a
+// restart are silently dropped.
+func (e *Engine) queueDaemonRestart(spec *task.Spec) {
+	if !e.restartGates.tryAcquire(spec.ID) {
+		// A restart is already queued or in flight; coalesce.
+		e.log.Debug("daemon restart coalesced", zap.String("task", spec.ID))
+		return
+	}
+	go func() {
+		defer e.restartGates.release(spec.ID)
+
+		e.log.Info("daemon restart triggered by prereq completion",
+			zap.String("task", spec.ID),
+		)
+		e.setDaemonState(spec.ID, DaemonStopping)
+
+		// Stop the existing run. KillRun is best-effort; the daemon may
+		// already have exited between FireChain's success notification
+		// and this goroutine waking up.
+		e.daemonMu.Lock()
+		runID := e.daemonRuns[spec.ID]
+		e.daemonMu.Unlock()
+		if runID != "" {
+			e.KillRun(runID)
+			// Wait briefly for the run to actually terminate so the
+			// onDaemonRunFinished restart hook (which itself runs
+			// startDaemon) doesn't race with our explicit restart.
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_, _ = e.WaitRun(ctx, runID)
+			cancel()
+		}
+
+		// Re-fire preflight + start. The onDaemonRunFinished path will
+		// ALSO try to restart on cancellation in some configurations;
+		// startDaemon's own idempotency (daemonRuns gating) keeps that
+		// safe.
+		e.startDaemon(spec)
+	}()
+}
+
+// restartGate is a per-task at-most-one-in-flight lock. Implemented as a
+// sync.Map keyed on task ID; values are unused (the presence/absence of
+// the key is the lock state).
+type restartGate struct {
+	gates sync.Map // map[string]struct{} — presence == locked
+}
+
+func newRestartGate() *restartGate { return &restartGate{} }
+
+// tryAcquire returns true if the caller now holds the lock for taskID,
+// false if another goroutine already does.
+func (g *restartGate) tryAcquire(taskID string) bool {
+	_, loaded := g.gates.LoadOrStore(taskID, struct{}{})
+	return !loaded
+}
+
+// release frees the lock for taskID. Must be called exactly once per
+// successful tryAcquire.
+func (g *restartGate) release(taskID string) {
+	g.gates.Delete(taskID)
 }
