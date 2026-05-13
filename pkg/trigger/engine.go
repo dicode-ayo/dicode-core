@@ -63,6 +63,12 @@ type Engine struct {
 	daemonRuns  map[string]string
 	daemonSpecs map[string]*task.Spec
 
+	// daemonStates tracks the preflight/lifecycle phase of each daemon task
+	// for surfacing in the WebUI (Engine.DaemonState). Independent of
+	// daemonMu — guarded by its own RWMutex so a state-read in the API path
+	// never has to wait on a long preflight dispatch holding daemonMu.
+	daemonStates *daemonStateMap
+
 	notifier        notify.Notifier
 	notifyOnSuccess bool
 	notifyOnFailure bool
@@ -120,15 +126,16 @@ type PythonRuntimeAPI interface {
 // New creates a trigger Engine with a default Deno executor.
 func New(r *registry.Registry, defaultExec pkgruntime.Executor, log *zap.Logger) *Engine {
 	e := &Engine{
-		registry:    r,
-		executors:   make(map[task.Runtime]pkgruntime.Executor),
-		cron:        cron.New(),
-		log:         log,
-		cronEntries: make(map[string]cron.EntryID),
-		webhooks:    make(map[string]string),
-		daemonRuns:  make(map[string]string),
-		daemonSpecs: make(map[string]*task.Spec),
-		guards:      newChainGuards(),
+		registry:     r,
+		executors:    make(map[task.Runtime]pkgruntime.Executor),
+		cron:         cron.New(),
+		log:          log,
+		cronEntries:  make(map[string]cron.EntryID),
+		webhooks:     make(map[string]string),
+		daemonRuns:   make(map[string]string),
+		daemonSpecs:  make(map[string]*task.Spec),
+		daemonStates: newDaemonStateMap(),
+		guards:       newChainGuards(),
 	}
 	e.executors[task.RuntimeDeno] = defaultExec
 	return e
