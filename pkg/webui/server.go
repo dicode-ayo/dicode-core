@@ -1363,6 +1363,12 @@ type TaskDetail struct {
 	ScriptFile   string `json:"script_file"`
 	TestFile     string `json:"test_file"`
 	TestExists   bool   `json:"test_exists"`
+
+	// DaemonState surfaces the engine's preflight/lifecycle phase for
+	// daemon tasks. Empty for non-daemon tasks so the WebUI can hide the
+	// row entirely. Five-value enum — see pkg/trigger.DaemonState for the
+	// canonical list.
+	DaemonState string `json:"daemon_state,omitempty"`
 }
 
 func (s *Server) apiGetTask(w http.ResponseWriter, r *http.Request) {
@@ -1376,6 +1382,11 @@ func (s *Server) apiGetTask(w http.ResponseWriter, r *http.Request) {
 	detail := TaskDetail{
 		Spec:         spec,
 		TriggerLabel: triggerLabel(spec.Trigger),
+	}
+	// Daemon preflight state — empty for non-daemon tasks so the UI
+	// doesn't render "stopped" labels on every cron job.
+	if spec.Trigger.Daemon {
+		detail.DaemonState = string(s.engine.DaemonState(spec.ID))
 	}
 
 	// Determine script file
