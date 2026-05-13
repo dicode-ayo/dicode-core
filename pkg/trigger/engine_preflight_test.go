@@ -7,10 +7,20 @@ package trigger
 // one-shot task rather than another daemon. Both rules live here.
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/dicode/dicode/pkg/db"
+	"github.com/dicode/dicode/pkg/registry"
+	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	"github.com/dicode/dicode/pkg/task"
+	"go.uber.org/zap"
 )
 
 func TestRegister_BeforeUnknownTaskRejected(t *testing.T) {
@@ -117,3 +127,207 @@ func TestRegister_BeforeValid_NonDaemonTarget(t *testing.T) {
 		t.Errorf("unexpected error on valid before-list: %v", err)
 	}
 }
+
+// preflightExec is a controllable Executor for the preflight tests. Each
+// task is keyed by ID; the configured fn runs synchronously and decides
+// the final status. Daemons never finish unless explicitly released.
+type preflightExec struct {
+	reg *registry.Registry
+
+	mu     sync.Mutex
+	fns    map[string]func(taskID, runID string) string
+	daemon map[string]chan struct{} // daemon taskID → block channel (closed = exit)
+	runs   atomic.Int32             // count of executed runs (any task)
+}
+
+func newPreflightExec(reg *registry.Registry) *preflightExec {
+	return &preflightExec{
+		reg:    reg,
+		fns:    make(map[string]func(string, string) string),
+		daemon: make(map[string]chan struct{}),
+	}
+}
+
+func (p *preflightExec) setFn(taskID string, fn func(taskID, runID string) string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.fns[taskID] = fn
+}
+
+func (p *preflightExec) markDaemon(taskID string) chan struct{} {
+	ch := make(chan struct{})
+	p.mu.Lock()
+	p.daemon[taskID] = ch
+	p.mu.Unlock()
+	return ch
+}
+
+func (p *preflightExec) Execute(_ context.Context, spec *task.Spec, opts pkgruntime.RunOptions) (*pkgruntime.RunResult, error) {
+	p.runs.Add(1)
+	p.mu.Lock()
+	daemonCh := p.daemon[spec.ID]
+	fn := p.fns[spec.ID]
+	p.mu.Unlock()
+
+	if daemonCh != nil {
+		// Long-running daemon: block until released.
+		<-daemonCh
+		_ = p.reg.FinishRun(context.Background(), opts.RunID, registry.StatusSuccess)
+		return &pkgruntime.RunResult{}, nil
+	}
+	status := registry.StatusSuccess
+	if fn != nil {
+		status = fn(spec.ID, opts.RunID)
+	}
+	if status == registry.StatusFailure {
+		_ = p.reg.FinishRunWithReason(context.Background(), opts.RunID, status, "test-injected: failure")
+		return &pkgruntime.RunResult{}, errors.New("injected failure")
+	}
+	_ = p.reg.FinishRun(context.Background(), opts.RunID, status)
+	return &pkgruntime.RunResult{}, nil
+}
+
+// newPreflightEnv returns a test engine + reg + controllable executor for
+// the preflight gating tests. Tasks complete synchronously (or block, for
+// marked daemons) without spawning Deno.
+func newPreflightEnv(t *testing.T) (*Engine, *registry.Registry, *preflightExec) {
+	t.Helper()
+	d, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { d.Close() })
+	reg := registry.New(d)
+	exec := newPreflightExec(reg)
+	eng := New(reg, exec, zap.NewNop())
+	return eng, reg, exec
+}
+
+func waitUntil(t *testing.T, timeout time.Duration, cond func() bool, msg string) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting: %s", msg)
+}
+
+// hasSuccessfulRunFor reports whether taskID has at least one run row in
+// the registry with the given status.
+func hasRunWithStatus(t *testing.T, reg *registry.Registry, taskID, status string) bool {
+	t.Helper()
+	runs, err := reg.ListRuns(context.Background(), taskID, 5)
+	if err != nil {
+		t.Fatalf("ListRuns: %v", err)
+	}
+	for _, r := range runs {
+		if r.Status == status {
+			return true
+		}
+	}
+	return false
+}
+
+// TestPreflight_DaemonWaitsForPrereqSuccess verifies the gating contract:
+// the daemon's run does not start until every task in its before-list has
+// finished with status=success. Asserted by ordering — prereq must have a
+// success run before the daemon's run shows up.
+func TestPreflight_DaemonWaitsForPrereqSuccess(t *testing.T) {
+	eng, reg, exec := newPreflightEnv(t)
+
+	// Prereq: completes successfully.
+	prereq := &task.Spec{
+		ID:      "render",
+		Name:    "render",
+		Runtime: task.RuntimeDeno,
+		Trigger: task.TriggerConfig{Manual: true},
+		Enabled: true,
+	}
+	if err := reg.Register(prereq); err != nil {
+		t.Fatalf("reg.Register prereq: %v", err)
+	}
+
+	// Daemon: blocks until released.
+	daemon := &task.Spec{
+		ID:      "d",
+		Name:    "d",
+		Runtime: task.RuntimeDocker,
+		Docker:  &task.DockerConfig{Image: "alpine"},
+		Trigger: task.TriggerConfig{Daemon: true, Before: []string{"render"}},
+		Enabled: true,
+	}
+	if err := reg.Register(daemon); err != nil {
+		t.Fatalf("reg.Register daemon: %v", err)
+	}
+	releaseDaemon := exec.markDaemon("d")
+	defer close(releaseDaemon)
+
+	if err := eng.Register(daemon); err != nil {
+		t.Fatalf("eng.Register daemon: %v", err)
+	}
+
+	// Prereq must complete to success.
+	waitUntil(t, 5*time.Second, func() bool {
+		return hasRunWithStatus(t, reg, "render", registry.StatusSuccess)
+	}, "prereq render never succeeded")
+
+	// Daemon must transition to Running once preflight succeeds.
+	waitUntil(t, 5*time.Second, func() bool {
+		return eng.DaemonState("d") == DaemonRunning
+	}, "daemon never reached Running")
+}
+
+// TestPreflight_NoBefore_StartsImmediately verifies that a daemon with an
+// empty before-list does not pay any preflight overhead: it goes straight
+// to Running without the engine touching daemonStates' PrereqRunning state.
+func TestPreflight_NoBefore_StartsImmediately(t *testing.T) {
+	eng, reg, exec := newPreflightEnv(t)
+	daemon := &task.Spec{
+		ID:      "d-noprereq",
+		Name:    "d-noprereq",
+		Runtime: task.RuntimeDocker,
+		Docker:  &task.DockerConfig{Image: "alpine"},
+		Trigger: task.TriggerConfig{Daemon: true}, // no Before
+		Enabled: true,
+	}
+	if err := reg.Register(daemon); err != nil {
+		t.Fatalf("reg.Register: %v", err)
+	}
+	releaseDaemon := exec.markDaemon("d-noprereq")
+	defer close(releaseDaemon)
+
+	if err := eng.Register(daemon); err != nil {
+		t.Fatalf("eng.Register: %v", err)
+	}
+	waitUntil(t, 5*time.Second, func() bool {
+		return eng.DaemonState("d-noprereq") == DaemonRunning
+	}, "daemon-without-before never reached Running")
+}
+
+// makeDaemonSpec is a tiny convenience to keep the table-style tests below
+// from drowning in struct literals. Kept local to this file.
+func makeDaemonSpec(id string, before []string) *task.Spec {
+	return &task.Spec{
+		ID:      id,
+		Name:    id,
+		Runtime: task.RuntimeDocker,
+		Docker:  &task.DockerConfig{Image: "alpine"},
+		Trigger: task.TriggerConfig{Daemon: true, Before: before},
+		Enabled: true,
+	}
+}
+
+func makeOneShotSpec(id string) *task.Spec {
+	return &task.Spec{
+		ID:      id,
+		Name:    id,
+		Runtime: task.RuntimeDeno,
+		Trigger: task.TriggerConfig{Manual: true},
+		Enabled: true,
+	}
+}
+
+var _ = fmt.Sprintf // keep fmt import live for future debug-helpers

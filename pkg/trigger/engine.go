@@ -618,18 +618,108 @@ func (e *Engine) registerDaemon(spec *task.Spec) {
 	if alreadyRunning {
 		return
 	}
-	e.startDaemon(spec)
+	// startDaemon may block on preflight (trigger.before); detach so
+	// Register and the reconciler's OnRegister callback stay synchronous
+	// for non-preflight daemons and don't stall the registration sweep
+	// for preflight ones.
+	if len(spec.Trigger.Before) == 0 {
+		e.startDaemon(spec)
+		return
+	}
+	go e.startDaemon(spec)
 }
 
+// startDaemon brings a daemon up. When trigger.before is set, runs the
+// preflight chain first and only fires the daemon if every prereq returns
+// status=success. Sets daemonStates throughout for WebUI visibility.
 func (e *Engine) startDaemon(spec *task.Spec) {
+	if len(spec.Trigger.Before) > 0 {
+		e.setDaemonState(spec.ID, DaemonPrereqRunning)
+		if err := e.runPrereqs(context.Background(), spec); err != nil {
+			e.setDaemonState(spec.ID, DaemonPrereqFailed)
+			e.log.Warn("daemon preflight failed; daemon not started",
+				zap.String("task", spec.ID),
+				zap.Error(err),
+			)
+			return
+		}
+	}
+
 	runID, err := e.fireAsync(context.Background(), spec, pkgruntime.RunOptions{}, registry.TriggerDaemon)
 	if err != nil {
+		e.setDaemonState(spec.ID, DaemonStopped)
 		e.log.Error("daemon start failed", zap.String("task", spec.ID), zap.Error(err))
 		return
 	}
 	e.daemonMu.Lock()
 	e.daemonRuns[spec.ID] = runID
 	e.daemonMu.Unlock()
+	e.setDaemonState(spec.ID, DaemonRunning)
+}
+
+// runPrereqs fires every task listed in spec.Trigger.Before in parallel and
+// blocks until they all reach a terminal state. Returns nil only if every
+// prereq finishes with status=success; otherwise returns the first
+// non-success error observed.
+//
+// Re-fires every prereq on every preflight attempt — no "already satisfied"
+// short-circuit. The whole point of preflight is to refresh ephemeral
+// state (rendered configs, freshly-rotated credentials) right before the
+// daemon starts; reusing yesterday's success would defeat that. If
+// operators want caching, that belongs in the prereq task itself, not in
+// the trigger engine.
+func (e *Engine) runPrereqs(ctx context.Context, spec *task.Spec) error {
+	type prereqResult struct {
+		refID string
+		err   error
+	}
+	results := make(chan prereqResult, len(spec.Trigger.Before))
+	var wg sync.WaitGroup
+
+	for _, refID := range spec.Trigger.Before {
+		refID := refID
+		ref, ok := e.registry.Get(refID)
+		if !ok {
+			// validateBeforeRefs catches this at registration time, but the
+			// registry can change between registration and preflight (task
+			// unregistered while daemon was queued, etc.). Defensive check.
+			results <- prereqResult{refID: refID, err: fmt.Errorf("prereq %q vanished from registry", refID)}
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			runID, err := e.fireAsync(ctx, ref, pkgruntime.RunOptions{}, registry.TriggerPreflight)
+			if err != nil {
+				results <- prereqResult{refID: refID, err: fmt.Errorf("dispatch: %w", err)}
+				return
+			}
+			// Use WaitRun (the existing terminal-state waiter, channel-backed
+			// rather than polling) so this scales to many parallel prereqs
+			// without hammering the DB.
+			res, werr := e.WaitRun(ctx, runID)
+			if werr != nil {
+				results <- prereqResult{refID: refID, err: fmt.Errorf("wait: %w", werr)}
+				return
+			}
+			if res.Status != registry.StatusSuccess {
+				results <- prereqResult{refID: refID, err: fmt.Errorf("status=%s", res.Status)}
+				return
+			}
+			results <- prereqResult{refID: refID, err: nil}
+		}()
+	}
+
+	wg.Wait()
+	close(results)
+
+	var firstErr error
+	for r := range results {
+		if r.err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("prereq %q: %w", r.refID, r.err)
+		}
+	}
+	return firstErr
 }
 
 func (e *Engine) onDaemonRunFinished(spec *task.Spec, runID string) {
