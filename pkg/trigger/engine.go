@@ -345,8 +345,17 @@ func (e *Engine) Start(ctx context.Context) error {
 	return nil
 }
 
-// Register adds or updates trigger registrations for a task spec.
-func (e *Engine) Register(spec *task.Spec) {
+// Register adds or updates trigger registrations for a task spec. Returns a
+// non-nil error when cross-spec validation fails (currently: invalid
+// trigger.before references). On error, no triggers are registered.
+func (e *Engine) Register(spec *task.Spec) error {
+	// Cross-spec validation must run BEFORE Unregister so that a previously
+	// valid registration isn't torn down when an updated spec fails its
+	// new-state checks. The registry-snapshot lookups are read-only.
+	if err := e.validateBeforeRefs(spec); err != nil {
+		return err
+	}
+
 	e.Unregister(spec.ID)
 
 	// Disabled tasks are kept in the registry for API visibility but must not
@@ -356,7 +365,7 @@ func (e *Engine) Register(spec *task.Spec) {
 			zap.String("task", spec.ID),
 			zap.String("runtime", string(spec.Runtime)),
 		)
-		return
+		return nil
 	}
 
 	if spec.Trigger.Cron != "" {
@@ -373,6 +382,31 @@ func (e *Engine) Register(spec *task.Spec) {
 		zap.String("trigger", string(triggerSource(spec))),
 		zap.String("runtime", string(spec.Runtime)),
 	)
+	return nil
+}
+
+// validateBeforeRefs checks each trigger.before entry against the current
+// registry. Per-spec validation (Spec.validate) already enforces shape;
+// here we only catch the things that need the full registry: unknown task
+// IDs and references to other daemons.
+//
+// On cycles: per-spec validation requires trigger.before only on daemon
+// tasks, and this function forbids before: references to daemons. Together
+// those constraints make cycles structurally unreachable — the only way a
+// cycle could form is through a prereq task carrying its own
+// trigger.before back to the daemon, but only daemons may have
+// trigger.before. We therefore do not implement explicit cycle detection.
+func (e *Engine) validateBeforeRefs(spec *task.Spec) error {
+	for _, refID := range spec.Trigger.Before {
+		ref, ok := e.registry.Get(refID)
+		if !ok {
+			return fmt.Errorf("trigger.before: task %q not found in registry", refID)
+		}
+		if ref.Trigger.Daemon {
+			return fmt.Errorf("trigger.before: task %q is a daemon (only one-shot tasks can be preflights)", refID)
+		}
+	}
+	return nil
 }
 
 // Unregister removes all trigger registrations for a task ID.
