@@ -623,15 +623,32 @@ func (e *Engine) registerDaemon(spec *task.Spec) {
 	if alreadyRunning {
 		return
 	}
+	// Gate the start path with the same per-daemon lock used for restart
+	// coalescing. Two concurrent registerDaemon calls (e.g. the reconciler
+	// firing OnRegister twice while preflight is in flight, or a manual
+	// re-register racing the reconciler) would otherwise both observe
+	// `alreadyRunning=false` and both spawn a goroutine that runs preflight
+	// + fireAsync. The lock ensures at most one in-flight start per task ID.
+	// Release happens inside startDaemon after the daemon's run slot is
+	// recorded (or after a preflight/dispatch failure has been logged).
+	if !e.restartGates.tryAcquire(spec.ID) {
+		e.log.Debug("daemon start coalesced — another start is already in flight",
+			zap.String("task", spec.ID))
+		return
+	}
 	// startDaemon may block on preflight (trigger.before); detach so
 	// Register and the reconciler's OnRegister callback stay synchronous
 	// for non-preflight daemons and don't stall the registration sweep
 	// for preflight ones.
 	if len(spec.Trigger.Before) == 0 {
+		defer e.restartGates.release(spec.ID)
 		e.startDaemon(spec)
 		return
 	}
-	go e.startDaemon(spec)
+	go func() {
+		defer e.restartGates.release(spec.ID)
+		e.startDaemon(spec)
+	}()
 }
 
 // startDaemon brings a daemon up. When trigger.before is set, runs the
