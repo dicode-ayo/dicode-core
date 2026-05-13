@@ -18,4 +18,9 @@ const (
 	TriggerCronCatchup TriggerSource = "cron-catchup"
 	TriggerProvider    TriggerSource = "provider"
 	TriggerIfMissing   TriggerSource = "if_missing"
+	// TriggerPreflight tags a run fired by the daemon-preflight gating
+	// mechanism (`trigger.before`). Distinct from TriggerChain so the
+	// WebUI can group preflight runs under the daemon they're gating
+	// rather than under their own chain-trigger history.
+	TriggerPreflight TriggerSource = "preflight"
 )
