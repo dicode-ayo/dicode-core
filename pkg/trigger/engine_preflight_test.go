@@ -562,3 +562,104 @@ func TestPreflight_PrereqFailureLeavesRunningDaemonAlone(t *testing.T) {
 }
 
 var _ = fmt.Sprintf // keep fmt import live for future debug-helpers
+
+// TestPreflight_RegisterDaemon_Concurrent_NoDoubleStart pins finding #1 from
+// the PR-300 review: two concurrent registerDaemon calls for the same
+// preflight daemon must NOT each spawn a goroutine that fires preflight and
+// starts the daemon. Without coalescing, both callers observe `daemonRuns`
+// empty (since neither has populated it yet — the goroutine only assigns
+// `daemonRuns[id] = runID` AFTER preflight + fireAsync) and both run a
+// preflight chain + a daemon run, racing for the registry slot.
+//
+// The fix: gate the initial-start path with the same per-task lock used for
+// restart coalescing. The second concurrent call should be a no-op.
+//
+// We inject a barrier into the prereq executor so both registerDaemon calls
+// can reach `go startDaemon` before either preflight returns. After the
+// barrier releases, both goroutines (if the bug exists) would proceed to
+// fireAsync; with the fix, only one does.
+func TestPreflight_RegisterDaemon_Concurrent_NoDoubleStart(t *testing.T) {
+	eng, reg, exec := newPreflightEnv(t)
+
+	prereq := makeOneShotSpec("render")
+	if err := reg.Register(prereq); err != nil {
+		t.Fatal(err)
+	}
+
+	// Block the prereq until released so both registerDaemon callers are
+	// guaranteed to have spawned their goroutines before either preflight
+	// completes. Without this, the test would race against goroutine
+	// scheduling and the bug could slip past on a fast machine.
+	prereqRelease := make(chan struct{})
+	var prereqRuns atomic.Int32
+	exec.setFn("render", func(string, string) string {
+		prereqRuns.Add(1)
+		<-prereqRelease
+		return registry.StatusSuccess
+	})
+
+	daemon := makeDaemonSpec("d", []string{"render"})
+	if err := reg.Register(daemon); err != nil {
+		t.Fatal(err)
+	}
+	exec.markDaemon("d")
+
+	// Fire two concurrent Register calls. Use a barrier so they enter
+	// registerDaemon in true overlap rather than serially.
+	var startBarrier sync.WaitGroup
+	startBarrier.Add(1)
+	var done sync.WaitGroup
+	done.Add(2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			defer done.Done()
+			startBarrier.Wait()
+			if err := eng.Register(daemon); err != nil {
+				t.Errorf("eng.Register: %v", err)
+			}
+		}()
+	}
+	startBarrier.Done()
+	done.Wait()
+
+	// Wait until preflight has actually started for at least one caller.
+	// (Both should reach the barrier; we only need one to be sure both
+	// registerDaemon calls have completed their spawn step.)
+	waitUntil(t, 2*time.Second, func() bool {
+		return prereqRuns.Load() >= 1
+	}, "no prereq run started after concurrent Register calls")
+
+	// Release the prereq barrier so any in-flight preflight goroutine(s)
+	// proceed to fireAsync.
+	close(prereqRelease)
+
+	// Wait for the daemon to reach Running so any double-start would have
+	// surfaced by now.
+	waitUntil(t, 5*time.Second, func() bool {
+		return eng.DaemonState("d") == DaemonRunning
+	}, "daemon never reached Running")
+	// Extra settle window: a second goroutine's fireAsync may land after
+	// the first daemon run reached Running. Without this, the bug could
+	// slip past the assertion below.
+	time.Sleep(500 * time.Millisecond)
+
+	// Assertion 1: exactly one preflight run.
+	if got := prereqRuns.Load(); got != 1 {
+		t.Errorf("expected exactly 1 preflight run, got %d (double-start race)", got)
+	}
+
+	// Assertion 2: exactly one daemon run in the registry.
+	runs, err := reg.ListRuns(context.Background(), "d", 10)
+	if err != nil {
+		t.Fatalf("ListRuns: %v", err)
+	}
+	var daemonRuns int
+	for _, r := range runs {
+		if r.TriggerSource == registry.TriggerDaemon {
+			daemonRuns++
+		}
+	}
+	if daemonRuns != 1 {
+		t.Errorf("expected exactly 1 daemon run, got %d (double-start race)", daemonRuns)
+	}
+}
