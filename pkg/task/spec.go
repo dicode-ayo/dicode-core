@@ -105,6 +105,14 @@ type TriggerConfig struct {
 	Chain         *ChainTrigger `yaml:"chain,omitempty"`          // fire when another task completes
 	Daemon        bool          `yaml:"daemon,omitempty"`         // start on app start, restart on exit
 	Restart       string        `yaml:"restart,omitempty"`        // daemon only: "always"(default)|"on-failure"|"never"
+	// Before lists task IDs that must run to success before this daemon starts.
+	// Only valid alongside `daemon: true`; per-spec validation rejects it on
+	// non-daemon triggers. Cross-spec validation (in pkg/trigger.Engine.Register)
+	// additionally rejects references to unknown tasks and to other daemons —
+	// only one-shot tasks can be preflights. When a referenced task re-runs
+	// successfully after the daemon is up, the engine restarts the daemon so
+	// it picks up newly-rendered config.
+	Before []string `yaml:"before,omitempty"`
 }
 
 // Param defines a user-configurable input for a task.
@@ -551,6 +559,23 @@ func (s *Spec) validate() error {
 			// ok
 		default:
 			return fmt.Errorf("trigger.restart must be always, on-failure, or never")
+		}
+	}
+	// trigger.before: declarative preflight dependency for daemon tasks. Only
+	// validated locally here; cross-spec checks (does the referenced task
+	// exist? is it a daemon?) live in pkg/trigger.Engine.Register because they
+	// need the full registry snapshot.
+	if len(s.Trigger.Before) > 0 {
+		if !s.Trigger.Daemon {
+			return fmt.Errorf("trigger.before: requires daemon: true (got non-daemon trigger)")
+		}
+		for _, id := range s.Trigger.Before {
+			if id == "" {
+				return fmt.Errorf("trigger.before: empty task ID")
+			}
+			if id == s.ID {
+				return fmt.Errorf("trigger.before: cannot reference self (task ID %q)", id)
+			}
 		}
 	}
 	if s.Trigger.Chain != nil {
