@@ -303,6 +303,95 @@ func TestChainTrigger_Params_ReservedKeyRejected(t *testing.T) {
 	}
 }
 
+func TestTriggerBefore_Parses(t *testing.T) {
+	src := strings.TrimSpace(`
+name: tunnel
+runtime: docker
+trigger:
+  daemon: true
+  before: [render-config, fetch-creds]
+docker:
+  image: x
+`)
+	var s Spec
+	if err := yaml.NewDecoder(strings.NewReader(src)).Decode(&s); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(s.Trigger.Before) != 2 || s.Trigger.Before[0] != "render-config" || s.Trigger.Before[1] != "fetch-creds" {
+		t.Errorf("Before = %v", s.Trigger.Before)
+	}
+}
+
+func TestTriggerBefore_Validation(t *testing.T) {
+	cases := []struct {
+		name    string
+		yaml    string
+		wantErr string
+	}{
+		{
+			name: "before without daemon",
+			yaml: `name: t
+runtime: deno
+trigger: { manual: true, before: [x] }`,
+			wantErr: "before: requires daemon: true",
+		},
+		{
+			name: "self-reference",
+			yaml: `name: selfref
+runtime: docker
+trigger: { daemon: true, before: [selfref] }
+docker: { image: x }`,
+			wantErr: "before: cannot reference self",
+		},
+		{
+			name: "empty task ID",
+			yaml: `name: t
+runtime: docker
+trigger: { daemon: true, before: [""] }
+docker: { image: x }`,
+			wantErr: "before: empty task ID",
+		},
+		{
+			name: "valid empty before",
+			yaml: `name: ok
+runtime: docker
+trigger: { daemon: true, before: [] }
+docker: { image: x }`,
+			wantErr: "",
+		},
+		{
+			name: "valid populated before",
+			yaml: `name: ok2
+runtime: docker
+trigger: { daemon: true, before: [render-config] }
+docker: { image: x }`,
+			wantErr: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var s Spec
+			if err := yaml.NewDecoder(strings.NewReader(strings.TrimSpace(tc.yaml))).Decode(&s); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			// Mimic LoadDirWithVars' post-decode initialisation: the ID is set
+			// from the directory base name. The self-reference test requires
+			// it to match the YAML name.
+			s.ID = s.Name
+			err := s.validate()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Errorf("expected no error, got %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("expected error containing %q, got: %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
 func equalSlice(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
