@@ -75,9 +75,23 @@ type DockerConfig struct {
 }
 
 // ChainTrigger fires a task when another task completes.
+//
+// Params are user-supplied values forwarded into the downstream task's input
+// map alongside engine-reserved keys (taskID, runID, status, output,
+// _chain_depth). When Params is empty, the engine passes the upstream task's
+// raw output through as input — preserving the historical contract where
+// downstream tasks consume `input` as the upstream's return value directly.
+// When Params is non-empty, input becomes a map[string]any merging user
+// params with the reserved engine keys; reserved keys are validated to not
+// appear in Params at config-load (see Spec.validate), so collisions are
+// impossible at firing time.
+//
+// Mirror of OnFailureChainSpec.Params (failure-chain side); shares the same
+// reservedChainParamKeys set.
 type ChainTrigger struct {
-	From string `yaml:"from"`         // task ID to listen for
-	On   string `yaml:"on,omitempty"` // "success" (default) | "failure" | "always"
+	From   string         `yaml:"from"`             // task ID to listen for
+	On     string         `yaml:"on,omitempty"`     // "success" (default) | "failure" | "always"
+	Params map[string]any `yaml:"params,omitempty"` // forwarded into downstream task input
 }
 
 // TriggerConfig defines how a task is triggered.
@@ -549,6 +563,14 @@ func (s *Spec) validate() error {
 			// ok
 		default:
 			return fmt.Errorf("trigger.chain.on must be success, failure, or always")
+		}
+		// Reject reserved keys at config load so the engine never has to
+		// disambiguate user vs. engine values at firing time. Mirrors the
+		// check on OnFailureChainSpec.Params (see onfailurechain.go).
+		for k := range s.Trigger.Chain.Params {
+			if _, reserved := reservedChainParamKeys[k]; reserved {
+				return fmt.Errorf("trigger.chain.params: %q is a reserved key (used by the engine)", k)
+			}
 		}
 	}
 	if triggers == 0 {

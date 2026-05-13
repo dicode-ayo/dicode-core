@@ -226,6 +226,48 @@ docker:
 	}
 }
 
+func TestChainTrigger_Params_Parses(t *testing.T) {
+	src := strings.TrimSpace(`
+name: downstream
+runtime: deno
+trigger:
+  chain:
+    from: upstream
+    on: success
+    params:
+      mode: production
+      shard: "3"
+`)
+	var s Spec
+	if err := yaml.NewDecoder(strings.NewReader(src)).Decode(&s); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if s.Trigger.Chain == nil {
+		t.Fatal("Chain nil")
+	}
+	if got := s.Trigger.Chain.Params["mode"]; got != "production" {
+		t.Errorf("Params[mode] = %v, want production", got)
+	}
+	if got := s.Trigger.Chain.Params["shard"]; got != "3" {
+		t.Errorf("Params[shard] = %v, want 3", got)
+	}
+}
+
+func TestChainTrigger_Params_ReservedKeyRejected(t *testing.T) {
+	for _, reserved := range []string{"taskID", "runID", "status", "output", "_chain_depth"} {
+		t.Run(reserved, func(t *testing.T) {
+			src := "name: t\nruntime: deno\ntrigger:\n  chain:\n    from: x\n    params:\n      " + reserved + ": v\n"
+			var s Spec
+			if err := yaml.NewDecoder(strings.NewReader(src)).Decode(&s); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if err := s.validate(); err == nil || !strings.Contains(err.Error(), reserved) {
+				t.Errorf("expected error mentioning %q, got: %v", reserved, err)
+			}
+		})
+	}
+}
+
 func equalSlice(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
