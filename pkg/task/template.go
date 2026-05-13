@@ -120,6 +120,16 @@ func expandSpec(spec *Spec, vars map[string]string) {
 	for i := range spec.Params {
 		spec.Params[i].Default = expandString(spec.Params[i].Default, vars, false)
 	}
+
+	// docker.volumes: lets tasks reference shared paths (${DATADIR}/foo) as
+	// mount sources. envFallback=false — a task.yaml from an untrusted
+	// source must not be able to mount arbitrary host paths by naming a
+	// daemon env var.
+	if spec.Docker != nil {
+		for i := range spec.Docker.Volumes {
+			spec.Docker.Volumes[i] = expandString(spec.Docker.Volumes[i], vars, false)
+		}
+	}
 }
 
 // builtinVars returns the template var map for a task loaded from dir, with

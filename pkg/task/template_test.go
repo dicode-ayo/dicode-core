@@ -252,6 +252,46 @@ func TestVarDataDir_Constant(t *testing.T) {
 	}
 }
 
+func TestExpandSpec_DockerVolumes(t *testing.T) {
+	spec := &Spec{
+		Docker: &DockerConfig{
+			Volumes: []string{
+				"${DATADIR}/cloudflared:/etc/cloudflared:ro",
+				"${TASK_DIR}/local:/work:rw",
+				"${UNKNOWN}/leave-literal:/x",
+			},
+		},
+	}
+	vars := map[string]string{
+		"DATADIR":  "/home/u/.dicode",
+		"TASK_DIR": "/repo/tasks/cf",
+	}
+	expandSpec(spec, vars)
+	want := []string{
+		"/home/u/.dicode/cloudflared:/etc/cloudflared:ro",
+		"/repo/tasks/cf/local:/work:rw",
+		"${UNKNOWN}/leave-literal:/x",
+	}
+	for i, got := range spec.Docker.Volumes {
+		if got != want[i] {
+			t.Errorf("Volumes[%d] = %q, want %q", i, got, want[i])
+		}
+	}
+}
+
+func TestExpandSpec_DockerVolumes_NoEnvFallback(t *testing.T) {
+	// envFallback must be false: a task.yaml from an untrusted source must not be
+	// able to reference a daemon env var as a mount source.
+	t.Setenv("DAEMON_SECRET_PATH", "/etc/dicode/secrets")
+	spec := &Spec{
+		Docker: &DockerConfig{Volumes: []string{"${DAEMON_SECRET_PATH}:/x"}},
+	}
+	expandSpec(spec, map[string]string{})
+	if spec.Docker.Volumes[0] != "${DAEMON_SECRET_PATH}:/x" {
+		t.Errorf("Volumes[0] = %q, want literal preserved (no env fallback)", spec.Docker.Volumes[0])
+	}
+}
+
 func TestLoadDirWithVars_ExpandsTaskSetDir(t *testing.T) {
 	dir := t.TempDir()
 	yaml := `
