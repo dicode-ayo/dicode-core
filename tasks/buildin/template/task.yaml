@@ -1,0 +1,73 @@
+apiVersion: dicode/v1
+kind: Task
+name: "Template Renderer"
+description: |
+  Substitutes ${VAR} placeholders in a template string using values from
+  the task's environment, returning the rendered string. Designed to be
+  composed: invoke from another task via dicode.run_task, chain into a
+  downstream task via input.output, or pipe through the CLI.
+
+  Invocation contract:
+
+    const r = await dicode.run_task("buildin/template", {
+      template: "tunnel: ${ID}\nhost: ${HOST}",
+    });
+    // r === "tunnel: abc-123\nhost: api.example.com"
+
+  The placeholder names map directly to environment variables visible to
+  this task. The set of visible env vars is controlled by permissions.env;
+  in the base taskset this list is empty and each call site is expected
+  to extend it via a `dicode tasks override buildin/template --env ...`
+  taskset override that declares which secrets/values this rendering may
+  consume.
+
+  Return-value persistence is suppressed (run_result.enabled: false)
+  because rendered configs routinely embed credentials. The string still
+  flows in-memory to synchronous run_task callers and to chained
+  downstream tasks via input.output — only the database column
+  runs.return_value (the value the WebUI and REST API surface) is empty.
+
+  Input persistence is also suppressed (run_inputs.enabled: false): the
+  template body itself can be sensitive (it may declare which secrets get
+  embedded), so we keep it out of the run-inputs store as defense in
+  depth.
+
+  Failure modes:
+    - Unresolved placeholder (no matching env var visible to the task)
+      -> task fails with `unresolved placeholder: ${NAME}`. Silent
+      passthrough would let a missing-secret deploy a half-rendered
+      config; loud failure short-circuits the chain.
+    - Prototype-chain lookups (${toString}, ${__proto__}, ...) -> also
+      fail as "unresolved placeholder"; the implementation builds a
+      null-prototype env map and uses hasOwnProperty guards.
+
+runtime: deno
+
+trigger:
+  manual: true
+
+# Template bodies and rendered output are sensitive; keep them out of the
+# run-inputs store and the run.return_value column. They still flow
+# in-memory to synchronous callers and to chained downstreams.
+run_inputs:
+  enabled: false
+run_result:
+  enabled: false
+
+params:
+  template:
+    type: string
+    required: true
+    description: "Template body with ${VAR} placeholders."
+
+permissions:
+  # Empty by default: each call site declares which env vars (typically
+  # secrets resolved via `from: secret:` or `from: task:`) are visible.
+  # Apply with `dicode tasks override buildin/template --env NAME=from`.
+  env: []
+
+timeout: 30s
+
+notify:
+  on_success: false
+  on_failure: true
