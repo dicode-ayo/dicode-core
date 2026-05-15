@@ -282,8 +282,155 @@ docker:
 	if err := yaml.NewDecoder(strings.NewReader(src)).Decode(&s); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(s.Trigger.Before) != 2 || s.Trigger.Before[0] != "render-config" || s.Trigger.Before[1] != "fetch-creds" {
+	if len(s.Trigger.Before) != 2 || s.Trigger.Before[0].Task != "render-config" || s.Trigger.Before[1].Task != "fetch-creds" {
 		t.Errorf("Before = %v", s.Trigger.Before)
+	}
+}
+
+// TestTriggerBefore_PerEdgeOverrides verifies the dual-form decoder on the
+// before: list: bare-ID strings, mapping forms with overrides, and a mix
+// of both must all parse correctly. The override blob itself is preserved
+// so the engine can apply it at preflight dispatch time.
+func TestTriggerBefore_PerEdgeOverrides(t *testing.T) {
+	src := strings.TrimSpace(`
+name: tunnel
+runtime: docker
+trigger:
+  daemon: true
+  before:
+    - render-config
+    - task: fetch-creds
+      overrides:
+        timeout: 5m
+        env:
+          - name: MODE
+            value: preflight
+    - task: warm-cache
+docker:
+  image: x
+`)
+	var s Spec
+	if err := yaml.NewDecoder(strings.NewReader(src)).Decode(&s); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(s.Trigger.Before) != 3 {
+		t.Fatalf("Before length = %d, want 3", len(s.Trigger.Before))
+	}
+
+	// Entry 0: bare string form, no overrides.
+	if s.Trigger.Before[0].Task != "render-config" {
+		t.Errorf("entry[0].Task = %q, want render-config", s.Trigger.Before[0].Task)
+	}
+	if s.Trigger.Before[0].Overrides != nil {
+		t.Errorf("entry[0].Overrides should be nil for bare-ID form, got %+v", s.Trigger.Before[0].Overrides)
+	}
+
+	// Entry 1: mapping form WITH overrides.
+	if s.Trigger.Before[1].Task != "fetch-creds" {
+		t.Errorf("entry[1].Task = %q, want fetch-creds", s.Trigger.Before[1].Task)
+	}
+	if s.Trigger.Before[1].Overrides == nil {
+		t.Fatal("entry[1].Overrides should be populated")
+	}
+	if got := s.Trigger.Before[1].Overrides.Timeout; got != 5*time.Minute {
+		t.Errorf("entry[1].Overrides.Timeout = %v, want 5m", got)
+	}
+	if len(s.Trigger.Before[1].Overrides.Env) != 1 ||
+		s.Trigger.Before[1].Overrides.Env[0].Name != "MODE" ||
+		s.Trigger.Before[1].Overrides.Env[0].Value != "preflight" {
+		t.Errorf("entry[1].Overrides.Env = %+v, want one MODE=preflight entry", s.Trigger.Before[1].Overrides.Env)
+	}
+
+	// Entry 2: mapping form WITHOUT overrides — still legal.
+	if s.Trigger.Before[2].Task != "warm-cache" {
+		t.Errorf("entry[2].Task = %q, want warm-cache", s.Trigger.Before[2].Task)
+	}
+	if s.Trigger.Before[2].Overrides != nil {
+		t.Errorf("entry[2].Overrides should be nil (mapping without overrides:), got %+v", s.Trigger.Before[2].Overrides)
+	}
+}
+
+// TestTriggerBefore_BadEntryShapeRejected pins the negative path: a
+// sequence-of-sequences or any other non-scalar / non-mapping node must
+// surface an explicit decode error rather than silently dropping the
+// entry. Catches the failure mode where a stray YAML structure (e.g. a
+// typo'd indentation) gets parsed as a no-op.
+func TestTriggerBefore_BadEntryShapeRejected(t *testing.T) {
+	src := strings.TrimSpace(`
+name: t
+runtime: docker
+trigger:
+  daemon: true
+  before:
+    - [oops, not, scalar]
+docker: { image: x }`)
+	var s Spec
+	err := yaml.NewDecoder(strings.NewReader(src)).Decode(&s)
+	if err == nil {
+		t.Fatalf("expected decode error for nested sequence in before:, got none (got Before=%+v)", s.Trigger.Before)
+	}
+	if !strings.Contains(err.Error(), "trigger.before entry") {
+		t.Errorf("expected error to mention trigger.before entry, got: %v", err)
+	}
+}
+
+// TestTriggerChain_Overrides_Parses verifies that trigger.chain.overrides
+// decodes alongside the existing chain fields. The override blob is held
+// as a *task.Overrides pointer; nil means "no per-edge override" (the
+// pre-existing behaviour preserved for backwards compat).
+func TestTriggerChain_Overrides_Parses(t *testing.T) {
+	src := strings.TrimSpace(`
+name: downstream
+runtime: deno
+trigger:
+  chain:
+    from: upstream
+    on: success
+    overrides:
+      params:
+        mode: prod
+      timeout: 90s
+`)
+	var s Spec
+	if err := yaml.NewDecoder(strings.NewReader(src)).Decode(&s); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if s.Trigger.Chain == nil {
+		t.Fatal("Chain not parsed")
+	}
+	if s.Trigger.Chain.Overrides == nil {
+		t.Fatal("Chain.Overrides not parsed")
+	}
+	if s.Trigger.Chain.Overrides.Timeout != 90*time.Second {
+		t.Errorf("Chain.Overrides.Timeout = %v, want 90s", s.Trigger.Chain.Overrides.Timeout)
+	}
+	if len(s.Trigger.Chain.Overrides.Params) != 1 ||
+		s.Trigger.Chain.Overrides.Params[0].Name != "mode" ||
+		s.Trigger.Chain.Overrides.Params[0].Default != "prod" {
+		t.Errorf("Chain.Overrides.Params = %+v, want one mode=prod entry", s.Trigger.Chain.Overrides.Params)
+	}
+}
+
+// TestTriggerChain_NoOverrides_BackwardsCompat verifies that omitting
+// trigger.chain.overrides leaves the field nil, preserving the existing
+// dispatch path for task.yamls written before the per-edge extension.
+func TestTriggerChain_NoOverrides_BackwardsCompat(t *testing.T) {
+	src := strings.TrimSpace(`
+name: downstream
+runtime: deno
+trigger:
+  chain:
+    from: upstream
+`)
+	var s Spec
+	if err := yaml.NewDecoder(strings.NewReader(src)).Decode(&s); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if s.Trigger.Chain == nil {
+		t.Fatal("Chain not parsed")
+	}
+	if s.Trigger.Chain.Overrides != nil {
+		t.Errorf("Chain.Overrides should be nil when absent, got %+v", s.Trigger.Chain.Overrides)
 	}
 }
 

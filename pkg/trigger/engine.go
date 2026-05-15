@@ -31,6 +31,7 @@ import (
 	"github.com/dicode/dicode/pkg/runtime/envresolve"
 	"github.com/dicode/dicode/pkg/secrets"
 	"github.com/dicode/dicode/pkg/task"
+	"github.com/dicode/dicode/pkg/taskset"
 	"github.com/google/uuid"
 	"github.com/robfig/cron/v3"
 	"go.uber.org/zap"
@@ -383,13 +384,24 @@ func (e *Engine) Register(spec *task.Spec) error {
 // trigger.before back to the daemon, but only daemons may have
 // trigger.before. We therefore do not implement explicit cycle detection.
 func (e *Engine) validateBeforeRefs(spec *task.Spec) error {
-	for _, refID := range spec.Trigger.Before {
-		ref, ok := e.registry.Get(refID)
+	for _, entry := range spec.Trigger.Before {
+		ref, ok := e.registry.Get(entry.Task)
 		if !ok {
-			return fmt.Errorf("trigger.before: task %q not found in registry", refID)
+			return fmt.Errorf("trigger.before: task %q not found in registry", entry.Task)
 		}
 		if ref.Trigger.Daemon {
-			return fmt.Errorf("trigger.before: task %q is a daemon (only one-shot tasks can be preflights)", refID)
+			return fmt.Errorf("trigger.before: task %q is a daemon (only one-shot tasks can be preflights)", entry.Task)
+		}
+		// If this edge carries per-firing overrides, verify they merge
+		// onto the prereq spec without producing an invalid Spec. Doing
+		// this here surfaces malformed overrides at Register time rather
+		// than at the first daemon start — operators see a clean error
+		// path instead of a silently-failing preflight.
+		if entry.Overrides != nil {
+			merged := taskset.ApplyOverrides(ref, entry.Overrides)
+			if err := merged.Validate(); err != nil {
+				return fmt.Errorf("trigger.before: overrides for %q produce invalid spec: %w", entry.Task, err)
+			}
 		}
 	}
 	return nil
@@ -672,8 +684,9 @@ func (e *Engine) runPrereqs(ctx context.Context, spec *task.Spec) error {
 	results := make(chan prereqResult, len(spec.Trigger.Before))
 	var wg sync.WaitGroup
 
-	for _, refID := range spec.Trigger.Before {
-		refID := refID
+	for _, entry := range spec.Trigger.Before {
+		entry := entry
+		refID := entry.Task
 		ref, ok := e.registry.Get(refID)
 		if !ok {
 			// validateBeforeRefs catches this at registration time, but the
@@ -682,10 +695,29 @@ func (e *Engine) runPrereqs(ctx context.Context, spec *task.Spec) error {
 			results <- prereqResult{refID: refID, err: fmt.Errorf("prereq %q vanished from registry", refID)}
 			continue
 		}
+		// Per-edge overrides (#NNN): if this preflight edge declares
+		// `overrides:`, merge them onto a deep copy of the prereq spec
+		// before dispatching. The registry's canonical spec is left
+		// untouched so the prereq's standalone (manual / cron / chain)
+		// fires continue using the spec on disk. The merged spec is
+		// re-validated to surface override-induced invariant violations
+		// (e.g. an override that switches runtime to an unsupported
+		// value) — validateBeforeRefs already runs the same check at
+		// Register time, this is a defensive second pass for cases where
+		// the registry mutated between Register and the preflight fire.
+		dispatchSpec := ref
+		if entry.Overrides != nil {
+			merged := taskset.ApplyOverrides(ref, entry.Overrides)
+			if vErr := merged.Validate(); vErr != nil {
+				results <- prereqResult{refID: refID, err: fmt.Errorf("overrides produce invalid spec: %w", vErr)}
+				continue
+			}
+			dispatchSpec = merged
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			runID, err := e.fireAsync(ctx, ref, pkgruntime.RunOptions{}, registry.TriggerPreflight)
+			runID, err := e.fireAsync(ctx, dispatchSpec, pkgruntime.RunOptions{}, registry.TriggerPreflight)
 			if err != nil {
 				results <- prereqResult{refID: refID, err: fmt.Errorf("dispatch: %w", err)}
 				return
@@ -999,12 +1031,32 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 		if on != "always" && on != runStatus {
 			continue
 		}
+		// Per-edge overrides (#NNN): when the downstream's trigger.chain
+		// declares `overrides:`, apply them to a deep copy of the
+		// downstream spec before dispatching. The registry's canonical
+		// spec is preserved so manual / cron / non-chain fires of the
+		// same downstream see the on-disk values. The merged spec is
+		// re-validated; on failure we log and skip this edge rather than
+		// dispatching a malformed spec.
+		dispatchSpec := spec
+		if chain.Overrides != nil {
+			merged := taskset.ApplyOverrides(spec, chain.Overrides)
+			if vErr := merged.Validate(); vErr != nil {
+				e.log.Error("chain trigger skipped — overrides produce invalid spec",
+					zap.String("from", completedTaskID),
+					zap.String("to", spec.ID),
+					zap.Error(vErr),
+				)
+				continue
+			}
+			dispatchSpec = merged
+		}
 		e.log.Info("chain trigger",
 			zap.String("from", completedTaskID),
 			zap.String("to", spec.ID),
 			zap.String("on", on),
 		)
-		go e.fireAsync(ctx, spec, pkgruntime.RunOptions{ //nolint:errcheck
+		go e.fireAsync(ctx, dispatchSpec, pkgruntime.RunOptions{ //nolint:errcheck
 			ParentRunID: runID,
 			Input:       buildChainInput(chain.Params, completedTaskID, runID, runStatus, output),
 		}, "chain")

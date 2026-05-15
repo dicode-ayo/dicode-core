@@ -2,13 +2,24 @@ package trigger
 
 import (
 	"context"
-	"slices"
 	"sync"
 	"time"
 
 	"github.com/dicode/dicode/pkg/task"
 	"go.uber.org/zap"
 )
+
+// beforeContains reports whether any BeforeEntry in entries names taskID.
+// Pulls only the Task field; per-edge overrides are irrelevant for
+// membership checks.
+func beforeContains(entries []task.BeforeEntry, taskID string) bool {
+	for _, e := range entries {
+		if e.Task == taskID {
+			return true
+		}
+	}
+	return false
+}
 
 // DaemonState describes the preflight/lifecycle phase of a daemon task as
 // observed by the trigger engine. Surfaced via Engine.DaemonState so the
@@ -109,7 +120,7 @@ func (e *Engine) notifyPrereqCompletion(completedTaskID string) {
 		if !spec.Trigger.Daemon {
 			continue
 		}
-		if !slices.Contains(spec.Trigger.Before, completedTaskID) {
+		if !beforeContains(spec.Trigger.Before, completedTaskID) {
 			continue
 		}
 		// Only attempt a restart if the daemon was actually up. Restarting
