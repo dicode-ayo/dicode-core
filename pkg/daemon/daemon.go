@@ -250,7 +250,20 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 				}
 			}
 		}
-		eng.Register(spec)
+		if err := eng.Register(spec); err != nil {
+			// Cross-spec validation (trigger.before pointing at an unknown
+			// task or at another daemon) is the only error Register currently
+			// returns. The reconciler will retry on the next reload, so a
+			// transient registry mismatch heals itself; a persistent config
+			// error surfaces here every cycle. Log at WARN — matches how the
+			// reconciler/engine surface other config-validation failures —
+			// and skip the downstream webhook/footgun checks so a half-
+			// registered task doesn't claim its gateway path.
+			log.Warn("task registration rejected by engine — fix the spec to re-enable",
+				zap.String("task", spec.ID),
+				zap.Error(err))
+			return
+		}
 		if spec.Trigger.Webhook != "" {
 			gateway.Register(spec.Trigger.Webhook, webhookH)
 			webhookMu.Lock()

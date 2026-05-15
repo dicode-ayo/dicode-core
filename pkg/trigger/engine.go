@@ -31,6 +31,7 @@ import (
 	"github.com/dicode/dicode/pkg/runtime/envresolve"
 	"github.com/dicode/dicode/pkg/secrets"
 	"github.com/dicode/dicode/pkg/task"
+	"github.com/dicode/dicode/pkg/taskset"
 	"github.com/google/uuid"
 	"github.com/robfig/cron/v3"
 	"go.uber.org/zap"
@@ -89,6 +90,16 @@ type Engine struct {
 	daemonRuns  map[string]string
 	daemonSpecs map[string]*task.Spec
 
+	// daemonStates tracks the preflight/lifecycle phase of each daemon task
+	// for surfacing in the WebUI (Engine.DaemonState). Independent of
+	// daemonMu — guarded by its own RWMutex so a state-read in the API path
+	// never has to wait on a long preflight dispatch holding daemonMu.
+	daemonStates *daemonStateMap
+
+	// restartGates is a per-daemon at-most-one-in-flight lock for prereq-
+	// driven restarts. See daemon_state.go for the coalescing rationale.
+	restartGates *restartGate
+
 	notifier        notify.Notifier
 	notifyOnSuccess bool
 	notifyOnFailure bool
@@ -146,15 +157,17 @@ type PythonRuntimeAPI interface {
 // New creates a trigger Engine with a default Deno executor.
 func New(r *registry.Registry, defaultExec pkgruntime.Executor, log *zap.Logger) *Engine {
 	e := &Engine{
-		registry:    r,
-		executors:   make(map[task.Runtime]pkgruntime.Executor),
-		cron:        cron.New(),
-		log:         log,
-		cronEntries: make(map[string]cron.EntryID),
-		webhooks:    make(map[string]string),
-		daemonRuns:  make(map[string]string),
-		daemonSpecs: make(map[string]*task.Spec),
-		guards:      newChainGuards(),
+		registry:     r,
+		executors:    make(map[task.Runtime]pkgruntime.Executor),
+		cron:         cron.New(),
+		log:          log,
+		cronEntries:  make(map[string]cron.EntryID),
+		webhooks:     make(map[string]string),
+		daemonRuns:   make(map[string]string),
+		daemonSpecs:  make(map[string]*task.Spec),
+		daemonStates: newDaemonStateMap(),
+		restartGates: newRestartGate(),
+		guards:       newChainGuards(),
 	}
 	e.executors[task.RuntimeDeno] = defaultExec
 	return e
@@ -345,8 +358,17 @@ func (e *Engine) Start(ctx context.Context) error {
 	return nil
 }
 
-// Register adds or updates trigger registrations for a task spec.
-func (e *Engine) Register(spec *task.Spec) {
+// Register adds or updates trigger registrations for a task spec. Returns a
+// non-nil error when cross-spec validation fails (currently: invalid
+// trigger.before references). On error, no triggers are registered.
+func (e *Engine) Register(spec *task.Spec) error {
+	// Cross-spec validation must run BEFORE Unregister so that a previously
+	// valid registration isn't torn down when an updated spec fails its
+	// new-state checks. The registry-snapshot lookups are read-only.
+	if err := e.validateBeforeRefs(spec); err != nil {
+		return err
+	}
+
 	e.Unregister(spec.ID)
 
 	// Disabled tasks are kept in the registry for API visibility but must not
@@ -356,7 +378,7 @@ func (e *Engine) Register(spec *task.Spec) {
 			zap.String("task", spec.ID),
 			zap.String("runtime", string(spec.Runtime)),
 		)
-		return
+		return nil
 	}
 
 	if spec.Trigger.Cron != "" {
@@ -373,6 +395,42 @@ func (e *Engine) Register(spec *task.Spec) {
 		zap.String("trigger", string(triggerSource(spec))),
 		zap.String("runtime", string(spec.Runtime)),
 	)
+	return nil
+}
+
+// validateBeforeRefs checks each trigger.before entry against the current
+// registry. Per-spec validation (Spec.validate) already enforces shape;
+// here we only catch the things that need the full registry: unknown task
+// IDs and references to other daemons.
+//
+// On cycles: per-spec validation requires trigger.before only on daemon
+// tasks, and this function forbids before: references to daemons. Together
+// those constraints make cycles structurally unreachable — the only way a
+// cycle could form is through a prereq task carrying its own
+// trigger.before back to the daemon, but only daemons may have
+// trigger.before. We therefore do not implement explicit cycle detection.
+func (e *Engine) validateBeforeRefs(spec *task.Spec) error {
+	for _, entry := range spec.Trigger.Before {
+		ref, ok := e.registry.Get(entry.Task)
+		if !ok {
+			return fmt.Errorf("trigger.before: task %q not found in registry", entry.Task)
+		}
+		if ref.Trigger.Daemon {
+			return fmt.Errorf("trigger.before: task %q is a daemon (only one-shot tasks can be preflights)", entry.Task)
+		}
+		// If this edge carries per-firing overrides, verify they merge
+		// onto the prereq spec without producing an invalid Spec. Doing
+		// this here surfaces malformed overrides at Register time rather
+		// than at the first daemon start — operators see a clean error
+		// path instead of a silently-failing preflight.
+		if entry.Overrides != nil {
+			merged := taskset.ApplyOverrides(ref, entry.Overrides)
+			if err := merged.Validate(); err != nil {
+				return fmt.Errorf("trigger.before: overrides for %q produce invalid spec: %w", entry.Task, err)
+			}
+		}
+	}
+	return nil
 }
 
 // Unregister removes all trigger registrations for a task ID.
@@ -577,18 +635,145 @@ func (e *Engine) registerDaemon(spec *task.Spec) {
 	if alreadyRunning {
 		return
 	}
-	e.startDaemon(spec)
+	// Gate the start path with the same per-daemon lock used for restart
+	// coalescing. Two concurrent registerDaemon calls (e.g. the reconciler
+	// firing OnRegister twice while preflight is in flight, or a manual
+	// re-register racing the reconciler) would otherwise both observe
+	// `alreadyRunning=false` and both spawn a goroutine that runs preflight
+	// + fireAsync. The lock ensures at most one in-flight start per task ID.
+	// Release happens inside startDaemon after the daemon's run slot is
+	// recorded (or after a preflight/dispatch failure has been logged).
+	if !e.restartGates.tryAcquire(spec.ID) {
+		e.log.Debug("daemon start coalesced — another start is already in flight",
+			zap.String("task", spec.ID))
+		return
+	}
+	// startDaemon may block on preflight (trigger.before); detach so
+	// Register and the reconciler's OnRegister callback stay synchronous
+	// for non-preflight daemons and don't stall the registration sweep
+	// for preflight ones.
+	if len(spec.Trigger.Before) == 0 {
+		defer e.restartGates.release(spec.ID)
+		e.startDaemon(spec)
+		return
+	}
+	go func() {
+		defer e.restartGates.release(spec.ID)
+		e.startDaemon(spec)
+	}()
 }
 
+// startDaemon brings a daemon up. When trigger.before is set, runs the
+// preflight chain first and only fires the daemon if every prereq returns
+// status=success. Sets daemonStates throughout for WebUI visibility.
 func (e *Engine) startDaemon(spec *task.Spec) {
+	if len(spec.Trigger.Before) > 0 {
+		e.setDaemonState(spec.ID, DaemonPrereqRunning)
+		if err := e.runPrereqs(context.Background(), spec); err != nil {
+			e.setDaemonState(spec.ID, DaemonPrereqFailed)
+			e.log.Warn("daemon preflight failed; daemon not started",
+				zap.String("task", spec.ID),
+				zap.Error(err),
+			)
+			return
+		}
+	}
+
 	runID, err := e.fireAsync(context.Background(), spec, pkgruntime.RunOptions{}, registry.TriggerDaemon)
 	if err != nil {
+		e.setDaemonState(spec.ID, DaemonStopped)
 		e.log.Error("daemon start failed", zap.String("task", spec.ID), zap.Error(err))
 		return
 	}
 	e.daemonMu.Lock()
 	e.daemonRuns[spec.ID] = runID
 	e.daemonMu.Unlock()
+	e.setDaemonState(spec.ID, DaemonRunning)
+}
+
+// runPrereqs fires every task listed in spec.Trigger.Before in parallel and
+// blocks until they all reach a terminal state. Returns nil only if every
+// prereq finishes with status=success; otherwise returns the first
+// non-success error observed.
+//
+// Re-fires every prereq on every preflight attempt — no "already satisfied"
+// short-circuit. The whole point of preflight is to refresh ephemeral
+// state (rendered configs, freshly-rotated credentials) right before the
+// daemon starts; reusing yesterday's success would defeat that. If
+// operators want caching, that belongs in the prereq task itself, not in
+// the trigger engine.
+func (e *Engine) runPrereqs(ctx context.Context, spec *task.Spec) error {
+	type prereqResult struct {
+		refID string
+		err   error
+	}
+	results := make(chan prereqResult, len(spec.Trigger.Before))
+	var wg sync.WaitGroup
+
+	for _, entry := range spec.Trigger.Before {
+		entry := entry
+		refID := entry.Task
+		ref, ok := e.registry.Get(refID)
+		if !ok {
+			// validateBeforeRefs catches this at registration time, but the
+			// registry can change between registration and preflight (task
+			// unregistered while daemon was queued, etc.). Defensive check.
+			results <- prereqResult{refID: refID, err: fmt.Errorf("prereq %q vanished from registry", refID)}
+			continue
+		}
+		// Per-edge overrides (#NNN): if this preflight edge declares
+		// `overrides:`, merge them onto a deep copy of the prereq spec
+		// before dispatching. The registry's canonical spec is left
+		// untouched so the prereq's standalone (manual / cron / chain)
+		// fires continue using the spec on disk. The merged spec is
+		// re-validated to surface override-induced invariant violations
+		// (e.g. an override that switches runtime to an unsupported
+		// value) — validateBeforeRefs already runs the same check at
+		// Register time, this is a defensive second pass for cases where
+		// the registry mutated between Register and the preflight fire.
+		dispatchSpec := ref
+		if entry.Overrides != nil {
+			merged := taskset.ApplyOverrides(ref, entry.Overrides)
+			if vErr := merged.Validate(); vErr != nil {
+				results <- prereqResult{refID: refID, err: fmt.Errorf("overrides produce invalid spec: %w", vErr)}
+				continue
+			}
+			dispatchSpec = merged
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			runID, err := e.fireAsync(ctx, dispatchSpec, pkgruntime.RunOptions{}, registry.TriggerPreflight)
+			if err != nil {
+				results <- prereqResult{refID: refID, err: fmt.Errorf("dispatch: %w", err)}
+				return
+			}
+			// Use WaitRun (the existing terminal-state waiter, channel-backed
+			// rather than polling) so this scales to many parallel prereqs
+			// without hammering the DB.
+			res, werr := e.WaitRun(ctx, runID)
+			if werr != nil {
+				results <- prereqResult{refID: refID, err: fmt.Errorf("wait: %w", werr)}
+				return
+			}
+			if res.Status != registry.StatusSuccess {
+				results <- prereqResult{refID: refID, err: fmt.Errorf("status=%s", res.Status)}
+				return
+			}
+			results <- prereqResult{refID: refID, err: nil}
+		}()
+	}
+
+	wg.Wait()
+	close(results)
+
+	var firstErr error
+	for r := range results {
+		if r.err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("prereq %q: %w", r.refID, r.err)
+		}
+	}
+	return firstErr
 }
 
 func (e *Engine) onDaemonRunFinished(spec *task.Spec, runID string) {
@@ -865,6 +1050,15 @@ func (e *Engine) KillRun(runID string) bool {
 // FireChain checks if any tasks declare a chain trigger from completedTaskID,
 // and fires the global on_failure_chain if configured.
 func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatus string, output interface{}) {
+	// Preflight restart hook: when a task that some daemon lists in
+	// trigger.before finishes with status=success, restart that daemon so
+	// it picks up newly-rendered config / freshly-rotated secrets. Failure
+	// or cancel does NOT trigger a restart — see the failure-semantics
+	// commit and tests for the rationale.
+	if runStatus == registry.StatusSuccess {
+		e.notifyPrereqCompletion(completedTaskID)
+	}
+
 	// Declared chain triggers.
 	for _, spec := range e.registry.All() {
 		chain := spec.Trigger.Chain
@@ -875,12 +1069,32 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 		if on != "always" && on != runStatus {
 			continue
 		}
+		// Per-edge overrides (#NNN): when the downstream's trigger.chain
+		// declares `overrides:`, apply them to a deep copy of the
+		// downstream spec before dispatching. The registry's canonical
+		// spec is preserved so manual / cron / non-chain fires of the
+		// same downstream see the on-disk values. The merged spec is
+		// re-validated; on failure we log and skip this edge rather than
+		// dispatching a malformed spec.
+		dispatchSpec := spec
+		if chain.Overrides != nil {
+			merged := taskset.ApplyOverrides(spec, chain.Overrides)
+			if vErr := merged.Validate(); vErr != nil {
+				e.log.Error("chain trigger skipped — overrides produce invalid spec",
+					zap.String("from", completedTaskID),
+					zap.String("to", spec.ID),
+					zap.Error(vErr),
+				)
+				continue
+			}
+			dispatchSpec = merged
+		}
 		e.log.Info("chain trigger",
 			zap.String("from", completedTaskID),
 			zap.String("to", spec.ID),
 			zap.String("on", on),
 		)
-		go e.fireAsync(ctx, spec, pkgruntime.RunOptions{ //nolint:errcheck
+		go e.fireAsync(ctx, dispatchSpec, pkgruntime.RunOptions{ //nolint:errcheck
 			ParentRunID: runID,
 			Input:       buildChainInput(chain.Params, completedTaskID, runID, runStatus, output),
 		}, "chain")
