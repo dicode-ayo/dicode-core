@@ -120,6 +120,25 @@ Deno.test("buildEnvMap: returned map has null prototype", () => {
   assertEquals(Object.getPrototypeOf(map), null);
 });
 
+Deno.test("buildEnvMap: getter that throws is treated as not-declared", () => {
+  // Under scoped --allow-env, some Deno builds throw PermissionDenied
+  // from env.get(name) for names that aren't in the allowlist (instead
+  // of returning undefined). buildEnvMap must catch that so the
+  // downstream renderTemplate failure mode is the user-facing
+  // "unresolved placeholder: ${NAME}" — not a permission-denied stack.
+  const map = buildEnvMap(["DECLARED", "UNDECLARED"], (n) => {
+    if (n === "UNDECLARED") {
+      throw new Deno.errors.PermissionDenied(
+        `Requires env access to "${n}"`,
+      );
+    }
+    return "ok";
+  });
+  assertEquals(Object.prototype.hasOwnProperty.call(map, "DECLARED"), true);
+  assertEquals(map.DECLARED, "ok");
+  assertEquals(Object.prototype.hasOwnProperty.call(map, "UNDECLARED"), false);
+});
+
 // --- main() end-to-end ---
 
 interface ParamStub {
@@ -197,11 +216,45 @@ Deno.test("main: empty template returns empty string", async () => {
   assertEquals(out, "");
 });
 
-Deno.test("main: missing template param defaults to empty", async () => {
-  // No 'template' key in the stub; params.get returns null;
-  // task.ts coerces to "".
-  const out = await main(stubSdk({}));
-  assertEquals(out, "");
+Deno.test("main: missing template param throws (engine enforces required)", async () => {
+  // No 'template' key in the stub; params.get returns null. task.yaml
+  // declares `template: required: true`, so the engine would reject
+  // the run upstream — but main() also guards against a null leaking
+  // through (no silent ?? "" fallback). The thrown error keeps the
+  // contract loud for programmatic callers.
+  await assertRejects(
+    () => main(stubSdk({})),
+    Error,
+    "missing required param: template",
+  );
+});
+
+Deno.test("main: env.get that throws PermissionDenied surfaces as unresolved placeholder", async () => {
+  // Simulates the scoped --allow-env path where Deno.env.get(NAME) for
+  // an undeclared NAME throws PermissionDenied (instead of returning
+  // undefined). The user-facing error must be the loud
+  // "unresolved placeholder" message — not a raw permission stack.
+  const realGet = Deno.env.get.bind(Deno.env);
+  Deno.env.get = ((name: string) => {
+    if (name === "TPL_TEST_THROWS") {
+      throw new Deno.errors.PermissionDenied(
+        `Requires env access to "${name}"`,
+      );
+    }
+    return realGet(name);
+  }) as typeof Deno.env.get;
+  try {
+    await assertRejects(
+      () =>
+        main(stubSdk({
+          template: "x=${TPL_TEST_THROWS}",
+        })),
+      Error,
+      "unresolved placeholder: ${TPL_TEST_THROWS}",
+    );
+  } finally {
+    Deno.env.get = realGet;
+  }
 });
 
 Deno.test("main: prototype-shaped placeholder also fails loud", async () => {

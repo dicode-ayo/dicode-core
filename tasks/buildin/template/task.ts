@@ -67,6 +67,15 @@ export function collectPlaceholders(template: string): string[] {
 // simply omitted; renderTemplate raises a loud error when it
 // encounters them, so the failure surface is the placeholder name (not
 // "undefined env"). The getter is injected for testability.
+//
+// A getter that throws (e.g. Deno.env.get under scoped --allow-env can
+// throw PermissionDenied for names outside the allowlist on some
+// platforms) is treated identically to "name not declared" — the entry
+// is omitted, and renderTemplate later fails with the loud
+// "unresolved placeholder: ${NAME}" message. That keeps the
+// user-facing error consistent regardless of whether the runtime
+// reports an undeclared name via `undefined` or via a permission
+// throw.
 export function buildEnvMap(
   names: Iterable<string>,
   get: (name: string) => string | undefined,
@@ -76,7 +85,15 @@ export function buildEnvMap(
   // Object.prototype.
   const map: Record<string, string> = Object.create(null);
   for (const name of names) {
-    const v = get(name);
+    let v: string | undefined;
+    try {
+      v = get(name);
+    } catch {
+      // Treat any throw (PermissionDenied, etc.) as "not declared".
+      // renderTemplate will surface the loud unresolved-placeholder
+      // error, which is the right user-facing diagnostic.
+      v = undefined;
+    }
     if (v !== undefined) {
       map[name] = v;
     }
@@ -85,7 +102,16 @@ export function buildEnvMap(
 }
 
 export default async function main({ params }: TaskSdk): Promise<string> {
-  const template = (await params.get("template")) ?? "";
+  // No `?? ""` fallback here: task.yaml declares `template: required:
+  // true`, and the trigger engine rejects a run that's missing a
+  // required param before main() is invoked. If the engine ever lets a
+  // null slip through (programmatic in-process callers, future
+  // regressions), fail loudly with a clear message rather than
+  // silently rendering an empty string.
+  const template = await params.get("template");
+  if (template === null) {
+    throw new Error("missing required param: template");
+  }
 
   // Drive env lookups by the placeholders found in the template. Using
   // per-name Deno.env.get() is required: Deno.env.toObject() needs

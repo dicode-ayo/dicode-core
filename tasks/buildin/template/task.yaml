@@ -4,8 +4,9 @@ name: "Template Renderer"
 description: |
   Substitutes ${VAR} placeholders in a template string using values from
   the task's environment, returning the rendered string. Designed to be
-  composed: invoke from another task via dicode.run_task, chain into a
-  downstream task via input.output, or pipe through the CLI.
+  composed: invoke from another task via dicode.run_task, or chain into
+  a downstream task via input.output. (CLI piping is intended but not
+  verified end-to-end in this PR — see follow-up issue. TODO.)
 
   Invocation contract:
 
