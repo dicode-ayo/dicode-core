@@ -1,0 +1,59 @@
+apiVersion: dicode/v1
+kind: Task
+name: "Template Renderer"
+description: |
+  Substitutes ${VAR} placeholders in a template string using values
+  from the task's environment. Returns rendered output via run-result
+  (suppressed from runs.return_value via run_result.enabled: false)
+  so the value flows to chain triggers and dicode.run_task callers
+  without crossing the persistence boundary.
+
+  Operator usage patterns:
+
+  1. Chained pipeline (preferred for daemons):
+       trigger.before: [{ task: buildin/template, overrides: {...} }]
+     The rendered string flows to downstream via input.output. Set
+     run_inputs.enabled: false on the downstream task to prevent the
+     value from being persisted in the downstream's encrypted
+     run_inputs blob.
+
+  2. CLI piping:
+       dicode tasks run buildin/template --param template='...' > file
+     The rendered string is printed to stdout. The dicode CLI does not
+     suppress this output even when run_result.enabled is false, so
+     the operator must redirect it appropriately. Running this command
+     interactively (without redirection) will display the rendered
+     content in the terminal — which lands in shell history, scrollback
+     buffers, and any tee/script captures. Don't do this for templates
+     that embed secrets unless you've redirected output to a file.
+
+runtime: deno
+
+trigger:
+  manual: true
+
+# Template bodies and rendered output are sensitive; keep them out of the
+# run-inputs store and the run.return_value column. They still flow
+# in-memory to synchronous callers and to chained downstreams.
+run_inputs:
+  enabled: false
+run_result:
+  enabled: false
+
+params:
+  template:
+    type: string
+    required: true
+    description: "Template body with ${VAR} placeholders."
+
+permissions:
+  # Empty by default: each call site declares which env vars (typically
+  # secrets resolved via `from: secret:` or `from: task:`) are visible.
+  # Apply with `dicode tasks override buildin/template --env NAME=from`.
+  env: []
+
+timeout: 30s
+
+notify:
+  on_success: false
+  on_failure: true
