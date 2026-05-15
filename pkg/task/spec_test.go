@@ -60,6 +60,41 @@ run_inputs:
 	}
 }
 
+func TestSpec_RunResultOverride_Parses(t *testing.T) {
+	yamlSrc := []byte(`
+name: test
+runtime: deno
+trigger: { manual: true }
+run_result:
+  enabled: false
+`)
+	var s Spec
+	if err := yaml.Unmarshal(yamlSrc, &s); err != nil {
+		t.Fatal(err)
+	}
+	if s.RunResult == nil {
+		t.Fatal("RunResult not parsed")
+	}
+	if s.RunResult.Enabled == nil || *s.RunResult.Enabled != false {
+		t.Errorf("RunResult.Enabled = %v, want false ptr", s.RunResult.Enabled)
+	}
+}
+
+func TestSpec_RunResultOverride_Omitted(t *testing.T) {
+	yamlSrc := []byte(`
+name: test
+runtime: deno
+trigger: { manual: true }
+`)
+	var s Spec
+	if err := yaml.Unmarshal(yamlSrc, &s); err != nil {
+		t.Fatal(err)
+	}
+	if s.RunResult != nil {
+		t.Errorf("RunResult should be nil when omitted, got %+v", s.RunResult)
+	}
+}
+
 func TestSpec_ProviderBlockRoundTrip(t *testing.T) {
 	src := strings.TrimSpace(`
 name: doppler
