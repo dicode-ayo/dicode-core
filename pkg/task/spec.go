@@ -663,12 +663,18 @@ func (s *Spec) validate() error {
 		if !s.Trigger.Daemon {
 			return fmt.Errorf("trigger.before: requires daemon: true (got non-daemon trigger)")
 		}
-		for _, entry := range s.Trigger.Before {
+		for i, entry := range s.Trigger.Before {
 			if entry.Task == "" {
 				return fmt.Errorf("trigger.before: empty task ID")
 			}
 			if entry.Task == s.ID {
 				return fmt.Errorf("trigger.before: cannot reference self (task ID %q)", entry.Task)
+			}
+			if entry.Overrides != nil {
+				site := fmt.Sprintf("trigger.before[%d].overrides (task %q)", i, entry.Task)
+				if err := validatePerEdgeOverrides(site, entry.Overrides); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -689,6 +695,11 @@ func (s *Spec) validate() error {
 		for k := range s.Trigger.Chain.Params {
 			if _, reserved := reservedChainParamKeys[k]; reserved {
 				return fmt.Errorf("trigger.chain.params: %q is a reserved key (used by the engine)", k)
+			}
+		}
+		if s.Trigger.Chain.Overrides != nil {
+			if err := validatePerEdgeOverrides("trigger.chain.overrides", s.Trigger.Chain.Overrides); err != nil {
+				return err
 			}
 		}
 	}

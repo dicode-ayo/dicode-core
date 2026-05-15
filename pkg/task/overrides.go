@@ -126,3 +126,70 @@ type Overrides struct {
 	// For task_set entries only — Entries patches specific tasks within the nested set.
 	Entries map[string]*Overrides `yaml:"entries,omitempty"`
 }
+
+// validatePerEdgeOverrides enforces a conservative allowlist on Overrides
+// values used at per-edge dispatch sites — i.e. trigger.before[].overrides
+// and trigger.chain.overrides. Several Overrides fields are meaningful only
+// at the taskset / global level (Defaults, Entries, Enabled, Retry, Name,
+// Description) or are silently ignored by the per-edge dispatch path
+// (Trigger — see PR #303 MED #3). Rejecting them at config-load surfaces
+// operator typos and prevents silent footguns.
+//
+// Allowed at a per-edge site: Params (minus reserved keys), Env, Net, Fs,
+// Timeout, Notify, Dicode, Runtime.
+//
+// The site string names the offending location (e.g.
+// "trigger.before[0].overrides (task \"render\")") so operators can find it
+// in their task.yaml.
+func validatePerEdgeOverrides(site string, o *Overrides) error {
+	if o == nil {
+		return nil
+	}
+	// Enabled — would silently no-op the prereq dispatch. Operators expect
+	// it to "skip this edge"; instead it does nothing. Reject so the wrong
+	// mental model surfaces at load.
+	if o.Enabled != nil {
+		return fmt.Errorf("%s: field %q is not supported at a per-edge site (set on the task itself, not on the edge)", site, "enabled")
+	}
+	// Name / Description — replacing the prereq's identity at the per-edge
+	// dispatch makes no semantic sense; the run is logged under the prereq's
+	// real ID regardless. Reject to avoid misleading task.yaml.
+	if o.Name != "" {
+		return fmt.Errorf("%s: field %q is not supported at a per-edge site", site, "name")
+	}
+	if o.Description != "" {
+		return fmt.Errorf("%s: field %q is not supported at a per-edge site", site, "description")
+	}
+	// Trigger — PR #303 MED #3. The per-edge dispatch path invokes the
+	// prereq directly (registry.TriggerPreflight / chain dispatch) and
+	// ignores any rewired trigger config on the merged spec. Allowing
+	// `trigger:` here misleads operators into thinking they're rewiring the
+	// prereq's trigger graph for this firing.
+	if o.Trigger != nil {
+		return fmt.Errorf("%s: field %q is not supported at a per-edge site (per-edge dispatch ignores the prereq's trigger config)", site, "trigger")
+	}
+	// Retry — would apply per-firing, almost certainly unintended. If
+	// per-edge preflight retries become a real feature request, lift this
+	// rejection and wire applyLayer to copy it.
+	if o.Retry != nil {
+		return fmt.Errorf("%s: field %q is not supported at a per-edge site", site, "retry")
+	}
+	// Defaults / Entries — taskset-level constructs with no per-edge
+	// meaning.
+	if o.Defaults != nil {
+		return fmt.Errorf("%s: field %q is not supported at a per-edge site (taskset-level construct)", site, "defaults")
+	}
+	if o.Entries != nil {
+		return fmt.Errorf("%s: field %q is not supported at a per-edge site (taskset-level construct)", site, "entries")
+	}
+	// Params: same reserved-key check used on trigger.chain.params /
+	// on_failure_chain.params. Reserved engine keys must not appear in
+	// user-supplied per-edge params either — otherwise they'd collide with
+	// the input map the engine populates at firing time.
+	for _, p := range o.Params {
+		if _, reserved := reservedChainParamKeys[p.Name]; reserved {
+			return fmt.Errorf("%s: params %q is a reserved key (used by the engine)", site, p.Name)
+		}
+	}
+	return nil
+}

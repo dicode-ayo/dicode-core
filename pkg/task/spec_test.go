@@ -504,6 +504,248 @@ docker: { image: x }`,
 	}
 }
 
+// TestPerEdgeOverrides_RejectUnsupportedFields pins the validation that runs
+// inside Spec.validate for every per-edge override site (Trigger.Before[].Overrides
+// and Trigger.Chain.Overrides). Fields that don't make sense at a per-edge
+// level — Enabled, Retry, Defaults, Entries, Name, Description, Trigger —
+// must be rejected with an error that names the offending field so operators
+// can find it in their task.yaml. See PR #303 HIGH and MED #3 review threads.
+func TestPerEdgeOverrides_RejectUnsupportedFields(t *testing.T) {
+	cases := []struct {
+		name     string
+		yaml     string
+		wantErr  string // substring that must appear in the error
+		wantSite string // substring naming the site (before/chain.overrides)
+	}{
+		// Trigger.Before[].Overrides — HIGH finding.
+		{
+			name: "before edge: enabled rejected",
+			yaml: `name: d
+runtime: docker
+docker: { image: x }
+trigger:
+  daemon: true
+  before:
+    - task: render
+      overrides:
+        enabled: false`,
+			wantErr:  "enabled",
+			wantSite: "trigger.before",
+		},
+		{
+			name: "before edge: retry rejected",
+			yaml: `name: d
+runtime: docker
+docker: { image: x }
+trigger:
+  daemon: true
+  before:
+    - task: render
+      overrides:
+        retry:
+          attempts: 3`,
+			wantErr:  "retry",
+			wantSite: "trigger.before",
+		},
+		{
+			name: "before edge: trigger rejected (MED #3)",
+			yaml: `name: d
+runtime: docker
+docker: { image: x }
+trigger:
+  daemon: true
+  before:
+    - task: render
+      overrides:
+        trigger:
+          manual: true`,
+			wantErr:  "trigger",
+			wantSite: "trigger.before",
+		},
+		{
+			name: "before edge: defaults rejected",
+			yaml: `name: d
+runtime: docker
+docker: { image: x }
+trigger:
+  daemon: true
+  before:
+    - task: render
+      overrides:
+        defaults:
+          timeout: 5m`,
+			wantErr:  "defaults",
+			wantSite: "trigger.before",
+		},
+		{
+			name: "before edge: entries rejected",
+			yaml: `name: d
+runtime: docker
+docker: { image: x }
+trigger:
+  daemon: true
+  before:
+    - task: render
+      overrides:
+        entries:
+          foo: {}`,
+			wantErr:  "entries",
+			wantSite: "trigger.before",
+		},
+		{
+			name: "before edge: name rejected",
+			yaml: `name: d
+runtime: docker
+docker: { image: x }
+trigger:
+  daemon: true
+  before:
+    - task: render
+      overrides:
+        name: renamed`,
+			wantErr:  "name",
+			wantSite: "trigger.before",
+		},
+		{
+			name: "before edge: description rejected",
+			yaml: `name: d
+runtime: docker
+docker: { image: x }
+trigger:
+  daemon: true
+  before:
+    - task: render
+      overrides:
+        description: nope`,
+			wantErr:  "description",
+			wantSite: "trigger.before",
+		},
+		{
+			name: "before edge: reserved param key rejected (MED #4)",
+			yaml: `name: d
+runtime: docker
+docker: { image: x }
+trigger:
+  daemon: true
+  before:
+    - task: render
+      overrides:
+        params:
+          taskID: x`,
+			wantErr:  "taskID",
+			wantSite: "trigger.before",
+		},
+
+		// Trigger.Chain.Overrides — same rules apply.
+		{
+			name: "chain edge: enabled rejected",
+			yaml: `name: d
+runtime: deno
+trigger:
+  chain:
+    from: upstream
+    overrides:
+      enabled: false`,
+			wantErr:  "enabled",
+			wantSite: "trigger.chain.overrides",
+		},
+		{
+			name: "chain edge: retry rejected",
+			yaml: `name: d
+runtime: deno
+trigger:
+  chain:
+    from: upstream
+    overrides:
+      retry:
+        attempts: 3`,
+			wantErr:  "retry",
+			wantSite: "trigger.chain.overrides",
+		},
+		{
+			name: "chain edge: trigger rejected (MED #3)",
+			yaml: `name: d
+runtime: deno
+trigger:
+  chain:
+    from: upstream
+    overrides:
+      trigger:
+        manual: true`,
+			wantErr:  "trigger",
+			wantSite: "trigger.chain.overrides",
+		},
+		{
+			name: "chain edge: reserved param key rejected (MED #4)",
+			yaml: `name: d
+runtime: deno
+trigger:
+  chain:
+    from: upstream
+    overrides:
+      params:
+        runID: x`,
+			wantErr:  "runID",
+			wantSite: "trigger.chain.overrides",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var s Spec
+			if err := yaml.NewDecoder(strings.NewReader(strings.TrimSpace(tc.yaml))).Decode(&s); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			err := s.validate()
+			if err == nil {
+				t.Fatalf("expected validation error for %s, got nil", tc.name)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error %q does not mention offending field %q", err.Error(), tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantSite) {
+				t.Errorf("error %q does not name the site %q", err.Error(), tc.wantSite)
+			}
+		})
+	}
+}
+
+// TestPerEdgeOverrides_LegitimateFieldsAllowed verifies the validator does NOT
+// reject the per-edge override fields that legitimately apply: Params (without
+// reserved keys), Env, Net, FS, Timeout, Notify, Dicode, Runtime. Guards
+// against an over-aggressive validator regression.
+func TestPerEdgeOverrides_LegitimateFieldsAllowed(t *testing.T) {
+	src := strings.TrimSpace(`
+name: d
+runtime: docker
+docker: { image: x }
+trigger:
+  daemon: true
+  before:
+    - task: render
+      overrides:
+        params:
+          mode: prod
+        env:
+          - name: FOO
+            value: bar
+        net: ["api.example.com"]
+        fs:
+          - path: /tmp
+            permission: rw
+        timeout: 30s
+        notify:
+          on_failure: true
+        runtime: deno
+`)
+	var s Spec
+	if err := yaml.NewDecoder(strings.NewReader(src)).Decode(&s); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if err := s.validate(); err != nil {
+		t.Fatalf("expected validate() to accept legitimate per-edge fields, got: %v", err)
+	}
+}
+
 func equalSlice(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
