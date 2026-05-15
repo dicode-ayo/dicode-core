@@ -280,7 +280,7 @@ Use **Edit code** on the task page to edit the Dockerfile directly in the web UI
 | `docker.command` | list | Overrides image CMD |
 | `docker.entrypoint` | list | Overrides image ENTRYPOINT |
 | `docker.ports` | list | Port bindings — `"hostPort:containerPort"` |
-| `docker.volumes` | list | Volume mounts — `"host:container[:ro]"` |
+| `docker.volumes` | list | Volume mounts — `"host:container[:ro]"`. Template vars `${DATADIR}`, `${TASK_DIR}`, `${HOME}` are expanded in the host path; `${UNKNOWN}` is left literal. Daemon env vars are NOT substituted. |
 | `docker.working_dir` | string | Container working directory |
 | `docker.env_vars` | map | Literal environment variables injected into container |
 | `docker.pull_policy` | string | `missing` (default), `always`, `never`. Ignored when using `build`. |
@@ -690,6 +690,7 @@ Template expansion runs over a tight allowlist, not every string field:
 - `permissions.fs[].path`
 - `trigger.webhook_secret`
 - `permissions.env[].from`, `.secret`, `.value` (the indirection keys)
+- `docker.volumes` (host-side mount paths; no env fallback)
 
 Everything else — `name`, `description`, `params.*.default`, `system_prompt` defaults — is taken literally. This is deliberate: expansion in descriptive strings usually hides bugs rather than enabling them.
 
