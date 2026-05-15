@@ -86,12 +86,92 @@ type DockerConfig struct {
 // appear in Params at config-load (see Spec.validate), so collisions are
 // impossible at firing time.
 //
+// Overrides, when set, are a per-firing patch applied to the downstream's
+// own spec right before dispatch via this chain edge. Semantically the
+// downstream is declaring the variant of itself it wants to run when fired
+// via this chain — manual fires of the same downstream are unaffected.
+// The merge reuses the same taskset.ApplyOverrides logic that powers the
+// global `dicode tasks override <id>` path. The override is held as a
+// *Overrides pointer so the (already large) override surface stays in one
+// place; a nil pointer means "no per-edge override" (the existing
+// behaviour).
+//
 // Mirror of OnFailureChainSpec.Params (failure-chain side); shares the same
 // reservedChainParamKeys set.
 type ChainTrigger struct {
-	From   string         `yaml:"from"`             // task ID to listen for
-	On     string         `yaml:"on,omitempty"`     // "success" (default) | "failure" | "always"
-	Params map[string]any `yaml:"params,omitempty"` // forwarded into downstream task input
+	From      string         `yaml:"from"`                // task ID to listen for
+	On        string         `yaml:"on,omitempty"`        // "success" (default) | "failure" | "always"
+	Params    map[string]any `yaml:"params,omitempty"`    // forwarded into downstream task input
+	Overrides *Overrides     `yaml:"overrides,omitempty"` // per-firing override applied to the downstream spec
+}
+
+// BeforeEntry is one entry in a daemon task's trigger.before preflight list.
+// It can be written in two YAML forms:
+//
+//	# legacy bare-ID form (single string):
+//	before:
+//	  - render-config
+//	  - fetch-creds
+//
+//	# mapping form with per-edge overrides:
+//	before:
+//	  - task: render-config
+//	    overrides:
+//	      timeout: 5m
+//	      env:
+//	        - name: MODE
+//	          value: preflight
+//
+// Both forms can be mixed within the same list. The bare-ID form is
+// equivalent to `{task: <id>}` with no overrides — preserved verbatim for
+// backwards compat with task.yamls written before the per-edge override
+// extension. The trigger engine applies the per-edge Overrides to a deep
+// copy of the prereq task's spec at dispatch time; the prereq's
+// standalone (manual / cron / chain) fires are unaffected.
+type BeforeEntry struct {
+	Task      string     `yaml:"task"`
+	Overrides *Overrides `yaml:"overrides,omitempty"`
+}
+
+// UnmarshalYAML accepts either a scalar (legacy bare-ID string) or a mapping
+// (task + overrides). Anything else is rejected with an explicit error to
+// surface typos rather than silently dropping the entry.
+func (b *BeforeEntry) UnmarshalYAML(value *yaml.Node) error {
+	switch value.Kind {
+	case yaml.ScalarNode:
+		b.Task = value.Value
+		b.Overrides = nil
+		return nil
+	case yaml.MappingNode:
+		// Decode into an anonymous alias to avoid recursing into this
+		// UnmarshalYAML.
+		type entryShape struct {
+			Task      string     `yaml:"task"`
+			Overrides *Overrides `yaml:"overrides,omitempty"`
+		}
+		var e entryShape
+		if err := value.Decode(&e); err != nil {
+			return fmt.Errorf("trigger.before entry: %w", err)
+		}
+		b.Task = e.Task
+		b.Overrides = e.Overrides
+		return nil
+	default:
+		return fmt.Errorf("trigger.before entry: expected string or mapping, got %v", value.Tag)
+	}
+}
+
+// MarshalYAML emits the bare-ID form when there are no overrides, and the
+// mapping form otherwise. This keeps round-tripping clean for the legacy
+// case (config files don't bloat after a load+rewrite cycle).
+func (b BeforeEntry) MarshalYAML() (interface{}, error) {
+	if b.Overrides == nil {
+		return b.Task, nil
+	}
+	return struct {
+		Task      string     `yaml:"task"`
+		Overrides *Overrides `yaml:"overrides,omitempty"`
+	}{Task: b.Task, Overrides: b.Overrides}, nil
 }
 
 // TriggerConfig defines how a task is triggered.
@@ -112,7 +192,14 @@ type TriggerConfig struct {
 	// only one-shot tasks can be preflights. When a referenced task re-runs
 	// successfully after the daemon is up, the engine restarts the daemon so
 	// it picks up newly-rendered config.
-	Before []string `yaml:"before,omitempty"`
+	//
+	// Each entry can be either a bare task-ID string (legacy form) or a
+	// mapping with `task:` plus optional `overrides:` — see BeforeEntry's
+	// UnmarshalYAML for the dual-form decoder. Per-edge overrides are
+	// applied to a deep copy of the prereq spec at dispatch time, so a
+	// daemon can pin a custom timeout / env / params for the preflight run
+	// without affecting the prereq's standalone (manual / cron) fires.
+	Before []BeforeEntry `yaml:"before,omitempty"`
 }
 
 // Param defines a user-configurable input for a task.
@@ -571,6 +658,13 @@ func (s *Spec) Script() (string, error) {
 	return string(b), nil
 }
 
+// Validate runs the per-spec consistency checks (shape of trigger config,
+// docker section, etc.) and returns the first violation. Exposed publicly
+// so callers that mutate a Spec after LoadDir (e.g. per-edge override
+// dispatch in pkg/trigger) can re-validate the resulting variant before
+// dispatching it.
+func (s *Spec) Validate() error { return s.validate() }
+
 func (s *Spec) validate() error {
 	// Clear stale warnings so re-validation (e.g. on a reloaded spec) starts
 	// from a clean slate; otherwise warnings accumulate across validate
@@ -606,12 +700,18 @@ func (s *Spec) validate() error {
 		if !s.Trigger.Daemon {
 			return fmt.Errorf("trigger.before: requires daemon: true (got non-daemon trigger)")
 		}
-		for _, id := range s.Trigger.Before {
-			if id == "" {
+		for i, entry := range s.Trigger.Before {
+			if entry.Task == "" {
 				return fmt.Errorf("trigger.before: empty task ID")
 			}
-			if id == s.ID {
-				return fmt.Errorf("trigger.before: cannot reference self (task ID %q)", id)
+			if entry.Task == s.ID {
+				return fmt.Errorf("trigger.before: cannot reference self (task ID %q)", entry.Task)
+			}
+			if entry.Overrides != nil {
+				site := fmt.Sprintf("trigger.before[%d].overrides (task %q)", i, entry.Task)
+				if err := validatePerEdgeOverrides(site, entry.Overrides); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -632,6 +732,11 @@ func (s *Spec) validate() error {
 		for k := range s.Trigger.Chain.Params {
 			if _, reserved := reservedChainParamKeys[k]; reserved {
 				return fmt.Errorf("trigger.chain.params: %q is a reserved key (used by the engine)", k)
+			}
+		}
+		if s.Trigger.Chain.Overrides != nil {
+			if err := validatePerEdgeOverrides("trigger.chain.overrides", s.Trigger.Chain.Overrides); err != nil {
+				return err
 			}
 		}
 	}

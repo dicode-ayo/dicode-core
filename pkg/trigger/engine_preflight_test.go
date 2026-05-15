@@ -30,7 +30,7 @@ func TestRegister_BeforeUnknownTaskRejected(t *testing.T) {
 		Name:    "d",
 		Runtime: task.RuntimeDocker,
 		Docker:  &task.DockerConfig{Image: "alpine"},
-		Trigger: task.TriggerConfig{Daemon: true, Before: []string{"missing"}},
+		Trigger: task.TriggerConfig{Daemon: true, Before: []task.BeforeEntry{{Task: "missing"}}},
 		Enabled: true,
 	}
 	err := e.engine.Register(daemon)
@@ -57,7 +57,7 @@ func TestRegister_BeforeDaemonRejected(t *testing.T) {
 		Name:    "d",
 		Runtime: task.RuntimeDocker,
 		Docker:  &task.DockerConfig{Image: "alpine"},
-		Trigger: task.TriggerConfig{Daemon: true, Before: []string{"other-daemon"}},
+		Trigger: task.TriggerConfig{Daemon: true, Before: []task.BeforeEntry{{Task: "other-daemon"}}},
 		Enabled: true,
 	}
 	err := e.engine.Register(target)
@@ -120,7 +120,7 @@ func TestRegister_BeforeValid_NonDaemonTarget(t *testing.T) {
 		Name:    "d",
 		Runtime: task.RuntimeDocker,
 		Docker:  &task.DockerConfig{Image: "alpine"},
-		Trigger: task.TriggerConfig{Daemon: true, Before: []string{"render"}},
+		Trigger: task.TriggerConfig{Daemon: true, Before: []task.BeforeEntry{{Task: "render"}}},
 		Enabled: true,
 	}
 	if err := e.engine.Register(daemon); err != nil {
@@ -267,7 +267,7 @@ func TestPreflight_DaemonWaitsForPrereqSuccess(t *testing.T) {
 		Name:    "d",
 		Runtime: task.RuntimeDocker,
 		Docker:  &task.DockerConfig{Image: "alpine"},
-		Trigger: task.TriggerConfig{Daemon: true, Before: []string{"render"}, Restart: "never"},
+		Trigger: task.TriggerConfig{Daemon: true, Before: []task.BeforeEntry{{Task: "render"}}, Restart: "never"},
 		Enabled: true,
 	}
 	if err := reg.Register(daemon); err != nil {
@@ -319,6 +319,10 @@ func TestPreflight_NoBefore_StartsImmediately(t *testing.T) {
 // makeDaemonSpec is a tiny convenience to keep the table-style tests below
 // from drowning in struct literals. Kept local to this file.
 func makeDaemonSpec(id string, before []string) *task.Spec {
+	entries := make([]task.BeforeEntry, len(before))
+	for i, t := range before {
+		entries[i] = task.BeforeEntry{Task: t}
+	}
 	return &task.Spec{
 		ID:      id,
 		Name:    id,
@@ -328,7 +332,7 @@ func makeDaemonSpec(id string, before []string) *task.Spec {
 		// existing "always restart" hook AND the prereq-driven restart
 		// path together (would double-count daemon runs in the
 		// coalescing test).
-		Trigger: task.TriggerConfig{Daemon: true, Before: before, Restart: "never"},
+		Trigger: task.TriggerConfig{Daemon: true, Before: entries, Restart: "never"},
 		Enabled: true,
 	}
 }
