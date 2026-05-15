@@ -844,7 +844,7 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 		)
 		go e.fireAsync(ctx, spec, pkgruntime.RunOptions{ //nolint:errcheck
 			ParentRunID: runID,
-			Input:       output,
+			Input:       buildChainInput(chain.Params, completedTaskID, runID, runStatus, output),
 		}, "chain")
 	}
 
@@ -993,6 +993,43 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 			}
 		}
 	}
+}
+
+// buildChainInput shapes the `Input` value handed to a downstream task that
+// was fired by a success-path trigger.chain (NOT on_failure_chain — that
+// path runs through fireFailureChain and always wraps).
+//
+// Contract:
+//
+//   - When userParams is empty (the historical case), returns the upstream's
+//     raw output unchanged. This preserves the existing contract for tasks
+//     that consume `input` as the upstream's return value directly. Adding
+//     a wrapping unconditionally would silently break every downstream task
+//     in the wild that reads input as e.g. a string or a typed object.
+//
+//   - When userParams is non-empty, returns a map merging user params with
+//     engine-reserved keys (taskID, runID, status, output, _chain_depth).
+//     Reserved keys cannot collide with user params: Spec.validate rejects
+//     reserved keys in trigger.chain.params at config load.
+//
+// _chain_depth is set to 0 for success chains. Depth tracking only matters
+// on the failure path today (cap loops via OnFailureChainSpec.MaxDepth);
+// success chains are intentionally not depth-capped because users build
+// fan-out pipelines (render → start daemon, etc.) where depth > 1 is normal.
+func buildChainInput(userParams map[string]any, completedTaskID, runID, status string, output any) any {
+	if len(userParams) == 0 {
+		return output
+	}
+	m := make(map[string]any, len(userParams)+5)
+	for k, v := range userParams {
+		m[k] = v
+	}
+	m["taskID"] = completedTaskID
+	m["runID"] = runID
+	m["status"] = status
+	m["output"] = output
+	m["_chain_depth"] = 0
+	return m
 }
 
 const (
