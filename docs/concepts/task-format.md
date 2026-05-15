@@ -90,6 +90,8 @@ permissions:
 | `params[].description` | string | | Human-readable description |
 | `params[].default` | string | | Default value (all params are strings) |
 | `tags` | list of strings | | Tags for filtering (future: source selectors) |
+| `run_result` | object | | Per-task return-value persistence config — see [Suppressing return-value persistence](#suppressing-return-value-persistence) |
+| `run_result.enabled` | bool | | When `false`, the JSON return value is not written to `runs.return_value`; in-memory delivery (`dicode.run_task`, chain `input.output`) is unaffected. Default `true`. |
 
 ### Trigger types
 
@@ -666,6 +668,37 @@ return output.html(htmlContent, { data: { count: 5 } })
 ```
 
 See [JS Runtime — output global](./js-runtime.md#output--rich-return-values) for the full API.
+
+## Suppressing return-value persistence
+
+By default every successful task's return value is JSON-marshalled and written to the `runs.return_value` column. The WebUI, run-history API, WebSocket stream, and replay tooling all read from that column. For tasks that return secret-bearing material — a rendered config with embedded tokens, a freshly minted credential, a Doppler-resolved bundle — that persisted copy is a confidentiality leak.
+
+Opt out at the task level:
+
+```yaml
+name: render-config
+runtime: deno
+trigger: { manual: true }
+permissions:
+  dicode: { secrets_has: true }
+run_result:
+  enabled: false      # do not persist return value to runs.return_value
+```
+
+What changes:
+
+- The `runs.return_value` column is left empty for this task's runs.
+- WebUI, REST `/api/runs`, and WebSocket payloads show no return value.
+- Replay can re-fire the task (the input is still persisted unless `run_inputs.enabled: false` is also set) but won't have the previous return value to display.
+
+What does **not** change:
+
+- Synchronous callers of `dicode.run_task("render-config")` still receive the return value in-memory — the engine holds it briefly outside the DB until the waiting caller picks it up.
+- Chain triggers (`trigger.chain.from: render-config`) still see the value as `input.output` in the downstream task — chain delivery never touches the persisted column.
+- Structured rich-output payloads (`output.html(...)`, `output.image(...)`, `output.file(...)`) continue to persist normally, since they live in the `output_content` columns and aren't part of the return-value confidentiality concern. If those carry secrets too, route them through a different task or scrub before returning.
+- `stdout`/`stderr` log lines persist normally. Combine with [`silent: true`](#) on the task spec when the script may print plaintext credentials.
+
+**Security note:** this flag suppresses the persisted *return value* only. A task that wants to handle plaintext credentials end-to-end should typically combine `run_result.enabled: false`, `run_inputs.enabled: false`, `silent: true`, and the tightest possible `permissions.{net,fs,env}` allowlists to remove every exfiltration channel.
 
 ## Task ID
 

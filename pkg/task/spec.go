@@ -366,6 +366,19 @@ type Spec struct {
 	// defaults.run_inputs from dicode.yaml for this task only.
 	RunInputs *RunInputsTaskOverride `yaml:"run_inputs,omitempty" json:"run_inputs,omitempty"`
 
+	// RunResult configures per-task return-value persistence. When
+	// `enabled: false` the JSON-marshalled return value is NOT written to
+	// `runs.return_value` in the database. The value still flows in-memory:
+	// synchronous callers of `dicode.run_task` receive it through WaitRun,
+	// and chain triggers receive it via `input.output`. Only the persisted
+	// (replayable / WebUI-visible) copy is suppressed.
+	//
+	// Use this for tasks that legitimately return secret material
+	// (e.g. a template renderer that emits a rendered config with embedded
+	// tokens). Structured `dicode.output(content, contentType)` data, stdout,
+	// stderr, and `fail_reason` are unaffected — those persist as usual.
+	RunResult *RunResultConfig `yaml:"run_result,omitempty" json:"run_result,omitempty"`
+
 	// AutoFix configures how the auto-fix loop sees this task's input.
 	// Independent of RunInputs (which controls persistence). Used by #238.
 	AutoFix *AutoFixConfig `yaml:"auto_fix,omitempty" json:"auto_fix,omitempty"`
@@ -402,6 +415,30 @@ type RunInputsTaskOverride struct {
 	Enabled         *bool         `yaml:"enabled,omitempty"          json:"enabled,omitempty"`
 	Retention       time.Duration `yaml:"retention,omitempty"        json:"retention,omitempty"`
 	BodyFullTextual *bool         `yaml:"body_full_textual,omitempty" json:"body_full_textual,omitempty"`
+}
+
+// RunResultConfig configures per-task return-value persistence. See the
+// Spec.RunResult doc comment for the full contract; the short version is
+// that `enabled: false` suppresses the JSON-marshalled return value from
+// being written to `runs.return_value`, while still letting it flow to
+// in-memory consumers (synchronous `dicode.run_task` callers via WaitRun,
+// chain triggers via `input.output`). Structured `dicode.output()` data,
+// stdout, and stderr are unaffected.
+type RunResultConfig struct {
+	// Enabled (default true) controls return-value persistence. When set
+	// to false, the engine skips the `SetRunResult` write for the
+	// return_value column. A nil pointer is treated as the default (true).
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+}
+
+// PersistReturnValue reports whether this RunResultConfig allows the
+// return value to be persisted to `runs.return_value`. Treats a nil
+// receiver or a nil Enabled pointer as the default (true).
+func (c *RunResultConfig) PersistReturnValue() bool {
+	if c == nil || c.Enabled == nil {
+		return true
+	}
+	return *c.Enabled
 }
 
 // AutoFixConfig configures how the auto-fix loop sees this task's input.

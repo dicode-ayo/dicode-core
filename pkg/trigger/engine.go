@@ -40,6 +40,14 @@ import (
 // ErrRunNotFound is returned by WaitRun when no run record exists for the given ID.
 var ErrRunNotFound = errors.New("run not found")
 
+// runReturnValueTTL is how long a suppressed-persistence return value
+// stays in the in-memory runReturnValue map after the run reaches a
+// terminal state. Long enough for a WaitRun caller woken by the runDone
+// close to scan the map; short enough that orphaned entries (no waiter)
+// don't accumulate. Only `run_result.enabled: false` tasks populate the
+// map, so this is a small footprint either way.
+const runReturnValueTTL = 30 * time.Second
+
 // Engine coordinates all trigger types and fires task runs.
 type Engine struct {
 	registry  *registry.Registry
@@ -55,6 +63,24 @@ type Engine struct {
 	runDone          sync.Map // runID (string) → chan struct{}, closed when the run reaches a terminal state
 	runTriggerSource sync.Map // runID (string) → triggerSource (registry.TriggerSource)
 	runChainDepth    sync.Map // runID (string) → int; _chain_depth from the run's input
+
+	// runReturnValue holds JSON-marshalled return values for runs whose task
+	// spec set `run_result.enabled: false`. The value is NOT written to the
+	// `runs.return_value` column in those cases, so WaitRun would otherwise
+	// see an empty value and break the synchronous dicode.run_task contract.
+	//
+	// Entries are added by dispatch right after marshalling and deleted by
+	// startRun's cleanup func via a time.AfterFunc that fires several
+	// seconds after the run reaches a terminal state — long enough for any
+	// WaitRun caller woken by the runDone close to scan the map before
+	// the entry disappears.
+	//
+	// Common case (persistence enabled) leaves this map untouched — the
+	// DB row carries the value as before, so there is no memory cost for
+	// regular tasks.
+	//
+	// Keys: runID (string). Values: string (JSON-marshalled return value).
+	runReturnValue sync.Map
 
 	shutdownMu  sync.RWMutex
 	shutdownCtx context.Context
@@ -696,9 +722,21 @@ func (e *Engine) WaitRun(ctx context.Context, runID string) (ipc.RunResult, erro
 		}
 		return ipc.RunResult{}, err
 	}
+	// Prefer the persisted return_value when present. Fall back to the
+	// in-memory runReturnValue cache for tasks that opted out of
+	// persistence via `run_result.enabled: false` — without this fallback,
+	// `dicode.run_task` callers would receive nil for those tasks even
+	// though the value is available in process. The cache entry survives
+	// for runReturnValueTTL after run completion (see startRun cleanup).
+	returnJSON := run.ReturnValue
+	if returnJSON == "" {
+		if v, ok := e.runReturnValue.Load(runID); ok {
+			returnJSON, _ = v.(string)
+		}
+	}
 	var returnValue interface{}
-	if run.ReturnValue != "" {
-		_ = json.Unmarshal([]byte(run.ReturnValue), &returnValue)
+	if returnJSON != "" {
+		_ = json.Unmarshal([]byte(returnJSON), &returnValue)
 	}
 	return ipc.RunResult{
 		RunID:       runID,
@@ -1551,6 +1589,16 @@ func (e *Engine) startRun(spec *task.Spec, opts *pkgruntime.RunOptions, source r
 		if v, ok := e.runDone.LoadAndDelete(opts.RunID); ok {
 			close(v.(chan struct{}))
 		}
+		// Defer deletion of the suppressed-persistence return-value cache:
+		// WaitRun goroutines woken by the runDone close above need time to
+		// scan runReturnValue before the entry is removed. The map is only
+		// populated for `run_result.enabled: false` tasks, so this AfterFunc
+		// is a no-op for the common case. Bounded by runReturnValueTTL so
+		// orphaned entries (no waiter ever calls WaitRun) don't leak.
+		runID := opts.RunID
+		time.AfterFunc(runReturnValueTTL, func() {
+			e.runReturnValue.Delete(runID)
+		})
 	}
 	return runCtx, cleanup, nil
 }
@@ -1957,6 +2005,17 @@ func (e *Engine) dispatch(ctx context.Context, spec *task.Spec, opts pkgruntime.
 	}
 
 	// Store return value and structured output if present.
+	//
+	// `run_result.enabled: false` opts out of persisting the JSON-marshalled
+	// return value to `runs.return_value`. Structured output_content and
+	// output_content_type are unaffected — those carry rich-output payloads
+	// (images, HTML) that are addressed separately by the WebUI's content
+	// type negotiation and aren't part of the confidentiality concern.
+	//
+	// In-memory delivery: regardless of persistence, the marshalled JSON is
+	// stashed in runReturnValue so WaitRun can serve it to synchronous
+	// callers (dicode.run_task -> IPC reply). The entry is cleared by the
+	// startRun cleanup func once the run reaches a terminal state.
 	if result != nil && (result.ReturnValue != nil || result.OutputContent != "") {
 		retJSON := ""
 		if result.ReturnValue != nil {
@@ -1964,7 +2023,32 @@ func (e *Engine) dispatch(ctx context.Context, spec *task.Spec, opts pkgruntime.
 				retJSON = string(b)
 			}
 		}
-		_ = e.registry.SetRunResult(context.Background(), opts.RunID, retJSON, result.OutputContentType, result.OutputContent)
+		persistReturnValue := spec.RunResult.PersistReturnValue()
+		// When persistence is suppressed, stash the in-memory copy so
+		// WaitRun can still serve it to synchronous callers
+		// (dicode.run_task -> IPC reply). Done BEFORE the DB write
+		// (skipped below) so a WaitRun caller racing against the runDone
+		// close never observes an empty value: dispatch is called from
+		// runTask synchronously, the runDone channel is closed only by
+		// startRun's cleanup func which runs after runTask returns, and
+		// the cleanup defers the runReturnValue deletion to give
+		// post-close WaitRun goroutines time to scan the map.
+		//
+		// Common case (persistence enabled) takes no in-memory slot — the
+		// DB row carries the value as before.
+		persistedReturnJSON := retJSON
+		if !persistReturnValue {
+			persistedReturnJSON = ""
+			if retJSON != "" {
+				e.runReturnValue.Store(opts.RunID, retJSON)
+			}
+		}
+		// Skip the SetRunResult call entirely when nothing would be
+		// written (e.g. return-value persistence disabled AND no
+		// structured output) to avoid a needless UPDATE statement.
+		if persistedReturnJSON != "" || result.OutputContent != "" {
+			_ = e.registry.SetRunResult(context.Background(), opts.RunID, persistedReturnJSON, result.OutputContentType, result.OutputContent)
+		}
 	}
 
 	status := registry.StatusSuccess
