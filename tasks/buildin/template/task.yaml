@@ -2,45 +2,30 @@ apiVersion: dicode/v1
 kind: Task
 name: "Template Renderer"
 description: |
-  Substitutes ${VAR} placeholders in a template string using values from
-  the task's environment, returning the rendered string. Designed to be
-  composed: invoke from another task via dicode.run_task, or chain into
-  a downstream task via input.output. (CLI piping is intended but not
-  verified end-to-end in this PR — see follow-up issue. TODO.)
+  Substitutes ${VAR} placeholders in a template string using values
+  from the task's environment. Returns rendered output via run-result
+  (suppressed from runs.return_value via run_result.enabled: false)
+  so the value flows to chain triggers and dicode.run_task callers
+  without crossing the persistence boundary.
 
-  Invocation contract:
+  Operator usage patterns:
 
-    const r = await dicode.run_task("buildin/template", {
-      template: "tunnel: ${ID}\nhost: ${HOST}",
-    });
-    // r === "tunnel: abc-123\nhost: api.example.com"
+  1. Chained pipeline (preferred for daemons):
+       trigger.before: [{ task: buildin/template, overrides: {...} }]
+     The rendered string flows to downstream via input.output. Set
+     run_inputs.enabled: false on the downstream task to prevent the
+     value from being persisted in the downstream's encrypted
+     run_inputs blob.
 
-  The placeholder names map directly to environment variables visible to
-  this task. The set of visible env vars is controlled by permissions.env;
-  in the base taskset this list is empty and each call site is expected
-  to extend it via a `dicode tasks override buildin/template --env ...`
-  taskset override that declares which secrets/values this rendering may
-  consume.
-
-  Return-value persistence is suppressed (run_result.enabled: false)
-  because rendered configs routinely embed credentials. The string still
-  flows in-memory to synchronous run_task callers and to chained
-  downstream tasks via input.output — only the database column
-  runs.return_value (the value the WebUI and REST API surface) is empty.
-
-  Input persistence is also suppressed (run_inputs.enabled: false): the
-  template body itself can be sensitive (it may declare which secrets get
-  embedded), so we keep it out of the run-inputs store as defense in
-  depth.
-
-  Failure modes:
-    - Unresolved placeholder (no matching env var visible to the task)
-      -> task fails with `unresolved placeholder: ${NAME}`. Silent
-      passthrough would let a missing-secret deploy a half-rendered
-      config; loud failure short-circuits the chain.
-    - Prototype-chain lookups (${toString}, ${__proto__}, ...) -> also
-      fail as "unresolved placeholder"; the implementation builds a
-      null-prototype env map and uses hasOwnProperty guards.
+  2. CLI piping:
+       dicode tasks run buildin/template --param template='...' > file
+     The rendered string is printed to stdout. The dicode CLI does not
+     suppress this output even when run_result.enabled is false, so
+     the operator must redirect it appropriately. Running this command
+     interactively (without redirection) will display the rendered
+     content in the terminal — which lands in shell history, scrollback
+     buffers, and any tee/script captures. Don't do this for templates
+     that embed secrets unless you've redirected output to a file.
 
 runtime: deno
 
