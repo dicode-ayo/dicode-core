@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -136,8 +137,17 @@ func loadFixtureTpl(t *testing.T, path string, vars map[string]string, idOverrid
 		t.Fatalf("loadFixtureTpl %s: read task.yaml: %v", path, err)
 	}
 	rendered := string(raw)
-	for k, v := range vars {
-		rendered = strings.ReplaceAll(rendered, "{{"+k+"}}", v)
+	// Iterate vars in a deterministic order so the output doesn't depend
+	// on Go map iteration. Today no var's value contains another key's
+	// "{{...}}" marker, but sorting makes the helper boring-correct
+	// instead of relying on that invariant.
+	keys := make([]string, 0, len(vars))
+	for k := range vars {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		rendered = strings.ReplaceAll(rendered, "{{"+k+"}}", vars[k])
 	}
 	// Fail loud on unrendered placeholders so a typo in vars doesn't
 	// silently leave a literal "{{FOO}}" in the parsed yaml. Match only
