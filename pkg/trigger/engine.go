@@ -739,6 +739,22 @@ func (e *Engine) runPrereqs(ctx context.Context, spec *task.Spec) error {
 			results <- prereqResult{refID: refID, err: fmt.Errorf("prereq %q vanished from registry", refID)}
 			continue
 		}
+		// Dispatch-time ${input.output} interpolation (PR2 hook). For PR2
+		// every before-edge dispatches with upstreamOutput="" because
+		// today's runPrereqs runs all stages in parallel without piping
+		// output between them — so any ${input.output} would fail loudly
+		// here. (before[0] is rejected at registration; later stages
+		// today have no source for the token.) PR3 rewrites this loop to
+		// be sequential and replaces "" with the previous stage's return
+		// value, completing the composable preflight pipeline.
+		if entry.Overrides != nil && entry.Overrides.Params != nil {
+			resolved, rerr := task.ResolveInputOutputList(entry.Overrides.Params, "")
+			if rerr != nil {
+				results <- prereqResult{refID: refID, err: fmt.Errorf("resolve input refs: %w", rerr)}
+				continue
+			}
+			entry.Overrides.Params = resolved
+		}
 		// Per-edge overrides (#NNN): if this preflight edge declares
 		// `overrides:`, merge them onto a deep copy of the prereq spec
 		// before dispatching. The registry's canonical spec is left
