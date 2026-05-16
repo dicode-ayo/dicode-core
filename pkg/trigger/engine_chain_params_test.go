@@ -281,3 +281,90 @@ func TestFireChain_SetsParentRunIDOnChainedRun(t *testing.T) {
 		t.Errorf("ParentRunID = %q, want %q", chainedRun.ParentRunID, failedRunID)
 	}
 }
+
+// TestChainDispatch_ResolvesInputOutput verifies the dispatch-time
+// substitution of ${input.output} in trigger.chain.params with the
+// upstream's string return value.
+func TestChainDispatch_ResolvesInputOutput(t *testing.T) {
+	dir := t.TempDir()
+	e := newTestEnv(t)
+
+	// Downstream task: declares trigger.chain on "upstream-render" with a
+	// param whose value is the literal ${input.output} token. Echoes the
+	// full input map back so we can inspect the resolved param.
+	downstream := writeTask(t, dir, "downstream-interp",
+		`export default async function main({ input }) { return input }`,
+		task.TriggerConfig{
+			Chain: &task.ChainTrigger{
+				From:   "upstream-render",
+				On:     "success",
+				Params: map[string]any{"content": "${input.output}", "path": "/tmp/foo"},
+			},
+		})
+	_ = e.reg.Register(downstream)
+
+	// Upstream returns a string; the engine must substitute that into the
+	// downstream's `content` param before dispatching.
+	upstream := writeTask(t, dir, "upstream-render",
+		`export default async function main() { return "rendered-string" }`,
+		task.TriggerConfig{Manual: true})
+	_ = e.reg.Register(upstream)
+
+	upstreamRunID, err := e.engine.FireManual(context.Background(), "upstream-render", nil)
+	if err != nil {
+		t.Fatalf("FireManual: %v", err)
+	}
+	primary := waitForTerminal(t, e.engine, upstreamRunID, 30*time.Second)
+	if primary.Status != "success" {
+		t.Fatalf("upstream status = %q, want success", primary.Status)
+	}
+
+	got := waitForRunOfTask(t, e.engine, "downstream-interp", 30*time.Second)
+	if got == nil {
+		t.Fatal("downstream-interp was not fired within the timeout")
+	}
+	if got.Status != "success" {
+		t.Errorf("downstream status = %q, want success", got.Status)
+	}
+
+	returnValue := pollReturnValue(t, e.engine, got.ID, 5*time.Second)
+	var input map[string]any
+	if err := json.Unmarshal([]byte(returnValue), &input); err != nil {
+		t.Fatalf("unmarshal return value %q: %v", returnValue, err)
+	}
+
+	// content should have been substituted; path should be untouched.
+	if input["content"] != "rendered-string" {
+		t.Errorf("content = %v, want rendered-string (token was not resolved)", input["content"])
+	}
+	if input["path"] != "/tmp/foo" {
+		t.Errorf("path = %v, want /tmp/foo", input["path"])
+	}
+}
+
+// TestStringRet pins the helper's contract: only direct-string returns
+// flow through; everything else (maps, slices, numbers, nil) becomes "".
+// The empty string then propagates as ErrInputUnavailable through the
+// resolver, which is the loud-failure path we want for non-string
+// upstreams.
+func TestStringRet(t *testing.T) {
+	cases := []struct {
+		name string
+		in   interface{}
+		want string
+	}{
+		{"direct string", "hello", "hello"},
+		{"empty string", "", ""},
+		{"map", map[string]interface{}{"x": 1}, ""},
+		{"slice", []interface{}{1, 2}, ""},
+		{"number", 42, ""},
+		{"nil", nil, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := stringRet(c.in); got != c.want {
+				t.Errorf("stringRet(%v) = %q; want %q", c.in, got, c.want)
+			}
+		})
+	}
+}

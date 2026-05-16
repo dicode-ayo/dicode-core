@@ -1107,6 +1107,22 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 			}
 			dispatchSpec = merged
 		}
+		// Dispatch-time ${input.output} interpolation: substitute the
+		// literal token in chain.Params with the upstream's return value.
+		// Only direct-string upstream returns flow through; non-string
+		// returns are treated as "no upstream available" — the chain
+		// dispatch is skipped (logged) rather than silently passing the
+		// literal token to the downstream.
+		upstreamRet := stringRet(output)
+		resolvedParams, rerr := task.ResolveInputOutputMap(chain.Params, upstreamRet)
+		if rerr != nil {
+			e.log.Error("chain trigger skipped — failed to resolve ${input.output}",
+				zap.String("from", completedTaskID),
+				zap.String("to", spec.ID),
+				zap.Error(rerr),
+			)
+			continue
+		}
 		e.log.Info("chain trigger",
 			zap.String("from", completedTaskID),
 			zap.String("to", spec.ID),
@@ -1114,7 +1130,7 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 		)
 		go e.fireAsync(ctx, dispatchSpec, pkgruntime.RunOptions{ //nolint:errcheck
 			ParentRunID: runID,
-			Input:       buildChainInput(chain.Params, completedTaskID, runID, runStatus, output),
+			Input:       buildChainInput(resolvedParams, completedTaskID, runID, runStatus, output),
 		}, "chain")
 	}
 
@@ -1256,6 +1272,16 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 			}
 		}
 	}
+}
+
+// stringRet returns the upstream's return value as a string for
+// ${input.output} interpolation. JSON-marshalled objects, numbers,
+// and lists are NOT auto-stringified — only direct string returns
+// flow through. Non-string returns produce "" which propagates as
+// ErrInputUnavailable through the resolver.
+func stringRet(rv interface{}) string {
+	s, _ := rv.(string)
+	return s
 }
 
 // buildChainInput shapes the `Input` value handed to a downstream task that
