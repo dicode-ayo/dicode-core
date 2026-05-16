@@ -1333,7 +1333,7 @@ func TestFireAsync_KillQueuedRun(t *testing.T) {
 		runID, status string
 	}
 	finishedCh := make(chan finishRecord, 2)
-	eng.SetRunFinishedHook(func(_, runID, status, _ string, _ int64, _, _ bool) {
+	eng.SetRunFinishedHook(func(_, runID, status, _ string, _ int64) {
 		finishedCh <- finishRecord{runID: runID, status: status}
 	})
 

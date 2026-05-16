@@ -25,7 +25,6 @@ Full configuration loading. All structs defined and validated:
 
 - `Config`, `SourceConfig`, `DatabaseConfig`, `RelayConfig`
 - `SecretsConfig`, `SecretProviderConfig`
-- `NotificationsConfig`, `NotifyProviderConfig`
 - `ServerConfig` — port, secret, **auth** (global auth wall), **allowed_origins** (CORS allowlist), **trust_proxy** (XFF trust flag), MCP, tray
 - **`DefaultsConfig`** — `OnFailureChain string` — global failure handler task ID
 - `applyDefaults()` with sensible defaults for all fields
@@ -56,13 +55,6 @@ Full configuration loading. All structs defined and validated:
 - `env.go` — `EnvProvider` (reads host env vars)
 - `local.go` — `LocalProvider` — ChaCha20-Poly1305 + Argon2id, master key management
 - `localdb.go` — `SQLiteSecretDB` — sqlite-backed Set/Get/Delete/List
-
-### `pkg/notify/` 🔧
-
-- `notify.go` — `Notifier` interface, `Message`, `Priority`, `Action`, `NoopNotifier` ✅
-- `ntfy.go` — `NtfyNotifier` full HTTP implementation ✅
-- `gotify.go` — **not yet created**
-- `desktop.go` — **not yet created** (OS desktop notifications)
 
 ### `pkg/taskset/` ✅
 
@@ -283,8 +275,8 @@ CLI dispatcher + daemon mode in one binary:
 | --- | --- |
 | `webui` | Dashboard SPA (served at `/hooks/webui`) |
 | `tray` | System tray icon (daemon) |
-| `alert` | Browser notification relay |
-| `notify` | Push notification dispatcher |
+| `notifications` | Native OS desktop notification (`notify-send` / `osascript` / `powershell`) |
+| `alert` | Chain-friendly wrapper that calls `buildin/notifications` via `dicode.run_task` |
 | `ai-agent` | Chat interface with tool-calling — discovers all registered tasks as tools, supports `task.yaml` template variables for provider config, conversation history with KV-backed compaction |
 | `auth-start` | OAuth broker: generates signed relay URL for 14+ providers |
 | `auth-complete` | OAuth broker: receives ECIES-encrypted tokens, decrypts, stores in secrets |
@@ -300,8 +292,6 @@ CLI dispatcher + daemon mode in one binary:
 |---|---|
 | `pkg/testing/` | Task test harness (mock globals, assert, runTask) |
 | `pkg/store/` | Task store installer (`dicode task install`) |
-| `pkg/notify/desktop.go` | OS desktop notifications |
-| `pkg/notify/gotify.go` | Gotify push notification provider |
 | `pkg/db/postgres.go` | PostgreSQL implementation |
 | `pkg/db/mysql.go` | MySQL implementation |
 | `pkg/runtime/js/globals/server.go` | `server` global (daemon tasks serving HTTP) |

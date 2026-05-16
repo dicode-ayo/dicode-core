@@ -37,7 +37,3 @@ permissions:
       - "dicode/relay-broker-pin/v1"
     tasks:
       - buildin/local-storage
-
-notify:
-  on_success: false
-  on_failure: true

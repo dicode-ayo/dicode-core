@@ -29,7 +29,3 @@ permissions:
       - "*"
 
 timeout: 60s
-
-notify:
-  on_success: false
-  on_failure: false

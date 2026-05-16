@@ -36,7 +36,3 @@ permissions:
       - buildin/local-storage
 
 timeout: 10s
-
-notify:
-  on_success: false
-  on_failure: true

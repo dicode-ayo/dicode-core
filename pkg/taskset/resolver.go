@@ -417,7 +417,7 @@ func defaultsNonEmpty(d *Defaults) bool {
 	if d == nil {
 		return false
 	}
-	return d.Timeout != 0 || d.Retry != nil || len(d.Env) > 0 || d.Trigger != nil || d.Notify != nil
+	return d.Timeout != 0 || d.Retry != nil || len(d.Env) > 0 || d.Trigger != nil
 }
 
 // joinNamespace joins namespace segments with '/'.
@@ -462,7 +462,6 @@ func mergeOverrides(a, b *Overrides) *Overrides {
 	if out.Defaults == nil {
 		out.Defaults = a.Defaults
 	}
-	out.Notify = mergeNotify(a.Notify, out.Notify)
 	// Env: merge by name (a first, b wins)
 	if len(a.Env) > 0 || len(out.Env) > 0 {
 		out.Env = mergeEnvEntries(a.Env, out.Env)

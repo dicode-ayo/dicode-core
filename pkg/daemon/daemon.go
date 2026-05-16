@@ -18,7 +18,6 @@ import (
 	"github.com/dicode/dicode/pkg/db"
 	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/metrics"
-	"github.com/dicode/dicode/pkg/notify"
 	"github.com/dicode/dicode/pkg/onboarding"
 	"github.com/dicode/dicode/pkg/registry"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
@@ -473,11 +472,6 @@ func buildRuntimes(
 			return nil, nil, nil, nil, fmt.Errorf("set on_failure_chain defaults: %w", err)
 		}
 	}
-	if p := cfg.Notifications.Provider; p != nil {
-		eng.SetNotifier(notify.NewNotifier(p.Type, p.URL, p.Topic, p.TokenEnv))
-	}
-	eng.SetNotifyDefaults(cfg.Notifications.NotifyOnSuccess(), cfg.Notifications.NotifyOnFailure())
-
 	var managed []pkgruntime.ManagedRuntime
 	managed = append(managed, denoRT)
 

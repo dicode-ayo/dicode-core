@@ -17,7 +17,6 @@
 | [Task Chaining](./concepts/task-chaining.md) | chain triggers, `dicode.trigger()`, pipeline north star |
 | [Secrets](./concepts/secrets.md) | provider chain, local encrypted store, external providers |
 | [Testing & Validation](./concepts/testing.md) | validate, unit tests, dry-run, CI |
-| [Notifications](./concepts/notifications.md) | `notify` global, ntfy, tray icon, desktop |
 | [Task → Orchestrator API](./concepts/orchestrator-api.md) | `dicode` global, progress, trigger, ask |
 | [MCP Server](./concepts/mcp-server.md) | MCP tools, agent workflow |
 | [Agent Skill](./concepts/agent-skill.md) | skill file, install, workflow rules |
@@ -33,7 +32,6 @@
 ## Design documents
 
 - [Security Plan](./security-plan.md) — threat model, phases 1–4 design decisions, Phase 5 RBAC north star
-- [Notifications & Interactive Tasks](./notifications-design.md) — browser notifications, run detail page, interact SDK, OAuth helper
 
 ## Runtime guides
 

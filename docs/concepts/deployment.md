@@ -213,15 +213,11 @@ secrets:
     - type: local                # encrypted SQLite
     - type: env                  # host env vars (fallback)
 
-# Notifications
-notifications:
-  on_failure: true
-  on_success: false
-  provider:
-    type: ntfy
-    url: https://ntfy.sh
-    topic: my-dicode-alerts
-    token_env: NTFY_TOKEN
+# Notifications: delivered by tasks via on_failure_chain.
+# Point at buildin/alert (desktop), buildin/notifications, or any task
+# you write yourself for ntfy / Slack / Discord / email / etc.
+defaults:
+  on_failure_chain: buildin/alert
 
 # Server
 server:

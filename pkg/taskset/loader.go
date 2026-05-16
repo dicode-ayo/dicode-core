@@ -2,6 +2,7 @@ package taskset
 
 import (
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"strings"
@@ -49,9 +50,17 @@ func LoadTaskSet(path string) (*TaskSetSpec, error) {
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
 	defer f.Close()
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+
+	if err := probeLegacyNotify(data, path); err != nil {
+		return nil, err
+	}
 
 	var ts TaskSetSpec
-	if err := yaml.NewDecoder(f).Decode(&ts); err != nil {
+	if err := yaml.Unmarshal(data, &ts); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	if ts.Kind != string(KindTaskSet) {
@@ -63,20 +72,63 @@ func LoadTaskSet(path string) (*TaskSetSpec, error) {
 	return &ts, nil
 }
 
+// probeLegacyNotify walks the YAML tree of a TaskSet/Config file and returns
+// a clear error if any `notify:` key appears anywhere — the field was removed
+// in #279 and yaml.v3's tolerant decode would otherwise drop it silently,
+// leading to "alerts went to /dev/null" without warning. Notifications are
+// now delivered by tasks via on_failure_chain.
+func probeLegacyNotify(data []byte, path string) error {
+	var root yaml.Node
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		// Decode error here will surface again from the typed Unmarshal in
+		// the caller with the same data, so just bail without an error.
+		return nil
+	}
+	if hasLegacyNotifyKey(&root) {
+		return fmt.Errorf("%s: legacy `notify` block detected. The per-task "+
+			"and taskset-level notify field was removed (#279). Use "+
+			"`on_failure_chain` to fire a notification task on failure.", path)
+	}
+	return nil
+}
+
+func hasLegacyNotifyKey(n *yaml.Node) bool {
+	if n == nil {
+		return false
+	}
+	if n.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			k := n.Content[i]
+			if k.Kind == yaml.ScalarNode && k.Value == "notify" {
+				return true
+			}
+		}
+	}
+	for _, child := range n.Content {
+		if hasLegacyNotifyKey(child) {
+			return true
+		}
+	}
+	return false
+}
+
 // LoadConfig parses a file with kind: Config.
 // Returns nil, nil if the file does not exist (Config is optional).
 func LoadConfig(path string) (*ConfigSpec, error) {
-	f, err := os.Open(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
-	defer f.Close()
+
+	if err := probeLegacyNotify(data, path); err != nil {
+		return nil, err
+	}
 
 	var cs ConfigSpec
-	if err := yaml.NewDecoder(f).Decode(&cs); err != nil {
+	if err := yaml.Unmarshal(data, &cs); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	if cs.Kind != string(KindConfig) {

@@ -109,6 +109,33 @@ sources:
 	}
 }
 
+// TestLoad_RejectsLegacyNotificationsBlock ensures the removed
+// `notifications:` block is rejected at load time. yaml.v3 would otherwise
+// drop it silently and operators would lose alerts without warning.
+func TestLoad_RejectsLegacyNotificationsBlock(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "dicode.yaml")
+
+	content := `
+notifications:
+  on_failure: true
+  provider:
+    type: ntfy
+    url: https://ntfy.sh
+    topic: test
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(cfgPath)
+	if err == nil {
+		t.Fatal("Load accepted legacy notifications block; want error")
+	}
+	if !strings.Contains(err.Error(), "on_failure_chain") {
+		t.Errorf("error = %v; want mention of on_failure_chain migration", err)
+	}
+}
+
 // TestLoad_IgnoresLegacyAIBlock ensures a legacy top-level `ai:` key from an
 // older dicode.yaml parses cleanly after AIConfig was removed. yaml.v3 silently
 // drops unknown keys when unmarshalling into a typed struct, so this should

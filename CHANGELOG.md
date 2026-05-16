@@ -1,5 +1,21 @@
 # Changelog
 
+## [Unreleased]
+
+### Breaking
+
+- **Legacy notification subsystem removed.** The daemon-level `notifications:`
+  config block (provider/on_failure/on_success), the per-task `notify:` field,
+  the `notify` taskset override key, and the `pkg/notify` package are all
+  gone. Notifications are now delivered exclusively by tasks: point
+  `defaults.on_failure_chain` (or per-task `on_failure_chain`) at
+  `buildin/alert`, `buildin/notifications`, or any task you write yourself
+  for ntfy / Slack / Discord / email / etc. WebSocket `run:finished` payloads
+  no longer carry `notifyOnSuccess` / `notifyOnFailure` fields. **The daemon
+  refuses to start if `dicode.yaml` still has a `notifications:` block** — you
+  will lose all alerts otherwise, since the keys would be silently ignored.
+  Strip the block (and any `notify:` blocks under task.yaml) to migrate.
+
 ## [0.2.1](https://github.com/dicode-ayo/dicode-core/compare/v0.2.0...v0.2.1) (2026-05-06)
 
 

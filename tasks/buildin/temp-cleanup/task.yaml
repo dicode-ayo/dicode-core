@@ -34,7 +34,3 @@ permissions:
     get_runs: true
 
 timeout: 60s
-
-notify:
-  on_success: false
-  on_failure: true

@@ -35,7 +35,3 @@ permissions:
       permission: r
 
 timeout: 60s
-
-notify:
-  on_success: false
-  on_failure: true

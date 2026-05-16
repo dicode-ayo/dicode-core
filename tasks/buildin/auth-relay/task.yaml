@@ -38,7 +38,3 @@ permissions:
     secrets_write: true
 
 timeout: 10s
-
-notify:
-  on_success: false
-  on_failure: true

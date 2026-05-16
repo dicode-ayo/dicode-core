@@ -25,7 +25,6 @@ import (
 
 	"github.com/dicode/dicode/pkg/db"
 	"github.com/dicode/dicode/pkg/ipc"
-	"github.com/dicode/dicode/pkg/notify"
 	"github.com/dicode/dicode/pkg/registry"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	"github.com/dicode/dicode/pkg/runtime/envresolve"
@@ -100,10 +99,6 @@ type Engine struct {
 	// driven restarts. See daemon_state.go for the coalescing rationale.
 	restartGates *restartGate
 
-	notifier        notify.Notifier
-	notifyOnSuccess bool
-	notifyOnFailure bool
-
 	defaultsOnFailureChain task.OnFailureChainSpec // from config.Defaults.OnFailureChain
 
 	db db.DB // optional — enables cron-job persistence and missed-run catchup
@@ -115,7 +110,7 @@ type Engine struct {
 	taskWaiting atomic.Int64  // goroutines parked waiting for a semaphore slot
 	started     atomic.Bool   // set to true by Start(); guards SetMaxConcurrentTasks
 
-	runFinishedHook func(taskID, runID, status, triggerSource string, durationMs int64, notifyOnSuccess, notifyOnFailure bool)
+	runFinishedHook func(taskID, runID, status, triggerSource string, durationMs int64)
 	runStartedHook  func(taskID, runID, triggerSource string)
 
 	// denoRuntime / pythonRuntime are typed runtime handles needed by the
@@ -257,21 +252,8 @@ func (e *Engine) SetRunStartedHook(fn func(taskID, runID, triggerSource string))
 // SetRunFinishedHook registers a callback invoked after every run completes.
 // Called from the goroutine that ran the task, so the hook must be non-blocking
 // (e.g. send to a buffered channel).
-// notifyOnSuccess and notifyOnFailure carry the resolved per-task notification flags.
-func (e *Engine) SetRunFinishedHook(fn func(taskID, runID, status, triggerSource string, durationMs int64, notifyOnSuccess, notifyOnFailure bool)) {
+func (e *Engine) SetRunFinishedHook(fn func(taskID, runID, status, triggerSource string, durationMs int64)) {
 	e.runFinishedHook = fn
-}
-
-// SetNotifier configures the push notification provider used for system-level alerts.
-func (e *Engine) SetNotifier(n notify.Notifier) {
-	e.notifier = n
-}
-
-// SetNotifyDefaults sets the global on_success / on_failure defaults.
-// Per-task Notify overrides in task.Spec take precedence over these.
-func (e *Engine) SetNotifyDefaults(onSuccess, onFailure bool) {
-	e.notifyOnSuccess = onSuccess
-	e.notifyOnFailure = onFailure
 }
 
 // SetDefaultsOnFailureChain sets the global on_failure_chain to fire when any task fails.
@@ -286,22 +268,6 @@ func (e *Engine) SetDefaultsOnFailureChain(spec task.OnFailureChainSpec) error {
 	}
 	e.defaultsOnFailureChain = spec
 	return nil
-}
-
-// resolveNotify returns the effective notification flags for a task spec,
-// falling back to the engine's global defaults when the spec has no override.
-func (e *Engine) resolveNotify(spec *task.Spec) (onSuccess, onFailure bool) {
-	onSuccess = e.notifyOnSuccess
-	onFailure = e.notifyOnFailure
-	if n := spec.Notify; n != nil {
-		if n.OnSuccess != nil {
-			onSuccess = *n.OnSuccess
-		}
-		if n.OnFailure != nil {
-			onFailure = *n.OnFailure
-		}
-	}
-	return
 }
 
 // ActiveRunCount returns the number of task runs currently in progress.
@@ -1930,29 +1896,8 @@ func (e *Engine) runTask(runCtx context.Context, spec *task.Spec, opts pkgruntim
 		e.log.Warn("run finished", runFields...)
 	}
 
-	notifyOnSuccess, notifyOnFailure := e.resolveNotify(spec)
-
-	if e.notifier != nil {
-		shouldNotify := (status == registry.StatusSuccess && notifyOnSuccess) ||
-			(status == registry.StatusFailure && notifyOnFailure)
-		if shouldNotify {
-			msg := notify.Message{
-				Title: fmt.Sprintf("[dicode] %s %s", spec.Name, status),
-				Body:  fmt.Sprintf("Run finished in %.1fs", elapsed.Seconds()),
-			}
-			if status == registry.StatusFailure {
-				msg.Priority = notify.PriorityHigh
-			}
-			go func() {
-				if err := e.notifier.Send(context.Background(), msg); err != nil {
-					e.log.Warn("notification send failed", zap.Error(err))
-				}
-			}()
-		}
-	}
-
 	if h := e.runFinishedHook; h != nil {
-		h(spec.ID, opts.RunID, status, string(source), elapsed.Milliseconds(), notifyOnSuccess, notifyOnFailure)
+		h(spec.ID, opts.RunID, status, string(source), elapsed.Milliseconds())
 	}
 
 	if spec.Trigger.Daemon {
@@ -1978,11 +1923,8 @@ func (e *Engine) finalizeCancelled(spec *task.Spec, opts pkgruntime.RunOptions, 
 			zap.Error(err))
 	}
 	if h := e.runFinishedHook; h != nil {
-		// Duration is 0 — the run never executed. The notifier (wired via
-		// a separate path in runTask) only fires on Success/Failure, so
-		// cancelled runs do not send spurious notifications.
-		notifyOnSuccess, notifyOnFailure := e.resolveNotify(spec)
-		h(spec.ID, opts.RunID, registry.StatusCancelled, string(source), 0, notifyOnSuccess, notifyOnFailure)
+		// Duration is 0 — the run never executed.
+		h(spec.ID, opts.RunID, registry.StatusCancelled, string(source), 0)
 	}
 }
 

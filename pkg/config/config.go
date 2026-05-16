@@ -27,6 +27,21 @@ var ErrLegacySourcesFormat = errors.New(
 		"with the source's fields nested under `ref`.",
 )
 
+// ErrLegacyNotificationsBlock is returned by Load when the config file
+// contains the removed `notifications:` block. The daemon-side notification
+// subsystem (#279) was deleted; notifications are now delivered by tasks
+// via `defaults.on_failure_chain`. Failing fast here prevents the silent
+// "alerts go to /dev/null" footgun where YAML's tolerant decode would
+// otherwise drop the block without comment.
+var ErrLegacyNotificationsBlock = errors.New(
+	"dicode.yaml: legacy `notifications` block detected. The daemon-side\n" +
+		"notification subsystem was removed (#279). Notifications are now\n" +
+		"delivered by tasks: point `defaults.on_failure_chain` at\n" +
+		"`buildin/alert`, `buildin/notifications`, or any task you write\n" +
+		"yourself for ntfy / Slack / Discord / email / etc. Remove the\n" +
+		"`notifications:` block from your config to continue.",
+)
+
 // RuntimeConfig configures a managed runtime executor.
 // The Version field pins the interpreter version that dicode downloads;
 // leave it empty to use the default version bundled with this release.
@@ -159,18 +174,17 @@ type Config struct {
 	//           branch: main
 	//           poll_interval: 5m
 	//           auth: { token_env: GITHUB_TOKEN }
-	Spec          taskset.TaskSetBody      `yaml:"spec"`
-	Database      DatabaseConfig           `yaml:"database"`
-	Secrets       SecretsConfig            `yaml:"secrets"`
-	Notifications NotificationsConfig      `yaml:"notifications"`
-	Server        ServerConfig             `yaml:"server"`
-	Defaults      DefaultsConfig           `yaml:"defaults"`
-	Runtimes      map[string]RuntimeConfig `yaml:"runtimes,omitempty"`
-	Execution     ExecutionConfig          `yaml:"execution,omitempty"`
-	Relay         RelayConfig              `yaml:"relay,omitempty"`
-	AI            AIConfig                 `yaml:"ai,omitempty"`
-	LogLevel      string                   `yaml:"log_level"`
-	DataDir       string                   `yaml:"data_dir"`
+	Spec      taskset.TaskSetBody      `yaml:"spec"`
+	Database  DatabaseConfig           `yaml:"database"`
+	Secrets   SecretsConfig            `yaml:"secrets"`
+	Server    ServerConfig             `yaml:"server"`
+	Defaults  DefaultsConfig           `yaml:"defaults"`
+	Runtimes  map[string]RuntimeConfig `yaml:"runtimes,omitempty"`
+	Execution ExecutionConfig          `yaml:"execution,omitempty"`
+	Relay     RelayConfig              `yaml:"relay,omitempty"`
+	AI        AIConfig                 `yaml:"ai,omitempty"`
+	LogLevel  string                   `yaml:"log_level"`
+	DataDir   string                   `yaml:"data_dir"`
 }
 
 // DatabaseConfig selects the storage backend.
@@ -189,37 +203,6 @@ type SecretProviderConfig struct {
 	Type     string `yaml:"type"`      // "local" | "env" | "vault" | ...
 	Address  string `yaml:"address"`   // vault address
 	TokenEnv string `yaml:"token_env"` // env var holding token
-}
-
-type NotificationsConfig struct {
-	// OnFailure sends a notification when a task run fails. Defaults to true.
-	OnFailure *bool `yaml:"on_failure,omitempty"`
-	// OnSuccess sends a notification when a task run succeeds. Defaults to false.
-	OnSuccess *bool                 `yaml:"on_success,omitempty"`
-	Provider  *NotifyProviderConfig `yaml:"provider,omitempty"`
-}
-
-// NotifyOnFailure returns the effective on_failure value (defaults to true).
-func (n *NotificationsConfig) NotifyOnFailure() bool {
-	if n.OnFailure == nil {
-		return true
-	}
-	return *n.OnFailure
-}
-
-// NotifyOnSuccess returns the effective on_success value (defaults to false).
-func (n *NotificationsConfig) NotifyOnSuccess() bool {
-	if n.OnSuccess == nil {
-		return false
-	}
-	return *n.OnSuccess
-}
-
-type NotifyProviderConfig struct {
-	Type     string `yaml:"type"`      // "ntfy" | "gotify" | "pushover" | "telegram"
-	URL      string `yaml:"url"`       // provider base URL
-	Topic    string `yaml:"topic"`     // ntfy topic / gotify app token / etc.
-	TokenEnv string `yaml:"token_env"` // env var holding auth token
 }
 
 type ServerConfig struct {
@@ -247,13 +230,21 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("open config: %w", err)
 	}
 
-	// Probe for the old `sources:` array before decoding into Config.
-	// Fail fast with a clear migration error instead of silently dropping sources.
+	// Probe for removed top-level keys before decoding into Config. Fail
+	// fast with a clear migration error instead of silently dropping the
+	// block — yaml.v3 does not enforce KnownFields by default, so an
+	// unrecognised key would otherwise vanish without comment.
 	var probe struct {
-		Sources any `yaml:"sources"`
+		Sources       any `yaml:"sources"`
+		Notifications any `yaml:"notifications"`
 	}
-	if err := yaml.Unmarshal(data, &probe); err == nil && probe.Sources != nil {
-		return nil, ErrLegacySourcesFormat
+	if err := yaml.Unmarshal(data, &probe); err == nil {
+		if probe.Sources != nil {
+			return nil, ErrLegacySourcesFormat
+		}
+		if probe.Notifications != nil {
+			return nil, ErrLegacyNotificationsBlock
+		}
 	}
 
 	var cfg Config

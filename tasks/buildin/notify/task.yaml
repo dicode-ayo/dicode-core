@@ -37,7 +37,3 @@ permissions:
     - which
 
 timeout: 10s
-
-notify:
-  on_success: false
-  on_failure: false

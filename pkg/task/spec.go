@@ -2,6 +2,7 @@ package task
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -362,13 +363,6 @@ type Permissions struct {
 	Dicode *DicodePermissions `yaml:"dicode,omitempty" json:"dicode,omitempty"`
 }
 
-// NotifyConfig controls when dicode sends push notifications for a task.
-// Nil fields inherit from the parent TaskSet defaults or the global config.
-type NotifyConfig struct {
-	OnSuccess *bool `yaml:"on_success,omitempty" json:"on_success,omitempty"`
-	OnFailure *bool `yaml:"on_failure,omitempty" json:"on_failure,omitempty"`
-}
-
 // DicodePermissions declares which dicode runtime APIs the task may call.
 // All dicode.* and mcp.* globals are denied by default; each must be explicitly enabled here.
 type DicodePermissions struct {
@@ -451,7 +445,6 @@ type Spec struct {
 	Params      Params        `yaml:"params,omitempty"      json:"params,omitempty"`
 	Permissions Permissions   `yaml:"permissions,omitempty" json:"permissions,omitempty"`
 	Timeout     time.Duration `yaml:"timeout"             json:"timeout"`
-	Notify      *NotifyConfig `yaml:"notify,omitempty" json:"notify,omitempty"`
 	// MCPPort declares that this daemon task exposes an MCP server on the given port.
 	MCPPort int `yaml:"mcp_port,omitempty" json:"mcp_port,omitempty"`
 	// OnFailureChain overrides the global defaults.on_failure_chain for this task.
@@ -590,9 +583,26 @@ func LoadDirWithVars(dir string, extras map[string]string) (*Spec, error) {
 		return nil, fmt.Errorf("open task.yaml in %s: %w", dir, err)
 	}
 	defer f.Close()
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return nil, fmt.Errorf("read task.yaml in %s: %w", dir, err)
+	}
+
+	// Probe for the removed `notify:` block before decoding. yaml.v3's
+	// tolerant decode would otherwise drop it silently and the task author
+	// would lose alerts they think are still configured. Notifications are
+	// now task-based via on_failure_chain (#279).
+	var probe struct {
+		Notify any `yaml:"notify"`
+	}
+	if err := yaml.Unmarshal(data, &probe); err == nil && probe.Notify != nil {
+		return nil, fmt.Errorf("task.yaml in %s: legacy `notify` block detected. "+
+			"The per-task notify field was removed (#279). Use `on_failure_chain` "+
+			"to fire a notification task on failure — see docs.", dir)
+	}
 
 	var spec Spec
-	if err := yaml.NewDecoder(f).Decode(&spec); err != nil {
+	if err := yaml.Unmarshal(data, &spec); err != nil {
 		return nil, fmt.Errorf("parse task.yaml in %s: %w", dir, err)
 	}
 

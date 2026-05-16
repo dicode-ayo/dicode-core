@@ -34,7 +34,3 @@ permissions:
       - buildin/notifications
 
 timeout: 30s
-
-notify:
-  on_success: false
-  on_failure: false

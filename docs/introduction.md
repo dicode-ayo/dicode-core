@@ -74,7 +74,7 @@ tasks git repo (or local dir)
 
 dicode binary
 ├── Reconciler      watches sources, syncs task registry (ArgoCD-style)
-├── JS Runtime      goja + http, kv, log, params, env, notify, dicode globals
+├── JS Runtime      goja + http, kv, log, params, env, dicode globals
 ├── Trigger engine  cron (robfig/cron), webhook, manual, chain
 ├── Secrets         provider chain: local encrypted SQLite → env vars → Vault/AWS SM
 ├── WebUI + API     HTMX frontend, REST API, live log streaming
