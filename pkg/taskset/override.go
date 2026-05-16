@@ -298,6 +298,21 @@ func copySpec(s *task.Spec) *task.Spec {
 		chain := *s.Trigger.Chain
 		out.Trigger.Chain = &chain
 	}
+	// Trigger.Before is a slice of BeforeEntry; each BeforeEntry carries a
+	// *task.Overrides pointer that per-firing dispatch may mutate. Without
+	// this deep-clone two concurrent firings would alias the same Overrides
+	// instance (survey §5.3).
+	if s.Trigger.Before != nil {
+		before := make([]task.BeforeEntry, len(s.Trigger.Before))
+		for i, be := range s.Trigger.Before {
+			before[i] = be
+			if be.Overrides != nil {
+				o := *be.Overrides
+				before[i].Overrides = &o
+			}
+		}
+		out.Trigger.Before = before
+	}
 	if s.Docker != nil {
 		docker := *s.Docker
 		out.Docker = &docker
@@ -309,6 +324,35 @@ func copySpec(s *task.Spec) *task.Spec {
 	if s.Permissions.Dicode != nil {
 		d := *s.Permissions.Dicode
 		out.Permissions.Dicode = &d
+	}
+	// OnFailureChain pointer — deep-clone so a per-firing mutation can't
+	// reach back into the registry's canonical spec (survey §5.3). The
+	// inner Params map is also cloned because chain dispatch overlays
+	// engine-stamped keys onto it.
+	if s.OnFailureChain != nil {
+		ofc := *s.OnFailureChain
+		if s.OnFailureChain.Params != nil {
+			ofc.Params = make(map[string]any, len(s.OnFailureChain.Params))
+			for k, v := range s.OnFailureChain.Params {
+				ofc.Params[k] = v
+			}
+		}
+		out.OnFailureChain = &ofc
+	}
+	// RunInputs pointer — same deep-clone discipline as the other pointer
+	// fields. The inner *bool fields are cloned so a per-firing override
+	// flipping Enabled cannot reach back into the registry copy.
+	if s.RunInputs != nil {
+		ri := *s.RunInputs
+		if s.RunInputs.Enabled != nil {
+			b := *s.RunInputs.Enabled
+			ri.Enabled = &b
+		}
+		if s.RunInputs.BodyFullTextual != nil {
+			b := *s.RunInputs.BodyFullTextual
+			ri.BodyFullTextual = &b
+		}
+		out.RunInputs = &ri
 	}
 	return &out
 }
