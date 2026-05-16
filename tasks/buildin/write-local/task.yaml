@@ -1,0 +1,52 @@
+apiVersion: dicode/v1
+kind: Task
+name: "Write Local File"
+description: |
+  Writes a string to a file at a given path with a given mode. Returns
+  the resolved path so it can flow to a downstream chain stage via
+  ${input.output} interpolation.
+
+  Operator-facing usage is via trigger.before pipeline overrides — the
+  task ships with no implicit fs roots, so each call site declares
+  exactly which path it's allowed to write to in its overrides.fs:
+  block.
+
+runtime: deno
+
+trigger:
+  manual: true
+
+params:
+  content:
+    type: string
+    required: true
+    description: "String contents to write."
+  path:
+    type: string
+    required: true
+    description: "Absolute target path. Must be inside an fs:rw root declared by the caller (or by per-edge override)."
+  mode:
+    type: string
+    default: "0600"
+    description: "File mode as an octal string (e.g. \"0600\", \"0644\")."
+
+permissions:
+  # Empty by default — every call site supplies its own fs:rw scope via
+  # overrides.fs. Matches buildin/template's "callers declare what's
+  # visible" pattern.
+  fs: []
+
+# Content may carry secrets (rendered configs with embedded credentials)
+# — keep input params and return values off the persisted runs table.
+# The return value (the resolved path) still flows in-memory to chain
+# consumers via the runReturnValue cache.
+run_inputs:
+  enabled: false
+run_result:
+  enabled: false
+
+timeout: 30s
+
+notify:
+  on_success: false
+  on_failure: true
