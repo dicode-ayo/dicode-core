@@ -1,0 +1,11 @@
+apiVersion: dicode/v1
+kind: Task
+name: process-payment
+runtime: deno
+trigger:
+  manual: true
+on_failure_chain:
+  task: buildin/auto-fix
+  params:
+    mode: review
+timeout: 30s

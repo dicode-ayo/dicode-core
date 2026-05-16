@@ -1,0 +1,20 @@
+apiVersion: dicode/v1
+kind: Task
+name: verify
+runtime: deno
+trigger:
+  chain:
+    from: render
+    on: success
+    params:
+      marker: "ok"
+permissions:
+  env:
+    - MARKER_PATH
+    - MARKER_DIR
+  fs:
+    # MARKER_DIR is the test's t.TempDir() the verifier writes its
+    # marker file into, substituted at fixture-load.
+    - path: "{{MARKER_DIR}}"
+      permission: rw
+timeout: 15s

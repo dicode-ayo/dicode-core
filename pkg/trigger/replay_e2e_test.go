@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/dicode/dicode/pkg/registry"
-	"github.com/dicode/dicode/pkg/task"
 )
 
 // TestReplay_FullPipeline exercises the complete v0.2.0 replay surface:
@@ -16,7 +15,6 @@ import (
 //  3. Assert the new run carries TriggerSource = "replay" and ParentRunID = original.
 //  4. Assert the new run completes with StatusSuccess.
 func TestReplay_FullPipeline(t *testing.T) {
-	dir := t.TempDir()
 	e := newTestEnv(t)
 
 	runner := &fakeRunner{store: map[string]string{}}
@@ -27,11 +25,7 @@ func TestReplay_FullPipeline(t *testing.T) {
 	e.engine.SetInputStore(is)
 	e.denoRT.SetInputStore(is)
 
-	spec := writeTask(t, dir, "echo-task",
-		`export default async function main(opts) {
-			return opts && opts.input ? opts.input : "no-input"
-		}`,
-		task.TriggerConfig{Manual: true})
+	spec := loadFixture(t, "replay-fullpipeline/echo-task", "")
 	if err := e.reg.Register(spec); err != nil {
 		t.Fatal(err)
 	}

@@ -51,7 +51,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -117,185 +116,6 @@ func (s *stubDockerExec) specFor(runID string) *task.Spec {
 	return s.captured[runID]
 }
 
-// renderTaskScript is the Deno body of the renderer prereq. Inlined here
-// (rather than depending on tasks/buildin/template at runtime) so the
-// test is self-contained and won't be perturbed by future edits to the
-// buildin task — those have their own task.test.ts coverage.
-//
-// It substitutes ${VAR} placeholders from process env using the same
-// regex shape as tasks/buildin/template/task.ts, writes the result to
-// outpath, and returns the rendered string. The return value flows via
-// chain (input.output) to the verifier; the on-disk side-effect proves
-// the prereq actually ran with the overridden params.
-const renderTaskScript = `
-const PLACEHOLDER_RE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
-export default async function main({ params }) {
-  const tpl = await params.get("template");
-  const outpath = await params.get("outpath");
-  if (tpl === null) throw new Error("missing template param");
-  if (outpath === null) throw new Error("missing outpath param");
-  const rendered = tpl.replace(PLACEHOLDER_RE, (_m, name) => {
-    const v = Deno.env.get(name);
-    if (v === undefined) throw new Error("unresolved placeholder: ${" + name + "}");
-    return v;
-  });
-  await Deno.writeTextFile(outpath, rendered);
-  return rendered;
-}
-`
-
-// verifyTaskScript is the chain consumer. It reads input.output (the
-// renderer's rendered string, delivered in-memory via FireChain despite
-// run_result.enabled=false) plus the user-supplied chain.params.marker
-// (PR #299), and writes a marker file so the test can confirm the chain
-// graph composed correctly.
-const verifyTaskScript = `
-export default async function main({ input }) {
-  const marker = input.marker;
-  const output = input.output;
-  if (typeof marker !== "string") throw new Error("missing marker: " + JSON.stringify(input));
-  if (typeof output !== "string") throw new Error("missing output: " + JSON.stringify(input));
-  const path = Deno.env.get("MARKER_PATH");
-  if (!path) throw new Error("MARKER_PATH not set");
-  await Deno.writeTextFile(path, marker + ":" + output);
-  return output;
-}
-`
-
-// writeRendererTask writes the renderer task.yaml + task.ts to a
-// dedicated subdir of dir so each task is loadable via LoadDirWithVars.
-// fsWriteDir scopes --allow-write at runtime so Deno can write the
-// rendered config file. envAllow scopes --allow-env to the names that
-// the per-edge override will project into the prereq's process env.
-func writeRendererTask(t *testing.T, dir string, fsWriteDir string, envAllow []string) string {
-	t.Helper()
-	td := filepath.Join(dir, "render")
-	if err := os.MkdirAll(td, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	envLines := ""
-	for _, n := range envAllow {
-		envLines += "    - " + n + "\n"
-	}
-	// run_result.enabled: false → suppress runs.return_value persistence
-	// while keeping in-memory delivery for chain + WaitRun.
-	yaml := `apiVersion: dicode/v1
-kind: Task
-name: render
-runtime: deno
-trigger:
-  manual: true
-permissions:
-  env:
-` + envLines + `  fs:
-    - path: ` + fsWriteDir + `
-      permission: rw
-params:
-  template:
-    type: string
-    required: true
-  outpath:
-    type: string
-    required: true
-run_result:
-  enabled: false
-timeout: 15s
-`
-	if err := os.WriteFile(filepath.Join(td, "task.yaml"), []byte(yaml), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(td, "task.ts"), []byte(renderTaskScript), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	return td
-}
-
-// writeVerifierTask emits the chain-consumer wired with trigger.chain
-// pointing at render, plus user-supplied chain.params so the engine
-// must merge them into input alongside the reserved keys (#299).
-func writeVerifierTask(t *testing.T, dir, fsWriteDir string) string {
-	t.Helper()
-	td := filepath.Join(dir, "verify")
-	if err := os.MkdirAll(td, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	yaml := `apiVersion: dicode/v1
-kind: Task
-name: verify
-runtime: deno
-trigger:
-  chain:
-    from: render
-    on: success
-    params:
-      marker: "ok"
-permissions:
-  env:
-    - MARKER_PATH
-    - MARKER_DIR
-  fs:
-    - path: ` + fsWriteDir + `
-      permission: rw
-timeout: 15s
-`
-	if err := os.WriteFile(filepath.Join(td, "task.yaml"), []byte(yaml), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(td, "task.ts"), []byte(verifyTaskScript), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	return td
-}
-
-// writeDaemonTask emits the daemon spec. The docker.volumes entry uses
-// ${DATADIR} which LoadDirWithVars must expand at load time (#297).
-// trigger.before points at the render task with per-edge overrides
-// patching params + env (#300 + #303). Restart: never so the test
-// doesn't loop on daemon exit during cleanup.
-func writeDaemonTask(t *testing.T, dir, template, outpath, tunnelID, host string) string {
-	t.Helper()
-	td := filepath.Join(dir, "tunnel")
-	if err := os.MkdirAll(td, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	yaml := `apiVersion: dicode/v1
-kind: Task
-name: tunnel
-runtime: docker
-docker:
-  image: alpine
-  volumes:
-    - "${DATADIR}/cf-config.yml:/etc/cf/config.yml:ro"
-trigger:
-  daemon: true
-  restart: never
-  before:
-    - task: render
-      overrides:
-        params:
-          template: ` + quoteYAML(template) + `
-          outpath: ` + quoteYAML(outpath) + `
-        env:
-          - name: TUNNEL_ID
-            value: ` + quoteYAML(tunnelID) + `
-          - name: HOST
-            value: ` + quoteYAML(host) + `
-        timeout: 12s
-`
-	if err := os.WriteFile(filepath.Join(td, "task.yaml"), []byte(yaml), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	return td
-}
-
-// quoteYAML wraps s in a double-quoted YAML scalar and escapes the
-// characters that the YAML 1.2 double-quoted style cares about. Used
-// for the template body which embeds newlines + ${VAR} sequences.
-func quoteYAML(s string) string {
-	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`)
-	return `"` + r.Replace(s) + `"`
-}
-
 // pollFileContents waits up to timeout for path to exist + be readable,
 // returning its content. Used to observe the renderer's on-disk side
 // effect without racing the daemon-state assertion.
@@ -321,9 +141,8 @@ func TestE2E_TemplatePreflightPipeline(t *testing.T) {
 		t.Skip("requires Deno subprocess")
 	}
 
-	// ── Scratch dirs.
-	tasksDir := t.TempDir()  // per-task subdirs live here
-	dataDir := t.TempDir()   // ${DATADIR} for volume expansion
+	// ── Scratch dirs (real paths the renderer + verifier + daemon write into).
+	dataDir := t.TempDir()   // ${DATADIR} for volume expansion + render output
 	markerDir := t.TempDir() // verifier writes its marker here
 
 	renderOutpath := filepath.Join(dataDir, "cf-config.yml")
@@ -338,16 +157,11 @@ func TestE2E_TemplatePreflightPipeline(t *testing.T) {
 	dockerExec := newStubDockerExec(e.reg)
 	e.engine.RegisterExecutor(task.RuntimeDocker, dockerExec)
 
-	// ── Renderer + verifier task dirs + LoadDir.
-	const tunnelID = "abc-123"
-	const host = "api.example.com"
-	template := "tunnel: ${TUNNEL_ID}\nhost: ${HOST}\n"
-
-	renderDir := writeRendererTask(t, tasksDir, dataDir, []string{"TUNNEL_ID", "HOST"})
-	renderSpec, err := task.LoadDir(renderDir)
-	if err != nil {
-		t.Fatalf("LoadDir render: %v", err)
-	}
+	// ── Renderer + verifier load from testdata/. {{DATADIR}} and
+	// {{MARKER_DIR}} are substituted at fixture-load by loadFixtureTpl.
+	renderSpec := loadFixtureTpl(t,
+		"template-preflight-pipeline/render",
+		map[string]string{"DATADIR": dataDir}, "")
 	if err := e.reg.Register(renderSpec); err != nil {
 		t.Fatalf("reg.Register render: %v", err)
 	}
@@ -355,11 +169,9 @@ func TestE2E_TemplatePreflightPipeline(t *testing.T) {
 		t.Fatalf("eng.Register render: %v", err)
 	}
 
-	verifyDir := writeVerifierTask(t, tasksDir, markerDir)
-	verifySpec, err := task.LoadDir(verifyDir)
-	if err != nil {
-		t.Fatalf("LoadDir verify: %v", err)
-	}
+	verifySpec := loadFixtureTpl(t,
+		"template-preflight-pipeline/verify",
+		map[string]string{"MARKER_DIR": markerDir}, "")
 	if err := e.reg.Register(verifySpec); err != nil {
 		t.Fatalf("reg.Register verify: %v", err)
 	}
@@ -367,15 +179,14 @@ func TestE2E_TemplatePreflightPipeline(t *testing.T) {
 		t.Fatalf("eng.Register verify: %v", err)
 	}
 
-	// ── Daemon dir + LoadDirWithVars so ${DATADIR} expansion runs on
-	// docker.volumes per PR #297.
-	daemonDir := writeDaemonTask(t, tasksDir, template, renderOutpath, tunnelID, host)
-	daemonSpec, err := task.LoadDirWithVars(daemonDir, map[string]string{
-		task.VarDataDir: dataDir,
-	})
-	if err != nil {
-		t.Fatalf("LoadDirWithVars daemon: %v", err)
-	}
+	// ── Daemon fixture: same {{DATADIR}} substitution for the
+	// trigger.before.overrides.params.outpath (outside expandSpec's
+	// allowlist), PLUS LoadDirWithVars-side ${DATADIR} expansion on
+	// docker.volumes (PR #297). loadFixtureTpl passes its vars map
+	// through to LoadDirWithVars so a single key serves both layers.
+	daemonSpec := loadFixtureTpl(t,
+		"template-preflight-pipeline/tunnel",
+		map[string]string{"DATADIR": dataDir}, "")
 
 	// Sanity: spec-load-time expansion must have rewritten ${DATADIR}
 	// in docker.volumes before we ever hand the spec to the engine.
@@ -410,9 +221,11 @@ func TestE2E_TemplatePreflightPipeline(t *testing.T) {
 
 	// ── Renderer's on-disk side effect: PR #303 must have projected
 	// the daemon's overrides into the render fire, and PR #300 must
-	// have completed preflight before letting the daemon start.
+	// have completed preflight before letting the daemon start. The
+	// literal values mirror the env-block in the tunnel fixture's
+	// trigger.before.overrides.env.
 	got := pollFileContents(t, renderOutpath, 5*time.Second)
-	want := "tunnel: " + tunnelID + "\nhost: " + host + "\n"
+	want := "tunnel: abc-123\nhost: api.example.com\n"
 	if got != want {
 		t.Errorf("rendered file contents = %q, want %q", got, want)
 	}
