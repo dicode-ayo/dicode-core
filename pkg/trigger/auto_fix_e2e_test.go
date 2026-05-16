@@ -53,7 +53,7 @@ func TestAutoFix_E2E_HappyPath(t *testing.T) {
 
 	// Controlled-failure task; on_failure_chain wiring lives in the fixture's
 	// task.yaml so this test path exercises the real loader + chain parser.
-	failing := loadFixture(t, "auto-fix-happypath/process-payment")
+	failing := loadFixture(t, "auto-fix-happypath/process-payment", "")
 	if err := e.reg.Register(failing); err != nil {
 		t.Fatalf("register failing task: %v", err)
 	}

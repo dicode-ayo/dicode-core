@@ -23,14 +23,14 @@ func TestEngine_RunTask_ParentLinkage_E2E(t *testing.T) {
 	e.denoRT.SetEngine(e.engine)
 
 	// Child task: trivial, returns its own run id so the parent can record it.
-	child := loadFixture(t, "run-task-parent-linkage/rg-child")
+	child := loadFixture(t, "run-task-parent-linkage/rg-child", "")
 	_ = e.reg.Register(child)
 	e.engine.Register(child)
 
 	// Parent task: uses dicode.run_task to fire the child synchronously,
 	// then returns the child's run id from the call result. The
 	// permissions.dicode.tasks allowlist lives in the fixture's task.yaml.
-	parent := loadFixture(t, "run-task-parent-linkage/rg-parent")
+	parent := loadFixture(t, "run-task-parent-linkage/rg-parent", "")
 	_ = e.reg.Register(parent)
 	e.engine.Register(parent)
 

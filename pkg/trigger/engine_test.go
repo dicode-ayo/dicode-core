@@ -64,9 +64,16 @@ func writeTask(t *testing.T, dir, id, script string, trigger task.TriggerConfig)
 }
 
 // loadFixture loads a checked-in task fixture from
-// pkg/trigger/testdata/<path>/. Pass idOverride for buildin/* tasks whose
-// IDs contain `/` (which can't appear in a directory name) — the fixture
-// directory uses a `-` substitute and the test patches spec.ID after load.
+// pkg/trigger/testdata/<test-slug>/<task-dir>/. Each task directory must
+// contain task.yaml + task.ts (or task.js); LoadDir derives spec.ID from
+// the directory basename.
+//
+// Pass idOverride="" for the normal case. Pass a non-empty idOverride for
+// buildin/* tasks: filesystem paths can't contain `/`, so the fixture
+// directory uses a substitute like `buildin-auto-fix/` and the override
+// restores the real ID. The override is followed by a re-Validate so
+// cross-task ID checks (trigger.chain.from, on_failure_chain.task, …) see
+// the post-override ID rather than the directory basename.
 //
 // e2e tests prefer this over writeTask because it exercises the real
 // task.LoadDir path (yaml parse + validate + expandSpec) instead of
@@ -74,7 +81,7 @@ func writeTask(t *testing.T, dir, id, script string, trigger task.TriggerConfig)
 //
 // Resolves to an absolute path so spec.TaskDir survives any chdir done
 // by the runtime when launching the deno subprocess.
-func loadFixture(t *testing.T, path string, idOverride ...string) *task.Spec {
+func loadFixture(t *testing.T, path, idOverride string) *task.Spec {
 	t.Helper()
 	abs, err := filepath.Abs(filepath.Join("testdata", path))
 	if err != nil {
@@ -84,8 +91,11 @@ func loadFixture(t *testing.T, path string, idOverride ...string) *task.Spec {
 	if err != nil {
 		t.Fatalf("loadFixture %s: %v", path, err)
 	}
-	if len(idOverride) > 0 {
-		spec.ID = idOverride[0]
+	if idOverride != "" {
+		spec.ID = idOverride
+		if err := spec.Validate(); err != nil {
+			t.Fatalf("loadFixture %s: re-validate after id override: %v", path, err)
+		}
 	}
 	return spec
 }

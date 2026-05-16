@@ -1,3 +1,6 @@
+# `name:` is decorative — task.LoadDir derives spec.ID from the directory
+# basename, which can't contain `/`. The test calls loadFixture with
+# idOverride="buildin/auto-fix" to restore the real ID after load.
 apiVersion: dicode/v1
 kind: Task
 name: buildin/auto-fix

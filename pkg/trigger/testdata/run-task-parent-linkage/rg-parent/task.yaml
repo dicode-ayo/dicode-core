@@ -8,4 +8,4 @@ permissions:
   dicode:
     tasks:
       - rg-child
-timeout: 60s
+timeout: 30s

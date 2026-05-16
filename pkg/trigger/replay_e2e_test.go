@@ -25,7 +25,7 @@ func TestReplay_FullPipeline(t *testing.T) {
 	e.engine.SetInputStore(is)
 	e.denoRT.SetInputStore(is)
 
-	spec := loadFixture(t, "replay-fullpipeline/echo-task")
+	spec := loadFixture(t, "replay-fullpipeline/echo-task", "")
 	if err := e.reg.Register(spec); err != nil {
 		t.Fatal(err)
 	}

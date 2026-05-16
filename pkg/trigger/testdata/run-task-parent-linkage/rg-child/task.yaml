@@ -4,4 +4,4 @@ name: rg-child
 runtime: deno
 trigger:
   manual: true
-timeout: 60s
+timeout: 30s
