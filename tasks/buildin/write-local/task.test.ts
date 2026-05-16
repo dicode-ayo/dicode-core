@@ -126,3 +126,13 @@ Deno.test("rejects_path_with_nul", async () => {
     "invalid path",
   );
 });
+
+Deno.test("write_accepts_empty_content", async () => {
+  await withTmpDir(async (dir) => {
+    const path = `${dir}/empty.txt`;
+    const result = await main(sdk({ content: "", path }));
+    assertEquals(result, { path });
+    const stat = await Deno.stat(path);
+    assertEquals(stat.size, 0);
+  });
+});
