@@ -41,6 +41,10 @@
 - [Python Runtime](./python-runtime.md) — uv, PEP 723 inline deps, SDK globals
 - [Podman Runtime](./podman-runtime.md) — rootless containers via Podman CLI
 
+## Examples
+
+- [Cloudflare Tunnel](./examples/cloudflare-tunnel.md) — hardened `cloudflared` daemon built from `trigger.before` preflight, per-edge overrides, `${DATADIR}` volume mounts, the `buildin/template` library task, and `run_result.enabled: false`
+
 ## Reference
 
 - [Configuration Reference](./concepts/task-format.md#configuration-reference)
