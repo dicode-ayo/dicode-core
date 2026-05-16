@@ -667,3 +667,55 @@ func TestPreflight_RegisterDaemon_Concurrent_NoDoubleStart(t *testing.T) {
 		t.Errorf("expected exactly 1 daemon run, got %d (double-start race)", daemonRuns)
 	}
 }
+
+// TestRegister_RejectsInputOutputOnFirstBeforeStage verifies that the
+// engine refuses to register a daemon whose trigger.before[0] override
+// references ${input.output}. The first stage of a preflight pipeline
+// has no upstream return value, so the reference is statically
+// unresolvable — surface it at config-load time rather than at the
+// first daemon dispatch.
+func TestRegister_RejectsInputOutputOnFirstBeforeStage(t *testing.T) {
+	eng, reg, _ := newPreflightEnv(t)
+
+	upstream := &task.Spec{
+		ID:      "render",
+		Name:    "render",
+		Runtime: task.RuntimeDeno,
+		Trigger: task.TriggerConfig{Manual: true},
+		Enabled: true,
+	}
+	if err := reg.Register(upstream); err != nil {
+		t.Fatalf("register upstream: %v", err)
+	}
+
+	daemon := &task.Spec{
+		ID:      "my-daemon",
+		Name:    "my-daemon",
+		Runtime: task.RuntimeDocker,
+		Docker:  &task.DockerConfig{Image: "alpine"},
+		Trigger: task.TriggerConfig{
+			Daemon: true,
+			Before: []task.BeforeEntry{
+				{
+					Task: "render",
+					Overrides: &task.Overrides{
+						Params: task.ParamOverrides{
+							{Name: "content", Default: "${input.output}"},
+						},
+					},
+				},
+			},
+		},
+		Enabled: true,
+	}
+	err := eng.Register(daemon)
+	if err == nil {
+		t.Fatal("expected register to reject ${input.output} on before[0]")
+	}
+	if !strings.Contains(err.Error(), "input.output") {
+		t.Errorf("error should mention input.output; got %v", err)
+	}
+	if !strings.Contains(err.Error(), "before[0]") {
+		t.Errorf("error should pinpoint the offending stage; got %v", err)
+	}
+}

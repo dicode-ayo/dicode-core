@@ -430,6 +430,24 @@ func (e *Engine) validateBeforeRefs(spec *task.Spec) error {
 			}
 		}
 	}
+	// ${input.output} on before[0] is statically unresolvable: the first
+	// pipeline stage has no upstream return value. Reject at registration
+	// so operators see the failure at config-load time rather than the
+	// first daemon dispatch. Non-first stages are allowed because PR3
+	// will pipe the previous stage's output into upstreamOutput.
+	for i, entry := range spec.Trigger.Before {
+		if i > 0 || entry.Overrides == nil {
+			continue
+		}
+		for _, p := range entry.Overrides.Params {
+			if p.Default == task.InputOutputToken {
+				return fmt.Errorf(
+					"trigger.before[0].overrides.params.%s: ${input.output} is not available on the first pipeline stage",
+					p.Name,
+				)
+			}
+		}
+	}
 	return nil
 }
 
