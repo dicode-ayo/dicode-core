@@ -739,14 +739,22 @@ func (e *Engine) runPrereqs(ctx context.Context, spec *task.Spec) error {
 			results <- prereqResult{refID: refID, err: fmt.Errorf("prereq %q vanished from registry", refID)}
 			continue
 		}
-		// Dispatch-time ${input.output} interpolation (PR2 hook). For PR2
-		// every before-edge dispatches with upstreamOutput="" because
-		// today's runPrereqs runs all stages in parallel without piping
-		// output between them — so any ${input.output} would fail loudly
-		// here. (before[0] is rejected at registration; later stages
-		// today have no source for the token.) PR3 rewrites this loop to
-		// be sequential and replaces "" with the previous stage's return
-		// value, completing the composable preflight pipeline.
+		// Resolve ${input.output} in overrides.params. PR2 ships with
+		// upstreamOutput="" — any token use here fails loudly (the
+		// resolver returns an error before reaching the assignment
+		// below). PR3 will replace "" with the previous stage's return
+		// value once `before:` runs sequentially.
+		//
+		// TODO(PR3): BeforeEntry.Overrides is a *Overrides — the
+		// assignment `entry.Overrides.Params = resolved` mutates the
+		// pointed-to struct, which is shared with the registry-held
+		// spec. Latent in PR2 (resolver either errors or produces an
+		// identical slice). When PR3 wires real upstream values,
+		// concurrent preflights of the same daemon would race on this
+		// write. PR3's runPrereqs rewrite must either shallow-copy
+		// entry.Overrides before assignment, OR thread `resolved`
+		// through as a local without writing back (e.g. build the
+		// merged spec from resolved directly, bypassing the field).
 		if entry.Overrides != nil && entry.Overrides.Params != nil {
 			resolved, rerr := task.ResolveInputOutputList(entry.Overrides.Params, "")
 			if rerr != nil {
