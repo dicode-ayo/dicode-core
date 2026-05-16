@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -96,6 +97,83 @@ func loadFixture(t *testing.T, path, idOverride string) *task.Spec {
 		if err := spec.Validate(); err != nil {
 			t.Fatalf("loadFixture %s: re-validate after id override: %v", path, err)
 		}
+	}
+	return spec
+}
+
+// unrenderedPlaceholderRE matches the {{UPPER_CASE_IDENT}} shape that
+// loadFixtureTpl emits — narrow enough that fixture prose like
+// "{{VAR}} substitution" inside YAML comments doesn't false-positive
+// the post-render check.
+var unrenderedPlaceholderRE = regexp.MustCompile(`\{\{[A-Z_][A-Z0-9_]*\}\}`)
+
+// loadFixtureTpl is loadFixture's sibling for fixtures whose task.yaml
+// contains dynamic values outside LoadDir's expandSpec allowlist
+// (permissions.net, trigger.before[].overrides, etc.). Every "{{KEY}}"
+// in task.yaml is replaced with vars[KEY], then the rendered yaml +
+// task.ts/task.js are written to a t.TempDir() that LoadDirWithVars
+// parses with the same vars map (so the loader's own "${KEY}"
+// expansion sees them too).
+//
+// The "{{KEY}}" syntax is intentionally distinct from the loader's
+// "${KEY}" so each substitution layer owns an unambiguous marker —
+// templates containing literal "${VAR}" placeholders for runtime
+// expansion (e.g. the buildin/template renderer's input) survive the
+// fixture-load pass untouched.
+//
+// task.ts/task.js bodies are copied verbatim — script source is real
+// code, not text to substitute into. idOverride works the same as in
+// loadFixture: "" for the normal case, or a real ID for buildin/*
+// fixtures whose directory basename can't contain `/`.
+func loadFixtureTpl(t *testing.T, path string, vars map[string]string, idOverride string) *task.Spec {
+	t.Helper()
+	src, err := filepath.Abs(filepath.Join("testdata", path))
+	if err != nil {
+		t.Fatalf("loadFixtureTpl abs %s: %v", path, err)
+	}
+	raw, err := os.ReadFile(filepath.Join(src, "task.yaml"))
+	if err != nil {
+		t.Fatalf("loadFixtureTpl %s: read task.yaml: %v", path, err)
+	}
+	rendered := string(raw)
+	for k, v := range vars {
+		rendered = strings.ReplaceAll(rendered, "{{"+k+"}}", v)
+	}
+	// Fail loud on unrendered placeholders so a typo in vars doesn't
+	// silently leave a literal "{{FOO}}" in the parsed yaml. Match only
+	// the shape we actually emit ({{UPPER_CASE_IDENT}}) so prose like
+	// "{{VAR}} substitution" inside a YAML comment doesn't false-positive.
+	if loc := unrenderedPlaceholderRE.FindStringIndex(rendered); loc != nil {
+		t.Fatalf("loadFixtureTpl %s: unrendered placeholder %q", path, rendered[loc[0]:loc[1]])
+	}
+
+	dst := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dst, "task.yaml"), []byte(rendered), 0o644); err != nil {
+		t.Fatalf("loadFixtureTpl %s: write rendered yaml: %v", path, err)
+	}
+	for _, name := range []string{"task.ts", "task.js"} {
+		b, err := os.ReadFile(filepath.Join(src, name))
+		if err != nil {
+			continue
+		}
+		if err := os.WriteFile(filepath.Join(dst, name), b, 0o644); err != nil {
+			t.Fatalf("loadFixtureTpl %s: write %s: %v", path, name, err)
+		}
+	}
+
+	spec, err := task.LoadDirWithVars(dst, vars)
+	if err != nil {
+		t.Fatalf("loadFixtureTpl %s: LoadDirWithVars: %v", path, err)
+	}
+	// LoadDir derives spec.ID from filepath.Base(dst), which is the
+	// TempDir suffix — not the fixture's directory name. Restore from
+	// the source path so the ID is stable across runs.
+	spec.ID = filepath.Base(src)
+	if idOverride != "" {
+		spec.ID = idOverride
+	}
+	if err := spec.Validate(); err != nil {
+		t.Fatalf("loadFixtureTpl %s: re-validate after id reassignment: %v", path, err)
 	}
 	return spec
 }

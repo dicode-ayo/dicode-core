@@ -1,0 +1,29 @@
+apiVersion: dicode/v1
+kind: Task
+name: render
+runtime: deno
+trigger:
+  manual: true
+permissions:
+  env:
+    - TUNNEL_ID
+    - HOST
+  fs:
+    # DATADIR is substituted at fixture-load — the test's t.TempDir()
+    # where the rendered config file lands. permissions.fs.path IS in
+    # expandSpec's allowlist, but routing it through the same
+    # fixture-load substitution keeps the fixture single-sourced.
+    - path: "{{DATADIR}}"
+      permission: rw
+params:
+  template:
+    type: string
+    required: true
+  outpath:
+    type: string
+    required: true
+# run_result.enabled=false → suppress runs.return_value persistence
+# while keeping in-memory delivery for chain + WaitRun.
+run_result:
+  enabled: false
+timeout: 15s

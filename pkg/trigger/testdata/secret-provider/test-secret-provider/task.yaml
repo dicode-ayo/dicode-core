@@ -1,0 +1,21 @@
+apiVersion: dicode/v1
+kind: Task
+name: test-secret-provider
+runtime: deno
+trigger:
+  manual: true
+provider:
+  cache_ttl: 5m
+permissions:
+  env:
+    - UPSTREAM_URL
+  # {{MOCK_HOST}} is substituted at fixture load — permissions.net is
+  # outside expandSpec's allowlist, so the loader's own ${VAR} expansion
+  # wouldn't reach it.
+  net:
+    - "{{MOCK_HOST}}"
+params:
+  requests:
+    type: string
+    required: true
+timeout: 10s

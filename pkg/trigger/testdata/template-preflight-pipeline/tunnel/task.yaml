@@ -1,0 +1,35 @@
+apiVersion: dicode/v1
+kind: Task
+name: tunnel
+runtime: docker
+docker:
+  image: alpine
+  # ${DATADIR} is left for LoadDirWithVars' expandSpec to expand —
+  # docker.volumes IS in the loader's allowlist (and this assertion is
+  # exactly what PR #297 guarantees).
+  volumes:
+    - "${DATADIR}/cf-config.yml:/etc/cf/config.yml:ro"
+trigger:
+  daemon: true
+  # restart: never so daemon doesn't loop on shutdown during test cleanup.
+  restart: never
+  before:
+    - task: render
+      overrides:
+        params:
+          # The template body contains literal ${TUNNEL_ID} / ${HOST}
+          # placeholders for the renderer to substitute at runtime —
+          # those must survive both substitution passes. They do:
+          # loadFixtureTpl uses double-brace syntax, and expandSpec
+          # doesn't reach trigger.before overrides.
+          template: "tunnel: ${TUNNEL_ID}\nhost: ${HOST}\n"
+          # DATADIR is substituted at fixture-load by loadFixtureTpl,
+          # since trigger.before overrides are outside expandSpec's
+          # allowlist.
+          outpath: "{{DATADIR}}/cf-config.yml"
+        env:
+          - name: TUNNEL_ID
+            value: "abc-123"
+          - name: HOST
+            value: "api.example.com"
+        timeout: 12s

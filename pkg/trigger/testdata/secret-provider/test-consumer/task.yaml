@@ -1,0 +1,14 @@
+apiVersion: dicode/v1
+kind: Task
+name: test-consumer
+runtime: deno
+trigger:
+  manual: true
+permissions:
+  env:
+    - name: PG_URL
+      from: task:test-secret-provider
+    - name: REDIS_URL
+      from: task:test-secret-provider
+      optional: true
+timeout: 10s

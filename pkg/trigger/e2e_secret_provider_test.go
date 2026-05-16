@@ -6,8 +6,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -18,7 +16,6 @@ import (
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	denoruntime "github.com/dicode/dicode/pkg/runtime/deno"
 	"github.com/dicode/dicode/pkg/secrets"
-	"github.com/dicode/dicode/pkg/task"
 	"go.uber.org/zap/zaptest"
 )
 
@@ -84,58 +81,14 @@ func TestE2E_SecretProvider_FullChain(t *testing.T) {
 	denoRT.SetEngine(eng)
 
 	// ── Provider task — Doppler-shaped body, but reads UPSTREAM_URL from
-	// host env so the test can point it at the httptest server.
+	// host env so the test can point it at the httptest server. The host
+	// allowlisted in permissions.net is the only test-time-dynamic value
+	// (httptest assigns the port at server startup); inject via {{MOCK_HOST}}.
 	const providerID = "test-secret-provider"
-	providerDir := t.TempDir()
-	providerYAML := `apiVersion: dicode/v1
-kind: Task
-name: test-secret-provider
-runtime: deno
-trigger:
-  manual: true
-provider:
-  cache_ttl: 5m
-permissions:
-  env:
-    - UPSTREAM_URL
-  net:
-    - ` + tsURL.Host + `
-params:
-  requests:
-    type: string
-    required: true
-timeout: 10s
-`
-	providerTS := `
-interface Req { name: string; optional: boolean }
-interface Resp { secrets: Record<string, { computed: string }> }
-export default async function main({ params, output }: any) {
-  const reqs: Req[] = JSON.parse((await params.get("requests")) ?? "[]");
-  const url = Deno.env.get("UPSTREAM_URL");
-  if (!url) throw new Error("UPSTREAM_URL not set");
-  const resp = await fetch(url, { headers: { "Authorization": "Bearer test" } });
-  if (!resp.ok) throw new Error("upstream " + resp.status);
-  const body = (await resp.json()) as Resp;
-  const out: Record<string, string> = {};
-  for (const r of reqs) {
-    const v = body.secrets[r.name]?.computed;
-    if (typeof v === "string") out[r.name] = v;
-    else if (!r.optional) throw new Error("required secret " + r.name + " missing");
-  }
-  await output(out, { secret: true });
-}
-`
-	if err := os.WriteFile(filepath.Join(providerDir, "task.yaml"), []byte(providerYAML), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(providerDir, "task.ts"), []byte(providerTS), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	providerSpec, err := task.LoadDir(providerDir)
-	if err != nil {
-		t.Fatalf("load provider: %v", err)
-	}
-	providerSpec.ID = providerID
+	providerSpec := loadFixtureTpl(t,
+		"secret-provider/test-secret-provider",
+		map[string]string{"MOCK_HOST": tsURL.Host},
+		providerID)
 	if err := reg.Register(providerSpec); err != nil {
 		t.Fatalf("register provider: %v", err)
 	}
@@ -143,40 +96,7 @@ export default async function main({ params, output }: any) {
 	// ── Consumer task — pulls PG_URL and REDIS_URL from the provider task,
 	// then echoes them via output.text so the run record carries the
 	// resolved values back to the test for end-to-end assertion.
-	consumerDir := t.TempDir()
-	consumerYAML := `apiVersion: dicode/v1
-kind: Task
-name: test-consumer
-runtime: deno
-trigger:
-  manual: true
-permissions:
-  env:
-    - name: PG_URL
-      from: task:test-secret-provider
-    - name: REDIS_URL
-      from: task:test-secret-provider
-      optional: true
-timeout: 10s
-`
-	consumerTS := `
-export default async function main({ output }: any) {
-  const pg = Deno.env.get("PG_URL") ?? "";
-  const r  = Deno.env.get("REDIS_URL") ?? "";
-  await output.text("PG_URL=" + pg + " REDIS_URL=" + r);
-}
-`
-	if err := os.WriteFile(filepath.Join(consumerDir, "task.yaml"), []byte(consumerYAML), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(consumerDir, "task.ts"), []byte(consumerTS), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	consumerSpec, err := task.LoadDir(consumerDir)
-	if err != nil {
-		t.Fatalf("load consumer: %v", err)
-	}
-	consumerSpec.ID = "test-consumer"
+	consumerSpec := loadFixture(t, "secret-provider/test-consumer", "")
 	if err := reg.Register(consumerSpec); err != nil {
 		t.Fatalf("register consumer: %v", err)
 	}
