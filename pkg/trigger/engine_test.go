@@ -63,6 +63,33 @@ func writeTask(t *testing.T, dir, id, script string, trigger task.TriggerConfig)
 	return spec
 }
 
+// loadFixture loads a checked-in task fixture from
+// pkg/trigger/testdata/<path>/. Pass idOverride for buildin/* tasks whose
+// IDs contain `/` (which can't appear in a directory name) — the fixture
+// directory uses a `-` substitute and the test patches spec.ID after load.
+//
+// e2e tests prefer this over writeTask because it exercises the real
+// task.LoadDir path (yaml parse + validate + expandSpec) instead of
+// hand-constructing a Spec struct in Go.
+//
+// Resolves to an absolute path so spec.TaskDir survives any chdir done
+// by the runtime when launching the deno subprocess.
+func loadFixture(t *testing.T, path string, idOverride ...string) *task.Spec {
+	t.Helper()
+	abs, err := filepath.Abs(filepath.Join("testdata", path))
+	if err != nil {
+		t.Fatalf("loadFixture abs %s: %v", path, err)
+	}
+	spec, err := task.LoadDir(abs)
+	if err != nil {
+		t.Fatalf("loadFixture %s: %v", path, err)
+	}
+	if len(idOverride) > 0 {
+		spec.ID = idOverride[0]
+	}
+	return spec
+}
+
 func TestEngine_FireManual(t *testing.T) {
 	dir := t.TempDir()
 	e := newTestEnv(t)

@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/dicode/dicode/pkg/registry"
-	"github.com/dicode/dicode/pkg/task"
 )
 
 // TestEngine_RunTask_ParentLinkage_E2E covers the third dispatch source from
@@ -19,30 +18,19 @@ import (
 // EngineRunner and only verifies the IPC handler forwards s.runID; this
 // test verifies fireAsync actually persists the parent ID end-to-end.
 func TestEngine_RunTask_ParentLinkage_E2E(t *testing.T) {
-	dir := t.TempDir()
 	e := newTestEnv(t)
 	// Wire the engine into the Deno runtime so dicode.run_task works.
 	e.denoRT.SetEngine(e.engine)
 
 	// Child task: trivial, returns its own run id so the parent can record it.
-	child := writeTask(t, dir, "rg-child",
-		`export default async function main({ dicode }) {
-			await dicode.set_group("conversation-7")
-			return dicode.run_id
-		}`,
-		task.TriggerConfig{Manual: true})
+	child := loadFixture(t, "run-task-parent-linkage/rg-child")
 	_ = e.reg.Register(child)
 	e.engine.Register(child)
 
 	// Parent task: uses dicode.run_task to fire the child synchronously,
-	// then returns the child's run id from the call result.
-	parent := writeTask(t, dir, "rg-parent",
-		`export default async function main({ dicode }) {
-			const result = await dicode.run_task("rg-child")
-			return result?.runID ?? null
-		}`,
-		task.TriggerConfig{Manual: true})
-	parent.Permissions.Dicode = &task.DicodePermissions{Tasks: []string{"rg-child"}}
+	// then returns the child's run id from the call result. The
+	// permissions.dicode.tasks allowlist lives in the fixture's task.yaml.
+	parent := loadFixture(t, "run-task-parent-linkage/rg-parent")
 	_ = e.reg.Register(parent)
 	e.engine.Register(parent)
 

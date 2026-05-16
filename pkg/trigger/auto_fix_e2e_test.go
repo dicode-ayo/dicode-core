@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/dicode/dicode/pkg/registry"
-	"github.com/dicode/dicode/pkg/task"
 )
 
 // TestAutoFix_E2E_HappyPath wires the engine, registry, input store, and chain
@@ -52,24 +51,17 @@ func TestAutoFix_E2E_HappyPath(t *testing.T) {
 	e.engine.SetInputStore(is)
 	e.denoRT.SetInputStore(is)
 
-	// Register a controlled-failure task with on_failure_chain pointing at
-	// buildin/auto-fix.
-	failing := writeTask(t, dir, "process-payment",
-		`export default async () => { throw new Error("boom") }`,
-		task.TriggerConfig{Manual: true})
-	failing.OnFailureChain = &task.OnFailureChainSpec{
-		Task:   "buildin/auto-fix",
-		Params: map[string]any{"mode": "review"},
-	}
+	// Controlled-failure task; on_failure_chain wiring lives in the fixture's
+	// task.yaml so this test path exercises the real loader + chain parser.
+	failing := loadFixture(t, "auto-fix-happypath/process-payment")
 	if err := e.reg.Register(failing); err != nil {
 		t.Fatalf("register failing task: %v", err)
 	}
 
-	// Register a stub buildin/auto-fix that returns a fake pr_url immediately.
-	// A full agent loop is exercised by manual smoke testing, not by this unit test.
-	autoFix := writeTask(t, dir, "buildin/auto-fix",
-		`export default async () => { return { ok: true, pr_url: "https://github.com/example/repo/pull/1" } }`,
-		task.TriggerConfig{Manual: true})
+	// Stub buildin/auto-fix that returns a fake pr_url immediately. The on-disk
+	// fixture dir uses a `-` substitute since `/` is invalid in a path; the
+	// id override restores the real task ID so the chain dispatcher resolves it.
+	autoFix := loadFixture(t, "auto-fix-happypath/buildin-auto-fix", "buildin/auto-fix")
 	if err := e.reg.Register(autoFix); err != nil {
 		t.Fatalf("register auto-fix stub: %v", err)
 	}

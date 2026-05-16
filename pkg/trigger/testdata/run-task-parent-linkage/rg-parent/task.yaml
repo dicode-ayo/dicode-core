@@ -1,0 +1,11 @@
+apiVersion: dicode/v1
+kind: Task
+name: rg-parent
+runtime: deno
+trigger:
+  manual: true
+permissions:
+  dicode:
+    tasks:
+      - rg-child
+timeout: 60s

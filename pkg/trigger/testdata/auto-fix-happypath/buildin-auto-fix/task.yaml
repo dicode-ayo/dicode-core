@@ -1,0 +1,7 @@
+apiVersion: dicode/v1
+kind: Task
+name: buildin/auto-fix
+runtime: deno
+trigger:
+  manual: true
+timeout: 30s

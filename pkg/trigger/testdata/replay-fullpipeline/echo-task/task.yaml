@@ -1,0 +1,7 @@
+apiVersion: dicode/v1
+kind: Task
+name: echo-task
+runtime: deno
+trigger:
+  manual: true
+timeout: 30s
