@@ -69,8 +69,11 @@ permissions:
 | `trigger.chain` | object | | Chain trigger (see below) |
 | `trigger.chain.from` | string | | Task ID to listen for |
 | `trigger.chain.on` | string | | `success` (default), `failure`, `always` |
+| `trigger.chain.params` | map | | User-defined keys merged into the downstream `input` map alongside engine-reserved keys (`taskID`, `runID`, `status`, `output`, `_chain_depth`). When omitted, `input` is the upstream's raw output unchanged. See [chain params and per-edge overrides](#chain-params-and-per-edge-overrides). |
+| `trigger.chain.overrides` | object | | Per-edge patch applied to a deep copy of the downstream's spec at firing time; manual fires of the same downstream are unaffected. See [per-edge overrides](#chain-params-and-per-edge-overrides). |
 | `trigger.daemon` | bool | | Start on app start, restart on exit |
 | `trigger.restart` | string | | daemon only: `always` (default), `on-failure`, `never` |
+| `trigger.before` | list | | daemon only: prereq task IDs (bare-string or `{task, overrides}` mapping) that must succeed before the daemon starts. See [`trigger.before` — daemon preflight](#daemon-preflight-via-triggerbefore). |
 | `permissions` | object | | Explicit access grants — nothing is implicit |
 | `permissions.env` | list | | Env vars the script may read (see below) |
 | `permissions.fs` | list | | Filesystem access declarations (Deno only) |
@@ -161,6 +164,124 @@ trigger:
 ```
 
 The completing task's return value is available as the `input` global.
+
+### Chain params and per-edge overrides
+
+By default, `input` in the downstream task is the upstream's raw return
+value (a string, map, whatever the upstream returned). Two optional
+fields let a chain edge enrich or specialize that dispatch without
+modifying the upstream or making the downstream daemon-aware.
+
+**`trigger.chain.params`** — operator-defined keys merged into the
+downstream's `input` map alongside engine-reserved keys. The upstream's
+return value lands under `input.output`; the rest of the user-defined
+keys appear at top level.
+
+```yaml
+# task-b/task.yaml — fires when task-a succeeds
+trigger:
+  chain:
+    from: task-a
+    params:
+      destination: "#alerts"
+      verbose: true
+```
+
+Inside `task-b`, the shape is:
+
+```typescript
+input.destination   // "#alerts"
+input.verbose       // true
+input.output        // task-a's return value
+input.taskID        // "task-a"  (engine-reserved)
+input.runID         // upstream run ID
+input.status        // "success"
+input._chain_depth  // 0 on success chains
+```
+
+Reserved keys (`taskID`, `runID`, `status`, `output`, `_chain_depth`)
+are rejected at config-load if present in `params`. When `params` is
+empty (the default), `input` stays as the upstream's raw value — no
+wrapping — so existing chains keep working unchanged.
+
+The same params shape applies symmetrically to
+`on_failure_chain.params` (the failure-chain analogue).
+
+**`trigger.chain.overrides`** — a per-firing patch applied to a deep
+copy of the downstream's spec right before dispatch via this edge.
+Manual / cron / direct-API fires of the same downstream task are
+unaffected.
+
+```yaml
+trigger:
+  chain:
+    from: task-a
+    overrides:
+      timeout: 5m
+      env:
+        - name: MODE
+          value: chain
+```
+
+Per-edge overrides accept a conservative subset of the global
+taskset-entry override surface:
+
+| Field | Allowed at per-edge site? |
+| --- | --- |
+| `params`, `env`, `net`, `fs`, `timeout`, `notify`, `dicode`, `runtime` | yes |
+| `trigger`, `enabled`, `name`, `description`, `retry`, `defaults`, `entries` | no (rejected at load) |
+
+The `trigger` rejection is deliberate — per-edge dispatch invokes the
+downstream directly and ignores any rewired trigger config on the merged
+spec, so silently accepting it would mislead operators.
+
+### Daemon preflight via trigger.before
+
+Only valid on daemon tasks. Lists one-shot prereq tasks that must run
+to `status=success` before the daemon container starts. The engine
+re-fires every prereq on every preflight attempt — no
+"already-satisfied" short-circuit — because the point of preflight is
+to refresh ephemeral state (rendered configs, freshly rotated
+credentials) right before the daemon starts.
+
+Each entry can be either a bare task-ID string (legacy form) or a
+mapping with `task:` plus optional `overrides:`:
+
+```yaml
+trigger:
+  daemon: true
+  restart: always
+  before:
+    # bare-ID form
+    - fetch-credentials
+
+    # mapping form with per-edge overrides
+    - task: render-config
+      overrides:
+        timeout: 30s
+        env:
+          - name: TUNNEL_ID
+            from: task:doppler
+```
+
+The two forms can be mixed within the same list. Per-edge overrides on
+a `before[]` entry use the same allowlist as `trigger.chain.overrides`
+(see table above).
+
+**Restart-on-prereq-rerun.** When any prereq listed in a daemon's
+`trigger.before` finishes with `status=success` later — for example, an
+operator runs `dicode tasks run render-config` to apply a config change
+— the engine queues a daemon restart. Restarts are coalesced per
+daemon (at most one in flight) so a flurry of prereq completions
+produces a single restart, not a thrash loop.
+
+**Cross-spec validation.** At registration time the engine rejects
+references to unknown tasks and to other daemons — only one-shot tasks
+can be preflights. Self-references are rejected at config-load.
+
+For an end-to-end example combining daemon preflight, per-edge
+overrides, `${DATADIR}` volumes, and `run_result.enabled: false`, see
+[Cloudflare Tunnel worked example](../examples/cloudflare-tunnel.md).
 
 ---
 
