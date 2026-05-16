@@ -1189,32 +1189,25 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 					zap.String("run", runID),
 					zap.Int("depth", nextDepth),
 				)
-				// Build input. Reserved keys (taskID, runID, status, output,
-				// _chain_depth) are populated by the engine and are NOT
-				// user-overridable. Config-load validation (#236 Task 11)
-				// rejects any chainSpec.Params containing these keys, so we
-				// can safely overlay user params first and then stamp the
-				// reserved keys — collisions cannot reach here in a
-				// well-validated config.
-				input := map[string]any{}
-				for k, v := range chainSpec.Params {
-					input[k] = v
-				}
+				// Build input via the shared buildChainPayload kernel so the
+				// failure-path and success-path stamps stay in lockstep.
+				// Reserved keys (taskID, runID, status, output, _chain_depth)
+				// are populated by the engine and are NOT user-overridable;
+				// config-load validation (#236 Task 11) rejects any
+				// chainSpec.Params containing these keys, so collisions
+				// cannot reach here in a well-validated config.
+				input := buildChainPayload(chainSpec.Params, completedTaskID, runID, runStatus, output, nextDepth)
 				// Auto-fix safety default: when the chain target is the
 				// buildin auto-fix preset, force mode=review unless the
 				// operator explicitly set it. Autonomous-by-default would
 				// be a foot-gun (the agent could push directly to main
-				// without human review).
+				// without human review). Stamped AFTER the kernel so a
+				// chainSpec.Params{mode:"yolo"} entry still wins.
 				if targetID == "buildin/auto-fix" {
 					if _, ok := input["mode"]; !ok {
 						input["mode"] = "review"
 					}
 				}
-				input["taskID"] = completedTaskID
-				input["runID"] = runID
-				input["status"] = runStatus
-				input["output"] = output
-				input["_chain_depth"] = nextDepth
 
 				// Synchronously invoke fireAsync — it returns once startRun
 				// completes, then continues the run on its own goroutine.
@@ -1272,6 +1265,19 @@ func buildChainInput(userParams map[string]any, completedTaskID, runID, status s
 	if len(userParams) == 0 {
 		return output
 	}
+	return buildChainPayload(userParams, completedTaskID, runID, status, output, 0)
+}
+
+// buildChainPayload is the shared kernel that produces the input map fed to
+// any chained task — success-path (trigger.chain) AND failure-path
+// (on_failure_chain). Both sites used to inline the same five engine-key
+// stamps; the unification eliminates that drift (survey §5.4 / 6.2.3).
+//
+// Reserved keys (taskID, runID, status, output, _chain_depth) are always
+// stamped *after* the userParams overlay, so a (well-validated) user map
+// cannot collide. Config-load validation enforces the reserved-key
+// invariant at three sites; this helper is the runtime backstop.
+func buildChainPayload(userParams map[string]any, completedTaskID, runID, status string, output any, depth int) map[string]any {
 	m := make(map[string]any, len(userParams)+5)
 	for k, v := range userParams {
 		m[k] = v
@@ -1280,7 +1286,7 @@ func buildChainInput(userParams map[string]any, completedTaskID, runID, status s
 	m["runID"] = runID
 	m["status"] = status
 	m["output"] = output
-	m["_chain_depth"] = 0
+	m["_chain_depth"] = depth
 	return m
 }
 

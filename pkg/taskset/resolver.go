@@ -168,6 +168,14 @@ func (r *Resolver) resolveBody(
 			resolved.ID = fullID
 			resolved.TaskDir = filepath.Dir(tsPath)
 			resolved.Enabled = enabled
+			// Re-validate after the override merge so a bad override
+			// surfaces here (with the operator-relevant taskset path)
+			// rather than later at engine.Register (survey §5.1).
+			if err := resolved.Validate(); err != nil {
+				r.log.Warn("taskset: merged spec failed validate after override apply; skipping",
+					zap.String("entry", fullID), zap.Error(err))
+				continue
+			}
 			results = append(results, &ResolvedTask{
 				Spec:    resolved,
 				ID:      fullID,
@@ -229,6 +237,14 @@ func (r *Resolver) resolveBody(
 			resolved := applyOverrides(spec, layers...)
 			resolved.ID = fullID
 			resolved.Enabled = enabled
+			// Re-validate after the override merge so a bad override
+			// surfaces here (with the operator-relevant taskset path)
+			// rather than later at engine.Register (survey §5.1).
+			if err := resolved.Validate(); err != nil {
+				r.log.Warn("taskset: merged spec failed validate after override apply; skipping",
+					zap.String("entry", fullID), zap.Error(err))
+				continue
+			}
 			results = append(results, &ResolvedTask{
 				Spec:    resolved,
 				ID:      fullID,
@@ -414,12 +430,17 @@ func joinNamespace(ns, key string) string {
 
 // mergeOverrides merges b on top of a (b wins on conflict).
 // Used to combine a parent entry patch with an entry's own overrides.
+//
+// Reserved chain-param keys (task.ReservedChainParamKey) are stripped from
+// the merged Params list — they're rejected at config-load by
+// validatePerEdgeOverrides / OnFailureChainSpec.Validate, so a well-formed
+// caller never reaches this branch; the strip is defensive (survey §5.2).
 func mergeOverrides(a, b *Overrides) *Overrides {
 	if a == nil {
-		return b
+		return stripReservedParamKeys(b)
 	}
 	if b == nil {
-		return a
+		return stripReservedParamKeys(a)
 	}
 	out := *b // copy b; fill gaps from a
 
@@ -464,7 +485,43 @@ func mergeOverrides(a, b *Overrides) *Overrides {
 		}
 		out.Entries = entries
 	}
+	// Drop reserved chain-param keys (defensive — config-load validation
+	// rejects them upstream).
+	out.Params = filterReservedParamKeys(out.Params)
 	return &out
+}
+
+// stripReservedParamKeys returns o with any reserved-key Params entries
+// removed. Returns o unchanged (same pointer) when no entries are
+// stripped, to keep the nil-input fast paths in mergeOverrides cheap.
+func stripReservedParamKeys(o *Overrides) *Overrides {
+	if o == nil || len(o.Params) == 0 {
+		return o
+	}
+	filtered := filterReservedParamKeys(o.Params)
+	if len(filtered) == len(o.Params) {
+		return o
+	}
+	out := *o
+	out.Params = filtered
+	return &out
+}
+
+// filterReservedParamKeys returns ps with any reserved-key entries removed.
+// Allocates a new slice only when at least one entry is dropped.
+func filterReservedParamKeys(ps []ParamOverride) []ParamOverride {
+	for _, p := range ps {
+		if task.IsReservedChainParamKey(p.Name) {
+			out := make([]ParamOverride, 0, len(ps))
+			for _, p := range ps {
+				if !task.IsReservedChainParamKey(p.Name) {
+					out = append(out, p)
+				}
+			}
+			return out
+		}
+	}
+	return ps
 }
 
 // mergeParamOverrides merges src into dst by name (src wins on conflict).
