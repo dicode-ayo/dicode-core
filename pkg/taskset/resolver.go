@@ -168,6 +168,14 @@ func (r *Resolver) resolveBody(
 			resolved.ID = fullID
 			resolved.TaskDir = filepath.Dir(tsPath)
 			resolved.Enabled = enabled
+			// Re-validate after the override merge so a bad override
+			// surfaces here (with the operator-relevant taskset path)
+			// rather than later at engine.Register (survey §5.1).
+			if err := resolved.Validate(); err != nil {
+				r.log.Warn("taskset: merged spec failed validate after override apply; skipping",
+					zap.String("entry", fullID), zap.Error(err))
+				continue
+			}
 			results = append(results, &ResolvedTask{
 				Spec:    resolved,
 				ID:      fullID,
@@ -229,6 +237,14 @@ func (r *Resolver) resolveBody(
 			resolved := applyOverrides(spec, layers...)
 			resolved.ID = fullID
 			resolved.Enabled = enabled
+			// Re-validate after the override merge so a bad override
+			// surfaces here (with the operator-relevant taskset path)
+			// rather than later at engine.Register (survey §5.1).
+			if err := resolved.Validate(); err != nil {
+				r.log.Warn("taskset: merged spec failed validate after override apply; skipping",
+					zap.String("entry", fullID), zap.Error(err))
+				continue
+			}
 			results = append(results, &ResolvedTask{
 				Spec:    resolved,
 				ID:      fullID,
