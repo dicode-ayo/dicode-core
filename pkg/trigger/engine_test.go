@@ -71,9 +71,9 @@ func writeTask(t *testing.T, dir, id, script string, trigger task.TriggerConfig)
 // Pass idOverride="" for the normal case. Pass a non-empty idOverride for
 // buildin/* tasks: filesystem paths can't contain `/`, so the fixture
 // directory uses a substitute like `buildin-auto-fix/` and the override
-// restores the real ID. The override is followed by a re-Validate so
-// cross-task ID checks (trigger.chain.from, on_failure_chain.task, …) see
-// the post-override ID rather than the directory basename.
+// restores the real ID. The override is followed by a re-Validate so the
+// loader's self-reference checks (trigger.before[].task at spec.go:707)
+// run against the post-override ID, not the directory basename.
 //
 // e2e tests prefer this over writeTask because it exercises the real
 // task.LoadDir path (yaml parse + validate + expandSpec) instead of
