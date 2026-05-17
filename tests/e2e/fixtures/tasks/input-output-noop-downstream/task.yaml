@@ -1,0 +1,24 @@
+apiVersion: dicode/v1
+kind: Task
+name: input-output-noop-downstream
+description: |
+  Test-only chain consumer used to verify a NEGATIVE case: when the
+  upstream returns a non-string, this task should NOT fire (the chain
+  dispatch short-circuits at the ${input.output} resolver).
+
+  If it does fire — i.e. the resolver regression slips past — this task
+  writes "ran" to ${MARKER_PATH} so pkg/trigger/e2e_input_output_test.go
+  can detect the contract violation via a filesystem assertion (belt +
+  braces alongside the registry ListRuns check).
+runtime: deno
+trigger:
+  chain:
+    from: input-output-non-string-upstream
+    on: success
+permissions:
+  env:
+    - MARKER_PATH
+  fs:
+    - path: "/tmp"
+      permission: rw
+timeout: 10s

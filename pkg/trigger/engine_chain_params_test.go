@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dicode/dicode/pkg/registry"
 	"github.com/dicode/dicode/pkg/task"
 )
 
@@ -279,5 +280,234 @@ func TestFireChain_SetsParentRunIDOnChainedRun(t *testing.T) {
 	// Assert that ParentRunID was threaded through from the failing run.
 	if chainedRun.ParentRunID != failedRunID {
 		t.Errorf("ParentRunID = %q, want %q", chainedRun.ParentRunID, failedRunID)
+	}
+}
+
+// TestChainDispatch_ResolvesInputOutput verifies the dispatch-time
+// substitution of ${input.output} in trigger.chain.params with the
+// upstream's string return value.
+func TestChainDispatch_ResolvesInputOutput(t *testing.T) {
+	dir := t.TempDir()
+	e := newTestEnv(t)
+
+	// Downstream task: declares trigger.chain on "upstream-render" with a
+	// param whose value is the literal ${input.output} token. Echoes the
+	// full input map back so we can inspect the resolved param.
+	downstream := writeTask(t, dir, "downstream-interp",
+		`export default async function main({ input }) { return input }`,
+		task.TriggerConfig{
+			Chain: &task.ChainTrigger{
+				From:   "upstream-render",
+				On:     "success",
+				Params: map[string]any{"content": "${input.output}", "path": "/tmp/foo"},
+			},
+		})
+	_ = e.reg.Register(downstream)
+
+	// Upstream returns a string; the engine must substitute that into the
+	// downstream's `content` param before dispatching.
+	upstream := writeTask(t, dir, "upstream-render",
+		`export default async function main() { return "rendered-string" }`,
+		task.TriggerConfig{Manual: true})
+	_ = e.reg.Register(upstream)
+
+	upstreamRunID, err := e.engine.FireManual(context.Background(), "upstream-render", nil)
+	if err != nil {
+		t.Fatalf("FireManual: %v", err)
+	}
+	primary := waitForTerminal(t, e.engine, upstreamRunID, 30*time.Second)
+	if primary.Status != "success" {
+		t.Fatalf("upstream status = %q, want success", primary.Status)
+	}
+
+	got := waitForRunOfTask(t, e.engine, "downstream-interp", 30*time.Second)
+	if got == nil {
+		t.Fatal("downstream-interp was not fired within the timeout")
+	}
+	if got.Status != "success" {
+		t.Errorf("downstream status = %q, want success", got.Status)
+	}
+
+	returnValue := pollReturnValue(t, e.engine, got.ID, 5*time.Second)
+	var input map[string]any
+	if err := json.Unmarshal([]byte(returnValue), &input); err != nil {
+		t.Fatalf("unmarshal return value %q: %v", returnValue, err)
+	}
+
+	// content should have been substituted; path should be untouched.
+	if input["content"] != "rendered-string" {
+		t.Errorf("content = %v, want rendered-string (token was not resolved)", input["content"])
+	}
+	if input["path"] != "/tmp/foo" {
+		t.Errorf("path = %v, want /tmp/foo", input["path"])
+	}
+}
+
+// strPtr is a tiny helper for the TestStringRet table — Go has no literal
+// syntax for "address of a string literal" so the typed-nil and
+// pointer-to-string cases need a helper to construct the *string.
+func strPtr(s string) *string { return &s }
+
+// TestOnFailureChainDispatch_ResolvesInputOutput drives FireChain
+// directly with a controlled string `output` to verify that the
+// failure-chain dispatch resolves ${input.output} in
+// on_failure_chain.params. Mirrors the success-chain interpolation
+// test (TestChainDispatch_ResolvesInputOutput) — both chain edges
+// must support the same contract; a literal token reaching the
+// downstream is a footgun regardless of which path triggered.
+//
+// We invoke FireChain directly (rather than driving a full deno-runtime
+// run through a thrown error) because thrown-Error tasks produce nil
+// ChainInput in practice — the upstream never reaches the `/return`
+// channel that populates ReturnValue. Calling FireChain with a chosen
+// `output` is the cleanest way to pin the resolver wiring.
+func TestOnFailureChainDispatch_ResolvesInputOutput(t *testing.T) {
+	dir := t.TempDir()
+	e := newTestEnv(t)
+
+	// Failure-chain target: echoes the full input map so we can inspect
+	// the resolved param.
+	fallback := writeTask(t, dir, "fallback-interp",
+		`export default async function main({ input }) { return input }`,
+		task.TriggerConfig{Manual: true})
+	_ = e.reg.Register(fallback)
+
+	// Source of the failure — only its on_failure_chain field matters
+	// for this test; we don't actually run it.
+	source := writeTask(t, dir, "source-interp",
+		`export default async function main() { return "unused" }`,
+		task.TriggerConfig{Manual: true})
+	source.OnFailureChain = &task.OnFailureChainSpec{
+		Task:   "fallback-interp",
+		Params: map[string]any{"content": "${input.output}", "path": "/tmp/foo"},
+	}
+	_ = e.reg.Register(source)
+
+	// Synthesise a parent run row so FireChain has a real runID to
+	// reference (runTriggerSource lookup tolerates a missing entry, so
+	// we don't need to populate it; the run row itself just needs to
+	// exist for the registry to satisfy SetRunGroup / parent lookups
+	// downstream).
+	parentRunID, err := e.reg.StartRunWithID(
+		context.Background(), "parent-run", "source-interp", "", string(registry.TriggerManual),
+	)
+	if err != nil {
+		t.Fatalf("seed parent run: %v", err)
+	}
+	if err := e.reg.FinishRun(context.Background(), parentRunID, registry.StatusFailure); err != nil {
+		t.Fatalf("finish parent run: %v", err)
+	}
+
+	// Drive FireChain with a string output. The resolver should
+	// substitute that string into chainSpec.Params["content"].
+	e.engine.FireChain(context.Background(), "source-interp", parentRunID, registry.StatusFailure, "rendered-error-output")
+
+	got := waitForRunOfTask(t, e.engine, "fallback-interp", 30*time.Second)
+	if got == nil {
+		t.Fatal("fallback-interp was not fired within the timeout")
+	}
+	if got.Status != "success" {
+		t.Errorf("fallback status = %q, want success", got.Status)
+	}
+
+	returnValue := pollReturnValue(t, e.engine, got.ID, 5*time.Second)
+	var input map[string]any
+	if err := json.Unmarshal([]byte(returnValue), &input); err != nil {
+		t.Fatalf("unmarshal return value %q: %v", returnValue, err)
+	}
+
+	// content should have been substituted with the upstream's string
+	// return; path should be untouched. The exact contract that PR #310
+	// is shipping for the on_failure_chain edge.
+	if input["content"] != "rendered-error-output" {
+		t.Errorf("content = %v, want rendered-error-output (token was not resolved on the failure-chain edge)", input["content"])
+	}
+	if input["path"] != "/tmp/foo" {
+		t.Errorf("path = %v, want /tmp/foo", input["path"])
+	}
+}
+
+// TestOnFailureChainDispatch_NonStringUpstreamSkips verifies that an
+// upstream whose return value is non-string (e.g. a map, a thrown
+// non-string value, or nil — which is what real JS-throw failures
+// produce in practice) causes the failure-chain dispatch to be
+// skipped: the literal ${input.output} token must NOT pass through
+// unresolved.
+//
+// PR2's stringRet() turns non-string returns into "", which propagates
+// as ErrInputUnavailable through ResolveInputOutputMap, which causes
+// the dispatch to log + return without firing the downstream.
+func TestOnFailureChainDispatch_NonStringUpstreamSkips(t *testing.T) {
+	dir := t.TempDir()
+	e := newTestEnv(t)
+
+	// Failure-chain target: would echo the input back if it ran.
+	fallback := writeTask(t, dir, "fallback-skip",
+		`export default async function main({ input }) { return input }`,
+		task.TriggerConfig{Manual: true})
+	_ = e.reg.Register(fallback)
+
+	source := writeTask(t, dir, "source-skip",
+		`export default async function main() { return "unused" }`,
+		task.TriggerConfig{Manual: true})
+	source.OnFailureChain = &task.OnFailureChainSpec{
+		Task:   "fallback-skip",
+		Params: map[string]any{"content": "${input.output}"},
+	}
+	_ = e.reg.Register(source)
+
+	parentRunID, err := e.reg.StartRunWithID(
+		context.Background(), "parent-skip-run", "source-skip", "", string(registry.TriggerManual),
+	)
+	if err != nil {
+		t.Fatalf("seed parent run: %v", err)
+	}
+	if err := e.reg.FinishRun(context.Background(), parentRunID, registry.StatusFailure); err != nil {
+		t.Fatalf("finish parent run: %v", err)
+	}
+
+	// Non-string output: a map. stringRet returns "", resolver fails,
+	// dispatch must skip.
+	e.engine.FireChain(context.Background(), "source-skip", parentRunID, registry.StatusFailure,
+		map[string]any{"nested": "object"})
+
+	// Give the chain dispatcher a window to (incorrectly) fire.
+	time.Sleep(2 * time.Second)
+	runs, err := e.engine.registry.ListRuns(context.Background(), "fallback-skip", 5)
+	if err != nil {
+		t.Fatalf("ListRuns: %v", err)
+	}
+	if len(runs) > 0 {
+		t.Errorf("fallback-skip should not have run when ${input.output} cannot resolve; got %d runs", len(runs))
+	}
+}
+
+// TestStringRet pins the helper's contract: only direct-string returns
+// flow through; everything else (maps, slices, numbers, nil, typed-nil
+// interfaces, pointers-to-string) becomes "". The empty string then
+// propagates as ErrInputUnavailable through the resolver, which is the
+// loud-failure path we want for non-string upstreams.
+func TestStringRet(t *testing.T) {
+	var typedNilString *string // (*string)(nil); interface-wraps to a typed-nil
+	cases := []struct {
+		name string
+		in   interface{}
+		want string
+	}{
+		{"direct string", "hello", "hello"},
+		{"empty string", "", ""},
+		{"map", map[string]interface{}{"x": 1}, ""},
+		{"slice", []interface{}{1, 2}, ""},
+		{"number", 42, ""},
+		{"nil", nil, ""},
+		{"typed nil interface", typedNilString, ""},
+		{"pointer to string", strPtr("hello"), ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := stringRet(c.in); got != c.want {
+				t.Errorf("stringRet(%v) = %q; want %q", c.in, got, c.want)
+			}
+		})
 	}
 }

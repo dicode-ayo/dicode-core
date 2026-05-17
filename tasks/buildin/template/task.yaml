@@ -53,7 +53,3 @@ permissions:
   env: []
 
 timeout: 30s
-
-notify:
-  on_success: false
-  on_failure: true
