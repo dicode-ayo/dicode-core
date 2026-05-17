@@ -21,17 +21,16 @@ package trigger
 //     actually being visible to a task body, not just persisted in
 //     `runs.return_value`.
 //
-//  2. The UPSTREAM uses `run_result.enabled: false` so the resolved
-//     value flows through the in-memory runReturnValue cache that
-//     `buildin/template` and `buildin/write-local` rely on — the path
-//     PR #310 was designed for. The mock-driven tests use the
-//     persisted-return path; this one pins the in-memory path.
+//  2. The UPSTREAM in the happy-path + embedded-token cases is the
+//     ACTUAL `tasks/buildin/template/` task loaded from disk — the same
+//     spec/code that ships in dicode-core. That exercises the real
+//     library task's `run_result.enabled: false` + in-memory cache
+//     return path PR #310 was designed for, and provides regression
+//     coverage if buildin/template's contract drifts.
 //
-//  3. The non-string-upstream short-circuit is verified with a REAL
-//     Deno task returning a JSON object (rather than FireChain being
-//     driven directly with a Go map). This rules out a bug in the
-//     return-value JSON marshalling pipeline that would only surface
-//     end-to-end.
+//  3. The non-string-upstream short-circuit is verified with an INLINE
+//     Deno task returning a JSON object — buildin/template returns only
+//     strings, so the negative case needs a separate fixture.
 //
 // PR #3 in the same epic covers `${input.output}` on `trigger.before`
 // overrides; that's out of scope here. We only cover the chain edge.
@@ -43,6 +42,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"testing"
 	"time"
 
@@ -88,19 +88,77 @@ func writeMarkerTask(t *testing.T, dir, id, body, markerDir string, trigger task
 	return spec
 }
 
+// buildinTemplateDir returns the absolute path to the on-disk
+// `tasks/buildin/template/` task that ships with dicode-core. Anchored
+// via runtime.Caller so it works regardless of the test runner's CWD
+// (go test sets CWD to the package dir, but worktree-relative anchors
+// drift if the layout ever changes). The walk-up is fixed: this file
+// lives at `pkg/trigger/`, two levels under the repo root, so the
+// buildin tasks dir is at `../../tasks/buildin/template`.
+func buildinTemplateDir(t *testing.T) string {
+	t.Helper()
+	_, thisFile, _, ok := goruntime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller(0) failed; cannot anchor buildin/template path")
+	}
+	// thisFile is .../pkg/trigger/e2e_input_output_test.go
+	// → repo root is two levels up from the file's directory.
+	pkgDir := filepath.Dir(thisFile)               // .../pkg/trigger
+	repoRoot := filepath.Dir(filepath.Dir(pkgDir)) // .../
+	dir := filepath.Join(repoRoot, "tasks", "buildin", "template")
+	if _, err := os.Stat(filepath.Join(dir, "task.yaml")); err != nil {
+		t.Fatalf("buildin/template task.yaml not found at %s: %v", dir, err)
+	}
+	return dir
+}
+
+// loadBuildinTemplateAs loads the real `tasks/buildin/template/` task
+// from disk and rebinds its ID + Name so the test can wire a downstream
+// chain trigger that references this upstream by a stable, test-scoped
+// name (LoadDir defaults the ID to filepath.Base of the dir, which
+// would collide if the same suite registered multiple buildin/template
+// instances across subtests).
+//
+// envAllow appends entries to permissions.env so the template body's
+// `${VAR}` placeholders can be resolved without enabling unrestricted
+// --allow-env. Each entry's Value is taken from the current process
+// env at registration time — t.Setenv() in the caller is the
+// recommended source.
+//
+// We re-validate after rebinding to surface any spec-level regressions
+// that would otherwise only fire once the engine dispatched the task.
+func loadBuildinTemplateAs(t *testing.T, id string, envAllow []task.EnvEntry) *task.Spec {
+	t.Helper()
+	spec, err := task.LoadDir(buildinTemplateDir(t))
+	if err != nil {
+		t.Fatalf("LoadDir buildin/template: %v", err)
+	}
+	spec.ID = id
+	spec.Name = id
+	if len(envAllow) > 0 {
+		spec.Permissions.Env = append(spec.Permissions.Env, envAllow...)
+	}
+	if err := spec.Validate(); err != nil {
+		t.Fatalf("buildin/template re-validate after rebind: %v", err)
+	}
+	return spec
+}
+
 // TestE2E_InputOutput_ChainParamsStringSubstitution drives the
-// happy-path success-chain dispatch through real Deno: a string-return
-// upstream feeds a downstream whose `chain.params.greeting` is the
+// happy-path success-chain dispatch through real Deno: the REAL
+// `tasks/buildin/template/` task loaded from disk renders a literal
+// string ("hello from upstream" — no placeholders, so no env wiring
+// needed) and feeds a downstream whose `chain.params.greeting` is the
 // literal `${input.output}` token. The downstream's task body reads
 // `input.greeting` and writes it to a marker file, proving the
 // resolver substituted the token BEFORE the engine packaged the input
 // for delivery.
 //
-// Uses `run_result.enabled: false` on the upstream — the in-memory
-// runReturnValue cache path that PR #310 was designed for. If the
-// engine accidentally routed chain delivery through the persisted
-// `runs.return_value` column (which the upstream suppressed),
-// the marker file would never appear.
+// Using the real buildin/template task exercises the production code
+// path (its `run_result.enabled: false` + in-memory cache return) that
+// PR #310 was designed for. If the engine accidentally routed chain
+// delivery through the persisted `runs.return_value` column (which
+// buildin/template suppresses), the marker file would never appear.
 func TestE2E_InputOutput_ChainParamsStringSubstitution(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires Deno subprocess")
@@ -113,14 +171,17 @@ func TestE2E_InputOutput_ChainParamsStringSubstitution(t *testing.T) {
 
 	e := newTestEnv(t)
 
+	const upstreamID = "upstream-string"
+	const downstreamID = "downstream-marker"
+	// No ${VAR} placeholders → buildin/template renders this verbatim
+	// and the downstream sees it as input.greeting after token
+	// substitution. Keeps the env-permission surface empty.
+	const upstreamReturn = "hello from upstream"
+
 	// Downstream — chained from the upstream with the literal token
 	// in chain.params.greeting. Reads input.greeting (the engine's
 	// merged ChainInput map) and writes it to disk so the test can
 	// observe the resolved value reaching a real task body.
-	const upstreamID = "upstream-string"
-	const downstreamID = "downstream-marker"
-	const upstreamReturn = "hello from upstream"
-
 	downstream := writeMarkerTask(t, dir, downstreamID, `
 export default async function main({ input }: any) {
   const path = Deno.env.get("MARKER_PATH");
@@ -142,19 +203,18 @@ export default async function main({ input }: any) {
 		t.Fatalf("reg.Register downstream: %v", err)
 	}
 
-	// Upstream — real Deno, returns a literal string, run_result
-	// suppressed so chain delivery rides the in-memory cache.
-	upstream := writeMarkerTask(t, dir, upstreamID,
-		`export default async function main() { return "`+upstreamReturn+`" }`,
-		markerDir,
-		task.TriggerConfig{Manual: true},
-		true, // run_result.enabled: false
-	)
+	// Upstream — REAL buildin/template loaded from disk. No env entries
+	// needed because the template body is a plain literal. The
+	// suppressed `run_result.enabled: false` in the on-disk YAML routes
+	// the rendered string through the in-memory cache exactly as the
+	// shipped buildin/template task does in production.
+	upstream := loadBuildinTemplateAs(t, upstreamID, nil)
 	if err := e.reg.Register(upstream); err != nil {
 		t.Fatalf("reg.Register upstream: %v", err)
 	}
 
-	upRunID, err := e.engine.FireManual(context.Background(), upstreamID, nil)
+	upRunID, err := e.engine.FireManual(context.Background(), upstreamID,
+		map[string]string{"template": upstreamReturn})
 	if err != nil {
 		t.Fatalf("FireManual upstream: %v", err)
 	}
@@ -188,6 +248,12 @@ export default async function main({ input }: any) {
 // run — its body would write a marker file if it did. The absence of
 // the marker, plus the registry showing zero runs of the downstream,
 // proves the resolver caught the type mismatch at dispatch.
+//
+// Why this case uses an INLINE upstream rather than buildin/template:
+// buildin/template's contract is "render a string from a template",
+// so it can never return a non-string. The negative-case fixture
+// needs a task that actually returns an object — a separate inline
+// Deno script is the minimal way to drive that.
 //
 // This is the e2e companion to
 // TestOnFailureChainDispatch_NonStringUpstreamSkips (which drives the
@@ -232,7 +298,9 @@ export default async function main() {
 	// Upstream returns a JSON OBJECT — stringRet's contract turns
 	// every non-string return into "", which propagates as
 	// ErrInputUnavailable through ResolveInputOutputMap and causes
-	// the chain dispatch to skip with an error log.
+	// the chain dispatch to skip with an error log. Inline rather
+	// than buildin/template because buildin/template only ever
+	// returns strings.
 	upstream := writeMarkerTask(t, dir, upstreamID,
 		`export default async function main() { return { key: "value" } }`,
 		markerDir,
@@ -291,7 +359,9 @@ export default async function main() {
 // The hand-written tests in pkg/task/inputref_test.go assert this at
 // the unit layer; this e2e pins it at the chain-dispatch boundary so
 // a future refactor that swaps in a more lenient regex-based resolver
-// can't accidentally pass through.
+// can't accidentally pass through. Upstream is the REAL
+// `tasks/buildin/template/` task — the rendered string is what
+// flows into `input.output` via the in-memory cache.
 func TestE2E_InputOutput_EmbeddedTokenPassesThroughLiterally(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires Deno subprocess")
@@ -329,17 +399,13 @@ export default async function main({ input }: any) {
 		t.Fatalf("reg.Register downstream: %v", err)
 	}
 
-	upstream := writeMarkerTask(t, dir, upstreamID,
-		`export default async function main() { return "the-real-value" }`,
-		markerDir,
-		task.TriggerConfig{Manual: true},
-		false,
-	)
+	upstream := loadBuildinTemplateAs(t, upstreamID, nil)
 	if err := e.reg.Register(upstream); err != nil {
 		t.Fatalf("reg.Register upstream: %v", err)
 	}
 
-	upRunID, err := e.engine.FireManual(context.Background(), upstreamID, nil)
+	upRunID, err := e.engine.FireManual(context.Background(), upstreamID,
+		map[string]string{"template": "the-real-value"})
 	if err != nil {
 		t.Fatalf("FireManual upstream: %v", err)
 	}
