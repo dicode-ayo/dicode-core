@@ -130,6 +130,46 @@ func expandSpec(spec *Spec, vars map[string]string) {
 			spec.Docker.Volumes[i] = expandString(spec.Docker.Volumes[i], vars, false)
 		}
 	}
+
+	// trigger.before[].overrides and trigger.chain.overrides: per-edge
+	// patches applied to the prereq / downstream spec at dispatch time.
+	// They must walk the same {Params[].Default, Fs[].Path,
+	// Env[].{From,Secret,Value}} surface as their top-level twins —
+	// otherwise tokens like ${DATADIR} embedded in an override reach the
+	// runtime literally and the dispatch fails (e.g. Deno's --allow-write
+	// sandbox sees the unexpanded "${DATADIR}/relay" path and rejects).
+	// envFallback policy mirrors the top-level fields exactly: identifier-
+	// like fields (Fs[].Path, Env[].From, Env[].Secret) get true, fields
+	// readable from task code (Params[].Default, Env[].Value) get false.
+	for i := range spec.Trigger.Before {
+		expandOverrides(spec.Trigger.Before[i].Overrides, vars)
+	}
+	if spec.Trigger.Chain != nil {
+		expandOverrides(spec.Trigger.Chain.Overrides, vars)
+	}
+}
+
+// expandOverrides walks the per-edge Overrides surface that mirrors top-level
+// spec fields. Only the surface actually consumed by the per-edge dispatch
+// path is touched — Params[].Default, Fs[].Path, and Env[].{From,Secret,Value}.
+// Other Overrides fields (Net, Runtime, Timeout, …) are either literal
+// strings, durations, or already opaque identifiers and don't need expansion.
+// See expandSpec's doc-block for the envFallback policy.
+func expandOverrides(o *Overrides, vars map[string]string) {
+	if o == nil {
+		return
+	}
+	for i := range o.Params {
+		o.Params[i].Default = expandString(o.Params[i].Default, vars, false)
+	}
+	for i := range o.Fs {
+		o.Fs[i].Path = expandString(o.Fs[i].Path, vars, true)
+	}
+	for i := range o.Env {
+		o.Env[i].From = expandString(o.Env[i].From, vars, true)
+		o.Env[i].Secret = expandString(o.Env[i].Secret, vars, true)
+		o.Env[i].Value = expandString(o.Env[i].Value, vars, false)
+	}
 }
 
 // builtinVars returns the template var map for a task loaded from dir, with
