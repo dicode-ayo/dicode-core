@@ -410,7 +410,7 @@ func (e *Engine) Register(spec *task.Spec) error {
 // trigger.before back to the daemon, but only daemons may have
 // trigger.before. We therefore do not implement explicit cycle detection.
 func (e *Engine) validateBeforeRefs(spec *task.Spec) error {
-	for _, entry := range spec.Trigger.Before {
+	for i, entry := range spec.Trigger.Before {
 		ref, ok := e.registry.Get(entry.Task)
 		if !ok {
 			return fmt.Errorf("trigger.before: task %q not found in registry", entry.Task)
@@ -429,22 +429,20 @@ func (e *Engine) validateBeforeRefs(spec *task.Spec) error {
 				return fmt.Errorf("trigger.before: overrides for %q produce invalid spec: %w", entry.Task, err)
 			}
 		}
-	}
-	// ${input.output} on before[0] is statically unresolvable: the first
-	// pipeline stage has no upstream return value. Reject at registration
-	// so operators see the failure at config-load time rather than the
-	// first daemon dispatch. Non-first stages are allowed because PR3
-	// will pipe the previous stage's output into upstreamOutput.
-	for i, entry := range spec.Trigger.Before {
-		if i > 0 || entry.Overrides == nil {
-			continue
-		}
-		for _, p := range entry.Overrides.Params {
-			if p.Default == task.InputOutputToken {
-				return fmt.Errorf(
-					"trigger.before[0].overrides.params.%s: ${input.output} is not available on the first pipeline stage",
-					p.Name,
-				)
+		// ${input.output} on before[0] is statically unresolvable: the
+		// first pipeline stage has no upstream return value. Reject at
+		// registration so operators see the failure at config-load time
+		// rather than the first daemon dispatch. Non-first stages are
+		// allowed because PR3 will pipe the previous stage's output into
+		// upstreamOutput.
+		if i == 0 && entry.Overrides != nil {
+			for _, p := range entry.Overrides.Params {
+				if p.Default == task.InputOutputToken {
+					return fmt.Errorf(
+						"trigger.before[0].overrides.params.%s: ${input.output} is not available on the first pipeline stage",
+						p.Name,
+					)
+				}
 			}
 		}
 	}
@@ -1241,6 +1239,26 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 					return
 				}
 
+				// Dispatch-time ${input.output} interpolation: substitute
+				// the literal token in chainSpec.Params with the upstream's
+				// return value. Symmetric with the success-chain path above —
+				// any chain edge supports the token; non-string upstream
+				// returns are treated as "no upstream available" and the
+				// failure-chain dispatch is skipped (logged) rather than
+				// silently passing the literal token to the downstream.
+				// Release the chainGuards slot we just acquired so a failed
+				// resolution doesn't burn cap_per_task / cap_global.
+				upstreamRet := stringRet(output)
+				resolvedParams, rerr := task.ResolveInputOutputMap(chainSpec.Params, upstreamRet)
+				if rerr != nil {
+					e.guards.releaseSlot(completedTaskID)
+					e.log.Error("on_failure_chain skipped — failed to resolve ${input.output}",
+						zap.String("from", completedTaskID),
+						zap.String("to", targetID),
+						zap.Error(rerr),
+					)
+					return
+				}
 				e.log.Info("on_failure_chain trigger",
 					zap.String("from", completedTaskID),
 					zap.String("to", targetID),
@@ -1254,7 +1272,7 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 				// config-load validation (#236 Task 11) rejects any
 				// chainSpec.Params containing these keys, so collisions
 				// cannot reach here in a well-validated config.
-				input := buildChainPayload(chainSpec.Params, completedTaskID, runID, runStatus, output, nextDepth)
+				input := buildChainPayload(resolvedParams, completedTaskID, runID, runStatus, output, nextDepth)
 				// Auto-fix safety default: when the chain target is the
 				// buildin auto-fix preset, force mode=review unless the
 				// operator explicitly set it. Autonomous-by-default would

@@ -668,6 +668,75 @@ func TestPreflight_RegisterDaemon_Concurrent_NoDoubleStart(t *testing.T) {
 	}
 }
 
+// TestRunPrereqs_RejectsInputOutputAtDispatch_LatentPR3 verifies the
+// runtime backstop for the ${input.output} contract. Registration
+// allows the token on non-first `before:` stages (PR3 will pipe the
+// previous stage's return value through), but PR2's runPrereqs hook
+// hardcodes upstreamOutput="" — so any token reference on a non-first
+// stage surfaces as ErrInputUnavailable at dispatch and the daemon
+// settles into DaemonPrereqFailed.
+//
+// When PR3 lands and runPrereqs threads real upstream output, this
+// test should be rewritten to assert successful interpolation — until
+// then, the loud failure is the desired contract: a literal token
+// must NOT reach the downstream.
+func TestRunPrereqs_RejectsInputOutputAtDispatch_LatentPR3(t *testing.T) {
+	eng, reg, _ := newPreflightEnv(t)
+
+	// Two one-shot prereqs. stage-a has no token; stage-b carries
+	// ${input.output} on its override, which is allowed at registration
+	// because it's not on before[0].
+	for _, id := range []string{"stage-a", "stage-b"} {
+		spec := &task.Spec{
+			ID:      id,
+			Name:    id,
+			Runtime: task.RuntimeDeno,
+			Trigger: task.TriggerConfig{Manual: true},
+			Enabled: true,
+		}
+		if err := reg.Register(spec); err != nil {
+			t.Fatalf("reg.Register %s: %v", id, err)
+		}
+	}
+
+	daemon := &task.Spec{
+		ID:      "daemon",
+		Name:    "daemon",
+		Runtime: task.RuntimeDocker,
+		Docker:  &task.DockerConfig{Image: "alpine"},
+		Trigger: task.TriggerConfig{
+			Daemon: true,
+			Before: []task.BeforeEntry{
+				{Task: "stage-a"}, // first stage, no token
+				{
+					Task: "stage-b",
+					Overrides: &task.Overrides{
+						Params: task.ParamOverrides{
+							{Name: "content", Default: "${input.output}"},
+						},
+					},
+				},
+			},
+			Restart: "never",
+		},
+		Enabled: true,
+	}
+	if err := reg.Register(daemon); err != nil {
+		t.Fatalf("reg.Register daemon: %v", err)
+	}
+	if err := eng.Register(daemon); err != nil {
+		t.Fatalf("eng.Register daemon: %v", err)
+	}
+
+	// runPrereqs fires both `before:` entries in parallel. stage-b's
+	// dispatch invokes ResolveInputOutputList with upstreamOutput="",
+	// returning ErrInputUnavailable; runPrereqs surfaces the error and
+	// the daemon ends up in DaemonPrereqFailed.
+	waitUntil(t, 5*time.Second, func() bool {
+		return eng.DaemonState("daemon") == DaemonPrereqFailed
+	}, "daemon never reached PrereqFailed for non-first stage token")
+}
+
 // TestRegister_RejectsInputOutputOnFirstBeforeStage verifies that the
 // engine refuses to register a daemon whose trigger.before[0] override
 // references ${input.output}. The first stage of a preflight pipeline

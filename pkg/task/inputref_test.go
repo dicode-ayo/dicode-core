@@ -170,3 +170,34 @@ func TestResolveInputOutputList_PreservesInput(t *testing.T) {
 		t.Errorf("input list was mutated; got %v", orig[0].Default)
 	}
 }
+
+// TestResolveInputOutputMap_NilMap pins that a nil params map is a no-op:
+// no error and the returned map is also nil. Both call sites (FireChain
+// and runPrereqs) can legitimately reach the resolver with a nil map
+// (chain.Params or overrides.Params omitted), and they rely on this
+// short-circuit to avoid an unnecessary allocation + the surrounding
+// dispatch logic should treat the result as "nothing to substitute".
+func TestResolveInputOutputMap_NilMap(t *testing.T) {
+	got, err := ResolveInputOutputMap(nil, "anything")
+	if err != nil {
+		t.Fatalf("nil map should not error: %v", err)
+	}
+	if got != nil {
+		t.Errorf("expected nil result; got %v", got)
+	}
+}
+
+// TestResolveInputOutputList_NilList is the slice-shaped counterpart to
+// TestResolveInputOutputMap_NilMap. The trigger.before resolver passes
+// entry.Overrides.Params straight through to ResolveInputOutputList; that
+// field is nil when the override declares no params, so the helper must
+// accept nil without error.
+func TestResolveInputOutputList_NilList(t *testing.T) {
+	got, err := ResolveInputOutputList(nil, "anything")
+	if err != nil {
+		t.Fatalf("nil list should not error: %v", err)
+	}
+	if got != nil {
+		t.Errorf("expected nil result; got %v", got)
+	}
+}
