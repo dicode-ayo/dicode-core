@@ -673,113 +673,131 @@ func (e *Engine) startDaemon(spec *task.Spec) {
 	e.setDaemonState(spec.ID, DaemonRunning)
 }
 
-// runPrereqs fires every task listed in spec.Trigger.Before in parallel and
-// blocks until they all reach a terminal state. Returns nil only if every
-// prereq finishes with status=success; otherwise returns the first
-// non-success error observed.
+// runPrereqs fires the daemon's trigger.before pipeline sequentially.
+// Each stage receives the previous stage's return value as
+// ${input.output} interpolation on its overrides.params, enabling
+// composable preflight pipelines (e.g. buildin/template →
+// buildin/write-local for relay-server). The first stage receives an
+// empty upstreamOutput; any ${input.output} reference there is a
+// static error caught at registration by validateBeforeRefs.
 //
-// Re-fires every prereq on every preflight attempt — no "already satisfied"
-// short-circuit. The whole point of preflight is to refresh ephemeral
-// state (rendered configs, freshly-rotated credentials) right before the
-// daemon starts; reusing yesterday's success would defeat that. If
-// operators want caching, that belongs in the prereq task itself, not in
-// the trigger engine.
+// Failure of any stage short-circuits the rest of the pipeline; the
+// daemon's caller (startDaemon) records DaemonPrereqFailed and does
+// not fire the daemon.
+//
+// Re-fires every stage on every preflight attempt — no "already
+// satisfied" short-circuit. The whole point of preflight is to refresh
+// ephemeral state (rendered configs, freshly-rotated credentials)
+// right before the daemon starts; reusing yesterday's success would
+// defeat that. If operators want caching, that belongs in the stage
+// task itself, not in the trigger engine.
+//
+// Semantic change vs PR #300: pre-PR3, this function ran prereqs in
+// parallel via go func + WaitGroup. The only on-main consumer
+// (docs/examples/cloudflare-tunnel.md) has commutative prereqs, so
+// correctness is preserved — just slightly slower in pathological
+// many-stage cases. A future `parallel: true` opt-in can restore the
+// fan-out shape for callers that don't need piping.
 func (e *Engine) runPrereqs(ctx context.Context, spec *task.Spec) error {
-	type prereqResult struct {
-		refID string
-		err   error
-	}
-	results := make(chan prereqResult, len(spec.Trigger.Before))
-	var wg sync.WaitGroup
-
-	for _, entry := range spec.Trigger.Before {
-		entry := entry
-		refID := entry.Task
-		ref, ok := e.registry.Get(refID)
-		if !ok {
-			// validateBeforeRefs catches this at registration time, but the
-			// registry can change between registration and preflight (task
-			// unregistered while daemon was queued, etc.). Defensive check.
-			results <- prereqResult{refID: refID, err: fmt.Errorf("prereq %q vanished from registry", refID)}
-			continue
+	var prevOutput string
+	for i, entry := range spec.Trigger.Before {
+		out, err := e.dispatchPipelineStage(ctx, entry, i, prevOutput)
+		if err != nil {
+			return err
 		}
-		// Resolve ${input.output} in overrides.params. PR2 ships with
-		// upstreamOutput="" — any token use here fails loudly (the
-		// resolver returns an error before reaching the assignment
-		// below). PR3 will replace "" with the previous stage's return
-		// value once `before:` runs sequentially.
-		//
-		// TODO(PR3): BeforeEntry.Overrides is a *Overrides — the
-		// assignment `entry.Overrides.Params = resolved` mutates the
-		// pointed-to struct, which is shared with the registry-held
-		// spec. Latent in PR2 (resolver either errors or produces an
-		// identical slice). When PR3 wires real upstream values,
-		// concurrent preflights of the same daemon would race on this
-		// write. PR3's runPrereqs rewrite must either shallow-copy
-		// entry.Overrides before assignment, OR thread `resolved`
-		// through as a local without writing back (e.g. build the
-		// merged spec from resolved directly, bypassing the field).
-		if entry.Overrides != nil && entry.Overrides.Params != nil {
-			resolved, rerr := task.ResolveInputOutputList(entry.Overrides.Params, "")
+		prevOutput = out
+	}
+	return nil
+}
+
+// dispatchPipelineStage runs a single trigger.before stage:
+//
+//  1. Resolves ${input.output} in entry.Overrides.Params against
+//     upstreamOutput (the previous stage's return value, or "" for the
+//     first stage). The override pointer is shallow-copied before
+//     mutation so the registry-held spec is never written to —
+//     concurrent preflight fires therefore never race on this field.
+//  2. Applies per-edge overrides onto a deep copy of the registry
+//     spec and re-validates.
+//  3. Fires the stage and waits for terminal status via WaitRun.
+//  4. Returns the stage's string return value (empty for non-string
+//     returns) so the next stage's ${input.output} resolves loudly
+//     rather than silently passing the literal token downstream.
+//
+// Shared by runPrereqs and the mid-pipeline re-fire propagation path
+// in daemon_state.go so both code paths apply identical semantics.
+func (e *Engine) dispatchPipelineStage(ctx context.Context, entry task.BeforeEntry, stageIdx int, upstreamOutput string) (string, error) {
+	refID := entry.Task
+	ref, ok := e.registry.Get(refID)
+	if !ok {
+		// validateBeforeRefs catches this at registration time, but the
+		// registry can change between registration and preflight (task
+		// unregistered while daemon was queued, etc.). Defensive check.
+		return "", fmt.Errorf("stage %d (%s): prereq vanished from registry", stageIdx, refID)
+	}
+
+	// Per-edge overrides (#303): if this preflight edge declares
+	// `overrides:`, merge them onto a deep copy of the prereq spec
+	// before dispatching. The registry's canonical spec is left
+	// untouched so the prereq's standalone (manual / cron / chain)
+	// fires continue using the spec on disk.
+	dispatchSpec := ref
+	if entry.Overrides != nil {
+		ovPtr := entry.Overrides
+		if entry.Overrides.Params != nil {
+			// Resolve ${input.output} against the previous stage's
+			// return value. Shallow-copy entry.Overrides before
+			// mutating Params — *Overrides is shared with the
+			// registry-held spec, and concurrent preflight fires
+			// would otherwise race on this field. (Fixes the
+			// pointer-shared mutation hazard flagged in PR2's
+			// reviewer note.)
+			resolved, rerr := task.ResolveInputOutputList(entry.Overrides.Params, upstreamOutput)
 			if rerr != nil {
-				results <- prereqResult{refID: refID, err: fmt.Errorf("resolve input refs: %w", rerr)}
-				continue
+				return "", fmt.Errorf("stage %d (%s): resolve input refs: %w", stageIdx, refID, rerr)
 			}
-			entry.Overrides.Params = resolved
+			ovCopy := *entry.Overrides
+			ovCopy.Params = resolved
+			ovPtr = &ovCopy
 		}
-		// Per-edge overrides (#NNN): if this preflight edge declares
-		// `overrides:`, merge them onto a deep copy of the prereq spec
-		// before dispatching. The registry's canonical spec is left
-		// untouched so the prereq's standalone (manual / cron / chain)
-		// fires continue using the spec on disk. The merged spec is
-		// re-validated to surface override-induced invariant violations
-		// (e.g. an override that switches runtime to an unsupported
-		// value) — validateBeforeRefs already runs the same check at
-		// Register time, this is a defensive second pass for cases where
-		// the registry mutated between Register and the preflight fire.
-		dispatchSpec := ref
-		if entry.Overrides != nil {
-			merged := taskset.ApplyOverrides(ref, entry.Overrides)
-			if vErr := merged.Validate(); vErr != nil {
-				results <- prereqResult{refID: refID, err: fmt.Errorf("overrides produce invalid spec: %w", vErr)}
-				continue
-			}
-			dispatchSpec = merged
+		// The merged spec is re-validated to surface override-induced
+		// invariant violations (e.g. an override that switches runtime
+		// to an unsupported value) — validateBeforeRefs already runs
+		// the same check at Register time, this is a defensive second
+		// pass for cases where the registry mutated between Register
+		// and the preflight fire.
+		merged := taskset.ApplyOverrides(ref, ovPtr)
+		if vErr := merged.Validate(); vErr != nil {
+			return "", fmt.Errorf("stage %d (%s): overrides produce invalid spec: %w", stageIdx, refID, vErr)
 		}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			runID, err := e.fireAsync(ctx, dispatchSpec, pkgruntime.RunOptions{}, registry.TriggerPreflight)
-			if err != nil {
-				results <- prereqResult{refID: refID, err: fmt.Errorf("dispatch: %w", err)}
-				return
-			}
-			// Use WaitRun (the existing terminal-state waiter, channel-backed
-			// rather than polling) so this scales to many parallel prereqs
-			// without hammering the DB.
-			res, werr := e.WaitRun(ctx, runID)
-			if werr != nil {
-				results <- prereqResult{refID: refID, err: fmt.Errorf("wait: %w", werr)}
-				return
-			}
-			if res.Status != registry.StatusSuccess {
-				results <- prereqResult{refID: refID, err: fmt.Errorf("status=%s", res.Status)}
-				return
-			}
-			results <- prereqResult{refID: refID, err: nil}
-		}()
+		dispatchSpec = merged
 	}
 
-	wg.Wait()
-	close(results)
-
-	var firstErr error
-	for r := range results {
-		if r.err != nil && firstErr == nil {
-			firstErr = fmt.Errorf("prereq %q: %w", r.refID, r.err)
-		}
+	runID, err := e.fireAsync(ctx, dispatchSpec, pkgruntime.RunOptions{}, registry.TriggerPreflight)
+	if err != nil {
+		return "", fmt.Errorf("stage %d (%s): dispatch: %w", stageIdx, refID, err)
 	}
-	return firstErr
+
+	// WaitRun (channel-backed) wakes on the runDone close and merges the
+	// in-memory runReturnValue cache with the persisted return_value
+	// column — so run_result.enabled:false stages (like
+	// buildin/template) still surface their value to the next stage.
+	res, werr := e.WaitRun(ctx, runID)
+	if werr != nil {
+		return "", fmt.Errorf("stage %d (%s): wait: %w", stageIdx, refID, werr)
+	}
+	if res.Status != registry.StatusSuccess {
+		return "", fmt.Errorf("stage %d (%s): run %s ended with status %s", stageIdx, refID, runID, res.Status)
+	}
+
+	// Only string returns flow as ${input.output} to the next stage.
+	// Non-string returns leave the next upstreamOutput="" so any
+	// reference downstream surfaces ErrInputUnavailable loudly rather
+	// than silently passing the literal token.
+	if s, ok := res.ReturnValue.(string); ok {
+		return s, nil
+	}
+	return "", nil
 }
 
 func (e *Engine) onDaemonRunFinished(spec *task.Spec, runID string) {

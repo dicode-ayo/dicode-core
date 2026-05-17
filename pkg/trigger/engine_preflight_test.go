@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -134,17 +135,23 @@ func TestRegister_BeforeValid_NonDaemonTarget(t *testing.T) {
 type preflightExec struct {
 	reg *registry.Registry
 
-	mu     sync.Mutex
-	fns    map[string]func(taskID, runID string) string
-	daemon map[string]chan struct{} // daemon taskID → block channel (closed = exit)
-	runs   atomic.Int32             // count of executed runs (any task)
+	mu       sync.Mutex
+	fns      map[string]func(taskID, runID string) string
+	returns  map[string]func(taskID, runID string, spec *task.Spec) interface{}
+	captured map[string]*task.Spec    // runID → spec snapshot (for assertions on merged Params)
+	daemon   map[string]chan struct{} // daemon taskID → block channel (closed = exit)
+	runs     atomic.Int32             // count of executed runs (any task)
+	failing  map[string]bool          // task IDs whose Execute should always return StatusFailure
 }
 
 func newPreflightExec(reg *registry.Registry) *preflightExec {
 	return &preflightExec{
-		reg:    reg,
-		fns:    make(map[string]func(string, string) string),
-		daemon: make(map[string]chan struct{}),
+		reg:      reg,
+		fns:      make(map[string]func(string, string) string),
+		returns:  make(map[string]func(string, string, *task.Spec) interface{}),
+		captured: make(map[string]*task.Spec),
+		daemon:   make(map[string]chan struct{}),
+		failing:  make(map[string]bool),
 	}
 }
 
@@ -152,6 +159,33 @@ func (p *preflightExec) setFn(taskID string, fn func(taskID, runID string) strin
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.fns[taskID] = fn
+}
+
+// setReturnFn registers a function that produces a return value for taskID's
+// Execute call. The closure receives the spec snapshot the executor was
+// handed, so tests can read post-override params (e.g. the resolved
+// ${input.output} default) and decide what to return. Status is always
+// StatusSuccess for returns-set tasks unless setFn also overrides it.
+func (p *preflightExec) setReturnFn(taskID string, fn func(taskID, runID string, spec *task.Spec) interface{}) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.returns[taskID] = fn
+}
+
+// markFailing pins taskID's Execute to always return StatusFailure, so
+// pipeline-failure tests don't need to clone setFn boilerplate.
+func (p *preflightExec) markFailing(taskID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.failing[taskID] = true
+}
+
+// specForRun returns the spec snapshot Execute captured for the given
+// runID, or nil if no run was recorded under that ID.
+func (p *preflightExec) specForRun(runID string) *task.Spec {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.captured[runID]
 }
 
 // markDaemon flags a task ID as a long-running daemon. Subsequent Execute
@@ -170,6 +204,17 @@ func (p *preflightExec) Execute(ctx context.Context, spec *task.Spec, opts pkgru
 	p.mu.Lock()
 	daemonCh := p.daemon[spec.ID]
 	fn := p.fns[spec.ID]
+	retFn := p.returns[spec.ID]
+	failing := p.failing[spec.ID]
+	// Capture a shallow copy of the spec so tests can assert on merged
+	// Params (e.g. ${input.output} resolution) without racing later
+	// engine mutations. Params is a slice; copy it explicitly so a later
+	// override on the registry spec wouldn't disturb the snapshot.
+	specCopy := *spec
+	if len(spec.Params) > 0 {
+		specCopy.Params = append(task.Params(nil), spec.Params...)
+	}
+	p.captured[opts.RunID] = &specCopy
 	p.mu.Unlock()
 
 	if daemonCh != nil {
@@ -182,6 +227,9 @@ func (p *preflightExec) Execute(ctx context.Context, spec *task.Spec, opts pkgru
 		return &pkgruntime.RunResult{}, nil
 	}
 	status := registry.StatusSuccess
+	if failing {
+		status = registry.StatusFailure
+	}
 	if fn != nil {
 		status = fn(spec.ID, opts.RunID)
 	}
@@ -189,8 +237,12 @@ func (p *preflightExec) Execute(ctx context.Context, spec *task.Spec, opts pkgru
 		_ = p.reg.FinishRunWithReason(context.Background(), opts.RunID, status, "test-injected: failure")
 		return &pkgruntime.RunResult{}, errors.New("injected failure")
 	}
+	res := &pkgruntime.RunResult{}
+	if retFn != nil {
+		res.ReturnValue = retFn(spec.ID, opts.RunID, &specCopy)
+	}
 	_ = p.reg.FinishRun(context.Background(), opts.RunID, status)
-	return &pkgruntime.RunResult{}, nil
+	return res, nil
 }
 
 // newPreflightEnv returns a test engine + reg + controllable executor for
@@ -786,5 +838,207 @@ func TestRegister_RejectsInputOutputOnFirstBeforeStage(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "before[0]") {
 		t.Errorf("error should pinpoint the offending stage; got %v", err)
+	}
+}
+
+// waitForCond polls cond until it returns true or the deadline expires.
+// Distinct from waitUntil (which fails the test on timeout): used by the
+// new sequential-pipeline tests where the caller wants to assert on the
+// final order/state after the cond reaches true, deferring failure to the
+// post-cond assertion.
+func waitForCond(timeout time.Duration, cond func() bool) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return true
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return cond()
+}
+
+// TestBefore_SequentialExecution verifies the PR3 contract: every entry
+// in trigger.before runs in declaration order, each waiting for the
+// previous stage to reach terminal success. A parallel implementation
+// would interleave the three stages because each fn sleeps 50ms; a
+// sequential implementation produces the exact order [a, b, c].
+func TestBefore_SequentialExecution(t *testing.T) {
+	eng, reg, exec := newPreflightEnv(t)
+
+	var order []string
+	var orderMu sync.Mutex
+	recordRun := func(id string) func(_, _ string) string {
+		return func(_, _ string) string {
+			orderMu.Lock()
+			order = append(order, id)
+			orderMu.Unlock()
+			// Sleep so a parallel impl would clearly interleave.
+			time.Sleep(50 * time.Millisecond)
+			return registry.StatusSuccess
+		}
+	}
+	for _, id := range []string{"stage-a", "stage-b", "stage-c"} {
+		spec := makeOneShotSpec(id)
+		if err := reg.Register(spec); err != nil {
+			t.Fatalf("register %s: %v", id, err)
+		}
+		exec.setFn(id, recordRun(id))
+	}
+
+	daemon := makeDaemonSpec("d", []string{"stage-a", "stage-b", "stage-c"})
+	if err := reg.Register(daemon); err != nil {
+		t.Fatalf("register daemon: %v", err)
+	}
+	exec.markDaemon("d")
+
+	if err := eng.Register(daemon); err != nil {
+		t.Fatalf("eng.Register: %v", err)
+	}
+
+	waitUntil(t, 5*time.Second, func() bool {
+		orderMu.Lock()
+		defer orderMu.Unlock()
+		return len(order) == 3
+	}, "all three stages never completed")
+	orderMu.Lock()
+	defer orderMu.Unlock()
+	want := []string{"stage-a", "stage-b", "stage-c"}
+	if !reflect.DeepEqual(order, want) {
+		t.Errorf("before-list ran out of order: got %v, want %v", order, want)
+	}
+}
+
+// TestBefore_PipesInputOutputThroughStages verifies that stage[i+1]'s
+// overrides.params see the previous stage's return value substituted
+// for "${input.output}" at dispatch time. We assert by reading the
+// captured spec the second stage's executor received: its Params[content]
+// Default must equal the renderer's return value, not the literal token.
+func TestBefore_PipesInputOutputThroughStages(t *testing.T) {
+	eng, reg, exec := newPreflightEnv(t)
+
+	// Stage 1 returns the rendered string. The mid-pipeline contract
+	// is that this exact value lands on stage 2's content param.
+	exec.setReturnFn("render", func(_, _ string, _ *task.Spec) interface{} {
+		return "rendered-yaml"
+	})
+	render := makeOneShotSpec("render")
+	if err := reg.Register(render); err != nil {
+		t.Fatalf("register render: %v", err)
+	}
+
+	// Stage 2 (writer) declares a `content` param so the per-edge
+	// override can patch its Default with the upstream return value.
+	writer := &task.Spec{
+		ID:      "write",
+		Name:    "write",
+		Runtime: task.RuntimeDeno,
+		Trigger: task.TriggerConfig{Manual: true},
+		Params: task.Params{
+			{Name: "content", Required: true},
+		},
+		Enabled: true,
+	}
+	if err := reg.Register(writer); err != nil {
+		t.Fatalf("register writer: %v", err)
+	}
+
+	daemon := &task.Spec{
+		ID:      "d",
+		Name:    "d",
+		Runtime: task.RuntimeDocker,
+		Docker:  &task.DockerConfig{Image: "alpine"},
+		Trigger: task.TriggerConfig{
+			Daemon:  true,
+			Restart: "never",
+			Before: []task.BeforeEntry{
+				{Task: "render"},
+				{
+					Task: "write",
+					Overrides: &task.Overrides{
+						Params: task.ParamOverrides{
+							{Name: "content", Default: "${input.output}"},
+						},
+					},
+				},
+			},
+		},
+		Enabled: true,
+	}
+	if err := reg.Register(daemon); err != nil {
+		t.Fatalf("register daemon: %v", err)
+	}
+	exec.markDaemon("d")
+
+	if err := eng.Register(daemon); err != nil {
+		t.Fatalf("eng.Register: %v", err)
+	}
+
+	// Wait until the writer stage produced a captured spec.
+	var writeSpec *task.Spec
+	waitUntil(t, 5*time.Second, func() bool {
+		runs, _ := reg.ListRuns(context.Background(), "write", 5)
+		for _, r := range runs {
+			if r.TriggerSource == registry.TriggerPreflight {
+				if s := exec.specForRun(r.ID); s != nil {
+					writeSpec = s
+					return true
+				}
+			}
+		}
+		return false
+	}, "write stage never captured by executor")
+
+	var got string
+	for _, p := range writeSpec.Params {
+		if p.Name == "content" {
+			got = p.Default
+		}
+	}
+	if got != "rendered-yaml" {
+		t.Errorf("write.content default = %q; want %q (upstream output did not pipe through)", got, "rendered-yaml")
+	}
+}
+
+// TestBefore_FailureShortCircuits verifies that a failed stage halts
+// the pipeline: no descendant stage runs, and the daemon ends up in
+// DaemonPrereqFailed. Without short-circuit semantics, downstream stages
+// might run with stale upstream output (or an empty one) and leak
+// half-applied side effects.
+func TestBefore_FailureShortCircuits(t *testing.T) {
+	eng, reg, exec := newPreflightEnv(t)
+
+	exec.markFailing("stage-a")
+	var bCalled atomic.Bool
+	exec.setFn("stage-b", func(_, _ string) string {
+		bCalled.Store(true)
+		return registry.StatusSuccess
+	})
+
+	for _, id := range []string{"stage-a", "stage-b"} {
+		spec := makeOneShotSpec(id)
+		if err := reg.Register(spec); err != nil {
+			t.Fatalf("register %s: %v", id, err)
+		}
+	}
+
+	daemon := makeDaemonSpec("d", []string{"stage-a", "stage-b"})
+	if err := reg.Register(daemon); err != nil {
+		t.Fatalf("register daemon: %v", err)
+	}
+	exec.markDaemon("d")
+
+	if err := eng.Register(daemon); err != nil {
+		t.Fatalf("eng.Register: %v", err)
+	}
+
+	// Wait until daemon settles into PrereqFailed (the engine's terminal
+	// state after a failed preflight). 500ms is plenty given everything
+	// runs in-memory; pad to 2s to keep the test resilient on slow CI.
+	waitUntil(t, 2*time.Second, func() bool {
+		return eng.DaemonState("d") == DaemonPrereqFailed
+	}, "daemon never reached PrereqFailed")
+
+	if bCalled.Load() {
+		t.Error("stage-b ran despite stage-a failure; pipeline did not short-circuit")
 	}
 }
