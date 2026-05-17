@@ -1,4 +1,4 @@
-import { assertEquals, assertRejects } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { assertEquals, assertRejects, assertThrows } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import main, { parseMode } from "./task.ts";
 
 // Test helper — wraps the SDK shape main() expects.
@@ -82,25 +82,22 @@ Deno.test("mode_accepts_three_digit", () => {
 });
 
 Deno.test("mode_rejects_garbage", () => {
-  try {
-    parseMode("rwx");
-    throw new Error("expected throw");
-  } catch (e) {
-    if (!(e instanceof Error) || !e.message.includes("invalid mode")) {
-      throw new Error(`wrong error: ${e}`);
-    }
-  }
+  assertThrows(() => parseMode("rwx"), Error, "invalid mode");
 });
 
 Deno.test("mode_rejects_non_octal_digits", () => {
-  try {
-    parseMode("9999");
-    throw new Error("expected throw");
-  } catch (e) {
-    if (!(e instanceof Error) || !e.message.includes("invalid mode")) {
-      throw new Error(`wrong error: ${e}`);
-    }
-  }
+  assertThrows(() => parseMode("9999"), Error, "invalid mode");
+});
+
+Deno.test("mode_rejects_special_bits", () => {
+  // 4-digit octal values whose first digit is non-zero carry
+  // setuid/setgid/sticky bits. A secret-bearing config has no business
+  // landing with mode 4755. The 3-digit regex (with optional leading
+  // zero) blocks these while still accepting "0600"/"0644".
+  assertThrows(() => parseMode("7777"), Error, "invalid mode");
+  assertThrows(() => parseMode("4755"), Error, "invalid mode");
+  assertThrows(() => parseMode("2755"), Error, "invalid mode");
+  assertThrows(() => parseMode("1755"), Error, "invalid mode");
 });
 
 Deno.test("rejects_missing_content", async () => {
@@ -125,6 +122,45 @@ Deno.test("rejects_path_with_nul", async () => {
     Error,
     "invalid path",
   );
+});
+
+Deno.test("rejects_relative_path", async () => {
+  await assertRejects(
+    () => main(sdk({ content: "x", path: "foo/bar.txt", mode: "0600" })),
+    Error,
+    "must be absolute",
+  );
+});
+
+Deno.test("rejects_dotdot_path", async () => {
+  await assertRejects(
+    () => main(sdk({ content: "x", path: "/tmp/foo/../bar.txt", mode: "0600" })),
+    Error,
+    "parent-directory segments not allowed",
+  );
+  await assertRejects(
+    () => main(sdk({ content: "x", path: "/tmp/foo/..", mode: "0600" })),
+    Error,
+    "parent-directory segments not allowed",
+  );
+});
+
+Deno.test("final_file_at_target_path_not_tmp", async () => {
+  // Atomic write goes through a sibling tmp file. After main() returns,
+  // the target path must exist and no .tmp.* sibling may be left behind.
+  await withTmpDir(async (dir) => {
+    const path = `${dir}/out.yaml`;
+    const result = await main(sdk({ content: "data", path }));
+    assertEquals(result, { path });
+    assertEquals(await Deno.readTextFile(path), "data");
+
+    const leftovers: string[] = [];
+    for await (const entry of Deno.readDir(dir)) {
+      leftovers.push(entry.name);
+    }
+    // Only the final file should be present — no `.tmp.<uuid>` siblings.
+    assertEquals(leftovers, ["out.yaml"]);
+  });
 });
 
 Deno.test("write_accepts_empty_content", async () => {

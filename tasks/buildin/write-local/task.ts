@@ -18,11 +18,13 @@ interface WriteResult {
 }
 
 // parseMode accepts octal strings like "0600", "600", "0644". Anything
-// outside [0-7]{3,4} is rejected loudly: a silent widening of file mode
-// on a secret-bearing config (rendered relay.yaml, cloudflared
-// credentials, etc.) is a real-world footgun.
+// outside [0-7]{3} (with an optional leading 0) is rejected loudly: a
+// silent widening of file mode on a secret-bearing config (rendered
+// relay.yaml, cloudflared credentials, etc.) is a real-world footgun.
+// The 3-digit cap also blocks the setuid/setgid/sticky bits — a
+// rendered config has no business carrying 4xxx/2xxx/1xxx modes.
 export function parseMode(s: string): number {
-  if (!/^0?[0-7]{3,4}$/.test(s)) {
+  if (!/^0?[0-7]{3}$/.test(s)) {
     throw new Error(`invalid mode: ${JSON.stringify(s)} (expected octal like "0600")`);
   }
   return parseInt(s, 8);
@@ -42,6 +44,15 @@ export default async function main(
   const modeStr = (await params.get("mode")) ?? "0600";
   const mode = parseMode(modeStr);
 
+  // Require an absolute path. task.yaml documents this contract; we
+  // enforce it loudly here rather than relying on the fs:rw allowlist
+  // to reject relative paths at write time with a cryptic error.
+  if (!path.startsWith("/")) {
+    throw new Error(`invalid path: must be absolute (got ${JSON.stringify(path)})`);
+  }
+  if (path.includes("/../") || path.endsWith("/..") || path === "..") {
+    throw new Error(`invalid path: parent-directory segments not allowed (${JSON.stringify(path)})`);
+  }
   // Block embedded NUL bytes before they reach Deno.writeTextFile. The
   // fs:rw allowlist already confines us to declared roots — this is
   // defence in depth that surfaces caller-config typos as a loud error
@@ -52,13 +63,33 @@ export default async function main(
 
   // Auto-create the parent directory. Allowed only inside the fs:rw
   // root the caller declared via overrides.fs — Deno's --allow-write
-  // sandbox enforces this regardless of what we attempt here.
+  // sandbox enforces this regardless of what we attempt here. Path is
+  // guaranteed absolute by the check above, so lastSlash >= 0 always.
   const lastSlash = path.lastIndexOf("/");
   if (lastSlash > 0) {
     const parent = path.slice(0, lastSlash);
     await Deno.mkdir(parent, { recursive: true });
   }
 
-  await Deno.writeTextFile(path, content, { mode });
+  // Atomic write: write to a sibling temp file then rename into place.
+  // The rename is atomic on the same filesystem (always true here since
+  // tmpPath shares path's parent), so concurrent readers (e.g.,
+  // cloudflared sighup-reloading its config) never observe a partial
+  // write. The UUID suffix prevents collisions when two write-local
+  // invocations race on the same target.
+  const tmpPath = `${path}.tmp.${crypto.randomUUID()}`;
+  try {
+    await Deno.writeTextFile(tmpPath, content, { mode });
+    await Deno.rename(tmpPath, path);
+  } catch (e) {
+    // Best-effort cleanup: if the rename failed, the tmp file is
+    // orphaned. Swallow cleanup errors (the original is what matters).
+    try {
+      await Deno.remove(tmpPath);
+    } catch {
+      // ignore
+    }
+    throw e;
+  }
   return { path };
 }
