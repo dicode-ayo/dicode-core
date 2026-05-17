@@ -1168,3 +1168,172 @@ func TestBefore_MidPipelineReFirePropagates(t *testing.T) {
 		t.Errorf("daemon never returned to Running after mid-pipeline re-fire; state=%v", eng.DaemonState("d"))
 	}
 }
+
+// TestBefore_MidPipelineReFireBailsOnUnregister verifies that the
+// propagation goroutine in propagateBeforeRerun bails out cleanly when
+// the daemon is unregistered mid-pipeline. Without the shutdown/
+// unregister guard, the propagation loop would keep firing descendant
+// stages and call startDaemonInternal on a daemon Unregister has
+// already purged from daemonSpecs — leaving stray daemonRuns entries
+// and racing the shutdown path.
+//
+// The test arranges a 2-descendant pipeline (render → write → finalize)
+// and blocks stage 2 ("write") on a channel so the propagation
+// goroutine is parked inside dispatchPipelineStage when we unregister
+// the daemon. After release + unregister, no third stage should be
+// dispatched, no DaemonRunning state should be set, and no stray
+// daemonRuns entry should remain.
+func TestBefore_MidPipelineReFireBailsOnUnregister(t *testing.T) {
+	eng, reg, exec := newPreflightEnv(t)
+
+	// Stage 1 (render): completes immediately, returns a token the
+	// later stages would (in the happy path) pipe through.
+	exec.setReturnFn("render", func(_, _ string, _ *task.Spec) interface{} {
+		return "render-out"
+	})
+	if err := reg.Register(makeOneShotSpec("render")); err != nil {
+		t.Fatalf("register render: %v", err)
+	}
+
+	// Stage 2 (write): blocks on a channel so the propagation
+	// goroutine is parked inside dispatchPipelineStage when we
+	// invoke Unregister below. write is the FIRST descendant of the
+	// re-fired render stage; we need it to actually start (so the
+	// "before the loop" guard cannot bail) but not finish until we
+	// release it.
+	writeStarted := make(chan struct{}, 1)
+	writeRelease := make(chan struct{})
+	var writeCalls atomic.Int32
+	exec.setFn("write", func(_, _ string) string {
+		if writeCalls.Add(1) == 1 {
+			select {
+			case writeStarted <- struct{}{}:
+			default:
+			}
+			<-writeRelease
+		}
+		return registry.StatusSuccess
+	})
+	if err := reg.Register(makeOneShotSpec("write")); err != nil {
+		t.Fatalf("register write: %v", err)
+	}
+
+	// Stage 3 (finalize): must NOT run after we unregister mid-loop.
+	// Count its dispatches so we can assert it stayed at zero
+	// post-release for the descendant that follows the blocked one.
+	var finalizeCalls atomic.Int32
+	exec.setFn("finalize", func(_, _ string) string {
+		finalizeCalls.Add(1)
+		return registry.StatusSuccess
+	})
+	if err := reg.Register(makeOneShotSpec("finalize")); err != nil {
+		t.Fatalf("register finalize: %v", err)
+	}
+
+	daemon := &task.Spec{
+		ID:      "d",
+		Name:    "d",
+		Runtime: task.RuntimeDocker,
+		Docker:  &task.DockerConfig{Image: "alpine"},
+		Trigger: task.TriggerConfig{
+			Daemon:  true,
+			Restart: "never",
+			Before: []task.BeforeEntry{
+				{Task: "render"},
+				{Task: "write"},
+				{Task: "finalize"},
+			},
+		},
+		Enabled: true,
+	}
+	if err := reg.Register(daemon); err != nil {
+		t.Fatalf("register daemon: %v", err)
+	}
+	exec.markDaemon("d")
+
+	if err := eng.Register(daemon); err != nil {
+		t.Fatalf("eng.Register: %v", err)
+	}
+
+	// First boot: writeCalls==1 (initial write during preflight) then
+	// the daemon comes up. Drain the first call so the next
+	// writeStarted signal corresponds to the propagation path.
+	select {
+	case <-writeStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("initial preflight write never started")
+	}
+	close(writeRelease) // unblock the first call; new writes will not block.
+	waitUntil(t, 5*time.Second, func() bool {
+		return eng.DaemonState("d") == DaemonRunning
+	}, "daemon never reached Running on first boot")
+
+	// Re-arm the block so the *second* (propagation) call to write
+	// parks inside Execute until we unregister.
+	writeRelease2 := make(chan struct{})
+	writeStarted2 := make(chan struct{}, 1)
+	exec.setFn("write", func(_, _ string) string {
+		select {
+		case writeStarted2 <- struct{}{}:
+		default:
+		}
+		<-writeRelease2
+		return registry.StatusSuccess
+	})
+
+	// Re-fire render — this kicks off propagation; write will block
+	// inside Execute, parking the propagation goroutine.
+	if _, err := eng.FireManual(context.Background(), "render", nil); err != nil {
+		t.Fatalf("FireManual render: %v", err)
+	}
+	select {
+	case <-writeStarted2:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("propagation never reached the write stage")
+	}
+
+	// Now the propagation goroutine is parked inside
+	// dispatchPipelineStage. Unregister the daemon — Unregister
+	// purges daemonSpecs and KillRuns the live daemon run.
+	eng.Unregister("d")
+
+	// Capture finalize-call count and daemon-state snapshot at the
+	// moment of unregister so we can compare after the release.
+	finalizeBefore := finalizeCalls.Load()
+
+	// Release write — the propagation goroutine resumes, returns
+	// from dispatchPipelineStage, and (with the fix) sees the
+	// unregister + bails before dispatching finalize or restarting
+	// the daemon.
+	close(writeRelease2)
+
+	// Give the propagation goroutine a moment to observe the
+	// unregister and exit. We can't waitUntil on a negative ("never
+	// dispatches finalize") so we poll for a short window: if
+	// finalize stays at finalizeBefore and daemonRuns stays clean,
+	// the guard worked.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if finalizeCalls.Load() != finalizeBefore {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if got := finalizeCalls.Load(); got != finalizeBefore {
+		t.Errorf("finalize was dispatched after unregister: calls=%d, want %d (propagation goroutine ignored the unregister)", got, finalizeBefore)
+	}
+
+	// No stray daemonRuns entry should remain after unregister: the
+	// propagation goroutine must NOT have re-fired startDaemonInternal,
+	// which is the load-bearing assertion (state Running may linger
+	// from the first boot because Unregister doesn't reset DaemonState
+	// — but startDaemonInternal would add a *new* daemonRuns entry,
+	// which Unregister has already drained).
+	eng.daemonMu.Lock()
+	leftover, hasRun := eng.daemonRuns["d"]
+	eng.daemonMu.Unlock()
+	if hasRun {
+		t.Errorf("daemonRuns has stray entry for unregistered daemon: runID=%q (propagation restarted the daemon after unregister)", leftover)
+	}
+}

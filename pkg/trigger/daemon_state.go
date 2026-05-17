@@ -106,6 +106,19 @@ func (e *Engine) setDaemonState(taskID string, s DaemonState) {
 	e.daemonStates.set(taskID, s)
 }
 
+// daemonRegistered reports whether taskID is currently tracked in
+// daemonSpecs — i.e. the engine still considers this task a live daemon.
+// Used by the propagation goroutine to bail out if Unregister has run
+// between the time the goroutine was launched and the time it gets
+// scheduled (or between successive descendant dispatches in a long
+// pipeline). Mirrors the stillRegistered check in onDaemonRunFinished.
+func (e *Engine) daemonRegistered(taskID string) bool {
+	e.daemonMu.Lock()
+	_, ok := e.daemonSpecs[taskID]
+	e.daemonMu.Unlock()
+	return ok
+}
+
 // notifyPrereqCompletion is the post-success hook the engine calls from
 // FireChain when ANY task finishes with status=success. It walks the
 // registered daemons and, for each one that lists completedTaskID in
@@ -201,6 +214,24 @@ func (e *Engine) propagateBeforeRerun(daemonSpec *task.Spec, reranTaskID string,
 			return
 		}
 
+		// Bail early if the engine is shutting down or the daemon was
+		// unregistered between notifyPrereqCompletion's check and our
+		// goroutine being scheduled. Matches the canonical guard from
+		// onDaemonRunFinished — without it, the propagation loop would
+		// happily dispatch descendants and re-fire startDaemonInternal
+		// on a torn-down daemon, leaking daemonRuns entries and racing
+		// the shutdown path.
+		if e.isShuttingDown() {
+			e.log.Debug("propagation skipped: engine shutting down",
+				zap.String("daemon", daemonSpec.ID))
+			return
+		}
+		if !e.daemonRegistered(daemonSpec.ID) {
+			e.log.Debug("propagation skipped: daemon unregistered",
+				zap.String("daemon", daemonSpec.ID))
+			return
+		}
+
 		e.log.Info("daemon mid-pipeline re-fire: propagating to descendants",
 			zap.String("task", daemonSpec.ID),
 			zap.String("rerun", reranTaskID),
@@ -209,8 +240,24 @@ func (e *Engine) propagateBeforeRerun(daemonSpec *task.Spec, reranTaskID string,
 		)
 
 		// Replay descendants sequentially with fresh ${input.output}.
+		// Re-check the shutdown/unregister guard at the top of each
+		// iteration: a long pipeline (many stages, each potentially
+		// dispatching a real container) can easily span a shutdown or
+		// unregister window opened by an operator while we're mid-loop.
 		prevOutput := initialOutput
 		for i := startIdx + 1; i < len(daemonSpec.Trigger.Before); i++ {
+			if e.isShuttingDown() {
+				e.log.Debug("propagation aborted: engine shutting down",
+					zap.String("daemon", daemonSpec.ID),
+					zap.Int("stage", i))
+				return
+			}
+			if !e.daemonRegistered(daemonSpec.ID) {
+				e.log.Debug("propagation aborted: daemon unregistered",
+					zap.String("daemon", daemonSpec.ID),
+					zap.Int("stage", i))
+				return
+			}
 			entry := daemonSpec.Trigger.Before[i]
 			out, err := e.dispatchPipelineStage(context.Background(), entry, i, prevOutput)
 			if err != nil {
@@ -222,6 +269,23 @@ func (e *Engine) propagateBeforeRerun(daemonSpec *task.Spec, reranTaskID string,
 				return
 			}
 			prevOutput = out
+		}
+
+		// Last guard before tearing down + restarting: a stage could
+		// have completed just as the operator unregistered the daemon
+		// or the engine started shutting down. Without this, we'd call
+		// startDaemonInternal on a daemon Unregister has already
+		// purged from daemonSpecs — leaving a stray daemonRuns entry
+		// that races the shutdown path.
+		if e.isShuttingDown() {
+			e.log.Debug("propagation restart skipped: engine shutting down",
+				zap.String("daemon", daemonSpec.ID))
+			return
+		}
+		if !e.daemonRegistered(daemonSpec.ID) {
+			e.log.Debug("propagation restart skipped: daemon unregistered",
+				zap.String("daemon", daemonSpec.ID))
+			return
 		}
 
 		// All descendants succeeded — stop the current daemon run and
