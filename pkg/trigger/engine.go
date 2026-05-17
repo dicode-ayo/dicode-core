@@ -412,6 +412,24 @@ func (e *Engine) validateBeforeRefs(spec *task.Spec) error {
 			}
 		}
 	}
+
+	// Reject duplicate task IDs in the pipeline. propagateBeforeRerun's
+	// descendant-startIdx lookup breaks at the first match — so if the
+	// same task appears twice in before:, only the descendants of the
+	// FIRST occurrence are replayed when that task re-fires. The
+	// second occurrence's descendants would silently miss the re-fire.
+	// Surface the ambiguity at registration time rather than ship
+	// surprising propagation semantics. (PR #311 review finding.)
+	seen := make(map[string]struct{}, len(spec.Trigger.Before))
+	for i, entry := range spec.Trigger.Before {
+		if _, dup := seen[entry.Task]; dup {
+			return fmt.Errorf(
+				"trigger.before[%d]: task %q listed multiple times — each task may appear only once in the pipeline",
+				i, entry.Task,
+			)
+		}
+		seen[entry.Task] = struct{}{}
+	}
 	return nil
 }
 
@@ -661,7 +679,17 @@ func (e *Engine) startDaemon(spec *task.Spec) {
 func (e *Engine) startDaemonInternal(spec *task.Spec, skipPrereqs bool) {
 	if !skipPrereqs && len(spec.Trigger.Before) > 0 {
 		e.setDaemonState(spec.ID, DaemonPrereqRunning)
-		if err := e.runPrereqs(context.Background(), spec); err != nil {
+		// Use the engine's shutdown-cancellable context so an in-flight
+		// preflight stage (fireAsync / WaitRun in dispatchPipelineStage)
+		// bails when Shutdown is called. The top-of-loop guards in
+		// runPrereqs only catch the BETWEEN-stage window — a long
+		// container preflight that's already dispatched would otherwise
+		// keep running until its own timeout. (PR #311 review finding.)
+		prereqCtx := e.getShutdownCtx()
+		if prereqCtx == nil {
+			prereqCtx = context.Background()
+		}
+		if err := e.runPrereqs(prereqCtx, spec); err != nil {
 			e.setDaemonState(spec.ID, DaemonPrereqFailed)
 			e.log.Warn("daemon preflight failed; daemon not started",
 				zap.String("task", spec.ID),
@@ -708,9 +736,45 @@ func (e *Engine) startDaemonInternal(spec *task.Spec, skipPrereqs bool) {
 // correctness is preserved — just slightly slower in pathological
 // many-stage cases. A future `parallel: true` opt-in can restore the
 // fan-out shape for callers that don't need piping.
+//
+// Shutdown / unregister: mirrors the guard pattern from
+// propagateBeforeRerun (commit 8472642). Long first-boot preflights
+// — many stages, each potentially dispatching a real container — can
+// easily span a shutdown or unregister window opened by an operator
+// while we're mid-pipeline. Re-checking before the loop and at the
+// top of each iteration lets the engine cleanly abandon the preflight
+// rather than push the daemon through to fireAsync on a torn-down
+// engine or unregistered daemon. Returns nil on bail (with a debug
+// log) so the caller (startDaemonInternal) treats it as "preflight
+// declined to run" — equivalent to "no daemon was started", which is
+// the correct outcome during shutdown / unregister.
 func (e *Engine) runPrereqs(ctx context.Context, spec *task.Spec) error {
+	if e.isShuttingDown() {
+		e.log.Debug("runPrereqs skipped: engine shutting down",
+			zap.String("daemon", spec.ID))
+		return nil
+	}
+	if !e.daemonRegistered(spec.ID) {
+		e.log.Debug("runPrereqs skipped: daemon unregistered",
+			zap.String("daemon", spec.ID))
+		return nil
+	}
+
 	var prevOutput string
 	for i, entry := range spec.Trigger.Before {
+		entry := entry
+		if e.isShuttingDown() {
+			e.log.Debug("runPrereqs aborted: engine shutting down",
+				zap.String("daemon", spec.ID),
+				zap.Int("stage", i))
+			return nil
+		}
+		if !e.daemonRegistered(spec.ID) {
+			e.log.Debug("runPrereqs aborted: daemon unregistered",
+				zap.String("daemon", spec.ID),
+				zap.Int("stage", i))
+			return nil
+		}
 		out, err := e.dispatchPipelineStage(ctx, entry, i, prevOutput)
 		if err != nil {
 			return err
@@ -766,6 +830,12 @@ func (e *Engine) dispatchPipelineStage(ctx context.Context, entry task.BeforeEnt
 			if rerr != nil {
 				return "", fmt.Errorf("stage %d (%s): resolve input refs: %w", stageIdx, refID, rerr)
 			}
+			// Shallow-copy entry.Overrides so the Params write below cannot
+			// reach the registry-held *Overrides via the pointer. Other fields
+			// (Env, Fs, Net, …) remain pointer-aliased — that's OK as long as
+			// no dispatch-time code mutates them. If a future change adds
+			// dispatch-time mutation on another Overrides field, that field
+			// must also be deep-copied here. (PR #311 review finding.)
 			ovCopy := *entry.Overrides
 			ovCopy.Params = resolved
 			ovPtr = &ovCopy

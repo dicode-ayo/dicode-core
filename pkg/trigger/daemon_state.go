@@ -244,6 +244,15 @@ func (e *Engine) propagateBeforeRerun(daemonSpec *task.Spec, reranTaskID string,
 		// iteration: a long pipeline (many stages, each potentially
 		// dispatching a real container) can easily span a shutdown or
 		// unregister window opened by an operator while we're mid-loop.
+		//
+		// Use the engine's shutdown-cancellable context for each stage
+		// dispatch so an in-flight fireAsync / WaitRun bails when
+		// Shutdown is called — the between-iteration guards above only
+		// catch the gaps, not a stage already inside Execute.
+		stageCtx := e.getShutdownCtx()
+		if stageCtx == nil {
+			stageCtx = context.Background()
+		}
 		prevOutput := initialOutput
 		for i := startIdx + 1; i < len(daemonSpec.Trigger.Before); i++ {
 			if e.isShuttingDown() {
@@ -259,7 +268,7 @@ func (e *Engine) propagateBeforeRerun(daemonSpec *task.Spec, reranTaskID string,
 				return
 			}
 			entry := daemonSpec.Trigger.Before[i]
-			out, err := e.dispatchPipelineStage(context.Background(), entry, i, prevOutput)
+			out, err := e.dispatchPipelineStage(stageCtx, entry, i, prevOutput)
 			if err != nil {
 				e.log.Warn("daemon mid-pipeline re-fire: descendant stage failed; daemon left at current state",
 					zap.String("task", daemonSpec.ID),

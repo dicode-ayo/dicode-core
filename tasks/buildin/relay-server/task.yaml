@@ -35,6 +35,10 @@ trigger:
       overrides:
         timeout: 30s
         params:
+          # The template body below is inlined here because buildin/template
+          # only accepts a `template: <string>` param. A future buildin/template
+          # `template_path:` param would let this body live in a sibling YAML
+          # file. Tracked as a follow-up to PR #311.
           template: |
             server:
               port: 5553
@@ -119,7 +123,7 @@ trigger:
                   pkce: true
                   scopes: [openid, profile, email, offline_access]
         env:
-          - DICODE_DATADIR
+          - name: DICODE_DATADIR
           - name: BASE_URL
             value: "https://relay.example.com"
           - name: STATUS_PASSWORD

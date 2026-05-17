@@ -149,12 +149,18 @@ func expandSpec(spec *Spec, vars map[string]string) {
 	}
 }
 
-// expandOverrides walks the per-edge Overrides surface that mirrors top-level
-// spec fields. Only the surface actually consumed by the per-edge dispatch
-// path is touched — Params[].Default, Fs[].Path, and Env[].{From,Secret,Value}.
+// expandOverrides applies ${VAR} substitution in place to the supplied
+// *Overrides — Params[].Default, Fs[].Path, and Env[].{From,Secret,Value}
+// fields. Mirrors the per-field envFallback policy from the top-level
+// expandSpec.
+//
+// Only the surface actually consumed by the per-edge dispatch path is touched.
 // Other Overrides fields (Net, Runtime, Timeout, …) are either literal
 // strings, durations, or already opaque identifiers and don't need expansion.
-// See expandSpec's doc-block for the envFallback policy.
+//
+// Precondition: the *Overrides MUST NOT be aliased by any other goroutine
+// during the call. Caller is the spec loader (reconciler), which holds
+// the only reference at expansion time — same contract as expandSpec.
 func expandOverrides(o *Overrides, vars map[string]string) {
 	if o == nil {
 		return
