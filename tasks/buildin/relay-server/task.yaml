@@ -1,140 +1,216 @@
 apiVersion: dicode/v1
 kind: Task
 name: "Relay Server"
-description: >
-  Runs dicode-relay in-process under the daemon's Deno runtime. OAuth client
-  secrets and the status password come from Doppler via the existing
-  buildin/secret-providers/doppler task.
+description: |
+  Runs dicode-relay in-process under the daemon's Deno runtime.
 
-  Set the public base_url via task overrides:
-    dicode tasks override buildin/relay-server --param base_url=https://relay.example.com
-  (or via the WebUI overrides dialog).
+  The relay's config (relay.yaml) is rendered by a 2-stage preflight
+  pipeline before this daemon starts:
+
+    1. buildin/template renders the YAML body, substituting
+       ${BASE_URL}, ${STATUS_PASSWORD}, and per-provider OAuth
+       client_id/client_secret values from the env declared below
+       (mix of literal value and Doppler-fed entries).
+
+    2. buildin/write-local persists the rendered string to
+       ${DATADIR}/relay/relay.yaml at mode 0600.
+
+  Doppler rotation: re-run the renderer manually (e.g. via the WebUI
+  or 'dicode tasks run buildin/template' with the per-edge overrides
+  applied) — the engine re-fires the writer with fresh content and
+  restarts this daemon.
+
+  Operator setup (one-time): edit the BASE_URL value below to the
+  public hostname the relay is reachable at (or apply a taskset
+  override to that specific env entry). DOPPLER_TOKEN must be in
+  the dicode secrets store before first daemon start.
 
 runtime: deno
 
 trigger:
   daemon: true
   restart: always
+  before:
+    - task: buildin/template
+      overrides:
+        timeout: 30s
+        params:
+          template: |
+            server:
+              port: 5553
+              base_url: ${BASE_URL}
+              tls:
+                cert_file: ""
+                key_file: ""
+            status:
+              password: ${STATUS_PASSWORD}
+            relay:
+              timestamp_tolerance_s: 30
+              ping_interval_ms: 30000
+              pong_timeout_ms: 10000
+              request_timeout_ms: 30000
+              nonce_ttl_ms: 60000
+            broker:
+              session_ttl_ms: 300000
+              signing_key_file: ${DICODE_DATADIR}/relay/broker-signing.key
+              providers:
+                github:
+                  client_id: ${GITHUB_CLIENT_ID}
+                  client_secret: ${GITHUB_CLIENT_SECRET}
+                  pkce: true
+                  scopes: [user, repo]
+                slack:
+                  client_id: ${SLACK_CLIENT_ID}
+                  pkce: true
+                  scopes: [channels:read]
+                google:
+                  client_id: ${GOOGLE_CLIENT_ID}
+                  client_secret: ${GOOGLE_CLIENT_SECRET}
+                  pkce: true
+                  scopes: ["https://www.googleapis.com/auth/userinfo.email"]
+                spotify:
+                  client_id: ${SPOTIFY_CLIENT_ID}
+                  pkce: true
+                  scopes: [user-read-private, user-read-email]
+                linear:
+                  client_id: ${LINEAR_CLIENT_ID}
+                  pkce: true
+                  scopes: [read]
+                discord:
+                  client_id: ${DISCORD_CLIENT_ID}
+                  pkce: true
+                  scopes: [identify, email]
+                gitlab:
+                  client_id: ${GITLAB_CLIENT_ID}
+                  client_secret: ${GITLAB_CLIENT_SECRET}
+                  pkce: true
+                  scopes: [read_user, read_api]
+                airtable:
+                  client_id: ${AIRTABLE_CLIENT_ID}
+                  client_secret: ${AIRTABLE_CLIENT_SECRET}
+                  pkce: true
+                  scopes: ["data.records:read"]
+                notion:
+                  client_id: ${NOTION_CLIENT_ID}
+                  client_secret: ${NOTION_CLIENT_SECRET}
+                  pkce: false
+                  scopes: []
+                confluence:
+                  client_id: ${CONFLUENCE_CLIENT_ID}
+                  pkce: true
+                  scopes: ["read:me", "read:confluence-content.all", offline_access]
+                salesforce:
+                  client_id: ${SALESFORCE_CLIENT_ID}
+                  pkce: true
+                  scopes: [api, refresh_token]
+                stripe:
+                  client_id: ${STRIPE_CLIENT_ID}
+                  client_secret: ${STRIPE_CLIENT_SECRET}
+                  pkce: false
+                  scopes: [read_write]
+                office365:
+                  client_id: ${OFFICE365_CLIENT_ID}
+                  client_secret: ${OFFICE365_CLIENT_SECRET}
+                  pkce: true
+                  scopes: [offline_access, User.Read, Mail.Read]
+                azure:
+                  client_id: ${AZURE_CLIENT_ID}
+                  client_secret: ${AZURE_CLIENT_SECRET}
+                  pkce: true
+                  scopes: [openid, profile, email, offline_access]
+        env:
+          - DICODE_DATADIR
+          - name: BASE_URL
+            value: "https://relay.example.com"
+          - name: STATUS_PASSWORD
+            from: task:secret-providers/doppler
+          - name: GITHUB_CLIENT_ID
+            from: task:secret-providers/doppler
+            optional: true
+          - name: GITHUB_CLIENT_SECRET
+            from: task:secret-providers/doppler
+            optional: true
+          - name: SLACK_CLIENT_ID
+            from: task:secret-providers/doppler
+            optional: true
+          - name: GOOGLE_CLIENT_ID
+            from: task:secret-providers/doppler
+            optional: true
+          - name: GOOGLE_CLIENT_SECRET
+            from: task:secret-providers/doppler
+            optional: true
+          - name: SPOTIFY_CLIENT_ID
+            from: task:secret-providers/doppler
+            optional: true
+          - name: LINEAR_CLIENT_ID
+            from: task:secret-providers/doppler
+            optional: true
+          - name: DISCORD_CLIENT_ID
+            from: task:secret-providers/doppler
+            optional: true
+          - name: GITLAB_CLIENT_ID
+            from: task:secret-providers/doppler
+            optional: true
+          - name: GITLAB_CLIENT_SECRET
+            from: task:secret-providers/doppler
+            optional: true
+          - name: AIRTABLE_CLIENT_ID
+            from: task:secret-providers/doppler
+            optional: true
+          - name: AIRTABLE_CLIENT_SECRET
+            from: task:secret-providers/doppler
+            optional: true
+          - name: NOTION_CLIENT_ID
+            from: task:secret-providers/doppler
+            optional: true
+          - name: NOTION_CLIENT_SECRET
+            from: task:secret-providers/doppler
+            optional: true
+          - name: CONFLUENCE_CLIENT_ID
+            from: task:secret-providers/doppler
+            optional: true
+          - name: SALESFORCE_CLIENT_ID
+            from: task:secret-providers/doppler
+            optional: true
+          - name: STRIPE_CLIENT_ID
+            from: task:secret-providers/doppler
+            optional: true
+          - name: STRIPE_CLIENT_SECRET
+            from: task:secret-providers/doppler
+            optional: true
+          - name: OFFICE365_CLIENT_ID
+            from: task:secret-providers/doppler
+            optional: true
+          - name: OFFICE365_CLIENT_SECRET
+            from: task:secret-providers/doppler
+            optional: true
+          - name: AZURE_CLIENT_ID
+            from: task:secret-providers/doppler
+            optional: true
+          - name: AZURE_CLIENT_SECRET
+            from: task:secret-providers/doppler
+            optional: true
 
-params:
-  base_url:
-    type: string
-    required: true
-    description: >
-      Public URL the relay is reachable at (used as the OAuth callback origin).
-      No default — override per-host via:
-        dicode tasks override buildin/relay-server --param base_url=https://...
-      Example: https://relay.example.com (or your Cloudflare Tunnel hostname).
+    - task: buildin/write-local
+      overrides:
+        timeout: 30s
+        params:
+          content: "${input.output}"
+          path: "${DATADIR}/relay/relay.yaml"
+          mode: "0600"
+        fs:
+          - path: "${DATADIR}/relay"
+            permission: rw
 
 permissions:
   net:
     - "*"
   fs:
-    # The relay's loadBrokerSigningKey() writes ${DICODE_DATADIR}/relay/broker-signing.key
-    # on first start (and reads it on subsequent starts) so existing sessions
-    # survive task restarts. Scope is the relay/ subdir only — not all of
-    # DATADIR — so a buggy relay can't clobber the daemon's SQLite or secrets
-    # store. The reconciler expands ${DATADIR} at task-load time (see
-    # pkg/task/template.go); paths are then plumbed into --allow-read/-write.
     - path: "${DATADIR}/relay"
       permission: rw
   env:
-    # Read-only platform vars (no `from:`) — provided by the daemon at task spawn.
     - DICODE_DATADIR
     - DICODE_VERSION
-    # Set by task.ts from the `base_url` param so the relay's loadConfig()
-    # can resolve ${BASE_URL} in relay.yaml. Bare entry (no `from:`) — this
-    # is a non-secret runtime var the task body writes itself via Deno.env.set,
-    # not a value the daemon resolves.
-    - BASE_URL
-
-    # Required secret — task fails fast if absent from Doppler.
-    - name: STATUS_PASSWORD
-      from: task:secret-providers/doppler
-
-    # OAuth providers — all optional. The relay silently skips any provider
-    # whose client_id resolves to empty, so a partial Doppler config still
-    # starts a working relay with only the providers you populated.
-    # Provider set mirrors relay.yaml.example (dicode-ayo/dicode-relay).
-    - name: GITHUB_CLIENT_ID
-      from: task:secret-providers/doppler
-      optional: true
-    - name: GITHUB_CLIENT_SECRET
-      from: task:secret-providers/doppler
-      optional: true
-
-    - name: SLACK_CLIENT_ID
-      from: task:secret-providers/doppler
-      optional: true
-
-    - name: GOOGLE_CLIENT_ID
-      from: task:secret-providers/doppler
-      optional: true
-    - name: GOOGLE_CLIENT_SECRET
-      from: task:secret-providers/doppler
-      optional: true
-
-    - name: SPOTIFY_CLIENT_ID
-      from: task:secret-providers/doppler
-      optional: true
-
-    - name: LINEAR_CLIENT_ID
-      from: task:secret-providers/doppler
-      optional: true
-
-    - name: DISCORD_CLIENT_ID
-      from: task:secret-providers/doppler
-      optional: true
-
-    - name: GITLAB_CLIENT_ID
-      from: task:secret-providers/doppler
-      optional: true
-    - name: GITLAB_CLIENT_SECRET
-      from: task:secret-providers/doppler
-      optional: true
-
-    - name: AIRTABLE_CLIENT_ID
-      from: task:secret-providers/doppler
-      optional: true
-    - name: AIRTABLE_CLIENT_SECRET
-      from: task:secret-providers/doppler
-      optional: true
-
-    - name: NOTION_CLIENT_ID
-      from: task:secret-providers/doppler
-      optional: true
-    - name: NOTION_CLIENT_SECRET
-      from: task:secret-providers/doppler
-      optional: true
-
-    - name: CONFLUENCE_CLIENT_ID
-      from: task:secret-providers/doppler
-      optional: true
-
-    - name: SALESFORCE_CLIENT_ID
-      from: task:secret-providers/doppler
-      optional: true
-
-    - name: STRIPE_CLIENT_ID
-      from: task:secret-providers/doppler
-      optional: true
-    - name: STRIPE_CLIENT_SECRET
-      from: task:secret-providers/doppler
-      optional: true
-
-    - name: OFFICE365_CLIENT_ID
-      from: task:secret-providers/doppler
-      optional: true
-    - name: OFFICE365_CLIENT_SECRET
-      from: task:secret-providers/doppler
-      optional: true
-
-    - name: AZURE_CLIENT_ID
-      from: task:secret-providers/doppler
-      optional: true
-    - name: AZURE_CLIENT_SECRET
-      from: task:secret-providers/doppler
-      optional: true
 
 notify:
   on_success: false

@@ -237,47 +237,89 @@ spec, so silently accepting it would mislead operators.
 
 ### Daemon preflight via trigger.before
 
-Only valid on daemon tasks. Lists one-shot prereq tasks that must run
-to `status=success` before the daemon container starts. The engine
-re-fires every prereq on every preflight attempt — no
-"already-satisfied" short-circuit — because the point of preflight is
-to refresh ephemeral state (rendered configs, freshly rotated
-credentials) right before the daemon starts.
+Only valid on daemon tasks. Lists one-shot prereq tasks that the engine
+runs as a **sequential output-piping pipeline** before the daemon
+container starts. Each stage must reach `status=success` for the
+pipeline to advance; a failure short-circuits the rest of the list and
+leaves the daemon in `prereq_failed`. The engine re-fires every stage
+on every preflight attempt — no "already-satisfied" short-circuit —
+because the point of preflight is to refresh ephemeral state (rendered
+configs, freshly rotated credentials) right before the daemon starts.
 
-Each entry can be either a bare task-ID string (legacy form) or a
-mapping with `task:` plus optional `overrides:`:
+Each entry can be either a bare task-ID string (single-stage form) or
+a mapping with `task:` plus optional `overrides:`:
 
 ```yaml
 trigger:
   daemon: true
   restart: always
   before:
-    # bare-ID form
-    - fetch-credentials
-
-    # mapping form with per-edge overrides
-    - task: render-config
+    # Stage 1: render config from secrets + literal values.
+    - task: buildin/template
       overrides:
-        timeout: 30s
+        params:
+          template: |
+            base_url: ${BASE_URL}
+            password: ${STATUS_PASSWORD}
         env:
-          - name: TUNNEL_ID
-            from: task:doppler
+          - name: BASE_URL
+            value: "https://relay.example.com"
+          - name: STATUS_PASSWORD
+            from: task:secret-providers/doppler
+
+    # Stage 2: persist stage 1's rendered output to disk.
+    - task: buildin/write-local
+      overrides:
+        params:
+          content: "${input.output}"
+          path: "${DATADIR}/relay/relay.yaml"
+          mode: "0600"
+        fs:
+          - path: "${DATADIR}/relay"
+            permission: rw
 ```
 
 The two forms can be mixed within the same list. Per-edge overrides on
 a `before[]` entry use the same allowlist as `trigger.chain.overrides`
 (see table above).
 
-**Restart-on-prereq-rerun.** When any prereq listed in a daemon's
-`trigger.before` finishes with `status=success` later — for example, an
-operator runs `dicode tasks run render-config` to apply a config change
-— the engine queues a daemon restart. Restarts are coalesced per
-daemon (at most one in flight) so a flurry of prereq completions
-produces a single restart, not a thrash loop.
+**`${input.output}` interpolation.** The literal token `${input.output}`
+in a `before[i].overrides.params` `default` value (or in a
+`trigger.chain.params` value) is replaced at dispatch time with the
+upstream stage's return value. Only direct string returns flow through;
+non-string returns (numbers, lists, structured payloads) leave the
+downstream's `${input.output}` unresolved and the dispatch fails loudly
+rather than passing the literal token through. The interpolation is
+exact-match on the whole value — embedded forms like
+`"prefix-${input.output}-x"` are not currently substituted.
+
+**First-stage validation.** The first stage (`before[0]`) has no
+upstream return value, so any `${input.output}` reference on
+`before[0].overrides.params` is rejected at task-registration time with
+an explicit error. Use a literal default or an env-projected secret on
+stage 0; downstream stages can then pipe via `${input.output}`.
+
+**Mid-pipeline re-fire propagation.** When an intermediate stage at
+index `i` re-runs successfully (e.g. an operator runs
+`dicode tasks run buildin/template` to pick up a rotated Doppler
+secret), the engine re-fires stages `[i+1..n-1]` sequentially with the
+re-run's fresh return value as the initial `${input.output}`, then
+restarts the daemon to pick up the propagated config. Stages
+`[0..i-1]` are NOT re-fired. Propagations are coalesced per daemon
+(at most one in flight) so a flurry of upstream completions produces a
+single propagation + restart, not a thrash loop.
 
 **Cross-spec validation.** At registration time the engine rejects
 references to unknown tasks and to other daemons — only one-shot tasks
 can be preflights. Self-references are rejected at config-load.
+
+**Semantic change vs PR #300.** Before PR3, `trigger.before` entries
+ran in parallel and were treated as independent prereqs (no piping).
+The new sequential semantics preserve correctness for prior consumers
+whose prereqs were commutative (the cloudflared docs example fits this
+shape), while enabling composable pipelines (render → persist → start
+daemon) for new consumers. If you need parallel preflights, file an
+issue requesting a `parallel: true` opt-in.
 
 For an end-to-end example combining daemon preflight, per-edge
 overrides, `${DATADIR}` volumes, and `run_result.enabled: false`, see

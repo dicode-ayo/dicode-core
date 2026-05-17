@@ -2,23 +2,26 @@
  * task.test.ts — unit tests for buildin/relay-server.
  *
  * Exercises four cases:
- *   1. base_url param missing → task body throws before touching the relay.
- *   2. DICODE_DATADIR unset → ensureSigningKey throws with a clear error.
- *   3. ensureSigningKey on a fresh datadir creates a readable PKCS8 PEM at
+ *   1. DICODE_DATADIR unset → ensureSigningKey throws with a clear error.
+ *   2. ensureSigningKey on a fresh datadir creates a readable PKCS8 PEM at
  *      ${DICODE_DATADIR}/relay/broker-signing.key with mode 0o600.
- *   4. ensureSigningKey is idempotent — when the file already exists it
+ *   3. ensureSigningKey is idempotent — when the file already exists it
  *      neither regenerates nor throws.
- *   5. valid base_url + ${DICODE_DATADIR}/relay/broker-signing.key staged
- *      on disk + STATUS_PASSWORD set → startServer({dryRun:true}) resolves.
+ *   4. valid ${DICODE_DATADIR}/relay/{broker-signing.key,relay.yaml} staged
+ *      on disk → startServer({dryRun:true}) resolves.
  *
- * Case 1 exercises the task body (./task.ts) via a hand-rolled SDK mock —
- * the harness in tasks/sdk-test.ts would dynamically re-import task.ts and
- * lose env determinism between cases. Cases 2-4 call the exported
- * ensureSigningKey directly. Case 5 calls startServer directly so it stays
+ * Cases 1-3 call the exported ensureSigningKey directly. Case 4 calls
+ * startServer directly (not via the task body's main()) so it stays
  * decoupled from the supervisor's signal-handling scaffolding, which would
  * otherwise leak Deno.addSignalListener handles into the test runner.
  *
- * Note (deviation from spec): the spec called for a "STATUS_PASSWORD
+ * Note on the dropped "base_url param missing" case: PR3 moved relay.yaml
+ * rendering into a preflight pipeline (buildin/template → buildin/write-local),
+ * so the task body no longer reads a base_url param — BASE_URL is set as an
+ * env entry on the per-edge override of the template renderer in task.yaml.
+ * There is no longer a "missing base_url" failure mode reachable from main().
+ *
+ * Note (carried from origin/main): the spec called for a "STATUS_PASSWORD
  * missing → throws" case. The published 0.1.6 relay's loadConfig() does
  * not throw on unresolved ${VAR} — it logs a warning and collapses to "".
  * Under 0.1.7+ the relay also throws ENOENT if the signing key file is
@@ -27,7 +30,7 @@
  * from the task body's happy path.
  */
 
-import { assertEquals, assertRejects, assertThrows } from "jsr:@std/assert@1";
+import { assertEquals, assertThrows } from "jsr:@std/assert@1";
 import { createPrivateKey, generateKeyPairSync } from "node:crypto";
 import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -74,8 +77,8 @@ function clearRelayEnv(): void {
 /**
  * Create a fresh DICODE_DATADIR under a unique temp dir, seed it with a
  * valid ECDSA P-256 broker signing key at ${DICODE_DATADIR}/relay/
- * broker-signing.key, and export DICODE_DATADIR so the YAML's
- * ${DICODE_DATADIR}/relay/broker-signing.key reference resolves to it.
+ * broker-signing.key, and export DICODE_DATADIR so subsequent calls
+ * resolve to it.
  */
 function stageDatadirWithSigningKey(): string {
   const datadir = Deno.makeTempDirSync({ prefix: "dicode-relay-test-" });
@@ -91,58 +94,6 @@ function stageDatadirWithSigningKey(): string {
   Deno.env.set("DICODE_DATADIR", datadir);
   return datadir;
 }
-
-interface MockSdk {
-  params: {
-    get: (k: string) => Promise<string | null>;
-    all: () => Promise<Record<string, string>>;
-  };
-  kv: {
-    get: () => Promise<unknown>;
-    set: () => Promise<void>;
-    delete: () => Promise<void>;
-    list: () => Promise<Record<string, unknown>>;
-  };
-  input: unknown;
-  output: () => Promise<void>;
-  mcp: { list_tools: () => Promise<unknown[]>; call: () => Promise<unknown> };
-  dicode: Record<string, unknown>;
-}
-
-function makeSdk(paramValues: Record<string, string>): MockSdk {
-  return {
-    params: {
-      get: (k: string) => Promise.resolve(paramValues[k] ?? null),
-      all: () => Promise.resolve({ ...paramValues }),
-    },
-    kv: {
-      get: () => Promise.resolve(undefined),
-      set: () => Promise.resolve(),
-      delete: () => Promise.resolve(),
-      list: () => Promise.resolve({}),
-    },
-    input: undefined,
-    output: () => Promise.resolve(),
-    mcp: { list_tools: () => Promise.resolve([]), call: () => Promise.resolve({}) },
-    dicode: {},
-  };
-}
-
-Deno.test("rejects when base_url param is missing", async () => {
-  clearRelayEnv();
-  Deno.env.set("STATUS_PASSWORD", "test-pw");
-  stageDatadirWithSigningKey();
-
-  const { default: main } = await import("./task.ts");
-  const sdk = makeSdk({}); // base_url intentionally unset.
-
-  await assertRejects(
-    // deno-lint-ignore no-explicit-any
-    () => main(sdk as any),
-    Error,
-    "base_url param is required",
-  );
-});
 
 Deno.test("ensureSigningKey throws when DICODE_DATADIR is unset", () => {
   clearRelayEnv();
@@ -194,14 +145,40 @@ Deno.test(
 );
 
 Deno.test(
-  "valid base_url + staged datadir → startServer({dryRun:true}) resolves",
+  "staged datadir + pre-rendered relay.yaml → startServer({dryRun:true}) resolves",
   async () => {
     clearRelayEnv();
-    Deno.env.set("STATUS_PASSWORD", "test-pw");
-    stageDatadirWithSigningKey();
-    Deno.env.set("BASE_URL", "https://relay.example.com");
+    const datadir = stageDatadirWithSigningKey();
 
-    const configPath = new URL("./relay.yaml", import.meta.url).pathname;
+    // PR3: the preflight pipeline (buildin/template → buildin/write-local)
+    // renders this YAML before the daemon's main() runs. In production it
+    // gets the ${VAR} placeholders substituted by the renderer's per-edge
+    // env override; here we stage a literal-value YAML so loadConfig
+    // doesn't depend on STATUS_PASSWORD / BASE_URL being set in the test's
+    // process env.
+    const relayYaml = `
+server:
+  port: 5553
+  base_url: "https://test.example.com"
+  tls:
+    cert_file: ""
+    key_file: ""
+status:
+  password: "test-pass"
+relay:
+  timestamp_tolerance_s: 30
+  ping_interval_ms: 30000
+  pong_timeout_ms: 10000
+  request_timeout_ms: 30000
+  nonce_ttl_ms: 60000
+broker:
+  session_ttl_ms: 300000
+  signing_key_file: ${datadir}/relay/broker-signing.key
+  providers: {}
+`;
+    const configPath = join(datadir, "relay", "relay.yaml");
+    writeFileSync(configPath, relayYaml, { mode: 0o600 });
+
     const handle = await startServer({ configPath, dryRun: true });
     await handle.close();
   },
