@@ -1,0 +1,15 @@
+apiVersion: dicode/v1
+kind: Task
+name: input-output-non-string-upstream
+description: |
+  Test-only upstream that returns a JSON object instead of a string.
+  Used by pkg/trigger/e2e_input_output_test.go to verify the
+  ${input.output} resolver fails loudly (short-circuits the chain
+  dispatch) when the upstream's return value is not a string.
+
+  buildin/template only ever returns strings, so the negative case
+  needs a dedicated fixture.
+runtime: deno
+trigger:
+  manual: true
+timeout: 10s

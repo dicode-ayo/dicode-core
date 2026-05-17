@@ -1,0 +1,25 @@
+apiVersion: dicode/v1
+kind: Task
+name: input-output-downstream
+description: |
+  Test-only chain consumer. Reads input.value (supplied via chain.params)
+  and writes it to ${MARKER_PATH}. Used by pkg/trigger/e2e_input_output_test.go
+  to verify chain.params.value: "${input.output}" interpolation reaches
+  the downstream as the upstream's resolved string return.
+
+  The fixture ships with an empty chain.params map; the Go test mutates
+  spec.Trigger.Chain.Params after LoadDir so the same fixture can cover
+  both the bare-token case (value: "${input.output}") and the embedded
+  literal case (value: "prefix-${input.output}-suffix").
+runtime: deno
+trigger:
+  chain:
+    from: input-output-upstream
+    on: success
+permissions:
+  env:
+    - MARKER_PATH
+  fs:
+    - path: "/tmp"
+      permission: rw
+timeout: 10s

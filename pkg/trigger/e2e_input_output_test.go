@@ -32,11 +32,15 @@ package trigger
 //     on-disk Deno task returning a JSON object — buildin/template
 //     returns only strings, so the negative case needs its own fixture.
 //
-// Every task in this file is a real task.yaml + task.ts written into a
-// t.TempDir() and loaded via task.LoadDir, matching the established
-// pattern in e2e_template_preflight_pipeline_test.go and
-// e2e_secret_provider_test.go. No inline *task.Spec{} literals — the
-// production loader is the system under test for spec construction.
+// Every task in this file is a NORMAL on-disk dicode task fixture
+// committed under tests/e2e/fixtures/tasks/input-output-* — the same
+// pattern the Playwright e2e suite already uses for chain-target,
+// hello-manual, etc. The Go test loads each fixture via task.LoadDir
+// (production loader is the system under test for spec construction),
+// then mutates spec.Trigger.Chain.Params on the downstream so a single
+// fixture can drive both the bare-token and embedded-literal cases.
+// No YAML/TS heredocs in this file — fixtures are editable, lintable,
+// and runnable via `dicode tasks run` like any other task.
 //
 // PR #3 in the same epic covers `${input.output}` on `trigger.before`
 // overrides; that's out of scope here. We only cover the chain edge.
@@ -80,6 +84,27 @@ func buildinTemplateDir(t *testing.T) string {
 	return dir
 }
 
+// inputOutputFixtureDir returns the absolute path to the on-disk
+// fixture task directory under tests/e2e/fixtures/tasks/<name>/.
+// Anchored the same way as buildinTemplateDir: via runtime.Caller so
+// `go test` from any CWD finds the fixtures. This keeps the e2e
+// fixtures co-located with the Playwright suite's fixtures
+// (tests/e2e/fixtures/tasks/...) rather than buried in pkg/trigger/.
+func inputOutputFixtureDir(t *testing.T, name string) string {
+	t.Helper()
+	_, thisFile, _, ok := goruntime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller(0) failed; cannot anchor fixture path")
+	}
+	pkgDir := filepath.Dir(thisFile)               // .../pkg/trigger
+	repoRoot := filepath.Dir(filepath.Dir(pkgDir)) // .../
+	dir := filepath.Join(repoRoot, "tests", "e2e", "fixtures", "tasks", name)
+	if _, err := os.Stat(filepath.Join(dir, "task.yaml")); err != nil {
+		t.Fatalf("fixture task.yaml not found at %s: %v", dir, err)
+	}
+	return dir
+}
+
 // loadBuildinTemplateAs loads the real `tasks/buildin/template/` task
 // from disk and rebinds its ID + Name so the test can wire a downstream
 // chain trigger that references this upstream by a stable, test-scoped
@@ -112,159 +137,41 @@ func loadBuildinTemplateAs(t *testing.T, id string, envAllow []task.EnvEntry) *t
 	return spec
 }
 
-// writeChainDownstreamTask writes a Deno task that chains off
-// upstreamID with a single chain.param whose value is `${input.output}`
-// (or, for the embedded-token case, a literal containing the token).
-// The task.ts body reads input.<chainParam>, asserts it's a string, and
-// writes it to ${MARKER_PATH}. Returns the task directory path so the
-// caller can task.LoadDir it.
+// loadInputOutputDownstream loads the shared input-output-downstream
+// fixture and injects chain.params.value with the caller-supplied
+// expression (typically "${input.output}" or an embedded literal).
 //
-// Mirrors writeRendererTask / writeVerifierTask in
-// e2e_template_preflight_pipeline_test.go — task.yaml + task.ts on
-// disk, loaded by the production loader, no inline *task.Spec{}.
-func writeChainDownstreamTask(t *testing.T, dir, id, markerDir, upstreamID, chainParam, chainValue string) string {
+// The fixture's on-disk task.yaml declares chain.from but no
+// chain.params — the test parameterises that per case so a single
+// fixture covers both the bare-token substitution and the
+// embedded-literal pass-through scenarios. We re-validate after the
+// mutation so any spec-level regression in the chain.params surface
+// surfaces here rather than at dispatch time.
+func loadInputOutputDownstream(t *testing.T, chainValue string) *task.Spec {
 	t.Helper()
-	td := filepath.Join(dir, id)
-	if err := os.MkdirAll(td, 0o755); err != nil {
-		t.Fatal(err)
+	spec, err := task.LoadDir(inputOutputFixtureDir(t, "input-output-downstream"))
+	if err != nil {
+		t.Fatalf("LoadDir input-output-downstream: %v", err)
 	}
-	// chainValue is rendered verbatim into a double-quoted YAML scalar;
-	// the only character we ever pass that the YAML parser cares about
-	// is the dollar sign in ${input.output}, which is safe inside
-	// double-quoted scalars. The literal `${input.output}` and the
-	// embedded form `prefix-${input.output}-suffix` both round-trip
-	// cleanly without escaping.
-	yaml := `apiVersion: dicode/v1
-kind: Task
-name: ` + id + `
-runtime: deno
-trigger:
-  chain:
-    from: ` + upstreamID + `
-    on: success
-    params:
-      ` + chainParam + `: "` + chainValue + `"
-permissions:
-  env:
-    - MARKER_PATH
-  fs:
-    - path: ` + markerDir + `
-      permission: rw
-timeout: 30s
-`
-	// task.ts body: pull input.<chainParam>, fail loud if it's not a
-	// string, write to ${MARKER_PATH}. The marker file is the
-	// load-bearing assertion in every test using this helper — its
-	// content is exactly what the chain dispatcher delivered.
-	ts := `
-export default async function main({ input }: any) {
-  const path = Deno.env.get("MARKER_PATH");
-  if (!path) throw new Error("MARKER_PATH not set");
-  const v = input["` + chainParam + `"];
-  if (typeof v !== "string") {
-    throw new Error("` + chainParam + ` is not a string; input=" + JSON.stringify(input));
-  }
-  await Deno.writeTextFile(path, v);
-}
-`
-	if err := os.WriteFile(filepath.Join(td, "task.yaml"), []byte(yaml), 0o644); err != nil {
-		t.Fatal(err)
+	if spec.Trigger.Chain == nil {
+		t.Fatal("input-output-downstream fixture missing trigger.chain block")
 	}
-	if err := os.WriteFile(filepath.Join(td, "task.ts"), []byte(ts), 0o644); err != nil {
-		t.Fatal(err)
+	spec.Trigger.Chain.Params = map[string]any{"value": chainValue}
+	if err := spec.Validate(); err != nil {
+		t.Fatalf("input-output-downstream re-validate after Params bind: %v", err)
 	}
-	return td
-}
-
-// writeChainDownstreamNoopTask writes a downstream that, IF the chain
-// dispatcher mistakenly fires it, will write a "ran" marker to disk.
-// The non-string-upstream test uses this so the absence of the marker
-// proves the resolver short-circuited before any downstream body ran.
-// Permissions + chain shape match writeChainDownstreamTask so the only
-// behavioural difference is the body.
-func writeChainDownstreamNoopTask(t *testing.T, dir, id, markerDir, upstreamID string) string {
-	t.Helper()
-	td := filepath.Join(dir, id)
-	if err := os.MkdirAll(td, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	yaml := `apiVersion: dicode/v1
-kind: Task
-name: ` + id + `
-runtime: deno
-trigger:
-  chain:
-    from: ` + upstreamID + `
-    on: success
-    params:
-      x: "${input.output}"
-permissions:
-  env:
-    - MARKER_PATH
-  fs:
-    - path: ` + markerDir + `
-      permission: rw
-timeout: 30s
-`
-	ts := `
-export default async function main() {
-  const path = Deno.env.get("MARKER_PATH");
-  if (path) await Deno.writeTextFile(path, "ran");
-}
-`
-	if err := os.WriteFile(filepath.Join(td, "task.yaml"), []byte(yaml), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(td, "task.ts"), []byte(ts), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	return td
-}
-
-// writeNonStringUpstreamTask emits a manual-triggered Deno task whose
-// main() returns a JSON object rather than a string. The chain
-// dispatcher's stringRet should treat the non-string return as "no
-// upstream available" and short-circuit the downstream — that's the
-// behaviour TestE2E_InputOutput_NonStringUpstreamFailsLoudly verifies.
-// buildin/template only ever returns strings so the negative case
-// needs its own fixture.
-func writeNonStringUpstreamTask(t *testing.T, dir, id string) string {
-	t.Helper()
-	td := filepath.Join(dir, id)
-	if err := os.MkdirAll(td, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	yaml := `apiVersion: dicode/v1
-kind: Task
-name: ` + id + `
-runtime: deno
-trigger:
-  manual: true
-timeout: 30s
-`
-	ts := `
-export default async function main() {
-  return { x: 1, y: "hello" };
-}
-`
-	if err := os.WriteFile(filepath.Join(td, "task.yaml"), []byte(yaml), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(td, "task.ts"), []byte(ts), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	return td
+	return spec
 }
 
 // TestE2E_InputOutput_ChainParamsStringSubstitution drives the
 // happy-path success-chain dispatch through real Deno: the REAL
 // `tasks/buildin/template/` task loaded from disk renders a literal
 // string ("hello from upstream" — no placeholders, so no env wiring
-// needed) and feeds a downstream whose `chain.params.greeting` is the
+// needed) and feeds a downstream whose `chain.params.value` is the
 // literal `${input.output}` token. The downstream's task body reads
-// `input.greeting` and writes it to a marker file, proving the
-// resolver substituted the token BEFORE the engine packaged the input
-// for delivery.
+// `input.value` and writes it to a marker file, proving the resolver
+// substituted the token BEFORE the engine packaged the input for
+// delivery.
 //
 // Using the real buildin/template task exercises the production code
 // path (its `run_result.enabled: false` + in-memory cache return) that
@@ -276,29 +183,27 @@ func TestE2E_InputOutput_ChainParamsStringSubstitution(t *testing.T) {
 		t.Skip("requires Deno subprocess")
 	}
 
-	tasksDir := t.TempDir()
 	markerDir := t.TempDir()
 	markerPath := filepath.Join(markerDir, "greeting.marker")
 	t.Setenv("MARKER_PATH", markerPath)
 
 	e := newTestEnv(t)
 
-	const upstreamID = "upstream-string"
-	const downstreamID = "downstream-marker"
+	const upstreamID = "input-output-upstream"
 	// No ${VAR} placeholders → buildin/template renders this verbatim
-	// and the downstream sees it as input.greeting after token
+	// and the downstream sees it as input.value after token
 	// substitution. Keeps the env-permission surface empty.
 	const upstreamReturn = "hello from upstream"
 
-	// Downstream — task.yaml + task.ts on disk, loaded via task.LoadDir.
-	// chain.params.greeting holds the literal ${input.output} token; the
-	// task body reads input.greeting and writes it to disk so the test
-	// can observe the resolved value reaching a real task body.
-	downDir := writeChainDownstreamTask(t, tasksDir, downstreamID, markerDir, upstreamID, "greeting", "${input.output}")
-	downstream, err := task.LoadDir(downDir)
-	if err != nil {
-		t.Fatalf("LoadDir downstream: %v", err)
-	}
+	// Downstream — on-disk fixture loaded via task.LoadDir. We inject
+	// the bare ${input.output} token as chain.params.value so the
+	// resolver substitutes the upstream's return string before
+	// dispatch. The downstream ID is the fixture dir basename
+	// ("input-output-downstream"); its chain.from already points at
+	// "input-output-upstream" so loadBuildinTemplateAs binds the
+	// upstream to that exact ID.
+	downstream := loadInputOutputDownstream(t, "${input.output}")
+	downstreamID := downstream.ID
 	if err := e.reg.Register(downstream); err != nil {
 		t.Fatalf("reg.Register downstream: %v", err)
 	}
@@ -352,10 +257,8 @@ func TestE2E_InputOutput_ChainParamsStringSubstitution(t *testing.T) {
 // Why this case uses a dedicated on-disk fixture rather than
 // buildin/template: buildin/template's contract is "render a string
 // from a template", so it can never return a non-string. The
-// negative-case fixture needs a task that actually returns an object —
-// writeNonStringUpstreamTask emits a minimal task.yaml + task.ts to
-// drive that, loaded by the production loader exactly like every
-// other task in this suite.
+// negative-case fixture (input-output-non-string-upstream) returns a
+// JSON object explicitly.
 //
 // This is the e2e companion to
 // TestOnFailureChainDispatch_NonStringUpstreamSkips (which drives the
@@ -368,41 +271,49 @@ func TestE2E_InputOutput_NonStringUpstreamFailsLoudly(t *testing.T) {
 		t.Skip("requires Deno subprocess")
 	}
 
-	tasksDir := t.TempDir()
 	markerDir := t.TempDir()
 	markerPath := filepath.Join(markerDir, "didrun.marker")
 	t.Setenv("MARKER_PATH", markerPath)
 
 	e := newTestEnv(t)
 
-	const upstreamID = "upstream-object"
-	const downstreamID = "downstream-skipped"
-
-	// Downstream — would write a "did-run" marker if it actually
-	// dispatched. The resolver must short-circuit before this body
-	// ever executes. On-disk task.yaml + task.ts, loaded via
-	// task.LoadDir.
-	downDir := writeChainDownstreamNoopTask(t, tasksDir, downstreamID, markerDir, upstreamID)
-	downstream, err := task.LoadDir(downDir)
+	// Downstream — input-output-noop-downstream fixture. Its on-disk
+	// chain.from already points at "input-output-non-string-upstream"
+	// so no rebind is needed; LoadDir sets spec.ID to the dir basename
+	// "input-output-noop-downstream". We bind chain.params.value to
+	// ${input.output} after load so the dispatcher has a token to
+	// resolve — and so the resolver's short-circuit (because the
+	// upstream returned a non-string) is what's being tested, not a
+	// "no params, no resolution needed" pass-through. If the resolver
+	// mistakenly fires the task body anyway, it drops a "ran" marker
+	// we can detect.
+	downstream, err := task.LoadDir(inputOutputFixtureDir(t, "input-output-noop-downstream"))
 	if err != nil {
-		t.Fatalf("LoadDir downstream: %v", err)
+		t.Fatalf("LoadDir input-output-noop-downstream: %v", err)
 	}
+	if downstream.Trigger.Chain == nil {
+		t.Fatal("input-output-noop-downstream fixture missing trigger.chain block")
+	}
+	downstream.Trigger.Chain.Params = map[string]any{"value": "${input.output}"}
+	if err := downstream.Validate(); err != nil {
+		t.Fatalf("noop downstream re-validate after Params bind: %v", err)
+	}
+	downstreamID := downstream.ID
 	if err := e.reg.Register(downstream); err != nil {
 		t.Fatalf("reg.Register downstream: %v", err)
 	}
 
-	// Upstream returns a JSON OBJECT — stringRet's contract turns
-	// every non-string return into "", which propagates as
-	// ErrInputUnavailable through ResolveInputOutputMap and causes
-	// the chain dispatch to skip with an error log. On-disk
-	// task.yaml + task.ts (writeNonStringUpstreamTask) rather than
-	// buildin/template because buildin/template only ever returns
-	// strings.
-	upDir := writeNonStringUpstreamTask(t, tasksDir, upstreamID)
-	upstream, err := task.LoadDir(upDir)
+	// Upstream — input-output-non-string-upstream fixture returns a
+	// JSON object. stringRet's contract turns every non-string return
+	// into "", which propagates as ErrInputUnavailable through
+	// ResolveInputOutputMap and causes the chain dispatch to skip with
+	// an error log. The downstream fixture's chain.from references
+	// this ID directly so no rebind is needed.
+	upstream, err := task.LoadDir(inputOutputFixtureDir(t, "input-output-non-string-upstream"))
 	if err != nil {
-		t.Fatalf("LoadDir upstream: %v", err)
+		t.Fatalf("LoadDir input-output-non-string-upstream: %v", err)
 	}
+	upstreamID := upstream.ID
 	if err := e.reg.Register(upstream); err != nil {
 		t.Fatalf("reg.Register upstream: %v", err)
 	}
@@ -463,26 +374,21 @@ func TestE2E_InputOutput_EmbeddedTokenPassesThroughLiterally(t *testing.T) {
 		t.Skip("requires Deno subprocess")
 	}
 
-	tasksDir := t.TempDir()
 	markerDir := t.TempDir()
 	markerPath := filepath.Join(markerDir, "embedded.marker")
 	t.Setenv("MARKER_PATH", markerPath)
 
 	e := newTestEnv(t)
 
-	const upstreamID = "upstream-embed"
-	const downstreamID = "downstream-embed"
+	const upstreamID = "input-output-upstream"
 	const embeddedLiteral = "prefix-${input.output}-suffix"
 
-	// Downstream — task.yaml + task.ts on disk, loaded via task.LoadDir.
-	// chain.params.embedded holds the embedded form; the marker MUST
-	// receive it verbatim because partial interpolation is outside the
-	// resolver's grammar.
-	downDir := writeChainDownstreamTask(t, tasksDir, downstreamID, markerDir, upstreamID, "embedded", embeddedLiteral)
-	downstream, err := task.LoadDir(downDir)
-	if err != nil {
-		t.Fatalf("LoadDir downstream: %v", err)
-	}
+	// Downstream — same fixture as the happy-path test, just with the
+	// embedded literal bound to chain.params.value. The marker MUST
+	// receive it verbatim because partial interpolation is outside
+	// the resolver's grammar.
+	downstream := loadInputOutputDownstream(t, embeddedLiteral)
+	downstreamID := downstream.ID
 	if err := e.reg.Register(downstream); err != nil {
 		t.Fatalf("reg.Register downstream: %v", err)
 	}
