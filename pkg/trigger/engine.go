@@ -649,7 +649,17 @@ func (e *Engine) registerDaemon(spec *task.Spec) {
 // preflight chain first and only fires the daemon if every prereq returns
 // status=success. Sets daemonStates throughout for WebUI visibility.
 func (e *Engine) startDaemon(spec *task.Spec) {
-	if len(spec.Trigger.Before) > 0 {
+	e.startDaemonInternal(spec, false)
+}
+
+// startDaemonInternal is startDaemon with a switch for skipping the
+// preflight pipeline. When skipPrereqs is true the daemon is fired
+// immediately — used by the mid-pipeline re-fire path
+// (notifyPrereqCompletion → propagateBeforeRerun) which has already
+// replayed descendant stages with fresh ${input.output} and would
+// otherwise double-run the full pipeline on restart.
+func (e *Engine) startDaemonInternal(spec *task.Spec, skipPrereqs bool) {
+	if !skipPrereqs && len(spec.Trigger.Before) > 0 {
 		e.setDaemonState(spec.ID, DaemonPrereqRunning)
 		if err := e.runPrereqs(context.Background(), spec); err != nil {
 			e.setDaemonState(spec.ID, DaemonPrereqFailed)
@@ -1080,7 +1090,7 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 	// or cancel does NOT trigger a restart — see the failure-semantics
 	// commit and tests for the rationale.
 	if runStatus == registry.StatusSuccess {
-		e.notifyPrereqCompletion(completedTaskID)
+		e.notifyPrereqCompletion(completedTaskID, output)
 	}
 
 	// Declared chain triggers.

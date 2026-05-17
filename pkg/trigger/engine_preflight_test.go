@@ -239,7 +239,14 @@ func (p *preflightExec) Execute(ctx context.Context, spec *task.Spec, opts pkgru
 	}
 	res := &pkgruntime.RunResult{}
 	if retFn != nil {
-		res.ReturnValue = retFn(spec.ID, opts.RunID, &specCopy)
+		v := retFn(spec.ID, opts.RunID, &specCopy)
+		res.ReturnValue = v
+		// Mirror the Deno runtime's default (runtime/deno/runtime.go:
+		// "r.ChainInput = result.ReturnValue" when no structured
+		// output is present). FireChain — and the mid-pipeline re-fire
+		// propagator — reads ChainInput when an upstream completes; we
+		// want tests to see the same value flow.
+		res.ChainInput = v
 	}
 	_ = p.reg.FinishRun(context.Background(), opts.RunID, status)
 	return res, nil
@@ -1040,5 +1047,124 @@ func TestBefore_FailureShortCircuits(t *testing.T) {
 
 	if bCalled.Load() {
 		t.Error("stage-b ran despite stage-a failure; pipeline did not short-circuit")
+	}
+}
+
+// TestBefore_MidPipelineReFirePropagates verifies that re-firing an
+// intermediate stage replays its descendants with fresh
+// ${input.output} (and only its descendants — earlier stages are
+// untouched), then restarts the daemon.
+//
+// Without descendant propagation, the daemon would restart on the
+// re-fired stage's success but consume the writer's STALE last-known
+// output — defeating the point of mid-pipeline re-fire as a config-
+// rotation primitive.
+func TestBefore_MidPipelineReFirePropagates(t *testing.T) {
+	eng, reg, exec := newPreflightEnv(t)
+
+	var renderCalls atomic.Int32
+	exec.setReturnFn("render", func(_, _ string, _ *task.Spec) interface{} {
+		return fmt.Sprintf("render-run-%d", renderCalls.Add(1))
+	})
+	render := makeOneShotSpec("render")
+	if err := reg.Register(render); err != nil {
+		t.Fatalf("register render: %v", err)
+	}
+
+	// Capture each writer dispatch's content default so we can observe
+	// the propagated update.
+	var writerContents []string
+	var writerMu sync.Mutex
+	exec.setReturnFn("write", func(_, _ string, spec *task.Spec) interface{} {
+		writerMu.Lock()
+		defer writerMu.Unlock()
+		for _, p := range spec.Params {
+			if p.Name == "content" {
+				writerContents = append(writerContents, p.Default)
+			}
+		}
+		return nil
+	})
+	writer := &task.Spec{
+		ID:      "write",
+		Name:    "write",
+		Runtime: task.RuntimeDeno,
+		Trigger: task.TriggerConfig{Manual: true},
+		Params:  task.Params{{Name: "content", Required: true}},
+		Enabled: true,
+	}
+	if err := reg.Register(writer); err != nil {
+		t.Fatalf("register writer: %v", err)
+	}
+
+	daemon := &task.Spec{
+		ID:      "d",
+		Name:    "d",
+		Runtime: task.RuntimeDocker,
+		Docker:  &task.DockerConfig{Image: "alpine"},
+		Trigger: task.TriggerConfig{
+			Daemon:  true,
+			Restart: "never",
+			Before: []task.BeforeEntry{
+				{Task: "render"},
+				{
+					Task: "write",
+					Overrides: &task.Overrides{
+						Params: task.ParamOverrides{
+							{Name: "content", Default: "${input.output}"},
+						},
+					},
+				},
+			},
+		},
+		Enabled: true,
+	}
+	if err := reg.Register(daemon); err != nil {
+		t.Fatalf("register daemon: %v", err)
+	}
+	exec.markDaemon("d")
+
+	if err := eng.Register(daemon); err != nil {
+		t.Fatalf("eng.Register: %v", err)
+	}
+
+	// First boot: render-run-1 lands on writer.
+	waitUntil(t, 5*time.Second, func() bool {
+		writerMu.Lock()
+		defer writerMu.Unlock()
+		return len(writerContents) >= 1
+	}, "writer never received first content")
+	writerMu.Lock()
+	if writerContents[0] != "render-run-1" {
+		t.Errorf("writer[0] = %q; want render-run-1", writerContents[0])
+	}
+	writerMu.Unlock()
+	waitUntil(t, 5*time.Second, func() bool {
+		return eng.DaemonState("d") == DaemonRunning
+	}, "daemon never reached Running on first boot")
+
+	// Re-fire the renderer; the engine must replay the writer with the
+	// new render output, then restart the daemon.
+	if _, err := eng.FireManual(context.Background(), "render", nil); err != nil {
+		t.Fatalf("FireManual render: %v", err)
+	}
+
+	waitUntil(t, 10*time.Second, func() bool {
+		writerMu.Lock()
+		defer writerMu.Unlock()
+		return len(writerContents) >= 2
+	}, "writer never re-ran after render re-fire (no descendant propagation)")
+	writerMu.Lock()
+	got := writerContents[1]
+	writerMu.Unlock()
+	if got != "render-run-2" {
+		t.Errorf("writer[1] = %q; want render-run-2 (descendant did not see fresh upstream output)", got)
+	}
+
+	// Daemon must return to Running after the propagation completes.
+	if !waitForCond(10*time.Second, func() bool {
+		return eng.DaemonState("d") == DaemonRunning
+	}) {
+		t.Errorf("daemon never returned to Running after mid-pipeline re-fire; state=%v", eng.DaemonState("d"))
 	}
 }
