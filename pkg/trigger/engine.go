@@ -741,21 +741,28 @@ func (e *Engine) startDaemonInternal(spec *task.Spec, skipPrereqs bool) {
 // propagateBeforeRerun (commit 8472642). Long first-boot preflights
 // — many stages, each potentially dispatching a real container — can
 // easily span a shutdown or unregister window opened by an operator
-// while we're mid-pipeline. Re-checking before the loop and at the
-// top of each iteration lets the engine cleanly abandon the preflight
-// rather than push the daemon through to fireAsync on a torn-down
-// engine or unregistered daemon. Returns nil on bail (with a debug
-// log) so the caller (startDaemonInternal) treats it as "preflight
-// declined to run" — equivalent to "no daemon was started", which is
-// the correct outcome during shutdown / unregister.
+// while we're mid-pipeline. Re-checking on every iteration lets the
+// engine cleanly abandon the preflight rather than push the daemon
+// through to fireAsync on a torn-down engine or unregistered daemon.
+// Returns nil on bail (with a debug log) so the caller
+// (startDaemonInternal) treats it as "preflight declined to run" —
+// equivalent to "no daemon was started", which is the correct outcome
+// during shutdown / unregister.
+//
+// Stage-0 daemonRegistered exemption: Engine.Register() runs the
+// non-atomic sequence validate → Unregister → registerDaemon →
+// daemonSpecs[id]=spec → tryAcquire → goroutine spawn. By the time
+// the spawned goroutine enters this loop's i==0 iteration, the spec
+// IS in daemonSpecs (registerDaemon put it there before the spawn).
+// The only way it could appear absent at i==0 is a concurrent
+// Register's transient Unregister(delete) landing in the gap — that
+// is NOT an operator-initiated unregister, and bailing on it would
+// kill the legitimate winner of the concurrent-Register race. From
+// stage 1 onward, an absence reflects a real operator Unregister
+// between stages, so the check stays.
 func (e *Engine) runPrereqs(ctx context.Context, spec *task.Spec) error {
 	if e.isShuttingDown() {
 		e.log.Debug("runPrereqs skipped: engine shutting down",
-			zap.String("daemon", spec.ID))
-		return nil
-	}
-	if !e.daemonRegistered(spec.ID) {
-		e.log.Debug("runPrereqs skipped: daemon unregistered",
 			zap.String("daemon", spec.ID))
 		return nil
 	}
@@ -769,7 +776,7 @@ func (e *Engine) runPrereqs(ctx context.Context, spec *task.Spec) error {
 				zap.Int("stage", i))
 			return nil
 		}
-		if !e.daemonRegistered(spec.ID) {
+		if i > 0 && !e.daemonRegistered(spec.ID) {
 			e.log.Debug("runPrereqs aborted: daemon unregistered",
 				zap.String("daemon", spec.ID),
 				zap.Int("stage", i))
