@@ -46,7 +46,3 @@ run_result:
   enabled: false
 
 timeout: 30s
-
-notify:
-  on_success: false
-  on_failure: true

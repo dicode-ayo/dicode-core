@@ -215,7 +215,3 @@ permissions:
   env:
     - DICODE_DATADIR
     - DICODE_VERSION
-
-notify:
-  on_success: false
-  on_failure: true
