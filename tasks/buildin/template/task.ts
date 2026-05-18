@@ -1,5 +1,9 @@
-// buildin/template — render ${VAR} placeholders in a template string
+// buildin/template — render ${VAR} placeholders in a template body
 // using values from the task's environment.
+//
+// The template body is supplied either inline as a string (template
+// param) or by absolute path to a sibling file (template_path param).
+// Exactly one of the two is required; both or neither fails loudly.
 //
 // Invoke from another task:
 //
@@ -7,6 +11,11 @@
 //     template: "tunnel: ${ID}\nhost: ${HOST}",
 //   });
 //   // rendered === "tunnel: abc-123\nhost: api.example.com"
+//
+//   // ...or, for large templates, point at a sibling file:
+//   const rendered2 = await dicode.run_task("buildin/template", {
+//     template_path: "/abs/path/to/template.tpl",
+//   });
 //
 // The rendered string is returned from main() — the runtime ships it
 // back as the run result. task.yaml sets `run_result.enabled: false`,
@@ -101,17 +110,61 @@ export function buildEnvMap(
   return map;
 }
 
-export default async function main({ params }: TaskSdk): Promise<string> {
-  // No `?? ""` fallback here: task.yaml declares `template: required:
-  // true`, and the trigger engine rejects a run that's missing a
-  // required param before main() is invoked. If the engine ever lets a
-  // null slip through (programmatic in-process callers, future
-  // regressions), fail loudly with a clear message rather than
-  // silently rendering an empty string.
-  const template = await params.get("template");
-  if (template === null) {
-    throw new Error("missing required param: template");
+// resolveTemplateBody enforces the XOR contract between the inline
+// `template` param and the file-backed `template_path` param. Exported
+// for testability — the file-IO path is small but worth a unit test.
+//
+// Both supplied → loud failure: exactly one is required.
+// Neither supplied → loud failure: at least one is required.
+// `template` supplied → use it verbatim.
+// `template_path` supplied → read the file; wrap IO errors with a clear
+// "reading template_path <path>: <reason>" message so the user sees the
+// path that failed (ENOENT, EACCES, etc.) instead of a bare Deno error.
+//
+// Empty-string is treated as "not supplied" — a zero-length value for
+// either param is almost certainly a misconfiguration (unresolved
+// caller-side ${VAR}, or an empty default fallback) rather than an
+// intentional empty template. The XOR check uses `!= null && != ""`
+// so an empty value behaves the same as a missing param.
+export async function resolveTemplateBody(
+  template: string | null,
+  templatePath: string | null,
+  readFile: (path: string) => Promise<string> = Deno.readTextFile,
+): Promise<string> {
+  const hasTemplate = template !== null && template !== "";
+  const hasPath = templatePath !== null && templatePath !== "";
+
+  if (hasTemplate && hasPath) {
+    throw new Error(
+      "both template and template_path supplied; exactly one is required",
+    );
   }
+  if (!hasTemplate && !hasPath) {
+    throw new Error(
+      "either template or template_path must be supplied",
+    );
+  }
+  if (hasTemplate) {
+    return template as string;
+  }
+  // hasPath
+  const path = templatePath as string;
+  try {
+    return await readFile(path);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`reading template_path ${path}: ${msg}`);
+  }
+}
+
+export default async function main({ params }: TaskSdk): Promise<string> {
+  // XOR validation lives in resolveTemplateBody. task.yaml no longer
+  // marks `template` as required: the trigger engine therefore can't
+  // reject "neither supplied" upstream, so we own the loud-failure
+  // contract entirely here.
+  const template = await params.get("template");
+  const templatePath = await params.get("template_path");
+  const body = await resolveTemplateBody(template, templatePath);
 
   // Drive env lookups by the placeholders found in the template. Using
   // per-name Deno.env.get() is required: Deno.env.toObject() needs
@@ -119,11 +172,11 @@ export default async function main({ params }: TaskSdk): Promise<string> {
   // permissions.env is a finite allowlist that compiles down to
   // `--allow-env=NAME1,NAME2,...`. Per-name get() works under both
   // scoped and unrestricted permissions and respects the allowlist.
-  const names = collectPlaceholders(template);
+  const names = collectPlaceholders(body);
   const envMap = buildEnvMap(names, (name) => Deno.env.get(name));
 
   // renderTemplate throws on any unresolved placeholder. Let it
   // propagate — the runtime turns the exception into a failed run,
   // which is the desired loud-failure contract.
-  return renderTemplate(template, envMap);
+  return renderTemplate(body, envMap);
 }
