@@ -323,7 +323,7 @@ stage 0; downstream stages can then pipe via `${input.output}`.
 
 **Mid-pipeline re-fire propagation.** When an intermediate stage at
 index `i` re-runs successfully (e.g. an operator runs
-`dicode tasks run buildin/template` to pick up a rotated Doppler
+`dicode run buildin/template` to pick up a rotated Doppler
 secret), the engine re-fires stages `[i+1..n-1]` sequentially with the
 re-run's fresh return value as the initial `${input.output}`, then
 restarts the daemon to pick up the propagated config. Stages
