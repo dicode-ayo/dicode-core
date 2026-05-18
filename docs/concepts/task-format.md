@@ -363,6 +363,10 @@ and via the REST API's `daemon_state` field:
   Terminal: an operator must re-fire the daemon task to retry —
   from the WebUI's task list via the Run button, or from the CLI
   via `dicode run <task-id>`.
+- `crashed` — The daemon's body ran but exited with a non-success
+  status (failure, timeout, etc.) and the configured restart policy
+  isn't going to restart it. Terminal: an operator must re-fire the
+  daemon to retry.
 
 For an end-to-end example combining daemon preflight, per-edge
 overrides, `${DATADIR}` volumes, and `run_result.enabled: false`, see
