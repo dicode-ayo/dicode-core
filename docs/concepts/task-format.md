@@ -283,6 +283,27 @@ The two forms can be mixed within the same list. Per-edge overrides on
 a `before[]` entry use the same allowlist as `trigger.chain.overrides`
 (see table above).
 
+**Inline `template` vs `template_path`.** The `buildin/template` task
+above takes its body via the inline `template` param, but you can also
+point it at a sibling YAML file in your task folder via `template_path`
+— useful when the body is too large to comfortably inline as a
+multi-line YAML scalar. Use `${TASK_DIR}` to anchor the absolute path.
+Exactly one of `template` or `template_path` must be supplied; the
+caller's `permissions.fs` (or per-edge `overrides.fs`) must declare
+read access to the file. Sketch:
+
+```yaml
+trigger:
+  before:
+    - task: buildin/template
+      overrides:
+        params:
+          template_path: "${TASK_DIR}/relay.yaml"
+        fs:
+          - path: "${TASK_DIR}/relay.yaml"
+            permission: r
+```
+
 **`${input.output}` interpolation.** The literal token `${input.output}`
 in a `before[i].overrides.params` `default` value (or in a
 `trigger.chain.params` value) is replaced at dispatch time with the
