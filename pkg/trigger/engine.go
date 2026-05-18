@@ -59,6 +59,20 @@ type Engine struct {
 	cronEntries map[string]cron.EntryID // taskID → cron entry
 	webhooks    map[string]string       // webhook path → taskID
 
+	// registerMu serializes the entire Register path so that concurrent
+	// registrations cannot admit a cycle through interleaved snapshots of
+	// the before-graph (each call's detectBeforeCycle scans the current
+	// registry state; without a mutex two parallel Register calls could
+	// each clear cycle detection against their independent snapshots and
+	// jointly close A→B→A). Held across validateBeforeRefs through the
+	// final Unregister/register* mutations. Separate from `mu` because
+	// Unregister itself takes `mu`, and from `daemonMu` for the same
+	// reason — keeping registerMu coarse-but-shallow avoids re-entrance.
+	//
+	// In practice the reconciler is single-threaded so registrations
+	// don't race today; this is defense-in-depth for future callers.
+	registerMu sync.Mutex
+
 	runCancels       sync.Map // runID → context.CancelFunc
 	runDone          sync.Map // runID (string) → chan struct{}, closed when the run reaches a terminal state
 	runTriggerSource sync.Map // runID (string) → triggerSource (registry.TriggerSource)
@@ -327,7 +341,14 @@ func (e *Engine) Start(ctx context.Context) error {
 // Register adds or updates trigger registrations for a task spec. Returns a
 // non-nil error when cross-spec validation fails (currently: invalid
 // trigger.before references). On error, no triggers are registered.
+// Register registers a task with the engine. Cycle detection runs
+// against the registered before-graph as of method entry; the call is
+// serialized via registerMu so concurrent registrations cannot admit
+// a cycle through interleaved snapshots.
 func (e *Engine) Register(spec *task.Spec) error {
+	e.registerMu.Lock()
+	defer e.registerMu.Unlock()
+
 	// Cross-spec validation must run BEFORE Unregister so that a previously
 	// valid registration isn't torn down when an updated spec fails its
 	// new-state checks. The registry-snapshot lookups are read-only.
@@ -2330,7 +2351,15 @@ func (e *Engine) finalizePreflightFailure(spec *task.Spec, opts pkgruntime.RunOp
 	// Chain-on-failure semantics: dispatch normally fires FireChain;
 	// the preflight short-circuit replicates it so chain triggers and
 	// on_failure_chain still observe the failure.
-	go e.FireChain(context.Background(), spec.ID, opts.RunID, registry.StatusFailure, nil, opts.Params)
+	//
+	// Called synchronously so the caller's deferred cleanup() (which
+	// deletes runChainDepth[opts.RunID]) cannot race ahead of FireChain's
+	// depth lookup. An earlier draft used `go FireChain(...)` to mirror a
+	// fire-and-forget shape, but that allowed cleanup to observe a
+	// depth-of-zero and let a chain-fired parent take one hop past the
+	// MaxDepth ceiling. Matches the normal FireChain call site at the end
+	// of dispatch (~line 2668), which is also synchronous.
+	e.FireChain(context.Background(), spec.ID, opts.RunID, registry.StatusFailure, nil, opts.Params)
 }
 
 // finalizeCancelled closes out a run that was cancelled before ever executing

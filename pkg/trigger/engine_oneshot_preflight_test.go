@@ -13,6 +13,7 @@ package trigger
 import (
 	"context"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -205,6 +206,120 @@ func TestRegister_AcceptsBeforeAcyclic(t *testing.T) {
 	}
 	if err := e.engine.Register(b); err != nil {
 		t.Errorf("eng.Register b (acyclic fan-in): unexpected error: %v", err)
+	}
+}
+
+// TestRegister_ConcurrentRegisterCannotAdmitCycle pins that the registerMu
+// serialization in Register makes the cycle-detection scan atomic with
+// respect to other in-flight registrations. Each goroutine mirrors the
+// production reconciler pattern (reg.Register then engine.Register) for
+// one half of an A→B→A cycle; the engine must never admit both edges.
+//
+// Without registerMu, two parallel engine.Register calls can interleave
+// such that each detectBeforeCycle reads a stale registry snapshot and
+// overlays its own candidate edge — passing cycle detection independently
+// even though the resulting registry state is cyclic.
+//
+// We assert the strong invariant: AT LEAST one engine.Register call
+// rejects with "cycle detected" — i.e. the final engine state is never
+// "both edges admitted". Either both interleavings observe the cycle
+// (one race ordering: both reg.Register commit before either engine
+// scan) or exactly one observes it (the other ordering: one engine
+// scan completes before the second reg.Register commits). Both
+// outcomes are correct; the failure mode the mutex eliminates is "zero
+// rejections" — a cycle admitted into the engine.
+//
+// In practice unreachable today because the reconciler is single-threaded,
+// but worth pinning for future concurrent-registration paths. Run with
+// `-race -count=20` for stress coverage.
+func TestRegister_ConcurrentRegisterCannotAdmitCycle(t *testing.T) {
+	e := newTestEnv(t)
+
+	// Seed both A and B as plain one-shots so they're known to the registry
+	// when the cycle-closing Register calls fire.
+	for _, id := range []string{"a", "b"} {
+		s := &task.Spec{
+			ID:      id,
+			Name:    id,
+			Runtime: task.RuntimeDeno,
+			Trigger: task.TriggerConfig{Manual: true},
+			Enabled: true,
+		}
+		if err := e.reg.Register(s); err != nil {
+			t.Fatalf("seed reg.Register %s: %v", id, err)
+		}
+		if err := e.engine.Register(s); err != nil {
+			t.Fatalf("seed eng.Register %s: %v", id, err)
+		}
+	}
+
+	aWithBefore := &task.Spec{
+		ID:      "a",
+		Name:    "a",
+		Runtime: task.RuntimeDeno,
+		Trigger: task.TriggerConfig{Manual: true, Before: []task.BeforeEntry{{Task: "b"}}},
+		Enabled: true,
+	}
+	bWithBefore := &task.Spec{
+		ID:      "b",
+		Name:    "b",
+		Runtime: task.RuntimeDeno,
+		Trigger: task.TriggerConfig{Manual: true, Before: []task.BeforeEntry{{Task: "a"}}},
+		Enabled: true,
+	}
+
+	// Mirror production order: reg.Register persists the candidate spec, then
+	// engine.Register validates + schedules. Run both pairs in parallel so
+	// registerMu's serialization is exercised against arbitrary interleavings
+	// of the reg.Register commits.
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	var errA, errB error
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		if err := e.reg.Register(aWithBefore); err != nil {
+			errA = err
+			return
+		}
+		errA = e.engine.Register(aWithBefore)
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		if err := e.reg.Register(bWithBefore); err != nil {
+			errB = err
+			return
+		}
+		errB = e.engine.Register(bWithBefore)
+	}()
+	close(start)
+	wg.Wait()
+
+	// Invariant: the engine must never admit both edges (i.e. both calls
+	// returning nil). At least one — possibly both — must surface the
+	// cycle, depending on the order in which the two reg.Register commits
+	// land relative to each engine.Register's cycle scan.
+	successCount := 0
+	cycleCount := 0
+	for _, err := range []error{errA, errB} {
+		switch {
+		case err == nil:
+			successCount++
+		case strings.Contains(err.Error(), "cycle detected"):
+			cycleCount++
+		default:
+			t.Errorf("unexpected error: %v", err)
+		}
+	}
+	if cycleCount == 0 {
+		t.Fatalf("expected at least one cycle-detection error, got success=%d cycle=%d (errA=%v errB=%v)",
+			successCount, cycleCount, errA, errB)
+	}
+	if successCount+cycleCount != 2 {
+		t.Fatalf("expected success+cycle to cover both calls, got success=%d cycle=%d (errA=%v errB=%v)",
+			successCount, cycleCount, errA, errB)
 	}
 }
 
