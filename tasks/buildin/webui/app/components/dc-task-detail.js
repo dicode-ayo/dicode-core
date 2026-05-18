@@ -358,6 +358,33 @@ class DcTaskDetail extends LitElement {
       ${expanded ? item.runs.map(r => this._renderRunRow(r, { indent: 1 })) : ''}`;
   }
 
+  // Renders the daemon lifecycle phase as a colored badge in the trigger
+  // row. The engine reports a six-value enum (see pkg/trigger.DaemonState);
+  // the mapping below keeps colors aligned with the surrounding UI palette:
+  // green for healthy, yellow/sky for transient, red for failure, muted for
+  // resting. The "failed_after_preflight" badge is deliberately distinct
+  // from "stopped" so operators can tell "preflight passed, daemon body
+  // broke" apart from "deliberately stopped" (issue #318).
+  _renderDaemonState(state) {
+    // Keep keys in sync with the DaemonState constants in
+    // pkg/trigger/daemon_state.go — out-of-sync entries fall through
+    // to the generic-text fallback below at render time.
+    const STYLES = {
+      running:                { bg: 'rgba(166, 227, 161, .15)', fg: 'var(--green)',  text: 'Running' },
+      prereq_running:         { bg: 'rgba(137, 220, 235, .15)', fg: 'var(--sky)',    text: 'Preflight running…' },
+      stopping:               { bg: 'rgba(249, 226, 175, .15)', fg: 'var(--yellow)', text: 'Stopping…' },
+      prereq_failed:          { bg: 'rgba(243, 139, 168, .15)', fg: 'var(--red)',    text: 'Preflight failed' },
+      failed_after_preflight: { bg: 'rgba(243, 139, 168, .15)', fg: 'var(--red)',    text: 'Crashed after preflight ✓' },
+      stopped:                { bg: 'rgba(166, 173, 200, .15)', fg: 'var(--muted)',  text: 'Stopped' },
+    };
+    const s = STYLES[state] || { bg: 'rgba(166, 173, 200, .15)', fg: 'var(--muted)', text: state };
+    return html`<span
+      data-daemon-state=${state}
+      title="Daemon state: ${state}"
+      style="font-size:0.75rem;font-weight:600;padding:2px 8px;border-radius:9999px;background:${s.bg};color:${s.fg};white-space:nowrap"
+      >${s.text}</span>`;
+  }
+
   _triggerFields() {
     const t = this._task?.trigger || this._task?.Trigger || {};
     const type = this._triggerType;
@@ -413,6 +440,7 @@ class DcTaskDetail extends LitElement {
 
       <div class="card" style="margin-bottom:var(--space-md);display:flex;align-items:center;gap:0.75rem">
         <span style="font-size:0.85rem"><strong>Trigger:</strong> ${task.trigger_label || 'manual'}</span>
+        ${task.daemon_state ? this._renderDaemonState(task.daemon_state) : ''}
         <button class="btn btn-sm" style="background:var(--muted);margin-left:auto"
           @click=${() => { this._triggerOpen = !this._triggerOpen; }}>&#9998; Edit trigger</button>
       </div>

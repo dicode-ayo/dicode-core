@@ -89,10 +89,17 @@ func TestDaemonState_Default(t *testing.T) {
 }
 
 // TestDaemonState_SetGet verifies that setDaemonState/DaemonState round-trip
-// the five enum values without contention.
+// the six enum values without contention.
 func TestDaemonState_SetGet(t *testing.T) {
 	e := newTestEnv(t)
-	states := []DaemonState{DaemonPrereqRunning, DaemonPrereqFailed, DaemonRunning, DaemonStopping, DaemonStopped}
+	states := []DaemonState{
+		DaemonPrereqRunning,
+		DaemonPrereqFailed,
+		DaemonRunning,
+		DaemonStopping,
+		DaemonFailedAfterPreflight,
+		DaemonStopped,
+	}
 	for _, want := range states {
 		e.engine.setDaemonState("d", want)
 		if got := e.engine.DaemonState("d"); got != want {
@@ -1519,5 +1526,133 @@ func TestRegister_RejectsDuplicateBeforeTask(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "multiple times") {
 		t.Errorf("expected error mentioning duplication, got: %v", err)
+	}
+}
+
+// TestStartDaemonInternal_FireAsyncFailureAfterPreflight verifies that when
+// startDaemonInternal's preflight stage succeeds (or is deliberately skipped
+// via skipPrereqs=true from the mid-pipeline re-fire path) but the
+// subsequent fireAsync fails, the daemon transitions to
+// DaemonFailedAfterPreflight — NOT to the generic DaemonStopped.
+//
+// Operators looking at the WebUI must be able to tell "preflight is fine,
+// daemon body broke" apart from "deliberately stopped / never started".
+// See issue #318 for the motivating scenario (Doppler-rotated relay-server
+// preflight succeeds, but the daemon's docker run fails on a port-already-
+// bound or image-pull error).
+//
+// We force the fireAsync failure by closing the underlying DB so
+// StartRunWithID — the first thing startRun does inside fireAsync — fails.
+// That's a low-fidelity stand-in for the real failure modes (binary
+// missing, port bound) but exercises the same code path: fireAsync returns
+// an error, startDaemonInternal hits its post-preflight error branch, and
+// the state assignment is the system-under-test.
+func TestStartDaemonInternal_FireAsyncFailureAfterPreflight(t *testing.T) {
+	// Build the env inline so we own the DB and can close it
+	// out from under the engine to force fireAsync to fail.
+	d, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	reg := registry.New(d)
+	exec := newPreflightExec(reg)
+	eng := New(reg, exec, zap.NewNop())
+	eng.RegisterExecutor(task.RuntimeDocker, exec)
+
+	// No preflight stages — keeps the test focused on the post-preflight
+	// fireAsync failure. With skipPrereqs=false and an empty Before list,
+	// startDaemonInternal goes straight to the fireAsync call, which is
+	// the exact branch the issue is about.
+	daemon := &task.Spec{
+		ID:      "d",
+		Name:    "d",
+		Runtime: task.RuntimeDocker,
+		Docker:  &task.DockerConfig{Image: "alpine"},
+		Trigger: task.TriggerConfig{Daemon: true, Restart: "never"},
+		Enabled: true,
+	}
+	if err := reg.Register(daemon); err != nil {
+		t.Fatalf("reg.Register: %v", err)
+	}
+
+	// Close the DB so any subsequent registry write (StartRunWithID, in
+	// our case) fails. Mirrors what would happen if disk space ran out or
+	// the DB connection was severed mid-operation.
+	if err := d.Close(); err != nil {
+		t.Fatalf("db.Close: %v", err)
+	}
+
+	// Drive startDaemonInternal directly with skipPrereqs=true — mirrors
+	// the call path used by propagateBeforeRerun (the issue's motivating
+	// scenario). Synchronous: fireAsync returns the error inline, so we
+	// can assert the state immediately without polling.
+	eng.startDaemonInternal(daemon, true)
+
+	if got := eng.DaemonState("d"); got != DaemonFailedAfterPreflight {
+		t.Fatalf("DaemonState = %q, want %q (must distinguish post-preflight failure from deliberately-stopped)",
+			got, DaemonFailedAfterPreflight)
+	}
+
+	// Sanity check: a daemon that was never started and never failed
+	// must NOT appear as failed_after_preflight — that would be a false
+	// positive on every fresh task.
+	if got := eng.DaemonState("never-touched"); got != DaemonStopped {
+		t.Errorf("DaemonState(unknown) = %q, want %q", got, DaemonStopped)
+	}
+}
+
+// TestStartDaemonInternal_FireAsyncFailureFirstBoot covers the sibling
+// branch of TestStartDaemonInternal_FireAsyncFailureAfterPreflight:
+// startDaemonInternal called with skipPrereqs=false (the first-boot path
+// taken by Engine.startDaemon when a daemon is initially scheduled). With
+// an empty trigger.before list the prereq block is skipped and execution
+// falls straight through to fireAsync — same error branch, different
+// caller — so the engine MUST still record DaemonFailedAfterPreflight
+// rather than DaemonStopped.
+//
+// The engine change in issue #318 applies to BOTH callers
+// (propagateBeforeRerun's skipPrereqs=true and the first-boot
+// skipPrereqs=false); without this sibling test, regressions on the
+// first-boot branch would pass CI.
+//
+// Same DB-close stand-in as the skipPrereqs=true sibling.
+func TestStartDaemonInternal_FireAsyncFailureFirstBoot(t *testing.T) {
+	d, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	reg := registry.New(d)
+	exec := newPreflightExec(reg)
+	eng := New(reg, exec, zap.NewNop())
+	eng.RegisterExecutor(task.RuntimeDocker, exec)
+
+	// Empty Before list + skipPrereqs=false means startDaemonInternal
+	// skips its prereq block via the len(spec.Trigger.Before) > 0 guard
+	// and goes straight to fireAsync — the exact branch this sibling
+	// covers. Adding stages here would couple the test to runPrereqs's
+	// behavior, which is not the system under test.
+	daemon := &task.Spec{
+		ID:      "d",
+		Name:    "d",
+		Runtime: task.RuntimeDocker,
+		Docker:  &task.DockerConfig{Image: "alpine"},
+		Trigger: task.TriggerConfig{Daemon: true, Restart: "never"},
+		Enabled: true,
+	}
+	if err := reg.Register(daemon); err != nil {
+		t.Fatalf("reg.Register: %v", err)
+	}
+
+	if err := d.Close(); err != nil {
+		t.Fatalf("db.Close: %v", err)
+	}
+
+	// skipPrereqs=false — the first-boot branch. fireAsync still fails
+	// (DB closed), so the state assignment must match the sibling test.
+	eng.startDaemonInternal(daemon, false)
+
+	if got := eng.DaemonState("d"); got != DaemonFailedAfterPreflight {
+		t.Fatalf("DaemonState = %q, want %q (first-boot path must record post-preflight failure identically to the mid-pipeline re-fire path)",
+			got, DaemonFailedAfterPreflight)
 	}
 }
