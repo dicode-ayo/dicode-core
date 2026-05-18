@@ -285,12 +285,13 @@ a `before[]` entry use the same allowlist as `trigger.chain.overrides`
 
 **Inline `template` vs `template_path`.** The `buildin/template` task
 above takes its body via the inline `template` param, but you can also
-point it at a sibling YAML file in your task folder via `template_path`
+point it at an absolute path to a UTF-8 text file via `template_path`
 — useful when the body is too large to comfortably inline as a
-multi-line YAML scalar. Use `${TASK_DIR}` to anchor the absolute path.
-Exactly one of `template` or `template_path` must be supplied; the
-caller's `permissions.fs` (or per-edge `overrides.fs`) must declare
-read access to the file. Sketch:
+multi-line YAML scalar. Anchoring under `${TASK_DIR}` is the typical
+pattern (keeps the body next to the task that uses it), but any path
+the caller's `permissions.fs` (or per-edge `overrides.fs`) allows
+works. Exactly one of `template` or `template_path` must be supplied.
+Sketch:
 
 ```yaml
 trigger:
@@ -359,7 +360,9 @@ and via the REST API's `daemon_state` field:
   (operator-initiated unregister, or engine shutdown).
 - `failed_after_preflight` — Preflight succeeded, but the daemon's
   own dispatch errored (binary missing, port already bound, etc.).
-  Terminal: an operator must re-Register the daemon to retry.
+  Terminal: an operator must re-fire the daemon task to retry —
+  from the WebUI's task list via the Run button, or from the CLI
+  via `dicode run <task-id>`.
 
 For an end-to-end example combining daemon preflight, per-edge
 overrides, `${DATADIR}` volumes, and `run_result.enabled: false`, see
