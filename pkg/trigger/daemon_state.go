@@ -27,7 +27,7 @@ func beforeContains(entries []task.BeforeEntry, taskID string) bool {
 // up — distinguishing "still waiting on the render task" from "render
 // failed" from "explicitly stopped".
 //
-// The six values are intentionally a closed set rather than a bag of
+// The seven values are intentionally a closed set rather than a bag of
 // booleans. Adding a new phase should require an explicit case in any
 // switch that consumes this type.
 type DaemonState string
@@ -36,7 +36,9 @@ const (
 	// DaemonStopped is the zero value. Returned for any task ID the engine
 	// hasn't tracked yet — including non-daemon tasks and unknown IDs — so
 	// callers don't have to special-case "not found". Also the resting
-	// state after a deliberate Unregister or engine shutdown.
+	// state after a deliberate Unregister or engine shutdown, AND after a
+	// daemon body exits cleanly (status=success) with no configured
+	// auto-restart. See DaemonCrashed for the non-success counterpart.
 	DaemonStopped DaemonState = "stopped"
 
 	// DaemonPrereqRunning indicates the engine has dispatched the daemon's
@@ -68,6 +70,23 @@ const (
 	// only from startDaemonInternal's post-preflight error branch (issue
 	// #318).
 	DaemonFailedAfterPreflight DaemonState = "failed_after_preflight"
+
+	// DaemonCrashed indicates the daemon's body successfully started but
+	// then exited with any non-success status (failure, cancelled, etc.)
+	// AND the configured restart policy will NOT restart it — i.e. either
+	// restart=never, or restart=on-failure with a status the engine
+	// doesn't treat as a failure. Reachable only from
+	// onDaemonRunFinished's no-restart branch.
+	//
+	// Distinct from DaemonStopped (clean exit / operator-initiated) and
+	// from DaemonFailedAfterPreflight (fireAsync-time error, before the
+	// daemon body got to run) so operators can tell the three apart in
+	// the WebUI / API.
+	//
+	// Terminal: like DaemonFailedAfterPreflight, an operator must re-fire
+	// the daemon (e.g. via manual run or a registry reload) to retry. The
+	// engine does not automatically transition out of this state.
+	DaemonCrashed DaemonState = "crashed"
 )
 
 // daemonStateMap is a thread-safe taskID → DaemonState map. Kept as a

@@ -923,15 +923,33 @@ func (e *Engine) onDaemonRunFinished(spec *task.Spec, runID string) {
 	if restart == "" {
 		restart = "always"
 	}
+	// noRestartTransition records the terminal state when the engine
+	// will NOT spawn an automatic restart for this exit. Status-aware
+	// split (issue #325):
+	//   - success exit, no restart  → DaemonStopped (clean shutdown)
+	//   - non-success exit, no restart → DaemonCrashed (operator
+	//     attention required)
+	// Without this, the no-restart branches return without touching
+	// daemonStates, leaving the WebUI showing a stale "Running" pill
+	// for a daemon that's no longer running.
+	noRestartTransition := func() {
+		if run.Status == registry.StatusSuccess {
+			e.setDaemonState(spec.ID, DaemonStopped)
+		} else {
+			e.setDaemonState(spec.ID, DaemonCrashed)
+		}
+	}
 	switch restart {
 	case "never":
 		e.log.Info("daemon exited — restart=never, not restarting",
 			zap.String("task", spec.ID), zap.String("status", run.Status))
+		noRestartTransition()
 		return
 	case "on-failure":
 		if run.Status != registry.StatusFailure {
 			e.log.Info("daemon exited — restart=on-failure, not restarting (no failure)",
 				zap.String("task", spec.ID), zap.String("status", run.Status))
+			noRestartTransition()
 			return
 		}
 	}

@@ -1363,10 +1363,11 @@ type TaskDetail struct {
 
 	// DaemonState surfaces the engine's preflight/lifecycle phase for
 	// daemon tasks. Empty for non-daemon tasks so the WebUI can hide the
-	// row entirely. Six-value enum — see pkg/trigger.DaemonState for the
-	// canonical list. The "failed_after_preflight" value is distinct from
-	// "stopped" so operators can tell "daemon body broke" apart from
-	// "deliberately stopped" (issue #318).
+	// row entirely. Seven-value enum — see pkg/trigger.DaemonState for
+	// the canonical list. The "failed_after_preflight" and "crashed"
+	// values are distinct from "stopped" so operators can tell
+	// "fireAsync broke" (#318) and "body crashed without auto-restart"
+	// (#325) apart from "deliberately stopped".
 	DaemonState string `json:"daemon_state,omitempty"`
 }
 

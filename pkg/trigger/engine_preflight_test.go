@@ -89,7 +89,7 @@ func TestDaemonState_Default(t *testing.T) {
 }
 
 // TestDaemonState_SetGet verifies that setDaemonState/DaemonState round-trip
-// the six enum values without contention.
+// the seven enum values without contention.
 func TestDaemonState_SetGet(t *testing.T) {
 	e := newTestEnv(t)
 	states := []DaemonState{
@@ -98,6 +98,7 @@ func TestDaemonState_SetGet(t *testing.T) {
 		DaemonRunning,
 		DaemonStopping,
 		DaemonFailedAfterPreflight,
+		DaemonCrashed,
 		DaemonStopped,
 	}
 	for _, want := range states {
@@ -1654,5 +1655,105 @@ func TestStartDaemonInternal_FireAsyncFailureFirstBoot(t *testing.T) {
 	if got := eng.DaemonState("d"); got != DaemonFailedAfterPreflight {
 		t.Fatalf("DaemonState = %q, want %q (first-boot path must record post-preflight failure identically to the mid-pipeline re-fire path)",
 			got, DaemonFailedAfterPreflight)
+	}
+}
+
+// finishedRunEnv stages a daemon spec + a finished registry run so the
+// onDaemonRunFinished tests can call the hook directly without going
+// through the full fireAsync → daemon-execute path. Keeping the setup
+// inline (rather than reusing preflightExec/newPreflightEnv) avoids
+// coupling the test to the executor's daemon-block semantics — these
+// tests are about the post-run state-transition decision only.
+func finishedRunEnv(t *testing.T, restartPolicy string, status string) (*Engine, *task.Spec, string) {
+	t.Helper()
+	d, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { d.Close() })
+	reg := registry.New(d)
+	exec := newPreflightExec(reg)
+	eng := New(reg, exec, zap.NewNop())
+	eng.RegisterExecutor(task.RuntimeDocker, exec)
+
+	spec := &task.Spec{
+		ID:      "d",
+		Name:    "d",
+		Runtime: task.RuntimeDocker,
+		Docker:  &task.DockerConfig{Image: "alpine"},
+		Trigger: task.TriggerConfig{Daemon: true, Restart: restartPolicy},
+		Enabled: true,
+	}
+	if err := reg.Register(spec); err != nil {
+		t.Fatalf("reg.Register: %v", err)
+	}
+	// Mark the daemon as still-registered with the engine so the
+	// onDaemonRunFinished early-return guard doesn't bail out.
+	eng.daemonMu.Lock()
+	eng.daemonSpecs[spec.ID] = spec
+	eng.daemonMu.Unlock()
+
+	// Seed a run row in the registry and finalize it with the requested
+	// terminal status — onDaemonRunFinished looks the run up via GetRun
+	// to decide whether to restart.
+	ctx := context.Background()
+	runID, err := reg.StartRun(ctx, spec.ID, "")
+	if err != nil {
+		t.Fatalf("StartRun: %v", err)
+	}
+	if err := reg.FinishRun(ctx, runID, status); err != nil {
+		t.Fatalf("FinishRun: %v", err)
+	}
+
+	// Pre-seed daemonStates with DaemonRunning so we can assert the
+	// transition actually fires (rather than just observing the default
+	// "stopped" fall-through that DaemonState() returns for absent keys).
+	// This mirrors reality: the WebUI's stale-Running pill described in
+	// issue #325 only appears because the engine successfully set
+	// DaemonRunning before the body crashed.
+	eng.setDaemonState(spec.ID, DaemonRunning)
+	return eng, spec, runID
+}
+
+// TestOnDaemonRunFinished_NoRestartFailure_TransitionsToCrashed exercises
+// the issue #325 fix: a daemon whose body exits with status=failure under
+// `restart: never` must transition to DaemonCrashed so the WebUI shows a
+// distinct pill (operator attention required) rather than a stale Running
+// indicator. Mirror test for the success path lives in the sibling
+// _TransitionsToStopped test below.
+func TestOnDaemonRunFinished_NoRestartFailure_TransitionsToCrashed(t *testing.T) {
+	eng, spec, runID := finishedRunEnv(t, "never", registry.StatusFailure)
+	eng.onDaemonRunFinished(spec, runID)
+	if got := eng.DaemonState(spec.ID); got != DaemonCrashed {
+		t.Fatalf("DaemonState = %q, want %q (non-success exit + no restart must surface as Crashed, not stale Running)",
+			got, DaemonCrashed)
+	}
+}
+
+// TestOnDaemonRunFinished_NoRestartSuccess_TransitionsToStopped covers
+// the clean-exit half of issue #325's status-aware split: a daemon body
+// that exits successfully under `restart: never` (e.g. a long-running
+// migration that completes) is NOT a crash — it's a clean shutdown, and
+// the operator should see Stopped, not Crashed.
+func TestOnDaemonRunFinished_NoRestartSuccess_TransitionsToStopped(t *testing.T) {
+	eng, spec, runID := finishedRunEnv(t, "never", registry.StatusSuccess)
+	eng.onDaemonRunFinished(spec, runID)
+	if got := eng.DaemonState(spec.ID); got != DaemonStopped {
+		t.Fatalf("DaemonState = %q, want %q (clean exit + no restart must surface as Stopped, not Crashed)",
+			got, DaemonStopped)
+	}
+}
+
+// TestOnDaemonRunFinished_OnFailurePolicy_SuccessExit_TransitionsToStopped
+// covers the second no-restart branch: restart=on-failure with a
+// success exit. The engine won't restart (no failure to react to), so
+// the daemon is in the same terminal Stopped state as the
+// restart=never+success case.
+func TestOnDaemonRunFinished_OnFailurePolicy_SuccessExit_TransitionsToStopped(t *testing.T) {
+	eng, spec, runID := finishedRunEnv(t, "on-failure", registry.StatusSuccess)
+	eng.onDaemonRunFinished(spec, runID)
+	if got := eng.DaemonState(spec.ID); got != DaemonStopped {
+		t.Fatalf("DaemonState = %q, want %q (on-failure + clean exit must surface as Stopped — no failure to restart, no crash to surface)",
+			got, DaemonStopped)
 	}
 }
