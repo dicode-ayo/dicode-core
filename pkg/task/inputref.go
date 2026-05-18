@@ -53,26 +53,27 @@ import (
 	"strings"
 )
 
-// InputOutputToken is the canonical bare-token form: `${input.output}`
-// (no field). Retained as a named constant so external callers — and
-// the registration-time first-stage rejection in trigger.engine — can
-// reference the canonical literal without rebuilding the spelling. The
-// resolver itself uses inputRefRe; the token-form match is a regex
-// edge case (kind="output", field="").
-const InputOutputToken = "${input.output}"
-
 // inputRefRe matches the three recognised reference shapes:
 //
 //	${input.output}              → kind="output",  field=""
 //	${input.output.<ident>}      → kind="output",  field=<ident>
 //	${input.params.<ident>}      → kind="params",  field=<ident>
 //
-// <ident> is a Go-identifier-ish name: [A-Za-z_][A-Za-z0-9_]*.
+// <ident> is a permissive identifier-ish name shaped to fit real-world
+// YAML keys and HTTP header names: a leading [A-Za-z_], followed by
+// any mix of [A-Za-z0-9_], hyphens, and dots. This accepts common
+// header-style names like `x-forwarded-for` and dotted keys like
+// `db.host` without ambiguity — the upstream params map is itself
+// indexed by arbitrary string keys (params.go), so the resolver
+// shouldn't be narrower than its lookup target. The leading character
+// is still restricted to a letter or underscore so that genuinely
+// malformed shapes like `${input.output.0bad}` are still rejected by
+// ValidateInputRefs.
+//
 // Anything else inside `${input.…}` (e.g. `${input.foo}`,
-// `${input.output.a.b}`, `${input.params}` with no field) does NOT
-// match the regex — ValidateInputRefs surfaces those as loud errors at
-// registration time.
-var inputRefRe = regexp.MustCompile(`\$\{input\.(output|params)(?:\.([A-Za-z_][A-Za-z0-9_]*))?\}`)
+// `${input.params}` with no field) does NOT match the regex —
+// ValidateInputRefs surfaces those as loud errors at registration time.
+var inputRefRe = regexp.MustCompile(`\$\{input\.(output|params)(?:\.([A-Za-z_][A-Za-z0-9_.\-]*))?\}`)
 
 // inputRefPrefixRe matches any `${input.…}` substring regardless of
 // shape — used by ValidateInputRefs to detect interpolation attempts

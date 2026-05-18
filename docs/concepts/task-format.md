@@ -326,8 +326,25 @@ Embedded forms (`"prefix-${input.output}-suffix"`) and multi-token
 forms (`"${input.params.scheme}://${input.output.host}"`) are
 supported — any string containing one or more recognised tokens is
 rewritten in place. Unknown shapes (e.g. `${input.foo}`,
-`${input.output.a.b}`) are rejected at task-registration time with a
+`${input.params}` with no field, identifiers starting with a digit or
+punctuation) are rejected at task-registration time with a
 site-qualified error so operators see the failure at config-load.
+
+The `<field>` / `<name>` portion of a token is a permissive identifier:
+the first character must be a letter or underscore, but the remainder
+may include letters, digits, underscores, **hyphens, and dots**. This
+fits common real-world shapes — HTTP-header-style param names like
+`${input.params.x-forwarded-for}`, dotted YAML keys like
+`${input.output.db.host}`, and namespaced fields like
+`${input.output.parent.child}` — without needing escapes.
+
+**Preflight-edge restriction.** `${input.params.<name>}` is rejected
+at registration on **every** `trigger.before[]` edge (not just
+`before[0]`). Preflight stages run with an empty `RunOptions`, so the
+upstream params channel is statically unavailable for the entire
+pipeline. `${input.output…}` continues to work on `before[i > 0]`
+edges because runPrereqs pipes the previous stage's return value
+forward.
 
 Loud-failures at dispatch produce a structured log
 (`failed to resolve ${input.…} reference`) and skip the chain /

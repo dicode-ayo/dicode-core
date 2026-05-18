@@ -856,6 +856,79 @@ func TestRegister_RejectsInputOutputOnFirstBeforeStage(t *testing.T) {
 	}
 }
 
+// TestRegister_RejectsInputParamsOnPreflightStage verifies that
+// validateBeforeRefs rejects ${input.params.X} on any preflight
+// before-edge, not just before[0]. dispatchPipelineStage fires each
+// preflight stage with an empty RunOptions, so the upstream params
+// snapshot it threads forward is always nil — a reference would always
+// fail loudly at dispatch with ErrInputUnavailable. Surfacing it at
+// registration produces the clearer config-load error.
+func TestRegister_RejectsInputParamsOnPreflightStage(t *testing.T) {
+	eng, reg, _ := newPreflightEnv(t)
+
+	render := &task.Spec{
+		ID:      "render",
+		Name:    "render",
+		Runtime: task.RuntimeDeno,
+		Trigger: task.TriggerConfig{Manual: true},
+		Enabled: true,
+	}
+	if err := reg.Register(render); err != nil {
+		t.Fatalf("register render: %v", err)
+	}
+	write := &task.Spec{
+		ID:      "write",
+		Name:    "write",
+		Runtime: task.RuntimeDeno,
+		Trigger: task.TriggerConfig{Manual: true},
+		Enabled: true,
+	}
+	if err := reg.Register(write); err != nil {
+		t.Fatalf("register write: %v", err)
+	}
+
+	daemon := &task.Spec{
+		ID:      "my-daemon",
+		Name:    "my-daemon",
+		Runtime: task.RuntimeDocker,
+		Docker:  &task.DockerConfig{Image: "alpine"},
+		Trigger: task.TriggerConfig{
+			Daemon: true,
+			Before: []task.BeforeEntry{
+				// before[0]: no ${input.…} — must be a valid first stage
+				{Task: "render"},
+				// before[1]: references upstream params, which preflight
+				// stages never receive. Must be rejected at registration.
+				{
+					Task: "write",
+					Overrides: &task.Overrides{
+						Params: task.ParamOverrides{
+							{Name: "endpoint", Default: "${input.params.url}"},
+						},
+					},
+				},
+			},
+		},
+		Enabled: true,
+	}
+	err := eng.Register(daemon)
+	if err == nil {
+		t.Fatal("expected register to reject ${input.params.X} on a preflight before-edge")
+	}
+	if !strings.Contains(err.Error(), "${input.params") {
+		t.Errorf("error should mention ${input.params; got %v", err)
+	}
+	if !strings.Contains(err.Error(), "before[1]") {
+		t.Errorf("error should pinpoint the offending stage; got %v", err)
+	}
+	// ${input.output.X} on the same edge must continue to work —
+	// only the params channel is statically unresolvable on preflight.
+	daemon.Trigger.Before[1].Overrides.Params[0].Default = "${input.output.path}"
+	if err := eng.Register(daemon); err != nil {
+		t.Fatalf("${input.output.X} on before[i>0] should still register: %v", err)
+	}
+}
+
 // waitForCond polls cond until it returns true or the deadline expires.
 // Distinct from waitUntil (which fails the test on timeout): used by the
 // new sequential-pipeline tests where the caller wants to assert on the

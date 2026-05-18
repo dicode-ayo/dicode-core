@@ -228,6 +228,40 @@ func TestResolveInputOutputMap_Params_NilMapFails(t *testing.T) {
 	}
 }
 
+// TestResolveInputOutputMap_HyphenatedAndDottedIdents exercises the
+// widened identifier class (PR #330 follow-up). Hyphenated names
+// (`x-forwarded-for`, `db-host`) and dotted names (`db.host`) must
+// resolve against the upstream params map / output map exactly like
+// plain identifiers — operators legitimately use those shapes for
+// HTTP-header-style param names and namespaced YAML keys.
+func TestResolveInputOutputMap_HyphenatedAndDottedIdents(t *testing.T) {
+	params := map[string]any{
+		"hdr":  "${input.params.x-forwarded-for}",
+		"db":   "${input.output.db-host}",
+		"port": "${input.params.db.host}",
+	}
+	ctx := InputContext{
+		Output: map[string]any{"db-host": "db.internal"},
+		Params: map[string]string{
+			"x-forwarded-for": "10.0.0.1",
+			"db.host":         "primary",
+		},
+	}
+	got, err := ResolveInputOutputMap(params, ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got["hdr"] != "10.0.0.1" {
+		t.Errorf("hdr = %q; want %q", got["hdr"], "10.0.0.1")
+	}
+	if got["db"] != "db.internal" {
+		t.Errorf("db = %q; want %q", got["db"], "db.internal")
+	}
+	if got["port"] != "primary" {
+		t.Errorf("port = %q; want %q", got["port"], "primary")
+	}
+}
+
 // TestResolveInputOutputMap_MultiToken pins multi-token interpolation
 // — e.g. constructing a URL from two distinct references. Each token
 // resolves independently against the same InputContext.
@@ -395,10 +429,22 @@ func TestValidateInputRefs(t *testing.T) {
 		{"params name", "${input.params.url}", false, ""},
 		{"embedded", "prefix-${input.output}-suffix", false, ""},
 		{"multi-token", "${input.params.scheme}://${input.output.host}", false, ""},
+		// Widened identifier class (PR #330 follow-up): hyphenated names
+		// (common for HTTP header values like `x-forwarded-for`) and
+		// dotted names (common for namespaced YAML keys like `db.host`)
+		// must both be accepted — the upstream params map is itself
+		// indexed by arbitrary string keys, so this resolver shouldn't
+		// be narrower than its lookup target.
+		{"params hyphenated", "${input.params.x-forwarded-for}", false, ""},
+		{"output hyphenated", "${input.output.db-host}", false, ""},
+		{"params dotted", "${input.params.db.host}", false, ""},
+		{"output dotted multi", "${input.output.a.b}", false, ""},
 		{"unknown kind", "${input.foo}", true, "${input.foo}"},
-		{"dotted path", "${input.output.a.b}", true, "${input.output.a.b}"},
 		{"params no field", "${input.params}", true, "${input.params}"},
 		{"output non-identifier", "${input.output.0bad}", true, "${input.output.0bad}"},
+		// Leading char is still strict — must be letter or underscore.
+		{"output leading hyphen", "${input.output.-foo}", true, "${input.output.-foo}"},
+		{"output leading dot", "${input.output..foo}", true, "${input.output..foo}"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

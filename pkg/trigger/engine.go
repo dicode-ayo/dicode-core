@@ -364,6 +364,14 @@ func (e *Engine) Register(spec *task.Spec) error {
 	return nil
 }
 
+// inputParamsRefRe matches any `${input.params.<name>}` token in a
+// per-edge override default. Used by validateBeforeRefs to reject
+// references to upstream params on preflight before-edges, where the
+// upstream params snapshot is statically unavailable (preflight stages
+// run with an empty RunOptions, see dispatchPipelineStage). The
+// identifier class mirrors task.inputRefRe so the two stay in sync.
+var inputParamsRefRe = regexp.MustCompile(`\$\{input\.params\.[A-Za-z_][A-Za-z0-9_.\-]*\}`)
+
 // validateBeforeRefs checks each trigger.before entry against the current
 // registry. Per-spec validation (Spec.validate) already enforces shape;
 // here we only catch the things that need the full registry: unknown task
@@ -399,9 +407,9 @@ func (e *Engine) validateBeforeRefs(spec *task.Spec) error {
 		// at dispatch time, so any well-formed `${input.output…}` or
 		// `${input.params…}` reference is statically unresolvable.
 		// Reject at registration so the operator sees the failure at
-		// config-load time. Non-first stages are allowed because
-		// runPrereqs pipes the previous stage's output (and, in
-		// future, params) forward.
+		// config-load time. Non-first stages are allowed to use
+		// `${input.output…}` because runPrereqs pipes the previous
+		// stage's return value forward.
 		//
 		// Malformed shapes (${input.foo}, ${input.output.a.b}, …) are
 		// caught by Spec.validate via validatePerEdgeOverrides; this
@@ -413,6 +421,25 @@ func (e *Engine) validateBeforeRefs(spec *task.Spec) error {
 					return fmt.Errorf(
 						"trigger.before[0].overrides.params.%s: ${input.…} references are not available on the first pipeline stage",
 						p.Name,
+					)
+				}
+			}
+		}
+		// `${input.params.X}` is rejected on every preflight before-edge,
+		// not just before[0]: dispatchPipelineStage fires each preflight
+		// stage with an empty RunOptions, so the upstream params snapshot
+		// it threads forward is always nil. A reference would always
+		// fail loudly at dispatch with ErrInputUnavailable("upstream
+		// params not available"), which is a confusing runtime error
+		// for what is really a static config bug. Surface it at
+		// registration instead. (`${input.output…}` continues to work
+		// on before[i > 0] — that channel IS populated.)
+		if i > 0 && entry.Overrides != nil {
+			for _, p := range entry.Overrides.Params {
+				if inputParamsRefRe.MatchString(p.Default) {
+					return fmt.Errorf(
+						"trigger.before[%d].overrides.params.%s: ${input.params.…} is not available on preflight stages — preflight stages don't receive a params context from upstream",
+						i, p.Name,
 					)
 				}
 			}
