@@ -1101,7 +1101,7 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 		// returns are treated as "no upstream available" — the chain
 		// dispatch is skipped (logged) rather than silently passing the
 		// literal token to the downstream.
-		upstreamRet := stringRet(output)
+		upstreamRet := coerceStringReturn(output)
 		resolvedParams, rerr := task.ResolveInputOutputMap(chain.Params, upstreamRet)
 		if rerr != nil {
 			e.log.Error("chain trigger skipped — failed to resolve ${input.output}",
@@ -1214,7 +1214,7 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 				// silently passing the literal token to the downstream.
 				// Release the chainGuards slot we just acquired so a failed
 				// resolution doesn't burn cap_per_task / cap_global.
-				upstreamRet := stringRet(output)
+				upstreamRet := coerceStringReturn(output)
 				resolvedParams, rerr := task.ResolveInputOutputMap(chainSpec.Params, upstreamRet)
 				if rerr != nil {
 					e.guards.releaseSlot(completedTaskID)
@@ -1282,12 +1282,12 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 	}
 }
 
-// stringRet returns the upstream's return value as a string for
-// ${input.output} interpolation. JSON-marshalled objects, numbers,
-// and lists are NOT auto-stringified — only direct string returns
-// flow through. Non-string returns produce "" which propagates as
-// ErrInputUnavailable through the resolver.
-func stringRet(rv interface{}) string {
+// coerceStringReturn coerces any return value to a string for
+// ${input.output} interpolation. Non-string returns (objects, numbers,
+// nil) yield ”. The empty string then propagates as ErrInputUnavailable
+// through the resolver, which is the loud-failure path we want for
+// non-string upstreams.
+func coerceStringReturn(rv interface{}) string {
 	s, _ := rv.(string)
 	return s
 }

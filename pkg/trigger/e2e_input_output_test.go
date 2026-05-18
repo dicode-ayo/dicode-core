@@ -304,8 +304,8 @@ func TestE2E_InputOutput_NonStringUpstreamFailsLoudly(t *testing.T) {
 	}
 
 	// Upstream — input-output-non-string-upstream fixture returns a
-	// JSON object. stringRet's contract turns every non-string return
-	// into "", which propagates as ErrInputUnavailable through
+	// JSON object. coerceStringReturn's contract turns every non-string
+	// return into "", which propagates as ErrInputUnavailable through
 	// ResolveInputOutputMap and causes the chain dispatch to skip with
 	// an error log. The downstream fixture's chain.from references
 	// this ID directly so no rebind is needed.
