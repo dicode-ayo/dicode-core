@@ -283,6 +283,28 @@ The two forms can be mixed within the same list. Per-edge overrides on
 a `before[]` entry use the same allowlist as `trigger.chain.overrides`
 (see table above).
 
+**Inline `template` vs `template_path`.** The `buildin/template` task
+above takes its body via the inline `template` param, but you can also
+point it at an absolute path to a UTF-8 text file via `template_path`
+— useful when the body is too large to comfortably inline as a
+multi-line YAML scalar. Anchoring under `${TASK_DIR}` is the typical
+pattern (keeps the body next to the task that uses it), but any path
+the caller's `permissions.fs` (or per-edge `overrides.fs`) allows
+works. Exactly one of `template` or `template_path` must be supplied.
+Sketch:
+
+```yaml
+trigger:
+  before:
+    - task: buildin/template
+      overrides:
+        params:
+          template_path: "${TASK_DIR}/relay.yaml"
+        fs:
+          - path: "${TASK_DIR}/relay.yaml"
+            permission: r
+```
+
 **`${input.output}` interpolation.** The literal token `${input.output}`
 in a `before[i].overrides.params` `default` value (or in a
 `trigger.chain.params` value) is replaced at dispatch time with the
@@ -301,7 +323,7 @@ stage 0; downstream stages can then pipe via `${input.output}`.
 
 **Mid-pipeline re-fire propagation.** When an intermediate stage at
 index `i` re-runs successfully (e.g. an operator runs
-`dicode tasks run buildin/template` to pick up a rotated Doppler
+`dicode run buildin/template` to pick up a rotated Doppler
 secret), the engine re-fires stages `[i+1..n-1]` sequentially with the
 re-run's fresh return value as the initial `${input.output}`, then
 restarts the daemon to pick up the propagated config. Stages
@@ -320,6 +342,27 @@ whose prereqs were commutative (the cloudflared docs example fits this
 shape), while enabling composable pipelines (render → persist → start
 daemon) for new consumers. If you need parallel preflights, file an
 issue requesting a `parallel: true` opt-in.
+
+#### Daemon states
+
+Daemons cycle through a small set of states observable in the WebUI
+and via the REST API's `daemon_state` field:
+
+- `stopped` — Resting state. Either the daemon was deliberately
+  stopped, the engine never started it, or it ran to completion with
+  no restart configured.
+- `prereq_running` — The `trigger.before` pipeline is executing.
+- `prereq_failed` — One stage of the preflight pipeline returned a
+  non-success status. The daemon will not start until the failing
+  stage is re-fired successfully.
+- `running` — The daemon body is executing.
+- `stopping` — The engine is shutting the daemon down
+  (operator-initiated unregister, or engine shutdown).
+- `failed_after_preflight` — Preflight succeeded, but the daemon's
+  own dispatch errored (binary missing, port already bound, etc.).
+  Terminal: an operator must re-fire the daemon task to retry —
+  from the WebUI's task list via the Run button, or from the CLI
+  via `dicode run <task-id>`.
 
 For an end-to-end example combining daemon preflight, per-edge
 overrides, `${DATADIR}` volumes, and `run_result.enabled: false`, see
