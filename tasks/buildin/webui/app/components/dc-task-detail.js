@@ -366,6 +366,9 @@ class DcTaskDetail extends LitElement {
   // from "stopped" so operators can tell "preflight passed, daemon body
   // broke" apart from "deliberately stopped" (issue #318).
   _renderDaemonState(state) {
+    // Keep keys in sync with the DaemonState constants in
+    // pkg/trigger/daemon_state.go — out-of-sync entries fall through
+    // to the generic-text fallback below at render time.
     const STYLES = {
       running:                { bg: 'rgba(166, 227, 161, .15)', fg: 'var(--green)',  text: 'Running' },
       prereq_running:         { bg: 'rgba(137, 220, 235, .15)', fg: 'var(--sky)',    text: 'Preflight running…' },
