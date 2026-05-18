@@ -1283,10 +1283,10 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 }
 
 // coerceStringReturn coerces any return value to a string for
-// ${input.output} interpolation. Non-string returns (objects, numbers,
-// nil) yield ”. The empty string then propagates as ErrInputUnavailable
-// through the resolver, which is the loud-failure path we want for
-// non-string upstreams.
+// ${input.output} interpolation. JSON-marshalled objects, numbers,
+// and lists are NOT auto-stringified — only direct string returns
+// flow through. Non-string returns produce "" which propagates as
+// ErrInputUnavailable through the resolver.
 func coerceStringReturn(rv interface{}) string {
 	s, _ := rv.(string)
 	return s
