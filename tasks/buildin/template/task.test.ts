@@ -286,7 +286,7 @@ Deno.test("resolveTemplateBody: returns inline template verbatim", async () => {
 
 Deno.test("resolveTemplateBody: rejects both template and template_path", async () => {
   await assertRejects(
-    () => resolveTemplateBody("inline", "/tmp/whatever"),
+    () => resolveTemplateBody("inline", "<unused-path>"),
     Error,
     "both template and template_path supplied; exactly one is required",
   );
@@ -364,7 +364,7 @@ Deno.test("main: rejects both template and template_path", async () => {
     () =>
       main(stubSdk({
         template: "inline body",
-        template_path: "/tmp/whatever.tpl",
+        template_path: "<unused-path>",
       })),
     Error,
     "exactly one",
@@ -403,7 +403,7 @@ Deno.test("main: template_path missing file produces loud wrapped error", async 
 // rather than emit a false pass.
 function runningAsRoot(): boolean {
   try {
-    return Deno.uid?.() === 0;
+    return Deno.uid() === 0;
   } catch {
     return false;
   }

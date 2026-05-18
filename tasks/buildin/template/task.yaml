@@ -35,8 +35,9 @@ description: |
      template_path (typically expanded from ${TASK_DIR}/body.tpl in the
      caller's per-edge overrides.params.default). The renderer reads
      the file at run time. The renderer task itself ships with
-     permissions.fs: [] — callers MUST declare the read scope on their
-     sibling file via their per-edge overrides.fs.r block. Example:
+     permissions.fs: [] — the caller's `permissions.fs` block (or
+     per-edge `overrides.fs`) must declare read access to the file.
+     Example:
 
        trigger:
          before:
@@ -46,7 +47,8 @@ description: |
                  - name: template_path
                    default: "${TASK_DIR}/cloudflared.tpl"
                fs:
-                 r: ["${TASK_DIR}/cloudflared.tpl"]
+                 - path: "${TASK_DIR}/cloudflared.tpl"
+                   permission: r
 
 runtime: deno
 
@@ -64,15 +66,21 @@ run_result:
 params:
   template:
     type: string
-    description: "Template body with ${VAR} placeholders. Mutually exclusive with template_path."
+    description: |
+      Template body with ${VAR} placeholders. Mutually exclusive with
+      template_path. An empty-string value is treated as "not supplied"
+      for the XOR check, so an unresolved caller-side ${VAR} fails loud
+      instead of silently rendering an empty string.
   template_path:
     type: string
     description: |
       Absolute path to a file containing the template body. The file is
       read at task run time; ${VAR} placeholders are then resolved from
       the task's declared env. Mutually exclusive with template; exactly
-      one of the two must be supplied. Callers must declare permissions.fs.r
-      on the sibling file via their per-edge overrides.fs block.
+      one of the two must be supplied. An empty-string value is treated
+      as "not supplied" for the XOR check. The caller's `permissions.fs`
+      block (or per-edge `overrides.fs`) must declare read access to
+      the file (list-of-mappings form, e.g. `- path: ... permission: r`).
 
 permissions:
   # Empty by default: each call site declares which env vars (typically
