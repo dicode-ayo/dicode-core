@@ -423,7 +423,7 @@ surfaces in the same place as any other task failure.
 | [#298] | The `buildin/template` library task. Without it stage 1 would have to be a hand-rolled task that reimplements `${VAR}` substitution and the no-persist contract every time. |
 | [#299] | `trigger.chain.params` carrying operator-defined keys downstream alongside `input.output`. Not used directly in the daemon above (the daemon uses `before:`, not `chain:`) but the same merging semantics power the per-edge `overrides.params` field. |
 | [#300] | `trigger.before:` itself — daemon preflight via task-id list, with the restart-on-prereq-rerun semantics. |
-| [#302] | `run_result.enabled: false` on `buildin/template` and `buildin/write-local`. Without it the rendered tunnel config (with the UUID baked in) and the template body would persist to `runs.return_value`. |
+| [#302] | `run_result.enabled: false` on `buildin/template` and `buildin/write-local`. Without it the rendered tunnel config (with the UUID baked in) would persist to `runs.return_value`. The template body is a param, suppressed separately by `run_inputs.enabled: false`. |
 | [#303] | Per-edge `overrides:` on each `before[]` entry and on `chain:` edges. Without it `buildin/template` and `buildin/write-local` would have to be either daemon-specific (one copy per daemon) or pre-overridden via the global `dicode tasks override` path. |
 | [#309] | The `buildin/write-local` library task. Without it stage 2 would have to be a hand-rolled Deno task that calls `Deno.writeTextFile`. |
 | [#310] | `${input.output}` interpolation in `before[i].overrides.params`. Without it stage 2 couldn't reach stage 1's rendered string declaratively — you'd need a wrapper task that invokes both via `dicode.run_task`. |
