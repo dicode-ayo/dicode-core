@@ -72,8 +72,8 @@ const (
 	DaemonFailedAfterPreflight DaemonState = "failed_after_preflight"
 
 	// DaemonCrashed indicates the daemon's body successfully started but
-	// then exited with a non-success status (failure, timeout, etc.) AND
-	// the configured restart policy will NOT restart it — i.e. either
+	// then exited with any non-success status (failure, cancelled, etc.)
+	// AND the configured restart policy will NOT restart it — i.e. either
 	// restart=never, or restart=on-failure with a status the engine
 	// doesn't treat as a failure. Reachable only from
 	// onDaemonRunFinished's no-restart branch.

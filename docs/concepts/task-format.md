@@ -348,9 +348,9 @@ issue requesting a `parallel: true` opt-in.
 Daemons cycle through a small set of states observable in the WebUI
 and via the REST API's `daemon_state` field:
 
-- `stopped` — Resting state. Either the daemon was deliberately
-  stopped, the engine never started it, or it ran to completion with
-  no restart configured.
+- `stopped` — Resting state (clean-exit case). Either the daemon was
+  deliberately stopped, the engine never started it, or it ran to
+  completion with `status: success` and no restart is configured.
 - `prereq_running` — The `trigger.before` pipeline is executing.
 - `prereq_failed` — One stage of the preflight pipeline returned a
   non-success status. The daemon will not start until the failing
@@ -364,8 +364,10 @@ and via the REST API's `daemon_state` field:
   from the WebUI's task list via the Run button, or from the CLI
   via `dicode run <task-id>`.
 - `crashed` — The daemon's body ran but exited with a non-success
-  status (failure, timeout, etc.) and the configured restart policy
-  isn't going to restart it. Terminal: an operator must re-fire the
+  status (failure, cancelled, etc.) and the configured restart policy
+  isn't going to restart it. The success/failure split versus
+  `stopped` is explicit: clean exits land in `stopped`, non-clean
+  exits land in `crashed`. Terminal: an operator must re-fire the
   daemon to retry.
 
 For an end-to-end example combining daemon preflight, per-edge
