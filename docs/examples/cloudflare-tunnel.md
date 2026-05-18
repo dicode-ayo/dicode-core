@@ -177,7 +177,7 @@ trigger:
         params:
           content: "${input.output}"
           path: "${DATADIR}/cloudflared/config.yml"
-          mode: "0644"
+          mode: "0600"
         fs:
           - path: "${DATADIR}/cloudflared"
             permission: rw
@@ -228,7 +228,7 @@ The renderer + writer pair are declared inline in the daemon's
 (`buildin/template`) renders the config string from Doppler-fed env.
 Stage 2 (`buildin/write-local`) receives the rendered string via
 `${input.output}` interpolation and persists it to
-`${DATADIR}/cloudflared/config.yml` at mode `0644`.
+`${DATADIR}/cloudflared/config.yml` at mode `0600`.
 
 `trigger.before:` runs entries **sequentially in declaration order** —
 each stage's return value is piped to the next via `${input.output}`,
@@ -319,7 +319,7 @@ The chain of events on `dicode daemon` startup:
    `${input.output}` in `overrides.params.content` is replaced with
    stage 1's return value at dispatch time. The task writes the
    rendered string to `${DATADIR}/cloudflared/config.yml` at mode
-   `0644` (the per-edge `fs:rw` override scopes the write to that
+   `0600` (the per-edge `fs:rw` override scopes the write to that
    directory) and returns the resolved path.
 4. Stage 3 (`stage-creds`, optional) fires. Decodes the base64-encoded
    cert + credentials from Doppler into the same directory at mode
@@ -349,14 +349,16 @@ task in its `before:`:
 ```bash
 # rotate the Cloudflare service URL
 doppler secrets set CF_TUNNEL_SERVICE="http://host.docker.internal:8081"
-
-# re-fire stage 1 by hand; the engine re-pipes its return value
-# through stage 2 (buildin/write-local), then restarts the daemon to
-# pick up the rewritten config.yml. Easier: just restart the daemon
-# (`dicode daemon restart cloudflare-tunnel`) — the preflight pipeline
-# re-fires from stage 1 with no manual `buildin/template` invocation.
-dicode daemon restart cloudflare-tunnel
 ```
+
+Then, from the WebUI's task list, manually re-fire `buildin/template`
+(its `trigger.manual: true` makes it eligible for the Run button). The
+engine's mid-pipeline-rerun propagation re-fires `buildin/write-local`
+with the fresh rendered string and restarts the daemon to pick up the
+rewritten `config.yml` — no CLI subcommand or container restart
+required. See
+[Task Format → `trigger.before`](../concepts/task-format.md#daemon-preflight-via-triggerbefore)
+for the exact semantics.
 
 Restarts are coalesced (at most one in flight per daemon) so a flurry
 of rotations produces one re-render and one restart, not a thrash
