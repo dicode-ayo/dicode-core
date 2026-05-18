@@ -311,6 +311,25 @@ Deno.test("resolveTemplateBody: empty-string template treated as not supplied", 
   );
 });
 
+Deno.test("resolveTemplateBody: rejects relative template_path", async () => {
+  // Defence in depth: docs promise template_path must be absolute. A
+  // relative path would silently resolve against Deno's cwd (not
+  // ${TASK_DIR}) and surprise operators. Fail loud before readFile.
+  await assertRejects(
+    () =>
+      resolveTemplateBody(
+        null,
+        "relative/path.tpl",
+        // readFile must NOT be reached.
+        () => {
+          throw new Error("readFile should not be called for relative path");
+        },
+      ),
+    Error,
+    'invalid template_path: must be absolute (got "relative/path.tpl")',
+  );
+});
+
 Deno.test("resolveTemplateBody: reads file via injected readFile", async () => {
   const out = await resolveTemplateBody(
     null,
@@ -376,6 +395,17 @@ Deno.test("main: rejects neither template nor template_path", async () => {
     () => main(stubSdk({})),
     Error,
     "either",
+  );
+});
+
+Deno.test("main: rejects_relative_template_path", async () => {
+  // Docs promise template_path must be absolute. A relative path would
+  // silently resolve against Deno's cwd, contradicting the contract.
+  // main() should fail loud with "must be absolute" before touching IO.
+  await assertRejects(
+    () => main(stubSdk({ template_path: "relative/path.tpl" })),
+    Error,
+    "must be absolute",
   );
 });
 

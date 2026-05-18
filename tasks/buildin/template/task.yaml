@@ -44,8 +44,7 @@ description: |
            - task: buildin/template
              overrides:
                params:
-                 - name: template_path
-                   default: "${TASK_DIR}/cloudflared.tpl"
+                 template_path: "${TASK_DIR}/cloudflared.tpl"
                fs:
                  - path: "${TASK_DIR}/cloudflared.tpl"
                    permission: r

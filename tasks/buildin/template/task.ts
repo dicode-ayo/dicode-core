@@ -149,6 +149,15 @@ export async function resolveTemplateBody(
   }
   // hasPath
   const path = templatePath as string;
+  // Require an absolute path. task.yaml documents this contract; enforce
+  // it loudly here rather than letting a relative path resolve against
+  // Deno's cwd (which would silently diverge from ${TASK_DIR} and
+  // surprise operators). Mirrors buildin/write-local's path validation.
+  if (!path.startsWith("/")) {
+    throw new Error(
+      `invalid template_path: must be absolute (got ${JSON.stringify(path)})`,
+    );
+  }
   try {
     return await readFile(path);
   } catch (err) {
