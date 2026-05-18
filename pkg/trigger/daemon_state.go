@@ -27,7 +27,7 @@ func beforeContains(entries []task.BeforeEntry, taskID string) bool {
 // up — distinguishing "still waiting on the render task" from "render
 // failed" from "explicitly stopped".
 //
-// The five values are intentionally a closed set rather than a bag of
+// The six values are intentionally a closed set rather than a bag of
 // booleans. Adding a new phase should require an explicit case in any
 // switch that consumes this type.
 type DaemonState string
@@ -35,7 +35,8 @@ type DaemonState string
 const (
 	// DaemonStopped is the zero value. Returned for any task ID the engine
 	// hasn't tracked yet — including non-daemon tasks and unknown IDs — so
-	// callers don't have to special-case "not found".
+	// callers don't have to special-case "not found". Also the resting
+	// state after a deliberate Unregister or engine shutdown.
 	DaemonStopped DaemonState = "stopped"
 
 	// DaemonPrereqRunning indicates the engine has dispatched the daemon's
@@ -56,6 +57,17 @@ const (
 	// from DaemonStopped so operators can see the brief intermediate state
 	// during a prereq-driven restart.
 	DaemonStopping DaemonState = "stopping"
+
+	// DaemonFailedAfterPreflight indicates the daemon's preflight pipeline
+	// completed (or was deliberately skipped via skipPrereqs=true from the
+	// mid-pipeline re-fire path) but the subsequent fireAsync call to
+	// launch the daemon body failed — e.g. binary missing, port already
+	// bound, runtime resource exhaustion. Distinct from DaemonStopped so
+	// operators can tell "preflight is fine, daemon body broke" apart from
+	// "operator deliberately stopped it / never started it". Reachable
+	// only from startDaemonInternal's post-preflight error branch (issue
+	// #318).
+	DaemonFailedAfterPreflight DaemonState = "failed_after_preflight"
 )
 
 // daemonStateMap is a thread-safe taskID → DaemonState map. Kept as a

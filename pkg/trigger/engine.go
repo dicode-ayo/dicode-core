@@ -701,8 +701,19 @@ func (e *Engine) startDaemonInternal(spec *task.Spec, skipPrereqs bool) {
 
 	runID, err := e.fireAsync(context.Background(), spec, pkgruntime.RunOptions{}, registry.TriggerDaemon)
 	if err != nil {
-		e.setDaemonState(spec.ID, DaemonStopped)
-		e.log.Error("daemon start failed", zap.String("task", spec.ID), zap.Error(err))
+		// Preflight already ran (or was deliberately skipped via
+		// skipPrereqs=true from the mid-pipeline re-fire path). The
+		// fireAsync error here is a daemon-body launch failure — binary
+		// missing, port already bound, runtime resource exhaustion. Distinct
+		// from DaemonStopped so operators can tell "deliberately stopped /
+		// never started" apart from "preflight passed, daemon body broke"
+		// in the WebUI. See issue #318.
+		e.setDaemonState(spec.ID, DaemonFailedAfterPreflight)
+		e.log.Error("daemon start failed after preflight",
+			zap.String("task", spec.ID),
+			zap.Bool("skip_prereqs", skipPrereqs),
+			zap.Error(err),
+		)
 		return
 	}
 	e.daemonMu.Lock()
