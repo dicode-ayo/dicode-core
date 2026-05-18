@@ -106,16 +106,37 @@ func (e *Engine) setDaemonState(taskID string, s DaemonState) {
 	e.daemonStates.set(taskID, s)
 }
 
+// daemonRegistered reports whether taskID is currently tracked in
+// daemonSpecs — i.e. the engine still considers this task a live daemon.
+// Used by the propagation goroutine to bail out if Unregister has run
+// between the time the goroutine was launched and the time it gets
+// scheduled (or between successive descendant dispatches in a long
+// pipeline). Mirrors the stillRegistered check in onDaemonRunFinished.
+func (e *Engine) daemonRegistered(taskID string) bool {
+	e.daemonMu.Lock()
+	_, ok := e.daemonSpecs[taskID]
+	e.daemonMu.Unlock()
+	return ok
+}
+
 // notifyPrereqCompletion is the post-success hook the engine calls from
 // FireChain when ANY task finishes with status=success. It walks the
-// registered daemons and queues a restart for each one that lists
-// completedTaskID in its trigger.before.
+// registered daemons and, for each one that lists completedTaskID in
+// its trigger.before, propagates the re-fire to descendant stages and
+// then restarts the daemon.
 //
-// Coalescing: at most one restart per daemon is in flight at any time —
-// concurrent prereq completions are dropped via restartGate.tryAcquire.
-// This prevents thrash when a daemon depends on a prereq that's on a
-// short cron (credential rotation, periodic config render, etc.).
-func (e *Engine) notifyPrereqCompletion(completedTaskID string) {
+// completedReturn is the upstream's return value, passed through as
+// the initial ${input.output} for the descendant stages. When the
+// upstream's run_result is a non-string (or nil), descendants whose
+// overrides reference ${input.output} will fail loudly via
+// ErrInputUnavailable — matches the FireChain semantics from PR #299.
+//
+// Coalescing: at most one propagation per daemon is in flight at any
+// time — concurrent prereq completions are dropped via
+// restartGate.tryAcquire. This prevents thrash when a daemon depends
+// on a prereq that's on a short cron (credential rotation, periodic
+// config render, etc.).
+func (e *Engine) notifyPrereqCompletion(completedTaskID string, completedReturn interface{}) {
 	for _, spec := range e.registry.All() {
 		if !spec.Trigger.Daemon {
 			continue
@@ -123,11 +144,12 @@ func (e *Engine) notifyPrereqCompletion(completedTaskID string) {
 		if !beforeContains(spec.Trigger.Before, completedTaskID) {
 			continue
 		}
-		// Only attempt a restart if the daemon was actually up. Restarting
-		// a daemon we never managed to start (e.g. PrereqFailed on first
-		// boot) would race with the in-flight first-boot path; the
-		// prereq's success will fall through to the normal startDaemon
-		// path via the next registration cycle.
+		// Only attempt a propagation if the daemon was actually up.
+		// Re-firing descendants for a daemon we never managed to start
+		// (e.g. PrereqFailed on first boot) would race with the
+		// in-flight first-boot path; the prereq's success will fall
+		// through to the normal startDaemon path via the next
+		// registration cycle.
 		state := e.DaemonState(spec.ID)
 		if state != DaemonRunning {
 			e.log.Debug("prereq completion ignored — daemon not Running",
@@ -137,50 +159,161 @@ func (e *Engine) notifyPrereqCompletion(completedTaskID string) {
 			)
 			continue
 		}
-		e.queueDaemonRestart(spec)
+		e.propagateBeforeRerun(spec, completedTaskID, completedReturn)
 	}
 }
 
-// queueDaemonRestart performs the stop-then-start cycle for a daemon
-// whose trigger.before has just been re-satisfied. Holds a per-daemon
-// lock (sync.Map keyed on task ID) so a flurry of prereq completions
-// produces at most ONE outstanding restart. Subsequent calls during a
-// restart are silently dropped.
-func (e *Engine) queueDaemonRestart(spec *task.Spec) {
-	if !e.restartGates.tryAcquire(spec.ID) {
-		// A restart is already queued or in flight; coalesce.
-		e.log.Debug("daemon restart coalesced", zap.String("task", spec.ID))
+// propagateBeforeRerun replays the descendants of a re-fired preflight
+// stage. When task X re-runs successfully and X is at index i of
+// daemon D's trigger.before pipeline, re-fire stages [i+1..n-1]
+// sequentially with X's fresh return value as the initial
+// upstreamOutput. After the last descendant succeeds, restart the
+// daemon (without re-running preflight — descendants are already
+// fresh) so it picks up the newly-rendered config.
+//
+// Stages [0..i-1] are NOT re-fired — they remain at their last
+// successful run. Only descendants flow through.
+//
+// If any descendant fails during propagation, the daemon stays at
+// its current state (running on old config). Matches PR #300's
+// failure semantics.
+//
+// Coalesced via restartGate so a flurry of re-fires produces at most
+// one outstanding propagation per daemon.
+func (e *Engine) propagateBeforeRerun(daemonSpec *task.Spec, reranTaskID string, reranReturn interface{}) {
+	if !e.restartGates.tryAcquire(daemonSpec.ID) {
+		// A propagation/restart is already queued or in flight; coalesce.
+		e.log.Debug("daemon restart coalesced", zap.String("task", daemonSpec.ID))
 		return
 	}
 	go func() {
-		defer e.restartGates.release(spec.ID)
+		defer e.restartGates.release(daemonSpec.ID)
 
-		e.log.Info("daemon restart triggered by prereq completion",
-			zap.String("task", spec.ID),
+		// Convert the upstream return value to a string. Non-string
+		// returns leave initialOutput="" so a descendant referencing
+		// ${input.output} fails loudly rather than silently passing
+		// the literal token.
+		initialOutput := ""
+		if s, ok := reranReturn.(string); ok {
+			initialOutput = s
+		}
+
+		// Find the re-fired stage's index in the daemon's before list.
+		startIdx := -1
+		for i, entry := range daemonSpec.Trigger.Before {
+			if entry.Task == reranTaskID {
+				startIdx = i
+				break
+			}
+		}
+		if startIdx < 0 {
+			// Defensive: notifyPrereqCompletion already verified
+			// membership via beforeContains, so this shouldn't fire.
+			// Bail without restarting rather than do something
+			// surprising on a registry mutation race.
+			return
+		}
+
+		// Bail early if the engine is shutting down or the daemon was
+		// unregistered between notifyPrereqCompletion's check and our
+		// goroutine being scheduled. Matches the canonical guard from
+		// onDaemonRunFinished — without it, the propagation loop would
+		// happily dispatch descendants and re-fire startDaemonInternal
+		// on a torn-down daemon, leaking daemonRuns entries and racing
+		// the shutdown path.
+		if e.isShuttingDown() {
+			e.log.Debug("propagation skipped: engine shutting down",
+				zap.String("daemon", daemonSpec.ID))
+			return
+		}
+		if !e.daemonRegistered(daemonSpec.ID) {
+			e.log.Debug("propagation skipped: daemon unregistered",
+				zap.String("daemon", daemonSpec.ID))
+			return
+		}
+
+		e.log.Info("daemon mid-pipeline re-fire: propagating to descendants",
+			zap.String("task", daemonSpec.ID),
+			zap.String("rerun", reranTaskID),
+			zap.Int("stage", startIdx),
+			zap.Int("descendants", len(daemonSpec.Trigger.Before)-startIdx-1),
 		)
-		e.setDaemonState(spec.ID, DaemonStopping)
 
-		// Stop the existing run. KillRun is best-effort; the daemon may
-		// already have exited between FireChain's success notification
-		// and this goroutine waking up.
+		// Replay descendants sequentially with fresh ${input.output}.
+		// Re-check the shutdown/unregister guard at the top of each
+		// iteration: a long pipeline (many stages, each potentially
+		// dispatching a real container) can easily span a shutdown or
+		// unregister window opened by an operator while we're mid-loop.
+		//
+		// Use the engine's shutdown-cancellable context for each stage
+		// dispatch so an in-flight fireAsync / WaitRun bails when
+		// Shutdown is called — the between-iteration guards above only
+		// catch the gaps, not a stage already inside Execute.
+		stageCtx := e.getShutdownCtx()
+		if stageCtx == nil {
+			stageCtx = context.Background()
+		}
+		prevOutput := initialOutput
+		for i := startIdx + 1; i < len(daemonSpec.Trigger.Before); i++ {
+			if e.isShuttingDown() {
+				e.log.Debug("propagation aborted: engine shutting down",
+					zap.String("daemon", daemonSpec.ID),
+					zap.Int("stage", i))
+				return
+			}
+			if !e.daemonRegistered(daemonSpec.ID) {
+				e.log.Debug("propagation aborted: daemon unregistered",
+					zap.String("daemon", daemonSpec.ID),
+					zap.Int("stage", i))
+				return
+			}
+			entry := daemonSpec.Trigger.Before[i]
+			out, err := e.dispatchPipelineStage(stageCtx, entry, i, prevOutput)
+			if err != nil {
+				e.log.Warn("daemon mid-pipeline re-fire: descendant stage failed; daemon left at current state",
+					zap.String("task", daemonSpec.ID),
+					zap.Int("stage", i),
+					zap.Error(err),
+				)
+				return
+			}
+			prevOutput = out
+		}
+
+		// Last guard before tearing down + restarting: a stage could
+		// have completed just as the operator unregistered the daemon
+		// or the engine started shutting down. Without this, we'd call
+		// startDaemonInternal on a daemon Unregister has already
+		// purged from daemonSpecs — leaving a stray daemonRuns entry
+		// that races the shutdown path.
+		if e.isShuttingDown() {
+			e.log.Debug("propagation restart skipped: engine shutting down",
+				zap.String("daemon", daemonSpec.ID))
+			return
+		}
+		if !e.daemonRegistered(daemonSpec.ID) {
+			e.log.Debug("propagation restart skipped: daemon unregistered",
+				zap.String("daemon", daemonSpec.ID))
+			return
+		}
+
+		// All descendants succeeded — stop the current daemon run and
+		// fire a fresh one. Skip the preflight re-run on startup
+		// because descendants are already fresh from the propagation
+		// above; re-running runPrereqs here would double-fire the
+		// re-rendered stages and re-execute the (unchanged) earlier
+		// stages.
+		e.setDaemonState(daemonSpec.ID, DaemonStopping)
 		e.daemonMu.Lock()
-		runID := e.daemonRuns[spec.ID]
+		runID := e.daemonRuns[daemonSpec.ID]
 		e.daemonMu.Unlock()
 		if runID != "" {
 			e.KillRun(runID)
-			// Wait briefly for the run to actually terminate so the
-			// onDaemonRunFinished restart hook (which itself runs
-			// startDaemon) doesn't race with our explicit restart.
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			_, _ = e.WaitRun(ctx, runID)
 			cancel()
 		}
-
-		// Re-fire preflight + start. The onDaemonRunFinished path will
-		// ALSO try to restart on cancellation in some configurations;
-		// startDaemon's own idempotency (daemonRuns gating) keeps that
-		// safe.
-		e.startDaemon(spec)
+		e.startDaemonInternal(daemonSpec, true)
 	}()
 }
 
