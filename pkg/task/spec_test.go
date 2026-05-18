@@ -479,11 +479,35 @@ func TestTriggerBefore_Validation(t *testing.T) {
 		wantErr string
 	}{
 		{
-			name: "before without daemon",
+			// Post-#312: trigger.before is valid on any trigger type, not
+			// just daemons. Manual / cron / webhook / chain tasks may declare
+			// preflight pipelines too.
+			name: "before on manual task",
 			yaml: `name: t
 runtime: deno
 trigger: { manual: true, before: [x] }`,
-			wantErr: "before: requires daemon: true",
+			wantErr: "",
+		},
+		{
+			name: "before on cron task",
+			yaml: `name: t
+runtime: deno
+trigger: { cron: "*/5 * * * *", before: [x] }`,
+			wantErr: "",
+		},
+		{
+			name: "before on webhook task",
+			yaml: `name: t
+runtime: deno
+trigger: { webhook: /h, before: [x] }`,
+			wantErr: "",
+		},
+		{
+			name: "before on chain task",
+			yaml: `name: t
+runtime: deno
+trigger: { chain: { from: upstream }, before: [x] }`,
+			wantErr: "",
 		},
 		{
 			name: "self-reference",

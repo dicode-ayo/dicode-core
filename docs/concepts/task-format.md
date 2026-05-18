@@ -73,7 +73,7 @@ permissions:
 | `trigger.chain.overrides` | object | | Per-edge patch applied to a deep copy of the downstream's spec at firing time; manual fires of the same downstream are unaffected. See [per-edge overrides](#chain-params-and-per-edge-overrides). |
 | `trigger.daemon` | bool | | Start on app start, restart on exit |
 | `trigger.restart` | string | | daemon only: `always` (default), `on-failure`, `never` |
-| `trigger.before` | list | | daemon only: prereq task IDs (bare-string or `{task, overrides}` mapping) that must succeed before the daemon starts. See [`trigger.before` — daemon preflight](#daemon-preflight-via-triggerbefore). |
+| `trigger.before` | list | | prereq task IDs (bare-string or `{task, overrides}` mapping) that must succeed before the main task body runs. Valid on any trigger type (daemon, manual, cron, webhook, chain). See [`trigger.before` — preflight pipelines](#preflight-pipelines-via-triggerbefore). |
 | `permissions` | object | | Explicit access grants — nothing is implicit |
 | `permissions.env` | list | | Env vars the script may read (see below) |
 | `permissions.fs` | list | | Filesystem access declarations (Deno only) |
@@ -241,16 +241,37 @@ The `trigger` rejection is deliberate — per-edge dispatch invokes the
 downstream directly and ignores any rewired trigger config on the merged
 spec, so silently accepting it would mislead operators.
 
-### Daemon preflight via trigger.before
+### Preflight pipelines via trigger.before
 
-Only valid on daemon tasks. Lists one-shot prereq tasks that the engine
-runs as a **sequential output-piping pipeline** before the daemon
-container starts. Each stage must reach `status=success` for the
-pipeline to advance; a failure short-circuits the rest of the list and
-leaves the daemon in `prereq_failed`. The engine re-fires every stage
-on every preflight attempt — no "already-satisfied" short-circuit —
-because the point of preflight is to refresh ephemeral state (rendered
-configs, freshly rotated credentials) right before the daemon starts.
+`trigger.before:` declares a sequential preflight pipeline of one-shot
+prereq tasks. It is valid on **any** trigger type — daemon, manual,
+cron, webhook, or chain. Preflight stages run in declaration order
+before the main task body; if any stage fails, the main body does not
+run.
+
+Each stage must reach `status=success` for the pipeline to advance; a
+failure short-circuits the rest of the list. The engine re-fires every
+stage on every preflight attempt — no "already-satisfied" short-circuit
+— because the point of preflight is to refresh ephemeral state
+(rendered configs, freshly rotated credentials) right before the main
+body runs.
+
+**Run-row semantics on failure.** The behaviour differs slightly by
+trigger type:
+
+- **Daemon:** preflight failure leaves the daemon in `prereq_failed`
+  and no daemon-body run is created. (Daemons distinguish lifecycle
+  states; the preflight pipeline is part of bringing the daemon up.)
+- **One-shot (manual / cron / webhook / chain):** preflight + body
+  collapse into a single parent run row. On preflight failure, the
+  parent run surfaces as `status=failure` with
+  `fail_reason="preflight_failed: stage N (<task-id>): <error>"`. The
+  parent's `start_time` is the time the operator fired the task (i.e.
+  when the run was attempted), not the time the failure was detected.
+
+Preflight stages themselves run as their own child runs tagged
+`trigger_source=preflight`, linked back to the parent fire — the
+WebUI groups them under the parent for visibility.
 
 Each entry can be either a bare task-ID string (single-stage form) or
 a mapping with `task:` plus optional `overrides:`:
@@ -372,19 +393,34 @@ upstream return value, so any `${input.…}` reference on
 an explicit error. Use a literal default or an env-projected secret on
 stage 0; downstream stages can then pipe via the recognised tokens.
 
-**Mid-pipeline re-fire propagation.** When an intermediate stage at
-index `i` re-runs successfully (e.g. an operator runs
-`dicode run buildin/template` to pick up a rotated Doppler
+**Mid-pipeline re-fire propagation (daemon-only).** When an
+intermediate stage at index `i` re-runs successfully (e.g. an operator
+runs `dicode run buildin/template` to pick up a rotated Doppler
 secret), the engine re-fires stages `[i+1..n-1]` sequentially with the
 re-run's fresh return value as the initial `${input.output}`, then
 restarts the daemon to pick up the propagated config. Stages
 `[0..i-1]` are NOT re-fired. Propagations are coalesced per daemon
 (at most one in flight) so a flurry of upstream completions produces a
-single propagation + restart, not a thrash loop.
+single propagation + restart, not a thrash loop. One-shots do NOT
+auto-restart on a prereq re-run — if the operator wants the one-shot
+to re-run, they re-fire it themselves.
 
-**Cross-spec validation.** At registration time the engine rejects
-references to unknown tasks and to other daemons — only one-shot tasks
-can be preflights. Self-references are rejected at config-load.
+**Concurrency.** Daemons coalesce concurrent `Register` calls — a
+re-register while preflight is in flight does not spawn a second
+preflight goroutine. One-shots do NOT coalesce: each manual / cron /
+webhook / chain fire gets its own preflight + body, distinct from the
+daemon's coalesce-on-Register behaviour.
+
+**Cross-spec validation.** At registration time the engine rejects:
+
+- References to unknown tasks.
+- References to daemons (only one-shot tasks can be preflights).
+- Self-references (already rejected at config-load).
+- Cycles in the before-graph. Once one-shots can declare
+  `trigger.before`, `A.before: [B]; B.before: [A]` becomes
+  representable; the engine runs a DFS over the registered
+  before-edges and rejects cycles with a path like
+  `cycle detected: A -> B -> A`.
 
 **Semantic change vs PR #300.** Before PR3, `trigger.before` entries
 ran in parallel and were treated as independent prereqs (no piping).

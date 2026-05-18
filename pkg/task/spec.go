@@ -702,14 +702,13 @@ func (s *Spec) validate() error {
 			return fmt.Errorf("trigger.restart must be always, on-failure, or never")
 		}
 	}
-	// trigger.before: declarative preflight dependency for daemon tasks. Only
-	// validated locally here; cross-spec checks (does the referenced task
-	// exist? is it a daemon?) live in pkg/trigger.Engine.Register because they
-	// need the full registry snapshot.
+	// trigger.before: declarative preflight pipeline. Valid on any trigger
+	// type — daemon, manual, cron, webhook, or chain — since issue #312.
+	// Only validated locally here; cross-spec checks (does the referenced
+	// task exist? is it a one-shot? does the before-graph contain a cycle?)
+	// live in pkg/trigger.Engine.Register because they need the full
+	// registry snapshot.
 	if len(s.Trigger.Before) > 0 {
-		if !s.Trigger.Daemon {
-			return fmt.Errorf("trigger.before: requires daemon: true (got non-daemon trigger)")
-		}
 		for i, entry := range s.Trigger.Before {
 			if entry.Task == "" {
 				return fmt.Errorf("trigger.before: empty task ID")
