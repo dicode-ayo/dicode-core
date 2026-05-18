@@ -343,8 +343,8 @@ func TestChainDispatch_ResolvesInputOutput(t *testing.T) {
 	}
 }
 
-// strPtr is a tiny helper for the TestStringRet table — Go has no literal
-// syntax for "address of a string literal" so the typed-nil and
+// strPtr is a tiny helper for the TestCoerceStringReturn table — Go has no
+// literal syntax for "address of a string literal" so the typed-nil and
 // pointer-to-string cases need a helper to construct the *string.
 func strPtr(s string) *string { return &s }
 
@@ -434,9 +434,9 @@ func TestOnFailureChainDispatch_ResolvesInputOutput(t *testing.T) {
 // skipped: the literal ${input.output} token must NOT pass through
 // unresolved.
 //
-// PR2's stringRet() turns non-string returns into "", which propagates
-// as ErrInputUnavailable through ResolveInputOutputMap, which causes
-// the dispatch to log + return without firing the downstream.
+// PR2's coerceStringReturn() turns non-string returns into "", which
+// propagates as ErrInputUnavailable through ResolveInputOutputMap, which
+// causes the dispatch to log + return without firing the downstream.
 func TestOnFailureChainDispatch_NonStringUpstreamSkips(t *testing.T) {
 	dir := t.TempDir()
 	e := newTestEnv(t)
@@ -466,8 +466,8 @@ func TestOnFailureChainDispatch_NonStringUpstreamSkips(t *testing.T) {
 		t.Fatalf("finish parent run: %v", err)
 	}
 
-	// Non-string output: a map. stringRet returns "", resolver fails,
-	// dispatch must skip.
+	// Non-string output: a map. coerceStringReturn returns "", resolver
+	// fails, dispatch must skip.
 	e.engine.FireChain(context.Background(), "source-skip", parentRunID, registry.StatusFailure,
 		map[string]any{"nested": "object"})
 
@@ -482,12 +482,12 @@ func TestOnFailureChainDispatch_NonStringUpstreamSkips(t *testing.T) {
 	}
 }
 
-// TestStringRet pins the helper's contract: only direct-string returns
-// flow through; everything else (maps, slices, numbers, nil, typed-nil
-// interfaces, pointers-to-string) becomes "". The empty string then
-// propagates as ErrInputUnavailable through the resolver, which is the
-// loud-failure path we want for non-string upstreams.
-func TestStringRet(t *testing.T) {
+// TestCoerceStringReturn pins the helper's contract: only direct-string
+// returns flow through; everything else (maps, slices, numbers, nil,
+// typed-nil interfaces, pointers-to-string) becomes "". The empty string
+// then propagates as ErrInputUnavailable through the resolver, which is
+// the loud-failure path we want for non-string upstreams.
+func TestCoerceStringReturn(t *testing.T) {
 	var typedNilString *string // (*string)(nil); interface-wraps to a typed-nil
 	cases := []struct {
 		name string
@@ -505,8 +505,8 @@ func TestStringRet(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := stringRet(c.in); got != c.want {
-				t.Errorf("stringRet(%v) = %q; want %q", c.in, got, c.want)
+			if got := coerceStringReturn(c.in); got != c.want {
+				t.Errorf("coerceStringReturn(%v) = %q; want %q", c.in, got, c.want)
 			}
 		})
 	}
