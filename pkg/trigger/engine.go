@@ -395,17 +395,23 @@ func (e *Engine) validateBeforeRefs(spec *task.Spec) error {
 				return fmt.Errorf("trigger.before: overrides for %q produce invalid spec: %w", entry.Task, err)
 			}
 		}
-		// ${input.output} on before[0] is statically unresolvable: the
-		// first pipeline stage has no upstream return value. Reject at
-		// registration so operators see the failure at config-load time
-		// rather than the first daemon dispatch. Non-first stages are
-		// allowed because PR3 will pipe the previous stage's output into
-		// upstreamOutput.
+		// before[0] has no upstream return value AND no upstream params
+		// at dispatch time, so any well-formed `${input.output…}` or
+		// `${input.params…}` reference is statically unresolvable.
+		// Reject at registration so the operator sees the failure at
+		// config-load time. Non-first stages are allowed because
+		// runPrereqs pipes the previous stage's output (and, in
+		// future, params) forward.
+		//
+		// Malformed shapes (${input.foo}, ${input.output.a.b}, …) are
+		// caught by Spec.validate via validatePerEdgeOverrides; this
+		// check focuses on the dispatch-time invariant unique to
+		// before[0].
 		if i == 0 && entry.Overrides != nil {
 			for _, p := range entry.Overrides.Params {
-				if p.Default == task.InputOutputToken {
+				if strings.Contains(p.Default, "${input.") {
 					return fmt.Errorf(
-						"trigger.before[0].overrides.params.%s: ${input.output} is not available on the first pipeline stage",
+						"trigger.before[0].overrides.params.%s: ${input.…} references are not available on the first pipeline stage",
 						p.Name,
 					)
 				}
@@ -778,7 +784,12 @@ func (e *Engine) runPrereqs(ctx context.Context, spec *task.Spec) error {
 		return nil
 	}
 
-	var prevOutput string
+	// The first stage runs against an empty InputContext — registration
+	// already rejects `${input.…}` references on before[0]. Subsequent
+	// stages carry the previous stage's full return value AND its
+	// RunOptions.Params (today: always empty), wired through
+	// dispatchPipelineStage.
+	var upstream task.InputContext
 	for i, entry := range spec.Trigger.Before {
 		entry := entry
 		if e.isShuttingDown() {
@@ -793,39 +804,40 @@ func (e *Engine) runPrereqs(ctx context.Context, spec *task.Spec) error {
 				zap.Int("stage", i))
 			return nil
 		}
-		out, err := e.dispatchPipelineStage(ctx, entry, i, prevOutput)
+		out, err := e.dispatchPipelineStage(ctx, entry, i, upstream)
 		if err != nil {
 			return err
 		}
-		prevOutput = out
+		upstream = out
 	}
 	return nil
 }
 
 // dispatchPipelineStage runs a single trigger.before stage:
 //
-//  1. Resolves ${input.output} in entry.Overrides.Params against
-//     upstreamOutput (the previous stage's return value, or "" for the
-//     first stage). The override pointer is shallow-copied before
-//     mutation so the registry-held spec is never written to —
-//     concurrent preflight fires therefore never race on this field.
+//  1. Resolves recognised `${input.…}` references in entry.Overrides.Params
+//     against the supplied InputContext (the previous stage's return value
+//     + the previous stage's RunOptions.Params, or empty for the first
+//     stage). The override pointer is shallow-copied before mutation so
+//     the registry-held spec is never written to — concurrent preflight
+//     fires therefore never race on this field.
 //  2. Applies per-edge overrides onto a deep copy of the registry
 //     spec and re-validates.
 //  3. Fires the stage and waits for terminal status via WaitRun.
-//  4. Returns the stage's string return value (empty for non-string
-//     returns) so the next stage's ${input.output} resolves loudly
-//     rather than silently passing the literal token downstream.
+//  4. Returns the stage's full return value AND its RunOptions.Params
+//     so the next stage's ${input.…} references resolve loudly rather
+//     than silently passing the literal token downstream.
 //
 // Shared by runPrereqs and the mid-pipeline re-fire propagation path
 // in daemon_state.go so both code paths apply identical semantics.
-func (e *Engine) dispatchPipelineStage(ctx context.Context, entry task.BeforeEntry, stageIdx int, upstreamOutput string) (string, error) {
+func (e *Engine) dispatchPipelineStage(ctx context.Context, entry task.BeforeEntry, stageIdx int, upstream task.InputContext) (task.InputContext, error) {
 	refID := entry.Task
 	ref, ok := e.registry.Get(refID)
 	if !ok {
 		// validateBeforeRefs catches this at registration time, but the
 		// registry can change between registration and preflight (task
 		// unregistered while daemon was queued, etc.). Defensive check.
-		return "", fmt.Errorf("stage %d (%s): prereq vanished from registry", stageIdx, refID)
+		return task.InputContext{}, fmt.Errorf("stage %d (%s): prereq vanished from registry", stageIdx, refID)
 	}
 
 	// Per-edge overrides (#303): if this preflight edge declares
@@ -837,16 +849,16 @@ func (e *Engine) dispatchPipelineStage(ctx context.Context, entry task.BeforeEnt
 	if entry.Overrides != nil {
 		ovPtr := entry.Overrides
 		if entry.Overrides.Params != nil {
-			// Resolve ${input.output} against the previous stage's
-			// return value. Shallow-copy entry.Overrides before
-			// mutating Params — *Overrides is shared with the
-			// registry-held spec, and concurrent preflight fires
-			// would otherwise race on this field. (Fixes the
-			// pointer-shared mutation hazard flagged in PR2's
-			// reviewer note.)
-			resolved, rerr := task.ResolveInputOutputList(entry.Overrides.Params, upstreamOutput)
+			// Resolve `${input.…}` references against the previous
+			// stage's return value + params. Shallow-copy
+			// entry.Overrides before mutating Params — *Overrides is
+			// shared with the registry-held spec, and concurrent
+			// preflight fires would otherwise race on this field.
+			// (Fixes the pointer-shared mutation hazard flagged in
+			// PR2's reviewer note.)
+			resolved, rerr := task.ResolveInputOutputList(entry.Overrides.Params, upstream)
 			if rerr != nil {
-				return "", fmt.Errorf("stage %d (%s): resolve input refs: %w", stageIdx, refID, rerr)
+				return task.InputContext{}, fmt.Errorf("stage %d (%s): resolve input refs: %w", stageIdx, refID, rerr)
 			}
 			// Shallow-copy entry.Overrides so the Params write below cannot
 			// reach the registry-held *Overrides via the pointer. Other fields
@@ -866,14 +878,21 @@ func (e *Engine) dispatchPipelineStage(ctx context.Context, entry task.BeforeEnt
 		// and the preflight fire.
 		merged := taskset.ApplyOverrides(ref, ovPtr)
 		if vErr := merged.Validate(); vErr != nil {
-			return "", fmt.Errorf("stage %d (%s): overrides produce invalid spec: %w", stageIdx, refID, vErr)
+			return task.InputContext{}, fmt.Errorf("stage %d (%s): overrides produce invalid spec: %w", stageIdx, refID, vErr)
 		}
 		dispatchSpec = merged
 	}
 
-	runID, err := e.fireAsync(ctx, dispatchSpec, pkgruntime.RunOptions{}, registry.TriggerPreflight)
+	// Snapshot the params we hand to fireAsync so the next stage's
+	// ${input.params.X} resolves against the params this stage saw.
+	// Preflight stages run with empty RunOptions.Params today — so
+	// this snapshot is always nil — but threading it through here lets
+	// a future change wire upstream params into the pipeline without
+	// touching the resolver contract again.
+	stageOpts := pkgruntime.RunOptions{}
+	runID, err := e.fireAsync(ctx, dispatchSpec, stageOpts, registry.TriggerPreflight)
 	if err != nil {
-		return "", fmt.Errorf("stage %d (%s): dispatch: %w", stageIdx, refID, err)
+		return task.InputContext{}, fmt.Errorf("stage %d (%s): dispatch: %w", stageIdx, refID, err)
 	}
 
 	// WaitRun (channel-backed) wakes on the runDone close and merges the
@@ -882,20 +901,19 @@ func (e *Engine) dispatchPipelineStage(ctx context.Context, entry task.BeforeEnt
 	// buildin/template) still surface their value to the next stage.
 	res, werr := e.WaitRun(ctx, runID)
 	if werr != nil {
-		return "", fmt.Errorf("stage %d (%s): wait: %w", stageIdx, refID, werr)
+		return task.InputContext{}, fmt.Errorf("stage %d (%s): wait: %w", stageIdx, refID, werr)
 	}
 	if res.Status != registry.StatusSuccess {
-		return "", fmt.Errorf("stage %d (%s): run %s ended with status %s", stageIdx, refID, runID, res.Status)
+		return task.InputContext{}, fmt.Errorf("stage %d (%s): run %s ended with status %s", stageIdx, refID, runID, res.Status)
 	}
 
-	// Only string returns flow as ${input.output} to the next stage.
-	// Non-string returns leave the next upstreamOutput="" so any
-	// reference downstream surfaces ErrInputUnavailable loudly rather
-	// than silently passing the literal token.
-	if s, ok := res.ReturnValue.(string); ok {
-		return s, nil
-	}
-	return "", nil
+	// Pass the FULL return value (not just a string-coerced view) into
+	// the next stage's InputContext.Output. The resolver type-asserts
+	// per-token: ${input.output} requires a string, ${input.output.X}
+	// requires a map. Non-resolvable references downstream now fail
+	// with a per-token reason instead of a one-size-fits-all "no
+	// upstream value".
+	return task.InputContext{Output: res.ReturnValue, Params: stageOpts.Params}, nil
 }
 
 func (e *Engine) onDaemonRunFinished(spec *task.Spec, runID string) {
@@ -1189,7 +1207,12 @@ func (e *Engine) KillRun(runID string) bool {
 
 // FireChain checks if any tasks declare a chain trigger from completedTaskID,
 // and fires the global on_failure_chain if configured.
-func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatus string, output interface{}) {
+//
+// upstreamParams is the upstream run's RunOptions.Params snapshot —
+// piped through to the dispatch-time `${input.params.<name>}`
+// resolver. Callers that don't track upstream params (e.g.
+// preflight-short-circuit paths) pass nil.
+func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatus string, output interface{}, upstreamParams map[string]string) {
 	// Preflight restart hook: when a task that some daemon lists in
 	// trigger.before finishes with status=success, restart that daemon so
 	// it picks up newly-rendered config / freshly-rotated secrets. Failure
@@ -1198,6 +1221,12 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 	if runStatus == registry.StatusSuccess {
 		e.notifyPrereqCompletion(completedTaskID, output)
 	}
+	// Shared resolver context for both the success-chain and
+	// on_failure_chain dispatch paths below. The full upstream return
+	// value flows through to the resolver — type-asserts happen
+	// per-token (${input.output} requires string, ${input.output.X}
+	// requires map).
+	upstreamCtx := task.InputContext{Output: output, Params: upstreamParams}
 
 	// Declared chain triggers.
 	for _, spec := range e.registry.All() {
@@ -1229,16 +1258,16 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 			}
 			dispatchSpec = merged
 		}
-		// Dispatch-time ${input.output} interpolation: substitute the
-		// literal token in chain.Params with the upstream's return value.
-		// Only direct-string upstream returns flow through; non-string
-		// returns are treated as "no upstream available" — the chain
-		// dispatch is skipped (logged) rather than silently passing the
-		// literal token to the downstream.
-		upstreamRet := coerceStringReturn(output)
-		resolvedParams, rerr := task.ResolveInputOutputMap(chain.Params, upstreamRet)
+		// Dispatch-time `${input.…}` interpolation against the upstream
+		// context (full return value + RunOptions.Params snapshot). The
+		// resolver type-asserts per-token: ${input.output} requires a
+		// string, ${input.output.X} requires a map, ${input.params.X}
+		// requires a non-nil Params map with the named entry. Any
+		// resolution failure skips the chain dispatch (logged) rather
+		// than silently passing a literal token to the downstream.
+		resolvedParams, rerr := task.ResolveInputOutputMap(chain.Params, upstreamCtx)
 		if rerr != nil {
-			e.log.Error("chain trigger skipped — failed to resolve ${input.output}",
+			e.log.Error("chain trigger skipped — failed to resolve ${input.…} reference",
 				zap.String("from", completedTaskID),
 				zap.String("to", spec.ID),
 				zap.Error(rerr),
@@ -1339,20 +1368,18 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 					return
 				}
 
-				// Dispatch-time ${input.output} interpolation: substitute
-				// the literal token in chainSpec.Params with the upstream's
-				// return value. Symmetric with the success-chain path above —
-				// any chain edge supports the token; non-string upstream
-				// returns are treated as "no upstream available" and the
-				// failure-chain dispatch is skipped (logged) rather than
-				// silently passing the literal token to the downstream.
-				// Release the chainGuards slot we just acquired so a failed
+				// Dispatch-time `${input.…}` interpolation against the
+				// upstream context. Symmetric with the success-chain
+				// path above — any chain edge supports the recognised
+				// shapes; failure-chain dispatch is skipped (logged) on
+				// resolution failure rather than silently passing a
+				// literal token to the downstream. Release the
+				// chainGuards slot we just acquired so a failed
 				// resolution doesn't burn cap_per_task / cap_global.
-				upstreamRet := coerceStringReturn(output)
-				resolvedParams, rerr := task.ResolveInputOutputMap(chainSpec.Params, upstreamRet)
+				resolvedParams, rerr := task.ResolveInputOutputMap(chainSpec.Params, upstreamCtx)
 				if rerr != nil {
 					e.guards.releaseSlot(completedTaskID)
-					e.log.Error("on_failure_chain skipped — failed to resolve ${input.output}",
+					e.log.Error("on_failure_chain skipped — failed to resolve ${input.…} reference",
 						zap.String("from", completedTaskID),
 						zap.String("to", targetID),
 						zap.Error(rerr),
@@ -1414,16 +1441,6 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 			}
 		}
 	}
-}
-
-// coerceStringReturn coerces any return value to a string for
-// ${input.output} interpolation. JSON-marshalled objects, numbers,
-// and lists are NOT auto-stringified — only direct string returns
-// flow through. Non-string returns produce "" which propagates as
-// ErrInputUnavailable through the resolver.
-func coerceStringReturn(rv interface{}) string {
-	s, _ := rv.(string)
-	return s
 }
 
 // buildChainInput shapes the `Input` value handed to a downstream task that
@@ -2094,7 +2111,7 @@ func (e *Engine) runTask(runCtx context.Context, spec *task.Spec, opts pkgruntim
 		_ = e.registry.FinishRunWithReason(context.Background(), opts.RunID, preStatus, preReason)
 		// dispatch normally fires FireChain; on the preflight short-circuit
 		// we replicate it so chain triggers still observe the failure.
-		go e.FireChain(context.Background(), spec.ID, opts.RunID, preStatus, nil)
+		go e.FireChain(context.Background(), spec.ID, opts.RunID, preStatus, nil, opts.Params)
 		status = preStatus
 		result = &pkgruntime.RunResult{RunID: opts.RunID, Error: errors.New(preReason)}
 	} else {
@@ -2479,7 +2496,7 @@ func (e *Engine) dispatch(ctx context.Context, spec *task.Spec, opts pkgruntime.
 		}
 	}
 
-	e.FireChain(context.Background(), spec.ID, opts.RunID, status, result.ChainInput)
+	e.FireChain(context.Background(), spec.ID, opts.RunID, status, result.ChainInput, opts.Params)
 	return status, result
 }
 

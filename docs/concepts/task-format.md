@@ -204,6 +204,12 @@ are rejected at config-load if present in `params`. When `params` is
 empty (the default), `input` stays as the upstream's raw value — no
 wrapping — so existing chains keep working unchanged.
 
+String values in `params` may reference the upstream's runtime state
+via the dispatch-time interpolation grammar — `${input.output}`,
+`${input.output.<field>}`, `${input.params.<name>}`, and embedded
+forms. See [`${input.…}` interpolation](#input-interpolation) below
+for the full grammar and loud-failure semantics.
+
 The same params shape applies symmetrically to
 `on_failure_chain.params` (the failure-chain analogue).
 
@@ -305,21 +311,49 @@ trigger:
             permission: r
 ```
 
-**`${input.output}` interpolation.** The literal token `${input.output}`
-in a `before[i].overrides.params` `default` value (or in a
-`trigger.chain.params` value) is replaced at dispatch time with the
-upstream stage's return value. Only direct string returns flow through;
-non-string returns (numbers, lists, structured payloads) leave the
-downstream's `${input.output}` unresolved and the dispatch fails loudly
-rather than passing the literal token through. The interpolation is
-exact-match on the whole value — embedded forms like
-`"prefix-${input.output}-x"` are not currently substituted.
+<a id="input-interpolation"></a>
+**`${input.…}` interpolation.** Three reference shapes are recognised
+at dispatch time in `before[i].overrides.params` defaults and
+`trigger.chain.params` values:
+
+| Form | Resolves to | Loud-fail when |
+| --- | --- | --- |
+| `${input.output}` | upstream's full string return value | upstream returned a non-string |
+| `${input.output.<field>}` | named string field of an object-shaped upstream return (e.g. `{path: "..."}`) | upstream isn't an object, field absent, field non-string |
+| `${input.params.<name>}` | named entry from the upstream's `RunOptions.Params` (chain edge: the caller-supplied params on the upstream's fire; preflight edge: always empty today) | params map nil or named entry missing |
+
+Embedded forms (`"prefix-${input.output}-suffix"`) and multi-token
+forms (`"${input.params.scheme}://${input.output.host}"`) are
+supported — any string containing one or more recognised tokens is
+rewritten in place. Unknown shapes (e.g. `${input.foo}`,
+`${input.output.a.b}`) are rejected at task-registration time with a
+site-qualified error so operators see the failure at config-load.
+
+Loud-failures at dispatch produce a structured log
+(`failed to resolve ${input.…} reference`) and skip the chain /
+preflight dispatch rather than silently passing a literal token to
+the downstream.
+
+```yaml
+trigger:
+  chain:
+    from: render-config
+    params:
+      # bare token — upstream must return a string
+      content: "${input.output}"
+      # named field — upstream returned {path: "..."}
+      destPath: "${input.output.path}"
+      # caller-supplied param piped from the upstream
+      endpoint: "${input.params.url}"
+      # embedded form — splice into a literal
+      banner: "rendered at ${input.output} on ${input.params.host}"
+```
 
 **First-stage validation.** The first stage (`before[0]`) has no
-upstream return value, so any `${input.output}` reference on
+upstream return value, so any `${input.…}` reference on
 `before[0].overrides.params` is rejected at task-registration time with
 an explicit error. Use a literal default or an env-projected secret on
-stage 0; downstream stages can then pipe via `${input.output}`.
+stage 0; downstream stages can then pipe via the recognised tokens.
 
 **Mid-pipeline re-fire propagation.** When an intermediate stage at
 index `i` re-runs successfully (e.g. an operator runs

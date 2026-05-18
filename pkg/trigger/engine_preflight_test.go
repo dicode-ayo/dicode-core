@@ -848,8 +848,8 @@ func TestRegister_RejectsInputOutputOnFirstBeforeStage(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected register to reject ${input.output} on before[0]")
 	}
-	if !strings.Contains(err.Error(), "input.output") {
-		t.Errorf("error should mention input.output; got %v", err)
+	if !strings.Contains(err.Error(), "${input.") {
+		t.Errorf("error should mention ${input. prefix; got %v", err)
 	}
 	if !strings.Contains(err.Error(), "before[0]") {
 		t.Errorf("error should pinpoint the offending stage; got %v", err)
@@ -920,6 +920,95 @@ func TestBefore_SequentialExecution(t *testing.T) {
 	want := []string{"stage-a", "stage-b", "stage-c"}
 	if !reflect.DeepEqual(order, want) {
 		t.Errorf("before-list ran out of order: got %v, want %v", order, want)
+	}
+}
+
+// TestBefore_PipesInputOutputFieldThroughStages exercises the
+// post-#316 grammar extension on the preflight edge:
+// ${input.output.<field>} lifts a named string field out of a
+// structured upstream return value. Stage 1 returns
+// {path: "/var/run/relay.yaml"}; stage 2's override.content references
+// the field directly. The captured spec's content default must equal
+// the field value — the resolver type-asserts the map and pulls the
+// string out before the writer fires.
+func TestBefore_PipesInputOutputFieldThroughStages(t *testing.T) {
+	eng, reg, exec := newPreflightEnv(t)
+
+	exec.setReturnFn("render-obj", func(_, _ string, _ *task.Spec) interface{} {
+		return map[string]any{"path": "/var/run/relay.yaml", "size": 42}
+	})
+	render := makeOneShotSpec("render-obj")
+	if err := reg.Register(render); err != nil {
+		t.Fatalf("register render-obj: %v", err)
+	}
+
+	writer := &task.Spec{
+		ID:      "write-obj",
+		Name:    "write-obj",
+		Runtime: task.RuntimeDeno,
+		Trigger: task.TriggerConfig{Manual: true},
+		Params: task.Params{
+			{Name: "target", Required: true},
+		},
+		Enabled: true,
+	}
+	if err := reg.Register(writer); err != nil {
+		t.Fatalf("register writer: %v", err)
+	}
+
+	daemon := &task.Spec{
+		ID:      "d-obj",
+		Name:    "d-obj",
+		Runtime: task.RuntimeDocker,
+		Docker:  &task.DockerConfig{Image: "alpine"},
+		Trigger: task.TriggerConfig{
+			Daemon:  true,
+			Restart: "never",
+			Before: []task.BeforeEntry{
+				{Task: "render-obj"},
+				{
+					Task: "write-obj",
+					Overrides: &task.Overrides{
+						Params: task.ParamOverrides{
+							{Name: "target", Default: "${input.output.path}"},
+						},
+					},
+				},
+			},
+		},
+		Enabled: true,
+	}
+	if err := reg.Register(daemon); err != nil {
+		t.Fatalf("register daemon: %v", err)
+	}
+	exec.markDaemon("d-obj")
+
+	if err := eng.Register(daemon); err != nil {
+		t.Fatalf("eng.Register: %v", err)
+	}
+
+	var writeSpec *task.Spec
+	waitUntil(t, 5*time.Second, func() bool {
+		runs, _ := reg.ListRuns(context.Background(), "write-obj", 5)
+		for _, r := range runs {
+			if r.TriggerSource == registry.TriggerPreflight {
+				if s := exec.specForRun(r.ID); s != nil {
+					writeSpec = s
+					return true
+				}
+			}
+		}
+		return false
+	}, "write-obj stage never captured by executor")
+
+	var got string
+	for _, p := range writeSpec.Params {
+		if p.Name == "target" {
+			got = p.Default
+		}
+	}
+	if got != "/var/run/relay.yaml" {
+		t.Errorf("write-obj.target default = %q; want %q (output.field did not resolve)", got, "/var/run/relay.yaml")
 	}
 }
 

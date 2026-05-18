@@ -127,9 +127,18 @@ func IsReservedChainParamKey(name string) bool {
 // Mutates s in place (zeroes any stripped fields) and returns non-fatal
 // warnings that callers should surface via their structured logger.
 func (s *OnFailureChainSpec) Validate() (warnings []string, err error) {
-	for k := range s.Params {
+	for k, v := range s.Params {
 		if _, reserved := reservedChainParamKeys[k]; reserved {
 			return nil, fmt.Errorf("on_failure_chain.params: %q is a reserved key (used by the engine)", k)
+		}
+		// Static validation of `${input.…}` references — same gate as
+		// trigger.chain.params (see spec.go). Catches malformed shapes
+		// at config load instead of letting them silently flow through
+		// as literal strings on the failure-chain edge.
+		if sv, ok := v.(string); ok {
+			if err := ValidateInputRefs(fmt.Sprintf("on_failure_chain.params.%s", k), sv); err != nil {
+				return nil, err
+			}
 		}
 	}
 	// MaxConcurrentGlobal and Storm are operator-policy fields that apply only

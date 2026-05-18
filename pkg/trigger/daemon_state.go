@@ -220,14 +220,14 @@ func (e *Engine) propagateBeforeRerun(daemonSpec *task.Spec, reranTaskID string,
 	go func() {
 		defer e.restartGates.release(daemonSpec.ID)
 
-		// Convert the upstream return value to a string. Non-string
-		// returns leave initialOutput="" so a descendant referencing
-		// ${input.output} fails loudly rather than silently passing
-		// the literal token.
-		initialOutput := ""
-		if s, ok := reranReturn.(string); ok {
-			initialOutput = s
-		}
+		// Wrap the re-fired stage's return value in an InputContext.
+		// The resolver type-asserts per-token at dispatch time:
+		// ${input.output} requires a string, ${input.output.X} a map,
+		// etc. — so a non-string reranReturn yields ErrInputUnavailable
+		// loudly rather than silently passing a literal token to
+		// descendants. Params is nil here because preflight stages run
+		// with empty RunOptions.Params today.
+		initialCtx := task.InputContext{Output: reranReturn}
 
 		// Find the re-fired stage's index in the daemon's before list.
 		startIdx := -1
@@ -284,7 +284,7 @@ func (e *Engine) propagateBeforeRerun(daemonSpec *task.Spec, reranTaskID string,
 		if stageCtx == nil {
 			stageCtx = context.Background()
 		}
-		prevOutput := initialOutput
+		upstream := initialCtx
 		for i := startIdx + 1; i < len(daemonSpec.Trigger.Before); i++ {
 			if e.isShuttingDown() {
 				e.log.Debug("propagation aborted: engine shutting down",
@@ -299,7 +299,7 @@ func (e *Engine) propagateBeforeRerun(daemonSpec *task.Spec, reranTaskID string,
 				return
 			}
 			entry := daemonSpec.Trigger.Before[i]
-			out, err := e.dispatchPipelineStage(stageCtx, entry, i, prevOutput)
+			out, err := e.dispatchPipelineStage(stageCtx, entry, i, upstream)
 			if err != nil {
 				e.log.Warn("daemon mid-pipeline re-fire: descendant stage failed; daemon left at current state",
 					zap.String("task", daemonSpec.ID),
@@ -308,7 +308,7 @@ func (e *Engine) propagateBeforeRerun(daemonSpec *task.Spec, reranTaskID string,
 				)
 				return
 			}
-			prevOutput = out
+			upstream = out
 		}
 
 		// Last guard before tearing down + restarting: a stage could
