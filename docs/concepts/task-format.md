@@ -342,6 +342,25 @@ shape), while enabling composable pipelines (render → persist → start
 daemon) for new consumers. If you need parallel preflights, file an
 issue requesting a `parallel: true` opt-in.
 
+#### Daemon states
+
+Daemons cycle through a small set of states observable in the WebUI
+and via the REST API's `daemon_state` field:
+
+- `stopped` — Resting state. Either the daemon was deliberately
+  stopped, the engine never started it, or it ran to completion with
+  no restart configured.
+- `prereq_running` — The `trigger.before` pipeline is executing.
+- `prereq_failed` — One stage of the preflight pipeline returned a
+  non-success status. The daemon will not start until the failing
+  stage is re-fired successfully.
+- `running` — The daemon body is executing.
+- `stopping` — The engine is shutting the daemon down
+  (operator-initiated unregister, or engine shutdown).
+- `failed_after_preflight` — Preflight succeeded, but the daemon's
+  own dispatch errored (binary missing, port already bound, etc.).
+  Terminal: an operator must re-Register the daemon to retry.
+
 For an end-to-end example combining daemon preflight, per-edge
 overrides, `${DATADIR}` volumes, and `run_result.enabled: false`, see
 [Cloudflare Tunnel worked example](../examples/cloudflare-tunnel.md).
