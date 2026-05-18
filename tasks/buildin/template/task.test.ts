@@ -11,6 +11,7 @@ import {
   buildEnvMap,
   collectPlaceholders,
   renderTemplate,
+  resolveTemplateBody,
 } from "./task.ts";
 
 // --- renderTemplate (pure) ---
@@ -211,21 +212,28 @@ Deno.test("main: missing env var produces unresolved-placeholder error", async (
   );
 });
 
-Deno.test("main: empty template returns empty string", async () => {
-  const out = await main(stubSdk({ template: "" }));
-  assertEquals(out, "");
+Deno.test("main: empty template treated as not supplied (loud failure)", async () => {
+  // An empty `template` is almost always a misconfiguration —
+  // typically an unresolved caller-side ${VAR} or an empty default
+  // fallback. Treat it the same as "neither supplied" so the failure
+  // is the loud XOR-validation error, not a silent empty render.
+  await assertRejects(
+    () => main(stubSdk({ template: "" })),
+    Error,
+    "either template or template_path must be supplied",
+  );
 });
 
-Deno.test("main: missing template param throws (engine enforces required)", async () => {
-  // No 'template' key in the stub; params.get returns null. task.yaml
-  // declares `template: required: true`, so the engine would reject
-  // the run upstream — but main() also guards against a null leaking
-  // through (no silent ?? "" fallback). The thrown error keeps the
-  // contract loud for programmatic callers.
+Deno.test("main: missing template param throws loud XOR-validation error", async () => {
+  // No 'template' or 'template_path' key in the stub; both
+  // params.get() calls return null. task.yaml no longer marks
+  // template as required (since template_path is an alternative), so
+  // the engine doesn't reject upstream — main() owns the loud-failure
+  // contract via resolveTemplateBody.
   await assertRejects(
     () => main(stubSdk({})),
     Error,
-    "missing required param: template",
+    "either template or template_path must be supplied",
   );
 });
 
@@ -267,4 +275,190 @@ Deno.test("main: prototype-shaped placeholder also fails loud", async () => {
     Error,
     "unresolved placeholder: ${__proto__}",
   );
+});
+
+// --- resolveTemplateBody (XOR + file IO) ---
+
+Deno.test("resolveTemplateBody: returns inline template verbatim", async () => {
+  const out = await resolveTemplateBody("hello ${X}", null);
+  assertEquals(out, "hello ${X}");
+});
+
+Deno.test("resolveTemplateBody: rejects both template and template_path", async () => {
+  await assertRejects(
+    () => resolveTemplateBody("inline", "<unused-path>"),
+    Error,
+    "both template and template_path supplied; exactly one is required",
+  );
+});
+
+Deno.test("resolveTemplateBody: rejects neither template nor template_path", async () => {
+  await assertRejects(
+    () => resolveTemplateBody(null, null),
+    Error,
+    "either template or template_path must be supplied",
+  );
+});
+
+Deno.test("resolveTemplateBody: empty-string template treated as not supplied", async () => {
+  // Empty value is almost always a misconfiguration (unresolved
+  // caller-side ${VAR}, empty default fallback) — fall through to
+  // the XOR error instead of returning an empty render.
+  await assertRejects(
+    () => resolveTemplateBody("", ""),
+    Error,
+    "either template or template_path must be supplied",
+  );
+});
+
+Deno.test("resolveTemplateBody: rejects relative template_path", async () => {
+  // Defence in depth: docs promise template_path must be absolute. A
+  // relative path would silently resolve against Deno's cwd (not
+  // ${TASK_DIR}) and surprise operators. Fail loud before readFile.
+  await assertRejects(
+    () =>
+      resolveTemplateBody(
+        null,
+        "relative/path.tpl",
+        // readFile must NOT be reached.
+        () => {
+          throw new Error("readFile should not be called for relative path");
+        },
+      ),
+    Error,
+    'invalid template_path: must be absolute (got "relative/path.tpl")',
+  );
+});
+
+Deno.test("resolveTemplateBody: reads file via injected readFile", async () => {
+  const out = await resolveTemplateBody(
+    null,
+    "/fake/path.tpl",
+    (p) => {
+      assertEquals(p, "/fake/path.tpl");
+      return Promise.resolve("body from file ${X}");
+    },
+  );
+  assertEquals(out, "body from file ${X}");
+});
+
+Deno.test("resolveTemplateBody: wraps readFile errors with path context", async () => {
+  await assertRejects(
+    () =>
+      resolveTemplateBody(
+        null,
+        "/missing/path.tpl",
+        () =>
+          Promise.reject(
+            new Deno.errors.NotFound("No such file or directory"),
+          ),
+      ),
+    Error,
+    "reading template_path /missing/path.tpl: No such file or directory",
+  );
+});
+
+// --- main() + template_path end-to-end (real Deno.readTextFile) ---
+
+Deno.test("main: template_path reads file then renders", async () => {
+  // Write a temp file with a placeholder; set the corresponding env
+  // var; invoke main() with template_path pointing at the file.
+  const tmp = await Deno.makeTempFile({
+    prefix: "buildin-template-test-",
+    suffix: ".tpl",
+  });
+  try {
+    await Deno.writeTextFile(tmp, "greeting: ${TPL_TEST_GREETING}");
+    await withEnv({ TPL_TEST_GREETING: "hello" }, async () => {
+      const out = await main(stubSdk({ template_path: tmp }));
+      assertEquals(out, "greeting: hello");
+    });
+  } finally {
+    await Deno.remove(tmp).catch(() => {});
+  }
+});
+
+Deno.test("main: rejects both template and template_path", async () => {
+  await assertRejects(
+    () =>
+      main(stubSdk({
+        template: "inline body",
+        template_path: "<unused-path>",
+      })),
+    Error,
+    "exactly one",
+  );
+});
+
+Deno.test("main: rejects neither template nor template_path", async () => {
+  await assertRejects(
+    () => main(stubSdk({})),
+    Error,
+    "either",
+  );
+});
+
+Deno.test("main: rejects_relative_template_path", async () => {
+  // Docs promise template_path must be absolute. A relative path would
+  // silently resolve against Deno's cwd, contradicting the contract.
+  // main() should fail loud with "must be absolute" before touching IO.
+  await assertRejects(
+    () => main(stubSdk({ template_path: "relative/path.tpl" })),
+    Error,
+    "must be absolute",
+  );
+});
+
+Deno.test("main: template_path missing file produces loud wrapped error", async () => {
+  // Build a path that we know doesn't exist. mkdtemp + immediate
+  // remove keeps the parent dir valid (no surprise ENOTDIR) but
+  // guarantees ENOENT on the target file.
+  const dir = await Deno.makeTempDir({ prefix: "buildin-template-test-" });
+  const bogus = `${dir}/does-not-exist.tpl`;
+  try {
+    await assertRejects(
+      () => main(stubSdk({ template_path: bogus })),
+      Error,
+      `reading template_path ${bogus}:`,
+    );
+  } finally {
+    await Deno.remove(dir, { recursive: true }).catch(() => {});
+  }
+});
+
+// runningAsRoot returns true when this Deno process can read uid 0,
+// false otherwise (including the common case where --allow-sys=uid is
+// not granted and Deno.uid() throws NotCapable). chmod 0 is a no-op
+// for root, so the permission-denied test below uses this to skip
+// rather than emit a false pass.
+function runningAsRoot(): boolean {
+  try {
+    return Deno.uid() === 0;
+  } catch {
+    return false;
+  }
+}
+
+Deno.test({
+  name: "main: template_path permission-denied produces loud wrapped error",
+  // chmod 0 is meaningless on Windows; root on Linux can bypass mode bits.
+  // Skip on Windows and when running as uid 0 to avoid a flaky false-pass.
+  ignore: Deno.build.os === "windows" || runningAsRoot(),
+  async fn() {
+    const dir = await Deno.makeTempDir({ prefix: "buildin-template-test-" });
+    const path = `${dir}/unreadable.tpl`;
+    try {
+      await Deno.writeTextFile(path, "shouldn't be reachable");
+      await Deno.chmod(path, 0o000);
+      await assertRejects(
+        () => main(stubSdk({ template_path: path })),
+        Error,
+        `reading template_path ${path}:`,
+      );
+    } finally {
+      // Restore mode so the cleanup can remove the file.
+      await Deno.chmod(path, 0o600).catch(() => {});
+      await Deno.remove(dir, { recursive: true }).catch(() => {});
+    }
+  },
 });

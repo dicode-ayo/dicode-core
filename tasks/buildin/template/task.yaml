@@ -2,11 +2,13 @@ apiVersion: dicode/v1
 kind: Task
 name: "Template Renderer"
 description: |
-  Substitutes ${VAR} placeholders in a template string using values
-  from the task's environment. Returns rendered output via run-result
-  (suppressed from runs.return_value via run_result.enabled: false)
-  so the value flows to chain triggers and dicode.run_task callers
-  without crossing the persistence boundary.
+  Substitutes ${VAR} placeholders in a template body using values from
+  the task's environment. The template body can be supplied inline
+  (template) or read from a sibling file at run time (template_path) —
+  exactly one of the two is required. Returns rendered output via
+  run-result (suppressed from runs.return_value via
+  run_result.enabled: false) so the value flows to chain triggers and
+  dicode.run_task callers without crossing the persistence boundary.
 
   Operator usage patterns:
 
@@ -27,6 +29,26 @@ description: |
      buffers, and any tee/script captures. Don't do this for templates
      that embed secrets unless you've redirected output to a file.
 
+  3. Template body in a sibling file (template_path):
+     For large template bodies, callers can store the body in a sibling
+     file inside their task folder and pass its absolute path via
+     template_path (typically expanded from ${TASK_DIR}/body.tpl in the
+     caller's per-edge overrides.params.default). The renderer reads
+     the file at run time. The renderer task itself ships with
+     permissions.fs: [] — the caller's `permissions.fs` block (or
+     per-edge `overrides.fs`) must declare read access to the file.
+     Example:
+
+       trigger:
+         before:
+           - task: buildin/template
+             overrides:
+               params:
+                 template_path: "${TASK_DIR}/cloudflared.tpl"
+               fs:
+                 - path: "${TASK_DIR}/cloudflared.tpl"
+                   permission: r
+
 runtime: deno
 
 trigger:
@@ -43,8 +65,21 @@ run_result:
 params:
   template:
     type: string
-    required: true
-    description: "Template body with ${VAR} placeholders."
+    description: |
+      Template body with ${VAR} placeholders. Mutually exclusive with
+      template_path. An empty-string value is treated as "not supplied"
+      for the XOR check, so an unresolved caller-side ${VAR} fails loud
+      instead of silently rendering an empty string.
+  template_path:
+    type: string
+    description: |
+      Absolute path to a file containing the template body. The file is
+      read at task run time; ${VAR} placeholders are then resolved from
+      the task's declared env. Mutually exclusive with template; exactly
+      one of the two must be supplied. An empty-string value is treated
+      as "not supplied" for the XOR check. The caller's `permissions.fs`
+      block (or per-edge `overrides.fs`) must declare read access to
+      the file (list-of-mappings form, e.g. `- path: ... permission: r`).
 
 permissions:
   # Empty by default: each call site declares which env vars (typically
