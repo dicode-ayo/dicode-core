@@ -739,9 +739,19 @@ func (s *Spec) validate() error {
 		// Reject reserved keys at config load so the engine never has to
 		// disambiguate user vs. engine values at firing time. Mirrors the
 		// check on OnFailureChainSpec.Params (see onfailurechain.go).
-		for k := range s.Trigger.Chain.Params {
+		for k, v := range s.Trigger.Chain.Params {
 			if _, reserved := reservedChainParamKeys[k]; reserved {
 				return fmt.Errorf("trigger.chain.params: %q is a reserved key (used by the engine)", k)
+			}
+			// Static validation of `${input.…}` references: catches
+			// malformed shapes (${input.foo}, ${input.output.a.b}, …)
+			// at config load. The resolver type-asserts per token at
+			// dispatch time; this surfaces typos before the first
+			// chain fire.
+			if sv, ok := v.(string); ok {
+				if err := ValidateInputRefs(fmt.Sprintf("trigger.chain.params.%s", k), sv); err != nil {
+					return err
+				}
 			}
 		}
 		if s.Trigger.Chain.Overrides != nil {

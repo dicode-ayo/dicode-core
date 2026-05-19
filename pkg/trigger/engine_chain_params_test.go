@@ -343,10 +343,119 @@ func TestChainDispatch_ResolvesInputOutput(t *testing.T) {
 	}
 }
 
-// strPtr is a tiny helper for the TestCoerceStringReturn table — Go has no
-// literal syntax for "address of a string literal" so the typed-nil and
-// pointer-to-string cases need a helper to construct the *string.
-func strPtr(s string) *string { return &s }
+// TestChainDispatch_ResolvesInputParams pins the post-#316 grammar
+// for ${input.params.<name>}: when the upstream was fired with a
+// non-empty RunOptions.Params, those values pipe into the downstream's
+// chain.params. This exercises the success-chain edge with a real
+// upstream fire (FireManual carries the params snapshot through
+// runTask → FireChain).
+func TestChainDispatch_ResolvesInputParams(t *testing.T) {
+	dir := t.TempDir()
+	e := newTestEnv(t)
+
+	// Downstream — chain.params.endpoint references the upstream's
+	// `url` param.
+	downstream := writeTask(t, dir, "downstream-params-pipe",
+		`export default async function main({ input }) { return input }`,
+		task.TriggerConfig{
+			Chain: &task.ChainTrigger{
+				From:   "upstream-params-pipe",
+				On:     "success",
+				Params: map[string]any{"endpoint": "${input.params.url}"},
+			},
+		})
+	_ = e.reg.Register(downstream)
+
+	upstream := writeTask(t, dir, "upstream-params-pipe",
+		`export default async function main() { return "rendered" }`,
+		task.TriggerConfig{Manual: true})
+	_ = e.reg.Register(upstream)
+
+	// Fire upstream with a param the chain edge will pull through.
+	upRunID, err := e.engine.FireManual(context.Background(), "upstream-params-pipe",
+		map[string]string{"url": "https://relay.example.com"})
+	if err != nil {
+		t.Fatalf("FireManual: %v", err)
+	}
+	primary := waitForTerminal(t, e.engine, upRunID, 30*time.Second)
+	if primary.Status != "success" {
+		t.Fatalf("upstream status = %q, want success", primary.Status)
+	}
+
+	got := waitForRunOfTask(t, e.engine, "downstream-params-pipe", 30*time.Second)
+	if got == nil {
+		t.Fatal("downstream-params-pipe was not fired within the timeout")
+	}
+	if got.Status != "success" {
+		t.Errorf("downstream status = %q, want success", got.Status)
+	}
+	returnValue := pollReturnValue(t, e.engine, got.ID, 5*time.Second)
+	var input map[string]any
+	if err := json.Unmarshal([]byte(returnValue), &input); err != nil {
+		t.Fatalf("unmarshal return value: %v", err)
+	}
+	if input["endpoint"] != "https://relay.example.com" {
+		t.Errorf("endpoint = %v, want https://relay.example.com (upstream params did not pipe through)", input["endpoint"])
+	}
+}
+
+// TestOnFailureChainDispatch_ResolvesInputOutputField drives FireChain
+// with an OBJECT-shaped `output` to verify the post-#316 grammar
+// extension: ${input.output.<field>} substitutes the named field's
+// string value. The path lifts a `{path: "..."}` return value
+// (the canonical write-local shape) into the downstream's params.
+func TestOnFailureChainDispatch_ResolvesInputOutputField(t *testing.T) {
+	dir := t.TempDir()
+	e := newTestEnv(t)
+
+	fallback := writeTask(t, dir, "fallback-field",
+		`export default async function main({ input }) { return input }`,
+		task.TriggerConfig{Manual: true})
+	_ = e.reg.Register(fallback)
+
+	source := writeTask(t, dir, "source-field",
+		`export default async function main() { return "unused" }`,
+		task.TriggerConfig{Manual: true})
+	source.OnFailureChain = &task.OnFailureChainSpec{
+		Task:   "fallback-field",
+		Params: map[string]any{"target": "${input.output.path}", "literal": "untouched"},
+	}
+	_ = e.reg.Register(source)
+
+	parentRunID, err := e.reg.StartRunWithID(
+		context.Background(), "parent-field", "source-field", "", string(registry.TriggerManual),
+	)
+	if err != nil {
+		t.Fatalf("seed parent run: %v", err)
+	}
+	if err := e.reg.FinishRun(context.Background(), parentRunID, registry.StatusFailure); err != nil {
+		t.Fatalf("finish parent run: %v", err)
+	}
+
+	// Map-shaped output (the JSON-decode shape). The resolver picks
+	// "path" out and substitutes its string value into `target`.
+	e.engine.FireChain(context.Background(), "source-field", parentRunID, registry.StatusFailure,
+		map[string]any{"path": "/var/run/rendered.yaml"}, nil)
+
+	got := waitForRunOfTask(t, e.engine, "fallback-field", 30*time.Second)
+	if got == nil {
+		t.Fatal("fallback-field was not fired within the timeout")
+	}
+	if got.Status != "success" {
+		t.Errorf("fallback status = %q, want success", got.Status)
+	}
+	returnValue := pollReturnValue(t, e.engine, got.ID, 5*time.Second)
+	var input map[string]any
+	if err := json.Unmarshal([]byte(returnValue), &input); err != nil {
+		t.Fatalf("unmarshal return value: %v", err)
+	}
+	if input["target"] != "/var/run/rendered.yaml" {
+		t.Errorf("target = %v, want /var/run/rendered.yaml", input["target"])
+	}
+	if input["literal"] != "untouched" {
+		t.Errorf("literal = %v, want untouched", input["literal"])
+	}
+}
 
 // TestOnFailureChainDispatch_ResolvesInputOutput drives FireChain
 // directly with a controlled string `output` to verify that the
@@ -400,7 +509,7 @@ func TestOnFailureChainDispatch_ResolvesInputOutput(t *testing.T) {
 
 	// Drive FireChain with a string output. The resolver should
 	// substitute that string into chainSpec.Params["content"].
-	e.engine.FireChain(context.Background(), "source-interp", parentRunID, registry.StatusFailure, "rendered-error-output")
+	e.engine.FireChain(context.Background(), "source-interp", parentRunID, registry.StatusFailure, "rendered-error-output", nil)
 
 	got := waitForRunOfTask(t, e.engine, "fallback-interp", 30*time.Second)
 	if got == nil {
@@ -434,9 +543,10 @@ func TestOnFailureChainDispatch_ResolvesInputOutput(t *testing.T) {
 // skipped: the literal ${input.output} token must NOT pass through
 // unresolved.
 //
-// PR2's coerceStringReturn() turns non-string returns into "", which
-// propagates as ErrInputUnavailable through ResolveInputOutputMap, which
-// causes the dispatch to log + return without firing the downstream.
+// The resolver's per-token type-assert for ${input.output} requires
+// a string upstream; a map (or any non-string) yields
+// ErrInputUnavailable, which causes the dispatch to log + return
+// without firing the downstream.
 func TestOnFailureChainDispatch_NonStringUpstreamSkips(t *testing.T) {
 	dir := t.TempDir()
 	e := newTestEnv(t)
@@ -466,10 +576,10 @@ func TestOnFailureChainDispatch_NonStringUpstreamSkips(t *testing.T) {
 		t.Fatalf("finish parent run: %v", err)
 	}
 
-	// Non-string output: a map. coerceStringReturn returns "", resolver
-	// fails, dispatch must skip.
+	// Non-string output: a map. The resolver type-asserts ${input.output}
+	// as a string, so a map → ErrInputUnavailable → dispatch must skip.
 	e.engine.FireChain(context.Background(), "source-skip", parentRunID, registry.StatusFailure,
-		map[string]any{"nested": "object"})
+		map[string]any{"nested": "object"}, nil)
 
 	// Give the chain dispatcher a window to (incorrectly) fire.
 	time.Sleep(2 * time.Second)
@@ -482,32 +592,58 @@ func TestOnFailureChainDispatch_NonStringUpstreamSkips(t *testing.T) {
 	}
 }
 
-// TestCoerceStringReturn pins the helper's contract: only direct-string
-// returns flow through; everything else (maps, slices, numbers, nil,
-// typed-nil interfaces, pointers-to-string) becomes "". The empty string
-// then propagates as ErrInputUnavailable through the resolver, which is
-// the loud-failure path we want for non-string upstreams.
-func TestCoerceStringReturn(t *testing.T) {
-	var typedNilString *string // (*string)(nil); interface-wraps to a typed-nil
-	cases := []struct {
-		name string
-		in   interface{}
-		want string
-	}{
-		{"direct string", "hello", "hello"},
-		{"empty string", "", ""},
-		{"map", map[string]interface{}{"x": 1}, ""},
-		{"slice", []interface{}{1, 2}, ""},
-		{"number", 42, ""},
-		{"nil", nil, ""},
-		{"typed nil interface", typedNilString, ""},
-		{"pointer to string", strPtr("hello"), ""},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			if got := coerceStringReturn(c.in); got != c.want {
-				t.Errorf("coerceStringReturn(%v) = %q; want %q", c.in, got, c.want)
-			}
+// TestFireChain_RejectsNonStringForBareInputOutput is the modern
+// successor to TestCoerceStringReturn: it pins the contract that a
+// non-string upstream return value still triggers ErrInputUnavailable
+// when a downstream's chain.params references the bare ${input.output}
+// token. PR #316 retired the coerceStringReturn helper in favour of
+// per-token type-asserts inside the resolver; this test exercises the
+// same loud-failure path through the public FireChain entry point.
+func TestFireChain_RejectsNonStringForBareInputOutput(t *testing.T) {
+	dir := t.TempDir()
+	e := newTestEnv(t)
+
+	// Downstream — chain.params.content references the bare token,
+	// which requires a string upstream. The upstream below returns a
+	// map; the resolver must short-circuit before fireAsync.
+	downstream := writeTask(t, dir, "ds-nonstring",
+		`export default async function main({ input }) { return input }`,
+		task.TriggerConfig{
+			Chain: &task.ChainTrigger{
+				From:   "us-nonstring",
+				On:     "success",
+				Params: map[string]any{"content": "${input.output}"},
+			},
 		})
+	_ = e.reg.Register(downstream)
+
+	upstream := writeTask(t, dir, "us-nonstring",
+		`export default async function main() { return "ignored" }`,
+		task.TriggerConfig{Manual: true})
+	_ = e.reg.Register(upstream)
+
+	// Seed a parent run so FireChain has a real runID to reference.
+	parentRunID, err := e.reg.StartRunWithID(
+		context.Background(), "ns-parent", "us-nonstring", "", string(registry.TriggerManual),
+	)
+	if err != nil {
+		t.Fatalf("seed parent run: %v", err)
+	}
+	if err := e.reg.FinishRun(context.Background(), parentRunID, registry.StatusSuccess); err != nil {
+		t.Fatalf("finish parent run: %v", err)
+	}
+
+	// Non-string output (map) → ${input.output} fails to resolve →
+	// dispatch must skip. We assert via the registry: downstream has
+	// zero runs.
+	e.engine.FireChain(context.Background(), "us-nonstring", parentRunID, registry.StatusSuccess,
+		map[string]any{"x": 1}, nil)
+	time.Sleep(2 * time.Second)
+	runs, err := e.engine.registry.ListRuns(context.Background(), "ds-nonstring", 5)
+	if err != nil {
+		t.Fatalf("ListRuns: %v", err)
+	}
+	if len(runs) > 0 {
+		t.Errorf("ds-nonstring should not have run; got %d runs", len(runs))
 	}
 }

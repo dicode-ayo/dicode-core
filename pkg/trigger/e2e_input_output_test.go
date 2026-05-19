@@ -304,11 +304,11 @@ func TestE2E_InputOutput_NonStringUpstreamFailsLoudly(t *testing.T) {
 	}
 
 	// Upstream — input-output-non-string-upstream fixture returns a
-	// JSON object. coerceStringReturn's contract turns every non-string
-	// return into "", which propagates as ErrInputUnavailable through
-	// ResolveInputOutputMap and causes the chain dispatch to skip with
-	// an error log. The downstream fixture's chain.from references
-	// this ID directly so no rebind is needed.
+	// JSON object. The resolver's per-token type-assert for
+	// ${input.output} requires a string; a map yields
+	// ErrInputUnavailable, which causes the chain dispatch to skip
+	// with an error log. The downstream fixture's chain.from
+	// references this ID directly so no rebind is needed.
 	upstream, err := task.LoadDir(inputOutputFixtureDir(t, "input-output-non-string-upstream"))
 	if err != nil {
 		t.Fatalf("LoadDir input-output-non-string-upstream: %v", err)
@@ -357,19 +357,20 @@ func TestE2E_InputOutput_NonStringUpstreamFailsLoudly(t *testing.T) {
 	}
 }
 
-// TestE2E_InputOutput_EmbeddedTokenPassesThroughLiterally pins the
-// narrow grammar of the resolver: only param values whose VALUE IS
-// EXACTLY `${input.output}` are interpolated. An embedded reference
-// like `"prefix-${input.output}-suffix"` must reach the downstream
-// as a literal string — no partial substitution, no error.
+// TestE2E_InputOutput_EmbeddedTokenInterpolates pins the post-#316
+// behaviour: any string containing one or more recognised
+// `${input.…}` tokens is rewritten through ReplaceAllStringFunc, so an
+// embedded reference like `"prefix-${input.output}-suffix"` reaches
+// the downstream with the resolved value spliced in:
+// `"prefix-<upstream return>-suffix"`. PR #310 deliberately left this
+// case literal; #316 extends the grammar to support embedded forms.
 //
-// The hand-written tests in pkg/task/inputref_test.go assert this at
-// the unit layer; this e2e pins it at the chain-dispatch boundary so
-// a future refactor that swaps in a more lenient regex-based resolver
-// can't accidentally pass through. Upstream is the REAL
-// `tasks/buildin/template/` task — the rendered string is what
-// flows into `input.output` via the in-memory cache.
-func TestE2E_InputOutput_EmbeddedTokenPassesThroughLiterally(t *testing.T) {
+// The hand-written tests in pkg/task/inputref_test.go cover this at
+// the unit layer; this e2e pins it at the chain-dispatch boundary so a
+// future regression to the narrow grammar can't slip through.
+// Upstream is the REAL `tasks/buildin/template/` task — the rendered
+// string is what flows into `input.output` via the in-memory cache.
+func TestE2E_InputOutput_EmbeddedTokenInterpolates(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires Deno subprocess")
 	}
@@ -381,13 +382,14 @@ func TestE2E_InputOutput_EmbeddedTokenPassesThroughLiterally(t *testing.T) {
 	e := newTestEnv(t)
 
 	const upstreamID = "input-output-upstream"
-	const embeddedLiteral = "prefix-${input.output}-suffix"
+	const upstreamReturn = "the-real-value"
+	const chainValue = "prefix-${input.output}-suffix"
+	const wantMarker = "prefix-the-real-value-suffix"
 
-	// Downstream — same fixture as the happy-path test, just with the
-	// embedded literal bound to chain.params.value. The marker MUST
-	// receive it verbatim because partial interpolation is outside
-	// the resolver's grammar.
-	downstream := loadInputOutputDownstream(t, embeddedLiteral)
+	// Downstream — same fixture as the happy-path test, with the
+	// embedded literal bound to chain.params.value. The marker
+	// receives the spliced result.
+	downstream := loadInputOutputDownstream(t, chainValue)
 	downstreamID := downstream.ID
 	if err := e.reg.Register(downstream); err != nil {
 		t.Fatalf("reg.Register downstream: %v", err)
@@ -399,7 +401,7 @@ func TestE2E_InputOutput_EmbeddedTokenPassesThroughLiterally(t *testing.T) {
 	}
 
 	upRunID, err := e.engine.FireManual(context.Background(), upstreamID,
-		map[string]string{"template": "the-real-value"})
+		map[string]string{"template": upstreamReturn})
 	if err != nil {
 		t.Fatalf("FireManual upstream: %v", err)
 	}
@@ -416,13 +418,90 @@ func TestE2E_InputOutput_EmbeddedTokenPassesThroughLiterally(t *testing.T) {
 		t.Errorf("downstream status = %q, want success", got.Status)
 	}
 
-	// The marker MUST hold the literal string verbatim — partial
-	// substitution like "prefix-the-real-value-suffix" would mean the
-	// resolver had moved beyond the narrow "value-is-exactly-token"
-	// grammar PR #310 ships.
 	markerContent := pollFileContents(t, markerPath, 5*time.Second)
-	if markerContent != embeddedLiteral {
-		t.Errorf("marker file = %q, want literal %q (resolver should not interpolate embedded tokens)",
-			markerContent, embeddedLiteral)
+	if markerContent != wantMarker {
+		t.Errorf("marker file = %q, want %q (embedded token was not interpolated)",
+			markerContent, wantMarker)
+	}
+}
+
+// TestE2E_InputOutput_ChainParamsOutputFieldSubstitution drives the
+// post-#316 ${input.output.<field>} grammar end-to-end through real
+// Deno. The upstream — the existing input-output-non-string-upstream
+// fixture — returns the JSON object `{x: 1, y: "hello"}`. The
+// downstream's chain.params.value references `${input.output.y}` so
+// the resolver must lift the string field out of the upstream's
+// structured return and splice it into the downstream's `input.value`.
+// The marker file pins the substituted value end-to-end.
+//
+// This is the e2e companion to TestResolveInputOutputMap_OutputField_StringOK
+// (unit-layer) and TestBefore_PipesInputOutputFieldThroughStages
+// (preflight-edge integration), closing out the new grammar's
+// coverage at the chain-dispatch boundary.
+func TestE2E_InputOutput_ChainParamsOutputFieldSubstitution(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires Deno subprocess")
+	}
+
+	markerDir := t.TempDir()
+	markerPath := filepath.Join(markerDir, "field.marker")
+	t.Setenv("MARKER_PATH", markerPath)
+
+	e := newTestEnv(t)
+
+	// Downstream — input-output-downstream's task.ts reads
+	// `input.value` and writes it to ${MARKER_PATH}. We rebind
+	// chain.from to point at the non-string upstream (whose on-disk
+	// chain.from would otherwise route to the buildin/template
+	// upstream this test doesn't use) and inject the
+	// `${input.output.y}` reference into chain.params.value.
+	downstream, err := task.LoadDir(inputOutputFixtureDir(t, "input-output-downstream"))
+	if err != nil {
+		t.Fatalf("LoadDir input-output-downstream: %v", err)
+	}
+	if downstream.Trigger.Chain == nil {
+		t.Fatal("input-output-downstream fixture missing trigger.chain block")
+	}
+	downstream.Trigger.Chain.From = "input-output-non-string-upstream"
+	downstream.Trigger.Chain.Params = map[string]any{"value": "${input.output.y}"}
+	if err := downstream.Validate(); err != nil {
+		t.Fatalf("downstream re-validate after rebind: %v", err)
+	}
+	downstreamID := downstream.ID
+	if err := e.reg.Register(downstream); err != nil {
+		t.Fatalf("reg.Register downstream: %v", err)
+	}
+
+	// Upstream — returns `{x: 1, y: "hello"}` (per the fixture's
+	// task.ts).
+	upstream, err := task.LoadDir(inputOutputFixtureDir(t, "input-output-non-string-upstream"))
+	if err != nil {
+		t.Fatalf("LoadDir input-output-non-string-upstream: %v", err)
+	}
+	upstreamID := upstream.ID
+	if err := e.reg.Register(upstream); err != nil {
+		t.Fatalf("reg.Register upstream: %v", err)
+	}
+
+	upRunID, err := e.engine.FireManual(context.Background(), upstreamID, nil)
+	if err != nil {
+		t.Fatalf("FireManual upstream: %v", err)
+	}
+	primary := waitForTerminal(t, e.engine, upRunID, 30*time.Second)
+	if primary.Status != registry.StatusSuccess {
+		t.Fatalf("upstream status = %q, want success", primary.Status)
+	}
+
+	got := waitForRunOfTask(t, e.engine, downstreamID, 30*time.Second)
+	if got == nil {
+		t.Fatal("downstream was not fired within the timeout")
+	}
+	if got.Status != registry.StatusSuccess {
+		t.Errorf("downstream status = %q, want success", got.Status)
+	}
+
+	markerContent := pollFileContents(t, markerPath, 5*time.Second)
+	if markerContent != "hello" {
+		t.Errorf("marker file = %q, want %q (output.field did not resolve)", markerContent, "hello")
 	}
 }
