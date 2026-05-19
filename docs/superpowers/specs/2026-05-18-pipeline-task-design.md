@@ -433,10 +433,21 @@ The work is structured to land in N PRs, each independently mergeable and review
 - Add load-time error for legacy `trigger.before:` referencing the migration doc.
 - Net diff: heavy deletions + 2 task migrations.
 
-### PR6 — Docs
-- `docs/concepts/task-format.md` — new "Pipelines" section, deprecate the "Preflight pipelines via trigger.before" section.
+### PR6 — Docs (dicode-core)
+- `docs/concepts/task-format.md` — new top-level "Pipelines" section, remove the "Preflight pipelines via trigger.before" section (per hard cut).
 - `docs/examples/cloudflare-tunnel.md` — already done in PR5.
-- Migration guide (small) for any operator who somehow has `trigger.before:` and needs to migrate.
+- Short migration guide for any operator with a `trigger.before:` task.yaml in flight: how to convert to `kind: PipelineTask` + separate daemon-body Task.
+
+### PR7 — dicode-site sync (dicode-ayo/dicode-site)
+Lands after PR6 merges. Pattern mirrors site#58 (the preflight-pipelines epic's site sync):
+
+- `docs-src/concepts/triggers.md` / `tasks.md` — pull the new "Pipelines" section from dicode-core's task-format.md. Remove the "Preflight pipelines via trigger.before" subsection.
+- `docs-src/concepts/` — add a new top-level concept page if the Pipelines section is large enough to warrant standalone navigation. Decide during the sync; bias toward keeping it inline unless the doc grows past ~200 lines.
+- `site/src/components/` — audit the landing-page components for any copy that promises the OLD shape ("preflight before daemons", `trigger.before`). Update if found; skip if the landing's existing narrative is general enough.
+- `docs/examples/cloudflare-tunnel.md` — pull updated example from dicode-core.
+- Build + `npm run build` verification per the existing dicode-site pipeline.
+
+PR7 cannot land before PR6 (cross-repo dep). File it as a follow-up issue with `blocked: waiting on dicode-core PR6` until PR6 merges.
 
 ## Risks
 
