@@ -410,6 +410,108 @@ func TestResolveInputOutputList_NilList(t *testing.T) {
 	}
 }
 
+// TestResolveString_RejectsEmptyOutput pins the existing loud failure
+// for the bare `${input.output}` form: an upstream that returns an
+// empty string is treated as "not provided" and yields
+// ErrInputUnavailable. This is the pre-existing contract from PR #310,
+// captured here so the regression net covers all three forms together.
+func TestResolveString_RejectsEmptyOutput(t *testing.T) {
+	params := map[string]any{
+		"content": "${input.output}",
+	}
+	_, err := ResolveInputOutputMap(params, ctxString(""))
+	if err == nil {
+		t.Fatal("expected ErrInputUnavailable for empty upstream string")
+	}
+	var ire *ErrInputUnavailable
+	if !errors.As(err, &ire) {
+		t.Fatalf("expected ErrInputUnavailable; got %T: %v", err, err)
+	}
+	if ire.Param != "content" {
+		t.Errorf("ErrInputUnavailable.Param = %q; want %q", ire.Param, "content")
+	}
+}
+
+// TestResolveString_RejectsEmptyOutputField locks the symmetric loud
+// failure for the `${input.output.<field>}` form: a present-but-empty
+// string field is treated as "not provided" rather than substituted
+// silently. Mirrors TestResolveString_RejectsEmptyOutput for the
+// dotted-form to preserve the Failed-loudly contract uniformly. Issue
+// #333.
+func TestResolveString_RejectsEmptyOutputField(t *testing.T) {
+	params := map[string]any{
+		"file": "${input.output.path}",
+	}
+	ctx := InputContext{Output: map[string]any{"path": ""}}
+	_, err := ResolveInputOutputMap(params, ctx)
+	if err == nil {
+		t.Fatal("expected ErrInputUnavailable for empty output field")
+	}
+	var ire *ErrInputUnavailable
+	if !errors.As(err, &ire) {
+		t.Fatalf("expected ErrInputUnavailable; got %T: %v", err, err)
+	}
+	if ire.Param != "file" {
+		t.Errorf("ErrInputUnavailable.Param = %q; want %q", ire.Param, "file")
+	}
+	if ire.Ref != "${input.output.path}" {
+		t.Errorf("ErrInputUnavailable.Ref = %q; want %q", ire.Ref, "${input.output.path}")
+	}
+	if !strings.Contains(ire.Error(), "empty string") {
+		t.Errorf("error should mention empty-string contract; got %v", ire)
+	}
+}
+
+// TestResolveString_RejectsEmptyOutputField_StringMap is the
+// map[string]string twin of TestResolveString_RejectsEmptyOutputField —
+// runtime-test mocks reach the resolver via map[string]string and that
+// path must also fail loudly when the field's value is empty.
+func TestResolveString_RejectsEmptyOutputField_StringMap(t *testing.T) {
+	params := map[string]any{
+		"file": "${input.output.path}",
+	}
+	ctx := InputContext{Output: map[string]string{"path": ""}}
+	_, err := ResolveInputOutputMap(params, ctx)
+	if err == nil {
+		t.Fatal("expected ErrInputUnavailable for empty output field (map[string]string)")
+	}
+	var ire *ErrInputUnavailable
+	if !errors.As(err, &ire) {
+		t.Fatalf("expected ErrInputUnavailable; got %T: %v", err, err)
+	}
+	if !strings.Contains(ire.Error(), "empty string") {
+		t.Errorf("error should mention empty-string contract; got %v", ire)
+	}
+}
+
+// TestResolveString_RejectsEmptyParam locks the symmetric loud failure
+// for the `${input.params.<name>}` form: a present-but-empty entry in
+// the upstream's Params map is treated as "not provided" rather than
+// substituted silently. Issue #333.
+func TestResolveString_RejectsEmptyParam(t *testing.T) {
+	params := map[string]any{
+		"endpoint": "${input.params.X}",
+	}
+	ctx := InputContext{Params: map[string]string{"X": ""}}
+	_, err := ResolveInputOutputMap(params, ctx)
+	if err == nil {
+		t.Fatal("expected ErrInputUnavailable for empty param value")
+	}
+	var ire *ErrInputUnavailable
+	if !errors.As(err, &ire) {
+		t.Fatalf("expected ErrInputUnavailable; got %T: %v", err, err)
+	}
+	if ire.Param != "endpoint" {
+		t.Errorf("ErrInputUnavailable.Param = %q; want %q", ire.Param, "endpoint")
+	}
+	if ire.Ref != "${input.params.X}" {
+		t.Errorf("ErrInputUnavailable.Ref = %q; want %q", ire.Ref, "${input.params.X}")
+	}
+	if !strings.Contains(ire.Error(), "empty string") {
+		t.Errorf("error should mention empty-string contract; got %v", ire)
+	}
+}
+
 // TestValidateInputRefs covers the registration-time gate that
 // surfaces malformed `${input.…}` shapes at config load. Well-formed
 // references (the three recognised shapes) and strings without any
