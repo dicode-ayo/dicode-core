@@ -512,6 +512,34 @@ func TestResolveString_RejectsEmptyParam(t *testing.T) {
 	}
 }
 
+// TestResolveString_RejectsEmptyEmbedded pins the loud-failure contract
+// for embedded `${input.…}` tokens: when a single token inside an
+// otherwise-valid embedded form ("prefix-${input.output}-suffix") would
+// resolve to an empty string, the resolver fails the entire param the
+// same way the bare form does — resolveString short-circuits on the
+// first token error, so an empty substitution can't silently produce
+// "prefix--suffix". Companion to TestResolveString_RejectsEmptyOutput,
+// kept separate so the embedded-form contract is greppable. Issue #333.
+func TestResolveString_RejectsEmptyEmbedded(t *testing.T) {
+	params := map[string]any{
+		"endpoint": "https://${input.output}/api",
+	}
+	_, err := ResolveInputOutputMap(params, ctxString(""))
+	if err == nil {
+		t.Fatal("expected ErrInputUnavailable for empty upstream in embedded form")
+	}
+	var ire *ErrInputUnavailable
+	if !errors.As(err, &ire) {
+		t.Fatalf("expected *ErrInputUnavailable; got %T: %v", err, err)
+	}
+	if ire.Param != "endpoint" {
+		t.Errorf("ErrInputUnavailable.Param = %q; want %q", ire.Param, "endpoint")
+	}
+	if !strings.Contains(ire.Error(), "empty string") {
+		t.Errorf("error should mention empty-string contract; got %v", ire)
+	}
+}
+
 // TestValidateInputRefs covers the registration-time gate that
 // surfaces malformed `${input.…}` shapes at config load. Well-formed
 // references (the three recognised shapes) and strings without any
