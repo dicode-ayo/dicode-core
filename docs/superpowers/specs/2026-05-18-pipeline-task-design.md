@@ -327,6 +327,34 @@ Total added: **~1390 LOC**.
 
 **Net: ~+845 LOC short-term.** But complexity-density goes down because the new code is one cohesive unit instead of branches spread across `fireAsync`, `runPrereqs`, `dispatchPipelineStage`, etc.
 
+### Relationship to `trigger.chain`
+
+PipelineTask does NOT replace `trigger.chain`. They model orthogonal orchestration concerns and continue to coexist:
+
+| Concern | Pipeline | Chain |
+|---|---|---|
+| Coupling direction | Pipeline declares the sequence; stages are unaware they're in one | Downstream B declares dependency on upstream A; A is unaware |
+| Style | Procedural / imperative composition | Event-driven / observer |
+| Discoverability | Read one pipeline spec → see the whole flow | Scan task graph for `chain.from: A`; fan-out is implicit |
+| Coordination | Single team owns the pipeline file | Team Y reacts to Team X's task without modifying X |
+| Cardinality | One pipeline, N stages | One source, M downstream subscribers (natural fan-out) |
+| Failure semantics | Stage failure short-circuits the pipeline | `on_failure_chain` lets a separate task react to failure |
+
+#### Cases where chain stays the right tool
+
+1. **Decoupled observability / auditing** — task A runs; audit-task B chains from it. Adding B doesn't require modifying A or every pipeline that includes A. Pipeline-only forces audit into every consumer's stages.
+2. **`on_failure_chain`** — A fails → remediation B runs. Pipelines can't model "run this only if the pipeline failed" without adding a separate grammar (deferred). Chain already does this.
+3. **Cross-team task coordination** — team X owns task A; team Y wants to fire B when A completes. Chain lets Y add a subscriber without coordinating with X.
+4. **Many-to-one event aggregation** — task C reacts when any of {A, B, D} completes. Chain handles this naturally (C has `chain.from` on each).
+5. **Webhook-driven fan-out** — webhook fires A; B, C, D each chain from A. With chain, each is independent. With pipelines, you'd wrap B/C/D in a parallel pipeline (deferred) and route the webhook to the wrapper.
+
+#### How they compose
+
+- **Chain can trigger a pipeline.** `kind: PipelineTask, trigger.chain.from: <some-task>` — the pipeline fires when the upstream task completes. The pipeline's first stage receives the upstream's return via the existing `${input.*}` grammar (chain.params, just like today for `kind: Task`).
+- **Pipeline can be a chain source.** Another task's `trigger.chain.from: <pipeline-id>` fires when the PipelineTask's parent run terminates. Chain consumer subscribes to the overall pipeline outcome, not individual stages. (Resolves open implementation question #2.)
+- **Stage failure can fire `on_failure_chain` independently.** A stage IS a `kind: Task`; if that task has its own `on_failure_chain` configured, the chain fires when the stage fails. The pipeline's overall short-circuit does not suppress the stage's own configured chain.
+- **No "pipeline as chain source for individual stage completion."** Chain consumers can only subscribe to the pipeline's overall outcome, not to "stage 2 of pipeline X." This keeps the chain-trigger surface narrow; observers needing per-stage events can chain from the underlying `kind: Task` directly.
+
 ### Migration
 
 Two consumer migrations in the same PR (or a follow-up PR if the diff is too big):
@@ -434,16 +462,13 @@ To resolve during planning:
 1. **Stage's `task:` field — can it be a fully-qualified path (e.g., `buildin/template`) or just a task name?**
    Today's `BeforeEntry.Task` accepts the fully-qualified registry ID. PipelineTask should match.
 
-2. **PipelineTask itself as a chain target?**
-   `trigger.chain.from: <pipeline-id>` — does the chain consumer fire when the PipelineTask's overall run succeeds, or on a specific stage? Probably "on the overall PipelineTask run's completion." Matches Task chain semantics; just operates on the pipeline's parent run.
-
-3. **`return_value` storage for the parent run.**
+2. **`return_value` storage for the parent run.**
    Sequential pipeline's parent run's `return_value` = terminal stage's `return_value`. Implementation: PipelineRunner reads the terminal stage's run row at completion and copies the value up. Same persistence semantics (`run_result.enabled` on the terminal stage propagates).
 
-4. **`run_inputs.enabled` for the parent PipelineTask run.**
+3. **`run_inputs.enabled` for the parent PipelineTask run.**
    Parent run has no params of its own (Trigger.Manual fire-time params? Cron schedule? Webhook payload?). Probably reuse the trigger's payload (manual params, webhook body) as the parent's `run_inputs`. Stage runs have their own inputs as today.
 
-5. **Timeout enforcement.**
+4. **Timeout enforcement.**
    `PipelineTask.Timeout` is the wall-clock budget for the entire pipeline. Each stage has its own `overrides.timeout`. When the pipeline timeout fires mid-stage: cancel the current stage, mark pipeline `timeout`. Implementation: PipelineRunner runs under a derived context with deadline.
 
 ## Out of scope (separate follow-up issues to file post-spec-approval)
