@@ -2289,9 +2289,19 @@ func (e *Engine) runTask(runCtx context.Context, spec *task.Spec, opts pkgruntim
 	preResolved, preStatus, preReason := e.preflightEnv(runCtx, spec)
 	if preStatus != "" {
 		_ = e.registry.FinishRunWithReason(context.Background(), opts.RunID, preStatus, preReason)
-		// dispatch normally fires FireChain; on the preflight short-circuit
-		// we replicate it so chain triggers still observe the failure.
-		go e.FireChain(context.Background(), spec.ID, opts.RunID, preStatus, nil, opts.Params)
+		// Chain-on-failure semantics: dispatch normally fires FireChain;
+		// the preflight-env short-circuit replicates it so chain triggers
+		// and on_failure_chain still observe the failure.
+		//
+		// Called synchronously so the caller's deferred cleanup() (which
+		// deletes runChainDepth[opts.RunID]) cannot race ahead of FireChain's
+		// depth lookup. An earlier draft used `go FireChain(...)` to mirror a
+		// fire-and-forget shape, but that allowed cleanup to observe a
+		// depth-of-zero and let a chain-fired parent take one hop past the
+		// MaxDepth ceiling (issue #334, sister to #331). Matches the normal
+		// FireChain call site at the end of dispatch (~line 2759), which is
+		// also synchronous.
+		e.FireChain(context.Background(), spec.ID, opts.RunID, preStatus, nil, opts.Params)
 		status = preStatus
 		result = &pkgruntime.RunResult{RunID: opts.RunID, Error: errors.New(preReason)}
 	} else {
