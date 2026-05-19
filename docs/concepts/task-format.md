@@ -435,9 +435,11 @@ issue requesting a `parallel: true` opt-in.
 Daemons cycle through a small set of states observable in the WebUI
 and via the REST API's `daemon_state` field:
 
-- `stopped` — Resting state (clean-exit case). Either the daemon was
-  deliberately stopped, the engine never started it, or it ran to
-  completion with `status: success` and no restart is configured.
+- `stopped` — Resting state. Reached by deliberate stop (Unregister,
+  engine shutdown, or operator clicking the per-run kill button), or
+  by a daemon that ran to completion with `status: success` and no
+  restart configured. The engine may also never have started the
+  daemon in the first place.
 - `prereq_running` — The `trigger.before` pipeline is executing.
 - `prereq_failed` — One stage of the preflight pipeline returned a
   non-success status. The daemon will not start until the failing
@@ -451,11 +453,10 @@ and via the REST API's `daemon_state` field:
   from the WebUI's task list via the Run button, or from the CLI
   via `dicode run <task-id>`.
 - `crashed` — The daemon's body ran but exited with a non-success
-  status (failure, cancelled, etc.) and the configured restart policy
-  isn't going to restart it. The success/failure split versus
-  `stopped` is explicit: clean exits land in `stopped`, non-clean
-  exits land in `crashed`. Terminal: an operator must re-fire the
-  daemon to retry.
+  status (failure, etc.) and the configured restart policy isn't
+  going to restart it. The success/failure split versus `stopped` is
+  explicit: clean exits land in `stopped`, non-clean exits land in
+  `crashed`. Terminal: an operator must re-fire the daemon to retry.
 
 For an end-to-end example combining daemon preflight, per-edge
 overrides, `${DATADIR}` volumes, and `run_result.enabled: false`, see

@@ -1105,6 +1105,15 @@ func (e *Engine) onDaemonRunFinished(spec *task.Spec, runID string) {
 		return
 	}
 	if run.Status == registry.StatusCancelled {
+		// Operator-initiated cancellation (e.g. per-run kill button).
+		// The daemon was running; treat the deliberate stop as a clean
+		// transition to DaemonStopped so the WebUI doesn't pin a stale
+		// "Running" pill on a daemon whose body has been killed (issue
+		// #332). This sits ahead of the noRestartTransition switch
+		// below because cancellation short-circuits the restart-policy
+		// decision entirely — a killed daemon stays stopped regardless
+		// of restart=always/on-failure/never.
+		e.setDaemonState(spec.ID, DaemonStopped)
 		return
 	}
 
