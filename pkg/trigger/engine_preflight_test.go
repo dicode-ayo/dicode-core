@@ -1920,20 +1920,51 @@ func TestOnDaemonRunFinished_OnFailurePolicy_SuccessExit_TransitionsToStopped(t 
 	}
 }
 
-// TestOnDaemonRunFinished_Cancelled_TransitionsToStopped pins the fix
-// for issue #332: PR #329's status-aware no-restart split (Stopped vs
-// Crashed) didn't cover the StatusCancelled path because cancellation
-// hits an earlier early-return in onDaemonRunFinished. A daemon killed
-// via the per-run kill button under `restart: never` was left in the
-// DaemonRunning state the engine had set when it started — the same
-// stale-Running-pill UX bug #329 fixed for failure/success exits.
-// Operator-initiated cancellation is semantically a clean stop, so it
-// routes into DaemonStopped (Option A from #332).
-func TestOnDaemonRunFinished_Cancelled_TransitionsToStopped(t *testing.T) {
+// TestOnDaemonRunFinished_Cancelled_RestartNever_TransitionsToStopped
+// pins the fix for issue #332: PR #329's status-aware no-restart split
+// (Stopped vs Crashed) didn't cover the StatusCancelled path because
+// cancellation hits an earlier early-return in onDaemonRunFinished. A
+// daemon killed via the per-run kill button under `restart: never` was
+// left in the DaemonRunning state the engine had set when it started —
+// the same stale-Running-pill UX bug #329 fixed for failure/success
+// exits. Operator-initiated cancellation is semantically a clean stop,
+// so it routes into DaemonStopped (Option A from #332).
+func TestOnDaemonRunFinished_Cancelled_RestartNever_TransitionsToStopped(t *testing.T) {
 	eng, spec, runID := finishedRunEnv(t, "never", registry.StatusCancelled)
 	eng.onDaemonRunFinished(spec, runID)
 	if got := eng.DaemonState(spec.ID); got != DaemonStopped {
 		t.Fatalf("DaemonState = %q, want %q (operator-initiated cancellation must surface as Stopped, not stale Running)",
+			got, DaemonStopped)
+	}
+}
+
+// TestOnDaemonRunFinished_Cancelled_RestartAlways_TransitionsToStopped
+// locks in the "regardless of restart policy" half of the #332
+// contract: cancellation is operator intent, so even when the spec
+// says `restart: always` the engine must NOT loop the daemon back to
+// Running — it must land in Stopped. Without this guard, a kill from
+// the WebUI on a restart-always daemon would just respawn it, making
+// the kill button feel broken.
+func TestOnDaemonRunFinished_Cancelled_RestartAlways_TransitionsToStopped(t *testing.T) {
+	eng, spec, runID := finishedRunEnv(t, "always", registry.StatusCancelled)
+	eng.onDaemonRunFinished(spec, runID)
+	if got := eng.DaemonState(spec.ID); got != DaemonStopped {
+		t.Fatalf("DaemonState = %q, want %q (operator cancellation overrides restart=always — kill button must stick)",
+			got, DaemonStopped)
+	}
+}
+
+// TestOnDaemonRunFinished_Cancelled_RestartOnFailure_TransitionsToStopped
+// covers the third restart policy. On-failure normally would NOT
+// restart a cancellation (it's not a failure), so the test mostly
+// confirms the StatusCancelled branch doesn't accidentally leak into
+// the failure-classification path and trigger a spurious restart or
+// Crashed transition.
+func TestOnDaemonRunFinished_Cancelled_RestartOnFailure_TransitionsToStopped(t *testing.T) {
+	eng, spec, runID := finishedRunEnv(t, "on-failure", registry.StatusCancelled)
+	eng.onDaemonRunFinished(spec, runID)
+	if got := eng.DaemonState(spec.ID); got != DaemonStopped {
+		t.Fatalf("DaemonState = %q, want %q (cancellation under restart=on-failure must surface as Stopped, not Crashed)",
 			got, DaemonStopped)
 	}
 }

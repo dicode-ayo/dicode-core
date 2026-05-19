@@ -453,11 +453,10 @@ and via the REST API's `daemon_state` field:
   from the WebUI's task list via the Run button, or from the CLI
   via `dicode run <task-id>`.
 - `crashed` — The daemon's body ran but exited with a non-success
-  status (failure, cancelled, etc.) and the configured restart policy
-  isn't going to restart it. The success/failure split versus
-  `stopped` is explicit: clean exits land in `stopped`, non-clean
-  exits land in `crashed`. Terminal: an operator must re-fire the
-  daemon to retry.
+  status (failure, etc.) and the configured restart policy isn't
+  going to restart it. The success/failure split versus `stopped` is
+  explicit: clean exits land in `stopped`, non-clean exits land in
+  `crashed`. Terminal: an operator must re-fire the daemon to retry.
 
 For an end-to-end example combining daemon preflight, per-edge
 overrides, `${DATADIR}` volumes, and `run_result.enabled: false`, see
