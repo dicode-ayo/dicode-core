@@ -91,15 +91,26 @@ type InputContext struct {
 }
 
 // ErrInputUnavailable is returned when a param references an
-// `${input.…}` token that cannot be resolved at dispatch time:
-//   - ${input.output} when the upstream returned a non-string
+// `${input.…}` token that cannot be resolved at dispatch time. The
+// resolver treats an empty-string value as "not provided" uniformly
+// across all three forms (the loud-failure contract):
+//   - ${input.output} when the upstream returned a non-string or an
+//     empty string
 //   - ${input.output.<field>} when the upstream returned a non-map,
-//     when the field is absent, or when the field's value is non-string
-//   - ${input.params.<name>} when the upstream's Params map is nil or
-//     the named entry is missing
+//     when the field is absent, when the field's value is non-string,
+//     or when the field's string value is empty
+//   - ${input.params.<name>} when the upstream's Params map is nil,
+//     when the named entry is missing, or when the named entry's value
+//     is empty
 //
 // Param identifies the offending param so operators can see which
 // override or chain key tripped the resolver.
+//
+// BREAKING CHANGE (PR #336 / issue #333): previously, ${input.output.<field>}
+// and ${input.params.<name>} silently substituted empty-string values without
+// failing. Operators upgrading should audit any task.yaml relying on that
+// loose behavior; the loud-failure contract now applies uniformly to all
+// three ${input.*} forms.
 type ErrInputUnavailable struct {
 	Param string // name of the offending param
 	Ref   string // the offending reference token, e.g. "${input.output.path}"
@@ -194,20 +205,31 @@ func resolveString(paramName, s string, ctx InputContext) (string, error) {
 // error path always returns *ErrInputUnavailable with Ref set so the
 // caller's wrapping log message includes the offending token.
 func resolveToken(paramName, token, kind, field string, ctx InputContext) (string, error) {
+	// emptyStringWhy is the canonical Why suffix when a token resolves
+	// to "". Empty values are treated as "not provided" uniformly across
+	// all three forms — see ErrInputUnavailable's doc comment for the
+	// rationale. Surfacing the same phrasing on every form makes the
+	// loud-failure contract obvious in logs.
+	const emptyStringWhy = "resolves to empty string (empty values are treated as \"not provided\"; pass a non-empty value or omit the reference)"
+
 	switch kind {
 	case "output":
 		if field == "" {
-			// ${input.output} — upstream must be a string.
+			// ${input.output} — upstream must be a non-empty string.
 			s, ok := ctx.Output.(string)
-			if !ok || s == "" {
+			if !ok {
 				return "", &ErrInputUnavailable{Param: paramName, Ref: token, Why: "upstream returned no string value"}
+			}
+			if s == "" {
+				return "", &ErrInputUnavailable{Param: paramName, Ref: token, Why: emptyStringWhy}
 			}
 			return s, nil
 		}
 		// ${input.output.<field>} — upstream must be a map[string]any
-		// (the shape JSON decoding produces) with a string-valued entry
-		// at <field>. Maps reached via direct Go callers (e.g.
-		// runtime-test mocks) may use map[string]string; accept both.
+		// (the shape JSON decoding produces) with a non-empty string-
+		// valued entry at <field>. Maps reached via direct Go callers
+		// (e.g. runtime-test mocks) may use map[string]string; accept
+		// both.
 		switch m := ctx.Output.(type) {
 		case map[string]any:
 			raw, ok := m[field]
@@ -218,11 +240,17 @@ func resolveToken(paramName, token, kind, field string, ctx InputContext) (strin
 			if !ok {
 				return "", &ErrInputUnavailable{Param: paramName, Ref: token, Why: fmt.Sprintf("upstream field %q is not a string", field)}
 			}
+			if s == "" {
+				return "", &ErrInputUnavailable{Param: paramName, Ref: token, Why: emptyStringWhy}
+			}
 			return s, nil
 		case map[string]string:
 			s, ok := m[field]
 			if !ok {
 				return "", &ErrInputUnavailable{Param: paramName, Ref: token, Why: fmt.Sprintf("upstream object has no field %q", field)}
+			}
+			if s == "" {
+				return "", &ErrInputUnavailable{Param: paramName, Ref: token, Why: emptyStringWhy}
 			}
 			return s, nil
 		default:
@@ -241,6 +269,9 @@ func resolveToken(paramName, token, kind, field string, ctx InputContext) (strin
 		v, ok := ctx.Params[field]
 		if !ok {
 			return "", &ErrInputUnavailable{Param: paramName, Ref: token, Why: fmt.Sprintf("upstream params has no entry %q", field)}
+		}
+		if v == "" {
+			return "", &ErrInputUnavailable{Param: paramName, Ref: token, Why: emptyStringWhy}
 		}
 		return v, nil
 	default:

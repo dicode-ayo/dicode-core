@@ -339,9 +339,18 @@ at dispatch time in `before[i].overrides.params` defaults and
 
 | Form | Resolves to | Loud-fail when |
 | --- | --- | --- |
-| `${input.output}` | upstream's full string return value | upstream returned a non-string |
-| `${input.output.<field>}` | named string field of an object-shaped upstream return (e.g. `{path: "..."}`) | upstream isn't an object, field absent, field non-string |
-| `${input.params.<name>}` | named entry from the upstream's `RunOptions.Params` (chain edge: the caller-supplied params on the upstream's fire; preflight edge: always empty today) | params map nil or named entry missing |
+| `${input.output}` | upstream's full string return value | upstream returned a non-string, or the string is empty |
+| `${input.output.<field>}` | named string field of an object-shaped upstream return (e.g. `{path: "..."}`) | upstream isn't an object, field absent, field non-string, or the field's string value is empty |
+| `${input.params.<name>}` | named entry from the upstream's `RunOptions.Params` (chain edge: the caller-supplied params on the upstream's fire; preflight edge: always empty today) | params map nil, named entry missing, or the entry's value is empty |
+
+**Empty-string contract.** Empty strings are treated as "not provided"
+uniformly across all three forms. A token whose resolution would yield
+`""` fails loudly with `ErrInputUnavailable`, identifying the offending
+param and token. Operators must either supply a non-empty value or
+omit the reference — empty values are never substituted silently. This
+preserves the loud-failure contract across the bare and dotted forms
+so operators can assume the same semantics everywhere `${input.…}`
+appears.
 
 Embedded forms (`"prefix-${input.output}-suffix"`) and multi-token
 forms (`"${input.params.scheme}://${input.output.host}"`) are
