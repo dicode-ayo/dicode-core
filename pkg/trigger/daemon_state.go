@@ -299,7 +299,12 @@ func (e *Engine) propagateBeforeRerun(daemonSpec *task.Spec, reranTaskID string,
 				return
 			}
 			entry := daemonSpec.Trigger.Before[i]
-			out, err := e.dispatchPipelineStage(stageCtx, entry, i, upstream)
+			// parent_run_id is "" here: the daemon's body run is created
+			// AFTER preflight finishes via startDaemonInternal's fireAsync,
+			// so we have no parent run ID to stamp on stage rows at this
+			// layer. See dispatchPipelineStage's parentRunID parameter
+			// doc.
+			out, err := e.dispatchPipelineStage(stageCtx, entry, i, upstream, "")
 			if err != nil {
 				e.log.Warn("daemon mid-pipeline re-fire: descendant stage failed; daemon left at current state",
 					zap.String("task", daemonSpec.ID),

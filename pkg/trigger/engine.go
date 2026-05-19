@@ -59,6 +59,20 @@ type Engine struct {
 	cronEntries map[string]cron.EntryID // taskID → cron entry
 	webhooks    map[string]string       // webhook path → taskID
 
+	// registerMu serializes the entire Register path so that concurrent
+	// registrations cannot admit a cycle through interleaved snapshots of
+	// the before-graph (each call's detectBeforeCycle scans the current
+	// registry state; without a mutex two parallel Register calls could
+	// each clear cycle detection against their independent snapshots and
+	// jointly close A→B→A). Held across validateBeforeRefs through the
+	// final Unregister/register* mutations. Separate from `mu` because
+	// Unregister itself takes `mu`, and from `daemonMu` for the same
+	// reason — keeping registerMu coarse-but-shallow avoids re-entrance.
+	//
+	// In practice the reconciler is single-threaded so registrations
+	// don't race today; this is defense-in-depth for future callers.
+	registerMu sync.Mutex
+
 	runCancels       sync.Map // runID → context.CancelFunc
 	runDone          sync.Map // runID (string) → chan struct{}, closed when the run reaches a terminal state
 	runTriggerSource sync.Map // runID (string) → triggerSource (registry.TriggerSource)
@@ -327,7 +341,14 @@ func (e *Engine) Start(ctx context.Context) error {
 // Register adds or updates trigger registrations for a task spec. Returns a
 // non-nil error when cross-spec validation fails (currently: invalid
 // trigger.before references). On error, no triggers are registered.
+// Register registers a task with the engine. Cycle detection runs
+// against the registered before-graph as of method entry; the call is
+// serialized via registerMu so concurrent registrations cannot admit
+// a cycle through interleaved snapshots.
 func (e *Engine) Register(spec *task.Spec) error {
+	e.registerMu.Lock()
+	defer e.registerMu.Unlock()
+
 	// Cross-spec validation must run BEFORE Unregister so that a previously
 	// valid registration isn't torn down when an updated spec fails its
 	// new-state checks. The registry-snapshot lookups are read-only.
@@ -375,14 +396,14 @@ var inputParamsRefRe = regexp.MustCompile(`\$\{input\.params\.[A-Za-z_][A-Za-z0-
 // validateBeforeRefs checks each trigger.before entry against the current
 // registry. Per-spec validation (Spec.validate) already enforces shape;
 // here we only catch the things that need the full registry: unknown task
-// IDs and references to other daemons.
+// IDs, references to other daemons, and before-graph cycles.
 //
-// On cycles: per-spec validation requires trigger.before only on daemon
-// tasks, and this function forbids before: references to daemons. Together
-// those constraints make cycles structurally unreachable — the only way a
-// cycle could form is through a prereq task carrying its own
-// trigger.before back to the daemon, but only daemons may have
-// trigger.before. We therefore do not implement explicit cycle detection.
+// Pre-#312, cycles were structurally unreachable: trigger.before was
+// daemon-only and entries had to be one-shots, so the graph was at most
+// one edge deep. Issue #312 lifts the daemon-only restriction (one-shot
+// tasks can declare trigger.before too), reopening A→B→A as a realisable
+// shape. detectBeforeCycle runs a three-colour DFS over the registered
+// before-edges (plus the spec being registered) and rejects any cycle.
 func (e *Engine) validateBeforeRefs(spec *task.Spec) error {
 	for i, entry := range spec.Trigger.Before {
 		ref, ok := e.registry.Get(entry.Task)
@@ -463,7 +484,94 @@ func (e *Engine) validateBeforeRefs(spec *task.Spec) error {
 		}
 		seen[entry.Task] = struct{}{}
 	}
+
+	// Cycle detection (#312). Pre-#312, trigger.before was daemon-only and
+	// entries had to be one-shots — the graph was at most one edge deep,
+	// so cycles were structurally unreachable. Now that one-shots may
+	// declare trigger.before too, A→B→A is a realisable shape and we
+	// must reject it at registration. Build a directed graph spanning the
+	// registry plus the spec being registered (which may shadow an existing
+	// registration), then run a three-colour DFS rooted at spec.ID.
+	if cyclePath := e.detectBeforeCycle(spec); cyclePath != "" {
+		return fmt.Errorf("trigger.before: cycle detected: %s", cyclePath)
+	}
 	return nil
+}
+
+// detectBeforeCycle returns a printable "a -> b -> c -> a" path if the
+// before-graph contains a cycle reachable from spec.ID, else "". The graph
+// is built from the current registry snapshot with spec's edges overlaid
+// (so re-registrations see the new edges, not the stale ones). Tasks not
+// yet in the registry contribute no outgoing edges — the unknown-task
+// check elsewhere in validateBeforeRefs surfaces those separately.
+func (e *Engine) detectBeforeCycle(spec *task.Spec) string {
+	edges := map[string][]string{}
+	for _, s := range e.registry.All() {
+		if s.ID == spec.ID {
+			continue // overlay with the candidate spec's edges below
+		}
+		if len(s.Trigger.Before) == 0 {
+			continue
+		}
+		out := make([]string, 0, len(s.Trigger.Before))
+		for _, b := range s.Trigger.Before {
+			out = append(out, b.Task)
+		}
+		edges[s.ID] = out
+	}
+	if len(spec.Trigger.Before) > 0 {
+		out := make([]string, 0, len(spec.Trigger.Before))
+		for _, b := range spec.Trigger.Before {
+			out = append(out, b.Task)
+		}
+		edges[spec.ID] = out
+	}
+
+	const (
+		white = 0 // unvisited
+		gray  = 1 // in current DFS stack
+		black = 2 // finished
+	)
+	color := map[string]int{}
+	var stack []string
+
+	var dfs func(id string) string
+	dfs = func(id string) string {
+		color[id] = gray
+		stack = append(stack, id)
+		for _, next := range edges[id] {
+			switch color[next] {
+			case gray:
+				// Found a back-edge. Trim stack to the cycle.
+				start := 0
+				for i, n := range stack {
+					if n == next {
+						start = i
+						break
+					}
+				}
+				path := append([]string(nil), stack[start:]...)
+				path = append(path, next)
+				return strings.Join(path, " -> ")
+			case white:
+				if p := dfs(next); p != "" {
+					return p
+				}
+			}
+		}
+		stack = stack[:len(stack)-1]
+		color[id] = black
+		return ""
+	}
+
+	// Root the search at spec.ID — only cycles reachable from the
+	// task being registered matter. A pre-existing detached cycle in the
+	// registry is not introduced by this Register call and was rejected
+	// when its components were originally added.
+	if p := dfs(spec.ID); p != "" {
+		return p
+	}
+	return ""
 }
 
 // Unregister removes all trigger registrations for a task ID.
@@ -722,7 +830,10 @@ func (e *Engine) startDaemonInternal(spec *task.Spec, skipPrereqs bool) {
 		if prereqCtx == nil {
 			prereqCtx = context.Background()
 		}
-		if err := e.runPrereqs(prereqCtx, spec); err != nil {
+		// Daemon path: parentRunID is "" because the daemon's body run
+		// hasn't been created yet (fireAsync below produces it after
+		// preflight clears).
+		if err := e.runPrereqs(prereqCtx, spec, ""); err != nil {
 			e.setDaemonState(spec.ID, DaemonPrereqFailed)
 			e.log.Warn("daemon preflight failed; daemon not started",
 				zap.String("task", spec.ID),
@@ -804,10 +915,20 @@ func (e *Engine) startDaemonInternal(spec *task.Spec, skipPrereqs bool) {
 // kill the legitimate winner of the concurrent-Register race. From
 // stage 1 onward, an absence reflects a real operator Unregister
 // between stages, so the check stays.
-func (e *Engine) runPrereqs(ctx context.Context, spec *task.Spec) error {
+//
+// One-shot fires (#312) don't have a daemonSpecs entry to consult.
+// For them the daemonRegistered gate is skipped — the parent's runCtx
+// already carries the kill signal (KillRun cancels runCtx through
+// runCancels) and isShuttingDown() catches engine teardown.
+// parentRunID is the parent fire's run ID for one-shots (#312); stamped on
+// each preflight stage row's parent_run_id column so the WebUI can group
+// children under the parent. Daemons pass "" here — see dispatchPipeline-
+// Stage's parentRunID parameter doc for the rationale.
+func (e *Engine) runPrereqs(ctx context.Context, spec *task.Spec, parentRunID string) error {
 	if e.isShuttingDown() {
 		e.log.Debug("runPrereqs skipped: engine shutting down",
-			zap.String("daemon", spec.ID))
+			zap.String("task", spec.ID),
+			zap.Bool("daemon", spec.Trigger.Daemon))
 		return nil
 	}
 
@@ -821,17 +942,33 @@ func (e *Engine) runPrereqs(ctx context.Context, spec *task.Spec) error {
 		entry := entry
 		if e.isShuttingDown() {
 			e.log.Debug("runPrereqs aborted: engine shutting down",
-				zap.String("daemon", spec.ID),
+				zap.String("task", spec.ID),
+				zap.Bool("daemon", spec.Trigger.Daemon),
 				zap.Int("stage", i))
 			return nil
 		}
-		if i > 0 && !e.daemonRegistered(spec.ID) {
+		// Daemon-only bail: between-stage operator-unregister window.
+		// One-shots have no daemonSpecs entry; they rely on ctx +
+		// shutdown gates instead.
+		if spec.Trigger.Daemon && i > 0 && !e.daemonRegistered(spec.ID) {
 			e.log.Debug("runPrereqs aborted: daemon unregistered",
 				zap.String("daemon", spec.ID),
 				zap.Int("stage", i))
 			return nil
 		}
-		out, err := e.dispatchPipelineStage(ctx, entry, i, upstream)
+		// One-shot bail: parent run was killed mid-pipeline. Daemons
+		// don't have a meaningful per-fire ctx at this layer (start-
+		// DaemonInternal passes the engine shutdown ctx), so this
+		// branch is functionally one-shot-only — daemons bail via the
+		// daemonRegistered check above.
+		if !spec.Trigger.Daemon && ctx.Err() != nil {
+			e.log.Debug("runPrereqs aborted: parent run cancelled",
+				zap.String("task", spec.ID),
+				zap.Int("stage", i),
+				zap.Error(ctx.Err()))
+			return nil
+		}
+		out, err := e.dispatchPipelineStage(ctx, entry, i, upstream, parentRunID)
 		if err != nil {
 			return err
 		}
@@ -855,9 +992,16 @@ func (e *Engine) runPrereqs(ctx context.Context, spec *task.Spec) error {
 //     so the next stage's ${input.…} references resolve loudly rather
 //     than silently passing the literal token downstream.
 //
+// parentRunID, if non-empty, is stamped on the stage run row's
+// parent_run_id column so the WebUI can group preflight children
+// under the parent fire (#312, one-shot case). Daemons pass "" here:
+// the daemon body's run is created AFTER preflight finishes, so
+// linking stage runs to a not-yet-existing daemon-run row is
+// impossible at this layer.
+//
 // Shared by runPrereqs and the mid-pipeline re-fire propagation path
 // in daemon_state.go so both code paths apply identical semantics.
-func (e *Engine) dispatchPipelineStage(ctx context.Context, entry task.BeforeEntry, stageIdx int, upstream task.InputContext) (task.InputContext, error) {
+func (e *Engine) dispatchPipelineStage(ctx context.Context, entry task.BeforeEntry, stageIdx int, upstream task.InputContext, parentRunID string) (task.InputContext, error) {
 	refID := entry.Task
 	ref, ok := e.registry.Get(refID)
 	if !ok {
@@ -916,7 +1060,7 @@ func (e *Engine) dispatchPipelineStage(ctx context.Context, entry task.BeforeEnt
 	// this snapshot is always nil — but threading it through here lets
 	// a future change wire upstream params into the pipeline without
 	// touching the resolver contract again.
-	stageOpts := pkgruntime.RunOptions{}
+	stageOpts := pkgruntime.RunOptions{ParentRunID: parentRunID}
 	runID, err := e.fireAsync(ctx, dispatchSpec, stageOpts, registry.TriggerPreflight)
 	if err != nil {
 		return task.InputContext{}, fmt.Errorf("stage %d (%s): dispatch: %w", stageIdx, refID, err)
@@ -2171,6 +2315,53 @@ func (e *Engine) runTask(runCtx context.Context, spec *task.Spec, opts pkgruntim
 	return status, result
 }
 
+// finalizePreflightFailure closes out a one-shot run whose trigger.before
+// pipeline failed before the body was dispatched (#312). It records the
+// run as a failure with a fail_reason carrying the stage index + task ID
+// that broke the pipeline, fires the runFinishedHook so websocket
+// subscribers observe a matching started/finished pair, and fires
+// FireChain so chain-on-failure consumers observe the failure.
+//
+// The parent run's start_time was set at startRun (before preflight) —
+// that's "the time the operator fired the task", per the issue contract.
+// Preflight duration is included in the run's elapsed window.
+func (e *Engine) finalizePreflightFailure(spec *task.Spec, opts pkgruntime.RunOptions, source registry.TriggerSource, preflightErr error) {
+	reason := "preflight_failed: " + preflightErr.Error()
+	finishCtx, finishCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer finishCancel()
+	if err := e.registry.FinishRunWithReason(finishCtx, opts.RunID, registry.StatusFailure, reason); err != nil {
+		e.log.Error("failed to finalize preflight-failed run",
+			zap.String("run", opts.RunID),
+			zap.String("task", spec.ID),
+			zap.Error(err))
+	}
+	e.log.Warn("one-shot preflight failed; body not dispatched",
+		zap.String("task", spec.ID),
+		zap.String("run", opts.RunID),
+		zap.String("trigger", string(source)),
+		zap.String("reason", reason),
+	)
+	if h := e.runFinishedHook; h != nil {
+		// Duration is 0 — see finalizeCancelled for the same convention.
+		// The preflight stages themselves have their own runs with
+		// accurate durations; the parent's start_time→finished_at delta
+		// captures the operator-visible total.
+		h(spec.ID, opts.RunID, registry.StatusFailure, string(source), 0)
+	}
+	// Chain-on-failure semantics: dispatch normally fires FireChain;
+	// the preflight short-circuit replicates it so chain triggers and
+	// on_failure_chain still observe the failure.
+	//
+	// Called synchronously so the caller's deferred cleanup() (which
+	// deletes runChainDepth[opts.RunID]) cannot race ahead of FireChain's
+	// depth lookup. An earlier draft used `go FireChain(...)` to mirror a
+	// fire-and-forget shape, but that allowed cleanup to observe a
+	// depth-of-zero and let a chain-fired parent take one hop past the
+	// MaxDepth ceiling. Matches the normal FireChain call site at the end
+	// of dispatch (~line 2668), which is also synchronous.
+	e.FireChain(context.Background(), spec.ID, opts.RunID, registry.StatusFailure, nil, opts.Params)
+}
+
 // finalizeCancelled closes out a run that was cancelled before ever executing
 // — e.g. user killed it while queued on the concurrency semaphore, or the
 // daemon is shutting down. It updates the registry row and fires the finished
@@ -2198,6 +2389,21 @@ func (e *Engine) finalizeCancelled(spec *task.Spec, opts pkgruntime.RunOptions, 
 // When a MaxConcurrentTasks semaphore is configured, the goroutine blocks
 // until a slot is available or the shutdown context is cancelled — ensuring
 // shutdown never deadlocks waiting tasks.
+//
+// One-shot preflight (#312): when the spec is a non-daemon with a
+// trigger.before pipeline AND we are NOT already inside a preflight fire,
+// the goroutine runs the preflight pipeline before the body. A failed
+// preflight short-circuits the body and finalizes the parent run with
+// status=failure and fail_reason="preflight_failed: stage N (<task>)".
+// The parent run row is created upfront (before preflight) so the
+// run's start_time reflects when the operator fired the task, not when
+// the failure was detected.
+//
+// Daemons keep their existing preflight path in startDaemonInternal —
+// this branch is skipped for them. Preflight stages themselves call
+// fireAsync with source=TriggerPreflight; that source also skips this
+// branch so a stage task that happens to declare its own trigger.before
+// doesn't recurse.
 func (e *Engine) fireAsync(ctx context.Context, spec *task.Spec, opts pkgruntime.RunOptions, source registry.TriggerSource) (string, error) {
 	opts.RunID = uuid.New().String()
 
@@ -2221,8 +2427,35 @@ func (e *Engine) fireAsync(ctx context.Context, spec *task.Spec, opts pkgruntime
 		}
 	}
 
+	runOneShotPreflight := !spec.Trigger.Daemon &&
+		len(spec.Trigger.Before) > 0 &&
+		source != registry.TriggerPreflight
+
 	go func() {
 		defer cleanup()
+
+		if runOneShotPreflight {
+			// Use runCtx so a KillRun on the parent run propagates into the
+			// preflight loop. The preflight stages themselves are dispatched
+			// via fireAsync (which honors its own runCtx via the parent
+			// goroutine's cancel propagation through dispatchPipelineStage's
+			// WaitRun call). Pass opts.RunID as the parent so each preflight
+			// stage's run row links back to the parent fire — gives the
+			// WebUI the data to render the pipeline + body under one row.
+			if perr := e.runPrereqs(runCtx, spec, opts.RunID); perr != nil {
+				e.finalizePreflightFailure(spec, opts, source, perr)
+				return
+			}
+			// Engine teardown / parent-run kill during preflight: runPrereqs
+			// returns nil on bail (matching daemon semantics), but we don't
+			// want to dispatch the body in that case either. Surface as a
+			// cancelled run so the websocket subscriber sees a matching
+			// started/finished pair.
+			if runCtx.Err() != nil || e.isShuttingDown() {
+				e.finalizeCancelled(spec, opts, source)
+				return
+			}
+		}
 
 		// Daemon tasks are long-running; they must not consume semaphore slots
 		// or they would permanently starve webhook/cron tasks.

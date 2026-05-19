@@ -186,13 +186,16 @@ type TriggerConfig struct {
 	Chain         *ChainTrigger `yaml:"chain,omitempty"`          // fire when another task completes
 	Daemon        bool          `yaml:"daemon,omitempty"`         // start on app start, restart on exit
 	Restart       string        `yaml:"restart,omitempty"`        // daemon only: "always"(default)|"on-failure"|"never"
-	// Before lists task IDs that must run to success before this daemon starts.
-	// Only valid alongside `daemon: true`; per-spec validation rejects it on
-	// non-daemon triggers. Cross-spec validation (in pkg/trigger.Engine.Register)
-	// additionally rejects references to unknown tasks and to other daemons —
-	// only one-shot tasks can be preflights. When a referenced task re-runs
-	// successfully after the daemon is up, the engine restarts the daemon so
-	// it picks up newly-rendered config.
+	// Before lists task IDs that must run to success before this task's main
+	// body runs. Valid on any trigger type (daemon, manual, cron, webhook,
+	// chain): for daemons the preflight gates the daemon body's start; for
+	// one-shots it gates the firing's run dispatch. Cross-spec validation
+	// (in pkg/trigger.Engine.Register) rejects references to unknown tasks
+	// and to other daemons — only one-shot tasks can be preflights — and
+	// rejects cycles in the before-graph. When a referenced task re-runs
+	// successfully after a daemon is up, the engine restarts the daemon so
+	// it picks up newly-rendered config (one-shots don't restart; each new
+	// firing simply re-runs the pipeline).
 	//
 	// Each entry can be either a bare task-ID string (legacy form) or a
 	// mapping with `task:` plus optional `overrides:` — see BeforeEntry's
@@ -702,14 +705,13 @@ func (s *Spec) validate() error {
 			return fmt.Errorf("trigger.restart must be always, on-failure, or never")
 		}
 	}
-	// trigger.before: declarative preflight dependency for daemon tasks. Only
-	// validated locally here; cross-spec checks (does the referenced task
-	// exist? is it a daemon?) live in pkg/trigger.Engine.Register because they
-	// need the full registry snapshot.
+	// trigger.before: declarative preflight pipeline. Valid on any trigger
+	// type — daemon, manual, cron, webhook, or chain — since issue #312.
+	// Only validated locally here; cross-spec checks (does the referenced
+	// task exist? is it a one-shot? does the before-graph contain a cycle?)
+	// live in pkg/trigger.Engine.Register because they need the full
+	// registry snapshot.
 	if len(s.Trigger.Before) > 0 {
-		if !s.Trigger.Daemon {
-			return fmt.Errorf("trigger.before: requires daemon: true (got non-daemon trigger)")
-		}
 		for i, entry := range s.Trigger.Before {
 			if entry.Task == "" {
 				return fmt.Errorf("trigger.before: empty task ID")
