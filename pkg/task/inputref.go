@@ -105,6 +105,12 @@ type InputContext struct {
 //
 // Param identifies the offending param so operators can see which
 // override or chain key tripped the resolver.
+//
+// BREAKING CHANGE (PR #336 / issue #333): previously, ${input.output.<field>}
+// and ${input.params.<name>} silently substituted empty-string values without
+// failing. Operators upgrading should audit any task.yaml relying on that
+// loose behavior; the loud-failure contract now applies uniformly to all
+// three ${input.*} forms.
 type ErrInputUnavailable struct {
 	Param string // name of the offending param
 	Ref   string // the offending reference token, e.g. "${input.output.path}"
