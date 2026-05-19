@@ -1919,3 +1919,21 @@ func TestOnDaemonRunFinished_OnFailurePolicy_SuccessExit_TransitionsToStopped(t 
 			got, DaemonStopped)
 	}
 }
+
+// TestOnDaemonRunFinished_Cancelled_TransitionsToStopped pins the fix
+// for issue #332: PR #329's status-aware no-restart split (Stopped vs
+// Crashed) didn't cover the StatusCancelled path because cancellation
+// hits an earlier early-return in onDaemonRunFinished. A daemon killed
+// via the per-run kill button under `restart: never` was left in the
+// DaemonRunning state the engine had set when it started — the same
+// stale-Running-pill UX bug #329 fixed for failure/success exits.
+// Operator-initiated cancellation is semantically a clean stop, so it
+// routes into DaemonStopped (Option A from #332).
+func TestOnDaemonRunFinished_Cancelled_TransitionsToStopped(t *testing.T) {
+	eng, spec, runID := finishedRunEnv(t, "never", registry.StatusCancelled)
+	eng.onDaemonRunFinished(spec, runID)
+	if got := eng.DaemonState(spec.ID); got != DaemonStopped {
+		t.Fatalf("DaemonState = %q, want %q (operator-initiated cancellation must surface as Stopped, not stale Running)",
+			got, DaemonStopped)
+	}
+}
