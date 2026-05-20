@@ -367,3 +367,38 @@ func TestRegistry_BulkAppendLogs_HookFired(t *testing.T) {
 		t.Errorf("hook got %v, want [a b]", hooked)
 	}
 }
+
+func TestRegistryKindedStorage(t *testing.T) {
+	r := newTestRegistry(t)
+
+	spec := makeSpec("t")
+	spec.Enabled = true
+	pipe := &task.PipelineTask{ID: "p", Name: "P", Subtype: "sequential", Enabled: true,
+		Stages: []task.Stage{{Task: "t"}}}
+
+	if err := r.Register(spec); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Register(pipe); err != nil {
+		t.Fatal(err)
+	}
+
+	// GetKinded sees both kinds.
+	if k, ok := r.GetKinded("p"); !ok || k.KindOf() != task.KindPipelineTask {
+		t.Fatalf("GetKinded(p) = %v,%v", k, ok)
+	}
+	// Get (typed) returns only Task-kind.
+	if _, ok := r.Get("p"); ok {
+		t.Fatal("Get(p) should not return a pipeline as *task.Spec")
+	}
+	if s, ok := r.Get("t"); !ok || s.ID != "t" {
+		t.Fatalf("Get(t) = %v,%v", s, ok)
+	}
+	// All (typed) filters to Task-kind; AllKinded returns both.
+	if got := len(r.All()); got != 1 {
+		t.Fatalf("All() = %d, want 1", got)
+	}
+	if got := len(r.AllKinded()); got != 2 {
+		t.Fatalf("AllKinded() = %d, want 2", got)
+	}
+}

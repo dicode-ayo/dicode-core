@@ -72,7 +72,7 @@ type LogEntry struct {
 // Registry is an in-memory map of tasks backed by a sqlite run log.
 type Registry struct {
 	mu      sync.RWMutex
-	tasks   map[string]*task.Spec
+	tasks   map[string]task.Kinded // was map[string]*task.Spec
 	db      db.DB
 	logHook func(runID, level, msg string, ts int64)
 	logMu   sync.Mutex
@@ -81,16 +81,17 @@ type Registry struct {
 // New creates an empty Registry backed by the given DB.
 func New(database db.DB) *Registry {
 	return &Registry{
-		tasks: make(map[string]*task.Spec),
+		tasks: make(map[string]task.Kinded),
 		db:    database,
 	}
 }
 
-// Register upserts a task spec into the registry.
-func (r *Registry) Register(spec *task.Spec) error {
+// Register upserts any task kind into the registry. *task.Spec satisfies
+// task.Kinded, so existing callers passing a *task.Spec keep compiling.
+func (r *Registry) Register(k task.Kinded) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.tasks[spec.ID] = spec
+	r.tasks[k.TaskID()] = k
 	return nil
 }
 
@@ -101,23 +102,51 @@ func (r *Registry) Unregister(id string) {
 	delete(r.tasks, id)
 }
 
-// Get returns the spec for a task ID, or (nil, false) if not found.
+// Get returns the *task.Spec for a Task-kind task, or (nil, false) if not
+// found OR if the ID names a non-Task kind. Existing consumers only want
+// kind: Task, so this filter keeps them unchanged.
 func (r *Registry) Get(id string) (*task.Spec, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	s, ok := r.tasks[id]
+	k, ok := r.tasks[id]
+	if !ok {
+		return nil, false
+	}
+	s, ok := k.(*task.Spec)
 	return s, ok
 }
 
-// All returns a snapshot of all registered task specs sorted by ID.
+// GetKinded returns any registered task kind by ID, or (nil, false) if not found.
+func (r *Registry) GetKinded(id string) (task.Kinded, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	k, ok := r.tasks[id]
+	return k, ok
+}
+
+// All returns a snapshot of all kind: Task specs, sorted by ID.
 func (r *Registry) All() []*task.Spec {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	out := make([]*task.Spec, 0, len(r.tasks))
-	for _, s := range r.tasks {
-		out = append(out, s)
+	for _, k := range r.tasks {
+		if s, ok := k.(*task.Spec); ok {
+			out = append(out, s)
+		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
+// AllKinded returns a snapshot of every registered task kind, sorted by ID.
+func (r *Registry) AllKinded() []task.Kinded {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]task.Kinded, 0, len(r.tasks))
+	for _, k := range r.tasks {
+		out = append(out, k)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].TaskID() < out[j].TaskID() })
 	return out
 }
 
