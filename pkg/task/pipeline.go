@@ -56,6 +56,9 @@ func (p *PipelineTask) IsEnabled() bool        { return p.Enabled }
 func (p *PipelineTask) SetEnabled(b bool)      { p.Enabled = b }
 func (p *PipelineTask) LoadWarnings() []string { return p.Warnings }
 
+// Compile-time assertion that PipelineTask satisfies Kinded.
+var _ Kinded = (*PipelineTask)(nil)
+
 // count reports how many trigger shapes are set (for the at-most-one check).
 func (t PipelineTrigger) count() int {
 	n := 0
@@ -73,10 +76,6 @@ func (t PipelineTrigger) count() int {
 	}
 	return n
 }
-
-// pipelineParallelFollowupIssue is referenced in the subtype error so operators
-// have a pointer to the planned parallel-mode work. Filled in once filed.
-const pipelineParallelFollowupIssue = "the parallel-pipeline support follow-up (planned; not yet filed)"
 
 // LoadPipelineDir parses a kind: PipelineTask from <dir>/task.yaml. The caller
 // is responsible for having already determined the kind (see LoadKindedDir).
@@ -144,9 +143,11 @@ func (p *PipelineTask) Validate() error {
 	if p.Name == "" {
 		return fmt.Errorf("pipeline: name is required")
 	}
+	if p.Subtype == "" {
+		return fmt.Errorf("pipeline: subtype is required (use \"sequential\")")
+	}
 	if p.Subtype != "sequential" {
-		return fmt.Errorf("pipeline: subtype %q not implemented in v1 (only \"sequential\"); see %s",
-			p.Subtype, pipelineParallelFollowupIssue)
+		return fmt.Errorf("pipeline: subtype %q is not supported in v1 (only \"sequential\"; parallel pipelines are a planned follow-up)", p.Subtype)
 	}
 	if p.Trigger.count() > 1 {
 		return fmt.Errorf("pipeline: at most one trigger type may be set")

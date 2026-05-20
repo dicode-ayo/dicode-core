@@ -47,7 +47,8 @@ func TestPipelineValidate(t *testing.T) {
 		{"bad apiVersion", func(p *PipelineTask) { p.APIVersion = "v2" }, "apiVersion"},
 		{"bad kind", func(p *PipelineTask) { p.Kind = "Task" }, "kind"},
 		{"no name", func(p *PipelineTask) { p.Name = "" }, "name"},
-		{"bad subtype", func(p *PipelineTask) { p.Subtype = "parallel" }, "not implemented in v1"},
+		{"missing subtype", func(p *PipelineTask) { p.Subtype = "" }, "subtype is required"},
+		{"bad subtype", func(p *PipelineTask) { p.Subtype = "parallel" }, "is not supported in v1"},
 		{"multi trigger", func(p *PipelineTask) {
 			p.Trigger = PipelineTrigger{Manual: true, Cron: "0 * * * *"}
 		}, "at most one trigger"},
@@ -64,6 +65,15 @@ func TestPipelineValidate(t *testing.T) {
 		{"stage override rejects enabled", func(p *PipelineTask) {
 			en := true
 			p.Stages[1].Overrides.Enabled = &en
+		}, "not supported at a pipeline stage"},
+		{"stage override rejects name", func(p *PipelineTask) {
+			p.Stages[1].Overrides.Name = "nope"
+		}, "not supported at a pipeline stage"},
+		{"stage override rejects description", func(p *PipelineTask) {
+			p.Stages[1].Overrides.Description = "nope"
+		}, "not supported at a pipeline stage"},
+		{"stage override rejects entries", func(p *PipelineTask) {
+			p.Stages[1].Overrides.Entries = map[string]*Overrides{"x": {}}
 		}, "not supported at a pipeline stage"},
 	}
 	for _, tc := range cases {

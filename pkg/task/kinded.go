@@ -25,6 +25,9 @@ type Kinded interface {
 	Validate() error
 }
 
+// Compile-time assertions that both task kinds satisfy Kinded.
+var _ Kinded = (*Spec)(nil)
+
 // --- *Spec implements Kinded ---
 
 func (s *Spec) KindOf() string         { return KindTask }
