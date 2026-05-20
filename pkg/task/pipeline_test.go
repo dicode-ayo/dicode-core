@@ -1,6 +1,8 @@
 package task
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -85,5 +87,53 @@ func TestPipelineStageTriggerOverrideAllowed(t *testing.T) {
 	p.Stages[0].Overrides = &Overrides{Trigger: &TriggerPatch{Manual: &disable}}
 	if err := p.Validate(); err != nil {
 		t.Fatalf("stage trigger override should be allowed: %v", err)
+	}
+}
+
+func TestLoadPipelineDir(t *testing.T) {
+	dir := t.TempDir()
+	yamlSrc := `apiVersion: dicode/v1
+kind: PipelineTask
+name: Demo Pipeline
+subtype: sequential
+trigger:
+  manual: true
+stages:
+  - task: buildin/template
+    overrides:
+      params:
+        template: "hello"
+  - task: buildin/write-local
+    overrides:
+      params:
+        content: "${input.output}"
+        path: "${DATADIR}/out.txt"
+`
+	if err := os.WriteFile(filepath.Join(dir, "task.yaml"), []byte(yamlSrc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p, err := LoadPipelineDir(dir, map[string]string{VarDataDir: "/data"})
+	if err != nil {
+		t.Fatalf("LoadPipelineDir: %v", err)
+	}
+	if p.Name != "Demo Pipeline" || len(p.Stages) != 2 {
+		t.Fatalf("parsed wrong: %+v", p)
+	}
+	if p.ID != filepath.Base(dir) {
+		t.Fatalf("ID = %q, want %q", p.ID, filepath.Base(dir))
+	}
+	if !p.Enabled {
+		t.Fatal("Enabled should default true")
+	}
+	// ${DATADIR} expansion applies to stage override params (lookup by name,
+	// not position, so a fixture reorder can't silently break this).
+	var pathDefault string
+	for _, pr := range p.Stages[1].Overrides.Params {
+		if pr.Name == "path" {
+			pathDefault = pr.Default
+		}
+	}
+	if pathDefault != "/data/out.txt" {
+		t.Fatalf("DATADIR not expanded: %q", pathDefault)
 	}
 }

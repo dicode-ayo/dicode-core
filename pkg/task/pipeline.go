@@ -2,8 +2,13 @@ package task
 
 import (
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // PipelineTask is the spec for kind: PipelineTask — a sequential orchestration
@@ -72,6 +77,59 @@ func (t PipelineTrigger) count() int {
 // pipelineParallelFollowupIssue is referenced in the subtype error so operators
 // have a pointer to the planned parallel-mode work. Filled in once filed.
 const pipelineParallelFollowupIssue = "the parallel-pipeline support follow-up (planned; not yet filed)"
+
+// LoadPipelineDir parses a kind: PipelineTask from <dir>/task.yaml. The caller
+// is responsible for having already determined the kind (see LoadKindedDir).
+func LoadPipelineDir(dir string, extras map[string]string) (*PipelineTask, error) {
+	specPath := filepath.Join(dir, "task.yaml")
+	f, err := os.Open(specPath)
+	if err != nil {
+		return nil, fmt.Errorf("open task.yaml in %s: %w", dir, err)
+	}
+	defer f.Close()
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return nil, fmt.Errorf("read task.yaml in %s: %w", dir, err)
+	}
+
+	// Probe for the removed `notify:` block before decoding (mirrors LoadDirWithVars).
+	var probe struct {
+		Notify any `yaml:"notify"`
+	}
+	if err := yaml.Unmarshal(data, &probe); err == nil && probe.Notify != nil {
+		return nil, fmt.Errorf("task.yaml in %s: legacy `notify` block detected. "+
+			"The per-task notify field was removed (#279). Use `on_failure_chain` "+
+			"to fire a notification task on failure — see docs.", dir)
+	}
+
+	var p PipelineTask
+	if err := yaml.Unmarshal(data, &p); err != nil {
+		return nil, fmt.Errorf("parse task.yaml in %s: %w", dir, err)
+	}
+
+	// Set ID before Validate: PipelineTask.Validate's self-reference check
+	// compares each stage against p.ID, so it must be populated first.
+	// (This intentionally differs from LoadDirWithVars's ordering.)
+	p.TaskDir = dir
+	p.ID = filepath.Base(dir)
+	p.Enabled = true
+
+	expandPipeline(&p, builtinVars(dir, extras))
+
+	if err := p.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid pipeline in %s: %w", dir, err)
+	}
+	return &p, nil
+}
+
+// expandPipeline expands ${VAR} template variables in stage override params and
+// fs paths, reusing expandOverrides (which mirrors the envFallback policy from
+// expandSpec: Params[].Default gets envFallback=false, Fs[].Path gets true).
+func expandPipeline(p *PipelineTask, vars map[string]string) {
+	for i := range p.Stages {
+		expandOverrides(p.Stages[i].Overrides, vars)
+	}
+}
 
 // Validate runs all load-time (non-registry) checks. Cross-spec checks (stage
 // existence, cycle detection, stages-must-be-kind-Task) run in the engine's
