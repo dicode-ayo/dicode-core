@@ -80,6 +80,11 @@ var inputRefRe = regexp.MustCompile(`\$\{input\.(output|params)(?:\.([A-Za-z_][A
 // the strict regex would silently pass through.
 var inputRefPrefixRe = regexp.MustCompile(`\$\{input\.[^}]*\}`)
 
+// inputParamsRefRe matches any ${input.params.<name>} reference specifically —
+// used by PipelineTask.Validate to reject ${input.params.…} references in
+// sequential pipelines (where the upstream params map is not forwarded).
+var inputParamsRefRe = regexp.MustCompile(`\$\{input\.params\.[A-Za-z_][A-Za-z0-9_.\-]*\}`)
+
 // InputContext carries the dispatch-time values the resolver needs.
 // Output is the upstream's full return value (any type — the resolver
 // type-asserts per-token). Params is the upstream's RunOptions.Params
