@@ -161,6 +161,11 @@ func (s *SQLiteDB) migrate() error {
 		// dicode.set_group(). Column is `run_group` (not `group`) because the
 		// latter is a SQL keyword and our migrate helper rejects quoted idents.
 		{"run_group", "TEXT NOT NULL DEFAULT ''"},
+		// kind discriminator for PipelineTask runs. 'task' (default) for
+		// normal Task runs; 'pipeline' will be set on a PipelineTask's
+		// parent run by the engine (upcoming PR). SQLite backfills existing
+		// rows to 'task' at ALTER time.
+		{"kind", "TEXT NOT NULL DEFAULT 'task'"},
 	}
 	ctx := context.Background()
 	for _, m := range runsMigrations {

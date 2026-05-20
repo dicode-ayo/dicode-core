@@ -67,3 +67,18 @@ func TestAddColumnIfMissing_AddsWithDefault(t *testing.T) {
 		t.Errorf("default not applied; flag = %d", flag)
 	}
 }
+
+func TestRunsKindColumnDefaultsToTask(t *testing.T) {
+	d := newTestDB(t).(*SQLiteDB)
+	ctx := context.Background()
+	if _, err := d.db.ExecContext(ctx, `INSERT INTO runs (id, task_id, status, started_at) VALUES ('r1','t1','running',0)`); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	var kind string
+	if err := d.db.QueryRowContext(ctx, `SELECT kind FROM runs WHERE id = 'r1'`).Scan(&kind); err != nil {
+		t.Fatal(err)
+	}
+	if kind != "task" {
+		t.Errorf("kind = %q, want %q", kind, "task")
+	}
+}

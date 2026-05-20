@@ -200,3 +200,42 @@ func validatePerEdgeOverrides(site string, o *Overrides) error {
 	}
 	return nil
 }
+
+// validatePipelineStageOverrides is the per-stage override allowlist for
+// kind: PipelineTask. It is identical to validatePerEdgeOverrides EXCEPT it
+// permits a Trigger patch — a pipeline may override a stage task's trigger
+// (e.g. flip a manual-only task to fireable). Params/Env/Net/Fs/Timeout/
+// Dicode/Runtime are allowed; Enabled/Name/Description/Retry/Defaults/Entries
+// are rejected.
+func validatePipelineStageOverrides(site string, o *Overrides) error {
+	if o == nil {
+		return nil
+	}
+	if o.Enabled != nil {
+		return fmt.Errorf("%s: field %q is not supported at a pipeline stage", site, "enabled")
+	}
+	if o.Name != "" {
+		return fmt.Errorf("%s: field %q is not supported at a pipeline stage", site, "name")
+	}
+	if o.Description != "" {
+		return fmt.Errorf("%s: field %q is not supported at a pipeline stage", site, "description")
+	}
+	if o.Retry != nil {
+		return fmt.Errorf("%s: field %q is not supported at a pipeline stage", site, "retry")
+	}
+	if o.Defaults != nil {
+		return fmt.Errorf("%s: field %q is not supported at a pipeline stage (taskset-level construct)", site, "defaults")
+	}
+	if o.Entries != nil {
+		return fmt.Errorf("%s: field %q is not supported at a pipeline stage (taskset-level construct)", site, "entries")
+	}
+	for _, p := range o.Params {
+		if _, reserved := reservedChainParamKeys[p.Name]; reserved {
+			return fmt.Errorf("%s: params %q is a reserved key (used by the engine)", site, p.Name)
+		}
+		if err := ValidateInputRefs(fmt.Sprintf("%s.params.%s", site, p.Name), p.Default); err != nil {
+			return err
+		}
+	}
+	return nil
+}
