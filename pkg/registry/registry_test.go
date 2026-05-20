@@ -402,3 +402,42 @@ func TestRegistryKindedStorage(t *testing.T) {
 		t.Fatalf("AllKinded() = %d, want 2", got)
 	}
 }
+
+func TestStartRunKind(t *testing.T) {
+	r := newTestRegistry(t)
+	ctx := context.Background()
+	if _, err := r.StartRunWithID(ctx, "r1", "t1", "", "manual", RunKindPipeline); err != nil {
+		t.Fatal(err)
+	}
+	run, err := r.GetRun(ctx, "r1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Kind != RunKindPipeline {
+		t.Fatalf("Kind = %q, want %q", run.Kind, RunKindPipeline)
+	}
+	// Default path: StartRun wrapper writes kind=RunKindTask.
+	id, err := r.StartRun(ctx, "t2", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run2, err := r.GetRun(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run2.Kind != RunKindTask {
+		t.Fatalf("Kind = %q, want %q", run2.Kind, RunKindTask)
+	}
+
+	// Empty kind falls back to RunKindTask.
+	if _, err := r.StartRunWithID(ctx, "r3", "t3", "", "manual", ""); err != nil {
+		t.Fatal(err)
+	}
+	run3, err := r.GetRun(ctx, "r3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run3.Kind != RunKindTask {
+		t.Fatalf("empty kind: got %q, want %q", run3.Kind, RunKindTask)
+	}
+}

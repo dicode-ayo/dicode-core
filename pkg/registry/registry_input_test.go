@@ -18,7 +18,7 @@ func TestListExpiredInputs_Basic(t *testing.T) {
 	pinnedID := uuid.New().String()
 
 	for _, id := range []string{expiredID, freshID, pinnedID} {
-		if _, err := r.StartRunWithID(ctx, id, "task-a", "", "manual"); err != nil {
+		if _, err := r.StartRunWithID(ctx, id, "task-a", "", "manual", "task"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -53,7 +53,7 @@ func TestPinUnpinRunInput(t *testing.T) {
 	ctx := context.Background()
 
 	id := uuid.New().String()
-	if _, err := r.StartRunWithID(ctx, id, "t", "", "manual"); err != nil {
+	if _, err := r.StartRunWithID(ctx, id, "t", "", "manual", "task"); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.SetRunInput(ctx, id, "k", 1, time.Now().Unix(), nil); err != nil {
@@ -84,7 +84,7 @@ func TestClearRunInput(t *testing.T) {
 	r := newTestRegistry(t)
 	ctx := context.Background()
 	id := uuid.New().String()
-	if _, err := r.StartRunWithID(ctx, id, "t", "", "manual"); err != nil {
+	if _, err := r.StartRunWithID(ctx, id, "t", "", "manual", "task"); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.SetRunInput(ctx, id, "k", 1, time.Now().Unix(), []string{"x"}); err != nil {
@@ -105,7 +105,7 @@ func TestSweepStalePins_ClearsFinishedPinnedRows(t *testing.T) {
 
 	// Live + pinned: must NOT be cleared.
 	live := uuid.New().String()
-	if _, err := r.StartRunWithID(ctx, live, "task-a", "", "manual"); err != nil {
+	if _, err := r.StartRunWithID(ctx, live, "task-a", "", "manual", "task"); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.SetRunInput(ctx, live, "k1", 100, time.Now().Unix(), nil); err != nil {
@@ -117,7 +117,7 @@ func TestSweepStalePins_ClearsFinishedPinnedRows(t *testing.T) {
 
 	// Finished + pinned: MUST be cleared.
 	dead := uuid.New().String()
-	if _, err := r.StartRunWithID(ctx, dead, "task-b", "", "manual"); err != nil {
+	if _, err := r.StartRunWithID(ctx, dead, "task-b", "", "manual", "task"); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.SetRunInput(ctx, dead, "k2", 100, time.Now().Unix(), nil); err != nil {
@@ -132,7 +132,7 @@ func TestSweepStalePins_ClearsFinishedPinnedRows(t *testing.T) {
 
 	// Finished + already-unpinned: must remain unpinned (no double-write).
 	finishedClean := uuid.New().String()
-	if _, err := r.StartRunWithID(ctx, finishedClean, "task-c", "", "manual"); err != nil {
+	if _, err := r.StartRunWithID(ctx, finishedClean, "task-c", "", "manual", "task"); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.SetRunInput(ctx, finishedClean, "k3", 100, time.Now().Unix(), nil); err != nil {

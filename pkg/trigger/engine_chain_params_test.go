@@ -423,7 +423,7 @@ func TestOnFailureChainDispatch_ResolvesInputOutputField(t *testing.T) {
 	_ = e.reg.Register(source)
 
 	parentRunID, err := e.reg.StartRunWithID(
-		context.Background(), "parent-field", "source-field", "", string(registry.TriggerManual),
+		context.Background(), "parent-field", "source-field", "", string(registry.TriggerManual), "task",
 	)
 	if err != nil {
 		t.Fatalf("seed parent run: %v", err)
@@ -498,7 +498,7 @@ func TestOnFailureChainDispatch_ResolvesInputOutput(t *testing.T) {
 	// exist for the registry to satisfy SetRunGroup / parent lookups
 	// downstream).
 	parentRunID, err := e.reg.StartRunWithID(
-		context.Background(), "parent-run", "source-interp", "", string(registry.TriggerManual),
+		context.Background(), "parent-run", "source-interp", "", string(registry.TriggerManual), "task",
 	)
 	if err != nil {
 		t.Fatalf("seed parent run: %v", err)
@@ -567,7 +567,7 @@ func TestOnFailureChainDispatch_NonStringUpstreamSkips(t *testing.T) {
 	_ = e.reg.Register(source)
 
 	parentRunID, err := e.reg.StartRunWithID(
-		context.Background(), "parent-skip-run", "source-skip", "", string(registry.TriggerManual),
+		context.Background(), "parent-skip-run", "source-skip", "", string(registry.TriggerManual), "task",
 	)
 	if err != nil {
 		t.Fatalf("seed parent run: %v", err)
@@ -624,7 +624,7 @@ func TestFireChain_RejectsNonStringForBareInputOutput(t *testing.T) {
 
 	// Seed a parent run so FireChain has a real runID to reference.
 	parentRunID, err := e.reg.StartRunWithID(
-		context.Background(), "ns-parent", "us-nonstring", "", string(registry.TriggerManual),
+		context.Background(), "ns-parent", "us-nonstring", "", string(registry.TriggerManual), "task",
 	)
 	if err != nil {
 		t.Fatalf("seed parent run: %v", err)

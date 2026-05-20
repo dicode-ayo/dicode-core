@@ -2151,7 +2151,7 @@ func (e *Engine) serveTaskAsset(w http.ResponseWriter, r *http.Request, taskDir,
 // hook, and returns a ready-to-run context. The caller is responsible for
 // calling the returned cleanup func when the run finishes.
 func (e *Engine) startRun(spec *task.Spec, opts *pkgruntime.RunOptions, source registry.TriggerSource) (runCtx context.Context, cleanup func(), err error) {
-	if _, err = e.registry.StartRunWithID(context.Background(), opts.RunID, spec.ID, opts.ParentRunID, string(source)); err != nil {
+	if _, err = e.registry.StartRunWithID(context.Background(), opts.RunID, spec.ID, opts.ParentRunID, string(source), registry.RunKindTask); err != nil {
 		return nil, nil, fmt.Errorf("start run record: %w", err)
 	}
 
