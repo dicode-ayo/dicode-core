@@ -180,9 +180,14 @@ func TestReconciler_OnRegisterCallback(t *testing.T) {
 	}
 }
 
-// TestReconcilerLoadsPipelineKind asserts a raw source event whose task.yaml
-// declares kind: PipelineTask is loaded as a *task.PipelineTask, registered
-// under the event's TaskID, and surfaced through the kind-aware OnRegister hook.
+// TestReconcilerLoadsPipelineKind covers the reconciler boundary only: a raw
+// source event whose task.yaml declares kind: PipelineTask is loaded as a
+// *task.PipelineTask, stored in the registry under the event's TaskID, and
+// surfaced through the kind-aware OnRegister hook. Engine-side acceptance
+// (registerPipeline's stage-ref + cycle validation) is exercised in
+// pkg/trigger/registerpipeline_test.go; it can't be cross-tested here because
+// pkg/trigger imports pkg/registry, not the reverse, so wiring a real engine
+// into a package registry test would be an import cycle.
 func TestReconcilerLoadsPipelineKind(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "task.yaml"), []byte(`apiVersion: dicode/v1
