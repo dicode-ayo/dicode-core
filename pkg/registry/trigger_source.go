@@ -23,4 +23,9 @@ const (
 	// WebUI can group preflight runs under the daemon they're gating
 	// rather than under their own chain-trigger history.
 	TriggerPreflight TriggerSource = "preflight"
+	// TriggerPipelineStage marks a run fired as a stage of a kind: PipelineTask.
+	// Distinct from TriggerPreflight so the WebUI can group pipeline stage runs
+	// under their parent pipeline run. Replaces TriggerPreflight once
+	// trigger.before is removed (PR6).
+	TriggerPipelineStage TriggerSource = "pipeline-stage"
 )
