@@ -570,6 +570,45 @@ func TestWebhookAuthGuard_LongestPrefixWins(t *testing.T) {
 	}
 }
 
+// TestWebhookAuthGuard_PipelineAuth guards against the auth bypass where a
+// kind: PipelineTask webhook with auth: true was silently public because the
+// guard only consulted registry.All() (kind: Task). A pipeline declaring
+// auth: true must require a session just like a kind: Task webhook.
+func TestWebhookAuthGuard_PipelineAuth(t *testing.T) {
+	srv := newAuthServer(t, "hunter2")
+
+	if err := srv.registry.Register(&task.PipelineTask{
+		ID:      "deploy-pipe",
+		Trigger: task.PipelineTrigger{Webhook: "/hooks/deploy", WebhookAuth: true},
+	}); err != nil {
+		t.Fatalf("register protected pipeline: %v", err)
+	}
+	if err := srv.registry.Register(&task.PipelineTask{
+		ID:      "public-pipe",
+		Trigger: task.PipelineTrigger{Webhook: "/hooks/public", WebhookAuth: false},
+	}); err != nil {
+		t.Fatalf("register public pipeline: %v", err)
+	}
+
+	h := srv.Handler()
+
+	// Protected pipeline webhook: rejected without a session.
+	req := httptest.NewRequest(http.MethodPost, "/hooks/deploy", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("POST /hooks/deploy (pipeline auth:true) without session: expected 401, got %d", w.Code)
+	}
+
+	// Public pipeline webhook: must NOT be turned into a protected one.
+	req = httptest.NewRequest(http.MethodPost, "/hooks/public", nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code == http.StatusUnauthorized {
+		t.Errorf("POST /hooks/public (pipeline auth:false): expected pass-through, got 401")
+	}
+}
+
 // TestWebhookAuthGuard_LongestPrefixWins_Inverse is the symmetric case:
 // the SHORT webhook is protected and the LONG one is public. Longest-prefix
 // must still win — i.e. a request to the long path must pass through

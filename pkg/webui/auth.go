@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/dicode/dicode/pkg/ipc"
+	"github.com/dicode/dicode/pkg/task"
 	"go.uber.org/zap"
 )
 
@@ -21,8 +22,21 @@ import (
 func (s *Server) webhookAuthGuard(w http.ResponseWriter, r *http.Request, next http.Handler) {
 	var requiresAuth bool
 	var bestLen = -1
-	for _, spec := range s.registry.All() {
-		wp := spec.Trigger.Webhook
+	// Consider every task kind: a kind: PipelineTask can also carry a webhook
+	// trigger with auth: true, and its protection must be enforced here just
+	// like a kind: Task's. Using AllKinded (not All) is what keeps a pipeline
+	// webhook from being silently public.
+	for _, k := range s.registry.AllKinded() {
+		var wp string
+		var auth bool
+		switch t := k.(type) {
+		case *task.Spec:
+			wp, auth = t.Trigger.Webhook, t.Trigger.WebhookAuth
+		case *task.PipelineTask:
+			wp, auth = t.Trigger.Webhook, t.Trigger.WebhookAuth
+		default:
+			continue
+		}
 		if wp == "" || !ipc.PathMatches(wp, r.URL.Path) {
 			continue
 		}
@@ -32,7 +46,7 @@ func (s *Server) webhookAuthGuard(w http.ResponseWriter, r *http.Request, next h
 		l := len(strings.TrimSuffix(wp, "/"))
 		if l > bestLen {
 			bestLen = l
-			requiresAuth = spec.Trigger.WebhookAuth
+			requiresAuth = auth
 		}
 	}
 
