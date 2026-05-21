@@ -122,10 +122,11 @@ type RuntimePinConfig struct {
 	Version string `yaml:"version"`
 }
 
-// ResolvedTask is a fully resolved task: base spec with all override layers applied,
-// a namespaced ID, and the local path to the task directory.
+// ResolvedTask is a fully resolved task of any kind: for kind: Task, the base
+// spec with all override layers applied; for kind: PipelineTask, the validated
+// pipeline. It also carries a namespaced ID and the local task directory path.
 type ResolvedTask struct {
-	Spec    *task.Spec
-	ID      string // namespaced, e.g. "infra/backend/deploy"
-	TaskDir string // absolute local path to the task directory
+	Kinded  task.Kinded // resolved task of any kind (overrides already applied)
+	ID      string      // namespaced, e.g. "infra/backend/deploy"
+	TaskDir string      // absolute local path to the task directory
 }

@@ -177,7 +177,7 @@ func (r *Resolver) resolveBody(
 				continue
 			}
 			results = append(results, &ResolvedTask{
-				Spec:    resolved,
+				Kinded:  resolved,
 				ID:      fullID,
 				TaskDir: resolved.TaskDir,
 			})
@@ -246,7 +246,45 @@ func (r *Resolver) resolveBody(
 				continue
 			}
 			results = append(results, &ResolvedTask{
-				Spec:    resolved,
+				Kinded:  resolved,
+				ID:      fullID,
+				TaskDir: taskDir,
+			})
+
+		case KindPipelineTask:
+			taskDir := filepath.Dir(localPath)
+			extras := extraVars
+			if extras == nil {
+				extras = make(map[string]string, 1)
+			}
+			if _, ok := extras[task.VarDataDir]; !ok && r.dataDir != "" {
+				// Don't clobber a caller-supplied DATADIR (allows tests to override).
+				// Clone before mutate — extraVars may be shared across loop iterations.
+				cloned := make(map[string]string, len(extras)+1)
+				for k, v := range extras {
+					cloned[k] = v
+				}
+				cloned[task.VarDataDir] = r.dataDir
+				extras = cloned
+			}
+			p, err := task.LoadPipelineDir(taskDir, extras)
+			if err != nil {
+				r.log.Warn("taskset: failed to load pipeline",
+					zap.String("entry", fullID), zap.Error(err))
+				continue
+			}
+			p.ID = fullID
+			p.Enabled = enabled
+			// Pipelines do not support taskset override layers in v1 — stage
+			// overrides live in the pipeline spec. Re-validate after stamping the
+			// namespaced ID so a stage self-reference surfaces with the taskset path.
+			if err := p.Validate(); err != nil {
+				r.log.Warn("taskset: pipeline failed validate; skipping",
+					zap.String("entry", fullID), zap.Error(err))
+				continue
+			}
+			results = append(results, &ResolvedTask{
+				Kinded:  p,
 				ID:      fullID,
 				TaskDir: taskDir,
 			})
@@ -269,7 +307,7 @@ func (r *Resolver) resolveBody(
 			// so the whole sub-tree stays visible in the API but is not scheduled.
 			if !enabled {
 				for _, rt := range nested {
-					rt.Spec.Enabled = false
+					rt.Kinded.SetEnabled(false)
 				}
 			}
 			results = append(results, nested...)

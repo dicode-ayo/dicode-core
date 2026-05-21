@@ -43,6 +43,24 @@ func writeTaskDir(t *testing.T, parent, name string, extra ...string) string {
 	return dir
 }
 
+// writePipelineDir writes a minimal kind: PipelineTask task.yaml into dir/name/
+// and returns the absolute path to the task directory.
+func writePipelineDir(t *testing.T, parent, name string) string {
+	t.Helper()
+	dir := filepath.Join(parent, name)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	yaml := "apiVersion: dicode/v1\nkind: PipelineTask\nname: " + name +
+		"\nsubtype: sequential\ntrigger:\n  manual: true\nstages:\n  - task: buildin/template\n"
+	writeFile(t, dir, "task.yaml", yaml)
+	return dir
+}
+
+// rtSpec extracts the *task.Spec carried by a resolved kind: Task. Tests use it
+// after ResolvedTask migrated from a typed *task.Spec field to task.Kinded.
+func rtSpec(rt *ResolvedTask) *task.Spec { return rt.Kinded.(*task.Spec) }
+
 // writeTaskSet writes a taskset.yaml into dir/name.yaml and returns the path.
 func writeTaskSetFile(t *testing.T, dir, name, content string) string {
 	t.Helper()
@@ -145,8 +163,47 @@ spec:
 	if results[0].ID != "infra/deploy" {
 		t.Errorf("ID: got %q", results[0].ID)
 	}
-	if results[0].Spec.Name != "deploy" {
-		t.Errorf("spec.name: %q", results[0].Spec.Name)
+	if rtSpec(results[0]).Name != "deploy" {
+		t.Errorf("spec.name: %q", rtSpec(results[0]).Name)
+	}
+}
+
+// TestResolvePipelineKind asserts a taskset ref to a kind: PipelineTask dir
+// resolves to a ResolvedTask carrying a *task.PipelineTask under the namespaced
+// ID (no override layers — pipelines carry stage overrides in their own spec).
+func TestResolvePipelineKind(t *testing.T) {
+	repoDir := t.TempDir()
+	pipeDir := writePipelineDir(t, repoDir, "release")
+
+	tsContent := `
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: infra
+spec:
+  entries:
+    release:
+      ref:
+        path: ` + filepath.Join(pipeDir, "task.yaml") + `
+`
+	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
+
+	r := newResolver(t)
+	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+	if results[0].ID != "infra/release" {
+		t.Errorf("ID: got %q", results[0].ID)
+	}
+	if results[0].Kinded == nil || results[0].Kinded.KindOf() != task.KindPipelineTask {
+		t.Fatalf("want PipelineTask, got %v", results[0].Kinded)
+	}
+	if results[0].Kinded.TaskID() != "infra/release" {
+		t.Errorf("pipeline ID: got %q, want infra/release", results[0].Kinded.TaskID())
 	}
 }
 
@@ -213,7 +270,7 @@ spec:
 	if len(results) != 1 {
 		t.Fatalf("want 1")
 	}
-	spec := results[0].Spec
+	spec := rtSpec(results[0])
 	if spec.Trigger.Cron != "0 2 * * *" {
 		t.Errorf("cron: %q", spec.Trigger.Cron)
 	}
@@ -251,7 +308,7 @@ spec:
 	if len(results) != 1 {
 		t.Fatalf("disabled task should appear with Enabled=false: got %d results", len(results))
 	}
-	if results[0].Spec.Enabled {
+	if rtSpec(results[0]).Enabled {
 		t.Errorf("disabled task should have Enabled=false, got Enabled=true")
 	}
 }
@@ -289,7 +346,7 @@ spec:
 	if len(results) != 1 {
 		t.Fatalf("parent-disabled task should appear with Enabled=false: got %d results", len(results))
 	}
-	if results[0].Spec.Enabled {
+	if rtSpec(results[0]).Enabled {
 		t.Errorf("parent-disabled task should have Enabled=false, got Enabled=true")
 	}
 }
@@ -322,7 +379,7 @@ spec:
 	if len(results) != 1 {
 		t.Fatalf("want 1")
 	}
-	spec := results[0].Spec
+	spec := rtSpec(results[0])
 	if spec.Timeout != 90*time.Second {
 		t.Errorf("timeout from defaults: got %v", spec.Timeout)
 	}
@@ -364,7 +421,7 @@ spec:
 	if len(results) != 1 {
 		t.Fatalf("want 1")
 	}
-	spec := results[0].Spec
+	spec := rtSpec(results[0])
 	// Timeout should NOT be overridden by configDefaults.
 	if spec.Timeout == 120*time.Second {
 		t.Errorf("deprecated configDefaults should not be applied: timeout was set to 120s")
@@ -405,8 +462,8 @@ spec:
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
-	if results[0].Spec.Timeout != 30*time.Second {
-		t.Errorf("entry override should beat set defaults: got %v", results[0].Spec.Timeout)
+	if rtSpec(results[0]).Timeout != 30*time.Second {
+		t.Errorf("entry override should beat set defaults: got %v", rtSpec(results[0]).Timeout)
 	}
 }
 
@@ -503,8 +560,8 @@ spec:
 		t.Fatalf("want 1, got %d", len(results))
 	}
 	// Nested entry's own override (0 4 * * *) beats parent entry patch (0 3 * * *) — leaf wins.
-	if results[0].Spec.Trigger.Cron != "0 4 * * *" {
-		t.Errorf("leaf should win: got %q", results[0].Spec.Trigger.Cron)
+	if rtSpec(results[0]).Trigger.Cron != "0 4 * * *" {
+		t.Errorf("leaf should win: got %q", rtSpec(results[0]).Trigger.Cron)
 	}
 }
 
@@ -569,8 +626,8 @@ spec:
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
-	if results[0].Spec.Trigger.Cron != "0 8 * * *" {
-		t.Errorf("dev mode off: got %q", results[0].Spec.Trigger.Cron)
+	if rtSpec(results[0]).Trigger.Cron != "0 8 * * *" {
+		t.Errorf("dev mode off: got %q", rtSpec(results[0]).Trigger.Cron)
 	}
 
 	// dev mode ON — should use dev ref (0 1)
@@ -579,8 +636,8 @@ spec:
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
-	if resultsDev[0].Spec.Trigger.Cron != "0 1 * * *" {
-		t.Errorf("dev mode on: got %q", resultsDev[0].Spec.Trigger.Cron)
+	if rtSpec(resultsDev[0]).Trigger.Cron != "0 1 * * *" {
+		t.Errorf("dev mode on: got %q", rtSpec(resultsDev[0]).Trigger.Cron)
 	}
 }
 
@@ -613,7 +670,7 @@ spec:
 	if results[0].ID != "infra/health-check" {
 		t.Errorf("ID: %q", results[0].ID)
 	}
-	if !results[0].Spec.Trigger.Manual {
+	if !rtSpec(results[0]).Trigger.Manual {
 		t.Error("trigger.manual should be true")
 	}
 }
@@ -712,7 +769,7 @@ spec:
 		t.Fatalf("want 1 result, got %d", len(results))
 	}
 
-	spec := results[0].Spec
+	spec := rtSpec(results[0])
 	if len(spec.Permissions.FS) != 1 {
 		t.Fatalf("want 1 fs entry, got %d", len(spec.Permissions.FS))
 	}
@@ -777,7 +834,7 @@ spec:
 	if len(results) != 1 {
 		t.Fatalf("want 1 result, got %d", len(results))
 	}
-	if got, want := results[0].Spec.Permissions.FS[0].Path, "/caller/wins/pool"; got != want {
+	if got, want := rtSpec(results[0]).Permissions.FS[0].Path, "/caller/wins/pool"; got != want {
 		t.Errorf("fs.path: got %q, want %q — caller extraVars should override resolver derivation", got, want)
 	}
 }
@@ -826,8 +883,8 @@ spec:
 	if len(results) != 1 {
 		t.Fatalf("want 1 result, got %d", len(results))
 	}
-	if results[0].Spec.Timeout != 5*time.Minute {
-		t.Errorf("timeout = %v, want 5m (root spec.entries override should cascade)", results[0].Spec.Timeout)
+	if rtSpec(results[0]).Timeout != 5*time.Minute {
+		t.Errorf("timeout = %v, want 5m (root spec.entries override should cascade)", rtSpec(results[0]).Timeout)
 	}
 }
 
@@ -866,7 +923,7 @@ spec:
 	if len(results) != 1 {
 		t.Fatalf("want 1 result (Enabled=false), got %d", len(results))
 	}
-	if results[0].Spec.Enabled {
+	if rtSpec(results[0]).Enabled {
 		t.Errorf("relay-client should be Enabled=false via root spec.entries override")
 	}
 }
@@ -897,7 +954,7 @@ spec:
 	if len(results) != 1 {
 		t.Fatalf("want 1 result, got %d", len(results))
 	}
-	if !results[0].Spec.Enabled {
+	if !rtSpec(results[0]).Enabled {
 		t.Errorf("task without enabled override should default to Enabled=true")
 	}
 }

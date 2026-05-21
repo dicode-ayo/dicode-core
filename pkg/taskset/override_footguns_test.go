@@ -60,9 +60,9 @@ spec:
 	// like a LoadDirWithVars failure today. The result list must NOT
 	// contain a spec whose Runtime=docker and Docker=nil.
 	for _, rt := range results {
-		if rt.Spec.Runtime == task.RuntimeDocker && rt.Spec.Docker == nil {
+		if rtSpec(rt).Runtime == task.RuntimeDocker && rtSpec(rt).Docker == nil {
 			t.Fatalf("resolver returned a merged spec that fails Validate: id=%s runtime=%q docker=nil",
-				rt.ID, rt.Spec.Runtime)
+				rt.ID, rtSpec(rt).Runtime)
 		}
 	}
 

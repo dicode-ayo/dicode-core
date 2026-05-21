@@ -77,7 +77,7 @@ func WithParentOverrides(ov *Overrides) SourceOption {
 
 type taskSnap struct {
 	specHash string
-	spec     *task.Spec
+	kinded   task.Kinded
 	taskDir  string
 }
 
@@ -542,8 +542,8 @@ func (s *Source) syncAndEmit(ctx context.Context, ch chan<- source.Event) error 
 	current := make(map[string]taskSnap, len(tasks))
 	for _, rt := range tasks {
 		current[rt.ID] = taskSnap{
-			specHash: hashSpec(rt.Spec),
-			spec:     rt.Spec,
+			specHash: hashKinded(rt.Kinded),
+			kinded:   rt.Kinded,
 			taskDir:  rt.TaskDir,
 		}
 	}
@@ -558,13 +558,13 @@ func (s *Source) syncAndEmit(ctx context.Context, ch chan<- source.Event) error 
 	for _, id := range added {
 		cur := current[id]
 		s.send(ch, source.Event{
-			Kind: source.EventAdded, TaskID: id, TaskDir: cur.taskDir, Source: s.id, Kinded: cur.spec,
+			Kind: source.EventAdded, TaskID: id, TaskDir: cur.taskDir, Source: s.id, Kinded: cur.kinded,
 		})
 	}
 	for _, id := range updated {
 		cur := current[id]
 		s.send(ch, source.Event{
-			Kind: source.EventUpdated, TaskID: id, TaskDir: cur.taskDir, Source: s.id, Kinded: cur.spec,
+			Kind: source.EventUpdated, TaskID: id, TaskDir: cur.taskDir, Source: s.id, Kinded: cur.kinded,
 		})
 	}
 	for _, id := range removed {
@@ -634,8 +634,11 @@ func (s *Source) loadConfigDefaults() (*Defaults, error) {
 	return cs.Spec.Defaults, nil
 }
 
-func hashSpec(spec *task.Spec) string {
-	b, _ := json.Marshal(spec)
+// hashKinded computes a content hash for change detection over any resolved
+// task kind. *task.Spec and *task.PipelineTask both marshal to distinct JSON,
+// so a kind change (or any field change) yields a different hash.
+func hashKinded(k task.Kinded) string {
+	b, _ := json.Marshal(k)
 	h := sha256.Sum256(b)
 	return fmt.Sprintf("%x", h)
 }

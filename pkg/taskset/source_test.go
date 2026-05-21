@@ -328,7 +328,7 @@ spec:
 	if len(tasks) != 1 {
 		t.Fatalf("want 1 task, got %d", len(tasks))
 	}
-	if tasks[0].Spec.Enabled {
+	if asSpec(tasks[0].Kinded).Enabled {
 		t.Errorf("Enabled = true, want false (parent override should disable)")
 	}
 }
