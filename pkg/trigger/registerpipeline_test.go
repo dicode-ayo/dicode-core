@@ -6,6 +6,66 @@ import (
 	"github.com/dicode/dicode/pkg/task"
 )
 
+// registerStageAndPipeline registers a trivial kind: Task stage plus the given
+// pipeline (which references it) through both the registry and the engine.
+func registerStageAndPipeline(t *testing.T, env *testEnv, pipe *task.PipelineTask) {
+	t.Helper()
+	stage := &task.Spec{ID: "s", Name: "S", Enabled: true,
+		Runtime: task.RuntimeDeno, Trigger: task.TriggerConfig{Manual: true}}
+	if err := env.reg.Register(stage); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.engine.Register(stage); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.reg.Register(pipe); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.engine.Register(pipe); err != nil {
+		t.Fatalf("register pipeline: %v", err)
+	}
+}
+
+// TestPipelineCronRegistered asserts a cron-triggered pipeline gets a cron entry
+// scheduled under its ID (so the scheduler will fire it).
+func TestPipelineCronRegistered(t *testing.T) {
+	env := newTestEnv(t)
+	pipe := &task.PipelineTask{
+		APIVersion: "dicode/v1", Kind: task.KindPipelineTask,
+		ID: "p", Name: "P", Subtype: "sequential", Enabled: true,
+		Trigger: task.PipelineTrigger{Cron: "0 0 * * *"},
+		Stages:  []task.Stage{{Task: "s"}},
+	}
+	registerStageAndPipeline(t, env, pipe)
+
+	env.engine.mu.Lock()
+	_, ok := env.engine.cronEntries["p"]
+	env.engine.mu.Unlock()
+	if !ok {
+		t.Fatal("no cron entry registered for cron-triggered pipeline")
+	}
+}
+
+// TestPipelineWebhookRegistered asserts a webhook-triggered pipeline claims its
+// path in the engine's webhook routing table.
+func TestPipelineWebhookRegistered(t *testing.T) {
+	env := newTestEnv(t)
+	pipe := &task.PipelineTask{
+		APIVersion: "dicode/v1", Kind: task.KindPipelineTask,
+		ID: "wp", Name: "WP", Subtype: "sequential", Enabled: true,
+		Trigger: task.PipelineTrigger{Webhook: "/hooks/pipe"},
+		Stages:  []task.Stage{{Task: "s"}},
+	}
+	registerStageAndPipeline(t, env, pipe)
+
+	env.engine.mu.Lock()
+	got := env.engine.webhooks["/hooks/pipe"]
+	env.engine.mu.Unlock()
+	if got != "wp" {
+		t.Fatalf("webhook path not claimed by pipeline: got %q, want wp", got)
+	}
+}
+
 func TestValidatePipelineRefs(t *testing.T) {
 	env := newTestEnv(t)
 	stage := &task.Spec{ID: "stage-a", Name: "A", Enabled: true,
