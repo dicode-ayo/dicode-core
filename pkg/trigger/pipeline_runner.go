@@ -127,6 +127,10 @@ func (e *Engine) dispatchStage(ctx context.Context, st task.Stage, upstream task
 	if res.Status != registry.StatusSuccess {
 		return task.InputContext{}, fmt.Errorf("run %s ended with status %s", runID, res.Status)
 	}
+	// Only Output is threaded between stages in v1: PipelineTask.Validate rejects
+	// ${input.params.*} refs, so there is deliberately no Params snapshot here.
+	// Cross-stage param threading is a planned follow-up (mirrors the forward-compat
+	// note on the preflight dispatchPipelineStage path).
 	return task.InputContext{Output: res.ReturnValue}, nil
 }
 
