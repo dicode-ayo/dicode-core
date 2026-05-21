@@ -113,6 +113,14 @@ type Engine struct {
 	// driven restarts. See daemon_state.go for the coalescing rationale.
 	restartGates *restartGate
 
+	// livePipelines tracks PipelineRunners whose terminal daemon stage is
+	// currently running — i.e. the pipeline parent run is 'running' for the
+	// daemon's lifetime. Keyed by pipeline task ID. Guarded by livePipelineMu
+	// (separate from daemonMu so a lookup never blocks on a long daemon
+	// dispatch holding daemonMu).
+	livePipelineMu sync.Mutex
+	livePipelines  map[string]*PipelineRunner
+
 	defaultsOnFailureChain task.OnFailureChainSpec // from config.Defaults.OnFailureChain
 
 	db db.DB // optional — enables cron-job persistence and missed-run catchup
@@ -166,17 +174,18 @@ type PythonRuntimeAPI interface {
 // New creates a trigger Engine with a default Deno executor.
 func New(r *registry.Registry, defaultExec pkgruntime.Executor, log *zap.Logger) *Engine {
 	e := &Engine{
-		registry:     r,
-		executors:    make(map[task.Runtime]pkgruntime.Executor),
-		cron:         cron.New(),
-		log:          log,
-		cronEntries:  make(map[string]cron.EntryID),
-		webhooks:     make(map[string]string),
-		daemonRuns:   make(map[string]string),
-		daemonSpecs:  make(map[string]*task.Spec),
-		daemonStates: newDaemonStateMap(),
-		restartGates: newRestartGate(),
-		guards:       newChainGuards(),
+		registry:      r,
+		executors:     make(map[task.Runtime]pkgruntime.Executor),
+		cron:          cron.New(),
+		log:           log,
+		cronEntries:   make(map[string]cron.EntryID),
+		webhooks:      make(map[string]string),
+		daemonRuns:    make(map[string]string),
+		daemonSpecs:   make(map[string]*task.Spec),
+		daemonStates:  newDaemonStateMap(),
+		restartGates:  newRestartGate(),
+		livePipelines: make(map[string]*PipelineRunner),
+		guards:        newChainGuards(),
 	}
 	e.executors[task.RuntimeDeno] = defaultExec
 	return e

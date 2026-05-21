@@ -93,6 +93,107 @@ func TestPipelineRunnerSequential(t *testing.T) {
 	}
 }
 
+// findStageChild polls a pipeline parent run's children for the named stage task
+// and returns it once observed in any state (or fails on timeout).
+func findStageChild(t *testing.T, env *testEnv, parentRunID, stageTaskID string, want string, timeout time.Duration) *registry.Run {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		kids, _ := env.reg.ListChildren(context.Background(), parentRunID, 20)
+		for _, c := range kids {
+			if c.TaskID != stageTaskID {
+				continue
+			}
+			if want == "" || c.Status == want {
+				return c
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("stage child %q (want status %q) not observed under %s", stageTaskID, want, timeout)
+	return nil
+}
+
+// TestPipelineDaemonTerminalStage asserts that a pipeline whose terminal stage
+// resolves to a trigger.daemon: true Task does NOT finish 'success' when the
+// daemon starts: it stays 'running' for the daemon's lifetime and finishes with
+// the daemon run's *actual* terminal status.
+//
+// Two behaviours are checked:
+//   - lifetime: while the daemon stage child is 'running', the pipeline parent
+//     is still 'running' (gated on the observable child-run state, not a sleep);
+//   - status fidelity: when the daemon run is killed (operator-style), the
+//     pipeline finishes with the daemon's terminal status ('cancelled'). The
+//     pre-Task-18 generic dispatchStage path would coerce any non-success
+//     terminal into a wrapped 'failure', so this distinguishes the new code.
+func TestPipelineDaemonTerminalStage(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires Deno subprocess")
+	}
+	env := newTestEnv(t)
+	dir := t.TempDir()
+
+	stageA := writeTask(t, dir, "dts-a",
+		`export default async function main() { return "from-a" }`,
+		task.TriggerConfig{Manual: true})
+	// Terminal stage is a daemon: it stays up until killed. restart:never so a
+	// kill doesn't loop.
+	stageB := writeTask(t, dir, "dts-b",
+		`export default async function main() { while (true) { await new Promise(r => setTimeout(r, 200)); } }`,
+		task.TriggerConfig{Daemon: true, Restart: "never"})
+	for _, s := range []*task.Spec{stageA, stageB} {
+		if err := env.reg.Register(s); err != nil {
+			t.Fatalf("reg.Register %s: %v", s.ID, err)
+		}
+		if err := env.engine.Register(s); err != nil {
+			t.Fatalf("eng.Register %s: %v", s.ID, err)
+		}
+	}
+
+	pipe := &task.PipelineTask{
+		APIVersion: "dicode/v1", Kind: task.KindPipelineTask,
+		ID: "dts-pipe", Name: "DTS", Subtype: "sequential", Enabled: true,
+		Trigger: task.PipelineTrigger{Manual: true},
+		Stages:  []task.Stage{{Task: "dts-a"}, {Task: "dts-b"}},
+	}
+	if err := env.reg.Register(pipe); err != nil {
+		t.Fatalf("reg.Register pipe: %v", err)
+	}
+	if err := env.engine.Register(pipe); err != nil {
+		t.Fatalf("eng.Register pipe: %v", err)
+	}
+
+	parentRunID, err := env.engine.FireManual(context.Background(), "dts-pipe", nil)
+	if err != nil {
+		t.Fatalf("FireManual: %v", err)
+	}
+
+	// Wait until the daemon terminal stage child run is up and 'running'.
+	daemonChild := findStageChild(t, env, parentRunID, "dts-b", registry.StatusRunning, 20*time.Second)
+
+	// While the daemon stage is running, the pipeline parent must NOT have
+	// finished — it tracks the daemon's lifetime.
+	parent, err := env.engine.registry.GetRun(context.Background(), parentRunID)
+	if err != nil {
+		t.Fatalf("GetRun parent: %v", err)
+	}
+	if parent.Status != registry.StatusRunning {
+		t.Fatalf("pipeline finished %q while daemon terminal stage still running; want 'running'", parent.Status)
+	}
+
+	// Kill the daemon stage run (operator-style). The pipeline must finish with
+	// the daemon run's *actual* terminal status (cancelled), not a coerced
+	// failure.
+	if !env.engine.KillRun(daemonChild.ID) {
+		t.Fatalf("KillRun(daemonChild) returned false; daemon stage run not cancellable")
+	}
+
+	final := waitForTerminal(t, env.engine, parentRunID, 20*time.Second)
+	if final.Status != registry.StatusCancelled {
+		t.Fatalf("pipeline final status = %q (reason=%q), want 'cancelled' (daemon run was killed)", final.Status, final.FailureReason)
+	}
+}
+
 // findPipelineRun polls for a kind=pipeline run of taskID and returns it once it
 // reaches a terminal state (or fails the test on timeout).
 func findRun(t *testing.T, env *testEnv, taskID string, wantKind string, timeout time.Duration) *registry.Run {
