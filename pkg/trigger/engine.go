@@ -110,14 +110,19 @@ type Engine struct {
 	daemonStates *daemonStateMap
 
 	// restartGates is a per-daemon at-most-one-in-flight lock for prereq-
-	// driven restarts. See daemon_state.go for the coalescing rationale.
+	// driven restarts. See daemon_state.go for the coalescing rationale. Also
+	// reused by handlePipelineStageRerun, keyed by pipeline ID, so a flurry of
+	// mid-pipeline stage re-fires coalesces to at most one outstanding
+	// propagation per pipeline.
 	restartGates *restartGate
 
 	// livePipelines tracks PipelineRunners whose terminal daemon stage is
 	// currently running — i.e. the pipeline parent run is 'running' for the
-	// daemon's lifetime. Keyed by pipeline task ID. Guarded by livePipelineMu
-	// (separate from daemonMu so a lookup never blocks on a long daemon
-	// dispatch holding daemonMu).
+	// daemon's lifetime. Keyed by pipeline task ID. handlePipelineStageRerun
+	// consults this to find which live pipelines contain a just-completed stage
+	// task and need their descendants replayed + daemon restarted. Guarded by
+	// livePipelineMu (separate from daemonMu so a stage-rerun scan never blocks
+	// on a long daemon dispatch holding daemonMu).
 	livePipelineMu sync.Mutex
 	livePipelines  map[string]*PipelineRunner
 
@@ -1448,6 +1453,11 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 	// commit and tests for the rationale.
 	if runStatus == registry.StatusSuccess {
 		e.notifyPrereqCompletion(completedTaskID, output)
+		// PipelineTask analogue: when a task that is a stage of a *live*
+		// pipeline (terminal daemon stage running) re-fires successfully,
+		// replay the descendant stages with fresh ${input} and restart the
+		// terminal daemon so it picks up the freshly-rendered descendants.
+		e.handlePipelineStageRerun(completedTaskID, output)
 	}
 	// Shared resolver context for both the success-chain and
 	// on_failure_chain dispatch paths below. The full upstream return

@@ -405,3 +405,132 @@ func TestPipelineFiresChain(t *testing.T) {
 		t.Errorf("downstream source = %q, want %q (chained from pipeline outcome)", run.TriggerSource, registry.TriggerChain)
 	}
 }
+
+// countStageChildren returns how many of a pipeline parent run's children are
+// runs of stageTaskID.
+func countStageChildren(t *testing.T, env *testEnv, parentRunID, stageTaskID string) int {
+	t.Helper()
+	kids, _ := env.reg.ListChildren(context.Background(), parentRunID, 100)
+	n := 0
+	for _, c := range kids {
+		if c.TaskID == stageTaskID {
+			n++
+		}
+	}
+	return n
+}
+
+// TestPipelineStageRerun is the mid-pipeline stage re-fire propagation test
+// (Task 19). A 3-stage pipeline runs to its terminal daemon stage and stays
+// live. An operator then re-fires stage 0's underlying Task standalone. The
+// engine must replay the descendant stages [1..terminal] with fresh ${input}
+// and restart the terminal daemon — observed as: a SECOND run of the descendant
+// stage-1 task appears as a pipeline child, AND a SECOND run of the terminal
+// daemon stage appears (the restart).
+//
+// Determinism: every assertion gates on observable child-run counts going from
+// 1 to 2 (not sleeps). The daemon body blocks until killed, so the only way a
+// second daemon-stage child appears is the re-fire's kill+restart.
+func TestPipelineStageRerun(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires Deno subprocess")
+	}
+	env := newTestEnv(t)
+	dir := t.TempDir()
+
+	stage0 := writeTask(t, dir, "rr-0",
+		`export default async function main() { return "gen" }`,
+		task.TriggerConfig{Manual: true})
+	stage1 := writeTask(t, dir, "rr-1",
+		`export default async function main({ params }) { return await params.get("content") }`,
+		task.TriggerConfig{Manual: true})
+	// Terminal daemon stage blocks until killed; restart:never so a kill
+	// doesn't engage the daemon auto-restart path (this stage is a pipeline
+	// child, not a registered daemon, so that path is inert anyway).
+	stage2 := writeTask(t, dir, "rr-2",
+		`export default async function main() { while (true) { await new Promise(r => setTimeout(r, 200)); } }`,
+		task.TriggerConfig{Daemon: true, Restart: "never"})
+	for _, s := range []*task.Spec{stage0, stage1, stage2} {
+		if err := env.reg.Register(s); err != nil {
+			t.Fatalf("reg.Register %s: %v", s.ID, err)
+		}
+		if err := env.engine.Register(s); err != nil {
+			t.Fatalf("eng.Register %s: %v", s.ID, err)
+		}
+	}
+
+	pipe := &task.PipelineTask{
+		APIVersion: "dicode/v1", Kind: task.KindPipelineTask,
+		ID: "rr-pipe", Name: "RR", Subtype: "sequential", Enabled: true,
+		Trigger: task.PipelineTrigger{Manual: true},
+		Stages: []task.Stage{
+			{Task: "rr-0"},
+			{Task: "rr-1", Overrides: &task.Overrides{
+				Params: task.ParamOverrides{{Name: "content", Default: "${input.output}"}}}},
+			{Task: "rr-2"},
+		},
+	}
+	if err := env.reg.Register(pipe); err != nil {
+		t.Fatalf("reg.Register pipe: %v", err)
+	}
+	if err := env.engine.Register(pipe); err != nil {
+		t.Fatalf("eng.Register pipe: %v", err)
+	}
+
+	parentRunID, err := env.engine.FireManual(context.Background(), "rr-pipe", nil)
+	if err != nil {
+		t.Fatalf("FireManual: %v", err)
+	}
+
+	// Wait until the terminal daemon stage is up: the pipeline is live.
+	findStageChild(t, env, parentRunID, "rr-2", registry.StatusRunning, 20*time.Second)
+	// Sanity: exactly one run each of the descendant + daemon stages so far.
+	if got := countStageChildren(t, env, parentRunID, "rr-1"); got != 1 {
+		t.Fatalf("before re-fire: rr-1 child count = %d, want 1", got)
+	}
+	if got := countStageChildren(t, env, parentRunID, "rr-2"); got != 1 {
+		t.Fatalf("before re-fire: rr-2 child count = %d, want 1", got)
+	}
+
+	// Operator re-fires stage 0's underlying Task standalone. On success its
+	// FireChain hook drives handlePipelineStageRerun → replay descendants +
+	// restart the terminal daemon.
+	if _, err := env.engine.FireManual(context.Background(), "rr-0", nil); err != nil {
+		t.Fatalf("FireManual rr-0 (re-fire): %v", err)
+	}
+
+	// Descendant stage-1 must re-run (a 2nd pipeline-child run appears).
+	waitUntil(t, 25*time.Second, func() bool {
+		return countStageChildren(t, env, parentRunID, "rr-1") >= 2
+	}, "descendant stage rr-1 was not re-run after stage-0 re-fire")
+
+	// Terminal daemon must restart (a 2nd daemon-stage child run appears, and
+	// it reaches 'running').
+	waitUntil(t, 25*time.Second, func() bool {
+		if countStageChildren(t, env, parentRunID, "rr-2") < 2 {
+			return false
+		}
+		// At least one rr-2 child should be 'running' (the restarted daemon).
+		kids, _ := env.reg.ListChildren(context.Background(), parentRunID, 100)
+		for _, c := range kids {
+			if c.TaskID == "rr-2" && c.Status == registry.StatusRunning {
+				return true
+			}
+		}
+		return false
+	}, "terminal daemon stage rr-2 did not restart after stage-0 re-fire")
+
+	// The pipeline parent must still be running across the restart (its
+	// lifetime tracks the restarted daemon, not the killed one).
+	parent, err := env.engine.registry.GetRun(context.Background(), parentRunID)
+	if err != nil {
+		t.Fatalf("GetRun parent: %v", err)
+	}
+	if parent.Status != registry.StatusRunning {
+		t.Fatalf("pipeline parent status = %q after restart, want 'running'", parent.Status)
+	}
+
+	// Cleanup: kill the pipeline so the daemon subprocess doesn't linger.
+	env.engine.KillRun(parentRunID)
+	waitForTerminal(t, env.engine, parentRunID, 15*time.Second)
+}
