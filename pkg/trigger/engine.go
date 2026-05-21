@@ -628,47 +628,70 @@ func cronNextRun(expr string) (time.Time, error) {
 }
 
 func (e *Engine) registerCron(spec *task.Spec) {
-	id, err := e.cron.AddFunc(spec.Trigger.Cron, func() {
+	e.scheduleCron(spec.ID, spec.Trigger.Cron, func() error {
 		s, ok := e.registry.Get(spec.ID)
 		if !ok {
-			return
+			return fmt.Errorf("cron task %q gone from registry", spec.ID)
 		}
-		// Advance next_run_at AFTER fireAsync so that a failed dispatch does not
-		// silently advance the schedule and cause the missed run to be invisible
-		// on the next restart.
-		if _, ferr := e.fireAsync(context.Background(), s, pkgruntime.RunOptions{}, registry.TriggerCron); ferr == nil && e.db != nil {
-			if next, nerr := cronNextRun(spec.Trigger.Cron); nerr == nil {
+		_, ferr := e.fireAsync(context.Background(), s, pkgruntime.RunOptions{}, registry.TriggerCron)
+		return ferr
+	})
+}
+
+// registerPipelineCron schedules a kind: PipelineTask on its cron expression,
+// firing the PipelineRunner via fireKinded. Mirrors registerCron's scheduling
+// through the shared scheduleCron primitive.
+func (e *Engine) registerPipelineCron(p *task.PipelineTask) {
+	e.scheduleCron(p.ID, p.Trigger.Cron, func() error {
+		k, ok := e.registry.GetKinded(p.ID)
+		if !ok {
+			return fmt.Errorf("cron pipeline %q gone from registry", p.ID)
+		}
+		_, ferr := e.fireKinded(context.Background(), k, pkgruntime.RunOptions{}, registry.TriggerCron)
+		return ferr
+	})
+}
+
+// scheduleCron registers a cron entry that runs fire() on each tick, records the
+// entry under id (kind-agnostic — keyed by task ID), and persists the cron_jobs
+// row. next_run_at is advanced only when fire() succeeds, so a failed dispatch
+// doesn't silently skip the missed run on the next restart. Shared by kind: Task
+// (registerCron) and kind: PipelineTask (registerPipelineCron).
+func (e *Engine) scheduleCron(id, cronExpr string, fire func() error) {
+	entryID, err := e.cron.AddFunc(cronExpr, func() {
+		if ferr := fire(); ferr == nil && e.db != nil {
+			if next, nerr := cronNextRun(cronExpr); nerr == nil {
 				if dbErr := e.db.Exec(context.Background(),
 					`UPDATE cron_jobs SET last_run_at=?, next_run_at=? WHERE task_id=?`,
-					time.Now().Unix(), next.Unix(), spec.ID,
+					time.Now().Unix(), next.Unix(), id,
 				); dbErr != nil {
 					e.log.Warn("cron: failed to persist next_run_at",
-						zap.String("task", spec.ID), zap.Error(dbErr))
+						zap.String("task", id), zap.Error(dbErr))
 				}
 			}
 		}
 	})
 	if err != nil {
 		e.log.Error("invalid cron expression",
-			zap.String("task", spec.ID),
-			zap.String("cron", spec.Trigger.Cron),
+			zap.String("task", id),
+			zap.String("cron", cronExpr),
 			zap.Error(err),
 		)
 		return
 	}
 	e.mu.Lock()
-	e.cronEntries[spec.ID] = id
+	e.cronEntries[id] = entryID
 	e.mu.Unlock()
 
 	if e.db != nil {
-		if next, nerr := cronNextRun(spec.Trigger.Cron); nerr == nil {
+		if next, nerr := cronNextRun(cronExpr); nerr == nil {
 			if dbErr := e.db.Exec(context.Background(),
 				`INSERT INTO cron_jobs(task_id,cron_expr,next_run_at) VALUES(?,?,?)
 				 ON CONFLICT(task_id) DO UPDATE SET cron_expr=excluded.cron_expr, next_run_at=excluded.next_run_at`,
-				spec.ID, spec.Trigger.Cron, next.Unix(),
+				id, cronExpr, next.Unix(),
 			); dbErr != nil {
 				e.log.Warn("cron: failed to persist cron_jobs row",
-					zap.String("task", spec.ID), zap.Error(dbErr))
+					zap.String("task", id), zap.Error(dbErr))
 			}
 		}
 	}
@@ -764,14 +787,22 @@ const reservedOAuthCompletePath = "/hooks/oauth-complete"
 const oauthRelayBuiltinID = "buildin/auth-relay"
 
 func (e *Engine) registerWebhook(spec *task.Spec) {
-	if spec.Trigger.Webhook == reservedOAuthCompletePath && spec.ID != oauthRelayBuiltinID {
+	e.registerWebhookPath(spec.ID, spec.Trigger.Webhook)
+}
+
+// registerWebhookPath claims a webhook path for a task ID (kind-agnostic). The
+// webhooks map routes incoming requests by path → task ID; the dispatcher
+// resolves the kind. Shared by kind: Task (registerWebhook) and kind:
+// PipelineTask (registerPipeline).
+func (e *Engine) registerWebhookPath(id, path string) {
+	if path == reservedOAuthCompletePath && id != oauthRelayBuiltinID {
 		e.log.Warn("rejecting task that tries to shadow reserved OAuth delivery path",
-			zap.String("task", spec.ID),
+			zap.String("task", id),
 			zap.String("path", reservedOAuthCompletePath))
 		return
 	}
 	e.mu.Lock()
-	e.webhooks[spec.Trigger.Webhook] = spec.ID
+	e.webhooks[path] = id
 	e.mu.Unlock()
 }
 
@@ -1740,7 +1771,13 @@ else { pre.innerHTML = logs.map(l => {
 // protection for a webhook request. Returns nil when the request is authentic.
 // When no secret is configured on the task the check is skipped (open webhook).
 func verifyWebhookSignature(spec *task.Spec, r *http.Request, body []byte) error {
-	secret := spec.Trigger.WebhookSecret
+	return verifyWebhookSignatureSecret(spec.Trigger.WebhookSecret, r, body)
+}
+
+// verifyWebhookSignatureSecret is the kind-agnostic HMAC verification core,
+// shared by kind: Task (verifyWebhookSignature) and kind: PipelineTask webhook
+// dispatch. An empty secret means the webhook is unauthenticated (back-compat).
+func verifyWebhookSignatureSecret(secret string, r *http.Request, body []byte) error {
 	if secret == "" {
 		return nil // unauthenticated webhook — allowed for backwards-compat
 	}
@@ -1773,6 +1810,39 @@ func verifyWebhookSignature(spec *task.Spec, r *http.Request, body []byte) error
 		return fmt.Errorf("signature mismatch")
 	}
 	return nil
+}
+
+// handlePipelineWebhook fires a kind: PipelineTask in response to a webhook
+// request and writes the parent run ID as JSON. Pipelines run asynchronously
+// (multi-stage), so there is no synchronous inline-result mode — callers poll
+// the returned runId. assetPath is non-empty only when the request targeted a
+// sub-path; pipelines expose no asset surface, so that is a 404.
+func (e *Engine) handlePipelineWebhook(w http.ResponseWriter, r *http.Request, pipe *task.PipelineTask, assetPath string) {
+	if assetPath != "" {
+		http.NotFound(w, r)
+		return
+	}
+	var body []byte
+	if r.Method != http.MethodGet && r.Body != nil {
+		body, _ = io.ReadAll(io.LimitReader(r.Body, webhookMaxBodyBytes))
+	}
+	if err := verifyWebhookSignatureSecret(pipe.Trigger.WebhookSecret, r, body); err != nil {
+		e.log.Warn("pipeline webhook signature verification failed",
+			zap.String("path", r.URL.Path), zap.String("task", pipe.ID), zap.Error(err))
+		http.Error(w, "forbidden: "+err.Error(), http.StatusForbidden)
+		return
+	}
+	e.log.Info("pipeline webhook trigger", zap.String("path", r.URL.Path), zap.String("task", pipe.ID))
+	// Decouple from the request context so the async pipeline survives the HTTP
+	// response (mirrors fireAsync's use of context.Background()).
+	runID, err := e.firePipeline(context.Background(), pipe, pkgruntime.RunOptions{}, registry.TriggerWebhook)
+	if err != nil {
+		http.Error(w, "pipeline failed to start: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("X-Run-Id", runID)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"runId": runID})
 }
 
 // WebhookHandler returns an HTTP handler that dispatches webhook-triggered tasks.
@@ -1824,6 +1894,16 @@ func (e *Engine) WebhookHandler() http.Handler {
 		if !ok {
 			http.NotFound(w, r)
 			return
+		}
+
+		// kind: PipelineTask webhooks have no task directory, index.html, or
+		// assets — fire the runner directly and return the parent run ID. Stage
+		// UIs/assets belong to the individual stage tasks, not the pipeline.
+		if k, isKinded := e.registry.GetKinded(taskID); isKinded {
+			if pipe, isPipe := k.(*task.PipelineTask); isPipe {
+				e.handlePipelineWebhook(w, r, pipe, assetPath)
+				return
+			}
 		}
 
 		spec, ok := e.registry.Get(taskID)

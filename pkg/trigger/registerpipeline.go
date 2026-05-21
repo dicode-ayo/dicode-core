@@ -127,6 +127,14 @@ func (e *Engine) registerPipeline(p *task.PipelineTask) error {
 		e.log.Info("pipeline registered (disabled — no triggers scheduled)", zap.String("task", p.ID))
 		return nil
 	}
+	// Schedule cron/webhook triggers. Manual pipelines fire via FireManual and
+	// chain pipelines via FireChain (Task 16), so neither needs scheduling here.
+	if p.Trigger.Cron != "" {
+		e.registerPipelineCron(p)
+	}
+	if p.Trigger.Webhook != "" {
+		e.registerWebhookPath(p.ID, p.Trigger.Webhook)
+	}
 	e.log.Info("pipeline registered", zap.String("task", p.ID), zap.Int("stages", len(p.Stages)))
 	return nil
 }
