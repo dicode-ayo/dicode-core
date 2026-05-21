@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/dicode/dicode/pkg/source"
+	"github.com/dicode/dicode/pkg/task"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
 )
@@ -80,13 +81,18 @@ spec:
 	if ev.TaskID != "infra/deploy" {
 		t.Errorf("TaskID: %q", ev.TaskID)
 	}
-	if ev.Spec == nil {
-		t.Error("Spec should be non-nil")
+	if ev.Kinded == nil {
+		t.Error("Kinded should be non-nil")
 	}
-	if ev.Spec.Trigger.Cron != "0 8 * * *" {
-		t.Errorf("cron: %q", ev.Spec.Trigger.Cron)
+	if asSpec(ev.Kinded).Trigger.Cron != "0 8 * * *" {
+		t.Errorf("cron: %q", asSpec(ev.Kinded).Trigger.Cron)
 	}
 }
+
+// asSpec extracts the *task.Spec carried by a kind: Task value. Tests use it
+// after source.Event/ResolvedTask migrated from a typed *task.Spec field to a
+// task.Kinded field; every fixture in these tests is a kind: Task.
+func asSpec(k task.Kinded) *task.Spec { return k.(*task.Spec) }
 
 func TestSource_UpdateEmitted(t *testing.T) {
 	dir := t.TempDir()
@@ -219,8 +225,8 @@ spec:
 	if len(events) != 1 {
 		t.Fatalf("want 1, got %d", len(events))
 	}
-	if events[0].Spec.Trigger.Cron != "0 2 * * *" {
-		t.Errorf("override not applied: cron=%q", events[0].Spec.Trigger.Cron)
+	if asSpec(events[0].Kinded).Trigger.Cron != "0 2 * * *" {
+		t.Errorf("override not applied: cron=%q", asSpec(events[0].Kinded).Trigger.Cron)
 	}
 }
 
@@ -268,7 +274,7 @@ spec:
 	if len(events) != 1 {
 		t.Fatalf("want 1, got %d", len(events))
 	}
-	spec := events[0].Spec
+	spec := asSpec(events[0].Kinded)
 	// Deprecated: config defaults should NOT be applied.
 	if spec.Timeout == 90*time.Second {
 		t.Errorf("deprecated kind:Config defaults should not be applied: timeout was set to 90s")
@@ -369,7 +375,7 @@ spec:
 		if ev.Kind != source.EventAdded {
 			t.Fatalf("first event kind = %v, want Added", ev.Kind)
 		}
-		if !ev.Spec.Enabled {
+		if !asSpec(ev.Kinded).Enabled {
 			t.Fatal("initial spec should be Enabled=true")
 		}
 	case <-time.After(5 * time.Second):
@@ -388,7 +394,7 @@ spec:
 		if ev.Kind != source.EventUpdated {
 			t.Fatalf("second event kind = %v, want Updated", ev.Kind)
 		}
-		if ev.Spec.Enabled {
+		if asSpec(ev.Kinded).Enabled {
 			t.Error("post-refresh spec.Enabled = true, want false")
 		}
 	case <-time.After(5 * time.Second):

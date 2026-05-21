@@ -18,7 +18,9 @@ type Reconciler struct {
 	log      *zap.Logger
 
 	// OnRegister is called after a task is registered (used by trigger engine).
-	OnRegister func(spec *task.Spec)
+	// It receives the registered task as a task.Kinded; consumers that only act
+	// on kind: Task type-assert to *task.Spec.
+	OnRegister func(k task.Kinded)
 	// OnUnregister is called after a task is removed.
 	OnUnregister func(id string)
 
@@ -130,13 +132,11 @@ func (rc *Reconciler) startSource(src source.Source) error {
 func (rc *Reconciler) handle(ev source.Event) {
 	switch ev.Kind {
 	case source.EventAdded, source.EventUpdated:
-		var spec *task.Spec
-		if ev.Spec != nil {
-			// TaskSet sources pre-resolve the spec (overrides already applied).
-			spec = ev.Spec
-			spec.ID = ev.TaskID
+		var k task.Kinded
+		if ev.Kinded != nil {
+			// TaskSet sources pre-resolve the task (overrides already applied).
+			k = ev.Kinded
 		} else {
-			var err error
 			extras := ev.ExtraVars
 			if extras == nil {
 				extras = make(map[string]string, 1)
@@ -145,13 +145,13 @@ func (rc *Reconciler) handle(ev source.Event) {
 				// Don't clobber a source-supplied DATADIR (allows tests to override).
 				// Clone before mutate — ev.ExtraVars may be shared across event consumers.
 				cloned := make(map[string]string, len(extras)+1)
-				for k, v := range extras {
-					cloned[k] = v
+				for key, v := range extras {
+					cloned[key] = v
 				}
 				cloned[task.VarDataDir] = rc.dataDir
 				extras = cloned
 			}
-			spec, err = task.LoadDirWithVars(ev.TaskDir, extras)
+			loaded, err := task.LoadKindedDir(ev.TaskDir, extras)
 			if err != nil {
 				rc.log.Warn("failed to load task",
 					zap.String("task", ev.TaskID),
@@ -160,23 +160,32 @@ func (rc *Reconciler) handle(ev source.Event) {
 				)
 				return
 			}
+			k = loaded
 		}
-		for _, w := range spec.Warnings {
+		// The registry keys on the event's TaskID. Flat git/local sources already
+		// load with ID == basename == TaskID, but namespaced/pre-resolved tasks
+		// need the canonical ID stamped here so every layer agrees.
+		k.SetTaskID(ev.TaskID)
+		for _, w := range k.LoadWarnings() {
 			rc.log.Warn("task config warning",
 				zap.String("task", ev.TaskID),
 				zap.String("source", ev.Source),
 				zap.String("warning", w),
 			)
 		}
-		if err := rc.validateTaskProviders(spec); err != nil {
-			rc.log.Warn("task references unknown provider",
-				zap.String("task", ev.TaskID),
-				zap.String("source", ev.Source),
-				zap.Error(err),
-			)
-			return
+		// Provider validation (issue #119) only applies to kind: Task env entries;
+		// pipelines declare no env providers.
+		if spec, ok := k.(*task.Spec); ok {
+			if err := rc.validateTaskProviders(spec); err != nil {
+				rc.log.Warn("task references unknown provider",
+					zap.String("task", ev.TaskID),
+					zap.String("source", ev.Source),
+					zap.Error(err),
+				)
+				return
+			}
 		}
-		if err := rc.registry.Register(spec); err != nil {
+		if err := rc.registry.Register(k); err != nil {
 			rc.log.Error("failed to register task", zap.String("task", ev.TaskID), zap.Error(err))
 			return
 		}
@@ -185,7 +194,7 @@ func (rc *Reconciler) handle(ev source.Event) {
 			zap.String("kind", string(ev.Kind)),
 		)
 		if rc.OnRegister != nil {
-			rc.OnRegister(spec)
+			rc.OnRegister(k)
 		}
 
 	case source.EventRemoved:

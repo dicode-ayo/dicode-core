@@ -558,13 +558,13 @@ func (s *Source) syncAndEmit(ctx context.Context, ch chan<- source.Event) error 
 	for _, id := range added {
 		cur := current[id]
 		s.send(ch, source.Event{
-			Kind: source.EventAdded, TaskID: id, TaskDir: cur.taskDir, Source: s.id, Spec: cur.spec,
+			Kind: source.EventAdded, TaskID: id, TaskDir: cur.taskDir, Source: s.id, Kinded: cur.spec,
 		})
 	}
 	for _, id := range updated {
 		cur := current[id]
 		s.send(ch, source.Event{
-			Kind: source.EventUpdated, TaskID: id, TaskDir: cur.taskDir, Source: s.id, Spec: cur.spec,
+			Kind: source.EventUpdated, TaskID: id, TaskDir: cur.taskDir, Source: s.id, Kinded: cur.spec,
 		})
 	}
 	for _, id := range removed {

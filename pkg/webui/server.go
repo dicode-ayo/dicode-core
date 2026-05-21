@@ -362,9 +362,9 @@ func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config
 	// Chain with the existing callbacks (already wired to the trigger engine in main).
 	if rec != nil {
 		prev := rec.OnRegister
-		rec.OnRegister = func(spec *task.Spec) {
+		rec.OnRegister = func(k task.Kinded) {
 			if prev != nil {
-				prev(spec)
+				prev(k)
 			}
 			s.ws.Broadcast(WSMsg{Type: "tasks:changed"})
 		}
