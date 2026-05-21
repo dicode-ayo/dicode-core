@@ -20,7 +20,8 @@ import (
 type PipelineRunner struct {
 	engine *Engine
 	spec   *task.PipelineTask
-	runID  string // the pipeline's own parent run ID
+	runID  string             // the pipeline's own parent run ID
+	cancel context.CancelFunc // cancels runCtx; invoked on finish + by KillRun
 }
 
 // firePipeline creates the pipeline's parent run row (kind=pipeline) and starts
@@ -40,8 +41,18 @@ func (e *Engine) firePipeline(ctx context.Context, p *task.PipelineTask, opts pk
 	if _, err := e.registry.StartRunWithID(context.Background(), runID, p.ID, opts.ParentRunID, string(source), registry.RunKindPipeline); err != nil {
 		return "", fmt.Errorf("start pipeline run: %w", err)
 	}
-	r := &PipelineRunner{engine: e, spec: p, runID: runID}
-	go r.run(ctx)
+	// Register the parent in the engine's run-lifecycle maps so it behaves like
+	// any managed run: WaitRun blocks on runDone until finish() (so a
+	// dicode.run_task targeting a pipeline gets the real result, not a racy nil),
+	// and KillRun(parentRunID) cancels runCtx — which the runner propagates to
+	// the in-flight stage. Trigger entrypoints pass a background context, so the
+	// async pipeline survives the trigger call returning.
+	runCtx, cancel := context.WithCancel(ctx)
+	e.runCancels.Store(runID, cancel)
+	e.runTriggerSource.Store(runID, source)
+	e.runDone.Store(runID, make(chan struct{}))
+	r := &PipelineRunner{engine: e, spec: p, runID: runID, cancel: cancel}
+	go r.run(runCtx)
 	return runID, nil
 }
 
@@ -108,6 +119,9 @@ func (e *Engine) dispatchStage(ctx context.Context, st task.Stage, upstream task
 	}
 	res, werr := e.WaitRun(ctx, runID)
 	if werr != nil {
+		// ctx cancelled (pipeline timeout or KillRun on the parent) — stop the
+		// orphaned stage subprocess rather than leaving it running detached.
+		e.KillRun(runID)
 		return task.InputContext{}, fmt.Errorf("wait: %w", werr)
 	}
 	if res.Status != registry.StatusSuccess {
@@ -133,7 +147,20 @@ func (r *PipelineRunner) finish(status, reason string, ret interface{}) {
 	} else {
 		_ = e.registry.FinishRun(finishCtx, r.runID, status)
 	}
+	// Tear down the run-lifecycle registrations now that the DB row is terminal.
+	// Close runDone AFTER the DB write so a WaitRun goroutine woken by the close
+	// reads the finalized row.
+	if v, ok := e.runDone.LoadAndDelete(r.runID); ok {
+		close(v.(chan struct{}))
+	}
 	// Pipeline-as-chain-source: fire downstream subscribers off the pipeline's
-	// overall outcome (a fresh background context — finishCtx is about to expire).
+	// overall outcome (fresh background context — finishCtx is about to expire).
+	// Done before dropping runTriggerSource, which FireChain's failure-path
+	// guards consult.
 	e.FireChain(context.Background(), r.spec.ID, r.runID, status, ret, nil)
+	e.runCancels.Delete(r.runID)
+	e.runTriggerSource.Delete(r.runID)
+	if r.cancel != nil {
+		r.cancel()
+	}
 }

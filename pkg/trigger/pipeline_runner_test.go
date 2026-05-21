@@ -114,6 +114,105 @@ func findRun(t *testing.T, env *testEnv, taskID string, wantKind string, timeout
 	return nil
 }
 
+// TestPipelineWaitRunBlocksUntilDone asserts WaitRun on a pipeline's parent run
+// blocks until the pipeline finishes and returns the terminal status + return
+// value — i.e. the parent is a managed run (runDone), so dicode.run_task on a
+// pipeline gets the real result rather than a racy "running"/nil.
+func TestPipelineWaitRunBlocksUntilDone(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires Deno subprocess")
+	}
+	env := newTestEnv(t)
+	dir := t.TempDir()
+	stage := writeTask(t, dir, "wstage", `export default async function main() { return "v" }`, task.TriggerConfig{Manual: true})
+	if err := env.reg.Register(stage); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.engine.Register(stage); err != nil {
+		t.Fatal(err)
+	}
+	pipe := &task.PipelineTask{
+		APIVersion: "dicode/v1", Kind: task.KindPipelineTask,
+		ID: "wpipe", Name: "WP", Subtype: "sequential", Enabled: true,
+		Trigger: task.PipelineTrigger{Manual: true},
+		Stages:  []task.Stage{{Task: "wstage"}},
+	}
+	if err := env.reg.Register(pipe); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.engine.Register(pipe); err != nil {
+		t.Fatalf("register pipeline: %v", err)
+	}
+
+	runID, err := env.engine.FireManual(context.Background(), "wpipe", nil)
+	if err != nil {
+		t.Fatalf("FireManual: %v", err)
+	}
+	res, err := env.engine.WaitRun(context.Background(), runID)
+	if err != nil {
+		t.Fatalf("WaitRun: %v", err)
+	}
+	if res.Status != registry.StatusSuccess {
+		t.Fatalf("WaitRun status = %q, want success (WaitRun should block until terminal)", res.Status)
+	}
+	if res.ReturnValue != "v" {
+		t.Errorf("WaitRun return = %v, want \"v\"", res.ReturnValue)
+	}
+}
+
+// TestPipelineKillRunCancelsStage asserts KillRun on a pipeline's parent run
+// cancels the in-flight stage instead of leaving it running detached. The stage
+// sleeps 10s; a working kill makes the pipeline terminate well before that.
+func TestPipelineKillRunCancelsStage(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires Deno subprocess")
+	}
+	env := newTestEnv(t)
+	dir := t.TempDir()
+	stage := writeTask(t, dir, "slowstage",
+		`export default async function main() { await new Promise(r => setTimeout(r, 10000)); return "late" }`,
+		task.TriggerConfig{Manual: true})
+	if err := env.reg.Register(stage); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.engine.Register(stage); err != nil {
+		t.Fatal(err)
+	}
+	pipe := &task.PipelineTask{
+		APIVersion: "dicode/v1", Kind: task.KindPipelineTask,
+		ID: "killpipe", Name: "KP", Subtype: "sequential", Enabled: true,
+		Trigger: task.PipelineTrigger{Manual: true},
+		Stages:  []task.Stage{{Task: "slowstage"}},
+	}
+	if err := env.reg.Register(pipe); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.engine.Register(pipe); err != nil {
+		t.Fatalf("register pipeline: %v", err)
+	}
+
+	runID, err := env.engine.FireManual(context.Background(), "killpipe", nil)
+	if err != nil {
+		t.Fatalf("FireManual: %v", err)
+	}
+	// Wait until the stage child run exists (pipeline is mid-stage).
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if kids, _ := env.reg.ListChildren(context.Background(), runID, 5); len(kids) > 0 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !env.engine.KillRun(runID) {
+		t.Fatal("KillRun returned false; pipeline parent run is not cancellable")
+	}
+	// If kill works, the pipeline fails fast (well under the stage's 10s sleep).
+	parent := waitForTerminal(t, env.engine, runID, 8*time.Second)
+	if parent.Status == registry.StatusSuccess {
+		t.Fatalf("killed pipeline ended success; expected failure")
+	}
+}
+
 // TestChainFiresPipeline asserts a pipeline with trigger.chain.from: <task> fires
 // when that upstream task completes successfully.
 func TestChainFiresPipeline(t *testing.T) {
