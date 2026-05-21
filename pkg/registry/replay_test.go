@@ -44,7 +44,7 @@ func TestReplay_FetchesInputAndFires(t *testing.T) {
 	is := NewInputStore(c, mr, "fake-storage")
 
 	originalRunID := uuid.New().String()
-	if _, err := r.StartRunWithID(ctx, originalRunID, "user-task", "", "manual"); err != nil {
+	if _, err := r.StartRunWithID(ctx, originalRunID, "user-task", "", "manual", "task"); err != nil {
 		t.Fatal(err)
 	}
 	in := PersistedInput{Source: "webhook", Method: "POST"}
@@ -93,7 +93,7 @@ func TestReplay_TaskNameOverride(t *testing.T) {
 	is := NewInputStore(newTestInputCrypto(t), mr, "fake-storage")
 
 	originalRunID := uuid.New().String()
-	if _, err := r.StartRunWithID(ctx, originalRunID, "user-task", "", "manual"); err != nil {
+	if _, err := r.StartRunWithID(ctx, originalRunID, "user-task", "", "manual", "task"); err != nil {
 		t.Fatal(err)
 	}
 	key, size, storedAt, err := is.Persist(ctx, originalRunID, PersistedInput{Source: "webhook"})
@@ -123,7 +123,7 @@ func TestReplay_NoStoredInput_ReturnsErrInputUnavailable(t *testing.T) {
 	is := NewInputStore(newTestInputCrypto(t), mr, "fake-storage")
 
 	originalRunID := uuid.New().String()
-	if _, err := r.StartRunWithID(ctx, originalRunID, "user-task", "", "manual"); err != nil {
+	if _, err := r.StartRunWithID(ctx, originalRunID, "user-task", "", "manual", "task"); err != nil {
 		t.Fatal(err)
 	}
 	// Note: no SetRunInput — column is empty.

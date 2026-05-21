@@ -23,10 +23,11 @@ type Event struct {
 	TaskID  string // namespaced task ID, e.g. "infra/backend/deploy"
 	TaskDir string // absolute path to the task directory (used by reconciler for LoadDir)
 	Source  string // source identifier (URL or path) for logging
-	// Spec, when non-nil, is a fully resolved task spec (overrides already applied).
-	// The reconciler uses it directly instead of calling task.LoadDir(TaskDir).
-	// Set by taskset sources; nil for plain git/local sources.
-	Spec *task.Spec
+	// Kinded, when non-nil, is a fully resolved task of any kind (overrides
+	// already applied). The reconciler uses it directly instead of loading from
+	// TaskDir. Set by taskset sources; nil for plain git/local sources, which
+	// the reconciler loads via task.LoadKindedDir(TaskDir).
+	Kinded task.Kinded
 	// ExtraVars carries per-source template variables injected into
 	// task.yaml's ${VAR} expansion at load time. Sources populate this with
 	// e.g. TASK_SET_DIR (the source's root path) so tasks can reference

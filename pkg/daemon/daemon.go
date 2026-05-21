@@ -233,14 +233,18 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	// 30 s, flooding the log. LoadOrStore ensures at most one WARN per task ID
 	// per daemon lifetime.
 	var bodyFullTextualWarned sync.Map
-	rec.OnRegister = func(spec *task.Spec) {
+	rec.OnRegister = func(k task.Kinded) {
+		// The webhook-gateway and footgun checks below only apply to kind: Task.
+		// Pipelines (kind: PipelineTask) register through the engine for routing
+		// but their trigger wiring lands in a later PR; skip the Spec-only logic.
+		spec, isSpec := k.(*task.Spec)
 		// Override buildin/run-inputs-cleanup's retention_seconds default to
 		// match dicode.yaml's defaults.run_inputs.retention. This must happen
 		// before eng.Register so the engine sees the correct default when
 		// building the param map for the next cron fire. We mutate the spec
 		// slice element in place; the reconciler replaces the spec on each
 		// reload, so the override is re-applied on every registration.
-		if spec.ID == "buildin/run-inputs-cleanup" && cfg.Defaults.RunInputs.Retention > 0 {
+		if isSpec && spec.ID == "buildin/run-inputs-cleanup" && cfg.Defaults.RunInputs.Retention > 0 {
 			retStr := fmt.Sprintf("%d", int64(cfg.Defaults.RunInputs.Retention.Seconds()))
 			for i := range spec.Params {
 				if spec.Params[i].Name == "retention_seconds" {
@@ -249,18 +253,21 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 				}
 			}
 		}
-		if err := eng.Register(spec); err != nil {
+		if err := eng.Register(k); err != nil {
 			// Cross-spec validation (trigger.before pointing at an unknown
-			// task or at another daemon) is the only error Register currently
-			// returns. The reconciler will retry on the next reload, so a
-			// transient registry mismatch heals itself; a persistent config
-			// error surfaces here every cycle. Log at WARN — matches how the
-			// reconciler/engine surface other config-validation failures —
-			// and skip the downstream webhook/footgun checks so a half-
-			// registered task doesn't claim its gateway path.
+			// task or at another daemon, or pipeline ref/cycle errors) is the
+			// only error Register currently returns. The reconciler will retry
+			// on the next reload, so a transient registry mismatch heals itself;
+			// a persistent config error surfaces here every cycle. Log at WARN —
+			// matches how the reconciler/engine surface other config-validation
+			// failures — and skip the downstream webhook/footgun checks so a
+			// half-registered task doesn't claim its gateway path.
 			log.Warn("task registration rejected by engine — fix the spec to re-enable",
-				zap.String("task", spec.ID),
+				zap.String("task", k.TaskID()),
 				zap.Error(err))
+			return
+		}
+		if !isSpec {
 			return
 		}
 		if spec.Trigger.Webhook != "" {

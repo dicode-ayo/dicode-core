@@ -367,3 +367,77 @@ func TestRegistry_BulkAppendLogs_HookFired(t *testing.T) {
 		t.Errorf("hook got %v, want [a b]", hooked)
 	}
 }
+
+func TestRegistryKindedStorage(t *testing.T) {
+	r := newTestRegistry(t)
+
+	spec := makeSpec("t")
+	spec.Enabled = true
+	pipe := &task.PipelineTask{ID: "p", Name: "P", Subtype: "sequential", Enabled: true,
+		Stages: []task.Stage{{Task: "t"}}}
+
+	if err := r.Register(spec); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Register(pipe); err != nil {
+		t.Fatal(err)
+	}
+
+	// GetKinded sees both kinds.
+	if k, ok := r.GetKinded("p"); !ok || k.KindOf() != task.KindPipelineTask {
+		t.Fatalf("GetKinded(p) = %v,%v", k, ok)
+	}
+	// Get (typed) returns only Task-kind.
+	if _, ok := r.Get("p"); ok {
+		t.Fatal("Get(p) should not return a pipeline as *task.Spec")
+	}
+	if s, ok := r.Get("t"); !ok || s.ID != "t" {
+		t.Fatalf("Get(t) = %v,%v", s, ok)
+	}
+	// All (typed) filters to Task-kind; AllKinded returns both.
+	if got := len(r.All()); got != 1 {
+		t.Fatalf("All() = %d, want 1", got)
+	}
+	if got := len(r.AllKinded()); got != 2 {
+		t.Fatalf("AllKinded() = %d, want 2", got)
+	}
+}
+
+func TestStartRunKind(t *testing.T) {
+	r := newTestRegistry(t)
+	ctx := context.Background()
+	if _, err := r.StartRunWithID(ctx, "r1", "t1", "", "manual", RunKindPipeline); err != nil {
+		t.Fatal(err)
+	}
+	run, err := r.GetRun(ctx, "r1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Kind != RunKindPipeline {
+		t.Fatalf("Kind = %q, want %q", run.Kind, RunKindPipeline)
+	}
+	// Default path: StartRun wrapper writes kind=RunKindTask.
+	id, err := r.StartRun(ctx, "t2", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run2, err := r.GetRun(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run2.Kind != RunKindTask {
+		t.Fatalf("Kind = %q, want %q", run2.Kind, RunKindTask)
+	}
+
+	// Empty kind falls back to RunKindTask.
+	if _, err := r.StartRunWithID(ctx, "r3", "t3", "", "manual", ""); err != nil {
+		t.Fatal(err)
+	}
+	run3, err := r.GetRun(ctx, "r3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run3.Kind != RunKindTask {
+		t.Fatalf("empty kind: got %q, want %q", run3.Kind, RunKindTask)
+	}
+}

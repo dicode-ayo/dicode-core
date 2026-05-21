@@ -338,51 +338,59 @@ func (e *Engine) Start(ctx context.Context) error {
 	return nil
 }
 
-// Register adds or updates trigger registrations for a task spec. Returns a
-// non-nil error when cross-spec validation fails (currently: invalid
-// trigger.before references). On error, no triggers are registered.
-// Register registers a task with the engine. Cycle detection runs
-// against the registered before-graph as of method entry; the call is
-// serialized via registerMu so concurrent registrations cannot admit
-// a cycle through interleaved snapshots.
-func (e *Engine) Register(spec *task.Spec) error {
+// Register adds or updates trigger registrations for the given task, routing by
+// kind: a *task.PipelineTask is validated via registerPipeline; a *task.Spec
+// follows the cron/webhook/daemon registration path. The call is serialized via
+// registerMu so concurrent registrations cannot admit a cycle through
+// interleaved registry snapshots. Returns a non-nil error if validation fails
+// (e.g. invalid trigger.before refs for a Task, or pipeline ref/cycle errors);
+// on error, no triggers are modified. Callers may pass any task.Kinded;
+// *task.Spec satisfies it, so existing call sites are unaffected.
+func (e *Engine) Register(k task.Kinded) error {
 	e.registerMu.Lock()
 	defer e.registerMu.Unlock()
 
-	// Cross-spec validation must run BEFORE Unregister so that a previously
-	// valid registration isn't torn down when an updated spec fails its
-	// new-state checks. The registry-snapshot lookups are read-only.
-	if err := e.validateBeforeRefs(spec); err != nil {
-		return err
-	}
+	switch s := k.(type) {
+	case *task.PipelineTask:
+		return e.registerPipeline(s)
+	case *task.Spec:
+		// Cross-spec validation must run BEFORE Unregister so that a previously
+		// valid registration isn't torn down when an updated spec fails its
+		// new-state checks. The registry-snapshot lookups are read-only.
+		if err := e.validateBeforeRefs(s); err != nil {
+			return err
+		}
 
-	e.Unregister(spec.ID)
+		e.Unregister(s.ID)
 
-	// Disabled tasks are kept in the registry for API visibility but must not
-	// be scheduled, spawned as daemons, or registered as webhook endpoints.
-	if !spec.Enabled {
-		e.log.Info("task registered (disabled — no triggers scheduled)",
-			zap.String("task", spec.ID),
-			zap.String("runtime", string(spec.Runtime)),
+		// Disabled tasks are kept in the registry for API visibility but must not
+		// be scheduled, spawned as daemons, or registered as webhook endpoints.
+		if !s.Enabled {
+			e.log.Info("task registered (disabled — no triggers scheduled)",
+				zap.String("task", s.ID),
+				zap.String("runtime", string(s.Runtime)),
+			)
+			return nil
+		}
+
+		if s.Trigger.Cron != "" {
+			e.registerCron(s)
+		}
+		if s.Trigger.Webhook != "" {
+			e.registerWebhook(s)
+		}
+		if s.Trigger.Daemon {
+			e.registerDaemon(s)
+		}
+		e.log.Info("task registered",
+			zap.String("task", s.ID),
+			zap.String("trigger", string(triggerSource(s))),
+			zap.String("runtime", string(s.Runtime)),
 		)
 		return nil
+	default:
+		return fmt.Errorf("engine: unsupported task kind %q", k.KindOf())
 	}
-
-	if spec.Trigger.Cron != "" {
-		e.registerCron(spec)
-	}
-	if spec.Trigger.Webhook != "" {
-		e.registerWebhook(spec)
-	}
-	if spec.Trigger.Daemon {
-		e.registerDaemon(spec)
-	}
-	e.log.Info("task registered",
-		zap.String("task", spec.ID),
-		zap.String("trigger", string(triggerSource(spec))),
-		zap.String("runtime", string(spec.Runtime)),
-	)
-	return nil
 }
 
 // inputParamsRefRe matches any `${input.params.<name>}` token in a
@@ -2151,7 +2159,7 @@ func (e *Engine) serveTaskAsset(w http.ResponseWriter, r *http.Request, taskDir,
 // hook, and returns a ready-to-run context. The caller is responsible for
 // calling the returned cleanup func when the run finishes.
 func (e *Engine) startRun(spec *task.Spec, opts *pkgruntime.RunOptions, source registry.TriggerSource) (runCtx context.Context, cleanup func(), err error) {
-	if _, err = e.registry.StartRunWithID(context.Background(), opts.RunID, spec.ID, opts.ParentRunID, string(source)); err != nil {
+	if _, err = e.registry.StartRunWithID(context.Background(), opts.RunID, spec.ID, opts.ParentRunID, string(source), registry.RunKindTask); err != nil {
 		return nil, nil, fmt.Errorf("start run record: %w", err)
 	}
 

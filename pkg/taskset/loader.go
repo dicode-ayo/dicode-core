@@ -14,9 +14,10 @@ import (
 type Kind string
 
 const (
-	KindTaskSet Kind = "TaskSet"
-	KindTask    Kind = "Task"
-	KindConfig  Kind = "Config"
+	KindTaskSet      Kind = "TaskSet"
+	KindTask         Kind = "Task"
+	KindConfig       Kind = "Config"
+	KindPipelineTask Kind = "PipelineTask" // mirrors task.KindPipelineTask; kept as a literal so pkg/taskset stays decoupled from pkg/task's constant
 )
 
 // fileHeader peeks at the kind field without decoding the full document.

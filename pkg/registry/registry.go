@@ -26,10 +26,20 @@ const (
 	StatusCancelled = "cancelled"
 )
 
+// Run kind values for the runs.kind column. These are the lowercase run-row
+// discriminators — distinct from pkg/task's task-kind strings ("Task" /
+// "PipelineTask"). RunKindPipeline is written by the PipelineTask dispatcher
+// (a later PR); everything else is RunKindTask.
+const (
+	RunKindTask     = "task"
+	RunKindPipeline = "pipeline"
+)
+
 // Run is a single execution record.
 type Run struct {
 	ID          string
 	TaskID      string
+	Kind        string // run kind: "task" (default) or "pipeline" (see RunKindTask/RunKindPipeline)
 	Status      string
 	StartedAt   time.Time
 	FinishedAt  *time.Time
@@ -72,7 +82,7 @@ type LogEntry struct {
 // Registry is an in-memory map of tasks backed by a sqlite run log.
 type Registry struct {
 	mu      sync.RWMutex
-	tasks   map[string]*task.Spec
+	tasks   map[string]task.Kinded // was map[string]*task.Spec
 	db      db.DB
 	logHook func(runID, level, msg string, ts int64)
 	logMu   sync.Mutex
@@ -81,16 +91,17 @@ type Registry struct {
 // New creates an empty Registry backed by the given DB.
 func New(database db.DB) *Registry {
 	return &Registry{
-		tasks: make(map[string]*task.Spec),
+		tasks: make(map[string]task.Kinded),
 		db:    database,
 	}
 }
 
-// Register upserts a task spec into the registry.
-func (r *Registry) Register(spec *task.Spec) error {
+// Register upserts any task kind into the registry. *task.Spec satisfies
+// task.Kinded, so existing callers passing a *task.Spec keep compiling.
+func (r *Registry) Register(k task.Kinded) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.tasks[spec.ID] = spec
+	r.tasks[k.TaskID()] = k
 	return nil
 }
 
@@ -101,38 +112,70 @@ func (r *Registry) Unregister(id string) {
 	delete(r.tasks, id)
 }
 
-// Get returns the spec for a task ID, or (nil, false) if not found.
+// Get returns the *task.Spec for a Task-kind task, or (nil, false) if not
+// found OR if the ID names a non-Task kind. Existing consumers only want
+// kind: Task, so this filter keeps them unchanged.
 func (r *Registry) Get(id string) (*task.Spec, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	s, ok := r.tasks[id]
+	k, ok := r.tasks[id]
+	if !ok {
+		return nil, false
+	}
+	s, ok := k.(*task.Spec)
 	return s, ok
 }
 
-// All returns a snapshot of all registered task specs sorted by ID.
+// GetKinded returns any registered task kind by ID, or (nil, false) if not found.
+func (r *Registry) GetKinded(id string) (task.Kinded, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	k, ok := r.tasks[id]
+	return k, ok
+}
+
+// All returns a snapshot of all kind: Task specs, sorted by ID.
 func (r *Registry) All() []*task.Spec {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	out := make([]*task.Spec, 0, len(r.tasks))
-	for _, s := range r.tasks {
-		out = append(out, s)
+	for _, k := range r.tasks {
+		if s, ok := k.(*task.Spec); ok {
+			out = append(out, s)
+		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
 }
 
+// AllKinded returns a snapshot of every registered task kind, sorted by ID.
+func (r *Registry) AllKinded() []task.Kinded {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]task.Kinded, 0, len(r.tasks))
+	for _, k := range r.tasks {
+		out = append(out, k)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].TaskID() < out[j].TaskID() })
+	return out
+}
+
 // StartRun records a new run in sqlite and returns its ID.
 func (r *Registry) StartRun(ctx context.Context, taskID, parentRunID string) (string, error) {
-	return r.StartRunWithID(ctx, uuid.New().String(), taskID, parentRunID, "")
+	return r.StartRunWithID(ctx, uuid.New().String(), taskID, parentRunID, "", RunKindTask)
 }
 
 // StartRunWithID records a new run using a caller-supplied ID.
 // Use this when the run ID must be known before execution begins (e.g. async fire).
-func (r *Registry) StartRunWithID(ctx context.Context, id, taskID, parentRunID, triggerSource string) (string, error) {
+// kind may be "task" or "pipeline"; empty defaults to "task".
+func (r *Registry) StartRunWithID(ctx context.Context, id, taskID, parentRunID, triggerSource, kind string) (string, error) {
+	if kind == "" {
+		kind = RunKindTask
+	}
 	now := time.Now().UnixMilli()
 	err := r.db.Exec(ctx,
-		`INSERT INTO runs (id, task_id, status, started_at, parent_run_id, trigger_source) VALUES (?, ?, ?, ?, ?, ?)`,
-		id, taskID, StatusRunning, now, parentRunID, triggerSource,
+		`INSERT INTO runs (id, task_id, status, started_at, parent_run_id, trigger_source, kind) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		id, taskID, StatusRunning, now, parentRunID, triggerSource, kind,
 	)
 	if err != nil {
 		return "", fmt.Errorf("start run: %w", err)
@@ -246,7 +289,7 @@ func (r *Registry) BulkAppendLogs(ctx context.Context, entries []PendingLogEntry
 func (r *Registry) GetRun(ctx context.Context, runID string) (*Run, error) {
 	var run *Run
 	err := r.db.Query(ctx,
-		`SELECT id, task_id, status, started_at, finished_at, parent_run_id, trigger_source,
+		`SELECT id, task_id, COALESCE(kind, 'task'), status, started_at, finished_at, parent_run_id, trigger_source,
 		        COALESCE(return_value, ''), COALESCE(output_content_type, ''), COALESCE(output_content, ''),
 		        COALESCE(fail_reason, ''),
 		        COALESCE(input_storage_key, ''), COALESCE(input_size, 0), COALESCE(input_stored_at, 0),
@@ -263,7 +306,7 @@ func (r *Registry) GetRun(ctx context.Context, runID string) (*Run, error) {
 				var redactedFieldsJSON string
 				var tsStr string
 				if err := rows.Scan(
-					&run.ID, &run.TaskID, &run.Status, &startedMs, &finishedMs, &parentID,
+					&run.ID, &run.TaskID, &run.Kind, &run.Status, &startedMs, &finishedMs, &parentID,
 					&tsStr, &run.ReturnValue, &run.OutputContentType, &run.OutputContent,
 					&run.FailureReason,
 					&run.InputStorageKey, &run.InputSize, &run.InputStoredAt, &redactedFieldsJSON, &run.InputPinned,
@@ -348,7 +391,7 @@ func (r *Registry) ListByGroup(ctx context.Context, taskID, group string, limit 
 func (r *Registry) queryRuns(ctx context.Context, whereAndLimit string, args []any) ([]*Run, error) {
 	var runs []*Run
 	err := r.db.Query(ctx,
-		`SELECT id, task_id, status, started_at, finished_at, parent_run_id, trigger_source,
+		`SELECT id, task_id, COALESCE(kind, 'task'), status, started_at, finished_at, parent_run_id, trigger_source,
 		        COALESCE(return_value, ''), COALESCE(output_content_type, ''), COALESCE(output_content, ''),
 		        COALESCE(fail_reason, ''), COALESCE(run_group, '')
 		 FROM runs `+whereAndLimit,
@@ -360,7 +403,7 @@ func (r *Registry) queryRuns(ctx context.Context, whereAndLimit string, args []a
 				var finishedMs *int64
 				var parentID *string
 				var tsStr string
-				if err := rows.Scan(&run.ID, &run.TaskID, &run.Status, &startedMs, &finishedMs, &parentID, &tsStr, &run.ReturnValue, &run.OutputContentType, &run.OutputContent, &run.FailureReason, &run.Group); err != nil {
+				if err := rows.Scan(&run.ID, &run.TaskID, &run.Kind, &run.Status, &startedMs, &finishedMs, &parentID, &tsStr, &run.ReturnValue, &run.OutputContentType, &run.OutputContent, &run.FailureReason, &run.Group); err != nil {
 					return err
 				}
 				run.TriggerSource = TriggerSource(tsStr)

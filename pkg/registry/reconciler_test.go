@@ -158,10 +158,10 @@ func TestReconciler_OnRegisterCallback(t *testing.T) {
 	_, rec := newTestReconciler(t, fs)
 
 	var mu sync.Mutex
-	var called *task.Spec
-	rec.OnRegister = func(spec *task.Spec) {
+	var called task.Kinded
+	rec.OnRegister = func(k task.Kinded) {
 		mu.Lock()
-		called = spec
+		called = k
 		mu.Unlock()
 	}
 
@@ -175,8 +175,45 @@ func TestReconciler_OnRegisterCallback(t *testing.T) {
 	mu.Lock()
 	got := called
 	mu.Unlock()
-	if got == nil || got.ID != "cb-task" {
+	if got == nil || got.TaskID() != "cb-task" {
 		t.Errorf("OnRegister not called, got %v", got)
+	}
+}
+
+// TestReconcilerLoadsPipelineKind covers the reconciler boundary only: a raw
+// source event whose task.yaml declares kind: PipelineTask is loaded as a
+// *task.PipelineTask, stored in the registry under the event's TaskID, and
+// surfaced through the kind-aware OnRegister hook. Engine-side acceptance
+// (registerPipeline's stage-ref + cycle validation) is exercised in
+// pkg/trigger/registerpipeline_test.go; it can't be cross-tested here because
+// pkg/trigger imports pkg/registry, not the reverse, so wiring a real engine
+// into a package registry test would be an import cycle.
+func TestReconcilerLoadsPipelineKind(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "task.yaml"), []byte(`apiVersion: dicode/v1
+kind: PipelineTask
+name: P
+subtype: sequential
+trigger:
+  manual: true
+stages:
+  - task: buildin/template
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	reg, rec := newTestReconciler(t)
+
+	var registered task.Kinded
+	rec.OnRegister = func(k task.Kinded) { registered = k }
+
+	rec.handle(source.Event{Kind: source.EventAdded, TaskID: "demo/p", TaskDir: dir})
+
+	if registered == nil || registered.KindOf() != task.KindPipelineTask {
+		t.Fatalf("expected pipeline registration via OnRegister, got %v", registered)
+	}
+	if k, ok := reg.GetKinded("demo/p"); !ok || k.KindOf() != task.KindPipelineTask {
+		t.Fatalf("registry missing pipeline under event TaskID: %v %v", k, ok)
 	}
 }
 
@@ -207,7 +244,7 @@ func TestReconciler_RejectsUnknownTaskProvider(t *testing.T) {
 	rc.handle(source.Event{
 		Kind:    source.EventAdded,
 		TaskID:  "consumer",
-		Spec:    consumer,
+		Kinded:  consumer,
 		Source:  "test",
 		TaskDir: "",
 	})

@@ -813,7 +813,7 @@ func TestServer_Dicode_SetGroup_Persists(t *testing.T) {
 	// The server doesn't auto-create a runs row; do it ourselves so the
 	// UPDATE has a target. (In production fireAsync inserts the row before
 	// the task starts.)
-	if _, err := e.reg.StartRunWithID(context.Background(), srv.runID, "test-task", "", "manual"); err != nil {
+	if _, err := e.reg.StartRunWithID(context.Background(), srv.runID, "test-task", "", "manual", "task"); err != nil {
 		t.Fatalf("StartRunWithID: %v", err)
 	}
 
