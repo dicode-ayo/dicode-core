@@ -1197,12 +1197,12 @@ func (e *Engine) getShutdownCtx() context.Context {
 
 // FireManual triggers a task by ID with optional param overrides.
 func (e *Engine) FireManual(ctx context.Context, taskID string, params map[string]string) (string, error) {
-	spec, ok := e.registry.Get(taskID)
+	k, ok := e.registry.GetKinded(taskID)
 	if !ok {
 		return "", fmt.Errorf("task %q not found", taskID)
 	}
 	e.log.Info("manual trigger", zap.String("task", taskID))
-	return e.fireAsync(context.Background(), spec, pkgruntime.RunOptions{Params: params}, registry.TriggerManual)
+	return e.fireKinded(context.Background(), k, pkgruntime.RunOptions{Params: params}, registry.TriggerManual)
 }
 
 // FireFromTask triggers a task as a child of an in-flight run. Used by the
@@ -1212,12 +1212,12 @@ func (e *Engine) FireFromTask(ctx context.Context, taskID, parentRunID string, p
 	if parentRunID == "" {
 		return e.FireManual(ctx, taskID, params)
 	}
-	spec, ok := e.registry.Get(taskID)
+	k, ok := e.registry.GetKinded(taskID)
 	if !ok {
 		return "", fmt.Errorf("task %q not found", taskID)
 	}
 	e.log.Info("subtask trigger", zap.String("task", taskID), zap.String("parent", parentRunID))
-	return e.fireAsync(context.Background(), spec,
+	return e.fireKinded(context.Background(), k,
 		pkgruntime.RunOptions{Params: params, ParentRunID: parentRunID},
 		registry.TriggerManual)
 }
@@ -2431,6 +2431,21 @@ func (e *Engine) finalizeCancelled(spec *task.Spec, opts pkgruntime.RunOptions, 
 // fireAsync with source=TriggerPreflight; that source also skips this
 // branch so a stage task that happens to declare its own trigger.before
 // doesn't recurse.
+// fireKinded dispatches any task kind, returning the (parent) run ID: a
+// *task.PipelineTask runs via the PipelineRunner (firePipeline); a *task.Spec
+// runs via fireAsync. Trigger entrypoints (manual/cron/webhook/chain) route
+// through here so a pipeline and a plain task fire uniformly.
+func (e *Engine) fireKinded(ctx context.Context, k task.Kinded, opts pkgruntime.RunOptions, source registry.TriggerSource) (string, error) {
+	switch s := k.(type) {
+	case *task.PipelineTask:
+		return e.firePipeline(ctx, s, opts, source)
+	case *task.Spec:
+		return e.fireAsync(ctx, s, opts, source)
+	default:
+		return "", fmt.Errorf("engine: cannot fire unsupported kind %q", k.KindOf())
+	}
+}
+
 func (e *Engine) fireAsync(ctx context.Context, spec *task.Spec, opts pkgruntime.RunOptions, source registry.TriggerSource) (string, error) {
 	opts.RunID = uuid.New().String()
 
