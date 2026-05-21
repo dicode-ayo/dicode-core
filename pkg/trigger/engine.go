@@ -1504,6 +1504,29 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 		}, "chain")
 	}
 
+	// Pipeline chain subscribers: a kind: PipelineTask may chain from an
+	// upstream task's outcome. v1 fires the pipeline without injecting the
+	// upstream output into stage 0 (deferred follow-up — stages thread their own
+	// output via ${input.*}); the upstream's status still gates the fire.
+	for _, k := range e.registry.AllKinded() {
+		p, ok := k.(*task.PipelineTask)
+		if !ok || p.Trigger.Chain == nil || p.Trigger.Chain.From != completedTaskID {
+			continue
+		}
+		on := p.Trigger.Chain.ChainOn()
+		if on != "always" && on != runStatus {
+			continue
+		}
+		e.log.Info("chain trigger (pipeline)",
+			zap.String("from", completedTaskID), zap.String("to", p.ID), zap.String("on", on))
+		go func(p *task.PipelineTask) {
+			if _, err := e.firePipeline(ctx, p, pkgruntime.RunOptions{ParentRunID: runID}, registry.TriggerChain); err != nil {
+				e.log.Warn("chain-triggered pipeline failed to start",
+					zap.String("from", completedTaskID), zap.String("to", p.ID), zap.Error(err))
+			}
+		}(p)
+	}
+
 	// Config-level default on_failure_chain.
 	if runStatus == "failure" {
 		chainSpec := e.defaultsOnFailureChain

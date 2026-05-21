@@ -92,3 +92,116 @@ func TestPipelineRunnerSequential(t *testing.T) {
 		t.Errorf("pipeline return = %v, want \"hello\"", res.ReturnValue)
 	}
 }
+
+// findPipelineRun polls for a kind=pipeline run of taskID and returns it once it
+// reaches a terminal state (or fails the test on timeout).
+func findRun(t *testing.T, env *testEnv, taskID string, wantKind string, timeout time.Duration) *registry.Run {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		runs, _ := env.reg.ListRuns(context.Background(), taskID, 5)
+		for _, r := range runs {
+			if wantKind != "" && r.Kind != wantKind {
+				continue
+			}
+			if r.FinishedAt != nil {
+				return r
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("no terminal run for %q (kind=%q) within %v", taskID, wantKind, timeout)
+	return nil
+}
+
+// TestChainFiresPipeline asserts a pipeline with trigger.chain.from: <task> fires
+// when that upstream task completes successfully.
+func TestChainFiresPipeline(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires Deno subprocess")
+	}
+	env := newTestEnv(t)
+	dir := t.TempDir()
+
+	stage := writeTask(t, dir, "pstage", `export default async function main() { return "ok" }`, task.TriggerConfig{Manual: true})
+	upstream := writeTask(t, dir, "up", `export default async function main() { return "done" }`, task.TriggerConfig{Manual: true})
+	for _, s := range []*task.Spec{stage, upstream} {
+		if err := env.reg.Register(s); err != nil {
+			t.Fatal(err)
+		}
+		if err := env.engine.Register(s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pipe := &task.PipelineTask{
+		APIVersion: "dicode/v1", Kind: task.KindPipelineTask,
+		ID: "chained-pipe", Name: "CP", Subtype: "sequential", Enabled: true,
+		Trigger: task.PipelineTrigger{Chain: &task.ChainTrigger{From: "up", On: "success"}},
+		Stages:  []task.Stage{{Task: "pstage"}},
+	}
+	if err := env.reg.Register(pipe); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.engine.Register(pipe); err != nil {
+		t.Fatalf("register pipeline: %v", err)
+	}
+
+	if _, err := env.engine.FireManual(context.Background(), "up", nil); err != nil {
+		t.Fatalf("FireManual up: %v", err)
+	}
+
+	run := findRun(t, env, "chained-pipe", registry.RunKindPipeline, 30*time.Second)
+	if run.Status != registry.StatusSuccess {
+		t.Errorf("chained pipeline status = %q, want success", run.Status)
+	}
+	if run.TriggerSource != registry.TriggerChain {
+		t.Errorf("chained pipeline source = %q, want %q", run.TriggerSource, registry.TriggerChain)
+	}
+}
+
+// TestPipelineFiresChain asserts a downstream kind: Task chains from a pipeline's
+// overall outcome (pipeline-as-chain-source).
+func TestPipelineFiresChain(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires Deno subprocess")
+	}
+	env := newTestEnv(t)
+	dir := t.TempDir()
+
+	stage := writeTask(t, dir, "pstage2", `export default async function main() { return "ok" }`, task.TriggerConfig{Manual: true})
+	if err := env.reg.Register(stage); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.engine.Register(stage); err != nil {
+		t.Fatal(err)
+	}
+	pipe := &task.PipelineTask{
+		APIVersion: "dicode/v1", Kind: task.KindPipelineTask,
+		ID: "src-pipe", Name: "SP", Subtype: "sequential", Enabled: true,
+		Trigger: task.PipelineTrigger{Manual: true},
+		Stages:  []task.Stage{{Task: "pstage2"}},
+	}
+	if err := env.reg.Register(pipe); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.engine.Register(pipe); err != nil {
+		t.Fatalf("register pipeline: %v", err)
+	}
+	downstream := writeTask(t, dir, "after-pipe", `export default async function main() { return "after" }`,
+		task.TriggerConfig{Chain: &task.ChainTrigger{From: "src-pipe", On: "success"}})
+	if err := env.reg.Register(downstream); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.engine.Register(downstream); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := env.engine.FireManual(context.Background(), "src-pipe", nil); err != nil {
+		t.Fatalf("FireManual src-pipe: %v", err)
+	}
+
+	run := findRun(t, env, "after-pipe", registry.RunKindTask, 30*time.Second)
+	if run.TriggerSource != registry.TriggerChain {
+		t.Errorf("downstream source = %q, want %q (chained from pipeline outcome)", run.TriggerSource, registry.TriggerChain)
+	}
+}

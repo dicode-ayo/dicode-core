@@ -133,4 +133,7 @@ func (r *PipelineRunner) finish(status, reason string, ret interface{}) {
 	} else {
 		_ = e.registry.FinishRun(finishCtx, r.runID, status)
 	}
+	// Pipeline-as-chain-source: fire downstream subscribers off the pipeline's
+	// overall outcome (a fresh background context — finishCtx is about to expire).
+	e.FireChain(context.Background(), r.spec.ID, r.runID, status, ret, nil)
 }
