@@ -338,13 +338,14 @@ func (e *Engine) Start(ctx context.Context) error {
 	return nil
 }
 
-// Register adds or updates trigger registrations for a task. Returns a
-// non-nil error when cross-spec validation fails (currently: invalid
-// trigger.before references). On error, no triggers are registered.
-// Register registers a task with the engine. Cycle detection runs
-// against the registered before-graph as of method entry; the call is
-// serialized via registerMu so concurrent registrations cannot admit
-// a cycle through interleaved snapshots.
+// Register adds or updates trigger registrations for the given task, routing by
+// kind: a *task.PipelineTask is validated via registerPipeline; a *task.Spec
+// follows the cron/webhook/daemon registration path. The call is serialized via
+// registerMu so concurrent registrations cannot admit a cycle through
+// interleaved registry snapshots. Returns a non-nil error if validation fails
+// (e.g. invalid trigger.before refs for a Task, or pipeline ref/cycle errors);
+// on error, no triggers are modified. Callers may pass any task.Kinded;
+// *task.Spec satisfies it, so existing call sites are unaffected.
 func (e *Engine) Register(k task.Kinded) error {
 	e.registerMu.Lock()
 	defer e.registerMu.Unlock()
