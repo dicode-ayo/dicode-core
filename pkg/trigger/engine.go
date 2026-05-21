@@ -338,51 +338,58 @@ func (e *Engine) Start(ctx context.Context) error {
 	return nil
 }
 
-// Register adds or updates trigger registrations for a task spec. Returns a
+// Register adds or updates trigger registrations for a task. Returns a
 // non-nil error when cross-spec validation fails (currently: invalid
 // trigger.before references). On error, no triggers are registered.
 // Register registers a task with the engine. Cycle detection runs
 // against the registered before-graph as of method entry; the call is
 // serialized via registerMu so concurrent registrations cannot admit
 // a cycle through interleaved snapshots.
-func (e *Engine) Register(spec *task.Spec) error {
+func (e *Engine) Register(k task.Kinded) error {
 	e.registerMu.Lock()
 	defer e.registerMu.Unlock()
 
-	// Cross-spec validation must run BEFORE Unregister so that a previously
-	// valid registration isn't torn down when an updated spec fails its
-	// new-state checks. The registry-snapshot lookups are read-only.
-	if err := e.validateBeforeRefs(spec); err != nil {
-		return err
-	}
+	switch s := k.(type) {
+	case *task.PipelineTask:
+		return e.registerPipeline(s)
+	case *task.Spec:
+		// Cross-spec validation must run BEFORE Unregister so that a previously
+		// valid registration isn't torn down when an updated spec fails its
+		// new-state checks. The registry-snapshot lookups are read-only.
+		if err := e.validateBeforeRefs(s); err != nil {
+			return err
+		}
 
-	e.Unregister(spec.ID)
+		e.Unregister(s.ID)
 
-	// Disabled tasks are kept in the registry for API visibility but must not
-	// be scheduled, spawned as daemons, or registered as webhook endpoints.
-	if !spec.Enabled {
-		e.log.Info("task registered (disabled — no triggers scheduled)",
-			zap.String("task", spec.ID),
-			zap.String("runtime", string(spec.Runtime)),
+		// Disabled tasks are kept in the registry for API visibility but must not
+		// be scheduled, spawned as daemons, or registered as webhook endpoints.
+		if !s.Enabled {
+			e.log.Info("task registered (disabled — no triggers scheduled)",
+				zap.String("task", s.ID),
+				zap.String("runtime", string(s.Runtime)),
+			)
+			return nil
+		}
+
+		if s.Trigger.Cron != "" {
+			e.registerCron(s)
+		}
+		if s.Trigger.Webhook != "" {
+			e.registerWebhook(s)
+		}
+		if s.Trigger.Daemon {
+			e.registerDaemon(s)
+		}
+		e.log.Info("task registered",
+			zap.String("task", s.ID),
+			zap.String("trigger", string(triggerSource(s))),
+			zap.String("runtime", string(s.Runtime)),
 		)
 		return nil
+	default:
+		return fmt.Errorf("engine: unsupported task kind %q", k.KindOf())
 	}
-
-	if spec.Trigger.Cron != "" {
-		e.registerCron(spec)
-	}
-	if spec.Trigger.Webhook != "" {
-		e.registerWebhook(spec)
-	}
-	if spec.Trigger.Daemon {
-		e.registerDaemon(spec)
-	}
-	e.log.Info("task registered",
-		zap.String("task", spec.ID),
-		zap.String("trigger", string(triggerSource(spec))),
-		zap.String("runtime", string(spec.Runtime)),
-	)
-	return nil
 }
 
 // inputParamsRefRe matches any `${input.params.<name>}` token in a

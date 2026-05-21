@@ -99,3 +99,31 @@ func TestRegisterPipelineValidates(t *testing.T) {
 		t.Fatal("expected subtype rejection")
 	}
 }
+
+func TestEngineRegisterRoutesByKind(t *testing.T) {
+	env := newTestEnv(t)
+	stage := &task.Spec{ID: "s", Name: "S", Enabled: true,
+		Runtime: task.RuntimeDeno, Trigger: task.TriggerConfig{Manual: true}}
+	if err := env.reg.Register(stage); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.engine.Register(stage); err != nil { // *task.Spec path still works
+		t.Fatalf("Register(spec) = %v", err)
+	}
+	pipe := &task.PipelineTask{APIVersion: "dicode/v1", Kind: task.KindPipelineTask,
+		ID: "p", Name: "P", Subtype: "sequential", Enabled: true,
+		Stages: []task.Stage{{Task: "s"}}}
+	if err := env.reg.Register(pipe); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.engine.Register(pipe); err != nil {
+		t.Fatalf("Register(pipeline) = %v", err)
+	}
+	// A bad pipeline (invalid subtype) is rejected.
+	bad := &task.PipelineTask{APIVersion: "dicode/v1", Kind: task.KindPipelineTask,
+		ID: "p2", Name: "P2", Subtype: "parallel",
+		Stages: []task.Stage{{Task: "s"}}}
+	if err := env.engine.Register(bad); err == nil {
+		t.Fatal("expected subtype rejection")
+	}
+}

@@ -115,7 +115,7 @@ func (e *Engine) detectPipelineCycle(p *task.PipelineTask) string {
 // registerPipeline validates a PipelineTask against the registry. Trigger
 // scheduling (cron/webhook) and execution wiring land in a later PR; manual
 // pipelines need no scheduling here.
-// TODO(registerMu): acquire e.registerMu (like Register does) once registerPipeline gains a production caller that mutates engine state (scheduling, later PR), to match Register's cycle-detection locking.
+// NOTE: registerPipeline must be called with e.registerMu already held (Engine.Register does this).
 func (e *Engine) registerPipeline(p *task.PipelineTask) error {
 	if err := p.Validate(); err != nil {
 		return err
