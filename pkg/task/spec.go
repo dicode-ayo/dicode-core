@@ -517,6 +517,24 @@ func LoadDirWithVars(dir string, extras map[string]string) (*Spec, error) {
 			"to fire a notification task on failure — see docs.", dir)
 	}
 
+	// Probe for the removed `trigger.before:` block before decoding. The
+	// Before field was deleted in PR6 (pipelines replace preflight
+	// orchestration), so yaml.v3 would otherwise drop it silently and an
+	// operator migrating from a pre-PipelineTask task.yaml would lose their
+	// preflight pipeline without warning. Convert the task to a kind:
+	// PipelineTask whose stages render config and whose terminal stage is the
+	// daemon/body task.
+	var beforeProbe struct {
+		Trigger struct {
+			Before any `yaml:"before"`
+		} `yaml:"trigger"`
+	}
+	if err := yaml.Unmarshal(data, &beforeProbe); err == nil && beforeProbe.Trigger.Before != nil {
+		return nil, fmt.Errorf("task.yaml in %s: `trigger.before` was removed — "+
+			"convert this task to a kind: PipelineTask (render stages + a terminal "+
+			"daemon/body stage). See docs/concepts/task-format.md#pipelines.", dir)
+	}
+
 	var spec Spec
 	if err := yaml.Unmarshal(data, &spec); err != nil {
 		return nil, fmt.Errorf("parse task.yaml in %s: %w", dir, err)

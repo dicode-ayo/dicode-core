@@ -531,6 +531,34 @@ notify:
 	}
 }
 
+// TestTriggerBeforeRejected ensures the removed `trigger.before:` field is
+// rejected at load time with a migration-pointing error. The Before field is
+// gone from TriggerConfig, so yaml.v3 would otherwise drop it silently and an
+// operator migrating from a pre-PipelineTask task.yaml would lose their
+// preflight pipeline without warning (PR6).
+func TestTriggerBeforeRejected(t *testing.T) {
+	dir := t.TempDir()
+	src := strings.TrimSpace(`
+name: T
+runtime: deno
+trigger:
+  manual: true
+  before:
+    - task: buildin/template
+`) + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "task.yaml"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "task.ts"), []byte("export default async function main() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := LoadDirWithVars(dir, nil)
+	if err == nil || !strings.Contains(err.Error(), "kind: PipelineTask") {
+		t.Fatalf("expected migration error mentioning kind: PipelineTask, got %v", err)
+	}
+}
+
 // TestLoadDir_BuildinTasksParse walks every on-disk `tasks/buildin/*/task.yaml`
 // (and nested provider tasks like secret-providers/doppler/) and asserts that
 // LoadDir succeeds for each. This locks in the cleanup from #317 — a future
