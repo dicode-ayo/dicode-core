@@ -27,7 +27,7 @@ class DcTaskDetail extends LitElement {
     _aiStatus:        { state: true },
     _aiSessionId:     { state: true },
     _currentFile:     { state: true },
-    _showPrereqs:     { state: true },
+    _showStages:      { state: true },
     _expanded:        { state: true }, // Set<runID> — top-level rows with children currently expanded
     _children:        { state: true }, // Map<parentRunID, Run[]> — lazily-fetched child rows
   };
@@ -38,7 +38,7 @@ class DcTaskDetail extends LitElement {
     this._triggerOpen = false; this._triggerType = 'manual';
     this._editorOpen = false; this._editorStatus = ''; this._currentFile = null;
     this._aiOpen = false; this._aiHistory = []; this._aiStatus = ''; this._aiSessionId = '';
-    this._showPrereqs = false;
+    this._showStages = false;
     this._expanded = new Set();
     this._children = new Map();
     this._editor = null;
@@ -242,9 +242,9 @@ class DcTaskDetail extends LitElement {
   // The flat list of runs returned by /api/tasks/{id}/runs is collapsed by
   // two rules so the user sees one row per logical event:
   //
-  //   1. Hide rows whose ParentRunID is set — those are sub-runs (a prereq
-  //      run from `if_missing`, or a sub-task fired via dicode.run_task).
-  //      A toggle restores the flat view for debugging.
+  //   1. Hide rows whose ParentRunID is set — those are stage runs (a
+  //      pipeline stage, or a sub-task fired via dicode.run_task). A toggle
+  //      restores the flat view for debugging.
   //   2. Collapse consecutive top-level rows with the same non-empty Group
   //      into one row ("N runs in this session, last 3m ago"). Tasks tag
   //      themselves via dicode.set_group() — see the ai-agent buildin (#112).
@@ -254,7 +254,7 @@ class DcTaskDetail extends LitElement {
   //   { kind: 'group',  runs: [...] }      — collapse of consecutive same-group runs
   _buildRunItems() {
     const all = this._runs || [];
-    if (this._showPrereqs) return all.map(run => ({ kind: 'single', run }));
+    if (this._showStages) return all.map(run => ({ kind: 'single', run }));
 
     const top = all.filter(r => !(r.ParentRunID || r.parent_run_id));
     const items = [];
@@ -308,14 +308,20 @@ class DcTaskDetail extends LitElement {
     const expanded = this._expanded.has(r.ID);
     const kids = this._children.get(r.ID) || [];
     const showExpand = !expandedKid; // sub-rows don't recurse further by default
+    // registry.Run has no JSON tags, so the kind serializes as `Kind`
+    // ("task" | "pipeline"); badge pipeline parents so operators can tell a
+    // pipeline run (whose stage children expand below) from a plain task run.
+    const isPipeline = (r.Kind || r.kind) === 'pipeline';
     return html`
       <tr>
         <td style=${padding}>
           ${showExpand ? html`<button class="btn btn-sm secondary"
             style="padding:0 .35rem;margin-right:.35rem;font-family:monospace"
-            title="Show child runs"
+            title="Show stage runs"
             @click=${() => this._toggleExpand(r.ID)}>${expanded ? '▾' : '▸'}</button>` : ''}
           <a href="runs/${r.ID}">${r.ID.slice(0,8)}</a>
+          ${isPipeline ? html`<span class="badge" title="Pipeline run"
+            style="margin-left:.5rem;font-size:0.7rem;background:rgba(137, 220, 235, .15);color:var(--sky)">pipeline</span>` : ''}
           ${hint ? html`<span class="meta" style="margin-left:.5rem">${hint}</span>` : ''}
         </td>
         <td><span class="badge badge-${r.Status}">${r.Status}</span></td>
@@ -508,9 +514,9 @@ class DcTaskDetail extends LitElement {
         <h2 style="margin:0">Recent runs</h2>
         <label class="meta" style="margin-left:auto;cursor:pointer">
           <input type="checkbox"
-            .checked=${this._showPrereqs}
-            @change=${e => { this._showPrereqs = e.target.checked; }}>
-          Show prereq runs
+            .checked=${this._showStages}
+            @change=${e => { this._showStages = e.target.checked; }}>
+          Show stages
         </label>
       </div>
       <table>
