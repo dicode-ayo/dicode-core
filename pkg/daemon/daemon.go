@@ -234,9 +234,10 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	// per daemon lifetime.
 	var bodyFullTextualWarned sync.Map
 	rec.OnRegister = func(k task.Kinded) {
-		// The webhook-gateway and footgun checks below only apply to kind: Task.
-		// Pipelines (kind: PipelineTask) register through the engine for routing
-		// but their trigger wiring lands in a later PR; skip the Spec-only logic.
+		// The footgun checks below only apply to kind: Task; the gateway-webhook
+		// route, however, applies to BOTH kind: Task and kind: PipelineTask —
+		// see registerGatewayWebhook (GAP 1: a pipeline's webhook 404'd because
+		// only kind: Task wired the daemon-level gateway route).
 		spec, isSpec := k.(*task.Spec)
 		// Override buildin/run-inputs-cleanup's retention_seconds default to
 		// match dicode.yaml's defaults.run_inputs.retention. This must happen
@@ -267,14 +268,14 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 				zap.Error(err))
 			return
 		}
+		// Wire the daemon-level gateway webhook route. Kind-aware: handles both
+		// kind: Task and kind: PipelineTask, so a pipeline's webhook trigger is
+		// reachable over HTTP (GAP 1). Recording the path under the task ID lets
+		// OnUnregister deregister it the same way for both kinds.
+		registerGatewayWebhook(gateway, webhookPaths, &webhookMu, webhookH, k)
+
 		if !isSpec {
 			return
-		}
-		if spec.Trigger.Webhook != "" {
-			gateway.Register(spec.Trigger.Webhook, webhookH)
-			webhookMu.Lock()
-			webhookPaths[spec.ID] = spec.Trigger.Webhook
-			webhookMu.Unlock()
 		}
 		if spec.Trigger.WebhookAuth && !cfg.Server.Auth {
 			log.Warn("task declares trigger.auth:true but server.auth is disabled — any password logs in",
