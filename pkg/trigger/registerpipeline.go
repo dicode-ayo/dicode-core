@@ -135,11 +135,28 @@ func (e *Engine) detectPipelineCycle(p *task.PipelineTask) string {
 // validation failure (bad subtype, invalid overrides, cycle) still returns an
 // error so the operator sees the misconfiguration.
 //
+// A disabled pipeline is short-circuited before the registry-ref check: it
+// schedules nothing regardless of its stages, so it is never deferred (and a
+// stale deferred entry is dropped if an enabled pipeline is re-registered
+// disabled).
+//
 // NOTE: registerPipeline must be called with e.registerMu already held (Engine.Register does this),
 // which is also what guards deferredPipelines.
 func (e *Engine) registerPipeline(p *task.PipelineTask) error {
 	if err := p.Validate(); err != nil {
 		return err
+	}
+	// Short-circuit a disabled pipeline before the registry-ref check: it
+	// schedules no triggers regardless of whether its stages ever arrive, so
+	// deferring it on a missing stage is pointless churn (it would sit in
+	// deferredPipelines and re-validate on every kind: Task registration, only
+	// to hit the disabled early-return below each time). Drop any stale deferred
+	// entry too — a pipeline deferred while enabled and re-registered disabled
+	// must not linger in the set and get retried.
+	if !p.Enabled {
+		delete(e.deferredPipelines, p.ID)
+		e.log.Info("pipeline registered (disabled — no triggers scheduled)", zap.String("task", p.ID))
+		return nil
 	}
 	if err := e.validatePipelineRefs(p); err != nil {
 		if errors.Is(err, errPipelineStageMissing) {
@@ -158,12 +175,8 @@ func (e *Engine) registerPipeline(p *task.PipelineTask) error {
 	}
 	// Validated cleanly — it must not linger in the deferred set (e.g. a
 	// previously-deferred pipeline whose stages have now arrived, or a
-	// re-registration after an edit).
+	// re-registration after an edit). Disabled pipelines already returned above.
 	delete(e.deferredPipelines, p.ID)
-	if !p.Enabled {
-		e.log.Info("pipeline registered (disabled — no triggers scheduled)", zap.String("task", p.ID))
-		return nil
-	}
 	// Schedule cron/webhook triggers. Manual pipelines fire via FireManual and
 	// chain pipelines via FireChain (Task 16), so neither needs scheduling here.
 	if p.Trigger.Cron != "" {

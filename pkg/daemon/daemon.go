@@ -272,6 +272,14 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 		// kind: Task and kind: PipelineTask, so a pipeline's webhook trigger is
 		// reachable over HTTP (GAP 1). Recording the path under the task ID lets
 		// OnUnregister deregister it the same way for both kinds.
+		//
+		// Cross-layer note: for a deferred webhook pipeline (cold start, stage not
+		// yet registered) eng.Register returned nil, so we claim the gateway route
+		// here even though the engine's webhooks map is not populated until the
+		// stage lands and retryDeferredPipelines schedules it. Until then a POST
+		// reaches the gateway, misses the engine's webhooks lookup, and 404s from
+		// the engine layer (correct "not ready" behaviour); the route starts
+		// routing once the stage arrives. The route is released on OnUnregister.
 		registerGatewayWebhook(gateway, webhookPaths, &webhookMu, webhookH, k)
 
 		if !isSpec {
