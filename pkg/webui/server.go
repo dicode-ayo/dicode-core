@@ -1385,12 +1385,20 @@ func (s *Server) apiListTasks(w http.ResponseWriter, r *http.Request) {
 				LastRunStatus: lastRunStatus,
 			})
 		default:
-			// Unknown kind — surface it rather than dropping it silently.
+			// Forward-compat safety net: the registry only ever holds
+			// *task.Spec / *task.PipelineTask today, so this branch is
+			// effectively unreachable. We surface an unknown kind rather than
+			// dropping it silently. PipelineListItem is reused only because its
+			// field set matches what the list view reads; the kind it carries
+			// is whatever KindOf() returns, which the JS badge won't recognize.
+			// Give it a parity TriggerLabel ("—") so the list renders sanely
+			// instead of falling back to a misleading "manual".
 			items = append(items, PipelineListItem{
 				ID:            k.TaskID(),
 				Name:          k.TaskID(),
 				Enabled:       k.IsEnabled(),
 				Kind:          k.KindOf(),
+				TriggerLabel:  "—",
 				LastRunID:     lastRunID,
 				LastRunStatus: lastRunStatus,
 			})

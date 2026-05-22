@@ -156,6 +156,57 @@ func TestAPI_ListTasks_IncludesPipelineKind(t *testing.T) {
 	}
 }
 
+// fakeKinded is a task.Kinded implementation that is neither *task.Spec nor
+// *task.PipelineTask, used to exercise apiListTasks's forward-compat default
+// branch (effectively unreachable in production today).
+type fakeKinded struct{ id string }
+
+func (f *fakeKinded) KindOf() string         { return "FutureKind" }
+func (f *fakeKinded) TaskID() string         { return f.id }
+func (f *fakeKinded) SetTaskID(s string)     { f.id = s }
+func (f *fakeKinded) IsEnabled() bool        { return true }
+func (f *fakeKinded) SetEnabled(bool)        {}
+func (f *fakeKinded) LoadWarnings() []string { return nil }
+func (f *fakeKinded) Validate() error        { return nil }
+
+// TestAPI_ListTasks_UnknownKind verifies that an unrecognized task kind hits
+// apiListTasks's default branch and serializes with a parity "—" trigger
+// label (rather than an empty string that the JS list would mask as "manual").
+func TestAPI_ListTasks_UnknownKind(t *testing.T) {
+	srv, reg := newTestServer(t)
+	if err := reg.Register(&fakeKinded{id: "mystery"}); err != nil {
+		t.Fatalf("register fakeKinded: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body)
+	}
+
+	var items []map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&items); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var found map[string]any
+	for _, it := range items {
+		if it["id"] == "mystery" {
+			found = it
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("unknown-kind task dropped from list: %v", items)
+	}
+	if found["kind"] != "FutureKind" {
+		t.Errorf("kind = %v, want %q", found["kind"], "FutureKind")
+	}
+	if found["trigger_label"] != "—" {
+		t.Errorf("trigger_label = %v, want %q (parity placeholder)", found["trigger_label"], "—")
+	}
+}
+
 func TestAPI_GetTask(t *testing.T) {
 	srv, reg := newTestServer(t)
 	registerTask(t, reg, "my-task", `return 1`)
@@ -282,6 +333,17 @@ func TestAPI_GetTask_Pipeline(t *testing.T) {
 	}
 	if len(stages) != 2 {
 		t.Fatalf("expected 2 stages, got %d: %v", len(stages), stages)
+	}
+	// The WebUI's _renderStages reads each stage's task ID and overrides
+	// indicator. task.Stage has no JSON tags, so the fields serialize with Go
+	// field-name casing ("Task"/"Overrides"); assert that contract so a future
+	// tag change can't silently break the stages list rendering.
+	s0, ok := stages[0].(map[string]any)
+	if !ok {
+		t.Fatalf("stage[0] not an object: %v", stages[0])
+	}
+	if s0["Task"] != "stage-a" {
+		t.Errorf("stage[0].Task = %v, want %q", s0["Task"], "stage-a")
 	}
 }
 
