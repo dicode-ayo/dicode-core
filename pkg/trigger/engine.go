@@ -2467,7 +2467,9 @@ func (e *Engine) runTask(runCtx context.Context, spec *task.Spec, opts pkgruntim
 	// when the stage task ALSO happens to be a registered standalone daemon,
 	// flip that standalone daemon's global DaemonState and possibly schedule an
 	// unintended startDaemon on a mid-pipeline restart's KillRun (#344, LOW
-	// security). Suppress the hook for pipeline-stage runs.
+	// security). Suppress the hook for pipeline-stage runs. This gate depends on
+	// fireStageRaw always dispatching pipeline stages with TriggerPipelineStage
+	// (see the INVARIANT note at pipeline_runner.go:fireStageRaw's fireAsync).
 	if spec.Trigger.Daemon && source != registry.TriggerPipelineStage {
 		e.onDaemonRunFinished(spec, opts.RunID)
 	}
