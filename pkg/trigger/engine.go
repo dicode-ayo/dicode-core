@@ -73,6 +73,19 @@ type Engine struct {
 	// don't race today; this is defense-in-depth for future callers.
 	registerMu sync.Mutex
 
+	// deferredPipelines holds kind: PipelineTask registrations that were
+	// rejected because a stage task was not yet in the registry — the
+	// cold-start ordering case where the reconciler registers a pipeline
+	// before its stages (#341). Such a pipeline is kept here (keyed by ID)
+	// instead of erroring; when a kind: Task later registers successfully,
+	// Register replays the deferred set, so a pipeline self-heals once its
+	// stages exist — without needing a file change to trigger re-reconcile.
+	// Guarded by registerMu (same lock that serialises the whole Register
+	// path), so retries can't race a concurrent registration. Entries are
+	// dropped on success and on Unregister(id) so a removed/superseded
+	// pipeline is never resurrected.
+	deferredPipelines map[string]*task.PipelineTask
+
 	runCancels       sync.Map // runID → context.CancelFunc
 	runDone          sync.Map // runID (string) → chan struct{}, closed when the run reaches a terminal state
 	runTriggerSource sync.Map // runID (string) → triggerSource (registry.TriggerSource)
@@ -179,18 +192,19 @@ type PythonRuntimeAPI interface {
 // New creates a trigger Engine with a default Deno executor.
 func New(r *registry.Registry, defaultExec pkgruntime.Executor, log *zap.Logger) *Engine {
 	e := &Engine{
-		registry:      r,
-		executors:     make(map[task.Runtime]pkgruntime.Executor),
-		cron:          cron.New(),
-		log:           log,
-		cronEntries:   make(map[string]cron.EntryID),
-		webhooks:      make(map[string]string),
-		daemonRuns:    make(map[string]string),
-		daemonSpecs:   make(map[string]*task.Spec),
-		daemonStates:  newDaemonStateMap(),
-		restartGates:  newRestartGate(),
-		livePipelines: make(map[string]*PipelineRunner),
-		guards:        newChainGuards(),
+		registry:          r,
+		executors:         make(map[task.Runtime]pkgruntime.Executor),
+		cron:              cron.New(),
+		log:               log,
+		cronEntries:       make(map[string]cron.EntryID),
+		webhooks:          make(map[string]string),
+		daemonRuns:        make(map[string]string),
+		daemonSpecs:       make(map[string]*task.Spec),
+		daemonStates:      newDaemonStateMap(),
+		restartGates:      newRestartGate(),
+		livePipelines:     make(map[string]*PipelineRunner),
+		deferredPipelines: make(map[string]*task.PipelineTask),
+		guards:            newChainGuards(),
 	}
 	e.executors[task.RuntimeDeno] = defaultExec
 	return e
@@ -375,7 +389,13 @@ func (e *Engine) Register(k task.Kinded) error {
 			return err
 		}
 
-		e.Unregister(s.ID)
+		// We already hold registerMu, so use the non-locking teardown and drop
+		// any deferred-pipeline entry for this ID inline (registerMu guards it).
+		// In practice a Spec ID won't be in deferredPipelines (that map only
+		// holds pipelines), but the delete is a cheap no-op safeguard if a
+		// pipeline is ever replaced in-place by a Task of the same ID.
+		delete(e.deferredPipelines, s.ID)
+		e.unregisterTriggers(s.ID)
 
 		// Disabled tasks are kept in the registry for API visibility but must not
 		// be scheduled, spawned as daemons, or registered as webhook endpoints.
@@ -401,6 +421,12 @@ func (e *Engine) Register(k task.Kinded) error {
 			zap.String("trigger", string(triggerSource(s))),
 			zap.String("runtime", string(s.Runtime)),
 		)
+		// A kind: Task just landed — it may be the stage a deferred pipeline was
+		// waiting on (cold-start ordering, #341). Retry the deferred set so such
+		// a pipeline schedules itself without needing a file change. Runs under
+		// registerMu (held for the whole Register path), which also guards
+		// deferredPipelines.
+		e.retryDeferredPipelines()
 		return nil
 	default:
 		return fmt.Errorf("engine: unsupported task kind %q", k.KindOf())
@@ -596,8 +622,26 @@ func (e *Engine) detectBeforeCycle(spec *task.Spec) string {
 	return ""
 }
 
-// Unregister removes all trigger registrations for a task ID.
+// Unregister removes all trigger registrations for a task ID and drops any
+// deferred-pipeline entry for it, so a pipeline that was parked waiting for its
+// stages (cold-start ordering, #341) is never resurrected after removal.
+//
+// This is the public entry point used by the reconciler's OnUnregister. It must
+// NOT be called while holding registerMu; the internal Register path uses
+// unregisterTriggers instead (it already holds registerMu and drops the
+// deferred entry inline).
 func (e *Engine) Unregister(id string) {
+	e.registerMu.Lock()
+	delete(e.deferredPipelines, id)
+	e.registerMu.Unlock()
+	e.unregisterTriggers(id)
+}
+
+// unregisterTriggers removes all trigger registrations (cron, webhook, daemon)
+// for a task ID. Split out from Unregister so the Register path can reuse it
+// while already holding registerMu without deadlocking on a re-entrant lock.
+// Does NOT touch deferredPipelines (the caller handles that under registerMu).
+func (e *Engine) unregisterTriggers(id string) {
 	e.mu.Lock()
 	hadCron := false
 	if entryID, ok := e.cronEntries[id]; ok {
