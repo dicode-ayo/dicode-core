@@ -90,6 +90,123 @@ func TestAPI_ListTasks(t *testing.T) {
 	}
 }
 
+// TestAPI_ListTasks_IncludesPipelineKind verifies that GET /api/tasks
+// surfaces kind: PipelineTask entries (via registry.AllKinded()) alongside
+// kind: Task entries, and that each list item carries a "kind" indicator so
+// the WebUI can badge pipelines. The kind: Task JSON shape must stay intact.
+func TestAPI_ListTasks_IncludesPipelineKind(t *testing.T) {
+	srv, reg := newTestServer(t)
+	registerTask(t, reg, "plain-task", `return 1`)
+	if err := reg.Register(&task.PipelineTask{
+		APIVersion: "dicode/v1",
+		Kind:       task.KindPipelineTask,
+		ID:         "my-pipeline",
+		Name:       "My Pipeline",
+		Subtype:    "sequential",
+		Enabled:    true,
+		Stages:     []task.Stage{{Task: "plain-task"}},
+	}); err != nil {
+		t.Fatalf("register pipeline: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body)
+	}
+
+	var items []map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&items); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	byID := map[string]map[string]any{}
+	for _, it := range items {
+		id, _ := it["id"].(string)
+		byID[id] = it
+	}
+	if len(byID) != 2 {
+		t.Fatalf("expected 2 list items (task + pipeline), got %d: %v", len(byID), items)
+	}
+
+	plain, ok := byID["plain-task"]
+	if !ok {
+		t.Fatalf("plain-task missing from list: %v", items)
+	}
+	if plain["kind"] != task.KindTask {
+		t.Errorf("plain-task kind = %v, want %q", plain["kind"], task.KindTask)
+	}
+	// kind: Task JSON shape must remain intact (name + trigger_label present).
+	if plain["name"] != "plain-task" {
+		t.Errorf("plain-task name = %v, want plain-task", plain["name"])
+	}
+	if _, ok := plain["trigger_label"]; !ok {
+		t.Errorf("plain-task missing trigger_label: %v", plain)
+	}
+
+	pipe, ok := byID["my-pipeline"]
+	if !ok {
+		t.Fatalf("my-pipeline missing from list: %v", items)
+	}
+	if pipe["kind"] != task.KindPipelineTask {
+		t.Errorf("my-pipeline kind = %v, want %q", pipe["kind"], task.KindPipelineTask)
+	}
+	if pipe["name"] != "My Pipeline" {
+		t.Errorf("my-pipeline name = %v, want My Pipeline", pipe["name"])
+	}
+}
+
+// fakeKinded is a task.Kinded implementation that is neither *task.Spec nor
+// *task.PipelineTask, used to exercise apiListTasks's forward-compat default
+// branch (effectively unreachable in production today).
+type fakeKinded struct{ id string }
+
+func (f *fakeKinded) KindOf() string         { return "FutureKind" }
+func (f *fakeKinded) TaskID() string         { return f.id }
+func (f *fakeKinded) SetTaskID(s string)     { f.id = s }
+func (f *fakeKinded) IsEnabled() bool        { return true }
+func (f *fakeKinded) SetEnabled(bool)        {}
+func (f *fakeKinded) LoadWarnings() []string { return nil }
+func (f *fakeKinded) Validate() error        { return nil }
+
+// TestAPI_ListTasks_UnknownKind verifies that an unrecognized task kind hits
+// apiListTasks's default branch and serializes with a parity "—" trigger
+// label (rather than an empty string that the JS list would mask as "manual").
+func TestAPI_ListTasks_UnknownKind(t *testing.T) {
+	srv, reg := newTestServer(t)
+	if err := reg.Register(&fakeKinded{id: "mystery"}); err != nil {
+		t.Fatalf("register fakeKinded: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body)
+	}
+
+	var items []map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&items); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var found map[string]any
+	for _, it := range items {
+		if it["id"] == "mystery" {
+			found = it
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("unknown-kind task dropped from list: %v", items)
+	}
+	if found["kind"] != "FutureKind" {
+		t.Errorf("kind = %v, want %q", found["kind"], "FutureKind")
+	}
+	if found["trigger_label"] != "—" {
+		t.Errorf("trigger_label = %v, want %q (parity placeholder)", found["trigger_label"], "—")
+	}
+}
+
 func TestAPI_GetTask(t *testing.T) {
 	srv, reg := newTestServer(t)
 	registerTask(t, reg, "my-task", `return 1`)
@@ -177,6 +294,151 @@ func TestAPI_GetTask_NonDaemonOmitsDaemonState(t *testing.T) {
 	}
 }
 
+// TestAPI_GetTask_Pipeline verifies that GET /api/tasks/{id} resolves a
+// kind: PipelineTask, returns 200, and surfaces its kind + stages so the
+// detail view can render the pipeline shape.
+func TestAPI_GetTask_Pipeline(t *testing.T) {
+	srv, reg := newTestServer(t)
+	registerTask(t, reg, "stage-a", `return 1`)
+	registerTask(t, reg, "stage-b", `return 2`)
+	if err := reg.Register(&task.PipelineTask{
+		APIVersion: "dicode/v1",
+		Kind:       task.KindPipelineTask,
+		ID:         "my-pipeline",
+		Name:       "My Pipeline",
+		Subtype:    "sequential",
+		Enabled:    true,
+		Stages:     []task.Stage{{Task: "stage-a"}, {Task: "stage-b"}},
+	}); err != nil {
+		t.Fatalf("register pipeline: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/my-pipeline", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body)
+	}
+
+	var detail map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&detail); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if detail["kind"] != task.KindPipelineTask {
+		t.Errorf("kind = %v, want %q", detail["kind"], task.KindPipelineTask)
+	}
+	stages, ok := detail["stages"].([]any)
+	if !ok {
+		t.Fatalf("stages missing or not an array: %v", detail["stages"])
+	}
+	if len(stages) != 2 {
+		t.Fatalf("expected 2 stages, got %d: %v", len(stages), stages)
+	}
+	// The WebUI's _renderStages reads each stage's task ID and overrides
+	// indicator. task.Stage has no JSON tags, so the fields serialize with Go
+	// field-name casing ("Task"/"Overrides"); assert that contract so a future
+	// tag change can't silently break the stages list rendering.
+	s0, ok := stages[0].(map[string]any)
+	if !ok {
+		t.Fatalf("stage[0] not an object: %v", stages[0])
+	}
+	if s0["Task"] != "stage-a" {
+		t.Errorf("stage[0].Task = %v, want %q", s0["Task"], "stage-a")
+	}
+}
+
+// TestAPI_GetTask_PipelineTerminalDaemonState verifies that GET
+// /api/tasks/{id} for a pipeline whose terminal stage resolves to a daemon
+// Task surfaces that stage's daemon lifecycle phase. The default for an
+// unfired daemon is "stopped".
+func TestAPI_GetTask_PipelineTerminalDaemonState(t *testing.T) {
+	srv, reg := newTestServer(t)
+	registerTask(t, reg, "build-step", `return 1`)
+
+	// Terminal stage is a daemon task.
+	dir := t.TempDir()
+	td := filepath.Join(dir, "serve-step")
+	_ = os.MkdirAll(td, 0755)
+	_ = os.WriteFile(filepath.Join(td, "task.yaml"),
+		[]byte("name: serve-step\nruntime: docker\ntrigger:\n  daemon: true\ndocker: { image: alpine }\n"), 0644)
+	if err := reg.Register(&task.Spec{
+		ID:      "serve-step",
+		Name:    "serve-step",
+		Runtime: task.RuntimeDocker,
+		Docker:  &task.DockerConfig{Image: "alpine"},
+		Trigger: task.TriggerConfig{Daemon: true, Restart: "never"},
+		Enabled: true,
+		TaskDir: td,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Register(&task.PipelineTask{
+		APIVersion: "dicode/v1",
+		Kind:       task.KindPipelineTask,
+		ID:         "daemon-pipeline",
+		Name:       "Daemon Pipeline",
+		Subtype:    "sequential",
+		Enabled:    true,
+		Stages:     []task.Stage{{Task: "build-step"}, {Task: "serve-step"}},
+	}); err != nil {
+		t.Fatalf("register pipeline: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/daemon-pipeline", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body)
+	}
+
+	var detail map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&detail); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	got, ok := detail["daemon_state"]
+	if !ok {
+		t.Fatalf("daemon_state missing for daemon-terminal pipeline: %v", detail)
+	}
+	if got != "stopped" {
+		t.Errorf("daemon_state = %v, want \"stopped\"", got)
+	}
+}
+
+// TestAPI_GetTask_PipelineNonDaemonTerminalOmitsState verifies that a
+// pipeline whose terminal stage is NOT a daemon omits daemon_state, so the
+// UI doesn't render a misleading "stopped" badge on plain pipelines.
+func TestAPI_GetTask_PipelineNonDaemonTerminalOmitsState(t *testing.T) {
+	srv, reg := newTestServer(t)
+	registerTask(t, reg, "step-1", `return 1`)
+	registerTask(t, reg, "step-2", `return 2`)
+	if err := reg.Register(&task.PipelineTask{
+		APIVersion: "dicode/v1",
+		Kind:       task.KindPipelineTask,
+		ID:         "plain-pipeline",
+		Name:       "Plain Pipeline",
+		Subtype:    "sequential",
+		Enabled:    true,
+		Stages:     []task.Stage{{Task: "step-1"}, {Task: "step-2"}},
+	}); err != nil {
+		t.Fatalf("register pipeline: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/plain-pipeline", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body)
+	}
+
+	var detail map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&detail); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got, ok := detail["daemon_state"]; ok && got != "" {
+		t.Errorf("daemon_state should be omitted for non-daemon pipeline, got %q", got)
+	}
+}
+
 func TestAPI_GetTask_NotFound(t *testing.T) {
 	srv, _ := newTestServer(t)
 
@@ -238,6 +500,37 @@ func TestAPI_ListRuns(t *testing.T) {
 	_ = json.NewDecoder(w2.Body).Decode(&runs)
 	if len(runs) == 0 {
 		t.Error("expected at least one run")
+	}
+}
+
+// TestAPI_ListRuns_IncludesKind verifies that GET /api/tasks/{id}/runs
+// surfaces the per-run kind ("task" or "pipeline") so the WebUI can badge
+// pipeline runs. registry.Run has no JSON tags, so the field serializes as
+// the Go field name "Kind".
+func TestAPI_ListRuns_IncludesKind(t *testing.T) {
+	srv, reg := newTestServer(t)
+	ctx := context.Background()
+
+	if _, err := reg.StartRunWithID(ctx, "pipe-run-1", "my-pipeline", "", "", registry.RunKindPipeline); err != nil {
+		t.Fatalf("StartRunWithID pipeline: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/my-pipeline/runs", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body)
+	}
+
+	var runs []map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&runs); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("expected 1 run, got %d: %v", len(runs), runs)
+	}
+	if runs[0]["Kind"] != registry.RunKindPipeline {
+		t.Errorf("run Kind = %v, want %q", runs[0]["Kind"], registry.RunKindPipeline)
 	}
 }
 

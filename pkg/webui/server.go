@@ -1328,27 +1328,81 @@ func (s *Server) apiGetConfig(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, configResponse{Config: s.cfg, RelayHookBaseURL: relayHookBaseURL})
 }
 
-// TaskListItem is the shape returned by GET /api/tasks.
+// TaskListItem is the shape returned by GET /api/tasks for a kind: Task
+// entry. It embeds the spec (the WebUI relies on the flat Spec fields) and
+// additively surfaces the task `kind` so the list view can badge pipelines.
 type TaskListItem struct {
 	*task.Spec
+	// Kind is the task kind discriminator (task.KindTask). Always set so the
+	// UI can distinguish tasks from pipelines without inspecting other fields.
+	Kind          string `json:"kind"`
+	TriggerLabel  string `json:"trigger_label"`
+	LastRunID     string `json:"last_run_id,omitempty"`
+	LastRunStatus string `json:"last_run_status,omitempty"`
+}
+
+// PipelineListItem is the shape returned by GET /api/tasks for a kind:
+// PipelineTask entry. It deliberately mirrors the kind: Task fields the list
+// view reads (id/name/enabled/kind/trigger_label/last_run_*) without embedding
+// *task.Spec, since a PipelineTask is a peer of Spec, not a Spec.
+type PipelineListItem struct {
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	Enabled       bool   `json:"enabled"`
+	Kind          string `json:"kind"`
 	TriggerLabel  string `json:"trigger_label"`
 	LastRunID     string `json:"last_run_id,omitempty"`
 	LastRunStatus string `json:"last_run_status,omitempty"`
 }
 
 func (s *Server) apiListTasks(w http.ResponseWriter, r *http.Request) {
-	specs := s.registry.All()
-	items := make([]TaskListItem, len(specs))
-	for i, spec := range specs {
-		item := TaskListItem{
-			Spec:         spec,
-			TriggerLabel: triggerLabel(spec.Trigger),
+	kinded := s.registry.AllKinded()
+	items := make([]any, 0, len(kinded))
+	for _, k := range kinded {
+		// Last-run lookup is identical across kinds.
+		var lastRunID, lastRunStatus string
+		if runs, err := s.registry.ListRuns(r.Context(), k.TaskID(), 1); err == nil && len(runs) > 0 {
+			lastRunID = runs[0].ID
+			lastRunStatus = runs[0].Status
 		}
-		if runs, err := s.registry.ListRuns(r.Context(), spec.ID, 1); err == nil && len(runs) > 0 {
-			item.LastRunID = runs[0].ID
-			item.LastRunStatus = runs[0].Status
+		switch v := k.(type) {
+		case *task.Spec:
+			items = append(items, TaskListItem{
+				Spec:          v,
+				Kind:          task.KindTask,
+				TriggerLabel:  triggerLabel(v.Trigger),
+				LastRunID:     lastRunID,
+				LastRunStatus: lastRunStatus,
+			})
+		case *task.PipelineTask:
+			items = append(items, PipelineListItem{
+				ID:            v.ID,
+				Name:          v.Name,
+				Enabled:       v.Enabled,
+				Kind:          task.KindPipelineTask,
+				TriggerLabel:  pipelineTriggerLabel(v),
+				LastRunID:     lastRunID,
+				LastRunStatus: lastRunStatus,
+			})
+		default:
+			// Forward-compat safety net: the registry only ever holds
+			// *task.Spec / *task.PipelineTask today, so this branch is
+			// effectively unreachable. We surface an unknown kind rather than
+			// dropping it silently. PipelineListItem is reused only because its
+			// field set matches what the list view reads; the kind it carries
+			// is whatever KindOf() returns, which the JS badge won't recognize.
+			// Give it a parity TriggerLabel ("—") so the list renders sanely
+			// instead of falling back to a misleading "manual".
+			items = append(items, PipelineListItem{
+				ID:            k.TaskID(),
+				Name:          k.TaskID(),
+				Enabled:       k.IsEnabled(),
+				Kind:          k.KindOf(),
+				TriggerLabel:  "—",
+				LastRunID:     lastRunID,
+				LastRunStatus: lastRunStatus,
+			})
 		}
-		items[i] = item
 	}
 	jsonOK(w, items)
 }
@@ -1371,10 +1425,29 @@ type TaskDetail struct {
 	DaemonState string `json:"daemon_state,omitempty"`
 }
 
+// PipelineDetail is the shape returned by GET /api/tasks/{id} for a kind:
+// PipelineTask. It embeds the pipeline spec (kind, name, stages, …) and adds
+// a trigger label plus — when the terminal stage resolves to a daemon Task —
+// that stage's daemon lifecycle phase, mirroring the kind: Task detail's
+// daemon_state contract.
+type PipelineDetail struct {
+	*task.PipelineTask
+	TriggerLabel string `json:"trigger_label"`
+	DaemonState  string `json:"daemon_state,omitempty"`
+}
+
 func (s *Server) apiGetTask(w http.ResponseWriter, r *http.Request) {
 	id := taskIDParam(r)
 	spec, ok := s.registry.Get(id)
 	if !ok {
+		// Not a kind: Task — it may be a kind: PipelineTask. A PipelineTask is
+		// a peer of Spec (not a Spec), so it needs its own detail shape.
+		if k, kok := s.registry.GetKinded(id); kok {
+			if p, pok := k.(*task.PipelineTask); pok {
+				s.writePipelineDetail(w, p)
+				return
+			}
+		}
 		jsonErr(w, "task not found", http.StatusNotFound)
 		return
 	}
@@ -1419,6 +1492,26 @@ func (s *Server) apiGetTask(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	jsonOK(w, detail)
+}
+
+// writePipelineDetail renders the GET /api/tasks/{id} response for a kind:
+// PipelineTask. It surfaces the pipeline's stages and, when the terminal
+// stage resolves to a daemon Task, that stage's daemon lifecycle phase — a
+// pipeline is daemon-shaped iff its terminal stage is a daemon, so operators
+// see the same lifecycle badge they'd see on the bare daemon task.
+func (s *Server) writePipelineDetail(w http.ResponseWriter, p *task.PipelineTask) {
+	detail := PipelineDetail{
+		PipelineTask: p,
+		TriggerLabel: pipelineTriggerLabel(p),
+	}
+	if len(p.Stages) > 0 {
+		terminalID := p.Stages[len(p.Stages)-1].Task
+		// Only a kind: Task with trigger.daemon: true has a daemon lifecycle.
+		if termSpec, ok := s.registry.Get(terminalID); ok && termSpec.Trigger.Daemon {
+			detail.DaemonState = string(s.engine.DaemonState(terminalID))
+		}
+	}
 	jsonOK(w, detail)
 }
 
@@ -2440,6 +2533,26 @@ func triggerLabel(tc task.TriggerConfig) string {
 		return "daemon (restart: " + restart + ")"
 	}
 	return "—"
+}
+
+// pipelineTriggerLabel renders a human-readable trigger summary for a
+// kind: PipelineTask. A pipeline's PipelineTrigger has no Daemon shape — a
+// pipeline is daemon-shaped iff its terminal stage is a daemon Task, which
+// the detail view surfaces separately via DaemonState.
+func pipelineTriggerLabel(p *task.PipelineTask) string {
+	tc := p.Trigger
+	switch {
+	case tc.Cron != "":
+		return "cron: " + tc.Cron
+	case tc.Webhook != "":
+		return "webhook: " + tc.Webhook
+	case tc.Chain != nil:
+		return "chain: " + tc.Chain.From
+	case tc.Manual:
+		return "manual"
+	default:
+		return "—"
+	}
 }
 
 func fmtTime(t time.Time) string {

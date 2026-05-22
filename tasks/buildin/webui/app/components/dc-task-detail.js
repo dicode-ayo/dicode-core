@@ -27,7 +27,7 @@ class DcTaskDetail extends LitElement {
     _aiStatus:        { state: true },
     _aiSessionId:     { state: true },
     _currentFile:     { state: true },
-    _showPrereqs:     { state: true },
+    _showStages:      { state: true },
     _expanded:        { state: true }, // Set<runID> — top-level rows with children currently expanded
     _children:        { state: true }, // Map<parentRunID, Run[]> — lazily-fetched child rows
   };
@@ -38,7 +38,7 @@ class DcTaskDetail extends LitElement {
     this._triggerOpen = false; this._triggerType = 'manual';
     this._editorOpen = false; this._editorStatus = ''; this._currentFile = null;
     this._aiOpen = false; this._aiHistory = []; this._aiStatus = ''; this._aiSessionId = '';
-    this._showPrereqs = false;
+    this._showStages = false;
     this._expanded = new Set();
     this._children = new Map();
     this._editor = null;
@@ -242,9 +242,9 @@ class DcTaskDetail extends LitElement {
   // The flat list of runs returned by /api/tasks/{id}/runs is collapsed by
   // two rules so the user sees one row per logical event:
   //
-  //   1. Hide rows whose ParentRunID is set — those are sub-runs (a prereq
-  //      run from `if_missing`, or a sub-task fired via dicode.run_task).
-  //      A toggle restores the flat view for debugging.
+  //   1. Hide rows whose ParentRunID is set — those are stage runs (a
+  //      pipeline stage, or a sub-task fired via dicode.run_task). A toggle
+  //      restores the flat view for debugging.
   //   2. Collapse consecutive top-level rows with the same non-empty Group
   //      into one row ("N runs in this session, last 3m ago"). Tasks tag
   //      themselves via dicode.set_group() — see the ai-agent buildin (#112).
@@ -254,7 +254,7 @@ class DcTaskDetail extends LitElement {
   //   { kind: 'group',  runs: [...] }      — collapse of consecutive same-group runs
   _buildRunItems() {
     const all = this._runs || [];
-    if (this._showPrereqs) return all.map(run => ({ kind: 'single', run }));
+    if (this._showStages) return all.map(run => ({ kind: 'single', run }));
 
     const top = all.filter(r => !(r.ParentRunID || r.parent_run_id));
     const items = [];
@@ -308,14 +308,20 @@ class DcTaskDetail extends LitElement {
     const expanded = this._expanded.has(r.ID);
     const kids = this._children.get(r.ID) || [];
     const showExpand = !expandedKid; // sub-rows don't recurse further by default
+    // registry.Run has no JSON tags, so the kind serializes as `Kind`
+    // ("task" | "pipeline"); badge pipeline parents so operators can tell a
+    // pipeline run (whose stage children expand below) from a plain task run.
+    const isPipeline = (r.Kind || r.kind) === 'pipeline';
     return html`
       <tr>
         <td style=${padding}>
           ${showExpand ? html`<button class="btn btn-sm secondary"
             style="padding:0 .35rem;margin-right:.35rem;font-family:monospace"
-            title="Show child runs"
+            title="Show stage runs"
             @click=${() => this._toggleExpand(r.ID)}>${expanded ? '▾' : '▸'}</button>` : ''}
           <a href="runs/${r.ID}">${r.ID.slice(0,8)}</a>
+          ${isPipeline ? html`<span class="badge" title="Pipeline run"
+            style="margin-left:.5rem;font-size:0.7rem;background:rgba(137, 220, 235, .15);color:var(--sky)">pipeline</span>` : ''}
           ${hint ? html`<span class="meta" style="margin-left:.5rem">${hint}</span>` : ''}
         </td>
         <td><span class="badge badge-${r.Status}">${r.Status}</span></td>
@@ -387,6 +393,40 @@ class DcTaskDetail extends LitElement {
       >${s.text}</span>`;
   }
 
+  // Renders the ordered stages of a kind: PipelineTask. The PipelineDetail
+  // payload embeds *task.PipelineTask, whose Stage struct has NO JSON tags, so
+  // each element serializes with Go field-name casing (`Task`, `Overrides`);
+  // we read both casings defensively. Stage task IDs are operator-controlled
+  // and therefore rendered via lit `html` text bindings (auto-escaped), never
+  // unsafeHTML. The terminal-stage daemon_state badge already renders in the
+  // trigger card above, so it isn't duplicated here.
+  _renderStages(task) {
+    const stages = task.stages || task.Stages || [];
+    if (!stages.length) {
+      return html`
+        <div class="card" style="margin-bottom:var(--space-md)">
+          <h2 style="margin:0 0 0.5rem">Stages</h2>
+          <p class="meta" style="margin:0">This pipeline has no stages.</p>
+        </div>`;
+    }
+    return html`
+      <div class="card" style="margin-bottom:var(--space-md)">
+        <h2 style="margin:0 0 0.75rem">Stages</h2>
+        <ol style="margin:0;padding-left:1.5rem;display:flex;flex-direction:column;gap:0.4rem">
+          ${stages.map(s => {
+            const id = s.Task || s.task || '(unknown)';
+            const hasOverrides = !!(s.Overrides || s.overrides);
+            return html`
+              <li>
+                <a href="tasks/${encodeURIComponent(id)}" style="font-family:monospace">${id}</a>
+                ${hasOverrides ? html`<span class="badge" title="This stage applies overrides"
+                  style="margin-left:.5rem;font-size:0.7rem;background:rgba(249, 226, 175, .15);color:var(--yellow)">overrides</span>` : ''}
+              </li>`;
+          })}
+        </ol>
+      </div>`;
+  }
+
   _triggerFields() {
     const t = this._task?.trigger || this._task?.Trigger || {};
     const type = this._triggerType;
@@ -431,12 +471,20 @@ class DcTaskDetail extends LitElement {
     const task = this._task;
     const scriptFile = task.script_file || 'task.ts';
     const testFile   = task.test_file   || scriptFile.replace(/\.(ts|js)$/, '.test.$1');
+    // A kind: PipelineTask has only a task.yaml — no script/test file — so the
+    // code editor (Edit-code button + Monaco tab) is meaningless and would
+    // 404 on save/load. Gate it on the presence of a script_file (kind: Task
+    // detail always sets one; PipelineDetail never does) and double-guard on
+    // the task kind so a future PipelineDetail field can't accidentally re-open
+    // the affordance.
+    const isPipeline = task.kind === 'PipelineTask';
+    const hasEditor  = !isPipeline && !!task.script_file;
 
     return html`
       <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:var(--space-sm)">
         <h1 style="margin:0">${task.name}</h1>
         <button class="btn" @click=${() => this._run()}>&#9654; Run now</button>
-        <button class="btn" style="background:var(--muted)" @click=${() => this._openEditor()}>&#9998; Edit code</button>
+        ${hasEditor ? html`<button class="btn" style="background:var(--muted)" @click=${() => this._openEditor()}>&#9998; Edit code</button>` : ''}
       </div>
       ${task.description ? html`<div class="task-desc">${unsafeHTML(marked.parse(task.description))}</div>` : ''}
 
@@ -446,6 +494,8 @@ class DcTaskDetail extends LitElement {
         <button class="btn btn-sm" style="background:var(--muted);margin-left:auto"
           @click=${() => { this._triggerOpen = !this._triggerOpen; }}>&#9998; Edit trigger</button>
       </div>
+
+      ${isPipeline ? this._renderStages(task) : ''}
 
       ${this._triggerOpen ? html`
         <div class="card" style="margin-bottom:var(--space-md)">
@@ -462,7 +512,7 @@ class DcTaskDetail extends LitElement {
           </div>
         </div>` : ''}
 
-      ${this._editorOpen ? html`
+      ${this._editorOpen && hasEditor ? html`
         <div class="card" style="margin-top:1.5rem;padding:0.75rem">
           <div style="display:flex;align-items:center;gap:var(--space-sm);margin-bottom:var(--space-sm);flex-wrap:wrap">
             <button class="btn btn-sm" @click=${() => this._loadEditorFile(scriptFile)}>${scriptFile}</button>
@@ -508,9 +558,9 @@ class DcTaskDetail extends LitElement {
         <h2 style="margin:0">Recent runs</h2>
         <label class="meta" style="margin-left:auto;cursor:pointer">
           <input type="checkbox"
-            .checked=${this._showPrereqs}
-            @change=${e => { this._showPrereqs = e.target.checked; }}>
-          Show prereq runs
+            .checked=${this._showStages}
+            @change=${e => { this._showStages = e.target.checked; }}>
+          Show stages
         </label>
       </div>
       <table>
