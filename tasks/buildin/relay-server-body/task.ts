@@ -1,15 +1,16 @@
-// buildin/relay-server — daemon task that runs dicode-relay in-process
+// buildin/relay-server-body — daemon task that runs dicode-relay in-process
 // under the daemon's Deno runtime.
 //
-// Config rendering is owned by the daemon's preflight pipeline:
+// This is the terminal stage of the buildin/relay-server PipelineTask.
+// Config rendering is owned by the pipeline's earlier stages:
 //
 //   stage 1: buildin/template renders relay.yaml from Doppler-fed env
 //   stage 2: buildin/write-local persists it to ${DATADIR}/relay/relay.yaml
 //
-// (See task.yaml's trigger.before for the wiring.) This task body just
-// bootstraps the broker signing key and hands off to startServer with
-// the pre-rendered path. OAuth secrets no longer flow through this
-// task's env — they're scoped to stage 1 of the pipeline.
+// (See ../relay-server/task.yaml for the pipeline wiring.) This task body
+// just bootstraps the broker signing key and hands off to startServer with
+// the pre-rendered path. OAuth secrets no longer flow through this task's
+// env — they're scoped to stage 1 of the pipeline.
 
 import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -62,9 +63,9 @@ export default async function main(_: DicodeSdk): Promise<void> {
     );
   }
 
-  // The preflight pipeline (buildin/template → buildin/write-local)
-  // has already rendered relay.yaml and written it to disk before
-  // this main() runs.
+  // The pipeline's render stages (buildin/template → buildin/write-local)
+  // have already rendered relay.yaml and written it to disk before this
+  // main() runs.
   const configPath = join(dataDir, "relay", "relay.yaml");
 
   ensureSigningKey();

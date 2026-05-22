@@ -1,0 +1,35 @@
+apiVersion: dicode/v1
+kind: Task
+name: "Relay Server (daemon body)"
+description: |
+  The relay daemon body: bootstraps the broker signing key and runs
+  dicode-relay in-process under the daemon's Deno runtime.
+
+  This is the terminal stage of the buildin/relay-server PipelineTask.
+  The pipeline's earlier stages (buildin/template → buildin/write-local)
+  render relay.yaml from Doppler-fed env and persist it to
+  ${DATADIR}/relay/relay.yaml before this daemon starts. This body just
+  reads that pre-rendered config — OAuth secrets and the status password
+  are scoped to the renderer stage, never this task's env.
+
+  Standalone-runnable: because this is a plain kind: Task with
+  trigger.daemon, an operator can run it directly (it will read whatever
+  relay.yaml is already on disk). The orchestration concern — re-render
+  config from fresh secrets before each start — lives in the PipelineTask,
+  not here.
+
+runtime: deno
+
+trigger:
+  daemon: true
+  restart: always
+
+permissions:
+  net:
+    - "*"
+  fs:
+    - path: "${DATADIR}/relay"
+      permission: rw
+  env:
+    - DICODE_DATADIR
+    - DICODE_VERSION

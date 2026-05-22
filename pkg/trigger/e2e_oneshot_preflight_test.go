@@ -46,41 +46,8 @@ import (
 	"github.com/dicode/dicode/pkg/task"
 )
 
-// buildinWriteLocalDir returns the absolute path to the on-disk
-// `tasks/buildin/write-local/` task. Anchored the same way as
-// buildinTemplateDir — see that helper's comment for the walk-up
-// rationale.
-func buildinWriteLocalDir(t *testing.T) string {
-	t.Helper()
-	_, thisFile, _, ok := goruntime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller(0) failed; cannot anchor buildin/write-local path")
-	}
-	pkgDir := filepath.Dir(thisFile)               // .../pkg/trigger
-	repoRoot := filepath.Dir(filepath.Dir(pkgDir)) // .../
-	dir := filepath.Join(repoRoot, "tasks", "buildin", "write-local")
-	if _, err := os.Stat(filepath.Join(dir, "task.yaml")); err != nil {
-		t.Fatalf("buildin/write-local task.yaml not found at %s: %v", dir, err)
-	}
-	return dir
-}
-
-// loadBuildinWriteLocalAs mirrors loadBuildinTemplateAs but for the
-// write-local task. ID/Name rebinding keeps the registry from
-// collision when multiple subtests register their own instance.
-func loadBuildinWriteLocalAs(t *testing.T, id string) *task.Spec {
-	t.Helper()
-	spec, err := task.LoadDir(buildinWriteLocalDir(t))
-	if err != nil {
-		t.Fatalf("LoadDir buildin/write-local: %v", err)
-	}
-	spec.ID = id
-	spec.Name = id
-	if err := spec.Validate(); err != nil {
-		t.Fatalf("buildin/write-local re-validate after rebind: %v", err)
-	}
-	return spec
-}
+// buildinWriteLocalDir + loadBuildinWriteLocalAs moved to
+// e2e_relay_pipeline_test.go (this file is removed in PR6).
 
 // TestE2E_OneShotPreflightPipeline_RealDeno wires a manual one-shot
 // task with a 2-stage preflight pipeline through REAL Deno. Pre-#312
