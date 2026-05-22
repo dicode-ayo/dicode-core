@@ -6,21 +6,23 @@ without any operator-facing config file containing the tunnel's
 credentials in cleartext.
 
 The goal is to demonstrate the full stack of task-format primitives that
-landed across PRs [#296], [#297], [#298], [#299], [#300], [#302], [#303],
-[#309], [#310], and [#311]:
+landed across PRs [#296], [#297], [#298], [#299], [#302], [#303],
+[#309], [#310], and the `kind: PipelineTask` epic:
 
+- A `kind: PipelineTask` orchestrator whose **terminal stage** is a
+  Docker daemon task — the render stages run, then the container starts.
 - A Docker daemon task with the modern hardening fields (`network_mode`,
   `extra_hosts`, `cap_drop`, `security_opt`, `read_only`, `user`).
 - `${DATADIR}` expansion in `docker.volumes`, so the daemon mounts its
   config from a path under the daemon data dir without hard-coding
   `/home/<user>/...`.
-- A `trigger.before:` **sequential output-piping pipeline** that renders
-  the daemon's config and persists it to disk before the container
-  starts — and re-fires every preflight on every restart so rotated
-  secrets land in the rendered file.
-- Per-edge `overrides:` on those preflight entries — the daemon pins the
+- A **sequential output-piping pipeline** that renders the daemon's
+  config and persists it to disk before the container starts — and
+  re-fires the descendant stages on every re-fire so rotated secrets
+  land in the rendered file.
+- Per-stage `overrides:` on those pipeline stages — the pipeline pins the
   template body, the output path, and the Doppler-fed env block
-  per-edge, leaving the prereq task's own (manual) fires alone.
+  per-stage, leaving each stage task's own (manual) fires alone.
 - The `buildin/template` library task with `run_result.enabled: false`,
   so the rendered config (which embeds the tunnel UUID and the hostname)
   never touches `runs.return_value` on disk.
@@ -42,8 +44,8 @@ up rotated values without editing the task.yaml.
 - The `cloudflared` CLI installed locally for the one-time login + tunnel
   create step.
 - A Doppler project with a token allowlisted for the relevant secrets
-  (the daemon will read them at preflight time, not at config-load
-  time).
+  (the pipeline's render stages read them at dispatch time, not at
+  config-load time).
 
 ---
 
@@ -98,7 +100,7 @@ base64 -w0 ~/.dicode/cloudflared/cert.pem        | doppler secrets set CF_CERT_B
 base64 -w0 ~/.dicode/cloudflared/credentials.json | doppler secrets set CF_CREDS_B64
 ```
 
-A second preflight task can then `base64 -d` them into place at boot.
+A second pipeline stage can then `base64 -d` them into place at boot.
 We'll show both shapes below; pick one.
 
 > The Doppler provider task (`buildin/secret-providers/doppler`, see
@@ -112,90 +114,118 @@ We'll show both shapes below; pick one.
 
 ---
 
-## The task.yaml
+## The pipeline + body
 
 Everything below lives in one folder, say `tasks/cloudflare-tunnel/`.
 The folder contains:
 
-- `task.yaml`             — the daemon, declares its preflight pipeline
-- `stage-creds/task.yaml` — the cert/credentials stager (optional;
+- `task.yaml`               — the `kind: PipelineTask` orchestrator
+- `cloudflared-body/task.yaml` — the `kind: Task` Docker daemon body
+  (the pipeline's terminal stage)
+- `stage-creds/task.yaml`   — the cert/credentials stager (optional;
   only needed if you chose the Doppler-encoded-file path)
 
-The renderer + writer pair are declared **inline** in the daemon's
-`trigger.before:` pipeline via `buildin/template` + `buildin/write-local`
-— no wrapper task required.
+The renderer + writer stages reference the `buildin/template` +
+`buildin/write-local` library tasks directly — no wrapper task required.
+The Docker daemon is its own `kind: Task` so it stays standalone-runnable;
+the pipeline is the orchestration concern.
 
-The daemon's `task.yaml`:
+The orchestrator's `task.yaml`:
 
 ```yaml
 apiVersion: dicode/v1
-kind: Task
+kind: PipelineTask
 name: Cloudflare Tunnel
 description: |
   Public ingress for api.example.com via a hardened cloudflared
   container. Config is rendered into ${DATADIR}/cloudflared/config.yml
-  by an inline buildin/template + buildin/write-local pipeline before
-  each (re)start; credentials are mounted read-only from the same
-  directory.
-runtime: docker
+  by a buildin/template + buildin/write-local pipeline before the
+  terminal Docker daemon stage starts; credentials are mounted
+  read-only from the same directory.
+subtype: sequential
 
-trigger:
-  daemon: true
-  restart: always
-  before:
-    # Stage 1: render the tunnel config string from Doppler-fed env.
-    # The template body is pinned per-edge so the buildin/template task
-    # itself stays a generic library helper. Returns the rendered
-    # string via in-memory delivery; nothing lands in runs.return_value
-    # (buildin/template sets run_result.enabled: false).
-    - task: buildin/template
-      overrides:
-        timeout: 30s
-        params:
-          template: |
+stages:
+  # Stage 1: render the tunnel config string from Doppler-fed env.
+  # The template body is pinned per-stage so the buildin/template task
+  # itself stays a generic library helper. Returns the rendered
+  # string via in-memory delivery; nothing lands in runs.return_value
+  # (buildin/template sets run_result.enabled: false).
+  - task: buildin/template
+    overrides:
+      timeout: 30s
+      params:
+        - name: template
+          default: |
             tunnel: ${CF_TUNNEL_ID}
             credentials-file: /etc/cloudflared/credentials.json
             ingress:
               - hostname: ${CF_TUNNEL_HOSTNAME}
                 service: ${CF_TUNNEL_SERVICE}
               - service: http_status:404
-        env:
-          - name: CF_TUNNEL_ID
-            from: task:doppler
-          - name: CF_TUNNEL_HOSTNAME
-            from: task:doppler
-          - name: CF_TUNNEL_SERVICE
-            from: task:doppler
+      env:
+        - name: CF_TUNNEL_ID
+          from: task:doppler
+        - name: CF_TUNNEL_HOSTNAME
+          from: task:doppler
+        - name: CF_TUNNEL_SERVICE
+          from: task:doppler
 
-    # Stage 2: persist stage 1's rendered string to disk. The
-    # ${input.output} token resolves to the upstream stage's return
-    # value at dispatch time. fs:rw is declared inline per-edge so the
-    # write-local task itself ships with no implicit fs roots.
-    - task: buildin/write-local
-      overrides:
-        timeout: 30s
-        params:
-          content: "${input.output}"
-          path: "${DATADIR}/cloudflared/config.yml"
-          mode: "0600"
-        fs:
-          - path: "${DATADIR}/cloudflared"
-            permission: rw
+  # Stage 2: persist stage 1's rendered string to disk. The
+  # ${input.output} token resolves to the upstream stage's return
+  # value at dispatch time. fs:rw is declared per-stage so the
+  # write-local task itself ships with no implicit fs roots.
+  - task: buildin/write-local
+    overrides:
+      timeout: 30s
+      params:
+        - name: content
+          default: "${input.output}"
+        - name: path
+          default: "${DATADIR}/cloudflared/config.yml"
+        - name: mode
+          default: "0600"
+      fs:
+        - path: "${DATADIR}/cloudflared"
+          permission: rw
 
-    # Stage 3 (optional): stages cert.pem / credentials.json into
-    # ${DATADIR}/cloudflared/ from base64-encoded Doppler entries. Omit
-    # this entry entirely if you copied the files manually in the
-    # one-time setup. Stays as a separate task because it produces two
-    # output files (not one rendered string), so the template+write-local
-    # pair doesn't apply.
-    - task: stage-creds
-      overrides:
-        timeout: 30s
-        env:
-          - name: CF_CERT_B64
-            from: task:doppler
-          - name: CF_CREDS_B64
-            from: task:doppler
+  # Stage 3 (optional): stages cert.pem / credentials.json into
+  # ${DATADIR}/cloudflared/ from base64-encoded Doppler entries. Omit
+  # this stage entirely if you copied the files manually in the
+  # one-time setup. Stays as a separate task because it produces two
+  # output files (not one rendered string), so the template+write-local
+  # pair doesn't apply.
+  - task: stage-creds
+    overrides:
+      timeout: 30s
+      env:
+        - name: CF_CERT_B64
+          from: task:doppler
+        - name: CF_CREDS_B64
+          from: task:doppler
+
+  # Terminal stage: the hardened cloudflared Docker daemon. Because it's
+  # a trigger.daemon: true Task, the pipeline stays 'running' for the
+  # daemon's lifetime and adopts the daemon run's terminal status.
+  - task: cloudflared-body
+```
+
+The terminal stage references `cloudflared-body`, the Docker daemon body
+declared in its own `task.yaml`:
+
+```yaml
+apiVersion: dicode/v1
+kind: Task
+name: Cloudflare Tunnel (daemon body)
+description: |
+  Hardened cloudflared container. Mounts the rendered config + credentials
+  read-only from ${DATADIR}/cloudflared. The render stages of the
+  Cloudflare Tunnel PipelineTask produce those files before this body
+  starts.
+runtime: docker
+
+trigger:
+  daemon: true
+  restart: always
 
 docker:
   image: cloudflare/cloudflared:latest
@@ -223,21 +253,21 @@ docker:
     - "${DATADIR}/cloudflared:/etc/cloudflared:ro"
 ```
 
-The renderer + writer pair are declared inline in the daemon's
-`before:` pipeline above — no wrapper task is required. Stage 1
-(`buildin/template`) renders the config string from Doppler-fed env.
-Stage 2 (`buildin/write-local`) receives the rendered string via
-`${input.output}` interpolation and persists it to
+The renderer + writer stages reference the library tasks directly — no
+wrapper task is required. Stage 1 (`buildin/template`) renders the config
+string from Doppler-fed env. Stage 2 (`buildin/write-local`) receives the
+rendered string via `${input.output}` interpolation and persists it to
 `${DATADIR}/cloudflared/config.yml` at mode `0600`.
 
-`trigger.before:` runs entries **sequentially in declaration order** —
-each stage's return value is piped to the next via `${input.output}`,
-and any failure short-circuits the rest of the pipeline and leaves the
-daemon in `prereq_failed`. The cloudflared example's three stages
-(`buildin/template` → `buildin/write-local` → `stage-creds`) run in
-order; if any fails, the daemon doesn't start. The engine re-fires
-every stage on every preflight attempt, so rotated Doppler secrets land
-in the rendered file on the next restart with no manual intervention.
+A `kind: PipelineTask` runs its stages **sequentially in declaration
+order** — each stage's return value is piped to the next via
+`${input.output}`, and any failure short-circuits the rest of the pipeline
+and leaves the pipeline in `failure`. The cloudflared example's four
+stages (`buildin/template` → `buildin/write-local` → `stage-creds` →
+`cloudflared-body`) run in order; if any render stage fails, the daemon
+doesn't start. Re-firing any non-terminal stage replays the descendants
+and restarts the terminal daemon, so rotated Doppler secrets land in the
+rendered file with no manual intervention.
 
 Both `buildin/template` and `buildin/write-local` set
 `run_inputs.enabled: false` and `run_result.enabled: false`, so the
@@ -302,11 +332,13 @@ export default async function main({ env, log }: DicodeSdk) {
 
 The chain of events on `dicode daemon` startup:
 
-1. The trigger engine registers `cloudflare-tunnel` as a daemon. Because
-   its `trigger.before` is non-empty, the engine does not start the
-   container yet — it queues a preflight pass.
-2. Stage 1 (`buildin/template`) fires. The per-edge `overrides:` are
-   merged onto a deep copy of the prereq's spec **at dispatch time
+1. The trigger engine registers `cloudflare-tunnel` as a `kind:
+   PipelineTask`. On fire (cron/manual/webhook, or on startup for a
+   daemon-terminal pipeline), the runner executes its stages in order;
+   the terminal Docker daemon stage doesn't start until the render
+   stages succeed.
+2. Stage 1 (`buildin/template`) fires. The per-stage `overrides:` are
+   merged onto a deep copy of the stage task's spec **at dispatch time
    only**; the library task's spec on disk is unaffected. The engine
    resolves `from: task:doppler` by spawning the Doppler secret
    provider once and caching the result for the rest of the pipeline
@@ -319,32 +351,31 @@ The chain of events on `dicode daemon` startup:
    `${input.output}` in `overrides.params.content` is replaced with
    stage 1's return value at dispatch time. The task writes the
    rendered string to `${DATADIR}/cloudflared/config.yml` at mode
-   `0600` (the per-edge `fs:rw` override scopes the write to that
+   `0600` (the per-stage `fs:rw` override scopes the write to that
    directory) and returns the resolved path.
 4. Stage 3 (`stage-creds`, optional) fires. Decodes the base64-encoded
    cert + credentials from Doppler into the same directory at mode
    `0600`.
-5. Once all stages return `status=success`, the engine starts the
-   `cloudflared` container with the hardening flags applied, the
-   credentials directory mounted read-only, and the rendered
-   `config.yml` already in place.
+5. Once the render stages return `status=success`, the terminal stage
+   (`cloudflared-body`) starts the `cloudflared` container with the
+   hardening flags applied, the credentials directory mounted
+   read-only, and the rendered `config.yml` already in place. The
+   pipeline run stays `running` for the daemon's lifetime.
 
-If any stage fails, the pipeline short-circuits — later stages don't
-run, the daemon is left in `prereq_failed`, and the failure shows up
-in the run history with that stage's own error message. The engine
+If any render stage fails, the pipeline short-circuits — later stages
+don't run, the pipeline run is marked `failure` with that stage's own
+error message, and the terminal Docker daemon never starts. The engine
 does **not** start a half-configured container.
 
 ---
 
 ## Secret rotation
 
-Rotating a Doppler secret followed by a manual restart of the daemon
-re-fires the entire `before:` pipeline against the fresh secret values
-(the engine re-fires every preflight on every restart — there's no
-"already-satisfied" short-circuit). For unattended rotation, re-run any
-intermediate stage of the pipeline by hand — the engine re-fires
-downstream stages and restarts every daemon that lists the touched
-task in its `before:`:
+Re-firing the pipeline against the fresh secret values re-runs all of
+its stages — there's no "already-satisfied" short-circuit. For
+unattended rotation, re-run any intermediate stage of the pipeline by
+hand — the engine replays the downstream stages and restarts the
+terminal Docker daemon:
 
 ```bash
 # rotate the Cloudflare service URL
@@ -354,19 +385,19 @@ doppler secrets set CF_TUNNEL_SERVICE="http://host.docker.internal:8081"
 Then, from the WebUI's task list, manually re-fire `buildin/template`
 (its `trigger.manual: true` makes it eligible for the Run button). The
 engine's mid-pipeline-rerun propagation re-fires `buildin/write-local`
-with the fresh rendered string and restarts the daemon to pick up the
-rewritten `config.yml` — no CLI subcommand or container restart
+with the fresh rendered string and restarts the terminal daemon to pick
+up the rewritten `config.yml` — no CLI subcommand or container restart
 required. See
-[Task Format → `trigger.before`](../concepts/task-format.md#daemon-preflight-via-triggerbefore)
+[Task Format → PipelineTask](../concepts/task-format.md#pipelines)
 for the exact semantics.
 
-Restarts are coalesced (at most one in flight per daemon) so a flurry
+Restarts are coalesced (at most one in flight per pipeline) so a flurry
 of rotations produces one re-render and one restart, not a thrash
 loop. The same propagation rule applies to `stage-creds` if you went
 the encoded-files route — re-running it triggers a daemon restart
 without touching the rendered config.
 
-For unattended rotation, add a cron prereq somewhere upstream of the
+For unattended rotation, add a cron stage somewhere upstream of the
 pipeline and chain it: see [Chain triggers](../concepts/task-chaining.md).
 
 ---
@@ -408,8 +439,8 @@ docker exec <container-id> cat /etc/cloudflared/config.yml
 You should see the same `tunnel:` / `ingress:` block with the Doppler
 values substituted.
 
-The dicode WebUI's run detail page for the daemon shows the preflight
-chain as child runs of the daemon's main run, so a failed preflight
+The dicode WebUI's run detail page for the pipeline shows each stage as
+a child run of the pipeline's parent run, so a failed render stage
 surfaces in the same place as any other task failure.
 
 ---
@@ -418,22 +449,21 @@ surfaces in the same place as any other task failure.
 
 | PR | What you'd lose without it |
 | --- | --- |
-| [#296] | The hardening fields (`network_mode`, `cap_drop`, `security_opt`, `read_only`, `user`, `extra_hosts`) on the daemon's `docker:` block. |
+| [#296] | The hardening fields (`network_mode`, `cap_drop`, `security_opt`, `read_only`, `user`, `extra_hosts`) on the daemon body's `docker:` block. |
 | [#297] | `${DATADIR}` and `${TASK_DIR}` expansion in `docker.volumes`. Without it you'd hard-code an absolute host path. |
 | [#298] | The `buildin/template` library task. Without it stage 1 would have to be a hand-rolled task that reimplements `${VAR}` substitution and the no-persist contract every time. |
-| [#299] | `trigger.chain.params` carrying operator-defined keys downstream alongside `input.output`. Not used directly in the daemon above (the daemon uses `before:`, not `chain:`) but the same merging semantics power the per-edge `overrides.params` field. |
-| [#300] | `trigger.before:` itself — daemon preflight via task-id list, with the restart-on-prereq-rerun semantics. |
+| [#299] | `trigger.chain.params` carrying operator-defined keys downstream alongside `input.output`. Not used directly here (the pipeline uses stages, not `chain:`) but the same merging semantics power the per-stage `overrides.params` field. |
 | [#302] | `run_result.enabled: false` on `buildin/template` and `buildin/write-local`. Without it the rendered tunnel config (with the UUID baked in) would persist to `runs.return_value`. The template body is a param, suppressed separately by `run_inputs.enabled: false`. |
-| [#303] | Per-edge `overrides:` on each `before[]` entry and on `chain:` edges. Without it `buildin/template` and `buildin/write-local` would have to be either daemon-specific (one copy per daemon) or pre-overridden via the global `dicode tasks override` path. |
+| [#303] | Per-stage `overrides:` on each pipeline stage and on `chain:` edges. Without it `buildin/template` and `buildin/write-local` would have to be either pipeline-specific (one copy per pipeline) or pre-overridden via the global `dicode tasks override` path. |
 | [#309] | The `buildin/write-local` library task. Without it stage 2 would have to be a hand-rolled Deno task that calls `Deno.writeTextFile`. |
-| [#310] | `${input.output}` interpolation in `before[i].overrides.params`. Without it stage 2 couldn't reach stage 1's rendered string declaratively — you'd need a wrapper task that invokes both via `dicode.run_task`. |
-| [#311] | Sequential semantics on `trigger.before:`. Without it stages would run in parallel and `${input.output}` propagation wouldn't exist; the wrapper task would still be required. |
+| [#310] | `${input.output}` interpolation in `stages[i].overrides.params`. Without it stage 2 couldn't reach stage 1's rendered string declaratively — you'd need a wrapper task that invokes both via `dicode.run_task`. |
+| `kind: PipelineTask` | Sequential stage orchestration with a daemon-terminal stage. Without it the render→write→daemon flow would need the removed `trigger.before:` bolt-on, and the daemon couldn't be a clean standalone `kind: Task`. |
 
 ---
 
 ## Related docs
 
-- [Task Format → `trigger.before`](../concepts/task-format.md#daemon-preflight-via-triggerbefore)
+- [Task Format → PipelineTask](../concepts/task-format.md#pipelines)
 - [Task Format → `trigger.chain.params` & `chain.overrides`](../concepts/task-format.md#chain-params-and-per-edge-overrides)
 - [Task Format → `run_result.enabled`](../concepts/task-format.md#suppressing-return-value-persistence)
 - [Task Format → Docker hardening fields](../concepts/task-format.md#container-fields-reference)
@@ -444,9 +474,7 @@ surfaces in the same place as any other task failure.
 [#297]: https://github.com/dicode-ayo/dicode-core/pull/297
 [#298]: https://github.com/dicode-ayo/dicode-core/pull/298
 [#299]: https://github.com/dicode-ayo/dicode-core/pull/299
-[#300]: https://github.com/dicode-ayo/dicode-core/pull/300
 [#302]: https://github.com/dicode-ayo/dicode-core/pull/302
 [#303]: https://github.com/dicode-ayo/dicode-core/pull/303
 [#309]: https://github.com/dicode-ayo/dicode-core/pull/309
 [#310]: https://github.com/dicode-ayo/dicode-core/pull/310
-[#311]: https://github.com/dicode-ayo/dicode-core/pull/311
