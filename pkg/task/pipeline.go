@@ -42,8 +42,9 @@ type PipelineTrigger struct {
 	Chain         *ChainTrigger `yaml:"chain,omitempty"`
 }
 
-// Stage is one entry in a PipelineTask.Stages list. Structurally identical to
-// BeforeEntry, but stage overrides additionally permit a Trigger patch.
+// Stage is one entry in a PipelineTask.Stages list: a task ID plus optional
+// per-stage overrides. Stage overrides permit a Trigger patch (a stage can
+// override its task's trigger), unlike the chain-edge override allowlist.
 type Stage struct {
 	Task      string     `yaml:"task"`
 	Overrides *Overrides `yaml:"overrides,omitempty"`

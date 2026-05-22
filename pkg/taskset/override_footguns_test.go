@@ -79,16 +79,13 @@ spec:
 	}
 }
 
-// ── Footgun #2: copySpec doesn't deep-clone Trigger.Before / OnFailureChain /
-// RunInputs (survey §5.3 / §4) ───────────────────────────────────────────────
+// ── Footgun #2: copySpec doesn't deep-clone OnFailureChain / RunInputs
+// (survey §5.3 / §4) ──────────────────────────────────────────────────────────
 //
-// `out := *s` copies the slice header for s.Trigger.Before — the backing
-// array is still shared. Per-firing dispatch sites that ever start writing
-// to merged.Trigger.Before would silently corrupt the registry's canonical
-// spec. The pointer fields (OnFailureChain, RunInputs) are also currently
-// aliased.
-//
-// After the fix, copySpec must deep-clone these.
+// `out := *s` aliases the pointer fields (OnFailureChain, RunInputs); a
+// per-firing mutation through the copy would silently corrupt the registry's
+// canonical spec. copySpec must deep-clone these. (The Trigger.Before clone
+// assertion was dropped in PR6 along with trigger.before.)
 func TestFootgun_CopySpecDeepClonesNestedStructs(t *testing.T) {
 	enabled := true
 	orig := &task.Spec{
@@ -96,28 +93,12 @@ func TestFootgun_CopySpecDeepClonesNestedStructs(t *testing.T) {
 		Runtime: task.RuntimeDeno,
 		Trigger: task.TriggerConfig{
 			Daemon: true,
-			Before: []task.BeforeEntry{
-				{Task: "render", Overrides: &task.Overrides{Name: "orig-name"}},
-			},
 		},
 		OnFailureChain: &task.OnFailureChainSpec{Task: "auto-fix"},
 		RunInputs:      &task.RunInputsTaskOverride{Enabled: &enabled},
 	}
 
 	cp := copySpec(orig)
-
-	// Trigger.Before — must not share backing array.
-	if len(cp.Trigger.Before) != 1 {
-		t.Fatalf("Trigger.Before len: got %d, want 1", len(cp.Trigger.Before))
-	}
-	cp.Trigger.Before[0].Task = "mutated"
-	cp.Trigger.Before[0].Overrides = &task.Overrides{Name: "mutated-overrides"}
-	if orig.Trigger.Before[0].Task != "render" {
-		t.Errorf("Trigger.Before shallow copy: orig mutated to %q", orig.Trigger.Before[0].Task)
-	}
-	if orig.Trigger.Before[0].Overrides == nil || orig.Trigger.Before[0].Overrides.Name != "orig-name" {
-		t.Errorf("Trigger.Before[0].Overrides shallow copy: orig mutated to %+v", orig.Trigger.Before[0].Overrides)
-	}
 
 	// OnFailureChain pointer — must be cloned.
 	cp.OnFailureChain.Task = "different-fixer"

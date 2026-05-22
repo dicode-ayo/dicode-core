@@ -191,9 +191,8 @@ func validatePerEdgeOverrides(site string, o *Overrides) error {
 		// Static validation of `${input.…}` references on per-edge
 		// override defaults — same gate as trigger.chain.params /
 		// on_failure_chain.params. Catches malformed shapes at config
-		// load. The chain-edge variant runs against every Overrides
-		// site; the before-edge variant additionally rejects ANY
-		// `${input.…}` on before[0] (handled in validateBeforeRefs).
+		// load. (PipelineTask stage[0] additionally rejects ANY
+		// `${input.…}` ref — see PipelineTask.Validate.)
 		if err := ValidateInputRefs(fmt.Sprintf("%s.params.%s", site, p.Name), p.Default); err != nil {
 			return err
 		}

@@ -255,9 +255,9 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 			}
 		}
 		if err := eng.Register(k); err != nil {
-			// Cross-spec validation (trigger.before pointing at an unknown
-			// task or at another daemon, or pipeline ref/cycle errors) is the
-			// only error Register currently returns. The reconciler will retry
+			// Cross-spec validation (pipeline stage refs pointing at an unknown
+			// task, or pipeline ref/cycle errors) is the only error Register
+			// currently returns. The reconciler will retry
 			// on the next reload, so a transient registry mismatch heals itself;
 			// a persistent config error surfaces here every cycle. Log at WARN —
 			// matches how the reconciler/engine surface other config-validation

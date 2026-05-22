@@ -275,21 +275,6 @@ func copySpec(s *task.Spec) *task.Spec {
 		chain := *s.Trigger.Chain
 		out.Trigger.Chain = &chain
 	}
-	// Trigger.Before is a slice of BeforeEntry; each BeforeEntry carries a
-	// *task.Overrides pointer that per-firing dispatch may mutate. Without
-	// this deep-clone two concurrent firings would alias the same Overrides
-	// instance (survey §5.3).
-	if s.Trigger.Before != nil {
-		before := make([]task.BeforeEntry, len(s.Trigger.Before))
-		for i, be := range s.Trigger.Before {
-			before[i] = be
-			if be.Overrides != nil {
-				o := *be.Overrides
-				before[i].Overrides = &o
-			}
-		}
-		out.Trigger.Before = before
-	}
 	if s.Docker != nil {
 		docker := *s.Docker
 		out.Docker = &docker

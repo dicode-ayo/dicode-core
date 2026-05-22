@@ -106,75 +106,6 @@ type ChainTrigger struct {
 	Overrides *Overrides     `yaml:"overrides,omitempty"` // per-firing override applied to the downstream spec
 }
 
-// BeforeEntry is one entry in a daemon task's trigger.before preflight list.
-// It can be written in two YAML forms:
-//
-//	# legacy bare-ID form (single string):
-//	before:
-//	  - render-config
-//	  - fetch-creds
-//
-//	# mapping form with per-edge overrides:
-//	before:
-//	  - task: render-config
-//	    overrides:
-//	      timeout: 5m
-//	      env:
-//	        - name: MODE
-//	          value: preflight
-//
-// Both forms can be mixed within the same list. The bare-ID form is
-// equivalent to `{task: <id>}` with no overrides — preserved verbatim for
-// backwards compat with task.yamls written before the per-edge override
-// extension. The trigger engine applies the per-edge Overrides to a deep
-// copy of the prereq task's spec at dispatch time; the prereq's
-// standalone (manual / cron / chain) fires are unaffected.
-type BeforeEntry struct {
-	Task      string     `yaml:"task"`
-	Overrides *Overrides `yaml:"overrides,omitempty"`
-}
-
-// UnmarshalYAML accepts either a scalar (legacy bare-ID string) or a mapping
-// (task + overrides). Anything else is rejected with an explicit error to
-// surface typos rather than silently dropping the entry.
-func (b *BeforeEntry) UnmarshalYAML(value *yaml.Node) error {
-	switch value.Kind {
-	case yaml.ScalarNode:
-		b.Task = value.Value
-		b.Overrides = nil
-		return nil
-	case yaml.MappingNode:
-		// Decode into an anonymous alias to avoid recursing into this
-		// UnmarshalYAML.
-		type entryShape struct {
-			Task      string     `yaml:"task"`
-			Overrides *Overrides `yaml:"overrides,omitempty"`
-		}
-		var e entryShape
-		if err := value.Decode(&e); err != nil {
-			return fmt.Errorf("trigger.before entry: %w", err)
-		}
-		b.Task = e.Task
-		b.Overrides = e.Overrides
-		return nil
-	default:
-		return fmt.Errorf("trigger.before entry: expected string or mapping, got %v", value.Tag)
-	}
-}
-
-// MarshalYAML emits the bare-ID form when there are no overrides, and the
-// mapping form otherwise. This keeps round-tripping clean for the legacy
-// case (config files don't bloat after a load+rewrite cycle).
-func (b BeforeEntry) MarshalYAML() (interface{}, error) {
-	if b.Overrides == nil {
-		return b.Task, nil
-	}
-	return struct {
-		Task      string     `yaml:"task"`
-		Overrides *Overrides `yaml:"overrides,omitempty"`
-	}{Task: b.Task, Overrides: b.Overrides}, nil
-}
-
 // TriggerConfig defines how a task is triggered.
 // Exactly one of Cron, Webhook, Manual, Chain, or Daemon should be set.
 type TriggerConfig struct {
@@ -186,24 +117,6 @@ type TriggerConfig struct {
 	Chain         *ChainTrigger `yaml:"chain,omitempty"`          // fire when another task completes
 	Daemon        bool          `yaml:"daemon,omitempty"`         // start on app start, restart on exit
 	Restart       string        `yaml:"restart,omitempty"`        // daemon only: "always"(default)|"on-failure"|"never"
-	// Before lists task IDs that must run to success before this task's main
-	// body runs. Valid on any trigger type (daemon, manual, cron, webhook,
-	// chain): for daemons the preflight gates the daemon body's start; for
-	// one-shots it gates the firing's run dispatch. Cross-spec validation
-	// (in pkg/trigger.Engine.Register) rejects references to unknown tasks
-	// and to other daemons — only one-shot tasks can be preflights — and
-	// rejects cycles in the before-graph. When a referenced task re-runs
-	// successfully after a daemon is up, the engine restarts the daemon so
-	// it picks up newly-rendered config (one-shots don't restart; each new
-	// firing simply re-runs the pipeline).
-	//
-	// Each entry can be either a bare task-ID string (legacy form) or a
-	// mapping with `task:` plus optional `overrides:` — see BeforeEntry's
-	// UnmarshalYAML for the dual-form decoder. Per-edge overrides are
-	// applied to a deep copy of the prereq spec at dispatch time, so a
-	// daemon can pin a custom timeout / env / params for the preflight run
-	// without affecting the prereq's standalone (manual / cron) fires.
-	Before []BeforeEntry `yaml:"before,omitempty"`
 }
 
 // Param defines a user-configurable input for a task.
@@ -703,28 +616,6 @@ func (s *Spec) validate() error {
 			// ok
 		default:
 			return fmt.Errorf("trigger.restart must be always, on-failure, or never")
-		}
-	}
-	// trigger.before: declarative preflight pipeline. Valid on any trigger
-	// type — daemon, manual, cron, webhook, or chain — since issue #312.
-	// Only validated locally here; cross-spec checks (does the referenced
-	// task exist? is it a one-shot? does the before-graph contain a cycle?)
-	// live in pkg/trigger.Engine.Register because they need the full
-	// registry snapshot.
-	if len(s.Trigger.Before) > 0 {
-		for i, entry := range s.Trigger.Before {
-			if entry.Task == "" {
-				return fmt.Errorf("trigger.before: empty task ID")
-			}
-			if entry.Task == s.ID {
-				return fmt.Errorf("trigger.before: cannot reference self (task ID %q)", entry.Task)
-			}
-			if entry.Overrides != nil {
-				site := fmt.Sprintf("trigger.before[%d].overrides (task %q)", i, entry.Task)
-				if err := validatePerEdgeOverrides(site, entry.Overrides); err != nil {
-					return err
-				}
-			}
 		}
 	}
 	if s.Trigger.Chain != nil {

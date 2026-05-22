@@ -131,19 +131,16 @@ func expandSpec(spec *Spec, vars map[string]string) {
 		}
 	}
 
-	// trigger.before[].overrides and trigger.chain.overrides: per-edge
-	// patches applied to the prereq / downstream spec at dispatch time.
-	// They must walk the same {Params[].Default, Fs[].Path,
-	// Env[].{From,Secret,Value}} surface as their top-level twins —
-	// otherwise tokens like ${DATADIR} embedded in an override reach the
-	// runtime literally and the dispatch fails (e.g. Deno's --allow-write
-	// sandbox sees the unexpanded "${DATADIR}/relay" path and rejects).
-	// envFallback policy mirrors the top-level fields exactly: identifier-
-	// like fields (Fs[].Path, Env[].From, Env[].Secret) get true, fields
-	// readable from task code (Params[].Default, Env[].Value) get false.
-	for i := range spec.Trigger.Before {
-		expandOverrides(spec.Trigger.Before[i].Overrides, vars)
-	}
+	// trigger.chain.overrides: per-edge patch applied to the downstream spec
+	// at dispatch time. It must walk the same {Params[].Default, Fs[].Path,
+	// Env[].{From,Secret,Value}} surface as its top-level twins — otherwise
+	// tokens like ${DATADIR} embedded in an override reach the runtime
+	// literally and the dispatch fails (e.g. Deno's --allow-write sandbox
+	// sees the unexpanded "${DATADIR}/relay" path and rejects). envFallback
+	// policy mirrors the top-level fields exactly: identifier-like fields
+	// (Fs[].Path, Env[].From, Env[].Secret) get true, fields readable from
+	// task code (Params[].Default, Env[].Value) get false. (PipelineTask
+	// stage overrides are expanded separately in expandPipeline.)
 	if spec.Trigger.Chain != nil {
 		expandOverrides(spec.Trigger.Chain.Overrides, vars)
 	}
