@@ -160,6 +160,296 @@ func TestRegisterPipelineValidates(t *testing.T) {
 	}
 }
 
+// TestColdStartDeferredPipeline is the regression test for GAP 2 (#341): on a
+// fresh daemon the reconciler can register a pipeline BEFORE its stage tasks.
+// registerPipeline → validatePipelineRefs then fails ("stage task not found"),
+// and nothing retried — so the pipeline's cron/webhook never got scheduled
+// until its file changed. The fix records such pipelines in deferredPipelines
+// and retries them when a kind: Task is later registered successfully.
+func TestColdStartDeferredPipeline(t *testing.T) {
+	env := newTestEnv(t)
+
+	// 1. Register the pipeline FIRST — its stage "s" is not yet registered.
+	pipe := &task.PipelineTask{
+		APIVersion: "dicode/v1", Kind: task.KindPipelineTask,
+		ID: "p", Name: "P", Subtype: "sequential", Enabled: true,
+		Trigger: task.PipelineTrigger{Cron: "0 0 * * *"},
+		Stages:  []task.Stage{{Task: "s"}},
+	}
+	if err := env.reg.Register(pipe); err != nil {
+		t.Fatalf("registry.Register(pipe): %v", err)
+	}
+	// Register must NOT return a fatal error — the pipeline is deferred.
+	if err := env.engine.Register(pipe); err != nil {
+		t.Fatalf("Register(pipe) before stage should defer, not error: %v", err)
+	}
+	// It must NOT be scheduled yet (no cron entry).
+	env.engine.mu.Lock()
+	_, scheduled := env.engine.cronEntries["p"]
+	env.engine.mu.Unlock()
+	if scheduled {
+		t.Fatal("pipeline should not be scheduled before its stage exists")
+	}
+	// It must be recorded as deferred.
+	env.engine.registerMu.Lock()
+	_, deferred := env.engine.deferredPipelines["p"]
+	env.engine.registerMu.Unlock()
+	if !deferred {
+		t.Fatal("pipeline with missing stage should be recorded as deferred")
+	}
+
+	// 2. Now register the stage task — WITHOUT re-submitting the pipeline.
+	stage := &task.Spec{ID: "s", Name: "S", Enabled: true,
+		Runtime: task.RuntimeDeno, Trigger: task.TriggerConfig{Manual: true}}
+	if err := env.reg.Register(stage); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.engine.Register(stage); err != nil {
+		t.Fatalf("Register(stage): %v", err)
+	}
+
+	// 3. The pipeline must now be scheduled (cron entry appears) and dropped
+	// from the deferred set.
+	env.engine.mu.Lock()
+	_, scheduled = env.engine.cronEntries["p"]
+	env.engine.mu.Unlock()
+	if !scheduled {
+		t.Fatal("pipeline was not scheduled after its stage registered (deferred-retry failed)")
+	}
+	env.engine.registerMu.Lock()
+	_, stillDeferred := env.engine.deferredPipelines["p"]
+	env.engine.registerMu.Unlock()
+	if stillDeferred {
+		t.Fatal("pipeline should be removed from deferred set once it schedules")
+	}
+}
+
+// TestColdStartDeferredPipeline_Webhook is the webhook analogue of
+// TestColdStartDeferredPipeline and locks in the cross-layer behaviour the
+// daemon comment describes: a webhook-triggered pipeline registered before its
+// stage is deferred and does NOT claim its path in the engine's webhooks map.
+// At the daemon layer the gateway route is still claimed at defer time, so a
+// POST reaches the engine but misses this lookup and 404s — the engine
+// webhooks[path] entry only appears once the stage lands and the deferred
+// pipeline is retried/scheduled. We assert against the engine routing table
+// directly (no full daemon+gateway harness needed: the engine map is the
+// authority for whether the path actually routes).
+func TestColdStartDeferredPipeline_Webhook(t *testing.T) {
+	env := newTestEnv(t)
+
+	const path = "/hooks/pipe"
+
+	// 1. Register the webhook pipeline FIRST — its stage "s" is absent.
+	pipe := &task.PipelineTask{
+		APIVersion: "dicode/v1", Kind: task.KindPipelineTask,
+		ID: "wp", Name: "WP", Subtype: "sequential", Enabled: true,
+		Trigger: task.PipelineTrigger{Webhook: path},
+		Stages:  []task.Stage{{Task: "s"}},
+	}
+	if err := env.reg.Register(pipe); err != nil {
+		t.Fatalf("registry.Register(pipe): %v", err)
+	}
+	if err := env.engine.Register(pipe); err != nil {
+		t.Fatalf("Register(pipe) before stage should defer, not error: %v", err)
+	}
+	// The webhook path must NOT be routable yet (engine webhooks map has no
+	// entry — a POST would 404 from the engine layer).
+	env.engine.mu.Lock()
+	_, routed := env.engine.webhooks[path]
+	env.engine.mu.Unlock()
+	if routed {
+		t.Fatal("webhook path must not be in the engine routing table while the pipeline is deferred")
+	}
+	// And it must be recorded as deferred.
+	env.engine.registerMu.Lock()
+	_, deferred := env.engine.deferredPipelines["wp"]
+	env.engine.registerMu.Unlock()
+	if !deferred {
+		t.Fatal("webhook pipeline with missing stage should be recorded as deferred")
+	}
+
+	// 2. Register the stage — WITHOUT re-submitting the pipeline.
+	stage := &task.Spec{ID: "s", Name: "S", Enabled: true,
+		Runtime: task.RuntimeDeno, Trigger: task.TriggerConfig{Manual: true}}
+	if err := env.reg.Register(stage); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.engine.Register(stage); err != nil {
+		t.Fatalf("Register(stage): %v", err)
+	}
+
+	// 3. The webhook path is now claimed by the pipeline (routable) and the
+	// pipeline is dropped from the deferred set.
+	env.engine.mu.Lock()
+	got := env.engine.webhooks[path]
+	env.engine.mu.Unlock()
+	if got != "wp" {
+		t.Fatalf("webhook path not routed to pipeline after stage registered: got %q, want wp", got)
+	}
+	env.engine.registerMu.Lock()
+	_, stillDeferred := env.engine.deferredPipelines["wp"]
+	env.engine.registerMu.Unlock()
+	if stillDeferred {
+		t.Fatal("webhook pipeline should be removed from the deferred set once it schedules")
+	}
+}
+
+// TestColdStartDeferredPipeline_DisabledNotDeferred confirms a disabled pipeline
+// with a missing stage is NOT parked in deferredPipelines — it schedules nothing
+// regardless of its stages, so deferring/retrying it would be pointless churn.
+// It also confirms that a pipeline deferred while enabled is dropped from the
+// deferred set when re-registered disabled.
+func TestColdStartDeferredPipeline_DisabledNotDeferred(t *testing.T) {
+	env := newTestEnv(t)
+
+	// A disabled pipeline whose stage is absent must register cleanly without
+	// being deferred.
+	disabled := &task.PipelineTask{
+		APIVersion: "dicode/v1", Kind: task.KindPipelineTask,
+		ID: "p", Name: "P", Subtype: "sequential", Enabled: false,
+		Trigger: task.PipelineTrigger{Cron: "0 0 * * *"},
+		Stages:  []task.Stage{{Task: "s"}},
+	}
+	if err := env.reg.Register(disabled); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.engine.Register(disabled); err != nil {
+		t.Fatalf("Register(disabled pipeline) should succeed, got: %v", err)
+	}
+	env.engine.registerMu.Lock()
+	_, deferred := env.engine.deferredPipelines["p"]
+	env.engine.registerMu.Unlock()
+	if deferred {
+		t.Fatal("disabled pipeline with a missing stage must not be deferred")
+	}
+	env.engine.mu.Lock()
+	_, scheduled := env.engine.cronEntries["p"]
+	env.engine.mu.Unlock()
+	if scheduled {
+		t.Fatal("disabled pipeline must not schedule a cron entry")
+	}
+
+	// Now flip the same pipeline enabled (still missing its stage) so it becomes
+	// deferred, then re-register it disabled — it must be dropped from the set.
+	enabled := &task.PipelineTask{
+		APIVersion: "dicode/v1", Kind: task.KindPipelineTask,
+		ID: "p", Name: "P", Subtype: "sequential", Enabled: true,
+		Trigger: task.PipelineTrigger{Cron: "0 0 * * *"},
+		Stages:  []task.Stage{{Task: "s"}},
+	}
+	if err := env.engine.Register(enabled); err != nil {
+		t.Fatalf("Register(enabled pipeline) should defer, not error: %v", err)
+	}
+	env.engine.registerMu.Lock()
+	_, deferred = env.engine.deferredPipelines["p"]
+	env.engine.registerMu.Unlock()
+	if !deferred {
+		t.Fatal("enabled pipeline with a missing stage should be deferred")
+	}
+
+	if err := env.engine.Register(disabled); err != nil {
+		t.Fatalf("re-Register(disabled pipeline) should succeed, got: %v", err)
+	}
+	env.engine.registerMu.Lock()
+	_, deferred = env.engine.deferredPipelines["p"]
+	env.engine.registerMu.Unlock()
+	if deferred {
+		t.Fatal("pipeline re-registered disabled must be dropped from the deferred set")
+	}
+}
+
+// TestColdStartDeferredPipeline_GenuinelyMissingStaysUnscheduled confirms a
+// pipeline whose stage is never registered stays unscheduled forever — no
+// crash, no infinite retry, just a permanently-deferred entry that never
+// schedules. Registering an UNRELATED stage triggers a retry attempt that must
+// fail cleanly and leave the pipeline deferred.
+func TestColdStartDeferredPipeline_GenuinelyMissingStaysUnscheduled(t *testing.T) {
+	env := newTestEnv(t)
+
+	pipe := &task.PipelineTask{
+		APIVersion: "dicode/v1", Kind: task.KindPipelineTask,
+		ID: "p", Name: "P", Subtype: "sequential", Enabled: true,
+		Trigger: task.PipelineTrigger{Cron: "0 0 * * *"},
+		Stages:  []task.Stage{{Task: "never-exists"}},
+	}
+	if err := env.reg.Register(pipe); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.engine.Register(pipe); err != nil {
+		t.Fatalf("Register(pipe) should defer, not error: %v", err)
+	}
+
+	// Register an unrelated stage — triggers a retry that must fail cleanly.
+	other := &task.Spec{ID: "other", Name: "Other", Enabled: true,
+		Runtime: task.RuntimeDeno, Trigger: task.TriggerConfig{Manual: true}}
+	if err := env.reg.Register(other); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.engine.Register(other); err != nil {
+		t.Fatalf("Register(other): %v", err)
+	}
+
+	env.engine.mu.Lock()
+	_, scheduled := env.engine.cronEntries["p"]
+	env.engine.mu.Unlock()
+	if scheduled {
+		t.Fatal("pipeline with a genuinely-missing stage must never schedule")
+	}
+	env.engine.registerMu.Lock()
+	_, deferred := env.engine.deferredPipelines["p"]
+	env.engine.registerMu.Unlock()
+	if !deferred {
+		t.Fatal("genuinely-missing pipeline should remain deferred")
+	}
+}
+
+// TestColdStartDeferredPipeline_DroppedOnUnregister confirms a deferred
+// pipeline that is later unregistered is removed from the deferred set, so a
+// subsequent stage registration does not resurrect a stale pipeline.
+func TestColdStartDeferredPipeline_DroppedOnUnregister(t *testing.T) {
+	env := newTestEnv(t)
+
+	pipe := &task.PipelineTask{
+		APIVersion: "dicode/v1", Kind: task.KindPipelineTask,
+		ID: "p", Name: "P", Subtype: "sequential", Enabled: true,
+		Trigger: task.PipelineTrigger{Cron: "0 0 * * *"},
+		Stages:  []task.Stage{{Task: "s"}},
+	}
+	if err := env.reg.Register(pipe); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.engine.Register(pipe); err != nil {
+		t.Fatalf("Register(pipe): %v", err)
+	}
+
+	// Unregister the deferred pipeline (e.g. its file was removed).
+	env.reg.Unregister("p")
+	env.engine.Unregister("p")
+
+	env.engine.registerMu.Lock()
+	_, deferred := env.engine.deferredPipelines["p"]
+	env.engine.registerMu.Unlock()
+	if deferred {
+		t.Fatal("unregistered pipeline must be dropped from the deferred set")
+	}
+
+	// Now register the stage — the dropped pipeline must NOT come back.
+	stage := &task.Spec{ID: "s", Name: "S", Enabled: true,
+		Runtime: task.RuntimeDeno, Trigger: task.TriggerConfig{Manual: true}}
+	if err := env.reg.Register(stage); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.engine.Register(stage); err != nil {
+		t.Fatal(err)
+	}
+	env.engine.mu.Lock()
+	_, scheduled := env.engine.cronEntries["p"]
+	env.engine.mu.Unlock()
+	if scheduled {
+		t.Fatal("dropped pipeline must not be resurrected by a later stage registration")
+	}
+}
+
 func TestEngineRegisterRoutesByKind(t *testing.T) {
 	env := newTestEnv(t)
 	stage := &task.Spec{ID: "s", Name: "S", Enabled: true,
