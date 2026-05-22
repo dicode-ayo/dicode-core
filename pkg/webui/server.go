@@ -1417,10 +1417,29 @@ type TaskDetail struct {
 	DaemonState string `json:"daemon_state,omitempty"`
 }
 
+// PipelineDetail is the shape returned by GET /api/tasks/{id} for a kind:
+// PipelineTask. It embeds the pipeline spec (kind, name, stages, …) and adds
+// a trigger label plus — when the terminal stage resolves to a daemon Task —
+// that stage's daemon lifecycle phase, mirroring the kind: Task detail's
+// daemon_state contract.
+type PipelineDetail struct {
+	*task.PipelineTask
+	TriggerLabel string `json:"trigger_label"`
+	DaemonState  string `json:"daemon_state,omitempty"`
+}
+
 func (s *Server) apiGetTask(w http.ResponseWriter, r *http.Request) {
 	id := taskIDParam(r)
 	spec, ok := s.registry.Get(id)
 	if !ok {
+		// Not a kind: Task — it may be a kind: PipelineTask. A PipelineTask is
+		// a peer of Spec (not a Spec), so it needs its own detail shape.
+		if k, kok := s.registry.GetKinded(id); kok {
+			if p, pok := k.(*task.PipelineTask); pok {
+				s.writePipelineDetail(w, p)
+				return
+			}
+		}
 		jsonErr(w, "task not found", http.StatusNotFound)
 		return
 	}
@@ -1465,6 +1484,26 @@ func (s *Server) apiGetTask(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	jsonOK(w, detail)
+}
+
+// writePipelineDetail renders the GET /api/tasks/{id} response for a kind:
+// PipelineTask. It surfaces the pipeline's stages and, when the terminal
+// stage resolves to a daemon Task, that stage's daemon lifecycle phase — a
+// pipeline is daemon-shaped iff its terminal stage is a daemon, so operators
+// see the same lifecycle badge they'd see on the bare daemon task.
+func (s *Server) writePipelineDetail(w http.ResponseWriter, p *task.PipelineTask) {
+	detail := PipelineDetail{
+		PipelineTask: p,
+		TriggerLabel: pipelineTriggerLabel(p),
+	}
+	if len(p.Stages) > 0 {
+		terminalID := p.Stages[len(p.Stages)-1].Task
+		// Only a kind: Task with trigger.daemon: true has a daemon lifecycle.
+		if termSpec, ok := s.registry.Get(terminalID); ok && termSpec.Trigger.Daemon {
+			detail.DaemonState = string(s.engine.DaemonState(terminalID))
+		}
+	}
 	jsonOK(w, detail)
 }
 

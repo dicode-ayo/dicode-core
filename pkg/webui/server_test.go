@@ -243,6 +243,140 @@ func TestAPI_GetTask_NonDaemonOmitsDaemonState(t *testing.T) {
 	}
 }
 
+// TestAPI_GetTask_Pipeline verifies that GET /api/tasks/{id} resolves a
+// kind: PipelineTask, returns 200, and surfaces its kind + stages so the
+// detail view can render the pipeline shape.
+func TestAPI_GetTask_Pipeline(t *testing.T) {
+	srv, reg := newTestServer(t)
+	registerTask(t, reg, "stage-a", `return 1`)
+	registerTask(t, reg, "stage-b", `return 2`)
+	if err := reg.Register(&task.PipelineTask{
+		APIVersion: "dicode/v1",
+		Kind:       task.KindPipelineTask,
+		ID:         "my-pipeline",
+		Name:       "My Pipeline",
+		Subtype:    "sequential",
+		Enabled:    true,
+		Stages:     []task.Stage{{Task: "stage-a"}, {Task: "stage-b"}},
+	}); err != nil {
+		t.Fatalf("register pipeline: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/my-pipeline", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body)
+	}
+
+	var detail map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&detail); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if detail["kind"] != task.KindPipelineTask {
+		t.Errorf("kind = %v, want %q", detail["kind"], task.KindPipelineTask)
+	}
+	stages, ok := detail["stages"].([]any)
+	if !ok {
+		t.Fatalf("stages missing or not an array: %v", detail["stages"])
+	}
+	if len(stages) != 2 {
+		t.Fatalf("expected 2 stages, got %d: %v", len(stages), stages)
+	}
+}
+
+// TestAPI_GetTask_PipelineTerminalDaemonState verifies that GET
+// /api/tasks/{id} for a pipeline whose terminal stage resolves to a daemon
+// Task surfaces that stage's daemon lifecycle phase. The default for an
+// unfired daemon is "stopped".
+func TestAPI_GetTask_PipelineTerminalDaemonState(t *testing.T) {
+	srv, reg := newTestServer(t)
+	registerTask(t, reg, "build-step", `return 1`)
+
+	// Terminal stage is a daemon task.
+	dir := t.TempDir()
+	td := filepath.Join(dir, "serve-step")
+	_ = os.MkdirAll(td, 0755)
+	_ = os.WriteFile(filepath.Join(td, "task.yaml"),
+		[]byte("name: serve-step\nruntime: docker\ntrigger:\n  daemon: true\ndocker: { image: alpine }\n"), 0644)
+	if err := reg.Register(&task.Spec{
+		ID:      "serve-step",
+		Name:    "serve-step",
+		Runtime: task.RuntimeDocker,
+		Docker:  &task.DockerConfig{Image: "alpine"},
+		Trigger: task.TriggerConfig{Daemon: true, Restart: "never"},
+		Enabled: true,
+		TaskDir: td,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Register(&task.PipelineTask{
+		APIVersion: "dicode/v1",
+		Kind:       task.KindPipelineTask,
+		ID:         "daemon-pipeline",
+		Name:       "Daemon Pipeline",
+		Subtype:    "sequential",
+		Enabled:    true,
+		Stages:     []task.Stage{{Task: "build-step"}, {Task: "serve-step"}},
+	}); err != nil {
+		t.Fatalf("register pipeline: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/daemon-pipeline", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body)
+	}
+
+	var detail map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&detail); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	got, ok := detail["daemon_state"]
+	if !ok {
+		t.Fatalf("daemon_state missing for daemon-terminal pipeline: %v", detail)
+	}
+	if got != "stopped" {
+		t.Errorf("daemon_state = %v, want \"stopped\"", got)
+	}
+}
+
+// TestAPI_GetTask_PipelineNonDaemonTerminalOmitsState verifies that a
+// pipeline whose terminal stage is NOT a daemon omits daemon_state, so the
+// UI doesn't render a misleading "stopped" badge on plain pipelines.
+func TestAPI_GetTask_PipelineNonDaemonTerminalOmitsState(t *testing.T) {
+	srv, reg := newTestServer(t)
+	registerTask(t, reg, "step-1", `return 1`)
+	registerTask(t, reg, "step-2", `return 2`)
+	if err := reg.Register(&task.PipelineTask{
+		APIVersion: "dicode/v1",
+		Kind:       task.KindPipelineTask,
+		ID:         "plain-pipeline",
+		Name:       "Plain Pipeline",
+		Subtype:    "sequential",
+		Enabled:    true,
+		Stages:     []task.Stage{{Task: "step-1"}, {Task: "step-2"}},
+	}); err != nil {
+		t.Fatalf("register pipeline: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/plain-pipeline", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body)
+	}
+
+	var detail map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&detail); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got, ok := detail["daemon_state"]; ok && got != "" {
+		t.Errorf("daemon_state should be omitted for non-daemon pipeline, got %q", got)
+	}
+}
+
 func TestAPI_GetTask_NotFound(t *testing.T) {
 	srv, _ := newTestServer(t)
 
