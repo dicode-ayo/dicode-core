@@ -2457,7 +2457,18 @@ func (e *Engine) runTask(runCtx context.Context, spec *task.Spec, opts pkgruntim
 		h(spec.ID, opts.RunID, status, string(source), elapsed.Milliseconds())
 	}
 
-	if spec.Trigger.Daemon {
+	// Drive the standalone-daemon lifecycle (restart-policy decision,
+	// DaemonState transition) only for runs that the engine actually manages as
+	// standalone daemons. A pipeline's terminal stage is dispatched as a
+	// daemon-kind run too (source=pipeline-stage), but it is owned by the
+	// PipelineRunner, not the standalone-daemon machinery: its lifetime,
+	// restarts, and DaemonState are not tracked in daemonRuns/daemonStates.
+	// Routing a pipeline-stage daemon run through onDaemonRunFinished would,
+	// when the stage task ALSO happens to be a registered standalone daemon,
+	// flip that standalone daemon's global DaemonState and possibly schedule an
+	// unintended startDaemon on a mid-pipeline restart's KillRun (#344, LOW
+	// security). Suppress the hook for pipeline-stage runs.
+	if spec.Trigger.Daemon && source != registry.TriggerPipelineStage {
 		e.onDaemonRunFinished(spec, opts.RunID)
 	}
 

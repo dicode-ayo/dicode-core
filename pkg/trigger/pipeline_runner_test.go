@@ -2,6 +2,8 @@ package trigger
 
 import (
 	"context"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -532,5 +534,242 @@ func TestPipelineStageRerun(t *testing.T) {
 
 	// Cleanup: kill the pipeline so the daemon subprocess doesn't linger.
 	env.engine.KillRun(parentRunID)
+	waitForTerminal(t, env.engine, parentRunID, 15*time.Second)
+}
+
+// TestPipelineParentKillDuringRestart covers the parent-kill-mid-restart window
+// that TestPipelineStageRerun misses (#344, HIGH). A live pipeline with a daemon
+// terminal stage is restarted by a mid-pipeline stage re-fire; the operator
+// KillRun's the pipeline PARENT while the restart handshake is in flight — old
+// daemon run already killed, the freshly-fired daemon run not yet published to
+// the runner's wait loop.
+//
+// Determinism: the runStartedHook fires synchronously inside fireStageRaw, so
+// when it observes the 2nd start of the terminal daemon task (the restart's new
+// run), propagatePipelineStageRerun is still blocked inside fireStageRaw and has
+// NOT reached its publish critical section. KillRun(parent) from the hook lands
+// runCtx cancellation squarely in the mid-restart window. The publish path must
+// then refuse to adopt the fresh daemon (runCtx cancelled), kill it, and let the
+// pipeline finish 'cancelled'.
+//
+// Invariants asserted after the parent kill:
+//
+//	(a) no daemon-stage child run remains 'running' (no orphaned subprocess);
+//	(b) the pipeline parent ends non-'running' (cancelled).
+func TestPipelineParentKillDuringRestart(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires Deno subprocess")
+	}
+	env := newTestEnv(t)
+	dir := t.TempDir()
+
+	stage0 := writeTask(t, dir, "pk-0",
+		`export default async function main() { return "gen" }`,
+		task.TriggerConfig{Manual: true})
+	stage1 := writeTask(t, dir, "pk-1",
+		`export default async function main({ params }) { return await params.get("content") }`,
+		task.TriggerConfig{Manual: true})
+	// Terminal daemon stage blocks until killed; restart:never so a kill
+	// doesn't engage the daemon auto-restart path.
+	stage2 := writeTask(t, dir, "pk-2",
+		`export default async function main() { while (true) { await new Promise(r => setTimeout(r, 200)); } }`,
+		task.TriggerConfig{Daemon: true, Restart: "never"})
+	for _, s := range []*task.Spec{stage0, stage1, stage2} {
+		if err := env.reg.Register(s); err != nil {
+			t.Fatalf("reg.Register %s: %v", s.ID, err)
+		}
+		if err := env.engine.Register(s); err != nil {
+			t.Fatalf("eng.Register %s: %v", s.ID, err)
+		}
+	}
+
+	pipe := &task.PipelineTask{
+		APIVersion: "dicode/v1", Kind: task.KindPipelineTask,
+		ID: "pk-pipe", Name: "PK", Subtype: "sequential", Enabled: true,
+		Trigger: task.PipelineTrigger{Manual: true},
+		Stages: []task.Stage{
+			{Task: "pk-0"},
+			{Task: "pk-1", Overrides: &task.Overrides{
+				Params: task.ParamOverrides{{Name: "content", Default: "${input.output}"}}}},
+			{Task: "pk-2"},
+		},
+	}
+	if err := env.reg.Register(pipe); err != nil {
+		t.Fatalf("reg.Register pipe: %v", err)
+	}
+	if err := env.engine.Register(pipe); err != nil {
+		t.Fatalf("eng.Register pipe: %v", err)
+	}
+
+	parentRunID, err := env.engine.FireManual(context.Background(), "pk-pipe", nil)
+	if err != nil {
+		t.Fatalf("FireManual: %v", err)
+	}
+
+	// Install the kill-during-restart trap: on the 2nd start of the terminal
+	// daemon task (= the restart's freshly-fired run), KillRun the pipeline
+	// parent. The hook runs synchronously inside fireStageRaw, before the
+	// runner's wait loop can adopt the new run — i.e. inside the restart window.
+	var daemonStarts int32
+	killed := make(chan struct{})
+	var killOnce sync.Once
+	env.engine.SetRunStartedHook(func(taskID, runID, triggerSource string) {
+		if taskID != "pk-2" {
+			return
+		}
+		if atomic.AddInt32(&daemonStarts, 1) == 2 {
+			env.engine.KillRun(parentRunID)
+			killOnce.Do(func() { close(killed) })
+		}
+	})
+
+	// Wait until the terminal daemon stage is up: the pipeline is live.
+	findStageChild(t, env, parentRunID, "pk-2", registry.StatusRunning, 20*time.Second)
+
+	// Operator re-fires stage 0 standalone → handlePipelineStageRerun replays
+	// descendants + restarts the terminal daemon. The restart's new run start
+	// trips the hook above, which KillRun's the parent mid-restart.
+	if _, err := env.engine.FireManual(context.Background(), "pk-0", nil); err != nil {
+		t.Fatalf("FireManual pk-0 (re-fire): %v", err)
+	}
+
+	// The hook must fire (the restart must reach the new-run-start point).
+	select {
+	case <-killed:
+	case <-time.After(25 * time.Second):
+		t.Fatal("restart never reached the new-daemon-run start; window not exercised")
+	}
+
+	// (b) The pipeline parent must end non-'running' (cancelled), not wedge.
+	final := waitForTerminal(t, env.engine, parentRunID, 20*time.Second)
+	if final.Status == registry.StatusRunning {
+		t.Fatalf("pipeline parent wedged 'running' after parent KillRun during restart")
+	}
+	if final.Status != registry.StatusCancelled {
+		t.Fatalf("pipeline final status = %q (reason=%q), want 'cancelled'", final.Status, final.FailureReason)
+	}
+
+	// (a) No daemon-stage child run may remain 'running' — neither the killed
+	// old run nor the freshly-fired-but-unadopted new run. Poll: the new run's
+	// kill is async (KillRun cancels its ctx; the run drains to a terminal).
+	waitUntil(t, 20*time.Second, func() bool {
+		kids, _ := env.reg.ListChildren(context.Background(), parentRunID, 100)
+		for _, c := range kids {
+			if c.TaskID == "pk-2" && c.Status == registry.StatusRunning {
+				return false
+			}
+		}
+		return true
+	}, "a terminal daemon stage child remained 'running' after parent KillRun during restart")
+}
+
+// TestPipelineStageDaemonDoesNotFlipStandaloneDaemonState covers the
+// daemon-state cross-contamination bug (#344, LOW security): a task that is BOTH
+// a registered standalone daemon AND a pipeline's terminal stage. Killing the
+// pipeline-stage run (as a mid-pipeline restart does) must NOT route through the
+// standalone-daemon lifecycle hook (onDaemonRunFinished) and flip the standalone
+// daemon's global DaemonState.
+//
+// Setup: register daemon task "shared" — registration auto-starts it standalone
+// (DaemonState→Running, its own standalone run). Then fire a pipeline whose
+// terminal stage is "shared"; that dispatches a SEPARATE pipeline-stage run of
+// the same task. KillRun the pipeline-stage run. With the bug,
+// onDaemonRunFinished(shared, pipelineStageRunID) fires and flips
+// DaemonState(shared) to Stopped/Crashed even though the standalone daemon run
+// is untouched. The fix suppresses the hook for pipeline-stage runs, so the
+// standalone daemon's state stays Running.
+func TestPipelineStageDaemonDoesNotFlipStandaloneDaemonState(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires Deno subprocess")
+	}
+	env := newTestEnv(t)
+	dir := t.TempDir()
+
+	// "shared" is a daemon that loops forever; restart:never so a kill doesn't
+	// auto-restart it.
+	shared := writeTask(t, dir, "shared",
+		`export default async function main() { while (true) { await new Promise(r => setTimeout(r, 200)); } }`,
+		task.TriggerConfig{Daemon: true, Restart: "never"})
+	if err := env.reg.Register(shared); err != nil {
+		t.Fatalf("reg.Register shared: %v", err)
+	}
+	if err := env.engine.Register(shared); err != nil {
+		t.Fatalf("eng.Register shared: %v", err)
+	}
+
+	// Registration auto-starts the STANDALONE daemon. Wait until it's Running.
+	waitUntil(t, 20*time.Second, func() bool {
+		return env.engine.DaemonState("shared") == DaemonRunning
+	}, "standalone daemon 'shared' did not reach DaemonRunning after registration")
+
+	// Record the standalone daemon's own run ID so we can tell it apart from the
+	// pipeline-stage run of the same task.
+	env.engine.daemonMu.Lock()
+	standaloneRunID := env.engine.daemonRuns["shared"]
+	env.engine.daemonMu.Unlock()
+	if standaloneRunID == "" {
+		t.Fatalf("no standalone daemon run recorded for 'shared'")
+	}
+
+	pipe := &task.PipelineTask{
+		APIVersion: "dicode/v1", Kind: task.KindPipelineTask,
+		ID: "sd-pipe", Name: "SD", Subtype: "sequential", Enabled: true,
+		Trigger: task.PipelineTrigger{Manual: true},
+		Stages:  []task.Stage{{Task: "shared"}},
+	}
+	if err := env.reg.Register(pipe); err != nil {
+		t.Fatalf("reg.Register pipe: %v", err)
+	}
+	if err := env.engine.Register(pipe); err != nil {
+		t.Fatalf("eng.Register pipe: %v", err)
+	}
+
+	parentRunID, err := env.engine.FireManual(context.Background(), "sd-pipe", nil)
+	if err != nil {
+		t.Fatalf("FireManual: %v", err)
+	}
+
+	// Find the pipeline-stage run of "shared" (a child of the pipeline parent,
+	// distinct from the standalone run) once it's running.
+	stageChild := findStageChild(t, env, parentRunID, "shared", registry.StatusRunning, 20*time.Second)
+	if stageChild.ID == standaloneRunID {
+		t.Fatalf("pipeline-stage run ID collided with standalone run ID %s", standaloneRunID)
+	}
+
+	// Kill the PIPELINE-STAGE run (this is what a mid-pipeline restart does to
+	// the old terminal-daemon stage run). It must not disturb the standalone
+	// daemon's lifecycle/state.
+	if !env.engine.KillRun(stageChild.ID) {
+		t.Fatalf("KillRun(stageChild) returned false")
+	}
+
+	// Wait for the pipeline-stage run to actually terminate, so the
+	// onDaemonRunFinished hook (if it were going to fire) would have fired.
+	if _, werr := env.engine.WaitRun(context.Background(), stageChild.ID); werr != nil {
+		t.Fatalf("WaitRun(stageChild): %v", werr)
+	}
+
+	// The standalone daemon must remain Running: its state was NOT flipped by
+	// the pipeline-stage run finishing. Poll briefly to give any spurious async
+	// hook a chance to mis-fire (it must not).
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if got := env.engine.DaemonState("shared"); got != DaemonRunning {
+			t.Fatalf("standalone daemon 'shared' state flipped to %q after pipeline-stage run killed; want still %q", got, DaemonRunning)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	// And its standalone run row must be untouched (still the same run, not
+	// removed from daemonRuns).
+	env.engine.daemonMu.Lock()
+	stillTracked := env.engine.daemonRuns["shared"]
+	env.engine.daemonMu.Unlock()
+	if stillTracked != standaloneRunID {
+		t.Fatalf("standalone daemon run tracking changed: %q != %q", stillTracked, standaloneRunID)
+	}
+
+	// Cleanup: stop the standalone daemon subprocess.
+	env.engine.KillRun(standaloneRunID)
+	// And drain the pipeline (its terminal stage was killed → pipeline finishes).
 	waitForTerminal(t, env.engine, parentRunID, 15*time.Second)
 }
