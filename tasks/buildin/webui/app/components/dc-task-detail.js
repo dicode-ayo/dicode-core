@@ -393,6 +393,40 @@ class DcTaskDetail extends LitElement {
       >${s.text}</span>`;
   }
 
+  // Renders the ordered stages of a kind: PipelineTask. The PipelineDetail
+  // payload embeds *task.PipelineTask, whose Stage struct has NO JSON tags, so
+  // each element serializes with Go field-name casing (`Task`, `Overrides`);
+  // we read both casings defensively. Stage task IDs are operator-controlled
+  // and therefore rendered via lit `html` text bindings (auto-escaped), never
+  // unsafeHTML. The terminal-stage daemon_state badge already renders in the
+  // trigger card above, so it isn't duplicated here.
+  _renderStages(task) {
+    const stages = task.stages || task.Stages || [];
+    if (!stages.length) {
+      return html`
+        <div class="card" style="margin-bottom:var(--space-md)">
+          <h2 style="margin:0 0 0.5rem">Stages</h2>
+          <p class="meta" style="margin:0">This pipeline has no stages.</p>
+        </div>`;
+    }
+    return html`
+      <div class="card" style="margin-bottom:var(--space-md)">
+        <h2 style="margin:0 0 0.75rem">Stages</h2>
+        <ol style="margin:0;padding-left:1.5rem;display:flex;flex-direction:column;gap:0.4rem">
+          ${stages.map(s => {
+            const id = s.Task || s.task || '(unknown)';
+            const hasOverrides = !!(s.Overrides || s.overrides);
+            return html`
+              <li>
+                <a href="tasks/${encodeURIComponent(id)}" style="font-family:monospace">${id}</a>
+                ${hasOverrides ? html`<span class="badge" title="This stage applies overrides"
+                  style="margin-left:.5rem;font-size:0.7rem;background:rgba(249, 226, 175, .15);color:var(--yellow)">overrides</span>` : ''}
+              </li>`;
+          })}
+        </ol>
+      </div>`;
+  }
+
   _triggerFields() {
     const t = this._task?.trigger || this._task?.Trigger || {};
     const type = this._triggerType;
@@ -437,12 +471,20 @@ class DcTaskDetail extends LitElement {
     const task = this._task;
     const scriptFile = task.script_file || 'task.ts';
     const testFile   = task.test_file   || scriptFile.replace(/\.(ts|js)$/, '.test.$1');
+    // A kind: PipelineTask has only a task.yaml — no script/test file — so the
+    // code editor (Edit-code button + Monaco tab) is meaningless and would
+    // 404 on save/load. Gate it on the presence of a script_file (kind: Task
+    // detail always sets one; PipelineDetail never does) and double-guard on
+    // the task kind so a future PipelineDetail field can't accidentally re-open
+    // the affordance.
+    const isPipeline = task.kind === 'PipelineTask';
+    const hasEditor  = !isPipeline && !!task.script_file;
 
     return html`
       <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:var(--space-sm)">
         <h1 style="margin:0">${task.name}</h1>
         <button class="btn" @click=${() => this._run()}>&#9654; Run now</button>
-        <button class="btn" style="background:var(--muted)" @click=${() => this._openEditor()}>&#9998; Edit code</button>
+        ${hasEditor ? html`<button class="btn" style="background:var(--muted)" @click=${() => this._openEditor()}>&#9998; Edit code</button>` : ''}
       </div>
       ${task.description ? html`<div class="task-desc">${unsafeHTML(marked.parse(task.description))}</div>` : ''}
 
@@ -452,6 +494,8 @@ class DcTaskDetail extends LitElement {
         <button class="btn btn-sm" style="background:var(--muted);margin-left:auto"
           @click=${() => { this._triggerOpen = !this._triggerOpen; }}>&#9998; Edit trigger</button>
       </div>
+
+      ${isPipeline ? this._renderStages(task) : ''}
 
       ${this._triggerOpen ? html`
         <div class="card" style="margin-bottom:var(--space-md)">
@@ -468,7 +512,7 @@ class DcTaskDetail extends LitElement {
           </div>
         </div>` : ''}
 
-      ${this._editorOpen ? html`
+      ${this._editorOpen && hasEditor ? html`
         <div class="card" style="margin-top:1.5rem;padding:0.75rem">
           <div style="display:flex;align-items:center;gap:var(--space-sm);margin-bottom:var(--space-sm);flex-wrap:wrap">
             <button class="btn btn-sm" @click=${() => this._loadEditorFile(scriptFile)}>${scriptFile}</button>
