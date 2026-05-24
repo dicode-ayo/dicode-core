@@ -365,13 +365,14 @@ stages:
 3. The first stage to reach `failure` / `timeout` / `cancelled`
    **short-circuits** the pipeline: the remaining stages are never
    fired, the pipeline's run goes to `failure`, and `fail_reason` is
-   set to `stage N (<task-id>): <error>`.
+   set to `stage N (<task-id>): <error>` (N is **0-based**, so the
+   first stage failing reports `stage 0 (...)`).
 
 ### Stage input threading
 
 Stages share the same `${input.…}` interpolation grammar as
-[chain params](#input-interpolation), evaluated at dispatch time against
-the **previous stage's** output:
+[chain params](#chain-params-and-per-edge-overrides), evaluated at dispatch
+time against the **previous stage's** output:
 
 | Form | Resolves to |
 | --- | --- |
@@ -405,20 +406,30 @@ crucially, a stage **may override the stage task's `trigger`**.
 | Field | Allowed at a pipeline stage? |
 | --- | --- |
 | `params`, `env`, `net`, `fs`, `timeout`, `dicode`, `runtime` | yes |
-| `trigger` | **yes** (unlike chain edges) — e.g. flip a `manual: true` library task to fireable |
+| `trigger` | **yes** (unlike chain edges) — e.g. flip the terminal stage's `daemon`-ness |
 | `enabled`, `name`, `description`, `retry`, `defaults`, `entries` | no (rejected at load) |
 
-The `trigger` override exists because a library task often defaults to
-`trigger.manual: true` so it isn't fired on its own; a pipeline that
-wants to use it as a stage can override that trigger for the stage's
-firing:
+A stage runs **regardless of the stage task's own trigger type**: the
+engine dispatches the merged stage spec directly and never gates on
+whether the underlying `kind: Task` is `manual` / `cron` / etc. So a
+`manual: true` library task fires as a stage with **no** trigger
+override — for example the shipped `buildin/relay-server` pipeline fires
+`buildin/write-local` (which is `trigger.manual: true`) as a stage and
+overrides only `params` / `fs` / `timeout`, never `trigger`.
+
+The `trigger` override is allowed at a stage so a stage can flip
+**daemon-ness** — set or clear `daemon: true` on the merged spec to
+make (or unmake) the terminal stage a daemon (see
+[Daemon terminal stage](#daemon-terminal-stage)). This is exactly why a
+per-edge `trigger` override is *rejected* on `trigger.chain` edges but
+permitted at a pipeline stage:
 
 ```yaml
 stages:
-  - task: my-manual-only-task
+  - task: my-server-task
     overrides:
       trigger:
-        manual: false   # allow the pipeline to fire it as a stage
+        daemon: true    # make this the pipeline's terminal daemon stage
 ```
 
 `${input.…}` references resolve at dispatch time, so they are stripped
@@ -475,10 +486,14 @@ Each pipeline fire produces **N+1** run rows:
 - One **child** run per stage, each `kind=task`, linked by
   `parent_run_id`, with `trigger_source=pipeline-stage`.
 
-The default WebUI runs list shows only parent rows (`parent_run_id IS
-NULL`); drill into a pipeline run to see its stage children and their
-individual statuses. A daemon stage that crashes shows up as a
-`crashed`/`failure` child under a `failure` pipeline parent.
+The WebUI lists runs **per task** (`GET /api/tasks/{id}/runs` →
+`Registry.ListRuns`, `WHERE task_id = ?` — there is no global list
+filtered on `parent_run_id`). A pipeline fire shows up as the parent
+run on the pipeline's own task; drill into it to fetch its stage
+children (`GET /api/runs?parent=<id>` → `Registry.ListChildren`), which
+are grouped under the parent with their individual statuses. A daemon
+stage that fails shows up as a `failure` child under a `failure`
+pipeline parent.
 
 ### Trigger types valid on a pipeline
 
