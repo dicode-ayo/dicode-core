@@ -85,6 +85,24 @@ func buildinTemplateDir(t *testing.T) string {
 }
 
 // inputOutputFixtureDir returns the absolute path to the on-disk
+// pollFileContents waits up to timeout for path to exist + be readable,
+// returning its content. Used to observe a task's on-disk side effect
+// without racing the run-state assertion. (Moved here from the deleted
+// e2e_template_preflight_pipeline_test.go.)
+func pollFileContents(t *testing.T, path string, timeout time.Duration) string {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		b, err := os.ReadFile(path)
+		if err == nil {
+			return string(b)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("file %s never appeared within %v", path, timeout)
+	return ""
+}
+
 // fixture task directory under tests/e2e/fixtures/tasks/<name>/.
 // Anchored the same way as buildinTemplateDir: via runtime.Caller so
 // `go test` from any CWD finds the fixtures. This keeps the e2e

@@ -52,7 +52,7 @@ func (r *Ref) effectivePoll() time.Duration {
 // Override-related types — Defaults, RetryConfig, TriggerPatch,
 // ParamOverride, ParamOverrides, Overrides — live in pkg/task so the same
 // data type can be referenced from per-edge override sites
-// (TriggerConfig.Before entries, ChainTrigger.Overrides) without creating
+// (ChainTrigger.Overrides, PipelineTask Stage overrides) without creating
 // an import cycle. They are re-exported here as type aliases so existing
 // `taskset.Overrides{}` usage continues to compile unchanged.
 type (

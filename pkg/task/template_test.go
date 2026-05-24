@@ -292,104 +292,95 @@ func TestExpandSpec_DockerVolumes_NoEnvFallback(t *testing.T) {
 	}
 }
 
-// trigger.before[].overrides.{params,fs,env} must receive the same template
-// expansion as their top-level twins. The relay-server daemon's preflight
-// pipeline embeds ${DATADIR}/relay/relay.yaml in overrides.params.path and
+// PipelineTask stage overrides.{params,fs,env} must receive the same template
+// expansion as their top-level spec twins. The relay-server pipeline embeds
+// ${DATADIR}/relay/relay.yaml in stages[].overrides.params.path and
 // overrides.fs.path; without expansion these reach Deno literally and the
-// daemon fails to boot.
-func TestExpandSpec_BeforeOverrides_ParamsAndFsExpand(t *testing.T) {
-	spec := &Spec{
-		Trigger: TriggerConfig{
-			Daemon: true,
-			Before: []BeforeEntry{
-				{
-					Task: "buildin/write-local",
-					Overrides: &Overrides{
-						Params: ParamOverrides{
-							{Name: "path", Default: "${DATADIR}/relay/relay.yaml"},
-							{Name: "content", Default: "${input.output}"},
-						},
-						Fs: []FSEntry{
-							{Path: "${DATADIR}/relay", Permission: "rw"},
-						},
+// daemon fails to boot. (Replaces the pre-PR6 trigger.before override
+// expansion tests; expandPipeline reuses the same expandOverrides path.)
+func TestExpandPipeline_StageOverrides_ParamsAndFsExpand(t *testing.T) {
+	p := &PipelineTask{
+		Stages: []Stage{
+			{
+				Task: "buildin/write-local",
+				Overrides: &Overrides{
+					Params: ParamOverrides{
+						{Name: "path", Default: "${DATADIR}/relay/relay.yaml"},
+						{Name: "content", Default: "${input.output}"},
+					},
+					Fs: []FSEntry{
+						{Path: "${DATADIR}/relay", Permission: "rw"},
 					},
 				},
 			},
 		},
 	}
 	vars := map[string]string{VarDataDir: "/var/dicode"}
-	expandSpec(spec, vars)
+	expandPipeline(p, vars)
 
-	got := spec.Trigger.Before[0].Overrides.Params[0].Default
+	got := p.Stages[0].Overrides.Params[0].Default
 	if got != "/var/dicode/relay/relay.yaml" {
 		t.Errorf("Params[0].Default = %q; want %q", got, "/var/dicode/relay/relay.yaml")
 	}
-	// Unknown tokens (PR2's dispatch-time interpolator territory, e.g.
-	// ${input.output}) must be LEFT LITERAL by expandSpec.
-	if got := spec.Trigger.Before[0].Overrides.Params[1].Default; got != "${input.output}" {
+	// Unknown tokens (dispatch-time interpolator territory, e.g.
+	// ${input.output}) must be LEFT LITERAL by expandPipeline.
+	if got := p.Stages[0].Overrides.Params[1].Default; got != "${input.output}" {
 		t.Errorf("Params[1].Default unknown-token mangled: %q; want literal preserved", got)
 	}
-	if got := spec.Trigger.Before[0].Overrides.Fs[0].Path; got != "/var/dicode/relay" {
+	if got := p.Stages[0].Overrides.Fs[0].Path; got != "/var/dicode/relay" {
 		t.Errorf("Fs[0].Path = %q; want %q", got, "/var/dicode/relay")
 	}
 }
 
-// Same exfiltration guard as the top-level Param.Default: overrides.params
-// defaults are readable from the prereq task's code at runtime (the engine
-// merges them into the param set the script sees), so envFallback must be
-// false.
-func TestExpandSpec_BeforeOverrides_ParamDefault_NoEnvExfiltration(t *testing.T) {
+// Same exfiltration guard as the top-level Param.Default: stage overrides.params
+// defaults are readable from the stage task's code at runtime (the engine
+// merges them into the param set the script sees), so envFallback must be false.
+func TestExpandPipeline_StageOverrides_ParamDefault_NoEnvExfiltration(t *testing.T) {
 	t.Setenv("DICODE_DAEMON_SECRET_TEST", "super-sensitive")
-	spec := &Spec{
-		Trigger: TriggerConfig{
-			Daemon: true,
-			Before: []BeforeEntry{
-				{
-					Task: "buildin/write-local",
-					Overrides: &Overrides{
-						Params: ParamOverrides{
-							{Name: "leak", Default: "${DICODE_DAEMON_SECRET_TEST}"},
-						},
+	p := &PipelineTask{
+		Stages: []Stage{
+			{
+				Task: "buildin/write-local",
+				Overrides: &Overrides{
+					Params: ParamOverrides{
+						{Name: "leak", Default: "${DICODE_DAEMON_SECRET_TEST}"},
 					},
 				},
 			},
 		},
 	}
-	expandSpec(spec, map[string]string{})
-	got := spec.Trigger.Before[0].Overrides.Params[0].Default
+	expandPipeline(p, map[string]string{})
+	got := p.Stages[0].Overrides.Params[0].Default
 	if got == "super-sensitive" {
-		t.Fatalf("daemon env exfiltrated via before.overrides.params[].default: %q", got)
+		t.Fatalf("env exfiltrated via stage overrides.params[].default: %q", got)
 	}
 	if got != "${DICODE_DAEMON_SECRET_TEST}" {
 		t.Errorf("Default = %q, want literal preserved", got)
 	}
 }
 
-// EnvEntry inside before.overrides should follow the same per-field
-// envFallback policy as top-level Permissions.Env (From/Secret may env-fall
-// back, Value may not).
-func TestExpandSpec_BeforeOverrides_EnvEntries(t *testing.T) {
+// EnvEntry inside stage overrides should follow the same per-field envFallback
+// policy as top-level Permissions.Env (From/Secret may env-fall back, Value may
+// not).
+func TestExpandPipeline_StageOverrides_EnvEntries(t *testing.T) {
 	t.Setenv("SECRETS_PREFIX", "prod")
 	t.Setenv("DICODE_DAEMON_SECRET_TEST", "super-sensitive")
-	spec := &Spec{
-		Trigger: TriggerConfig{
-			Daemon: true,
-			Before: []BeforeEntry{
-				{
-					Task: "buildin/x",
-					Overrides: &Overrides{
-						Env: []EnvEntry{
-							{Name: "DB_PASS", Secret: "${SECRETS_PREFIX}_db"},
-							{Name: "API_KEY", From: "${SECRETS_PREFIX}_token"},
-							{Name: "LEAK", Value: "${DICODE_DAEMON_SECRET_TEST}"},
-						},
+	p := &PipelineTask{
+		Stages: []Stage{
+			{
+				Task: "buildin/x",
+				Overrides: &Overrides{
+					Env: []EnvEntry{
+						{Name: "DB_PASS", Secret: "${SECRETS_PREFIX}_db"},
+						{Name: "API_KEY", From: "${SECRETS_PREFIX}_token"},
+						{Name: "LEAK", Value: "${DICODE_DAEMON_SECRET_TEST}"},
 					},
 				},
 			},
 		},
 	}
-	expandSpec(spec, map[string]string{})
-	env := spec.Trigger.Before[0].Overrides.Env
+	expandPipeline(p, map[string]string{})
+	env := p.Stages[0].Overrides.Env
 	if env[0].Secret != "prod_db" {
 		t.Errorf("Env[0].Secret = %q", env[0].Secret)
 	}
@@ -397,15 +388,16 @@ func TestExpandSpec_BeforeOverrides_EnvEntries(t *testing.T) {
 		t.Errorf("Env[1].From = %q", env[1].From)
 	}
 	if env[2].Value == "super-sensitive" {
-		t.Fatalf("env exfiltrated via before.overrides.env[].value: %q", env[2].Value)
+		t.Fatalf("env exfiltrated via stage overrides.env[].value: %q", env[2].Value)
 	}
 	if env[2].Value != "${DICODE_DAEMON_SECRET_TEST}" {
 		t.Errorf("Env[2].Value = %q, want literal preserved", env[2].Value)
 	}
 }
 
-// chain.overrides.{params,fs,env} mirror before.overrides — chain edges and
-// before edges are treated symmetrically by the per-edge dispatch path.
+// chain.overrides.{params,fs,env} get the same template expansion as
+// top-level spec fields — the per-edge dispatch path embeds ${VAR} tokens
+// (e.g. ${DATADIR}) that must resolve before the downstream task runs.
 func TestExpandSpec_ChainOverrides_ParamsAndFsExpand(t *testing.T) {
 	spec := &Spec{
 		Trigger: TriggerConfig{

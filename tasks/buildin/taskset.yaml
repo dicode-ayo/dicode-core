@@ -123,19 +123,29 @@ spec:
       ref:
         path: ./relay-client/task.yaml
 
-    # ─── relay-server: in-process dicode-relay supervisor ────────────────────
-    # Runs dicode-relay under the daemon's Deno runtime. The relay's config
-    # is rendered by a 2-stage preflight pipeline (buildin/template →
-    # buildin/write-local) declared on relay-server's trigger.before; OAuth
-    # client secrets + the status password are scoped to that renderer's
-    # per-edge env override and resolved via buildin/secret-providers/doppler.
-    # BASE_URL is set via the env entry in before[0].overrides.env (operators
-    # override per-host with a taskset override). See
-    # tasks/buildin/relay-server/task.yaml for the full pipeline + env
-    # contract.
+    # ─── relay-server: in-process dicode-relay supervisor (PipelineTask) ──────
+    # A kind: PipelineTask that renders relay.yaml from Doppler-fed env, writes
+    # it to disk, then runs the relay daemon body as the terminal stage:
+    #   1. buildin/template      — render relay.yaml from the sibling template
+    #   2. buildin/write-local   — persist to ${DATADIR}/relay/relay.yaml
+    #   3. buildin/relay-server-body — terminal daemon stage (runs the relay)
+    # OAuth client secrets + the status password are scoped to the render
+    # stage's env override and resolved via buildin/secret-providers/doppler.
+    # BASE_URL is set via the env entry on stage 1 (operators override per-host
+    # with a taskset override). See tasks/buildin/relay-server/task.yaml for the
+    # full pipeline + env contract.
     relay-server:
       ref:
         path: ./relay-server/task.yaml
+
+    # ─── relay-server-body: the relay daemon body (kind: Task) ────────────────
+    # Standalone daemon body that bootstraps the broker signing key and runs
+    # dicode-relay, reading the pre-rendered config from ${DATADIR}/relay/
+    # relay.yaml. Used as the terminal stage of the relay-server PipelineTask
+    # above; runnable on its own (it reads whatever relay.yaml is on disk).
+    relay-server-body:
+      ref:
+        path: ./relay-server-body/task.yaml
 
     run-inputs-cleanup:
       ref:

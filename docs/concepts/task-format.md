@@ -73,7 +73,7 @@ permissions:
 | `trigger.chain.overrides` | object | | Per-edge patch applied to a deep copy of the downstream's spec at firing time; manual fires of the same downstream are unaffected. See [per-edge overrides](#chain-params-and-per-edge-overrides). |
 | `trigger.daemon` | bool | | Start on app start, restart on exit |
 | `trigger.restart` | string | | daemon only: `always` (default), `on-failure`, `never` |
-| `trigger.before` | list | | prereq task IDs (bare-string or `{task, overrides}` mapping) that must succeed before the main task body runs. Valid on any trigger type (daemon, manual, cron, webhook, chain). See [`trigger.before` — preflight pipelines](#preflight-pipelines-via-triggerbefore). |
+| ~~`trigger.before`~~ | — | | **Removed.** `trigger.before` was replaced by `kind: PipelineTask` — preflight orchestration is now expressed as pipeline stages. A `task.yaml` that still declares `trigger.before` is rejected at load. See [Pipelines](#pipelines). |
 | `permissions` | object | | Explicit access grants — nothing is implicit |
 | `permissions.env` | list | | Env vars the script may read (see below) |
 | `permissions.fs` | list | | Filesystem access declarations (Deno only) |
@@ -241,234 +241,63 @@ The `trigger` rejection is deliberate — per-edge dispatch invokes the
 downstream directly and ignores any rewired trigger config on the merged
 spec, so silently accepting it would mislead operators.
 
-### Preflight pipelines via trigger.before
-
-`trigger.before:` declares a sequential preflight pipeline of one-shot
-prereq tasks. It is valid on **any** trigger type — daemon, manual,
-cron, webhook, or chain. Preflight stages run in declaration order
-before the main task body; if any stage fails, the main body does not
-run.
-
-Each stage must reach `status=success` for the pipeline to advance; a
-failure short-circuits the rest of the list. The engine re-fires every
-stage on every preflight attempt — no "already-satisfied" short-circuit
-— because the point of preflight is to refresh ephemeral state
-(rendered configs, freshly rotated credentials) right before the main
-body runs.
-
-**Run-row semantics on failure.** The behaviour differs slightly by
-trigger type:
-
-- **Daemon:** preflight failure leaves the daemon in `prereq_failed`
-  and no daemon-body run is created. (Daemons distinguish lifecycle
-  states; the preflight pipeline is part of bringing the daemon up.)
-- **One-shot (manual / cron / webhook / chain):** preflight + body
-  collapse into a single parent run row. On preflight failure, the
-  parent run surfaces as `status=failure` with
-  `fail_reason="preflight_failed: stage N (<task-id>): <error>"`. The
-  parent's `start_time` is the time the operator fired the task (i.e.
-  when the run was attempted), not the time the failure was detected.
-
-Preflight stages themselves run as their own child runs tagged
-`trigger_source=preflight`, linked back to the parent fire — the
-WebUI groups them under the parent for visibility.
-
-Each entry can be either a bare task-ID string (single-stage form) or
-a mapping with `task:` plus optional `overrides:`:
-
-```yaml
-trigger:
-  daemon: true
-  restart: always
-  before:
-    # Stage 1: render config from secrets + literal values.
-    - task: buildin/template
-      overrides:
-        params:
-          template: |
-            base_url: ${BASE_URL}
-            password: ${STATUS_PASSWORD}
-        env:
-          - name: BASE_URL
-            value: "https://relay.example.com"
-          - name: STATUS_PASSWORD
-            from: task:secret-providers/doppler
-
-    # Stage 2: persist stage 1's rendered output to disk.
-    - task: buildin/write-local
-      overrides:
-        params:
-          content: "${input.output}"
-          path: "${DATADIR}/relay/relay.yaml"
-          mode: "0600"
-        fs:
-          - path: "${DATADIR}/relay"
-            permission: rw
-```
-
-The two forms can be mixed within the same list. Per-edge overrides on
-a `before[]` entry use the same allowlist as `trigger.chain.overrides`
-(see table above).
-
-**Inline `template` vs `template_path`.** The `buildin/template` task
-above takes its body via the inline `template` param, but you can also
-point it at an absolute path to a UTF-8 text file via `template_path`
-— useful when the body is too large to comfortably inline as a
-multi-line YAML scalar. Anchoring under `${TASK_DIR}` is the typical
-pattern (keeps the body next to the task that uses it), but any path
-the caller's `permissions.fs` (or per-edge `overrides.fs`) allows
-works. Exactly one of `template` or `template_path` must be supplied.
-Sketch:
-
-```yaml
-trigger:
-  before:
-    - task: buildin/template
-      overrides:
-        params:
-          template_path: "${TASK_DIR}/relay.yaml"
-        fs:
-          - path: "${TASK_DIR}/relay.yaml"
-            permission: r
-```
-
 <a id="input-interpolation"></a>
 **`${input.…}` interpolation.** Three reference shapes are recognised
-at dispatch time in `before[i].overrides.params` defaults and
-`trigger.chain.params` values:
+at dispatch time in `trigger.chain.params` values (and, equivalently,
+in `kind: PipelineTask` stage overrides):
 
 | Form | Resolves to | Loud-fail when |
 | --- | --- | --- |
 | `${input.output}` | upstream's full string return value | upstream returned a non-string, or the string is empty |
 | `${input.output.<field>}` | named string field of an object-shaped upstream return (e.g. `{path: "..."}`) | upstream isn't an object, field absent, field non-string, or the field's string value is empty |
-| `${input.params.<name>}` | named entry from the upstream's `RunOptions.Params` (chain edge: the caller-supplied params on the upstream's fire; preflight edge: always empty today) | params map nil, named entry missing, or the entry's value is empty |
+| `${input.params.<name>}` | named entry from the upstream's `RunOptions.Params` (the caller-supplied params on the upstream's fire) | params map nil, named entry missing, or the entry's value is empty |
 
-**Empty-string contract.** Empty strings are treated as "not provided"
-uniformly across all three forms. A token whose resolution would yield
-`""` fails loudly with `ErrInputUnavailable`, identifying the offending
-param and token. Operators must either supply a non-empty value or
-omit the reference — empty values are never substituted silently. This
-preserves the loud-failure contract across the bare and dotted forms
-so operators can assume the same semantics everywhere `${input.…}`
-appears.
+Empty strings are treated as "not provided" uniformly: a token whose
+resolution would yield `""` fails loudly with `ErrInputUnavailable`,
+identifying the offending param and token — values are never
+substituted silently. Embedded forms
+(`"prefix-${input.output}-suffix"`) and multi-token forms
+(`"${input.params.scheme}://${input.output.host}"`) are supported.
+Unknown shapes (e.g. `${input.foo}`, `${input.params}` with no field)
+are rejected at task-registration time with a site-qualified error.
 
-Embedded forms (`"prefix-${input.output}-suffix"`) and multi-token
-forms (`"${input.params.scheme}://${input.output.host}"`) are
-supported — any string containing one or more recognised tokens is
-rewritten in place. Unknown shapes (e.g. `${input.foo}`,
-`${input.params}` with no field, identifiers starting with a digit or
-punctuation) are rejected at task-registration time with a
-site-qualified error so operators see the failure at config-load.
-
-The `<field>` / `<name>` portion of a token is a permissive identifier:
-the first character must be a letter or underscore, but the remainder
-may include letters, digits, underscores, **hyphens, and dots**. This
-fits common real-world shapes — HTTP-header-style param names like
-`${input.params.x-forwarded-for}`, dotted YAML keys like
-`${input.output.db.host}`, and namespaced fields like
-`${input.output.parent.child}` — without needing escapes.
-
-**Preflight-edge restriction.** `${input.params.<name>}` is rejected
-at registration on **every** `trigger.before[]` edge (not just
-`before[0]`). Preflight stages run with an empty `RunOptions`, so the
-upstream params channel is statically unavailable for the entire
-pipeline. `${input.output…}` continues to work on `before[i > 0]`
-edges because runPrereqs pipes the previous stage's return value
-forward.
-
-Loud-failures at dispatch produce a structured log
-(`failed to resolve ${input.…} reference`) and skip the chain /
-preflight dispatch rather than silently passing a literal token to
-the downstream.
+The `<field>` / `<name>` portion is a permissive identifier: the first
+character must be a letter or underscore; the remainder may include
+letters, digits, underscores, hyphens, and dots — fitting shapes like
+`${input.params.x-forwarded-for}` and `${input.output.db.host}`.
 
 ```yaml
 trigger:
   chain:
     from: render-config
     params:
-      # bare token — upstream must return a string
-      content: "${input.output}"
-      # named field — upstream returned {path: "..."}
-      destPath: "${input.output.path}"
-      # caller-supplied param piped from the upstream
-      endpoint: "${input.params.url}"
-      # embedded form — splice into a literal
+      content: "${input.output}"          # bare token
+      destPath: "${input.output.path}"    # named field
+      endpoint: "${input.params.url}"     # piped caller param
       banner: "rendered at ${input.output} on ${input.params.host}"
 ```
 
-**First-stage validation.** The first stage (`before[0]`) has no
-upstream return value, so any `${input.…}` reference on
-`before[0].overrides.params` is rejected at task-registration time with
-an explicit error. Use a literal default or an env-projected secret on
-stage 0; downstream stages can then pipe via the recognised tokens.
+## Pipelines
 
-**Mid-pipeline re-fire propagation (daemon-only).** When an
-intermediate stage at index `i` re-runs successfully (e.g. an operator
-runs `dicode run buildin/template` to pick up a rotated Doppler
-secret), the engine re-fires stages `[i+1..n-1]` sequentially with the
-re-run's fresh return value as the initial `${input.output}`, then
-restarts the daemon to pick up the propagated config. Stages
-`[0..i-1]` are NOT re-fired. Propagations are coalesced per daemon
-(at most one in flight) so a flurry of upstream completions produces a
-single propagation + restart, not a thrash loop. One-shots do NOT
-auto-restart on a prereq re-run — if the operator wants the one-shot
-to re-run, they re-fire it themselves.
+> **`trigger.before` was removed.** Preflight orchestration — render
+> config, persist it, then start a daemon/body — is no longer expressed
+> as a `trigger.before:` list on a task. It is now a first-class
+> `kind: PipelineTask` whose stages run sequentially before a terminal
+> daemon/body stage. A `task.yaml` that still declares `trigger.before`
+> is rejected at load with a pointer to this section.
 
-**Concurrency.** Daemons coalesce concurrent `Register` calls — a
-re-register while preflight is in flight does not spawn a second
-preflight goroutine. One-shots do NOT coalesce: each manual / cron /
-webhook / chain fire gets its own preflight + body, distinct from the
-daemon's coalesce-on-Register behaviour.
+A `kind: PipelineTask` declares an ordered list of stages. Each stage
+runs as its own child run; a stage must reach `status=success` for the
+pipeline to advance, and a failure short-circuits the rest. The
+previous stage's return value is piped forward via `${input.output}`,
+so the same render → persist → start composition that `trigger.before`
+expressed now lives in the pipeline definition. Per-edge overrides use
+the same allowlist as [`trigger.chain.overrides`](#chain-params-and-per-edge-overrides).
 
-**Cross-spec validation.** At registration time the engine rejects:
-
-- References to unknown tasks.
-- References to daemons (only one-shot tasks can be preflights).
-- Self-references (already rejected at config-load).
-- Cycles in the before-graph. Once one-shots can declare
-  `trigger.before`, `A.before: [B]; B.before: [A]` becomes
-  representable; the engine runs a DFS over the registered
-  before-edges and rejects cycles with a path like
-  `cycle detected: A -> B -> A`.
-
-**Semantic change vs PR #300.** Before PR3, `trigger.before` entries
-ran in parallel and were treated as independent prereqs (no piping).
-The new sequential semantics preserve correctness for prior consumers
-whose prereqs were commutative (the cloudflared docs example fits this
-shape), while enabling composable pipelines (render → persist → start
-daemon) for new consumers. If you need parallel preflights, file an
-issue requesting a `parallel: true` opt-in.
-
-#### Daemon states
-
-Daemons cycle through a small set of states observable in the WebUI
-and via the REST API's `daemon_state` field:
-
-- `stopped` — Resting state. Reached by deliberate stop (Unregister,
-  engine shutdown, or operator clicking the per-run kill button), or
-  by a daemon that ran to completion with `status: success` and no
-  restart configured. The engine may also never have started the
-  daemon in the first place.
-- `prereq_running` — The `trigger.before` pipeline is executing.
-- `prereq_failed` — One stage of the preflight pipeline returned a
-  non-success status. The daemon will not start until the failing
-  stage is re-fired successfully.
-- `running` — The daemon body is executing.
-- `stopping` — The engine is shutting the daemon down
-  (operator-initiated unregister, or engine shutdown).
-- `failed_after_preflight` — Preflight succeeded, but the daemon's
-  own dispatch errored (binary missing, port already bound, etc.).
-  Terminal: an operator must re-fire the daemon task to retry —
-  from the WebUI's task list via the Run button, or from the CLI
-  via `dicode run <task-id>`.
-- `crashed` — The daemon's body ran but exited with a non-success
-  status (failure, etc.) and the configured restart policy isn't
-  going to restart it. The success/failure split versus `stopped` is
-  explicit: clean exits land in `stopped`, non-clean exits land in
-  `crashed`. Terminal: an operator must re-fire the daemon to retry.
-
-For an end-to-end example combining daemon preflight, per-edge
-overrides, `${DATADIR}` volumes, and `run_result.enabled: false`, see
+The full `kind: PipelineTask` field reference, stage semantics, daemon
+states, and `${input.…}` interpolation rules land in a dedicated docs
+update (the PipelineTask documentation PR). For a worked end-to-end
+example today, see the
 [Cloudflare Tunnel worked example](../examples/cloudflare-tunnel.md).
 
 ---

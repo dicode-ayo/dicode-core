@@ -1,135 +1,133 @@
 apiVersion: dicode/v1
-kind: Task
+kind: PipelineTask
 name: "Relay Server"
 description: |
-  Runs dicode-relay in-process under the daemon's Deno runtime.
+  Runs dicode-relay in-process under the daemon's Deno runtime, fronted by
+  a 2-stage render pipeline that produces relay.yaml from Doppler-fed env
+  before the daemon body starts.
 
-  The relay's config (relay.yaml) is rendered by a 2-stage preflight
-  pipeline before this daemon starts:
+  Stages (sequential):
 
-    1. buildin/template reads the renderer's template body from the
-       sibling relay.yaml (via the template_path param) and substitutes
-       ${BASE_URL}, ${STATUS_PASSWORD}, and per-provider OAuth
-       client_id/client_secret values from the env declared below
-       (mix of literal value and Doppler-fed entries).
+    1. buildin/template reads the renderer's template body from the sibling
+       relay.yaml (via the template_path param) and substitutes ${BASE_URL},
+       ${STATUS_PASSWORD}, and per-provider OAuth client_id/client_secret
+       values from the env declared below (a mix of literal value and
+       Doppler-fed entries).
 
     2. buildin/write-local persists the rendered string to
        ${DATADIR}/relay/relay.yaml at mode 0600.
 
-  Doppler rotation: re-run the renderer manually (e.g. via the WebUI
-  or 'dicode tasks run buildin/template' with the per-edge overrides
-  applied) — the engine re-fires the writer with fresh content and
-  restarts this daemon.
+    3. buildin/relay-server-body (the terminal daemon stage) bootstraps the
+       broker signing key and runs the relay, reading the pre-rendered config
+       from ${DATADIR}/relay/relay.yaml.
 
-  Operator setup (one-time): edit the BASE_URL value below to the
-  public hostname the relay is reachable at (or apply a taskset
-  override to that specific env entry). DOPPLER_TOKEN must be in
-  the dicode secrets store before first daemon start.
+  Doppler rotation: re-run the renderer stage (e.g. via the WebUI or
+  'dicode tasks run buildin/template' with the per-stage overrides applied) —
+  the pipeline re-fires the writer with fresh content and restarts the
+  terminal daemon stage.
 
-runtime: deno
+  Operator setup (one-time): edit the BASE_URL value below to the public
+  hostname the relay is reachable at (or apply a taskset override to that
+  env entry). DOPPLER_TOKEN must be in the dicode secrets store before first
+  daemon start.
 
-trigger:
-  daemon: true
-  restart: always
-  before:
-    - task: buildin/template
-      overrides:
-        timeout: 30s
-        params:
-          template_path: "${TASK_DIR}/relay.yaml"
-        fs:
-          - path: "${TASK_DIR}/relay.yaml"
-            permission: r
-        env:
-          - name: DICODE_DATADIR
-          - name: BASE_URL
-            value: "https://relay.example.com"
-          - name: STATUS_PASSWORD
-            from: task:secret-providers/doppler
-          - name: GITHUB_CLIENT_ID
-            from: task:secret-providers/doppler
-            optional: true
-          - name: GITHUB_CLIENT_SECRET
-            from: task:secret-providers/doppler
-            optional: true
-          - name: SLACK_CLIENT_ID
-            from: task:secret-providers/doppler
-            optional: true
-          - name: GOOGLE_CLIENT_ID
-            from: task:secret-providers/doppler
-            optional: true
-          - name: GOOGLE_CLIENT_SECRET
-            from: task:secret-providers/doppler
-            optional: true
-          - name: SPOTIFY_CLIENT_ID
-            from: task:secret-providers/doppler
-            optional: true
-          - name: LINEAR_CLIENT_ID
-            from: task:secret-providers/doppler
-            optional: true
-          - name: DISCORD_CLIENT_ID
-            from: task:secret-providers/doppler
-            optional: true
-          - name: GITLAB_CLIENT_ID
-            from: task:secret-providers/doppler
-            optional: true
-          - name: GITLAB_CLIENT_SECRET
-            from: task:secret-providers/doppler
-            optional: true
-          - name: AIRTABLE_CLIENT_ID
-            from: task:secret-providers/doppler
-            optional: true
-          - name: AIRTABLE_CLIENT_SECRET
-            from: task:secret-providers/doppler
-            optional: true
-          - name: NOTION_CLIENT_ID
-            from: task:secret-providers/doppler
-            optional: true
-          - name: NOTION_CLIENT_SECRET
-            from: task:secret-providers/doppler
-            optional: true
-          - name: CONFLUENCE_CLIENT_ID
-            from: task:secret-providers/doppler
-            optional: true
-          - name: SALESFORCE_CLIENT_ID
-            from: task:secret-providers/doppler
-            optional: true
-          - name: STRIPE_CLIENT_ID
-            from: task:secret-providers/doppler
-            optional: true
-          - name: STRIPE_CLIENT_SECRET
-            from: task:secret-providers/doppler
-            optional: true
-          - name: OFFICE365_CLIENT_ID
-            from: task:secret-providers/doppler
-            optional: true
-          - name: OFFICE365_CLIENT_SECRET
-            from: task:secret-providers/doppler
-            optional: true
-          - name: AZURE_CLIENT_ID
-            from: task:secret-providers/doppler
-            optional: true
-          - name: AZURE_CLIENT_SECRET
-            from: task:secret-providers/doppler
-            optional: true
+subtype: sequential
 
-    - task: buildin/write-local
-      overrides:
-        timeout: 30s
-        params:
-          content: "${input.output}"
-          path: "${DATADIR}/relay/relay.yaml"
-          mode: "0600"
-        fs:
-          - path: "${DATADIR}/relay"
-            permission: rw
+stages:
+  - task: buildin/template
+    overrides:
+      timeout: 30s
+      params:
+        - name: template_path
+          default: "${TASK_DIR}/relay.yaml"
+      fs:
+        - path: "${TASK_DIR}/relay.yaml"
+          permission: r
+      env:
+        - name: DICODE_DATADIR
+        - name: BASE_URL
+          value: "https://relay.example.com"
+        - name: STATUS_PASSWORD
+          from: task:secret-providers/doppler
+        - name: GITHUB_CLIENT_ID
+          from: task:secret-providers/doppler
+          optional: true
+        - name: GITHUB_CLIENT_SECRET
+          from: task:secret-providers/doppler
+          optional: true
+        - name: SLACK_CLIENT_ID
+          from: task:secret-providers/doppler
+          optional: true
+        - name: GOOGLE_CLIENT_ID
+          from: task:secret-providers/doppler
+          optional: true
+        - name: GOOGLE_CLIENT_SECRET
+          from: task:secret-providers/doppler
+          optional: true
+        - name: SPOTIFY_CLIENT_ID
+          from: task:secret-providers/doppler
+          optional: true
+        - name: LINEAR_CLIENT_ID
+          from: task:secret-providers/doppler
+          optional: true
+        - name: DISCORD_CLIENT_ID
+          from: task:secret-providers/doppler
+          optional: true
+        - name: GITLAB_CLIENT_ID
+          from: task:secret-providers/doppler
+          optional: true
+        - name: GITLAB_CLIENT_SECRET
+          from: task:secret-providers/doppler
+          optional: true
+        - name: AIRTABLE_CLIENT_ID
+          from: task:secret-providers/doppler
+          optional: true
+        - name: AIRTABLE_CLIENT_SECRET
+          from: task:secret-providers/doppler
+          optional: true
+        - name: NOTION_CLIENT_ID
+          from: task:secret-providers/doppler
+          optional: true
+        - name: NOTION_CLIENT_SECRET
+          from: task:secret-providers/doppler
+          optional: true
+        - name: CONFLUENCE_CLIENT_ID
+          from: task:secret-providers/doppler
+          optional: true
+        - name: SALESFORCE_CLIENT_ID
+          from: task:secret-providers/doppler
+          optional: true
+        - name: STRIPE_CLIENT_ID
+          from: task:secret-providers/doppler
+          optional: true
+        - name: STRIPE_CLIENT_SECRET
+          from: task:secret-providers/doppler
+          optional: true
+        - name: OFFICE365_CLIENT_ID
+          from: task:secret-providers/doppler
+          optional: true
+        - name: OFFICE365_CLIENT_SECRET
+          from: task:secret-providers/doppler
+          optional: true
+        - name: AZURE_CLIENT_ID
+          from: task:secret-providers/doppler
+          optional: true
+        - name: AZURE_CLIENT_SECRET
+          from: task:secret-providers/doppler
+          optional: true
 
-permissions:
-  net:
-    - "*"
-  fs:
-    - path: "${DATADIR}/relay"
-      permission: rw
-  env:
-    - DICODE_DATADIR
-    - DICODE_VERSION
+  - task: buildin/write-local
+    overrides:
+      timeout: 30s
+      params:
+        - name: content
+          default: "${input.output}"
+        - name: path
+          default: "${DATADIR}/relay/relay.yaml"
+        - name: mode
+          default: "0600"
+      fs:
+        - path: "${DATADIR}/relay"
+          permission: rw
+
+  - task: buildin/relay-server-body

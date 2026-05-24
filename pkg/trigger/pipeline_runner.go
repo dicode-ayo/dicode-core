@@ -326,8 +326,7 @@ func (e *Engine) awaitStageSuccess(ctx context.Context, runID string) (task.Inpu
 	}
 	// Only Output is threaded between stages in v1: PipelineTask.Validate rejects
 	// ${input.params.*} refs, so there is deliberately no Params snapshot here.
-	// Cross-stage param threading is a planned follow-up (mirrors the forward-compat
-	// note on the preflight dispatchPipelineStage path).
+	// Cross-stage param threading is a planned follow-up.
 	return task.InputContext{Output: res.ReturnValue}, nil
 }
 
@@ -425,8 +424,7 @@ func pipelineContainsStage(p *task.PipelineTask, taskID string) bool {
 }
 
 // handlePipelineStageRerun is the post-success hook the engine calls from
-// FireChain when ANY kind: Task finishes with status=success. It is the
-// PipelineTask analogue of notifyPrereqCompletion → propagateBeforeRerun.
+// FireChain when ANY kind: Task finishes with status=success.
 //
 // For each registered kind: PipelineTask that (a) lists completedTaskID as a
 // stage and (b) is currently *live* (terminal daemon stage running, tracked in
@@ -434,10 +432,10 @@ func pipelineContainsStage(p *task.PipelineTask, taskID string) bool {
 // ${input} (seeded from the re-fired stage's output) and then restarts the
 // terminal daemon so it picks up the freshly-rendered descendants.
 //
-// Coalescing + shutdown/unregister handling mirror propagateBeforeRerun exactly:
-// restartGates.tryAcquire (keyed by pipeline ID) → defer release → bail on
-// shutdown / not-live → descendant loop with per-iteration re-checks → kill+wait
-// the old daemon run → re-fire the terminal daemon stage.
+// Coalescing + shutdown/unregister handling: restartGates.tryAcquire (keyed by
+// pipeline ID) → defer release → bail on shutdown / not-live → descendant loop
+// with per-iteration re-checks → kill+wait the old daemon run → re-fire the
+// terminal daemon stage.
 func (e *Engine) handlePipelineStageRerun(completedTaskID string, output interface{}) {
 	for _, k := range e.registry.AllKinded() {
 		p, ok := k.(*task.PipelineTask)
@@ -461,16 +459,15 @@ func (e *Engine) handlePipelineStageRerun(completedTaskID string, output interfa
 }
 
 // propagatePipelineStageRerun replays the descendants of a re-fired pipeline
-// stage and restarts the terminal daemon. Structurally mirrors
-// propagateBeforeRerun (daemon_state.go): coalesce via restartGates, bail on
+// stage and restarts the terminal daemon: coalesce via restartGates, bail on
 // shutdown / the pipeline no longer being live, replay descendants with fresh
 // ${input}, then kill+wait the old daemon run and re-fire the terminal stage.
 func (e *Engine) propagatePipelineStageRerun(runner *PipelineRunner, reranTaskID string, reranReturn interface{}) {
 	pipelineID := runner.spec.ID
-	// restartGates is shared with the standalone-daemon restart path
-	// (propagateBeforeRerun), which keys it by daemon TASK ID. Namespace the
-	// pipeline key so a pipeline whose ID happens to equal a daemon task ID
-	// can't cross-coalesce with that daemon's restart gate (#344, LOW).
+	// restartGates is shared with the daemon restart path, which keys it by
+	// daemon TASK ID. Namespace the pipeline key so a pipeline whose ID happens
+	// to equal a daemon task ID can't cross-coalesce with that daemon's restart
+	// gate (#344, LOW).
 	gateKey := pipelineRestartGateKey(pipelineID)
 	if !e.restartGates.tryAcquire(gateKey) {
 		// A propagation/restart is already queued or in flight; coalesce.
@@ -496,7 +493,6 @@ func (e *Engine) propagatePipelineStageRerun(runner *PipelineRunner, reranTaskID
 		// Bail if the engine is shutting down or the pipeline is no longer
 		// live (its terminal daemon already exited / the pipeline finished)
 		// between the liveness check and this goroutine being scheduled.
-		// Mirrors propagateBeforeRerun's canonical guard.
 		if e.isShuttingDown() {
 			e.log.Debug("pipeline stage re-fire skipped: engine shutting down",
 				zap.String("pipeline", pipelineID))
@@ -607,8 +603,8 @@ func (e *Engine) propagatePipelineStageRerun(runner *PipelineRunner, reranTaskID
 			close(restartDone)
 		}()
 
-		// Kill the current terminal daemon run and wait for it to drain.
-		// Mirrors propagateBeforeRerun: KillRun(old) + bounded WaitRun(old).
+		// Kill the current terminal daemon run and wait for it to drain:
+		// KillRun(old) + bounded WaitRun(old).
 		if oldDaemonRunID != "" {
 			e.KillRun(oldDaemonRunID)
 			waitCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

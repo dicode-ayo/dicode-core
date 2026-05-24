@@ -13,7 +13,7 @@ func TestValidatePerEdgeOverrides_AcceptsBareOutputToken(t *testing.T) {
 			{Name: "path", Default: "/foo/bar"},
 		},
 	}
-	if err := validatePerEdgeOverrides("trigger.before[0].overrides", o); err != nil {
+	if err := validatePerEdgeOverrides("trigger.chain.overrides", o); err != nil {
 		t.Errorf("unexpected rejection of ${input.output}: %v", err)
 	}
 }

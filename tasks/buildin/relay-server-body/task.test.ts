@@ -1,5 +1,5 @@
 /**
- * task.test.ts — unit tests for buildin/relay-server.
+ * task.test.ts — unit tests for buildin/relay-server-body.
  *
  * Exercises four cases:
  *   1. DICODE_DATADIR unset → ensureSigningKey throws with a clear error.
@@ -15,11 +15,12 @@
  * decoupled from the supervisor's signal-handling scaffolding, which would
  * otherwise leak Deno.addSignalListener handles into the test runner.
  *
- * Note on the dropped "base_url param missing" case: PR3 moved relay.yaml
- * rendering into a preflight pipeline (buildin/template → buildin/write-local),
- * so the task body no longer reads a base_url param — BASE_URL is set as an
- * env entry on the per-edge override of the template renderer in task.yaml.
- * There is no longer a "missing base_url" failure mode reachable from main().
+ * Note on the dropped "base_url param missing" case: relay.yaml rendering
+ * lives in the buildin/relay-server PipelineTask's render stages
+ * (buildin/template → buildin/write-local), so this body no longer reads a
+ * base_url param — BASE_URL is set as an env entry on the template stage's
+ * override in ../relay-server/task.yaml. There is no longer a "missing
+ * base_url" failure mode reachable from main().
  *
  * Note (carried from origin/main): the spec called for a "STATUS_PASSWORD
  * missing → throws" case. The published 0.1.6 relay's loadConfig() does

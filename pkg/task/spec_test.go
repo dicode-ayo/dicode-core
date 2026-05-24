@@ -306,112 +306,6 @@ func TestChainTrigger_Params_ReservedKeyRejected(t *testing.T) {
 	}
 }
 
-func TestTriggerBefore_Parses(t *testing.T) {
-	src := strings.TrimSpace(`
-name: tunnel
-runtime: docker
-trigger:
-  daemon: true
-  before: [render-config, fetch-creds]
-docker:
-  image: x
-`)
-	var s Spec
-	if err := yaml.NewDecoder(strings.NewReader(src)).Decode(&s); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if len(s.Trigger.Before) != 2 || s.Trigger.Before[0].Task != "render-config" || s.Trigger.Before[1].Task != "fetch-creds" {
-		t.Errorf("Before = %v", s.Trigger.Before)
-	}
-}
-
-// TestTriggerBefore_PerEdgeOverrides verifies the dual-form decoder on the
-// before: list: bare-ID strings, mapping forms with overrides, and a mix
-// of both must all parse correctly. The override blob itself is preserved
-// so the engine can apply it at preflight dispatch time.
-func TestTriggerBefore_PerEdgeOverrides(t *testing.T) {
-	src := strings.TrimSpace(`
-name: tunnel
-runtime: docker
-trigger:
-  daemon: true
-  before:
-    - render-config
-    - task: fetch-creds
-      overrides:
-        timeout: 5m
-        env:
-          - name: MODE
-            value: preflight
-    - task: warm-cache
-docker:
-  image: x
-`)
-	var s Spec
-	if err := yaml.NewDecoder(strings.NewReader(src)).Decode(&s); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if len(s.Trigger.Before) != 3 {
-		t.Fatalf("Before length = %d, want 3", len(s.Trigger.Before))
-	}
-
-	// Entry 0: bare string form, no overrides.
-	if s.Trigger.Before[0].Task != "render-config" {
-		t.Errorf("entry[0].Task = %q, want render-config", s.Trigger.Before[0].Task)
-	}
-	if s.Trigger.Before[0].Overrides != nil {
-		t.Errorf("entry[0].Overrides should be nil for bare-ID form, got %+v", s.Trigger.Before[0].Overrides)
-	}
-
-	// Entry 1: mapping form WITH overrides.
-	if s.Trigger.Before[1].Task != "fetch-creds" {
-		t.Errorf("entry[1].Task = %q, want fetch-creds", s.Trigger.Before[1].Task)
-	}
-	if s.Trigger.Before[1].Overrides == nil {
-		t.Fatal("entry[1].Overrides should be populated")
-	}
-	if got := s.Trigger.Before[1].Overrides.Timeout; got != 5*time.Minute {
-		t.Errorf("entry[1].Overrides.Timeout = %v, want 5m", got)
-	}
-	if len(s.Trigger.Before[1].Overrides.Env) != 1 ||
-		s.Trigger.Before[1].Overrides.Env[0].Name != "MODE" ||
-		s.Trigger.Before[1].Overrides.Env[0].Value != "preflight" {
-		t.Errorf("entry[1].Overrides.Env = %+v, want one MODE=preflight entry", s.Trigger.Before[1].Overrides.Env)
-	}
-
-	// Entry 2: mapping form WITHOUT overrides — still legal.
-	if s.Trigger.Before[2].Task != "warm-cache" {
-		t.Errorf("entry[2].Task = %q, want warm-cache", s.Trigger.Before[2].Task)
-	}
-	if s.Trigger.Before[2].Overrides != nil {
-		t.Errorf("entry[2].Overrides should be nil (mapping without overrides:), got %+v", s.Trigger.Before[2].Overrides)
-	}
-}
-
-// TestTriggerBefore_BadEntryShapeRejected pins the negative path: a
-// sequence-of-sequences or any other non-scalar / non-mapping node must
-// surface an explicit decode error rather than silently dropping the
-// entry. Catches the failure mode where a stray YAML structure (e.g. a
-// typo'd indentation) gets parsed as a no-op.
-func TestTriggerBefore_BadEntryShapeRejected(t *testing.T) {
-	src := strings.TrimSpace(`
-name: t
-runtime: docker
-trigger:
-  daemon: true
-  before:
-    - [oops, not, scalar]
-docker: { image: x }`)
-	var s Spec
-	err := yaml.NewDecoder(strings.NewReader(src)).Decode(&s)
-	if err == nil {
-		t.Fatalf("expected decode error for nested sequence in before:, got none (got Before=%+v)", s.Trigger.Before)
-	}
-	if !strings.Contains(err.Error(), "trigger.before entry") {
-		t.Errorf("expected error to mention trigger.before entry, got: %v", err)
-	}
-}
-
 // TestTriggerChain_Overrides_Parses verifies that trigger.chain.overrides
 // decodes alongside the existing chain fields. The override blob is held
 // as a *task.Overrides pointer; nil means "no per-edge override" (the
@@ -472,106 +366,13 @@ trigger:
 	}
 }
 
-func TestTriggerBefore_Validation(t *testing.T) {
-	cases := []struct {
-		name    string
-		yaml    string
-		wantErr string
-	}{
-		{
-			// Post-#312: trigger.before is valid on any trigger type, not
-			// just daemons. Manual / cron / webhook / chain tasks may declare
-			// preflight pipelines too.
-			name: "before on manual task",
-			yaml: `name: t
-runtime: deno
-trigger: { manual: true, before: [x] }`,
-			wantErr: "",
-		},
-		{
-			name: "before on cron task",
-			yaml: `name: t
-runtime: deno
-trigger: { cron: "*/5 * * * *", before: [x] }`,
-			wantErr: "",
-		},
-		{
-			name: "before on webhook task",
-			yaml: `name: t
-runtime: deno
-trigger: { webhook: /h, before: [x] }`,
-			wantErr: "",
-		},
-		{
-			name: "before on chain task",
-			yaml: `name: t
-runtime: deno
-trigger: { chain: { from: upstream }, before: [x] }`,
-			wantErr: "",
-		},
-		{
-			name: "self-reference",
-			yaml: `name: selfref
-runtime: docker
-trigger: { daemon: true, before: [selfref] }
-docker: { image: x }`,
-			wantErr: "before: cannot reference self",
-		},
-		{
-			name: "empty task ID",
-			yaml: `name: t
-runtime: docker
-trigger: { daemon: true, before: [""] }
-docker: { image: x }`,
-			wantErr: "before: empty task ID",
-		},
-		{
-			name: "valid empty before",
-			yaml: `name: ok
-runtime: docker
-trigger: { daemon: true, before: [] }
-docker: { image: x }`,
-			wantErr: "",
-		},
-		{
-			name: "valid populated before",
-			yaml: `name: ok2
-runtime: docker
-trigger: { daemon: true, before: [render-config] }
-docker: { image: x }`,
-			wantErr: "",
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			var s Spec
-			if err := yaml.NewDecoder(strings.NewReader(strings.TrimSpace(tc.yaml))).Decode(&s); err != nil {
-				t.Fatalf("decode: %v", err)
-			}
-			// Mimic LoadDirWithVars' post-decode initialisation: the ID is set
-			// from the directory base name. The self-reference test requires
-			// it to match the YAML name.
-			s.ID = s.Name
-			err := s.validate()
-			if tc.wantErr == "" {
-				if err != nil {
-					t.Errorf("expected no error, got %v", err)
-				}
-				return
-			}
-			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-				t.Errorf("expected error containing %q, got: %v", tc.wantErr, err)
-			}
-		})
-	}
-}
-
 // TestPerEdgeOverrides_RejectUnsupportedFields pins the validation that runs
-// inside Spec.validate for every per-edge override site (Trigger.Before[].Overrides
-// and Trigger.Chain.Overrides). Fields that don't make sense at a per-edge
-// level — Enabled, Retry, Defaults, Entries, Name, Description, Trigger —
-// must be rejected with an error that names the offending field so operators
-// can find it in their task.yaml. See PR #303 HIGH and MED #3 review threads.
+// inside Spec.validate for the per-edge override site (Trigger.Chain.Overrides;
+// the Trigger.Before[].Overrides site was removed in PR6). Fields that don't
+// make sense at a per-edge level — Enabled, Retry, Defaults, Entries, Name,
+// Description, Trigger — must be rejected with an error that names the
+// offending field so operators can find it in their task.yaml. See PR #303
+// HIGH and MED #3 review threads.
 func TestPerEdgeOverrides_RejectUnsupportedFields(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -579,125 +380,6 @@ func TestPerEdgeOverrides_RejectUnsupportedFields(t *testing.T) {
 		wantErr  string // substring that must appear in the error
 		wantSite string // substring naming the site (before/chain.overrides)
 	}{
-		// Trigger.Before[].Overrides — HIGH finding.
-		{
-			name: "before edge: enabled rejected",
-			yaml: `name: d
-runtime: docker
-docker: { image: x }
-trigger:
-  daemon: true
-  before:
-    - task: render
-      overrides:
-        enabled: false`,
-			wantErr:  "enabled",
-			wantSite: "trigger.before",
-		},
-		{
-			name: "before edge: retry rejected",
-			yaml: `name: d
-runtime: docker
-docker: { image: x }
-trigger:
-  daemon: true
-  before:
-    - task: render
-      overrides:
-        retry:
-          attempts: 3`,
-			wantErr:  "retry",
-			wantSite: "trigger.before",
-		},
-		{
-			name: "before edge: trigger rejected (MED #3)",
-			yaml: `name: d
-runtime: docker
-docker: { image: x }
-trigger:
-  daemon: true
-  before:
-    - task: render
-      overrides:
-        trigger:
-          manual: true`,
-			wantErr:  "trigger",
-			wantSite: "trigger.before",
-		},
-		{
-			name: "before edge: defaults rejected",
-			yaml: `name: d
-runtime: docker
-docker: { image: x }
-trigger:
-  daemon: true
-  before:
-    - task: render
-      overrides:
-        defaults:
-          timeout: 5m`,
-			wantErr:  "defaults",
-			wantSite: "trigger.before",
-		},
-		{
-			name: "before edge: entries rejected",
-			yaml: `name: d
-runtime: docker
-docker: { image: x }
-trigger:
-  daemon: true
-  before:
-    - task: render
-      overrides:
-        entries:
-          foo: {}`,
-			wantErr:  "entries",
-			wantSite: "trigger.before",
-		},
-		{
-			name: "before edge: name rejected",
-			yaml: `name: d
-runtime: docker
-docker: { image: x }
-trigger:
-  daemon: true
-  before:
-    - task: render
-      overrides:
-        name: renamed`,
-			wantErr:  "name",
-			wantSite: "trigger.before",
-		},
-		{
-			name: "before edge: description rejected",
-			yaml: `name: d
-runtime: docker
-docker: { image: x }
-trigger:
-  daemon: true
-  before:
-    - task: render
-      overrides:
-        description: nope`,
-			wantErr:  "description",
-			wantSite: "trigger.before",
-		},
-		{
-			name: "before edge: reserved param key rejected (MED #4)",
-			yaml: `name: d
-runtime: docker
-docker: { image: x }
-trigger:
-  daemon: true
-  before:
-    - task: render
-      overrides:
-        params:
-          taskID: x`,
-			wantErr:  "taskID",
-			wantSite: "trigger.before",
-		},
-
 		// Trigger.Chain.Overrides — same rules apply.
 		{
 			name: "chain edge: enabled rejected",
@@ -772,32 +454,31 @@ trigger:
 }
 
 // TestPerEdgeOverrides_LegitimateFieldsAllowed verifies the validator does NOT
-// reject the per-edge override fields that legitimately apply: Params (without
-// reserved keys), Env, Net, FS, Timeout, Notify, Dicode, Runtime. Guards
-// against an over-aggressive validator regression.
+// reject the per-edge override fields that legitimately apply on a chain edge:
+// Params (without reserved keys), Env, Net, FS, Timeout, Runtime. Guards
+// against an over-aggressive validatePerEdgeOverrides regression. (The
+// before-edge variant was removed in PR6 along with trigger.before; chain is
+// the surviving per-edge override site validated by Spec.validate.)
 func TestPerEdgeOverrides_LegitimateFieldsAllowed(t *testing.T) {
 	src := strings.TrimSpace(`
 name: d
 runtime: docker
 docker: { image: x }
 trigger:
-  daemon: true
-  before:
-    - task: render
-      overrides:
-        params:
-          mode: prod
-        env:
-          - name: FOO
-            value: bar
-        net: ["api.example.com"]
-        fs:
-          - path: /tmp
-            permission: rw
-        timeout: 30s
-        notify:
-          on_failure: true
-        runtime: deno
+  chain:
+    from: upstream
+    overrides:
+      params:
+        mode: prod
+      env:
+        - name: FOO
+          value: bar
+      net: ["api.example.com"]
+      fs:
+        - path: /tmp
+          permission: rw
+      timeout: 30s
+      runtime: deno
 `)
 	var s Spec
 	if err := yaml.NewDecoder(strings.NewReader(src)).Decode(&s); err != nil {
@@ -850,6 +531,34 @@ notify:
 	}
 }
 
+// TestTriggerBeforeRejected ensures the removed `trigger.before:` field is
+// rejected at load time with a migration-pointing error. The Before field is
+// gone from TriggerConfig, so yaml.v3 would otherwise drop it silently and an
+// operator migrating from a pre-PipelineTask task.yaml would lose their
+// preflight pipeline without warning (PR6).
+func TestTriggerBeforeRejected(t *testing.T) {
+	dir := t.TempDir()
+	src := strings.TrimSpace(`
+name: T
+runtime: deno
+trigger:
+  manual: true
+  before:
+    - task: buildin/template
+`) + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "task.yaml"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "task.ts"), []byte("export default async function main() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := LoadDirWithVars(dir, nil)
+	if err == nil || !strings.Contains(err.Error(), "kind: PipelineTask") {
+		t.Fatalf("expected migration error mentioning kind: PipelineTask, got %v", err)
+	}
+}
+
 // TestLoadDir_BuildinTasksParse walks every on-disk `tasks/buildin/*/task.yaml`
 // (and nested provider tasks like secret-providers/doppler/) and asserts that
 // LoadDir succeeds for each. This locks in the cleanup from #317 — a future
@@ -898,8 +607,11 @@ func TestLoadDir_BuildinTasksParse(t *testing.T) {
 			extras := map[string]string{
 				VarTaskSetDir: buildinRoot,
 			}
-			if _, err := LoadDirWithVars(dir, extras); err != nil {
-				t.Fatalf("LoadDirWithVars(%s): %v", dir, err)
+			// LoadKindedDir routes by the task.yaml's `kind:` so both
+			// kind: Task and kind: PipelineTask (e.g. relay-server) load
+			// through their respective loaders — mirrors the reconciler.
+			if _, err := LoadKindedDir(dir, extras); err != nil {
+				t.Fatalf("LoadKindedDir(%s): %v", dir, err)
 			}
 		})
 	}
