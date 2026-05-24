@@ -215,9 +215,8 @@ func TestResolveInputOutputMap_Params_MissingFails(t *testing.T) {
 }
 
 // TestResolveInputOutputMap_Params_NilMapFails locks the loud failure
-// when the upstream has no Params map at all (typical for preflight
-// stages today). A `${input.params.X}` reference must error rather
-// than substitute an empty string.
+// when the upstream has no Params map at all. A `${input.params.X}`
+// reference must error rather than substitute an empty string.
 func TestResolveInputOutputMap_Params_NilMapFails(t *testing.T) {
 	params := map[string]any{
 		"endpoint": "${input.params.url}",
@@ -360,7 +359,7 @@ func TestResolveInputOutputList_PreservesInput(t *testing.T) {
 
 // TestResolveInputOutputList_OutputField_Pipeline pins the slice-shaped
 // equivalent of TestResolveInputOutputMap_OutputField_StringOK — this is
-// the form used by trigger.before[].overrides.params at dispatch.
+// the form used by kind: PipelineTask stage overrides.params at dispatch.
 func TestResolveInputOutputList_OutputField_Pipeline(t *testing.T) {
 	params := ParamOverrides{
 		{Name: "destPath", Default: "${input.output.path}"},
@@ -396,8 +395,8 @@ func TestResolveInputOutputMap_NilMap(t *testing.T) {
 }
 
 // TestResolveInputOutputList_NilList is the slice-shaped counterpart to
-// TestResolveInputOutputMap_NilMap. The trigger.before resolver passes
-// entry.Overrides.Params straight through to ResolveInputOutputList; that
+// TestResolveInputOutputMap_NilMap. The pipeline-stage resolver passes
+// stage.Overrides.Params straight through to ResolveInputOutputList; that
 // field is nil when the override declares no params, so the helper must
 // accept nil without error.
 func TestResolveInputOutputList_NilList(t *testing.T) {

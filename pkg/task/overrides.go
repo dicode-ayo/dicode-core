@@ -11,9 +11,9 @@ import (
 // They form level 2 in the three-level precedence stack.
 //
 // Defined in pkg/task (rather than pkg/taskset) so the same data type can be
-// referenced from per-edge override sites in this package (BeforeEntry,
-// ChainTrigger.Overrides) without creating an import cycle. pkg/taskset
-// re-exports it via a type alias for source compat.
+// referenced from per-edge override sites in this package (Stage.Overrides on
+// kind: PipelineTask, ChainTrigger.Overrides) without creating an import
+// cycle. pkg/taskset re-exports it via a type alias for source compat.
 type Defaults struct {
 	Timeout time.Duration `yaml:"timeout,omitempty"`
 	Retry   *RetryConfig  `yaml:"retry,omitempty"`
@@ -97,8 +97,9 @@ func (p *ParamOverrides) UnmarshalYAML(value *yaml.Node) error {
 // Fields are applied in the three-level override cascade; later layers win.
 //
 // Defined in pkg/task (rather than pkg/taskset) so the same data type can be
-// referenced from per-edge override sites — BeforeEntry and
-// ChainTrigger.Overrides — without creating an import cycle. The merge
+// referenced from per-edge override sites — Stage.Overrides on
+// kind: PipelineTask and ChainTrigger.Overrides — without creating an import
+// cycle. The merge
 // implementation continues to live in pkg/taskset (exported as
 // taskset.ApplyOverrides) so per-edge dispatch sites can reuse the exact
 // same semantics as the global `dicode tasks override <id>` path.
@@ -126,19 +127,20 @@ type Overrides struct {
 }
 
 // validatePerEdgeOverrides enforces a conservative allowlist on Overrides
-// values used at per-edge dispatch sites — i.e. trigger.before[].overrides
-// and trigger.chain.overrides. Several Overrides fields are meaningful only
-// at the taskset / global level (Defaults, Entries, Enabled, Retry, Name,
-// Description) or are silently ignored by the per-edge dispatch path
-// (Trigger — see PR #303 MED #3). Rejecting them at config-load surfaces
-// operator typos and prevents silent footguns.
+// values used at the per-edge chain dispatch site — i.e.
+// trigger.chain.overrides. (kind: PipelineTask stages use the sibling
+// validatePipelineStageOverrides, which allows a Trigger patch.) Several
+// Overrides fields are meaningful only at the taskset / global level
+// (Defaults, Entries, Enabled, Retry, Name, Description) or are silently
+// ignored by the per-edge dispatch path (Trigger — see PR #303 MED #3).
+// Rejecting them at config-load surfaces operator typos and prevents silent
+// footguns.
 //
 // Allowed at a per-edge site: Params (minus reserved keys), Env, Net, Fs,
 // Timeout, Dicode, Runtime.
 //
 // The site string names the offending location (e.g.
-// "trigger.before[0].overrides (task \"render\")") so operators can find it
-// in their task.yaml.
+// "trigger.chain.overrides") so operators can find it in their task.yaml.
 func validatePerEdgeOverrides(site string, o *Overrides) error {
 	if o == nil {
 		return nil
@@ -158,16 +160,15 @@ func validatePerEdgeOverrides(site string, o *Overrides) error {
 	if o.Description != "" {
 		return fmt.Errorf("%s: field %q is not supported at a per-edge site", site, "description")
 	}
-	// Trigger — PR #303 MED #3. The per-edge dispatch path invokes the
-	// prereq directly (registry.TriggerPreflight / chain dispatch) and
-	// ignores any rewired trigger config on the merged spec. Allowing
-	// `trigger:` here misleads operators into thinking they're rewiring the
-	// prereq's trigger graph for this firing.
+	// Trigger — PR #303 MED #3. The chain dispatch path invokes the
+	// downstream directly and ignores any rewired trigger config on the
+	// merged spec. Allowing `trigger:` here misleads operators into thinking
+	// they're rewiring the downstream's trigger graph for this firing.
 	if o.Trigger != nil {
-		return fmt.Errorf("%s: field %q is not supported at a per-edge site (per-edge dispatch ignores the prereq's trigger config)", site, "trigger")
+		return fmt.Errorf("%s: field %q is not supported at a per-edge site (per-edge dispatch ignores the downstream's trigger config)", site, "trigger")
 	}
 	// Retry — would apply per-firing, almost certainly unintended. If
-	// per-edge preflight retries become a real feature request, lift this
+	// per-edge retries become a real feature request, lift this
 	// rejection and wire applyLayer to copy it.
 	if o.Retry != nil {
 		return fmt.Errorf("%s: field %q is not supported at a per-edge site", site, "retry")

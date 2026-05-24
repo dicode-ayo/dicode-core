@@ -5,8 +5,8 @@
 // reads task.yaml off disk.
 //
 // ResolveInputOutput{Map,List} are the dispatch-time complement: when
-// a downstream task is fired (via chain.from or via trigger.before
-// pipeline), any of its params whose VALUE contains a recognised
+// a downstream task is fired (via chain.from or via a kind: PipelineTask
+// stage), any of its params whose VALUE contains a recognised
 // `${input.…}` token is rewritten in place. Three shapes are
 // recognised:
 //
@@ -33,9 +33,9 @@
 //   - trigger.chain.params is map[string]any (values may be string,
 //     number, bool, list). ResolveInputOutputMap walks string values.
 //
-//   - trigger.before[].overrides.params is ParamOverrides
-//     ([]ParamOverride). The Default string field carries the value.
-//     ResolveInputOutputList walks Default fields.
+//   - pipeline stage overrides.params (kind: PipelineTask) is
+//     ParamOverrides ([]ParamOverride). The Default string field carries
+//     the value. ResolveInputOutputList walks Default fields.
 //
 // Both share InputContext + ErrInputUnavailable + ValidateInputRefs.
 //
@@ -137,7 +137,7 @@ func (e *ErrInputUnavailable) Error() string {
 // `${input.output.a.b}`, `${input.params}` with no field). Returns nil
 // when every interpolation attempt is well-formed AND when s contains
 // no interpolation attempts at all. Site is a free-form location
-// string ("trigger.chain.params.X", "trigger.before[2].overrides.params.X")
+// string ("trigger.chain.params.X", "pipeline.stages[2].overrides.params.X")
 // included in the error so operators can pinpoint the offending field
 // in their task.yaml.
 //

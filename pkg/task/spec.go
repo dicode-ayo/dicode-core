@@ -532,7 +532,9 @@ func LoadDirWithVars(dir string, extras map[string]string) (*Spec, error) {
 	if err := yaml.Unmarshal(data, &beforeProbe); err == nil && beforeProbe.Trigger.Before != nil {
 		return nil, fmt.Errorf("task.yaml in %s: `trigger.before` was removed — "+
 			"convert this task to a kind: PipelineTask (render stages + a terminal "+
-			"daemon/body stage). See docs/concepts/task-format.md#pipelines.", dir)
+			"daemon/body stage). For a worked migration see "+
+			"tasks/buildin/relay-server/task.yaml and "+
+			"docs/examples/cloudflare-tunnel.md.", dir)
 	}
 
 	var spec Spec
