@@ -379,10 +379,12 @@ time against the **previous stage's** output:
 | `${input.output}` | the previous stage's full string return value |
 | `${input.output.<field>}` | a named string field of an object-shaped previous-stage return |
 
-These tokens are used inside `stages[].overrides.params` defaults (and
-the other override string fields). The same loud-failure rules apply: a
-token that would resolve to an empty string fails the stage with
-`ErrInputUnavailable` rather than substituting silently.
+These tokens are resolved **only** inside `stages[].overrides.params`
+defaults. Other override fields (`env[].value`, `fs[].path`, `timeout`,
+…) are applied verbatim — a `${input.…}` token there is not interpolated
+and would be passed through literally. The same loud-failure rules apply:
+a token in a param default that would resolve to an empty string fails
+the stage with `ErrInputUnavailable` rather than substituting silently.
 
 **v1 threads `Output` only.** `${input.params.<name>}` (referencing the
 *upstream stage's* input params) is **not** supported in sequential
