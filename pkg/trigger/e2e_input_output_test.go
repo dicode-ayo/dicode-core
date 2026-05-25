@@ -42,11 +42,12 @@ package trigger
 // No YAML/TS heredocs in this file — fixtures are editable, lintable,
 // and runnable via `dicode tasks run` like any other task.
 //
-// PR #3 in the same epic covers `${input.output}` on `trigger.before`
-// overrides; that's out of scope here. We only cover the chain edge.
+// `${input.output}` on pipeline stage overrides is covered by the
+// pipeline e2e tests; that's out of scope here. We only cover the chain
+// edge.
 //
 // Gated on real Deno (skipped via newTestEnv's t.Skipf) — same gate
-// as TestE2E_TemplatePreflightPipeline.
+// as TestE2E_PipelineTask_RealDeno.
 
 import (
 	"context"
@@ -87,8 +88,7 @@ func buildinTemplateDir(t *testing.T) string {
 // inputOutputFixtureDir returns the absolute path to the on-disk
 // pollFileContents waits up to timeout for path to exist + be readable,
 // returning its content. Used to observe a task's on-disk side effect
-// without racing the run-state assertion. (Moved here from the deleted
-// e2e_template_preflight_pipeline_test.go.)
+// without racing the run-state assertion.
 func pollFileContents(t *testing.T, path string, timeout time.Duration) string {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -453,9 +453,8 @@ func TestE2E_InputOutput_EmbeddedTokenInterpolates(t *testing.T) {
 // The marker file pins the substituted value end-to-end.
 //
 // This is the e2e companion to TestResolveInputOutputMap_OutputField_StringOK
-// (unit-layer) and TestBefore_PipesInputOutputFieldThroughStages
-// (preflight-edge integration), closing out the new grammar's
-// coverage at the chain-dispatch boundary.
+// (unit-layer), closing out the new grammar's coverage at the
+// chain-dispatch boundary.
 func TestE2E_InputOutput_ChainParamsOutputFieldSubstitution(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires Deno subprocess")

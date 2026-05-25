@@ -296,8 +296,8 @@ func TestExpandSpec_DockerVolumes_NoEnvFallback(t *testing.T) {
 // expansion as their top-level spec twins. The relay-server pipeline embeds
 // ${DATADIR}/relay/relay.yaml in stages[].overrides.params.path and
 // overrides.fs.path; without expansion these reach Deno literally and the
-// daemon fails to boot. (Replaces the pre-PR6 trigger.before override
-// expansion tests; expandPipeline reuses the same expandOverrides path.)
+// daemon fails to boot. (expandPipeline reuses the same expandOverrides
+// path as the rest of the loader.)
 func TestExpandPipeline_StageOverrides_ParamsAndFsExpand(t *testing.T) {
 	p := &PipelineTask{
 		Stages: []Stage{

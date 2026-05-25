@@ -457,7 +457,7 @@ surfaces in the same place as any other task failure.
 | [#303] | Per-stage `overrides:` on each pipeline stage and on `chain:` edges. Without it `buildin/template` and `buildin/write-local` would have to be either pipeline-specific (one copy per pipeline) or pre-overridden via the global `dicode tasks override` path. |
 | [#309] | The `buildin/write-local` library task. Without it stage 2 would have to be a hand-rolled Deno task that calls `Deno.writeTextFile`. |
 | [#310] | `${input.output}` interpolation in `stages[i].overrides.params`. Without it stage 2 couldn't reach stage 1's rendered string declaratively — you'd need a wrapper task that invokes both via `dicode.run_task`. |
-| `kind: PipelineTask` | Sequential stage orchestration with a daemon-terminal stage. Without it the render→write→daemon flow would need the removed `trigger.before:` bolt-on, and the daemon couldn't be a clean standalone `kind: Task`. |
+| `kind: PipelineTask` | Sequential stage orchestration with a daemon-terminal stage. It expresses the render→write→daemon flow in one self-contained spec while keeping the daemon a clean standalone `kind: Task`. |
 
 ---
 

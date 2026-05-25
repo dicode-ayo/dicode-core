@@ -8,9 +8,8 @@ package trigger
 //  2. The registry's canonical spec is NOT mutated — manual / cron /
 //     unrelated fires of the same task still see the on-disk values.
 //
-// (The trigger.before per-edge override tests were removed in PR6 along with
-// trigger.before itself; the equivalent stage-override behaviour for kind:
-// PipelineTask is covered by the pipeline runner tests.)
+// (The equivalent stage-override behaviour for kind: PipelineTask is
+// covered by the pipeline runner tests.)
 //
 // The chain test goes through the real Deno runtime so it can read back the
 // merged Params.Default via the task script.

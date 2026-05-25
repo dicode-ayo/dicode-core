@@ -18,7 +18,7 @@ func applyOverrides(base *task.Spec, layers ...*Overrides) *task.Spec {
 }
 
 // ApplyOverrides is the exported entry point used by per-edge override
-// dispatch sites (pkg/trigger preflight + chain firing). It returns a
+// dispatch sites (pkg/trigger chain firing + pipeline stages). It returns a
 // deep copy of base with the supplied layers merged on top, reusing the
 // exact same logic that powers `dicode tasks override <id>` and the
 // taskset resolver's three-level cascade.

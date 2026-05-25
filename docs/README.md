@@ -41,7 +41,7 @@
 
 ## Examples
 
-- [Cloudflare Tunnel](./examples/cloudflare-tunnel.md) — hardened `cloudflared` daemon built from `trigger.before` preflight, per-edge overrides, `${DATADIR}` volume mounts, the `buildin/template` library task, and `run_result.enabled: false`
+- [Cloudflare Tunnel](./examples/cloudflare-tunnel.md) — hardened `cloudflared` daemon as the terminal stage of a `kind: PipelineTask`, per-stage overrides, `${DATADIR}` volume mounts, the `buildin/template` library task, and `run_result.enabled: false`
 
 ## Reference
 

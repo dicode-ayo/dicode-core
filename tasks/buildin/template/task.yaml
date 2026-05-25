@@ -12,12 +12,14 @@ description: |
 
   Operator usage patterns:
 
-  1. Chained pipeline (preferred for daemons):
-       trigger.before: [{ task: buildin/template, overrides: {...} }]
-     The rendered string flows to downstream via input.output. Set
-     run_inputs.enabled: false on the downstream task to prevent the
-     value from being persisted in the downstream's encrypted
-     run_inputs blob.
+  1. Pipeline stage (preferred for daemons):
+       kind: PipelineTask
+       stages:
+         - { task: buildin/template, overrides: {...} }
+     The rendered string flows to the next stage via input.output. Set
+     run_inputs.enabled: false on the consuming stage to prevent the
+     value from being persisted in that stage's encrypted run_inputs
+     blob.
 
   2. CLI piping:
        dicode tasks run buildin/template --param template='...' > file
@@ -37,17 +39,16 @@ description: |
      the file at run time. The renderer task itself ships with
      permissions.fs: [] — the caller's `permissions.fs` block (or
      per-edge `overrides.fs`) must declare read access to the file.
-     Example:
+     Example (as a pipeline stage):
 
-       trigger:
-         before:
-           - task: buildin/template
-             overrides:
-               params:
-                 template_path: "${TASK_DIR}/cloudflared.tpl"
-               fs:
-                 - path: "${TASK_DIR}/cloudflared.tpl"
-                   permission: r
+       stages:
+         - task: buildin/template
+           overrides:
+             params:
+               template_path: "${TASK_DIR}/cloudflared.tpl"
+             fs:
+               - path: "${TASK_DIR}/cloudflared.tpl"
+                 permission: r
 
 runtime: deno
 

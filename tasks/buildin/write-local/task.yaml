@@ -3,13 +3,13 @@ kind: Task
 name: "Write Local File"
 description: |
   Writes a string to a file at a given path with a given mode. Returns
-  the resolved path so it can flow to a downstream chain stage via
+  the resolved path so it can flow to a downstream pipeline stage via
   ${input.output} interpolation.
 
-  Operator-facing usage is via trigger.before pipeline overrides — the
-  task ships with no implicit fs roots, so each call site declares
-  exactly which path it's allowed to write to in its overrides.fs:
-  block.
+  Operator-facing usage is as a `kind: PipelineTask` stage with per-edge
+  overrides — the task ships with no implicit fs roots, so each call site
+  declares exactly which path it's allowed to write to in its
+  overrides.fs: block.
 
 runtime: deno
 

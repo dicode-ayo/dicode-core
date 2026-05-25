@@ -74,8 +74,8 @@ func writeTask(t *testing.T, dir, id, script string, trigger task.TriggerConfig)
 // buildin/* tasks: filesystem paths can't contain `/`, so the fixture
 // directory uses a substitute like `buildin-auto-fix/` and the override
 // restores the real ID. The override is followed by a re-Validate so the
-// loader's self-reference checks (trigger.before[].task at spec.go:707)
-// run against the post-override ID, not the directory basename.
+// loader's self-reference checks (e.g. trigger.chain.from / stage task
+// references) run against the post-override ID, not the directory basename.
 //
 // e2e tests prefer this over writeTask because it exercises the real
 // task.LoadDir path (yaml parse + validate + expandSpec) instead of
@@ -110,7 +110,7 @@ var unrenderedPlaceholderRE = regexp.MustCompile(`\{\{[A-Z_][A-Z0-9_]*\}\}`)
 
 // loadFixtureTpl is loadFixture's sibling for fixtures whose task.yaml
 // contains dynamic values outside LoadDir's expandSpec allowlist
-// (permissions.net, trigger.before[].overrides, etc.). Every "{{KEY}}"
+// (permissions.net, stage/chain overrides, etc.). Every "{{KEY}}"
 // in task.yaml is replaced with vars[KEY], then the rendered yaml +
 // task.ts/task.js are written to a t.TempDir() that LoadDirWithVars
 // parses with the same vars map (so the loader's own "${KEY}"

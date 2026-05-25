@@ -2,8 +2,7 @@ package trigger
 
 // Daemon lifecycle tests + shared controllable-executor helpers.
 //
-// This file holds the surviving daemon-machinery coverage migrated out of the
-// (removed) engine_preflight_test.go when trigger.before was deleted in PR6:
+// This file holds the daemon-machinery coverage:
 //
 //   - DaemonState map round-trip;
 //   - a daemon with no orchestration starts immediately on registration;
@@ -12,9 +11,9 @@ package trigger
 //
 // It also defines the controllable preflightExec + newPreflightEnv + waitUntil
 // helpers still used by the chain per-edge override test and the pipeline
-// runner tests. (The name "preflight" is historical — these helpers drive any
-// task through a synchronous, scriptable executor; they no longer have
-// anything to do with the removed trigger.before preflight pipeline.)
+// runner tests. (These are generic helpers that drive any task through a
+// synchronous, scriptable executor; the "preflight" in their names is just
+// a leftover label and carries no special orchestration meaning.)
 
 import (
 	"context"
@@ -136,8 +135,8 @@ func TestDaemonState_SetGet(t *testing.T) {
 	}
 }
 
-// TestDaemon_StartsImmediately verifies a daemon (which no longer has any
-// trigger.before orchestration) reaches Running directly on registration.
+// TestDaemon_StartsImmediately verifies a daemon with no orchestration
+// reaches Running directly on registration.
 func TestDaemon_StartsImmediately(t *testing.T) {
 	eng, reg, exec := newPreflightEnv(t)
 	daemon := &task.Spec{
