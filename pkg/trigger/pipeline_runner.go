@@ -32,6 +32,15 @@ type PipelineRunner struct {
 	cancel context.CancelFunc // cancels runCtx; invoked on finish + by KillRun
 	runCtx context.Context    // the pipeline's lifecycle context (cancelled by KillRun/finish)
 
+	// triggerInput and triggerParams carry the trigger-payload that fired this
+	// pipeline. They seed stage 0's InputContext so ${input.output} /
+	// ${input.output.<field>} / ${input.params.<name>} references on stage 0
+	// resolve against whatever fired the pipeline (webhook body, manual/chain
+	// params, etc.). Stages ≥1 receive the previous stage's return value as
+	// their InputContext via the normal threading path. (#350)
+	triggerInput  interface{}
+	triggerParams map[string]string
+
 	mu sync.Mutex
 	// live-daemon-terminal-stage state, set once the terminal daemon stage is
 	// fired and read by handlePipelineStageRerun. All guarded by mu.
@@ -68,6 +77,44 @@ func (e *Engine) firePipeline(ctx context.Context, p *task.PipelineTask, opts pk
 	if _, err := e.registry.StartRunWithID(context.Background(), runID, p.ID, opts.ParentRunID, string(source), registry.RunKindPipeline); err != nil {
 		return "", fmt.Errorf("start pipeline run: %w", err)
 	}
+
+	// Persist the trigger payload on the parent pipeline run row so the UI can
+	// show what fired it — mirrors how startRun persists inputs for kind: Task.
+	// Best-effort: a failure does not block the run.
+	if e.inputStore != nil {
+		var web *registry.WebhookFields
+		if opts.WebhookCtx != nil {
+			web = &registry.WebhookFields{
+				Method:      opts.WebhookCtx.Method,
+				Path:        opts.WebhookCtx.Path,
+				Headers:     opts.WebhookCtx.Headers,
+				Query:       opts.WebhookCtx.Query,
+				RawBody:     opts.WebhookCtx.RawBody,
+				ContentType: opts.WebhookCtx.ContentType,
+			}
+		}
+		in := registry.BuildPersistedInputFromRunOpts(string(source), opts.Params, opts.Input, web)
+		key, size, storedAt, perr := e.inputStore.Persist(context.Background(), runID, in)
+		if perr != nil {
+			e.log.Warn("pipeline run-input persist failed",
+				zap.String("run", runID),
+				zap.String("pipeline", p.ID),
+				zap.String("error_class", "persist"),
+			)
+		} else {
+			if opts.WebhookCtx != nil {
+				opts.WebhookCtx.RawBody = nil
+			}
+			if serr := e.registry.SetRunInput(context.Background(), runID, key, size, storedAt, in.RedactedFields); serr != nil {
+				e.log.Warn("pipeline run-input set columns failed",
+					zap.String("run", runID),
+					zap.String("pipeline", p.ID),
+					zap.Error(serr),
+				)
+			}
+		}
+	}
+
 	// Register the parent in the engine's run-lifecycle maps so it behaves like
 	// any managed run: WaitRun blocks on runDone until finish() (so a
 	// dicode.run_task targeting a pipeline gets the real result, not a racy nil),
@@ -78,7 +125,15 @@ func (e *Engine) firePipeline(ctx context.Context, p *task.PipelineTask, opts pk
 	e.runCancels.Store(runID, cancel)
 	e.runTriggerSource.Store(runID, source)
 	e.runDone.Store(runID, make(chan struct{}))
-	r := &PipelineRunner{engine: e, spec: p, runID: runID, cancel: cancel, runCtx: runCtx}
+	r := &PipelineRunner{
+		engine:        e,
+		spec:          p,
+		runID:         runID,
+		cancel:        cancel,
+		runCtx:        runCtx,
+		triggerInput:  opts.Input,
+		triggerParams: opts.Params,
+	}
 	go r.run(runCtx)
 	return runID, nil
 }
@@ -93,7 +148,15 @@ func (r *PipelineRunner) run(ctx context.Context) {
 		defer cancel()
 	}
 
-	var upstream task.InputContext
+	// Stage 0 is seeded from the trigger payload (#350): whatever fired the
+	// pipeline (webhook body, manual/chain params, etc.) becomes the stage-0
+	// InputContext. This makes ${input.output} / ${input.output.<field>} /
+	// ${input.params.<name>} references available on stage 0 overrides.
+	// Stages ≥1 receive the previous stage's return value as usual.
+	upstream := task.InputContext{
+		Output: r.triggerInput,
+		Params: r.triggerParams,
+	}
 	var lastReturn interface{}
 	for i, st := range r.spec.Stages {
 		isTerminal := i == len(r.spec.Stages)-1

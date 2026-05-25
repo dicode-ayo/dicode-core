@@ -1099,9 +1099,9 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 	}
 
 	// Pipeline chain subscribers: a kind: PipelineTask may chain from an
-	// upstream task's outcome. v1 fires the pipeline without injecting the
-	// upstream output into stage 0 (deferred follow-up — stages thread their own
-	// output via ${input.*}); the upstream's status still gates the fire.
+	// upstream task's outcome. chain.params (if set) are resolved against the
+	// upstream context and forwarded as the trigger payload for stage 0 (#350),
+	// mirroring the kind: Task chain dispatch path above.
 	for _, k := range e.registry.AllKinded() {
 		p, ok := k.(*task.PipelineTask)
 		if !ok || p.Trigger.Chain == nil || p.Trigger.Chain.From != completedTaskID {
@@ -1111,14 +1111,37 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 		if on != "always" && on != runStatus {
 			continue
 		}
+		// Resolve any ${input.*} references in chain.params against the upstream
+		// return value + params, exactly like the kind: Task chain path does.
+		resolvedParams, rerr := task.ResolveInputOutputMap(p.Trigger.Chain.Params, upstreamCtx)
+		if rerr != nil {
+			e.log.Error("pipeline chain trigger skipped — failed to resolve ${input.…} reference",
+				zap.String("from", completedTaskID),
+				zap.String("to", p.ID),
+				zap.Error(rerr),
+			)
+			continue
+		}
+		// Build the trigger payload for stage 0: the resolved chain.params
+		// become the pipeline's Input (as a map) and Params (flat string map).
+		var triggerInput interface{}
+		var triggerParams map[string]string
+		if len(resolvedParams) > 0 {
+			triggerInput = resolvedParams
+			triggerParams = flatStringMap(resolvedParams)
+		}
 		e.log.Info("chain trigger (pipeline)",
 			zap.String("from", completedTaskID), zap.String("to", p.ID), zap.String("on", on))
-		go func(p *task.PipelineTask) {
-			if _, err := e.firePipeline(ctx, p, pkgruntime.RunOptions{ParentRunID: runID}, registry.TriggerChain); err != nil {
+		go func(p *task.PipelineTask, in interface{}, params map[string]string) {
+			if _, err := e.firePipeline(ctx, p, pkgruntime.RunOptions{
+				ParentRunID: runID,
+				Input:       in,
+				Params:      params,
+			}, registry.TriggerChain); err != nil {
 				e.log.Warn("chain-triggered pipeline failed to start",
 					zap.String("from", completedTaskID), zap.String("to", p.ID), zap.Error(err))
 			}
-		}(p)
+		}(p, triggerInput, triggerParams)
 	}
 
 	// Config-level default on_failure_chain.
@@ -1434,25 +1457,81 @@ func verifyWebhookSignatureSecret(secret string, r *http.Request, body []byte) e
 // (multi-stage), so there is no synchronous inline-result mode — callers poll
 // the returned runId. assetPath is non-empty only when the request targeted a
 // sub-path; pipelines expose no asset surface, so that is a 404.
+//
+// The request body (or GET query params) is decoded into a trigger payload and
+// threaded into stage 0 via RunOptions.Input / RunOptions.Params (#350),
+// mirroring the kind: Task webhook decode path exactly.
 func (e *Engine) handlePipelineWebhook(w http.ResponseWriter, r *http.Request, pipe *task.PipelineTask, assetPath string) {
 	if assetPath != "" {
 		http.NotFound(w, r)
 		return
 	}
+
+	// Decode the request body / query params into a trigger payload — mirrors
+	// the kind: Task webhook decode path in WebhookHandler exactly.
+	var input interface{}
 	var body []byte
-	if r.Method != http.MethodGet && r.Body != nil {
-		body, _ = io.ReadAll(io.LimitReader(r.Body, webhookMaxBodyBytes))
+
+	if r.Method == http.MethodGet {
+		if q := r.URL.Query(); len(q) > 0 {
+			m := make(map[string]interface{}, len(q))
+			for k, v := range q {
+				if len(v) == 1 {
+					m[k] = v[0]
+				} else {
+					m[k] = v
+				}
+			}
+			input = m
+		}
+	} else {
+		if r.Body != nil {
+			body, _ = io.ReadAll(io.LimitReader(r.Body, webhookMaxBodyBytes))
+		}
+		ct := r.Header.Get("Content-Type")
+		if strings.Contains(ct, "application/x-www-form-urlencoded") {
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			if err := r.ParseForm(); err == nil {
+				m := make(map[string]interface{}, len(r.Form))
+				for k, v := range r.Form {
+					if len(v) == 1 {
+						m[k] = v[0]
+					} else {
+						m[k] = v
+					}
+				}
+				input = m
+			}
+		} else if len(body) > 0 {
+			_ = json.Unmarshal(body, &input)
+		}
 	}
+
 	if err := verifyWebhookSignatureSecret(pipe.Trigger.WebhookSecret, r, body); err != nil {
 		e.log.Warn("pipeline webhook signature verification failed",
 			zap.String("path", r.URL.Path), zap.String("task", pipe.ID), zap.Error(err))
 		http.Error(w, "forbidden: "+err.Error(), http.StatusForbidden)
 		return
 	}
+
+	params := flatStringMap(input)
+	webhookCtx := &pkgruntime.WebhookContext{
+		Method:      r.Method,
+		Path:        r.URL.Path,
+		Headers:     r.Header,
+		Query:       r.URL.Query(),
+		RawBody:     body,
+		ContentType: r.Header.Get("Content-Type"),
+	}
+
 	e.log.Info("pipeline webhook trigger", zap.String("path", r.URL.Path), zap.String("task", pipe.ID))
 	// Decouple from the request context so the async pipeline survives the HTTP
 	// response (mirrors fireAsync's use of context.Background()).
-	runID, err := e.firePipeline(context.Background(), pipe, pkgruntime.RunOptions{}, registry.TriggerWebhook)
+	runID, err := e.firePipeline(context.Background(), pipe, pkgruntime.RunOptions{
+		Input:      input,
+		Params:     params,
+		WebhookCtx: webhookCtx,
+	}, registry.TriggerWebhook)
 	if err != nil {
 		http.Error(w, "pipeline failed to start: "+err.Error(), http.StatusInternalServerError)
 		return

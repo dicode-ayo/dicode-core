@@ -5,7 +5,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -175,11 +174,12 @@ func (p *PipelineTask) Validate() error {
 				return err
 			}
 			for _, pr := range st.Overrides.Params {
-				if i == 0 && strings.Contains(pr.Default, "${input.") {
-					return fmt.Errorf("pipeline.stages[0].overrides.params.%s: ${input.…} references are not available on the first stage", pr.Name)
-				}
-				if inputParamsRefRe.MatchString(pr.Default) {
-					return fmt.Errorf("pipeline.stages[%d].overrides.params.%s: ${input.params.…} is not available in sequential pipelines", i, pr.Name)
+				// Stage 0 may reference ${input.*} — the trigger payload seeds it (#350).
+				// Stages ≥1 have no upstream params map, so ${input.params.*} is still
+				// rejected there; ${input.output} / ${input.output.<field>} remain valid
+				// on all stages (stage→stage threading).
+				if i > 0 && inputParamsRefRe.MatchString(pr.Default) {
+					return fmt.Errorf("pipeline.stages[%d].overrides.params.%s: ${input.params.…} is not available on stages after stage 0 (no upstream params are threaded between stages)", i, pr.Name)
 				}
 			}
 		}
