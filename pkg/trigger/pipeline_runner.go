@@ -81,6 +81,14 @@ func (e *Engine) firePipeline(ctx context.Context, p *task.PipelineTask, opts pk
 	// Persist the trigger payload on the parent pipeline run row so the UI can
 	// show what fired it — mirrors how startRun persists inputs for kind: Task.
 	// Best-effort: a failure does not block the run.
+	//
+	// Intentional divergence from the kind: Task path: startRun gates on
+	// shouldPersistInput(spec) which enforces (a) a per-task run_inputs.enabled:
+	// false opt-out and (b) recursion guards for the storage/cleanup tasks.
+	// Neither guard applies here: kind: PipelineTask has no RunInputs field and
+	// a pipeline can never be the storage or cleanup task. Checking only
+	// e.inputStore != nil is therefore correct and intentional. Revisit if
+	// kind: PipelineTask ever gains a run_inputs opt-out field.
 	if e.inputStore != nil {
 		var web *registry.WebhookFields
 		if opts.WebhookCtx != nil {
@@ -100,7 +108,8 @@ func (e *Engine) firePipeline(ctx context.Context, p *task.PipelineTask, opts pk
 			// transit env-resolver internals where CodeQL tracks a
 			// secretKey taint label; emitting it raw causes a false-positive
 			// go/clear-text-logging alert. The category is enough for ops to
-			// triage; full error is available via the failed task's own logs.
+			// triage the best-effort persistence failure; the pipeline run
+			// itself is unaffected and continues normally.
 			e.log.Warn("pipeline run-input persist failed",
 				zap.String("run", runID),
 				zap.String("pipeline", p.ID),

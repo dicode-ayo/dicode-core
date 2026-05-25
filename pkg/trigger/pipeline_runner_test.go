@@ -1379,3 +1379,219 @@ func TestPipelineChainNoParamsThreadsUpstreamOutput(t *testing.T) {
 		t.Errorf("trigger_source = %q, want %q", run.TriggerSource, registry.TriggerChain)
 	}
 }
+
+// TestPipelineWebhookHMACCorrectSignatureSucceeds asserts that a pipeline
+// webhook with a configured WebhookSecret accepts a request with the correct
+// HMAC-SHA256 signature: the handler returns HTTP 200 and the body reaches
+// stage 0 (i.e. ${input.params.event} resolves from the JSON payload).
+func TestPipelineWebhookHMACCorrectSignatureSucceeds(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires Deno subprocess")
+	}
+	env := newTestEnv(t)
+	dir := t.TempDir()
+
+	stageHMAC := writeTask(t, dir, "hmac-stage",
+		`export default async function main({ params }) { return await params.get("event") }`,
+		task.TriggerConfig{Manual: true})
+	if err := env.reg.Register(stageHMAC); err != nil {
+		t.Fatalf("reg.Register %s: %v", stageHMAC.ID, err)
+	}
+	if err := env.engine.Register(stageHMAC); err != nil {
+		t.Fatalf("eng.Register %s: %v", stageHMAC.ID, err)
+	}
+
+	const secret = "test-pipeline-secret"
+	pipe := &task.PipelineTask{
+		APIVersion: "dicode/v1", Kind: task.KindPipelineTask,
+		ID: "hmac-pipe", Name: "HMAC", Subtype: "sequential", Enabled: true,
+		Trigger: task.PipelineTrigger{
+			Webhook:       "/hooks/hmac-pipe",
+			WebhookSecret: secret,
+		},
+		Stages: []task.Stage{
+			{Task: "hmac-stage", Overrides: &task.Overrides{
+				Params: task.ParamOverrides{
+					{Name: "event", Default: "${input.params.event}"},
+				},
+			}},
+		},
+	}
+	if err := env.reg.Register(pipe); err != nil {
+		t.Fatalf("reg.Register pipe: %v", err)
+	}
+	if err := env.engine.Register(pipe); err != nil {
+		t.Fatalf("eng.Register pipe: %v", err)
+	}
+
+	handler := env.engine.WebhookHandler()
+	body := []byte(`{"event":"deploy"}`)
+	req := httptest.NewRequest("POST", "/hooks/hmac-pipe", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	// Attach the correct HMAC-SHA256 signature using the shared signBody helper
+	// (defined in webhook_test.go, same package).
+	req.Header.Set(webhookSignatureHeader, signBody(secret, body))
+
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("webhook POST with correct HMAC: status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+
+	runID := w.Header().Get("X-Run-Id")
+	if runID == "" {
+		t.Fatal("no X-Run-Id in response")
+	}
+
+	res := waitForTerminal(t, env.engine, runID, 30*time.Second)
+	if res.Status != registry.StatusSuccess {
+		t.Fatalf("pipeline status = %q (reason=%q), want success", res.Status, res.FailureReason)
+	}
+	parent, err := env.engine.WaitRun(context.Background(), runID)
+	if err != nil {
+		t.Fatalf("WaitRun: %v", err)
+	}
+	if parent.ReturnValue != "deploy" {
+		t.Errorf("pipeline return = %v, want \"deploy\" (body not seeded to stage 0 via correct HMAC path)", parent.ReturnValue)
+	}
+}
+
+// TestPipelineWebhookHMACWrongSignatureForbidden asserts that a pipeline
+// webhook with a configured WebhookSecret rejects a request with a wrong
+// (or missing) HMAC-SHA256 signature with HTTP 403 and does NOT fire the
+// pipeline (no pipeline run is created).
+func TestPipelineWebhookHMACWrongSignatureForbidden(t *testing.T) {
+	env := newTestEnv(t)
+	dir := t.TempDir()
+
+	stageNoop := writeTask(t, dir, "hmac-noop-stage",
+		`export default async function main() { return "should-not-run" }`,
+		task.TriggerConfig{Manual: true})
+	if err := env.reg.Register(stageNoop); err != nil {
+		t.Fatalf("reg.Register %s: %v", stageNoop.ID, err)
+	}
+	if err := env.engine.Register(stageNoop); err != nil {
+		t.Fatalf("eng.Register %s: %v", stageNoop.ID, err)
+	}
+
+	pipe := &task.PipelineTask{
+		APIVersion: "dicode/v1", Kind: task.KindPipelineTask,
+		ID: "hmac-reject-pipe", Name: "HMACR", Subtype: "sequential", Enabled: true,
+		Trigger: task.PipelineTrigger{
+			Webhook:       "/hooks/hmac-reject-pipe",
+			WebhookSecret: "correct-secret",
+		},
+		Stages: []task.Stage{{Task: "hmac-noop-stage"}},
+	}
+	if err := env.reg.Register(pipe); err != nil {
+		t.Fatalf("reg.Register pipe: %v", err)
+	}
+	if err := env.engine.Register(pipe); err != nil {
+		t.Fatalf("eng.Register pipe: %v", err)
+	}
+
+	handler := env.engine.WebhookHandler()
+	body := []byte(`{"event":"push"}`)
+
+	// Subtest: wrong secret — must return 403.
+	t.Run("wrong_secret", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/hooks/hmac-reject-pipe", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(webhookSignatureHeader, signBody("wrong-secret", body))
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code != 403 {
+			t.Errorf("wrong-secret request: status = %d, want 403", w.Code)
+		}
+		if w.Header().Get("X-Run-Id") != "" {
+			t.Errorf("wrong-secret request: got X-Run-Id=%q; pipeline must NOT have fired", w.Header().Get("X-Run-Id"))
+		}
+	})
+
+	// Subtest: missing signature header — must return 403.
+	t.Run("missing_signature", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/hooks/hmac-reject-pipe", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		// No X-Hub-Signature-256 header.
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code != 403 {
+			t.Errorf("missing-signature request: status = %d, want 403", w.Code)
+		}
+		if w.Header().Get("X-Run-Id") != "" {
+			t.Errorf("missing-signature request: got X-Run-Id=%q; pipeline must NOT have fired", w.Header().Get("X-Run-Id"))
+		}
+	})
+}
+
+// TestPipelineWebhookFormURLEncoded asserts that an application/x-www-form-urlencoded
+// POST to a pipeline webhook reaches stage 0: form fields are decoded by the
+// shared decodeWebhookPayload helper and made available via ${input.params.<field>}
+// on stage 0 overrides.
+func TestPipelineWebhookFormURLEncoded(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires Deno subprocess")
+	}
+	env := newTestEnv(t)
+	dir := t.TempDir()
+
+	stageForm := writeTask(t, dir, "form-stage",
+		`export default async function main({ params }) { return await params.get("action") }`,
+		task.TriggerConfig{Manual: true})
+	if err := env.reg.Register(stageForm); err != nil {
+		t.Fatalf("reg.Register %s: %v", stageForm.ID, err)
+	}
+	if err := env.engine.Register(stageForm); err != nil {
+		t.Fatalf("eng.Register %s: %v", stageForm.ID, err)
+	}
+
+	pipe := &task.PipelineTask{
+		APIVersion: "dicode/v1", Kind: task.KindPipelineTask,
+		ID: "form-pipe", Name: "FP", Subtype: "sequential", Enabled: true,
+		Trigger: task.PipelineTrigger{Webhook: "/hooks/form-pipe"},
+		Stages: []task.Stage{
+			{Task: "form-stage", Overrides: &task.Overrides{
+				Params: task.ParamOverrides{
+					{Name: "action", Default: "${input.params.action}"},
+				},
+			}},
+		},
+	}
+	if err := env.reg.Register(pipe); err != nil {
+		t.Fatalf("reg.Register pipe: %v", err)
+	}
+	if err := env.engine.Register(pipe); err != nil {
+		t.Fatalf("eng.Register pipe: %v", err)
+	}
+
+	handler := env.engine.WebhookHandler()
+	// POST an application/x-www-form-urlencoded body with an "action" field.
+	formBody := []byte("action=merge&repo=dicode")
+	req := httptest.NewRequest("POST", "/hooks/form-pipe", bytes.NewReader(formBody))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("form-urlencoded POST status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+
+	runID := w.Header().Get("X-Run-Id")
+	if runID == "" {
+		t.Fatal("no X-Run-Id in response")
+	}
+
+	res := waitForTerminal(t, env.engine, runID, 30*time.Second)
+	if res.Status != registry.StatusSuccess {
+		t.Fatalf("pipeline status = %q (reason=%q), want success", res.Status, res.FailureReason)
+	}
+	parent, err := env.engine.WaitRun(context.Background(), runID)
+	if err != nil {
+		t.Fatalf("WaitRun: %v", err)
+	}
+	// Stage 0 must have resolved ${input.params.action} = "merge" from the
+	// form field, confirming the shared decodeWebhookPayload form path works
+	// for pipeline webhooks.
+	if parent.ReturnValue != "merge" {
+		t.Errorf("pipeline return = %v, want \"merge\" (form-urlencoded body not decoded to stage 0 via ${input.params.action})", parent.ReturnValue)
+	}
+}
