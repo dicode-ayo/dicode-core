@@ -1122,14 +1122,15 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 			)
 			continue
 		}
-		// Build the trigger payload for stage 0: the resolved chain.params
-		// become the pipeline's Input (as a map) and Params (flat string map).
-		var triggerInput interface{}
-		var triggerParams map[string]string
-		if len(resolvedParams) > 0 {
-			triggerInput = resolvedParams
-			triggerParams = flatStringMap(resolvedParams)
-		}
+		// Build the trigger payload for stage 0: mirror the kind: Task chain
+		// path (buildChainInput) exactly:
+		//   - Non-empty chain.params → wrap as a labelled map (taskID, runID,
+		//     status, output, params) so stage 0 can access individual fields.
+		//   - Empty/nil chain.params → thread the upstream's raw output directly
+		//     (same as buildChainInput's zero-params branch) so ${input.output}
+		//     on stage 0 resolves to the upstream return value.
+		triggerInput := buildChainInput(resolvedParams, completedTaskID, runID, runStatus, output)
+		triggerParams := flatStringMap(resolvedParams)
 		e.log.Info("chain trigger (pipeline)",
 			zap.String("from", completedTaskID), zap.String("to", p.ID), zap.String("on", on))
 		go func(p *task.PipelineTask, in interface{}, params map[string]string) {
@@ -1352,6 +1353,69 @@ func buildChainPayload(userParams map[string]any, completedTaskID, runID, status
 	return m
 }
 
+// decodeWebhookPayload reads and decodes a webhook request body (or GET query
+// params) into an input value. It is the shared kernel for both the kind: Task
+// (WebhookHandler) and kind: PipelineTask (handlePipelineWebhook) decode paths
+// so the two sites cannot drift.
+//
+// Contract:
+//   - GET with query params → input is map[string]interface{}, body is nil,
+//     isForm is false.
+//   - POST with application/x-www-form-urlencoded → input is
+//     map[string]interface{}, body is the raw body bytes (for HMAC), isForm is
+//     true. r.Body is replayed via bytes.NewReader(body) before ParseForm so the
+//     caller's HMAC verification still covers the actual bytes.
+//   - POST with any other content type (typically application/json) → input is
+//     whatever json.Unmarshal produces (or nil if the body is empty/invalid),
+//     body is the raw bytes for HMAC, isForm is false.
+//
+// The raw body is always read up to webhookMaxBodyBytes via a LimitReader before
+// any other processing — this preserves the existing HMAC ordering: body bytes
+// available to the signature verifier regardless of content-type. Single-value
+// query / form entries are flattened to string ([]string{"v"} → "v"); multi-
+// value entries remain []string so no information is lost.
+//
+// isForm is the flag the kind: Task site uses to drive its browser-redirect
+// response; the pipeline site ignores it.
+func decodeWebhookPayload(r *http.Request, limitedBody []byte) (input interface{}, isForm bool) {
+	if r.Method == http.MethodGet {
+		if q := r.URL.Query(); len(q) > 0 {
+			m := make(map[string]interface{}, len(q))
+			for k, v := range q {
+				if len(v) == 1 {
+					m[k] = v[0]
+				} else {
+					m[k] = v
+				}
+			}
+			input = m
+		}
+		return input, false
+	}
+	ct := r.Header.Get("Content-Type")
+	if strings.Contains(ct, "application/x-www-form-urlencoded") {
+		// Replay the raw bytes back into r.Body so ParseForm can read them.
+		r.Body = io.NopCloser(bytes.NewReader(limitedBody))
+		if err := r.ParseForm(); err == nil {
+			m := make(map[string]interface{}, len(r.Form))
+			for k, v := range r.Form {
+				if len(v) == 1 {
+					m[k] = v[0]
+				} else {
+					m[k] = v
+				}
+			}
+			input = m
+			isForm = true
+		}
+		return input, isForm
+	}
+	if len(limitedBody) > 0 {
+		_ = json.Unmarshal(limitedBody, &input)
+	}
+	return input, false
+}
+
 const (
 	// webhookMaxBodyBytes caps the body read for HMAC verification.
 	webhookMaxBodyBytes = 5 << 20 // 5 MB
@@ -1467,45 +1531,13 @@ func (e *Engine) handlePipelineWebhook(w http.ResponseWriter, r *http.Request, p
 		return
 	}
 
-	// Decode the request body / query params into a trigger payload — mirrors
-	// the kind: Task webhook decode path in WebhookHandler exactly.
-	var input interface{}
+	// Read the raw body first so HMAC verification always covers the actual
+	// request bytes; then decode via the shared helper.
 	var body []byte
-
-	if r.Method == http.MethodGet {
-		if q := r.URL.Query(); len(q) > 0 {
-			m := make(map[string]interface{}, len(q))
-			for k, v := range q {
-				if len(v) == 1 {
-					m[k] = v[0]
-				} else {
-					m[k] = v
-				}
-			}
-			input = m
-		}
-	} else {
-		if r.Body != nil {
-			body, _ = io.ReadAll(io.LimitReader(r.Body, webhookMaxBodyBytes))
-		}
-		ct := r.Header.Get("Content-Type")
-		if strings.Contains(ct, "application/x-www-form-urlencoded") {
-			r.Body = io.NopCloser(bytes.NewReader(body))
-			if err := r.ParseForm(); err == nil {
-				m := make(map[string]interface{}, len(r.Form))
-				for k, v := range r.Form {
-					if len(v) == 1 {
-						m[k] = v[0]
-					} else {
-						m[k] = v
-					}
-				}
-				input = m
-			}
-		} else if len(body) > 0 {
-			_ = json.Unmarshal(body, &input)
-		}
+	if r.Method != http.MethodGet && r.Body != nil {
+		body, _ = io.ReadAll(io.LimitReader(r.Body, webhookMaxBodyBytes))
 	}
+	input, _ := decodeWebhookPayload(r, body) // isForm ignored — pipelines don't redirect
 
 	if err := verifyWebhookSignatureSecret(pipe.Trigger.WebhookSecret, r, body); err != nil {
 		e.log.Warn("pipeline webhook signature verification failed",
@@ -1649,48 +1681,13 @@ func (e *Engine) WebhookHandler() http.Handler {
 
 		e.log.Info("webhook trigger", zap.String("path", path), zap.String("task", taskID))
 
-		var input interface{}
-		isFormSubmit := false
+		// Read the raw body first so HMAC verification always covers the
+		// actual request bytes, regardless of content-type.
 		var body []byte
-
-		if r.Method == http.MethodGet {
-			if q := r.URL.Query(); len(q) > 0 {
-				m := make(map[string]interface{}, len(q))
-				for k, v := range q {
-					if len(v) == 1 {
-						m[k] = v[0]
-					} else {
-						m[k] = v
-					}
-				}
-				input = m
-			}
-		} else {
-			// Read the raw body first so HMAC verification always covers the
-			// actual request bytes, regardless of content-type.
-			if r.Body != nil {
-				body, _ = io.ReadAll(io.LimitReader(r.Body, webhookMaxBodyBytes))
-			}
-			ct := r.Header.Get("Content-Type")
-			if strings.Contains(ct, "application/x-www-form-urlencoded") {
-				// Replay the raw bytes back into r.Body so ParseForm can read them.
-				r.Body = io.NopCloser(bytes.NewReader(body))
-				if err := r.ParseForm(); err == nil {
-					m := make(map[string]interface{}, len(r.Form))
-					for k, v := range r.Form {
-						if len(v) == 1 {
-							m[k] = v[0]
-						} else {
-							m[k] = v
-						}
-					}
-					input = m
-					isFormSubmit = true
-				}
-			} else if len(body) > 0 {
-				_ = json.Unmarshal(body, &input)
-			}
+		if r.Method != http.MethodGet && r.Body != nil {
+			body, _ = io.ReadAll(io.LimitReader(r.Body, webhookMaxBodyBytes))
 		}
+		input, isFormSubmit := decodeWebhookPayload(r, body)
 
 		// Verify HMAC signature when a secret is configured on the task.
 		if err := verifyWebhookSignature(spec, r, body); err != nil {

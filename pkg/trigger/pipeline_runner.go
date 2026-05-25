@@ -96,6 +96,11 @@ func (e *Engine) firePipeline(ctx context.Context, p *task.PipelineTask, opts pk
 		in := registry.BuildPersistedInputFromRunOpts(string(source), opts.Params, opts.Input, web)
 		key, size, storedAt, perr := e.inputStore.Persist(context.Background(), runID, in)
 		if perr != nil {
+			// Log only a sanitized error category. The full perr chain may
+			// transit env-resolver internals where CodeQL tracks a
+			// secretKey taint label; emitting it raw causes a false-positive
+			// go/clear-text-logging alert. The category is enough for ops to
+			// triage; full error is available via the failed task's own logs.
 			e.log.Warn("pipeline run-input persist failed",
 				zap.String("run", runID),
 				zap.String("pipeline", p.ID),
@@ -133,7 +138,7 @@ func (e *Engine) firePipeline(ctx context.Context, p *task.PipelineTask, opts pk
 	// or when both are nil/empty (cron → loud fail unchanged).
 	triggerInput := opts.Input
 	if triggerInput == nil && len(opts.Params) > 0 {
-		m := make(map[string]any, len(opts.Params))
+		m := make(map[string]interface{}, len(opts.Params))
 		for k, v := range opts.Params {
 			m[k] = v
 		}
