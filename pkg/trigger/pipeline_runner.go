@@ -125,13 +125,27 @@ func (e *Engine) firePipeline(ctx context.Context, p *task.PipelineTask, opts pk
 	e.runCancels.Store(runID, cancel)
 	e.runTriggerSource.Store(runID, source)
 	e.runDone.Store(runID, make(chan struct{}))
+	// When no structured Input was supplied (manual fire or empty-param chain)
+	// but params ARE present, promote the params map to a map[string]any so
+	// that stage-0 ${input.output} and ${input.output.<name>} resolve to the
+	// params object — uniform with the webhook/chain-with-input path (#350).
+	// This is a no-op when opts.Input != nil (webhook, chain with payload)
+	// or when both are nil/empty (cron → loud fail unchanged).
+	triggerInput := opts.Input
+	if triggerInput == nil && len(opts.Params) > 0 {
+		m := make(map[string]any, len(opts.Params))
+		for k, v := range opts.Params {
+			m[k] = v
+		}
+		triggerInput = m
+	}
 	r := &PipelineRunner{
 		engine:        e,
 		spec:          p,
 		runID:         runID,
 		cancel:        cancel,
 		runCtx:        runCtx,
-		triggerInput:  opts.Input,
+		triggerInput:  triggerInput,
 		triggerParams: opts.Params,
 	}
 	go r.run(runCtx)
@@ -388,8 +402,10 @@ func (e *Engine) awaitStageSuccess(ctx context.Context, runID string) (task.Inpu
 		return task.InputContext{}, fmt.Errorf("run %s ended with status %s", runID, res.Status)
 	}
 	// Only Output is threaded between stages in v1: PipelineTask.Validate rejects
-	// ${input.params.*} refs, so there is deliberately no Params snapshot here.
-	// Cross-stage param threading is a planned follow-up.
+	// ${input.params.*} refs on non-first stages (they are only valid on stage 0,
+	// where they resolve against the trigger payload), so there is deliberately no
+	// Params snapshot threaded between stages here. Cross-stage param threading is
+	// a planned follow-up.
 	return task.InputContext{Output: res.ReturnValue}, nil
 }
 

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/dicode/dicode/pkg/registry"
+	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	"github.com/dicode/dicode/pkg/task"
 )
 
@@ -958,6 +959,138 @@ func TestPipelineWebhookStage0Input(t *testing.T) {
 	}
 	if parent.ReturnValue != "push" {
 		t.Errorf("pipeline return = %v, want \"push\" (webhook body not seeded to stage 0)", parent.ReturnValue)
+	}
+}
+
+// TestPipelineStage0ManualOutputRef asserts that ${input.output.<name>} on stage 0
+// resolves to the named manual-trigger param value (#350). This covers the case
+// where opts.Input is nil (manual fire) but opts.Params is non-empty: firePipeline
+// must promote params to a map[string]any so ${input.output} and
+// ${input.output.<field>} resolve correctly, not just ${input.params.<name>}.
+func TestPipelineStage0ManualOutputRef(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires Deno subprocess")
+	}
+	env := newTestEnv(t)
+	dir := t.TempDir()
+
+	// stage echoes its "val" param (wired via ${input.output.greeting}).
+	stageOut := writeTask(t, dir, "out-stage",
+		`export default async function main({ params }) { return await params.get("val") }`,
+		task.TriggerConfig{Manual: true})
+	if err := env.reg.Register(stageOut); err != nil {
+		t.Fatalf("reg.Register %s: %v", stageOut.ID, err)
+	}
+	if err := env.engine.Register(stageOut); err != nil {
+		t.Fatalf("eng.Register %s: %v", stageOut.ID, err)
+	}
+
+	pipe := &task.PipelineTask{
+		APIVersion: "dicode/v1", Kind: task.KindPipelineTask,
+		ID: "out-pipe", Name: "OP", Subtype: "sequential", Enabled: true,
+		Trigger: task.PipelineTrigger{Manual: true},
+		Stages: []task.Stage{
+			{Task: "out-stage", Overrides: &task.Overrides{
+				Params: task.ParamOverrides{
+					// ${input.output.greeting} — fields of the promoted params map.
+					{Name: "val", Default: "${input.output.greeting}"},
+				},
+			}},
+		},
+	}
+	if err := env.reg.Register(pipe); err != nil {
+		t.Fatalf("reg.Register pipe: %v", err)
+	}
+	if err := env.engine.Register(pipe); err != nil {
+		t.Fatalf("eng.Register pipe: %v", err)
+	}
+
+	parentRunID, err := env.engine.FireManual(context.Background(), "out-pipe",
+		map[string]string{"greeting": "hi-from-output"})
+	if err != nil {
+		t.Fatalf("FireManual: %v", err)
+	}
+
+	res := waitForTerminal(t, env.engine, parentRunID, 30*time.Second)
+	if res.Status != registry.StatusSuccess {
+		t.Fatalf("pipeline status = %q (reason=%q), want success", res.Status, res.FailureReason)
+	}
+	parent, err := env.engine.WaitRun(context.Background(), parentRunID)
+	if err != nil {
+		t.Fatalf("WaitRun: %v", err)
+	}
+	if parent.ReturnValue != "hi-from-output" {
+		t.Errorf("pipeline return = %v, want \"hi-from-output\" (${input.output.<name>} on stage 0 not resolved from manual params)", parent.ReturnValue)
+	}
+}
+
+// TestPipelineStage0CronRealDispatch asserts that firing a pipeline via the
+// actual cron dispatch path (registerPipelineCron → fireKinded with TriggerCron,
+// empty RunOptions) seeds stage 0 with a nil/empty InputContext and that a
+// ${input.params.X} ref fails loudly (ErrInputUnavailable), i.e. the pipeline
+// ends in a failure status. This exercises the real cron code path rather than
+// simulating it via FireManual.
+func TestPipelineStage0CronRealDispatch(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires Deno subprocess")
+	}
+	env := newTestEnv(t)
+	dir := t.TempDir()
+
+	// stage-cron: tries to read ${input.params.key} — must fail loud when no
+	// trigger payload is present (cron fires with empty RunOptions).
+	stageCron := writeTask(t, dir, "cron-real-stage",
+		`export default async function main({ params }) { return await params.get("key") }`,
+		task.TriggerConfig{Manual: true})
+	if err := env.reg.Register(stageCron); err != nil {
+		t.Fatalf("reg.Register %s: %v", stageCron.ID, err)
+	}
+	if err := env.engine.Register(stageCron); err != nil {
+		t.Fatalf("eng.Register %s: %v", stageCron.ID, err)
+	}
+
+	pipe := &task.PipelineTask{
+		APIVersion: "dicode/v1", Kind: task.KindPipelineTask,
+		ID: "cron-real-pipe", Name: "CRP", Subtype: "sequential", Enabled: true,
+		// Cron field is set but we invoke the dispatch path directly below
+		// rather than waiting on a wall-clock tick.
+		Trigger: task.PipelineTrigger{Cron: "0 0 1 1 *"},
+		Stages: []task.Stage{
+			{Task: "cron-real-stage", Overrides: &task.Overrides{
+				Params: task.ParamOverrides{
+					{Name: "key", Default: "${input.params.key}"},
+				},
+			}},
+		},
+	}
+	if err := env.reg.Register(pipe); err != nil {
+		t.Fatalf("reg.Register pipe: %v", err)
+	}
+	if err := env.engine.Register(pipe); err != nil {
+		t.Fatalf("eng.Register pipe: %v", err)
+	}
+
+	// Invoke the cron dispatch path directly: retrieve the kinded task and fire
+	// it through fireKinded with TriggerCron + empty RunOptions — exactly what
+	// registerPipelineCron's callback does on each tick.
+	k, ok := env.engine.registry.GetKinded("cron-real-pipe")
+	if !ok {
+		t.Fatal("cron-real-pipe not in registry")
+	}
+	parentRunID, err := env.engine.fireKinded(context.Background(), k,
+		pkgruntime.RunOptions{}, registry.TriggerCron)
+	if err != nil {
+		t.Fatalf("fireKinded(cron): %v", err)
+	}
+
+	res := waitForTerminal(t, env.engine, parentRunID, 30*time.Second)
+	// Cron fires with no params → stage-0 ${input.params.key} must fail loud
+	// (ErrInputUnavailable), causing the pipeline to end in failure.
+	if res.Status == registry.StatusSuccess {
+		t.Fatal("cron-dispatched pipeline should fail when stage 0 has ${input.params.X} but no trigger payload, but succeeded")
+	}
+	if res.TriggerSource != registry.TriggerCron {
+		t.Errorf("trigger_source = %q, want %q", res.TriggerSource, registry.TriggerCron)
 	}
 }
 
