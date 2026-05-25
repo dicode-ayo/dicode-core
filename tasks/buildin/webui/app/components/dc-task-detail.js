@@ -365,23 +365,22 @@ class DcTaskDetail extends LitElement {
   }
 
   // Renders the daemon lifecycle phase as a colored badge in the trigger
-  // row. The engine reports a seven-value enum (see pkg/trigger.DaemonState);
+  // row. The engine reports a five-value enum (see pkg/trigger.DaemonState);
   // the mapping below keeps colors aligned with the surrounding UI palette:
-  // green for healthy, yellow/sky for transient, red for failure, muted for
-  // resting. The three failure badges are deliberately distinguishable so
-  // operators can tell "preflight failed" (issue #300) from "preflight
-  // passed, fireAsync handoff broke" (issue #318) from "daemon body ran
-  // then crashed without an auto-restart" (issue #325).
+  // green for healthy, yellow for transient, red for failure, muted for
+  // resting. The two failure badges are deliberately distinguishable so
+  // operators can tell "daemon body launch failed" (issue #318) from
+  // "daemon body ran then crashed without an auto-restart" (issue #325).
   _renderDaemonState(state) {
     // Keep keys in sync with the DaemonState constants in
     // pkg/trigger/daemon_state.go — out-of-sync entries fall through
-    // to the generic-text fallback below at render time.
+    // to the generic-text fallback below at render time. The wire value
+    // "failed_after_preflight" is a retained enum value; its current
+    // meaning is simply "daemon body launch failed".
     const STYLES = {
       running:                { bg: 'rgba(166, 227, 161, .15)', fg: 'var(--green)',  text: 'Running' },
-      prereq_running:         { bg: 'rgba(137, 220, 235, .15)', fg: 'var(--sky)',    text: 'Preflight running…' },
       stopping:               { bg: 'rgba(249, 226, 175, .15)', fg: 'var(--yellow)', text: 'Stopping…' },
-      prereq_failed:          { bg: 'rgba(243, 139, 168, .15)', fg: 'var(--red)',    text: 'Preflight failed' },
-      failed_after_preflight: { bg: 'rgba(243, 139, 168, .15)', fg: 'var(--red)',    text: 'Crashed after preflight ✓' },
+      failed_after_preflight: { bg: 'rgba(243, 139, 168, .15)', fg: 'var(--red)',    text: '⨯ Launch failed' },
       crashed:                { bg: 'rgba(243, 139, 168, .28)', fg: 'var(--red)',    text: '⨯ Crashed (no restart)' },
       stopped:                { bg: 'rgba(166, 173, 200, .15)', fg: 'var(--muted)',  text: 'Stopped' },
     };

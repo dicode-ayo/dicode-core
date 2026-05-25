@@ -151,8 +151,8 @@ Deno.test(
     clearRelayEnv();
     const datadir = stageDatadirWithSigningKey();
 
-    // PR3: the preflight pipeline (buildin/template → buildin/write-local)
-    // renders this YAML before the daemon's main() runs. In production it
+    // PR3: the pipeline stages (buildin/template → buildin/write-local)
+    // render this YAML before the daemon's main() runs. In production it
     // gets the ${VAR} placeholders substituted by the renderer's per-edge
     // env override; here we stage a literal-value YAML so loadConfig
     // doesn't depend on STATUS_PASSWORD / BASE_URL being set in the test's

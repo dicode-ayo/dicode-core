@@ -223,8 +223,8 @@ func TestAPI_GetTask(t *testing.T) {
 // TestAPI_GetTask_DaemonState verifies that GET /api/tasks/{id} for a
 // daemon task includes the engine's current DaemonState in the response.
 // Operators viewing a daemon detail page need this to distinguish
-// "stopped", "waiting on render preflight", "preflight failed", and
-// "running" — a single boolean isn't enough.
+// "stopped", "running", "failed_after_preflight", and "crashed" — a
+// single boolean isn't enough.
 func TestAPI_GetTask_DaemonState(t *testing.T) {
 	srv, reg := newTestServer(t)
 

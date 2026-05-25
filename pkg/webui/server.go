@@ -1415,13 +1415,12 @@ type TaskDetail struct {
 	TestFile     string `json:"test_file"`
 	TestExists   bool   `json:"test_exists"`
 
-	// DaemonState surfaces the engine's preflight/lifecycle phase for
-	// daemon tasks. Empty for non-daemon tasks so the WebUI can hide the
-	// row entirely. Seven-value enum — see pkg/trigger.DaemonState for
-	// the canonical list. The "failed_after_preflight" and "crashed"
-	// values are distinct from "stopped" so operators can tell
-	// "fireAsync broke" (#318) and "body crashed without auto-restart"
-	// (#325) apart from "deliberately stopped".
+	// DaemonState surfaces the engine's lifecycle phase for daemon tasks.
+	// Empty for non-daemon tasks so the WebUI can hide the row entirely.
+	// Five-value enum — see pkg/trigger.DaemonState for the canonical list.
+	// The "failed_after_preflight" and "crashed" values are distinct from
+	// "stopped" so operators can tell "fireAsync broke" (#318) and "body
+	// crashed without auto-restart" (#325) apart from "deliberately stopped".
 	DaemonState string `json:"daemon_state,omitempty"`
 }
 
@@ -1456,7 +1455,7 @@ func (s *Server) apiGetTask(w http.ResponseWriter, r *http.Request) {
 		Spec:         spec,
 		TriggerLabel: triggerLabel(spec.Trigger),
 	}
-	// Daemon preflight state — empty for non-daemon tasks so the UI
+	// Daemon lifecycle state — empty for non-daemon tasks so the UI
 	// doesn't render "stopped" labels on every cron job.
 	if spec.Trigger.Daemon {
 		detail.DaemonState = string(s.engine.DaemonState(spec.ID))

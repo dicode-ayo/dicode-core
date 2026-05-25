@@ -456,9 +456,8 @@ trigger:
 // TestPerEdgeOverrides_LegitimateFieldsAllowed verifies the validator does NOT
 // reject the per-edge override fields that legitimately apply on a chain edge:
 // Params (without reserved keys), Env, Net, FS, Timeout, Runtime. Guards
-// against an over-aggressive validatePerEdgeOverrides regression. (The
-// before-edge variant was removed in PR6 along with trigger.before; chain is
-// the surviving per-edge override site validated by Spec.validate.)
+// against an over-aggressive validatePerEdgeOverrides regression. (chain is
+// the per-edge override site validated by Spec.validate.)
 func TestPerEdgeOverrides_LegitimateFieldsAllowed(t *testing.T) {
 	src := strings.TrimSpace(`
 name: d
@@ -528,34 +527,6 @@ notify:
 	}
 	if !strings.Contains(err.Error(), "on_failure_chain") {
 		t.Errorf("error = %v; want mention of on_failure_chain migration", err)
-	}
-}
-
-// TestTriggerBeforeRejected ensures the removed `trigger.before:` field is
-// rejected at load time with a migration-pointing error. The Before field is
-// gone from TriggerConfig, so yaml.v3 would otherwise drop it silently and an
-// operator migrating from a pre-PipelineTask task.yaml would lose their
-// preflight pipeline without warning (PR6).
-func TestTriggerBeforeRejected(t *testing.T) {
-	dir := t.TempDir()
-	src := strings.TrimSpace(`
-name: T
-runtime: deno
-trigger:
-  manual: true
-  before:
-    - task: buildin/template
-`) + "\n"
-	if err := os.WriteFile(filepath.Join(dir, "task.yaml"), []byte(src), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "task.ts"), []byte("export default async function main() {}\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := LoadDirWithVars(dir, nil)
-	if err == nil || !strings.Contains(err.Error(), "kind: PipelineTask") {
-		t.Fatalf("expected migration error mentioning kind: PipelineTask, got %v", err)
 	}
 }
 

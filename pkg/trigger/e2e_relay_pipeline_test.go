@@ -10,9 +10,8 @@ package trigger
 //	stage 2: buildin/write-local   persists it to ${DATADIR}/relay/relay.yaml
 //	stage 3: relay daemon body     reads the rendered config + parks (daemon)
 //
-// This replaces the pre-PR6 e2e_relay_template_pipeline_test.go, which
-// exercised the same render→write→daemon flow via the now-removed
-// trigger.before machinery. The assertions carried over verbatim:
+// This exercises the render→write→daemon flow end-to-end via a
+// kind: PipelineTask. The assertions:
 //
 //   - both render stages run and the daemon terminal stage reaches Running
 //     (proves overrides applied + ${input.output} piped + stages ordered);
@@ -39,8 +38,7 @@ import (
 // buildinWriteLocalDir returns the absolute path to the on-disk
 // `tasks/buildin/write-local/` task. Anchored the same way as
 // buildinTemplateDir — walk up from this source file to the repo root.
-// (Moved here from the deleted e2e_oneshot_preflight_test.go; still used by
-// e2e_pipeline_task_test.go's loadBuildinWriteLocalAs.)
+// (Used by e2e_pipeline_task_test.go's loadBuildinWriteLocalAs.)
 func buildinWriteLocalDir(t *testing.T) string {
 	t.Helper()
 	_, thisFile, _, ok := goruntime.Caller(0)

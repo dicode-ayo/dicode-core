@@ -145,15 +145,15 @@ func validatePerEdgeOverrides(site string, o *Overrides) error {
 	if o == nil {
 		return nil
 	}
-	// Enabled — would silently no-op the prereq dispatch. Operators expect
+	// Enabled — would silently no-op the downstream dispatch. Operators expect
 	// it to "skip this edge"; instead it does nothing. Reject so the wrong
 	// mental model surfaces at load.
 	if o.Enabled != nil {
 		return fmt.Errorf("%s: field %q is not supported at a per-edge site (set on the task itself, not on the edge)", site, "enabled")
 	}
-	// Name / Description — replacing the prereq's identity at the per-edge
-	// dispatch makes no semantic sense; the run is logged under the prereq's
-	// real ID regardless. Reject to avoid misleading task.yaml.
+	// Name / Description — replacing the chained/stage task's identity at the
+	// per-edge dispatch makes no semantic sense; the run is logged under the
+	// task's real ID regardless. Reject to avoid misleading task.yaml.
 	if o.Name != "" {
 		return fmt.Errorf("%s: field %q is not supported at a per-edge site", site, "name")
 	}

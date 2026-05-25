@@ -73,7 +73,6 @@ permissions:
 | `trigger.chain.overrides` | object | | Per-edge patch applied to a deep copy of the downstream's spec at firing time; manual fires of the same downstream are unaffected. See [per-edge overrides](#chain-params-and-per-edge-overrides). |
 | `trigger.daemon` | bool | | Start on app start, restart on exit |
 | `trigger.restart` | string | | daemon only: `always` (default), `on-failure`, `never` |
-| ~~`trigger.before`~~ | — | | **Removed.** `trigger.before` was replaced by `kind: PipelineTask` — preflight orchestration is now expressed as pipeline stages. A `task.yaml` that still declares `trigger.before` is rejected at load. See [Pipelines](#pipelines). |
 | `permissions` | object | | Explicit access grants — nothing is implicit |
 | `permissions.env` | list | | Env vars the script may read (see below) |
 | `permissions.fs` | list | | Filesystem access declarations (Deno only) |
@@ -279,20 +278,13 @@ trigger:
 
 ## Pipelines
 
-> **`trigger.before` was removed.** Preflight orchestration — render
-> config, persist it, then start a daemon/body — is no longer expressed
-> as a `trigger.before:` list on a task. It is now a first-class
-> `kind: PipelineTask` whose stages run sequentially before a terminal
-> daemon/body stage. A `task.yaml` that still declares `trigger.before`
-> is rejected at load with a pointer to this section.
-
 A **pipeline** is a `kind: PipelineTask` that declares an ordered list
 of stages. Each stage is an existing `kind: Task`, run as its own child
 run. A stage must reach `status=success` for the pipeline to advance;
 the first failure short-circuits the rest. The previous stage's return
-value is piped forward via `${input.output}`, so the render → persist →
-start composition that `trigger.before` once expressed now lives in one
-self-contained pipeline definition.
+value is piped forward via `${input.output}`, so a render → persist →
+start-daemon composition lives in one self-contained pipeline
+definition.
 
 A pipeline lives in a task folder like any other task — the file is
 still **`task.yaml`**, discriminated by its `kind:`. There is no
@@ -522,7 +514,7 @@ orthogonal orchestration concerns and coexist:
 
 **Reach for a pipeline** when you own the whole sequence and want it
 described in one place — especially the render → persist → start-daemon
-shape that `trigger.before` used to express.
+shape.
 
 **Reach for a chain** when:
 
@@ -548,79 +540,24 @@ shape that `trigger.before` used to express.
   Task`, so its own configured failure chain fires when that stage
   fails, independent of the pipeline's short-circuit.
 
-### Migrating `trigger.before` → `kind: PipelineTask`
+### Worked example: `buildin/relay-server`
 
-`trigger.before` declared a list of preflight steps that ran before a
-task's daemon/body. The replacement splits that into two pieces:
+A render → persist → start-daemon flow is modeled as a
+`kind: PipelineTask` whose render/persist stages run first and whose
+**terminal stage** is a standalone daemon-body `kind: Task`. The split
+has two pieces:
 
-1. A standalone **daemon-body** `kind: Task` (`trigger.daemon: true`) —
-   the thing that used to be the host of `trigger.before`. It reads its
-   pre-rendered config off disk and is independently runnable.
+1. A standalone **daemon-body** `kind: Task` (`trigger.daemon: true`)
+   that reads its pre-rendered config off disk and is independently
+   runnable.
 2. A **`kind: PipelineTask`** whose render/persist stages run first and
-   whose **terminal stage** is that daemon-body task.
+   whose **terminal stage** is that daemon-body task. `${input.output}`
+   threads each stage's return value into the next.
 
-The mechanical conversion:
-
-| Old (`trigger.before`) | New (`kind: PipelineTask`) |
-| --- | --- |
-| The host task with `trigger.daemon: true` | A standalone `kind: Task` daemon body (its own folder) |
-| Each `before[i]` entry | A `stages[i]` entry referencing the same task ID, with the same overrides |
-| `${input.output}` between before-steps | `${input.output}` between stages (unchanged) |
-| The daemon as the implicit "after" step | The daemon body as the **terminal** stage |
-
-#### Worked example: `buildin/relay-server`
-
-Before — a single daemon task with a `trigger.before` preflight (the
-shape that is now rejected at load):
+The pipeline (`task.yaml`) whose terminal stage is the daemon body:
 
 ```yaml
-# tasks/buildin/relay-server/task.yaml  (OLD — no longer valid)
-apiVersion: dicode/v1
-kind: Task
-name: Relay Server
-runtime: deno
-
-trigger:
-  daemon: true
-  restart: always
-  before:
-    - task: buildin/template          # render relay.yaml from Doppler-fed env
-      overrides:
-        params:
-          - name: template_path
-            default: "${TASK_DIR}/relay.yaml"
-        fs:
-          - path: "${TASK_DIR}/relay.yaml"
-            permission: r
-        env:
-          - name: BASE_URL
-            value: "https://relay.example.com"
-          # ...Doppler-fed OAuth client_id/secret entries...
-    - task: buildin/write-local       # persist the rendered string
-      overrides:
-        params:
-          - name: content
-            default: "${input.output}"
-          - name: path
-            default: "${DATADIR}/relay/relay.yaml"
-          - name: mode
-            default: "0600"
-        fs:
-          - path: "${DATADIR}/relay"
-            permission: rw
-
-permissions:
-  net: ["*"]
-  fs:
-    - path: "${DATADIR}/relay"
-      permission: rw
-```
-
-After — a `kind: PipelineTask` (`task.yaml`) whose terminal stage is a
-standalone daemon-body `kind: Task`:
-
-```yaml
-# tasks/buildin/relay-server/task.yaml  (NEW — kind: PipelineTask)
+# tasks/buildin/relay-server/task.yaml  (kind: PipelineTask)
 apiVersion: dicode/v1
 kind: PipelineTask
 name: Relay Server
@@ -660,7 +597,7 @@ stages:
 ```
 
 ```yaml
-# tasks/buildin/relay-server-body/task.yaml  (NEW — standalone daemon body)
+# tasks/buildin/relay-server-body/task.yaml  (standalone daemon body)
 apiVersion: dicode/v1
 kind: Task
 name: Relay Server (daemon body)
@@ -681,17 +618,17 @@ permissions:
     - DICODE_VERSION
 ```
 
-What changed and why:
+Why it's shaped this way:
 
-- The daemon body is now a plain `kind: Task` that **reads** the
+- The daemon body is a plain `kind: Task` that **reads** the
   pre-rendered config — it's independently runnable and carries no
   rendering concern. OAuth secrets and the status password are scoped to
   the render stage's `env`, never the daemon body's.
-- The render and persist steps became `stages` in declaration order,
-  keeping their original overrides verbatim. `${input.output}` still
-  threads the rendered string from the template stage into the writer.
-- Rotating Doppler secrets is the same as before: re-fire the render
-  stage and the pipeline re-renders and restarts the terminal daemon.
+- The render and persist steps are `stages` in declaration order, each
+  carrying its own per-edge overrides. `${input.output}` threads the
+  rendered string from the template stage into the writer.
+- Rotating Doppler secrets is straightforward: re-fire the render stage
+  and the pipeline re-renders and restarts the terminal daemon.
 
 For a full end-to-end docker variant, see the
 [Cloudflare Tunnel worked example](../examples/cloudflare-tunnel.md).

@@ -84,8 +84,7 @@ spec:
 //
 // `out := *s` aliases the pointer fields (OnFailureChain, RunInputs); a
 // per-firing mutation through the copy would silently corrupt the registry's
-// canonical spec. copySpec must deep-clone these. (The Trigger.Before clone
-// assertion was dropped in PR6 along with trigger.before.)
+// canonical spec. copySpec must deep-clone these.
 func TestFootgun_CopySpecDeepClonesNestedStructs(t *testing.T) {
 	enabled := true
 	orig := &task.Spec{

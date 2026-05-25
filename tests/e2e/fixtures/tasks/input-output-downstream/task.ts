@@ -5,8 +5,7 @@
 // marker file content is the load-bearing assertion: the test compares
 // it byte-for-byte against the expected substituted string.
 //
-// The SDK access pattern matches the verifier in
-// e2e_template_preflight_pipeline_test.go — `input.<key>` directly,
+// The SDK access pattern reads `input.<key>` directly and uses
 // Deno.env.get for the marker path. We fail loud if the value is not a
 // string so a regression in the resolver surfaces here rather than as a
 // silent "wrote `[object Object]` to the marker".

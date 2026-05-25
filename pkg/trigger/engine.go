@@ -117,15 +117,15 @@ type Engine struct {
 	daemonRuns  map[string]string
 	daemonSpecs map[string]*task.Spec
 
-	// daemonStates tracks the preflight/lifecycle phase of each daemon task
-	// for surfacing in the WebUI (Engine.DaemonState). Independent of
-	// daemonMu — guarded by its own RWMutex so a state-read in the API path
-	// never has to wait on a long preflight dispatch holding daemonMu.
+	// daemonStates tracks the lifecycle phase of each daemon task for
+	// surfacing in the WebUI (Engine.DaemonState). Independent of daemonMu —
+	// guarded by its own RWMutex so a state-read in the API path never has to
+	// wait on a long daemon dispatch holding daemonMu.
 	daemonStates *daemonStateMap
 
-	// restartGates is a per-daemon at-most-one-in-flight lock for prereq-
-	// driven restarts. See daemon_state.go for the coalescing rationale. Also
-	// reused by handlePipelineStageRerun, keyed by pipeline ID, so a flurry of
+	// restartGates is a per-daemon at-most-one-in-flight lock for daemon
+	// restarts. See daemon_state.go for the coalescing rationale. Also reused
+	// by handlePipelineStageRerun, keyed by pipeline ID, so a flurry of
 	// mid-pipeline stage re-fires coalesces to at most one outstanding
 	// propagation per pipeline.
 	restartGates *restartGate

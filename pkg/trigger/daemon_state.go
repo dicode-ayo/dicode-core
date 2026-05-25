@@ -37,10 +37,11 @@ const (
 	// i.e. the fireAsync call to launch the body returned an error. Distinct
 	// from DaemonStopped so operators can tell "daemon body broke" apart from
 	// "operator deliberately stopped it / never started it". Reachable only
-	// from startDaemon's launch-error branch (issue #318). (Named for
-	// historical reasons — pre-PipelineTask this state meant "preflight
-	// passed but body launch failed"; daemons no longer preflight, so it now
-	// just means "body launch failed".)
+	// from startDaemon's launch-error branch (issue #318).
+	//
+	// The const name and wire value "failed_after_preflight" are kept as-is:
+	// they are a live API/WebUI enum value, so renaming would be a breaking
+	// change. The current meaning is simply "daemon body launch failed".
 	DaemonFailedAfterPreflight DaemonState = "failed_after_preflight"
 
 	// DaemonCrashed indicates the daemon's body successfully started but
