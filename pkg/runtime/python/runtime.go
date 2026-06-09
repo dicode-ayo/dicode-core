@@ -206,13 +206,6 @@ type executor struct {
 func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime.RunOptions) (*pkgruntime.RunResult, error) {
 	runID := opts.RunID
 	result := &pkgruntime.RunResult{RunID: runID}
-	status := registry.StatusSuccess
-
-	defer func() {
-		if ferr := e.reg.FinishRun(context.Background(), runID, status); ferr != nil {
-			e.log.Error("finish run", zap.String("run", runID), zap.Error(ferr))
-		}
-	}()
 
 	// Resolve declared env permissions. When the trigger engine ran
 	// preflight (issue #235), it forwards the *Resolved here so we don't
@@ -228,7 +221,6 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 	} else {
 		resolvedRes, err = envresolve.New(e.reg, e.secrets, e.providerRunner).Resolve(ctx, spec)
 		if err != nil {
-			status = registry.StatusFailure
 			result.Error = err
 			return result, nil
 		}
@@ -239,13 +231,11 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 	// Read the user's task.py.
 	scriptPath := spec.ScriptPath()
 	if scriptPath == "" {
-		status = registry.StatusFailure
 		result.Error = fmt.Errorf("script not found for task %s", spec.ID)
 		return result, nil
 	}
 	scriptBytes, err := os.ReadFile(scriptPath) //nolint:gosec
 	if err != nil {
-		status = registry.StatusFailure
 		result.Error = fmt.Errorf("read script: %w", err)
 		return result, nil
 	}
@@ -277,7 +267,6 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 	}
 	socketPath, token, err := srv.Start(execCtx)
 	if err != nil {
-		status = registry.StatusFailure
 		result.Error = fmt.Errorf("start socket server: %w", err)
 		return result, nil
 	}
@@ -286,14 +275,12 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 	// Build the temporary wrapper file.
 	wrapped, err := buildWrapper(scriptBytes)
 	if err != nil {
-		status = registry.StatusFailure
 		result.Error = fmt.Errorf("build wrapper: %w", err)
 		return result, nil
 	}
 
 	tmpFile, err := os.CreateTemp("", "dicode-task-"+runID+"__*.py")
 	if err != nil {
-		status = registry.StatusFailure
 		result.Error = fmt.Errorf("create temp file: %w", err)
 		return result, nil
 	}
@@ -301,7 +288,6 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 
 	if _, err := tmpFile.WriteString(wrapped); err != nil {
 		tmpFile.Close()
-		status = registry.StatusFailure
 		result.Error = fmt.Errorf("write wrapper: %w", err)
 		return result, nil
 	}
@@ -312,13 +298,11 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		status = registry.StatusFailure
 		result.Error = err
 		return result, nil
 	}
 
 	if err := cmd.Start(); err != nil {
-		status = registry.StatusFailure
 		result.Error = fmt.Errorf("start uv: %w", err)
 		return result, nil
 	}
@@ -359,11 +343,6 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 			result.ChainInput = out.Data
 		}
 		if exitErr != nil {
-			if execCtx.Err() != nil {
-				status = registry.StatusCancelled
-			} else {
-				status = registry.StatusFailure
-			}
 			result.Error = exitErr
 		}
 	}

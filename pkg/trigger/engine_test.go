@@ -903,13 +903,9 @@ func TestInjectDicodeSDK_NoHead(t *testing.T) {
 // instantExec is a mock Executor that completes immediately with success.
 // It avoids spawning real Deno subprocesses so the WaitRun channel tests
 // are fast and not sensitive to script format or Deno availability.
-// It calls FinishRun itself (mirroring what the real Deno executor does via defer).
-type instantExec struct {
-	reg *registry.Registry
-}
+type instantExec struct{}
 
-func (e instantExec) Execute(_ context.Context, _ *task.Spec, opts pkgruntime.RunOptions) (*pkgruntime.RunResult, error) {
-	_ = e.reg.FinishRun(context.Background(), opts.RunID, registry.StatusSuccess)
+func (e instantExec) Execute(_ context.Context, _ *task.Spec, _ pkgruntime.RunOptions) (*pkgruntime.RunResult, error) {
 	return &pkgruntime.RunResult{ReturnValue: "done"}, nil
 }
 
@@ -923,7 +919,7 @@ func newFastEnv(t *testing.T) *testEnv {
 	}
 	t.Cleanup(func() { d.Close() })
 	reg := registry.New(d)
-	eng := New(reg, instantExec{reg: reg}, zap.NewNop())
+	eng := New(reg, instantExec{}, zap.NewNop())
 	return &testEnv{engine: eng, reg: reg}
 }
 

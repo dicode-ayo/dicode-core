@@ -242,7 +242,6 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	}
 
 	result := &RunResult{RunID: runID}
-	status := registry.StatusSuccess
 
 	defer func() {
 		// If the run failed before Deno started (secret missing, script not found,
@@ -253,9 +252,6 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		}
 		if logs, lerr := rt.registry.GetRunLogs(context.Background(), runID); lerr == nil {
 			result.Logs = logs
-		}
-		if ferr := rt.registry.FinishRun(context.Background(), runID, status); ferr != nil {
-			rt.log.Error("finish run", zap.String("run", runID), zap.Error(ferr))
 		}
 	}()
 
@@ -272,7 +268,6 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	} else {
 		resolvedRes, err = rt.envresolver().Resolve(ctx, spec)
 		if err != nil {
-			status = registry.StatusFailure
 			result.Error = err
 			return result, nil
 		}
@@ -282,7 +277,6 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 
 	taskPath := spec.ScriptPath()
 	if taskPath == "" {
-		status = registry.StatusFailure
 		result.Error = fmt.Errorf("script not found for task %s", spec.ID)
 		return result, nil
 	}
@@ -318,7 +312,6 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	}
 	socketPath, token, err := srv.Start(execCtx)
 	if err != nil {
-		status = registry.StatusFailure
 		result.Error = fmt.Errorf("start socket server: %w", err)
 		return result, nil
 	}
@@ -331,7 +324,6 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	// tasks/buildin/temp-cleanup builtin can correlate orphaned files with runs.
 	shimFile, err := os.CreateTemp("", "dicode-shim-"+runID+"__*.ts")
 	if err != nil {
-		status = registry.StatusFailure
 		result.Error = fmt.Errorf("create shim file: %w", err)
 		return result, nil
 	}
@@ -341,7 +333,6 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	}
 	if _, err := shimFile.WriteString(shimContent); err != nil {
 		shimFile.Close()
-		status = registry.StatusFailure
 		result.Error = fmt.Errorf("write shim: %w", err)
 		return result, nil
 	}
@@ -350,7 +341,6 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	// Write the wrapper that imports both and calls the user's exported main().
 	runnerFile, err := os.CreateTemp("", "dicode-runner-"+runID+"__*.ts")
 	if err != nil {
-		status = registry.StatusFailure
 		result.Error = fmt.Errorf("create runner file: %w", err)
 		return result, nil
 	}
@@ -383,7 +373,6 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		"}\n"
 	if _, err := runnerFile.WriteString(runner); err != nil {
 		runnerFile.Close()
-		status = registry.StatusFailure
 		result.Error = fmt.Errorf("write runner: %w", err)
 		return result, nil
 	}
@@ -400,25 +389,21 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		cmd.Stdout = io.Discard
 		cmd.Stderr = io.Discard
 		if err := cmd.Start(); err != nil {
-			status = registry.StatusFailure
 			result.Error = fmt.Errorf("start deno: %w", err)
 			return result, nil
 		}
 	} else {
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
-			status = registry.StatusFailure
 			result.Error = err
 			return result, nil
 		}
 		stderr, err := cmd.StderrPipe()
 		if err != nil {
-			status = registry.StatusFailure
 			result.Error = err
 			return result, nil
 		}
 		if err := cmd.Start(); err != nil {
-			status = registry.StatusFailure
 			result.Error = fmt.Errorf("start deno: %w", err)
 			return result, nil
 		}
@@ -471,11 +456,6 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		}
 		result.Output = srv.Output()
 		if exitErr != nil {
-			if execCtx.Err() != nil {
-				status = registry.StatusCancelled
-			} else {
-				status = registry.StatusFailure
-			}
 			result.Error = exitErr
 		}
 	}

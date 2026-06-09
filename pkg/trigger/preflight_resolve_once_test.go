@@ -35,14 +35,12 @@ func (f *fakeDenoRuntimeForChannel) SetSecretOutputChannel(c chan map[string]str
 // dispatches are recorded too — and the most recent opts.PreResolvedEnv is
 // captured so the test can verify the engine threaded it through.
 //
-// Real runtimes mark the run finished via their deferred reg.FinishRun; this
-// mock does the same so engine.Engine.WaitRun (used by the engine's own
-// ProviderRunner.Run method) sees a terminal status.
+// Real runtimes mark the run finished via FinishRunWithResult called by dispatch;
+// this mock just returns and lets dispatch handle it.
 type providerCountingExecutor struct {
 	providerID  string
 	providerVal map[string]string
 	denoRT      *fakeDenoRuntimeForChannel
-	reg         *registry.Registry
 
 	providerCalls           atomic.Int64
 	consumerCalls           atomic.Int64
@@ -50,12 +48,6 @@ type providerCountingExecutor struct {
 }
 
 func (p *providerCountingExecutor) Execute(_ context.Context, spec *task.Spec, opts pkgruntime.RunOptions) (*pkgruntime.RunResult, error) {
-	defer func() {
-		// Match the runtime contract: the run record must reach a terminal
-		// state by the time the executor returns or WaitRun blocks forever.
-		_ = p.reg.FinishRun(context.Background(), opts.RunID, registry.StatusSuccess)
-	}()
-
 	if spec.ID == p.providerID {
 		p.providerCalls.Add(1)
 		// Mimic the IPC-server-side behaviour: when the provider task calls
@@ -104,7 +96,6 @@ func TestPreflight_ProviderFiresOnceAcrossPreflightAndDispatch(t *testing.T) {
 		providerID:  "doppler",
 		providerVal: map[string]string{"PG_URL": "postgres://x"},
 		denoRT:      denoRT,
-		reg:         reg,
 	}
 
 	eng := New(reg, exec, zap.NewNop())

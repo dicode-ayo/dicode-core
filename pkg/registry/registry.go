@@ -211,6 +211,18 @@ func (r *Registry) FinishRunWithReason(ctx context.Context, runID, status, reaso
 	)
 }
 
+// FinishRunWithResult atomically updates the run status, finished_at,
+// return_value, and structured output columns in a single UPDATE.
+// This eliminates the race where a reader sees status=success but an
+// empty return_value because FinishRun and SetRunResult were separate writes.
+func (r *Registry) FinishRunWithResult(ctx context.Context, runID, status, returnValueJSON, outputContentType, outputContent string) error {
+	now := time.Now().UnixMilli()
+	return r.db.Exec(ctx,
+		`UPDATE runs SET status = ?, finished_at = ?, return_value = ?, output_content_type = ?, output_content = ? WHERE id = ?`,
+		status, now, returnValueJSON, outputContentType, outputContent, runID,
+	)
+}
+
 // SetLogHook registers a function called after each log entry is written.
 func (r *Registry) SetLogHook(fn func(runID, level, msg string, ts int64)) {
 	r.logMu.Lock()

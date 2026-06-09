@@ -54,7 +54,6 @@ func New(r *registry.Registry, log *zap.Logger) *Runtime {
 
 // fail marks a run as failed and returns the result.
 func (rt *Runtime) fail(runID string, err error) (*RunResult, error) {
-	_ = rt.registry.FinishRun(context.Background(), runID, registry.StatusFailure)
 	return &RunResult{RunID: runID, Error: err}, nil
 }
 
@@ -80,7 +79,6 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		imageTag, err = rt.buildImage(ctx, dc, spec, runID)
 		if err != nil {
 			if ctx.Err() != nil {
-				_ = rt.registry.FinishRun(context.Background(), runID, registry.StatusCancelled)
 				return &RunResult{RunID: runID, Error: err}, nil
 			}
 			return rt.fail(runID, err)
@@ -92,7 +90,6 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		}
 		if err := rt.maybePull(ctx, dc, cfg.Image, pullPolicy, runID); err != nil {
 			if ctx.Err() != nil {
-				_ = rt.registry.FinishRun(context.Background(), runID, registry.StatusCancelled)
 				return &RunResult{RunID: runID, Error: err}, nil
 			}
 			return rt.fail(runID, err)
@@ -232,16 +229,9 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	<-logDone
 	closeLog() // no-op if the kill-watcher already closed it
 
-	finalStatus := registry.StatusSuccess
-	if ctx.Err() != nil {
-		finalStatus = registry.StatusCancelled
-	} else if result.Error != nil || exitCode != 0 {
-		finalStatus = registry.StatusFailure
-		if result.Error == nil {
-			result.Error = fmt.Errorf("container exited with code %d", exitCode)
-		}
+	if result.Error == nil && exitCode != 0 {
+		result.Error = fmt.Errorf("container exited with code %d", exitCode)
 	}
-	_ = rt.registry.FinishRun(context.Background(), runID, finalStatus)
 	return result, nil
 }
 

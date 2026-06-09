@@ -68,7 +68,7 @@ func TestFireChain_Success_ParamsMergedIntoInput(t *testing.T) {
 		t.Errorf("downstream status = %q, want success", got.Status)
 	}
 
-	returnValue := pollReturnValue(t, e.engine, got.ID, 5*time.Second)
+	returnValue := got.ReturnValue
 	var input map[string]any
 	if err := json.Unmarshal([]byte(returnValue), &input); err != nil {
 		t.Fatalf("unmarshal return value %q: %v", returnValue, err)
@@ -140,7 +140,7 @@ func TestFireChain_Success_NoParams_PreservesRawOutput(t *testing.T) {
 		t.Errorf("downstream status = %q, want success", got.Status)
 	}
 
-	returnValue := pollReturnValue(t, e.engine, got.ID, 5*time.Second)
+	returnValue := got.ReturnValue
 	// No wrapping: downstream sees the raw upstream output as a JSON string.
 	var input any
 	if err := json.Unmarshal([]byte(returnValue), &input); err != nil {

@@ -452,12 +452,8 @@ func TestRuntime_RunRecord(t *testing.T) {
 	if r.RunID == "" {
 		t.Fatal("no run ID")
 	}
-	run, err := e.reg.GetRun(context.Background(), r.RunID)
-	if err != nil {
-		t.Fatalf("GetRun: %v", err)
-	}
-	if run.Status != registry.StatusSuccess {
-		t.Errorf("expected success, got %s", run.Status)
+	if r.Error != nil {
+		t.Errorf("expected success, got error: %v", r.Error)
 	}
 }
 
@@ -491,13 +487,6 @@ func TestRuntime_ScriptError(t *testing.T) {
 	r := e.run(t, `throw new Error("boom")`, RunOptions{})
 	if r.Error == nil {
 		t.Fatal("expected error")
-	}
-	run, err := e.reg.GetRun(context.Background(), r.RunID)
-	if err != nil {
-		t.Fatalf("GetRun: %v", err)
-	}
-	if run.Status != registry.StatusFailure {
-		t.Errorf("expected failure, got %s", run.Status)
 	}
 }
 

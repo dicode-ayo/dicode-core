@@ -60,10 +60,7 @@ func TestFireChain_MergesParamsIntoInput(t *testing.T) {
 	}
 
 	// Decode the return value — the chain target echoed `input` back.
-	// Poll for return_value: the runtime's deferred FinishRun commits before
-	// the engine wrapper's SetRunResult, so a fast reader can see status=success
-	// with an empty ReturnValue.
-	returnValue := pollReturnValue(t, e.engine, got.ID, 5*time.Second)
+	returnValue := got.ReturnValue
 	var input map[string]any
 	if err := json.Unmarshal([]byte(returnValue), &input); err != nil {
 		t.Fatalf("unmarshal return value %q: %v", returnValue, err)
@@ -154,10 +151,7 @@ func TestFireChain_PerTaskFullyReplacesDefaults(t *testing.T) {
 	}
 
 	// Decode the return value — the chain target echoed `input` back.
-	// Poll for return_value: the runtime's deferred FinishRun commits before
-	// the engine wrapper's SetRunResult, so a fast reader can see status=success
-	// with an empty ReturnValue.
-	returnValue := pollReturnValue(t, e.engine, got.ID, 5*time.Second)
+	returnValue := got.ReturnValue
 	var input map[string]any
 	if err := json.Unmarshal([]byte(returnValue), &input); err != nil {
 		t.Fatalf("unmarshal return value %q: %v", returnValue, err)
@@ -328,7 +322,7 @@ func TestChainDispatch_ResolvesInputOutput(t *testing.T) {
 		t.Errorf("downstream status = %q, want success", got.Status)
 	}
 
-	returnValue := pollReturnValue(t, e.engine, got.ID, 5*time.Second)
+	returnValue := got.ReturnValue
 	var input map[string]any
 	if err := json.Unmarshal([]byte(returnValue), &input); err != nil {
 		t.Fatalf("unmarshal return value %q: %v", returnValue, err)
@@ -389,7 +383,7 @@ func TestChainDispatch_ResolvesInputParams(t *testing.T) {
 	if got.Status != "success" {
 		t.Errorf("downstream status = %q, want success", got.Status)
 	}
-	returnValue := pollReturnValue(t, e.engine, got.ID, 5*time.Second)
+	returnValue := got.ReturnValue
 	var input map[string]any
 	if err := json.Unmarshal([]byte(returnValue), &input); err != nil {
 		t.Fatalf("unmarshal return value: %v", err)
@@ -444,7 +438,7 @@ func TestOnFailureChainDispatch_ResolvesInputOutputField(t *testing.T) {
 	if got.Status != "success" {
 		t.Errorf("fallback status = %q, want success", got.Status)
 	}
-	returnValue := pollReturnValue(t, e.engine, got.ID, 5*time.Second)
+	returnValue := got.ReturnValue
 	var input map[string]any
 	if err := json.Unmarshal([]byte(returnValue), &input); err != nil {
 		t.Fatalf("unmarshal return value: %v", err)
@@ -519,7 +513,7 @@ func TestOnFailureChainDispatch_ResolvesInputOutput(t *testing.T) {
 		t.Errorf("fallback status = %q, want success", got.Status)
 	}
 
-	returnValue := pollReturnValue(t, e.engine, got.ID, 5*time.Second)
+	returnValue := got.ReturnValue
 	var input map[string]any
 	if err := json.Unmarshal([]byte(returnValue), &input); err != nil {
 		t.Fatalf("unmarshal return value %q: %v", returnValue, err)
