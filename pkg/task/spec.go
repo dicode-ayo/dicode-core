@@ -109,15 +109,15 @@ type ChainTrigger struct {
 // TriggerConfig defines how a task is triggered.
 // Exactly one of Cron, Webhook, Manual, Chain, or Daemon should be set.
 type TriggerConfig struct {
-	Cron             string        `yaml:"cron,omitempty"`           // cron expression e.g. "0 9 * * *"
-	Webhook          string        `yaml:"webhook,omitempty"`        // HTTP path e.g. "/hooks/my-task"
-	WebhookSecret    string        `yaml:"webhook_secret,omitempty"` // HMAC-SHA256 secret for webhook auth
-	WebhookAuth      bool          `yaml:"auth,omitempty"`           // require dicode session for GET (UI) and POST (run)
+	Cron             string        `yaml:"cron,omitempty"`              // cron expression e.g. "0 9 * * *"
+	Webhook          string        `yaml:"webhook,omitempty"`           // HTTP path e.g. "/hooks/my-task"
+	WebhookSecret    string        `yaml:"webhook_secret,omitempty"`    // HMAC-SHA256 secret for webhook auth
+	WebhookAuth      bool          `yaml:"auth,omitempty"`              // require dicode session for GET (UI) and POST (run)
 	ReplayProtection *bool         `yaml:"replay_protection,omitempty"` // nonce-cache replay guard; default true when webhook_secret is set
-	Manual           bool          `yaml:"manual,omitempty"`         // only via explicit trigger
-	Chain            *ChainTrigger `yaml:"chain,omitempty"`          // fire when another task completes
-	Daemon           bool          `yaml:"daemon,omitempty"`         // start on app start, restart on exit
-	Restart          string        `yaml:"restart,omitempty"`        // daemon only: "always"(default)|"on-failure"|"never"
+	Manual           bool          `yaml:"manual,omitempty"`            // only via explicit trigger
+	Chain            *ChainTrigger `yaml:"chain,omitempty"`             // fire when another task completes
+	Daemon           bool          `yaml:"daemon,omitempty"`            // start on app start, restart on exit
+	Restart          string        `yaml:"restart,omitempty"`           // daemon only: "always"(default)|"on-failure"|"never"
 }
 
 // Param defines a user-configurable input for a task.

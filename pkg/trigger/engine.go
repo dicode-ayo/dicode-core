@@ -55,9 +55,9 @@ type Engine struct {
 	cron      *cron.Cron
 	log       *zap.Logger
 
-	mu          sync.Mutex
-	cronEntries map[string]cron.EntryID // taskID → cron entry
-	webhooks           map[string]string // webhook path → taskID
+	mu                 sync.Mutex
+	cronEntries        map[string]cron.EntryID // taskID → cron entry
+	webhooks           map[string]string       // webhook path → taskID
 	webhookReplayCache *replayCache
 
 	// registerMu serializes the entire Register path so that concurrent
@@ -194,20 +194,20 @@ type PythonRuntimeAPI interface {
 // New creates a trigger Engine with a default Deno executor.
 func New(r *registry.Registry, defaultExec pkgruntime.Executor, log *zap.Logger) *Engine {
 	e := &Engine{
-		registry:          r,
-		executors:         make(map[task.Runtime]pkgruntime.Executor),
-		cron:              cron.New(),
-		log:               log,
-		cronEntries:       make(map[string]cron.EntryID),
+		registry:           r,
+		executors:          make(map[task.Runtime]pkgruntime.Executor),
+		cron:               cron.New(),
+		log:                log,
+		cronEntries:        make(map[string]cron.EntryID),
 		webhooks:           make(map[string]string),
 		webhookReplayCache: newReplayCache(1 * time.Hour),
-		daemonRuns:        make(map[string]string),
-		daemonSpecs:       make(map[string]*task.Spec),
-		daemonStates:      newDaemonStateMap(),
-		restartGates:      newRestartGate(),
-		livePipelines:     make(map[string]*PipelineRunner),
-		deferredPipelines: make(map[string]*task.PipelineTask),
-		guards:            newChainGuards(),
+		daemonRuns:         make(map[string]string),
+		daemonSpecs:        make(map[string]*task.Spec),
+		daemonStates:       newDaemonStateMap(),
+		restartGates:       newRestartGate(),
+		livePipelines:      make(map[string]*PipelineRunner),
+		deferredPipelines:  make(map[string]*task.PipelineTask),
+		guards:             newChainGuards(),
 	}
 	e.executors[task.RuntimeDeno] = defaultExec
 	return e
