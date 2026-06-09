@@ -95,13 +95,6 @@ type executor struct {
 func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime.RunOptions) (*pkgruntime.RunResult, error) {
 	runID := opts.RunID
 	result := &pkgruntime.RunResult{RunID: runID}
-	status := registry.StatusSuccess
-
-	defer func() {
-		if ferr := e.reg.FinishRun(context.Background(), runID, status); ferr != nil {
-			e.log.Error("finish run", zap.String("run", runID), zap.Error(ferr))
-		}
-	}()
 
 	cfg := spec.Docker
 	containerName := "dicode-" + runID
@@ -112,11 +105,6 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 		var err error
 		imageTag, err = e.buildImage(ctx, spec, runID)
 		if err != nil {
-			if ctx.Err() != nil {
-				status = registry.StatusCancelled
-			} else {
-				status = registry.StatusFailure
-			}
 			result.Error = err
 			return result, nil
 		}
@@ -135,19 +123,16 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		status = registry.StatusFailure
 		result.Error = err
 		return result, nil
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		status = registry.StatusFailure
 		result.Error = err
 		return result, nil
 	}
 
 	if err := cmd.Start(); err != nil {
-		status = registry.StatusFailure
 		result.Error = fmt.Errorf("start podman: %w", err)
 		return result, nil
 	}
@@ -178,10 +163,8 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 
 	switch {
 	case ctx.Err() != nil:
-		status = registry.StatusCancelled
 		result.Error = ctx.Err()
 	case exitErr != nil:
-		status = registry.StatusFailure
 		result.Error = exitErr
 	}
 

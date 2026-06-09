@@ -441,3 +441,33 @@ func TestStartRunKind(t *testing.T) {
 		t.Fatalf("empty kind: got %q, want %q", run3.Kind, RunKindTask)
 	}
 }
+
+func TestFinishRunWithResult(t *testing.T) {
+	t.Parallel()
+	r := newTestRegistry(t)
+
+	runID, err := r.StartRun(context.Background(), "task-1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = r.FinishRunWithResult(context.Background(), runID, StatusSuccess,
+		`{"key":"value"}`, "text/html", "<b>hello</b>")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	run, err := r.GetRun(context.Background(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Status != StatusSuccess {
+		t.Errorf("status = %q, want %q", run.Status, StatusSuccess)
+	}
+	if run.ReturnValue != `{"key":"value"}` {
+		t.Errorf("return_value = %q, want %q", run.ReturnValue, `{"key":"value"}`)
+	}
+	if run.FinishedAt == nil {
+		t.Error("finished_at should be set")
+	}
+}
