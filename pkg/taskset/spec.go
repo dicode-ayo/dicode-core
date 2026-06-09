@@ -26,8 +26,8 @@ type Ref struct {
 
 // RefAuth holds optional credentials for a git ref.
 type RefAuth struct {
-	TokenEnv string `yaml:"token_env,omitempty"`
-	SSHKey   string `yaml:"ssh_key,omitempty"`
+	TokenEnv string `yaml:"token_env,omitempty" json:"-"`
+	SSHKey   string `yaml:"ssh_key,omitempty" json:"-"`
 }
 
 // IsGit reports whether this is a git ref (URL is non-empty).
