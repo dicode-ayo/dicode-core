@@ -33,12 +33,13 @@ type PipelineTask struct {
 // Notably no Daemon: a pipeline is daemon-shaped iff its terminal stage is a
 // kind: Task with trigger.daemon: true.
 type PipelineTrigger struct {
-	Manual        bool          `yaml:"manual,omitempty"`
-	Cron          string        `yaml:"cron,omitempty"`
-	Webhook       string        `yaml:"webhook,omitempty"`
-	WebhookSecret string        `yaml:"webhook_secret,omitempty"`
-	WebhookAuth   bool          `yaml:"auth,omitempty"`
-	Chain         *ChainTrigger `yaml:"chain,omitempty"`
+	Manual           bool          `yaml:"manual,omitempty"`
+	Cron             string        `yaml:"cron,omitempty"`
+	Webhook          string        `yaml:"webhook,omitempty"`
+	WebhookSecret    string        `yaml:"webhook_secret,omitempty"`
+	WebhookAuth      bool          `yaml:"auth,omitempty"`
+	ReplayProtection *bool         `yaml:"replay_protection,omitempty"`
+	Chain            *ChainTrigger `yaml:"chain,omitempty"`
 }
 
 // Stage is one entry in a PipelineTask.Stages list: a task ID plus optional
