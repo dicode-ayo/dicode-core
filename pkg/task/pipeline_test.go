@@ -48,7 +48,7 @@ func TestPipelineValidate(t *testing.T) {
 		{"bad kind", func(p *PipelineTask) { p.Kind = "Task" }, "kind"},
 		{"no name", func(p *PipelineTask) { p.Name = "" }, "name"},
 		{"missing subtype", func(p *PipelineTask) { p.Subtype = "" }, "subtype is required"},
-		{"bad subtype", func(p *PipelineTask) { p.Subtype = "parallel" }, "is not supported in v1"},
+		{"bad subtype", func(p *PipelineTask) { p.Subtype = "parallel" }, "is not supported"},
 		{"multi trigger", func(p *PipelineTask) {
 			p.Trigger = PipelineTrigger{Manual: true, Cron: "0 * * * *"}
 		}, "at most one trigger"},
