@@ -332,6 +332,7 @@ func TestServer_Log_RedactsSecretValue(t *testing.T) {
 		"message": "secret leak attempt: " + secretValue + " trailing",
 	})
 	time.Sleep(20 * time.Millisecond)
+	conn.Close()
 	srv.Stop()
 
 	logs, err := e.reg.GetRunLogs(context.Background(), srv.runID)
@@ -360,6 +361,7 @@ func TestServer_Log_NilRedactorIsPassThrough(t *testing.T) {
 	const msg = "token=abc123 (not a secret to this server)"
 	sendMsg(t, conn, map[string]any{"method": "log", "level": "info", "message": msg})
 	time.Sleep(20 * time.Millisecond)
+	conn.Close()
 	srv.Stop()
 
 	logs, err := e.reg.GetRunLogs(context.Background(), srv.runID)
@@ -379,6 +381,7 @@ func TestServer_Log(t *testing.T) {
 	// Give the server goroutine time to receive and enqueue the message,
 	// then Stop() flushes the buffer before we query.
 	time.Sleep(20 * time.Millisecond)
+	conn.Close()
 	srv.Stop()
 
 	logs, err := e.reg.GetRunLogs(context.Background(), srv.runID)
@@ -401,6 +404,7 @@ func TestServer_Log_MultiLine(t *testing.T) {
 	msg := "line one\nline two\nline three"
 	sendMsg(t, conn, map[string]any{"method": "log", "level": "info", "message": msg})
 	time.Sleep(20 * time.Millisecond)
+	conn.Close()
 	srv.Stop()
 
 	logs, _ := e.reg.GetRunLogs(context.Background(), srv.runID)
@@ -1406,6 +1410,7 @@ func TestServer_Log_OrderingPreserved(t *testing.T) {
 	}
 	// Give server time to receive all messages before flushing.
 	time.Sleep(50 * time.Millisecond)
+	conn.Close()
 	srv.Stop()
 
 	logs, err := e.reg.GetRunLogs(context.Background(), srv.runID)
@@ -1444,10 +1449,12 @@ func TestServer_Log_InvalidLevel(t *testing.T) {
 			if logs[0].Level != "info" {
 				t.Errorf("expected level normalised to \"info\", got %q", logs[0].Level)
 			}
+			conn.Close()
 			srv.Stop()
 			return
 		}
 	}
+	conn.Close()
 	srv.Stop()
 	t.Fatal("log entry was not flushed within 2 s")
 }
@@ -2031,5 +2038,159 @@ func TestServer_Crypto_RoundTrip(t *testing.T) {
 	}
 	if string(gotPT) != string(plaintext) {
 		t.Errorf("round-trip mismatch: got %q, want %q", gotPT, plaintext)
+	}
+}
+
+// ── Bug #130: Stop() ordering race ───────────────────────────────────────────
+
+// TestServer_Stop_WaitsForInflightHandleConn verifies that log entries
+// buffered by a handleConn goroutine that is still running when Stop() is
+// called are NOT lost. The fix adds a connWG WaitGroup: Stop() closes the
+// listener first, then waits for all handleConn goroutines to drain, THEN
+// triggers the final log flush.
+func TestServer_Stop_WaitsForInflightHandleConn(t *testing.T) {
+	t.Parallel()
+	e := newTestEnv(t)
+	conn, srv := e.start(t, nil, nil)
+
+	// Send a log message; we expect it to survive Stop() even if the
+	// handleConn goroutine hasn't finished processing when Stop fires.
+	const msg = "in-flight-log"
+	sendMsg(t, conn, map[string]any{
+		"method":  "log",
+		"level":   "info",
+		"message": msg,
+	})
+
+	// Give the server goroutine a brief moment to receive the message and
+	// enqueue it in the log buffer (but not flush it yet — ticker is 200 ms).
+	time.Sleep(10 * time.Millisecond)
+
+	// Close the connection to make handleConn's readMsg return EOF, then
+	// immediately call Stop. The fix ensures Stop waits for handleConn to
+	// finish (and thus for bufferLog to complete) before flushing.
+	conn.Close()
+	srv.Stop()
+
+	logs, err := e.reg.GetRunLogs(context.Background(), srv.runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, l := range logs {
+		if l.Message == msg {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("in-flight log entry was lost on Stop(); got %d entries: %+v", len(logs), logs)
+	}
+}
+
+// TestServer_Stop_Idempotent verifies that calling Stop() twice does not
+// panic (double-close of logFlushCh is guarded by the select).
+func TestServer_Stop_Idempotent(t *testing.T) {
+	t.Parallel()
+	e := newTestEnv(t)
+	conn, srv := e.start(t, nil, nil)
+	// Close the connection first so that handleConn's readMsg returns EOF and
+	// the goroutine exits. connWG then drops to zero so Stop() can proceed.
+	conn.Close()
+	srv.Stop()
+	srv.Stop() // must not panic
+}
+
+// ── Bug #130: BulkAppendLogs fallback ────────────────────────────────────────
+
+// txFailDB is a db.DB that wraps a real DB but injects a failure on the first
+// Tx() call, simulating a transient SQLite transaction error. Subsequent Tx
+// and Exec calls are forwarded to the underlying DB.
+type txFailDB struct {
+	db.DB
+	txFailed bool
+}
+
+func (f *txFailDB) Tx(ctx context.Context, fn func(tx db.DB) error) error {
+	if !f.txFailed {
+		f.txFailed = true
+		return fmt.Errorf("injected tx failure")
+	}
+	return f.DB.Tx(ctx, fn)
+}
+
+// TestServer_FlushBatch_FallsBackToPerRow verifies that when BulkAppendLogs
+// returns an error the flush caller falls back to per-row AppendLog inserts
+// and the log entries are still written to the DB.
+func TestServer_FlushBatch_FallsBackToPerRow(t *testing.T) {
+	t.Parallel()
+	realDB, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { realDB.Close() })
+
+	// Use a txFailDB so that the first BulkAppendLogs (which uses Tx) fails,
+	// forcing flushBatch to fall back to per-row AppendLog (which uses Exec).
+	failingDB := &txFailDB{DB: realDB}
+	reg := registry.New(failingDB)
+	secret, _ := NewSecret()
+
+	runID := fmt.Sprintf("fallback-%d", time.Now().UnixNano())
+	srv := New(runID, "test-task", secret, reg, failingDB, nil, nil, zap.NewNop(), nil, nil)
+
+	batch := []registry.PendingLogEntry{
+		{RunID: runID, Level: "info", Message: "should-survive-bulk-failure", TsMs: time.Now().UnixMilli()},
+		{RunID: runID, Level: "warn", Message: "also-survives", TsMs: time.Now().UnixMilli()},
+	}
+
+	// First call triggers the injected Tx failure; flushBatch must fall back
+	// to per-row AppendLog and the entries must still appear in the DB.
+	srv.flushBatch(context.Background(), batch, "test-error")
+
+	// Read back using the real DB (Exec succeeds on it for the per-row path).
+	logs, err := reg.GetRunLogs(context.Background(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) != 2 {
+		t.Errorf("expected 2 log entries after fallback, got %d: %+v", len(logs), logs)
+	}
+	msgs := map[string]bool{}
+	for _, l := range logs {
+		msgs[l.Message] = true
+	}
+	if !msgs["should-survive-bulk-failure"] || !msgs["also-survives"] {
+		t.Errorf("expected both messages to survive fallback; got: %+v", msgs)
+	}
+}
+
+// TestServer_FlushBatch_SuccessPath verifies that the normal (non-error) path
+// through flushBatch writes entries correctly.
+func TestServer_FlushBatch_SuccessPath(t *testing.T) {
+	t.Parallel()
+	d, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { d.Close() })
+
+	reg := registry.New(d)
+	secret, _ := NewSecret()
+
+	runID := fmt.Sprintf("success-%d", time.Now().UnixNano())
+	srv := New(runID, "test-task", secret, reg, d, nil, nil, zap.NewNop(), nil, nil)
+
+	batch := []registry.PendingLogEntry{
+		{RunID: runID, Level: "info", Message: "success-entry", TsMs: time.Now().UnixMilli()},
+	}
+	srv.flushBatch(context.Background(), batch, "test")
+
+	logs, err := reg.GetRunLogs(context.Background(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) != 1 || logs[0].Message != "success-entry" {
+		t.Errorf("expected 1 log entry 'success-entry', got %d: %+v", len(logs), logs)
 	}
 }
