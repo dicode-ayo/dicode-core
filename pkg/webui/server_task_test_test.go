@@ -18,7 +18,7 @@ import (
 
 // registerTaskWithTest writes a task.ts + task.test.ts under a temp dir and
 // registers a directly-constructed task.Spec — the on-disk task.yaml is
-// intentionally NOT written because tasktest.Run discovers the test file via
+// NOT written because tasktest.Run discovers the test file via
 // spec.TaskDir and uses the in-memory spec for runtime/params; writing a
 // YAML that's never parsed would only invite drift between the two.
 //

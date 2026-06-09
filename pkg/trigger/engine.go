@@ -1324,7 +1324,7 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 //
 // _chain_depth is set to 0 for success chains. Depth tracking only matters
 // on the failure path today (cap loops via OnFailureChainSpec.MaxDepth);
-// success chains are intentionally not depth-capped because users build
+// success chains are not depth-capped because users build
 // fan-out pipelines (render → start daemon, etc.) where depth > 1 is normal.
 func buildChainInput(userParams map[string]any, completedTaskID, runID, status string, output any) any {
 	if len(userParams) == 0 {
@@ -1677,7 +1677,7 @@ func (e *Engine) WebhookHandler() http.Handler {
 		// If the sub-path has no recognised file extension and the task has an
 		// index.html, fall back to serving that — enabling SPA client-side routing
 		// (e.g. /hooks/webui/config, /hooks/webui/tasks/foo all return the SPA shell).
-		// This intentionally applies to any webhook task that ships an index.html,
+		// This applies to any webhook task that ships an index.html,
 		// not just the built-in webui — it is the standard "SPA shell" pattern.
 		if assetPath != "" {
 			// Block path traversal before any extension check; the SPA fallback

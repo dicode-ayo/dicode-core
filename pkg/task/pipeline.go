@@ -109,7 +109,7 @@ func LoadPipelineDir(dir string, extras map[string]string) (*PipelineTask, error
 
 	// Set ID before Validate: PipelineTask.Validate's self-reference check
 	// compares each stage against p.ID, so it must be populated first.
-	// (This intentionally differs from LoadDirWithVars's ordering.)
+	// (This differs from LoadDirWithVars's ordering.)
 	p.TaskDir = dir
 	p.ID = filepath.Base(dir)
 	p.Enabled = true
@@ -148,7 +148,7 @@ func (p *PipelineTask) Validate() error {
 		return fmt.Errorf("pipeline: subtype is required (use \"sequential\")")
 	}
 	if p.Subtype != "sequential" {
-		return fmt.Errorf("pipeline: subtype %q is not supported in v1 (only \"sequential\"; parallel pipelines are a planned follow-up)", p.Subtype)
+		return fmt.Errorf("pipeline: subtype %q is not supported (only \"sequential\")", p.Subtype)
 	}
 	if p.Trigger.count() > 1 {
 		return fmt.Errorf("pipeline: at most one trigger type may be set")

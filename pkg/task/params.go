@@ -38,7 +38,7 @@ func (e ParamErrors) Error() string {
 // fail validation.
 //
 // Unknown keys (i.e. keys present in input but not declared in spec.Params)
-// are reported as errors — the schema is intentionally closed so that typos
+// are reported as errors — the schema is closed so that typos
 // in a calling agent's payload surface immediately rather than being
 // silently dropped at runtime.
 //

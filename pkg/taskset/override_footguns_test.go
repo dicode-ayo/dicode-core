@@ -1,10 +1,8 @@
 package taskset
 
-// Footgun pins for the override-machinery unification refactor
-// (docs/superpowers/specs/2026-05-15-override-machinery-survey.md §5.1–5.3).
+// Footgun pins for the override-machinery unification.
 //
-// Each test below pins one of the three latent footguns the survey
-// identified. They fail on `origin/main` and pass once the refactor lands.
+// Each test below pins one of three latent footguns in the override stack.
 
 import (
 	"context"

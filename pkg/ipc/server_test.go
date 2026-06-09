@@ -224,7 +224,7 @@ func TestHandshake_WrongRunID(t *testing.T) {
 // these as dicode.task_id / dicode.run_id, and task code (e.g. ai-agent)
 // uses task_id as its self-identity for recursion guards. An empty or
 // missing value silently disables those guards — see message.go for why
-// the struct fields are intentionally NOT omitempty.
+// the struct fields are NOT omitempty.
 func TestHandshake_TaskChannelReturnsTaskAndRunID(t *testing.T) {
 	e := newTestEnv(t)
 	runID := fmt.Sprintf("run-%d", time.Now().UnixNano())
@@ -670,7 +670,7 @@ func TestServer_Dicode_ListTasks_TemplateAndWebhook(t *testing.T) {
 	_ = e.reg.Register(&task.Spec{
 		ID:      "auth/disabled-oauth",
 		Name:    "Disabled OAuth",
-		Enabled: false, // intentionally not template-marked; default false-zero
+		Enabled: false, // not template-marked; default false-zero
 	})
 
 	spec := specWithDicode("caller", &task.DicodePermissions{ListTasks: true})
@@ -1672,7 +1672,7 @@ func TestIPC_RunsReplay_RequiresCap(t *testing.T) {
 				RunsDeleteInput: true,
 				RunsPinInput:    true,
 				RunsUnpinInput:  true,
-				// RunsReplay deliberately omitted.
+				// RunsReplay omitted.
 			},
 		},
 	}
@@ -1744,7 +1744,7 @@ func TestIPC_TasksTest_RequiresCap(t *testing.T) {
 				RunsDeleteInput: true,
 				RunsPinInput:    true,
 				RunsUnpinInput:  true,
-				// TasksTest deliberately omitted.
+				// TasksTest omitted.
 			},
 		},
 	}
@@ -1811,7 +1811,7 @@ func TestIPC_SourcesSetDevMode_RequiresCap(t *testing.T) {
 	spec := &task.Spec{
 		Permissions: task.Permissions{
 			Dicode: &task.DicodePermissions{
-				// SourcesSetDevMode deliberately omitted.
+				// SourcesSetDevMode omitted.
 			},
 		},
 	}
@@ -1877,7 +1877,7 @@ func TestIPC_GitCommitPush_RequiresCap(t *testing.T) {
 	spec := &task.Spec{
 		Permissions: task.Permissions{
 			Dicode: &task.DicodePermissions{
-				// GitCommitPush deliberately omitted.
+				// GitCommitPush omitted.
 			},
 		},
 	}
@@ -1939,7 +1939,7 @@ func TestIPC_GitCommitPush_GrantedByCap(t *testing.T) {
 	sendMsg(t, conn, map[string]any{
 		"id":     "git-2",
 		"method": "dicode.git.commit_push",
-		// source_id intentionally omitted
+		// source_id omitted
 	})
 	resp := recvMsg(t, conn)
 	errMsg, _ := resp["error"].(string)

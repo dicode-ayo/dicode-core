@@ -58,8 +58,8 @@ func TestCloneOrPull_TransientErrorRetries(t *testing.T) {
 }
 
 // TestCloneOrPull_AuthErrorIsPermanent verifies that an authentication
-// failure surfaces immediately without retrying. We deliberately avoid
-// retrying on auth errors so a misconfigured token doesn't burn the
+// failure surfaces immediately without retrying. Auth errors are not
+// retried so a misconfigured token doesn't burn the
 // 30-second retry budget on every poll tick — and so the operator gets a
 // fast, clear failure signal in the logs.
 func TestCloneOrPull_AuthErrorIsPermanent(t *testing.T) {

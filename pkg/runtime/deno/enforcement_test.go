@@ -14,17 +14,14 @@ import (
 // enforcement. The issue lists a 4×5 matrix (Deno/Python/Docker/Podman × env,
 // fs-read, fs-write, net, apis). Existing coverage in runtime_test.go already
 // pins the Deno env and net halves (TestRuntime_Env_* and TestRuntime_Net_*);
-// this file fills the remaining fs and apis gaps for Deno. Python, Docker,
-// and Podman are out of scope here — see the top of the file for each one's
-// t.Skip-worthy reason and the follow-up tracker.
+// this file fills the remaining fs and apis gaps for Deno.
 //
 // Python has no in-tree test harness (see the comment at the top of
 // pkg/runtime/python/runtime.go re: uv + Python availability); Docker and
 // Podman runtimes enforce via `--network` and bind-mount shapes which are
 // container-platform-level rather than language-runtime-level — testing
 // them meaningfully requires a real Docker/Podman socket and isn't covered
-// here. A follow-up issue will track those three runtimes if they stay in
-// alpha scope.
+// here.
 
 // ── fs: read ──────────────────────────────────────────────────────────────
 

@@ -14,7 +14,7 @@ import (
 // only redirects daemon state into the mounted volume because this
 // helper consults the env var when cfg.DataDir is empty. Regressing
 // this order would silently move SQLite + sources into the container's
-// writable layer again — exactly the bug PR #227 fixed.
+// writable layer again.
 func TestResolveDataDir(t *testing.T) {
 	cases := []struct {
 		name    string

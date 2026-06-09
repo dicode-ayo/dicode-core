@@ -178,9 +178,8 @@ func cmdAuth(c *ipc.ControlClient, args []string) error {
 			return fmt.Errorf("decode reset result: %w", err)
 		}
 		// Hand the plaintext to a small banner printer. The intermediate
-		// local + closure deliberately match the webui auto-generation
-		// pattern in pkg/webui/passphrase.go ensurePassphrase — operator
-		// terminal output is the design here; the indirection just keeps
+		// local + closure match the webui auto-generation pattern in
+		// pkg/webui/passphrase.go ensurePassphrase; the indirection keeps
 		// CodeQL's clear-text-logging heuristic from flagging the
 		// struct-field path on the IPC response.
 		printResetBanner(result.Value)

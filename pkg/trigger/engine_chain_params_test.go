@@ -520,8 +520,7 @@ func TestOnFailureChainDispatch_ResolvesInputOutput(t *testing.T) {
 	}
 
 	// content should have been substituted with the upstream's string
-	// return; path should be untouched. The exact contract that PR #310
-	// is shipping for the on_failure_chain edge.
+	// return; path should be untouched.
 	if input["content"] != "rendered-error-output" {
 		t.Errorf("content = %v, want rendered-error-output (token was not resolved on the failure-chain edge)", input["content"])
 	}
@@ -586,13 +585,12 @@ func TestOnFailureChainDispatch_NonStringUpstreamSkips(t *testing.T) {
 	}
 }
 
-// TestFireChain_RejectsNonStringForBareInputOutput is the modern
-// successor to TestCoerceStringReturn: it pins the contract that a
-// non-string upstream return value still triggers ErrInputUnavailable
+// TestFireChain_RejectsNonStringForBareInputOutput pins the contract
+// that a non-string upstream return value triggers ErrInputUnavailable
 // when a downstream's chain.params references the bare ${input.output}
-// token. PR #316 retired the coerceStringReturn helper in favour of
-// per-token type-asserts inside the resolver; this test exercises the
-// same loud-failure path through the public FireChain entry point.
+// token. The per-token type-assert inside the resolver produces the
+// loud failure; this test exercises that path through the public
+// FireChain entry point.
 func TestFireChain_RejectsNonStringForBareInputOutput(t *testing.T) {
 	dir := t.TempDir()
 	e := newTestEnv(t)

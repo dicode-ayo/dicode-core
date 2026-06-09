@@ -1463,9 +1463,9 @@ func TestAPI_GetTask_DisabledTaskVisible(t *testing.T) {
 	}
 }
 
-// TestPersistConfig_OverridesAndTagsSurviveRoundTrip is a regression guard for
-// Fix 2 of PR #262: persistConfig previously serialised only the `ref` block,
-// silently dropping `overrides` and `tags` on every web-UI save.
+// TestPersistConfig_OverridesAndTagsSurviveRoundTrip is a regression guard:
+// persistConfig must serialise `overrides` and `tags` alongside the `ref`
+// block; dropping them on web-UI save would silently lose operator config.
 func TestPersistConfig_OverridesAndTagsSurviveRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "dicode.yaml")

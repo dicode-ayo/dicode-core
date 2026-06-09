@@ -96,7 +96,7 @@ func isReclonableError(err error) bool {
 	s := err.Error()
 	// Positive signals: references or objects that the remote has but
 	// the local object DB doesn't, which go-git surfaces as these
-	// phrases. Matching on substrings is deliberately permissive —
+	// phrases. Matching on substrings is permissive —
 	// we'd rather over-recover (cheap) than under-recover (breaks
 	// tasksets silently for the operator).
 	for _, sig := range []string{

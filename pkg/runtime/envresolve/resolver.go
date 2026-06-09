@@ -196,8 +196,8 @@ func (r *Resolver) resolveProvider(
 		if spec.Provider != nil {
 			ttl = spec.Provider.CacheTTL
 		}
-		// Empty values are cached intentionally. A provider that returns
-		// {"KEY": ""} is asserting the secret deliberately maps to empty;
+		// Empty values are cached. A provider that returns
+		// {"KEY": ""} is asserting the secret maps to empty;
 		// we preserve that intent rather than treating empty as "not found".
 		// Providers that mean "not found" should omit the key from the map
 		// (the required/optional check handles that path below).

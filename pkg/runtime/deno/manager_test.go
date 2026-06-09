@@ -35,10 +35,9 @@ func newTestInputStore() *registry.InputStore {
 }
 
 // TestNewExecutor_PropagatesProviderFields pins the contract that
-// Runtime.NewExecutor must copy the issue #119 fields to the new
-// per-run Runtime. Regression test for the gap caught by the PR #232
-// security review (commit d0731c9): the trigger-engine dispatch path
-// goes through NewExecutor, so omitting these fields silently disables
+// Runtime.NewExecutor must copy the provider fields to the new
+// per-run Runtime. The trigger-engine dispatch path goes through
+// NewExecutor, so omitting these fields silently disables
 // secret-provider routing in production.
 func TestNewExecutor_PropagatesProviderFields(t *testing.T) {
 	parent := &Runtime{

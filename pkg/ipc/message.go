@@ -15,7 +15,7 @@ type handshakeReq struct {
 // the TaskID and RunID of the context that accepted the connection so the
 // shim can expose them as dicode.task_id / dicode.run_id.
 //
-// These fields are intentionally NOT omitempty: task code uses task_id as
+// These fields are NOT omitempty: task code uses task_id as
 // its self-identity for operations like tool-recursion guards, and an
 // empty task_id silently disables those guards. Forcing the wire to carry
 // the value every time makes "missing task_id" a loud, detectable event.

@@ -85,7 +85,7 @@ spec:
         params:
           model: "llama3.2"
           base_url: "http://localhost:11434/v1"
-          # api_key_env deliberately omitted — Ollama does not authenticate.
+          # api_key_env omitted — Ollama does not authenticate.
           # Inheriting the buildin default ("") tells task.ts to send a
           # placeholder apiKey (required by the OpenAI SDK). If you run an
           # authenticated Ollama proxy, override api_key_env here with the

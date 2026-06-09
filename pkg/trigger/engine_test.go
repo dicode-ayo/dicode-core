@@ -116,7 +116,7 @@ var unrenderedPlaceholderRE = regexp.MustCompile(`\{\{[A-Z_][A-Z0-9_]*\}\}`)
 // parses with the same vars map (so the loader's own "${KEY}"
 // expansion sees them too).
 //
-// The "{{KEY}}" syntax is intentionally distinct from the loader's
+// The "{{KEY}}" syntax is distinct from the loader's
 // "${KEY}" so each substitution layer owns an unambiguous marker —
 // templates containing literal "${VAR}" placeholders for runtime
 // expansion (e.g. the buildin/template renderer's input) survive the

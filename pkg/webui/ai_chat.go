@@ -18,7 +18,7 @@ import (
 // passed through verbatim to the configured task's webhook so per-task params
 // (session_id, skills, tools, model overrides…) travel untouched.
 //
-// This endpoint intentionally re-enters s.Handler() rather than calling the
+// This endpoint re-enters s.Handler() rather than calling the
 // webhook handler directly. The webhook path already layers: longest-prefix
 // auth (webhookAuthGuard), asset serving, SPA fallback, IPC gateway dispatch —
 // dispatching through the full router keeps the forward identical to what a

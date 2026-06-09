@@ -367,12 +367,10 @@ trigger:
 }
 
 // TestPerEdgeOverrides_RejectUnsupportedFields pins the validation that runs
-// inside Spec.validate for the per-edge override site (Trigger.Chain.Overrides;
-// the Trigger.Before[].Overrides site was removed in PR6). Fields that don't
-// make sense at a per-edge level — Enabled, Retry, Defaults, Entries, Name,
-// Description, Trigger — must be rejected with an error that names the
-// offending field so operators can find it in their task.yaml. See PR #303
-// HIGH and MED #3 review threads.
+// inside Spec.validate for the per-edge override site (Trigger.Chain.Overrides).
+// Fields that don't make sense at a per-edge level — Enabled, Retry, Defaults,
+// Entries, Name, Description, Trigger — must be rejected with an error that
+// names the offending field so operators can find it in their task.yaml.
 func TestPerEdgeOverrides_RejectUnsupportedFields(t *testing.T) {
 	cases := []struct {
 		name     string

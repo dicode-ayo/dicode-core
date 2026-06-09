@@ -534,7 +534,7 @@ func LoadDirWithVars(dir string, extras map[string]string) (*Spec, error) {
 	spec.Enabled = true
 
 	// Expand ${VAR} template references in paths, secrets, and env indirection
-	// keys. Kept intentionally narrow — see expandSpec for the allowlist and
+	// keys. Kept narrow — see expandSpec for the allowlist and
 	// pkg/task/template.go for the resolution rules.
 	expandSpec(&spec, builtinVars(dir, extras))
 

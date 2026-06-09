@@ -646,7 +646,7 @@ func (s *Server) Start(ctx context.Context) error {
 		Handler:           s.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       120 * time.Second,
-		// WriteTimeout is intentionally 0: WebSocket and SSE endpoints write indefinitely.
+		// WriteTimeout is 0: WebSocket and SSE endpoints write indefinitely.
 	}
 	go func() {
 		<-ctx.Done()
@@ -1040,8 +1040,8 @@ func (s *Server) apiSecretsUnlock(w http.ResponseWriter, r *http.Request) {
 	// state) — accept any password, mirroring the previous behaviour. The
 	// /security UI will force one to be set as soon as the operator logs in.
 	//
-	// passphraseSourceUnknown means the DB read failed; we deliberately do
-	// NOT treat that as bootstrap (which would accept any password). Reject
+	// passphraseSourceUnknown means the DB read failed; this is NOT treated
+	// as bootstrap (which would accept any password). Reject
 	// the login with 503 so the operator can investigate the outage rather
 	// than silently letting anyone in.
 	src := s.passphraseSource(r.Context())
@@ -1345,7 +1345,7 @@ type TaskListItem struct {
 }
 
 // PipelineListItem is the shape returned by GET /api/tasks for a kind:
-// PipelineTask entry. It deliberately mirrors the kind: Task fields the list
+// PipelineTask entry. It mirrors the kind: Task fields the list
 // view reads (id/name/enabled/kind/trigger_label/last_run_*) without embedding
 // *task.Spec, since a PipelineTask is a peer of Spec, not a Spec.
 type PipelineListItem struct {
@@ -1703,7 +1703,7 @@ type testTaskRequest struct {
 //   - duration_ms:  wall-clock duration of the runner subprocess in ms
 //   - run_id:       opaque correlation ID for this test invocation; surface in
 //     logs / future audit trail. Not stored in the runs table because test
-//     invocations are intentionally separate from the production run log.
+//     invocations are separate from the production run log.
 type testTaskResponse struct {
 	Status     string `json:"status"`
 	ExitCode   int    `json:"exit_code"`
@@ -1770,7 +1770,7 @@ func (s *Server) apiTestTask(w http.ResponseWriter, r *http.Request) {
 	if timeout < 0 {
 		timeout = 0
 	}
-	// TODO(#208 follow-up): wire `coerced` (the validated string-typed params)
+	// TODO: wire `coerced` (the validated string-typed params)
 	// into tasktest.Run so the runner actually receives them. Today the
 	// validator gates the call but the params themselves never reach Deno
 	// — see the testTaskRequest godoc.
@@ -1844,7 +1844,7 @@ func buildTestTaskResponse(res tasktest.Result, runErr error, runID string) test
 }
 
 // randomRunID returns an opaque correlation ID for a test invocation. Not a
-// registry run ID — test invocations are deliberately kept off the runs
+// registry run ID — test invocations are kept off the runs
 // table so they don't pollute history dashboards.
 func randomRunID() string {
 	b := make([]byte, 16)

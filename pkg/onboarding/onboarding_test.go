@@ -56,7 +56,7 @@ func TestRenderConfig_LoadsCleanly(t *testing.T) {
 // volume contract: `ENV DICODE_DATA_DIR=/data` only persists state if
 // silent onboarding writes that path into the generated dicode.yaml.
 // Without this, SQLite + sources would land in the container's writable
-// layer and `docker rm` would wipe everything (PR #227 bug).
+// layer and `docker rm` would wipe everything.
 func TestDefaultResult_HonorsDataDirEnv(t *testing.T) {
 	t.Run("env set overrides home default", func(t *testing.T) {
 		t.Setenv("DICODE_DATA_DIR", "/data")

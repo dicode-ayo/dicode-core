@@ -75,8 +75,8 @@ func (c *cache) put(providerID, secretName, providerHash, value string, ttl time
 }
 
 // bustProvider drops every cached entry for providerID. Called on
-// content-hash mismatch (see get) and exposed for the reconciler to call
-// on EventUpdated/EventRemoved if needed in a follow-up.
+// content-hash mismatch (see get) and available for the reconciler to call
+// on EventUpdated/EventRemoved.
 func (c *cache) bustProvider(providerID string) {
 	c.mu.Lock()
 	for k := range c.m {
