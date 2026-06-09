@@ -132,7 +132,7 @@ type Overrides struct {
 // validatePipelineStageOverrides, which allows a Trigger patch.) Several
 // Overrides fields are meaningful only at the taskset / global level
 // (Defaults, Entries, Enabled, Retry, Name, Description) or are silently
-// ignored by the per-edge dispatch path (Trigger — see PR #303 MED #3).
+// ignored by the per-edge dispatch path (Trigger).
 // Rejecting them at config-load surfaces operator typos and prevents silent
 // footguns.
 //
@@ -160,7 +160,7 @@ func validatePerEdgeOverrides(site string, o *Overrides) error {
 	if o.Description != "" {
 		return fmt.Errorf("%s: field %q is not supported at a per-edge site", site, "description")
 	}
-	// Trigger — PR #303 MED #3. The chain dispatch path invokes the
+	// Trigger — the chain dispatch path invokes the
 	// downstream directly and ignores any rewired trigger config on the
 	// merged spec. Allowing `trigger:` here misleads operators into thinking
 	// they're rewiring the downstream's trigger graph for this firing.

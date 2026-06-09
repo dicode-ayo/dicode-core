@@ -214,7 +214,7 @@ func setSessionCookie(w http.ResponseWriter, token string) {
 }
 
 // setDeviceCookie writes the long-lived device cookie to the response.
-// The Path is intentionally "/" so the SPA can call /api/auth/refresh with it.
+// The Path is "/" so the SPA can call /api/auth/refresh with it.
 func setDeviceCookie(w http.ResponseWriter, token string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     deviceCookie,

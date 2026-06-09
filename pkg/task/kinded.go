@@ -2,7 +2,7 @@ package task
 
 // Kind discriminator values for the top-level `kind:` field in a task's
 // task.yaml. pkg/taskset carries a parallel typed Kind constant with the
-// same string value ("Task"); the two are intentionally independent to
+// same string value ("Task"); the two are independent to
 // avoid a circular import (pkg/taskset imports pkg/task, not vice versa).
 const (
 	KindTask         = "Task"
@@ -13,7 +13,7 @@ const (
 // reconciler, engine registration) needs to handle any task kind uniformly.
 // Both *Spec (kind: Task) and *PipelineTask (kind: PipelineTask) implement it.
 //
-// Method names deliberately avoid clashing with the underlying struct fields
+// Method names avoid clashing with the underlying struct fields
 // (ID, Enabled, Warnings) — Go forbids a method and field of the same name.
 type Kinded interface {
 	KindOf() string

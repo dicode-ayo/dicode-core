@@ -1,6 +1,6 @@
 package trigger
 
-// End-to-end coverage for PR #310's `${input.output}` interpolation
+// End-to-end coverage for the `${input.output}` interpolation
 // primitive on the success-chain dispatch edge, exercised through the
 // REAL Deno runtime (not test-exec mocks).
 //
@@ -25,7 +25,7 @@ package trigger
 //     ACTUAL `tasks/buildin/template/` task loaded from disk — the same
 //     spec/code that ships in dicode-core. That exercises the real
 //     library task's `run_result.enabled: false` + in-memory cache
-//     return path PR #310 was designed for, and provides regression
+//     return path, and provides regression
 //     coverage if buildin/template's contract drifts.
 //
 //  3. The non-string-upstream short-circuit is verified with a separate
@@ -192,8 +192,8 @@ func loadInputOutputDownstream(t *testing.T, chainValue string) *task.Spec {
 // delivery.
 //
 // Using the real buildin/template task exercises the production code
-// path (its `run_result.enabled: false` + in-memory cache return) that
-// PR #310 was designed for. If the engine accidentally routed chain
+// path (its `run_result.enabled: false` + in-memory cache return).
+// If the engine accidentally routed chain
 // delivery through the persisted `runs.return_value` column (which
 // buildin/template suppresses), the marker file would never appear.
 func TestE2E_InputOutput_ChainParamsStringSubstitution(t *testing.T) {
@@ -375,13 +375,11 @@ func TestE2E_InputOutput_NonStringUpstreamFailsLoudly(t *testing.T) {
 	}
 }
 
-// TestE2E_InputOutput_EmbeddedTokenInterpolates pins the post-#316
-// behaviour: any string containing one or more recognised
-// `${input.…}` tokens is rewritten through ReplaceAllStringFunc, so an
-// embedded reference like `"prefix-${input.output}-suffix"` reaches
-// the downstream with the resolved value spliced in:
-// `"prefix-<upstream return>-suffix"`. PR #310 deliberately left this
-// case literal; #316 extends the grammar to support embedded forms.
+// TestE2E_InputOutput_EmbeddedTokenInterpolates pins the behaviour
+// that any string containing one or more recognised `${input.…}` tokens
+// is rewritten through ReplaceAllStringFunc, so an embedded reference
+// like `"prefix-${input.output}-suffix"` reaches the downstream with
+// the resolved value spliced in: `"prefix-<upstream return>-suffix"`.
 //
 // The hand-written tests in pkg/task/inputref_test.go cover this at
 // the unit layer; this e2e pins it at the chain-dispatch boundary so a

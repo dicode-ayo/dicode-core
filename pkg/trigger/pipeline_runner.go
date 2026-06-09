@@ -417,9 +417,8 @@ func (e *Engine) awaitStageSuccess(ctx context.Context, runID string) (task.Inpu
 	}
 	// Only Output is threaded between stages in v1: PipelineTask.Validate rejects
 	// ${input.params.*} refs on non-first stages (they are only valid on stage 0,
-	// where they resolve against the trigger payload), so there is deliberately no
-	// Params snapshot threaded between stages here. Cross-stage param threading is
-	// a planned follow-up.
+	// where they resolve against the trigger payload), so there is no
+	// Params snapshot threaded between stages here.
 	return task.InputContext{Output: res.ReturnValue}, nil
 }
 
@@ -626,10 +625,10 @@ func (e *Engine) propagatePipelineStageRerun(runner *PipelineRunner, reranTaskID
 		// upstream is what feeds the FIRST replayed descendant. When the
 		// re-fired stage is the terminal daemon stage itself (startIdx ==
 		// terminalIdx — an operator restarting the daemon's own task), there
-		// are no descendants to replay and the terminal stage keeps the
-		// upstream that originally fed it; re-seeding it with the daemon's own
-		// return would be wrong. Otherwise the first descendant is fed by the
-		// re-fired stage's fresh return value.
+		// are no descendants to replay and the terminal stage keeps its
+		// stored upstream; re-seeding it with the daemon's own return would
+		// be wrong. Otherwise the first descendant is fed by the re-fired
+		// stage's fresh return value.
 		upstream := task.InputContext{Output: reranReturn}
 		if startIdx >= terminalIdx {
 			upstream = storedUpstream

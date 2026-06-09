@@ -677,7 +677,7 @@ func (s *Server) handleConn(conn net.Conn) {
 				reply(req.ID, nil, "ipc: permission denied (tasks.list)")
 				continue
 			}
-			// Summary intentionally trimmed: id, name, description, params,
+			// Summary trimmed: id, name, description, params,
 			// template, webhook, enabled. NOT exposed: TaskDir (filesystem
 			// leakage), Permissions (could hint at secret env-var names),
 			// Trigger.WebhookSecret (would defeat HMAC auth). The fields

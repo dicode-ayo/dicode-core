@@ -364,10 +364,11 @@ execution:
 	}
 }
 
-// Regression for #177: `watch: false` and `mcp: false` in YAML must survive
-// applyDefaults. Previously both fields were `bool` with a default-flip
-// (`if !x { x = true }`) that made explicit false a no-op.
-// With the new spec.entries shape, watch lives on spec.entries.<name>.ref.watch.
+// Regression: `watch: false` and `mcp: false` in YAML must survive
+// applyDefaults. Using a bare `bool` with a default-flip
+// (`if !x { x = true }`) makes explicit false a no-op; the pointer-based
+// fields avoid that. With the new spec.entries shape, watch lives on
+// spec.entries.<name>.ref.watch.
 func TestLoadWatchAndMCPRespectExplicitFalse(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "dicode.yaml")

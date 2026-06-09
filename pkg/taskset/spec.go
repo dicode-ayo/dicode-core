@@ -112,7 +112,6 @@ type ConfigSpec struct {
 // ConfigBody is the spec block of a Config file.
 type ConfigBody struct {
 	Runtimes map[string]RuntimePinConfig `yaml:"runtimes,omitempty"`
-	// Defaults previously sat at precedence level 2 in the old six-level stack.
 	// Deprecated: kind:Config spec.defaults no longer affects the override stack; use dicode.yaml defaults: instead.
 	Defaults *Defaults `yaml:"defaults,omitempty"`
 }

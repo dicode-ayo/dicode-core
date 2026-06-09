@@ -663,10 +663,10 @@ func TestPassphraseSource_DBErrorReturnsUnknown(t *testing.T) {
 	}
 }
 
-// TestApiSecretsUnlock_DBErrorRejects exercises the regression that originally
-// motivated this whole patch: a transient DB outage previously made
-// `passphraseSource` return `none`, and `apiSecretsUnlock`'s bootstrap
-// fast-path then accepted ANY password. Now it must reject with 503.
+// TestApiSecretsUnlock_DBErrorRejects exercises the fail-open guard: a
+// transient DB outage must not cause `passphraseSource` to return `none`
+// (which would let `apiSecretsUnlock`'s bootstrap fast-path accept ANY
+// password). The correct response is 503.
 func TestApiSecretsUnlock_DBErrorRejects(t *testing.T) {
 	srv := newAuthServer(t, "")
 	_, _ = srv.passphraseStore.setHashed(context.Background(), "stored-pass-1234", bcrypt.MinCost)
@@ -829,7 +829,7 @@ func TestVerifyPassphrase_ConcurrentLegacyMigration_SingleWrite(t *testing.T) {
 // in the hash header — to assert the wire-up rather than mocking.
 func TestApiChangePassphrase_HonorsConfiguredBcryptCost(t *testing.T) {
 	srv := newAuthServer(t, "")
-	srv.cfg.Server.BcryptCost = 5 // intentionally non-default; still > MinCost
+	srv.cfg.Server.BcryptCost = 5 // non-default; still > MinCost
 	_, _ = srv.passphraseStore.setHashed(context.Background(), "old-pass-here-123", bcrypt.MinCost)
 
 	h := srv.Handler()

@@ -73,7 +73,7 @@ func expandString(s string, vars map[string]string, envFallback bool) string {
 }
 
 // expandSpec applies template expansion to every spec field that may
-// reasonably contain a path or identifier. This is intentionally a small,
+// reasonably contain a path or identifier. This is a small,
 // well-defined set — we do NOT expand every string field, because most
 // fields (name, description, system_prompt defaults, ...) should be taken
 // literally.

@@ -44,9 +44,8 @@ func TestResolveInputOutputMap_SubstitutesExactToken(t *testing.T) {
 	}
 }
 
-// TestResolveInputOutputMap_EmbeddedTokenInterpolates verifies the
-// post-#316 contract: a string containing the recognised token is
-// rewritten in place. Was a literal pass-through in PR #310.
+// TestResolveInputOutputMap_EmbeddedTokenInterpolates verifies that a
+// string containing the recognised token is rewritten in place.
 func TestResolveInputOutputMap_EmbeddedTokenInterpolates(t *testing.T) {
 	params := map[string]any{
 		"content": "prefix-${input.output}-suffix",
@@ -228,7 +227,7 @@ func TestResolveInputOutputMap_Params_NilMapFails(t *testing.T) {
 }
 
 // TestResolveInputOutputMap_HyphenatedAndDottedIdents exercises the
-// widened identifier class (PR #330 follow-up). Hyphenated names
+// widened identifier class. Hyphenated names
 // (`x-forwarded-for`, `db-host`) and dotted names (`db.host`) must
 // resolve against the upstream params map / output map exactly like
 // plain identifiers — operators legitimately use those shapes for
@@ -412,8 +411,7 @@ func TestResolveInputOutputList_NilList(t *testing.T) {
 // TestResolveString_RejectsEmptyOutput pins the existing loud failure
 // for the bare `${input.output}` form: an upstream that returns an
 // empty string is treated as "not provided" and yields
-// ErrInputUnavailable. This is the pre-existing contract from PR #310,
-// captured here so the regression net covers all three forms together.
+// ErrInputUnavailable.
 func TestResolveString_RejectsEmptyOutput(t *testing.T) {
 	params := map[string]any{
 		"content": "${input.output}",
@@ -558,7 +556,7 @@ func TestValidateInputRefs(t *testing.T) {
 		{"params name", "${input.params.url}", false, ""},
 		{"embedded", "prefix-${input.output}-suffix", false, ""},
 		{"multi-token", "${input.params.scheme}://${input.output.host}", false, ""},
-		// Widened identifier class (PR #330 follow-up): hyphenated names
+		// Widened identifier class: hyphenated names
 		// (common for HTTP header values like `x-forwarded-for`) and
 		// dotted names (common for namespaced YAML keys like `db.host`)
 		// must both be accepted — the upstream params map is itself

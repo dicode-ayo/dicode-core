@@ -604,8 +604,8 @@ func (s *Source) resolve(ctx context.Context) ([]*ResolvedTask, error) {
 	// root taskset.yaml path, so the source loader no longer needs to know
 	// about it. Pass nil for extraVars — if a future source type needs to
 	// layer additional vars, build them here.
-	// parentOverrides is read under mu because a follow-up commit will add
-	// SetParentOverrides for hot reload from PATCH /api/tasks/{id}/overrides.
+	// parentOverrides is read under mu because SetParentOverrides may be
+	// called concurrently (e.g. from PATCH /api/tasks/{id}/overrides).
 	s.mu.Lock()
 	parent := s.parentOverrides
 	s.mu.Unlock()

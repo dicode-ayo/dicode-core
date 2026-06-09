@@ -146,8 +146,8 @@ type passphraseMigrator struct {
 //
 // Resolution order matches resolvePassphrase:
 //  1. YAML override (server.secret) — constant-time compare against the
-//     plaintext from the config file. We deliberately do not hash YAML
-//     overrides: rotating one already requires editing dicode.yaml, and a
+//     plaintext from the config file. YAML overrides are not hashed —
+//     rotating one already requires editing dicode.yaml, and a
 //     plaintext-comparable value is what operators expect for headless and
 //     scripted setups.
 //  2. DB-stored value:
@@ -261,9 +261,8 @@ func (s *Server) migrateLegacyPlaintext(ctx context.Context, plaintext string) {
 //
 // Returns ("", nil) when no passphrase is configured (or the store is nil).
 // Returns ("", err) when the DB read fails — callers MUST distinguish this
-// from "" to avoid fail-open behavior. A swallowed DB error here previously
-// allowed apiSecretsUnlock to bypass authentication during a transient DB
-// outage; that bug was fixed alongside the bcrypt migration.
+// from "" to avoid fail-open behavior. A swallowed DB error would allow
+// apiSecretsUnlock to bypass authentication during a transient DB outage.
 func (s *Server) cachedDBValue(ctx context.Context) (string, error) {
 	if s.passphraseStore == nil {
 		return "", nil
@@ -299,7 +298,7 @@ const (
 	// failed; callers must treat it as "passphrase configured but
 	// unavailable" so login/secrets-change endpoints fail closed under a
 	// transient outage. Distinct from "none" specifically to prevent the
-	// bootstrap fast-path (which intentionally accepts any password when
+	// bootstrap fast-path (which accepts any password when
 	// no passphrase has been set yet) from being entered on an error.
 	passphraseSourceUnknown resolvePassphraseSource = "unknown"
 )

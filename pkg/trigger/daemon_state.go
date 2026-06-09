@@ -8,7 +8,7 @@ import "sync"
 // distinguishing "running" from "failed to launch" from "crashed" from
 // "explicitly stopped".
 //
-// The values are intentionally a closed set rather than a bag of booleans.
+// The values are a closed set rather than a bag of booleans.
 // Adding a new phase should require an explicit case in any switch that
 // consumes this type.
 type DaemonState string

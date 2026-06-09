@@ -88,8 +88,8 @@ func TestPipelineValidate(t *testing.T) {
 	}
 }
 
-// TestPipelineStage0AcceptsInputRefs verifies that after #350 stage 0 is
-// allowed to reference the trigger payload via ${input.output}, ${input.output.field},
+// TestPipelineStage0AcceptsInputRefs verifies that stage 0 is allowed to
+// reference the trigger payload via ${input.output}, ${input.output.field},
 // and ${input.params.X}.
 func TestPipelineStage0AcceptsInputRefs(t *testing.T) {
 	cases := []struct {

@@ -24,8 +24,7 @@ runtime: deno
 
 trigger:
   webhook: /hooks/ai-claude
-  # auth: true intentionally omitted — see #96 (auth UX for protected
-  # webhook tasks). Re-enable once the auth flow lands.
+  # auth: true omitted — webhook auth for tasks is not yet supported.
 
 params:
   prompt:
