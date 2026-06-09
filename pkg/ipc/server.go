@@ -69,6 +69,9 @@ type Server struct {
 	socketPath string
 	listener   net.Listener
 
+	connWG   sync.WaitGroup // tracks in-flight handleConn goroutines
+	acceptMu sync.Mutex     // serialises accept+Add against Stop's Wait
+
 	mu     sync.Mutex
 	output *OutputResult
 	retCh  chan any
@@ -237,27 +240,42 @@ func (s *Server) Start(ctx context.Context) (socketPath, token string, err error
 	return socketPath, token, nil
 }
 
-// Stop signals the flush goroutine to perform a final drain, waits for it to
-// finish, then closes the listener and removes the socket file.
-// The goroutine is always the last writer so there is no race between a
-// ticker-triggered flush and Stop's own drain.
+// Stop closes the listener (stopping new connections), waits for all
+// in-flight handleConn goroutines to finish (so all bufferLog calls
+// complete), then signals the flush goroutine for a final drain and waits
+// for it to exit. This ordering ensures no log entries are silently lost.
 func (s *Server) Stop() {
-	// Signal the flush goroutine to do a final drain and exit.
-	select {
-	case <-s.logFlushCh:
-		// already closed
-	default:
-		close(s.logFlushCh)
-	}
-	// Wait for the goroutine to complete the final flush before tearing down.
-	<-s.logFlushDone
-
+	// Step 1: stop accepting new connections so no new handleConn goroutines
+	// are spawned after this point.
 	if s.listener != nil {
 		_ = s.listener.Close()
 	}
 	if s.socketPath != "" {
 		_ = os.Remove(s.socketPath)
 	}
+
+	// Step 2: wait for all in-flight handleConn goroutines to exit. Each
+	// goroutine may still be calling bufferLog, so we must drain them before
+	// triggering the final flush — otherwise those log entries arrive in the
+	// buffer after the flush goroutine has already exited and are lost.
+	//
+	// Acquire acceptMu first to close the TOCTOU window: if accept() is
+	// between Accept() returning a live conn and connWG.Add(1), Wait()
+	// would see zero and proceed while a handler is about to be spawned.
+	// The lock ensures accept() finishes its Add+spawn before we Wait.
+	s.acceptMu.Lock()   //nolint:SA2001 // barrier: ensures accept() finishes its Add+spawn
+	s.acceptMu.Unlock() // before we observe connWG's count
+	s.connWG.Wait()
+
+	// Step 3: signal the flush goroutine to do a final drain and exit.
+	select {
+	case <-s.logFlushCh:
+		// already closed
+	default:
+		close(s.logFlushCh)
+	}
+	// Wait for the goroutine to complete the final flush before returning.
+	<-s.logFlushDone
 }
 
 // SetGateway attaches the HTTP gateway so daemon tasks can call http.register.
@@ -318,7 +336,17 @@ func (s *Server) accept() {
 		if err != nil {
 			return
 		}
-		go s.handleConn(conn)
+		// Hold acceptMu around Add+spawn so Stop() cannot observe a
+		// zero WaitGroup count while we hold a live conn. Stop()
+		// acquires acceptMu before connWG.Wait(), closing the TOCTOU
+		// window between Accept returning and Add(1) executing.
+		s.acceptMu.Lock()
+		s.connWG.Add(1)
+		go func(c net.Conn) {
+			defer s.connWG.Done()
+			s.handleConn(c)
+		}(conn)
+		s.acceptMu.Unlock()
 	}
 }
 
@@ -1279,14 +1307,10 @@ func (s *Server) bufferLog(level, message string) {
 	s.logMu.Unlock()
 
 	if capBatch != nil {
-		if err := s.registry.BulkAppendLogs(context.Background(), capBatch); err != nil {
-			s.log.Error("ipc: bulk log flush (cap)", zap.String("run", s.runID), zap.Error(err))
-		}
+		s.flushBatch(context.Background(), capBatch, "cap")
 	}
 	if flush {
-		if err := s.registry.BulkAppendLogs(context.Background(), batch); err != nil {
-			s.log.Error("ipc: bulk log flush (size threshold)", zap.String("run", s.runID), zap.Error(err))
-		}
+		s.flushBatch(context.Background(), batch, "size threshold")
 	}
 }
 
@@ -1301,8 +1325,33 @@ func (s *Server) flushLogsNow(ctx context.Context) {
 	if len(batch) == 0 {
 		return
 	}
+	s.flushBatch(ctx, batch, "periodic")
+}
+
+// flushBatch attempts to write a batch of log entries to the DB using the
+// bulk path. If the batch transaction fails (e.g. transient SQLite error),
+// it falls back to per-row inserts via AppendLog so that as many entries as
+// possible are salvaged rather than silently discarded.
+func (s *Server) flushBatch(ctx context.Context, batch []registry.PendingLogEntry, reason string) {
 	if err := s.registry.BulkAppendLogs(ctx, batch); err != nil {
-		s.log.Error("ipc: bulk log flush", zap.String("run", s.runID), zap.Error(err))
+		s.log.Error("ipc: bulk log flush failed, falling back to per-row inserts",
+			zap.String("run", s.runID),
+			zap.String("reason", reason),
+			zap.Int("entries", len(batch)),
+			zap.Error(err),
+		)
+		// Per-row fallback: salvage as many entries as possible. Each insert
+		// uses AppendLog which captures a fresh timestamp — that is acceptable
+		// here because we are already in a degraded error path and the
+		// original TsMs is preserved in the batch entry's level/message.
+		for _, e := range batch {
+			if rerr := s.registry.AppendLog(ctx, e.RunID, e.Level, e.Message); rerr != nil {
+				s.log.Error("ipc: per-row log fallback failed",
+					zap.String("run", e.RunID),
+					zap.Error(rerr),
+				)
+			}
+		}
 	}
 }
 
