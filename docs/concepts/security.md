@@ -402,6 +402,28 @@ webhookTimestampTolerance = 5 * time.Minute
 webhookMaxBodyBytes       = 5 << 20  // 5 MB
 ```
 
+### Replay protection (nonce cache)
+
+Even with timestamp validation, an attacker can replay a captured request
+within the 5-minute tolerance window. To close this gap, dicode maintains a
+bounded in-memory nonce cache keyed on the HMAC digest of the request body.
+
+When a signed webhook arrives:
+
+1. HMAC signature is verified (unchanged).
+2. Timestamp is checked if `X-Dicode-Timestamp` is present (unchanged).
+3. The HMAC digest is looked up in the nonce cache:
+   - **Already seen (within 1 hour)** → HTTP 409 Conflict.
+   - **Not seen** → request accepted, digest recorded.
+
+The cache is bounded to 10,000 entries with FIFO eviction. Entries older
+than 1 hour are lazily pruned. The cache lives in-memory on the Engine
+instance — a daemon restart clears it, which is acceptable (the attacker
+would need to re-capture a fresh request).
+
+Replay protection is enabled by default when `webhook_secret` is set.
+Per-task opt-out via `replay_protection: false` in `task.yaml`.
+
 ---
 
 ## Phase 4 — MCP API Key Authentication
