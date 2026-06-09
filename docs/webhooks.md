@@ -57,6 +57,25 @@ trigger:
 
 Public webhooks (no `auth: true`) remain fully open.
 
+### Replay protection
+
+When `webhook_secret` is set, dicode automatically rejects duplicate webhook
+bodies within a 1-hour window. This prevents an attacker who captures a valid
+request from replaying it — the task fires once and subsequent identical
+requests return HTTP 409.
+
+Replay protection is enabled by default. Opt out per task if your sender
+legitimately sends byte-identical payloads:
+
+```yaml
+trigger:
+  webhook: /hooks/idempotent-task
+  webhook_secret: "${SECRET}"
+  replay_protection: false
+```
+
+Open webhooks (no `webhook_secret`) are unaffected.
+
 ---
 
 ## Accessing request data in the task

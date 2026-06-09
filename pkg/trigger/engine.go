@@ -55,9 +55,10 @@ type Engine struct {
 	cron      *cron.Cron
 	log       *zap.Logger
 
-	mu          sync.Mutex
-	cronEntries map[string]cron.EntryID // taskID → cron entry
-	webhooks    map[string]string       // webhook path → taskID
+	mu                 sync.Mutex
+	cronEntries        map[string]cron.EntryID // taskID → cron entry
+	webhooks           map[string]string       // webhook path → taskID
+	webhookReplayCache *replayCache
 
 	// registerMu serializes the entire Register path so that concurrent
 	// registrations cannot admit a cycle through interleaved snapshots of
@@ -193,19 +194,20 @@ type PythonRuntimeAPI interface {
 // New creates a trigger Engine with a default Deno executor.
 func New(r *registry.Registry, defaultExec pkgruntime.Executor, log *zap.Logger) *Engine {
 	e := &Engine{
-		registry:          r,
-		executors:         make(map[task.Runtime]pkgruntime.Executor),
-		cron:              cron.New(),
-		log:               log,
-		cronEntries:       make(map[string]cron.EntryID),
-		webhooks:          make(map[string]string),
-		daemonRuns:        make(map[string]string),
-		daemonSpecs:       make(map[string]*task.Spec),
-		daemonStates:      newDaemonStateMap(),
-		restartGates:      newRestartGate(),
-		livePipelines:     make(map[string]*PipelineRunner),
-		deferredPipelines: make(map[string]*task.PipelineTask),
-		guards:            newChainGuards(),
+		registry:           r,
+		executors:          make(map[task.Runtime]pkgruntime.Executor),
+		cron:               cron.New(),
+		log:                log,
+		cronEntries:        make(map[string]cron.EntryID),
+		webhooks:           make(map[string]string),
+		webhookReplayCache: newReplayCache(1 * time.Hour),
+		daemonRuns:         make(map[string]string),
+		daemonSpecs:        make(map[string]*task.Spec),
+		daemonStates:       newDaemonStateMap(),
+		restartGates:       newRestartGate(),
+		livePipelines:      make(map[string]*PipelineRunner),
+		deferredPipelines:  make(map[string]*task.PipelineTask),
+		guards:             newChainGuards(),
 	}
 	e.executors[task.RuntimeDeno] = defaultExec
 	return e
@@ -1516,6 +1518,25 @@ func verifyWebhookSignatureSecret(secret string, r *http.Request, body []byte) e
 	return nil
 }
 
+// checkWebhookReplay returns an error if the webhook body is a replay.
+// When the task has no secret (open webhook) or replay_protection is
+// explicitly false, this is a no-op.
+func (e *Engine) checkWebhookReplay(secret string, replayProtection *bool, body []byte) error {
+	if secret == "" {
+		return nil
+	}
+	if replayProtection != nil && !*replayProtection {
+		return nil
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write(body)
+	digest := hex.EncodeToString(mac.Sum(nil))
+	if e.webhookReplayCache.seen(digest) {
+		return fmt.Errorf("duplicate webhook (replay)")
+	}
+	return nil
+}
+
 // handlePipelineWebhook fires a kind: PipelineTask in response to a webhook
 // request and writes the parent run ID as JSON. Pipelines run asynchronously
 // (multi-stage), so there is no synchronous inline-result mode — callers poll
@@ -1543,6 +1564,18 @@ func (e *Engine) handlePipelineWebhook(w http.ResponseWriter, r *http.Request, p
 		e.log.Warn("pipeline webhook signature verification failed",
 			zap.String("path", r.URL.Path), zap.String("task", pipe.ID), zap.Error(err))
 		http.Error(w, "forbidden: "+err.Error(), http.StatusForbidden)
+		return
+	}
+
+	// Replay protection: reject duplicate bodies within the nonce cache TTL.
+	if err := e.checkWebhookReplay(pipe.Trigger.WebhookSecret, pipe.Trigger.ReplayProtection, body); err != nil {
+		e.log.Warn("pipeline webhook replay rejected",
+			zap.String("path", r.URL.Path),
+			zap.String("task", pipe.ID),
+		)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":"duplicate webhook (replay)"}`))
 		return
 	}
 
@@ -1697,6 +1730,18 @@ func (e *Engine) WebhookHandler() http.Handler {
 				zap.Error(err),
 			)
 			http.Error(w, "forbidden: "+err.Error(), http.StatusForbidden)
+			return
+		}
+
+		// Replay protection: reject duplicate bodies within the nonce cache TTL.
+		if err := e.checkWebhookReplay(spec.Trigger.WebhookSecret, spec.Trigger.ReplayProtection, body); err != nil {
+			e.log.Warn("webhook replay rejected",
+				zap.String("path", path),
+				zap.String("task", taskID),
+			)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"error":"duplicate webhook (replay)"}`))
 			return
 		}
 

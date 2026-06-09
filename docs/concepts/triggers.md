@@ -68,6 +68,10 @@ log.info(`Received push to ${input.ref}`)
 
 Requests with an invalid or missing secret are rejected with 401.
 
+**Replay protection:** when `webhook_secret` is set, dicode rejects duplicate webhook bodies within a 1-hour window (HTTP 409). Opt out per task:
+- `replay_protection: false` — allow byte-identical payloads (e.g. idempotent senders)
+- Default: `true` (protection enabled whenever a secret is configured)
+
 **Path rules:**
 - Must start with `/`
 - Alphanumeric characters, hyphens, underscores, and forward slashes only
