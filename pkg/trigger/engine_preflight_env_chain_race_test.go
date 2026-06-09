@@ -19,19 +19,13 @@ import (
 // The on_failure_chain target dispatches through fireAsync, which hands the
 // run to its Executor; counting Execute calls per task ID lets the test
 // assert whether the on_failure_chain edge fired at all.
-//
-// FinishRun is called from the deferred path so the registry's run row
-// reaches a terminal state — without it WaitRun (and the engine's own
-// shutdown teardown) blocks.
 type chainTargetCountingExecutor struct {
-	reg   *registry.Registry
 	calls sync.Map // taskID -> *atomic.Int64
 }
 
 func (c *chainTargetCountingExecutor) Execute(_ context.Context, spec *task.Spec, opts pkgruntime.RunOptions) (*pkgruntime.RunResult, error) {
 	v, _ := c.calls.LoadOrStore(spec.ID, &atomic.Int64{})
 	v.(*atomic.Int64).Add(1)
-	_ = c.reg.FinishRun(context.Background(), opts.RunID, registry.StatusSuccess)
 	return &pkgruntime.RunResult{RunID: opts.RunID}, nil
 }
 
@@ -71,7 +65,7 @@ func TestRunTask_PreflightEnvFailure_ChainDepthPreserved(t *testing.T) {
 	t.Cleanup(func() { d.Close() })
 	reg := registry.New(d)
 
-	exec := &chainTargetCountingExecutor{reg: reg}
+	exec := &chainTargetCountingExecutor{}
 	eng := New(reg, exec, zap.NewNop())
 	// Non-nil chain so preflightEnv does not short-circuit on
 	// `e.secrets == nil`. The empty chain is fine: the test path uses

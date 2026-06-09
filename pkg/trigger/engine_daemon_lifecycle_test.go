@@ -34,16 +34,13 @@ import (
 // One-shot tasks finish StatusSuccess synchronously; tasks marked via
 // markDaemon block until their run context is cancelled (KillRun path).
 type preflightExec struct {
-	reg *registry.Registry
-
 	mu     sync.Mutex
 	daemon map[string]chan struct{} // daemon taskID → block channel
 	runs   atomic.Int32             // count of executed runs (any task)
 }
 
-func newPreflightExec(reg *registry.Registry) *preflightExec {
+func newPreflightExec(_ *registry.Registry) *preflightExec {
 	return &preflightExec{
-		reg:    reg,
 		daemon: make(map[string]chan struct{}),
 	}
 }
@@ -59,7 +56,7 @@ func (p *preflightExec) markDaemon(taskID string) {
 	p.mu.Unlock()
 }
 
-func (p *preflightExec) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime.RunOptions) (*pkgruntime.RunResult, error) {
+func (p *preflightExec) Execute(ctx context.Context, spec *task.Spec, _ pkgruntime.RunOptions) (*pkgruntime.RunResult, error) {
 	p.runs.Add(1)
 	p.mu.Lock()
 	daemonCh := p.daemon[spec.ID]
@@ -67,14 +64,10 @@ func (p *preflightExec) Execute(ctx context.Context, spec *task.Spec, opts pkgru
 
 	if daemonCh != nil {
 		// Long-running daemon: block until the run's context is cancelled
-		// (KillRun path). FinishRun(Success) before returning so onDaemon-
-		// RunFinished doesn't treat the daemon as crashed. Mirrors how a
-		// real daemon exits gracefully on shutdown.
+		// (KillRun path). Mirrors how a real daemon exits gracefully on shutdown.
 		<-ctx.Done()
-		_ = p.reg.FinishRun(context.Background(), opts.RunID, registry.StatusSuccess)
 		return &pkgruntime.RunResult{}, nil
 	}
-	_ = p.reg.FinishRun(context.Background(), opts.RunID, registry.StatusSuccess)
 	return &pkgruntime.RunResult{}, nil
 }
 

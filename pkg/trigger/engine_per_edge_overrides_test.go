@@ -124,7 +124,7 @@ params:
 	if got.Status != registry.StatusSuccess {
 		t.Errorf("downstream status = %q, want success", got.Status)
 	}
-	returnValue := pollReturnValue(t, e.engine, got.ID, 5*time.Second)
+	returnValue := got.ReturnValue
 	var mode string
 	if err := json.Unmarshal([]byte(returnValue), &mode); err != nil {
 		t.Fatalf("unmarshal return %q: %v", returnValue, err)
