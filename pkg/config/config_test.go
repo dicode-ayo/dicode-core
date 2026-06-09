@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestExpandVars(t *testing.T) {
@@ -551,5 +552,228 @@ defaults:
 	}
 	if !strings.Contains(err.Error(), "reserved") {
 		t.Errorf("error = %v; want mention of reserved", err)
+	}
+}
+
+// TestLoad_AICreateTaskDefault ensures an empty ai: block falls back to the
+// buildin/task-create default so zero-config installs get the AI-first task
+// authoring agent wired up without edits to dicode.yaml.
+func TestLoad_AICreateTaskDefault(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "dicode.yaml")
+
+	content := `
+spec:
+  entries:
+    local:
+      ref:
+        path: ${CONFIGDIR}/tasks
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AI.CreateTask != "buildin/task-create" {
+		t.Errorf("AI.CreateTask default = %q, want %q", cfg.AI.CreateTask, "buildin/task-create")
+	}
+}
+
+// TestLoad_AICreateTaskOverride ensures a user-supplied ai.create_task survives
+// the YAML round-trip without being clobbered by applyDefaults — operators
+// who point at a custom override (e.g. claude-cli wrapper) must keep their
+// choice across daemon restarts.
+func TestLoad_AICreateTaskOverride(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "dicode.yaml")
+
+	content := `
+ai:
+  create_task: examples/task-create-claude
+spec:
+  entries:
+    local:
+      ref:
+        path: ${CONFIGDIR}/tasks
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AI.CreateTask != "examples/task-create-claude" {
+		t.Errorf("AI.CreateTask = %q, want %q", cfg.AI.CreateTask, "examples/task-create-claude")
+	}
+}
+
+// TestLoad_AICreateSessionTTLDefault ensures an empty ai.create_session_ttl
+// falls back to 24h so stale authoring sessions are auto-cancelled without
+// requiring explicit operator config.
+func TestLoad_AICreateSessionTTLDefault(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "dicode.yaml")
+
+	content := `
+spec:
+  entries:
+    local:
+      ref:
+        path: ${CONFIGDIR}/tasks
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := 24 * time.Hour
+	if cfg.AI.CreateSessionTTL != want {
+		t.Errorf("AI.CreateSessionTTL default = %v, want %v", cfg.AI.CreateSessionTTL, want)
+	}
+}
+
+// TestLoad_AIScratchSourceSynthesized ensures that when no source named
+// "ai-scratch" is defined in dicode.yaml, applyDefaults synthesizes one
+// pointing at ${DATADIR}/ai-tasks. This is what makes `dicode task create`
+// zero-config: the operator runs it, the boilerplate writes to the
+// synthesized source, and the reconciler picks it up. Without this, every
+// install would need to hand-author an entry in dicode.yaml first.
+func TestLoad_AIScratchSourceSynthesized(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "dicode.yaml")
+
+	content := fmt.Sprintf(`
+data_dir: %s
+spec:
+  entries:
+    local:
+      ref:
+        path: ${CONFIGDIR}/tasks
+`, dir)
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, ok := cfg.Spec.Entries["ai-scratch"]
+	if !ok || entry == nil {
+		t.Fatalf("Spec.Entries[ai-scratch] missing; want synthesized entry")
+	}
+	if entry.Ref == nil {
+		t.Fatalf("Spec.Entries[ai-scratch].Ref = nil; want non-nil local ref")
+	}
+	wantPath := filepath.Join(dir, "ai-tasks")
+	if entry.Ref.Path != wantPath {
+		t.Errorf("Spec.Entries[ai-scratch].Ref.Path = %q, want %q", entry.Ref.Path, wantPath)
+	}
+	if entry.Ref.URL != "" {
+		t.Errorf("Spec.Entries[ai-scratch].Ref.URL = %q, want empty (local source)", entry.Ref.URL)
+	}
+	// Watch defaults to true for local sources so the agent's writes are
+	// reflected in the registry via fsnotify, matching every other local
+	// source under the same applyDefaults branch.
+	if entry.Ref.Watch == nil || !*entry.Ref.Watch {
+		t.Errorf("Spec.Entries[ai-scratch].Ref.Watch = %v, want explicit true", entry.Ref.Watch)
+	}
+}
+
+// TestLoad_AIScratchSynthesizedFromEmptySpec ensures the synthesis works
+// even when dicode.yaml has no `spec:` block at all (the bare zero-config
+// install). A refactor that drops the `cfg.Spec.Entries == nil` map-init
+// guard would pass every other test in this package because they all
+// pre-populate at least one entry — this is the only test that exercises
+// the nil-map allocation path.
+func TestLoad_AIScratchSynthesizedFromEmptySpec(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "dicode.yaml")
+
+	content := fmt.Sprintf(`
+data_dir: %s
+`, dir)
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Spec.Entries == nil {
+		t.Fatal("Spec.Entries = nil after Load; want allocated map containing ai-scratch")
+	}
+	entry, ok := cfg.Spec.Entries["ai-scratch"]
+	if !ok || entry == nil {
+		t.Fatalf("Spec.Entries[ai-scratch] missing; want synthesized entry on empty spec")
+	}
+	wantPath := filepath.Join(dir, "ai-tasks")
+	if entry.Ref == nil || entry.Ref.Path != wantPath {
+		t.Errorf("Spec.Entries[ai-scratch].Ref.Path = %v, want %q", entry.Ref, wantPath)
+	}
+}
+
+// TestLoad_AIScratchUserDefinedWins ensures a user who explicitly defines
+// an `ai-scratch` source in dicode.yaml is not overwritten by the synthesis.
+// The synthesis is a default — like every other applyDefaults branch, a
+// user-supplied value takes precedence.
+func TestLoad_AIScratchUserDefinedWins(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "dicode.yaml")
+	userPath := filepath.Join(dir, "my-scratch")
+
+	content := fmt.Sprintf(`
+data_dir: %s
+spec:
+  entries:
+    ai-scratch:
+      ref:
+        path: %s
+`, dir, userPath)
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, ok := cfg.Spec.Entries["ai-scratch"]
+	if !ok || entry == nil {
+		t.Fatalf("Spec.Entries[ai-scratch] missing")
+	}
+	if entry.Ref.Path != userPath {
+		t.Errorf("Spec.Entries[ai-scratch].Ref.Path = %q, want user-supplied %q (synthesis must not overwrite)", entry.Ref.Path, userPath)
+	}
+}
+
+// TestLoad_AICreateSessionTTLOverride ensures a user-supplied duration string
+// parses into time.Duration so operators can tune the auto-cancel window
+// (short TTLs for shared dev boxes, long for personal installs).
+func TestLoad_AICreateSessionTTLOverride(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "dicode.yaml")
+
+	content := `
+ai:
+  create_session_ttl: 1h
+spec:
+  entries:
+    local:
+      ref:
+        path: ${CONFIGDIR}/tasks
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AI.CreateSessionTTL != time.Hour {
+		t.Errorf("AI.CreateSessionTTL = %v, want %v", cfg.AI.CreateSessionTTL, time.Hour)
 	}
 }
