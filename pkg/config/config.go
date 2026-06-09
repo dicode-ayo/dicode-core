@@ -328,24 +328,25 @@ func applyDefaults(cfg *Config, configDir string) {
 	cfg.Database.Path = expand(cfg.Database.Path)
 
 	// Synthesise the virtual "ai-scratch" local source if the operator
-	// hasn't already defined one. This is what makes `dicode task create`
-	// zero-config — boilerplate writes land here, the reconciler picks
-	// them up, and the synthesised entry shows up in the Sources webui
-	// page like any other local source. If the operator declares their
-	// own ai-scratch entry, theirs wins.
+	// hasn't already defined one AND the ai-tasks directory already exists.
+	// The directory is created lazily by the first AI authoring session
+	// (`dicode task create --ai`); synthesising a source for a non-existent
+	// path causes the taskset resolver to log spurious WARN on every
+	// fsnotify tick and can race with other sources that share the same
+	// watchRoot (both resolve to filepath.Dir of their ref path).
 	//
 	// Synthesis runs before the entry-expansion loop below so the
 	// synthesised ref goes through the same path-expansion + watch-default
-	// + IsGit-branch normalisation every other entry gets. Anything that
-	// the loop applies (today: ${VAR} expansion, branch/poll defaults for
-	// git, watch=&true for local) will automatically apply to ai-scratch
-	// too — no per-field-on-synthesis maintenance.
+	// + IsGit-branch normalisation every other entry gets.
 	if cfg.Spec.Entries == nil {
 		cfg.Spec.Entries = map[string]*taskset.Entry{}
 	}
+	aiScratchPath := filepath.Join(cfg.DataDir, "ai-tasks")
 	if _, exists := cfg.Spec.Entries["ai-scratch"]; !exists {
-		cfg.Spec.Entries["ai-scratch"] = &taskset.Entry{
-			Ref: &taskset.Ref{Path: filepath.Join(cfg.DataDir, "ai-tasks")},
+		if fi, err := os.Stat(aiScratchPath); err == nil && fi.IsDir() {
+			cfg.Spec.Entries["ai-scratch"] = &taskset.Entry{
+				Ref: &taskset.Ref{Path: aiScratchPath},
+			}
 		}
 	}
 

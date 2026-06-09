@@ -647,6 +647,12 @@ func TestLoad_AIScratchSourceSynthesized(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "dicode.yaml")
 
+	// Create the ai-tasks directory — synthesis only triggers when it exists.
+	aiTasksDir := filepath.Join(dir, "ai-tasks")
+	if err := os.MkdirAll(aiTasksDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
 	content := fmt.Sprintf(`
 data_dir: %s
 spec:
@@ -684,15 +690,49 @@ spec:
 	}
 }
 
+// TestLoad_AIScratchNotSynthesizedWithoutDir verifies that when the ai-tasks
+// directory does not exist, no ai-scratch source is injected. This prevents
+// a non-existent directory from being watched, which would cause spurious
+// WARN logs and potential race conditions with other sources sharing the
+// same watchRoot.
+func TestLoad_AIScratchNotSynthesizedWithoutDir(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "dicode.yaml")
+
+	content := fmt.Sprintf(`
+data_dir: %s
+spec:
+  entries:
+    local:
+      ref:
+        path: ${CONFIGDIR}/tasks
+`, dir)
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cfg.Spec.Entries["ai-scratch"]; ok {
+		t.Errorf("Spec.Entries[ai-scratch] present; want absent when ai-tasks dir does not exist")
+	}
+}
+
 // TestLoad_AIScratchSynthesizedFromEmptySpec ensures the synthesis works
 // even when dicode.yaml has no `spec:` block at all (the bare zero-config
-// install). A refactor that drops the `cfg.Spec.Entries == nil` map-init
-// guard would pass every other test in this package because they all
-// pre-populate at least one entry — this is the only test that exercises
-// the nil-map allocation path.
+// install), provided the ai-tasks directory exists. A refactor that drops
+// the `cfg.Spec.Entries == nil` map-init guard would pass every other test
+// in this package because they all pre-populate at least one entry — this
+// is the only test that exercises the nil-map allocation path.
 func TestLoad_AIScratchSynthesizedFromEmptySpec(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "dicode.yaml")
+
+	// Create the ai-tasks directory so synthesis triggers.
+	if err := os.MkdirAll(filepath.Join(dir, "ai-tasks"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 
 	content := fmt.Sprintf(`
 data_dir: %s
