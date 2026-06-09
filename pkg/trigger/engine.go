@@ -2364,7 +2364,17 @@ func (e *Engine) dispatch(ctx context.Context, spec *task.Spec, opts pkgruntime.
 		return registry.StatusFailure, &pkgruntime.RunResult{Error: err}
 	}
 
-	// Store return value and structured output if present.
+	// Compute final status from the result.
+	status := registry.StatusSuccess
+	if result.Error != nil {
+		if ctx.Err() != nil {
+			status = registry.StatusCancelled
+		} else {
+			status = registry.StatusFailure
+		}
+	}
+
+	// Marshal return value and determine persistence.
 	//
 	// `run_result.enabled: false` opts out of persisting the JSON-marshalled
 	// return value to `runs.return_value`. Structured output_content and
@@ -2376,49 +2386,33 @@ func (e *Engine) dispatch(ctx context.Context, spec *task.Spec, opts pkgruntime.
 	// stashed in runReturnValue so WaitRun can serve it to synchronous
 	// callers (dicode.run_task -> IPC reply). The entry is cleared by the
 	// startRun cleanup func once the run reaches a terminal state.
-	if result != nil && (result.ReturnValue != nil || result.OutputContent != "") {
-		retJSON := ""
-		if result.ReturnValue != nil {
-			if b, merr := json.Marshal(result.ReturnValue); merr == nil {
-				retJSON = string(b)
-			}
-		}
-		persistReturnValue := spec.RunResult.PersistReturnValue()
-		// When persistence is suppressed, stash the in-memory copy so
-		// WaitRun can still serve it to synchronous callers
-		// (dicode.run_task -> IPC reply). Done BEFORE the DB write
-		// (skipped below) so a WaitRun caller racing against the runDone
-		// close never observes an empty value: dispatch is called from
-		// runTask synchronously, the runDone channel is closed only by
-		// startRun's cleanup func which runs after runTask returns, and
-		// the cleanup defers the runReturnValue deletion to give
-		// post-close WaitRun goroutines time to scan the map.
-		//
-		// Common case (persistence enabled) takes no in-memory slot — the
-		// DB row carries the value as before.
-		persistedReturnJSON := retJSON
-		if !persistReturnValue {
-			persistedReturnJSON = ""
-			if retJSON != "" {
-				e.runReturnValue.Store(opts.RunID, retJSON)
-			}
-		}
-		// Skip the SetRunResult call entirely when nothing would be
-		// written (e.g. return-value persistence disabled AND no
-		// structured output) to avoid a needless UPDATE statement.
-		if persistedReturnJSON != "" || result.OutputContent != "" {
-			_ = e.registry.SetRunResult(context.Background(), opts.RunID, persistedReturnJSON, result.OutputContentType, result.OutputContent)
+	retJSON := ""
+	if result != nil && result.ReturnValue != nil {
+		if b, merr := json.Marshal(result.ReturnValue); merr == nil {
+			retJSON = string(b)
 		}
 	}
 
-	status := registry.StatusSuccess
-	if result.Error != nil {
-		if ctx.Err() != nil {
-			status = registry.StatusCancelled
-		} else {
-			status = registry.StatusFailure
+	persistedReturnJSON := retJSON
+	if persistReturnValue := spec.RunResult.PersistReturnValue(); !persistReturnValue {
+		persistedReturnJSON = ""
+		if retJSON != "" {
+			e.runReturnValue.Store(opts.RunID, retJSON)
 		}
 	}
+
+	outputContentType := ""
+	outputContent := ""
+	if result != nil {
+		outputContentType = result.OutputContentType
+		outputContent = result.OutputContent
+	}
+
+	// Atomic: set status + finished_at + return_value + output in one UPDATE.
+	// This eliminates the race where a reader polling for status != running
+	// could see the status flip before return_value was written.
+	_ = e.registry.FinishRunWithResult(context.Background(), opts.RunID, status,
+		persistedReturnJSON, outputContentType, outputContent)
 
 	e.FireChain(context.Background(), spec.ID, opts.RunID, status, result.ChainInput, opts.Params)
 	return status, result
