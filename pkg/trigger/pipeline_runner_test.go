@@ -1,13 +1,17 @@
 package trigger
 
 import (
+	"bytes"
 	"context"
+	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/dicode/dicode/pkg/registry"
+	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	"github.com/dicode/dicode/pkg/task"
 )
 
@@ -772,4 +776,822 @@ func TestPipelineStageDaemonDoesNotFlipStandaloneDaemonState(t *testing.T) {
 	env.engine.KillRun(standaloneRunID)
 	// And drain the pipeline (its terminal stage was killed → pipeline finishes).
 	waitForTerminal(t, env.engine, parentRunID, 15*time.Second)
+}
+
+// TestPipelineStage0ReceivesTriggerInput asserts that a manual fire with params
+// seeds stage 0's ${input.params.X} and ${input.output} references (#350).
+func TestPipelineStage0ReceivesTriggerInput(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires Deno subprocess")
+	}
+	env := newTestEnv(t)
+	dir := t.TempDir()
+
+	// stage-seed: receives a param "greeting" wired from trigger params, echoes
+	// it back as the return value.
+	stageSeed := writeTask(t, dir, "seed-stage",
+		`export default async function main({ params }) { return await params.get("greeting") }`,
+		task.TriggerConfig{Manual: true})
+	for _, s := range []*task.Spec{stageSeed} {
+		if err := env.reg.Register(s); err != nil {
+			t.Fatalf("reg.Register %s: %v", s.ID, err)
+		}
+		if err := env.engine.Register(s); err != nil {
+			t.Fatalf("eng.Register %s: %v", s.ID, err)
+		}
+	}
+
+	pipe := &task.PipelineTask{
+		APIVersion: "dicode/v1", Kind: task.KindPipelineTask,
+		ID: "seed-pipe", Name: "SP2", Subtype: "sequential", Enabled: true,
+		Trigger: task.PipelineTrigger{Manual: true},
+		Stages: []task.Stage{
+			{Task: "seed-stage", Overrides: &task.Overrides{
+				Params: task.ParamOverrides{
+					{Name: "greeting", Default: "${input.params.greeting}"},
+				},
+			}},
+		},
+	}
+	if err := env.reg.Register(pipe); err != nil {
+		t.Fatalf("reg.Register pipe: %v", err)
+	}
+	if err := env.engine.Register(pipe); err != nil {
+		t.Fatalf("eng.Register pipe: %v", err)
+	}
+
+	parentRunID, err := env.engine.FireManual(context.Background(), "seed-pipe",
+		map[string]string{"greeting": "hello-trigger"})
+	if err != nil {
+		t.Fatalf("FireManual: %v", err)
+	}
+
+	res := waitForTerminal(t, env.engine, parentRunID, 30*time.Second)
+	if res.Status != registry.StatusSuccess {
+		t.Fatalf("pipeline status = %q (reason=%q), want success", res.Status, res.FailureReason)
+	}
+	// The pipeline's return value is stage-0's return, which should be the
+	// trigger param value threaded via ${input.params.greeting}.
+	parent, err := env.engine.WaitRun(context.Background(), parentRunID)
+	if err != nil {
+		t.Fatalf("WaitRun: %v", err)
+	}
+	if parent.ReturnValue != "hello-trigger" {
+		t.Errorf("pipeline return = %v, want \"hello-trigger\" (trigger param not seeded to stage 0)", parent.ReturnValue)
+	}
+}
+
+// TestPipelineStage0CronEmptyInput asserts that a cron/empty-trigger fire seeds
+// an empty InputContext and a ${input.params.X} ref on stage 0 fails with
+// ErrInputUnavailable (not silently empty string).
+func TestPipelineStage0CronEmptyInput(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires Deno subprocess")
+	}
+	env := newTestEnv(t)
+	dir := t.TempDir()
+
+	// stage-fail: tries to read ${input.params.key} — should receive
+	// ErrInputUnavailable, causing the stage + pipeline to fail.
+	stageNoInput := writeTask(t, dir, "noinput-stage",
+		`export default async function main({ params }) { return await params.get("key") }`,
+		task.TriggerConfig{Manual: true})
+	if err := env.reg.Register(stageNoInput); err != nil {
+		t.Fatalf("reg.Register %s: %v", stageNoInput.ID, err)
+	}
+	if err := env.engine.Register(stageNoInput); err != nil {
+		t.Fatalf("eng.Register %s: %v", stageNoInput.ID, err)
+	}
+
+	pipe := &task.PipelineTask{
+		APIVersion: "dicode/v1", Kind: task.KindPipelineTask,
+		ID: "cron-pipe", Name: "CP2", Subtype: "sequential", Enabled: true,
+		Trigger: task.PipelineTrigger{Manual: true},
+		Stages: []task.Stage{
+			{Task: "noinput-stage", Overrides: &task.Overrides{
+				Params: task.ParamOverrides{
+					{Name: "key", Default: "${input.params.key}"},
+				},
+			}},
+		},
+	}
+	if err := env.reg.Register(pipe); err != nil {
+		t.Fatalf("reg.Register pipe: %v", err)
+	}
+	if err := env.engine.Register(pipe); err != nil {
+		t.Fatalf("eng.Register pipe: %v", err)
+	}
+
+	// Fire with NO params (simulates cron — empty opts).
+	parentRunID, err := env.engine.FireManual(context.Background(), "cron-pipe", nil)
+	if err != nil {
+		t.Fatalf("FireManual: %v", err)
+	}
+
+	res := waitForTerminal(t, env.engine, parentRunID, 30*time.Second)
+	// The pipeline must FAIL (not succeed with empty string) because no
+	// trigger params were provided — ErrInputUnavailable.
+	if res.Status == registry.StatusSuccess {
+		t.Fatal("pipeline should fail when stage 0 ${input.params.X} has no trigger input, but succeeded")
+	}
+	// Confirm the failure is specifically the unresolved-input path, not a
+	// Deno crash or registration error — FailureReason must mention "${input".
+	if !strings.Contains(res.FailureReason, "${input") {
+		t.Errorf("pipeline failure reason %q does not mention ${input}; want ErrInputUnavailable path, not a spurious error", res.FailureReason)
+	}
+}
+
+// TestPipelineWebhookStage0Input asserts that a webhook POST body flows through
+// as the trigger payload for stage 0 (${input.params.X} from webhook body).
+func TestPipelineWebhookStage0Input(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires Deno subprocess")
+	}
+	env := newTestEnv(t)
+	dir := t.TempDir()
+
+	stageWH := writeTask(t, dir, "wh-stage",
+		`export default async function main({ params }) { return await params.get("event") }`,
+		task.TriggerConfig{Manual: true})
+	if err := env.reg.Register(stageWH); err != nil {
+		t.Fatalf("reg.Register %s: %v", stageWH.ID, err)
+	}
+	if err := env.engine.Register(stageWH); err != nil {
+		t.Fatalf("eng.Register %s: %v", stageWH.ID, err)
+	}
+
+	pipe := &task.PipelineTask{
+		APIVersion: "dicode/v1", Kind: task.KindPipelineTask,
+		ID: "wh-pipe", Name: "WHP", Subtype: "sequential", Enabled: true,
+		Trigger: task.PipelineTrigger{Webhook: "/hooks/wh-pipe"},
+		Stages: []task.Stage{
+			{Task: "wh-stage", Overrides: &task.Overrides{
+				Params: task.ParamOverrides{
+					{Name: "event", Default: "${input.params.event}"},
+				},
+			}},
+		},
+	}
+	if err := env.reg.Register(pipe); err != nil {
+		t.Fatalf("reg.Register pipe: %v", err)
+	}
+	if err := env.engine.Register(pipe); err != nil {
+		t.Fatalf("eng.Register pipe: %v", err)
+	}
+
+	// POST a JSON body to the pipeline webhook — body should seed stage 0.
+	handler := env.engine.WebhookHandler()
+	body := []byte(`{"event":"push"}`)
+	req := httptest.NewRequest("POST", "/hooks/wh-pipe", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("webhook POST status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+
+	runID := w.Header().Get("X-Run-Id")
+	if runID == "" {
+		t.Fatal("no X-Run-Id in response")
+	}
+
+	res := waitForTerminal(t, env.engine, runID, 30*time.Second)
+	if res.Status != registry.StatusSuccess {
+		t.Fatalf("pipeline status = %q (reason=%q), want success", res.Status, res.FailureReason)
+	}
+	parent, err := env.engine.WaitRun(context.Background(), runID)
+	if err != nil {
+		t.Fatalf("WaitRun: %v", err)
+	}
+	if parent.ReturnValue != "push" {
+		t.Errorf("pipeline return = %v, want \"push\" (webhook body not seeded to stage 0)", parent.ReturnValue)
+	}
+}
+
+// TestPipelineStage0ManualOutputRef asserts that ${input.output.<name>} on stage 0
+// resolves to the named manual-trigger param value (#350). This covers the case
+// where opts.Input is nil (manual fire) but opts.Params is non-empty: firePipeline
+// must promote params to a map[string]any so ${input.output} and
+// ${input.output.<field>} resolve correctly, not just ${input.params.<name>}.
+func TestPipelineStage0ManualOutputRef(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires Deno subprocess")
+	}
+	env := newTestEnv(t)
+	dir := t.TempDir()
+
+	// stage echoes its "val" param (wired via ${input.output.greeting}).
+	stageOut := writeTask(t, dir, "out-stage",
+		`export default async function main({ params }) { return await params.get("val") }`,
+		task.TriggerConfig{Manual: true})
+	if err := env.reg.Register(stageOut); err != nil {
+		t.Fatalf("reg.Register %s: %v", stageOut.ID, err)
+	}
+	if err := env.engine.Register(stageOut); err != nil {
+		t.Fatalf("eng.Register %s: %v", stageOut.ID, err)
+	}
+
+	pipe := &task.PipelineTask{
+		APIVersion: "dicode/v1", Kind: task.KindPipelineTask,
+		ID: "out-pipe", Name: "OP", Subtype: "sequential", Enabled: true,
+		Trigger: task.PipelineTrigger{Manual: true},
+		Stages: []task.Stage{
+			{Task: "out-stage", Overrides: &task.Overrides{
+				Params: task.ParamOverrides{
+					// ${input.output.greeting} — fields of the promoted params map.
+					{Name: "val", Default: "${input.output.greeting}"},
+				},
+			}},
+		},
+	}
+	if err := env.reg.Register(pipe); err != nil {
+		t.Fatalf("reg.Register pipe: %v", err)
+	}
+	if err := env.engine.Register(pipe); err != nil {
+		t.Fatalf("eng.Register pipe: %v", err)
+	}
+
+	parentRunID, err := env.engine.FireManual(context.Background(), "out-pipe",
+		map[string]string{"greeting": "hi-from-output"})
+	if err != nil {
+		t.Fatalf("FireManual: %v", err)
+	}
+
+	res := waitForTerminal(t, env.engine, parentRunID, 30*time.Second)
+	if res.Status != registry.StatusSuccess {
+		t.Fatalf("pipeline status = %q (reason=%q), want success", res.Status, res.FailureReason)
+	}
+	parent, err := env.engine.WaitRun(context.Background(), parentRunID)
+	if err != nil {
+		t.Fatalf("WaitRun: %v", err)
+	}
+	if parent.ReturnValue != "hi-from-output" {
+		t.Errorf("pipeline return = %v, want \"hi-from-output\" (${input.output.<name>} on stage 0 not resolved from manual params)", parent.ReturnValue)
+	}
+}
+
+// TestPipelineStage0CronRealDispatch asserts that firing a pipeline via the
+// actual cron dispatch path (registerPipelineCron → fireKinded with TriggerCron,
+// empty RunOptions) seeds stage 0 with a nil/empty InputContext and that a
+// ${input.params.X} ref fails loudly (ErrInputUnavailable), i.e. the pipeline
+// ends in a failure status. This exercises the real cron code path rather than
+// simulating it via FireManual.
+func TestPipelineStage0CronRealDispatch(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires Deno subprocess")
+	}
+	env := newTestEnv(t)
+	dir := t.TempDir()
+
+	// stage-cron: tries to read ${input.params.key} — must fail loud when no
+	// trigger payload is present (cron fires with empty RunOptions).
+	stageCron := writeTask(t, dir, "cron-real-stage",
+		`export default async function main({ params }) { return await params.get("key") }`,
+		task.TriggerConfig{Manual: true})
+	if err := env.reg.Register(stageCron); err != nil {
+		t.Fatalf("reg.Register %s: %v", stageCron.ID, err)
+	}
+	if err := env.engine.Register(stageCron); err != nil {
+		t.Fatalf("eng.Register %s: %v", stageCron.ID, err)
+	}
+
+	pipe := &task.PipelineTask{
+		APIVersion: "dicode/v1", Kind: task.KindPipelineTask,
+		ID: "cron-real-pipe", Name: "CRP", Subtype: "sequential", Enabled: true,
+		// Cron field is set but we invoke the dispatch path directly below
+		// rather than waiting on a wall-clock tick.
+		Trigger: task.PipelineTrigger{Cron: "0 0 1 1 *"},
+		Stages: []task.Stage{
+			{Task: "cron-real-stage", Overrides: &task.Overrides{
+				Params: task.ParamOverrides{
+					{Name: "key", Default: "${input.params.key}"},
+				},
+			}},
+		},
+	}
+	if err := env.reg.Register(pipe); err != nil {
+		t.Fatalf("reg.Register pipe: %v", err)
+	}
+	if err := env.engine.Register(pipe); err != nil {
+		t.Fatalf("eng.Register pipe: %v", err)
+	}
+
+	// Invoke the cron dispatch path directly: retrieve the kinded task and fire
+	// it through fireKinded with TriggerCron + empty RunOptions — exactly what
+	// registerPipelineCron's callback does on each tick.
+	k, ok := env.engine.registry.GetKinded("cron-real-pipe")
+	if !ok {
+		t.Fatal("cron-real-pipe not in registry")
+	}
+	parentRunID, err := env.engine.fireKinded(context.Background(), k,
+		pkgruntime.RunOptions{}, registry.TriggerCron)
+	if err != nil {
+		t.Fatalf("fireKinded(cron): %v", err)
+	}
+
+	res := waitForTerminal(t, env.engine, parentRunID, 30*time.Second)
+	// Cron fires with no params → stage-0 ${input.params.key} must fail loud
+	// (ErrInputUnavailable), causing the pipeline to end in failure.
+	if res.Status == registry.StatusSuccess {
+		t.Fatal("cron-dispatched pipeline should fail when stage 0 has ${input.params.X} but no trigger payload, but succeeded")
+	}
+	if res.TriggerSource != registry.TriggerCron {
+		t.Errorf("trigger_source = %q, want %q", res.TriggerSource, registry.TriggerCron)
+	}
+	// Confirm the failure is specifically the unresolved-input path, not a
+	// Deno crash or registration error — FailureReason must mention "${input".
+	if !strings.Contains(res.FailureReason, "${input") {
+		t.Errorf("pipeline failure reason %q does not mention ${input}; want ErrInputUnavailable path, not a spurious error", res.FailureReason)
+	}
+}
+
+// TestPipelineChainStage0Input asserts that chain.params from a chain-triggered
+// pipeline fire flow through as the trigger payload for stage 0 (#350).
+func TestPipelineChainStage0Input(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires Deno subprocess")
+	}
+	env := newTestEnv(t)
+	dir := t.TempDir()
+
+	upstream := writeTask(t, dir, "chain-up",
+		`export default async function main() { return "upstream-done" }`,
+		task.TriggerConfig{Manual: true})
+	stageChain := writeTask(t, dir, "chain-stage",
+		`export default async function main({ params }) { return await params.get("msg") }`,
+		task.TriggerConfig{Manual: true})
+	for _, s := range []*task.Spec{upstream, stageChain} {
+		if err := env.reg.Register(s); err != nil {
+			t.Fatalf("reg.Register %s: %v", s.ID, err)
+		}
+		if err := env.engine.Register(s); err != nil {
+			t.Fatalf("eng.Register %s: %v", s.ID, err)
+		}
+	}
+
+	pipe := &task.PipelineTask{
+		APIVersion: "dicode/v1", Kind: task.KindPipelineTask,
+		ID: "chain-pipe2", Name: "CP3", Subtype: "sequential", Enabled: true,
+		Trigger: task.PipelineTrigger{Chain: &task.ChainTrigger{
+			From:   "chain-up",
+			On:     "success",
+			Params: map[string]interface{}{"msg": "chain-hello"},
+		}},
+		Stages: []task.Stage{
+			{Task: "chain-stage", Overrides: &task.Overrides{
+				Params: task.ParamOverrides{
+					{Name: "msg", Default: "${input.params.msg}"},
+				},
+			}},
+		},
+	}
+	if err := env.reg.Register(pipe); err != nil {
+		t.Fatalf("reg.Register pipe: %v", err)
+	}
+	if err := env.engine.Register(pipe); err != nil {
+		t.Fatalf("eng.Register pipe: %v", err)
+	}
+
+	if _, err := env.engine.FireManual(context.Background(), "chain-up", nil); err != nil {
+		t.Fatalf("FireManual chain-up: %v", err)
+	}
+
+	run := findRun(t, env, "chain-pipe2", registry.RunKindPipeline, 30*time.Second)
+	if run.Status != registry.StatusSuccess {
+		t.Fatalf("chained pipeline status = %q, want success", run.Status)
+	}
+	parent, err := env.engine.WaitRun(context.Background(), run.ID)
+	if err != nil {
+		t.Fatalf("WaitRun: %v", err)
+	}
+	if parent.ReturnValue != "chain-hello" {
+		t.Errorf("pipeline return = %v, want \"chain-hello\" (chain.params not seeded to stage 0)", parent.ReturnValue)
+	}
+}
+
+// TestPipelineWebhookStage0GETQuery (FIX F) asserts that a webhook GET request
+// with query params seeds stage 0 via ${input.output.<field>} (the query map
+// is threaded as the trigger Input, so ${input.output.X} resolves to the query
+// param named X).
+func TestPipelineWebhookStage0GETQuery(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires Deno subprocess")
+	}
+	env := newTestEnv(t)
+	dir := t.TempDir()
+
+	stageGET := writeTask(t, dir, "get-stage",
+		`export default async function main({ params }) { return await params.get("ref") }`,
+		task.TriggerConfig{Manual: true})
+	if err := env.reg.Register(stageGET); err != nil {
+		t.Fatalf("reg.Register %s: %v", stageGET.ID, err)
+	}
+	if err := env.engine.Register(stageGET); err != nil {
+		t.Fatalf("eng.Register %s: %v", stageGET.ID, err)
+	}
+
+	pipe := &task.PipelineTask{
+		APIVersion: "dicode/v1", Kind: task.KindPipelineTask,
+		ID: "get-pipe", Name: "GP", Subtype: "sequential", Enabled: true,
+		Trigger: task.PipelineTrigger{Webhook: "/hooks/get-pipe"},
+		Stages: []task.Stage{
+			{Task: "get-stage", Overrides: &task.Overrides{
+				Params: task.ParamOverrides{
+					// GET query params are decoded into a map and set as Input,
+					// so ${input.output.<field>} resolves the named query param.
+					{Name: "ref", Default: "${input.output.branch}"},
+				},
+			}},
+		},
+	}
+	if err := env.reg.Register(pipe); err != nil {
+		t.Fatalf("reg.Register pipe: %v", err)
+	}
+	if err := env.engine.Register(pipe); err != nil {
+		t.Fatalf("eng.Register pipe: %v", err)
+	}
+
+	handler := env.engine.WebhookHandler()
+	req := httptest.NewRequest("GET", "/hooks/get-pipe?branch=main", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("webhook GET status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+
+	runID := w.Header().Get("X-Run-Id")
+	if runID == "" {
+		t.Fatal("no X-Run-Id in response")
+	}
+
+	res := waitForTerminal(t, env.engine, runID, 30*time.Second)
+	if res.Status != registry.StatusSuccess {
+		t.Fatalf("pipeline status = %q (reason=%q), want success", res.Status, res.FailureReason)
+	}
+	parent, err := env.engine.WaitRun(context.Background(), runID)
+	if err != nil {
+		t.Fatalf("WaitRun: %v", err)
+	}
+	if parent.ReturnValue != "main" {
+		t.Errorf("pipeline return = %v, want \"main\" (GET query param not seeded to stage 0 via ${input.output.branch})", parent.ReturnValue)
+	}
+}
+
+// TestPipelineWebhookStage0NestedJSON (FIX F) asserts that a webhook POST with
+// a nested JSON body resolves ${input.output.<field>} on stage 0 to the nested
+// field value (the JSON body is decoded to map[string]interface{} and set as
+// Input, so the top-level fields are accessible via ${input.output.<field>}).
+func TestPipelineWebhookStage0NestedJSON(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires Deno subprocess")
+	}
+	env := newTestEnv(t)
+	dir := t.TempDir()
+
+	stageNested := writeTask(t, dir, "nested-stage",
+		`export default async function main({ params }) { return await params.get("action") }`,
+		task.TriggerConfig{Manual: true})
+	if err := env.reg.Register(stageNested); err != nil {
+		t.Fatalf("reg.Register %s: %v", stageNested.ID, err)
+	}
+	if err := env.engine.Register(stageNested); err != nil {
+		t.Fatalf("eng.Register %s: %v", stageNested.ID, err)
+	}
+
+	pipe := &task.PipelineTask{
+		APIVersion: "dicode/v1", Kind: task.KindPipelineTask,
+		ID: "nested-pipe", Name: "NP", Subtype: "sequential", Enabled: true,
+		Trigger: task.PipelineTrigger{Webhook: "/hooks/nested-pipe"},
+		Stages: []task.Stage{
+			{Task: "nested-stage", Overrides: &task.Overrides{
+				Params: task.ParamOverrides{
+					// Nested JSON body: {"repo":{"action":"opened"}} — access
+					// top-level field "action" directly (one level of nesting
+					// is the schema; ${input.output.action} resolves the field
+					// named "action" in the top-level JSON object).
+					{Name: "action", Default: "${input.output.action}"},
+				},
+			}},
+		},
+	}
+	if err := env.reg.Register(pipe); err != nil {
+		t.Fatalf("reg.Register pipe: %v", err)
+	}
+	if err := env.engine.Register(pipe); err != nil {
+		t.Fatalf("eng.Register pipe: %v", err)
+	}
+
+	handler := env.engine.WebhookHandler()
+	// POST a nested JSON body: top-level "action" field with a string value.
+	body := []byte(`{"action":"opened","repo":{"name":"dicode","stars":42}}`)
+	req := httptest.NewRequest("POST", "/hooks/nested-pipe", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("webhook POST status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+
+	runID := w.Header().Get("X-Run-Id")
+	if runID == "" {
+		t.Fatal("no X-Run-Id in response")
+	}
+
+	res := waitForTerminal(t, env.engine, runID, 30*time.Second)
+	if res.Status != registry.StatusSuccess {
+		t.Fatalf("pipeline status = %q (reason=%q), want success", res.Status, res.FailureReason)
+	}
+	parent, err := env.engine.WaitRun(context.Background(), runID)
+	if err != nil {
+		t.Fatalf("WaitRun: %v", err)
+	}
+	if parent.ReturnValue != "opened" {
+		t.Errorf("pipeline return = %v, want \"opened\" (nested JSON field not resolved via ${input.output.action})", parent.ReturnValue)
+	}
+}
+
+// TestPipelineChainNoParamsThreadsUpstreamOutput (FIX B) asserts that a
+// chain-triggered pipeline with NO chain.params threads the upstream task's raw
+// return value into stage 0 via ${input.output} / ${input.output.<field>},
+// mirroring the kind: Task buildChainInput zero-params branch (#350).
+func TestPipelineChainNoParamsThreadsUpstreamOutput(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires Deno subprocess")
+	}
+	env := newTestEnv(t)
+	dir := t.TempDir()
+
+	// upstream: returns a structured value with a "result" field.
+	upstream := writeTask(t, dir, "noparams-up",
+		`export default async function main() { return { result: "from-upstream", code: 42 } }`,
+		task.TriggerConfig{Manual: true})
+	stageNoParams := writeTask(t, dir, "noparams-stage",
+		`export default async function main({ params }) { return await params.get("val") }`,
+		task.TriggerConfig{Manual: true})
+	for _, s := range []*task.Spec{upstream, stageNoParams} {
+		if err := env.reg.Register(s); err != nil {
+			t.Fatalf("reg.Register %s: %v", s.ID, err)
+		}
+		if err := env.engine.Register(s); err != nil {
+			t.Fatalf("eng.Register %s: %v", s.ID, err)
+		}
+	}
+
+	pipe := &task.PipelineTask{
+		APIVersion: "dicode/v1", Kind: task.KindPipelineTask,
+		ID: "noparams-pipe", Name: "NoPP", Subtype: "sequential", Enabled: true,
+		// chain with NO params — the upstream output must be threaded directly.
+		Trigger: task.PipelineTrigger{Chain: &task.ChainTrigger{From: "noparams-up", On: "success"}},
+		Stages: []task.Stage{
+			{Task: "noparams-stage", Overrides: &task.Overrides{
+				Params: task.ParamOverrides{
+					// ${input.output.result} resolves to the upstream's "result" field.
+					{Name: "val", Default: "${input.output.result}"},
+				},
+			}},
+		},
+	}
+	if err := env.reg.Register(pipe); err != nil {
+		t.Fatalf("reg.Register pipe: %v", err)
+	}
+	if err := env.engine.Register(pipe); err != nil {
+		t.Fatalf("eng.Register pipe: %v", err)
+	}
+
+	if _, err := env.engine.FireManual(context.Background(), "noparams-up", nil); err != nil {
+		t.Fatalf("FireManual noparams-up: %v", err)
+	}
+
+	run := findRun(t, env, "noparams-pipe", registry.RunKindPipeline, 30*time.Second)
+	if run.Status != registry.StatusSuccess {
+		t.Fatalf("chained pipeline status = %q (reason=%q), want success", run.Status, run.FailureReason)
+	}
+	parent, err := env.engine.WaitRun(context.Background(), run.ID)
+	if err != nil {
+		t.Fatalf("WaitRun: %v", err)
+	}
+	// Stage 0 must have resolved ${input.output.result} = "from-upstream"
+	if parent.ReturnValue != "from-upstream" {
+		t.Errorf("pipeline return = %v, want \"from-upstream\" (chain with no params: upstream output not threaded to stage 0 via ${input.output.result})", parent.ReturnValue)
+	}
+	// Confirm the pipeline was triggered by the chain.
+	if run.TriggerSource != registry.TriggerChain {
+		t.Errorf("trigger_source = %q, want %q", run.TriggerSource, registry.TriggerChain)
+	}
+}
+
+// TestPipelineWebhookHMACCorrectSignatureSucceeds asserts that a pipeline
+// webhook with a configured WebhookSecret accepts a request with the correct
+// HMAC-SHA256 signature: the handler returns HTTP 200 and the body reaches
+// stage 0 (i.e. ${input.params.event} resolves from the JSON payload).
+func TestPipelineWebhookHMACCorrectSignatureSucceeds(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires Deno subprocess")
+	}
+	env := newTestEnv(t)
+	dir := t.TempDir()
+
+	stageHMAC := writeTask(t, dir, "hmac-stage",
+		`export default async function main({ params }) { return await params.get("event") }`,
+		task.TriggerConfig{Manual: true})
+	if err := env.reg.Register(stageHMAC); err != nil {
+		t.Fatalf("reg.Register %s: %v", stageHMAC.ID, err)
+	}
+	if err := env.engine.Register(stageHMAC); err != nil {
+		t.Fatalf("eng.Register %s: %v", stageHMAC.ID, err)
+	}
+
+	const secret = "test-pipeline-secret"
+	pipe := &task.PipelineTask{
+		APIVersion: "dicode/v1", Kind: task.KindPipelineTask,
+		ID: "hmac-pipe", Name: "HMAC", Subtype: "sequential", Enabled: true,
+		Trigger: task.PipelineTrigger{
+			Webhook:       "/hooks/hmac-pipe",
+			WebhookSecret: secret,
+		},
+		Stages: []task.Stage{
+			{Task: "hmac-stage", Overrides: &task.Overrides{
+				Params: task.ParamOverrides{
+					{Name: "event", Default: "${input.params.event}"},
+				},
+			}},
+		},
+	}
+	if err := env.reg.Register(pipe); err != nil {
+		t.Fatalf("reg.Register pipe: %v", err)
+	}
+	if err := env.engine.Register(pipe); err != nil {
+		t.Fatalf("eng.Register pipe: %v", err)
+	}
+
+	handler := env.engine.WebhookHandler()
+	body := []byte(`{"event":"deploy"}`)
+	req := httptest.NewRequest("POST", "/hooks/hmac-pipe", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	// Attach the correct HMAC-SHA256 signature using the shared signBody helper
+	// (defined in webhook_test.go, same package).
+	req.Header.Set(webhookSignatureHeader, signBody(secret, body))
+
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("webhook POST with correct HMAC: status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+
+	runID := w.Header().Get("X-Run-Id")
+	if runID == "" {
+		t.Fatal("no X-Run-Id in response")
+	}
+
+	res := waitForTerminal(t, env.engine, runID, 30*time.Second)
+	if res.Status != registry.StatusSuccess {
+		t.Fatalf("pipeline status = %q (reason=%q), want success", res.Status, res.FailureReason)
+	}
+	parent, err := env.engine.WaitRun(context.Background(), runID)
+	if err != nil {
+		t.Fatalf("WaitRun: %v", err)
+	}
+	if parent.ReturnValue != "deploy" {
+		t.Errorf("pipeline return = %v, want \"deploy\" (body not seeded to stage 0 via correct HMAC path)", parent.ReturnValue)
+	}
+}
+
+// TestPipelineWebhookHMACWrongSignatureForbidden asserts that a pipeline
+// webhook with a configured WebhookSecret rejects a request with a wrong
+// (or missing) HMAC-SHA256 signature with HTTP 403 and does NOT fire the
+// pipeline (no pipeline run is created).
+func TestPipelineWebhookHMACWrongSignatureForbidden(t *testing.T) {
+	env := newTestEnv(t)
+	dir := t.TempDir()
+
+	stageNoop := writeTask(t, dir, "hmac-noop-stage",
+		`export default async function main() { return "should-not-run" }`,
+		task.TriggerConfig{Manual: true})
+	if err := env.reg.Register(stageNoop); err != nil {
+		t.Fatalf("reg.Register %s: %v", stageNoop.ID, err)
+	}
+	if err := env.engine.Register(stageNoop); err != nil {
+		t.Fatalf("eng.Register %s: %v", stageNoop.ID, err)
+	}
+
+	pipe := &task.PipelineTask{
+		APIVersion: "dicode/v1", Kind: task.KindPipelineTask,
+		ID: "hmac-reject-pipe", Name: "HMACR", Subtype: "sequential", Enabled: true,
+		Trigger: task.PipelineTrigger{
+			Webhook:       "/hooks/hmac-reject-pipe",
+			WebhookSecret: "correct-secret",
+		},
+		Stages: []task.Stage{{Task: "hmac-noop-stage"}},
+	}
+	if err := env.reg.Register(pipe); err != nil {
+		t.Fatalf("reg.Register pipe: %v", err)
+	}
+	if err := env.engine.Register(pipe); err != nil {
+		t.Fatalf("eng.Register pipe: %v", err)
+	}
+
+	handler := env.engine.WebhookHandler()
+	body := []byte(`{"event":"push"}`)
+
+	// Subtest: wrong secret — must return 403.
+	t.Run("wrong_secret", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/hooks/hmac-reject-pipe", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(webhookSignatureHeader, signBody("wrong-secret", body))
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code != 403 {
+			t.Errorf("wrong-secret request: status = %d, want 403", w.Code)
+		}
+		if w.Header().Get("X-Run-Id") != "" {
+			t.Errorf("wrong-secret request: got X-Run-Id=%q; pipeline must NOT have fired", w.Header().Get("X-Run-Id"))
+		}
+	})
+
+	// Subtest: missing signature header — must return 403.
+	t.Run("missing_signature", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/hooks/hmac-reject-pipe", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		// No X-Hub-Signature-256 header.
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code != 403 {
+			t.Errorf("missing-signature request: status = %d, want 403", w.Code)
+		}
+		if w.Header().Get("X-Run-Id") != "" {
+			t.Errorf("missing-signature request: got X-Run-Id=%q; pipeline must NOT have fired", w.Header().Get("X-Run-Id"))
+		}
+	})
+}
+
+// TestPipelineWebhookFormURLEncoded asserts that an application/x-www-form-urlencoded
+// POST to a pipeline webhook reaches stage 0: form fields are decoded by the
+// shared decodeWebhookPayload helper and made available via ${input.params.<field>}
+// on stage 0 overrides.
+func TestPipelineWebhookFormURLEncoded(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires Deno subprocess")
+	}
+	env := newTestEnv(t)
+	dir := t.TempDir()
+
+	stageForm := writeTask(t, dir, "form-stage",
+		`export default async function main({ params }) { return await params.get("action") }`,
+		task.TriggerConfig{Manual: true})
+	if err := env.reg.Register(stageForm); err != nil {
+		t.Fatalf("reg.Register %s: %v", stageForm.ID, err)
+	}
+	if err := env.engine.Register(stageForm); err != nil {
+		t.Fatalf("eng.Register %s: %v", stageForm.ID, err)
+	}
+
+	pipe := &task.PipelineTask{
+		APIVersion: "dicode/v1", Kind: task.KindPipelineTask,
+		ID: "form-pipe", Name: "FP", Subtype: "sequential", Enabled: true,
+		Trigger: task.PipelineTrigger{Webhook: "/hooks/form-pipe"},
+		Stages: []task.Stage{
+			{Task: "form-stage", Overrides: &task.Overrides{
+				Params: task.ParamOverrides{
+					{Name: "action", Default: "${input.params.action}"},
+				},
+			}},
+		},
+	}
+	if err := env.reg.Register(pipe); err != nil {
+		t.Fatalf("reg.Register pipe: %v", err)
+	}
+	if err := env.engine.Register(pipe); err != nil {
+		t.Fatalf("eng.Register pipe: %v", err)
+	}
+
+	handler := env.engine.WebhookHandler()
+	// POST an application/x-www-form-urlencoded body with an "action" field.
+	formBody := []byte("action=merge&repo=dicode")
+	req := httptest.NewRequest("POST", "/hooks/form-pipe", bytes.NewReader(formBody))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("form-urlencoded POST status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+
+	runID := w.Header().Get("X-Run-Id")
+	if runID == "" {
+		t.Fatal("no X-Run-Id in response")
+	}
+
+	res := waitForTerminal(t, env.engine, runID, 30*time.Second)
+	if res.Status != registry.StatusSuccess {
+		t.Fatalf("pipeline status = %q (reason=%q), want success", res.Status, res.FailureReason)
+	}
+	parent, err := env.engine.WaitRun(context.Background(), runID)
+	if err != nil {
+		t.Fatalf("WaitRun: %v", err)
+	}
+	// Stage 0 must have resolved ${input.params.action} = "merge" from the
+	// form field, confirming the shared decodeWebhookPayload form path works
+	// for pipeline webhooks.
+	if parent.ReturnValue != "merge" {
+		t.Errorf("pipeline return = %v, want \"merge\" (form-urlencoded body not decoded to stage 0 via ${input.params.action})", parent.ReturnValue)
+	}
 }

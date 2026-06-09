@@ -56,10 +56,7 @@ func TestPipelineValidate(t *testing.T) {
 		{"empty stage task", func(p *PipelineTask) { p.Stages[0].Task = "" }, "empty task"},
 		{"self ref", func(p *PipelineTask) { p.Stages[0].Task = "p" }, "cannot reference itself"},
 		{"dup stage", func(p *PipelineTask) { p.Stages[1].Task = "buildin/template" }, "duplicate"},
-		{"input on stage0", func(p *PipelineTask) {
-			p.Stages[0].Overrides = &Overrides{Params: ParamOverrides{{Name: "x", Default: "${input.output}"}}}
-		}, "first stage"},
-		{"input.params anywhere", func(p *PipelineTask) {
+		{"input.params on stage1+", func(p *PipelineTask) {
 			p.Stages[1].Overrides.Params[0].Default = "${input.params.foo}"
 		}, "${input.params"},
 		{"stage override rejects enabled", func(p *PipelineTask) {
@@ -88,6 +85,77 @@ func TestPipelineValidate(t *testing.T) {
 				t.Fatalf("error %q does not contain %q", err.Error(), tc.want)
 			}
 		})
+	}
+}
+
+// TestPipelineStage0AcceptsInputRefs verifies that after #350 stage 0 is
+// allowed to reference the trigger payload via ${input.output}, ${input.output.field},
+// and ${input.params.X}.
+func TestPipelineStage0AcceptsInputRefs(t *testing.T) {
+	cases := []struct {
+		name  string
+		value string
+	}{
+		{"output bare", "${input.output}"},
+		{"output field", "${input.output.payload}"},
+		{"params field", "${input.params.key}"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &PipelineTask{
+				APIVersion: "dicode/v1", Kind: KindPipelineTask, Name: "P",
+				Subtype: "sequential", ID: "p",
+				Stages: []Stage{
+					{Task: "buildin/template", Overrides: &Overrides{
+						Params: ParamOverrides{{Name: "x", Default: tc.value}},
+					}},
+				},
+			}
+			if err := p.Validate(); err != nil {
+				t.Fatalf("stage 0 ref %q should be accepted, got error: %v", tc.value, err)
+			}
+		})
+	}
+}
+
+// TestPipelineStage1PlusRejectsInputParams verifies that ${input.params.X} is
+// still rejected on stages ≥1 (no upstream params are threaded between stages).
+func TestPipelineStage1PlusRejectsInputParams(t *testing.T) {
+	p := &PipelineTask{
+		APIVersion: "dicode/v1", Kind: KindPipelineTask, Name: "P",
+		Subtype: "sequential", ID: "p",
+		Stages: []Stage{
+			{Task: "buildin/template"},
+			{Task: "buildin/write-local", Overrides: &Overrides{
+				Params: ParamOverrides{{Name: "content", Default: "${input.params.foo}"}},
+			}},
+		},
+	}
+	err := p.Validate()
+	if err == nil {
+		t.Fatal("expected error for ${input.params.X} on stage 1, got nil")
+	}
+	if !strings.Contains(err.Error(), "${input.params") {
+		t.Fatalf("error %q does not mention ${input.params", err.Error())
+	}
+}
+
+// TestPipelineStage1PlusAcceptsInputOutput verifies that ${input.output} and
+// ${input.output.field} remain valid on stages ≥1 (they receive the previous
+// stage's return value).
+func TestPipelineStage1PlusAcceptsInputOutput(t *testing.T) {
+	p := &PipelineTask{
+		APIVersion: "dicode/v1", Kind: KindPipelineTask, Name: "P",
+		Subtype: "sequential", ID: "p",
+		Stages: []Stage{
+			{Task: "buildin/template"},
+			{Task: "buildin/write-local", Overrides: &Overrides{
+				Params: ParamOverrides{{Name: "content", Default: "${input.output}"}},
+			}},
+		},
+	}
+	if err := p.Validate(); err != nil {
+		t.Fatalf("stage 1 ${input.output} should be accepted: %v", err)
 	}
 }
 

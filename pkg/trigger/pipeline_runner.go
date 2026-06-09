@@ -32,6 +32,15 @@ type PipelineRunner struct {
 	cancel context.CancelFunc // cancels runCtx; invoked on finish + by KillRun
 	runCtx context.Context    // the pipeline's lifecycle context (cancelled by KillRun/finish)
 
+	// triggerInput and triggerParams carry the trigger-payload that fired this
+	// pipeline. They seed stage 0's InputContext so ${input.output} /
+	// ${input.output.<field>} / ${input.params.<name>} references on stage 0
+	// resolve against whatever fired the pipeline (webhook body, manual/chain
+	// params, etc.). Stages ≥1 receive the previous stage's return value as
+	// their InputContext via the normal threading path. (#350)
+	triggerInput  interface{}
+	triggerParams map[string]string
+
 	mu sync.Mutex
 	// live-daemon-terminal-stage state, set once the terminal daemon stage is
 	// fired and read by handlePipelineStageRerun. All guarded by mu.
@@ -68,6 +77,58 @@ func (e *Engine) firePipeline(ctx context.Context, p *task.PipelineTask, opts pk
 	if _, err := e.registry.StartRunWithID(context.Background(), runID, p.ID, opts.ParentRunID, string(source), registry.RunKindPipeline); err != nil {
 		return "", fmt.Errorf("start pipeline run: %w", err)
 	}
+
+	// Persist the trigger payload on the parent pipeline run row so the UI can
+	// show what fired it — mirrors how startRun persists inputs for kind: Task.
+	// Best-effort: a failure does not block the run.
+	//
+	// Intentional divergence from the kind: Task path: startRun gates on
+	// shouldPersistInput(spec) which enforces (a) a per-task run_inputs.enabled:
+	// false opt-out and (b) recursion guards for the storage/cleanup tasks.
+	// Neither guard applies here: kind: PipelineTask has no RunInputs field and
+	// a pipeline can never be the storage or cleanup task. Checking only
+	// e.inputStore != nil is therefore correct and intentional. Revisit if
+	// kind: PipelineTask ever gains a run_inputs opt-out field.
+	if e.inputStore != nil {
+		var web *registry.WebhookFields
+		if opts.WebhookCtx != nil {
+			web = &registry.WebhookFields{
+				Method:      opts.WebhookCtx.Method,
+				Path:        opts.WebhookCtx.Path,
+				Headers:     opts.WebhookCtx.Headers,
+				Query:       opts.WebhookCtx.Query,
+				RawBody:     opts.WebhookCtx.RawBody,
+				ContentType: opts.WebhookCtx.ContentType,
+			}
+		}
+		in := registry.BuildPersistedInputFromRunOpts(string(source), opts.Params, opts.Input, web)
+		key, size, storedAt, perr := e.inputStore.Persist(context.Background(), runID, in)
+		if perr != nil {
+			// Log only a sanitized error category. The full perr chain may
+			// transit env-resolver internals where CodeQL tracks a
+			// secretKey taint label; emitting it raw causes a false-positive
+			// go/clear-text-logging alert. The category is enough for ops to
+			// triage the best-effort persistence failure; the pipeline run
+			// itself is unaffected and continues normally.
+			e.log.Warn("pipeline run-input persist failed",
+				zap.String("run", runID),
+				zap.String("pipeline", p.ID),
+				zap.String("error_class", "persist"),
+			)
+		} else {
+			if opts.WebhookCtx != nil {
+				opts.WebhookCtx.RawBody = nil
+			}
+			if serr := e.registry.SetRunInput(context.Background(), runID, key, size, storedAt, in.RedactedFields); serr != nil {
+				e.log.Warn("pipeline run-input set columns failed",
+					zap.String("run", runID),
+					zap.String("pipeline", p.ID),
+					zap.Error(serr),
+				)
+			}
+		}
+	}
+
 	// Register the parent in the engine's run-lifecycle maps so it behaves like
 	// any managed run: WaitRun blocks on runDone until finish() (so a
 	// dicode.run_task targeting a pipeline gets the real result, not a racy nil),
@@ -78,7 +139,29 @@ func (e *Engine) firePipeline(ctx context.Context, p *task.PipelineTask, opts pk
 	e.runCancels.Store(runID, cancel)
 	e.runTriggerSource.Store(runID, source)
 	e.runDone.Store(runID, make(chan struct{}))
-	r := &PipelineRunner{engine: e, spec: p, runID: runID, cancel: cancel, runCtx: runCtx}
+	// When no structured Input was supplied (manual fire or empty-param chain)
+	// but params ARE present, promote the params map to a map[string]any so
+	// that stage-0 ${input.output} and ${input.output.<name>} resolve to the
+	// params object — uniform with the webhook/chain-with-input path (#350).
+	// This is a no-op when opts.Input != nil (webhook, chain with payload)
+	// or when both are nil/empty (cron → loud fail unchanged).
+	triggerInput := opts.Input
+	if triggerInput == nil && len(opts.Params) > 0 {
+		m := make(map[string]interface{}, len(opts.Params))
+		for k, v := range opts.Params {
+			m[k] = v
+		}
+		triggerInput = m
+	}
+	r := &PipelineRunner{
+		engine:        e,
+		spec:          p,
+		runID:         runID,
+		cancel:        cancel,
+		runCtx:        runCtx,
+		triggerInput:  triggerInput,
+		triggerParams: opts.Params,
+	}
 	go r.run(runCtx)
 	return runID, nil
 }
@@ -93,7 +176,15 @@ func (r *PipelineRunner) run(ctx context.Context) {
 		defer cancel()
 	}
 
-	var upstream task.InputContext
+	// Stage 0 is seeded from the trigger payload (#350): whatever fired the
+	// pipeline (webhook body, manual/chain params, etc.) becomes the stage-0
+	// InputContext. This makes ${input.output} / ${input.output.<field>} /
+	// ${input.params.<name>} references available on stage 0 overrides.
+	// Stages ≥1 receive the previous stage's return value as usual.
+	upstream := task.InputContext{
+		Output: r.triggerInput,
+		Params: r.triggerParams,
+	}
 	var lastReturn interface{}
 	for i, st := range r.spec.Stages {
 		isTerminal := i == len(r.spec.Stages)-1
@@ -325,8 +416,10 @@ func (e *Engine) awaitStageSuccess(ctx context.Context, runID string) (task.Inpu
 		return task.InputContext{}, fmt.Errorf("run %s ended with status %s", runID, res.Status)
 	}
 	// Only Output is threaded between stages in v1: PipelineTask.Validate rejects
-	// ${input.params.*} refs, so there is deliberately no Params snapshot here.
-	// Cross-stage param threading is a planned follow-up.
+	// ${input.params.*} refs on non-first stages (they are only valid on stage 0,
+	// where they resolve against the trigger payload), so there is deliberately no
+	// Params snapshot threaded between stages here. Cross-stage param threading is
+	// a planned follow-up.
 	return task.InputContext{Output: res.ReturnValue}, nil
 }
 
