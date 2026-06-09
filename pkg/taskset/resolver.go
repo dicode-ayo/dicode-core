@@ -7,11 +7,22 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/dicode/dicode/pkg/task"
 	"go.uber.org/zap"
+)
+
+// Ref path template variables expanded before path resolution.
+const (
+	// VarRepoDir expands to the root of the source (git clone dir or local source root).
+	VarRepoDir = "REPO_DIR"
+	// VarTaskSetRefDir expands to the directory containing the current taskset.yaml.
+	// Named differently from task.VarTaskSetDir to avoid confusion: VarTaskSetDir
+	// is expanded inside task.yaml specs; VarTaskSetRefDir is expanded in ref paths.
+	VarTaskSetRefDir = "TASKSET_DIR"
 )
 
 // repoKey is the deduplication key for a git repository clone.
@@ -78,7 +89,7 @@ func (r *Resolver) DevMode() bool {
 // root taskset.yaml path, so source loaders don't need to. The map is
 // treated as read-only; the resolver never mutates or retains it.
 func (r *Resolver) Resolve(ctx context.Context, namespace string, tsRef *Ref, configDefaults *Defaults, parentOverrides *Overrides, extraVars map[string]string) ([]*ResolvedTask, error) {
-	tsPath, err := r.resolveRef(ctx, tsRef, "")
+	tsPath, err := r.resolveRef(ctx, tsRef, "", nil)
 	if err != nil {
 		return nil, fmt.Errorf("resolve ref for namespace %q: %w", namespace, err)
 	}
@@ -87,6 +98,11 @@ func (r *Resolver) Resolve(ctx context.Context, namespace string, tsRef *Ref, co
 	if err != nil {
 		return nil, err
 	}
+
+	// Compute the repo-root directory for ref path template expansion.
+	// For local sources this is the directory containing the root taskset.yaml;
+	// for git sources it would be the clone directory (already resolved above).
+	repoDir := filepath.Dir(tsPath)
 
 	// At the TOP-level Resolve only, inject TASK_SET_DIR from the resolved
 	// root taskset path. Nested resolveNestedRef calls receive this same
@@ -99,7 +115,7 @@ func (r *Resolver) Resolve(ctx context.Context, namespace string, tsRef *Ref, co
 	// ${TASK_SET_DIR} in task.yaml paths.
 	rootVars := withTaskSetDir(extraVars, tsPath)
 
-	return r.resolveBody(ctx, namespace, tsPath, ts, configDefaults, parentOverrides, rootVars)
+	return r.resolveBody(ctx, namespace, tsPath, ts, configDefaults, parentOverrides, rootVars, repoDir)
 }
 
 // withTaskSetDir returns a copy of base with VarTaskSetDir set to
@@ -124,6 +140,7 @@ func (r *Resolver) resolveBody(
 	configDefaults *Defaults,
 	parentOverrides *Overrides,
 	extraVars map[string]string,
+	repoDir string,
 ) ([]*ResolvedTask, error) {
 	// Deprecation warnings for removed precedence levels.
 	if defaultsNonEmpty(configDefaults) {
@@ -190,7 +207,13 @@ func (r *Resolver) resolveBody(
 			ref = ref.DevRef
 		}
 
-		localPath, err := r.resolveRef(ctx, ref, tsPath)
+		// Build ref path template variables for ${REPO_DIR} / ${TASKSET_DIR}.
+		refVars := map[string]string{
+			VarRepoDir:       repoDir,
+			VarTaskSetRefDir: filepath.Dir(tsPath),
+		}
+
+		localPath, err := r.resolveRef(ctx, ref, tsPath, refVars)
 		if err != nil {
 			r.log.Warn("taskset: failed to resolve ref",
 				zap.String("entry", fullID), zap.Error(err))
@@ -297,7 +320,7 @@ func (r *Resolver) resolveBody(
 			if parentEntryOverride != nil {
 				nestedOverrides = mergeOverrides(parentEntryOverride, nestedOverrides)
 			}
-			nested, err := r.resolveNestedRef(ctx, fullID, localPath, nestedOverrides, extraVars)
+			nested, err := r.resolveNestedRef(ctx, fullID, localPath, nestedOverrides, extraVars, repoDir)
 			if err != nil {
 				r.log.Warn("taskset: failed to resolve nested taskset",
 					zap.String("entry", fullID), zap.Error(err))
@@ -321,27 +344,32 @@ func (r *Resolver) resolveBody(
 	return results, nil
 }
 
-func (r *Resolver) resolveNestedRef(ctx context.Context, namespace, tsPath string, overrides *Overrides, extraVars map[string]string) ([]*ResolvedTask, error) {
+func (r *Resolver) resolveNestedRef(ctx context.Context, namespace, tsPath string, overrides *Overrides, extraVars map[string]string, repoDir string) ([]*ResolvedTask, error) {
 	ts, err := LoadTaskSet(tsPath)
 	if err != nil {
 		return nil, err
 	}
 	// Pass nil for configDefaults: deprecation warnings are emitted once at the
 	// public Resolve entry point; nested sets do not re-emit them.
-	return r.resolveBody(ctx, namespace, tsPath, ts, nil, overrides, extraVars)
+	return r.resolveBody(ctx, namespace, tsPath, ts, nil, overrides, extraVars, repoDir)
 }
 
 // resolveRef returns the absolute local path to the yaml file pointed to by ref.
 // For git refs this may trigger a clone or pull.
 // parentTSPath is the absolute path of the parent taskset.yaml — used to resolve
 // relative paths in local refs against the parent's directory.
-func (r *Resolver) resolveRef(ctx context.Context, ref *Ref, parentTSPath string) (string, error) {
+// refVars holds template variables (REPO_DIR, TASKSET_DIR) to expand in the
+// ref's Path field before resolution. Pass nil when no expansion is needed
+// (e.g. the root Resolve call before repoDir is known).
+func (r *Resolver) resolveRef(ctx context.Context, ref *Ref, parentTSPath string, refVars map[string]string) (string, error) {
+	path := expandRefPath(ref.Path, refVars)
+
 	var resolved string
 	if !ref.IsGit() {
-		if !filepath.IsAbs(ref.Path) {
-			resolved = filepath.Join(filepath.Dir(parentTSPath), ref.Path)
+		if !filepath.IsAbs(path) {
+			resolved = filepath.Join(filepath.Dir(parentTSPath), path)
 		} else {
-			resolved = ref.Path
+			resolved = path
 		}
 	} else {
 		branch := ref.effectiveBranch()
@@ -349,9 +377,23 @@ func (r *Resolver) resolveRef(ctx context.Context, ref *Ref, parentTSPath string
 		if err != nil {
 			return "", err
 		}
-		resolved = filepath.Join(localDir, ref.Path)
+		resolved = filepath.Join(localDir, path)
 	}
 	return resolveYAMLPath(resolved), nil
+}
+
+// expandRefPath replaces ${REPO_DIR} and ${TASKSET_DIR} placeholders in a ref
+// path with the corresponding values from vars. Unknown or absent variables are
+// left as-is. Returns the path unchanged when vars is nil or the path contains
+// no placeholders.
+func expandRefPath(path string, vars map[string]string) string {
+	if len(vars) == 0 || !strings.Contains(path, "${") {
+		return path
+	}
+	for k, v := range vars {
+		path = strings.ReplaceAll(path, "${"+k+"}", v)
+	}
+	return path
 }
 
 // resolveYAMLPath returns path unchanged if it is already a file.

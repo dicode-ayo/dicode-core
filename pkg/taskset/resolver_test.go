@@ -958,3 +958,144 @@ spec:
 		t.Errorf("task without enabled override should default to Enabled=true")
 	}
 }
+
+// ── expandRefPath ────────────────────────────────────────────────────────────
+
+func TestExpandRefPath_NoVars(t *testing.T) {
+	// Path without variables is returned unchanged.
+	got := expandRefPath("./deploy/task.yaml", nil)
+	if got != "./deploy/task.yaml" {
+		t.Errorf("got %q, want unchanged", got)
+	}
+}
+
+func TestExpandRefPath_RepoDir(t *testing.T) {
+	vars := map[string]string{VarRepoDir: "/home/repo", VarTaskSetRefDir: "/home/repo/sets"}
+	got := expandRefPath("${REPO_DIR}/tasks/deploy", vars)
+	if got != "/home/repo/tasks/deploy" {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestExpandRefPath_TaskSetDir(t *testing.T) {
+	vars := map[string]string{VarRepoDir: "/home/repo", VarTaskSetRefDir: "/home/repo/sets"}
+	got := expandRefPath("${TASKSET_DIR}/../shared", vars)
+	if got != "/home/repo/sets/../shared" {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestExpandRefPath_BothVars(t *testing.T) {
+	vars := map[string]string{VarRepoDir: "/root", VarTaskSetRefDir: "/root/sub"}
+	got := expandRefPath("${REPO_DIR}/a/${TASKSET_DIR}/b", vars)
+	if got != "/root/a//root/sub/b" {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestExpandRefPath_UnknownVar(t *testing.T) {
+	vars := map[string]string{VarRepoDir: "/root"}
+	got := expandRefPath("${UNKNOWN}/foo", vars)
+	if got != "${UNKNOWN}/foo" {
+		t.Errorf("unknown var should be left as-is: got %q", got)
+	}
+}
+
+// ── Resolver ref path templating integration ─────────────────────────────────
+
+func TestResolver_RefPathRepoDirExpansion(t *testing.T) {
+	// ${REPO_DIR} in a ref path expands to the root taskset.yaml directory.
+	repoDir := t.TempDir()
+	taskDir := writeTaskDir(t, repoDir, "deploy")
+
+	tsContent := `
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: infra
+spec:
+  entries:
+    deploy:
+      ref:
+        path: ${REPO_DIR}/deploy
+`
+	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
+
+	r := newResolver(t)
+	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+	if results[0].ID != "infra/deploy" {
+		t.Errorf("ID: got %q", results[0].ID)
+	}
+	// TaskDir should point at the actual task directory.
+	if results[0].TaskDir != taskDir {
+		t.Errorf("TaskDir: got %q, want %q", results[0].TaskDir, taskDir)
+	}
+}
+
+func TestResolver_RefPathTaskSetDirExpansion(t *testing.T) {
+	// ${TASKSET_DIR} in a ref path expands to the directory of the current
+	// taskset.yaml, which for the root taskset is the same as REPO_DIR.
+	repoDir := t.TempDir()
+	taskDir := writeTaskDir(t, repoDir, "deploy")
+
+	tsContent := `
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: infra
+spec:
+  entries:
+    deploy:
+      ref:
+        path: ${TASKSET_DIR}/deploy
+`
+	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
+
+	r := newResolver(t)
+	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+	if results[0].TaskDir != taskDir {
+		t.Errorf("TaskDir: got %q, want %q", results[0].TaskDir, taskDir)
+	}
+}
+
+func TestResolver_RefPathWithoutVarsUnchanged(t *testing.T) {
+	// Regression: ref paths without template variables must still work.
+	repoDir := t.TempDir()
+	taskDir := writeTaskDir(t, repoDir, "deploy")
+
+	tsContent := `
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: infra
+spec:
+  entries:
+    deploy:
+      ref:
+        path: ` + filepath.Join(taskDir, "task.yaml") + `
+`
+	tsPath := writeTaskSetFile(t, repoDir, "taskset.yaml", tsContent)
+	r := newResolver(t)
+	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+	if results[0].ID != "infra/deploy" {
+		t.Errorf("ID: got %q", results[0].ID)
+	}
+}
