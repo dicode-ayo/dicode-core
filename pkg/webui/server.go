@@ -776,6 +776,9 @@ func (s *Server) apiSaveConfigRaw(w http.ResponseWriter, r *http.Request) {
 	if newCfg, err := config.Load(s.cfgPath); err == nil {
 		s.cfgMu.Lock()
 		s.cfg = newCfg
+		if s.sourceMgr != nil {
+			s.sourceMgr.SetCfg(newCfg)
+		}
 		s.cfgMu.Unlock()
 	} else {
 		s.log.Warn("config reload after raw save failed", zap.Error(err))

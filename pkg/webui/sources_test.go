@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -73,4 +75,66 @@ func TestApiSetDevMode_RejectsMalformedJson(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("got %d; want 400 BadRequest for malformed body. body=%s", w.Code, w.Body.String())
 	}
+}
+
+// TestApiSaveConfigRaw_SyncsSourceManagerCfg verifies that after a raw config
+// save via POST /api/config/raw, SourceManager.cfg is updated to the new
+// *config.Config pointer so that subsequent List() calls reflect the new sources.
+// This is the regression guard for issue #268.
+func TestApiSaveConfigRaw_SyncsSourceManagerCfg(t *testing.T) {
+	// Write initial dicode.yaml with one source entry.
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "dicode.yaml")
+	initialYAML := "server:\n  port: 8080\nspec:\n  entries:\n    old-source:\n      ref:\n        path: /tmp/old\n"
+	if err := os.WriteFile(cfgPath, []byte(initialYAML), 0600); err != nil {
+		t.Fatalf("write initial config: %v", err)
+	}
+
+	// Build initial config and SourceManager from it.
+	initialCfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load initial config: %v", err)
+	}
+	sourceMgr := NewSourceManager(initialCfg, nil, dir, zap.NewNop())
+
+	// Build server with the SourceManager and the cfgPath so the handler can
+	// write and hot-reload the config.
+	srv, _ := newTestServerWithSourceMgr(t, initialCfg, cfgPath, sourceMgr)
+
+	// POST updated config that removes old-source and adds new-source.
+	updatedYAML := "server:\n  port: 8080\nspec:\n  entries:\n    new-source:\n      ref:\n        path: /tmp/new\n"
+	body := `{"content":` + string(mustJSON(t, updatedYAML)) + `}`
+	req := httptest.NewRequest(http.MethodPost, "/api/config/raw", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("POST /api/config/raw returned %d; body=%s", w.Code, w.Body.String())
+	}
+
+	// SourceManager.List() must now show new-source, not old-source.
+	sources := sourceMgr.List()
+	found := false
+	for _, s := range sources {
+		if s.Name == "new-source" {
+			found = true
+		}
+		if s.Name == "old-source" {
+			t.Errorf("SourceManager still lists old-source after raw config save; cfg was not synced")
+		}
+	}
+	if !found {
+		t.Errorf("SourceManager does not list new-source after raw config save; got %+v", sources)
+	}
+}
+
+// mustJSON marshals v as JSON, failing the test on error.
+func mustJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	return b
 }

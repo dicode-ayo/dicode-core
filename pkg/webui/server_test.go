@@ -29,6 +29,13 @@ import (
 
 func newTestServer(t *testing.T) (*Server, *registry.Registry) {
 	t.Helper()
+	return newTestServerWithSourceMgr(t, &config.Config{Server: config.ServerConfig{Port: 8080}}, "", nil)
+}
+
+// newTestServerWithSourceMgr creates a test Server with an optional SourceManager
+// and cfgPath. Pass nil sourceMgr and "" cfgPath for the default minimal setup.
+func newTestServerWithSourceMgr(t *testing.T, cfg *config.Config, cfgPath string, sourceMgr *SourceManager) (*Server, *registry.Registry) {
+	t.Helper()
 	d, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
 	if err != nil {
 		t.Fatalf("db: %v", err)
@@ -42,9 +49,12 @@ func newTestServer(t *testing.T) (*Server, *registry.Registry) {
 	}
 	eng := trigger.New(reg, rt, zap.NewNop())
 
-	srv, err := New(8080, reg, eng, &config.Config{Server: config.ServerConfig{Port: 8080}}, "", nil, nil, nil, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
+	srv, err := New(8080, reg, eng, cfg, cfgPath, nil, nil, sourceMgr, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
 	if err != nil {
 		t.Fatalf("New server: %v", err)
+	}
+	if sourceMgr != nil {
+		sourceMgr.BindCfgMutex(&srv.cfgMu)
 	}
 	return srv, reg
 }

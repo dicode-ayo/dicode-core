@@ -72,6 +72,12 @@ func (m *SourceManager) BindCfgMutex(mu *sync.RWMutex) {
 	m.cfgMu = mu
 }
 
+// SetCfg replaces the config pointer. Must be called under cfgMu.Lock()
+// (the same mutex wired by BindCfgMutex).
+func (m *SourceManager) SetCfg(cfg *config.Config) {
+	m.cfg = cfg
+}
+
 // rLockCfg / rUnlockCfg let SourceManager methods uniformly acquire the
 // shared cfg lock; they're no-ops if cfgMu is nil (test setups).
 func (m *SourceManager) rLockCfg() {
