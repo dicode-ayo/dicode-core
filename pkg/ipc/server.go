@@ -69,7 +69,8 @@ type Server struct {
 	socketPath string
 	listener   net.Listener
 
-	connWG sync.WaitGroup // tracks in-flight handleConn goroutines
+	connWG   sync.WaitGroup // tracks in-flight handleConn goroutines
+	acceptMu sync.Mutex     // serialises accept+Add against Stop's Wait
 
 	mu     sync.Mutex
 	output *OutputResult
@@ -257,6 +258,13 @@ func (s *Server) Stop() {
 	// goroutine may still be calling bufferLog, so we must drain them before
 	// triggering the final flush — otherwise those log entries arrive in the
 	// buffer after the flush goroutine has already exited and are lost.
+	//
+	// Acquire acceptMu first to close the TOCTOU window: if accept() is
+	// between Accept() returning a live conn and connWG.Add(1), Wait()
+	// would see zero and proceed while a handler is about to be spawned.
+	// The lock ensures accept() finishes its Add+spawn before we Wait.
+	s.acceptMu.Lock()   //nolint:SA2001 // barrier: ensures accept() finishes its Add+spawn
+	s.acceptMu.Unlock() // before we observe connWG's count
 	s.connWG.Wait()
 
 	// Step 3: signal the flush goroutine to do a final drain and exit.
@@ -328,11 +336,17 @@ func (s *Server) accept() {
 		if err != nil {
 			return
 		}
+		// Hold acceptMu around Add+spawn so Stop() cannot observe a
+		// zero WaitGroup count while we hold a live conn. Stop()
+		// acquires acceptMu before connWG.Wait(), closing the TOCTOU
+		// window between Accept returning and Add(1) executing.
+		s.acceptMu.Lock()
 		s.connWG.Add(1)
 		go func(c net.Conn) {
 			defer s.connWG.Done()
 			s.handleConn(c)
 		}(conn)
+		s.acceptMu.Unlock()
 	}
 }
 
