@@ -83,6 +83,37 @@ run_result:
 	}
 }
 
+func TestSpec_MCPExposed_Parses(t *testing.T) {
+	yamlSrc := []byte(`
+name: exposed-task
+runtime: deno
+trigger: { manual: true }
+mcp_exposed: true
+`)
+	var s Spec
+	if err := yaml.Unmarshal(yamlSrc, &s); err != nil {
+		t.Fatal(err)
+	}
+	if !s.MCPExposed {
+		t.Error("MCPExposed = false, want true")
+	}
+}
+
+func TestSpec_MCPExposed_DefaultFalse(t *testing.T) {
+	yamlSrc := []byte(`
+name: internal-task
+runtime: deno
+trigger: { manual: true }
+`)
+	var s Spec
+	if err := yaml.Unmarshal(yamlSrc, &s); err != nil {
+		t.Fatal(err)
+	}
+	if s.MCPExposed {
+		t.Error("MCPExposed = true, want false (default)")
+	}
+}
+
 func TestSpec_RunResultOverride_Omitted(t *testing.T) {
 	yamlSrc := []byte(`
 name: test

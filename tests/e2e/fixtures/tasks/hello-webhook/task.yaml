@@ -3,6 +3,7 @@ kind: Task
 name: Hello Webhook
 description: A webhook task for e2e testing.
 runtime: js
+mcp_exposed: true
 trigger:
   webhook: /hooks/test-webhook
 timeout: 10s

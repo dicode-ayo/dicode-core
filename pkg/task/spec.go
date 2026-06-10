@@ -362,6 +362,12 @@ type Spec struct {
 	Params      Params        `yaml:"params,omitempty"      json:"params,omitempty"`
 	Permissions Permissions   `yaml:"permissions,omitempty" json:"permissions,omitempty"`
 	Timeout     time.Duration `yaml:"timeout"             json:"timeout"`
+	// MCPExposed, when true, marks this task as visible and callable via the
+	// MCP endpoint (/mcp). Tasks default to NOT exposed — users must opt in
+	// per task. The builtin MCP task filters dicode.list_tasks and gates
+	// dicode.run_task using this flag so that connecting Claude Desktop or
+	// Cursor to /mcp does not inadvertently surface internal tasks.
+	MCPExposed bool `yaml:"mcp_exposed,omitempty" json:"mcp_exposed,omitempty"`
 	// MCPPort declares that this daemon task exposes an MCP server on the given port.
 	MCPPort int `yaml:"mcp_port,omitempty" json:"mcp_port,omitempty"`
 	// OnFailureChain overrides the global defaults.on_failure_chain for this task.

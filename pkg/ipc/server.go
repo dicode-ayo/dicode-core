@@ -653,6 +653,17 @@ func (s *Server) handleConn(conn net.Conn) {
 				reply(req.ID, nil, fmt.Sprintf("ipc: task %q not in security.allowed_tasks", req.TaskID))
 				continue
 			}
+			// When the caller signals MCP context, only allow invocation of
+			// tasks that have explicitly opted in via mcp_exposed: true.
+			if req.MCPContext {
+				if targetSpec, ok := s.registry.Get(req.TaskID); !ok {
+					reply(req.ID, nil, fmt.Sprintf("ipc: task %q not found", req.TaskID))
+					continue
+				} else if !targetSpec.MCPExposed {
+					reply(req.ID, nil, fmt.Sprintf("ipc: task %q is not exposed via MCP", req.TaskID))
+					continue
+				}
+			}
 			var callParams map[string]string
 			if len(req.Params) > 0 {
 				_ = json.Unmarshal(req.Params, &callParams)
@@ -694,6 +705,11 @@ func (s *Server) handleConn(conn net.Conn) {
 			all := s.registry.All()
 			summaries := make([]taskSummary, 0, len(all))
 			for _, sp := range all {
+				// When the caller signals MCP context, only surface tasks
+				// that have explicitly opted in via mcp_exposed: true.
+				if req.MCPContext && !sp.MCPExposed {
+					continue
+				}
 				summaries = append(summaries, taskSummary{
 					ID:          sp.ID,
 					Name:        sp.Name,

@@ -9,6 +9,7 @@ description: >
   Go server, which was a thin JSON-RPC dispatcher around the same
   capabilities the dicode SDK and HTTP API already expose to tasks.
 runtime: deno
+mcp_exposed: true
 trigger:
   webhook: /hooks/mcp
   # auth: true closes the bypass where a remote caller could skip the

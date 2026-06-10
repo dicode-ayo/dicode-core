@@ -2167,6 +2167,123 @@ func TestServer_FlushBatch_FallsBackToPerRow(t *testing.T) {
 
 // TestServer_FlushBatch_SuccessPath verifies that the normal (non-error) path
 // through flushBatch writes entries correctly.
+// ── MCP exposure filter tests ────────────────────────────────────────────────
+
+func TestServer_MCPContext_ListTasks_FiltersNonExposed(t *testing.T) {
+	e := newTestEnv(t)
+	// Register two tasks: one MCP-exposed, one not.
+	_ = e.reg.Register(&task.Spec{ID: "public-api", Name: "Public API", MCPExposed: true})
+	_ = e.reg.Register(&task.Spec{ID: "internal-cron", Name: "Internal Cron", MCPExposed: false})
+
+	spec := specWithDicode("caller", &task.DicodePermissions{ListTasks: true})
+	conn, _ := e.startWithSpec(t, nil, nil, spec, nil)
+
+	// With mcpContext: true, only the MCP-exposed task should appear.
+	sendMsg(t, conn, map[string]any{"id": "1", "method": "dicode.list_tasks", "mcpContext": true})
+	resp := recvMsg(t, conn)
+
+	tasks, ok := resp["result"].([]any)
+	if !ok {
+		t.Fatalf("expected array, got %T", resp["result"])
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("expected 1 MCP-exposed task, got %d", len(tasks))
+	}
+	first := tasks[0].(map[string]any)
+	if first["id"] != "public-api" {
+		t.Errorf("expected public-api, got %v", first["id"])
+	}
+}
+
+func TestServer_MCPContext_ListTasks_NoFilterWithoutFlag(t *testing.T) {
+	e := newTestEnv(t)
+	_ = e.reg.Register(&task.Spec{ID: "public-api", Name: "Public API", MCPExposed: true})
+	_ = e.reg.Register(&task.Spec{ID: "internal-cron", Name: "Internal Cron", MCPExposed: false})
+
+	spec := specWithDicode("caller", &task.DicodePermissions{ListTasks: true})
+	conn, _ := e.startWithSpec(t, nil, nil, spec, nil)
+
+	// Without mcpContext, both tasks should appear (backwards compat).
+	sendMsg(t, conn, map[string]any{"id": "1", "method": "dicode.list_tasks"})
+	resp := recvMsg(t, conn)
+
+	tasks, ok := resp["result"].([]any)
+	if !ok {
+		t.Fatalf("expected array, got %T", resp["result"])
+	}
+	if len(tasks) != 2 {
+		t.Errorf("expected 2 tasks without mcpContext, got %d", len(tasks))
+	}
+}
+
+func TestServer_MCPContext_RunTask_DeniesNonExposed(t *testing.T) {
+	e := newTestEnv(t)
+	// Register the target task as NOT MCP-exposed.
+	_ = e.reg.Register(&task.Spec{ID: "internal-task", Name: "Internal", MCPExposed: false})
+
+	eng := &mockEngine{runID: "run-1", result: RunResult{RunID: "run-1", Status: "success"}}
+	spec := specWithDicode("caller", &task.DicodePermissions{
+		ListTasks: true,
+		Tasks:     []string{"*"},
+	})
+	conn, _ := e.startWithSpec(t, nil, nil, spec, eng)
+
+	sendMsg(t, conn, map[string]any{
+		"id":         "1",
+		"method":     "dicode.run_task",
+		"taskID":     "internal-task",
+		"mcpContext": true,
+	})
+	resp := recvMsg(t, conn)
+
+	errMsg, _ := resp["error"].(string)
+	if !strings.Contains(errMsg, "not exposed via MCP") {
+		t.Errorf("expected 'not exposed via MCP' error, got: %v", errMsg)
+	}
+}
+
+func TestServer_MCPContext_RunTask_AllowsExposed(t *testing.T) {
+	e := newTestEnv(t)
+	_ = e.reg.Register(&task.Spec{ID: "public-task", Name: "Public", MCPExposed: true})
+
+	eng := &mockEngine{runID: "run-1", result: RunResult{RunID: "run-1", Status: "success"}}
+	spec := specWithDicode("caller", &task.DicodePermissions{Tasks: []string{"*"}})
+	conn, _ := e.startWithSpec(t, nil, nil, spec, eng)
+
+	sendMsg(t, conn, map[string]any{
+		"id":         "1",
+		"method":     "dicode.run_task",
+		"taskID":     "public-task",
+		"mcpContext": true,
+	})
+	resp := recvMsg(t, conn)
+
+	if resp["error"] != nil {
+		t.Errorf("expected success for MCP-exposed task, got error: %v", resp["error"])
+	}
+}
+
+func TestServer_MCPContext_RunTask_NoFilterWithoutFlag(t *testing.T) {
+	e := newTestEnv(t)
+	_ = e.reg.Register(&task.Spec{ID: "internal-task", Name: "Internal", MCPExposed: false})
+
+	eng := &mockEngine{runID: "run-1", result: RunResult{RunID: "run-1", Status: "success"}}
+	spec := specWithDicode("caller", &task.DicodePermissions{Tasks: []string{"*"}})
+	conn, _ := e.startWithSpec(t, nil, nil, spec, eng)
+
+	// Without mcpContext, the call should succeed even for non-exposed tasks.
+	sendMsg(t, conn, map[string]any{
+		"id":     "1",
+		"method": "dicode.run_task",
+		"taskID": "internal-task",
+	})
+	resp := recvMsg(t, conn)
+
+	if resp["error"] != nil {
+		t.Errorf("expected success without mcpContext, got error: %v", resp["error"])
+	}
+}
+
 func TestServer_FlushBatch_SuccessPath(t *testing.T) {
 	t.Parallel()
 	d, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})

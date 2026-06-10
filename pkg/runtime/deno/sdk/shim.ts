@@ -111,8 +111,8 @@ export interface Dicode {
   task_id:        string;
   // run_id: the id of the current run (uuid). Same source as task_id.
   run_id:         string;
-  run_task:       (taskID: string, params?: Record<string, string>)  => Promise<unknown>;
-  list_tasks:     ()                                                   => Promise<TaskSummary[]>;
+  run_task:       (taskID: string, params?: Record<string, string>, opts?: { mcpContext?: boolean })  => Promise<unknown>;
+  list_tasks:     (opts?: { mcpContext?: boolean })                     => Promise<TaskSummary[]>;
   get_runs:       (taskID: string, opts?: { limit?: number })         => Promise<unknown>;
   // set_group labels the current run with a free-text string used by the
   // WebUI to collapse same-group siblings (#116). Last write wins; only
@@ -333,8 +333,8 @@ const mcp: MCP = {
 const dicode: Dicode = {
   task_id:        __hsResp__.task_id ?? "",
   run_id:         __hsResp__.run_id ?? "",
-  run_task:       (taskID, params)  => __call__({ method: "dicode.run_task",       taskID, params: params ?? {} }),
-  list_tasks:     ()                => __call__({ method: "dicode.list_tasks" }) as Promise<TaskSummary[]>,
+  run_task:       (taskID, params, opts)  => __call__({ method: "dicode.run_task", taskID, params: params ?? {}, mcpContext: opts?.mcpContext ?? false }),
+  list_tasks:     (opts)                => __call__({ method: "dicode.list_tasks", mcpContext: opts?.mcpContext ?? false }) as Promise<TaskSummary[]>,
   get_runs:       (taskID, opts)    => __call__({ method: "dicode.get_runs",        taskID, limit: opts?.limit ?? 10 }),
   set_group:      (label)           => __call__({ method: "dicode.set_group",       group: String(label ?? "") }) as Promise<void>,
   secrets_set:    (key, value)      => __call__({ method: "dicode.secrets_set",     key, stringValue: value }) as Promise<void>,

@@ -386,12 +386,14 @@ class _Dicode:
         self.sources = _Sources()
         self.git = _Git()
 
-    def run_task(self, task_id, params=None):
+    def run_task(self, task_id, params=None, mcp_context=False):
         return _call({"method": "dicode.run_task", "taskID": task_id,
-                      "params": params or {}})
+                      "params": params or {},
+                      "mcpContext": mcp_context})
 
-    def list_tasks(self):
-        return _call({"method": "dicode.list_tasks"}) or []
+    def list_tasks(self, mcp_context=False):
+        return _call({"method": "dicode.list_tasks",
+                      "mcpContext": mcp_context}) or []
 
     def get_runs(self, task_id, limit=10):
         return _call({"method": "dicode.get_runs", "taskID": task_id,
@@ -402,12 +404,14 @@ class _Dicode:
         # by the WebUI to collapse same-group siblings. Last write wins.
         _call({"method": "dicode.set_group", "group": str(label or "")})
 
-    async def run_task_async(self, task_id, params=None):
+    async def run_task_async(self, task_id, params=None, mcp_context=False):
         return await _call_async({"method": "dicode.run_task", "taskID": task_id,
-                                  "params": params or {}})
+                                  "params": params or {},
+                                  "mcpContext": mcp_context})
 
-    async def list_tasks_async(self):
-        return await _call_async({"method": "dicode.list_tasks"}) or []
+    async def list_tasks_async(self, mcp_context=False):
+        return await _call_async({"method": "dicode.list_tasks",
+                                  "mcpContext": mcp_context}) or []
 
     async def get_runs_async(self, task_id, limit=10):
         return await _call_async({"method": "dicode.get_runs", "taskID": task_id,

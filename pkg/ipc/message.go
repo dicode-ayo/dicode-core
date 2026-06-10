@@ -72,6 +72,11 @@ type Request struct {
 	Tool    string          `json:"tool,omitempty"`
 	Args    json.RawMessage `json:"args,omitempty"`
 
+	// MCPContext signals that this IPC call originates from the MCP endpoint.
+	// When true, dicode.list_tasks filters to tasks with mcp_exposed: true,
+	// and dicode.run_task rejects tasks that are not MCP-exposed.
+	MCPContext bool `json:"mcpContext,omitempty"`
+
 	// http.register (daemon tasks register an HTTP pattern with the gateway)
 	Pattern  string `json:"pattern,omitempty"`
 	StreamID string `json:"streamID,omitempty"`
