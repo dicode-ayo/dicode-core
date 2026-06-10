@@ -124,15 +124,15 @@ type Server struct {
 	gateway            *ipc.Gateway
 	db                 db.DB
 	managedRuntimes    []pkgruntime.ManagedRuntime
-	sm                 *scs.SessionManager // short-lived browser sessions (scs/v2)
-	scsStore           *scsStore           // underlying SQLite store for sm; nil in DB-less tests
-	dbSessions         *dbSessionStore     // persistent trusted-device tokens
-	apiKeys            *apiKeyStore        // MCP / programmatic API keys
+	sm                 *scs.SessionManager    // short-lived browser sessions (scs/v2)
+	scsStore           *scsStore              // underlying SQLite store for sm; nil in DB-less tests
+	dbSessions         *dbSessionStore        // persistent trusted-device tokens
+	apiKeys            *apiKeyStore           // MCP / programmatic API keys
 	authoringSessions  *authoringSessionStore // AI-first authoring sessions (#288)
-	passphraseStore    *passphraseStore    // auth passphrase persisted in DB
-	cachedPassphrase   string              // in-memory cache of stored DB value (bcrypt hash, or legacy plaintext during migration); invalidated on change
-	cachedPassphraseMu sync.RWMutex        // guards cachedPassphrase
-	migrateGroup       passphraseMigrator  // collapses concurrent legacy-passphrase migrations to one bcrypt+write
+	passphraseStore    *passphraseStore       // auth passphrase persisted in DB
+	cachedPassphrase   string                 // in-memory cache of stored DB value (bcrypt hash, or legacy plaintext during migration); invalidated on change
+	cachedPassphraseMu sync.RWMutex           // guards cachedPassphrase
+	migrateGroup       passphraseMigrator     // collapses concurrent legacy-passphrase migrations to one bcrypt+write
 	logs               *LogBroadcaster
 	ws                 *WSHub
 	log                *zap.Logger
@@ -216,27 +216,27 @@ func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config
 	}
 
 	s := &Server{
-		registry:        r,
-		engine:          eng,
-		cfg:             cfg,
-		cfgPath:         cfgPath,
-		secretsMgr:      secretsMgr,
-		reconciler:      rec,
-		sourceMgr:       sourceMgr,
-		dataDir:         dataDir,
-		sm:              sm,
-		scsStore:        store,
+		registry:          r,
+		engine:            eng,
+		cfg:               cfg,
+		cfgPath:           cfgPath,
+		secretsMgr:        secretsMgr,
+		reconciler:        rec,
+		sourceMgr:         sourceMgr,
+		dataDir:           dataDir,
+		sm:                sm,
+		scsStore:          store,
 		dbSessions:        dbs,
 		apiKeys:           aks,
 		authoringSessions: as,
 		passphraseStore:   ps,
-		logs:            logs,
-		ws:              wsHub,
-		log:             log,
-		port:            port,
-		gateway:         gateway,
-		csrfKey:         csrfKey,
-		db:              database,
+		logs:              logs,
+		ws:                wsHub,
+		log:               log,
+		port:              port,
+		gateway:           gateway,
+		csrfKey:           csrfKey,
+		db:                database,
 	}
 
 	// Wire run started hook → broadcast run:started

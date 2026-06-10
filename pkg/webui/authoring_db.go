@@ -13,12 +13,12 @@ import (
 type AuthoringSession struct {
 	ID          string    `json:"id"`
 	Kind        string    `json:"kind"`         // "create" or "edit"
-	Source      string    `json:"source"`        // source name (e.g. "ai-scratch")
-	TaskID      string    `json:"task_id"`       // empty for new-task sessions until scaffold
-	SandboxPath string    `json:"sandbox_path"`  // working directory for the session
+	Source      string    `json:"source"`       // source name (e.g. "ai-scratch")
+	TaskID      string    `json:"task_id"`      // empty for new-task sessions until scaffold
+	SandboxPath string    `json:"sandbox_path"` // working directory for the session
 	CreatedAt   time.Time `json:"created_at"`
 	LastTurnAt  time.Time `json:"last_turn_at"`
-	ClosedAt    *int64    `json:"closed_at"`     // nil = open
+	ClosedAt    *int64    `json:"closed_at"` // nil = open
 	Applied     bool      `json:"applied"`
 }
 
