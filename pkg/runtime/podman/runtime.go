@@ -141,14 +141,22 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 	go func() {
 		defer close(logDone)
 		scanner := bufio.NewScanner(stdout)
+		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 		for scanner.Scan() {
 			_ = e.reg.AppendLog(context.Background(), runID, "info", scanner.Text())
+		}
+		if err := scanner.Err(); err != nil {
+			e.log.Warn("stdout scanner error", zap.String("run", runID), zap.Error(err))
 		}
 	}()
 	go func() {
 		scanner := bufio.NewScanner(stderr)
+		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 		for scanner.Scan() {
 			_ = e.reg.AppendLog(context.Background(), runID, "warn", scanner.Text())
+		}
+		if err := scanner.Err(); err != nil {
+			e.log.Warn("stderr scanner error", zap.String("run", runID), zap.Error(err))
 		}
 	}()
 
@@ -212,14 +220,22 @@ func (e *executor) buildImage(ctx context.Context, spec *task.Spec, runID string
 	go func() {
 		defer close(buildDone)
 		scanner := bufio.NewScanner(stdout)
+		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 		for scanner.Scan() {
 			_ = e.reg.AppendLog(ctx, runID, "info", scanner.Text())
+		}
+		if err := scanner.Err(); err != nil {
+			e.log.Warn("build stdout scanner error", zap.String("run", runID), zap.Error(err))
 		}
 	}()
 	go func() {
 		scanner := bufio.NewScanner(stderr)
+		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 		for scanner.Scan() {
 			_ = e.reg.AppendLog(ctx, runID, "warn", scanner.Text())
+		}
+		if err := scanner.Err(); err != nil {
+			e.log.Warn("build stderr scanner error", zap.String("run", runID), zap.Error(err))
 		}
 	}()
 
