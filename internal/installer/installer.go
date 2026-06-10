@@ -50,6 +50,10 @@ type Spec struct {
 	BinName string
 	// CachePath is the final filesystem path where the binary will be stored.
 	CachePath string
+	// CacheBase is the root directory that CachePath must reside under.
+	// Used to prevent path-traversal attacks. Defaults to ~/.cache/dicode
+	// when empty.
+	CacheBase string
 	// Format is the archive format (zip or tar.gz).
 	Format ArchiveFormat
 	// Extract controls how the binary is located in the archive.
@@ -60,10 +64,21 @@ type Spec struct {
 // to the given Spec. If the binary already exists at CachePath it is returned
 // immediately without any network access.
 func EnsureBinary(s Spec) (string, error) {
-	// filepath.Clean prevents path traversal — CodeQL flags the raw user-facing
-	// Spec fields as tainted, but callers (pkg/deno, pkg/uv) construct them
-	// from hardcoded version strings. Clean is defence-in-depth.
+	// Validate CachePath against traversal. Callers (pkg/deno, pkg/uv) build
+	// it from hardcoded segments + a version string; Clean+HasPrefix is
+	// defence-in-depth so a rogue version can't escape the cache tree.
 	cachePath := filepath.Clean(s.CachePath)
+	cacheBase := s.CacheBase
+	if cacheBase == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("resolve home dir: %w", err)
+		}
+		cacheBase = filepath.Join(home, ".cache", "dicode")
+	}
+	if !strings.HasPrefix(cachePath, filepath.Clean(cacheBase)+string(filepath.Separator)) {
+		return "", fmt.Errorf("cache path %q escapes base %q", cachePath, cacheBase)
+	}
 
 	if _, err := os.Stat(cachePath); err == nil {
 		return cachePath, nil

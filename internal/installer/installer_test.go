@@ -127,7 +127,7 @@ func TestEnsureBinary_Cached(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := EnsureBinary(Spec{CachePath: cachePath})
+	got, err := EnsureBinary(Spec{CachePath: cachePath, CacheBase: dir})
 	if err != nil {
 		t.Fatalf("EnsureBinary: %v", err)
 	}
@@ -165,6 +165,7 @@ func TestEnsureBinary_DownloadZip(t *testing.T) {
 		ChecksumURL: srv.URL + "/checksum",
 		BinName:     "mybinary",
 		CachePath:   cachePath,
+		CacheBase:   dir,
 		Format:      FormatZip,
 		Extract:     MatchExact,
 	})
@@ -208,6 +209,7 @@ func TestEnsureBinary_DownloadTarGz(t *testing.T) {
 		ChecksumURL: srv.URL + "/checksum",
 		BinName:     "uv",
 		CachePath:   cachePath,
+		CacheBase:   dir,
 		Format:      FormatTarGz,
 		Extract:     MatchBaseName,
 	})
@@ -249,6 +251,7 @@ func TestEnsureBinary_ChecksumMismatch(t *testing.T) {
 		ChecksumURL: srv.URL + "/checksum",
 		BinName:     "mybinary",
 		CachePath:   filepath.Join(dir, "mybinary"),
+		CacheBase:   dir,
 		Format:      FormatZip,
 		Extract:     MatchExact,
 	})
