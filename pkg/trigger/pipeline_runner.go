@@ -343,6 +343,8 @@ func (r *PipelineRunner) runParallel(ctx context.Context) {
 	// ready. On failure, it triggers fail-fast cancellation.
 	var launchStage func(idx int)
 	launchStage = func(idx int) {
+		// wg.Add MUST be called before go func — otherwise wg.Wait can
+		// return early if the parent's Done fires before the child runs.
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
