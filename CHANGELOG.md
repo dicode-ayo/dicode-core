@@ -1,5 +1,71 @@
 # Changelog
 
+## [0.3.0](https://github.com/dicode-ayo/dicode-core/compare/v0.2.1...v0.3.0) (2026-06-10)
+
+
+### ⚠ BREAKING CHANGES
+
+* document kind: PipelineTask; remove all legacy trigger.before references (PR7/8) ([#349](https://github.com/dicode-ayo/dicode-core/issues/349))
+* remove trigger.before; pipelines replace preflight orchestration (PR6/8) ([#347](https://github.com/dicode-ayo/dicode-core/issues/347))
+* drop legacy notification subsystem ([#281](https://github.com/dicode-ayo/dicode-core/issues/281))
+
+### docs+chore
+
+* document kind: PipelineTask; remove all legacy trigger.before references (PR7/8) ([#349](https://github.com/dicode-ayo/dicode-core/issues/349)) ([82f48f3](https://github.com/dicode-ayo/dicode-core/commit/82f48f3d06d54f7616f8f8aea801e8e9da220ee7))
+
+
+### Features
+
+* **auth-providers:** auto-discover BYO OAuth tasks via template marker ([#278](https://github.com/dicode-ayo/dicode-core/issues/278)) ([b0eecf9](https://github.com/dicode-ayo/dicode-core/commit/b0eecf952a974aaaf50cb4bd8871124810b7ffd8))
+* **buildin/relay-server:** Doppler-fed relay supervisor ([#284](https://github.com/dicode-ayo/dicode-core/issues/284)) ([3992f9c](https://github.com/dicode-ayo/dicode-core/commit/3992f9c9a8fd6f6d4ed316338d748e5acf785acd))
+* **buildin/template:** ${VAR} substitution library task ([#298](https://github.com/dicode-ayo/dicode-core/issues/298)) ([154a3b5](https://github.com/dicode-ayo/dicode-core/commit/154a3b5bb05485cd424cde5b6a886321b49828a9))
+* **buildin/template:** template_path param to load body from a file ([#323](https://github.com/dicode-ayo/dicode-core/issues/323)) ([8616b88](https://github.com/dicode-ayo/dicode-core/commit/8616b8880704838fa76ad56e212a0f9172677df6))
+* **buildin/write-local:** generic file-write library task ([#309](https://github.com/dicode-ayo/dicode-core/issues/309)) ([16bb4af](https://github.com/dicode-ayo/dicode-core/commit/16bb4affd57c277e77f2a73da3fe0a45e28ca1e6))
+* **config:** AI task-authoring fields + virtual ai-scratch source (epic [#288](https://github.com/dicode-ayo/dicode-core/issues/288)) ([#293](https://github.com/dicode-ayo/dicode-core/issues/293)) ([0fec424](https://github.com/dicode-ayo/dicode-core/commit/0fec424e7f14902c1e0a494b2930a5af4e223ca1))
+* drop legacy notification subsystem ([#281](https://github.com/dicode-ayo/dicode-core/issues/281)) ([019cb5e](https://github.com/dicode-ayo/dicode-core/commit/019cb5e651d61b681fa7f860a9be84e53b09269b))
+* **task,trigger:** allow trigger.before on one-shot tasks ([#331](https://github.com/dicode-ayo/dicode-core/issues/331)) ([f39781a](https://github.com/dicode-ayo/dicode-core/commit/f39781a9cea027ea57ab3fe582d80661c21e82fe))
+* **task,trigger:** richer ${input.*} interpolation grammar ([#330](https://github.com/dicode-ayo/dicode-core/issues/330)) ([96c3461](https://github.com/dicode-ayo/dicode-core/commit/96c3461fe78857e67fa2390637d993c1d0488eaf))
+* **task/docker:** add network + hardening fields to docker spec ([#296](https://github.com/dicode-ayo/dicode-core/issues/296)) ([643c2f4](https://github.com/dicode-ayo/dicode-core/commit/643c2f4ee5770338128f043e59a62cadebb1cabd))
+* **task:** expand template vars in docker.volumes ([#297](https://github.com/dicode-ayo/dicode-core/issues/297)) ([555354c](https://github.com/dicode-ayo/dicode-core/commit/555354c1269a925506caf59365d47e7ad69e1ba8))
+* **task:** PipelineTask spec-layer foundation (kind: PipelineTask, PR1/8) ([#339](https://github.com/dicode-ayo/dicode-core/issues/339)) ([4a6131a](https://github.com/dicode-ayo/dicode-core/commit/4a6131aff5659a0bc138392ea92c28c9dfdeff44))
+* **task:** run_result flag to suppress return-value persistence ([#302](https://github.com/dicode-ayo/dicode-core/issues/302)) ([67f04c9](https://github.com/dicode-ayo/dicode-core/commit/67f04c92e5c5d61ab14aca176c3a2df27e37eb3a))
+* **taskset:** path templating variables in ref entries — REPO_DIR, TASKSET_DIR ([#360](https://github.com/dicode-ayo/dicode-core/issues/360)) ([0dd9667](https://github.com/dicode-ayo/dicode-core/commit/0dd966728766ac44a9bab002ed0a33f01823c844))
+* **transport:** PipelineTask polymorphic transport + registration (PR2/8) ([#340](https://github.com/dicode-ayo/dicode-core/issues/340)) ([ee93bfd](https://github.com/dicode-ayo/dicode-core/commit/ee93bfd060437c6b383239bed6729d58f828757c))
+* **trigger,task:** ${input.output} interpolation in chain.params + before.overrides.params ([#310](https://github.com/dicode-ayo/dicode-core/issues/310)) ([6c4a8da](https://github.com/dicode-ayo/dicode-core/commit/6c4a8da427a6522ed580a83b766ea822e3337184))
+* **trigger,webui:** distinguish crashed daemon from cleanly-stopped ([#329](https://github.com/dicode-ayo/dicode-core/issues/329)) ([257ae3c](https://github.com/dicode-ayo/dicode-core/commit/257ae3c41617a691d4388bda93b31b304383874b))
+* **trigger,webui:** distinguish failed-after-preflight from stopped ([#324](https://github.com/dicode-ayo/dicode-core/issues/324)) ([60b6bb6](https://github.com/dicode-ayo/dicode-core/commit/60b6bb6eb272efbedc9702a4ec318861fb6203aa))
+* **trigger:** chain trigger params (symmetry with failure chain) ([#299](https://github.com/dicode-ayo/dicode-core/issues/299)) ([046c8e9](https://github.com/dicode-ayo/dicode-core/commit/046c8e95784053b40c11f6b2f3495d7b427ff44f))
+* **trigger:** PipelineRunner — sequential execution + dispatch (PR3/8) ([#342](https://github.com/dicode-ayo/dicode-core/issues/342)) ([f9a5323](https://github.com/dicode-ayo/dicode-core/commit/f9a53237e24ff7c1e5f445d9935ad4cb4af26d7d))
+* **trigger:** re-run propagation + daemon-terminal-stage lifetime (PR4/8) ([#343](https://github.com/dicode-ayo/dicode-core/issues/343)) ([c57ed5a](https://github.com/dicode-ayo/dicode-core/commit/c57ed5aeab89bc0d1b5528fa7344a8ac1c8344e1))
+* **trigger:** seed PipelineTask stage 0 input from the firing trigger ([#351](https://github.com/dicode-ayo/dicode-core/issues/351)) ([56e34a9](https://github.com/dicode-ayo/dicode-core/commit/56e34a97494550be4dfdc8e488b5bf0b1682c24a))
+* **webui:** surface pipelines + stages in the WebUI (PR5/8) ([#345](https://github.com/dicode-ayo/dicode-core/issues/345)) ([74ddb33](https://github.com/dicode-ayo/dicode-core/commit/74ddb33865532d6ba6d5a7b12a39b746b0a2a35e))
+
+
+### Bug Fixes
+
+* **buildin/auth-providers:** land [#256](https://github.com/dicode-ayo/dicode-core/issues/256) on main + broker-less fallback ([#275](https://github.com/dicode-ayo/dicode-core/issues/275)) ([77efdc8](https://github.com/dicode-ayo/dicode-core/commit/77efdc86cf5839c39782a65696b1eee13525f4be))
+* **buildin/relay-server:** pre-create broker signing key on first run ([#289](https://github.com/dicode-ayo/dicode-core/issues/289)) ([96ff725](https://github.com/dicode-ayo/dicode-core/commit/96ff725b52f5b37a7d2c2dc701c28719bb883935))
+* **ipc:** close log-batch silent-loss windows on Stop() and flush errors ([#357](https://github.com/dicode-ayo/dicode-core/issues/357)) ([975495b](https://github.com/dicode-ayo/dicode-core/commit/975495b80d7a08160dcb12313d9002e2f5a32423))
+* **task:** unify empty-string handling across ${input.*} forms ([#336](https://github.com/dicode-ayo/dicode-core/issues/336)) ([ffdc51a](https://github.com/dicode-ayo/dicode-core/commit/ffdc51a85034b2668611c50c225e5894f9ef3f39))
+* **trigger,daemon:** pipeline daemon trigger fixes — restart orphan, webhook gateway, cold-start ordering ([#346](https://github.com/dicode-ayo/dicode-core/issues/346)) ([bfbadae](https://github.com/dicode-ayo/dicode-core/commit/bfbadae1d54a75141e3d3e0b7027fbc507fbc74f))
+* **trigger:** atomic FinishRunWithResult eliminates status/return_value race ([#354](https://github.com/dicode-ayo/dicode-core/issues/354)) ([daeb1f7](https://github.com/dicode-ayo/dicode-core/commit/daeb1f7c7a38912a0b8b7eb9cd270b8ac51ee02f))
+* **trigger:** cancelled daemon run transitions to DaemonStopped ([#335](https://github.com/dicode-ayo/dicode-core/issues/335)) ([19a3a9f](https://github.com/dicode-ayo/dicode-core/commit/19a3a9f1f786054c8f67650d60413ddc78e0e5ed))
+* **trigger:** runTask preflight-env FireChain is now synchronous ([#337](https://github.com/dicode-ayo/dicode-core/issues/337)) ([bbb3fe0](https://github.com/dicode-ayo/dicode-core/commit/bbb3fe036bbf4cd6df38463c564daf8798e8227f))
+* **webui,taskset:** hardening follow-ups — redact RefAuth secrets + source API tests ([#359](https://github.com/dicode-ayo/dicode-core/issues/359)) ([c8ae687](https://github.com/dicode-ayo/dicode-core/commit/c8ae687dc05632956c909c0fb4402f60b1277768))
+* **webui:** sync SourceManager.cfg on raw config save ([#356](https://github.com/dicode-ayo/dicode-core/issues/356)) ([a193a54](https://github.com/dicode-ayo/dicode-core/commit/a193a54116a612a2fae00767b422e97c0b31dec7))
+
+
+### Documentation
+
+* document template_path + daemon states ([#327](https://github.com/dicode-ayo/dicode-core/issues/327)) ([6710763](https://github.com/dicode-ayo/dicode-core/commit/671076312ccb08eb9031275b82274cfebd3bc334))
+* **examples:** cloudflared uses buildin/template + buildin/write-local ([#321](https://github.com/dicode-ayo/dicode-core/issues/321)) ([9eccc92](https://github.com/dicode-ayo/dicode-core/commit/9eccc92d53e23730ed5cebd9afa74f16f043d701))
+* **examples:** cloudflared via template-resolver + preflight + per-edge overrides ([#305](https://github.com/dicode-ayo/dicode-core/issues/305)) ([cdbe3d5](https://github.com/dicode-ayo/dicode-core/commit/cdbe3d58e48dd467b0a1789a275ede573b17b4df))
+
+
+### Miscellaneous
+
+* remove trigger.before; pipelines replace preflight orchestration (PR6/8) ([#347](https://github.com/dicode-ayo/dicode-core/issues/347)) ([f9e3edc](https://github.com/dicode-ayo/dicode-core/commit/f9e3edcaefb8dfe2a82729207a0adc8b47a9bf48))
+
 ## [Unreleased]
 
 ### Breaking
