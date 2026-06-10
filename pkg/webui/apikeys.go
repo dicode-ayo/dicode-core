@@ -239,9 +239,5 @@ func (s *Server) authSessionValid(r *http.Request) bool {
 	if !s.cfg.Server.Auth {
 		return true
 	}
-	c, err := r.Cookie(sessionCookie)
-	if err != nil {
-		return false
-	}
-	return s.sessions.valid(c.Value)
+	return s.sm.GetBool(r.Context(), "authenticated")
 }

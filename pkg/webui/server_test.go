@@ -794,14 +794,16 @@ func TestWebhook_AuthTask_AllowsAuthenticatedSession(t *testing.T) {
 	srv := newAuthServer(t, "hunter2")
 	registerWebhookTask(t, srv.registry, srv, "auth-hook2", "/hooks/priv2", true)
 
-	// Issue a valid in-memory session token.
-	token := srv.sessions.issue()
 	h := srv.Handler()
+	cookie := login(t, h, "hunter2", false)
+	if cookie == nil {
+		t.Fatal("login failed — no session cookie")
+	}
 
 	// GET with a valid session: should serve index.html (200), NOT be blocked.
 	getReq := httptest.NewRequest(http.MethodGet, "/hooks/priv2", nil)
 	getReq.Header.Set("Accept", "text/html,application/xhtml+xml,*/*")
-	getReq.AddCookie(&http.Cookie{Name: sessionCookie, Value: token})
+	getReq.AddCookie(cookie)
 	getW := httptest.NewRecorder()
 	h.ServeHTTP(getW, getReq)
 	if getW.Code == http.StatusUnauthorized || getW.Code == http.StatusSeeOther {
@@ -810,7 +812,7 @@ func TestWebhook_AuthTask_AllowsAuthenticatedSession(t *testing.T) {
 
 	// POST with a valid session: should pass through, NOT be blocked.
 	postReq := httptest.NewRequest(http.MethodPost, "/hooks/priv2", nil)
-	postReq.AddCookie(&http.Cookie{Name: sessionCookie, Value: token})
+	postReq.AddCookie(cookie)
 	postW := httptest.NewRecorder()
 	h.ServeHTTP(postW, postReq)
 	if postW.Code == http.StatusUnauthorized || postW.Code == http.StatusSeeOther {
@@ -870,12 +872,16 @@ func TestAPI_Metrics_AuthOK(t *testing.T) {
 	// Verify that GET /api/metrics returns 200 with valid JSON when auth is
 	// enabled and a valid session token is present.
 	srv := newAuthServer(t, "hunter2")
-	token := srv.sessions.issue()
+	h := srv.Handler()
+	cookie := login(t, h, "hunter2", false)
+	if cookie == nil {
+		t.Fatal("login failed — no session cookie")
+	}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/metrics", nil)
-	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: token})
+	req.AddCookie(cookie)
 	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())

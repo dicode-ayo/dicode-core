@@ -21,8 +21,8 @@ const (
 )
 
 // dbSessionStore backs sessions and trusted-device tokens in SQLite so they
-// survive server restarts. It is used alongside the in-memory sessionStore
-// which handles the hot-path validation.
+// survive server restarts. Short-lived browser sessions are managed by the
+// scs.SessionManager; this store handles only device tokens.
 type dbSessionStore struct {
 	db db.DB
 }
@@ -61,8 +61,8 @@ func (s *dbSessionStore) issueDeviceToken(ctx context.Context, ip, userAgent str
 // last_seen inside a transaction and returns ok=true. When the token is older
 // than deviceRotateAfter a new device token is issued and the old one deleted
 // atomically; the new raw token is returned in newDeviceToken so the caller
-// can set a fresh device cookie. The caller is always responsible for issuing
-// a new in-memory session token.
+// can set a fresh device cookie. The caller is responsible for establishing
+// a new scs session.
 func (s *dbSessionStore) renewFromDevice(ctx context.Context, rawDeviceToken, ip string) (newDeviceToken string, ok bool) {
 	if rawDeviceToken == "" {
 		return "", false
@@ -201,18 +201,6 @@ func hashToken(raw string) string {
 	return hex.EncodeToString(h[:])
 }
 
-// setSessionCookie writes the short-lived session cookie to the response.
-func setSessionCookie(w http.ResponseWriter, token string) {
-	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookie,
-		Value:    token,
-		Path:     "/",
-		HttpOnly: true,
-		SameSite: http.SameSiteStrictMode,
-		MaxAge:   int(sessionTTL.Seconds()),
-	})
-}
-
 // setDeviceCookie writes the long-lived device cookie to the response.
 // The Path is intentionally "/" so the SPA can call /api/auth/refresh with it.
 func setDeviceCookie(w http.ResponseWriter, token string) {
@@ -226,11 +214,10 @@ func setDeviceCookie(w http.ResponseWriter, token string) {
 	})
 }
 
-// clearAuthCookies removes both auth cookies (logout).
-func clearAuthCookies(w http.ResponseWriter) {
-	for _, name := range []string{sessionCookie, deviceCookie} {
-		http.SetCookie(w, &http.Cookie{Name: name, Path: "/", MaxAge: -1})
-	}
+// clearDeviceCookie removes the device cookie. The session cookie is managed
+// by scs (via sm.Destroy) and does not need manual clearing.
+func clearDeviceCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{Name: deviceCookie, Path: "/", MaxAge: -1})
 }
 
 // --- HTTP handlers -----------------------------------------------------------
@@ -249,11 +236,12 @@ func (s *Server) apiAuthRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 	newDevToken, ok := s.dbSessions.renewFromDevice(r.Context(), dc.Value, clientIP(r, s.cfg.Server.TrustProxy))
 	if !ok {
-		clearAuthCookies(w)
+		_ = s.sm.Destroy(r.Context())
+		clearDeviceCookie(w)
 		jsonErr(w, "device token invalid or expired", http.StatusUnauthorized)
 		return
 	}
-	setSessionCookie(w, s.sessions.issue())
+	s.sm.Put(r.Context(), "authenticated", true)
 	if newDevToken != "" {
 		setDeviceCookie(w, newDevToken)
 	}
@@ -293,27 +281,25 @@ func (s *Server) apiRevokeDevice(w http.ResponseWriter, r *http.Request) {
 
 // apiLogout revokes the current session and device token.
 func (s *Server) apiLogout(w http.ResponseWriter, r *http.Request) {
-	if c, err := r.Cookie(sessionCookie); err == nil {
-		s.sessions.revoke(c.Value)
-	}
+	_ = s.sm.Destroy(r.Context())
 	if s.dbSessions != nil {
 		if dc, err := r.Cookie(deviceCookie); err == nil {
 			_ = s.dbSessions.revokeDevice(r.Context(), dc.Value)
 		}
 	}
-	clearAuthCookies(w)
+	clearDeviceCookie(w)
 	jsonOK(w, map[string]string{"status": "ok"})
 }
 
 // apiLogoutAll revokes all sessions and trusted devices (emergency lockout).
 func (s *Server) apiLogoutAll(w http.ResponseWriter, r *http.Request) {
-	s.sessions.mu.Lock()
-	s.sessions.tokens = make(map[string]time.Time)
-	s.sessions.mu.Unlock()
-
+	if s.scsStore != nil {
+		_ = s.scsStore.deleteAll()
+	}
 	if s.dbSessions != nil {
 		_ = s.dbSessions.revokeAllDevices(r.Context())
 	}
-	clearAuthCookies(w)
+	_ = s.sm.Destroy(r.Context())
+	clearDeviceCookie(w)
 	jsonOK(w, map[string]string{"status": "ok"})
 }
