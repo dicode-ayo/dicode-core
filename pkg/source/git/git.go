@@ -16,11 +16,11 @@ import (
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
+	"github.com/dicode/dicode/internal/gitops"
 	"github.com/dicode/dicode/pkg/source"
 	"github.com/dicode/dicode/pkg/task"
 	gogit "github.com/go-git/go-git/v5"
 	gogitconfig "github.com/go-git/go-git/v5/config"
-	"github.com/go-git/go-git/v5/plumbing"
 	gogittransport "github.com/go-git/go-git/v5/plumbing/transport"
 	"github.com/go-git/go-git/v5/plumbing/transport/http"
 	"go.uber.org/zap"
@@ -182,51 +182,7 @@ func (g *GitSource) cloneOrPull(ctx context.Context) error {
 // Returns nil on success or NoErrAlreadyUpToDate; any other error indicates
 // a failure the caller (cloneOrPull) may want to retry.
 func (g *GitSource) tryCloneOrPull(ctx context.Context) error {
-	auth := g.httpAuth()
-
-	// If the local dir already contains a repo, pull; otherwise clone.
-	if _, err := os.Stat(filepath.Join(g.localDir, ".git")); err == nil {
-		repo, err := gogit.PlainOpen(g.localDir)
-		if err != nil {
-			return fmt.Errorf("open repo: %w", err)
-		}
-		wt, err := repo.Worktree()
-		if err != nil {
-			return fmt.Errorf("worktree: %w", err)
-		}
-		opts := &gogit.PullOptions{
-			RemoteName:    "origin",
-			ReferenceName: plumbing.NewBranchReferenceName(g.branch),
-			Force:         true,
-		}
-		if auth != nil {
-			opts.Auth = auth
-		}
-		err = wt.PullContext(ctx, opts)
-		if err != nil && err != gogit.NoErrAlreadyUpToDate {
-			return fmt.Errorf("pull: %w", err)
-		}
-		return nil
-	}
-
-	// Clone.
-	if err := os.MkdirAll(g.localDir, 0755); err != nil {
-		return fmt.Errorf("mkdir: %w", err)
-	}
-	opts := &gogit.CloneOptions{
-		URL:           g.url,
-		ReferenceName: plumbing.NewBranchReferenceName(g.branch),
-		SingleBranch:  true,
-		Depth:         1,
-	}
-	if auth != nil {
-		opts.Auth = auth
-	}
-	_, err := gogit.PlainCloneContext(ctx, g.localDir, false, opts)
-	if err != nil {
-		return fmt.Errorf("clone: %w", err)
-	}
-	return nil
+	return gitops.CloneOrPull(ctx, g.localDir, g.url, g.branch, gitops.HTTPAuth(g.tokenEnv))
 }
 
 // isPermanentGitError reports whether err is a configuration-style failure
@@ -247,18 +203,6 @@ func isPermanentGitError(err error) bool {
 		return true
 	}
 	return false
-}
-
-// httpAuth returns HTTP basic-auth credentials if a token env var is set.
-func (g *GitSource) httpAuth() *http.BasicAuth {
-	if g.tokenEnv == "" {
-		return nil
-	}
-	token := os.Getenv(g.tokenEnv)
-	if token == "" {
-		return nil
-	}
-	return &http.BasicAuth{Username: "git", Password: token}
 }
 
 // syncAndEmit computes a diff against the previous snapshot and sends events.
