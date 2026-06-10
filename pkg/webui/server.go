@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/alexedwards/scs/v2"
 	"github.com/dicode/dicode/pkg/config"
 	"github.com/dicode/dicode/pkg/db"
 	"github.com/dicode/dicode/pkg/ipc"
@@ -62,53 +63,23 @@ var allowedOverrideJSONFields = map[string]bool{
 	"entries":     true,
 }
 
-// sessionStore holds in-memory session tokens for the secrets page.
-type sessionStore struct {
-	mu     sync.Mutex
-	tokens map[string]time.Time
-}
-
-func newSessionStore() *sessionStore { return &sessionStore{tokens: make(map[string]time.Time)} }
-
-func (s *sessionStore) issue() string {
-	raw := make([]byte, 32)
-	_, _ = rand.Read(raw)
-	token := hex.EncodeToString(raw)
-	s.mu.Lock()
-	s.tokens[token] = time.Now().Add(8 * time.Hour)
-	s.mu.Unlock()
-	return token
-}
-
-func (s *sessionStore) valid(token string) bool {
-	if token == "" {
-		return false
+// newSessionManager creates an scs.SessionManager backed by SQLite via the
+// given db.DB. When database is nil (tests without persistence) a plain
+// in-memory map store is used as a fallback.
+func newSessionManager(database db.DB) *scs.SessionManager {
+	sm := scs.New()
+	sm.Lifetime = sessionTTL
+	sm.Cookie.Name = sessionCookie
+	sm.Cookie.HttpOnly = true
+	sm.Cookie.SameSite = http.SameSiteStrictMode
+	sm.Cookie.Persist = true
+	sm.Cookie.Path = "/"
+	if database != nil {
+		store := newSCSStore(database)
+		store.startPurgeLoop()
+		sm.Store = store
 	}
-	s.mu.Lock()
-	exp, ok := s.tokens[token]
-	s.mu.Unlock()
-	return ok && time.Now().Before(exp)
-}
-
-func (s *sessionStore) revoke(token string) {
-	s.mu.Lock()
-	delete(s.tokens, token)
-	s.mu.Unlock()
-}
-
-func (s *sessionStore) purgeLoop() {
-	t := time.NewTicker(time.Hour)
-	defer t.Stop()
-	for range t.C {
-		s.mu.Lock()
-		now := time.Now()
-		for tok, exp := range s.tokens {
-			if now.After(exp) {
-				delete(s.tokens, tok)
-			}
-		}
-		s.mu.Unlock()
-	}
+	return sm
 }
 
 // unlockLimiter is a simple per-IP rate limiter for the secrets unlock endpoint.
@@ -192,13 +163,14 @@ type Server struct {
 	gateway            *ipc.Gateway
 	db                 db.DB
 	managedRuntimes    []pkgruntime.ManagedRuntime
-	sessions           *sessionStore
-	dbSessions         *dbSessionStore    // persistent sessions / trusted devices
-	apiKeys            *apiKeyStore       // MCP / programmatic API keys
-	passphraseStore    *passphraseStore   // auth passphrase persisted in DB
-	cachedPassphrase   string             // in-memory cache of stored DB value (bcrypt hash, or legacy plaintext during migration); invalidated on change
-	cachedPassphraseMu sync.RWMutex       // guards cachedPassphrase
-	migrateGroup       passphraseMigrator // collapses concurrent legacy-passphrase migrations to one bcrypt+write
+	sm                 *scs.SessionManager // short-lived browser sessions (scs/v2)
+	scsStore           *scsStore           // underlying SQLite store for sm; nil in DB-less tests
+	dbSessions         *dbSessionStore     // persistent trusted-device tokens
+	apiKeys            *apiKeyStore        // MCP / programmatic API keys
+	passphraseStore    *passphraseStore    // auth passphrase persisted in DB
+	cachedPassphrase   string              // in-memory cache of stored DB value (bcrypt hash, or legacy plaintext during migration); invalidated on change
+	cachedPassphraseMu sync.RWMutex        // guards cachedPassphrase
+	migrateGroup       passphraseMigrator  // collapses concurrent legacy-passphrase migrations to one bcrypt+write
 	limiter            *unlockLimiter
 	logs               *LogBroadcaster
 	ws                 *WSHub
@@ -260,8 +232,7 @@ func (s *Server) SetManagedRuntimes(runtimes []pkgruntime.ManagedRuntime) {
 // sourceMgr enables the /api/sources endpoints and MCP source tools; pass nil in tests.
 // database is required for persistent sessions and API key storage; pass nil in tests (auth features disabled).
 func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config, cfgPath string, secretsMgr SecretsManager, rec *registry.Reconciler, sourceMgr *SourceManager, dataDir string, logs *LogBroadcaster, log *zap.Logger, database db.DB, gateway *ipc.Gateway) (*Server, error) {
-	ss := newSessionStore()
-	go ss.purgeLoop()
+	sm := newSessionManager(database)
 
 	wsHub := NewWSHub(log)
 
@@ -273,10 +244,12 @@ func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config
 	var dbs *dbSessionStore
 	var aks *apiKeyStore
 	var ps *passphraseStore
+	var store *scsStore
 	if database != nil {
 		dbs = newDBSessionStore(database)
 		aks = newAPIKeyStore(database)
 		ps = newPassphraseStore(database)
+		store = sm.Store.(*scsStore)
 	}
 
 	s := &Server{
@@ -288,7 +261,8 @@ func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config
 		reconciler:      rec,
 		sourceMgr:       sourceMgr,
 		dataDir:         dataDir,
-		sessions:        ss,
+		sm:              sm,
+		scsStore:        store,
 		dbSessions:      dbs,
 		apiKeys:         aks,
 		passphraseStore: ps,
@@ -404,6 +378,7 @@ func (s *Server) Handler() http.Handler {
 	r.Use(middleware.RequestLogger(&zapLogFormatter{log: s.log}))
 	r.Use(middleware.Recoverer)
 	r.Use(securityHeaders)
+	r.Use(s.sm.LoadAndSave) // scs session middleware — must wrap all handlers
 
 	// Auth endpoints — always public (login flow must be reachable without session).
 	//
@@ -1056,8 +1031,7 @@ func (s *Server) apiSecretsUnlock(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	token := s.sessions.issue()
-	setSessionCookie(w, token)
+	s.sm.Put(r.Context(), "authenticated", true)
 
 	if trust && s.dbSessions != nil {
 		ua := r.Header.Get("User-Agent")

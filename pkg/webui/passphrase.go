@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/dicode/dicode/pkg/db"
 	"go.uber.org/zap"
@@ -460,13 +459,14 @@ func (s *Server) apiChangePassphrase(w http.ResponseWriter, r *http.Request) {
 	s.cachedPassphraseMu.Unlock()
 
 	// Invalidate all current sessions — everyone must re-login with the new passphrase.
-	s.sessions.mu.Lock()
-	s.sessions.tokens = make(map[string]time.Time)
-	s.sessions.mu.Unlock()
+	if s.scsStore != nil {
+		_ = s.scsStore.deleteAll()
+	}
 	if s.dbSessions != nil {
 		_ = s.dbSessions.revokeAllDevices(r.Context())
 	}
-	clearAuthCookies(w)
+	_ = s.sm.Destroy(r.Context())
+	clearDeviceCookie(w)
 
 	s.log.Info("auth passphrase changed — all sessions invalidated")
 	jsonOK(w, map[string]string{"status": "ok"})

@@ -174,6 +174,20 @@ func (s *SQLiteDB) migrate() error {
 		}
 	}
 
+	// scs_sessions — SQLite-backed store for alexedwards/scs/v2 session
+	// manager. Replaces the former in-memory sessionStore.
+	_, err = s.db.Exec(`
+		CREATE TABLE IF NOT EXISTS scs_sessions (
+			token      TEXT PRIMARY KEY,
+			data       BLOB NOT NULL,
+			expires_at INTEGER NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_scs_sessions_expires ON scs_sessions(expires_at);
+	`)
+	if err != nil {
+		return fmt.Errorf("migrate scs_sessions: %w", err)
+	}
+
 	// Indexes supporting #116 run-grouping filters. CREATE INDEX IF NOT EXISTS
 	// is idempotent so this is safe to run on every startup.
 	_, err = s.db.Exec(`

@@ -3,6 +3,7 @@ module github.com/dicode/dicode
 go 1.25.0
 
 require (
+	github.com/alexedwards/scs/v2 v2.9.0
 	github.com/bep/debounce v1.2.1
 	github.com/cenkalti/backoff/v4 v4.3.0
 	github.com/coder/websocket v1.8.14

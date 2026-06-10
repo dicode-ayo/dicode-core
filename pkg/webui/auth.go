@@ -102,15 +102,11 @@ func isSafeNextPath(next string) bool {
 	return true
 }
 
-// hasValidSession returns true if r carries a valid in-memory session cookie
-// or a device token that can be auto-renewed. Note: when a device token is
-// present the function has a side effect — it consumes the token and issues a
-// fresh one via renewFromDevice.
+// hasValidSession returns true if the request carries a valid scs session
+// or a device token that can be auto-renewed.
 func (s *Server) hasValidSession(r *http.Request) bool {
-	if cookie, err := r.Cookie(sessionCookie); err == nil {
-		if s.sessions.valid(cookie.Value) {
-			return true
-		}
+	if s.sm.GetBool(r.Context(), "authenticated") {
+		return true
 	}
 	if s.dbSessions != nil {
 		if dc, err := r.Cookie(deviceCookie); err == nil {
@@ -161,18 +157,16 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 			return
 		}
 
-		// Check session cookie first.
-		if cookie, err := r.Cookie(sessionCookie); err == nil {
-			if s.sessions.valid(cookie.Value) {
-				next.ServeHTTP(w, r)
-				return
-			}
+		// Check scs session first.
+		if s.sm.GetBool(r.Context(), "authenticated") {
+			next.ServeHTTP(w, r)
+			return
 		}
 
 		// Session missing or expired — try device token for auto-renewal.
 		if dc, err := r.Cookie(deviceCookie); err == nil {
 			if newDevToken, ok := s.dbSessions.renewFromDevice(r.Context(), dc.Value, clientIP(r, s.cfg.Server.TrustProxy)); ok {
-				setSessionCookie(w, s.sessions.issue())
+				s.sm.Put(r.Context(), "authenticated", true)
 				if newDevToken != "" {
 					setDeviceCookie(w, newDevToken)
 				}
