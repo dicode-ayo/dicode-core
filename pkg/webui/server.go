@@ -75,7 +75,9 @@ func newSessionManager(database db.DB) *scs.SessionManager {
 	sm.Cookie.Persist = true
 	sm.Cookie.Path = "/"
 	if database != nil {
-		sm.Store = newSCSStore(database)
+		store := newSCSStore(database)
+		store.startPurgeLoop()
+		sm.Store = store
 	}
 	return sm
 }

@@ -84,8 +84,20 @@ func (s *scsStore) deleteAll() error {
 	return s.db.Exec(context.Background(), `DELETE FROM scs_sessions`)
 }
 
-// purgeExpired removes expired rows. Called periodically.
+// purgeExpired removes expired rows.
 func (s *scsStore) purgeExpired() error {
 	return s.db.Exec(context.Background(),
 		`DELETE FROM scs_sessions WHERE expires_at <= ?`, time.Now().Unix())
+}
+
+// startPurgeLoop runs purgeExpired every hour in a background goroutine.
+// Without this, expired rows accumulate indefinitely in SQLite.
+func (s *scsStore) startPurgeLoop() {
+	go func() {
+		t := time.NewTicker(time.Hour)
+		defer t.Stop()
+		for range t.C {
+			_ = s.purgeExpired()
+		}
+	}()
 }
