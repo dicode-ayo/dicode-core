@@ -202,7 +202,7 @@ func (s *SQLiteDB) migrate() error {
 	_, err = s.db.Exec(`
 		CREATE TABLE IF NOT EXISTS author_sessions (
 			id           TEXT PRIMARY KEY,
-			kind         TEXT NOT NULL,
+			kind         TEXT NOT NULL CHECK(kind IN ('create','edit')),
 			source       TEXT NOT NULL,
 			task_id      TEXT NOT NULL DEFAULT '',
 			sandbox_path TEXT NOT NULL DEFAULT '',
@@ -214,6 +214,17 @@ func (s *SQLiteDB) migrate() error {
 	`)
 	if err != nil {
 		return fmt.Errorf("migrate author_sessions: %w", err)
+	}
+	// Enforce single-session-per-source at the DB level. Two concurrent
+	// edit requests can race past the application-level GetOpenForSource
+	// check (TOCTOU); this partial unique index makes the second INSERT
+	// fail with a constraint violation.
+	_, err = s.db.Exec(`
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_author_sessions_open_source
+		ON author_sessions(source) WHERE closed_at IS NULL;
+	`)
+	if err != nil {
+		return fmt.Errorf("migrate author_sessions index: %w", err)
 	}
 
 	return nil

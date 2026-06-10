@@ -125,8 +125,9 @@ timeout: 30s
 	}
 
 	taskID := source + "/" + name
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	jsonOK(w, taskCreateResp{
+	_ = json.NewEncoder(w).Encode(taskCreateResp{
 		TaskID: taskID,
 		Source: source,
 		Files:  []string{"task.yaml", "task.js"},
@@ -168,8 +169,9 @@ func (s *Server) apiTaskEdit(w http.ResponseWriter, r *http.Request) {
 		_ = s.authoringSessions.UpdateLastTurn(ctx, sess.ID)
 
 		sourceKind := s.resolveSourceKind(sess.Source)
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusAccepted)
-		jsonOK(w, taskEditResp{
+		_ = json.NewEncoder(w).Encode(taskEditResp{
 			SessionID:   sess.ID,
 			SandboxPath: sess.SandboxPath,
 			Source:      sess.Source,
@@ -223,8 +225,9 @@ func (s *Server) apiTaskEdit(w http.ResponseWriter, r *http.Request) {
 	// For this slice the session is created but the AI agent invocation is stubbed.
 
 	sourceKind := s.resolveSourceKind(source)
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
-	jsonOK(w, taskEditResp{
+	_ = json.NewEncoder(w).Encode(taskEditResp{
 		SessionID:   sessID,
 		SandboxPath: sess.SandboxPath,
 		Source:      source,
