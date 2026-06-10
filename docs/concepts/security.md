@@ -178,18 +178,16 @@ func clientIP(r *http.Request, trustProxy bool) string {
 
 #### Login rate limiter
 
-`unlockLimiter` in [server.go](../../pkg/webui/server.go):
+`go-chi/httprate` middleware in [server.go](../../pkg/webui/server.go):
 
-- 5 attempts per IP per minute
-- On the 5th failed attempt the window is **extended to 15 minutes** (not just reset to 1 minute)
+- 5 attempts per IP per minute (flat rate limit via `httprate.Limit`)
 - Each IP is tracked independently — one IP being locked out does not affect others
-- The map is never persisted; restarts reset all counters
+- Counters are in-memory; restarts reset them
 
 ```go
 const (
     unlockMaxAttempts = 5
     unlockWindow      = time.Minute
-    unlockLockoutTTL  = 15 * time.Minute
 )
 ```
 

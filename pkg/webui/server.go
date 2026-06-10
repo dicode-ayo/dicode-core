@@ -35,6 +35,7 @@ import (
 	"github.com/dicode/dicode/pkg/trigger"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/go-chi/httprate"
 	"github.com/gorilla/csrf"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
@@ -82,21 +83,11 @@ func newSessionManager(database db.DB) *scs.SessionManager {
 	return sm
 }
 
-// unlockLimiter is a simple per-IP rate limiter for the secrets unlock endpoint.
-type unlockLimiter struct {
-	mu      sync.Mutex
-	entries map[string]*limitEntry
-}
-
-type limitEntry struct {
-	count   int
-	resetAt time.Time
-}
-
+// unlockMaxAttempts and unlockWindow define the flat per-IP rate limit on the
+// login endpoint. Enforced via go-chi/httprate middleware.
 const (
 	unlockMaxAttempts = 5
 	unlockWindow      = time.Minute
-	unlockLockoutTTL  = 15 * time.Minute // extended lockout after max attempts
 )
 
 // webhookPathPrefix is the URL prefix every webhook-triggered task's HTTP
@@ -106,36 +97,6 @@ const (
 // Keep the trailing slash to enforce boundary matching (TrimPrefix + HasPrefix
 // semantics require it).
 const webhookPathPrefix = "/hooks/"
-
-func newUnlockLimiter() *unlockLimiter {
-	return &unlockLimiter{entries: make(map[string]*limitEntry)}
-}
-
-func (l *unlockLimiter) allow(ip string) bool {
-	// Test/dev escape hatch: disable the limiter entirely when this env is set.
-	// Prod never sets it; e2e tests rapid-fire many login attempts from one IP
-	// and would otherwise trip the 5-per-minute cap mid-suite.
-	if os.Getenv("DICODE_DISABLE_UNLOCK_LIMITER") == "1" {
-		return true
-	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	now := time.Now()
-	e, ok := l.entries[ip]
-	if !ok || now.After(e.resetAt) {
-		l.entries[ip] = &limitEntry{count: 1, resetAt: now.Add(unlockWindow)}
-		return true
-	}
-	if e.count >= unlockMaxAttempts {
-		return false
-	}
-	e.count++
-	if e.count >= unlockMaxAttempts {
-		// Extend the lockout window significantly on the attempt that hits the cap.
-		e.resetAt = now.Add(unlockLockoutTTL)
-	}
-	return true
-}
 
 //go:embed static
 var staticFS embed.FS
@@ -171,7 +132,6 @@ type Server struct {
 	cachedPassphrase   string              // in-memory cache of stored DB value (bcrypt hash, or legacy plaintext during migration); invalidated on change
 	cachedPassphraseMu sync.RWMutex        // guards cachedPassphrase
 	migrateGroup       passphraseMigrator  // collapses concurrent legacy-passphrase migrations to one bcrypt+write
-	limiter            *unlockLimiter
 	logs               *LogBroadcaster
 	ws                 *WSHub
 	log                *zap.Logger
@@ -266,7 +226,6 @@ func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config
 		dbSessions:      dbs,
 		apiKeys:         aks,
 		passphraseStore: ps,
-		limiter:         newUnlockLimiter(),
 		logs:            logs,
 		ws:              wsHub,
 		log:             log,
@@ -423,8 +382,22 @@ func (s *Server) Handler() http.Handler {
 	}
 	r.Group(func(lr chi.Router) {
 		lr.Use(csrfGuard)
-		lr.Post("/api/auth/login", s.apiSecretsUnlock)
 		lr.Get("/login", s.handleLoginPage)
+		// Per-IP rate limit on the login POST (5 req/min). Skipped when
+		// DICODE_DISABLE_UNLOCK_LIMITER=1 so e2e tests can rapid-fire logins.
+		lr.Group(func(rl chi.Router) {
+			if os.Getenv("DICODE_DISABLE_UNLOCK_LIMITER") != "1" {
+				rl.Use(httprate.Limit(unlockMaxAttempts, unlockWindow,
+					httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
+						s.cfgMu.RLock()
+						trustProxy := s.cfg.Server.TrustProxy
+						s.cfgMu.RUnlock()
+						return clientIP(r, trustProxy), nil
+					}),
+				))
+			}
+			rl.Post("/api/auth/login", s.apiSecretsUnlock)
+		})
 	})
 	r.Post("/api/auth/refresh", s.apiAuthRefresh)
 
@@ -966,10 +939,6 @@ func (s *Server) apiSecretsUnlock(w http.ResponseWriter, r *http.Request) {
 	trustProxy := s.cfg.Server.TrustProxy
 	s.cfgMu.RUnlock()
 	ip := clientIP(r, trustProxy)
-	if !s.limiter.allow(ip) {
-		jsonErr(w, "too many unlock attempts — try again in a minute", http.StatusTooManyRequests)
-		return
-	}
 
 	isForm := isFormRequest(r)
 
