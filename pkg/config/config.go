@@ -154,6 +154,26 @@ type AIConfig struct {
 	// with the dicode-task-dev skill. Point it at any ai-agent override to
 	// swap providers, skills, or model without changing code.
 	Task string `yaml:"task,omitempty"`
+
+	// CreateTask is the task id invoked for AI-first task authoring sessions
+	// (`dicode task create --ai`, `dicode task edit`, and the dc-task-create
+	// webui component). Defaults to "buildin/task-create" — an ai-agent
+	// override preloaded with the dicode-task-create skill and granted the
+	// sandbox FS + sources_set_dev_mode permissions it needs to scaffold
+	// task files inside a dev-mode clone. Distinct from Task so the
+	// read-only chat surface and the writeable authoring agent can be
+	// swapped independently. Empty-string and absent both resolve to the
+	// default — no explicit-disable state today (matches AI.Task).
+	CreateTask string `yaml:"create_task,omitempty"`
+
+	// CreateSessionTTL bounds how long an open authoring session may sit
+	// idle before the daemon force-cancels it (releasing the dev-mode lock
+	// on its source and cleaning up the sandbox dir). Defaults to 24h.
+	// Empty or zero falls through to the default — no explicit-disable
+	// state today (matches DefaultsConfig.RunInputs.Retention). Operators
+	// who want effectively-never auto-cancel can set a very large value
+	// (e.g. 8760h).
+	CreateSessionTTL time.Duration `yaml:"create_session_ttl,omitempty"`
 }
 
 type Config struct {
@@ -307,6 +327,29 @@ func applyDefaults(cfg *Config, configDir string) {
 
 	cfg.Database.Path = expand(cfg.Database.Path)
 
+	// Synthesise the virtual "ai-scratch" local source if the operator
+	// hasn't already defined one AND the ai-tasks directory already exists.
+	// The directory is created lazily by the first AI authoring session
+	// (`dicode task create --ai`); synthesising a source for a non-existent
+	// path causes the taskset resolver to log spurious WARN on every
+	// fsnotify tick and can race with other sources that share the same
+	// watchRoot (both resolve to filepath.Dir of their ref path).
+	//
+	// Synthesis runs before the entry-expansion loop below so the
+	// synthesised ref goes through the same path-expansion + watch-default
+	// + IsGit-branch normalisation every other entry gets.
+	if cfg.Spec.Entries == nil {
+		cfg.Spec.Entries = map[string]*taskset.Entry{}
+	}
+	aiScratchPath := filepath.Join(cfg.DataDir, "ai-tasks")
+	if _, exists := cfg.Spec.Entries["ai-scratch"]; !exists {
+		if fi, err := os.Stat(aiScratchPath); err == nil && fi.IsDir() {
+			cfg.Spec.Entries["ai-scratch"] = &taskset.Entry{
+				Ref: &taskset.Ref{Path: aiScratchPath},
+			}
+		}
+	}
+
 	// Expand ${VAR} in ref paths for spec.entries.
 	for _, entry := range cfg.Spec.Entries {
 		if entry == nil || entry.Ref == nil {
@@ -369,6 +412,21 @@ func applyDefaults(cfg *Config, configDir string) {
 	// *string and test for nil instead of empty.
 	if cfg.AI.Task == "" {
 		cfg.AI.Task = "buildin/dicodai"
+	}
+	// AI.CreateTask defaults to the buildin/task-create preset so AI-first
+	// authoring (`dicode task create --ai`, `dicode task edit`, the
+	// dc-task-create webui component) works out of the box. Same
+	// empty-or-default semantics as AI.Task — keep them in lockstep so
+	// operators reason about one rule.
+	if cfg.AI.CreateTask == "" {
+		cfg.AI.CreateTask = "buildin/task-create"
+	}
+	// AI.CreateSessionTTL caps idle authoring-session lifetime so a stale
+	// open session can't hold a source's dev-mode lock indefinitely. 24h
+	// is long enough for "I'll come back to it tomorrow" and short enough
+	// to free shared boxes overnight.
+	if cfg.AI.CreateSessionTTL == 0 {
+		cfg.AI.CreateSessionTTL = 24 * time.Hour
 	}
 	// RunInputs defaults: 30-day retention, local-storage backend.
 	if cfg.Defaults.RunInputs.Retention == 0 {
