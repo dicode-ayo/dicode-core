@@ -10,8 +10,10 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// PipelineTask is the spec for kind: PipelineTask — a sequential orchestration
-// of one or more kind: Task stages. It is a peer of Spec, not a Spec.
+// PipelineTask is the spec for kind: PipelineTask — an orchestration of one or
+// more kind: Task stages. subtype: sequential runs stages in order; subtype:
+// parallel runs stages concurrently (with optional depends_on for DAG ordering).
+// It is a peer of Spec, not a Spec.
 type PipelineTask struct {
 	APIVersion  string          `yaml:"apiVersion" json:"apiVersion"`
 	Kind        string          `yaml:"kind"       json:"kind"`
@@ -47,6 +49,7 @@ type PipelineTrigger struct {
 // override its task's trigger), unlike the chain-edge override allowlist.
 type Stage struct {
 	Task      string     `yaml:"task"`
+	DependsOn []string   `yaml:"depends_on,omitempty" json:"depends_on,omitempty"`
 	Overrides *Overrides `yaml:"overrides,omitempty"`
 }
 
@@ -145,10 +148,10 @@ func (p *PipelineTask) Validate() error {
 		return fmt.Errorf("pipeline: name is required")
 	}
 	if p.Subtype == "" {
-		return fmt.Errorf("pipeline: subtype is required (use \"sequential\")")
+		return fmt.Errorf("pipeline: subtype is required (use \"sequential\" or \"parallel\")")
 	}
-	if p.Subtype != "sequential" {
-		return fmt.Errorf("pipeline: subtype %q is not supported (only \"sequential\")", p.Subtype)
+	if p.Subtype != "sequential" && p.Subtype != "parallel" {
+		return fmt.Errorf("pipeline: subtype %q is not supported (use \"sequential\" or \"parallel\")", p.Subtype)
 	}
 	if p.Trigger.count() > 1 {
 		return fmt.Errorf("pipeline: at most one trigger type may be set")
@@ -169,6 +172,20 @@ func (p *PipelineTask) Validate() error {
 		}
 		seen[st.Task] = struct{}{}
 
+		// depends_on is only valid for parallel pipelines.
+		if len(st.DependsOn) > 0 && p.Subtype != "parallel" {
+			return fmt.Errorf("pipeline: stage %d (%s): depends_on is only valid for subtype \"parallel\"", i, st.Task)
+		}
+		// Validate depends_on references point to existing stage task IDs.
+		for _, dep := range st.DependsOn {
+			if _, ok := seen[dep]; !ok {
+				// The dependency must reference a stage that was listed BEFORE
+				// this stage (already in `seen`). This also rejects forward
+				// references and unknown task IDs.
+				return fmt.Errorf("pipeline: stage %d (%s): depends_on references unknown or forward stage %q", i, st.Task, dep)
+			}
+		}
+
 		if st.Overrides != nil {
 			site := fmt.Sprintf("pipeline.stages[%d].overrides (task %q)", i, st.Task)
 			if err := validatePipelineStageOverrides(site, st.Overrides); err != nil {
@@ -179,11 +196,89 @@ func (p *PipelineTask) Validate() error {
 				// Stages ≥1 have no upstream params map, so ${input.params.*} is still
 				// rejected there; ${input.output} / ${input.output.<field>} remain valid
 				// on all stages (stage→stage threading).
-				if i > 0 && inputParamsRefRe.MatchString(pr.Default) {
+				// For parallel pipelines, input.params refs are only valid on
+				// root stages (no depends_on).
+				isRoot := len(st.DependsOn) == 0
+				if p.Subtype == "sequential" && i > 0 && inputParamsRefRe.MatchString(pr.Default) {
 					return fmt.Errorf("pipeline.stages[%d].overrides.params.%s: ${input.params.…} is not available on stages after stage 0 (no upstream params are threaded between stages)", i, pr.Name)
+				}
+				if p.Subtype == "parallel" && !isRoot && inputParamsRefRe.MatchString(pr.Default) {
+					return fmt.Errorf("pipeline.stages[%d].overrides.params.%s: ${input.params.…} is not available on stages with depends_on (no upstream params are threaded between stages)", i, pr.Name)
 				}
 			}
 		}
 	}
+
+	// DAG cycle detection for parallel pipelines: since depends_on only allows
+	// references to stages listed earlier (validated above), cycles are
+	// structurally impossible. But we still detect them defensively.
+	if p.Subtype == "parallel" {
+		if cycle := detectStageCycle(p.Stages); cycle != "" {
+			return fmt.Errorf("pipeline: cycle detected in depends_on: %s", cycle)
+		}
+	}
+
 	return nil
+}
+
+// detectStageCycle runs a DFS on the depends_on graph and returns a printable
+// cycle path or "". Since depends_on only allows backward references (validated
+// during stage iteration), this should be unreachable, but is retained for
+// defense-in-depth.
+func detectStageCycle(stages []Stage) string {
+	edges := make(map[string][]string, len(stages))
+	for _, st := range stages {
+		edges[st.Task] = st.DependsOn
+	}
+
+	const (
+		white = 0
+		gray  = 1
+		black = 2
+	)
+	color := make(map[string]int, len(stages))
+	var stack []string
+	var dfs func(id string) string
+	dfs = func(id string) string {
+		color[id] = gray
+		stack = append(stack, id)
+		for _, next := range edges[id] {
+			switch color[next] {
+			case gray:
+				start := 0
+				for idx, n := range stack {
+					if n == next {
+						start = idx
+						break
+					}
+				}
+				path := append([]string(nil), stack[start:]...)
+				path = append(path, next)
+				return fmt.Sprintf("%s", joinArrow(path))
+			case white:
+				if cp := dfs(next); cp != "" {
+					return cp
+				}
+			}
+		}
+		stack = stack[:len(stack)-1]
+		color[id] = black
+		return ""
+	}
+	for _, st := range stages {
+		if color[st.Task] == white {
+			if cp := dfs(st.Task); cp != "" {
+				return cp
+			}
+		}
+	}
+	return ""
+}
+
+func joinArrow(parts []string) string {
+	result := parts[0]
+	for _, p := range parts[1:] {
+		result += " -> " + p
+	}
+	return result
 }

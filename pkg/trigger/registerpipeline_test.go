@@ -146,13 +146,26 @@ func TestRegisterPipelineValidates(t *testing.T) {
 	if err := env.engine.registerPipeline(good); err != nil {
 		t.Fatalf("registerPipeline(good) = %v", err)
 	}
-	// Invalid subtype is rejected (Validate runs inside registerPipeline).
-	bad := &task.PipelineTask{
+	// parallel subtype is now valid (registered with its stage already present).
+	par := &task.PipelineTask{
 		APIVersion: "dicode/v1",
 		Kind:       task.KindPipelineTask,
 		ID:         "p2",
 		Name:       "P2",
 		Subtype:    "parallel",
+		Enabled:    true,
+		Stages:     []task.Stage{{Task: "s"}},
+	}
+	if err := env.engine.registerPipeline(par); err != nil {
+		t.Fatalf("registerPipeline(parallel) = %v", err)
+	}
+	// Invalid subtype is still rejected.
+	bad := &task.PipelineTask{
+		APIVersion: "dicode/v1",
+		Kind:       task.KindPipelineTask,
+		ID:         "p3",
+		Name:       "P3",
+		Subtype:    "unknown",
 		Stages:     []task.Stage{{Task: "s"}},
 	}
 	if err := env.engine.registerPipeline(bad); err == nil {
@@ -471,7 +484,7 @@ func TestEngineRegisterRoutesByKind(t *testing.T) {
 	}
 	// A bad pipeline (invalid subtype) is rejected.
 	bad := &task.PipelineTask{APIVersion: "dicode/v1", Kind: task.KindPipelineTask,
-		ID: "p2", Name: "P2", Subtype: "parallel",
+		ID: "p2", Name: "P2", Subtype: "unknown",
 		Stages: []task.Stage{{Task: "s"}}}
 	if err := env.engine.Register(bad); err == nil {
 		t.Fatal("expected subtype rejection")
