@@ -160,7 +160,10 @@ const TOOLS: ToolDef[] = [
 ];
 
 async function listTasks(dicode: Dicode): Promise<TaskSummary[]> {
-  return ((await dicode.list_tasks()) as TaskSummary[]) ?? [];
+  // mcpContext: true signals the IPC server to filter to tasks with
+  // mcp_exposed: true — so only explicitly opted-in tasks are discoverable
+  // via the MCP endpoint.
+  return ((await dicode.list_tasks({ mcpContext: true })) as TaskSummary[]) ?? [];
 }
 
 function stringifyParams(raw: unknown): Record<string, string> {
@@ -195,7 +198,8 @@ async function dispatchTool(
       const id = String(args.id ?? "");
       if (!id) throw new Error("id is required");
       const params = stringifyParams(args.params);
-      const result = await dicode.run_task(id, params);
+      // mcpContext: true gates invocation to tasks with mcp_exposed: true.
+      const result = await dicode.run_task(id, params, { mcpContext: true });
       return textContent(JSON.stringify(result ?? null, null, 2));
     }
     case "list_sources": {
