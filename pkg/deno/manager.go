@@ -2,17 +2,12 @@
 package deno
 
 import (
-	"archive/zip"
-	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
+
+	"github.com/dicode/dicode/internal/installer"
 )
 
 // EnsureDeno returns the path to the cached Deno binary for the current
@@ -27,15 +22,7 @@ func EnsureDeno(version string) (string, error) {
 		return "", err
 	}
 
-	if _, err := os.Stat(cachePath); err == nil {
-		return cachePath, nil
-	}
-
-	if err := os.MkdirAll(filepath.Dir(cachePath), 0755); err != nil {
-		return "", fmt.Errorf("create cache dir: %w", err)
-	}
-
-	platform, err := platformName()
+	platform, err := installer.PlatformName()
 	if err != nil {
 		return "", err
 	}
@@ -44,60 +31,15 @@ func EnsureDeno(version string) (string, error) {
 		"https://github.com/denoland/deno/releases/download/v%s/deno-%s.zip",
 		version, platform,
 	)
-	checksumURL := zipURL + ".sha256sum"
 
-	zipData, err := downloadBytes(zipURL)
-	if err != nil {
-		return "", fmt.Errorf("download deno: %w", err)
-	}
-
-	checksumData, err := downloadBytes(checksumURL)
-	if err != nil {
-		return "", fmt.Errorf("download checksum: %w", err)
-	}
-
-	if err := verifyChecksum(zipData, string(checksumData)); err != nil {
-		return "", fmt.Errorf("checksum verification failed: %w", err)
-	}
-
-	binName := "deno"
-	if runtime.GOOS == "windows" {
-		binName = "deno.exe"
-	}
-
-	binData, err := extractFromZip(zipData, binName)
-	if err != nil {
-		return "", fmt.Errorf("extract deno binary: %w", err)
-	}
-
-	// Write to a temp file in the same directory, then rename atomically.
-	// This prevents concurrent downloaders from corrupting the binary: if two
-	// goroutines both find the binary missing and both download, the last rename
-	// wins and the final file is always a complete binary.
-	tmp, err := os.CreateTemp(filepath.Dir(cachePath), "deno-*.tmp")
-	if err != nil {
-		return "", fmt.Errorf("create temp file: %w", err)
-	}
-	tmpPath := tmp.Name()
-	if _, err := tmp.Write(binData); err != nil {
-		tmp.Close()
-		_ = os.Remove(tmpPath)
-		return "", fmt.Errorf("write deno binary: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpPath)
-		return "", fmt.Errorf("close temp file: %w", err)
-	}
-	if err := os.Chmod(tmpPath, 0755); err != nil {
-		_ = os.Remove(tmpPath)
-		return "", fmt.Errorf("chmod deno binary: %w", err)
-	}
-	if err := os.Rename(tmpPath, cachePath); err != nil {
-		_ = os.Remove(tmpPath)
-		return "", fmt.Errorf("install deno binary: %w", err)
-	}
-
-	return cachePath, nil
+	return installer.EnsureBinary(installer.Spec{
+		ArchiveURL:  zipURL,
+		ChecksumURL: zipURL + ".sha256sum",
+		BinName:     binName(),
+		CachePath:   cachePath,
+		Format:      installer.FormatZip,
+		Extract:     installer.MatchExact,
+	})
 }
 
 // BinaryPath returns the expected filesystem path for the cached Deno binary
@@ -111,72 +53,12 @@ func cacheBinPath(version string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("home dir: %w", err)
 	}
-	binName := "deno"
+	return filepath.Join(home, ".cache", "dicode", "deno", version, binName()), nil
+}
+
+func binName() string {
 	if runtime.GOOS == "windows" {
-		binName = "deno.exe"
+		return "deno.exe"
 	}
-	return filepath.Join(home, ".cache", "dicode", "deno", version, binName), nil
-}
-
-func platformName() (string, error) {
-	type entry struct{ goos, goarch, name string }
-	platforms := []entry{
-		{"linux", "amd64", "x86_64-unknown-linux-gnu"},
-		{"linux", "arm64", "aarch64-unknown-linux-gnu"},
-		{"darwin", "amd64", "x86_64-apple-darwin"},
-		{"darwin", "arm64", "aarch64-apple-darwin"},
-		{"windows", "amd64", "x86_64-pc-windows-msvc"},
-	}
-	for _, p := range platforms {
-		if p.goos == runtime.GOOS && p.goarch == runtime.GOARCH {
-			return p.name, nil
-		}
-	}
-	return "", fmt.Errorf("unsupported platform %s/%s", runtime.GOOS, runtime.GOARCH)
-}
-
-func downloadBytes(url string) ([]byte, error) {
-	resp, err := http.Get(url) //nolint:gosec
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP %d fetching %s", resp.StatusCode, url)
-	}
-	return io.ReadAll(resp.Body)
-}
-
-// verifyChecksum checks the SHA-256 of data against a checksum file line
-// in the format "<hex>  <filename>" (standard sha256sum output).
-func verifyChecksum(data []byte, checksumLine string) error {
-	fields := strings.Fields(checksumLine)
-	if len(fields) == 0 {
-		return fmt.Errorf("empty checksum file")
-	}
-	expected := strings.ToLower(fields[0])
-	h := sha256.Sum256(data)
-	got := hex.EncodeToString(h[:])
-	if got != expected {
-		return fmt.Errorf("expected %s got %s", expected, got)
-	}
-	return nil
-}
-
-func extractFromZip(zipData []byte, name string) ([]byte, error) {
-	r, err := zip.NewReader(bytes.NewReader(zipData), int64(len(zipData)))
-	if err != nil {
-		return nil, err
-	}
-	for _, f := range r.File {
-		if f.Name == name {
-			rc, err := f.Open()
-			if err != nil {
-				return nil, err
-			}
-			defer rc.Close()
-			return io.ReadAll(rc)
-		}
-	}
-	return nil, fmt.Errorf("file %q not found in zip", name)
+	return "deno"
 }
