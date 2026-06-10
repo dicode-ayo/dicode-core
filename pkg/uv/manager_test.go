@@ -1,4 +1,4 @@
-package deno
+package uv
 
 import (
 	"os"
@@ -6,10 +6,10 @@ import (
 	"testing"
 )
 
-func TestEnsureDeno_CachedPath(t *testing.T) {
-	// Write a fake binary to the cache path, then verify EnsureDeno returns it
+func TestEnsureUv_CachedPath(t *testing.T) {
+	// Write a fake binary to the cache path, then verify EnsureUv returns it
 	// without hitting the network.
-	cachePath, err := cacheBinPath("0.0.0-test")
+	cachePath, err := BinaryPath("0.0.0-test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -21,9 +21,9 @@ func TestEnsureDeno_CachedPath(t *testing.T) {
 	}
 	t.Cleanup(func() { os.Remove(cachePath) })
 
-	got, err := EnsureDeno("0.0.0-test")
+	got, err := EnsureUv("0.0.0-test")
 	if err != nil {
-		t.Fatalf("EnsureDeno: %v", err)
+		t.Fatalf("EnsureUv: %v", err)
 	}
 	if got != cachePath {
 		t.Errorf("expected %s, got %s", cachePath, got)
@@ -41,7 +41,7 @@ func TestBinaryPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := filepath.Join(home, ".cache", "dicode", "deno", "1.2.3", binName())
+	want := filepath.Join(home, ".cache", "dicode", "uv", "1.2.3", binName())
 	if p != want {
 		t.Errorf("BinaryPath = %q, want %q", p, want)
 	}
