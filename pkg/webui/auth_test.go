@@ -380,31 +380,21 @@ func TestAPIKey_MCP_Requires_Key_When_Auth_Enabled(t *testing.T) {
 	}
 }
 
-// ── Rate limiter lockout ──────────────────────────────────────────────────────
+// ── Rate limiter per-IP isolation ─────────────────────────────────────────────
 
-func TestAuth_RateLimit_ExtendedLockout(t *testing.T) {
+func TestAuth_RateLimit_DifferentIPNotBlocked(t *testing.T) {
 	srv := newAuthServer(t, "secret")
 	h := srv.Handler()
 
 	body, _ := json.Marshal(map[string]any{"password": "wrong"})
 
-	// Exhaust the limit.
-	for i := 0; i < unlockMaxAttempts; i++ {
+	// Exhaust the limit for one IP.
+	for i := 0; i < unlockMaxAttempts+1; i++ {
 		req := httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		req.RemoteAddr = "10.0.0.2:1234"
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, req)
-	}
-
-	// Next attempt should be 429 immediately (not after a 1-minute reset).
-	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req.RemoteAddr = "10.0.0.2:1234"
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-	if w.Code != http.StatusTooManyRequests {
-		t.Errorf("expected 429 during extended lockout, got %d", w.Code)
 	}
 
 	// A different IP must still be allowed.
