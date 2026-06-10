@@ -194,7 +194,7 @@ func (s *Server) SetManagedRuntimes(runtimes []pkgruntime.ManagedRuntime) {
 func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config, cfgPath string, secretsMgr SecretsManager, rec *registry.Reconciler, sourceMgr *SourceManager, dataDir string, logs *LogBroadcaster, log *zap.Logger, database db.DB, gateway *ipc.Gateway) (*Server, error) {
 	sm := newSessionManager(database)
 
-	wsHub := NewWSHub(log)
+	wsHub := NewWSHub(log, cfg.Server.AllowedOrigins)
 
 	csrfKey := make([]byte, 32)
 	if _, err := rand.Read(csrfKey); err != nil {

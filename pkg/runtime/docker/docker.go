@@ -282,6 +282,7 @@ func (rt *Runtime) buildImage(ctx context.Context, dc *dockerclient.Client, spec
 		Error  string `json:"error"`
 	}
 	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if err := json.Unmarshal([]byte(line), &msg); err != nil {
@@ -293,6 +294,9 @@ func (rt *Runtime) buildImage(ctx context.Context, dc *dockerclient.Client, spec
 		if out := strings.TrimSpace(msg.Stream); out != "" {
 			_ = rt.registry.AppendLog(ctx, runID, "info", out)
 		}
+	}
+	if err := scanner.Err(); err != nil {
+		rt.log.Warn("build output scanner error", zap.String("run", runID), zap.Error(err))
 	}
 
 	return tag, nil
@@ -322,13 +326,17 @@ func buildContextTar(dir string) (io.Reader, error) {
 			return err
 		}
 		if !info.IsDir() {
-			f, err := os.Open(path) //nolint:gosec
-			if err != nil {
+			if err := func() error {
+				f, err := os.Open(path) //nolint:gosec
+				if err != nil {
+					return err
+				}
+				defer f.Close()
+				_, err = io.Copy(tw, f)
+				return err
+			}(); err != nil {
 				return err
 			}
-			defer f.Close()
-			_, err = io.Copy(tw, f)
-			return err
 		}
 		return nil
 	})
@@ -360,11 +368,15 @@ func (rt *Runtime) maybePull(ctx context.Context, dc *dockerclient.Client, img, 
 		Status string `json:"status"`
 	}
 	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if err := json.Unmarshal([]byte(line), &pullMsg); err == nil && pullMsg.Status != "" {
 			_ = rt.registry.AppendLog(ctx, runID, "info", pullMsg.Status)
 		}
+	}
+	if err := scanner.Err(); err != nil {
+		rt.log.Warn("image pull scanner error", zap.String("run", runID), zap.Error(err))
 	}
 	return nil
 }
@@ -372,8 +384,12 @@ func (rt *Runtime) maybePull(ctx context.Context, dc *dockerclient.Client, img, 
 // streamLines reads lines from r and appends them to the run log.
 func (rt *Runtime) streamLines(runID string, r io.Reader, level string) {
 	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
 		_ = rt.registry.AppendLog(context.Background(), runID, level, scanner.Text())
+	}
+	if err := scanner.Err(); err != nil {
+		rt.log.Warn("stream scanner error", zap.String("run", runID), zap.Error(err))
 	}
 }
 

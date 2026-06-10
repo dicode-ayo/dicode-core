@@ -46,10 +46,11 @@ type RunFinishedData struct {
 
 // WSHub manages all WebSocket clients.
 type WSHub struct {
-	mu         sync.Mutex
-	clients    map[*wsClient]struct{}
-	log        *zap.Logger
-	recentLogs func() []string // returns buffered log lines for replay on subscribe
+	mu             sync.Mutex
+	clients        map[*wsClient]struct{}
+	log            *zap.Logger
+	recentLogs     func() []string // returns buffered log lines for replay on subscribe
+	allowedOrigins []string        // origin patterns for websocket.AcceptOptions; empty = same-origin only
 }
 
 type wsClient struct {
@@ -60,8 +61,8 @@ type wsClient struct {
 	mu     sync.Mutex
 }
 
-func NewWSHub(log *zap.Logger) *WSHub {
-	return &WSHub{clients: make(map[*wsClient]struct{}), log: log}
+func NewWSHub(log *zap.Logger, allowedOrigins []string) *WSHub {
+	return &WSHub{clients: make(map[*wsClient]struct{}), log: log, allowedOrigins: allowedOrigins}
 }
 
 func (h *WSHub) add(c *wsClient) {
@@ -113,7 +114,7 @@ func (h *WSHub) BroadcastLog(line string) {
 // ServeHTTP upgrades the connection to WebSocket and manages the client.
 func (h *WSHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		InsecureSkipVerify: true, // local dev — allow any origin
+		OriginPatterns: h.allowedOrigins,
 	})
 	if err != nil {
 		h.log.Debug("ws accept failed", zap.Error(err))

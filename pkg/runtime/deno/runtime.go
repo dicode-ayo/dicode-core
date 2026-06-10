@@ -415,15 +415,23 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		go func() {
 			defer wg.Done()
 			scanner := bufio.NewScanner(stdout)
+			scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 			for scanner.Scan() {
 				_ = rt.registry.AppendLog(context.Background(), runID, "info", redactor.RedactString(scanner.Text()))
+			}
+			if err := scanner.Err(); err != nil {
+				rt.log.Warn("stdout scanner error", zap.String("run", runID), zap.Error(err))
 			}
 		}()
 		go func() {
 			defer wg.Done()
 			scanner := bufio.NewScanner(stderr)
+			scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 			for scanner.Scan() {
 				_ = rt.registry.AppendLog(context.Background(), runID, "error", redactor.RedactString(scanner.Text()))
+			}
+			if err := scanner.Err(); err != nil {
+				rt.log.Warn("stderr scanner error", zap.String("run", runID), zap.Error(err))
 			}
 		}()
 	}

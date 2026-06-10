@@ -313,8 +313,12 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 	go func() {
 		defer wg.Done()
 		scanner := bufio.NewScanner(stderr)
+		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 		for scanner.Scan() {
 			_ = e.reg.AppendLog(context.Background(), runID, "warn", redactor.RedactString(scanner.Text()))
+		}
+		if err := scanner.Err(); err != nil {
+			e.log.Warn("stderr scanner error", zap.String("run", runID), zap.Error(err))
 		}
 	}()
 
