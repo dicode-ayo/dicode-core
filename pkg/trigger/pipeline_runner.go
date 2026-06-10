@@ -166,15 +166,27 @@ func (e *Engine) firePipeline(ctx context.Context, p *task.PipelineTask, opts pk
 	return runID, nil
 }
 
-// run executes stages sequentially, threading each stage's output into the next
-// via ${input.*}, and short-circuits the pipeline on the first stage failure.
+// run dispatches to the sequential or parallel runner based on subtype.
 func (r *PipelineRunner) run(ctx context.Context) {
-	e := r.engine
 	if r.spec.Timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, r.spec.Timeout)
 		defer cancel()
 	}
+
+	switch r.spec.Subtype {
+	case "parallel":
+		r.runParallel(ctx)
+	default:
+		r.runSequential(ctx)
+	}
+}
+
+// runSequential executes stages sequentially, threading each stage's output into
+// the next via ${input.*}, and short-circuits the pipeline on the first stage
+// failure.
+func (r *PipelineRunner) runSequential(ctx context.Context) {
+	e := r.engine
 
 	// Stage 0 is seeded from the trigger payload (#350): whatever fired the
 	// pipeline (webhook body, manual/chain params, etc.) becomes the stage-0
@@ -239,6 +251,187 @@ func (r *PipelineRunner) run(ctx context.Context) {
 	// Reachable only for an empty-stages pipeline (Validate rejects that), but
 	// keep the success terminal for completeness.
 	r.finish(registry.StatusSuccess, "", lastReturn)
+}
+
+// runParallel executes stages as a DAG: stages with no depends_on run first
+// (concurrently), then downstream stages run once all their dependencies have
+// completed. Fail-fast: on the first stage failure, all in-flight stages are
+// cancelled and the pipeline fails.
+//
+// Input passing: root stages (no depends_on) receive the trigger payload as
+// their InputContext. Downstream stages receive the merged outputs of their
+// dependencies: if a stage depends on one upstream, it receives that upstream's
+// output directly; if it depends on multiple, outputs are merged into a
+// map[string]interface{} keyed by the dependency's task ID.
+//
+// The pipeline's return value is the last stage's output (by declaration order)
+// if there is exactly one terminal stage (no downstream consumers), or the
+// merged outputs of all terminal stages otherwise.
+func (r *PipelineRunner) runParallel(ctx context.Context) {
+	e := r.engine
+	stages := r.spec.Stages
+
+	// Build index: task ID -> stage index for fast lookup.
+	taskIdx := make(map[string]int, len(stages))
+	for i, st := range stages {
+		taskIdx[st.Task] = i
+	}
+
+	// Build reverse dependency map: which stages depend on this stage?
+	// Also count incoming edges for each stage (for the ready check).
+	downstream := make(map[int][]int, len(stages))
+	inDegree := make([]int, len(stages))
+	for i, st := range stages {
+		inDegree[i] = len(st.DependsOn)
+		for _, dep := range st.DependsOn {
+			j := taskIdx[dep]
+			downstream[j] = append(downstream[j], i)
+		}
+	}
+
+	// Per-stage results, protected by mu.
+	type stageResult struct {
+		output task.InputContext
+		err    error
+	}
+	results := make([]stageResult, len(stages))
+	remaining := make([]int, len(stages)) // remaining dep count per stage
+	copy(remaining, inDegree)
+
+	var mu sync.Mutex // guards remaining[] and results[]
+
+	// Use a cancellable context for fail-fast: cancelling stops all in-flight
+	// stages and prevents new stages from launching.
+	parallelCtx, cancelAll := context.WithCancel(ctx)
+	defer cancelAll()
+
+	// WaitGroup tracks all in-flight stage goroutines.
+	var wg sync.WaitGroup
+
+	// First failure reason (for the pipeline's failure message).
+	var firstFailure string
+	var failOnce sync.Once
+
+	triggerInput := task.InputContext{
+		Output: r.triggerInput,
+		Params: r.triggerParams,
+	}
+
+	// buildUpstream constructs the InputContext for a stage based on its
+	// depends_on list. Root stages get the trigger input; stages with one dep
+	// get that dep's output; stages with multiple deps get a merged map.
+	buildUpstream := func(stageIdx int) task.InputContext {
+		deps := stages[stageIdx].DependsOn
+		if len(deps) == 0 {
+			return triggerInput
+		}
+		if len(deps) == 1 {
+			depIdx := taskIdx[deps[0]]
+			return results[depIdx].output
+		}
+		// Multiple dependencies: merge outputs into a map keyed by task ID.
+		merged := make(map[string]interface{}, len(deps))
+		for _, dep := range deps {
+			depIdx := taskIdx[dep]
+			merged[dep] = results[depIdx].output.Output
+		}
+		return task.InputContext{Output: merged}
+	}
+
+	// launchStage fires a single stage and, on success, decrements the
+	// remaining count of its downstream consumers, launching any that become
+	// ready. On failure, it triggers fail-fast cancellation.
+	var launchStage func(idx int)
+	launchStage = func(idx int) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			// Check for cancellation before dispatching.
+			if parallelCtx.Err() != nil {
+				return
+			}
+
+			mu.Lock()
+			upstream := buildUpstream(idx)
+			mu.Unlock()
+
+			st := stages[idx]
+			out, err := e.dispatchStage(parallelCtx, st, upstream, r.runID)
+
+			mu.Lock()
+			defer mu.Unlock()
+
+			if err != nil {
+				results[idx] = stageResult{err: err}
+				failOnce.Do(func() {
+					firstFailure = fmt.Sprintf("stage %d (%s): %s", idx, st.Task, err.Error())
+					e.log.Warn("parallel pipeline stage failed; cancelling siblings",
+						zap.String("pipeline", r.spec.ID), zap.Int("stage", idx),
+						zap.String("task", st.Task), zap.Error(err))
+					cancelAll()
+				})
+				return
+			}
+
+			results[idx] = stageResult{output: out}
+
+			// Decrement remaining count for all downstream stages and launch
+			// any that become ready (all deps satisfied).
+			for _, ds := range downstream[idx] {
+				remaining[ds]--
+				if remaining[ds] == 0 {
+					launchStage(ds)
+				}
+			}
+		}()
+	}
+
+	// Launch all root stages (no dependencies).
+	for i := range stages {
+		if inDegree[i] == 0 {
+			launchStage(i)
+		}
+	}
+
+	// Wait for all stages to complete (or be cancelled).
+	wg.Wait()
+
+	if firstFailure != "" {
+		r.finish(registry.StatusFailure, firstFailure, nil)
+		return
+	}
+
+	// Determine the pipeline's return value: find terminal stages (stages that
+	// no other stage depends on).
+	isTerminal := make([]bool, len(stages))
+	for i := range stages {
+		isTerminal[i] = true
+	}
+	for _, st := range stages {
+		for _, dep := range st.DependsOn {
+			isTerminal[taskIdx[dep]] = false
+		}
+	}
+	var terminals []int
+	for i, t := range isTerminal {
+		if t {
+			terminals = append(terminals, i)
+		}
+	}
+
+	var ret interface{}
+	if len(terminals) == 1 {
+		ret = results[terminals[0]].output.Output
+	} else {
+		merged := make(map[string]interface{}, len(terminals))
+		for _, idx := range terminals {
+			merged[stages[idx].Task] = results[idx].output.Output
+		}
+		ret = merged
+	}
+
+	r.finish(registry.StatusSuccess, "", ret)
 }
 
 // runTerminalDaemon ties the pipeline's lifetime to a daemon terminal stage's

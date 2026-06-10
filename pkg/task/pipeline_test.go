@@ -48,7 +48,7 @@ func TestPipelineValidate(t *testing.T) {
 		{"bad kind", func(p *PipelineTask) { p.Kind = "Task" }, "kind"},
 		{"no name", func(p *PipelineTask) { p.Name = "" }, "name"},
 		{"missing subtype", func(p *PipelineTask) { p.Subtype = "" }, "subtype is required"},
-		{"bad subtype", func(p *PipelineTask) { p.Subtype = "parallel" }, "is not supported"},
+		{"bad subtype", func(p *PipelineTask) { p.Subtype = "unknown" }, "is not supported"},
 		{"multi trigger", func(p *PipelineTask) {
 			p.Trigger = PipelineTrigger{Manual: true, Cron: "0 * * * *"}
 		}, "at most one trigger"},
@@ -165,6 +165,103 @@ func TestPipelineStageTriggerOverrideAllowed(t *testing.T) {
 	p.Stages[0].Overrides = &Overrides{Trigger: &TriggerPatch{Manual: &disable}}
 	if err := p.Validate(); err != nil {
 		t.Fatalf("stage trigger override should be allowed: %v", err)
+	}
+}
+
+// --- Parallel pipeline validation tests ---
+
+func validParallelPipeline() *PipelineTask {
+	return &PipelineTask{
+		APIVersion: "dicode/v1", Kind: KindPipelineTask, Name: "PP",
+		Subtype: "parallel", ID: "pp",
+		Stages: []Stage{
+			{Task: "stage-a"},
+			{Task: "stage-b"},
+			{Task: "stage-c", DependsOn: []string{"stage-a", "stage-b"}},
+		},
+	}
+}
+
+func TestParallelPipelineValidate(t *testing.T) {
+	if err := validParallelPipeline().Validate(); err != nil {
+		t.Fatalf("valid parallel pipeline rejected: %v", err)
+	}
+}
+
+func TestParallelPipelineDependsOnUnknownStage(t *testing.T) {
+	p := validParallelPipeline()
+	p.Stages[2].DependsOn = []string{"stage-a", "nonexistent"}
+	err := p.Validate()
+	if err == nil {
+		t.Fatal("expected error for depends_on referencing unknown stage")
+	}
+	if !strings.Contains(err.Error(), "nonexistent") {
+		t.Fatalf("error %q does not mention the unknown dep", err.Error())
+	}
+}
+
+func TestParallelPipelineDependsOnForwardRef(t *testing.T) {
+	p := &PipelineTask{
+		APIVersion: "dicode/v1", Kind: KindPipelineTask, Name: "PP",
+		Subtype: "parallel", ID: "pp",
+		Stages: []Stage{
+			{Task: "stage-a", DependsOn: []string{"stage-b"}}, // forward ref
+			{Task: "stage-b"},
+		},
+	}
+	err := p.Validate()
+	if err == nil {
+		t.Fatal("expected error for forward reference in depends_on")
+	}
+	if !strings.Contains(err.Error(), "forward stage") {
+		t.Fatalf("error %q does not mention forward ref", err.Error())
+	}
+}
+
+func TestParallelPipelineDependsOnRejectsSequential(t *testing.T) {
+	p := validPipeline()
+	p.Stages[1].DependsOn = []string{"buildin/template"}
+	err := p.Validate()
+	if err == nil {
+		t.Fatal("expected error for depends_on on sequential pipeline")
+	}
+	if !strings.Contains(err.Error(), "only valid for subtype") {
+		t.Fatalf("error %q does not mention subtype restriction", err.Error())
+	}
+}
+
+func TestParallelPipelineInputParamsOnRootStageAccepted(t *testing.T) {
+	p := &PipelineTask{
+		APIVersion: "dicode/v1", Kind: KindPipelineTask, Name: "PP",
+		Subtype: "parallel", ID: "pp",
+		Stages: []Stage{
+			{Task: "stage-a", Overrides: &Overrides{
+				Params: ParamOverrides{{Name: "x", Default: "${input.params.key}"}},
+			}},
+		},
+	}
+	if err := p.Validate(); err != nil {
+		t.Fatalf("root stage ${input.params.*} should be accepted: %v", err)
+	}
+}
+
+func TestParallelPipelineInputParamsOnDependentStageRejected(t *testing.T) {
+	p := &PipelineTask{
+		APIVersion: "dicode/v1", Kind: KindPipelineTask, Name: "PP",
+		Subtype: "parallel", ID: "pp",
+		Stages: []Stage{
+			{Task: "stage-a"},
+			{Task: "stage-b", DependsOn: []string{"stage-a"}, Overrides: &Overrides{
+				Params: ParamOverrides{{Name: "x", Default: "${input.params.key}"}},
+			}},
+		},
+	}
+	err := p.Validate()
+	if err == nil {
+		t.Fatal("expected error for ${input.params.*} on dependent stage")
+	}
+	if !strings.Contains(err.Error(), "${input.params") {
+		t.Fatalf("error %q does not mention ${input.params", err.Error())
 	}
 }
 

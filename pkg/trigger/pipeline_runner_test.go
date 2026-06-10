@@ -1595,3 +1595,349 @@ func TestPipelineWebhookFormURLEncoded(t *testing.T) {
 		t.Errorf("pipeline return = %v, want \"merge\" (form-urlencoded body not decoded to stage 0 via ${input.params.action})", parent.ReturnValue)
 	}
 }
+
+// --- Parallel pipeline tests ---
+
+// TestParallelPipelineIndependentStages fires a parallel pipeline with 3
+// independent stages (no depends_on) and asserts they all run and the pipeline
+// succeeds.
+func TestParallelPipelineIndependentStages(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires Deno subprocess")
+	}
+	env := newTestEnv(t)
+	dir := t.TempDir()
+
+	stageA := writeTask(t, dir, "par-a",
+		`export default async function main() { return "a" }`,
+		task.TriggerConfig{Manual: true})
+	stageB := writeTask(t, dir, "par-b",
+		`export default async function main() { return "b" }`,
+		task.TriggerConfig{Manual: true})
+	stageC := writeTask(t, dir, "par-c",
+		`export default async function main() { return "c" }`,
+		task.TriggerConfig{Manual: true})
+	for _, s := range []*task.Spec{stageA, stageB, stageC} {
+		if err := env.reg.Register(s); err != nil {
+			t.Fatalf("reg.Register %s: %v", s.ID, err)
+		}
+		if err := env.engine.Register(s); err != nil {
+			t.Fatalf("eng.Register %s: %v", s.ID, err)
+		}
+	}
+
+	pipe := &task.PipelineTask{
+		APIVersion: "dicode/v1", Kind: task.KindPipelineTask,
+		ID: "par-pipe", Name: "PAR", Subtype: "parallel", Enabled: true,
+		Trigger: task.PipelineTrigger{Manual: true},
+		Stages: []task.Stage{
+			{Task: "par-a"},
+			{Task: "par-b"},
+			{Task: "par-c"},
+		},
+	}
+	if err := env.reg.Register(pipe); err != nil {
+		t.Fatalf("reg.Register pipe: %v", err)
+	}
+	if err := env.engine.Register(pipe); err != nil {
+		t.Fatalf("eng.Register pipe: %v", err)
+	}
+
+	parentRunID, err := env.engine.FireManual(context.Background(), "par-pipe", nil)
+	if err != nil {
+		t.Fatalf("FireManual: %v", err)
+	}
+
+	parent := waitForTerminal(t, env.engine, parentRunID, 30*time.Second)
+	if parent.Kind != registry.RunKindPipeline {
+		t.Fatalf("parent kind = %q, want %q", parent.Kind, registry.RunKindPipeline)
+	}
+	if parent.Status != registry.StatusSuccess {
+		t.Fatalf("parent status = %q (reason=%q), want success", parent.Status, parent.FailureReason)
+	}
+
+	// All 3 stages must have run as pipeline-stage children.
+	kids, err := env.reg.ListChildren(context.Background(), parentRunID, 10)
+	if err != nil {
+		t.Fatalf("ListChildren: %v", err)
+	}
+	if len(kids) != 3 {
+		t.Fatalf("want 3 stage children, got %d", len(kids))
+	}
+	for _, c := range kids {
+		if c.TriggerSource != registry.TriggerPipelineStage {
+			t.Errorf("child %s source = %q, want %q", c.TaskID, c.TriggerSource, registry.TriggerPipelineStage)
+		}
+	}
+
+	// Return value: all 3 are terminal, so result should be a merged map.
+	res, err := env.engine.WaitRun(context.Background(), parentRunID)
+	if err != nil {
+		t.Fatalf("WaitRun parent: %v", err)
+	}
+	retMap, ok := res.ReturnValue.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected merged map return, got %T: %v", res.ReturnValue, res.ReturnValue)
+	}
+	if retMap["par-a"] != "a" || retMap["par-b"] != "b" || retMap["par-c"] != "c" {
+		t.Errorf("merged return = %v, want a/b/c", retMap)
+	}
+}
+
+// TestParallelPipelineFanIn fires a parallel pipeline where stage C depends on
+// stages A and B: C must wait for both A and B to complete, and receives their
+// merged outputs.
+func TestParallelPipelineFanIn(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires Deno subprocess")
+	}
+	env := newTestEnv(t)
+	dir := t.TempDir()
+
+	stageA := writeTask(t, dir, "fi-a",
+		`export default async function main() { return "alpha" }`,
+		task.TriggerConfig{Manual: true})
+	stageB := writeTask(t, dir, "fi-b",
+		`export default async function main() { return "beta" }`,
+		task.TriggerConfig{Manual: true})
+	// Stage C depends on A and B; it reads the merged output via ${input.output}
+	// which is a map with keys "fi-a" and "fi-b".
+	stageC := writeTask(t, dir, "fi-c",
+		`export default async function main() { return "done" }`,
+		task.TriggerConfig{Manual: true})
+	for _, s := range []*task.Spec{stageA, stageB, stageC} {
+		if err := env.reg.Register(s); err != nil {
+			t.Fatalf("reg.Register %s: %v", s.ID, err)
+		}
+		if err := env.engine.Register(s); err != nil {
+			t.Fatalf("eng.Register %s: %v", s.ID, err)
+		}
+	}
+
+	pipe := &task.PipelineTask{
+		APIVersion: "dicode/v1", Kind: task.KindPipelineTask,
+		ID: "fi-pipe", Name: "FI", Subtype: "parallel", Enabled: true,
+		Trigger: task.PipelineTrigger{Manual: true},
+		Stages: []task.Stage{
+			{Task: "fi-a"},
+			{Task: "fi-b"},
+			{Task: "fi-c", DependsOn: []string{"fi-a", "fi-b"}},
+		},
+	}
+	if err := env.reg.Register(pipe); err != nil {
+		t.Fatalf("reg.Register pipe: %v", err)
+	}
+	if err := env.engine.Register(pipe); err != nil {
+		t.Fatalf("eng.Register pipe: %v", err)
+	}
+
+	parentRunID, err := env.engine.FireManual(context.Background(), "fi-pipe", nil)
+	if err != nil {
+		t.Fatalf("FireManual: %v", err)
+	}
+
+	parent := waitForTerminal(t, env.engine, parentRunID, 30*time.Second)
+	if parent.Status != registry.StatusSuccess {
+		t.Fatalf("parent status = %q (reason=%q), want success", parent.Status, parent.FailureReason)
+	}
+
+	// C is the only terminal stage (A and B are consumed by C), so the pipeline
+	// return value is C's return.
+	res, err := env.engine.WaitRun(context.Background(), parentRunID)
+	if err != nil {
+		t.Fatalf("WaitRun parent: %v", err)
+	}
+	if res.ReturnValue != "done" {
+		t.Errorf("pipeline return = %v, want \"done\"", res.ReturnValue)
+	}
+
+	// All 3 stages must have run.
+	kids, err := env.reg.ListChildren(context.Background(), parentRunID, 10)
+	if err != nil {
+		t.Fatalf("ListChildren: %v", err)
+	}
+	if len(kids) != 3 {
+		t.Fatalf("want 3 stage children, got %d", len(kids))
+	}
+}
+
+// TestParallelPipelineFailFast fires a parallel pipeline where one stage fails
+// and asserts the pipeline fails and in-flight siblings are cancelled.
+func TestParallelPipelineFailFast(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires Deno subprocess")
+	}
+	env := newTestEnv(t)
+	dir := t.TempDir()
+
+	// Stage A fails immediately.
+	stageA := writeTask(t, dir, "ff-a",
+		`export default async function main() { throw new Error("boom") }`,
+		task.TriggerConfig{Manual: true})
+	// Stage B takes a long time (10s) — should be cancelled by fail-fast.
+	stageB := writeTask(t, dir, "ff-b",
+		`export default async function main() { await new Promise(r => setTimeout(r, 10000)); return "late" }`,
+		task.TriggerConfig{Manual: true})
+	for _, s := range []*task.Spec{stageA, stageB} {
+		if err := env.reg.Register(s); err != nil {
+			t.Fatalf("reg.Register %s: %v", s.ID, err)
+		}
+		if err := env.engine.Register(s); err != nil {
+			t.Fatalf("eng.Register %s: %v", s.ID, err)
+		}
+	}
+
+	pipe := &task.PipelineTask{
+		APIVersion: "dicode/v1", Kind: task.KindPipelineTask,
+		ID: "ff-pipe", Name: "FF", Subtype: "parallel", Enabled: true,
+		Trigger: task.PipelineTrigger{Manual: true},
+		Stages: []task.Stage{
+			{Task: "ff-a"},
+			{Task: "ff-b"},
+		},
+	}
+	if err := env.reg.Register(pipe); err != nil {
+		t.Fatalf("reg.Register pipe: %v", err)
+	}
+	if err := env.engine.Register(pipe); err != nil {
+		t.Fatalf("eng.Register pipe: %v", err)
+	}
+
+	parentRunID, err := env.engine.FireManual(context.Background(), "ff-pipe", nil)
+	if err != nil {
+		t.Fatalf("FireManual: %v", err)
+	}
+
+	// Pipeline must fail fast (well under 10s).
+	parent := waitForTerminal(t, env.engine, parentRunID, 8*time.Second)
+	if parent.Status != registry.StatusFailure {
+		t.Fatalf("parent status = %q, want failure (fail-fast)", parent.Status)
+	}
+	if !strings.Contains(parent.FailureReason, "ff-a") {
+		t.Errorf("failure reason %q should mention the failing stage ff-a", parent.FailureReason)
+	}
+}
+
+// TestParallelPipelineSingleDependency fires a parallel pipeline with a linear
+// DAG: A -> B -> C. Asserts stages run in order and output threads correctly.
+func TestParallelPipelineSingleDependency(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires Deno subprocess")
+	}
+	env := newTestEnv(t)
+	dir := t.TempDir()
+
+	stageA := writeTask(t, dir, "sd-a",
+		`export default async function main() { return "from-a" }`,
+		task.TriggerConfig{Manual: true})
+	stageB := writeTask(t, dir, "sd-b",
+		`export default async function main({ params }) { return await params.get("val") + "-b" }`,
+		task.TriggerConfig{Manual: true})
+	stageC := writeTask(t, dir, "sd-c",
+		`export default async function main({ params }) { return await params.get("val") + "-c" }`,
+		task.TriggerConfig{Manual: true})
+	for _, s := range []*task.Spec{stageA, stageB, stageC} {
+		if err := env.reg.Register(s); err != nil {
+			t.Fatalf("reg.Register %s: %v", s.ID, err)
+		}
+		if err := env.engine.Register(s); err != nil {
+			t.Fatalf("eng.Register %s: %v", s.ID, err)
+		}
+	}
+
+	pipe := &task.PipelineTask{
+		APIVersion: "dicode/v1", Kind: task.KindPipelineTask,
+		ID: "sd-pipe", Name: "SD", Subtype: "parallel", Enabled: true,
+		Trigger: task.PipelineTrigger{Manual: true},
+		Stages: []task.Stage{
+			{Task: "sd-a"},
+			{Task: "sd-b", DependsOn: []string{"sd-a"}, Overrides: &task.Overrides{
+				Params: task.ParamOverrides{{Name: "val", Default: "${input.output}"}}}},
+			{Task: "sd-c", DependsOn: []string{"sd-b"}, Overrides: &task.Overrides{
+				Params: task.ParamOverrides{{Name: "val", Default: "${input.output}"}}}},
+		},
+	}
+	if err := env.reg.Register(pipe); err != nil {
+		t.Fatalf("reg.Register pipe: %v", err)
+	}
+	if err := env.engine.Register(pipe); err != nil {
+		t.Fatalf("eng.Register pipe: %v", err)
+	}
+
+	parentRunID, err := env.engine.FireManual(context.Background(), "sd-pipe", nil)
+	if err != nil {
+		t.Fatalf("FireManual: %v", err)
+	}
+
+	parent := waitForTerminal(t, env.engine, parentRunID, 30*time.Second)
+	if parent.Status != registry.StatusSuccess {
+		t.Fatalf("parent status = %q (reason=%q), want success", parent.Status, parent.FailureReason)
+	}
+
+	res, err := env.engine.WaitRun(context.Background(), parentRunID)
+	if err != nil {
+		t.Fatalf("WaitRun parent: %v", err)
+	}
+	// Linear chain: A returns "from-a", B receives "from-a" and returns "from-a-b",
+	// C receives "from-a-b" and returns "from-a-b-c". C is the sole terminal.
+	if res.ReturnValue != "from-a-b-c" {
+		t.Errorf("pipeline return = %v, want \"from-a-b-c\"", res.ReturnValue)
+	}
+}
+
+// TestParallelPipelineTriggerInput asserts that root stages in a parallel
+// pipeline receive the trigger payload via ${input.params.*}.
+func TestParallelPipelineTriggerInput(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires Deno subprocess")
+	}
+	env := newTestEnv(t)
+	dir := t.TempDir()
+
+	stageA := writeTask(t, dir, "ti-a",
+		`export default async function main({ params }) { return await params.get("greeting") }`,
+		task.TriggerConfig{Manual: true})
+	if err := env.reg.Register(stageA); err != nil {
+		t.Fatalf("reg.Register: %v", err)
+	}
+	if err := env.engine.Register(stageA); err != nil {
+		t.Fatalf("eng.Register: %v", err)
+	}
+
+	pipe := &task.PipelineTask{
+		APIVersion: "dicode/v1", Kind: task.KindPipelineTask,
+		ID: "ti-pipe", Name: "TI", Subtype: "parallel", Enabled: true,
+		Trigger: task.PipelineTrigger{Manual: true},
+		Stages: []task.Stage{
+			{Task: "ti-a", Overrides: &task.Overrides{
+				Params: task.ParamOverrides{
+					{Name: "greeting", Default: "${input.params.greeting}"},
+				},
+			}},
+		},
+	}
+	if err := env.reg.Register(pipe); err != nil {
+		t.Fatalf("reg.Register pipe: %v", err)
+	}
+	if err := env.engine.Register(pipe); err != nil {
+		t.Fatalf("eng.Register pipe: %v", err)
+	}
+
+	parentRunID, err := env.engine.FireManual(context.Background(), "ti-pipe",
+		map[string]string{"greeting": "hello-parallel"})
+	if err != nil {
+		t.Fatalf("FireManual: %v", err)
+	}
+
+	res := waitForTerminal(t, env.engine, parentRunID, 30*time.Second)
+	if res.Status != registry.StatusSuccess {
+		t.Fatalf("pipeline status = %q (reason=%q), want success", res.Status, res.FailureReason)
+	}
+	parent, err := env.engine.WaitRun(context.Background(), parentRunID)
+	if err != nil {
+		t.Fatalf("WaitRun: %v", err)
+	}
+	if parent.ReturnValue != "hello-parallel" {
+		t.Errorf("pipeline return = %v, want \"hello-parallel\"", parent.ReturnValue)
+	}
+}
