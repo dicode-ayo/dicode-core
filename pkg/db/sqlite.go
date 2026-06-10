@@ -197,6 +197,25 @@ func (s *SQLiteDB) migrate() error {
 	if err != nil {
 		return fmt.Errorf("migrate run-grouping indexes: %w", err)
 	}
+
+	// author_sessions — AI-first task authoring sessions (#288).
+	_, err = s.db.Exec(`
+		CREATE TABLE IF NOT EXISTS author_sessions (
+			id           TEXT PRIMARY KEY,
+			kind         TEXT NOT NULL,
+			source       TEXT NOT NULL,
+			task_id      TEXT NOT NULL DEFAULT '',
+			sandbox_path TEXT NOT NULL DEFAULT '',
+			created_at   INTEGER NOT NULL,
+			last_turn_at INTEGER NOT NULL,
+			closed_at    INTEGER,
+			applied      INTEGER NOT NULL DEFAULT 0
+		);
+	`)
+	if err != nil {
+		return fmt.Errorf("migrate author_sessions: %w", err)
+	}
+
 	return nil
 }
 

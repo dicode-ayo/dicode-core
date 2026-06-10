@@ -128,6 +128,7 @@ type Server struct {
 	scsStore           *scsStore           // underlying SQLite store for sm; nil in DB-less tests
 	dbSessions         *dbSessionStore     // persistent trusted-device tokens
 	apiKeys            *apiKeyStore        // MCP / programmatic API keys
+	authoringSessions  *authoringSessionStore // AI-first authoring sessions (#288)
 	passphraseStore    *passphraseStore    // auth passphrase persisted in DB
 	cachedPassphrase   string              // in-memory cache of stored DB value (bcrypt hash, or legacy plaintext during migration); invalidated on change
 	cachedPassphraseMu sync.RWMutex        // guards cachedPassphrase
@@ -205,11 +206,13 @@ func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config
 	var aks *apiKeyStore
 	var ps *passphraseStore
 	var store *scsStore
+	var as *authoringSessionStore
 	if database != nil {
 		dbs = newDBSessionStore(database)
 		aks = newAPIKeyStore(database)
 		ps = newPassphraseStore(database)
 		store = sm.Store.(*scsStore)
+		as = newAuthoringSessionStore(database)
 	}
 
 	s := &Server{
@@ -223,9 +226,10 @@ func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config
 		dataDir:         dataDir,
 		sm:              sm,
 		scsStore:        store,
-		dbSessions:      dbs,
-		apiKeys:         aks,
-		passphraseStore: ps,
+		dbSessions:        dbs,
+		apiKeys:           aks,
+		authoringSessions: as,
+		passphraseStore:   ps,
 		logs:            logs,
 		ws:              wsHub,
 		log:             log,
@@ -534,6 +538,12 @@ func (s *Server) Handler() http.Handler {
 
 			// AI chat — forwards to the task named by cfg.AI.Task.
 			r.Post("/ai/chat", s.apiAIChat)
+
+			// AI-first task authoring (#288)
+			r.Post("/task/create", s.apiTaskCreate)
+			r.Post("/task/edit", s.apiTaskEdit)
+			r.Post("/task/save", s.apiTaskSave)
+			r.Post("/task/cancel", s.apiTaskCancel)
 
 			// Managed runtime lifecycle
 			r.Get("/runtimes", s.apiListRuntimes)
