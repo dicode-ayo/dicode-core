@@ -121,10 +121,15 @@ type Request struct {
 	SessionID string `json:"sessionID,omitempty"`
 
 	// cli.task.{create,edit,save,cancel} — AI-first task authoring.
-	// TaskName is the create verb's task name; Source is the create verb's
-	// target source. TaskID/SessionID/Prompt are reused from the fields above.
+	// TaskName is the create verb's task name. TaskID/SessionID/Prompt are
+	// reused from the fields above.
 	TaskName string `json:"taskName,omitempty"`
-	Source   string `json:"source,omitempty"`
+
+	// Source names the owning source: the create verb's target, or the
+	// delete verb's ID-prefix-resolution override. Force skips the delete
+	// verb's dangling-reference / confirmation guard.
+	Source string `json:"source,omitempty"`
+	Force  bool   `json:"force,omitempty"`
 
 	// dicode.crypto.{encrypt, decrypt} inputs
 	Context       string `json:"context,omitempty"`
@@ -270,6 +275,25 @@ type TaskSaveResult struct {
 type TaskCancelResult struct {
 	SessionID string `json:"sessionID"`
 	Cancelled bool   `json:"cancelled"`
+}
+
+// TaskDeleteResult is the cli.task.delete response.
+//
+// Mode is "local" when the task directory was removed in place, or "git"
+// when the deletion was pushed to a branch and a PR was filed. For "git",
+// PRRunID is the run id of the buildin/git-pr task that opened the PR and
+// PRValue is whatever that task returned (typically the PR URL). Refs lists
+// task ids that chain off the deleted task (on_failure / chain triggers) —
+// surfaced so the CLI can warn before the deletion takes effect.
+type TaskDeleteResult struct {
+	TaskID  string   `json:"taskID"`
+	Source  string   `json:"source"`
+	Mode    string   `json:"mode"` // "preview" | "local" | "git"
+	Trigger string   `json:"trigger,omitempty"`
+	Branch  string   `json:"branch,omitempty"`
+	PRRunID string   `json:"prRunID,omitempty"`
+	PRValue string   `json:"prValue,omitempty"`
+	Refs    []string `json:"refs,omitempty"`
 }
 
 // MetricsSnapshot is the cli.metrics response.

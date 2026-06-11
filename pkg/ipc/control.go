@@ -40,6 +40,7 @@ type ControlServer struct {
 	database        db.DB            // for broker pubkey trust pinning; nil in tests
 	apiKeys         APIKeyMinter     // nil if webui not wired (tests)
 	authoring       AuthoringService // nil if webui not wired (tests)
+	taskDeleter     TaskDeleter      // nil if webui not wired (tests)
 	log             *zap.Logger
 
 	// defaultAITask is cfg.AI.Task — the task id that `dicode ai` fires when
@@ -243,6 +244,9 @@ func (cs *ControlServer) dispatch(ctx context.Context, req Request) (any, error)
 
 	case "cli.task.cancel":
 		return cs.handleTaskCancel(ctx, req)
+
+	case "cli.task.delete":
+		return cs.handleTaskDelete(ctx, req)
 
 	case "cli.auth.reset_passphrase":
 		return cs.handleAuthResetPassphrase(ctx)
