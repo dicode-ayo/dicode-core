@@ -21,7 +21,8 @@ import (
 // authoringError carries an HTTP-style status alongside the message so the
 // REST layer can map it back to a response code while the IPC layer surfaces
 // the same wording. The 409 conflict path (single open session per source)
-// references #283 and must reach CLI users intact.
+// carries its #283 reference in the message itself and must reach CLI users
+// intact.
 type authoringError struct {
 	status int
 	msg    string
@@ -95,7 +96,7 @@ timeout: 30s
 
 // EditTask opens a new AI edit session for taskID, or resumes the session
 // identified by sessionID. Exactly one of the two must be supplied. The
-// single-open-session-per-source rule (#283) is enforced here: an edit for a
+// single-open-session-per-source rule is enforced here: an edit for a
 // source whose open session is the SAME task auto-resumes that session; an edit
 // for a DIFFERENT task in that source returns a 409 conflict.
 func (s *Server) EditTask(ctx context.Context, sessionID, taskID string) (ipc.AuthoringEditResult, error) {
@@ -136,7 +137,7 @@ func (s *Server) EditTask(ctx context.Context, sessionID, taskID string) (ipc.Au
 		source = source[:idx]
 	}
 
-	// Single-session-per-source (#283): auto-resume an open session for this
+	// Single-session-per-source: auto-resume an open session for this
 	// source rather than rejecting, so the CLI's task-id-keyed edit verb
 	// transparently continues the in-flight conversation. A session opened
 	// against a different task in the same source surfaces as a conflict.
@@ -181,8 +182,8 @@ func (s *Server) EditTask(ctx context.Context, sessionID, taskID string) (ipc.Au
 }
 
 // resumeOrConflict resumes an existing open session for a source when it is the
-// same task, or returns the 409 single-session conflict (#283) when the open
-// session belongs to a different task.
+// same task, or returns the 409 single-session conflict when the open session
+// belongs to a different task.
 func (s *Server) resumeOrConflict(ctx context.Context, existing *AuthoringSession, source, taskID string) (ipc.AuthoringEditResult, error) {
 	if existing.TaskID != "" && existing.TaskID != taskID {
 		return ipc.AuthoringEditResult{}, authErr(409, "source %q already has an open session %s for task %q (#283)", source, existing.ID, existing.TaskID)

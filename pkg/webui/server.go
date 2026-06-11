@@ -539,7 +539,7 @@ func (s *Server) Handler() http.Handler {
 			// AI chat — forwards to the task named by cfg.AI.Task.
 			r.Post("/ai/chat", s.apiAIChat)
 
-			// AI-first task authoring (#288)
+			// AI-first task authoring
 			r.Post("/task/create", s.apiTaskCreate)
 			r.Post("/task/edit", s.apiTaskEdit)
 			r.Post("/task/save", s.apiTaskSave)

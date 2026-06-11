@@ -281,7 +281,7 @@ func (cs *ControlServer) SetAPIKeyMinter(m APIKeyMinter) { cs.apiKeys = m }
 //
 // These methods carry the same business logic the REST handlers
 // (POST /api/task/{create,edit,save,cancel}) call, so the CLI and the browser
-// share one code path. The 409 single-open-session-per-source rule (#283) is
+// share one code path. The 409 single-open-session-per-source rule is
 // enforced inside EditTask and surfaces as an error string.
 type AuthoringService interface {
 	CreateTask(ctx context.Context, name, source string) (AuthoringCreateResult, error)

@@ -155,7 +155,11 @@ func cmdTaskEdit(c *ipc.ControlClient, args []string) error {
 	if res.WebUIURL != "" {
 		fmt.Fprintf(os.Stderr, "open: %s\n", res.WebUIURL)
 	}
-	fmt.Println(res.Reply)
+	// Reply is the piped (stdout) value; the AI turn that fills it is not wired
+	// yet, so only print when present to keep stdout empty rather than a blank line.
+	if res.Reply != "" {
+		fmt.Println(res.Reply)
+	}
 	return nil
 }
 
