@@ -1021,10 +1021,11 @@ func (e *Engine) preflightEnv(ctx context.Context, spec *task.Spec) (*envresolve
 		case errors.As(err, &mis):
 			return nil, registry.StatusFailure, "provider_misconfigured: " + mis.ProviderID
 		}
-		// Non-typed error: log for operator visibility, then let dispatch
+		// Non-typed error: log for operator visibility (without the error
+		// detail, which may contain secret key names), then let dispatch
 		// surface it through the runtime's inline resolver path.
 		e.log.Warn("preflight env-resolve returned non-typed error — falling through to inline resolution",
-			zap.String("task", spec.ID), zap.Error(err))
+			zap.String("task", spec.ID))
 		return nil, "", ""
 	}
 	return resolved, "", ""
