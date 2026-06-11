@@ -2,6 +2,7 @@ package webui
 
 import (
 	"context"
+	"net/http"
 	"testing"
 	"time"
 
@@ -52,7 +53,7 @@ func TestDeviceBinding_StrictSameSubnetPasses(t *testing.T) {
 
 	raw := issueRow(t, d, "203.0.113.10", strptr(uaFamily(chromeMac)), fresh)
 	// Same /24, different host octet.
-	_, ok := store.renewFromDevice(ctx, raw, "203.0.113.99", chromeMac, bindingStrict)
+	_, ok, _ := store.renewFromDevice(ctx, raw, "203.0.113.99", chromeMac, bindingStrict)
 	if !ok {
 		t.Fatal("strict mode rejected a same-/24 renewal")
 	}
@@ -63,9 +64,22 @@ func TestDeviceBinding_StrictCrossSubnetRejected(t *testing.T) {
 	ctx := context.Background()
 
 	raw := issueRow(t, d, "203.0.113.10", strptr(uaFamily(chromeMac)), fresh)
-	_, ok := store.renewFromDevice(ctx, raw, "198.51.100.10", chromeMac, bindingStrict)
+	_, ok, driftReject := store.renewFromDevice(ctx, raw, "198.51.100.10", chromeMac, bindingStrict)
 	if ok {
 		t.Fatal("strict mode allowed a cross-/24 renewal")
+	}
+	if !driftReject {
+		t.Fatal("strict cross-subnet reject should set driftReject=true")
+	}
+	// H1: the offending row must be hard-revoked, not left replayable.
+	devices, _ := store.listDevices(ctx)
+	if len(devices) != 0 {
+		t.Fatalf("strict drift must delete the device row, got %d rows", len(devices))
+	}
+	// Re-presenting the same cookie from the legit subnet must now also fail —
+	// the row is gone.
+	if _, ok2, _ := store.renewFromDevice(ctx, raw, "203.0.113.10", chromeMac, bindingStrict); ok2 {
+		t.Fatal("revoked device token still accepted after strict-drift reject")
 	}
 }
 
@@ -74,9 +88,12 @@ func TestDeviceBinding_StrictUAFamilyMismatchRejected(t *testing.T) {
 	ctx := context.Background()
 
 	raw := issueRow(t, d, "203.0.113.10", strptr(uaFamily(chromeMac)), fresh)
-	_, ok := store.renewFromDevice(ctx, raw, "203.0.113.10", firefoxMac, bindingStrict)
+	_, ok, driftReject := store.renewFromDevice(ctx, raw, "203.0.113.10", firefoxMac, bindingStrict)
 	if ok {
 		t.Fatal("strict mode allowed a UA-family mismatch")
+	}
+	if !driftReject {
+		t.Fatal("strict UA-mismatch reject should set driftReject=true")
 	}
 }
 
@@ -85,7 +102,7 @@ func TestDeviceBinding_WarnCrossSubnetAllowedAndFlagged(t *testing.T) {
 	ctx := context.Background()
 
 	raw := issueRow(t, d, "203.0.113.10", strptr(uaFamily(chromeMac)), fresh)
-	_, ok := store.renewFromDevice(ctx, raw, "198.51.100.10", chromeMac, bindingWarn)
+	_, ok, _ := store.renewFromDevice(ctx, raw, "198.51.100.10", chromeMac, bindingWarn)
 	if !ok {
 		t.Fatal("warn mode rejected a renewal; should allow")
 	}
@@ -106,7 +123,7 @@ func TestDeviceBinding_WarnUAFamilyDriftFlagged(t *testing.T) {
 	ctx := context.Background()
 
 	raw := issueRow(t, d, "203.0.113.10", strptr(uaFamily(chromeMac)), fresh)
-	_, ok := store.renewFromDevice(ctx, raw, "203.0.113.10", firefoxMac, bindingWarn)
+	_, ok, _ := store.renewFromDevice(ctx, raw, "203.0.113.10", firefoxMac, bindingWarn)
 	if !ok {
 		t.Fatal("warn mode rejected a UA-drift renewal; should allow")
 	}
@@ -116,20 +133,35 @@ func TestDeviceBinding_WarnUAFamilyDriftFlagged(t *testing.T) {
 	}
 }
 
-func TestDeviceBinding_WarnCleanRenewalClearsFlag(t *testing.T) {
+// M3: warn-mode drift is sticky against the issue-time anchor. A renewal that is
+// still off the issuing subnet keeps the flag; only a genuine return to the
+// issuing subnet clears it.
+func TestDeviceBinding_WarnDriftStickyUntilReturnToBaseline(t *testing.T) {
 	store, d := newTestStore(t)
 	ctx := context.Background()
 
 	raw := issueRow(t, d, "203.0.113.10", strptr(uaFamily(chromeMac)), fresh)
-	// Drift once.
-	store.renewFromDevice(ctx, raw, "198.51.100.10", chromeMac, bindingWarn)
-	// Clean renewal from a same-subnet-as-last IP. last_seen ip is now 198.51.100.10.
-	if _, ok := store.renewFromDevice(ctx, raw, "198.51.100.20", chromeMac, bindingWarn); !ok {
-		t.Fatal("clean renewal rejected")
+	// Drift away from the issuing /24.
+	if _, ok, _ := store.renewFromDevice(ctx, raw, "198.51.100.10", chromeMac, bindingWarn); !ok {
+		t.Fatal("warn drift renewal rejected")
+	}
+	// Still off the issuing subnet (different from issue IP). The baseline must
+	// not have re-anchored to 198.51.100.x, so this stays flagged.
+	if _, ok, _ := store.renewFromDevice(ctx, raw, "198.51.100.20", chromeMac, bindingWarn); !ok {
+		t.Fatal("warn renewal rejected")
 	}
 	devices, _ := store.listDevices(ctx)
+	if len(devices) != 1 || !devices[0].Drift {
+		t.Errorf("drift flag should stay set while still off the issuing subnet, got %+v", devices)
+	}
+
+	// Genuine return to the issuing /24 clears the flag.
+	if _, ok, _ := store.renewFromDevice(ctx, raw, "203.0.113.55", chromeMac, bindingWarn); !ok {
+		t.Fatal("return-to-baseline renewal rejected")
+	}
+	devices, _ = store.listDevices(ctx)
 	if len(devices) != 1 || devices[0].Drift {
-		t.Errorf("drift flag should be cleared after clean renewal, got %+v", devices)
+		t.Errorf("drift flag should clear on return to issuing subnet, got %+v", devices)
 	}
 }
 
@@ -139,7 +171,7 @@ func TestDeviceBinding_OffNeverEnforces(t *testing.T) {
 	ctx := context.Background()
 
 	raw := issueRow(t, d, "203.0.113.10", strptr(uaFamily(chromeMac)), fresh)
-	_, ok := store.renewFromDevice(ctx, raw, "198.51.100.10", firefoxMac, bindingOff)
+	_, ok, _ := store.renewFromDevice(ctx, raw, "198.51.100.10", firefoxMac, bindingOff)
 	if !ok {
 		t.Fatal("off mode rejected a renewal")
 	}
@@ -156,11 +188,11 @@ func TestDeviceBinding_NullUAFamilyNotDrift(t *testing.T) {
 	ctx := context.Background()
 
 	raw := issueRow(t, d, "203.0.113.10", nil, fresh)
-	if _, ok := store.renewFromDevice(ctx, raw, "203.0.113.10", firefoxMac, bindingStrict); !ok {
+	if _, ok, _ := store.renewFromDevice(ctx, raw, "203.0.113.10", firefoxMac, bindingStrict); !ok {
 		t.Fatal("strict mode rejected a NULL-ua_family (legacy) row")
 	}
 	// Family is now backfilled — a subsequent mismatch must be caught.
-	if _, ok := store.renewFromDevice(ctx, raw, "203.0.113.10", chromeMac, bindingStrict); ok {
+	if _, ok, _ := store.renewFromDevice(ctx, raw, "203.0.113.10", chromeMac, bindingStrict); ok {
 		t.Fatal("strict mode allowed a mismatch after ua_family backfill")
 	}
 }
@@ -171,12 +203,51 @@ func TestDeviceBinding_StrictIPv6Subnet(t *testing.T) {
 	ctx := context.Background()
 
 	raw := issueRow(t, d, "2001:db8:abcd:1::1", strptr(uaFamily(chromeMac)), fresh)
-	if _, ok := store.renewFromDevice(ctx, raw, "2001:db8:abcd:9::42", chromeMac, bindingStrict); !ok {
+	if _, ok, _ := store.renewFromDevice(ctx, raw, "2001:db8:abcd:9::42", chromeMac, bindingStrict); !ok {
 		t.Fatal("strict mode rejected a same-/48 IPv6 renewal")
 	}
 	raw2 := issueRow(t, d, "2001:db8:abcd:1::1", strptr(uaFamily(chromeMac)), fresh)
-	if _, ok := store.renewFromDevice(ctx, raw2, "2001:db8:ffff:1::1", chromeMac, bindingStrict); ok {
+	if _, ok, _ := store.renewFromDevice(ctx, raw2, "2001:db8:ffff:1::1", chromeMac, bindingStrict); ok {
 		t.Fatal("strict mode allowed a cross-/48 IPv6 renewal")
+	}
+}
+
+// H2: drive the IP through the real clientIP path. A bracketed IPv6 RemoteAddr
+// (host:port form, "[2001:db8::1]:443") must be normalized to a bare address so
+// sameSubnet's /48 mask applies — otherwise IPv6 silently degrades to exact
+// string compare and RFC 4941 privacy-address clients re-login constantly.
+func TestDeviceBinding_StrictIPv6ThroughClientIP(t *testing.T) {
+	store, d := newTestStore(t)
+	ctx := context.Background()
+
+	issueIP := clientIP(&http.Request{RemoteAddr: "[2001:db8:abcd:1::1]:51000"}, false)
+	if issueIP != "2001:db8:abcd:1::1" {
+		t.Fatalf("clientIP did not strip IPv6 brackets/port: got %q", issueIP)
+	}
+	raw := issueRow(t, d, issueIP, strptr(uaFamily(chromeMac)), fresh)
+
+	// Same /48, different lower bits and a fresh ephemeral port (RFC 4941 churn).
+	renewIP := clientIP(&http.Request{RemoteAddr: "[2001:db8:abcd:ffff::dead]:62000"}, false)
+	if _, ok, _ := store.renewFromDevice(ctx, raw, renewIP, chromeMac, bindingStrict); !ok {
+		t.Fatal("strict mode rejected a same-/48 IPv6 renewal via clientIP (bracket bug)")
+	}
+
+	// Trust-proxy XFF path with a bracketed IPv6 must normalize too.
+	r := &http.Request{RemoteAddr: "10.0.0.1:80", Header: http.Header{}}
+	r.Header.Set("X-Forwarded-For", "[2001:db8:abcd:2::9]:40000, 10.0.0.1")
+	if got := clientIP(r, true); got != "2001:db8:abcd:2::9" {
+		t.Fatalf("clientIP XFF did not normalize bracketed IPv6: got %q", got)
+	}
+}
+
+// M1: an IPv4-mapped IPv6 address (::ffff:a.b.c.d) and the native IPv4 form of
+// the same /24 must compare equal, not be rejected as a family mismatch.
+func TestSameSubnet_IPv4MappedIPv6(t *testing.T) {
+	if !sameSubnet("::ffff:203.0.113.10", "203.0.113.99") {
+		t.Error("IPv4-mapped IPv6 and native IPv4 in the same /24 should match")
+	}
+	if sameSubnet("::ffff:203.0.113.10", "203.0.114.10") {
+		t.Error("IPv4-mapped IPv6 across /24 boundary should not match")
 	}
 }
 

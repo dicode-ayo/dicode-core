@@ -83,37 +83,43 @@ const (
 //
 // mode controls IP-subnet / UA-family binding enforcement (see the package's
 // device_binding config). In strict mode a /24 (IPv4) or /48 (IPv6) subnet
-// change or a UA-family mismatch rejects the renewal (ok=false). In warn mode
-// the renewal proceeds but the drift is recorded on the row so /security can
-// surface it. A stored ua_family of NULL (rows issued before this feature) is
-// never treated as a mismatch; the current family is recorded on renewal.
-func (s *dbSessionStore) renewFromDevice(ctx context.Context, rawDeviceToken, ip, userAgent, mode string) (newDeviceToken string, ok bool) {
+// change or a UA-family mismatch rejects the renewal (ok=false) AND hard-revokes
+// the device row in the same transaction, so a cookie judged stolen cannot be
+// replayed until its 30-day expiry; driftReject is set so the caller clears the
+// device cookie. In warn mode the renewal proceeds but the drift is recorded on
+// the row so /security can surface it; warn-mode drift is sticky — the stored
+// baseline IP/ua_family is not re-anchored to the drifted values while a drift
+// is flagged, so a persistent drift keeps showing until the client genuinely
+// returns to its issuing subnet/family. A stored ua_family of NULL (rows issued
+// before this feature) is never treated as a mismatch; the current family is
+// recorded on renewal.
+func (s *dbSessionStore) renewFromDevice(ctx context.Context, rawDeviceToken, ip, userAgent, mode string) (newDeviceToken string, ok bool, driftReject bool) {
 	if rawDeviceToken == "" {
-		return "", false
+		return "", false, false
 	}
 	hash := hashToken(rawDeviceToken)
 	now := time.Now()
 	nowUnix := now.Unix()
 	curFam := uaFamily(userAgent)
 
-	var notFound bool
+	var notFound, rejected bool
 	var rotated string
 	var driftReason, driftDevice, driftStoredIP string
 
 	err := s.db.Tx(ctx, func(tx db.DB) error {
-		var id, label, storedIP string
+		var id, label, storedIP, storedReason string
 		var storedFam *string
 		var createdAt int64
 		found := false
 
 		if err := tx.Query(ctx,
-			`SELECT id, label, ip, ua_family, created_at FROM sessions
+			`SELECT id, label, ip, ua_family, drift_reason, created_at FROM sessions
 			 WHERE token_hash = ? AND kind = 'device' AND expires_at > ?`,
 			[]any{hash, nowUnix},
 			func(rows db.Scanner) error {
 				if rows.Next() {
 					found = true
-					return rows.Scan(&id, &label, &storedIP, &storedFam, &createdAt)
+					return rows.Scan(&id, &label, &storedIP, &storedFam, &storedReason, &createdAt)
 				}
 				return nil
 			},
@@ -127,23 +133,45 @@ func (s *dbSessionStore) renewFromDevice(ctx context.Context, rawDeviceToken, ip
 
 		drift, reason := deviceDrift(storedIP, ip, storedFam, curFam)
 		if drift && mode == bindingStrict {
-			notFound = true // reuse the reject path; caller clears the cookie
+			// Hard-revoke: a strict-mode drift means the cookie is presenting
+			// from an unexpected subnet/UA, so delete the row in this same
+			// transaction rather than leaving it replayable until expiry.
+			if err := tx.Exec(ctx, `DELETE FROM sessions WHERE id = ?`, id); err != nil {
+				return err
+			}
+			rejected = true
 			return nil
 		}
 		// warn mode records the drift on the row and logs the event after commit.
-		// Only persist a reason when actually drifting so a later clean renewal
-		// clears the flag.
+		// Only persist a reason when actually drifting (vs the issue-time anchor)
+		// so a genuine return to baseline clears the flag.
 		persistReason := ""
 		if drift && mode == bindingWarn {
 			driftReason, driftDevice, driftStoredIP = reason, id, storedIP
 			persistReason = reason
 		}
 
+		// Anchor the stored baseline IP/ua_family. In warn mode, while the device
+		// has ever drifted (or is drifting now) keep the baseline pinned to the
+		// issuing values instead of re-baselining to the drifted client; the
+		// drift comparison above is against storedIP/storedFam, so re-baselining
+		// would let a persistent drift self-heal after a single renewal. Off mode
+		// and never-drifted devices track the live client as before.
+		anchorIP, anchorFam := ip, curFam
+		if mode == bindingWarn && (drift || storedReason != "") {
+			anchorIP = storedIP
+			if storedFam != nil {
+				anchorFam = *storedFam
+			}
+			// storedFam == nil (legacy NULL): backfill with curFam (anchorFam
+			// already holds it) so the baseline gains a UA family exactly once.
+		}
+
 		age := now.Sub(time.Unix(createdAt, 0))
 		if age >= deviceRotateAfter {
 			// Rotate: insert a fresh token, delete the old one. The fresh row
-			// re-records the current UA family so the binding tracks the live
-			// client rather than a stale value.
+			// carries the anchored IP/UA family so warn-mode drift stays sticky
+			// across a rotation rather than re-baselining to the drifted client.
 			raw, err := randomToken()
 			if err != nil {
 				return err
@@ -153,7 +181,7 @@ func (s *dbSessionStore) renewFromDevice(ctx context.Context, rawDeviceToken, ip
 			if err := tx.Exec(ctx,
 				`INSERT INTO sessions (id, token_hash, kind, label, ip, ua_family, drift_reason, created_at, last_seen, expires_at)
 				 VALUES (?, ?, 'device', ?, ?, ?, ?, ?, ?, ?)`,
-				uuid.New().String(), newHash, label, ip, curFam, persistReason, nowUnix, nowUnix, newExp,
+				uuid.New().String(), newHash, label, anchorIP, anchorFam, persistReason, nowUnix, nowUnix, newExp,
 			); err != nil {
 				return err
 			}
@@ -167,7 +195,7 @@ func (s *dbSessionStore) renewFromDevice(ctx context.Context, rawDeviceToken, ip
 			// has a baseline.
 			if err := tx.Exec(ctx,
 				`UPDATE sessions SET last_seen = ?, ip = ?, ua_family = ?, drift_reason = ? WHERE id = ?`,
-				nowUnix, ip, curFam, persistReason, id,
+				nowUnix, anchorIP, anchorFam, persistReason, id,
 			); err != nil {
 				return err
 			}
@@ -176,12 +204,14 @@ func (s *dbSessionStore) renewFromDevice(ctx context.Context, rawDeviceToken, ip
 	})
 
 	if err != nil || notFound {
-		return "", false
+		return "", false, false
+	}
+	if rejected {
+		return "", false, true
 	}
 	if driftReason != "" {
-		// Structured device.binding_drift event. Issue #45's audit subsystem is
-		// not yet implemented, so the drift is also recorded on the row
-		// (drift_reason) and surfaced inline on /security.
+		// Structured device.binding_drift event. Drift is also recorded on the
+		// row (drift_reason) and surfaced inline on /security.
 		s.log.Warn("device.binding_drift",
 			zap.String("event", "device.binding_drift"),
 			zap.String("device_id", driftDevice),
@@ -190,7 +220,7 @@ func (s *dbSessionStore) renewFromDevice(ctx context.Context, rawDeviceToken, ip
 			zap.String("current_ip", ip),
 		)
 	}
-	return rotated, true // rotated is "" when no rotation occurred
+	return rotated, true, false // rotated is "" when no rotation occurred
 }
 
 // deviceDrift reports whether the presenting IP subnet or UA family differs
@@ -223,6 +253,10 @@ func sameSubnet(a, b string) bool {
 	if erra != nil || errb != nil {
 		return a == b
 	}
+	// Unmap IPv4-in-IPv6 (::ffff:a.b.c.d) so a mapped and a native form of the
+	// same IPv4 address compare in the same family at /24.
+	ipa = ipa.Unmap()
+	ipb = ipb.Unmap()
 	if ipa.Is4() != ipb.Is4() {
 		return false
 	}
@@ -341,8 +375,11 @@ func (s *Server) apiAuthRefresh(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "no device token", http.StatusUnauthorized)
 		return
 	}
-	newDevToken, ok := s.dbSessions.renewFromDevice(r.Context(), dc.Value, clientIP(r, s.cfg.Server.TrustProxy), r.Header.Get("User-Agent"), s.cfg.Server.DeviceBinding)
+	newDevToken, ok, _ := s.dbSessions.renewFromDevice(r.Context(), dc.Value, clientIP(r, s.cfg.Server.TrustProxy), r.Header.Get("User-Agent"), s.cfg.Server.DeviceBinding)
 	if !ok {
+		// On strict-drift the row is already hard-revoked inside renewFromDevice;
+		// clearing the cookie + destroying the session here covers both the
+		// drift-reject and the benign expiry case.
 		_ = s.sm.Destroy(r.Context())
 		clearDeviceCookie(w)
 		jsonErr(w, "device token invalid or expired", http.StatusUnauthorized)

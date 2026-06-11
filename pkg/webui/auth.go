@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -56,7 +57,7 @@ func (s *Server) webhookAuthGuard(w http.ResponseWriter, r *http.Request, next h
 	}
 
 	// Task requires a valid dicode session.
-	if s.hasValidSession(r) {
+	if s.hasValidSession(w, r) {
 		next.ServeHTTP(w, r)
 		return
 	}
@@ -103,14 +104,19 @@ func isSafeNextPath(next string) bool {
 }
 
 // hasValidSession returns true if the request carries a valid scs session
-// or a device token that can be auto-renewed.
-func (s *Server) hasValidSession(r *http.Request) bool {
+// or a device token that can be auto-renewed. On a strict-drift reject the
+// offending device row is hard-revoked inside renewFromDevice; w lets this path
+// clear the now-dead device cookie so the browser stops replaying it.
+func (s *Server) hasValidSession(w http.ResponseWriter, r *http.Request) bool {
 	if s.sm.GetBool(r.Context(), "authenticated") {
 		return true
 	}
 	if s.dbSessions != nil {
 		if dc, err := r.Cookie(deviceCookie); err == nil {
-			_, ok := s.dbSessions.renewFromDevice(r.Context(), dc.Value, clientIP(r, s.cfg.Server.TrustProxy), r.Header.Get("User-Agent"), s.cfg.Server.DeviceBinding)
+			_, ok, driftReject := s.dbSessions.renewFromDevice(r.Context(), dc.Value, clientIP(r, s.cfg.Server.TrustProxy), r.Header.Get("User-Agent"), s.cfg.Server.DeviceBinding)
+			if !ok && driftReject {
+				clearDeviceCookie(w)
+			}
 			return ok
 		}
 	}
@@ -130,7 +136,7 @@ func (s *Server) requireSessionOrAPIKey(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if s.hasValidSession(r) {
+		if s.hasValidSession(w, r) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -165,13 +171,19 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 
 		// Session missing or expired — try device token for auto-renewal.
 		if dc, err := r.Cookie(deviceCookie); err == nil {
-			if newDevToken, ok := s.dbSessions.renewFromDevice(r.Context(), dc.Value, clientIP(r, s.cfg.Server.TrustProxy), r.Header.Get("User-Agent"), s.cfg.Server.DeviceBinding); ok {
+			newDevToken, ok, driftReject := s.dbSessions.renewFromDevice(r.Context(), dc.Value, clientIP(r, s.cfg.Server.TrustProxy), r.Header.Get("User-Agent"), s.cfg.Server.DeviceBinding)
+			if ok {
 				s.sm.Put(r.Context(), "authenticated", true)
 				if newDevToken != "" {
 					setDeviceCookie(w, newDevToken)
 				}
 				next.ServeHTTP(w, r)
 				return
+			}
+			// A strict-drift reject already hard-revoked the row; clear the now-
+			// dead cookie so the browser stops replaying it.
+			if driftReject {
+				clearDeviceCookie(w)
 			}
 		}
 
@@ -271,25 +283,34 @@ func isAPIRequest(r *http.Request) bool {
 
 // clientIP extracts the real client IP. X-Forwarded-For is only trusted when
 // trustProxy is true (i.e. server.trust_proxy: true in config), so that direct
-// clients cannot spoof their IP and bypass rate limiting.
+// clients cannot spoof their IP and bypass rate limiting. The returned value is
+// a bare address (no port, no IPv6 brackets) so it parses with netip.ParseAddr
+// for subnet binding.
 func clientIP(r *http.Request, trustProxy bool) string {
 	if trustProxy {
 		if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
+			first := fwd
 			if idx := strings.Index(fwd, ","); idx != -1 {
-				return strings.TrimSpace(fwd[:idx])
+				first = fwd[:idx]
 			}
-			return strings.TrimSpace(fwd)
+			return normalizeIP(strings.TrimSpace(first))
 		}
 	}
-	ip, _, _ := splitHostPort(r.RemoteAddr)
-	return ip
+	return normalizeIP(r.RemoteAddr)
 }
 
-// splitHostPort is a nil-safe wrapper around net.SplitHostPort.
-func splitHostPort(hostport string) (host, port string, err error) {
-	// Fast path: avoid importing net just for this.
-	if i := strings.LastIndex(hostport, ":"); i >= 0 {
-		return hostport[:i], hostport[i+1:], nil
+// normalizeIP strips any port and IPv6 brackets so the result is a bare address
+// that netip.ParseAddr accepts. Inputs may be "host:port", "[v6]:port", "[v6]",
+// or a bare address; anything unparseable is returned trimmed of brackets.
+func normalizeIP(s string) string {
+	if s == "" {
+		return ""
 	}
-	return hostport, "", nil
+	if host, _, err := net.SplitHostPort(s); err == nil {
+		return host // SplitHostPort already strips IPv6 brackets
+	}
+	// No port present: drop surrounding brackets on a bare IPv6 literal.
+	s = strings.TrimPrefix(s, "[")
+	s = strings.TrimSuffix(s, "]")
+	return s
 }

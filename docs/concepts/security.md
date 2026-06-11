@@ -231,7 +231,7 @@ Managed by `dbSessionStore` in [sessions_db.go](../../pkg/webui/sessions_db.go).
 2. Open a **database transaction**
 3. Query for a matching, non-expired `device` row
 4. If not found → return `("", false)`
-5. Evaluate device binding (`mode` = `server.device_binding`) — see below. In `strict` mode a drift takes the reject path (`("", false)`); in `warn` mode the drift reason is recorded on the row and a structured event is logged.
+5. Evaluate device binding (`mode` = `server.device_binding`) — see below. In `strict` mode a drift hard-revokes the device row (`DELETE` in the same transaction) and returns the reject path; every caller then destroys the session and clears the `dicode_device` cookie, so a cookie judged stolen cannot be replayed until its 30-day expiry. In `warn` mode the drift reason is recorded on the row and a structured event is logged.
 6. If found and `age < deviceRotateAfter` (24h) → update `last_seen` + `ip` + `ua_family`, commit
 7. If found and `age ≥ deviceRotateAfter` → **rotate**:
    - Generate a new raw token
@@ -251,13 +251,15 @@ A trusted-device cookie is a 30-day bearer credential. To limit the blast radius
 | Mode     | Behaviour |
 | -------- | --------- |
 | `off`    | Default. IP/UA are recorded but never verified — backward-compatible. |
-| `warn`   | Renewal is allowed even on drift, but the drift is flagged (`drift: true` + reason) on the `/security` device row and a structured `device.binding_drift` log event is emitted. |
-| `strict` | Renewal is **rejected** on drift; the session is destroyed and the device cookie cleared, forcing a fresh login. |
+| `warn`   | Renewal is allowed even on drift, but the drift is flagged (`drift: true` + reason) on the `/security` device row and a structured `device.binding_drift` log event is emitted. The flag is **sticky**: it is compared against the issue-time baseline (the stored IP/UA family is not re-anchored to the drifted client), so a persistent drift keeps showing until the client genuinely returns to its issuing subnet/family. |
+| `strict` | Renewal is **rejected** on drift, the offending device row is **hard-revoked** in the same transaction, and the session is destroyed and the device cookie cleared on every code path (`requireAuth`, `hasValidSession`, `/api/auth/refresh`), forcing a fresh login. |
 
 "Drift" means either:
 
 - **IP subnet change** — compared at **/24 for IPv4** and **/48 for IPv6**, deliberately coarse so mobile NAT and carrier IP churn within a network do not trip the binding. Full-IP comparison is intentionally *not* used.
 - **UA-family mismatch** — the User-Agent is reduced to a coarse `browser/os` family (e.g. `chrome/macos`), dropping version numbers so routine browser auto-updates don't force a re-login. A cookie replayed from a different browser or OS is caught.
+
+> **Caveat:** UA-family binding only catches *accidental* cross-browser cookie copy (e.g. a token pasted into a different browser). A deliberate attacker can trivially set the victim's User-Agent header, so this is a defence-in-depth signal, not a primary control — the IP-subnet check and the short session TTL carry the real weight.
 
 **UA family** is stored in the `ua_family` column. Rows issued before this feature have `ua_family = NULL`; a NULL family is **never** treated as a mismatch — the current family is backfilled on the next renewal. This keeps existing trusted devices working when an operator first enables binding.
 
