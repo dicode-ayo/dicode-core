@@ -121,7 +121,7 @@ func dispatch(c *ipc.ControlClient, args []string) error {
 		return cmdAI(c, args[1:])
 	case "task":
 		if len(args) < 2 {
-			return fmt.Errorf("usage: dicode task <test|create|edit|save|cancel> [args...]")
+			return fmt.Errorf("usage: dicode task <test|create|edit|save|cancel|delete> [args...]")
 		}
 		return cmdTask(c, args[1:])
 	case "auth":
