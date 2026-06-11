@@ -275,8 +275,8 @@ type APIKeyMinter interface {
 func (cs *ControlServer) SetAPIKeyMinter(m APIKeyMinter) { cs.apiKeys = m }
 
 // AuthoringService is the surface the control server uses to drive AI-first
-// task authoring (#288) on behalf of CLI clients. Implemented by webui.Server,
-// which owns the source manager and the author_sessions store. Defined here so
+// task authoring on behalf of CLI clients. Implemented by webui.Server, which
+// owns the source manager and the author_sessions store. Defined here so
 // pkg/ipc keeps no import on pkg/webui — same pattern as APIKeyMinter.
 //
 // These methods carry the same business logic the REST handlers
@@ -301,9 +301,12 @@ type AuthoringCreateResult struct {
 	Files  []string
 }
 
-// AuthoringEditResult mirrors webui.EditTaskResult on the IPC side.
+// AuthoringEditResult mirrors webui.EditTaskResult on the IPC side. TaskID is
+// the session's own task id (sess.TaskID), not the caller's claim, so the CLI
+// echoes back the identity the session actually belongs to.
 type AuthoringEditResult struct {
 	SessionID   string
+	TaskID      string
 	SandboxPath string
 	Source      string
 	SourceKind  string
@@ -331,9 +334,11 @@ func (cs *ControlServer) handleTaskCreate(ctx context.Context, req Request) (Tas
 	}
 	edit, err := cs.handleTaskEdit(ctx, Request{TaskID: res.TaskID, Prompt: req.Prompt})
 	if err != nil {
-		// The scaffold already landed; surface the edit failure but keep the
-		// task id so the user can retry the edit against the created task.
-		return out, fmt.Errorf("task %s created but opening edit session failed: %w", res.TaskID, err)
+		// The scaffold already landed. The dispatch loop sends Error XOR
+		// Result, so `out` (with the new task id) is dropped on the wire when
+		// err is non-nil — embed the task id and a ready-to-run retry command
+		// in the error string so the CLI user can recover the created task.
+		return out, fmt.Errorf("task %s created but opening edit session failed: %w; retry with: dicode task edit %s \"<prompt>\"", res.TaskID, err, res.TaskID)
 	}
 	// Fold the edit metadata into the create result's wire shape via the
 	// dedicated fields the CLI reads.
@@ -353,7 +358,7 @@ func (cs *ControlServer) handleTaskEdit(ctx context.Context, req Request) (TaskE
 	}
 	out := TaskEditResult{
 		SessionID:   res.SessionID,
-		TaskID:      req.TaskID,
+		TaskID:      res.TaskID,
 		Source:      res.Source,
 		SourceKind:  res.SourceKind,
 		SandboxPath: res.SandboxPath,

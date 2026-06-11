@@ -124,7 +124,7 @@ func TestControl_TaskCreate_AIEditFailureKeepsTaskID(t *testing.T) {
 
 func TestControl_TaskEdit_BuildsWebUIURL(t *testing.T) {
 	m := &mockAuthoring{
-		editResult: AuthoringEditResult{SessionID: "abc", Source: "ai-scratch", SourceKind: "local"},
+		editResult: AuthoringEditResult{SessionID: "abc", TaskID: "ai-scratch/t", Source: "ai-scratch", SourceKind: "local"},
 		baseURL:    "https://host:1234",
 	}
 	cs := newAuthoringControl(m)
@@ -132,6 +132,7 @@ func TestControl_TaskEdit_BuildsWebUIURL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handleTaskEdit: %v", err)
 	}
+	// TaskID echoes the service result (sess.TaskID), not the request's claim.
 	if res.SessionID != "abc" || res.TaskID != "ai-scratch/t" {
 		t.Errorf("res = %+v", res)
 	}

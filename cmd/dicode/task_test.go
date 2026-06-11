@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -207,6 +208,34 @@ func TestCmdTaskCreate_AIPathChainsEditWithEqualsFlags(t *testing.T) {
 	// --ai presence makes the daemon chain create → edit against the new task.
 	if fa.editTask != "ai-scratch/x" {
 		t.Errorf("edit chained against %q, want ai-scratch/x", fa.editTask)
+	}
+}
+
+func TestCmdTaskCreate_AIEditFailureSurfacesTaskID(t *testing.T) {
+	// Drives the real control socket: create succeeds, the chained edit fails.
+	// The dispatch loop sends Error XOR Result, so the created task id must ride
+	// inside the error string to reach the CLI user (a retry command).
+	c, done := dialTestClient(t, &fakeAuthoring{
+		create:  ipc.AuthoringCreateResult{TaskID: "ai-scratch/hello", Source: "ai-scratch"},
+		editErr: errors.New("agent unavailable"),
+	})
+	defer done()
+	out, _, err := captureOutput(t, func() error {
+		return cmdTaskCreate(c, []string{"hello", "--ai", "make it greet"})
+	})
+	if err == nil {
+		t.Fatal("expected an error when the chained edit fails")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "ai-scratch/hello") {
+		t.Errorf("error must contain the created task id, got %q", msg)
+	}
+	if !strings.Contains(msg, "dicode task edit ai-scratch/hello") {
+		t.Errorf("error must contain a ready-to-run retry command, got %q", msg)
+	}
+	// stdout stays empty on failure — the task id reaches the user via stderr/error.
+	if strings.TrimSpace(out) != "" {
+		t.Errorf("stdout should be empty on failure, got %q", out)
 	}
 }
 

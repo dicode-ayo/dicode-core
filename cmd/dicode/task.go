@@ -8,8 +8,6 @@ import (
 	"github.com/dicode/dicode/pkg/ipc"
 )
 
-// AI-first task authoring verbs (#288): create | edit | save | cancel.
-//
 // Output convention mirrors `dicode ai`: stdout carries the single piped
 // value (task id or PR url), stderr carries metadata (session id, webui URL,
 // progress). Pipelines can consume stdout cleanly while the operator still

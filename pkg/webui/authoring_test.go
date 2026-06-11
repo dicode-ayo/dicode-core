@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/dicode/dicode/pkg/config"
@@ -211,6 +212,53 @@ func TestAPITaskEdit_ResumeSession(t *testing.T) {
 	}
 }
 
+func TestAPITaskEdit_SameTaskAutoResumes(t *testing.T) {
+	dir := t.TempDir()
+	srv := newAuthoringTestServer(t, "ai-scratch", dir)
+	h := srv.Handler()
+
+	// First edit opens a session for the task.
+	w := postJSON(h, "/api/task/edit", map[string]string{"task_id": "ai-scratch/hello"})
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("first status = %d, want 202; body: %s", w.Code, w.Body.String())
+	}
+	first := decodeJSON(t, w)
+	sessID, _ := first["session_id"].(string)
+	if sessID == "" {
+		t.Fatal("first edit returned empty session_id")
+	}
+
+	// A second edit for the SAME task id auto-resumes the open session rather
+	// than rejecting with 409 — pins the #288 same-task contract.
+	w = postJSON(h, "/api/task/edit", map[string]string{"task_id": "ai-scratch/hello"})
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("same-task status = %d, want 202 auto-resume; body: %s", w.Code, w.Body.String())
+	}
+	second := decodeJSON(t, w)
+	if second["session_id"] != sessID {
+		t.Errorf("auto-resume session_id = %v, want same %q", second["session_id"], sessID)
+	}
+}
+
+func TestAPITaskEdit_DifferentTaskSameSourceConflicts(t *testing.T) {
+	dir := t.TempDir()
+	srv := newAuthoringTestServer(t, "ai-scratch", dir)
+	h := srv.Handler()
+
+	w := postJSON(h, "/api/task/edit", map[string]string{"task_id": "ai-scratch/hello"})
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("first status = %d, want 202", w.Code)
+	}
+
+	w = postJSON(h, "/api/task/edit", map[string]string{"task_id": "ai-scratch/other"})
+	if w.Code != http.StatusConflict {
+		t.Fatalf("different-task status = %d, want 409; body: %s", w.Code, w.Body.String())
+	}
+	if body := w.Body.String(); !strings.Contains(body, "#283") {
+		t.Errorf("409 body = %q, want #283 reference", body)
+	}
+}
+
 func TestAPITaskEdit_ConflictSameSource(t *testing.T) {
 	dir := t.TempDir()
 	srv := newAuthoringTestServer(t, "ai-scratch", dir)
@@ -226,6 +274,38 @@ func TestAPITaskEdit_ConflictSameSource(t *testing.T) {
 	w = postJSON(h, "/api/task/edit", map[string]string{"task_id": "ai-scratch/other"})
 	if w.Code != http.StatusConflict {
 		t.Fatalf("second status = %d, want 409; body: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestAPITaskEdit_ResumeRejectsTaskMismatch(t *testing.T) {
+	dir := t.TempDir()
+	srv := newAuthoringTestServer(t, "ai-scratch", dir)
+	h := srv.Handler()
+
+	// Open a session for ai-scratch/hello.
+	w := postJSON(h, "/api/task/edit", map[string]string{"task_id": "ai-scratch/hello"})
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("open status = %d, want 202", w.Code)
+	}
+	sessID := decodeJSON(t, w)["session_id"].(string)
+
+	// Resuming with a task id that does not match the session's must be
+	// rejected rather than silently editing the wrong task.
+	w = postJSON(h, "/api/task/edit", map[string]string{
+		"session_id": sessID,
+		"task_id":    "ai-scratch/wrong",
+	})
+	if w.Code != http.StatusConflict {
+		t.Fatalf("mismatch status = %d, want 409; body: %s", w.Code, w.Body.String())
+	}
+
+	// The same session id resumes cleanly when the task id matches.
+	w = postJSON(h, "/api/task/edit", map[string]string{
+		"session_id": sessID,
+		"task_id":    "ai-scratch/hello",
+	})
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("matching-task resume status = %d, want 202; body: %s", w.Code, w.Body.String())
 	}
 }
 

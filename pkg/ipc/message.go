@@ -120,7 +120,7 @@ type Request struct {
 	Prompt    string `json:"prompt,omitempty"`
 	SessionID string `json:"sessionID,omitempty"`
 
-	// cli.task.{create,edit,save,cancel} — AI-first task authoring (#288).
+	// cli.task.{create,edit,save,cancel} — AI-first task authoring.
 	// TaskName is the create verb's task name; Source is the create verb's
 	// target source. TaskID/SessionID/Prompt are reused from the fields above.
 	TaskName string `json:"taskName,omitempty"`
@@ -231,7 +231,7 @@ type AIResult struct {
 	Reply     string `json:"reply"`
 }
 
-// TaskCreateResult is the cli.task.create response (#288). TaskID is the
+// TaskCreateResult is the cli.task.create response. TaskID is the
 // piped value the CLI prints to stdout; the rest is metadata. The SessionID /
 // WebUIURL / Reply fields are populated only on the --ai path, where create
 // chains straight into an edit session in one round-trip.
@@ -244,7 +244,7 @@ type TaskCreateResult struct {
 	Reply     string   `json:"reply,omitempty"`
 }
 
-// TaskEditResult is the cli.task.edit response (#288). Reply is the AI turn's
+// TaskEditResult is the cli.task.edit response. Reply is the AI turn's
 // text (stdout); SessionID and the source metadata go to stderr. WebUIURL is
 // the page the user can open to continue the session in the browser.
 type TaskEditResult struct {
@@ -257,7 +257,7 @@ type TaskEditResult struct {
 	Reply       string `json:"reply"`
 }
 
-// TaskSaveResult is the cli.task.save response (#288). TaskID or PRURL is the
+// TaskSaveResult is the cli.task.save response. TaskID or PRURL is the
 // piped value (stdout); the rest is metadata.
 type TaskSaveResult struct {
 	SessionID string `json:"sessionID"`
@@ -266,7 +266,7 @@ type TaskSaveResult struct {
 	Applied   bool   `json:"applied"`
 }
 
-// TaskCancelResult is the cli.task.cancel response (#288).
+// TaskCancelResult is the cli.task.cancel response.
 type TaskCancelResult struct {
 	SessionID string `json:"sessionID"`
 	Cancelled bool   `json:"cancelled"`

@@ -11,11 +11,12 @@ import (
 
 	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/google/uuid"
+	"go.uber.org/zap"
 )
 
-// Authoring service layer (#288). The REST handlers in authoring.go and the
-// control-socket IPC handlers in pkg/ipc both call these methods, so the
-// create/edit/save/cancel business logic lives in exactly one place.
+// The REST handlers in authoring.go and the control-socket IPC handlers in
+// pkg/ipc both call these methods, so the create/edit/save/cancel business
+// logic lives in exactly one place.
 
 // authoringError carries an HTTP-style status alongside the message so the
 // REST layer can map it back to a response code while the IPC layer surfaces
@@ -94,8 +95,9 @@ timeout: 30s
 
 // EditTask opens a new AI edit session for taskID, or resumes the session
 // identified by sessionID. Exactly one of the two must be supplied. The
-// single-open-session-per-source rule (#283) is enforced here: a fresh edit
-// for a source that already has an open session returns a 409 conflict.
+// single-open-session-per-source rule (#283) is enforced here: an edit for a
+// source whose open session is the SAME task auto-resumes that session; an edit
+// for a DIFFERENT task in that source returns a 409 conflict.
 func (s *Server) EditTask(ctx context.Context, sessionID, taskID string) (ipc.AuthoringEditResult, error) {
 	if s.authoringSessions == nil {
 		return ipc.AuthoringEditResult{}, authErr(503, "authoring sessions not available")
@@ -112,9 +114,13 @@ func (s *Server) EditTask(ctx context.Context, sessionID, taskID string) (ipc.Au
 		if sess.ClosedAt != nil {
 			return ipc.AuthoringEditResult{}, authErr(409, "session is closed")
 		}
+		if taskID != "" && sess.TaskID != taskID {
+			return ipc.AuthoringEditResult{}, authErr(409, "session %s belongs to task %q, not %q", sess.ID, sess.TaskID, taskID)
+		}
 		_ = s.authoringSessions.UpdateLastTurn(ctx, sess.ID)
 		return ipc.AuthoringEditResult{
 			SessionID:   sess.ID,
+			TaskID:      sess.TaskID,
 			SandboxPath: sess.SandboxPath,
 			Source:      sess.Source,
 			SourceKind:  s.resolveSourceKind(sess.Source),
@@ -139,16 +145,7 @@ func (s *Server) EditTask(ctx context.Context, sessionID, taskID string) (ipc.Au
 		return ipc.AuthoringEditResult{}, authErr(500, "check open sessions: %v", err)
 	}
 	if existing != nil {
-		if existing.TaskID != "" && existing.TaskID != taskID {
-			return ipc.AuthoringEditResult{}, authErr(409, "source %q already has an open session %s for task %q (#283)", source, existing.ID, existing.TaskID)
-		}
-		_ = s.authoringSessions.UpdateLastTurn(ctx, existing.ID)
-		return ipc.AuthoringEditResult{
-			SessionID:   existing.ID,
-			SandboxPath: existing.SandboxPath,
-			Source:      existing.Source,
-			SourceKind:  s.resolveSourceKind(existing.Source),
-		}, nil
+		return s.resumeOrConflict(ctx, existing, source, taskID)
 	}
 
 	sessID := uuid.New().String()
@@ -162,15 +159,49 @@ func (s *Server) EditTask(ctx context.Context, sessionID, taskID string) (ipc.Au
 		LastTurnAt: now,
 	}
 	if err := s.authoringSessions.Create(ctx, sess); err != nil {
+		// The partial unique index idx_author_sessions_open_source rejects a
+		// second open session for this source. A concurrent insert that lost
+		// the race lands here: re-read the winner and return the same 409 the
+		// non-racing path returns, not a 500.
+		if isUniqueConstraint(err) {
+			if winner, gerr := s.authoringSessions.GetOpenForSource(ctx, source); gerr == nil && winner != nil {
+				return s.resumeOrConflict(ctx, winner, source, taskID)
+			}
+		}
 		return ipc.AuthoringEditResult{}, authErr(500, "create session: %v", err)
 	}
 
 	return ipc.AuthoringEditResult{
 		SessionID:   sessID,
+		TaskID:      taskID,
 		SandboxPath: sess.SandboxPath,
 		Source:      source,
 		SourceKind:  s.resolveSourceKind(source),
 	}, nil
+}
+
+// resumeOrConflict resumes an existing open session for a source when it is the
+// same task, or returns the 409 single-session conflict (#283) when the open
+// session belongs to a different task.
+func (s *Server) resumeOrConflict(ctx context.Context, existing *AuthoringSession, source, taskID string) (ipc.AuthoringEditResult, error) {
+	if existing.TaskID != "" && existing.TaskID != taskID {
+		return ipc.AuthoringEditResult{}, authErr(409, "source %q already has an open session %s for task %q (#283)", source, existing.ID, existing.TaskID)
+	}
+	_ = s.authoringSessions.UpdateLastTurn(ctx, existing.ID)
+	return ipc.AuthoringEditResult{
+		SessionID:   existing.ID,
+		TaskID:      existing.TaskID,
+		SandboxPath: existing.SandboxPath,
+		Source:      existing.Source,
+		SourceKind:  s.resolveSourceKind(existing.Source),
+	}, nil
+}
+
+// isUniqueConstraint reports whether err is a SQLite UNIQUE-constraint
+// violation. The db layer surfaces the driver error verbatim; modernc.org/sqlite
+// renders these as "...UNIQUE constraint failed: ...".
+func isUniqueConstraint(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed")
 }
 
 // SaveTask applies the session's pending changes and closes it as applied.
@@ -220,6 +251,53 @@ func (s *Server) CancelTask(ctx context.Context, sessionID string) error {
 		return authErr(500, "close session: %v", err)
 	}
 	return nil
+}
+
+// startAuthoringPurgeLoop sweeps idle open authoring sessions on the configured
+// ai.create_session_ttl cadence so a stale never-saved session stops blocking
+// its source (the single-session-per-source rule would otherwise wedge it
+// forever). A non-positive TTL disables the sweep. The loop exits when ctx is
+// cancelled at daemon shutdown.
+func (s *Server) startAuthoringPurgeLoop(ctx context.Context) {
+	if s.authoringSessions == nil {
+		return
+	}
+	s.cfgMu.RLock()
+	ttl := time.Duration(0)
+	if s.cfg != nil {
+		ttl = s.cfg.AI.CreateSessionTTL
+	}
+	s.cfgMu.RUnlock()
+	if ttl <= 0 {
+		return
+	}
+
+	// Sweep at a fraction of the TTL so a session is cancelled within a
+	// bounded window past its deadline rather than up to a full TTL late.
+	interval := ttl / 4
+	if interval < time.Minute {
+		interval = time.Minute
+	}
+
+	go func() {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				n, err := s.authoringSessions.PurgeExpired(ctx, ttl)
+				if err != nil {
+					s.log.Warn("authoring session purge failed", zap.Error(err))
+					continue
+				}
+				if n > 0 {
+					s.log.Info("purged idle authoring sessions", zap.Int("count", n))
+				}
+			}
+		}
+	}()
 }
 
 // WebUIBaseURL returns the scheme://host:port the browser would use to reach

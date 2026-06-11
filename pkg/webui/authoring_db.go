@@ -9,7 +9,7 @@ import (
 	"github.com/dicode/dicode/pkg/db"
 )
 
-// AuthoringSession represents an AI-first task authoring session (#288).
+// AuthoringSession represents an AI-first task authoring session.
 type AuthoringSession struct {
 	ID          string    `json:"id"`
 	Kind        string    `json:"kind"`         // "create" or "edit"
