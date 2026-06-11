@@ -401,6 +401,11 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	// the apiKeyStore; control just dispatches.
 	ctrlSrv.SetAPIKeyMinter(srv)
 
+	// Wire AI-first task authoring (#288) so `dicode task create|edit|save|
+	// cancel` reuses the same source manager and author_sessions store the
+	// REST handlers use.
+	ctrlSrv.SetAuthoringService(srv)
+
 	// Wire the generic dicode.crypto.{encrypt, decrypt} IPC verb so buildin
 	// tasks (relay-client, auth-start, auth-relay) can encrypt/decrypt blobs
 	// via DeriveSubKey-derived sub-keys. Sub-keys never cross IPC; only the
