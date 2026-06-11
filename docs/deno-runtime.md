@@ -142,7 +142,7 @@ return { count: 42, status: "ok" }
 
 ### `dicode` — task orchestration
 
-Allows a task to orchestrate other tasks. Requires `security.allowed_tasks` to be configured.
+Allows a task to orchestrate other tasks. Requires `permissions.dicode.tasks` to be configured.
 
 ```typescript
 // Run another task and await its result
@@ -157,18 +157,19 @@ const tasks = await dicode.list_tasks()
 const runs = await dicode.get_runs("send-report", { limit: 5 })
 ```
 
-**task.yaml security config:**
+**task.yaml permissions config:**
 
 ```yaml
-security:
-  allowed_tasks:
-    - "send-report"   # specific task ID
-    - "*"             # or allow all tasks
+permissions:
+  dicode:
+    tasks:
+      - "send-report"   # specific task ID
+      - "*"             # or allow all tasks
 ```
 
 ### `mcp` — MCP server tools
 
-Allows a task to call tools exposed by daemon tasks that declare `mcp_port`. Requires `security.allowed_mcp`.
+Allows a task to call tools exposed by daemon tasks that declare `mcp_port`. Requires `permissions.dicode.mcp`.
 
 ```typescript
 // List available tools on an MCP server
@@ -178,13 +179,14 @@ const tools = await mcp.list_tools("github-mcp")
 const result = await mcp.call("github-mcp", "search_repositories", { query: "dicode" })
 ```
 
-**task.yaml security config:**
+**task.yaml permissions config:**
 
 ```yaml
-security:
-  allowed_mcp:
-    - "github-mcp"   # daemon task ID that declares mcp_port
-    - "*"            # or allow all MCP servers
+permissions:
+  dicode:
+    mcp:
+      - "github-mcp"   # daemon task ID that declares mcp_port
+      - "*"            # or allow all MCP servers
 ```
 
 **MCP daemon task example:**
@@ -220,8 +222,9 @@ params:
   - name: prompt
     type: string
     required: true
-security:
-  allowed_tasks: ["*"]
+permissions:
+  dicode:
+    tasks: ["*"]
 ```
 
 ```typescript

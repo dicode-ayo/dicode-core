@@ -54,7 +54,7 @@ server:
 - `corsMiddleware` replaces the former wildcard with an explicit `server.allowed_origins` list; unrecognised origins receive no `Access-Control-Allow-Origin` header; entries are validated with `url.Parse()` at startup — malformed entries are skipped and logged rather than silently corrupting the allowlist
 - `securityHeaders` extended with `Content-Security-Policy` and `Permissions-Policy`
 - `X-Forwarded-For` only trusted when `server.trust_proxy: true` — prevents direct clients from spoofing their IP to bypass the login rate limiter
-- Login rate limiter extended: on the 5th failed attempt the lockout window extends to **15 minutes** (not just 1 minute)
+- Login rate limiter: 5 attempts per IP per minute (flat rate via go-chi/httprate, in-memory, resets on restart)
 
 ---
 

@@ -84,7 +84,9 @@ When `server.auth: false`, the `Authorization` header is optional (the endpoint 
 
 ### `list_tasks`
 
-Returns all registered tasks with ID, name, trigger type, last run status, and last run time.
+Returns registered tasks with ID, name, trigger type, last run status, and last run time.
+
+**`mcp_exposed` filter:** Tasks are hidden from MCP by default. Only tasks with `mcp_exposed: true` in their `task.yaml` appear in `list_tasks` and can be invoked via `tools/call`. This is a security feature to prevent unintended exposure of internal tasks to MCP clients.
 
 ```json
 {
