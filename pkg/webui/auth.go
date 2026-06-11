@@ -110,7 +110,7 @@ func (s *Server) hasValidSession(r *http.Request) bool {
 	}
 	if s.dbSessions != nil {
 		if dc, err := r.Cookie(deviceCookie); err == nil {
-			_, ok := s.dbSessions.renewFromDevice(r.Context(), dc.Value, clientIP(r, s.cfg.Server.TrustProxy))
+			_, ok := s.dbSessions.renewFromDevice(r.Context(), dc.Value, clientIP(r, s.cfg.Server.TrustProxy), r.Header.Get("User-Agent"), s.cfg.Server.DeviceBinding)
 			return ok
 		}
 	}
@@ -165,7 +165,7 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 
 		// Session missing or expired — try device token for auto-renewal.
 		if dc, err := r.Cookie(deviceCookie); err == nil {
-			if newDevToken, ok := s.dbSessions.renewFromDevice(r.Context(), dc.Value, clientIP(r, s.cfg.Server.TrustProxy)); ok {
+			if newDevToken, ok := s.dbSessions.renewFromDevice(r.Context(), dc.Value, clientIP(r, s.cfg.Server.TrustProxy), r.Header.Get("User-Agent"), s.cfg.Server.DeviceBinding); ok {
 				s.sm.Put(r.Context(), "authenticated", true)
 				if newDevToken != "" {
 					setDeviceCookie(w, newDevToken)

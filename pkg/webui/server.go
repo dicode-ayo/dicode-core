@@ -208,7 +208,7 @@ func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config
 	var store *scsStore
 	var as *authoringSessionStore
 	if database != nil {
-		dbs = newDBSessionStore(database)
+		dbs = newDBSessionStore(database, log)
 		aks = newAPIKeyStore(database)
 		ps = newPassphraseStore(database)
 		store = sm.Store.(*scsStore)

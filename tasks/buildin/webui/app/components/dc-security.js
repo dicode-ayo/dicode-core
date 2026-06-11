@@ -135,7 +135,11 @@ class DcSecurity extends LitElement {
                 <td style="font-size:0.8rem;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title=${d.label}>
                   ${d.label || '—'}
                 </td>
-                <td><code style="font-size:0.8rem">${d.ip || '—'}</code></td>
+                <td>
+                  <code style="font-size:0.8rem">${d.ip || '—'}</code>
+                  ${d.drift ? html`<span style="margin-left:0.4rem;font-size:0.7rem;color:var(--red);border:1px solid var(--red);border-radius:3px;padding:0 0.3rem"
+                    title=${`Device-binding drift: ${d.drift_reason}. The cookie was presented from a different IP subnet or browser family than it was issued for.`}>drift: ${d.drift_reason}</span>` : ''}
+                </td>
                 <td style="font-size:0.8rem">${this._fmtDate(d.last_seen)}</td>
                 <td style="font-size:0.8rem">${this._fmtDate(d.expires_at)}</td>
                 <td style="text-align:right">

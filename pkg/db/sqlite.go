@@ -126,6 +126,8 @@ func (s *SQLiteDB) migrate() error {
 			kind        TEXT NOT NULL CHECK(kind IN ('session','device')),
 			label       TEXT NOT NULL DEFAULT '',
 			ip          TEXT NOT NULL DEFAULT '',
+			ua_family   TEXT,
+			drift_reason TEXT NOT NULL DEFAULT '',
 			created_at  INTEGER NOT NULL,
 			last_seen   INTEGER NOT NULL,
 			expires_at  INTEGER NOT NULL
@@ -172,6 +174,19 @@ func (s *SQLiteDB) migrate() error {
 		if err := addColumnIfMissing(ctx, s.db, "runs", m.name, m.ddl); err != nil {
 			return fmt.Errorf("migrate runs.%s: %w", m.name, err)
 		}
+	}
+
+	// ua_family on trusted-device rows (#132). Nullable on purpose: rows issued
+	// before this migration have no recorded UA family and must not be treated
+	// as a mismatch — see renewFromDevice for the NULL-is-not-drift handling.
+	if err := addColumnIfMissing(ctx, s.db, "sessions", "ua_family", "TEXT"); err != nil {
+		return fmt.Errorf("migrate sessions.ua_family: %w", err)
+	}
+	// drift_reason records the last observed device-binding drift ("ip", "ua",
+	// "ip+ua") for warn mode so /security can surface it. Empty string means no
+	// drift seen on this row.
+	if err := addColumnIfMissing(ctx, s.db, "sessions", "drift_reason", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("migrate sessions.drift_reason: %w", err)
 	}
 
 	// scs_sessions — SQLite-backed store for alexedwards/scs/v2 session

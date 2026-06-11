@@ -241,6 +241,13 @@ type ServerConfig struct {
 	// (e.g. Raspberry Pi Zero) where the default ~300ms login is too slow.
 	// Values outside 4–14 are rejected by validate.
 	BcryptCost int `yaml:"bcrypt_cost,omitempty"`
+	// DeviceBinding controls how strictly a trusted-device cookie is bound to
+	// the IP subnet and User-Agent family it was issued for. One of:
+	//   "off"    — record IP/UA but never verify them (default, backward compatible)
+	//   "warn"   — allow renewal on drift, but flag it on /security
+	//   "strict" — reject renewal when the IP subnet or UA family drifts
+	// Empty resolves to "off" in applyDefaults; validate rejects other values.
+	DeviceBinding string `yaml:"device_binding,omitempty"`
 }
 
 // Load reads and parses the config file at path, then applies defaults.
@@ -388,6 +395,11 @@ func applyDefaults(cfg *Config, configDir string) {
 	if cfg.Server.BcryptCost == 0 {
 		cfg.Server.BcryptCost = 12
 	}
+	// Device binding defaults to off so existing deployments keep their
+	// current trusted-device behaviour until an operator opts in.
+	if cfg.Server.DeviceBinding == "" {
+		cfg.Server.DeviceBinding = "off"
+	}
 	// Default secret providers if none configured
 	if len(cfg.Secrets.Providers) == 0 {
 		cfg.Secrets.Providers = []SecretProviderConfig{
@@ -483,6 +495,11 @@ func (cfg *Config) validate() error {
 	// mid-attempt timeout) by setting 20 "to be safe".
 	if cfg.Server.BcryptCost != 0 && (cfg.Server.BcryptCost < 4 || cfg.Server.BcryptCost > 14) {
 		return fmt.Errorf("server.bcrypt_cost: must be between 4 and 14, got %d", cfg.Server.BcryptCost)
+	}
+	switch cfg.Server.DeviceBinding {
+	case "", "off", "warn", "strict":
+	default:
+		return fmt.Errorf("server.device_binding: must be one of off, warn, strict, got %q", cfg.Server.DeviceBinding)
 	}
 	if err := cfg.Defaults.OnFailureChain.ValidateAtDefaults(); err != nil {
 		return fmt.Errorf("defaults.on_failure_chain: %w", err)

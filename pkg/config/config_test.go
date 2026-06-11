@@ -217,6 +217,83 @@ spec:
 	}
 }
 
+// TestLoad_DeviceBindingDefault ensures server.device_binding defaults to "off"
+// when omitted, preserving the pre-#132 trusted-device behaviour.
+func TestLoad_DeviceBindingDefault(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "dicode.yaml")
+
+	content := `
+spec:
+  entries:
+    local:
+      ref:
+        path: ${CONFIGDIR}/tasks
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Server.DeviceBinding != "off" {
+		t.Errorf("DeviceBinding default = %q, want %q", cfg.Server.DeviceBinding, "off")
+	}
+}
+
+// TestLoad_DeviceBindingOverride checks that warn/strict survive the round-trip.
+func TestLoad_DeviceBindingOverride(t *testing.T) {
+	for _, mode := range []string{"warn", "strict", "off"} {
+		t.Run(mode, func(t *testing.T) {
+			dir := t.TempDir()
+			cfgPath := filepath.Join(dir, "dicode.yaml")
+			content := fmt.Sprintf(`
+server:
+  device_binding: %s
+spec:
+  entries:
+    local:
+      ref:
+        path: ${CONFIGDIR}/tasks
+`, mode)
+			if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := Load(cfgPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Server.DeviceBinding != mode {
+				t.Errorf("DeviceBinding = %q, want %q", cfg.Server.DeviceBinding, mode)
+			}
+		})
+	}
+}
+
+// TestLoad_DeviceBindingInvalid rejects unknown modes at Load() time.
+func TestLoad_DeviceBindingInvalid(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "dicode.yaml")
+	content := `
+server:
+  device_binding: paranoid
+spec:
+  entries:
+    local:
+      ref:
+        path: ${CONFIGDIR}/tasks
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(cfgPath); err == nil {
+		t.Fatal("expected error for invalid device_binding, got nil")
+	} else if !strings.Contains(err.Error(), "device_binding") {
+		t.Errorf("error = %v, want mention of device_binding", err)
+	}
+}
+
 // TestResolvedBrokerURL_Override exercises the explicit RelayConfig.BrokerURL
 // path: when set it wins over any derivation from ServerURL.
 func TestResolvedBrokerURL_Override(t *testing.T) {
