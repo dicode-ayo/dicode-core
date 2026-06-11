@@ -176,7 +176,7 @@ func (s *SQLiteDB) migrate() error {
 		}
 	}
 
-	// ua_family on trusted-device rows (#132). Nullable on purpose: rows issued
+	// ua_family on trusted-device rows. Nullable on purpose: rows issued
 	// before this migration have no recorded UA family and must not be treated
 	// as a mismatch — see renewFromDevice for the NULL-is-not-drift handling.
 	if err := addColumnIfMissing(ctx, s.db, "sessions", "ua_family", "TEXT"); err != nil {

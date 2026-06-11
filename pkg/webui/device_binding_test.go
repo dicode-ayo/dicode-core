@@ -71,7 +71,7 @@ func TestDeviceBinding_StrictCrossSubnetRejected(t *testing.T) {
 	if !driftReject {
 		t.Fatal("strict cross-subnet reject should set driftReject=true")
 	}
-	// H1: the offending row must be hard-revoked, not left replayable.
+	// The offending row must be hard-revoked, not left replayable.
 	devices, _ := store.listDevices(ctx)
 	if len(devices) != 0 {
 		t.Fatalf("strict drift must delete the device row, got %d rows", len(devices))
@@ -133,7 +133,7 @@ func TestDeviceBinding_WarnUAFamilyDriftFlagged(t *testing.T) {
 	}
 }
 
-// M3: warn-mode drift is sticky against the issue-time anchor. A renewal that is
+// Warn-mode drift is sticky against the issue-time anchor. A renewal that is
 // still off the issuing subnet keeps the flag; only a genuine return to the
 // issuing subnet clears it.
 func TestDeviceBinding_WarnDriftStickyUntilReturnToBaseline(t *testing.T) {
@@ -212,7 +212,7 @@ func TestDeviceBinding_StrictIPv6Subnet(t *testing.T) {
 	}
 }
 
-// H2: drive the IP through the real clientIP path. A bracketed IPv6 RemoteAddr
+// Drive the IP through the real clientIP path. A bracketed IPv6 RemoteAddr
 // (host:port form, "[2001:db8::1]:443") must be normalized to a bare address so
 // sameSubnet's /48 mask applies — otherwise IPv6 silently degrades to exact
 // string compare and RFC 4941 privacy-address clients re-login constantly.
@@ -240,7 +240,7 @@ func TestDeviceBinding_StrictIPv6ThroughClientIP(t *testing.T) {
 	}
 }
 
-// M1: an IPv4-mapped IPv6 address (::ffff:a.b.c.d) and the native IPv4 form of
+// An IPv4-mapped IPv6 address (::ffff:a.b.c.d) and the native IPv4 form of
 // the same /24 must compare equal, not be rejected as a family mismatch.
 func TestSameSubnet_IPv4MappedIPv6(t *testing.T) {
 	if !sameSubnet("::ffff:203.0.113.10", "203.0.113.99") {
@@ -248,6 +248,93 @@ func TestSameSubnet_IPv4MappedIPv6(t *testing.T) {
 	}
 	if sameSubnet("::ffff:203.0.113.10", "203.0.114.10") {
 		t.Error("IPv4-mapped IPv6 across /24 boundary should not match")
+	}
+}
+
+// Strict mode must fail closed when the row has a recorded IP but the incoming
+// IP normalizes to empty (e.g. a crafted X-Forwarded-For token that yields "").
+// An empty current IP is treated as drift, not "no IP signal", so it cannot
+// silently disable the subnet binding.
+func TestDeviceBinding_StrictEmptyCurrentIPRejected(t *testing.T) {
+	store, d := newTestStore(t)
+	ctx := context.Background()
+
+	raw := issueRow(t, d, "203.0.113.10", strptr(uaFamily(chromeMac)), fresh)
+	if _, ok, driftReject := store.renewFromDevice(ctx, raw, "", chromeMac, bindingStrict); ok || !driftReject {
+		t.Fatalf("strict mode must reject an empty current IP against a recorded IP, got ok=%v driftReject=%v", ok, driftReject)
+	}
+
+	// Warn mode must not flag an empty current IP (transient missing signal),
+	// and the renewal proceeds without setting a drift reason.
+	raw2 := issueRow(t, d, "203.0.113.10", strptr(uaFamily(chromeMac)), fresh)
+	if _, ok, _ := store.renewFromDevice(ctx, raw2, "", chromeMac, bindingWarn); !ok {
+		t.Fatal("warn mode rejected an empty-IP renewal; should allow")
+	}
+	devices, _ := store.listDevices(ctx)
+	for _, dv := range devices {
+		if dv.Drift {
+			t.Errorf("warn mode should not flag an empty current IP, got %+v", dv)
+		}
+	}
+}
+
+// Strict mode must fail closed when the row has a recorded ua_family but the
+// incoming request carries no User-Agent (curFam == ""). A row with NO recorded
+// family (legacy NULL) must still not drift on the UA axis.
+func TestDeviceBinding_StrictEmptyUAWithRecordedFamilyRejected(t *testing.T) {
+	store, d := newTestStore(t)
+	ctx := context.Background()
+
+	raw := issueRow(t, d, "203.0.113.10", strptr(uaFamily(chromeMac)), fresh)
+	if _, ok, driftReject := store.renewFromDevice(ctx, raw, "203.0.113.10", "", bindingStrict); ok || !driftReject {
+		t.Fatalf("strict mode must reject an empty UA against a recorded ua_family, got ok=%v driftReject=%v", ok, driftReject)
+	}
+
+	// Legacy NULL ua_family row: an empty UA is not drift even in strict mode.
+	rawLegacy := issueRow(t, d, "203.0.113.10", nil, fresh)
+	if _, ok, _ := store.renewFromDevice(ctx, rawLegacy, "203.0.113.10", "", bindingStrict); !ok {
+		t.Fatal("strict mode rejected an empty UA on a legacy NULL-ua_family row")
+	}
+}
+
+// Sticky warn-mode drift must survive a rotation: when the device row is old
+// enough to rotate (createdAgo >= deviceRotateAfter) and renews from a drifted
+// subnet under warn, the freshly INSERTed row keeps Drift=true with the baseline
+// IP pinned (not re-baselined to the drifted client).
+func TestDeviceBinding_WarnDriftStickyThroughRotation(t *testing.T) {
+	store, d := newTestStore(t)
+	ctx := context.Background()
+
+	// Old enough to trigger the rotate branch.
+	raw := issueRow(t, d, "203.0.113.10", strptr(uaFamily(chromeMac)), deviceRotateAfter+time.Hour)
+	newToken, ok, _ := store.renewFromDevice(ctx, raw, "198.51.100.10", chromeMac, bindingWarn)
+	if !ok {
+		t.Fatal("warn drift renewal through rotation rejected")
+	}
+	if newToken == "" {
+		t.Fatal("expected a rotated device token (old row should rotate)")
+	}
+
+	devices, _ := store.listDevices(ctx)
+	if len(devices) != 1 {
+		t.Fatalf("expected 1 device after rotation, got %d", len(devices))
+	}
+	if !devices[0].Drift || devices[0].DriftReason != "ip" {
+		t.Errorf("rotated row should keep ip drift flag, got %+v", devices[0])
+	}
+	// Baseline IP must stay pinned to the issuing /24, not the drifted client.
+	if !sameSubnet(devices[0].IP, "203.0.113.10") {
+		t.Errorf("rotated row baseline IP re-anchored to drifted client: %q", devices[0].IP)
+	}
+
+	// The rotated token still drifting from another off-baseline subnet stays
+	// flagged (the anchor did not move to 198.51.100.x).
+	if _, ok, _ := store.renewFromDevice(ctx, newToken, "198.51.100.20", chromeMac, bindingWarn); !ok {
+		t.Fatal("post-rotation warn renewal rejected")
+	}
+	devices, _ = store.listDevices(ctx)
+	if len(devices) != 1 || !devices[0].Drift {
+		t.Errorf("drift flag should stay set while still off the issuing subnet after rotation, got %+v", devices)
 	}
 }
 

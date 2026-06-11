@@ -293,7 +293,12 @@ func clientIP(r *http.Request, trustProxy bool) string {
 			if idx := strings.Index(fwd, ","); idx != -1 {
 				first = fwd[:idx]
 			}
-			return normalizeIP(strings.TrimSpace(first))
+			// A leftmost token that normalizes to "" (e.g. a client-supplied
+			// "[]") must not erase the client IP — fall back to RemoteAddr so
+			// callers (rate-limiter, device binding) always get a bound value.
+			if ip := normalizeIP(strings.TrimSpace(first)); ip != "" {
+				return ip
+			}
 		}
 	}
 	return normalizeIP(r.RemoteAddr)

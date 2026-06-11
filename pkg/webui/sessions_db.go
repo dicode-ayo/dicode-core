@@ -131,7 +131,7 @@ func (s *dbSessionStore) renewFromDevice(ctx context.Context, rawDeviceToken, ip
 			return nil
 		}
 
-		drift, reason := deviceDrift(storedIP, ip, storedFam, curFam)
+		drift, reason := deviceDrift(storedIP, ip, storedFam, curFam, mode == bindingStrict)
 		if drift && mode == bindingStrict {
 			// Hard-revoke: a strict-mode drift means the cookie is presenting
 			// from an unexpected subnet/UA, so delete the row in this same
@@ -227,9 +227,29 @@ func (s *dbSessionStore) renewFromDevice(ctx context.Context, rawDeviceToken, ip
 // from what was recorded for a device token. A stored UA family of NULL (legacy
 // rows) is not a mismatch. The reason string ("ip", "ua", "ip+ua", or "") is
 // suitable for surfacing on /security.
-func deviceDrift(storedIP, curIP string, storedFam *string, curFam string) (bool, string) {
+//
+// strict makes the binding fail closed when the device had a recorded signal but
+// the request carries none: an empty curIP against a recorded storedIP, or an
+// empty curFam against a recorded storedFam, both count as drift. This blocks a
+// crafted request that strips the IP/UA signal (e.g. an X-Forwarded-For token
+// that normalizes to "" or a missing User-Agent header) from silently disabling
+// a binding axis. In warn/off the empty-signal case is not flagged so a transient
+// missing signal does not raise a benign warning. Legacy rows with no recorded
+// ua_family (storedFam == nil) never drift on the UA axis regardless of mode.
+func deviceDrift(storedIP, curIP string, storedFam *string, curFam string, strict bool) (bool, string) {
 	ipDrift := storedIP != "" && curIP != "" && !sameSubnet(storedIP, curIP)
 	uaDrift := storedFam != nil && *storedFam != "" && curFam != "" && *storedFam != curFam
+	if strict {
+		// Fail closed: a recorded signal with no incoming counterpart is drift,
+		// not "no signal". curFam is only enforced when the row has a recorded
+		// family, so legacy NULL rows still do not drift here.
+		if storedIP != "" && curIP == "" {
+			ipDrift = true
+		}
+		if storedFam != nil && *storedFam != "" && curFam == "" {
+			uaDrift = true
+		}
+	}
 
 	switch {
 	case ipDrift && uaDrift:
