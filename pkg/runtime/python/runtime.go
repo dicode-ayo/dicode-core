@@ -75,6 +75,10 @@ type Runtime struct {
 	// the env resolver can spawn provider tasks for from: task:<id>
 	// entries. Nil disables provider lookups; legacy paths still work.
 	providerRunner envresolve.ProviderRunner
+	// sharedResolver is the daemon-scoped env resolver whose TTL cache
+	// survives across task launches (issue #242). When non-nil, the executor
+	// uses it instead of constructing a fresh instance per Execute.
+	sharedResolver *envresolve.Resolver
 	// replayer, sourceMgr, repoResolver are wired after buildRuntimes returns
 	// (same late-wiring pattern as inputStore). Executors read these fields
 	// from parent at IPC server creation time.
@@ -122,6 +126,13 @@ func (rt *Runtime) SetSecretOutputChannel(ch chan map[string]string) {
 // daemon startup. Nil disables provider task: lookups.
 func (rt *Runtime) SetProviderRunner(p envresolve.ProviderRunner) {
 	rt.providerRunner = p
+}
+
+// SetEnvResolver wires the daemon-scoped env resolver whose TTL cache
+// survives across task launches (issue #242). When set, the executor
+// uses it instead of constructing a fresh instance per Execute.
+func (rt *Runtime) SetEnvResolver(r *envresolve.Resolver) {
+	rt.sharedResolver = r
 }
 
 // New creates a Python Runtime manager.
@@ -202,6 +213,17 @@ type executor struct {
 	providerRunner envresolve.ProviderRunner
 }
 
+// envresolver returns the env resolver to use for an Execute call. When a
+// daemon-scoped shared resolver is wired (issue #242), it is returned so
+// the TTL cache survives across launches. Otherwise a fresh instance is
+// constructed (legacy / test path).
+func (e *executor) envresolver() *envresolve.Resolver {
+	if e.parent != nil && e.parent.sharedResolver != nil {
+		return e.parent.sharedResolver
+	}
+	return envresolve.New(e.reg, e.secrets, e.providerRunner)
+}
+
 // Execute implements runtime.Executor.
 func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime.RunOptions) (*pkgruntime.RunResult, error) {
 	runID := opts.RunID
@@ -219,7 +241,7 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 	if opts.PreResolvedEnv != nil {
 		resolvedRes = opts.PreResolvedEnv
 	} else {
-		resolvedRes, err = envresolve.New(e.reg, e.secrets, e.providerRunner).Resolve(ctx, spec)
+		resolvedRes, err = e.envresolver().Resolve(ctx, spec)
 		if err != nil {
 			result.Error = err
 			return result, nil

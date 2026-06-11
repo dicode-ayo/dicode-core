@@ -52,8 +52,8 @@ type Resolver struct {
 	Now func() time.Time
 }
 
-// New constructs a Resolver. Each runtime constructs its own Resolver;
-// the cache lives inside the Resolver instance.
+// New constructs a Resolver. The daemon constructs a single shared instance
+// whose cache survives across task launches (issue #242).
 func New(reg Registry, sc secrets.Chain, runner ProviderRunner) *Resolver {
 	return &Resolver{
 		Runner:   runner,
@@ -162,6 +162,9 @@ func (r *Resolver) resolveProvider(
 		}
 	}
 
+	// Hash error → empty string → cache always misses (content-hash
+	// mismatch path in cache.get). Safe but wasteful; the empty hash
+	// is defence-in-depth against stale data from a corrupted task dir.
 	providerHash, _ := contentHashOf(spec)
 	now := r.Now()
 
