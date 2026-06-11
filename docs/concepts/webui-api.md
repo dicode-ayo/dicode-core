@@ -217,6 +217,71 @@ Response (streaming JSON lines):
 { "type": "result", "files": { "task.yaml": "...", "task.js": "...", "task.test.js": "..." } }
 ```
 
+### AI authoring
+
+Session-based AI authoring endpoints for creating and editing tasks via an interactive workflow.
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `POST` | `/api/task/create` | Scaffold a new task with boilerplate |
+| `POST` | `/api/task/edit` | Create or resume an AI authoring session |
+| `POST` | `/api/task/save` | Apply authored changes |
+| `POST` | `/api/task/cancel` | Discard an authoring session |
+
+**POST `/api/task/create`**:
+
+```json
+{ "name": "my-task", "source": "default" }
+```
+
+Response: `201`
+
+```json
+{ "task_id": "my-task", "source": "default", "files": ["task.yaml", "task.ts"] }
+```
+
+**POST `/api/task/edit`** — create a new session or resume an existing one:
+
+```json
+{ "task_id": "my-task", "prompt": "Add a cron trigger that runs every hour" }
+```
+
+Or resume:
+
+```json
+{ "session_id": "sess_abc123", "prompt": "Also add a slack notification" }
+```
+
+Response: `202`
+
+```json
+{ "session_id": "sess_abc123", "sandbox_path": "/tmp/dicode-edit-abc", "source": "default", "source_kind": "local" }
+```
+
+**POST `/api/task/save`**:
+
+```json
+{ "session_id": "sess_abc123" }
+```
+
+Response:
+
+```json
+{ "applied": true, "pr_url": "https://github.com/org/repo/pull/42" }
+```
+
+**POST `/api/task/cancel`**:
+
+```json
+{ "session_id": "sess_abc123" }
+```
+
+Response:
+
+```json
+{ "cancelled": true }
+```
+
 ### MCP
 
 | Path | Description |

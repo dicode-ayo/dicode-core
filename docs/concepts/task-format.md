@@ -92,6 +92,7 @@ permissions:
 | `params[].description` | string | | Human-readable description |
 | `params[].default` | string | | Default value (all params are strings) |
 | `tags` | list of strings | | Tags for filtering (future: source selectors) |
+| `mcp_exposed` | bool | | When `false` (default), the task is hidden from MCP `tools/list` and `tools/call`. Set to `true` to expose the task to MCP clients. |
 | `run_result` | object | | Per-task return-value persistence config — see [Suppressing return-value persistence](#suppressing-return-value-persistence) |
 | `run_result.enabled` | bool | | When `false`, the JSON return value is not written to `runs.return_value`; in-memory delivery (`dicode.run_task`, chain `input.output`) is unaffected. Default `true`. |
 
@@ -328,7 +329,7 @@ stages:
 | `kind` | string | ✅ | Must be `PipelineTask` |
 | `name` | string | ✅ | Human-readable pipeline name |
 | `description` | string | | One-line (or multi-line) description |
-| `subtype` | string | ✅ | Must be `sequential` in v1. Any other value (e.g. `parallel`) is rejected at load — parallel pipelines are a planned follow-up. |
+| `subtype` | string | ✅ | `sequential` (stages run in declaration order) or `parallel` (stages with no `depends_on` run concurrently; stages with `depends_on: [stage-id]` wait for all listed dependencies). Error semantics for parallel: fail-fast (first failure cancels in-flight siblings). |
 | `trigger` | object | | How the **pipeline** is fired. At most one trigger type. Omit for a pipeline that's only fired programmatically (e.g. via `dicode.run_task`). |
 | `trigger.manual` | bool | | Manual-only fire (API / UI) |
 | `trigger.cron` | string | | Standard 5-field cron expression |
@@ -337,7 +338,9 @@ stages:
 | `trigger.auth` | bool | | Require a valid dicode session for the webhook (same semantics as `kind: Task`) |
 | `trigger.chain` | object | | Chain trigger — fire the pipeline when an upstream task/pipeline completes (see [chain](#chain-params-and-per-edge-overrides)) |
 | `stages` | list | ✅ | Ordered list of stages; at least one required |
+| `stages[].id` | string | | Stage identifier, used as a `depends_on` target in `subtype: parallel` pipelines |
 | `stages[].task` | string | ✅ | Task ID of an existing `kind: Task` to run as this stage |
+| `stages[].depends_on` | []string | | List of stage IDs this stage depends on. Only valid for `subtype: parallel`. All dependencies must complete before this stage runs. |
 | `stages[].overrides` | object | | Per-stage patch applied to the stage task's spec at dispatch time (see [stage overrides](#stage-overrides)) |
 | `timeout` | duration | | Overall pipeline timeout (e.g. `5m`). Cancels the in-flight stage and fails the pipeline if exceeded. |
 

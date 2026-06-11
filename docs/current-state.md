@@ -107,7 +107,7 @@ WebSocket relay client and self-hosting server for receiving webhooks behind NAT
 
 - `db.go` — `DB` interface, `Scanner`, `Config`, `Open()` dispatcher
 - `sqlite.go` — WAL mode, full schema migration, Tx with rollback
-- **New tables**: `sessions` (browser sessions + trusted device tokens), `api_keys` (MCP/programmatic keys, hashed)
+- **New tables**: `sessions` (device tokens + scs session data), `api_keys` (MCP/programmatic keys, hashed)
 
 ### `pkg/registry/` ✅
 
@@ -162,7 +162,8 @@ WebSocket relay client and self-hosting server for receiving webhooks behind NAT
   - `New()` now accepts `db.DB` parameter for persistent session and key storage
   - Router restructured: always-public paths (login, static assets, webhooks) separated from the auth-gated group
 - **`auth.go`** — `requireAuth` middleware (session cookie check → device token renewal → 401/redirect), `corsMiddleware` (explicit allowlist, Vary header; origins validated with `url.Parse()` at startup — malformed entries skipped), `securityHeaders` (X-Content-Type-Options, X-Frame-Options, Referrer-Policy, Permissions-Policy, **Content-Security-Policy**), `clientIP(r, trustProxy bool)` — XFF only trusted when `server.trust_proxy: true`
-- **`sessions_db.go`** — SQLite-backed `dbSessionStore`: `issueDeviceToken`, `renewFromDevice` (wrapped in `db.Tx()`; implements atomic device token rotation after 24h — deletes old row, inserts new, returns new raw token to caller), `listDevices`, `revokeDevice`, `revokeAllDevices`. Device tokens: 30-day expiry, stored as SHA-256 hash, cookie is HttpOnly + SameSite=Strict. HTTP handlers: `apiAuthRefresh`, `apiListDevices`, `apiRevokeDevice`, `apiLogout`, `apiLogoutAll`.
+- **`scsstore.go`** — SQLite-backed session store adapter for `alexedwards/scs/v2`. Short-lived sessions (8h) are managed by scs with automatic expiry and cleanup. Replaces the former in-memory `sessionStore`.
+- **`sessions_db.go`** — SQLite-backed `dbSessionStore` for long-lived device tokens: `issueDeviceToken`, `renewFromDevice` (wrapped in `db.Tx()`; implements atomic device token rotation after 24h — deletes old row, inserts new, returns new raw token to caller), `listDevices`, `revokeDevice`, `revokeAllDevices`. Device tokens: 30-day expiry, stored as SHA-256 hash, cookie is HttpOnly + SameSite=Strict. HTTP handlers: `apiAuthRefresh`, `apiListDevices`, `apiRevokeDevice`, `apiLogout`, `apiLogoutAll`.
 - **`apikeys.go`** — `apiKeyStore`: `generate` (returns raw `dck_`-prefixed key once; prefix truncation bounds-checked), `validate` (hash-compare + `last_used` update), `list`, `revoke`. `requireAPIKey` middleware for MCP. HTTP handlers: `apiListAPIKeys`, `apiCreateAPIKey`, `apiRevokeAPIKey`.
 - `apiSecretsUnlock` extended: accepts `trust: true` → issues device cookie alongside session cookie
 - REST API endpoints including `POST /api/runs/{runID}/kill`, file editor, trigger editor, AI stream
