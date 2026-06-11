@@ -137,6 +137,43 @@ func TestDeleteTaskFromSource_Local_RefusesEscape(t *testing.T) {
 	}
 }
 
+// A task dir that is a symlink pointing outside the source root must be refused:
+// the lexical path sits under root, but os.RemoveAll would follow the link out.
+func TestDeleteTaskFromSource_Local_RefusesSymlinkEscape(t *testing.T) {
+	if _, err := os.Lstat("/"); err != nil {
+		t.Skip("filesystem unavailable")
+	}
+	dir := t.TempDir()
+	outside := t.TempDir()
+	victim := filepath.Join(outside, "victim")
+	if err := os.MkdirAll(victim, 0o755); err != nil {
+		t.Fatalf("mkdir victim: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(victim, "keep.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	// A symlink inside the source root pointing at the outside victim dir.
+	link := filepath.Join(dir, "evil")
+	if err := os.Symlink(victim, link); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+
+	cfg := &config.Config{}
+	cfg.Spec.Entries = map[string]*taskset.Entry{
+		"tasks": {Ref: &taskset.Ref{Path: filepath.Join(dir, "taskset.yaml")}},
+	}
+	m := NewSourceManager(cfg, nil, dir, zap.NewNop())
+	m.Register("tasks", newStubTasksetSource(t, "tasks", dir))
+
+	spec := &task.Spec{ID: "tasks/evil", TaskDir: link}
+	if _, err := m.DeleteTaskFromSource(context.Background(), "tasks/evil", "tasks", spec); err == nil {
+		t.Fatal("expected refusal when TaskDir is a symlink escaping the source root")
+	}
+	if _, statErr := os.Stat(filepath.Join(victim, "keep.txt")); statErr != nil {
+		t.Fatalf("symlink target must NOT have been removed: %v", statErr)
+	}
+}
+
 // gitFixtureRemote builds a bare git remote seeded with the given files on
 // `branch` and returns a file:// URL usable as a taskset git ref. Mirrors the
 // taskset package's own fixture helper.

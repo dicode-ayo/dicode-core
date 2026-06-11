@@ -3,6 +3,7 @@ package ipc
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/dicode/dicode/pkg/db"
@@ -36,6 +37,8 @@ type fakeDeleter struct {
 	deleteErr     error
 	deleteCalled  bool
 	deletedTaskID string
+
+	devModeDisabled bool
 }
 
 func (f *fakeDeleter) ResolveTaskSource(taskID, sourceOverride string) (string, bool, error) {
@@ -56,6 +59,11 @@ func (f *fakeDeleter) DeleteTaskFromSource(_ context.Context, taskID, _ string, 
 		return TaskDeleteOutcome{}, f.deleteErr
 	}
 	return f.outcome, nil
+}
+
+func (f *fakeDeleter) DisableSourceDevMode(_ context.Context, _ string) error {
+	f.devModeDisabled = true
+	return nil
 }
 
 func newDeleteTestServer(t *testing.T, reg *registry.Registry, eng EngineRunner, del TaskDeleter) *ControlServer {
@@ -140,6 +148,34 @@ func TestTaskDelete_Preview_SurfacesChainedReferences(t *testing.T) {
 	}
 }
 
+// A pipeline whose stage references the deleted task must surface as a dangling
+// referrer alongside chain/on_failure referrers.
+func TestTaskDelete_Preview_SurfacesPipelineStageReference(t *testing.T) {
+	reg := newTestRegistry(t)
+	target := &task.Spec{ID: "tasks/source-task", Name: "source"}
+	if err := reg.Register(target); err != nil {
+		t.Fatalf("register target: %v", err)
+	}
+	pipe := &task.PipelineTask{
+		ID:     "tasks/pipe",
+		Kind:   task.KindPipelineTask,
+		Stages: []task.Stage{{Task: "tasks/other"}, {Task: "tasks/source-task"}},
+	}
+	if err := reg.Register(pipe); err != nil {
+		t.Fatalf("register pipeline: %v", err)
+	}
+	del := &fakeDeleter{resolveName: "tasks"}
+	cs := newDeleteTestServer(t, reg, &recordingEngine{}, del)
+
+	res, err := cs.handleTaskDelete(context.Background(), Request{TaskID: "tasks/source-task", Force: false})
+	if err != nil {
+		t.Fatalf("preview: %v", err)
+	}
+	if len(res.Refs) != 1 || res.Refs[0] != "tasks/pipe" {
+		t.Fatalf("Refs = %v, want [tasks/pipe]", res.Refs)
+	}
+}
+
 func TestTaskDelete_Local_DeletesAndReturns(t *testing.T) {
 	reg := newTestRegistry(t)
 	if err := reg.Register(&task.Spec{ID: "tasks/local-task", Name: "local", TaskDir: "/tmp/x"}); err != nil {
@@ -182,7 +218,12 @@ func TestTaskDelete_Git_FiresGitPRTask(t *testing.T) {
 	}
 	eng := &recordingEngine{}
 	eng.runID = "pr-run-1"
-	eng.result = RunResult{RunID: "pr-run-1", Status: "success", ReturnValue: "https://example/pr/1"}
+	// git-pr returns an object; WaitRun unmarshals it to map[string]any. The URL
+	// must be read from the "url" key, not the map's %v stringification.
+	eng.result = RunResult{RunID: "pr-run-1", Status: "success", ReturnValue: map[string]any{
+		"ok":  true,
+		"url": "https://example/pr/1",
+	}}
 	cs := newDeleteTestServer(t, reg, eng, del)
 
 	res, err := cs.handleTaskDelete(context.Background(), Request{TaskID: "tasks/git-task", Force: true})
@@ -199,10 +240,66 @@ func TestTaskDelete_Git_FiresGitPRTask(t *testing.T) {
 		t.Fatalf("clone_path param = %q", eng.firedParams["clone_path"])
 	}
 	if res.PRValue != "https://example/pr/1" {
-		t.Fatalf("PRValue = %q, want the PR url", res.PRValue)
+		t.Fatalf("PRValue = %q, want the PR url parsed from the map", res.PRValue)
 	}
 	if res.PRRunID != "pr-run-1" {
 		t.Fatalf("PRRunID = %q", res.PRRunID)
+	}
+	if !del.devModeDisabled {
+		t.Fatal("dev-mode must be disabled after a successful git delete")
+	}
+}
+
+// A git-pr {ok:false} return means `gh` failed even though the run Status is
+// "success"; the delete must FAIL and surface the error, not print a map.
+func TestTaskDelete_Git_GitPRNotOK_Fails(t *testing.T) {
+	reg := newTestRegistry(t)
+	if err := reg.Register(&task.Spec{ID: "tasks/git-task", Name: "git", TaskDir: "/tmp/x"}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	del := &fakeDeleter{
+		resolveName: "tasks",
+		isGit:       true,
+		outcome:     TaskDeleteOutcome{Source: "tasks", Mode: "git", Branch: "delete/tasks/git-task", Base: "main"},
+	}
+	eng := &recordingEngine{}
+	eng.runID = "pr-run-3"
+	eng.result = RunResult{RunID: "pr-run-3", Status: "success", ReturnValue: map[string]any{
+		"ok":    false,
+		"error": "gh: not authenticated",
+	}}
+	cs := newDeleteTestServer(t, reg, eng, del)
+
+	_, err := cs.handleTaskDelete(context.Background(), Request{TaskID: "tasks/git-task", Force: true})
+	if err == nil {
+		t.Fatal("expected error when git-pr returns ok:false")
+	}
+	if !strings.Contains(err.Error(), "gh: not authenticated") {
+		t.Fatalf("error must surface the git-pr error field, got: %v", err)
+	}
+	if !del.devModeDisabled {
+		t.Fatal("dev-mode must be disabled even when git-pr fails")
+	}
+}
+
+func TestPRURLFromReturn(t *testing.T) {
+	if got, err := prURLFromReturn(map[string]any{"ok": true, "url": "u"}); err != nil || got != "u" {
+		t.Fatalf("ok+url: got (%q, %v)", got, err)
+	}
+	if _, err := prURLFromReturn(map[string]any{"ok": true}); err == nil {
+		t.Fatal("ok without url must error")
+	}
+	if _, err := prURLFromReturn(map[string]any{"ok": false, "error": "boom"}); err == nil {
+		t.Fatal("ok:false must error")
+	}
+	if _, err := prURLFromReturn(map[string]any{"url": "u"}); err == nil {
+		t.Fatal("missing ok must error")
+	}
+	if got, err := prURLFromReturn("u"); err != nil || got != "u" {
+		t.Fatalf("bare string: got (%q, %v)", got, err)
+	}
+	if _, err := prURLFromReturn(42); err == nil {
+		t.Fatal("unexpected shape must error")
 	}
 }
 
@@ -224,6 +321,9 @@ func TestTaskDelete_Git_PRTaskFailure_IsReported(t *testing.T) {
 	_, err := cs.handleTaskDelete(context.Background(), Request{TaskID: "tasks/git-task", Force: true})
 	if err == nil {
 		t.Fatal("expected error when the PR task fails")
+	}
+	if !del.devModeDisabled {
+		t.Fatal("dev-mode must be disabled even when the PR task fails")
 	}
 }
 

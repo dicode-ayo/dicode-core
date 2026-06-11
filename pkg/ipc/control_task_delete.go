@@ -39,11 +39,18 @@ type TaskDeleter interface {
 	ResolveTaskSource(taskID, sourceOverride string) (name string, isGit bool, err error)
 
 	// DeleteTaskFromSource performs the removal. For a local source it removes
-	// the task directory in place. For a git source it clones the repo, removes
-	// the task directory, commits, and pushes to delete/<sanitized-task-id>;
-	// the returned outcome carries the branch + clone path so the caller can
-	// open a PR. spec.TaskDir locates the task on disk.
+	// the task directory in place. For a git source it clones the repo (leaving
+	// the source in clone-mode so the PR task can run in the clone), removes the
+	// task directory, commits, and pushes to delete/<sanitized-task-id>; the
+	// returned outcome carries the branch + clone path so the caller can open a
+	// PR. spec.TaskDir locates the task on disk. The caller MUST call
+	// DisableSourceDevMode once the PR step finishes.
 	DeleteTaskFromSource(ctx context.Context, taskID, sourceName string, spec *task.Spec) (TaskDeleteOutcome, error)
+
+	// DisableSourceDevMode reverts a git source out of the clone-mode that
+	// DeleteTaskFromSource leaves it in. It removes the local clone but not the
+	// pushed remote branch. Idempotent for sources not in clone-mode.
+	DisableSourceDevMode(ctx context.Context, sourceName string) error
 }
 
 // SetTaskDeleter wires the task-deletion backend for cli.task.delete dispatch.
@@ -123,10 +130,15 @@ func (cs *ControlServer) handleTaskDelete(ctx context.Context, req Request) (Tas
 		return res, nil
 	}
 
-	// Git source: open the PR via the same buildin task the authoring save
-	// flow uses. A push without a PR would still be picked up by the
-	// reconciler, but the operator needs the PR to actually merge the
-	// removal — so a PR-task failure fails the whole delete.
+	// The git path left the source in clone-mode so buildin/git-pr can run `gh`
+	// inside the clone. Revert it once the PR step finishes — on every exit. The
+	// disable removes the local clone but not the pushed remote branch, which the
+	// PR depends on.
+	defer func() { _ = cs.taskDeleter.DisableSourceDevMode(ctx, sourceName) }()
+
+	// Open the PR via the same buildin task the authoring save flow uses. The
+	// operator needs the PR to merge the removal, so a PR-task failure fails the
+	// whole delete.
 	prParams := map[string]string{
 		"source_id":  sourceName,
 		"branch":     outcome.Branch,
@@ -147,41 +159,85 @@ func (cs *ControlServer) handleTaskDelete(ctx context.Context, req Request) (Tas
 	if runRes.Status != "success" {
 		return res, fmt.Errorf("delete pushed to branch %q but the PR task finished %s (run %s)", outcome.Branch, runRes.Status, runID)
 	}
-	res.PRValue = prReturnString(runRes.ReturnValue)
+	url, err := prURLFromReturn(runRes.ReturnValue)
+	if err != nil {
+		return res, fmt.Errorf("delete pushed to branch %q but the PR was not opened: %w", outcome.Branch, err)
+	}
+	res.PRValue = url
 	return res, nil
 }
 
-// chainReferrers returns the ids of registered tasks that reference target via
-// a chain trigger (trigger.chain.from) or an on_failure_chain (on_failure_chain.task).
-// The result is sorted and excludes target itself.
+// chainReferrers returns the ids of registered tasks/pipelines that reference
+// target via a chain trigger (trigger.chain.from), an on_failure_chain
+// (on_failure_chain.task), or a pipeline stage (stages[].task). The result is
+// sorted, de-duplicated, and excludes target itself.
 func (cs *ControlServer) chainReferrers(target string) []string {
-	var refs []string
+	seen := map[string]struct{}{}
+	add := func(id string) {
+		if id != target {
+			seen[id] = struct{}{}
+		}
+	}
 	for _, s := range cs.reg.All() {
 		if s.ID == target {
 			continue
 		}
 		if s.Trigger.Chain != nil && s.Trigger.Chain.From == target {
-			refs = append(refs, s.ID)
-			continue
+			add(s.ID)
 		}
 		if s.OnFailureChain != nil && s.OnFailureChain.Task == target {
-			refs = append(refs, s.ID)
+			add(s.ID)
 		}
+	}
+	for _, k := range cs.reg.AllKinded() {
+		p, ok := k.(*task.PipelineTask)
+		if !ok || p.ID == target {
+			continue
+		}
+		if p.Trigger.Chain != nil && p.Trigger.Chain.From == target {
+			add(p.ID)
+		}
+		for _, st := range p.Stages {
+			if st.Task == target {
+				add(p.ID)
+				break
+			}
+		}
+	}
+	refs := make([]string, 0, len(seen))
+	for id := range seen {
+		refs = append(refs, id)
 	}
 	sort.Strings(refs)
 	return refs
 }
 
-// prReturnString renders the buildin/git-pr task's return value as a string —
-// the PR URL when the task returns one. A bare string passes through; other
-// shapes are stringified so the operator still sees something useful.
-func prReturnString(v any) string {
+// prURLFromReturn extracts the PR URL from the buildin/git-pr task's return
+// value. git-pr returns {ok, url?, error?}, which WaitRun unmarshals to
+// map[string]any. A non-true ok (or empty url) is an error — surfacing the
+// task's "error" field — so a failed `gh` can never masquerade as a PR URL.
+// A bare string is accepted as the URL for forward-compatibility; any other
+// shape is rejected rather than stringified.
+func prURLFromReturn(v any) (string, error) {
 	switch t := v.(type) {
-	case nil:
-		return ""
 	case string:
-		return t
+		if t == "" {
+			return "", fmt.Errorf("git-pr returned an empty result")
+		}
+		return t, nil
+	case map[string]any:
+		if ok, _ := t["ok"].(bool); !ok {
+			if msg, _ := t["error"].(string); msg != "" {
+				return "", fmt.Errorf("git-pr failed: %s", msg)
+			}
+			return "", fmt.Errorf("git-pr did not report success")
+		}
+		url, _ := t["url"].(string)
+		if url == "" {
+			return "", fmt.Errorf("git-pr reported success but returned no PR url")
+		}
+		return url, nil
 	default:
-		return fmt.Sprintf("%v", t)
+		return "", fmt.Errorf("git-pr returned an unexpected result shape %T", v)
 	}
 }
