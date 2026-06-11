@@ -470,7 +470,7 @@ func TestAuth_DeviceToken_Rotation(t *testing.T) {
 	}
 	defer d.Close()
 
-	store := newDBSessionStore(d)
+	store := newDBSessionStore(d, nil)
 	ctx := t.Context()
 
 	// Issue a device token with a created_at far enough in the past to trigger rotation.
@@ -489,7 +489,7 @@ func TestAuth_DeviceToken_Rotation(t *testing.T) {
 		t.Fatalf("insert: %v", err)
 	}
 
-	newDevToken, ok := store.renewFromDevice(ctx, raw, "127.0.0.1")
+	newDevToken, ok, _ := store.renewFromDevice(ctx, raw, "127.0.0.1", "", "off")
 	if !ok {
 		t.Fatal("renewFromDevice returned not-ok for valid token")
 	}
@@ -501,13 +501,13 @@ func TestAuth_DeviceToken_Rotation(t *testing.T) {
 	}
 
 	// Old token must now be rejected.
-	_, ok2 := store.renewFromDevice(ctx, raw, "127.0.0.1")
+	_, ok2, _ := store.renewFromDevice(ctx, raw, "127.0.0.1", "", "off")
 	if ok2 {
 		t.Error("old device token should be rejected after rotation")
 	}
 
 	// New token must be accepted.
-	_, ok3 := store.renewFromDevice(ctx, newDevToken, "127.0.0.1")
+	_, ok3, _ := store.renewFromDevice(ctx, newDevToken, "127.0.0.1", "", "off")
 	if !ok3 {
 		t.Error("new rotated device token should be accepted")
 	}
