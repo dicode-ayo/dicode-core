@@ -162,6 +162,9 @@ func (r *Resolver) resolveProvider(
 		}
 	}
 
+	// Hash error → empty string → cache always misses (content-hash
+	// mismatch path in cache.get). Safe but wasteful; the empty hash
+	// is defence-in-depth against stale data from a corrupted task dir.
 	providerHash, _ := contentHashOf(spec)
 	now := r.Now()
 
