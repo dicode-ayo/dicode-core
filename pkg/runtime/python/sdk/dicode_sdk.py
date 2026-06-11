@@ -353,11 +353,15 @@ class _Secrets:
 
     def has(self, key):
         """Return True if key exists in the secrets store."""
-        return _call({"method": "dicode.secrets.has", "key": key})
+        if not isinstance(key, str) or not key:
+            raise TypeError("secrets.has: key must be a non-empty string")
+        return bool(_call({"method": "dicode.secrets.has", "key": key}))
 
     async def has_async(self, key):
         """Async variant of has."""
-        return await _call_async({"method": "dicode.secrets.has", "key": key})
+        if not isinstance(key, str) or not key:
+            raise TypeError("secrets.has: key must be a non-empty string")
+        return bool(await _call_async({"method": "dicode.secrets.has", "key": key}))
 
 
 class _Git:
