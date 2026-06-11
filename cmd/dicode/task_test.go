@@ -1,0 +1,373 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/dicode/dicode/pkg/ipc"
+	"go.uber.org/zap"
+)
+
+// fakeAuthoring is an in-process ipc.AuthoringService used to drive the CLI
+// verbs end-to-end over a real control socket, so the tests exercise the full
+// flag-parse → IPC → handler → stdout/stderr-split chain.
+type fakeAuthoring struct {
+	create    ipc.AuthoringCreateResult
+	createErr error
+	edit      ipc.AuthoringEditResult
+	editErr   error
+	saveErr   error
+	cancelErr error
+}
+
+func (f *fakeAuthoring) CreateTask(_ context.Context, name, source string) (ipc.AuthoringCreateResult, error) {
+	if f.createErr != nil {
+		return ipc.AuthoringCreateResult{}, f.createErr
+	}
+	res := f.create
+	if res.TaskID == "" {
+		res.TaskID = source + "/" + name
+	}
+	return res, nil
+}
+
+func (f *fakeAuthoring) EditTask(_ context.Context, sessionID, taskID string) (ipc.AuthoringEditResult, error) {
+	if f.editErr != nil {
+		return ipc.AuthoringEditResult{}, f.editErr
+	}
+	return f.edit, nil
+}
+
+func (f *fakeAuthoring) SaveTask(_ context.Context, sessionID string) error   { return f.saveErr }
+func (f *fakeAuthoring) CancelTask(_ context.Context, sessionID string) error { return f.cancelErr }
+func (f *fakeAuthoring) WebUIBaseURL() string                                 { return "http://localhost:8080" }
+
+// dialTestClient boots a ControlServer wired to auth and returns a connected
+// ControlClient plus a cleanup func.
+func dialTestClient(t *testing.T, auth ipc.AuthoringService) (*ipc.ControlClient, func()) {
+	t.Helper()
+	dir := t.TempDir()
+	socketPath := filepath.Join(dir, "ctrl.sock")
+	tokenPath := filepath.Join(dir, "ctrl.token")
+
+	cs, err := ipc.NewControlServer(socketPath, tokenPath, nil, &noopEngine{}, nil, ipc.MetricsProvider{}, "test", zap.NewNop(), nil, "")
+	if err != nil {
+		t.Fatalf("NewControlServer: %v", err)
+	}
+	cs.SetAuthoringService(auth)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { _ = cs.Start(ctx) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(socketPath); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatal("control socket never appeared")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	c, err := ipc.Dial(socketPath, tokenPath)
+	if err != nil {
+		cancel()
+		t.Fatalf("dial: %v", err)
+	}
+	return c, func() { c.Close(); cancel() }
+}
+
+// noopEngine satisfies ipc.EngineRunner for tests that don't fire tasks.
+type noopEngine struct{}
+
+func (noopEngine) FireManual(context.Context, string, map[string]string) (string, error) {
+	return "", nil
+}
+func (noopEngine) FireFromTask(context.Context, string, string, map[string]string) (string, error) {
+	return "", nil
+}
+func (noopEngine) WaitRun(context.Context, string) (ipc.RunResult, error) {
+	return ipc.RunResult{}, nil
+}
+func (noopEngine) ActiveRunCount() int     { return 0 }
+func (noopEngine) ActiveTaskSlots() int    { return 0 }
+func (noopEngine) MaxConcurrentTasks() int { return 0 }
+func (noopEngine) WaitingTasks() int       { return 0 }
+
+// captureOutput redirects os.Stdout and os.Stderr around fn and returns what
+// each captured. The CLI verbs write directly to the process streams, so this
+// is how the stdout/stderr split is asserted.
+func captureOutput(t *testing.T, fn func() error) (stdout, stderr string, err error) {
+	t.Helper()
+	origOut, origErr := os.Stdout, os.Stderr
+	rOut, wOut, _ := os.Pipe()
+	rErr, wErr, _ := os.Pipe()
+	os.Stdout, os.Stderr = wOut, wErr
+
+	err = fn()
+
+	wOut.Close()
+	wErr.Close()
+	os.Stdout, os.Stderr = origOut, origErr
+
+	var bo, be bytes.Buffer
+	_, _ = io.Copy(&bo, rOut)
+	_, _ = io.Copy(&be, rErr)
+	return bo.String(), be.String(), err
+}
+
+// --- flag-parsing tests (no socket needed: they fail before Send) ----------
+
+func TestCmdTaskCreate_MissingName(t *testing.T) {
+	c, done := dialTestClient(t, &fakeAuthoring{})
+	defer done()
+	_, _, err := captureOutput(t, func() error { return cmdTaskCreate(c, nil) })
+	if err == nil || !strings.Contains(err.Error(), "usage") {
+		t.Fatalf("err = %v, want usage", err)
+	}
+}
+
+func TestCmdTaskCreate_DanglingFlag(t *testing.T) {
+	c, done := dialTestClient(t, &fakeAuthoring{})
+	defer done()
+	_, _, err := captureOutput(t, func() error { return cmdTaskCreate(c, []string{"name", "--source"}) })
+	if err == nil || !strings.Contains(err.Error(), "--source requires a value") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestCmdTaskCreate_Plain(t *testing.T) {
+	c, done := dialTestClient(t, &fakeAuthoring{
+		create: ipc.AuthoringCreateResult{TaskID: "ai-scratch/hello", Source: "ai-scratch"},
+	})
+	defer done()
+	out, errOut, err := captureOutput(t, func() error {
+		return cmdTaskCreate(c, []string{"hello", "--source", "ai-scratch"})
+	})
+	if err != nil {
+		t.Fatalf("cmdTaskCreate: %v", err)
+	}
+	if strings.TrimSpace(out) != "ai-scratch/hello" {
+		t.Errorf("stdout = %q, want task id", out)
+	}
+	if errOut != "" {
+		t.Errorf("plain create should have empty stderr, got %q", errOut)
+	}
+}
+
+func TestCmdTaskCreate_WithAI_SplitsStreams(t *testing.T) {
+	// The --ai metadata (session, url, reply) is produced by the daemon
+	// chaining create → edit; the edit result drives it.
+	c, done := dialTestClient(t, &fakeAuthoring{
+		create: ipc.AuthoringCreateResult{TaskID: "ai-scratch/hello", Source: "ai-scratch"},
+		edit:   ipc.AuthoringEditResult{SessionID: "sess-1", Source: "ai-scratch", SourceKind: "local"},
+	})
+	defer done()
+	out, errOut, err := captureOutput(t, func() error {
+		return cmdTaskCreate(c, []string{"hello", "--ai", "make it greet"})
+	})
+	if err != nil {
+		t.Fatalf("cmdTaskCreate: %v", err)
+	}
+	if strings.TrimSpace(out) != "ai-scratch/hello" {
+		t.Errorf("stdout = %q, want only task id", out)
+	}
+	if !strings.Contains(errOut, "session: sess-1") {
+		t.Errorf("stderr missing session line: %q", errOut)
+	}
+	if !strings.Contains(errOut, "open: http://localhost:8080/?session=sess-1") {
+		t.Errorf("stderr missing open line: %q", errOut)
+	}
+}
+
+func TestCmdTaskCreate_AIPathChainsEditWithEqualsFlags(t *testing.T) {
+	fa := &recordingAuthoring{fakeAuthoring: fakeAuthoring{
+		create: ipc.AuthoringCreateResult{TaskID: "ai-scratch/x"},
+		edit:   ipc.AuthoringEditResult{SessionID: "s"},
+	}}
+	c, done := dialTestClient(t, fa)
+	defer done()
+	_, _, err := captureOutput(t, func() error {
+		return cmdTaskCreate(c, []string{"x", "--ai=do it", "--source=ai-scratch"})
+	})
+	if err != nil {
+		t.Fatalf("cmdTaskCreate: %v", err)
+	}
+	if fa.source != "ai-scratch" {
+		t.Errorf("source forwarded = %q, want ai-scratch", fa.source)
+	}
+	// --ai presence makes the daemon chain create → edit against the new task.
+	if fa.editTask != "ai-scratch/x" {
+		t.Errorf("edit chained against %q, want ai-scratch/x", fa.editTask)
+	}
+}
+
+func TestCmdTaskCreate_AIEditFailureSurfacesTaskID(t *testing.T) {
+	// Drives the real control socket: create succeeds, the chained edit fails.
+	// The dispatch loop sends Error XOR Result, so the created task id must ride
+	// inside the error string to reach the CLI user (a retry command).
+	c, done := dialTestClient(t, &fakeAuthoring{
+		create:  ipc.AuthoringCreateResult{TaskID: "ai-scratch/hello", Source: "ai-scratch"},
+		editErr: errors.New("agent unavailable"),
+	})
+	defer done()
+	out, _, err := captureOutput(t, func() error {
+		return cmdTaskCreate(c, []string{"hello", "--ai", "make it greet"})
+	})
+	if err == nil {
+		t.Fatal("expected an error when the chained edit fails")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "ai-scratch/hello") {
+		t.Errorf("error must contain the created task id, got %q", msg)
+	}
+	if !strings.Contains(msg, "dicode task edit ai-scratch/hello") {
+		t.Errorf("error must contain a ready-to-run retry command, got %q", msg)
+	}
+	// stdout stays empty on failure — the task id reaches the user via stderr/error.
+	if strings.TrimSpace(out) != "" {
+		t.Errorf("stdout should be empty on failure, got %q", out)
+	}
+}
+
+func TestCmdTaskEdit_MissingTaskID(t *testing.T) {
+	c, done := dialTestClient(t, &fakeAuthoring{})
+	defer done()
+	_, _, err := captureOutput(t, func() error { return cmdTaskEdit(c, nil) })
+	if err == nil || !strings.Contains(err.Error(), "usage") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestCmdTaskEdit_SplitsStreams(t *testing.T) {
+	c, done := dialTestClient(t, &fakeAuthoring{
+		edit: ipc.AuthoringEditResult{SessionID: "e1", Source: "ai-scratch", SourceKind: "local"},
+	})
+	defer done()
+	out, errOut, err := captureOutput(t, func() error {
+		return cmdTaskEdit(c, []string{"ai-scratch/t", "please", "fix", "it"})
+	})
+	if err != nil {
+		t.Fatalf("cmdTaskEdit: %v", err)
+	}
+	// Reply (empty here) goes to stdout; session + open go to stderr.
+	if !strings.Contains(errOut, "session: e1") {
+		t.Errorf("stderr missing session: %q", errOut)
+	}
+	if !strings.Contains(errOut, "open: http://localhost:8080/?session=e1") {
+		t.Errorf("stderr missing open url: %q", errOut)
+	}
+	_ = out
+}
+
+func TestCmdTaskEdit_DashSentinel(t *testing.T) {
+	fa := &recordingAuthoring{fakeAuthoring: fakeAuthoring{
+		edit: ipc.AuthoringEditResult{SessionID: "e1"},
+	}}
+	c, done := dialTestClient(t, fa)
+	defer done()
+	// After `--`, "--session" is a literal prompt word, not a flag.
+	_, _, err := captureOutput(t, func() error {
+		return cmdTaskEdit(c, []string{"ai-scratch/t", "--", "--session", "is", "a", "word"})
+	})
+	if err != nil {
+		t.Fatalf("cmdTaskEdit: %v", err)
+	}
+	if fa.editSession != "" {
+		t.Errorf("--session after -- must not set sessionID, got %q", fa.editSession)
+	}
+}
+
+func TestCmdTaskEdit_SessionFlag(t *testing.T) {
+	fa := &recordingAuthoring{fakeAuthoring: fakeAuthoring{
+		edit: ipc.AuthoringEditResult{SessionID: "resumed"},
+	}}
+	c, done := dialTestClient(t, fa)
+	defer done()
+	_, _, err := captureOutput(t, func() error {
+		return cmdTaskEdit(c, []string{"ai-scratch/t", "more", "--session", "resumed"})
+	})
+	if err != nil {
+		t.Fatalf("cmdTaskEdit: %v", err)
+	}
+	if fa.editSession != "resumed" {
+		t.Errorf("sessionID forwarded = %q, want resumed", fa.editSession)
+	}
+}
+
+func TestCmdTaskSave_MissingArg(t *testing.T) {
+	c, done := dialTestClient(t, &fakeAuthoring{})
+	defer done()
+	_, _, err := captureOutput(t, func() error { return cmdTaskSave(c, nil) })
+	if err == nil || !strings.Contains(err.Error(), "usage") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestCmdTaskSave_PrintsSessionToStderr(t *testing.T) {
+	c, done := dialTestClient(t, &fakeAuthoring{})
+	defer done()
+	out, errOut, err := captureOutput(t, func() error { return cmdTaskSave(c, []string{"s1"}) })
+	if err != nil {
+		t.Fatalf("cmdTaskSave: %v", err)
+	}
+	if !strings.Contains(errOut, "session: s1") {
+		t.Errorf("stderr = %q", errOut)
+	}
+	// No PR url / task id from the fake → stdout falls back to the session id.
+	if strings.TrimSpace(out) != "s1" {
+		t.Errorf("stdout = %q", out)
+	}
+}
+
+func TestCmdTaskCancel_PrintsConfirmation(t *testing.T) {
+	c, done := dialTestClient(t, &fakeAuthoring{})
+	defer done()
+	out, errOut, err := captureOutput(t, func() error { return cmdTaskCancel(c, []string{"s2"}) })
+	if err != nil {
+		t.Fatalf("cmdTaskCancel: %v", err)
+	}
+	if !strings.Contains(out, "cancelled s2") {
+		t.Errorf("stdout = %q", out)
+	}
+	if !strings.Contains(errOut, "session: s2") {
+		t.Errorf("stderr = %q", errOut)
+	}
+}
+
+func TestCmdTaskCancel_MissingArg(t *testing.T) {
+	c, done := dialTestClient(t, &fakeAuthoring{})
+	defer done()
+	_, _, err := captureOutput(t, func() error { return cmdTaskCancel(c, nil) })
+	if err == nil || !strings.Contains(err.Error(), "usage") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// recordingAuthoring captures the arguments forwarded to the service so the
+// CLI tests can assert flag wiring (prompt, source, sessionID).
+type recordingAuthoring struct {
+	fakeAuthoring
+	source, editSession, editTask string
+}
+
+func (r *recordingAuthoring) CreateTask(ctx context.Context, name, source string) (ipc.AuthoringCreateResult, error) {
+	r.source = source
+	return r.fakeAuthoring.CreateTask(ctx, name, source)
+}
+
+func (r *recordingAuthoring) EditTask(ctx context.Context, sessionID, taskID string) (ipc.AuthoringEditResult, error) {
+	// CreateTask's --ai chain forwards the prompt via EditTask on the daemon
+	// side, so record both the prompt-carrying edit and direct edits here.
+	r.editSession, r.editTask = sessionID, taskID
+	return r.fakeAuthoring.EditTask(ctx, sessionID, taskID)
+}

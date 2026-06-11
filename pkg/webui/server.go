@@ -128,7 +128,7 @@ type Server struct {
 	scsStore           *scsStore              // underlying SQLite store for sm; nil in DB-less tests
 	dbSessions         *dbSessionStore        // persistent trusted-device tokens
 	apiKeys            *apiKeyStore           // MCP / programmatic API keys
-	authoringSessions  *authoringSessionStore // AI-first authoring sessions (#288)
+	authoringSessions  *authoringSessionStore // AI-first authoring sessions
 	passphraseStore    *passphraseStore       // auth passphrase persisted in DB
 	cachedPassphrase   string                 // in-memory cache of stored DB value (bcrypt hash, or legacy plaintext during migration); invalidated on change
 	cachedPassphraseMu sync.RWMutex           // guards cachedPassphrase
@@ -539,7 +539,7 @@ func (s *Server) Handler() http.Handler {
 			// AI chat — forwards to the task named by cfg.AI.Task.
 			r.Post("/ai/chat", s.apiAIChat)
 
-			// AI-first task authoring (#288)
+			// AI-first task authoring
 			r.Post("/task/create", s.apiTaskCreate)
 			r.Post("/task/edit", s.apiTaskEdit)
 			r.Post("/task/save", s.apiTaskSave)
@@ -598,6 +598,8 @@ func (s *Server) Start(ctx context.Context) error {
 	if err := s.ensurePassphrase(ctx); err != nil {
 		return fmt.Errorf("ensure auth passphrase: %w", err)
 	}
+
+	s.startAuthoringPurgeLoop(ctx)
 
 	s.srv = &http.Server{
 		Addr:              fmt.Sprintf(":%d", s.port),

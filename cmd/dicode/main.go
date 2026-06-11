@@ -15,6 +15,10 @@
 //	status [task-id]                daemon health or latest run for a task
 //	ai <prompt> [flags]             run the configured AI task with a prompt
 //	task test <task-id>             run the task's sibling task.test.* through its runtime
+//	task create <name> [flags]      scaffold a task; with --ai, open an edit session
+//	task edit <task-id> <prompt>    open or resume an AI edit session
+//	task save <session-id>          apply a session's changes
+//	task cancel <session-id>        discard a session
 //	secrets list                    list secret keys
 //	secrets set <key> <value>       store a secret
 //	secrets delete <key>            delete a secret
@@ -116,7 +120,7 @@ func dispatch(c *ipc.ControlClient, args []string) error {
 		return cmdAI(c, args[1:])
 	case "task":
 		if len(args) < 2 {
-			return fmt.Errorf("usage: dicode task <test> <task-id>")
+			return fmt.Errorf("usage: dicode task <test|create|edit|save|cancel> [args...]")
 		}
 		return cmdTask(c, args[1:])
 	case "auth":
@@ -474,8 +478,16 @@ func cmdTask(c *ipc.ControlClient, args []string) error {
 			return fmt.Errorf("usage: dicode task test <task-id>")
 		}
 		return cmdTaskTest(c, args[1])
+	case "create":
+		return cmdTaskCreate(c, args[1:])
+	case "edit":
+		return cmdTaskEdit(c, args[1:])
+	case "save":
+		return cmdTaskSave(c, args[1:])
+	case "cancel":
+		return cmdTaskCancel(c, args[1:])
 	default:
-		return fmt.Errorf("unknown task subcommand %q — supported: test", args[0])
+		return fmt.Errorf("unknown task subcommand %q — supported: test, create, edit, save, cancel", args[0])
 	}
 }
 

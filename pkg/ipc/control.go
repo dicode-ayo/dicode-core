@@ -37,8 +37,9 @@ type ControlServer struct {
 	engine          EngineRunner
 	secrets         secrets.Manager // nil if no local provider configured
 	metricsProvider MetricsProvider
-	database        db.DB        // for broker pubkey trust pinning; nil in tests
-	apiKeys         APIKeyMinter // nil if webui not wired (tests)
+	database        db.DB            // for broker pubkey trust pinning; nil in tests
+	apiKeys         APIKeyMinter     // nil if webui not wired (tests)
+	authoring       AuthoringService // nil if webui not wired (tests)
 	log             *zap.Logger
 
 	// defaultAITask is cfg.AI.Task — the task id that `dicode ai` fires when
@@ -231,6 +232,18 @@ func (cs *ControlServer) dispatch(ctx context.Context, req Request) (any, error)
 	case "cli.task.test":
 		return cs.handleTaskTest(ctx, req)
 
+	case "cli.task.create":
+		return cs.handleTaskCreate(ctx, req)
+
+	case "cli.task.edit":
+		return cs.handleTaskEdit(ctx, req)
+
+	case "cli.task.save":
+		return cs.handleTaskSave(ctx, req)
+
+	case "cli.task.cancel":
+		return cs.handleTaskCancel(ctx, req)
+
 	case "cli.auth.reset_passphrase":
 		return cs.handleAuthResetPassphrase(ctx)
 
@@ -260,6 +273,119 @@ type APIKeyMinter interface {
 // Nil leaves the methods returning a clear error (tests / configurations
 // without webui).
 func (cs *ControlServer) SetAPIKeyMinter(m APIKeyMinter) { cs.apiKeys = m }
+
+// AuthoringService is the surface the control server uses to drive AI-first
+// task authoring on behalf of CLI clients. Implemented by webui.Server, which
+// owns the source manager and the author_sessions store. Defined here so
+// pkg/ipc keeps no import on pkg/webui — same pattern as APIKeyMinter.
+//
+// These methods carry the same business logic the REST handlers
+// (POST /api/task/{create,edit,save,cancel}) call, so the CLI and the browser
+// share one code path. The 409 single-open-session-per-source rule is
+// enforced inside EditTask and surfaces as an error string.
+type AuthoringService interface {
+	CreateTask(ctx context.Context, name, source string) (AuthoringCreateResult, error)
+	EditTask(ctx context.Context, sessionID, taskID string) (AuthoringEditResult, error)
+	SaveTask(ctx context.Context, sessionID string) error
+	CancelTask(ctx context.Context, sessionID string) error
+	// WebUIBaseURL returns scheme://host:port for the daemon's web UI so the
+	// CLI can print an "open: <url>" hint pointing at the session.
+	WebUIBaseURL() string
+}
+
+// AuthoringCreateResult mirrors webui.CreateTaskResult on the IPC side so
+// pkg/ipc has no dependency on pkg/webui's concrete types.
+type AuthoringCreateResult struct {
+	TaskID string
+	Source string
+	Files  []string
+}
+
+// AuthoringEditResult mirrors webui.EditTaskResult on the IPC side. TaskID is
+// the session's own task id (sess.TaskID), not the caller's claim, so the CLI
+// echoes back the identity the session actually belongs to.
+type AuthoringEditResult struct {
+	SessionID   string
+	TaskID      string
+	SandboxPath string
+	Source      string
+	SourceKind  string
+}
+
+// SetAuthoringService wires the authoring service for cli.task.* dispatch.
+// Called from the daemon at startup once the webui Server is built. Nil leaves
+// the methods returning a clear error (tests / configurations without webui).
+func (cs *ControlServer) SetAuthoringService(a AuthoringService) { cs.authoring = a }
+
+func (cs *ControlServer) handleTaskCreate(ctx context.Context, req Request) (TaskCreateResult, error) {
+	if cs.authoring == nil {
+		return TaskCreateResult{}, errors.New("authoring service not configured")
+	}
+	res, err := cs.authoring.CreateTask(ctx, req.TaskName, req.Source)
+	if err != nil {
+		return TaskCreateResult{}, err
+	}
+	out := TaskCreateResult{TaskID: res.TaskID, Source: res.Source, Files: res.Files}
+
+	// With --ai, scaffolding chains straight into an edit session so the CLI
+	// gets the task id, session id, and webui URL in a single round-trip.
+	if req.Prompt == "" {
+		return out, nil
+	}
+	edit, err := cs.handleTaskEdit(ctx, Request{TaskID: res.TaskID, Prompt: req.Prompt})
+	if err != nil {
+		// The scaffold already landed. The dispatch loop sends Error XOR
+		// Result, so `out` (with the new task id) is dropped on the wire when
+		// err is non-nil — embed the task id and a ready-to-run retry command
+		// in the error string so the CLI user can recover the created task.
+		return out, fmt.Errorf("task %s created but opening edit session failed: %w; retry with: dicode task edit %s \"<prompt>\"", res.TaskID, err, res.TaskID)
+	}
+	// Fold the edit metadata into the create result's wire shape via the
+	// dedicated fields the CLI reads.
+	out.SessionID = edit.SessionID
+	out.WebUIURL = edit.WebUIURL
+	out.Reply = edit.Reply
+	return out, nil
+}
+
+func (cs *ControlServer) handleTaskEdit(ctx context.Context, req Request) (TaskEditResult, error) {
+	if cs.authoring == nil {
+		return TaskEditResult{}, errors.New("authoring service not configured")
+	}
+	res, err := cs.authoring.EditTask(ctx, req.SessionID, req.TaskID)
+	if err != nil {
+		return TaskEditResult{}, err
+	}
+	out := TaskEditResult{
+		SessionID:   res.SessionID,
+		TaskID:      res.TaskID,
+		Source:      res.Source,
+		SourceKind:  res.SourceKind,
+		SandboxPath: res.SandboxPath,
+		WebUIURL:    cs.authoring.WebUIBaseURL() + "/?session=" + res.SessionID,
+	}
+	return out, nil
+}
+
+func (cs *ControlServer) handleTaskSave(ctx context.Context, req Request) (TaskSaveResult, error) {
+	if cs.authoring == nil {
+		return TaskSaveResult{}, errors.New("authoring service not configured")
+	}
+	if err := cs.authoring.SaveTask(ctx, req.SessionID); err != nil {
+		return TaskSaveResult{}, err
+	}
+	return TaskSaveResult{SessionID: req.SessionID, Applied: true}, nil
+}
+
+func (cs *ControlServer) handleTaskCancel(ctx context.Context, req Request) (TaskCancelResult, error) {
+	if cs.authoring == nil {
+		return TaskCancelResult{}, errors.New("authoring service not configured")
+	}
+	if err := cs.authoring.CancelTask(ctx, req.SessionID); err != nil {
+		return TaskCancelResult{}, err
+	}
+	return TaskCancelResult{SessionID: req.SessionID, Cancelled: true}, nil
+}
 
 func (cs *ControlServer) handleAPIKeyCreate(ctx context.Context, req Request) (any, error) {
 	if cs.apiKeys == nil {
