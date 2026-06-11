@@ -327,7 +327,7 @@ After a successful authorization the following secrets are written:
 | Provider | Secrets written |
 |----------|----------------|
 | Google | `GOOGLE_ACCESS_TOKEN`, `GOOGLE_REFRESH_TOKEN` |
-| Slack | `SLACK_USER_TOKEN` |
+| Slack | `SLACK_ACCESS_TOKEN` |
 | GitHub | `GITHUB_ACCESS_TOKEN` |
 | Spotify | `SPOTIFY_ACCESS_TOKEN`, `SPOTIFY_REFRESH_TOKEN` |
 | Linear | `LINEAR_ACCESS_TOKEN` |

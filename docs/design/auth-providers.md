@@ -158,7 +158,7 @@ extract a shared `providers.json` consumed by both.
 - **Auto-refresh visibility.** The auth-relay task already auto-refreshes
   `<P>_ACCESS_TOKEN` when `<P>_EXPIRES_AT` approaches; the dashboard shows
   the latest stored expiry but doesn't currently expose refresh events.
-- **Slack token-key mismatch with the legacy local-PKCE path.** The
-  `slack-oauth` task overrides `access_token_env: SLACK_USER_TOKEN`, so
-  legacy-path tokens won't show as Connected on the dashboard. Tracked at
-  [#223](https://github.com/dicode-ayo/dicode-core/issues/223).
+- **Slack token-key mismatch with the legacy local-PKCE path.** Fixed in
+  [#223](https://github.com/dicode-ayo/dicode-core/issues/223): the token
+  key is now `SLACK_ACCESS_TOKEN`, consistent with the
+  `<PROVIDER_UPPER>_ACCESS_TOKEN` convention the dashboard expects.
