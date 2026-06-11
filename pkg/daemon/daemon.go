@@ -483,6 +483,10 @@ func buildRuntimes(
 	// per-run secretOutputCh for each provider invocation.
 	eng.SetDenoRuntime(denoRT)
 	denoRT.SetProviderRunner(eng)
+	// Issue #242: share a single env resolver across all task launches so
+	// that provider.cache_ttl survives across fires. The resolver's cache is
+	// in-memory and reset on daemon restart.
+	denoRT.SetEnvResolver(eng.Resolver())
 	if !cfg.Defaults.OnFailureChain.IsZero() {
 		if err := eng.SetDefaultsOnFailureChain(cfg.Defaults.OnFailureChain); err != nil {
 			return nil, nil, nil, nil, fmt.Errorf("set on_failure_chain defaults: %w", err)
@@ -518,6 +522,7 @@ func buildRuntimes(
 	pythonMgr.SetSecretsManager(secretsMgr)
 	eng.SetPythonRuntime(pythonMgr)
 	pythonMgr.SetProviderRunner(eng)
+	pythonMgr.SetEnvResolver(eng.Resolver())
 	managed = append(managed, pythonMgr)
 
 	if rc, ok := cfg.Runtimes["python"]; ok && !rc.Disabled {

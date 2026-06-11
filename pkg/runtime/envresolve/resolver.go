@@ -52,8 +52,8 @@ type Resolver struct {
 	Now func() time.Time
 }
 
-// New constructs a Resolver. Each runtime constructs its own Resolver;
-// the cache lives inside the Resolver instance.
+// New constructs a Resolver. The daemon constructs a single shared instance
+// whose cache survives across task launches (issue #242).
 func New(reg Registry, sc secrets.Chain, runner ProviderRunner) *Resolver {
 	return &Resolver{
 		Runner:   runner,

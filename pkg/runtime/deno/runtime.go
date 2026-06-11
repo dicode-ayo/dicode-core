@@ -101,6 +101,10 @@ type Runtime struct {
 	// the env resolver can spawn provider tasks for from: task:<id>
 	// entries. Nil disables provider lookups; legacy paths still work.
 	providerRunner envresolve.ProviderRunner
+	// sharedResolver is the daemon-scoped env resolver whose TTL cache
+	// survives across task launches (issue #242). When non-nil, envresolver()
+	// returns it instead of constructing a fresh instance per Run.
+	sharedResolver *envresolve.Resolver
 	// replayer, sourceMgr, repoResolver are wired after buildRuntimes returns
 	// (same late-wiring pattern as inputStore). effectiveReplayer /
 	// effectiveSourceMgr / effectiveRepoResolver read through parent when
@@ -222,6 +226,13 @@ func (rt *Runtime) SetSecretOutputChannel(ch chan map[string]string) {
 // daemon startup. Nil disables provider task: lookups.
 func (rt *Runtime) SetProviderRunner(p envresolve.ProviderRunner) {
 	rt.providerRunner = p
+}
+
+// SetEnvResolver wires the daemon-scoped env resolver whose TTL cache
+// survives across task launches (issue #242). When set, envresolver()
+// returns it instead of constructing a fresh instance per Run.
+func (rt *Runtime) SetEnvResolver(r *envresolve.Resolver) {
+	rt.sharedResolver = r
 }
 
 // Run executes a task script and returns the result.
@@ -568,11 +579,18 @@ func buildEnv(resolved map[string]string, socketPath, token string) []string {
 	return env
 }
 
-// envresolver lazily constructs the env resolver. Wired with the daemon's
-// secret chain + a provider runner that calls back into the trigger
-// engine. Nil engine (test harness with no providers) yields a resolver
-// that errors on any from: task:<id> entry.
+// envresolver returns the env resolver to use for a Run. When a
+// daemon-scoped shared resolver is wired (issue #242), it is returned so
+// the TTL cache survives across launches. Otherwise a fresh instance is
+// constructed (legacy / test path).
 func (rt *Runtime) envresolver() *envresolve.Resolver {
+	// Read through parent for per-version executors.
+	if rt.parent != nil && rt.parent.sharedResolver != nil {
+		return rt.parent.sharedResolver
+	}
+	if rt.sharedResolver != nil {
+		return rt.sharedResolver
+	}
 	return envresolve.New(rt.registry, rt.secrets, rt.providerRunner)
 }
 

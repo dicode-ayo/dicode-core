@@ -163,6 +163,11 @@ type Engine struct {
 	denoRuntime   DenoRuntimeAPI
 	pythonRuntime PythonRuntimeAPI
 
+	// envResolver is the daemon-scoped env resolver shared across all task
+	// launches. The cache lives inside this instance, so cross-launch TTL
+	// hits work as intended (issue #242). Constructed lazily by Resolver().
+	envResolver *envresolve.Resolver
+
 	// providerRunMu serializes Engine.Run invocations so concurrent provider
 	// resolutions don't clobber each other's secretOutputCh on the runtime.
 	// MVP-quality: a per-run channel registry would allow parallelism but
@@ -240,6 +245,18 @@ func (e *Engine) SetPythonRuntime(r PythonRuntimeAPI) { e.pythonRuntime = r }
 // run-start. Called by the daemon after secrets are available (so the derived
 // sub-key exists). When nil (the default), input persistence is a no-op.
 func (e *Engine) SetInputStore(s *registry.InputStore) { e.inputStore = s }
+
+// Resolver returns the daemon-scoped env resolver, constructing it lazily on
+// first call. The resolver's TTL cache survives across task launches so that
+// provider.cache_ttl actually provides cross-fire benefit (issue #242).
+func (e *Engine) Resolver() *envresolve.Resolver {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.envResolver == nil {
+		e.envResolver = envresolve.New(e.registry, e.secrets, e)
+	}
+	return e.envResolver
+}
 
 // SetMaxConcurrentTasks configures a semaphore that limits how many task
 // goroutines run concurrently. n == 0 (the default) means unlimited.
@@ -988,8 +1005,7 @@ func (e *Engine) preflightEnv(ctx context.Context, spec *task.Spec) (*envresolve
 	if e.secrets == nil || len(spec.Permissions.Env) == 0 {
 		return nil, "", ""
 	}
-	r := envresolve.New(e.registry, e.secrets, e)
-	resolved, err := r.Resolve(ctx, spec)
+	resolved, err := e.Resolver().Resolve(ctx, spec)
 	if err != nil {
 		var pu *envresolve.ErrProviderUnavailable
 		var rsm *envresolve.ErrRequiredSecretMissing
