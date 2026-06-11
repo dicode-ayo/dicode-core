@@ -348,6 +348,22 @@ class _Sources:
                                   "base": base, "run_id": run_id})
 
 
+class _Secrets:
+    """Presence-only secret checks — never returns the value."""
+
+    def has(self, key):
+        """Return True if key exists in the secrets store."""
+        if not isinstance(key, str) or not key:
+            raise TypeError("secrets.has: key must be a non-empty string")
+        return bool(_call({"method": "dicode.secrets.has", "key": key}))
+
+    async def has_async(self, key):
+        """Async variant of has."""
+        if not isinstance(key, str) or not key:
+            raise TypeError("secrets.has: key must be a non-empty string")
+        return bool(await _call_async({"method": "dicode.secrets.has", "key": key}))
+
+
 class _Git:
     def commit_push(self, source_id, *, message, branch, author_name,
                     author_email, branch_prefix="", allow_main=False,
@@ -385,6 +401,7 @@ class _Dicode:
         self.tasks = _Tasks()
         self.sources = _Sources()
         self.git = _Git()
+        self.secrets = _Secrets()
 
     def run_task(self, task_id, params=None, mcp_context=False):
         return _call({"method": "dicode.run_task", "taskID": task_id,
