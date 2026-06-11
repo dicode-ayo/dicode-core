@@ -89,7 +89,7 @@ func (cs *ControlServer) handleTaskDelete(ctx context.Context, req Request) (Tas
 		return TaskDeleteResult{}, errors.New("task deletion not configured (no source manager)")
 	}
 
-	spec, ok := cs.reg.Get(req.TaskID)
+	spec, ok := cs.deletableSpec(req.TaskID)
 	if !ok {
 		return TaskDeleteResult{}, fmt.Errorf("task %q not found", req.TaskID)
 	}
@@ -165,6 +165,37 @@ func (cs *ControlServer) handleTaskDelete(ctx context.Context, req Request) (Tas
 	}
 	res.PRValue = url
 	return res, nil
+}
+
+// deletableSpec resolves the registered task whose on-disk directory the delete
+// path will remove. A kind: Task resolves to its own *task.Spec. A registered
+// pipeline (kind: PipelineTask) has no *task.Spec but carries the same TaskDir
+// and source-resolvable id, so it is adapted into a minimal Spec — the delete
+// path consumes only TaskDir (removal) and Trigger (the preview label). The
+// buildin guard, containment check, and dangling-ref preview operate on the id
+// and TaskDir and so apply identically to a pipeline.
+func (cs *ControlServer) deletableSpec(id string) (*task.Spec, bool) {
+	if spec, ok := cs.reg.Get(id); ok {
+		return spec, true
+	}
+	k, ok := cs.reg.GetKinded(id)
+	if !ok {
+		return nil, false
+	}
+	p, ok := k.(*task.PipelineTask)
+	if !ok {
+		return nil, false
+	}
+	return &task.Spec{
+		ID:      p.ID,
+		TaskDir: p.TaskDir,
+		Trigger: task.TriggerConfig{
+			Cron:    p.Trigger.Cron,
+			Webhook: p.Trigger.Webhook,
+			Manual:  p.Trigger.Manual,
+			Chain:   p.Trigger.Chain,
+		},
+	}, true
 }
 
 // chainReferrers returns the ids of registered tasks/pipelines that reference

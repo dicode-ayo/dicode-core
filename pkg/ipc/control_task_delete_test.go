@@ -200,6 +200,49 @@ func TestTaskDelete_Local_DeletesAndReturns(t *testing.T) {
 	}
 }
 
+// A registered pipeline (kind: PipelineTask) has no *task.Spec but carries a
+// TaskDir, so it must resolve through the same delete path rather than erroring
+// with the misleading "task not found".
+func TestTaskDelete_Pipeline_DeletesViaSamePath(t *testing.T) {
+	reg := newTestRegistry(t)
+	pipe := &task.PipelineTask{
+		ID:      "tasks/pipe",
+		Kind:    task.KindPipelineTask,
+		TaskDir: "/tmp/pipe",
+		Stages:  []task.Stage{{Task: "tasks/a"}, {Task: "tasks/b"}},
+	}
+	if err := reg.Register(pipe); err != nil {
+		t.Fatalf("register pipeline: %v", err)
+	}
+	del := &fakeDeleter{resolveName: "tasks", outcome: TaskDeleteOutcome{Source: "tasks", Mode: "local"}}
+	eng := &recordingEngine{}
+	cs := newDeleteTestServer(t, reg, eng, del)
+
+	// Preview must succeed (not "task not found") and resolve the source.
+	prev, err := cs.handleTaskDelete(context.Background(), Request{TaskID: "tasks/pipe", Force: false})
+	if err != nil {
+		t.Fatalf("pipeline preview: %v", err)
+	}
+	if prev.Mode != "preview" || prev.Source != "tasks" {
+		t.Fatalf("preview = %+v, want mode=preview source=tasks", prev)
+	}
+
+	// Force must delete through DeleteTaskFromSource, not error.
+	res, err := cs.handleTaskDelete(context.Background(), Request{TaskID: "tasks/pipe", Force: true})
+	if err != nil {
+		t.Fatalf("pipeline delete: %v", err)
+	}
+	if !del.deleteCalled {
+		t.Fatal("DeleteTaskFromSource was not called for a pipeline")
+	}
+	if del.deletedTaskID != "tasks/pipe" {
+		t.Fatalf("deleted task id = %q, want tasks/pipe", del.deletedTaskID)
+	}
+	if res.Mode != "local" {
+		t.Fatalf("Mode = %q, want local", res.Mode)
+	}
+}
+
 func TestTaskDelete_Git_FiresGitPRTask(t *testing.T) {
 	reg := newTestRegistry(t)
 	if err := reg.Register(&task.Spec{ID: "tasks/git-task", Name: "git", TaskDir: "/tmp/x"}); err != nil {

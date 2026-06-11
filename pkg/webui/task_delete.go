@@ -103,9 +103,6 @@ func containedTaskDir(root, taskDir, sourceName string) (string, error) {
 	if root == "" {
 		return "", fmt.Errorf("source %q root path not resolved", sourceName)
 	}
-	if taskDir == "" {
-		return "", fmt.Errorf("task %q has no on-disk directory", sourceName)
-	}
 	canonRoot, err := filepath.EvalSymlinks(filepath.Clean(root))
 	if err != nil {
 		return "", fmt.Errorf("resolve source %q root: %w", sourceName, err)
