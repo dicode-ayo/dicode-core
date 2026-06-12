@@ -90,6 +90,44 @@ func TestNewUntrustedTaskPending(t *testing.T) {
 	}
 }
 
+func TestBootstrapSeedsThenGates(t *testing.T) {
+	g, arm, lock := newTestGate(t, enabledPolicy())
+	g.SetBootstrap(true)
+
+	// During bootstrap an untrusted task is seeded (armed + recorded), not held.
+	existing := writeTaskDir(t, t.TempDir(), "repo/existing", "x")
+	armed, err := g.Admit(existing)
+	if err != nil || !armed {
+		t.Fatalf("bootstrap Admit = (%v, %v), want (true, nil)", armed, err)
+	}
+	rec, ok := lock.Get("repo/existing")
+	if !ok || rec.ApprovedBy != ApprovedByBootstrap {
+		t.Fatalf("bootstrap task lock record = %+v (ok=%v), want approved_by=%q", rec, ok, ApprovedByBootstrap)
+	}
+	if g.IsPending("repo/existing") {
+		t.Fatal("bootstrap-seeded task must not be pending")
+	}
+
+	// Window closes: a subsequently-appearing untrusted task is gated.
+	if !g.FinishBootstrap() {
+		t.Fatal("FinishBootstrap reported gate was not bootstrapping")
+	}
+	fresh := writeTaskDir(t, t.TempDir(), "repo/fresh", "y")
+	armed, err = g.Admit(fresh)
+	if err != nil {
+		t.Fatalf("post-bootstrap Admit: %v", err)
+	}
+	if armed {
+		t.Fatal("task appearing after bootstrap must be pending, got armed")
+	}
+	if _, ok := lock.Get("repo/fresh"); ok {
+		t.Fatal("pending post-bootstrap task must not get a lock record")
+	}
+	if len(arm.armedIDs()) != 1 {
+		t.Fatalf("armed = %v, want only the bootstrap-seeded task", arm.armedIDs())
+	}
+}
+
 func TestTrustedSourceArmsAndRecords(t *testing.T) {
 	p := enabledPolicy()
 	p.TrustedSources["repo"] = true

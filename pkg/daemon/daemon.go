@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/dicode/dicode/pkg/approval"
 	"github.com/dicode/dicode/pkg/config"
@@ -37,6 +38,12 @@ import (
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/term"
 )
+
+// bootstrapSettle is how long the approval gate's first-run seeding window
+// stays open after the most recent task registration. It spans the initial
+// source sync (including a slow first git clone, which delays the first event
+// but then streams quickly) and closes shortly after the burst ends.
+const bootstrapSettle = 10 * time.Second
 
 // Run starts the daemon process. It blocks until the context is cancelled
 // (via signal) or a fatal error occurs. configPath is the path to
@@ -324,7 +331,10 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	if err != nil {
 		return fmt.Errorf("resolve config dir: %w", err)
 	}
-	lock, err := approval.LoadLock(filepath.Join(configDir, approval.LockFileName))
+	lockPath := filepath.Join(configDir, approval.LockFileName)
+	_, lockStatErr := os.Stat(lockPath)
+	lockExisted := lockStatErr == nil
+	lock, err := approval.LoadLock(lockPath)
 	if err != nil {
 		return fmt.Errorf("load approval lock: %w", err)
 	}
@@ -349,6 +359,18 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	// guard vetoes those at the engine chokepoint.
 	eng.SetFireGuard(approvalGate.FireGuard)
 
+	// First-run bootstrap: with no dicode.lock, seed the existing inventory as
+	// approved instead of stranding every task behind a gate that has no
+	// approve UI yet. The window opens on the first registration and closes
+	// once the initial source sync settles (bootstrapSettle of quiet); tasks
+	// that change or appear after that are gated normally.
+	if !lockExisted && gatePolicy.Enabled {
+		approvalGate.SetBootstrap(true)
+		log.Info("approval gate: no dicode.lock — seeding current tasks as approved (first-run bootstrap); changes after startup require approval",
+			zap.String("lock", lockPath))
+	}
+	var bootstrapTimer *time.Timer
+
 	rec.OnRegister = func(k task.Kinded) {
 		armed, err := approvalGate.Admit(k)
 		if err != nil {
@@ -357,12 +379,26 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 				zap.Error(err))
 			return
 		}
-		if !armed {
-			disarm(k.TaskID())
-			log.Warn("task held pending approval — triggers not armed",
-				zap.String("task", k.TaskID()),
-				zap.String("hint", "set approval.sources.<source>.trust: always or approval.tasks.<id>.trust: always in dicode.yaml, or approve the task"))
+		if armed {
+			// Slide the bootstrap window forward while the initial inventory
+			// is still streaming in (handles slow first git clone).
+			if approvalGate.Bootstrapping() {
+				if bootstrapTimer == nil {
+					bootstrapTimer = time.AfterFunc(bootstrapSettle, func() {
+						if approvalGate.FinishBootstrap() {
+							log.Info("approval gate active — subsequent task changes require approval")
+						}
+					})
+				} else {
+					bootstrapTimer.Reset(bootstrapSettle)
+				}
+			}
+			return
 		}
+		disarm(k.TaskID())
+		log.Warn("task held pending approval — triggers not armed",
+			zap.String("task", k.TaskID()),
+			zap.String("hint", "set approval.sources.<source>.trust: always or approval.tasks.<id>.trust: always in dicode.yaml, or approve the task"))
 	}
 	rec.OnUnregister = func(id string) {
 		disarm(id)

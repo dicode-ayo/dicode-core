@@ -48,8 +48,9 @@ type Gate struct {
 	hashFn func(task.Kinded) (string, error)
 	log    *zap.Logger
 
-	mu      sync.Mutex
-	pending map[string]pendingEntry
+	mu        sync.Mutex
+	pending   map[string]pendingEntry
+	bootstrap bool
 }
 
 // pendingEntry captures the task (and the hash observed at decision time) so
@@ -78,6 +79,34 @@ func NewGate(policy Policy, lock *Lock, arm func(task.Kinded) error, log *zap.Lo
 
 // SetHashFunc overrides the content-hash function (tests).
 func (g *Gate) SetHashFunc(fn func(task.Kinded) (string, error)) { g.hashFn = fn }
+
+// SetBootstrap toggles bootstrap mode. While on, Admit seeds (auto-approves +
+// records) every task instead of holding it pending, so adopting the gate on
+// an install with existing tasks does not strand them. The daemon enables it
+// when dicode.lock is absent at startup and ends it once the initial source
+// sync settles.
+func (g *Gate) SetBootstrap(on bool) {
+	g.mu.Lock()
+	g.bootstrap = on
+	g.mu.Unlock()
+}
+
+// FinishBootstrap ends bootstrap mode; tasks seen afterwards are gated
+// normally. Idempotent; reports whether bootstrap was active.
+func (g *Gate) FinishBootstrap() bool {
+	g.mu.Lock()
+	was := g.bootstrap
+	g.bootstrap = false
+	g.mu.Unlock()
+	return was
+}
+
+// Bootstrapping reports whether the gate is in the first-run seeding window.
+func (g *Gate) Bootstrapping() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.bootstrap
+}
 
 // Admit runs the gate for a newly registered (new or changed) task. It
 // returns true when the task was armed, false when it is held pending.
@@ -108,6 +137,10 @@ func (g *Gate) Admit(k task.Kinded) (armed bool, err error) {
 		// Already approved at exactly this hash; keep the original record.
 		g.clearPending(id)
 		return true, g.arm(k)
+	case g.Bootstrapping():
+		// Adoption window: seed the current inventory as approved rather
+		// than strand pre-existing tasks behind a gate with no approve UI.
+		by = ApprovedByBootstrap
 	default:
 		g.mu.Lock()
 		g.pending[id] = pendingEntry{kinded: k, hash: hash}

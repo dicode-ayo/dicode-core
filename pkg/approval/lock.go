@@ -28,6 +28,7 @@ const (
 	ApprovedByTrustedTask   = "trusted-task"
 	ApprovedByManual        = "manual"
 	ApprovedByGateDisabled  = "gate-disabled"
+	ApprovedByBootstrap     = "bootstrap"
 )
 
 // Record is one approved task entry in the lock: the content hash that was
