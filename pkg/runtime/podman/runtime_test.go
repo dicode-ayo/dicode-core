@@ -5,8 +5,28 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dicode/dicode/pkg/runtime/containersec"
 	"github.com/dicode/dicode/pkg/task"
+	"go.uber.org/zap"
 )
+
+// TestNewExecutor_PropagatesPolicy pins that the container security policy
+// set on the manager reaches the executor created later — including the
+// executors re-created by the webui install path (issue #380).
+func TestNewExecutor_PropagatesPolicy(t *testing.T) {
+	rt := New(nil, zap.NewNop())
+	rt.SetPolicy(containersec.Policy{AllowHostNetwork: true, AllowedCapAdd: []string{"SYS_PTRACE"}})
+	e, ok := rt.NewExecutor("/usr/bin/podman").(*executor)
+	if !ok {
+		t.Fatalf("NewExecutor did not return *executor")
+	}
+	if !e.policy.AllowHostNetwork {
+		t.Errorf("AllowHostNetwork not propagated to executor")
+	}
+	if len(e.policy.AllowedCapAdd) != 1 || e.policy.AllowedCapAdd[0] != "SYS_PTRACE" {
+		t.Errorf("AllowedCapAdd not propagated: %v", e.policy.AllowedCapAdd)
+	}
+}
 
 // argsContainPair asserts that args contains `flag` immediately followed by `value`.
 func argsContainPair(args []string, flag, value string) bool {
@@ -113,5 +133,128 @@ func TestBuildArgs_HardeningPrecedesImage(t *testing.T) {
 	// Command must come after image.
 	if args[len(args)-2] != "echo" || args[len(args)-1] != "hi" {
 		t.Errorf("command args malformed at tail: %v", args)
+	}
+}
+
+// TestValidateArgvSafety_Rejections pins the argv-injection floor (issue
+// #380): task-controlled values that could corrupt the podman invocation are
+// rejected before buildArgs assembles the argv.
+func TestValidateArgvSafety_Rejections(t *testing.T) {
+	tests := []struct {
+		name     string
+		cfg      *task.DockerConfig
+		imageRef string
+	}{
+		{
+			name:     "empty image ref",
+			cfg:      &task.DockerConfig{},
+			imageRef: "",
+		},
+		{
+			name:     "image ref starting with dash is parsed as a flag",
+			cfg:      &task.DockerConfig{},
+			imageRef: "--privileged",
+		},
+		{
+			name:     "image ref with embedded space",
+			cfg:      &task.DockerConfig{},
+			imageRef: "alpine --privileged",
+		},
+		{
+			name:     "image ref with newline",
+			cfg:      &task.DockerConfig{},
+			imageRef: "alpine\nlatest",
+		},
+		{
+			name:     "port with newline",
+			cfg:      &task.DockerConfig{Ports: []string{"8080:80\n"}},
+			imageRef: "alpine",
+		},
+		{
+			name:     "volume with NUL byte",
+			cfg:      &task.DockerConfig{Volumes: []string{"/srv/a\x00b:/data"}},
+			imageRef: "alpine",
+		},
+		{
+			name:     "extra host with carriage return",
+			cfg:      &task.DockerConfig{ExtraHosts: []string{"evil:1.2.3.4\r"}},
+			imageRef: "alpine",
+		},
+		{
+			name:     "network mode with newline",
+			cfg:      &task.DockerConfig{NetworkMode: "bridge\n"},
+			imageRef: "alpine",
+		},
+		{
+			name:     "user with control character",
+			cfg:      &task.DockerConfig{User: "0:0\n"},
+			imageRef: "alpine",
+		},
+		{
+			name:     "env key with equals smuggles a second pair",
+			cfg:      &task.DockerConfig{EnvVars: map[string]string{"FOO=BAR": "x"}},
+			imageRef: "alpine",
+		},
+		{
+			name:     "env key with leading dash",
+			cfg:      &task.DockerConfig{EnvVars: map[string]string{"-e": "x"}},
+			imageRef: "alpine",
+		},
+		{
+			name:     "env value with NUL",
+			cfg:      &task.DockerConfig{EnvVars: map[string]string{"FOO": "a\x00b"}},
+			imageRef: "alpine",
+		},
+		{
+			name:     "command token with NUL",
+			cfg:      &task.DockerConfig{Command: []string{"echo", "a\x00b"}},
+			imageRef: "alpine",
+		},
+		{
+			name:     "entrypoint token with NUL",
+			cfg:      &task.DockerConfig{Entrypoint: []string{"/bin/sh\x00"}},
+			imageRef: "alpine",
+		},
+		{
+			name:     "security opt with newline",
+			cfg:      &task.DockerConfig{SecurityOpt: []string{"no-new-privileges:true\n"}},
+			imageRef: "alpine",
+		},
+		{
+			name:     "cap_add with newline",
+			cfg:      &task.DockerConfig{CapAdd: []string{"NET_BIND_SERVICE\n"}},
+			imageRef: "alpine",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := validateArgvSafety(tt.cfg, tt.imageRef); err == nil {
+				t.Errorf("expected rejection for %s", tt.name)
+			}
+		})
+	}
+}
+
+func TestValidateArgvSafety_SafeConfigPasses(t *testing.T) {
+	cfg := &task.DockerConfig{
+		Ports:       []string{"8080:80", "9090:90/udp"},
+		Volumes:     []string{"/srv/data:/data:ro", "named-vol:/cache"},
+		ExtraHosts:  []string{"host.docker.internal:host-gateway"},
+		EnvVars:     map[string]string{"FOO": "bar baz", "MULTI": "line1\nline2", "_UNDERSCORE": "ok"},
+		WorkingDir:  "/app",
+		NetworkMode: "bridge",
+		CapDrop:     []string{"ALL"},
+		CapAdd:      []string{"NET_BIND_SERVICE"},
+		SecurityOpt: []string{"no-new-privileges:true"},
+		User:        "65532:65532",
+		Command:     []string{"echo", "--flag-for-the-container", "hi"},
+		Entrypoint:  []string{"/bin/sh", "-c"},
+	}
+	if err := validateArgvSafety(cfg, "alpine:3.20"); err != nil {
+		t.Errorf("safe config rejected: %v", err)
+	}
+	// Built image tags look like dicode-<task>:<hash> and must pass too.
+	if err := validateArgvSafety(&task.DockerConfig{}, "dicode-mytask:a1b2c3d4e5f6"); err != nil {
+		t.Errorf("built image tag rejected: %v", err)
 	}
 }

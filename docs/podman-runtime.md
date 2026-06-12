@@ -129,7 +129,26 @@ The `docker:` section supports container-isolation fields that map to podman CLI
 | `read_only` | `--read-only` |
 | `user` | `--user` |
 
-A startup warning is emitted for values that visibly weaken isolation — `network_mode: host`, `cap_add` of `SYS_ADMIN`/`SYS_PTRACE`/`SYS_MODULE`/`ALL`, and `security_opt` disabling seccomp/AppArmor/SELinux. The task still runs; the warning surfaces in the UI so reviewers notice.
+A startup warning is emitted for values that visibly weaken isolation — `network_mode: host`, `cap_add` of `SYS_ADMIN`/`SYS_PTRACE`/`SYS_MODULE`/`ALL`, and `security_opt` disabling seccomp/AppArmor/SELinux.
+
+On top of the warning, a **security floor is enforced at dispatch** (issue #380): the run is **aborted with an error** — in both the docker and podman runtimes — when a task requests a dangerous escape:
+
+- `network_mode: host` (or `container:<id>` / `ns:<path>`),
+- `cap_add` of escape-capable capabilities (`ALL`, `SYS_ADMIN`, `SYS_PTRACE`, `SYS_MODULE`, `NET_ADMIN`, `DAC_READ_SEARCH`, …),
+- `security_opt` that disables a kernel sandbox layer (`seccomp=unconfined`, `apparmor=unconfined`, `label=disable`, `systempaths=unconfined`, `unmask=…`),
+- bind mounts of sensitive host paths — `/`, `/proc`, `/sys`, `/etc`, `/dev`, `/run` (including the docker/podman control sockets), container-runtime state dirs — or sources that traverse (`..`/symlinks) into them.
+
+Operators opt in to specific escapes via the `container_security` block in `dicode.yaml`:
+
+```yaml
+container_security:
+  allow_host_network: true                  # permit network_mode: host
+  allow_insecure_security_opt: true         # permit seccomp/apparmor/label weakening
+  allowed_cap_add: [SYS_PTRACE]             # caps tasks may add despite the deny list ("ALL" = any)
+  allowed_volume_roots: [/srv/dicode-data]  # strict allowlist for bind-mount sources
+```
+
+When `allowed_volume_roots` is set, every bind-mount source must resolve inside one of the listed roots (an explicitly listed root also overrides the built-in sensitive-path denylist).
 
 See [Task Format → Container fields reference](./concepts/task-format.md#container-fields-reference) for the full schema and a hardened-defaults example.
 

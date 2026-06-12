@@ -8,7 +8,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -19,6 +18,8 @@ import (
 
 	"github.com/dicode/dicode/pkg/registry"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
+	"github.com/dicode/dicode/pkg/runtime/containersec"
+	"github.com/dicode/dicode/pkg/runtime/imagegc"
 	"github.com/dicode/dicode/pkg/task"
 	dockerbuild "github.com/docker/docker/api/types/build"
 	"github.com/docker/docker/api/types/container"
@@ -45,12 +46,19 @@ type RunResult struct {
 type Runtime struct {
 	registry *registry.Registry
 	log      *zap.Logger
+	// policy is the container host-config security floor (issue #380).
+	// The zero value is the strict default: every dangerous escape denied.
+	policy containersec.Policy
 }
 
 // New creates a Docker Runtime.
 func New(r *registry.Registry, log *zap.Logger) *Runtime {
 	return &Runtime{registry: r, log: log}
 }
+
+// SetPolicy installs the operator-configured container security policy.
+// Call before the first Run; without it the strict default applies.
+func (rt *Runtime) SetPolicy(p containersec.Policy) { rt.policy = p }
 
 // fail marks a run as failed and returns the result.
 func (rt *Runtime) fail(runID string, err error) (*RunResult, error) {
@@ -72,6 +80,16 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	defer dc.Close()
 
 	cfg := spec.Docker
+
+	// Security floor (issue #380): task.yaml is untrusted input. Reject
+	// dangerous host config (host network namespace, dangerous cap_add,
+	// isolation-weakening security_opt, bind mounts of sensitive host paths)
+	// before any image is built or any container is created, unless the
+	// operator opted in via container_security in dicode.yaml.
+	if err := containersec.Validate(cfg, rt.policy); err != nil {
+		_ = rt.registry.AppendLog(ctx, runID, "error", err.Error())
+		return rt.fail(runID, err)
+	}
 
 	// Resolve the image: build from Dockerfile or pull.
 	imageTag := cfg.Image
@@ -246,8 +264,7 @@ func (rt *Runtime) buildImage(ctx context.Context, dc *dockerclient.Client, spec
 	if err != nil {
 		return "", fmt.Errorf("read Dockerfile: %w", err)
 	}
-	h := sha256.Sum256(content)
-	tag := fmt.Sprintf("dicode-%s:%x", spec.ID, h[:6])
+	tag := imagegc.Tag(spec.ID, content)
 
 	// Cache hit: image with this tag already exists.
 	if _, _, err := dc.ImageInspectWithRaw(ctx, tag); err == nil {

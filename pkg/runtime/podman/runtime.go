@@ -25,13 +25,14 @@
 // Images are tagged dicode-<taskID>:<hash> where hash is derived from the
 // Dockerfile content. If the image already exists, the build is skipped.
 //
-// TODO: clean up old dicode-<taskID>:* images when a task is removed or the Dockerfile changes.
+// Old dicode-<taskID>:* images (task removed, or Dockerfile changed) are
+// reclaimed best-effort by ReclaimOrphanedImages (see imagegc.go), which the
+// daemon calls periodically with the registry's current task list.
 package podman
 
 import (
 	"bufio"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -42,6 +43,8 @@ import (
 	podmanpkg "github.com/dicode/dicode/pkg/podman"
 	"github.com/dicode/dicode/pkg/registry"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
+	"github.com/dicode/dicode/pkg/runtime/containersec"
+	"github.com/dicode/dicode/pkg/runtime/imagegc"
 	"github.com/dicode/dicode/pkg/task"
 	"go.uber.org/zap"
 )
@@ -50,12 +53,19 @@ import (
 type Runtime struct {
 	reg *registry.Registry
 	log *zap.Logger
+	// policy is the container host-config security floor (issue #380).
+	// The zero value is the strict default: every dangerous escape denied.
+	policy containersec.Policy
 }
 
 // New creates a Podman Runtime manager.
 func New(reg *registry.Registry, log *zap.Logger) *Runtime {
 	return &Runtime{reg: reg, log: log}
 }
+
+// SetPolicy installs the operator-configured container security policy.
+// Call before NewExecutor; executors copy the policy at creation time.
+func (rt *Runtime) SetPolicy(p containersec.Policy) { rt.policy = p }
 
 // --- ManagedRuntime interface ---
 
@@ -80,7 +90,7 @@ func (rt *Runtime) Install(_ context.Context, _ string) error {
 }
 
 func (rt *Runtime) NewExecutor(binaryPath string) pkgruntime.Executor {
-	return &executor{podmanPath: binaryPath, reg: rt.reg, log: rt.log}
+	return &executor{podmanPath: binaryPath, reg: rt.reg, log: rt.log, policy: rt.policy}
 }
 
 // --- executor ---
@@ -89,6 +99,7 @@ type executor struct {
 	podmanPath string
 	reg        *registry.Registry
 	log        *zap.Logger
+	policy     containersec.Policy
 }
 
 // Execute implements runtime.Executor.
@@ -99,6 +110,17 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 	cfg := spec.Docker
 	containerName := "dicode-" + runID
 
+	// Security floor (issue #380): task.yaml is untrusted input. Reject
+	// dangerous host config (host network namespace, dangerous cap_add,
+	// isolation-weakening security_opt, bind mounts of sensitive host paths)
+	// before any image is built or any container is created, unless the
+	// operator opted in via container_security in dicode.yaml.
+	if err := containersec.Validate(cfg, e.policy); err != nil {
+		_ = e.reg.AppendLog(ctx, runID, "error", err.Error())
+		result.Error = err
+		return result, nil
+	}
+
 	// Resolve the image: build from Dockerfile or pull.
 	imageTag := cfg.Image
 	if cfg.Build != nil {
@@ -108,6 +130,14 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 			result.Error = err
 			return result, nil
 		}
+	}
+
+	// Task-controlled values are string-concatenated into the podman argv;
+	// reject values that could corrupt the invocation (issue #380).
+	if err := validateArgvSafety(cfg, imageTag); err != nil {
+		_ = e.reg.AppendLog(ctx, runID, "error", err.Error())
+		result.Error = err
+		return result, nil
 	}
 
 	args := e.buildArgs(cfg, imageTag, containerName, runID, spec.ID)
@@ -189,8 +219,7 @@ func (e *executor) buildImage(ctx context.Context, spec *task.Spec, runID string
 	if err != nil {
 		return "", fmt.Errorf("read Dockerfile: %w", err)
 	}
-	h := sha256.Sum256(content)
-	tag := fmt.Sprintf("dicode-%s:%x", spec.ID, h[:6])
+	tag := imagegc.Tag(spec.ID, content)
 
 	// Cache hit: image with this tag already exists.
 	if exec.CommandContext(ctx, e.podmanPath, "image", "exists", tag).Run() == nil { //nolint:gosec
