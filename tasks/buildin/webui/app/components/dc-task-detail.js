@@ -123,6 +123,14 @@ class DcTaskDetail extends LitElement {
     } catch(e) { alert('Failed: ' + e.message); }
   }
 
+  async _approve() {
+    if (!confirm(`Approve task "${this.taskid}"? Its triggers will arm and the current version will be trusted.`)) return;
+    try {
+      await post(`/api/tasks/${encodeURIComponent(this.taskid)}/approve`);
+      await this._load();
+    } catch(e) { alert('Approve failed: ' + e.message); }
+  }
+
   _openEditor() {
     this._editorOpen = true;
     this._currentFile = this._task?.script_file || 'task.ts';
@@ -479,9 +487,14 @@ class DcTaskDetail extends LitElement {
     const isPipeline = task.kind === 'PipelineTask';
     const hasEditor  = !isPipeline && !!task.script_file;
 
+    const needsApproval = task.pending_approval === true;
+
     return html`
       <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:var(--space-sm)">
         <h1 style="margin:0">${task.name}</h1>
+        ${needsApproval ? html`<span title="This task is new or changed and its triggers are not armed until approved"
+          style="padding:0 0.45rem;font-size:0.75rem;border-radius:3px;background:rgba(210,153,34,0.18);color:#d29922;border:1px solid rgba(210,153,34,0.45)">pending approval</span>` : ''}
+        ${needsApproval ? html`<button class="btn" style="background:#d29922" @click=${() => this._approve()}>&#10003; Approve</button>` : ''}
         <button class="btn" @click=${() => this._run()}>&#9654; Run now</button>
         ${hasEditor ? html`<button class="btn" style="background:var(--muted)" @click=${() => this._openEditor()}>&#9998; Edit code</button>` : ''}
       </div>

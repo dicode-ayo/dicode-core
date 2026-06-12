@@ -489,9 +489,34 @@ func cmdTask(c *ipc.ControlClient, args []string) error {
 		return cmdTaskCancel(c, args[1:])
 	case "delete":
 		return cmdTaskDelete(c, args[1:])
+	case "approve":
+		return cmdTaskApprove(c, args[1:])
 	default:
-		return fmt.Errorf("unknown task subcommand %q — supported: test, create, edit, save, cancel, delete", args[0])
+		return fmt.Errorf("unknown task subcommand %q — supported: test, create, edit, save, cancel, delete, approve", args[0])
 	}
+}
+
+// cmdTaskApprove implements `dicode task approve <task-id>`: approves a task
+// held pending by the trust-on-change gate, recording its content hash in
+// dicode.lock and arming its triggers.
+func cmdTaskApprove(c *ipc.ControlClient, args []string) error {
+	if len(args) != 1 || strings.HasPrefix(args[0], "-") {
+		return fmt.Errorf("usage: dicode task approve <task-id>")
+	}
+	taskID := args[0]
+	resp, err := c.Send(ipc.Request{Method: "cli.task.approve", TaskID: taskID})
+	if err != nil {
+		return err
+	}
+	if resp.Error != "" {
+		return fmt.Errorf("%s", resp.Error)
+	}
+	var r ipc.TaskApproveResult
+	if err := remarshal(resp.Result, &r); err != nil {
+		return err
+	}
+	fmt.Printf("Task %q approved — triggers armed, hash recorded in dicode.lock.\n", r.TaskID)
+	return nil
 }
 
 func cmdTaskTest(c *ipc.ControlClient, taskID string) error {
@@ -1001,6 +1026,7 @@ Commands:
   task test <task-id>             run the task's sibling task.test.* through its runtime
   task delete <task-id> [flags]   remove a task from its source (local rm / git PR)
                                   flags: --source NAME, --force
+  task approve <task-id>          approve a task held pending by the approval gate
   secrets list                    list secret keys
   secrets set <key> <value>       store a secret
   secrets delete <key>            delete a secret

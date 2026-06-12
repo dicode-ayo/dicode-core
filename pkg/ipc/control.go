@@ -43,6 +43,10 @@ type ControlServer struct {
 	taskDeleter     TaskDeleter      // nil if webui not wired (tests)
 	log             *zap.Logger
 
+	// taskApprover is the approval gate's Approve, wired via SetTaskApprover.
+	// Nil when the gate is not configured (tests).
+	taskApprover func(taskID string) error
+
 	// defaultAITask is cfg.AI.Task — the task id that `dicode ai` fires when
 	// the client doesn't supply --task. Empty when the daemon was started
 	// without config (tests).
@@ -253,6 +257,9 @@ func (cs *ControlServer) dispatch(ctx context.Context, req Request) (any, error)
 
 	case "cli.task.delete":
 		return cs.handleTaskDelete(ctx, req)
+
+	case "cli.task.approve":
+		return cs.handleTaskApprove(req)
 
 	case "cli.auth.reset_passphrase":
 		return cs.handleAuthResetPassphrase(ctx)

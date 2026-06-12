@@ -27,6 +27,7 @@ const (
 	ApprovedByTrustedSource = "trusted-source"
 	ApprovedByTrustedTask   = "trusted-task"
 	ApprovedByManual        = "manual"
+	ApprovedByToken         = "token-link"
 	ApprovedByGateDisabled  = "gate-disabled"
 	ApprovedByBootstrap     = "bootstrap"
 )
