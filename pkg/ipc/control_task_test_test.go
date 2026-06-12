@@ -2,6 +2,7 @@ package ipc
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -96,6 +97,36 @@ func TestControl_TaskTest_UnknownTask(t *testing.T) {
 	_, err := cs.handleTaskTest(context.Background(), Request{TaskID: "does/not/exist"})
 	if err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Errorf("err = %v, want 'not found'", err)
+	}
+}
+
+// TestControl_TaskTest_PendingApprovalRefused covers the approval-gate veto
+// on the CLI path: a task held pending approval must be refused BEFORE
+// tasktest.RunByID — its test file runs with full host permissions. The
+// registered task has a valid test file; only the guard stands in the way.
+func TestControl_TaskTest_PendingApprovalRefused(t *testing.T) {
+	cs, reg := newControlServerForTaskTest(t)
+	dir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(dir, "task.yaml"), []byte("name: pend\ntrigger:\n  manual: true\nruntime: deno\n"), 0644)
+	_ = os.WriteFile(filepath.Join(dir, "task.ts"), []byte("export default () => ({})\n"), 0644)
+	_ = os.WriteFile(filepath.Join(dir, "task.test.ts"), []byte(`Deno.test("ok", () => {});`+"\n"), 0644)
+	spec := &task.Spec{
+		ID: "src/pending", Name: "pend", Runtime: task.RuntimeDeno,
+		Trigger: task.TriggerConfig{Manual: true}, Timeout: 5 * time.Second, TaskDir: dir,
+	}
+	_ = reg.Register(spec)
+
+	cs.SetTestGuard(func(id string) error {
+		return errors.New("task pending approval: " + id)
+	})
+
+	res, err := cs.handleTaskTest(context.Background(), Request{TaskID: "src/pending"})
+	if err == nil || !strings.Contains(err.Error(), "pending approval") {
+		t.Fatalf("err = %v, want pending-approval refusal", err)
+	}
+	// The refusal must happen before the runner: no output, no counts.
+	if res.Output != "" || res.Passed != 0 || res.Failed != 0 {
+		t.Errorf("test runner output present despite refusal: %+v", res)
 	}
 }
 

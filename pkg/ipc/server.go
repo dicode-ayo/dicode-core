@@ -64,6 +64,11 @@ type Server struct {
 	sourceMgr    SourceDevModeSetter  // optional; enables dicode.sources.set_dev_mode
 	repoResolver RepoPathResolver     // optional; enables dicode.git.commit_push
 	crypto       *cryptoHandler       // optional; enables dicode.crypto.{encrypt, decrypt}
+	// testGuard vetoes dicode.tasks.test for a given task ID. The approval
+	// gate wires its FireGuard here: a pending (unapproved) task's test file
+	// runs with full host permissions, so it must be refused exactly like a
+	// fire. Nil means allow.
+	testGuard func(taskID string) error
 
 	ctx        context.Context
 	socketPath string
@@ -319,6 +324,12 @@ func (s *Server) SetRepoResolver(r RepoPathResolver) { s.repoResolver = r }
 func (s *Server) SetCryptoHandler(d SubKeyDeriver) {
 	s.crypto = newCryptoHandler(d)
 }
+
+// SetTestGuard installs the approval gate's veto for dicode.tasks.test.
+// A non-nil error from the guard refuses the test run (the target task's
+// test file executes with full host permissions, so an unapproved task must
+// not reach it). nil allows everything. Must be called before Start.
+func (s *Server) SetTestGuard(g func(taskID string) error) { s.testGuard = g }
 
 // ReturnCh receives the task return value once the subprocess sends "return".
 func (s *Server) ReturnCh() <-chan any { return s.retCh }
@@ -902,6 +913,14 @@ func (s *Server) handleConn(conn net.Conn) {
 			if req.TaskID == "" {
 				reply(req.ID, nil, "ipc: taskID required")
 				continue
+			}
+			// Approval-gate veto: the test file runs with full host perms,
+			// so a pending task must be refused here just like a fire.
+			if s.testGuard != nil {
+				if gerr := s.testGuard(req.TaskID); gerr != nil {
+					reply(req.ID, nil, "ipc: "+gerr.Error())
+					continue
+				}
 			}
 			spec, ok := s.registry.Get(req.TaskID)
 			if !ok {

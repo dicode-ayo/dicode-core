@@ -117,6 +117,10 @@ type Runtime struct {
 	// declare permissions.dicode.crypto. Wired at daemon boot via
 	// SetCryptoHandler; reads through parent in per-version executors.
 	cryptoDeriver ipc.SubKeyDeriver // optional; nil disables crypto IPC
+	// testGuard is the approval gate's veto for dicode.tasks.test, forwarded
+	// to every per-run IPC server. Reads through parent in per-version
+	// executors. Nil means allow.
+	testGuard func(taskID string) error
 }
 
 // effectiveInputStore returns the live InputStore to use for this runtime
@@ -212,6 +216,20 @@ func (rt *Runtime) effectiveCryptoDeriver() ipc.SubKeyDeriver {
 		return rt.parent.cryptoDeriver
 	}
 	return rt.cryptoDeriver
+}
+
+// SetTestGuard wires the approval gate's veto for dicode.tasks.test into
+// every per-run IPC server. Nil means allow; mirrors the SetCryptoHandler
+// wiring pattern.
+func (rt *Runtime) SetTestGuard(g func(taskID string) error) { rt.testGuard = g }
+
+// effectiveTestGuard returns the live test guard, reading through parent
+// when this is a per-version executor.
+func (rt *Runtime) effectiveTestGuard() func(taskID string) error {
+	if rt.parent != nil {
+		return rt.parent.testGuard
+	}
+	return rt.testGuard
 }
 
 // SetSecretOutputChannel wires the channel that receives provider tasks'
@@ -320,6 +338,9 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	}
 	if d := rt.effectiveCryptoDeriver(); d != nil {
 		srv.SetCryptoHandler(d)
+	}
+	if g := rt.effectiveTestGuard(); g != nil {
+		srv.SetTestGuard(g)
 	}
 	socketPath, token, err := srv.Start(execCtx)
 	if err != nil {

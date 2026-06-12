@@ -1802,6 +1802,46 @@ func TestIPC_TasksTest_GrantedByCap(t *testing.T) {
 	}
 }
 
+// TestIPC_TasksTest_PendingApprovalRefused covers the approval-gate veto on
+// the per-task IPC path: even a caller task that holds the tasks_test
+// capability must not be able to run a PENDING task's test file (it executes
+// with full host permissions). The guard fires before the registry lookup
+// and before tasktest.Run.
+func TestIPC_TasksTest_PendingApprovalRefused(t *testing.T) {
+	e := newTestEnv(t)
+	_ = e.reg.Register(&task.Spec{ID: "src/pending", Name: "pending"})
+
+	spec := &task.Spec{
+		Permissions: task.Permissions{
+			Dicode: &task.DicodePermissions{TasksTest: true},
+		},
+	}
+	runID := fmt.Sprintf("pend-tasks-test-%d", time.Now().UnixNano())
+	srv := New(runID, "caller-task", e.secret, e.reg, e.db, nil, nil, zap.NewNop(), spec, nil)
+	srv.SetTestGuard(func(id string) error {
+		return fmt.Errorf("task pending approval: %s", id)
+	})
+	socketPath, token, err := srv.Start(context.Background())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(srv.Stop)
+	conn := dial(t, socketPath)
+	t.Cleanup(func() { conn.Close() })
+	doHandshake(t, conn, token)
+
+	sendMsg(t, conn, map[string]any{
+		"id":     "pend-1",
+		"method": "dicode.tasks.test",
+		"taskID": "src/pending",
+	})
+	resp := recvMsg(t, conn)
+	errMsg, _ := resp["error"].(string)
+	if !strings.Contains(errMsg, "pending approval") {
+		t.Errorf("expected pending-approval refusal, got: %q (full resp: %#v)", errMsg, resp)
+	}
+}
+
 // TestIPC_SourcesSetDevMode_RequiresCap verifies that a task spec WITHOUT
 // permissions.dicode.sources_set_dev_mode: true cannot call
 // dicode.sources.set_dev_mode — it must receive "permission denied".

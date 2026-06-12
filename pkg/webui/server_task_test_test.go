@@ -3,6 +3,7 @@ package webui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -100,6 +101,39 @@ func TestAPI_TestTask_Success(t *testing.T) {
 	}
 	if resp.Passed < 1 {
 		t.Errorf("passed: got %d, want >= 1", resp.Passed)
+	}
+}
+
+// TestAPI_TestTask_PendingApprovalRefused covers the approval-gate veto:
+// a task held pending approval must NOT have its test file executed — the
+// sibling test runs with full host permissions, so the endpoint must refuse
+// with 409 before tasktest.RunByID is ever reached.
+func TestAPI_TestTask_PendingApprovalRefused(t *testing.T) {
+	srv, reg := newTestServer(t)
+	registerTaskWithTest(t, reg, "pending-task", "", passingTest)
+	srv.SetTestGuard(func(id string) error {
+		return errors.New("task pending approval: " + id)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks/pending-task/test", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "pending approval") {
+		t.Errorf("body should carry the pending message, got: %s", w.Body.String())
+	}
+	// A guard that allows the task must not interfere.
+	srv.SetTestGuard(func(string) error { return nil })
+	req = httptest.NewRequest(http.MethodPost, "/api/tasks/pending-task/test", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("allowing guard: expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 }
 

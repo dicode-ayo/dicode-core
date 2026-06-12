@@ -47,6 +47,12 @@ type ControlServer struct {
 	// without config (tests).
 	defaultAITask string
 
+	// testGuard vetoes cli.task.test for a given task ID. The approval gate
+	// wires its FireGuard here so a pending (unapproved) task's test file —
+	// which runs with full host permissions — cannot be executed from the
+	// CLI. Nil means allow.
+	testGuard func(taskID string) error
+
 	startedAt time.Time
 	version   string
 }
@@ -316,6 +322,11 @@ type AuthoringEditResult struct {
 // Called from the daemon at startup once the webui Server is built. Nil leaves
 // the methods returning a clear error (tests / configurations without webui).
 func (cs *ControlServer) SetAuthoringService(a AuthoringService) { cs.authoring = a }
+
+// SetTestGuard installs the approval gate's veto for cli.task.test. A
+// non-nil error from the guard refuses the test run. nil allows everything.
+// Must be called before Start.
+func (cs *ControlServer) SetTestGuard(g func(taskID string) error) { cs.testGuard = g }
 
 func (cs *ControlServer) handleTaskCreate(ctx context.Context, req Request) (TaskCreateResult, error) {
 	if cs.authoring == nil {
@@ -742,6 +753,13 @@ type TaskTestResult struct {
 func (cs *ControlServer) handleTaskTest(ctx context.Context, req Request) (TaskTestResult, error) {
 	if req.TaskID == "" {
 		return TaskTestResult{}, errors.New("taskID required")
+	}
+	// Approval-gate veto: the test file runs with full host permissions, so
+	// a pending (unapproved) task must be refused here just like a fire.
+	if cs.testGuard != nil {
+		if err := cs.testGuard(req.TaskID); err != nil {
+			return TaskTestResult{TaskID: req.TaskID}, err
+		}
 	}
 	res, _, err := tasktest.RunByID(ctx, cs.reg, req.TaskID, nil, 0)
 	wire := TaskTestResult{

@@ -356,20 +356,34 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	approvalGate := approval.NewGate(gatePolicy, lock, arm, log)
 	// Pending tasks stay in the registry (API visibility, like Enabled:false)
 	// and remain resolvable by manual / chain / replay fire paths — the fire
-	// guard vetoes those at the engine chokepoint.
+	// guard vetoes those at the engine chokepoint. The same guard also vetoes
+	// the task-TEST surfaces: test files run with full host permissions
+	// (deno test --allow-all), so an unapproved task's test code must be
+	// refused everywhere it can be invoked — REST (webui), CLI control
+	// socket, and the per-run dicode.tasks.test IPC capability.
 	eng.SetFireGuard(approvalGate.FireGuard)
+	denoRT.SetTestGuard(approvalGate.FireGuard)
+	pythonRT.SetTestGuard(approvalGate.FireGuard)
 
 	// First-run bootstrap: with no dicode.lock, seed the existing inventory as
 	// approved instead of stranding every task behind a gate that has no
-	// approve UI yet. The window opens on the first registration and closes
-	// once the initial source sync settles (bootstrapSettle of quiet); tasks
-	// that change or appear after that are gated normally.
+	// approve UI yet. The settle timer is armed immediately — not on the
+	// first registration — so the window also closes on an install with zero
+	// tasks; otherwise the first task to ever appear would be auto-approved.
+	// Each registration during the window slides it forward (tolerates a slow
+	// first git clone). FinishBootstrap is idempotent, so the timer firing is
+	// always safe.
+	var bootstrapTimer *time.Timer
 	if !lockExisted && gatePolicy.Enabled {
 		approvalGate.SetBootstrap(true)
+		bootstrapTimer = time.AfterFunc(bootstrapSettle, func() {
+			if approvalGate.FinishBootstrap() {
+				log.Info("approval gate active — subsequent task changes require approval")
+			}
+		})
 		log.Info("approval gate: no dicode.lock — seeding current tasks as approved (first-run bootstrap); changes after startup require approval",
 			zap.String("lock", lockPath))
 	}
-	var bootstrapTimer *time.Timer
 
 	rec.OnRegister = func(k task.Kinded) {
 		armed, err := approvalGate.Admit(k)
@@ -382,16 +396,8 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 		if armed {
 			// Slide the bootstrap window forward while the initial inventory
 			// is still streaming in (handles slow first git clone).
-			if approvalGate.Bootstrapping() {
-				if bootstrapTimer == nil {
-					bootstrapTimer = time.AfterFunc(bootstrapSettle, func() {
-						if approvalGate.FinishBootstrap() {
-							log.Info("approval gate active — subsequent task changes require approval")
-						}
-					})
-				} else {
-					bootstrapTimer.Reset(bootstrapSettle)
-				}
+			if approvalGate.Bootstrapping() && bootstrapTimer != nil {
+				bootstrapTimer.Reset(bootstrapSettle)
 			}
 			return
 		}
@@ -467,6 +473,7 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 		return fmt.Errorf("build webui: %w", err)
 	}
 	srv.SetManagedRuntimes(managedRuntimes)
+	srv.SetTestGuard(approvalGate.FireGuard)
 	if replayer != nil {
 		srv.SetReplayer(replayer)
 	}
@@ -493,6 +500,10 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	// auto-generate keys via the control socket. The webui Server holds
 	// the apiKeyStore; control just dispatches.
 	ctrlSrv.SetAPIKeyMinter(srv)
+
+	// Approval-gate veto for `dicode task test` — same guard as the engine's
+	// fire paths and the REST test endpoint.
+	ctrlSrv.SetTestGuard(approvalGate.FireGuard)
 
 	// Wire AI-first task authoring so `dicode task create|edit|save|cancel`
 	// reuses the same source manager and author_sessions store the REST
