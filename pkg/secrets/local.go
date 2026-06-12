@@ -16,7 +16,8 @@ import (
 // The encryption key is derived from a master key via Argon2id.
 //
 // Master key resolution order:
-//  1. DICODE_MASTER_KEY env var (base64-encoded 32 bytes)
+//  1. DICODE_MASTER_KEY env var (base64-encoded 32 bytes; unset from the
+//     process env after a successful load so children cannot inherit it)
 //  2. ~/.dicode/master.key file (auto-generated on first run, chmod 600)
 //
 // The raw master is retained (in `masterKey`) so DeriveSubKey can derive
@@ -153,6 +154,11 @@ func loadOrCreateMasterKey(dataDir string) ([]byte, error) {
 		if len(key) != 32 {
 			return nil, fmt.Errorf("DICODE_MASTER_KEY must be 32 bytes (base64-encoded)")
 		}
+		// Remove the key from the process env so child processes (task
+		// subprocesses inherit a subset of the daemon env) can never see it.
+		// The raw bytes are retained in LocalProvider.masterKey for
+		// DeriveSubKey, so derivation is unaffected.
+		os.Unsetenv("DICODE_MASTER_KEY")
 		return key, nil
 	}
 

@@ -323,7 +323,7 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 	tmpFile.Close()
 
 	cmd := exec.CommandContext(execCtx, e.uvPath, "run", tmpFile.Name()) //nolint:gosec
-	cmd.Env = buildEnv(resolved, socketPath, token)
+	cmd.Env = pkgruntime.SubprocessEnv(spec, resolved, socketPath, token)
 
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
@@ -471,12 +471,4 @@ func mergeParams(specParams []task.Param, overrides map[string]string) map[strin
 		out[k] = v
 	}
 	return out
-}
-
-func buildEnv(resolved map[string]string, socketPath, token string) []string {
-	env := append(os.Environ(), "DICODE_SOCKET="+socketPath, "DICODE_TOKEN="+token)
-	for k, v := range resolved {
-		env = append(env, k+"="+v)
-	}
-	return env
 }
