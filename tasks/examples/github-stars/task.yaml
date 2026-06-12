@@ -12,4 +12,8 @@ params:
     description: GitHub repo in owner/name format
     default: "denoland/deno"
 
+permissions:
+  net:
+    - api.github.com
+
 timeout: 30s

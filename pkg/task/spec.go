@@ -272,9 +272,9 @@ type Permissions struct {
 	// Use ["*"] for all; omit to deny all subprocess execution.
 	Run []string `yaml:"run,omitempty" json:"run,omitempty"`
 	// Net controls outbound network access (Deno and Python).
-	// Omit or use ["*"] for unrestricted access.
+	// Omit or use [] (empty list) to deny all network access (default).
+	// Use ["*"] for unrestricted access.
 	// List specific hosts to restrict: ["api.github.com", "hooks.slack.com"].
-	// Use [] (empty list) to deny all network access.
 	Net []string `yaml:"net,omitempty" json:"net,omitempty"`
 	// Sys lists Deno system-info APIs the task may call (Deno only; the
 	// names have no usable Python equivalent, so Python ignores this field).

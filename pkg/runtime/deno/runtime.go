@@ -513,19 +513,16 @@ func expandHome(p string) string {
 func buildDenoArgs(spec *task.Spec, socketPath, shimPath, runnerPath string) []string {
 	args := []string{"run"}
 
-	// Network: omit = unrestricted (--allow-net); empty list = deny all; named hosts = allowlist.
-	// The IPC socket itself uses a Unix socket (--allow-read/write), not TCP, so net
-	// permission does not affect it.
+	// Network is deny-by-default: omit or [] = deny all; ["*"] = unrestricted;
+	// named hosts = allowlist. The IPC socket itself uses a Unix socket
+	// (--allow-read/write), not TCP, so net permission does not affect it.
 	net := spec.Permissions.Net
-	if net == nil {
-		// no net: field → unrestricted (backward-compatible default)
-		args = append(args, "--allow-net")
-	} else if len(net) == 1 && net[0] == "*" {
+	if len(net) == 1 && net[0] == "*" {
 		args = append(args, "--allow-net")
 	} else if len(net) > 0 {
 		args = append(args, "--allow-net="+strings.Join(net, ","))
 	}
-	// len(net) == 0 (explicit empty list) → no --allow-net flag → network denied
+	// nil or explicit empty list → no --allow-net flag → network denied
 
 	// Env: always allow the internal IPC vars plus HOME/DENO_DIR/XDG_CACHE_HOME
 	// (required by deno.land/x/cache for vendored binary downloads).

@@ -44,9 +44,9 @@ type guardRun struct {
 // buildGuardPolicy maps spec.Permissions onto the audit-hook policy with the
 // same semantics as the Deno runtime's buildDenoArgs:
 //
-//	net: omit → unrestricted; ["*"] → unrestricted; [h, ...] → allowlist;
-//	     [] (explicit empty) → deny all. Omit=unrestricted is intentional
-//	     parity with Deno; #379 tracks changing the default to deny.
+//	net: deny by default — omit or [] → deny all; ["*"] → unrestricted;
+//	     [h, ...] → allowlist. A task gets network access only by declaring
+//	     it explicitly.
 //	run: ["*"] → allow all; [c, ...] → allowlist; empty/omit → deny all.
 //	fs:  "w"/"rw" entries form the write allowlist. "~" expands to the user
 //	     home; relative paths resolve against the task dir. "r" entries are
@@ -58,7 +58,7 @@ func buildGuardPolicy(spec *task.Spec, socketPath string) guardPolicy {
 
 	net := spec.Permissions.Net
 	switch {
-	case net == nil, len(net) == 1 && net[0] == "*":
+	case len(net) == 1 && net[0] == "*":
 		pol.Net.Mode = "unrestricted"
 	case len(net) > 0:
 		pol.Net.Mode = "allowlist"

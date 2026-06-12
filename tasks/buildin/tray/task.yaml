@@ -17,6 +17,12 @@ permissions:
   fs:
     - path: ~/.cache
       permission: rw
+  # systray-portable binary download: github.com redirects release assets
+  # to *.githubusercontent.com hosts.
+  net:
+    - github.com
+    - objects.githubusercontent.com
+    - release-assets.githubusercontent.com
 
 params:
   tray_version:

@@ -367,11 +367,18 @@ func TestRuntime_HTTP(t *testing.T) {
 	defer srv.Close()
 
 	e := newTestEnv(t)
-	r := e.run(t, `
+	spec := &task.Spec{
+		ID: "net-http", Name: "net-http", Runtime: task.RuntimeDeno,
+		Trigger: task.TriggerConfig{Manual: true}, Timeout: 30 * time.Second,
+		Permissions: task.Permissions{
+			Net: []string{"127.0.0.1"},
+		},
+	}
+	r := e.runSpec(t, `export default async function main() {
 		const res = await fetch("`+srv.URL+`")
 		const body = await res.json()
 		return body.ok
-	`)
+	}`, spec)
 	if r.Error != nil {
 		t.Fatalf("error: %v", r.Error)
 	}
@@ -380,8 +387,37 @@ func TestRuntime_HTTP(t *testing.T) {
 	}
 }
 
-func TestRuntime_HTTP_Unrestricted(t *testing.T) {
-	// net: omitted → --allow-net (unrestricted); fetch should succeed.
+// TestRuntime_Net_DefaultDeny: net: omitted → no --allow-net flag; all network blocked.
+func TestRuntime_Net_DefaultDeny(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"ok":true}`)) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	e := newTestEnv(t)
+	spec := &task.Spec{
+		ID: "net-default", Name: "net-default", Runtime: task.RuntimeDeno,
+		Trigger: task.TriggerConfig{Manual: true}, Timeout: 30 * time.Second,
+		// Permissions.Net is nil → deny all
+	}
+	r := e.runSpec(t, `export default async function main() {
+		try {
+			await fetch("`+srv.URL+`")
+			return "allowed"
+		} catch (e) {
+			return "blocked"
+		}
+	}`, spec)
+	if r.Error != nil {
+		t.Fatalf("unexpected run error: %v", r.Error)
+	}
+	if r.ReturnValue != "blocked" {
+		t.Errorf("expected omitted net to deny all network, got %v", r.ReturnValue)
+	}
+}
+
+// TestRuntime_Net_Wildcard: net: ["*"] → --allow-net (unrestricted); fetch succeeds.
+func TestRuntime_Net_Wildcard(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Write([]byte(`{"ok":true}`)) //nolint:errcheck
 	}))
@@ -391,7 +427,9 @@ func TestRuntime_HTTP_Unrestricted(t *testing.T) {
 	spec := &task.Spec{
 		ID: "net-open", Name: "net-open", Runtime: task.RuntimeDeno,
 		Trigger: task.TriggerConfig{Manual: true}, Timeout: 30 * time.Second,
-		// Permissions.Net is nil → unrestricted
+		Permissions: task.Permissions{
+			Net: []string{"*"},
+		},
 	}
 	r := e.runSpec(t, `export default async function main() {
 		const res = await fetch("`+srv.URL+`")

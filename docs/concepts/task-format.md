@@ -79,7 +79,7 @@ permissions:
 | `permissions.fs[].path` | string | | Absolute or `~`-prefixed path |
 | `permissions.fs[].permission` | string | | `r`, `w`, or `rw` |
 | `permissions.run` | list of strings | | Executables the script may spawn (Deno and Python); use `["*"]` for all |
-| `permissions.net` | list of strings | | Outbound network hosts (Deno and Python); omit = unrestricted, `[]` = deny all |
+| `permissions.net` | list of strings | | Outbound network hosts (Deno and Python); omit or `[]` = deny all, `["*"]` = unrestricted |
 | `permissions.sys` | list of strings | | Deno sys APIs (Deno only); omit = deny all, `["*"]` = all |
 | `permissions.dicode` | object | | Which dicode runtime APIs the task may call (all denied by default) |
 | `permissions.dicode.tasks` | list of strings | | Task IDs the script may invoke via `dicode.run_task()`; use `["*"]` for all |
@@ -908,7 +908,7 @@ permissions:
     - name: DB_PASS             # secret: resolve "db_password" from secrets store
       secret: db_password
   net:
-    - "api.github.com"          # restrict outbound to these hosts (omit = unrestricted)
+    - "api.github.com"          # restrict outbound to these hosts (omit = deny all)
   fs:
     - path: ~/data
       permission: r             # read-only
@@ -1069,9 +1069,12 @@ Controls which hostnames the task may connect to (Deno `--allow-net`; Python aud
 
 | Value | Effect |
 | --- | --- |
-| Omit field (default) | Unrestricted outbound |
+| Omit field (default) | Deny all outbound network |
+| `["*"]` | Unrestricted outbound |
 | `["api.github.com", "hooks.slack.com"]` | Restrict to listed hosts only |
 | `[]` (empty list) | Deny all outbound network |
+
+> **Migration note:** the default used to be unrestricted. Any existing task that makes outbound network calls but omits `permissions.net` must now declare it explicitly — `net: ["*"]` for arbitrary hosts, or a minimal host allowlist.
 
 The Python enforcement is a guardrail, not a security boundary: hostnames are vetted at DNS resolution, so IP-literal connections pass the allowlist (deny-all still blocks them), and pooled or exotic async connections may not re-emit audit events.
 

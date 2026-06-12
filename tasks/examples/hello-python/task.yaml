@@ -17,3 +17,7 @@ params:
   count:
     description: Run count (shown in greeting)
     default: "1"
+
+permissions:
+  net:
+    - httpbin.org

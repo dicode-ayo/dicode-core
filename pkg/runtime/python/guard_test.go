@@ -20,7 +20,7 @@ func TestBuildGuardPolicy_NetModes(t *testing.T) {
 		wantMode  string
 		wantHosts []string
 	}{
-		{"omitted is unrestricted", nil, "unrestricted", nil},
+		{"omitted denies all", nil, "deny", nil},
 		{"wildcard is unrestricted", []string{"*"}, "unrestricted", nil},
 		{"hosts form an allowlist", []string{"api.github.com", "hooks.slack.com:443"}, "allowlist", []string{"api.github.com", "hooks.slack.com:443"}},
 		{"explicit empty denies all", []string{}, "deny", nil},
