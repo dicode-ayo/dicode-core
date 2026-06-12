@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/dicode/dicode/pkg/approval"
+	"github.com/dicode/dicode/pkg/audit"
 	"github.com/dicode/dicode/pkg/config"
 	"github.com/dicode/dicode/pkg/db"
 	"github.com/dicode/dicode/pkg/ipc"
@@ -570,8 +571,41 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 		}
 	}
 
+	// 9.5. Audit-log retention (#45). Event emission is wired implicitly —
+	// the trigger engine (SetDB), per-run IPC servers, and webui all build
+	// their own audit.Store over the shared database handle. The daemon
+	// only owns pruning: once at startup, then periodically. retention 0
+	// (explicit opt-out) disables pruning entirely; Prune itself also
+	// refuses to run with a non-positive window.
+	auditStore := audit.NewStore(database)
+	auditRetentionDays := cfg.AuditLog.EffectiveRetentionDays()
+	if auditRetentionDays > 0 {
+		if err := auditStore.Prune(ctx, auditRetentionDays); err != nil {
+			log.Warn("audit log prune failed", zap.Error(err))
+		}
+		log.Info("audit log retention enabled", zap.Int("retention_days", auditRetentionDays))
+	} else {
+		log.Info("audit log pruning disabled (audit_log.retention_days: 0)")
+	}
+
 	// 10. Run everything concurrently.
 	g, ctx := errgroup.WithContext(ctx)
+	if auditRetentionDays > 0 {
+		g.Go(func() error {
+			ticker := time.NewTicker(6 * time.Hour)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return nil
+				case <-ticker.C:
+					if err := auditStore.Prune(ctx, auditRetentionDays); err != nil {
+						log.Warn("audit log prune failed", zap.Error(err))
+					}
+				}
+			}
+		})
+	}
 	g.Go(func() error { return rec.Run(ctx) })
 	g.Go(func() error { return eng.Start(ctx) })
 	g.Go(func() error { return srv.Start(ctx) })
