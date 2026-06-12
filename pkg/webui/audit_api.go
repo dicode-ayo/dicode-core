@@ -5,6 +5,7 @@ import (
 	"strconv"
 
 	"github.com/dicode/dicode/pkg/audit"
+	"go.uber.org/zap"
 )
 
 // apiQueryAudit serves GET /api/audit?task_id=&actor=&event_type=&limit=&offset=
@@ -29,7 +30,7 @@ func (s *Server) apiQueryAudit(w http.ResponseWriter, r *http.Request) {
 		Offset:    offset,
 	})
 	if err != nil {
-		s.log.Error("audit query failed")
+		s.log.Error("audit query failed", zap.Error(err))
 		jsonErr(w, "audit query failed", http.StatusInternalServerError)
 		return
 	}
