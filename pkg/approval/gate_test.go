@@ -380,3 +380,85 @@ func TestContentHashFallsBackToSpecJSON(t *testing.T) {
 		t.Fatalf("fallback hashes not distinct: %q vs %q", ha, hb)
 	}
 }
+
+func TestPendingHash(t *testing.T) {
+	g, _, _ := newTestGate(t, enabledPolicy())
+	spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "v1")
+
+	if _, ok := g.PendingHash("repo/deploy"); ok {
+		t.Fatal("PendingHash before Admit must report not-pending")
+	}
+	if armed, _ := g.Admit(spec); armed {
+		t.Fatal("expected pending")
+	}
+	hash, ok := g.PendingHash("repo/deploy")
+	if !ok || hash == "" {
+		t.Fatalf("PendingHash = (%q, %v), want observed hash", hash, ok)
+	}
+	want, err := ContentHash(spec)
+	if err != nil {
+		t.Fatalf("ContentHash: %v", err)
+	}
+	if hash != want {
+		t.Fatalf("PendingHash = %q, want %q", hash, want)
+	}
+}
+
+func TestApproveIfHashMatch(t *testing.T) {
+	g, arm, lock := newTestGate(t, enabledPolicy())
+	spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "v1")
+	if armed, _ := g.Admit(spec); armed {
+		t.Fatal("expected pending")
+	}
+	hash, _ := g.PendingHash("repo/deploy")
+
+	if err := g.ApproveIfHash("repo/deploy", hash); err != nil {
+		t.Fatalf("ApproveIfHash: %v", err)
+	}
+	if got := arm.armedIDs(); len(got) != 1 || got[0] != "repo/deploy" {
+		t.Fatalf("armed = %v", got)
+	}
+	rec, ok := lock.Get("repo/deploy")
+	if !ok || rec.ApprovedBy != ApprovedByToken || rec.Hash != hash {
+		t.Fatalf("lock record = %+v, ok=%v", rec, ok)
+	}
+	if g.IsPending("repo/deploy") {
+		t.Fatal("approved task still pending")
+	}
+}
+
+func TestApproveIfHashMismatchRejected(t *testing.T) {
+	g, arm, lock := newTestGate(t, enabledPolicy())
+	spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "v1")
+	if armed, _ := g.Admit(spec); armed {
+		t.Fatal("expected pending")
+	}
+	staleHash, _ := g.PendingHash("repo/deploy")
+
+	// Task content changes; the gate re-observes a new hash.
+	if err := os.WriteFile(filepath.Join(spec.TaskDir, "task.js"), []byte("v2 — changed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if armed, _ := g.Admit(spec); armed {
+		t.Fatal("changed task must still be pending")
+	}
+
+	// The stale hash must not approve the new version.
+	if err := g.ApproveIfHash("repo/deploy", staleHash); err == nil {
+		t.Fatal("stale-hash approval must be rejected")
+	}
+	if !g.IsPending("repo/deploy") {
+		t.Fatal("task must stay pending after rejected approval")
+	}
+	if got := arm.armedIDs(); len(got) != 0 {
+		t.Fatalf("arm called despite rejection: %v", got)
+	}
+	if _, ok := lock.Get("repo/deploy"); ok {
+		t.Fatal("lock must not be written on rejected approval")
+	}
+
+	// Empty hash never approves.
+	if err := g.ApproveIfHash("repo/deploy", ""); err == nil {
+		t.Fatal("empty-hash approval must be rejected")
+	}
+}

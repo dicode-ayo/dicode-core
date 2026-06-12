@@ -165,6 +165,24 @@ func (g *Gate) Admit(k task.Kinded) (armed bool, err error) {
 // Approve approves a pending task: records its observed hash in the lock and
 // arms its triggers. Returns an error when the task is not pending.
 func (g *Gate) Approve(id string) error {
+	return g.approve(id, "", ApprovedByManual)
+}
+
+// ApproveIfHash approves a pending task only when the hash observed at
+// gate-decision time equals hash. Token-link redemptions go through this so a
+// token minted for one version of a task can never approve a later version:
+// if the task content changed after the token was issued, the redemption is
+// rejected and the task stays pending.
+func (g *Gate) ApproveIfHash(id, hash string) error {
+	if hash == "" {
+		return fmt.Errorf("approve %q: empty hash", id)
+	}
+	return g.approve(id, hash, ApprovedByToken)
+}
+
+// approve is the shared approval path. A non-empty wantHash must match the
+// pending entry's observed hash exactly.
+func (g *Gate) approve(id, wantHash, by string) error {
 	g.mu.Lock()
 	ent, ok := g.pending[id]
 	g.mu.Unlock()
@@ -174,13 +192,22 @@ func (g *Gate) Approve(id string) error {
 	if ent.hash == "" {
 		return fmt.Errorf("task %q has no computable content hash; cannot approve", id)
 	}
-	if err := g.lock.Record(id, ent.hash, ApprovedByManual); err != nil {
+	if wantHash != "" && ent.hash != wantHash {
+		return fmt.Errorf("task %q changed since the approval was issued; re-review and approve the current version", id)
+	}
+	if err := g.lock.Record(id, ent.hash, by); err != nil {
 		return fmt.Errorf("record approval for %q: %w", id, err)
 	}
 	if err := g.arm(ent.kinded); err != nil {
 		return fmt.Errorf("arm %q: %w", id, err)
 	}
-	g.clearPending(id)
+	// Clear only the entry we approved: a concurrent Admit may have re-pended
+	// the task at a newer hash, and that newer version must stay held.
+	g.mu.Lock()
+	if cur, ok := g.pending[id]; ok && cur.hash == ent.hash {
+		delete(g.pending, id)
+	}
+	g.mu.Unlock()
 	return nil
 }
 
@@ -212,6 +239,18 @@ func (g *Gate) IsPending(id string) bool {
 	defer g.mu.Unlock()
 	_, ok := g.pending[id]
 	return ok
+}
+
+// PendingHash returns the content hash observed when id was held pending,
+// and whether id is pending at all. Approval tokens are bound to this hash.
+func (g *Gate) PendingHash(id string) (string, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	ent, ok := g.pending[id]
+	if !ok {
+		return "", false
+	}
+	return ent.hash, true
 }
 
 // FireGuard vetoes any fire of a pending task. Wired into the trigger

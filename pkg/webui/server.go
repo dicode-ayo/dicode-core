@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/alexedwards/scs/v2"
+	"github.com/dicode/dicode/pkg/approval"
 	"github.com/dicode/dicode/pkg/config"
 	"github.com/dicode/dicode/pkg/db"
 	"github.com/dicode/dicode/pkg/ipc"
@@ -155,6 +156,13 @@ type Server struct {
 	// test file runs with full host permissions, so it must be refused
 	// exactly like a fire. Nil means allow.
 	testGuard func(taskID string) error
+
+	// approvalGate is the trust-on-change gate's approve/pending surface
+	// (SetApprovalGate). Nil disables the pending flag and the approve
+	// endpoints. approvalTokens persists single-use approve-link tokens
+	// (SetApprovalTokenStore); nil disables the /approve/{token} link flow.
+	approvalGate   ApprovalGate
+	approvalTokens *approval.TokenStore
 }
 
 // SetReplayer wires a Replayer for the POST /api/runs/{runID}/replay
@@ -598,6 +606,17 @@ func (s *Server) Handler() http.Handler {
 	// or a Bearer API key (CLI / auto-fix scripts). Mounted outside the
 	// session-only group so machine callers without cookies still work.
 	r.With(s.requireSessionOrAPIKey).Post("/api/runs/{runID}/replay", s.apiReplayRun)
+
+	// Approval-gate approve endpoint (#398) — same auth posture as replay:
+	// session cookie (WebUI approve button) or Bearer API key.
+	r.With(s.requireSessionOrAPIKey).Post("/api/tasks/{id}/approve", s.apiApproveTask)
+
+	// Tokenized approve link (#398) — the single-use token in the URL is the
+	// auth, so these stay outside the session groups. GET renders a confirm
+	// page without consuming the token (link prefetchers must not approve);
+	// POST redeems it.
+	r.Get("/approve/{token}", s.handleApproveLinkPage)
+	r.Post("/approve/{token}", s.handleApproveLinkRedeem)
 
 	return r
 }
@@ -1308,6 +1327,9 @@ type TaskListItem struct {
 	TriggerLabel  string `json:"trigger_label"`
 	LastRunID     string `json:"last_run_id,omitempty"`
 	LastRunStatus string `json:"last_run_status,omitempty"`
+	// PendingApproval flags a task held by the trust-on-change approval gate:
+	// its triggers are not armed until an operator approves it.
+	PendingApproval bool `json:"pending_approval,omitempty"`
 }
 
 // PipelineListItem is the shape returned by GET /api/tasks for a kind:
@@ -1315,13 +1337,14 @@ type TaskListItem struct {
 // view reads (id/name/enabled/kind/trigger_label/last_run_*) without embedding
 // *task.Spec, since a PipelineTask is a peer of Spec, not a Spec.
 type PipelineListItem struct {
-	ID            string `json:"id"`
-	Name          string `json:"name"`
-	Enabled       bool   `json:"enabled"`
-	Kind          string `json:"kind"`
-	TriggerLabel  string `json:"trigger_label"`
-	LastRunID     string `json:"last_run_id,omitempty"`
-	LastRunStatus string `json:"last_run_status,omitempty"`
+	ID              string `json:"id"`
+	Name            string `json:"name"`
+	Enabled         bool   `json:"enabled"`
+	Kind            string `json:"kind"`
+	TriggerLabel    string `json:"trigger_label"`
+	LastRunID       string `json:"last_run_id,omitempty"`
+	LastRunStatus   string `json:"last_run_status,omitempty"`
+	PendingApproval bool   `json:"pending_approval,omitempty"`
 }
 
 func (s *Server) apiListTasks(w http.ResponseWriter, r *http.Request) {
@@ -1334,24 +1357,27 @@ func (s *Server) apiListTasks(w http.ResponseWriter, r *http.Request) {
 			lastRunID = runs[0].ID
 			lastRunStatus = runs[0].Status
 		}
+		pendingApproval := s.taskPendingApproval(k.TaskID())
 		switch v := k.(type) {
 		case *task.Spec:
 			items = append(items, TaskListItem{
-				Spec:          v,
-				Kind:          task.KindTask,
-				TriggerLabel:  triggerLabel(v.Trigger),
-				LastRunID:     lastRunID,
-				LastRunStatus: lastRunStatus,
+				Spec:            v,
+				Kind:            task.KindTask,
+				TriggerLabel:    triggerLabel(v.Trigger),
+				LastRunID:       lastRunID,
+				LastRunStatus:   lastRunStatus,
+				PendingApproval: pendingApproval,
 			})
 		case *task.PipelineTask:
 			items = append(items, PipelineListItem{
-				ID:            v.ID,
-				Name:          v.Name,
-				Enabled:       v.Enabled,
-				Kind:          task.KindPipelineTask,
-				TriggerLabel:  pipelineTriggerLabel(v),
-				LastRunID:     lastRunID,
-				LastRunStatus: lastRunStatus,
+				ID:              v.ID,
+				Name:            v.Name,
+				Enabled:         v.Enabled,
+				Kind:            task.KindPipelineTask,
+				TriggerLabel:    pipelineTriggerLabel(v),
+				LastRunID:       lastRunID,
+				LastRunStatus:   lastRunStatus,
+				PendingApproval: pendingApproval,
 			})
 		default:
 			// Forward-compat safety net: the registry only ever holds
@@ -1363,13 +1389,14 @@ func (s *Server) apiListTasks(w http.ResponseWriter, r *http.Request) {
 			// Give it a parity TriggerLabel ("—") so the list renders sanely
 			// instead of falling back to a misleading "manual".
 			items = append(items, PipelineListItem{
-				ID:            k.TaskID(),
-				Name:          k.TaskID(),
-				Enabled:       k.IsEnabled(),
-				Kind:          k.KindOf(),
-				TriggerLabel:  "—",
-				LastRunID:     lastRunID,
-				LastRunStatus: lastRunStatus,
+				ID:              k.TaskID(),
+				Name:            k.TaskID(),
+				Enabled:         k.IsEnabled(),
+				Kind:            k.KindOf(),
+				TriggerLabel:    "—",
+				LastRunID:       lastRunID,
+				LastRunStatus:   lastRunStatus,
+				PendingApproval: pendingApproval,
 			})
 		}
 	}
@@ -1391,6 +1418,9 @@ type TaskDetail struct {
 	// "stopped" so operators can tell "fireAsync broke" (#318) and "body
 	// crashed without auto-restart" (#325) apart from "deliberately stopped".
 	DaemonState string `json:"daemon_state,omitempty"`
+
+	// PendingApproval flags a task held by the trust-on-change approval gate.
+	PendingApproval bool `json:"pending_approval,omitempty"`
 }
 
 // PipelineDetail is the shape returned by GET /api/tasks/{id} for a kind:
@@ -1400,8 +1430,9 @@ type TaskDetail struct {
 // daemon_state contract.
 type PipelineDetail struct {
 	*task.PipelineTask
-	TriggerLabel string `json:"trigger_label"`
-	DaemonState  string `json:"daemon_state,omitempty"`
+	TriggerLabel    string `json:"trigger_label"`
+	DaemonState     string `json:"daemon_state,omitempty"`
+	PendingApproval bool   `json:"pending_approval,omitempty"`
 }
 
 func (s *Server) apiGetTask(w http.ResponseWriter, r *http.Request) {
@@ -1421,8 +1452,9 @@ func (s *Server) apiGetTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	detail := TaskDetail{
-		Spec:         spec,
-		TriggerLabel: triggerLabel(spec.Trigger),
+		Spec:            spec,
+		TriggerLabel:    triggerLabel(spec.Trigger),
+		PendingApproval: s.taskPendingApproval(spec.ID),
 	}
 	// Daemon lifecycle state — empty for non-daemon tasks so the UI
 	// doesn't render "stopped" labels on every cron job.
@@ -1470,8 +1502,9 @@ func (s *Server) apiGetTask(w http.ResponseWriter, r *http.Request) {
 // see the same lifecycle badge they'd see on the bare daemon task.
 func (s *Server) writePipelineDetail(w http.ResponseWriter, p *task.PipelineTask) {
 	detail := PipelineDetail{
-		PipelineTask: p,
-		TriggerLabel: pipelineTriggerLabel(p),
+		PipelineTask:    p,
+		TriggerLabel:    pipelineTriggerLabel(p),
+		PendingApproval: s.taskPendingApproval(p.ID),
 	}
 	if len(p.Stages) > 0 {
 		terminalID := p.Stages[len(p.Stages)-1].Task

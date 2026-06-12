@@ -100,6 +100,14 @@ class DcTaskList extends LitElement {
     } catch(e) { alert('Failed to run task: ' + e.message); }
   }
 
+  async _approve(taskID) {
+    if (!confirm(`Approve task "${taskID}"? Its triggers will arm and the current version will be trusted.`)) return;
+    try {
+      await post(`/api/tasks/${encodeURIComponent(taskID)}/approve`);
+      await this._load();
+    } catch(e) { this._toast('Approve failed: ' + e.message); }
+  }
+
   // Group tasks by top-level namespace segment, applying the active
   // filter as a case-insensitive substring match against ID, name, and
   // trigger label. Tasks without '/' in their ID go in the '' bucket.
@@ -178,9 +186,10 @@ class DcTaskList extends LitElement {
     const id = t.id;
     const disabled = t.enabled === false;
     const pending = this._togglePending.has(id);
+    const needsApproval = t.pending_approval === true;
     return html`
       <tr class=${disabled ? 'disabled' : ''} data-task-id=${id}>
-        <td><a href="/tasks/${t.id}" @click=${e => { e.preventDefault(); navigate('/tasks/' + t.id); }}>${shown}</a>${disabled ? html`<span class="badge-paused">paused</span>` : ''}</td>
+        <td><a href="/tasks/${t.id}" @click=${e => { e.preventDefault(); navigate('/tasks/' + t.id); }}>${shown}</a>${disabled ? html`<span class="badge-paused">paused</span>` : ''}${needsApproval ? html`<span class="badge-pending-approval" title="This task is new or changed and its triggers are not armed until approved">pending approval</span>` : ''}</td>
         <td>${t.name}</td>
         <td>${t.trigger?.Webhook
           ? html`<a href="${webhookURL(this._relayBase, t.trigger.Webhook)}" target="_blank" class="meta">${t.trigger_label}</a>`
@@ -203,6 +212,9 @@ class DcTaskList extends LitElement {
                 </svg>`
               : html`<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="9"/></svg>`}
           </button>
+          ${needsApproval
+            ? html`<button class="btn btn-sm btn-approve" title="Approve this task version" @click=${() => this._approve(t.id)}>&#10003; Approve</button>`
+            : ''}
           <button class="btn btn-sm" @click=${() => this._run(t.id)}>&#9654; Run</button>
         </td>
       </tr>`;
@@ -319,6 +331,18 @@ class DcTaskList extends LitElement {
           vertical-align: middle;
         }
         dc-task-list .toggle-btn:disabled { cursor: wait; }
+        dc-task-list .badge-pending-approval {
+          display: inline-block;
+          margin-left: 0.5rem;
+          padding: 0 0.4rem;
+          font-size: 0.7rem;
+          border-radius: 3px;
+          background: rgba(210, 153, 34, 0.18);
+          color: #d29922;
+          border: 1px solid rgba(210, 153, 34, 0.45);
+          vertical-align: middle;
+        }
+        dc-task-list .btn-approve { background: #d29922; }
         dc-task-list .toggle-btn.on  { color: var(--accent, #4caf50); }
         dc-task-list .toggle-btn.off { color: var(--muted, #888); }
         dc-task-list .toggle-btn svg { display: inline-block; width: 18px; height: 18px; vertical-align: middle; }

@@ -474,6 +474,10 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	}
 	srv.SetManagedRuntimes(managedRuntimes)
 	srv.SetTestGuard(approvalGate.FireGuard)
+	// Approve surfaces (#398): pending visibility + POST /api/tasks/{id}/approve
+	// + the single-use tokenized approve link for notifications.
+	srv.SetApprovalGate(approvalGate)
+	srv.SetApprovalTokenStore(approval.NewTokenStore(database))
 	if replayer != nil {
 		srv.SetReplayer(replayer)
 	}
@@ -504,6 +508,9 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	// Approval-gate veto for `dicode task test` — same guard as the engine's
 	// fire paths and the REST test endpoint.
 	ctrlSrv.SetTestGuard(approvalGate.FireGuard)
+
+	// `dicode task approve` — the control socket is a trusted local channel.
+	ctrlSrv.SetTaskApprover(approvalGate.Approve)
 
 	// Wire AI-first task authoring so `dicode task create|edit|save|cancel`
 	// reuses the same source manager and author_sessions store the REST

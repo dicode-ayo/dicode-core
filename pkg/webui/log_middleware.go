@@ -2,6 +2,7 @@ package webui
 
 import (
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5/middleware"
@@ -17,10 +18,20 @@ func (f *zapLogFormatter) NewLogEntry(r *http.Request) middleware.LogEntry {
 	return &zapLogEntry{
 		log:    f.log,
 		method: r.Method,
-		path:   r.URL.Path,
+		path:   redactPath(r.URL.Path),
 		remote: r.RemoteAddr,
 		reqID:  middleware.GetReqID(r.Context()),
 	}
+}
+
+// redactPath strips capability-bearing path segments from request logs.
+// /approve/{token} carries a single-use approval token — the URL is the
+// credential, so it must not land in (potentially shipped) daemon logs.
+func redactPath(p string) string {
+	if strings.HasPrefix(p, "/approve/") {
+		return "/approve/[redacted]"
+	}
+	return p
 }
 
 type zapLogEntry struct {

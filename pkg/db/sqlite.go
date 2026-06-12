@@ -242,6 +242,22 @@ func (s *SQLiteDB) migrate() error {
 		return fmt.Errorf("migrate author_sessions index: %w", err)
 	}
 
+	// approval_tokens — single-use approve-link tokens (#398). token_hash is
+	// the SHA-256 of the raw token; the raw value is never stored.
+	_, err = s.db.Exec(`
+		CREATE TABLE IF NOT EXISTS approval_tokens (
+			token_hash   TEXT PRIMARY KEY,
+			task_id      TEXT NOT NULL,
+			content_hash TEXT NOT NULL,
+			created_at   INTEGER NOT NULL,
+			expires_at   INTEGER NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_approval_tokens_expires ON approval_tokens(expires_at);
+	`)
+	if err != nil {
+		return fmt.Errorf("migrate approval_tokens: %w", err)
+	}
+
 	return nil
 }
 
