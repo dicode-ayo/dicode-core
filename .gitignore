@@ -6,6 +6,7 @@
 node_modules/
 .playwright-mcp/
 .worktrees/
+.claude/worktrees/
 playwright-report/
 test-results/
 .playwright/

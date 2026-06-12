@@ -3,6 +3,7 @@ package git
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -101,7 +102,7 @@ func CommitPush(ctx context.Context, repoPath string, opts CommitPushOptions) (s
 		}
 	} else {
 		for _, p := range opts.Files {
-			if _, err := wt.Add(p); err != nil {
+			if err := addPath(repo, wt, p); err != nil {
 				return "", fmt.Errorf("add %q: %w", p, err)
 			}
 		}
@@ -129,4 +130,37 @@ func CommitPush(ctx context.Context, repoPath string, opts CommitPushOptions) (s
 		return "", fmt.Errorf("push: %w", err)
 	}
 	return commit.String(), nil
+}
+
+// addPath stages the change at p (relative to the repo root). go-git's Add
+// stages a removed FILE as a deletion, but a removed DIRECTORY can no longer be
+// Lstat-ed, so Add mis-handles it as a missing single file. When p is a removed
+// directory we enumerate its tracked index entries and stage each child's
+// removal individually. Existing files are staged directly.
+func addPath(repo *gogit.Repository, wt *gogit.Worktree, p string) error {
+	if _, err := wt.Add(p); err == nil {
+		return nil
+	} else if _, statErr := wt.Filesystem.Lstat(p); statErr == nil {
+		// p exists on disk; the Add error is real.
+		return err
+	}
+	idx, err := repo.Storer.Index()
+	if err != nil {
+		return fmt.Errorf("read index: %w", err)
+	}
+	prefix := strings.TrimSuffix(filepath.ToSlash(filepath.Clean(p)), "/") + "/"
+	staged := false
+	for _, e := range idx.Entries {
+		if !strings.HasPrefix(e.Name, prefix) {
+			continue
+		}
+		if _, err := wt.Add(e.Name); err != nil {
+			return fmt.Errorf("stage removal of %q: %w", e.Name, err)
+		}
+		staged = true
+	}
+	if !staged {
+		return fmt.Errorf("path %q matched no worktree file or tracked index entry", p)
+	}
+	return nil
 }

@@ -406,6 +406,10 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	// handlers use.
 	ctrlSrv.SetAuthoringService(srv)
 
+	// Wire task deletion so `dicode task delete` can remove a task from its
+	// source. The SourceManager owns source state, repo paths, and dev-clones.
+	ctrlSrv.SetTaskDeleter(sourceMgr)
+
 	// Wire the generic dicode.crypto.{encrypt, decrypt} IPC verb so buildin
 	// tasks (relay-client, auth-start, auth-relay) can encrypt/decrypt blobs
 	// via DeriveSubKey-derived sub-keys. Sub-keys never cross IPC; only the

@@ -26,6 +26,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -120,7 +121,7 @@ func dispatch(c *ipc.ControlClient, args []string) error {
 		return cmdAI(c, args[1:])
 	case "task":
 		if len(args) < 2 {
-			return fmt.Errorf("usage: dicode task <test|create|edit|save|cancel> [args...]")
+			return fmt.Errorf("usage: dicode task <test|create|edit|save|cancel|delete> [args...]")
 		}
 		return cmdTask(c, args[1:])
 	case "auth":
@@ -486,8 +487,10 @@ func cmdTask(c *ipc.ControlClient, args []string) error {
 		return cmdTaskSave(c, args[1:])
 	case "cancel":
 		return cmdTaskCancel(c, args[1:])
+	case "delete":
+		return cmdTaskDelete(c, args[1:])
 	default:
-		return fmt.Errorf("unknown task subcommand %q — supported: test, create, edit, save, cancel", args[0])
+		return fmt.Errorf("unknown task subcommand %q — supported: test, create, edit, save, cancel, delete", args[0])
 	}
 }
 
@@ -526,6 +529,112 @@ func cmdTaskTest(c *ipc.ControlClient, taskID string) error {
 	fmt.Printf(" (runtime=%s, %dms)\n", r.Runtime, r.DurMs)
 	if r.Failed > 0 || r.ExitCode != 0 {
 		return fmt.Errorf("%d test(s) failed", r.Failed)
+	}
+	return nil
+}
+
+// cmdTaskDelete implements `dicode task delete <task-id> [--source NAME] [--force]`.
+//
+// Without --force it first fetches a non-destructive preview (chained
+// references, trigger schedule, owning source), prints the warnings, and
+// prompts for confirmation on stderr; the destructive request is sent only
+// after the operator confirms. stdout carries the piped value (the PR URL for
+// git sources, or "deleted" for local sources); stderr carries progress and
+// warnings so pipelines stay clean.
+func cmdTaskDelete(c *ipc.ControlClient, args []string) error {
+	var taskID, source string
+	force := false
+	parseFlags := true
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if parseFlags && a == "--" {
+			parseFlags = false
+			continue
+		}
+		if parseFlags {
+			switch {
+			case a == "--force", a == "-f":
+				force = true
+				continue
+			case a == "--source":
+				if i+1 >= len(args) {
+					return fmt.Errorf("--source requires a value")
+				}
+				source = args[i+1]
+				i++
+				continue
+			case strings.HasPrefix(a, "--source="):
+				source = strings.TrimPrefix(a, "--source=")
+				continue
+			case a == "--help", a == "-h":
+				fmt.Fprintln(os.Stderr, "Usage: dicode task delete <task-id> [--source NAME] [--force]")
+				return nil
+			case strings.HasPrefix(a, "-"):
+				return fmt.Errorf("unknown flag %q — usage: dicode task delete <task-id> [--source NAME] [--force]", a)
+			}
+		}
+		if taskID != "" {
+			return fmt.Errorf("unexpected argument %q — only one task id is allowed", a)
+		}
+		taskID = a
+	}
+	if taskID == "" {
+		return fmt.Errorf("usage: dicode task delete <task-id> [--source NAME] [--force]")
+	}
+
+	if !force {
+		preview, err := c.Send(ipc.Request{Method: "cli.task.delete", TaskID: taskID, Source: source, Force: false})
+		if err != nil {
+			return err
+		}
+		if preview.Error != "" {
+			return fmt.Errorf("%s", preview.Error)
+		}
+		var p ipc.TaskDeleteResult
+		if err := remarshal(preview.Result, &p); err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "About to delete task %q from source %q.\n", p.TaskID, p.Source)
+		if p.Trigger != "" {
+			fmt.Fprintf(os.Stderr, "  trigger: %s\n", p.Trigger)
+		}
+		if len(p.Refs) > 0 {
+			fmt.Fprintf(os.Stderr, "  WARNING: %d task(s) chain off this one and will dangle: %s\n",
+				len(p.Refs), strings.Join(p.Refs, ", "))
+		}
+		fmt.Fprintln(os.Stderr, "  Pinned/historical runs of this task remain viewable but lose their friendly name.")
+		fmt.Fprint(os.Stderr, "Proceed? [y/N] ")
+		reader := bufio.NewReader(os.Stdin)
+		line, _ := reader.ReadString('\n')
+		switch strings.ToLower(strings.TrimSpace(line)) {
+		case "y", "yes":
+		default:
+			return fmt.Errorf("aborted")
+		}
+	}
+
+	resp, err := c.Send(ipc.Request{Method: "cli.task.delete", TaskID: taskID, Source: source, Force: true})
+	if err != nil {
+		return err
+	}
+	if resp.Error != "" {
+		return fmt.Errorf("%s", resp.Error)
+	}
+	var r ipc.TaskDeleteResult
+	if err := remarshal(resp.Result, &r); err != nil {
+		return err
+	}
+	switch r.Mode {
+	case "git":
+		fmt.Fprintf(os.Stderr, "Pushed deletion to branch %q; opened PR (run %s).\n", r.Branch, r.PRRunID)
+		if r.PRValue != "" {
+			fmt.Println(r.PRValue) // PR URL → stdout
+		} else {
+			fmt.Println(r.Branch)
+		}
+	default:
+		fmt.Fprintf(os.Stderr, "Deleted task %q from source %q. Reconciler will deregister it within ~30s.\n", r.TaskID, r.Source)
+		fmt.Println("deleted")
 	}
 	return nil
 }
@@ -890,6 +999,8 @@ Commands:
   ai <prompt> [flags]             run the configured AI task with a prompt
                                   flags: --session-id ID, --task TASK_ID
   task test <task-id>             run the task's sibling task.test.* through its runtime
+  task delete <task-id> [flags]   remove a task from its source (local rm / git PR)
+                                  flags: --source NAME, --force
   secrets list                    list secret keys
   secrets set <key> <value>       store a secret
   secrets delete <key>            delete a secret
