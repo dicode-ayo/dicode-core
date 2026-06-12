@@ -23,6 +23,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/dicode/dicode/pkg/audit"
 	"github.com/dicode/dicode/pkg/db"
 	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/registry"
@@ -54,6 +55,7 @@ type Engine struct {
 	executors map[task.Runtime]pkgruntime.Executor
 	cron      *cron.Cron
 	log       *zap.Logger
+	audit     *audit.Store // best-effort audit emission; nil-safe, wired by SetDB
 
 	mu                 sync.Mutex
 	cronEntries        map[string]cron.EntryID // taskID → cron entry
@@ -233,6 +235,9 @@ func New(r *registry.Registry, defaultExec pkgruntime.Executor, log *zap.Logger)
 // detects missed runs on startup (e.g. after a process restart).
 func (e *Engine) SetDB(d db.DB) {
 	e.db = d
+	// Audit emission piggybacks on the same handle — one wiring point keeps
+	// the #45 footprint minimal. NewStore(nil) → nil → Emit is a no-op.
+	e.audit = audit.NewStore(d)
 }
 
 // SetSecrets wires the secrets chain into the engine. Required for the
@@ -2036,6 +2041,20 @@ func (e *Engine) startRun(spec *task.Spec, opts *pkgruntime.RunOptions, source r
 	if _, err = e.registry.StartRunWithID(context.Background(), opts.RunID, spec.ID, opts.ParentRunID, string(source), registry.RunKindTask); err != nil {
 		return nil, nil, fmt.Errorf("start run record: %w", err)
 	}
+
+	// Audit boundary (#45): one best-effort run_triggered event per run.
+	// actor_kind is the trigger source; actor_id is the parent run for
+	// chain/task-fired runs (empty for cron/webhook/manual).
+	e.audit.Emit(context.Background(), audit.Event{
+		EventType:  audit.EventRunTriggered,
+		ActorKind:  string(source),
+		ActorID:    opts.ParentRunID,
+		TargetKind: "task",
+		TargetID:   spec.ID,
+		Params:     audit.SanitizeParams(opts.Params),
+		RunID:      opts.RunID,
+		Allowed:    true,
+	})
 
 	// Best-effort input persistence. Failures do not block the run — the
 	// auto-fix loop (#234) handles missing inputs via ErrInputUnavailable.

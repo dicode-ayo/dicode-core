@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/dicode/dicode/pkg/audit"
 	"github.com/dicode/dicode/pkg/db"
 	mcpclient "github.com/dicode/dicode/pkg/mcp/client"
 	"github.com/dicode/dicode/pkg/registry"
@@ -41,6 +42,7 @@ type Server struct {
 	engine   EngineRunner
 	secrets  secrets.Manager // optional; enables dicode.secrets_set / dicode.secrets_delete
 	log      *zap.Logger
+	audit    *audit.Store // best-effort task_called / mcp_called emission (#45); nil-safe
 
 	// redactor strips secret values from inbound log messages before they
 	// hit the run log. Nil load is safe (no redaction; RedactString is
@@ -129,6 +131,7 @@ func New(
 		secret:       secret,
 		registry:     reg,
 		db:           database,
+		audit:        audit.NewStore(database),
 		params:       params,
 		input:        input,
 		spec:         spec,
@@ -653,6 +656,7 @@ func (s *Server) handleConn(conn net.Conn) {
 
 		case "dicode.run_task":
 			if !hasCap(caps, CapTaskTrigger) {
+				s.auditTaskCall(req, false, "permission denied (tasks.trigger)", "")
 				reply(req.ID, nil, "ipc: permission denied (tasks.trigger)")
 				continue
 			}
@@ -661,6 +665,7 @@ func (s *Server) handleConn(conn net.Conn) {
 				continue
 			}
 			if !s.taskAllowed(req.TaskID) {
+				s.auditTaskCall(req, false, "not in security.allowed_tasks", "")
 				reply(req.ID, nil, fmt.Sprintf("ipc: task %q not in security.allowed_tasks", req.TaskID))
 				continue
 			}
@@ -668,9 +673,11 @@ func (s *Server) handleConn(conn net.Conn) {
 			// tasks that have explicitly opted in via mcp_exposed: true.
 			if req.MCPContext {
 				if targetSpec, ok := s.registry.Get(req.TaskID); !ok {
+					s.auditTaskCall(req, false, "task not found", "")
 					reply(req.ID, nil, fmt.Sprintf("ipc: task %q not found", req.TaskID))
 					continue
 				} else if !targetSpec.MCPExposed {
+					s.auditTaskCall(req, false, "not exposed via MCP", "")
 					reply(req.ID, nil, fmt.Sprintf("ipc: task %q is not exposed via MCP", req.TaskID))
 					continue
 				}
@@ -684,9 +691,11 @@ func (s *Server) handleConn(conn net.Conn) {
 			// s.runID is "" and FireFromTask falls back to a plain manual.
 			runID, err := s.engine.FireFromTask(s.ctx, req.TaskID, s.runID, callParams)
 			if err != nil {
+				s.auditTaskCall(req, true, "fire failed: "+err.Error(), "")
 				reply(req.ID, nil, err.Error())
 				continue
 			}
+			s.auditTaskCall(req, true, "", runID)
 			result, err := s.engine.WaitRun(s.ctx, runID)
 			if err != nil {
 				reply(req.ID, nil, err.Error())
@@ -1096,10 +1105,12 @@ func (s *Server) handleConn(conn net.Conn) {
 
 		case "mcp.call":
 			if !hasCap(caps, CapMCPCall) {
+				s.auditMCPCall(req, false, "permission denied (mcp.call)")
 				reply(req.ID, nil, "ipc: permission denied (mcp.call)")
 				continue
 			}
 			if !s.mcpAllowed(req.MCPName) {
+				s.auditMCPCall(req, false, "not in security.allowed_mcp")
 				reply(req.ID, nil, fmt.Sprintf("ipc: %q not in security.allowed_mcp", req.MCPName))
 				continue
 			}
@@ -1112,6 +1123,9 @@ func (s *Server) handleConn(conn net.Conn) {
 			if len(req.Args) > 0 {
 				_ = json.Unmarshal(req.Args, &args)
 			}
+			// Audit before the network round-trip so every authorized
+			// invocation is recorded even when the MCP server errors.
+			s.auditMCPCall(req, true, "")
 			result, err := mcpclient.New(port).Call(context.Background(), req.Tool, args)
 			if err != nil {
 				reply(req.ID, nil, err.Error())
@@ -1214,6 +1228,62 @@ func (s *Server) handleConn(conn net.Conn) {
 			}
 		}
 	}
+}
+
+// auditTaskCall records a dicode.run_task invocation (#45). The event type
+// is mcp_called when the caller signalled MCP context (i.e. the buildin/mcp
+// task forwarding a tools/call), task_called otherwise. firedRunID is the
+// newly fired run when the call succeeded; the event otherwise falls back
+// to the caller's own run ID for correlation. Best-effort and nil-safe.
+func (s *Server) auditTaskCall(req Request, allowed bool, reason, firedRunID string) {
+	eventType := audit.EventTaskCalled
+	if req.MCPContext {
+		eventType = audit.EventMCPCalled
+	}
+	var callParams map[string]string
+	if len(req.Params) > 0 {
+		_ = json.Unmarshal(req.Params, &callParams)
+	}
+	runID := firedRunID
+	if runID == "" {
+		runID = s.runID
+	}
+	s.audit.Emit(context.Background(), audit.Event{
+		EventType:  eventType,
+		ActorKind:  "task",
+		ActorID:    s.taskID,
+		TargetKind: "task",
+		TargetID:   req.TaskID,
+		Params:     audit.SanitizeParams(callParams),
+		RunID:      runID,
+		Allowed:    allowed,
+		Reason:     reason,
+	})
+}
+
+// auditMCPCall records an outbound mcp.call to an external MCP server (#45).
+// Tool arguments are sanitized recursively before storage. Best-effort and
+// nil-safe.
+func (s *Server) auditMCPCall(req Request, allowed bool, reason string) {
+	var args map[string]any
+	if len(req.Args) > 0 {
+		_ = json.Unmarshal(req.Args, &args)
+	}
+	var params string
+	if args != nil {
+		params = audit.SanitizeAny(args)
+	}
+	s.audit.Emit(context.Background(), audit.Event{
+		EventType:  audit.EventMCPCalled,
+		ActorKind:  "task",
+		ActorID:    s.taskID,
+		TargetKind: "mcp",
+		TargetID:   req.MCPName + "/" + req.Tool,
+		Params:     params,
+		RunID:      s.runID,
+		Allowed:    allowed,
+		Reason:     reason,
+	})
 }
 
 // dicodePerms returns the Dicode permission block for the current spec, or nil.
