@@ -262,16 +262,22 @@ func (e *EnvEntry) UnmarshalYAML(value *yaml.Node) error {
 type Permissions struct {
 	// Env lists env vars the task script may read or that are injected into it.
 	Env []EnvEntry `yaml:"env,omitempty" json:"env,omitempty"`
-	// FS lists filesystem paths and their access modes ("r", "w", "rw"). Deno only.
+	// FS lists filesystem paths and their access modes ("r", "w", "rw").
+	// Deno enforces reads and writes. Python enforces writes only: an
+	// in-interpreter read allowlist would break normal execution (the
+	// interpreter and site-packages read files constantly), so "r" entries
+	// are ignored there and reads stay unrestricted.
 	FS []FSEntry `yaml:"fs,omitempty" json:"fs,omitempty"`
-	// Run lists executables the task may spawn via Deno.Command. Use ["*"] for all. Deno only.
+	// Run lists executables the task may spawn (Deno and Python).
+	// Use ["*"] for all; omit to deny all subprocess execution.
 	Run []string `yaml:"run,omitempty" json:"run,omitempty"`
-	// Net controls outbound network access (Deno only).
-	// Omit or use ["*"] for unrestricted access (--allow-net).
+	// Net controls outbound network access (Deno and Python).
+	// Omit or use ["*"] for unrestricted access.
 	// List specific hosts to restrict: ["api.github.com", "hooks.slack.com"].
 	// Use [] (empty list) to deny all network access.
 	Net []string `yaml:"net,omitempty" json:"net,omitempty"`
-	// Sys lists Deno system-info APIs the task may call (Deno only).
+	// Sys lists Deno system-info APIs the task may call (Deno only; the
+	// names have no usable Python equivalent, so Python ignores this field).
 	// Use ["*"] for all, or list specific names: ["hostname", "osRelease", "networkInterfaces"].
 	// Omit to deny all sys access (default).
 	Sys []string `yaml:"sys,omitempty" json:"sys,omitempty"`
