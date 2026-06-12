@@ -1,21 +1,11 @@
 package config
 
 import (
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
 
-func loadConfigString(t *testing.T, content string) (*Config, error) {
-	t.Helper()
-	dir := t.TempDir()
-	cfgPath := filepath.Join(dir, "dicode.yaml")
-	if err := os.WriteFile(cfgPath, []byte(content), 0644); err != nil {
-		t.Fatal(err)
-	}
-	return Load(cfgPath)
-}
+// loadConfigString is shared with approval_test.go (same package).
 
 func TestAuditLogConfig_DefaultRetention(t *testing.T) {
 	cfg, err := loadConfigString(t, "spec:\n  entries: {}\n")
