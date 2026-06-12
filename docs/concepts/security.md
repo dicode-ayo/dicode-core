@@ -520,9 +520,84 @@ All require a valid session (not just an API key — key management is a human o
 
 ---
 
+## Audit Log
+
+A structured audit log records security-sensitive operations at the system's
+trust boundaries (`pkg/audit`). Events are appended to the `audit_log` table
+(below) and surfaced via `GET /api/audit`.
+
+**Emission boundaries:**
+
+| Event | Where | Captures |
+| --- | --- | --- |
+| `run_triggered` | `trigger.Engine.startRun()` | every run start (cron/webhook/manual/chain/daemon/replay); the manual/API actor is recorded as the client IP |
+| `task_called` | `pkg/ipc` `dicode.run_task` | a task invoking another task — allowed **and** denied (capability / `allowed_tasks` / MCP-exposure) |
+| `mcp_called` | `pkg/ipc` | the `buildin/mcp` `tools/call` forwarder and outbound `mcp.call` to external MCP servers |
+| `denied` | `pkg/webui` | rejected auth (`requireAuth`, API-key, webhook guard, failed passphrase login) |
+
+**Redaction:** `params` is stored as JSON with values replaced by `[REDACTED]`
+when the key name matches the secret deny-list (mirroring
+`pkg/registry/inputredact.go`) or the value is an `env:` / `secret:` /
+`secrets:` reference. Nested MCP arguments are walked recursively, so audit
+rows never contain secret values.
+
+**Retention:** `audit_log.retention_days` (top-level config) controls pruning —
+unset defaults to **30** days; an explicit `0` disables pruning. The daemon
+prunes once at startup and every 6 hours.
+
+Writes are best-effort: a failed audit insert never breaks or blocks the
+operation being audited. The log is queryable via `GET /api/audit` (see the
+[Web UI API](webui-api.md) reference), behind `requireAuth` like every other
+API route.
+
+---
+
+## Container Security Floor
+
+Docker and podman tasks accept host configuration from untrusted `task.yaml`
+files. `pkg/runtime/containersec` enforces a **default-deny floor**: dangerous
+host config is rejected (the run is aborted before the container is created) in
+**both** runtimes unless an operator explicitly opts in. The zero-value policy
+denies everything dangerous, so the floor is fail-closed even if unconfigured.
+
+**Rejected by default:**
+
+- `network_mode: host` (and `container:<id>`, `ns:<path>`)
+- `cap_add` of escape-enabling capabilities: `ALL`, `SYS_ADMIN`, `SYS_PTRACE`,
+  `SYS_MODULE`, `SYS_RAWIO`, `SYS_BOOT`, `SYS_TIME`, `NET_ADMIN`,
+  `DAC_READ_SEARCH`, `DAC_OVERRIDE`, `BPF`, `SYSLOG` (case- and `CAP_`-prefix
+  insensitive)
+- `security_opt` that disables a sandbox layer: `seccomp=unconfined`,
+  `apparmor=unconfined`, `label=disable`, `systempaths=unconfined`, `unmask=…`
+- bind-mount sources resolving (after `..`/symlink cleaning) to `/` or under
+  `/proc`, `/sys`, `/etc`, `/dev`, `/boot`, `/root`, `/run`, `/var/run`,
+  `/var/lib/docker`, `/var/lib/containers`; the docker/podman control sockets
+  (by subtree **and** basename); and all relative sources. Named/anonymous
+  volumes remain allowed.
+
+**Operator opt-out** — the top-level `container_security` block in `dicode.yaml`:
+
+```yaml
+container_security:
+  allow_host_network: false          # permit network_mode: host / container: / ns:
+  allow_insecure_security_opt: false # permit seccomp/apparmor/label/systempaths/unmask
+  allowed_cap_add: []                # capabilities tasks may add (["ALL"] = any)
+  allowed_volume_roots: []           # absolute roots; when set, strict allowlist mode
+```
+
+When `allowed_volume_roots` is non-empty the policy switches to **strict
+allowlist mode**: every bind-mount source must resolve inside one of the listed
+(absolute) roots, and an explicitly listed root overrides the built-in denylist.
+
+Podman additionally validates task-controlled argv values (image refs / flag
+values starting with `-`, control characters, env-key smuggling) before
+invoking the CLI. Orphaned `dicode-*` build images are reclaimed by a GC pass.
+
+---
+
 ## Database Schema Summary
 
-Both tables are created in the SQLite migration in `pkg/db/sqlite.go`:
+These tables are created in the SQLite migration in `pkg/db/sqlite.go`:
 
 ```sql
 -- Trusted device tokens (Phase 2)
@@ -548,6 +623,23 @@ CREATE TABLE IF NOT EXISTS api_keys (
     last_used  INTEGER,
     expires_at INTEGER
 );
+
+-- Structured security audit log (#45)
+CREATE TABLE IF NOT EXISTS audit_log (
+    id          TEXT PRIMARY KEY,
+    ts          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    event_type  TEXT NOT NULL,   -- run_triggered | task_called | mcp_called | denied
+    actor_kind  TEXT,
+    actor_id    TEXT,
+    target_kind TEXT,
+    target_id   TEXT,
+    params      TEXT,            -- sanitized JSON (no secret values)
+    run_id      TEXT,
+    allowed     BOOLEAN NOT NULL,
+    reason      TEXT
+);
+CREATE INDEX IF NOT EXISTS audit_log_ts ON audit_log(ts DESC);
+CREATE INDEX IF NOT EXISTS audit_log_actor ON audit_log(actor_id, ts DESC);
 ```
 
 Expired rows are cleaned up by `dbSessionStore.purgeExpired(ctx)` which is called on a schedule from the server.
@@ -567,6 +659,16 @@ All security-relevant fields in `ServerConfig`:
 | `mcp` | bool | `true` | Expose MCP endpoint at `/mcp` |
 | `bcrypt_cost` | int | `12` | bcrypt work factor for the stored passphrase hash; valid range 4–14 |
 | `device_binding` | string | `off` | Bind trusted-device cookie to issuing IP subnet (/24, /48) + UA family. `off` \| `warn` \| `strict` |
+
+Top-level security blocks in `Config` (siblings of `server:`, not nested under it):
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `audit_log.retention_days` | int | `30` | Days to retain `audit_log` rows; `0` disables pruning |
+| `container_security.allow_host_network` | bool | `false` | Permit `network_mode: host`/`container:`/`ns:` |
+| `container_security.allow_insecure_security_opt` | bool | `false` | Permit sandbox-disabling `security_opt` values |
+| `container_security.allowed_cap_add` | []string | `[]` | Capabilities tasks may `cap_add` (`["ALL"]` = any) |
+| `container_security.allowed_volume_roots` | []string | `[]` | Absolute host roots; non-empty = strict bind-mount allowlist |
 
 ---
 
@@ -597,6 +699,8 @@ All security-relevant fields in `ServerConfig`:
 | MIME sniffing protection | `X-Content-Type-Options: nosniff` |
 | Device token rotation | Atomic DB transaction, old token deleted |
 | IP spoofing guard | XFF only trusted with explicit `trust_proxy: true` |
+| Structured audit log | Security-sensitive ops recorded at trust boundaries; secret values redacted (`pkg/audit`) |
+| Container host-config floor | Dangerous docker/podman config rejected by default (`pkg/runtime/containersec`) |
 | Brute force protection | 5 attempts/IP per minute (flat rate via go-chi/httprate) |
 | Replay attack protection | 5-minute timestamp window on signed webhooks |
 | CORS misconfiguration guard | Origins validated with `url.Parse()` at startup |
