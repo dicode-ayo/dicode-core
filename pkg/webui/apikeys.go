@@ -170,6 +170,7 @@ func (s *Server) requireAPIKey(next http.Handler) http.Handler {
 		}
 		raw := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if raw == "" || !s.apiKeys.validate(r.Context(), raw) {
+			s.auditDenied(r, "invalid or missing API key")
 			w.Header().Set("WWW-Authenticate", `Bearer realm="dicode"`)
 			jsonErr(w, "invalid or missing API key", http.StatusUnauthorized)
 			return

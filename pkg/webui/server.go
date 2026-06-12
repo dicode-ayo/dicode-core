@@ -22,6 +22,7 @@ import (
 
 	"github.com/alexedwards/scs/v2"
 	"github.com/dicode/dicode/pkg/approval"
+	"github.com/dicode/dicode/pkg/audit"
 	"github.com/dicode/dicode/pkg/config"
 	"github.com/dicode/dicode/pkg/db"
 	"github.com/dicode/dicode/pkg/ipc"
@@ -163,6 +164,9 @@ type Server struct {
 	// (SetApprovalTokenStore); nil disables the /approve/{token} link flow.
 	approvalGate   ApprovalGate
 	approvalTokens *approval.TokenStore
+	// audit records denied-auth events and serves GET /api/audit (#45).
+	// Nil when no database is wired (tests); all emission is nil-safe.
+	audit *audit.Store
 }
 
 // SetReplayer wires a Replayer for the POST /api/runs/{runID}/replay
@@ -256,6 +260,7 @@ func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config
 		gateway:           gateway,
 		csrfKey:           csrfKey,
 		db:                database,
+		audit:             audit.NewStore(database),
 	}
 
 	// Wire run started hook → broadcast run:started
@@ -516,6 +521,9 @@ func (s *Server) Handler() http.Handler {
 			// (group + task), per #116. /api/tasks/{id}/runs above remains
 			// the canonical "list a task's runs" endpoint.
 			r.Get("/runs", s.apiQueryRuns)
+
+			// Security audit log (#45) — protected by requireAuth above.
+			r.Get("/audit", s.apiQueryAudit)
 			r.Get("/runs/{runID}", s.apiGetRun)
 			r.Get("/runs/{runID}/logs", s.apiGetLogs)
 			r.Post("/runs/{runID}/kill", s.apiKillRun)
@@ -1037,6 +1045,7 @@ func (s *Server) apiSecretsUnlock(w http.ResponseWriter, r *http.Request) {
 	}
 	if src != passphraseSourceNone {
 		if !s.verifyPassphrase(r.Context(), password) {
+			s.auditDenied(r, "incorrect password")
 			s.loginError(w, r, "incorrect password", http.StatusUnauthorized, safeNext)
 			return
 		}
