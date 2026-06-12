@@ -26,6 +26,13 @@
 //
 // The runtime extracts any such block from task.py and places it at the top of
 // the temporary wrapper file so that uv can parse it correctly.
+//
+// # Permission enforcement
+//
+// Declared permissions.{fs,net,run} are enforced by a PEP 578 audit hook
+// injected into the wrapper (see guard.go and sdk/guard.py). The hook is a
+// guardrail on declared intent, not a security boundary: fs reads and sys
+// are unenforced, and in-process escapes are acceptable.
 package python
 
 import (
@@ -295,7 +302,7 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 	defer srv.Stop()
 
 	// Build the temporary wrapper file.
-	wrapped, err := buildWrapper(scriptBytes)
+	wrapped, err := buildWrapper(scriptBytes, buildGuardPolicy(spec, socketPath))
 	if err != nil {
 		result.Error = fmt.Errorf("build wrapper: %w", err)
 		return result, nil
@@ -382,10 +389,19 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 //  1. PEP 723 script block (extracted from the user script, if present) — must
 //     be first so uv can parse inline dependencies.
 //  2. The dicode SDK shim (sdk.py).
-//  3. The user script body (script block stripped out).
-//  4. Return-capture epilogue.
-func buildWrapper(scriptBytes []byte) (string, error) {
+//  3. The permission guard (guard.py) — after the SDK so the hook never
+//     governs the SDK's own socket setup, before the task body so it governs
+//     all user code. uv resolves PEP 723 deps before the script runs, so
+//     dependency installation is ungoverned too.
+//  4. The user script body (script block stripped out).
+//  5. Return-capture epilogue.
+func buildWrapper(scriptBytes []byte, pol guardPolicy) (string, error) {
 	pep723, body := extractPEP723(string(scriptBytes))
+
+	guard, err := buildGuard(pol)
+	if err != nil {
+		return "", err
+	}
 
 	var w strings.Builder
 	if pep723 != "" {
@@ -394,6 +410,8 @@ func buildWrapper(scriptBytes []byte) (string, error) {
 	}
 	w.WriteString("# === dicode SDK ===\n")
 	w.WriteString(sdkContent)
+	w.WriteString("\n# === permission guard ===\n")
+	w.WriteString(guard)
 	w.WriteString("\n# === task script ===\n")
 	w.WriteString(body)
 	w.WriteString("\n# === return capture ===\n")

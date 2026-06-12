@@ -75,11 +75,11 @@ permissions:
 | `trigger.restart` | string | | daemon only: `always` (default), `on-failure`, `never` |
 | `permissions` | object | | Explicit access grants — nothing is implicit |
 | `permissions.env` | list | | Env vars the script may read (see below) |
-| `permissions.fs` | list | | Filesystem access declarations (Deno only) |
+| `permissions.fs` | list | | Filesystem access declarations (Deno: read+write; Python: write only) |
 | `permissions.fs[].path` | string | | Absolute or `~`-prefixed path |
 | `permissions.fs[].permission` | string | | `r`, `w`, or `rw` |
-| `permissions.run` | list of strings | | Executables the script may spawn (Deno only); use `["*"]` for all |
-| `permissions.net` | list of strings | | Outbound network hosts (Deno only); omit = unrestricted, `[]` = deny all |
+| `permissions.run` | list of strings | | Executables the script may spawn (Deno and Python); use `["*"]` for all |
+| `permissions.net` | list of strings | | Outbound network hosts (Deno and Python); omit = unrestricted, `[]` = deny all |
 | `permissions.sys` | list of strings | | Deno sys APIs (Deno only); omit = deny all, `["*"]` = all |
 | `permissions.dicode` | object | | Which dicode runtime APIs the task may call (all denied by default) |
 | `permissions.dicode.tasks` | list of strings | | Task IDs the script may invoke via `dicode.run_task()`; use `["*"]` for all |
@@ -915,10 +915,10 @@ permissions:
     - path: ~/reports
       permission: rw            # read + write + delete
   run:
-    - curl                      # allow spawning curl (Deno only)
+    - curl                      # allow spawning curl
     # - "*"                     # allow all executables
   sys:
-    - hostname                  # Deno system-info APIs (omit = deny all)
+    - hostname                  # Deno system-info APIs (omit = deny all; Deno only)
 ```
 
 ### `permissions.env` — environment variables
@@ -1045,7 +1045,7 @@ If the prereq itself fails — for example an OAuth task throwing *"Open this UR
 
 Only `secret:`-backed entries honor `if_missing:`. On a `from:`, `value:`, or bare entry the directive is silently ignored — there's no secret to check for presence in the first place.
 
-### `permissions.fs` — filesystem access (Deno only)
+### `permissions.fs` — filesystem access
 
 | Permission | Read | Write | Delete | mkdir |
 | --- | --- | --- | --- | --- |
@@ -1053,23 +1053,27 @@ Only `secret:`-backed entries honor `if_missing:`. On a `from:`, `value:`, or ba
 | `w` | ❌ | ✅ | ✅ | ✅ |
 | `rw` | ✅ | ✅ | ✅ | ✅ |
 
-`~` is expanded to the user's home directory at runtime.
+`~` is expanded to the user's home directory at runtime; relative paths resolve against the task directory.
 
-### `permissions.run` — subprocess execution (Deno only)
+Deno enforces both reads and writes via `--allow-read`/`--allow-write`. Python enforces **writes only** (via a PEP 578 audit hook): read allowlists are impractical in-interpreter — the interpreter and installed packages read files constantly — so reads stay unrestricted and `r` entries are ignored there.
 
-Lists executables the script may spawn via `Deno.Command`. Use `["*"]` to allow all. Omitting this field blocks all subprocess execution.
+### `permissions.run` — subprocess execution
 
-### `permissions.net` — outbound network (Deno only)
+Lists executables the script may spawn (`Deno.Command`, Python `subprocess`/`os.system`/`os.exec*`). Use `["*"]` to allow all. Omitting this field blocks all subprocess execution.
 
-Controls which hostnames the task may connect to.
+### `permissions.net` — outbound network
+
+Controls which hostnames the task may connect to (Deno `--allow-net`; Python audit hook on `socket.connect`/`socket.getaddrinfo`).
 
 | Value | Effect |
 | --- | --- |
-| Omit field (default) | Unrestricted outbound (`--allow-net`) |
+| Omit field (default) | Unrestricted outbound |
 | `["api.github.com", "hooks.slack.com"]` | Restrict to listed hosts only |
 | `[]` (empty list) | Deny all outbound network |
 
-### `permissions.sys` — system-info APIs (Deno only)
+The Python enforcement is a guardrail, not a security boundary: hostnames are vetted at DNS resolution, so IP-literal connections pass the allowlist (deny-all still blocks them), and pooled or exotic async connections may not re-emit audit events.
+
+### `permissions.sys` — system-info APIs (Deno only; Python ignores this field)
 
 Controls access to Deno's [`Deno.systemMemoryInfo()`](https://deno.land/api?s=Deno.systemMemoryInfo), `Deno.hostname()`, etc.
 
