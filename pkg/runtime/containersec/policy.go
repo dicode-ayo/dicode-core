@@ -153,9 +153,12 @@ func checkCapAdd(caps []string, p Policy) []string {
 func checkSecurityOpt(opts []string, p Policy) []string {
 	var violations []string
 	for _, o := range opts {
-		// Docker historically accepted ":" as the key/value separator;
-		// normalize the first one to "=" so seccomp:unconfined is caught.
-		canon := strings.Replace(strings.ToLower(strings.TrimSpace(o)), ":", "=", 1)
+		// Canonicalize: lower-case, strip all internal whitespace (so
+		// "seccomp = unconfined" can't slip past the exact match), then
+		// normalize the first ":" to "=" (Docker historically accepted ":"
+		// as the key/value separator) so seccomp:unconfined is caught.
+		canon := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(o)), " ", "")
+		canon = strings.Replace(canon, ":", "=", 1)
 		dangerous := canon == "seccomp=unconfined" ||
 			canon == "apparmor=unconfined" ||
 			canon == "label=disable" ||

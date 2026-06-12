@@ -79,6 +79,11 @@ func TestValidate_DefaultDeny(t *testing.T) {
 			wantSub: "security_opt",
 		},
 		{
+			name:    "seccomp unconfined with internal whitespace",
+			cfg:     &task.DockerConfig{SecurityOpt: []string{"seccomp = unconfined"}},
+			wantSub: "security_opt",
+		},
+		{
 			name:    "apparmor unconfined",
 			cfg:     &task.DockerConfig{SecurityOpt: []string{"apparmor=unconfined"}},
 			wantSub: "security_opt",
