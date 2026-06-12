@@ -63,13 +63,18 @@ func TestSubprocessEnv_ResolvedVarsIncluded(t *testing.T) {
 func TestSubprocessEnv_BareAllowlistEntryForwardsHostValue(t *testing.T) {
 	t.Setenv("UPSTREAM_URL", "http://example.test")
 	t.Setenv("OTHER_HOST_VAR", "nope")
+	t.Setenv("DICODE_MASTER_KEY", "root-key")
+	t.Setenv("DICODE_API_KEY", "admin-key")
+	t.Setenv("DICODE_MCP_API_KEY", "mcp-key")
 
 	spec := &task.Spec{}
 	spec.Permissions.Env = []task.EnvEntry{
 		{Name: "UPSTREAM_URL"},                     // bare → forward host value
 		{Name: "FROM_VAR", From: "env:SOMEWHERE"},  // resolver-handled, not forwarded here
 		{Name: "SECRET_VAR", Secret: "secret-key"}, // resolver-handled
-		{Name: "DICODE_MASTER_KEY"},                // never forwarded
+		{Name: "DICODE_MASTER_KEY"},                // daemon-only → never forwarded
+		{Name: "DICODE_API_KEY"},                   // daemon-only → never forwarded
+		{Name: "DICODE_MCP_API_KEY"},               // daemon-only → never forwarded
 		{Name: "UNSET_BARE"},                       // not set on host → omitted
 	}
 
@@ -82,7 +87,7 @@ func TestSubprocessEnv_BareAllowlistEntryForwardsHostValue(t *testing.T) {
 	if _, ok := m["OTHER_HOST_VAR"]; ok {
 		t.Error("undeclared host var forwarded")
 	}
-	for _, name := range []string{"FROM_VAR", "SECRET_VAR", "DICODE_MASTER_KEY", "UNSET_BARE"} {
+	for _, name := range []string{"FROM_VAR", "SECRET_VAR", "DICODE_MASTER_KEY", "DICODE_API_KEY", "DICODE_MCP_API_KEY", "UNSET_BARE"} {
 		for _, kv := range env {
 			if strings.HasPrefix(kv, name+"=") {
 				t.Errorf("%s should not be present in subprocess env", name)

@@ -32,6 +32,15 @@ var hostPassthroughVars = []string{
 	"UV_CACHE_DIR", "UV_PYTHON", "UV_PYTHON_INSTALL_DIR", "VIRTUAL_ENV",
 }
 
+// neverForwardEnv are daemon-only credentials that a bare permissions.env
+// entry must never forward to a task subprocess, regardless of what a
+// task.yaml declares.
+var neverForwardEnv = map[string]bool{
+	"DICODE_MASTER_KEY":  true, // root key deriving every secret
+	"DICODE_API_KEY":     true, // daemon admin control-plane credential
+	"DICODE_MCP_API_KEY": true, // daemon MCP control-plane credential
+}
+
 // SubprocessEnv builds the full environment for a task subprocess:
 // allowlisted host vars (only those actually set in the daemon env), host
 // values for bare permissions.env entries (a name-only entry allowlists a
@@ -51,9 +60,11 @@ func SubprocessEnv(spec *task.Spec, resolved map[string]string, socketPath, toke
 			if e.Name == "" || e.Value != "" || e.Secret != "" || e.From != "" {
 				continue
 			}
-			// The master key must never reach a task, even if a task.yaml
-			// names it.
-			if e.Name == "DICODE_MASTER_KEY" {
+			// Daemon-only credentials must never reach a task, even if a
+			// task.yaml names them: the master key derives every secret, and
+			// the API keys authenticate to the daemon's own admin/MCP control
+			// plane — a task has no legitimate need for any of them.
+			if neverForwardEnv[e.Name] {
 				continue
 			}
 			if _, ok := resolved[e.Name]; ok {
