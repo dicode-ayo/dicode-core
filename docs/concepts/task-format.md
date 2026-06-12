@@ -1057,6 +1057,8 @@ Only `secret:`-backed entries honor `if_missing:`. On a `from:`, `value:`, or ba
 
 Deno enforces both reads and writes via `--allow-read`/`--allow-write`. Python enforces **writes only** (via a PEP 578 audit hook): read allowlists are impractical in-interpreter — the interpreter and installed packages read files constantly — so reads stay unrestricted and `r` entries are ignored there.
 
+Writes are denied by default: a Python task that writes a file, creates a directory or symlink, or uses the `tempfile` module must declare the target path with `w`/`rw`. Libraries that write under the temp directory therefore need an explicit grant, e.g. `- path: /tmp` with `permission: rw`.
+
 ### `permissions.run` — subprocess execution
 
 Lists executables the script may spawn (`Deno.Command`, Python `subprocess`/`os.system`/`os.exec*`). Use `["*"]` to allow all. Omitting this field blocks all subprocess execution.

@@ -109,6 +109,16 @@ func TestGuard_FSRemoveDenied(t *testing.T) {
 	requireDenied(t, out, err, "permissions.fs")
 }
 
+func TestGuard_FSSymlinkDenied(t *testing.T) {
+	link := filepath.Join(t.TempDir(), "link")
+	pol := guardPolicy{Net: guardNet{Mode: "unrestricted"}, Run: guardRun{Mode: "deny"}}
+	out, err := runGuardScript(t, pol, fmt.Sprintf("import os\nos.symlink('/etc/passwd', %q)", link))
+	requireDenied(t, out, err, "permissions.fs")
+	if _, statErr := os.Lstat(link); statErr == nil {
+		t.Error("denied symlink was still created")
+	}
+}
+
 func TestGuard_FSReadAlwaysAllowed(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "readable.txt")

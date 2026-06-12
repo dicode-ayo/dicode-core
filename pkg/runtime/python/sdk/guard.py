@@ -31,11 +31,15 @@ def _dicode_install_guard():
 
     net_rules = []  # (lowercase host, port or None)
     for entry in policy["net"].get("hosts") or []:
-        host, colon, port = entry.rpartition(":")
-        if colon and port.isdigit():
-            net_rules.append((host.lower(), int(port)))
+        e = entry.strip()
+        if e.startswith("["):  # [ipv6] or [ipv6]:port
+            host, _, rest = e[1:].partition("]")
+            port = rest[1:] if rest.startswith(":") else ""
+        elif e.count(":") == 1:  # host:port (bare IPv6 has >1 colon)
+            host, _, port = e.partition(":")
         else:
-            net_rules.append((entry.lower(), None))
+            host, port = e, ""
+        net_rules.append((host.lower(), int(port) if port.isdigit() else None))
 
     run_allowed = set(policy["run"].get("commands") or [])
 
@@ -136,6 +140,11 @@ def _dicode_install_guard():
         elif event in ("os.rename", "shutil.move"):
             _check_write(args[0], event)
             _check_write(args[1], event)
+        elif event in ("os.symlink", "os.link"):
+            # The mutation is the new link at the destination (args[1]).
+            _check_write(args[1], event)
+        elif event in ("os.chmod", "os.chown"):
+            _check_write(args[0], event)
         elif event == "socket.connect":
             if net_mode == "unrestricted":
                 return
