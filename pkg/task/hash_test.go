@@ -154,6 +154,38 @@ func TestHash_ChangesOn_MjsEdit(t *testing.T) {
 	}
 }
 
+// TestHash_ChangesOnSubprocessScriptEdit covers the subprocess-runtime
+// extensions (task.py et al.) that ScriptPath resolves — same allowlist
+// invariant as the .ts/.mjs tests above.
+func TestHash_ChangesOnSubprocessScriptEdit(t *testing.T) {
+	for _, name := range []string{"task.py", "task.sh", "task.rb", "task.jl"} {
+		dir := filepath.Join(t.TempDir(), "hello")
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "task.yaml"), []byte("name: hello\n"), 0644); err != nil {
+			t.Fatalf("write yaml: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("v1"), 0644); err != nil {
+			t.Fatalf("write %s v1: %v", name, err)
+		}
+		before, err := Hash(dir)
+		if err != nil {
+			t.Fatalf("before: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("v2"), 0644); err != nil {
+			t.Fatalf("write %s v2: %v", name, err)
+		}
+		after, err := Hash(dir)
+		if err != nil {
+			t.Fatalf("after: %v", err)
+		}
+		if before == after {
+			t.Fatalf("Hash ignored %s edit: before == after == %q", name, before)
+		}
+	}
+}
+
 // TestHash_FilenameInjectionBarrier guards the "include filename as
 // separator" comment in hash.go: hash(A_yaml + B_js) must not collide with
 // hash(A_yaml + B_js_content_as_yaml), i.e. shuffling bytes across files

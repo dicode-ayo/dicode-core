@@ -14,8 +14,12 @@ import (
 // missing one means script edits of that kind go undetected by the
 // reconciler (see #157 for the historic miss on task.ts, the Deno default).
 var hashedScriptFiles = []string{
+	"task.jl",
 	"task.js",
 	"task.mjs",
+	"task.py",
+	"task.rb",
+	"task.sh",
 	"task.ts",
 }
 
