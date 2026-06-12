@@ -13,7 +13,9 @@ import (
 	"strconv"
 	"sync"
 	"syscall"
+	"time"
 
+	"github.com/dicode/dicode/pkg/approval"
 	"github.com/dicode/dicode/pkg/config"
 	"github.com/dicode/dicode/pkg/db"
 	"github.com/dicode/dicode/pkg/ipc"
@@ -36,6 +38,12 @@ import (
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/term"
 )
+
+// bootstrapSettle is how long the approval gate's first-run seeding window
+// stays open after the most recent task registration. It spans the initial
+// source sync (including a slow first git clone, which delays the first event
+// but then streams quickly) and closes shortly after the burst ends.
+const bootstrapSettle = 10 * time.Second
 
 // Run starts the daemon process. It blocks until the context is cancelled
 // (via signal) or a fatal error occurs. configPath is the path to
@@ -233,7 +241,11 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	// 30 s, flooding the log. LoadOrStore ensures at most one WARN per task ID
 	// per daemon lifetime.
 	var bodyFullTextualWarned sync.Map
-	rec.OnRegister = func(k task.Kinded) {
+	// arm wires an approval-gated task into the trigger engine plus the
+	// daemon-level gateway webhook route and footgun warnings. Called by the
+	// approval gate for every task that passes it (immediately for trusted /
+	// builtin / already-approved tasks, later from Approve for pending ones).
+	arm := func(k task.Kinded) error {
 		// The footgun checks below only apply to kind: Task; the gateway-webhook
 		// route, however, applies to BOTH kind: Task and kind: PipelineTask —
 		// see registerGatewayWebhook (GAP 1: a pipeline's webhook 404'd because
@@ -259,19 +271,15 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 			// task, or pipeline ref/cycle errors) is the only error Register
 			// currently returns. The reconciler will retry
 			// on the next reload, so a transient registry mismatch heals itself;
-			// a persistent config error surfaces here every cycle. Log at WARN —
-			// matches how the reconciler/engine surface other config-validation
-			// failures — and skip the downstream webhook/footgun checks so a
-			// half-registered task doesn't claim its gateway path.
-			log.Warn("task registration rejected by engine — fix the spec to re-enable",
-				zap.String("task", k.TaskID()),
-				zap.Error(err))
-			return
+			// a persistent config error surfaces here every cycle. Skipping the
+			// downstream webhook/footgun checks means a half-registered task
+			// doesn't claim its gateway path.
+			return err
 		}
 		// Wire the daemon-level gateway webhook route. Kind-aware: handles both
 		// kind: Task and kind: PipelineTask, so a pipeline's webhook trigger is
 		// reachable over HTTP (GAP 1). Recording the path under the task ID lets
-		// OnUnregister deregister it the same way for both kinds.
+		// the disarm path deregister it the same way for both kinds.
 		//
 		// Cross-layer note: for a deferred webhook pipeline (cold start, stage not
 		// yet registered) eng.Register returned nil, so we claim the gateway route
@@ -279,11 +287,11 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 		// stage lands and retryDeferredPipelines schedules it. Until then a POST
 		// reaches the gateway, misses the engine's webhooks lookup, and 404s from
 		// the engine layer (correct "not ready" behaviour); the route starts
-		// routing once the stage arrives. The route is released on OnUnregister.
+		// routing once the stage arrives. The route is released on disarm.
 		registerGatewayWebhook(gateway, webhookPaths, &webhookMu, webhookH, k)
 
 		if !isSpec {
-			return
+			return nil
 		}
 		if spec.Trigger.WebhookAuth && !cfg.Server.Auth {
 			log.Warn("task declares trigger.auth:true but server.auth is disabled — any password logs in",
@@ -300,8 +308,12 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 					zap.String("task", spec.ID))
 			}
 		}
+		return nil
 	}
-	rec.OnUnregister = func(id string) {
+	// disarm tears down a task's triggers and gateway route. Used both for
+	// removed tasks and for changed tasks held pending approval (their
+	// previous version may still be armed).
+	disarm := func(id string) {
 		webhookMu.Lock()
 		path := webhookPaths[id]
 		delete(webhookPaths, id)
@@ -310,6 +322,93 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 			gateway.Unregister(path)
 		}
 		eng.Unregister(id)
+	}
+
+	// 7a. Approval gate (#392 phase 1): every new or changed task passes the
+	// trust-on-change gate before its triggers arm. Approval records live in
+	// dicode.lock next to dicode.yaml; trust policy lives in cfg.Approval.
+	configDir, err := filepath.Abs(filepath.Dir(configPath))
+	if err != nil {
+		return fmt.Errorf("resolve config dir: %w", err)
+	}
+	lockPath := filepath.Join(configDir, approval.LockFileName)
+	_, lockStatErr := os.Stat(lockPath)
+	lockExisted := lockStatErr == nil
+	lock, err := approval.LoadLock(lockPath)
+	if err != nil {
+		return fmt.Errorf("load approval lock: %w", err)
+	}
+	gatePolicy := approval.Policy{
+		Enabled:        cfg.Approval.IsEnabled(),
+		TrustedSources: map[string]bool{},
+		TrustedTasks:   map[string]bool{},
+	}
+	for name, p := range cfg.Approval.Sources {
+		if p.Trust == "always" {
+			gatePolicy.TrustedSources[name] = true
+		}
+	}
+	for id, p := range cfg.Approval.Tasks {
+		if p.Trust == "always" {
+			gatePolicy.TrustedTasks[id] = true
+		}
+	}
+	approvalGate := approval.NewGate(gatePolicy, lock, arm, log)
+	// Pending tasks stay in the registry (API visibility, like Enabled:false)
+	// and remain resolvable by manual / chain / replay fire paths — the fire
+	// guard vetoes those at the engine chokepoint. The same guard also vetoes
+	// the task-TEST surfaces: test files run with full host permissions
+	// (deno test --allow-all), so an unapproved task's test code must be
+	// refused everywhere it can be invoked — REST (webui), CLI control
+	// socket, and the per-run dicode.tasks.test IPC capability.
+	eng.SetFireGuard(approvalGate.FireGuard)
+	denoRT.SetTestGuard(approvalGate.FireGuard)
+	pythonRT.SetTestGuard(approvalGate.FireGuard)
+
+	// First-run bootstrap: with no dicode.lock, seed the existing inventory as
+	// approved instead of stranding every task behind a gate that has no
+	// approve UI yet. The settle timer is armed immediately — not on the
+	// first registration — so the window also closes on an install with zero
+	// tasks; otherwise the first task to ever appear would be auto-approved.
+	// Each registration during the window slides it forward (tolerates a slow
+	// first git clone). FinishBootstrap is idempotent, so the timer firing is
+	// always safe.
+	var bootstrapTimer *time.Timer
+	if !lockExisted && gatePolicy.Enabled {
+		approvalGate.SetBootstrap(true)
+		bootstrapTimer = time.AfterFunc(bootstrapSettle, func() {
+			if approvalGate.FinishBootstrap() {
+				log.Info("approval gate active — subsequent task changes require approval")
+			}
+		})
+		log.Info("approval gate: no dicode.lock — seeding current tasks as approved (first-run bootstrap); changes after startup require approval",
+			zap.String("lock", lockPath))
+	}
+
+	rec.OnRegister = func(k task.Kinded) {
+		armed, err := approvalGate.Admit(k)
+		if err != nil {
+			log.Warn("task registration rejected by engine — fix the spec to re-enable",
+				zap.String("task", k.TaskID()),
+				zap.Error(err))
+			return
+		}
+		if armed {
+			// Slide the bootstrap window forward while the initial inventory
+			// is still streaming in (handles slow first git clone).
+			if approvalGate.Bootstrapping() && bootstrapTimer != nil {
+				bootstrapTimer.Reset(bootstrapSettle)
+			}
+			return
+		}
+		disarm(k.TaskID())
+		log.Warn("task held pending approval — triggers not armed",
+			zap.String("task", k.TaskID()),
+			zap.String("hint", "set approval.sources.<source>.trust: always or approval.tasks.<id>.trust: always in dicode.yaml, or approve the task"))
+	}
+	rec.OnUnregister = func(id string) {
+		disarm(id)
+		approvalGate.Forget(id)
 	}
 
 	// 8. Web UI.
@@ -374,6 +473,7 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 		return fmt.Errorf("build webui: %w", err)
 	}
 	srv.SetManagedRuntimes(managedRuntimes)
+	srv.SetTestGuard(approvalGate.FireGuard)
 	if replayer != nil {
 		srv.SetReplayer(replayer)
 	}
@@ -400,6 +500,10 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	// auto-generate keys via the control socket. The webui Server holds
 	// the apiKeyStore; control just dispatches.
 	ctrlSrv.SetAPIKeyMinter(srv)
+
+	// Approval-gate veto for `dicode task test` — same guard as the engine's
+	// fire paths and the REST test endpoint.
+	ctrlSrv.SetTestGuard(approvalGate.FireGuard)
 
 	// Wire AI-first task authoring so `dicode task create|edit|save|cancel`
 	// reuses the same source manager and author_sessions store the REST

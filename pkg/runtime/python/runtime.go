@@ -92,6 +92,10 @@ type Runtime struct {
 	replayer     *registry.Replayer      // optional; enables dicode.runs.replay
 	sourceMgr    ipc.SourceDevModeSetter // optional; enables dicode.sources.set_dev_mode
 	repoResolver ipc.RepoPathResolver    // optional; enables dicode.git.commit_push
+	// testGuard is the approval gate's veto for dicode.tasks.test, forwarded
+	// to every per-run IPC server. Executors read it live from parent. Nil
+	// means allow.
+	testGuard func(taskID string) error
 }
 
 // SetEngine configures the engine runner used for dicode.run_task calls.
@@ -120,6 +124,10 @@ func (rt *Runtime) SetSourceManager(m ipc.SourceDevModeSetter) { rt.sourceMgr = 
 // SetRepoResolver wires the repo-path resolver so the per-run IPC server
 // can serve dicode.git.commit_push calls.
 func (rt *Runtime) SetRepoResolver(r ipc.RepoPathResolver) { rt.repoResolver = r }
+
+// SetTestGuard wires the approval gate's veto for dicode.tasks.test into
+// every per-run IPC server. Nil means allow; mirrors the SetReplayer wiring.
+func (rt *Runtime) SetTestGuard(g func(taskID string) error) { rt.testGuard = g }
 
 // SetSecretOutputChannel wires the channel that receives provider tasks'
 // secret maps. Called by the trigger engine before invoking Execute when
@@ -290,6 +298,9 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 	}
 	if r := e.parent.repoResolver; r != nil {
 		srv.SetRepoResolver(r)
+	}
+	if g := e.parent.testGuard; g != nil {
+		srv.SetTestGuard(g)
 	}
 	if e.secretOutputCh != nil {
 		srv.SetSecretOutput(e.secretOutputCh)

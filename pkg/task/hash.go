@@ -4,40 +4,81 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 )
 
-// hashedScriptFiles are the script filenames folded into the content hash
-// alongside task.yaml. Kept deterministic (alphabetical) so Hash is stable
-// across invocations. Must cover every extension ScriptPath may resolve —
-// missing one means script edits of that kind go undetected by the
-// reconciler (see #157 for the historic miss on task.ts, the Deno default).
-var hashedScriptFiles = []string{
-	"task.js",
-	"task.mjs",
-	"task.ts",
-}
-
-// Hash computes a content hash over task.yaml and the task's script file
-// (any of the extensions in hashedScriptFiles).
-// Used by the reconciler to detect task changes.
+// Hash computes a content hash over every regular file under dir,
+// recursively, in sorted dir-relative path order. The runtime allows the
+// task script to import any sibling file (the Deno sandbox allow-reads the
+// whole task dir; Python imports sibling modules), so every in-dir file is
+// reachable code and must be part of the fingerprint — the approval gate
+// (dicode.lock) keys re-approval off this hash.
+//
+// Symlinks are never read through: the link's target string is folded in
+// instead, so retargeting a link changes the hash without ever reading a
+// file outside dir. Symlinked directories are not descended. Non-regular,
+// non-symlink entries (sockets, devices) are skipped — reading them can
+// block and they carry no task content.
+//
+// A missing dir hashes like an empty one (callers race task removal).
 func Hash(dir string) (string, error) {
-	h := sha256.New()
-
-	names := append([]string{"task.yaml"}, hashedScriptFiles...)
-	for _, name := range names {
-		path := filepath.Join(dir, name)
-		data, err := os.ReadFile(path)
+	type entry struct {
+		rel    string
+		isLink bool
+		target string
+	}
+	var entries []entry
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			if os.IsNotExist(err) {
-				continue // a given task only uses one script extension; missing ones are expected
-			}
-			return "", fmt.Errorf("hash %s: %w", path, err)
+			return err
 		}
-		// include filename as separator so hash(A+B) != hash(AB)
-		fmt.Fprintf(h, "%s\x00", name)
-		h.Write(data)
+		if d.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		switch {
+		case d.Type()&fs.ModeSymlink != 0:
+			target, err := os.Readlink(path)
+			if err != nil {
+				return fmt.Errorf("readlink %s: %w", path, err)
+			}
+			entries = append(entries, entry{rel: rel, isLink: true, target: target})
+		case d.Type().IsRegular():
+			entries = append(entries, entry{rel: rel})
+		}
+		return nil
+	})
+	if err != nil && !os.IsNotExist(err) {
+		return "", fmt.Errorf("hash %s: %w", dir, err)
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].rel < entries[j].rel })
+
+	h := sha256.New()
+	for _, e := range entries {
+		// Path and kind act as separators so hash(A+B) != hash(AB) and a
+		// regular file can never collide with a link whose target holds the
+		// same bytes.
+		kind := byte('f')
+		if e.isLink {
+			kind = 'l'
+		}
+		fmt.Fprintf(h, "%s\x00%c\x00", e.rel, kind)
+		if e.isLink {
+			h.Write([]byte(e.target))
+		} else {
+			data, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(e.rel)))
+			if err != nil {
+				return "", fmt.Errorf("hash %s: %w", filepath.Join(dir, e.rel), err)
+			}
+			h.Write(data)
+		}
 		h.Write([]byte{0})
 	}
 

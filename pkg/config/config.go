@@ -176,6 +176,42 @@ type AIConfig struct {
 	CreateSessionTTL time.Duration `yaml:"create_session_ttl,omitempty"`
 }
 
+// TrustPolicy is the per-source / per-task trust declaration under the
+// approval block. The only recognised value is "always" (auto-approve);
+// empty means the gate applies normally.
+type TrustPolicy struct {
+	Trust string `yaml:"trust,omitempty"`
+}
+
+// ApprovalConfig is the trust-on-change approval gate policy (#392). The
+// daemon never writes this block — approval records live in the daemon-owned
+// dicode.lock sibling file; dicode.yaml carries only the human-edited policy.
+type ApprovalConfig struct {
+	// Enabled toggles the gate. nil → true (gate ON by default). When false,
+	// every task arms regardless of approval state, but dicode.lock is still
+	// maintained as a running inventory.
+	Enabled *bool `yaml:"enabled,omitempty"`
+
+	// NotifyTask is the task fired when a task goes pending. Reserved: parsed
+	// and validated for shape, but not consumed by the daemon yet.
+	NotifyTask string `yaml:"notify_task,omitempty"`
+
+	// Sources maps a source name (the first segment of a namespaced task ID,
+	// i.e. a spec.entries key) to its trust policy.
+	Sources map[string]TrustPolicy `yaml:"sources,omitempty"`
+
+	// Tasks maps a full task ID to a per-task trust override.
+	Tasks map[string]TrustPolicy `yaml:"tasks,omitempty"`
+}
+
+// IsEnabled returns the effective Enabled value (nil → true).
+func (a ApprovalConfig) IsEnabled() bool {
+	if a.Enabled == nil {
+		return true
+	}
+	return *a.Enabled
+}
+
 type Config struct {
 	// Spec is the root TaskSet defined inline in dicode.yaml. Its entries
 	// declare every source the daemon loads. Overrides on these entries
@@ -203,6 +239,7 @@ type Config struct {
 	Execution ExecutionConfig          `yaml:"execution,omitempty"`
 	Relay     RelayConfig              `yaml:"relay,omitempty"`
 	AI        AIConfig                 `yaml:"ai,omitempty"`
+	Approval  ApprovalConfig           `yaml:"approval,omitempty"`
 	LogLevel  string                   `yaml:"log_level"`
 	DataDir   string                   `yaml:"data_dir"`
 }
@@ -503,6 +540,16 @@ func (cfg *Config) validate() error {
 	}
 	if err := cfg.Defaults.OnFailureChain.ValidateAtDefaults(); err != nil {
 		return fmt.Errorf("defaults.on_failure_chain: %w", err)
+	}
+	for name, p := range cfg.Approval.Sources {
+		if p.Trust != "" && p.Trust != "always" {
+			return fmt.Errorf("approval.sources[%q].trust: must be \"always\" or unset, got %q", name, p.Trust)
+		}
+	}
+	for id, p := range cfg.Approval.Tasks {
+		if p.Trust != "" && p.Trust != "always" {
+			return fmt.Errorf("approval.tasks[%q].trust: must be \"always\" or unset, got %q", id, p.Trust)
+		}
 	}
 	return nil
 }

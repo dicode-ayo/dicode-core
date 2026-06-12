@@ -149,11 +149,22 @@ type Server struct {
 	// is disabled (SetReplayer not called); the /api/runs/{runID}/replay
 	// endpoint returns 503 in that case.
 	replayer *registry.Replayer
+
+	// testGuard vetoes POST /api/tasks/{id}/test for a given task ID. The
+	// approval gate wires its FireGuard here: a pending (unapproved) task's
+	// test file runs with full host permissions, so it must be refused
+	// exactly like a fire. Nil means allow.
+	testGuard func(taskID string) error
 }
 
 // SetReplayer wires a Replayer for the POST /api/runs/{runID}/replay
 // endpoint. Pass nil to disable (the endpoint will return 503).
 func (s *Server) SetReplayer(r *registry.Replayer) { s.replayer = r }
+
+// SetTestGuard installs the approval gate's veto for POST /api/tasks/{id}/test.
+// A non-nil error from the guard refuses the test run with 409. nil allows
+// everything. Call after New and before Start.
+func (s *Server) SetTestGuard(g func(taskID string) error) { s.testGuard = g }
 
 // MintAPIKey implements ipc.APIKeyMinter. Generates a new API key with
 // the given name and returns the raw value (which is shown once and
@@ -1691,9 +1702,20 @@ type testTaskResponse struct {
 //   - 401 — bad/missing API key (handled upstream by requireAPIKey)
 //   - 404 — task ID not registered
 //   - 408 — runner timed out
+//   - 409 — task is held pending approval (test code must not execute)
 //   - 422 — params payload failed schema validation
 func (s *Server) apiTestTask(w http.ResponseWriter, r *http.Request) {
 	id := taskIDParam(r)
+
+	// Approval-gate veto: the sibling test file runs with full host
+	// permissions, so a pending (unapproved) task must be refused here just
+	// like a fire.
+	if s.testGuard != nil {
+		if err := s.testGuard(id); err != nil {
+			jsonErr(w, err.Error(), http.StatusConflict)
+			return
+		}
+	}
 
 	// Body is optional. An empty body is the common case for "just run the
 	// tests with defaults" — guard the decode against a zero-length stream

@@ -60,6 +60,16 @@ type Engine struct {
 	webhooks           map[string]string       // webhook path → taskID
 	webhookReplayCache *replayCache
 
+	// fireGuard, when set, can veto any run before it starts (approval gate,
+	// #392). Checked in startRun — the chokepoint every kind: Task run passes
+	// through regardless of trigger path — and in fireKinded for an early,
+	// pipeline-covering rejection on manual fires. Tasks held pending never
+	// arm cron/webhook/daemon triggers, but manual / chain / replay /
+	// pipeline-stage paths resolve tasks from the registry, so they need
+	// this veto.
+	fireGuardMu sync.RWMutex
+	fireGuard   func(taskID string) error
+
 	// registerMu serializes the entire Register path so that concurrent
 	// registrations cannot admit a cycle through interleaved snapshots of
 	// the pipeline-stage graph (registerPipeline's validatePipelineRefs
@@ -245,6 +255,26 @@ func (e *Engine) SetPythonRuntime(r PythonRuntimeAPI) { e.pythonRuntime = r }
 // run-start. Called by the daemon after secrets are available (so the derived
 // sub-key exists). When nil (the default), input persistence is a no-op.
 func (e *Engine) SetInputStore(s *registry.InputStore) { e.inputStore = s }
+
+// SetFireGuard installs a veto consulted before any run starts (see the
+// fireGuard field doc). A nil guard removes the veto.
+func (e *Engine) SetFireGuard(g func(taskID string) error) {
+	e.fireGuardMu.Lock()
+	e.fireGuard = g
+	e.fireGuardMu.Unlock()
+}
+
+// checkFireGuard returns the guard's veto for taskID, or nil when no guard
+// is installed.
+func (e *Engine) checkFireGuard(taskID string) error {
+	e.fireGuardMu.RLock()
+	g := e.fireGuard
+	e.fireGuardMu.RUnlock()
+	if g == nil {
+		return nil
+	}
+	return g(taskID)
+}
 
 // Resolver returns the daemon-scoped env resolver, constructing it lazily on
 // first call. The resolver's TTL cache survives across task launches so that
@@ -2000,6 +2030,9 @@ func (e *Engine) serveTaskAsset(w http.ResponseWriter, r *http.Request, taskDir,
 // hook, and returns a ready-to-run context. The caller is responsible for
 // calling the returned cleanup func when the run finishes.
 func (e *Engine) startRun(spec *task.Spec, opts *pkgruntime.RunOptions, source registry.TriggerSource) (runCtx context.Context, cleanup func(), err error) {
+	if err = e.checkFireGuard(spec.ID); err != nil {
+		return nil, nil, err
+	}
 	if _, err = e.registry.StartRunWithID(context.Background(), opts.RunID, spec.ID, opts.ParentRunID, string(source), registry.RunKindTask); err != nil {
 		return nil, nil, fmt.Errorf("start run record: %w", err)
 	}
@@ -2229,6 +2262,9 @@ func (e *Engine) finalizeCancelled(spec *task.Spec, opts pkgruntime.RunOptions, 
 // runs via fireAsync. Trigger entrypoints (manual/cron/webhook/chain) route
 // through here so a pipeline and a plain task fire uniformly.
 func (e *Engine) fireKinded(ctx context.Context, k task.Kinded, opts pkgruntime.RunOptions, source registry.TriggerSource) (string, error) {
+	if err := e.checkFireGuard(k.TaskID()); err != nil {
+		return "", err
+	}
 	switch s := k.(type) {
 	case *task.PipelineTask:
 		return e.firePipeline(ctx, s, opts, source)
