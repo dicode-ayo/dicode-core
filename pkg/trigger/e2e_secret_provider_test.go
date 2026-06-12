@@ -102,8 +102,8 @@ func TestE2E_SecretProvider_FullChain(t *testing.T) {
 	}
 
 	// UPSTREAM_URL is host-env-allowlisted in the provider's permissions.env;
-	// the runtime inherits os.Environ() so t.Setenv flows through to the
-	// Deno subprocess.
+	// bare allowlist entries are forwarded from the host env into the
+	// subprocess env, so t.Setenv flows through to the Deno subprocess.
 	t.Setenv("UPSTREAM_URL", ts.URL)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)

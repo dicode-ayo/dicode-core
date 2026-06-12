@@ -391,7 +391,7 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 
 	args := buildDenoArgs(spec, socketPath, shimPath, runnerPath)
 	cmd := exec.CommandContext(execCtx, rt.denoPath, args...) //nolint:gosec
-	cmd.Env = buildEnv(resolved, socketPath, token)
+	cmd.Env = pkgruntime.SubprocessEnv(spec, resolved, socketPath, token)
 
 	var wg sync.WaitGroup
 	if spec.Silent {
@@ -575,16 +575,6 @@ func buildDenoArgs(spec *task.Spec, socketPath, shimPath, runnerPath string) []s
 
 	args = append(args, runnerPath)
 	return args
-}
-
-func buildEnv(resolved map[string]string, socketPath, token string) []string {
-	// Inherit the host environment so Deno can locate its cache (DENO_DIR etc).
-	// The --allow-env flag separately controls which vars the JS script can read.
-	env := append(os.Environ(), "DICODE_SOCKET="+socketPath, "DICODE_TOKEN="+token)
-	for k, v := range resolved {
-		env = append(env, k+"="+v)
-	}
-	return env
 }
 
 // envresolver returns the env resolver to use for a Run. When a

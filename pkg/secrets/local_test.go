@@ -2,6 +2,8 @@ package secrets
 
 import (
 	"bytes"
+	"encoding/base64"
+	"os"
 	"testing"
 )
 
@@ -67,6 +69,29 @@ func TestLocalProvider_DeriveSubKey_RejectsEmptyContext(t *testing.T) {
 	_, err := p.DeriveSubKey("")
 	if err == nil {
 		t.Error("expected error for empty context")
+	}
+}
+
+func TestNewLocalProvider_UnsetsMasterKeyEnvVar(t *testing.T) {
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	t.Setenv("DICODE_MASTER_KEY", base64.StdEncoding.EncodeToString(key))
+
+	p, err := NewLocalProvider(t.TempDir(), newTestSecretDB(t))
+	if err != nil {
+		t.Fatalf("NewLocalProvider: %v", err)
+	}
+
+	if v, ok := os.LookupEnv("DICODE_MASTER_KEY"); ok {
+		t.Errorf("DICODE_MASTER_KEY still in process env after provider init: %q", v)
+	}
+	if !bytes.Equal(p.masterKey, key) {
+		t.Error("master key bytes not retained after env unset")
+	}
+	if _, err := p.DeriveSubKey("dicode/run-inputs/v1"); err != nil {
+		t.Errorf("DeriveSubKey after env unset: %v", err)
 	}
 }
 
