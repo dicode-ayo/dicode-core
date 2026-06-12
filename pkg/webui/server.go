@@ -1528,7 +1528,10 @@ func (s *Server) writePipelineDetail(w http.ResponseWriter, p *task.PipelineTask
 func (s *Server) apiRunTask(w http.ResponseWriter, r *http.Request) {
 	id := taskIDParam(r)
 	s.log.Info("run requested via API", zap.String("task", id))
-	runID, err := s.engine.FireManual(r.Context(), id, nil)
+	// Record the operator principal (the session's client IP — the best
+	// identity available under single-passphrase auth) so the run_triggered
+	// audit event (#45) can answer "who triggered this manual run".
+	runID, err := s.engine.FireManualWithActor(r.Context(), id, nil, clientIP(r, s.cfg.Server.TrustProxy))
 	if err != nil {
 		jsonErr(w, err.Error(), http.StatusBadRequest)
 		return
