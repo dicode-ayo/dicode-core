@@ -32,20 +32,19 @@ func newControlServerForTaskTest(t *testing.T) (*ControlServer, *registry.Regist
 }
 
 // registerTaskWithTest writes a minimal Deno task + passing test file
-// into a fresh temp dir and registers it.
+// into a fresh temp dir and registers it. assertEquals is defined inline
+// rather than pulled in via tasks/sdk-test.ts (whose jsr:@std/yaml import
+// needs network access) — go test must pass offline.
 func registerTaskWithTest(t *testing.T, reg *registry.Registry, id string) *task.Spec {
 	t.Helper()
 	dir := t.TempDir()
 	_ = os.WriteFile(filepath.Join(dir, "task.yaml"), []byte("name: "+id+"\ntrigger:\n  manual: true\nruntime: deno\n"), 0644)
 	_ = os.WriteFile(filepath.Join(dir, "task.ts"), []byte(`export default async function main() { return { ok: true } }`+"\n"), 0644)
 	_ = os.WriteFile(filepath.Join(dir, "task.test.ts"), []byte(`
-import { setupHarness } from "`+repoRootTasks(t)+`/sdk-test.ts";
-await setupHarness(import.meta.url);
-
-test("smoke", async () => {
-  const r = await runTask();
-  assert.equal(r.ok, true);
-});
+function assertEquals(a: unknown, b: unknown) {
+  if (a !== b) throw new Error("assertEquals: " + String(a) + " !== " + String(b));
+}
+Deno.test("smoke", () => { assertEquals(1, 1); });
 `), 0644)
 
 	spec := &task.Spec{
@@ -60,27 +59,6 @@ test("smoke", async () => {
 		t.Fatalf("register: %v", err)
 	}
 	return spec
-}
-
-// repoRootTasks walks up from the CWD until it finds tasks/sdk-test.ts,
-// so the temp task's test file can import it. Keeps the test self-locating
-// regardless of where `go test` is invoked from.
-func repoRootTasks(t *testing.T) string {
-	t.Helper()
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	for dir := cwd; ; {
-		if _, err := os.Stat(filepath.Join(dir, "tasks", "sdk-test.ts")); err == nil {
-			return "file://" + filepath.Join(dir, "tasks")
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			t.Fatalf("could not find tasks/sdk-test.ts walking up from %s", cwd)
-		}
-		dir = parent
-	}
 }
 
 func TestControl_TaskTest_MissingTaskID(t *testing.T) {

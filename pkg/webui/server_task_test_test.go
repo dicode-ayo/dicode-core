@@ -55,8 +55,12 @@ func registerTaskWithTest(t *testing.T, reg *registry.Registry, id, taskScript, 
 }
 
 // passingTest is the canonical Deno test fixture used by the success path.
+// assertEquals is defined inline rather than imported from jsr:@std/assert
+// so the fixture needs no network access — go test must pass offline.
 // Kept short so test runs stay snappy.
-const passingTest = `import { assertEquals } from "jsr:@std/assert@1";
+const passingTest = `function assertEquals(a: unknown, b: unknown) {
+  if (a !== b) throw new Error("assertEquals: " + String(a) + " !== " + String(b));
+}
 Deno.test("ok", () => { assertEquals(1, 1); });
 `
 
