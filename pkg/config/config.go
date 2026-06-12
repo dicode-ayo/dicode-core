@@ -216,6 +216,27 @@ func (a ApprovalConfig) IsEnabled() bool {
 	return *a.Enabled
 }
 
+// AuditLogConfig tunes the structured security audit log (#45).
+type AuditLogConfig struct {
+	// RetentionDays is how long audit_log rows are kept before the daemon
+	// prunes them. nil (unset) defaults to 30 days; an explicit 0 disables
+	// pruning entirely (rows are kept forever). Negative values are
+	// rejected by validate.
+	RetentionDays *int `yaml:"retention_days,omitempty"`
+}
+
+// defaultAuditRetentionDays is applied when audit_log.retention_days is unset.
+const defaultAuditRetentionDays = 30
+
+// EffectiveRetentionDays resolves the retention window: nil → 30 (default),
+// explicit 0 → 0 (pruning disabled).
+func (c AuditLogConfig) EffectiveRetentionDays() int {
+	if c.RetentionDays == nil {
+		return defaultAuditRetentionDays
+	}
+	return *c.RetentionDays
+}
+
 type Config struct {
 	// Spec is the root TaskSet defined inline in dicode.yaml. Its entries
 	// declare every source the daemon loads. Overrides on these entries
@@ -244,6 +265,7 @@ type Config struct {
 	Relay     RelayConfig              `yaml:"relay,omitempty"`
 	AI        AIConfig                 `yaml:"ai,omitempty"`
 	Approval  ApprovalConfig           `yaml:"approval,omitempty"`
+	AuditLog  AuditLogConfig           `yaml:"audit_log,omitempty"`
 	LogLevel  string                   `yaml:"log_level"`
 	DataDir   string                   `yaml:"data_dir"`
 	// ContainerSecurity is the operator opt-out for the container runtime
@@ -581,6 +603,9 @@ func (cfg *Config) validate() error {
 	case "", "off", "warn", "strict":
 	default:
 		return fmt.Errorf("server.device_binding: must be one of off, warn, strict, got %q", cfg.Server.DeviceBinding)
+	}
+	if cfg.AuditLog.RetentionDays != nil && *cfg.AuditLog.RetentionDays < 0 {
+		return fmt.Errorf("audit_log.retention_days: must be >= 0 (0 disables pruning), got %d", *cfg.AuditLog.RetentionDays)
 	}
 	if err := cfg.Defaults.OnFailureChain.ValidateAtDefaults(); err != nil {
 		return fmt.Errorf("defaults.on_failure_chain: %w", err)
