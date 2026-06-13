@@ -145,7 +145,7 @@ func TestTrustedSourceArmsAndRecords(t *testing.T) {
 	if !ok || rec.ApprovedBy != ApprovedByTrustedSource {
 		t.Fatalf("lock record = %+v, ok=%v", rec, ok)
 	}
-	wantHash, err := task.Hash(spec.TaskDir)
+	wantHash, err := ContentHash(spec)
 	if err != nil {
 		t.Fatal(err)
 	}
