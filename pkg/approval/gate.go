@@ -279,19 +279,78 @@ func SourceOf(id string) string {
 	return ""
 }
 
-// ContentHash computes the gate's content hash for a task: task.Hash over
-// the task directory (task.yaml + script files) when the task has one, else
-// a hash of the resolved spec JSON (inline / dir-less tasks).
+// contentHashDomainV2 is the versioned domain-separation prefix for the
+// dir-backed *task.Spec hash. Bump the version whenever the folded field set
+// or encoding changes so old lock entries can never collide with new ones.
+const contentHashDomainV2 = "dicode-approval-content-v2"
+
+// resolvedSecurityFields pins the exact set of resolved (post-override)
+// security-bearing spec fields folded into the v2 content hash. Keeping the
+// set in a dedicated struct (rather than hashing the whole spec) makes it
+// explicit and deterministic: cosmetic resolved fields (name, description,
+// params, …) do not churn approvals, while anything that widens what the
+// task may touch does.
+type resolvedSecurityFields struct {
+	// Permissions is the full resolved permission set (env, fs, run, net,
+	// sys, dicode) — taskset overrides can replace or merge any of these.
+	Permissions task.Permissions `json:"permissions"`
+	// Runtime is folded in because overrides can swap deno→python, which
+	// changes how (and whether) the declared permissions are enforced.
+	Runtime task.Runtime `json:"runtime"`
+	// WebhookAuth is folded in because a trigger patch can silently drop
+	// session auth from a webhook-triggered task.
+	WebhookAuth bool `json:"webhook_auth"`
+}
+
+// ContentHash computes the gate's content hash for a task.
+//
+// For a *task.Spec with a task directory, the hash covers task.Hash over the
+// directory (task.yaml + script files) AND a canonical JSON encoding of the
+// resolved security-bearing fields (permissions, runtime, webhook auth).
+// Folding the resolved fields in is essential: taskset overrides
+// (pkg/taskset/override.go) mutate the resolved spec after load — they can
+// replace permissions.net/fs/dicode, merge env entries, patch trigger.auth
+// and swap the runtime — and taskset.yaml lives outside the task dir, so a
+// dir-only hash would let an override elevate a task's effective permissions
+// without ever re-pending it for approval (issue #400). The two inputs are
+// combined under the versioned domain-separation prefix
+// contentHashDomainV2, NUL-delimited.
+//
+// A *task.PipelineTask with a directory keeps the plain dir hash: pipelines
+// are not subject to permission-replacing taskset overrides (see
+// pkg/taskset/resolver.go, case KindPipelineTask), and their per-stage
+// overrides live in the pipeline's own task.yaml, which the dir hash already
+// covers.
+//
+// Dir-less tasks (inline taskset entries) hash the resolved spec JSON.
 func ContentHash(k task.Kinded) (string, error) {
-	var dir string
 	switch s := k.(type) {
 	case *task.Spec:
-		dir = s.TaskDir
+		if s.TaskDir != "" {
+			dirHash, err := task.Hash(s.TaskDir)
+			if err != nil {
+				return "", err
+			}
+			resolved, err := json.Marshal(resolvedSecurityFields{
+				Permissions: s.Permissions,
+				Runtime:     s.Runtime,
+				WebhookAuth: s.Trigger.WebhookAuth,
+			})
+			if err != nil {
+				return "", fmt.Errorf("hash %s: marshal resolved fields: %w", k.TaskID(), err)
+			}
+			h := sha256.New()
+			h.Write([]byte(contentHashDomainV2))
+			h.Write([]byte{0})
+			h.Write([]byte(dirHash))
+			h.Write([]byte{0})
+			h.Write(resolved)
+			return hex.EncodeToString(h.Sum(nil)), nil
+		}
 	case *task.PipelineTask:
-		dir = s.TaskDir
-	}
-	if dir != "" {
-		return task.Hash(dir)
+		if s.TaskDir != "" {
+			return task.Hash(s.TaskDir)
+		}
 	}
 	b, err := json.Marshal(k)
 	if err != nil {
