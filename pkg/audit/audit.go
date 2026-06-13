@@ -17,6 +17,7 @@ package audit
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"strings"
 	"time"
@@ -59,8 +60,31 @@ type Filter struct {
 	Actor     string // matches actor_id
 	EventType string // matches event_type
 	Limit     int    // default defaultQueryLimit, capped at maxQueryLimit
-	Offset    int    // pagination offset
+	Offset    int    // pagination offset (ignored when After is set)
+
+	// After is an exclusive (ts, id) cursor. When non-zero, Query returns
+	// only rows strictly after it in the chosen order, and Offset is
+	// ignored — cursor and offset paging are mutually exclusive. The (ts,
+	// id) tuple is used rather than ts alone because ts is not unique;
+	// the id tiebreak makes resumption stable under a concurrent writer.
+	After Cursor
+
+	// Ascending requests oldest-first ordering. The default (false) keeps
+	// the newest-first contract the UI/API relies on. A log shipper sets
+	// this together with After to walk the trail forward chronologically.
+	Ascending bool
 }
+
+// Cursor is an opaque (ts, id) position in the audit log. The zero value
+// means "no cursor". Encode/Decode round-trip it through the opaque base64
+// form used on the wire and in API responses.
+type Cursor struct {
+	TS time.Time
+	ID string
+}
+
+// IsZero reports whether the cursor is unset.
+func (c Cursor) IsZero() bool { return c.ID == "" && c.TS.IsZero() }
 
 const (
 	defaultQueryLimit = 100
@@ -117,7 +141,9 @@ func (s *Store) Emit(ctx context.Context, ev Event) {
 	_ = s.Append(ctx, ev)
 }
 
-// Query returns events matching the filter, newest first.
+// Query returns events matching the filter. Newest-first by default;
+// oldest-first when Filter.Ascending is set. When Filter.After is set the
+// result starts strictly after that (ts, id) cursor (Offset is ignored).
 func (s *Store) Query(ctx context.Context, f Filter) ([]Event, error) {
 	if s == nil || s.db == nil {
 		return []Event{}, nil
@@ -148,13 +174,39 @@ func (s *Store) Query(ctx context.Context, f Filter) ([]Event, error) {
 		where = append(where, "event_type = ?")
 		args = append(args, f.EventType)
 	}
+	if !f.After.IsZero() {
+		// Lexicographic (ts, id) tuple comparison. ts is stored in a
+		// lexicographically-sortable layout (tsLayout), so a row-wise
+		// tuple comparison via the (ts > c) OR (ts = c AND id > c) form is
+		// equivalent to ordering on the (ts, id) pair. Ascending walks
+		// forward (>), descending walks backward (<).
+		cmp := ">"
+		if !f.Ascending {
+			cmp = "<"
+		}
+		where = append(where, fmt.Sprintf("(ts %s ? OR (ts = ? AND id %s ?))", cmp, cmp))
+		cts := f.After.TS.UTC().Format(tsLayout)
+		args = append(args, cts, cts, f.After.ID)
+	}
 	q := `SELECT id, ts, event_type, actor_kind, actor_id, target_kind, target_id, params, run_id, allowed, reason
 	      FROM audit_log`
 	if len(where) > 0 {
 		q += " WHERE " + strings.Join(where, " AND ")
 	}
-	q += " ORDER BY ts DESC, id DESC LIMIT ? OFFSET ?"
-	args = append(args, limit, offset)
+	if f.Ascending {
+		q += " ORDER BY ts ASC, id ASC"
+	} else {
+		q += " ORDER BY ts DESC, id DESC"
+	}
+	// Offset and cursor are mutually exclusive: a cursor already encodes the
+	// resume position, so applying a stale offset on top would skip rows.
+	if f.After.IsZero() {
+		q += " LIMIT ? OFFSET ?"
+		args = append(args, limit, offset)
+	} else {
+		q += " LIMIT ?"
+		args = append(args, limit)
+	}
 
 	events := []Event{}
 	err := s.db.Query(ctx, q, args, func(rows db.Scanner) error {
@@ -176,6 +228,42 @@ func (s *Store) Query(ctx context.Context, f Filter) ([]Event, error) {
 		return nil, fmt.Errorf("audit query: %w", err)
 	}
 	return events, nil
+}
+
+// CursorOf returns the opaque resume cursor for an event — the (ts, id)
+// position a consumer passes back as Filter.After to continue after it.
+func CursorOf(ev Event) Cursor { return Cursor{TS: ev.TS, ID: ev.ID} }
+
+// EncodeCursor renders a cursor as an opaque, URL-safe token. The zero
+// cursor encodes to "" so an empty cursor round-trips to empty.
+func EncodeCursor(c Cursor) string {
+	if c.IsZero() {
+		return ""
+	}
+	raw := c.TS.UTC().Format(tsLayout) + "|" + c.ID
+	return base64.RawURLEncoding.EncodeToString([]byte(raw))
+}
+
+// DecodeCursor parses a token produced by EncodeCursor. An empty token
+// decodes to the zero cursor. A malformed token is an error so a consumer
+// learns its saved position is unusable rather than silently restarting.
+func DecodeCursor(tok string) (Cursor, error) {
+	if tok == "" {
+		return Cursor{}, nil
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(tok)
+	if err != nil {
+		return Cursor{}, fmt.Errorf("audit: invalid cursor encoding: %w", err)
+	}
+	tsStr, id, ok := strings.Cut(string(raw), "|")
+	if !ok {
+		return Cursor{}, fmt.Errorf("audit: malformed cursor %q", tok)
+	}
+	ts := parseTS(tsStr)
+	if ts.IsZero() {
+		return Cursor{}, fmt.Errorf("audit: cursor has unparseable timestamp")
+	}
+	return Cursor{TS: ts, ID: id}, nil
 }
 
 // parseTS decodes a stored ts column value. Accepts both the fractional

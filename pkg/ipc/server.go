@@ -231,6 +231,9 @@ func (s *Server) Start(ctx context.Context) (socketPath, token string, err error
 		if len(dp.Crypto) > 0 {
 			caps = append(caps, CapCryptoCall)
 		}
+		if dp.AuditQuery {
+			caps = append(caps, CapAuditQuery)
+		}
 	}
 	if s.spec != nil && s.spec.Trigger.Daemon && s.gateway != nil {
 		caps = append(caps, CapHTTPRegister)
@@ -1221,6 +1224,49 @@ func (s *Server) handleConn(conn net.Conn) {
 				continue
 			}
 			reply(req.ID, map[string]string{"plaintext_b64": base64.StdEncoding.EncodeToString(pt)}, "")
+
+		// ── dicode.audit.* ───────────────────────────────────────────────
+
+		case "dicode.audit.query":
+			if !hasCap(caps, CapAuditQuery) {
+				reply(req.ID, nil, "ipc: permission denied (audit.query)")
+				continue
+			}
+			if s.audit == nil {
+				reply(req.ID, nil, "ipc: audit log unavailable (no database)")
+				continue
+			}
+			after, err := audit.DecodeCursor(req.After)
+			if err != nil {
+				reply(req.ID, nil, err.Error())
+				continue
+			}
+			ascending := false
+			switch req.Order {
+			case "", "desc":
+			case "asc":
+				ascending = true
+			default:
+				reply(req.ID, nil, "ipc: order must be asc or desc")
+				continue
+			}
+			events, err := s.audit.Query(context.Background(), audit.Filter{
+				TaskID:    req.TaskID,
+				Actor:     req.Actor,
+				EventType: req.EventType,
+				Limit:     req.Limit,
+				After:     after,
+				Ascending: ascending,
+			})
+			if err != nil {
+				reply(req.ID, nil, err.Error())
+				continue
+			}
+			var next string
+			if n := len(events); n > 0 {
+				next = audit.EncodeCursor(audit.CursorOf(events[n-1]))
+			}
+			reply(req.ID, AuditQueryResult{Events: events, NextCursor: next}, "")
 
 		default:
 			if req.ID != "" {

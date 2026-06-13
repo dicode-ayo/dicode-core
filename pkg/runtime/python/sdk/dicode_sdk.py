@@ -364,6 +364,26 @@ class _Secrets:
         return bool(await _call_async({"method": "dicode.secrets.has", "key": key}))
 
 
+class _Audit:
+    """Read access to the security audit trail (requires
+    permissions.dicode.audit_query). Params on returned events are
+    sanitized at write time — no value is a raw secret."""
+
+    def query(self, after="", limit=0, order="desc", task_id="",
+              actor="", event_type=""):
+        return _call({"method": "dicode.audit.query",
+                      "after": after, "limit": limit, "order": order,
+                      "taskID": task_id, "actor": actor,
+                      "event_type": event_type})
+
+    async def query_async(self, after="", limit=0, order="desc", task_id="",
+                          actor="", event_type=""):
+        return await _call_async({"method": "dicode.audit.query",
+                                  "after": after, "limit": limit,
+                                  "order": order, "taskID": task_id,
+                                  "actor": actor, "event_type": event_type})
+
+
 class _Git:
     def commit_push(self, source_id, *, message, branch, author_name,
                     author_email, branch_prefix="", allow_main=False,
@@ -402,6 +422,7 @@ class _Dicode:
         self.sources = _Sources()
         self.git = _Git()
         self.secrets = _Secrets()
+        self.audit = _Audit()
 
     def run_task(self, task_id, params=None, mcp_context=False):
         return _call({"method": "dicode.run_task", "taskID": task_id,

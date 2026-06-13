@@ -242,3 +242,109 @@ func TestAPIAudit_QueryAndFilter(t *testing.T) {
 		t.Errorf("limit=1 offset=2 count: %v", body["count"])
 	}
 }
+
+// TestAPIAudit_DescDefaultUnchanged is the #415 regression guard: with no
+// order/after params the response is newest-first, exactly as #45 shipped.
+func TestAPIAudit_DescDefaultUnchanged(t *testing.T) {
+	cfg := &config.Config{Server: config.ServerConfig{Port: 8080}}
+	srv := newAuditTestServer(t, cfg)
+	h := srv.Handler()
+	ctx := context.Background()
+	for i := 0; i < 3; i++ {
+		if err := srv.audit.Append(ctx, audit.Event{
+			EventType: audit.EventRunTriggered, TargetID: "t",
+			TS: time.Date(2026, 6, 1, 12, 0, i, 0, time.UTC), Allowed: true,
+		}); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/audit", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	var body map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("bad JSON: %v", err)
+	}
+	events := body["events"].([]any)
+	if len(events) != 3 {
+		t.Fatalf("got %d events, want 3", len(events))
+	}
+	// Newest first: the latest ts is element 0.
+	first := events[0].(map[string]any)["ts"].(string)
+	last := events[2].(map[string]any)["ts"].(string)
+	if first <= last {
+		t.Errorf("expected newest-first (desc) by default: first=%s last=%s", first, last)
+	}
+}
+
+// TestAPIAudit_CursorForward walks /api/audit forward with order=asc + after=
+// (next_cursor) and confirms no overlap and full coverage.
+func TestAPIAudit_CursorForward(t *testing.T) {
+	cfg := &config.Config{Server: config.ServerConfig{Port: 8080}}
+	srv := newAuditTestServer(t, cfg)
+	h := srv.Handler()
+	ctx := context.Background()
+	for i := 0; i < 5; i++ {
+		if err := srv.audit.Append(ctx, audit.Event{
+			EventType: audit.EventRunTriggered, TargetID: "t",
+			TS: time.Date(2026, 6, 1, 12, 0, i, 0, time.UTC), Allowed: true,
+		}); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+
+	get := func(url string) map[string]any {
+		req := httptest.NewRequest(http.MethodGet, url, nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("GET %s: status %d", url, w.Code)
+		}
+		var body map[string]any
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Fatalf("bad JSON: %v", err)
+		}
+		return body
+	}
+
+	seen := map[string]bool{}
+	cursor := ""
+	for {
+		url := "/api/audit?order=asc&limit=2"
+		if cursor != "" {
+			url += "&after=" + cursor
+		}
+		body := get(url)
+		events := body["events"].([]any)
+		if len(events) == 0 {
+			break
+		}
+		for _, raw := range events {
+			id := raw.(map[string]any)["id"].(string)
+			if seen[id] {
+				t.Errorf("duplicate id %s across cursor pages", id)
+			}
+			seen[id] = true
+		}
+		cursor = body["next_cursor"].(string)
+	}
+	if len(seen) != 5 {
+		t.Errorf("expected 5 distinct events, got %d", len(seen))
+	}
+}
+
+// TestAPIAudit_BadParams rejects malformed order/cursor with 400.
+func TestAPIAudit_BadParams(t *testing.T) {
+	cfg := &config.Config{Server: config.ServerConfig{Port: 8080}}
+	srv := newAuditTestServer(t, cfg)
+	h := srv.Handler()
+
+	for _, url := range []string{"/api/audit?order=bogus", "/api/audit?after=%21%21not-base64"} {
+		req := httptest.NewRequest(http.MethodGet, url, nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("GET %s: expected 400, got %d", url, w.Code)
+		}
+	}
+}
