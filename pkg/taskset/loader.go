@@ -200,13 +200,15 @@ func ValidateRefURL(filePath, key, rawURL string) error {
 }
 
 // isValidSCPHost reports whether s looks like a valid SCP hostname — only
-// letters, digits, hyphens, and dots, and not empty.
+// letters, digits, hyphens, dots, and underscores (underscores are technically
+// invalid per RFC 952 but are common in corporate/internal git servers), and
+// not empty.
 func isValidSCPHost(s string) bool {
 	if s == "" {
 		return false
 	}
 	for _, c := range s {
-		if !('a' <= c && c <= 'z') && !('A' <= c && c <= 'Z') && !('0' <= c && c <= '9') && c != '-' && c != '.' {
+		if !('a' <= c && c <= 'z') && !('A' <= c && c <= 'Z') && !('0' <= c && c <= '9') && c != '-' && c != '.' && c != '_' {
 			return false
 		}
 	}

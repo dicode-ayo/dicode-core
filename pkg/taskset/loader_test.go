@@ -481,9 +481,11 @@ func TestValidateRefURL_SCPInvalidHost(t *testing.T) {
 	}{
 		{"git@github.com:org/repo.git", true},
 		{"user@host.example.com:path/to/repo", true},
-		{"git@github.com:../../etc/passwd", true}, // looks like git+path, host is valid
-		{"user@host with spaces:repo", false},     // space in host
-		{"user@:repo", false},                     // empty host
+		{"git@github.com:../../etc/passwd", true},     // valid host, path traversal is separate concern
+		{"user@git_server.internal:repo", true},       // underscore in hostname (common in corp setups)
+		{"user@host_with_underscores:repo.git", true}, // underscores allowed
+		{"user@host with spaces:repo", false},         // space in host
+		{"user@:repo", false},                         // empty host
 	}
 	for _, tc := range cases {
 		err := ValidateRefURL("test.yaml", "key", tc.rawURL)

@@ -330,7 +330,14 @@ func (r *Resolver) resolveBody(
 			if parentEntryOverride != nil {
 				nestedOverrides = mergeOverrides(parentEntryOverride, nestedOverrides)
 			}
-			nested, err := r.resolveNestedRef(ctx, fullID, localPath, nestedOverrides, extraVars, repoDir, cloneRoot)
+			// When a nested taskset was resolved from a git ref, its local refs
+			// must be constrained to THAT clone's root, not the parent's. Update
+			// cloneRoot to the directory containing the resolved nested taskset.
+			nestedCloneRoot := cloneRoot
+			if ref.IsGit() {
+				nestedCloneRoot = filepath.Dir(localPath)
+			}
+			nested, err := r.resolveNestedRef(ctx, fullID, localPath, nestedOverrides, extraVars, repoDir, nestedCloneRoot)
 			if err != nil {
 				r.log.Warn("taskset: failed to resolve nested taskset",
 					zap.String("entry", fullID), zap.Error(err))
