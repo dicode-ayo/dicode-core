@@ -131,3 +131,49 @@ func TestRetentionOverrideSkippedWhenZero(t *testing.T) {
 		t.Errorf("expected default unchanged (2592000) when retention is zero, got %q", got)
 	}
 }
+
+// TestRelayServerBodyGate exercises the gate the arm closure applies before
+// eng.Register. The configured-relay branch is the load-bearing half — it must
+// NOT disable the task when the operator has set up the relay, or the relay
+// never starts.
+func TestRelayServerBodyGate(t *testing.T) {
+	cases := []struct {
+		name        string
+		enabled     bool
+		serverURL   string
+		wantEnabled bool
+	}{
+		{name: "relay unconfigured (default)", wantEnabled: false},
+		{name: "enabled flag but no server url", enabled: true, wantEnabled: false},
+		{name: "server url but flag off", serverURL: "wss://relay.example.com", wantEnabled: false},
+		{name: "relay fully configured", enabled: true, serverURL: "wss://relay.example.com", wantEnabled: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Relay.Enabled = tc.enabled
+			cfg.Relay.ServerURL = tc.serverURL
+
+			// SetEnabled defaults to true at resolve time; the gate only flips
+			// it off, never on.
+			spec := &task.Spec{ID: "buildin/relay-server-body", Enabled: true}
+			gateRelayServerBody(spec, cfg)
+
+			if spec.Enabled != tc.wantEnabled {
+				t.Errorf("relay-server-body Enabled = %v, want %v", spec.Enabled, tc.wantEnabled)
+			}
+		})
+	}
+}
+
+// TestRelayServerBodyGateLeavesOtherTasksAlone guards against the gate
+// accidentally disabling unrelated daemon tasks when the relay is off.
+func TestRelayServerBodyGateLeavesOtherTasksAlone(t *testing.T) {
+	cfg := &config.Config{} // relay unconfigured
+	spec := &task.Spec{ID: "buildin/relay-client", Enabled: true}
+	gateRelayServerBody(spec, cfg)
+	if !spec.Enabled {
+		t.Error("gate disabled an unrelated task (buildin/relay-client)")
+	}
+}
