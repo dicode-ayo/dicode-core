@@ -262,6 +262,15 @@ func (e *EnvEntry) UnmarshalYAML(value *yaml.Node) error {
 // subprocess executable, network host, and dicode API must be listed here.
 type Permissions struct {
 	// Env lists env vars the task script may read or that are injected into it.
+	// A name-only "*" entry is an escape hatch granting Deno bare --allow-env
+	// (read any var), for node-compat / npm tasks whose transitive deps read
+	// unpredictable process.env keys at import time. It may coexist with named
+	// entries — "*" widens read permission, named entries still drive value
+	// forwarding/injection. The blast radius is bounded by runtime.SubprocessEnv:
+	// the subprocess env is already an allowlist (PATH/HOME/cache/proxy/TLS vars,
+	// DICODE_SOCKET/DICODE_TOKEN, and the task's own resolved vars) with the
+	// daemon master/admin keys denylisted, so "read any var" only exposes what
+	// the task already holds. (Deno only; Python reads env via the SDK.)
 	Env []EnvEntry `yaml:"env,omitempty" json:"env,omitempty"`
 	// FS lists filesystem paths and their access modes ("r", "w", "rw").
 	// Deno enforces reads and writes. Python enforces writes only: an

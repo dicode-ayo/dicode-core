@@ -545,13 +545,24 @@ func buildDenoArgs(spec *task.Spec, socketPath, shimPath, runnerPath string) []s
 	}
 	// nil or explicit empty list → no --allow-net flag → network denied
 
-	// Env: always allow the internal IPC vars plus HOME/DENO_DIR/XDG_CACHE_HOME
-	// (required by deno.land/x/cache for vendored binary downloads).
-	envVars := []string{"DICODE_SOCKET", "DICODE_TOKEN", "HOME", "DENO_DIR", "XDG_CACHE_HOME"}
-	for _, e := range spec.Permissions.Env {
-		envVars = append(envVars, e.Name)
+	// Env: ["*"] grants bare --allow-env (read any var). The blast radius is
+	// bounded by runtime.SubprocessEnv, which forwards only an allowlist
+	// (PATH/HOME/cache/proxy/TLS vars, DICODE_SOCKET/DICODE_TOKEN, and the
+	// task's own resolved vars) and denylists the daemon's master/admin keys,
+	// so "read any var" can only read what the task already holds. Needed for
+	// Deno node-compat / npm tasks whose transitive deps read unpredictable
+	// process.env keys at module init. Otherwise the explicit list: the
+	// internal IPC vars plus HOME/DENO_DIR/XDG_CACHE_HOME (required by
+	// deno.land/x/cache for vendored binary downloads) plus declared names.
+	if envWildcard(spec.Permissions.Env) {
+		args = append(args, "--allow-env")
+	} else {
+		envVars := []string{"DICODE_SOCKET", "DICODE_TOKEN", "HOME", "DENO_DIR", "XDG_CACHE_HOME"}
+		for _, e := range spec.Permissions.Env {
+			envVars = append(envVars, e.Name)
+		}
+		args = append(args, "--allow-env="+strings.Join(envVars, ","))
 	}
-	args = append(args, "--allow-env="+strings.Join(envVars, ","))
 
 	// Sys: omit field = deny all (default); ["*"] = all; named = allowlist.
 	sys := spec.Permissions.Sys
@@ -593,6 +604,23 @@ func buildDenoArgs(spec *task.Spec, socketPath, shimPath, runnerPath string) []s
 
 	args = append(args, runnerPath)
 	return args
+}
+
+// envWildcard reports whether permissions.env contains the "*" sentinel that
+// grants bare --allow-env (read any var). Unlike net/sys/run — where "*" is
+// only honored as a lone list entry — env "*" coexists with named entries:
+// the wildcard widens read permission while the named entries still drive
+// value forwarding/injection (SubprocessEnv), so a task can both read any var
+// AND have its specific vars populated. Only a name-only "*" is the sentinel;
+// a "*" carrying from/secret/value would be a (nonsensical) injection target,
+// not the grant-all marker.
+func envWildcard(env []task.EnvEntry) bool {
+	for _, e := range env {
+		if e.Name == "*" && e.From == "" && e.Secret == "" && e.Value == "" {
+			return true
+		}
+	}
+	return false
 }
 
 // envresolver returns the env resolver to use for a Run. When a

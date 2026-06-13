@@ -60,6 +60,13 @@ func SubprocessEnv(spec *task.Spec, resolved map[string]string, socketPath, toke
 			if e.Name == "" || e.Value != "" || e.Secret != "" || e.From != "" {
 				continue
 			}
+			// "*" is the Deno --allow-env grant-all sentinel (see
+			// envWildcard in pkg/runtime/deno), not a host var named "*" to
+			// forward. It widens read permission only; the script still sees
+			// just the allowlisted/resolved env assembled here.
+			if e.Name == "*" {
+				continue
+			}
 			// Daemon-only credentials must never reach a task, even if a
 			// task.yaml names them: the master key derives every secret, and
 			// the API keys authenticate to the daemon's own admin/MCP control
