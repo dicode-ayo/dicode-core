@@ -121,6 +121,27 @@ func resolveDataDir(cfg *config.Config) (string, error) {
 	return home + "/.dicode", nil
 }
 
+// relayConfigured reports whether the operator has configured the dicode-relay
+// server. It mirrors the gate used when exporting DICODE_RELAY_* env vars at boot.
+func relayConfigured(cfg *config.Config) bool {
+	return cfg.Relay.Enabled && cfg.Relay.ServerURL != ""
+}
+
+// gateRelayServerBody disables the buildin/relay-server-body daemon when the
+// relay is not configured. With trigger.daemon + restart:always the engine would
+// otherwise auto-start it on every daemon, and its `import "npm:dicode-relay/start"`
+// reads process.env beyond the task's declared --allow-env names — throwing
+// NotCapable at import time and crash-looping even where the relay is unused.
+// Disabling before eng.Register keeps the engine from spawning the daemon unless
+// the operator has actually configured the relay. No-op for every other task.
+func gateRelayServerBody(spec *task.Spec, cfg *config.Config) bool {
+	if spec.ID == "buildin/relay-server-body" && !relayConfigured(cfg) {
+		spec.Enabled = false
+		return true
+	}
+	return false
+}
+
 func hasDisplay() bool {
 	switch runtime.GOOS {
 	case "darwin", "windows":
@@ -265,6 +286,10 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 					break
 				}
 			}
+		}
+		if isSpec && gateRelayServerBody(spec, cfg) {
+			log.Info("relay-server-body disabled — relay not configured (set relay.enabled + relay.server_url in dicode.yaml to run it)",
+				zap.String("task", spec.ID))
 		}
 		if err := eng.Register(k); err != nil {
 			// Cross-spec validation (pipeline stage refs pointing at an unknown
@@ -429,7 +454,7 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 			return fmt.Errorf("setenv DICODE_STORAGE_TASK: %w", err)
 		}
 	}
-	if cfg.Relay.Enabled && cfg.Relay.ServerURL != "" {
+	if relayConfigured(cfg) {
 		if err := os.Setenv("DICODE_RELAY_SERVER_URL", cfg.Relay.ServerURL); err != nil {
 			return fmt.Errorf("setenv DICODE_RELAY_SERVER_URL: %w", err)
 		}
