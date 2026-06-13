@@ -68,6 +68,42 @@ func TestContentHashFoldsResolvedSecurityFields(t *testing.T) {
 	}
 }
 
+// TestContentHashFoldsResolvedTriggerShape: a TriggerPatch override can
+// switch a manual/cron task to an (unauthenticated) webhook, change its path,
+// or rewire chain/daemon — all without touching the task dir or webhook_auth.
+// Every such trigger-shape change must perturb the hash.
+func TestContentHashFoldsResolvedTriggerShape(t *testing.T) {
+	base := writeTaskDir(t, t.TempDir(), "repo/deploy", "x")
+
+	pairs := []struct {
+		name string
+		a, b func(*task.Spec)
+	}{
+		{
+			name: "manual to unauthenticated webhook",
+			a:    func(s *task.Spec) { s.Trigger.Manual = true },
+			b:    func(s *task.Spec) { s.Trigger.Webhook = "/hooks/x" },
+		},
+		{
+			name: "webhook path change",
+			a:    func(s *task.Spec) { s.Trigger.Webhook = "/hooks/a" },
+			b:    func(s *task.Spec) { s.Trigger.Webhook = "/hooks/b" },
+		},
+		{
+			name: "chain rewire",
+			a:    nil,
+			b:    func(s *task.Spec) { s.Trigger.Chain = &task.ChainTrigger{From: "repo/other"} },
+		},
+	}
+	for _, p := range pairs {
+		ha := mustHash(t, specVariant(base, p.a))
+		hb := mustHash(t, specVariant(base, p.b))
+		if ha == hb {
+			t.Errorf("%s: hash unchanged despite trigger shape change", p.name)
+		}
+	}
+}
+
 // TestContentHashIgnoresCosmeticResolvedFields documents the intended scope:
 // only security-bearing resolved fields are folded in; cosmetic resolved
 // drift (e.g. an override-free description tweak applied post-load) must not
@@ -138,6 +174,46 @@ func TestOverrideElevatedPermissionsRePend(t *testing.T) {
 		t.Fatalf("armed = %v, want only the original approval", got)
 	}
 	// The lock keeps the previously approved hash for drift inspection.
+	if rec, ok := lock.Get("repo/deploy"); !ok || rec != approvedRec {
+		t.Fatalf("lock record changed on re-pend: %+v → %+v (ok=%v)", approvedRec, rec, ok)
+	}
+}
+
+// TestOverrideTriggerRewireRePend is the gate-level regression for the
+// trigger-shape gap: an approved manual task whose resolved trigger is later
+// switched to an unauthenticated webhook by a taskset override (same dir on
+// disk, webhook_auth still false) must be held pending again, not auto-armed
+// off the stale lock entry.
+func TestOverrideTriggerRewireRePend(t *testing.T) {
+	g, arm, lock := newTestGate(t, enabledPolicy())
+	base := writeTaskDir(t, t.TempDir(), "repo/deploy", "v1")
+
+	// Admit as a manual-trigger task and approve.
+	manual := specVariant(base, func(s *task.Spec) { s.Trigger.Manual = true })
+	if armed, err := g.Admit(manual); err != nil || armed {
+		t.Fatalf("Admit manual = (%v, %v), want pending", armed, err)
+	}
+	if err := g.Approve("repo/deploy"); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+	approvedRec, _ := lock.Get("repo/deploy")
+
+	// Same dir, but a TriggerPatch override has rewired the task to an
+	// unauthenticated webhook (Webhook set, Manual cleared, auth false).
+	webhook := specVariant(base, func(s *task.Spec) { s.Trigger.Webhook = "/hooks/x" })
+	armed, err := g.Admit(webhook)
+	if err != nil {
+		t.Fatalf("Admit webhook: %v", err)
+	}
+	if armed {
+		t.Fatal("trigger-rewired task must re-pend, got armed (issue #400 trigger-shape bypass)")
+	}
+	if !g.IsPending("repo/deploy") {
+		t.Fatal("trigger-rewired task not in pending set")
+	}
+	if got := arm.armedIDs(); len(got) != 1 {
+		t.Fatalf("armed = %v, want only the original approval", got)
+	}
 	if rec, ok := lock.Get("repo/deploy"); !ok || rec != approvedRec {
 		t.Fatalf("lock record changed on re-pend: %+v → %+v (ok=%v)", approvedRec, rec, ok)
 	}

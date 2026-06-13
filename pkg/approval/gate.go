@@ -279,13 +279,14 @@ func SourceOf(id string) string {
 	return ""
 }
 
-// contentHashDomainV2 is the versioned domain-separation prefix for the
+// contentHashDomainV3 is the versioned domain-separation prefix for the
 // dir-backed *task.Spec hash. Bump the version whenever the folded field set
 // or encoding changes so old lock entries can never collide with new ones.
-const contentHashDomainV2 = "dicode-approval-content-v2"
+// v3 folds the full resolved trigger shape (v2 only covered webhook auth).
+const contentHashDomainV3 = "dicode-approval-content-v3"
 
 // resolvedSecurityFields pins the exact set of resolved (post-override)
-// security-bearing spec fields folded into the v2 content hash. Keeping the
+// security-bearing spec fields folded into the v3 content hash. Keeping the
 // set in a dedicated struct (rather than hashing the whole spec) makes it
 // explicit and deterministic: cosmetic resolved fields (name, description,
 // params, …) do not churn approvals, while anything that widens what the
@@ -297,24 +298,37 @@ type resolvedSecurityFields struct {
 	// Runtime is folded in because overrides can swap deno→python, which
 	// changes how (and whether) the declared permissions are enforced.
 	Runtime task.Runtime `json:"runtime"`
-	// WebhookAuth is folded in because a trigger patch can silently drop
-	// session auth from a webhook-triggered task.
-	WebhookAuth bool `json:"webhook_auth"`
+	// Trigger captures the full resolved trigger shape: an override's
+	// TriggerPatch (pkg/task/overrides.go: Cron, Webhook, Auth, Manual,
+	// Chain, Daemon, Restart) can switch a manual/cron task to an
+	// (unauthenticated) webhook, change its path, or rewire chain/daemon —
+	// none of which touch the dir hash. WebhookSecret and ReplayProtection
+	// are deliberately excluded: TriggerPatch cannot set them, the secret
+	// is already covered by the dir hash, and a secret must never feed a
+	// non-secret hash input.
+	Webhook     string             `json:"webhook"`
+	WebhookAuth bool               `json:"webhook_auth"`
+	Cron        string             `json:"cron"`
+	Manual      bool               `json:"manual"`
+	Daemon      bool               `json:"daemon"`
+	Restart     string             `json:"restart"`
+	Chain       *task.ChainTrigger `json:"chain,omitempty"`
 }
 
 // ContentHash computes the gate's content hash for a task.
 //
 // For a *task.Spec with a task directory, the hash covers task.Hash over the
 // directory (task.yaml + script files) AND a canonical JSON encoding of the
-// resolved security-bearing fields (permissions, runtime, webhook auth).
-// Folding the resolved fields in is essential: taskset overrides
-// (pkg/taskset/override.go) mutate the resolved spec after load — they can
-// replace permissions.net/fs/dicode, merge env entries, patch trigger.auth
-// and swap the runtime — and taskset.yaml lives outside the task dir, so a
-// dir-only hash would let an override elevate a task's effective permissions
-// without ever re-pending it for approval (issue #400). The two inputs are
-// combined under the versioned domain-separation prefix
-// contentHashDomainV2, NUL-delimited.
+// resolved security-bearing fields (permissions, runtime, and the full
+// resolved trigger shape). Folding the resolved fields in is essential:
+// taskset overrides (pkg/taskset/override.go) mutate the resolved spec after
+// load — they can replace permissions.net/fs/dicode, merge env entries, swap
+// the runtime, and patch the trigger (switch a manual/cron task to an
+// unauthenticated webhook, change its path, rewire chain/daemon) — and
+// taskset.yaml lives outside the task dir, so a dir-only hash would let an
+// override elevate a task's effective permissions or exposure without ever
+// re-pending it for approval (issue #400). The two inputs are combined under
+// the versioned domain-separation prefix contentHashDomainV3, NUL-delimited.
 //
 // A *task.PipelineTask with a directory keeps the plain dir hash: pipelines
 // are not subject to permission-replacing taskset overrides (see
@@ -334,13 +348,19 @@ func ContentHash(k task.Kinded) (string, error) {
 			resolved, err := json.Marshal(resolvedSecurityFields{
 				Permissions: s.Permissions,
 				Runtime:     s.Runtime,
+				Webhook:     s.Trigger.Webhook,
 				WebhookAuth: s.Trigger.WebhookAuth,
+				Cron:        s.Trigger.Cron,
+				Manual:      s.Trigger.Manual,
+				Daemon:      s.Trigger.Daemon,
+				Restart:     s.Trigger.Restart,
+				Chain:       s.Trigger.Chain,
 			})
 			if err != nil {
 				return "", fmt.Errorf("hash %s: marshal resolved fields: %w", k.TaskID(), err)
 			}
 			h := sha256.New()
-			h.Write([]byte(contentHashDomainV2))
+			h.Write([]byte(contentHashDomainV3))
 			h.Write([]byte{0})
 			h.Write([]byte(dirHash))
 			h.Write([]byte{0})
