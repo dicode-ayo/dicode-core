@@ -142,7 +142,7 @@ func TestSQLiteDB_Schema(t *testing.T) {
 	db := newTestDB(t)
 	ctx := context.Background()
 
-	tables := []string{"runs", "run_logs", "kv", "secrets"}
+	tables := []string{"runs", "run_logs", "kv", "secrets", "audit_log"}
 	for _, tbl := range tables {
 		var name string
 		_ = db.Query(ctx,
@@ -157,6 +157,28 @@ func TestSQLiteDB_Schema(t *testing.T) {
 		)
 		if name != tbl {
 			t.Errorf("table %q not found", tbl)
+		}
+	}
+}
+
+func TestSQLiteDB_AuditLogIndexes(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+
+	for _, idx := range []string{"idx_audit_log_ts", "idx_audit_log_actor_ts"} {
+		var name string
+		_ = db.Query(ctx,
+			`SELECT name FROM sqlite_master WHERE type='index' AND name=?`,
+			[]any{idx},
+			func(rows Scanner) error {
+				if rows.Next() {
+					return rows.Scan(&name)
+				}
+				return nil
+			},
+		)
+		if name != idx {
+			t.Errorf("index %q not found", idx)
 		}
 	}
 }

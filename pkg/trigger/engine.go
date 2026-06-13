@@ -23,6 +23,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/dicode/dicode/pkg/audit"
 	"github.com/dicode/dicode/pkg/db"
 	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/registry"
@@ -54,6 +55,7 @@ type Engine struct {
 	executors map[task.Runtime]pkgruntime.Executor
 	cron      *cron.Cron
 	log       *zap.Logger
+	audit     *audit.Store // best-effort audit emission; nil-safe, wired by SetDB
 
 	mu                 sync.Mutex
 	cronEntries        map[string]cron.EntryID // taskID → cron entry
@@ -233,6 +235,9 @@ func New(r *registry.Registry, defaultExec pkgruntime.Executor, log *zap.Logger)
 // detects missed runs on startup (e.g. after a process restart).
 func (e *Engine) SetDB(d db.DB) {
 	e.db = d
+	// Audit emission piggybacks on the same handle — one wiring point keeps
+	// the #45 footprint minimal. NewStore(nil) → nil → Emit is a no-op.
+	e.audit = audit.NewStore(d)
 }
 
 // SetSecrets wires the secrets chain into the engine. Required for the
@@ -873,12 +878,20 @@ func (e *Engine) getShutdownCtx() context.Context {
 
 // FireManual triggers a task by ID with optional param overrides.
 func (e *Engine) FireManual(ctx context.Context, taskID string, params map[string]string) (string, error) {
+	return e.FireManualWithActor(ctx, taskID, params, "")
+}
+
+// FireManualWithActor is FireManual carrying the identity of the operator
+// principal (e.g. the authenticated web session's client IP) that requested
+// the run. The actor flows into the run_triggered audit event (#45) as
+// actor_id; an empty actor preserves plain FireManual behaviour.
+func (e *Engine) FireManualWithActor(ctx context.Context, taskID string, params map[string]string, actor string) (string, error) {
 	k, ok := e.registry.GetKinded(taskID)
 	if !ok {
 		return "", fmt.Errorf("task %q not found", taskID)
 	}
 	e.log.Info("manual trigger", zap.String("task", taskID))
-	return e.fireKinded(context.Background(), k, pkgruntime.RunOptions{Params: params}, registry.TriggerManual)
+	return e.fireKinded(context.Background(), k, pkgruntime.RunOptions{Params: params, TriggerActor: actor}, registry.TriggerManual)
 }
 
 // FireFromTask triggers a task as a child of an in-flight run. Used by the
@@ -2036,6 +2049,26 @@ func (e *Engine) startRun(spec *task.Spec, opts *pkgruntime.RunOptions, source r
 	if _, err = e.registry.StartRunWithID(context.Background(), opts.RunID, spec.ID, opts.ParentRunID, string(source), registry.RunKindTask); err != nil {
 		return nil, nil, fmt.Errorf("start run record: %w", err)
 	}
+
+	// Audit boundary (#45): one best-effort run_triggered event per run.
+	// actor_kind is the trigger source; actor_id is the operator principal
+	// (opts.TriggerActor — e.g. the web session's client IP for manual API
+	// runs) when known, falling back to the parent run for chain/task-fired
+	// runs (empty for cron/webhook).
+	actorID := opts.TriggerActor
+	if actorID == "" {
+		actorID = opts.ParentRunID
+	}
+	e.audit.Emit(context.Background(), audit.Event{
+		EventType:  audit.EventRunTriggered,
+		ActorKind:  string(source),
+		ActorID:    actorID,
+		TargetKind: "task",
+		TargetID:   spec.ID,
+		Params:     audit.SanitizeParams(opts.Params),
+		RunID:      opts.RunID,
+		Allowed:    true,
+	})
 
 	// Best-effort input persistence. Failures do not block the run — the
 	// auto-fix loop (#234) handles missing inputs via ErrInputUnavailable.

@@ -1,15 +1,31 @@
 package webui
 
 import (
+	"context"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
 
+	"github.com/dicode/dicode/pkg/audit"
 	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/task"
 	"go.uber.org/zap"
 )
+
+// auditDenied records a denied-auth event (#45). Best-effort and nil-safe;
+// uses a background context so a client disconnect cannot cancel the insert.
+func (s *Server) auditDenied(r *http.Request, reason string) {
+	s.audit.Emit(context.Background(), audit.Event{
+		EventType:  audit.EventDenied,
+		ActorKind:  "ip",
+		ActorID:    clientIP(r, s.cfg.Server.TrustProxy),
+		TargetKind: "endpoint",
+		TargetID:   r.Method + " " + r.URL.Path,
+		Allowed:    false,
+		Reason:     reason,
+	})
+}
 
 // webhookAuthGuard checks whether the task associated with the requested webhook
 // path has trigger.auth: true. If it does, and the request carries no valid
@@ -61,6 +77,8 @@ func (s *Server) webhookAuthGuard(w http.ResponseWriter, r *http.Request, next h
 		next.ServeHTTP(w, r)
 		return
 	}
+
+	s.auditDenied(r, "webhook requires authenticated session")
 
 	// For webhook paths, a GET from a browser includes "text/html" in Accept.
 	// API clients (curl, fetch without custom headers, etc.) typically don't,
@@ -140,6 +158,7 @@ func (s *Server) requireSessionOrAPIKey(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		s.auditDenied(r, "no valid session or API key")
 		w.Header().Set("WWW-Authenticate", `Bearer realm="dicode"`)
 		jsonErr(w, "unauthorized", http.StatusUnauthorized)
 	})
@@ -187,6 +206,7 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 			}
 		}
 
+		s.auditDenied(r, "no valid session")
 		if isAPIRequest(r) {
 			jsonErr(w, "unauthorized", http.StatusUnauthorized)
 			return

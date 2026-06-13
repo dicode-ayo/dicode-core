@@ -257,6 +257,30 @@ func (s *SQLiteDB) migrate() error {
 	if err != nil {
 		return fmt.Errorf("migrate approval_tokens: %w", err)
 	}
+	// audit_log — structured audit log for security-sensitive operations
+	// (#45). Appended by pkg/audit at the trigger-engine, IPC (run_task /
+	// mcp.call), and webui denied-auth boundaries. params holds sanitized
+	// JSON only — secret values are redacted before insert.
+	_, err = s.db.Exec(`
+		CREATE TABLE IF NOT EXISTS audit_log (
+			id          TEXT PRIMARY KEY,
+			ts          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			event_type  TEXT NOT NULL DEFAULT '',
+			actor_kind  TEXT NOT NULL DEFAULT '',
+			actor_id    TEXT NOT NULL DEFAULT '',
+			target_kind TEXT NOT NULL DEFAULT '',
+			target_id   TEXT NOT NULL DEFAULT '',
+			params      TEXT NOT NULL DEFAULT '',
+			run_id      TEXT NOT NULL DEFAULT '',
+			allowed     BOOLEAN NOT NULL,
+			reason      TEXT NOT NULL DEFAULT ''
+		);
+		CREATE INDEX IF NOT EXISTS idx_audit_log_ts ON audit_log(ts DESC);
+		CREATE INDEX IF NOT EXISTS idx_audit_log_actor_ts ON audit_log(actor_id, ts DESC);
+	`)
+	if err != nil {
+		return fmt.Errorf("migrate audit_log: %w", err)
+	}
 
 	return nil
 }

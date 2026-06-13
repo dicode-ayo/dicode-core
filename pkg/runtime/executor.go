@@ -30,6 +30,12 @@ type RunOptions struct {
 	Params      map[string]string
 	Input       interface{}
 
+	// TriggerActor identifies the operator principal that initiated this
+	// run (e.g. the authenticated web session's client IP for manual API
+	// runs). Empty for cron/webhook/chain runs. The trigger engine prefers
+	// it over ParentRunID as the run_triggered audit actor_id (#45).
+	TriggerActor string
+
 	// PreResolvedEnv, when set, is the result of an env-resolver pass run
 	// by the trigger engine before dispatch. The runtime uses these values
 	// directly instead of calling the resolver itself, avoiding the
