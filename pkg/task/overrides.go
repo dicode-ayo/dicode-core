@@ -103,6 +103,11 @@ func (p *ParamOverrides) UnmarshalYAML(value *yaml.Node) error {
 // implementation continues to live in pkg/taskset (exported as
 // taskset.ApplyOverrides) so per-edge dispatch sites can reuse the exact
 // same semantics as the global `dicode tasks override <id>` path.
+//
+// SECURITY: every field added here (and to TriggerPatch) must be classified
+// in pkg/approval/content_hash_guard_test.go — either folded into the
+// approval gate's resolvedSecurityFields or explicitly exempted with a
+// justification. The guard test fails the build of pkg/approval otherwise.
 type Overrides struct {
 	Enabled     *bool          `yaml:"enabled,omitempty"`
 	Name        string         `yaml:"name,omitempty"`        // replaces spec.Name

@@ -2,12 +2,13 @@ package approval
 
 import (
 	"testing"
+	"time"
 
 	"github.com/dicode/dicode/pkg/task"
 )
 
-// specInDir returns a dir-backed spec for the given task dir (created once by
-// the caller via writeTaskDir) with the supplied mutation applied, so tests
+// specVariant returns a dir-backed spec for the given task dir (created once
+// by the caller via writeTaskDir) with the supplied mutation applied, so tests
 // can vary single resolved fields against an identical on-disk dir.
 func specVariant(base *task.Spec, mutate func(*task.Spec)) *task.Spec {
 	s := &task.Spec{ID: base.ID, TaskDir: base.TaskDir}
@@ -57,6 +58,8 @@ func TestContentHashFoldsResolvedSecurityFields(t *testing.T) {
 		"dicode tasks":     func(s *task.Spec) { s.Permissions.Dicode = &task.DicodePermissions{Tasks: []string{"*"}} },
 		"runtime swap":     func(s *task.Spec) { s.Runtime = task.Runtime("python") },
 		"webhook auth off": func(s *task.Spec) { s.Trigger.WebhookAuth = true },
+		"param default":    func(s *task.Spec) { s.Params = task.Params{{Name: "url", Default: "https://evil.example"}} },
+		"timeout widened":  func(s *task.Spec) { s.Timeout = 4 * time.Hour },
 	}
 
 	baseHash := mustHash(t, specVariant(base, nil))
@@ -65,6 +68,105 @@ func TestContentHashFoldsResolvedSecurityFields(t *testing.T) {
 		if got == baseHash {
 			t.Errorf("%s: hash unchanged despite elevated resolved field", name)
 		}
+	}
+}
+
+// TestContentHashFoldsParamDefault: param defaults are override-mutable
+// program inputs (mergeParams); repointing one against an identical dir must
+// perturb the hash, while a cosmetic param description edit must not.
+func TestContentHashFoldsParamDefault(t *testing.T) {
+	base := writeTaskDir(t, t.TempDir(), "repo/deploy", "x")
+
+	a := mustHash(t, specVariant(base, func(s *task.Spec) {
+		s.Params = task.Params{{Name: "url", Default: "https://api.example.com"}}
+	}))
+	b := mustHash(t, specVariant(base, func(s *task.Spec) {
+		s.Params = task.Params{{Name: "url", Default: "https://exfil.example.com"}}
+	}))
+	if a == b {
+		t.Fatal("param default change must perturb the hash (override-mutable program input)")
+	}
+
+	withDesc := mustHash(t, specVariant(base, func(s *task.Spec) {
+		s.Params = task.Params{{Name: "url", Default: "https://api.example.com", Description: "the endpoint"}}
+	}))
+	if a != withDesc {
+		t.Fatal("param description edit must not churn the hash")
+	}
+}
+
+// TestContentHashFoldsTimeout: an override-widened timeout extends the
+// wall-clock budget and must re-pend.
+func TestContentHashFoldsTimeout(t *testing.T) {
+	base := writeTaskDir(t, t.TempDir(), "repo/deploy", "x")
+	a := mustHash(t, specVariant(base, func(s *task.Spec) { s.Timeout = time.Minute }))
+	b := mustHash(t, specVariant(base, func(s *task.Spec) { s.Timeout = 24 * time.Hour }))
+	if a == b {
+		t.Fatal("timeout change must perturb the hash")
+	}
+}
+
+// TestContentHashRedactsEnvLiteralValues: dicode.lock is committable, so a
+// literal env value must never feed the hash (offline dictionary attack on a
+// low-entropy credential). A Value-only change therefore keeps the hash; a
+// NAME change (a different variable becomes injectable) must perturb it.
+func TestContentHashRedactsEnvLiteralValues(t *testing.T) {
+	base := writeTaskDir(t, t.TempDir(), "repo/deploy", "x")
+
+	valA := mustHash(t, specVariant(base, func(s *task.Spec) {
+		s.Permissions.Env = []task.EnvEntry{{Name: "API_TOKEN", Value: "hunter2"}}
+	}))
+	valB := mustHash(t, specVariant(base, func(s *task.Spec) {
+		s.Permissions.Env = []task.EnvEntry{{Name: "API_TOKEN", Value: "correct-horse-battery-staple"}}
+	}))
+	if valA != valB {
+		t.Fatal("env literal Value must be redacted from the hash input; value-only change churned the hash")
+	}
+
+	renamed := mustHash(t, specVariant(base, func(s *task.Spec) {
+		s.Permissions.Env = []task.EnvEntry{{Name: "OTHER_TOKEN", Value: "hunter2"}}
+	}))
+	if renamed == valA {
+		t.Fatal("env entry NAME change must perturb the hash")
+	}
+}
+
+// TestContentHashDirlessFallbackSanitized: the dir-less *task.Spec fallback
+// marshals the spec, and TriggerConfig has yaml tags only — every exported
+// field would marshal by Go name. The fallback must clear WebhookSecret (and
+// redact env literals) so the committable lock never embeds a digest over
+// secret material.
+func TestContentHashDirlessFallbackSanitized(t *testing.T) {
+	mk := func(secret string) *task.Spec {
+		return &task.Spec{
+			ID: "set/inline",
+			Trigger: task.TriggerConfig{
+				Webhook:       "/hooks/inline",
+				WebhookSecret: secret,
+			},
+		}
+	}
+	a := mustHash(t, mk("s3cret-one"))
+	b := mustHash(t, mk("s3cret-two"))
+	if a != b {
+		t.Fatal("dir-less fallback must exclude Trigger.WebhookSecret from the hash input")
+	}
+
+	// Env literal redaction applies to the fallback too.
+	mkEnv := func(val string) *task.Spec {
+		s := mk("")
+		s.Permissions.Env = []task.EnvEntry{{Name: "API_TOKEN", Value: val}}
+		return s
+	}
+	if mustHash(t, mkEnv("one")) != mustHash(t, mkEnv("two")) {
+		t.Fatal("dir-less fallback must redact env literal values")
+	}
+
+	// Sanity: the webhook path itself still folds.
+	c := mk("")
+	c.Trigger.Webhook = "/hooks/other"
+	if mustHash(t, c) == a {
+		t.Fatal("dir-less fallback lost non-secret trigger fields")
 	}
 }
 
@@ -120,101 +222,97 @@ func TestContentHashIgnoresCosmeticResolvedFields(t *testing.T) {
 	}
 }
 
-// TestContentHashPipelineTaskKeepsDirHash: pipelines are not subject to
-// permission-replacing taskset overrides, so their gate hash remains the
-// plain directory hash.
-func TestContentHashPipelineTaskKeepsDirHash(t *testing.T) {
+// TestContentHashPipelineFoldsResolvedTrigger: dir-backed pipelines get the
+// same dirHash+resolved-fields scheme as Specs, so a future resolver that
+// applies override layers to pipelines fails closed (re-pends) instead of
+// silently keeping a dir-only approval. A manual→webhook rewire against an
+// identical dir must perturb the hash, and the hash must not degrade to the
+// plain dir hash.
+func TestContentHashPipelineFoldsResolvedTrigger(t *testing.T) {
 	// Reuse writeTaskDir for the directory contents; only the dir matters.
 	dir := writeTaskDir(t, t.TempDir(), "repo/pipe", "stages").TaskDir
-	p := &task.PipelineTask{ID: "repo/pipe", TaskDir: dir}
-	got := mustHash(t, p)
-	want, err := task.Hash(dir)
+
+	manual := &task.PipelineTask{ID: "repo/pipe", TaskDir: dir,
+		Trigger: task.PipelineTrigger{Manual: true}}
+	webhook := &task.PipelineTask{ID: "repo/pipe", TaskDir: dir,
+		Trigger: task.PipelineTrigger{Webhook: "/hooks/pipe"}}
+
+	hm := mustHash(t, manual)
+	hw := mustHash(t, webhook)
+	if hm == hw {
+		t.Fatal("pipeline trigger rewire (manual→webhook) must perturb the hash")
+	}
+
+	dirHash, err := task.Hash(dir)
 	if err != nil {
 		t.Fatalf("task.Hash: %v", err)
 	}
-	if got != want {
-		t.Fatalf("pipeline ContentHash = %q, want plain dir hash %q", got, want)
+	if hm == dirHash || hw == dirHash {
+		t.Fatal("pipeline ContentHash must not be the plain dir hash")
 	}
 }
 
-// TestOverrideElevatedPermissionsRePend is the gate-level regression test for
-// issue #400: an approved task whose resolved permissions are later elevated
-// by a taskset override (same dir on disk) must be held pending again, not
-// auto-approved off the stale lock entry.
-func TestOverrideElevatedPermissionsRePend(t *testing.T) {
-	g, arm, lock := newTestGate(t, enabledPolicy())
-	base := writeTaskDir(t, t.TempDir(), "repo/deploy", "v1")
+// TestOverrideElevationRePend is the gate-level regression test for issue
+// #400: an approved task whose resolved spec is later elevated by a taskset
+// override (same dir on disk) must be held pending again, not auto-armed off
+// the stale lock entry — whether the elevation is a permission grant or a
+// trigger rewire.
+func TestOverrideElevationRePend(t *testing.T) {
+	cases := []struct {
+		name     string
+		initial  func(*task.Spec)
+		elevated func(*task.Spec)
+	}{
+		{
+			// Override-elevated permissions (simulating a taskset.yaml edit
+			// outside the task dir).
+			name:    "elevated permissions",
+			initial: nil,
+			elevated: func(s *task.Spec) {
+				s.Permissions.Net = []string{"*"}
+				s.Permissions.Dicode = &task.DicodePermissions{SecretsWrite: true}
+			},
+		},
+		{
+			// A TriggerPatch override rewires the approved manual task to an
+			// unauthenticated webhook (Webhook set, Manual cleared, auth false).
+			name:     "trigger rewire to unauthenticated webhook",
+			initial:  func(s *task.Spec) { s.Trigger.Manual = true },
+			elevated: func(s *task.Spec) { s.Trigger.Webhook = "/hooks/x" },
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			g, arm, lock := newTestGate(t, enabledPolicy())
+			base := writeTaskDir(t, t.TempDir(), "repo/deploy", "v1")
 
-	// Admit at base permissions and approve.
-	if armed, err := g.Admit(specVariant(base, nil)); err != nil || armed {
-		t.Fatalf("Admit base = (%v, %v), want pending", armed, err)
-	}
-	if err := g.Approve("repo/deploy"); err != nil {
-		t.Fatalf("Approve: %v", err)
-	}
-	approvedRec, _ := lock.Get("repo/deploy")
+			// Admit at the initial shape and approve.
+			if armed, err := g.Admit(specVariant(base, tc.initial)); err != nil || armed {
+				t.Fatalf("Admit initial = (%v, %v), want pending", armed, err)
+			}
+			if err := g.Approve("repo/deploy"); err != nil {
+				t.Fatalf("Approve: %v", err)
+			}
+			approvedRec, _ := lock.Get("repo/deploy")
 
-	// Same dir, but the resolved spec now carries override-elevated
-	// permissions (simulating a taskset.yaml edit outside the task dir).
-	elevated := specVariant(base, func(s *task.Spec) {
-		s.Permissions.Net = []string{"*"}
-		s.Permissions.Dicode = &task.DicodePermissions{SecretsWrite: true}
-	})
-	armed, err := g.Admit(elevated)
-	if err != nil {
-		t.Fatalf("Admit elevated: %v", err)
-	}
-	if armed {
-		t.Fatal("override-elevated task must re-pend, got armed (issue #400 bypass)")
-	}
-	if !g.IsPending("repo/deploy") {
-		t.Fatal("elevated task not in pending set")
-	}
-	if got := arm.armedIDs(); len(got) != 1 {
-		t.Fatalf("armed = %v, want only the original approval", got)
-	}
-	// The lock keeps the previously approved hash for drift inspection.
-	if rec, ok := lock.Get("repo/deploy"); !ok || rec != approvedRec {
-		t.Fatalf("lock record changed on re-pend: %+v → %+v (ok=%v)", approvedRec, rec, ok)
-	}
-}
-
-// TestOverrideTriggerRewireRePend is the gate-level regression for the
-// trigger-shape gap: an approved manual task whose resolved trigger is later
-// switched to an unauthenticated webhook by a taskset override (same dir on
-// disk, webhook_auth still false) must be held pending again, not auto-armed
-// off the stale lock entry.
-func TestOverrideTriggerRewireRePend(t *testing.T) {
-	g, arm, lock := newTestGate(t, enabledPolicy())
-	base := writeTaskDir(t, t.TempDir(), "repo/deploy", "v1")
-
-	// Admit as a manual-trigger task and approve.
-	manual := specVariant(base, func(s *task.Spec) { s.Trigger.Manual = true })
-	if armed, err := g.Admit(manual); err != nil || armed {
-		t.Fatalf("Admit manual = (%v, %v), want pending", armed, err)
-	}
-	if err := g.Approve("repo/deploy"); err != nil {
-		t.Fatalf("Approve: %v", err)
-	}
-	approvedRec, _ := lock.Get("repo/deploy")
-
-	// Same dir, but a TriggerPatch override has rewired the task to an
-	// unauthenticated webhook (Webhook set, Manual cleared, auth false).
-	webhook := specVariant(base, func(s *task.Spec) { s.Trigger.Webhook = "/hooks/x" })
-	armed, err := g.Admit(webhook)
-	if err != nil {
-		t.Fatalf("Admit webhook: %v", err)
-	}
-	if armed {
-		t.Fatal("trigger-rewired task must re-pend, got armed (issue #400 trigger-shape bypass)")
-	}
-	if !g.IsPending("repo/deploy") {
-		t.Fatal("trigger-rewired task not in pending set")
-	}
-	if got := arm.armedIDs(); len(got) != 1 {
-		t.Fatalf("armed = %v, want only the original approval", got)
-	}
-	if rec, ok := lock.Get("repo/deploy"); !ok || rec != approvedRec {
-		t.Fatalf("lock record changed on re-pend: %+v → %+v (ok=%v)", approvedRec, rec, ok)
+			// Same dir, but the resolved spec is now override-elevated.
+			armed, err := g.Admit(specVariant(base, tc.elevated))
+			if err != nil {
+				t.Fatalf("Admit elevated: %v", err)
+			}
+			if armed {
+				t.Fatal("override-elevated task must re-pend, got armed (issue #400 bypass)")
+			}
+			if !g.IsPending("repo/deploy") {
+				t.Fatal("elevated task not in pending set")
+			}
+			if got := arm.armedIDs(); len(got) != 1 {
+				t.Fatalf("armed = %v, want only the original approval", got)
+			}
+			// The lock keeps the previously approved hash for drift inspection.
+			if rec, ok := lock.Get("repo/deploy"); !ok || rec != approvedRec {
+				t.Fatalf("lock record changed on re-pend: %+v → %+v (ok=%v)", approvedRec, rec, ok)
+			}
+		})
 	}
 }

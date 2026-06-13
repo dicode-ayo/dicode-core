@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/dicode/dicode/pkg/task"
 	"go.uber.org/zap"
@@ -279,25 +280,78 @@ func SourceOf(id string) string {
 	return ""
 }
 
-// contentHashDomainV3 is the versioned domain-separation prefix for the
-// dir-backed *task.Spec hash. Bump the version whenever the folded field set
-// or encoding changes so old lock entries can never collide with new ones.
-// v3 folds the full resolved trigger shape (v2 only covered webhook auth).
-const contentHashDomainV3 = "dicode-approval-content-v3"
+// contentHashDomain is the versioned domain-separation prefix for the
+// dir-backed content hash. Bump the version whenever the folded field set or
+// encoding changes so old lock entries can never collide with new ones.
+const contentHashDomain = "dicode-approval-content-v1"
+
+// redactedEnvValue replaces literal EnvEntry.Value contents in every hash
+// input. dicode.lock is documented as committable and every other hash input
+// is reconstructable from the repo, so folding a literal env value would put
+// a low-entropy credential digest in the lock — an offline dictionary
+// attack. Trade-off: value-content edits no longer re-pend; a value change
+// does not widen capability (the entry's name/secret/from refs still fold),
+// which matches the WebhookSecret exclusion rationale.
+const redactedEnvValue = "<redacted>"
+
+// sanitizePermissions returns p with every non-empty Env literal Value
+// replaced by redactedEnvValue. The Env slice is copied before mutation so
+// the caller's spec is never touched; name/secret/from refs are kept.
+func sanitizePermissions(p task.Permissions) task.Permissions {
+	needsRedact := false
+	for _, e := range p.Env {
+		if e.Value != "" {
+			needsRedact = true
+			break
+		}
+	}
+	if !needsRedact {
+		return p
+	}
+	env := make([]task.EnvEntry, len(p.Env))
+	copy(env, p.Env)
+	for i := range env {
+		if env[i].Value != "" {
+			env[i].Value = redactedEnvValue
+		}
+	}
+	p.Env = env
+	return p
+}
+
+// resolvedParam is the minimal override-mutable tuple of a task.Param folded
+// into the hash. Description (and Type, which mergeParams cannot touch) are
+// deliberately excluded so cosmetic param edits do not churn approvals.
+type resolvedParam struct {
+	Name     string `json:"name"`
+	Default  string `json:"default"`
+	Required bool   `json:"required"`
+}
 
 // resolvedSecurityFields pins the exact set of resolved (post-override)
-// security-bearing spec fields folded into the v3 content hash. Keeping the
-// set in a dedicated struct (rather than hashing the whole spec) makes it
+// security-bearing spec fields folded into the content hash. Keeping the set
+// in a dedicated struct (rather than hashing the whole spec) makes it
 // explicit and deterministic: cosmetic resolved fields (name, description,
-// params, …) do not churn approvals, while anything that widens what the
-// task may touch does.
+// param descriptions, …) do not churn approvals, while anything that widens
+// what the task may touch — or what it is fed — does.
+//
+// The reflection guard in content_hash_guard_test.go enforces that every
+// field of task.Overrides / task.TriggerPatch is either represented here or
+// explicitly exempted.
 type resolvedSecurityFields struct {
 	// Permissions is the full resolved permission set (env, fs, run, net,
 	// sys, dicode) — taskset overrides can replace or merge any of these.
+	// Env literal values are redacted (see redactedEnvValue).
 	Permissions task.Permissions `json:"permissions"`
 	// Runtime is folded in because overrides can swap deno→python, which
 	// changes how (and whether) the declared permissions are enforced.
 	Runtime task.Runtime `json:"runtime"`
+	// Params are override-mutable (mergeParams) program inputs: an override
+	// can repoint a param-default URL at an attacker endpoint without
+	// touching the dir, so defaults must perturb the hash.
+	Params []resolvedParam `json:"params,omitempty"`
+	// Timeout is override-mutable and widens the task's wall-clock budget.
+	Timeout time.Duration `json:"timeout"`
 	// Trigger captures the full resolved trigger shape: an override's
 	// TriggerPatch (pkg/task/overrides.go: Cron, Webhook, Auth, Manual,
 	// Chain, Daemon, Restart) can switch a manual/cron task to an
@@ -315,39 +369,82 @@ type resolvedSecurityFields struct {
 	Chain       *task.ChainTrigger `json:"chain,omitempty"`
 }
 
+// resolvedPipelineSecurityFields mirrors resolvedSecurityFields for
+// kind: PipelineTask. Pipelines skip taskset override layers in v1
+// (pkg/taskset/resolver.go, case KindPipelineTask), but folding the resolved
+// shape now means a future resolver that does apply overrides to pipelines
+// fails closed (re-pends) instead of silently keeping a stale dir-only
+// approval. PipelineTrigger has no Daemon/Restart; WebhookSecret and
+// ReplayProtection are excluded for the same reasons as on Spec.
+type resolvedPipelineSecurityFields struct {
+	Timeout     time.Duration      `json:"timeout"`
+	Webhook     string             `json:"webhook"`
+	WebhookAuth bool               `json:"webhook_auth"`
+	Cron        string             `json:"cron"`
+	Manual      bool               `json:"manual"`
+	Chain       *task.ChainTrigger `json:"chain,omitempty"`
+}
+
+// hashDirResolved combines the task-dir hash with the canonical JSON of the
+// resolved security fields under the versioned domain prefix, NUL-delimited.
+func hashDirResolved(taskID, dir string, resolved any) (string, error) {
+	dirHash, err := task.Hash(dir)
+	if err != nil {
+		return "", err
+	}
+	b, err := json.Marshal(resolved)
+	if err != nil {
+		return "", fmt.Errorf("hash %s: marshal resolved fields: %w", taskID, err)
+	}
+	h := sha256.New()
+	h.Write([]byte(contentHashDomain))
+	h.Write([]byte{0})
+	h.Write([]byte(dirHash))
+	h.Write([]byte{0})
+	h.Write(b)
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
 // ContentHash computes the gate's content hash for a task.
 //
 // For a *task.Spec with a task directory, the hash covers task.Hash over the
 // directory (task.yaml + script files) AND a canonical JSON encoding of the
-// resolved security-bearing fields (permissions, runtime, and the full
-// resolved trigger shape). Folding the resolved fields in is essential:
-// taskset overrides (pkg/taskset/override.go) mutate the resolved spec after
-// load — they can replace permissions.net/fs/dicode, merge env entries, swap
-// the runtime, and patch the trigger (switch a manual/cron task to an
-// unauthenticated webhook, change its path, rewire chain/daemon) — and
-// taskset.yaml lives outside the task dir, so a dir-only hash would let an
-// override elevate a task's effective permissions or exposure without ever
-// re-pending it for approval (issue #400). The two inputs are combined under
-// the versioned domain-separation prefix contentHashDomainV3, NUL-delimited.
+// resolved security-bearing fields (permissions, runtime, params, timeout,
+// and the full resolved trigger shape). Folding the resolved fields in is
+// essential: taskset overrides (pkg/taskset/override.go) mutate the resolved
+// spec after load — they can replace permissions.net/fs/dicode, merge env
+// entries, swap the runtime, repoint param defaults, widen the timeout, and
+// patch the trigger (switch a manual/cron task to an unauthenticated
+// webhook, change its path, rewire chain/daemon) — and taskset.yaml lives
+// outside the task dir, so a dir-only hash would let an override elevate a
+// task's effective permissions or exposure without ever re-pending it for
+// approval (issue #400). The two inputs are combined under the versioned
+// domain-separation prefix contentHashDomain, NUL-delimited.
 //
-// A *task.PipelineTask with a directory keeps the plain dir hash: pipelines
-// are not subject to permission-replacing taskset overrides (see
-// pkg/taskset/resolver.go, case KindPipelineTask), and their per-stage
-// overrides live in the pipeline's own task.yaml, which the dir hash already
-// covers.
+// A *task.PipelineTask with a directory uses the same scheme over its
+// resolved trigger shape and timeout — see resolvedPipelineSecurityFields.
 //
-// Dir-less tasks (inline taskset entries) hash the resolved spec JSON.
+// Dir-less tasks (inline taskset entries) hash the resolved spec JSON; for
+// *task.Spec the marshalled copy has Trigger.WebhookSecret cleared and env
+// literal values redacted (TriggerConfig carries yaml tags only, so every
+// exported field — secret included — would otherwise marshal by Go name).
 func ContentHash(k task.Kinded) (string, error) {
 	switch s := k.(type) {
 	case *task.Spec:
 		if s.TaskDir != "" {
-			dirHash, err := task.Hash(s.TaskDir)
-			if err != nil {
-				return "", err
+			var params []resolvedParam
+			for _, p := range s.Params {
+				params = append(params, resolvedParam{
+					Name:     p.Name,
+					Default:  p.Default,
+					Required: p.Required,
+				})
 			}
-			resolved, err := json.Marshal(resolvedSecurityFields{
-				Permissions: s.Permissions,
+			return hashDirResolved(k.TaskID(), s.TaskDir, resolvedSecurityFields{
+				Permissions: sanitizePermissions(s.Permissions),
 				Runtime:     s.Runtime,
+				Params:      params,
+				Timeout:     s.Timeout,
 				Webhook:     s.Trigger.Webhook,
 				WebhookAuth: s.Trigger.WebhookAuth,
 				Cron:        s.Trigger.Cron,
@@ -356,25 +453,33 @@ func ContentHash(k task.Kinded) (string, error) {
 				Restart:     s.Trigger.Restart,
 				Chain:       s.Trigger.Chain,
 			})
-			if err != nil {
-				return "", fmt.Errorf("hash %s: marshal resolved fields: %w", k.TaskID(), err)
-			}
-			h := sha256.New()
-			h.Write([]byte(contentHashDomainV3))
-			h.Write([]byte{0})
-			h.Write([]byte(dirHash))
-			h.Write([]byte{0})
-			h.Write(resolved)
-			return hex.EncodeToString(h.Sum(nil)), nil
 		}
+		// Dir-less fallback: hash a shallow copy with secrets stripped so the
+		// committable lock never embeds a digest over secret material.
+		c := *s
+		c.Trigger.WebhookSecret = ""
+		c.Permissions = sanitizePermissions(c.Permissions)
+		return hashJSON(k.TaskID(), &c)
 	case *task.PipelineTask:
 		if s.TaskDir != "" {
-			return task.Hash(s.TaskDir)
+			return hashDirResolved(k.TaskID(), s.TaskDir, resolvedPipelineSecurityFields{
+				Timeout:     s.Timeout,
+				Webhook:     s.Trigger.Webhook,
+				WebhookAuth: s.Trigger.WebhookAuth,
+				Cron:        s.Trigger.Cron,
+				Manual:      s.Trigger.Manual,
+				Chain:       s.Trigger.Chain,
+			})
 		}
 	}
-	b, err := json.Marshal(k)
+	return hashJSON(k.TaskID(), k)
+}
+
+// hashJSON is the dir-less fallback: SHA-256 over the JSON encoding of v.
+func hashJSON(taskID string, v any) (string, error) {
+	b, err := json.Marshal(v)
 	if err != nil {
-		return "", fmt.Errorf("hash %s: %w", k.TaskID(), err)
+		return "", fmt.Errorf("hash %s: %w", taskID, err)
 	}
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:]), nil
