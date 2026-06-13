@@ -34,6 +34,16 @@ func (s *Server) SetApprovalGate(g ApprovalGate) { s.approvalGate = g }
 // /approve/{token} flow and MintApproveLink.
 func (s *Server) SetApprovalTokenStore(ts *approval.TokenStore) { s.approvalTokens = ts }
 
+// BroadcastApprovalPending emits the "approval:pending" WebSocket event so
+// dashboards can surface a newly held task without polling. The hash is
+// shortened to its display form — the browser never needs the full hash.
+func (s *Server) BroadcastApprovalPending(taskID, hash string) {
+	s.ws.Broadcast(WSMsg{
+		Type: "approval:pending",
+		Data: ApprovalPendingData{TaskID: taskID, Hash: shortHash(hash)},
+	})
+}
+
 // taskPendingApproval reports whether id is held by the approval gate.
 func (s *Server) taskPendingApproval(id string) bool {
 	return s.approvalGate != nil && s.approvalGate.IsPending(id)

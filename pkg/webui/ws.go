@@ -44,6 +44,12 @@ type RunFinishedData struct {
 	ReturnValue       string `json:"returnValue,omitempty"`
 }
 
+// ApprovalPendingData is the payload for "approval:pending".
+type ApprovalPendingData struct {
+	TaskID string `json:"taskID"`
+	Hash   string `json:"hash,omitempty"`
+}
+
 // WSHub manages all WebSocket clients.
 type WSHub struct {
 	mu             sync.Mutex
