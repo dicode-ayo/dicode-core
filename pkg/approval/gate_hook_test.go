@@ -1,0 +1,102 @@
+package approval
+
+import (
+	"sync"
+	"testing"
+
+	"github.com/dicode/dicode/pkg/task"
+)
+
+// hookCall records one pending-hook invocation.
+type hookCall struct {
+	id   string
+	hash string
+}
+
+func TestPendingHookFiresOnNewHold(t *testing.T) {
+	g, _, _ := newTestGate(t, enabledPolicy())
+	g.SetHashFunc(func(task.Kinded) (string, error) { return "h1", nil })
+	var mu sync.Mutex
+	var calls []hookCall
+	g.SetPendingHook(func(k task.Kinded, hash string) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls = append(calls, hookCall{k.TaskID(), hash})
+	})
+
+	spec := &task.Spec{ID: "repo/deploy"}
+	if armed, _ := g.Admit(spec); armed {
+		t.Fatal("untrusted task must be pending")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(calls) != 1 || calls[0] != (hookCall{"repo/deploy", "h1"}) {
+		t.Fatalf("hook calls = %+v, want one {repo/deploy h1}", calls)
+	}
+}
+
+func TestPendingHookSkipsUnchangedReAdmit(t *testing.T) {
+	g, _, _ := newTestGate(t, enabledPolicy())
+	g.SetHashFunc(func(task.Kinded) (string, error) { return "h1", nil })
+	var mu sync.Mutex
+	var n int
+	g.SetPendingHook(func(task.Kinded, string) { mu.Lock(); n++; mu.Unlock() })
+
+	spec := &task.Spec{ID: "repo/deploy"}
+	g.Admit(spec) // new hold → fires
+	g.Admit(spec) // unchanged re-admit (reconcile poll) → must NOT re-fire
+	g.Admit(spec)
+	mu.Lock()
+	defer mu.Unlock()
+	if n != 1 {
+		t.Fatalf("hook fired %d times, want 1 (only on transition)", n)
+	}
+}
+
+func TestPendingHookFiresOnHashChange(t *testing.T) {
+	g, _, _ := newTestGate(t, enabledPolicy())
+	hash := "h1"
+	g.SetHashFunc(func(task.Kinded) (string, error) { return hash, nil })
+	var mu sync.Mutex
+	var calls []hookCall
+	g.SetPendingHook(func(k task.Kinded, h string) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls = append(calls, hookCall{k.TaskID(), h})
+	})
+
+	spec := &task.Spec{ID: "repo/deploy"}
+	g.Admit(spec) // h1 hold
+	hash = "h2"   // content changed while still pending
+	g.Admit(spec) // h2 → must re-fire
+	mu.Lock()
+	defer mu.Unlock()
+	if len(calls) != 2 || calls[1].hash != "h2" {
+		t.Fatalf("hook calls = %+v, want a second fire at h2", calls)
+	}
+}
+
+func TestPendingHookNotFiredForTrustedTask(t *testing.T) {
+	policy := enabledPolicy()
+	policy.TrustedTasks["repo/deploy"] = true
+	g, _, _ := newTestGate(t, policy)
+	g.SetHashFunc(func(task.Kinded) (string, error) { return "h1", nil })
+	var fired bool
+	g.SetPendingHook(func(task.Kinded, string) { fired = true })
+
+	if armed, _ := g.Admit(&task.Spec{ID: "repo/deploy"}); !armed {
+		t.Fatal("trusted task must arm")
+	}
+	if fired {
+		t.Fatal("hook must not fire for an auto-approved task")
+	}
+}
+
+func TestPendingHookNilSafe(t *testing.T) {
+	g, _, _ := newTestGate(t, enabledPolicy())
+	g.SetHashFunc(func(task.Kinded) (string, error) { return "h1", nil })
+	// No hook installed; Admit must not panic on the pending path.
+	if armed, _ := g.Admit(&task.Spec{ID: "repo/deploy"}); armed {
+		t.Fatal("untrusted task must be pending")
+	}
+}

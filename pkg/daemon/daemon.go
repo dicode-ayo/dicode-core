@@ -478,6 +478,36 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	// + the single-use tokenized approve link for notifications.
 	srv.SetApprovalGate(approvalGate)
 	srv.SetApprovalTokenStore(approval.NewTokenStore(database))
+	// Phase 3 (#399): notify on the transition into pending. Installed here —
+	// after srv exists — because the gate is built earlier (step 7a) than the
+	// webui Server (step 8), and the hook needs srv for the broadcast + the
+	// tokenized approve link. The gate invokes this without its lock held and
+	// only on a true pending transition (new hold / hash change), never on an
+	// unchanged re-admit, so the 30s reconcile loop cannot spam notifications.
+	notifier := approvalNotifier{
+		notifyTask: cfg.Approval.NotifyTask,
+		broadcast:  srv.BroadcastApprovalPending,
+		mintLink:   func(id string) (string, error) { return srv.MintApproveLink(ctx, id) },
+		fire: func(id string, params map[string]string) error {
+			_, err := eng.FireManual(ctx, id, params)
+			return err
+		},
+		log: log,
+	}
+	approvalGate.SetPendingHook(func(k task.Kinded, hash string) {
+		id := k.TaskID()
+		// The reconciler goroutine drives the hook; never let notification work
+		// block it, and never let a notify failure crash the daemon.
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Error("approval notify hook panicked",
+						zap.String("task", id), zap.Any("panic", r))
+				}
+			}()
+			notifier.notify(id, hash)
+		}()
+	})
 	if replayer != nil {
 		srv.SetReplayer(replayer)
 	}

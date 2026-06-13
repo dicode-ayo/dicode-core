@@ -48,9 +48,10 @@ type Gate struct {
 	hashFn func(task.Kinded) (string, error)
 	log    *zap.Logger
 
-	mu        sync.Mutex
-	pending   map[string]pendingEntry
-	bootstrap bool
+	mu          sync.Mutex
+	pending     map[string]pendingEntry
+	pendingHook func(k task.Kinded, hash string)
+	bootstrap   bool
 }
 
 // pendingEntry captures the task (and the hash observed at decision time) so
@@ -79,6 +80,18 @@ func NewGate(policy Policy, lock *Lock, arm func(task.Kinded) error, log *zap.Lo
 
 // SetHashFunc overrides the content-hash function (tests).
 func (g *Gate) SetHashFunc(fn func(task.Kinded) (string, error)) { g.hashFn = fn }
+
+// SetPendingHook installs the operator-notification hook. It is invoked only
+// on the transition into pending — a task newly held, or a held task observed
+// at a different content hash — never on a re-admit of an unchanged pending
+// task, so a 30s reconcile loop cannot spam notifications. The hook is called
+// without the gate lock held; it must not block (spawn a goroutine for any
+// slow work).
+func (g *Gate) SetPendingHook(fn func(k task.Kinded, hash string)) {
+	g.mu.Lock()
+	g.pendingHook = fn
+	g.mu.Unlock()
+}
 
 // SetBootstrap toggles bootstrap mode. While on, Admit seeds (auto-approves +
 // records) every task instead of holding it pending, so adopting the gate on
@@ -143,8 +156,13 @@ func (g *Gate) Admit(k task.Kinded) (armed bool, err error) {
 		by = ApprovedByBootstrap
 	default:
 		g.mu.Lock()
+		prev, was := g.pending[id]
 		g.pending[id] = pendingEntry{kinded: k, hash: hash}
+		hook := g.pendingHook
 		g.mu.Unlock()
+		if hook != nil && (!was || prev.hash != hash) {
+			hook(k, hash)
+		}
 		return false, nil
 	}
 
