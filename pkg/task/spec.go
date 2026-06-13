@@ -596,9 +596,13 @@ func (s *Spec) ScriptPath() string {
 
 // Script reads and returns the task script source.
 func (s *Spec) Script() (string, error) {
-	b, err := os.ReadFile(s.ScriptPath())
+	p := s.ScriptPath()
+	if p == "" {
+		return "", fmt.Errorf("no script file found for task %s (file missing or is a symlink)", s.Name)
+	}
+	b, err := os.ReadFile(p)
 	if err != nil {
-		return "", fmt.Errorf("read script %s: %w", s.ScriptPath(), err)
+		return "", fmt.Errorf("read script %s: %w", p, err)
 	}
 	return string(b), nil
 }
