@@ -22,9 +22,10 @@ const (
 
 // DockerBuild configures a local Dockerfile build instead of pulling a pre-built image.
 // The built image is tagged dicode-<taskID>:<hash> and cached; rebuild only happens when
-// the Dockerfile content changes.
-//
-// TODO: clean up old dicode-<taskID>:* images when a task is removed or the Dockerfile changes.
+// the Dockerfile content changes. Old dicode-<taskID>:* images (task removed, or
+// Dockerfile changed) are reclaimed best-effort by the daemon's periodic image GC —
+// see pkg/runtime/imagegc and the ReclaimOrphanedImages functions in the docker and
+// podman runtimes.
 type DockerBuild struct {
 	Dockerfile string `yaml:"dockerfile,omitempty"` // path relative to task dir; default "Dockerfile"
 	Context    string `yaml:"context,omitempty"`    // path relative to task dir; default task dir
@@ -703,8 +704,11 @@ func (s *Spec) validate() error {
 }
 
 // dockerHardeningWarnings flags container settings that visibly weaken
-// isolation. These aren't errors — operators can explicitly opt in — but they
-// should surface in the UI so reviewers notice.
+// isolation so they surface in the UI at config-load time. Warnings are
+// advisory only; the hard security floor is enforced at dispatch by
+// pkg/runtime/containersec.Validate (issue #380), which rejects these
+// settings — plus sensitive bind mounts — unless the operator opted in via
+// the container_security block in dicode.yaml.
 func dockerHardeningWarnings(d *DockerConfig) []string {
 	var warns []string
 	if d.NetworkMode == "host" {

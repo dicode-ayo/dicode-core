@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dicode/dicode/pkg/runtime/containersec"
 	"github.com/dicode/dicode/pkg/task"
 	"github.com/dicode/dicode/pkg/taskset"
 	"gopkg.in/yaml.v3"
@@ -245,6 +246,46 @@ type Config struct {
 	Approval  ApprovalConfig           `yaml:"approval,omitempty"`
 	LogLevel  string                   `yaml:"log_level"`
 	DataDir   string                   `yaml:"data_dir"`
+	// ContainerSecurity is the operator opt-out for the container runtime
+	// security floor (issue #380). By default every dangerous host-config
+	// request from a task.yaml (host network namespace, dangerous cap_add,
+	// isolation-weakening security_opt, bind mounts of sensitive host paths)
+	// is rejected at dispatch; this block lets an operator explicitly allow
+	// specific escapes. Appended last to minimize merge conflicts.
+	ContainerSecurity ContainerSecurityConfig `yaml:"container_security,omitempty"`
+}
+
+// ContainerSecurityConfig configures the security floor enforced on
+// docker/podman task host configuration (issue #380). The zero value —
+// no block in dicode.yaml — denies everything dangerous.
+//
+// Example:
+//
+//	container_security:
+//	  allow_host_network: true                 # permit network_mode: host / container:<id>
+//	  allow_insecure_security_opt: false       # seccomp/apparmor/label/unmask weakening
+//	  allowed_cap_add: [SYS_PTRACE]            # caps tasks may add despite the deny list ("ALL" = any)
+//	  allowed_volume_roots: [/srv/dicode-data] # strict allowlist for bind-mount sources
+//
+// When allowed_volume_roots is non-empty, EVERY bind-mount source must
+// resolve (after symlink/".." cleaning) inside one of the listed roots;
+// an explicitly listed root also overrides the built-in sensitive-path
+// denylist (/, /proc, /sys, /etc, /dev, /run, the docker/podman sockets, …).
+type ContainerSecurityConfig struct {
+	AllowHostNetwork         bool     `yaml:"allow_host_network,omitempty"`
+	AllowInsecureSecurityOpt bool     `yaml:"allow_insecure_security_opt,omitempty"`
+	AllowedCapAdd            []string `yaml:"allowed_cap_add,omitempty"`
+	AllowedVolumeRoots       []string `yaml:"allowed_volume_roots,omitempty"`
+}
+
+// Policy converts the operator config into the runtime-enforced policy.
+func (c ContainerSecurityConfig) Policy() containersec.Policy {
+	return containersec.Policy{
+		AllowHostNetwork:         c.AllowHostNetwork,
+		AllowInsecureSecurityOpt: c.AllowInsecureSecurityOpt,
+		AllowedCapAdd:            c.AllowedCapAdd,
+		AllowedVolumeRoots:       c.AllowedVolumeRoots,
+	}
 }
 
 // DatabaseConfig selects the storage backend.
@@ -552,6 +593,19 @@ func (cfg *Config) validate() error {
 	for id, p := range cfg.Approval.Tasks {
 		if p.Trust != "" && p.Trust != "always" {
 			return fmt.Errorf("approval.tasks[%q].trust: must be \"always\" or unset, got %q", id, p.Trust)
+		}
+	}
+	// container_security (issue #380): roots must be absolute so the
+	// runtime's resolve-then-prefix check is well-defined; caps must be
+	// non-empty names.
+	for _, root := range cfg.ContainerSecurity.AllowedVolumeRoots {
+		if !filepath.IsAbs(root) {
+			return fmt.Errorf("container_security.allowed_volume_roots: %q must be an absolute path", root)
+		}
+	}
+	for _, c := range cfg.ContainerSecurity.AllowedCapAdd {
+		if strings.TrimSpace(c) == "" {
+			return fmt.Errorf("container_security.allowed_cap_add: entries must be non-empty capability names")
 		}
 	}
 	return nil

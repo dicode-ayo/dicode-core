@@ -895,3 +895,79 @@ spec:
 		t.Errorf("AI.CreateSessionTTL = %v, want %v", cfg.AI.CreateSessionTTL, time.Hour)
 	}
 }
+
+// TestLoad_ContainerSecurity covers the issue #380 operator opt-out block:
+// default deny when absent, parsed values when present, and validation of
+// allowed_volume_roots / allowed_cap_add entries.
+func TestLoad_ContainerSecurity(t *testing.T) {
+	writeCfg := func(t *testing.T, body string) string {
+		t.Helper()
+		dir := t.TempDir()
+		cfgPath := filepath.Join(dir, "dicode.yaml")
+		content := `
+spec:
+  entries:
+    local:
+      ref:
+        path: ${CONFIGDIR}/tasks
+` + body
+		if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return cfgPath
+	}
+
+	t.Run("absent block is default deny", func(t *testing.T) {
+		cfg, err := Load(writeCfg(t, ""))
+		if err != nil {
+			t.Fatal(err)
+		}
+		p := cfg.ContainerSecurity.Policy()
+		if p.AllowHostNetwork || p.AllowInsecureSecurityOpt || len(p.AllowedCapAdd) != 0 || len(p.AllowedVolumeRoots) != 0 {
+			t.Errorf("absent container_security must yield the strict zero policy, got %+v", p)
+		}
+	})
+
+	t.Run("explicit opt-ins parse into the policy", func(t *testing.T) {
+		cfg, err := Load(writeCfg(t, `
+container_security:
+  allow_host_network: true
+  allow_insecure_security_opt: true
+  allowed_cap_add: [SYS_PTRACE, CAP_NET_ADMIN]
+  allowed_volume_roots: [/srv/dicode-data, /opt/shared]
+`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		p := cfg.ContainerSecurity.Policy()
+		if !p.AllowHostNetwork || !p.AllowInsecureSecurityOpt {
+			t.Errorf("booleans not propagated: %+v", p)
+		}
+		if len(p.AllowedCapAdd) != 2 || p.AllowedCapAdd[0] != "SYS_PTRACE" {
+			t.Errorf("AllowedCapAdd = %v", p.AllowedCapAdd)
+		}
+		if len(p.AllowedVolumeRoots) != 2 || p.AllowedVolumeRoots[0] != "/srv/dicode-data" {
+			t.Errorf("AllowedVolumeRoots = %v", p.AllowedVolumeRoots)
+		}
+	})
+
+	t.Run("relative allowed_volume_roots rejected", func(t *testing.T) {
+		_, err := Load(writeCfg(t, `
+container_security:
+  allowed_volume_roots: [relative/path]
+`))
+		if err == nil || !strings.Contains(err.Error(), "allowed_volume_roots") {
+			t.Errorf("expected allowed_volume_roots validation error, got %v", err)
+		}
+	})
+
+	t.Run("empty allowed_cap_add entry rejected", func(t *testing.T) {
+		_, err := Load(writeCfg(t, `
+container_security:
+  allowed_cap_add: ["", SYS_PTRACE]
+`))
+		if err == nil || !strings.Contains(err.Error(), "allowed_cap_add") {
+			t.Errorf("expected allowed_cap_add validation error, got %v", err)
+		}
+	})
+}

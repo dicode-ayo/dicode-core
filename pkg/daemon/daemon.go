@@ -577,6 +577,27 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	g.Go(func() error { return srv.Start(ctx) })
 	g.Go(func() error { return ctrlSrv.Start(ctx) })
 
+	// Best-effort container image GC (issue #380): reclaim dicode-built
+	// images whose task is gone or whose Dockerfile hash moved on. The
+	// first pass is delayed so the reconciler has populated the registry
+	// (an empty registry would treat every dicode image as orphaned);
+	// later passes run daily.
+	g.Go(func() error {
+		timer := time.NewTimer(2 * time.Minute)
+		defer timer.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-timer.C:
+			}
+			specs := reg.All()
+			dockerruntime.ReclaimOrphanedImages(ctx, log, specs)
+			podmanruntime.ReclaimOrphanedImages(ctx, log, specs)
+			timer.Reset(24 * time.Hour)
+		}
+	})
+
 	// Relay client now runs as the buildin/relay-client daemon task, which
 	// reconciler-launches automatically when cfg.Relay.Enabled = true.
 	// Daemon-level wiring (env vars + crypto handler) is set above; nothing
@@ -653,9 +674,19 @@ func buildRuntimes(
 		}
 	}
 
-	eng.RegisterExecutor(task.RuntimeDocker, dockerruntime.New(reg, log))
+	// Container security floor (issue #380): both container runtimes
+	// validate untrusted task host config against the operator policy
+	// before creating containers. The zero-value policy (no
+	// container_security block in dicode.yaml) denies every dangerous
+	// escape.
+	secPolicy := cfg.ContainerSecurity.Policy()
+
+	dockerRT := dockerruntime.New(reg, log)
+	dockerRT.SetPolicy(secPolicy)
+	eng.RegisterExecutor(task.RuntimeDocker, dockerRT)
 
 	podmanMgr := podmanruntime.New(reg, log)
+	podmanMgr.SetPolicy(secPolicy)
 	managed = append(managed, podmanMgr)
 	if podmanMgr.IsInstalled("") {
 		if p, err := podmanMgr.BinaryPath(""); err == nil {
