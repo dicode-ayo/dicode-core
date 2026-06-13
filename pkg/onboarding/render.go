@@ -43,21 +43,11 @@ spec:
 		if !r.TaskSetsEnabled[p.Name] {
 			continue
 		}
-		fmt.Fprintf(&b, `    %s:
-      ref:
-        url: %s
-        branch: %s
-        path: %s
-        poll_interval: 30s
-`, p.Name, p.URL, p.Branch, p.EntryPath)
+		fmt.Fprintf(&b, "    %s:\n      ref:\n        url: %q\n        branch: %q\n        path: %q\n        poll_interval: 30s\n", p.Name, p.URL, p.Branch, p.EntryPath)
 	}
 
 	if r.LocalTasksDir != "" {
-		fmt.Fprintf(&b, `    local:
-      ref:
-        path: %s
-        watch: true
-`, r.LocalTasksDir)
+		fmt.Fprintf(&b, "    local:\n      ref:\n        path: %q\n        watch: true\n", r.LocalTasksDir)
 	}
 
 	b.WriteString(`
@@ -93,7 +83,7 @@ server:
 # ---------------------------------------------------------------------------
 log_level: info
 `)
-	fmt.Fprintf(&b, "data_dir: %s\n", r.DataDir)
+	fmt.Fprintf(&b, "data_dir: %q\n", r.DataDir)
 
 	return b.String()
 }

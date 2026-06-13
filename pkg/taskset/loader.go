@@ -181,7 +181,7 @@ func ValidateRefURL(filePath, key, rawURL string) error {
 				// Ensure no "/" before the ":" — a slash means it's a path
 				// separator, not the SCP host:path separator.
 				hostPart := afterAt[:colon]
-				if !strings.Contains(hostPart, "/") {
+				if !strings.Contains(hostPart, "/") && isValidSCPHost(hostPart) {
 					return nil // valid SSH shorthand
 				}
 			}
@@ -197,6 +197,20 @@ func ValidateRefURL(filePath, key, rawURL string) error {
 	default:
 		return fmt.Errorf("%s: entry %q: ref.url must use scheme http, https, ssh, or git (got %q)", filePath, key, u.Scheme)
 	}
+}
+
+// isValidSCPHost reports whether s looks like a valid SCP hostname — only
+// letters, digits, hyphens, and dots, and not empty.
+func isValidSCPHost(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if !('a' <= c && c <= 'z') && !('A' <= c && c <= 'Z') && !('0' <= c && c <= '9') && c != '-' && c != '.' {
+			return false
+		}
+	}
+	return true
 }
 
 func validateTaskSet(ts *TaskSetSpec, path string) error {

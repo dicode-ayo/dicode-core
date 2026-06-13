@@ -571,17 +571,22 @@ func (s *Spec) ScriptPath() string {
 	switch s.Runtime {
 	case RuntimeDeno:
 		ts := filepath.Join(s.TaskDir, "task.ts")
-		if _, err := os.Stat(ts); err == nil {
+		if fi, err := os.Lstat(ts); err == nil && fi.Mode()&os.ModeSymlink == 0 {
 			return ts
 		}
-		return filepath.Join(s.TaskDir, "task.js")
+		p := filepath.Join(s.TaskDir, "task.js")
+		if fi, err := os.Lstat(p); err == nil && fi.Mode()&os.ModeSymlink == 0 {
+			return p
+		}
+		return ""
 	case RuntimeDocker, RuntimePodman:
 		return ""
 	default:
 		// For subprocess runtimes, look for any task.* file in the task dir.
+		// Symlinks are rejected to prevent reading files outside the task directory.
 		for _, ext := range []string{".py", ".jl", ".rb", ".sh", ".ts", ".js", ".mjs"} {
 			p := filepath.Join(s.TaskDir, "task"+ext)
-			if _, err := os.Stat(p); err == nil {
+			if fi, err := os.Lstat(p); err == nil && fi.Mode()&os.ModeSymlink == 0 {
 				return p
 			}
 		}

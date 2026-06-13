@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -267,6 +268,20 @@ func TestGitSource_SyncTriggersImmediatePull(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("beta/task.yaml not found in local clone under %s", betaPath)
+	}
+}
+
+func TestNew_StripsCredentialsFromID(t *testing.T) {
+	s, err := New(t.TempDir(), "https://user:token@github.com/org/repo.git", "main", 0, "", "", zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := s.ID()
+	if strings.Contains(got, "token") || strings.Contains(got, "user:") {
+		t.Errorf("ID() leaks credentials: %q", got)
+	}
+	if !strings.Contains(got, "github.com") {
+		t.Errorf("ID() lost the host: %q", got)
 	}
 }
 

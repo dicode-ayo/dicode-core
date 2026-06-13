@@ -179,3 +179,28 @@ func TestRenderConfig_GitSourceFieldsMatchPreset(t *testing.T) {
 		t.Errorf("path = %q; want %q", e.Ref.Path, preset.EntryPath)
 	}
 }
+
+// TestRenderConfig_YAMLInjectionSafe verifies that newlines in DataDir or
+// LocalTasksDir cannot inject extra YAML keys.
+func TestRenderConfig_YAMLInjectionSafe(t *testing.T) {
+	r := Result{
+		TaskSetsEnabled: map[string]bool{},
+		LocalTasksDir:   "/safe/path\nmalicious: injected",
+		DataDir:         "/data\nevil: true",
+		Port:            8080,
+		Passphrase:      "p",
+	}
+	out := RenderConfig(r)
+	// The output must parse as valid YAML.
+	var doc map[string]interface{}
+	if err := yaml.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatalf("RenderConfig produced invalid YAML: %v\n%s", err, out)
+	}
+	// The injected keys must not appear at the top level.
+	if _, ok := doc["malicious"]; ok {
+		t.Error("YAML injection via LocalTasksDir succeeded")
+	}
+	if _, ok := doc["evil"]; ok {
+		t.Error("YAML injection via DataDir succeeded")
+	}
+}

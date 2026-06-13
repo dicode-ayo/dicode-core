@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -1097,5 +1098,43 @@ spec:
 	}
 	if results[0].ID != "infra/deploy" {
 		t.Errorf("ID: got %q", results[0].ID)
+	}
+}
+
+// TestResolveRef_LocalEscapeRejectedInsideClone verifies that a local ref
+// that would traverse above cloneRoot is rejected when cloneRoot is set.
+func TestResolveRef_LocalEscapeRejectedInsideClone(t *testing.T) {
+	r := newResolver(t)
+	parent := filepath.Join(t.TempDir(), "clone", "taskset.yaml")
+	cloneRoot := filepath.Dir(parent)
+	if err := os.MkdirAll(cloneRoot, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	ref := &Ref{Path: "../../etc/passwd"}
+	_, err := r.resolveRef(context.Background(), ref, parent, nil, cloneRoot)
+	if err == nil {
+		t.Fatal("expected error for path escaping clone root, got nil")
+	}
+}
+
+// TestResolveRef_LocalContainedPathAllowed verifies a path that stays inside cloneRoot.
+func TestResolveRef_LocalContainedPathAllowed(t *testing.T) {
+	r := newResolver(t)
+	cloneDir := t.TempDir()
+	tsFile := filepath.Join(cloneDir, "sub", "taskset.yaml")
+	if err := os.MkdirAll(filepath.Dir(tsFile), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// A relative path that stays inside cloneDir is allowed.
+	ref := &Ref{Path: "sibling/taskset.yaml"}
+	got, err := r.resolveRef(context.Background(), ref, tsFile, nil, cloneDir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// resolveYAMLPath returns the path unchanged if it doesn't exist; just check it starts with cloneDir.
+	if !strings.HasPrefix(got, cloneDir) {
+		t.Errorf("resolved path %q not under cloneDir %q", got, cloneDir)
 	}
 }

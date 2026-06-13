@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -25,6 +26,17 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/transport/http"
 	"go.uber.org/zap"
 )
+
+// stripURLCredentials returns rawURL with any userinfo (user:password@) removed.
+// Returns rawURL unchanged if it cannot be parsed or has no userinfo.
+func stripURLCredentials(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.User == nil {
+		return rawURL
+	}
+	u.User = nil
+	return u.String()
+}
 
 const (
 	defaultPoll = 30 * time.Second
@@ -73,12 +85,14 @@ func New(dataDir, url, branch string, poll time.Duration, tokenEnv, sshKey strin
 	if poll == 0 {
 		poll = defaultPoll
 	}
-	// Deterministic local dir name from URL hash so re-adding the same URL reuses the clone.
-	h := sha256.Sum256([]byte(url))
+	// Deterministic local dir name from credential-stripped URL so re-adding
+	// the same repo with different credentials reuses the existing clone.
+	displayURL := stripURLCredentials(url)
+	h := sha256.Sum256([]byte(displayURL))
 	dir := filepath.Join(dataDir, "repos", fmt.Sprintf("%x", h[:8]))
 
 	return &GitSource{
-		id:           url,
+		id:           displayURL,
 		url:          url,
 		branch:       branch,
 		pollInterval: poll,
@@ -96,12 +110,12 @@ func (g *GitSource) ID() string { return g.id }
 func (g *GitSource) Start(ctx context.Context) (<-chan source.Event, error) {
 	if err := g.cloneOrPull(ctx); err != nil {
 		// Don't fatal — the repo might be accessible later. Log and continue.
-		g.log.Warn("git source: initial clone/pull failed", zap.String("url", g.url), zap.Error(err))
+		g.log.Warn("git source: initial clone/pull failed", zap.String("url", g.id), zap.Error(err))
 	}
 
 	ch := make(chan source.Event, 32)
 	if err := g.syncAndEmit(ctx, ch); err != nil {
-		g.log.Warn("git source: initial scan failed", zap.String("url", g.url), zap.Error(err))
+		g.log.Warn("git source: initial scan failed", zap.String("url", g.id), zap.Error(err))
 	}
 
 	go g.poll(ctx, ch)
@@ -132,11 +146,11 @@ func (g *GitSource) poll(ctx context.Context, ch chan<- source.Event) {
 			return
 		case <-ticker.C:
 			if err := g.cloneOrPull(ctx); err != nil {
-				g.log.Warn("git source: pull failed", zap.String("url", g.url), zap.Error(err))
+				g.log.Warn("git source: pull failed", zap.String("url", g.id), zap.Error(err))
 				continue
 			}
 			if err := g.syncAndEmit(ctx, ch); err != nil {
-				g.log.Warn("git source: scan failed", zap.String("url", g.url), zap.Error(err))
+				g.log.Warn("git source: scan failed", zap.String("url", g.id), zap.Error(err))
 			}
 		}
 	}

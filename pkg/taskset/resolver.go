@@ -89,7 +89,7 @@ func (r *Resolver) DevMode() bool {
 // root taskset.yaml path, so source loaders don't need to. The map is
 // treated as read-only; the resolver never mutates or retains it.
 func (r *Resolver) Resolve(ctx context.Context, namespace string, tsRef *Ref, configDefaults *Defaults, parentOverrides *Overrides, extraVars map[string]string) ([]*ResolvedTask, error) {
-	tsPath, err := r.resolveRef(ctx, tsRef, "", nil)
+	tsPath, err := r.resolveRef(ctx, tsRef, "", nil, "")
 	if err != nil {
 		return nil, fmt.Errorf("resolve ref for namespace %q: %w", namespace, err)
 	}
@@ -104,6 +104,15 @@ func (r *Resolver) Resolve(ctx context.Context, namespace string, tsRef *Ref, co
 	// for git sources it would be the clone directory (already resolved above).
 	repoDir := filepath.Dir(tsPath)
 
+	// cloneRoot constrains local ref paths when the root taskset was resolved
+	// from a git source: relative paths in nested refs must stay within the
+	// clone directory. For local sources, cloneRoot is "" so no containment
+	// check is applied (the operator chose those paths explicitly).
+	cloneRoot := ""
+	if tsRef.IsGit() {
+		cloneRoot = repoDir
+	}
+
 	// At the TOP-level Resolve only, inject TASK_SET_DIR from the resolved
 	// root taskset path. Nested resolveNestedRef calls receive this same
 	// map unchanged, so the variable always points at the ROOT taskset dir
@@ -115,7 +124,7 @@ func (r *Resolver) Resolve(ctx context.Context, namespace string, tsRef *Ref, co
 	// ${TASK_SET_DIR} in task.yaml paths.
 	rootVars := withTaskSetDir(extraVars, tsPath)
 
-	return r.resolveBody(ctx, namespace, tsPath, ts, configDefaults, parentOverrides, rootVars, repoDir)
+	return r.resolveBody(ctx, namespace, tsPath, ts, configDefaults, parentOverrides, rootVars, repoDir, cloneRoot)
 }
 
 // withTaskSetDir returns a copy of base with VarTaskSetDir set to
@@ -141,6 +150,7 @@ func (r *Resolver) resolveBody(
 	parentOverrides *Overrides,
 	extraVars map[string]string,
 	repoDir string,
+	cloneRoot string,
 ) ([]*ResolvedTask, error) {
 	// Deprecation warnings for removed precedence levels.
 	if defaultsNonEmpty(configDefaults) {
@@ -213,7 +223,7 @@ func (r *Resolver) resolveBody(
 			VarTaskSetRefDir: filepath.Dir(tsPath),
 		}
 
-		localPath, err := r.resolveRef(ctx, ref, tsPath, refVars)
+		localPath, err := r.resolveRef(ctx, ref, tsPath, refVars, cloneRoot)
 		if err != nil {
 			r.log.Warn("taskset: failed to resolve ref",
 				zap.String("entry", fullID), zap.Error(err))
@@ -320,7 +330,7 @@ func (r *Resolver) resolveBody(
 			if parentEntryOverride != nil {
 				nestedOverrides = mergeOverrides(parentEntryOverride, nestedOverrides)
 			}
-			nested, err := r.resolveNestedRef(ctx, fullID, localPath, nestedOverrides, extraVars, repoDir)
+			nested, err := r.resolveNestedRef(ctx, fullID, localPath, nestedOverrides, extraVars, repoDir, cloneRoot)
 			if err != nil {
 				r.log.Warn("taskset: failed to resolve nested taskset",
 					zap.String("entry", fullID), zap.Error(err))
@@ -344,14 +354,14 @@ func (r *Resolver) resolveBody(
 	return results, nil
 }
 
-func (r *Resolver) resolveNestedRef(ctx context.Context, namespace, tsPath string, overrides *Overrides, extraVars map[string]string, repoDir string) ([]*ResolvedTask, error) {
+func (r *Resolver) resolveNestedRef(ctx context.Context, namespace, tsPath string, overrides *Overrides, extraVars map[string]string, repoDir string, cloneRoot string) ([]*ResolvedTask, error) {
 	ts, err := LoadTaskSet(tsPath)
 	if err != nil {
 		return nil, err
 	}
 	// Pass nil for configDefaults: deprecation warnings are emitted once at the
 	// public Resolve entry point; nested sets do not re-emit them.
-	return r.resolveBody(ctx, namespace, tsPath, ts, nil, overrides, extraVars, repoDir)
+	return r.resolveBody(ctx, namespace, tsPath, ts, nil, overrides, extraVars, repoDir, cloneRoot)
 }
 
 // resolveRef returns the absolute local path to the yaml file pointed to by ref.
@@ -361,15 +371,21 @@ func (r *Resolver) resolveNestedRef(ctx context.Context, namespace, tsPath strin
 // refVars holds template variables (REPO_DIR, TASKSET_DIR) to expand in the
 // ref's Path field before resolution. Pass nil when no expansion is needed
 // (e.g. the root Resolve call before repoDir is known).
-func (r *Resolver) resolveRef(ctx context.Context, ref *Ref, parentTSPath string, refVars map[string]string) (string, error) {
+// cloneRoot, when non-empty, constrains local (non-git) refs: the resolved path
+// must remain within cloneRoot. Pass "" to skip the containment check.
+func (r *Resolver) resolveRef(ctx context.Context, ref *Ref, parentTSPath string, refVars map[string]string, cloneRoot string) (string, error) {
 	path := expandRefPath(ref.Path, refVars)
 
 	var resolved string
 	if !ref.IsGit() {
 		if !filepath.IsAbs(path) {
-			resolved = filepath.Join(filepath.Dir(parentTSPath), path)
+			resolved = filepath.Clean(filepath.Join(filepath.Dir(parentTSPath), path))
 		} else {
-			resolved = path
+			resolved = filepath.Clean(path)
+		}
+		// When inside a git-cloned source, local refs must stay within the clone root.
+		if cloneRoot != "" && !strings.HasPrefix(resolved+string(filepath.Separator), cloneRoot+string(filepath.Separator)) {
+			return "", fmt.Errorf("ref path %q escapes repo root", ref.Path)
 		}
 	} else {
 		branch := ref.effectiveBranch()
@@ -377,7 +393,10 @@ func (r *Resolver) resolveRef(ctx context.Context, ref *Ref, parentTSPath string
 		if err != nil {
 			return "", err
 		}
-		resolved = filepath.Join(localDir, path)
+		resolved = filepath.Clean(filepath.Join(localDir, path))
+		if !strings.HasPrefix(resolved+string(filepath.Separator), localDir+string(filepath.Separator)) {
+			return "", fmt.Errorf("ref path %q escapes repo root", ref.Path)
+		}
 	}
 	return resolveYAMLPath(resolved), nil
 }
