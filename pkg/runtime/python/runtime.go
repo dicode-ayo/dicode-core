@@ -244,6 +244,18 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 	runID := opts.RunID
 	result := &pkgruntime.RunResult{RunID: runID}
 
+	// A failed run must always leave a diagnostic in the run log. Early
+	// returns (env resolution, missing script, socket/wrapper setup, uv
+	// start) set result.Error before any subprocess stderr exists; and a
+	// subprocess that exits non-zero without emitting stderr (signal kill,
+	// OOM) leaves the streamed-stderr log empty. Appending result.Error here
+	// guarantees the WebUI run detail and CLI log output show why it failed.
+	defer func() {
+		if result.Error != nil {
+			_ = e.reg.AppendLog(context.Background(), runID, "error", result.Error.Error())
+		}
+	}()
+
 	// Resolve declared env permissions. When the trigger engine ran
 	// preflight (issue #235), it forwards the *Resolved here so we don't
 	// re-spawn provider tasks. When opts.PreResolvedEnv is nil (legacy
@@ -430,7 +442,7 @@ func buildWrapper(scriptBytes []byte, pol guardPolicy) (string, error) {
 	w.WriteString("_asyncio_mod = _sys.modules['asyncio']\n")
 	w.WriteString("_main = globals().get('main')\n")
 	w.WriteString("if _main is not None and _asyncio_mod.iscoroutinefunction(_main):\n")
-	w.WriteString("    result = _asyncio_mod.run(_main(log=log, kv=kv, params=params, env=env, input=input, output=output, mcp=mcp, dicode=dicode))\n")
+	w.WriteString("    result = _asyncio_mod.run(_main())\n")
 	w.WriteString("_set_return(globals().get('result', None))\n")
 	// Schedule close on _loop so it runs *after* any pending _fire coroutines
 	// (the event loop is FIFO — tasks submitted before this will drain first).
