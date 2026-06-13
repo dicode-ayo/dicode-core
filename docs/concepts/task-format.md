@@ -756,17 +756,19 @@ Use **Edit code** on the task page to edit the Dockerfile directly in the web UI
 | `docker.command` | list | Overrides image CMD |
 | `docker.entrypoint` | list | Overrides image ENTRYPOINT |
 | `docker.ports` | list | Port bindings — `"hostPort:containerPort"` |
-| `docker.volumes` | list | Volume mounts — `"host:container[:ro]"`. Template vars `${DATADIR}`, `${TASK_DIR}`, `${HOME}` are expanded in the host path; `${UNKNOWN}` is left literal. Daemon env vars are NOT substituted. |
+| `docker.volumes` | list | Volume mounts — `"host:container[:ro]"`. Template vars `${DATADIR}`, `${TASK_DIR}`, `${HOME}` are expanded in the host path; `${UNKNOWN}` is left literal. Daemon env vars are NOT substituted. Bind-mounts of `/`, the docker/podman socket, and other sensitive host paths are **rejected by default** (see `container_security.allowed_volume_roots`). |
 | `docker.working_dir` | string | Container working directory |
 | `docker.env_vars` | map | Literal environment variables injected into container |
 | `docker.pull_policy` | string | `missing` (default), `always`, `never`. Ignored when using `build`. |
-| `docker.network_mode` | string | Container network — `bridge` (default for docker), `host`, `none`, or a user-defined network name. `host` collapses isolation; a startup warning is emitted. |
+| `docker.network_mode` | string | Container network — `bridge` (default for docker), `host`, `none`, or a user-defined network name. `host` (and `container:`/`ns:`) is **rejected by default** — allow via `container_security.allow_host_network`. |
 | `docker.extra_hosts` | list | Extra `/etc/hosts` entries — `"<name>:<ip>"`. Use `host.docker.internal:host-gateway` to reach host services from a bridge-networked container. |
 | `docker.cap_drop` | list | Linux capabilities to drop, e.g. `[ALL]`. |
-| `docker.cap_add` | list | Linux capabilities to re-add after `cap_drop`. Granting `SYS_ADMIN`, `SYS_PTRACE`, `SYS_MODULE`, or `ALL` emits a warning — these can enable container escape. |
-| `docker.security_opt` | list | Container security options, e.g. `["no-new-privileges:true"]`. Disabling sandbox layers (`seccomp=unconfined`, `apparmor=unconfined`, `label=disable`) emits a warning. |
+| `docker.cap_add` | list | Linux capabilities to re-add after `cap_drop`. Escape-enabling caps (`SYS_ADMIN`, `SYS_PTRACE`, `SYS_MODULE`, `ALL`, …) are **rejected by default** — allow specific caps via `container_security.allowed_cap_add`. |
+| `docker.security_opt` | list | Container security options, e.g. `["no-new-privileges:true"]`. Values that disable a sandbox layer (`seccomp=unconfined`, `apparmor=unconfined`, `label=disable`, `systempaths=unconfined`, `unmask=…`) are **rejected by default** — allow via `container_security.allow_insecure_security_opt`. |
 | `docker.read_only` | bool | Mount the container rootfs read-only. Pair with explicit tmpfs/volumes for any paths that need writes. |
 | `docker.user` | string | Run the container as `<uid>[:<gid>]` or `<name>[:<group>]`. Overrides the image's `USER` directive. |
+
+> **Security floor.** The "rejected by default" values above are enforced as a hard, fail-closed floor in both the docker and podman runtimes (`pkg/runtime/containersec`) — the run is aborted before the container is created. Operators opt specific exceptions in via the top-level `container_security` block. See [Container Security Floor](security.md#container-security-floor).
 
 #### Hardened defaults
 

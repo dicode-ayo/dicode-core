@@ -133,6 +133,7 @@ Response:
 | `GET` | `/api/runs/{runID}/logs` | Run logs (completed) |
 | `GET` | `/api/runs/{runID}/logs/stream` | Run logs (SSE, live) |
 | `POST` | `/api/runs/{runID}/kill` | Kill a running task |
+| `GET` | `/api/audit` | Security audit log — filter by `task_id`, `actor`, `event_type`; paginate with `limit` (≤1000, default 100) + `offset`. Newest first. |
 
 **GET `/api/runs/{runID}`** response:
 
@@ -147,6 +148,27 @@ Response:
   "duration_ms": 3241,
   "return_value": { "count": 5 },
   "parent_run_id": null
+}
+```
+
+**GET `/api/audit`** response (`{events, count}`; each event is sanitized — `params` never contains secret values):
+
+```json
+{
+  "events": [
+    {
+      "id": "5f1c…",
+      "ts": "2026-06-12T18:40:00Z",
+      "event_type": "denied",
+      "actor_kind": "ip",
+      "actor_id": "203.0.113.9",
+      "target_kind": "endpoint",
+      "target_id": "GET /api/tasks",
+      "allowed": false,
+      "reason": "no valid session"
+    }
+  ],
+  "count": 1
 }
 ```
 
