@@ -8,7 +8,6 @@ import (
 	"net"
 	"os"
 	"sort"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1376,16 +1375,29 @@ func (s *Server) mcpAllowed(name string) bool {
 	return false
 }
 
+// daemonPrivateCryptoContexts is the explicit denylist of sub-key context
+// strings the daemon uses for its own internal encrypted storage. Tasks may
+// not access these even with a wildcard ("*") grant, because doing so would
+// let a task derive the same key the daemon uses to encrypt data on behalf of
+// all users/tasks (e.g. persisted run inputs).
+//
+// Note: buildin tasks that legitimately use "dicode/"-prefixed contexts
+// (e.g. "dicode/relay-identity/v1") are granted those specific contexts
+// explicitly in their task.yaml and are NOT listed here — they are a
+// different namespace from these daemon-private keys.
+var daemonPrivateCryptoContexts = map[string]bool{
+	"dicode/run-inputs/v1": true, // pkg/registry/inputcrypto.go
+}
+
 // cryptoContextAllowed reports whether the requested context string is
 // allowed by this task's permissions.dicode.crypto list. Mirrors the
 // taskAllowed pattern used by dicode.run_task.
 //
-// The "dicode/" prefix is reserved for daemon-internal sub-keys (e.g.
-// "dicode/run-inputs/v1") and is always denied to tasks even when "*" is
-// granted — otherwise a task with crypto:["*"] could decrypt every persisted
-// run input stored by the daemon.
+// Daemon-private contexts (see daemonPrivateCryptoContexts) are always
+// denied even when "*" is granted — otherwise a task could decrypt every
+// persisted run input stored by the daemon.
 func (s *Server) cryptoContextAllowed(ctx string) bool {
-	if strings.HasPrefix(ctx, "dicode/") {
+	if daemonPrivateCryptoContexts[ctx] {
 		return false
 	}
 	dp := dicodePerms(s.spec)

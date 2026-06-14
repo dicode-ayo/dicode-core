@@ -88,7 +88,7 @@ permissions:
 | `permissions.dicode.get_runs` | bool | | Allow `dicode.get_runs()` |
 | `permissions.dicode.secrets_write` | bool | | Allow `dicode.secrets_set()` and `dicode.secrets_delete()` — write-only, no read |
 | `permissions.dicode.secrets_has` | bool | | Allow `dicode.secrets_has(key)` — boolean presence check, never returns the value |
-| `permissions.dicode.crypto` | list of strings | | Context names allowed for `dicode.crypto.encrypt/decrypt`; `["*"]` for all user contexts. The `dicode/` prefix is always reserved for daemon internals. |
+| `permissions.dicode.crypto` | list of strings | | Context names allowed for `dicode.crypto.encrypt/decrypt`; `["*"]` for all user-accessible contexts. Daemon-private contexts (e.g. `dicode/run-inputs/v1`) are never accessible to tasks. |
 | `params` | list | | Input parameters with defaults |
 | `params[].name` | string | | Parameter name |
 | `params[].description` | string | | Human-readable description |
@@ -1104,7 +1104,7 @@ All `dicode.*` and `mcp.*` globals are **denied by default**. Each capability mu
 | `get_runs: true` | `dicode.get_runs()` |
 | `secrets_write: true` | `dicode.secrets_set(key, value)` and `dicode.secrets_delete(key)` — **write-only**, tasks can never read secrets back |
 | `secrets_has: true` | `dicode.secrets_has(key)` — boolean presence check only; never reveals the secret value |
-| `crypto: ["ctx"]` | `dicode.crypto.encrypt(ctx, data)` / `dicode.crypto.decrypt(ctx, blob)` — AES-256 encrypt/decrypt under a context-scoped sub-key; `["*"]` allows all contexts. **The `dicode/` context prefix is always reserved for daemon-internal keys and is denied even when `["*"]` is granted.** |
+| `crypto: ["ctx"]` | `dicode.crypto.encrypt(ctx, data)` / `dicode.crypto.decrypt(ctx, blob)` — AES-256 encrypt/decrypt under a context-scoped sub-key; `["*"]` allows all contexts. **Daemon-private contexts (currently `dicode/run-inputs/v1`) are always denied even when `["*"]` is granted.** |
 
 ```yaml
 # An agent task that can call other tasks:

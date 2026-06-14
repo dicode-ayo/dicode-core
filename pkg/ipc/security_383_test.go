@@ -46,12 +46,16 @@ func TestCryptoContextAllowed_RejectsDicodePrefix(t *testing.T) {
 		ctx     string
 		allowed bool
 	}{
-		{"dicode/ with wildcard", []string{"*"}, "dicode/run-inputs/v1", false},
-		{"dicode/ with exact match", []string{"dicode/run-inputs/v1"}, "dicode/run-inputs/v1", false},
-		{"dicode/ sub-path", []string{"*"}, "dicode/secrets/v2", false},
+		// Daemon-private context — always denied.
+		{"run-inputs denied with wildcard", []string{"*"}, "dicode/run-inputs/v1", false},
+		{"run-inputs denied with exact grant", []string{"dicode/run-inputs/v1"}, "dicode/run-inputs/v1", false},
+		// Buildin-task contexts — allowed when granted (not daemon-private).
+		{"relay-identity allowed with wildcard", []string{"*"}, "dicode/relay-identity/v1", true},
+		{"relay-identity allowed with explicit", []string{"dicode/relay-identity/v1"}, "dicode/relay-identity/v1", true},
+		{"relay-identity denied without grant", []string{"my-ctx"}, "dicode/relay-identity/v1", false},
+		// Regular user contexts.
 		{"user ctx with wildcard", []string{"*"}, "my-app/secrets", true},
 		{"user ctx explicit", []string{"my-app/secrets"}, "my-app/secrets", true},
-		{"user ctx not-dicode prefix", []string{"*"}, "dicodefoo/bar", true},
 	}
 
 	for _, tc := range cases {
