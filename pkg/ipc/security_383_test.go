@@ -94,10 +94,10 @@ func TestIPC_Crypto_RejectsDaemonNamespace(t *testing.T) {
 	srv.SetCryptoHandler(&fakeDeriver{})
 
 	sendMsg(t, conn, map[string]any{
-		"id":      "crypto-deny",
-		"method":  "dicode.crypto.encrypt",
-		"context": "dicode/run-inputs/v1",
-		"data":    "aGVsbG8=",
+		"id":           "crypto-deny",
+		"method":       "dicode.crypto.encrypt",
+		"context":      "dicode/run-inputs/v1",
+		"plaintext_b64": "aGVsbG8=", // base64("hello")
 	})
 	resp := recvMsg(t, conn)
 	errMsg, _ := resp["error"].(string)

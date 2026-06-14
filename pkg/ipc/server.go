@@ -172,7 +172,12 @@ func (s *Server) Start(ctx context.Context) (socketPath, token string, err error
 	socketPath = fmt.Sprintf("/tmp/dicode-%s.sock", s.runID)
 	_ = os.Remove(socketPath)
 
-	l, err := net.Listen("unix", socketPath)
+	// listenUnixSecure sets the process umask to 0177 for the duration of
+	// net.Listen so the socket is created 0600 from the start, then restores
+	// the original umask (see socket_unix.go). os.Chmod is kept as a
+	// belt-and-suspenders fallback for container runtimes that inherit a
+	// non-standard umask.
+	l, err := listenUnixSecure(socketPath)
 	if err != nil {
 		return "", "", fmt.Errorf("ipc: listen %s: %w", socketPath, err)
 	}
