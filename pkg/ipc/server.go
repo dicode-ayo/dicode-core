@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -174,6 +175,10 @@ func (s *Server) Start(ctx context.Context) (socketPath, token string, err error
 	l, err := net.Listen("unix", socketPath)
 	if err != nil {
 		return "", "", fmt.Errorf("ipc: listen %s: %w", socketPath, err)
+	}
+	if err := os.Chmod(socketPath, 0600); err != nil {
+		_ = l.Close()
+		return "", "", fmt.Errorf("ipc: chmod socket: %w", err)
 	}
 	s.socketPath = socketPath
 	s.listener = l
@@ -1369,7 +1374,15 @@ func (s *Server) mcpAllowed(name string) bool {
 // cryptoContextAllowed reports whether the requested context string is
 // allowed by this task's permissions.dicode.crypto list. Mirrors the
 // taskAllowed pattern used by dicode.run_task.
+//
+// The "dicode/" prefix is reserved for daemon-internal sub-keys (e.g.
+// "dicode/run-inputs/v1") and is always denied to tasks even when "*" is
+// granted — otherwise a task with crypto:["*"] could decrypt every persisted
+// run input stored by the daemon.
 func (s *Server) cryptoContextAllowed(ctx string) bool {
+	if strings.HasPrefix(ctx, "dicode/") {
+		return false
+	}
 	dp := dicodePerms(s.spec)
 	if dp == nil {
 		return false

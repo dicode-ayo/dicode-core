@@ -75,6 +75,12 @@ func (r *Replayer) Replay(ctx context.Context, runID, taskName, callerTaskID, ca
 		if run.TaskID != callerTaskID && callerParentRunID != runID {
 			return "", ErrReplayNotPermitted
 		}
+		// Even when ownership passes, forbid redirecting the replay at a
+		// different task — a task with RunsReplay could otherwise inject the
+		// current run's input into a broader-privileged sibling.
+		if taskName != "" && taskName != run.TaskID {
+			return "", ErrReplayNotPermitted
+		}
 	}
 
 	in, err := r.store.Fetch(ctx, runID, run.InputStorageKey, run.InputStoredAt)

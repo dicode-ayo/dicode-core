@@ -226,6 +226,22 @@ func mergeDicodePerms(base, overlay *task.DicodePermissions) *task.DicodePermiss
 	if overlay.GitCommitPush {
 		out.GitCommitPush = true
 	}
+	if overlay.SecretsHas {
+		out.SecretsHas = true
+	}
+	if len(overlay.Crypto) > 0 {
+		// UNION — append unique entries from overlay, same pattern as Tasks.
+		existing := make(map[string]struct{}, len(out.Crypto))
+		for _, c := range out.Crypto {
+			existing[c] = struct{}{}
+		}
+		for _, c := range overlay.Crypto {
+			if _, ok := existing[c]; !ok {
+				out.Crypto = append(out.Crypto, c)
+				existing[c] = struct{}{}
+			}
+		}
+	}
 	return &out
 }
 
