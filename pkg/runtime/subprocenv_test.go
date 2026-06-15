@@ -96,29 +96,6 @@ func TestSubprocessEnv_BareAllowlistEntryForwardsHostValue(t *testing.T) {
 	}
 }
 
-// TestSubprocessEnv_WildcardEntryIsNoOpForForwarding: the "*" --allow-env
-// grant-all sentinel must not be forwarded as a host var named "*", while
-// named entries listed alongside it still forward their host values.
-func TestSubprocessEnv_WildcardEntryIsNoOpForForwarding(t *testing.T) {
-	t.Setenv("DICODE_DATADIR", "/var/lib/dicode")
-
-	spec := &task.Spec{}
-	spec.Permissions.Env = []task.EnvEntry{
-		{Name: "*"},              // grant-all sentinel → no forwarding
-		{Name: "DICODE_DATADIR"}, // named → forward host value
-	}
-
-	env := SubprocessEnv(spec, nil, "/tmp/sock", "tok")
-	m := envMap(env)
-
-	if _, ok := m["*"]; ok {
-		t.Error(`"*" was forwarded as a host var named "*"`)
-	}
-	if m["DICODE_DATADIR"] != "/var/lib/dicode" {
-		t.Errorf("named entry alongside wildcard not forwarded, got %q", m["DICODE_DATADIR"])
-	}
-}
-
 func TestSubprocessEnv_ResolvedWinsOverBareHostValue(t *testing.T) {
 	t.Setenv("DUAL_VAR", "host-value")
 	spec := &task.Spec{}

@@ -62,42 +62,45 @@ func TestBuildDenoArgs_Env_Omitted(t *testing.T) {
 	}
 }
 
-// TestBuildDenoArgs_Env_Wildcard: a name-only "*" entry grants bare --allow-env.
-func TestBuildDenoArgs_Env_Wildcard(t *testing.T) {
-	args := buildDenoArgs(specWithEnv([]task.EnvEntry{{Name: "*"}}), "/run/sock", "/shim.ts", "/runner.ts")
+// TestBuildDenoArgs_Env_ReadExposed: env_read_exposed grants bare --allow-env.
+func TestBuildDenoArgs_Env_ReadExposed(t *testing.T) {
+	spec := specWithEnv(nil)
+	spec.Permissions.EnvReadExposed = true
+	args := buildDenoArgs(spec, "/run/sock", "/shim.ts", "/runner.ts")
 	got, ok := allowEnvArg(args)
 	if !ok {
 		t.Fatal("no --allow-env arg emitted")
 	}
 	if got != "--allow-env" {
-		t.Errorf("env [\"*\"] must grant bare --allow-env, got %q", got)
+		t.Errorf("env_read_exposed must grant bare --allow-env, got %q", got)
 	}
 }
 
-// TestBuildDenoArgs_Env_WildcardWithNamed: "*" alongside named entries still
-// grants bare --allow-env — the wildcard widens read permission while the
-// named entries drive value forwarding (SubprocessEnv), tested separately.
-func TestBuildDenoArgs_Env_WildcardWithNamed(t *testing.T) {
-	args := buildDenoArgs(specWithEnv([]task.EnvEntry{{Name: "*"}, {Name: "DICODE_DATADIR"}}), "/run/sock", "/shim.ts", "/runner.ts")
+// TestBuildDenoArgs_Env_ReadExposedWithNamed: env_read_exposed grants bare
+// --allow-env regardless of named entries — read permission is widened while
+// the named entries drive value forwarding (SubprocessEnv), tested separately.
+func TestBuildDenoArgs_Env_ReadExposedWithNamed(t *testing.T) {
+	spec := specWithEnv([]task.EnvEntry{{Name: "DICODE_DATADIR"}})
+	spec.Permissions.EnvReadExposed = true
+	args := buildDenoArgs(spec, "/run/sock", "/shim.ts", "/runner.ts")
 	got, ok := allowEnvArg(args)
 	if !ok {
 		t.Fatal("no --allow-env arg emitted")
 	}
 	if got != "--allow-env" {
-		t.Errorf("env with \"*\" must grant bare --allow-env, got %q", got)
+		t.Errorf("env_read_exposed with named entries must grant bare --allow-env, got %q", got)
 	}
 }
 
-// TestBuildDenoArgs_Env_StarWithInjection: a "*" carrying secret/value/from is
-// an injection target, not the grant-all sentinel, so it must NOT grant bare
-// --allow-env (it falls through to the explicit-list path).
-func TestBuildDenoArgs_Env_StarWithInjection(t *testing.T) {
-	args := buildDenoArgs(specWithEnv([]task.EnvEntry{{Name: "*", Secret: "weird"}}), "/run/sock", "/shim.ts", "/runner.ts")
+// TestBuildDenoArgs_Env_NamedOnlyNeverBare: named entries without
+// env_read_exposed must produce an explicit allowlist, never bare --allow-env.
+func TestBuildDenoArgs_Env_NamedOnlyNeverBare(t *testing.T) {
+	args := buildDenoArgs(specWithEnv([]task.EnvEntry{{Name: "DICODE_DATADIR"}}), "/run/sock", "/shim.ts", "/runner.ts")
 	got, ok := allowEnvArg(args)
 	if !ok {
 		t.Fatal("no --allow-env arg emitted")
 	}
 	if got == "--allow-env" {
-		t.Errorf("a \"*\" with secret: must not be treated as grant-all, got %q", got)
+		t.Errorf("named entries without env_read_exposed must not grant bare --allow-env, got %q", got)
 	}
 }
