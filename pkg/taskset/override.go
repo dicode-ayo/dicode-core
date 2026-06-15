@@ -226,6 +226,9 @@ func mergeDicodePerms(base, overlay *task.DicodePermissions) *task.DicodePermiss
 	if overlay.GitCommitPush {
 		out.GitCommitPush = true
 	}
+	if overlay.AuditQuery {
+		out.AuditQuery = true
+	}
 	if overlay.SecretsHas {
 		out.SecretsHas = true
 	}
