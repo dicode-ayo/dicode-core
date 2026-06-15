@@ -460,6 +460,37 @@ func TestMergeDicodePerms_CryptoBaseNilOverlaySet(t *testing.T) {
 	}
 }
 
+// TestMergeDicodePerms_Exhaustive mechanically guards against the #383 root
+// cause: a new DicodePermissions field added without a corresponding merge in
+// mergeDicodePerms. It sets every field of the overlay to a non-zero value
+// over an empty base and asserts the merged result carries each one through.
+// A new field of an unhandled kind fails loudly so the test is extended
+// alongside the struct.
+func TestMergeDicodePerms_Exhaustive(t *testing.T) {
+	overlay := &task.DicodePermissions{}
+	ov := reflect.ValueOf(overlay).Elem()
+	for i := 0; i < ov.NumField(); i++ {
+		f := ov.Field(i)
+		switch f.Kind() {
+		case reflect.Bool:
+			f.SetBool(true)
+		case reflect.Slice:
+			f.Set(reflect.ValueOf([]string{"x"}))
+		default:
+			t.Fatalf("field %s has unhandled kind %s; extend mergeDicodePerms and this test",
+				ov.Type().Field(i).Name, f.Kind())
+		}
+	}
+
+	got := reflect.ValueOf(mergeDicodePerms(&task.DicodePermissions{}, overlay)).Elem()
+	for i := 0; i < got.NumField(); i++ {
+		if got.Field(i).IsZero() {
+			t.Errorf("field %s dropped by mergeDicodePerms (overlay value not merged)",
+				got.Type().Field(i).Name)
+		}
+	}
+}
+
 // ── copySpec ──────────────────────────────────────────────────────────────────
 
 func TestCopySpec_Independence(t *testing.T) {
