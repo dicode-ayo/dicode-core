@@ -41,6 +41,11 @@ import (
 // ErrRunNotFound is returned by WaitRun when no run record exists for the given ID.
 var ErrRunNotFound = errors.New("run not found")
 
+// errAtConcurrencyLimit is returned by fireSync when MaxConcurrentTasks is
+// configured and all slots are occupied. The webhook handler translates this
+// to HTTP 503 Service Unavailable.
+var errAtConcurrencyLimit = errors.New("at max concurrent task slots")
+
 // runReturnValueTTL is how long a suppressed-persistence return value
 // stays in the in-memory runReturnValue map after the run reaches a
 // terminal state. Long enough for a WaitRun caller woken by the runDone
@@ -722,8 +727,19 @@ func (e *Engine) registerWebhookPath(id, path string) {
 		return
 	}
 	e.mu.Lock()
+	defer e.mu.Unlock()
+	// Reject duplicate registrations: a task from a watched repo must not be
+	// able to silently hijack another task's webhook path (last-writer-wins
+	// was the previous behavior). A task re-registering its own path (e.g.
+	// during reconciler reload) is allowed.
+	if existing, ok := e.webhooks[path]; ok && existing != id {
+		e.log.Warn("rejecting duplicate webhook path — already claimed by another task",
+			zap.String("path", path),
+			zap.String("existing_task", existing),
+			zap.String("rejected_task", id))
+		return
+	}
 	e.webhooks[path] = id
-	e.mu.Unlock()
 }
 
 func (e *Engine) registerDaemon(spec *task.Spec) {
@@ -1524,16 +1540,33 @@ const taskErrorPage = `<!doctype html>
 <h3>Logs</h3>
 <pre id="logs"></pre>
 <script id="log-data" type="application/json">%s</script>
-<script type="module">
-import Convert from 'https://esm.sh/ansi-to-html@0.7.2';
-const conv = new Convert({ fg: '#cdd6f4', bg: '#181825', escapeXML: true,
-  colors: { 1:'#f38ba8',2:'#a6e3a1',3:'#f9e2af',4:'#89b4fa',5:'#cba6f7',6:'#89dceb',7:'#cdd6f4' } });
+<script>
+// Inline ANSI-to-HTML — eliminates the esm.sh CDN dependency (supply-chain
+// risk + air-gap breakage). Handles SGR reset, bold, and the 8+8 standard/
+// bright foreground colors used by the task runtimes.
+function ansiToHtml(s) {
+  const FG={31:'#f38ba8',32:'#a6e3a1',33:'#f9e2af',34:'#89b4fa',35:'#cba6f7',36:'#89dceb',37:'#cdd6f4',
+             91:'#f38ba8',92:'#a6e3a1',93:'#f9e2af',94:'#89b4fa',95:'#cba6f7',96:'#89dceb',97:'#cdd6f4'};
+  function esc(t){return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+  let out='', depth=0;
+  for(const tok of s.split(/(\x1b\[\d+(?:;\d+)*m)/)){
+    const m=tok.match(/^\x1b\[(\d+(?:;\d+)*)m$/);
+    if(!m){out+=esc(tok);continue;}
+    for(const c of m[1].split(';')){
+      const n=+c;
+      if(!n){out+='</span>'.repeat(depth);depth=0;}
+      else if(FG[n]){out+='<span style="color:'+FG[n]+'">';depth++;}
+      else if(n===1){out+='<span style="font-weight:bold">';depth++;}
+    }
+  }
+  return out+'</span>'.repeat(depth);
+}
 const logs = JSON.parse(document.getElementById('log-data').textContent);
 const pre = document.getElementById('logs');
 if (!logs.length) { pre.textContent = '(no logs)'; }
 else { pre.innerHTML = logs.map(l => {
   const cls = /error|uncaught|notcapable/i.test(l) ? 'error' : /warn/i.test(l) ? 'warn' : 'info';
-  return '<span class="' + cls + '">' + conv.toHtml(l) + '</span>';
+  return '<span class="' + cls + '">' + ansiToHtml(l) + '</span>';
 }).join(''); }
 </script>
 </body>
@@ -1554,9 +1587,23 @@ func verifyWebhookSignatureSecret(secret string, r *http.Request, body []byte) e
 		return nil // unauthenticated webhook — allowed for backwards-compat
 	}
 
-	// Replay protection via timestamp header (optional — not all senders provide it).
-	if tsStr := r.Header.Get(webhookTimestampHeader); tsStr != "" {
-		ts, err := strconv.ParseInt(tsStr, 10, 64)
+	// GET requests have no body — HMAC(secret, "") is a constant that doesn't
+	// bind to any request-specific data, enabling (a) replay DoS (all GETs with
+	// same secret share the same HMAC digest → 2nd request always 409) and
+	// (b) signature reuse across different query strings. Reject GET when a
+	// secret is configured.
+	if r.Method == http.MethodGet {
+		return fmt.Errorf("webhook_secret requires POST; GET is not supported for authenticated webhooks")
+	}
+
+	// Validate the optional timestamp and capture it for inclusion in the HMAC
+	// preimage. When X-Dicode-Timestamp is present the signature must cover
+	// "timestamp_str\nbody" rather than just the body — this binds the signature
+	// to a specific time window so a captured request cannot be replayed after
+	// the 1-hour replay cache expires (the timestamp changes each signed request).
+	var tsStr string
+	if raw := r.Header.Get(webhookTimestampHeader); raw != "" {
+		ts, err := strconv.ParseInt(raw, 10, 64)
 		if err != nil {
 			return fmt.Errorf("invalid %s header", webhookTimestampHeader)
 		}
@@ -1567,6 +1614,7 @@ func verifyWebhookSignatureSecret(secret string, r *http.Request, body []byte) e
 		if age > webhookTimestampTolerance {
 			return fmt.Errorf("webhook timestamp out of tolerance window (%v)", age.Round(time.Second))
 		}
+		tsStr = raw
 	}
 
 	got := r.Header.Get(webhookSignatureHeader)
@@ -1575,6 +1623,11 @@ func verifyWebhookSignatureSecret(secret string, r *http.Request, body []byte) e
 	}
 
 	mac := hmac.New(sha256.New, []byte(secret))
+	if tsStr != "" {
+		// Include timestamp in signed payload: "<ts_unix_str>\n<body>"
+		mac.Write([]byte(tsStr))
+		mac.Write([]byte("\n"))
+	}
 	mac.Write(body)
 	want := "sha256=" + hex.EncodeToString(mac.Sum(nil))
 
@@ -1848,6 +1901,10 @@ func (e *Engine) WebhookHandler() http.Handler {
 
 		runID, result, err := e.fireSync(spec, pkgruntime.RunOptions{Input: input, Params: params, WebhookCtx: webhookCtx}, registry.TriggerWebhook)
 		if err != nil {
+			if errors.Is(err, errAtConcurrencyLimit) {
+				http.Error(w, "too many concurrent tasks; retry later", http.StatusServiceUnavailable)
+				return
+			}
 			http.Error(w, "task failed to start", http.StatusInternalServerError)
 			return
 		}
@@ -2384,6 +2441,20 @@ func (e *Engine) fireAsync(ctx context.Context, spec *task.Spec, opts pkgruntime
 // request context ends mid-execution.
 func (e *Engine) fireSync(spec *task.Spec, opts pkgruntime.RunOptions, source registry.TriggerSource) (string, *pkgruntime.RunResult, error) {
 	opts.RunID = uuid.New().String()
+
+	// Enforce the same concurrency cap as fireAsync. Daemon tasks are exempt
+	// (they're long-lived and would permanently starve all other slots). For
+	// sync callers (the default webhook path) we fail-fast rather than block:
+	// the HTTP caller gets 503 and can retry, which is preferable to holding
+	// the request open indefinitely waiting for a slot.
+	if e.taskSem != nil && !spec.Trigger.Daemon {
+		select {
+		case e.taskSem <- struct{}{}:
+			defer func() { <-e.taskSem }()
+		default:
+			return "", nil, errAtConcurrencyLimit
+		}
+	}
 
 	runCtx, cleanup, err := e.startRun(spec, &opts, source)
 	if err != nil {
