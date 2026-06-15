@@ -175,17 +175,7 @@ func mergeDicodePerms(base, overlay *task.DicodePermissions) *task.DicodePermiss
 	}
 	out := *base
 	if len(overlay.Tasks) > 0 {
-		// UNION (was full-replace) — append unique entries from overlay.
-		existing := make(map[string]struct{}, len(out.Tasks))
-		for _, t := range out.Tasks {
-			existing[t] = struct{}{}
-		}
-		for _, t := range overlay.Tasks {
-			if _, ok := existing[t]; !ok {
-				out.Tasks = append(out.Tasks, t)
-				existing[t] = struct{}{}
-			}
-		}
+		out.Tasks = unionStrings(out.Tasks, overlay.Tasks)
 	}
 	if len(overlay.MCP) > 0 {
 		out.MCP = overlay.MCP
@@ -233,19 +223,31 @@ func mergeDicodePerms(base, overlay *task.DicodePermissions) *task.DicodePermiss
 		out.SecretsHas = true
 	}
 	if len(overlay.Crypto) > 0 {
-		// UNION — append unique entries from overlay, same pattern as Tasks.
-		existing := make(map[string]struct{}, len(out.Crypto))
-		for _, c := range out.Crypto {
-			existing[c] = struct{}{}
-		}
-		for _, c := range overlay.Crypto {
-			if _, ok := existing[c]; !ok {
-				out.Crypto = append(out.Crypto, c)
-				existing[c] = struct{}{}
-			}
-		}
+		out.Crypto = unionStrings(out.Crypto, overlay.Crypto)
 	}
 	return &out
+}
+
+// unionStrings returns the entries of base followed by any entries of overlay
+// not already present, preserving order and deduping. The result is a freshly
+// allocated slice, so it never aliases base's backing array — callers that
+// shallow-copy a struct (out := *base) can assign it without mutating base.
+func unionStrings(base, overlay []string) []string {
+	seen := make(map[string]struct{}, len(base)+len(overlay))
+	out := make([]string, 0, len(base)+len(overlay))
+	for _, s := range base {
+		if _, ok := seen[s]; !ok {
+			seen[s] = struct{}{}
+			out = append(out, s)
+		}
+	}
+	for _, s := range overlay {
+		if _, ok := seen[s]; !ok {
+			seen[s] = struct{}{}
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // defaultsToOverrides converts a Defaults block into an Overrides that can be

@@ -460,6 +460,24 @@ func TestMergeDicodePerms_CryptoBaseNilOverlaySet(t *testing.T) {
 	}
 }
 
+func TestMergeDicodePerms_UnionDoesNotMutateBase(t *testing.T) {
+	// Regression: `out := *base` followed by append(out.Tasks, ...) wrote into
+	// base's backing array when base had spare capacity.
+	baseTasks := make([]string, 1, 4)
+	baseTasks[0] = "a"
+	base := &task.DicodePermissions{Tasks: baseTasks}
+	overlay := &task.DicodePermissions{Tasks: []string{"b"}}
+
+	_ = mergeDicodePerms(base, overlay)
+
+	if len(base.Tasks) != 1 || base.Tasks[0] != "a" {
+		t.Errorf("base.Tasks mutated: %v", base.Tasks)
+	}
+	if spare := base.Tasks[:cap(base.Tasks)]; spare[1] != "" {
+		t.Errorf("merge wrote into base's spare backing array: %q", spare[1])
+	}
+}
+
 // TestMergeDicodePerms_Exhaustive mechanically guards against the #383 root
 // cause: a new DicodePermissions field added without a corresponding merge in
 // mergeDicodePerms. It sets every field of the overlay to a non-zero value
