@@ -2,6 +2,7 @@ package audit
 
 import (
 	"context"
+	"encoding/base64"
 	"testing"
 	"time"
 
@@ -155,6 +156,168 @@ func TestStore_Prune(t *testing.T) {
 	after, _ := s.Query(ctx, Filter{})
 	if len(after) != 1 || after[0].TargetID != "fresh" {
 		t.Fatalf("expected only the fresh row to survive, got %+v", after)
+	}
+}
+
+// TestStore_QueryDescContractUnchanged regression-guards the #45 behaviour:
+// with no cursor and no Ascending flag, Query returns newest-first and honours
+// limit/offset exactly as before #415.
+func TestStore_QueryDescContractUnchanged(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	for i := 0; i < 5; i++ {
+		if err := s.Append(ctx, Event{
+			EventType: EventRunTriggered, TargetID: "t",
+			TS: time.Date(2026, 6, 1, 12, 0, i, 0, time.UTC), Allowed: true,
+		}); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+	}
+	all, err := s.Query(ctx, Filter{})
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(all) != 5 {
+		t.Fatalf("got %d, want 5", len(all))
+	}
+	// Newest first: index 0 is the latest timestamp.
+	for i := 0; i+1 < len(all); i++ {
+		if all[i].TS.Before(all[i+1].TS) {
+			t.Errorf("not newest-first at %d: %v before %v", i, all[i].TS, all[i+1].TS)
+		}
+	}
+	page1, _ := s.Query(ctx, Filter{Limit: 2})
+	page2, _ := s.Query(ctx, Filter{Limit: 2, Offset: 2})
+	if len(page1) != 2 || len(page2) != 2 {
+		t.Fatalf("offset paging broke: %d, %d", len(page1), len(page2))
+	}
+	if page1[0].ID == page2[0].ID {
+		t.Error("offset paging overlap")
+	}
+}
+
+// TestStore_CursorExactlyOnceUnderConcurrentWriter is the #415 acceptance
+// test: page ascending with a cursor, append more rows mid-paging, resume —
+// no duplicates, no gaps. Offset paging would dupe/skip here because inserts
+// shift the window; the (ts, id) cursor does not.
+func TestStore_CursorExactlyOnceUnderConcurrentWriter(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	appendAt := func(sec int) {
+		if err := s.Append(ctx, Event{
+			EventType: EventRunTriggered, TargetID: "t",
+			TS: time.Date(2026, 6, 1, 12, 0, sec, 0, time.UTC), Allowed: true,
+		}); err != nil {
+			t.Fatalf("append @%d: %v", sec, err)
+		}
+	}
+
+	// Initial 3 rows.
+	for i := 0; i < 3; i++ {
+		appendAt(i)
+	}
+
+	seen := map[string]bool{}
+	var cursor Cursor
+
+	// Page 1 (ascending, limit 2).
+	p1, err := s.Query(ctx, Filter{Ascending: true, Limit: 2})
+	if err != nil {
+		t.Fatalf("page1: %v", err)
+	}
+	if len(p1) != 2 {
+		t.Fatalf("page1 size %d, want 2", len(p1))
+	}
+	for _, ev := range p1 {
+		seen[ev.ID] = true
+	}
+	cursor = CursorOf(p1[len(p1)-1])
+
+	// Concurrent writer appends 2 more rows AFTER the cursor position.
+	appendAt(3)
+	appendAt(4)
+
+	// Resume from the cursor — must pick up the 1 leftover original plus the
+	// 2 new rows, with no row seen twice.
+	for {
+		page, err := s.Query(ctx, Filter{Ascending: true, Limit: 2, After: cursor})
+		if err != nil {
+			t.Fatalf("resume: %v", err)
+		}
+		if len(page) == 0 {
+			break
+		}
+		for _, ev := range page {
+			if seen[ev.ID] {
+				t.Errorf("duplicate event id across cursor pages: %s", ev.ID)
+			}
+			seen[ev.ID] = true
+		}
+		cursor = CursorOf(page[len(page)-1])
+	}
+
+	if len(seen) != 5 {
+		t.Errorf("expected 5 distinct events (3 original + 2 concurrent), got %d", len(seen))
+	}
+}
+
+// TestStore_CursorOffsetIgnoredWhenAfterSet confirms Offset is not applied
+// alongside a cursor (the two are mutually exclusive).
+func TestStore_CursorOffsetIgnoredWhenAfterSet(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	for i := 0; i < 4; i++ {
+		if err := s.Append(ctx, Event{
+			EventType: EventRunTriggered, TargetID: "t",
+			TS: time.Date(2026, 6, 1, 12, 0, i, 0, time.UTC), Allowed: true,
+		}); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+	}
+	first, _ := s.Query(ctx, Filter{Ascending: true, Limit: 1})
+	cursor := CursorOf(first[0])
+	// With a stale Offset that would skip everything if applied, the cursor
+	// must still return the 3 rows after `first`.
+	rest, err := s.Query(ctx, Filter{Ascending: true, After: cursor, Offset: 100})
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(rest) != 3 {
+		t.Errorf("offset leaked into cursor paging: got %d rows, want 3", len(rest))
+	}
+}
+
+func TestCursor_EncodeDecodeRoundTrip(t *testing.T) {
+	orig := Cursor{TS: time.Date(2026, 6, 1, 12, 30, 45, 123_000_000, time.UTC), ID: "abc-123"}
+	tok := EncodeCursor(orig)
+	if tok == "" {
+		t.Fatal("non-zero cursor must encode to a non-empty token")
+	}
+	got, err := DecodeCursor(tok)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.ID != orig.ID || !got.TS.Equal(orig.TS) {
+		t.Errorf("round-trip mismatch: got %+v, want %+v", got, orig)
+	}
+
+	// Empty token ↔ zero cursor.
+	if EncodeCursor(Cursor{}) != "" {
+		t.Error("zero cursor must encode to empty string")
+	}
+	z, err := DecodeCursor("")
+	if err != nil || !z.IsZero() {
+		t.Errorf("empty token must decode to zero cursor: %+v, %v", z, err)
+	}
+
+	// Malformed tokens are an error.
+	if _, err := DecodeCursor("!!!not-base64!!!"); err == nil {
+		t.Error("expected error for malformed base64 cursor")
+	}
+	noSep := base64.RawURLEncoding.EncodeToString([]byte("no-separator"))
+	if _, err := DecodeCursor(noSep); err == nil {
+		t.Error("expected error for cursor missing separator")
 	}
 }
 

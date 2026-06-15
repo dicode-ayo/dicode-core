@@ -42,6 +42,43 @@ export interface DicodeCrypto {
   decrypt(context: string, ciphertext: Uint8Array): Promise<Uint8Array>;
 }
 
+// AuditEvent is one row of the security audit log. Params are sanitized at
+// write time, so no value here is a raw secret.
+export interface AuditEvent {
+  id:          string;
+  ts:          string;
+  event_type:  string;
+  actor_kind:  string;
+  actor_id:    string;
+  target_kind: string;
+  target_id:   string;
+  params?:     string;
+  run_id?:     string;
+  allowed:     boolean;
+  reason?:     string;
+}
+
+export interface AuditQueryResult {
+  events:      AuditEvent[];
+  next_cursor: string;
+}
+
+export interface DicodeAudit {
+  /**
+   * Read the security audit trail. Pass `after` (a prior result's
+   * next_cursor) with order:"asc" to walk forward exactly-once.
+   * Requires permissions.dicode.audit_query.
+   */
+  query(opts?: {
+    after?:     string;
+    limit?:     number;
+    order?:     "asc" | "desc";
+    taskID?:    string;
+    actor?:     string;
+    eventType?: string;
+  }): Promise<AuditQueryResult>;
+}
+
 export interface Dicode {
   // Fully-namespaced id of the currently-running task (e.g. "buildin/ai-agent").
   // Populated from the IPC handshake; lets task code self-identify without
@@ -55,6 +92,7 @@ export interface Dicode {
   secrets_set(key: string, value: string): Promise<void>;
   secrets_delete(key: string): Promise<void>;
   crypto: DicodeCrypto;
+  audit: DicodeAudit;
 }
 
 export interface DicodeSdk {

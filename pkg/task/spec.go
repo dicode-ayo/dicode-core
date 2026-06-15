@@ -344,6 +344,13 @@ type DicodePermissions struct {
 	// Use ["*"] to allow all contexts (intended for admin/utility tasks only;
 	// every named-context task should list its contexts explicitly).
 	Crypto []string `yaml:"crypto,omitempty" json:"crypto,omitempty"`
+
+	// AuditQuery enables dicode.audit.query() — read access to the security
+	// audit trail (#415). Sensitive: the log lists every actor, target, and
+	// denial across the system, so it is never granted ambiently. Grant only
+	// to tasks that legitimately ship or inspect the audit log (e.g. the
+	// buildin log exporters).
+	AuditQuery bool `yaml:"audit_query,omitempty" json:"audit_query,omitempty"`
 }
 
 // ProviderConfig declares secret-provider settings on a task that

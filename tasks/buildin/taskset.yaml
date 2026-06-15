@@ -151,6 +151,10 @@ spec:
       ref:
         path: ./run-inputs-cleanup/task.yaml
 
+    audit-export-loki:
+      ref:
+        path: ./audit-export-loki/task.yaml
+
     git-pr:
       ref:
         path: ./git-pr/task.yaml

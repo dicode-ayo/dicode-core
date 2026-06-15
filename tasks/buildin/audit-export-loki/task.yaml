@@ -1,0 +1,71 @@
+apiVersion: dicode/v1
+kind: Task
+name: "Audit log → Grafana Loki exporter"
+description: |
+  Ships the security audit trail (#45) to Grafana Loki via the push API.
+
+  Poll-batch-push, not a long-lived stream: each cron tick reads the last
+  shipped cursor from dicode.kv, calls dicode.audit.query({ after, order:
+  'asc', limit: 1000 }), maps events to Loki streams, and POSTs them to
+  /loki/api/v1/push. The kv cursor advances ONLY after a 2xx, so delivery
+  is at-least-once; dedupe downstream on the event `id` (emitted as a
+  structured field on every log line).
+
+  Endpoint + auth come from params and declared env/secret references —
+  nothing is hard-coded. See README.md for the Loki/Grafana Cloud setup
+  and the Datadog-variant seam.
+runtime: deno
+
+trigger:
+  cron: "* * * * *"   # every 60s; override the schedule via taskset/dicode.yaml
+
+params:
+  endpoint:
+    type: string
+    required: true
+    description: >
+      Loki base URL, e.g. https://logs-prod-eu-west-0.grafana.net or
+      http://localhost:3100. The push path /loki/api/v1/push is appended.
+  tenant_id:
+    type: string
+    default: ""
+    description: "Optional Loki tenant — sent as the X-Scope-OrgID header (multi-tenant Loki)."
+  batch_limit:
+    type: number
+    default: "1000"
+    description: "Max events shipped per run (1..1000). Capped at the audit store's 1000."
+  auth_user:
+    type: string
+    default: ""
+    description: >
+      Basic-auth username (Grafana Cloud: your numeric user/instance ID).
+      When set, the LOKI_AUTH_TOKEN env value is used as the password.
+      Leave empty to send LOKI_AUTH_TOKEN as a Bearer token instead.
+
+permissions:
+  # The audit trail enumerates every actor/target/denial in the system, so
+  # this read capability is opt-in and granted only to trusted exporters.
+  dicode:
+    audit_query: true
+
+  # Auth material is resolved from the secrets store (preferred) or host
+  # env. Never put the token in params. Operators set it via
+  # `dicode secrets set LOKI_AUTH_TOKEN ...` or the host environment.
+  env:
+    - name: LOKI_AUTH_TOKEN
+      secret: LOKI_AUTH_TOKEN
+      optional: true
+
+  # Outbound network is denied by default. Operators MUST widen this to
+  # their Loki host via a taskset/dicode.yaml override, e.g.
+  #   net: ["logs-prod-eu-west-0.grafana.net", "localhost"]
+  # Listing the host explicitly keeps the exporter from reaching anywhere
+  # else even if the endpoint param is misconfigured.
+  net: []
+
+# Cursor state lives in kv; this task's own params are uninteresting and
+# need not be persisted on every minute tick.
+run_inputs:
+  enabled: false
+
+timeout: 60s

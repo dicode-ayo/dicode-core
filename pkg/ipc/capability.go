@@ -67,6 +67,12 @@ const (
 	// of the context allow-list happens in the dispatch case.
 	CapCryptoCall = "crypto.call"
 
+	// CapAuditQuery gates dicode.audit.query() — read access to the security
+	// audit trail (#415). Sensitive: the log enumerates every actor, target,
+	// and denial across the system, so it is opt-in via
+	// permissions.dicode.audit_query and never granted by default.
+	CapAuditQuery = "audit.query"
+
 	// Reserved for CLI and WebUI clients (not issued to task shims today).
 	CapHTTPRegister  = "http.register" // register HTTP handler routes (issue #54)
 	CapSourcesManage = "sources.manage"

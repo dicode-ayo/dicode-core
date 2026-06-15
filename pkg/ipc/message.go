@@ -3,6 +3,8 @@ package ipc
 import (
 	"context"
 	"encoding/json"
+
+	"github.com/dicode/dicode/pkg/audit"
 )
 
 // handshakeReq is the first message sent by the client after connecting.
@@ -135,6 +137,22 @@ type Request struct {
 	Context       string `json:"context,omitempty"`
 	PlaintextB64  string `json:"plaintext_b64,omitempty"`
 	CiphertextB64 string `json:"ciphertext_b64,omitempty"`
+
+	// dicode.audit.query inputs (#415). After is an opaque resume cursor
+	// (from a prior response's next_cursor); Order is "asc" or "desc"
+	// (default desc); Actor/EventType filter alongside TaskID and Limit
+	// reused from the fields above.
+	After     string `json:"after,omitempty"`
+	Order     string `json:"order,omitempty"`
+	Actor     string `json:"actor,omitempty"`
+	EventType string `json:"event_type,omitempty"`
+}
+
+// AuditQueryResult is the dicode.audit.query response: the matched events
+// plus the opaque cursor to resume after the last one.
+type AuditQueryResult struct {
+	Events     []audit.Event `json:"events"`
+	NextCursor string        `json:"next_cursor"`
 }
 
 // Response is an outbound message to a connected client.

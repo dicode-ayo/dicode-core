@@ -87,6 +87,42 @@ export interface DicodeSecrets {
   has: (key: string) => Promise<boolean>;
 }
 
+// AuditEvent is one row of the security audit log. Params are already
+// sanitized at write time — secret-shaped values were redacted before
+// storage, so no value here is a raw secret.
+export interface AuditEvent {
+  id:          string;
+  ts:          string;
+  event_type:  string;
+  actor_kind:  string;
+  actor_id:    string;
+  target_kind: string;
+  target_id:   string;
+  params?:     string;
+  run_id?:     string;
+  allowed:     boolean;
+  reason?:     string;
+}
+
+export interface AuditQueryResult {
+  events:      AuditEvent[];
+  next_cursor: string;
+}
+
+export interface DicodeAudit {
+  // query reads the security audit trail. Pass `after` (the next_cursor
+  // from a prior result) with order:"asc" to walk the log forward
+  // exactly-once. Requires permissions.dicode.audit_query.
+  query: (opts?: {
+    after?:      string;
+    limit?:      number;
+    order?:      "asc" | "desc";
+    taskID?:     string;
+    actor?:      string;
+    eventType?:  string;
+  }) => Promise<AuditQueryResult>;
+}
+
 // TaskSummary is what dicode.list_tasks() returns per task. The IPC server
 // trims the spec to fields already exposed via /api/tasks; filesystem paths
 // and permission details are deliberately not surfaced.
@@ -122,6 +158,7 @@ export interface Dicode {
   secrets_delete: (key: string)                => Promise<void>;
   secrets:        DicodeSecrets;
   crypto:         DicodeCrypto;
+  audit:          DicodeAudit;
   runs: {
     list_expired: (opts?: { before_ts?: number }) => Promise<unknown>;
     delete_input: (runID: string)                 => Promise<unknown>;
@@ -341,6 +378,18 @@ const dicode: Dicode = {
   secrets_delete: (key)             => __call__({ method: "dicode.secrets_delete",  key }) as Promise<void>,
   secrets: {
     has: (key) => __call__({ method: "dicode.secrets.has", key }) as Promise<boolean>,
+  },
+  audit: {
+    query: (opts) =>
+      __call__({
+        method: "dicode.audit.query",
+        after: opts?.after ?? "",
+        limit: opts?.limit ?? 0,
+        order: opts?.order ?? "desc",
+        taskID: opts?.taskID ?? "",
+        actor: opts?.actor ?? "",
+        event_type: opts?.eventType ?? "",
+      }) as Promise<AuditQueryResult>,
   },
   runs: {
     list_expired: (opts) =>
