@@ -364,7 +364,9 @@ func hashToken(raw string) string {
 
 // setDeviceCookie writes the long-lived device cookie to the response.
 // The Path is "/" so the SPA can call /api/auth/refresh with it.
-func setDeviceCookie(w http.ResponseWriter, token string) {
+// secure should be true when the server sits behind a TLS-terminating proxy
+// (cfg.Server.TrustProxy) so the Secure flag is set on the cookie.
+func setDeviceCookie(w http.ResponseWriter, token string, secure bool) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     deviceCookie,
 		Value:    token,
@@ -372,6 +374,7 @@ func setDeviceCookie(w http.ResponseWriter, token string) {
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
 		MaxAge:   int(deviceTTL.Seconds()),
+		Secure:   secure,
 	})
 }
 
@@ -407,7 +410,10 @@ func (s *Server) apiAuthRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 	s.sm.Put(r.Context(), "authenticated", true)
 	if newDevToken != "" {
-		setDeviceCookie(w, newDevToken)
+		s.cfgMu.RLock()
+		secure := s.cfg.Server.TrustProxy
+		s.cfgMu.RUnlock()
+		setDeviceCookie(w, newDevToken, secure)
 	}
 	jsonOK(w, map[string]string{"status": "ok"})
 }

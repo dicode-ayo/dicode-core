@@ -68,14 +68,17 @@ var allowedOverrideJSONFields = map[string]bool{
 
 // newSessionManager creates an scs.SessionManager backed by SQLite via the
 // given db.DB. When database is nil (tests without persistence) a plain
-// in-memory map store is used as a fallback.
-func newSessionManager(database db.DB) *scs.SessionManager {
+// in-memory map store is used as a fallback. secure sets the Secure flag on
+// the session cookie — pass cfg.Server.TrustProxy so the flag is set when the
+// daemon sits behind a TLS-terminating reverse proxy.
+func newSessionManager(database db.DB, secure bool) *scs.SessionManager {
 	sm := scs.New()
 	sm.Lifetime = sessionTTL
 	sm.Cookie.Name = sessionCookie
 	sm.Cookie.HttpOnly = true
 	sm.Cookie.SameSite = http.SameSiteStrictMode
 	sm.Cookie.Persist = true
+	sm.Cookie.Secure = secure
 	sm.Cookie.Path = "/"
 	if database != nil {
 		store := newSCSStore(database)
@@ -216,9 +219,9 @@ func (s *Server) SetManagedRuntimes(runtimes []pkgruntime.ManagedRuntime) {
 // sourceMgr enables the /api/sources endpoints and MCP source tools; pass nil in tests.
 // database is required for persistent sessions and API key storage; pass nil in tests (auth features disabled).
 func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config, cfgPath string, secretsMgr SecretsManager, rec *registry.Reconciler, sourceMgr *SourceManager, dataDir string, logs *LogBroadcaster, log *zap.Logger, database db.DB, gateway *ipc.Gateway) (*Server, error) {
-	sm := newSessionManager(database)
+	sm := newSessionManager(database, cfg.Server.TrustProxy)
 
-	wsHub := NewWSHub(log, cfg.Server.AllowedOrigins)
+	wsHub := NewWSHub(log, wsOriginPatterns(cfg.Server.AllowedOrigins))
 
 	csrfKey := make([]byte, 32)
 	if _, err := rand.Read(csrfKey); err != nil {
@@ -578,25 +581,23 @@ func (s *Server) Handler() http.Handler {
 			r.Delete("/runtimes/{name}", s.apiRemoveRuntime)
 		})
 
-		// MCP endpoint — API-key gated; the actual JSON-RPC dispatch lives in
-		// the buildin/mcp dicode task (tasks/buildin/mcp/task.ts). This URL
-		// stays mounted for backwards compatibility with existing MCP client
-		// configurations: GET returns a small server-info doc; POST forwards
-		// the request body to /hooks/mcp through the trigger engine's
-		// webhook handler. MCP is a *bool pointer; nil = default enabled
-		// once applyDefaults has filled it in.
-		s.cfgMu.RLock()
-		mcpEnabled := s.cfg == nil || s.cfg.Server.MCP == nil || *s.cfg.Server.MCP
-		s.cfgMu.RUnlock()
-		if mcpEnabled {
-			r.With(s.requireAPIKey).HandleFunc("/mcp", s.handleMCP)
-		}
-
 		// Redirect root and unmatched GET routes to the webui webhook task.
 		r.Get("/*", func(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "/hooks/webui", http.StatusFound)
 		})
 	})
+
+	// MCP endpoint — accepts session cookie OR Bearer API key so machine callers
+	// work without a browser session. Mounted outside the requireAuth group so
+	// Bearer-only clients are not rejected before the key is checked. The actual
+	// JSON-RPC dispatch lives in the buildin/mcp dicode task (tasks/buildin/mcp/task.ts).
+	// MCP is a *bool pointer; nil = default enabled once applyDefaults has filled it in.
+	s.cfgMu.RLock()
+	mcpEnabled := s.cfg == nil || s.cfg.Server.MCP == nil || *s.cfg.Server.MCP
+	s.cfgMu.RUnlock()
+	if mcpEnabled {
+		r.With(s.requireSessionOrAPIKey).HandleFunc("/mcp", s.handleMCP)
+	}
 
 	// Task test endpoint (#208) — API-key gated, mounted OUTSIDE the
 	// session-auth group so external automation (CI scripts, MCP clients)
@@ -640,7 +641,7 @@ func (s *Server) Start(ctx context.Context) error {
 	s.startAuthoringPurgeLoop(ctx)
 
 	s.srv = &http.Server{
-		Addr:              fmt.Sprintf(":%d", s.port),
+		Addr:              s.bindAddr(),
 		Handler:           s.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       120 * time.Second,
@@ -669,6 +670,48 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// bindAddr returns the address the server should bind to.
+// When auth is disabled, restrict to loopback to prevent accidental public exposure.
+func (s *Server) bindAddr() string {
+	s.cfgMu.RLock()
+	auth := s.cfg.Server.Auth
+	s.cfgMu.RUnlock()
+	if !auth {
+		return fmt.Sprintf("127.0.0.1:%d", s.port)
+	}
+	return fmt.Sprintf(":%d", s.port)
+}
+
+// isAllowedGitScheme returns true when the URL uses a scheme valid for a git remote.
+// Rejects file://, ftp://, data:, and other schemes that could trigger local-file
+// reads or SSRF against non-git services.
+func isAllowedGitScheme(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https", "http", "git", "ssh":
+		return true
+	}
+	return false
+}
+
+// wsOriginPatterns converts full-URL origin entries (e.g. "https://example.com")
+// to the host-only patterns that coder/websocket.AcceptOptions.OriginPatterns expects.
+func wsOriginPatterns(origins []string) []string {
+	out := make([]string, 0, len(origins))
+	for _, o := range origins {
+		u, err := url.Parse(o)
+		if err != nil || u.Host == "" {
+			out = append(out, o) // pass through unchanged if not a valid URL
+			continue
+		}
+		out = append(out, u.Host)
+	}
+	return out
 }
 
 // useEncodedPath is a middleware that makes chi route on r.URL.RawPath instead
@@ -730,6 +773,16 @@ func (s *Server) apiGetConfigRaw(w http.ResponseWriter, r *http.Request) {
 		s.log.Error("read config file", zap.Error(err))
 		jsonErr(w, "could not read config file", http.StatusInternalServerError)
 		return
+	}
+	// Redact server.secret before returning to the browser.
+	var raw map[string]interface{}
+	if err := yaml.Unmarshal(b, &raw); err == nil {
+		if srv, ok := raw["server"].(map[string]interface{}); ok {
+			delete(srv, "secret")
+		}
+		if redacted, err := yaml.Marshal(raw); err == nil {
+			b = redacted
+		}
 	}
 	jsonOK(w, map[string]string{"content": string(b)})
 }
@@ -1056,7 +1109,10 @@ func (s *Server) apiSecretsUnlock(w http.ResponseWriter, r *http.Request) {
 	if trust && s.dbSessions != nil {
 		ua := r.Header.Get("User-Agent")
 		if devToken, err := s.dbSessions.issueDeviceToken(r.Context(), ip, ua); err == nil {
-			setDeviceCookie(w, devToken)
+			s.cfgMu.RLock()
+			secure := s.cfg.Server.TrustProxy
+			s.cfgMu.RUnlock()
+			setDeviceCookie(w, devToken, secure)
 		}
 	}
 
@@ -2170,6 +2226,10 @@ func (s *Server) apiAddSource(w http.ResponseWriter, r *http.Request) {
 
 	var ref taskset.Ref
 	if url := strings.TrimSpace(body.URL); url != "" {
+		if !isAllowedGitScheme(url) {
+			jsonErr(w, "url scheme not allowed", http.StatusBadRequest)
+			return
+		}
 		branch := body.Branch
 		if branch == "" {
 			branch = "main"
@@ -2232,6 +2292,10 @@ func (s *Server) apiListGitBranches(w http.ResponseWriter, r *http.Request) {
 	repoURL := r.URL.Query().Get("url")
 	if repoURL == "" {
 		jsonErr(w, "url is required", http.StatusBadRequest)
+		return
+	}
+	if !isAllowedGitScheme(repoURL) {
+		jsonErr(w, "url scheme not allowed", http.StatusBadRequest)
 		return
 	}
 	tokenEnv := r.URL.Query().Get("token_env")
