@@ -92,6 +92,28 @@ func TestAPIGetConfigRaw_PreservesOtherFields(t *testing.T) {
 	}
 }
 
+func TestRedactServerSecret_PreservesComments(t *testing.T) {
+	input := "server:\n  auth: true\n  secret: mysecret\n# trailing-comment\n"
+	out := string(redactServerSecret([]byte(input)))
+	if strings.Contains(out, "mysecret") {
+		t.Error("secret was not redacted")
+	}
+	if !strings.Contains(out, "# trailing-comment") {
+		t.Error("comment was lost during redaction")
+	}
+}
+
+func TestRedactServerSecret_PreservesInlineComment(t *testing.T) {
+	input := "server:\n  port: 8080\n  secret: pass\n  # my-marker\n"
+	out := string(redactServerSecret([]byte(input)))
+	if strings.Contains(out, "pass") {
+		t.Error("secret was not redacted")
+	}
+	if !strings.Contains(out, "# my-marker") {
+		t.Error("inline comment inside server block was lost")
+	}
+}
+
 // ── 2. /mcp accepts Bearer API key ───────────────────────────────────────────
 
 func TestMCP_AcceptsBearerAPIKey(t *testing.T) {

@@ -774,17 +774,41 @@ func (s *Server) apiGetConfigRaw(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "could not read config file", http.StatusInternalServerError)
 		return
 	}
-	// Redact server.secret before returning to the browser.
-	var raw map[string]interface{}
-	if err := yaml.Unmarshal(b, &raw); err == nil {
-		if srv, ok := raw["server"].(map[string]interface{}); ok {
-			delete(srv, "secret")
+	jsonOK(w, map[string]string{"content": string(redactServerSecret(b))})
+}
+
+// redactServerSecret removes the server.secret field from raw YAML bytes
+// without full unmarshalling so that comments and formatting are preserved.
+func redactServerSecret(b []byte) []byte {
+	lines := strings.Split(string(b), "\n")
+	result := make([]string, 0, len(lines))
+	inServer := false
+	serverIndent := -1
+	for _, line := range lines {
+		trimmed := strings.TrimLeft(line, " \t")
+		// Blank lines and comments are passed through; they don't change state.
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			result = append(result, line)
+			continue
 		}
-		if redacted, err := yaml.Marshal(raw); err == nil {
-			b = redacted
+		indent := len(line) - len(trimmed)
+		if !inServer {
+			if indent == 0 && (line == "server:" || strings.HasPrefix(line, "server: ") || strings.HasPrefix(line, "server:\t")) {
+				inServer = true
+				serverIndent = indent
+			}
+			result = append(result, line)
+			continue
 		}
+		// Inside the server block.
+		if indent <= serverIndent {
+			inServer = false // exiting the block
+		} else if strings.HasPrefix(trimmed, "secret:") {
+			continue // drop this line
+		}
+		result = append(result, line)
 	}
-	jsonOK(w, map[string]string{"content": string(b)})
+	return []byte(strings.Join(result, "\n"))
 }
 
 // apiSaveConfigRaw validates and writes the raw config back to dicode.yaml.
