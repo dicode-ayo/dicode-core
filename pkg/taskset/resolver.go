@@ -391,8 +391,10 @@ func (r *Resolver) resolveRef(ctx context.Context, ref *Ref, parentTSPath string
 			resolved = filepath.Clean(path)
 		}
 		// When inside a git-cloned source, local refs must stay within the clone root.
-		if cloneRoot != "" && !strings.HasPrefix(resolved+string(filepath.Separator), cloneRoot+string(filepath.Separator)) {
-			return "", fmt.Errorf("ref path %q escapes repo root", ref.Path)
+		if cloneRoot != "" {
+			if err := containedPath(cloneRoot, resolved); err != nil {
+				return "", fmt.Errorf("ref path %q: %w", ref.Path, err)
+			}
 		}
 	} else {
 		branch := ref.effectiveBranch()
@@ -401,11 +403,46 @@ func (r *Resolver) resolveRef(ctx context.Context, ref *Ref, parentTSPath string
 			return "", err
 		}
 		resolved = filepath.Clean(filepath.Join(localDir, path))
-		if !strings.HasPrefix(resolved+string(filepath.Separator), localDir+string(filepath.Separator)) {
-			return "", fmt.Errorf("ref path %q escapes repo root", ref.Path)
+		if err := containedPath(localDir, resolved); err != nil {
+			return "", fmt.Errorf("ref path %q: %w", ref.Path, err)
 		}
 	}
 	return resolveYAMLPath(resolved), nil
+}
+
+// containedPath reports whether target stays within root, rejecting both
+// lexical escapes (`..`, absolute overrides) and symlink escapes. The lexical
+// check alone is insufficient because go-git materializes repo-committed
+// symlinks as real on-disk links: a directory symlink inside the clone (e.g.
+// `sub -> /etc`) keeps target lexically under root while the downstream
+// os.Open/os.Stat would follow it outside. Every path component from root down
+// to target is Lstat'd and any symlink is refused, mirroring the symlink policy
+// in ScriptPath and pkg/task/hash.go.
+func containedPath(root, target string) error {
+	if !strings.HasPrefix(target+string(filepath.Separator), root+string(filepath.Separator)) {
+		return fmt.Errorf("escapes repo root")
+	}
+	rel, err := filepath.Rel(root, target)
+	if err != nil {
+		return fmt.Errorf("escapes repo root")
+	}
+	if rel == "." {
+		return nil
+	}
+	cur := root
+	for _, seg := range strings.Split(rel, string(filepath.Separator)) {
+		cur = filepath.Join(cur, seg)
+		fi, err := os.Lstat(cur)
+		if err != nil {
+			// Component does not exist yet; nothing to follow, and a missing
+			// file simply fails to load downstream.
+			return nil
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("traverses symlink %q", cur)
+		}
+	}
+	return nil
 }
 
 // expandRefPath replaces ${REPO_DIR} and ${TASKSET_DIR} placeholders in a ref

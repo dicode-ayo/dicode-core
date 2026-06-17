@@ -1138,3 +1138,26 @@ func TestResolveRef_LocalContainedPathAllowed(t *testing.T) {
 		t.Errorf("resolved path %q not under cloneDir %q", got, cloneDir)
 	}
 }
+
+// TestResolveRef_SymlinkEscapeRejected verifies that a ref whose path traverses
+// a directory symlink committed inside the clone is rejected even though the
+// lexical path stays under cloneRoot — go-git materializes such symlinks as real
+// on-disk links, so following them would escape the clone.
+func TestResolveRef_SymlinkEscapeRejected(t *testing.T) {
+	r := newResolver(t)
+	cloneDir := t.TempDir()
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "taskset.yaml"), []byte("kind: TaskSet\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// A directory symlink inside the clone pointing outside it.
+	if err := os.Symlink(outside, filepath.Join(cloneDir, "evil")); err != nil {
+		t.Skipf("symlinks not supported: %v", err)
+	}
+	tsFile := filepath.Join(cloneDir, "taskset.yaml")
+
+	ref := &Ref{Path: "evil/taskset.yaml"}
+	if _, err := r.resolveRef(context.Background(), ref, tsFile, nil, cloneDir); err == nil {
+		t.Fatal("expected error for ref traversing a symlink out of the clone, got nil")
+	}
+}
