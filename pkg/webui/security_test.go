@@ -164,6 +164,34 @@ func TestRedactServerSecret_DoesNotOverRedact(t *testing.T) {
 	}
 }
 
+func TestSecureCookies_DirectTLS(t *testing.T) {
+	// Direct TLS (tls_cert + tls_key set, trust_proxy false) must enable Secure.
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			TrustProxy:  false,
+			TLSCertFile: "/etc/ssl/cert.pem",
+			TLSKeyFile:  "/etc/ssl/key.pem",
+		},
+	}
+	if !secureCookies(cfg) {
+		t.Error("secureCookies should return true when tls_cert+tls_key are set")
+	}
+}
+
+func TestSecureCookies_TrustProxyOnly(t *testing.T) {
+	cfg := &config.Config{Server: config.ServerConfig{TrustProxy: true}}
+	if !secureCookies(cfg) {
+		t.Error("secureCookies should return true when trust_proxy is true")
+	}
+}
+
+func TestSecureCookies_NeitherSet(t *testing.T) {
+	cfg := &config.Config{Server: config.ServerConfig{}}
+	if secureCookies(cfg) {
+		t.Error("secureCookies should return false when neither TLS nor proxy is configured")
+	}
+}
+
 // ── 2. /mcp accepts Bearer API key ───────────────────────────────────────────
 
 func TestMCP_AcceptsBearerAPIKey(t *testing.T) {

@@ -15,7 +15,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -65,6 +64,14 @@ var allowedOverrideJSONFields = map[string]bool{
 	"dicode":      true,
 	"defaults":    true,
 	"entries":     true,
+}
+
+// secureCookies returns true when the daemon is reachable over HTTPS, either
+// because it terminates TLS itself (tls_cert + tls_key set) or because it sits
+// behind a TLS-terminating reverse proxy (trust_proxy: true). When true, the
+// Secure attribute is set on session and device cookies.
+func secureCookies(cfg *config.Config) bool {
+	return cfg.Server.TrustProxy || (cfg.Server.TLSCertFile != "" && cfg.Server.TLSKeyFile != "")
 }
 
 // newSessionManager creates an scs.SessionManager backed by SQLite via the
@@ -795,79 +802,56 @@ func (s *Server) apiGetConfigRaw(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]string{"content": string(redactServerSecret(b))})
 }
 
-// inlineFlowSecretRe strips a `secret: <value>` entry (up to the next comma or
-// closing brace) from a YAML flow mapping such as `server: {secret: x, auth: true}`.
-var inlineFlowSecretRe = regexp.MustCompile(`(?i)(\bsecret\s*:)\s*[^,}]*`)
-
-// isBlockScalarValue reports whether a YAML mapping value (the part after the
-// `key:`) opens a block scalar (`|` or `>`, with optional chomping/indent
-// indicators and trailing comment), whose continuation lines carry the value.
-func isBlockScalarValue(v string) bool {
-	v = strings.TrimSpace(v)
-	if v == "" || (v[0] != '|' && v[0] != '>') {
-		return false
-	}
-	rest := strings.TrimLeft(v[1:], "+-0123456789")
-	rest = strings.TrimSpace(rest)
-	return rest == "" || strings.HasPrefix(rest, "#")
-}
-
-// redactServerSecret removes the server.secret field from raw YAML bytes
-// without full unmarshalling so that comments and formatting are preserved.
-// It handles plain values, inline flow mappings, and block scalars so the
-// secret cannot leak through an alternate-but-valid serialization.
+// redactServerSecret removes the server.secret field from raw YAML bytes.
+// It uses yaml.Node to parse so that comments and field ordering are preserved,
+// and so all valid YAML forms of the field (plain scalar, block scalar |/>,
+// flow-style inline mapping) are handled correctly.
 func redactServerSecret(b []byte) []byte {
-	lines := strings.Split(string(b), "\n")
-	result := make([]string, 0, len(lines))
-	inServer := false
-	serverIndent := -1
-	// secretBlockIndent >= 0 means we are inside the continuation of a dropped
-	// `secret:` block scalar; lines more indented than it are part of the value.
-	secretBlockIndent := -1
-	for _, line := range lines {
-		trimmed := strings.TrimLeft(line, " \t")
-		indent := len(line) - len(trimmed)
-		// Drop continuation lines of a block-scalar secret value.
-		if secretBlockIndent >= 0 {
-			if trimmed == "" || indent > secretBlockIndent {
-				continue
-			}
-			secretBlockIndent = -1
-		}
-		// Blank lines and comments are passed through; they don't change state.
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			result = append(result, line)
-			continue
-		}
-		if !inServer {
-			if indent == 0 && (line == "server:" || strings.HasPrefix(line, "server: ") || strings.HasPrefix(line, "server:\t")) {
-				inServer = true
-				serverIndent = indent
-				// Flow mapping on the same line (`server: {secret: x, ...}`) —
-				// redact inline. A single-line flow mapping closes the block; a
-				// brace left open spans following lines, so keep scanning them.
-				if rest := strings.TrimSpace(line[len("server:"):]); strings.HasPrefix(rest, "{") {
-					line = inlineFlowSecretRe.ReplaceAllString(line, "$1 [redacted]")
-					if strings.Contains(rest, "}") {
-						inServer = false
+	var doc yaml.Node
+	if err := yaml.Unmarshal(b, &doc); err != nil {
+		return b // not valid YAML; return as-is (no leak risk)
+	}
+	if doc.Kind == yaml.DocumentNode && len(doc.Content) > 0 {
+		if root := doc.Content[0]; root.Kind == yaml.MappingNode {
+			for i := 0; i+1 < len(root.Content); i += 2 {
+				if root.Content[i].Value == "server" {
+					serverNode := root.Content[i+1]
+					if serverNode.Kind == yaml.MappingNode {
+						// Remove the secret key-value pair.  Any trailing comment on the
+						// secret key node is re-attached to the preceding value node (or
+						// to the server mapping's FootComment) so it is not lost.
+						newContent := make([]*yaml.Node, 0, len(serverNode.Content))
+						for j := 0; j+1 < len(serverNode.Content); j += 2 {
+							keyNode := serverNode.Content[j]
+							if keyNode.Value == "secret" {
+								if fc := keyNode.FootComment; fc != "" {
+									if len(newContent) >= 2 {
+										prev := newContent[len(newContent)-1]
+										if prev.FootComment != "" {
+											prev.FootComment += "\n" + fc
+										} else {
+											prev.FootComment = fc
+										}
+									} else {
+										serverNode.FootComment = fc
+									}
+								}
+								continue
+							}
+							newContent = append(newContent, keyNode, serverNode.Content[j+1])
+						}
+						serverNode.Content = newContent
 					}
+					break
 				}
 			}
-			result = append(result, line)
-			continue
 		}
-		// Inside the server block.
-		if indent <= serverIndent {
-			inServer = false // exiting the block
-		} else if strings.HasPrefix(trimmed, "secret:") {
-			if isBlockScalarValue(trimmed[len("secret:"):]) {
-				secretBlockIndent = indent
-			}
-			continue // drop this line
-		}
-		result = append(result, line)
 	}
-	return []byte(strings.Join(result, "\n"))
+	out, err := yaml.Marshal(&doc)
+	if err != nil {
+		return b
+	}
+	return out
 }
 
 // apiSaveConfigRaw validates and writes the raw config back to dicode.yaml.
