@@ -4,6 +4,7 @@ package python
 
 import (
 	"context"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -98,6 +99,16 @@ func TestExecute_HelloPythonSucceeds(t *testing.T) {
 	uv, err := uvpkg.EnsureUv("")
 	if err != nil {
 		t.Skipf("uv provisioning failed (offline?): %v", err)
+	}
+
+	// Pre-flight: skip if httpbin.org is not returning success (rate-limit, block, etc.).
+	pf, pfErr := http.Get("https://httpbin.org/get") //nolint:noctx
+	if pfErr != nil {
+		t.Skipf("httpbin.org unreachable: %v", pfErr)
+	}
+	pf.Body.Close()
+	if pf.StatusCode >= 300 {
+		t.Skipf("httpbin.org returned %d, skipping network integration test", pf.StatusCode)
 	}
 
 	rt, reg := newTestRuntime(t)
