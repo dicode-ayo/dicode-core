@@ -943,7 +943,7 @@ func ensureDaemon(socketPath string) error {
 
 	// Log daemon stderr to dataDir/daemon.log so startup failures are diagnosable.
 	logPath := filepath.Join(filepath.Dir(socketPath), "daemon.log")
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 	if err != nil {
 		logFile = nil // non-fatal: proceed without log capture
 	}

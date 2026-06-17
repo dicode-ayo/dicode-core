@@ -37,7 +37,7 @@ func newAuthServerNoDB(t *testing.T, passphrase string) *Server {
 		registry: reg,
 		engine:   eng,
 		cfg:      cfg,
-		sm:       newSessionManager(nil),
+		sm:       newSessionManager(nil, false),
 		logs:     NewLogBroadcaster(),
 		ws:       NewWSHub(zap.NewNop(), nil),
 		log:      zap.NewNop(),

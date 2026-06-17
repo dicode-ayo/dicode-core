@@ -66,16 +66,27 @@ var allowedOverrideJSONFields = map[string]bool{
 	"entries":     true,
 }
 
+// secureCookies returns true when the daemon is reachable over HTTPS, either
+// because it terminates TLS itself (tls_cert + tls_key set) or because it sits
+// behind a TLS-terminating reverse proxy (trust_proxy: true). When true, the
+// Secure attribute is set on session and device cookies.
+func secureCookies(cfg *config.Config) bool {
+	return cfg.Server.TrustProxy || (cfg.Server.TLSCertFile != "" && cfg.Server.TLSKeyFile != "")
+}
+
 // newSessionManager creates an scs.SessionManager backed by SQLite via the
 // given db.DB. When database is nil (tests without persistence) a plain
-// in-memory map store is used as a fallback.
-func newSessionManager(database db.DB) *scs.SessionManager {
+// in-memory map store is used as a fallback. secure sets the Secure flag on
+// the session cookie — pass secureCookies(cfg) so the flag is set whenever the
+// connection is HTTPS (direct TLS or a TLS-terminating reverse proxy).
+func newSessionManager(database db.DB, secure bool) *scs.SessionManager {
 	sm := scs.New()
 	sm.Lifetime = sessionTTL
 	sm.Cookie.Name = sessionCookie
 	sm.Cookie.HttpOnly = true
 	sm.Cookie.SameSite = http.SameSiteStrictMode
 	sm.Cookie.Persist = true
+	sm.Cookie.Secure = secure
 	sm.Cookie.Path = "/"
 	if database != nil {
 		store := newSCSStore(database)
@@ -216,9 +227,9 @@ func (s *Server) SetManagedRuntimes(runtimes []pkgruntime.ManagedRuntime) {
 // sourceMgr enables the /api/sources endpoints and MCP source tools; pass nil in tests.
 // database is required for persistent sessions and API key storage; pass nil in tests (auth features disabled).
 func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config, cfgPath string, secretsMgr SecretsManager, rec *registry.Reconciler, sourceMgr *SourceManager, dataDir string, logs *LogBroadcaster, log *zap.Logger, database db.DB, gateway *ipc.Gateway) (*Server, error) {
-	sm := newSessionManager(database)
+	sm := newSessionManager(database, secureCookiesFor(cfg))
 
-	wsHub := NewWSHub(log, cfg.Server.AllowedOrigins)
+	wsHub := NewWSHub(log, wsOriginPatterns(cfg.Server.AllowedOrigins))
 
 	csrfKey := make([]byte, 32)
 	if _, err := rand.Read(csrfKey); err != nil {
@@ -578,25 +589,23 @@ func (s *Server) Handler() http.Handler {
 			r.Delete("/runtimes/{name}", s.apiRemoveRuntime)
 		})
 
-		// MCP endpoint — API-key gated; the actual JSON-RPC dispatch lives in
-		// the buildin/mcp dicode task (tasks/buildin/mcp/task.ts). This URL
-		// stays mounted for backwards compatibility with existing MCP client
-		// configurations: GET returns a small server-info doc; POST forwards
-		// the request body to /hooks/mcp through the trigger engine's
-		// webhook handler. MCP is a *bool pointer; nil = default enabled
-		// once applyDefaults has filled it in.
-		s.cfgMu.RLock()
-		mcpEnabled := s.cfg == nil || s.cfg.Server.MCP == nil || *s.cfg.Server.MCP
-		s.cfgMu.RUnlock()
-		if mcpEnabled {
-			r.With(s.requireAPIKey).HandleFunc("/mcp", s.handleMCP)
-		}
-
 		// Redirect root and unmatched GET routes to the webui webhook task.
 		r.Get("/*", func(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "/hooks/webui", http.StatusFound)
 		})
 	})
+
+	// MCP endpoint — accepts session cookie OR Bearer API key so machine callers
+	// work without a browser session. Mounted outside the requireAuth group so
+	// Bearer-only clients are not rejected before the key is checked. The actual
+	// JSON-RPC dispatch lives in the buildin/mcp dicode task (tasks/buildin/mcp/task.ts).
+	// MCP is a *bool pointer; nil = default enabled once applyDefaults has filled it in.
+	s.cfgMu.RLock()
+	mcpEnabled := s.cfg == nil || s.cfg.Server.MCP == nil || *s.cfg.Server.MCP
+	s.cfgMu.RUnlock()
+	if mcpEnabled {
+		r.With(s.requireSessionOrAPIKey).HandleFunc("/mcp", s.handleMCP)
+	}
 
 	// Task test endpoint (#208) — API-key gated, mounted OUTSIDE the
 	// session-auth group so external automation (CI scripts, MCP clients)
@@ -640,7 +649,7 @@ func (s *Server) Start(ctx context.Context) error {
 	s.startAuthoringPurgeLoop(ctx)
 
 	s.srv = &http.Server{
-		Addr:              fmt.Sprintf(":%d", s.port),
+		Addr:              s.bindAddr(),
 		Handler:           s.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       120 * time.Second,
@@ -669,6 +678,65 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// bindAddr returns the address the server should bind to.
+// When auth is disabled, restrict to loopback to prevent accidental public exposure.
+func (s *Server) bindAddr() string {
+	s.cfgMu.RLock()
+	auth := s.cfg.Server.Auth
+	s.cfgMu.RUnlock()
+	if !auth {
+		return fmt.Sprintf("127.0.0.1:%d", s.port)
+	}
+	return fmt.Sprintf(":%d", s.port)
+}
+
+// secureCookies reports whether auth cookies should carry the Secure flag.
+// True whenever the connection is HTTPS: either the daemon terminates TLS
+// itself (tls_cert/tls_key set) or sits behind a TLS-terminating proxy
+// (trust_proxy). Caller must hold no lock; this acquires cfgMu.
+func (s *Server) secureCookies() bool {
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
+	return secureCookiesFor(s.cfg)
+}
+
+func secureCookiesFor(cfg *config.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	return cfg.Server.TrustProxy || (cfg.Server.TLSCertFile != "" && cfg.Server.TLSKeyFile != "")
+}
+
+// isAllowedGitScheme returns true when the URL uses a scheme valid for a git remote.
+// Rejects file://, ftp://, data:, and other schemes that could trigger local-file
+// reads or SSRF against non-git services.
+func isAllowedGitScheme(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https", "http", "git", "ssh":
+		return true
+	}
+	return false
+}
+
+// wsOriginPatterns converts full-URL origin entries (e.g. "https://example.com")
+// to the host-only patterns that coder/websocket.AcceptOptions.OriginPatterns expects.
+func wsOriginPatterns(origins []string) []string {
+	out := make([]string, 0, len(origins))
+	for _, o := range origins {
+		u, err := url.Parse(o)
+		if err != nil || u.Host == "" {
+			out = append(out, o) // pass through unchanged if not a valid URL
+			continue
+		}
+		out = append(out, u.Host)
+	}
+	return out
 }
 
 // useEncodedPath is a middleware that makes chi route on r.URL.RawPath instead
@@ -731,7 +799,59 @@ func (s *Server) apiGetConfigRaw(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "could not read config file", http.StatusInternalServerError)
 		return
 	}
-	jsonOK(w, map[string]string{"content": string(b)})
+	jsonOK(w, map[string]string{"content": string(redactServerSecret(b))})
+}
+
+// redactServerSecret removes the server.secret field from raw YAML bytes.
+// It uses yaml.Node to parse so that comments and field ordering are preserved,
+// and so all valid YAML forms of the field (plain scalar, block scalar |/>,
+// flow-style inline mapping) are handled correctly.
+func redactServerSecret(b []byte) []byte {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(b, &doc); err != nil {
+		return b // not valid YAML; return as-is (no leak risk)
+	}
+	if doc.Kind == yaml.DocumentNode && len(doc.Content) > 0 {
+		if root := doc.Content[0]; root.Kind == yaml.MappingNode {
+			for i := 0; i+1 < len(root.Content); i += 2 {
+				if root.Content[i].Value == "server" {
+					serverNode := root.Content[i+1]
+					if serverNode.Kind == yaml.MappingNode {
+						// Remove the secret key-value pair.  Any trailing comment on the
+						// secret key node is re-attached to the preceding value node (or
+						// to the server mapping's FootComment) so it is not lost.
+						newContent := make([]*yaml.Node, 0, len(serverNode.Content))
+						for j := 0; j+1 < len(serverNode.Content); j += 2 {
+							keyNode := serverNode.Content[j]
+							if keyNode.Value == "secret" {
+								if fc := keyNode.FootComment; fc != "" {
+									if len(newContent) >= 2 {
+										prev := newContent[len(newContent)-1]
+										if prev.FootComment != "" {
+											prev.FootComment += "\n" + fc
+										} else {
+											prev.FootComment = fc
+										}
+									} else {
+										serverNode.FootComment = fc
+									}
+								}
+								continue
+							}
+							newContent = append(newContent, keyNode, serverNode.Content[j+1])
+						}
+						serverNode.Content = newContent
+					}
+					break
+				}
+			}
+		}
+	}
+	out, err := yaml.Marshal(&doc)
+	if err != nil {
+		return b
+	}
+	return out
 }
 
 // apiSaveConfigRaw validates and writes the raw config back to dicode.yaml.
@@ -1056,7 +1176,7 @@ func (s *Server) apiSecretsUnlock(w http.ResponseWriter, r *http.Request) {
 	if trust && s.dbSessions != nil {
 		ua := r.Header.Get("User-Agent")
 		if devToken, err := s.dbSessions.issueDeviceToken(r.Context(), ip, ua); err == nil {
-			setDeviceCookie(w, devToken)
+			setDeviceCookie(w, devToken, s.secureCookies())
 		}
 	}
 
@@ -2170,6 +2290,10 @@ func (s *Server) apiAddSource(w http.ResponseWriter, r *http.Request) {
 
 	var ref taskset.Ref
 	if url := strings.TrimSpace(body.URL); url != "" {
+		if !isAllowedGitScheme(url) {
+			jsonErr(w, "url scheme not allowed", http.StatusBadRequest)
+			return
+		}
 		branch := body.Branch
 		if branch == "" {
 			branch = "main"
@@ -2232,6 +2356,10 @@ func (s *Server) apiListGitBranches(w http.ResponseWriter, r *http.Request) {
 	repoURL := r.URL.Query().Get("url")
 	if repoURL == "" {
 		jsonErr(w, "url is required", http.StatusBadRequest)
+		return
+	}
+	if !isAllowedGitScheme(repoURL) {
+		jsonErr(w, "url scheme not allowed", http.StatusBadRequest)
 		return
 	}
 	tokenEnv := r.URL.Query().Get("token_env")
