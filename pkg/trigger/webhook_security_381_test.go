@@ -8,6 +8,11 @@ import (
 	"testing"
 	"time"
 
+	"go.uber.org/zap"
+
+	"github.com/dicode/dicode/pkg/db"
+	"github.com/dicode/dicode/pkg/registry"
+	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	"github.com/dicode/dicode/pkg/task"
 )
 
@@ -147,5 +152,64 @@ func TestWebhookHandler_ConcurrencyLimit_Returns503(t *testing.T) {
 
 	if w.Code != http.StatusServiceUnavailable {
 		t.Errorf("at-capacity webhook should return 503, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// Fix 2 (regression): a webhook run that triggers a nested synchronous run
+// (if_missing prereq / input-storage delegation, both routed through fireSync
+// from inside the executing task) must not self-block on the parent's own
+// concurrency slot. With the cap saturated by the parent, the nested fireSync
+// must still succeed — the gate lives at the webhook entry, not in fireSync.
+func TestFireSync_NestedRun_NotBlockedBySlot(t *testing.T) {
+	d, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { d.Close() })
+	reg := registry.New(d)
+
+	dir := t.TempDir()
+	child := writeTask(t, dir, "nested-child", `return 1`, task.TriggerConfig{Manual: true})
+
+	var eng *Engine
+	var nestedErr error
+	var nestedRan bool
+	firedNested := false
+	exec := &fakeExecutor{fn: func() {
+		// Fire the nested child only on the parent's first execution; the
+		// child run reuses this same executor and must just return, or the
+		// fn would recurse forever.
+		if firedNested {
+			return
+		}
+		firedNested = true
+		// Runs inside the parent's executor while the parent holds the only
+		// slot. Firing the child synchronously must not deadlock or 503.
+		nestedRan = true
+		_, _, nestedErr = eng.fireSync(child, pkgruntime.RunOptions{}, "if_missing")
+	}}
+	eng = New(reg, exec, zap.NewNop())
+
+	eng.SetMaxConcurrentTasks(1)
+	_ = reg.Register(child)
+	eng.Register(child)
+
+	parent := writeTask(t, dir, "nested-parent", `return 1`, task.TriggerConfig{Webhook: "/hooks/nested-parent"})
+	_ = reg.Register(parent)
+	eng.Register(parent)
+
+	handler := eng.WebhookHandler()
+	req := httptest.NewRequest(http.MethodPost, "/hooks/nested-parent", strings.NewReader(`{}`))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if !nestedRan {
+		t.Fatal("parent executor never ran")
+	}
+	if nestedErr != nil {
+		t.Errorf("nested fireSync must not be blocked by parent's slot, got: %v", nestedErr)
+	}
+	if w.Code == http.StatusServiceUnavailable {
+		t.Errorf("parent webhook should not 503 when only the parent occupies the slot")
 	}
 }
