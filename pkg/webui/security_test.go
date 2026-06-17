@@ -114,6 +114,48 @@ func TestRedactServerSecret_PreservesInlineComment(t *testing.T) {
 	}
 }
 
+func TestRedactServerSecret_BlockScalar(t *testing.T) {
+	input := "server:\n  auth: true\n  secret: |\n    line-one-LEAK\n    line-two-LEAK\n  port: 8080\n"
+	out := string(redactServerSecret([]byte(input)))
+	if strings.Contains(out, "LEAK") {
+		t.Errorf("block-scalar secret continuation leaked:\n%s", out)
+	}
+	if !strings.Contains(out, "port: 8080") {
+		t.Errorf("field after block scalar was lost:\n%s", out)
+	}
+}
+
+func TestRedactServerSecret_BlockScalarChomp(t *testing.T) {
+	input := "server:\n  secret: >-\n    folded-LEAK\n  auth: true\n"
+	out := string(redactServerSecret([]byte(input)))
+	if strings.Contains(out, "LEAK") {
+		t.Errorf("folded/chomped block-scalar secret leaked:\n%s", out)
+	}
+	if !strings.Contains(out, "auth: true") {
+		t.Errorf("field after block scalar was lost:\n%s", out)
+	}
+}
+
+func TestRedactServerSecret_InlineFlow(t *testing.T) {
+	input := "server: {auth: true, secret: inlineLEAK, port: 8080}\n"
+	out := string(redactServerSecret([]byte(input)))
+	if strings.Contains(out, "inlineLEAK") {
+		t.Errorf("inline-flow secret leaked:\n%s", out)
+	}
+	if !strings.Contains(out, "auth: true") || !strings.Contains(out, "port: 8080") {
+		t.Errorf("sibling flow fields were lost:\n%s", out)
+	}
+}
+
+func TestRedactServerSecret_DoesNotOverRedact(t *testing.T) {
+	// A non-secret key whose name merely starts with "secret" must survive.
+	input := "server:\n  secret_backup: keep-me\n  auth: true\n"
+	out := string(redactServerSecret([]byte(input)))
+	if !strings.Contains(out, "keep-me") {
+		t.Errorf("secret_backup was wrongly redacted:\n%s", out)
+	}
+}
+
 // ── 2. /mcp accepts Bearer API key ───────────────────────────────────────────
 
 func TestMCP_AcceptsBearerAPIKey(t *testing.T) {
@@ -238,5 +280,29 @@ func TestBindAddr_AuthTrue_AllInterfaces(t *testing.T) {
 	}
 	if strings.HasPrefix(addr, "127.0.0.1:") {
 		t.Errorf("bindAddr() = %q should not bind loopback when auth is on", addr)
+	}
+}
+
+// ── 6. secureCookiesFor ─────────────────────────────────────────────────────
+
+func TestSecureCookiesFor(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  config.ServerConfig
+		want bool
+	}{
+		{"plain http", config.ServerConfig{}, false},
+		{"trust proxy", config.ServerConfig{TrustProxy: true}, true},
+		{"direct tls", config.ServerConfig{TLSCertFile: "cert.pem", TLSKeyFile: "key.pem"}, true},
+		{"tls cert only", config.ServerConfig{TLSCertFile: "cert.pem"}, false},
+	}
+	for _, tc := range cases {
+		got := secureCookiesFor(&config.Config{Server: tc.cfg})
+		if got != tc.want {
+			t.Errorf("%s: secureCookiesFor = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	if secureCookiesFor(nil) {
+		t.Error("secureCookiesFor(nil) = true, want false")
 	}
 }

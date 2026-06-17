@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -69,8 +70,8 @@ var allowedOverrideJSONFields = map[string]bool{
 // newSessionManager creates an scs.SessionManager backed by SQLite via the
 // given db.DB. When database is nil (tests without persistence) a plain
 // in-memory map store is used as a fallback. secure sets the Secure flag on
-// the session cookie — pass cfg.Server.TrustProxy so the flag is set when the
-// daemon sits behind a TLS-terminating reverse proxy.
+// the session cookie — pass secureCookies(cfg) so the flag is set whenever the
+// connection is HTTPS (direct TLS or a TLS-terminating reverse proxy).
 func newSessionManager(database db.DB, secure bool) *scs.SessionManager {
 	sm := scs.New()
 	sm.Lifetime = sessionTTL
@@ -219,7 +220,7 @@ func (s *Server) SetManagedRuntimes(runtimes []pkgruntime.ManagedRuntime) {
 // sourceMgr enables the /api/sources endpoints and MCP source tools; pass nil in tests.
 // database is required for persistent sessions and API key storage; pass nil in tests (auth features disabled).
 func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config, cfgPath string, secretsMgr SecretsManager, rec *registry.Reconciler, sourceMgr *SourceManager, dataDir string, logs *LogBroadcaster, log *zap.Logger, database db.DB, gateway *ipc.Gateway) (*Server, error) {
-	sm := newSessionManager(database, cfg.Server.TrustProxy)
+	sm := newSessionManager(database, secureCookiesFor(cfg))
 
 	wsHub := NewWSHub(log, wsOriginPatterns(cfg.Server.AllowedOrigins))
 
@@ -684,6 +685,23 @@ func (s *Server) bindAddr() string {
 	return fmt.Sprintf(":%d", s.port)
 }
 
+// secureCookies reports whether auth cookies should carry the Secure flag.
+// True whenever the connection is HTTPS: either the daemon terminates TLS
+// itself (tls_cert/tls_key set) or sits behind a TLS-terminating proxy
+// (trust_proxy). Caller must hold no lock; this acquires cfgMu.
+func (s *Server) secureCookies() bool {
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
+	return secureCookiesFor(s.cfg)
+}
+
+func secureCookiesFor(cfg *config.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	return cfg.Server.TrustProxy || (cfg.Server.TLSCertFile != "" && cfg.Server.TLSKeyFile != "")
+}
+
 // isAllowedGitScheme returns true when the URL uses a scheme valid for a git remote.
 // Rejects file://, ftp://, data:, and other schemes that could trigger local-file
 // reads or SSRF against non-git services.
@@ -777,25 +795,60 @@ func (s *Server) apiGetConfigRaw(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]string{"content": string(redactServerSecret(b))})
 }
 
+// inlineFlowSecretRe strips a `secret: <value>` entry (up to the next comma or
+// closing brace) from a YAML flow mapping such as `server: {secret: x, auth: true}`.
+var inlineFlowSecretRe = regexp.MustCompile(`(?i)(\bsecret\s*:)\s*[^,}]*`)
+
+// isBlockScalarValue reports whether a YAML mapping value (the part after the
+// `key:`) opens a block scalar (`|` or `>`, with optional chomping/indent
+// indicators and trailing comment), whose continuation lines carry the value.
+func isBlockScalarValue(v string) bool {
+	v = strings.TrimSpace(v)
+	if v == "" || (v[0] != '|' && v[0] != '>') {
+		return false
+	}
+	rest := strings.TrimLeft(v[1:], "+-0123456789")
+	rest = strings.TrimSpace(rest)
+	return rest == "" || strings.HasPrefix(rest, "#")
+}
+
 // redactServerSecret removes the server.secret field from raw YAML bytes
 // without full unmarshalling so that comments and formatting are preserved.
+// It handles plain values, inline flow mappings, and block scalars so the
+// secret cannot leak through an alternate-but-valid serialization.
 func redactServerSecret(b []byte) []byte {
 	lines := strings.Split(string(b), "\n")
 	result := make([]string, 0, len(lines))
 	inServer := false
 	serverIndent := -1
+	// secretBlockIndent >= 0 means we are inside the continuation of a dropped
+	// `secret:` block scalar; lines more indented than it are part of the value.
+	secretBlockIndent := -1
 	for _, line := range lines {
 		trimmed := strings.TrimLeft(line, " \t")
+		indent := len(line) - len(trimmed)
+		// Drop continuation lines of a block-scalar secret value.
+		if secretBlockIndent >= 0 {
+			if trimmed == "" || indent > secretBlockIndent {
+				continue
+			}
+			secretBlockIndent = -1
+		}
 		// Blank lines and comments are passed through; they don't change state.
 		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
 			result = append(result, line)
 			continue
 		}
-		indent := len(line) - len(trimmed)
 		if !inServer {
 			if indent == 0 && (line == "server:" || strings.HasPrefix(line, "server: ") || strings.HasPrefix(line, "server:\t")) {
 				inServer = true
 				serverIndent = indent
+				// Flow mapping on the same line (`server: {secret: x, ...}`) —
+				// redact inline rather than entering the block-style branch.
+				if rest := strings.TrimSpace(line[len("server:"):]); strings.HasPrefix(rest, "{") {
+					line = inlineFlowSecretRe.ReplaceAllString(line, "$1 [redacted]")
+					inServer = false
+				}
 			}
 			result = append(result, line)
 			continue
@@ -804,6 +857,9 @@ func redactServerSecret(b []byte) []byte {
 		if indent <= serverIndent {
 			inServer = false // exiting the block
 		} else if strings.HasPrefix(trimmed, "secret:") {
+			if isBlockScalarValue(trimmed[len("secret:"):]) {
+				secretBlockIndent = indent
+			}
 			continue // drop this line
 		}
 		result = append(result, line)
@@ -1133,10 +1189,7 @@ func (s *Server) apiSecretsUnlock(w http.ResponseWriter, r *http.Request) {
 	if trust && s.dbSessions != nil {
 		ua := r.Header.Get("User-Agent")
 		if devToken, err := s.dbSessions.issueDeviceToken(r.Context(), ip, ua); err == nil {
-			s.cfgMu.RLock()
-			secure := s.cfg.Server.TrustProxy
-			s.cfgMu.RUnlock()
-			setDeviceCookie(w, devToken, secure)
+			setDeviceCookie(w, devToken, s.secureCookies())
 		}
 	}
 

@@ -194,10 +194,7 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 			if ok {
 				s.sm.Put(r.Context(), "authenticated", true)
 				if newDevToken != "" {
-					s.cfgMu.RLock()
-					secure := s.cfg.Server.TrustProxy
-					s.cfgMu.RUnlock()
-					setDeviceCookie(w, newDevToken, secure)
+					setDeviceCookie(w, newDevToken, s.secureCookies())
 				}
 				next.ServeHTTP(w, r)
 				return
