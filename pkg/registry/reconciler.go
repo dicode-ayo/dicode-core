@@ -215,6 +215,11 @@ func (rc *Reconciler) handle(ev source.Event) {
 		rc.retryPending()
 
 	case source.EventRemoved:
+		// Cancel any pending retry so a removed-then-retried task is not
+		// re-registered after its provider eventually shows up.
+		rc.mu.Lock()
+		delete(rc.pending, ev.TaskID)
+		rc.mu.Unlock()
 		rc.registry.Unregister(ev.TaskID)
 		rc.log.Info("task unregistered", zap.String("task", ev.TaskID))
 		if rc.OnUnregister != nil {

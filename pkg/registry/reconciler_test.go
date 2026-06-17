@@ -333,6 +333,53 @@ func TestReconciler_RetryPendingAfterProviderRegisters(t *testing.T) {
 	}
 }
 
+// TestReconciler_RemovedWhilePendingNotRetried verifies that a task removed
+// (EventRemoved) while it sits in the pending-retry queue is NOT re-registered
+// when its provider eventually registers.
+func TestReconciler_RemovedWhilePendingNotRetried(t *testing.T) {
+	fs := newFakeSource("test")
+	reg, rec := newTestReconciler(t, fs)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go rec.Run(ctx)
+
+	time.Sleep(20 * time.Millisecond)
+
+	provider := &task.Spec{
+		ID:      "ghost-provider",
+		Name:    "ghost-provider",
+		Trigger: task.TriggerConfig{Manual: true},
+	}
+	consumer := &task.Spec{
+		ID:   "ghost-consumer",
+		Name: "ghost-consumer",
+		Permissions: task.Permissions{
+			Env: []task.EnvEntry{{Name: "X", From: "task:ghost-provider"}},
+		},
+		Trigger: task.TriggerConfig{Manual: true},
+	}
+
+	// Consumer queued — provider not yet registered.
+	fs.ch <- source.Event{Kind: source.EventAdded, TaskID: "ghost-consumer", Kinded: consumer, Source: "test"}
+	time.Sleep(80 * time.Millisecond)
+
+	// Consumer is removed before the provider arrives.
+	fs.ch <- source.Event{Kind: source.EventRemoved, TaskID: "ghost-consumer", Source: "test"}
+	time.Sleep(80 * time.Millisecond)
+
+	// Provider registers — must NOT cause removed consumer to reappear.
+	fs.ch <- source.Event{Kind: source.EventAdded, TaskID: "ghost-provider", Kinded: provider, Source: "test"}
+	time.Sleep(300 * time.Millisecond)
+
+	if _, ok := reg.Get("ghost-consumer"); ok {
+		t.Fatal("removed-while-pending consumer was re-registered after provider arrived")
+	}
+	if _, ok := reg.Get("ghost-provider"); !ok {
+		t.Fatal("ghost-provider should be registered")
+	}
+}
+
 func TestReconciler_InjectsDATADIR(t *testing.T) {
 	dataDir := "/var/lib/dicode-test"
 	// The reconciler derives spec.ID from filepath.Base(ev.TaskDir), so the
