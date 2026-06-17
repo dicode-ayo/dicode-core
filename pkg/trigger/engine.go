@@ -41,11 +41,6 @@ import (
 // ErrRunNotFound is returned by WaitRun when no run record exists for the given ID.
 var ErrRunNotFound = errors.New("run not found")
 
-// errAtConcurrencyLimit is returned by fireSync when MaxConcurrentTasks is
-// configured and all slots are occupied. The webhook handler translates this
-// to HTTP 503 Service Unavailable.
-var errAtConcurrencyLimit = errors.New("at max concurrent task slots")
-
 // runReturnValueTTL is how long a suppressed-persistence return value
 // stays in the in-memory runReturnValue map after the run reaches a
 // terminal state. Long enough for a WaitRun caller woken by the runDone
@@ -1899,12 +1894,23 @@ func (e *Engine) WebhookHandler() http.Handler {
 			return
 		}
 
-		runID, result, err := e.fireSync(spec, pkgruntime.RunOptions{Input: input, Params: params, WebhookCtx: webhookCtx}, registry.TriggerWebhook)
-		if err != nil {
-			if errors.Is(err, errAtConcurrencyLimit) {
+		// Enforce the concurrency cap at the webhook entry point, not inside
+		// fireSync. fireSync is reentrant: if_missing prereqs and input-storage
+		// delegation both call fireSync from within runTask, so placing the gate
+		// inside fireSync causes a parent holding a slot to self-block when it
+		// spawns a nested sub-run. Gate only the top-level webhook-triggered call.
+		if e.taskSem != nil && !spec.Trigger.Daemon {
+			select {
+			case e.taskSem <- struct{}{}:
+				defer func() { <-e.taskSem }()
+			default:
 				http.Error(w, "too many concurrent tasks; retry later", http.StatusServiceUnavailable)
 				return
 			}
+		}
+
+		runID, result, err := e.fireSync(spec, pkgruntime.RunOptions{Input: input, Params: params, WebhookCtx: webhookCtx}, registry.TriggerWebhook)
+		if err != nil {
 			http.Error(w, "task failed to start", http.StatusInternalServerError)
 			return
 		}
@@ -2441,20 +2447,6 @@ func (e *Engine) fireAsync(ctx context.Context, spec *task.Spec, opts pkgruntime
 // request context ends mid-execution.
 func (e *Engine) fireSync(spec *task.Spec, opts pkgruntime.RunOptions, source registry.TriggerSource) (string, *pkgruntime.RunResult, error) {
 	opts.RunID = uuid.New().String()
-
-	// Enforce the same concurrency cap as fireAsync. Daemon tasks are exempt
-	// (they're long-lived and would permanently starve all other slots). For
-	// sync callers (the default webhook path) we fail-fast rather than block:
-	// the HTTP caller gets 503 and can retry, which is preferable to holding
-	// the request open indefinitely waiting for a slot.
-	if e.taskSem != nil && !spec.Trigger.Daemon {
-		select {
-		case e.taskSem <- struct{}{}:
-			defer func() { <-e.taskSem }()
-		default:
-			return "", nil, errAtConcurrencyLimit
-		}
-	}
 
 	runCtx, cleanup, err := e.startRun(spec, &opts, source)
 	if err != nil {
