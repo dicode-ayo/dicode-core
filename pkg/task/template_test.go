@@ -465,12 +465,13 @@ permissions:
 	}
 }
 
-// TestExpandSpec_DockerFields verifies that ${VAR} in docker.command,
-// docker.entrypoint, docker.working_dir, docker.build.context, and
-// docker.build.dockerfile are all expanded at spec-load time (#386).
+// TestExpandSpec_DockerFields verifies that ${VAR} in docker.image,
+// docker.command, docker.entrypoint, docker.working_dir, docker.build.context,
+// and docker.build.dockerfile are all expanded at spec-load time (#386).
 func TestExpandSpec_DockerFields(t *testing.T) {
 	spec := &Spec{
 		Docker: &DockerConfig{
+			Image:      "${REGISTRY}/myapp:latest",
 			Command:    []string{"${TASK_DIR}/start.sh", "--verbose"},
 			Entrypoint: []string{"/bin/sh", "${TASK_DIR}/entrypoint.sh"},
 			WorkingDir: "${TASK_DIR}/app",
@@ -480,9 +481,12 @@ func TestExpandSpec_DockerFields(t *testing.T) {
 			},
 		},
 	}
-	vars := map[string]string{VarTaskDir: "/abs/task"}
+	vars := map[string]string{VarTaskDir: "/abs/task", "REGISTRY": "registry.example.com"}
 	expandSpec(spec, vars)
 
+	if got := spec.Docker.Image; got != "registry.example.com/myapp:latest" {
+		t.Errorf("Image = %q, want registry.example.com/myapp:latest", got)
+	}
 	if got := spec.Docker.Command[0]; got != "/abs/task/start.sh" {
 		t.Errorf("Command[0] = %q, want /abs/task/start.sh", got)
 	}

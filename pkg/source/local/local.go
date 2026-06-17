@@ -59,9 +59,18 @@ func (s *LocalSource) Start(ctx context.Context) (<-chan source.Event, error) {
 	s.ch = ch
 	s.mu.Unlock()
 
+	// abort clears s.ch and closes ch on any Start error path so that a later
+	// Sync() call does not send on a closed channel and panic.
+	abort := func() {
+		s.mu.Lock()
+		s.ch = nil
+		s.mu.Unlock()
+		close(ch)
+	}
+
 	// Initial scan — emit Added for every task already on disk.
 	if err := s.syncAndEmit(ctx, ch); err != nil {
-		close(ch)
+		abort()
 		return nil, err
 	}
 
@@ -78,13 +87,13 @@ func (s *LocalSource) Start(ctx context.Context) (<-chan source.Event, error) {
 
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		close(ch)
+		abort()
 		return nil, err
 	}
 	// Watch root tasks dir and all current task subdirectories.
 	if err := s.addWatchDirs(watcher); err != nil {
 		watcher.Close()
-		close(ch)
+		abort()
 		return nil, err
 	}
 

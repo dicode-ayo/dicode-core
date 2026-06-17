@@ -126,6 +126,7 @@ func expandSpec(spec *Spec, vars map[string]string) {
 	// or daemon env vars through these fields. TASK_DIR and other builtins
 	// always resolve because they are in the vars map, not the process env.
 	if spec.Docker != nil {
+		spec.Docker.Image = expandString(spec.Docker.Image, vars, false)
 		for i := range spec.Docker.Volumes {
 			spec.Docker.Volumes[i] = expandString(spec.Docker.Volumes[i], vars, false)
 		}

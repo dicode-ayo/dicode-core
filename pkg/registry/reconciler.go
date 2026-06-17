@@ -247,6 +247,16 @@ func (rc *Reconciler) retryPending() {
 
 	go func() {
 		for _, ev := range events {
+			// Re-check pending membership: an EventRemoved may have arrived
+			// after the snapshot was taken, deleting this task from rc.pending
+			// and unregistering it. Skipping here prevents a re-registration
+			// of a task that was intentionally removed.
+			rc.mu.Lock()
+			_, stillPending := rc.pending[ev.TaskID]
+			rc.mu.Unlock()
+			if !stillPending {
+				continue
+			}
 			select {
 			case rc.merged <- ev:
 			case <-ctx.Done():
