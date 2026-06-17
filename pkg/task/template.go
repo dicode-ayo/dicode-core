@@ -121,13 +121,24 @@ func expandSpec(spec *Spec, vars map[string]string) {
 		spec.Params[i].Default = expandString(spec.Params[i].Default, vars, false)
 	}
 
-	// docker.volumes: lets tasks reference shared paths (${DATADIR}/foo) as
-	// mount sources. envFallback=false — a task.yaml from an untrusted
-	// source must not be able to mount arbitrary host paths by naming a
-	// daemon env var.
+	// docker.*: all fields expanded with envFallback=false — a task.yaml from
+	// an untrusted source must not be able to reference arbitrary host paths
+	// or daemon env vars through these fields. TASK_DIR and other builtins
+	// always resolve because they are in the vars map, not the process env.
 	if spec.Docker != nil {
 		for i := range spec.Docker.Volumes {
 			spec.Docker.Volumes[i] = expandString(spec.Docker.Volumes[i], vars, false)
+		}
+		for i := range spec.Docker.Command {
+			spec.Docker.Command[i] = expandString(spec.Docker.Command[i], vars, false)
+		}
+		for i := range spec.Docker.Entrypoint {
+			spec.Docker.Entrypoint[i] = expandString(spec.Docker.Entrypoint[i], vars, false)
+		}
+		spec.Docker.WorkingDir = expandString(spec.Docker.WorkingDir, vars, false)
+		if spec.Docker.Build != nil {
+			spec.Docker.Build.Context = expandString(spec.Docker.Build.Context, vars, false)
+			spec.Docker.Build.Dockerfile = expandString(spec.Docker.Build.Dockerfile, vars, false)
 		}
 	}
 

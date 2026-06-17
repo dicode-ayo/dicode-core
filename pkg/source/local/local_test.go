@@ -309,3 +309,84 @@ func TestLocalSource_WatchDisabled_NoFsNotifyEvents(t *testing.T) {
 		t.Fatalf("Sync: %v", err)
 	}
 }
+
+// TestLocalSource_Sync_EmitsEvents verifies that Sync() delivers events to
+// the channel opened by Start() instead of silently discarding them (#386).
+func TestLocalSource_Sync_EmitsEvents(t *testing.T) {
+	dir := t.TempDir()
+	s, err := New("test-sync", dir, false, zap.NewNop()) // watchEnabled=false, driven by Sync
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ch, err := s.Start(ctx)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	collectEvents(ch, 50*time.Millisecond) // drain initial empty scan
+
+	// Write a new task after Start.
+	writeTask(t, dir, "new-task")
+
+	if err := s.Sync(ctx); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+
+	evs := collectEvents(ch, 500*time.Millisecond)
+	found := false
+	for _, ev := range evs {
+		if ev.TaskID == "new-task" && ev.Kind == source.EventAdded {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("Sync() should emit EventAdded for new-task; got %+v", evs)
+	}
+}
+
+// TestLocalSource_WatchNewTaskDir verifies that task directories created
+// after Start() are watched and edits inside them trigger reload events (#386).
+func TestLocalSource_WatchNewTaskDir(t *testing.T) {
+	dir := t.TempDir()
+	s := newTestSource(t, dir)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ch, err := s.Start(ctx)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	collectEvents(ch, 300*time.Millisecond) // drain initial empty scan
+
+	// Create a new task dir after Start — should trigger Added.
+	writeTask(t, dir, "late-task")
+
+	evs := collectEvents(ch, 2*time.Second)
+	var gotAdded bool
+	for _, ev := range evs {
+		if ev.TaskID == "late-task" && ev.Kind == source.EventAdded {
+			gotAdded = true
+		}
+	}
+	if !gotAdded {
+		t.Fatal("new task dir created after Start should trigger EventAdded")
+	}
+
+	// Edit a file inside the new task dir — should trigger Updated.
+	td := filepath.Join(dir, "late-task")
+	if err := os.WriteFile(filepath.Join(td, "task.js"), []byte("// v2"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	evs = collectEvents(ch, 2*time.Second)
+	var gotUpdated bool
+	for _, ev := range evs {
+		if ev.TaskID == "late-task" && ev.Kind == source.EventUpdated {
+			gotUpdated = true
+		}
+	}
+	if !gotUpdated {
+		t.Error("edit inside new task dir should trigger EventUpdated")
+	}
+}

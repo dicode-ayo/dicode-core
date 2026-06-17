@@ -464,3 +464,70 @@ permissions:
 		t.Errorf("FS[1] = %q, want %s/local", spec.Permissions.FS[1].Path, dir)
 	}
 }
+
+// TestExpandSpec_DockerFields verifies that ${VAR} in docker.command,
+// docker.entrypoint, docker.working_dir, docker.build.context, and
+// docker.build.dockerfile are all expanded at spec-load time (#386).
+func TestExpandSpec_DockerFields(t *testing.T) {
+	spec := &Spec{
+		Docker: &DockerConfig{
+			Command:    []string{"${TASK_DIR}/start.sh", "--verbose"},
+			Entrypoint: []string{"/bin/sh", "${TASK_DIR}/entrypoint.sh"},
+			WorkingDir: "${TASK_DIR}/app",
+			Build: &DockerBuild{
+				Context:    "${TASK_DIR}/context",
+				Dockerfile: "${TASK_DIR}/Dockerfile.prod",
+			},
+		},
+	}
+	vars := map[string]string{VarTaskDir: "/abs/task"}
+	expandSpec(spec, vars)
+
+	if got := spec.Docker.Command[0]; got != "/abs/task/start.sh" {
+		t.Errorf("Command[0] = %q, want /abs/task/start.sh", got)
+	}
+	if got := spec.Docker.Command[1]; got != "--verbose" {
+		t.Errorf("Command[1] = %q, want --verbose (literal)", got)
+	}
+	if got := spec.Docker.Entrypoint[1]; got != "/abs/task/entrypoint.sh" {
+		t.Errorf("Entrypoint[1] = %q, want /abs/task/entrypoint.sh", got)
+	}
+	if got := spec.Docker.WorkingDir; got != "/abs/task/app" {
+		t.Errorf("WorkingDir = %q, want /abs/task/app", got)
+	}
+	if got := spec.Docker.Build.Context; got != "/abs/task/context" {
+		t.Errorf("Build.Context = %q, want /abs/task/context", got)
+	}
+	if got := spec.Docker.Build.Dockerfile; got != "/abs/task/Dockerfile.prod" {
+		t.Errorf("Build.Dockerfile = %q, want /abs/task/Dockerfile.prod", got)
+	}
+}
+
+// TestExpandSpec_DockerFields_NoEnvFallback guards against an untrusted
+// task.yaml using a daemon env var in docker fields to reach host paths.
+func TestExpandSpec_DockerFields_NoEnvFallback(t *testing.T) {
+	t.Setenv("DICODE_DAEMON_SECRET_PATH", "/daemon/secret")
+	spec := &Spec{
+		Docker: &DockerConfig{
+			Command:    []string{"${DICODE_DAEMON_SECRET_PATH}/cmd"},
+			WorkingDir: "${DICODE_DAEMON_SECRET_PATH}",
+			Build: &DockerBuild{
+				Context:    "${DICODE_DAEMON_SECRET_PATH}/ctx",
+				Dockerfile: "${DICODE_DAEMON_SECRET_PATH}/Dockerfile",
+			},
+		},
+	}
+	expandSpec(spec, map[string]string{})
+
+	for _, got := range []string{
+		spec.Docker.Command[0],
+		spec.Docker.WorkingDir,
+		spec.Docker.Build.Context,
+		spec.Docker.Build.Dockerfile,
+	} {
+		if got == "/daemon/secret/cmd" || got == "/daemon/secret" ||
+			got == "/daemon/secret/ctx" || got == "/daemon/secret/Dockerfile" {
+			t.Errorf("daemon env leaked into docker field: %q", got)
+		}
+	}
+}
