@@ -844,10 +844,13 @@ func redactServerSecret(b []byte) []byte {
 				inServer = true
 				serverIndent = indent
 				// Flow mapping on the same line (`server: {secret: x, ...}`) —
-				// redact inline rather than entering the block-style branch.
+				// redact inline. A single-line flow mapping closes the block; a
+				// brace left open spans following lines, so keep scanning them.
 				if rest := strings.TrimSpace(line[len("server:"):]); strings.HasPrefix(rest, "{") {
 					line = inlineFlowSecretRe.ReplaceAllString(line, "$1 [redacted]")
-					inServer = false
+					if strings.Contains(rest, "}") {
+						inServer = false
+					}
 				}
 			}
 			result = append(result, line)

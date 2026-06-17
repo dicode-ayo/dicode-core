@@ -147,6 +147,14 @@ func TestRedactServerSecret_InlineFlow(t *testing.T) {
 	}
 }
 
+func TestRedactServerSecret_MultiLineFlow(t *testing.T) {
+	input := "server: {\n  auth: true,\n  secret: spanningLEAK,\n}\n"
+	out := string(redactServerSecret([]byte(input)))
+	if strings.Contains(out, "spanningLEAK") {
+		t.Errorf("multi-line flow secret leaked:\n%s", out)
+	}
+}
+
 func TestRedactServerSecret_DoesNotOverRedact(t *testing.T) {
 	// A non-secret key whose name merely starts with "secret" must survive.
 	input := "server:\n  secret_backup: keep-me\n  auth: true\n"
