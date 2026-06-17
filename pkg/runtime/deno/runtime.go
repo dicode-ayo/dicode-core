@@ -545,13 +545,24 @@ func buildDenoArgs(spec *task.Spec, socketPath, shimPath, runnerPath string) []s
 	}
 	// nil or explicit empty list → no --allow-net flag → network denied
 
-	// Env: always allow the internal IPC vars plus HOME/DENO_DIR/XDG_CACHE_HOME
-	// (required by deno.land/x/cache for vendored binary downloads).
-	envVars := []string{"DICODE_SOCKET", "DICODE_TOKEN", "HOME", "DENO_DIR", "XDG_CACHE_HOME"}
-	for _, e := range spec.Permissions.Env {
-		envVars = append(envVars, e.Name)
+	// EnvReadExposed grants bare --allow-env (read any var). The blast radius is
+	// bounded by runtime.SubprocessEnv, which forwards only an allowlist
+	// (PATH/HOME/cache/proxy/TLS vars, DICODE_SOCKET/DICODE_TOKEN, and the
+	// task's own resolved vars) and denylists the daemon's master/admin keys,
+	// so "read any var" can only read what the task already holds. Needed for
+	// Deno node-compat / npm tasks whose transitive deps read unpredictable
+	// process.env keys at module init. Otherwise the explicit list: the
+	// internal IPC vars plus HOME/DENO_DIR/XDG_CACHE_HOME (required by
+	// deno.land/x/cache for vendored binary downloads) plus declared names.
+	if spec.Permissions.EnvReadExposed {
+		args = append(args, "--allow-env")
+	} else {
+		envVars := []string{"DICODE_SOCKET", "DICODE_TOKEN", "HOME", "DENO_DIR", "XDG_CACHE_HOME"}
+		for _, e := range spec.Permissions.Env {
+			envVars = append(envVars, e.Name)
+		}
+		args = append(args, "--allow-env="+strings.Join(envVars, ","))
 	}
-	args = append(args, "--allow-env="+strings.Join(envVars, ","))
 
 	// Sys: omit field = deny all (default); ["*"] = all; named = allowlist.
 	sys := spec.Permissions.Sys

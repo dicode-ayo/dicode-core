@@ -114,6 +114,51 @@ trigger: { manual: true }
 	}
 }
 
+func TestSpec_EnvReadExposed_Parses(t *testing.T) {
+	yamlSrc := []byte(`
+name: exposed-env
+runtime: deno
+trigger: { manual: true }
+permissions:
+  env_read_exposed: true
+  env:
+    - DICODE_DATADIR
+`)
+	var s Spec
+	if err := yaml.Unmarshal(yamlSrc, &s); err != nil {
+		t.Fatal(err)
+	}
+	if !s.Permissions.EnvReadExposed {
+		t.Error("EnvReadExposed = false, want true")
+	}
+	if err := s.Validate(); err != nil {
+		t.Fatalf("env_read_exposed with named entries should validate, got %v", err)
+	}
+}
+
+func TestSpec_Validate_RejectsEnvStarEntry(t *testing.T) {
+	yamlSrc := []byte(`
+name: legacy-wildcard
+runtime: deno
+trigger: { manual: true }
+permissions:
+  env:
+    - "*"
+    - DICODE_DATADIR
+`)
+	var s Spec
+	if err := yaml.Unmarshal(yamlSrc, &s); err != nil {
+		t.Fatal(err)
+	}
+	err := s.Validate()
+	if err == nil {
+		t.Fatal("a name-only \"*\" env entry must be rejected")
+	}
+	if !strings.Contains(err.Error(), "env_read_exposed") {
+		t.Errorf("error should point to env_read_exposed, got %v", err)
+	}
+}
+
 func TestSpec_RunResultOverride_Omitted(t *testing.T) {
 	yamlSrc := []byte(`
 name: test

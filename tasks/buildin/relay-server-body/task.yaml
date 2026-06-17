@@ -30,6 +30,14 @@ permissions:
   fs:
     - path: "${DATADIR}/relay"
       permission: rw
+  # env_read_exposed grants bare --allow-env so the npm:dicode-relay node-compat
+  # import can read whatever process.env keys its transitive deps touch at
+  # module init (granting NODE_ENV alone is insufficient — the reads are
+  # unpredictable). Bounded by runtime.SubprocessEnv, which forwards only an
+  # allowlist and denylists the daemon master/admin keys, so the script can
+  # still read only what it already holds.
+  env_read_exposed: true
   env:
+    # Named entries forward their host values into the subprocess.
     - DICODE_DATADIR
     - DICODE_VERSION
