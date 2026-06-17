@@ -19,6 +19,17 @@ func signBody(secret string, body []byte) string {
 	return "sha256=" + hex.EncodeToString(mac.Sum(nil))
 }
 
+// signBodyWithTimestamp produces HMAC-SHA256 over "<tsStr>\n<body>".
+// Use when sending X-Dicode-Timestamp so the signature matches the new
+// preimage that includes the timestamp.
+func signBodyWithTimestamp(secret, tsStr string, body []byte) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(tsStr))
+	mac.Write([]byte("\n"))
+	mac.Write(body)
+	return "sha256=" + hex.EncodeToString(mac.Sum(nil))
+}
+
 func TestVerifyWebhookSignature_NoSecret_Passes(t *testing.T) {
 	spec := &task.Spec{Trigger: task.TriggerConfig{WebhookSecret: ""}}
 	req := httptest.NewRequest("POST", "/hooks/test", nil)
@@ -69,9 +80,10 @@ func TestVerifyWebhookSignature_ReplayProtection_Fresh_Passes(t *testing.T) {
 	body := []byte(`{}`)
 	spec := &task.Spec{Trigger: task.TriggerConfig{WebhookSecret: secret}}
 
+	tsStr := strconv.FormatInt(time.Now().Unix(), 10)
 	req := httptest.NewRequest("POST", "/hooks/test", nil)
-	req.Header.Set(webhookSignatureHeader, signBody(secret, body))
-	req.Header.Set(webhookTimestampHeader, strconv.FormatInt(time.Now().Unix(), 10))
+	req.Header.Set(webhookSignatureHeader, signBodyWithTimestamp(secret, tsStr, body))
+	req.Header.Set(webhookTimestampHeader, tsStr)
 
 	if err := verifyWebhookSignature(spec, req, body); err != nil {
 		t.Errorf("fresh timestamp should pass, got: %v", err)
@@ -84,10 +96,13 @@ func TestVerifyWebhookSignature_ReplayProtection_Stale_Fails(t *testing.T) {
 	spec := &task.Spec{Trigger: task.TriggerConfig{WebhookSecret: secret}}
 
 	staleTs := time.Now().Add(-10 * time.Minute).Unix()
+	staleTsStr := fmt.Sprintf("%d", staleTs)
 
 	req := httptest.NewRequest("POST", "/hooks/test", nil)
-	req.Header.Set(webhookSignatureHeader, signBody(secret, body))
-	req.Header.Set(webhookTimestampHeader, fmt.Sprintf("%d", staleTs))
+	// Sign with ts+body so the signature itself is valid — we want the stale
+	// timestamp check (not the signature check) to be what rejects this request.
+	req.Header.Set(webhookSignatureHeader, signBodyWithTimestamp(secret, staleTsStr, body))
+	req.Header.Set(webhookTimestampHeader, staleTsStr)
 
 	if err := verifyWebhookSignature(spec, req, body); err == nil {
 		t.Error("stale timestamp should fail, got nil")
