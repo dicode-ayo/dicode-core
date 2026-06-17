@@ -408,6 +408,7 @@ func TestApplyOverrides_DicodeNewBoolFlags(t *testing.T) {
 			RunsReplay: true, RunsGetInput: true, TasksTest: true, SourcesSetDevMode: true,
 			GitCommitPush: true, RunsPinInput: true, RunsUnpinInput: true,
 			RunsListExpired: true, RunsDeleteInput: true,
+			SecretsHas: true,
 		},
 	}
 	out := applyOverrides(base, overlay)
@@ -417,9 +418,93 @@ func TestApplyOverrides_DicodeNewBoolFlags(t *testing.T) {
 		"SourcesSetDevMode": d.SourcesSetDevMode, "GitCommitPush": d.GitCommitPush,
 		"RunsPinInput": d.RunsPinInput, "RunsUnpinInput": d.RunsUnpinInput,
 		"RunsListExpired": d.RunsListExpired, "RunsDeleteInput": d.RunsDeleteInput,
+		"SecretsHas": d.SecretsHas,
 	} {
 		if !v {
 			t.Errorf("flag %s not propagated by override", name)
+		}
+	}
+}
+
+func TestMergeDicodePerms_SecretsHas(t *testing.T) {
+	// SecretsHas was silently dropped before this fix (#383).
+	base := &task.DicodePermissions{SecretsHas: false, SecretsWrite: true}
+	overlay := &task.DicodePermissions{SecretsHas: true}
+	got := mergeDicodePerms(base, overlay)
+	if !got.SecretsHas {
+		t.Error("SecretsHas should be true after overlay merges it")
+	}
+	if !got.SecretsWrite {
+		t.Error("SecretsWrite should be preserved from base")
+	}
+}
+
+func TestMergeDicodePerms_CryptoUnion(t *testing.T) {
+	// Crypto was silently dropped before this fix (#383).
+	base := &task.DicodePermissions{Crypto: []string{"ctx-a", "ctx-b"}}
+	overlay := &task.DicodePermissions{Crypto: []string{"ctx-b", "ctx-c"}} // ctx-b deduped
+	got := mergeDicodePerms(base, overlay)
+	want := []string{"ctx-a", "ctx-b", "ctx-c"}
+	sort.Strings(got.Crypto)
+	if !reflect.DeepEqual(got.Crypto, want) {
+		t.Errorf("Crypto union: got %v, want %v", got.Crypto, want)
+	}
+}
+
+func TestMergeDicodePerms_CryptoBaseNilOverlaySet(t *testing.T) {
+	base := &task.DicodePermissions{}
+	overlay := &task.DicodePermissions{Crypto: []string{"ctx-x"}}
+	got := mergeDicodePerms(base, overlay)
+	if len(got.Crypto) != 1 || got.Crypto[0] != "ctx-x" {
+		t.Errorf("Crypto not set from overlay: got %v", got.Crypto)
+	}
+}
+
+func TestMergeDicodePerms_UnionDoesNotMutateBase(t *testing.T) {
+	// Regression: `out := *base` followed by append(out.Tasks, ...) wrote into
+	// base's backing array when base had spare capacity.
+	baseTasks := make([]string, 1, 4)
+	baseTasks[0] = "a"
+	base := &task.DicodePermissions{Tasks: baseTasks}
+	overlay := &task.DicodePermissions{Tasks: []string{"b"}}
+
+	_ = mergeDicodePerms(base, overlay)
+
+	if len(base.Tasks) != 1 || base.Tasks[0] != "a" {
+		t.Errorf("base.Tasks mutated: %v", base.Tasks)
+	}
+	if spare := base.Tasks[:cap(base.Tasks)]; spare[1] != "" {
+		t.Errorf("merge wrote into base's spare backing array: %q", spare[1])
+	}
+}
+
+// TestMergeDicodePerms_Exhaustive mechanically guards against the #383 root
+// cause: a new DicodePermissions field added without a corresponding merge in
+// mergeDicodePerms. It sets every field of the overlay to a non-zero value
+// over an empty base and asserts the merged result carries each one through.
+// A new field of an unhandled kind fails loudly so the test is extended
+// alongside the struct.
+func TestMergeDicodePerms_Exhaustive(t *testing.T) {
+	overlay := &task.DicodePermissions{}
+	ov := reflect.ValueOf(overlay).Elem()
+	for i := 0; i < ov.NumField(); i++ {
+		f := ov.Field(i)
+		switch f.Kind() {
+		case reflect.Bool:
+			f.SetBool(true)
+		case reflect.Slice:
+			f.Set(reflect.ValueOf([]string{"x"}))
+		default:
+			t.Fatalf("field %s has unhandled kind %s; extend mergeDicodePerms and this test",
+				ov.Type().Field(i).Name, f.Kind())
+		}
+	}
+
+	got := reflect.ValueOf(mergeDicodePerms(&task.DicodePermissions{}, overlay)).Elem()
+	for i := 0; i < got.NumField(); i++ {
+		if got.Field(i).IsZero() {
+			t.Errorf("field %s dropped by mergeDicodePerms (overlay value not merged)",
+				got.Type().Field(i).Name)
 		}
 	}
 }

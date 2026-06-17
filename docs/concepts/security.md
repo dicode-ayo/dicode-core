@@ -705,3 +705,7 @@ Top-level security blocks in `Config` (siblings of `server:`, not nested under i
 | Replay attack protection | 5-minute timestamp window on signed webhooks |
 | CORS misconfiguration guard | Origins validated with `url.Parse()` at startup |
 | Passphrase rotation requires current | bcrypt verify on `current` field |
+| Per-task IPC socket is 0600 | Each task run's Unix socket is created with `chmod 0600`; other local users cannot connect even without a token |
+| Daemon crypto namespace isolated | `permissions.dicode.crypto: ["*"]` never grants access to daemon-private sub-keys (e.g. `dicode/run-inputs/v1`); these are listed in `daemonPrivateCryptoContexts` in `pkg/ipc/server.go` and denied before any grant check |
+| Replay retarget blocked | A task-scoped `dicode.runs.replay` call cannot redirect the replay at a different task ID — the target is pinned to the original run's task |
+| `dicode` permission overrides are exhaustive | `mergeDicodePerms` merges all `DicodePermissions` fields including `secrets_has` and `crypto`; added exhaustiveness test guards against future fields being silently dropped |
