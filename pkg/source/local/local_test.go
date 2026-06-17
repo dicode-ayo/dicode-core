@@ -2,6 +2,7 @@ package local
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -426,4 +427,37 @@ func TestLocalSource_StartError_SyncDoesNotPanic(t *testing.T) {
 		}
 	}()
 	_ = s.Sync(ctx)
+}
+
+// TestLocalSource_CtxCancel_SyncDoesNotPanic verifies that Sync() does not panic
+// after ctx cancellation closes the channel on the normal (non-error) close path.
+// Covers both watchEnabled=false (ctx-done goroutine) and watchEnabled=true
+// (watch() defer close).
+func TestLocalSource_CtxCancel_SyncDoesNotPanic(t *testing.T) {
+	for _, watchEnabled := range []bool{false, true} {
+		watchEnabled := watchEnabled
+		t.Run(fmt.Sprintf("watchEnabled=%v", watchEnabled), func(t *testing.T) {
+			dir := t.TempDir()
+			s, err := New("test-cancel", dir, watchEnabled, zap.NewNop())
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+
+			_, err = s.Start(ctx)
+			if err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+
+			cancel()
+			time.Sleep(50 * time.Millisecond) // let close goroutine/watch run
+
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("Sync() panicked after ctx cancel (watchEnabled=%v): %v", watchEnabled, r)
+				}
+			}()
+			_ = s.Sync(context.Background())
+		})
+	}
 }

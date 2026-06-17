@@ -80,6 +80,9 @@ func (s *LocalSource) Start(ctx context.Context) (<-chan source.Event, error) {
 	if !s.watchEnabled {
 		go func() {
 			<-ctx.Done()
+			s.mu.Lock()
+			s.ch = nil
+			s.mu.Unlock()
 			close(ch)
 		}()
 		return ch, nil
@@ -139,6 +142,11 @@ func (s *LocalSource) Sync(ctx context.Context) error {
 func (s *LocalSource) watch(ctx context.Context, watcher *fsnotify.Watcher, ch chan<- source.Event) {
 	defer watcher.Close()
 	defer close(ch)
+	defer func() {
+		s.mu.Lock()
+		s.ch = nil
+		s.mu.Unlock()
+	}()
 
 	// bep/debounce schedules its callback via time.AfterFunc in a detached
 	// goroutine and has no Stop() in v1.2.1 — so a callback scheduled just
