@@ -29,6 +29,13 @@ type Reconciler struct {
 	merged  chan source.Event
 	cancels map[string]context.CancelFunc // sourceID → cancel fn
 	runCtx  context.Context
+
+	// pending holds events that failed validateTaskProviders because a
+	// provider task was not yet registered. After any successful registration
+	// these are re-emitted to merged for a retry. Keyed by task ID so a
+	// repeated failure for the same task replaces the previous attempt
+	// (always retrying the most recent event).
+	pending map[string]source.Event
 }
 
 // NewReconciler creates a Reconciler for the given registry and sources.
@@ -42,6 +49,7 @@ func NewReconciler(r *Registry, sources []source.Source, dataDir string, log *za
 		dataDir:  dataDir,
 		log:      log,
 		cancels:  make(map[string]context.CancelFunc),
+		pending:  make(map[string]source.Event),
 	}
 }
 
@@ -177,11 +185,14 @@ func (rc *Reconciler) handle(ev source.Event) {
 		// pipelines declare no env providers.
 		if spec, ok := k.(*task.Spec); ok {
 			if err := rc.validateTaskProviders(spec); err != nil {
-				rc.log.Warn("task references unknown provider",
+				rc.log.Warn("task references unknown provider; queued for retry after next registration",
 					zap.String("task", ev.TaskID),
 					zap.String("source", ev.Source),
 					zap.Error(err),
 				)
+				rc.mu.Lock()
+				rc.pending[ev.TaskID] = ev
+				rc.mu.Unlock()
 				return
 			}
 		}
@@ -189,6 +200,10 @@ func (rc *Reconciler) handle(ev source.Event) {
 			rc.log.Error("failed to register task", zap.String("task", ev.TaskID), zap.Error(err))
 			return
 		}
+		// Clear from pending if this was a successful retry.
+		rc.mu.Lock()
+		delete(rc.pending, ev.TaskID)
+		rc.mu.Unlock()
 		rc.log.Info("task registered",
 			zap.String("task", ev.TaskID),
 			zap.String("kind", string(ev.Kind)),
@@ -196,14 +211,59 @@ func (rc *Reconciler) handle(ev source.Event) {
 		if rc.OnRegister != nil {
 			rc.OnRegister(k)
 		}
+		// Re-queue pending tasks — any of them may now have their provider satisfied.
+		rc.retryPending()
 
 	case source.EventRemoved:
+		// Cancel any pending retry so a removed-then-retried task is not
+		// re-registered after its provider eventually shows up.
+		rc.mu.Lock()
+		delete(rc.pending, ev.TaskID)
+		rc.mu.Unlock()
 		rc.registry.Unregister(ev.TaskID)
 		rc.log.Info("task unregistered", zap.String("task", ev.TaskID))
 		if rc.OnUnregister != nil {
 			rc.OnUnregister(ev.TaskID)
 		}
 	}
+}
+
+// retryPending re-emits every pending event to the merged channel so they
+// get a second chance now that a new provider may have registered. It runs
+// in a goroutine to avoid deadlocking the handle() call-site (handle is
+// called from the Run loop, which is the only reader of merged).
+func (rc *Reconciler) retryPending() {
+	rc.mu.Lock()
+	if len(rc.pending) == 0 {
+		rc.mu.Unlock()
+		return
+	}
+	events := make([]source.Event, 0, len(rc.pending))
+	for _, ev := range rc.pending {
+		events = append(events, ev)
+	}
+	ctx := rc.runCtx
+	rc.mu.Unlock()
+
+	go func() {
+		for _, ev := range events {
+			// Re-check pending membership: an EventRemoved may have arrived
+			// after the snapshot was taken, deleting this task from rc.pending
+			// and unregistering it. Skipping here prevents a re-registration
+			// of a task that was intentionally removed.
+			rc.mu.Lock()
+			_, stillPending := rc.pending[ev.TaskID]
+			rc.mu.Unlock()
+			if !stillPending {
+				continue
+			}
+			select {
+			case rc.merged <- ev:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 }
 
 // validateTaskProviders inspects every EnvEntry whose From has the
@@ -214,9 +274,9 @@ func (rc *Reconciler) handle(ev source.Event) {
 // Order dependency: provider tasks must reconcile before their consumers.
 // The buildin source registers providers first because they live under
 // tasks/buildin/secret-providers/* and the taskset.yaml entry order is
-// preserved. For multi-source setups, a transient miss on first
-// reconciler pass causes the consumer to be skipped; the next sync (30s
-// later, or on the source's next event) retries.
+// preserved. For multi-source setups, a miss on the first reconciler pass
+// causes the consumer to be queued in rc.pending and retried after the
+// next successful registration (see handle and retryPending).
 func (rc *Reconciler) validateTaskProviders(spec *task.Spec) error {
 	for _, e := range spec.Permissions.Env {
 		kind, target := task.ParseFrom(e.From)

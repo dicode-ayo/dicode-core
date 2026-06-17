@@ -25,7 +25,8 @@ type LocalSource struct {
 	watchEnabled bool   // whether to run fsnotify; false = poll-only via explicit Sync()
 
 	mu       sync.Mutex
-	snapshot map[string]string // taskID → hash at last sync
+	snapshot map[string]string   // taskID → hash at last sync
+	ch       chan<- source.Event // send end of events channel; nil until Start is called
 
 	log *zap.Logger
 }
@@ -54,9 +55,22 @@ func (s *LocalSource) ID() string { return s.id }
 func (s *LocalSource) Start(ctx context.Context) (<-chan source.Event, error) {
 	ch := make(chan source.Event, 32)
 
+	s.mu.Lock()
+	s.ch = ch
+	s.mu.Unlock()
+
+	// abort clears s.ch and closes ch on any Start error path so that a later
+	// Sync() call does not send on a closed channel and panic.
+	abort := func() {
+		s.mu.Lock()
+		s.ch = nil
+		s.mu.Unlock()
+		close(ch)
+	}
+
 	// Initial scan — emit Added for every task already on disk.
 	if err := s.syncAndEmit(ctx, ch); err != nil {
-		close(ch)
+		abort()
 		return nil, err
 	}
 
@@ -66,6 +80,9 @@ func (s *LocalSource) Start(ctx context.Context) (<-chan source.Event, error) {
 	if !s.watchEnabled {
 		go func() {
 			<-ctx.Done()
+			s.mu.Lock()
+			s.ch = nil
+			s.mu.Unlock()
 			close(ch)
 		}()
 		return ch, nil
@@ -73,13 +90,13 @@ func (s *LocalSource) Start(ctx context.Context) (<-chan source.Event, error) {
 
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		close(ch)
+		abort()
 		return nil, err
 	}
 	// Watch root tasks dir and all current task subdirectories.
 	if err := s.addWatchDirs(watcher); err != nil {
 		watcher.Close()
-		close(ch)
+		abort()
 		return nil, err
 	}
 
@@ -107,18 +124,29 @@ func (s *LocalSource) addWatchDirs(watcher *fsnotify.Watcher) error {
 	return nil
 }
 
-// Sync triggers an immediate rescan and emits any changes.
+// Sync triggers an immediate rescan and emits any changes to the channel
+// established by Start. If Start has not been called yet, only the snapshot
+// is updated (events are silently discarded — callers that need events must
+// call Start first).
 func (s *LocalSource) Sync(ctx context.Context) error {
-	// We emit to a local sink because callers of Sync don't consume events.
-	// Callers that need events go through Start.
-	_ = ctx
-	_, err := s.diff()
-	return err
+	s.mu.Lock()
+	ch := s.ch
+	s.mu.Unlock()
+	if ch == nil {
+		_, err := s.diff()
+		return err
+	}
+	return s.syncAndEmit(ctx, ch)
 }
 
 func (s *LocalSource) watch(ctx context.Context, watcher *fsnotify.Watcher, ch chan<- source.Event) {
 	defer watcher.Close()
 	defer close(ch)
+	defer func() {
+		s.mu.Lock()
+		s.ch = nil
+		s.mu.Unlock()
+	}()
 
 	// bep/debounce schedules its callback via time.AfterFunc in a detached
 	// goroutine and has no Stop() in v1.2.1 — so a callback scheduled just
@@ -146,9 +174,18 @@ func (s *LocalSource) watch(ctx context.Context, watcher *fsnotify.Watcher, ch c
 				return
 			}
 			s.log.Warn("watcher error", zap.Error(err))
-		case _, ok := <-watcher.Events:
+		case ev, ok := <-watcher.Events:
 			if !ok {
 				return
+			}
+			// When a new directory appears under the tasks root, start watching
+			// it immediately so edits inside it trigger reloads. This covers
+			// tasks created after Start() — without this, changes inside a
+			// newly created task dir are never seen until a daemon restart.
+			if ev.Has(fsnotify.Create) {
+				if fi, err := os.Lstat(ev.Name); err == nil && fi.IsDir() {
+					_ = watcher.Add(ev.Name)
+				}
 			}
 			debounced(trigger)
 		case <-fireSig:
