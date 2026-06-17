@@ -74,7 +74,8 @@ permissions:
 | `trigger.daemon` | bool | | Start on app start, restart on exit |
 | `trigger.restart` | string | | daemon only: `always` (default), `on-failure`, `never` |
 | `permissions` | object | | Explicit access grants — nothing is implicit |
-| `permissions.env` | list | | Env vars the script may read (see below); `"*"` grants unrestricted env read for Deno node-compat / npm tasks |
+| `permissions.env` | list | | Env vars the script may read (see below); for unrestricted env read use `env_read_exposed` |
+| `permissions.env_read_exposed` | bool | | Deno only: grant bare `--allow-env` (read any env var) for node-compat / npm tasks (see below) |
 | `permissions.fs` | list | | Filesystem access declarations (Deno: read+write; Python: write only) |
 | `permissions.fs[].path` | string | | Absolute or `~`-prefixed path |
 | `permissions.fs[].permission` | string | | `r`, `w`, or `rw` |
