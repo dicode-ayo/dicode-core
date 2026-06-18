@@ -24,8 +24,11 @@ async def main():
     await kv.set_async("previous_name", name)
 
     # Async HTTP call with httpx (PEP 723 inline dep above).
+    # httpbin_url defaults to https://httpbin.org/get but can be overridden
+    # via params (e.g. by tests using a local httptest server).
+    httpbin_url = await params.get_async("httpbin_url", "https://httpbin.org/get")
     async with httpx.AsyncClient(timeout=5) as client:
-        resp = await client.get("https://httpbin.org/get", params={"name": name})
+        resp = await client.get(httpbin_url, params={"name": name})
         resp.raise_for_status()
         origin = resp.json().get("origin", "unknown")
     await log.info_async(f"Request origin: {origin}")

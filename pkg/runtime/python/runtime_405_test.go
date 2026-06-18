@@ -4,7 +4,9 @@ package python
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -87,29 +89,34 @@ func TestExecute_FailedRunCapturesDiagnostics(t *testing.T) {
 
 // TestExecute_HelloPythonSucceeds is the end-to-end regression for #405: the
 // hello-python example (async def main(), PEP 723 httpx dep, an allowlisted
-// httpx GET to httpbin.org) must run to completion. It provisions uv the way
-// the runtime itself does — uv is not assumed to be on PATH — and reaches the
-// public internet, so it skips when uv cannot be provisioned. It guards the
-// async-main invocation (the kwargs bug that broke the run) and confirms the
-// PEP 578 net guard admits an allowlisted httpx call.
+// httpx GET) must run to completion. It provisions uv the way the runtime
+// itself does and skips when uv cannot be provisioned.
+//
+// The test spins up a local httptest.Server instead of reaching httpbin.org,
+// eliminating the external dependency that caused CI flakiness (#422). The
+// local server still validates the PEP 578 net guard: IP literals (127.0.0.1)
+// are allowed by the guard regardless of the allowlist, so the test uses
+// permissions.net: ["127.0.0.1"] to engage allowlist mode rather than
+// unrestricted mode while still permitting the loopback connection.
 func TestExecute_HelloPythonSucceeds(t *testing.T) {
 	if testing.Short() {
-		t.Skip("skipping network/uv integration test in -short mode")
+		t.Skip("skipping uv integration test in -short mode")
 	}
 	uv, err := uvpkg.EnsureUv("")
 	if err != nil {
 		t.Skipf("uv provisioning failed (offline?): %v", err)
 	}
 
-	// Pre-flight: skip if httpbin.org is not returning success (rate-limit, block, etc.).
-	pf, pfErr := http.Get("https://httpbin.org/get") //nolint:noctx
-	if pfErr != nil {
-		t.Skipf("httpbin.org unreachable: %v", pfErr)
-	}
-	pf.Body.Close()
-	if pf.StatusCode >= 300 {
-		t.Skipf("httpbin.org returned %d, skipping network integration test", pf.StatusCode)
-	}
+	// Local httpbin-compatible server — no external network required.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"origin": "127.0.0.1",
+			"args":   r.URL.Query(),
+			"url":    r.URL.String(),
+		})
+	}))
+	t.Cleanup(srv.Close)
 
 	rt, reg := newTestRuntime(t)
 	ex := rt.NewExecutor(uv)
@@ -124,8 +131,12 @@ func TestExecute_HelloPythonSucceeds(t *testing.T) {
 		Params: []task.Param{
 			{Name: "name", Default: "World"},
 			{Name: "count", Default: "1"},
+			{Name: "httpbin_url", Default: "https://httpbin.org/get"},
 		},
-		Permissions: task.Permissions{Net: []string{"httpbin.org"}},
+		// 127.0.0.1 is an IP literal — the PEP 578 guard admits it in
+		// allowlist mode without needing an explicit allowlist entry. Using
+		// a non-empty net list here engages allowlist mode rather than deny.
+		Permissions: task.Permissions{Net: []string{"127.0.0.1"}},
 	}
 	if err := reg.Register(spec); err != nil {
 		t.Fatalf("register: %v", err)
@@ -137,7 +148,10 @@ func TestExecute_HelloPythonSucceeds(t *testing.T) {
 		t.Fatalf("StartRun: %v", err)
 	}
 
-	res, err := ex.Execute(ctx, spec, pkgruntime.RunOptions{RunID: runID})
+	res, err := ex.Execute(ctx, spec, pkgruntime.RunOptions{
+		RunID:  runID,
+		Params: map[string]string{"httpbin_url": srv.URL + "/get"},
+	})
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
