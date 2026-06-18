@@ -1,5 +1,50 @@
 # Changelog
 
+## [0.4.0](https://github.com/dicode-ayo/dicode-core/compare/v0.3.0...v0.4.0) (2026-06-18)
+
+
+### ⚠ BREAKING CHANGES
+
+* **permissions:** default net permission flips to deny ([#379](https://github.com/dicode-ayo/dicode-core/issues/379)) (#394)
+
+### security
+
+* **permissions:** default net permission flips to deny ([#379](https://github.com/dicode-ayo/dicode-core/issues/379)) ([#394](https://github.com/dicode-ayo/dicode-core/issues/394)) ([1013cf3](https://github.com/dicode-ayo/dicode-core/commit/1013cf3e69b2c794559524765c0d2460804c7a55))
+
+
+### Features
+
+* **approval:** approve surfaces — WebUI, CLI, tokenized link ([#392](https://github.com/dicode-ayo/dicode-core/issues/392) phase 2) ([#403](https://github.com/dicode-ayo/dicode-core/issues/403)) ([a2e1eac](https://github.com/dicode-ayo/dicode-core/commit/a2e1eacac554b204ceed95c3d247c5cd7fc48c23))
+* **approval:** operator notification on pending task ([#399](https://github.com/dicode-ayo/dicode-core/issues/399)) ([#409](https://github.com/dicode-ayo/dicode-core/issues/409)) ([34c80da](https://github.com/dicode-ayo/dicode-core/commit/34c80da79f85d55df96ca9041522ac3ed39df4e4))
+* **approval:** trust-on-change task approval gate — core gate ([#392](https://github.com/dicode-ayo/dicode-core/issues/392), phase 1) ([#393](https://github.com/dicode-ayo/dicode-core/issues/393)) ([090b8d8](https://github.com/dicode-ayo/dicode-core/commit/090b8d862fcc73156ffabadb14f55be97f6eb331))
+* **audit:** cursor + SDK audit.query() + builtin Grafana/Loki exporter ([#415](https://github.com/dicode-ayo/dicode-core/issues/415)) ([#416](https://github.com/dicode-ayo/dicode-core/issues/416)) ([f7b48c1](https://github.com/dicode-ayo/dicode-core/commit/f7b48c1569270bb600619debd3d20e6a9a7f4216))
+* **audit:** structured audit log for security-sensitive operations ([#45](https://github.com/dicode-ayo/dicode-core/issues/45)) ([#395](https://github.com/dicode-ayo/dicode-core/issues/395)) ([755906d](https://github.com/dicode-ayo/dicode-core/commit/755906d069412c7c7a7f1f81afe32c0581d7c7ba))
+* **authoring:** IPC + CLI verbs for AI task create/edit/save/cancel ([#288](https://github.com/dicode-ayo/dicode-core/issues/288)) ([#376](https://github.com/dicode-ayo/dicode-core/issues/376)) ([cea475f](https://github.com/dicode-ayo/dicode-core/commit/cea475f7d8d2afc3c78a2f75ed5c13e71cb07256))
+* **authoring:** sessions table + REST handlers for AI task create/edit ([#288](https://github.com/dicode-ayo/dicode-core/issues/288)) ([#369](https://github.com/dicode-ayo/dicode-core/issues/369)) ([a17dc6e](https://github.com/dicode-ayo/dicode-core/commit/a17dc6ef4752406209e3d36c3a79e897eaf06904))
+* **cli:** dicode task delete &lt;id&gt; ([#285](https://github.com/dicode-ayo/dicode-core/issues/285)) ([#377](https://github.com/dicode-ayo/dicode-core/issues/377)) ([63321d5](https://github.com/dicode-ayo/dicode-core/commit/63321d5d76d125f34a8c648b163396e91e09e1f2))
+* **deno:** env_read_exposed flag to close --allow-env gap for npm tasks ([#413](https://github.com/dicode-ayo/dicode-core/issues/413)) ([1cce241](https://github.com/dicode-ayo/dicode-core/commit/1cce24100c0b14c0e994cf7f0f7c37c4ad2093d9))
+* **pipeline:** parallel stage execution with DAG dependencies ([#355](https://github.com/dicode-ayo/dicode-core/issues/355)) ([#368](https://github.com/dicode-ayo/dicode-core/issues/368)) ([a01642b](https://github.com/dicode-ayo/dicode-core/commit/a01642b262bcbafc839a28021af3d1b1534a16dd))
+* **python-runtime:** enforce permissions.{fs,net,run} via PEP 578 audit hook ([#390](https://github.com/dicode-ayo/dicode-core/issues/390)) ([bcf5db2](https://github.com/dicode-ayo/dicode-core/commit/bcf5db2bac39567932ed50b36cc1820ea93b2b25))
+* **runtime:** enforce container security floor for docker/podman ([#380](https://github.com/dicode-ayo/dicode-core/issues/380)) ([#397](https://github.com/dicode-ayo/dicode-core/issues/397)) ([920ff92](https://github.com/dicode-ayo/dicode-core/commit/920ff921b33c41581fd5e9b496cba5f6ffd74f57))
+
+
+### Bug Fixes
+
+* **auth-providers:** restore connected-providers indication via secrets.has ([#255](https://github.com/dicode-ayo/dicode-core/issues/255)) ([#374](https://github.com/dicode-ayo/dicode-core/issues/374)) ([897726e](https://github.com/dicode-ayo/dicode-core/commit/897726e6b1f6b7f5e03de2c9e321b3ace7e6179c))
+* **auth:** align slack-oauth token key with dashboard convention ([#223](https://github.com/dicode-ayo/dicode-core/issues/223)) ([#373](https://github.com/dicode-ayo/dicode-core/issues/373)) ([73b8011](https://github.com/dicode-ayo/dicode-core/commit/73b8011e8723370c86e19184c23177d4f2e3c92b))
+* **envresolve:** share resolver across launches for cross-fire cache TTL ([#242](https://github.com/dicode-ayo/dicode-core/issues/242)) ([#372](https://github.com/dicode-ayo/dicode-core/issues/372)) ([3eea744](https://github.com/dicode-ayo/dicode-core/commit/3eea744c9e166eecad00a027b7d47a3e46172052))
+* **hot-reload:** LocalSource Sync delivery, new-dir watching, provider retry, Docker template expansion ([#425](https://github.com/dicode-ayo/dicode-core/issues/425)) ([97ba564](https://github.com/dicode-ayo/dicode-core/commit/97ba56491575223fe68ef552273a13f805d9995a))
+* post-alpha correctness — scanner limits, FD leak, WS origin ([#194](https://github.com/dicode-ayo/dicode-core/issues/194)) ([#367](https://github.com/dicode-ayo/dicode-core/issues/367)) ([6ed5a37](https://github.com/dicode-ayo/dicode-core/commit/6ed5a3764d6404d25526606c09a84d42bfb9651c))
+* **python:** make TestExecute_HelloPythonSucceeds hermetic (Closes [#422](https://github.com/dicode-ayo/dicode-core/issues/422)) ([#427](https://github.com/dicode-ayo/dicode-core/issues/427)) ([e53aa05](https://github.com/dicode-ayo/dicode-core/commit/e53aa05cf2e13b883c3cbf003b66c0cb76ed5e40))
+* **python:** run async main() with no args and always log run failures ([#405](https://github.com/dicode-ayo/dicode-core/issues/405)) ([#410](https://github.com/dicode-ayo/dicode-core/issues/410)) ([017a166](https://github.com/dicode-ayo/dicode-core/commit/017a16602a698854b64fbc26cdb1b1d1430e4565))
+* **relay:** gate relay-server-body daemon on relay config ([#406](https://github.com/dicode-ayo/dicode-core/issues/406)) ([#411](https://github.com/dicode-ayo/dicode-core/issues/411)) ([b452c29](https://github.com/dicode-ayo/dicode-core/commit/b452c29108bccb2702904e473e362d60d0f7861a))
+
+
+### Documentation
+
+* audit log ([#45](https://github.com/dicode-ayo/dicode-core/issues/45)) and container security floor ([#380](https://github.com/dicode-ayo/dicode-core/issues/380)) ([#404](https://github.com/dicode-ayo/dicode-core/issues/404)) ([8cf53d1](https://github.com/dicode-ayo/dicode-core/commit/8cf53d1645ab64cb881f5b6ec86dab0fbce569a9))
+* update security, MCP, pipeline, and API docs after PRs [#362](https://github.com/dicode-ayo/dicode-core/issues/362)–[#369](https://github.com/dicode-ayo/dicode-core/issues/369) ([#371](https://github.com/dicode-ayo/dicode-core/issues/371)) ([30daec5](https://github.com/dicode-ayo/dicode-core/commit/30daec5e76262048866dba06e0594d80a6f723ad))
+
 ## [0.3.0](https://github.com/dicode-ayo/dicode-core/compare/v0.2.1...v0.3.0) (2026-06-10)
 
 
