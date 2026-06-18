@@ -786,7 +786,9 @@ func (s *Server) apiSaveConfigRaw(w http.ResponseWriter, r *http.Request) {
 		// stale parentOverrides until restart, so a revoked permission
 		// elevation would otherwise keep running with the broader grant.
 		// Re-applying every entry's overrides joins the editor path to that
-		// pipeline (SetParentOverrides coalesces no-op signals).
+		// pipeline (SetParentOverrides coalesces no-op signals). Deleting a
+		// whole source entry here does not tear down its running source —
+		// source removal must go through DELETE /api/settings/sources/{name}.
 		if s.sourceMgr != nil {
 			for name, entry := range newCfg.Spec.Entries {
 				if entry == nil {
