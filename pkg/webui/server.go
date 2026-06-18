@@ -778,6 +778,25 @@ func (s *Server) apiSaveConfigRaw(w http.ResponseWriter, r *http.Request) {
 			s.sourceMgr.SetCfg(newCfg)
 		}
 		s.cfgMu.Unlock()
+
+		// Both override-mutation surfaces (this editor and PATCH
+		// /api/tasks/{id}/overrides) must drive the same re-resolve →
+		// EventUpdated → re-Admit pipeline. SetCfg alone only refreshes the
+		// snapshot the REST API reads; the running taskset.Source keeps its
+		// stale parentOverrides until restart, so a revoked permission
+		// elevation would otherwise keep running with the broader grant.
+		// Re-applying every entry's overrides joins the editor path to that
+		// pipeline (SetParentOverrides coalesces no-op signals).
+		if s.sourceMgr != nil {
+			for name, entry := range newCfg.Spec.Entries {
+				if entry == nil {
+					continue
+				}
+				if src, ok := s.sourceMgr.Get(name); ok {
+					src.SetParentOverrides(entry.Overrides)
+				}
+			}
+		}
 	} else {
 		s.log.Warn("config reload after raw save failed", zap.Error(err))
 	}

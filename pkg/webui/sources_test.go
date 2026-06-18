@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -8,8 +9,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dicode/dicode/pkg/config"
+	"github.com/dicode/dicode/pkg/source"
+	"github.com/dicode/dicode/pkg/task"
 	"github.com/dicode/dicode/pkg/taskset"
 	"go.uber.org/zap"
 )
@@ -270,5 +274,98 @@ func TestApiRemoveSource_NotFound(t *testing.T) {
 
 	if w.Code != http.StatusNotFound {
 		t.Errorf("got %d; want 404 for non-existent source", w.Code)
+	}
+}
+
+// TestApiSaveConfigRaw_ReResolvesSourceOverrides asserts parity between the two
+// override-mutation surfaces: a raw-config save that changes an entry's
+// overrides must drive the same re-resolve → EventUpdated → re-Admit pipeline
+// that PATCH /api/tasks/{id}/overrides does. Before #408 the editor path only
+// refreshed the REST snapshot via SetCfg and left the running taskset.Source's
+// parentOverrides stale until restart — a revoked permission elevation kept
+// running with the broader grant. The Source emitting EventUpdated with the
+// new (disabled) resolved spec proves SetParentOverrides was applied.
+func TestApiSaveConfigRaw_ReResolvesSourceOverrides(t *testing.T) {
+	repoDir := t.TempDir()
+	taskDir := filepath.Join(repoDir, "deploy")
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatalf("mkdir task: %v", err)
+	}
+	taskYAML := "kind: Task\napiVersion: dicode/v1\nname: deploy\nruntime: deno\ntrigger:\n  cron: \"0 8 * * *\"\n"
+	if err := os.WriteFile(filepath.Join(taskDir, "task.yaml"), []byte(taskYAML), 0o644); err != nil {
+		t.Fatalf("write task.yaml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(taskDir, "task.js"), []byte("// task"), 0o644); err != nil {
+		t.Fatalf("write task.js: %v", err)
+	}
+	tsPath := filepath.Join(repoDir, "taskset.yaml")
+	tsContent := "apiVersion: dicode/v1\nkind: TaskSet\nmetadata:\n  name: buildin\nspec:\n  entries:\n    deploy:\n      ref:\n        path: " + filepath.Join(taskDir, "task.yaml") + "\n"
+	if err := os.WriteFile(tsPath, []byte(tsContent), 0o644); err != nil {
+		t.Fatalf("write taskset.yaml: %v", err)
+	}
+
+	src := taskset.NewSource(
+		"buildin", "buildin",
+		&taskset.Ref{Path: tsPath},
+		"", t.TempDir(), false, time.Hour, // long poll so only the refresh signal fires
+		zap.NewNop(),
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	ch, err := src.Start(ctx)
+	if err != nil {
+		t.Fatalf("Start source: %v", err)
+	}
+
+	// Drain the initial Added event; the task starts enabled.
+	select {
+	case ev := <-ch:
+		if ev.Kind != source.EventAdded {
+			t.Fatalf("first event kind = %v, want Added", ev.Kind)
+		}
+		if !ev.Kinded.(*task.Spec).Enabled {
+			t.Fatal("initial spec should be Enabled=true")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for initial Added event")
+	}
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "dicode.yaml")
+	initialYAML := "spec:\n  entries:\n    buildin:\n      ref:\n        path: " + tsPath + "\n"
+	if err := os.WriteFile(cfgPath, []byte(initialYAML), 0o600); err != nil {
+		t.Fatalf("write initial cfg: %v", err)
+	}
+	initialCfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load initial cfg: %v", err)
+	}
+	sourceMgr := NewSourceManager(initialCfg, map[string]*taskset.Source{"buildin": src}, dir, zap.NewNop())
+	srv, _ := newTestServerWithSourceMgr(t, initialCfg, cfgPath, sourceMgr)
+
+	// Raw-config save that revokes the task via an entry override.
+	updatedYAML := "spec:\n  entries:\n    buildin:\n      ref:\n        path: " + tsPath + "\n      overrides:\n        entries:\n          deploy:\n            enabled: false\n"
+	body := `{"content":` + string(mustJSON(t, updatedYAML)) + `}`
+	req := httptest.NewRequest(http.MethodPost, "/api/config/raw", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("POST /api/config/raw returned %d; body=%s", w.Code, w.Body.String())
+	}
+
+	// The running source must re-resolve and emit Updated with the now-disabled
+	// spec — identical to the PATCH path's outcome.
+	select {
+	case ev := <-ch:
+		if ev.Kind != source.EventUpdated {
+			t.Fatalf("post-save event kind = %v, want Updated", ev.Kind)
+		}
+		if ev.Kinded.(*task.Spec).Enabled {
+			t.Error("post-save resolved spec.Enabled = true, want false (override not applied to running source)")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for refresh-driven Updated event after raw-config save")
 	}
 }
