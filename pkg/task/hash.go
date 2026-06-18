@@ -26,16 +26,21 @@ var heavyDirs = map[string]bool{
 	".git":         true,
 }
 
-// Hash computes a content hash over every regular file under dir,
-// recursively, in sorted dir-relative path order. The runtime allows the
-// task script to import any sibling file (the Deno sandbox allow-reads the
-// whole task dir; Python imports sibling modules), so every in-dir file is
-// reachable code and must be part of the fingerprint — the approval gate
-// (dicode.lock) keys re-approval off this hash.
+// Hash computes a content hash over the regular files under dir, recursively,
+// in sorted dir-relative path order. The runtime allows the task script to
+// import any sibling file (the Deno sandbox allow-reads the whole task dir;
+// Python imports sibling modules), so in-dir files are reachable code and form
+// the fingerprint the approval gate (dicode.lock) keys re-approval off.
 //
-// Files larger than maxHashedFileBytes are folded in by a size+mtime
-// descriptor rather than full contents (see the const). The node_modules and
-// .git subtrees are skipped entirely (see heavyDirs).
+// Two bounded exclusions keep the per-poll cost flat without losing
+// change-detection for task logic, which lives in small, top-level files:
+//   - Files larger than maxHashedFileBytes fold in a size+mtime descriptor
+//     instead of their contents (see the const); a content edit that preserves
+//     both size and mtime is therefore not detected.
+//   - The node_modules and .git subtrees are skipped wholesale (see heavyDirs).
+// Consequently, code reachable only through those exclusions can change without
+// re-triggering approval — acceptable under the trusted-author model, where the
+// operator approves the source, not every transitive vendored file.
 //
 // Symlinks are never read through: the link's target string is folded in
 // instead, so retargeting a link changes the hash without ever reading a
