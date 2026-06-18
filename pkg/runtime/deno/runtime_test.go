@@ -753,6 +753,17 @@ func TestBuildDenoArgs_Env(t *testing.T) {
 		}
 	})
 
+	t.Run("wildcard after a named entry still emits a bare --allow-env", func(t *testing.T) {
+		args := buildDenoArgs(base([]task.EnvEntry{{Name: "API_KEY"}, {Name: "*"}}), "/sock", "/shim.ts", "/runner.ts")
+		val, ok := envFlag(args)
+		if !ok {
+			t.Fatal("expected an --allow-env flag")
+		}
+		if val != "" {
+			t.Errorf("expected bare --allow-env regardless of entry order, got --allow-env=%q", val)
+		}
+	})
+
 	t.Run("empty list scopes to the internal vars only", func(t *testing.T) {
 		args := buildDenoArgs(base(nil), "/sock", "/shim.ts", "/runner.ts")
 		val, ok := envFlag(args)
