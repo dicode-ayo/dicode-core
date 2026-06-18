@@ -17,10 +17,9 @@ params:
   count:
     description: Run count (shown in greeting)
     default: "1"
-  httpbin_url:
-    description: HTTP endpoint to GET (httpbin-compatible JSON response). Override in tests to use a local server.
-    default: "https://httpbin.org/get"
 
 permissions:
   net:
     - httpbin.org
+  env:
+    - HTTPBIN_URL

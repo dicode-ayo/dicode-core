@@ -8,6 +8,7 @@
 #   - httpx async HTTP call as a realistic async dependency example
 
 import httpx
+import os
 
 
 async def main():
@@ -24,9 +25,7 @@ async def main():
     await kv.set_async("previous_name", name)
 
     # Async HTTP call with httpx (PEP 723 inline dep above).
-    # httpbin_url defaults to https://httpbin.org/get but can be overridden
-    # via params (e.g. by tests using a local httptest server).
-    httpbin_url = await params.get_async("httpbin_url", "https://httpbin.org/get")
+    httpbin_url = os.environ.get("HTTPBIN_URL", "https://httpbin.org/get")
     async with httpx.AsyncClient(timeout=5) as client:
         resp = await client.get(httpbin_url, params={"name": name})
         resp.raise_for_status()

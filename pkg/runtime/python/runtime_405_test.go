@@ -92,12 +92,17 @@ func TestExecute_FailedRunCapturesDiagnostics(t *testing.T) {
 // httpx GET) must run to completion. It provisions uv the way the runtime
 // itself does and skips when uv cannot be provisioned.
 //
-// The test spins up a local httptest.Server instead of reaching httpbin.org,
-// eliminating the external dependency that caused CI flakiness (#422). The
-// local server still validates the PEP 578 net guard: IP literals (127.0.0.1)
-// are allowed by the guard regardless of the allowlist, so the test uses
-// permissions.net: ["127.0.0.1"] to engage allowlist mode rather than
-// unrestricted mode while still permitting the loopback connection.
+// The test spins up a local httptest.Server and injects its URL via the
+// HTTPBIN_URL env var (forwarded to the subprocess via permissions.env),
+// eliminating the external dependency that caused CI flakiness (#422). Using
+// an env var rather than a run param means the URL is controlled only by the
+// host environment — it cannot be overridden by a task caller via the API.
+//
+// Net guard: the spec uses permissions.net: ["httpbin.org"] (matching the
+// production task.yaml). In allowlist mode the PEP 578 guard unconditionally
+// admits IP literals at the _is_ip_literal check before any hostname
+// comparison, so the 127.0.0.1 loopback address is allowed even though it
+// doesn't appear in the declared list.
 func TestExecute_HelloPythonSucceeds(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping uv integration test in -short mode")
@@ -110,13 +115,20 @@ func TestExecute_HelloPythonSucceeds(t *testing.T) {
 	// Local httpbin-compatible server — no external network required.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
+		if err := json.NewEncoder(w).Encode(map[string]any{
 			"origin": "127.0.0.1",
 			"args":   r.URL.Query(),
 			"url":    r.URL.String(),
-		})
+		}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
 	}))
 	t.Cleanup(srv.Close)
+
+	// Point the task at the local server via the host env var. The runtime
+	// forwards HTTPBIN_URL to the Python subprocess because it is declared
+	// under permissions.env in the spec below.
+	t.Setenv("HTTPBIN_URL", srv.URL+"/get")
 
 	rt, reg := newTestRuntime(t)
 	ex := rt.NewExecutor(uv)
@@ -131,12 +143,11 @@ func TestExecute_HelloPythonSucceeds(t *testing.T) {
 		Params: []task.Param{
 			{Name: "name", Default: "World"},
 			{Name: "count", Default: "1"},
-			{Name: "httpbin_url", Default: "https://httpbin.org/get"},
 		},
-		// 127.0.0.1 is an IP literal — the PEP 578 guard admits it in
-		// allowlist mode without needing an explicit allowlist entry. Using
-		// a non-empty net list here engages allowlist mode rather than deny.
-		Permissions: task.Permissions{Net: []string{"127.0.0.1"}},
+		Permissions: task.Permissions{
+			Net: []string{"httpbin.org"},
+			Env: []task.EnvEntry{{Name: "HTTPBIN_URL"}},
+		},
 	}
 	if err := reg.Register(spec); err != nil {
 		t.Fatalf("register: %v", err)
@@ -148,10 +159,7 @@ func TestExecute_HelloPythonSucceeds(t *testing.T) {
 		t.Fatalf("StartRun: %v", err)
 	}
 
-	res, err := ex.Execute(ctx, spec, pkgruntime.RunOptions{
-		RunID:  runID,
-		Params: map[string]string{"httpbin_url": srv.URL + "/get"},
-	})
+	res, err := ex.Execute(ctx, spec, pkgruntime.RunOptions{RunID: runID})
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
