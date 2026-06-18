@@ -547,11 +547,27 @@ func buildDenoArgs(spec *task.Spec, socketPath, shimPath, runnerPath string) []s
 
 	// Env: always allow the internal IPC vars plus HOME/DENO_DIR/XDG_CACHE_HOME
 	// (required by deno.land/x/cache for vendored binary downloads).
-	envVars := []string{"DICODE_SOCKET", "DICODE_TOKEN", "HOME", "DENO_DIR", "XDG_CACHE_HOME"}
+	// A "*" entry emits a bare --allow-env (unrestricted): the subprocess env is
+	// itself an allowlist (runtime.SubprocessEnv — IPC/cache vars + resolved task
+	// vars, master key Unsetenv'd), so "all" only exposes that minimal forwarded
+	// set. The wildcard coexists with named entries, which still drive value
+	// forwarding in SubprocessEnv.
+	envWildcard := false
 	for _, e := range spec.Permissions.Env {
-		envVars = append(envVars, e.Name)
+		if e.Name == "*" {
+			envWildcard = true
+			break
+		}
 	}
-	args = append(args, "--allow-env="+strings.Join(envVars, ","))
+	if envWildcard {
+		args = append(args, "--allow-env")
+	} else {
+		envVars := []string{"DICODE_SOCKET", "DICODE_TOKEN", "HOME", "DENO_DIR", "XDG_CACHE_HOME"}
+		for _, e := range spec.Permissions.Env {
+			envVars = append(envVars, e.Name)
+		}
+		args = append(args, "--allow-env="+strings.Join(envVars, ","))
+	}
 
 	// Sys: omit field = deny all (default); ["*"] = all; named = allowlist.
 	sys := spec.Permissions.Sys

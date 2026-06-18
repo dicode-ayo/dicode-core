@@ -30,6 +30,12 @@ permissions:
   fs:
     - path: "${DATADIR}/relay"
       permission: rw
+  # "*" grants unrestricted env reads for the npm:dicode-relay import, whose
+  # Express-family deps read process.env (NODE_ENV, etc.) at module init beyond
+  # a declarable allowlist. Bounded: the subprocess env is itself an allowlist
+  # (IPC/cache vars + the named entries below; daemon secrets withheld). The
+  # named entries stay so their host values are forwarded into the subprocess.
   env:
+    - "*"
     - DICODE_DATADIR
     - DICODE_VERSION

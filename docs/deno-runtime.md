@@ -403,7 +403,7 @@ Permissions are derived from `task.yaml`:
 | Permission | Source |
 | --- | --- |
 | `--allow-net` / `--allow-net=host1,...` | `net:` entries — omit or `[]` = denied (no flag), `["*"]` = unrestricted, host list = allowlist |
-| `--allow-env=DICODE_SOCKET,DICODE_TOKEN,VAR1,...` | `DICODE_SOCKET`, `DICODE_TOKEN` (IPC handshake) + all `env:` vars |
+| `--allow-env=DICODE_SOCKET,DICODE_TOKEN,VAR1,...` / `--allow-env` | `DICODE_SOCKET`, `DICODE_TOKEN` (IPC handshake) + all `env:` vars; an `"*"` entry emits a bare `--allow-env` (unrestricted, bounded by the subprocess env allowlist) |
 | `--allow-read=path1,path2` | `fs:` entries with `r` or `rw` |
 | `--allow-write=path1` | `fs:` entries with `w` or `rw` |
 

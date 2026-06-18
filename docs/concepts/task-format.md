@@ -933,6 +933,9 @@ Four forms, with clear source distinction:
 | `from:` | host OS var name | Host OS env | Read `$GH_TOKEN` from OS, inject subprocess env as `API_KEY` |
 | `secret:` | secrets store key | Secrets store | Resolve encrypted secret, inject as the given name; **fails if not found** |
 | `value:` | — | Literal | Inject a fixed string (used by taskset override layers) |
+| `"*"` | — | — | Unrestricted env reads (`--allow-env`); see the wildcard note below |
+
+A bare `"*"` entry grants the script unrestricted env reads. It is the escape hatch for `npm:`/node-compat imports whose dependencies read `process.env` (e.g. `NODE_ENV`) at module init beyond a declarable allowlist. This is safe to grant because the subprocess env is itself an allowlist: only the IPC/cache vars and the task's resolved env reach the subprocess, and daemon-only credentials (the master key, the daemon API keys) are withheld regardless of what the task declares — so `"*"` exposes nothing a named list wouldn't. The wildcard coexists with named entries; keep the bare names of any host vars whose *values* the script needs forwarded (`"*"` controls read permission, not forwarding).
 
 Two modifiers apply on top:
 

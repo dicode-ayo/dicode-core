@@ -702,3 +702,65 @@ func TestRuntime_Silent_DropsStdoutStderr(t *testing.T) {
 		}
 	}
 }
+
+// envFlag extracts the --allow-env argument from a buildDenoArgs result.
+// Returns ("", false) when no --allow-env flag is present.
+func envFlag(args []string) (string, bool) {
+	for _, a := range args {
+		if a == "--allow-env" {
+			return "", true
+		}
+		if v, ok := strings.CutPrefix(a, "--allow-env="); ok {
+			return v, true
+		}
+	}
+	return "", false
+}
+
+// TestBuildDenoArgs_Env covers the env-permission cases: named entries produce
+// a scoped --allow-env=...; a "*" entry produces a bare (unrestricted)
+// --allow-env; and an empty/omitted list still scopes to the internal vars.
+func TestBuildDenoArgs_Env(t *testing.T) {
+	base := func(env []task.EnvEntry) *task.Spec {
+		return &task.Spec{
+			ID: "env-args", Name: "env-args", Runtime: task.RuntimeDeno,
+			TaskDir:     "/tmp/task",
+			Permissions: task.Permissions{Env: env},
+		}
+	}
+
+	t.Run("named entries are appended to the internal allowlist", func(t *testing.T) {
+		args := buildDenoArgs(base([]task.EnvEntry{{Name: "API_KEY"}, {Name: "DB_URL"}}), "/sock", "/shim.ts", "/runner.ts")
+		val, ok := envFlag(args)
+		if !ok {
+			t.Fatal("expected an --allow-env flag")
+		}
+		want := "DICODE_SOCKET,DICODE_TOKEN,HOME,DENO_DIR,XDG_CACHE_HOME,API_KEY,DB_URL"
+		if val != want {
+			t.Errorf("--allow-env = %q, want %q", val, want)
+		}
+	})
+
+	t.Run("wildcard entry emits a bare --allow-env", func(t *testing.T) {
+		// Named entries alongside "*" must not turn it back into a scoped list.
+		args := buildDenoArgs(base([]task.EnvEntry{{Name: "*"}, {Name: "DICODE_DATADIR"}}), "/sock", "/shim.ts", "/runner.ts")
+		val, ok := envFlag(args)
+		if !ok {
+			t.Fatal("expected an --allow-env flag")
+		}
+		if val != "" {
+			t.Errorf("expected bare --allow-env, got --allow-env=%q", val)
+		}
+	})
+
+	t.Run("empty list scopes to the internal vars only", func(t *testing.T) {
+		args := buildDenoArgs(base(nil), "/sock", "/shim.ts", "/runner.ts")
+		val, ok := envFlag(args)
+		if !ok {
+			t.Fatal("expected an --allow-env flag")
+		}
+		if val != "DICODE_SOCKET,DICODE_TOKEN,HOME,DENO_DIR,XDG_CACHE_HOME" {
+			t.Errorf("--allow-env = %q, want the internal-vars-only allowlist", val)
+		}
+	})
+}
