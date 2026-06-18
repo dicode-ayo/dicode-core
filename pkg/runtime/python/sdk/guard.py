@@ -52,8 +52,10 @@ def _dicode_install_guard():
 
     # Approval-gate state (dicode.lock, dicode.yaml). These must never be
     # writable even when a broad write grant covers their directory, so the
-    # deny set is checked before the allowlist.
-    write_denied = {_os.path.abspath(p) for p in policy.get("fs_deny") or []}
+    # deny set is checked before the allowlist. Paths are canonicalised
+    # (realpath) so a write reaching the lock via a symlinked config dir still
+    # matches the deny entry.
+    write_denied = {_os.path.realpath(p) for p in policy.get("fs_deny") or []}
 
     sep = _os.sep
     af_unix = getattr(_socket, "AF_UNIX", None)
@@ -70,9 +72,11 @@ def _dicode_install_guard():
         n = _to_str(p)
         if n is None:
             return True  # fd-based op; no path to match against
-        n = _os.path.abspath(n)
-        if n in write_denied:
+        # Compare against the deny set on the canonical (realpath) form so a
+        # write reaching a protected path through a symlink still matches.
+        if _os.path.realpath(n) in write_denied:
             return False
+        n = _os.path.abspath(n)
         if n.endswith(".pyc") or (sep + "__pycache__") in n:
             return True
         for root in write_roots:

@@ -147,3 +147,45 @@ func TestEnforcement_ProtectedLockNotWritable(t *testing.T) {
 		t.Errorf("lock was modified despite deny-write: %q", string(data))
 	}
 }
+
+// TestEnforcement_ProtectedLockNotRemovable proves --deny-write also blocks a
+// direct Deno.remove of the lock: deletion is a write to the protected path, so
+// a broad-fs task cannot drop the lock to force a bootstrap re-seed on restart.
+func TestEnforcement_ProtectedLockNotRemovable(t *testing.T) {
+	e := newTestEnv(t)
+
+	configDir := t.TempDir()
+	lockPath := filepath.Join(configDir, "dicode.lock")
+	if err := os.WriteFile(lockPath, []byte("approved: original"), 0o600); err != nil {
+		t.Fatalf("seed lock: %v", err)
+	}
+	e.rt.SetProtectedPaths([]string{lockPath})
+
+	spec := &task.Spec{
+		ID: "lock-remove", Name: "lock-remove", Runtime: task.RuntimeDeno,
+		Trigger: task.TriggerConfig{Manual: true}, Timeout: 30 * time.Second,
+		Permissions: task.Permissions{
+			FS: []task.FSEntry{{Path: configDir, Permission: "w"}},
+		},
+	}
+	r := e.runSpec(t, `
+		export default async function main() {
+			try {
+				await Deno.remove(`+"`"+lockPath+"`"+`);
+				return "allowed";
+			} catch (e) {
+				return (e && e.name) || "error";
+			}
+		}
+	`, spec)
+	if r.Error != nil {
+		t.Fatalf("unexpected run error: %v", r.Error)
+	}
+	got, _ := r.ReturnValue.(string)
+	if !strings.Contains(got, "NotCapable") {
+		t.Errorf("expected NotCapable denial removing the lock, got %v", r.ReturnValue)
+	}
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Errorf("lock was removed despite deny-write: %v", err)
+	}
+}

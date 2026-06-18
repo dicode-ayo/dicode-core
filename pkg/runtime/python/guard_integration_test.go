@@ -109,6 +109,30 @@ func TestGuard_FSRemoveDenied(t *testing.T) {
 	requireDenied(t, out, err, "permissions.fs")
 }
 
+// TestGuard_FSDenyWinsOverCoveringWriteRoot proves the deny set beats a broad
+// write grant covering its directory: with fs_write on the config dir and
+// fs_deny on the lock inside it, a direct os.remove of the lock is rejected.
+// This is the issue #402 escalation on the Python runtime — a broad-fs task
+// dropping dicode.lock to force a bootstrap re-seed.
+func TestGuard_FSDenyWinsOverCoveringWriteRoot(t *testing.T) {
+	dir := t.TempDir()
+	lock := filepath.Join(dir, "dicode.lock")
+	if err := os.WriteFile(lock, []byte("approved: original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pol := guardPolicy{
+		Net:     guardNet{Mode: "unrestricted"},
+		Run:     guardRun{Mode: "deny"},
+		FSWrite: []string{dir},
+		FSDeny:  []string{lock},
+	}
+	out, err := runGuardScript(t, pol, fmt.Sprintf("import os\nos.remove(%q)", lock))
+	requireDenied(t, out, err, "permissions.fs")
+	if _, statErr := os.Stat(lock); statErr != nil {
+		t.Errorf("lock was removed despite fs_deny: %v", statErr)
+	}
+}
+
 func TestGuard_FSSymlinkDenied(t *testing.T) {
 	link := filepath.Join(t.TempDir(), "link")
 	pol := guardPolicy{Net: guardNet{Mode: "unrestricted"}, Run: guardRun{Mode: "deny"}}
