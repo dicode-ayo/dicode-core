@@ -42,6 +42,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -96,6 +97,11 @@ type Runtime struct {
 	// to every per-run IPC server. Executors read it live from parent. Nil
 	// means allow.
 	testGuard func(taskID string) error
+	// protectedPaths are files (dicode.lock, dicode.yaml) that hold approval
+	// state and must never be writable by a task, even when a broad "w"/"rw"
+	// grant covers their directory. Forwarded to the guard policy's deny list.
+	// Executors read it live from parent.
+	protectedPaths []string
 }
 
 // SetEngine configures the engine runner used for dicode.run_task calls.
@@ -128,6 +134,20 @@ func (rt *Runtime) SetRepoResolver(r ipc.RepoPathResolver) { rt.repoResolver = r
 // SetTestGuard wires the approval gate's veto for dicode.tasks.test into
 // every per-run IPC server. Nil means allow; mirrors the SetReplayer wiring.
 func (rt *Runtime) SetTestGuard(g func(taskID string) error) { rt.testGuard = g }
+
+// SetProtectedPaths records files that no task may write (dicode.lock,
+// dicode.yaml — the approval-gate state). Forwarded to the guard policy's deny
+// list so the deny wins over any broad write grant. Mirrors SetTestGuard.
+func (rt *Runtime) SetProtectedPaths(paths []string) {
+	cleaned := make([]string, 0, len(paths))
+	for _, p := range paths {
+		if p == "" {
+			continue
+		}
+		cleaned = append(cleaned, filepath.Clean(p))
+	}
+	rt.protectedPaths = cleaned
+}
 
 // SetSecretOutputChannel wires the channel that receives provider tasks'
 // secret maps. Called by the trigger engine before invoking Execute when
@@ -325,7 +345,7 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 	defer srv.Stop()
 
 	// Build the temporary wrapper file.
-	wrapped, err := buildWrapper(scriptBytes, buildGuardPolicy(spec, socketPath))
+	wrapped, err := buildWrapper(scriptBytes, buildGuardPolicy(spec, socketPath, e.parent.protectedPaths))
 	if err != nil {
 		result.Error = fmt.Errorf("build wrapper: %w", err)
 		return result, nil

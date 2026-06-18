@@ -29,6 +29,11 @@ type guardPolicy struct {
 	Net     guardNet `json:"net"`
 	Run     guardRun `json:"run"`
 	FSWrite []string `json:"fs_write"`
+	// FSDeny lists files (dicode.lock, dicode.yaml — the approval-gate state)
+	// that no task may write, even when a broad "w"/"rw" grant covers their
+	// directory. The audit hook checks this before the write allowlist so the
+	// deny always wins.
+	FSDeny []string `json:"fs_deny,omitempty"`
 }
 
 type guardNet struct {
@@ -53,7 +58,9 @@ type guardRun struct {
 //	     ignored (reads are unenforced, see guardPolicy).
 //
 // The IPC socket path is always writable so SDK traffic is never governed.
-func buildGuardPolicy(spec *task.Spec, socketPath string) guardPolicy {
+// protectedPaths (dicode.lock, dicode.yaml) become the deny list so no broad
+// write grant can reach the approval-gate state.
+func buildGuardPolicy(spec *task.Spec, socketPath string, protectedPaths []string) guardPolicy {
 	var pol guardPolicy
 
 	net := spec.Permissions.Net
@@ -90,6 +97,12 @@ func buildGuardPolicy(spec *task.Spec, socketPath string) guardPolicy {
 			p = filepath.Join(spec.TaskDir, p)
 		}
 		pol.FSWrite = append(pol.FSWrite, p)
+	}
+	for _, p := range protectedPaths {
+		if p == "" {
+			continue
+		}
+		pol.FSDeny = append(pol.FSDeny, filepath.Clean(p))
 	}
 	return pol
 }

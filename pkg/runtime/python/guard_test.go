@@ -27,7 +27,7 @@ func TestBuildGuardPolicy_NetModes(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			pol := buildGuardPolicy(specWithPerms(task.Permissions{Net: tc.net}), "/tmp/dicode.sock")
+			pol := buildGuardPolicy(specWithPerms(task.Permissions{Net: tc.net}), "/tmp/dicode.sock", nil)
 			if pol.Net.Mode != tc.wantMode {
 				t.Errorf("net mode = %q, want %q", pol.Net.Mode, tc.wantMode)
 			}
@@ -56,7 +56,7 @@ func TestBuildGuardPolicy_RunModes(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			pol := buildGuardPolicy(specWithPerms(task.Permissions{Run: tc.run}), "/tmp/dicode.sock")
+			pol := buildGuardPolicy(specWithPerms(task.Permissions{Run: tc.run}), "/tmp/dicode.sock", nil)
 			if pol.Run.Mode != tc.wantMode {
 				t.Errorf("run mode = %q, want %q", pol.Run.Mode, tc.wantMode)
 			}
@@ -78,7 +78,7 @@ func TestBuildGuardPolicy_FSWriteResolution(t *testing.T) {
 		{Path: "/var/log/out", Permission: "w"}, // absolute → kept
 		{Path: "readonly", Permission: "r"},     // read entry → not in write allowlist
 	}})
-	pol := buildGuardPolicy(spec, "/tmp/dicode.sock")
+	pol := buildGuardPolicy(spec, "/tmp/dicode.sock", nil)
 
 	want := []string{
 		"/tmp/dicode.sock", // IPC socket always writable
@@ -99,7 +99,7 @@ func TestBuildGuard_EmbedsPolicyJSON(t *testing.T) {
 	pol := buildGuardPolicy(specWithPerms(task.Permissions{
 		Net: []string{"api.github.com"},
 		Run: []string{"git"},
-	}), "/tmp/dicode.sock")
+	}), "/tmp/dicode.sock", nil)
 
 	guard, err := buildGuard(pol)
 	if err != nil {
@@ -139,9 +139,29 @@ func TestBuildGuard_EmbedsPolicyJSON(t *testing.T) {
 	}
 }
 
+func TestBuildGuardPolicy_ProtectedPathsBecomeDenyList(t *testing.T) {
+	// A broad "w" grant on the config dir would otherwise cover dicode.lock;
+	// the protected paths must land in fs_deny so the hook rejects them.
+	spec := specWithPerms(task.Permissions{FS: []task.FSEntry{
+		{Path: "/etc/dicode", Permission: "w"},
+	}})
+	protected := []string{"/etc/dicode/dicode.lock", "/etc/dicode/../dicode/dicode.yaml"}
+	pol := buildGuardPolicy(spec, "/tmp/dicode.sock", protected)
+
+	want := []string{"/etc/dicode/dicode.lock", "/etc/dicode/dicode.yaml"}
+	if len(pol.FSDeny) != len(want) {
+		t.Fatalf("fs_deny = %v, want %v", pol.FSDeny, want)
+	}
+	for i := range want {
+		if pol.FSDeny[i] != want[i] {
+			t.Errorf("fs_deny[%d] = %q, want %q (paths must be cleaned)", i, pol.FSDeny[i], want[i])
+		}
+	}
+}
+
 func TestBuildWrapper_GuardPlacement(t *testing.T) {
 	script := "# /// script\n# dependencies = [\"requests\"]\n# ///\nresult = 1\n"
-	pol := buildGuardPolicy(specWithPerms(task.Permissions{}), "/tmp/dicode.sock")
+	pol := buildGuardPolicy(specWithPerms(task.Permissions{}), "/tmp/dicode.sock", nil)
 
 	wrapped, err := buildWrapper([]byte(script), pol)
 	if err != nil {

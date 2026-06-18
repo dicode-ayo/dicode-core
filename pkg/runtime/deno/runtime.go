@@ -121,6 +121,13 @@ type Runtime struct {
 	// to every per-run IPC server. Reads through parent in per-version
 	// executors. Nil means allow.
 	testGuard func(taskID string) error
+	// protectedPaths are files (dicode.lock, dicode.yaml) that hold approval
+	// state and must never be writable by a task: a task with a broad
+	// --allow-write grant covering the config dir could otherwise overwrite
+	// dicode.lock to self-approve other tasks. Every Run emits a --deny-write
+	// for these so the deny takes precedence over any allow. Reads through
+	// parent in per-version executors.
+	protectedPaths []string
 }
 
 // effectiveInputStore returns the live InputStore to use for this runtime
@@ -222,6 +229,31 @@ func (rt *Runtime) effectiveCryptoDeriver() ipc.SubKeyDeriver {
 // every per-run IPC server. Nil means allow; mirrors the SetCryptoHandler
 // wiring pattern.
 func (rt *Runtime) SetTestGuard(g func(taskID string) error) { rt.testGuard = g }
+
+// SetProtectedPaths records files that no task may ever write (dicode.lock,
+// dicode.yaml — the approval-gate state). Each is emitted as a --deny-write so
+// it overrides any broad --allow-write a task declares. Paths are cleaned and
+// stored; mirrors the SetTestGuard wiring pattern.
+func (rt *Runtime) SetProtectedPaths(paths []string) {
+	cleaned := make([]string, 0, len(paths))
+	for _, p := range paths {
+		if p == "" {
+			continue
+		}
+		cleaned = append(cleaned, filepath.Clean(p))
+	}
+	rt.protectedPaths = cleaned
+}
+
+// effectiveProtectedPaths returns the protected paths, reading through parent
+// when this is a per-version executor so a daemon-level SetProtectedPaths call
+// propagates without extra bookkeeping.
+func (rt *Runtime) effectiveProtectedPaths() []string {
+	if rt.parent != nil {
+		return rt.parent.protectedPaths
+	}
+	return rt.protectedPaths
+}
 
 // effectiveTestGuard returns the live test guard, reading through parent
 // when this is a per-version executor.
@@ -410,7 +442,7 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	}
 	runnerFile.Close()
 
-	args := buildDenoArgs(spec, socketPath, shimPath, runnerPath)
+	args := buildDenoArgs(spec, socketPath, shimPath, runnerPath, rt.effectiveProtectedPaths())
 	cmd := exec.CommandContext(execCtx, rt.denoPath, args...) //nolint:gosec
 	cmd.Env = pkgruntime.SubprocessEnv(spec, resolved, socketPath, token)
 
@@ -531,7 +563,7 @@ func expandHome(p string) string {
 	return p
 }
 
-func buildDenoArgs(spec *task.Spec, socketPath, shimPath, runnerPath string) []string {
+func buildDenoArgs(spec *task.Spec, socketPath, shimPath, runnerPath string, protectedPaths []string) []string {
 	args := []string{"run"}
 
 	// Network is deny-by-default: omit or [] = deny all; ["*"] = unrestricted;
@@ -571,6 +603,9 @@ func buildDenoArgs(spec *task.Spec, socketPath, shimPath, runnerPath string) []s
 		if !filepath.IsAbs(path) {
 			path = filepath.Join(spec.TaskDir, path)
 		}
+		// Clean every declared path so "../" segments and redundant separators
+		// resolve before they reach Deno, keeping the grant set canonical.
+		path = filepath.Clean(path)
 		switch entry.Permission {
 		case "r":
 			readPaths = append(readPaths, path)
@@ -583,6 +618,13 @@ func buildDenoArgs(spec *task.Spec, socketPath, shimPath, runnerPath string) []s
 	}
 	args = append(args, "--allow-read="+strings.Join(readPaths, ","))
 	args = append(args, "--allow-write="+strings.Join(writePaths, ","))
+	// The approval-gate state (dicode.lock, dicode.yaml) must never be writable
+	// by a task: a broad --allow-write covering the config dir would otherwise
+	// let a task overwrite the lock to self-approve. --deny-write takes
+	// precedence over any allow, so emit it unconditionally.
+	if len(protectedPaths) > 0 {
+		args = append(args, "--deny-write="+strings.Join(protectedPaths, ","))
+	}
 
 	run := spec.Permissions.Run
 	if len(run) == 1 && run[0] == "*" {

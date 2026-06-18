@@ -358,6 +358,16 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 		return fmt.Errorf("resolve config dir: %w", err)
 	}
 	lockPath := filepath.Join(configDir, approval.LockFileName)
+	// Approval-gate state must never be writable by a task. A task with a broad
+	// fs-write grant covering the config dir could otherwise overwrite
+	// dicode.lock to self-approve other pending tasks; deny-write on these paths
+	// overrides any such allow.
+	protectedPaths := []string{lockPath}
+	if absConfigPath, err := filepath.Abs(configPath); err == nil {
+		protectedPaths = append(protectedPaths, absConfigPath)
+	}
+	denoRT.SetProtectedPaths(protectedPaths)
+	pythonRT.SetProtectedPaths(protectedPaths)
 	_, lockStatErr := os.Stat(lockPath)
 	lockExisted := lockStatErr == nil
 	lock, err := approval.LoadLock(lockPath)
