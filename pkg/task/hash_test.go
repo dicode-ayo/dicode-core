@@ -1,9 +1,11 @@
 package task
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // Tests for pkg/task.Hash and pkg/task.ScanDir.
@@ -443,6 +445,123 @@ func TestScanDir_StableAcrossInvocations(t *testing.T) {
 				t.Fatalf("trial %d: id=%q hash=%q, want %q", i, id, got[id], hash)
 			}
 		}
+	}
+}
+
+// TestHash_LargeFileHashedByDescriptor covers the per-file size cap: a file
+// over maxHashedFileBytes folds in only its size+mtime, so rewriting its
+// contents while preserving size and mtime must not change the hash, but
+// changing its size must. This keeps the ~30s poll off re-reading bulk assets
+// while still catching the kind of change a committed asset actually undergoes.
+func TestHash_LargeFileHashedByDescriptor(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "hello")
+	writeTaskFiles(t, dir, "name: hello\n", "export default () => 1\n")
+
+	asset := filepath.Join(dir, "asset.bin")
+	big := bytes.Repeat([]byte{'a'}, maxHashedFileBytes+1)
+	if err := os.WriteFile(asset, big, 0644); err != nil {
+		t.Fatalf("write asset: %v", err)
+	}
+	// Pin mtime so we control the descriptor independently of write time.
+	mtime := time.Unix(1_700_000_000, 0)
+	if err := os.Chtimes(asset, mtime, mtime); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	before, err := Hash(dir)
+	if err != nil {
+		t.Fatalf("before: %v", err)
+	}
+
+	// Same size + same mtime, different bytes → descriptor unchanged → hash unchanged.
+	changed := bytes.Repeat([]byte{'b'}, maxHashedFileBytes+1)
+	if err := os.WriteFile(asset, changed, 0644); err != nil {
+		t.Fatalf("rewrite asset: %v", err)
+	}
+	if err := os.Chtimes(asset, mtime, mtime); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+	sameSize, err := Hash(dir)
+	if err != nil {
+		t.Fatalf("sameSize: %v", err)
+	}
+	if sameSize != before {
+		t.Fatalf("hash changed for large file content edit at fixed size+mtime: %q -> %q", before, sameSize)
+	}
+
+	// Grow the file → descriptor size changes → hash changes.
+	grown := bytes.Repeat([]byte{'b'}, maxHashedFileBytes+2)
+	if err := os.WriteFile(asset, grown, 0644); err != nil {
+		t.Fatalf("grow asset: %v", err)
+	}
+	if err := os.Chtimes(asset, mtime, mtime); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+	grownHash, err := Hash(dir)
+	if err != nil {
+		t.Fatalf("grownHash: %v", err)
+	}
+	if grownHash == before {
+		t.Fatalf("hash did not change after large file size change: both = %q", before)
+	}
+}
+
+// TestHash_SmallFileEditChanges guards that the size cap does not weaken
+// change-detection for code: editing a sub-threshold file (the common case)
+// still changes the hash so the reconciler reloads the task.
+func TestHash_SmallFileEditChanges(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "hello")
+	writeTaskFiles(t, dir, "name: hello\n", "export default () => 1\n")
+
+	helper := filepath.Join(dir, "helper.js")
+	if err := os.WriteFile(helper, []byte("export const x = 1\n"), 0644); err != nil {
+		t.Fatalf("write helper: %v", err)
+	}
+
+	before, err := Hash(dir)
+	if err != nil {
+		t.Fatalf("before: %v", err)
+	}
+	if err := os.WriteFile(helper, []byte("export const x = 2\n"), 0644); err != nil {
+		t.Fatalf("rewrite helper: %v", err)
+	}
+	after, err := Hash(dir)
+	if err != nil {
+		t.Fatalf("after: %v", err)
+	}
+	if before == after {
+		t.Fatalf("hash did not change after small file edit: both = %q", before)
+	}
+}
+
+// TestHash_SkipsHeavyDirs covers the heavy-dir skip: files under node_modules
+// and .git are not folded into the digest, so committing or churning them does
+// not force a task reload nor cost the walk a full subtree read.
+func TestHash_SkipsHeavyDirs(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "hello")
+	writeTaskFiles(t, dir, "name: hello\n", "export default () => 1\n")
+
+	before, err := Hash(dir)
+	if err != nil {
+		t.Fatalf("before: %v", err)
+	}
+
+	for _, sub := range []string{"node_modules", ".git"} {
+		nested := filepath.Join(dir, sub, "pkg")
+		if err := os.MkdirAll(nested, 0755); err != nil {
+			t.Fatalf("mkdir %s: %v", sub, err)
+		}
+		if err := os.WriteFile(filepath.Join(nested, "index.js"), []byte("whatever\n"), 0644); err != nil {
+			t.Fatalf("write under %s: %v", sub, err)
+		}
+	}
+
+	after, err := Hash(dir)
+	if err != nil {
+		t.Fatalf("after: %v", err)
+	}
+	if before != after {
+		t.Fatalf("hash changed after adding files under heavy dirs: %q -> %q", before, after)
 	}
 }
 
