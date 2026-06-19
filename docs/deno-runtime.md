@@ -394,6 +394,10 @@ import * as _ from "npm:lodash-es"
 
 Deno caches packages on first run.
 
+### Dependency pinning
+
+If a `deno.lock` file exists at or near the task directory (the runtime walks up to three parent directories), Deno is invoked with `--lock=<path> --frozen`. This prevents per-run resolution of newer versions within a caret range (`^`) — packages are pinned to the exact versions recorded in the lockfile. Buildin tasks ship a `tasks/deno.lock` that is automatically detected and enforced.
+
 ---
 
 ## Deno permissions

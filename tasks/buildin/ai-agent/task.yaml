@@ -15,7 +15,7 @@ description: >
 runtime: deno
 trigger:
   webhook: /hooks/ai
-  # auth: true omitted — webhook auth for tasks is not yet supported.
+  auth: true
 
 params:
   # ─── Per-call inputs ───────────────────────────────────────────────────────

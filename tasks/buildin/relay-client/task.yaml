@@ -21,6 +21,11 @@ trigger:
 
 permissions:
   net:
+    # The relay broker URL is operator-configured at runtime (DICODE_RELAY_SERVER_URL).
+    # A static allowlist cannot be derived from a config-driven value without
+    # template-variable expansion in permissions.net — until that is available,
+    # "*" is the minimum viable scope. The actual connection target is validated
+    # by the TOFU broker-pin stored encrypted-at-rest.
     - "*"
   env:
     - DICODE_RELAY_SERVER_URL
