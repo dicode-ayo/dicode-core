@@ -33,7 +33,7 @@ func specWithEnv(env []task.EnvEntry) *task.Spec {
 // TestBuildDenoArgs_Env_List: declared names produce an explicit allowlist that
 // always carries the internal IPC + cache vars plus the declared names.
 func TestBuildDenoArgs_Env_List(t *testing.T) {
-	args := buildDenoArgs(specWithEnv([]task.EnvEntry{{Name: "FOO"}, {Name: "BAR"}}), "/run/sock", "/shim.ts", "/runner.ts")
+	args := buildDenoArgs(specWithEnv([]task.EnvEntry{{Name: "FOO"}, {Name: "BAR"}}), "/run/sock", "/shim.ts", "/runner.ts", nil)
 	got, ok := allowEnvArg(args)
 	if !ok {
 		t.Fatal("no --allow-env arg emitted")
@@ -51,7 +51,7 @@ func TestBuildDenoArgs_Env_List(t *testing.T) {
 // TestBuildDenoArgs_Env_Omitted: no declared env still yields the baseline
 // allowlist (never bare --allow-env).
 func TestBuildDenoArgs_Env_Omitted(t *testing.T) {
-	args := buildDenoArgs(specWithEnv(nil), "/run/sock", "/shim.ts", "/runner.ts")
+	args := buildDenoArgs(specWithEnv(nil), "/run/sock", "/shim.ts", "/runner.ts", nil)
 	got, ok := allowEnvArg(args)
 	if !ok {
 		t.Fatal("no --allow-env arg emitted")
@@ -68,7 +68,7 @@ func TestBuildDenoArgs_Env_Omitted(t *testing.T) {
 func TestBuildDenoArgs_Env_ReadExposed(t *testing.T) {
 	spec := specWithEnv(nil)
 	spec.Permissions.EnvReadExposed = true
-	args := buildDenoArgs(spec, "/run/sock", "/shim.ts", "/runner.ts")
+	args := buildDenoArgs(spec, "/run/sock", "/shim.ts", "/runner.ts", nil)
 	got, ok := allowEnvArg(args)
 	if !ok {
 		t.Fatal("no --allow-env arg emitted")
@@ -84,7 +84,7 @@ func TestBuildDenoArgs_Env_ReadExposed(t *testing.T) {
 func TestBuildDenoArgs_Env_ReadExposedWithNamed(t *testing.T) {
 	spec := specWithEnv([]task.EnvEntry{{Name: "DICODE_DATADIR"}})
 	spec.Permissions.EnvReadExposed = true
-	args := buildDenoArgs(spec, "/run/sock", "/shim.ts", "/runner.ts")
+	args := buildDenoArgs(spec, "/run/sock", "/shim.ts", "/runner.ts", nil)
 	got, ok := allowEnvArg(args)
 	if !ok {
 		t.Fatal("no --allow-env arg emitted")
@@ -97,7 +97,7 @@ func TestBuildDenoArgs_Env_ReadExposedWithNamed(t *testing.T) {
 // TestBuildDenoArgs_Env_NamedOnlyNeverBare: named entries without
 // env_read_exposed must produce an explicit allowlist, never bare --allow-env.
 func TestBuildDenoArgs_Env_NamedOnlyNeverBare(t *testing.T) {
-	args := buildDenoArgs(specWithEnv([]task.EnvEntry{{Name: "DICODE_DATADIR"}}), "/run/sock", "/shim.ts", "/runner.ts")
+	args := buildDenoArgs(specWithEnv([]task.EnvEntry{{Name: "DICODE_DATADIR"}}), "/run/sock", "/shim.ts", "/runner.ts", nil)
 	got, ok := allowEnvArg(args)
 	if !ok {
 		t.Fatal("no --allow-env arg emitted")
@@ -207,7 +207,7 @@ func TestBuildDenoArgs_LockFrozen_WithLockfile(t *testing.T) {
 		Trigger: task.TriggerConfig{Manual: true}, Timeout: 30 * time.Second,
 		TaskDir: taskDir,
 	}
-	args := buildDenoArgs(spec, "/run/sock", "/shim.ts", "/runner.ts")
+	args := buildDenoArgs(spec, "/run/sock", "/shim.ts", "/runner.ts", nil)
 
 	if !hasArgPrefix(args, "--lock=") {
 		t.Error("expected --lock=<path> arg when deno.lock exists")
@@ -231,7 +231,7 @@ func TestBuildDenoArgs_LockFrozen_NoLockfile(t *testing.T) {
 		Trigger: task.TriggerConfig{Manual: true}, Timeout: 30 * time.Second,
 		TaskDir: t.TempDir(),
 	}
-	args := buildDenoArgs(spec, "/run/sock", "/shim.ts", "/runner.ts")
+	args := buildDenoArgs(spec, "/run/sock", "/shim.ts", "/runner.ts", nil)
 
 	if hasArgPrefix(args, "--lock=") || hasArg(args, "--lock") {
 		t.Error("--lock must not appear when no deno.lock is present")
@@ -263,7 +263,7 @@ func TestBuildDenoArgs_LockFrozen_SkippedWhenDenoJsonPresent(t *testing.T) {
 		Trigger: task.TriggerConfig{Manual: true}, Timeout: 30 * time.Second,
 		TaskDir: taskDir,
 	}
-	args := buildDenoArgs(spec, "/run/sock", "/shim.ts", "/runner.ts")
+	args := buildDenoArgs(spec, "/run/sock", "/shim.ts", "/runner.ts", nil)
 
 	if hasArgPrefix(args, "--lock=") || hasArg(args, "--lock") {
 		t.Error("--lock must not appear when task has deno.json")

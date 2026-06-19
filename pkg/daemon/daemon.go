@@ -358,8 +358,25 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 		return fmt.Errorf("resolve config dir: %w", err)
 	}
 	lockPath := filepath.Join(configDir, approval.LockFileName)
+	// Approval-gate state must never be writable by a task. A task with a broad
+	// fs-write grant covering the config dir could otherwise overwrite
+	// dicode.lock to self-approve other pending tasks; deny-write on these paths
+	// overrides any such allow. Paths are canonicalised (symlinks resolved) so
+	// the deny set matches the form a task's write resolves to — a config dir
+	// reached via a symlink would otherwise carry a deny entry that never
+	// matches the canonical write path.
+	protectedPaths := []string{canonicalPath(lockPath)}
+	if absConfigPath, err := filepath.Abs(configPath); err == nil {
+		protectedPaths = append(protectedPaths, canonicalPath(absConfigPath))
+	}
+	denoRT.SetProtectedPaths(protectedPaths)
+	pythonRT.SetProtectedPaths(protectedPaths)
 	_, lockStatErr := os.Stat(lockPath)
 	lockExisted := lockStatErr == nil
+	markerExists, err := bootstrapMarkerExists(ctx, database)
+	if err != nil {
+		return fmt.Errorf("read approval bootstrap marker: %w", err)
+	}
 	lock, err := approval.LoadLock(lockPath)
 	if err != nil {
 		return fmt.Errorf("load approval lock: %w", err)
@@ -391,23 +408,54 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	denoRT.SetTestGuard(approvalGate.FireGuard)
 	pythonRT.SetTestGuard(approvalGate.FireGuard)
 
-	// First-run bootstrap: with no dicode.lock, seed the existing inventory as
-	// approved instead of stranding every task behind a gate that has no
-	// approve UI yet. The settle timer is armed immediately — not on the
-	// first registration — so the window also closes on an install with zero
-	// tasks; otherwise the first task to ever appear would be auto-approved.
-	// Each registration during the window slides it forward (tolerates a slow
-	// first git clone). FinishBootstrap is idempotent, so the timer firing is
-	// always safe.
+	// First-run bootstrap: on a genuine first run (no lock, no completed-marker)
+	// seed the existing inventory as approved instead of stranding every task
+	// behind a gate that has no approve UI yet. The settle timer is armed
+	// immediately — not on the first registration — so the window also closes
+	// on an install with zero tasks; otherwise the first task to ever appear
+	// would be auto-approved. Each registration during the window slides it
+	// forward (tolerates a slow first git clone). FinishBootstrap is idempotent,
+	// so the timer firing is always safe. The completed-marker is set when the
+	// window closes; a crash mid-bootstrap leaves the marker unset, so the next
+	// start re-bootstraps rather than stranding the inventory.
+	//
+	// Lock-loss after a prior run must fail closed: the marker present with the
+	// lock absent means the approval state was deleted/lost (a broad-fs task can
+	// remove it by a vector the file-level deny does not cover). Re-entering
+	// bootstrap then would re-seed the attacker's pending change as approved —
+	// the #402 escalation — so bootstrap is skipped and the inventory is held
+	// pending for explicit re-approval.
+	//
+	// An existing lock proves first-run is over, so the marker MUST track it:
+	// without this backfill an adopted lock (operator-shipped/restored, or one
+	// written before a crash interrupted the first bootstrap) would leave the
+	// marker unset, and a later lock-deletion would satisfy shouldBootstrap and
+	// re-seed as approved. Backfilling keeps "lock present ⇒ marker present" so
+	// the fail-closed branch above always fires after the lock vanishes.
 	var bootstrapTimer *time.Timer
-	if !lockExisted && gatePolicy.Enabled {
+	if shouldBootstrap(lockExisted, markerExists, gatePolicy.Enabled) {
 		approvalGate.SetBootstrap(true)
 		bootstrapTimer = time.AfterFunc(bootstrapSettle, func() {
 			if approvalGate.FinishBootstrap() {
+				if err := setBootstrapMarker(ctx, database); err != nil {
+					log.Warn("approval gate: failed to persist bootstrap marker; next start may re-bootstrap",
+						zap.Error(err))
+				}
 				log.Info("approval gate active — subsequent task changes require approval")
 			}
 		})
 		log.Info("approval gate: no dicode.lock — seeding current tasks as approved (first-run bootstrap); changes after startup require approval",
+			zap.String("lock", lockPath))
+	} else if gatePolicy.Enabled && lockExisted && !markerExists {
+		if err := setBootstrapMarker(ctx, database); err != nil {
+			log.Warn("approval gate: failed to persist bootstrap marker for an adopted lock; "+
+				"a later lock-loss may fail open rather than closed",
+				zap.Error(err))
+		}
+	} else if gatePolicy.Enabled && !lockExisted && markerExists {
+		log.Warn("approval gate: dicode.lock is missing despite a prior run — failing closed; "+
+			"all changed tasks require explicit re-approval. If the lock was not removed deliberately, "+
+			"this may indicate tampering by a task with a broad filesystem grant",
 			zap.String("lock", lockPath))
 	}
 
