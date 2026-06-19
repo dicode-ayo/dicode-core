@@ -38,6 +38,7 @@ var heavyDirs = map[string]bool{
 //     instead of their contents (see the const); a content edit that preserves
 //     both size and mtime is therefore not detected.
 //   - The node_modules and .git subtrees are skipped wholesale (see heavyDirs).
+//
 // Consequently, code reachable only through those exclusions can change without
 // re-triggering approval — acceptable under the trusted-author model, where the
 // operator approves the source, not every transitive vendored file.
