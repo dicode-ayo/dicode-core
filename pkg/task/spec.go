@@ -263,6 +263,16 @@ func (e *EnvEntry) UnmarshalYAML(value *yaml.Node) error {
 type Permissions struct {
 	// Env lists env vars the task script may read or that are injected into it.
 	Env []EnvEntry `yaml:"env,omitempty" json:"env,omitempty"`
+	// EnvReadExposed grants the Deno sandbox bare --allow-env: the task may read
+	// ANY env var exposed to its subprocess, not only the names listed in Env.
+	// The exposed set is still bounded by runtime.SubprocessEnv (an allowlist —
+	// PATH/HOME/cache/proxy/TLS vars, DICODE_SOCKET/DICODE_TOKEN, and the task's
+	// own resolved vars; the daemon master/admin keys are denylisted), so this
+	// never reaches anything the task does not already hold. It exists for
+	// node-compat / npm tasks whose transitive deps enumerate process.env at
+	// import time. Deno only — Python has no per-var env-read gate (it reads its
+	// full exposed env regardless); parity tracked in #418.
+	EnvReadExposed bool `yaml:"env_read_exposed,omitempty" json:"env_read_exposed,omitempty"`
 	// FS lists filesystem paths and their access modes ("r", "w", "rw").
 	// Deno enforces reads and writes. Python enforces writes only: an
 	// in-interpreter read allowlist would break normal execution (the
@@ -578,17 +588,22 @@ func (s *Spec) ScriptPath() string {
 	switch s.Runtime {
 	case RuntimeDeno:
 		ts := filepath.Join(s.TaskDir, "task.ts")
-		if _, err := os.Stat(ts); err == nil {
+		if fi, err := os.Lstat(ts); err == nil && fi.Mode()&os.ModeSymlink == 0 {
 			return ts
 		}
-		return filepath.Join(s.TaskDir, "task.js")
+		p := filepath.Join(s.TaskDir, "task.js")
+		if fi, err := os.Lstat(p); err == nil && fi.Mode()&os.ModeSymlink == 0 {
+			return p
+		}
+		return ""
 	case RuntimeDocker, RuntimePodman:
 		return ""
 	default:
 		// For subprocess runtimes, look for any task.* file in the task dir.
+		// Symlinks are rejected to prevent reading files outside the task directory.
 		for _, ext := range []string{".py", ".jl", ".rb", ".sh", ".ts", ".js", ".mjs"} {
 			p := filepath.Join(s.TaskDir, "task"+ext)
-			if _, err := os.Stat(p); err == nil {
+			if fi, err := os.Lstat(p); err == nil && fi.Mode()&os.ModeSymlink == 0 {
 				return p
 			}
 		}
@@ -598,9 +613,13 @@ func (s *Spec) ScriptPath() string {
 
 // Script reads and returns the task script source.
 func (s *Spec) Script() (string, error) {
-	b, err := os.ReadFile(s.ScriptPath())
+	p := s.ScriptPath()
+	if p == "" {
+		return "", fmt.Errorf("no script file found for task %s (file missing or is a symlink)", s.Name)
+	}
+	b, err := os.ReadFile(p)
 	if err != nil {
-		return "", fmt.Errorf("read script %s: %w", s.ScriptPath(), err)
+		return "", fmt.Errorf("read script %s: %w", p, err)
 	}
 	return string(b), nil
 }
@@ -619,6 +638,11 @@ func (s *Spec) validate() error {
 	s.Warnings = nil
 	if s.Name == "" {
 		return fmt.Errorf("name is required")
+	}
+	for _, e := range s.Permissions.Env {
+		if e.Name == "*" {
+			return fmt.Errorf(`permissions.env: a name-only "*" entry is no longer accepted; set "env_read_exposed: true" to grant the Deno sandbox bare --allow-env`)
+		}
 	}
 	triggers := 0
 	if s.Trigger.Cron != "" {

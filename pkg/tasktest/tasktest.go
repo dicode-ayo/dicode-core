@@ -79,10 +79,11 @@ func Run(ctx context.Context, spec *task.Spec) (Result, error) {
 
 // findTestFile picks the first task.test.* that exists in the task dir.
 // Mirrors the extension priority used by pkg/task.ScriptPath.
+// Symlinks are rejected to stay consistent with the production script-path policy.
 func findTestFile(spec *task.Spec) (string, error) {
 	for _, ext := range []string{".ts", ".js", ".mjs"} {
 		p := filepath.Join(spec.TaskDir, "task.test"+ext)
-		if _, err := os.Stat(p); err == nil {
+		if fi, err := os.Lstat(p); err == nil && fi.Mode()&os.ModeSymlink == 0 {
 			return p, nil
 		}
 	}

@@ -57,6 +57,55 @@ trigger:
 
 Public webhooks (no `auth: true`) remain fully open.
 
+### GET requests not supported with webhook_secret
+
+When `webhook_secret` is configured, only POST requests are accepted.
+GET requests are rejected with HTTP 403. This is intentional: GET requests
+carry no body, so `HMAC(secret, "")` is a constant value that does not bind to
+any request-specific data — it cannot authenticate a GET, and using one would
+allow (a) replay DoS (all GETs share the same HMAC digest so the second request
+is always rejected as a duplicate) and (b) signature reuse across different
+query strings.
+
+Open webhooks (no `webhook_secret`) continue to accept GET requests for
+backward compatibility.
+
+### Timestamp-bound HMAC
+
+When the sender includes the `X-Dicode-Timestamp` header (Unix seconds as a
+decimal string), dicode validates that the timestamp is within a 5-minute
+tolerance window and then **includes the timestamp in the HMAC preimage**:
+
+```
+HMAC-SHA256(secret, "<timestamp_unix_str>\n<body>")
+```
+
+Without a timestamp the preimage is just the body (backwards-compatible):
+
+```
+HMAC-SHA256(secret, "<body>")
+```
+
+Including the timestamp in the signed payload binds the signature to a specific
+time window. This means a captured request cannot be replayed even after the
+1-hour replay cache expires, because the timestamp value changes with every
+legitimately signed request.
+
+Example — signing a request with a timestamp in Python:
+
+```python
+import hmac, hashlib, time
+
+ts = str(int(time.time()))
+preimage = (ts + "\n").encode() + body
+sig = "sha256=" + hmac.new(secret.encode(), preimage, hashlib.sha256).hexdigest()
+
+headers = {
+    "X-Dicode-Timestamp": ts,
+    "X-Hub-Signature-256": sig,
+}
+```
+
 ### Replay protection
 
 When `webhook_secret` is set, dicode automatically rejects duplicate webhook
@@ -75,6 +124,27 @@ trigger:
 ```
 
 Open webhooks (no `webhook_secret`) are unaffected.
+
+### Concurrency cap applies to webhook-triggered runs
+
+When `max_concurrent_tasks` is configured in `dicode.yaml`, the cap applies to
+webhook-triggered runs as well as cron and manual runs. When all slots are
+occupied, the webhook handler returns HTTP 503 (Service Unavailable) immediately
+rather than queuing the request indefinitely. The caller should retry after a
+short delay.
+
+### Duplicate webhook paths are rejected
+
+Each webhook path can only be claimed by one task. If a second task (e.g., a
+task loaded from a watched git repo) tries to register a path that is already
+claimed, it is silently rejected and a warning is logged:
+
+```
+WARN rejecting duplicate webhook path — already claimed by another task
+     path=/hooks/my-path existing_task=original-task rejected_task=intruder-task
+```
+
+A task re-registering its own path during a reconciler reload is allowed.
 
 ---
 

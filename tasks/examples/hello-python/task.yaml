@@ -21,3 +21,5 @@ params:
 permissions:
   net:
     - httpbin.org
+  env:
+    - HTTPBIN_URL

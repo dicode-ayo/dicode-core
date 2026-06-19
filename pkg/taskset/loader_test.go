@@ -470,3 +470,30 @@ func TestLoadConfig_WrongKind(t *testing.T) {
 		t.Fatal("expected error for wrong kind")
 	}
 }
+
+// TestValidateRefURL_SCPInvalidHost ensures the SCP fast-path rejects
+// syntactically invalid hostnames (e.g. containing path separators or
+// shell metacharacters).
+func TestValidateRefURL_SCPInvalidHost(t *testing.T) {
+	cases := []struct {
+		rawURL string
+		valid  bool
+	}{
+		{"git@github.com:org/repo.git", true},
+		{"user@host.example.com:path/to/repo", true},
+		{"git@github.com:../../etc/passwd", true},     // valid host, path traversal is separate concern
+		{"user@git_server.internal:repo", true},       // underscore in hostname (common in corp setups)
+		{"user@host_with_underscores:repo.git", true}, // underscores allowed
+		{"user@host with spaces:repo", false},         // space in host
+		{"user@:repo", false},                         // empty host
+	}
+	for _, tc := range cases {
+		err := ValidateRefURL("test.yaml", "key", tc.rawURL)
+		if tc.valid && err != nil {
+			t.Errorf("ValidateRefURL(%q) = %v, want nil", tc.rawURL, err)
+		}
+		if !tc.valid && err == nil {
+			t.Errorf("ValidateRefURL(%q) = nil, want error", tc.rawURL)
+		}
+	}
+}

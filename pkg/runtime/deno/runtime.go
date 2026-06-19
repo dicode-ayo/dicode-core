@@ -563,8 +563,39 @@ func expandHome(p string) string {
 	return p
 }
 
+// findDenoLockFile walks up from dir (at most maxParents levels) looking for
+// a deno.lock file. Returns the absolute path on the first match, or "".
+// maxParents=2 covers the buildin layout: tasks/buildin/<name>/ → tasks/deno.lock.
+// Note: i <= maxParents means the loop runs maxParents+1 times, visiting the
+// starting dir and maxParents ancestors.
+func findDenoLockFile(dir string, maxParents int) string {
+	current := filepath.Clean(dir)
+	for i := 0; i <= maxParents; i++ {
+		candidate := filepath.Join(current, "deno.lock")
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+	return ""
+}
+
 func buildDenoArgs(spec *task.Spec, socketPath, shimPath, runnerPath string, protectedPaths []string) []string {
 	args := []string{"run"}
+
+	// Enforce the lockfile when a deno.lock is found at or near the task directory.
+	// Skip when the task has its own deno.json: that file controls lock configuration
+	// (including "lock": false opt-out) and Deno respects it without our help.
+	// maxParents=2 covers tasks/buildin/<name>/ → tasks/deno.lock.
+	if _, err := os.Stat(filepath.Join(spec.TaskDir, "deno.json")); os.IsNotExist(err) {
+		if lf := findDenoLockFile(spec.TaskDir, 2); lf != "" {
+			args = append(args, "--lock="+lf, "--frozen")
+		}
+	}
 
 	// Network is deny-by-default: omit or [] = deny all; ["*"] = unrestricted;
 	// named hosts = allowlist. The IPC socket itself uses a Unix socket
@@ -577,13 +608,24 @@ func buildDenoArgs(spec *task.Spec, socketPath, shimPath, runnerPath string, pro
 	}
 	// nil or explicit empty list → no --allow-net flag → network denied
 
-	// Env: always allow the internal IPC vars plus HOME/DENO_DIR/XDG_CACHE_HOME
-	// (required by deno.land/x/cache for vendored binary downloads).
-	envVars := []string{"DICODE_SOCKET", "DICODE_TOKEN", "HOME", "DENO_DIR", "XDG_CACHE_HOME"}
-	for _, e := range spec.Permissions.Env {
-		envVars = append(envVars, e.Name)
+	// EnvReadExposed grants bare --allow-env (read any var). The blast radius is
+	// bounded by runtime.SubprocessEnv, which forwards only an allowlist
+	// (PATH/HOME/cache/proxy/TLS vars, DICODE_SOCKET/DICODE_TOKEN, and the
+	// task's own resolved vars) and denylists the daemon's master/admin keys,
+	// so "read any var" can only read what the task already holds. Needed for
+	// Deno node-compat / npm tasks whose transitive deps read unpredictable
+	// process.env keys at module init. Otherwise the explicit list: the
+	// internal IPC vars plus HOME/DENO_DIR/XDG_CACHE_HOME (required by
+	// deno.land/x/cache for vendored binary downloads) plus declared names.
+	if spec.Permissions.EnvReadExposed {
+		args = append(args, "--allow-env")
+	} else {
+		envVars := []string{"DICODE_SOCKET", "DICODE_TOKEN", "HOME", "DENO_DIR", "XDG_CACHE_HOME"}
+		for _, e := range spec.Permissions.Env {
+			envVars = append(envVars, e.Name)
+		}
+		args = append(args, "--allow-env="+strings.Join(envVars, ","))
 	}
-	args = append(args, "--allow-env="+strings.Join(envVars, ","))
 
 	// Sys: omit field = deny all (default); ["*"] = all; named = allowlist.
 	sys := spec.Permissions.Sys

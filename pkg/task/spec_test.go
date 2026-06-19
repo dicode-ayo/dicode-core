@@ -114,6 +114,51 @@ trigger: { manual: true }
 	}
 }
 
+func TestSpec_EnvReadExposed_Parses(t *testing.T) {
+	yamlSrc := []byte(`
+name: exposed-env
+runtime: deno
+trigger: { manual: true }
+permissions:
+  env_read_exposed: true
+  env:
+    - DICODE_DATADIR
+`)
+	var s Spec
+	if err := yaml.Unmarshal(yamlSrc, &s); err != nil {
+		t.Fatal(err)
+	}
+	if !s.Permissions.EnvReadExposed {
+		t.Error("EnvReadExposed = false, want true")
+	}
+	if err := s.Validate(); err != nil {
+		t.Fatalf("env_read_exposed with named entries should validate, got %v", err)
+	}
+}
+
+func TestSpec_Validate_RejectsEnvStarEntry(t *testing.T) {
+	yamlSrc := []byte(`
+name: legacy-wildcard
+runtime: deno
+trigger: { manual: true }
+permissions:
+  env:
+    - "*"
+    - DICODE_DATADIR
+`)
+	var s Spec
+	if err := yaml.Unmarshal(yamlSrc, &s); err != nil {
+		t.Fatal(err)
+	}
+	err := s.Validate()
+	if err == nil {
+		t.Fatal("a name-only \"*\" env entry must be rejected")
+	}
+	if !strings.Contains(err.Error(), "env_read_exposed") {
+		t.Errorf("error should point to env_read_exposed, got %v", err)
+	}
+}
+
 func TestSpec_RunResultOverride_Omitted(t *testing.T) {
 	yamlSrc := []byte(`
 name: test
@@ -614,5 +659,47 @@ func TestLoadDir_BuildinTasksParse(t *testing.T) {
 				t.Fatalf("LoadKindedDir(%s): %v", dir, err)
 			}
 		})
+	}
+}
+
+// TestScriptPath_SymlinkRejected verifies that ScriptPath returns empty string
+// when task.py (or any other script) is a symlink, preventing the daemon from
+// reading files outside the task directory via symlink traversal.
+func TestScriptPath_SymlinkRejected(t *testing.T) {
+	dir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "secret.py")
+	if err := os.WriteFile(outside, []byte("secret"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "task.py")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlinks not supported: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "task.yaml"), []byte("name: t\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	s := &Spec{TaskDir: dir, Runtime: "python"}
+	if got := s.ScriptPath(); got != "" {
+		t.Errorf("ScriptPath() = %q, want empty (symlink should be rejected)", got)
+	}
+}
+
+// TestScriptPath_SymlinkRejected_Deno mirrors the same test for the Deno runtime.
+func TestScriptPath_SymlinkRejected_Deno(t *testing.T) {
+	dir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "secret.js")
+	if err := os.WriteFile(outside, []byte("secret"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "task.js")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlinks not supported: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "task.yaml"), []byte("name: t\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	s := &Spec{TaskDir: dir, Runtime: RuntimeDeno}
+	if got := s.ScriptPath(); got != "" {
+		t.Errorf("ScriptPath() = %q, want empty (symlink should be rejected)", got)
 	}
 }

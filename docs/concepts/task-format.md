@@ -74,7 +74,8 @@ permissions:
 | `trigger.daemon` | bool | | Start on app start, restart on exit |
 | `trigger.restart` | string | | daemon only: `always` (default), `on-failure`, `never` |
 | `permissions` | object | | Explicit access grants — nothing is implicit |
-| `permissions.env` | list | | Env vars the script may read (see below) |
+| `permissions.env` | list | | Env vars the script may read (see below); for unrestricted env read use `env_read_exposed` |
+| `permissions.env_read_exposed` | bool | | Deno only: grant bare `--allow-env` (read any env var) for node-compat / npm tasks (see below) |
 | `permissions.fs` | list | | Filesystem access declarations (Deno: read+write; Python: write only) |
 | `permissions.fs[].path` | string | | Absolute or `~`-prefixed path |
 | `permissions.fs[].permission` | string | | `r`, `w`, or `rw` |
@@ -87,6 +88,8 @@ permissions:
 | `permissions.dicode.list_tasks` | bool | | Allow `dicode.list_tasks()` |
 | `permissions.dicode.get_runs` | bool | | Allow `dicode.get_runs()` |
 | `permissions.dicode.secrets_write` | bool | | Allow `dicode.secrets_set()` and `dicode.secrets_delete()` — write-only, no read |
+| `permissions.dicode.secrets_has` | bool | | Allow `dicode.secrets.has(key)` — boolean presence check, never returns the value |
+| `permissions.dicode.crypto` | list of strings | | Context names allowed for `dicode.crypto.encrypt/decrypt`; `["*"]` for all user-accessible contexts. Daemon-private contexts (e.g. `dicode/run-inputs/v1`) are never accessible to tasks. |
 | `params` | list | | Input parameters with defaults |
 | `params[].name` | string | | Parameter name |
 | `params[].description` | string | | Human-readable description |
@@ -1028,6 +1031,22 @@ export default async function main({ env }) {
 }
 ```
 
+#### `env_read_exposed` — grant unrestricted env read (Deno node-compat / npm escape hatch)
+
+`permissions.env_read_exposed: true` grants the Deno sandbox bare `--allow-env` (read **any** env var). It exists for node-compat / npm tasks: `import "npm:…"` pulls in transitive dependencies that read `process.env` keys (`NODE_ENV` and others) at module-init time, before your `main()` runs. The set is unpredictable per dependency, so pinning individual names is fragile — `import "npm:dicode-relay/start"`, for example, still throws `NotCapable` even with `NODE_ENV` explicitly declared.
+
+`env_read_exposed` widens *read permission* only. It is independent of the `env:` list — set the flag to allow reads, and keep the named/`secret:`/`from:` entries that your task actually needs **forwarded** (the flag grants permission to read a var but does not inject any values):
+
+```yaml
+permissions:
+  env_read_exposed: true   # allow reading any env var (node-compat import needs this)
+  env:
+    - DICODE_DATADIR        # still forwarded so the script's value is populated
+    - DICODE_VERSION
+```
+
+**Blast radius — why this is safe.** A task subprocess does not inherit the daemon environment. `runtime.SubprocessEnv` assembles the subprocess env as an allowlist: process basics + cache/proxy/TLS vars (`PATH`, `HOME`, `XDG_CACHE_HOME`, `DENO_DIR`, `HTTP(S)_PROXY`, `SSL_CERT_*`, …), the per-run IPC coordinates (`DICODE_SOCKET`/`DICODE_TOKEN`, which the task already holds), the host values of the task's own named entries, and its resolved secrets/values. The daemon master key and admin/MCP API keys are explicitly denylisted and never forwarded. So bare `--allow-env` lets the script read only that minimal, already-task-scoped env — it exposes nothing the task didn't already have. (Deno only; Python tasks read env through the SDK, not `--allow-env`, so `env_read_exposed` is a Deno-runtime concept.)
+
 #### Example 5 — `if_missing`: run a prereq task when a secret is absent
 
 Useful when a secret is populated by an interactive flow (OAuth, device-code, etc.). If the secret is already in the store, the entry resolves normally and `if_missing` is a no-op. If it's missing, the trigger engine fires the declared prereq task in chain mode *before* the main task dispatches; if the prereq succeeds the secret is re-resolved and the main task runs.
@@ -1101,6 +1120,8 @@ All `dicode.*` and `mcp.*` globals are **denied by default**. Each capability mu
 | `list_tasks: true` | `dicode.list_tasks()` |
 | `get_runs: true` | `dicode.get_runs()` |
 | `secrets_write: true` | `dicode.secrets_set(key, value)` and `dicode.secrets_delete(key)` — **write-only**, tasks can never read secrets back |
+| `secrets_has: true` | `dicode.secrets.has(key)` — boolean presence check only; never reveals the secret value |
+| `crypto: ["ctx"]` | `dicode.crypto.encrypt(ctx, data)` / `dicode.crypto.decrypt(ctx, blob)` — AES-256 encrypt/decrypt under a context-scoped sub-key; `["*"]` allows all contexts. **Daemon-private contexts (currently `dicode/run-inputs/v1`) are always denied even when `["*"]` is granted.** |
 
 ```yaml
 # An agent task that can call other tasks:

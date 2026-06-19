@@ -54,6 +54,7 @@ func TestContentHashFoldsResolvedSecurityFields(t *testing.T) {
 
 	variants := map[string]func(*task.Spec){
 		"net wildcard":     func(s *task.Spec) { s.Permissions.Net = []string{"*"} },
+		"env read exposed": func(s *task.Spec) { s.Permissions.EnvReadExposed = true },
 		"fs write grant":   func(s *task.Spec) { s.Permissions.FS = []task.FSEntry{{Path: "/etc", Permission: "w"}} },
 		"dicode tasks":     func(s *task.Spec) { s.Permissions.Dicode = &task.DicodePermissions{Tasks: []string{"*"}} },
 		"runtime swap":     func(s *task.Spec) { s.Runtime = task.Runtime("python") },
