@@ -531,8 +531,33 @@ func expandHome(p string) string {
 	return p
 }
 
+// findDenoLockFile walks up from dir (at most maxParents levels) looking for
+// a deno.lock file. Returns the absolute path on the first match, or "".
+// Walking up covers tasks/buildin/<name>/ → tasks/deno.lock (2 levels up).
+func findDenoLockFile(dir string, maxParents int) string {
+	current := dir
+	for i := 0; i <= maxParents; i++ {
+		candidate := filepath.Join(current, "deno.lock")
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+	return ""
+}
+
 func buildDenoArgs(spec *task.Spec, socketPath, shimPath, runnerPath string) []string {
 	args := []string{"run"}
+
+	// Enforce the lockfile when one exists at or near the task directory.
+	// --frozen prevents Deno from silently upgrading caret-ranged deps on each run.
+	if lf := findDenoLockFile(spec.TaskDir, 3); lf != "" {
+		args = append(args, "--lock="+lf, "--frozen")
+	}
 
 	// Network is deny-by-default: omit or [] = deny all; ["*"] = unrestricted;
 	// named hosts = allowlist. The IPC socket itself uses a Unix socket

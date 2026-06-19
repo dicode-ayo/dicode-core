@@ -185,7 +185,7 @@ Per-request overrides work too — just pass `model` / `base_url` / `api_key_env
 
 ## Security notes
 
-- **The agent has `permissions.dicode.tasks: ["*"]` by default.** Any task registered with the runtime is callable. On a public or untrusted network this is a keys-to-the-kingdom endpoint — the chat page is currently unauthenticated pending [issue #96](https://github.com/dicode-ayo/dicode-core/issues/96) (return-to-origin auth UX for protected webhooks). Do **not** ship this in an alpha release without fixing #96. Local dev on localhost-only is fine.
+- **The agent webhook requires authentication.** Both `buildin/ai-agent` (`/hooks/ai`) and `buildin/ai-agent-claude-cli` (`/hooks/ai-claude`) set `trigger.auth: true`, so callers must present a valid dicode session cookie or API key. Anonymous POSTs are rejected before the task runs. Task `permissions.dicode.tasks: ["*"]` is scoped behind that auth gate.
 - **API keys never reach the model.** Credentials are resolved from `Deno.env.get(api_key_env)` at task start and used only to construct the OpenAI client. They are never included in the conversation history, never returned to the caller, and never logged.
 - **Model output is rendered as `textContent` in the chat UI**, never `innerHTML`. Tool call arguments are also string-stringified before being passed to `dicode.run_task()`, which itself receives the already-whitelisted task id map.
 - **The session KV is per-task and isolated.** Session blobs are stored under the `buildin/ai-agent` task namespace; they are not visible to any other task unless you explicitly grant cross-task KV access (which dicode does not support today).

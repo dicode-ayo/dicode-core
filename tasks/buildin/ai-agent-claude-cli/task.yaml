@@ -2,12 +2,6 @@ apiVersion: dicode/v1
 kind: Task
 name: "AI Agent (Claude CLI)"
 description: |
-  ⚠️  WARNING: the webhook (/hooks/ai-claude) is UNAUTHENTICATED by default.
-  Pending #96 for per-task webhook auth, anyone host-reachable can POST a
-  prompt and drain the operator's Claude subscription rate window. Run
-  with `server.auth: true` in dicode.yaml to gate the entire HTTP surface
-  behind the session-cookie + API-key auth chain.
-
   Wraps the official `claude` CLI (https://code.claude.com) so dicode tasks
   can drive Claude with the operator's Claude.ai Pro/Max subscription
   instead of paying per-token via the Anthropic API.
@@ -24,7 +18,7 @@ runtime: deno
 
 trigger:
   webhook: /hooks/ai-claude
-  # auth: true omitted — webhook auth for tasks is not yet supported.
+  auth: true
 
 params:
   prompt:

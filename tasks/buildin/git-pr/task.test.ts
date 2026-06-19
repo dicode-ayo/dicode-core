@@ -17,7 +17,6 @@ echo "https://github.com/example/repo/pull/123"
     Deno.env.set("PATH", `${tmp}:${origPath}`);
     Deno.env.set("GH_TOKEN", "stub-token");
 
-    // Create a stub clone directory so readDir doesn't fail
     const dataDir = await Deno.makeTempDir();
     const cloneRoot = `${dataDir}/dev-clones/user-tasks`;
     const cloneDir = `${cloneRoot}/run-123`;
@@ -32,8 +31,8 @@ echo "https://github.com/example/repo/pull/123"
                 base: "main",
                 title: "auto-fix",
                 body: "",
+                clone_path: cloneDir,
             })),
-            // dicode shim mock — task.ts should not call dicode.* in this test
         } as any);
         assertEquals(result.ok, true);
         assertEquals(result.url, "https://github.com/example/repo/pull/123");
@@ -110,7 +109,6 @@ exit 1
     const origPath = Deno.env.get("PATH") ?? "";
     Deno.env.set("PATH", `${tmp}:${origPath}`);
 
-    // Create a stub clone directory so readDir doesn't fail
     const dataDir = await Deno.makeTempDir();
     const cloneRoot = `${dataDir}/dev-clones/user-tasks`;
     const cloneDir = `${cloneRoot}/run-456`;
@@ -121,10 +119,30 @@ exit 1
         const result = await main({
             params: new Map(Object.entries({
                 source_id: "user-tasks", branch: "fix/abc", base: "main", title: "x", body: "",
+                clone_path: cloneDir,
             })),
         } as any);
         assertEquals(result.ok, false);
     } finally {
         Deno.env.set("PATH", origPath);
+    }
+});
+
+Deno.test("git-pr: hard-fails when clone_path is omitted", async () => {
+    Deno.env.set("GH_TOKEN", "stub-token");
+    Deno.env.set("DICODE_DATA_DIR", await Deno.makeTempDir());
+    const result = await main({
+        params: new Map(Object.entries({
+            source_id: "user-tasks",
+            branch: "fix/abc",
+            base: "main",
+            title: "x",
+            body: "",
+            // clone_path deliberately omitted — must hard-fail
+        })),
+    } as any);
+    assertEquals(result.ok, false);
+    if (!String(result.error ?? "").includes("clone_path is required")) {
+        throw new Error(`expected clone_path-required error, got ${result.error}`);
     }
 });

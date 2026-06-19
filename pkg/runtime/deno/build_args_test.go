@@ -1,6 +1,8 @@
 package deno
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -102,5 +104,136 @@ func TestBuildDenoArgs_Env_NamedOnlyNeverBare(t *testing.T) {
 	}
 	if got == "--allow-env" {
 		t.Errorf("named entries without env_read_exposed must not grant bare --allow-env, got %q", got)
+	}
+}
+
+// hasArg returns true if args contains the exact string s.
+func hasArg(args []string, s string) bool {
+	for _, a := range args {
+		if a == s {
+			return true
+		}
+	}
+	return false
+}
+
+// hasArgPrefix returns true if any arg starts with prefix.
+func hasArgPrefix(args []string, prefix string) bool {
+	for _, a := range args {
+		if strings.HasPrefix(a, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestFindDenoLockFile_TaskDir: lockfile in the task dir itself is found at depth 0.
+func TestFindDenoLockFile_TaskDir(t *testing.T) {
+	dir := t.TempDir()
+	lock := filepath.Join(dir, "deno.lock")
+	if err := os.WriteFile(lock, []byte("{}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got := findDenoLockFile(dir, 3)
+	if got != lock {
+		t.Errorf("expected %q, got %q", lock, got)
+	}
+}
+
+// TestFindDenoLockFile_ParentDir: lockfile 2 levels up (tasks/deno.lock pattern).
+func TestFindDenoLockFile_ParentDir(t *testing.T) {
+	root := t.TempDir()
+	taskDir := filepath.Join(root, "buildin", "my-task")
+	if err := os.MkdirAll(taskDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	lock := filepath.Join(root, "deno.lock")
+	if err := os.WriteFile(lock, []byte("{}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got := findDenoLockFile(taskDir, 3)
+	if got != lock {
+		t.Errorf("expected %q, got %q", lock, got)
+	}
+}
+
+// TestFindDenoLockFile_Missing: no lockfile → empty string.
+func TestFindDenoLockFile_Missing(t *testing.T) {
+	dir := t.TempDir()
+	got := findDenoLockFile(dir, 3)
+	if got != "" {
+		t.Errorf("expected empty string when no lockfile, got %q", got)
+	}
+}
+
+// TestFindDenoLockFile_BeyondMaxParents: lockfile exists but is beyond the search depth.
+func TestFindDenoLockFile_BeyondMaxParents(t *testing.T) {
+	root := t.TempDir()
+	// 4 levels deep: root/a/b/c/d/
+	taskDir := filepath.Join(root, "a", "b", "c", "d")
+	if err := os.MkdirAll(taskDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	lock := filepath.Join(root, "deno.lock")
+	if err := os.WriteFile(lock, []byte("{}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// maxParents=3 means we walk 4 dirs (taskDir + 3 parents) — root is 4 up, so not found.
+	got := findDenoLockFile(taskDir, 3)
+	if got != "" {
+		t.Errorf("expected empty string when lockfile beyond maxParents, got %q", got)
+	}
+}
+
+// TestBuildDenoArgs_LockFrozen_WithLockfile: when a deno.lock exists near the
+// task dir, --lock=<path> and --frozen must appear in the args.
+func TestBuildDenoArgs_LockFrozen_WithLockfile(t *testing.T) {
+	root := t.TempDir()
+	taskDir := filepath.Join(root, "buildin", "relay-client")
+	if err := os.MkdirAll(taskDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	lock := filepath.Join(root, "deno.lock")
+	if err := os.WriteFile(lock, []byte("{}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	spec := &task.Spec{
+		ID: "test", Name: "test", Runtime: task.RuntimeDeno,
+		Trigger: task.TriggerConfig{Manual: true}, Timeout: 30 * time.Second,
+		TaskDir: taskDir,
+	}
+	args := buildDenoArgs(spec, "/run/sock", "/shim.ts", "/runner.ts")
+
+	if !hasArgPrefix(args, "--lock=") {
+		t.Error("expected --lock=<path> arg when deno.lock exists")
+	}
+	if !hasArg(args, "--frozen") {
+		t.Error("expected --frozen arg when deno.lock exists")
+	}
+	// Verify the lock path points to the actual file.
+	for _, a := range args {
+		if strings.HasPrefix(a, "--lock=") {
+			if a != "--lock="+lock {
+				t.Errorf("--lock path: got %q, want %q", a, "--lock="+lock)
+			}
+		}
+	}
+}
+
+// TestBuildDenoArgs_LockFrozen_NoLockfile: no --lock or --frozen when no deno.lock found.
+func TestBuildDenoArgs_LockFrozen_NoLockfile(t *testing.T) {
+	spec := &task.Spec{
+		ID: "test", Name: "test", Runtime: task.RuntimeDeno,
+		Trigger: task.TriggerConfig{Manual: true}, Timeout: 30 * time.Second,
+		TaskDir: t.TempDir(),
+	}
+	args := buildDenoArgs(spec, "/run/sock", "/shim.ts", "/runner.ts")
+
+	if hasArgPrefix(args, "--lock=") || hasArg(args, "--lock") {
+		t.Error("--lock must not appear when no deno.lock is present")
+	}
+	if hasArg(args, "--frozen") {
+		t.Error("--frozen must not appear when no deno.lock is present")
 	}
 }

@@ -40,36 +40,16 @@ export default async function main(opts: { params: Map<string, string> }) {
                     `${Deno.env.get("HOME")}/.dicode`;
     const cloneRoot = `${dataDir}/dev-clones/${sourceID}`;
 
-    let workdir: string;
-    if (clonePath) {
-        // Validate that the explicit path is rooted inside cloneRoot —
-        // defense-in-depth even though the caller is normally trusted.
-        if (!clonePath.startsWith(cloneRoot + "/") && clonePath !== cloneRoot) {
-            return { ok: false, error: `clone_path must be rooted at ${cloneRoot}; got ${clonePath}` };
-        }
-        workdir = clonePath;
-    } else {
-        // Legacy fallback: scan dev-clones/<source_id>/* for the first
-        // directory entry. Brittle if a previous run left an orphan
-        // clone; warn loudly so the caller migrates.
-        workdir = cloneRoot;
-        let found = false;
-        try {
-            for await (const entry of Deno.readDir(cloneRoot)) {
-                if (entry.isDirectory) {
-                    workdir = `${cloneRoot}/${entry.name}`;
-                    found = true;
-                    break;
-                }
-            }
-        } catch (e) {
-            return { ok: false, error: `clone root unreadable: ${e}` };
-        }
-        if (!found) {
-            return { ok: false, error: `no clone directory under ${cloneRoot}; pass clone_path explicitly` };
-        }
-        console.warn(`git-pr: clone_path not provided; picked ${workdir} via readDir scan. Pass clone_path explicitly to avoid orphan-clone races.`);
+    if (!clonePath) {
+        return { ok: false, error: "clone_path is required; pass the path returned by dicode.sources.set_dev_mode" };
     }
+
+    // Validate that the explicit path is rooted inside cloneRoot —
+    // defense-in-depth even though the caller is normally trusted.
+    if (!clonePath.startsWith(cloneRoot + "/") && clonePath !== cloneRoot) {
+        return { ok: false, error: `clone_path must be rooted at ${cloneRoot}; got ${clonePath}` };
+    }
+    const workdir = clonePath;
 
     const cmd = new Deno.Command("gh", {
         args: ["pr", "create",
