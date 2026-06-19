@@ -533,9 +533,11 @@ func expandHome(p string) string {
 
 // findDenoLockFile walks up from dir (at most maxParents levels) looking for
 // a deno.lock file. Returns the absolute path on the first match, or "".
-// Walking up covers tasks/buildin/<name>/ → tasks/deno.lock (2 levels up).
+// maxParents=2 covers the buildin layout: tasks/buildin/<name>/ → tasks/deno.lock.
+// Note: i <= maxParents means the loop runs maxParents+1 times, visiting the
+// starting dir and maxParents ancestors.
 func findDenoLockFile(dir string, maxParents int) string {
-	current := dir
+	current := filepath.Clean(dir)
 	for i := 0; i <= maxParents; i++ {
 		candidate := filepath.Join(current, "deno.lock")
 		if _, err := os.Stat(candidate); err == nil {
@@ -553,10 +555,14 @@ func findDenoLockFile(dir string, maxParents int) string {
 func buildDenoArgs(spec *task.Spec, socketPath, shimPath, runnerPath string) []string {
 	args := []string{"run"}
 
-	// Enforce the lockfile when one exists at or near the task directory.
-	// --frozen prevents Deno from silently upgrading caret-ranged deps on each run.
-	if lf := findDenoLockFile(spec.TaskDir, 3); lf != "" {
-		args = append(args, "--lock="+lf, "--frozen")
+	// Enforce the lockfile when a deno.lock is found at or near the task directory.
+	// Skip when the task has its own deno.json: that file controls lock configuration
+	// (including "lock": false opt-out) and Deno respects it without our help.
+	// maxParents=2 covers tasks/buildin/<name>/ → tasks/deno.lock.
+	if _, err := os.Stat(filepath.Join(spec.TaskDir, "deno.json")); os.IsNotExist(err) {
+		if lf := findDenoLockFile(spec.TaskDir, 2); lf != "" {
+			args = append(args, "--lock="+lf, "--frozen")
+		}
 	}
 
 	// Network is deny-by-default: omit or [] = deny all; ["*"] = unrestricted;
