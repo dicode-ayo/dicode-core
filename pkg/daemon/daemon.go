@@ -425,6 +425,13 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	// bootstrap then would re-seed the attacker's pending change as approved —
 	// the #402 escalation — so bootstrap is skipped and the inventory is held
 	// pending for explicit re-approval.
+	//
+	// An existing lock proves first-run is over, so the marker MUST track it:
+	// without this backfill an adopted lock (operator-shipped/restored, or one
+	// written before a crash interrupted the first bootstrap) would leave the
+	// marker unset, and a later lock-deletion would satisfy shouldBootstrap and
+	// re-seed as approved. Backfilling keeps "lock present ⇒ marker present" so
+	// the fail-closed branch above always fires after the lock vanishes.
 	var bootstrapTimer *time.Timer
 	if shouldBootstrap(lockExisted, markerExists, gatePolicy.Enabled) {
 		approvalGate.SetBootstrap(true)
@@ -439,6 +446,12 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 		})
 		log.Info("approval gate: no dicode.lock — seeding current tasks as approved (first-run bootstrap); changes after startup require approval",
 			zap.String("lock", lockPath))
+	} else if gatePolicy.Enabled && lockExisted && !markerExists {
+		if err := setBootstrapMarker(ctx, database); err != nil {
+			log.Warn("approval gate: failed to persist bootstrap marker for an adopted lock; "+
+				"a later lock-loss may fail open rather than closed",
+				zap.Error(err))
+		}
 	} else if gatePolicy.Enabled && !lockExisted && markerExists {
 		log.Warn("approval gate: dicode.lock is missing despite a prior run — failing closed; "+
 			"all changed tasks require explicit re-approval. If the lock was not removed deliberately, "+

@@ -69,6 +69,24 @@ func TestBootstrapMarkerRoundTrip(t *testing.T) {
 	}
 }
 
+// TestShouldBootstrap_AdoptedLockBackfillFailsClosed documents the fail-closed
+// invariant end-to-end: an adopted lock (present at startup, e.g. operator-
+// shipped or written before a crash interrupted the first bootstrap) backfills
+// the marker, so a later lock-loss is correctly held pending instead of being
+// re-seeded as approved (the #402 escalation). Without the backfill, the
+// post-deletion state would be (lock absent, marker absent) → bootstrap re-runs.
+func TestShouldBootstrap_AdoptedLockBackfillFailsClosed(t *testing.T) {
+	// Startup with a lock present and no marker yet: the gate must not bootstrap.
+	if shouldBootstrap(true, false, true) {
+		t.Fatal("adopting an existing lock must not enter bootstrap")
+	}
+	// The adopt path backfills the marker; a subsequent lock-loss then presents
+	// (lock absent, marker present), which must fail closed.
+	if shouldBootstrap(false, true, true) {
+		t.Fatal("lock lost after marker backfill must fail closed, not re-seed as approved")
+	}
+}
+
 // TestBootstrapMarkerKeyIsTaskUnforgeable guards the invariant that the marker
 // key carries no colon. Task kv rows are namespaced "<taskID>:<key>" by the IPC
 // server, so any task-reachable row contains a colon; a colon-free key can
