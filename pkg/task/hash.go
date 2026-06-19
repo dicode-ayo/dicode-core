@@ -10,12 +10,38 @@ import (
 	"sort"
 )
 
-// Hash computes a content hash over every regular file under dir,
-// recursively, in sorted dir-relative path order. The runtime allows the
-// task script to import any sibling file (the Deno sandbox allow-reads the
-// whole task dir; Python imports sibling modules), so every in-dir file is
-// reachable code and must be part of the fingerprint — the approval gate
-// (dicode.lock) keys re-approval off this hash.
+// maxHashedFileBytes bounds the contents read into the digest per file. The
+// hash runs on every reconciler poll (~30s), so a committed large asset would
+// re-read its full bytes each cycle. Files at or below this size are hashed by
+// content; larger files fold in only a size+mtime descriptor — code files are
+// small, so change-detection for task logic stays exact while bulk assets cost
+// a stat instead of a full read.
+const maxHashedFileBytes = 1 << 20 // 1 MiB
+
+// heavyDirs are skipped wholesale during the walk: they hold no task code and
+// can dominate walk cost. node_modules in particular can be a committed tree of
+// thousands of files.
+var heavyDirs = map[string]bool{
+	"node_modules": true,
+	".git":         true,
+}
+
+// Hash computes a content hash over the regular files under dir, recursively,
+// in sorted dir-relative path order. The runtime allows the task script to
+// import any sibling file (the Deno sandbox allow-reads the whole task dir;
+// Python imports sibling modules), so in-dir files are reachable code and form
+// the fingerprint the approval gate (dicode.lock) keys re-approval off.
+//
+// Two bounded exclusions keep the per-poll cost flat without losing
+// change-detection for task logic, which lives in small, top-level files:
+//   - Files larger than maxHashedFileBytes fold in a size+mtime descriptor
+//     instead of their contents (see the const); a content edit that preserves
+//     both size and mtime is therefore not detected.
+//   - The node_modules and .git subtrees are skipped wholesale (see heavyDirs).
+//
+// Consequently, code reachable only through those exclusions can change without
+// re-triggering approval — acceptable under the trusted-author model, where the
+// operator approves the source, not every transitive vendored file.
 //
 // Symlinks are never read through: the link's target string is folded in
 // instead, so retargeting a link changes the hash without ever reading a
@@ -36,6 +62,9 @@ func Hash(dir string) (string, error) {
 			return err
 		}
 		if d.IsDir() {
+			if path != dir && heavyDirs[d.Name()] {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		rel, err := filepath.Rel(dir, path)
@@ -73,11 +102,20 @@ func Hash(dir string) (string, error) {
 		if e.isLink {
 			h.Write([]byte(e.target))
 		} else {
-			data, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(e.rel)))
+			abs := filepath.Join(dir, filepath.FromSlash(e.rel))
+			info, err := os.Stat(abs)
 			if err != nil {
-				return "", fmt.Errorf("hash %s: %w", filepath.Join(dir, e.rel), err)
+				return "", fmt.Errorf("hash %s: %w", abs, err)
 			}
-			h.Write(data)
+			if info.Size() > maxHashedFileBytes {
+				fmt.Fprintf(h, "%d\x00%d", info.Size(), info.ModTime().UnixNano())
+			} else {
+				data, err := os.ReadFile(abs)
+				if err != nil {
+					return "", fmt.Errorf("hash %s: %w", abs, err)
+				}
+				h.Write(data)
+			}
 		}
 		h.Write([]byte{0})
 	}
