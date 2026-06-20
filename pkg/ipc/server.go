@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
+	"runtime"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -74,6 +76,7 @@ type Server struct {
 
 	ctx        context.Context
 	socketPath string
+	socketDir  string // per-run 0700 parent dir; empty on Windows
 	listener   net.Listener
 
 	connWG   sync.WaitGroup // tracks in-flight handleConn goroutines
@@ -166,21 +169,47 @@ func (s *Server) SetSecretOutput(ch chan map[string]string) {
 
 // Start creates the Unix socket and begins accepting connections.
 // Returns the socket path and a capability token to pass to the subprocess.
+//
+// On non-Windows platforms the socket is placed inside a per-run directory
+// created with mode 0700 (e.g. /tmp/dicode-<runID>/ipc.sock). This removes
+// the brief pre-chmod window and makes the socket unreachable by other local
+// users independent of the umask at creation time. On Windows the flat
+// /tmp/dicode-<runID>.sock path is kept because AF_UNIX directory semantics
+// differ there.
 func (s *Server) Start(ctx context.Context) (socketPath, token string, err error) {
 	s.ctx = ctx
-	socketPath = fmt.Sprintf("/tmp/dicode-%s.sock", s.runID)
-	_ = os.Remove(socketPath)
+
+	if runtime.GOOS == "windows" {
+		socketPath = fmt.Sprintf("/tmp/dicode-%s.sock", s.runID)
+		_ = os.Remove(socketPath)
+	} else {
+		dir := filepath.Join("/tmp", "dicode-"+s.runID)
+		// Remove any leftover dir from a previous (crashed) run.
+		_ = os.RemoveAll(dir)
+		if err := os.Mkdir(dir, 0700); err != nil {
+			return "", "", fmt.Errorf("ipc: mkdir socket dir: %w", err)
+		}
+		s.socketDir = dir
+		socketPath = filepath.Join(dir, "ipc.sock")
+	}
 
 	l, err := net.Listen("unix", socketPath)
 	if err != nil {
+		if s.socketDir != "" {
+			_ = os.RemoveAll(s.socketDir)
+		}
 		return "", "", fmt.Errorf("ipc: listen %s: %w", socketPath, err)
 	}
-	// Restrict to the owner so other local users cannot connect to the
-	// per-run socket. The token handshake is the primary authentication;
-	// any connect through the brief window before this chmod still cannot
-	// complete the handshake without the run-bound token.
+	// On Windows the socket is created in a shared /tmp without a 0700
+	// parent dir, so we still chmod it 0600 to restrict access. On Unix the
+	// 0700 parent dir already makes the socket unreachable; chmod is a
+	// belt-and-suspenders extra that also closes the brief pre-chmod window
+	// on non-Windows platforms that lack sticky-bit /tmp behaviour.
 	if err := os.Chmod(socketPath, 0600); err != nil {
 		_ = l.Close()
+		if s.socketDir != "" {
+			_ = os.RemoveAll(s.socketDir)
+		}
 		return "", "", fmt.Errorf("ipc: chmod socket: %w", err)
 	}
 	s.socketPath = socketPath
@@ -269,7 +298,11 @@ func (s *Server) Stop() {
 	if s.listener != nil {
 		_ = s.listener.Close()
 	}
-	if s.socketPath != "" {
+	// On Unix the socket lives inside a per-run 0700 dir; remove the whole
+	// tree. On Windows (socketDir == "") fall back to removing the flat file.
+	if s.socketDir != "" {
+		_ = os.RemoveAll(s.socketDir)
+	} else if s.socketPath != "" {
 		_ = os.Remove(s.socketPath)
 	}
 

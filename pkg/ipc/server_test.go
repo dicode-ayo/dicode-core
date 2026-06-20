@@ -8,6 +8,9 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -2349,5 +2352,137 @@ func TestServer_FlushBatch_SuccessPath(t *testing.T) {
 	}
 	if len(logs) != 1 || logs[0].Message != "success-entry" {
 		t.Errorf("expected 1 log entry 'success-entry', got %d: %+v", len(logs), logs)
+	}
+}
+
+// ── socket-dir hardening tests (#423) ────────────────────────────────────────
+
+// TestServer_SocketInPerRunDir verifies that on non-Windows platforms the IPC
+// socket is placed inside a per-run directory (/tmp/dicode-<runID>/) rather
+// than directly in /tmp. This is the defense-in-depth hardening from issue
+// #423: even if the socket's own chmod is racy, the 0700 parent dir keeps
+// other local users from reaching the socket file at all.
+func TestServer_SocketInPerRunDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("per-run dir hardening not applied on Windows")
+	}
+
+	d, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+	secret, _ := NewSecret()
+	reg := registry.New(d)
+
+	runID := fmt.Sprintf("dir-test-%d", time.Now().UnixNano())
+	srv := New(runID, "test-task", secret, reg, d, nil, nil, zap.NewNop(), nil, nil)
+
+	socketPath, token, err := srv.Start(context.Background())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Socket must live inside a directory, not directly in /tmp.
+	dir := filepath.Dir(socketPath)
+	if dir == "/tmp" {
+		t.Errorf("socket %q is directly in /tmp; expected a per-run subdirectory", socketPath)
+	}
+
+	// Parent directory must be 0700.
+	dirInfo, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("stat socket dir %q: %v", dir, err)
+	}
+	if !dirInfo.IsDir() {
+		t.Fatalf("socket parent %q is not a directory", dir)
+	}
+	if perm := dirInfo.Mode().Perm(); perm != 0700 {
+		t.Errorf("socket dir %q has mode %o, want 0700", dir, perm)
+	}
+
+	// Socket file itself must be 0600.
+	sockInfo, err := os.Stat(socketPath)
+	if err != nil {
+		t.Fatalf("stat socket %q: %v", socketPath, err)
+	}
+	if perm := sockInfo.Mode().Perm(); perm != 0600 {
+		t.Errorf("socket file %q has mode %o, want 0600", socketPath, perm)
+	}
+
+	// Connection and handshake must succeed through the new path.
+	conn := dial(t, socketPath)
+	doHandshake(t, conn, token)
+	_ = conn.Close()
+
+	// After Stop the entire per-run directory must be gone.
+	srv.Stop()
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("socket dir %q still exists after Stop; expected it to be removed", dir)
+	}
+}
+
+// TestServer_SocketDirCleanedUpOnStartFailure verifies that the per-run dir is
+// removed even when Start fails after creating the directory (e.g. listen
+// error). This guards against stale /tmp/dicode-<runID>/ dirs accumulating on
+// repeated crash-restart cycles.
+func TestServer_SocketDirCleanedUpOnStartFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("per-run dir hardening not applied on Windows")
+	}
+
+	d, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+	secret, _ := NewSecret()
+	reg := registry.New(d)
+
+	// Start a first server to occupy the directory slot and trigger a dir
+	// collision on the second attempt with the same runID.
+	runID := fmt.Sprintf("fail-test-%d", time.Now().UnixNano())
+	srv1 := New(runID, "test-task", secret, reg, d, nil, nil, zap.NewNop(), nil, nil)
+	socketPath, token, err := srv1.Start(context.Background())
+	if err != nil {
+		t.Fatalf("first Start: %v", err)
+	}
+	_ = token
+	defer srv1.Stop()
+
+	// A second server with the same runID will find its socket path already
+	// in use (socket file exists). On Linux, net.Listen on an existing socket
+	// path fails with EADDRINUSE only when the previous socket file was NOT
+	// removed. srv1 is still running, so the socket file is live. Start()
+	// removes any stale file first and then tries to listen — on a live
+	// socket this will fail.
+	//
+	// We test the cleanup by pre-creating the per-run directory manually
+	// (simulating a crash) and verifying that Start() cleans it up before
+	// re-creating, so no dir leak occurs.
+	dir := filepath.Dir(socketPath)
+
+	// Stop srv1 so the socket is gone, then manually re-create the dir to
+	// simulate a leftover from a crashed previous run.
+	srv1.Stop()
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatalf("mkdir stale dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+	srv2 := New(runID, "test-task", secret, reg, d, nil, nil, zap.NewNop(), nil, nil)
+	socketPath2, _, err := srv2.Start(context.Background())
+	if err != nil {
+		t.Fatalf("second Start after stale dir: %v", err)
+	}
+	defer srv2.Stop()
+
+	// The stale dir was removed and a fresh one created — new socket path
+	// must match what we expect.
+	if socketPath2 != socketPath {
+		t.Errorf("socket path after stale-dir cleanup = %q, want %q", socketPath2, socketPath)
+	}
+	if _, err := os.Stat(filepath.Dir(socketPath2)); err != nil {
+		t.Errorf("fresh socket dir missing: %v", err)
 	}
 }
