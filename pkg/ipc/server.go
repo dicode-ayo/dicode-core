@@ -279,7 +279,11 @@ func (s *Server) Start(ctx context.Context) (socketPath, token string, err error
 	token, err = IssueToken(s.secret, "task:"+s.taskID, s.runID, caps)
 	if err != nil {
 		_ = l.Close()
-		_ = os.Remove(socketPath)
+		if s.socketDir != "" {
+			_ = os.RemoveAll(s.socketDir)
+		} else {
+			_ = os.Remove(socketPath)
+		}
 		return "", "", fmt.Errorf("ipc: issue token: %w", err)
 	}
 
