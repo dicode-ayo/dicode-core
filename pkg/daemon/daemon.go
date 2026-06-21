@@ -54,7 +54,7 @@ const bootstrapSettle = 10 * time.Second
 func Run(configPath string, portOverride int, version string) {
 	// Signal-aware context covers both onboarding and the main daemon loop
 	// so Ctrl-C during the wizard cancels the ephemeral HTTP listener.
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer cancel()
 
 	// First-run onboarding: if no config exists, run the wizard.

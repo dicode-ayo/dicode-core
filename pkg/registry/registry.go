@@ -438,34 +438,43 @@ func (r *Registry) queryRuns(ctx context.Context, whereAndLimit string, args []a
 // CleanupStaleRuns marks any "running" runs as "cancelled".
 // Called at startup to handle runs from a previous session that never finished.
 // Returns the distinct task IDs that had stale runs so callers can restart them.
+//
+// The SELECT and UPDATE run inside a transaction so a run that starts between
+// the two statements cannot be erroneously cancelled.
 func (r *Registry) CleanupStaleRuns(ctx context.Context) ([]string, error) {
 	var taskIDs []string
-	err := r.db.Query(ctx,
-		`SELECT DISTINCT task_id FROM runs WHERE status = ?`,
-		[]any{StatusRunning},
-		func(rows db.Scanner) error {
-			for rows.Next() {
-				var id string
-				if err := rows.Scan(&id); err != nil {
-					return err
+	err := r.db.Tx(ctx, func(tx db.DB) error {
+		taskIDs = nil // reset on retry
+		if err := tx.Query(ctx,
+			`SELECT DISTINCT task_id FROM runs WHERE status = ?`,
+			[]any{StatusRunning},
+			func(rows db.Scanner) error {
+				for rows.Next() {
+					var id string
+					if err := rows.Scan(&id); err != nil {
+						return err
+					}
+					taskIDs = append(taskIDs, id)
 				}
-				taskIDs = append(taskIDs, id)
-			}
+				return nil
+			},
+		); err != nil {
+			return fmt.Errorf("query stale runs: %w", err)
+		}
+		if len(taskIDs) == 0 {
 			return nil
-		},
-	)
+		}
+		now := time.Now().UnixMilli()
+		if err := tx.Exec(ctx,
+			`UPDATE runs SET status = ?, finished_at = ? WHERE status = ?`,
+			StatusCancelled, now, StatusRunning,
+		); err != nil {
+			return fmt.Errorf("cancel stale runs: %w", err)
+		}
+		return nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("query stale runs: %w", err)
-	}
-	if len(taskIDs) == 0 {
-		return nil, nil
-	}
-	now := time.Now().UnixMilli()
-	if err := r.db.Exec(ctx,
-		`UPDATE runs SET status = ?, finished_at = ? WHERE status = ?`,
-		StatusCancelled, now, StatusRunning,
-	); err != nil {
-		return nil, fmt.Errorf("cancel stale runs: %w", err)
+		return nil, err
 	}
 	return taskIDs, nil
 }
@@ -564,31 +573,37 @@ func (r *Registry) UnpinRunInput(ctx context.Context, runID string) error {
 // Called at engine startup to recover from daemons that crashed mid-fix
 // before unpinning. A pinned + finished row would otherwise prevent the
 // retention sweep from ever collecting that input blob.
+//
+// The COUNT and UPDATE run inside a transaction so a run that completes
+// between the two statements cannot be missed or double-cleared.
 func (r *Registry) SweepStalePins(ctx context.Context) (int, error) {
 	// SQLite doesn't return RowsAffected through the DB.Exec wrapper without
 	// an extra round-trip. Count first, then update — one extra query is
 	// fine at startup.
 	var n int
-	err := r.db.Query(ctx,
-		`SELECT COUNT(*) FROM runs WHERE input_pinned = 1 AND status != ?`,
-		[]any{StatusRunning},
-		func(rows db.Scanner) error {
-			if rows.Next() {
-				return rows.Scan(&n)
-			}
+	err := r.db.Tx(ctx, func(tx db.DB) error {
+		n = 0 // reset on retry
+		if err := tx.Query(ctx,
+			`SELECT COUNT(*) FROM runs WHERE input_pinned = 1 AND status != ?`,
+			[]any{StatusRunning},
+			func(rows db.Scanner) error {
+				if rows.Next() {
+					return rows.Scan(&n)
+				}
+				return nil
+			},
+		); err != nil {
+			return err
+		}
+		if n == 0 {
 			return nil
-		},
-	)
+		}
+		return tx.Exec(ctx,
+			`UPDATE runs SET input_pinned = 0 WHERE input_pinned = 1 AND status != ?`,
+			StatusRunning,
+		)
+	})
 	if err != nil {
-		return 0, err
-	}
-	if n == 0 {
-		return 0, nil
-	}
-	if err := r.db.Exec(ctx,
-		`UPDATE runs SET input_pinned = 0 WHERE input_pinned = 1 AND status != ?`,
-		StatusRunning,
-	); err != nil {
 		return 0, err
 	}
 	return n, nil

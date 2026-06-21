@@ -643,13 +643,19 @@ func (r *PipelineRunner) finish(status, reason string, ret interface{}) {
 	defer cancel()
 	if ret != nil {
 		if b, err := json.Marshal(ret); err == nil {
-			_ = e.registry.SetRunResult(finishCtx, r.runID, string(b), "", "")
+			if err2 := e.registry.SetRunResult(finishCtx, r.runID, string(b), "", ""); err2 != nil {
+				e.log.Warn("FinishRun: set run result", zap.String("run", r.runID), zap.Error(err2))
+			}
 		}
 	}
 	if reason != "" {
-		_ = e.registry.FinishRunWithReason(finishCtx, r.runID, status, reason)
+		if err := e.registry.FinishRunWithReason(finishCtx, r.runID, status, reason); err != nil {
+			e.log.Warn("FinishRun: finish with reason", zap.String("run", r.runID), zap.Error(err))
+		}
 	} else {
-		_ = e.registry.FinishRun(finishCtx, r.runID, status)
+		if err := e.registry.FinishRun(finishCtx, r.runID, status); err != nil {
+			e.log.Warn("FinishRun: finish", zap.String("run", r.runID), zap.Error(err))
+		}
 	}
 	// Tear down the run-lifecycle registrations now that the DB row is terminal.
 	// Close runDone AFTER the DB write so a WaitRun goroutine woken by the close

@@ -23,7 +23,7 @@ func (r *inputStoreTaskRunner) RunTaskSync(ctx context.Context, taskID string, p
 	if !ok {
 		return nil, fmt.Errorf("storage task %q not registered", taskID)
 	}
-	_, result, err := r.e.fireSync(spec, pkgruntime.RunOptions{Params: params}, "input-storage")
+	_, result, err := r.e.fireSync(ctx, spec, pkgruntime.RunOptions{Params: params}, "input-storage")
 	if err != nil {
 		return nil, err
 	}

@@ -110,7 +110,7 @@ func TestE2E_SecretProvider_FullChain(t *testing.T) {
 	defer cancel()
 
 	// ── First launch.
-	runID, result, err := eng.fireSync(consumerSpec, pkgruntime.RunOptions{}, "manual")
+	runID, result, err := eng.fireSync(ctx, consumerSpec, pkgruntime.RunOptions{}, "manual")
 	if err != nil {
 		t.Fatalf("fireSync: %v", err)
 	}
