@@ -2324,6 +2324,9 @@ func (e *Engine) startRunWithParent(parent context.Context, spec *task.Spec, opt
 			)
 		} else {
 			if opts.WebhookCtx != nil {
+				// Bound RAM exposure: RawBody is no longer needed now that the
+				// blob has been persisted. Nil it out so the slice can be GC'd
+				// rather than held for the full run lifetime.
 				opts.WebhookCtx.RawBody = nil
 			}
 			if serr := e.registry.SetRunInput(context.Background(), opts.RunID, key, size, storedAt, in.RedactedFields); serr != nil {
@@ -2358,6 +2361,11 @@ func (e *Engine) startRunWithParent(parent context.Context, spec *task.Spec, opt
 		if v, ok := e.runDone.LoadAndDelete(opts.RunID); ok {
 			close(v.(chan struct{}))
 		}
+		// Defer deletion of the suppressed-persistence return-value cache:
+		// WaitRun goroutines woken by the runDone close above need time to
+		// scan runReturnValue before the entry is removed. The map is only
+		// populated for `run_result.enabled: false` tasks, so this AfterFunc
+		// is a no-op for the common case.
 		runID := opts.RunID
 		time.AfterFunc(runReturnValueTTL, func() {
 			e.runReturnValue.Delete(runID)

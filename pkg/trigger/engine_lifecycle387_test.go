@@ -12,6 +12,7 @@ import (
 
 	"github.com/dicode/dicode/pkg/db"
 	"github.com/dicode/dicode/pkg/registry"
+	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	"github.com/dicode/dicode/pkg/task"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -279,5 +280,66 @@ func TestDaemon_CrashBackoff_Constants(t *testing.T) {
 	}
 	if daemonStableThreshold != 10*time.Second {
 		t.Errorf("daemonStableThreshold = %v, want 10s", daemonStableThreshold)
+	}
+}
+
+// ── Fix 2: prereq context propagation ────────────────────────────────────────
+
+// TestFireSync_ParentContextCancelsRun verifies that when fireSync is called
+// with a cancellable parent context, cancelling that context also cancels the
+// in-flight run (Fix 2, #387).
+//
+// Before the fix, fireSync always called startRun which used
+// context.Background() as the run's parent, so cancelling the caller's context
+// had no effect on the run. The prereqCtx timeout in resolveIfMissing was
+// therefore useless — a prereq with a long spec Timeout could block forever.
+//
+// After the fix, fireSync calls startRunWithParent(callerCtx, ...) so the run
+// context inherits the caller's cancellation signal.
+func TestFireSync_ParentContextCancelsRun(t *testing.T) {
+	eng, reg, exec := newPreflightEnv(t)
+
+	const taskID = "prereq-ctx-propagation"
+	// markDaemon makes Execute block until the run's context is cancelled.
+	// If the parent context does NOT propagate to the run context, this goroutine
+	// would block forever and the test would time out.
+	exec.markDaemon(taskID)
+
+	spec := &task.Spec{
+		ID:      taskID,
+		Name:    taskID,
+		Runtime: task.RuntimeDocker,
+		Docker:  &task.DockerConfig{Image: "alpine"},
+		Trigger: task.TriggerConfig{Daemon: true, Restart: "always"},
+		Enabled: true,
+	}
+	if err := reg.Register(spec); err != nil {
+		t.Fatalf("reg.Register: %v", err)
+	}
+	if err := eng.Register(spec); err != nil {
+		t.Fatalf("eng.Register: %v", err)
+	}
+
+	parent, cancelParent := context.WithCancel(context.Background())
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		eng.fireSync(parent, spec, pkgruntime.RunOptions{}, "if_missing") //nolint:errcheck
+	}()
+
+	// Give the executor time to start and block inside markDaemon's <-ctx.Done().
+	time.Sleep(100 * time.Millisecond)
+
+	// Cancel parent. With Fix 2, this propagates through startRunWithParent's
+	// context.WithCancel(parent) to the run context, unblocking the executor.
+	cancelParent()
+
+	select {
+	case <-done:
+		// Run was cancelled by parent context propagation — correct.
+	case <-time.After(3 * time.Second):
+		t.Error("fireSync did not return after parent context cancellation; " +
+			"before Fix 2 the run used context.Background() as parent and would block forever")
 	}
 }
