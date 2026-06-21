@@ -49,6 +49,15 @@ var ErrRunNotFound = errors.New("run not found")
 // map, so this is a small footprint either way.
 const runReturnValueTTL = 30 * time.Second
 
+// Daemon crash-loop exponential backoff constants (Fix 4, #387).
+// A daemon that exits within daemonStableThreshold is considered crashed;
+// one that outlasts it is considered stable and resets the backoff.
+const (
+	daemonBackoffInit     = 1 * time.Second
+	daemonBackoffMax      = 30 * time.Second
+	daemonStableThreshold = 10 * time.Second
+)
+
 // Engine coordinates all trigger types and fires task runs.
 type Engine struct {
 	registry  *registry.Registry
@@ -135,6 +144,12 @@ type Engine struct {
 	// guarded by its own RWMutex so a state-read in the API path never has to
 	// wait on a long daemon dispatch holding daemonMu.
 	daemonStates *daemonStateMap
+
+	// daemonBackoffs tracks the current restart backoff duration for each
+	// daemon task (keyed as "daemon-backoff:<taskID>"). Persists the backoff
+	// value across restarts within a single daemon lifetime so exponential
+	// growth is monotone. Values are time.Duration; nil entry means "use init".
+	daemonBackoffs sync.Map
 
 	// restartGates is a per-daemon at-most-one-in-flight lock for daemon
 	// restarts. See daemon_state.go for the coalescing rationale. Also reused
@@ -458,6 +473,26 @@ func (e *Engine) Register(k task.Kinded) error {
 			return nil
 		}
 
+		// Cycle guard for success-chain edges (Fix 1, #387): before arming
+		// triggers, verify that registering s does not close a cycle in the
+		// trigger.chain graph. A cycle would cause A→B→A→… to loop forever
+		// without the depth-cap that protects on_failure_chain. We do this
+		// check while holding registerMu so a concurrent registration cannot
+		// sneak in a second half of a cycle between our check and our commit.
+		if s.Trigger.Chain != nil {
+			on := s.Trigger.Chain.ChainOn()
+			if on == "success" || on == "always" {
+				if e.hasSuccessChainCycle(s.ID, s.Trigger.Chain.From) {
+					e.log.Error("task registration rejected: success-chain cycle detected",
+						zap.String("task", s.ID),
+						zap.String("chains_from", s.Trigger.Chain.From),
+						zap.String("hint", "A→B→A loops in trigger.chain would run forever; break the cycle"),
+					)
+					return fmt.Errorf("task %q: trigger.chain creates a success-chain cycle via %q", s.ID, s.Trigger.Chain.From)
+				}
+			}
+		}
+
 		if s.Trigger.Cron != "" {
 			e.registerCron(s)
 		}
@@ -482,6 +517,60 @@ func (e *Engine) Register(k task.Kinded) error {
 	default:
 		return fmt.Errorf("engine: unsupported task kind %q", k.KindOf())
 	}
+}
+
+// maxSuccessChainDepth caps the _chain_depth for success-chain (trigger.chain)
+// hops. Failure chains use OnFailureChainSpec.MaxDepth; success chains previously
+// had no cap at all. A cap of 10 is generous for fan-out pipelines while still
+// breaking accidental infinite loops that weren't caught at registration time.
+const maxSuccessChainDepth = 10
+
+// hasSuccessChainCycle reports whether registering a task with ID newID that
+// declares trigger.chain.from = from would close a success-chain cycle. It
+// performs a DFS over the combined graph: existing registered tasks' success-chain
+// edges plus the proposed new edge (from → newID). A cycle exists when newID
+// can reach `from` via the combined graph — that would mean newID fires when
+// `from` succeeds, and `from` would also eventually fire when newID succeeds,
+// creating a loop.
+//
+// Caller must hold registerMu.
+func (e *Engine) hasSuccessChainCycle(newID, from string) bool {
+	// Build an adjacency list of existing success-chain edges: edge (A→B) means
+	// B fires when A succeeds.
+	successTargets := make(map[string][]string)
+	for _, spec := range e.registry.All() {
+		if spec.Trigger.Chain == nil {
+			continue
+		}
+		on := spec.Trigger.Chain.ChainOn()
+		if on != "success" && on != "always" {
+			continue
+		}
+		successTargets[spec.Trigger.Chain.From] = append(successTargets[spec.Trigger.Chain.From], spec.ID)
+	}
+	// Add the proposed new edge: from → newID.
+	successTargets[from] = append(successTargets[from], newID)
+
+	// DFS from newID: can we reach `from`? If yes, adding from→newID closes
+	// a cycle because from→newID and newID→…→from form a loop.
+	visited := make(map[string]bool)
+	var dfs func(current string) bool
+	dfs = func(current string) bool {
+		if current == from {
+			return true // reached the source → cycle
+		}
+		if visited[current] {
+			return false
+		}
+		visited[current] = true
+		for _, next := range successTargets[current] {
+			if dfs(next) {
+				return true
+			}
+		}
+		return false
+	}
+	return dfs(newID)
 }
 
 // Unregister removes all trigger registrations for a task ID and drops any
@@ -858,6 +947,37 @@ func (e *Engine) onDaemonRunFinished(spec *task.Spec, runID string) {
 		zap.String("restart", restart),
 	)
 
+	// Exponential backoff for crash-looping daemons. Constants are package-level
+	// (see daemonBackoffInit etc.) so tests can inspect them without repetition.
+	// Compute elapsed run time from the run record. run.StartedAt is always set
+	// by startRun; run.FinishedAt may be nil on abnormal exit — treat that as
+	// an instant crash so the pessimistic branch applies.
+	var elapsed time.Duration
+	if run.FinishedAt != nil {
+		elapsed = run.FinishedAt.Sub(run.StartedAt)
+	}
+
+	// Load the current backoff for this daemon (stored across restarts in a
+	// sync.Map keyed by task ID). Reset to init after a stable run.
+	backoffKey := "daemon-backoff:" + spec.ID
+	var backoff time.Duration
+	if elapsed >= daemonStableThreshold {
+		backoff = daemonBackoffInit
+	} else {
+		if v, ok := e.daemonBackoffs.Load(backoffKey); ok {
+			backoff = v.(time.Duration)
+		} else {
+			backoff = daemonBackoffInit
+		}
+	}
+	e.daemonBackoffs.Store(backoffKey, backoff)
+
+	e.log.Info("daemon restart backoff",
+		zap.String("task", spec.ID),
+		zap.Duration("backoff", backoff),
+		zap.Duration("elapsed", elapsed),
+	)
+
 	shutCtx := e.getShutdownCtx()
 	if shutCtx == nil {
 		shutCtx = context.Background()
@@ -865,8 +985,16 @@ func (e *Engine) onDaemonRunFinished(spec *task.Spec, runID string) {
 	select {
 	case <-shutCtx.Done():
 		return
-	case <-time.After(2 * time.Second):
+	case <-time.After(backoff):
 	}
+
+	// Advance the backoff for next crash (cap at max). Done after the sleep so
+	// a shutdown during the sleep doesn't persist a doubled value.
+	nextBackoff := backoff * 2
+	if nextBackoff > daemonBackoffMax {
+		nextBackoff = daemonBackoffMax
+	}
+	e.daemonBackoffs.Store(backoffKey, nextBackoff)
 
 	if !e.isShuttingDown() {
 		e.log.Info("restarting daemon task", zap.String("task", spec.ID))
@@ -1166,14 +1294,51 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 			)
 			continue
 		}
+
+		// Depth tracking for success-chain (Fix 1, #387): mirror the failure-chain
+		// depth cap so any cycle that slips past the registration-time DFS check
+		// (e.g. tasks registered in a different order) cannot loop indefinitely.
+		incomingDepth := 0
+		if d, ok := e.runChainDepth.Load(runID); ok {
+			incomingDepth, _ = d.(int)
+		}
+		nextDepth := incomingDepth + 1
+		if nextDepth > maxSuccessChainDepth {
+			e.log.Warn("chain trigger suppressed: max_depth exceeded",
+				zap.Int("depth", nextDepth),
+				zap.Int("max_depth", maxSuccessChainDepth),
+				zap.String("from", completedTaskID),
+				zap.String("to", spec.ID),
+				zap.String("run", runID),
+			)
+			continue
+		}
+
 		e.log.Info("chain trigger",
 			zap.String("from", completedTaskID),
 			zap.String("to", spec.ID),
 			zap.String("on", on),
+			zap.Int("depth", nextDepth),
 		)
+		// Use buildChainPayload (not buildChainInput) to stamp _chain_depth so the
+		// downstream can propagate it. When resolvedParams is empty, build a minimal
+		// map with just engine keys so depth is always present.
+		var chainInput interface{}
+		if len(resolvedParams) == 0 && len(chain.Params) == 0 {
+			// Historical no-params case: downstream expects raw output as input.
+			// We must still propagate depth, so only add the wrapper when depth > 0
+			// (depth 0 = first hop — keep raw output semantics for existing tasks).
+			if nextDepth <= 1 {
+				chainInput = output
+			} else {
+				chainInput = buildChainPayload(resolvedParams, completedTaskID, runID, runStatus, output, nextDepth)
+			}
+		} else {
+			chainInput = buildChainPayload(resolvedParams, completedTaskID, runID, runStatus, output, nextDepth)
+		}
 		go e.fireAsync(ctx, dispatchSpec, pkgruntime.RunOptions{ //nolint:errcheck
 			ParentRunID: runID,
-			Input:       buildChainInput(resolvedParams, completedTaskID, runID, runStatus, output),
+			Input:       chainInput,
 		}, "chain")
 	}
 
@@ -1909,7 +2074,7 @@ func (e *Engine) WebhookHandler() http.Handler {
 			}
 		}
 
-		runID, result, err := e.fireSync(spec, pkgruntime.RunOptions{Input: input, Params: params, WebhookCtx: webhookCtx}, registry.TriggerWebhook)
+		runID, result, err := e.fireSync(context.Background(), spec, pkgruntime.RunOptions{Input: input, Params: params, WebhookCtx: webhookCtx}, registry.TriggerWebhook)
 		if err != nil {
 			http.Error(w, "task failed to start", http.StatusInternalServerError)
 			return
@@ -2105,7 +2270,11 @@ func (e *Engine) serveTaskAsset(w http.ResponseWriter, r *http.Request, taskDir,
 // startRun creates the DB record, stores the cancel func, fires the started
 // hook, and returns a ready-to-run context. The caller is responsible for
 // calling the returned cleanup func when the run finishes.
-func (e *Engine) startRun(spec *task.Spec, opts *pkgruntime.RunOptions, source registry.TriggerSource) (runCtx context.Context, cleanup func(), err error) {
+// startRunWithParent is like startRun but accepts an explicit parent context
+// for the run's cancellation context. The run is cancelled when either the
+// parent context expires or KillRun is called. Pass context.Background() to
+// reproduce the original independent-context behaviour.
+func (e *Engine) startRunWithParent(parent context.Context, spec *task.Spec, opts *pkgruntime.RunOptions, source registry.TriggerSource) (runCtx context.Context, cleanup func(), err error) {
 	if err = e.checkFireGuard(spec.ID); err != nil {
 		return nil, nil, err
 	}
@@ -2113,11 +2282,6 @@ func (e *Engine) startRun(spec *task.Spec, opts *pkgruntime.RunOptions, source r
 		return nil, nil, fmt.Errorf("start run record: %w", err)
 	}
 
-	// Audit boundary (#45): one best-effort run_triggered event per run.
-	// actor_kind is the trigger source; actor_id is the operator principal
-	// (opts.TriggerActor — e.g. the web session's client IP for manual API
-	// runs) when known, falling back to the parent run for chain/task-fired
-	// runs (empty for cron/webhook).
 	actorID := opts.TriggerActor
 	if actorID == "" {
 		actorID = opts.ParentRunID
@@ -2133,8 +2297,6 @@ func (e *Engine) startRun(spec *task.Spec, opts *pkgruntime.RunOptions, source r
 		Allowed:    true,
 	})
 
-	// Best-effort input persistence. Failures do not block the run — the
-	// auto-fix loop (#234) handles missing inputs via ErrInputUnavailable.
 	if e.inputStore != nil && e.shouldPersistInput(spec) {
 		var web *registry.WebhookFields
 		if opts.WebhookCtx != nil {
@@ -2155,20 +2317,12 @@ func (e *Engine) startRun(spec *task.Spec, opts *pkgruntime.RunOptions, source r
 		in := registry.BuildPersistedInputFromRunOpts(string(source), opts.Params, opts.Input, web)
 		key, size, storedAt, perr := e.inputStore.Persist(context.Background(), opts.RunID, in)
 		if perr != nil {
-			// Log only a sanitized error category. The full perr chain may
-			// transit env-resolver internals where CodeQL tracks a
-			// secretKey taint label; emitting it raw causes a false-positive
-			// go/clear-text-logging alert. The category is enough for ops to
-			// triage; full error is available via the failed task's own logs.
 			e.log.Warn("run-input persist failed",
 				zap.String("run", opts.RunID),
 				zap.String("task", spec.ID),
 				zap.String("error_class", "persist"),
 			)
 		} else {
-			// Bound RAM exposure: RawBody is no longer needed now that the
-			// blob has been persisted. Nil it out so the slice can be GC'd
-			// rather than held for the full run lifetime.
 			if opts.WebhookCtx != nil {
 				opts.WebhookCtx.RawBody = nil
 			}
@@ -2186,12 +2340,10 @@ func (e *Engine) startRun(spec *task.Spec, opts *pkgruntime.RunOptions, source r
 		h(spec.ID, opts.RunID, string(source))
 	}
 	var cancel context.CancelFunc
-	runCtx, cancel = context.WithCancel(context.Background())
+	runCtx, cancel = context.WithCancel(parent)
 	e.runCancels.Store(opts.RunID, cancel)
 	e.runTriggerSource.Store(opts.RunID, source)
 
-	// Register a completion channel for WaitRun. The channel is closed (not
-	// sent to) so that multiple concurrent waiters are all unblocked at once.
 	doneCh := make(chan struct{})
 	e.runDone.Store(opts.RunID, doneCh)
 
@@ -2203,22 +2355,23 @@ func (e *Engine) startRun(spec *task.Spec, opts *pkgruntime.RunOptions, source r
 		e.runTriggerSource.Delete(opts.RunID)
 		e.runChainDepth.Delete(opts.RunID)
 		cancel()
-		// Signal all waiters that the run has finished, then remove the entry.
 		if v, ok := e.runDone.LoadAndDelete(opts.RunID); ok {
 			close(v.(chan struct{}))
 		}
-		// Defer deletion of the suppressed-persistence return-value cache:
-		// WaitRun goroutines woken by the runDone close above need time to
-		// scan runReturnValue before the entry is removed. The map is only
-		// populated for `run_result.enabled: false` tasks, so this AfterFunc
-		// is a no-op for the common case. Bounded by runReturnValueTTL so
-		// orphaned entries (no waiter ever calls WaitRun) don't leak.
 		runID := opts.RunID
 		time.AfterFunc(runReturnValueTTL, func() {
 			e.runReturnValue.Delete(runID)
 		})
 	}
 	return runCtx, cleanup, nil
+}
+
+// startRun creates a run record and context rooted at context.Background() —
+// the standard path for all trigger types. See startRunWithParent for the
+// variant that wires an explicit parent (used by fireSync so prereq timeouts
+// propagate correctly).
+func (e *Engine) startRun(spec *task.Spec, opts *pkgruntime.RunOptions, source registry.TriggerSource) (runCtx context.Context, cleanup func(), err error) {
+	return e.startRunWithParent(context.Background(), spec, opts, source)
 }
 
 // shouldPersistInput returns true when the run's input should be persisted.
@@ -2266,7 +2419,9 @@ func (e *Engine) runTask(runCtx context.Context, spec *task.Spec, opts pkgruntim
 	var result *pkgruntime.RunResult
 	preResolved, preStatus, preReason := e.preflightEnv(runCtx, spec)
 	if preStatus != "" {
-		_ = e.registry.FinishRunWithReason(context.Background(), opts.RunID, preStatus, preReason)
+		if err := e.registry.FinishRunWithReason(context.Background(), opts.RunID, preStatus, preReason); err != nil {
+			e.log.Warn("FinishRun: preflight failure", zap.String("run", opts.RunID), zap.Error(err))
+		}
 		// Chain-on-failure semantics: dispatch normally fires FireChain;
 		// the preflight-env short-circuit replicates it so chain triggers
 		// and on_failure_chain still observe the failure.
@@ -2445,10 +2600,15 @@ func (e *Engine) fireAsync(ctx context.Context, spec *task.Spec, opts pkgruntime
 // The caller's context is used only for cancellation of the run setup; the
 // run itself uses an independent context so it is not cancelled when the HTTP
 // request context ends mid-execution.
-func (e *Engine) fireSync(spec *task.Spec, opts pkgruntime.RunOptions, source registry.TriggerSource) (string, *pkgruntime.RunResult, error) {
+//
+// When callerCtx is non-nil, it is used as the parent of the run context so
+// a deadline on callerCtx (e.g. the prereq ceiling from resolveIfMissing)
+// propagates to the run. Pass context.Background() to preserve the old
+// independent-context behaviour.
+func (e *Engine) fireSync(callerCtx context.Context, spec *task.Spec, opts pkgruntime.RunOptions, source registry.TriggerSource) (string, *pkgruntime.RunResult, error) {
 	opts.RunID = uuid.New().String()
 
-	runCtx, cleanup, err := e.startRun(spec, &opts, source)
+	runCtx, cleanup, err := e.startRunWithParent(callerCtx, spec, &opts, source)
 	if err != nil {
 		return "", nil, err
 	}
@@ -2538,7 +2698,9 @@ func (e *Engine) resolveIfMissing(ctx context.Context, spec *task.Spec, parentRu
 			// `input !== null` check treats this as a programmatic
 			// invocation (silent refresh path), not an interactive UI click.
 			chainInput := map[string]any{}
-			prereqRunID, result, fireErr := e.fireSync(prereqSpec, pkgruntime.RunOptions{
+			// Pass prereqCtx so the 60s engine-level ceiling is enforced even
+			// if the prereq task's own spec Timeout is longer (Fix 2, #387).
+			prereqRunID, result, fireErr := e.fireSync(prereqCtx, prereqSpec, pkgruntime.RunOptions{
 				ParentRunID: parentRunID,
 				Input:       chainInput,
 				Params:      params,
@@ -2616,7 +2778,9 @@ func (e *Engine) dispatch(ctx context.Context, spec *task.Spec, opts pkgruntime.
 			zap.String("task", spec.ID),
 			zap.String("runtime", string(spec.Runtime)),
 		)
-		_ = e.registry.FinishRun(context.Background(), opts.RunID, registry.StatusFailure)
+		if err := e.registry.FinishRun(context.Background(), opts.RunID, registry.StatusFailure); err != nil {
+			e.log.Warn("FinishRun: no executor", zap.String("run", opts.RunID), zap.Error(err))
+		}
 		return registry.StatusFailure, &pkgruntime.RunResult{Error: fmt.Errorf("no executor for runtime %s", spec.Runtime)}
 	}
 
@@ -2625,7 +2789,9 @@ func (e *Engine) dispatch(ctx context.Context, spec *task.Spec, opts pkgruntime.
 			zap.String("task", spec.ID),
 			zap.Error(err),
 		)
-		_ = e.registry.FinishRun(context.Background(), opts.RunID, registry.StatusFailure)
+		if err2 := e.registry.FinishRun(context.Background(), opts.RunID, registry.StatusFailure); err2 != nil {
+			e.log.Warn("FinishRun: if_missing failure", zap.String("run", opts.RunID), zap.Error(err2))
+		}
 		return registry.StatusFailure, &pkgruntime.RunResult{Error: err}
 	}
 
@@ -2636,7 +2802,9 @@ func (e *Engine) dispatch(ctx context.Context, spec *task.Spec, opts pkgruntime.
 			zap.String("runtime", string(spec.Runtime)),
 			zap.Error(err),
 		)
-		_ = e.registry.FinishRun(context.Background(), opts.RunID, registry.StatusFailure)
+		if err2 := e.registry.FinishRun(context.Background(), opts.RunID, registry.StatusFailure); err2 != nil {
+			e.log.Warn("FinishRun: executor error", zap.String("run", opts.RunID), zap.Error(err2))
+		}
 		return registry.StatusFailure, &pkgruntime.RunResult{Error: err}
 	}
 
@@ -2687,8 +2855,10 @@ func (e *Engine) dispatch(ctx context.Context, spec *task.Spec, opts pkgruntime.
 	// Atomic: set status + finished_at + return_value + output in one UPDATE.
 	// This eliminates the race where a reader polling for status != running
 	// could see the status flip before return_value was written.
-	_ = e.registry.FinishRunWithResult(context.Background(), opts.RunID, status,
-		persistedReturnJSON, outputContentType, outputContent)
+	if err := e.registry.FinishRunWithResult(context.Background(), opts.RunID, status,
+		persistedReturnJSON, outputContentType, outputContent); err != nil {
+		e.log.Warn("FinishRun: finalize run result", zap.String("run", opts.RunID), zap.Error(err))
+	}
 
 	e.FireChain(context.Background(), spec.ID, opts.RunID, status, result.ChainInput, opts.Params)
 	return status, result

@@ -131,7 +131,7 @@ func TestPreflight_ProviderFiresOnceAcrossPreflightAndDispatch(t *testing.T) {
 	}
 
 	// fireSync drives the full runTask flow synchronously: preflight + dispatch.
-	runID, result, err := eng.fireSync(consumer, pkgruntime.RunOptions{}, "manual")
+	runID, result, err := eng.fireSync(context.Background(), consumer, pkgruntime.RunOptions{}, "manual")
 	if err != nil {
 		t.Fatalf("fireSync: %v", err)
 	}

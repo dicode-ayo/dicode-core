@@ -1,6 +1,7 @@
 package trigger
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -186,7 +187,7 @@ func TestFireSync_NestedRun_NotBlockedBySlot(t *testing.T) {
 		// Runs inside the parent's executor while the parent holds the only
 		// slot. Firing the child synchronously must not deadlock or 503.
 		nestedRan = true
-		_, _, nestedErr = eng.fireSync(child, pkgruntime.RunOptions{}, "if_missing")
+		_, _, nestedErr = eng.fireSync(context.Background(), child, pkgruntime.RunOptions{}, "if_missing")
 	}}
 	eng = New(reg, exec, zap.NewNop())
 
