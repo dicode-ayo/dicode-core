@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -151,12 +152,14 @@ func (l *Lock) computeMAC() (string, error) {
 }
 
 // verifyMAC reports whether macHex matches the HMAC of the current tasks map.
+// The stored hex is normalized to lowercase before comparison so that a file
+// manually edited with uppercase hex doesn't trigger a false tamper alarm.
 func (l *Lock) verifyMAC(macHex string) bool {
 	expected, err := l.computeMAC()
 	if err != nil {
 		return false
 	}
-	return hmac.Equal([]byte(expected), []byte(macHex))
+	return hmac.Equal([]byte(expected), []byte(strings.ToLower(macHex)))
 }
 
 // Path returns the lockfile location on disk.

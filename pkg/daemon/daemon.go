@@ -390,6 +390,10 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 			break
 		}
 	}
+	if lockSigningKey == nil {
+		log.Warn("approval lock running in unsigned mode — no SubKeyDeriver available in secrets chain; " +
+			"lock file integrity cannot be verified")
+	}
 	lock, err := approval.LoadSignedLock(lockPath, lockSigningKey)
 	if err != nil {
 		return fmt.Errorf("load approval lock: %w", err)
