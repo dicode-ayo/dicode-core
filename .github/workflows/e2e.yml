@@ -25,7 +25,7 @@ jobs:
       TEST_WEBHOOK_SECRET: test-webhook-secret-12345
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-go@v6
         with:
