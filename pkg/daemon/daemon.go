@@ -377,9 +377,27 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	if err != nil {
 		return fmt.Errorf("read approval bootstrap marker: %w", err)
 	}
-	lock, err := approval.LoadLock(lockPath)
+	// Derive the lock-signing key from the master key so the HMAC key is
+	// never task-reachable and survives across restarts even if the SQLite DB
+	// is wiped. Silently falls back to unsigned mode when no SubKeyDeriver is
+	// available (e.g. stripped test builds without a local provider).
+	var lockSigningKey []byte
+	for _, p := range secretsChain {
+		if d, ok := p.(secrets.SubKeyDeriver); ok {
+			if k, kerr := d.DeriveSubKey("dicode/approval-lock/v1"); kerr == nil {
+				lockSigningKey = k
+			}
+			break
+		}
+	}
+	lock, err := approval.LoadSignedLock(lockPath, lockSigningKey)
 	if err != nil {
 		return fmt.Errorf("load approval lock: %w", err)
+	}
+	if lock.Tampered() {
+		log.Warn("approval lock HMAC verification failed — lock may be tampered or forged; "+
+			"all approval records discarded, tasks require explicit re-approval",
+			zap.String("lock", lockPath))
 	}
 	gatePolicy := approval.Policy{
 		Enabled:        cfg.Approval.IsEnabled(),
