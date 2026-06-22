@@ -613,7 +613,7 @@ cryptographically signed with an HMAC key derived from the daemon's master key.
 
 ### Signing scheme
 
-```
+```plaintext
 lockSigningKey = DeriveSubKey(masterKey, "dicode/approval-lock/v1")  // Argon2id
 canonicalContent = JSON(tasks_map)                                    // Go sort-ordered
 mac = hex(HMAC-SHA256(lockSigningKey, canonicalContent))             // stored in mac: field

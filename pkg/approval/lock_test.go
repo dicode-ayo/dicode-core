@@ -342,6 +342,38 @@ func TestLockMACIsValidHex(t *testing.T) {
 	t.Fatal("mac field not found in lock file")
 }
 
+func TestLoadSignedLock_UppercaseHexMAC(t *testing.T) {
+	path := filepath.Join(t.TempDir(), LockFileName)
+	key := testSigningKey()
+
+	l, _ := LoadSignedLock(path, key)
+	if err := l.Record("repo/deploy", "abc", ApprovedByManual); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	// Convert the mac field to uppercase hex.
+	data, _ := os.ReadFile(path)
+	modified := string(data)
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "mac:") {
+			macVal := strings.TrimSpace(strings.TrimPrefix(line, "mac:"))
+			modified = strings.ReplaceAll(string(data), macVal, strings.ToUpper(macVal))
+			break
+		}
+	}
+	if err := os.WriteFile(path, []byte(modified), 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	reloaded, err := LoadSignedLock(path, key)
+	if err != nil {
+		t.Fatalf("LoadSignedLock with uppercase MAC: %v", err)
+	}
+	if reloaded.Tampered() {
+		t.Fatal("Tampered() should be false for uppercase hex MAC")
+	}
+}
+
 func TestLoadSignedLock_RecordAfterTamperDetection(t *testing.T) {
 	path := filepath.Join(t.TempDir(), LockFileName)
 	key := testSigningKey()

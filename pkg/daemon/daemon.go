@@ -386,12 +386,15 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 		if d, ok := p.(secrets.SubKeyDeriver); ok {
 			if k, kerr := d.DeriveSubKey("dicode/approval-lock/v1"); kerr == nil {
 				lockSigningKey = k
+			} else {
+				log.Warn("approval lock: sub-key derivation failed — falling back to unsigned mode",
+					zap.Error(kerr))
 			}
 			break
 		}
 	}
 	if lockSigningKey == nil {
-		log.Warn("approval lock running in unsigned mode — no SubKeyDeriver available in secrets chain; " +
+		log.Warn("approval lock running in unsigned mode — sub-key derivation unavailable; " +
 			"lock file integrity cannot be verified")
 	}
 	lock, err := approval.LoadSignedLock(lockPath, lockSigningKey)
