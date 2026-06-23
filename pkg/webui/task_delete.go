@@ -187,7 +187,7 @@ func (m *SourceManager) deleteGit(ctx context.Context, taskID, sourceName string
 	// clone-mode ourselves so the source isn't wedged.
 	defer func() {
 		if err != nil {
-			_ = src.SetDevMode(ctx, false, taskset.DevModeOpts{})
+			_ = src.SetDevMode(ctx, false, taskset.DevModeOpts{RunID: runID})
 		}
 	}()
 

@@ -26,7 +26,7 @@ and replay, and either push to main (autonomous) or open a PR (review).
 3. **Open a fix branch.**
    - In `mode: review`: use `${branch_prefix}${runID}` (default `fix/<runID>`).
    - In `mode: autonomous`: use the source's tracked branch (`base_branch`).
-   - Call `dicode.sources.set_dev_mode(<source>, { enabled: true, branch: <fixBranch>, base: <base> })`.
+   - Call `dicode.sources.set_dev_mode(<source>, { enabled: true, branch: <fixBranch>, base: <base>, run_id: <runID> })`.
 4. **Iterate** (cap each iteration at `max_iteration_seconds`, default 300s):
    - Read failing-task source files via `Deno.readTextFile` from `${DATADIR}/dev-clones/<source>/<runID>/`.
    - Edit via `Deno.writeTextFile` — **only inside the failing task's directory.**
@@ -46,7 +46,7 @@ and replay, and either push to main (autonomous) or open a PR (review).
      `git-pr` is brittle when prior runs left orphan clone directories.
    - Body must mention any redacted_fields you saw — reviewers need that signal.
 7. **Disable dev mode.**
-   - `dicode.sources.set_dev_mode(<source>, { enabled: false })` — engine
+   - `dicode.sources.set_dev_mode(<source>, { enabled: false, run_id: <runID> })` — engine
      removes the local clone; the remote branch is retained.
 8. **Unpin input** (the deferred cleanup also handles the timeout/panic case).
 
