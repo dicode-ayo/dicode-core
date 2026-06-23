@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -198,7 +199,7 @@ spec:
 	}
 }
 
-func TestSetDevMode_Branch_RefusesConcurrent(t *testing.T) {
+func TestSetDevMode_Branch_AllowsConcurrentSessions(t *testing.T) {
 	remoteDir := newFixtureRemote(t, "main", map[string]string{
 		"taskset.yaml": `apiVersion: dicode/v1
 kind: TaskSet
@@ -211,12 +212,41 @@ spec:
 	src := newTestSourceWithRemote(t, "ns", remoteDir, "main")
 	ctx := context.Background()
 
+	// First session.
 	if err := src.SetDevMode(ctx, true, DevModeOpts{Branch: "fix/a", Base: "main", RunID: "a"}); err != nil {
 		t.Fatalf("first enable: %v", err)
 	}
-	err := src.SetDevMode(ctx, true, DevModeOpts{Branch: "fix/b", Base: "main", RunID: "b"})
+	// Second session with a different RunID must succeed (no busy error).
+	if err := src.SetDevMode(ctx, true, DevModeOpts{Branch: "fix/b", Base: "main", RunID: "b"}); err != nil {
+		t.Fatalf("second enable (different runID): %v", err)
+	}
+	// Primary should be the most-recently-enabled session.
+	repoPath := src.RepoPath()
+	if !strings.Contains(repoPath, "b") {
+		t.Errorf("RepoPath = %q, want path containing 'b' (latest primary)", repoPath)
+	}
+}
+
+func TestSetDevMode_Branch_RefusesRunIDCollision(t *testing.T) {
+	remoteDir := newFixtureRemote(t, "main", map[string]string{
+		"taskset.yaml": `apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: fixture
+spec:
+  entries: {}
+`,
+	})
+	src := newTestSourceWithRemote(t, "ns", remoteDir, "main")
+	ctx := context.Background()
+
+	if err := src.SetDevMode(ctx, true, DevModeOpts{Branch: "fix/a", Base: "main", RunID: "dup"}); err != nil {
+		t.Fatalf("first enable: %v", err)
+	}
+	// Same RunID must return ErrDevModeBusy.
+	err := src.SetDevMode(ctx, true, DevModeOpts{Branch: "fix/b", Base: "main", RunID: "dup"})
 	if !errors.Is(err, ErrDevModeBusy) {
-		t.Errorf("got %v, want ErrDevModeBusy", err)
+		t.Errorf("got %v, want ErrDevModeBusy for duplicate run ID", err)
 	}
 }
 
@@ -239,7 +269,7 @@ spec:
 	}
 }
 
-func TestSetDevMode_Branch_ConcurrentSecondCallReturnsBusy(t *testing.T) {
+func TestSetDevMode_Branch_ConcurrentDifferentRunIDsBothSucceed(t *testing.T) {
 	remoteDir := newFixtureRemote(t, "main", map[string]string{
 		"taskset.yaml": `apiVersion: dicode/v1
 kind: TaskSet
@@ -263,20 +293,81 @@ spec: {entries: {}}
 	}()
 	wg.Wait()
 
-	// Exactly one nil, exactly one ErrDevModeBusy.
-	nils := 0
-	busies := 0
-	for _, err := range results {
-		switch {
-		case err == nil:
-			nils++
-		case errors.Is(err, ErrDevModeBusy):
-			busies++
-		default:
-			t.Errorf("unexpected error: %v", err)
+	// Both should succeed with different RunIDs.
+	for i, err := range results {
+		if err != nil {
+			t.Errorf("goroutine %d: got %v, want nil", i, err)
 		}
 	}
-	if nils != 1 || busies != 1 {
-		t.Errorf("got nils=%d busies=%d, want exactly 1 of each", nils, busies)
+}
+
+func TestSetDevMode_Branch_TargetedDisableRemovesOnlyNamedSession(t *testing.T) {
+	remoteDir := newFixtureRemote(t, "main", map[string]string{
+		"taskset.yaml": `apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: fixture
+spec:
+  entries: {}
+`,
+	})
+	src := newTestSourceWithRemote(t, "ns", remoteDir, "main")
+	ctx := context.Background()
+
+	if err := src.SetDevMode(ctx, true, DevModeOpts{Branch: "fix/a", Base: "main", RunID: "a"}); err != nil {
+		t.Fatalf("enable a: %v", err)
+	}
+	if err := src.SetDevMode(ctx, true, DevModeOpts{Branch: "fix/b", Base: "main", RunID: "b"}); err != nil {
+		t.Fatalf("enable b: %v", err)
+	}
+	cloneA := filepath.Join(src.DataDir(), "dev-clones", src.Namespace(), "a")
+	cloneB := filepath.Join(src.DataDir(), "dev-clones", src.Namespace(), "b")
+
+	// Disable only session "b" (the current primary).
+	if err := src.SetDevMode(ctx, false, DevModeOpts{RunID: "b"}); err != nil {
+		t.Fatalf("disable b: %v", err)
+	}
+	if _, err := os.Stat(cloneB); !os.IsNotExist(err) {
+		t.Errorf("clone b should be removed after targeted disable; stat err = %v", err)
+	}
+	if _, err := os.Stat(cloneA); err != nil {
+		t.Errorf("clone a should still exist: %v", err)
+	}
+	// Still in dev mode because session "a" is active.
+	if !src.DevMode() {
+		t.Error("DevMode() = false after targeted disable of non-last session")
+	}
+}
+
+func TestSetDevMode_Branch_PrimaryPromotedAfterDisable(t *testing.T) {
+	remoteDir := newFixtureRemote(t, "main", map[string]string{
+		"taskset.yaml": `apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: fixture
+spec:
+  entries: {}
+`,
+	})
+	src := newTestSourceWithRemote(t, "ns", remoteDir, "main")
+	ctx := context.Background()
+
+	if err := src.SetDevMode(ctx, true, DevModeOpts{Branch: "fix/a", Base: "main", RunID: "a"}); err != nil {
+		t.Fatalf("enable a: %v", err)
+	}
+	if err := src.SetDevMode(ctx, true, DevModeOpts{Branch: "fix/b", Base: "main", RunID: "b"}); err != nil {
+		t.Fatalf("enable b: %v", err)
+	}
+	// b is now primary.
+	if !strings.Contains(src.RepoPath(), "b") {
+		t.Fatalf("expected b to be primary, RepoPath = %q", src.RepoPath())
+	}
+
+	// Disable b; a should become primary.
+	if err := src.SetDevMode(ctx, false, DevModeOpts{RunID: "b"}); err != nil {
+		t.Fatalf("disable b: %v", err)
+	}
+	if !strings.Contains(src.RepoPath(), "a") {
+		t.Errorf("after disabling b, expected a to be primary, RepoPath = %q", src.RepoPath())
 	}
 }
