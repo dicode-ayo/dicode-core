@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -221,9 +220,8 @@ spec:
 		t.Fatalf("second enable (different runID): %v", err)
 	}
 	// Primary should be the most-recently-enabled session.
-	repoPath := src.RepoPath()
-	if !strings.Contains(repoPath, "b") {
-		t.Errorf("RepoPath = %q, want path containing 'b' (latest primary)", repoPath)
+	if got := filepath.Base(src.RepoPath()); got != "b" {
+		t.Errorf("RepoPath base = %q, want \"b\" (latest primary)", got)
 	}
 }
 
@@ -359,15 +357,15 @@ spec:
 		t.Fatalf("enable b: %v", err)
 	}
 	// b is now primary.
-	if !strings.Contains(src.RepoPath(), "b") {
-		t.Fatalf("expected b to be primary, RepoPath = %q", src.RepoPath())
+	if got := filepath.Base(src.RepoPath()); got != "b" {
+		t.Fatalf("expected b to be primary, RepoPath base = %q", got)
 	}
 
 	// Disable b; a should become primary.
 	if err := src.SetDevMode(ctx, false, DevModeOpts{RunID: "b"}); err != nil {
 		t.Fatalf("disable b: %v", err)
 	}
-	if !strings.Contains(src.RepoPath(), "a") {
-		t.Errorf("after disabling b, expected a to be primary, RepoPath = %q", src.RepoPath())
+	if got := filepath.Base(src.RepoPath()); got != "a" {
+		t.Errorf("after disabling b, expected a to be primary, RepoPath base = %q", got)
 	}
 }

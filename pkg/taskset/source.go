@@ -222,6 +222,14 @@ func (s *Source) SetDevMode(ctx context.Context, enabled bool, opts DevModeOpts)
 		}
 
 		s.mu.Lock()
+		if _, stillReserved := s.clones[opts.RunID]; !stillReserved {
+			// A concurrent disable-all removed our placeholder while enableClone
+			// ran outside the lock. The clone directory was successfully created,
+			// so clean it up to leave no orphan on disk.
+			s.mu.Unlock()
+			_ = os.RemoveAll(filepath.Dir(devPath))
+			return fmt.Errorf("dev-mode: session %q cancelled by concurrent disable-all", opts.RunID)
+		}
 		s.clones[opts.RunID] = cloneState{
 			cloneDir:    filepath.Dir(devPath),
 			devRootPath: devPath,
@@ -386,6 +394,16 @@ func (s *Source) enableClone(ctx context.Context, opts DevModeOpts) (string, err
 		return "", fmt.Errorf("mkdir parent: %w", err)
 	}
 
+	// Remove any partial clone on failure so a retry with the same RunID isn't
+	// wedged by go-git "repository already exists". cleanClonePath is safe to
+	// use here — it has already been verified to sit inside cloneRoot above.
+	var cloneSucceeded bool
+	defer func() {
+		if !cloneSucceeded {
+			_ = os.RemoveAll(cleanClonePath)
+		}
+	}()
+
 	cloneOpts := &gogit.CloneOptions{
 		URL: s.rootRef.URL,
 	}
@@ -431,6 +449,7 @@ func (s *Source) enableClone(ctx context.Context, opts DevModeOpts) (string, err
 	if rootEntry == "" {
 		rootEntry = "taskset.yaml"
 	}
+	cloneSucceeded = true
 	return filepath.Join(clonePath, rootEntry), nil
 }
 
