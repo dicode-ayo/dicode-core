@@ -270,8 +270,21 @@ func (s *Source) SetDevMode(ctx context.Context, enabled bool, opts DevModeOpts)
 		s.mu.Unlock()
 
 		// Remove clone directories outside the lock.
+		// runIDs in toRemove were validated by ValidateRunID when the session
+		// was established (enableClone rejects bad IDs), and are only stored in
+		// s.clones after passing that check. We re-validate here as defence in
+		// depth against any future code path that bypasses the validator, and to
+		// give static analysis tools a local proof that the path is safe.
 		cloneRoot := filepath.Join(s.dataDir, "dev-clones", s.namespace)
 		for _, runID := range toRemove {
+			if err := ValidateRunID(runID); err != nil {
+				s.log.Warn("dev-clones disable: runID failed validation; refusing to remove",
+					zap.String("source", s.namespace),
+					zap.String("run_id", runID),
+					zap.Error(err),
+				)
+				continue
+			}
 			clonePath := filepath.Join(cloneRoot, runID)
 			cleanClonePath := filepath.Clean(clonePath)
 			if cleanClonePath != clonePath || !strings.HasPrefix(cleanClonePath+string(filepath.Separator), cloneRoot+string(filepath.Separator)) {
@@ -281,10 +294,10 @@ func (s *Source) SetDevMode(ctx context.Context, enabled bool, opts DevModeOpts)
 				)
 				continue
 			}
-			if err := os.RemoveAll(clonePath); err != nil {
+			if err := os.RemoveAll(cleanClonePath); err != nil {
 				s.log.Warn("dev-clones disable: removeall failed",
 					zap.String("source", s.namespace),
-					zap.String("path", clonePath),
+					zap.String("path", cleanClonePath),
 					zap.Error(err),
 				)
 			}
