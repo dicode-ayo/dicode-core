@@ -45,6 +45,8 @@ stages:
           permission: r
       env:
         - name: DICODE_DATADIR
+        - name: PORT
+          value: "5553"
         - name: BASE_URL
           value: "https://relay.example.com"
         - name: STATUS_PASSWORD

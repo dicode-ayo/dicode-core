@@ -81,12 +81,14 @@ export default defineConfig({
 
     // ── relay ─────────────────────────────────────────────────────────────────
     // Self-contained tests for the TS relay-client + auth-relay integration.
-    // Spawns its own broker + daemon subprocess pair (random ports, no global
-    // setup daemon involved). Skipped unless DICODE_E2E_RELAY=1 is set.
+    // Two specs, both skipped unless DICODE_E2E_RELAY=1 is set:
+    //   relay-protocol.spec.ts  — manual broker spawn, fastest protocol signal
+    //   relay-buildin.spec.ts   — broker runs inside daemon via buildin task,
+    //                             exercises the production supervisor path
     // Run:  DICODE_E2E_RELAY=1 npx playwright test --project=relay
     {
       name: 'relay',
-      testMatch: ['**/relay.spec.ts'],
+      testMatch: ['**/relay-protocol.spec.ts', '**/relay-buildin.spec.ts'],
       use: {
         ...devices['Desktop Chrome'],
       },

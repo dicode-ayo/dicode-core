@@ -9,6 +9,23 @@ Two independent e2e suites live in this repo:
 
 This document covers the **daemon ↔ relay** suite. See [`tests/e2e/README.md`](../../tests/e2e/README.md) for the Playwright suite.
 
+## Playwright relay specs
+
+Two Playwright specs in the `relay` project (both skipped unless `DICODE_E2E_RELAY=1`) cover the relay-client + auth-relay integration from the TypeScript side:
+
+| Spec | Relay source | Purpose |
+|---|---|---|
+| `relay-protocol.spec.ts` | Separate `node dicode-relay` subprocess | Fastest protocol-level signal: independent broker startup, no daemon task supervision involved |
+| `relay-buildin.spec.ts` | `buildin/relay-server-body` runs inside the daemon | Production-path coverage: relay broker is a Deno daemon task supervised by the trigger engine |
+
+Run both with:
+
+```sh
+DICODE_E2E_RELAY=1 npx playwright test --project=relay
+```
+
+`relay-buildin.spec.ts` pre-writes `${DATADIR}/relay/relay.yaml` with an ephemeral port (bypassing the Doppler-fed pipeline stages 1+2), then uses `spec.entries` overrides in the daemon config to inject `DICODE_E2E_MOCK_PROVIDER=1` into the relay-server-body task subprocess so `/_test/deliver` is available.
+
 ## What it covers
 
 Spawns a real `dicode-relay` container (from the published image) and drives it against an in-process `pkg/relay.Client` + `pkg/ipc.Server` to catch cross-service drift that unit tests on either side cannot. The matrix lives in [tests/e2e/relay/relay_test.go](../../tests/e2e/relay/relay_test.go).
