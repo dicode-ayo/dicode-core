@@ -41,3 +41,7 @@ permissions:
     # Named entries forward their host values into the subprocess.
     - DICODE_DATADIR
     - DICODE_VERSION
+    # Optional mock-provider flag. Production never sets it; tests override
+    # value: "1" via spec.entries overrides to enable /_test/deliver.
+    - name: DICODE_E2E_MOCK_PROVIDER
+      optional: true

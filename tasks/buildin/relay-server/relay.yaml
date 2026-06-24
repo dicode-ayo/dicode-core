@@ -1,5 +1,5 @@
 server:
-  port: 5553
+  port: ${PORT}
   base_url: ${BASE_URL}
   tls:
     cert_file: ""
