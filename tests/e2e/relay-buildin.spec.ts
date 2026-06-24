@@ -166,6 +166,20 @@ function spawnDaemon(cfgPath: string): ChildProcess {
   return proc;
 }
 
+async function waitForProcessExit(proc: ChildProcess, timeoutMs = 8_000): Promise<void> {
+  if (proc.exitCode !== null) return;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error('process did not exit within timeout')),
+      timeoutMs,
+    );
+    proc.once('exit', () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
+
 async function waitForRelayConnected(
   webuiP: number,
   timeoutMs = 45_000,
@@ -233,10 +247,10 @@ test.describe('relay-buildin', () => {
   });
 
   test.afterAll(async () => {
-    daemonProc?.kill('SIGTERM');
-    // Give the daemon time to gracefully terminate the relay-server-body task
-    // before we clean up tempDir.
-    await new Promise((r) => setTimeout(r, 1_000));
+    if (daemonProc) {
+      daemonProc.kill('SIGTERM');
+      await waitForProcessExit(daemonProc).catch(() => daemonProc?.kill('SIGKILL'));
+    }
     if (tempDir) {
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
@@ -269,7 +283,7 @@ test.describe('relay-buildin', () => {
     // Restart the daemon. relay-server-body will re-read the pre-written
     // relay.yaml from disk, so no extra setup is needed between restarts.
     daemonProc?.kill('SIGTERM');
-    await new Promise((r) => setTimeout(r, 1_000));
+    if (daemonProc) await waitForProcessExit(daemonProc);
 
     const cfgPath = path.join(tempDir, 'dicode.yaml');
     daemonProc = spawnDaemon(cfgPath);
