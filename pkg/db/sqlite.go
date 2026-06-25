@@ -38,7 +38,9 @@ func openSQLite(path string) (DB, error) {
 		if err != nil {
 			return nil, fmt.Errorf("create db file: %w", err)
 		}
-		f.Close()
+		if err := f.Close(); err != nil {
+			return nil, fmt.Errorf("close db file: %w", err)
+		}
 		if err := os.Chmod(path, 0600); err != nil {
 			return nil, fmt.Errorf("chmod db file: %w", err)
 		}
