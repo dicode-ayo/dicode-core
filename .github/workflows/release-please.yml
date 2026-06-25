@@ -36,7 +36,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           # Required: release-please created the v0.X.Y tag earlier in this
@@ -73,7 +73,7 @@ jobs:
       contents: write   # softprops/action-gh-release append
       packages: write   # ghcr.io push
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: docker/setup-qemu-action@v4
       - uses: docker/setup-buildx-action@v4
