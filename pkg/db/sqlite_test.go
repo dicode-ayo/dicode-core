@@ -202,6 +202,33 @@ func TestSQLiteDB_FileMode(t *testing.T) {
 	}
 }
 
+// TestSQLiteDB_FileMode_ExistingWrongPerms verifies that openSQLite repairs
+// the permissions of a pre-existing database that was created with wrong
+// permissions (e.g. before this fix, or if umask left it at 0644).
+func TestSQLiteDB_FileMode_ExistingWrongPerms(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "dicode.db")
+
+	// Simulate an old database created with too-broad permissions.
+	if err := os.WriteFile(path, nil, 0644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	db, err := openSQLite(path)
+	if err != nil {
+		t.Fatalf("openSQLite: %v", err)
+	}
+	db.Close()
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat db file: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0600 {
+		t.Errorf("db file mode after repair = %04o, want 0600", got)
+	}
+}
+
 func TestSQLiteDB_EarlyRunsColumns(t *testing.T) {
 	d := newTestDB(t).(*SQLiteDB)
 	ctx := context.Background()

@@ -31,14 +31,17 @@ func openSQLite(path string) (DB, error) {
 		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 			return nil, fmt.Errorf("create db dir: %w", err)
 		}
-		// Pre-create the file at owner-only mode. sql.Open would create it with
-		// umask-derived permissions (often 0644); since the file holds ciphertext
-		// and session token hashes it must not be world-readable.
+		// Ensure the file exists and is readable only by the owner. The 0600
+		// perm on OpenFile only applies at creation time; Chmod also repairs
+		// pre-existing databases that were created before this fix.
 		f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
 		if err != nil {
 			return nil, fmt.Errorf("create db file: %w", err)
 		}
 		f.Close()
+		if err := os.Chmod(path, 0600); err != nil {
+			return nil, fmt.Errorf("chmod db file: %w", err)
+		}
 	}
 	db, err := sql.Open("sqlite", path+"?_foreign_keys=on")
 	if err != nil {
