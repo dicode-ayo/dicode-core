@@ -595,6 +595,67 @@ invoking the CLI. Orphaned `dicode-*` build images are reclaimed by a GC pass.
 
 ---
 
+## Approval Lock Integrity (HMAC-signed dicode.lock)
+
+The trust-on-change gate persists approval records in `dicode.lock`. Because
+this file controls which task versions are allowed to run, its integrity is
+security-critical. Starting from format version 2 each lock file is
+cryptographically signed with an HMAC key derived from the daemon's master key.
+
+### Threat model
+
+| Vector | Prior defense | Residual before v2 |
+|--------|---------------|---------------------|
+| In-place overwrite via broad `fs: w` | `--deny-write` (PR #431) | Stopped |
+| Symlink write-through bypass | Python guard resolves realpath; Deno lexical check | Deno symlink still allowed |
+| Delete + replace (swap attack) | Fail-closed bootstrap + DB marker | Content not integrity-checked |
+| Forged content from DB wipe + lock tamper | DB marker; secrets store wipe loud | No cryptographic integrity |
+
+### Signing scheme
+
+```plaintext
+lockSigningKey = DeriveSubKey(masterKey, "dicode/approval-lock/v1")  // Argon2id
+canonicalContent = JSON(tasks_map)                                    // Go sort-ordered
+mac = hex(HMAC-SHA256(lockSigningKey, canonicalContent))             // stored in mac: field
+```
+
+The key is derived from the master key (`DICODE_MASTER_KEY` / `~/.dicode/master.key`),
+which is never forwarded to task subprocesses and survives independently of the
+SQLite database. Even if a task wipes the database it cannot forge a valid MAC
+without the master key.
+
+### Load-time behaviour
+
+| Condition | Outcome |
+|-----------|---------|
+| File absent | Empty lock (normal first-run) |
+| Legacy v1 (no `mac:` field), key available | Accepted + immediately re-signed (format upgrade) |
+| `mac:` present, verification passes | Normal load |
+| `mac:` present, verification fails | **Fail closed**: all records discarded; `Tampered()` returns `true`; daemon logs a warning; all tasks require explicit re-approval |
+| No signing key available (env stripped of master key) | Unsigned/legacy mode — no verification |
+
+### On-disk format
+
+Signed locks use `version: 2` and include a `mac:` field directly after the
+version line, before `tasks:`:
+
+```yaml
+# dicode.lock — approval records, managed by the dicode daemon.
+version: 2
+mac: 8a3f1c...  # 64 hex chars = HMAC-SHA256
+tasks:
+  my-task:
+    hash: sha256:...
+    approved_at: 2026-06-01T12:00:00Z
+    approved_by: manual
+```
+
+Legacy unsigned files (`version: 1`, no `mac:`) are accepted on the first
+startup with a key and immediately upgraded to v2. After that, any subsequent
+load that sees a missing or wrong MAC treats the file as tampered.
+
+---
+
 ## Database Schema Summary
 
 These tables are created in the SQLite migration in `pkg/db/sqlite.go`:
@@ -706,6 +767,7 @@ Top-level security blocks in `Config` (siblings of `server:`, not nested under i
 | CORS misconfiguration guard | Origins validated with `url.Parse()` at startup |
 | Passphrase rotation requires current | bcrypt verify on `current` field |
 | Per-task IPC socket in 0700 dir | On Linux/macOS each task run's Unix socket lives inside a per-run directory created `0700` (`/tmp/dicode-<runID>/ipc.sock`). The directory makes the socket unreachable to other local users independent of the socket file's own mode and the process umask. The socket file is also `chmod 0600` as belt-and-suspenders. |
+| `dicode.lock` HMAC integrity | Approval records are HMAC-SHA256 signed with a key derived from the master key via Argon2id (`"dicode/approval-lock/v1"` context). A MAC mismatch on load causes fail-closed: all records discarded, tasks require re-approval. Upgrade path: unsigned v1 files are accepted once and immediately re-signed. |
 | Daemon crypto namespace isolated | `permissions.dicode.crypto: ["*"]` never grants access to daemon-private sub-keys (e.g. `dicode/run-inputs/v1`); these are listed in `daemonPrivateCryptoContexts` in `pkg/ipc/server.go` and denied before any grant check |
 | Replay retarget blocked | A task-scoped `dicode.runs.replay` call cannot redirect the replay at a different task ID — the target is pinned to the original run's task |
 | `dicode` permission overrides are exhaustive | `mergeDicodePerms` merges all `DicodePermissions` fields including `secrets_has` and `crypto`; added exhaustiveness test guards against future fields being silently dropped |

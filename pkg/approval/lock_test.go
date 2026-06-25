@@ -1,6 +1,7 @@
 package approval
 
 import (
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
@@ -116,5 +117,293 @@ func TestLockFileHasHeaderComment(t *testing.T) {
 	}
 	if !strings.HasPrefix(string(data), "# dicode.lock") {
 		t.Fatalf("lockfile missing header comment, starts with: %.60s", data)
+	}
+}
+
+// testSigningKey returns a fixed 32-byte key for use in signing tests.
+func testSigningKey() []byte {
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i + 1)
+	}
+	return key
+}
+
+func TestLoadSignedLock_MissingFile(t *testing.T) {
+	l, err := LoadSignedLock(filepath.Join(t.TempDir(), LockFileName), testSigningKey())
+	if err != nil {
+		t.Fatalf("LoadSignedLock on missing file: %v", err)
+	}
+	if len(l.List()) != 0 {
+		t.Fatal("expected empty lock for missing file")
+	}
+	if l.Tampered() {
+		t.Fatal("Tampered() should be false for missing file")
+	}
+}
+
+func TestLoadSignedLock_RoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), LockFileName)
+	key := testSigningKey()
+
+	l, err := LoadSignedLock(path, key)
+	if err != nil {
+		t.Fatalf("initial LoadSignedLock: %v", err)
+	}
+	if err := l.Record("repo/deploy", "abc123", ApprovedByManual); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	// Reload and verify the MAC passes.
+	reloaded, err := LoadSignedLock(path, key)
+	if err != nil {
+		t.Fatalf("reload LoadSignedLock: %v", err)
+	}
+	if reloaded.Tampered() {
+		t.Fatal("Tampered() should be false after valid round-trip")
+	}
+	rec, ok := reloaded.Get("repo/deploy")
+	if !ok || rec.Hash != "abc123" {
+		t.Fatalf("expected repo/deploy hash abc123, got %+v ok=%v", rec, ok)
+	}
+}
+
+func TestLoadSignedLock_LegacyUpgrade(t *testing.T) {
+	path := filepath.Join(t.TempDir(), LockFileName)
+	key := testSigningKey()
+
+	// Write a legacy unsigned lock (LoadLock = no key).
+	l, err := LoadLock(path)
+	if err != nil {
+		t.Fatalf("LoadLock: %v", err)
+	}
+	if err := l.Record("repo/deploy", "abc123", ApprovedByManual); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	// Verify the file has no mac field.
+	data, _ := os.ReadFile(path)
+	if strings.Contains(string(data), "mac:") {
+		t.Fatal("legacy lock should not have mac field")
+	}
+
+	// Load with a key: should upgrade (re-sign) and succeed.
+	upgraded, err := LoadSignedLock(path, key)
+	if err != nil {
+		t.Fatalf("LoadSignedLock on legacy file: %v", err)
+	}
+	if upgraded.Tampered() {
+		t.Fatal("Tampered() should be false after legacy upgrade")
+	}
+	if _, ok := upgraded.Get("repo/deploy"); !ok {
+		t.Fatal("records should survive legacy upgrade")
+	}
+
+	// Now the file should have a mac field.
+	data, _ = os.ReadFile(path)
+	if !strings.Contains(string(data), "mac:") {
+		t.Fatal("upgraded lock should have mac field")
+	}
+
+	// A subsequent load with the same key should verify cleanly.
+	verified, err := LoadSignedLock(path, key)
+	if err != nil {
+		t.Fatalf("second LoadSignedLock after upgrade: %v", err)
+	}
+	if verified.Tampered() {
+		t.Fatal("Tampered() should be false after upgrade and verify")
+	}
+}
+
+func TestLoadSignedLock_TamperedContent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), LockFileName)
+	key := testSigningKey()
+
+	l, err := LoadSignedLock(path, key)
+	if err != nil {
+		t.Fatalf("LoadSignedLock: %v", err)
+	}
+	if err := l.Record("repo/deploy", "abc123", ApprovedByManual); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	// Tamper with the file by replacing the hash.
+	data, _ := os.ReadFile(path)
+	tampered := strings.ReplaceAll(string(data), "abc123", "forged!")
+	if err := os.WriteFile(path, []byte(tampered), 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	// Loading with the correct key should detect the tampering.
+	reloaded, err := LoadSignedLock(path, key)
+	if err != nil {
+		t.Fatalf("LoadSignedLock on tampered file: %v", err)
+	}
+	if !reloaded.Tampered() {
+		t.Fatal("Tampered() should be true after content modification")
+	}
+	// Fail closed: records must be empty.
+	if len(reloaded.List()) != 0 {
+		t.Fatalf("expected empty records after tamper detection, got %v", reloaded.List())
+	}
+}
+
+func TestLoadSignedLock_WrongKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), LockFileName)
+	key := testSigningKey()
+
+	l, err := LoadSignedLock(path, key)
+	if err != nil {
+		t.Fatalf("LoadSignedLock: %v", err)
+	}
+	if err := l.Record("repo/deploy", "abc123", ApprovedByManual); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	// Load with a different key.
+	differentKey := make([]byte, 32)
+	for i := range differentKey {
+		differentKey[i] = 0xFF
+	}
+	reloaded, err := LoadSignedLock(path, differentKey)
+	if err != nil {
+		t.Fatalf("LoadSignedLock with wrong key: %v", err)
+	}
+	if !reloaded.Tampered() {
+		t.Fatal("Tampered() should be true when wrong key is used")
+	}
+}
+
+func TestLoadSignedLock_UnsignedModeAcceptsSignedFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), LockFileName)
+	key := testSigningKey()
+
+	l, err := LoadSignedLock(path, key)
+	if err != nil {
+		t.Fatalf("LoadSignedLock: %v", err)
+	}
+	if err := l.Record("repo/deploy", "abc123", ApprovedByManual); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	// LoadLock (unsigned mode) should still be able to read the file.
+	unsigned, err := LoadLock(path)
+	if err != nil {
+		t.Fatalf("LoadLock on signed file: %v", err)
+	}
+	if unsigned.Tampered() {
+		t.Fatal("Tampered() should always be false in unsigned mode")
+	}
+	if _, ok := unsigned.Get("repo/deploy"); !ok {
+		t.Fatal("records should be readable in unsigned mode even from signed file")
+	}
+}
+
+func TestLockSignedFileHasMACField(t *testing.T) {
+	path := filepath.Join(t.TempDir(), LockFileName)
+	l, err := LoadSignedLock(path, testSigningKey())
+	if err != nil {
+		t.Fatalf("LoadSignedLock: %v", err)
+	}
+	if err := l.Record("repo/deploy", "abc", ApprovedByManual); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read lock: %v", err)
+	}
+	if !strings.Contains(string(data), "mac:") {
+		t.Fatal("signed lock should contain mac field")
+	}
+}
+
+func TestLockMACIsValidHex(t *testing.T) {
+	path := filepath.Join(t.TempDir(), LockFileName)
+	l, err := LoadSignedLock(path, testSigningKey())
+	if err != nil {
+		t.Fatalf("LoadSignedLock: %v", err)
+	}
+	if err := l.Record("repo/deploy", "abc", ApprovedByManual); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	data, _ := os.ReadFile(path)
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "mac:") {
+			macVal := strings.TrimSpace(strings.TrimPrefix(line, "mac:"))
+			if _, err := hex.DecodeString(macVal); err != nil {
+				t.Fatalf("mac field is not valid hex: %q", macVal)
+			}
+			if len(macVal) != 64 {
+				t.Fatalf("mac field should be 64 hex chars (SHA-256), got %d", len(macVal))
+			}
+			return
+		}
+	}
+	t.Fatal("mac field not found in lock file")
+}
+
+func TestLoadSignedLock_UppercaseHexMAC(t *testing.T) {
+	path := filepath.Join(t.TempDir(), LockFileName)
+	key := testSigningKey()
+
+	l, _ := LoadSignedLock(path, key)
+	if err := l.Record("repo/deploy", "abc", ApprovedByManual); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	// Convert the mac field to uppercase hex.
+	data, _ := os.ReadFile(path)
+	modified := string(data)
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "mac:") {
+			macVal := strings.TrimSpace(strings.TrimPrefix(line, "mac:"))
+			modified = strings.ReplaceAll(string(data), macVal, strings.ToUpper(macVal))
+			break
+		}
+	}
+	if err := os.WriteFile(path, []byte(modified), 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	reloaded, err := LoadSignedLock(path, key)
+	if err != nil {
+		t.Fatalf("LoadSignedLock with uppercase MAC: %v", err)
+	}
+	if reloaded.Tampered() {
+		t.Fatal("Tampered() should be false for uppercase hex MAC")
+	}
+}
+
+func TestLoadSignedLock_RecordAfterTamperDetection(t *testing.T) {
+	path := filepath.Join(t.TempDir(), LockFileName)
+	key := testSigningKey()
+
+	l, _ := LoadSignedLock(path, key)
+	_ = l.Record("repo/deploy", "abc", ApprovedByManual)
+
+	// Tamper.
+	data, _ := os.ReadFile(path)
+	_ = os.WriteFile(path, []byte(strings.ReplaceAll(string(data), "abc", "bad")), 0600)
+
+	tampered, _ := LoadSignedLock(path, key)
+	if !tampered.Tampered() {
+		t.Fatal("expected tampered state")
+	}
+
+	// Re-approval should succeed and produce a valid signed lock.
+	if err := tampered.Record("repo/deploy", "abc", ApprovedByManual); err != nil {
+		t.Fatalf("Record after tamper: %v", err)
+	}
+
+	reloaded, err := LoadSignedLock(path, key)
+	if err != nil {
+		t.Fatalf("reload after re-approval: %v", err)
+	}
+	if reloaded.Tampered() {
+		t.Fatal("Tampered() should be false after re-approval")
+	}
+	rec, ok := reloaded.Get("repo/deploy")
+	if !ok || rec.Hash != "abc" {
+		t.Fatalf("record should survive re-approval: %+v ok=%v", rec, ok)
 	}
 }

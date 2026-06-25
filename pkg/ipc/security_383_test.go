@@ -49,6 +49,8 @@ func TestCryptoContextAllowed_RejectsDicodePrefix(t *testing.T) {
 		// Daemon-private context — always denied.
 		{"run-inputs denied with wildcard", []string{"*"}, "dicode/run-inputs/v1", false},
 		{"run-inputs denied with exact grant", []string{"dicode/run-inputs/v1"}, "dicode/run-inputs/v1", false},
+		{"approval-lock denied with wildcard", []string{"*"}, "dicode/approval-lock/v1", false},
+		{"approval-lock denied with exact grant", []string{"dicode/approval-lock/v1"}, "dicode/approval-lock/v1", false},
 		// Buildin-task contexts — allowed when granted (not daemon-private).
 		{"relay-identity allowed with wildcard", []string{"*"}, "dicode/relay-identity/v1", true},
 		{"relay-identity allowed with explicit", []string{"dicode/relay-identity/v1"}, "dicode/relay-identity/v1", true},
