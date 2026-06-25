@@ -571,11 +571,6 @@ func LoadDirWithVars(dir string, extras map[string]string) (*Spec, error) {
 	if spec.Runtime == "" || spec.Runtime == "js" {
 		spec.Runtime = RuntimeDeno
 	}
-	// Container and daemon tasks may run indefinitely; don't impose a default timeout.
-	if spec.Timeout == 0 && spec.Runtime != RuntimeDocker && spec.Runtime != RuntimePodman && !spec.Trigger.Daemon {
-		spec.Timeout = 60 * time.Second
-	}
-
 	return &spec, nil
 }
 

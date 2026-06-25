@@ -38,11 +38,12 @@ func openSQLite(path string) (DB, error) {
 		if err != nil {
 			return nil, fmt.Errorf("create db file: %w", err)
 		}
+		if err := f.Chmod(0600); err != nil {
+			_ = f.Close()
+			return nil, fmt.Errorf("chmod db file: %w", err)
+		}
 		if err := f.Close(); err != nil {
 			return nil, fmt.Errorf("close db file: %w", err)
-		}
-		if err := os.Chmod(path, 0600); err != nil {
-			return nil, fmt.Errorf("chmod db file: %w", err)
 		}
 	}
 	db, err := sql.Open("sqlite", path+"?_foreign_keys=on")

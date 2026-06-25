@@ -191,6 +191,9 @@ func TestSQLiteDB_FileMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("openSQLite: %v", err)
 	}
+	// WAL sidecar files (path-wal, path-shm) exist only while the DB is open.
+	// SQLite checkpoints and removes them on a clean Close, so only the main
+	// file needs a permission assertion here.
 	db.Close()
 
 	info, err := os.Stat(path)
