@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -179,6 +180,83 @@ func TestSQLiteDB_AuditLogIndexes(t *testing.T) {
 		)
 		if name != idx {
 			t.Errorf("index %q not found", idx)
+		}
+	}
+}
+
+func TestSQLiteDB_FileMode(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "dicode.db")
+	db, err := openSQLite(path)
+	if err != nil {
+		t.Fatalf("openSQLite: %v", err)
+	}
+	// WAL sidecar files (path-wal, path-shm) exist only while the DB is open.
+	// SQLite checkpoints and removes them on a clean Close, so only the main
+	// file needs a permission assertion here.
+	db.Close()
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat db file: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0600 {
+		t.Errorf("db file mode = %04o, want 0600", got)
+	}
+}
+
+// TestSQLiteDB_FileMode_ExistingWrongPerms verifies that openSQLite repairs
+// the permissions of a pre-existing database that was created with wrong
+// permissions (e.g. before this fix, or if umask left it at 0644).
+func TestSQLiteDB_FileMode_ExistingWrongPerms(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "dicode.db")
+
+	// Simulate an old database created with too-broad permissions.
+	if err := os.WriteFile(path, nil, 0644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	db, err := openSQLite(path)
+	if err != nil {
+		t.Fatalf("openSQLite: %v", err)
+	}
+	db.Close()
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat db file: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0600 {
+		t.Errorf("db file mode after repair = %04o, want 0600", got)
+	}
+}
+
+func TestSQLiteDB_EarlyRunsColumns(t *testing.T) {
+	d := newTestDB(t).(*SQLiteDB)
+	ctx := context.Background()
+	rows, err := d.db.QueryContext(ctx, `PRAGMA table_info(runs)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	cols := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			t.Fatal(err)
+		}
+		cols[name] = true
+	}
+	for _, want := range []string{
+		"trigger_source", "return_value", "output_content_type",
+		"output_content", "fail_reason",
+	} {
+		if !cols[want] {
+			t.Errorf("runs missing column %q", want)
 		}
 	}
 }

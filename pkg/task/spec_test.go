@@ -604,6 +604,29 @@ notify:
 	}
 }
 
+// TestLoadDir_ZeroTimeoutPreserved verifies that omitting timeout: in task.yaml
+// leaves spec.Timeout == 0 (no deadline) for both Deno and Python runtimes.
+// The old code coerced zero to 60s for non-container/non-daemon tasks, which
+// contradicted the "no built-in default timeout" contract.
+func TestLoadDir_ZeroTimeoutPreserved(t *testing.T) {
+	for _, rt := range []string{"deno", "python"} {
+		t.Run(rt, func(t *testing.T) {
+			dir := t.TempDir()
+			src := "name: timeout-test\nruntime: " + rt + "\ntrigger: { manual: true }\n"
+			if err := os.WriteFile(filepath.Join(dir, "task.yaml"), []byte(src), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			spec, err := LoadDirWithVars(dir, nil)
+			if err != nil {
+				t.Fatalf("LoadDirWithVars: %v", err)
+			}
+			if spec.Timeout != 0 {
+				t.Errorf("runtime=%s: spec.Timeout = %v, want 0 (no deadline)", rt, spec.Timeout)
+			}
+		})
+	}
+}
+
 // TestLoadDir_BuildinTasksParse walks every on-disk `tasks/buildin/*/task.yaml`
 // (and nested provider tasks like secret-providers/doppler/) and asserts that
 // LoadDir succeeds for each. This locks in the cleanup from #317 — a future

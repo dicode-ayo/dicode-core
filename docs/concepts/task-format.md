@@ -794,7 +794,7 @@ This keeps services bound to `127.0.0.1` on the host unreachable from the contai
 
 **Kill** — Container tasks may run indefinitely. Use the **Kill** button on the run detail page (or `POST /api/runs/{runID}/kill`) to stop the container gracefully (SIGTERM + 10 s timeout).
 
-**No default timeout** — unlike JS tasks (60 s default), container tasks have no timeout unless you set `timeout:` explicitly.
+**No default timeout** — no runtime (Deno, Python, Docker, Podman) enforces a built-in default timeout. Set `timeout:` explicitly in `task.yaml` to bound run duration.
 
 ---
 

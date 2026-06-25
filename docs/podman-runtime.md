@@ -106,7 +106,7 @@ Podman tasks may run indefinitely. Use the **Kill** button on the run detail pag
 
 ## No default timeout
 
-Unlike JS tasks (60 s default), Podman tasks have no timeout unless you set `timeout:` explicitly in `task.yaml`.
+Podman tasks (and all other runtimes — Deno, Python, Docker) have no built-in default timeout. Set `timeout:` explicitly in `task.yaml` to bound run duration.
 
 ---
 

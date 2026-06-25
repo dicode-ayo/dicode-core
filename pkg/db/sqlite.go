@@ -31,6 +31,20 @@ func openSQLite(path string) (DB, error) {
 		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 			return nil, fmt.Errorf("create db dir: %w", err)
 		}
+		// Ensure the file exists and is readable only by the owner. The 0600
+		// perm on OpenFile only applies at creation time; Chmod also repairs
+		// pre-existing databases that were created before this fix.
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
+		if err != nil {
+			return nil, fmt.Errorf("create db file: %w", err)
+		}
+		if err := f.Chmod(0600); err != nil {
+			_ = f.Close()
+			return nil, fmt.Errorf("chmod db file: %w", err)
+		}
+		if err := f.Close(); err != nil {
+			return nil, fmt.Errorf("close db file: %w", err)
+		}
 	}
 	db, err := sql.Open("sqlite", path+"?_foreign_keys=on")
 	if err != nil {
@@ -107,15 +121,19 @@ func (s *SQLiteDB) migrate() error {
 	if err != nil {
 		return err
 	}
-	// Add new columns to existing tables (errors suppressed — expected on re-run).
-	for _, stmt := range []string{
-		`ALTER TABLE runs ADD COLUMN trigger_source TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE runs ADD COLUMN return_value TEXT`,
-		`ALTER TABLE runs ADD COLUMN output_content_type TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE runs ADD COLUMN output_content TEXT`,
-		`ALTER TABLE runs ADD COLUMN fail_reason TEXT NOT NULL DEFAULT ''`,
+	// Add new columns to existing tables via the proper migration helper so
+	// genuine failures are surfaced rather than silently swallowed.
+	ctx := context.Background()
+	for _, m := range []struct{ name, ddl string }{
+		{"trigger_source", "TEXT NOT NULL DEFAULT ''"},
+		{"return_value", "TEXT"},
+		{"output_content_type", "TEXT NOT NULL DEFAULT ''"},
+		{"output_content", "TEXT"},
+		{"fail_reason", "TEXT NOT NULL DEFAULT ''"},
 	} {
-		_, _ = s.db.Exec(stmt)
+		if err := addColumnIfMissing(ctx, s.db, "runs", m.name, m.ddl); err != nil {
+			return fmt.Errorf("migrate runs.%s: %w", m.name, err)
+		}
 	}
 
 	// Auth tables — sessions (browser sessions + trusted devices) and API keys.
@@ -169,7 +187,6 @@ func (s *SQLiteDB) migrate() error {
 		// rows to 'task' at ALTER time.
 		{"kind", "TEXT NOT NULL DEFAULT 'task'"},
 	}
-	ctx := context.Background()
 	for _, m := range runsMigrations {
 		if err := addColumnIfMissing(ctx, s.db, "runs", m.name, m.ddl); err != nil {
 			return fmt.Errorf("migrate runs.%s: %w", m.name, err)
