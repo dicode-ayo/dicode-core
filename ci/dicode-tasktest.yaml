@@ -1,0 +1,15 @@
+# Minimal dicode config for the test-tasks-cli CI job.
+# ${DATADIR} expands to DICODE_DATA_DIR (set in the workflow env).
+# ${CONFIGDIR} expands to the directory containing this file — the ci/
+# sub-directory. The spec path uses an absolute path written by the workflow.
+database:
+  path: ${DATADIR}/data.db
+  type: sqlite
+log_level: warn
+server:
+  port: 18765
+  auth: false
+  mcp: false
+  tray: false
+relay:
+  enabled: false
