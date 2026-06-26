@@ -84,6 +84,7 @@ jobs:
           # absolute workspace path (${CONFIGDIR} won't reach tasks/ from ci/).
           cat ci/dicode-tasktest.yaml > "$DICODE_DATA_DIR/dicode-ci.yaml"
           cat >> "$DICODE_DATA_DIR/dicode-ci.yaml" <<SPECEOF
+          data_dir: $DICODE_DATA_DIR
           spec:
             entries:
               buildin:
@@ -97,9 +98,11 @@ jobs:
           DAEMON_PID=$!
           trap "kill $DAEMON_PID 2>/dev/null || true" EXIT
 
-          # Wait for HTTP API readiness (max 30 s, 0.5 s poll)
+          # Wait for IPC socket readiness (max 30 s, 0.5 s poll).
+          # Poll the socket, not HTTP — the CLI communicates via IPC and we
+          # need that path ready before invoking `dicode task test`.
           for i in $(seq 1 60); do
-            curl -sf http://localhost:18765/api/tasks >/dev/null 2>&1 && break
+            test -S "$DICODE_DATA_DIR/daemon.sock" && break
             if [ "$i" -eq 60 ]; then
               echo "Daemon did not become ready in 30 s"
               echo "=== daemon log ==="
