@@ -520,16 +520,6 @@ func cmdTaskApprove(c *ipc.ControlClient, args []string) error {
 	return nil
 }
 
-// cmdTaskTest implements `dicode task test <task-id> [--format=text|junit|gh-summary]`.
-//
-// --format=text (default): human-readable output to stdout.
-// --format=junit:          JUnit XML to stdout; human-readable to stderr;
-//
-//	GH step-summary markdown appended to $GITHUB_STEP_SUMMARY.
-//
-// --format=gh-summary:     GH step-summary markdown to stdout; also written to
-//
-//	$GITHUB_STEP_SUMMARY when the env var is set.
 func cmdTaskTest(c *ipc.ControlClient, args []string) error {
 	format := "text"
 	var taskID string
@@ -562,11 +552,17 @@ func cmdTaskTest(c *ipc.ControlClient, args []string) error {
 		return err
 	}
 
+	switch format {
+	case "text", "junit", "gh-summary":
+	default:
+		return fmt.Errorf("unknown --format %q: must be text, junit, or gh-summary", format)
+	}
+
 	var r ipc.TaskTestResult
 	hasPayload := false
 	if resp.Result != nil {
 		if rerr := remarshal(resp.Result, &r); rerr == nil {
-			hasPayload = r.Output != "" || r.Failed > 0 || r.Passed > 0
+			hasPayload = r.Output != "" || r.Failed > 0 || r.Passed > 0 || r.Skipped > 0
 		}
 	}
 	if !hasPayload {
@@ -594,6 +590,9 @@ func cmdTaskTest(c *ipc.ControlClient, args []string) error {
 		if !strings.HasSuffix(r.Output, "\n") {
 			fmt.Fprintln(os.Stderr)
 		}
+		if r.Error != "" {
+			fmt.Fprintf(os.Stderr, "error: %s\n", r.Error)
+		}
 		fmt.Fprintf(os.Stderr, "%s: %d passed, %d failed (runtime=%s, %dms)\n",
 			r.TaskID, r.Passed, r.Failed, r.Runtime, r.DurMs)
 		fmt.Print(tasktest.FormatJUnit(result))
@@ -602,6 +601,9 @@ func cmdTaskTest(c *ipc.ControlClient, args []string) error {
 		summary := tasktest.FormatGHSummary(result)
 		fmt.Print(summary)
 		writeGHStepSummary(summary)
+		if r.Error != "" {
+			fmt.Fprintf(os.Stderr, "error: %s\n", r.Error)
+		}
 	default: // "text"
 		fmt.Print(r.Output)
 		if !strings.HasSuffix(r.Output, "\n") {
@@ -620,9 +622,6 @@ func cmdTaskTest(c *ipc.ControlClient, args []string) error {
 	return nil
 }
 
-// writeGHStepSummary appends markdown to $GITHUB_STEP_SUMMARY when the env
-// var is set. Failures are silently ignored — the primary output path already
-// delivered the result; summary writing is best-effort.
 func writeGHStepSummary(markdown string) {
 	path := os.Getenv("GITHUB_STEP_SUMMARY")
 	if path == "" {

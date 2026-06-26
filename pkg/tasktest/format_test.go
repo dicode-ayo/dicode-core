@@ -106,3 +106,44 @@ func TestFormatGHSummary_WithOutput(t *testing.T) {
 		t.Error("expected raw output inside details block")
 	}
 }
+
+func TestFormatJUnit_WithSkipped(t *testing.T) {
+	r := Result{
+		TaskID:  "buildin/foo",
+		Runtime: "deno",
+		Passed:  2,
+		Failed:  1,
+		Skipped: 3,
+	}
+	out := FormatJUnit(r)
+	if !strings.Contains(out, `tests="6"`) {
+		t.Errorf("expected tests=6 (2+1+3), got:\n%s", out)
+	}
+	if !strings.Contains(out, `skipped="3"`) {
+		t.Errorf("expected skipped=3 on testsuite, got:\n%s", out)
+	}
+	// Every test (passed, failed, skipped) must have a <testcase> element.
+	if n := strings.Count(out, "<testcase"); n != 6 {
+		t.Errorf("expected 6 <testcase> elements (2+1+3), got %d:\n%s", n, out)
+	}
+	if n := strings.Count(out, "<skipped"); n != 3 {
+		t.Errorf("expected 3 <skipped> elements, got %d:\n%s", n, out)
+	}
+}
+
+func TestFormatGHSummary_BacktickOutputFence(t *testing.T) {
+	r := Result{
+		TaskID: "buildin/foo",
+		Passed: 1,
+		// Output contains triple-backticks; tilde fencing must survive them.
+		Output: "line1\n```\nsome code\n```\nline2\n",
+	}
+	out := FormatGHSummary(r)
+	// Fence delimiter must be tilde, not backtick, so output backticks don't close the block.
+	if !strings.Contains(out, "\n~~~\n") {
+		t.Error("expected tilde fence delimiter (~~~) in output details block")
+	}
+	if !strings.Contains(out, "some code") {
+		t.Error("expected raw output preserved inside the fenced block")
+	}
+}
