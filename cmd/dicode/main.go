@@ -547,15 +547,15 @@ func cmdTaskTest(c *ipc.ControlClient, args []string) error {
 		return fmt.Errorf("usage: dicode task test <task-id> [--format=text|junit|gh-summary]")
 	}
 
-	resp, err := c.Send(ipc.Request{Method: "cli.task.test", TaskID: taskID})
-	if err != nil {
-		return err
-	}
-
 	switch format {
 	case "text", "junit", "gh-summary":
 	default:
 		return fmt.Errorf("unknown --format %q: must be text, junit, or gh-summary", format)
+	}
+
+	resp, err := c.Send(ipc.Request{Method: "cli.task.test", TaskID: taskID})
+	if err != nil {
+		return err
 	}
 
 	var r ipc.TaskTestResult

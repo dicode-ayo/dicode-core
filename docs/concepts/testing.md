@@ -9,7 +9,7 @@
 
 Dicode is designed with four validation layers, each catching different classes of problems.
 
-```
+```text
 Layer 1: Static validation     — schema + syntax, zero execution, instant        [planned]
 Layer 2: Unit tests            — mocked globals, full task run, local             [implemented: Deno]
 Layer 3: Dry run               — real secrets, intercepted HTTP, no side effects  [planned]
