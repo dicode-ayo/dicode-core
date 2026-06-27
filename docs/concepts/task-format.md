@@ -1033,7 +1033,7 @@ export default async function main({ env }) {
 
 #### `env_read_exposed` — grant unrestricted env read (Deno node-compat / npm escape hatch; Python env-filter bypass)
 
-`permissions.env_read_exposed: true` grants unrestricted env-var reads. For Deno it passes bare `--allow-env` to the sandbox. For Python it disables the `os.environ` filter (#418): by default Python tasks can only read the names listed in `permissions.env` plus a runtime-essential set (`PATH`, `HOME`, cache/proxy/TLS vars, `DICODE_SOCKET`, `DICODE_TOKEN`, …); setting this flag lifts that restriction.
+`permissions.env_read_exposed: true` grants unrestricted env-var reads. For Deno it passes bare `--allow-env` to the sandbox. For Python it disables the `os.environ` filter (#418): by default Python tasks can initially only read the names listed in `permissions.env` plus a runtime-essential set (`PATH`, `HOME`, cache/proxy/TLS vars, `DICODE_SOCKET`, `DICODE_TOKEN`, …); keys the task writes with `os.environ["K"] = v` become readable immediately without this flag. Setting `env_read_exposed: true` lifts all restrictions.
 
 The flag exists primarily for node-compat / npm tasks: `import "npm:…"` pulls in transitive dependencies that read `process.env` keys (`NODE_ENV` and others) at module-init time, before your `main()` runs. The set is unpredictable per dependency, so pinning individual names is fragile — `import "npm:dicode-relay/start"`, for example, still throws `NotCapable` even with `NODE_ENV` explicitly declared.
 

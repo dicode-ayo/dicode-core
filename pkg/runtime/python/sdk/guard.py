@@ -228,8 +228,41 @@ def _dicode_install_guard():
                 return sum(1 for k in _env_allowed_set if k in _real_env)
             def __contains__(self, key):
                 return key in _env_allowed_set and key in _real_env
+            def copy(self):
+                return dict(self.items())
 
         _os.environ = _FilteredEnv()
+
+        # Also cover the bytes env API so os.environb / os.getenvb cannot be
+        # used to bypass the allowlist on platforms that expose them (Linux).
+        if hasattr(_os, "environb"):
+            _real_environb = _os.environb
+
+            class _FilteredEnvB:
+                def __getitem__(self, key):
+                    if key.decode(errors="replace") in _env_allowed_set:
+                        return _real_environb[key]
+                    raise KeyError(key)
+                def get(self, key, default=None):
+                    if key.decode(errors="replace") in _env_allowed_set:
+                        return _real_environb.get(key, default)
+                    return default
+                def __contains__(self, key):
+                    return key.decode(errors="replace") in _env_allowed_set and key in _real_environb
+                def __iter__(self):
+                    return (k for k in _real_environb if k.decode(errors="replace") in _env_allowed_set)
+                def keys(self):
+                    return list(self)
+
+            _os.environb = _FilteredEnvB()
+
+        if hasattr(_os, "getenvb"):
+            _real_getenvb = _os.getenvb
+            def _getenvb(key, default=None):
+                if key.decode(errors="replace") in _env_allowed_set:
+                    return _real_getenvb(key, default)
+                return default
+            _os.getenvb = _getenvb
 
     _sys.addaudithook(_hook)
 

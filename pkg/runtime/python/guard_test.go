@@ -175,10 +175,19 @@ func TestBuildGuardPolicy_EnvAllowed_WithDeclaredVars(t *testing.T) {
 	for _, n := range pol.EnvAllowed {
 		names[n] = true
 	}
-	for _, want := range []string{"MY_API_KEY", "ANOTHER_VAR", "PATH", "HOME", "DICODE_SOCKET", "DICODE_TOKEN"} {
+	for _, want := range []string{
+		"MY_API_KEY", "ANOTHER_VAR",
+		// Essential set samples (locale, proxy, TLS, cache, IPC).
+		"PATH", "HOME", "LANG", "HTTP_PROXY", "SSL_CERT_FILE", "XDG_CACHE_HOME",
+		"DICODE_SOCKET", "DICODE_TOKEN",
+	} {
 		if !names[want] {
 			t.Errorf("EnvAllowed missing %q; got %v", want, pol.EnvAllowed)
 		}
+	}
+	// DENO_DIR is Deno-specific and must never appear in the Python essential set.
+	if names["DENO_DIR"] {
+		t.Errorf("EnvAllowed must not contain DENO_DIR (Deno-specific); got %v", pol.EnvAllowed)
 	}
 }
 
@@ -206,10 +215,16 @@ func TestBuildGuardPolicy_EnvAllowed_NoDeclarations(t *testing.T) {
 	for _, n := range pol.EnvAllowed {
 		names[n] = true
 	}
-	for _, want := range []string{"PATH", "HOME", "DICODE_SOCKET", "DICODE_TOKEN"} {
+	for _, want := range []string{
+		"PATH", "HOME", "LANG", "HTTP_PROXY", "SSL_CERT_FILE", "XDG_CACHE_HOME",
+		"DICODE_SOCKET", "DICODE_TOKEN",
+	} {
 		if !names[want] {
 			t.Errorf("EnvAllowed (essential-only) missing %q", want)
 		}
+	}
+	if names["DENO_DIR"] {
+		t.Errorf("EnvAllowed must not contain DENO_DIR; got %v", pol.EnvAllowed)
 	}
 }
 
