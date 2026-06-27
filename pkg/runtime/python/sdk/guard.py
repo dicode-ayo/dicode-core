@@ -238,21 +238,26 @@ def _dicode_install_guard():
         if hasattr(_os, "environb"):
             _real_environb = _os.environb
 
-            class _FilteredEnvB:
+            class _FilteredEnvB(_cabc.MutableMapping):
+                """Bytes-key view of _FilteredEnv; mirrors the allowlist filtering."""
                 def __getitem__(self, key):
                     if key.decode(errors="replace") in _env_allowed_set:
                         return _real_environb[key]
                     raise KeyError(key)
-                def get(self, key, default=None):
-                    if key.decode(errors="replace") in _env_allowed_set:
-                        return _real_environb.get(key, default)
-                    return default
-                def __contains__(self, key):
-                    return key.decode(errors="replace") in _env_allowed_set and key in _real_environb
+                def __setitem__(self, key, value):
+                    _real_environb[key] = value
+                    _env_allowed_set.add(key.decode(errors="replace"))
+                def __delitem__(self, key):
+                    if key.decode(errors="replace") not in _env_allowed_set:
+                        raise KeyError(key)
+                    del _real_environb[key]
+                    _env_allowed_set.discard(key.decode(errors="replace"))
                 def __iter__(self):
                     return (k for k in _real_environb if k.decode(errors="replace") in _env_allowed_set)
-                def keys(self):
-                    return list(self)
+                def __len__(self):
+                    return sum(1 for k in _real_environb if k.decode(errors="replace") in _env_allowed_set)
+                def __contains__(self, key):
+                    return key.decode(errors="replace") in _env_allowed_set and key in _real_environb
 
             _os.environb = _FilteredEnvB()
 
