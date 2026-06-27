@@ -34,6 +34,10 @@ type guardPolicy struct {
 	// directory. The audit hook checks this before the write allowlist so the
 	// deny always wins.
 	FSDeny []string `json:"fs_deny,omitempty"`
+	// EnvAllowed lists env var names the task may read; nil means no filtering
+	// (env_read_exposed=true). When set, guard.py replaces os.environ with a
+	// filtered view restricted to these names.
+	EnvAllowed []string `json:"env_allowed,omitempty"`
 }
 
 type guardNet struct {
@@ -104,6 +108,48 @@ func buildGuardPolicy(spec *task.Spec, socketPath string, protectedPaths []strin
 		}
 		pol.FSDeny = append(pol.FSDeny, filepath.Clean(p))
 	}
+
+	// Env-read guardrail: when env_read_exposed is false (the default), restrict
+	// os.environ reads to the declared env var names plus a runtime-essential set.
+	// When env_read_exposed is true, leave EnvAllowed nil (no filter).
+	if !spec.Permissions.EnvReadExposed {
+		essential := []string{
+			// Process basics.
+			"PATH", "HOME", "USER", "LOGNAME", "TMPDIR",
+			// Locale / timezone.
+			"LANG", "LC_ALL", "LC_CTYPE", "TZ",
+			// Cache, data, and config roots.
+			"XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME",
+			// TLS trust store overrides.
+			"SSL_CERT_FILE", "SSL_CERT_DIR",
+			// Proxies, honored by uv/requests.
+			"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
+			"http_proxy", "https_proxy", "no_proxy",
+			// Deno cache location (kept for consistency with subprocenv.go).
+			"DENO_DIR",
+			// uv interpreter and cache locations.
+			"UV_CACHE_DIR", "UV_PYTHON", "UV_PYTHON_INSTALL_DIR", "VIRTUAL_ENV",
+			// IPC handshake coordinates.
+			"DICODE_SOCKET", "DICODE_TOKEN",
+		}
+		seen := make(map[string]bool, len(essential)+len(spec.Permissions.Env))
+		allowed := make([]string, 0, len(essential)+len(spec.Permissions.Env))
+		for _, name := range essential {
+			if !seen[name] {
+				seen[name] = true
+				allowed = append(allowed, name)
+			}
+		}
+		for _, e := range spec.Permissions.Env {
+			if e.Name == "" || seen[e.Name] {
+				continue
+			}
+			seen[e.Name] = true
+			allowed = append(allowed, e.Name)
+		}
+		pol.EnvAllowed = allowed
+	}
+
 	return pol
 }
 

@@ -159,6 +159,60 @@ func TestBuildGuardPolicy_ProtectedPathsBecomeDenyList(t *testing.T) {
 	}
 }
 
+func TestBuildGuardPolicy_EnvAllowed_WithDeclaredVars(t *testing.T) {
+	// When env_read_exposed=false and env vars are declared, EnvAllowed
+	// must contain the declared names and the essential set.
+	spec := specWithPerms(task.Permissions{
+		Env: []task.EnvEntry{
+			{Name: "MY_API_KEY"},
+			{Name: "ANOTHER_VAR"},
+		},
+	})
+	pol := buildGuardPolicy(spec, "/tmp/dicode.sock", nil)
+
+	// Must contain declared names
+	names := make(map[string]bool, len(pol.EnvAllowed))
+	for _, n := range pol.EnvAllowed {
+		names[n] = true
+	}
+	for _, want := range []string{"MY_API_KEY", "ANOTHER_VAR", "PATH", "HOME", "DICODE_SOCKET", "DICODE_TOKEN"} {
+		if !names[want] {
+			t.Errorf("EnvAllowed missing %q; got %v", want, pol.EnvAllowed)
+		}
+	}
+}
+
+func TestBuildGuardPolicy_EnvAllowed_EnvReadExposed(t *testing.T) {
+	// env_read_exposed=true must set EnvAllowed=nil (no filter).
+	spec := specWithPerms(task.Permissions{
+		EnvReadExposed: true,
+		Env:            []task.EnvEntry{{Name: "FOO"}},
+	})
+	pol := buildGuardPolicy(spec, "/tmp/dicode.sock", nil)
+	if pol.EnvAllowed != nil {
+		t.Errorf("env_read_exposed=true must set EnvAllowed=nil; got %v", pol.EnvAllowed)
+	}
+}
+
+func TestBuildGuardPolicy_EnvAllowed_NoDeclarations(t *testing.T) {
+	// No declared vars: EnvAllowed must still be set (to essential set only),
+	// not nil, so filtering is active.
+	spec := specWithPerms(task.Permissions{})
+	pol := buildGuardPolicy(spec, "/tmp/dicode.sock", nil)
+	if pol.EnvAllowed == nil {
+		t.Error("EnvAllowed must be non-nil (essential set) even with no declared vars")
+	}
+	names := make(map[string]bool, len(pol.EnvAllowed))
+	for _, n := range pol.EnvAllowed {
+		names[n] = true
+	}
+	for _, want := range []string{"PATH", "HOME", "DICODE_SOCKET", "DICODE_TOKEN"} {
+		if !names[want] {
+			t.Errorf("EnvAllowed (essential-only) missing %q", want)
+		}
+	}
+}
+
 func TestBuildWrapper_GuardPlacement(t *testing.T) {
 	script := "# /// script\n# dependencies = [\"requests\"]\n# ///\nresult = 1\n"
 	pol := buildGuardPolicy(specWithPerms(task.Permissions{}), "/tmp/dicode.sock", nil)

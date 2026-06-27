@@ -75,7 +75,7 @@ permissions:
 | `trigger.restart` | string | | daemon only: `always` (default), `on-failure`, `never` |
 | `permissions` | object | | Explicit access grants — nothing is implicit |
 | `permissions.env` | list | | Env vars the script may read (see below); for unrestricted env read use `env_read_exposed` |
-| `permissions.env_read_exposed` | bool | | Deno only: grant bare `--allow-env` (read any env var) for node-compat / npm tasks (see below) |
+| `permissions.env_read_exposed` | bool | | Grant unrestricted env-var reads (Deno and Python): Deno gets bare `--allow-env`; Python lifts the os.environ filter added in #418. For node-compat / npm tasks (see below) |
 | `permissions.fs` | list | | Filesystem access declarations (Deno: read+write; Python: write only) |
 | `permissions.fs[].path` | string | | Absolute or `~`-prefixed path |
 | `permissions.fs[].permission` | string | | `r`, `w`, or `rw` |
@@ -1031,9 +1031,11 @@ export default async function main({ env }) {
 }
 ```
 
-#### `env_read_exposed` — grant unrestricted env read (Deno node-compat / npm escape hatch)
+#### `env_read_exposed` — grant unrestricted env read (Deno node-compat / npm escape hatch; Python env-filter bypass)
 
-`permissions.env_read_exposed: true` grants the Deno sandbox bare `--allow-env` (read **any** env var). It exists for node-compat / npm tasks: `import "npm:…"` pulls in transitive dependencies that read `process.env` keys (`NODE_ENV` and others) at module-init time, before your `main()` runs. The set is unpredictable per dependency, so pinning individual names is fragile — `import "npm:dicode-relay/start"`, for example, still throws `NotCapable` even with `NODE_ENV` explicitly declared.
+`permissions.env_read_exposed: true` grants unrestricted env-var reads. For Deno it passes bare `--allow-env` to the sandbox. For Python it disables the `os.environ` filter (#418): by default Python tasks can only read the names listed in `permissions.env` plus a runtime-essential set (`PATH`, `HOME`, cache/proxy/TLS vars, `DICODE_SOCKET`, `DICODE_TOKEN`, …); setting this flag lifts that restriction.
+
+The flag exists primarily for node-compat / npm tasks: `import "npm:…"` pulls in transitive dependencies that read `process.env` keys (`NODE_ENV` and others) at module-init time, before your `main()` runs. The set is unpredictable per dependency, so pinning individual names is fragile — `import "npm:dicode-relay/start"`, for example, still throws `NotCapable` even with `NODE_ENV` explicitly declared.
 
 `env_read_exposed` widens *read permission* only. It is independent of the `env:` list — set the flag to allow reads, and keep the named/`secret:`/`from:` entries that your task actually needs **forwarded** (the flag grants permission to read a var but does not inject any values):
 
@@ -1045,7 +1047,7 @@ permissions:
     - DICODE_VERSION
 ```
 
-**Blast radius — why this is safe.** A task subprocess does not inherit the daemon environment. `runtime.SubprocessEnv` assembles the subprocess env as an allowlist: process basics + cache/proxy/TLS vars (`PATH`, `HOME`, `XDG_CACHE_HOME`, `DENO_DIR`, `HTTP(S)_PROXY`, `SSL_CERT_*`, …), the per-run IPC coordinates (`DICODE_SOCKET`/`DICODE_TOKEN`, which the task already holds), the host values of the task's own named entries, and its resolved secrets/values. The daemon master key and admin/MCP API keys are explicitly denylisted and never forwarded. So bare `--allow-env` lets the script read only that minimal, already-task-scoped env — it exposes nothing the task didn't already have. (Deno only; Python tasks read env through the SDK, not `--allow-env`, so `env_read_exposed` is a Deno-runtime concept.)
+**Blast radius — why this is safe.** A task subprocess does not inherit the daemon environment. `runtime.SubprocessEnv` assembles the subprocess env as an allowlist: process basics + cache/proxy/TLS vars (`PATH`, `HOME`, `XDG_CACHE_HOME`, `DENO_DIR`, `HTTP(S)_PROXY`, `SSL_CERT_*`, …), the per-run IPC coordinates (`DICODE_SOCKET`/`DICODE_TOKEN`, which the task already holds), the host values of the task's own named entries, and its resolved secrets/values. The daemon master key and admin/MCP API keys are explicitly denylisted and never forwarded. So `env_read_exposed` lets the script read only that minimal, already-task-scoped env — it exposes nothing the task didn't already have.
 
 #### Example 5 — `if_missing`: run a prereq task when a secret is absent
 

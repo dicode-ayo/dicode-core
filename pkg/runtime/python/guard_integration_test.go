@@ -231,6 +231,82 @@ func TestGuard_NetAllowlistPassesIPLiterals(t *testing.T) {
 	requireAllowed(t, out, err)
 }
 
+func TestGuard_EnvReadDenied(t *testing.T) {
+	// A var not in env_allowed must not be readable.
+	pol := guardPolicy{
+		Net:        guardNet{Mode: "unrestricted"},
+		Run:        guardRun{Mode: "deny"},
+		EnvAllowed: []string{"PATH", "HOME", "DICODE_SOCKET", "DICODE_TOKEN"},
+	}
+	payload := `
+import os
+try:
+    v = os.environ["SECRET_NOT_DECLARED"]
+    raise AssertionError(f"should have raised KeyError, got {v!r}")
+except KeyError:
+    pass  # expected
+# .get() must also return None
+assert os.environ.get("SECRET_NOT_DECLARED") is None, "get must return None for filtered var"
+# Membership test must also be filtered
+assert "SECRET_NOT_DECLARED" not in os.environ, "in-test must return False for filtered var"
+`
+	out, err := runGuardScript(t, pol, payload)
+	requireAllowed(t, out, err)
+}
+
+func TestGuard_EnvReadAllowed_DeclaredVar(t *testing.T) {
+	// A declared var that is in os.environ must be readable.
+	pol := guardPolicy{
+		Net:        guardNet{Mode: "unrestricted"},
+		Run:        guardRun{Mode: "deny"},
+		EnvAllowed: []string{"PATH", "HOME", "MY_DECLARED_VAR", "DICODE_SOCKET", "DICODE_TOKEN"},
+	}
+	payload := `
+import os
+os.environ["MY_DECLARED_VAR"] = "hello"  # set it first
+v = os.environ["MY_DECLARED_VAR"]
+assert v == "hello", f"expected 'hello', got {v!r}"
+`
+	out, err := runGuardScript(t, pol, payload)
+	requireAllowed(t, out, err)
+}
+
+func TestGuard_EnvReadAll_NoFilter(t *testing.T) {
+	// When env_allowed is nil (env_read_exposed=true), os.environ is unfiltered.
+	pol := guardPolicy{
+		Net:        guardNet{Mode: "unrestricted"},
+		Run:        guardRun{Mode: "deny"},
+		EnvAllowed: nil, // no filter
+	}
+	payload := `
+import os
+os.environ["ANYTHING"] = "value"
+v = os.environ.get("ANYTHING")
+assert v == "value", f"expected 'value', got {v!r}"
+`
+	out, err := runGuardScript(t, pol, payload)
+	requireAllowed(t, out, err)
+}
+
+func TestGuard_EnvIter_OnlyDeclared(t *testing.T) {
+	// Iterating os.environ must only yield allowed keys.
+	pol := guardPolicy{
+		Net:        guardNet{Mode: "unrestricted"},
+		Run:        guardRun{Mode: "deny"},
+		EnvAllowed: []string{"ONLY_THIS_ONE", "DICODE_SOCKET", "DICODE_TOKEN"},
+	}
+	payload := `
+import os
+os.environ["ONLY_THIS_ONE"] = "yes"
+os.environ["NOT_THIS_ONE"] = "no"
+keys = list(os.environ.keys())
+assert "ONLY_THIS_ONE" in keys, f"ONLY_THIS_ONE missing from {keys}"
+assert "NOT_THIS_ONE" not in keys, f"NOT_THIS_ONE leaked into {keys}"
+`
+	out, err := runGuardScript(t, pol, payload)
+	requireAllowed(t, out, err)
+}
+
 func TestGuard_NetAllowlistGetaddrinfo(t *testing.T) {
 	pol := guardPolicy{
 		Net: guardNet{Mode: "allowlist", Hosts: []string{"localhost"}},

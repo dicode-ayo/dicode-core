@@ -197,6 +197,32 @@ def _dicode_install_guard():
             parts = (_to_str(args[0]) or "").split()
             _check_run(parts[0] if parts else args[0])
 
+    # Env-read guardrail: restrict os.environ reads to declared names + essential vars.
+    env_allowed = policy.get("env_allowed")
+    if env_allowed is not None:
+        import collections.abc as _cabc
+        _env_allowed_set = frozenset(env_allowed)
+        _real_env = _os.environ  # keep the original MutableMapping
+
+        class _FilteredEnv(_cabc.MutableMapping):
+            """Filters os.environ reads to env_allowed_set; writes go through."""
+            def __getitem__(self, key):
+                if key in _env_allowed_set:
+                    return _real_env[key]
+                raise KeyError(key)
+            def __setitem__(self, key, value):
+                _real_env[key] = value
+            def __delitem__(self, key):
+                del _real_env[key]
+            def __iter__(self):
+                return (k for k in _real_env if k in _env_allowed_set)
+            def __len__(self):
+                return sum(1 for k in _real_env if k in _env_allowed_set)
+            def __contains__(self, key):
+                return key in _env_allowed_set and key in _real_env
+
+        _os.environ = _FilteredEnv()
+
     _sys.addaudithook(_hook)
 
 
