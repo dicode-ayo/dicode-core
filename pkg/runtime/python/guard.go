@@ -125,8 +125,6 @@ func buildGuardPolicy(spec *task.Spec, socketPath string, protectedPaths []strin
 			// Proxies, honored by uv/requests.
 			"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
 			"http_proxy", "https_proxy", "no_proxy",
-			// Deno cache location (kept for consistency with subprocenv.go).
-			"DENO_DIR",
 			// uv interpreter and cache locations.
 			"UV_CACHE_DIR", "UV_PYTHON", "UV_PYTHON_INSTALL_DIR", "VIRTUAL_ENV",
 			// IPC handshake coordinates.

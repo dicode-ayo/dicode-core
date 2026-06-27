@@ -201,7 +201,9 @@ def _dicode_install_guard():
     env_allowed = policy.get("env_allowed")
     if env_allowed is not None:
         import collections.abc as _cabc
-        _env_allowed_set = frozenset(env_allowed)
+        # Mutable set: task writes (os.environ["K"] = v) extend the allowed set
+        # so the task can read back what it wrote without a KeyError.
+        _env_allowed_set = set(env_allowed)
         _real_env = _os.environ  # keep the original MutableMapping
 
         class _FilteredEnv(_cabc.MutableMapping):
@@ -212,12 +214,18 @@ def _dicode_install_guard():
                 raise KeyError(key)
             def __setitem__(self, key, value):
                 _real_env[key] = value
+                _env_allowed_set.add(key)  # task can read back what it wrote
             def __delitem__(self, key):
+                if key not in _env_allowed_set:
+                    raise KeyError(key)
                 del _real_env[key]
+                _env_allowed_set.discard(key)
             def __iter__(self):
                 return (k for k in _real_env if k in _env_allowed_set)
             def __len__(self):
-                return sum(1 for k in _real_env if k in _env_allowed_set)
+                # Iterate the smaller allowed set (O(|allowed|)) rather than
+                # all of _real_env (O(|real_env|)) which can be much larger.
+                return sum(1 for k in _env_allowed_set if k in _real_env)
             def __contains__(self, key):
                 return key in _env_allowed_set and key in _real_env
 

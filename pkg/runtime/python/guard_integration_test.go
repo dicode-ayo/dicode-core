@@ -288,20 +288,43 @@ assert v == "value", f"expected 'value', got {v!r}"
 	requireAllowed(t, out, err)
 }
 
-func TestGuard_EnvIter_OnlyDeclared(t *testing.T) {
-	// Iterating os.environ must only yield allowed keys.
+func TestGuard_EnvIter_OnlyDeclaredAndWritten(t *testing.T) {
+	// Iterating os.environ yields only declared keys plus keys the task wrote.
+	// A pre-existing var not in env_allowed is hidden; a task-written var is
+	// visible immediately after the write (write-then-read consistency).
 	pol := guardPolicy{
 		Net:        guardNet{Mode: "unrestricted"},
 		Run:        guardRun{Mode: "deny"},
-		EnvAllowed: []string{"ONLY_THIS_ONE", "DICODE_SOCKET", "DICODE_TOKEN"},
+		EnvAllowed: []string{"DECLARED_VAR", "DICODE_SOCKET", "DICODE_TOKEN"},
 	}
 	payload := `
 import os
-os.environ["ONLY_THIS_ONE"] = "yes"
-os.environ["NOT_THIS_ONE"] = "no"
+os.environ["DECLARED_VAR"] = "yes"
+os.environ["TASK_WRITTEN_VAR"] = "also_yes"  # not pre-declared but task wrote it
 keys = list(os.environ.keys())
-assert "ONLY_THIS_ONE" in keys, f"ONLY_THIS_ONE missing from {keys}"
-assert "NOT_THIS_ONE" not in keys, f"NOT_THIS_ONE leaked into {keys}"
+assert "DECLARED_VAR" in keys, f"DECLARED_VAR missing from {keys}"
+assert "TASK_WRITTEN_VAR" in keys, f"TASK_WRITTEN_VAR missing — task should read back what it wrote"
+# Read back what was written
+assert os.environ["TASK_WRITTEN_VAR"] == "also_yes", "write-then-read must work"
+`
+	out, err := runGuardScript(t, pol, payload)
+	requireAllowed(t, out, err)
+}
+
+func TestGuard_EnvDelete_UndeclaredDenied(t *testing.T) {
+	// Deleting a var not in env_allowed must raise KeyError.
+	pol := guardPolicy{
+		Net:        guardNet{Mode: "unrestricted"},
+		Run:        guardRun{Mode: "deny"},
+		EnvAllowed: []string{"DICODE_SOCKET", "DICODE_TOKEN"},
+	}
+	payload := `
+import os
+try:
+    del os.environ["UNDECLARED_SECRET"]
+    raise AssertionError("should have raised KeyError")
+except KeyError:
+    pass  # expected: cannot delete what you cannot see
 `
 	out, err := runGuardScript(t, pol, payload)
 	requireAllowed(t, out, err)
