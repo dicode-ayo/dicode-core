@@ -279,7 +279,11 @@ func (rt *Runtime) buildImage(ctx context.Context, dc *dockerclient.Client, spec
 	if err != nil {
 		return "", fmt.Errorf("read Dockerfile: %w", err)
 	}
-	tag := imagegc.Tag(spec.ID, content)
+	// Include netMode in the cache key: a build with network access must not be
+	// reused for a task that later restricts to network_mode: none (or vice versa).
+	cacheMaterial := append([]byte{}, content...)
+	cacheMaterial = append(cacheMaterial, []byte("\x00dicode-build-network-mode:"+netMode)...)
+	tag := imagegc.Tag(spec.ID, cacheMaterial)
 
 	// Cache hit: image with this tag already exists.
 	if _, _, err := dc.ImageInspectWithRaw(ctx, tag); err == nil {
