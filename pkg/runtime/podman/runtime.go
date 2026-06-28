@@ -138,7 +138,7 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 	imageTag := cfg.Image
 	if cfg.Build != nil {
 		var err error
-		imageTag, err = e.buildImage(ctx, spec, runID)
+		imageTag, err = e.buildImage(ctx, spec, runID, effectiveNetMode)
 		if err != nil {
 			result.Error = err
 			return result, nil
@@ -224,7 +224,9 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 
 // buildImage builds a Podman image from the task's Dockerfile and returns the image tag.
 // Results are cached by Dockerfile content hash — if the image already exists the build is skipped.
-func (e *executor) buildImage(ctx context.Context, spec *task.Spec, runID string) (string, error) {
+// netMode is applied to the build's RUN steps so that Containerfile layers respect the
+// same network isolation policy as the eventual container run.
+func (e *executor) buildImage(ctx context.Context, spec *task.Spec, runID, netMode string) (string, error) {
 	b := spec.Docker.Build
 	dockerfilePath, contextDir := b.ResolvePaths(spec.TaskDir)
 
@@ -242,7 +244,11 @@ func (e *executor) buildImage(ctx context.Context, spec *task.Spec, runID string
 
 	_ = e.reg.AppendLog(ctx, runID, "info", "building image "+tag+"…")
 
-	buildCmd := []string{"build", "-t", tag, "-f", dockerfilePath, contextDir}
+	buildCmd := []string{"build", "-t", tag, "-f", dockerfilePath}
+	if netMode != "" {
+		buildCmd = append(buildCmd, "--network", netMode)
+	}
+	buildCmd = append(buildCmd, contextDir)
 	cmd := exec.CommandContext(ctx, e.podmanPath, buildCmd...) //nolint:gosec
 
 	stdout, err := cmd.StdoutPipe()

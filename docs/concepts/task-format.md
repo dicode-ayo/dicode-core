@@ -80,7 +80,7 @@ permissions:
 | `permissions.fs[].path` | string | | Absolute or `~`-prefixed path |
 | `permissions.fs[].permission` | string | | `r`, `w`, or `rw` |
 | `permissions.run` | list of strings | | Executables the script may spawn (Deno and Python); use `["*"]` for all |
-| `permissions.net` | list of strings | | Outbound network hosts; omit or `[]` = deny all, `["*"]` = unrestricted. Deno/Python enforce per-host; Docker/Podman default to `network_mode: none` when empty (and no ports), or unrestricted with a warning when specific hosts are listed (per-host filtering not yet implemented for containers). |
+| `permissions.net` | list of strings | | Outbound network hosts. `["*"]` = unrestricted. Omit or `[]` = deny all (Deno/Python: per-host enforcement; Docker/Podman: `network_mode: none` unless `docker.ports` are published — in which case networking stays enabled for port binding). Specific hosts are enforced per-host for Deno/Python; for Docker/Podman they are allowed but not yet per-host enforced (a warning is logged). |
 | `permissions.sys` | list of strings | | Deno sys APIs (Deno only); omit = deny all, `["*"]` = all |
 | `permissions.dicode` | object | | Which dicode runtime APIs the task may call (all denied by default) |
 | `permissions.dicode.tasks` | list of strings | | Task IDs the script may invoke via `dicode.run_task()`; use `["*"]` for all |

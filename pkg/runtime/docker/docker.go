@@ -107,7 +107,7 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	// Resolve the image: build from Dockerfile or pull.
 	imageTag := cfg.Image
 	if cfg.Build != nil {
-		imageTag, err = rt.buildImage(ctx, dc, spec, runID)
+		imageTag, err = rt.buildImage(ctx, dc, spec, runID, effectiveNetMode)
 		if err != nil {
 			if ctx.Err() != nil {
 				return &RunResult{RunID: runID, Error: err}, nil
@@ -269,7 +269,9 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 // buildImage builds a Docker image from the task's Dockerfile and returns the image tag.
 // Results are cached by Dockerfile content hash — if the Dockerfile hasn't changed the
 // existing image is reused and the build is skipped entirely.
-func (rt *Runtime) buildImage(ctx context.Context, dc *dockerclient.Client, spec *task.Spec, runID string) (string, error) {
+// netMode is applied to the build's RUN steps so that Dockerfile layers respect the
+// same network isolation policy as the eventual container run.
+func (rt *Runtime) buildImage(ctx context.Context, dc *dockerclient.Client, spec *task.Spec, runID, netMode string) (string, error) {
 	b := spec.Docker.Build
 	dockerfilePath, contextDir := b.ResolvePaths(spec.TaskDir)
 
@@ -298,9 +300,10 @@ func (rt *Runtime) buildImage(ctx context.Context, dc *dockerclient.Client, spec
 	}
 
 	resp, err := dc.ImageBuild(ctx, buildCtx, dockerbuild.ImageBuildOptions{
-		Tags:       []string{tag},
-		Dockerfile: relDockerfile,
-		Remove:     true,
+		Tags:        []string{tag},
+		Dockerfile:  relDockerfile,
+		Remove:      true,
+		NetworkMode: netMode,
 	})
 	if err != nil {
 		return "", fmt.Errorf("image build: %w", err)
