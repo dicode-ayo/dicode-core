@@ -121,6 +121,15 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 		return result, nil
 	}
 
+	// Zero-default network isolation (#214): when no docker.network_mode is
+	// declared and the task has no network permissions and publishes no ports,
+	// default to "none" to deny all outbound connectivity.
+	effectiveNetMode := pkgruntime.EffectiveNetworkMode(cfg.NetworkMode, spec.Permissions, cfg.Ports)
+	if pkgruntime.NetPermsNeedWarning(cfg.NetworkMode, spec.Permissions) {
+		_ = e.reg.AppendLog(ctx, runID, "warn",
+			"permissions.net lists specific hosts but per-host network enforcement is not yet implemented for Podman — outbound network is unrestricted; use docker.network_mode: none to deny all, or [\"*\"] to grant unrestricted access explicitly")
+	}
+
 	// Resolve the image: build from Dockerfile or pull.
 	imageTag := cfg.Image
 	if cfg.Build != nil {
@@ -140,7 +149,7 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 		return result, nil
 	}
 
-	args := e.buildArgs(cfg, imageTag, containerName, runID, spec.ID)
+	args := e.buildArgs(cfg, imageTag, containerName, runID, spec.ID, effectiveNetMode)
 
 	e.log.Info("podman run",
 		zap.String("task", spec.ID),
@@ -276,7 +285,7 @@ func (e *executor) buildImage(ctx context.Context, spec *task.Spec, runID string
 	return tag, nil
 }
 
-func (e *executor) buildArgs(cfg *task.DockerConfig, imageTag, containerName, runID, taskID string) []string {
+func (e *executor) buildArgs(cfg *task.DockerConfig, imageTag, containerName, runID, taskID, netMode string) []string {
 	args := []string{
 		"run", "--rm",
 		"--name", containerName,
@@ -295,8 +304,8 @@ func (e *executor) buildArgs(cfg *task.DockerConfig, imageTag, containerName, ru
 	if cfg.WorkingDir != "" {
 		args = append(args, "--workdir", cfg.WorkingDir)
 	}
-	if cfg.NetworkMode != "" {
-		args = append(args, "--network", cfg.NetworkMode)
+	if netMode != "" {
+		args = append(args, "--network", netMode)
 	}
 	for _, h := range cfg.ExtraHosts {
 		args = append(args, "--add-host", h)

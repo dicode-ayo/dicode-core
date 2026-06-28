@@ -91,6 +91,15 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		return rt.fail(runID, err)
 	}
 
+	// Zero-default network isolation (#214): when no docker.network_mode is
+	// declared and the task has no network permissions and publishes no ports,
+	// default to "none" to deny all outbound connectivity.
+	effectiveNetMode := pkgruntime.EffectiveNetworkMode(cfg.NetworkMode, spec.Permissions, cfg.Ports)
+	if pkgruntime.NetPermsNeedWarning(cfg.NetworkMode, spec.Permissions) {
+		_ = rt.registry.AppendLog(ctx, runID, "warn",
+			"permissions.net lists specific hosts but per-host network enforcement is not yet implemented for Docker — outbound network is unrestricted; use docker.network_mode: none to deny all, or [\"*\"] to grant unrestricted access explicitly")
+	}
+
 	// Resolve the image: build from Dockerfile or pull.
 	imageTag := cfg.Image
 	if cfg.Build != nil {
@@ -161,7 +170,7 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		Binds:          cfg.Volumes,
 		PortBindings:   portBindings,
 		AutoRemove:     false,
-		NetworkMode:    container.NetworkMode(cfg.NetworkMode),
+		NetworkMode:    container.NetworkMode(effectiveNetMode),
 		ExtraHosts:     cfg.ExtraHosts,
 		CapAdd:         cfg.CapAdd,
 		CapDrop:        cfg.CapDrop,

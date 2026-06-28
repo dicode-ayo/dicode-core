@@ -80,7 +80,7 @@ permissions:
 | `permissions.fs[].path` | string | | Absolute or `~`-prefixed path |
 | `permissions.fs[].permission` | string | | `r`, `w`, or `rw` |
 | `permissions.run` | list of strings | | Executables the script may spawn (Deno and Python); use `["*"]` for all |
-| `permissions.net` | list of strings | | Outbound network hosts (Deno and Python); omit or `[]` = deny all, `["*"]` = unrestricted |
+| `permissions.net` | list of strings | | Outbound network hosts; omit or `[]` = deny all, `["*"]` = unrestricted. Deno/Python enforce per-host; Docker/Podman default to `network_mode: none` when empty (and no ports), or unrestricted with a warning when specific hosts are listed (per-host filtering not yet implemented for containers). |
 | `permissions.sys` | list of strings | | Deno sys APIs (Deno only); omit = deny all, `["*"]` = all |
 | `permissions.dicode` | object | | Which dicode runtime APIs the task may call (all denied by default) |
 | `permissions.dicode.tasks` | list of strings | | Task IDs the script may invoke via `dicode.run_task()`; use `["*"]` for all |
@@ -772,6 +772,8 @@ Use **Edit code** on the task page to edit the Dockerfile directly in the web UI
 | `docker.user` | string | Run the container as `<uid>[:<gid>]` or `<name>[:<group>]`. Overrides the image's `USER` directive. |
 
 > **Security floor.** The "rejected by default" values above are enforced as a hard, fail-closed floor in both the docker and podman runtimes (`pkg/runtime/containersec`) — the run is aborted before the container is created. Operators opt specific exceptions in via the top-level `container_security` block. See [Container Security Floor](security.md#container-security-floor).
+
+> **Network isolation.** Docker and Podman tasks follow the same zero-default-permissions rule as Deno/Python: when `permissions.net` is empty and no `docker.ports` are published, the container starts with `network_mode: none` — no outbound connectivity. To allow network, add `permissions.net: ["*"]` (unrestricted) or specific hosts (allowed but not per-host enforced today; a warning is logged). Tasks that publish `docker.ports` always need a network interface and are not defaulted to `none`. An explicit `docker.network_mode` always takes precedence.
 
 #### Hardened defaults
 
