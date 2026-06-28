@@ -87,7 +87,7 @@ func TestBuildArgs_HardeningFlags(t *testing.T) {
 }
 
 func TestBuildArgs_OmitsHardeningWhenUnset(t *testing.T) {
-	// When netMode is "" (no explicit mode, no permissions.net, but has ports),
+	// When netMode is "" (e.g. task has permissions.net set so zero-default is skipped),
 	// buildArgs must not inject any --network flag — the runtime picks its default.
 	cfg := &task.DockerConfig{Image: "alpine"}
 	e := &executor{podmanPath: "/usr/bin/podman"}

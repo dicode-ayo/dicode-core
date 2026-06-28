@@ -129,6 +129,10 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 		_ = e.reg.AppendLog(ctx, runID, "warn",
 			"permissions.net lists specific hosts but per-host network enforcement is not yet implemented for Podman — outbound network is unrestricted; use docker.network_mode: none to deny all, or [\"*\"] to grant unrestricted access explicitly")
 	}
+	if effectiveNetMode == "none" && len(cfg.ExtraHosts) > 0 {
+		_ = e.reg.AppendLog(ctx, runID, "warn",
+			"docker.extra_hosts are defined but the container has network_mode: none — extra host entries will be unreachable; set permissions.net or docker.network_mode to enable network access")
+	}
 
 	// Resolve the image: build from Dockerfile or pull.
 	imageTag := cfg.Image
