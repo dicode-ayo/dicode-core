@@ -615,7 +615,7 @@ cryptographically signed with an HMAC key derived from the daemon's master key.
 
 ```plaintext
 lockSigningKey = DeriveSubKey(masterKey, "dicode/approval-lock/v1")  // Argon2id
-canonicalContent = JSON(tasks_map)                                    // Go sort-ordered
+canonicalContent = JSON({bootstrapped, tasks_map})                    // Go sort-ordered (v3)
 mac = hex(HMAC-SHA256(lockSigningKey, canonicalContent))             // stored in mac: field
 ```
 
@@ -624,25 +624,48 @@ which is never forwarded to task subprocesses and survives independently of the
 SQLite database. Even if a task wipes the database it cannot forge a valid MAC
 without the master key.
 
+### Bootstrap marker — dual-store defence (#434)
+
+The first-run bootstrap marker is persisted in **two independent locations**:
+
+1. **`dicode.lock` `bootstrapped:` field** (v3 format) — covered by the HMAC,
+   so it cannot be silently flipped without invalidating the MAC. Survives SQLite
+   deletion.
+2. **`kv["approval.bootstrap_completed"]` row** in SQLite — survives `dicode.lock`
+   deletion (directory-level attacks that the file-level deny cannot block).
+
+At daemon startup the effective marker is:
+
+```
+markerExists = lock.IsBootstrapped() || dbMarkerExists
+```
+
+**Both** stores must be absent for bootstrap to re-run. Deleting either one alone
+is insufficient to reset the gate.
+
 ### Load-time behaviour
 
 | Condition | Outcome |
 |-----------|---------|
 | File absent | Empty lock (normal first-run) |
-| Legacy v1 (no `mac:` field), key available | Accepted + immediately re-signed (format upgrade) |
-| `mac:` present, verification passes | Normal load |
-| `mac:` present, verification fails | **Fail closed**: all records discarded; `Tampered()` returns `true`; daemon logs a warning; all tasks require explicit re-approval |
+| Legacy v1 (no `mac:` field), key available | Accepted + immediately upgraded to v3 (format upgrade) |
+| v2 `mac:` (tasks-only HMAC), verification passes | Accepted + immediately upgraded to v3 in-place |
+| v2 `mac:`, verification fails | **Fail closed**: all records discarded; `Tampered()` returns `true` |
+| v3 `mac:` (bootstrapped+tasks HMAC), verification passes | Normal load |
+| v3 `mac:`, verification fails | **Fail closed**: all records discarded; `Tampered()` returns `true`; daemon logs a warning; all tasks require explicit re-approval |
+| Unknown version with `mac:` present | **Fail closed**: cannot verify; treated as tampered |
 | No signing key available (env stripped of master key) | Unsigned/legacy mode — no verification |
 
 ### On-disk format
 
-Signed locks use `version: 2` and include a `mac:` field directly after the
-version line, before `tasks:`:
+Signed locks use `version: 3` and include a `mac:` field directly after the
+version line, before `bootstrapped:` and `tasks:`:
 
 ```yaml
 # dicode.lock — approval records, managed by the dicode daemon.
-version: 2
-mac: 8a3f1c...  # 64 hex chars = HMAC-SHA256
+version: 3
+mac: 8a3f1c...  # 64 hex chars = HMAC-SHA256 over {bootstrapped, tasks}
+bootstrapped: true
 tasks:
   my-task:
     hash: sha256:...
@@ -650,9 +673,11 @@ tasks:
     approved_by: manual
 ```
 
-Legacy unsigned files (`version: 1`, no `mac:`) are accepted on the first
-startup with a key and immediately upgraded to v2. After that, any subsequent
-load that sees a missing or wrong MAC treats the file as tampered.
+The `bootstrapped: true` field is omitted (YAML `omitempty`) until
+`MarkBootstrapped()` is called. Legacy unsigned files (`version: 1`, no `mac:`)
+and v2 signed files are accepted on the first startup with a key and immediately
+upgraded to v3. After that, any subsequent load that sees a missing or wrong MAC
+treats the file as tampered.
 
 ---
 
@@ -767,7 +792,7 @@ Top-level security blocks in `Config` (siblings of `server:`, not nested under i
 | CORS misconfiguration guard | Origins validated with `url.Parse()` at startup |
 | Passphrase rotation requires current | bcrypt verify on `current` field |
 | Per-task IPC socket in 0700 dir | On Linux/macOS each task run's Unix socket lives inside a per-run directory created `0700` (`/tmp/dicode-<runID>/ipc.sock`). The directory makes the socket unreachable to other local users independent of the socket file's own mode and the process umask. The socket file is also `chmod 0600` as belt-and-suspenders. |
-| `dicode.lock` HMAC integrity | Approval records are HMAC-SHA256 signed with a key derived from the master key via Argon2id (`"dicode/approval-lock/v1"` context). A MAC mismatch on load causes fail-closed: all records discarded, tasks require re-approval. Upgrade path: unsigned v1 files are accepted once and immediately re-signed. |
+| `dicode.lock` HMAC integrity | Approval records are HMAC-SHA256 signed with a key derived from the master key via Argon2id (`"dicode/approval-lock/v1"` context). v3 format: MAC covers `{bootstrapped, tasks}` so the bootstrap flag cannot be silently cleared. A MAC mismatch on load causes fail-closed: all records discarded, tasks require re-approval. Upgrade path: v1 unsigned and v2 tasks-only locks are accepted once and immediately upgraded to v3 in-place. |
 | Daemon crypto namespace isolated | `permissions.dicode.crypto: ["*"]` never grants access to daemon-private sub-keys (e.g. `dicode/run-inputs/v1`); these are listed in `daemonPrivateCryptoContexts` in `pkg/ipc/server.go` and denied before any grant check |
 | Replay retarget blocked | A task-scoped `dicode.runs.replay` call cannot redirect the replay at a different task ID — the target is pinned to the original run's task |
 | `dicode` permission overrides are exhaustive | `mergeDicodePerms` merges all `DicodePermissions` fields including `secrets_has` and `crypto`; added exhaustiveness test guards against future fields being silently dropped |

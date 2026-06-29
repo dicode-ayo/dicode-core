@@ -99,3 +99,30 @@ func TestBootstrapMarkerKeyIsTaskUnforgeable(t *testing.T) {
 		}
 	}
 }
+
+// TestBootstrapMarkerDBDeleteFallback verifies that the DB-deletion attack vector
+// is closed: if the DB (and thus its bootstrap marker) is wiped but the lock's
+// bootstrapped flag is still true, shouldBootstrap must remain false.
+func TestBootstrapMarkerDBDeleteFallback(t *testing.T) {
+	// Simulate: DB deleted (dbMarkerExists=false) but lock.IsBootstrapped()=true.
+	lockBootstrapped := true
+	dbMarkerExists := false
+	markerExists := lockBootstrapped || dbMarkerExists
+	// lockExisted=true: the v3 lock file still exists (only the DB was wiped).
+	if shouldBootstrap(true, markerExists, true) {
+		t.Fatal("DB deletion must not re-enable bootstrap when lock has bootstrapped=true")
+	}
+}
+
+// TestBootstrapMarkerLockDeleteFallback verifies that lock-loss alone
+// does not re-enable bootstrap when the DB marker is still present.
+func TestBootstrapMarkerLockDeleteFallback(t *testing.T) {
+	// Simulate: lock deleted (bootstrapped=false) but DB marker exists.
+	lockBootstrapped := false
+	dbMarkerExists := true
+	markerExists := lockBootstrapped || dbMarkerExists
+	// lock absent + marker present → shouldBootstrap=false (fail closed)
+	if shouldBootstrap(false, markerExists, true) {
+		t.Fatal("lock-deletion alone must not re-enable bootstrap when DB marker exists")
+	}
+}

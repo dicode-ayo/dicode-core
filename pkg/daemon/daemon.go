@@ -373,7 +373,7 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	pythonRT.SetProtectedPaths(protectedPaths)
 	_, lockStatErr := os.Stat(lockPath)
 	lockExisted := lockStatErr == nil
-	markerExists, err := bootstrapMarkerExists(ctx, database)
+	dbMarkerExists, err := bootstrapMarkerExists(ctx, database)
 	if err != nil {
 		return fmt.Errorf("read approval bootstrap marker: %w", err)
 	}
@@ -406,6 +406,10 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 			"all approval records discarded, tasks require explicit re-approval",
 			zap.String("lock", lockPath))
 	}
+	// The effective bootstrap marker is the union of the DB kv row and the lock's
+	// own bootstrapped flag. Both must be absent to re-enter bootstrap, so deleting
+	// either alone (the SQLite DB or the lock file) cannot reset the gate (#434).
+	markerExists := lock.IsBootstrapped() || dbMarkerExists
 	gatePolicy := approval.Policy{
 		Enabled:        cfg.Approval.IsEnabled(),
 		TrustedSources: map[string]bool{},
@@ -462,6 +466,13 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 		approvalGate.SetBootstrap(true)
 		bootstrapTimer = time.AfterFunc(bootstrapSettle, func() {
 			if approvalGate.FinishBootstrap() {
+				// Persist the bootstrap marker in both the lock and the DB.
+				// Lock marker: survives DB deletion (the primary attack vector).
+				// DB marker: survives lock deletion (fallback / directory-level attacks).
+				if err := lock.MarkBootstrapped(); err != nil {
+					log.Warn("approval gate: failed to persist bootstrap marker in lock; lock-only DB deletion may re-bootstrap on next start",
+						zap.Error(err))
+				}
 				if err := setBootstrapMarker(ctx, database); err != nil {
 					log.Warn("approval gate: failed to persist bootstrap marker; next start may re-bootstrap",
 						zap.Error(err))
@@ -472,6 +483,11 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 		log.Info("approval gate: no dicode.lock — seeding current tasks as approved (first-run bootstrap); changes after startup require approval",
 			zap.String("lock", lockPath))
 	} else if gatePolicy.Enabled && lockExisted && !markerExists {
+		if err := lock.MarkBootstrapped(); err != nil {
+			log.Warn("approval gate: failed to persist bootstrap marker in lock for an adopted lock; "+
+				"a DB deletion could re-enable bootstrap",
+				zap.Error(err))
+		}
 		if err := setBootstrapMarker(ctx, database); err != nil {
 			log.Warn("approval gate: failed to persist bootstrap marker for an adopted lock; "+
 				"a later lock-loss may fail open rather than closed",
