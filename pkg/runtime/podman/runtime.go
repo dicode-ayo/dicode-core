@@ -121,11 +121,24 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 		return result, nil
 	}
 
+	// Zero-default network isolation (#214): when no docker.network_mode is
+	// declared and the task has no network permissions and publishes no ports,
+	// default to "none" to deny all outbound connectivity.
+	effectiveNetMode := pkgruntime.EffectiveNetworkMode(cfg.NetworkMode, spec.Permissions, cfg.Ports)
+	if pkgruntime.NetPermsNeedWarning(cfg.NetworkMode, spec.Permissions) {
+		_ = e.reg.AppendLog(ctx, runID, "warn",
+			"permissions.net lists specific hosts but per-host network enforcement is not yet implemented for Podman — outbound network is unrestricted; use docker.network_mode: none to deny all, or [\"*\"] to grant unrestricted access explicitly")
+	}
+	if effectiveNetMode == "none" && len(cfg.ExtraHosts) > 0 {
+		_ = e.reg.AppendLog(ctx, runID, "warn",
+			"docker.extra_hosts are defined but the container has network_mode: none — extra host entries will be unreachable; set permissions.net or docker.network_mode to enable network access")
+	}
+
 	// Resolve the image: build from Dockerfile or pull.
 	imageTag := cfg.Image
 	if cfg.Build != nil {
 		var err error
-		imageTag, err = e.buildImage(ctx, spec, runID)
+		imageTag, err = e.buildImage(ctx, spec, runID, effectiveNetMode)
 		if err != nil {
 			result.Error = err
 			return result, nil
@@ -140,7 +153,7 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 		return result, nil
 	}
 
-	args := e.buildArgs(cfg, imageTag, containerName, runID, spec.ID)
+	args := e.buildArgs(cfg, imageTag, containerName, runID, spec.ID, effectiveNetMode)
 
 	e.log.Info("podman run",
 		zap.String("task", spec.ID),
@@ -211,7 +224,9 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 
 // buildImage builds a Podman image from the task's Dockerfile and returns the image tag.
 // Results are cached by Dockerfile content hash — if the image already exists the build is skipped.
-func (e *executor) buildImage(ctx context.Context, spec *task.Spec, runID string) (string, error) {
+// netMode is applied to the build's RUN steps so that Containerfile layers respect the
+// same network isolation policy as the eventual container run.
+func (e *executor) buildImage(ctx context.Context, spec *task.Spec, runID, netMode string) (string, error) {
 	b := spec.Docker.Build
 	dockerfilePath, contextDir := b.ResolvePaths(spec.TaskDir)
 
@@ -219,7 +234,11 @@ func (e *executor) buildImage(ctx context.Context, spec *task.Spec, runID string
 	if err != nil {
 		return "", fmt.Errorf("read Dockerfile: %w", err)
 	}
-	tag := imagegc.Tag(spec.ID, content)
+	// Include netMode in the cache key: a build with network access must not be
+	// reused for a task that later restricts to network_mode: none (or vice versa).
+	cacheMaterial := append([]byte{}, content...)
+	cacheMaterial = append(cacheMaterial, []byte("\x00dicode-build-network-mode:"+netMode)...)
+	tag := imagegc.Tag(spec.ID, cacheMaterial)
 
 	// Cache hit: image with this tag already exists.
 	if exec.CommandContext(ctx, e.podmanPath, "image", "exists", tag).Run() == nil { //nolint:gosec
@@ -229,7 +248,11 @@ func (e *executor) buildImage(ctx context.Context, spec *task.Spec, runID string
 
 	_ = e.reg.AppendLog(ctx, runID, "info", "building image "+tag+"…")
 
-	buildCmd := []string{"build", "-t", tag, "-f", dockerfilePath, contextDir}
+	buildCmd := []string{"build", "-t", tag, "-f", dockerfilePath}
+	if netMode != "" {
+		buildCmd = append(buildCmd, "--network", netMode)
+	}
+	buildCmd = append(buildCmd, contextDir)
 	cmd := exec.CommandContext(ctx, e.podmanPath, buildCmd...) //nolint:gosec
 
 	stdout, err := cmd.StdoutPipe()
@@ -276,7 +299,7 @@ func (e *executor) buildImage(ctx context.Context, spec *task.Spec, runID string
 	return tag, nil
 }
 
-func (e *executor) buildArgs(cfg *task.DockerConfig, imageTag, containerName, runID, taskID string) []string {
+func (e *executor) buildArgs(cfg *task.DockerConfig, imageTag, containerName, runID, taskID, netMode string) []string {
 	args := []string{
 		"run", "--rm",
 		"--name", containerName,
@@ -295,8 +318,8 @@ func (e *executor) buildArgs(cfg *task.DockerConfig, imageTag, containerName, ru
 	if cfg.WorkingDir != "" {
 		args = append(args, "--workdir", cfg.WorkingDir)
 	}
-	if cfg.NetworkMode != "" {
-		args = append(args, "--network", cfg.NetworkMode)
+	if netMode != "" {
+		args = append(args, "--network", netMode)
 	}
 	for _, h := range cfg.ExtraHosts {
 		args = append(args, "--add-host", h)

@@ -55,7 +55,7 @@ func TestBuildArgs_HardeningFlags(t *testing.T) {
 		User:        "65532:65532",
 	}
 	e := &executor{podmanPath: "/usr/bin/podman"}
-	args := e.buildArgs(cfg, "cloudflare/cloudflared:latest", "dicode-run1", "run1", "task1")
+	args := e.buildArgs(cfg, "cloudflare/cloudflared:latest", "dicode-run1", "run1", "task1", "bridge")
 
 	if !argsContainPair(args, "--network", "bridge") {
 		t.Errorf("missing --network bridge in %v", args)
@@ -87,15 +87,45 @@ func TestBuildArgs_HardeningFlags(t *testing.T) {
 }
 
 func TestBuildArgs_OmitsHardeningWhenUnset(t *testing.T) {
+	// When netMode is "" (e.g. task has permissions.net set so zero-default is skipped),
+	// buildArgs must not inject any --network flag — the runtime picks its default.
 	cfg := &task.DockerConfig{Image: "alpine"}
 	e := &executor{podmanPath: "/usr/bin/podman"}
-	args := e.buildArgs(cfg, "alpine", "dicode-run1", "run1", "task1")
+	args := e.buildArgs(cfg, "alpine", "dicode-run1", "run1", "task1", "")
 
 	joined := strings.Join(args, " ")
 	for _, forbidden := range []string{"--network", "--add-host", "--cap-drop", "--cap-add", "--security-opt", "--read-only", "--user"} {
 		if strings.Contains(joined, forbidden) {
 			t.Errorf("unexpected %s in %v", forbidden, args)
 		}
+	}
+}
+
+// TestBuildArgs_NetworkNone_ZeroDefaultPerms pins the regression: a task with no
+// permissions.net and no ports must receive --network none in the podman argv.
+// Before #214 the container would get default (bridge) network regardless.
+func TestBuildArgs_NetworkNone_ZeroDefaultPerms(t *testing.T) {
+	cfg := &task.DockerConfig{Image: "alpine"}
+	e := &executor{podmanPath: "/usr/bin/podman"}
+	// EffectiveNetworkMode returns "none" when permissions.net is empty and no ports.
+	args := e.buildArgs(cfg, "alpine", "dicode-run1", "run1", "task1", "none")
+
+	if !argsContainPair(args, "--network", "none") {
+		t.Errorf("expected --network none for zero-default isolation; args=%v", args)
+	}
+}
+
+// TestBuildArgs_NetworkBridge_WhenPermissionsNetWildcard pins that a task
+// declaring permissions.net: ["*"] does not get --network none injected.
+func TestBuildArgs_NetworkBridge_WhenPermissionsNetWildcard(t *testing.T) {
+	cfg := &task.DockerConfig{Image: "alpine"}
+	e := &executor{podmanPath: "/usr/bin/podman"}
+	// EffectiveNetworkMode returns "" when permissions.net is non-empty.
+	args := e.buildArgs(cfg, "alpine", "dicode-run1", "run1", "task1", "")
+
+	joined := strings.Join(args, " ")
+	if strings.Contains(joined, "--network none") {
+		t.Errorf("task with permissions.net must not get --network none; args=%v", args)
 	}
 }
 
@@ -114,7 +144,7 @@ func TestBuildArgs_HardeningPrecedesImage(t *testing.T) {
 		Command:     []string{"echo", "hi"},
 	}
 	e := &executor{podmanPath: "/usr/bin/podman"}
-	args := e.buildArgs(cfg, "alpine", "dicode-run1", "run1", "task1")
+	args := e.buildArgs(cfg, "alpine", "dicode-run1", "run1", "task1", "bridge")
 
 	imageIdx := slices.Index(args, "alpine")
 	if imageIdx < 0 {

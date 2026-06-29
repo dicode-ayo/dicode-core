@@ -282,10 +282,20 @@ type Permissions struct {
 	// Run lists executables the task may spawn (Deno and Python).
 	// Use ["*"] for all; omit to deny all subprocess execution.
 	Run []string `yaml:"run,omitempty" json:"run,omitempty"`
-	// Net controls outbound network access (Deno and Python).
+	// Net controls outbound network access (Deno, Python, Docker, and Podman).
 	// Omit or use [] (empty list) to deny all network access (default).
 	// Use ["*"] for unrestricted access.
 	// List specific hosts to restrict: ["api.github.com", "hooks.slack.com"].
+	//
+	// Enforcement per runtime:
+	//   Deno   — --allow-net=HOST list; exact per-host enforcement.
+	//   Python — urllib/requests intercepted at stdlib level; exact per-host enforcement.
+	//   Docker/Podman — when empty (and no ports published): container network mode
+	//                   defaults to "none", denying all outbound connectivity.
+	//                   When non-empty without "*": container gets unrestricted network
+	//                   (per-host filtering is not yet implemented; a warning is logged).
+	//                   When ["*"]: unrestricted. When docker.network_mode is set
+	//                   explicitly, that value takes precedence over permissions.net.
 	Net []string `yaml:"net,omitempty" json:"net,omitempty"`
 	// Sys lists Deno system-info APIs the task may call (Deno only; the
 	// names have no usable Python equivalent, so Python ignores this field).

@@ -91,10 +91,23 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		return rt.fail(runID, err)
 	}
 
+	// Zero-default network isolation (#214): when no docker.network_mode is
+	// declared and the task has no network permissions and publishes no ports,
+	// default to "none" to deny all outbound connectivity.
+	effectiveNetMode := pkgruntime.EffectiveNetworkMode(cfg.NetworkMode, spec.Permissions, cfg.Ports)
+	if pkgruntime.NetPermsNeedWarning(cfg.NetworkMode, spec.Permissions) {
+		_ = rt.registry.AppendLog(ctx, runID, "warn",
+			"permissions.net lists specific hosts but per-host network enforcement is not yet implemented for Docker — outbound network is unrestricted; use docker.network_mode: none to deny all, or [\"*\"] to grant unrestricted access explicitly")
+	}
+	if effectiveNetMode == "none" && len(cfg.ExtraHosts) > 0 {
+		_ = rt.registry.AppendLog(ctx, runID, "warn",
+			"docker.extra_hosts are defined but the container has network_mode: none — extra host entries will be unreachable; set permissions.net or docker.network_mode to enable network access")
+	}
+
 	// Resolve the image: build from Dockerfile or pull.
 	imageTag := cfg.Image
 	if cfg.Build != nil {
-		imageTag, err = rt.buildImage(ctx, dc, spec, runID)
+		imageTag, err = rt.buildImage(ctx, dc, spec, runID, effectiveNetMode)
 		if err != nil {
 			if ctx.Err() != nil {
 				return &RunResult{RunID: runID, Error: err}, nil
@@ -161,7 +174,7 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		Binds:          cfg.Volumes,
 		PortBindings:   portBindings,
 		AutoRemove:     false,
-		NetworkMode:    container.NetworkMode(cfg.NetworkMode),
+		NetworkMode:    container.NetworkMode(effectiveNetMode),
 		ExtraHosts:     cfg.ExtraHosts,
 		CapAdd:         cfg.CapAdd,
 		CapDrop:        cfg.CapDrop,
@@ -256,7 +269,9 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 // buildImage builds a Docker image from the task's Dockerfile and returns the image tag.
 // Results are cached by Dockerfile content hash — if the Dockerfile hasn't changed the
 // existing image is reused and the build is skipped entirely.
-func (rt *Runtime) buildImage(ctx context.Context, dc *dockerclient.Client, spec *task.Spec, runID string) (string, error) {
+// netMode is applied to the build's RUN steps so that Dockerfile layers respect the
+// same network isolation policy as the eventual container run.
+func (rt *Runtime) buildImage(ctx context.Context, dc *dockerclient.Client, spec *task.Spec, runID, netMode string) (string, error) {
 	b := spec.Docker.Build
 	dockerfilePath, contextDir := b.ResolvePaths(spec.TaskDir)
 
@@ -264,7 +279,11 @@ func (rt *Runtime) buildImage(ctx context.Context, dc *dockerclient.Client, spec
 	if err != nil {
 		return "", fmt.Errorf("read Dockerfile: %w", err)
 	}
-	tag := imagegc.Tag(spec.ID, content)
+	// Include netMode in the cache key: a build with network access must not be
+	// reused for a task that later restricts to network_mode: none (or vice versa).
+	cacheMaterial := append([]byte{}, content...)
+	cacheMaterial = append(cacheMaterial, []byte("\x00dicode-build-network-mode:"+netMode)...)
+	tag := imagegc.Tag(spec.ID, cacheMaterial)
 
 	// Cache hit: image with this tag already exists.
 	if _, _, err := dc.ImageInspectWithRaw(ctx, tag); err == nil {
@@ -285,9 +304,10 @@ func (rt *Runtime) buildImage(ctx context.Context, dc *dockerclient.Client, spec
 	}
 
 	resp, err := dc.ImageBuild(ctx, buildCtx, dockerbuild.ImageBuildOptions{
-		Tags:       []string{tag},
-		Dockerfile: relDockerfile,
-		Remove:     true,
+		Tags:        []string{tag},
+		Dockerfile:  relDockerfile,
+		Remove:      true,
+		NetworkMode: netMode,
 	})
 	if err != nil {
 		return "", fmt.Errorf("image build: %w", err)
