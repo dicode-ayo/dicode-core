@@ -19,11 +19,15 @@ func canonicalPath(p string) string {
 }
 
 // approvalBootstrapMarkerKey records that the approval gate has completed its
-// first-run seeding at least once. It lives in the kv table, which tasks can
-// only reach through the IPC control plane — and there every task key is
-// namespaced as "<taskID>:<key>". Because a task's row always contains a colon
-// from that namespace separator, this colon-free key can never be forged or
-// deleted by a task.
+// first-run seeding at least once. It lives in the kv table — and there every
+// task key is namespaced as "<taskID>:<key>", so this colon-free key is
+// unforgeable/undeleteable via the kv IPC API.
+//
+// DB-deletion attack: a task with broad fs.write can delete the SQLite DB
+// file, erasing this marker. To close that vector, the same flag is also
+// embedded in dicode.lock (covered by its HMAC). At daemon startup the
+// effective marker is the OR of this DB row and lock.IsBootstrapped(), so
+// deleting either alone is insufficient to re-enable bootstrap.
 const approvalBootstrapMarkerKey = "approval.bootstrap_completed"
 
 // bootstrapMarkerExists reports whether the first-run seeding marker is set.
@@ -51,6 +55,11 @@ func setBootstrapMarker(ctx context.Context, database db.DB) error {
 }
 
 // shouldBootstrap decides whether to seed the current inventory as approved.
+//
+// markerExists is the OR of the lock's bootstrapped flag (lock.IsBootstrapped)
+// and the DB kv marker (bootstrapMarkerExists). Both must be absent to permit
+// re-bootstrap, so deleting either alone (the SQLite DB or the lock file) cannot
+// reset the gate.
 //
 // Security invariant: an approval lock that disappears after the daemon has run
 // before must fail closed. A task with a broad fs-write grant can delete

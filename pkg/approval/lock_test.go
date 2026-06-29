@@ -374,6 +374,101 @@ func TestLoadSignedLock_UppercaseHexMAC(t *testing.T) {
 	}
 }
 
+func TestLockMarkBootstrapped_RoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), LockFileName)
+	key := testSigningKey()
+	l, err := LoadSignedLock(path, key)
+	if err != nil {
+		t.Fatalf("LoadSignedLock: %v", err)
+	}
+	if l.IsBootstrapped() {
+		t.Fatal("IsBootstrapped() should be false on fresh lock")
+	}
+	if err := l.MarkBootstrapped(); err != nil {
+		t.Fatalf("MarkBootstrapped: %v", err)
+	}
+	if !l.IsBootstrapped() {
+		t.Fatal("IsBootstrapped() should be true after mark")
+	}
+	reloaded, err := LoadSignedLock(path, key)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if reloaded.Tampered() {
+		t.Fatal("Tampered() should be false after round-trip")
+	}
+	if !reloaded.IsBootstrapped() {
+		t.Fatal("IsBootstrapped() should survive reload")
+	}
+}
+
+func TestLockMarkBootstrapped_Idempotent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), LockFileName)
+	l, _ := LoadSignedLock(path, testSigningKey())
+	if err := l.MarkBootstrapped(); err != nil {
+		t.Fatalf("first MarkBootstrapped: %v", err)
+	}
+	if err := l.MarkBootstrapped(); err != nil {
+		t.Fatalf("second MarkBootstrapped (idempotent): %v", err)
+	}
+}
+
+func TestLoadSignedLock_BootstrappedCoveredByMAC(t *testing.T) {
+	path := filepath.Join(t.TempDir(), LockFileName)
+	key := testSigningKey()
+	l, _ := LoadSignedLock(path, key)
+	_ = l.Record("repo/deploy", "abc", ApprovedByManual)
+	_ = l.MarkBootstrapped()
+
+	data, _ := os.ReadFile(path)
+	// Flip bootstrapped: true to bootstrapped: false to test MAC coverage.
+	flipped := strings.ReplaceAll(string(data), "bootstrapped: true", "bootstrapped: false")
+	if flipped == string(data) {
+		t.Skip("bootstrapped:true not found in expected form; adjust test")
+	}
+	_ = os.WriteFile(path, []byte(flipped), 0600)
+
+	reloaded, err := LoadSignedLock(path, key)
+	if err != nil {
+		t.Fatalf("LoadSignedLock after flag flip: %v", err)
+	}
+	if !reloaded.Tampered() {
+		t.Fatal("flipping bootstrapped must invalidate MAC (Tampered() = true)")
+	}
+	if len(reloaded.List()) != 0 {
+		t.Fatal("tampered lock must discard all records")
+	}
+}
+
+func TestLoadSignedLock_V2UpgradeBootstrappedFalse(t *testing.T) {
+	// A v1 unsigned lock (pre-v2/v3) should upgrade to v3 with bootstrapped=false.
+	path := filepath.Join(t.TempDir(), LockFileName)
+	key := testSigningKey()
+	// Write unsigned v1 lock.
+	unsigned, _ := LoadLock(path)
+	_ = unsigned.Record("repo/deploy", "abc123", ApprovedByManual)
+
+	// Load with signing key: upgrades to v3.
+	upgraded, err := LoadSignedLock(path, key)
+	if err != nil {
+		t.Fatalf("LoadSignedLock on v1: %v", err)
+	}
+	if upgraded.Tampered() {
+		t.Fatal("v1 upgrade must not be tampered")
+	}
+	if _, ok := upgraded.Get("repo/deploy"); !ok {
+		t.Fatal("records must survive v1→v3 upgrade")
+	}
+	if upgraded.IsBootstrapped() {
+		t.Fatal("bootstrapped must be false after upgrading from v1")
+	}
+	// Verify second load is clean v3.
+	verified, err := LoadSignedLock(path, key)
+	if err != nil || verified.Tampered() {
+		t.Fatalf("v3 verify after upgrade: tampered=%v err=%v", verified.Tampered(), err)
+	}
+}
+
 func TestLoadSignedLock_RecordAfterTamperDetection(t *testing.T) {
 	path := filepath.Join(t.TempDir(), LockFileName)
 	key := testSigningKey()
