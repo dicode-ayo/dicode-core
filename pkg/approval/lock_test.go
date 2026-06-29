@@ -424,7 +424,7 @@ func TestLoadSignedLock_BootstrappedCoveredByMAC(t *testing.T) {
 	// Flip bootstrapped: true to bootstrapped: false to test MAC coverage.
 	flipped := strings.ReplaceAll(string(data), "bootstrapped: true", "bootstrapped: false")
 	if flipped == string(data) {
-		t.Skip("bootstrapped:true not found in expected form; adjust test")
+		t.Fatal("bootstrapped: true not found in lock file after MarkBootstrapped; update the search string if YAML serialisation changed")
 	}
 	_ = os.WriteFile(path, []byte(flipped), 0600)
 
