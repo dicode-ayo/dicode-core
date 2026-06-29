@@ -108,7 +108,8 @@ func TestBootstrapMarkerDBDeleteFallback(t *testing.T) {
 	lockBootstrapped := true
 	dbMarkerExists := false
 	markerExists := lockBootstrapped || dbMarkerExists
-	if shouldBootstrap(false, markerExists, true) {
+	// lockExisted=true: the v3 lock file still exists (only the DB was wiped).
+	if shouldBootstrap(true, markerExists, true) {
 		t.Fatal("DB deletion must not re-enable bootstrap when lock has bootstrapped=true")
 	}
 }

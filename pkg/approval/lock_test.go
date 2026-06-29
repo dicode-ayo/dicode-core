@@ -6,6 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestLoadLockMissingFile(t *testing.T) {
@@ -440,7 +443,7 @@ func TestLoadSignedLock_BootstrappedCoveredByMAC(t *testing.T) {
 	}
 }
 
-func TestLoadSignedLock_V2UpgradeBootstrappedFalse(t *testing.T) {
+func TestLoadSignedLock_V1UpgradeBootstrappedFalse(t *testing.T) {
 	// A v1 unsigned lock (pre-v2/v3) should upgrade to v3 with bootstrapped=false.
 	path := filepath.Join(t.TempDir(), LockFileName)
 	key := testSigningKey()
@@ -466,6 +469,57 @@ func TestLoadSignedLock_V2UpgradeBootstrappedFalse(t *testing.T) {
 	verified, err := LoadSignedLock(path, key)
 	if err != nil || verified.Tampered() {
 		t.Fatalf("v3 verify after upgrade: tampered=%v err=%v", verified.Tampered(), err)
+	}
+}
+
+func TestLoadSignedLock_V2UpgradeBootstrappedFalse(t *testing.T) {
+	// A genuine v2 lock (version=2, HMAC over tasks only) should upgrade to v3
+	// with bootstrapped=false even if the file has bootstrapped: true in YAML,
+	// because bootstrapped is not covered by the v2 MAC and must be ignored.
+	path := filepath.Join(t.TempDir(), LockFileName)
+	key := testSigningKey()
+
+	// Build a v2 lock file manually: compute v2 MAC using the unexported helper.
+	tasks := map[string]Record{
+		"repo/deploy": {
+			Hash:       "abc123",
+			ApprovedBy: ApprovedByManual,
+			ApprovedAt: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
+		},
+	}
+	ephemeral := &Lock{path: path, signingKey: key, tasks: tasks}
+	mac, err := ephemeral.computeMACv2()
+	if err != nil {
+		t.Fatalf("computeMACv2: %v", err)
+	}
+	// Write a v2 file with bootstrapped: true in the YAML — the loader must ignore it.
+	lf := lockFile{Version: lockVersion, MAC: mac, Bootstrapped: true, Tasks: tasks}
+	raw, err := yaml.Marshal(lf)
+	if err != nil {
+		t.Fatalf("yaml.Marshal: %v", err)
+	}
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	// Load with signing key: should verify v2 MAC, ignore bootstrapped field, upgrade to v3.
+	upgraded, err := LoadSignedLock(path, key)
+	if err != nil {
+		t.Fatalf("LoadSignedLock on v2: %v", err)
+	}
+	if upgraded.Tampered() {
+		t.Fatal("v2 upgrade must not be tampered")
+	}
+	if _, ok := upgraded.Get("repo/deploy"); !ok {
+		t.Fatal("records must survive v2→v3 upgrade")
+	}
+	if upgraded.IsBootstrapped() {
+		t.Fatal("bootstrapped must be false after v2→v3 upgrade even if YAML field was true")
+	}
+	// Second load must be a valid v3 file.
+	verified, err := LoadSignedLock(path, key)
+	if err != nil || verified.Tampered() {
+		t.Fatalf("v3 verify after v2 upgrade: tampered=%v err=%v", verified.Tampered(), err)
 	}
 }
 

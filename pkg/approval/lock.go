@@ -107,7 +107,9 @@ func LoadSignedLock(path string, key []byte) (*Lock, error) {
 	if lf.Tasks != nil {
 		l.tasks = lf.Tasks
 	}
-	l.bootstrapped = lf.Bootstrapped
+	// l.bootstrapped is intentionally NOT set here. Only the v3 authenticated
+	// path below may populate it; unsigned and v2 files do not cover this field
+	// in their MAC so an attacker who can write to the lock cannot forge the flag.
 
 	if key == nil {
 		// Unsigned mode: accept without verification.
@@ -115,6 +117,15 @@ func LoadSignedLock(path string, key []byte) (*Lock, error) {
 	}
 
 	if lf.MAC == "" {
+		// MAC absent: only treat as a legacy v1 lock (version ≤ 1). A v2/v3
+		// file with the mac field stripped is treated as tampered so an attacker
+		// who can write to the lock file cannot remove the MAC to bypass
+		// bootstrapped-flag protection or version gating.
+		if lf.Version > lockVersionUnsigned {
+			l.tampered = true
+			l.tasks = map[string]Record{}
+			return l, nil
+		}
 		// Legacy unsigned lock (v1): seal immediately so future loads verify.
 		if err := l.save(); err != nil {
 			return nil, fmt.Errorf("seal legacy %s: %w", path, err)
@@ -130,14 +141,21 @@ func LoadSignedLock(path string, key []byte) (*Lock, error) {
 			l.tasks = map[string]Record{}
 			return l, nil
 		}
-		// Valid v2 — upgrade to v3 in-place so subsequent loads use the new MAC.
+		// Valid v2 — bootstrapped is not covered by the v2 MAC so it is forced
+		// to false regardless of what the file field says.
+		l.bootstrapped = false
+		// Upgrade to v3 in-place so subsequent loads use the new MAC.
 		if err := l.save(); err != nil {
 			return nil, fmt.Errorf("upgrade %s to v3: %w", path, err)
 		}
 	case lockVersionBootstrapped: // v3: HMAC over {bootstrapped, tasks}
+		// Set bootstrapped before MAC verification so macContent() uses the
+		// correct value; cleared below if the MAC does not verify.
+		l.bootstrapped = lf.Bootstrapped
 		if !l.verifyMAC(lf.MAC) {
 			// Tampered or forged lock: discard all records and fail closed.
 			l.tampered = true
+			l.bootstrapped = false
 			l.tasks = map[string]Record{}
 			return l, nil
 		}
@@ -295,7 +313,12 @@ func (l *Lock) MarkBootstrapped() error {
 		return nil
 	}
 	l.bootstrapped = true
-	return l.save()
+	if err := l.save(); err != nil {
+		// Roll back in-memory flag so the next call can retry the disk write.
+		l.bootstrapped = false
+		return err
+	}
+	return nil
 }
 
 // save persists the lock atomically (temp file + rename). Caller must hold mu.
