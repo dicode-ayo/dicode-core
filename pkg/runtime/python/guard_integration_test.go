@@ -32,7 +32,7 @@ func pythonForGuardTest(t *testing.T) []string {
 // runGuardScript renders the guard for pol, appends payload, and executes the
 // result with a real interpreter. Returns the combined output and the exec
 // error (nil on exit 0).
-func runGuardScript(t *testing.T, pol guardPolicy, payload string) (string, error) {
+func runGuardScript(t *testing.T, pol guardPolicy, payload string, extraEnv ...string) (string, error) {
 	t.Helper()
 	guard, err := buildGuard(pol)
 	if err != nil {
@@ -45,6 +45,9 @@ func runGuardScript(t *testing.T, pol guardPolicy, payload string) (string, erro
 	}
 	interp := pythonForGuardTest(t)
 	cmd := exec.Command(interp[0], append(interp[1:], script)...) //nolint:gosec
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
+	}
 	out, runErr := cmd.CombinedOutput()
 	return string(out), runErr
 }
@@ -228,6 +231,115 @@ func TestGuard_NetAllowlistPassesIPLiterals(t *testing.T) {
 		Run: guardRun{Mode: "deny"},
 	}
 	out, err := runGuardScript(t, pol, localConnectPayload)
+	requireAllowed(t, out, err)
+}
+
+func TestGuard_EnvReadDenied(t *testing.T) {
+	// A pre-seeded var not in env_allowed must not be readable.
+	pol := guardPolicy{
+		Net:        guardNet{Mode: "unrestricted"},
+		Run:        guardRun{Mode: "deny"},
+		EnvAllowed: []string{"PATH", "HOME", "DICODE_SOCKET", "DICODE_TOKEN"},
+	}
+	payload := `
+import os
+try:
+    v = os.environ["SECRET_NOT_DECLARED"]
+    raise AssertionError(f"should have raised KeyError, got {v!r}")
+except KeyError:
+    pass  # expected: pre-seeded but undeclared
+# .get() must also return None
+assert os.environ.get("SECRET_NOT_DECLARED") is None, "get must return None for filtered var"
+# Membership test must also be filtered
+assert "SECRET_NOT_DECLARED" not in os.environ, "in-test must return False for filtered var"
+`
+	// Seed SECRET_NOT_DECLARED into the subprocess env so the test proves the
+	// filter hides a var that actually exists in the process environment.
+	out, err := runGuardScript(t, pol, payload, "SECRET_NOT_DECLARED=shh")
+	requireAllowed(t, out, err)
+}
+
+func TestGuard_EnvReadAllowed_DeclaredVar(t *testing.T) {
+	// A declared var pre-seeded by the test harness must be readable.
+	pol := guardPolicy{
+		Net:        guardNet{Mode: "unrestricted"},
+		Run:        guardRun{Mode: "deny"},
+		EnvAllowed: []string{"PATH", "HOME", "MY_DECLARED_VAR", "DICODE_SOCKET", "DICODE_TOKEN"},
+	}
+	payload := `
+import os
+v = os.environ["MY_DECLARED_VAR"]
+assert v == "hello", f"expected 'hello', got {v!r}"
+`
+	// Seed MY_DECLARED_VAR into the subprocess environment so the test exercises
+	// filtering against a var that genuinely exists in the inherited env.
+	out, err := runGuardScript(t, pol, payload, "MY_DECLARED_VAR=hello")
+	requireAllowed(t, out, err)
+}
+
+func TestGuard_EnvReadAll_NoFilter(t *testing.T) {
+	// When env_allowed is nil (env_read_exposed=true), os.environ is unfiltered.
+	pol := guardPolicy{
+		Net:        guardNet{Mode: "unrestricted"},
+		Run:        guardRun{Mode: "deny"},
+		EnvAllowed: nil, // no filter
+	}
+	payload := `
+import os
+v = os.environ.get("ANYTHING")
+assert v == "value", f"expected 'value', got {v!r}"
+`
+	// Seed ANYTHING so the test exercises reading a pre-existing env var in
+	// unfiltered mode (rather than writing inside the payload and reading back).
+	out, err := runGuardScript(t, pol, payload, "ANYTHING=value")
+	requireAllowed(t, out, err)
+}
+
+func TestGuard_EnvIter_OnlyDeclaredAndWritten(t *testing.T) {
+	// Iterating os.environ yields only declared keys plus keys the task wrote.
+	// A pre-existing var not in env_allowed is hidden; a task-written var is
+	// visible immediately after the write (write-then-read consistency).
+	pol := guardPolicy{
+		Net:        guardNet{Mode: "unrestricted"},
+		Run:        guardRun{Mode: "deny"},
+		EnvAllowed: []string{"DECLARED_VAR", "DICODE_SOCKET", "DICODE_TOKEN"},
+	}
+	payload := `
+import os
+os.environ["TASK_WRITTEN_VAR"] = "also_yes"  # not pre-declared but task wrote it
+keys = list(os.environ.keys())
+assert "DECLARED_VAR" in keys, f"DECLARED_VAR missing from {keys}"
+assert "TASK_WRITTEN_VAR" in keys, f"TASK_WRITTEN_VAR missing — task should read back what it wrote"
+assert "HIDDEN_PREEXISTING_VAR" not in keys, f"HIDDEN_PREEXISTING_VAR leaked in {keys}"
+# Read back what was written
+assert os.environ["TASK_WRITTEN_VAR"] == "also_yes", "write-then-read must work"
+# Declared var was seeded by the test harness and must be readable
+assert os.environ["DECLARED_VAR"] == "yes", "pre-seeded declared var must be readable"
+`
+	// Seed DECLARED_VAR and a hidden undeclared var to prove the filter works
+	// against vars that genuinely exist in the inherited process environment.
+	out, err := runGuardScript(t, pol, payload, "DECLARED_VAR=yes", "HIDDEN_PREEXISTING_VAR=secret")
+	requireAllowed(t, out, err)
+}
+
+func TestGuard_EnvDelete_UndeclaredDenied(t *testing.T) {
+	// Deleting a pre-seeded var not in env_allowed must raise KeyError.
+	pol := guardPolicy{
+		Net:        guardNet{Mode: "unrestricted"},
+		Run:        guardRun{Mode: "deny"},
+		EnvAllowed: []string{"DICODE_SOCKET", "DICODE_TOKEN"},
+	}
+	payload := `
+import os
+try:
+    del os.environ["UNDECLARED_SECRET"]
+    raise AssertionError("should have raised KeyError")
+except KeyError:
+    pass  # expected: cannot delete what you cannot see
+`
+	// Seed UNDECLARED_SECRET so the test proves the filter blocks deletion of a
+	// var that genuinely exists in the inherited process environment.
+	out, err := runGuardScript(t, pol, payload, "UNDECLARED_SECRET=secret")
 	requireAllowed(t, out, err)
 }
 

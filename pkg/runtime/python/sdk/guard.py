@@ -197,6 +197,78 @@ def _dicode_install_guard():
             parts = (_to_str(args[0]) or "").split()
             _check_run(parts[0] if parts else args[0])
 
+    # Env-read guardrail: restrict os.environ reads to declared names + essential vars.
+    env_allowed = policy.get("env_allowed")
+    if env_allowed is not None:
+        import collections.abc as _cabc
+        # Mutable set: task writes (os.environ["K"] = v) extend the allowed set
+        # so the task can read back what it wrote without a KeyError.
+        _env_allowed_set = set(env_allowed)
+        _real_env = _os.environ  # keep the original MutableMapping
+
+        class _FilteredEnv(_cabc.MutableMapping):
+            """Filters os.environ reads to env_allowed_set; writes go through."""
+            def __getitem__(self, key):
+                if key in _env_allowed_set:
+                    return _real_env[key]
+                raise KeyError(key)
+            def __setitem__(self, key, value):
+                _real_env[key] = value
+                _env_allowed_set.add(key)  # task can read back what it wrote
+            def __delitem__(self, key):
+                if key not in _env_allowed_set:
+                    raise KeyError(key)
+                del _real_env[key]
+                _env_allowed_set.discard(key)
+            def __iter__(self):
+                return (k for k in _real_env if k in _env_allowed_set)
+            def __len__(self):
+                # Iterate the smaller allowed set (O(|allowed|)) rather than
+                # all of _real_env (O(|real_env|)) which can be much larger.
+                return sum(1 for k in _env_allowed_set if k in _real_env)
+            def __contains__(self, key):
+                return key in _env_allowed_set and key in _real_env
+            def copy(self):
+                return dict(self.items())
+
+        _os.environ = _FilteredEnv()
+
+        # Also cover the bytes env API so os.environb / os.getenvb cannot be
+        # used to bypass the allowlist on platforms that expose them (Linux).
+        if hasattr(_os, "environb"):
+            _real_environb = _os.environb
+
+            class _FilteredEnvB(_cabc.MutableMapping):
+                """Bytes-key view of _FilteredEnv; mirrors the allowlist filtering."""
+                def __getitem__(self, key):
+                    if key.decode(errors="replace") in _env_allowed_set:
+                        return _real_environb[key]
+                    raise KeyError(key)
+                def __setitem__(self, key, value):
+                    _real_environb[key] = value
+                    _env_allowed_set.add(key.decode(errors="replace"))
+                def __delitem__(self, key):
+                    if key.decode(errors="replace") not in _env_allowed_set:
+                        raise KeyError(key)
+                    del _real_environb[key]
+                    _env_allowed_set.discard(key.decode(errors="replace"))
+                def __iter__(self):
+                    return (k for k in _real_environb if k.decode(errors="replace") in _env_allowed_set)
+                def __len__(self):
+                    return sum(1 for k in _real_environb if k.decode(errors="replace") in _env_allowed_set)
+                def __contains__(self, key):
+                    return key.decode(errors="replace") in _env_allowed_set and key in _real_environb
+
+            _os.environb = _FilteredEnvB()
+
+        if hasattr(_os, "getenvb"):
+            _real_getenvb = _os.getenvb
+            def _getenvb(key, default=None):
+                if key.decode(errors="replace") in _env_allowed_set:
+                    return _real_getenvb(key, default)
+                return default
+            _os.getenvb = _getenvb
+
     _sys.addaudithook(_hook)
 
 
