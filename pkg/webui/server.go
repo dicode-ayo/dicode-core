@@ -1147,8 +1147,9 @@ func (s *Server) apiSecretsUnlock(w http.ResponseWriter, r *http.Request) {
 	// than silently letting anyone in.
 	src := s.passphraseSource(r.Context())
 	if src == passphraseSourceUnknown {
+		// DB/passphrase read failed — surface as 503, not as "Incorrect password".
 		if isForm {
-			http.Redirect(w, r, loginErrURL(safeNext), http.StatusSeeOther)
+			http.Error(w, "service temporarily unavailable", http.StatusServiceUnavailable)
 			return
 		}
 		jsonErr(w, "service temporarily unavailable", http.StatusServiceUnavailable)
@@ -1227,8 +1228,21 @@ func (s *Server) apiLoginContext(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]string{"title": s.loginTitle(next)})
 }
 
-// validateOrigin checks the Origin header against the request Host to defend
-// against cross-origin submissions (CSRF). A missing Origin is allowed —
+// requestScheme returns the externally visible scheme for r. TLS state takes
+// precedence; X-Forwarded-Proto covers the common case where TLS terminates at
+// a trusted reverse proxy and the backend receives plain HTTP.
+func requestScheme(r *http.Request) string {
+	if r.TLS != nil {
+		return "https"
+	}
+	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
+		return strings.ToLower(proto)
+	}
+	return "http"
+}
+
+// validateOrigin checks the Origin header against the request scheme+host to
+// defend against cross-origin submissions (CSRF). A missing Origin is allowed —
 // curl and other non-browser clients omit it and are not subject to CSRF.
 // "null" is explicitly rejected: browsers send it from sandboxed contexts where
 // the same-origin property cannot be established.
@@ -1246,6 +1260,12 @@ func validateOrigin(r *http.Request) bool {
 	}
 	u, err := url.Parse(origin)
 	if err != nil || u.Host == "" {
+		return false
+	}
+	// Scheme must match the externally visible scheme of the request. A page
+	// served over http:// is a different origin from https:// even on the same
+	// host, so Origin: http://myapp must be rejected for an HTTPS request.
+	if u.Scheme != requestScheme(r) {
 		return false
 	}
 	host := r.Host

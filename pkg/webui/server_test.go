@@ -3,6 +3,7 @@ package webui
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -1213,11 +1214,35 @@ func TestLogin_FormPost_DefaultPortStripped(t *testing.T) {
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Host = "myapp:443"
 	req.Header.Set("Origin", "https://myapp") // browser omits default :443
+	req.TLS = &tls.ConnectionState{}          // simulate HTTPS connection
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusSeeOther {
 		t.Fatalf("same-origin with implicit port: expected 303, got %d: %s", w.Code, w.Body)
+	}
+}
+
+// TestLogin_FormPost_SchemeMismatch_Rejected verifies that Origin: http://myapp
+// is rejected when the request is served over HTTPS (r.TLS set). http and https
+// are distinct origins even on the same host; accepting a mismatched scheme
+// would let a plain-HTTP page CSRF a login endpoint that is only served via TLS.
+func TestLogin_FormPost_SchemeMismatch_Rejected(t *testing.T) {
+	srv := newAuthServer(t, "hunter2")
+	h := srv.Handler()
+
+	form := url.Values{"password": {"hunter2"}}
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Host = "myapp"
+	req.Header.Set("Origin", "http://myapp") // wrong scheme — page is HTTP, endpoint is HTTPS
+	req.TLS = &tls.ConnectionState{}         // simulate HTTPS connection
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("scheme-mismatched Origin: expected 403, got %d: %s", w.Code, w.Body)
 	}
 }
 
