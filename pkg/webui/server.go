@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html/template"
 	"io"
 	"net/http"
 	"net/url"
@@ -38,7 +37,6 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/httprate"
-	"github.com/gorilla/csrf"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 )
@@ -114,6 +112,9 @@ const webhookPathPrefix = "/hooks/"
 //go:embed static
 var staticFS embed.FS
 
+//go:embed login
+var loginEmbedFS embed.FS
+
 // Version is the build-stamped version reported by GET /healthz. Set by
 // pkg/daemon before calling webui.New(). Defaults to "dev" when unset.
 var Version = "dev"
@@ -151,12 +152,6 @@ type Server struct {
 	log                *zap.Logger
 	port               int
 	srv                *http.Server
-
-	// csrfKey is a per-daemon random 32-byte HMAC key for gorilla/csrf. It is
-	// regenerated on every daemon restart — any open browser tab that was
-	// mid-login must reload /login to get a fresh token. Not persisted so a
-	// stolen key cannot outlast a restart.
-	csrfKey []byte
 
 	// replayer fires new runs from persisted inputs. Nil when input persistence
 	// is disabled (SetReplayer not called); the /api/runs/{runID}/replay
@@ -231,11 +226,6 @@ func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config
 
 	wsHub := NewWSHub(log, wsOriginPatterns(cfg.Server.AllowedOrigins))
 
-	csrfKey := make([]byte, 32)
-	if _, err := rand.Read(csrfKey); err != nil {
-		return nil, fmt.Errorf("webui: generate csrf key: %w", err)
-	}
-
 	var dbs *dbSessionStore
 	var aks *apiKeyStore
 	var ps *passphraseStore
@@ -269,7 +259,6 @@ func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config
 		log:               log,
 		port:              port,
 		gateway:           gateway,
-		csrfKey:           csrfKey,
 		db:                database,
 		audit:             audit.NewStore(database),
 	}
@@ -380,63 +369,27 @@ func (s *Server) Handler() http.Handler {
 
 	// Auth endpoints — always public (login flow must be reachable without session).
 	//
-	// CSRF protection via gorilla/csrf is scoped to the login-form flow only.
-	// GET /login sets/refreshes the masked token cookie; the form POST is
-	// validated by the middleware automatically. The JSON variant of
-	// /api/auth/login is exempted in csrfGuard below because it follows a
-	// different threat model (same-origin fetch with credentials; no cookie
-	// to forge in a cross-origin form).
-	s.cfgMu.RLock()
-	tlsConfigured := s.cfg.Server.TLSCertFile != ""
-	s.cfgMu.RUnlock()
-	csrfProtect := csrf.Protect(
-		s.csrfKey,
-		csrf.CookieName("dicode_csrf"),
-		csrf.FieldName("_csrf"),
-		csrf.Path("/"),
-		csrf.Secure(tlsConfigured),
-		csrf.SameSite(csrf.SameSiteStrictMode),
-		csrf.MaxAge(3600),
-	)
-	csrfGuard := func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-			// JSON POSTs to /api/auth/login bypass CSRF validation — see
-			// comment above. All other methods + content types go through.
-			if req.URL.Path == "/api/auth/login" && req.Method == http.MethodPost && !isFormRequest(req) {
-				next.ServeHTTP(w, req)
-				return
-			}
-			// gorilla/csrf defaults to treating the request as HTTPS and
-			// enforces Origin/Referer checks. dicode's daemon is typically
-			// HTTP over localhost (TLS only when TLSCertFile is configured),
-			// so mark the request plaintext when TLS is not configured —
-			// otherwise every local form submission is rejected with
-			// "referer not supplied". Under TLS, the strict-referer check
-			// stays on to defend against HTTP-downgrade MITM.
-			if !tlsConfigured {
-				req = csrf.PlaintextHTTPRequest(req)
-			}
-			csrfProtect(next).ServeHTTP(w, req)
-		})
-	}
-	r.Group(func(lr chi.Router) {
-		lr.Use(csrfGuard)
-		lr.Get("/login", s.handleLoginPage)
-		// Per-IP rate limit on the login POST (5 req/min). Skipped when
-		// DICODE_DISABLE_UNLOCK_LIMITER=1 so e2e tests can rapid-fire logins.
-		lr.Group(func(rl chi.Router) {
-			if os.Getenv("DICODE_DISABLE_UNLOCK_LIMITER") != "1" {
-				rl.Use(httprate.Limit(unlockMaxAttempts, unlockWindow,
-					httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
-						s.cfgMu.RLock()
-						trustProxy := s.cfg.Server.TrustProxy
-						s.cfgMu.RUnlock()
-						return clientIP(r, trustProxy), nil
-					}),
-				))
-			}
-			rl.Post("/api/auth/login", s.apiSecretsUnlock)
-		})
+	// CSRF for form POSTs is enforced via Origin-header check in apiSecretsUnlock
+	// (validateOrigin). JSON POSTs follow a different threat model: same-origin
+	// fetch with SameSite=Strict session cookie — no form token needed.
+	r.Get("/login", s.serveLoginPage)
+	r.Get("/login/style.css", serveLoginFile("style.css", "text/css; charset=utf-8"))
+	r.Get("/login/login.js", serveLoginFile("login.js", "text/javascript; charset=utf-8"))
+	r.Get("/api/login/context", s.apiLoginContext)
+	// Per-IP rate limit on the login POST (5 req/min). Skipped when
+	// DICODE_DISABLE_UNLOCK_LIMITER=1 so e2e tests can rapid-fire logins.
+	r.Group(func(rl chi.Router) {
+		if os.Getenv("DICODE_DISABLE_UNLOCK_LIMITER") != "1" {
+			rl.Use(httprate.Limit(unlockMaxAttempts, unlockWindow,
+				httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
+					s.cfgMu.RLock()
+					trustProxy := s.cfg.Server.TrustProxy
+					s.cfgMu.RUnlock()
+					return clientIP(r, trustProxy), nil
+				}),
+			))
+		}
+		rl.Post("/api/auth/login", s.apiSecretsUnlock)
 	})
 	r.Post("/api/auth/refresh", s.apiAuthRefresh)
 
@@ -1136,14 +1089,17 @@ func (s *Server) apiSecretsUnlock(w http.ResponseWriter, r *http.Request) {
 	var password, nextPath string
 	var trust bool
 	if isForm {
-		if err := r.ParseForm(); err != nil {
-			s.loginError(w, r, "invalid form", http.StatusBadRequest, "")
+		// Validate Origin header to defend against cross-origin form submissions
+		// (CSRF). A missing Origin is allowed for same-site tools and legacy
+		// clients; the SameSite=Strict session cookie provides belt-and-suspenders.
+		if !validateOrigin(r) {
+			http.Error(w, "Forbidden", http.StatusForbidden)
 			return
 		}
-		// CSRF: gorilla/csrf middleware has already validated the token on
-		// POST (see csrfGuard in Handler()) — the request would have been
-		// rejected with 403 before reaching here if the token was missing or
-		// mismatched.
+		if err := r.ParseForm(); err != nil {
+			http.Redirect(w, r, "/login?err=1", http.StatusSeeOther)
+			return
+		}
 		password = r.PostFormValue("password")
 		trust = r.PostFormValue("trust") != ""
 		nextPath = r.PostFormValue("next")
@@ -1181,13 +1137,21 @@ func (s *Server) apiSecretsUnlock(w http.ResponseWriter, r *http.Request) {
 	// than silently letting anyone in.
 	src := s.passphraseSource(r.Context())
 	if src == passphraseSourceUnknown {
-		s.loginError(w, r, "service temporarily unavailable", http.StatusServiceUnavailable, safeNext)
+		if isForm {
+			http.Redirect(w, r, loginErrURL(safeNext), http.StatusSeeOther)
+			return
+		}
+		jsonErr(w, "service temporarily unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	if src != passphraseSourceNone {
 		if !s.verifyPassphrase(r.Context(), password) {
 			s.auditDenied(r, "incorrect password")
-			s.loginError(w, r, "incorrect password", http.StatusUnauthorized, safeNext)
+			if isForm {
+				http.Redirect(w, r, loginErrURL(safeNext), http.StatusSeeOther)
+				return
+			}
+			jsonErr(w, "incorrect password", http.StatusUnauthorized)
 			return
 		}
 	}
@@ -1217,39 +1181,67 @@ func (s *Server) apiSecretsUnlock(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, resp)
 }
 
-func (s *Server) loginError(w http.ResponseWriter, r *http.Request, msg string, code int, safeNext string) {
-	if !isFormRequest(r) {
-		jsonErr(w, msg, code)
-		return
-	}
-	// gorilla/csrf middleware has already placed a fresh masked token on the
-	// response cookie; csrf.TemplateField(r) returns the same value to embed in the
-	// retry form.
-	body, err := renderLoginPage(s.loginTitle(safeNext), safeNext, csrf.TemplateField(r), msg)
+// serveLoginPage serves the embedded static login page HTML.
+func (s *Server) serveLoginPage(w http.ResponseWriter, r *http.Request) {
+	data, err := loginEmbedFS.ReadFile("login/index.html")
 	if err != nil {
-		s.log.Error("login error render: template execute", zap.Error(err))
-		jsonErr(w, msg, code)
-		return
-	}
-	setLoginPageHeaders(w)
-	w.WriteHeader(code)
-	_, _ = w.Write(body)
-}
-
-func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
-	next := r.URL.Query().Get("next")
-	if next != "" && !isSafeNextPath(next) {
-		s.log.Warn("rejecting unsafe next on login page", zap.String("next", next))
-		next = ""
-	}
-	body, err := renderLoginPage(s.loginTitle(next), next, csrf.TemplateField(r), "")
-	if err != nil {
-		s.log.Error("login page: template execute", zap.Error(err))
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 	setLoginPageHeaders(w)
-	_, _ = w.Write(body)
+	_, _ = w.Write(data)
+}
+
+// serveLoginFile returns a handler that serves a named static login asset
+// (style.css, login.js) embedded in the binary.
+func serveLoginFile(name, contentType string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		data, err := loginEmbedFS.ReadFile("login/" + name)
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", contentType)
+		_, _ = w.Write(data)
+	}
+}
+
+// apiLoginContext returns JSON with the contextual page title. The static login
+// page fetches this via a short JS snippet to avoid server-side HTML rendering.
+func (s *Server) apiLoginContext(w http.ResponseWriter, r *http.Request) {
+	next := r.URL.Query().Get("next")
+	if next != "" && !isSafeNextPath(next) {
+		next = ""
+	}
+	jsonOK(w, map[string]string{"title": s.loginTitle(next)})
+}
+
+// validateOrigin checks the Origin header against the request Host to defend
+// against cross-origin form submissions (CSRF). A missing Origin is allowed —
+// same-site tools (curl, legacy browsers) omit it and pose no CSRF risk when
+// session cookies carry SameSite=Strict.
+func validateOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	host := r.Host
+	if host == "" {
+		host = r.URL.Host
+	}
+	return u.Host == host
+}
+
+// loginErrURL returns the URL to redirect to when a form login fails.
+func loginErrURL(safeNext string) string {
+	if safeNext == "" {
+		return "/login?err=1"
+	}
+	return "/login?err=1&next=" + url.QueryEscape(safeNext)
 }
 
 // isFormRequest returns true when the request body is a browser-style form
@@ -1260,18 +1252,18 @@ func isFormRequest(r *http.Request) bool {
 		strings.HasPrefix(ct, "multipart/form-data")
 }
 
-// setLoginPageHeaders applies defence-in-depth headers on any response that
-// renders the login form. Clickjacking prevention (XFO + frame-ancestors),
-// a referrer policy that keeps the `next` path from leaking cross-origin
-// but preserves the Origin header on same-origin POSTs (gorilla/csrf rejects
-// Origin: null, which Chrome sends when the policy is `no-referrer`), and a
-// CSP that allows only same-origin subresources plus inline styles.
+// setLoginPageHeaders applies defence-in-depth headers on the login page
+// response. Clickjacking prevention (XFO + frame-ancestors), a referrer policy
+// that keeps the `next` path from leaking cross-origin while preserving the
+// Origin header on same-origin POSTs (needed for validateOrigin), and a CSP
+// that allows same-origin scripts and styles (the page loads /login/login.js
+// and /login/style.css from the same origin).
 func setLoginPageHeaders(w http.ResponseWriter) {
 	h := w.Header()
 	h.Set("Content-Type", "text/html; charset=utf-8")
 	h.Set("X-Frame-Options", "DENY")
 	h.Set("Content-Security-Policy",
-		"default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'none'; "+
+		"default-src 'self'; style-src 'self'; script-src 'self'; "+
 			"img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
 	h.Set("Referrer-Policy", "strict-origin-when-cross-origin")
 }
@@ -1312,70 +1304,6 @@ func (s *Server) loginTitle(next string) string {
 	}
 	return "Sign in to dicode"
 }
-
-// loginPageTpl is compiled once at init time. html/template applies context-
-// aware auto-escaping so every {{.X}} is safe in its surrounding markup:
-// .Title goes into <title> (body text), .Err into body text, .Next and .CSRF
-// into attribute values. Static analysers (CodeQL go/reflected-xss) recognise
-// html/template as a sanitising sink.
-var loginPageTpl = template.Must(template.New("login").Parse(`<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{{.Title}}</title>
-<style>` + loginCSS + `</style>
-</head>
-<body>
-<main class="dc-login">
-<form method="post" action="/api/auth/login" enctype="application/x-www-form-urlencoded">
-<h1>{{.Title}}</h1>
-{{if .Err}}<p class="dc-err" role="alert">{{.Err}}</p>{{end}}
-<label>Password<input type="password" name="password" autocomplete="current-password" autofocus required></label>
-<label class="dc-check"><input type="checkbox" name="trust" value="1">Trust this browser</label>
-<input type="hidden" name="next" value="{{.Next}}">
-{{.CSRFField}}
-<button type="submit">Sign in</button>
-</form>
-</main>
-</body>
-</html>`))
-
-type loginPageData struct {
-	Title     string
-	Next      string
-	CSRFField template.HTML // rendered <input> tag from csrf.TemplateField
-	Err       string
-}
-
-// renderLoginPage produces the login form HTML with contextual auto-escaping
-// via html/template. The CSRF field is a template.HTML value produced by
-// csrf.TemplateField(r) — it carries its own escape-safe `<input>` tag so
-// html/template doesn't re-escape the base64 token's `+` characters as
-// numeric references, which would corrupt the form value in simple
-// string-based extractors (real browsers HTML-decode attribute values,
-// but not all clients do).
-func renderLoginPage(title, next string, csrfField template.HTML, errMsg string) ([]byte, error) {
-	var b strings.Builder
-	if err := loginPageTpl.Execute(&b, loginPageData{
-		Title: title, Next: next, CSRFField: csrfField, Err: errMsg,
-	}); err != nil {
-		return nil, err
-	}
-	return []byte(b.String()), nil
-}
-
-const loginCSS = `body{margin:0;font:16px/1.4 system-ui,sans-serif;background:#0f1115;color:#e6e8eb;display:grid;place-items:center;min-height:100vh}` +
-	`.dc-login{width:100%;max-width:360px;padding:2rem}` +
-	`.dc-login h1{font-size:1.25rem;margin:0 0 1.25rem;font-weight:600}` +
-	`.dc-login form{display:flex;flex-direction:column;gap:0.75rem}` +
-	`.dc-login label{display:flex;flex-direction:column;gap:0.25rem;font-size:0.85rem;color:#9aa1ab}` +
-	`.dc-login input[type=password]{padding:0.6rem 0.7rem;border:1px solid #2a2f38;background:#181b21;color:#e6e8eb;border-radius:4px;font:inherit}` +
-	`.dc-login input[type=password]:focus{outline:2px solid #3b82f6;border-color:transparent}` +
-	`.dc-login .dc-check{flex-direction:row;align-items:center;gap:0.5rem;color:#cbd0d7}` +
-	`.dc-login button{margin-top:0.5rem;padding:0.65rem;background:#3b82f6;border:0;color:#fff;font:inherit;font-weight:600;border-radius:4px;cursor:pointer}` +
-	`.dc-login button:hover{background:#2563eb}` +
-	`.dc-err{margin:0 0 0.5rem;padding:0.5rem 0.7rem;background:#3a1a1a;border:1px solid #6b2424;color:#fca5a5;border-radius:4px;font-size:0.85rem}`
 
 func (s *Server) apiListSecrets(w http.ResponseWriter, r *http.Request) {
 	if s.secretsMgr == nil {

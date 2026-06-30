@@ -990,104 +990,72 @@ func TestLoginPage_Served_WhenPathIsPublic(t *testing.T) {
 	if !contains(body, `name="next"`) {
 		t.Error("login form must contain a hidden next field")
 	}
-	if !contains(body, `name="_csrf"`) {
-		t.Error("login form must contain a hidden _csrf field")
-	}
-	var csrfSet bool
-	for _, c := range w.Result().Cookies() {
-		if c.Name == csrfCookie {
-			csrfSet = true
-			if !c.HttpOnly {
-				t.Error("csrf cookie must be HttpOnly")
-			}
-			if c.SameSite != http.SameSiteStrictMode {
-				t.Error("csrf cookie must be SameSite=Strict")
-			}
-		}
-	}
-	if !csrfSet {
-		t.Error("csrf cookie must be issued on /login GET")
-	}
 }
 
-// csrfCookie is the cookie name set by gorilla/csrf middleware. Kept here
-// (not in server.go) as a test helper so tests can assert on a stable name.
-const csrfCookie = "dicode_csrf"
-
-// prepareLoginPost performs a GET /login to obtain a CSRF cookie and token,
-// then builds a POST request carrying both. Returned request has the cookie
-// attached and the form body includes the matching _csrf field.
-func prepareLoginPost(t *testing.T, h http.Handler, form url.Values) *http.Request {
+// prepareLoginPost builds a POST /api/auth/login form request with a same-origin
+// Origin header so validateOrigin passes. The CSRF dance (gorilla token + cookie)
+// is no longer needed — Origin-header check is the sole CSRF defence for forms.
+func prepareLoginPost(t *testing.T, _ http.Handler, form url.Values) *http.Request {
 	t.Helper()
-	getReq := httptest.NewRequest(http.MethodGet, "/login", nil)
-	getW := httptest.NewRecorder()
-	h.ServeHTTP(getW, getReq)
-	if getW.Code != http.StatusOK {
-		t.Fatalf("prepareLoginPost: GET /login returned %d", getW.Code)
-	}
-	var csrfCookieVal string
-	for _, c := range getW.Result().Cookies() {
-		if c.Name == csrfCookie {
-			csrfCookieVal = c.Value
-		}
-	}
-	if csrfCookieVal == "" {
-		t.Fatal("prepareLoginPost: no csrf cookie on /login GET")
-	}
-	token := extractCSRFFromHTML(t, getW.Body.String())
-	if token == "" {
-		t.Fatal("prepareLoginPost: no _csrf field in rendered form")
-	}
 	if form == nil {
 		form = url.Values{}
 	}
-	form.Set("_csrf", token)
-
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.AddCookie(&http.Cookie{Name: csrfCookie, Value: csrfCookieVal})
+	// Simulate a same-origin browser form submission.
+	req.Host = "example.com"
+	req.Header.Set("Origin", "http://example.com")
 	return req
 }
 
-// extractCSRFFromHTML pulls the hidden _csrf value from the rendered login form.
-func extractCSRFFromHTML(t *testing.T, body string) string {
-	t.Helper()
-	const marker = `name="_csrf" value="`
-	i := strings.Index(body, marker)
-	if i < 0 {
-		return ""
-	}
-	rest := body[i+len(marker):]
-	end := strings.Index(rest, `"`)
-	if end < 0 {
-		return ""
-	}
-	return rest[:end]
-}
-
-func TestLoginPage_ShowsTaskNameForWebhookNext(t *testing.T) {
+// TestLoginContext_ShowsTaskNameForWebhookNext verifies that GET /api/login/context
+// returns the task name and description when next points at a known webhook task.
+// The static login page's JS fetches this endpoint to display a contextual title.
+func TestLoginContext_ShowsTaskNameForWebhookNext(t *testing.T) {
 	srv := newAuthServer(t, "hunter2")
 	spec := registerWebhookTask(t, srv.registry, srv, "ai-hook", "/hooks/ai", true)
 	spec.Name = "AI Assistant"
 	spec.Description = "Chat with your tasks"
 	h := srv.Handler()
 
-	req := httptest.NewRequest(http.MethodGet, "/login?next=%2Fhooks%2Fai", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/login/context?next=%2Fhooks%2Fai", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
-	body := w.Body.String()
-	if !contains(body, "AI Assistant") {
-		t.Errorf("expected task name in login page, got:\n%s", body)
+	var resp map[string]string
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
 	}
-	if !contains(body, "Chat with your tasks") {
-		t.Errorf("expected task description in login page, got:\n%s", body)
+	if !contains(resp["title"], "AI Assistant") {
+		t.Errorf("expected task name in title, got %q", resp["title"])
+	}
+	if !contains(resp["title"], "Chat with your tasks") {
+		t.Errorf("expected task description in title, got %q", resp["title"])
 	}
 }
 
+// TestLoginContext_GenericTitleForUnknownNext verifies that /api/login/context
+// returns the generic "Sign in to dicode" title when next is absent.
+func TestLoginContext_GenericTitleForUnknownNext(t *testing.T) {
+	srv := newAuthServer(t, "hunter2")
+	h := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/login/context", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	var resp map[string]string
+	_ = json.NewDecoder(w.Body).Decode(&resp)
+	if !contains(resp["title"], "Sign in to dicode") {
+		t.Errorf("expected generic fallback title, got %q", resp["title"])
+	}
+}
+
+// TestLoginPage_GenericTitleForUnknownNext confirms the static login HTML
+// contains the default "Sign in to dicode" text (shown before JS updates it).
 func TestLoginPage_GenericTitleForUnknownNext(t *testing.T) {
 	srv := newAuthServer(t, "hunter2")
 	h := srv.Handler()
@@ -1097,7 +1065,7 @@ func TestLoginPage_GenericTitleForUnknownNext(t *testing.T) {
 	h.ServeHTTP(w, req)
 
 	if !contains(w.Body.String(), "Sign in to dicode") {
-		t.Error("expected generic fallback title")
+		t.Error("expected generic fallback title in static HTML")
 	}
 }
 
@@ -1165,7 +1133,7 @@ func TestLogin_FormPost_Trust_IssuesDeviceCookie(t *testing.T) {
 	}
 }
 
-func TestLogin_FormPost_WrongPassword_RendersErrorHTML(t *testing.T) {
+func TestLogin_FormPost_WrongPassword_RedirectsToLoginWithErr(t *testing.T) {
 	srv := newAuthServer(t, "hunter2")
 	h := srv.Handler()
 
@@ -1177,27 +1145,29 @@ func TestLogin_FormPost_WrongPassword_RendersErrorHTML(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
-	if w.Code != http.StatusUnauthorized {
-		t.Fatalf("expected 401, got %d", w.Code)
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303 redirect on wrong password, got %d", w.Code)
 	}
-	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
-		t.Errorf("expected HTML response, got Content-Type=%q", ct)
+	loc := w.Header().Get("Location")
+	if !contains(loc, "/login") || !contains(loc, "err=1") {
+		t.Errorf("expected redirect to /login?err=1, got %q", loc)
 	}
-	if !contains(w.Body.String(), "incorrect password") {
-		t.Error("expected error message in HTML body")
+	if !contains(loc, url.QueryEscape("/hooks/ai")) {
+		t.Errorf("next path not preserved in error redirect, got %q", loc)
 	}
 }
 
-func TestLogin_FormPost_MissingCSRFCookie_Rejected(t *testing.T) {
+// TestLogin_FormPost_OriginMismatch_Rejected verifies that a form POST with a
+// cross-origin Origin header is rejected with 403 (CSRF defence via Origin check).
+func TestLogin_FormPost_OriginMismatch_Rejected(t *testing.T) {
 	srv := newAuthServer(t, "hunter2")
 	h := srv.Handler()
 
-	form := url.Values{}
-	form.Set("password", "hunter2")
-	form.Set("_csrf", "decafbad") // form has a value, cookie missing
-
+	form := url.Values{"password": {"hunter2"}}
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Host = "example.com"
+	req.Header.Set("Origin", "https://evil.com") // cross-origin
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
@@ -1206,32 +1176,27 @@ func TestLogin_FormPost_MissingCSRFCookie_Rejected(t *testing.T) {
 	}
 	for _, c := range w.Result().Cookies() {
 		if c.Name == sessionCookie {
-			t.Error("session cookie must not be issued when CSRF check fails")
+			t.Error("session cookie must not be issued when Origin check fails")
 		}
 	}
 }
 
-func TestLogin_FormPost_CSRFMismatch_Rejected(t *testing.T) {
+// TestLogin_FormPost_MissingOrigin_Allowed verifies that a form POST without an
+// Origin header is allowed (same-site tools like curl omit it; SameSite=Strict
+// cookies provide belt-and-suspenders protection).
+func TestLogin_FormPost_MissingOrigin_Allowed(t *testing.T) {
 	srv := newAuthServer(t, "hunter2")
 	h := srv.Handler()
 
-	form := url.Values{}
-	form.Set("password", "hunter2")
-	form.Set("_csrf", "not-the-cookie-value")
-
+	form := url.Values{"password": {"hunter2"}}
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.AddCookie(&http.Cookie{Name: csrfCookie, Value: "cookie-value"})
+	// No Origin header — should be allowed.
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("expected 403, got %d: %s", w.Code, w.Body)
-	}
-	for _, c := range w.Result().Cookies() {
-		if c.Name == sessionCookie {
-			t.Error("session cookie must not be issued when CSRF mismatches")
-		}
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303 (successful login redirect), got %d: %s", w.Code, w.Body)
 	}
 }
 
@@ -1309,13 +1274,12 @@ func TestLoginPage_SetsSecurityHeaders(t *testing.T) {
 	if !strings.Contains(csp, "frame-ancestors 'none'") {
 		t.Errorf("CSP must set frame-ancestors 'none', got %q", csp)
 	}
-	if !strings.Contains(csp, "script-src 'none'") {
-		t.Errorf("CSP must set script-src 'none' on login page, got %q", csp)
+	if !strings.Contains(csp, "script-src 'self'") {
+		t.Errorf("CSP must set script-src 'self' (login.js), got %q", csp)
 	}
-	// Referrer-Policy must preserve the Origin header on same-origin POSTs —
-	// `no-referrer` makes Chrome send Origin: null, which gorilla/csrf then
-	// rejects as "origin invalid". `strict-origin-when-cross-origin` keeps
-	// the anti-leak property cross-origin while letting the login form work.
+	// Referrer-Policy must preserve the Origin header on same-origin POSTs so
+	// validateOrigin can compare it to the Host. `strict-origin-when-cross-origin`
+	// keeps the anti-leak property cross-origin while letting the login form work.
 	if got := w.Header().Get("Referrer-Policy"); got != "strict-origin-when-cross-origin" {
 		t.Errorf("Referrer-Policy: want strict-origin-when-cross-origin, got %q", got)
 	}
@@ -1341,7 +1305,10 @@ func TestLogin_JSONPost_OpenRedirect_Dropped(t *testing.T) {
 	}
 }
 
-func TestLoginPage_RejectsUnsafeNextInQueryString(t *testing.T) {
+func TestLoginPage_UnsafeNextInQueryString_PageStillServed(t *testing.T) {
+	// The static login page is served even when ?next= is unsafe; the JS
+	// guards client-side, and the server rejects the open redirect at POST time
+	// (tested by TestLogin_FormPost_OpenRedirect_Attempts_FallbackToDefault).
 	srv := newAuthServer(t, "hunter2")
 	h := srv.Handler()
 
@@ -1352,11 +1319,29 @@ func TestLoginPage_RejectsUnsafeNextInQueryString(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
+	// Static HTML must not contain server-rendered evil.com.
 	if contains(w.Body.String(), "evil.com") {
-		t.Error("unsafe next leaked into rendered login page")
+		t.Error("unsafe next must not appear in static login HTML")
 	}
-	if !contains(w.Body.String(), `name="next" value=""`) {
-		t.Error("expected empty hidden next field when next is unsafe")
+}
+
+// TestLoginContext_UnsafeNextDropped confirms /api/login/context silently drops
+// an unsafe next param and returns the generic title instead.
+func TestLoginContext_UnsafeNextDropped(t *testing.T) {
+	srv := newAuthServer(t, "hunter2")
+	h := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/login/context?next=%2F%2Fevil.com", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	var resp map[string]string
+	_ = json.NewDecoder(w.Body).Decode(&resp)
+	if contains(resp["title"], "evil.com") {
+		t.Errorf("unsafe next must not leak into login context title, got %q", resp["title"])
+	}
+	if !contains(resp["title"], "Sign in to dicode") {
+		t.Errorf("expected generic title when next is unsafe, got %q", resp["title"])
 	}
 }
 
