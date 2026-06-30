@@ -1200,6 +1200,52 @@ func TestLogin_FormPost_MissingOrigin_Allowed(t *testing.T) {
 	}
 }
 
+// TestLogin_FormPost_DefaultPortStripped verifies that a same-origin form POST
+// is accepted when the Origin header omits the default HTTPS port but the Host
+// header retains it (common when a reverse proxy preserves the explicit-port
+// form of the Host header while the browser canonicalises Origin without it).
+func TestLogin_FormPost_DefaultPortStripped(t *testing.T) {
+	srv := newAuthServer(t, "hunter2")
+	h := srv.Handler()
+
+	form := url.Values{"password": {"hunter2"}}
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Host = "myapp:443"
+	req.Header.Set("Origin", "https://myapp") // browser omits default :443
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("same-origin with implicit port: expected 303, got %d: %s", w.Code, w.Body)
+	}
+}
+
+// TestLogin_NonForm_CrossOrigin_Rejected verifies that a non-form (text/plain)
+// POST with a cross-origin Origin header is rejected. Without this check a
+// text/plain+JSON body bypasses the CORS preflight and isFormRequest at once.
+func TestLogin_NonForm_CrossOrigin_Rejected(t *testing.T) {
+	srv := newAuthServer(t, "hunter2")
+	h := srv.Handler()
+
+	body := strings.NewReader(`{"password":"hunter2"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", body)
+	req.Header.Set("Content-Type", "text/plain") // simple CORS request, no preflight
+	req.Host = "example.com"
+	req.Header.Set("Origin", "https://evil.com")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for cross-origin text/plain POST, got %d: %s", w.Code, w.Body)
+	}
+	for _, c := range w.Result().Cookies() {
+		if c.Name == sessionCookie {
+			t.Error("session cookie must not be issued when Origin check fails")
+		}
+	}
+}
+
 func TestLogin_JSONPost_EchoesSafeNext(t *testing.T) {
 	srv := newAuthServer(t, "hunter2")
 	h := srv.Handler()

@@ -1090,8 +1090,9 @@ func (s *Server) apiSecretsUnlock(w http.ResponseWriter, r *http.Request) {
 	var trust bool
 	if isForm {
 		// Validate Origin header to defend against cross-origin form submissions
-		// (CSRF). A missing Origin is allowed for same-site tools and legacy
-		// clients; the SameSite=Strict session cookie provides belt-and-suspenders.
+		// (CSRF). A missing Origin is allowed for curl and legacy clients that
+		// do not send it; modern browsers send Origin on cross-origin POSTs and
+		// will be rejected here if they don't match.
 		if !validateOrigin(r) {
 			http.Error(w, "Forbidden", http.StatusForbidden)
 			return
@@ -1104,6 +1105,15 @@ func (s *Server) apiSecretsUnlock(w http.ResponseWriter, r *http.Request) {
 		trust = r.PostFormValue("trust") != ""
 		nextPath = r.PostFormValue("next")
 	} else {
+		// Non-form path (JSON and other Content-Types). A cross-origin fetch
+		// with Content-Type: text/plain is a "simple" CORS request (no
+		// preflight) and Go's json.Decoder ignores Content-Type, so the JSON
+		// decode path is reachable cross-origin without a preflight. Validate
+		// the Origin header when it is present to close that vector.
+		if r.Header.Get("Origin") != "" && !validateOrigin(r) {
+			jsonErr(w, "forbidden", http.StatusForbidden)
+			return
+		}
 		var body struct {
 			Password string `json:"password"`
 			Trust    bool   `json:"trust"`
@@ -1202,6 +1212,7 @@ func serveLoginFile(name, contentType string) http.HandlerFunc {
 			return
 		}
 		w.Header().Set("Content-Type", contentType)
+		w.Header().Set("Cache-Control", "no-cache")
 		_, _ = w.Write(data)
 	}
 }
@@ -1217,21 +1228,39 @@ func (s *Server) apiLoginContext(w http.ResponseWriter, r *http.Request) {
 }
 
 // validateOrigin checks the Origin header against the request Host to defend
-// against cross-origin form submissions (CSRF). A missing Origin is allowed —
-// same-site tools (curl, legacy browsers) omit it and pose no CSRF risk when
-// session cookies carry SameSite=Strict.
+// against cross-origin submissions (CSRF). A missing Origin is allowed —
+// curl and other non-browser clients omit it and are not subject to CSRF.
+// "null" is explicitly rejected: browsers send it from sandboxed contexts where
+// the same-origin property cannot be established.
+// Browsers canonically omit default ports from the Origin serialisation
+// (https→443, http→80); we strip those same defaults from r.Host before
+// comparing so deployments behind a proxy that preserves an explicit-port
+// Host header (e.g. "myapp:443") still accept legitimate same-origin requests.
 func validateOrigin(r *http.Request) bool {
 	origin := r.Header.Get("Origin")
 	if origin == "" {
 		return true
 	}
+	if origin == "null" {
+		return false
+	}
 	u, err := url.Parse(origin)
-	if err != nil {
+	if err != nil || u.Host == "" {
 		return false
 	}
 	host := r.Host
 	if host == "" {
 		host = r.URL.Host
+	}
+	// Browsers omit the default port from Origin. Strip the same default from
+	// r.Host when the origin carries no port, so "myapp" matches "myapp:443".
+	if u.Port() == "" {
+		switch u.Scheme {
+		case "https":
+			host = strings.TrimSuffix(host, ":443")
+		case "http":
+			host = strings.TrimSuffix(host, ":80")
+		}
 	}
 	return u.Host == host
 }
@@ -1261,6 +1290,7 @@ func isFormRequest(r *http.Request) bool {
 func setLoginPageHeaders(w http.ResponseWriter) {
 	h := w.Header()
 	h.Set("Content-Type", "text/html; charset=utf-8")
+	h.Set("Cache-Control", "no-store")
 	h.Set("X-Frame-Options", "DENY")
 	h.Set("Content-Security-Policy",
 		"default-src 'self'; style-src 'self'; script-src 'self'; "+
