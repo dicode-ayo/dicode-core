@@ -74,7 +74,7 @@ test("rejects path traversal in key", async () => {
   assert.ok(res.error && res.error.includes("invalid key"));
 });
 
-test("rejects path separators in namespace", async () => {
+test("rejects a '..' segment in namespace", async () => {
   const root = await Deno.makeTempDir();
   params.set("op", "put");
   params.set("namespace", "../escape");
@@ -84,6 +84,37 @@ test("rejects path separators in namespace", async () => {
   const res = await runTask() as { ok: boolean; error?: string };
   assert.equal(res.ok, false);
   assert.ok(res.error && res.error.includes("invalid namespace"));
+});
+
+test("rejects an empty namespace segment (double slash / trailing slash)", async () => {
+  const root = await Deno.makeTempDir();
+  params.set("op", "put");
+  params.set("namespace", "a//b");
+  params.set("key", "abc");
+  params.set("value", btoa("x"));
+  params.set("root", root);
+  const res = await runTask() as { ok: boolean; error?: string };
+  assert.equal(res.ok, false);
+  assert.ok(res.error && res.error.includes("invalid namespace"));
+});
+
+test("namespace supports nested task-id-style segments", async () => {
+  const root = await Deno.makeTempDir();
+  const value = btoa("nested value");
+
+  params.set("op", "put");
+  params.set("namespace", "buildin/blob-storage");
+  params.set("key", "k");
+  params.set("value", value);
+  params.set("root", root);
+  let res = await runTask() as { ok: boolean };
+  assert.equal(res.ok, true);
+
+  params.set("op", "get");
+  params.set("value", "");
+  res = await runTask() as { ok: boolean; value: string };
+  assert.equal(res.ok, true);
+  assert.equal((res as any).value, value);
 });
 
 test("namespaces are isolated from each other", async () => {

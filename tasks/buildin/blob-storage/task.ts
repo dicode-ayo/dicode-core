@@ -4,9 +4,13 @@
 //
 // Layout on disk: ${root}/${namespace}/${key}.bin
 //
-// Namespace and key are each validated as a single safe path component (no
-// separators, no traversal) so a caller cannot escape its own namespace
-// directory or another namespace's directory via a crafted key.
+// `namespace` is, by convention, the caller's own `dicode.task_id` — which is
+// always "<org-or-source>/<task-name>" shaped (e.g. "buildin/blob-storage")
+// — so it is validated as a sequence of safe path segments (split on "/",
+// each segment non-empty and not "." or ".."), not a single component. `key`
+// stays a single safe component: no separators, no traversal. Together these
+// stop a caller from escaping its own namespace directory or another
+// namespace's directory via a crafted namespace or key.
 
 interface PutResult { ok: true }
 interface GetResult { ok: true; value: string }
@@ -16,20 +20,27 @@ interface ErrorResult { ok: false; error: string }
 
 const BLOB_EXT = ".bin";
 
-function assertSafeComponent(label: string, value: string): void {
-  if (!value || value.includes("/") || value.includes("\\") || value.includes("..")) {
+function assertSafeSegment(label: string, value: string): void {
+  if (!value || value === "." || value === ".." || value.includes("\\")) {
     throw new Error(`invalid ${label}: ${JSON.stringify(value)}`);
   }
 }
 
 function namespaceDir(root: string, namespace: string): string {
-  assertSafeComponent("namespace", namespace);
-  return `${root}/${namespace}`;
+  if (!namespace) throw new Error(`invalid namespace: ${JSON.stringify(namespace)}`);
+  const segments = namespace.split("/");
+  for (const segment of segments) {
+    assertSafeSegment("namespace", segment);
+  }
+  return `${root}/${segments.join("/")}`;
 }
 
-function fileFor(root: string, namespace: string, key: string): string {
-  assertSafeComponent("key", key);
-  return `${namespaceDir(root, namespace)}/${key}${BLOB_EXT}`;
+function fileFor(dir: string, key: string): string {
+  assertSafeSegment("key", key);
+  if (key.includes("/")) {
+    throw new Error(`invalid key: ${JSON.stringify(key)}`);
+  }
+  return `${dir}/${key}${BLOB_EXT}`;
 }
 
 function base64Decode(s: string): Uint8Array {
@@ -70,14 +81,15 @@ export default async function main({ params }: DicodeSdk):
     }
 
     if (!key) return { ok: false, error: "key required" };
-    const path = fileFor(root, namespace, key);
+    const dir = namespaceDir(root, namespace);
+    const path = fileFor(dir, key);
 
     if (op === "put") {
       const value = String((await params.get("value")) ?? "");
       if (!value) return { ok: false, error: "value required for put" };
       // Decode→write round-trip implicitly validates base64.
       const bytes = base64Decode(value);
-      await Deno.mkdir(namespaceDir(root, namespace), { recursive: true });
+      await Deno.mkdir(dir, { recursive: true });
       await Deno.writeFile(path, bytes);
       return { ok: true };
     }
