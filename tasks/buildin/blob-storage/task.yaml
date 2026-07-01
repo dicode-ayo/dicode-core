@@ -1,0 +1,57 @@
+apiVersion: dicode/v1
+kind: Task
+name: "Blob Storage (user data)"
+description: |
+  Generic filesystem-backed blob store for user tasks (#244). Sibling to
+  buildin/local-storage, which is reserved for core's own encrypted
+  run-input/relay-identity persistence. This task is for arbitrary
+  binary/string data that a user task wants to persist across runs.
+
+  Each caller supplies a `namespace` (by convention its own `dicode.task_id`,
+  read via `sdk.task_id` — see pkg/runtime/deno/sdk/shim.ts) so different
+  tasks don't collide on the same key. Isolation here is the same
+  self-declared-namespace convention already used by local-storage's
+  `prefix` param: this task trusts whatever namespace the caller passes,
+  it is not cryptographically enforced by core. Values are stored exactly
+  as given (base64-decoded to bytes) — this task does not encrypt at rest;
+  a caller that needs confidentiality must encrypt the value itself before
+  calling `put` (see `dicode.crypto` in the SDK).
+
+runtime: deno
+
+trigger:
+  manual: true
+
+params:
+  op:
+    type: string
+    required: true
+    description: "Operation: put | get | delete | list"
+  namespace:
+    type: string
+    required: true
+    description: "Caller-scoped namespace, by convention the caller's own dicode.task_id (e.g. 'my-org/my-task')"
+  key:
+    type: string
+    required: false
+    description: "Blob key within the namespace (required for put/get/delete, ignored for list)"
+  value:
+    type: string
+    default: ""
+    description: "Base64-encoded blob bytes (put only)"
+  root:
+    type: string
+    default: "${DATADIR}/blobs"
+    description: "Storage root directory (overridable for tests)"
+
+permissions:
+  fs:
+    - path: "${DATADIR}/blobs"
+      permission: rw
+
+# Self-opt-out from input persistence to avoid recursion: this task IS a
+# storage backend; persisting its own params would loop indefinitely.
+run_inputs:
+  enabled: false
+
+timeout: 30s
