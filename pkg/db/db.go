@@ -66,6 +66,19 @@ func (e *UnsupportedBackendError) Error() string {
 	return "unsupported database type: " + e.Type + " (supported: sqlite, postgres, mysql)"
 }
 
-// Stub functions — implemented in postgres.go, mysql.go
-func openPostgres(_ string) (DB, error) { panic("not yet implemented") }
-func openMySQL(_ string) (DB, error)    { panic("not yet implemented") }
+// NotImplementedError indicates a recognized backend type with no driver
+// wired up yet. Distinct from UnsupportedBackendError (unrecognized type)
+// so callers/tests can tell "typo" apart from "known but not built".
+type NotImplementedError struct{ Type string }
+
+func (e *NotImplementedError) Error() string {
+	return "database type " + e.Type + " is not yet implemented (only sqlite is currently supported)"
+}
+
+// Stub functions — postgres and mysql backends are not implemented yet.
+// They return an error rather than panicking so a config typo or a
+// not-yet-supported backend fails startup cleanly (see Open's caller in
+// pkg/daemon, which already wraps and returns this error) instead of
+// crashing the daemon with an unhandled panic.
+func openPostgres(_ string) (DB, error) { return nil, &NotImplementedError{Type: "postgres"} }
+func openMySQL(_ string) (DB, error)    { return nil, &NotImplementedError{Type: "mysql"} }
