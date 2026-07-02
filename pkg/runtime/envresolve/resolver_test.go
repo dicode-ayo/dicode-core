@@ -3,6 +3,7 @@ package envresolve
 import (
 	"context"
 	"errors"
+	"os"
 	"testing"
 	"time"
 
@@ -179,6 +180,30 @@ func TestResolve_BarePrefixIsHostEnv(t *testing.T) {
 	}
 	if _, ok := got.Secrets["FOO"]; ok {
 		t.Errorf("host-env values must NOT be flagged secret")
+	}
+}
+
+func TestResolve_UnsetHostEnvIsAbsentNotEmpty(t *testing.T) {
+	t.Setenv("PRESENT_HOST_VAR", "set")
+	if err := os.Unsetenv("MISSING_HOST_VAR"); err != nil {
+		t.Fatal(err)
+	}
+	r := New(&fakeRegistry{}, secrets.Chain{}, nil)
+	consumer := newSpec("consumer", []task.EnvEntry{
+		{Name: "PRESENT", From: "PRESENT_HOST_VAR"},
+		{Name: "MISSING", From: "MISSING_HOST_VAR"},
+	})
+	got, err := r.Resolve(context.Background(), consumer)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if got.Env["PRESENT"] != "set" {
+		t.Errorf("PRESENT = %q, want %q", got.Env["PRESENT"], "set")
+	}
+	// An unset source must leave the entry absent, not injected as "".
+	// An explicit "" would defeat a task's `?? default` fallback.
+	if v, ok := got.Env["MISSING"]; ok {
+		t.Errorf("unset source injected %q; want absent", v)
 	}
 }
 

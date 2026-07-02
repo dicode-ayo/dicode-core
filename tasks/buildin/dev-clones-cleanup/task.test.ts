@@ -5,11 +5,11 @@
  *
  * Tests use real temp directories so Deno.readDir / Deno.remove are exercised
  * without mocking (--allow-all is passed by the make target). The
- * DICODE_DATA_DIR env var is intercepted via the sdk-test harness so task.ts
+ * DICODE_DATADIR env var is intercepted via the sdk-test harness so task.ts
  * picks up the test-specific tmpdir.
  *
- * The task constructs its root as ${DICODE_DATA_DIR}/dev-clones. Tests set
- * DICODE_DATA_DIR to a tmpdir that acts as the mock data-dir, then create
+ * The task constructs its root as ${DICODE_DATADIR}/dev-clones. Tests set
+ * DICODE_DATADIR to a tmpdir that acts as the mock data-dir, then create
  * the dev-clones sub-tree inside it.
  */
 import { setupHarness } from "../../sdk-test.ts";
@@ -43,7 +43,7 @@ async function listCloneDirs(dataDir: string): Promise<string[]> {
 }
 
 test("removes orphan clones, keeps active run", async () => {
-  // dataDir acts as the mock DICODE_DATA_DIR; the task appends /dev-clones.
+  // dataDir acts as the mock DICODE_DATADIR; the task appends /dev-clones.
   const dataDir = await Deno.makeTempDir({ prefix: "dc-cleanup-test-" });
   try {
     await makeCloneTree(dataDir, [
@@ -52,7 +52,7 @@ test("removes orphan clones, keeps active run", async () => {
       { source: "myrepo",  runID: "run-orphan-2" },
     ]);
 
-    env.set("DICODE_DATA_DIR", dataDir);
+    env.set("DICODE_DATADIR", dataDir);
 
     // Stub list_tasks: return a single task; get_runs returns runs for it.
     dicode.list_tasks = async () => [{ id: "my-task" }];
@@ -81,7 +81,7 @@ test("returns early with note when dev-clones dir does not exist", async () => {
   const dataDir = await Deno.makeTempDir({ prefix: "dc-cleanup-ne-" });
   // Do NOT create dev-clones under it — task should detect NotFound.
 
-  env.set("DICODE_DATA_DIR", dataDir);
+  env.set("DICODE_DATADIR", dataDir);
 
   dicode.list_tasks = async () => [{ id: "some-task" }];
   dicode.get_runs = async () => [];
@@ -106,7 +106,7 @@ test("swallows get_runs error for task deregistered between list and get", async
       { source: "s1", runID: "run-xyz" },
     ]);
 
-    env.set("DICODE_DATA_DIR", dataDir);
+    env.set("DICODE_DATADIR", dataDir);
 
     // list_tasks returns a task, but get_runs throws (task deregistered between calls).
     dicode.list_tasks = async () => [{ id: "disappearing-task" }];
@@ -132,7 +132,7 @@ test("non-directory entries under source dir are ignored", async () => {
     await Deno.writeTextFile(`${dataDir}/dev-clones/mysource/not-a-run.txt`, "stale file");
     await Deno.mkdir(`${dataDir}/dev-clones/mysource/real-run`, { recursive: true });
 
-    env.set("DICODE_DATA_DIR", dataDir);
+    env.set("DICODE_DATADIR", dataDir);
     dicode.list_tasks = async () => [{ id: "some-task" }];
     dicode.get_runs = async () => [];
 

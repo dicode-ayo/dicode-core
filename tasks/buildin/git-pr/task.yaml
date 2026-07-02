@@ -27,8 +27,7 @@ permissions:
   env:
     - name: GH_TOKEN
       from: GH_TOKEN_AUTOFIX
-    - name: DICODE_DATA_DIR
-      from: DICODE_DATA_DIR
+    - DICODE_DATADIR
     - HOME
   fs:
     - path: "${DATADIR}/dev-clones"

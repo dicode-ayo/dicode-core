@@ -1,5 +1,5 @@
 // Deletes orphaned task temp files from /tmp AND orphaned per-task
-// scratch directories from ${DICODE_DATA_DIR}/tmp/.
+// scratch directories from ${DATADIR}/tmp/.
 //
 // 1. /tmp file sweep — each dicode runtime writes its wrapper to a file
 //    named  dicode-<kind>-<runID>__<rand>.<ext>  (where <kind> is one
@@ -10,7 +10,7 @@
 //    runs. Files whose name does not match the expected shape are
 //    left alone.
 //
-// 2. ${DICODE_DATA_DIR}/tmp/<task>/<uuid>/ directory sweep — tasks like
+// 2. ${DATADIR}/tmp/<task>/<uuid>/ directory sweep — tasks like
 //    buildin/ai-agent-claude-cli mkdir a per-invocation workdir at
 //    ${DATADIR}/tmp/<task-name>/<uuid>/ and run a subprocess with cwd
 //    pointing there (the .claude/ project-local config goes inside).
@@ -65,35 +65,37 @@ async function collectRunningRunIDs(dicode: Dicode): Promise<Set<string>> {
 }
 
 // sweepDataDirTmp removes per-invocation scratch directories under
-// ${DICODE_DATA_DIR}/tmp/<task>/<uuid>/ that are older than DIR_TTL_MS.
+// ${DATADIR}/tmp/<task>/<uuid>/ that are older than DIR_TTL_MS.
 // Returns counters for logging.
 async function sweepDataDirTmp(): Promise<{ scanned: number; deleted: number; skipped: number }> {
-  const dataDir = Deno.env.get("DICODE_DATA_DIR") ??
+  // `||` (not `??`) so a declared-but-unset entry arriving as "" falls back
+  // rather than resolving root to "/tmp" and sweeping the whole system temp.
+  const dataDir = Deno.env.get("DICODE_DATADIR") ||
                   `${Deno.env.get("HOME") ?? "/root"}/.dicode`;
   const root = `${dataDir}/tmp`;
   const cutoff = Date.now() - DIR_TTL_MS;
   let scanned = 0, deleted = 0, skipped = 0;
 
-  let taskDirs: AsyncIterable<Deno.DirEntry>;
-  try {
-    taskDirs = Deno.readDir(root);
-  } catch (_) {
-    // Root doesn't exist yet (no tasks have created scratch dirs) —
-    // nothing to do, not an error.
-    return { scanned, deleted, skipped };
+  // Deno.readDir is lazy: NotFound (root absent) and PermissionDenied (an
+  // unreadable subtree) surface while iterating, not at the call, so a
+  // try/catch around the call alone lets them escape as an uncaught rejection.
+  // Drain eagerly inside the guard instead.
+  async function listDir(dir: string): Promise<Deno.DirEntry[]> {
+    const out: Deno.DirEntry[] = [];
+    try {
+      for await (const e of Deno.readDir(dir)) out.push(e);
+    } catch (e) {
+      if (!(e instanceof Deno.errors.NotFound)) {
+        console.warn("temp-cleanup: readDir", dir, String(e));
+      }
+    }
+    return out;
   }
 
-  for await (const taskEntry of taskDirs) {
+  for (const taskEntry of await listDir(root)) {
     if (!taskEntry.isDirectory) continue;
     const taskRoot = `${root}/${taskEntry.name}`;
-    let leaves: AsyncIterable<Deno.DirEntry>;
-    try {
-      leaves = Deno.readDir(taskRoot);
-    } catch (e) {
-      console.warn("temp-cleanup: readDir", taskRoot, String(e));
-      continue;
-    }
-    for await (const leaf of leaves) {
+    for (const leaf of await listDir(taskRoot)) {
       if (!leaf.isDirectory) continue;
       const path = `${taskRoot}/${leaf.name}`;
       scanned++;

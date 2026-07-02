@@ -35,7 +35,7 @@ export default async function main(opts: { params: Map<string, string> }) {
         return { ok: false, error: "clone_path is required; pass the path returned by dicode.sources.set_dev_mode" };
     }
 
-    const rawDataDir = Deno.env.get("DICODE_DATA_DIR");
+    const rawDataDir = Deno.env.get("DICODE_DATADIR");
     const home = Deno.env.get("HOME");
     // Normalize trailing slashes so the prefix check matches Go's filepath.Join output.
     const dataDir = rawDataDir
@@ -44,7 +44,7 @@ export default async function main(opts: { params: Map<string, string> }) {
             ? home.replace(/\/+$/, "") + "/.dicode"
             : null;
     if (!dataDir) {
-        return { ok: false, error: "DICODE_DATA_DIR or HOME must be set" };
+        return { ok: false, error: "DICODE_DATADIR or HOME must be set" };
     }
     const cloneRoot = `${dataDir}/dev-clones/${sourceID}`;
 
