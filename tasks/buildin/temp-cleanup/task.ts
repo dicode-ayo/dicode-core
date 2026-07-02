@@ -64,6 +64,23 @@ async function collectRunningRunIDs(dicode: Dicode): Promise<Set<string>> {
   return running;
 }
 
+// listDir eagerly drains Deno.readDir into an array. Deno.readDir is lazy:
+// NotFound (dir absent) and PermissionDenied (an unreadable subtree) surface
+// while iterating, not at the call, so draining inside a try/catch is the only
+// way to keep them from escaping as an uncaught rejection. NotFound is a normal
+// "nothing to sweep" signal and stays silent; other errors are logged.
+async function listDir(dir: string): Promise<Deno.DirEntry[]> {
+  const out: Deno.DirEntry[] = [];
+  try {
+    for await (const e of Deno.readDir(dir)) out.push(e);
+  } catch (e) {
+    if (!(e instanceof Deno.errors.NotFound)) {
+      console.warn("temp-cleanup: readDir", dir, String(e));
+    }
+  }
+  return out;
+}
+
 // sweepDataDirTmp removes per-invocation scratch directories under
 // ${DATADIR}/tmp/<task>/<uuid>/ that are older than DIR_TTL_MS.
 // Returns counters for logging.
@@ -75,22 +92,6 @@ async function sweepDataDirTmp(): Promise<{ scanned: number; deleted: number; sk
   const root = `${dataDir}/tmp`;
   const cutoff = Date.now() - DIR_TTL_MS;
   let scanned = 0, deleted = 0, skipped = 0;
-
-  // Deno.readDir is lazy: NotFound (root absent) and PermissionDenied (an
-  // unreadable subtree) surface while iterating, not at the call, so a
-  // try/catch around the call alone lets them escape as an uncaught rejection.
-  // Drain eagerly inside the guard instead.
-  async function listDir(dir: string): Promise<Deno.DirEntry[]> {
-    const out: Deno.DirEntry[] = [];
-    try {
-      for await (const e of Deno.readDir(dir)) out.push(e);
-    } catch (e) {
-      if (!(e instanceof Deno.errors.NotFound)) {
-        console.warn("temp-cleanup: readDir", dir, String(e));
-      }
-    }
-    return out;
-  }
 
   for (const taskEntry of await listDir(root)) {
     if (!taskEntry.isDirectory) continue;
@@ -129,7 +130,7 @@ export default async function main({ dicode }: DicodeSdk) {
   let deleted = 0;
   let skipped = 0;
 
-  for await (const entry of Deno.readDir(TEMP_DIR)) {
+  for (const entry of await listDir(TEMP_DIR)) {
     if (!entry.isFile) continue;
     const runID = parseRunID(entry.name);
     if (runID === null) continue;
