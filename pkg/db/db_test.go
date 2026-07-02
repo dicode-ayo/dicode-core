@@ -57,10 +57,12 @@ func TestOpen_UnknownType_ReturnsUnsupportedBackendError(t *testing.T) {
 
 func TestOpen_SQLite_DefaultAndExplicit(t *testing.T) {
 	for _, typ := range []string{"", "sqlite"} {
-		d, err := Open(Config{Type: typ, Path: ":memory:"})
-		if err != nil {
-			t.Fatalf("Open(Type:%q): %v", typ, err)
-		}
-		defer d.Close()
+		func() {
+			d, err := Open(Config{Type: typ, Path: ":memory:"})
+			if err != nil {
+				t.Fatalf("Open(Type:%q): %v", typ, err)
+			}
+			defer d.Close()
+		}()
 	}
 }
