@@ -21,7 +21,7 @@ echo "https://github.com/example/repo/pull/123"
     const cloneRoot = `${dataDir}/dev-clones/user-tasks`;
     const cloneDir = `${cloneRoot}/run-123`;
     await Deno.mkdir(cloneDir, { recursive: true });
-    Deno.env.set("DICODE_DATA_DIR", dataDir);
+    Deno.env.set("DICODE_DATADIR", dataDir);
 
     try {
         const result = await main({
@@ -43,7 +43,7 @@ echo "https://github.com/example/repo/pull/123"
 
 Deno.test("git-pr: rejects path-traversal source_id", async () => {
     Deno.env.set("GH_TOKEN", "stub-token");
-    Deno.env.set("DICODE_DATA_DIR", await Deno.makeTempDir());
+    Deno.env.set("DICODE_DATADIR", await Deno.makeTempDir());
     const result = await main({
         params: new Map(Object.entries({
             source_id: "../../etc",
@@ -61,7 +61,7 @@ Deno.test("git-pr: rejects path-traversal source_id", async () => {
 
 Deno.test("git-pr: refuses to run without GH_TOKEN", async () => {
     Deno.env.delete("GH_TOKEN");
-    Deno.env.set("DICODE_DATA_DIR", await Deno.makeTempDir());
+    Deno.env.set("DICODE_DATADIR", await Deno.makeTempDir());
     const result = await main({
         params: new Map(Object.entries({
             source_id: "user-tasks",
@@ -80,7 +80,7 @@ Deno.test("git-pr: refuses to run without GH_TOKEN", async () => {
 Deno.test("git-pr: rejects clone_path outside dev-clones", async () => {
     Deno.env.set("GH_TOKEN", "stub-token");
     const dataDir = await Deno.makeTempDir();
-    Deno.env.set("DICODE_DATA_DIR", dataDir);
+    Deno.env.set("DICODE_DATADIR", dataDir);
     const result = await main({
         params: new Map(Object.entries({
             source_id: "user-tasks",
@@ -113,7 +113,7 @@ exit 1
     const cloneRoot = `${dataDir}/dev-clones/user-tasks`;
     const cloneDir = `${cloneRoot}/run-456`;
     await Deno.mkdir(cloneDir, { recursive: true });
-    Deno.env.set("DICODE_DATA_DIR", dataDir);
+    Deno.env.set("DICODE_DATADIR", dataDir);
 
     try {
         const result = await main({
@@ -130,7 +130,7 @@ exit 1
 
 Deno.test("git-pr: hard-fails when clone_path is omitted", async () => {
     Deno.env.set("GH_TOKEN", "stub-token");
-    Deno.env.set("DICODE_DATA_DIR", await Deno.makeTempDir());
+    Deno.env.set("DICODE_DATADIR", await Deno.makeTempDir());
     const result = await main({
         params: new Map(Object.entries({
             source_id: "user-tasks",

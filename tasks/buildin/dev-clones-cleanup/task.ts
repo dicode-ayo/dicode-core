@@ -6,10 +6,8 @@
 // layout are left alone.
 //
 // Path resolution (in preference order):
-//   1. DICODE_DATA_DIR env var (injected via permissions.env; covers Docker
-//      deployments with a non-default data_dir)
-//   2. params.dev_clones_root (defaults to ${HOME}/.dicode/dev-clones at
-//      load time via the built-in HOME template variable)
+//   1. DICODE_DATADIR env var (the resolved data_dir the daemon exports)
+//   2. params.dev_clones_root (defaults to ${DATADIR}/dev-clones at load time)
 
 interface Run {
   ID: string;
@@ -35,15 +33,15 @@ async function collectActiveRunIDs(dicode: Dicode): Promise<Set<string>> {
 }
 
 export default async function main({ params, dicode }: DicodeSdk): Promise<unknown> {
-  // Prefer the DICODE_DATA_DIR env var (set in Docker / explicit deploys) so we
-  // always operate on the actual data directory regardless of the ~/.dicode default.
-  const dataEnv = Deno.env.get("DICODE_DATA_DIR");
+  // The daemon exports the resolved data dir as DICODE_DATADIR, so we always
+  // operate on the actual data directory regardless of the ~/.dicode default.
+  const dataEnv = Deno.env.get("DICODE_DATADIR");
   const root = dataEnv
     ? `${dataEnv}/dev-clones`
     : (await params.get("dev_clones_root")) ?? "";
 
   if (!root) {
-    dicode.log?.error?.("could not determine dev-clones root — DICODE_DATA_DIR unset and dev_clones_root param empty");
+    dicode.log?.error?.("could not determine dev-clones root — DICODE_DATADIR unset and dev_clones_root param empty");
     return { ok: false, error: "dev_clones_root unset" };
   }
 

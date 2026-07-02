@@ -124,8 +124,15 @@ func (r *Resolver) Resolve(ctx context.Context, spec *task.Spec) (*Resolved, err
 				optional:  e.Optional,
 			})
 		case task.FromKindEnv:
+			// Inject only when the source var is actually set. os.Getenv
+			// returns "" for an unset var, and an explicitly-empty value
+			// defeats a task's own `?? default` fallback (JS/TS `??` triggers
+			// on null/undefined, not ""). Leaving it absent — as the bare
+			// passthrough in SubprocessEnv does — lets the fallback apply.
 			if target != "" {
-				out.Env[e.Name] = os.Getenv(target)
+				if v, ok := os.LookupEnv(target); ok {
+					out.Env[e.Name] = v
+				}
 			}
 			// fully bare → no injection (allowlist only); leave unset.
 		}

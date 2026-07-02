@@ -26,8 +26,7 @@ permissions:
     - path: "${DATADIR}/tmp"
       permission: rw
   env:
-    - name: DICODE_DATA_DIR
-      from: DICODE_DATA_DIR
+    - DICODE_DATADIR
     - HOME
   dicode:
     list_tasks: true

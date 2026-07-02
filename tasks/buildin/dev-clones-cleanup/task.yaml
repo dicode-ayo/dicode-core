@@ -15,36 +15,22 @@ trigger:
 params:
   dev_clones_root:
     type: string
-    # ${HOME} is a built-in template variable expanded at spec-load time.
-    # task.ts also reads DICODE_DATA_DIR (injected via permissions.env) and
-    # prefers it over this default — Docker deployments (ENV DICODE_DATA_DIR=/data)
-    # therefore use the correct path without any configuration.
-    default: "${HOME}/.dicode/dev-clones"
+    # task.ts prefers the DICODE_DATADIR env var over this default; this only
+    # applies when the var is somehow absent.
+    default: "${DATADIR}/dev-clones"
     description: >
       Root directory containing per-fix clone dirs
-      (layout: <root>/<sourceName>/<runID>/). Defaults to the standard
-      ~/.dicode/dev-clones location. Override if your daemon uses a
-      non-standard data_dir and DICODE_DATA_DIR is not set in the env.
+      (layout: <root>/<sourceName>/<runID>/). Defaults to the resolved
+      data_dir's dev-clones location.
 
 permissions:
   fs:
-    # Cover the default ~/.dicode/dev-clones path. The ${HOME} variable is
-    # always expanded at load time.
-    - path: "${HOME}/.dicode/dev-clones"
-      permission: rw
-    # Also cover ${DICODE_DATA_DIR}/dev-clones for non-default data-dir
-    # deployments (e.g. Docker with ENV DICODE_DATA_DIR=/data). This entry
-    # expands via envFallback at load time; if DICODE_DATA_DIR is unset in
-    # the daemon process it stays literal and acts as a harmless no-op.
-    - path: "${DICODE_DATA_DIR}/dev-clones"
+    # ${DATADIR} expands at load time to the resolved data_dir, covering both
+    # the default ~/.dicode and non-standard / Docker deployments.
+    - path: "${DATADIR}/dev-clones"
       permission: rw
   env:
-    # Inject DICODE_DATA_DIR so task.ts can compute the correct root path
-    # regardless of the compiled-in default. Value is the daemon process's
-    # DICODE_DATA_DIR env var; empty string if not set (task.ts falls back
-    # to the params.dev_clones_root default).
-    - name: DICODE_DATA_DIR
-      from: DICODE_DATA_DIR
+    - DICODE_DATADIR
   dicode:
     list_tasks: true
     get_runs: true
