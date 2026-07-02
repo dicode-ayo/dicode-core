@@ -98,6 +98,16 @@ test-tasks:
 	@test -n "$(DENO)" || { echo "deno not found — install or run dicode daemon once to bootstrap"; exit 1; }
 	$(DENO) test --allow-all --config=tasks/deno.json 'tasks/buildin/**/task.test.ts'
 
+## deno-lock: regenerate tasks/deno.lock across all buildin task.ts entrypoints
+deno-lock:
+	@test -n "$(DENO)" || { echo "deno not found — install or run dicode daemon once to bootstrap"; exit 1; }
+	$(DENO) cache --frozen=false --lock=tasks/deno.lock --config=tasks/deno.json $$(find tasks/buildin -name task.ts)
+
+## deno-lock-check: verify tasks/deno.lock is current without mutating it (used in CI)
+deno-lock-check:
+	@test -n "$(DENO)" || { echo "deno not found — install or run dicode daemon once to bootstrap"; exit 1; }
+	$(DENO) cache --frozen --lock=tasks/deno.lock --config=tasks/deno.json $$(find tasks/buildin -name task.ts)
+
 ## dev-relay-config: render a minimal local relay.yaml (no Doppler) for dev — see issue #459
 dev-relay-config:
 	@bash scripts/dev-relay-config.sh $(RELAY_ARGS)

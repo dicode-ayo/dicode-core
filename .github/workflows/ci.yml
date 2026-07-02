@@ -49,6 +49,8 @@ jobs:
       - uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x
+      - name: Verify tasks/deno.lock is up to date
+        run: make deno-lock-check
       - name: Run Deno tests for tasks/buildin/*
         run: deno test --allow-all --config=tasks/deno.json 'tasks/buildin/**/task.test.ts'
 
