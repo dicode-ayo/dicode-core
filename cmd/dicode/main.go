@@ -39,6 +39,7 @@ import (
 
 	"github.com/dicode/dicode/pkg/daemon"
 	"github.com/dicode/dicode/pkg/ipc"
+	"github.com/dicode/dicode/pkg/tasktest"
 )
 
 var version = "dev"
@@ -476,9 +477,9 @@ func cmdTask(c *ipc.ControlClient, args []string) error {
 	switch args[0] {
 	case "test":
 		if len(args) < 2 {
-			return fmt.Errorf("usage: dicode task test <task-id>")
+			return fmt.Errorf("usage: dicode task test <task-id> [--format=text|junit|gh-summary]")
 		}
-		return cmdTaskTest(c, args[1])
+		return cmdTaskTest(c, args[1:])
 	case "create":
 		return cmdTaskCreate(c, args[1:])
 	case "edit":
@@ -519,21 +520,49 @@ func cmdTaskApprove(c *ipc.ControlClient, args []string) error {
 	return nil
 }
 
-func cmdTaskTest(c *ipc.ControlClient, taskID string) error {
+func cmdTaskTest(c *ipc.ControlClient, args []string) error {
+	format := "text"
+	var taskID string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--format":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--format requires a value")
+			}
+			format = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--format="):
+			format = strings.TrimPrefix(a, "--format=")
+		case a == "--help" || a == "-h":
+			fmt.Fprintln(os.Stderr, "Usage: dicode task test <task-id> [--format=text|junit|gh-summary]")
+			return nil
+		default:
+			if taskID == "" {
+				taskID = a
+			}
+		}
+	}
+	if taskID == "" {
+		return fmt.Errorf("usage: dicode task test <task-id> [--format=text|junit|gh-summary]")
+	}
+
+	switch format {
+	case "text", "junit", "gh-summary":
+	default:
+		return fmt.Errorf("unknown --format %q: must be text, junit, or gh-summary", format)
+	}
+
 	resp, err := c.Send(ipc.Request{Method: "cli.task.test", TaskID: taskID})
 	if err != nil {
 		return err
 	}
 
-	// The daemon returns a populated Result AND sometimes a non-empty
-	// resp.Error (e.g. failing tests produce real output but the handler
-	// flags them). Prefer the structured payload when we have one; fall
-	// back to the error string when we don't.
 	var r ipc.TaskTestResult
 	hasPayload := false
 	if resp.Result != nil {
 		if rerr := remarshal(resp.Result, &r); rerr == nil {
-			hasPayload = r.Output != "" || r.Failed > 0 || r.Passed > 0
+			hasPayload = r.Output != "" || r.Failed > 0 || r.Passed > 0 || r.Skipped > 0
 		}
 	}
 	if !hasPayload {
@@ -543,19 +572,67 @@ func cmdTaskTest(c *ipc.ControlClient, taskID string) error {
 		return nil
 	}
 
-	fmt.Print(r.Output)
-	if !strings.HasSuffix(r.Output, "\n") {
-		fmt.Println()
+	result := tasktest.Result{
+		TaskID:   r.TaskID,
+		Runtime:  r.Runtime,
+		Passed:   r.Passed,
+		Failed:   r.Failed,
+		Skipped:  r.Skipped,
+		Duration: time.Duration(r.DurMs) * time.Millisecond,
+		ExitCode: r.ExitCode,
+		Output:   r.Output,
 	}
-	fmt.Printf("%s: %d passed, %d failed", r.TaskID, r.Passed, r.Failed)
-	if r.Skipped > 0 {
-		fmt.Printf(", %d skipped", r.Skipped)
+
+	switch format {
+	case "junit":
+		// JUnit XML → stdout; human-readable → stderr so CI logs stay readable.
+		fmt.Fprint(os.Stderr, r.Output)
+		if !strings.HasSuffix(r.Output, "\n") {
+			fmt.Fprintln(os.Stderr)
+		}
+		if r.Error != "" {
+			fmt.Fprintf(os.Stderr, "error: %s\n", r.Error)
+		}
+		fmt.Fprintf(os.Stderr, "%s: %d passed, %d failed (runtime=%s, %dms)\n",
+			r.TaskID, r.Passed, r.Failed, r.Runtime, r.DurMs)
+		fmt.Print(tasktest.FormatJUnit(result))
+		writeGHStepSummary(tasktest.FormatGHSummary(result))
+	case "gh-summary":
+		summary := tasktest.FormatGHSummary(result)
+		fmt.Print(summary)
+		writeGHStepSummary(summary)
+		if r.Error != "" {
+			fmt.Fprintf(os.Stderr, "error: %s\n", r.Error)
+		}
+	default: // "text"
+		fmt.Print(r.Output)
+		if !strings.HasSuffix(r.Output, "\n") {
+			fmt.Println()
+		}
+		fmt.Printf("%s: %d passed, %d failed", r.TaskID, r.Passed, r.Failed)
+		if r.Skipped > 0 {
+			fmt.Printf(", %d skipped", r.Skipped)
+		}
+		fmt.Printf(" (runtime=%s, %dms)\n", r.Runtime, r.DurMs)
 	}
-	fmt.Printf(" (runtime=%s, %dms)\n", r.Runtime, r.DurMs)
+
 	if r.Failed > 0 || r.ExitCode != 0 {
 		return fmt.Errorf("%d test(s) failed", r.Failed)
 	}
 	return nil
+}
+
+func writeGHStepSummary(markdown string) {
+	path := os.Getenv("GITHUB_STEP_SUMMARY")
+	if path == "" {
+		return
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return
+	}
+	_, _ = f.WriteString(markdown)
+	_ = f.Close()
 }
 
 // cmdTaskDelete implements `dicode task delete <task-id> [--source NAME] [--force]`.
@@ -1023,7 +1100,8 @@ Commands:
   status [task-id]                daemon health or task's latest run
   ai <prompt> [flags]             run the configured AI task with a prompt
                                   flags: --session-id ID, --task TASK_ID
-  task test <task-id>             run the task's sibling task.test.* through its runtime
+  task test <task-id> [flags]     run the task's sibling task.test.* through its runtime
+                                  flags: --format=text|junit|gh-summary
   task delete <task-id> [flags]   remove a task from its source (local rm / git PR)
                                   flags: --source NAME, --force
   task approve <task-id>          approve a task held pending by the approval gate

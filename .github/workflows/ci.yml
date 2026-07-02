@@ -52,6 +52,88 @@ jobs:
       - name: Run Deno tests for tasks/buildin/*
         run: deno test --allow-all --config=tasks/deno.json 'tasks/buildin/**/task.test.ts'
 
+  test-tasks-cli:
+    name: Test buildin tasks (dicode CLI)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      DICODE_DATA_DIR: /tmp/dicode-ci
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Build dicode binary
+        run: go build -o dicode ./cmd/dicode
+
+      - name: Start daemon and run task tests
+        run: |
+          set -euo pipefail
+          mkdir -p "$DICODE_DATA_DIR"
+
+          # Assemble the CI config: base file + spec entry that needs the
+          # absolute workspace path (${CONFIGDIR} won't reach tasks/ from ci/).
+          cat ci/dicode-tasktest.yaml > "$DICODE_DATA_DIR/dicode-ci.yaml"
+          cat >> "$DICODE_DATA_DIR/dicode-ci.yaml" <<SPECEOF
+          data_dir: $DICODE_DATA_DIR
+          spec:
+            entries:
+              buildin:
+                ref:
+                  path: $GITHUB_WORKSPACE/tasks/buildin/taskset.yaml
+                  watch: false
+          SPECEOF
+
+          ./dicode daemon --config "$DICODE_DATA_DIR/dicode-ci.yaml" \
+            > "$DICODE_DATA_DIR/daemon.log" 2>&1 &
+          DAEMON_PID=$!
+          trap "kill $DAEMON_PID 2>/dev/null || true" EXIT
+
+          # Wait for IPC socket readiness (max 30 s, 0.5 s poll).
+          # Poll the socket, not HTTP — the CLI communicates via IPC and we
+          # need that path ready before invoking `dicode task test`.
+          for i in $(seq 1 60); do
+            test -S "$DICODE_DATA_DIR/daemon.sock" && break
+            if [ "$i" -eq 60 ]; then
+              echo "Daemon did not become ready in 30 s"
+              echo "=== daemon log ==="
+              cat "$DICODE_DATA_DIR/daemon.log"
+              exit 1
+            fi
+            sleep 0.5
+          done
+
+          ./dicode task test buildin/webui --format=junit \
+            > "$RUNNER_TEMP/buildin-webui.xml"
+
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: task-test-results
+          path: ${{ runner.temp }}/buildin-webui.xml
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Upload daemon log on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: daemon-log
+          path: ${{ env.DICODE_DATA_DIR }}/daemon.log
+          retention-days: 3
+
   lint:
     name: Lint
     runs-on: ubuntu-latest

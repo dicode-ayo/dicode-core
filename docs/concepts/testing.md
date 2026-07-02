@@ -1,14 +1,19 @@
 # Testing & Validation
 
-> **Status**: This document describes the **planned** testing and validation system. The test harness (`pkg/testing/`), CLI commands (`dicode task validate`, `dicode task test`, `dicode task run --dry-run`, `dicode ci init`), and mock API are not yet implemented. This serves as the design spec for future development.
+> **Status**: This document describes the testing and validation system. Layer 2
+> (`dicode task test`) is implemented for the Deno runtime (`pkg/tasktest`).
+> Layer 1 (`dicode task validate`), Layer 3 (`dicode task run --dry-run`), and
+> `dicode ci init` remain planned. The mock API described under Layer 2 is the
+> long-term design; the current implementation runs Deno's built-in test runner
+> against `task.test.ts` files and parses its summary output.
 
 Dicode is designed with four validation layers, each catching different classes of problems.
 
-```
+```text
 Layer 1: Static validation     — schema + syntax, zero execution, instant        [planned]
-Layer 2: Unit tests            — mocked globals, full task run, local             [planned]
+Layer 2: Unit tests            — mocked globals, full task run, local             [implemented: Deno]
 Layer 3: Dry run               — real secrets, intercepted HTTP, no side effects  [planned]
-Layer 4: CI guardrails         — layers 1+2 on every push, offline-safe           [planned]
+Layer 4: CI guardrails         — layers 1+2 on every push, offline-safe           [partial: see CI job below]
 ```
 
 ---
@@ -41,11 +46,42 @@ Checks performed without executing any code:
 
 ```bash
 dicode task test <id>
+dicode task test <id> --format=junit        # JUnit XML to stdout; human output to stderr
+dicode task test <id> --format=gh-summary   # GitHub Markdown to stdout + $GITHUB_STEP_SUMMARY
 dicode task test --all
-dicode task test <id> --watch   # re-run on file save
+dicode task test <id> --watch   # re-run on file save (planned)
 ```
 
-Runs `task.test.js` with mocked globals. No real HTTP calls, no real secrets, no database side effects.
+Runs `task.test.ts` (Deno runtime) through the Deno test runner. The current
+implementation captures aggregate passed/failed/skipped counts from Deno's
+summary line.
+
+### Output formats
+
+| Flag | stdout | $GITHUB_STEP_SUMMARY |
+|---|---|---|
+| `--format=text` (default) | Human-readable | not written |
+| `--format=junit` | JUnit XML | written if env var is set |
+| `--format=gh-summary` | GitHub Markdown | written if env var is set |
+
+When `--format=junit` is used, human-readable output goes to stderr so CI logs
+remain readable alongside the machine-readable XML.
+
+### CI job: `test-tasks-cli`
+
+The `.github/workflows/ci.yml` job `test-tasks-cli` boots the dicode daemon
+against the built-in task set (using `ci/dicode-tasktest.yaml`) and runs:
+
+```bash
+./dicode task test buildin/webui --format=junit
+```
+
+The resulting JUnit XML is uploaded as a workflow artifact. The daemon log is
+uploaded on failure for post-mortem inspection.
+
+The long-term design (mocked globals, `http.mock`, `runTask()`, etc.) remains
+the target for future layers. The current implementation uses Deno's native
+`Deno.test` runner and parses its output.
 
 ### Test file format
 
