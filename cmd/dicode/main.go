@@ -55,6 +55,17 @@ func main() {
 		return
 	}
 
+	// `deno` is a local dev/CI helper (relock/verify a task lockfile via the
+	// pinned Deno). It touches only files + the provisioned Deno toolchain, so
+	// it runs without the daemon — handle it before ensureDaemon.
+	if os.Args[1] == "deno" {
+		if err := cmdDeno(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "dicode: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	// The daemon subcommand runs the full engine in-process.
 	// It must be handled before ensureDaemon — the daemon IS the daemon.
 	if os.Args[1] == "daemon" {
@@ -1105,6 +1116,7 @@ Commands:
   task delete <task-id> [flags]   remove a task from its source (local rm / git PR)
                                   flags: --source NAME, --force
   task approve <task-id>          approve a task held pending by the approval gate
+  deno relock [--check] [dir]     regenerate/verify a task tree's deno.lock via the pinned Deno
   secrets list                    list secret keys
   secrets set <key> <value>       store a secret
   secrets delete <key>            delete a secret
