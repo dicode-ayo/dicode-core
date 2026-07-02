@@ -1,0 +1,163 @@
+# dicode.lock — approval records, managed by the dicode daemon.
+# Trust policy lives in dicode.yaml (approval:); this file records which
+# content hash of each task is approved to run.
+version: 3
+mac: 6eefb06e8018419e654be6903dcea9d0a574b433c445ac08d66d782b5c5bc4d5
+bootstrapped: true
+tasks:
+    auth/openrouter-oauth:
+        hash: 501b2cd05ce778b468903ddcc05a32c9bedcc1676802be9e5bcda63f96915f0c
+        approved_at: 2026-07-02T09:07:15.281541237Z
+        approved_by: bootstrap
+    buildin/ai-agent:
+        hash: 85bc019ac2e40c59f577c7d6c9c19cd4b83f69374093d80e1e9b4b6dc572cd7c
+        approved_at: 2026-07-02T09:07:15.394961092Z
+        approved_by: builtin
+    buildin/ai-agent-claude-cli:
+        hash: 0cf6871e66eff500e305d4b9f21ee70c18124f04fb016db0040a968d5ebd87f6
+        approved_at: 2026-07-02T09:07:15.359919297Z
+        approved_by: builtin
+    buildin/alert:
+        hash: 6822b5eca7553e99527e45b6ff690e4051b814fc50977b542d89822729640606
+        approved_at: 2026-07-02T09:07:15.33118597Z
+        approved_by: builtin
+    buildin/audit-export-loki:
+        hash: c3d123758ca468ca05471c83e0c99ccc4787924cd38ac6dd03c4fb3d7c7ef173
+        approved_at: 2026-07-02T09:07:15.360436473Z
+        approved_by: builtin
+    buildin/auth-providers:
+        hash: 5c1262965c415909231eab1ba7445539470bd69de3ac0a2848b1aee5e2ebcdfb
+        approved_at: 2026-07-02T09:07:15.333250214Z
+        approved_by: builtin
+    buildin/auth-relay:
+        hash: 9faa69c18f1c59dd8153184b80a2ee309456b4b4e5bc45f6a47b55039b851b70
+        approved_at: 2026-07-02T09:07:15.332651577Z
+        approved_by: builtin
+    buildin/auth-start:
+        hash: 9bf4887696e075cdcd127ba783955bec76ac588b717d1912c9f4059b6357a3e6
+        approved_at: 2026-07-02T09:07:15.394045781Z
+        approved_by: builtin
+    buildin/auto-fix:
+        hash: 1061e6f20078df67d0e6dc4ef0ddb2cc252b0b20fd19ca3c3b4a3cb68a583af3
+        approved_at: 2026-07-02T09:07:15.33226987Z
+        approved_by: builtin
+    buildin/blob-storage:
+        hash: 692a3b22df0b1b158b46a41685ee15e1a3aaf46239e74765a7e095be2b0636b7
+        approved_at: 2026-07-02T09:07:15.333663644Z
+        approved_by: builtin
+    buildin/dev-clones-cleanup:
+        hash: da558d3b377be377bebbd099eed72d01fe617bfa934fa931d7742d6d1be95bdc
+        approved_at: 2026-07-02T10:41:49.651880632Z
+        approved_by: builtin
+    buildin/dicodai:
+        hash: 2ba64e4086a88876cf538999d50d38b0d267c1c9c557748ab2bd679b0da9ad93
+        approved_at: 2026-07-02T09:07:15.330145022Z
+        approved_by: builtin
+    buildin/git-pr:
+        hash: aee1e0a2f09d5558015a42d93c2dc3800ee9795e1394e8d1a306b247455924b1
+        approved_at: 2026-07-02T10:42:25.884439851Z
+        approved_by: builtin
+    buildin/local-storage:
+        hash: d4583cb13a63fa26f58a2d384e33714559805f213d65e44bc6c7e74068db4474
+        approved_at: 2026-07-02T09:07:15.394465401Z
+        approved_by: builtin
+    buildin/mcp:
+        hash: 18bd9229c1e236415385b7db588884589e9fb37ed3ec71ee7139dacb2e26c8ea
+        approved_at: 2026-07-02T09:07:15.331488403Z
+        approved_by: builtin
+    buildin/notifications:
+        hash: 138d62bc2002a3da8315701d18df4e09bf99927a546b27c5f220ffe652d2c3e1
+        approved_at: 2026-07-02T09:07:15.331877009Z
+        approved_by: builtin
+    buildin/relay-client:
+        hash: 5751ad01d3518e0d51d4af993686ff6858183ed69ed962078bf0dd523cd8b97d
+        approved_at: 2026-07-02T09:07:15.334021158Z
+        approved_by: builtin
+    buildin/relay-server:
+        hash: 4aecc918a09df6991bc6b38aabe76aad68b6248ca990d5bdf82582fb2b5e93e6
+        approved_at: 2026-07-02T09:07:15.330844959Z
+        approved_by: builtin
+    buildin/relay-server-body:
+        hash: 067f7d3aabf5bbc38c678ce163cfe98c48a7ef2cbf0615cc28bc9fd84298280c
+        approved_at: 2026-07-02T09:07:15.307239059Z
+        approved_by: builtin
+    buildin/run-inputs-cleanup:
+        hash: 94caa86483c009edd09249153b02469bd204ffa5f1d41b12d0c612a2693c76d4
+        approved_at: 2026-07-02T09:07:15.385113774Z
+        approved_by: builtin
+    buildin/secret-providers/doppler:
+        hash: db5df1c382f6aa407713f4338d56372ab883afbe5540bd9d3cf9420e3d494a28
+        approved_at: 2026-07-02T09:07:15.330530914Z
+        approved_by: builtin
+    buildin/temp-cleanup:
+        hash: 79d510c850e5c5d94efcea2d07f351f03aec32a9484df35917e33ac86495196b
+        approved_at: 2026-07-02T10:16:26.444857551Z
+        approved_by: builtin
+    buildin/tray:
+        hash: c10e8a6502f508a06719578b7620dd24a59431ffc8cce2f3c2c98c64c8e1962e
+        approved_at: 2026-07-02T09:07:15.368908107Z
+        approved_by: builtin
+    buildin/webui:
+        hash: 19cc481b2df27573f7f21efbfc4a380a0c5c4523e7e25fb8837ec9879c65a62b
+        approved_at: 2026-07-02T09:07:15.393563015Z
+        approved_by: builtin
+    examples/ai-agent-groq:
+        hash: df4833976e96834b32a98b29255dce4f9db5586adedf42c8c4bc01e182ca75f4
+        approved_at: 2026-07-02T09:07:15.290345575Z
+        approved_by: bootstrap
+    examples/ai-agent-ollama:
+        hash: 339521980349d9aa0824ec22a77a9af971e7c1e694a62b8158d43aef39a46874
+        approved_at: 2026-07-02T09:07:15.282779846Z
+        approved_by: bootstrap
+    examples/ai-agent-openai:
+        hash: 16cc21b04c0a5cd4520e9b9a00a0944fe41c80274543674f39e829a2472fa572
+        approved_at: 2026-07-02T09:07:15.283016285Z
+        approved_by: bootstrap
+    examples/ai-agent-openrouter:
+        hash: 931bf4c3f5f5bce8b27ec0d0a3929dc8b46957897245a4a3fc878f5046d382b3
+        approved_at: 2026-07-02T09:07:15.281839797Z
+        approved_by: bootstrap
+    examples/github-push-webhook:
+        hash: 042d5cb37ab5326b9c47391dd4c1061a2000ac6ecf8c8db32f6cc3c669977f0d
+        approved_at: 2026-07-02T09:07:15.282367242Z
+        approved_by: bootstrap
+    examples/github-stars:
+        hash: ecc1c17a1e1599d029daec1cb11da7511c22c21db053ecb7bbf15a11184c9e25
+        approved_at: 2026-07-02T09:07:15.306185076Z
+        approved_by: bootstrap
+    examples/github-stars-hook:
+        hash: f7642f5b1dcf20d04516533389480116a7581e6d6d99065c2eda561c66eae78b
+        approved_at: 2026-07-02T09:07:15.306874824Z
+        approved_by: bootstrap
+    examples/hello-cron:
+        hash: aeeda0e9ea19b87ed5800412b5dbdd740bd65c1a853ac0ff071f60006f75a413
+        approved_at: 2026-07-02T09:07:15.283189634Z
+        approved_by: bootstrap
+    examples/hello-docker:
+        hash: 80b161052b274be2633570162d6f1feadd1b7a0794630104716da13372bd2d74
+        approved_at: 2026-07-02T09:07:15.282053725Z
+        approved_by: bootstrap
+    examples/hello-podman:
+        hash: f72dee3de203ee4328fd8329ffdd0eeb1ec2d3713b5cac713ce5680cafaf9f33
+        approved_at: 2026-07-02T09:07:15.291108428Z
+        approved_by: bootstrap
+    examples/hello-python:
+        hash: 4f068e33e591e315cbf752822a0c2f56531764d810a45df936e1d762765e083b
+        approved_at: 2026-07-02T09:07:15.291407461Z
+        approved_by: bootstrap
+    examples/hello-webhook:
+        hash: bb9a75f383f35911720b7e1235aff9a29dec0c09686b8639ecea13b23bc98662
+        approved_at: 2026-07-02T09:07:15.28252865Z
+        approved_by: bootstrap
+    examples/nginx-start:
+        hash: 3b1f3671c37296df1a04c421ab75cf78d2fbccdf9c5afc579497a22126d830d0
+        approved_at: 2026-07-02T09:07:15.291692639Z
+        approved_by: bootstrap
+    examples/webhook-dashboard:
+        hash: 17581bd70138220edfef57e04df50cfbfbafaf66c7cade7d2322c143b748cfa8
+        approved_at: 2026-07-02T09:07:15.29079005Z
+        approved_by: bootstrap
+    examples/webhook-form:
+        hash: dc129c812154c28551913cc63ed6a9bc861c06a766bf903e86ac8509a2edfebd
+        approved_at: 2026-07-02T09:07:15.282221072Z
+        approved_by: bootstrap
