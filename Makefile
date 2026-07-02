@@ -98,6 +98,10 @@ test-tasks:
 	@test -n "$(DENO)" || { echo "deno not found — install or run dicode daemon once to bootstrap"; exit 1; }
 	$(DENO) test --allow-all --config=tasks/deno.json 'tasks/buildin/**/task.test.ts'
 
+## dev-relay-config: render a minimal local relay.yaml (no Doppler) for dev — see issue #459
+dev-relay-config:
+	@bash scripts/dev-relay-config.sh $(RELAY_ARGS)
+
 ## proto-tools: install buf + protoc-gen-go (idempotent, needed by `make proto`)
 proto-tools:
 	$(GO) install github.com/bufbuild/buf/cmd/buf@latest
