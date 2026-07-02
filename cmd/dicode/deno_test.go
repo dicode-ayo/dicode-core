@@ -13,7 +13,7 @@ func TestFindTaskEntrypoints(t *testing.T) {
 	mustWrite(t, filepath.Join(root, "a", "task.ts"), "")
 	mustWrite(t, filepath.Join(root, "b", "nested", "task.ts"), "")
 	mustWrite(t, filepath.Join(root, "b", "task.test.ts"), "") // not an entrypoint
-	mustWrite(t, filepath.Join(root, "c", "task.py"), "")       // other runtime
+	mustWrite(t, filepath.Join(root, "c", "task.py"), "")      // other runtime
 
 	got, err := findTaskEntrypoints(root)
 	if err != nil {
