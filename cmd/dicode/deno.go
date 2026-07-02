@@ -99,7 +99,11 @@ func cmdDenoRelock(args []string) error {
 	cmd.Stderr = os.Stderr
 	if runErr := cmd.Run(); runErr != nil {
 		if check {
-			return fmt.Errorf("%s is out of date — run `dicode deno relock %s` to update it", lockPath, dir)
+			// deno prints the cause above — a lockfile diff if the lock is
+			// stale, otherwise a dependency/config/type error. Don't assert
+			// staleness; surface both so a non-lock failure isn't mistaken for
+			// drift.
+			return fmt.Errorf("deno cache --frozen failed (see output above); if %s is stale, run `dicode deno relock %s`: %w", lockPath, dir, runErr)
 		}
 		return fmt.Errorf("deno cache: %w", runErr)
 	}
