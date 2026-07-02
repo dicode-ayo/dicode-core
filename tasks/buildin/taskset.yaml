@@ -114,6 +114,10 @@ spec:
       ref:
         path: ./local-storage/task.yaml
 
+    blob-storage:
+      ref:
+        path: ./blob-storage/task.yaml
+
     # ─── relay-client: WebSocket tunnel daemon task ──────────────────────────
     # Maintains the persistent WSS connection to the relay broker so the daemon
     # can receive webhooks without a public port. Only active when relay.enabled
