@@ -1602,8 +1602,7 @@ dicode/
 │   ├── mcp/            # MCP server (JSON-RPC 2.0) + MCP client for daemon tasks
 │   ├── tray/           # system tray icon (fyne.io/systray)
 │   ├── onboarding/     # first-run config generation
-│   ├── webui/          # HTTP server, REST API, auth, WebSocket hub
-│   └── service/        # OS service management (interface defined, impls planned)
+│   └── webui/          # HTTP server, REST API, auth, WebSocket hub
 ├── tasks/
 │   ├── buildin/        # built-in tasks (webui, tray, alert, notifications, ai-agent, dicodai)
 │   ├── skills/         # shared markdown "skills" loaded into agent prompts (dicode-basics, dicode-task-dev)

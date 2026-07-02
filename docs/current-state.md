@@ -98,10 +98,9 @@ WebSocket relay client and self-hosting server for receiving webhooks behind NAT
 
 - `metrics.go` — `Collector` struct: exposes `GET /api/metrics` endpoint with active task count, memory usage (RSS), CPU percentage, goroutine count. Updated on each run start/finish via `Inc()`/`Dec()` on the active counter.
 
-### `pkg/service/` 🟡
+### `pkg/service/` 📄
 
-- `service.go` — `Manager` interface (Install, Uninstall, Start, Stop, Restart, Status, Logs)
-- Platform-specific implementations — **not yet created**
+- **Documented only — no code.** The `Manager` interface stub (Install, Uninstall, Start, Stop, Restart, Status, Logs) was removed as dead code (#388): it had no platform implementations and no CLI wiring (`dicode service ...` is not a real subcommand yet; see README.md's OS-service-management note). The design still lives in `docs/implementation-plan.md`.
 
 ### `pkg/db/` ✅
 
