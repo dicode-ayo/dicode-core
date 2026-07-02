@@ -19,15 +19,13 @@ import (
 
 // TestLogin_FormPost_BrowserOriginHeader pins two properties at once:
 //
-//  1. A same-origin form POST with a valid Origin header is accepted by the
-//     gorilla/csrf middleware (regression test for the playwright failure
-//     where Chrome sent Origin: null under Referrer-Policy: no-referrer, which
-//     gorilla rejected as "origin invalid").
+//  1. A same-origin form POST with a matching Origin header is accepted
+//     (the Origin-header check in validateOrigin passes when Origin == Host).
 //
 //  2. The login page's Referrer-Policy is not `no-referrer` — that header
-//     causes Chrome to strip the Origin header from form POSTs, breaking the
-//     real-browser login flow. `strict-origin-when-cross-origin` (or any
-//     same-origin-preserving policy) is required.
+//     causes Chrome to strip the Origin header from form POSTs, which would
+//     break the Origin-check CSRF defence. `strict-origin-when-cross-origin`
+//     (or any same-origin-preserving policy) is required.
 func TestLogin_FormPost_BrowserOriginHeader(t *testing.T) {
 	h := newBrowserTestHandler(t, "hunter2")
 
@@ -39,43 +37,21 @@ func TestLogin_FormPost_BrowserOriginHeader(t *testing.T) {
 		t.Fatalf("GET /login: expected 200, got %d", getW.Code)
 	}
 
-	// Regression guard: Referrer-Policy must NOT be `no-referrer` (Chrome sends
-	// Origin: null on form POSTs under that policy, which gorilla/csrf rejects).
+	// Regression guard: Referrer-Policy must NOT be `no-referrer` (Chrome omits
+	// the Origin header on form POSTs under that policy, breaking validateOrigin).
 	if rp := getW.Header().Get("Referrer-Policy"); rp == "no-referrer" {
-		t.Fatalf("Referrer-Policy must not be no-referrer (strips Origin header on POST, breaks CSRF sameOrigin check); got %q", rp)
+		t.Fatalf("Referrer-Policy must not be no-referrer (strips Origin header on POST, breaks Origin CSRF check); got %q", rp)
 	}
-
-	var csrfCookieVal string
-	for _, c := range getW.Result().Cookies() {
-		if c.Name == "dicode_csrf" {
-			csrfCookieVal = c.Value
-		}
-	}
-	if csrfCookieVal == "" {
-		t.Fatal("no dicode_csrf cookie on /login GET")
-	}
-
-	body := getW.Body.String()
-	const marker = `name="_csrf" value="`
-	i := strings.Index(body, marker)
-	if i < 0 {
-		t.Fatal("no _csrf field in rendered login form")
-	}
-	rest := body[i+len(marker):]
-	end := strings.Index(rest, `"`)
-	token := rest[:end]
 
 	form := url.Values{}
 	form.Set("password", "hunter2")
 	form.Set("next", "/hooks/webui")
-	form.Set("_csrf", token)
 
 	postReq := httptest.NewRequestWithContext(context.Background(), "POST", "http://localhost:8765/api/auth/login", strings.NewReader(form.Encode()))
 	postReq.Host = "localhost:8765"
 	postReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	postReq.Header.Set("Origin", "http://localhost:8765")
 	postReq.Header.Set("Referer", "http://localhost:8765/login")
-	postReq.AddCookie(&http.Cookie{Name: "dicode_csrf", Value: csrfCookieVal})
 
 	postW := httptest.NewRecorder()
 	h.ServeHTTP(postW, postReq)
@@ -84,40 +60,19 @@ func TestLogin_FormPost_BrowserOriginHeader(t *testing.T) {
 	}
 }
 
-// TestLogin_FormPost_OriginNull verifies that Origin: null is rejected. This
-// is the correct security posture — if the browser is sending an anonymised
-// Origin, the same-origin property cannot be established and the request
-// should be refused rather than accepted.
+// TestLogin_FormPost_OriginNull verifies that Origin: null is rejected with 403.
+// Browsers send this anonymised origin in sandboxed contexts (data URIs, etc.);
+// since the same-origin property cannot be established, the request is refused.
 func TestLogin_FormPost_OriginNull(t *testing.T) {
 	h := newBrowserTestHandler(t, "hunter2")
 
-	getReq := httptest.NewRequestWithContext(context.Background(), "GET", "http://localhost:8765/login", nil)
-	getReq.Host = "localhost:8765"
-	getW := httptest.NewRecorder()
-	h.ServeHTTP(getW, getReq)
-
-	var csrfCookieVal string
-	for _, c := range getW.Result().Cookies() {
-		if c.Name == "dicode_csrf" {
-			csrfCookieVal = c.Value
-		}
-	}
-	body := getW.Body.String()
-	const marker = `name="_csrf" value="`
-	i := strings.Index(body, marker)
-	rest := body[i+len(marker):]
-	end := strings.Index(rest, `"`)
-	token := rest[:end]
-
 	form := url.Values{}
 	form.Set("password", "hunter2")
-	form.Set("_csrf", token)
 
 	postReq := httptest.NewRequestWithContext(context.Background(), "POST", "http://localhost:8765/api/auth/login", strings.NewReader(form.Encode()))
 	postReq.Host = "localhost:8765"
 	postReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	postReq.Header.Set("Origin", "null")
-	postReq.AddCookie(&http.Cookie{Name: "dicode_csrf", Value: csrfCookieVal})
 
 	postW := httptest.NewRecorder()
 	h.ServeHTTP(postW, postReq)

@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sign in to dicode</title>
+<link rel="stylesheet" href="/login/style.css">
+</head>
+<body>
+<main class="dc-login">
+<form method="post" action="/api/auth/login" enctype="application/x-www-form-urlencoded">
+<h1 id="login-title">Sign in to dicode</h1>
+<p class="dc-err" role="alert" id="dc-err" hidden></p>
+<label>Password<input type="password" name="password" autocomplete="current-password" autofocus required></label>
+<label class="dc-check"><input type="checkbox" name="trust" value="1">Trust this browser</label>
+<input type="hidden" name="next" id="next-input" value="">
+<button type="submit">Sign in</button>
+</form>
+</main>
+<script src="/login/login.js"></script>
+</body>
+</html>
