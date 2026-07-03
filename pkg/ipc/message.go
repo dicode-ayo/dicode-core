@@ -199,13 +199,33 @@ type HTTPInboundRequest struct {
 	ReqBody    []byte            `json:"reqBody,omitempty"` // base64-encoded in JSON
 }
 
+// StatusCrashLooping is the synthesized task-level status reported by
+// cli.list / cli.status for a daemon task the trigger engine has flagged as
+// crash-looping (issue #458). It replaces whatever the latest run row says —
+// notably the transient "running" of a spawn that is about to die — so a
+// hard-failing daemon never samples as healthy. Mirrors the wire value of
+// trigger.DaemonCrashLooping; duplicated here because pkg/trigger imports
+// pkg/ipc, so this package cannot import the constant.
+const StatusCrashLooping = "crashlooping"
+
+// CrashloopReporter is an optional extension of EngineRunner. The trigger
+// engine implements it; test fakes may not. The control server type-asserts
+// for it when deriving the displayed status of a task, so crash-loop
+// surfacing degrades gracefully to plain last-run status when absent.
+type CrashloopReporter interface {
+	// IsCrashLooping reports whether the daemon task's body has failed
+	// several consecutive starts and is currently in a spawn/crash/backoff
+	// loop. See pkg/trigger/crashloop.go for the exact detection rule.
+	IsCrashLooping(taskID string) bool
+}
+
 // TaskSummary is a single row in the cli.list response.
 type TaskSummary struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
 	Description string `json:"description,omitempty"`
 	Trigger     string `json:"trigger"`    // "manual" | "cron:..." | "webhook:..." | "daemon"
-	LastStatus  string `json:"lastStatus"` // "success" | "failure" | "running" | ""
+	LastStatus  string `json:"lastStatus"` // "success" | "failure" | "running" | "crashlooping" | ""
 	LastRunID   string `json:"lastRunID"`  // "" if never run
 	LastRunAt   string `json:"lastRunAt"`  // RFC3339 or ""
 }
