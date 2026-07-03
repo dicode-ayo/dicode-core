@@ -24,6 +24,16 @@ func TestCmdRelock_RoutingAndEarlyErrors(t *testing.T) {
 	denoOnly := t.TempDir()
 	mustWrite(t, filepath.Join(denoOnly, "t", "task.ts"), "export default () => {};\n")
 
+	// Mixed tree (both runtimes present): the deno pass must NOT be skipped
+	// just because task.py files also exist — --check still trips on the
+	// missing deno.lock first. The complementary direction (python pass
+	// running after a successful deno pass) needs the provisioned toolchains,
+	// so it is covered by CI's `dicode relock --check` on the real mixed
+	// tasks/ tree rather than here.
+	mixed := t.TempDir()
+	mustWrite(t, filepath.Join(mixed, "d", "task.ts"), "export default () => {};\n")
+	mustWrite(t, filepath.Join(mixed, "p", "task.py"), pep723Block)
+
 	cases := []struct {
 		name string
 		args []string
@@ -34,6 +44,7 @@ func TestCmdRelock_RoutingAndEarlyErrors(t *testing.T) {
 		{"no scripts of either runtime", []string{empty}, "no task.ts or task.py"},
 		{"python-only: deno skipped, python enforced", []string{"--check", pyOnly}, "no lock sidecar"},
 		{"deno-only: deno enforced", []string{"--check", denoOnly}, "no deno.lock"},
+		{"mixed tree: deno pass not skipped", []string{"--check", mixed}, "no deno.lock"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
