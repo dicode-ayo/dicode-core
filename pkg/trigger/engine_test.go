@@ -1502,3 +1502,23 @@ func TestEngine_DisabledTask_NoDaemonSpawned(t *testing.T) {
 		t.Errorf("disabled task should NOT be registered as a daemon")
 	}
 }
+
+// TestInjectDicodeSDK_EscapesInterpolatedValues pins the escape-at-sink fix
+// for CodeQL go/reflected-xss (alerts 62/63): even if a hostile value reached
+// hookPath or taskID (both are constrained upstream — registered-webhook map
+// match and registry lookup — but the sink must not depend on that), the
+// injected markup HTML-escapes it so an attribute breakout is impossible.
+func TestInjectDicodeSDK_EscapesInterpolatedValues(t *testing.T) {
+	input := `<html><head></head><body></body></html>`
+	hostile := `"><script>alert(1)</script><x a="`
+	dummyReq, _ := http.NewRequest(http.MethodGet, "http://localhost/hooks/x", nil)
+
+	result := injectDicodeSDK(input, hostile, hostile, dummyReq)
+
+	if strings.Contains(result, `<script>alert(1)</script>`) {
+		t.Fatalf("hostile value survived unescaped: %s", result)
+	}
+	if !strings.Contains(result, "&#34;&gt;&lt;script&gt;") {
+		t.Errorf("expected HTML-escaped hostile value in output, got: %s", result)
+	}
+}

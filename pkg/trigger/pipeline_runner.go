@@ -583,7 +583,7 @@ func (e *Engine) fireStageRaw(ctx context.Context, st task.Stage, upstream task.
 	}
 
 	// INVARIANT: the registry.TriggerPipelineStage source here is load-bearing,
-	// not cosmetic. runTask keys off it (engine.go:onDaemonRunFinished gate) to
+	// not cosmetic. runTask keys off it (run.go: onDaemonRunFinished gate) to
 	// skip the standalone-daemon onDaemonRunFinished lifecycle hook for pipeline
 	// stages — pipeline-owned daemon runs must not flip global DaemonState or
 	// schedule restarts (#344). Any future stage-dispatch path MUST fire with
