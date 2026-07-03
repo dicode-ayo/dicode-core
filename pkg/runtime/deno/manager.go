@@ -47,15 +47,22 @@ func (rt *Runtime) Install(_ context.Context, version string) error {
 // The executor holds a parent back-reference so that a late SetInputStore call
 // on the manager (which happens in daemon.go after buildRuntimes returns) is
 // visible to all executors via effectiveInputStore().
+//
+// Note: this copy list is intentionally narrower than the Python runtime's
+// NewExecutor, which also snapshots SecretsManager, IPCSecret, Engine, and
+// Gateway. Preserved as-is by the #388 dedup (behavior-preserving); see that
+// issue for the follow-up on reconciling the two.
 func (rt *Runtime) NewExecutor(binaryPath string) pkgruntime.Executor {
 	return &Runtime{
-		parent:         rt,
-		registry:       rt.registry,
-		secrets:        rt.secrets,
-		db:             rt.db,
-		log:            rt.log,
-		denoPath:       binaryPath,
-		secretOutputCh: rt.secretOutputCh,
-		providerRunner: rt.providerRunner,
+		parent: rt,
+		BridgeDeps: pkgruntime.BridgeDeps{
+			Registry:       rt.Registry,
+			SecretsChain:   rt.SecretsChain,
+			DB:             rt.DB,
+			Log:            rt.Log,
+			SecretOutputCh: rt.SecretOutputCh,
+			ProviderRunner: rt.ProviderRunner,
+		},
+		denoPath: binaryPath,
 	}
 }

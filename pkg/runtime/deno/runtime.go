@@ -77,97 +77,57 @@ type RunResult struct {
 type Runtime struct {
 	// parent is non-nil when this Runtime was created by NewExecutor (i.e. it
 	// is acting as a per-version executor rather than the manager-owned
-	// instance). effectiveInputStore reads from parent.inputStore so that a
-	// late SetInputStore call on the manager propagates to all executors
-	// without extra bookkeeping. Nil means "I am the manager; use my own
-	// inputStore field directly."
-	parent         *Runtime
-	registry       *registry.Registry
-	secrets        secrets.Chain
-	secretsManager secrets.Manager      // optional; wired for dicode.secrets_set/delete
-	inputStore     *registry.InputStore // optional; wired for dicode.runs.delete_input / get_input
-	db             db.DB
-	log            *zap.Logger
-	denoPath       string
-	secret         []byte
-	engine         ipc.EngineRunner
-	gateway        *ipc.Gateway
-	// secretOutputCh is opt-in: when set, every Run wires it into the
-	// per-run IPC server so a provider task's dicode.output(..., {secret:
-	// true}) call is routed to the resolver awaiting it. Nil leaves the
-	// path inert (current behavior).
-	secretOutputCh chan map[string]string
-	// providerRunner is wired by the trigger engine at daemon startup so
-	// the env resolver can spawn provider tasks for from: task:<id>
-	// entries. Nil disables provider lookups; legacy paths still work.
-	providerRunner envresolve.ProviderRunner
-	// sharedResolver is the daemon-scoped env resolver whose TTL cache
-	// survives across task launches (issue #242). When non-nil, envresolver()
-	// returns it instead of constructing a fresh instance per Run.
-	sharedResolver *envresolve.Resolver
-	// replayer, sourceMgr, repoResolver are wired after buildRuntimes returns
-	// (same late-wiring pattern as inputStore). effectiveReplayer /
-	// effectiveSourceMgr / effectiveRepoResolver read through parent when
-	// non-nil so a single SetX call on the manager propagates to all
-	// executors without extra bookkeeping.
-	replayer     *registry.Replayer      // optional; enables dicode.runs.replay
-	sourceMgr    ipc.SourceDevModeSetter // optional; enables dicode.sources.set_dev_mode
-	repoResolver ipc.RepoPathResolver    // optional; enables dicode.git.commit_push
+	// instance). live() reads from parent.BridgeDeps so that late Set* calls
+	// on the manager (SetInputStore, SetReplayer, ...) propagate to all
+	// executors without extra bookkeeping. Nil means "I am the manager; use
+	// my own fields directly."
+	parent *Runtime
+
+	// BridgeDeps carries the dependency-injection surface shared with the
+	// Python runtime — registry/secrets/IPC wiring plus the promoted Set*
+	// methods daemon.go calls at boot. See pkg/runtime/bridgedeps.go.
+	pkgruntime.BridgeDeps
+
+	denoPath string
+
 	// cryptoDeriver enables dicode.crypto.{encrypt, decrypt} for tasks that
 	// declare permissions.dicode.crypto. Wired at daemon boot via
 	// SetCryptoHandler; reads through parent in per-version executors.
+	// Deno-only: the Python runtime has no crypto IPC surface, so this field
+	// stays here rather than in the shared BridgeDeps.
 	cryptoDeriver ipc.SubKeyDeriver // optional; nil disables crypto IPC
-	// testGuard is the approval gate's veto for dicode.tasks.test, forwarded
-	// to every per-run IPC server. Reads through parent in per-version
-	// executors. Nil means allow.
-	testGuard func(taskID string) error
-	// protectedPaths are files (dicode.lock, dicode.yaml) that hold approval
-	// state and must never be writable by a task: a task with a broad
-	// --allow-write grant covering the config dir could otherwise overwrite
-	// dicode.lock to self-approve other tasks. Every Run emits a --deny-write
-	// for these so the deny takes precedence over any allow. Reads through
-	// parent in per-version executors.
-	protectedPaths []string
+}
+
+// live returns the BridgeDeps to consult for late-wired capabilities
+// (InputStore, Replayer, SourceMgr, RepoResolver, TestGuard,
+// ProtectedPaths): the parent's when this Runtime is a per-version executor,
+// its own otherwise. This is what makes a daemon-level Set* call that runs
+// after NewExecutor still visible to every executor.
+func (rt *Runtime) live() *pkgruntime.BridgeDeps {
+	if rt.parent != nil {
+		return &rt.parent.BridgeDeps
+	}
+	return &rt.BridgeDeps
 }
 
 // effectiveInputStore returns the live InputStore to use for this runtime
 // instance. When this Runtime is a per-version executor (parent != nil) it
 // reads from the parent so that a daemon-level SetInputStore call that runs
 // after NewExecutor is still visible here.
-func (rt *Runtime) effectiveInputStore() *registry.InputStore {
-	if rt.parent != nil {
-		return rt.parent.inputStore
-	}
-	return rt.inputStore
-}
+func (rt *Runtime) effectiveInputStore() *registry.InputStore { return rt.live().InputStore }
 
 // effectiveReplayer returns the live Replayer, reading from parent when this
 // is a per-version executor so that a late SetReplayer call on the manager
 // propagates without extra bookkeeping.
-func (rt *Runtime) effectiveReplayer() *registry.Replayer {
-	if rt.parent != nil {
-		return rt.parent.replayer
-	}
-	return rt.replayer
-}
+func (rt *Runtime) effectiveReplayer() *registry.Replayer { return rt.live().Replayer }
 
 // effectiveSourceMgr returns the live SourceDevModeSetter, reading from parent
 // when this is a per-version executor.
-func (rt *Runtime) effectiveSourceMgr() ipc.SourceDevModeSetter {
-	if rt.parent != nil {
-		return rt.parent.sourceMgr
-	}
-	return rt.sourceMgr
-}
+func (rt *Runtime) effectiveSourceMgr() ipc.SourceDevModeSetter { return rt.live().SourceMgr }
 
 // effectiveRepoResolver returns the live RepoPathResolver, reading from parent
 // when this is a per-version executor.
-func (rt *Runtime) effectiveRepoResolver() ipc.RepoPathResolver {
-	if rt.parent != nil {
-		return rt.parent.repoResolver
-	}
-	return rt.repoResolver
-}
+func (rt *Runtime) effectiveRepoResolver() ipc.RepoPathResolver { return rt.live().RepoResolver }
 
 // New creates a Deno Runtime. It ensures the Deno binary is present in the
 // cache, downloading it if necessary.
@@ -180,39 +140,20 @@ func New(r *registry.Registry, sc secrets.Chain, database db.DB, log *zap.Logger
 	if err != nil {
 		return nil, fmt.Errorf("ipc secret: %w", err)
 	}
-	return &Runtime{registry: r, secrets: sc, db: database, log: log, denoPath: path, secret: secret}, nil
+	return &Runtime{
+		BridgeDeps: pkgruntime.BridgeDeps{Registry: r, SecretsChain: sc, DB: database, Log: log, IPCSecret: secret},
+		denoPath:   path,
+	}, nil
 }
 
-// SetEngine configures the engine runner used for dicode.run_task calls.
-func (rt *Runtime) SetEngine(e ipc.EngineRunner) { rt.engine = e }
-
-// SetGateway attaches the HTTP gateway so daemon tasks can call http.register.
-func (rt *Runtime) SetGateway(g *ipc.Gateway) { rt.gateway = g }
-
-// SetSecretsManager wires the secrets manager so tasks with permissions.dicode.secrets_write
-// can call dicode.secrets_set() and dicode.secrets_delete().
-func (rt *Runtime) SetSecretsManager(m secrets.Manager) { rt.secretsManager = m }
-
-// SetInputStore wires the InputStore so the per-run IPC server can serve
-// dicode.runs.delete_input and dicode.runs.get_input calls. Must be called
-// before any Run; mirrors the SetEngine / SetGateway pattern.
-func (rt *Runtime) SetInputStore(is *registry.InputStore) { rt.inputStore = is }
-
-// SetReplayer wires the Replayer so the per-run IPC server can serve
-// dicode.runs.replay calls. Mirrors the SetInputStore wiring.
-func (rt *Runtime) SetReplayer(r *registry.Replayer) { rt.replayer = r }
-
-// SetSourceManager wires the source manager so the per-run IPC server can
-// serve dicode.sources.set_dev_mode calls.
-func (rt *Runtime) SetSourceManager(m ipc.SourceDevModeSetter) { rt.sourceMgr = m }
-
-// SetRepoResolver wires the repo-path resolver so the per-run IPC server
-// can serve dicode.git.commit_push calls.
-func (rt *Runtime) SetRepoResolver(r ipc.RepoPathResolver) { rt.repoResolver = r }
+// The Set* dependency wiring (SetEngine, SetGateway, SetInputStore, ...) is
+// promoted from the embedded pkgruntime.BridgeDeps — see bridgedeps.go for
+// the full surface shared with the Python runtime.
 
 // SetCryptoHandler wires the SubKeyDeriver so per-run IPC servers can serve
 // dicode.crypto.{encrypt, decrypt} calls. Must be called before any Run;
-// mirrors the SetEngine / SetGateway pattern.
+// mirrors the SetEngine / SetGateway pattern. Deno-only — the Python runtime
+// has no crypto IPC surface.
 func (rt *Runtime) SetCryptoHandler(d ipc.SubKeyDeriver) { rt.cryptoDeriver = d }
 
 // effectiveCryptoDeriver returns the live SubKeyDeriver, reading through
@@ -225,65 +166,15 @@ func (rt *Runtime) effectiveCryptoDeriver() ipc.SubKeyDeriver {
 	return rt.cryptoDeriver
 }
 
-// SetTestGuard wires the approval gate's veto for dicode.tasks.test into
-// every per-run IPC server. Nil means allow; mirrors the SetCryptoHandler
-// wiring pattern.
-func (rt *Runtime) SetTestGuard(g func(taskID string) error) { rt.testGuard = g }
-
-// SetProtectedPaths records files that no task may ever write (dicode.lock,
-// dicode.yaml — the approval-gate state). Each is emitted as a --deny-write so
-// it overrides any broad --allow-write a task declares. Paths are cleaned and
-// stored; mirrors the SetTestGuard wiring pattern.
-func (rt *Runtime) SetProtectedPaths(paths []string) {
-	cleaned := make([]string, 0, len(paths))
-	for _, p := range paths {
-		if p == "" {
-			continue
-		}
-		cleaned = append(cleaned, filepath.Clean(p))
-	}
-	rt.protectedPaths = cleaned
-}
-
 // effectiveProtectedPaths returns the protected paths, reading through parent
 // when this is a per-version executor so a daemon-level SetProtectedPaths call
-// propagates without extra bookkeeping.
-func (rt *Runtime) effectiveProtectedPaths() []string {
-	if rt.parent != nil {
-		return rt.parent.protectedPaths
-	}
-	return rt.protectedPaths
-}
+// propagates without extra bookkeeping. Every Run emits each as a
+// --deny-write so the deny takes precedence over any --allow-write.
+func (rt *Runtime) effectiveProtectedPaths() []string { return rt.live().ProtectedPaths }
 
 // effectiveTestGuard returns the live test guard, reading through parent
 // when this is a per-version executor.
-func (rt *Runtime) effectiveTestGuard() func(taskID string) error {
-	if rt.parent != nil {
-		return rt.parent.testGuard
-	}
-	return rt.testGuard
-}
-
-// SetSecretOutputChannel wires the channel that receives provider tasks'
-// secret maps. Called by the trigger engine before invoking Run when the
-// task is being launched in "provider" mode.
-func (rt *Runtime) SetSecretOutputChannel(ch chan map[string]string) {
-	rt.secretOutputCh = ch
-}
-
-// SetProviderRunner wires the env-resolver's provider invocation. The
-// trigger engine implements ProviderRunner and registers itself here at
-// daemon startup. Nil disables provider task: lookups.
-func (rt *Runtime) SetProviderRunner(p envresolve.ProviderRunner) {
-	rt.providerRunner = p
-}
-
-// SetEnvResolver wires the daemon-scoped env resolver whose TTL cache
-// survives across task launches (issue #242). When set, envresolver()
-// returns it instead of constructing a fresh instance per Run.
-func (rt *Runtime) SetEnvResolver(r *envresolve.Resolver) {
-	rt.sharedResolver = r
-}
+func (rt *Runtime) effectiveTestGuard() func(taskID string) error { return rt.live().TestGuard }
 
 // Run executes a task script and returns the result.
 func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*RunResult, error) {
@@ -296,7 +187,7 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	if opts.RunID != "" {
 		runID = opts.RunID
 	} else {
-		runID, err = rt.registry.StartRun(ctx, spec.ID, opts.ParentRunID)
+		runID, err = rt.Registry.StartRun(ctx, spec.ID, opts.ParentRunID)
 		if err != nil {
 			return nil, fmt.Errorf("start run: %w", err)
 		}
@@ -309,9 +200,9 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		// etc.) result.Error is set but no log entries exist yet. Append it now so
 		// the error is visible in both the Web UI run detail and the CLI log output.
 		if result.Error != nil {
-			_ = rt.registry.AppendLog(context.Background(), runID, "error", result.Error.Error())
+			_ = rt.Registry.AppendLog(context.Background(), runID, "error", result.Error.Error())
 		}
-		if logs, lerr := rt.registry.GetRunLogs(context.Background(), runID); lerr == nil {
+		if logs, lerr := rt.Registry.GetRunLogs(context.Background(), runID); lerr == nil {
 			result.Logs = logs
 		}
 	}()
@@ -347,9 +238,9 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 
 	mergedParams := pkgruntime.MergeParams(spec.Params, opts.Params)
 
-	srv := ipc.New(runID, spec.ID, rt.secret, rt.registry, rt.db, mergedParams, opts.Input, rt.log, spec, rt.engine)
-	srv.SetGateway(rt.gateway)
-	srv.SetSecrets(rt.secretsManager)
+	srv := ipc.New(runID, spec.ID, rt.IPCSecret, rt.Registry, rt.DB, mergedParams, opts.Input, rt.Log, spec, rt.Engine)
+	srv.SetGateway(rt.Gateway)
+	srv.SetSecrets(rt.SecretsManager)
 	srv.SetInputStore(rt.effectiveInputStore())
 	srv.SetRedactor(redactor)
 	srv.SetReplayer(rt.effectiveReplayer())
@@ -359,8 +250,8 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	if r := rt.effectiveRepoResolver(); r != nil {
 		srv.SetRepoResolver(r)
 	}
-	if rt.secretOutputCh != nil {
-		srv.SetSecretOutput(rt.secretOutputCh)
+	if rt.SecretOutputCh != nil {
+		srv.SetSecretOutput(rt.SecretOutputCh)
 	}
 	if d := rt.effectiveCryptoDeriver(); d != nil {
 		srv.SetCryptoHandler(d)
@@ -375,7 +266,7 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	}
 	defer srv.Stop()
 
-	debug := rt.log.Core().Enabled(zap.DebugLevel)
+	debug := rt.Log.Core().Enabled(zap.DebugLevel)
 
 	// Write the shim as a proper ES module to a temp file.
 	// Run ID is embedded between the prefix and the __<random> suffix so the
@@ -406,7 +297,7 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	if !debug {
 		defer os.Remove(runnerPath)
 	}
-	rt.log.Debug("deno temp files",
+	rt.Log.Debug("deno temp files",
 		zap.String("task", spec.ID),
 		zap.String("shim", shimPath),
 		zap.String("task_script", taskPath),
@@ -475,10 +366,10 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 			scanner := bufio.NewScanner(stdout)
 			scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 			for scanner.Scan() {
-				_ = rt.registry.AppendLog(context.Background(), runID, "info", redactor.RedactString(scanner.Text()))
+				_ = rt.Registry.AppendLog(context.Background(), runID, "info", redactor.RedactString(scanner.Text()))
 			}
 			if err := scanner.Err(); err != nil {
-				rt.log.Warn("stdout scanner error", zap.String("run", runID), zap.Error(err))
+				rt.Log.Warn("stdout scanner error", zap.String("run", runID), zap.Error(err))
 			}
 		}()
 		go func() {
@@ -486,10 +377,10 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 			scanner := bufio.NewScanner(stderr)
 			scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 			for scanner.Scan() {
-				_ = rt.registry.AppendLog(context.Background(), runID, "error", redactor.RedactString(scanner.Text()))
+				_ = rt.Registry.AppendLog(context.Background(), runID, "error", redactor.RedactString(scanner.Text()))
 			}
 			if err := scanner.Err(); err != nil {
-				rt.log.Warn("stderr scanner error", zap.String("run", runID), zap.Error(err))
+				rt.Log.Warn("stderr scanner error", zap.String("run", runID), zap.Error(err))
 			}
 		}()
 	}
@@ -666,13 +557,13 @@ func buildDenoArgs(spec *task.Spec, socketPath, shimPath, runnerPath string, pro
 // constructed (legacy / test path).
 func (rt *Runtime) envresolver() *envresolve.Resolver {
 	// Read through parent for per-version executors.
-	if rt.parent != nil && rt.parent.sharedResolver != nil {
-		return rt.parent.sharedResolver
+	if rt.parent != nil && rt.parent.SharedResolver != nil {
+		return rt.parent.SharedResolver
 	}
-	if rt.sharedResolver != nil {
-		return rt.sharedResolver
+	if rt.SharedResolver != nil {
+		return rt.SharedResolver
 	}
-	return envresolve.New(rt.registry, rt.secrets, rt.providerRunner)
+	return envresolve.New(rt.Registry, rt.SecretsChain, rt.ProviderRunner)
 }
 
 // Execute implements runtime.Executor.

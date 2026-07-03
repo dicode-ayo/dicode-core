@@ -54,7 +54,7 @@ func TestNewExecutor_SeesLateInputStore(t *testing.T) {
 	}
 
 	// Before SetInputStore the live lookup must return nil.
-	if got := exec.parent.inputStore; got != nil {
+	if got := exec.parent.InputStore; got != nil {
 		t.Errorf("expected nil before SetInputStore; got %v", got)
 	}
 
@@ -63,7 +63,7 @@ func TestNewExecutor_SeesLateInputStore(t *testing.T) {
 	rt.SetInputStore(is)
 
 	// The executor must now see the store via the parent back-reference.
-	if got := exec.parent.inputStore; got != is {
+	if got := exec.parent.InputStore; got != is {
 		t.Errorf("executor did not pick up late-set InputStore: got %v, want %v", got, is)
 	}
 }
@@ -82,7 +82,7 @@ func (fakeRepoPathResolver) ResolveRepoPath(_ string) (string, error) { return "
 
 // TestRuntime_SetReplayer_Propagates verifies the late-wiring pattern for
 // SetReplayer on the Python runtime: an executor created before SetReplayer is
-// called on the parent must see the replayer via exec.parent.replayer.
+// called on the parent must see the replayer via exec.parent.Replayer.
 func TestRuntime_SetReplayer_Propagates(t *testing.T) {
 	rt, err := New(nil, nil, nil, nil)
 	if err != nil {
@@ -94,7 +94,7 @@ func TestRuntime_SetReplayer_Propagates(t *testing.T) {
 		t.Fatalf("NewExecutor did not return *executor")
 	}
 
-	if exec.parent.replayer != nil {
+	if exec.parent.Replayer != nil {
 		t.Error("expected nil before SetReplayer")
 	}
 
@@ -102,7 +102,7 @@ func TestRuntime_SetReplayer_Propagates(t *testing.T) {
 	r := registry.NewReplayer(registry.New(nil), is, nil)
 	rt.SetReplayer(r)
 
-	if got := exec.parent.replayer; got != r {
+	if got := exec.parent.Replayer; got != r {
 		t.Errorf("executor did not pick up late-set Replayer: got %v, want %v", got, r)
 	}
 }
@@ -120,14 +120,14 @@ func TestRuntime_SetSourceManager_Propagates(t *testing.T) {
 		t.Fatalf("NewExecutor did not return *executor")
 	}
 
-	if exec.parent.sourceMgr != nil {
+	if exec.parent.SourceMgr != nil {
 		t.Error("expected nil before SetSourceManager")
 	}
 
 	var m ipc.SourceDevModeSetter = fakeSourceDevModeSetter{}
 	rt.SetSourceManager(m)
 
-	if got := exec.parent.sourceMgr; got != m {
+	if got := exec.parent.SourceMgr; got != m {
 		t.Errorf("executor did not pick up late-set SourceManager: got %v, want %v", got, m)
 	}
 }
@@ -145,14 +145,14 @@ func TestRuntime_SetRepoResolver_Propagates(t *testing.T) {
 		t.Fatalf("NewExecutor did not return *executor")
 	}
 
-	if exec.parent.repoResolver != nil {
+	if exec.parent.RepoResolver != nil {
 		t.Error("expected nil before SetRepoResolver")
 	}
 
 	var r ipc.RepoPathResolver = fakeRepoPathResolver{}
 	rt.SetRepoResolver(r)
 
-	if got := exec.parent.repoResolver; got != r {
+	if got := exec.parent.RepoResolver; got != r {
 		t.Errorf("executor did not pick up late-set RepoResolver: got %v, want %v", got, r)
 	}
 }
