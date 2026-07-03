@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dicode/dicode/pkg/runtime/envresolve"
 	"github.com/dicode/dicode/pkg/task"
 )
 
@@ -90,6 +91,94 @@ func TestMergeParams(t *testing.T) {
 	if _, ok := got["no_default"]; ok {
 		t.Error("param with empty default must be omitted when not overridden")
 	}
+}
+
+// TestResolveRunEnv_PreferredPreflight verifies that a preflight-resolved
+// env is used verbatim and that the resolver factory is NOT invoked — the
+// whole point of forwarding PreResolvedEnv is to avoid re-spawning provider
+// tasks (issue #235).
+func TestResolveRunEnv_PreferredPreflight(t *testing.T) {
+	pre := &envresolve.Resolved{
+		Env:     map[string]string{"FOO": "bar", "TOKEN": "s3cret-value"},
+		Secrets: map[string]string{"TOKEN": "s3cret-value"},
+	}
+	resolver := func() *envresolve.Resolver {
+		t.Fatal("resolver must not be constructed when PreResolvedEnv is set")
+		return nil
+	}
+
+	env, red, err := ResolveRunEnv(context.Background(), &task.Spec{ID: "t"}, pre, resolver)
+	if err != nil {
+		t.Fatalf("ResolveRunEnv: %v", err)
+	}
+	if env["FOO"] != "bar" || env["TOKEN"] != "s3cret-value" {
+		t.Errorf("env not passed through: %v", env)
+	}
+	if got := red.RedactString("leak s3cret-value here"); got == "leak s3cret-value here" {
+		t.Errorf("redactor does not cover preflight secrets: %q", got)
+	}
+}
+
+// TestResolveRunEnv_InlineFallback verifies the legacy path: with no
+// preflight result the resolver factory is invoked and its result is
+// returned. A spec with no env permissions resolves to an empty env.
+func TestResolveRunEnv_InlineFallback(t *testing.T) {
+	called := false
+	resolver := func() *envresolve.Resolver {
+		called = true
+		return envresolve.New(nil, nil, nil)
+	}
+
+	env, red, err := ResolveRunEnv(context.Background(), &task.Spec{ID: "t"}, nil, resolver)
+	if err != nil {
+		t.Fatalf("ResolveRunEnv: %v", err)
+	}
+	if !called {
+		t.Fatal("resolver factory was not invoked on the inline path")
+	}
+	if len(env) != 0 {
+		t.Errorf("expected empty env for spec without env permissions, got %v", env)
+	}
+	if red == nil {
+		t.Error("expected a (no-op) redactor, got nil")
+	}
+}
+
+// TestLiveResolver_Precedence pins the resolver selection order both
+// runtimes relied on: parent's shared resolver > self's shared resolver >
+// fresh instance.
+func TestLiveResolver_Precedence(t *testing.T) {
+	parentShared := envresolve.New(nil, nil, nil)
+	selfShared := envresolve.New(nil, nil, nil)
+
+	t.Run("parent shared wins", func(t *testing.T) {
+		self := &BridgeDeps{SharedResolver: selfShared}
+		parent := &BridgeDeps{SharedResolver: parentShared}
+		if got := LiveResolver(self, parent); got != parentShared {
+			t.Errorf("got %p, want parent's shared resolver %p", got, parentShared)
+		}
+	})
+
+	t.Run("self shared when parent has none", func(t *testing.T) {
+		self := &BridgeDeps{SharedResolver: selfShared}
+		if got := LiveResolver(self, &BridgeDeps{}); got != selfShared {
+			t.Error("expected self's shared resolver when parent's is nil")
+		}
+		if got := LiveResolver(self, nil); got != selfShared {
+			t.Error("expected self's shared resolver when parent is nil (manager path)")
+		}
+	})
+
+	t.Run("fresh instance as fallback", func(t *testing.T) {
+		self := &BridgeDeps{}
+		got := LiveResolver(self, nil)
+		if got == nil {
+			t.Fatal("expected a fresh resolver, got nil")
+		}
+		if got == parentShared || got == selfShared {
+			t.Error("fallback must construct a new instance")
+		}
+	})
 }
 
 func TestMergeParams_NilOverrides(t *testing.T) {

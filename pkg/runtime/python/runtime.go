@@ -162,15 +162,15 @@ type executor struct {
 	pkgruntime.BridgeDeps
 }
 
-// envresolver returns the env resolver to use for an Execute call. When a
-// daemon-scoped shared resolver is wired (issue #242), it is returned so
-// the TTL cache survives across launches. Otherwise a fresh instance is
-// constructed (legacy / test path).
+// envresolver returns the env resolver to use for an Execute call, reading
+// the daemon-scoped shared resolver (issue #242) live through parent. See
+// pkgruntime.LiveResolver for the precedence order.
 func (e *executor) envresolver() *envresolve.Resolver {
-	if e.parent != nil && e.parent.SharedResolver != nil {
-		return e.parent.SharedResolver
+	var parent *pkgruntime.BridgeDeps
+	if e.parent != nil {
+		parent = &e.parent.BridgeDeps
 	}
-	return envresolve.New(e.Registry, e.SecretsChain, e.ProviderRunner)
+	return pkgruntime.LiveResolver(&e.BridgeDeps, parent)
 }
 
 // Execute implements runtime.Executor.
@@ -190,26 +190,13 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 		}
 	}()
 
-	// Resolve declared env permissions. When the trigger engine ran
-	// preflight (issue #235), it forwards the *Resolved here so we don't
-	// re-spawn provider tasks. When opts.PreResolvedEnv is nil (legacy
-	// callers, tests that bypass the engine), fall back to inline
-	// resolution. Provider tasks (from: task:<id>) are spawned and batched
-	// at most once per provider per launch; legacy paths (secret:,
-	// env:NAME, bare) are preserved.
-	var resolvedRes *envresolve.Resolved
-	var err error
-	if opts.PreResolvedEnv != nil {
-		resolvedRes = opts.PreResolvedEnv
-	} else {
-		resolvedRes, err = e.envresolver().Resolve(ctx, spec)
-		if err != nil {
-			result.Error = err
-			return result, nil
-		}
+	// Resolve declared env permissions — preferring the trigger engine's
+	// preflight result over inline resolution (see ResolveRunEnv).
+	resolved, redactor, err := pkgruntime.ResolveRunEnv(ctx, spec, opts.PreResolvedEnv, e.envresolver)
+	if err != nil {
+		result.Error = err
+		return result, nil
 	}
-	resolved := resolvedRes.Env
-	redactor := secrets.NewRedactor(resolvedRes.Secrets)
 
 	// Read the user's task.py.
 	scriptPath := spec.ScriptPath()

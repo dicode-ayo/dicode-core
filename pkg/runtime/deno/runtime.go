@@ -207,25 +207,13 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		}
 	}()
 
-	// Resolve declared env permissions. When the trigger engine ran
-	// preflight (issue #235), it forwards the *Resolved here so we don't
-	// re-spawn provider tasks. When opts.PreResolvedEnv is nil (legacy
-	// callers, tests that bypass the engine), fall back to inline
-	// resolution. Provider tasks (from: task:<id>) are spawned and batched
-	// at most once per provider per launch; legacy paths (secret:,
-	// env:NAME, bare) are preserved.
-	var resolvedRes *envresolve.Resolved
-	if opts.PreResolvedEnv != nil {
-		resolvedRes = opts.PreResolvedEnv
-	} else {
-		resolvedRes, err = rt.envresolver().Resolve(ctx, spec)
-		if err != nil {
-			result.Error = err
-			return result, nil
-		}
+	// Resolve declared env permissions — preferring the trigger engine's
+	// preflight result over inline resolution (see ResolveRunEnv).
+	resolved, redactor, err := pkgruntime.ResolveRunEnv(ctx, spec, opts.PreResolvedEnv, rt.envresolver)
+	if err != nil {
+		result.Error = err
+		return result, nil
 	}
-	resolved := resolvedRes.Env
-	redactor := secrets.NewRedactor(resolvedRes.Secrets)
 
 	taskPath := spec.ScriptPath()
 	if taskPath == "" {
@@ -551,19 +539,15 @@ func buildDenoArgs(spec *task.Spec, socketPath, shimPath, runnerPath string, pro
 	return args
 }
 
-// envresolver returns the env resolver to use for a Run. When a
-// daemon-scoped shared resolver is wired (issue #242), it is returned so
-// the TTL cache survives across launches. Otherwise a fresh instance is
-// constructed (legacy / test path).
+// envresolver returns the env resolver to use for a Run, reading the
+// daemon-scoped shared resolver (issue #242) through parent for per-version
+// executors. See pkgruntime.LiveResolver for the precedence order.
 func (rt *Runtime) envresolver() *envresolve.Resolver {
-	// Read through parent for per-version executors.
-	if rt.parent != nil && rt.parent.SharedResolver != nil {
-		return rt.parent.SharedResolver
+	var parent *pkgruntime.BridgeDeps
+	if rt.parent != nil {
+		parent = &rt.parent.BridgeDeps
 	}
-	if rt.SharedResolver != nil {
-		return rt.SharedResolver
-	}
-	return envresolve.New(rt.Registry, rt.SecretsChain, rt.ProviderRunner)
+	return pkgruntime.LiveResolver(&rt.BridgeDeps, parent)
 }
 
 // Execute implements runtime.Executor.
