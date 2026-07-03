@@ -12,6 +12,7 @@ import (
 	"github.com/dicode/dicode/pkg/registry"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	"github.com/dicode/dicode/pkg/task"
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
 
@@ -38,8 +39,8 @@ func (e *Engine) registerDaemon(spec *task.Spec) {
 	// firing OnRegister twice, or a manual re-register racing the reconciler)
 	// would otherwise both observe `alreadyRunning=false` and both spawn a
 	// daemon body. The lock ensures at most one in-flight start per task ID.
-	// Release happens inside startDaemon after the daemon's run slot is
-	// recorded (or after a dispatch failure has been logged).
+	// Released once startDaemon has recorded the daemon's run slot (or
+	// logged a launch failure).
 	if !e.restartGates.tryAcquire(spec.ID) {
 		e.log.Debug("daemon start coalesced — another start is already in flight",
 			zap.String("task", spec.ID))
@@ -61,28 +62,48 @@ func (e *Engine) startDaemon(spec *task.Spec) {
 	// recovery would later misread as a sustained run and wrongly clear the
 	// crash-loop state (#458).
 	e.crashloops.noteSpawn(spec.ID)
-	runID, err := e.fireAsync(context.Background(), spec, pkgruntime.RunOptions{}, registry.TriggerDaemon)
-	if err != nil {
+
+	// Reserve the run slot and publish DaemonRunning BEFORE firing the body
+	// (#470, race 1). fireAsync launches the run goroutine and returns; an
+	// instant crash can drive onDaemonRunFinished before control returns
+	// here. If the slot were written after fireAsync (as it used to be), the
+	// finish path's `daemonRuns[spec.ID] == runID` cleanup would miss —
+	// leaving a stale slot that makes registerDaemon think the daemon is
+	// still up — and the late setDaemonState(DaemonRunning) would overwrite
+	// the terminal DaemonStopped/DaemonCrashed the finish path just
+	// recorded. Pre-generating the run ID (fireAsync honors a non-empty
+	// opts.RunID) makes the reservation observable before the body can
+	// possibly exit, and leaves nothing to do after fireAsync succeeds.
+	runID := uuid.New().String()
+	e.daemonMu.Lock()
+	e.daemonRuns[spec.ID] = runID
+	e.daemonMu.Unlock()
+	e.setDaemonState(spec.ID, DaemonRunning)
+
+	if _, err := e.fireAsync(context.Background(), spec, pkgruntime.RunOptions{RunID: runID}, registry.TriggerDaemon); err != nil {
 		// fireAsync error here is a daemon-body launch failure — binary
 		// missing, port already bound, runtime resource exhaustion. Distinct
 		// from DaemonStopped so operators can tell "deliberately stopped /
 		// never started" apart from "daemon body broke" in the WebUI. See
 		// issue #318.
 		//
-		// No run is live, so drop the spawn timestamp recorded above — it
-		// must not age into a fake "sustained run".
+		// No run is live: roll back the reservation made above. The
+		// slot-matches guard mirrors onDaemonRunFinished so a concurrent
+		// starter's fresh reservation is never clobbered.
+		e.daemonMu.Lock()
+		if e.daemonRuns[spec.ID] == runID {
+			delete(e.daemonRuns, spec.ID)
+		}
+		e.daemonMu.Unlock()
+		// Drop the spawn timestamp recorded above — it must not age into a
+		// fake "sustained run".
 		e.crashloops.clearSpawn(spec.ID)
 		e.setDaemonState(spec.ID, DaemonFailedAfterPreflight)
 		e.log.Error("daemon start failed",
 			zap.String("task", spec.ID),
 			zap.Error(err),
 		)
-		return
 	}
-	e.daemonMu.Lock()
-	e.daemonRuns[spec.ID] = runID
-	e.daemonMu.Unlock()
-	e.setDaemonState(spec.ID, DaemonRunning)
 }
 
 func (e *Engine) onDaemonRunFinished(spec *task.Spec, runID string) {

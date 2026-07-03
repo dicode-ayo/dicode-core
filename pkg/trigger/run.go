@@ -401,7 +401,14 @@ func (e *Engine) fireKinded(ctx context.Context, k task.Kinded, opts pkgruntime.
 }
 
 func (e *Engine) fireAsync(ctx context.Context, spec *task.Spec, opts pkgruntime.RunOptions, source registry.TriggerSource) (string, error) {
-	opts.RunID = uuid.New().String()
+	// Honor a caller-provided run ID; generate one only when absent. The only
+	// caller that pre-sets opts.RunID is startDaemon (#470): it must reserve
+	// the daemonRuns slot BEFORE the run goroutine can exit, which requires
+	// knowing the run ID before fireAsync launches the body. Every other call
+	// site passes a fresh RunOptions with an empty RunID.
+	if opts.RunID == "" {
+		opts.RunID = uuid.New().String()
+	}
 
 	runCtx, cleanup, err := e.startRun(spec, &opts, source)
 	if err != nil {
