@@ -373,12 +373,13 @@ class DcTaskDetail extends LitElement {
   }
 
   // Renders the daemon lifecycle phase as a colored badge in the trigger
-  // row. The engine reports a five-value enum (see pkg/trigger.DaemonState);
+  // row. The engine reports a six-value enum (see pkg/trigger.DaemonState);
   // the mapping below keeps colors aligned with the surrounding UI palette:
   // green for healthy, yellow for transient, red for failure, muted for
-  // resting. The two failure badges are deliberately distinguishable so
+  // resting. The failure badges are deliberately distinguishable so
   // operators can tell "daemon body launch failed" (issue #318) from
-  // "daemon body ran then crashed without an auto-restart" (issue #325).
+  // "daemon body ran then crashed without an auto-restart" (issue #325)
+  // from "daemon body is stuck in a spawn/crash/backoff loop" (issue #458).
   _renderDaemonState(state) {
     // Keep keys in sync with the DaemonState constants in
     // pkg/trigger/daemon_state.go — out-of-sync entries fall through
@@ -390,6 +391,7 @@ class DcTaskDetail extends LitElement {
       stopping:               { bg: 'rgba(249, 226, 175, .15)', fg: 'var(--yellow)', text: 'Stopping…' },
       failed_after_preflight: { bg: 'rgba(243, 139, 168, .15)', fg: 'var(--red)',    text: '⨯ Launch failed' },
       crashed:                { bg: 'rgba(243, 139, 168, .28)', fg: 'var(--red)',    text: '⨯ Crashed (no restart)' },
+      crashlooping:           { bg: 'rgba(243, 139, 168, .28)', fg: 'var(--red)',    text: '⟳ Crash-looping' },
       stopped:                { bg: 'rgba(166, 173, 200, .15)', fg: 'var(--muted)',  text: 'Stopped' },
     };
     const s = STYLES[state] || { bg: 'rgba(166, 173, 200, .15)', fg: 'var(--muted)', text: state };

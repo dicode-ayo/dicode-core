@@ -512,6 +512,13 @@ func (cs *ControlServer) handleList() ([]TaskSummary, error) {
 				summary.LastRunAt = r.StartedAt.UTC().Format(time.RFC3339)
 			}
 		}
+		// Crash-loop override (#458): a crash-looping daemon's latest run is
+		// intermittently a transient "running" (the brief spawn-before-crash
+		// window), which would present a hard-failing task as healthy. Show
+		// the loop state instead of the point-in-time snapshot.
+		if cl, ok := cs.engine.(CrashloopReporter); ok && cl.IsCrashLooping(s.ID) {
+			summary.LastStatus = StatusCrashLooping
+		}
 		out = append(out, summary)
 	}
 	return out, nil
@@ -566,7 +573,15 @@ func (cs *ControlServer) handleStatus(ctx context.Context, req Request) (any, er
 	if len(runs) == 0 {
 		return nil, fmt.Errorf("no runs found for task %q", req.TaskID)
 	}
-	return runs[0], nil
+	run := runs[0]
+	// Crash-loop override (#458): mirror handleList — while the daemon is
+	// crash-looping, never report the transient "running" of a spawn that is
+	// about to die. The Run value is freshly allocated per query, so mutating
+	// the returned copy's status is safe.
+	if cl, ok := cs.engine.(CrashloopReporter); ok && cl.IsCrashLooping(req.TaskID) {
+		run.Status = StatusCrashLooping
+	}
+	return run, nil
 }
 
 func (cs *ControlServer) handleSecretsList(ctx context.Context) ([]string, error) {

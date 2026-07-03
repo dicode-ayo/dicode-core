@@ -130,6 +130,9 @@ tr:last-child td { border-bottom: none; }
 .badge-success   { background: rgba(166, 227, 161, .15); color: var(--green);  border-color: rgba(166, 227, 161, .3); }
 .badge-failure   { background: rgba(243, 139, 168, .15); color: var(--red);    border-color: rgba(243, 139, 168, .3); }
 .badge-running   { background: rgba(249, 226, 175, .15); color: var(--yellow); border-color: rgba(249, 226, 175, .3); }
+/* crashlooping (#458): a daemon stuck in a spawn/crash/backoff loop — stronger
+   red than badge-failure so a persistently-broken daemon stands out. */
+.badge-crashlooping { background: rgba(243, 139, 168, .28); color: var(--red); border-color: rgba(243, 139, 168, .4); }
 .badge-cancelled { background: var(--card-bg); color: var(--muted); border-color: var(--border); }
 .badge-manual    { background: var(--card-bg); color: var(--muted); border-color: var(--border); }
 

@@ -151,6 +151,12 @@ type Engine struct {
 	// growth is monotone. Values are time.Duration; nil entry means "use init".
 	daemonBackoffs sync.Map
 
+	// crashloops counts consecutive quick daemon-body failures per task so a
+	// crash-looping daemon reports DaemonCrashLooping instead of the transient
+	// "running" of a spawn that is about to die (issue #458). In-memory only,
+	// like daemonBackoffs. See crashloop.go.
+	crashloops *crashloopTracker
+
 	// restartGates is a per-daemon at-most-one-in-flight lock for daemon
 	// restarts. See daemon_state.go for the coalescing rationale. Also reused
 	// by handlePipelineStageRerun, keyed by pipeline ID, so a flurry of
@@ -236,6 +242,7 @@ func New(r *registry.Registry, defaultExec pkgruntime.Executor, log *zap.Logger)
 		daemonRuns:         make(map[string]string),
 		daemonSpecs:        make(map[string]*task.Spec),
 		daemonStates:       newDaemonStateMap(),
+		crashloops:         newCrashloopTracker(),
 		restartGates:       newRestartGate(),
 		livePipelines:      make(map[string]*PipelineRunner),
 		deferredPipelines:  make(map[string]*task.PipelineTask),
@@ -620,6 +627,11 @@ func (e *Engine) unregisterTriggers(id string) {
 	delete(e.daemonRuns, id)
 	e.daemonMu.Unlock()
 
+	// Unregistration wipes crash-loop tracking (#458): a removed (or
+	// reloaded-with-new-content) task starts with a fresh failure counter,
+	// mirroring how daemonStates entries don't outlive the registration.
+	e.crashloops.reset(id)
+
 	if runID != "" {
 		e.log.Info("stopping daemon — task unregistered", zap.String("task", id), zap.String("run", runID))
 		e.KillRun(runID)
@@ -856,6 +868,13 @@ func (e *Engine) registerDaemon(spec *task.Spec) {
 // start are expressed as a kind: PipelineTask whose terminal stage is this
 // daemon Task — the render stages run in the pipeline runner, not here.
 func (e *Engine) startDaemon(spec *task.Spec) {
+	// Record the spawn time for lazy crash-loop recovery BEFORE the body can
+	// possibly exit: fireAsync launches the run goroutine, so a very fast
+	// crash could otherwise run noteExit first and a late noteSpawn would
+	// stamp a spawn time onto a dead run — which isCrashLooping's lazy
+	// recovery would later misread as a sustained run and wrongly clear the
+	// crash-loop state (#458).
+	e.crashloops.noteSpawn(spec.ID)
 	runID, err := e.fireAsync(context.Background(), spec, pkgruntime.RunOptions{}, registry.TriggerDaemon)
 	if err != nil {
 		// fireAsync error here is a daemon-body launch failure — binary
@@ -863,6 +882,10 @@ func (e *Engine) startDaemon(spec *task.Spec) {
 		// from DaemonStopped so operators can tell "deliberately stopped /
 		// never started" apart from "daemon body broke" in the WebUI. See
 		// issue #318.
+		//
+		// No run is live, so drop the spawn timestamp recorded above — it
+		// must not age into a fake "sustained run".
+		e.crashloops.clearSpawn(spec.ID)
 		e.setDaemonState(spec.ID, DaemonFailedAfterPreflight)
 		e.log.Error("daemon start failed",
 			zap.String("task", spec.ID),
@@ -893,6 +916,15 @@ func (e *Engine) onDaemonRunFinished(spec *task.Spec, runID string) {
 		e.log.Error("daemon: failed to get run status", zap.String("run", runID), zap.Error(err))
 		return
 	}
+	// Elapsed run time, shared by the crash-loop tracker and the restart
+	// backoff below. run.StartedAt is always set by startRun; run.FinishedAt
+	// may be nil on abnormal exit — treat that as an instant crash so the
+	// pessimistic branch applies in both consumers.
+	var elapsed time.Duration
+	if run.FinishedAt != nil {
+		elapsed = run.FinishedAt.Sub(run.StartedAt)
+	}
+
 	if run.Status == registry.StatusCancelled {
 		// Operator-initiated cancellation (e.g. per-run kill button).
 		// The daemon was running; treat the deliberate stop as a clean
@@ -902,8 +934,26 @@ func (e *Engine) onDaemonRunFinished(spec *task.Spec, runID string) {
 		// below because cancellation short-circuits the restart-policy
 		// decision entirely — a killed daemon stays stopped regardless
 		// of restart=always/on-failure/never.
+		//
+		// Cancellation also clears crash-loop tracking (#458): a kill is
+		// deliberate operator intent, not another crashed start, and the
+		// stopped daemon must not keep reporting "crashlooping".
+		e.crashloops.reset(spec.ID)
 		e.setDaemonState(spec.ID, DaemonStopped)
 		return
+	}
+
+	// Crash-loop accounting (#458): a quick non-success exit bumps the
+	// consecutive-failure counter; a clean or sustained exit resets it.
+	// Tracked for every non-cancelled exit regardless of restart policy so
+	// the rule stays a single invariant; in practice only auto-restarting
+	// daemons accumulate enough consecutive starts to trip the threshold.
+	if fails := e.crashloops.noteExit(spec.ID, elapsed, run.Status == registry.StatusSuccess); fails == crashloopThreshold {
+		e.log.Warn("daemon is crash-looping — status reports 'crashlooping' until a run sustains",
+			zap.String("task", spec.ID),
+			zap.Int("consecutive_quick_failures", fails),
+			zap.Duration("sustain_window", crashloopSustainWindow),
+		)
 	}
 
 	restart := spec.Trigger.Restart
@@ -949,14 +999,8 @@ func (e *Engine) onDaemonRunFinished(spec *task.Spec, runID string) {
 
 	// Exponential backoff for crash-looping daemons. Constants are package-level
 	// (see daemonBackoffInit etc.) so tests can inspect them without repetition.
-	// Compute elapsed run time from the run record. run.StartedAt is always set
-	// by startRun; run.FinishedAt may be nil on abnormal exit — treat that as
-	// an instant crash so the pessimistic branch applies.
-	var elapsed time.Duration
-	if run.FinishedAt != nil {
-		elapsed = run.FinishedAt.Sub(run.StartedAt)
-	}
-
+	// elapsed was computed above (shared with the crash-loop tracker).
+	//
 	// Load the current backoff for this daemon (stored across restarts in a
 	// sync.Map keyed by task ID). Reset to init after a stable run.
 	backoffKey := "daemon-backoff:" + spec.ID

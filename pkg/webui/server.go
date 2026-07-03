@@ -1485,6 +1485,13 @@ func (s *Server) apiListTasks(w http.ResponseWriter, r *http.Request) {
 			lastRunID = runs[0].ID
 			lastRunStatus = runs[0].Status
 		}
+		// Crash-loop override (#458): a crash-looping daemon's latest run is
+		// intermittently a transient "running" (spawn-before-crash window).
+		// Surface the loop state so the list never shows a hard-failing
+		// daemon as healthy. Matches the CLI's cli.list derivation.
+		if s.engine.IsCrashLooping(k.TaskID()) {
+			lastRunStatus = string(trigger.DaemonCrashLooping)
+		}
 		pendingApproval := s.taskPendingApproval(k.TaskID())
 		switch v := k.(type) {
 		case *task.Spec:
@@ -1541,10 +1548,12 @@ type TaskDetail struct {
 
 	// DaemonState surfaces the engine's lifecycle phase for daemon tasks.
 	// Empty for non-daemon tasks so the WebUI can hide the row entirely.
-	// Five-value enum — see pkg/trigger.DaemonState for the canonical list.
+	// Six-value enum — see pkg/trigger.DaemonState for the canonical list.
 	// The "failed_after_preflight" and "crashed" values are distinct from
 	// "stopped" so operators can tell "fireAsync broke" (#318) and "body
-	// crashed without auto-restart" (#325) apart from "deliberately stopped".
+	// crashed without auto-restart" (#325) apart from "deliberately stopped";
+	// "crashlooping" (#458) marks a daemon stuck in a spawn/crash/backoff
+	// loop that would otherwise sample as "running".
 	DaemonState string `json:"daemon_state,omitempty"`
 
 	// PendingApproval flags a task held by the trust-on-change approval gate.
