@@ -30,6 +30,49 @@ func MergeParams(specParams []task.Param, overrides map[string]string) map[strin
 	return out
 }
 
+// BridgeShutdownGrace is how long a socket-bridge subprocess gets to exit on
+// its own after posting its return value before it is signalled.
+const BridgeShutdownGrace = 5 * time.Second
+
+// AwaitBridgeCompletion implements the completion protocol shared by the
+// socket-bridge runtimes: a run ends either when the task posts its return
+// value over IPC or when the subprocess exits, whichever happens first.
+//
+//   - Return first: onReturn is invoked synchronously the moment the value
+//     arrives — before the grace wait — so callers snapshot their result
+//     (return value, IPC output) at the same instant the pre-#388 code did.
+//     The process normally exits shortly after posting /return; it gets
+//     grace to do so, then terminate() is called (both runtimes pass a
+//     SIGTERM). The exit status on this path is deliberately ignored — the
+//     run already produced its result. terminate() is fire-and-forget: the
+//     helper does not wait for the process afterwards (the exec.CommandContext
+//     cancel kills it at the latest when the run context ends).
+//   - Exit first: a return value that raced in just before exit is drained
+//     non-blocking into onReturn, and the process exit error (nil for a
+//     clean exit) is returned with exitedFirst=true.
+//
+// onReturn is called at most once.
+func AwaitBridgeCompletion(returnCh <-chan any, doneCh <-chan error, grace time.Duration, onReturn func(retVal any), terminate func()) (exitErr error, exitedFirst bool) {
+	select {
+	case retVal := <-returnCh:
+		onReturn(retVal)
+		select {
+		case <-doneCh:
+		case <-time.After(grace):
+			terminate()
+		}
+		return nil, false
+
+	case err := <-doneCh:
+		select {
+		case retVal := <-returnCh:
+			onReturn(retVal)
+		default:
+		}
+		return err, true
+	}
+}
+
 // ResolveRunEnv resolves a run's declared env permissions, returning the
 // name→value map to inject into the subprocess environment and a redactor
 // over the secret values for the run-log streams.

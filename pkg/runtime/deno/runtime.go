@@ -15,7 +15,6 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 
 	"github.com/dicode/dicode/pkg/db"
 	denopkg "github.com/dicode/dicode/pkg/deno"
@@ -365,24 +364,14 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	doneCh := make(chan error, 1)
 	go func() { doneCh <- cmd.Wait() }()
 
-	select {
-	case retVal := <-srv.ReturnCh():
-		result.ReturnValue = retVal
-		result.Output = srv.Output()
-		// Process exits shortly after posting /return; give it a moment.
-		select {
-		case <-doneCh:
-		case <-time.After(5 * time.Second):
-			_ = cmd.Process.Signal(syscall.SIGTERM)
-		}
-
-	case exitErr := <-doneCh:
-		// Check for a return value that arrived just before exit (non-blocking).
-		select {
-		case retVal := <-srv.ReturnCh():
+	exitErr, exitedFirst := pkgruntime.AwaitBridgeCompletion(srv.ReturnCh(), doneCh, pkgruntime.BridgeShutdownGrace,
+		func(retVal any) {
 			result.ReturnValue = retVal
-		default:
-		}
+			result.Output = srv.Output()
+		},
+		func() { _ = cmd.Process.Signal(syscall.SIGTERM) },
+	)
+	if exitedFirst {
 		result.Output = srv.Output()
 		if exitErr != nil {
 			result.Error = exitErr

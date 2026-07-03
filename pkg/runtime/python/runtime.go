@@ -50,7 +50,6 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 
 	"github.com/dicode/dicode/pkg/db"
 	"github.com/dicode/dicode/pkg/ipc"
@@ -291,24 +290,16 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 	doneCh := make(chan error, 1)
 	go func() { doneCh <- cmd.Wait() }()
 
-	select {
-	case retVal := <-srv.ReturnCh():
-		result.ChainInput = retVal
-		if out := srv.Output(); out != nil {
-			result.ChainInput = out.Data
-		}
-		select {
-		case <-doneCh:
-		case <-time.After(5 * time.Second):
-			_ = cmd.Process.Signal(syscall.SIGTERM)
-		}
-
-	case exitErr := <-doneCh:
-		select {
-		case retVal := <-srv.ReturnCh():
+	exitErr, exitedFirst := pkgruntime.AwaitBridgeCompletion(srv.ReturnCh(), doneCh, pkgruntime.BridgeShutdownGrace,
+		func(retVal any) {
 			result.ChainInput = retVal
-		default:
-		}
+			if out := srv.Output(); out != nil {
+				result.ChainInput = out.Data
+			}
+		},
+		func() { _ = cmd.Process.Signal(syscall.SIGTERM) },
+	)
+	if exitedFirst {
 		if out := srv.Output(); out != nil {
 			result.ChainInput = out.Data
 		}
