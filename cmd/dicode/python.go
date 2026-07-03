@@ -2,11 +2,8 @@ package main
 
 import (
 	"fmt"
-	"io/fs"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"sort"
 
 	pythonpkg "github.com/dicode/dicode/pkg/runtime/python"
 	uvpkg "github.com/dicode/dicode/pkg/uv"
@@ -42,26 +39,9 @@ func cmdPython(args []string) error {
 // (--check). With --check the sidecars are verified with `uv lock --check`
 // and left untouched; exit is non-zero if any is missing or stale.
 func cmdPythonRelock(args []string) error {
-	check := false
-	dir := ""
-	for _, a := range args {
-		switch {
-		case a == "--check":
-			check = true
-		case a == "--help", a == "-h":
-			fmt.Fprintln(os.Stderr, `Usage: dicode python relock [--check] [dir]   (dir defaults to "tasks")`)
-			return nil
-		case len(a) > 0 && a[0] == '-':
-			return fmt.Errorf("unknown flag %q — usage: dicode python relock [--check] [dir]", a)
-		default:
-			if dir != "" {
-				return fmt.Errorf("unexpected argument %q — only one dir is allowed", a)
-			}
-			dir = a
-		}
-	}
-	if dir == "" {
-		dir = "tasks"
+	check, dir, showedHelp, err := parseRelockArgs("python", args)
+	if err != nil || showedHelp {
+		return err
 	}
 
 	scripts, err := findPythonTaskScripts(dir)
@@ -155,19 +135,5 @@ func cmdPythonRelock(args []string) error {
 // findPythonTaskScripts returns every task.py under dir, sorted for a stable
 // command line and deterministic error ordering. Mirrors findTaskEntrypoints.
 func findPythonTaskScripts(dir string) ([]string, error) {
-	var out []string
-	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if !d.IsDir() && d.Name() == "task.py" {
-			out = append(out, path)
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("scan %s for task.py: %w", dir, err)
-	}
-	sort.Strings(out)
-	return out, nil
+	return findTaskFiles(dir, "task.py")
 }

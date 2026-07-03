@@ -2,11 +2,9 @@ package main
 
 import (
 	"fmt"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 
 	denopkg "github.com/dicode/dicode/pkg/deno"
 )
@@ -38,26 +36,9 @@ func cmdDeno(args []string) error {
 // lock). With --check the lock is verified with --frozen and left untouched;
 // exit is non-zero if it is stale.
 func cmdDenoRelock(args []string) error {
-	check := false
-	dir := ""
-	for _, a := range args {
-		switch {
-		case a == "--check":
-			check = true
-		case a == "--help", a == "-h":
-			fmt.Fprintln(os.Stderr, `Usage: dicode deno relock [--check] [dir]   (dir defaults to "tasks")`)
-			return nil
-		case len(a) > 0 && a[0] == '-':
-			return fmt.Errorf("unknown flag %q — usage: dicode deno relock [--check] [dir]", a)
-		default:
-			if dir != "" {
-				return fmt.Errorf("unexpected argument %q — only one dir is allowed", a)
-			}
-			dir = a
-		}
-	}
-	if dir == "" {
-		dir = "tasks"
+	check, dir, showedHelp, err := parseRelockArgs("deno", args)
+	if err != nil || showedHelp {
+		return err
 	}
 
 	lockPath := filepath.Join(dir, "deno.lock")
@@ -119,21 +100,7 @@ func cmdDenoRelock(args []string) error {
 // findTaskEntrypoints returns every task.ts under dir, sorted for a stable
 // command line (deterministic lock ordering).
 func findTaskEntrypoints(dir string) ([]string, error) {
-	var out []string
-	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if !d.IsDir() && d.Name() == "task.ts" {
-			out = append(out, path)
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("scan %s for task.ts: %w", dir, err)
-	}
-	sort.Strings(out)
-	return out, nil
+	return findTaskFiles(dir, "task.ts")
 }
 
 func fileExists(p string) bool {
