@@ -171,3 +171,88 @@ func TestStartDaemon_InstantCrash_NoStaleSlot_TerminalStateSticks(t *testing.T) 
 			got, DaemonCrashed)
 	}
 }
+
+// TestDaemon_BackoffRestartCoalescesWithConcurrentStart — race 2, end to
+// end: the test acquires the per-daemon restart gate up front, playing a
+// concurrent re-register (registerDaemon holds the same gate across its
+// startDaemon call). The instant-crash body's finish handler schedules a
+// backoff restart; when the backoff elapses it must hit the held gate and
+// coalesce — so exactly ONE body ever starts.
+func TestDaemon_BackoffRestartCoalescesWithConcurrentStart(t *testing.T) {
+	eng, spec, exec := daemonRaceEnv(t, "always")
+
+	// Play the concurrent re-register: hold the gate for the whole test so
+	// the backoff-restart path deterministically finds it taken.
+	if !eng.restartGates.tryAcquire(spec.ID) {
+		t.Fatal("could not acquire restart gate")
+	}
+	defer eng.restartGates.release(spec.ID)
+
+	// registerDaemon calls startDaemon while holding the gate; mirror that.
+	eng.startDaemon(spec)
+
+	// Body crashes instantly; the finish handler sleeps daemonBackoffInit and
+	// must then coalesce on the held gate instead of double-starting.
+	time.Sleep(daemonBackoffInit + 1500*time.Millisecond)
+	if got := exec.runs.Load(); got != 1 {
+		t.Fatalf("executed %d daemon bodies, want exactly 1 — the backoff restart must coalesce on the held restart gate", got)
+	}
+}
+
+// TestOnDaemonRunFinished_BackoffRestart_SkipsWhenAlreadyRestarted — race 2,
+// completed-restart flavor: by the time the backoff elapses, a re-register
+// has already started a fresh body (live daemonRuns slot, gate released).
+// The restart path must observe the slot and skip rather than start a second
+// body next to the live one.
+func TestOnDaemonRunFinished_BackoffRestart_SkipsWhenAlreadyRestarted(t *testing.T) {
+	eng, spec, exec := daemonRaceEnv(t, "always")
+
+	// Seed a finished quick-failure run for the OLD body.
+	runID := quickFailureRun(t, eng, spec.ID, registry.StatusFailure)
+
+	// Simulate the re-register having completed during the backoff: a fresh
+	// body is live under a different run ID (reservation written before the
+	// body fires — race 1 fix — so slot presence means "body in flight").
+	eng.daemonMu.Lock()
+	eng.daemonRuns[spec.ID] = "live-restarted-run"
+	eng.daemonMu.Unlock()
+
+	// Synchronous: sleeps daemonBackoffInit, then must skip on the live slot.
+	eng.onDaemonRunFinished(spec, runID)
+
+	if got := exec.runs.Load(); got != 0 {
+		t.Fatalf("executed %d daemon bodies, want 0 — a live run slot must suppress the backoff restart", got)
+	}
+	eng.daemonMu.Lock()
+	slot := eng.daemonRuns[spec.ID]
+	eng.daemonMu.Unlock()
+	if slot != "live-restarted-run" {
+		t.Fatalf("daemonRuns slot = %q, want the concurrent starter's %q left untouched", slot, "live-restarted-run")
+	}
+}
+
+// TestOnDaemonRunFinished_BackoffRestart_SkipsWhenUnregisteredDuringBackoff —
+// the unregister-during-backoff hole adjacent to race 2: the stillRegistered
+// check at the top of onDaemonRunFinished predates the backoff sleep, so an
+// Unregister during the sleep must be re-checked before restarting — an
+// unregistered daemon must not be resurrected.
+func TestOnDaemonRunFinished_BackoffRestart_SkipsWhenUnregisteredDuringBackoff(t *testing.T) {
+	eng, spec, exec := daemonRaceEnv(t, "always")
+
+	runID := quickFailureRun(t, eng, spec.ID, registry.StatusFailure)
+
+	// Unregister mid-backoff: the delay is well past the (instant, in-memory)
+	// top-of-function checks and well inside the 1s backoff sleep.
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		eng.daemonMu.Lock()
+		delete(eng.daemonSpecs, spec.ID)
+		eng.daemonMu.Unlock()
+	}()
+
+	eng.onDaemonRunFinished(spec, runID)
+
+	if got := exec.runs.Load(); got != 0 {
+		t.Fatalf("executed %d daemon bodies, want 0 — an unregister during the backoff must not resurrect the daemon", got)
+	}
+}
