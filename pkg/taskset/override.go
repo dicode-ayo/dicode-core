@@ -292,6 +292,10 @@ func copySpec(s *task.Spec) *task.Spec {
 		out.Permissions.Net = make([]string, len(s.Permissions.Net))
 		copy(out.Permissions.Net, s.Permissions.Net)
 	}
+	if s.Permissions.Sys != nil {
+		out.Permissions.Sys = make([]string, len(s.Permissions.Sys))
+		copy(out.Permissions.Sys, s.Permissions.Sys)
+	}
 	if s.Trigger.Chain != nil {
 		chain := *s.Trigger.Chain
 		out.Trigger.Chain = &chain
