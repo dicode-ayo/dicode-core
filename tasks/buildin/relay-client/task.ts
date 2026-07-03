@@ -11,6 +11,8 @@ import {
   type TofuResult,
 } from "npm:dicode-relay@^0.1.4/client";
 
+import type { DicodeSdk } from "../../sdk.ts";
+
 const IDENTITY_CTX   = "dicode/relay-identity/v1";
 const BROKER_PIN_CTX = "dicode/relay-broker-pin/v1";
 const PREFIX         = "relay/";
@@ -37,7 +39,50 @@ function b64decode(s: string): Uint8Array {
 const OUTER_BACKOFF_INITIAL_MS = 5_000;
 const OUTER_BACKOFF_MAX_MS = 60_000;
 
+// ── ws abortHandshake fault containment (#460) ──────────────────────────
+// When the relay is unreachable, npm ws@8.x can run abortHandshake() from
+// an AbortSignal timeout callback after the 'error' handler already nulled
+// the underlying ClientRequest, deref'ing req.setHeader. That TypeError is
+// thrown OUTSIDE the promise chain RelayClient.run() is awaited on, so the
+// outer backoff loop can't catch it — Deno exits 1 and, with restart: never,
+// the tunnel stays dead until manual intervention.
+
+// True only for that fault family: a TypeError raised inside ws's
+// websocket.js handshake path deref'ing a nulled request. Anything else
+// must stay fatal so real bugs aren't masked by the reconnect loop.
+export function isAbortedHandshakeFault(err: unknown): boolean {
+  if (!(err instanceof TypeError)) return false;
+  const stack = err.stack ?? "";
+  const inWsHandshake = stack.includes("abortHandshake") ||
+    /\bws(@[^/\s]+)?\/lib\/websocket\.js/.test(stack);
+  // Both V8 phrasings: "Cannot read properties of null (reading 'x')" and
+  // the older "Cannot read property 'x' of null".
+  return inWsHandshake && /Cannot read propert(?:y|ies).* of null/.test(err.message);
+}
+
+// Set while a RelayClient.run() is in flight; a swallowed fault rejects
+// that run's race so the outer backoff loop drives the reconnect.
+let onWsFault: ((err: Error) => void) | null = null;
+
+function installWsFaultHandlers(): void {
+  const swallow = (ev: Event, err: unknown, kind: string) => {
+    if (!isAbortedHandshakeFault(err)) return; // real bug — stay fatal
+    ev.preventDefault();
+    console.warn(
+      `relay-client: swallowed ws handshake fault (${kind}), reconnecting:`,
+      (err as Error).message,
+    );
+    onWsFault?.(err as Error);
+  };
+  globalThis.addEventListener("error", (ev) => swallow(ev, ev.error, "error"));
+  globalThis.addEventListener(
+    "unhandledrejection",
+    (ev) => swallow(ev, ev.reason, "unhandledrejection"),
+  );
+}
+
 export default async function main(sdk: DicodeSdk): Promise<void> {
+  installWsFaultHandlers();
   let backoff = OUTER_BACKOFF_INITIAL_MS;
 
   // Outer loop: never exit. task.yaml has restart: never so engine won't
@@ -95,7 +140,19 @@ async function runOnce(sdk: DicodeSdk): Promise<void> {
     },
   });
 
-  await client.run();
+  // Race run() against the process-level fault channel: a swallowed ws
+  // handshake fault rejects the race (caught by main's backoff loop) and
+  // the abort tears down the abandoned client so reconnects don't stack.
+  const abort = new AbortController();
+  const fault = new Promise<never>((_, reject) => {
+    onWsFault = reject;
+  });
+  try {
+    await Promise.race([client.run(abort.signal), fault]);
+  } finally {
+    onWsFault = null;
+    abort.abort();
+  }
 }
 
 async function loadOrGenerateIdentity(
