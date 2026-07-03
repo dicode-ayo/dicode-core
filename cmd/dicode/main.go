@@ -66,6 +66,17 @@ func main() {
 		return
 	}
 
+	// `python` is the uv-side twin of `deno` (relock/verify per-script lock
+	// sidecars via the pinned uv). Same contract: files + the provisioned
+	// toolchain only, so it runs without the daemon.
+	if os.Args[1] == "python" {
+		if err := cmdPython(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "dicode: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	// The daemon subcommand runs the full engine in-process.
 	// It must be handled before ensureDaemon — the daemon IS the daemon.
 	if os.Args[1] == "daemon" {
@@ -1117,6 +1128,7 @@ Commands:
                                   flags: --source NAME, --force
   task approve <task-id>          approve a task held pending by the approval gate
   deno relock [--check] [dir]     regenerate/verify a task tree's deno.lock via the pinned Deno
+  python relock [--check] [dir]   regenerate/verify Python tasks' task.py.lock sidecars via the pinned uv
   secrets list                    list secret keys
   secrets set <key> <value>       store a secret
   secrets delete <key>            delete a secret
