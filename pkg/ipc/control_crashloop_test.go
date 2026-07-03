@@ -151,3 +151,21 @@ func TestHandleStatus_NotCrashLooping_KeepsRunStatus(t *testing.T) {
 		t.Fatalf("run.Status = %q, want %q", run.Status, registry.StatusRunning)
 	}
 }
+
+// TestHandleStatus_EngineWithoutReporter_DegradesGracefully mirrors the
+// handleList degrade test: a plain EngineRunner (no CrashloopReporter) must
+// keep the old behaviour on the status path too.
+func TestHandleStatus_EngineWithoutReporter_DegradesGracefully(t *testing.T) {
+	cs, _ := newCrashloopControlEnv(t, &mockEngine{})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	res, err := cs.handleStatus(ctx, Request{TaskID: "loopy"})
+	if err != nil {
+		t.Fatalf("handleStatus: %v", err)
+	}
+	run := res.(*registry.Run)
+	if run.Status != registry.StatusRunning {
+		t.Fatalf("run.Status = %q, want %q", run.Status, registry.StatusRunning)
+	}
+}

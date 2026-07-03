@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/dicode/dicode/pkg/db"
+	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/registry"
 	"github.com/dicode/dicode/pkg/task"
 	"go.uber.org/zap"
@@ -320,5 +321,62 @@ func TestUnregister_ResetsCrashLoop(t *testing.T) {
 	eng.Unregister(spec.ID)
 	if eng.IsCrashLooping(spec.ID) {
 		t.Fatal("still crashlooping after Unregister")
+	}
+}
+
+// TestCrashloopTracker_ExitAfterSpawnKeepsLooping pins the spawn/exit
+// ordering fix: noteSpawn is recorded in the launch path BEFORE the body can
+// exit, and a subsequent quick failure zeroes the timestamp — so a dead run's
+// spawn time can never age past the sustain window and be misread as a
+// sustained run during a long restart backoff.
+func TestCrashloopTracker_ExitAfterSpawnKeepsLooping(t *testing.T) {
+	now := time.Now()
+	tr := newCrashloopTracker()
+	tr.now = func() time.Time { return now }
+
+	for i := 0; i < crashloopThreshold; i++ {
+		tr.noteExit("d", quickFail, false)
+	}
+	if !tr.isCrashLooping("d") {
+		t.Fatal("expected crashlooping after threshold quick failures")
+	}
+
+	// Respawn recorded, then the run dies quickly: the exit must zero the
+	// spawn timestamp, so even well past the sustain window the daemon still
+	// reports crashlooping (nothing sustained).
+	tr.noteSpawn("d")
+	tr.noteExit("d", quickFail, false)
+	now = now.Add(crashloopSustainWindow + time.Second)
+	if !tr.isCrashLooping("d") {
+		t.Fatal("stale spawn timestamp from a dead run cleared crashlooping")
+	}
+}
+
+// TestCrashloopTracker_ClearSpawnDropsTimestamp pins clearSpawn (used when
+// fireAsync fails to launch): the failure count survives, but the orphaned
+// spawn timestamp must not age into a fake sustained run.
+func TestCrashloopTracker_ClearSpawnDropsTimestamp(t *testing.T) {
+	now := time.Now()
+	tr := newCrashloopTracker()
+	tr.now = func() time.Time { return now }
+
+	for i := 0; i < crashloopThreshold; i++ {
+		tr.noteExit("d", quickFail, false)
+	}
+	tr.noteSpawn("d")
+	tr.clearSpawn("d")
+	now = now.Add(crashloopSustainWindow + time.Second)
+	if !tr.isCrashLooping("d") {
+		t.Fatal("clearSpawn'd timestamp still cleared crashlooping")
+	}
+}
+
+// TestCrashLoopingStatusMirrorsIPC guards the hand-mirrored wire value:
+// pkg/ipc cannot import pkg/trigger, so StatusCrashLooping duplicates
+// DaemonCrashLooping's string by hand — this pins them equal.
+func TestCrashLoopingStatusMirrorsIPC(t *testing.T) {
+	if string(DaemonCrashLooping) != ipc.StatusCrashLooping {
+		t.Fatalf("trigger.DaemonCrashLooping = %q, want ipc.StatusCrashLooping = %q",
+			DaemonCrashLooping, ipc.StatusCrashLooping)
 	}
 }

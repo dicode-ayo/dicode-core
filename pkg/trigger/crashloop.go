@@ -108,6 +108,17 @@ func (t *crashloopTracker) noteExit(taskID string, elapsed time.Duration, clean 
 	return e.quickFails
 }
 
+// clearSpawn drops the live-spawn timestamp without touching the failure
+// count. Called when a spawn recorded via noteSpawn failed to launch (no run
+// is live), so the timestamp cannot age into a fake "sustained run".
+func (t *crashloopTracker) clearSpawn(taskID string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if e, ok := t.entries[taskID]; ok {
+		e.spawnedAt = time.Time{}
+	}
+}
+
 // reset clears all crash-loop state for a task. Called on operator
 // cancellation and on unregistration.
 func (t *crashloopTracker) reset(taskID string) {

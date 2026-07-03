@@ -868,6 +868,13 @@ func (e *Engine) registerDaemon(spec *task.Spec) {
 // start are expressed as a kind: PipelineTask whose terminal stage is this
 // daemon Task — the render stages run in the pipeline runner, not here.
 func (e *Engine) startDaemon(spec *task.Spec) {
+	// Record the spawn time for lazy crash-loop recovery BEFORE the body can
+	// possibly exit: fireAsync launches the run goroutine, so a very fast
+	// crash could otherwise run noteExit first and a late noteSpawn would
+	// stamp a spawn time onto a dead run — which isCrashLooping's lazy
+	// recovery would later misread as a sustained run and wrongly clear the
+	// crash-loop state (#458).
+	e.crashloops.noteSpawn(spec.ID)
 	runID, err := e.fireAsync(context.Background(), spec, pkgruntime.RunOptions{}, registry.TriggerDaemon)
 	if err != nil {
 		// fireAsync error here is a daemon-body launch failure — binary
@@ -875,6 +882,10 @@ func (e *Engine) startDaemon(spec *task.Spec) {
 		// from DaemonStopped so operators can tell "deliberately stopped /
 		// never started" apart from "daemon body broke" in the WebUI. See
 		// issue #318.
+		//
+		// No run is live, so drop the spawn timestamp recorded above — it
+		// must not age into a fake "sustained run".
+		e.crashloops.clearSpawn(spec.ID)
 		e.setDaemonState(spec.ID, DaemonFailedAfterPreflight)
 		e.log.Error("daemon start failed",
 			zap.String("task", spec.ID),
@@ -885,9 +896,6 @@ func (e *Engine) startDaemon(spec *task.Spec) {
 	e.daemonMu.Lock()
 	e.daemonRuns[spec.ID] = runID
 	e.daemonMu.Unlock()
-	// Record the spawn time for lazy crash-loop recovery: once this run
-	// survives crashloopSustainWindow, isCrashLooping self-clears (#458).
-	e.crashloops.noteSpawn(spec.ID)
 	e.setDaemonState(spec.ID, DaemonRunning)
 }
 
