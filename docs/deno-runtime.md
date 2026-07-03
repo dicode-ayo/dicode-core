@@ -398,7 +398,7 @@ Deno caches packages on first run.
 
 If a `deno.lock` file exists at or near the task directory (the runtime walks up to three parent directories), Deno is invoked with `--lock=<path> --frozen`. This prevents per-run resolution of newer versions within a caret range (`^`) — packages are pinned to the exact versions recorded in the lockfile. Buildin tasks ship a `tasks/deno.lock` that is automatically detected and enforced.
 
-When a task's dependencies change, regenerate the lock with `dicode deno relock [dir]` (dir defaults to `tasks`). It provisions the pinned Deno and re-caches every `task.ts` under the tree, so the lock is deterministic regardless of any system Deno. `dicode deno relock --check` verifies the lock without modifying it (exit non-zero if stale) — run it in CI to catch drift before it reaches the runtime.
+When a task's dependencies change, regenerate the lock with `dicode deno relock [dir]` (dir defaults to `tasks`). It provisions the pinned Deno and re-caches every `task.ts` under the tree, so the lock is deterministic regardless of any system Deno. `dicode deno relock --check` verifies the lock without modifying it (exit non-zero if stale) — run it in CI to catch drift before it reaches the runtime. The runtime-spanning `dicode relock [--check] [dir]` runs this Deno pass and the Python sidecar pass (see [python-runtime.md](python-runtime.md)) together — one command covering every task lock.
 
 ---
 

@@ -228,6 +228,40 @@ The `# /// script` block must appear near the top of `task.py`. uv creates a
 dedicated virtual environment per script on first run and caches it for
 subsequent runs (`~/.cache/uv/`).
 
+### Dependency pinning
+
+If a `task.py.lock` sidecar exists next to `task.py` (written by
+`uv lock --script`), the runtime stages it alongside the temporary wrapper and
+invokes uv with `--locked`. This prevents per-run resolution of newer versions
+within a range (`>=`, `~=`, `^`-style caret ranges) — packages are pinned to
+the exact versions and hashes recorded in the sidecar, and a stale lock fails
+the run loudly instead of silently re-resolving. Tasks without a sidecar (for
+example, tasks with no PEP 723 block at all) run exactly as before — the same
+degrade behaviour as the Deno runtime when no `deno.lock` is present.
+
+When a task's dependencies change, regenerate the sidecar with
+`dicode python relock [dir]` (dir defaults to `tasks`). It provisions the
+pinned uv and runs `uv lock --script` for every `task.py` under the tree that
+carries a PEP 723 block, so the locks are deterministic regardless of any
+system uv; sidecars orphaned by a removed block are deleted. `dicode python
+relock --check` verifies the sidecars without modifying them (exit non-zero if
+one is missing, stale, or orphaned) — run it in CI to catch drift before it
+reaches the runtime. Buildin/example tasks ship committed `task.py.lock`
+sidecars that are automatically detected and enforced.
+
+The runtime-spanning `dicode relock [--check] [dir]` runs the Deno and Python
+lock passes together for whichever task kinds exist under the tree — one
+command (and one CI step) covering both `tasks/deno.lock` and the
+`task.py.lock` sidecars.
+
+> **Pin `requires-python` for a reproducible lock.** A lock only reproduces if
+> the PEP 723 block declares a `requires-python` constraint. Without one, uv
+> resolves against whatever Python is default in the current environment
+> (e.g. `>=3.11` on a dev box vs `>=3.12` in CI), producing a *different* lock
+> that then fails `--locked` on the other machine. `dicode python relock` warns
+> when a lockable script omits it — add e.g. `# requires-python = ">=3.11"` to
+> the block.
+
 ---
 
 ## Run context

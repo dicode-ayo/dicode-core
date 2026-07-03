@@ -27,6 +27,11 @@
 // The runtime extracts any such block from task.py and places it at the top of
 // the temporary wrapper file so that uv can parse it correctly.
 //
+// When a task.py.lock sidecar exists (written by `dicode python relock` via
+// `uv lock --script`), it is staged next to the wrapper and enforced with
+// `uv run --locked`, pinning resolution to the recorded versions and hashes.
+// Without a sidecar the task runs unlocked, exactly as before (issue #465).
+//
 // # Permission enforcement
 //
 // Declared permissions.{fs,net,run} are enforced by a PEP 578 audit hook
@@ -360,7 +365,22 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 	}
 	tmpFile.Close()
 
-	cmd := exec.CommandContext(execCtx, e.uvPath, "run", tmpFile.Name()) //nolint:gosec
+	// Reproducible dependency resolution (issue #465): when the task has a
+	// committed lock sidecar (task.py.lock, from `dicode python relock`),
+	// stage it next to the wrapper and run with --locked so drift fails
+	// loudly instead of silently resolving new versions. Tasks without a
+	// sidecar run exactly as before — mirrors the Deno runtime, which only
+	// enforces --frozen when a deno.lock is present.
+	stagedLock, locked, err := stageLockSidecar(scriptPath, tmpFile.Name())
+	if err != nil {
+		result.Error = err
+		return result, nil
+	}
+	if locked {
+		defer os.Remove(stagedLock)
+	}
+
+	cmd := exec.CommandContext(execCtx, e.uvPath, buildUvRunArgs(tmpFile.Name(), locked)...) //nolint:gosec
 	cmd.Env = pkgruntime.SubprocessEnv(spec, resolved, socketPath, token)
 
 	stderr, err := cmd.StderrPipe()
