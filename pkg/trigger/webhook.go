@@ -668,7 +668,7 @@ func isValidRelayBase(s string) bool {
 	return validRelayBaseRe.MatchString(s)
 }
 
-func injectDicodeSDK(html, hookPath, taskID string, r *http.Request) string {
+func injectDicodeSDK(htmlDoc, hookPath, taskID string, r *http.Request) string {
 	relayBase := r.Header.Get("X-Relay-Base")
 	// Only accept relay base paths matching /u/<64-hex-chars>.
 	if relayBase != "" && !isValidRelayBase(relayBase) {
@@ -681,18 +681,25 @@ func injectDicodeSDK(html, hookPath, taskID string, r *http.Request) string {
 		dicodeJSSrc = relayBase + "/dicode.js"
 	}
 
-	injection := `<base href="` + basePath + `/">` +
-		`<meta name="dicode-task" content="` + taskID + `">` +
-		`<meta name="dicode-hook" content="` + basePath + `">` +
-		`<script src="` + dicodeJSSrc + `"></script>`
+	// HTML-escape every interpolated value. All three are already
+	// constrained upstream — relayBase by the anchored hex regex above,
+	// hookPath by the registered-webhook map match, taskID by the registry —
+	// but escaping makes the attribute contexts safe by construction rather
+	// than by upstream invariant (CodeQL go/reflected-xss). A no-op for all
+	// legitimate values.
+	escBase := html.EscapeString(basePath)
+	injection := `<base href="` + escBase + `/">` +
+		`<meta name="dicode-task" content="` + html.EscapeString(taskID) + `">` +
+		`<meta name="dicode-hook" content="` + escBase + `">` +
+		`<script src="` + html.EscapeString(dicodeJSSrc) + `"></script>`
 	// Inject immediately after <head> so <base> precedes every other element
 	// (stylesheets, scripts, images) that carries a relative URL.
-	if i := strings.Index(html, "<head>"); i != -1 {
+	if i := strings.Index(htmlDoc, "<head>"); i != -1 {
 		after := i + len("<head>")
-		return html[:after] + "\n" + injection + html[after:]
+		return htmlDoc[:after] + "\n" + injection + htmlDoc[after:]
 	}
 	// Fallback for pages without a <head> tag.
-	return injection + "\n" + html
+	return injection + "\n" + htmlDoc
 }
 
 // allowedAssetTypes maps file extensions to their Content-Type for webhook UI assets.
