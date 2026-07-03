@@ -43,7 +43,12 @@ func cmdPythonRelock(args []string) error {
 	if err != nil || showedHelp {
 		return err
 	}
+	return runPythonRelock(check, dir)
+}
 
+// runPythonRelock is the parse-free core of `dicode python relock`, shared
+// with the runtime-spanning `dicode relock` frontend.
+func runPythonRelock(check bool, dir string) error {
 	scripts, err := findPythonTaskScripts(dir)
 	if err != nil {
 		return err

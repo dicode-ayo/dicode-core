@@ -77,11 +77,8 @@ jobs:
       - name: Build dicode binary
         run: go build -o dicode ./cmd/dicode
 
-      - name: Verify tasks/deno.lock is up to date
-        run: ./dicode deno relock --check
-
-      - name: Verify Python task lock sidecars are up to date
-        run: ./dicode python relock --check
+      - name: Verify task locks are up to date (deno.lock + task.py.lock sidecars)
+        run: ./dicode relock --check
 
       - name: Start daemon and run task tests
         run: |

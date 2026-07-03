@@ -249,6 +249,11 @@ one is missing, stale, or orphaned) — run it in CI to catch drift before it
 reaches the runtime. Buildin/example tasks ship committed `task.py.lock`
 sidecars that are automatically detected and enforced.
 
+The runtime-spanning `dicode relock [--check] [dir]` runs the Deno and Python
+lock passes together for whichever task kinds exist under the tree — one
+command (and one CI step) covering both `tasks/deno.lock` and the
+`task.py.lock` sidecars.
+
 > **Pin `requires-python` for a reproducible lock.** A lock only reproduces if
 > the PEP 723 block declares a `requires-python` constraint. Without one, uv
 > resolves against whatever Python is default in the current environment

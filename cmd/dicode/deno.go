@@ -40,7 +40,12 @@ func cmdDenoRelock(args []string) error {
 	if err != nil || showedHelp {
 		return err
 	}
+	return runDenoRelock(check, dir)
+}
 
+// runDenoRelock is the parse-free core of `dicode deno relock`, shared with
+// the runtime-spanning `dicode relock` frontend.
+func runDenoRelock(check bool, dir string) error {
 	lockPath := filepath.Join(dir, "deno.lock")
 	if check {
 		if _, err := os.Stat(lockPath); err != nil {
