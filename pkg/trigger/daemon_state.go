@@ -60,6 +60,21 @@ const (
 	// the daemon (e.g. via manual run or a registry reload) to retry. The
 	// engine does not automatically transition out of this state.
 	DaemonCrashed DaemonState = "crashed"
+
+	// DaemonCrashLooping indicates the daemon's body has failed
+	// crashloopThreshold consecutive starts, each dying within
+	// crashloopSustainWindow (issue #458). Unlike DaemonCrashed the engine IS
+	// still restarting the body (restart=always / on-failure), so a
+	// point-in-time snapshot would intermittently land in the brief
+	// spawn-before-crash window and report a hard-failing task as "running".
+	// This state overrides that transient: while the crash-loop tracker is
+	// tripped, DaemonState reports crashlooping regardless of whether a spawn
+	// is momentarily in flight.
+	//
+	// Self-clearing: the state ends as soon as a run sustains past the
+	// window, exits cleanly, is cancelled by an operator, or the task is
+	// unregistered — see pkg/trigger/crashloop.go for the exact rule.
+	DaemonCrashLooping DaemonState = "crashlooping"
 )
 
 // daemonStateMap is a thread-safe taskID → DaemonState map. Kept as a
@@ -98,8 +113,17 @@ func (d *daemonStateMap) set(taskID string, s DaemonState) {
 // DaemonState returns the current lifecycle phase of the daemon with the
 // given task ID. Returns DaemonStopped for unknown / never-started tasks.
 //
+// Crash-loop override (issue #458): while the crash-loop tracker is tripped
+// for this task, the reported state is DaemonCrashLooping even if the
+// underlying map says DaemonRunning — a crash-looping daemon's respawns set
+// DaemonRunning for the brief spawn-before-crash window, and surfacing that
+// transient would present a hard-failing task as healthy.
+//
 // Safe for concurrent use.
 func (e *Engine) DaemonState(taskID string) DaemonState {
+	if e.crashloops.isCrashLooping(taskID) {
+		return DaemonCrashLooping
+	}
 	return e.daemonStates.get(taskID)
 }
 
