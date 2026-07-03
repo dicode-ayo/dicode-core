@@ -229,7 +229,7 @@ func TestRuntime_Env_From(t *testing.T) {
 // TestRuntime_Env_Secret: secret: resolves from the secrets chain and injects.
 func TestRuntime_Env_Secret(t *testing.T) {
 	e := newTestEnv(t)
-	e.rt.secrets = secrets.Chain{mockSecretProvider{"my_api_key": "secret-value"}}
+	e.rt.SecretsChain = secrets.Chain{mockSecretProvider{"my_api_key": "secret-value"}}
 	spec := &task.Spec{
 		ID: "env-secret", Name: "env-secret", Runtime: task.RuntimeDeno,
 		Trigger: task.TriggerConfig{Manual: true}, Timeout: 30 * time.Second,
@@ -249,7 +249,7 @@ func TestRuntime_Env_Secret(t *testing.T) {
 // TestRuntime_Env_SecretMissing: secret: with a missing key fails the run immediately.
 func TestRuntime_Env_SecretMissing(t *testing.T) {
 	e := newTestEnv(t)
-	e.rt.secrets = secrets.Chain{mockSecretProvider{}} // empty — key not present
+	e.rt.SecretsChain = secrets.Chain{mockSecretProvider{}} // empty — key not present
 	spec := &task.Spec{
 		ID: "env-missing", Name: "env-missing", Runtime: task.RuntimeDeno,
 		Trigger: task.TriggerConfig{Manual: true}, Timeout: 30 * time.Second,
@@ -575,7 +575,7 @@ func TestRuntime_LogRedaction_SecretValue(t *testing.T) {
 	const secretValue = "s3cr3t-p@ssw0rd-xyz"
 
 	e := newTestEnv(t)
-	e.rt.secrets = secrets.Chain{mockSecretProvider{"my_key": secretValue}}
+	e.rt.SecretsChain = secrets.Chain{mockSecretProvider{"my_key": secretValue}}
 	spec := &task.Spec{
 		ID: "log-redact", Name: "log-redact", Runtime: task.RuntimeDeno,
 		Trigger: task.TriggerConfig{Manual: true}, Timeout: 30 * time.Second,

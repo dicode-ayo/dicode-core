@@ -41,17 +41,14 @@
 package python
 
 import (
-	"bufio"
 	"context"
 	_ "embed"
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 
 	"github.com/dicode/dicode/pkg/db"
 	"github.com/dicode/dicode/pkg/ipc"
@@ -69,110 +66,15 @@ var sdkContent string
 
 // Runtime is the ManagedRuntime implementation for Python+uv.
 // It manages the uv binary lifecycle and creates socket-bridge Executors.
+//
+// The Set* dependency wiring (SetEngine, SetGateway, SetInputStore, ...) is
+// promoted from the embedded pkgruntime.BridgeDeps — see bridgedeps.go for
+// the full surface shared with the Deno runtime. Executors read the
+// late-wired fields (InputStore, Replayer, SourceMgr, RepoResolver,
+// TestGuard, ProtectedPaths) live from the parent's BridgeDeps at IPC server
+// creation time.
 type Runtime struct {
-	reg            *registry.Registry
-	secrets        secrets.Chain
-	secretsManager secrets.Manager      // optional; wired for dicode.secrets_set/delete
-	inputStore     *registry.InputStore // optional; wired for dicode.runs.delete_input / get_input
-	db             db.DB
-	log            *zap.Logger
-	secret         []byte
-	engine         ipc.EngineRunner
-	gateway        *ipc.Gateway
-	// secretOutputCh is opt-in: when set, every Execute wires it into the
-	// per-run IPC server so a provider task's dicode.output(..., secret=
-	// True) call is routed to the resolver awaiting it. Nil leaves the
-	// path inert (current behavior).
-	secretOutputCh chan map[string]string
-	// providerRunner is wired by the trigger engine at daemon startup so
-	// the env resolver can spawn provider tasks for from: task:<id>
-	// entries. Nil disables provider lookups; legacy paths still work.
-	providerRunner envresolve.ProviderRunner
-	// sharedResolver is the daemon-scoped env resolver whose TTL cache
-	// survives across task launches (issue #242). When non-nil, the executor
-	// uses it instead of constructing a fresh instance per Execute.
-	sharedResolver *envresolve.Resolver
-	// replayer, sourceMgr, repoResolver are wired after buildRuntimes returns
-	// (same late-wiring pattern as inputStore). Executors read these fields
-	// from parent at IPC server creation time.
-	replayer     *registry.Replayer      // optional; enables dicode.runs.replay
-	sourceMgr    ipc.SourceDevModeSetter // optional; enables dicode.sources.set_dev_mode
-	repoResolver ipc.RepoPathResolver    // optional; enables dicode.git.commit_push
-	// testGuard is the approval gate's veto for dicode.tasks.test, forwarded
-	// to every per-run IPC server. Executors read it live from parent. Nil
-	// means allow.
-	testGuard func(taskID string) error
-	// protectedPaths are files (dicode.lock, dicode.yaml) that hold approval
-	// state and must never be writable by a task, even when a broad "w"/"rw"
-	// grant covers their directory. Forwarded to the guard policy's deny list.
-	// Executors read it live from parent.
-	protectedPaths []string
-}
-
-// SetEngine configures the engine runner used for dicode.run_task calls.
-func (rt *Runtime) SetEngine(e ipc.EngineRunner) { rt.engine = e }
-
-// SetGateway attaches the HTTP gateway so daemon tasks can call http.register.
-func (rt *Runtime) SetGateway(g *ipc.Gateway) { rt.gateway = g }
-
-// SetSecretsManager wires the secrets manager so tasks with permissions.dicode.secrets_write
-// can call dicode.secrets_set() and dicode.secrets_delete().
-func (rt *Runtime) SetSecretsManager(m secrets.Manager) { rt.secretsManager = m }
-
-// SetInputStore wires the InputStore so the per-run IPC server can serve
-// dicode.runs.delete_input and dicode.runs.get_input calls. Must be called
-// before any Execute; mirrors the SetEngine / SetGateway pattern.
-func (rt *Runtime) SetInputStore(is *registry.InputStore) { rt.inputStore = is }
-
-// SetReplayer wires the Replayer so the per-run IPC server can serve
-// dicode.runs.replay calls. Mirrors the SetInputStore wiring.
-func (rt *Runtime) SetReplayer(r *registry.Replayer) { rt.replayer = r }
-
-// SetSourceManager wires the source manager so the per-run IPC server can
-// serve dicode.sources.set_dev_mode calls.
-func (rt *Runtime) SetSourceManager(m ipc.SourceDevModeSetter) { rt.sourceMgr = m }
-
-// SetRepoResolver wires the repo-path resolver so the per-run IPC server
-// can serve dicode.git.commit_push calls.
-func (rt *Runtime) SetRepoResolver(r ipc.RepoPathResolver) { rt.repoResolver = r }
-
-// SetTestGuard wires the approval gate's veto for dicode.tasks.test into
-// every per-run IPC server. Nil means allow; mirrors the SetReplayer wiring.
-func (rt *Runtime) SetTestGuard(g func(taskID string) error) { rt.testGuard = g }
-
-// SetProtectedPaths records files that no task may write (dicode.lock,
-// dicode.yaml — the approval-gate state). Forwarded to the guard policy's deny
-// list so the deny wins over any broad write grant. Mirrors SetTestGuard.
-func (rt *Runtime) SetProtectedPaths(paths []string) {
-	cleaned := make([]string, 0, len(paths))
-	for _, p := range paths {
-		if p == "" {
-			continue
-		}
-		cleaned = append(cleaned, filepath.Clean(p))
-	}
-	rt.protectedPaths = cleaned
-}
-
-// SetSecretOutputChannel wires the channel that receives provider tasks'
-// secret maps. Called by the trigger engine before invoking Execute when
-// the task is being launched in "provider" mode.
-func (rt *Runtime) SetSecretOutputChannel(ch chan map[string]string) {
-	rt.secretOutputCh = ch
-}
-
-// SetProviderRunner wires the env-resolver's provider invocation. The
-// trigger engine implements ProviderRunner and registers itself here at
-// daemon startup. Nil disables provider task: lookups.
-func (rt *Runtime) SetProviderRunner(p envresolve.ProviderRunner) {
-	rt.providerRunner = p
-}
-
-// SetEnvResolver wires the daemon-scoped env resolver whose TTL cache
-// survives across task launches (issue #242). When set, the executor
-// uses it instead of constructing a fresh instance per Execute.
-func (rt *Runtime) SetEnvResolver(r *envresolve.Resolver) {
-	rt.sharedResolver = r
+	pkgruntime.BridgeDeps
 }
 
 // New creates a Python Runtime manager.
@@ -181,7 +83,9 @@ func New(reg *registry.Registry, sc secrets.Chain, database db.DB, log *zap.Logg
 	if err != nil {
 		return nil, fmt.Errorf("python runtime: generate ipc secret: %w", err)
 	}
-	return &Runtime{reg: reg, secrets: sc, db: database, log: log, secret: secret}, nil
+	return &Runtime{
+		BridgeDeps: pkgruntime.BridgeDeps{Registry: reg, SecretsChain: sc, DB: database, Log: log, IPCSecret: secret},
+	}, nil
 }
 
 // --- ManagedRuntime interface ---
@@ -216,52 +120,55 @@ func (rt *Runtime) Install(_ context.Context, version string) error {
 
 // NewExecutor returns an Executor that runs Python scripts via the uv binary
 // at binaryPath, connected to the dicode socket-bridge SDK.
+//
+// Note: this copy list is intentionally wider than the Deno runtime's
+// NewExecutor — it also snapshots SecretsManager, IPCSecret, Engine, and
+// Gateway. Preserved as-is by the #388 dedup (behavior-preserving); see that
+// issue for the follow-up on reconciling the two.
 func (rt *Runtime) NewExecutor(binaryPath string) pkgruntime.Executor {
 	return &executor{
-		uvPath:         binaryPath,
-		parent:         rt,
-		reg:            rt.reg,
-		secrets:        rt.secrets,
-		secretsManager: rt.secretsManager,
-		db:             rt.db,
-		log:            rt.log,
-		secret:         rt.secret,
-		engine:         rt.engine,
-		gateway:        rt.gateway,
-		secretOutputCh: rt.secretOutputCh,
-		providerRunner: rt.providerRunner,
+		uvPath: binaryPath,
+		parent: rt,
+		BridgeDeps: pkgruntime.BridgeDeps{
+			Registry:       rt.Registry,
+			SecretsChain:   rt.SecretsChain,
+			SecretsManager: rt.SecretsManager,
+			DB:             rt.DB,
+			Log:            rt.Log,
+			IPCSecret:      rt.IPCSecret,
+			Engine:         rt.Engine,
+			Gateway:        rt.Gateway,
+			SecretOutputCh: rt.SecretOutputCh,
+			ProviderRunner: rt.ProviderRunner,
+		},
 	}
 }
 
 // --- executor ---
 
 type executor struct {
-	uvPath         string
-	parent         *Runtime // back-reference for live lookups (inputStore, etc.)
-	reg            *registry.Registry
-	secrets        secrets.Chain
-	secretsManager secrets.Manager
-	// inputStore is not snapshotted here; read live from parent.inputStore
-	// so late SetInputStore calls (daemon wires it after buildRuntimes) are
-	// visible to all executors without any extra bookkeeping.
-	db             db.DB
-	log            *zap.Logger
-	secret         []byte
-	engine         ipc.EngineRunner
-	gateway        *ipc.Gateway
-	secretOutputCh chan map[string]string
-	providerRunner envresolve.ProviderRunner
+	uvPath string
+	// parent is the back-reference for live lookups: the late-wired fields
+	// (InputStore, Replayer, SourceMgr, RepoResolver, TestGuard,
+	// ProtectedPaths, SharedResolver) are not snapshotted below — they are
+	// read from parent.BridgeDeps at IPC server creation time so daemon
+	// wiring that happens after NewExecutor is visible to all executors
+	// without any extra bookkeeping.
+	parent *Runtime
+	// BridgeDeps is the construction-time snapshot of the manager's deps
+	// taken by NewExecutor (see its doc for the copy list).
+	pkgruntime.BridgeDeps
 }
 
-// envresolver returns the env resolver to use for an Execute call. When a
-// daemon-scoped shared resolver is wired (issue #242), it is returned so
-// the TTL cache survives across launches. Otherwise a fresh instance is
-// constructed (legacy / test path).
+// envresolver returns the env resolver to use for an Execute call, reading
+// the daemon-scoped shared resolver (issue #242) live through parent. See
+// pkgruntime.LiveResolver for the precedence order.
 func (e *executor) envresolver() *envresolve.Resolver {
-	if e.parent != nil && e.parent.sharedResolver != nil {
-		return e.parent.sharedResolver
+	var parent *pkgruntime.BridgeDeps
+	if e.parent != nil {
+		parent = &e.parent.BridgeDeps
 	}
-	return envresolve.New(e.reg, e.secrets, e.providerRunner)
+	return pkgruntime.LiveResolver(&e.BridgeDeps, parent)
 }
 
 // Execute implements runtime.Executor.
@@ -277,30 +184,17 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 	// guarantees the WebUI run detail and CLI log output show why it failed.
 	defer func() {
 		if result.Error != nil {
-			_ = e.reg.AppendLog(context.Background(), runID, "error", result.Error.Error())
+			_ = e.Registry.AppendLog(context.Background(), runID, "error", result.Error.Error())
 		}
 	}()
 
-	// Resolve declared env permissions. When the trigger engine ran
-	// preflight (issue #235), it forwards the *Resolved here so we don't
-	// re-spawn provider tasks. When opts.PreResolvedEnv is nil (legacy
-	// callers, tests that bypass the engine), fall back to inline
-	// resolution. Provider tasks (from: task:<id>) are spawned and batched
-	// at most once per provider per launch; legacy paths (secret:,
-	// env:NAME, bare) are preserved.
-	var resolvedRes *envresolve.Resolved
-	var err error
-	if opts.PreResolvedEnv != nil {
-		resolvedRes = opts.PreResolvedEnv
-	} else {
-		resolvedRes, err = e.envresolver().Resolve(ctx, spec)
-		if err != nil {
-			result.Error = err
-			return result, nil
-		}
+	// Resolve declared env permissions — preferring the trigger engine's
+	// preflight result over inline resolution (see ResolveRunEnv).
+	resolved, redactor, err := pkgruntime.ResolveRunEnv(ctx, spec, opts.PreResolvedEnv, e.envresolver)
+	if err != nil {
+		result.Error = err
+		return result, nil
 	}
-	resolved := resolvedRes.Env
-	redactor := secrets.NewRedactor(resolvedRes.Secrets)
 
 	// Read the user's task.py.
 	scriptPath := spec.ScriptPath()
@@ -314,29 +208,12 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 		return result, nil
 	}
 
-	execCtx, cancel := buildExecContext(ctx, spec.Timeout)
+	execCtx, cancel := pkgruntime.ExecContext(ctx, spec.Timeout)
 	defer cancel()
 
-	mergedParams := mergeParams(spec.Params, opts.Params)
+	mergedParams := pkgruntime.MergeParams(spec.Params, opts.Params)
 
-	srv := ipc.New(runID, spec.ID, e.secret, e.reg, e.db, mergedParams, opts.Input, e.log, spec, e.engine)
-	srv.SetGateway(e.gateway)
-	srv.SetSecrets(e.secretsManager)
-	srv.SetInputStore(e.parent.inputStore)
-	srv.SetRedactor(redactor)
-	srv.SetReplayer(e.parent.replayer)
-	if m := e.parent.sourceMgr; m != nil {
-		srv.SetSourceManager(m)
-	}
-	if r := e.parent.repoResolver; r != nil {
-		srv.SetRepoResolver(r)
-	}
-	if g := e.parent.testGuard; g != nil {
-		srv.SetTestGuard(g)
-	}
-	if e.secretOutputCh != nil {
-		srv.SetSecretOutput(e.secretOutputCh)
-	}
+	srv := e.BridgeDeps.NewIPCServer(runID, spec, mergedParams, opts.Input, redactor, &e.parent.BridgeDeps)
 	socketPath, token, err := srv.Start(execCtx)
 	if err != nil {
 		result.Error = fmt.Errorf("start socket server: %w", err)
@@ -345,7 +222,7 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 	defer srv.Stop()
 
 	// Build the temporary wrapper file.
-	wrapped, err := buildWrapper(scriptBytes, buildGuardPolicy(spec, socketPath, e.parent.protectedPaths))
+	wrapped, err := buildWrapper(scriptBytes, buildGuardPolicy(spec, socketPath, e.parent.ProtectedPaths))
 	if err != nil {
 		result.Error = fmt.Errorf("build wrapper: %w", err)
 		return result, nil
@@ -394,42 +271,27 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 		return result, nil
 	}
 
-	// Stream uv/Python stderr to registry logs in real-time.
+	// Stream uv/Python stderr to registry logs in real-time, at "warn": the
+	// stream mixes uv's own progress chatter with Python tracebacks, unlike
+	// Deno's, whose stderr is logged as "error". Stdout is not streamed
+	// (Python tasks log via the SDK's log global over IPC).
 	var wg sync.WaitGroup
 	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		scanner := bufio.NewScanner(stderr)
-		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-		for scanner.Scan() {
-			_ = e.reg.AppendLog(context.Background(), runID, "warn", redactor.RedactString(scanner.Text()))
-		}
-		if err := scanner.Err(); err != nil {
-			e.log.Warn("stderr scanner error", zap.String("run", runID), zap.Error(err))
-		}
-	}()
+	go e.StreamRunLog(&wg, stderr, runID, "stderr", "warn", redactor)
 
 	doneCh := make(chan error, 1)
 	go func() { doneCh <- cmd.Wait() }()
 
-	select {
-	case retVal := <-srv.ReturnCh():
-		result.ChainInput = retVal
-		if out := srv.Output(); out != nil {
-			result.ChainInput = out.Data
-		}
-		select {
-		case <-doneCh:
-		case <-time.After(5 * time.Second):
-			_ = cmd.Process.Signal(syscall.SIGTERM)
-		}
-
-	case exitErr := <-doneCh:
-		select {
-		case retVal := <-srv.ReturnCh():
+	exitErr, exitedFirst := pkgruntime.AwaitBridgeCompletion(srv.ReturnCh(), doneCh, pkgruntime.BridgeShutdownGrace,
+		func(retVal any) {
 			result.ChainInput = retVal
-		default:
-		}
+			if out := srv.Output(); out != nil {
+				result.ChainInput = out.Data
+			}
+		},
+		func() { _ = cmd.Process.Signal(syscall.SIGTERM) },
+	)
+	if exitedFirst {
 		if out := srv.Output(); out != nil {
 			result.ChainInput = out.Data
 		}
@@ -516,28 +378,4 @@ func extractPEP723(src string) (block, body string) {
 	blockLines := lines[start : end+1]
 	bodyLines := append(lines[:start:start], lines[end+1:]...)
 	return strings.Join(blockLines, "\n"), strings.Join(bodyLines, "\n")
-}
-
-// buildExecContext returns a context and cancel function for a task execution.
-// A positive timeout creates a child context with that deadline. A zero or
-// negative timeout wraps the parent in WithCancel so the caller can still
-// cancel early but no new deadline is imposed — matching Deno's behaviour.
-func buildExecContext(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
-	if timeout > 0 {
-		return context.WithTimeout(parent, timeout)
-	}
-	return context.WithCancel(parent)
-}
-
-func mergeParams(specParams []task.Param, overrides map[string]string) map[string]string {
-	out := make(map[string]string, len(specParams))
-	for _, p := range specParams {
-		if p.Default != "" {
-			out[p.Name] = p.Default
-		}
-	}
-	for k, v := range overrides {
-		out[k] = v
-	}
-	return out
 }

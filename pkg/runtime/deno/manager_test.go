@@ -6,6 +6,7 @@ import (
 
 	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/registry"
+	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	"github.com/dicode/dicode/pkg/runtime/envresolve"
 	"github.com/dicode/dicode/pkg/taskset"
 )
@@ -41,19 +42,21 @@ func newTestInputStore() *registry.InputStore {
 // secret-provider routing in production.
 func TestNewExecutor_PropagatesProviderFields(t *testing.T) {
 	parent := &Runtime{
-		secretOutputCh: make(chan map[string]string, 1),
-		providerRunner: fakeProviderRunner{},
+		BridgeDeps: pkgruntime.BridgeDeps{
+			SecretOutputCh: make(chan map[string]string, 1),
+			ProviderRunner: fakeProviderRunner{},
+		},
 	}
 
 	exec, ok := parent.NewExecutor("/usr/bin/deno").(*Runtime)
 	if !ok {
 		t.Fatalf("NewExecutor did not return *Runtime")
 	}
-	if exec.secretOutputCh != parent.secretOutputCh {
-		t.Errorf("secretOutputCh not propagated: got %v, want %v", exec.secretOutputCh, parent.secretOutputCh)
+	if exec.SecretOutputCh != parent.SecretOutputCh {
+		t.Errorf("SecretOutputCh not propagated: got %v, want %v", exec.SecretOutputCh, parent.SecretOutputCh)
 	}
-	if exec.providerRunner != parent.providerRunner {
-		t.Errorf("providerRunner not propagated: got %v, want %v", exec.providerRunner, parent.providerRunner)
+	if exec.ProviderRunner != parent.ProviderRunner {
+		t.Errorf("ProviderRunner not propagated: got %v, want %v", exec.ProviderRunner, parent.ProviderRunner)
 	}
 }
 
