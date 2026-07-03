@@ -3,6 +3,7 @@ package python
 import (
 	"fmt"
 	"os"
+	"strings"
 )
 
 // LockSidecarPath returns the path of the per-script uv lock sidecar for a
@@ -19,6 +20,17 @@ func LockSidecarPath(scriptPath string) string {
 func HasInlineMetadata(src []byte) bool {
 	block, _ := extractPEP723(string(src))
 	return block != ""
+}
+
+// HasRequiresPython reports whether the script's PEP 723 block declares a
+// `requires-python` constraint. Without one, uv resolves against whatever
+// Python version is default in the current environment (e.g. 3.11 locally vs
+// 3.12 in CI), so the generated lock silently varies by machine and fails
+// `--locked` elsewhere — defeating the point of locking. relock warns when it
+// is missing so authors pin it for a truly reproducible lock.
+func HasRequiresPython(src []byte) bool {
+	block, _ := extractPEP723(string(src))
+	return strings.Contains(block, "requires-python")
 }
 
 // stageLockSidecar makes the task's committed lock sidecar visible to uv for

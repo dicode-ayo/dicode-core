@@ -33,6 +33,25 @@ func TestHasInlineMetadata(t *testing.T) {
 	}
 }
 
+func TestHasRequiresPython(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want bool
+	}{
+		{"with requires-python", "# /// script\n# requires-python = \">=3.11\"\n# dependencies = [\"httpx\"]\n# ///\n", true},
+		{"deps only, no requires-python", "# /// script\n# dependencies = [\"httpx\"]\n# ///\n", false},
+		{"no block", "import httpx\n", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := HasRequiresPython([]byte(tc.src)); got != tc.want {
+				t.Fatalf("HasRequiresPython = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // The runtime must pass --locked only when a lock sidecar exists for the
 // task, and run plain otherwise — a Python task with no lock (e.g. no
 // external deps) keeps working exactly as before (issue #465).

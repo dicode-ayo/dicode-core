@@ -249,6 +249,14 @@ one is missing, stale, or orphaned) — run it in CI to catch drift before it
 reaches the runtime. Buildin/example tasks ship committed `task.py.lock`
 sidecars that are automatically detected and enforced.
 
+> **Pin `requires-python` for a reproducible lock.** A lock only reproduces if
+> the PEP 723 block declares a `requires-python` constraint. Without one, uv
+> resolves against whatever Python is default in the current environment
+> (e.g. `>=3.11` on a dev box vs `>=3.12` in CI), producing a *different* lock
+> that then fails `--locked` on the other machine. `dicode python relock` warns
+> when a lockable script omits it — add e.g. `# requires-python = ">=3.11"` to
+> the block.
+
 ---
 
 ## Run context

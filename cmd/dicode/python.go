@@ -84,6 +84,9 @@ func cmdPythonRelock(args []string) error {
 		sidecar := pythonpkg.LockSidecarPath(p)
 		if pythonpkg.HasInlineMetadata(src) {
 			lockable = append(lockable, p)
+			if !pythonpkg.HasRequiresPython(src) {
+				fmt.Fprintf(os.Stderr, "dicode: warning: %s has no `requires-python` in its PEP 723 block; its lock resolves against the default Python (e.g. >=3.11 locally vs >=3.12 in CI) and may not be reproducible — pin one, e.g. `# requires-python = \">=3.11\"`\n", p)
+			}
 		} else if fileExists(sidecar) {
 			orphanLocks = append(orphanLocks, sidecar)
 		}
