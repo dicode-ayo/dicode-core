@@ -80,6 +80,9 @@ jobs:
       - name: Verify tasks/deno.lock is up to date
         run: ./dicode deno relock --check
 
+      - name: Verify Python task lock sidecars are up to date
+        run: ./dicode python relock --check
+
       - name: Start daemon and run task tests
         run: |
           set -euo pipefail
