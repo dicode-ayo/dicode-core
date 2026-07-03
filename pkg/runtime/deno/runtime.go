@@ -170,10 +170,6 @@ func (rt *Runtime) effectiveCryptoDeriver() ipc.SubKeyDeriver {
 // --deny-write so the deny takes precedence over any --allow-write.
 func (rt *Runtime) effectiveProtectedPaths() []string { return rt.live().ProtectedPaths }
 
-// effectiveTestGuard returns the live test guard, reading through parent
-// when this is a per-version executor.
-func (rt *Runtime) effectiveTestGuard() func(taskID string) error { return rt.live().TestGuard }
-
 // Run executes a task script and returns the result.
 func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*RunResult, error) {
 	if opts.Params == nil {
