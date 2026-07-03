@@ -82,3 +82,27 @@ func TestStreamRunLog_LongLine(t *testing.T) {
 		t.Errorf("line after long line = %q, want %q", logs[1].Message, "after")
 	}
 }
+
+// TestStreamRunLog_OversizedLineStopsStreamWithDiagnostic pins the
+// scanner-error branch (issue #194's other half): a single line exceeding
+// the 1 MiB scanner cap makes bufio return ErrTooLong — the stream stops,
+// wg.Done still fires (no caller hang), and lines that arrived before the
+// oversized one were already flushed.
+func TestStreamRunLog_OversizedLineStopsStreamWithDiagnostic(t *testing.T) {
+	deps, reg := newStreamTestDeps(t)
+	red := secrets.NewRedactor(nil)
+
+	input := "before\n" + strings.Repeat("x", 1024*1024+1) + "\nafter\n"
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go deps.StreamRunLog(&wg, strings.NewReader(input), "run-big", "stderr", "warn", red)
+	wg.Wait() // must return despite the scanner error — callers block on this
+
+	logs, err := reg.GetRunLogs(context.Background(), "run-big")
+	if err != nil {
+		t.Fatalf("GetRunLogs: %v", err)
+	}
+	if len(logs) != 1 || logs[0].Message != "before" {
+		t.Fatalf("expected only the pre-error line to be flushed, got %d lines: %+v", len(logs), logs)
+	}
+}

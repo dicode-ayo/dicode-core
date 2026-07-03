@@ -4,6 +4,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+
+	"github.com/dicode/dicode/pkg/runtime/envresolve"
 )
 
 // TestBridgeDeps_SetProtectedPaths pins the path-hygiene contract both
@@ -40,9 +42,9 @@ func TestBridgeDeps_SetProtectedPaths_AllEmpty(t *testing.T) {
 	}
 }
 
-// TestBridgeDeps_SetEnvResolver_And_SecretOutputChannel covers the setters
-// whose stored value is consumed indirectly (no getter): the fields must be
-// exactly what was passed, including nil to clear.
+// TestBridgeDeps_SetSecretOutputChannel_Clear covers a setter whose stored
+// value is consumed indirectly (no getter): the field must be exactly what
+// was passed, including nil to clear.
 func TestBridgeDeps_SetSecretOutputChannel_Clear(t *testing.T) {
 	var d BridgeDeps
 	ch := make(chan map[string]string, 1)
@@ -54,5 +56,21 @@ func TestBridgeDeps_SetSecretOutputChannel_Clear(t *testing.T) {
 	d.SetSecretOutputChannel(nil)
 	if d.SecretOutputCh != nil {
 		t.Fatal("SetSecretOutputChannel(nil) did not clear the channel")
+	}
+}
+
+// TestBridgeDeps_SetEnvResolver pins the shared-resolver setter: the exact
+// instance must be stored (LiveResolver's precedence depends on identity),
+// and nil must clear it.
+func TestBridgeDeps_SetEnvResolver(t *testing.T) {
+	var d BridgeDeps
+	r := envresolve.New(nil, nil, nil)
+	d.SetEnvResolver(r)
+	if d.SharedResolver != r {
+		t.Fatal("SetEnvResolver did not store the resolver")
+	}
+	d.SetEnvResolver(nil)
+	if d.SharedResolver != nil {
+		t.Fatal("SetEnvResolver(nil) did not clear the resolver")
 	}
 }
