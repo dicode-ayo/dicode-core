@@ -215,24 +215,7 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 
 	mergedParams := pkgruntime.MergeParams(spec.Params, opts.Params)
 
-	srv := ipc.New(runID, spec.ID, e.IPCSecret, e.Registry, e.DB, mergedParams, opts.Input, e.Log, spec, e.Engine)
-	srv.SetGateway(e.Gateway)
-	srv.SetSecrets(e.SecretsManager)
-	srv.SetInputStore(e.parent.InputStore)
-	srv.SetRedactor(redactor)
-	srv.SetReplayer(e.parent.Replayer)
-	if m := e.parent.SourceMgr; m != nil {
-		srv.SetSourceManager(m)
-	}
-	if r := e.parent.RepoResolver; r != nil {
-		srv.SetRepoResolver(r)
-	}
-	if g := e.parent.TestGuard; g != nil {
-		srv.SetTestGuard(g)
-	}
-	if e.SecretOutputCh != nil {
-		srv.SetSecretOutput(e.SecretOutputCh)
-	}
+	srv := e.BridgeDeps.NewIPCServer(runID, spec, mergedParams, opts.Input, redactor, &e.parent.BridgeDeps)
 	socketPath, token, err := srv.Start(execCtx)
 	if err != nil {
 		result.Error = fmt.Errorf("start socket server: %w", err)

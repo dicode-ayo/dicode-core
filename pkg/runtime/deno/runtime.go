@@ -226,26 +226,10 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 
 	mergedParams := pkgruntime.MergeParams(spec.Params, opts.Params)
 
-	srv := ipc.New(runID, spec.ID, rt.IPCSecret, rt.Registry, rt.DB, mergedParams, opts.Input, rt.Log, spec, rt.Engine)
-	srv.SetGateway(rt.Gateway)
-	srv.SetSecrets(rt.SecretsManager)
-	srv.SetInputStore(rt.effectiveInputStore())
-	srv.SetRedactor(redactor)
-	srv.SetReplayer(rt.effectiveReplayer())
-	if m := rt.effectiveSourceMgr(); m != nil {
-		srv.SetSourceManager(m)
-	}
-	if r := rt.effectiveRepoResolver(); r != nil {
-		srv.SetRepoResolver(r)
-	}
-	if rt.SecretOutputCh != nil {
-		srv.SetSecretOutput(rt.SecretOutputCh)
-	}
+	srv := rt.BridgeDeps.NewIPCServer(runID, spec, mergedParams, opts.Input, redactor, rt.live())
+	// Crypto IPC is Deno-only; wired here rather than in the shared helper.
 	if d := rt.effectiveCryptoDeriver(); d != nil {
 		srv.SetCryptoHandler(d)
-	}
-	if g := rt.effectiveTestGuard(); g != nil {
-		srv.SetTestGuard(g)
 	}
 	socketPath, token, err := srv.Start(execCtx)
 	if err != nil {

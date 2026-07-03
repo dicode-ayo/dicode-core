@@ -8,6 +8,7 @@ import (
 	"github.com/dicode/dicode/pkg/registry"
 	"github.com/dicode/dicode/pkg/runtime/envresolve"
 	"github.com/dicode/dicode/pkg/secrets"
+	"github.com/dicode/dicode/pkg/task"
 	"go.uber.org/zap"
 )
 
@@ -66,6 +67,41 @@ type BridgeDeps struct {
 	// grant covers their directory. Deno emits them as --deny-write flags;
 	// Python forwards them to the audit-hook guard policy's deny list.
 	ProtectedPaths []string
+}
+
+// NewIPCServer constructs the per-run IPC socket server and applies the
+// capability wiring common to both socket-bridge runtimes.
+//
+// Construction-time dependencies (IPCSecret, Registry, DB, Log, Engine,
+// Gateway, SecretsManager, SecretOutputCh) are read from the receiver — the
+// snapshot each runtime's NewExecutor made. Late-wired capabilities
+// (InputStore, Replayer, SourceMgr, RepoResolver, TestGuard) are read from
+// live, which per-version executors point at the manager's BridgeDeps so
+// daemon wiring that happens after NewExecutor is still honored; the manager
+// passes itself.
+//
+// Runtime-specific capabilities are wired by the caller afterwards (Deno
+// adds SetCryptoHandler); all setters are inert until srv.Start.
+func (d *BridgeDeps) NewIPCServer(runID string, spec *task.Spec, params map[string]string, input any, red *secrets.Redactor, live *BridgeDeps) *ipc.Server {
+	srv := ipc.New(runID, spec.ID, d.IPCSecret, d.Registry, d.DB, params, input, d.Log, spec, d.Engine)
+	srv.SetGateway(d.Gateway)
+	srv.SetSecrets(d.SecretsManager)
+	srv.SetInputStore(live.InputStore)
+	srv.SetRedactor(red)
+	srv.SetReplayer(live.Replayer)
+	if m := live.SourceMgr; m != nil {
+		srv.SetSourceManager(m)
+	}
+	if r := live.RepoResolver; r != nil {
+		srv.SetRepoResolver(r)
+	}
+	if d.SecretOutputCh != nil {
+		srv.SetSecretOutput(d.SecretOutputCh)
+	}
+	if g := live.TestGuard; g != nil {
+		srv.SetTestGuard(g)
+	}
+	return srv
 }
 
 // SetEngine configures the engine runner used for dicode.run_task calls.
