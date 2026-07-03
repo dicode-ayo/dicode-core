@@ -314,10 +314,10 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 		return result, nil
 	}
 
-	execCtx, cancel := buildExecContext(ctx, spec.Timeout)
+	execCtx, cancel := pkgruntime.ExecContext(ctx, spec.Timeout)
 	defer cancel()
 
-	mergedParams := mergeParams(spec.Params, opts.Params)
+	mergedParams := pkgruntime.MergeParams(spec.Params, opts.Params)
 
 	srv := ipc.New(runID, spec.ID, e.secret, e.reg, e.db, mergedParams, opts.Input, e.log, spec, e.engine)
 	srv.SetGateway(e.gateway)
@@ -516,28 +516,4 @@ func extractPEP723(src string) (block, body string) {
 	blockLines := lines[start : end+1]
 	bodyLines := append(lines[:start:start], lines[end+1:]...)
 	return strings.Join(blockLines, "\n"), strings.Join(bodyLines, "\n")
-}
-
-// buildExecContext returns a context and cancel function for a task execution.
-// A positive timeout creates a child context with that deadline. A zero or
-// negative timeout wraps the parent in WithCancel so the caller can still
-// cancel early but no new deadline is imposed — matching Deno's behaviour.
-func buildExecContext(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
-	if timeout > 0 {
-		return context.WithTimeout(parent, timeout)
-	}
-	return context.WithCancel(parent)
-}
-
-func mergeParams(specParams []task.Param, overrides map[string]string) map[string]string {
-	out := make(map[string]string, len(specParams))
-	for _, p := range specParams {
-		if p.Default != "" {
-			out[p.Name] = p.Default
-		}
-	}
-	for k, v := range overrides {
-		out[k] = v
-	}
-	return out
 }

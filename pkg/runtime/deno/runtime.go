@@ -342,16 +342,10 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		return result, nil
 	}
 
-	var execCtx context.Context
-	var cancel context.CancelFunc
-	if spec.Timeout > 0 {
-		execCtx, cancel = context.WithTimeout(ctx, spec.Timeout)
-	} else {
-		execCtx, cancel = context.WithCancel(ctx)
-	}
+	execCtx, cancel := pkgruntime.ExecContext(ctx, spec.Timeout)
 	defer cancel()
 
-	mergedParams := mergeParams(spec.Params, opts.Params)
+	mergedParams := pkgruntime.MergeParams(spec.Params, opts.Params)
 
 	srv := ipc.New(runID, spec.ID, rt.secret, rt.registry, rt.db, mergedParams, opts.Input, rt.log, spec, rt.engine)
 	srv.SetGateway(rt.gateway)
@@ -538,19 +532,6 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	wg.Wait()
 
 	return result, nil
-}
-
-func mergeParams(specParams []task.Param, overrides map[string]string) map[string]string {
-	out := make(map[string]string, len(specParams))
-	for _, p := range specParams {
-		if p.Default != "" {
-			out[p.Name] = p.Default
-		}
-	}
-	for k, v := range overrides {
-		out[k] = v
-	}
-	return out
 }
 
 func expandHome(p string) string {
