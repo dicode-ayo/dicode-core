@@ -145,11 +145,7 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 		// Depth tracking for success-chain (Fix 1, #387): mirror the failure-chain
 		// depth cap so any cycle that slips past the registration-time DFS check
 		// (e.g. tasks registered in a different order) cannot loop indefinitely.
-		incomingDepth := 0
-		if d, ok := e.runChainDepth.Load(runID); ok {
-			incomingDepth, _ = d.(int)
-		}
-		nextDepth := incomingDepth + 1
+		nextDepth := e.chainDepth(runID) + 1
 		if nextDepth > maxSuccessChainDepth {
 			e.log.Warn("chain trigger suppressed: max_depth exceeded",
 				zap.Int("depth", nextDepth),
@@ -263,11 +259,7 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 			// refuse to fire when the next hop would exceed MaxDepth (default 2).
 			// This replaces the old chain-of-chains suppression that blocked all
 			// chaining beyond depth 1.
-			incomingDepth := 0
-			if d, ok := e.runChainDepth.Load(runID); ok {
-				incomingDepth, _ = d.(int)
-			}
-			nextDepth := incomingDepth + 1
+			nextDepth := e.chainDepth(runID) + 1
 			maxDepth := chainSpec.EffectiveMaxDepth()
 			if nextDepth > maxDepth {
 				e.log.Warn("on_failure_chain suppressed: max_depth exceeded",
@@ -392,6 +384,16 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 			}
 		}
 	}
+}
+
+// chainDepth returns the _chain_depth recorded for runID at fire time (see
+// fireAsync), or 0 when none was stored — i.e. the run is a first hop.
+func (e *Engine) chainDepth(runID string) int {
+	if d, ok := e.runChainDepth.Load(runID); ok {
+		depth, _ := d.(int)
+		return depth
+	}
+	return 0
 }
 
 // buildChainInput shapes the `Input` value handed to a downstream task that

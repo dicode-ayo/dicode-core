@@ -94,15 +94,7 @@ func (e *Engine) registerWebhookPath(id, path string) {
 func decodeWebhookPayload(r *http.Request, limitedBody []byte) (input interface{}, isForm bool) {
 	if r.Method == http.MethodGet {
 		if q := r.URL.Query(); len(q) > 0 {
-			m := make(map[string]interface{}, len(q))
-			for k, v := range q {
-				if len(v) == 1 {
-					m[k] = v[0]
-				} else {
-					m[k] = v
-				}
-			}
-			input = m
+			input = flattenValues(q)
 		}
 		return input, false
 	}
@@ -111,15 +103,7 @@ func decodeWebhookPayload(r *http.Request, limitedBody []byte) (input interface{
 		// Replay the raw bytes back into r.Body so ParseForm can read them.
 		r.Body = io.NopCloser(bytes.NewReader(limitedBody))
 		if err := r.ParseForm(); err == nil {
-			m := make(map[string]interface{}, len(r.Form))
-			for k, v := range r.Form {
-				if len(v) == 1 {
-					m[k] = v[0]
-				} else {
-					m[k] = v
-				}
-			}
-			input = m
+			input = flattenValues(r.Form)
 			isForm = true
 		}
 		return input, isForm
@@ -128,6 +112,56 @@ func decodeWebhookPayload(r *http.Request, limitedBody []byte) (input interface{
 		_ = json.Unmarshal(limitedBody, &input)
 	}
 	return input, false
+}
+
+// flattenValues converts url.Values-shaped data (query params, form fields)
+// into the webhook input map: single-value entries flatten to string
+// ([]string{"v"} → "v"), multi-value entries remain []string so no
+// information is lost.
+func flattenValues(vals map[string][]string) map[string]interface{} {
+	m := make(map[string]interface{}, len(vals))
+	for k, v := range vals {
+		if len(v) == 1 {
+			m[k] = v[0]
+		} else {
+			m[k] = v
+		}
+	}
+	return m
+}
+
+// readWebhookBody reads the raw request body up to webhookMaxBodyBytes so
+// HMAC verification always covers the actual request bytes, regardless of
+// content-type. GET requests have no body — returns nil.
+func readWebhookBody(r *http.Request) []byte {
+	if r.Method == http.MethodGet || r.Body == nil {
+		return nil
+	}
+	body, _ := io.ReadAll(io.LimitReader(r.Body, webhookMaxBodyBytes))
+	return body
+}
+
+// newWebhookContext captures the request metadata handed to the persistence
+// layer (content-type-aware redaction of the raw body, Method/Path/Headers/
+// Query on the stored PersistedInput). Shared by the kind: Task and kind:
+// PipelineTask dispatch paths.
+func newWebhookContext(r *http.Request, body []byte) *pkgruntime.WebhookContext {
+	return &pkgruntime.WebhookContext{
+		Method:      r.Method,
+		Path:        r.URL.Path,
+		Headers:     r.Header,
+		Query:       r.URL.Query(),
+		RawBody:     body,
+		ContentType: r.Header.Get("Content-Type"),
+	}
+}
+
+// writeWebhookReplayRejected writes the 409 JSON envelope shared by the
+// kind: Task and kind: PipelineTask replay-rejection paths.
+func writeWebhookReplayRejected(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusConflict)
+	_, _ = w.Write([]byte(`{"error":"duplicate webhook (replay)"}`))
 }
 
 const (
@@ -303,10 +337,7 @@ func (e *Engine) handlePipelineWebhook(w http.ResponseWriter, r *http.Request, p
 
 	// Read the raw body first so HMAC verification always covers the actual
 	// request bytes; then decode via the shared helper.
-	var body []byte
-	if r.Method != http.MethodGet && r.Body != nil {
-		body, _ = io.ReadAll(io.LimitReader(r.Body, webhookMaxBodyBytes))
-	}
+	body := readWebhookBody(r)
 	input, _ := decodeWebhookPayload(r, body) // isForm ignored — pipelines don't redirect
 
 	if err := verifyWebhookSignatureSecret(pipe.Trigger.WebhookSecret, r, body); err != nil {
@@ -322,21 +353,12 @@ func (e *Engine) handlePipelineWebhook(w http.ResponseWriter, r *http.Request, p
 			zap.String("path", r.URL.Path),
 			zap.String("task", pipe.ID),
 		)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusConflict)
-		_, _ = w.Write([]byte(`{"error":"duplicate webhook (replay)"}`))
+		writeWebhookReplayRejected(w)
 		return
 	}
 
 	params := flatStringMap(input)
-	webhookCtx := &pkgruntime.WebhookContext{
-		Method:      r.Method,
-		Path:        r.URL.Path,
-		Headers:     r.Header,
-		Query:       r.URL.Query(),
-		RawBody:     body,
-		ContentType: r.Header.Get("Content-Type"),
-	}
+	webhookCtx := newWebhookContext(r, body)
 
 	e.log.Info("pipeline webhook trigger", zap.String("path", r.URL.Path), zap.String("task", pipe.ID))
 	// Decouple from the request context so the async pipeline survives the HTTP
@@ -465,10 +487,7 @@ func (e *Engine) WebhookHandler() http.Handler {
 
 		// Read the raw body first so HMAC verification always covers the
 		// actual request bytes, regardless of content-type.
-		var body []byte
-		if r.Method != http.MethodGet && r.Body != nil {
-			body, _ = io.ReadAll(io.LimitReader(r.Body, webhookMaxBodyBytes))
-		}
+		body := readWebhookBody(r)
 		input, isFormSubmit := decodeWebhookPayload(r, body)
 
 		// Verify HMAC signature when a secret is configured on the task.
@@ -488,9 +507,7 @@ func (e *Engine) WebhookHandler() http.Handler {
 				zap.String("path", path),
 				zap.String("task", taskID),
 			)
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusConflict)
-			_, _ = w.Write([]byte(`{"error":"duplicate webhook (replay)"}`))
+			writeWebhookReplayRejected(w)
 			return
 		}
 
@@ -504,14 +521,7 @@ func (e *Engine) WebhookHandler() http.Handler {
 		// Method/Path/Headers/Query on the stored PersistedInput.
 		// For GET requests body is nil; body was already read above for
 		// POST/PUT/etc. and is safe to reference here.
-		webhookCtx := &pkgruntime.WebhookContext{
-			Method:      r.Method,
-			Path:        r.URL.Path,
-			Headers:     r.Header,
-			Query:       r.URL.Query(),
-			RawBody:     body,
-			ContentType: r.Header.Get("Content-Type"),
-		}
+		webhookCtx := newWebhookContext(r, body)
 
 		// Default: wait for the run to finish and return the result inline.
 		// Pass ?wait=false to fire-and-forget (returns runId immediately).

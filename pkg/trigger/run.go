@@ -306,8 +306,8 @@ func (e *Engine) runTask(runCtx context.Context, spec *task.Spec, opts pkgruntim
 		// fire-and-forget shape, but that allowed cleanup to observe a
 		// depth-of-zero and let a chain-fired parent take one hop past the
 		// MaxDepth ceiling (issue #334, sister to #331). Matches the normal
-		// FireChain call site at the end of dispatch (~line 2759), which is
-		// also synchronous.
+		// FireChain call site at the end of dispatch, which is also
+		// synchronous.
 		e.FireChain(context.Background(), spec.ID, opts.RunID, preStatus, nil, opts.Params)
 		status = preStatus
 		result = &pkgruntime.RunResult{RunID: opts.RunID, Error: errors.New(preReason)}
