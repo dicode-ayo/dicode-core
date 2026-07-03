@@ -228,6 +228,27 @@ The `# /// script` block must appear near the top of `task.py`. uv creates a
 dedicated virtual environment per script on first run and caches it for
 subsequent runs (`~/.cache/uv/`).
 
+### Dependency pinning
+
+If a `task.py.lock` sidecar exists next to `task.py` (written by
+`uv lock --script`), the runtime stages it alongside the temporary wrapper and
+invokes uv with `--locked`. This prevents per-run resolution of newer versions
+within a range (`>=`, `~=`, `^`-style caret ranges) — packages are pinned to
+the exact versions and hashes recorded in the sidecar, and a stale lock fails
+the run loudly instead of silently re-resolving. Tasks without a sidecar (for
+example, tasks with no PEP 723 block at all) run exactly as before — the same
+degrade behaviour as the Deno runtime when no `deno.lock` is present.
+
+When a task's dependencies change, regenerate the sidecar with
+`dicode python relock [dir]` (dir defaults to `tasks`). It provisions the
+pinned uv and runs `uv lock --script` for every `task.py` under the tree that
+carries a PEP 723 block, so the locks are deterministic regardless of any
+system uv; sidecars orphaned by a removed block are deleted. `dicode python
+relock --check` verifies the sidecars without modifying them (exit non-zero if
+one is missing, stale, or orphaned) — run it in CI to catch drift before it
+reaches the runtime. Buildin/example tasks ship committed `task.py.lock`
+sidecars that are automatically detected and enforced.
+
 ---
 
 ## Run context
