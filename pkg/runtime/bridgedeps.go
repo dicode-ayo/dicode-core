@@ -1,7 +1,11 @@
 package runtime
 
 import (
+	"bufio"
+	"context"
+	"io"
 	"path/filepath"
+	"sync"
 
 	"github.com/dicode/dicode/pkg/db"
 	"github.com/dicode/dicode/pkg/ipc"
@@ -102,6 +106,30 @@ func (d *BridgeDeps) NewIPCServer(runID string, spec *task.Spec, params map[stri
 		srv.SetTestGuard(g)
 	}
 	return srv
+}
+
+// StreamRunLog reads r line-by-line, redacts each line, and appends it to
+// the run log at the given level; stream names the pipe ("stdout"/"stderr")
+// for the scanner-error diagnostic. The scanner buffer is 64 KiB initial /
+// 1 MiB max so a long single line can't kill the stream (issue #194).
+// AppendLog failures are ignored (as both runtimes always did) and scanner
+// errors are logged, not fatal.
+//
+// Blocks until r is exhausted — i.e. until the pipe closes on process exit.
+// Callers run it in a goroutine after wg.Add(1); wg.Done is deferred here so
+// a caller-side wg.Wait guarantees every line is flushed to the DB before
+// the run returns (otherwise a caller fetching logs immediately after could
+// see an empty list).
+func (d *BridgeDeps) StreamRunLog(wg *sync.WaitGroup, r io.Reader, runID, stream, level string, red *secrets.Redactor) {
+	defer wg.Done()
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		_ = d.Registry.AppendLog(context.Background(), runID, level, red.RedactString(scanner.Text()))
+	}
+	if err := scanner.Err(); err != nil {
+		d.Log.Warn(stream+" scanner error", zap.String("run", runID), zap.Error(err))
+	}
 }
 
 // SetEngine configures the engine runner used for dicode.run_task calls.

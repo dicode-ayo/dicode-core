@@ -41,7 +41,6 @@
 package python
 
 import (
-	"bufio"
 	"context"
 	_ "embed"
 	"fmt"
@@ -272,20 +271,13 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 		return result, nil
 	}
 
-	// Stream uv/Python stderr to registry logs in real-time.
+	// Stream uv/Python stderr to registry logs in real-time, at "warn": the
+	// stream mixes uv's own progress chatter with Python tracebacks, unlike
+	// Deno's, whose stderr is logged as "error". Stdout is not streamed
+	// (Python tasks log via the SDK's log global over IPC).
 	var wg sync.WaitGroup
 	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		scanner := bufio.NewScanner(stderr)
-		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-		for scanner.Scan() {
-			_ = e.Registry.AppendLog(context.Background(), runID, "warn", redactor.RedactString(scanner.Text()))
-		}
-		if err := scanner.Err(); err != nil {
-			e.Log.Warn("stderr scanner error", zap.String("run", runID), zap.Error(err))
-		}
-	}()
+	go e.StreamRunLog(&wg, stderr, runID, "stderr", "warn", redactor)
 
 	doneCh := make(chan error, 1)
 	go func() { doneCh <- cmd.Wait() }()

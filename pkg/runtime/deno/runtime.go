@@ -4,7 +4,6 @@
 package deno
 
 import (
-	"bufio"
 	"context"
 	_ "embed"
 	"fmt"
@@ -332,28 +331,8 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		// wg ensures all log lines are flushed before Run returns, avoiding the race
 		// where the caller fetches logs immediately after exit and sees an empty list.
 		wg.Add(2)
-		go func() {
-			defer wg.Done()
-			scanner := bufio.NewScanner(stdout)
-			scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-			for scanner.Scan() {
-				_ = rt.Registry.AppendLog(context.Background(), runID, "info", redactor.RedactString(scanner.Text()))
-			}
-			if err := scanner.Err(); err != nil {
-				rt.Log.Warn("stdout scanner error", zap.String("run", runID), zap.Error(err))
-			}
-		}()
-		go func() {
-			defer wg.Done()
-			scanner := bufio.NewScanner(stderr)
-			scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-			for scanner.Scan() {
-				_ = rt.Registry.AppendLog(context.Background(), runID, "error", redactor.RedactString(scanner.Text()))
-			}
-			if err := scanner.Err(); err != nil {
-				rt.Log.Warn("stderr scanner error", zap.String("run", runID), zap.Error(err))
-			}
-		}()
+		go rt.StreamRunLog(&wg, stdout, runID, "stdout", "info", redactor)
+		go rt.StreamRunLog(&wg, stderr, runID, "stderr", "error", redactor)
 	}
 
 	// Register PID so metrics can aggregate child process resource usage.
