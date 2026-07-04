@@ -20,6 +20,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/dicode/dicode/internal/pathguard"
 	"github.com/dicode/dicode/pkg/task"
 )
 
@@ -236,8 +237,10 @@ func checkVolume(spec string, p Policy) string {
 
 // resolveHostPath cleans ".." segments and resolves symlinks best-effort so
 // a source like /home/user/../../etc or a symlink pointing at /proc cannot
-// dodge the sensitive-path checks. Paths that do not exist on the host fall
-// back to the lexically cleaned form.
+// dodge the sensitive-path checks. Symlinks are canonicalized on the longest
+// existing ancestor (pathguard.ResolveExisting), so a not-yet-existing tail
+// under a symlinked directory still resolves; paths that cannot be resolved
+// at all fall back to the lexically cleaned form.
 func resolveHostPath(src string) string {
 	cleaned := filepath.Clean(src)
 	if !filepath.IsAbs(cleaned) {
@@ -245,17 +248,16 @@ func resolveHostPath(src string) string {
 			cleaned = abs
 		}
 	}
-	if resolved, err := filepath.EvalSymlinks(cleaned); err == nil {
+	if resolved, err := pathguard.ResolveExisting(cleaned); err == nil {
 		return resolved
 	}
 	return cleaned
 }
 
 // pathWithin reports whether path equals root or lives inside root's subtree.
-// Both arguments must already be cleaned absolute paths.
+// Both arguments must already be cleaned absolute paths (symlink resolution
+// happens once, in resolveHostPath, before the containment loops).
 func pathWithin(path, root string) bool {
-	if root == "/" {
-		return true
-	}
-	return path == root || strings.HasPrefix(path, root+"/")
+	ok, _ := pathguard.Within(root, path)
+	return ok
 }

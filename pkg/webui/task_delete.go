@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/dicode/dicode/internal/pathguard"
 	"github.com/dicode/dicode/pkg/ipc"
 	gitSource "github.com/dicode/dicode/pkg/source/git"
 	"github.com/dicode/dicode/pkg/task"
@@ -107,40 +108,22 @@ func containedTaskDir(root, taskDir, sourceName string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve source %q root: %w", sourceName, err)
 	}
-	canonTask, err := resolveExisting(filepath.Clean(taskDir))
+	if canonRoot == string(filepath.Separator) {
+		// A source rooted at the filesystem root would make every path
+		// "contained"; nothing legitimate is configured that way.
+		return "", fmt.Errorf("source %q root resolves to the filesystem root; refusing to remove", sourceName)
+	}
+	canonTask, err := pathguard.ResolveExisting(taskDir)
 	if err != nil {
 		return "", fmt.Errorf("resolve task directory %q: %w", taskDir, err)
 	}
 	if canonTask == canonRoot {
 		return "", fmt.Errorf("task directory equals source root %q; refusing to remove", canonRoot)
 	}
-	if !strings.HasPrefix(canonTask+string(filepath.Separator), canonRoot+string(filepath.Separator)) {
+	if within, werr := pathguard.Within(canonRoot, canonTask); werr != nil || !within {
 		return "", fmt.Errorf("task directory %q is not under source %q root %q; refusing to remove", canonTask, sourceName, canonRoot)
 	}
 	return canonTask, nil
-}
-
-// resolveExisting canonicalises p with EvalSymlinks, walking up to the nearest
-// existing ancestor when p itself does not exist and re-appending the missing
-// tail. This canonicalises every real (and therefore symlink-bearing) component
-// while tolerating an already-absent task dir.
-func resolveExisting(p string) (string, error) {
-	resolved, err := filepath.EvalSymlinks(p)
-	if err == nil {
-		return resolved, nil
-	}
-	if !os.IsNotExist(err) {
-		return "", err
-	}
-	parent := filepath.Dir(p)
-	if parent == p {
-		return "", err
-	}
-	resolvedParent, perr := resolveExisting(parent)
-	if perr != nil {
-		return "", perr
-	}
-	return filepath.Join(resolvedParent, filepath.Base(p)), nil
 }
 
 // deleteLocal removes the task directory under a local source. It refuses to

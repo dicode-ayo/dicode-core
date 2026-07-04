@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 
+	"github.com/dicode/dicode/internal/fsutil"
 	pythonpkg "github.com/dicode/dicode/pkg/runtime/python"
 	uvpkg "github.com/dicode/dicode/pkg/uv"
 )
@@ -72,7 +73,7 @@ func runPythonRelock(check bool, dir string) error {
 			if !pythonpkg.HasRequiresPython(src) {
 				fmt.Fprintf(os.Stderr, "dicode: warning: %s has no `requires-python` in its PEP 723 block; its lock resolves against the default Python (e.g. >=3.11 locally vs >=3.12 in CI) and may not be reproducible — pin one, e.g. `# requires-python = \">=3.11\"`\n", p)
 			}
-		} else if fileExists(sidecar) {
+		} else if fsutil.Exists(sidecar) {
 			orphanLocks = append(orphanLocks, sidecar)
 		}
 	}
@@ -81,7 +82,7 @@ func runPythonRelock(check bool, dir string) error {
 	// so these paths stay testable without the toolchain or network.
 	if check {
 		for _, p := range lockable {
-			if sidecar := pythonpkg.LockSidecarPath(p); !fileExists(sidecar) {
+			if sidecar := pythonpkg.LockSidecarPath(p); !fsutil.Exists(sidecar) {
 				return fmt.Errorf("no lock sidecar at %s (run `dicode python relock %s` to create it)", sidecar, dir)
 			}
 		}

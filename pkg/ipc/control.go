@@ -2,7 +2,6 @@ package ipc
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -78,8 +77,8 @@ func NewControlServer(
 	database db.DB,
 	defaultAITask string,
 ) (*ControlServer, error) {
-	secret := make([]byte, 32)
-	if _, err := rand.Read(secret); err != nil {
+	secret, err := NewSecret()
+	if err != nil {
 		return nil, fmt.Errorf("control: generate secret: %w", err)
 	}
 

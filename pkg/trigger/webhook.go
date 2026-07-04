@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dicode/dicode/internal/pathguard"
 	"github.com/dicode/dicode/pkg/registry"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	"github.com/dicode/dicode/pkg/task"
@@ -739,7 +740,7 @@ func (e *Engine) serveTaskAsset(w http.ResponseWriter, r *http.Request, taskDir,
 
 	fullPath := filepath.Join(taskDir, clean)
 	// Double-check the resolved path is still inside taskDir.
-	if !strings.HasPrefix(fullPath, filepath.Clean(taskDir)+string(filepath.Separator)) {
+	if within, err := pathguard.Within(taskDir, fullPath); err != nil || !within {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}

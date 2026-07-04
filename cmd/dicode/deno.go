@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 
+	"github.com/dicode/dicode/internal/fsutil"
 	denopkg "github.com/dicode/dicode/pkg/deno"
 )
 
@@ -73,7 +74,7 @@ func runDenoRelock(check bool, dir string) error {
 		cacheArgs = append(cacheArgs, "--frozen=false")
 	}
 	cacheArgs = append(cacheArgs, "--lock="+lockPath)
-	if cfg := filepath.Join(dir, "deno.json"); fileExists(cfg) {
+	if cfg := filepath.Join(dir, "deno.json"); fsutil.Exists(cfg) {
 		cacheArgs = append(cacheArgs, "--config="+cfg)
 	}
 	cacheArgs = append(cacheArgs, entrypoints...)
@@ -106,9 +107,4 @@ func runDenoRelock(check bool, dir string) error {
 // command line (deterministic lock ordering).
 func findTaskEntrypoints(dir string) ([]string, error) {
 	return findTaskFiles(dir, "task.ts")
-}
-
-func fileExists(p string) bool {
-	_, err := os.Stat(p)
-	return err == nil
 }

@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dicode/dicode/internal/fsutil"
 	"github.com/dicode/dicode/pkg/deno"
 	"github.com/dicode/dicode/pkg/task"
 )
@@ -100,19 +101,10 @@ var denoSummaryRe = regexp.MustCompile(`(\d+)\s+passed(?:\s*\([\d\w]+\))?\s*\|\s
 // up to a sensible ceiling. Matches the harness config that ships with the
 // repo so `npm:...` imports resolve in-process.
 func denoConfigPath(taskDir string) string {
-	dir := filepath.Clean(taskDir)
-	for range 10 {
-		candidate := filepath.Join(dir, "tasks", "deno.json")
-		if _, err := os.Stat(candidate); err == nil {
-			return candidate
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return ""
-		}
-		dir = parent
-	}
-	return ""
+	// maxParents=9: the task dir plus nine ancestors, matching the historical
+	// ten-directory ceiling.
+	path, _ := fsutil.FindUp(taskDir, filepath.Join("tasks", "deno.json"), 9)
+	return path
 }
 
 func runDeno(ctx context.Context, spec *task.Spec, testFile string) (Result, error) {

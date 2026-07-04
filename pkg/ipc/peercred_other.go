@@ -6,6 +6,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+
+	"github.com/dicode/dicode/internal/fsutil"
 )
 
 const peerCredSupported = false
@@ -21,11 +23,7 @@ func writeCLITokenFile(path, token string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(token), 0600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return fsutil.WriteFileAtomic(path, []byte(token), 0600)
 }
 
 // readCLITokenFile reads the token from disk on non-Linux platforms.

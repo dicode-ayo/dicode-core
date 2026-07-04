@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/bep/debounce"
+	"github.com/dicode/dicode/internal/pathguard"
 	"github.com/dicode/dicode/pkg/source"
 	"github.com/dicode/dicode/pkg/task"
 	"github.com/fsnotify/fsnotify"
@@ -327,7 +328,7 @@ func (s *Source) SetDevMode(ctx context.Context, enabled bool, opts DevModeOpts)
 			if item.cloneDir == "" {
 				continue
 			}
-			if !strings.HasPrefix(item.cloneDir+string(filepath.Separator), cloneRoot+string(filepath.Separator)) {
+			if within, err := pathguard.Within(cloneRoot, item.cloneDir); err != nil || !within {
 				s.log.Warn("dev-clones disable: stored clone path escapes data dir; refusing to remove",
 					zap.String("source", s.namespace),
 					zap.String("path", item.cloneDir),
@@ -417,7 +418,8 @@ func (s *Source) enableClone(ctx context.Context, opts DevModeOpts) (string, err
 	cloneRoot := filepath.Join(s.dataDir, "dev-clones", s.namespace)
 	clonePath := filepath.Join(cloneRoot, opts.RunID)
 	cleanClonePath := filepath.Clean(clonePath)
-	if cleanClonePath != clonePath || !strings.HasPrefix(cleanClonePath+string(filepath.Separator), cloneRoot+string(filepath.Separator)) {
+	within, werr := pathguard.Within(cloneRoot, cleanClonePath)
+	if cleanClonePath != clonePath || werr != nil || !within {
 		return "", fmt.Errorf("clone path escapes data dir: %q", clonePath)
 	}
 	if err := os.MkdirAll(cloneRoot, 0o755); err != nil {

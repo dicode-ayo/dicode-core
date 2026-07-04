@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/dicode/dicode/internal/fsutil"
 	gogit "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/transport/http"
@@ -23,7 +24,7 @@ import (
 // Clones are full (no Depth limit) so that go-git's PullContext can
 // always compute a merge base when the remote advances. See #175.
 func CloneOrPull(ctx context.Context, dir, url, branch string, auth *http.BasicAuth) error {
-	if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+	if fsutil.Exists(filepath.Join(dir, ".git")) {
 		if err := pullExisting(ctx, dir, branch, auth); err == nil {
 			return nil
 		} else if !IsReclonableError(err) {

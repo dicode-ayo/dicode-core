@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dicode/dicode/internal/fsutil"
+	"github.com/dicode/dicode/internal/pathguard"
 	"github.com/dicode/dicode/pkg/task"
 	"go.uber.org/zap"
 )
@@ -419,44 +421,14 @@ func (r *Resolver) resolveRef(ctx context.Context, ref *Ref, parentTSPath string
 // before the containment check, mirroring the symlink policy in ScriptPath and
 // pkg/task/hash.go.
 func containedPath(root, target string) error {
-	realRoot, err := filepath.EvalSymlinks(root)
+	within, err := pathguard.WithinResolved(root, target)
 	if err != nil {
-		return fmt.Errorf("resolve repo root: %w", err)
+		return err
 	}
-	// EvalSymlinks requires the path to exist. Walk up to the deepest existing
-	// ancestor, canonicalize that, then re-attach the not-yet-existing tail
-	// (which therefore cannot contain a traversable symlink).
-	real, err := evalExisting(target)
-	if err != nil {
-		return fmt.Errorf("resolve ref path: %w", err)
-	}
-	if real != realRoot && !strings.HasPrefix(real, realRoot+string(filepath.Separator)) {
+	if !within {
 		return fmt.Errorf("escapes repo root")
 	}
 	return nil
-}
-
-// evalExisting canonicalizes the longest existing prefix of p with
-// filepath.EvalSymlinks (resolving every symlink in it) and rejoins the
-// trailing components that do not yet exist. The trailing components are
-// guaranteed symlink-free because they have no on-disk entry to follow.
-func evalExisting(p string) (string, error) {
-	p = filepath.Clean(p)
-	var tail []string
-	for {
-		if real, err := filepath.EvalSymlinks(p); err == nil {
-			if len(tail) == 0 {
-				return real, nil
-			}
-			return filepath.Join(append([]string{real}, tail...)...), nil
-		}
-		parent := filepath.Dir(p)
-		if parent == p {
-			return "", fmt.Errorf("no existing ancestor for %q", p)
-		}
-		tail = append([]string{filepath.Base(p)}, tail...)
-		p = parent
-	}
 }
 
 // expandRefPath replaces ${REPO_DIR} and ${TASKSET_DIR} placeholders in a ref
@@ -482,7 +454,7 @@ func resolveYAMLPath(path string) string {
 	}
 	for _, candidate := range []string{"taskset.yaml", "task.yaml"} {
 		p := filepath.Join(path, candidate)
-		if _, err := os.Stat(p); err == nil {
+		if fsutil.Exists(p) {
 			return p
 		}
 	}

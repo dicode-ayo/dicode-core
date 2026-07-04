@@ -15,6 +15,7 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/dicode/dicode/internal/fsutil"
 	"github.com/dicode/dicode/pkg/db"
 	denopkg "github.com/dicode/dicode/pkg/deno"
 	"github.com/dicode/dicode/pkg/ipc"
@@ -374,22 +375,9 @@ func expandHome(p string) string {
 // findDenoLockFile walks up from dir (at most maxParents levels) looking for
 // a deno.lock file. Returns the absolute path on the first match, or "".
 // maxParents=2 covers the buildin layout: tasks/buildin/<name>/ → tasks/deno.lock.
-// Note: i <= maxParents means the loop runs maxParents+1 times, visiting the
-// starting dir and maxParents ancestors.
 func findDenoLockFile(dir string, maxParents int) string {
-	current := filepath.Clean(dir)
-	for i := 0; i <= maxParents; i++ {
-		candidate := filepath.Join(current, "deno.lock")
-		if _, err := os.Stat(candidate); err == nil {
-			return candidate
-		}
-		parent := filepath.Dir(current)
-		if parent == current {
-			break
-		}
-		current = parent
-	}
-	return ""
+	path, _ := fsutil.FindUp(dir, "deno.lock", maxParents)
+	return path
 }
 
 func buildDenoArgs(spec *task.Spec, socketPath, shimPath, runnerPath string, protectedPaths []string) []string {
