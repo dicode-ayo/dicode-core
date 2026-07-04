@@ -129,6 +129,9 @@ func dispatch(c *ipc.ControlClient, args []string) error {
 		if len(args) < 2 {
 			return fmt.Errorf("usage: dicode run <task-id> [key=value ...]")
 		}
+		if err := waitDaemonReady(c, readyWaitTimeout); err != nil {
+			return err
+		}
 		return cmdRun(c, args[1], args[2:])
 	case "logs":
 		if len(args) < 2 {
@@ -139,6 +142,13 @@ func dispatch(c *ipc.ControlClient, args []string) error {
 		taskID := ""
 		if len(args) >= 2 {
 			taskID = args[1]
+		}
+		// Only the task-scoped form needs the registry populated; bare
+		// `dicode status` is daemon health and must answer even mid-sync.
+		if taskID != "" {
+			if err := waitDaemonReady(c, readyWaitTimeout); err != nil {
+				return err
+			}
 		}
 		return cmdStatus(c, taskID)
 	case "secrets":
@@ -511,6 +521,9 @@ func cmdTask(c *ipc.ControlClient, args []string) error {
 	case "test":
 		if len(args) < 2 {
 			return fmt.Errorf("usage: dicode task test <task-id> [--format=text|junit|gh-summary]")
+		}
+		if err := waitDaemonReady(c, readyWaitTimeout); err != nil {
+			return err
 		}
 		return cmdTaskTest(c, args[1:])
 	case "create":
@@ -1034,6 +1047,46 @@ func cmdAI(c *ipc.ControlClient, args []string) error {
 		fmt.Fprintf(os.Stderr, "session: %s\n", result.SessionID)
 	}
 	fmt.Println(result.Reply)
+	return nil
+}
+
+// readyWaitTimeout bounds how long task-scoped commands (run, status <task>,
+// task test) wait for the daemon's first task sync after the control socket
+// is reachable. The first sync may include a git clone of the task sources,
+// so this is deliberately more generous than ensureDaemon's socket poll.
+const readyWaitTimeout = 30 * time.Second
+
+// waitDaemonReady blocks until the daemon reports its initial task sync is
+// complete, or timeout elapses. Socket-up does not imply ready-to-serve-
+// lookups (#464): the control socket accepts connections before the
+// reconciler's first sync has registered the task inventory, so a task-scoped
+// command issued right after daemon start could see a spurious "task not
+// found". The wait happens daemon-side (single blocking cli.ready round-trip,
+// no polling); on a daemon that shuts down mid-wait the request errors out.
+// An older daemon that predates cli.ready is treated as ready so mixed
+// CLI/daemon versions keep working.
+func waitDaemonReady(c *ipc.ControlClient, timeout time.Duration) error {
+	resp, err := c.Send(ipc.Request{
+		Method: "cli.ready",
+		WaitMs: int(timeout / time.Millisecond),
+	})
+	if err != nil {
+		return fmt.Errorf("query daemon readiness: %w", err)
+	}
+	if resp.Error != "" {
+		if strings.Contains(resp.Error, "unknown method") {
+			return nil // pre-#464 daemon: no readiness barrier, keep old behaviour
+		}
+		return fmt.Errorf("query daemon readiness: %s", resp.Error)
+	}
+	var r ipc.ReadyResult
+	if err := remarshal(resp.Result, &r); err != nil {
+		return fmt.Errorf("decode readiness result: %w", err)
+	}
+	if !r.Ready {
+		return fmt.Errorf("daemon not ready after %s — initial task sync still running (retry shortly, or check %s)",
+			timeout, filepath.Join(defaultDataDir(), "daemon.log"))
+	}
 	return nil
 }
 

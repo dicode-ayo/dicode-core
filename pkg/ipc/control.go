@@ -58,9 +58,20 @@ type ControlServer struct {
 	// CLI. Nil means allow.
 	testGuard func(taskID string) error
 
+	// ready closes once the daemon has finished registering its initial task
+	// inventory — the reconciler's first-sync signal, wired via
+	// SetReadySignal (#464). Nil (tests / stripped builds) means always
+	// ready, preserving pre-barrier behaviour.
+	ready <-chan struct{}
+
 	startedAt time.Time
 	version   string
 }
+
+// maxReadyWait caps how long a single cli.ready request may block waiting
+// for the first task sync, regardless of the client-requested WaitMs. Keeps
+// a stray client from parking a handler goroutine indefinitely.
+const maxReadyWait = 60 * time.Second
 
 // NewControlServer creates a ControlServer. Call Start to begin accepting
 // connections. socketPath is the Unix socket path; tokenPath is where the CLI
@@ -209,6 +220,9 @@ func (cs *ControlServer) dispatch(ctx context.Context, req Request) (any, error)
 	switch req.Method {
 	case "cli.ping":
 		return cs.handlePing(), nil
+
+	case "cli.ready":
+		return cs.handleReady(ctx, req)
 
 	case "cli.list":
 		return cs.handleList()
@@ -484,12 +498,60 @@ func (cs *ControlServer) handleAuthResetPassphrase(ctx context.Context) (any, er
 	return AuthResetPassphraseResult{Value: plaintext}, nil
 }
 
+// SetReadySignal wires the reconciler's first-sync channel so cli.ready (and
+// the Ready field on cli.ping) can report when the initial task inventory is
+// registered (#464). Must be called before Start. Nil (tests / configurations
+// without a reconciler) means always ready.
+func (cs *ControlServer) SetReadySignal(ch <-chan struct{}) { cs.ready = ch }
+
+// isReady is a non-blocking readiness probe.
+func (cs *ControlServer) isReady() bool {
+	if cs.ready == nil {
+		return true
+	}
+	select {
+	case <-cs.ready:
+		return true
+	default:
+		return false
+	}
+}
+
+// handleReady reports whether the daemon's first task sync has completed,
+// optionally blocking up to req.WaitMs (capped at maxReadyWait) for it. The
+// wait also unblocks on connection/daemon shutdown via ctx, so a daemon that
+// never finishes its first sync (e.g. cancelled mid-clone) cannot strand the
+// handler goroutine — shutdown-safety for the readiness barrier (#464).
+func (cs *ControlServer) handleReady(ctx context.Context, req Request) (ReadyResult, error) {
+	if cs.isReady() {
+		return ReadyResult{Ready: true}, nil
+	}
+	wait := time.Duration(req.WaitMs) * time.Millisecond
+	if wait <= 0 {
+		return ReadyResult{Ready: false}, nil
+	}
+	if wait > maxReadyWait {
+		wait = maxReadyWait
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-cs.ready:
+		return ReadyResult{Ready: true}, nil
+	case <-timer.C:
+		return ReadyResult{Ready: false}, nil
+	case <-ctx.Done():
+		return ReadyResult{Ready: false}, ctx.Err()
+	}
+}
+
 func (cs *ControlServer) handlePing() DaemonStatus {
 	all := cs.reg.All()
 	return DaemonStatus{
 		Version:   cs.version,
 		UptimeSec: int64(time.Since(cs.startedAt).Seconds()),
 		TaskCount: len(all),
+		Ready:     cs.isReady(),
 	}
 }
 

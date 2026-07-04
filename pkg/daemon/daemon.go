@@ -654,6 +654,14 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	// fire paths and the REST test endpoint.
 	ctrlSrv.SetTestGuard(approvalGate.FireGuard)
 
+	// Readiness barrier (#464): the control socket comes up before the
+	// reconciler's first sync has registered the initial task inventory, so a
+	// CLI command racing daemon startup could observe a spurious "task not
+	// found". cli.ready lets task-scoped CLI commands block (bounded) until
+	// the first sync completes. The channel never closes if ctx is cancelled
+	// mid-sync; the IPC handler's own ctx/timeout select keeps shutdown clean.
+	ctrlSrv.SetReadySignal(rec.Ready())
+
 	// `dicode task approve` — the control socket is a trusted local channel.
 	ctrlSrv.SetTaskApprover(approvalGate.Approve)
 
