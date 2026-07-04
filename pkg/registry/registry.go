@@ -346,7 +346,12 @@ func scanRun(rows db.Scanner, withInput bool) (*Run, error) {
 		run.ParentRunID = *parentID
 	}
 	if redactedFieldsJSON != "" && redactedFieldsJSON != "null" {
-		_ = json.Unmarshal([]byte(redactedFieldsJSON), &run.InputRedactedFields)
+		// input_redacted_fields is daemon-written json.Marshal([]string); a
+		// malformed value signals data corruption, so surface it rather than
+		// silently returning empty (potentially misleading) redaction metadata.
+		if err := json.Unmarshal([]byte(redactedFieldsJSON), &run.InputRedactedFields); err != nil {
+			return nil, fmt.Errorf("decode input_redacted_fields for run %s: %w", run.ID, err)
+		}
 	}
 	return run, nil
 }
