@@ -323,6 +323,13 @@ func (s *dbSessionStore) revokeDevice(ctx context.Context, id string) error {
 	return s.db.Exec(ctx, `DELETE FROM sessions WHERE id = ? AND kind = 'device'`, id)
 }
 
+// revokeDeviceByToken deletes the device row matching a raw device-cookie
+// value. apiLogout has the raw cookie, not the row id, so it must revoke by
+// token_hash — the same key renewFromDevice looks the row up by.
+func (s *dbSessionStore) revokeDeviceByToken(ctx context.Context, rawToken string) error {
+	return s.db.Exec(ctx, `DELETE FROM sessions WHERE token_hash = ? AND kind = 'device'`, hashToken(rawToken))
+}
+
 // RevokeAllDevices clears all trusted device tokens (emergency lockout).
 func (s *dbSessionStore) revokeAllDevices(ctx context.Context) error {
 	return s.db.Exec(ctx, `DELETE FROM sessions WHERE kind = 'device'`)
@@ -451,7 +458,12 @@ func (s *Server) apiLogout(w http.ResponseWriter, r *http.Request) {
 	_ = s.sm.Destroy(r.Context())
 	if s.dbSessions != nil {
 		if dc, err := r.Cookie(deviceCookie); err == nil {
-			_ = s.dbSessions.revokeDevice(r.Context(), dc.Value)
+			// Surface a failed revoke: the cookie is cleared client-side
+			// regardless, but if the row survives (DB error / contention) a
+			// captured cookie stays usable, so the failure must not be silent.
+			if err := s.dbSessions.revokeDeviceByToken(r.Context(), dc.Value); err != nil {
+				s.log.Warn("device.revoke_on_logout_failed", zap.Error(err))
+			}
 		}
 	}
 	clearDeviceCookie(w)
