@@ -19,26 +19,31 @@ func WriteFileAtomic(path string, data []byte, mode os.FileMode) error {
 		return fmt.Errorf("create tmp: %w", err)
 	}
 	tmpPath := tmp.Name()
+	// cleanup removes the temp file on any error path; both calls are
+	// best-effort after a primary error is already being returned, so their
+	// own errors are intentionally discarded (keeps errcheck satisfied).
+	cleanup := func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+	}
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		os.Remove(tmpPath)
+		cleanup()
 		return fmt.Errorf("write tmp: %w", err)
 	}
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		os.Remove(tmpPath)
+		cleanup()
 		return fmt.Errorf("sync tmp: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
-		os.Remove(tmpPath)
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("close tmp: %w", err)
 	}
 	if err := os.Chmod(tmpPath, mode); err != nil {
-		os.Remove(tmpPath)
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("chmod tmp: %w", err)
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
-		os.Remove(tmpPath)
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("rename: %w", err)
 	}
 	return nil

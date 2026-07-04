@@ -739,8 +739,11 @@ func (e *Engine) serveTaskAsset(w http.ResponseWriter, r *http.Request, taskDir,
 	}
 
 	fullPath := filepath.Join(taskDir, clean)
-	// Double-check the resolved path is still inside taskDir.
-	if within, err := pathguard.Within(taskDir, fullPath); err != nil || !within {
+	// Double-check the resolved path is still inside taskDir. Use the
+	// symlink-resolving guard: task dirs come from untrusted sources (a git
+	// author can commit a symlink asset pointing at /etc/passwd), so a purely
+	// lexical check would pass while os.ReadFile below follows the link out.
+	if within, err := pathguard.WithinResolved(taskDir, fullPath); err != nil || !within {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
