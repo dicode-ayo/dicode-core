@@ -174,6 +174,101 @@ func TestAuth_Logout_RevokesSession(t *testing.T) {
 	}
 }
 
+// TestAuth_Logout_RevokesDeviceToken is a regression test for the bug where
+// apiLogout passed the raw device-cookie value to the id-keyed revokeDevice,
+// matching zero rows and leaving the trusted-device token replayable until its
+// 30-day expiry. Logout must delete the row by token_hash so the cookie is
+// dead immediately.
+func TestAuth_Logout_RevokesDeviceToken(t *testing.T) {
+	srv := newAuthServer(t, "hunter2")
+	h := srv.Handler()
+
+	// Login with trust=true to get both a session cookie and a device cookie.
+	body, _ := json.Marshal(map[string]any{"password": "hunter2", "trust": true})
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "TestBrowser/1.0")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("login failed: %d: %s", w.Code, w.Body)
+	}
+	var sessCookie, devCookie *http.Cookie
+	for _, c := range w.Result().Cookies() {
+		switch c.Name {
+		case sessionCookie:
+			sessCookie = c
+		case deviceCookie:
+			devCookie = c
+		}
+	}
+	if sessCookie == nil || devCookie == nil {
+		t.Fatalf("expected session and device cookies, got session=%v device=%v", sessCookie, devCookie)
+	}
+
+	devices, err := srv.dbSessions.listDevices(t.Context())
+	if err != nil {
+		t.Fatalf("listDevices: %v", err)
+	}
+	if len(devices) != 1 {
+		t.Fatalf("expected 1 device row after trusted login, got %d", len(devices))
+	}
+
+	// Logout with the device cookie attached.
+	req2 := httptest.NewRequest(http.MethodPost, "/api/auth/logout", nil)
+	req2.AddCookie(sessCookie)
+	req2.AddCookie(devCookie)
+	w2 := httptest.NewRecorder()
+	h.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("logout failed: %d", w2.Code)
+	}
+
+	// The device row must be gone, not just the session.
+	devices, err = srv.dbSessions.listDevices(t.Context())
+	if err != nil {
+		t.Fatalf("listDevices: %v", err)
+	}
+	if len(devices) != 0 {
+		t.Fatalf("device row must be deleted on logout, got %d rows", len(devices))
+	}
+
+	// Replaying the raw device token must fail — the cookie is dead.
+	if _, ok, _ := srv.dbSessions.renewFromDevice(t.Context(), devCookie.Value, "127.0.0.1", "TestBrowser/1.0", "off"); ok {
+		t.Fatal("device token still accepted after logout; logout must revoke by token_hash")
+	}
+}
+
+// Guard: the id-keyed revokeDevice used by apiRevokeDevice (revoke a device
+// from the /security list) must keep working alongside the token-keyed revoke.
+func TestAuth_RevokeDeviceByID_StillWorks(t *testing.T) {
+	store, _ := newTestStore(t)
+	ctx := t.Context()
+
+	raw, err := store.issueDeviceToken(ctx, "203.0.113.10", "TestBrowser/1.0")
+	if err != nil {
+		t.Fatalf("issueDeviceToken: %v", err)
+	}
+	devices, err := store.listDevices(ctx)
+	if err != nil {
+		t.Fatalf("listDevices: %v", err)
+	}
+	if len(devices) != 1 {
+		t.Fatalf("expected 1 device, got %d", len(devices))
+	}
+
+	if err := store.revokeDevice(ctx, devices[0].ID); err != nil {
+		t.Fatalf("revokeDevice: %v", err)
+	}
+	devices, _ = store.listDevices(ctx)
+	if len(devices) != 0 {
+		t.Fatalf("id-based revoke must delete the row, got %d rows", len(devices))
+	}
+	if _, ok, _ := store.renewFromDevice(ctx, raw, "203.0.113.10", "TestBrowser/1.0", "off"); ok {
+		t.Fatal("device token still accepted after id-based revoke")
+	}
+}
+
 func TestAuth_TrustedDevice_IssuedOnLogin(t *testing.T) {
 	srv := newAuthServer(t, "secret")
 	h := srv.Handler()
