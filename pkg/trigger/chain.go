@@ -23,6 +23,12 @@ import (
 // breaking accidental infinite loops that weren't caught at registration time.
 const maxSuccessChainDepth = 10
 
+// chainOnAlways is the trigger.chain `on:` value that fires the edge
+// regardless of the upstream run's outcome. The other two accepted values
+// compare directly against run statuses, so they use registry.StatusSuccess /
+// registry.StatusFailure rather than their own constants.
+const chainOnAlways = "always"
+
 // hasSuccessChainCycle reports whether registering a task with ID newID that
 // declares trigger.chain.from = from would close a success-chain cycle. It
 // performs a DFS over the combined graph: existing registered tasks' success-chain
@@ -41,7 +47,7 @@ func (e *Engine) hasSuccessChainCycle(newID, from string) bool {
 			continue
 		}
 		on := spec.Trigger.Chain.ChainOn()
-		if on != "success" && on != "always" {
+		if on != registry.StatusSuccess && on != chainOnAlways {
 			continue
 		}
 		successTargets[spec.Trigger.Chain.From] = append(successTargets[spec.Trigger.Chain.From], spec.ID)
@@ -102,7 +108,7 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 			continue
 		}
 		on := chain.ChainOn()
-		if on != "always" && on != runStatus {
+		if on != chainOnAlways && on != runStatus {
 			continue
 		}
 		// Per-edge overrides (#NNN): when the downstream's trigger.chain
@@ -195,7 +201,7 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 			continue
 		}
 		on := p.Trigger.Chain.ChainOn()
-		if on != "always" && on != runStatus {
+		if on != chainOnAlways && on != runStatus {
 			continue
 		}
 		// Resolve any ${input.*} references in chain.params against the upstream
@@ -233,7 +239,7 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 	}
 
 	// Config-level default on_failure_chain.
-	if runStatus == "failure" {
+	if runStatus == registry.StatusFailure {
 		chainSpec := e.defaultsOnFailureChain
 		if failedSpec, ok := e.registry.Get(completedTaskID); ok {
 			if failedSpec.OnFailureChain != nil {

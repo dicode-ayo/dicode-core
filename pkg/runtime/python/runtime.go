@@ -7,7 +7,7 @@
 // # Execution model
 //
 // Each Run spawns a fresh uv subprocess connected to the same per-run Unix
-// socket server used by the Deno runtime. An embedded Python shim (sdk.py)
+// socket server used by the Deno runtime. An embedded Python shim (dicode_sdk.py)
 // provides the same globals as the Deno SDK:
 //
 //	log, params, env, kv, input, output
@@ -308,7 +308,7 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 //
 //  1. PEP 723 script block (extracted from the user script, if present) — must
 //     be first so uv can parse inline dependencies.
-//  2. The dicode SDK shim (sdk.py).
+//  2. The dicode SDK shim (dicode_sdk.py).
 //  3. The permission guard (guard.py) — after the SDK so the hook never
 //     governs the SDK's own socket setup, before the task body so it governs
 //     all user code. uv resolves PEP 723 deps before the script runs, so

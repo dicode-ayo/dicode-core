@@ -297,47 +297,71 @@ func (r *Registry) BulkAppendLogs(ctx context.Context, entries []PendingLogEntry
 	return nil
 }
 
+// runColumns is the SELECT column list shared by GetRun and queryRuns.
+// scanRun decodes exactly these columns, in this order. Adding a run column
+// means extending this list plus scanRun — nothing else.
+const runColumns = `id, task_id, COALESCE(kind, 'task'), status, started_at, finished_at, parent_run_id, trigger_source,
+        COALESCE(return_value, ''), COALESCE(output_content_type, ''), COALESCE(output_content, ''),
+        COALESCE(fail_reason, ''), COALESCE(run_group, '')`
+
+// runInputColumns are the input-persistence columns GetRun additionally
+// selects (appended after runColumns). queryRuns deliberately omits them:
+// list endpoints serve the run table and don't surface input metadata, and
+// list responses serialize Run directly, so populating these fields there
+// would change API output.
+const runInputColumns = `,
+        COALESCE(input_storage_key, ''), COALESCE(input_size, 0), COALESCE(input_stored_at, 0),
+        COALESCE(input_redacted_fields, ''), COALESCE(input_pinned, 0)`
+
+// scanRun decodes one row selected with runColumns (plus runInputColumns when
+// withInput is true) into a Run, including the shared post-processing
+// (trigger source, millisecond timestamps, nullable parent, redacted-fields
+// JSON). rows.Next() must already have returned true.
+func scanRun(rows db.Scanner, withInput bool) (*Run, error) {
+	run := &Run{}
+	var startedMs int64
+	var finishedMs *int64
+	var parentID *string
+	var tsStr string
+	var redactedFieldsJSON string
+	dest := []any{
+		&run.ID, &run.TaskID, &run.Kind, &run.Status, &startedMs, &finishedMs, &parentID,
+		&tsStr, &run.ReturnValue, &run.OutputContentType, &run.OutputContent,
+		&run.FailureReason, &run.Group,
+	}
+	if withInput {
+		dest = append(dest,
+			&run.InputStorageKey, &run.InputSize, &run.InputStoredAt, &redactedFieldsJSON, &run.InputPinned)
+	}
+	if err := rows.Scan(dest...); err != nil {
+		return nil, err
+	}
+	run.TriggerSource = TriggerSource(tsStr)
+	run.StartedAt = time.UnixMilli(startedMs)
+	if finishedMs != nil {
+		t := time.UnixMilli(*finishedMs)
+		run.FinishedAt = &t
+	}
+	if parentID != nil {
+		run.ParentRunID = *parentID
+	}
+	if redactedFieldsJSON != "" && redactedFieldsJSON != "null" {
+		_ = json.Unmarshal([]byte(redactedFieldsJSON), &run.InputRedactedFields)
+	}
+	return run, nil
+}
+
 // GetRun fetches a run record by ID.
 func (r *Registry) GetRun(ctx context.Context, runID string) (*Run, error) {
 	var run *Run
 	err := r.db.Query(ctx,
-		`SELECT id, task_id, COALESCE(kind, 'task'), status, started_at, finished_at, parent_run_id, trigger_source,
-		        COALESCE(return_value, ''), COALESCE(output_content_type, ''), COALESCE(output_content, ''),
-		        COALESCE(fail_reason, ''),
-		        COALESCE(input_storage_key, ''), COALESCE(input_size, 0), COALESCE(input_stored_at, 0),
-		        COALESCE(input_redacted_fields, ''), COALESCE(input_pinned, 0),
-		        COALESCE(run_group, '')
-		 FROM runs WHERE id = ?`,
+		`SELECT `+runColumns+runInputColumns+` FROM runs WHERE id = ?`,
 		[]any{runID},
 		func(rows db.Scanner) error {
 			if rows.Next() {
-				run = &Run{}
-				var startedMs int64
-				var finishedMs *int64
-				var parentID *string
-				var redactedFieldsJSON string
-				var tsStr string
-				if err := rows.Scan(
-					&run.ID, &run.TaskID, &run.Kind, &run.Status, &startedMs, &finishedMs, &parentID,
-					&tsStr, &run.ReturnValue, &run.OutputContentType, &run.OutputContent,
-					&run.FailureReason,
-					&run.InputStorageKey, &run.InputSize, &run.InputStoredAt, &redactedFieldsJSON, &run.InputPinned,
-					&run.Group,
-				); err != nil {
-					return err
-				}
-				run.TriggerSource = TriggerSource(tsStr)
-				run.StartedAt = time.UnixMilli(startedMs)
-				if finishedMs != nil {
-					t := time.UnixMilli(*finishedMs)
-					run.FinishedAt = &t
-				}
-				if parentID != nil {
-					run.ParentRunID = *parentID
-				}
-				if redactedFieldsJSON != "" && redactedFieldsJSON != "null" {
-					_ = json.Unmarshal([]byte(redactedFieldsJSON), &run.InputRedactedFields)
-				}
+				var scanErr error
+				run, scanErr = scanRun(rows, true)
+				return scanErr
 			}
 			return nil
 		},
@@ -403,29 +427,13 @@ func (r *Registry) ListByGroup(ctx context.Context, taskID, group string, limit 
 func (r *Registry) queryRuns(ctx context.Context, whereAndLimit string, args []any) ([]*Run, error) {
 	var runs []*Run
 	err := r.db.Query(ctx,
-		`SELECT id, task_id, COALESCE(kind, 'task'), status, started_at, finished_at, parent_run_id, trigger_source,
-		        COALESCE(return_value, ''), COALESCE(output_content_type, ''), COALESCE(output_content, ''),
-		        COALESCE(fail_reason, ''), COALESCE(run_group, '')
-		 FROM runs `+whereAndLimit,
+		`SELECT `+runColumns+` FROM runs `+whereAndLimit,
 		args,
 		func(rows db.Scanner) error {
 			for rows.Next() {
-				run := &Run{}
-				var startedMs int64
-				var finishedMs *int64
-				var parentID *string
-				var tsStr string
-				if err := rows.Scan(&run.ID, &run.TaskID, &run.Kind, &run.Status, &startedMs, &finishedMs, &parentID, &tsStr, &run.ReturnValue, &run.OutputContentType, &run.OutputContent, &run.FailureReason, &run.Group); err != nil {
+				run, err := scanRun(rows, false)
+				if err != nil {
 					return err
-				}
-				run.TriggerSource = TriggerSource(tsStr)
-				run.StartedAt = time.UnixMilli(startedMs)
-				if finishedMs != nil {
-					t := time.UnixMilli(*finishedMs)
-					run.FinishedAt = &t
-				}
-				if parentID != nil {
-					run.ParentRunID = *parentID
 				}
 				runs = append(runs, run)
 			}
