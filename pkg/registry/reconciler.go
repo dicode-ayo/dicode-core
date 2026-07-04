@@ -10,6 +10,14 @@ import (
 	"go.uber.org/zap"
 )
 
+// initialSyncBarrier is an internal sentinel event kind injected by the
+// reconciler itself — never emitted by real sources. Each initially-configured
+// source's forwarding goroutine pushes one barrier into the merged channel
+// right after the source's initial scan batch, so by the time the Run loop
+// dequeues the barrier every task from that batch has been handled (registered
+// or rejected). Once all barriers have been seen the Ready channel closes.
+const initialSyncBarrier source.EventKind = "dicode-internal/initial-sync-barrier"
+
 // Reconciler fans-in events from multiple sources and applies them to the registry.
 type Reconciler struct {
 	registry *Registry
@@ -36,6 +44,15 @@ type Reconciler struct {
 	// repeated failure for the same task replaces the previous attempt
 	// (always retrying the most recent event).
 	pending map[string]source.Event
+
+	// ready closes once the first sync completes: every initially-configured
+	// source has started AND its initial scan batch has been handled (#464).
+	// It never closes when the run context is cancelled first, so consumers
+	// must select on their own timeout/context alongside it. initPending
+	// (guarded by mu) counts sources whose barrier has not yet been seen.
+	ready       chan struct{}
+	readyOnce   sync.Once
+	initPending int
 }
 
 // NewReconciler creates a Reconciler for the given registry and sources.
@@ -50,6 +67,26 @@ func NewReconciler(r *Registry, sources []source.Source, dataDir string, log *za
 		log:      log,
 		cancels:  make(map[string]context.CancelFunc),
 		pending:  make(map[string]source.Event),
+		ready:    make(chan struct{}),
+	}
+}
+
+// Ready returns a channel that closes once the reconciler's first sync has
+// completed — every initially-configured source has started and the tasks
+// from its initial scan have been registered (or rejected). The channel never
+// closes if the run context is cancelled before the first sync finishes, so
+// consumers must select on their own timeout/context alongside it.
+func (rc *Reconciler) Ready() <-chan struct{} { return rc.ready }
+
+// markInitialSourceSynced records one source's initial-sync barrier passing
+// through the Run loop; when the last one lands, Ready closes.
+func (rc *Reconciler) markInitialSourceSynced() {
+	rc.mu.Lock()
+	rc.initPending--
+	done := rc.initPending <= 0
+	rc.mu.Unlock()
+	if done {
+		rc.readyOnce.Do(func() { close(rc.ready) })
 	}
 }
 
@@ -58,15 +95,18 @@ func (rc *Reconciler) Run(ctx context.Context) error {
 	rc.mu.Lock()
 	rc.runCtx = ctx
 	rc.merged = make(chan source.Event, 64)
+	rc.initPending = len(rc.sources)
 	rc.mu.Unlock()
 
 	if len(rc.sources) == 0 {
+		// Nothing to sync — the first sync is trivially complete.
+		rc.readyOnce.Do(func() { close(rc.ready) })
 		// Still need to run so dynamic AddSource works.
 		goto loop
 	}
 
 	for _, src := range rc.sources {
-		if err := rc.startSource(src); err != nil {
+		if err := rc.startSource(src, true); err != nil {
 			return fmt.Errorf("start source %s: %w", src.ID(), err)
 		}
 	}
@@ -77,6 +117,10 @@ loop:
 		case <-ctx.Done():
 			return nil
 		case ev := <-rc.merged:
+			if ev.Kind == initialSyncBarrier {
+				rc.markInitialSourceSynced()
+				continue
+			}
 			rc.handle(ev)
 		}
 	}
@@ -84,8 +128,10 @@ loop:
 
 // AddSource adds a new source at runtime and starts it immediately.
 // Safe to call from any goroutine after Run has been called.
+// Runtime-added sources never participate in the first-sync readiness
+// barrier — Ready tracks only the initially-configured set.
 func (rc *Reconciler) AddSource(src source.Source) error {
-	return rc.startSource(src)
+	return rc.startSource(src, false)
 }
 
 // RemoveSource stops and removes a source by its ID.
@@ -101,7 +147,17 @@ func (rc *Reconciler) RemoveSource(id string) {
 }
 
 // startSource begins watching a source and forwarding its events to merged.
-func (rc *Reconciler) startSource(src source.Source) error {
+//
+// trackInitial marks the source as part of the first-sync readiness barrier:
+// sources emit their initial scan synchronously inside Start (into the
+// buffered channel), so len(ch) captured here is the initial batch size. The
+// forwarding goroutine pushes an initialSyncBarrier sentinel into merged right
+// after that batch; when the Run loop dequeues it, every initial task from
+// this source has already been handled. Any watch-phase events that slipped
+// into the buffer before the snapshot only inflate the count — they are
+// already buffered, so the barrier still lands without waiting on future
+// activity.
+func (rc *Reconciler) startSource(src source.Source, trackInitial bool) error {
 	rc.mu.Lock()
 	ctx := rc.runCtx
 	rc.mu.Unlock()
@@ -115,12 +171,34 @@ func (rc *Reconciler) startSource(src source.Source) error {
 		cancel()
 		return err
 	}
+	initialBatch := 0
+	if trackInitial {
+		initialBatch = len(ch)
+	}
 
 	rc.mu.Lock()
 	rc.cancels[src.ID()] = cancel
 	rc.mu.Unlock()
 
 	go func() {
+		// sendBarrier signals this source's initial batch has been forwarded.
+		// It reports false when ctx is done, so the forwarder can bail out.
+		// On shutdown before the barrier lands, Ready simply never closes —
+		// readiness consumers select on their own timeout/context.
+		sendBarrier := func() bool {
+			select {
+			case rc.merged <- source.Event{Kind: initialSyncBarrier}:
+				return true
+			case <-ctx.Done():
+				return false
+			}
+		}
+		if trackInitial && initialBatch == 0 {
+			if !sendBarrier() {
+				return
+			}
+			trackInitial = false
+		}
 		for ev := range ch {
 			// Without the ctx select, a slow main loop plus a closed merged
 			// reader during shutdown would block this goroutine forever
@@ -131,6 +209,14 @@ func (rc *Reconciler) startSource(src source.Source) error {
 			case rc.merged <- ev:
 			case <-ctx.Done():
 				return
+			}
+			if trackInitial {
+				if initialBatch--; initialBatch == 0 {
+					if !sendBarrier() {
+						return
+					}
+					trackInitial = false
+				}
 			}
 		}
 	}()

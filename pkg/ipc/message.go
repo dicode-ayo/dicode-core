@@ -93,6 +93,7 @@ type Request struct {
 	RunID       string `json:"runID,omitempty"`
 	StringValue string `json:"stringValue,omitempty"` // cli.secrets.set value
 	Follow      bool   `json:"follow,omitempty"`      // cli.logs — reserved for streaming
+	WaitMs      int    `json:"waitMs,omitempty"`      // cli.ready — max ms to block for readiness (0 = probe only)
 
 	// dicode.runs.* — run-input retention management (#233)
 	BeforeTs int64 `json:"before_ts,omitempty"` // dicode.runs.list_expired: unix timestamp cutoff
@@ -244,6 +245,17 @@ type DaemonStatus struct {
 	UptimeSec int64  `json:"uptimeSec"`
 	TaskCount int    `json:"taskCount"`
 	RunCount  int    `json:"runCount"` // runs in the last 24h
+	// Ready reports whether the reconciler's first sync has completed —
+	// i.e. the initial task inventory is registered and lookups by task ID
+	// are meaningful (#464). Point-in-time snapshot; cli.ready is the
+	// blocking wait.
+	Ready bool `json:"ready"`
+}
+
+// ReadyResult is the cli.ready response. Ready is false when the daemon's
+// first task sync had not completed within the requested wait window.
+type ReadyResult struct {
+	Ready bool `json:"ready"`
 }
 
 // RunResult is returned by EngineRunner.WaitRun.
