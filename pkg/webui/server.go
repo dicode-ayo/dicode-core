@@ -2360,6 +2360,25 @@ func (s *Server) apiAddSource(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]string{"status": "ok"})
 }
 
+// apiListGitBranches lists remote branches for a git URL — used by the config
+// UI when adding or inspecting a source.
+//
+// Security (#475): the token_env query parameter names an environment
+// variable whose value is sent as an HTTP basic-auth password to the remote.
+// Honouring an arbitrary name would let any authenticated caller exfiltrate
+// any daemon env var by pointing url at a server they control. The rule
+// enforced by resolveBranchesTokenEnv:
+//
+//  1. If url matches an already-configured git source, that source's
+//     configured auth.token_env is used and the request's token_env is
+//     ignored.
+//  2. Otherwise (previewing a source that has not been added yet), token_env
+//     must be empty or exactly match an auth.token_env already configured on
+//     some git source in dicode.yaml — i.e. an env var the operator has
+//     explicitly designated as a git credential.
+//
+// SSRF against loopback/private/link-local/internal hosts is rejected inside
+// gitSource.ListBranches before any connection is made.
 func (s *Server) apiListGitBranches(w http.ResponseWriter, r *http.Request) {
 	repoURL := r.URL.Query().Get("url")
 	if repoURL == "" {
@@ -2370,13 +2389,55 @@ func (s *Server) apiListGitBranches(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "url scheme not allowed", http.StatusBadRequest)
 		return
 	}
-	tokenEnv := r.URL.Query().Get("token_env")
+	tokenEnv, err := s.resolveBranchesTokenEnv(repoURL, r.URL.Query().Get("token_env"))
+	if err != nil {
+		jsonErr(w, err.Error(), http.StatusForbidden)
+		return
+	}
 	branches, err := gitSource.ListBranches(r.Context(), repoURL, tokenEnv)
 	if err != nil {
 		jsonErr(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	jsonOK(w, branches)
+}
+
+// resolveBranchesTokenEnv decides which environment variable, if any, may be
+// used as the git credential for a branch-listing request. See the security
+// note on apiListGitBranches for the rule it enforces.
+func (s *Server) resolveBranchesTokenEnv(repoURL, requested string) (string, error) {
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
+
+	want := normalizeGitURL(repoURL)
+	allowed := make(map[string]bool)
+	if s.cfg != nil {
+		for _, entry := range s.cfg.Spec.Entries {
+			if entry == nil || entry.Ref == nil || !entry.Ref.IsGit() {
+				continue
+			}
+			if normalizeGitURL(entry.Ref.URL) == want {
+				// Configured source: always use its own credential.
+				return entry.Ref.Auth.TokenEnv, nil
+			}
+			if entry.Ref.Auth.TokenEnv != "" {
+				allowed[entry.Ref.Auth.TokenEnv] = true
+			}
+		}
+	}
+	if requested == "" || allowed[requested] {
+		return requested, nil
+	}
+	return "", fmt.Errorf("token_env %q is not permitted: it must match the auth.token_env of a git source configured in dicode.yaml", requested)
+}
+
+// normalizeGitURL canonicalises a git remote URL for equality comparison:
+// trims surrounding whitespace, a trailing slash, and a trailing ".git".
+func normalizeGitURL(raw string) string {
+	u := strings.TrimSpace(raw)
+	u = strings.TrimSuffix(u, "/")
+	u = strings.TrimSuffix(u, ".git")
+	return u
 }
 
 func (s *Server) apiRemoveSource(w http.ResponseWriter, r *http.Request) {

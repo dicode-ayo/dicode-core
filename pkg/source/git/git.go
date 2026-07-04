@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -241,14 +242,51 @@ func (g *GitSource) syncAndEmit(ctx context.Context, ch chan<- source.Event) err
 	return nil
 }
 
+// validateRemoteHost rejects remote endpoints that point at loopback,
+// private, link-local, or otherwise internal network targets (SSRF guard,
+// #475). It inspects the literal host only: IP literals are classified with
+// the net package; hostnames are matched against well-known internal
+// suffixes (localhost, *.local mDNS, *.internal cloud-metadata style names).
+// DNS resolution is deliberately not performed here — resolving would add a
+// network dependency and the result would be TOCTOU-racy against the actual
+// dial anyway.
+func validateRemoteHost(ep *gogittransport.Endpoint) error {
+	// go-git stores IPv6 literals bracketed ("[::1]"); strip for parsing.
+	host := strings.ToLower(strings.Trim(ep.Host, "[]"))
+	if host == "" {
+		return fmt.Errorf("url has no remote host")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+			ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast() {
+			return fmt.Errorf("host %q is a private or internal address; refusing to contact it", host)
+		}
+		return nil
+	}
+	if host == "localhost" ||
+		strings.HasSuffix(host, ".localhost") ||
+		strings.HasSuffix(host, ".local") ||
+		strings.HasSuffix(host, ".internal") {
+		return fmt.Errorf("host %q is a private or internal address; refusing to contact it", host)
+	}
+	return nil
+}
+
 // ListBranches contacts the remote and returns branch names sorted alphabetically.
 // tokenEnv is the name of an env var holding an HTTP auth token; pass "" for public repos.
+//
+// Remotes on loopback/private/link-local/internal hosts are rejected before
+// any connection is attempted — this function is reachable from the REST API
+// with a caller-supplied URL, so it must not be usable to probe the daemon's
+// internal network (#475).
 func ListBranches(ctx context.Context, repoURL, tokenEnv string) ([]string, error) {
 	ep, err := gogittransport.NewEndpoint(repoURL)
 	if err != nil {
 		return nil, fmt.Errorf("invalid url: %w", err)
 	}
-	_ = ep // endpoint validated; use go-git remote directly
+	if err := validateRemoteHost(ep); err != nil {
+		return nil, err
+	}
 
 	var auth gogittransport.AuthMethod
 	if tokenEnv != "" {
