@@ -458,7 +458,12 @@ func (s *Server) apiLogout(w http.ResponseWriter, r *http.Request) {
 	_ = s.sm.Destroy(r.Context())
 	if s.dbSessions != nil {
 		if dc, err := r.Cookie(deviceCookie); err == nil {
-			_ = s.dbSessions.revokeDeviceByToken(r.Context(), dc.Value)
+			// Surface a failed revoke: the cookie is cleared client-side
+			// regardless, but if the row survives (DB error / contention) a
+			// captured cookie stays usable, so the failure must not be silent.
+			if err := s.dbSessions.revokeDeviceByToken(r.Context(), dc.Value); err != nil {
+				s.log.Warn("device.revoke_on_logout_failed", zap.Error(err))
+			}
 		}
 	}
 	clearDeviceCookie(w)
