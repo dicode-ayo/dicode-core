@@ -62,6 +62,9 @@ func TestIsBlockedIP(t *testing.T) {
 // sandboxed dev environment routing all HTTPS through a local proxy)
 // instead of on the guard's own logic. Tests that specifically exercise the
 // proxy exemption override configuredProxyHosts again after calling this.
+//
+// Not safe for use with t.Parallel(): the swapped vars are package-level and
+// unsynchronized, shared by every test in this file.
 func withStubs(t *testing.T, resolve func(ctx context.Context, host string) ([]net.IP, error), dial func(ctx context.Context, network, address string) (net.Conn, error)) {
 	t.Helper()
 	origResolve, origDial, origProxyHosts := resolveHost, dialTCP, configuredProxyHosts
