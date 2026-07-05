@@ -108,10 +108,17 @@ var installGuardOnce sync.Once
 // that imports internal/gitops (git source, taskset loader) gets the guard
 // without needing to remember to wire it up.
 //
-// Only "http" and "https" are re-registered. SSH dials through go-git's own
-// (non-HTTP) transport with different connection semantics and is out of
-// scope: the exploitable surface — "point the daemon's fetch at an internal
-// endpoint over a URL a config file controls" — is the HTTP(S) path.
+// Only "http" and "https" are re-registered. This guard does NOT cover the
+// "ssh" or "git" schemes: both dial through go-git's own transports (an
+// SSH client and a bare TCP `net.Dial` respectively — the latter with no
+// injectable dialer at all) with no shared choke point with the HTTP(S)
+// client installed here. A `ref.url: git://<attacker-controlled host>` is
+// therefore NOT protected by this guard, at either the literal-host layer
+// (validateRemoteHost is only ever invoked from pkg/source/git's
+// ListBranches, not from any clone/pull path) or this dial-time layer —
+// tracked separately as a follow-up, since closing it means either
+// rejecting the "git" scheme in taskset ref validation or building a
+// dedicated guarded transport for it, both bigger than this issue's scope.
 //
 // When an outbound proxy is configured (HTTPS_PROXY/HTTP_PROXY), the
 // dialer connects to the proxy's address, not the final target's — the
