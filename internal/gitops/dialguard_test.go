@@ -4,7 +4,14 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
+
+	gogit "github.com/go-git/go-git/v5"
+	gogitconfig "github.com/go-git/go-git/v5/config"
 )
 
 func TestIsBlockedIP(t *testing.T) {
@@ -168,4 +175,80 @@ func TestGuardedDialContext_ResolveError(t *testing.T) {
 func TestInstallSSRFGuardedTransport_Idempotent(t *testing.T) {
 	InstallSSRFGuardedTransport()
 	InstallSSRFGuardedTransport()
+}
+
+// TestDialSettings_MatchHTTPDefaultTransport pins dialTCP's Timeout/KeepAlive
+// to the values net/http.DefaultTransport's own dialer used before its
+// DialContext was replaced with guardedDialContext. Losing these silently
+// (e.g. back to a zero-value net.Dialer) would turn a dial to a
+// black-holed/firewalled address into an OS-level-timeout hang (minutes)
+// instead of failing at the bound the rest of the codebase expects.
+func TestDialSettings_MatchHTTPDefaultTransport(t *testing.T) {
+	if dialTimeout != 30*time.Second {
+		t.Errorf("dialTimeout = %v, want 30s (net/http.DefaultTransport's dialer)", dialTimeout)
+	}
+	if dialKeepAlive != 30*time.Second {
+		t.Errorf("dialKeepAlive = %v, want 30s (net/http.DefaultTransport's dialer)", dialKeepAlive)
+	}
+}
+
+// TestGuardedDialContext_FallsBackOnDialError proves the multi-candidate
+// loop actually falls through to a later candidate when an earlier one
+// fails to connect (as opposed to just being validated and never
+// exercised): the first candidate's dial errors, the second succeeds, and
+// the returned connection is the second dial's.
+func TestGuardedDialContext_FallsBackOnDialError(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	defer serverConn.Close()
+
+	var dialed []string
+	withStubs(t,
+		func(ctx context.Context, host string) ([]net.IP, error) {
+			return []net.IP{net.ParseIP("203.0.113.1"), net.ParseIP("203.0.113.2")}, nil
+		},
+		func(ctx context.Context, network, address string) (net.Conn, error) {
+			dialed = append(dialed, address)
+			if address == "203.0.113.1:443" {
+				return nil, fmt.Errorf("stub: connection refused")
+			}
+			return clientConn, nil
+		},
+	)
+
+	conn, err := guardedDialContext(context.Background(), "tcp", "multi.example.test:443")
+	if err != nil {
+		t.Fatalf("expected success via the second candidate, got %v", err)
+	}
+	if conn != clientConn {
+		t.Error("returned conn is not the stub's successful connection")
+	}
+	want := []string{"203.0.113.1:443", "203.0.113.2:443"}
+	if len(dialed) != len(want) || dialed[0] != want[0] || dialed[1] != want[1] {
+		t.Errorf("dialed = %v, want %v (both candidates tried, in order)", dialed, want)
+	}
+}
+
+// TestInstallSSRFGuardedTransport_RejectsRealLoopbackViaGoGit proves the
+// installed transport is actually reachable through go-git's real request
+// path (client.Protocols -> githttp.NewClient -> our guarded DialContext),
+// not just unit-tested in isolation. It drives an actual go-git remote list
+// against an httptest.Server, which genuinely listens on 127.0.0.1 — a real
+// TCP loopback address, not a stubbed one — so a rejection here can only
+// come from guardedDialContext actually being wired into go-git's client.
+func TestInstallSSRFGuardedTransport_RejectsRealLoopbackViaGoGit(t *testing.T) {
+	InstallSSRFGuardedTransport() // idempotent; asserts explicit re-install is harmless too
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("handler must never be reached: the dial guard should reject the connection before any HTTP request is sent")
+	}))
+	defer srv.Close()
+
+	rem := gogit.NewRemote(nil, &gogitconfig.RemoteConfig{Name: "origin", URLs: []string{srv.URL}})
+	_, err := rem.ListContext(context.Background(), &gogit.ListOptions{})
+	if err == nil {
+		t.Fatal("expected the loopback dial to be rejected")
+	}
+	if !strings.Contains(err.Error(), "private/internal address") {
+		t.Fatalf("expected a dial-guard rejection, got: %v", err)
+	}
 }

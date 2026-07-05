@@ -6,15 +6,34 @@ import (
 	"net"
 	stdhttp "net/http"
 	"sync"
+	"time"
 
 	"github.com/go-git/go-git/v5/plumbing/transport/client"
 	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
+)
+
+// dialTimeout and dialKeepAlive match the values net/http.DefaultTransport's
+// own dialer uses. dialTCP (below) replaces that dialer entirely, so without
+// restating these explicitly a dial to a black-holed/firewalled address
+// would hang for the OS's own TCP connect timeout (minutes, not seconds)
+// instead of the 30s the rest of the codebase already relies on.
+const (
+	dialTimeout   = 30 * time.Second
+	dialKeepAlive = 30 * time.Second
 )
 
 // IsBlockedIP reports whether ip falls in a loopback, private, link-local,
 // unspecified, or multicast range — the set dicode refuses to let a git
 // remote resolve to (SSRF guard, #475/#481). Handles IPv4, IPv6, and
 // IPv4-mapped IPv6 addresses via the net.IP predicates' own normalisation.
+//
+// Known residual gap: this does not decode 6to4 (2002::/16) or Teredo
+// (2001::/32) tunnelling addresses that embed a private/loopback IPv4
+// payload — those addresses look like ordinary global-unicast IPv6 to
+// net.IP's predicates. Exploiting that requires the resolving host to also
+// have 6to4/Teredo routing enabled, which is disabled by default on the
+// server platforms dicode runs on; left undecoded rather than adding
+// bespoke tunnelling-format parsing for a narrow, non-default surface.
 func IsBlockedIP(ip net.IP) bool {
 	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
 		ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast()
@@ -39,7 +58,7 @@ var resolveHost = func(ctx context.Context, host string) ([]net.IP, error) {
 // resolved and cleared. A var so tests can stub it out and assert on the
 // address they were asked to dial, without touching the network.
 var dialTCP = func(ctx context.Context, network, address string) (net.Conn, error) {
-	var d net.Dialer
+	d := &net.Dialer{Timeout: dialTimeout, KeepAlive: dialKeepAlive}
 	return d.DialContext(ctx, network, address)
 }
 
@@ -130,7 +149,17 @@ var installGuardOnce sync.Once
 // the tunnelled destination, same as before this change.
 func InstallSSRFGuardedTransport() {
 	installGuardOnce.Do(func() {
-		t := stdhttp.DefaultTransport.(*stdhttp.Transport).Clone()
+		// http.DefaultTransport is documented as a *http.Transport in every
+		// Go release, but this runs from an unconditional package init(), so
+		// fail open to a fresh, default-shaped Transport rather than panic
+		// the whole binary at startup if that ever stops being true (e.g. a
+		// test harness or future stdlib change replaces it).
+		var t *stdhttp.Transport
+		if dt, ok := stdhttp.DefaultTransport.(*stdhttp.Transport); ok {
+			t = dt.Clone()
+		} else {
+			t = &stdhttp.Transport{Proxy: stdhttp.ProxyFromEnvironment}
+		}
 		t.DialContext = guardedDialContext
 
 		c := &stdhttp.Client{Transport: t}
