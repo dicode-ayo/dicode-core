@@ -31,6 +31,11 @@ func TestIsBlockedIP(t *testing.T) {
 		{"unspecified v4", "0.0.0.0", true},
 		{"unspecified v6", "::", true},
 		{"multicast v4", "224.0.0.1", true},
+		{"cgnat range start", "100.64.0.0", true},
+		{"cgnat range mid", "100.100.1.1", true},
+		{"cgnat range end", "100.127.255.255", true},
+		{"just below cgnat range", "100.63.255.255", false},
+		{"just above cgnat range", "100.128.0.0", false},
 		{"ipv4-mapped loopback", "::ffff:127.0.0.1", true},
 		{"ipv4-mapped private", "::ffff:10.0.0.5", true},
 		{"public v4", "8.8.8.8", false},
@@ -51,19 +56,26 @@ func TestIsBlockedIP(t *testing.T) {
 
 // withStubs temporarily swaps resolveHost/dialTCP for the duration of the
 // test and restores the originals on cleanup, so tests never touch the real
-// network or DNS.
+// network or DNS. It also stubs configuredProxyHosts to report no proxy —
+// without this, these tests' outcomes would depend on whatever HTTPS_PROXY/
+// HTTP_PROXY happens to be set in the environment they run in (e.g. a
+// sandboxed dev environment routing all HTTPS through a local proxy)
+// instead of on the guard's own logic. Tests that specifically exercise the
+// proxy exemption override configuredProxyHosts again after calling this.
 func withStubs(t *testing.T, resolve func(ctx context.Context, host string) ([]net.IP, error), dial func(ctx context.Context, network, address string) (net.Conn, error)) {
 	t.Helper()
-	origResolve, origDial := resolveHost, dialTCP
+	origResolve, origDial, origProxyHosts := resolveHost, dialTCP, configuredProxyHosts
 	if resolve != nil {
 		resolveHost = resolve
 	}
 	if dial != nil {
 		dialTCP = dial
 	}
+	configuredProxyHosts = func() map[string]bool { return map[string]bool{} }
 	t.Cleanup(func() {
 		resolveHost = origResolve
 		dialTCP = origDial
+		configuredProxyHosts = origProxyHosts
 	})
 }
 
@@ -153,6 +165,50 @@ func TestGuardedDialContext_IPLiteralSkipsResolver(t *testing.T) {
 	}
 }
 
+// TestGuardedDialContext_ExemptsConfiguredProxyHost proves that a dial
+// target matching a configured HTTPS_PROXY/HTTP_PROXY host bypasses
+// resolution and the block check entirely — dialed as-is, unresolved. This
+// is the fix for the common case where the proxy itself sits on a private
+// address (a local Squid instance, a corporate gateway): without the
+// exemption, guardedDialContext would reject every request through such a
+// proxy, since it's the proxy's address (not the tunnelled destination's)
+// that gets dialed.
+func TestGuardedDialContext_ExemptsConfiguredProxyHost(t *testing.T) {
+	withStubs(t, failIfCalledResolve(t), nil)
+	configuredProxyHosts = func() map[string]bool {
+		return map[string]bool{"internal-proxy.corp.example": true}
+	}
+
+	var dialedAddr string
+	dialTCP = func(ctx context.Context, network, address string) (net.Conn, error) {
+		dialedAddr = address
+		return nil, fmt.Errorf("stub: proxy dial")
+	}
+
+	_, err := guardedDialContext(context.Background(), "tcp", "internal-proxy.corp.example:3128")
+	if err == nil || err.Error() != "stub: proxy dial" {
+		t.Fatalf("expected the stub dial error to propagate, got %v", err)
+	}
+	if dialedAddr != "internal-proxy.corp.example:3128" {
+		t.Errorf("dialed address = %q, want the proxy address dialed directly, unresolved", dialedAddr)
+	}
+}
+
+// TestGuardedDialContext_NonProxyPrivateHostStillBlocked proves the proxy
+// exemption is narrow: a private-address dial target that is NOT the
+// configured proxy host is still rejected normally.
+func TestGuardedDialContext_NonProxyPrivateHostStillBlocked(t *testing.T) {
+	withStubs(t, failIfCalledResolve(t), failIfCalledDial(t))
+	configuredProxyHosts = func() map[string]bool {
+		return map[string]bool{"internal-proxy.corp.example": true}
+	}
+
+	_, err := guardedDialContext(context.Background(), "tcp", "127.0.0.1:9418")
+	if err == nil {
+		t.Fatal("expected a loopback IP literal to still be rejected when it isn't the configured proxy host")
+	}
+}
+
 // TestGuardedDialContext_ResolveError propagates resolver failures instead
 // of silently allowing the dial.
 func TestGuardedDialContext_ResolveError(t *testing.T) {
@@ -237,6 +293,16 @@ func TestGuardedDialContext_FallsBackOnDialError(t *testing.T) {
 // come from guardedDialContext actually being wired into go-git's client.
 func TestInstallSSRFGuardedTransport_RejectsRealLoopbackViaGoGit(t *testing.T) {
 	InstallSSRFGuardedTransport() // idempotent; asserts explicit re-install is harmless too
+
+	// Neutralize the proxy exemption for this test specifically: this
+	// process may itself be running behind an HTTPS_PROXY on 127.0.0.1 (a
+	// common sandboxed-dev-environment setup), which would otherwise make
+	// configuredProxyHosts() legitimately treat the loopback test server
+	// below as "the configured proxy" and exempt it — masking the very
+	// rejection this test exists to prove.
+	origProxyHosts := configuredProxyHosts
+	configuredProxyHosts = func() map[string]bool { return map[string]bool{} }
+	t.Cleanup(func() { configuredProxyHosts = origProxyHosts })
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("handler must never be reached: the dial guard should reject the connection before any HTTP request is sent")
