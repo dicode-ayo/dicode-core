@@ -47,7 +47,7 @@ Full configuration loading. All structs defined and validated:
 
 - `source.go` — `Source` interface (`ID()`, `Start()`, `Sync()`), `Event` type, `EventKind` constants
 - `source/local/` — fsnotify watcher with 150ms debounce, recursive subdir watching, snapshot-based diff. 6 tests passing.
-- `source/git/` — go-git poll, `ListBranches()`, HTTP token auth, deterministic clone path.
+- `source/git/` — go-git poll, `ListBranches()`, HTTP token auth, deterministic clone path. SSRF guard is two-layered: `validateRemoteHost()` rejects loopback/private/internal literal hosts before any dial (#475); `internal/gitops.InstallSSRFGuardedTransport()` installs a process-wide go-git HTTP(S) transport whose dialer re-checks every *resolved* connection IP, closing the DNS-rebind gap for a hostname that only turns out to be internal after DNS resolves it (#481).
 
 ### `pkg/secrets/` ✅
 

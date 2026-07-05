@@ -245,11 +245,13 @@ func (g *GitSource) syncAndEmit(ctx context.Context, ch chan<- source.Event) err
 // validateRemoteHost rejects remote endpoints that point at loopback,
 // private, link-local, or otherwise internal network targets (SSRF guard,
 // #475). It inspects the literal host only: IP literals are classified with
-// the net package; hostnames are matched against well-known internal
+// gitops.IsBlockedIP; hostnames are matched against well-known internal
 // suffixes (localhost, *.local mDNS, *.internal cloud-metadata style names).
-// DNS resolution is deliberately not performed here — resolving would add a
-// network dependency and the result would be TOCTOU-racy against the actual
-// dial anyway.
+// DNS resolution is deliberately not performed here: this is the cheap
+// first gate, rejecting the common case without a network round-trip. A
+// hostname that clears this check but *resolves* to a blocked address
+// (including on a later DNS-rebind) is caught by the second, dial-time
+// layer installed via gitops.InstallSSRFGuardedTransport (#481).
 func validateRemoteHost(ep *gogittransport.Endpoint) error {
 	// go-git stores IPv6 literals bracketed ("[::1]"); strip for parsing.
 	host := strings.ToLower(strings.Trim(ep.Host, "[]"))
@@ -257,8 +259,7 @@ func validateRemoteHost(ep *gogittransport.Endpoint) error {
 		return fmt.Errorf("url has no remote host")
 	}
 	if ip := net.ParseIP(host); ip != nil {
-		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
-			ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast() {
+		if gitops.IsBlockedIP(ip) {
 			return fmt.Errorf("host %q is a private or internal address; refusing to contact it", host)
 		}
 		return nil
