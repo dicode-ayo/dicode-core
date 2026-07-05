@@ -101,14 +101,52 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 	// requires map).
 	upstreamCtx := task.InputContext{Output: output, Params: upstreamParams}
 
-	// Declared chain triggers.
+	e.fireSuccessChains(ctx, completedTaskID, runID, runStatus, output, upstreamCtx)
+	e.firePipelineChains(ctx, completedTaskID, runID, runStatus, output, upstreamCtx)
+	e.fireFailureChain(ctx, completedTaskID, runID, runStatus, output, upstreamCtx)
+}
+
+// chainEdgeMatches reports whether a declared trigger.chain edge fires for
+// the completion of completedTaskID with runStatus: the edge must point at
+// the completed task (chain.From) and its ChainOn() value must be "always"
+// or equal to the run status. Returns the resolved on-value for logging.
+// Shared preamble of the kind: Task and kind: PipelineTask chain loops.
+func chainEdgeMatches(chain *task.ChainTrigger, completedTaskID, runStatus string) (string, bool) {
+	if chain == nil || chain.From != completedTaskID {
+		return "", false
+	}
+	on := chain.ChainOn()
+	if on != chainOnAlways && on != runStatus {
+		return "", false
+	}
+	return on, true
+}
+
+// resolveChainEdge performs the dispatch-time `${input.…}` interpolation for
+// one chain edge against the upstream context, logging and reporting
+// ok=false on failure so the caller skips the edge rather than passing a
+// literal token downstream. skipMsg distinguishes the kind: Task and kind:
+// PipelineTask log lines, which predate this helper.
+func (e *Engine) resolveChainEdge(params map[string]any, upstreamCtx task.InputContext, skipMsg, from, to string) (map[string]any, bool) {
+	resolved, rerr := task.ResolveInputOutputMap(params, upstreamCtx)
+	if rerr != nil {
+		e.log.Error(skipMsg,
+			zap.String("from", from),
+			zap.String("to", to),
+			zap.Error(rerr),
+		)
+		return nil, false
+	}
+	return resolved, true
+}
+
+// fireSuccessChains dispatches every kind: Task whose trigger.chain edge
+// matches the completed run (declared chain triggers).
+func (e *Engine) fireSuccessChains(ctx context.Context, completedTaskID, runID, runStatus string, output interface{}, upstreamCtx task.InputContext) {
 	for _, spec := range e.registry.All() {
 		chain := spec.Trigger.Chain
-		if chain == nil || chain.From != completedTaskID {
-			continue
-		}
-		on := chain.ChainOn()
-		if on != chainOnAlways && on != runStatus {
+		on, matched := chainEdgeMatches(chain, completedTaskID, runStatus)
+		if !matched {
 			continue
 		}
 		// Per-edge overrides (#NNN): when the downstream's trigger.chain
@@ -138,13 +176,9 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 		// requires a non-nil Params map with the named entry. Any
 		// resolution failure skips the chain dispatch (logged) rather
 		// than silently passing a literal token to the downstream.
-		resolvedParams, rerr := task.ResolveInputOutputMap(chain.Params, upstreamCtx)
-		if rerr != nil {
-			e.log.Error("chain trigger skipped — failed to resolve ${input.…} reference",
-				zap.String("from", completedTaskID),
-				zap.String("to", spec.ID),
-				zap.Error(rerr),
-			)
+		resolvedParams, resolved := e.resolveChainEdge(chain.Params, upstreamCtx,
+			"chain trigger skipped — failed to resolve ${input.…} reference", completedTaskID, spec.ID)
+		if !resolved {
 			continue
 		}
 
@@ -190,29 +224,28 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 			Input:       chainInput,
 		}, "chain")
 	}
+}
 
-	// Pipeline chain subscribers: a kind: PipelineTask may chain from an
-	// upstream task's outcome. chain.params (if set) are resolved against the
-	// upstream context and forwarded as the trigger payload for stage 0 (#350),
-	// mirroring the kind: Task chain dispatch path above.
+// firePipelineChains dispatches every pipeline chain subscriber: a kind:
+// PipelineTask may chain from an upstream task's outcome. chain.params (if
+// set) are resolved against the upstream context and forwarded as the
+// trigger payload for stage 0 (#350), mirroring the kind: Task chain
+// dispatch path (fireSuccessChains).
+func (e *Engine) firePipelineChains(ctx context.Context, completedTaskID, runID, runStatus string, output interface{}, upstreamCtx task.InputContext) {
 	for _, k := range e.registry.AllKinded() {
 		p, ok := k.(*task.PipelineTask)
-		if !ok || p.Trigger.Chain == nil || p.Trigger.Chain.From != completedTaskID {
+		if !ok {
 			continue
 		}
-		on := p.Trigger.Chain.ChainOn()
-		if on != chainOnAlways && on != runStatus {
+		on, matched := chainEdgeMatches(p.Trigger.Chain, completedTaskID, runStatus)
+		if !matched {
 			continue
 		}
 		// Resolve any ${input.*} references in chain.params against the upstream
 		// return value + params, exactly like the kind: Task chain path does.
-		resolvedParams, rerr := task.ResolveInputOutputMap(p.Trigger.Chain.Params, upstreamCtx)
-		if rerr != nil {
-			e.log.Error("pipeline chain trigger skipped — failed to resolve ${input.…} reference",
-				zap.String("from", completedTaskID),
-				zap.String("to", p.ID),
-				zap.Error(rerr),
-			)
+		resolvedParams, resolved := e.resolveChainEdge(p.Trigger.Chain.Params, upstreamCtx,
+			"pipeline chain trigger skipped — failed to resolve ${input.…} reference", completedTaskID, p.ID)
+		if !resolved {
 			continue
 		}
 		// Build the trigger payload for stage 0: mirror the kind: Task chain
@@ -237,7 +270,12 @@ func (e *Engine) FireChain(ctx context.Context, completedTaskID, runID, runStatu
 			}
 		}(p, triggerInput, triggerParams)
 	}
+}
 
+// fireFailureChain dispatches the config-level default on_failure_chain (or
+// the failed task's per-task override) when the completed run failed,
+// applying the replay-source, depth, storm, cooldown, and concurrency guards.
+func (e *Engine) fireFailureChain(ctx context.Context, completedTaskID, runID, runStatus string, output interface{}, upstreamCtx task.InputContext) {
 	// Config-level default on_failure_chain.
 	if runStatus == registry.StatusFailure {
 		chainSpec := e.defaultsOnFailureChain

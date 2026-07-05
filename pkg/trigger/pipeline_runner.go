@@ -767,205 +767,211 @@ func (e *Engine) propagatePipelineStageRerun(runner *PipelineRunner, reranTaskID
 		e.log.Debug("pipeline stage re-fire coalesced", zap.String("pipeline", pipelineID))
 		return
 	}
-	go func() {
-		defer e.restartGates.release(gateKey)
+	go e.runPipelineStageRerun(runner, reranTaskID, reranReturn, pipelineID, gateKey)
+}
 
-		// Find the re-fired stage's index in the pipeline's stages.
-		startIdx := -1
-		for i, st := range runner.spec.Stages {
-			if st.Task == reranTaskID {
-				startIdx = i
-				break
-			}
+// pipelineReplayAborted reports whether a mid-stage replay must stop: either
+// the engine is shutting down or the runner is no longer the live
+// registration for the pipeline. what distinguishes the log lines of the
+// guard sites ("skipped" / "aborted" / "restart skipped", preserved from the
+// pre-extraction inline checks); extra fields (e.g. the stage index inside
+// the descendant loop) are appended after the pipeline field.
+func (e *Engine) pipelineReplayAborted(pipelineID string, r *PipelineRunner, what string, fields ...zap.Field) bool {
+	if e.isShuttingDown() {
+		e.log.Debug("pipeline stage re-fire "+what+": engine shutting down",
+			append([]zap.Field{zap.String("pipeline", pipelineID)}, fields...)...)
+		return true
+	}
+	if !e.pipelineStillLive(pipelineID, r) {
+		e.log.Debug("pipeline stage re-fire "+what+": pipeline no longer live",
+			append([]zap.Field{zap.String("pipeline", pipelineID)}, fields...)...)
+		return true
+	}
+	return false
+}
+
+// runPipelineStageRerun is the goroutine body of propagatePipelineStageRerun:
+// replay the non-terminal descendants of the re-fired stage with fresh
+// ${input}, then kill+wait the old terminal daemon run and re-fire the
+// terminal stage via the restart handshake. The caller has already acquired
+// the restartGates slot for gateKey; it is released when this returns.
+func (e *Engine) runPipelineStageRerun(runner *PipelineRunner, reranTaskID string, reranReturn interface{}, pipelineID, gateKey string) {
+	defer e.restartGates.release(gateKey)
+
+	// Find the re-fired stage's index in the pipeline's stages.
+	startIdx := -1
+	for i, st := range runner.spec.Stages {
+		if st.Task == reranTaskID {
+			startIdx = i
+			break
 		}
-		if startIdx < 0 {
-			// Defensive: handlePipelineStageRerun already verified membership.
+	}
+	if startIdx < 0 {
+		// Defensive: handlePipelineStageRerun already verified membership.
+		return
+	}
+
+	// Bail if the engine is shutting down or the pipeline is no longer
+	// live (its terminal daemon already exited / the pipeline finished)
+	// between the liveness check and this goroutine being scheduled.
+	if e.pipelineReplayAborted(pipelineID, runner, "skipped") {
+		return
+	}
+
+	runner.mu.Lock()
+	terminalIdx := runner.terminalIdx
+	terminalStage := runner.terminalStage
+	oldDaemonRunID := runner.daemonRunID
+	storedUpstream := runner.terminalUpstream
+	runner.mu.Unlock()
+
+	e.log.Info("pipeline mid-stage re-fire: propagating to descendants",
+		zap.String("pipeline", pipelineID),
+		zap.String("rerun", reranTaskID),
+		zap.Int("stage", startIdx),
+		// Non-terminal descendants replayed below [startIdx+1 .. terminalIdx-1];
+		// the terminal daemon stage is restarted separately.
+		zap.Int("replayed_descendants", terminalIdx-startIdx-1),
+	)
+
+	// Replay the NON-terminal descendants [startIdx+1 .. terminalIdx-1]
+	// with fresh ${input}, seeded from the re-fired stage's return value.
+	// The terminal stage itself is restarted separately below (it's the
+	// daemon). Use the engine's shutdown-cancellable context so an
+	// in-flight stage bails on Shutdown; the between-iteration guards only
+	// catch the gaps, not a stage already inside Execute.
+	stageCtx := e.getShutdownCtx()
+	if stageCtx == nil {
+		stageCtx = context.Background()
+	}
+	// upstream is what feeds the FIRST replayed descendant. When the
+	// re-fired stage is the terminal daemon stage itself (startIdx ==
+	// terminalIdx — an operator restarting the daemon's own task), there
+	// are no descendants to replay and the terminal stage keeps its
+	// stored upstream; re-seeding it with the daemon's own return would
+	// be wrong. Otherwise the first descendant is fed by the re-fired
+	// stage's fresh return value.
+	upstream := task.InputContext{Output: reranReturn}
+	if startIdx >= terminalIdx {
+		upstream = storedUpstream
+	}
+	for i := startIdx + 1; i < terminalIdx; i++ {
+		if e.pipelineReplayAborted(pipelineID, runner, "aborted", zap.Int("stage", i)) {
 			return
 		}
-
-		// Bail if the engine is shutting down or the pipeline is no longer
-		// live (its terminal daemon already exited / the pipeline finished)
-		// between the liveness check and this goroutine being scheduled.
-		if e.isShuttingDown() {
-			e.log.Debug("pipeline stage re-fire skipped: engine shutting down",
-				zap.String("pipeline", pipelineID))
+		out, err := e.dispatchStage(stageCtx, runner.spec.Stages[i], upstream, runner.runID)
+		if err != nil {
+			e.log.Warn("pipeline mid-stage re-fire: descendant stage failed; pipeline left on old daemon",
+				zap.String("pipeline", pipelineID), zap.Int("stage", i), zap.Error(err))
 			return
 		}
-		if !e.pipelineStillLive(pipelineID, runner) {
-			e.log.Debug("pipeline stage re-fire skipped: pipeline no longer live",
-				zap.String("pipeline", pipelineID))
-			return
-		}
+		upstream = out
+	}
 
-		runner.mu.Lock()
-		terminalIdx := runner.terminalIdx
-		terminalStage := runner.terminalStage
-		oldDaemonRunID := runner.daemonRunID
-		storedUpstream := runner.terminalUpstream
-		runner.mu.Unlock()
+	// Last guard before restarting the daemon: the pipeline could have
+	// finished (terminal daemon exited) or the engine started shutting
+	// down while we replayed descendants.
+	if e.pipelineReplayAborted(pipelineID, runner, "restart skipped") {
+		return
+	}
 
-		e.log.Info("pipeline mid-stage re-fire: propagating to descendants",
-			zap.String("pipeline", pipelineID),
-			zap.String("rerun", reranTaskID),
-			zap.Int("stage", startIdx),
-			// Non-terminal descendants replayed below [startIdx+1 .. terminalIdx-1];
-			// the terminal daemon stage is restarted separately.
-			zap.Int("replayed_descendants", terminalIdx-startIdx-1),
-		)
+	// Enter the restart handshake. Setting restarting=true + a fresh
+	// restartDone BEFORE killing the old run tells the runner's wait loop
+	// that the imminent terminal of oldDaemonRunID is a deliberate restart,
+	// not a real exit — so it blocks on restartDone instead of finishing
+	// the pipeline. We MUST resolve the handshake (publish the new run or
+	// clear restarting) on every exit path from here, or the wait loop
+	// blocks forever; the deferred cleanup below guarantees that.
+	restartDone := make(chan struct{})
+	runner.mu.Lock()
+	runner.restarting = true
+	runner.restartDone = restartDone
+	runner.mu.Unlock()
 
-		// Replay the NON-terminal descendants [startIdx+1 .. terminalIdx-1]
-		// with fresh ${input}, seeded from the re-fired stage's return value.
-		// The terminal stage itself is restarted separately below (it's the
-		// daemon). Use the engine's shutdown-cancellable context so an
-		// in-flight stage bails on Shutdown; the between-iteration guards only
-		// catch the gaps, not a stage already inside Execute.
-		stageCtx := e.getShutdownCtx()
-		if stageCtx == nil {
-			stageCtx = context.Background()
-		}
-		// upstream is what feeds the FIRST replayed descendant. When the
-		// re-fired stage is the terminal daemon stage itself (startIdx ==
-		// terminalIdx — an operator restarting the daemon's own task), there
-		// are no descendants to replay and the terminal stage keeps its
-		// stored upstream; re-seeding it with the daemon's own return would
-		// be wrong. Otherwise the first descendant is fed by the re-fired
-		// stage's fresh return value.
-		upstream := task.InputContext{Output: reranReturn}
-		if startIdx >= terminalIdx {
-			upstream = storedUpstream
-		}
-		for i := startIdx + 1; i < terminalIdx; i++ {
-			if e.isShuttingDown() {
-				e.log.Debug("pipeline stage re-fire aborted: engine shutting down",
-					zap.String("pipeline", pipelineID), zap.Int("stage", i))
-				return
-			}
-			if !e.pipelineStillLive(pipelineID, runner) {
-				e.log.Debug("pipeline stage re-fire aborted: pipeline no longer live",
-					zap.String("pipeline", pipelineID), zap.Int("stage", i))
-				return
-			}
-			out, err := e.dispatchStage(stageCtx, runner.spec.Stages[i], upstream, runner.runID)
-			if err != nil {
-				e.log.Warn("pipeline mid-stage re-fire: descendant stage failed; pipeline left on old daemon",
-					zap.String("pipeline", pipelineID), zap.Int("stage", i), zap.Error(err))
-				return
-			}
-			upstream = out
-		}
-
-		// Last guard before restarting the daemon: the pipeline could have
-		// finished (terminal daemon exited) or the engine started shutting
-		// down while we replayed descendants.
-		if e.isShuttingDown() {
-			e.log.Debug("pipeline stage re-fire restart skipped: engine shutting down",
-				zap.String("pipeline", pipelineID))
-			return
-		}
-		if !e.pipelineStillLive(pipelineID, runner) {
-			e.log.Debug("pipeline stage re-fire restart skipped: pipeline no longer live",
-				zap.String("pipeline", pipelineID))
-			return
-		}
-
-		// Enter the restart handshake. Setting restarting=true + a fresh
-		// restartDone BEFORE killing the old run tells the runner's wait loop
-		// that the imminent terminal of oldDaemonRunID is a deliberate restart,
-		// not a real exit — so it blocks on restartDone instead of finishing
-		// the pipeline. We MUST resolve the handshake (publish the new run or
-		// clear restarting) on every exit path from here, or the wait loop
-		// blocks forever; the deferred cleanup below guarantees that.
-		restartDone := make(chan struct{})
-		runner.mu.Lock()
-		runner.restarting = true
-		runner.restartDone = restartDone
-		runner.mu.Unlock()
-
-		published := false
-		defer func() {
-			// If we exit before publishing the new run (descendant of the
-			// restart phase failed), leave daemonRunID pointing at the old
-			// (now-killed) run and clear restarting; the wait loop detects the
-			// unchanged run ID and finishes the pipeline with the killed
-			// daemon's status. Closing restartDone unblocks it.
-			if !published {
-				runner.mu.Lock()
-				runner.restarting = false
-				runner.mu.Unlock()
-			}
-			close(restartDone)
-		}()
-
-		// Kill the current terminal daemon run and wait for it to drain:
-		// KillRun(old) + bounded WaitRun(old).
-		if oldDaemonRunID != "" {
-			e.KillRun(oldDaemonRunID)
-			waitCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			_, _ = e.WaitRun(waitCtx, oldDaemonRunID)
-			cancel()
-		}
-
-		// Re-fire the terminal daemon stage with the freshly-replayed upstream.
-		newRunID, isDaemon, ferr := e.fireStageRaw(stageCtx, terminalStage, upstream, runner.runID)
-		if ferr != nil {
-			e.log.Error("pipeline mid-stage re-fire: terminal daemon restart failed",
-				zap.String("pipeline", pipelineID), zap.Error(ferr))
-			return
-		}
-		if !isDaemon {
-			// Defensive: the terminal stage was a daemon when we registered as
-			// live; a registry mutation could in principle flip it. Stop the
-			// stray run rather than leaving it untracked, and let the wait loop
-			// finish the pipeline on the old (killed) daemon's status.
-			e.log.Warn("pipeline mid-stage re-fire: terminal stage no longer a daemon after restart; stopping stray run",
-				zap.String("pipeline", pipelineID))
-			e.KillRun(newRunID)
-			return
-		}
-
-		// Publish the new daemon run + upstream so the runner's wait loop
-		// re-waits on it. Clear restarting under the same lock so the loop sees
-		// a consistent snapshot.
-		//
-		// Two abort conditions, checked under the SAME mutex as the publish so
-		// there's no TOCTOU between "is the pipeline still alive?" and "adopt the
-		// fresh run":
-		//
-		//   - runner.finished: the pipeline already finished (its terminal-daemon
-		//     wait loop ran finish()) while we were restarting.
-		//   - runner.runCtx.Err() != nil: the pipeline parent was KillRun'd /
-		//     cancelled while we were restarting. The single-shot runCtx watcher
-		//     in runTerminalDaemon may have already fired on the now-dead OLD run
-		//     (it's spent), so adopting the fresh run here would leave it with
-		//     nothing to kill it → leaked daemon subprocess + pipeline wedged
-		//     'running' (#344, HIGH). Refuse to adopt: kill the fresh daemon and
-		//     leave daemonRunID pointing at the killed old run so the wait loop's
-		//     "restart aborted" branch finishes the pipeline with the old run's
-		//     terminal status (cancelled).
-		//
-		// The deferred cleanup (published==false) clears restarting + closes
-		// restartDone on either abort, unblocking the wait loop.
-		runner.mu.Lock()
-		if runner.finished {
+	published := false
+	defer func() {
+		// If we exit before publishing the new run (descendant of the
+		// restart phase failed), leave daemonRunID pointing at the old
+		// (now-killed) run and clear restarting; the wait loop detects the
+		// unchanged run ID and finishes the pipeline with the killed
+		// daemon's status. Closing restartDone unblocks it.
+		if !published {
+			runner.mu.Lock()
+			runner.restarting = false
 			runner.mu.Unlock()
-			e.log.Debug("pipeline stage re-fire: pipeline finished during restart; stopping fresh daemon run",
-				zap.String("pipeline", pipelineID))
-			e.KillRun(newRunID)
-			return
 		}
-		if runner.runCtx.Err() != nil {
-			runner.mu.Unlock()
-			e.log.Debug("pipeline stage re-fire: pipeline cancelled during restart; stopping fresh daemon run",
-				zap.String("pipeline", pipelineID))
-			e.KillRun(newRunID)
-			return
-		}
-		runner.daemonRunID = newRunID
-		runner.terminalUpstream = upstream
-		runner.restarting = false
-		runner.mu.Unlock()
-		published = true
+		close(restartDone)
 	}()
+
+	// Kill the current terminal daemon run and wait for it to drain:
+	// KillRun(old) + bounded WaitRun(old).
+	if oldDaemonRunID != "" {
+		e.KillRun(oldDaemonRunID)
+		waitCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_, _ = e.WaitRun(waitCtx, oldDaemonRunID)
+		cancel()
+	}
+
+	// Re-fire the terminal daemon stage with the freshly-replayed upstream.
+	newRunID, isDaemon, ferr := e.fireStageRaw(stageCtx, terminalStage, upstream, runner.runID)
+	if ferr != nil {
+		e.log.Error("pipeline mid-stage re-fire: terminal daemon restart failed",
+			zap.String("pipeline", pipelineID), zap.Error(ferr))
+		return
+	}
+	if !isDaemon {
+		// Defensive: the terminal stage was a daemon when we registered as
+		// live; a registry mutation could in principle flip it. Stop the
+		// stray run rather than leaving it untracked, and let the wait loop
+		// finish the pipeline on the old (killed) daemon's status.
+		e.log.Warn("pipeline mid-stage re-fire: terminal stage no longer a daemon after restart; stopping stray run",
+			zap.String("pipeline", pipelineID))
+		e.KillRun(newRunID)
+		return
+	}
+
+	// Publish the new daemon run + upstream so the runner's wait loop
+	// re-waits on it. Clear restarting under the same lock so the loop sees
+	// a consistent snapshot.
+	//
+	// Two abort conditions, checked under the SAME mutex as the publish so
+	// there's no TOCTOU between "is the pipeline still alive?" and "adopt the
+	// fresh run":
+	//
+	//   - runner.finished: the pipeline already finished (its terminal-daemon
+	//     wait loop ran finish()) while we were restarting.
+	//   - runner.runCtx.Err() != nil: the pipeline parent was KillRun'd /
+	//     cancelled while we were restarting. The single-shot runCtx watcher
+	//     in runTerminalDaemon may have already fired on the now-dead OLD run
+	//     (it's spent), so adopting the fresh run here would leave it with
+	//     nothing to kill it → leaked daemon subprocess + pipeline wedged
+	//     'running' (#344, HIGH). Refuse to adopt: kill the fresh daemon and
+	//     leave daemonRunID pointing at the killed old run so the wait loop's
+	//     "restart aborted" branch finishes the pipeline with the old run's
+	//     terminal status (cancelled).
+	//
+	// The deferred cleanup (published==false) clears restarting + closes
+	// restartDone on either abort, unblocking the wait loop.
+	runner.mu.Lock()
+	if runner.finished {
+		runner.mu.Unlock()
+		e.log.Debug("pipeline stage re-fire: pipeline finished during restart; stopping fresh daemon run",
+			zap.String("pipeline", pipelineID))
+		e.KillRun(newRunID)
+		return
+	}
+	if runner.runCtx.Err() != nil {
+		runner.mu.Unlock()
+		e.log.Debug("pipeline stage re-fire: pipeline cancelled during restart; stopping fresh daemon run",
+			zap.String("pipeline", pipelineID))
+		e.KillRun(newRunID)
+		return
+	}
+	runner.daemonRunID = newRunID
+	runner.terminalUpstream = upstream
+	runner.restarting = false
+	runner.mu.Unlock()
+	published = true
 }
 
 // pipelineStillLive reports whether the given runner is still the live

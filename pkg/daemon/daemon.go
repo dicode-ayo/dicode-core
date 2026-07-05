@@ -154,13 +154,9 @@ func hasDisplay() bool {
 
 func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, configPath, version string, logBroadcaster *webui.LogBroadcaster, log *zap.Logger) error {
 	// 1. Open database.
-	database, err := db.Open(db.Config{
-		Type:   cfg.Database.Type,
-		Path:   cfg.Database.Path,
-		URLEnv: cfg.Database.URLEnv,
-	})
+	database, err := openDatabase(cfg)
 	if err != nil {
-		return fmt.Errorf("open database: %w", err)
+		return err
 	}
 	defer database.Close()
 
@@ -174,6 +170,72 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	secretsChain, localSecrets := buildSecretsChain(cfg, dataDir, database, log)
 
 	// 4. Task registry + startup cleanup.
+	reg := setupRegistry(ctx, database, log)
+
+	// 5. HTTP gateway.
+	gateway := ipc.NewGateway()
+
+	// 6. Managed runtimes + trigger engine.
+	managedRuntimes, eng, denoRT, pythonRT, err := buildRuntimes(ctx, cfg, reg, secretsChain, localSecrets, database, log, gateway)
+	if err != nil {
+		return err
+	}
+
+	// 6a. Run-input persistence (Task 14): wire InputStore when enabled.
+	// replayer is nil when persistence is disabled; consumed after webui.New.
+	replayer := wireRunInputPersistence(cfg, secretsChain, reg, eng, denoRT, pythonRT, log)
+
+	// 7. Sources + reconciler.
+	sourceMgr, rec, err := initSources(cfg, dataDir, reg, denoRT, pythonRT, log)
+	if err != nil {
+		return err
+	}
+	arm, disarm := newArmDisarm(cfg, eng, gateway, log)
+
+	// 7a. Approval gate (#392 phase 1): every new or changed task passes the
+	// trust-on-change gate before its triggers arm. Approval records live in
+	// dicode.lock next to dicode.yaml; trust policy lives in cfg.Approval.
+	approvalGate, err := setupApprovalGate(ctx, cfg, configPath, database, secretsChain, eng, denoRT, pythonRT, rec, arm, disarm, log)
+	if err != nil {
+		return err
+	}
+
+	// 8. Web UI (including the 8.5 relay env exports).
+	srv, err := buildWebUI(ctx, cfg, configPath, version, dataDir, database, reg, eng, localSecrets, rec, sourceMgr, gateway, logBroadcaster, managedRuntimes, approvalGate, replayer, log)
+	if err != nil {
+		return err
+	}
+
+	// 9. Control socket for CLI clients.
+	ctrlSrv, err := buildControlServer(cfg, dataDir, version, database, reg, eng, localSecrets, srv, sourceMgr, approvalGate, log)
+	if err != nil {
+		return err
+	}
+	wireCryptoIPC(secretsChain, denoRT, log)
+
+	// 9.5. Audit-log retention (#45).
+	auditStore, auditRetentionDays := initAuditPruning(ctx, cfg, database, log)
+
+	// 10. Run everything concurrently.
+	return runServices(ctx, rec, eng, srv, ctrlSrv, reg, auditStore, auditRetentionDays, log)
+}
+
+// openDatabase opens the daemon's database from the config (step 1).
+func openDatabase(cfg *config.Config) (db.DB, error) {
+	database, err := db.Open(db.Config{
+		Type:   cfg.Database.Type,
+		Path:   cfg.Database.Path,
+		URLEnv: cfg.Database.URLEnv,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("open database: %w", err)
+	}
+	return database, nil
+}
+
+// setupRegistry cleans up container/run state left over from a previous
+// session and builds the task registry (step 4).
+func setupRegistry(ctx context.Context, database db.DB, log *zap.Logger) *registry.Registry {
 	dockerruntime.CleanupOrphanedContainers(ctx, log)
 	podmanruntime.CleanupOrphanedContainers(ctx, log)
 
@@ -190,61 +252,59 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	} else {
 		log.Warn("sweep stale input pins failed", zap.Error(err))
 	}
+	return reg
+}
 
-	// 5. HTTP gateway.
-	gateway := ipc.NewGateway()
-
-	// 6. Managed runtimes + trigger engine.
-	managedRuntimes, eng, denoRT, pythonRT, err := buildRuntimes(ctx, cfg, reg, secretsChain, localSecrets, database, log, gateway)
-	if err != nil {
-		return err
-	}
-
-	// replayer is built inside the run-input block below (needs the InputStore)
-	// and consumed after webui.New. Declared here so both sites see it.
-	var replayer *registry.Replayer
-
-	// 6a. Run-input persistence (Task 14): wire InputStore when enabled.
-	if cfg.Defaults.RunInputs.IsEnabled() {
-		var deriver secrets.SubKeyDeriver
-		for _, p := range secretsChain {
-			if d, ok := p.(secrets.SubKeyDeriver); ok {
-				deriver = d
-				break
-			}
-		}
-		if deriver == nil {
-			log.Warn("run-input persistence: no SubKeyDeriver available in secrets chain — persistence disabled")
-		} else {
-			key, err := deriver.DeriveSubKey("dicode/run-inputs/v1")
-			if err != nil {
-				log.Warn("run-input persistence: sub-key derive failed", zap.Error(err))
-			} else {
-				runner := trigger.NewInputStoreTaskRunner(eng)
-				is := registry.NewInputStore(registry.NewInputCrypto(key), runner, cfg.Defaults.RunInputs.StorageTask)
-				eng.SetInputStore(is)
-				denoRT.SetInputStore(is)
-				pythonRT.SetInputStore(is)
-				// Replayer composes InputStore.Fetch + the engine's fireAsync.
-				// Wired after InputStore so dicode.runs.replay finds a populated store.
-				replayer = registry.NewReplayer(reg, is, trigger.NewReplayRunner(eng))
-				denoRT.SetReplayer(replayer)
-				pythonRT.SetReplayer(replayer)
-				// srv.SetReplayer is called below after webui is built.
-				log.Info("run-input persistence enabled",
-					zap.Duration("retention", cfg.Defaults.RunInputs.Retention),
-					zap.String("storage_task", cfg.Defaults.RunInputs.StorageTask),
-				)
-			}
-		}
-	} else {
+// wireRunInputPersistence wires the run-input persistence InputStore into the
+// engine and both runtimes when enabled (step 6a, Task 14). Returns the
+// Replayer composing InputStore.Fetch + the engine's fireAsync — wired after
+// the InputStore so dicode.runs.replay finds a populated store — or nil when
+// persistence is disabled or unavailable. srv.SetReplayer is called by run()
+// after webui is built.
+func wireRunInputPersistence(cfg *config.Config, secretsChain secrets.Chain, reg *registry.Registry, eng *trigger.Engine, denoRT *denoruntime.Runtime, pythonRT *pythonruntime.Runtime, log *zap.Logger) *registry.Replayer {
+	if !cfg.Defaults.RunInputs.IsEnabled() {
 		log.Info("run-input persistence disabled by config")
+		return nil
 	}
+	var deriver secrets.SubKeyDeriver
+	for _, p := range secretsChain {
+		if d, ok := p.(secrets.SubKeyDeriver); ok {
+			deriver = d
+			break
+		}
+	}
+	if deriver == nil {
+		log.Warn("run-input persistence: no SubKeyDeriver available in secrets chain — persistence disabled")
+		return nil
+	}
+	key, err := deriver.DeriveSubKey("dicode/run-inputs/v1")
+	if err != nil {
+		log.Warn("run-input persistence: sub-key derive failed", zap.Error(err))
+		return nil
+	}
+	runner := trigger.NewInputStoreTaskRunner(eng)
+	is := registry.NewInputStore(registry.NewInputCrypto(key), runner, cfg.Defaults.RunInputs.StorageTask)
+	eng.SetInputStore(is)
+	denoRT.SetInputStore(is)
+	pythonRT.SetInputStore(is)
+	// Replayer composes InputStore.Fetch + the engine's fireAsync.
+	// Wired after InputStore so dicode.runs.replay finds a populated store.
+	replayer := registry.NewReplayer(reg, is, trigger.NewReplayRunner(eng))
+	denoRT.SetReplayer(replayer)
+	pythonRT.SetReplayer(replayer)
+	log.Info("run-input persistence enabled",
+		zap.Duration("retention", cfg.Defaults.RunInputs.Retention),
+		zap.String("storage_task", cfg.Defaults.RunInputs.StorageTask),
+	)
+	return replayer
+}
 
-	// 7. Sources + reconciler.
+// initSources builds the task sources + source manager, wires them into both
+// runtimes, and creates the reconciler (step 7).
+func initSources(cfg *config.Config, dataDir string, reg *registry.Registry, denoRT *denoruntime.Runtime, pythonRT *pythonruntime.Runtime, log *zap.Logger) (*webui.SourceManager, *registry.Reconciler, error) {
 	sources, sourceMgr, err := buildSources(cfg, dataDir, log)
 	if err != nil {
-		return fmt.Errorf("build sources: %w", err)
+		return nil, nil, fmt.Errorf("build sources: %w", err)
 	}
 	// *webui.SourceManager satisfies both SourceDevModeSetter (Task 6) and
 	// RepoPathResolver (Task 8); wire both interfaces into both runtimes so
@@ -254,6 +314,11 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	pythonRT.SetSourceManager(sourceMgr)
 	pythonRT.SetRepoResolver(sourceMgr)
 	rec := registry.NewReconciler(reg, sources, dataDir, log)
+	return sourceMgr, rec, nil
+}
+
+// newArmDisarm builds the arm/disarm pair the approval gate drives (step 7).
+func newArmDisarm(cfg *config.Config, eng *trigger.Engine, gateway *ipc.Gateway, log *zap.Logger) (arm func(task.Kinded) error, disarm func(string)) {
 	webhookH := eng.WebhookHandler()
 	var webhookMu sync.Mutex
 	webhookPaths := make(map[string]string)
@@ -267,7 +332,7 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	// daemon-level gateway webhook route and footgun warnings. Called by the
 	// approval gate for every task that passes it (immediately for trusted /
 	// builtin / already-approved tasks, later from Approve for pending ones).
-	arm := func(k task.Kinded) error {
+	arm = func(k task.Kinded) error {
 		// The footgun checks below only apply to kind: Task; the gateway-webhook
 		// route, however, applies to BOTH kind: Task and kind: PipelineTask —
 		// see registerGatewayWebhook (GAP 1: a pipeline's webhook 404'd because
@@ -339,7 +404,7 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	// disarm tears down a task's triggers and gateway route. Used both for
 	// removed tasks and for changed tasks held pending approval (their
 	// previous version may still be armed).
-	disarm := func(id string) {
+	disarm = func(id string) {
 		webhookMu.Lock()
 		path := webhookPaths[id]
 		delete(webhookPaths, id)
@@ -349,13 +414,17 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 		}
 		eng.Unregister(id)
 	}
+	return arm, disarm
+}
 
-	// 7a. Approval gate (#392 phase 1): every new or changed task passes the
-	// trust-on-change gate before its triggers arm. Approval records live in
-	// dicode.lock next to dicode.yaml; trust policy lives in cfg.Approval.
+// setupApprovalGate builds the trust-on-change approval gate (step 7a, #392
+// phase 1): protected-path denies, the signed dicode.lock, the bootstrap
+// marker/window handling, the engine/runtime fire-guard wiring, and the
+// reconciler's OnRegister/OnUnregister hooks that drive arm/disarm.
+func setupApprovalGate(ctx context.Context, cfg *config.Config, configPath string, database db.DB, secretsChain secrets.Chain, eng *trigger.Engine, denoRT *denoruntime.Runtime, pythonRT *pythonruntime.Runtime, rec *registry.Reconciler, arm func(task.Kinded) error, disarm func(string), log *zap.Logger) (*approval.Gate, error) {
 	configDir, err := filepath.Abs(filepath.Dir(configPath))
 	if err != nil {
-		return fmt.Errorf("resolve config dir: %w", err)
+		return nil, fmt.Errorf("resolve config dir: %w", err)
 	}
 	lockPath := filepath.Join(configDir, approval.LockFileName)
 	// Approval-gate state must never be writable by a task. A task with a broad
@@ -375,7 +444,7 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	lockExisted := lockStatErr == nil
 	dbMarkerExists, err := bootstrapMarkerExists(ctx, database)
 	if err != nil {
-		return fmt.Errorf("read approval bootstrap marker: %w", err)
+		return nil, fmt.Errorf("read approval bootstrap marker: %w", err)
 	}
 	// Derive the lock-signing key from the master key so the HMAC key is
 	// never task-reachable and survives across restarts even if the SQLite DB
@@ -399,7 +468,7 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	}
 	lock, err := approval.LoadSignedLock(lockPath, lockSigningKey)
 	if err != nil {
-		return fmt.Errorf("load approval lock: %w", err)
+		return nil, fmt.Errorf("load approval lock: %w", err)
 	}
 	if lock.Tampered() {
 		log.Warn("approval lock HMAC verification failed — lock may be tampered or forged; "+
@@ -525,8 +594,12 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 		disarm(id)
 		approvalGate.Forget(id)
 	}
+	return approvalGate, nil
+}
 
-	// 8. Web UI.
+// buildWebUI exports the relay-related env vars and builds the web UI server
+// with its approval / replay wiring (steps 8 + 8.5).
+func buildWebUI(ctx context.Context, cfg *config.Config, configPath, version, dataDir string, database db.DB, reg *registry.Registry, eng *trigger.Engine, localSecrets secrets.Manager, rec *registry.Reconciler, sourceMgr *webui.SourceManager, gateway *ipc.Gateway, logBroadcaster *webui.LogBroadcaster, managedRuntimes []pkgruntime.ManagedRuntime, approvalGate *approval.Gate, replayer *registry.Replayer, log *zap.Logger) (*webui.Server, error) {
 	port := cfg.Server.Port
 	if port == 0 {
 		port = 8080
@@ -537,23 +610,23 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	// These tasks declare the var names in permissions.env; Deno's allow-env
 	// flag exposes them to the task subprocess.
 	if err := os.Setenv("DICODE_DATADIR", dataDir); err != nil {
-		return fmt.Errorf("setenv DICODE_DATADIR: %w", err)
+		return nil, fmt.Errorf("setenv DICODE_DATADIR: %w", err)
 	}
 	if cfg.Defaults.RunInputs.StorageTask != "" {
 		if err := os.Setenv("DICODE_STORAGE_TASK", cfg.Defaults.RunInputs.StorageTask); err != nil {
-			return fmt.Errorf("setenv DICODE_STORAGE_TASK: %w", err)
+			return nil, fmt.Errorf("setenv DICODE_STORAGE_TASK: %w", err)
 		}
 	}
 	if relayConfigured(cfg) {
 		if err := os.Setenv("DICODE_RELAY_SERVER_URL", cfg.Relay.ServerURL); err != nil {
-			return fmt.Errorf("setenv DICODE_RELAY_SERVER_URL: %w", err)
+			return nil, fmt.Errorf("setenv DICODE_RELAY_SERVER_URL: %w", err)
 		}
 		if err := os.Setenv("DICODE_RELAY_LOCAL_PORT", fmt.Sprintf("%d", port)); err != nil {
-			return fmt.Errorf("setenv DICODE_RELAY_LOCAL_PORT: %w", err)
+			return nil, fmt.Errorf("setenv DICODE_RELAY_LOCAL_PORT: %w", err)
 		}
 		if brokerURL := cfg.Relay.ResolvedBrokerURL(); brokerURL != "" {
 			if err := os.Setenv("DICODE_RELAY_BROKER_URL", brokerURL); err != nil {
-				return fmt.Errorf("setenv DICODE_RELAY_BROKER_URL: %w", err)
+				return nil, fmt.Errorf("setenv DICODE_RELAY_BROKER_URL: %w", err)
 			}
 		}
 
@@ -585,7 +658,7 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	webui.Version = version
 	srv, err := webui.New(port, reg, eng, cfg, configPath, localSecrets, rec, sourceMgr, dataDir, logBroadcaster, log, database, gateway)
 	if err != nil {
-		return fmt.Errorf("build webui: %w", err)
+		return nil, fmt.Errorf("build webui: %w", err)
 	}
 	srv.SetManagedRuntimes(managedRuntimes)
 	srv.SetTestGuard(approvalGate.FireGuard)
@@ -626,8 +699,13 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	if replayer != nil {
 		srv.SetReplayer(replayer)
 	}
+	return srv, nil
+}
 
-	// 9. Control socket for CLI clients.
+// buildControlServer builds the control socket for CLI clients and wires its
+// capabilities: API-key minting, the approval-gate test/approve surfaces, AI
+// task authoring, and task deletion (step 9).
+func buildControlServer(cfg *config.Config, dataDir, version string, database db.DB, reg *registry.Registry, eng *trigger.Engine, localSecrets secrets.Manager, srv *webui.Server, sourceMgr *webui.SourceManager, approvalGate *approval.Gate, log *zap.Logger) (*ipc.ControlServer, error) {
 	socketPath := filepath.Join(dataDir, "daemon.sock")
 	tokenPath := filepath.Join(dataDir, "daemon.token")
 	mp := ipc.MetricsProvider{
@@ -643,7 +721,7 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	}
 	ctrlSrv, err := ipc.NewControlServer(socketPath, tokenPath, reg, eng, localSecrets, mp, version, log, database, cfg.AI.Task)
 	if err != nil {
-		return fmt.Errorf("build control server: %w", err)
+		return nil, fmt.Errorf("build control server: %w", err)
 	}
 	// Wire API-key minting so `dicode mcp install` and friends can
 	// auto-generate keys via the control socket. The webui Server holds
@@ -673,32 +751,36 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	// Wire task deletion so `dicode task delete` can remove a task from its
 	// source. The SourceManager owns source state, repo paths, and dev-clones.
 	ctrlSrv.SetTaskDeleter(sourceMgr)
+	return ctrlSrv, nil
+}
 
-	// Wire the generic dicode.crypto.{encrypt, decrypt} IPC verb so buildin
-	// tasks (relay-client, auth-start, auth-relay) can encrypt/decrypt blobs
-	// via DeriveSubKey-derived sub-keys. Sub-keys never cross IPC; only the
-	// encrypt/decrypt operations are exposed.
-	{
-		var cryptoDeriver secrets.SubKeyDeriver
-		for _, p := range secretsChain {
-			if d, ok := p.(secrets.SubKeyDeriver); ok {
-				cryptoDeriver = d
-				break
-			}
-		}
-		if cryptoDeriver == nil {
-			log.Warn("crypto IPC handler: no SubKeyDeriver available in secrets chain — dicode.crypto.{encrypt,decrypt} disabled")
-		} else {
-			denoRT.SetCryptoHandler(cryptoDeriver)
+// wireCryptoIPC wires the generic dicode.crypto.{encrypt, decrypt} IPC verb
+// so buildin tasks (relay-client, auth-start, auth-relay) can encrypt/decrypt
+// blobs via DeriveSubKey-derived sub-keys. Sub-keys never cross IPC; only the
+// encrypt/decrypt operations are exposed.
+func wireCryptoIPC(secretsChain secrets.Chain, denoRT *denoruntime.Runtime, log *zap.Logger) {
+	var cryptoDeriver secrets.SubKeyDeriver
+	for _, p := range secretsChain {
+		if d, ok := p.(secrets.SubKeyDeriver); ok {
+			cryptoDeriver = d
+			break
 		}
 	}
+	if cryptoDeriver == nil {
+		log.Warn("crypto IPC handler: no SubKeyDeriver available in secrets chain — dicode.crypto.{encrypt,decrypt} disabled")
+	} else {
+		denoRT.SetCryptoHandler(cryptoDeriver)
+	}
+}
 
-	// 9.5. Audit-log retention (#45). Event emission is wired implicitly —
-	// the trigger engine (SetDB), per-run IPC servers, and webui all build
-	// their own audit.Store over the shared database handle. The daemon
-	// only owns pruning: once at startup, then periodically. retention 0
-	// (explicit opt-out) disables pruning entirely; Prune itself also
-	// refuses to run with a non-positive window.
+// initAuditPruning builds the audit store and runs the startup prune pass
+// (step 9.5, #45). Event emission is wired implicitly — the trigger engine
+// (SetDB), per-run IPC servers, and webui all build their own audit.Store
+// over the shared database handle. The daemon only owns pruning: once at
+// startup here, then periodically in runServices. retention 0 (explicit
+// opt-out) disables pruning entirely; Prune itself also refuses to run with
+// a non-positive window.
+func initAuditPruning(ctx context.Context, cfg *config.Config, database db.DB, log *zap.Logger) (*audit.Store, int) {
 	auditStore := audit.NewStore(database)
 	auditRetentionDays := cfg.AuditLog.EffectiveRetentionDays()
 	if auditRetentionDays > 0 {
@@ -709,8 +791,14 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	} else {
 		log.Info("audit log pruning disabled (audit_log.retention_days: 0)")
 	}
+	return auditStore, auditRetentionDays
+}
 
-	// 10. Run everything concurrently.
+// runServices runs every daemon loop concurrently until the context is
+// cancelled or one loop fails (step 10): periodic audit pruning, the
+// reconciler, the trigger engine, the web UI, the control server, and the
+// container image GC.
+func runServices(ctx context.Context, rec *registry.Reconciler, eng *trigger.Engine, srv *webui.Server, ctrlSrv *ipc.ControlServer, reg *registry.Registry, auditStore *audit.Store, auditRetentionDays int, log *zap.Logger) error {
 	g, ctx := errgroup.WithContext(ctx)
 	if auditRetentionDays > 0 {
 		g.Go(func() error {
