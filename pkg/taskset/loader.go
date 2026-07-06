@@ -172,10 +172,12 @@ func LiftEntryEnabled(entries map[string]*Entry) error {
 //
 // The "git" scheme is deliberately rejected (#486): go-git dials it through
 // a native git-protocol transport with a hardcoded net.Dial and no
-// injectable dialer, so — unlike http/https (guarded by validateRemoteHost
-// plus a dial-time SSRF guard, #475/#481) — a git:// remote gets zero host
-// validation at any layer, a full SSRF into the daemon's internal network.
-// The unauthenticated, unencrypted git:// protocol (port 9418) is largely
+// injectable dialer, so a git:// remote gets zero host validation at any
+// layer — a full SSRF into the daemon's internal network. That is strictly
+// worse than the allowed schemes: http/https/ssh at least go through
+// go-git's standard transports, which pkg/source/git's validateRemoteHost
+// can (and, for the ListBranches path, does) inspect before dialing. The
+// unauthenticated, unencrypted git:// protocol (port 9418) is largely
 // obsolete — GitHub and most major hosts no longer serve it — so rejecting
 // the scheme outright is the lowest-risk fix. This is a behavior change for
 // any existing git:// ref.url configs; see CHANGELOG/docs.
@@ -205,10 +207,22 @@ func ValidateRefURL(filePath, key, rawURL string) error {
 	case "http", "https", "ssh":
 		return nil
 	case "git":
-		return fmt.Errorf("%s: entry %q: ref.url scheme \"git\" is no longer accepted — it bypasses dicode's SSRF host guards (#486); use https or ssh instead", filePath, key)
+		return fmt.Errorf("%s: entry %q: ref.url scheme \"git\" is no longer accepted — it bypasses dicode's SSRF host guards; use https or ssh instead", filePath, key)
 	default:
 		return fmt.Errorf("%s: entry %q: ref.url must use scheme http, https, or ssh (got %q)", filePath, key, u.Scheme)
 	}
+}
+
+// IsAllowedRefScheme reports whether rawURL uses a scheme accepted for a git
+// remote — the same http/https/ssh (+ SCP-shorthand) acceptance set
+// ValidateRefURL enforces, minus its file/key error formatting. This is the
+// single source of truth other packages (e.g. pkg/webui, which validates a
+// URL typed into the "add source" form before it ever reaches a
+// dicode.yaml/taskset.yaml entry) should call instead of reimplementing the
+// scheme switch — a prior duplicate in pkg/webui had already drifted from
+// this one (it rejected the SCP-shorthand form ValidateRefURL accepts).
+func IsAllowedRefScheme(rawURL string) bool {
+	return ValidateRefURL("", "", rawURL) == nil
 }
 
 // isValidSCPHost reports whether s looks like a valid SCP hostname — only

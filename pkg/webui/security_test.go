@@ -241,6 +241,7 @@ func TestIsAllowedGitScheme_Allowed(t *testing.T) {
 		"https://github.com/user/repo",
 		"http://github.com/user/repo",
 		"ssh://git@github.com/user/repo",
+		"git@github.com:org/repo.git", // SSH SCP-shorthand, via taskset.IsAllowedRefScheme
 	}
 	for _, u := range cases {
 		if !isAllowedGitScheme(u) {
