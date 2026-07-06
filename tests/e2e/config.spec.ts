@@ -57,6 +57,29 @@ test.describe('Config API', () => {
     expect(e2e!.type || e2e!.Type).toBe('taskset');
   });
 
+  // #486: git:// remotes bypass every SSRF host guard (go-git dials the
+  // git-protocol scheme through a hardcoded, unguarded net.Dial with no
+  // injectable dialer), so both the source-add and branch-preview endpoints
+  // must reject the scheme before ever reaching go-git.
+  test('POST /api/settings/sources rejects a git:// url with 400', async ({ request }) => {
+    const res = await request.post('/api/settings/sources', {
+      data: { name: 'e2e-git-scheme-reject', url: 'git://github.com/example/repo.git' },
+      headers: { 'Content-Type': 'application/json' },
+    });
+    expect(res.status()).toBe(400);
+
+    // No source should have been registered as a side effect of the rejected call.
+    const sources = await (await request.get('/api/sources')).json() as Array<Record<string, unknown>>;
+    expect(sources.find((s) => (s.name || s.Name) === 'e2e-git-scheme-reject')).toBeFalsy();
+  });
+
+  test('GET /api/settings/sources/git/branches (preview) rejects a git:// url with 400', async ({ request }) => {
+    const res = await request.get('/api/settings/sources/git/branches', {
+      params: { url: 'git://github.com/example/repo.git' },
+    });
+    expect(res.status()).toBe(400);
+  });
+
   test('GET /api/config/raw returns YAML content', async ({ request }) => {
     const res = await request.get('/api/config/raw');
     expect(res.ok()).toBe(true);

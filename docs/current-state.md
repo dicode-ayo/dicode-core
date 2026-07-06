@@ -61,7 +61,7 @@ Full configuration loading. All structs defined and validated:
 Full TaskSet architecture — hierarchical task composition inspired by ArgoCD App-of-Apps.
 
 - `spec.go` — `TaskSetSpec`, `TaskSetEntry`, `Ref`, `Defaults`, `TaskOverrides` structs. `kind` field required on all yaml files (Task, TaskSet, Config). `Ref` encodes local vs git: `url` present = git ref, `path` only = local ref.
-- `loader.go` — `LoadTaskSet(path)`, `LoadConfig(path)` — loads and validates `kind:TaskSet` and `kind:Config` yaml files
+- `loader.go` — `LoadTaskSet(path)`, `LoadConfig(path)` — loads and validates `kind:TaskSet` and `kind:Config` yaml files. `ValidateRefURL` gates `ref.url` to `http`, `https`, `ssh` schemes (plus the `user@host:path` SSH shorthand); the `git://` scheme is rejected outright (#486) — go-git dials it through a native transport with a hardcoded, unguarded `net.Dial`, so it would get zero SSRF host validation, unlike http/https (`pkg/source/git`'s `validateRemoteHost` plus a dial-time guard, #475/#481).
 - `resolver.go` — `Resolver` struct (per `(url, branch)` repo dedup), `Resolve(ctx, namespace, rootRef, configDefaults, parentOverrides) []*ResolvedTask`. Implements 6-level precedence stack: task.yaml base → kind:Config defaults → spec.defaults → parent overrides.defaults → parent overrides.entries[key] → entry overrides (leaf wins). `SetDevMode(bool)` / `DevMode() bool`.
 - `source.go` — `Source` implementing `source.Source`: polls by re-resolving the full task tree and diffing against snapshot. `SetDevMode(ctx, enabled, localPath)` — swaps the root ref to a local path and triggers immediate re-sync. `DevMode() bool`, `DevRootPath() string`.
 - 11 tests passing (resolver override ordering, nested overrides, source event emission).

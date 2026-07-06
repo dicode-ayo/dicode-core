@@ -665,13 +665,20 @@ func secureCookiesFor(cfg *config.Config) bool {
 // isAllowedGitScheme returns true when the URL uses a scheme valid for a git remote.
 // Rejects file://, ftp://, data:, and other schemes that could trigger local-file
 // reads or SSRF against non-git services.
+//
+// "git" is deliberately excluded (#486): go-git dials it through a native
+// git-protocol transport with a hardcoded, unguarded net.Dial, so a git://
+// remote added here (via apiAddSource or previewed via apiListGitBranches)
+// would get zero SSRF host validation — unlike http/https/ssh. This mirrors
+// the same scheme restriction taskset.ValidateRefURL enforces for ref.url
+// entries loaded from dicode.yaml/taskset.yaml.
 func isAllowedGitScheme(rawURL string) bool {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return false
 	}
 	switch strings.ToLower(u.Scheme) {
-	case "https", "http", "git", "ssh":
+	case "https", "http", "ssh":
 		return true
 	}
 	return false

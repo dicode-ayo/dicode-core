@@ -163,12 +163,22 @@ func LiftEntryEnabled(entries map[string]*Entry) error {
 }
 
 // ValidateRefURL validates the scheme of a git ref URL.
-// It accepts http, https, ssh, and git schemes, plus the SSH shorthand
+// It accepts http, https, and ssh schemes, plus the SSH shorthand
 // form (git@host:path) which url.Parse would misparse as a relative URL
 // with scheme "". The SSH shorthand is detected by the SCP-style
 // user@host:path pattern: the URL must contain no "://" (which would mean
 // it already has an explicit scheme), and the colon separating host from
 // path must follow the "@".
+//
+// The "git" scheme is deliberately rejected (#486): go-git dials it through
+// a native git-protocol transport with a hardcoded net.Dial and no
+// injectable dialer, so — unlike http/https (guarded by validateRemoteHost
+// plus a dial-time SSRF guard, #475/#481) — a git:// remote gets zero host
+// validation at any layer, a full SSRF into the daemon's internal network.
+// The unauthenticated, unencrypted git:// protocol (port 9418) is largely
+// obsolete — GitHub and most major hosts no longer serve it — so rejecting
+// the scheme outright is the lowest-risk fix. This is a behavior change for
+// any existing git:// ref.url configs; see CHANGELOG/docs.
 func ValidateRefURL(filePath, key, rawURL string) error {
 	// Detect the SCP-style SSH shorthand: user@host:path (e.g. git@github.com:org/repo.git).
 	// These look like relative paths to url.Parse (Scheme=""), so we handle them
@@ -192,10 +202,12 @@ func ValidateRefURL(filePath, key, rawURL string) error {
 		return fmt.Errorf("%s: entry %q: invalid ref.url: %w", filePath, key, err)
 	}
 	switch strings.ToLower(u.Scheme) {
-	case "http", "https", "ssh", "git":
+	case "http", "https", "ssh":
 		return nil
+	case "git":
+		return fmt.Errorf("%s: entry %q: ref.url scheme \"git\" is no longer accepted — it bypasses dicode's SSRF host guards (#486); use https or ssh instead", filePath, key)
 	default:
-		return fmt.Errorf("%s: entry %q: ref.url must use scheme http, https, ssh, or git (got %q)", filePath, key, u.Scheme)
+		return fmt.Errorf("%s: entry %q: ref.url must use scheme http, https, or ssh (got %q)", filePath, key, u.Scheme)
 	}
 }
 
