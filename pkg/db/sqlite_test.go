@@ -122,6 +122,44 @@ func TestSQLiteDB_RunsHasInputColumns(t *testing.T) {
 	}
 }
 
+func TestSQLiteDB_RunsHasResumeColumns(t *testing.T) {
+	d := newTestDB(t).(*SQLiteDB)
+	ctx := context.Background()
+	rows, err := d.db.QueryContext(ctx, `PRAGMA table_info(runs)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	cols := map[string]string{}
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			t.Fatal(err)
+		}
+		cols[name] = ctype
+	}
+	wantCols := map[string]string{
+		"resume_state":    "BLOB",
+		"resume_form":     "BLOB",
+		"resume_token":    "TEXT",
+		"suspended_at":    "INTEGER",
+		"resume_deadline": "INTEGER",
+	}
+	for name, wantType := range wantCols {
+		got, ok := cols[name]
+		if !ok {
+			t.Errorf("runs missing column %q", name)
+			continue
+		}
+		if got != wantType {
+			t.Errorf("runs.%s type = %q, want %q", name, got, wantType)
+		}
+	}
+}
+
 func TestSQLiteDB_Migrate_Idempotent(t *testing.T) {
 	tmp := t.TempDir()
 	path := filepath.Join(tmp, "test.db")

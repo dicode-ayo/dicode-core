@@ -471,3 +471,123 @@ func TestFinishRunWithResult(t *testing.T) {
 		t.Error("finished_at should be set")
 	}
 }
+
+func TestSuspendRun_RoundTrip(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	r := newTestRegistry(t)
+
+	runID, err := r.StartRun(ctx, "task-suspend", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	state := []byte(`{"step":"ask_name"}`)
+	form := []byte(`{"fields":[{"name":"project_name"}]}`)
+	token := "resume-token-xyz"
+	suspendedAt := time.Now().UnixMilli()
+	deadline := suspendedAt + 86_400_000
+
+	if err := r.SuspendRun(ctx, runID, state, form, token, suspendedAt, deadline); err != nil {
+		t.Fatal(err)
+	}
+
+	run, err := r.GetRun(ctx, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Status != StatusSuspended {
+		t.Errorf("status = %q, want %q", run.Status, StatusSuspended)
+	}
+	// Suspended is non-terminal: finished_at must stay unset.
+	if run.FinishedAt != nil {
+		t.Errorf("finished_at = %v, want nil for a suspended run", run.FinishedAt)
+	}
+	if string(run.ResumeState) != string(state) {
+		t.Errorf("resume_state = %q, want %q", run.ResumeState, state)
+	}
+	if string(run.ResumeForm) != string(form) {
+		t.Errorf("resume_form = %q, want %q", run.ResumeForm, form)
+	}
+	if run.ResumeToken != token {
+		t.Errorf("resume_token = %q, want %q", run.ResumeToken, token)
+	}
+	if run.SuspendedAt != suspendedAt {
+		t.Errorf("suspended_at = %d, want %d", run.SuspendedAt, suspendedAt)
+	}
+	if run.ResumeDeadline != deadline {
+		t.Errorf("resume_deadline = %d, want %d", run.ResumeDeadline, deadline)
+	}
+}
+
+// A zero deadline persists as NULL and reads back as 0; nil state/form blobs
+// round-trip as nil rather than a zero-length slice mismatch.
+func TestSuspendRun_NoDeadlineNilBlobs(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	r := newTestRegistry(t)
+
+	runID, err := r.StartRun(ctx, "task-suspend-2", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.SuspendRun(ctx, runID, nil, nil, "tok", time.Now().UnixMilli(), 0); err != nil {
+		t.Fatal(err)
+	}
+
+	run, err := r.GetRun(ctx, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Status != StatusSuspended {
+		t.Errorf("status = %q, want %q", run.Status, StatusSuspended)
+	}
+	if run.ResumeDeadline != 0 {
+		t.Errorf("resume_deadline = %d, want 0", run.ResumeDeadline)
+	}
+	if run.ResumeState != nil {
+		t.Errorf("resume_state = %v, want nil", run.ResumeState)
+	}
+	if run.ResumeForm != nil {
+		t.Errorf("resume_form = %v, want nil", run.ResumeForm)
+	}
+}
+
+// A suspended run is not "running", so the startup stale-run sweep must leave
+// it alone rather than cancelling it.
+func TestCleanupStaleRuns_SkipsSuspended(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	r := newTestRegistry(t)
+
+	suspended, err := r.StartRun(ctx, "task-a", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.SuspendRun(ctx, suspended, []byte(`{}`), nil, "tok", time.Now().UnixMilli(), 0); err != nil {
+		t.Fatal(err)
+	}
+	running, err := r.StartRun(ctx, "task-b", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := r.CleanupStaleRuns(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	sRun, err := r.GetRun(ctx, suspended)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sRun.Status != StatusSuspended {
+		t.Errorf("suspended run status = %q, want %q (sweep must skip it)", sRun.Status, StatusSuspended)
+	}
+	rRun, err := r.GetRun(ctx, running)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rRun.Status != StatusCancelled {
+		t.Errorf("running run status = %q, want %q", rRun.Status, StatusCancelled)
+	}
+}
