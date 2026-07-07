@@ -1581,12 +1581,13 @@ type TaskDetail struct {
 
 	// DaemonState surfaces the engine's lifecycle phase for daemon tasks.
 	// Empty for non-daemon tasks so the WebUI can hide the row entirely.
-	// Six-value enum — see pkg/trigger.DaemonState for the canonical list.
+	// See pkg/trigger.DaemonState for the canonical enum.
 	// The "failed_after_preflight" and "crashed" values are distinct from
 	// "stopped" so operators can tell "fireAsync broke" (#318) and "body
 	// crashed without auto-restart" (#325) apart from "deliberately stopped";
 	// "crashlooping" (#458) marks a daemon stuck in a spawn/crash/backoff
-	// loop that would otherwise sample as "running".
+	// loop that would otherwise sample as "running"; "suspended" (#95) marks a
+	// body parked awaiting user input.
 	DaemonState string `json:"daemon_state,omitempty"`
 
 	// PendingApproval flags a task held by the trust-on-change approval gate.

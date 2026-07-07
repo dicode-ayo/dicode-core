@@ -7,6 +7,7 @@ package trigger
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/dicode/dicode/pkg/registry"
@@ -107,7 +108,89 @@ func (e *Engine) startDaemon(spec *task.Spec) {
 	}
 }
 
+// resumeDaemonBody spawns the continuation of a suspended daemon body while
+// keeping the #470 "slot present == one body in flight" invariant honest across
+// the suspend→resume hop. onDaemonRunFinished parked the slot on the suspended
+// run; this adopts it for the continuation BEFORE the body fires (mirroring
+// startDaemon's pre-reservation, which fireAsync honors via opts.RunID) so a
+// reconciler reload during the continuation observes alreadyRunning and won't
+// start a second body, and the continuation's onDaemonRunFinished slot-match
+// frees the slot correctly. The compare-and-swap is the safety interlock: if
+// the slot is no longer parked on the suspended run (the task was unregistered,
+// or another start took over), coalesce rather than double-start.
+func (e *Engine) resumeDaemonBody(spec *task.Spec, suspendedRunID string, opts pkgruntime.RunOptions) (string, error) {
+	runID := uuid.New().String()
+	opts.RunID = runID
+
+	e.daemonMu.Lock()
+	if e.daemonRuns[spec.ID] != suspendedRunID {
+		e.daemonMu.Unlock()
+		return "", fmt.Errorf("resume: daemon %q slot no longer parked on suspended run %q", spec.ID, suspendedRunID)
+	}
+	e.daemonRuns[spec.ID] = runID
+	e.daemonMu.Unlock()
+
+	// Record the spawn before fireAsync for the same reason startDaemon does:
+	// an instant exit could otherwise run noteExit before a late noteSpawn,
+	// stamping a spawn time onto a dead run (#458).
+	e.crashloops.noteSpawn(spec.ID)
+	e.setDaemonState(spec.ID, DaemonRunning)
+
+	newRunID, err := e.fireAsync(context.Background(), spec, opts, registry.TriggerResume)
+	if err != nil {
+		// No body is live: roll back the adoption. The slot-match guard mirrors
+		// onDaemonRunFinished so a concurrent starter's reservation is never
+		// clobbered.
+		e.daemonMu.Lock()
+		if e.daemonRuns[spec.ID] == runID {
+			delete(e.daemonRuns, spec.ID)
+		}
+		e.daemonMu.Unlock()
+		e.crashloops.clearSpawn(spec.ID)
+		e.setDaemonState(spec.ID, DaemonFailedAfterPreflight)
+		return "", err
+	}
+	return newRunID, nil
+}
+
 func (e *Engine) onDaemonRunFinished(spec *task.Spec, runID string) {
+	// Resolve the run status BEFORE releasing the slot: a suspended body must
+	// keep its #470 reservation (see below), so the slot decision depends on
+	// the outcome.
+	run, err := e.registry.GetRun(context.Background(), runID)
+	if err != nil {
+		// Free the slot even on a lookup failure so a dead body can't pin the
+		// "body in flight" reservation forever.
+		e.daemonMu.Lock()
+		if e.daemonRuns[spec.ID] == runID {
+			delete(e.daemonRuns, spec.ID)
+		}
+		e.daemonMu.Unlock()
+		e.log.Error("daemon: failed to get run status", zap.String("run", runID), zap.Error(err))
+		return
+	}
+
+	// A suspended run is non-terminal (#95): the subprocess exited to await
+	// user input, not because the daemon crashed or stopped. Keep the run slot
+	// reserved so the #470 "one body in flight" invariant holds across the
+	// suspended gap — a reconciler reload must not start a second body while
+	// this one is parked — and publish DaemonSuspended instead of leaving a
+	// stale "running". The resume continuation (resumeDaemonBody) adopts the
+	// slot and drives the next transition. Crash-loop tracking and the restart
+	// policy are deliberately untouched. The slot-ownership check guards the
+	// unregister race: if Unregister already freed the slot (and killed the
+	// body), there is nothing to park and no state to publish for a task the
+	// engine no longer tracks.
+	if run.Status == registry.StatusSuspended {
+		e.daemonMu.Lock()
+		slotOwned := e.daemonRuns[spec.ID] == runID
+		e.daemonMu.Unlock()
+		if slotOwned {
+			e.setDaemonState(spec.ID, DaemonSuspended)
+		}
+		return
+	}
+
 	e.daemonMu.Lock()
 	if e.daemonRuns[spec.ID] == runID {
 		delete(e.daemonRuns, spec.ID)
@@ -116,20 +199,6 @@ func (e *Engine) onDaemonRunFinished(spec *task.Spec, runID string) {
 	e.daemonMu.Unlock()
 
 	if !stillRegistered || e.isShuttingDown() {
-		return
-	}
-
-	run, err := e.registry.GetRun(context.Background(), runID)
-	if err != nil {
-		e.log.Error("daemon: failed to get run status", zap.String("run", runID), zap.Error(err))
-		return
-	}
-	// A suspended run is non-terminal (#95): the subprocess exited to await
-	// user input, not because the daemon crashed or stopped. Treat it as a
-	// neutral outcome — don't count it as a crash-loop exit, don't reset the
-	// counter, and don't schedule a restart. The daemon state is unchanged;
-	// the continuation run drives the next lifecycle transition on resume.
-	if run.Status == registry.StatusSuspended {
 		return
 	}
 
