@@ -105,9 +105,18 @@ func (r *Resolver) Resolve(ctx context.Context, spec *task.Spec) (*Resolved, err
 			val, err := r.Secrets.Resolve(ctx, e.Secret)
 			if err != nil {
 				var notFound *secrets.NotFoundError
-				if e.Optional && errors.As(err, &notFound) {
-					out.Env[e.Name] = ""
-					continue
+				if errors.As(err, &notFound) {
+					// default: wins over optional: — a documented literal
+					// fallback is more useful than an empty degrade (e.g. a
+					// dev status password before the store is configured).
+					if e.Default != "" {
+						out.Env[e.Name] = e.Default
+						continue
+					}
+					if e.Optional {
+						out.Env[e.Name] = ""
+						continue
+					}
 				}
 				return nil, fmt.Errorf("resolve secret %q for env %q: %w", e.Secret, e.Name, err)
 			}
@@ -163,10 +172,12 @@ func (r *Resolver) resolveProvider(
 	// updates are handled by the cache's content-hash mismatch path.
 	spec, ok := r.Registry.Get(providerID)
 	if !ok {
-		return &ErrProviderUnavailable{
+		// A provider that isn't registered is unavailable for every entry;
+		// no cached values are trustworthy, so treat all entries as misses.
+		return degradeProviderFailure(entries, nil, out, &ErrProviderUnavailable{
 			ProviderID: providerID,
 			Cause:      fmt.Errorf("provider task not registered"),
-		}
+		})
 	}
 
 	// Hash error → empty string → cache always misses (content-hash
@@ -192,13 +203,13 @@ func (r *Resolver) resolveProvider(
 	if len(misses) > 0 {
 		res, err := r.Runner.Run(ctx, providerID, misses)
 		if err != nil {
-			return &ErrProviderUnavailable{ProviderID: providerID, Cause: err}
+			return degradeProviderFailure(entries, cached, out, &ErrProviderUnavailable{ProviderID: providerID, Cause: err})
 		}
 		if res == nil || res.Values == nil {
-			return &ErrProviderMisconfigured{
+			return degradeProviderFailure(entries, cached, out, &ErrProviderMisconfigured{
 				ProviderID: providerID,
 				Reason:     "task returned no secret map (did it call dicode.output(..., { secret: true })?)",
-			}
+			})
 		}
 		fetched = res.Values
 
@@ -233,6 +244,36 @@ func (r *Resolver) resolveProvider(
 		}
 		out.Env[e.envName] = val
 		out.Secrets[e.envName] = val
+	}
+	return nil
+}
+
+// degradeProviderFailure applies a provider-batch failure to a set of
+// entries. Entries already resolved from cache keep their values; optional
+// un-cached entries degrade to "" (the same contract as a per-key
+// not-found); the first required un-cached entry makes the failure fatal
+// (returns failErr).
+//
+// This lets a consumer whose provider is entirely unavailable — e.g. the
+// relay renderer with no Doppler token configured — still resolve when every
+// entry it needs from that provider is optional. Required entries continue to
+// fail loud, so a genuinely-needed secret never silently becomes empty.
+func degradeProviderFailure(entries []taskEntry, cached map[string]string, out *Resolved, failErr error) error {
+	hasRequiredMiss := false
+	for _, e := range entries {
+		if v, ok := cached[e.envName]; ok {
+			out.Env[e.envName] = v
+			out.Secrets[e.envName] = v
+			continue
+		}
+		if e.optional {
+			out.Env[e.envName] = ""
+			continue
+		}
+		hasRequiredMiss = true
+	}
+	if hasRequiredMiss {
+		return failErr
 	}
 	return nil
 }

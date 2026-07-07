@@ -230,3 +230,118 @@ type fakeRunnerNilMap struct{}
 func (fakeRunnerNilMap) Run(ctx context.Context, providerID string, reqs []ProviderRequest) (*ProviderResult, error) {
 	return &ProviderResult{Values: nil}, nil
 }
+
+// staticProvider is a secrets.Provider backed by a fixed map. A key absent
+// from the map resolves to ("", nil), which the Chain reports as NotFound.
+type staticProvider struct{ vals map[string]string }
+
+func (staticProvider) Name() string { return "static" }
+
+func (p staticProvider) Get(_ context.Context, key string) (string, error) {
+	return p.vals[key], nil
+}
+
+func TestResolve_SecretDefaultUsedWhenNotFound(t *testing.T) {
+	r := New(&fakeRegistry{}, secrets.Chain{}, nil) // empty chain → NotFound
+	consumer := newSpec("consumer", []task.EnvEntry{
+		{Name: "STATUS_PASSWORD", Secret: "RELAY_STATUS_PASSWORD", Default: "dev-default"},
+	})
+	got, err := r.Resolve(context.Background(), consumer)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if got.Env["STATUS_PASSWORD"] != "dev-default" {
+		t.Errorf("expected default, got %q", got.Env["STATUS_PASSWORD"])
+	}
+	// A literal default is not a resolved secret; it must not be flagged for
+	// redaction (matching value: semantics).
+	if _, ok := got.Secrets["STATUS_PASSWORD"]; ok {
+		t.Errorf("default should not be flagged as secret: %#v", got.Secrets)
+	}
+}
+
+func TestResolve_SecretDefaultBeatsOptional(t *testing.T) {
+	r := New(&fakeRegistry{}, secrets.Chain{}, nil)
+	consumer := newSpec("consumer", []task.EnvEntry{
+		{Name: "PW", Secret: "MISSING", Default: "d", Optional: true},
+	})
+	got, err := r.Resolve(context.Background(), consumer)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if got.Env["PW"] != "d" {
+		t.Errorf("default should win over optional empty; got %q", got.Env["PW"])
+	}
+}
+
+func TestResolve_SecretPresentIgnoresDefault(t *testing.T) {
+	chain := secrets.Chain{staticProvider{vals: map[string]string{"K": "real"}}}
+	r := New(&fakeRegistry{}, chain, nil)
+	consumer := newSpec("consumer", []task.EnvEntry{
+		{Name: "PW", Secret: "K", Default: "d"},
+	})
+	got, err := r.Resolve(context.Background(), consumer)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if got.Env["PW"] != "real" {
+		t.Errorf("expected resolved secret, got %q", got.Env["PW"])
+	}
+	if got.Secrets["PW"] != "real" {
+		t.Errorf("resolved secret must be flagged for redaction: %#v", got.Secrets)
+	}
+}
+
+func TestResolve_ProviderUnavailableOptionalDegrades(t *testing.T) {
+	reg := &fakeRegistry{specs: map[string]*task.Spec{
+		"doppler": newProviderSpec("doppler", 0),
+	}}
+	runner := &fakeRunner{err: errors.New("no DOPPLER_TOKEN")}
+	r := New(reg, secrets.Chain{}, runner)
+	r.Now = func() time.Time { return time.Unix(0, 0) }
+
+	consumer := newSpec("consumer", []task.EnvEntry{
+		{Name: "GITHUB_CLIENT_ID", From: "task:doppler", Optional: true},
+		{Name: "SLACK_CLIENT_ID", From: "task:doppler", Optional: true},
+	})
+	got, err := r.Resolve(context.Background(), consumer)
+	if err != nil {
+		t.Fatalf("Resolve should degrade optional entries, got: %v", err)
+	}
+	if got.Env["GITHUB_CLIENT_ID"] != "" || got.Env["SLACK_CLIENT_ID"] != "" {
+		t.Errorf("expected empty degrade, got %#v", got.Env)
+	}
+}
+
+func TestResolve_ProviderUnavailableRequiredStillFails(t *testing.T) {
+	reg := &fakeRegistry{specs: map[string]*task.Spec{
+		"doppler": newProviderSpec("doppler", 0),
+	}}
+	runner := &fakeRunner{err: errors.New("no DOPPLER_TOKEN")}
+	r := New(reg, secrets.Chain{}, runner)
+	r.Now = func() time.Time { return time.Unix(0, 0) }
+
+	consumer := newSpec("consumer", []task.EnvEntry{
+		{Name: "OPTIONAL_ID", From: "task:doppler", Optional: true},
+		{Name: "REQUIRED_ID", From: "task:doppler"},
+	})
+	_, err := r.Resolve(context.Background(), consumer)
+	var pu *ErrProviderUnavailable
+	if !errors.As(err, &pu) {
+		t.Fatalf("expected ErrProviderUnavailable for required entry, got %T %v", err, err)
+	}
+}
+
+func TestResolve_ProviderNotRegisteredOptionalDegrades(t *testing.T) {
+	r := New(&fakeRegistry{}, secrets.Chain{}, &fakeRunner{})
+	consumer := newSpec("consumer", []task.EnvEntry{
+		{Name: "GITHUB_CLIENT_ID", From: "task:doppler", Optional: true},
+	})
+	got, err := r.Resolve(context.Background(), consumer)
+	if err != nil {
+		t.Fatalf("unregistered provider with optional entry should degrade, got: %v", err)
+	}
+	if got.Env["GITHUB_CLIENT_ID"] != "" {
+		t.Errorf("expected empty degrade, got %q", got.Env["GITHUB_CLIENT_ID"])
+	}
+}

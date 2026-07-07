@@ -3,16 +3,20 @@ kind: PipelineTask
 name: "Relay Server"
 description: |
   Runs dicode-relay in-process under the daemon's Deno runtime, fronted by
-  a 2-stage render pipeline that produces relay.yaml from Doppler-fed env
-  before the daemon body starts.
+  a 2-stage render pipeline that produces relay.yaml before the daemon body
+  starts. The render works with or without Doppler: OAuth client_ids are
+  optional (unset providers are omitted from the config), and the status
+  password resolves from the local secrets store with a dev default, so an
+  operator can stand the relay up locally without configuring Doppler.
 
   Stages (sequential):
 
     1. buildin/template reads the renderer's template body from the sibling
        relay.yaml (via the template_path param) and substitutes ${BASE_URL},
        ${STATUS_PASSWORD}, and per-provider OAuth client_id/client_secret
-       values from the env declared below (a mix of literal value and
-       Doppler-fed entries).
+       values from the env declared below. Provider blocks are wrapped in
+       #dicode:if guards, so an unconfigured (unset) provider is dropped
+       from the rendered config rather than emitting a null client_id.
 
     2. buildin/write-local persists the rendered string to
        ${DATADIR}/relay/relay.yaml at mode 0600.
@@ -28,8 +32,10 @@ description: |
 
   Operator setup (one-time): edit the BASE_URL value below to the public
   hostname the relay is reachable at (or apply a taskset override to that
-  env entry). DOPPLER_TOKEN must be in the dicode secrets store before first
-  daemon start.
+  env entry). For a Doppler-fed deployment, set DOPPLER_TOKEN in the dicode
+  secrets store before first daemon start; for local/dev use it is optional
+  — the render degrades unset OAuth providers to omitted and uses the
+  RELAY_STATUS_PASSWORD dev default.
 
 subtype: sequential
 
@@ -49,8 +55,14 @@ stages:
           value: "5553"
         - name: BASE_URL
           value: "https://relay.example.com"
+        # STATUS_PASSWORD resolves from the local secrets store (set it with
+        # `dicode secrets set RELAY_STATUS_PASSWORD <pw>`) and falls back to a
+        # documented dev default when unset, so the relay renders and stands
+        # up without Doppler. Operators who keep it in Doppler can taskset-
+        # override this entry back to `from: task:secret-providers/doppler`.
         - name: STATUS_PASSWORD
-          from: task:secret-providers/doppler
+          secret: RELAY_STATUS_PASSWORD
+          default: "dicode-relay-dev"
         - name: GITHUB_CLIENT_ID
           from: task:secret-providers/doppler
           optional: true
