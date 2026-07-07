@@ -21,6 +21,8 @@
 //	Response (error):       {"id":"1","error":"something went wrong"}
 package ipc
 
+import "github.com/dicode/dicode/pkg/task"
+
 // Capability constants — used in token claims and capability checks.
 const (
 	// Task-shim capabilities (all task tokens include these by default).
@@ -45,9 +47,11 @@ const (
 
 	// CapSuspend allows a task to call dicode.suspend() — pause the run,
 	// hand the runtime an opaque state blob plus a form schema, and exit
-	// cleanly for later resume (#95). A core self-affecting primitive
-	// granted to every task token by default; the cap exists only so future
-	// denial policies can revoke it.
+	// cleanly for later resume (#95). Granted only to runtimes that read
+	// srv.Suspend() to build a suspended result (deno, python); withheld from
+	// container runtimes (docker/podman) so a suspend attempt fails with a
+	// clear permission-denied error instead of being acked then dropped.
+	// See runtimeSupportsSuspend.
 	CapSuspend = "suspend"
 
 	// Conditionally granted to tasks based on security config.
@@ -125,6 +129,20 @@ func defaultTaskCaps() []string {
 		CapReturn,
 		CapOutputSecret,
 		CapSetGroup,
-		CapSuspend,
+	}
+}
+
+// runtimeSupportsSuspend reports whether a runtime implements the suspend
+// mechanism — reading srv.Suspend() after the task exits to turn a
+// dicode.suspend() into a suspended RunResult. Only the managed subprocess
+// runtimes do. Container runtimes (docker/podman) run an opaque image and
+// never read the payload, so granting CapSuspend there would let a suspend be
+// acked then silently dropped; withholding it yields a clear cap-denied error.
+func runtimeSupportsSuspend(rt task.Runtime) bool {
+	switch rt {
+	case task.RuntimeDocker, task.RuntimePodman:
+		return false
+	default:
+		return true
 	}
 }
