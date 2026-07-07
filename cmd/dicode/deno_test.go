@@ -7,32 +7,6 @@ import (
 	"testing"
 )
 
-func TestFindTaskEntrypoints(t *testing.T) {
-	root := t.TempDir()
-	// Two task.ts (one nested), plus decoys that must be ignored.
-	mustWrite(t, filepath.Join(root, "a", "task.ts"), "")
-	mustWrite(t, filepath.Join(root, "b", "nested", "task.ts"), "")
-	mustWrite(t, filepath.Join(root, "b", "task.test.ts"), "") // not an entrypoint
-	mustWrite(t, filepath.Join(root, "c", "task.py"), "")      // other runtime
-
-	got, err := findTaskEntrypoints(root)
-	if err != nil {
-		t.Fatalf("findTaskEntrypoints: %v", err)
-	}
-	want := []string{
-		filepath.Join(root, "a", "task.ts"),
-		filepath.Join(root, "b", "nested", "task.ts"),
-	}
-	if len(got) != len(want) {
-		t.Fatalf("got %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] { // also asserts sorted order
-			t.Errorf("entry %d = %q, want %q", i, got[i], want[i])
-		}
-	}
-}
-
 // The early validation paths must fail before provisioning Deno, so they are
 // testable without the toolchain or network.
 func TestCmdDenoRelock_EarlyErrors(t *testing.T) {

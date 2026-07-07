@@ -295,71 +295,130 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	runnerFile.Close()
 
 	args := buildDenoArgs(spec, socketPath, shimPath, runnerPath, rt.effectiveProtectedPaths())
-	cmd := exec.CommandContext(execCtx, rt.denoPath, args...) //nolint:gosec
-	cmd.Env = pkgruntime.SubprocessEnv(spec, resolved, socketPath, token)
 
-	var wg sync.WaitGroup
-	if spec.Silent {
-		// Discard stdout/stderr entirely — no AppendLog calls. Use io.Discard
-		// so the task process doesn't block on a full pipe buffer either.
-		cmd.Stdout = io.Discard
-		cmd.Stderr = io.Discard
-		if err := cmd.Start(); err != nil {
-			result.Error = fmt.Errorf("start deno: %w", err)
-			return result, nil
-		}
-	} else {
-		stdout, err := cmd.StdoutPipe()
-		if err != nil {
-			result.Error = err
-			return result, nil
-		}
-		stderr, err := cmd.StderrPipe()
-		if err != nil {
-			result.Error = err
-			return result, nil
-		}
-		if err := cmd.Start(); err != nil {
-			result.Error = fmt.Errorf("start deno: %w", err)
-			return result, nil
-		}
-		// Stream stdout (console.log/info) as "info" and stderr (console.error +
-		// Deno runtime errors) as "error" in the run log.
-		// wg ensures all log lines are flushed before Run returns, avoiding the race
-		// where the caller fetches logs immediately after exit and sees an empty list.
-		wg.Add(2)
-		go rt.StreamRunLog(&wg, stdout, runID, "stdout", "info", redactor)
-		go rt.StreamRunLog(&wg, stderr, runID, "stderr", "error", redactor)
-	}
+	// runOnce spawns the Deno subprocess, streams its output, and records the
+	// outcome on result. It reports whether the run failed with the stale-lock
+	// signature so a single deterministic relock+retry can recover a drifted
+	// deno.lock without invoking the AI auto-fix loop (issue #455).
+	runOnce := func() (staleLock bool) {
+		result.Error = nil
+		result.Output = nil
+		result.ReturnValue = nil
 
-	// Register PID so metrics can aggregate child process resource usage.
-	pid := cmd.Process.Pid
-	activePIDs.Store(pid, struct{}{})
-	defer activePIDs.Delete(pid)
+		cmd := exec.CommandContext(execCtx, rt.denoPath, args...) //nolint:gosec
+		cmd.Env = pkgruntime.SubprocessEnv(spec, resolved, socketPath, token)
+		sniffer := pkgruntime.NewLockErrSniffer(staleLockSignature)
 
-	doneCh := make(chan error, 1)
-	go func() { doneCh <- cmd.Wait() }()
+		var wg sync.WaitGroup
+		if spec.Silent {
+			// Discard stdout — no AppendLog calls — but still sniff stderr for the
+			// stale-lock signature so recovery works for silent tasks too.
+			cmd.Stdout = io.Discard
+			cmd.Stderr = sniffer
+			if err := cmd.Start(); err != nil {
+				result.Error = fmt.Errorf("start deno: %w", err)
+				return false
+			}
+		} else {
+			stdout, err := cmd.StdoutPipe()
+			if err != nil {
+				result.Error = err
+				return false
+			}
+			stderr, err := cmd.StderrPipe()
+			if err != nil {
+				result.Error = err
+				return false
+			}
+			if err := cmd.Start(); err != nil {
+				result.Error = fmt.Errorf("start deno: %w", err)
+				return false
+			}
+			// Stream stdout (console.log/info) as "info" and stderr (console.error +
+			// Deno runtime errors) as "error" in the run log; tee stderr through the
+			// sniffer so the same bytes still reach the log.
+			// wg ensures all log lines are flushed before Run returns, avoiding the race
+			// where the caller fetches logs immediately after exit and sees an empty list.
+			wg.Add(2)
+			go rt.StreamRunLog(&wg, stdout, runID, "stdout", "info", redactor)
+			go rt.StreamRunLog(&wg, io.TeeReader(stderr, sniffer), runID, "stderr", "error", redactor)
+		}
 
-	exitErr, exitedFirst := pkgruntime.AwaitBridgeCompletion(srv.ReturnCh(), doneCh, pkgruntime.BridgeShutdownGrace,
-		func(retVal any) {
-			result.ReturnValue = retVal
+		// Register PID so metrics can aggregate child process resource usage.
+		pid := cmd.Process.Pid
+		activePIDs.Store(pid, struct{}{})
+
+		doneCh := make(chan error, 1)
+		go func() { doneCh <- cmd.Wait() }()
+
+		exitErr, exitedFirst := pkgruntime.AwaitBridgeCompletion(srv.ReturnCh(), doneCh, pkgruntime.BridgeShutdownGrace,
+			func(retVal any) {
+				result.ReturnValue = retVal
+				result.Output = srv.Output()
+			},
+			func() { _ = cmd.Process.Signal(syscall.SIGTERM) },
+		)
+		if exitedFirst {
 			result.Output = srv.Output()
-		},
-		func() { _ = cmd.Process.Signal(syscall.SIGTERM) },
-	)
-	if exitedFirst {
-		result.Output = srv.Output()
-		if exitErr != nil {
-			result.Error = exitErr
+			if exitErr != nil {
+				result.Error = exitErr
+			}
 		}
+
+		activePIDs.Delete(pid)
+		// Wait for stdout/stderr scanners to flush all log lines before returning.
+		// Without this, callers that fetch logs immediately after Run returns may see
+		// an empty list because the goroutines haven't written to the DB yet.
+		wg.Wait()
+
+		return result.Error != nil && sniffer.StaleLock()
 	}
 
-	// Wait for stdout/stderr scanners to flush all log lines before returning.
-	// Without this, callers that fetch logs immediately after Run returns may see
-	// an empty list because the goroutines haven't written to the DB yet.
-	wg.Wait()
+	// A deno.lock is only enforced (and only stale-fails) when one is present at
+	// or near the task dir; recover only then, and only when not opted out.
+	lockPath := denoLockForRecovery(spec)
+	enabled := lockPath != "" && pkgruntime.StaleLockRecoveryEnabled()
+	pkgruntime.RecoverStaleLock(enabled, runOnce, func() error {
+		return rt.relockDeno(ctx, spec, runID, lockPath)
+	})
 
 	return result, nil
+}
+
+// denoLockForRecovery returns the deno.lock path enforced for spec (the one a
+// stale-lock failure would come from), or "" when the task opts out via its own
+// deno.json or has no lock nearby. Mirrors the enforcement decision in
+// buildDenoArgs.
+func denoLockForRecovery(spec *task.Spec) string {
+	if _, err := os.Stat(filepath.Join(spec.TaskDir, "deno.json")); !os.IsNotExist(err) {
+		return ""
+	}
+	return findDenoLockFile(spec.TaskDir, 2)
+}
+
+// relockDeno regenerates the shared deno.lock covering spec's task tree after a
+// stale-lock run failure and records an audit line with the lock's hash delta.
+// Regenerating re-pins the dependencies the (already-approved) task declares,
+// so it does not bypass the approval gate, which governs task content.
+func (rt *Runtime) relockDeno(ctx context.Context, spec *task.Spec, runID, lockPath string) error {
+	before, _ := os.ReadFile(lockPath) //nolint:gosec
+	dir := filepath.Dir(lockPath)
+	var out strings.Builder
+	if _, err := Relock(ctx, dir, false, &out); err != nil {
+		rt.Log.Warn("stale-lock auto-recovery: deno relock failed",
+			zap.String("task", spec.ID), zap.String("lock", lockPath), zap.Error(err))
+		_ = rt.Registry.AppendLog(context.Background(), runID, "error",
+			fmt.Sprintf("auto-recovery: deno.lock regeneration failed: %v", err))
+		return err
+	}
+	after, _ := os.ReadFile(lockPath) //nolint:gosec
+	hb, ha := pkgruntime.ShortHash(before), pkgruntime.ShortHash(after)
+	rt.Log.Info("stale-lock auto-recovery: regenerated deno.lock, retrying run",
+		zap.String("task", spec.ID), zap.String("lock", lockPath),
+		zap.String("hash_before", hb), zap.String("hash_after", ha))
+	_ = rt.Registry.AppendLog(context.Background(), runID, "info",
+		fmt.Sprintf("auto-recovery: deno.lock was stale, regenerated (%s→%s), retrying run", hb, ha))
+	return nil
 }
 
 func expandHome(p string) string {

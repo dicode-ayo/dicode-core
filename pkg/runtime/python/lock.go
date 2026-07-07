@@ -1,10 +1,40 @@
 package python
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"strings"
 )
+
+// staleLockSignature is the substring uv prints to stderr when a `--locked`
+// run is rejected because the script's inline metadata drifted from its lock
+// sidecar:
+//
+//	error: The lockfile at `...` needs to be updated, but `--locked` was provided. ...
+//
+// Matching it lets the runtime tell a stale sidecar (mechanically recoverable
+// by regenerating it) apart from an ordinary resolution/metadata error.
+const staleLockSignature = "`--locked` was provided"
+
+// RelockScript regenerates (check=false) or verifies (check=true) the lock
+// sidecar for a single PEP 723 script via `uv lock --script`, using uv at
+// uvPath. uv's resolution chatter is written to out. This is the per-script
+// core behind both `dicode python relock` and the runtime's stale-lock
+// auto-recovery; the runtime relocks only the one script that failed, since uv
+// locks inline scripts individually (unlike Deno's shared lock).
+func RelockScript(ctx context.Context, uvPath, scriptPath string, check bool, out io.Writer) error {
+	args := []string{"lock", "--script", scriptPath}
+	if check {
+		args = append(args, "--check")
+	}
+	cmd := exec.CommandContext(ctx, uvPath, args...) // #nosec G204 — argv is the provisioned uv plus a discovered task.py path, no user shell injection.
+	cmd.Stdout = out
+	cmd.Stderr = out
+	return cmd.Run()
+}
 
 // LockSidecarPath returns the path of the per-script uv lock sidecar for a
 // PEP 723 inline script, as written by `uv lock --script <script>`:
