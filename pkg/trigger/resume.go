@@ -29,6 +29,12 @@ var (
 	// ErrResumeExpired is returned when the run's resume_deadline has passed.
 	// The run is swept to cancelled/resume_timeout as a side effect.
 	ErrResumeExpired = errors.New("resume deadline expired")
+	// ErrResumePending is returned when the fire guard vetoes the continuation
+	// — typically the trust-on-change approval gate holding the task pending
+	// after an edit. The token is NOT consumed and the run stays suspended, so
+	// it resumes once the task is re-approved. The underlying guard error
+	// (e.g. approval.ErrPending) is wrapped for callers that inspect it.
+	ErrResumePending = errors.New("resume blocked: task not admitted")
 )
 
 // suspendRun persists a run that called dicode.suspend() as suspended: it mints
@@ -62,8 +68,9 @@ func newResumeToken() (string, error) {
 // ResumeRun consumes a resume token and spawns the continuation run for a
 // suspended task. It looks the run up by token, rejects it if not found, not
 // suspended, or past its deadline (an expired run is swept to
-// cancelled/resume_timeout), marks the original run resumed so the token can't
-// be replayed, then fires a fresh run of the same task seeded with the stored
+// cancelled/resume_timeout), verifies the task is still registered and the
+// fire guard admits it, marks the original run resumed so the token can't be
+// replayed, then fires a fresh run of the same task seeded with the stored
 // resume state and the caller's input. The continuation runs the normal
 // execution path, so a task that suspends again mints its own token — chaining
 // multi-step wizards. Returns the continuation run's ID.
@@ -95,6 +102,16 @@ func (e *Engine) ResumeRun(ctx context.Context, token string, input []byte) (str
 	spec, ok := e.registry.Get(run.TaskID)
 	if !ok {
 		return "", fmt.Errorf("resume: task %q is no longer registered", run.TaskID)
+	}
+
+	// Probe the fire guard WITHOUT spawning or consuming the token. The same
+	// guard runs again inside the spawn path; checking it here first means a
+	// vetoed continuation (e.g. the author edited the task, so the
+	// trust-on-change gate holds it pending) leaves the run suspended with its
+	// token intact — consuming the token before the veto would strand the
+	// resume_state on a terminal `resumed` row forever.
+	if gerr := e.checkFireGuard(spec.ID); gerr != nil {
+		return "", fmt.Errorf("%w: %w", ErrResumePending, gerr)
 	}
 
 	// Consume the token atomically. This is the single-use guard: a second

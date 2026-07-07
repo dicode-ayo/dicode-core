@@ -97,6 +97,11 @@ func (s *Server) apiResumeRun(w http.ResponseWriter, r *http.Request) {
 			jsonErr(w, "run already resumed", http.StatusConflict)
 		case errors.Is(err, trigger.ErrResumeExpired):
 			jsonErr(w, "resume deadline expired", http.StatusGone)
+		case errors.Is(err, trigger.ErrResumePending):
+			// The task is held pending approval (or otherwise vetoed); the run
+			// stays suspended and resumable once it is approved. 423 Locked
+			// signals a retryable, not-yet-permitted state.
+			jsonErr(w, "task is awaiting approval; resume once it is approved", http.StatusLocked)
 		default:
 			jsonErr(w, err.Error(), http.StatusInternalServerError)
 		}
