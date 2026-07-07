@@ -40,7 +40,7 @@ func seedSuspendedRun(t *testing.T, reg *registry.Registry, form []byte, token s
 	if err != nil {
 		t.Fatalf("StartRunWithID: %v", err)
 	}
-	if err := reg.SuspendRun(ctx, id, []byte(`{"step":"x"}`), form, token, 1, 0); err != nil {
+	if err := reg.SuspendRun(ctx, id, []byte(`{"step":"x"}`), form, token, 1, 0, nil); err != nil {
 		t.Fatalf("SuspendRun: %v", err)
 	}
 	return id
