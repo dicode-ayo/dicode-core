@@ -94,6 +94,10 @@ type Run struct {
 	ResumeToken    string // unguessable resume handle; empty when absent
 	SuspendedAt    int64  // Unix ms the run suspended; 0 when absent
 	ResumeDeadline int64  // Unix ms TTL; 0 when no deadline set
+	// ResumeParams is a JSON envelope of the original run's fire-time param
+	// overrides and chain depth, preserved so the continuation resumes with the
+	// same ctx.params and honors the same chain-depth ceiling. nil when absent.
+	ResumeParams []byte
 }
 
 // LogEntry is one log line from a run.
@@ -254,15 +258,15 @@ func (r *Registry) FinishRunWithResult(ctx context.Context, runID, status, retur
 // deliberately leaves finished_at NULL: suspended is a non-terminal status, so
 // the run is neither running (CleanupStaleRuns skips it) nor finished.
 //
-// A deadline of 0 stores NULL (no TTL). state and form may be nil.
-func (r *Registry) SuspendRun(ctx context.Context, runID string, state, form []byte, token string, suspendedAt, deadline int64) error {
+// A deadline of 0 stores NULL (no TTL). state, form, and resumeParams may be nil.
+func (r *Registry) SuspendRun(ctx context.Context, runID string, state, form []byte, token string, suspendedAt, deadline int64, resumeParams []byte) error {
 	var deadlineArg any
 	if deadline > 0 {
 		deadlineArg = deadline
 	}
 	return r.db.Exec(ctx,
-		`UPDATE runs SET status = ?, resume_state = ?, resume_form = ?, resume_token = ?, suspended_at = ?, resume_deadline = ? WHERE id = ?`,
-		StatusSuspended, state, form, token, suspendedAt, deadlineArg, runID,
+		`UPDATE runs SET status = ?, resume_state = ?, resume_form = ?, resume_token = ?, suspended_at = ?, resume_deadline = ?, resume_params = ? WHERE id = ?`,
+		StatusSuspended, state, form, token, suspendedAt, deadlineArg, resumeParams, runID,
 	)
 }
 
@@ -363,7 +367,7 @@ const runInputColumns = `,
 // COALESCE so a NULL reads back as the zero value.
 const runResumeColumns = `,
         resume_state, resume_form, COALESCE(resume_token, ''),
-        COALESCE(suspended_at, 0), COALESCE(resume_deadline, 0)`
+        COALESCE(suspended_at, 0), COALESCE(resume_deadline, 0), resume_params`
 
 // scanRun decodes one row selected with runColumns (plus runInputColumns when
 // withInput is true, plus runResumeColumns when withResume is true) into a Run,
@@ -388,7 +392,8 @@ func scanRun(rows db.Scanner, withInput, withResume bool) (*Run, error) {
 	}
 	if withResume {
 		dest = append(dest,
-			&run.ResumeState, &run.ResumeForm, &run.ResumeToken, &run.SuspendedAt, &run.ResumeDeadline)
+			&run.ResumeState, &run.ResumeForm, &run.ResumeToken, &run.SuspendedAt, &run.ResumeDeadline,
+			&run.ResumeParams)
 	}
 	if err := rows.Scan(dest...); err != nil {
 		return nil, err

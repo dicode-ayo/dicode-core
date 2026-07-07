@@ -2,6 +2,7 @@ package trigger
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -28,9 +29,11 @@ type suspendExec struct {
 	firstDeadline int64
 	suspendAgain  bool
 
-	resumeCalls     int
-	seenResumeState []byte
-	seenResumeInput []byte
+	resumeCalls      int
+	seenResumeState  []byte
+	seenResumeInput  []byte
+	seenResumeParams map[string]string
+	seenInput        any
 }
 
 func (s *suspendExec) Execute(_ context.Context, _ *task.Spec, opts pkgruntime.RunOptions) (*pkgruntime.RunResult, error) {
@@ -48,6 +51,8 @@ func (s *suspendExec) Execute(_ context.Context, _ *task.Spec, opts pkgruntime.R
 	s.resumeCalls++
 	s.seenResumeState = append([]byte(nil), opts.ResumeState...)
 	s.seenResumeInput = append([]byte(nil), opts.ResumeInput...)
+	s.seenResumeParams = opts.Params
+	s.seenInput = opts.Input
 	if s.suspendAgain {
 		return &pkgruntime.RunResult{
 			RunID:       opts.RunID,
@@ -415,7 +420,7 @@ func TestSuspendedDaemonRun_NeutralForCrashloop(t *testing.T) {
 	if _, err := reg.StartRunWithID(ctx, runID, spec.ID, "", string(registry.TriggerDaemon), registry.RunKindTask); err != nil {
 		t.Fatalf("StartRunWithID: %v", err)
 	}
-	if err := reg.SuspendRun(ctx, runID, []byte(`{}`), nil, "tok-daemon", time.Now().UnixMilli(), 0); err != nil {
+	if err := reg.SuspendRun(ctx, runID, []byte(`{}`), nil, "tok-daemon", time.Now().UnixMilli(), 0, nil); err != nil {
 		t.Fatalf("SuspendRun: %v", err)
 	}
 
@@ -435,4 +440,86 @@ func TestSuspendedDaemonRun_NeutralForCrashloop(t *testing.T) {
 	if eng.IsCrashLooping(spec.ID) {
 		t.Error("suspended daemon run must not count toward crash-loop")
 	}
+}
+
+// TestResumeRun_PreservesFireTimeParams pins #502: a run fired with a param
+// override that suspends must resume with the SAME override, not the spec
+// defaults. Without preservation the continuation's opts.Params is nil and
+// MergeParams(spec.Params, nil) silently reverts ctx.params mid-wizard.
+func TestResumeRun_PreservesFireTimeParams(t *testing.T) {
+	exec := &suspendExec{}
+	eng, reg := newSuspendEnv(t, exec)
+	spec := &task.Spec{ID: "wiz", Name: "wiz", Runtime: task.RuntimeDeno,
+		Params:  []task.Param{{Name: "project_name", Default: "spec-default"}},
+		Trigger: task.TriggerConfig{Manual: true}, Enabled: true}
+	if err := reg.Register(spec); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	override := map[string]string{"project_name": "user-choice"}
+	origID, err := eng.FireManual(context.Background(), "wiz", override)
+	if err != nil {
+		t.Fatalf("FireManual: %v", err)
+	}
+	orig := waitStatus(t, reg, origID, registry.StatusSuspended)
+	if len(orig.ResumeParams) == 0 {
+		t.Fatal("suspended run did not persist fire-time params")
+	}
+
+	newID, err := eng.ResumeRun(context.Background(), orig.ResumeToken, []byte(`{}`))
+	if err != nil {
+		t.Fatalf("ResumeRun: %v", err)
+	}
+	waitStatus(t, reg, newID, registry.StatusSuccess)
+
+	exec.mu.Lock()
+	defer exec.mu.Unlock()
+	if got := exec.seenResumeParams["project_name"]; got != "user-choice" {
+		t.Errorf("continuation param project_name = %q, want %q (reverted to spec default?)", got, "user-choice")
+	}
+}
+
+// TestResumeRun_PreservesChainDepth pins #502: the chain-depth ceiling must
+// survive a suspend hop. A run fired at depth 3 that suspends and resumes into
+// a continuation which suspends again must carry depth 3 forward — if the hop
+// reset it, the persisted depth of the second suspension would be 0.
+func TestResumeRun_PreservesChainDepth(t *testing.T) {
+	exec := &suspendExec{suspendAgain: true}
+	eng, reg := newSuspendEnv(t, exec)
+	spec := &task.Spec{ID: "wiz", Name: "wiz", Runtime: task.RuntimeDeno,
+		Trigger: task.TriggerConfig{Manual: true}, Enabled: true}
+	if err := reg.Register(spec); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	origID, err := eng.fireAsync(context.Background(), spec,
+		pkgruntime.RunOptions{Input: map[string]any{"_chain_depth": 3}}, registry.TriggerChain)
+	if err != nil {
+		t.Fatalf("fireAsync: %v", err)
+	}
+	orig := waitStatus(t, reg, origID, registry.StatusSuspended)
+	if got := decodeCarryDepth(t, orig.ResumeParams); got != 3 {
+		t.Fatalf("original suspension chain depth = %d, want 3", got)
+	}
+
+	newID, err := eng.ResumeRun(context.Background(), orig.ResumeToken, []byte(`{"project_name":"acme"}`))
+	if err != nil {
+		t.Fatalf("ResumeRun: %v", err)
+	}
+	step2 := waitStatus(t, reg, newID, registry.StatusSuspended)
+	if got := decodeCarryDepth(t, step2.ResumeParams); got != 3 {
+		t.Errorf("chain depth after suspend hop = %d, want 3 (ceiling reset?)", got)
+	}
+}
+
+func decodeCarryDepth(t *testing.T, blob []byte) int {
+	t.Helper()
+	if len(blob) == 0 {
+		t.Fatal("resume_params blob is empty")
+	}
+	var c resumeCarry
+	if err := json.Unmarshal(blob, &c); err != nil {
+		t.Fatalf("decode resume_params: %v", err)
+	}
+	return c.ChainDepth
 }

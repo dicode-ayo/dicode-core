@@ -48,7 +48,7 @@ func suspendRun(t *testing.T, reg *registry.Registry, runID, token string, form 
 		t.Fatalf("StartRunWithID: %v", err)
 	}
 	deadline := time.Now().Add(time.Hour).UnixMilli()
-	if err := reg.SuspendRun(ctx, runID, []byte(`{"step":1}`), form, token, time.Now().UnixMilli(), deadline); err != nil {
+	if err := reg.SuspendRun(ctx, runID, []byte(`{"step":1}`), form, token, time.Now().UnixMilli(), deadline, nil); err != nil {
 		t.Fatalf("SuspendRun: %v", err)
 	}
 }

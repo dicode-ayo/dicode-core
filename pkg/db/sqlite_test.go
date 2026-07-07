@@ -147,6 +147,7 @@ func TestSQLiteDB_RunsHasResumeColumns(t *testing.T) {
 		"resume_token":    "TEXT",
 		"suspended_at":    "INTEGER",
 		"resume_deadline": "INTEGER",
+		"resume_params":   "BLOB",
 	}
 	for name, wantType := range wantCols {
 		got, ok := cols[name]

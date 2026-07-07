@@ -196,6 +196,11 @@ func (s *SQLiteDB) migrate() error {
 		{"resume_token", "TEXT"},
 		{"suspended_at", "INTEGER"},
 		{"resume_deadline", "INTEGER"},
+		// resume_params carries the ORIGINAL run's fire-time param overrides and
+		// chain depth as a JSON envelope so the continuation resumes with the same
+		// ctx.params and honors the same chain-depth ceiling. NULL when the
+		// suspended run carried neither.
+		{"resume_params", "BLOB"},
 	}
 	for _, m := range runsMigrations {
 		if err := addColumnIfMissing(ctx, s.db, "runs", m.name, m.ddl); err != nil {

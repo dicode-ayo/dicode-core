@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -12,6 +13,16 @@ import (
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	"go.uber.org/zap"
 )
+
+// resumeCarry is the fire-time context of a suspended run that must survive the
+// suspend→resume hop: the param overrides the run was fired with (so the
+// continuation sees the same ctx.params instead of reverting to spec defaults)
+// and the chain depth (so the chain-depth ceiling is not reset by a suspend).
+// Persisted as JSON in runs.resume_params at suspend, restored in ResumeRun.
+type resumeCarry struct {
+	Params     map[string]string `json:"params,omitempty"`
+	ChainDepth int               `json:"chain_depth,omitempty"`
+}
 
 // defaultResumeTTL is how long a suspended run stays resumable when the task
 // did not specify its own deadline. After it, the sweep cancels the run with
@@ -41,7 +52,7 @@ var (
 // an unguessable single-use resume token and records the state/form blobs plus
 // the deadline. The deadline comes from the task (result.ResumeDeadline) or
 // defaults to defaultResumeTTL from now.
-func (e *Engine) suspendRun(runID string, result *pkgruntime.RunResult) error {
+func (e *Engine) suspendRun(opts *pkgruntime.RunOptions, result *pkgruntime.RunResult) error {
 	token, err := newResumeToken()
 	if err != nil {
 		return fmt.Errorf("mint resume token: %w", err)
@@ -51,8 +62,17 @@ func (e *Engine) suspendRun(runID string, result *pkgruntime.RunResult) error {
 	if deadlineMs <= 0 {
 		deadlineMs = time.Now().Add(defaultResumeTTL).UnixMilli()
 	}
-	return e.registry.SuspendRun(context.Background(), runID,
-		result.ResumeState, result.ResumeForm, token, nowMs, deadlineMs)
+	// Persist the run's fire-time params and chain depth so the continuation
+	// resumes with the same ctx.params and the same chain-depth ceiling.
+	var carryJSON []byte
+	carry := resumeCarry{Params: opts.Params, ChainDepth: e.chainDepth(opts.RunID)}
+	if len(carry.Params) > 0 || carry.ChainDepth > 0 {
+		if carryJSON, err = json.Marshal(carry); err != nil {
+			return fmt.Errorf("marshal resume params: %w", err)
+		}
+	}
+	return e.registry.SuspendRun(context.Background(), opts.RunID,
+		result.ResumeState, result.ResumeForm, token, nowMs, deadlineMs, carryJSON)
 }
 
 // newResumeToken returns a 32-byte crypto/rand token, hex-encoded. Long and
@@ -123,11 +143,27 @@ func (e *Engine) ResumeRun(ctx context.Context, token string, input []byte) (str
 		return "", fmt.Errorf("mark run resumed: %w", err)
 	}
 
-	newRunID, err := e.fireAsync(context.Background(), spec, pkgruntime.RunOptions{
+	opts := pkgruntime.RunOptions{
 		ParentRunID: run.ID,
 		ResumeState: run.ResumeState,
 		ResumeInput: input,
-	}, registry.TriggerResume)
+	}
+	// Restore the original run's fire-time params and chain depth so the
+	// continuation sees the same ctx.params (not spec defaults) and stays under
+	// the chain-depth ceiling. Chain depth rides in Input because fireAsync reads
+	// _chain_depth from there to seed runChainDepth.
+	if len(run.ResumeParams) > 0 {
+		var carry resumeCarry
+		if err := json.Unmarshal(run.ResumeParams, &carry); err != nil {
+			return "", fmt.Errorf("resume: decode carried run params: %w", err)
+		}
+		opts.Params = carry.Params
+		if carry.ChainDepth > 0 {
+			opts.Input = map[string]any{"_chain_depth": carry.ChainDepth}
+		}
+	}
+
+	newRunID, err := e.fireAsync(context.Background(), spec, opts, registry.TriggerResume)
 	if err != nil {
 		return "", fmt.Errorf("resume: spawn continuation run: %w", err)
 	}
