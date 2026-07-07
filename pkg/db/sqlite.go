@@ -325,6 +325,14 @@ func (s *SQLiteDB) Exec(ctx context.Context, query string, args ...any) error {
 	return err
 }
 
+func (s *SQLiteDB) ExecResult(ctx context.Context, query string, args ...any) (int64, error) {
+	res, err := s.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 func (s *SQLiteDB) Query(ctx context.Context, query string, args []any, scan func(rows Scanner) error) error {
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -363,6 +371,14 @@ func (t *sqliteTx) Close() error                 { return nil }
 func (t *sqliteTx) Exec(ctx context.Context, query string, args ...any) error {
 	_, err := t.tx.ExecContext(ctx, query, args...)
 	return err
+}
+
+func (t *sqliteTx) ExecResult(ctx context.Context, query string, args ...any) (int64, error) {
+	res, err := t.tx.ExecContext(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 func (t *sqliteTx) Query(ctx context.Context, query string, args []any, scan func(rows Scanner) error) error {

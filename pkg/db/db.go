@@ -25,6 +25,12 @@ type DB interface {
 	// Exec executes a statement that returns no rows.
 	Exec(ctx context.Context, query string, args ...any) error
 
+	// ExecResult executes a statement and reports the number of rows it
+	// affected. Use it when a conditional write's row count is load-bearing
+	// (e.g. a single-shot guarded UPDATE whose success must not depend on the
+	// connection-pool size).
+	ExecResult(ctx context.Context, query string, args ...any) (int64, error)
+
 	// Query executes a query and returns rows via the callback.
 	Query(ctx context.Context, query string, args []any, scan func(rows Scanner) error) error
 

@@ -46,6 +46,10 @@ import (
 // but then streams quickly) and closes shortly after the burst ends.
 const bootstrapSettle = 10 * time.Second
 
+// resumeSweepInterval is how often runServices sweeps suspended runs whose
+// resume_deadline has passed and cancels them with ReasonResumeTimeout (#95).
+const resumeSweepInterval = 1 * time.Minute
+
 // Run starts the daemon process. It blocks until the context is cancelled
 // (via signal) or a fatal error occurs. configPath is the path to
 // dicode.yaml; portOverride, when non-zero, is propagated to the
@@ -251,6 +255,13 @@ func setupRegistry(ctx context.Context, database db.DB, log *zap.Logger) *regist
 		}
 	} else {
 		log.Warn("sweep stale input pins failed", zap.Error(err))
+	}
+	// Cancel suspended runs whose resume deadline lapsed while the daemon was
+	// down (#95); the periodic sweep in runServices handles the steady state.
+	if swept, err := reg.SweepExpiredSuspensions(ctx, time.Now().UnixMilli()); err != nil {
+		log.Warn("resume-deadline sweep failed at startup", zap.Error(err))
+	} else if len(swept) > 0 {
+		log.Info("cancelled suspended runs past resume deadline at startup", zap.Strings("runs", swept))
 	}
 	return reg
 }
@@ -816,6 +827,26 @@ func runServices(ctx context.Context, rec *registry.Reconciler, eng *trigger.Eng
 			}
 		})
 	}
+	// Resume-deadline sweep (#95): cancel suspended runs whose resume_deadline
+	// has passed, recording ReasonResumeTimeout. Runs on a ticker so a run that
+	// suspends and is never resumed doesn't linger indefinitely.
+	g.Go(func() error {
+		ticker := time.NewTicker(resumeSweepInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-ticker.C:
+				swept, err := reg.SweepExpiredSuspensions(ctx, time.Now().UnixMilli())
+				if err != nil {
+					log.Warn("resume-deadline sweep failed", zap.Error(err))
+				} else if len(swept) > 0 {
+					log.Info("cancelled suspended runs past resume deadline", zap.Strings("runs", swept))
+				}
+			}
+		}
+	})
 	g.Go(func() error { return rec.Run(ctx) })
 	g.Go(func() error { return eng.Start(ctx) })
 	g.Go(func() error { return srv.Start(ctx) })

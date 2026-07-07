@@ -689,6 +689,21 @@ func (e *Engine) dispatch(ctx context.Context, spec *task.Spec, opts pkgruntime.
 		return registry.StatusFailure, &pkgruntime.RunResult{Error: err}
 	}
 
+	// dicode.suspend() paused the task (#95): persist the run as suspended with
+	// a fresh resume token and deadline instead of finishing it, and skip the
+	// chain — suspended is non-terminal, so success/failure chains must not
+	// fire until the continuation run reaches a real terminal state.
+	if result.Suspended {
+		if serr := e.suspendRun(opts.RunID, result); serr != nil {
+			e.log.Warn("suspend run persist failed", zap.String("run", opts.RunID), zap.Error(serr))
+			if ferr := e.registry.FinishRun(context.Background(), opts.RunID, registry.StatusFailure); ferr != nil {
+				e.log.Warn("FinishRun: suspend fallback", zap.String("run", opts.RunID), zap.Error(ferr))
+			}
+			return registry.StatusFailure, &pkgruntime.RunResult{Error: serr}
+		}
+		return registry.StatusSuspended, result
+	}
+
 	// Compute final status from the result.
 	status := registry.StatusSuccess
 	if result.Error != nil {
