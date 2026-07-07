@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/alexedwards/scs/v2"
+	"github.com/dicode/dicode/internal/fsutil"
 	"github.com/dicode/dicode/pkg/approval"
 	"github.com/dicode/dicode/pkg/audit"
 	"github.com/dicode/dicode/pkg/config"
@@ -1605,7 +1606,7 @@ func (s *Server) apiGetTask(w http.ResponseWriter, r *http.Request) {
 		detail.ScriptFile = "Dockerfile"
 	default:
 		for _, name := range []string{"task.ts", "task.js", "task.py"} {
-			if _, err := os.Stat(filepath.Join(spec.TaskDir, name)); err == nil {
+			if fsutil.Exists(filepath.Join(spec.TaskDir, name)) {
 				detail.ScriptFile = name
 				break
 			}
@@ -1614,7 +1615,7 @@ func (s *Server) apiGetTask(w http.ResponseWriter, r *http.Request) {
 			detail.ScriptFile = "task.ts"
 		}
 		for _, name := range []string{"task.test.ts", "task.test.js"} {
-			if _, err := os.Stat(filepath.Join(spec.TaskDir, name)); err == nil {
+			if fsutil.Exists(filepath.Join(spec.TaskDir, name)) {
 				detail.TestFile = name
 				detail.TestExists = true
 				break

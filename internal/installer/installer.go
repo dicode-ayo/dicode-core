@@ -17,6 +17,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/dicode/dicode/internal/fsutil"
+	"github.com/dicode/dicode/internal/pathguard"
 )
 
 // ArchiveFormat describes the archive type to download and extract.
@@ -65,8 +68,8 @@ type Spec struct {
 // immediately without any network access.
 func EnsureBinary(s Spec) (string, error) {
 	// Validate CachePath against traversal. Callers (pkg/deno, pkg/uv) build
-	// it from hardcoded segments + a version string; Clean+HasPrefix is
-	// defence-in-depth so a rogue version can't escape the cache tree.
+	// it from hardcoded segments + a version string; the lexical containment
+	// check is defence-in-depth so a rogue version can't escape the cache tree.
 	cachePath := filepath.Clean(s.CachePath)
 	cacheBase := s.CacheBase
 	if cacheBase == "" {
@@ -76,11 +79,13 @@ func EnsureBinary(s Spec) (string, error) {
 		}
 		cacheBase = filepath.Join(home, ".cache", "dicode")
 	}
-	if !strings.HasPrefix(cachePath, filepath.Clean(cacheBase)+string(filepath.Separator)) {
+	// The base dir itself is not a valid cache path, so equality is rejected too.
+	within, err := pathguard.Within(cacheBase, cachePath)
+	if err != nil || !within || cachePath == filepath.Clean(cacheBase) {
 		return "", fmt.Errorf("cache path %q escapes base %q", cachePath, cacheBase)
 	}
 
-	if _, err := os.Stat(cachePath); err == nil {
+	if fsutil.Exists(cachePath) {
 		return cachePath, nil
 	}
 
@@ -117,26 +122,7 @@ func EnsureBinary(s Spec) (string, error) {
 
 	// Write to a temp file in the same directory, then rename atomically.
 	// This prevents concurrent downloaders from corrupting the binary.
-	tmp, err := os.CreateTemp(filepath.Dir(cachePath), "installer-*.tmp")
-	if err != nil {
-		return "", fmt.Errorf("create temp file: %w", err)
-	}
-	tmpPath := tmp.Name()
-	if _, err := tmp.Write(binData); err != nil {
-		tmp.Close()
-		_ = os.Remove(tmpPath)
-		return "", fmt.Errorf("write binary: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpPath)
-		return "", fmt.Errorf("close temp file: %w", err)
-	}
-	if err := os.Chmod(tmpPath, 0755); err != nil {
-		_ = os.Remove(tmpPath)
-		return "", fmt.Errorf("chmod binary: %w", err)
-	}
-	if err := os.Rename(tmpPath, cachePath); err != nil {
-		_ = os.Remove(tmpPath)
+	if err := fsutil.WriteFileAtomic(cachePath, binData, 0755); err != nil {
 		return "", fmt.Errorf("install binary: %w", err)
 	}
 

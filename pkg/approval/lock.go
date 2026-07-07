@@ -13,11 +13,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/dicode/dicode/internal/fsutil"
 	"gopkg.in/yaml.v3"
 )
 
@@ -344,22 +344,8 @@ func (l *Lock) save() error {
 	header := []byte("# dicode.lock — approval records, managed by the dicode daemon.\n" +
 		"# Trust policy lives in dicode.yaml (approval:); this file records which\n" +
 		"# content hash of each task is approved to run.\n")
-	tmp, err := os.CreateTemp(filepath.Dir(l.path), ".dicode.lock.*")
-	if err != nil {
-		return fmt.Errorf("write %s: %w", l.path, err)
-	}
-	tmpName := tmp.Name()
-	if _, err := tmp.Write(append(header, data...)); err != nil {
-		tmp.Close()
-		os.Remove(tmpName)
-		return fmt.Errorf("write %s: %w", l.path, err)
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmpName)
-		return fmt.Errorf("write %s: %w", l.path, err)
-	}
-	if err := os.Rename(tmpName, l.path); err != nil {
-		os.Remove(tmpName)
+	// 0600 matches the mode the previous temp-file dance produced.
+	if err := fsutil.WriteFileAtomic(l.path, append(header, data...), 0o600); err != nil {
 		return fmt.Errorf("write %s: %w", l.path, err)
 	}
 	return nil

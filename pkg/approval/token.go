@@ -2,7 +2,6 @@ package approval
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -12,6 +11,7 @@ import (
 	"time"
 
 	"github.com/dicode/dicode/pkg/db"
+	"github.com/dicode/dicode/pkg/ipc"
 )
 
 // TokenTTL is how long a minted approve-link token stays redeemable.
@@ -59,8 +59,8 @@ func (ts *TokenStore) Mint(ctx context.Context, taskID, hash string) (string, er
 	if taskID == "" || hash == "" {
 		return "", fmt.Errorf("approval token: task id and hash are required")
 	}
-	raw := make([]byte, 32)
-	if _, err := rand.Read(raw); err != nil {
+	raw, err := ipc.NewSecret()
+	if err != nil {
 		return "", fmt.Errorf("approval token: %w", err)
 	}
 	token := tokenPrefix + base64.RawURLEncoding.EncodeToString(raw)
