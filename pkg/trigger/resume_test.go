@@ -3,11 +3,13 @@ package trigger
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/dicode/dicode/pkg/approval"
 	"github.com/dicode/dicode/pkg/db"
 	"github.com/dicode/dicode/pkg/registry"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
@@ -260,6 +262,59 @@ func TestResumeRun_DeregisteredTaskKeepsSuspensionResumable(t *testing.T) {
 	newID, err := eng.ResumeRun(context.Background(), orig.ResumeToken, []byte(`{"project_name":"acme"}`))
 	if err != nil {
 		t.Fatalf("ResumeRun after re-register: %v", err)
+	}
+	cont := waitStatus(t, reg, newID, registry.StatusSuccess)
+	if cont.ParentRunID != origID {
+		t.Errorf("continuation parent = %q, want %q", cont.ParentRunID, origID)
+	}
+}
+
+func TestResumeRun_FireGuardPendingKeepsSuspensionResumable(t *testing.T) {
+	exec := &suspendExec{}
+	eng, reg := newSuspendEnv(t, exec)
+	spec := &task.Spec{ID: "wiz", Name: "wiz", Runtime: task.RuntimeDeno, Trigger: task.TriggerConfig{Manual: true}, Enabled: true}
+	_ = reg.Register(spec)
+
+	origID, err := eng.FireManual(context.Background(), "wiz", nil)
+	if err != nil {
+		t.Fatalf("FireManual: %v", err)
+	}
+	orig := waitStatus(t, reg, origID, registry.StatusSuspended)
+
+	// The author edits the task, so the trust-on-change approval gate holds it
+	// pending: the fire guard now vetoes any run of "wiz".
+	pending := true
+	eng.SetFireGuard(func(taskID string) error {
+		if pending && taskID == "wiz" {
+			return fmt.Errorf("%w: %s", approval.ErrPending, taskID)
+		}
+		return nil
+	})
+
+	_, err = eng.ResumeRun(context.Background(), orig.ResumeToken, nil)
+	if !errors.Is(err, ErrResumePending) {
+		t.Fatalf("ResumeRun err = %v, want ErrResumePending", err)
+	}
+	// The underlying guard veto is preserved for callers that inspect it.
+	if !errors.Is(err, approval.ErrPending) {
+		t.Errorf("ResumeRun err = %v, want wrapped approval.ErrPending", err)
+	}
+
+	// The token must NOT have been consumed: the run stays suspended and keeps
+	// its token, so it remains resumable once the task is re-approved.
+	still, _ := reg.GetRun(context.Background(), origID)
+	if still.Status != registry.StatusSuspended {
+		t.Errorf("run status = %q, want suspended (token must not be consumed)", still.Status)
+	}
+	if still.ResumeToken != orig.ResumeToken {
+		t.Errorf("resume token changed/cleared: %q", still.ResumeToken)
+	}
+
+	// Re-approving the task (guard admits again) lets the SAME token resume.
+	pending = false
+	newID, err := eng.ResumeRun(context.Background(), orig.ResumeToken, []byte(`{"project_name":"acme"}`))
+	if err != nil {
+		t.Fatalf("ResumeRun after re-approval: %v", err)
 	}
 	cont := waitStatus(t, reg, newID, registry.StatusSuccess)
 	if cont.ParentRunID != origID {
