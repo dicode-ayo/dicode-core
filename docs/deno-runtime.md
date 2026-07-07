@@ -409,7 +409,7 @@ Permissions are derived from `task.yaml`:
 | Permission | Source |
 | --- | --- |
 | `--allow-net` / `--allow-net=host1,...` | `net:` entries — omit or `[]` = denied (no flag), `["*"]` = unrestricted, host list = allowlist |
-| `--allow-env=DICODE_SOCKET,DICODE_TOKEN,VAR1,...` | `DICODE_SOCKET`, `DICODE_TOKEN` (IPC handshake) + cache vars + all `env:` vars. Bare `--allow-env` (read any var) when `env_read_exposed: true` — node-compat / npm escape hatch |
+| `--allow-env=DICODE_SOCKET,DICODE_TOKEN,VAR1,...` | `DICODE_SOCKET`, `DICODE_TOKEN` (IPC handshake) + cache vars + all `env:` vars (a `PREFIX_*` pattern entry expands to its matching host var names, minus the daemon credential denylist). Bare `--allow-env` (read any var) when `env_read_exposed: true` — node-compat / npm escape hatch |
 | `--allow-read=path1,path2` | `fs:` entries with `r` or `rw` |
 | `--allow-write=path1` | `fs:` entries with `w` or `rw` |
 

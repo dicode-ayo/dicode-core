@@ -60,6 +60,11 @@ func SubprocessEnv(spec *task.Spec, resolved map[string]string, socketPath, toke
 			if e.Name == "" || e.Value != "" || e.Secret != "" || e.From != "" {
 				continue
 			}
+			// Pattern entries (e.g. "GITHUB_*") are expanded against the host
+			// environment below; the literal name is never a real var.
+			if IsWildcardEnvEntry(e) {
+				continue
+			}
 			// Daemon-only credentials must never reach a task, even if a
 			// task.yaml names them: the master key derives every secret, and
 			// the API keys authenticate to the daemon's own admin/MCP control
@@ -72,6 +77,16 @@ func SubprocessEnv(spec *task.Spec, resolved map[string]string, socketPath, toke
 			}
 			if v, ok := os.LookupEnv(e.Name); ok {
 				env = append(env, e.Name+"="+v)
+			}
+		}
+		// Wildcard entries forward every matching host var. WildcardEnvNames
+		// already drops the daemon credential denylist and the IPC vars.
+		for _, name := range WildcardEnvNames(spec) {
+			if _, ok := resolved[name]; ok {
+				continue
+			}
+			if v, ok := os.LookupEnv(name); ok {
+				env = append(env, name+"="+v)
 			}
 		}
 	}

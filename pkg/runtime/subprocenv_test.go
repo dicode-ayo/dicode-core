@@ -96,6 +96,68 @@ func TestSubprocessEnv_BareAllowlistEntryForwardsHostValue(t *testing.T) {
 	}
 }
 
+func TestSubprocessEnv_WildcardForwardsMatchingHostVars(t *testing.T) {
+	// Collision-proof prefix: CI hosts carry many GITHUB_*/DICODE_* vars, so a
+	// real-world prefix would make presence/absence assertions env-fragile.
+	t.Setenv("WILDTEST_TOKEN", "gh-tok")
+	t.Setenv("WILDTEST_SHA", "abc123")
+	t.Setenv("WILDOTHER_TOKEN", "gl-tok") // different prefix → not matched
+
+	spec := &task.Spec{}
+	spec.Permissions.Env = []task.EnvEntry{{Name: "WILDTEST_*"}}
+
+	m := envMap(SubprocessEnv(spec, nil, "/tmp/sock", "tok"))
+
+	if m["WILDTEST_TOKEN"] != "gh-tok" || m["WILDTEST_SHA"] != "abc123" {
+		t.Errorf("wildcard did not forward matching host vars: token=%q sha=%q", m["WILDTEST_TOKEN"], m["WILDTEST_SHA"])
+	}
+	if _, ok := m["WILDOTHER_TOKEN"]; ok {
+		t.Error("non-matching-prefix var forwarded by wildcard")
+	}
+	// The literal pattern name must never appear as a var.
+	if _, ok := m["WILDTEST_*"]; ok {
+		t.Error("literal wildcard pattern leaked as a var name")
+	}
+}
+
+func TestSubprocessEnv_WildcardUnsetForwardsNothing(t *testing.T) {
+	spec := &task.Spec{}
+	spec.Permissions.Env = []task.EnvEntry{{Name: "NOMATCH_PREFIX_*"}}
+
+	env := SubprocessEnv(spec, nil, "/tmp/sock", "tok")
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "NOMATCH_PREFIX_") || strings.HasPrefix(kv, "NOMATCH_PREFIX_*=") {
+			t.Errorf("wildcard with no matches forwarded %q", kv)
+		}
+	}
+}
+
+// A wildcard must NEVER forward a denylisted daemon credential or the internal
+// IPC vars, even when the pattern (DICODE_*) prefix-matches all of them.
+func TestSubprocessEnv_WildcardNeverLeaksDaemonCredentials(t *testing.T) {
+	t.Setenv("DICODE_MASTER_KEY", "root-key")
+	t.Setenv("DICODE_API_KEY", "admin-key")
+	t.Setenv("DICODE_MCP_API_KEY", "mcp-key")
+	t.Setenv("DICODE_SOCKET", "/daemon/sock")
+	t.Setenv("DICODE_TOKEN", "daemon-tok")
+
+	spec := &task.Spec{}
+	spec.Permissions.Env = []task.EnvEntry{{Name: "DICODE_*"}}
+
+	m := envMap(SubprocessEnv(spec, nil, "/tmp/sock", "tok"))
+
+	for _, name := range []string{"DICODE_MASTER_KEY", "DICODE_API_KEY", "DICODE_MCP_API_KEY"} {
+		if _, ok := m[name]; ok {
+			t.Errorf("wildcard DICODE_* leaked daemon credential %s", name)
+		}
+	}
+	// IPC vars are always injected by the daemon (per-run coordinates), never
+	// the host daemon-env values a DICODE_* pattern would otherwise match.
+	if m["DICODE_SOCKET"] != "/tmp/sock" || m["DICODE_TOKEN"] != "tok" {
+		t.Errorf("IPC vars overwritten by wildcard match: socket=%q token=%q", m["DICODE_SOCKET"], m["DICODE_TOKEN"])
+	}
+}
+
 func TestSubprocessEnv_ResolvedWinsOverBareHostValue(t *testing.T) {
 	t.Setenv("DUAL_VAR", "host-value")
 	spec := &task.Spec{}

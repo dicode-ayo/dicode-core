@@ -48,6 +48,33 @@ func TestBuildDenoArgs_Env_List(t *testing.T) {
 	}
 }
 
+// TestBuildDenoArgs_Env_Wildcard: a pattern entry adds its expanded host
+// matches (not the literal "GITHUB_*") to --allow-env, and never a denylisted
+// daemon credential the pattern would prefix-match.
+func TestBuildDenoArgs_Env_Wildcard(t *testing.T) {
+	// Collision-proof prefix so match assertions hold under CI's ambient env.
+	t.Setenv("WILDTEST_TOKEN", "gh")
+	t.Setenv("WILDTEST_SHA", "sha")
+	t.Setenv("DICODE_MASTER_KEY", "root")
+
+	args := buildDenoArgs(specWithEnv([]task.EnvEntry{{Name: "WILDTEST_*"}}), "/run/sock", "/shim.ts", "/runner.ts", nil)
+	got, ok := allowEnvArg(args)
+	if !ok {
+		t.Fatal("no --allow-env arg emitted")
+	}
+	for _, want := range []string{"WILDTEST_TOKEN", "WILDTEST_SHA"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("allow-env %q missing wildcard match %q", got, want)
+		}
+	}
+	if strings.Contains(got, "WILDTEST_*") {
+		t.Errorf("literal pattern name leaked into allow-env: %q", got)
+	}
+	if strings.Contains(got, "DICODE_MASTER_KEY") {
+		t.Errorf("wildcard leaked daemon credential into allow-env: %q", got)
+	}
+}
+
 // TestBuildDenoArgs_Env_Omitted: no declared env still yields the baseline
 // allowlist (never bare --allow-env).
 func TestBuildDenoArgs_Env_Omitted(t *testing.T) {

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	"github.com/dicode/dicode/pkg/task"
 )
 
@@ -139,11 +140,20 @@ func buildGuardPolicy(spec *task.Spec, socketPath string, protectedPaths []strin
 			}
 		}
 		for _, e := range spec.Permissions.Env {
-			if e.Name == "" || seen[e.Name] {
+			// A pattern entry's literal name ("GITHUB_*") is not a readable var;
+			// its expanded matches are appended below.
+			if e.Name == "" || seen[e.Name] || pkgruntime.IsWildcardEnvEntry(e) {
 				continue
 			}
 			seen[e.Name] = true
 			allowed = append(allowed, e.Name)
+		}
+		for _, name := range pkgruntime.WildcardEnvNames(spec) {
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
+			allowed = append(allowed, name)
 		}
 		pol.EnvAllowed = allowed
 	}
