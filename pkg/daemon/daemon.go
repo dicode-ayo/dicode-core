@@ -207,7 +207,7 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	}
 
 	// 9. Control socket for CLI clients.
-	ctrlSrv, err := buildControlServer(cfg, dataDir, version, database, reg, eng, localSecrets, srv, sourceMgr, approvalGate, log)
+	ctrlSrv, err := buildControlServer(cfg, dataDir, version, database, reg, rec, eng, localSecrets, srv, sourceMgr, approvalGate, log)
 	if err != nil {
 		return err
 	}
@@ -705,7 +705,7 @@ func buildWebUI(ctx context.Context, cfg *config.Config, configPath, version, da
 // buildControlServer builds the control socket for CLI clients and wires its
 // capabilities: API-key minting, the approval-gate test/approve surfaces, AI
 // task authoring, and task deletion (step 9).
-func buildControlServer(cfg *config.Config, dataDir, version string, database db.DB, reg *registry.Registry, eng *trigger.Engine, localSecrets secrets.Manager, srv *webui.Server, sourceMgr *webui.SourceManager, approvalGate *approval.Gate, log *zap.Logger) (*ipc.ControlServer, error) {
+func buildControlServer(cfg *config.Config, dataDir, version string, database db.DB, reg *registry.Registry, rec *registry.Reconciler, eng *trigger.Engine, localSecrets secrets.Manager, srv *webui.Server, sourceMgr *webui.SourceManager, approvalGate *approval.Gate, log *zap.Logger) (*ipc.ControlServer, error) {
 	socketPath := filepath.Join(dataDir, "daemon.sock")
 	tokenPath := filepath.Join(dataDir, "daemon.token")
 	mp := ipc.MetricsProvider{
