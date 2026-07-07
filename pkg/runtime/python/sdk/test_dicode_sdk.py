@@ -345,6 +345,58 @@ class MCPTests(SDKTestBase):
         self.assertEqual(result, {"output": "result"})
 
 
+class SuspendTests(SDKTestBase):
+    def test_suspend_records_payload_and_raises(self):
+        captured = {}
+
+        def on_suspend(msg):
+            captured["state"] = msg.get("state")
+            captured["form"] = msg.get("form")
+            captured["deadline"] = msg.get("deadline")
+            return True  # ack
+        self.server.handlers["dicode.suspend"] = on_suspend
+
+        sdk = self.load_sdk()
+        self.assertFalse(sdk._was_suspend_requested())
+        with self.assertRaises(sdk.SuspendSignal):
+            sdk.dicode.suspend(
+                state={"step": "one", "n": 42},
+                form={"title": "Name?", "fields": [
+                    {"name": "project_name", "type": "string", "label": "Name"}]},
+                deadline=1893456000000,
+            )
+        # The signal was raised only after the payload was acked, and the
+        # module-level flag is set so the wrapper's swallow-guard can fire.
+        self.assertTrue(sdk._was_suspend_requested())
+        self.assertEqual(captured["state"], {"step": "one", "n": 42})
+        self.assertEqual(captured["form"]["title"], "Name?")
+        self.assertEqual(captured["deadline"], 1893456000000)
+
+    def test_suspend_signal_is_exception_subclass(self):
+        # Mirrors the Deno SDK: the signal is a plain Error/Exception so a broad
+        # `except Exception` swallows it — exactly the footgun the wrapper's
+        # swallow-guard protects against.
+        sdk = self.load_sdk()
+        self.assertTrue(issubclass(sdk.SuspendSignal, Exception))
+
+
+class ResumeContextTests(SDKTestBase):
+    def test_ctx_none_on_first_run(self):
+        sdk = self.load_sdk()
+        self.assertIsNone(sdk.ctx.resume_state)
+        self.assertIsNone(sdk.ctx.resume_input)
+
+    def test_ctx_exposes_injected_state_and_input(self):
+        self.server.handlers["resume"] = lambda _: {
+            "state": {"step": "ask_framework", "name": "proj"},
+            "input": {"project_name": "acme"},
+        }
+        sdk = self.load_sdk()
+        self.assertEqual(sdk.ctx.resume_state,
+                         {"step": "ask_framework", "name": "proj"})
+        self.assertEqual(sdk.ctx.resume_input, {"project_name": "acme"})
+
+
 class ReturnTests(SDKTestBase):
     def test_set_return(self):
         captured = {}
