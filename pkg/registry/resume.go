@@ -106,6 +106,25 @@ func (r *Registry) MarkRunResumed(ctx context.Context, runID string) error {
 	return ErrRunNotSuspended
 }
 
+// CancelSuspendedRun transitions a suspended run to cancelled with the given
+// fail_reason and clears its resume token, but ONLY while the run is still
+// suspended. The conditional UPDATE mirrors MarkRunResumed/SweepExpiredSuspensions:
+// an operator resume racing this finalize (which flips suspended→resumed) changes
+// 0 rows here and is not clobbered back to cancelled. Reports whether the row
+// changed. Used to finalize a pipeline stage that suspended, since a pipeline
+// stage cannot pause its parent pipeline.
+func (r *Registry) CancelSuspendedRun(ctx context.Context, runID, reason string) (bool, error) {
+	now := time.Now().UnixMilli()
+	affected, err := r.db.ExecResult(ctx,
+		`UPDATE runs SET status = ?, finished_at = ?, fail_reason = ?, resume_token = NULL WHERE id = ? AND status = ?`,
+		StatusCancelled, now, reason, runID, StatusSuspended,
+	)
+	if err != nil {
+		return false, fmt.Errorf("cancel suspended run: %w", err)
+	}
+	return affected > 0, nil
+}
+
 // SweepExpiredSuspensions cancels every suspended run whose resume_deadline has
 // passed (relative to nowMs), recording ReasonResumeTimeout as the fail_reason
 // and stamping finished_at. Rows with no deadline (resume_deadline NULL/0) are
