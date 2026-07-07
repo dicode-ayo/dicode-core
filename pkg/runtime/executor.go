@@ -55,6 +55,15 @@ type RunOptions struct {
 	// on_failure_chain. Empty for non-chained runs. Used by the trigger
 	// engine to release the chainGuards slot on completion.
 	ChainParentTask string
+
+	// ResumeState / ResumeInput carry a suspended run's prior state and the
+	// user's form submission when the engine re-spawns a task to resume it
+	// (#95). Both are opaque JSON blobs surfaced to the task as
+	// ctx.resume_state / ctx.resume_input. Nil on a first (non-resume) run.
+	// Populated by the resume orchestration (PR 3); the runtime only forwards
+	// them to the subprocess.
+	ResumeState []byte
+	ResumeInput []byte
 }
 
 // RunResult is returned by every Executor.
@@ -68,6 +77,17 @@ type RunResult struct {
 	// Empty string means no structured output was produced.
 	OutputContentType string
 	OutputContent     string
+
+	// Suspended is set when the task called dicode.suspend() (#95): the run
+	// paused cleanly (exit 0, not a failure) and yielded state + a form for
+	// later resume. ResumeState/ResumeForm are opaque JSON blobs; ResumeDeadline
+	// is an optional Unix-ms TTL (0 = unset). The trigger engine consumes these
+	// to persist the suspended run and mint a resume token (PR 3); this runtime
+	// only produces them.
+	Suspended      bool
+	ResumeState    []byte
+	ResumeForm     []byte
+	ResumeDeadline int64
 }
 
 // Executor is the common interface satisfied by every runtime (Deno, Docker,

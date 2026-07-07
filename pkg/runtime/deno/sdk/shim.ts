@@ -140,6 +140,34 @@ export interface TaskSummary {
   enabled:      boolean;
 }
 
+// One field in a suspend form (#95). `type` selects the input widget the
+// WebUI renders; `options` is required for "select".
+export interface FormField {
+  name: string;
+  type: "string" | "text" | "number" | "boolean" | "select";
+  label: string;
+  required?: boolean;
+  default?: string | number | boolean;
+  options?: { value: string; label: string }[];
+  placeholder?: string;
+}
+
+// The form a suspended task asks the user to fill in before resume (#95).
+export interface FormSchema {
+  title?: string;
+  description?: string;
+  fields: FormField[];
+}
+
+// Argument to dicode.suspend() (#95). `state` is an opaque JSON blob echoed
+// back as ctx.resume_state on resume; `form` describes the input to collect;
+// `deadline` is an optional Unix-ms TTL (default applied by the engine).
+export interface SuspendRequest {
+  state: unknown;
+  form: FormSchema;
+  deadline?: number;
+}
+
 export interface Dicode {
   // task_id: the fully-namespaced id of the currently-running task (e.g.
   // "buildin/ai-agent"). Populated from the IPC handshake so task code can
@@ -154,6 +182,11 @@ export interface Dicode {
   // WebUI to collapse same-group siblings (#116). Last write wins; only
   // affects the current run.
   set_group:      (label: string)      => Promise<void>;
+  // suspend pauses the run: it hands the runtime the state blob + form, then
+  // never resolves — it throws internally so the process exits cleanly and
+  // the run ends as `suspended`. On resume the task is re-run with
+  // ctx.resume_state / ctx.resume_input populated (#95).
+  suspend:        (req: SuspendRequest) => Promise<never>;
   secrets_set:    (key: string, value: string) => Promise<void>;
   secrets_delete: (key: string)                => Promise<void>;
   secrets:        DicodeSecrets;
@@ -327,6 +360,35 @@ const kv: KV = {
 
 const input = await __call__({ method: "input" });
 
+// ── resume (#95) ────────────────────────────────────────────────────────────────
+// When this run is a resume of a suspended one, the runtime injects the prior
+// state blob and the user's form submission. Both are null on a first run.
+
+const __resume__ = await __call__({ method: "resume" }) as
+  { state?: unknown; input?: unknown } | null;
+const resume_state: unknown = __resume__?.state ?? undefined;
+const resume_input: unknown = __resume__?.input ?? undefined;
+
+// SuspendSignal is thrown by dicode.suspend() after the payload is delivered
+// over IPC. The per-run wrapper catches it (via __isSuspend__) and exits the
+// process cleanly (exit 0) — a suspend is not a failure.
+class SuspendSignal extends Error {
+  constructor() {
+    super("dicode.suspend");
+    this.name = "SuspendSignal";
+  }
+}
+function __isSuspend__(e: unknown): boolean {
+  return e instanceof SuspendSignal;
+}
+
+// Set the instant before the SuspendSignal is thrown (payload already recorded
+// server-side). If main() returns normally with this set, a user try/catch
+// swallowed the signal and kept executing — the wrapper turns that into a loud
+// failure rather than a contradictory "suspended run that also returned".
+let __suspendRequested__ = false;
+function __wasSuspendRequested__(): boolean { return __suspendRequested__; }
+
 // ── output ────────────────────────────────────────────────────────────────────
 
 function __outputCallable__(value: Record<string, string>, _opts: SecretOutputOptions): Promise<void> {
@@ -374,6 +436,19 @@ const dicode: Dicode = {
   list_tasks:     (opts)                => __call__({ method: "dicode.list_tasks", mcpContext: opts?.mcpContext ?? false }) as Promise<TaskSummary[]>,
   get_runs:       (taskID, opts)    => __call__({ method: "dicode.get_runs",        taskID, limit: opts?.limit ?? 10 }),
   set_group:      (label)           => __call__({ method: "dicode.set_group",       group: String(label ?? "") }) as Promise<void>,
+  suspend:        async (req) => {
+    // Await the ack so the payload is recorded before we throw — the read
+    // loop resolves this once the daemon captured state/form/deadline. The
+    // call then never resolves normally: it always throws.
+    await __call__({
+      method: "dicode.suspend",
+      state: req.state ?? null,
+      form: req.form,
+      deadline: req.deadline ?? 0,
+    });
+    __suspendRequested__ = true;
+    throw new SuspendSignal();
+  },
   secrets_set:    (key, value)      => __call__({ method: "dicode.secrets_set",     key, stringValue: value }) as Promise<void>,
   secrets_delete: (key)             => __call__({ method: "dicode.secrets_delete",  key }) as Promise<void>,
   secrets: {
@@ -463,4 +538,4 @@ const dicode: Dicode = {
 // The runner awaits this on exit so fire-and-forget log writes are not lost.
 async function __flush__(): Promise<void> { await __wq__; }
 
-export { params, kv, input, output, mcp, dicode, __setReturn__, __conn__, __flush__ };
+export { params, kv, input, resume_state, resume_input, output, mcp, dicode, __setReturn__, __conn__, __flush__, __isSuspend__, __wasSuspendRequested__ };

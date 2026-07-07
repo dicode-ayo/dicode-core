@@ -75,6 +75,34 @@ declare interface TaskSummary {
   enabled:      boolean;
 }
 
+/** One field in a suspend form (#95). `type` selects the input widget the
+ *  WebUI renders; `options` is required for "select". */
+declare interface FormField {
+  name: string;
+  type: "string" | "text" | "number" | "boolean" | "select";
+  label: string;
+  required?: boolean;
+  default?: string | number | boolean;
+  options?: { value: string; label: string }[];
+  placeholder?: string;
+}
+
+/** The form a suspended task asks the user to fill in before resume (#95). */
+declare interface FormSchema {
+  title?: string;
+  description?: string;
+  fields: FormField[];
+}
+
+/** Argument to dicode.suspend() (#95). `state` is an opaque JSON blob echoed
+ *  back as ctx.resume_state on resume; `form` describes the input to collect;
+ *  `deadline` is an optional Unix-ms TTL. */
+declare interface SuspendRequest {
+  state: unknown;
+  form: FormSchema;
+  deadline?: number;
+}
+
 declare interface Dicode {
   /** Fully-namespaced id of the currently-running task (e.g. "buildin/ai-agent"). */
   task_id:        string;
@@ -83,6 +111,10 @@ declare interface Dicode {
   run_task:       (taskID: string, params?: Record<string, string>) => Promise<unknown>;
   list_tasks:     ()                                                 => Promise<TaskSummary[]>;
   get_runs:       (taskID: string, opts?: { limit?: number })        => Promise<unknown>;
+  /** Pause the run: hand the runtime `state` + `form`, then never resolve —
+   *  the process exits cleanly and the run ends as `suspended`. On resume the
+   *  task re-runs with ctx.resume_state / ctx.resume_input populated (#95). */
+  suspend:        (req: SuspendRequest) => Promise<never>;
   secrets_set:    (key: string, value: string) => Promise<void>;
   secrets_delete: (key: string)                => Promise<void>;
   /** Secrets presence API. Requires permissions.dicode.secrets_has: true. */
@@ -95,6 +127,12 @@ declare interface DicodeSdk {
   params: Params;
   kv:     KV;
   input:  unknown;
+  /** Prior state blob when this run is a resume of a suspended one; the same
+   *  value passed to dicode.suspend({ state }). Undefined on a first run (#95). */
+  resume_state?: unknown;
+  /** The user's form submission that triggered this resume, keyed by field
+   *  name. Undefined on a first run (#95). */
+  resume_input?: Record<string, unknown>;
   output: Output;
   mcp:    MCP;
   dicode: Dicode;
