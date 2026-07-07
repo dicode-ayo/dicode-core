@@ -216,8 +216,14 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		return result, nil
 	}
 
-	execCtx, cancel := pkgruntime.ExecContext(ctx, spec.Timeout)
-	defer cancel()
+	// The IPC server spans the whole run — both the initial attempt and any
+	// stale-lock retry — so it is scoped to a run-lifetime context, not a
+	// per-attempt timeout. Each subprocess attempt gets its own fresh
+	// ExecContext (see runOnce) so the retry, which follows a possibly slow
+	// relock, is born with a full timeout budget rather than the initial
+	// attempt's already-spent one.
+	srvCtx, srvCancel := context.WithCancel(ctx)
+	defer srvCancel()
 
 	mergedParams := pkgruntime.MergeParams(spec.Params, opts.Params)
 
@@ -226,7 +232,7 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	if d := rt.effectiveCryptoDeriver(); d != nil {
 		srv.SetCryptoHandler(d)
 	}
-	socketPath, token, err := srv.Start(execCtx)
+	socketPath, token, err := srv.Start(srvCtx)
 	if err != nil {
 		result.Error = fmt.Errorf("start socket server: %w", err)
 		return result, nil
@@ -305,11 +311,20 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		result.Output = nil
 		result.ReturnValue = nil
 
+		// Fresh per-attempt timeout budget: the retry's deadline is measured
+		// from here (after any relock), so a slow relock cannot starve it.
+		execCtx, cancel := pkgruntime.ExecContext(ctx, spec.Timeout)
+		defer cancel()
+
 		cmd := exec.CommandContext(execCtx, rt.denoPath, args...) //nolint:gosec
 		cmd.Env = pkgruntime.SubprocessEnv(spec, resolved, socketPath, token)
 		sniffer := pkgruntime.NewLockErrSniffer(staleLockSignature)
 
 		var wg sync.WaitGroup
+		// stderrW, when non-nil, is closed by the cmd.Wait goroutine once the
+		// process has exited and every stderr byte has been copied to the
+		// sniffer — this is what lets the log streamer drain to EOF.
+		var stderrW *io.PipeWriter
 		if spec.Silent {
 			// Discard stdout — no AppendLog calls — but still sniff stderr for the
 			// stale-lock signature so recovery works for silent tasks too.
@@ -325,23 +340,23 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 				result.Error = err
 				return false
 			}
-			stderr, err := cmd.StderrPipe()
-			if err != nil {
-				result.Error = err
-				return false
-			}
+			// Route stderr through cmd.Stderr (a writer), not StderrPipe: this
+			// makes cmd.Wait block until every stderr byte has been copied to the
+			// sniffer, so the stale-lock decision never races the process exit
+			// closing a pipe. The bytes are teed to a pipe that feeds the log
+			// streamer, so they still reach the run log ("error" level).
+			pr, pw := io.Pipe()
+			stderrW = pw
+			cmd.Stderr = io.MultiWriter(sniffer, pw)
 			if err := cmd.Start(); err != nil {
 				result.Error = fmt.Errorf("start deno: %w", err)
 				return false
 			}
-			// Stream stdout (console.log/info) as "info" and stderr (console.error +
-			// Deno runtime errors) as "error" in the run log; tee stderr through the
-			// sniffer so the same bytes still reach the log.
 			// wg ensures all log lines are flushed before Run returns, avoiding the race
 			// where the caller fetches logs immediately after exit and sees an empty list.
 			wg.Add(2)
 			go rt.StreamRunLog(&wg, stdout, runID, "stdout", "info", redactor)
-			go rt.StreamRunLog(&wg, io.TeeReader(stderr, sniffer), runID, "stderr", "error", redactor)
+			go rt.StreamRunLog(&wg, pr, runID, "stderr", "error", redactor)
 		}
 
 		// Register PID so metrics can aggregate child process resource usage.
@@ -349,7 +364,16 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		activePIDs.Store(pid, struct{}{})
 
 		doneCh := make(chan error, 1)
-		go func() { doneCh <- cmd.Wait() }()
+		go func() {
+			err := cmd.Wait()
+			// The process has exited and (for the non-silent path) the stderr
+			// copier has flushed to the sniffer; close the pipe so the log
+			// streamer sees EOF and wg can complete.
+			if stderrW != nil {
+				_ = stderrW.Close()
+			}
+			doneCh <- err
+		}()
 
 		exitErr, exitedFirst := pkgruntime.AwaitBridgeCompletion(srv.ReturnCh(), doneCh, pkgruntime.BridgeShutdownGrace,
 			func(retVal any) {
@@ -396,6 +420,10 @@ func denoLockForRecovery(spec *task.Spec) string {
 	return findDenoLockFile(spec.TaskDir, 2)
 }
 
+// denoRelock is the relock entry the runtime invokes; a package var so tests
+// can simulate a slow or failing relock without the Deno toolchain.
+var denoRelock = Relock
+
 // relockDeno regenerates the shared deno.lock covering spec's task tree after a
 // stale-lock run failure and records an audit line with the lock's hash delta.
 // Regenerating re-pins the dependencies the (already-approved) task declares,
@@ -404,7 +432,7 @@ func (rt *Runtime) relockDeno(ctx context.Context, spec *task.Spec, runID, lockP
 	before, _ := os.ReadFile(lockPath) //nolint:gosec
 	dir := filepath.Dir(lockPath)
 	var out strings.Builder
-	if _, err := Relock(ctx, dir, false, &out); err != nil {
+	if _, err := denoRelock(ctx, dir, false, &out); err != nil {
 		rt.Log.Warn("stale-lock auto-recovery: deno relock failed",
 			zap.String("task", spec.ID), zap.String("lock", lockPath), zap.Error(err))
 		_ = rt.Registry.AppendLog(context.Background(), runID, "error",

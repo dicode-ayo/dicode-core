@@ -209,13 +209,19 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 		return result, nil
 	}
 
-	execCtx, cancel := pkgruntime.ExecContext(ctx, spec.Timeout)
-	defer cancel()
+	// The IPC server spans the whole run — both the initial attempt and any
+	// stale-lock retry — so it is scoped to a run-lifetime context, not a
+	// per-attempt timeout. Each subprocess attempt gets its own fresh
+	// ExecContext (see runOnce) so the retry, which follows a possibly slow
+	// relock, is born with a full timeout budget rather than the initial
+	// attempt's already-spent one.
+	srvCtx, srvCancel := context.WithCancel(ctx)
+	defer srvCancel()
 
 	mergedParams := pkgruntime.MergeParams(spec.Params, opts.Params)
 
 	srv := e.BridgeDeps.NewIPCServer(runID, spec, mergedParams, opts.Input, redactor, &e.parent.BridgeDeps)
-	socketPath, token, err := srv.Start(execCtx)
+	socketPath, token, err := srv.Start(srvCtx)
 	if err != nil {
 		result.Error = fmt.Errorf("start socket server: %w", err)
 		return result, nil
@@ -270,31 +276,42 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 			return false
 		}
 
+		// Fresh per-attempt timeout budget: the retry's deadline is measured
+		// from here (after any relock), so a slow relock cannot starve it.
+		execCtx, cancel := pkgruntime.ExecContext(ctx, spec.Timeout)
+		defer cancel()
+
 		cmd := exec.CommandContext(execCtx, e.uvPath, buildUvRunArgs(tmpFile.Name(), locked)...) //nolint:gosec
 		cmd.Env = pkgruntime.SubprocessEnv(spec, resolved, socketPath, token)
 		sniffer := pkgruntime.NewLockErrSniffer(staleLockSignature)
 
-		stderr, err := cmd.StderrPipe()
-		if err != nil {
-			result.Error = err
-			return false
-		}
+		// Route stderr through cmd.Stderr (a writer), not StderrPipe: this makes
+		// cmd.Wait block until every stderr byte has been copied to the sniffer,
+		// so the stale-lock decision never races the process exit closing a
+		// pipe. The bytes are teed to a pipe that feeds the log streamer, so they
+		// still reach the run log. Stream at "warn": the stream mixes uv's own
+		// progress chatter with Python tracebacks, unlike Deno's, whose stderr is
+		// logged as "error". Stdout is not streamed (Python tasks log via the
+		// SDK's log global over IPC).
+		pr, pw := io.Pipe()
+		cmd.Stderr = io.MultiWriter(sniffer, pw)
 		if err := cmd.Start(); err != nil {
 			result.Error = fmt.Errorf("start uv: %w", err)
 			return false
 		}
 
-		// Stream uv/Python stderr to registry logs in real-time, at "warn": the
-		// stream mixes uv's own progress chatter with Python tracebacks, unlike
-		// Deno's, whose stderr is logged as "error". Tee it through the sniffer so
-		// the same bytes still reach the log. Stdout is not streamed (Python tasks
-		// log via the SDK's log global over IPC).
 		var wg sync.WaitGroup
 		wg.Add(1)
-		go e.StreamRunLog(&wg, io.TeeReader(stderr, sniffer), runID, "stderr", "warn", redactor)
+		go e.StreamRunLog(&wg, pr, runID, "stderr", "warn", redactor)
 
 		doneCh := make(chan error, 1)
-		go func() { doneCh <- cmd.Wait() }()
+		go func() {
+			err := cmd.Wait()
+			// The process has exited and the stderr copier has flushed to the
+			// sniffer; close the pipe so the log streamer sees EOF.
+			_ = pw.Close()
+			doneCh <- err
+		}()
 
 		exitErr, exitedFirst := pkgruntime.AwaitBridgeCompletion(srv.ReturnCh(), doneCh, pkgruntime.BridgeShutdownGrace,
 			func(retVal any) {
@@ -325,6 +342,10 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 	return result, nil
 }
 
+// pythonRelock is the relock entry the runtime invokes; a package var so tests
+// can simulate a slow or failing relock without the uv toolchain.
+var pythonRelock = RelockScript
+
 // relockScript regenerates the task.py.lock sidecar for the failing script
 // after a stale-lock run failure and records an audit line with the sidecar's
 // hash delta. Regenerating re-pins the dependencies the (already-approved) task
@@ -333,7 +354,7 @@ func (e *executor) relockScript(ctx context.Context, spec *task.Spec, runID, scr
 	sidecar := LockSidecarPath(scriptPath)
 	before, _ := os.ReadFile(sidecar) //nolint:gosec
 	var out strings.Builder
-	if err := RelockScript(ctx, e.uvPath, scriptPath, false, &out); err != nil {
+	if err := pythonRelock(ctx, e.uvPath, scriptPath, false, &out); err != nil {
 		e.Log.Warn("stale-lock auto-recovery: uv relock failed",
 			zap.String("task", spec.ID), zap.String("lock", sidecar), zap.Error(err))
 		_ = e.Registry.AppendLog(context.Background(), runID, "error",
