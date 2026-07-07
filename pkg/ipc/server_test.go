@@ -2486,3 +2486,76 @@ func TestServer_SocketDirCleanedUpOnStartFailure(t *testing.T) {
 		t.Errorf("fresh socket dir missing: %v", err)
 	}
 }
+
+// ── suspend capability gating (#502) ────────────────────────────────────────
+
+// CapSuspend must be granted only to runtimes that read srv.Suspend(): deno
+// and python. Container runtimes (docker/podman) never read the payload, so
+// granting the cap would let a dicode.suspend be acked then silently dropped.
+func TestServer_SuspendCap_GrantedByRuntime(t *testing.T) {
+	cases := []struct {
+		runtime task.Runtime
+		want    bool
+	}{
+		{task.RuntimeDeno, true},
+		{task.Runtime("python"), true},
+		{task.RuntimeDocker, false},
+		{task.RuntimePodman, false},
+	}
+	for _, tc := range cases {
+		t.Run(string(tc.runtime), func(t *testing.T) {
+			e := newTestEnv(t)
+			runID := fmt.Sprintf("test-%d", time.Now().UnixNano())
+			srv := New(runID, "test-task", e.secret, e.reg, e.db, nil, nil, zap.NewNop(), &task.Spec{Runtime: tc.runtime}, nil)
+			_, token, err := srv.Start(context.Background())
+			if err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			t.Cleanup(srv.Stop)
+			claims, err := VerifyToken(e.secret, token)
+			if err != nil {
+				t.Fatalf("VerifyToken: %v", err)
+			}
+			if got := hasCap(claims.Caps, CapSuspend); got != tc.want {
+				t.Errorf("runtime %s: CapSuspend granted=%v, want %v (caps=%v)", tc.runtime, got, tc.want, claims.Caps)
+			}
+		})
+	}
+}
+
+// A docker task's dicode.suspend must be rejected with a clear cap-denied
+// error rather than acked-then-dropped.
+func TestServer_Suspend_DeniedForDocker(t *testing.T) {
+	e := newTestEnv(t)
+	conn, srv := e.startWithSpec(t, nil, nil, &task.Spec{Runtime: task.RuntimeDocker}, nil)
+	sendMsg(t, conn, map[string]any{
+		"id":     "1",
+		"method": "dicode.suspend",
+		"state":  json.RawMessage(`{"step":1}`),
+	})
+	resp := recvMsg(t, conn)
+	if errMsg, _ := resp["error"].(string); !strings.Contains(errMsg, "permission denied") {
+		t.Fatalf("expected permission denied for docker suspend; got error=%v result=%v", resp["error"], resp["result"])
+	}
+	if srv.Suspend() != nil {
+		t.Fatal("docker suspend must not record a payload")
+	}
+}
+
+// A deno task's dicode.suspend is accepted and records the payload.
+func TestServer_Suspend_GrantedForDeno(t *testing.T) {
+	e := newTestEnv(t)
+	conn, srv := e.startWithSpec(t, nil, nil, &task.Spec{Runtime: task.RuntimeDeno}, nil)
+	sendMsg(t, conn, map[string]any{
+		"id":     "1",
+		"method": "dicode.suspend",
+		"state":  json.RawMessage(`{"step":1}`),
+	})
+	resp := recvMsg(t, conn)
+	if resp["error"] != nil {
+		t.Fatalf("deno suspend rejected: %v", resp["error"])
+	}
+	if srv.Suspend() == nil {
+		t.Fatal("expected suspend payload recorded for deno")
+	}
+}

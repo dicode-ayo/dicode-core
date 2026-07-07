@@ -228,6 +228,9 @@ func (s *Server) Start(ctx context.Context) (socketPath, token string, err error
 	// Core I/O caps are always granted; dicode.* API caps require explicit
 	// opt-in via permissions.dicode in task.yaml.
 	caps := defaultTaskCaps()
+	if s.spec != nil && runtimeSupportsSuspend(s.spec.Runtime) {
+		caps = append(caps, CapSuspend)
+	}
 	if dp := dicodePerms(s.spec); dp != nil {
 		if len(dp.Tasks) > 0 {
 			caps = append(caps, CapTaskTrigger)
