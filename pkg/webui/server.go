@@ -808,6 +808,34 @@ func redactServerSecret(b []byte) []byte {
 	return out
 }
 
+// decodeBody populates v from a JSON request body when the Content-Type is
+// application/json; for any other content type it invokes fromForm, which
+// reads the equivalent form values into the same destination. The JSON
+// decode error is returned for the caller to surface — call sites use
+// different 400 bodies, preserved verbatim from before this helper existed.
+func decodeBody(r *http.Request, v any, fromForm func()) error {
+	ct := r.Header.Get("Content-Type")
+	if strings.Contains(ct, "application/json") {
+		return json.NewDecoder(r.Body).Decode(v)
+	}
+	fromForm()
+	return nil
+}
+
+// readContentField extracts the editor payload from either a JSON body
+// ({"content": …}) or the "content" form value. ok=false means a JSON decode
+// error was already written as a 400 response.
+func readContentField(w http.ResponseWriter, r *http.Request) (string, bool) {
+	var body struct {
+		Content string `json:"content"`
+	}
+	if err := decodeBody(r, &body, func() { body.Content = r.FormValue("content") }); err != nil {
+		jsonErr(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return "", false
+	}
+	return body.Content, true
+}
+
 // apiSaveConfigRaw validates and writes the raw config back to dicode.yaml.
 // Protected by the main session via requireAuth.
 func (s *Server) apiSaveConfigRaw(w http.ResponseWriter, r *http.Request) {
@@ -817,19 +845,9 @@ func (s *Server) apiSaveConfigRaw(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Support both JSON body and form value.
-	var content string
-	ct := r.Header.Get("Content-Type")
-	if strings.Contains(ct, "application/json") {
-		var body struct {
-			Content string `json:"content"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			jsonErr(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		content = body.Content
-	} else {
-		content = r.FormValue("content")
+	content, ok := readContentField(w, r)
+	if !ok {
+		return
 	}
 
 	// Validate: must parse as valid YAML mapping.
@@ -921,20 +939,43 @@ func safeTaskFilePath(taskDir, filename string) (string, error) {
 	return joined, nil
 }
 
-func (s *Server) apiGetFile(w http.ResponseWriter, r *http.Request) {
-	id, filename := taskIDParam(r), chi.URLParam(r, "filename")
-	if !allowedFiles[filename] {
-		jsonErr(w, "file not allowed", http.StatusBadRequest)
-		return
-	}
+// taskOr404 looks up a kind: Task spec by ID, writing the shared
+// "task not found" 404 envelope when the registry has no such task.
+// ok=false means the response was already written.
+func (s *Server) taskOr404(w http.ResponseWriter, id string) (*task.Spec, bool) {
 	spec, ok := s.registry.Get(id)
 	if !ok {
 		jsonErr(w, "task not found", http.StatusNotFound)
-		return
+		return nil, false
+	}
+	return spec, true
+}
+
+// resolveTaskFile is the shared apiGetFile/apiSaveFile preamble: extract the
+// task ID + filename params, enforce the editable-file allowlist, resolve the
+// task, and validate the filename stays inside the task dir. ok=false means
+// an error response was already written.
+func (s *Server) resolveTaskFile(w http.ResponseWriter, r *http.Request) (path, id, filename string, ok bool) {
+	id, filename = taskIDParam(r), chi.URLParam(r, "filename")
+	if !allowedFiles[filename] {
+		jsonErr(w, "file not allowed", http.StatusBadRequest)
+		return "", "", "", false
+	}
+	spec, ok := s.taskOr404(w, id)
+	if !ok {
+		return "", "", "", false
 	}
 	path, err := safeTaskFilePath(spec.TaskDir, filename)
 	if err != nil {
 		jsonErr(w, "invalid filename", http.StatusBadRequest)
+		return "", "", "", false
+	}
+	return path, id, filename, true
+}
+
+func (s *Server) apiGetFile(w http.ResponseWriter, r *http.Request) {
+	path, _, _, ok := s.resolveTaskFile(w, r)
+	if !ok {
 		return
 	}
 	b, err := os.ReadFile(path)
@@ -948,19 +989,8 @@ func (s *Server) apiGetFile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) apiSaveFile(w http.ResponseWriter, r *http.Request) {
-	id, filename := taskIDParam(r), chi.URLParam(r, "filename")
-	if !allowedFiles[filename] {
-		jsonErr(w, "file not allowed", http.StatusBadRequest)
-		return
-	}
-	spec, ok := s.registry.Get(id)
+	path, id, filename, ok := s.resolveTaskFile(w, r)
 	if !ok {
-		jsonErr(w, "task not found", http.StatusNotFound)
-		return
-	}
-	path, err := safeTaskFilePath(spec.TaskDir, filename)
-	if err != nil {
-		jsonErr(w, "invalid filename", http.StatusBadRequest)
 		return
 	}
 
@@ -988,9 +1018,8 @@ func (s *Server) apiSaveFile(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) apiSaveTrigger(w http.ResponseWriter, r *http.Request) {
 	id := taskIDParam(r)
-	spec, ok := s.registry.Get(id)
+	spec, ok := s.taskOr404(w, id)
 	if !ok {
-		jsonErr(w, "task not found", http.StatusNotFound)
 		return
 	}
 
@@ -1016,13 +1045,7 @@ func (s *Server) apiSaveTrigger(w http.ResponseWriter, r *http.Request) {
 		On      string `json:"on"`
 		Restart string `json:"restart"`
 	}
-	ct := r.Header.Get("Content-Type")
-	if strings.Contains(ct, "application/json") {
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			jsonErr(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-	} else {
+	if err := decodeBody(r, &body, func() {
 		// Fallback: form values
 		body.Type = r.FormValue("type")
 		body.Cron = r.FormValue("cron")
@@ -1030,6 +1053,9 @@ func (s *Server) apiSaveTrigger(w http.ResponseWriter, r *http.Request) {
 		body.From = r.FormValue("chain_from")
 		body.On = r.FormValue("chain_on")
 		body.Restart = r.FormValue("restart")
+	}); err != nil {
+		jsonErr(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
 	}
 
 	var trigMap map[string]any
@@ -1375,23 +1401,18 @@ func (s *Server) apiSetSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var key, value string
-	ct := r.Header.Get("Content-Type")
-	if strings.Contains(ct, "application/json") {
-		var body struct {
-			Key   string `json:"key"`
-			Value string `json:"value"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			jsonErr(w, "invalid JSON", http.StatusBadRequest)
-			return
-		}
-		key = body.Key
-		value = body.Value
-	} else {
-		key = r.FormValue("key")
-		value = r.FormValue("value")
+	var body struct {
+		Key   string `json:"key"`
+		Value string `json:"value"`
 	}
+	if err := decodeBody(r, &body, func() {
+		body.Key = r.FormValue("key")
+		body.Value = r.FormValue("value")
+	}); err != nil {
+		jsonErr(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	key, value := body.Key, body.Value
 
 	if key == "" {
 		jsonErr(w, "key is required", http.StatusBadRequest)
@@ -1702,8 +1723,7 @@ func (s *Server) apiPatchTaskOverrides(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, ok := s.registry.Get(id); !ok {
-		jsonErr(w, "task not found", http.StatusNotFound)
+	if _, ok := s.taskOr404(w, id); !ok {
 		return
 	}
 
@@ -2238,10 +2258,10 @@ func (s *Server) apiSaveAISettings(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "task must have a webhook trigger under "+webhookPathPrefix, http.StatusBadRequest)
 		return
 	}
-	s.cfgMu.Lock()
-	s.cfg.AI.Task = task
-	err := s.persistConfigLocked()
-	s.cfgMu.Unlock()
+	err := s.updateConfig(func(cfg *config.Config) error {
+		cfg.AI.Task = task
+		return nil
+	})
 	if err != nil {
 		s.log.Warn("settings persist failed", zap.Error(err))
 		jsonErr(w, "saved in memory but could not write file: "+err.Error(), http.StatusInternalServerError)
@@ -2260,15 +2280,15 @@ func (s *Server) apiSaveServerSettings(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	s.cfgMu.Lock()
-	if body.LogLevel != "" {
-		s.cfg.LogLevel = body.LogLevel
-	}
-	if body.Secret != "" {
-		s.cfg.Server.Secret = body.Secret
-	}
-	err := s.persistConfigLocked()
-	s.cfgMu.Unlock()
+	err := s.updateConfig(func(cfg *config.Config) error {
+		if body.LogLevel != "" {
+			cfg.LogLevel = body.LogLevel
+		}
+		if body.Secret != "" {
+			cfg.Server.Secret = body.Secret
+		}
+		return nil
+	})
 	if err != nil {
 		s.log.Warn("settings persist failed", zap.Error(err))
 		jsonErr(w, "saved in memory but could not write file: "+err.Error(), http.StatusInternalServerError)
@@ -2347,13 +2367,13 @@ func (s *Server) apiAddSource(w http.ResponseWriter, r *http.Request) {
 		s.sourceMgr.Register(name, ts)
 	}
 
-	s.cfgMu.Lock()
-	if s.cfg.Spec.Entries == nil {
-		s.cfg.Spec.Entries = make(map[string]*taskset.Entry)
-	}
-	s.cfg.Spec.Entries[name] = entry
-	persistErr := s.persistConfigLocked()
-	s.cfgMu.Unlock()
+	persistErr := s.updateConfig(func(cfg *config.Config) error {
+		if cfg.Spec.Entries == nil {
+			cfg.Spec.Entries = make(map[string]*taskset.Entry)
+		}
+		cfg.Spec.Entries[name] = entry
+		return nil
+	})
 	if persistErr != nil {
 		s.log.Warn("source persist failed", zap.Error(persistErr))
 	}
@@ -2441,22 +2461,30 @@ func normalizeGitURL(raw string) string {
 	return u
 }
 
+// errSourceNotFound aborts the apiRemoveSource updateConfig mutate so a
+// missing source never triggers a config persist. The handler surfaces it
+// as the 404 via its own entry-nil check.
+var errSourceNotFound = errors.New("source not found")
+
 func (s *Server) apiRemoveSource(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	if name == "" {
 		jsonErr(w, "source name is required", http.StatusBadRequest)
 		return
 	}
-	s.cfgMu.Lock()
-	entry := s.cfg.Spec.Entries[name]
+	var entry *taskset.Entry
+	persistErr := s.updateConfig(func(cfg *config.Config) error {
+		entry = cfg.Spec.Entries[name]
+		if entry == nil {
+			return errSourceNotFound // skip the persist; surfaced as a 404 below
+		}
+		delete(cfg.Spec.Entries, name)
+		return nil
+	})
 	if entry == nil {
-		s.cfgMu.Unlock()
 		jsonErr(w, "source not found", http.StatusNotFound)
 		return
 	}
-	delete(s.cfg.Spec.Entries, name)
-	persistErr := s.persistConfigLocked()
-	s.cfgMu.Unlock()
 
 	if s.reconciler != nil && entry.Ref != nil {
 		id := entry.Ref.URL
@@ -2547,15 +2575,15 @@ func (s *Server) apiInstallRuntime(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.cfgMu.Lock()
-	if s.cfg.Runtimes == nil {
-		s.cfg.Runtimes = make(map[string]config.RuntimeConfig)
-	}
-	rcUpdate := s.cfg.Runtimes[name]
-	rcUpdate.Version = version
-	s.cfg.Runtimes[name] = rcUpdate
-	persistErr := s.persistConfigLocked()
-	s.cfgMu.Unlock()
+	persistErr := s.updateConfig(func(cfg *config.Config) error {
+		if cfg.Runtimes == nil {
+			cfg.Runtimes = make(map[string]config.RuntimeConfig)
+		}
+		rcUpdate := cfg.Runtimes[name]
+		rcUpdate.Version = version
+		cfg.Runtimes[name] = rcUpdate
+		return nil
+	})
 	if persistErr != nil {
 		s.log.Warn("runtime config persist failed", zap.Error(persistErr))
 	}
@@ -2574,16 +2602,31 @@ func (s *Server) apiRemoveRuntime(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "deno is required and cannot be removed", http.StatusBadRequest)
 		return
 	}
-	s.cfgMu.Lock()
-	if s.cfg.Runtimes != nil {
-		delete(s.cfg.Runtimes, name)
-	}
-	persistErr := s.persistConfigLocked()
-	s.cfgMu.Unlock()
+	persistErr := s.updateConfig(func(cfg *config.Config) error {
+		if cfg.Runtimes != nil {
+			delete(cfg.Runtimes, name)
+		}
+		return nil
+	})
 	if persistErr != nil {
 		s.log.Warn("runtime config persist failed", zap.Error(persistErr))
 	}
 	jsonOK(w, map[string]string{"status": "ok"})
+}
+
+// updateConfig runs mutate on the in-memory config and persists the result
+// to dicode.yaml under a single cfgMu critical section — the same
+// lock-across-mutate+persist scope every call site previously held inline.
+// A non-nil error from mutate skips the persist and is returned as-is;
+// otherwise the persistConfigLocked error is returned for the caller to
+// surface (the sites differ: hard 500 vs warn-and-continue).
+func (s *Server) updateConfig(mutate func(*config.Config) error) error {
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
+	if err := mutate(s.cfg); err != nil {
+		return err
+	}
+	return s.persistConfigLocked()
 }
 
 // persistConfig writes the current in-memory config back to dicode.yaml.

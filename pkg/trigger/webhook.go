@@ -392,38 +392,7 @@ func (e *Engine) WebhookHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
 
-		// Exact match — normal webhook execution path.
-		e.mu.Lock()
-		taskID, ok := e.webhooks[path]
-		var assetPath, matchedHook string
-		if !ok {
-			// No exact match — the request is for a static asset under some
-			// webhook UI. Walk up one path segment at a time doing exact
-			// map lookups, so the most-specific parent hook wins. This
-			// matters when both `/hooks/ai` and `/hooks/ai/openai` are
-			// registered: `/hooks/ai/openai/chat.js` must bind to the
-			// preset, not to the buildin. Exact map lookups (rather than
-			// iterating e.webhooks with strings.HasPrefix) are also
-			// immune to Go's randomised map iteration order.
-			for candidate := path; ; {
-				idx := strings.LastIndex(candidate, "/")
-				if idx <= 0 {
-					break
-				}
-				candidate = candidate[:idx]
-				if tid, found := e.webhooks[candidate]; found {
-					taskID = tid
-					matchedHook = candidate
-					assetPath = path[len(candidate)+1:]
-					ok = true
-					break
-				}
-			}
-		} else {
-			matchedHook = path
-		}
-		e.mu.Unlock()
-
+		taskID, matchedHook, assetPath, ok := e.resolveWebhookPath(path)
 		if !ok {
 			http.NotFound(w, r)
 			return
@@ -459,181 +428,231 @@ func (e *Engine) WebhookHandler() http.Handler {
 				return
 			}
 			if r.Method == http.MethodGet &&
-				filepath.Ext(assetPath) == "" {
-				indexFile := filepath.Join(spec.TaskDir, "index.html")
-				if data, err := os.ReadFile(indexFile); err == nil {
-					html := injectDicodeSDK(string(data), matchedHook, taskID, r)
-					w.Header().Set("Content-Type", "text/html; charset=utf-8")
-					_, _ = w.Write([]byte(html))
-					return
-				}
+				filepath.Ext(assetPath) == "" &&
+				e.serveTaskUI(w, r, spec, matchedHook, taskID, false) {
+				return
 			}
 			e.serveTaskAsset(w, r, spec.TaskDir, assetPath)
 			return
 		}
 
 		// On GET, serve the task's index.html UI when one is present.
-		if r.Method == http.MethodGet {
-			indexFile := filepath.Join(spec.TaskDir, "index.html")
-			if data, err := os.ReadFile(indexFile); err == nil {
-				e.log.Info("webhook UI served", zap.String("path", path), zap.String("task", taskID))
-				html := injectDicodeSDK(string(data), matchedHook, taskID, r)
-				w.Header().Set("Content-Type", "text/html; charset=utf-8")
-				_, _ = w.Write([]byte(html))
-				return
-			}
-		}
-
-		e.log.Info("webhook trigger", zap.String("path", path), zap.String("task", taskID))
-
-		// Read the raw body first so HMAC verification always covers the
-		// actual request bytes, regardless of content-type.
-		body := readWebhookBody(r)
-		input, isFormSubmit := decodeWebhookPayload(r, body)
-
-		// Verify HMAC signature when a secret is configured on the task.
-		if err := verifyWebhookSignature(spec, r, body); err != nil {
-			e.log.Warn("webhook signature verification failed",
-				zap.String("path", path),
-				zap.String("task", taskID),
-				zap.Error(err),
-			)
-			http.Error(w, "forbidden: "+err.Error(), http.StatusForbidden)
+		if r.Method == http.MethodGet && e.serveTaskUI(w, r, spec, matchedHook, taskID, true) {
 			return
 		}
 
-		// Replay protection: reject duplicate bodies within the nonce cache TTL.
-		if err := e.checkWebhookReplay(spec.Trigger.WebhookSecret, spec.Trigger.ReplayProtection, body); err != nil {
-			e.log.Warn("webhook replay rejected",
-				zap.String("path", path),
-				zap.String("task", taskID),
-			)
-			writeWebhookReplayRejected(w)
-			return
+		e.fireWebhookTask(w, r, spec, path, taskID)
+	})
+}
+
+// resolveWebhookPath routes an incoming request path to a registered webhook:
+// either an exact match (normal webhook execution path) or, for static assets
+// under some webhook UI, the most-specific parent hook plus the remaining
+// asset sub-path. ok=false means no registered webhook claims the path.
+func (e *Engine) resolveWebhookPath(path string) (taskID, matchedHook, assetPath string, ok bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	// Exact match — normal webhook execution path.
+	if tid, found := e.webhooks[path]; found {
+		return tid, path, "", true
+	}
+	// No exact match — the request is for a static asset under some
+	// webhook UI. Walk up one path segment at a time doing exact
+	// map lookups, so the most-specific parent hook wins. This
+	// matters when both `/hooks/ai` and `/hooks/ai/openai` are
+	// registered: `/hooks/ai/openai/chat.js` must bind to the
+	// preset, not to the buildin. Exact map lookups (rather than
+	// iterating e.webhooks with strings.HasPrefix) are also
+	// immune to Go's randomised map iteration order.
+	for candidate := path; ; {
+		idx := strings.LastIndex(candidate, "/")
+		if idx <= 0 {
+			break
 		}
-
-		// Extract a flat string map from the input so it is accessible via
-		// params.get() in task scripts (RunOptions.Params), in addition to the
-		// raw input being available as the `input` global (RunOptions.Input).
-		params := flatStringMap(input)
-
-		// Build the WebhookContext so the persistence layer can apply
-		// content-type-aware redaction to the raw body and populate
-		// Method/Path/Headers/Query on the stored PersistedInput.
-		// For GET requests body is nil; body was already read above for
-		// POST/PUT/etc. and is safe to reference here.
-		webhookCtx := newWebhookContext(r, body)
-
-		// Default: wait for the run to finish and return the result inline.
-		// Pass ?wait=false to fire-and-forget (returns runId immediately).
-		async := r.URL.Query().Get("wait") == "false"
-
-		if async {
-			runID, err := e.fireAsync(r.Context(), spec, pkgruntime.RunOptions{Input: input, Params: params, WebhookCtx: webhookCtx}, registry.TriggerWebhook)
-			if err != nil {
-				http.Error(w, "task failed to start", http.StatusInternalServerError)
-				return
-			}
-			w.Header().Set("X-Run-Id", runID)
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]string{"runId": runID})
-			return
+		candidate = candidate[:idx]
+		if tid, found := e.webhooks[candidate]; found {
+			return tid, candidate, path[len(candidate)+1:], true
 		}
+	}
+	return "", "", "", false
+}
 
-		// Enforce the concurrency cap at the webhook entry point, not inside
-		// fireSync. fireSync is reentrant: if_missing prereqs and input-storage
-		// delegation both call fireSync from within runTask, so placing the gate
-		// inside fireSync causes a parent holding a slot to self-block when it
-		// spawns a nested sub-run. Gate only the top-level webhook-triggered call.
-		if e.taskSem != nil && !spec.Trigger.Daemon {
-			select {
-			case e.taskSem <- struct{}{}:
-				defer func() { <-e.taskSem }()
-			default:
-				http.Error(w, "too many concurrent tasks; retry later", http.StatusServiceUnavailable)
-				return
-			}
-		}
+// serveTaskUI serves the task directory's index.html with the dicode client
+// SDK injected, when one is present. Returns false — without writing to w —
+// when the task has no readable index.html, so callers fall through to their
+// asset-serving / execution path. logServe controls the "webhook UI served"
+// info line: the top-level GET site logs it, the SPA-fallback asset site does
+// not (both preserved from the pre-extraction handler).
+func (e *Engine) serveTaskUI(w http.ResponseWriter, r *http.Request, spec *task.Spec, matchedHook, taskID string, logServe bool) bool {
+	indexFile := filepath.Join(spec.TaskDir, "index.html")
+	data, err := os.ReadFile(indexFile)
+	if err != nil {
+		return false
+	}
+	if logServe {
+		e.log.Info("webhook UI served", zap.String("path", r.URL.Path), zap.String("task", taskID))
+	}
+	html := injectDicodeSDK(string(data), matchedHook, taskID, r)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write([]byte(html))
+	return true
+}
 
-		runID, result, err := e.fireSync(context.Background(), spec, pkgruntime.RunOptions{Input: input, Params: params, WebhookCtx: webhookCtx}, registry.TriggerWebhook)
+// fireWebhookTask executes a kind: Task webhook request end-to-end: decode
+// the payload, verify HMAC signature + replay protection, fire the task
+// (async when ?wait=false, otherwise synchronously under the concurrency
+// cap), and shape the HTTP response (redirect for browser form submissions,
+// structured output, or the JSON/error-page envelopes).
+func (e *Engine) fireWebhookTask(w http.ResponseWriter, r *http.Request, spec *task.Spec, path, taskID string) {
+	e.log.Info("webhook trigger", zap.String("path", path), zap.String("task", taskID))
+
+	// Read the raw body first so HMAC verification always covers the
+	// actual request bytes, regardless of content-type.
+	body := readWebhookBody(r)
+	input, isFormSubmit := decodeWebhookPayload(r, body)
+
+	// Verify HMAC signature when a secret is configured on the task.
+	if err := verifyWebhookSignature(spec, r, body); err != nil {
+		e.log.Warn("webhook signature verification failed",
+			zap.String("path", path),
+			zap.String("task", taskID),
+			zap.Error(err),
+		)
+		http.Error(w, "forbidden: "+err.Error(), http.StatusForbidden)
+		return
+	}
+
+	// Replay protection: reject duplicate bodies within the nonce cache TTL.
+	if err := e.checkWebhookReplay(spec.Trigger.WebhookSecret, spec.Trigger.ReplayProtection, body); err != nil {
+		e.log.Warn("webhook replay rejected",
+			zap.String("path", path),
+			zap.String("task", taskID),
+		)
+		writeWebhookReplayRejected(w)
+		return
+	}
+
+	// Extract a flat string map from the input so it is accessible via
+	// params.get() in task scripts (RunOptions.Params), in addition to the
+	// raw input being available as the `input` global (RunOptions.Input).
+	params := flatStringMap(input)
+
+	// Build the WebhookContext so the persistence layer can apply
+	// content-type-aware redaction to the raw body and populate
+	// Method/Path/Headers/Query on the stored PersistedInput.
+	// For GET requests body is nil; body was already read above for
+	// POST/PUT/etc. and is safe to reference here.
+	webhookCtx := newWebhookContext(r, body)
+
+	// Default: wait for the run to finish and return the result inline.
+	// Pass ?wait=false to fire-and-forget (returns runId immediately).
+	async := r.URL.Query().Get("wait") == "false"
+
+	if async {
+		runID, err := e.fireAsync(r.Context(), spec, pkgruntime.RunOptions{Input: input, Params: params, WebhookCtx: webhookCtx}, registry.TriggerWebhook)
 		if err != nil {
 			http.Error(w, "task failed to start", http.StatusInternalServerError)
 			return
 		}
+		w.Header().Set("X-Run-Id", runID)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"runId": runID})
+		return
+	}
 
-		// Browser form submissions redirect to the run result page.
-		if isFormSubmit {
-			http.Redirect(w, r, "/runs/"+runID+"/result", http.StatusSeeOther)
+	// Enforce the concurrency cap at the webhook entry point, not inside
+	// fireSync. fireSync is reentrant: if_missing prereqs and input-storage
+	// delegation both call fireSync from within runTask, so placing the gate
+	// inside fireSync causes a parent holding a slot to self-block when it
+	// spawns a nested sub-run. Gate only the top-level webhook-triggered call.
+	if e.taskSem != nil && !spec.Trigger.Daemon {
+		select {
+		case e.taskSem <- struct{}{}:
+			defer func() { <-e.taskSem }()
+		default:
+			http.Error(w, "too many concurrent tasks; retry later", http.StatusServiceUnavailable)
 			return
 		}
+	}
 
-		// Return structured output or return value directly when available.
-		if result.OutputContent != "" {
-			ct := result.OutputContentType
-			if ct == "" {
-				ct = "text/plain"
-			}
-			w.Header().Set("Content-Type", ct+"; charset=utf-8")
-			w.Header().Set("X-Run-Id", runID)
-			if result.Error != nil {
-				w.WriteHeader(http.StatusInternalServerError)
-			}
-			_, _ = w.Write([]byte(result.OutputContent))
-			return
-		}
-		if result.ReturnValue != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.Header().Set("X-Run-Id", runID)
-			if result.Error != nil {
-				w.WriteHeader(http.StatusInternalServerError)
-			}
-			_ = json.NewEncoder(w).Encode(result.ReturnValue)
-			return
-		}
+	runID, result, err := e.fireSync(context.Background(), spec, pkgruntime.RunOptions{Input: input, Params: params, WebhookCtx: webhookCtx}, registry.TriggerWebhook)
+	if err != nil {
+		http.Error(w, "task failed to start", http.StatusInternalServerError)
+		return
+	}
 
-		// No output produced — the task either succeeded silently or threw before
-		// calling output.*. Collect logs so we can surface them to the caller.
-		var logLines []string
-		if logEntries, logErr := e.registry.GetRunLogs(context.Background(), runID); logErr == nil {
-			for _, le := range logEntries {
-				logLines = append(logLines, le.Message)
-			}
-		}
+	// Browser form submissions redirect to the run result page.
+	if isFormSubmit {
+		http.Redirect(w, r, "/runs/"+runID+"/result", http.StatusSeeOther)
+		return
+	}
 
+	// Return structured output or return value directly when available.
+	if result.OutputContent != "" {
+		ct := result.OutputContentType
+		if ct == "" {
+			ct = "text/plain"
+		}
+		w.Header().Set("Content-Type", ct+"; charset=utf-8")
+		w.Header().Set("X-Run-Id", runID)
 		if result.Error != nil {
-			errMsg := result.Error.Error()
-			// Browser: render an error page using the same log style as the webui.
-			if strings.Contains(r.Header.Get("Accept"), "text/html") {
-				w.Header().Set("Content-Type", "text/html; charset=utf-8")
-				w.Header().Set("X-Run-Id", runID)
-				w.WriteHeader(http.StatusInternalServerError)
-				logsJSON, _ := json.Marshal(logLines)
-				var safeJSON bytes.Buffer
-				json.HTMLEscape(&safeJSON, logsJSON)
-				_, _ = fmt.Fprintf(w, taskErrorPage, html.EscapeString(runID), html.EscapeString(errMsg), safeJSON.String())
-				return
-			}
-			// API: JSON envelope with error message.
-			w.Header().Set("Content-Type", "application/json")
-			w.Header().Set("X-Run-Id", runID)
 			w.WriteHeader(http.StatusInternalServerError)
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"runId":  runID,
-				"status": "failure",
-				"error":  errMsg,
-				"logs":   logLines,
-			})
-			return
 		}
-
-		// Successful run with no output.
+		_, _ = w.Write([]byte(result.OutputContent))
+		return
+	}
+	if result.ReturnValue != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-Run-Id", runID)
+		if result.Error != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+		_ = json.NewEncoder(w).Encode(result.ReturnValue)
+		return
+	}
+
+	// No output produced — the task either succeeded silently or threw before
+	// calling output.*. Collect logs so we can surface them to the caller.
+	var logLines []string
+	if logEntries, logErr := e.registry.GetRunLogs(context.Background(), runID); logErr == nil {
+		for _, le := range logEntries {
+			logLines = append(logLines, le.Message)
+		}
+	}
+
+	if result.Error != nil {
+		errMsg := result.Error.Error()
+		// Browser: render an error page using the same log style as the webui.
+		if strings.Contains(r.Header.Get("Accept"), "text/html") {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Header().Set("X-Run-Id", runID)
+			w.WriteHeader(http.StatusInternalServerError)
+			logsJSON, _ := json.Marshal(logLines)
+			var safeJSON bytes.Buffer
+			json.HTMLEscape(&safeJSON, logsJSON)
+			_, _ = fmt.Fprintf(w, taskErrorPage, html.EscapeString(runID), html.EscapeString(errMsg), safeJSON.String())
+			return
+		}
+		// API: JSON envelope with error message.
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Run-Id", runID)
+		w.WriteHeader(http.StatusInternalServerError)
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"runId":  runID,
-			"status": "success",
+			"status": "failure",
+			"error":  errMsg,
 			"logs":   logLines,
 		})
+		return
+	}
+
+	// Successful run with no output.
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Run-Id", runID)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"runId":  runID,
+		"status": "success",
+		"logs":   logLines,
 	})
 }
 
