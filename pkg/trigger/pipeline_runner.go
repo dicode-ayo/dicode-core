@@ -537,15 +537,55 @@ func (r *PipelineRunner) runTerminalDaemon(stageIdx int, stage task.Stage, upstr
 			// Restart aborted (descendant failed / shutting down): daemonRunID
 			// still points at the killed run. Finish with its terminal status.
 			r.mu.Unlock()
-			r.finish(status, "", ret)
+			r.finishTerminalDaemon(stageIdx, stage.Task, current, status, ret)
 			return
 		}
 		r.mu.Unlock()
 
-		r.finish(status, "", ret)
+		r.finishTerminalDaemon(stageIdx, stage.Task, current, status, ret)
 		return
 	}
 }
+
+// finishTerminalDaemon finalizes the pipeline from the terminal daemon stage's
+// exit. A daemon stage that called dicode.suspend() exits its subprocess but is
+// non-terminal; adopting that status onto the parent would leave the pipeline
+// `suspended` with no resume token and no deadline — unsweepable, unresumable,
+// and matching no chain edge (a permanently wedged parent). Translate a
+// suspended daemon exit into a coherent pipeline failure and cancel the orphaned
+// suspended run instead.
+func (r *PipelineRunner) finishTerminalDaemon(stageIdx int, stageTask, daemonRunID, status string, ret interface{}) {
+	if status == registry.StatusSuspended {
+		r.engine.finalizeSuspendedStage(daemonRunID)
+		reason := fmt.Sprintf("stage %d (%s): suspended mid-pipeline; a pipeline stage cannot suspend", stageIdx, stageTask)
+		r.engine.log.Warn("pipeline terminal daemon suspended; pipeline failed",
+			zap.String("pipeline", r.spec.ID), zap.Int("stage", stageIdx),
+			zap.String("task", stageTask), zap.String("daemon_run", daemonRunID))
+		r.finish(registry.StatusFailure, reason, nil)
+		return
+	}
+	r.finish(status, "", ret)
+}
+
+// finalizeSuspendedStage cancels a stage run that suspended mid-pipeline. Left
+// `suspended`, the stage would still be resumable — spawning a standalone
+// continuation detached from the (now-failed) pipeline. Transitioning it to
+// cancelled makes it terminal and drops its resume token so no orphan can be
+// spawned. Conditional on the run still being suspended, so an operator resume
+// that raced in first is not clobbered.
+func (e *Engine) finalizeSuspendedStage(runID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := e.registry.CancelSuspendedRun(ctx, runID, reasonPipelineStageSuspended); err != nil {
+		e.log.Warn("pipeline: finalize suspended stage failed",
+			zap.String("run", runID), zap.Error(err))
+	}
+}
+
+// reasonPipelineStageSuspended is the fail_reason stamped on a pipeline stage
+// run finalized because it called dicode.suspend(). A pipeline stage cannot
+// pause the pipeline, so the suspension is closed out as a cancellation.
+const reasonPipelineStageSuspended = "pipeline_stage_suspended"
 
 // fireStageRaw resolves the stage's overrides + ${input.*} references against
 // the upstream stage's output and fires the stage as a kind: Task child of the
@@ -608,6 +648,15 @@ func (e *Engine) awaitStageSuccess(ctx context.Context, runID string) (task.Inpu
 		return task.InputContext{}, fmt.Errorf("wait: %w", werr)
 	}
 	if res.Status != registry.StatusSuccess {
+		if res.Status == registry.StatusSuspended {
+			// A pipeline stage cannot pause the pipeline: the parent run is owned
+			// by the PipelineRunner and is not resumable through the single-run
+			// resume path. Finalize the orphaned suspended run so it can't be
+			// resumed into a continuation detached from the (now-failing) pipeline,
+			// and fail the stage.
+			e.finalizeSuspendedStage(runID)
+			return task.InputContext{}, fmt.Errorf("run %s suspended mid-pipeline; a pipeline stage cannot suspend", runID)
+		}
 		return task.InputContext{}, fmt.Errorf("run %s ended with status %s", runID, res.Status)
 	}
 	// Only Output is threaded between stages in v1: PipelineTask.Validate rejects
