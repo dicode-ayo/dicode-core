@@ -221,6 +221,8 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 	mergedParams := pkgruntime.MergeParams(spec.Params, opts.Params)
 
 	srv := e.BridgeDeps.NewIPCServer(runID, spec, mergedParams, opts.Input, redactor, &e.parent.BridgeDeps)
+	// Inject a resumed run's prior state + user input (#95); nil on first run.
+	srv.SetResume(opts.ResumeState, opts.ResumeInput)
 	socketPath, token, err := srv.Start(srvCtx)
 	if err != nil {
 		result.Error = fmt.Errorf("start socket server: %w", err)
@@ -339,6 +341,20 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 		return e.relockScript(ctx, spec, runID, scriptPath)
 	})
 
+	// A legitimate dicode.suspend() exits the process cleanly (exit 0), so the
+	// run is not a failure. Only then translate the captured payload into a
+	// suspended result (#95). When result.Error is set the subprocess exited
+	// non-zero — the wrapper's swallow-guard trips this when a task caught the
+	// SuspendSignal and kept running — so keep it a failure rather than a
+	// contradictory suspended-and-returned run, even though a payload was
+	// recorded server-side. Mirrors the Deno runtime.
+	if sr := srv.Suspend(); sr != nil && result.Error == nil {
+		result.Suspended = true
+		result.ResumeState = sr.State
+		result.ResumeForm = sr.Form
+		result.ResumeDeadline = sr.Deadline
+	}
+
 	return result, nil
 }
 
@@ -404,20 +420,28 @@ func buildWrapper(scriptBytes []byte, pol guardPolicy) (string, error) {
 	w.WriteString("\n# === return capture ===\n")
 	w.WriteString("import sys as _sys\n")
 	w.WriteString("_asyncio_mod = _sys.modules['asyncio']\n")
-	w.WriteString("_main = globals().get('main')\n")
-	w.WriteString("if _main is not None and _asyncio_mod.iscoroutinefunction(_main):\n")
-	w.WriteString("    result = _asyncio_mod.run(_main())\n")
-	w.WriteString("_set_return(globals().get('result', None))\n")
-	// Schedule close on _loop so it runs *after* any pending _fire coroutines
-	// (the event loop is FIFO — tasks submitted before this will drain first).
-	// Wrap in try/except so a timeout never marks a successful run as failed.
-	w.WriteString("async def _dicode_close():\n")
-	w.WriteString("    _writer.close()\n")
-	w.WriteString("    await _writer.wait_closed()\n")
+	// A clean dicode.suspend() from inside main() raises SuspendSignal after the
+	// payload is recorded — exit 0 without a return value (a suspend is not a
+	// failure). If task code instead swallowed the signal and returned, the
+	// suspend flag is still set: fail loudly rather than record a contradictory
+	// suspended-and-returned run (#95). A suspend at task top level (sync tasks)
+	// unwinds past this block and is handled by the SDK's sys.excepthook.
 	w.WriteString("try:\n")
-	w.WriteString("    _asyncio_mod.run_coroutine_threadsafe(_dicode_close(), _loop).result(timeout=5)\n")
-	w.WriteString("except Exception:\n")
-	w.WriteString("    pass\n")
+	w.WriteString("    _main = globals().get('main')\n")
+	w.WriteString("    if _main is not None and _asyncio_mod.iscoroutinefunction(_main):\n")
+	w.WriteString("        result = _asyncio_mod.run(_main())\n")
+	w.WriteString("    if _was_suspend_requested():\n")
+	w.WriteString("        _sys.stderr.write(\"[dicode] dicode.suspend() was called but its control-flow signal was caught by task code — do not wrap dicode.suspend() in a try/except that swallows it\\n\")\n")
+	w.WriteString("        _sys.stderr.flush()\n")
+	w.WriteString("        _flush_and_close()\n")
+	w.WriteString("        _sys.exit(1)\n")
+	w.WriteString("    _set_return(globals().get('result', None))\n")
+	w.WriteString("except SuspendSignal:\n")
+	w.WriteString("    _flush_and_close()\n")
+	w.WriteString("    _sys.exit(0)\n")
+	// _flush_and_close drains pending _fire writes and closes the socket on the
+	// FIFO IO loop; it swallows errors so a slow close never fails a good run.
+	w.WriteString("_flush_and_close()\n")
 	return w.String(), nil
 }
 

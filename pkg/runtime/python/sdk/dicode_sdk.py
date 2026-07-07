@@ -254,6 +254,84 @@ kv = _KV()
 input = _call({"method": "input"})
 
 
+# ── suspend / resume (#95) ────────────────────────────────────────────────────
+# dicode.suspend() pauses the run: it hands the daemon a state blob + form, then
+# raises SuspendSignal so the process exits cleanly (exit 0) and the run ends as
+# `suspended`. On resume the task is re-run with ctx.resume_state /
+# ctx.resume_input populated. See runtime.go for how the wrapper turns a clean
+# suspend into a suspended RunResult.
+
+
+class SuspendSignal(Exception):
+    """Control-flow signal raised by dicode.suspend() after the payload is
+    recorded over IPC. The wrapper catches it and exits the process cleanly —
+    a suspend is not a failure. It subclasses Exception (not BaseException) to
+    mirror the Deno SDK, whose signal is a plain Error; the wrapper's
+    swallow-guard fails the run loudly if task code catches it and returns."""
+
+    def __init__(self):
+        super().__init__("dicode.suspend")
+
+
+# Set the instant before SuspendSignal is raised (payload already recorded
+# server-side). If task code returns normally with this set, a try/except
+# swallowed the signal and kept executing — the wrapper turns that into a loud
+# failure rather than a contradictory "suspended run that also returned".
+_suspend_requested = False
+
+
+def _was_suspend_requested():
+    return _suspend_requested
+
+
+def _flush_and_close():
+    """Drain pending fire-and-forget writes and close the socket on _loop.
+    Scheduling on _loop makes the close run *after* any queued _fire coroutines
+    (the loop is FIFO). Swallows errors so a slow/broken close never masks the
+    run outcome."""
+    async def _do():
+        try:
+            _writer.close()
+            await _writer.wait_closed()
+        except Exception:
+            pass
+    try:
+        asyncio.run_coroutine_threadsafe(_do(), _loop).result(timeout=5)
+    except Exception:
+        pass
+
+
+class _Context:
+    """Resume context (#95). resume_state is the prior suspended run's opaque
+    state blob; resume_input is the user's form submission. Both are None on a
+    first (non-resume) invocation. Fetched once at import time."""
+
+    def __init__(self):
+        r = _call({"method": "resume"}) or {}
+        self.resume_state = r.get("state")
+        self.resume_input = r.get("input")
+
+
+ctx = _Context()
+
+
+# A dicode.suspend() at task top level (a synchronous task) raises SuspendSignal
+# that unwinds past the wrapper's return-capture epilogue. Intercept it here so
+# the process still exits cleanly; real errors fall through to the default hook
+# (which prints the traceback) and the non-zero exit that marks a failed run.
+_orig_excepthook = sys.excepthook
+
+
+def _suspend_excepthook(exc_type, exc, tb):
+    if isinstance(exc, SuspendSignal):
+        _flush_and_close()
+        os._exit(0)
+    _orig_excepthook(exc_type, exc, tb)
+
+
+sys.excepthook = _suspend_excepthook
+
+
 # ── output ────────────────────────────────────────────────────────────────────
 
 
@@ -441,6 +519,21 @@ class _Dicode:
         # Label the current run with a free-text group string (#116). Used
         # by the WebUI to collapse same-group siblings. Last write wins.
         _call({"method": "dicode.set_group", "group": str(label or "")})
+
+    def suspend(self, state=None, form=None, deadline=None):
+        """Pause the run and wait for user input (#95). Records the state blob +
+        form over IPC, then raises SuspendSignal — it never returns. The wrapper
+        exits the process cleanly and the run ends as `suspended`; on resume the
+        task is re-run with ctx.resume_state / ctx.resume_input populated. Do not
+        wrap this call in a try/except that swallows the signal."""
+        global _suspend_requested
+        # Await the ack so the payload is recorded before we raise: the daemon
+        # captures state/form/deadline synchronously in response to this call.
+        _call({"method": "dicode.suspend",
+               "state": state, "form": form,
+               "deadline": deadline or 0})
+        _suspend_requested = True
+        raise SuspendSignal()
 
     async def run_task_async(self, task_id, params=None, mcp_context=False):
         return await _call_async({"method": "dicode.run_task", "taskID": task_id,
