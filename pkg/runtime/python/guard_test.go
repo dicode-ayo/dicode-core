@@ -191,6 +191,37 @@ func TestBuildGuardPolicy_EnvAllowed_WithDeclaredVars(t *testing.T) {
 	}
 }
 
+func TestBuildGuardPolicy_EnvAllowed_Wildcard(t *testing.T) {
+	// A pattern entry adds its expanded host matches to EnvAllowed (never the
+	// literal "GITHUB_*"), and never a denylisted daemon credential it would
+	// prefix-match.
+	// Collision-proof prefix so match assertions hold under CI's ambient env.
+	t.Setenv("WILDTEST_TOKEN", "gh")
+	t.Setenv("WILDTEST_SHA", "sha")
+	t.Setenv("DICODE_MASTER_KEY", "root")
+
+	spec := specWithPerms(task.Permissions{
+		Env: []task.EnvEntry{{Name: "WILDTEST_*"}},
+	})
+	pol := buildGuardPolicy(spec, "/tmp/dicode.sock", nil)
+
+	names := make(map[string]bool, len(pol.EnvAllowed))
+	for _, n := range pol.EnvAllowed {
+		names[n] = true
+	}
+	for _, want := range []string{"WILDTEST_TOKEN", "WILDTEST_SHA"} {
+		if !names[want] {
+			t.Errorf("EnvAllowed missing wildcard match %q; got %v", want, pol.EnvAllowed)
+		}
+	}
+	if names["WILDTEST_*"] {
+		t.Errorf("literal pattern name leaked into EnvAllowed; got %v", pol.EnvAllowed)
+	}
+	if names["DICODE_MASTER_KEY"] {
+		t.Errorf("wildcard leaked daemon credential into EnvAllowed; got %v", pol.EnvAllowed)
+	}
+}
+
 func TestBuildGuardPolicy_EnvAllowed_EnvReadExposed(t *testing.T) {
 	// env_read_exposed=true must set EnvAllowed=nil (no filter).
 	spec := specWithPerms(task.Permissions{

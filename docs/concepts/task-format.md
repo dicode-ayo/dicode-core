@@ -930,11 +930,12 @@ permissions:
 
 ### `permissions.env` — environment variables
 
-Four forms, with clear source distinction:
+Five forms, with clear source distinction:
 
 | Form | Key | Source | Effect |
 | --- | --- | --- | --- |
-| Bare name | — | Host OS env | Script reads `$VAR` at runtime via `env.get()`; no injection |
+| Bare name | — | Host OS env | Script reads `$VAR` at runtime via `env.get()`; forwarded from the host if set |
+| Bare pattern (`PREFIX_*`) | — | Host OS env | Forward **every** host var matching the trailing-`*` prefix, and make each matched name readable |
 | `from:` | host OS var name | Host OS env | Read `$GH_TOKEN` from OS, inject subprocess env as `API_KEY` |
 | `secret:` | secrets store key | Secrets store | Resolve encrypted secret, inject as the given name; **fails if not found** |
 | `value:` | — | Literal | Inject a fixed string (used by taskset override layers) |
@@ -950,6 +951,9 @@ Two modifiers apply on top:
 - `from:` reads **only** from the host OS environment (`os.Getenv`). Use it to rename a host env var or make the mapping explicit.
 - `secret:` reads **only** from the dicode secrets store (set via `dicode secrets set`). Run fails immediately if the key is not in the store.
 - A bare name does **neither** — it only allowlists the var so the script can read it from the host env via `env.get()`. No injection, no secrets lookup.
+- A bare **pattern** (`PREFIX_*`) is a bare name with a trailing-`*` prefix glob: at launch it expands against the host environment, forwards every matching host var's value into the subprocess, and makes each matched name readable (Deno `--allow-env`, the Python env-read filter). It pulls in a related family of vars without enumerating each — while still **not** granting blanket read the way `env_read_exposed` does. Distinct from a lone `"*"` (rejected — use `env_read_exposed`).
+
+> **Security:** a pattern never forwards the daemon's own credentials. `DICODE_MASTER_KEY`, `DICODE_API_KEY`, `DICODE_MCP_API_KEY` and the per-run IPC vars (`DICODE_SOCKET`/`DICODE_TOKEN`) are always excluded, even when a pattern like `DICODE_*` prefix-matches them.
 
 #### Example 1 — bare passthrough (name stays the same)
 
@@ -964,6 +968,26 @@ permissions:
 // task.ts
 export default async function main({ env }) {
   const token = await env.get("GITHUB_TOKEN")  // reads $GITHUB_TOKEN from host env at runtime
+}
+```
+
+#### Example 1b — pattern passthrough (forward a family of host vars)
+
+The host OS has `GITHUB_TOKEN`, `GITHUB_SHA`, `GITHUB_REPOSITORY`. Forward all of
+them without listing each:
+
+```yaml
+# task.yaml
+permissions:
+  env:
+    - "GITHUB_*"   # every host var starting with GITHUB_ is forwarded and readable
+```
+
+```typescript
+// task.ts
+export default async function main({ env }) {
+  const token = await env.get("GITHUB_TOKEN")  // forwarded from the host
+  const sha = await env.get("GITHUB_SHA")
 }
 ```
 

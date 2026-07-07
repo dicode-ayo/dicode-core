@@ -418,8 +418,14 @@ func buildDenoArgs(spec *task.Spec, socketPath, shimPath, runnerPath string, pro
 	} else {
 		envVars := []string{"DICODE_SOCKET", "DICODE_TOKEN", "HOME", "DENO_DIR", "XDG_CACHE_HOME"}
 		for _, e := range spec.Permissions.Env {
+			// A pattern entry's literal name ("GITHUB_*") is not a readable var;
+			// its expanded matches are appended below so they reach the sandbox.
+			if pkgruntime.IsWildcardEnvEntry(e) {
+				continue
+			}
 			envVars = append(envVars, e.Name)
 		}
+		envVars = append(envVars, pkgruntime.WildcardEnvNames(spec)...)
 		args = append(args, "--allow-env="+strings.Join(envVars, ","))
 	}
 
