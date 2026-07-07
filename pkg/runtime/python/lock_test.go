@@ -5,11 +5,34 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 )
 
 func TestLockSidecarPath(t *testing.T) {
 	if got := LockSidecarPath("/x/tasks/t/task.py"); got != "/x/tasks/t/task.py.lock" {
 		t.Fatalf("LockSidecarPath = %q", got)
+	}
+}
+
+// The exact stderr uv writes when a `--locked` run is rejected because the
+// script's inline metadata drifted from its lock sidecar. Pins that
+// staleLockSignature keeps matching the real message.
+const uvLockedStaleErr = "error: The lockfile at `uv.lock` needs to be updated, but `--locked` was provided. To update the lockfile, run `uv lock`.\n"
+
+func TestStaleLockSignature_MatchesUvLockedError(t *testing.T) {
+	s := pkgruntime.NewLockErrSniffer(staleLockSignature)
+	s.Write([]byte(uvLockedStaleErr)) //nolint:errcheck
+	if !s.StaleLock() {
+		t.Errorf("staleLockSignature %q did not match uv's --locked error", staleLockSignature)
+	}
+}
+
+func TestStaleLockSignature_IgnoresOrdinaryError(t *testing.T) {
+	s := pkgruntime.NewLockErrSniffer(staleLockSignature)
+	s.Write([]byte("Traceback (most recent call last):\n  File task.py, line 1\nValueError: boom\n")) //nolint:errcheck
+	if s.StaleLock() {
+		t.Error("ordinary Python traceback must not be treated as a stale lock")
 	}
 }
 

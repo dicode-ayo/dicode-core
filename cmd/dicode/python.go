@@ -1,9 +1,9 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
-	"os/exec"
 
 	"github.com/dicode/dicode/internal/fsutil"
 	pythonpkg "github.com/dicode/dicode/pkg/runtime/python"
@@ -109,16 +109,9 @@ func runPythonRelock(check bool, dir string) error {
 	}
 
 	for _, p := range lockable {
-		lockArgs := []string{"lock", "--script", p}
-		if check {
-			lockArgs = append(lockArgs, "--check")
-		}
-		cmd := exec.Command(uvPath, lockArgs...) // #nosec G204 — argv is the provisioned uv plus discovered task.py paths, no user shell injection.
 		// uv's resolution chatter goes to the operator terminal; stdout is
 		// kept clean for scripting (same contract as cmdDenoRelock).
-		cmd.Stdout = os.Stderr
-		cmd.Stderr = os.Stderr
-		if runErr := cmd.Run(); runErr != nil {
+		if runErr := pythonpkg.RelockScript(context.Background(), uvPath, p, check, os.Stderr); runErr != nil {
 			sidecar := pythonpkg.LockSidecarPath(p)
 			if check {
 				// uv prints the cause above — a lockfile diff if the sidecar

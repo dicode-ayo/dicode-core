@@ -44,6 +44,7 @@ import (
 	"context"
 	_ "embed"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -248,60 +249,105 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 	// loudly instead of silently resolving new versions. Tasks without a
 	// sidecar run exactly as before — mirrors the Deno runtime, which only
 	// enforces --frozen when a deno.lock is present.
-	stagedLock, locked, err := stageLockSidecar(scriptPath, tmpFile.Name())
-	if err != nil {
-		result.Error = err
-		return result, nil
-	}
-	if locked {
-		defer os.Remove(stagedLock)
-	}
+	//
+	// Staging happens per attempt so a stale-lock auto-recovery relock (issue
+	// #455) is picked up on retry: uv discovers the lock strictly by the
+	// <wrapper>.lock filename, so the regenerated sidecar must be re-copied.
+	stagedPath := LockSidecarPath(tmpFile.Name())
+	defer os.Remove(stagedPath)
 
-	cmd := exec.CommandContext(execCtx, e.uvPath, buildUvRunArgs(tmpFile.Name(), locked)...) //nolint:gosec
-	cmd.Env = pkgruntime.SubprocessEnv(spec, resolved, socketPath, token)
+	// runOnce stages the lock, spawns the uv subprocess, streams its output, and
+	// records the outcome on result. It reports whether the run failed with the
+	// stale-lock signature so a single deterministic relock+retry can recover a
+	// drifted sidecar without invoking the AI auto-fix loop.
+	runOnce := func() (staleLock bool) {
+		result.Error = nil
+		result.ChainInput = nil
 
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		result.Error = err
-		return result, nil
-	}
+		_, locked, err := stageLockSidecar(scriptPath, tmpFile.Name())
+		if err != nil {
+			result.Error = err
+			return false
+		}
 
-	if err := cmd.Start(); err != nil {
-		result.Error = fmt.Errorf("start uv: %w", err)
-		return result, nil
-	}
+		cmd := exec.CommandContext(execCtx, e.uvPath, buildUvRunArgs(tmpFile.Name(), locked)...) //nolint:gosec
+		cmd.Env = pkgruntime.SubprocessEnv(spec, resolved, socketPath, token)
+		sniffer := pkgruntime.NewLockErrSniffer(staleLockSignature)
 
-	// Stream uv/Python stderr to registry logs in real-time, at "warn": the
-	// stream mixes uv's own progress chatter with Python tracebacks, unlike
-	// Deno's, whose stderr is logged as "error". Stdout is not streamed
-	// (Python tasks log via the SDK's log global over IPC).
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go e.StreamRunLog(&wg, stderr, runID, "stderr", "warn", redactor)
+		stderr, err := cmd.StderrPipe()
+		if err != nil {
+			result.Error = err
+			return false
+		}
+		if err := cmd.Start(); err != nil {
+			result.Error = fmt.Errorf("start uv: %w", err)
+			return false
+		}
 
-	doneCh := make(chan error, 1)
-	go func() { doneCh <- cmd.Wait() }()
+		// Stream uv/Python stderr to registry logs in real-time, at "warn": the
+		// stream mixes uv's own progress chatter with Python tracebacks, unlike
+		// Deno's, whose stderr is logged as "error". Tee it through the sniffer so
+		// the same bytes still reach the log. Stdout is not streamed (Python tasks
+		// log via the SDK's log global over IPC).
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go e.StreamRunLog(&wg, io.TeeReader(stderr, sniffer), runID, "stderr", "warn", redactor)
 
-	exitErr, exitedFirst := pkgruntime.AwaitBridgeCompletion(srv.ReturnCh(), doneCh, pkgruntime.BridgeShutdownGrace,
-		func(retVal any) {
-			result.ChainInput = retVal
+		doneCh := make(chan error, 1)
+		go func() { doneCh <- cmd.Wait() }()
+
+		exitErr, exitedFirst := pkgruntime.AwaitBridgeCompletion(srv.ReturnCh(), doneCh, pkgruntime.BridgeShutdownGrace,
+			func(retVal any) {
+				result.ChainInput = retVal
+				if out := srv.Output(); out != nil {
+					result.ChainInput = out.Data
+				}
+			},
+			func() { _ = cmd.Process.Signal(syscall.SIGTERM) },
+		)
+		if exitedFirst {
 			if out := srv.Output(); out != nil {
 				result.ChainInput = out.Data
 			}
-		},
-		func() { _ = cmd.Process.Signal(syscall.SIGTERM) },
-	)
-	if exitedFirst {
-		if out := srv.Output(); out != nil {
-			result.ChainInput = out.Data
+			if exitErr != nil {
+				result.Error = exitErr
+			}
 		}
-		if exitErr != nil {
-			result.Error = exitErr
-		}
+
+		wg.Wait()
+		return result.Error != nil && sniffer.StaleLock()
 	}
 
-	wg.Wait()
+	pkgruntime.RecoverStaleLock(pkgruntime.StaleLockRecoveryEnabled(), runOnce, func() error {
+		return e.relockScript(ctx, spec, runID, scriptPath)
+	})
+
 	return result, nil
+}
+
+// relockScript regenerates the task.py.lock sidecar for the failing script
+// after a stale-lock run failure and records an audit line with the sidecar's
+// hash delta. Regenerating re-pins the dependencies the (already-approved) task
+// declares, so it does not bypass the approval gate, which governs task content.
+func (e *executor) relockScript(ctx context.Context, spec *task.Spec, runID, scriptPath string) error {
+	sidecar := LockSidecarPath(scriptPath)
+	before, _ := os.ReadFile(sidecar) //nolint:gosec
+	var out strings.Builder
+	if err := RelockScript(ctx, e.uvPath, scriptPath, false, &out); err != nil {
+		e.Log.Warn("stale-lock auto-recovery: uv relock failed",
+			zap.String("task", spec.ID), zap.String("lock", sidecar), zap.Error(err))
+		_ = e.Registry.AppendLog(context.Background(), runID, "error",
+			fmt.Sprintf("auto-recovery: %s regeneration failed: %v", sidecar, err))
+		return err
+	}
+	after, _ := os.ReadFile(sidecar) //nolint:gosec
+	hb, ha := pkgruntime.ShortHash(before), pkgruntime.ShortHash(after)
+	e.Log.Info("stale-lock auto-recovery: regenerated uv lock, retrying run",
+		zap.String("task", spec.ID), zap.String("lock", sidecar),
+		zap.String("hash_before", hb), zap.String("hash_after", ha))
+	_ = e.Registry.AppendLog(context.Background(), runID, "info",
+		fmt.Sprintf("auto-recovery: %s was stale, regenerated (%s→%s), retrying run", sidecar, hb, ha))
+	return nil
 }
 
 // buildWrapper assembles the final Python file that uv will execute:

@@ -1,13 +1,12 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 
-	"github.com/dicode/dicode/internal/fsutil"
-	denopkg "github.com/dicode/dicode/pkg/deno"
+	denort "github.com/dicode/dicode/pkg/runtime/deno"
 )
 
 // cmdDeno implements `dicode deno <subcommand>` — local, daemon-free helpers
@@ -44,8 +43,9 @@ func cmdDenoRelock(args []string) error {
 	return runDenoRelock(check, dir)
 }
 
-// runDenoRelock is the parse-free core of `dicode deno relock`, shared with
-// the runtime-spanning `dicode relock` frontend.
+// runDenoRelock is the parse-free frontend of `dicode deno relock`, shared with
+// the runtime-spanning `dicode relock`. It delegates the deno-cache pass to
+// denort.Relock — the same core the runtime uses for stale-lock auto-recovery.
 func runDenoRelock(check bool, dir string) error {
 	lockPath := filepath.Join(dir, "deno.lock")
 	if check {
@@ -54,57 +54,24 @@ func runDenoRelock(check bool, dir string) error {
 		}
 	}
 
-	entrypoints, err := findTaskEntrypoints(dir)
-	if err != nil {
-		return err
-	}
-	if len(entrypoints) == 0 {
-		return fmt.Errorf("no task.ts entrypoints found under %s", dir)
-	}
-
-	denoPath, err := denopkg.EnsureDeno(denopkg.DefaultVersion)
-	if err != nil {
-		return fmt.Errorf("provision deno %s: %w", denopkg.DefaultVersion, err)
-	}
-
-	cacheArgs := []string{"cache"}
-	if check {
-		cacheArgs = append(cacheArgs, "--frozen")
-	} else {
-		cacheArgs = append(cacheArgs, "--frozen=false")
-	}
-	cacheArgs = append(cacheArgs, "--lock="+lockPath)
-	if cfg := filepath.Join(dir, "deno.json"); fsutil.Exists(cfg) {
-		cacheArgs = append(cacheArgs, "--config="+cfg)
-	}
-	cacheArgs = append(cacheArgs, entrypoints...)
-
-	cmd := exec.Command(denoPath, cacheArgs...)
 	// Deno's Check/Download/lockfile-diff chatter goes to the operator terminal;
 	// stdout is kept clean for scripting.
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	if runErr := cmd.Run(); runErr != nil {
+	n, err := denort.Relock(context.Background(), dir, check, os.Stderr)
+	if err != nil {
 		if check {
 			// deno prints the cause above — a lockfile diff if the lock is
 			// stale, otherwise a dependency/config/type error. Don't assert
 			// staleness; surface both so a non-lock failure isn't mistaken for
 			// drift.
-			return fmt.Errorf("deno cache --frozen failed (see output above); if %s is stale, run `dicode deno relock %s`: %w", lockPath, dir, runErr)
+			return fmt.Errorf("deno cache --frozen failed (see output above); if %s is stale, run `dicode deno relock %s`: %w", lockPath, dir, err)
 		}
-		return fmt.Errorf("deno cache: %w", runErr)
+		return fmt.Errorf("deno cache: %w", err)
 	}
 
 	if check {
-		fmt.Fprintf(os.Stderr, "dicode: %s is up to date (%d entrypoints)\n", lockPath, len(entrypoints))
+		fmt.Fprintf(os.Stderr, "dicode: %s is up to date (%d entrypoints)\n", lockPath, n)
 	} else {
-		fmt.Fprintf(os.Stderr, "dicode: regenerated %s (%d entrypoints)\n", lockPath, len(entrypoints))
+		fmt.Fprintf(os.Stderr, "dicode: regenerated %s (%d entrypoints)\n", lockPath, n)
 	}
 	return nil
-}
-
-// findTaskEntrypoints returns every task.ts under dir, sorted for a stable
-// command line (deterministic lock ordering).
-func findTaskEntrypoints(dir string) ([]string, error) {
-	return findTaskFiles(dir, "task.ts")
 }
