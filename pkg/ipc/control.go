@@ -58,6 +58,13 @@ type ControlServer struct {
 	// CLI. Nil means allow.
 	testGuard func(taskID string) error
 
+	// readyWait blocks until the daemon's first reconcile completes (or a bound
+	// elapses), reporting whether it became ready. Task-scoped handlers call it
+	// so a lookup issued the instant the socket opens does not spuriously miss a
+	// task that is about to register (issue #464). Nil (tests / no reconciler)
+	// means "don't wait".
+	readyWait func(ctx context.Context) bool
+
 	startedAt time.Time
 	version   string
 }
@@ -339,6 +346,22 @@ func (cs *ControlServer) SetAuthoringService(a AuthoringService) { cs.authoring 
 // Must be called before Start.
 func (cs *ControlServer) SetTestGuard(g func(taskID string) error) { cs.testGuard = g }
 
+// SetReadinessWaiter installs the readiness barrier consulted by task-scoped
+// handlers (cli.run, cli.task.test, cli.status with a task id) before they look
+// a task up. The daemon wires this to the reconciler's first-sync signal. Must
+// be called before Start; nil leaves those handlers un-gated.
+func (cs *ControlServer) SetReadinessWaiter(fn func(ctx context.Context) bool) { cs.readyWait = fn }
+
+// awaitReady blocks a task-scoped handler until the daemon's first reconcile
+// completes or the waiter's bound elapses. On timeout it returns and lets the
+// lookup proceed, so a genuinely-absent task still surfaces a not-found rather
+// than hanging forever.
+func (cs *ControlServer) awaitReady(ctx context.Context) {
+	if cs.readyWait != nil {
+		cs.readyWait(ctx)
+	}
+}
+
 func (cs *ControlServer) handleTaskCreate(ctx context.Context, req Request) (TaskCreateResult, error) {
 	if cs.authoring == nil {
 		return TaskCreateResult{}, errors.New("authoring service not configured")
@@ -521,6 +544,7 @@ func (cs *ControlServer) handleRun(ctx context.Context, req Request) (RunResult,
 	if req.TaskID == "" {
 		return RunResult{}, errors.New("taskID required")
 	}
+	cs.awaitReady(ctx)
 	var params map[string]string
 	if req.Params != nil {
 		if err := json.Unmarshal(req.Params, &params); err != nil {
@@ -558,6 +582,7 @@ func (cs *ControlServer) handleStatus(ctx context.Context, req Request) (any, er
 	if req.TaskID == "" {
 		return cs.handlePing(), nil
 	}
+	cs.awaitReady(ctx)
 	// Return the latest run for the given task.
 	runs, err := cs.reg.ListRuns(ctx, req.TaskID, 1)
 	if err != nil {
@@ -765,6 +790,7 @@ func (cs *ControlServer) handleTaskTest(ctx context.Context, req Request) (TaskT
 	if req.TaskID == "" {
 		return TaskTestResult{}, errors.New("taskID required")
 	}
+	cs.awaitReady(ctx)
 	// Approval-gate veto: the test file runs with full host permissions, so
 	// a pending (unapproved) task must be refused here just like a fire.
 	if cs.testGuard != nil {

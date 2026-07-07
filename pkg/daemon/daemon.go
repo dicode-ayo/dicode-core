@@ -46,6 +46,11 @@ import (
 // but then streams quickly) and closes shortly after the burst ends.
 const bootstrapSettle = 10 * time.Second
 
+// cliReadyTimeout bounds how long a task-scoped control-socket command waits
+// for the reconciler's first sync before dispatching anyway. It only bites
+// during the startup window; once ready, the wait returns immediately.
+const cliReadyTimeout = 10 * time.Second
+
 // Run starts the daemon process. It blocks until the context is cancelled
 // (via signal) or a fatal error occurs. configPath is the path to
 // dicode.yaml; portOverride, when non-zero, is propagated to the
@@ -653,6 +658,15 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	// Approval-gate veto for `dicode task test` — same guard as the engine's
 	// fire paths and the REST test endpoint.
 	ctrlSrv.SetTestGuard(approvalGate.FireGuard)
+
+	// Readiness barrier (#464): the control socket opens before the reconciler's
+	// first sync registers tasks, so a task-scoped CLI command dispatched the
+	// instant the socket is live could see a spurious "not found". Gate those
+	// handlers on the first-sync signal; on timeout the lookup proceeds so a
+	// genuinely-absent task still returns not-found instead of hanging.
+	ctrlSrv.SetReadinessWaiter(func(ctx context.Context) bool {
+		return rec.WaitReady(ctx, cliReadyTimeout)
+	})
 
 	// `dicode task approve` — the control socket is a trusted local channel.
 	ctrlSrv.SetTaskApprover(approvalGate.Approve)

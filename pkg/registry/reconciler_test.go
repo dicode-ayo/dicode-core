@@ -30,6 +30,28 @@ func (f *fakeSource) Start(_ context.Context) (<-chan source.Event, error) {
 }
 func (f *fakeSource) Sync(_ context.Context) error { return nil }
 
+// syncEmitSource mirrors the real taskset source contract for the readiness
+// path: Start emits its initial inventory synchronously (into the buffered
+// channel) before returning, so the reconciler's initial drain observes it.
+type syncEmitSource struct {
+	id      string
+	ch      chan source.Event
+	initial []source.Event
+}
+
+func newSyncEmitSource(id string, initial ...source.Event) *syncEmitSource {
+	return &syncEmitSource{id: id, ch: make(chan source.Event, 64), initial: initial}
+}
+
+func (s *syncEmitSource) ID() string { return s.id }
+func (s *syncEmitSource) Start(_ context.Context) (<-chan source.Event, error) {
+	for _, ev := range s.initial {
+		s.ch <- ev
+	}
+	return s.ch, nil
+}
+func (s *syncEmitSource) Sync(_ context.Context) error { return nil }
+
 func writeTask(t *testing.T, dir, name string) string {
 	t.Helper()
 	td := filepath.Join(dir, name)
@@ -377,6 +399,75 @@ func TestReconciler_RemovedWhilePendingNotRetried(t *testing.T) {
 	}
 	if _, ok := reg.Get("ghost-provider"); !ok {
 		t.Fatal("ghost-provider should be registered")
+	}
+}
+
+// TestReconciler_ReadyAfterFirstSync asserts the readiness barrier: by the time
+// Ready() is observable-closed, the initial inventory a source emitted from
+// Start is already in the registry — never the reverse (issue #464).
+func TestReconciler_ReadyAfterFirstSync(t *testing.T) {
+	dir := t.TempDir()
+	td := writeTask(t, dir, "init-task")
+
+	fs := newSyncEmitSource("test", source.Event{
+		Kind: source.EventAdded, TaskID: "init-task", TaskDir: td, Source: "test",
+	})
+	reg, rec := newTestReconciler(t, fs)
+
+	// Not ready before Run.
+	select {
+	case <-rec.Ready():
+		t.Fatal("reconciler reported ready before Run started")
+	default:
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go rec.Run(ctx)
+
+	select {
+	case <-rec.Ready():
+		if _, ok := reg.Get("init-task"); !ok {
+			t.Fatal("readiness fired before the initial inventory was registered")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("reconciler never became ready")
+	}
+}
+
+// TestReconciler_ReadyWithNoSources verifies a source-less daemon becomes ready
+// promptly rather than blocking CLI task commands forever.
+func TestReconciler_ReadyWithNoSources(t *testing.T) {
+	_, rec := newTestReconciler(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go rec.Run(ctx)
+
+	select {
+	case <-rec.Ready():
+	case <-time.After(2 * time.Second):
+		t.Fatal("source-less reconciler never became ready")
+	}
+}
+
+// TestReconciler_WaitReadyTimeout verifies WaitReady returns false (rather than
+// blocking indefinitely) when the first sync has not completed, and true once
+// it has.
+func TestReconciler_WaitReadyTimeout(t *testing.T) {
+	_, rec := newTestReconciler(t)
+
+	// Run has not been called — never ready. Bounded wait must give up.
+	if rec.WaitReady(context.Background(), 50*time.Millisecond) {
+		t.Fatal("WaitReady reported ready before Run started")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go rec.Run(ctx)
+
+	if !rec.WaitReady(context.Background(), 2*time.Second) {
+		t.Fatal("WaitReady did not observe readiness after the first sync")
 	}
 }
 

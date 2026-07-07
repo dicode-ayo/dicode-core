@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/dicode/dicode/pkg/source"
 	"github.com/dicode/dicode/pkg/task"
@@ -30,6 +31,12 @@ type Reconciler struct {
 	cancels map[string]context.CancelFunc // sourceID → cancel fn
 	runCtx  context.Context
 
+	// readyCh is closed once Run has applied the initial inventory emitted by
+	// every configured source. Until then a task lookup may miss a task that is
+	// about to register, so task-scoped CLI commands wait on it (issue #464).
+	readyCh   chan struct{}
+	readyOnce sync.Once
+
 	// pending holds events that failed validateTaskProviders because a
 	// provider task was not yet registered. After any successful registration
 	// these are re-emitted to merged for a retry. Keyed by task ID so a
@@ -50,6 +57,7 @@ func NewReconciler(r *Registry, sources []source.Source, dataDir string, log *za
 		log:      log,
 		cancels:  make(map[string]context.CancelFunc),
 		pending:  make(map[string]source.Event),
+		readyCh:  make(chan struct{}),
 	}
 }
 
@@ -60,18 +68,22 @@ func (rc *Reconciler) Run(ctx context.Context) error {
 	rc.merged = make(chan source.Event, 64)
 	rc.mu.Unlock()
 
-	if len(rc.sources) == 0 {
-		// Still need to run so dynamic AddSource works.
-		goto loop
-	}
-
+	// Source.Start emits its initial inventory synchronously into the source's
+	// own channel before returning. Drain and apply that burst here — before
+	// marking the reconciler ready — so a CLI task lookup arriving the instant
+	// the control socket opens cannot observe a task that is about to register
+	// (issue #464). The ongoing watcher is forwarded only after the initial
+	// drain, so first-sync events are never raced by a later change.
 	for _, src := range rc.sources {
-		if err := rc.startSource(src); err != nil {
+		ch, err := rc.beginSource(src)
+		if err != nil {
 			return fmt.Errorf("start source %s: %w", src.ID(), err)
 		}
+		rc.drainInitial(ch)
+		rc.forward(ctx, ch)
 	}
+	rc.markReady()
 
-loop:
 	for {
 		select {
 		case <-ctx.Done():
@@ -79,6 +91,44 @@ loop:
 		case ev := <-rc.merged:
 			rc.handle(ev)
 		}
+	}
+}
+
+// Ready returns a channel closed once Run has applied the initial inventory of
+// every configured source. A daemon with no sources is ready immediately.
+func (rc *Reconciler) Ready() <-chan struct{} { return rc.readyCh }
+
+// markReady closes readyCh exactly once.
+func (rc *Reconciler) markReady() {
+	rc.readyOnce.Do(func() { close(rc.readyCh) })
+}
+
+// WaitReady blocks until the first sync completes, ctx is cancelled, or timeout
+// elapses, reporting whether the reconciler became ready. A non-positive
+// timeout waits only on the already-completed case and ctx.
+func (rc *Reconciler) WaitReady(ctx context.Context, timeout time.Duration) bool {
+	select {
+	case <-rc.readyCh:
+		return true
+	default:
+	}
+	if timeout <= 0 {
+		select {
+		case <-rc.readyCh:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
+	t := time.NewTimer(timeout)
+	defer t.Stop()
+	select {
+	case <-rc.readyCh:
+		return true
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return false
 	}
 }
 
@@ -105,21 +155,55 @@ func (rc *Reconciler) startSource(src source.Source) error {
 	rc.mu.Lock()
 	ctx := rc.runCtx
 	rc.mu.Unlock()
+	ch, err := rc.beginSource(src)
+	if err != nil {
+		return err
+	}
+	rc.forward(ctx, ch)
+	return nil
+}
+
+// beginSource starts a source and registers its cancel func, returning the
+// event channel without forwarding it. Callers that need the initial burst
+// applied before ongoing events (Run) drain the channel themselves first.
+func (rc *Reconciler) beginSource(src source.Source) (<-chan source.Event, error) {
+	rc.mu.Lock()
+	ctx := rc.runCtx
+	rc.mu.Unlock()
 	if ctx == nil {
-		return fmt.Errorf("reconciler not yet running")
+		return nil, fmt.Errorf("reconciler not yet running")
 	}
 
 	srcCtx, cancel := context.WithCancel(ctx)
 	ch, err := src.Start(srcCtx)
 	if err != nil {
 		cancel()
-		return err
+		return nil, err
 	}
 
 	rc.mu.Lock()
 	rc.cancels[src.ID()] = cancel
 	rc.mu.Unlock()
+	return ch, nil
+}
 
+// drainInitial applies every event already buffered on a freshly started
+// source channel. Source.Start emits its initial inventory synchronously
+// before returning, so a non-blocking drain captures exactly that burst
+// without waiting on later changes.
+func (rc *Reconciler) drainInitial(ch <-chan source.Event) {
+	for {
+		select {
+		case ev := <-ch:
+			rc.handle(ev)
+		default:
+			return
+		}
+	}
+}
+
+// forward pumps a source channel into the merged stream until ctx is done.
+func (rc *Reconciler) forward(ctx context.Context, ch <-chan source.Event) {
 	go func() {
 		for ev := range ch {
 			// Without the ctx select, a slow main loop plus a closed merged
@@ -134,7 +218,6 @@ func (rc *Reconciler) startSource(src source.Source) error {
 			}
 		}
 	}()
-	return nil
 }
 
 func (rc *Reconciler) handle(ev source.Event) {
