@@ -1,0 +1,8 @@
+apiVersion: dicode/v1
+kind: Task
+name: Suspend Wizard
+description: A one-step suspend/resume wizard for e2e testing (#95).
+runtime: deno
+trigger:
+  manual: true
+timeout: 10s

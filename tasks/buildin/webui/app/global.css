@@ -135,6 +135,9 @@ tr:last-child td { border-bottom: none; }
 .badge-crashlooping { background: rgba(243, 139, 168, .28); color: var(--red); border-color: rgba(243, 139, 168, .4); }
 .badge-cancelled { background: var(--card-bg); color: var(--muted); border-color: var(--border); }
 .badge-manual    { background: var(--card-bg); color: var(--muted); border-color: var(--border); }
+/* suspended (#95): a run paused waiting on user input — blue "waiting on you". */
+.badge-suspended { background: var(--blue-tint); color: var(--sky); border-color: var(--blue-tint-strong); }
+.badge-resumed   { background: var(--card-bg); color: var(--muted); border-color: var(--border); }
 
 /* ── PILLS & TAGS ─────────────────────────────────────────────────── */
 .pill {

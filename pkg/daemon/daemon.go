@@ -710,6 +710,8 @@ func buildWebUI(ctx context.Context, cfg *config.Config, configPath, version, da
 	if replayer != nil {
 		srv.SetReplayer(replayer)
 	}
+	// The engine's ResumeRun backs the suspended-run resume endpoint (#95).
+	srv.SetResumer(eng)
 	return srv, nil
 }
 
