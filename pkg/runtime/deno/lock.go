@@ -8,10 +8,19 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"sync"
 
 	"github.com/dicode/dicode/internal/fsutil"
 	denopkg "github.com/dicode/dicode/pkg/deno"
 )
+
+// denoLockMu serializes regeneration of the shared tasks/deno.lock. Every deno
+// task shares one lock, so a dependency drift after a push stale-fails several
+// concurrently running tasks at once; each would call Relock in parallel and
+// race writing the same file. Serializing them means later relocks observe the
+// freshly written lock instead of clobbering it. Check mode (frozen) does not
+// write and is not held.
+var denoLockMu sync.Mutex
 
 // staleLockSignature is the substring Deno prints to stderr when a `--frozen`
 // run is rejected because the dependency graph drifted from the lockfile:
@@ -35,6 +44,12 @@ func Relock(ctx context.Context, dir string, frozen bool, out io.Writer) (int, e
 	}
 	if len(entrypoints) == 0 {
 		return 0, fmt.Errorf("no task.ts entrypoints found under %s", dir)
+	}
+
+	// Serialize writers against the shared lock; verifiers are read-only.
+	if !frozen {
+		denoLockMu.Lock()
+		defer denoLockMu.Unlock()
 	}
 
 	denoPath, err := denopkg.EnsureDeno(denopkg.DefaultVersion)
