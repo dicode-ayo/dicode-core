@@ -40,6 +40,7 @@ type ControlServer struct {
 	apiKeys         APIKeyMinter     // nil if webui not wired (tests)
 	authoring       AuthoringService // nil if webui not wired (tests)
 	taskDeleter     TaskDeleter      // nil if webui not wired (tests)
+	resumer         Resumer          // nil if engine not wired (tests)
 	log             *zap.Logger
 
 	// taskApprover is the approval gate's Approve, wired via SetTaskApprover.
@@ -234,6 +235,12 @@ func (cs *ControlServer) dispatch(ctx context.Context, req Request) (any, error)
 
 	case "cli.status":
 		return cs.handleStatus(ctx, req)
+
+	case "cli.resume":
+		return cs.handleResume(ctx, req)
+
+	case "cli.resume.list":
+		return cs.handleResumeList(ctx)
 
 	case "cli.secrets.list":
 		return cs.handleSecretsList(ctx)

@@ -5,6 +5,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -764,7 +765,30 @@ func buildControlServer(cfg *config.Config, dataDir, version string, database db
 	// Wire task deletion so `dicode task delete` can remove a task from its
 	// source. The SourceManager owns source state, repo paths, and dev-clones.
 	ctrlSrv.SetTaskDeleter(sourceMgr)
+
+	// Wire suspended-run resume so `dicode resume` reaches Engine.ResumeRun.
+	ctrlSrv.SetResumer(resumerAdapter{eng: eng})
 	return ctrlSrv, nil
+}
+
+// resumerAdapter maps the trigger engine's typed resume errors onto the ipc
+// sentinels so the control handler can classify them — pkg/ipc cannot import
+// pkg/trigger (trigger imports ipc), so the translation lives here.
+type resumerAdapter struct{ eng *trigger.Engine }
+
+func (a resumerAdapter) ResumeRun(ctx context.Context, token string, input []byte) (string, error) {
+	id, err := a.eng.ResumeRun(ctx, token, input)
+	switch {
+	case errors.Is(err, trigger.ErrResumeTokenNotFound):
+		return "", ipc.ErrResumeTokenNotFound
+	case errors.Is(err, trigger.ErrResumeNotSuspended):
+		return "", ipc.ErrResumeNotSuspended
+	case errors.Is(err, trigger.ErrResumeExpired):
+		return "", ipc.ErrResumeExpired
+	case errors.Is(err, trigger.ErrResumePending):
+		return "", ipc.ErrResumePending
+	}
+	return id, err
 }
 
 // wireCryptoIPC wires the generic dicode.crypto.{encrypt, decrypt} IPC verb

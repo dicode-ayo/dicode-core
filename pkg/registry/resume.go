@@ -37,6 +37,33 @@ func (r *Registry) GetRunByResumeToken(ctx context.Context, token string) (*Run,
 	return run, nil
 }
 
+// ListSuspendedRuns returns every run currently in the suspended state, newest
+// first (by suspend time). Unlike queryRuns, it selects the resume columns so
+// callers can render each run's pending form — used by `dicode resume` to list
+// what's resumable.
+func (r *Registry) ListSuspendedRuns(ctx context.Context, limit int) ([]*Run, error) {
+	var runs []*Run
+	err := r.db.Query(ctx,
+		`SELECT `+runColumns+runInputColumns+runResumeColumns+`
+		 FROM runs WHERE status = ? ORDER BY suspended_at DESC LIMIT ?`,
+		[]any{StatusSuspended, limit},
+		func(rows db.Scanner) error {
+			for rows.Next() {
+				run, err := scanRun(rows, true, true)
+				if err != nil {
+					return err
+				}
+				runs = append(runs, run)
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list suspended runs: %w", err)
+	}
+	return runs, nil
+}
+
 // MarkRunResumed transitions a suspended run to the terminal `resumed` state,
 // consuming its resume token so it can't be replayed. The transition is a
 // single conditional UPDATE gated on the current status; RowsAffected decides
