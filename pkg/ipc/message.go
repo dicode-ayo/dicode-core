@@ -101,6 +101,15 @@ type Request struct {
 	// dicode.set_group — free-text label for the caller's run (#116).
 	Group string `json:"group,omitempty"`
 
+	// dicode.suspend — pause the run and yield a form for the user (#95).
+	// State is the opaque JSON blob to rehydrate on resume; Form is the
+	// FormSchema describing the input to collect; Deadline is an optional
+	// Unix-ms TTL (0 = unset, engine applies its default). Kept as raw JSON
+	// so the runtime threads the blobs through without re-encoding.
+	State    json.RawMessage `json:"state,omitempty"`
+	Form     json.RawMessage `json:"form,omitempty"`
+	Deadline int64           `json:"deadline,omitempty"`
+
 	// dicode.sources.set_dev_mode — toggles dev mode on a configured source (#234)
 	Name      string `json:"name,omitempty"`       // source name
 	Enabled   bool   `json:"enabled,omitempty"`    // true to enable
@@ -172,6 +181,16 @@ type OutputResult struct {
 
 // IsSet reports whether any output was recorded.
 func (o *OutputResult) IsSet() bool { return o != nil && o.ContentType != "" }
+
+// SuspendResult captures a dicode.suspend() request (#95): the opaque state
+// blob to rehydrate on resume, the FormSchema describing the input to
+// collect, and an optional Unix-ms deadline (0 = unset). State and Form are
+// kept as raw JSON so the runtime forwards them to the engine unchanged.
+type SuspendResult struct {
+	State    json.RawMessage `json:"state,omitempty"`
+	Form     json.RawMessage `json:"form,omitempty"`
+	Deadline int64           `json:"deadline,omitempty"`
+}
 
 // EngineRunner allows the IPC server to fire and await task runs, and to
 // query live concurrency state. Implemented by the trigger engine; injected

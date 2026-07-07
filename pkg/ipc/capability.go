@@ -43,6 +43,13 @@ const (
 	// only so future denial policies can revoke it.
 	CapOutputSecret = "output.secret"
 
+	// CapSuspend allows a task to call dicode.suspend() — pause the run,
+	// hand the runtime an opaque state blob plus a form schema, and exit
+	// cleanly for later resume (#95). A core self-affecting primitive
+	// granted to every task token by default; the cap exists only so future
+	// denial policies can revoke it.
+	CapSuspend = "suspend"
+
 	// Conditionally granted to tasks based on security config.
 	CapTaskTrigger = "tasks.trigger" // dicode.run_task — also checked against allowed_tasks list
 	CapTasksList   = "tasks.list"    // dicode.list_tasks
@@ -118,5 +125,6 @@ func defaultTaskCaps() []string {
 		CapReturn,
 		CapOutputSecret,
 		CapSetGroup,
+		CapSuspend,
 	}
 }

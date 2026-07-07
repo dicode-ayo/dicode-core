@@ -82,9 +82,18 @@ type Server struct {
 	connWG   sync.WaitGroup // tracks in-flight handleConn goroutines
 	acceptMu sync.Mutex     // serialises accept+Add against Stop's Wait
 
-	mu     sync.Mutex
-	output *OutputResult
-	retCh  chan any
+	mu      sync.Mutex
+	output  *OutputResult
+	suspend *SuspendResult // set when the task calls dicode.suspend (#95)
+	retCh   chan any
+
+	// resumeState / resumeInput are the prior-run payload injected when this
+	// run is a resume of a suspended one (#95). Exposed to the task as
+	// ctx.resume_state / ctx.resume_input via the "resume" IPC method. Both
+	// are nil on a first (non-resume) invocation. Set via SetResume before
+	// Start; read-only afterwards, so no mutex is needed.
+	resumeState json.RawMessage
+	resumeInput json.RawMessage
 
 	// secretOut, when non-nil, receives the flat map produced by a
 	// provider task calling dicode.output(map, { secret: true }). The
@@ -392,6 +401,23 @@ func (s *Server) Output() *OutputResult {
 	return s.output
 }
 
+// Suspend returns the payload captured when the task called dicode.suspend,
+// or nil if it did not (#95). The runtime reads it after the subprocess exits
+// to build a suspended RunResult.
+func (s *Server) Suspend() *SuspendResult {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.suspend
+}
+
+// SetResume injects the prior-run state and user input for a resumed run,
+// exposed to the task as ctx.resume_state / ctx.resume_input (#95). Both are
+// opaque JSON blobs; nil means "not a resume". Must be called before Start.
+func (s *Server) SetResume(state, input json.RawMessage) {
+	s.resumeState = state
+	s.resumeInput = input
+}
+
 func (s *Server) accept() {
 	for {
 		conn, err := s.listener.Accept()
@@ -604,6 +630,20 @@ func (s *Server) handleConn(conn net.Conn) {
 			}
 			reply(req.ID, s.input, "")
 
+		case "resume":
+			// Returns the prior-run state + user input for a resumed run
+			// (#95), exposed to the task as ctx.resume_state / ctx.resume_input.
+			// Gated by the same cap as input — it is contextual run input.
+			// Both fields are nil on a first (non-resume) invocation.
+			if !hasCap(caps, CapInputRead) {
+				reply(req.ID, nil, "ipc: permission denied (input.read)")
+				continue
+			}
+			reply(req.ID, map[string]any{
+				"state": s.resumeState,
+				"input": s.resumeInput,
+			}, "")
+
 		case "kv.get":
 			if !hasCap(caps, CapKVRead) {
 				reply(req.ID, nil, "ipc: permission denied (kv.read)")
@@ -686,6 +726,26 @@ func (s *Server) handleConn(conn net.Conn) {
 			reply(req.ID, true, "")
 
 		// ── dicode.* ──────────────────────────────────────────────────────
+
+		case "dicode.suspend":
+			// The task is pausing: capture the state/form/deadline and ack.
+			// dicode.suspend() is a request/response call so the ack ordering
+			// guarantees the payload is recorded before the shim throws its
+			// SuspendSignal and the subprocess exits — the runtime then reads
+			// Suspend() to build a suspended RunResult. Never resolves in task
+			// code (the shim throws on ack).
+			if !hasCap(caps, CapSuspend) {
+				reply(req.ID, nil, "ipc: permission denied (suspend)")
+				continue
+			}
+			s.mu.Lock()
+			s.suspend = &SuspendResult{
+				State:    req.State,
+				Form:     req.Form,
+				Deadline: req.Deadline,
+			}
+			s.mu.Unlock()
+			reply(req.ID, true, "")
 
 		case "dicode.set_group":
 			if !hasCap(caps, CapSetGroup) {

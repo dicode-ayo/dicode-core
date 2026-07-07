@@ -6,6 +6,7 @@ package deno
 import (
 	"context"
 	_ "embed"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -61,6 +62,13 @@ type RunOptions struct {
 	// values directly instead of constructing its own resolver. Nil falls
 	// back to the inline resolver path.
 	PreResolvedEnv *envresolve.Resolved
+
+	// ResumeState / ResumeInput carry a suspended run's prior state and the
+	// user's form submission when this run is a resume (#95). Both are opaque
+	// JSON blobs surfaced to the task as ctx.resume_state / ctx.resume_input.
+	// Nil on a first (non-resume) invocation.
+	ResumeState json.RawMessage
+	ResumeInput json.RawMessage
 }
 
 // RunResult is returned by Run.
@@ -70,6 +78,15 @@ type RunResult struct {
 	Output      *ipc.OutputResult
 	Logs        []*registry.LogEntry
 	Error       error
+
+	// Suspended is set when the task called dicode.suspend() (#95): the run
+	// paused cleanly rather than completing or failing. ResumeState/ResumeForm
+	// are the opaque state blob and form schema; ResumeDeadline is an optional
+	// Unix-ms TTL (0 = unset).
+	Suspended      bool
+	ResumeState    []byte
+	ResumeForm     []byte
+	ResumeDeadline int64
 }
 
 // Runtime executes task scripts with Deno.
@@ -232,6 +249,8 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	if d := rt.effectiveCryptoDeriver(); d != nil {
 		srv.SetCryptoHandler(d)
 	}
+	// Inject a resumed run's prior state + user input (#95); nil on first run.
+	srv.SetResume(opts.ResumeState, opts.ResumeInput)
 	socketPath, token, err := srv.Start(srvCtx)
 	if err != nil {
 		result.Error = fmt.Errorf("start socket server: %w", err)
@@ -276,7 +295,7 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		zap.String("task_script", taskPath),
 		zap.String("runner", runnerPath),
 	)
-	runner := "import { params, kv, input, output, mcp, dicode, __setReturn__, __conn__, __flush__ } from \"" + shimPath + "\";\n" +
+	runner := "import { params, kv, input, output, mcp, dicode, resume_state, resume_input, __setReturn__, __conn__, __flush__, __isSuspend__ } from \"" + shimPath + "\";\n" +
 		"let __main__;\n" +
 		"try {\n" +
 		"  __main__ = (await import(\"" + taskPath + "\")).default;\n" +
@@ -287,8 +306,17 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		"  Deno.exit(1);\n" +
 		"}\n" +
 		"try {\n" +
-		"  const result = await __main__({ params, kv, input, output, mcp, dicode });\n" +
+		"  const result = await __main__({ params, kv, input, output, mcp, dicode, resume_state, resume_input });\n" +
 		"  await __setReturn__(result);\n" +
+		"} catch (__err__) {\n" +
+		// A dicode.suspend() throws SuspendSignal after the payload is already
+		// delivered over IPC. Treat it as a clean exit (0), not a failure.
+		"  if (__isSuspend__(__err__)) {\n" +
+		"    await __flush__();\n" +
+		"    try { __conn__.close(); } catch {}\n" +
+		"    Deno.exit(0);\n" +
+		"  }\n" +
+		"  throw __err__;\n" +
 		"} finally {\n" +
 		"  await __flush__();\n" +
 		"  try { __conn__.close(); } catch {}\n" +
@@ -405,6 +433,16 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	pkgruntime.RecoverStaleLock(enabled, runOnce, func() error {
 		return rt.relockDeno(ctx, spec, runID, lockPath)
 	})
+
+	// A dicode.suspend() exits the process cleanly (exit 0), so the run is not
+	// a failure. Translate the captured payload into a suspended result (#95).
+	if sr := srv.Suspend(); sr != nil {
+		result.Suspended = true
+		result.ResumeState = sr.State
+		result.ResumeForm = sr.Form
+		result.ResumeDeadline = sr.Deadline
+		result.Error = nil
+	}
 
 	return result, nil
 }
@@ -587,6 +625,8 @@ func (rt *Runtime) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 		Params:         opts.Params,
 		Input:          opts.Input,
 		PreResolvedEnv: opts.PreResolvedEnv,
+		ResumeState:    opts.ResumeState,
+		ResumeInput:    opts.ResumeInput,
 	})
 	if err != nil {
 		return nil, err
@@ -598,6 +638,12 @@ func (rt *Runtime) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 		r.ChainInput = result.Output.Data
 	} else {
 		r.ChainInput = result.ReturnValue
+	}
+	if result.Suspended {
+		r.Suspended = true
+		r.ResumeState = result.ResumeState
+		r.ResumeForm = result.ResumeForm
+		r.ResumeDeadline = result.ResumeDeadline
 	}
 	return r, nil
 }
