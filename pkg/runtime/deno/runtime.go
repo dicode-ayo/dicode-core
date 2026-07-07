@@ -295,7 +295,7 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		zap.String("task_script", taskPath),
 		zap.String("runner", runnerPath),
 	)
-	runner := "import { params, kv, input, output, mcp, dicode, resume_state, resume_input, __setReturn__, __conn__, __flush__, __isSuspend__ } from \"" + shimPath + "\";\n" +
+	runner := "import { params, kv, input, output, mcp, dicode, resume_state, resume_input, __setReturn__, __conn__, __flush__, __isSuspend__, __wasSuspendRequested__ } from \"" + shimPath + "\";\n" +
 		"let __main__;\n" +
 		"try {\n" +
 		"  __main__ = (await import(\"" + taskPath + "\")).default;\n" +
@@ -307,6 +307,17 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		"}\n" +
 		"try {\n" +
 		"  const result = await __main__({ params, kv, input, output, mcp, dicode, resume_state, resume_input });\n" +
+		// If main() returned normally yet a suspend was requested, the task
+		// caught the SuspendSignal in its own try/catch and kept running. The
+		// payload is already recorded server-side, so a normal return would
+		// leave the run in a contradictory suspended-and-returned state. Fail
+		// loudly (exit 1) instead so the author fixes the swallowing catch.
+		"  if (__wasSuspendRequested__()) {\n" +
+		"    console.error(\"[dicode] dicode.suspend() was called but its control-flow signal was caught by task code — do not wrap dicode.suspend() in a try/catch that swallows it\");\n" +
+		"    await __flush__();\n" +
+		"    try { __conn__.close(); } catch {}\n" +
+		"    Deno.exit(1);\n" +
+		"  }\n" +
 		"  await __setReturn__(result);\n" +
 		"} catch (__err__) {\n" +
 		// A dicode.suspend() throws SuspendSignal after the payload is already
@@ -434,14 +445,18 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		return rt.relockDeno(ctx, spec, runID, lockPath)
 	})
 
-	// A dicode.suspend() exits the process cleanly (exit 0), so the run is not
-	// a failure. Translate the captured payload into a suspended result (#95).
-	if sr := srv.Suspend(); sr != nil {
+	// A legitimate dicode.suspend() exits the process cleanly (exit 0), so the
+	// run is not a failure. Only then translate the captured payload into a
+	// suspended result (#95). When result.Error is set the subprocess exited
+	// non-zero — the shim's guard trips this path when a task swallowed the
+	// SuspendSignal and kept running — so keep it a failure rather than a
+	// contradictory suspended-and-returned run, even though a payload was
+	// recorded server-side.
+	if sr := srv.Suspend(); sr != nil && result.Error == nil {
 		result.Suspended = true
 		result.ResumeState = sr.State
 		result.ResumeForm = sr.Form
 		result.ResumeDeadline = sr.Deadline
-		result.Error = nil
 	}
 
 	return result, nil

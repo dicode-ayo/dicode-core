@@ -382,6 +382,13 @@ function __isSuspend__(e: unknown): boolean {
   return e instanceof SuspendSignal;
 }
 
+// Set the instant before the SuspendSignal is thrown (payload already recorded
+// server-side). If main() returns normally with this set, a user try/catch
+// swallowed the signal and kept executing — the wrapper turns that into a loud
+// failure rather than a contradictory "suspended run that also returned".
+let __suspendRequested__ = false;
+function __wasSuspendRequested__(): boolean { return __suspendRequested__; }
+
 // ── output ────────────────────────────────────────────────────────────────────
 
 function __outputCallable__(value: Record<string, string>, _opts: SecretOutputOptions): Promise<void> {
@@ -439,6 +446,7 @@ const dicode: Dicode = {
       form: req.form,
       deadline: req.deadline ?? 0,
     });
+    __suspendRequested__ = true;
     throw new SuspendSignal();
   },
   secrets_set:    (key, value)      => __call__({ method: "dicode.secrets_set",     key, stringValue: value }) as Promise<void>,
@@ -530,4 +538,4 @@ const dicode: Dicode = {
 // The runner awaits this on exit so fire-and-forget log writes are not lost.
 async function __flush__(): Promise<void> { await __wq__; }
 
-export { params, kv, input, resume_state, resume_input, output, mcp, dicode, __setReturn__, __conn__, __flush__, __isSuspend__ };
+export { params, kv, input, resume_state, resume_input, output, mcp, dicode, __setReturn__, __conn__, __flush__, __isSuspend__, __wasSuspendRequested__ };

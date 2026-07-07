@@ -3,6 +3,7 @@ package deno
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -80,6 +81,66 @@ export default async function main({ dicode }) {
 	}
 	if form.Title != "Your name?" || len(form.Fields) != 1 || form.Fields[0].Name != "project_name" {
 		t.Errorf("ResumeForm = %+v, want title + one project_name field", form)
+	}
+}
+
+// TestRun_SuspendSwallowedByTaskFails guards the case where a task wraps its
+// body in a broad try/catch that swallows the SuspendSignal thrown by
+// dicode.suspend() and keeps executing (#95). The suspend payload is already
+// recorded server-side, so a normal return would leave the run in a
+// contradictory suspended-and-returned state. The run must instead FAIL
+// loudly and NOT be classified as suspended.
+func TestRun_SuspendSwallowedByTaskFails(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires Deno subprocess")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	rt, reg, cleanup := newTestRuntime(t)
+	defer cleanup()
+
+	spec := writeProviderTask(t, "swallower", `
+export default async function main({ dicode }) {
+  try {
+    await dicode.suspend({
+      state: { step: "one" },
+      form: { fields: [{ name: "x", type: "string", label: "X" }] },
+    });
+  } catch (_e) {
+    // Swallow the control-flow signal and keep going — the bug we guard against.
+  }
+  return { kept_running: true };
+}
+`)
+	if err := reg.Register(spec); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := rt.Run(ctx, spec, RunOptions{RunID: "run-swallow-1"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Suspended {
+		t.Fatalf("swallowed suspend must not be classified as suspended")
+	}
+	if res.Error == nil {
+		t.Fatalf("swallowed suspend must fail the run, got no error")
+	}
+	if res.ReturnValue != nil {
+		t.Errorf("swallowed suspend must not record a return value, got %#v", res.ReturnValue)
+	}
+
+	logs, _ := reg.GetRunLogs(ctx, "run-swallow-1")
+	found := false
+	for _, l := range logs {
+		if strings.Contains(l.Message, "control-flow signal was caught by task code") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected a clear diagnostic in the run log, logs = %+v", logs)
 	}
 }
 
