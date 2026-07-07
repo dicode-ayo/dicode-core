@@ -159,6 +159,10 @@ type Server struct {
 	// endpoint returns 503 in that case.
 	replayer *registry.Replayer
 
+	// resumer spawns the continuation run for a suspended run (SetResumer).
+	// Nil when not wired; the /api/runs/{runID}/resume endpoint returns 503.
+	resumer Resumer
+
 	// testGuard vetoes POST /api/tasks/{id}/test for a given task ID. The
 	// approval gate wires its FireGuard here: a pending (unapproved) task's
 	// test file runs with full host permissions, so it must be refused
@@ -577,6 +581,12 @@ func (s *Server) Handler() http.Handler {
 	// or a Bearer API key (CLI / auto-fix scripts). Mounted outside the
 	// session-only group so machine callers without cookies still work.
 	r.With(s.requireSessionOrAPIKey).Post("/api/runs/{runID}/replay", s.apiReplayRun)
+
+	// Resume endpoint (#95) — a suspended run's form submission. Same auth
+	// posture as replay: session cookie (WebUI form) or Bearer API key. The
+	// raw resume_token is resolved server-side from the run, never trusted
+	// from the client.
+	r.With(s.requireSessionOrAPIKey).Post("/api/runs/{runID}/resume", s.apiResumeRun)
 
 	// Approval-gate approve endpoint (#398) — same auth posture as replay:
 	// session cookie (WebUI approve button) or Bearer API key.
@@ -2107,10 +2117,16 @@ func (s *Server) apiListRuns(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, runs)
 }
 
-// RunDetail is the shape returned by GET /api/runs/{runID}.
+// RunDetail is the shape returned by GET /api/runs/{runID}. ResumeForm carries
+// the suspended run's form as decoded JSON (resume_form) so the WebUI renders
+// it directly; the embedded Run's own ResumeToken/ResumeState/ResumeForm are
+// cleared by apiGetRun before embedding — the token is the resume
+// authorization and must never reach the client, and the state blob is
+// task-internal.
 type RunDetail struct {
 	*registry.Run
-	TaskName string `json:"task_name"`
+	TaskName   string          `json:"task_name"`
+	ResumeForm json.RawMessage `json:"resume_form,omitempty"`
 }
 
 func (s *Server) apiGetRun(w http.ResponseWriter, r *http.Request) {
@@ -2124,7 +2140,17 @@ func (s *Server) apiGetRun(w http.ResponseWriter, r *http.Request) {
 	if spec, ok := s.registry.Get(run.TaskID); ok {
 		taskName = spec.Name
 	}
-	jsonOK(w, RunDetail{Run: run, TaskName: taskName})
+	// Surface the form (for rendering) but strip the token and state blob from
+	// the wire — the resume endpoint resolves the token server-side.
+	var form json.RawMessage
+	if run.Status == registry.StatusSuspended && len(run.ResumeForm) > 0 {
+		form = json.RawMessage(run.ResumeForm)
+	}
+	safe := *run
+	safe.ResumeToken = ""
+	safe.ResumeState = nil
+	safe.ResumeForm = nil
+	jsonOK(w, RunDetail{Run: &safe, TaskName: taskName, ResumeForm: form})
 }
 
 // LogEntryJSON is the JSON shape returned by GET /api/runs/{runID}/logs.

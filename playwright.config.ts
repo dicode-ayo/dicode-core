@@ -58,6 +58,7 @@ export default defineConfig({
         '**/dev-mode-clone.spec.ts',
         '**/run-input-persistence.spec.ts',
         '**/task-toggle.spec.ts',
+        '**/suspend-resume.spec.ts',
       ],
       use: {
         ...devices['Desktop Chrome'],

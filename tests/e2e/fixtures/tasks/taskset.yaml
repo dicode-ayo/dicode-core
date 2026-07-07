@@ -28,6 +28,9 @@ spec:
     persistence-test:
       ref:
         path: FIXTURES_TASKS_DIR/persistence-test/task.yaml
+    suspend-wizard:
+      ref:
+        path: FIXTURES_TASKS_DIR/suspend-wizard/task.yaml
     webui:
       ref:
         path: BUILDIN_WEBUI_TASK_YAML

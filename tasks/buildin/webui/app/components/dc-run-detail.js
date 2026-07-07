@@ -18,6 +18,8 @@ class DcRunDetail extends LitElement {
     _duration: { state: true },
     _parent:   { state: true }, // Run record for ParentRunID, or null (#115)
     _children: { state: true }, // child Run[] for the Sub-runs panel (#115)
+    _resuming:     { state: true }, // resume submit in flight (#95)
+    _resumeError:  { state: true }, // last resume submit error, or null (#95)
   };
 
   constructor() {
@@ -25,6 +27,7 @@ class DcRunDetail extends LitElement {
     this._run = null; this._logs = []; this._error = null;
     this._status = null; this._duration = null;
     this._parent = null; this._children = null;
+    this._resuming = false; this._resumeError = null;
     this._offLog = null; this._offFinished = null;
   }
 
@@ -55,6 +58,7 @@ class DcRunDetail extends LitElement {
     this._run = null; this._logs = []; this._error = null;
     this._status = null; this._duration = null;
     this._parent = null; this._children = null;
+    this._resuming = false; this._resumeError = null;
     try {
       // Children fetch is fire-and-forget — failure here shouldn't block the
       // main run/logs load (Sub-runs panel just stays empty).
@@ -134,6 +138,88 @@ class DcRunDetail extends LitElement {
     }
   }
 
+  // #95: submit a suspended run's form. Values are collected from the light-DOM
+  // form and POSTed; the server resolves the resume token itself. On success we
+  // navigate to the continuation run.
+  async _submitResume(e) {
+    e.preventDefault();
+    const schema = this._run?.resume_form;
+    if (!schema) return;
+    const form = e.target;
+    const values = {};
+    for (const f of (schema.fields || [])) {
+      const el = form.elements[f.name];
+      if (!el) continue;
+      let v;
+      if (f.type === 'boolean') v = el.checked;
+      else if (f.type === 'number') v = el.value === '' ? '' : Number(el.value);
+      else v = el.value;
+      if (f.required && (v === '' || v === null || v === undefined)) {
+        this._resumeError = `${f.label || f.name} is required`;
+        return;
+      }
+      // Omit empty optional values so the task sees them as absent.
+      if (v === '' && !f.required) continue;
+      values[f.name] = v;
+    }
+    this._resumeError = null;
+    this._resuming = true;
+    try {
+      const res = await post(`/api/runs/${this.runid}/resume`, values);
+      const newID = res?.run_id;
+      if (newID) navigate(`/runs/${newID}`);
+    } catch (err) {
+      this._resumeError = err.message;
+    } finally {
+      this._resuming = false;
+    }
+  }
+
+  _renderResumeField(f) {
+    const req = f.required ? html`<span style="color:var(--red)"> *</span>` : '';
+    let input;
+    switch (f.type) {
+      case 'text':
+        input = html`<textarea name=${f.name} rows="4" placeholder=${f.placeholder || ''} .value=${f.default ?? ''} style="width:100%"></textarea>`;
+        break;
+      case 'number':
+        input = html`<input type="number" name=${f.name} placeholder=${f.placeholder || ''} .value=${f.default ?? ''} style="width:100%">`;
+        break;
+      case 'boolean':
+        return html`<div style="margin-bottom:var(--space-md)">
+          <label><input type="checkbox" name=${f.name} ?checked=${f.default === true}> ${f.label || f.name}${req}</label>
+        </div>`;
+      case 'select':
+        input = html`<select name=${f.name} style="width:100%">
+          ${(f.options || []).map(o => html`<option value=${o.value} ?selected=${o.value === f.default}>${o.label ?? o.value}</option>`)}
+        </select>`;
+        break;
+      default:
+        input = html`<input type="text" name=${f.name} placeholder=${f.placeholder || ''} .value=${f.default ?? ''} style="width:100%">`;
+    }
+    return html`<div style="margin-bottom:var(--space-md)">
+      <label style="display:block;font-weight:var(--font-semibold);margin-bottom:.25rem">${f.label || f.name}${req}</label>
+      ${input}
+    </div>`;
+  }
+
+  _renderResumeForm() {
+    const schema = this._run?.resume_form;
+    if (!schema) return '';
+    return html`
+      <h2 style="margin-top:var(--space-lg)">${schema.title || 'Waiting on your input'}</h2>
+      <div class="card">
+        ${schema.description ? html`<p class="meta" style="margin-top:0">${schema.description}</p>` : ''}
+        <form @submit=${e => this._submitResume(e)}>
+          ${(schema.fields || []).map(f => this._renderResumeField(f))}
+          ${this._resumeError ? html`<p style="color:var(--red)">${this._resumeError}</p>` : ''}
+          <div style="margin-top:var(--space-md)">
+            <button class="btn" type="submit" ?disabled=${this._resuming}>${this._resuming ? 'Resuming…' : 'Submit'}</button>
+          </div>
+        </form>
+      </div>`;
+  }
+
   render() {
     if (this._error) return html`<p style="color:red">Error: ${this._error}</p>`;
     if (!this._run) return html`<div class="meta">Loading…</div>`;
@@ -188,6 +274,8 @@ class DcRunDetail extends LitElement {
             <button class="btn btn-sm" @click=${() => this._replay()} title="Re-fire this run with its persisted input">Replay</button>` : ''}
         </div>
       </div>
+
+      ${status === 'suspended' ? this._renderResumeForm() : ''}
 
       ${children.length ? html`
         <h2 style="margin-top:var(--space-lg)">Sub-runs <span class="meta">(${children.length})</span></h2>
