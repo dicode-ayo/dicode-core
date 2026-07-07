@@ -1605,13 +1605,13 @@ func (s *Server) apiGetTask(w http.ResponseWriter, r *http.Request) {
 	case task.RuntimeDocker, task.RuntimePodman:
 		detail.ScriptFile = "Dockerfile"
 	default:
-		for _, name := range []string{"task.ts", "task.js", "task.py"} {
-			if fsutil.Exists(filepath.Join(spec.TaskDir, name)) {
-				detail.ScriptFile = name
-				break
-			}
-		}
-		if detail.ScriptFile == "" {
+		// Use the runtime's own script discovery (Spec.ScriptPath) so the UI
+		// reports exactly the file the runtime would execute — ScriptPath
+		// rejects symlinked script entries, and a hand-rolled existence loop
+		// here previously disagreed with it.
+		if p := spec.ScriptPath(); p != "" {
+			detail.ScriptFile = filepath.Base(p)
+		} else {
 			detail.ScriptFile = "task.ts"
 		}
 		for _, name := range []string{"task.test.ts", "task.test.js"} {

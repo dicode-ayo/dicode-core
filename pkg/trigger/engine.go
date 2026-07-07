@@ -415,7 +415,7 @@ func (e *Engine) Register(k task.Kinded) error {
 		// sneak in a second half of a cycle between our check and our commit.
 		if s.Trigger.Chain != nil {
 			on := s.Trigger.Chain.ChainOn()
-			if on == "success" || on == "always" {
+			if on == registry.StatusSuccess || on == chainOnAlways {
 				if e.hasSuccessChainCycle(s.ID, s.Trigger.Chain.From) {
 					e.log.Error("task registration rejected: success-chain cycle detected",
 						zap.String("task", s.ID),
