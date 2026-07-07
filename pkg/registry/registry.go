@@ -18,12 +18,16 @@ import (
 // ErrRunNotFound is returned by GetRun when no run record exists for the given ID.
 var ErrRunNotFound = errors.New("run not found")
 
-// RunStatus values.
+// RunStatus values. success/failure/cancelled are terminal; running and
+// suspended are not. A suspended run has paused awaiting user input — it is
+// neither in-flight (not "running", so CleanupStaleRuns leaves it alone) nor
+// finished (finished_at stays NULL until it resumes or its deadline expires).
 const (
 	StatusRunning   = "running"
 	StatusSuccess   = "success"
 	StatusFailure   = "failure"
 	StatusCancelled = "cancelled"
+	StatusSuspended = "suspended"
 )
 
 // Run kind values for the runs.kind column. These are the lowercase run-row
@@ -68,6 +72,15 @@ type Run struct {
 	InputStoredAt       int64    // unix timestamp the blob was stored (AAD-bound)
 	InputRedactedFields []string // dotted paths of any redacted fields
 	InputPinned         int      // 1 = pinned (excluded from retention cleanup)
+
+	// Suspend/resume persistence fields (#95). Populated by GetRun only; the
+	// list queries omit them (mirrors the input-persistence fields above).
+	// Zero values mean "not suspended".
+	ResumeState    []byte // opaque task-provided state blob; nil when absent
+	ResumeForm     []byte // form schema JSON to render on resume; nil when absent
+	ResumeToken    string // unguessable resume handle; empty when absent
+	SuspendedAt    int64  // Unix ms the run suspended; 0 when absent
+	ResumeDeadline int64  // Unix ms TTL; 0 when no deadline set
 }
 
 // LogEntry is one log line from a run.
@@ -223,6 +236,23 @@ func (r *Registry) FinishRunWithResult(ctx context.Context, runID, status, retur
 	)
 }
 
+// SuspendRun records a run as suspended awaiting user input, persisting the
+// opaque state/form blobs, the resume token, and the suspend timestamp. It
+// deliberately leaves finished_at NULL: suspended is a non-terminal status, so
+// the run is neither running (CleanupStaleRuns skips it) nor finished.
+//
+// A deadline of 0 stores NULL (no TTL). state and form may be nil.
+func (r *Registry) SuspendRun(ctx context.Context, runID string, state, form []byte, token string, suspendedAt, deadline int64) error {
+	var deadlineArg any
+	if deadline > 0 {
+		deadlineArg = deadline
+	}
+	return r.db.Exec(ctx,
+		`UPDATE runs SET status = ?, resume_state = ?, resume_form = ?, resume_token = ?, suspended_at = ?, resume_deadline = ? WHERE id = ?`,
+		StatusSuspended, state, form, token, suspendedAt, deadlineArg, runID,
+	)
+}
+
 // SetLogHook registers a function called after each log entry is written.
 func (r *Registry) SetLogHook(fn func(runID, level, msg string, ts int64)) {
 	r.logMu.Lock()
@@ -313,11 +343,21 @@ const runInputColumns = `,
         COALESCE(input_storage_key, ''), COALESCE(input_size, 0), COALESCE(input_stored_at, 0),
         COALESCE(input_redacted_fields, ''), COALESCE(input_pinned, 0)`
 
+// runResumeColumns are the suspend/resume columns GetRun additionally selects
+// (appended after runInputColumns). Like the input columns, queryRuns omits
+// them: list responses serialize Run directly and don't surface resume state.
+// The BLOB columns are scanned as-is (NULL → nil []byte); the scalars use
+// COALESCE so a NULL reads back as the zero value.
+const runResumeColumns = `,
+        resume_state, resume_form, COALESCE(resume_token, ''),
+        COALESCE(suspended_at, 0), COALESCE(resume_deadline, 0)`
+
 // scanRun decodes one row selected with runColumns (plus runInputColumns when
-// withInput is true) into a Run, including the shared post-processing
-// (trigger source, millisecond timestamps, nullable parent, redacted-fields
-// JSON). rows.Next() must already have returned true.
-func scanRun(rows db.Scanner, withInput bool) (*Run, error) {
+// withInput is true, plus runResumeColumns when withResume is true) into a Run,
+// including the shared post-processing (trigger source, millisecond timestamps,
+// nullable parent, redacted-fields JSON). rows.Next() must already have
+// returned true.
+func scanRun(rows db.Scanner, withInput, withResume bool) (*Run, error) {
 	run := &Run{}
 	var startedMs int64
 	var finishedMs *int64
@@ -332,6 +372,10 @@ func scanRun(rows db.Scanner, withInput bool) (*Run, error) {
 	if withInput {
 		dest = append(dest,
 			&run.InputStorageKey, &run.InputSize, &run.InputStoredAt, &redactedFieldsJSON, &run.InputPinned)
+	}
+	if withResume {
+		dest = append(dest,
+			&run.ResumeState, &run.ResumeForm, &run.ResumeToken, &run.SuspendedAt, &run.ResumeDeadline)
 	}
 	if err := rows.Scan(dest...); err != nil {
 		return nil, err
@@ -360,12 +404,12 @@ func scanRun(rows db.Scanner, withInput bool) (*Run, error) {
 func (r *Registry) GetRun(ctx context.Context, runID string) (*Run, error) {
 	var run *Run
 	err := r.db.Query(ctx,
-		`SELECT `+runColumns+runInputColumns+` FROM runs WHERE id = ?`,
+		`SELECT `+runColumns+runInputColumns+runResumeColumns+` FROM runs WHERE id = ?`,
 		[]any{runID},
 		func(rows db.Scanner) error {
 			if rows.Next() {
 				var scanErr error
-				run, scanErr = scanRun(rows, true)
+				run, scanErr = scanRun(rows, true, true)
 				return scanErr
 			}
 			return nil
@@ -436,7 +480,7 @@ func (r *Registry) queryRuns(ctx context.Context, whereAndLimit string, args []a
 		args,
 		func(rows db.Scanner) error {
 			for rows.Next() {
-				run, err := scanRun(rows, false)
+				run, err := scanRun(rows, false, false)
 				if err != nil {
 					return err
 				}

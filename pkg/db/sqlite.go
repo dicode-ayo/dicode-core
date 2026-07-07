@@ -186,6 +186,16 @@ func (s *SQLiteDB) migrate() error {
 		// parent run by the engine (upcoming PR). SQLite backfills existing
 		// rows to 'task' at ALTER time.
 		{"kind", "TEXT NOT NULL DEFAULT 'task'"},
+		// Suspend/resume columns (#95). All nullable — set only when a run
+		// suspends awaiting user input. resume_state/resume_form hold opaque
+		// JSON blobs; resume_token is an unguessable resume handle; the two
+		// timestamps are Unix milliseconds (resume_deadline is the TTL after
+		// which a still-suspended run is cancelled).
+		{"resume_state", "BLOB"},
+		{"resume_form", "BLOB"},
+		{"resume_token", "TEXT"},
+		{"suspended_at", "INTEGER"},
+		{"resume_deadline", "INTEGER"},
 	}
 	for _, m := range runsMigrations {
 		if err := addColumnIfMissing(ctx, s.db, "runs", m.name, m.ddl); err != nil {
