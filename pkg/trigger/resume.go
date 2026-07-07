@@ -88,6 +88,15 @@ func (e *Engine) ResumeRun(ctx context.Context, token string, input []byte) (str
 		return "", ErrResumeExpired
 	}
 
+	// Resolve the task BEFORE consuming the token. If it was deregistered or
+	// reloaded away between suspend and resume, fail without spending the
+	// single-use token or flipping the run out of `suspended` — the suspension
+	// stays resumable once the task is back.
+	spec, ok := e.registry.Get(run.TaskID)
+	if !ok {
+		return "", fmt.Errorf("resume: task %q is no longer registered", run.TaskID)
+	}
+
 	// Consume the token atomically. This is the single-use guard: a second
 	// ResumeRun for the same token finds the run already resumed and fails.
 	if err := e.registry.MarkRunResumed(ctx, run.ID); err != nil {
@@ -95,11 +104,6 @@ func (e *Engine) ResumeRun(ctx context.Context, token string, input []byte) (str
 			return "", ErrResumeNotSuspended
 		}
 		return "", fmt.Errorf("mark run resumed: %w", err)
-	}
-
-	spec, ok := e.registry.Get(run.TaskID)
-	if !ok {
-		return "", fmt.Errorf("resume: task %q is no longer registered", run.TaskID)
 	}
 
 	newRunID, err := e.fireAsync(context.Background(), spec, pkgruntime.RunOptions{

@@ -38,41 +38,45 @@ func (r *Registry) GetRunByResumeToken(ctx context.Context, token string) (*Run,
 }
 
 // MarkRunResumed transitions a suspended run to the terminal `resumed` state,
-// consuming its resume token so it can't be replayed. The suspended→resumed
-// UPDATE and the current-status check run in one transaction, so two concurrent
-// resumes of the same token race to a single winner: the loser sees the row
-// already resumed and gets ErrRunNotSuspended. Returns ErrRunNotSuspended when
-// the run isn't currently suspended (already resumed, cancelled, or never
-// suspended).
+// consuming its resume token so it can't be replayed. The transition is a
+// single conditional UPDATE gated on the current status; RowsAffected decides
+// the outcome, so exactly one of two concurrent resumes of the same token wins
+// (the loser changes 0 rows and gets ErrRunNotSuspended). This is atomic and
+// correct regardless of the connection-pool size — no SELECT-then-UPDATE window.
+// Returns ErrRunNotSuspended when the run isn't currently suspended (already
+// resumed, cancelled, or never suspended) and ErrRunNotFound when no such run
+// exists.
 func (r *Registry) MarkRunResumed(ctx context.Context, runID string) error {
 	now := time.Now().UnixMilli()
-	return r.db.Tx(ctx, func(tx db.DB) error {
-		var status string
-		var found bool
-		if err := tx.Query(ctx,
-			`SELECT status FROM runs WHERE id = ?`,
-			[]any{runID},
-			func(rows db.Scanner) error {
-				if rows.Next() {
-					found = true
-					return rows.Scan(&status)
-				}
-				return nil
-			},
-		); err != nil {
-			return fmt.Errorf("read run status: %w", err)
-		}
-		if !found {
-			return ErrRunNotFound
-		}
-		if status != StatusSuspended {
-			return ErrRunNotSuspended
-		}
-		return tx.Exec(ctx,
-			`UPDATE runs SET status = ?, finished_at = ? WHERE id = ?`,
-			StatusResumed, now, runID,
-		)
-	})
+	affected, err := r.db.ExecResult(ctx,
+		`UPDATE runs SET status = ?, finished_at = ? WHERE id = ? AND status = ?`,
+		StatusResumed, now, runID, StatusSuspended,
+	)
+	if err != nil {
+		return fmt.Errorf("mark run resumed: %w", err)
+	}
+	if affected > 0 {
+		return nil
+	}
+	// The guarded UPDATE changed nothing: the run isn't suspended. Distinguish
+	// "no such run" from "present but not suspended" for a precise error — this
+	// is diagnostic only; the single-use guard was already enforced atomically
+	// by the conditional UPDATE above.
+	var exists bool
+	if err := r.db.Query(ctx,
+		`SELECT 1 FROM runs WHERE id = ?`,
+		[]any{runID},
+		func(rows db.Scanner) error {
+			exists = rows.Next()
+			return nil
+		},
+	); err != nil {
+		return fmt.Errorf("check run exists: %w", err)
+	}
+	if !exists {
+		return ErrRunNotFound
+	}
+	return ErrRunNotSuspended
 }
 
 // SweepExpiredSuspensions cancels every suspended run whose resume_deadline has

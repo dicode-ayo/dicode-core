@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -221,6 +222,99 @@ func TestResumeRun_ExpiredTokenRejectedAndSwept(t *testing.T) {
 	}
 	if after.FailureReason != registry.ReasonResumeTimeout {
 		t.Errorf("expired run reason = %q, want %q", after.FailureReason, registry.ReasonResumeTimeout)
+	}
+}
+
+func TestResumeRun_DeregisteredTaskKeepsSuspensionResumable(t *testing.T) {
+	exec := &suspendExec{}
+	eng, reg := newSuspendEnv(t, exec)
+	spec := &task.Spec{ID: "wiz", Name: "wiz", Runtime: task.RuntimeDeno, Trigger: task.TriggerConfig{Manual: true}, Enabled: true}
+	_ = reg.Register(spec)
+
+	origID, err := eng.FireManual(context.Background(), "wiz", nil)
+	if err != nil {
+		t.Fatalf("FireManual: %v", err)
+	}
+	orig := waitStatus(t, reg, origID, registry.StatusSuspended)
+
+	// Task disappears (deregistered / reloaded away) before the user resumes.
+	reg.Unregister("wiz")
+
+	if _, err := eng.ResumeRun(context.Background(), orig.ResumeToken, nil); err == nil {
+		t.Fatal("expected error resuming a run whose task is gone")
+	}
+	// The token must NOT have been consumed: the run is still suspended and
+	// keeps its token, so it stays resumable once the task is back.
+	still, _ := reg.GetRun(context.Background(), origID)
+	if still.Status != registry.StatusSuspended {
+		t.Errorf("run status = %q, want suspended (token must not be consumed)", still.Status)
+	}
+	if still.ResumeToken != orig.ResumeToken {
+		t.Errorf("resume token changed/cleared: %q", still.ResumeToken)
+	}
+
+	// Once the task is re-registered, the same token still resumes.
+	if err := reg.Register(spec); err != nil {
+		t.Fatalf("re-register: %v", err)
+	}
+	newID, err := eng.ResumeRun(context.Background(), orig.ResumeToken, []byte(`{"project_name":"acme"}`))
+	if err != nil {
+		t.Fatalf("ResumeRun after re-register: %v", err)
+	}
+	cont := waitStatus(t, reg, newID, registry.StatusSuccess)
+	if cont.ParentRunID != origID {
+		t.Errorf("continuation parent = %q, want %q", cont.ParentRunID, origID)
+	}
+}
+
+func TestResumeRun_ConcurrentSingleWinner(t *testing.T) {
+	eng, reg := newSuspendEnv(t, &suspendExec{})
+	spec := &task.Spec{ID: "wiz", Name: "wiz", Runtime: task.RuntimeDeno, Trigger: task.TriggerConfig{Manual: true}, Enabled: true}
+	_ = reg.Register(spec)
+
+	origID, err := eng.FireManual(context.Background(), "wiz", nil)
+	if err != nil {
+		t.Fatalf("FireManual: %v", err)
+	}
+	orig := waitStatus(t, reg, origID, registry.StatusSuspended)
+
+	const racers = 8
+	var wg sync.WaitGroup
+	var winners, notSuspended int32
+	results := make(chan error, racers)
+	wg.Add(racers)
+	start := make(chan struct{})
+	for i := 0; i < racers; i++ {
+		go func() {
+			defer wg.Done()
+			<-start
+			_, rerr := eng.ResumeRun(context.Background(), orig.ResumeToken, nil)
+			results <- rerr
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	for rerr := range results {
+		switch {
+		case rerr == nil:
+			atomic.AddInt32(&winners, 1)
+		case errors.Is(rerr, ErrResumeNotSuspended):
+			atomic.AddInt32(&notSuspended, 1)
+		default:
+			t.Errorf("unexpected ResumeRun error: %v", rerr)
+		}
+	}
+	if winners != 1 {
+		t.Errorf("winners = %d, want exactly 1 continuation spawned", winners)
+	}
+	if notSuspended != racers-1 {
+		t.Errorf("ErrResumeNotSuspended count = %d, want %d", notSuspended, racers-1)
+	}
+
+	after, _ := reg.GetRun(context.Background(), origID)
+	if after.Status != registry.StatusResumed {
+		t.Errorf("original status = %q, want resumed", after.Status)
 	}
 }
 
