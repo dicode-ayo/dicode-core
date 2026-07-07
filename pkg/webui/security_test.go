@@ -240,8 +240,8 @@ func TestIsAllowedGitScheme_Allowed(t *testing.T) {
 	cases := []string{
 		"https://github.com/user/repo",
 		"http://github.com/user/repo",
-		"git://github.com/user/repo",
 		"ssh://git@github.com/user/repo",
+		"git@github.com:org/repo.git", // SSH SCP-shorthand, via taskset.IsAllowedRefScheme
 	}
 	for _, u := range cases {
 		if !isAllowedGitScheme(u) {
@@ -250,6 +250,10 @@ func TestIsAllowedGitScheme_Allowed(t *testing.T) {
 	}
 }
 
+// git:// is rejected (#486): go-git dials it through a native transport with
+// a hardcoded, unguarded net.Dial, so a git:// source added via apiAddSource
+// or previewed via apiListGitBranches would get zero SSRF host validation —
+// unlike http/https/ssh.
 func TestIsAllowedGitScheme_Rejected(t *testing.T) {
 	cases := []string{
 		"file:///etc/passwd",
@@ -258,6 +262,8 @@ func TestIsAllowedGitScheme_Rejected(t *testing.T) {
 		"javascript:alert(1)",
 		"",
 		"not-a-url",
+		"git://github.com/user/repo",
+		"git://169.254.169.254/metadata",
 	}
 	for _, u := range cases {
 		if isAllowedGitScheme(u) {

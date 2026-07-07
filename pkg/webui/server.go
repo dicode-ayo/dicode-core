@@ -665,17 +665,18 @@ func secureCookiesFor(cfg *config.Config) bool {
 
 // isAllowedGitScheme returns true when the URL uses a scheme valid for a git remote.
 // Rejects file://, ftp://, data:, and other schemes that could trigger local-file
-// reads or SSRF against non-git services.
+// reads or SSRF against non-git services. "git" is excluded (#486): go-git dials
+// it through a native git-protocol transport with a hardcoded, unguarded
+// net.Dial, so a git:// remote added here (via apiAddSource or previewed via
+// apiListGitBranches) would get zero SSRF host validation — unlike http/https/ssh.
+//
+// Delegates to taskset.IsAllowedRefScheme rather than reimplementing the
+// scheme switch: an earlier independent copy here had already drifted from
+// it (it rejected the SCP-shorthand form, e.g. git@github.com:org/repo.git,
+// that dicode.yaml's ref.url accepts), which is exactly the kind of gap a
+// second, hand-maintained allowlist invites.
 func isAllowedGitScheme(rawURL string) bool {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return false
-	}
-	switch strings.ToLower(u.Scheme) {
-	case "https", "http", "git", "ssh":
-		return true
-	}
-	return false
+	return taskset.IsAllowedRefScheme(rawURL)
 }
 
 // wsOriginPatterns converts full-URL origin entries (e.g. "https://example.com")

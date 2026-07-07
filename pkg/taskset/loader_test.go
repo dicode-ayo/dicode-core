@@ -381,7 +381,6 @@ spec:
 		"https://github.com/org/repo",
 		"http://internal.corp/tasks",
 		"ssh://git@github.com/org/repo.git",
-		"git://github.com/org/repo.git",
 		"git@github.com:org/repo.git",       // SSH shorthand
 		"git@gitlab.com:group/subgroup.git", // SSH shorthand with subgroup
 	}
@@ -394,10 +393,15 @@ spec:
 		})
 	}
 
+	// git:// is rejected (#486): go-git dials it via a native transport with a
+	// hardcoded net.Dial and no injectable dialer, so unlike http/https it gets
+	// no SSRF host validation at any layer.
 	rejected := []string{
 		"file:///etc/passwd",
 		"file://localhost/tmp/tasks",
 		"/tmp/local-path",
+		"git://github.com/org/repo.git",
+		"git://169.254.169.254/metadata",
 	}
 	for _, u := range rejected {
 		t.Run("rejected:"+u, func(t *testing.T) {
@@ -407,6 +411,20 @@ spec:
 				t.Errorf("expected %q to be rejected, got nil error", u)
 			}
 		})
+	}
+}
+
+// TestValidateRefURL_GitSchemeRejected pins the exact error message for the
+// git:// rejection (#486), so a future refactor that silently drops the
+// dedicated git-scheme branch (e.g. folding it back into the generic
+// default case) is caught even if the generic case still errors.
+func TestValidateRefURL_GitSchemeRejected(t *testing.T) {
+	err := ValidateRefURL("test.yaml", "key", "git://github.com/org/repo.git")
+	if err == nil {
+		t.Fatal("expected git:// scheme to be rejected")
+	}
+	if !strings.Contains(err.Error(), "no longer accepted") || !strings.Contains(err.Error(), "SSRF") {
+		t.Errorf("expected error to explain the SSRF-related rejection, got: %v", err)
 	}
 }
 
