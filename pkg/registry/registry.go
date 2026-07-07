@@ -18,17 +18,30 @@ import (
 // ErrRunNotFound is returned by GetRun when no run record exists for the given ID.
 var ErrRunNotFound = errors.New("run not found")
 
-// RunStatus values. success/failure/cancelled are terminal; running and
+// ErrRunNotSuspended is returned by MarkRunResumed when the target run is not
+// in the suspended state — the single-use guard that makes a resume token
+// non-replayable (a second resume of the same run finds it already resumed).
+var ErrRunNotSuspended = errors.New("run not suspended")
+
+// RunStatus values. success/failure/cancelled/resumed are terminal; running and
 // suspended are not. A suspended run has paused awaiting user input — it is
 // neither in-flight (not "running", so CleanupStaleRuns leaves it alone) nor
 // finished (finished_at stays NULL until it resumes or its deadline expires).
+// A suspended run transitions to resumed exactly once, when its token is
+// consumed to spawn the continuation run — after which the token can't be
+// replayed.
 const (
 	StatusRunning   = "running"
 	StatusSuccess   = "success"
 	StatusFailure   = "failure"
 	StatusCancelled = "cancelled"
 	StatusSuspended = "suspended"
+	StatusResumed   = "resumed"
 )
+
+// ReasonResumeTimeout is the fail_reason recorded when the deadline sweep
+// cancels a suspended run whose resume_deadline has passed.
+const ReasonResumeTimeout = "resume_timeout"
 
 // Run kind values for the runs.kind column. These are the lowercase run-row
 // discriminators — distinct from pkg/task's task-kind strings ("Task" /

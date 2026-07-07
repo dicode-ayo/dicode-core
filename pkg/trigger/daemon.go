@@ -124,6 +124,15 @@ func (e *Engine) onDaemonRunFinished(spec *task.Spec, runID string) {
 		e.log.Error("daemon: failed to get run status", zap.String("run", runID), zap.Error(err))
 		return
 	}
+	// A suspended run is non-terminal (#95): the subprocess exited to await
+	// user input, not because the daemon crashed or stopped. Treat it as a
+	// neutral outcome — don't count it as a crash-loop exit, don't reset the
+	// counter, and don't schedule a restart. The daemon state is unchanged;
+	// the continuation run drives the next lifecycle transition on resume.
+	if run.Status == registry.StatusSuspended {
+		return
+	}
+
 	// Elapsed run time, shared by the crash-loop tracker and the restart
 	// backoff below. run.StartedAt is always set by startRun; run.FinishedAt
 	// may be nil on abnormal exit — treat that as an instant crash so the
