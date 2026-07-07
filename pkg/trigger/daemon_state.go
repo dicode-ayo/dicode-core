@@ -61,6 +61,15 @@ const (
 	// engine does not automatically transition out of this state.
 	DaemonCrashed DaemonState = "crashed"
 
+	// DaemonSuspended indicates the daemon body exited to await user input
+	// via dicode.suspend() (#95) — non-terminal, distinct from a crash or a
+	// stop. The daemon run slot stays reserved while suspended so the #470
+	// "one body in flight" invariant holds across the suspended gap (a
+	// reconciler reload must not start a second body), and the resume
+	// continuation drives the next transition. Reported instead of the stale
+	// "running" a parked-awaiting-input body would otherwise show.
+	DaemonSuspended DaemonState = "suspended"
+
 	// DaemonCrashLooping indicates the daemon's body has failed
 	// crashloopThreshold consecutive starts, each dying within
 	// crashloopSustainWindow (issue #458). Unlike DaemonCrashed the engine IS

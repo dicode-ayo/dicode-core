@@ -163,7 +163,17 @@ func (e *Engine) ResumeRun(ctx context.Context, token string, input []byte) (str
 		}
 	}
 
-	newRunID, err := e.fireAsync(context.Background(), spec, opts, registry.TriggerResume)
+	// A daemon body's continuation must re-enter the #470 slot accounting: it
+	// adopts the slot the suspended body kept reserved so a reconciler reload
+	// can't start a second body alongside the continuation, and its
+	// onDaemonRunFinished frees the slot correctly. Plain (non-daemon) tasks
+	// have no slot to manage and fire directly.
+	var newRunID string
+	if spec.Trigger.Daemon {
+		newRunID, err = e.resumeDaemonBody(spec, run.ID, opts)
+	} else {
+		newRunID, err = e.fireAsync(context.Background(), spec, opts, registry.TriggerResume)
+	}
 	if err != nil {
 		return "", fmt.Errorf("resume: spawn continuation run: %w", err)
 	}

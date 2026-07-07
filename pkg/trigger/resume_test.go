@@ -406,10 +406,12 @@ func TestResumeRun_MultiStepWizardChains(t *testing.T) {
 	}
 }
 
-// TestSuspendedDaemonRun_NeutralForCrashloop verifies a daemon body that
-// suspends is a neutral outcome: it does not flip the daemon to crashed/stopped
-// and does not count as a crash-loop exit.
-func TestSuspendedDaemonRun_NeutralForCrashloop(t *testing.T) {
+// TestSuspendedDaemonRun_KeepsSlotAndReportsSuspended verifies that a daemon
+// body which suspends (a) does not count as a crash-loop exit, (b) reports the
+// distinct DaemonSuspended state instead of a stale "running", and (c) keeps
+// its #470 run slot reserved so the "one body in flight" invariant holds across
+// the suspended gap.
+func TestSuspendedDaemonRun_KeepsSlotAndReportsSuspended(t *testing.T) {
 	eng, reg := newSuspendEnv(t, &suspendExec{})
 	spec := &task.Spec{ID: "wiz-daemon", Name: "wiz-daemon", Runtime: task.RuntimeDeno,
 		Trigger: task.TriggerConfig{Daemon: true, Restart: "never"}, Enabled: true}
@@ -432,10 +434,19 @@ func TestSuspendedDaemonRun_NeutralForCrashloop(t *testing.T) {
 
 	eng.onDaemonRunFinished(spec, runID)
 
-	// With restart=never, a non-suspended non-success exit would flip state to
-	// DaemonCrashed. A suspended run must leave the state untouched.
-	if got := eng.daemonStates.get(spec.ID); got != DaemonRunning {
-		t.Errorf("daemon state = %q, want running (suspended is neutral)", got)
+	// State reflects reality: awaiting input, not the stale "running" (and not
+	// DaemonCrashed, which a non-suspended non-success exit under restart=never
+	// would produce).
+	if got := eng.daemonStates.get(spec.ID); got != DaemonSuspended {
+		t.Errorf("daemon state = %q, want suspended", got)
+	}
+	// The slot stays reserved: a reconciler reload's registerDaemon must see the
+	// daemon as still in flight, and a resume must find the slot parked here.
+	eng.daemonMu.Lock()
+	slot, ok := eng.daemonRuns[spec.ID]
+	eng.daemonMu.Unlock()
+	if !ok || slot != runID {
+		t.Errorf("daemon slot = %q (present=%v), want it kept at %q across the suspended gap", slot, ok, runID)
 	}
 	if eng.IsCrashLooping(spec.ID) {
 		t.Error("suspended daemon run must not count toward crash-loop")
@@ -522,4 +533,159 @@ func decodeCarryDepth(t *testing.T, blob []byte) int {
 		t.Fatalf("decode resume_params: %v", err)
 	}
 	return c.ChainDepth
+}
+
+// TestSuspendedDaemon_ReloadFencesStaleResume is the double-start regression
+// (#502 item 2 / #470). A daemon body suspends; a reconciler content reload
+// (eng.Register) tears the daemon down and restarts a fresh body, re-pointing
+// the run slot. Resuming the now-stale pre-reload suspension must be fenced off
+// — otherwise its continuation would run as a SECOND concurrent body next to
+// the reloaded one. The interlock is resumeDaemonBody's slot compare-and-swap:
+// the slot no longer points at the suspended run, so no continuation spawns.
+func TestSuspendedDaemon_ReloadFencesStaleResume(t *testing.T) {
+	eng, reg := newSuspendEnv(t, &suspendExec{})
+	spec := &task.Spec{ID: "wiz-daemon", Name: "wiz-daemon", Runtime: task.RuntimeDeno,
+		Trigger: task.TriggerConfig{Daemon: true, Restart: "never"}, Enabled: true}
+	if err := reg.Register(spec); err != nil {
+		t.Fatalf("reg.Register: %v", err)
+	}
+
+	// Bring the daemon up; its body suspends immediately.
+	if err := eng.Register(spec); err != nil {
+		t.Fatalf("eng.Register: %v", err)
+	}
+	waitUntil(t, 5*time.Second, func() bool {
+		return eng.DaemonState(spec.ID) == DaemonSuspended
+	}, "daemon never parked in DaemonSuspended")
+
+	eng.daemonMu.Lock()
+	firstRun, ok := eng.daemonRuns[spec.ID]
+	eng.daemonMu.Unlock()
+	if !ok {
+		t.Fatal("suspended daemon dropped its run slot")
+	}
+	orig, err := reg.GetRun(context.Background(), firstRun)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	staleToken := orig.ResumeToken
+
+	// Reconciler content reload: eng.Register tears down + restarts. The fresh
+	// body re-points the slot (reserved before the body fires, #470 race 1), so
+	// the pre-reload suspension is now stale.
+	if err := eng.Register(spec); err != nil {
+		t.Fatalf("reload eng.Register: %v", err)
+	}
+	eng.daemonMu.Lock()
+	freshRun, ok := eng.daemonRuns[spec.ID]
+	eng.daemonMu.Unlock()
+	if !ok || freshRun == firstRun {
+		t.Fatalf("reload did not start a fresh body: slot=%q present=%v (pre-reload %q)", freshRun, ok, firstRun)
+	}
+
+	// Resuming the STALE suspension must fail — it must not start a second body.
+	if _, err := eng.ResumeRun(context.Background(), staleToken, nil); err == nil {
+		t.Fatal("stale daemon resume after reload must fail — it would start a second concurrent body")
+	}
+
+	// The slot still belongs to the fresh body; no continuation adopted it.
+	eng.daemonMu.Lock()
+	slot := eng.daemonRuns[spec.ID]
+	eng.daemonMu.Unlock()
+	if slot != freshRun {
+		t.Fatalf("slot = %q after the fenced resume, want the fresh body %q left untouched", slot, freshRun)
+	}
+}
+
+// blockingResumeDaemonExec suspends the first (non-resume) run and blocks the
+// resume continuation inside Execute until release is closed, so a test can
+// observe engine state while the continuation is provably in flight.
+type blockingResumeDaemonExec struct {
+	started    chan string // continuation run ID, sent once its body starts
+	release    chan struct{}
+	firstRuns  atomic.Int32
+	resumeRuns atomic.Int32
+}
+
+func (b *blockingResumeDaemonExec) Execute(_ context.Context, _ *task.Spec, opts pkgruntime.RunOptions) (*pkgruntime.RunResult, error) {
+	if opts.ResumeState == nil {
+		b.firstRuns.Add(1)
+		return &pkgruntime.RunResult{
+			RunID:       opts.RunID,
+			Suspended:   true,
+			ResumeState: []byte(`{"step":"one"}`),
+			ResumeForm:  []byte(`{}`),
+		}, nil
+	}
+	b.resumeRuns.Add(1)
+	b.started <- opts.RunID
+	<-b.release
+	return &pkgruntime.RunResult{RunID: opts.RunID, ReturnValue: "done"}, nil
+}
+
+// TestResumeRun_DaemonContinuation_KeepsOneBodyInFlight verifies the resume half
+// of the #470 invariant: a suspended daemon body's continuation adopts the run
+// slot (so it participates in "one body in flight") and the state reflects a
+// live body again — asserted while the continuation is deterministically parked
+// mid-execution.
+func TestResumeRun_DaemonContinuation_KeepsOneBodyInFlight(t *testing.T) {
+	exec := &blockingResumeDaemonExec{started: make(chan string, 1), release: make(chan struct{})}
+	eng, reg := newSuspendEnv(t, exec)
+	spec := &task.Spec{ID: "wiz-daemon", Name: "wiz-daemon", Runtime: task.RuntimeDeno,
+		Trigger: task.TriggerConfig{Daemon: true, Restart: "never"}, Enabled: true}
+	if err := reg.Register(spec); err != nil {
+		t.Fatalf("reg.Register: %v", err)
+	}
+
+	if err := eng.Register(spec); err != nil {
+		t.Fatalf("eng.Register: %v", err)
+	}
+	waitUntil(t, 5*time.Second, func() bool {
+		return eng.DaemonState(spec.ID) == DaemonSuspended
+	}, "daemon never parked in DaemonSuspended")
+
+	eng.daemonMu.Lock()
+	firstRun := eng.daemonRuns[spec.ID]
+	eng.daemonMu.Unlock()
+	orig, err := reg.GetRun(context.Background(), firstRun)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+
+	contID, err := eng.ResumeRun(context.Background(), orig.ResumeToken, nil)
+	if err != nil {
+		t.Fatalf("ResumeRun: %v", err)
+	}
+	if contID == firstRun {
+		t.Fatal("continuation must have a fresh run ID")
+	}
+
+	// The continuation body is now in flight (blocked in Execute).
+	if started := <-exec.started; started != contID {
+		t.Fatalf("continuation body run %q != returned continuation ID %q", started, contID)
+	}
+
+	// It adopted the daemon slot, and the state reflects a live body again.
+	eng.daemonMu.Lock()
+	slot := eng.daemonRuns[spec.ID]
+	eng.daemonMu.Unlock()
+	if slot != contID {
+		t.Fatalf("continuation did not adopt the slot: slot=%q, want %q", slot, contID)
+	}
+	if got := eng.DaemonState(spec.ID); got != DaemonRunning {
+		t.Fatalf("state = %q while continuation in flight, want running", got)
+	}
+
+	// Release; the continuation completes and frees the slot.
+	close(exec.release)
+	waitStatus(t, reg, contID, registry.StatusSuccess)
+	waitUntil(t, 5*time.Second, func() bool {
+		eng.daemonMu.Lock()
+		defer eng.daemonMu.Unlock()
+		_, reserved := eng.daemonRuns[spec.ID]
+		return !reserved
+	}, "continuation finished but the daemon slot leaked")
+	if got := exec.resumeRuns.Load(); got != 1 {
+		t.Fatalf("continuation bodies = %d, want exactly 1", got)
+	}
 }
