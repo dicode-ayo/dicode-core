@@ -138,6 +138,15 @@ func dispatch(c *ipc.ControlClient, args []string) error {
 			return fmt.Errorf("usage: dicode logs <run-id>")
 		}
 		return cmdLogs(c, args[1])
+	case "resume":
+		// Bare `dicode resume` lists suspended runs; with a run id it resumes.
+		if len(args) < 2 {
+			return cmdResumeList(c)
+		}
+		if err := waitDaemonReady(c, readyWaitTimeout); err != nil {
+			return err
+		}
+		return cmdResume(c, args[1], args[2:])
 	case "status":
 		taskID := ""
 		if len(args) >= 2 {
@@ -915,6 +924,78 @@ func cmdStatus(c *ipc.ControlClient, taskID string) error {
 	return nil
 }
 
+// parseResumeInput turns `field=value` CLI args into the JSON object the
+// daemon forwards to the resumed task as ctx.resume_input. An arg without an
+// `=` is a usage error. An empty arg list yields an empty object.
+func parseResumeInput(kvArgs []string) ([]byte, error) {
+	input := map[string]string{}
+	for _, kv := range kvArgs {
+		parts := strings.SplitN(kv, "=", 2)
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("invalid form value %q — expected field=value", kv)
+		}
+		input[parts[0]] = parts[1]
+	}
+	return json.Marshal(input)
+}
+
+// cmdResume submits collected form values as the resume input for a suspended
+// run. It sends only the run id and the key=value pairs — the daemon resolves
+// the run's resume token server-side and calls the engine's resume, returning
+// the continuation run id.
+func cmdResume(c *ipc.ControlClient, runID string, kvArgs []string) error {
+	inputJSON, err := parseResumeInput(kvArgs)
+	if err != nil {
+		return err
+	}
+	resp, err := c.Send(ipc.Request{
+		Method: "cli.resume",
+		RunID:  runID,
+		Params: inputJSON,
+	})
+	if err != nil {
+		return err
+	}
+	if resp.Error != "" {
+		return fmt.Errorf("%s", resp.Error)
+	}
+	var result ipc.ResumeResult
+	if err := remarshal(resp.Result, &result); err != nil {
+		return err
+	}
+	fmt.Printf("resumed: continuation run %s\n", result.RunID)
+	// The continuation runs asynchronously; point the user at its logs rather
+	// than blocking, since resume returns as soon as the run is spawned.
+	fmt.Printf("follow: dicode logs %s\n", result.RunID)
+	return nil
+}
+
+// cmdResumeList prints the runs currently awaiting resume, with the form fields
+// each expects, so the operator knows what to pass to `dicode resume`.
+func cmdResumeList(c *ipc.ControlClient) error {
+	resp, err := c.Send(ipc.Request{Method: "cli.resume.list"})
+	if err != nil {
+		return err
+	}
+	if resp.Error != "" {
+		return fmt.Errorf("%s", resp.Error)
+	}
+	var runs []ipc.SuspendedRunSummary
+	if err := remarshal(resp.Result, &runs); err != nil {
+		return err
+	}
+	if len(runs) == 0 {
+		fmt.Println("no suspended runs")
+		return nil
+	}
+	fmt.Printf("%-36s %-24s %-20s %s\n", "RUN ID", "TASK", "SUSPENDED AT", "FIELDS")
+	for _, r := range runs {
+		fmt.Printf("%-36s %-24s %-20s %s\n", r.RunID, r.TaskID, orDash(r.SuspendedAt), strings.Join(r.Fields, ","))
+	}
+	fmt.Println("\nresume with: dicode resume <run-id> [field=value ...]")
+	return nil
+}
+
 func cmdSecrets(c *ipc.ControlClient, args []string) error {
 	switch args[0] {
 	case "list":
@@ -1184,6 +1265,7 @@ Commands:
   list                            list registered tasks
   logs <run-id>                   show logs for a run
   status [task-id]                daemon health or task's latest run
+  resume [run-id] [field=value]   resume a suspended run (no args lists suspended runs)
   ai <prompt> [flags]             run the configured AI task with a prompt
                                   flags: --session-id ID, --task TASK_ID
   task test <task-id> [flags]     run the task's sibling task.test.* through its runtime
