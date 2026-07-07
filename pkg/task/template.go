@@ -112,6 +112,7 @@ func expandSpec(spec *Spec, vars map[string]string) {
 		spec.Permissions.Env[i].From = expandString(spec.Permissions.Env[i].From, vars, true)
 		spec.Permissions.Env[i].Secret = expandString(spec.Permissions.Env[i].Secret, vars, true)
 		spec.Permissions.Env[i].Value = expandString(spec.Permissions.Env[i].Value, vars, false)
+		spec.Permissions.Env[i].Default = expandString(spec.Permissions.Env[i].Default, vars, false)
 	}
 
 	// params[].default: lets task.yaml surface loader-provided paths
@@ -184,6 +185,7 @@ func expandOverrides(o *Overrides, vars map[string]string) {
 		o.Env[i].From = expandString(o.Env[i].From, vars, true)
 		o.Env[i].Secret = expandString(o.Env[i].Secret, vars, true)
 		o.Env[i].Value = expandString(o.Env[i].Value, vars, false)
+		o.Env[i].Default = expandString(o.Env[i].Default, vars, false)
 	}
 }
 

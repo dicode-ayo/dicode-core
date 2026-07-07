@@ -57,6 +57,9 @@ permissions:                       # explicit access grants — nothing is impli
       from: GH_TOKEN
     - name: DB_PASS                #   secret: resolve "db_password" from secrets store only
       secret: db_password
+    - name: STATUS_PW              #   default: literal fallback when the secret is unset
+      secret: relay_status_password
+      default: "dev-fallback"
     - name: LOG_LEVEL              #   value: literal injection (taskset overrides)
       value: "info"
   net:                             # outbound network (Deno only)

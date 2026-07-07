@@ -33,6 +33,27 @@
 // what Deno.env keys must satisfy on every supported platform.
 const PLACEHOLDER_RE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
 
+// Conditional-block directives let a template drop a whole section when a
+// variable is unset or empty. Motivating case: relay.yaml lists ~15 OAuth
+// providers whose client_ids are optional and usually unset; an unset value
+// renders as YAML `null`, which the relay's schema rejects. Wrapping each
+// provider block in a conditional makes the renderer omit the block entirely
+// (so an OAuth-less relay renders valid config) instead of emitting a null.
+//
+//   #dicode:if VAR [VAR...]
+//   ...lines...
+//   #dicode:endif
+//
+// A block is kept only when at least one listed variable resolves to a
+// non-empty string (OR semantics); otherwise the whole block — including any
+// ${VAR} placeholders inside it — is dropped, so unset optional vars inside
+// an omitted block never trip renderTemplate's unresolved-placeholder guard.
+// Directive lines are matched after trimming surrounding whitespace, so they
+// can be indented and read as YAML comments. Blocks may nest. Unbalanced
+// if/endif fails loud.
+const IF_RE = /^#\s*dicode:if\s+([A-Za-z_][A-Za-z0-9_ ]*?)\s*$/;
+const ENDIF_RE = /^#\s*dicode:endif\s*$/;
+
 // Minimal local SDK shape. The full DicodeSdk type is an ambient
 // declaration injected by the daemon at runtime; it isn't visible to
 // `deno test` (which type-checks this file because the test imports
@@ -69,6 +90,61 @@ export function collectPlaceholders(template: string): string[] {
     names.add(m[1]);
   }
   return [...names];
+}
+
+// evalConditionals resolves #dicode:if / #dicode:endif blocks (see IF_RE),
+// returning the template with excluded blocks and all directive lines
+// removed. The result still contains ${VAR} placeholders in kept blocks —
+// callers run renderTemplate on it afterwards. `get` resolves a condition
+// variable to its value; a block is kept when any of its variables resolves
+// to a non-empty string. A getter that throws (scoped --allow-env
+// PermissionDenied) is treated as "unset" for that variable.
+export function evalConditionals(
+  template: string,
+  get: (name: string) => string | undefined,
+): string {
+  const out: string[] = [];
+  // Stack of per-open-block "emitting" flags; a line is emitted only when
+  // every enclosing block is active (so a nested block inside an excluded
+  // one stays excluded regardless of its own condition).
+  const stack: boolean[] = [];
+  const emitting = () => stack.every((v) => v);
+  for (const line of template.split("\n")) {
+    const trimmed = line.trim();
+    const ifm = trimmed.match(IF_RE);
+    if (ifm) {
+      if (!emitting()) {
+        // Parent excluded: don't evaluate the nested condition at all.
+        stack.push(false);
+        continue;
+      }
+      const names = ifm[1].split(/\s+/).filter((n) => n !== "");
+      const active = names.some((name) => {
+        try {
+          const v = get(name);
+          return v !== undefined && v !== "";
+        } catch {
+          return false;
+        }
+      });
+      stack.push(active);
+      continue;
+    }
+    if (ENDIF_RE.test(trimmed)) {
+      if (stack.length === 0) {
+        throw new Error("unbalanced #dicode:endif (no matching #dicode:if)");
+      }
+      stack.pop();
+      continue;
+    }
+    if (emitting()) {
+      out.push(line);
+    }
+  }
+  if (stack.length > 0) {
+    throw new Error("unbalanced #dicode:if (missing #dicode:endif)");
+  }
+  return out.join("\n");
 }
 
 // buildEnvMap looks up each placeholder name via the supplied getter
@@ -175,17 +251,22 @@ export default async function main({ params }: TaskSdk): Promise<string> {
   const templatePath = await params.get("template_path");
   const body = await resolveTemplateBody(template, templatePath);
 
+  // Resolve #dicode:if blocks first: excluded blocks (and their
+  // placeholders) are dropped before renderTemplate ever sees them, so an
+  // unset optional var inside an omitted block doesn't fail the render.
+  const reduced = evalConditionals(body, (name) => Deno.env.get(name));
+
   // Drive env lookups by the placeholders found in the template. Using
   // per-name Deno.env.get() is required: Deno.env.toObject() needs
   // unrestricted --allow-env permission, but task.yaml's
   // permissions.env is a finite allowlist that compiles down to
   // `--allow-env=NAME1,NAME2,...`. Per-name get() works under both
   // scoped and unrestricted permissions and respects the allowlist.
-  const names = collectPlaceholders(body);
+  const names = collectPlaceholders(reduced);
   const envMap = buildEnvMap(names, (name) => Deno.env.get(name));
 
   // renderTemplate throws on any unresolved placeholder. Let it
   // propagate — the runtime turns the exception into a failed run,
   // which is the desired loud-failure contract.
-  return renderTemplate(body, envMap);
+  return renderTemplate(reduced, envMap);
 }

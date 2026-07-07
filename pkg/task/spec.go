@@ -227,11 +227,17 @@ type IfMissing struct {
 //
 // The optional `if_missing:` directive (only meaningful alongside `secret:`)
 // runs a prereq task when the secret is absent. See the IfMissing type.
+//
+// The optional `default:` literal (only meaningful alongside `secret:`) is
+// injected when the secret is not found, letting an operator stand a task up
+// with a documented fallback (e.g. a dev password) before configuring the
+// store. It takes precedence over `optional:`'s empty-string degrade.
 type EnvEntry struct {
 	Name      string     `yaml:"name"                  json:"name"`
 	From      string     `yaml:"from,omitempty"        json:"from,omitempty"`       // host OS env var name to read and inject as Name
 	Secret    string     `yaml:"secret,omitempty"      json:"secret,omitempty"`     // secrets store key to resolve and inject as Name
 	Value     string     `yaml:"value,omitempty"       json:"value,omitempty"`      // literal value injection (taskset overrides)
+	Default   string     `yaml:"default,omitempty"     json:"default,omitempty"`    // literal fallback injected when Secret is not found
 	Optional  bool       `yaml:"optional,omitempty"    json:"optional,omitempty"`   // if true, missing secret → empty string instead of failure
 	IfMissing *IfMissing `yaml:"if_missing,omitempty"  json:"if_missing,omitempty"` // prereq task to run when Secret is absent
 }

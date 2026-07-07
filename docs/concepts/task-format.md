@@ -583,7 +583,10 @@ stages:
       env:
         - name: BASE_URL
           value: "https://relay.example.com"
-        # ...Doppler-fed OAuth client_id/secret entries...
+        - name: STATUS_PASSWORD
+          secret: RELAY_STATUS_PASSWORD   # local store, with a dev fallback
+          default: "dicode-relay-dev"
+        # ...optional, Doppler-fed OAuth client_id/secret entries...
 
   - task: buildin/write-local         # stage 2: persist stage 1's output
     overrides:
@@ -635,6 +638,12 @@ Why it's shaped this way:
   rendered string from the template stage into the writer.
 - Rotating Doppler secrets is straightforward: re-fire the render stage
   and the pipeline re-renders and restarts the terminal daemon.
+- The render works without Doppler too: the OAuth `client_id` entries are
+  `optional: true`, so when the provider is unavailable they degrade to
+  empty and the template's `#dicode:if` guards drop the unconfigured
+  provider blocks — leaving a valid `providers: {}` config. The status
+  password comes from the local secrets store with a `default:` dev
+  fallback, so a local operator can stand the relay up without Doppler.
 
 For a full end-to-end docker variant, see the
 [Cloudflare Tunnel worked example](../examples/cloudflare-tunnel.md).
@@ -944,6 +953,7 @@ Two modifiers apply on top:
 | Modifier | Applies to | Effect |
 | --- | --- | --- |
 | `optional: true` | `secret:` | Missing secret injects empty string instead of failing the run |
+| `default: <literal>` | `secret:` | Missing secret injects this literal instead of failing (takes precedence over `optional:`); use for a documented dev fallback |
 | `if_missing: { task: ... }` | `secret:` | Runs a prereq task (typically an OAuth flow) to populate the secret before dispatch |
 
 **`from:` vs `secret:` — the key distinction:**

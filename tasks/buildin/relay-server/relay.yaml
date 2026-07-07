@@ -15,68 +15,103 @@ relay:
 broker:
   session_ttl_ms: 300000
   signing_key_file: ${DICODE_DATADIR}/relay/broker-signing.key
+# The providers key is emitted only when at least one OAuth client_id is set.
+# With none configured the key is omitted entirely so the relay's schema
+# applies its `providers` default of {} — an empty map — rather than choking
+# on a `providers:` null. Each provider block below is likewise gated on its
+# own client_id so unconfigured providers never render as null client_ids.
+#dicode:if GITHUB_CLIENT_ID SLACK_CLIENT_ID GOOGLE_CLIENT_ID SPOTIFY_CLIENT_ID LINEAR_CLIENT_ID DISCORD_CLIENT_ID GITLAB_CLIENT_ID AIRTABLE_CLIENT_ID NOTION_CLIENT_ID CONFLUENCE_CLIENT_ID SALESFORCE_CLIENT_ID STRIPE_CLIENT_ID OFFICE365_CLIENT_ID AZURE_CLIENT_ID
   providers:
+#dicode:if GITHUB_CLIENT_ID
     github:
       client_id: ${GITHUB_CLIENT_ID}
       client_secret: ${GITHUB_CLIENT_SECRET}
       pkce: true
       scopes: [user, repo]
+#dicode:endif
+#dicode:if SLACK_CLIENT_ID
     slack:
       client_id: ${SLACK_CLIENT_ID}
       pkce: true
       scopes: [channels:read]
+#dicode:endif
+#dicode:if GOOGLE_CLIENT_ID
     google:
       client_id: ${GOOGLE_CLIENT_ID}
       client_secret: ${GOOGLE_CLIENT_SECRET}
       pkce: true
       scopes: ["https://www.googleapis.com/auth/userinfo.email"]
+#dicode:endif
+#dicode:if SPOTIFY_CLIENT_ID
     spotify:
       client_id: ${SPOTIFY_CLIENT_ID}
       pkce: true
       scopes: [user-read-private, user-read-email]
+#dicode:endif
+#dicode:if LINEAR_CLIENT_ID
     linear:
       client_id: ${LINEAR_CLIENT_ID}
       pkce: true
       scopes: [read]
+#dicode:endif
+#dicode:if DISCORD_CLIENT_ID
     discord:
       client_id: ${DISCORD_CLIENT_ID}
       pkce: true
       scopes: [identify, email]
+#dicode:endif
+#dicode:if GITLAB_CLIENT_ID
     gitlab:
       client_id: ${GITLAB_CLIENT_ID}
       client_secret: ${GITLAB_CLIENT_SECRET}
       pkce: true
       scopes: [read_user, read_api]
+#dicode:endif
+#dicode:if AIRTABLE_CLIENT_ID
     airtable:
       client_id: ${AIRTABLE_CLIENT_ID}
       client_secret: ${AIRTABLE_CLIENT_SECRET}
       pkce: true
       scopes: ["data.records:read"]
+#dicode:endif
+#dicode:if NOTION_CLIENT_ID
     notion:
       client_id: ${NOTION_CLIENT_ID}
       client_secret: ${NOTION_CLIENT_SECRET}
       pkce: false
       scopes: []
+#dicode:endif
+#dicode:if CONFLUENCE_CLIENT_ID
     confluence:
       client_id: ${CONFLUENCE_CLIENT_ID}
       pkce: true
       scopes: ["read:me", "read:confluence-content.all", offline_access]
+#dicode:endif
+#dicode:if SALESFORCE_CLIENT_ID
     salesforce:
       client_id: ${SALESFORCE_CLIENT_ID}
       pkce: true
       scopes: [api, refresh_token]
+#dicode:endif
+#dicode:if STRIPE_CLIENT_ID
     stripe:
       client_id: ${STRIPE_CLIENT_ID}
       client_secret: ${STRIPE_CLIENT_SECRET}
       pkce: false
       scopes: [read_write]
+#dicode:endif
+#dicode:if OFFICE365_CLIENT_ID
     office365:
       client_id: ${OFFICE365_CLIENT_ID}
       client_secret: ${OFFICE365_CLIENT_SECRET}
       pkce: true
       scopes: [offline_access, User.Read, Mail.Read]
+#dicode:endif
+#dicode:if AZURE_CLIENT_ID
     azure:
       client_id: ${AZURE_CLIENT_ID}
       client_secret: ${AZURE_CLIENT_SECRET}
       pkce: true
       scopes: [openid, profile, email, offline_access]
+#dicode:endif
+#dicode:endif

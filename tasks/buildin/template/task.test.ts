@@ -10,9 +10,17 @@ import { assertEquals, assertRejects, assertThrows } from "jsr:@std/assert@1";
 import {
   buildEnvMap,
   collectPlaceholders,
+  evalConditionals,
   renderTemplate,
   resolveTemplateBody,
 } from "./task.ts";
+
+// getFrom builds a condition getter over a plain record. An absent key
+// yields undefined (treated as "unset"); an empty string is present-but-empty.
+function getFrom(vars: Record<string, string>) {
+  return (name: string): string | undefined =>
+    Object.prototype.hasOwnProperty.call(vars, name) ? vars[name] : undefined;
+}
 
 // --- renderTemplate (pure) ---
 
@@ -99,6 +107,104 @@ Deno.test("collectPlaceholders: empty when template has none", () => {
 Deno.test("collectPlaceholders: ignores invalid placeholder shapes", () => {
   // Bash-style ${1}, ${a-b}, bare $VAR don't match the strict regex.
   assertEquals(collectPlaceholders("$1 ${a-b} $X ${OK}"), ["OK"]);
+});
+
+// --- evalConditionals (pure) ---
+
+Deno.test("evalConditionals: keeps block when var is set, drops directives", () => {
+  const tpl = [
+    "a: 1",
+    "#dicode:if X",
+    "b: ${X}",
+    "#dicode:endif",
+    "c: 3",
+  ].join("\n");
+  assertEquals(
+    evalConditionals(tpl, getFrom({ X: "on" })),
+    "a: 1\nb: ${X}\nc: 3",
+  );
+});
+
+Deno.test("evalConditionals: drops block (and its placeholders) when var unset", () => {
+  const tpl = [
+    "a: 1",
+    "#dicode:if X",
+    "b: ${X_SECRET}",
+    "#dicode:endif",
+    "c: 3",
+  ].join("\n");
+  // The unset ${X_SECRET} inside the dropped block must not survive to
+  // renderTemplate — it's gone entirely.
+  assertEquals(evalConditionals(tpl, getFrom({})), "a: 1\nc: 3");
+});
+
+Deno.test("evalConditionals: empty-string var is treated as unset (block dropped)", () => {
+  const tpl = "#dicode:if X\nkept: yes\n#dicode:endif";
+  assertEquals(evalConditionals(tpl, getFrom({ X: "" })), "");
+});
+
+Deno.test("evalConditionals: OR semantics — any set var keeps the block", () => {
+  const tpl = "#dicode:if A B C\nkept: yes\n#dicode:endif";
+  assertEquals(evalConditionals(tpl, getFrom({ B: "set" })), "kept: yes");
+  assertEquals(evalConditionals(tpl, getFrom({})), "");
+});
+
+Deno.test("evalConditionals: indented directives are matched", () => {
+  const tpl = "  #dicode:if X\n  kept: yes\n  #dicode:endif";
+  assertEquals(evalConditionals(tpl, getFrom({ X: "1" })), "  kept: yes");
+  assertEquals(evalConditionals(tpl, getFrom({})), "");
+});
+
+Deno.test("evalConditionals: nested block excluded when parent excluded", () => {
+  const tpl = [
+    "#dicode:if OUTER",
+    "outer: yes",
+    "#dicode:if INNER",
+    "inner: ${INNER}",
+    "#dicode:endif",
+    "#dicode:endif",
+  ].join("\n");
+  // OUTER unset → whole thing dropped, INNER never evaluated.
+  assertEquals(evalConditionals(tpl, getFrom({ INNER: "x" })), "");
+  // OUTER set, INNER unset → only inner dropped.
+  assertEquals(
+    evalConditionals(tpl, getFrom({ OUTER: "1" })),
+    "outer: yes",
+  );
+  // Both set → both kept.
+  assertEquals(
+    evalConditionals(tpl, getFrom({ OUTER: "1", INNER: "x" })),
+    "outer: yes\ninner: ${INNER}",
+  );
+});
+
+Deno.test("evalConditionals: getter that throws counts as unset", () => {
+  const tpl = "#dicode:if X\nkept: yes\n#dicode:endif";
+  const out = evalConditionals(tpl, () => {
+    throw new Deno.errors.PermissionDenied("no env access");
+  });
+  assertEquals(out, "");
+});
+
+Deno.test("evalConditionals: unbalanced endif fails loud", () => {
+  assertThrows(
+    () => evalConditionals("a\n#dicode:endif", getFrom({})),
+    Error,
+    "unbalanced #dicode:endif",
+  );
+});
+
+Deno.test("evalConditionals: unbalanced if fails loud", () => {
+  assertThrows(
+    () => evalConditionals("#dicode:if X\nkept", getFrom({ X: "1" })),
+    Error,
+    "unbalanced #dicode:if",
+  );
+});
+
+Deno.test("evalConditionals: template with no directives is unchanged", () => {
+  const tpl = "a: 1\nb: ${X}\nc: 3";
+  assertEquals(evalConditionals(tpl, getFrom({})), tpl);
 });
 
 // --- buildEnvMap (pure) ---
@@ -197,6 +303,28 @@ Deno.test("main: reads template param, resolves env, returns rendered string", a
       assertEquals(out, "tunnel: abc-123\nhost: api.example.com");
     },
   );
+});
+
+Deno.test("main: #dicode:if drops block for unset var, keeps it for set var", async () => {
+  const tpl = [
+    "keep: always",
+    "#dicode:if TPL_TEST_COND",
+    "opt: ${TPL_TEST_COND}",
+    "#dicode:endif",
+  ].join("\n");
+
+  // Unset → block dropped, and its ${TPL_TEST_COND} never trips the
+  // unresolved-placeholder guard.
+  Deno.env.delete("TPL_TEST_COND");
+  assertEquals(await main(stubSdk({ template: tpl })), "keep: always");
+
+  // Set → block kept and rendered.
+  await withEnv({ TPL_TEST_COND: "here" }, async () => {
+    assertEquals(
+      await main(stubSdk({ template: tpl })),
+      "keep: always\nopt: here",
+    );
+  });
 });
 
 Deno.test("main: missing env var produces unresolved-placeholder error", async () => {
