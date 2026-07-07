@@ -855,7 +855,9 @@ func runServices(ctx context.Context, rec *registry.Reconciler, eng *trigger.Eng
 	}
 	// Resume-deadline sweep (#95): cancel suspended runs whose resume_deadline
 	// has passed, recording ReasonResumeTimeout. Runs on a ticker so a run that
-	// suspends and is never resumed doesn't linger indefinitely.
+	// suspends and is never resumed doesn't linger indefinitely. Routed through
+	// the engine so each cancellation fires the run:finished hook and its
+	// resume_timeout chain, matching a normal cancellation's finish side-effects.
 	g.Go(func() error {
 		ticker := time.NewTicker(resumeSweepInterval)
 		defer ticker.Stop()
@@ -864,7 +866,7 @@ func runServices(ctx context.Context, rec *registry.Reconciler, eng *trigger.Eng
 			case <-ctx.Done():
 				return nil
 			case <-ticker.C:
-				swept, err := reg.SweepExpiredSuspensions(ctx, time.Now().UnixMilli())
+				swept, err := eng.SweepExpiredSuspensions(ctx, time.Now().UnixMilli())
 				if err != nil {
 					log.Warn("resume-deadline sweep failed", zap.Error(err))
 				} else if len(swept) > 0 {

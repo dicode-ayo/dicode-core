@@ -107,8 +107,9 @@ func (e *Engine) ResumeRun(ctx context.Context, token string, input []byte) (str
 	}
 	if run.ResumeDeadline > 0 && time.Now().UnixMilli() > run.ResumeDeadline {
 		// Expired: sweep it now so its terminal state reflects the timeout even
-		// if the periodic sweep hasn't run yet, then reject.
-		if _, serr := e.registry.SweepExpiredSuspensions(ctx, time.Now().UnixMilli()); serr != nil {
+		// if the periodic sweep hasn't run yet, then reject. Routed through the
+		// engine sweep so the run:finished hook and resume_timeout chain fire.
+		if _, serr := e.SweepExpiredSuspensions(ctx, time.Now().UnixMilli()); serr != nil {
 			e.log.Warn("resume: sweep expired suspension failed",
 				zap.String("run", run.ID), zap.Error(serr))
 		}
