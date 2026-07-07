@@ -128,14 +128,18 @@ func (r *Registry) CancelSuspendedRun(ctx context.Context, runID, reason string)
 // SweepExpiredSuspensions cancels every suspended run whose resume_deadline has
 // passed (relative to nowMs), recording ReasonResumeTimeout as the fail_reason
 // and stamping finished_at. Rows with no deadline (resume_deadline NULL/0) are
-// left untouched. Returns the IDs of the runs it cancelled.
+// left untouched. Returns the IDs of the runs it actually cancelled.
 //
-// The SELECT and UPDATE run in one transaction so a run that resumes between the
-// two statements (flipping to `resumed`) is not erroneously cancelled.
+// Each candidate is transitioned with its own status-guarded UPDATE and only
+// the rows that UPDATE changed are returned. A run that resumes between the
+// candidate SELECT and its UPDATE changes 0 rows and is excluded, so a caller
+// that fires finish side-effects per returned ID cannot double-finish a run
+// that already left `suspended`.
 func (r *Registry) SweepExpiredSuspensions(ctx context.Context, nowMs int64) ([]string, error) {
-	var expired []string
+	var cancelled []string
 	err := r.db.Tx(ctx, func(tx db.DB) error {
-		expired = nil // reset on retry
+		cancelled = nil // reset on retry
+		var candidates []string
 		if err := tx.Query(ctx,
 			`SELECT id FROM runs WHERE status = ? AND resume_deadline IS NOT NULL AND resume_deadline > 0 AND resume_deadline < ?`,
 			[]any{StatusSuspended, nowMs},
@@ -145,24 +149,30 @@ func (r *Registry) SweepExpiredSuspensions(ctx context.Context, nowMs int64) ([]
 					if err := rows.Scan(&id); err != nil {
 						return err
 					}
-					expired = append(expired, id)
+					candidates = append(candidates, id)
 				}
 				return nil
 			},
 		); err != nil {
 			return fmt.Errorf("query expired suspensions: %w", err)
 		}
-		if len(expired) == 0 {
-			return nil
+		for _, id := range candidates {
+			affected, err := tx.ExecResult(ctx,
+				`UPDATE runs SET status = ?, finished_at = ?, fail_reason = ?
+				 WHERE id = ? AND status = ?`,
+				StatusCancelled, nowMs, ReasonResumeTimeout, id, StatusSuspended,
+			)
+			if err != nil {
+				return fmt.Errorf("cancel expired suspension %s: %w", id, err)
+			}
+			if affected > 0 {
+				cancelled = append(cancelled, id)
+			}
 		}
-		return tx.Exec(ctx,
-			`UPDATE runs SET status = ?, finished_at = ?, fail_reason = ?
-			 WHERE status = ? AND resume_deadline IS NOT NULL AND resume_deadline > 0 AND resume_deadline < ?`,
-			StatusCancelled, nowMs, ReasonResumeTimeout, StatusSuspended, nowMs,
-		)
+		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	return expired, nil
+	return cancelled, nil
 }
