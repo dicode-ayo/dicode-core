@@ -21,7 +21,7 @@ type inputStoreTaskRunner struct{ e *Engine }
 func (r *inputStoreTaskRunner) RunTaskSync(ctx context.Context, taskID string, params map[string]string) (any, error) {
 	spec, ok := r.e.registry.Get(taskID)
 	if !ok {
-		return nil, fmt.Errorf("storage task %q not registered", taskID)
+		return nil, fmt.Errorf("storage task %q: %w", taskID, registry.ErrStorageTaskNotRegistered)
 	}
 	_, result, err := r.e.fireSync(ctx, spec, pkgruntime.RunOptions{Params: params}, "input-storage")
 	if err != nil {

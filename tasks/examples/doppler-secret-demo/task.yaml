@@ -28,9 +28,9 @@ trigger:
 permissions:
   env:
     - name: PG_URL
-      from: task:secret-providers/doppler
+      from: task:buildin/secret-providers/doppler
     - name: REDIS_URL
-      from: task:secret-providers/doppler
+      from: task:buildin/secret-providers/doppler
       optional: true
 
 timeout: 10s

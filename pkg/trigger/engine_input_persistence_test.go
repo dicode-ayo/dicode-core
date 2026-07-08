@@ -5,8 +5,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dicode/dicode/pkg/db"
 	"github.com/dicode/dicode/pkg/registry"
 	"github.com/dicode/dicode/pkg/task"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // fakeRunner is a minimal in-memory TaskRunner for testing the engine's
@@ -287,6 +291,65 @@ export default async function main({ params, dicode }: any) {
 	}
 	if afterRun.InputStoredAt != 0 {
 		t.Errorf("InputStoredAt not cleared after delete_input; got %d", afterRun.InputStoredAt)
+	}
+}
+
+// TestEngine_PersistStorageTaskNotReady_NotWarned verifies the #523 startup
+// race: when a run's input persist fails purely because the backing storage
+// task is not yet registered, the engine logs at debug (self-healing startup
+// window) rather than emitting a false-alarm WARN. A genuine persist error
+// would still warn (see the error_class="persist" branch).
+func TestEngine_PersistStorageTaskNotReady_NotWarned(t *testing.T) {
+	d, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { d.Close() })
+	reg := registry.New(d)
+
+	core, logs := observer.New(zapcore.DebugLevel)
+	// nil executor: dispatch fails after the run record is created, but the
+	// synchronous persist hook in startRunWithParent runs first — which is all
+	// this test exercises.
+	eng := New(reg, nil, zap.New(core))
+	eng.SetDB(d)
+
+	// Real runner backed by this engine, pointed at a storage task that is
+	// deliberately never registered so RunTaskSync returns
+	// registry.ErrStorageTaskNotRegistered.
+	runner := NewInputStoreTaskRunner(eng)
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i + 1)
+	}
+	is := registry.NewInputStore(registry.NewInputCrypto(key), runner, "buildin/local-storage")
+	eng.SetInputStore(is)
+
+	spec := &task.Spec{
+		ID:      "daemon-ish-task",
+		Name:    "daemon-ish-task",
+		Runtime: task.RuntimeDeno,
+		Trigger: task.TriggerConfig{Manual: true},
+		Timeout: 30 * time.Second,
+		Enabled: true,
+	}
+	_ = reg.Register(spec)
+
+	runID, err := eng.FireManual(context.Background(), "daemon-ish-task", map[string]string{"a": "b"})
+	if err != nil {
+		t.Fatalf("FireManual: %v", err)
+	}
+	waitForTerminal(t, eng, runID, 30*time.Second)
+
+	if n := logs.FilterMessage("run-input persist failed").Len(); n != 0 {
+		t.Errorf("storage-not-ready must not WARN; got %d 'run-input persist failed' logs", n)
+	}
+	debug := logs.FilterMessage("run-input persist skipped: storage task not yet registered")
+	if debug.Len() == 0 {
+		t.Fatal("expected a debug log for the storage-not-ready persist window, got none")
+	}
+	if lvl := debug.All()[0].Level; lvl != zapcore.DebugLevel {
+		t.Errorf("storage-not-ready log level = %v, want debug", lvl)
 	}
 }
 

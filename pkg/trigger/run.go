@@ -183,11 +183,22 @@ func (e *Engine) startRunWithParent(parent context.Context, spec *task.Spec, opt
 		in := registry.BuildPersistedInputFromRunOpts(string(source), opts.Params, opts.Input, web)
 		key, size, storedAt, perr := e.inputStore.Persist(context.Background(), opts.RunID, in)
 		if perr != nil {
-			e.log.Warn("run-input persist failed",
-				zap.String("run", opts.RunID),
-				zap.String("task", spec.ID),
-				zap.String("error_class", "persist"),
-			)
+			if errors.Is(perr, registry.ErrStorageTaskNotRegistered) {
+				// Startup race (#523): daemon-triggered runs (tray, relay-*,
+				// nginx-start) fire before buildin/local-storage registers, so
+				// the backing store isn't ready yet. Expected and self-healing —
+				// debug, not warn. Genuine persist failures still warn below.
+				e.log.Debug("run-input persist skipped: storage task not yet registered",
+					zap.String("run", opts.RunID),
+					zap.String("task", spec.ID),
+				)
+			} else {
+				e.log.Warn("run-input persist failed",
+					zap.String("run", opts.RunID),
+					zap.String("task", spec.ID),
+					zap.String("error_class", "persist"),
+				)
+			}
 		} else {
 			if opts.WebhookCtx != nil {
 				// Bound RAM exposure: RawBody is no longer needed now that the
