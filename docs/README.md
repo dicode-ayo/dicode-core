@@ -18,6 +18,7 @@
 | [Secrets](./concepts/secrets.md) | provider chain, local encrypted store, external providers |
 | [Testing & Validation](./concepts/testing.md) | validate, unit tests, dry-run, CI |
 | [Task → Orchestrator API](./concepts/orchestrator-api.md) | `dicode` global, progress, trigger, ask |
+| [Suspendable Tasks](./concepts/suspendable-tasks.md) | `dicode.suspend()`, resume forms, `suspended`/`resumed` lifecycle, `dicode resume` |
 | [MCP Server](./concepts/mcp-server.md) | MCP tools, agent workflow |
 | [Agent Skill](./concepts/agent-skill.md) | skill file, install, workflow rules |
 | [AI Generation](./concepts/ai-generation.md) | Claude API, prompt building, validation loop |

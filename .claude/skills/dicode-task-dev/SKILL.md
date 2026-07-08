@@ -1,6 +1,6 @@
 ---
 name: dicode-task-dev
-description: Author, modify, or debug dicode tasks — the JS/TS/Python/Docker automation scripts under tasks/ (task.yaml + task.ts + task.test.ts). Use when writing a new task, editing an existing one, adding triggers/permissions/params, wiring MCP or task chaining, or fixing a failing task test. Covers the task.yaml schema, the SDK globals (kv/log/params/env/input/output/dicode/mcp), the test harness, and the validate → test → run dev loop.
+description: Author, modify, or debug dicode tasks — the JS/TS/Python/Docker automation scripts under tasks/ (task.yaml + task.ts + task.test.ts). Use when writing a new task, editing an existing one, adding triggers/permissions/params, wiring MCP or task chaining, or fixing a failing task test. Covers the task.yaml schema, the SDK globals (kv/log/params/env/input/output/dicode/mcp/suspend+resume), the test harness, and the validate → test → run dev loop.
 ---
 
 # dicode Task Development
@@ -83,7 +83,33 @@ on_failure_chain: <task-id>      # run on failure; "" disables global default
 - `output.html()/text()` — render UI instead of returning JSON.
 - `await dicode.run_task(id, params?)` / `list_tasks()` / `get_runs(id, opts)` / `secrets_set()/secrets_delete()` — gated by `permissions.dicode`.
 - `await mcp.list_tools(server)` / `mcp.call(server, tool, args)` — gated by `permissions.dicode.mcp`.
+- `await dicode.suspend({ state, form, deadline? })` — pause for user input; reads back as `resume_state` / `resume_input` (Python: `ctx.resume_state`). See below.
 - `return <json>` — value handed to downstream chain tasks; keep it under ~1MB.
+
+### Suspendable tasks (pause for user input)
+
+`dicode.suspend()` pauses a run to collect input from a human, then continues.
+It never returns — the process exits, the run becomes `suspended`, and on resume
+the task **re-runs from the top** with `resume_state` (the blob you passed) and
+`resume_input` (the submitted form) populated (both `undefined`/`None` on a first
+run). Branch on `resume_state` to resume where you left off. Deno/Python only; no
+permission declaration needed.
+
+```typescript
+if (!resume_state) {
+  await dicode.suspend({
+    state: { step: "confirm" },
+    form: { title: "Approve?", fields: [{ name: "ok", label: "OK?", type: "boolean", required: true }] },
+  })  // unreachable — never returns
+}
+const answers = resume_input as Record<string, unknown>
+```
+
+Field types: `string | text | number | boolean | select` (`select` needs
+`options: [{ value, label }]`). Never swallow the suspend signal in a `try/catch`
+(the run fails loudly). Resume via the WebUI run-detail form or the CLI:
+`dicode resume` lists suspended runs, `dicode resume <run-id> field=value` submits.
+Full reference: [docs/concepts/suspendable-tasks.md](../../../docs/concepts/suspendable-tasks.md).
 
 ## Test harness (`task.test.ts`)
 

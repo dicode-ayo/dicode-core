@@ -143,6 +143,27 @@ Assign `result` at module level. The value is passed to chained tasks via `input
 result = {"count": 42, "status": "ok"}
 ```
 
+### `suspend` / `ctx.resume_state` / `ctx.resume_input`
+
+Pause a run to collect input from a human. `dicode.suspend(state=..., form=...)`
+never returns — it raises a control signal, the process exits, the run becomes
+`suspended`, and on resume the task re-runs from the top with `ctx.resume_state`
+(the blob you passed) and `ctx.resume_input` (the submitted form) populated (both
+`None` on a first run).
+
+```python
+if ctx.resume_state is None:
+    dicode.suspend(
+        state={"step": "confirm"},
+        form={"title": "Approve?", "fields": [{"name": "ok", "label": "OK?", "type": "boolean", "required": True}]},
+    )  # unreachable — never returns
+```
+
+Do not wrap `suspend()` in a `try/except` that swallows the signal — the run
+fails loudly if you do. See [Suspendable Tasks](./concepts/suspendable-tasks.md)
+for the form schema, lifecycle (`suspended` → `resumed`), and how to resume via
+the Web UI or `dicode resume`.
+
 ### Async tasks
 
 Define `async def main()` and return a value from it. The shim detects the coroutine and runs it with `asyncio.run()`.
