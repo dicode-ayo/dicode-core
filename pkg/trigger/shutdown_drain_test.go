@@ -37,9 +37,25 @@ type drainExec struct {
 	// block, when non-nil, is waited on INSTEAD of ctx — a wedged run that
 	// ignores KillRun. The test releases it during teardown.
 	block chan struct{}
+
+	mu        sync.Mutex
+	execCount map[string]int // per-task Execute invocations
 }
 
-func (d *drainExec) Execute(ctx context.Context, _ *task.Spec, opts pkgruntime.RunOptions) (*pkgruntime.RunResult, error) {
+func (d *drainExec) count(taskID string) int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.execCount[taskID]
+}
+
+func (d *drainExec) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime.RunOptions) (*pkgruntime.RunResult, error) {
+	d.mu.Lock()
+	if d.execCount == nil {
+		d.execCount = map[string]int{}
+	}
+	d.execCount[spec.ID]++
+	d.mu.Unlock()
+
 	d.startedOnce.Do(func() { close(d.started) })
 	if d.block != nil {
 		<-d.block
@@ -169,4 +185,100 @@ func TestShutdownDrainBoundedByGrace(t *testing.T) {
 	// open DB before the deferred db.Close runs.
 	close(exec.block)
 	eng.runWG.Wait()
+}
+
+// TestShutdownGatesChainDispatch proves the drain is a fence, not a snapshot: a
+// run finalizing during shutdown fires its chain edge in a detached goroutine
+// (FireChain → `go fireAsync`), and that dispatch must be refused rather than
+// escape the drain and write to a closed DB. The downstream task must never
+// execute and must leave no run row.
+func TestShutdownGatesChainDispatch(t *testing.T) {
+	exec := &drainExec{started: make(chan struct{})}
+	eng, reg := newDrainEnv(t, exec)
+
+	daemon := drainDaemonSpec() // "drain-daemon", killed on shutdown → finalizes
+	target := &task.Spec{
+		ID:      "chain-target",
+		Name:    "chain-target",
+		Runtime: task.RuntimeDocker,
+		Docker:  &task.DockerConfig{Image: "alpine"},
+		// Fires on ANY terminal status of the daemon, including its shutdown kill.
+		Trigger: task.TriggerConfig{Chain: &task.ChainTrigger{From: daemon.ID, On: "always"}},
+		Enabled: true,
+	}
+	for _, s := range []*task.Spec{daemon, target} {
+		if err := reg.Register(s); err != nil {
+			t.Fatalf("reg.Register %s: %v", s.ID, err)
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	startDone := make(chan error, 1)
+	go func() { startDone <- eng.Start(ctx) }()
+
+	runningDaemonRunID(t, eng, exec, daemon.ID)
+
+	cancel()
+
+	select {
+	case <-startDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Start did not return after shutdown")
+	}
+
+	// Give the detached chain-dispatch goroutine time to run and be refused.
+	time.Sleep(150 * time.Millisecond)
+
+	if n := exec.count(target.ID); n != 0 {
+		t.Errorf("downstream %q executed %d time(s); chain dispatch escaped the shutdown gate", target.ID, n)
+	}
+	runs, err := reg.ListRuns(context.Background(), target.ID, 10)
+	if err != nil {
+		t.Fatalf("ListRuns(%q): %v", target.ID, err)
+	}
+	if len(runs) != 0 {
+		t.Errorf("downstream %q has %d run row(s); a gated dispatch must create none", target.ID, len(runs))
+	}
+}
+
+// TestTrackRunGateRaceWithShutdown exercises many concurrent trackRun fires
+// against beginShutdown + the drain's Wait. The wgMu serialization must keep
+// every Add out of the Wait window, so this never trips Go's
+// "sync: WaitGroup misuse: Add called concurrently with Wait" panic. Run under
+// -race for the full effect.
+func TestTrackRunGateRaceWithShutdown(t *testing.T) {
+	exec := &drainExec{started: make(chan struct{})}
+	eng, _ := newDrainEnv(t, exec)
+
+	var fires sync.WaitGroup
+	for i := 0; i < 200; i++ {
+		fires.Add(1)
+		go func() {
+			defer fires.Done()
+			if eng.trackRun() {
+				// Won the gate before shutdown latched → must balance the Add.
+				eng.runWG.Done()
+			}
+		}()
+	}
+
+	// Latch shutdown concurrently with the fires, then drain.
+	eng.beginShutdown()
+	drained := make(chan struct{})
+	go func() {
+		eng.runWG.Wait()
+		close(drained)
+	}()
+
+	select {
+	case <-drained:
+	case <-time.After(5 * time.Second):
+		t.Fatal("drain did not complete")
+	}
+	fires.Wait()
+
+	// After shutdown latched, every subsequent trackRun must be refused.
+	if eng.trackRun() {
+		t.Fatal("trackRun granted a slot after beginShutdown")
+	}
 }
