@@ -37,6 +37,24 @@ func (e *Engine) SweepExpiredSuspensions(ctx context.Context, nowMs int64) ([]st
 			h(run.TaskID, run.ID, registry.StatusCancelled, string(run.TriggerSource), 0)
 		}
 		e.FireChain(context.Background(), run.TaskID, run.ID, registry.StatusCancelled, nil, nil)
+
+		// A standalone daemon body that suspended kept its #470 run slot parked
+		// (DaemonSuspended) for a resume that never came; the sweep just made the
+		// run terminal but its goroutine is long gone, so onDaemonRunFinished
+		// won't release the slot or apply the restart policy. Route it back
+		// through the daemon lifecycle so the slot frees and restart=always
+		// restarts instead of the daemon wedging. Pipeline-stage daemon runs
+		// (TriggerPipelineStage) are owned by the PipelineRunner, not the
+		// standalone-daemon machinery — mirror run.go's onDaemonRunFinished gate
+		// and leave them alone.
+		if run.TriggerSource != registry.TriggerPipelineStage {
+			e.daemonMu.Lock()
+			spec, isDaemon := e.daemonSpecs[run.TaskID]
+			e.daemonMu.Unlock()
+			if isDaemon && spec.Trigger.Daemon {
+				go e.onDaemonSuspensionSwept(spec, run)
+			}
+		}
 	}
 	return swept, nil
 }

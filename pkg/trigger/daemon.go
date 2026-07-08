@@ -216,10 +216,9 @@ func (e *Engine) onDaemonRunFinished(spec *task.Spec, runID string) {
 		// The daemon was running; treat the deliberate stop as a clean
 		// transition to DaemonStopped so the WebUI doesn't pin a stale
 		// "Running" pill on a daemon whose body has been killed (issue
-		// #332). This sits ahead of the noRestartTransition switch
-		// below because cancellation short-circuits the restart-policy
-		// decision entirely — a killed daemon stays stopped regardless
-		// of restart=always/on-failure/never.
+		// #332). This sits ahead of the restart-policy decision because
+		// cancellation short-circuits it entirely — a killed daemon
+		// stays stopped regardless of restart=always/on-failure/never.
 		//
 		// Cancellation also clears crash-loop tracking (#458): a kill is
 		// deliberate operator intent, not another crashed start, and the
@@ -229,12 +228,26 @@ func (e *Engine) onDaemonRunFinished(spec *task.Spec, runID string) {
 		return
 	}
 
+	e.restartDaemonAfterExit(spec, run.Status, elapsed)
+}
+
+// restartDaemonAfterExit applies crash-loop accounting and the restart policy
+// for a daemon body that has left the running state with a non-cancelled exit,
+// re-launching it (through the shared restart gate, after backoff) when the
+// policy calls for it. The caller must have already released the run slot and
+// confirmed the task is still registered and the engine is not shutting down.
+//
+// Reused by two entry points: the run goroutine's onDaemonRunFinished (in-line,
+// where blocking on the backoff is fine) and the timeout sweep of a suspended
+// daemon (out-of-band, where the run goroutine is already gone) — so both take
+// the identical restart decision.
+func (e *Engine) restartDaemonAfterExit(spec *task.Spec, status string, elapsed time.Duration) {
 	// Crash-loop accounting (#458): a quick non-success exit bumps the
 	// consecutive-failure counter; a clean or sustained exit resets it.
 	// Tracked for every non-cancelled exit regardless of restart policy so
 	// the rule stays a single invariant; in practice only auto-restarting
 	// daemons accumulate enough consecutive starts to trip the threshold.
-	if fails := e.crashloops.noteExit(spec.ID, elapsed, run.Status == registry.StatusSuccess); fails == crashloopThreshold {
+	if fails := e.crashloops.noteExit(spec.ID, elapsed, status == registry.StatusSuccess); fails == crashloopThreshold {
 		e.log.Warn("daemon is crash-looping — status reports 'crashlooping' until a run sustains",
 			zap.String("task", spec.ID),
 			zap.Int("consecutive_quick_failures", fails),
@@ -256,7 +269,7 @@ func (e *Engine) onDaemonRunFinished(spec *task.Spec, runID string) {
 	// daemonStates, leaving the WebUI showing a stale "Running" pill
 	// for a daemon that's no longer running.
 	noRestartTransition := func() {
-		if run.Status == registry.StatusSuccess {
+		if status == registry.StatusSuccess {
 			e.setDaemonState(spec.ID, DaemonStopped)
 		} else {
 			e.setDaemonState(spec.ID, DaemonCrashed)
@@ -265,13 +278,13 @@ func (e *Engine) onDaemonRunFinished(spec *task.Spec, runID string) {
 	switch restart {
 	case "never":
 		e.log.Info("daemon exited — restart=never, not restarting",
-			zap.String("task", spec.ID), zap.String("status", run.Status))
+			zap.String("task", spec.ID), zap.String("status", status))
 		noRestartTransition()
 		return
 	case "on-failure":
-		if run.Status != registry.StatusFailure {
+		if status != registry.StatusFailure {
 			e.log.Info("daemon exited — restart=on-failure, not restarting (no failure)",
-				zap.String("task", spec.ID), zap.String("status", run.Status))
+				zap.String("task", spec.ID), zap.String("status", status))
 			noRestartTransition()
 			return
 		}
@@ -279,7 +292,7 @@ func (e *Engine) onDaemonRunFinished(spec *task.Spec, runID string) {
 
 	e.log.Info("daemon exited, scheduling restart",
 		zap.String("task", spec.ID),
-		zap.String("status", run.Status),
+		zap.String("status", status),
 		zap.String("restart", restart),
 	)
 
@@ -347,15 +360,15 @@ func (e *Engine) onDaemonRunFinished(spec *task.Spec, runID string) {
 	// Re-check under the gate: the backoff sleep is up to daemonBackoffMax,
 	// plenty of time for the world to have moved on.
 	//   - An Unregister during the sleep must not resurrect the daemon (the
-	//     stillRegistered check at the top of this function predates the
-	//     sleep, so it cannot cover this).
+	//     caller's stillRegistered check predates the sleep, so it cannot
+	//     cover this).
 	//   - A re-register that already completed (gate released) has a live
 	//     run slot; starting again would double-start the body. With the
 	//     slot now reserved before the body fires (race 1 fix above), slot
 	//     presence is a reliable "body in flight" signal — the same check
 	//     registerDaemon uses.
 	e.daemonMu.Lock()
-	_, stillRegistered = e.daemonSpecs[spec.ID]
+	_, stillRegistered := e.daemonSpecs[spec.ID]
 	_, alreadyRunning := e.daemonRuns[spec.ID]
 	e.daemonMu.Unlock()
 	if !stillRegistered {
@@ -371,4 +384,50 @@ func (e *Engine) onDaemonRunFinished(spec *task.Spec, runID string) {
 
 	e.log.Info("restarting daemon task", zap.String("task", spec.ID))
 	e.startDaemon(spec)
+}
+
+// onDaemonSuspensionSwept routes a standalone daemon body whose suspension
+// timed out — swept suspended→cancelled by SweepExpiredSuspensions — back
+// through the daemon lifecycle. onDaemonRunFinished parked the #470 run slot on
+// the suspended run and published DaemonSuspended, expecting a resume to adopt
+// the slot; but the body goroutine exited cleanly on suspend, so
+// onDaemonRunFinished will never run again for this run. Without this the slot
+// stays pinned to a now-cancelled run — registerDaemon reads alreadyRunning and
+// a reconciler reload refuses to restart, wedging the daemon and bypassing its
+// restart policy until a full process restart.
+//
+// This does the slot release + restart decision onDaemonRunFinished would have
+// done, but out-of-band from the (already gone) run goroutine. It must run in
+// its own goroutine: restartDaemonAfterExit blocks on the restart backoff.
+func (e *Engine) onDaemonSuspensionSwept(spec *task.Spec, run *registry.Run) {
+	// Slot-match guard, identical to onDaemonRunFinished/resumeDaemonBody: only
+	// release the slot if it still parks the swept run. The status-guarded sweep
+	// UPDATE already ensures the sweep and a resume can't both transition the
+	// same run (a resumed run is excluded from the swept set), so a resume that
+	// adopted the slot is not in play here — but the guard keeps slot ownership
+	// consistent with that outcome regardless.
+	e.daemonMu.Lock()
+	if e.daemonRuns[spec.ID] != run.ID {
+		e.daemonMu.Unlock()
+		return
+	}
+	delete(e.daemonRuns, spec.ID)
+	_, stillRegistered := e.daemonSpecs[spec.ID]
+	e.daemonMu.Unlock()
+
+	if !stillRegistered || e.isShuttingDown() {
+		// Nothing will restart; clear the parked DaemonSuspended so the WebUI
+		// doesn't pin a stale "suspended" pill on a daemon that is gone.
+		e.setDaemonState(spec.ID, DaemonStopped)
+		return
+	}
+
+	// elapsed spans the whole suspended gap (StartedAt → the sweep's
+	// finished_at). A real suspension outlives daemonStableThreshold, so the
+	// restart backoff resets to init — a timeout is not a crash loop.
+	var elapsed time.Duration
+	if run.FinishedAt != nil {
+		elapsed = run.FinishedAt.Sub(run.StartedAt)
+	}
+	e.restartDaemonAfterExit(spec, run.Status, elapsed)
 }
