@@ -204,6 +204,37 @@ const tools  = await mcp.list_tools("github-mcp")
 const result = await mcp.call("github-mcp", "search_repositories", { query: "dicode" })
 ```
 
+### `suspend` / `resume_state` / `resume_input` — pause for user input
+Pause a run to collect input from a human, then continue. `dicode.suspend()`
+never returns: the process exits, the run becomes `suspended`, and on resume the
+task re-runs **from the top** with `resume_state` / `resume_input` populated
+(both `undefined` on a first run). Branch on `resume_state` to pick up where you
+left off. No permission declaration needed; Deno/Python only (not docker/podman).
+
+```typescript
+if (!resume_state) {
+  await dicode.suspend({
+    state: { step: "confirm" },              // JSON-serializable; echoed back as resume_state
+    form: {
+      title: "Deploy to production?",
+      fields: [
+        { name: "approve", label: "Approve?", type: "boolean", required: true },
+      ],
+    },
+    // deadline: optional Unix-ms; default 24h. On lapse the run is cancelled (resume_timeout).
+  })
+  // unreachable — suspend() never returns
+}
+const answers = resume_input as Record<string, unknown>
+if (!answers.approve) return { deployed: false }
+```
+
+Rules: never wrap `suspend()` in a `try/catch` that swallows the control signal
+(the run fails loudly if you do); `params` survive a resume but the original
+trigger `input` does not — stash anything you need into `state`. Python uses
+`ctx.resume_state` / `ctx.resume_input` and `dicode.suspend(state=..., form=...)`.
+Full reference: [docs/concepts/suspendable-tasks.md](../../docs/concepts/suspendable-tasks.md).
+
 ### `return` — pass data to downstream chain tasks
 ```typescript
 return { count: 3, ids: ["a", "b", "c"] }   // must be JSON-serializable

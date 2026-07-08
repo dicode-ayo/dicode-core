@@ -136,6 +136,26 @@ output.html(html, { data: { count: 5 } })  // chained tasks receive { count: 5 }
 return { count: 42, status: "ok" }
 ```
 
+### `suspend` / `resume_state` / `resume_input`
+
+Pause a run to collect input from a human. `dicode.suspend({ state, form })`
+never returns — the process exits, the run becomes `suspended`, and on resume the
+task re-runs from the top with `resume_state` (the blob you passed) and
+`resume_input` (the submitted form) populated (both `undefined` on a first run).
+
+```typescript
+if (!resume_state) {
+  await dicode.suspend({
+    state: { step: "confirm" },
+    form: { title: "Approve?", fields: [{ name: "ok", label: "OK?", type: "boolean", required: true }] },
+  })  // unreachable — never returns
+}
+```
+
+See [Suspendable Tasks](./concepts/suspendable-tasks.md) for the form schema,
+lifecycle (`suspended` → `resumed`), and how to resume via the Web UI or
+`dicode resume`.
+
 ---
 
 ## Agent globals
