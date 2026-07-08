@@ -369,8 +369,8 @@ func TestSetDevMode_Branch_RejectsSSRFHost(t *testing.T) {
 			if err == nil {
 				t.Fatalf("enableClone(%q) = nil error, want SSRF host rejection", tc.url)
 			}
-			if !strings.Contains(err.Error(), "private or internal") {
-				t.Errorf("enableClone(%q) error = %q, want private/internal rejection", tc.url, err)
+			if !errors.Is(err, gitops.ErrBlockedHost) {
+				t.Errorf("enableClone(%q) error = %v, want errors.Is(gitops.ErrBlockedHost)", tc.url, err)
 			}
 
 			clonePath := filepath.Join(src.DataDir(), "dev-clones", src.Namespace(), runID)
@@ -387,8 +387,8 @@ func TestSetDevMode_Branch_RejectsSSRFHost(t *testing.T) {
 			if err == nil {
 				t.Fatalf("SetDevMode with malicious url %q = nil error, want SSRF host rejection", tc.url)
 			}
-			if !strings.Contains(err.Error(), "private or internal") {
-				t.Errorf("SetDevMode error = %q, want private/internal rejection", err)
+			if !errors.Is(err, gitops.ErrBlockedHost) {
+				t.Errorf("SetDevMode error = %v, want errors.Is(gitops.ErrBlockedHost)", err)
 			}
 			publicClonePath := filepath.Join(src.DataDir(), "dev-clones", src.Namespace(), runID+"-public")
 			if _, statErr := os.Stat(publicClonePath); !os.IsNotExist(statErr) {
