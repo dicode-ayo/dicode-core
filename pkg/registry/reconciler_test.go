@@ -12,6 +12,8 @@ import (
 	"github.com/dicode/dicode/pkg/source"
 	"github.com/dicode/dicode/pkg/task"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // fakeSource is a controllable source for testing the reconciler.
@@ -432,5 +434,63 @@ permissions:
 	want := dataDir + "/some-subdir"
 	if spec.Permissions.FS[0].Path != want {
 		t.Errorf("FS[0].Path = %q, want %q (${DATADIR} was not expanded)", spec.Permissions.FS[0].Path, want)
+	}
+}
+
+// TestReconciler_QueuedWarnLoggedOnce verifies that an unresolved provider
+// dependency warns exactly once even when the queued-retry check re-runs on
+// every subsequent registration (#521). Repeat re-checks drop to debug so one
+// unresolved task does not emit N identical WARN lines during startup.
+func TestReconciler_QueuedWarnLoggedOnce(t *testing.T) {
+	core, logs := observer.New(zapcore.DebugLevel)
+
+	fs := newFakeSource("test")
+	d, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { d.Close() })
+	reg := New(d)
+	rc := NewReconciler(reg, []source.Source{fs}, "", zap.New(core))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go rc.Run(ctx)
+
+	time.Sleep(20 * time.Millisecond) // let Run() set up merged channel
+
+	consumer := &task.Spec{
+		ID:   "waiting-consumer",
+		Name: "waiting-consumer",
+		Permissions: task.Permissions{
+			Env: []task.EnvEntry{{Name: "PG_URL", From: "task:missing-provider"}},
+		},
+		Trigger: task.TriggerConfig{Manual: true},
+	}
+	// Consumer queued: provider never registers, so it stays unresolved.
+	fs.ch <- source.Event{Kind: source.EventAdded, TaskID: "waiting-consumer", Kinded: consumer, Source: "test"}
+	time.Sleep(50 * time.Millisecond)
+
+	// Register several unrelated tasks. Each successful registration re-runs
+	// retryPending, re-checking the still-unresolved consumer.
+	for i := 0; i < 5; i++ {
+		other := &task.Spec{
+			ID:      "other-" + string(rune('a'+i)),
+			Name:    "other",
+			Trigger: task.TriggerConfig{Manual: true},
+		}
+		fs.ch <- source.Event{Kind: source.EventAdded, TaskID: other.ID, Kinded: other, Source: "test"}
+		time.Sleep(20 * time.Millisecond)
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	const warnMsg = "task references unknown provider; queued for retry after next registration"
+	warnCount := logs.FilterMessage(warnMsg).Len()
+	if warnCount != 1 {
+		t.Fatalf("expected exactly 1 WARN for the unresolved provider, got %d", warnCount)
+	}
+	// The repeat re-checks must still leave a trail at debug level.
+	if debugCount := logs.FilterMessage("task still references unknown provider; remains queued for retry").Len(); debugCount == 0 {
+		t.Fatal("expected repeat queued re-checks to be logged at debug, got none")
 	}
 }

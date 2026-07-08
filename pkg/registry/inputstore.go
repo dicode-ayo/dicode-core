@@ -22,6 +22,13 @@ type TaskRunner interface {
 // abort the operation rather than retry.
 var ErrInputUnavailable = errors.New("run input unavailable (gc'd or never stored)")
 
+// ErrStorageTaskNotRegistered wraps Persist/Fetch/Delete failures that stem
+// purely from the configured storage task not yet being in the registry.
+// Daemon-triggered runs can fire before buildin/local-storage registers at
+// startup (#523); callers use errors.Is to treat this transient window
+// distinctly from a genuine storage write failure.
+var ErrStorageTaskNotRegistered = errors.New("storage task not registered")
+
 // InputStore marshals PersistedInput, encrypts it with InputCrypto, and
 // delegates byte storage to a configured storage task via a TaskRunner.
 //

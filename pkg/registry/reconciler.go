@@ -271,14 +271,27 @@ func (rc *Reconciler) handle(ev source.Event) {
 		// pipelines declare no env providers.
 		if spec, ok := k.(*task.Spec); ok {
 			if err := rc.validateTaskProviders(spec); err != nil {
-				rc.log.Warn("task references unknown provider; queued for retry after next registration",
+				// Warn only on the transition into "queued"; every successful
+				// registration re-runs this check for all still-pending tasks,
+				// so warning each time turns one unresolved dependency into N
+				// identical lines during startup (#521). Repeat re-checks of an
+				// already-queued task drop to debug — the signal is preserved
+				// (a task that resolves is deleted from pending, and a later
+				// re-failure warns again as a fresh transition).
+				rc.mu.Lock()
+				_, alreadyQueued := rc.pending[ev.TaskID]
+				rc.pending[ev.TaskID] = ev
+				rc.mu.Unlock()
+				fields := []zap.Field{
 					zap.String("task", ev.TaskID),
 					zap.String("source", ev.Source),
 					zap.Error(err),
-				)
-				rc.mu.Lock()
-				rc.pending[ev.TaskID] = ev
-				rc.mu.Unlock()
+				}
+				if alreadyQueued {
+					rc.log.Debug("task still references unknown provider; remains queued for retry", fields...)
+				} else {
+					rc.log.Warn("task references unknown provider; queued for retry after next registration", fields...)
+				}
 				return
 			}
 		}
