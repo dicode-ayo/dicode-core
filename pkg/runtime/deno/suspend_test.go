@@ -11,8 +11,9 @@ import (
 // TestRun_SuspendYieldsSuspendedResult runs a real Deno task that calls
 // dicode.suspend({ state, schema, deadline }) and asserts the run ends as a
 // clean suspend (not a failure) with the state/schema/deadline captured on the
-// RunResult (#512). The SuspendSignal thrown by the SDK must exit the process
-// with code 0.
+// RunResult (#512). The runner persists `state` wrapped in a { __step, state }
+// envelope so it can dispatch handlers on resume; the author's blob rides in
+// `state`. The SuspendSignal thrown by the SDK must exit the process with 0.
 func TestRun_SuspendYieldsSuspendedResult(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires Deno subprocess")
@@ -60,15 +61,23 @@ export default async function main({ dicode }) {
 		t.Errorf("ResumeDeadline = %d, want 1893456000000", res.ResumeDeadline)
 	}
 
-	var state struct {
-		Step string `json:"step"`
-		N    int    `json:"n"`
+	// ResumeState is the internal envelope: __step null (no `to`), the author's
+	// blob nested under `state`.
+	var env struct {
+		Step  *string `json:"__step"`
+		State struct {
+			Step string `json:"step"`
+			N    int    `json:"n"`
+		} `json:"state"`
 	}
-	if err := json.Unmarshal(res.ResumeState, &state); err != nil {
+	if err := json.Unmarshal(res.ResumeState, &env); err != nil {
 		t.Fatalf("ResumeState not valid JSON (%q): %v", res.ResumeState, err)
 	}
-	if state.Step != "ask_name" || state.N != 42 {
-		t.Errorf("ResumeState = %+v, want {ask_name 42}", state)
+	if env.Step != nil {
+		t.Errorf("__step = %v, want null for a two-function/main suspend", *env.Step)
+	}
+	if env.State.Step != "ask_name" || env.State.N != 42 {
+		t.Errorf("unwrapped state = %+v, want {ask_name 42}", env.State)
 	}
 
 	var schema struct {
@@ -85,13 +94,12 @@ export default async function main({ dicode }) {
 	}
 }
 
-// TestRun_SuspendThenResumeSeesDefinedState is the loop-avoidance regression
-// guard: `state` is required, so the blob a task passes to suspend() is stored
-// and, when fed back on resume, makes ctx.resume_state defined (truthy) — the
-// signal that flips the `if (!resume_state)` guard so the task finishes instead
-// of re-suspending forever. It runs the real suspend pass, takes the captured
-// ResumeState, and replays it exactly as the daemon would.
-func TestRun_SuspendThenResumeSeesDefinedState(t *testing.T) {
+// TestRun_MainOnlyResumeReRunsMain is the single-main back-compat guard: a task
+// exporting only `main` (no `resume`, no `steps`) re-runs `main` on resume, and
+// its author state round-trips through the __step envelope invisibly — the first
+// run sees ctx.state undefined, the resume sees the real unwrapped blob so the
+// author can branch by hand (#512).
+func TestRun_MainOnlyResumeReRunsMain(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires Deno subprocess")
 	}
@@ -101,17 +109,15 @@ func TestRun_SuspendThenResumeSeesDefinedState(t *testing.T) {
 	rt, reg, cleanup := newTestRuntime(t)
 	defer cleanup()
 
-	// The task suspends on a first run and, on resume, reports whether it saw a
-	// defined resume_state and returns the carried step.
 	spec := writeProviderTask(t, "loopguard", `
-export default async function main({ dicode, resume_state }) {
-  if (!resume_state) {
+export default async function main({ dicode, state, input }) {
+  if (!state) {
     await dicode.suspend({
       state: { step: "ask_name" },
       schema: { type: "object", properties: { project_name: { type: "string" } }, required: ["project_name"] },
     });
   }
-  return { defined: resume_state !== undefined, step: (resume_state as any).step };
+  return { defined: state !== undefined, step: (state as any).step, name: (input as any).project_name };
 }
 `)
 	if err := reg.Register(spec); err != nil {
@@ -126,7 +132,7 @@ export default async function main({ dicode, resume_state }) {
 		t.Fatalf("first run must suspend and capture a state blob; got suspended=%v state=%q", first.Suspended, first.ResumeState)
 	}
 
-	// Replay the stored state exactly as the resume path would.
+	// Replay the stored envelope exactly as the resume path would.
 	second, err := rt.Run(ctx, spec, RunOptions{
 		RunID:       "run-loopguard-2",
 		ResumeState: json.RawMessage(first.ResumeState),
@@ -143,10 +149,189 @@ export default async function main({ dicode, resume_state }) {
 		t.Fatalf("ReturnValue = %#v, want map", second.ReturnValue)
 	}
 	if ret["defined"] != true {
-		t.Errorf("resume_state must be defined on resume, got %#v", ret["defined"])
+		t.Errorf("ctx.state must be defined on resume, got %#v", ret["defined"])
 	}
 	if ret["step"] != "ask_name" {
-		t.Errorf("resume_state.step = %#v, want ask_name", ret["step"])
+		t.Errorf("ctx.state.step = %#v, want ask_name", ret["step"])
+	}
+	if ret["name"] != "acme" {
+		t.Errorf("ctx.input.project_name = %#v, want acme", ret["name"])
+	}
+}
+
+// TestRun_ResumeDispatchesToResumeFn covers the two-function shape: a task
+// exports `main` (first run) and `resume` (resume). The runner must run `resume`
+// on the continuation, handing it the carried state and the validated input via
+// ctx.state / ctx.input (#512).
+func TestRun_ResumeDispatchesToResumeFn(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires Deno subprocess")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	rt, reg, cleanup := newTestRuntime(t)
+	defer cleanup()
+
+	spec := writeProviderTask(t, "twofunc", `
+export default async function main({ dicode }) {
+  await dicode.suspend({
+    state: { greeting: "hi" },
+    schema: { type: "object", properties: { project_name: { type: "string" } }, required: ["project_name"] },
+  });
+  return { via: "main" };
+}
+export async function resume({ state, input }) {
+  return { via: "resume", greeting: (state as any).greeting, name: (input as any).project_name };
+}
+`)
+	if err := reg.Register(spec); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := rt.Run(ctx, spec, RunOptions{RunID: "run-twofunc-1"})
+	if err != nil {
+		t.Fatalf("Run (suspend): %v", err)
+	}
+	if !first.Suspended {
+		t.Fatalf("first run must suspend")
+	}
+
+	second, err := rt.Run(ctx, spec, RunOptions{
+		RunID:       "run-twofunc-2",
+		ResumeState: json.RawMessage(first.ResumeState),
+		ResumeInput: json.RawMessage(`{"project_name":"acme"}`),
+	})
+	if err != nil {
+		t.Fatalf("Run (resume): %v", err)
+	}
+	if second.Suspended {
+		t.Fatalf("resume must not re-suspend")
+	}
+	ret, ok := second.ReturnValue.(map[string]any)
+	if !ok {
+		t.Fatalf("ReturnValue = %#v, want map", second.ReturnValue)
+	}
+	if ret["via"] != "resume" {
+		t.Errorf("dispatch went to %#v, want the resume handler", ret["via"])
+	}
+	if ret["greeting"] != "hi" {
+		t.Errorf("ctx.state.greeting = %#v, want hi", ret["greeting"])
+	}
+	if ret["name"] != "acme" {
+		t.Errorf("ctx.input.project_name = %#v, want acme", ret["name"])
+	}
+}
+
+// TestRun_StepsWizardMultiStep drives a full named-step wizard (#512): main
+// suspends `to: "chooseFramework"`, that step sees ctx.input and suspends
+// `to: "deploy"` carrying state, and deploy sees the prior state + the new input
+// and returns. Exercises __step envelope threading across two hops, and asserts
+// main sees ctx.state undefined on the first run even with the internal marker.
+func TestRun_StepsWizardMultiStep(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires Deno subprocess")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	rt, reg, cleanup := newTestRuntime(t)
+	defer cleanup()
+
+	spec := writeProviderTask(t, "steps-wizard", `
+export default async function main({ dicode, state }) {
+  if (state !== undefined) throw new Error("main must see ctx.state undefined on the first run");
+  await dicode.suspend({
+    to: "chooseFramework",
+    schema: { type: "object", properties: { framework: { type: "string" } }, required: ["framework"] },
+  });
+  return { via: "main" };
+}
+export const steps = {
+  async chooseFramework({ dicode, input }) {
+    await dicode.suspend({
+      to: "deploy",
+      state: { framework: (input as any).framework },
+      schema: { type: "object", properties: { env: { type: "string" } }, required: ["env"] },
+    });
+    return { via: "chooseFramework" };
+  },
+  async deploy({ state, input }) {
+    return { framework: (state as any).framework, env: (input as any).env };
+  },
+};
+`)
+	if err := reg.Register(spec); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run 1 — main suspends to chooseFramework.
+	r1, err := rt.Run(ctx, spec, RunOptions{RunID: "run-steps-1"})
+	if err != nil {
+		t.Fatalf("Run 1: %v", err)
+	}
+	if !r1.Suspended {
+		t.Fatalf("run 1 must suspend")
+	}
+	var env1 struct {
+		Step string `json:"__step"`
+	}
+	if err := json.Unmarshal(r1.ResumeState, &env1); err != nil {
+		t.Fatalf("run 1 ResumeState: %v", err)
+	}
+	if env1.Step != "chooseFramework" {
+		t.Fatalf("__step = %q, want chooseFramework", env1.Step)
+	}
+
+	// Run 2 — chooseFramework sees the framework input, suspends to deploy.
+	r2, err := rt.Run(ctx, spec, RunOptions{
+		RunID:       "run-steps-2",
+		ResumeState: json.RawMessage(r1.ResumeState),
+		ResumeInput: json.RawMessage(`{"framework":"deno"}`),
+	})
+	if err != nil {
+		t.Fatalf("Run 2: %v", err)
+	}
+	if !r2.Suspended {
+		t.Fatalf("run 2 must suspend again")
+	}
+	var env2 struct {
+		Step  string `json:"__step"`
+		State struct {
+			Framework string `json:"framework"`
+		} `json:"state"`
+	}
+	if err := json.Unmarshal(r2.ResumeState, &env2); err != nil {
+		t.Fatalf("run 2 ResumeState: %v", err)
+	}
+	if env2.Step != "deploy" {
+		t.Errorf("__step = %q, want deploy", env2.Step)
+	}
+	if env2.State.Framework != "deno" {
+		t.Errorf("carried state.framework = %q, want deno", env2.State.Framework)
+	}
+
+	// Run 3 — deploy sees the prior state + the new env input and finishes.
+	r3, err := rt.Run(ctx, spec, RunOptions{
+		RunID:       "run-steps-3",
+		ResumeState: json.RawMessage(r2.ResumeState),
+		ResumeInput: json.RawMessage(`{"env":"prod"}`),
+	})
+	if err != nil {
+		t.Fatalf("Run 3: %v", err)
+	}
+	if r3.Suspended {
+		t.Fatalf("run 3 must finish, not suspend")
+	}
+	ret, ok := r3.ReturnValue.(map[string]any)
+	if !ok {
+		t.Fatalf("ReturnValue = %#v, want map", r3.ReturnValue)
+	}
+	if ret["framework"] != "deno" {
+		t.Errorf("deploy ctx.state.framework = %#v, want deno", ret["framework"])
+	}
+	if ret["env"] != "prod" {
+		t.Errorf("deploy ctx.input.env = %#v, want prod", ret["env"])
 	}
 }
 
@@ -210,11 +395,9 @@ export default async function main({ dicode }) {
 	}
 }
 
-// TestRun_ResumeStateAndInputExposed injects a prior-run state blob and a
-// user form submission via RunOptions and asserts the task sees them on
-// ctx.resume_state / ctx.resume_input (#95). Nothing in PR 2 populates these
-// from a real suspended run yet — this verifies the accept + expose mechanism
-// with an injected value.
+// TestRun_ResumeStateAndInputExposed injects a prior-run state envelope and a
+// user form submission via RunOptions and asserts the handler sees the UNWRAPPED
+// state on ctx.state and the submission on ctx.input (#512).
 func TestRun_ResumeStateAndInputExposed(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires Deno subprocess")
@@ -226,8 +409,8 @@ func TestRun_ResumeStateAndInputExposed(t *testing.T) {
 	defer cleanup()
 
 	spec := writeProviderTask(t, "resumer", `
-export default async function main({ resume_state, resume_input }) {
-  return { st: resume_state, inp: resume_input };
+export default async function main({ state, input }) {
+  return { st: state, inp: input };
 }
 `)
 	if err := reg.Register(spec); err != nil {
@@ -236,7 +419,7 @@ export default async function main({ resume_state, resume_input }) {
 
 	res, err := rt.Run(ctx, spec, RunOptions{
 		RunID:       "run-resume-1",
-		ResumeState: json.RawMessage(`{"step":"ask_framework","name":"proj"}`),
+		ResumeState: json.RawMessage(`{"__step":null,"state":{"step":"ask_framework","name":"proj"}}`),
 		ResumeInput: json.RawMessage(`{"project_name":"acme"}`),
 	})
 	if err != nil {
@@ -255,23 +438,23 @@ export default async function main({ resume_state, resume_input }) {
 	}
 	st, ok := ret["st"].(map[string]any)
 	if !ok {
-		t.Fatalf("resume_state not exposed: %#v", ret["st"])
+		t.Fatalf("ctx.state not exposed (unwrapped): %#v", ret["st"])
 	}
 	if st["step"] != "ask_framework" || st["name"] != "proj" {
-		t.Errorf("resume_state = %#v, want step=ask_framework name=proj", st)
+		t.Errorf("ctx.state = %#v, want step=ask_framework name=proj", st)
 	}
 	inp, ok := ret["inp"].(map[string]any)
 	if !ok {
-		t.Fatalf("resume_input not exposed: %#v", ret["inp"])
+		t.Fatalf("ctx.input not exposed: %#v", ret["inp"])
 	}
 	if inp["project_name"] != "acme" {
-		t.Errorf("resume_input = %#v, want project_name=acme", inp)
+		t.Errorf("ctx.input = %#v, want project_name=acme", inp)
 	}
 }
 
-// TestRun_NoResumeIsUndefined verifies that a first (non-resume) invocation
-// sees ctx.resume_state / ctx.resume_input as undefined (#95), so a task can
-// branch on their presence.
+// TestRun_NoResumeIsUndefined verifies that a first (non-resume) invocation sees
+// ctx.state undefined (#512), so a handler can branch on its presence. ctx.input
+// on a first run is the trigger input (nil here), not the resume submission.
 func TestRun_NoResumeIsUndefined(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires Deno subprocess")
@@ -283,8 +466,8 @@ func TestRun_NoResumeIsUndefined(t *testing.T) {
 	defer cleanup()
 
 	spec := writeProviderTask(t, "firstrun", `
-export default async function main({ resume_state, resume_input }) {
-  return { hasState: resume_state !== undefined, hasInput: resume_input !== undefined };
+export default async function main({ state }) {
+  return { hasState: state !== undefined };
 }
 `)
 	if err := reg.Register(spec); err != nil {
@@ -302,7 +485,7 @@ export default async function main({ resume_state, resume_input }) {
 	if !ok {
 		t.Fatalf("ReturnValue = %#v, want map", res.ReturnValue)
 	}
-	if ret["hasState"] != false || ret["hasInput"] != false {
-		t.Errorf("expected resume_state/resume_input undefined on first run, got %#v", ret)
+	if ret["hasState"] != false {
+		t.Errorf("expected ctx.state undefined on first run, got %#v", ret)
 	}
 }

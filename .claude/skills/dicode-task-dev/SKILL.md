@@ -83,25 +83,26 @@ on_failure_chain: <task-id>      # run on failure; "" disables global default
 - `output.html()/text()` — render UI instead of returning JSON.
 - `await dicode.run_task(id, params?)` / `list_tasks()` / `get_runs(id, opts)` / `secrets_set()/secrets_delete()` — gated by `permissions.dicode`.
 - `await mcp.list_tools(server)` / `mcp.call(server, tool, args)` — gated by `permissions.dicode.mcp`.
-- `await dicode.suspend({ state, schema, deadline? })` — pause for user input; reads back as `resume_state` / `resume_input` (Python: `ctx.resume_state`). See below.
+- `await dicode.suspend({ schema, to?, state?, deadline? })` — pause for user input; the runner dispatches a resume handler that reads `ctx.input` / `ctx.state`. See below.
 - `return <json>` — value handed to downstream chain tasks; keep it under ~1MB.
 
 ### Suspendable tasks (pause for user input)
 
 `dicode.suspend()` pauses a run to collect input from a human, then continues.
 It never returns — the process exits, the run becomes `suspended`, and on resume
-the task **re-runs from the top** with `resume_state` (the blob you passed) and
-`resume_input` (the submitted values) populated (both `undefined`/`None` on a
-first run). Branch on `resume_state` to resume where you left off. Deno/Python
-only; no permission declaration needed.
+the runner **re-runs the file and dispatches the right handler for you** (no
+`if (resume_state)` switch). Each handler reads `ctx.state` (the blob you
+carried, `undefined`/`None` on the first run) and `ctx.input` (the validated
+submission). Deno/Python only; no permission declaration needed.
 
-`schema` is a JSON Schema (draft 2020-12) for the input object; the daemon
-validates the submission against it server-side before resuming.
+Export **`main`** (first run) + optionally **`resume`** (the continuation), or a
+**`steps`** map named by `suspend({ to })` for a multi-step wizard. `schema` is a
+JSON Schema (draft 2020-12); the daemon validates the submission against it
+server-side before resuming.
 
 ```typescript
-if (!resume_state) {
+export default async function main({ dicode }) {
   await dicode.suspend({
-    state: { step: "confirm" },
     schema: {
       type: "object",
       properties: { ok: { type: "boolean", title: "OK?" } },
@@ -109,7 +110,9 @@ if (!resume_state) {
     },
   })  // unreachable — never returns
 }
-const answers = resume_input as Record<string, unknown>
+export async function resume({ input }) {
+  return { confirmed: input.ok }
+}
 ```
 
 Default renderer maps: `type:string`→text (`format:"textarea"`→textarea),

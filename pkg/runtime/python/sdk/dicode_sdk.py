@@ -16,6 +16,7 @@
 #                               dicode.get_runs,
 #                               mcp.list_tools, mcp.call
 import asyncio
+import inspect
 import json
 import os
 import struct
@@ -257,9 +258,9 @@ input = _call({"method": "input"})
 # ── suspend / resume (#95) ────────────────────────────────────────────────────
 # dicode.suspend() pauses the run: it hands the daemon a state blob + schema, then
 # raises SuspendSignal so the process exits cleanly (exit 0) and the run ends as
-# `suspended`. On resume the task is re-run with ctx.resume_state /
-# ctx.resume_input populated. See runtime.go for how the wrapper turns a clean
-# suspend into a suspended RunResult.
+# `suspended`. On resume the runner dispatches the matching handler with ctx.state
+# / ctx.input populated. See runtime.go for how the wrapper turns a clean suspend
+# into a suspended RunResult.
 
 
 class SuspendSignal(Exception):
@@ -301,18 +302,72 @@ def _flush_and_close():
         pass
 
 
+def _unwrap_state(raw):
+    """Unwrap the { __step, state } envelope suspend() persists (#512). Returns
+    (step, author_state). A raw value without a __step key is treated as the
+    author state directly (step None)."""
+    if isinstance(raw, dict) and "__step" in raw:
+        step = raw.get("__step")
+        return (step if isinstance(step, str) else None), raw.get("state")
+    return None, raw
+
+
 class _Context:
-    """Resume context (#95). resume_state is the prior suspended run's opaque
-    state blob; resume_input is the user's form submission. Both are None on a
-    first (non-resume) invocation. Fetched once at import time."""
+    """Resume context (#512). `state` is the author's carried blob (unwrapped
+    from the internal step envelope); `input` is the input handed to THIS
+    invocation — the trigger input on a fresh run, the validated form submission
+    on a resume. `state` and the resume input are None on a first run. `_step`
+    names the handler the resume dispatches to. Fetched once at import time."""
 
-    def __init__(self):
+    def __init__(self, trigger_input):
         r = _call({"method": "resume"}) or {}
-        self.resume_state = r.get("state")
-        self.resume_input = r.get("input")
+        raw = r.get("state")
+        self._resumed = raw is not None
+        self._step, self.state = _unwrap_state(raw)
+        self.input = r.get("input") if self._resumed else trigger_input
 
 
-ctx = _Context()
+ctx = _Context(input)
+
+
+def _call_handler(fn):
+    """Invoke a task handler, passing `ctx` if it declares a positional
+    parameter and awaiting it if it returns a coroutine (#512). A no-arg
+    handler keeps reading the module-global `ctx`."""
+    wants_arg = False
+    try:
+        for p in inspect.signature(fn).parameters.values():
+            if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD, p.VAR_POSITIONAL):
+                wants_arg = True
+                break
+    except (TypeError, ValueError):
+        pass
+    res = fn(ctx) if wants_arg else fn()
+    if asyncio.iscoroutine(res):
+        res = asyncio.run(res)
+    return res
+
+
+def _dispatch(g):
+    """Select and run the task handler from the resume context (#512). First run
+    → main; a resume with a step marker → steps[step] (wizard shape); a resume
+    without → resume() if exported, else main (two-function / single-main shape).
+    g is the task module globals(). Falls through to the module-level `result`
+    for a top-level (no-main) task."""
+    main = g.get("main")
+    resume = g.get("resume")
+    steps = g.get("steps")
+    if not ctx._resumed:
+        handler = main
+    elif ctx._step is not None and isinstance(steps, dict) and callable(steps.get(ctx._step)):
+        handler = steps.get(ctx._step)
+    elif callable(resume):
+        handler = resume
+    else:
+        handler = main
+    if not callable(handler):
+        return g.get("result")
+    return _call_handler(handler)
 
 
 # A dicode.suspend() at task top level (a synchronous task) raises SuspendSignal
@@ -520,24 +575,25 @@ class _Dicode:
         # by the WebUI to collapse same-group siblings. Last write wins.
         _call({"method": "dicode.set_group", "group": str(label or "")})
 
-    def suspend(self, state, schema=None, deadline=None):
+    def suspend(self, state=None, schema=None, to=None, deadline=None):
         """Pause the run and wait for user input (#512). Records the state blob +
         JSON Schema over IPC, then raises SuspendSignal — it never returns. The
         wrapper exits the process cleanly and the run ends as `suspended`; on
-        resume the task is re-run with ctx.resume_state / ctx.resume_input
-        populated (the submission, validated against `schema` server-side). Do
-        not wrap this call in a try/except that swallows the signal.
+        resume the runner dispatches the matching handler with ctx.state /
+        ctx.input populated (the submission, validated against `schema`
+        server-side). Do not wrap this call in a try/except that swallows the
+        signal.
 
-        `state` is REQUIRED: it is the only signal that tells a first run
-        (ctx.resume_state is None) apart from a resume (ctx.resume_state = this
-        object). A None/missing state reads back as None on resume, so an
-        `if ctx.resume_state is None` guard would fire again and the task would
-        re-suspend forever. Pass at least `{}` when you carry nothing."""
+        `to` names the step handler to run on resume (wizard shape); omit it for
+        the two-function (main/resume) or single-main shape. `state` is the
+        author's carried blob, echoed back as ctx.state (unwrapped) on resume."""
         global _suspend_requested
         # Await the ack so the payload is recorded before we raise: the daemon
         # captures state/schema/deadline synchronously in response to this call.
+        # Persist an envelope so the runner can dispatch steps[to] on resume; the
+        # author's blob rides in `state` and is unwrapped before any handler runs.
         _call({"method": "dicode.suspend",
-               "state": state, "schema": schema,
+               "state": {"__step": to, "state": state}, "schema": schema,
                "deadline": deadline or 0})
         _suspend_requested = True
         raise SuspendSignal()

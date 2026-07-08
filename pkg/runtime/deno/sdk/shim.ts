@@ -155,15 +155,19 @@ export type JSONSchema = {
   [keyword: string]: unknown;
 };
 
-// Argument to dicode.suspend() (#512). `state` is an opaque JSON blob echoed
-// back as ctx.resume_state on resume; `schema` is the JSON Schema the submitted
+// Argument to dicode.suspend() (#512). `schema` is the JSON Schema the submitted
 // input is validated against; `deadline` is an optional Unix-ms TTL (default
-// applied by the engine). `state` is REQUIRED — it is the only signal that
-// tells a first run (resume_state undefined) apart from a resume, so a
-// missing/null state would re-fire the guard and re-suspend forever.
+// applied by the engine).
+//
+// `to` names the step handler to run on resume (wizard shape); omit it for the
+// two-function (main/resume) shape. `state` is the author's carried blob, echoed
+// back as ctx.state (unwrapped) on resume — the runner persists it wrapped with
+// an internal step marker so first-vs-resume stays unambiguous without the author
+// ever seeing the marker.
 export interface SuspendRequest {
-  state: unknown;
   schema: JSONSchema;
+  to?: string;
+  state?: unknown;
   deadline?: number;
 }
 
@@ -183,8 +187,8 @@ export interface Dicode {
   set_group:      (label: string)      => Promise<void>;
   // suspend pauses the run: it hands the runtime the state blob + schema, then
   // never resolves — it throws internally so the process exits cleanly and
-  // the run ends as `suspended`. On resume the task is re-run with
-  // ctx.resume_state / ctx.resume_input populated (#512).
+  // the run ends as `suspended`. On resume the runner dispatches the matching
+  // handler (steps[to], resume, or main) with ctx.state / ctx.input populated (#512).
   suspend:        (req: SuspendRequest) => Promise<never>;
   secrets_set:    (key: string, value: string) => Promise<void>;
   secrets_delete: (key: string)                => Promise<void>;
@@ -355,18 +359,30 @@ const kv: KV = {
   list:   (prefix = "") => __call__({ method: "kv.list", prefix }) as Promise<Record<string, unknown>>,
 };
 
-// ── input ─────────────────────────────────────────────────────────────────────
+// ── input & resume (#512) ──────────────────────────────────────────────────────
+// suspend() persists the carried blob wrapped as { __step, state } so the runner
+// can dispatch the right handler without the author threading a step id. Here we
+// unwrap it: `state` is the author's own blob (never the envelope), `__resumeStep__`
+// names the handler the resume must run, and `input` is the input handed to THIS
+// invocation — the trigger payload on a fresh run, the validated form submission
+// on a resume. Both `state` and the resume `input` are undefined on a first run.
 
-const input = await __call__({ method: "input" });
-
-// ── resume (#95) ────────────────────────────────────────────────────────────────
-// When this run is a resume of a suspended one, the runtime injects the prior
-// state blob and the user's form submission. Both are null on a first run.
-
+const __triggerInput__ = await __call__({ method: "input" });
 const __resume__ = await __call__({ method: "resume" }) as
   { state?: unknown; input?: unknown } | null;
-const resume_state: unknown = __resume__?.state ?? undefined;
-const resume_input: unknown = __resume__?.input ?? undefined;
+const __resumed__ = __resume__ != null && __resume__.state != null;
+
+function __unwrapState__(raw: unknown): { step: string | undefined; state: unknown } {
+  if (raw && typeof raw === "object" && "__step" in (raw as Record<string, unknown>)) {
+    const env = raw as { __step?: unknown; state?: unknown };
+    return { step: typeof env.__step === "string" ? env.__step : undefined, state: env.state };
+  }
+  return { step: undefined, state: raw };
+}
+
+const { step: __resumeStep__, state } =
+  __unwrapState__(__resumed__ ? __resume__!.state : undefined);
+const input: unknown = __resumed__ ? __resume__!.input : __triggerInput__;
 
 // SuspendSignal is thrown by dicode.suspend() after the payload is delivered
 // over IPC. The per-run wrapper catches it (via __isSuspend__) and exits the
@@ -441,7 +457,9 @@ const dicode: Dicode = {
     // call then never resolves normally: it always throws.
     await __call__({
       method: "dicode.suspend",
-      state: req.state ?? null,
+      // Persist an envelope so the runner can dispatch steps[to] on resume; the
+      // author's blob rides in `state` and is unwrapped before any handler runs.
+      state: { __step: req.to ?? null, state: req.state ?? null },
       schema: req.schema,
       deadline: req.deadline ?? 0,
     });
@@ -537,4 +555,4 @@ const dicode: Dicode = {
 // The runner awaits this on exit so fire-and-forget log writes are not lost.
 async function __flush__(): Promise<void> { await __wq__; }
 
-export { params, kv, input, resume_state, resume_input, output, mcp, dicode, __setReturn__, __conn__, __flush__, __isSuspend__, __wasSuspendRequested__ };
+export { params, kv, input, state, output, mcp, dicode, __setReturn__, __conn__, __flush__, __isSuspend__, __wasSuspendRequested__, __resumed__, __resumeStep__ };

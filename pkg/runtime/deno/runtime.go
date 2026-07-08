@@ -65,8 +65,8 @@ type RunOptions struct {
 
 	// ResumeState / ResumeInput carry a suspended run's prior state and the
 	// user's form submission when this run is a resume (#95). Both are opaque
-	// JSON blobs surfaced to the task as ctx.resume_state / ctx.resume_input.
-	// Nil on a first (non-resume) invocation.
+	// JSON blobs; the SDK unwraps the step envelope and surfaces them to the
+	// task as ctx.state / ctx.input. Nil on a first (non-resume) invocation.
 	ResumeState json.RawMessage
 	ResumeInput json.RawMessage
 }
@@ -295,18 +295,38 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		zap.String("task_script", taskPath),
 		zap.String("runner", runnerPath),
 	)
-	runner := "import { params, kv, input, output, mcp, dicode, resume_state, resume_input, __setReturn__, __conn__, __flush__, __isSuspend__, __wasSuspendRequested__ } from \"" + shimPath + "\";\n" +
-		"let __main__;\n" +
+	runner := "import { params, kv, input, state, output, mcp, dicode, __setReturn__, __conn__, __flush__, __isSuspend__, __wasSuspendRequested__, __resumed__, __resumeStep__ } from \"" + shimPath + "\";\n" +
+		"let __mod__;\n" +
 		"try {\n" +
-		"  __main__ = (await import(\"" + taskPath + "\")).default;\n" +
+		"  __mod__ = await import(\"" + taskPath + "\");\n" +
 		"} catch (__importErr__) {\n" +
 		"  console.error(\"[dicode] task import failed:\", String(__importErr__));\n" +
 		"  await __flush__();\n" +
 		"  try { __conn__.close(); } catch {}\n" +
 		"  Deno.exit(1);\n" +
 		"}\n" +
+		// Auto-dispatch (#512): a first run calls main; a resume runs steps[to]
+		// (wizard shape) if the marker names an exported step, else the exported
+		// resume (two-function shape), else falls back to main so a single-main
+		// task keeps working. The author reads ctx.state / ctx.input, never a step
+		// switch. main is the entry (first) step.
+		"const __ctx__ = { params, kv, input, state, output, mcp, dicode };\n" +
+		"const __main__ = __mod__.default;\n" +
+		"const __resumeFn__ = __mod__.resume;\n" +
+		"const __steps__ = __mod__.steps;\n" +
+		"let __handler__ = __main__;\n" +
+		"if (__resumed__) {\n" +
+		"  if (__resumeStep__ && __steps__ && typeof __steps__[__resumeStep__] === \"function\") { __handler__ = __steps__[__resumeStep__]; }\n" +
+		"  else if (typeof __resumeFn__ === \"function\") { __handler__ = __resumeFn__; }\n" +
+		"}\n" +
+		"if (typeof __handler__ !== \"function\") {\n" +
+		"  console.error(\"[dicode] task has no default export (main) to run\");\n" +
+		"  await __flush__();\n" +
+		"  try { __conn__.close(); } catch {}\n" +
+		"  Deno.exit(1);\n" +
+		"}\n" +
 		"try {\n" +
-		"  const result = await __main__({ params, kv, input, output, mcp, dicode, resume_state, resume_input });\n" +
+		"  const result = await __handler__(__ctx__);\n" +
 		// If main() returned normally yet a suspend was requested, the task
 		// caught the SuspendSignal in its own try/catch and kept running. The
 		// payload is already recorded server-side, so a normal return would

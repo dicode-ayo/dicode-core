@@ -81,7 +81,7 @@ export interface DicodeAudit {
 
 // A JSON Schema (draft 2020-12) object describing the input a suspended task
 // asks the user to fill in before resume (#512). The daemon validates the
-// submission against it server-side, so ctx.resume_input conforms on resume.
+// submission against it server-side, so ctx.input conforms on resume.
 // Loosely typed on purpose — any valid JSON Schema is accepted; the common
 // keywords the default WebUI renderer understands are `type`, `properties`,
 // `required`, `enum`, `default`, `title`, `description`, and `format`.
@@ -97,18 +97,18 @@ export type JSONSchema = {
   [keyword: string]: unknown;
 };
 
-// Argument to dicode.suspend() (#512). `state` is an opaque JSON blob echoed
-// back as ctx.resume_state on resume; `schema` is the JSON Schema the submitted
+// Argument to dicode.suspend() (#512). `schema` is the JSON Schema the submitted
 // input is validated against; `deadline` is an optional Unix-ms TTL.
 //
-// `state` is REQUIRED: it is the sole signal that distinguishes a first run
-// (ctx.resume_state undefined) from a resume (ctx.resume_state = this object).
-// A missing/null state reads back as undefined on resume, so an
-// `if (!resume_state)` guard would fire again and the task would re-suspend
-// forever. Pass at least `{}` when you carry nothing.
+// `to` names the step handler to run on resume — the wizard shape: the runner
+// dispatches `steps[to]`. Omit `to` for the two-function shape (main + resume)
+// or a single-main task that branches by hand. `state` is the author's carried
+// blob, echoed back as ctx.state (unwrapped) on the resume; the runner persists
+// it wrapped with an internal step marker the author never sees.
 export interface SuspendRequest {
-  state: unknown;
   schema: JSONSchema;
+  to?: string;
+  state?: unknown;
   deadline?: number;
 }
 
@@ -122,9 +122,10 @@ export interface Dicode {
   run_task(taskID: string, params?: Record<string, string>): Promise<unknown>;
   list_tasks(): Promise<unknown[]>;
   get_runs(taskID: string, opts?: { limit?: number }): Promise<unknown[]>;
-  // Pause the run: hand the runtime `state` + `schema`, then never resolve — the
-  // process exits cleanly and the run ends as `suspended`. On resume the task
-  // re-runs with ctx.resume_state / ctx.resume_input populated (#512).
+  // Pause the run: hand the runtime `schema` + carried `state`, then never
+  // resolve — the process exits cleanly and the run ends as `suspended`. On
+  // resume the runner dispatches the matching handler (steps[to], resume, or
+  // main) with ctx.state / ctx.input populated (#512).
   suspend(req: SuspendRequest): Promise<never>;
   secrets_set(key: string, value: string): Promise<void>;
   secrets_delete(key: string): Promise<void>;
@@ -132,17 +133,26 @@ export interface Dicode {
   audit: DicodeAudit;
 }
 
+// The context each task handler (main / resume / steps[x]) receives (#512).
 export interface DicodeSdk {
   params: Params;
   kv:     KV;
+  // The input handed to THIS invocation: the trigger payload on a fresh run, the
+  // schema-validated form submission on a resume.
   input:  unknown;
-  // Prior state blob when this run is a resume of a suspended one; the same
-  // value passed to dicode.suspend({ state }). Undefined on a first run (#95).
-  resume_state?: unknown;
-  // The user's form submission that triggered this resume, keyed by field name.
-  // Undefined on a first run (#95).
-  resume_input?: Record<string, unknown>;
+  // The author's carried blob, unwrapped from dicode.suspend({ state }). Undefined
+  // on a first run — so a handler can tell first-vs-resume without a step switch.
+  state?: unknown;
   output: Output;
   mcp:    MCP;
   dicode: Dicode;
 }
+
+// A task handler — the default export (`main`, the entry step), an optional
+// `resume`, or a named entry in the `steps` map (#512). Each receives the
+// resume context and returns the run's result (or suspends again).
+export type TaskHandler = (ctx: DicodeSdk) => unknown | Promise<unknown>;
+
+// The wizard shape: a map of named step handlers. dicode.suspend({ to }) names
+// the entry the runner dispatches on resume; `main` is the first step.
+export type TaskSteps = Record<string, TaskHandler>;

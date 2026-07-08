@@ -419,23 +419,23 @@ func buildWrapper(scriptBytes []byte, pol guardPolicy) (string, error) {
 	w.WriteString(body)
 	w.WriteString("\n# === return capture ===\n")
 	w.WriteString("import sys as _sys\n")
-	w.WriteString("_asyncio_mod = _sys.modules['asyncio']\n")
-	// A clean dicode.suspend() from inside main() raises SuspendSignal after the
-	// payload is recorded — exit 0 without a return value (a suspend is not a
-	// failure). If task code instead swallowed the signal and returned, the
-	// suspend flag is still set: fail loudly rather than record a contradictory
-	// suspended-and-returned run (#95). A suspend at task top level (sync tasks)
-	// unwinds past this block and is handled by the SDK's sys.excepthook.
+	// _dispatch auto-selects the task handler from the resume context (#512):
+	// first run → main; a resume → steps[to] (wizard) or resume() (two-function),
+	// falling back to main so a single-main task keeps working. The author reads
+	// ctx.state / ctx.input, never a step switch. A clean dicode.suspend() raises
+	// SuspendSignal after the payload is recorded — exit 0 without a return value
+	// (a suspend is not a failure). If task code instead swallowed the signal and
+	// returned, the suspend flag is still set: fail loudly rather than record a
+	// contradictory suspended-and-returned run (#95). A suspend at task top level
+	// (sync tasks) unwinds past this block and is handled by the SDK's excepthook.
 	w.WriteString("try:\n")
-	w.WriteString("    _main = globals().get('main')\n")
-	w.WriteString("    if _main is not None and _asyncio_mod.iscoroutinefunction(_main):\n")
-	w.WriteString("        result = _asyncio_mod.run(_main())\n")
+	w.WriteString("    result = _dispatch(globals())\n")
 	w.WriteString("    if _was_suspend_requested():\n")
 	w.WriteString("        _sys.stderr.write(\"[dicode] dicode.suspend() was called but its control-flow signal was caught by task code — do not wrap dicode.suspend() in a try/except that swallows it\\n\")\n")
 	w.WriteString("        _sys.stderr.flush()\n")
 	w.WriteString("        _flush_and_close()\n")
 	w.WriteString("        _sys.exit(1)\n")
-	w.WriteString("    _set_return(globals().get('result', None))\n")
+	w.WriteString("    _set_return(result)\n")
 	w.WriteString("except SuspendSignal:\n")
 	w.WriteString("    _flush_and_close()\n")
 	w.WriteString("    _sys.exit(0)\n")
