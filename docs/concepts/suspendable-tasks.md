@@ -1,10 +1,11 @@
 # Suspendable Tasks
 
 A task can **pause mid-run to ask a human for input**, then continue once the
-form is filled. Call `dicode.suspend({ state, schema })`: the run ends as
-`suspended`, dicode collects the input via the Web UI or the `dicode resume`
-CLI, validates it against the schema, and the task runs again — this time with
-the answers in hand.
+form is filled. Call `dicode.suspend({ schema })`: the run ends as `suspended`,
+dicode collects the input via the Web UI or the `dicode resume` CLI, validates
+it against the schema, and the task runs again — this time with the answers in
+hand, dispatched to a **resume handler you export** so you never write an
+`if (resume_state)` switch.
 
 Use it for approval gates, wizards, "which of these do you mean?" disambiguation,
 or any step that can't proceed without a person.
@@ -12,7 +13,7 @@ or any step that can't proceed without a person.
 The form is described with a **[JSON Schema](https://json-schema.org)** (draft
 2020-12). That is a standard, portable vocabulary: the same schema drives the
 default Web UI form, the CLI prompts, and the **server-side validation** that
-guarantees `resume_input` conforms before your task re-runs.
+guarantees `ctx.input` conforms before your task re-runs.
 
 ---
 
@@ -21,22 +22,21 @@ guarantees `resume_input` conforms before your task re-runs.
 Suspend is **not** VM suspension. Nothing is frozen in memory.
 
 1. The task calls `dicode.suspend(...)`.
-2. dicode records the `state` blob and the `schema`, then the **process exits
-   cleanly** (exit 0). The run row is marked `suspended`.
+2. dicode records the carried `state` blob and the `schema`, then the **process
+   exits cleanly** (exit 0). The run row is marked `suspended`.
 3. When someone submits the form, dicode **validates the submission against the
    schema**, then starts a **brand-new process** for the same task and re-runs
    `task.ts` / `task.py` **from the top**.
-4. On that re-run the task reads `resume_state` (the blob it passed to
-   `suspend`) and `resume_input` (the submitted values) to pick up where it
-   left off.
+4. On that re-run the runner **dispatches the right handler** and hands it
+   `ctx.state` (the blob you carried) and `ctx.input` (the submitted values).
 
-Because the whole file runs again from the top, your task owns its control flow:
-**branch on `resume_state` early** to decide which step you're on. Any side
-effect before the `suspend()` call runs again on every resume, so keep the
-pre-suspend section idempotent (or gate it behind a `resume_state` check).
+Because the whole file re-runs from the top, any side effect at module top level
+runs again on every resume — keep top-level code idempotent and put real work
+inside a handler. You do **not** write a step switch: the runner picks the
+handler for you (see [Auto-dispatch](#the-handlers--auto-dispatch)).
 
-A first (non-resume) run has `resume_state` / `resume_input` **undefined**
-(Deno) or **`None`** (Python) — that's how you detect the initial pass.
+A first (non-resume) run sees `ctx.state` **undefined** (Deno) / **`None`**
+(Python) in `main`; a resumed handler sees the real carried blob.
 
 ---
 
@@ -51,40 +51,53 @@ dicode.suspend(req: SuspendRequest): Promise<never>
 Pauses the run. It records `req` over IPC, then **never returns** — internally
 it throws a control signal that the runtime catches to exit the process. Code
 after `suspend()` does not run on the suspending pass; it runs on the resume
-pass instead (from the top of the file).
+pass instead (in the handler the runner dispatches to).
 
 ```typescript
 interface SuspendRequest {
-  state: unknown       // REQUIRED; JSON-serializable; echoed back as resume_state on resume
   schema: JSONSchema   // JSON Schema (draft 2020-12) for the input to collect
+  to?: string          // name of the steps[] handler to run on resume (wizard shape)
+  state?: unknown      // JSON-serializable blob carried to the resume as ctx.state
   deadline?: number    // optional Unix-ms instant; resumable until then (default: 24h)
 }
 ```
 
-`state` is **required** — it is the only signal that distinguishes a first run
-(`resume_state` undefined / `None`) from a resume (`resume_state` = the object
-you passed). Pass at least `{}` when you carry nothing across the pause; a
-missing state would read back as undefined and re-fire your `if (!resume_state)`
-guard, re-suspending forever.
+- **`to`** names the `steps` handler to dispatch on resume — the wizard shape.
+  Omit it for the two-function (`main` + `resume`) shape.
+- **`state`** is your own carried blob, handed back as `ctx.state` on the
+  resume. The runner persists it wrapped with an internal step marker (so
+  first-vs-resume stays unambiguous) — you never see or manage that marker.
 
 Python signature (keyword args):
 
 ```python
-dicode.suspend(state=<json>, schema=<dict>, deadline=<unix_ms>)
+dicode.suspend(schema=<dict>, to=<str>, state=<json>, deadline=<unix_ms>)
 ```
 
-### Reading the resume context
+### The handlers — auto-dispatch
+
+You export handlers; the runner picks which one runs based on the resume:
+
+| You export | First run | Resume |
+|---|---|---|
+| `main` only | `main` | `main` again (branch on `ctx.state` by hand) |
+| `main` + `resume` | `main` | `resume` |
+| `main` + `steps` map | `main` | `steps[to]` — the handler named by `suspend({ to })` |
+
+`main` is always the entry (first) step. Each handler receives the resume
+context — **Deno**: destructure the argument (`async function resume({ state, input, dicode })`);
+**Python**: read the module-global `ctx` (`ctx.state`, `ctx.input`) or accept it
+as an argument (`async def resume(ctx):`).
 
 | | First run | Resume run |
 |---|---|---|
-| Deno global `resume_state` | `undefined` | the `state` you passed to `suspend()` |
-| Deno global `resume_input` | `undefined` | the submitted values, keyed by property name |
-| Python `ctx.resume_state` | `None` | the `state` you passed to `suspend()` |
-| Python `ctx.resume_input` | `None` | the submitted values, keyed by property name |
+| `ctx.state` | `undefined` / `None` | the `state` you passed to `suspend()` (unwrapped) |
+| `ctx.input` | the trigger input | the submitted values, keyed by property name |
 
-`resume_input` is validated against the schema before your task re-runs, and its
-values arrive with the **declared JSON types** — a `number`/`integer` property
-is a number, a `boolean` is a bool. (Coerce defensively anyway.)
+`ctx.input` on a resume is validated against the schema before your task
+re-runs, and its values arrive with the **declared JSON types** — a
+`number`/`integer` property is a number, a `boolean` is a bool. (Coerce
+defensively anyway.)
 
 `dicode.suspend` needs **no permission declaration** — it is granted by default
 on the `deno` and `python` runtimes. It is **not** available on `docker` /
@@ -141,66 +154,61 @@ validated server-side regardless of how it renders.
 
 ---
 
-## Worked example — a two-step wizard
+## Worked example — a two-step wizard (`steps`)
 
-Collect a project name, then a target environment, then finish. The task is a
-state machine keyed by a `step` field carried in `state`.
+Collect a project name, then a target environment, then finish. `suspend({ to })`
+names the next handler; the runner dispatches it and hands it `ctx.input` (the
+submission) and `ctx.state` (the blob you carried). No step switch.
 
 ### Deno (`task.ts`)
 
 ```typescript
-type WizardState = { step: "name" } | { step: "env"; name: string }
-
-const state = resume_state as WizardState | undefined
-const answers = (resume_input ?? {}) as Record<string, unknown>
-
-// First run — ask for the project name and pause.
-if (!state) {
+export default async function main({ dicode }) {
+  // First run — ask for the project name, resume into the "env" step.
   await dicode.suspend({
-    state: { step: "name" },
+    to: "env",
     schema: {
       type: "object",
       title: "New project",
       description: "What should we call it?",
-      properties: {
-        project: { type: "string", title: "Project name" },
-      },
+      properties: { project: { type: "string", title: "Project name" } },
       required: ["project"],
     },
   })
   // unreachable — suspend() never returns
 }
 
-// Second run — the name is in, ask for the environment and pause again.
-if (state.step === "name") {
-  const project = String(answers.project ?? "")
-  await dicode.suspend({
-    state: { step: "env", name: project },
-    schema: {
-      type: "object",
-      title: `Deploy ${project}`,
-      properties: {
-        env: { type: "string", title: "Target environment", enum: ["staging", "prod"] },
+export const steps = {
+  // Runs on the first resume: the name is in ctx.input; ask for the environment,
+  // carrying the name forward in state.
+  async env({ dicode, input }) {
+    await dicode.suspend({
+      to: "finish",
+      state: { name: input.project },
+      schema: {
+        type: "object",
+        title: `Deploy ${input.project}`,
+        properties: {
+          env: { type: "string", title: "Target environment", enum: ["staging", "prod"] },
+        },
+        required: ["env"],
       },
-      required: ["env"],
-    },
-  })
+    })
+  },
+  // Runs on the second resume: both answers in hand; finish.
+  async finish({ state, input }) {
+    return { project: state.name, env: input.env ?? "staging" }
+  },
 }
-
-// Third run — both answers in hand; finish.
-return { project: state.name, env: answers.env ?? "staging" }
 ```
 
 ### Python (`task.py`)
 
 ```python
-state = ctx.resume_state
-answers = ctx.resume_input or {}
-
-# First run — ask for the project name and pause.
-if state is None:
+async def main():
+    # First run — ask for the project name, resume into the "env" step.
     dicode.suspend(
-        state={"step": "name"},
+        to="env",
         schema={
             "type": "object",
             "title": "New project",
@@ -211,14 +219,16 @@ if state is None:
     )
     # unreachable — suspend() raises and the process exits
 
-# Second run — the name is in, ask for the environment and pause again.
-if state["step"] == "name":
-    project = answers.get("project", "")
+
+async def env(ctx):
+    # First resume: the name is in ctx.input; ask for the environment, carrying
+    # the name forward in state.
     dicode.suspend(
-        state={"step": "env", "name": project},
+        to="finish",
+        state={"name": ctx.input["project"]},
         schema={
             "type": "object",
-            "title": f"Deploy {project}",
+            "title": f"Deploy {ctx.input['project']}",
             "properties": {
                 "env": {"type": "string", "title": "Target environment", "enum": ["staging", "prod"]},
             },
@@ -226,13 +236,44 @@ if state["step"] == "name":
         },
     )
 
-# Third run — both answers in hand; finish.
-result = {"project": state["name"], "env": answers.get("env", "staging")}
+
+async def finish(ctx):
+    # Second resume: both answers in hand; finish.
+    return {"project": ctx.state["name"], "env": ctx.input.get("env", "staging")}
+
+
+steps = {"env": env, "finish": finish}
 ```
 
 Each `suspend()` mints its own resume, so a task can suspend any number of times
-— that's what chains the wizard steps together. (Each step still branches on
-`resume_state` by hand; automatic step dispatch is a separate follow-up.)
+— chaining the wizard steps together, one named handler per pause.
+
+## Simpler — ask once, then finish (`resume`)
+
+When you only pause once, skip the `steps` map: export `main` and `resume`. The
+runner runs `main` on the first pass and `resume` on the continuation.
+
+```typescript
+export default async function main({ dicode }) {
+  await dicode.suspend({
+    schema: {
+      type: "object",
+      title: "Approve deploy?",
+      properties: { ok: { type: "boolean", title: "Ship it?" } },
+      required: ["ok"],
+    },
+  })
+}
+
+export async function resume({ input }) {
+  return { shipped: input.ok }
+}
+```
+
+A task that exports **only `main`** still works: on resume the runner re-runs
+`main`, and you branch on `ctx.state` by hand (undefined on the first run, your
+carried blob on the resume). Pass a `state` when you go this route so the two
+passes are distinguishable.
 
 ---
 
@@ -252,9 +293,10 @@ Each `suspend()` mints its own resume, so a task can suspend any number of times
 
 - **`params` survive a resume; the original trigger input does not.** The
   continuation is a fresh run that restores the suspended run's `params` (so
-  `ctx.params` is unchanged), but the `input` that fired the *original* run (the
-  webhook body, the chain payload) is **not** replayed. If you'll need something
-  from `input` after resuming, **stash it into `state`** before you suspend.
+  `ctx.params` is unchanged). On a resume `ctx.input` is the **form submission**,
+  not the payload that fired the *original* run (the webhook body, the chain
+  payload) — that is **not** replayed. If you'll need something from the original
+  input after resuming, **stash it into `state`** before you suspend.
 
 - **`deadline` is optional.** It's a Unix-ms instant; the run stays resumable
   until then. Omit it (or pass `0`) for the default **24-hour** window. Once the
@@ -288,7 +330,8 @@ running ──suspend()──► suspended ──resume──► resumed        
 The **continuation is a new run** with its own run id, taken through the normal
 execution path — which is why it can suspend again. The original suspended run
 does not itself "become" the continuation; it transitions to `resumed` and the
-continuation carries on from `resume_state`.
+continuation carries on from the handler the runner dispatches, with `ctx.state`
+restored.
 
 ---
 

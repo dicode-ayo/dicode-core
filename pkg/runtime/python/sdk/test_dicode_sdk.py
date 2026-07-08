@@ -360,6 +360,7 @@ class SuspendTests(SDKTestBase):
         self.assertFalse(sdk._was_suspend_requested())
         with self.assertRaises(sdk.SuspendSignal):
             sdk.dicode.suspend(
+                to="deploy",
                 state={"step": "one", "n": 42},
                 schema={"type": "object", "title": "Name?", "properties": {
                     "project_name": {"type": "string", "title": "Name"}}},
@@ -368,7 +369,10 @@ class SuspendTests(SDKTestBase):
         # The signal was raised only after the payload was acked, and the
         # module-level flag is set so the wrapper's swallow-guard can fire.
         self.assertTrue(sdk._was_suspend_requested())
-        self.assertEqual(captured["state"], {"step": "one", "n": 42})
+        # State is persisted wrapped in a { __step, state } envelope so the runner
+        # can dispatch steps[to] on resume; the author's blob rides in `state`.
+        self.assertEqual(captured["state"],
+                         {"__step": "deploy", "state": {"step": "one", "n": 42}})
         self.assertEqual(captured["schema"]["title"], "Name?")
         self.assertEqual(captured["deadline"], 1893456000000)
 
@@ -383,18 +387,21 @@ class SuspendTests(SDKTestBase):
 class ResumeContextTests(SDKTestBase):
     def test_ctx_none_on_first_run(self):
         sdk = self.load_sdk()
-        self.assertIsNone(sdk.ctx.resume_state)
-        self.assertIsNone(sdk.ctx.resume_input)
+        self.assertFalse(sdk.ctx._resumed)
+        self.assertIsNone(sdk.ctx.state)
 
-    def test_ctx_exposes_injected_state_and_input(self):
+    def test_ctx_unwraps_step_envelope(self):
+        # The real path persists a { __step, state } envelope; the SDK unwraps
+        # it so the author sees only their own blob on ctx.state.
         self.server.handlers["resume"] = lambda _: {
-            "state": {"step": "ask_framework", "name": "proj"},
+            "state": {"__step": "deploy", "state": {"name": "proj"}},
             "input": {"project_name": "acme"},
         }
         sdk = self.load_sdk()
-        self.assertEqual(sdk.ctx.resume_state,
-                         {"step": "ask_framework", "name": "proj"})
-        self.assertEqual(sdk.ctx.resume_input, {"project_name": "acme"})
+        self.assertTrue(sdk.ctx._resumed)
+        self.assertEqual(sdk.ctx._step, "deploy")
+        self.assertEqual(sdk.ctx.state, {"name": "proj"})
+        self.assertEqual(sdk.ctx.input, {"project_name": "acme"})
 
 
 class ReturnTests(SDKTestBase):

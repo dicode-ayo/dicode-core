@@ -50,7 +50,8 @@ func newSuspendExecutor(t *testing.T) (*registry.Registry, pkgruntime.Executor) 
 // TestExecute_SuspendYieldsSuspendedResult runs a real Python task that calls
 // dicode.suspend(state=..., schema=..., deadline=...) and asserts the run ends
 // as a clean suspend (not a failure) with the state/schema/deadline captured on
-// the RunResult (#512). The SuspendSignal must exit the process with code 0.
+// the RunResult (#512). The runner persists `state` wrapped in a { __step, state }
+// envelope; the SuspendSignal must exit the process with code 0.
 func TestExecute_SuspendYieldsSuspendedResult(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires uv subprocess")
@@ -101,15 +102,23 @@ async def main():
 		t.Errorf("ResumeDeadline = %d, want 1893456000000", res.ResumeDeadline)
 	}
 
-	var state struct {
-		Step string `json:"step"`
-		N    int    `json:"n"`
+	// ResumeState is the internal envelope: __step null (no `to`), the author's
+	// blob nested under `state`.
+	var env struct {
+		Step  *string `json:"__step"`
+		State struct {
+			Step string `json:"step"`
+			N    int    `json:"n"`
+		} `json:"state"`
 	}
-	if err := json.Unmarshal(res.ResumeState, &state); err != nil {
+	if err := json.Unmarshal(res.ResumeState, &env); err != nil {
 		t.Fatalf("ResumeState not valid JSON (%q): %v", res.ResumeState, err)
 	}
-	if state.Step != "ask_name" || state.N != 42 {
-		t.Errorf("ResumeState = %+v, want {ask_name 42}", state)
+	if env.Step != nil {
+		t.Errorf("__step = %v, want null for a two-function/main suspend", *env.Step)
+	}
+	if env.State.Step != "ask_name" || env.State.N != 42 {
+		t.Errorf("unwrapped state = %+v, want {ask_name 42}", env.State)
 	}
 
 	var schema struct {
@@ -127,9 +136,9 @@ async def main():
 }
 
 // TestExecute_SuspendAtTopLevelYieldsSuspendedResult covers a synchronous task
-// that calls dicode.suspend() at module top level (no async main). The
-// SuspendSignal unwinds past the return-capture epilogue and is caught by the
-// SDK's sys.excepthook, which still exits the process cleanly (#95).
+// that calls dicode.suspend() at module top level (no main). The SuspendSignal
+// unwinds past the return-capture epilogue and is caught by the SDK's
+// sys.excepthook, which still exits the process cleanly (#95).
 func TestExecute_SuspendAtTopLevelYieldsSuspendedResult(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires uv subprocess")
@@ -140,7 +149,7 @@ func TestExecute_SuspendAtTopLevelYieldsSuspendedResult(t *testing.T) {
 	reg, ex := newSuspendExecutor(t)
 
 	spec := writePythonTask(t, "examples/sync-wizard", `
-if ctx.resume_state is None:
+if ctx.state is None:
     dicode.suspend(
         state={"step": "sync"},
         schema={"type": "object", "properties": {"x": {"type": "string"}}},
@@ -169,14 +178,277 @@ result = {"reached": True}
 	if res.ChainInput != nil {
 		t.Errorf("suspend must not produce a return value, got %#v", res.ChainInput)
 	}
-	var state struct {
-		Step string `json:"step"`
+	var env struct {
+		State struct {
+			Step string `json:"step"`
+		} `json:"state"`
 	}
-	if err := json.Unmarshal(res.ResumeState, &state); err != nil {
+	if err := json.Unmarshal(res.ResumeState, &env); err != nil {
 		t.Fatalf("ResumeState not valid JSON (%q): %v", res.ResumeState, err)
 	}
-	if state.Step != "sync" {
-		t.Errorf("ResumeState = %+v, want step=sync", state)
+	if env.State.Step != "sync" {
+		t.Errorf("unwrapped state = %+v, want step=sync", env.State)
+	}
+}
+
+// TestExecute_MainOnlyResumeReRunsMain is the single-main back-compat guard: a
+// task defining only `main` re-runs `main` on resume, its author state round-trips
+// through the __step envelope invisibly, and the handler reads ctx.state /
+// ctx.input from the module-global ctx (#512).
+func TestExecute_MainOnlyResumeReRunsMain(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires uv subprocess")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	reg, ex := newSuspendExecutor(t)
+
+	spec := writePythonTask(t, "examples/loopguard", `
+async def main():
+    if ctx.state is None:
+        dicode.suspend(
+            state={"step": "ask_name"},
+            schema={"type": "object", "properties": {"project_name": {"type": "string"}}, "required": ["project_name"]},
+        )
+    return {"defined": ctx.state is not None, "step": ctx.state["step"], "name": ctx.input["project_name"]}
+`)
+	if err := reg.Register(spec); err != nil {
+		t.Fatal(err)
+	}
+	runID, err := reg.StartRun(ctx, spec.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := ex.Execute(ctx, spec, pkgruntime.RunOptions{RunID: runID})
+	if err != nil {
+		t.Fatalf("Execute (suspend): %v", err)
+	}
+	if !first.Suspended || len(first.ResumeState) == 0 {
+		t.Fatalf("first run must suspend and capture a state blob; got suspended=%v", first.Suspended)
+	}
+
+	runID2, err := reg.StartRun(ctx, spec.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := ex.Execute(ctx, spec, pkgruntime.RunOptions{
+		RunID:       runID2,
+		ResumeState: json.RawMessage(first.ResumeState),
+		ResumeInput: json.RawMessage(`{"project_name":"acme"}`),
+	})
+	if err != nil {
+		t.Fatalf("Execute (resume): %v", err)
+	}
+	logs, _ := reg.GetRunLogs(ctx, runID2)
+	if second.Suspended {
+		t.Fatalf("resume must not re-suspend\nlogs:\n%s", joinLogs(logs))
+	}
+	ret, ok := second.ChainInput.(map[string]any)
+	if !ok {
+		t.Fatalf("ChainInput = %#v, want map\nlogs:\n%s", second.ChainInput, joinLogs(logs))
+	}
+	if ret["defined"] != true {
+		t.Errorf("ctx.state must be defined on resume, got %#v", ret["defined"])
+	}
+	if ret["step"] != "ask_name" {
+		t.Errorf("ctx.state[step] = %#v, want ask_name", ret["step"])
+	}
+	if ret["name"] != "acme" {
+		t.Errorf("ctx.input[project_name] = %#v, want acme", ret["name"])
+	}
+}
+
+// TestExecute_ResumeDispatchesToResumeFn covers the two-function shape: main
+// (no args, reads global ctx) suspends, and `resume(ctx)` (arg style) runs on
+// the continuation with the carried state + validated input (#512).
+func TestExecute_ResumeDispatchesToResumeFn(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires uv subprocess")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	reg, ex := newSuspendExecutor(t)
+
+	spec := writePythonTask(t, "examples/twofunc", `
+async def main():
+    dicode.suspend(
+        state={"greeting": "hi"},
+        schema={"type": "object", "properties": {"project_name": {"type": "string"}}, "required": ["project_name"]},
+    )
+    return {"via": "main"}
+
+async def resume(ctx):
+    return {"via": "resume", "greeting": ctx.state["greeting"], "name": ctx.input["project_name"]}
+`)
+	if err := reg.Register(spec); err != nil {
+		t.Fatal(err)
+	}
+	runID, err := reg.StartRun(ctx, spec.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := ex.Execute(ctx, spec, pkgruntime.RunOptions{RunID: runID})
+	if err != nil {
+		t.Fatalf("Execute (suspend): %v", err)
+	}
+	if !first.Suspended {
+		t.Fatalf("first run must suspend")
+	}
+
+	runID2, err := reg.StartRun(ctx, spec.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := ex.Execute(ctx, spec, pkgruntime.RunOptions{
+		RunID:       runID2,
+		ResumeState: json.RawMessage(first.ResumeState),
+		ResumeInput: json.RawMessage(`{"project_name":"acme"}`),
+	})
+	if err != nil {
+		t.Fatalf("Execute (resume): %v", err)
+	}
+	logs, _ := reg.GetRunLogs(ctx, runID2)
+	if second.Suspended {
+		t.Fatalf("resume must not re-suspend\nlogs:\n%s", joinLogs(logs))
+	}
+	ret, ok := second.ChainInput.(map[string]any)
+	if !ok {
+		t.Fatalf("ChainInput = %#v, want map\nlogs:\n%s", second.ChainInput, joinLogs(logs))
+	}
+	if ret["via"] != "resume" {
+		t.Errorf("dispatch went to %#v, want the resume handler", ret["via"])
+	}
+	if ret["greeting"] != "hi" {
+		t.Errorf("ctx.state[greeting] = %#v, want hi", ret["greeting"])
+	}
+	if ret["name"] != "acme" {
+		t.Errorf("ctx.input[project_name] = %#v, want acme", ret["name"])
+	}
+}
+
+// TestExecute_StepsWizardMultiStep drives a full named-step wizard (#512): main
+// suspends to="choose_framework", that step sees ctx.input and suspends
+// to="deploy" carrying state, and deploy sees the prior state + the new input
+// and returns. Step handlers take ctx as an argument.
+func TestExecute_StepsWizardMultiStep(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires uv subprocess")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	reg, ex := newSuspendExecutor(t)
+
+	spec := writePythonTask(t, "examples/steps-wizard", `
+async def main():
+    assert ctx.state is None, "main must see ctx.state None on the first run"
+    dicode.suspend(
+        to="choose_framework",
+        schema={"type": "object", "properties": {"framework": {"type": "string"}}, "required": ["framework"]},
+    )
+    return {"via": "main"}
+
+async def choose_framework(ctx):
+    dicode.suspend(
+        to="deploy",
+        state={"framework": ctx.input["framework"]},
+        schema={"type": "object", "properties": {"env": {"type": "string"}}, "required": ["env"]},
+    )
+    return {"via": "choose_framework"}
+
+async def deploy(ctx):
+    return {"framework": ctx.state["framework"], "env": ctx.input["env"]}
+
+steps = {"choose_framework": choose_framework, "deploy": deploy}
+`)
+	if err := reg.Register(spec); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run 1 — main suspends to choose_framework.
+	runID1, err := reg.StartRun(ctx, spec.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r1, err := ex.Execute(ctx, spec, pkgruntime.RunOptions{RunID: runID1})
+	if err != nil {
+		t.Fatalf("Run 1: %v", err)
+	}
+	logs1, _ := reg.GetRunLogs(ctx, runID1)
+	if !r1.Suspended {
+		t.Fatalf("run 1 must suspend\nlogs:\n%s", joinLogs(logs1))
+	}
+	var env1 struct {
+		Step string `json:"__step"`
+	}
+	if err := json.Unmarshal(r1.ResumeState, &env1); err != nil {
+		t.Fatalf("run 1 ResumeState: %v", err)
+	}
+	if env1.Step != "choose_framework" {
+		t.Fatalf("__step = %q, want choose_framework", env1.Step)
+	}
+
+	// Run 2 — choose_framework sees the framework input, suspends to deploy.
+	runID2, err := reg.StartRun(ctx, spec.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r2, err := ex.Execute(ctx, spec, pkgruntime.RunOptions{
+		RunID:       runID2,
+		ResumeState: json.RawMessage(r1.ResumeState),
+		ResumeInput: json.RawMessage(`{"framework":"deno"}`),
+	})
+	if err != nil {
+		t.Fatalf("Run 2: %v", err)
+	}
+	logs2, _ := reg.GetRunLogs(ctx, runID2)
+	if !r2.Suspended {
+		t.Fatalf("run 2 must suspend again\nlogs:\n%s", joinLogs(logs2))
+	}
+	var env2 struct {
+		Step  string `json:"__step"`
+		State struct {
+			Framework string `json:"framework"`
+		} `json:"state"`
+	}
+	if err := json.Unmarshal(r2.ResumeState, &env2); err != nil {
+		t.Fatalf("run 2 ResumeState: %v", err)
+	}
+	if env2.Step != "deploy" {
+		t.Errorf("__step = %q, want deploy", env2.Step)
+	}
+	if env2.State.Framework != "deno" {
+		t.Errorf("carried state.framework = %q, want deno", env2.State.Framework)
+	}
+
+	// Run 3 — deploy sees the prior state + the new env input and finishes.
+	runID3, err := reg.StartRun(ctx, spec.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r3, err := ex.Execute(ctx, spec, pkgruntime.RunOptions{
+		RunID:       runID3,
+		ResumeState: json.RawMessage(r2.ResumeState),
+		ResumeInput: json.RawMessage(`{"env":"prod"}`),
+	})
+	if err != nil {
+		t.Fatalf("Run 3: %v", err)
+	}
+	logs3, _ := reg.GetRunLogs(ctx, runID3)
+	if r3.Suspended {
+		t.Fatalf("run 3 must finish, not suspend\nlogs:\n%s", joinLogs(logs3))
+	}
+	ret, ok := r3.ChainInput.(map[string]any)
+	if !ok {
+		t.Fatalf("ChainInput = %#v, want map\nlogs:\n%s", r3.ChainInput, joinLogs(logs3))
+	}
+	if ret["framework"] != "deno" {
+		t.Errorf("deploy ctx.state[framework] = %#v, want deno", ret["framework"])
+	}
+	if ret["env"] != "prod" {
+		t.Errorf("deploy ctx.input[env] = %#v, want prod", ret["env"])
 	}
 }
 
@@ -241,9 +513,9 @@ async def main():
 	}
 }
 
-// TestExecute_ResumeStateAndInputExposed injects a prior-run state blob and a
-// user form submission via RunOptions and asserts the task sees them on
-// ctx.resume_state / ctx.resume_input (#95).
+// TestExecute_ResumeStateAndInputExposed injects a prior-run state envelope and a
+// user form submission via RunOptions and asserts the handler sees the UNWRAPPED
+// state on ctx.state and the submission on ctx.input (#512).
 func TestExecute_ResumeStateAndInputExposed(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires uv subprocess")
@@ -255,7 +527,7 @@ func TestExecute_ResumeStateAndInputExposed(t *testing.T) {
 
 	spec := writePythonTask(t, "examples/resumer", `
 async def main():
-    return {"st": ctx.resume_state, "inp": ctx.resume_input}
+    return {"st": ctx.state, "inp": ctx.input}
 `)
 	if err := reg.Register(spec); err != nil {
 		t.Fatal(err)
@@ -267,7 +539,7 @@ async def main():
 
 	res, err := ex.Execute(ctx, spec, pkgruntime.RunOptions{
 		RunID:       runID,
-		ResumeState: json.RawMessage(`{"step":"ask_framework","name":"proj"}`),
+		ResumeState: json.RawMessage(`{"__step":null,"state":{"step":"ask_framework","name":"proj"}}`),
 		ResumeInput: json.RawMessage(`{"project_name":"acme"}`),
 	})
 	if err != nil {
@@ -287,23 +559,22 @@ async def main():
 	}
 	st, ok := ret["st"].(map[string]any)
 	if !ok {
-		t.Fatalf("resume_state not exposed: %#v", ret["st"])
+		t.Fatalf("ctx.state not exposed (unwrapped): %#v", ret["st"])
 	}
 	if st["step"] != "ask_framework" || st["name"] != "proj" {
-		t.Errorf("resume_state = %#v, want step=ask_framework name=proj", st)
+		t.Errorf("ctx.state = %#v, want step=ask_framework name=proj", st)
 	}
 	inp, ok := ret["inp"].(map[string]any)
 	if !ok {
-		t.Fatalf("resume_input not exposed: %#v", ret["inp"])
+		t.Fatalf("ctx.input not exposed: %#v", ret["inp"])
 	}
 	if inp["project_name"] != "acme" {
-		t.Errorf("resume_input = %#v, want project_name=acme", inp)
+		t.Errorf("ctx.input = %#v, want project_name=acme", inp)
 	}
 }
 
 // TestExecute_NoResumeIsNone verifies that a first (non-resume) invocation sees
-// ctx.resume_state / ctx.resume_input as None (#95), so a task can branch on
-// their presence.
+// ctx.state as None (#512), so a handler can branch on its presence.
 func TestExecute_NoResumeIsNone(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires uv subprocess")
@@ -315,7 +586,7 @@ func TestExecute_NoResumeIsNone(t *testing.T) {
 
 	spec := writePythonTask(t, "examples/firstrun", `
 async def main():
-    return {"has_state": ctx.resume_state is not None, "has_input": ctx.resume_input is not None}
+    return {"has_state": ctx.state is not None}
 `)
 	if err := reg.Register(spec); err != nil {
 		t.Fatal(err)
@@ -337,7 +608,7 @@ async def main():
 	if !ok {
 		t.Fatalf("ChainInput = %#v, want map", res.ChainInput)
 	}
-	if ret["has_state"] != false || ret["has_input"] != false {
-		t.Errorf("expected resume_state/resume_input None on first run, got %#v", ret)
+	if ret["has_state"] != false {
+		t.Errorf("expected ctx.state None on first run, got %#v", ret)
 	}
 }

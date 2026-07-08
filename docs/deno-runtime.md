@@ -136,20 +136,19 @@ output.html(html, { data: { count: 5 } })  // chained tasks receive { count: 5 }
 return { count: 42, status: "ok" }
 ```
 
-### `suspend` / `resume_state` / `resume_input`
+### `suspend` — pause for human input, auto-dispatched
 
-Pause a run to collect input from a human. `dicode.suspend({ state, schema })`
-never returns — the process exits, the run becomes `suspended`, and on resume the
-task re-runs from the top with `resume_state` (the blob you passed) and
-`resume_input` (the submitted input) populated (both `undefined` on a first run).
-`schema` is a [JSON Schema](https://json-schema.org) (draft 2020-12) describing
-the expected input object; the daemon validates the submission against it before
-resuming, so `resume_input` conforms.
+Pause a run to collect input from a human. `dicode.suspend({ schema })` never
+returns — the process exits, the run becomes `suspended`, and on resume the
+runner re-runs the file and **dispatches the right handler for you**: no
+hand-rolled `if (resume_state)` switch. Each handler reads `ctx.state` (the blob
+you carried) and `ctx.input` (the validated submission).
+
+Export **`main`** (the first run) and optionally **`resume`** (the continuation):
 
 ```typescript
-if (!resume_state) {
+export default async function main({ dicode }) {
   await dicode.suspend({
-    state: { step: "confirm" },
     schema: {
       type: "object",
       properties: { ok: { type: "boolean", title: "OK?" } },
@@ -157,11 +156,20 @@ if (!resume_state) {
     },
   })  // unreachable — never returns
 }
+
+export async function resume({ input }) {
+  return { confirmed: input.ok }
+}
 ```
 
-See [Suspendable Tasks](./concepts/suspendable-tasks.md) for the JSON-Schema form,
-lifecycle (`suspended` → `resumed`), and how to resume via the Web UI or
-`dicode resume`.
+For a multi-step wizard, export a **`steps`** map and name the next handler with
+`suspend({ to })`. `schema` is a [JSON Schema](https://json-schema.org) (draft
+2020-12); the daemon validates the submission against it before resuming, so
+`ctx.input` conforms.
+
+See [Suspendable Tasks](./concepts/suspendable-tasks.md) for the dispatch rules,
+the `steps` wizard shape, lifecycle (`suspended` → `resumed`), and how to resume
+via the Web UI or `dicode resume`.
 
 ---
 

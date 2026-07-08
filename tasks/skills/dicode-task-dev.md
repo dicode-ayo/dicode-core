@@ -204,21 +204,22 @@ const tools  = await mcp.list_tools("github-mcp")
 const result = await mcp.call("github-mcp", "search_repositories", { query: "dicode" })
 ```
 
-### `suspend` / `resume_state` / `resume_input` — pause for user input
+### `suspend` — pause for user input, auto-dispatched
 Pause a run to collect input from a human, then continue. `dicode.suspend()`
 never returns: the process exits, the run becomes `suspended`, and on resume the
-task re-runs **from the top** with `resume_state` / `resume_input` populated
-(both `undefined` on a first run). `resume_input` is validated against the
-declared JSON Schema server-side. Branch on `resume_state` to pick up where you
-left off. No permission declaration needed; Deno/Python only (not docker/podman).
+runner **re-runs the file and dispatches the right handler** — you never write an
+`if (resume_state)` switch. Each handler reads `ctx.state` (the blob you carried,
+`undefined`/`None` on the first run) and `ctx.input` (the validated submission).
+No permission declaration needed; Deno/Python only (not docker/podman).
 
-`schema` is a JSON Schema (draft 2020-12) for the input object; the daemon
-validates the submission against it before resuming, so `resume_input` conforms.
+Export **`main`** (first run) + optionally **`resume`** (the continuation), or a
+**`steps`** map named by `suspend({ to })` for a multi-step wizard. `schema` is a
+JSON Schema (draft 2020-12); the daemon validates the submission against it
+before resuming, so `ctx.input` conforms.
 
 ```typescript
-if (!resume_state) {
+export default async function main({ dicode }) {
   await dicode.suspend({
-    state: { step: "confirm" },              // JSON-serializable; echoed back as resume_state
     schema: {
       type: "object",
       title: "Deploy to production?",
@@ -231,8 +232,10 @@ if (!resume_state) {
   })
   // unreachable — suspend() never returns
 }
-const answers = resume_input as Record<string, unknown>
-if (!answers.approve) return { deployed: false }
+
+export async function resume({ input }) {
+  return { deployed: Boolean(input.approve) }
+}
 ```
 
 Default WebUI renderer maps the common subset: `type:string`→text (`format:"textarea"`→textarea),
@@ -241,8 +244,10 @@ Default WebUI renderer maps the common subset: `type:string`→text (`format:"te
 
 Rules: never wrap `suspend()` in a `try/catch` that swallows the control signal
 (the run fails loudly if you do); `params` survive a resume but the original
-trigger `input` does not — stash anything you need into `state`. Python uses
-`ctx.resume_state` / `ctx.resume_input` and `dicode.suspend(state=..., schema=...)`.
+trigger `input` does not — stash anything you need into `state`. Python defines
+`main` / `resume` / `steps` and reads the module-global `ctx` (`ctx.state`,
+`ctx.input`), or accepts it as a handler argument (`async def resume(ctx):`);
+`dicode.suspend(schema=..., to=..., state=...)`.
 Full reference: [docs/concepts/suspendable-tasks.md](../../docs/concepts/suspendable-tasks.md).
 
 ### `return` — pass data to downstream chain tasks
