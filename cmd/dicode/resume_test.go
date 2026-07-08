@@ -81,6 +81,36 @@ func TestCoerceResumeValue_Types(t *testing.T) {
 	}
 }
 
+func TestCoerceResumeValue_UntypedNumericEnum(t *testing.T) {
+	// enum with no `type`: the CLI must match the raw string against the choices
+	// and return the entry's original JSON type (number), not a bare string.
+	p := resumeProp{Enum: []any{float64(1), float64(2)}}
+	got, err := coerceResumeValue(p, "2")
+	if err != nil {
+		t.Fatalf("coerce untyped numeric enum: %v", err)
+	}
+	if got != float64(2) {
+		t.Errorf("got %#v, want float64(2)", got)
+	}
+	if _, err := coerceResumeValue(p, "3"); err == nil {
+		t.Error("expected error for a value outside the enum")
+	}
+}
+
+func TestCoerceResumeValue_StringEnum(t *testing.T) {
+	p := resumeProp{Type: "string", Enum: []any{"staging", "prod"}}
+	got, err := coerceResumeValue(p, "prod")
+	if err != nil {
+		t.Fatalf("coerce string enum: %v", err)
+	}
+	if got != "prod" {
+		t.Errorf("got %#v, want prod", got)
+	}
+	if _, err := coerceResumeValue(p, "dev"); err == nil {
+		t.Error("expected error for a value outside the enum")
+	}
+}
+
 func TestCoerceResumeValue_Errors(t *testing.T) {
 	if _, err := coerceResumeValue(resumeProp{Type: "integer"}, "abc"); err == nil {
 		t.Error("expected error coercing non-integer")

@@ -991,6 +991,22 @@ func parseResumeProps(schemaJSON []byte) ([]resumePropEntry, map[string]bool, er
 // yields a JSON number, a boolean a JSON bool) rather than a string.
 func coerceResumeValue(p resumeProp, raw string) (any, error) {
 	s := strings.TrimSpace(raw)
+	// enum: match the raw string against the declared choices and return the
+	// matching entry with its original JSON type. This mirrors the WebUI's
+	// option-index approach, so a numeric enum like {enum:[1,2]} coerces to a
+	// number even when `type` is omitted — not just a bare string.
+	if len(p.Enum) > 0 {
+		for _, e := range p.Enum {
+			if fmt.Sprintf("%v", e) == s {
+				return e, nil
+			}
+		}
+		opts := make([]string, len(p.Enum))
+		for i, e := range p.Enum {
+			opts[i] = fmt.Sprintf("%v", e)
+		}
+		return nil, fmt.Errorf("must be one of %s", strings.Join(opts, ", "))
+	}
 	switch p.Type {
 	case "boolean":
 		switch strings.ToLower(s) {

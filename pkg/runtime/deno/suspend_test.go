@@ -85,6 +85,71 @@ export default async function main({ dicode }) {
 	}
 }
 
+// TestRun_SuspendThenResumeSeesDefinedState is the loop-avoidance regression
+// guard: `state` is required, so the blob a task passes to suspend() is stored
+// and, when fed back on resume, makes ctx.resume_state defined (truthy) — the
+// signal that flips the `if (!resume_state)` guard so the task finishes instead
+// of re-suspending forever. It runs the real suspend pass, takes the captured
+// ResumeState, and replays it exactly as the daemon would.
+func TestRun_SuspendThenResumeSeesDefinedState(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires Deno subprocess")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	rt, reg, cleanup := newTestRuntime(t)
+	defer cleanup()
+
+	// The task suspends on a first run and, on resume, reports whether it saw a
+	// defined resume_state and returns the carried step.
+	spec := writeProviderTask(t, "loopguard", `
+export default async function main({ dicode, resume_state }) {
+  if (!resume_state) {
+    await dicode.suspend({
+      state: { step: "ask_name" },
+      schema: { type: "object", properties: { project_name: { type: "string" } }, required: ["project_name"] },
+    });
+  }
+  return { defined: resume_state !== undefined, step: (resume_state as any).step };
+}
+`)
+	if err := reg.Register(spec); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := rt.Run(ctx, spec, RunOptions{RunID: "run-loopguard-1"})
+	if err != nil {
+		t.Fatalf("Run (suspend): %v", err)
+	}
+	if !first.Suspended || len(first.ResumeState) == 0 {
+		t.Fatalf("first run must suspend and capture a state blob; got suspended=%v state=%q", first.Suspended, first.ResumeState)
+	}
+
+	// Replay the stored state exactly as the resume path would.
+	second, err := rt.Run(ctx, spec, RunOptions{
+		RunID:       "run-loopguard-2",
+		ResumeState: json.RawMessage(first.ResumeState),
+		ResumeInput: json.RawMessage(`{"project_name":"acme"}`),
+	})
+	if err != nil {
+		t.Fatalf("Run (resume): %v", err)
+	}
+	if second.Suspended {
+		t.Fatalf("resume must not re-suspend — the state guard failed to flip")
+	}
+	ret, ok := second.ReturnValue.(map[string]any)
+	if !ok {
+		t.Fatalf("ReturnValue = %#v, want map", second.ReturnValue)
+	}
+	if ret["defined"] != true {
+		t.Errorf("resume_state must be defined on resume, got %#v", ret["defined"])
+	}
+	if ret["step"] != "ask_name" {
+		t.Errorf("resume_state.step = %#v, want ask_name", ret["step"])
+	}
+}
+
 // TestRun_SuspendSwallowedByTaskFails guards the case where a task wraps its
 // body in a broad try/catch that swallows the SuspendSignal thrown by
 // dicode.suspend() and keeps executing (#95). The suspend payload is already

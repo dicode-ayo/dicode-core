@@ -20,6 +20,16 @@ import (
 // kind messages are rendered through it.
 var enPrinter = message.NewPrinter(language.English)
 
+// denyLoader is a jsonschema URLLoader that refuses every external reference. It
+// replaces the library's default FileLoader so a task's suspend schema can
+// never turn a `$ref` into a local-file read (or any other fetch) by the
+// privileged daemon. The error names the offending url without ever opening it.
+type denyLoader struct{}
+
+func (denyLoader) Load(url string) (any, error) {
+	return nil, fmt.Errorf("external $ref not allowed in a suspend schema: %s", url)
+}
+
 // Validate checks input (a JSON document) against schema (a JSON Schema
 // document). A nil/empty schema imposes no constraints. A returned error
 // carries a concise, per-field message suitable for a 400 body or a CLI line.
@@ -42,6 +52,12 @@ func Compile(schema []byte) (*jsonschema.Schema, error) {
 		return nil, fmt.Errorf("invalid schema JSON: %w", err)
 	}
 	c := jsonschema.NewCompiler()
+	// The compiler installs a default FileLoader that resolves file:// $refs off
+	// the daemon's own filesystem — a task-authored schema with
+	// {"$ref":"file:///etc/passwd"} would be read by the privileged daemon,
+	// outside the task's sandbox. A suspend schema is self-contained (internal
+	// $ref/$defs are resolved in-document, no load), so deny every external ref.
+	c.UseLoader(denyLoader{})
 	if err := c.AddResource("schema.json", doc); err != nil {
 		return nil, fmt.Errorf("invalid schema: %w", err)
 	}

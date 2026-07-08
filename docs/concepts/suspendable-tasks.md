@@ -55,11 +55,17 @@ pass instead (from the top of the file).
 
 ```typescript
 interface SuspendRequest {
-  state?: unknown      // JSON-serializable; echoed back as resume_state on resume
+  state: unknown       // REQUIRED; JSON-serializable; echoed back as resume_state on resume
   schema: JSONSchema   // JSON Schema (draft 2020-12) for the input to collect
   deadline?: number    // optional Unix-ms instant; resumable until then (default: 24h)
 }
 ```
+
+`state` is **required** — it is the only signal that distinguishes a first run
+(`resume_state` undefined / `None`) from a resume (`resume_state` = the object
+you passed). Pass at least `{}` when you carry nothing across the pause; a
+missing state would read back as undefined and re-fire your `if (!resume_state)`
+guard, re-suspending forever.
 
 Python signature (keyword args):
 

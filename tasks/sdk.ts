@@ -100,8 +100,14 @@ export type JSONSchema = {
 // Argument to dicode.suspend() (#512). `state` is an opaque JSON blob echoed
 // back as ctx.resume_state on resume; `schema` is the JSON Schema the submitted
 // input is validated against; `deadline` is an optional Unix-ms TTL.
+//
+// `state` is REQUIRED: it is the sole signal that distinguishes a first run
+// (ctx.resume_state undefined) from a resume (ctx.resume_state = this object).
+// A missing/null state reads back as undefined on resume, so an
+// `if (!resume_state)` guard would fire again and the task would re-suspend
+// forever. Pass at least `{}` when you carry nothing.
 export interface SuspendRequest {
-  state?: unknown;
+  state: unknown;
   schema: JSONSchema;
   deadline?: number;
 }

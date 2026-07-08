@@ -520,13 +520,19 @@ class _Dicode:
         # by the WebUI to collapse same-group siblings. Last write wins.
         _call({"method": "dicode.set_group", "group": str(label or "")})
 
-    def suspend(self, state=None, schema=None, deadline=None):
+    def suspend(self, state, schema=None, deadline=None):
         """Pause the run and wait for user input (#512). Records the state blob +
         JSON Schema over IPC, then raises SuspendSignal — it never returns. The
         wrapper exits the process cleanly and the run ends as `suspended`; on
         resume the task is re-run with ctx.resume_state / ctx.resume_input
         populated (the submission, validated against `schema` server-side). Do
-        not wrap this call in a try/except that swallows the signal."""
+        not wrap this call in a try/except that swallows the signal.
+
+        `state` is REQUIRED: it is the only signal that tells a first run
+        (ctx.resume_state is None) apart from a resume (ctx.resume_state = this
+        object). A None/missing state reads back as None on resume, so an
+        `if ctx.resume_state is None` guard would fire again and the task would
+        re-suspend forever. Pass at least `{}` when you carry nothing."""
         global _suspend_requested
         # Await the ack so the payload is recorded before we raise: the daemon
         # captures state/schema/deadline synchronously in response to this call.
