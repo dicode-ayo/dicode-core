@@ -30,7 +30,7 @@ func (s *Server) SetResumer(r Resumer) { s.resumer = r }
 // resolved from the stored run, never trusted from the client.
 //
 // The submission is validated against the run's stored JSON Schema before the
-// continuation is spawned, so the resumed task can trust ctx.resume_input.
+// continuation is spawned, so the resumed task can trust ctx.input.
 //
 // Status codes:
 //   - 200 — resumed; body returns the continuation run_id.
@@ -67,7 +67,7 @@ func (s *Server) apiResumeRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Collected values pass through as opaque JSON — the task reads them as
-	// ctx.resume_input.
+	// ctx.input.
 	input, err := json.Marshal(values)
 	if err != nil {
 		jsonErr(w, "encode input: "+err.Error(), http.StatusInternalServerError)

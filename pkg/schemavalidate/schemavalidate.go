@@ -1,7 +1,7 @@
 // Package schemavalidate compiles a stored JSON Schema (draft 2020-12) and
 // validates a submitted input object against it. It is the single validator
 // shared by the WebUI resume endpoint and the CLI resume control method so a
-// suspended task can trust that ctx.resume_input conforms to the schema it
+// suspended task can trust that ctx.input conforms to the schema it
 // declared via dicode.suspend({ schema }).
 package schemavalidate
 

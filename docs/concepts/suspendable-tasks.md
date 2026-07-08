@@ -277,6 +277,33 @@ passes are distinguishable.
 
 ---
 
+## Try the shipped example
+
+A ready-to-run wizard ships under
+[`tasks/examples/suspend-wizard/`](../../tasks/examples/suspend-wizard/). It is a
+manually-triggered, three-step "new project" wizard built on the `steps` map and
+the JSON-Schema resume form — the same shape as the worked example above, one hop
+longer.
+
+1. In the Web UI, open the **Suspend Wizard (example)** task and **Run** it. The
+   run immediately goes `suspended` and its detail page renders a form.
+2. **Step 1 — Project name.** `main` suspends `to: "chooseFramework"` asking for a
+   `project_name` (string, required). Fill it in and submit.
+3. **Step 2 — Framework.** `chooseFramework` reads the name from `ctx.input`,
+   carries it in `state`, and suspends `to: "confirm"` asking for a `framework`
+   (an `enum` of `deno` / `node` / `bun`, rendered as a select).
+4. **Step 3 — Confirm.** `confirm` suspends `to: "summarize"` with a `confirmed`
+   boolean (a checkbox), carrying name + framework forward.
+5. **Finish.** `summarize` returns `{ project, framework, confirmed }` — the run
+   ends `resumed` and the continuation's result is on its run detail page.
+
+Each pause auto-renders from the schema, so there is no form code to write; the
+runner dispatches the next handler by the `to` name with no step switch. The same
+flow works from the CLI — `dicode resume` lists the suspended run and
+`dicode resume <run-id> project_name=acme` (etc.) submits each step.
+
+---
+
 ## Rules and gotchas
 
 - **`state` must be JSON-serializable.** It is persisted as JSON, so functions,

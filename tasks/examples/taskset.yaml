@@ -36,6 +36,10 @@ spec:
       ref:
         path: ./webhook-dashboard/task.yaml
 
+    suspend-wizard:
+      ref:
+        path: ./suspend-wizard/task.yaml
+
     github-stars:
       ref:
         path: ./github-stars/task.yaml

@@ -89,7 +89,7 @@ type Server struct {
 
 	// resumeState / resumeInput are the prior-run payload injected when this
 	// run is a resume of a suspended one (#95). Exposed to the task as
-	// ctx.resume_state / ctx.resume_input via the "resume" IPC method. Both
+	// ctx.state / ctx.input via the "resume" IPC method. Both
 	// are nil on a first (non-resume) invocation. Set via SetResume before
 	// Start; read-only afterwards, so no mutex is needed.
 	resumeState json.RawMessage
@@ -414,7 +414,7 @@ func (s *Server) Suspend() *SuspendResult {
 }
 
 // SetResume injects the prior-run state and user input for a resumed run,
-// exposed to the task as ctx.resume_state / ctx.resume_input (#95). Both are
+// exposed to the task as ctx.state / ctx.input (#95). Both are
 // opaque JSON blobs; nil means "not a resume". Must be called before Start.
 func (s *Server) SetResume(state, input json.RawMessage) {
 	s.resumeState = state
@@ -635,7 +635,7 @@ func (s *Server) handleConn(conn net.Conn) {
 
 		case "resume":
 			// Returns the prior-run state + user input for a resumed run
-			// (#95), exposed to the task as ctx.resume_state / ctx.resume_input.
+			// (#95), exposed to the task as ctx.state / ctx.input.
 			// Gated by the same cap as input — it is contextual run input.
 			// Both fields are nil on a first (non-resume) invocation.
 			if !hasCap(caps, CapInputRead) {

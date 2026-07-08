@@ -83,7 +83,7 @@ func (cs *ControlServer) handleResume(ctx context.Context, req Request) (ResumeR
 	}
 
 	// The key=value pairs arrive as a JSON object in Params; pass through as the
-	// opaque resume input the task reads as ctx.resume_input.
+	// opaque resume input the task reads as ctx.input.
 	input := []byte(req.Params)
 	if len(input) == 0 {
 		input = []byte("{}")
