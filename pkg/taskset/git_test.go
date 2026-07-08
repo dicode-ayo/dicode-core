@@ -51,10 +51,18 @@ func newSeededBareRepo(t *testing.T) *seededBareRepo {
 
 	return &seededBareRepo{
 		bareDir: bareDir,
-		url:     "file://" + bareDir,
-		wt:      wt,
-		wtPath:  wtPath,
-		branch:  "main",
+		// Placeholder, non-blocked hostname so this file:// fixture passes
+		// internal/gitops.ValidateRemoteHost (wired into CloneOrPull for
+		// #489), which rejects host-less remotes. The file:// transport
+		// itself ignores Endpoint.Host entirely (only Path matters), and
+		// no production caller can reach CloneOrPull with a file:// URL
+		// anyway — pkg/taskset.ValidateRefURL only allows http/https/ssh
+		// at config-load time. See the matching comment in
+		// pkg/source/git/git_test.go's newSeededRepo.
+		url:    "file://test-fixture.invalid" + bareDir,
+		wt:     wt,
+		wtPath: wtPath,
+		branch: "main",
 	}
 }
 

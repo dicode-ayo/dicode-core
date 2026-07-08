@@ -24,6 +24,10 @@ import (
 // Clones are full (no Depth limit) so that go-git's PullContext can
 // always compute a merge base when the remote advances. See #175.
 func CloneOrPull(ctx context.Context, dir, url, branch string, auth *http.BasicAuth) error {
+	if err := ValidateRemoteHost(url); err != nil {
+		return err
+	}
+
 	if fsutil.Exists(filepath.Join(dir, ".git")) {
 		if err := pullExisting(ctx, dir, branch, auth); err == nil {
 			return nil

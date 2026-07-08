@@ -220,7 +220,11 @@ func gitFixtureRemote(t *testing.T, branch string, files map[string]string) stri
 	if err := wt.Push(&gogit.PushOptions{RemoteName: "origin"}); err != nil && err != gogit.NoErrAlreadyUpToDate {
 		t.Fatalf("push: %v", err)
 	}
-	return "file://" + bareDir
+	// Placeholder, non-blocked hostname so this file:// fixture passes
+	// internal/gitops.ValidateRemoteHost (wired into CloneOrPull for
+	// #489), which rejects host-less remotes. See the matching comment in
+	// pkg/source/git/git_test.go's newSeededRepo.
+	return "file://test-fixture.invalid" + bareDir
 }
 
 // TestDeleteTaskFromSource_Git_ClonePushesDeleteBranch exercises the real

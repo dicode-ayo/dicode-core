@@ -65,7 +65,11 @@ func newFixtureRemote(t *testing.T, branch string, files map[string]string) stri
 		t.Fatalf("newFixtureRemote: push: %v", err)
 	}
 
-	return "file://" + bareDir
+	// Placeholder, non-blocked hostname so this file:// fixture passes
+	// internal/gitops.ValidateRemoteHost (wired into CloneOrPull for
+	// #489), which rejects host-less remotes. See the matching comment in
+	// pkg/source/git/git_test.go's newSeededRepo.
+	return "file://test-fixture.invalid" + bareDir
 }
 
 // newTestSourceWithRemote constructs a Source pointing at the given git remote URL.

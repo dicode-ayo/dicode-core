@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	gogittransport "github.com/go-git/go-git/v5/plumbing/transport"
+	"github.com/dicode/dicode/internal/gitops"
 )
 
 // Tests for the ListBranches SSRF guard (#475). ListBranches is reachable
@@ -61,12 +61,8 @@ func TestValidateRemoteHost_AllowsPublicHosts(t *testing.T) {
 		"git://example.com/repo.git",
 	}
 	for _, u := range cases {
-		ep, err := gogittransport.NewEndpoint(u)
-		if err != nil {
-			t.Fatalf("NewEndpoint(%q): %v", u, err)
-		}
-		if err := validateRemoteHost(ep); err != nil {
-			t.Errorf("validateRemoteHost(%q) = %v, want nil", u, err)
+		if err := gitops.ValidateRemoteHost(u); err != nil {
+			t.Errorf("ValidateRemoteHost(%q) = %v, want nil", u, err)
 		}
 	}
 }
@@ -74,12 +70,8 @@ func TestValidateRemoteHost_AllowsPublicHosts(t *testing.T) {
 func TestValidateRemoteHost_RejectsMissingHost(t *testing.T) {
 	// file:// endpoints carry no remote host — the guard must reject them
 	// even though the webui scheme allowlist also blocks file:// upstream.
-	ep, err := gogittransport.NewEndpoint("file:///etc/passwd")
-	if err != nil {
-		t.Fatalf("NewEndpoint: %v", err)
-	}
-	if err := validateRemoteHost(ep); err == nil {
-		t.Error("validateRemoteHost(file:///etc/passwd) = nil, want no-host rejection")
+	if err := gitops.ValidateRemoteHost("file:///etc/passwd"); err == nil {
+		t.Error("ValidateRemoteHost(file:///etc/passwd) = nil, want no-host rejection")
 	}
 }
 
