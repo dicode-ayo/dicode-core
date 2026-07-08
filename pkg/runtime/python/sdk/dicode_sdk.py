@@ -322,7 +322,7 @@ class _Context:
     def __init__(self, trigger_input):
         r = _call({"method": "resume"}) or {}
         raw = r.get("state")
-        self._resumed = raw is not None
+        self._resumed = r.get("resumed") is True
         self._step, self.state = _unwrap_state(raw)
         self.input = r.get("input") if self._resumed else trigger_input
 
@@ -353,14 +353,23 @@ def _dispatch(g):
     → main; a resume with a step marker → steps[step] (wizard shape); a resume
     without → resume() if exported, else main (two-function / single-main shape).
     g is the task module globals(). Falls through to the module-level `result`
-    for a top-level (no-main) task."""
+    for a top-level (no-main) task. When `steps` is exported but the marker names
+    no matching step (typo, or the task was edited mid-wizard), fail loudly rather
+    than silently re-running an unrelated handler against mid-wizard state."""
     main = g.get("main")
     resume = g.get("resume")
     steps = g.get("steps")
     if not ctx._resumed:
         handler = main
-    elif ctx._step is not None and isinstance(steps, dict) and callable(steps.get(ctx._step)):
+    elif isinstance(steps, dict) and ctx._step is not None:
         handler = steps.get(ctx._step)
+        if not callable(handler):
+            sys.stderr.write(
+                '[dicode] resume step "%s" is not an exported step function\n' % ctx._step
+            )
+            sys.stderr.flush()
+            _flush_and_close()
+            os._exit(1)
     elif callable(resume):
         handler = resume
     else:

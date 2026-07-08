@@ -234,6 +234,7 @@ async def main():
 	}
 	second, err := ex.Execute(ctx, spec, pkgruntime.RunOptions{
 		RunID:       runID2,
+		Resumed:     true,
 		ResumeState: json.RawMessage(first.ResumeState),
 		ResumeInput: json.RawMessage(`{"project_name":"acme"}`),
 	})
@@ -303,6 +304,7 @@ async def resume(ctx):
 	}
 	second, err := ex.Execute(ctx, spec, pkgruntime.RunOptions{
 		RunID:       runID2,
+		Resumed:     true,
 		ResumeState: json.RawMessage(first.ResumeState),
 		ResumeInput: json.RawMessage(`{"project_name":"acme"}`),
 	})
@@ -397,6 +399,7 @@ steps = {"choose_framework": choose_framework, "deploy": deploy}
 	}
 	r2, err := ex.Execute(ctx, spec, pkgruntime.RunOptions{
 		RunID:       runID2,
+		Resumed:     true,
 		ResumeState: json.RawMessage(r1.ResumeState),
 		ResumeInput: json.RawMessage(`{"framework":"deno"}`),
 	})
@@ -430,6 +433,7 @@ steps = {"choose_framework": choose_framework, "deploy": deploy}
 	}
 	r3, err := ex.Execute(ctx, spec, pkgruntime.RunOptions{
 		RunID:       runID3,
+		Resumed:     true,
 		ResumeState: json.RawMessage(r2.ResumeState),
 		ResumeInput: json.RawMessage(`{"env":"prod"}`),
 	})
@@ -539,6 +543,7 @@ async def main():
 
 	res, err := ex.Execute(ctx, spec, pkgruntime.RunOptions{
 		RunID:       runID,
+		Resumed:     true,
 		ResumeState: json.RawMessage(`{"__step":null,"state":{"step":"ask_framework","name":"proj"}}`),
 		ResumeInput: json.RawMessage(`{"project_name":"acme"}`),
 	})
@@ -570,6 +575,124 @@ async def main():
 	}
 	if inp["project_name"] != "acme" {
 		t.Errorf("ctx.input = %#v, want project_name=acme", inp)
+	}
+}
+
+// TestExecute_ResumeWithNullStateDispatchesResume guards the resume-detection
+// fix (#517): a resume whose carried author state is genuinely None must still be
+// treated as a resume and dispatch the resume handler with the validated input —
+// not fall through to main as a fresh run. The signal is the explicit `resumed`
+// flag, never the presence of state.
+func TestExecute_ResumeWithNullStateDispatchesResume(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires uv subprocess")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	reg, ex := newSuspendExecutor(t)
+
+	spec := writePythonTask(t, "examples/nullstate", `
+async def main():
+    return {"via": "main"}
+
+async def resume(ctx):
+    return {"via": "resume", "state_none": ctx.state is None, "name": ctx.input["project_name"]}
+`)
+	if err := reg.Register(spec); err != nil {
+		t.Fatal(err)
+	}
+	runID, err := reg.StartRun(ctx, spec.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := ex.Execute(ctx, spec, pkgruntime.RunOptions{
+		RunID:       runID,
+		Resumed:     true,
+		ResumeState: nil, // genuinely-null carried state
+		ResumeInput: json.RawMessage(`{"project_name":"acme"}`),
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	logs, _ := reg.GetRunLogs(ctx, runID)
+	if res.Error != nil {
+		t.Fatalf("run error: %v\nlogs:\n%s", res.Error, joinLogs(logs))
+	}
+	ret, ok := res.ChainInput.(map[string]any)
+	if !ok {
+		t.Fatalf("ChainInput = %#v, want map\nlogs:\n%s", res.ChainInput, joinLogs(logs))
+	}
+	if ret["via"] != "resume" {
+		t.Errorf("dispatch went to %#v, want the resume handler (not a fresh main)", ret["via"])
+	}
+	if ret["state_none"] != true {
+		t.Errorf("resume must see the None carried state, got state_none=%#v", ret["state_none"])
+	}
+	if ret["name"] != "acme" {
+		t.Errorf("validated submission dropped: ctx.input[project_name] = %#v, want acme", ret["name"])
+	}
+}
+
+// TestExecute_ResumeMissingStepFailsLoudly guards the missing-marker fix (#517):
+// when `steps` is exported but the resume marker names no matching step, the run
+// must FAIL loudly rather than silently re-run main/resume against mid-wizard
+// state.
+func TestExecute_ResumeMissingStepFailsLoudly(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires uv subprocess")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	reg, ex := newSuspendExecutor(t)
+
+	spec := writePythonTask(t, "examples/missingstep", `
+async def main():
+    return {"via": "main"}
+
+async def known(ctx):
+    return {"via": "known"}
+
+steps = {"known": known}
+`)
+	if err := reg.Register(spec); err != nil {
+		t.Fatal(err)
+	}
+	runID, err := reg.StartRun(ctx, spec.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := ex.Execute(ctx, spec, pkgruntime.RunOptions{
+		RunID:       runID,
+		Resumed:     true,
+		ResumeState: json.RawMessage(`{"__step":"gone","state":{}}`),
+		ResumeInput: json.RawMessage(`{"x":"y"}`),
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	logs, _ := reg.GetRunLogs(ctx, runID)
+	if res.Error == nil {
+		t.Fatalf("resume to a missing step must fail the run, got no error\nlogs:\n%s", joinLogs(logs))
+	}
+	if res.ChainInput != nil {
+		t.Errorf("resume to a missing step must not run main, got return %#v", res.ChainInput)
+	}
+	if res.Suspended {
+		t.Errorf("resume to a missing step must not be classified as suspended")
+	}
+	found := false
+	for _, l := range logs {
+		if strings.Contains(l.Message, "is not an exported step function") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected a clear diagnostic naming the missing step, logs:\n%s", joinLogs(logs))
 	}
 }
 

@@ -394,6 +394,7 @@ class ResumeContextTests(SDKTestBase):
         # The real path persists a { __step, state } envelope; the SDK unwraps
         # it so the author sees only their own blob on ctx.state.
         self.server.handlers["resume"] = lambda _: {
+            "resumed": True,
             "state": {"__step": "deploy", "state": {"name": "proj"}},
             "input": {"project_name": "acme"},
         }
