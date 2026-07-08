@@ -30,7 +30,7 @@ func (f *fakeResumer) ResumeRun(_ context.Context, token string, input []byte) (
 }
 
 // newResumeReg returns an in-memory registry holding one run, optionally
-// suspended with the given token and form.
+// suspended with the given token and JSON Schema.
 func newResumeReg(t *testing.T) (*registry.Registry, db.DB) {
 	t.Helper()
 	d, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
@@ -41,21 +41,23 @@ func newResumeReg(t *testing.T) (*registry.Registry, db.DB) {
 	return registry.New(d), d
 }
 
-func suspendRun(t *testing.T, reg *registry.Registry, runID, token string, form []byte) {
+func suspendRun(t *testing.T, reg *registry.Registry, runID, token string, schema []byte) {
 	t.Helper()
 	ctx := context.Background()
 	if _, err := reg.StartRunWithID(ctx, runID, "task-x", "", string(registry.TriggerManual), registry.RunKindTask); err != nil {
 		t.Fatalf("StartRunWithID: %v", err)
 	}
 	deadline := time.Now().Add(time.Hour).UnixMilli()
-	if err := reg.SuspendRun(ctx, runID, []byte(`{"step":1}`), form, token, time.Now().UnixMilli(), deadline, nil); err != nil {
+	if err := reg.SuspendRun(ctx, runID, []byte(`{"step":1}`), schema, token, time.Now().UnixMilli(), deadline, nil); err != nil {
 		t.Fatalf("SuspendRun: %v", err)
 	}
 }
 
+const approveSchema = `{"type":"object","properties":{"approve":{"type":"string"}},"required":["approve"]}`
+
 func TestResume_Success_CallsResumerWithParsedInput(t *testing.T) {
 	reg, _ := newResumeReg(t)
-	suspendRun(t, reg, "run-1", "tok-abc", []byte(`{"fields":[{"name":"approve"}]}`))
+	suspendRun(t, reg, "run-1", "tok-abc", []byte(approveSchema))
 
 	fr := &fakeResumer{newRunID: "run-2"}
 	cs := &ControlServer{reg: reg, resumer: fr, log: zap.NewNop()}
@@ -99,6 +101,50 @@ func TestResume_EmptyParamsBecomesEmptyObject(t *testing.T) {
 	}
 	if string(fr.gotInput) != `{}` {
 		t.Fatalf("input = %s, want {}", fr.gotInput)
+	}
+}
+
+func TestResume_InvalidInputRejectedBeforeResumer(t *testing.T) {
+	reg, _ := newResumeReg(t)
+	suspendRun(t, reg, "run-1", "tok-abc", []byte(approveSchema))
+
+	fr := &fakeResumer{newRunID: "run-2"}
+	cs := &ControlServer{reg: reg, resumer: fr, log: zap.NewNop()}
+
+	// Missing the required "approve" property → schema validation must reject.
+	_, err := cs.dispatch(context.Background(), Request{
+		ID: "1", Method: "cli.resume", RunID: "run-1",
+		Params: json.RawMessage(`{}`),
+	})
+	if err == nil {
+		t.Fatal("expected validation error for missing required field")
+	}
+	if !strings.Contains(err.Error(), "approve") {
+		t.Fatalf("error should name the missing field; got %v", err)
+	}
+	if fr.called {
+		t.Fatal("resumer must not be called when validation fails")
+	}
+}
+
+func TestResumeGet_ReturnsSchema(t *testing.T) {
+	reg, _ := newResumeReg(t)
+	suspendRun(t, reg, "run-1", "tok-abc", []byte(approveSchema))
+
+	cs := &ControlServer{reg: reg, log: zap.NewNop()}
+	res, err := cs.dispatch(context.Background(), Request{ID: "1", Method: "cli.resume.get", RunID: "run-1"})
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	info, ok := res.(ResumeInfo)
+	if !ok {
+		t.Fatalf("result type %T", res)
+	}
+	if info.RunID != "run-1" || info.TaskID != "task-x" {
+		t.Fatalf("info = %+v", info)
+	}
+	if !strings.Contains(string(info.Schema), "approve") {
+		t.Fatalf("schema = %s, want it to carry the approve property", info.Schema)
 	}
 }
 
@@ -169,7 +215,7 @@ func TestResume_NotConfigured(t *testing.T) {
 
 func TestResumeList_ReportsSuspendedRunsWithFields(t *testing.T) {
 	reg, _ := newResumeReg(t)
-	suspendRun(t, reg, "run-1", "tok-1", []byte(`{"fields":[{"name":"approve"},{"name":"note"}]}`))
+	suspendRun(t, reg, "run-1", "tok-1", []byte(`{"type":"object","properties":{"approve":{"type":"string"},"note":{"type":"string"}},"required":["approve","note"]}`))
 
 	cs := &ControlServer{reg: reg, log: zap.NewNop()}
 	res, err := cs.dispatch(context.Background(), Request{ID: "1", Method: "cli.resume.list"})

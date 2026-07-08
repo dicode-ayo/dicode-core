@@ -44,7 +44,7 @@ func (s *suspendExec) Execute(_ context.Context, _ *task.Spec, opts pkgruntime.R
 			RunID:          opts.RunID,
 			Suspended:      true,
 			ResumeState:    []byte(`{"step":"ask_name"}`),
-			ResumeForm:     []byte(`{"fields":[{"name":"project_name"}]}`),
+			ResumeSchema:   []byte(`{"type":"object","properties":{"project_name":{"type":"string"}}}`),
 			ResumeDeadline: s.firstDeadline,
 		}, nil
 	}
@@ -55,10 +55,10 @@ func (s *suspendExec) Execute(_ context.Context, _ *task.Spec, opts pkgruntime.R
 	s.seenInput = opts.Input
 	if s.suspendAgain {
 		return &pkgruntime.RunResult{
-			RunID:       opts.RunID,
-			Suspended:   true,
-			ResumeState: []byte(`{"step":"ask_framework"}`),
-			ResumeForm:  []byte(`{"fields":[{"name":"framework"}]}`),
+			RunID:        opts.RunID,
+			Suspended:    true,
+			ResumeState:  []byte(`{"step":"ask_framework"}`),
+			ResumeSchema: []byte(`{"type":"object","properties":{"framework":{"type":"string"}}}`),
 		}, nil
 	}
 	return &pkgruntime.RunResult{RunID: opts.RunID, ReturnValue: "wizard-done"}, nil
@@ -611,10 +611,10 @@ func (b *blockingResumeDaemonExec) Execute(_ context.Context, _ *task.Spec, opts
 	if opts.ResumeState == nil {
 		b.firstRuns.Add(1)
 		return &pkgruntime.RunResult{
-			RunID:       opts.RunID,
-			Suspended:   true,
-			ResumeState: []byte(`{"step":"one"}`),
-			ResumeForm:  []byte(`{}`),
+			RunID:        opts.RunID,
+			Suspended:    true,
+			ResumeState:  []byte(`{"step":"one"}`),
+			ResumeSchema: []byte(`{}`),
 		}, nil
 	}
 	b.resumeRuns.Add(1)

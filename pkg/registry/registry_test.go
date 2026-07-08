@@ -483,12 +483,12 @@ func TestSuspendRun_RoundTrip(t *testing.T) {
 	}
 
 	state := []byte(`{"step":"ask_name"}`)
-	form := []byte(`{"fields":[{"name":"project_name"}]}`)
+	schema := []byte(`{"type":"object","properties":{"project_name":{"type":"string"}}}`)
 	token := "resume-token-xyz"
 	suspendedAt := time.Now().UnixMilli()
 	deadline := suspendedAt + 86_400_000
 
-	if err := r.SuspendRun(ctx, runID, state, form, token, suspendedAt, deadline, nil); err != nil {
+	if err := r.SuspendRun(ctx, runID, state, schema, token, suspendedAt, deadline, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -506,8 +506,8 @@ func TestSuspendRun_RoundTrip(t *testing.T) {
 	if string(run.ResumeState) != string(state) {
 		t.Errorf("resume_state = %q, want %q", run.ResumeState, state)
 	}
-	if string(run.ResumeForm) != string(form) {
-		t.Errorf("resume_form = %q, want %q", run.ResumeForm, form)
+	if string(run.ResumeSchema) != string(schema) {
+		t.Errorf("resume_schema = %q, want %q", run.ResumeSchema, schema)
 	}
 	if run.ResumeToken != token {
 		t.Errorf("resume_token = %q, want %q", run.ResumeToken, token)
@@ -520,7 +520,7 @@ func TestSuspendRun_RoundTrip(t *testing.T) {
 	}
 }
 
-// A zero deadline persists as NULL and reads back as 0; nil state/form blobs
+// A zero deadline persists as NULL and reads back as 0; nil state/schema blobs
 // round-trip as nil rather than a zero-length slice mismatch.
 func TestSuspendRun_NoDeadlineNilBlobs(t *testing.T) {
 	t.Parallel()
@@ -548,8 +548,8 @@ func TestSuspendRun_NoDeadlineNilBlobs(t *testing.T) {
 	if run.ResumeState != nil {
 		t.Errorf("resume_state = %v, want nil", run.ResumeState)
 	}
-	if run.ResumeForm != nil {
-		t.Errorf("resume_form = %v, want nil", run.ResumeForm)
+	if run.ResumeSchema != nil {
+		t.Errorf("resume_schema = %v, want nil", run.ResumeSchema)
 	}
 }
 

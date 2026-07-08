@@ -1,12 +1,18 @@
 # Suspendable Tasks
 
 A task can **pause mid-run to ask a human for input**, then continue once the
-form is filled. Call `dicode.suspend({ state, form })`: the run ends as
+form is filled. Call `dicode.suspend({ state, schema })`: the run ends as
 `suspended`, dicode collects the input via the Web UI or the `dicode resume`
-CLI, and the task runs again — this time with the answers in hand.
+CLI, validates it against the schema, and the task runs again — this time with
+the answers in hand.
 
 Use it for approval gates, wizards, "which of these do you mean?" disambiguation,
 or any step that can't proceed without a person.
+
+The form is described with a **[JSON Schema](https://json-schema.org)** (draft
+2020-12). That is a standard, portable vocabulary: the same schema drives the
+default Web UI form, the CLI prompts, and the **server-side validation** that
+guarantees `resume_input` conforms before your task re-runs.
 
 ---
 
@@ -15,12 +21,13 @@ or any step that can't proceed without a person.
 Suspend is **not** VM suspension. Nothing is frozen in memory.
 
 1. The task calls `dicode.suspend(...)`.
-2. dicode records the `state` blob and the `form`, then the **process exits
+2. dicode records the `state` blob and the `schema`, then the **process exits
    cleanly** (exit 0). The run row is marked `suspended`.
-3. When someone submits the form, dicode starts a **brand-new process** for the
-   same task and re-runs `task.ts` / `task.py` **from the top**.
+3. When someone submits the form, dicode **validates the submission against the
+   schema**, then starts a **brand-new process** for the same task and re-runs
+   `task.ts` / `task.py` **from the top**.
 4. On that re-run the task reads `resume_state` (the blob it passed to
-   `suspend`) and `resume_input` (the submitted form values) to pick up where it
+   `suspend`) and `resume_input` (the submitted values) to pick up where it
    left off.
 
 Because the whole file runs again from the top, your task owns its control flow:
@@ -48,8 +55,8 @@ pass instead (from the top of the file).
 
 ```typescript
 interface SuspendRequest {
-  state: unknown       // JSON-serializable; echoed back as resume_state on resume
-  form: FormSchema     // the input to collect before resume
+  state?: unknown      // JSON-serializable; echoed back as resume_state on resume
+  schema: JSONSchema   // JSON Schema (draft 2020-12) for the input to collect
   deadline?: number    // optional Unix-ms instant; resumable until then (default: 24h)
 }
 ```
@@ -57,7 +64,7 @@ interface SuspendRequest {
 Python signature (keyword args):
 
 ```python
-dicode.suspend(state=<json>, form=<dict>, deadline=<unix_ms>)
+dicode.suspend(state=<json>, schema=<dict>, deadline=<unix_ms>)
 ```
 
 ### Reading the resume context
@@ -65,66 +72,66 @@ dicode.suspend(state=<json>, form=<dict>, deadline=<unix_ms>)
 | | First run | Resume run |
 |---|---|---|
 | Deno global `resume_state` | `undefined` | the `state` you passed to `suspend()` |
-| Deno global `resume_input` | `undefined` | the submitted form values, keyed by field `name` |
+| Deno global `resume_input` | `undefined` | the submitted values, keyed by property name |
 | Python `ctx.resume_state` | `None` | the `state` you passed to `suspend()` |
-| Python `ctx.resume_input` | `None` | the submitted form values, keyed by field `name` |
+| Python `ctx.resume_input` | `None` | the submitted values, keyed by property name |
 
-`resume_input` values from the CLI are always strings; the Web UI submits the
-value for the field's `type` (a `number` field submits a number, `boolean` a
-bool). Coerce defensively.
+`resume_input` is validated against the schema before your task re-runs, and its
+values arrive with the **declared JSON types** — a `number`/`integer` property
+is a number, a `boolean` is a bool. (Coerce defensively anyway.)
 
 `dicode.suspend` needs **no permission declaration** — it is granted by default
 on the `deno` and `python` runtimes. It is **not** available on `docker` /
-`podman` (see [Limits](#limits)).
+`podman` (see the Deno / Python only note under [Rules and gotchas](#rules-and-gotchas)).
 
 ---
 
-## Form reference
+## The form — JSON Schema
 
-### `FormSchema`
+`schema` is a JSON Schema object describing the **input object** the user fills
+in. Server-side validation rejects a submission that doesn't conform (Web UI:
+`400` with the failing property; CLI: a clear error) before the task resumes.
 
-| Field | Type | Required | Description |
-|---|---|---|---|
-| `title` | string | no | Heading shown above the form |
-| `description` | string | no | Sub-text under the title |
-| `fields` | `FormField[]` | **yes** | The inputs to collect |
-
-### `FormField`
-
-| Field | Type | Required | Description |
-|---|---|---|---|
-| `name` | string | **yes** | Key the answer appears under in `resume_input` |
-| `label` | string | **yes** | Shown next to the input |
-| `type` | `"string"` \| `"text"` \| `"number"` \| `"boolean"` \| `"select"` | **yes** | Which widget to render |
-| `required` | boolean | no | Reject resume if left empty (a `boolean` counts as answered once present — `false` is a valid answer) |
-| `default` | string \| number \| boolean | no | Pre-filled value |
-| `options` | `{ value, label }[]` | for `select` | Choices; **required** when `type` is `"select"` |
-| `placeholder` | string | no | Placeholder text |
-
-### The five field types
+Use an `object` schema whose `properties` are the fields to collect:
 
 ```jsonc
-// string — single-line text
-{ "name": "title", "label": "Title", "type": "string", "required": true, "placeholder": "Weekly report" }
-
-// text — multi-line textarea
-{ "name": "notes", "label": "Notes", "type": "text", "placeholder": "Anything to add?" }
-
-// number
-{ "name": "count", "label": "How many?", "type": "number", "default": 10 }
-
-// boolean — checkbox
-{ "name": "notify", "label": "Send a notification?", "type": "boolean", "default": true }
-
-// select — needs options
 {
-  "name": "env", "label": "Environment", "type": "select", "required": true,
-  "options": [
-    { "value": "staging", "label": "Staging" },
-    { "value": "prod",    "label": "Production" }
-  ]
+  "type": "object",
+  "title": "Deploy",                 // heading shown above the form
+  "description": "Pick a target.",   // sub-text under the title
+  "properties": {
+    "project": { "type": "string", "title": "Project name" },
+    "notes":   { "type": "string", "title": "Notes", "format": "textarea" },
+    "count":   { "type": "integer", "title": "How many?", "default": 10 },
+    "notify":  { "type": "boolean", "title": "Send a notification?", "default": true },
+    "env":     { "type": "string", "title": "Environment", "enum": ["staging", "prod"] }
+  },
+  "required": ["project", "env"]
 }
 ```
+
+### What the default renderer maps
+
+The built-in Web UI form renders the common JSON-Schema subset with zero author
+effort. Each property in `properties` becomes one control:
+
+| Schema | Control |
+|---|---|
+| `type: "string"` | text input |
+| `type: "string"`, `format: "textarea"` (or `"multiline"`) | textarea |
+| `enum: [...]` (any type) | select |
+| `type: "boolean"` | checkbox |
+| `type: "number"` / `"integer"` | number input |
+
+Honored keywords: `title` (label — falls back to the property name),
+`description` (help text), `default` (pre-filled value), `enum` (choices),
+and the top-level `required` array (marks a field required and drives the
+missing-field validation). Standard constraint keywords (`minimum`,
+`maxLength`, `pattern`, …) are enforced by the server-side validator even when
+the default renderer has no special widget for them.
+
+The renderer covers the 90% case; anything the schema expresses is still
+validated server-side regardless of how it renders.
 
 ---
 
@@ -139,18 +146,20 @@ state machine keyed by a `step` field carried in `state`.
 type WizardState = { step: "name" } | { step: "env"; name: string }
 
 const state = resume_state as WizardState | undefined
-const answers = (resume_input ?? {}) as Record<string, string>
+const answers = (resume_input ?? {}) as Record<string, unknown>
 
 // First run — ask for the project name and pause.
 if (!state) {
   await dicode.suspend({
     state: { step: "name" },
-    form: {
+    schema: {
+      type: "object",
       title: "New project",
       description: "What should we call it?",
-      fields: [
-        { name: "project", label: "Project name", type: "string", required: true },
-      ],
+      properties: {
+        project: { type: "string", title: "Project name" },
+      },
+      required: ["project"],
     },
   })
   // unreachable — suspend() never returns
@@ -158,23 +167,16 @@ if (!state) {
 
 // Second run — the name is in, ask for the environment and pause again.
 if (state.step === "name") {
-  const project = answers.project ?? ""
+  const project = String(answers.project ?? "")
   await dicode.suspend({
     state: { step: "env", name: project },
-    form: {
+    schema: {
+      type: "object",
       title: `Deploy ${project}`,
-      fields: [
-        {
-          name: "env",
-          label: "Target environment",
-          type: "select",
-          required: true,
-          options: [
-            { value: "staging", label: "Staging" },
-            { value: "prod", label: "Production" },
-          ],
-        },
-      ],
+      properties: {
+        env: { type: "string", title: "Target environment", enum: ["staging", "prod"] },
+      },
+      required: ["env"],
     },
   })
 }
@@ -193,12 +195,12 @@ answers = ctx.resume_input or {}
 if state is None:
     dicode.suspend(
         state={"step": "name"},
-        form={
+        schema={
+            "type": "object",
             "title": "New project",
             "description": "What should we call it?",
-            "fields": [
-                {"name": "project", "label": "Project name", "type": "string", "required": True},
-            ],
+            "properties": {"project": {"type": "string", "title": "Project name"}},
+            "required": ["project"],
         },
     )
     # unreachable — suspend() raises and the process exits
@@ -208,20 +210,13 @@ if state["step"] == "name":
     project = answers.get("project", "")
     dicode.suspend(
         state={"step": "env", "name": project},
-        form={
+        schema={
+            "type": "object",
             "title": f"Deploy {project}",
-            "fields": [
-                {
-                    "name": "env",
-                    "label": "Target environment",
-                    "type": "select",
-                    "required": True,
-                    "options": [
-                        {"value": "staging", "label": "Staging"},
-                        {"value": "prod", "label": "Production"},
-                    ],
-                },
-            ],
+            "properties": {
+                "env": {"type": "string", "title": "Target environment", "enum": ["staging", "prod"]},
+            },
+            "required": ["env"],
         },
     )
 
@@ -230,7 +225,8 @@ result = {"project": state["name"], "env": answers.get("env", "staging")}
 ```
 
 Each `suspend()` mints its own resume, so a task can suspend any number of times
-— that's what chains the wizard steps together.
+— that's what chains the wizard steps together. (Each step still branches on
+`resume_state` by hand; automatic step dispatch is a separate follow-up.)
 
 ---
 
@@ -294,34 +290,45 @@ continuation carries on from `resume_state`.
 
 ### Web UI
 
-Open the suspended run's detail page. It renders the `form` the task declared;
-fill it in and submit. That POSTs the collected values to
-`/api/runs/{runID}/resume`, which validates required fields and spawns the
-continuation run. The raw resume handle is resolved server-side from the stored
-run — the browser session (or API key) is the authorization.
+Open the suspended run's detail page. It renders a form from the JSON Schema the
+task declared; fill it in and submit. That POSTs the collected values to
+`/api/runs/{runID}/resume`, which **validates them against the stored schema**
+and spawns the continuation run. The raw resume handle is resolved server-side
+from the stored run — the browser session (or API key) is the authorization.
 
 ### CLI
 
-List what's waiting:
+List what's waiting (the `FIELDS` column shows the schema's required
+properties):
 
 ```console
 $ dicode resume
 RUN ID                               TASK                     SUSPENDED AT         FIELDS
-b1c2…                                examples/deploy-wizard   2026-07-08T09:12:00Z project
-
-resume with: dicode resume <run-id> [field=value ...]
+b1c2…                                examples/deploy-wizard   2026-07-08T09:12:00Z project,env
 ```
 
-Submit the answers as `field=value` pairs:
+Resume interactively — dicode reads the schema and prompts for each property,
+honoring its type, `enum` choices, `required`, and `default`:
 
 ```console
-$ dicode resume b1c2… project=acme-api
+$ dicode resume b1c2…
+Project name (required): acme-api
+Target environment
+  choices: staging, prod
+env (required): prod
+resumed: continuation run 7f8a…
+```
+
+Or pass the answers as `field=value` pairs — each value is coerced to the
+property's declared type and validated against the schema before submit:
+
+```console
+$ dicode resume b1c2… project=acme-api env=prod
 resumed: continuation run 7f8a…
 follow: dicode logs 7f8a…
 ```
 
 The continuation runs asynchronously; follow it with `dicode logs <run-id>`.
-CLI values are always strings.
 
 ---
 

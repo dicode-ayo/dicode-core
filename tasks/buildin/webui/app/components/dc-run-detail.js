@@ -138,29 +138,58 @@ class DcRunDetail extends LitElement {
     }
   }
 
-  // #95: submit a suspended run's form. Values are collected from the light-DOM
-  // form and POSTed; the server resolves the resume token itself. On success we
-  // navigate to the continuation run.
+  // #512: is this JSON-Schema property required? Derived from the schema's
+  // top-level `required` array.
+  _isRequired(name) {
+    const req = this._run?.resume_schema?.required;
+    return Array.isArray(req) && req.includes(name);
+  }
+
+  // #512: render a textarea for a string property when the schema hints at
+  // multi-line input (format:"textarea"/"multiline") — otherwise a text input.
+  _isTextarea(prop) {
+    return prop?.type === 'string' && (prop.format === 'textarea' || prop.format === 'multiline');
+  }
+
+  // #512: coerce a control's value to the property's declared JSON type so the
+  // task receives a typed value (number field → number, boolean → bool). Empty
+  // optional values return undefined so they are omitted from the submission.
+  _coerceValue(prop, el) {
+    if (prop.type === 'boolean') return el.checked;
+    if (Array.isArray(prop.enum)) {
+      if (el.value === '') return undefined;
+      // The <option> value carries the enum index, preserving the entry's
+      // original JSON type (a numeric enum stays numeric).
+      const i = Number(el.value);
+      return prop.enum[i];
+    }
+    if (el.value === '') return undefined;
+    if (prop.type === 'number' || prop.type === 'integer') return Number(el.value);
+    return el.value;
+  }
+
+  // #512: submit a suspended run's input. Values are collected from the
+  // light-DOM form, coerced to the schema's declared types, and POSTed; the
+  // server validates against the stored schema and resolves the resume token
+  // itself. On success we navigate to the continuation run.
   async _submitResume(e) {
     e.preventDefault();
-    const schema = this._run?.resume_form;
+    const schema = this._run?.resume_schema;
     if (!schema) return;
+    const props = schema.properties || {};
     const form = e.target;
     const values = {};
-    for (const f of (schema.fields || [])) {
-      const el = form.elements[f.name];
+    for (const [name, prop] of Object.entries(props)) {
+      const el = form.elements[name];
       if (!el) continue;
-      let v;
-      if (f.type === 'boolean') v = el.checked;
-      else if (f.type === 'number') v = el.value === '' ? '' : Number(el.value);
-      else v = el.value;
-      if (f.required && (v === '' || v === null || v === undefined)) {
-        this._resumeError = `${f.label || f.name} is required`;
+      const v = this._coerceValue(prop, el);
+      if (this._isRequired(name) && (v === '' || v === null || v === undefined)) {
+        this._resumeError = `${prop.title || name} is required`;
         return;
       }
       // Omit empty optional values so the task sees them as absent.
-      if (v === '' && !f.required) continue;
-      values[f.name] = v;
+      if (v === undefined) continue;
+      values[name] = v;
     }
     this._resumeError = null;
     this._resuming = true;
@@ -175,43 +204,44 @@ class DcRunDetail extends LitElement {
     }
   }
 
-  _renderResumeField(f) {
-    const req = f.required ? html`<span style="color:var(--red)"> *</span>` : '';
+  _renderResumeField(name, prop) {
+    const req = this._isRequired(name) ? html`<span style="color:var(--red)"> *</span>` : '';
+    const label = prop.title || name;
+    const desc = prop.description ? html`<span class="meta" style="display:block;font-weight:normal">${prop.description}</span>` : '';
     let input;
-    switch (f.type) {
-      case 'text':
-        input = html`<textarea name=${f.name} rows="4" placeholder=${f.placeholder || ''} .value=${f.default ?? ''} style="width:100%"></textarea>`;
-        break;
-      case 'number':
-        input = html`<input type="number" name=${f.name} placeholder=${f.placeholder || ''} .value=${f.default ?? ''} style="width:100%">`;
-        break;
-      case 'boolean':
-        return html`<div style="margin-bottom:var(--space-md)">
-          <label><input type="checkbox" name=${f.name} ?checked=${f.default === true}> ${f.label || f.name}${req}</label>
-        </div>`;
-      case 'select':
-        input = html`<select name=${f.name} style="width:100%">
-          ${(f.options || []).map(o => html`<option value=${o.value} ?selected=${o.value === f.default}>${o.label ?? o.value}</option>`)}
-        </select>`;
-        break;
-      default:
-        input = html`<input type="text" name=${f.name} placeholder=${f.placeholder || ''} .value=${f.default ?? ''} style="width:100%">`;
+    if (prop.type === 'boolean') {
+      return html`<div style="margin-bottom:var(--space-md)">
+        <label><input type="checkbox" name=${name} ?checked=${prop.default === true}> ${label}${req}</label>
+        ${desc}
+      </div>`;
+    } else if (Array.isArray(prop.enum)) {
+      input = html`<select name=${name} style="width:100%">
+        ${prop.enum.map((o, i) => html`<option value=${i} ?selected=${o === prop.default}>${String(o)}</option>`)}
+      </select>`;
+    } else if (this._isTextarea(prop)) {
+      input = html`<textarea name=${name} rows="4" .value=${prop.default ?? ''} style="width:100%"></textarea>`;
+    } else if (prop.type === 'number' || prop.type === 'integer') {
+      input = html`<input type="number" name=${name} step=${prop.type === 'integer' ? '1' : 'any'} .value=${prop.default ?? ''} style="width:100%">`;
+    } else {
+      input = html`<input type="text" name=${name} .value=${prop.default ?? ''} style="width:100%">`;
     }
     return html`<div style="margin-bottom:var(--space-md)">
-      <label style="display:block;font-weight:var(--font-semibold);margin-bottom:.25rem">${f.label || f.name}${req}</label>
+      <label style="display:block;font-weight:var(--font-semibold);margin-bottom:.25rem">${label}${req}</label>
+      ${desc}
       ${input}
     </div>`;
   }
 
   _renderResumeForm() {
-    const schema = this._run?.resume_form;
+    const schema = this._run?.resume_schema;
     if (!schema) return '';
+    const props = Object.entries(schema.properties || {});
     return html`
       <h2 style="margin-top:var(--space-lg)">${schema.title || 'Waiting on your input'}</h2>
       <div class="card">
         ${schema.description ? html`<p class="meta" style="margin-top:0">${schema.description}</p>` : ''}
         <form @submit=${e => this._submitResume(e)}>
-          ${(schema.fields || []).map(f => this._renderResumeField(f))}
+          ${props.map(([name, prop]) => this._renderResumeField(name, prop))}
           ${this._resumeError ? html`<p style="color:var(--red)">${this._resumeError}</p>` : ''}
           <div style="margin-top:var(--space-md)">
             <button class="btn" type="submit" ?disabled=${this._resuming}>${this._resuming ? 'Resuming…' : 'Submit'}</button>

@@ -31,22 +31,22 @@ func (f *fakeResumer) ResumeRun(_ context.Context, token string, input []byte) (
 	return f.newRunID, f.err
 }
 
-// seedSuspendedRun inserts a run and marks it suspended with the given form
-// and token, returning its run ID.
-func seedSuspendedRun(t *testing.T, reg *registry.Registry, form []byte, token string) string {
+// seedSuspendedRun inserts a run and marks it suspended with the given JSON
+// Schema and token, returning its run ID.
+func seedSuspendedRun(t *testing.T, reg *registry.Registry, schema []byte, token string) string {
 	t.Helper()
 	ctx := context.Background()
 	id, err := reg.StartRunWithID(ctx, "run-suspended-1", "task-a", "", "manual", registry.RunKindTask)
 	if err != nil {
 		t.Fatalf("StartRunWithID: %v", err)
 	}
-	if err := reg.SuspendRun(ctx, id, []byte(`{"step":"x"}`), form, token, 1, 0, nil); err != nil {
+	if err := reg.SuspendRun(ctx, id, []byte(`{"step":"x"}`), schema, token, 1, 0, nil); err != nil {
 		t.Fatalf("SuspendRun: %v", err)
 	}
 	return id
 }
 
-var oneRequiredField = []byte(`{"title":"Name?","fields":[{"name":"project_name","type":"string","label":"Name","required":true}]}`)
+var oneRequiredField = []byte(`{"type":"object","title":"Name?","properties":{"project_name":{"type":"string","title":"Name"}},"required":["project_name"]}`)
 
 func TestApiResumeRun_HappyPath(t *testing.T) {
 	srv, reg := newTestServer(t)
@@ -199,9 +199,9 @@ func TestApiResumeRun_RequiresAuth(t *testing.T) {
 	}
 }
 
-// GET /api/runs/{id} must expose the decoded form for rendering but never leak
-// the resume token (the resume endpoint resolves it server-side).
-func TestApiGetRun_SuspendedExposesFormNotToken(t *testing.T) {
+// GET /api/runs/{id} must expose the decoded JSON Schema for rendering but never
+// leak the resume token (the resume endpoint resolves it server-side).
+func TestApiGetRun_SuspendedExposesSchemaNotToken(t *testing.T) {
 	srv, reg := newTestServer(t)
 	runID := seedSuspendedRun(t, reg, oneRequiredField, "super-secret")
 
@@ -217,12 +217,12 @@ func TestApiGetRun_SuspendedExposesFormNotToken(t *testing.T) {
 		t.Errorf("response leaked resume token: %s", raw)
 	}
 	var body struct {
-		ResumeForm json.RawMessage `json:"resume_form"`
+		ResumeSchema json.RawMessage `json:"resume_schema"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if !strings.Contains(string(body.ResumeForm), "project_name") {
-		t.Errorf("resume_form missing form fields; got %s", body.ResumeForm)
+	if !strings.Contains(string(body.ResumeSchema), "project_name") {
+		t.Errorf("resume_schema missing schema properties; got %s", body.ResumeSchema)
 	}
 }

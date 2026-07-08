@@ -80,13 +80,13 @@ type RunResult struct {
 
 	// Suspended is set when the task called dicode.suspend() (#95): the run
 	// paused cleanly (exit 0, not a failure) and yielded state + a form for
-	// later resume. ResumeState/ResumeForm are opaque JSON blobs; ResumeDeadline
+	// later resume. ResumeState/ResumeSchema are opaque JSON blobs; ResumeDeadline
 	// is an optional Unix-ms TTL (0 = unset). The trigger engine consumes these
 	// to persist the suspended run and mint a resume token (PR 3); this runtime
 	// only produces them.
 	Suspended      bool
 	ResumeState    []byte
-	ResumeForm     []byte
+	ResumeSchema   []byte
 	ResumeDeadline int64
 }
 

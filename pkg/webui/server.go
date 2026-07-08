@@ -2118,16 +2118,16 @@ func (s *Server) apiListRuns(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, runs)
 }
 
-// RunDetail is the shape returned by GET /api/runs/{runID}. ResumeForm carries
-// the suspended run's form as decoded JSON (resume_form) so the WebUI renders
-// it directly; the embedded Run's own ResumeToken/ResumeState/ResumeForm are
-// cleared by apiGetRun before embedding — the token is the resume
-// authorization and must never reach the client, and the state blob is
+// RunDetail is the shape returned by GET /api/runs/{runID}. ResumeSchema
+// carries the suspended run's JSON Schema as raw JSON so the WebUI renders a
+// form from it directly; the embedded Run's own ResumeToken/ResumeState/
+// ResumeSchema are cleared by apiGetRun before embedding — the token is the
+// resume authorization and must never reach the client, and the state blob is
 // task-internal.
 type RunDetail struct {
 	*registry.Run
-	TaskName   string          `json:"task_name"`
-	ResumeForm json.RawMessage `json:"resume_form,omitempty"`
+	TaskName     string          `json:"task_name"`
+	ResumeSchema json.RawMessage `json:"resume_schema,omitempty"`
 }
 
 func (s *Server) apiGetRun(w http.ResponseWriter, r *http.Request) {
@@ -2141,17 +2141,17 @@ func (s *Server) apiGetRun(w http.ResponseWriter, r *http.Request) {
 	if spec, ok := s.registry.Get(run.TaskID); ok {
 		taskName = spec.Name
 	}
-	// Surface the form (for rendering) but strip the token and state blob from
+	// Surface the schema (for rendering) but strip the token and state blob from
 	// the wire — the resume endpoint resolves the token server-side.
-	var form json.RawMessage
-	if run.Status == registry.StatusSuspended && len(run.ResumeForm) > 0 {
-		form = json.RawMessage(run.ResumeForm)
+	var schema json.RawMessage
+	if run.Status == registry.StatusSuspended && len(run.ResumeSchema) > 0 {
+		schema = json.RawMessage(run.ResumeSchema)
 	}
 	safe := *run
 	safe.ResumeToken = ""
 	safe.ResumeState = nil
-	safe.ResumeForm = nil
-	jsonOK(w, RunDetail{Run: &safe, TaskName: taskName, ResumeForm: form})
+	safe.ResumeSchema = nil
+	jsonOK(w, RunDetail{Run: &safe, TaskName: taskName, ResumeSchema: schema})
 }
 
 // LogEntryJSON is the JSON shape returned by GET /api/runs/{runID}/logs.

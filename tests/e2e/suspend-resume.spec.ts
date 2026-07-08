@@ -1,9 +1,9 @@
 /**
  * suspend-resume.spec.ts
  *
- * End-to-end coverage for the suspend/resume WebUI surface (#95, PR 4):
+ * End-to-end coverage for the suspend/resume WebUI surface (#512):
  * fire a task that calls dicode.suspend(), confirm the run lands in
- * `suspended` with a form, submit the form via POST /api/runs/<id>/resume,
+ * `suspended` with a JSON Schema, submit the input via POST /api/runs/<id>/resume,
  * and assert the continuation run succeeds with the submitted value while the
  * original run transitions to `resumed`.
  */
@@ -62,10 +62,10 @@ test.describe('suspend/resume webui', () => {
     const { runId } = (await fireRes.json()) as { runId: string };
     expect(runId).toBeTruthy();
 
-    // It must land suspended, carrying a decoded form — and NOT leak a token.
+    // It must land suspended, carrying a decoded JSON Schema — and NOT leak a token.
     const suspended = await waitForStatus(request, runId, 'suspended');
-    const form = suspended.resume_form as { fields?: { name: string }[] } | undefined;
-    expect(form?.fields?.some((f) => f.name === 'project_name')).toBe(true);
+    const schema = suspended.resume_schema as { properties?: Record<string, unknown> } | undefined;
+    expect(schema?.properties?.project_name).toBeTruthy();
     // The token is the resume authorization — it must never reach the client.
     expect(suspended.ResumeToken ?? '').toBe('');
     expect(suspended.ResumeState ?? null).toBeNull();

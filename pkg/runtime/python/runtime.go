@@ -351,7 +351,7 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 	if sr := srv.Suspend(); sr != nil && result.Error == nil {
 		result.Suspended = true
 		result.ResumeState = sr.State
-		result.ResumeForm = sr.Form
+		result.ResumeSchema = sr.Schema
 		result.ResumeDeadline = sr.Deadline
 	}
 

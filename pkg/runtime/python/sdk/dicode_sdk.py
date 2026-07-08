@@ -255,7 +255,7 @@ input = _call({"method": "input"})
 
 
 # ── suspend / resume (#95) ────────────────────────────────────────────────────
-# dicode.suspend() pauses the run: it hands the daemon a state blob + form, then
+# dicode.suspend() pauses the run: it hands the daemon a state blob + schema, then
 # raises SuspendSignal so the process exits cleanly (exit 0) and the run ends as
 # `suspended`. On resume the task is re-run with ctx.resume_state /
 # ctx.resume_input populated. See runtime.go for how the wrapper turns a clean
@@ -520,17 +520,18 @@ class _Dicode:
         # by the WebUI to collapse same-group siblings. Last write wins.
         _call({"method": "dicode.set_group", "group": str(label or "")})
 
-    def suspend(self, state=None, form=None, deadline=None):
-        """Pause the run and wait for user input (#95). Records the state blob +
-        form over IPC, then raises SuspendSignal — it never returns. The wrapper
-        exits the process cleanly and the run ends as `suspended`; on resume the
-        task is re-run with ctx.resume_state / ctx.resume_input populated. Do not
-        wrap this call in a try/except that swallows the signal."""
+    def suspend(self, state=None, schema=None, deadline=None):
+        """Pause the run and wait for user input (#512). Records the state blob +
+        JSON Schema over IPC, then raises SuspendSignal — it never returns. The
+        wrapper exits the process cleanly and the run ends as `suspended`; on
+        resume the task is re-run with ctx.resume_state / ctx.resume_input
+        populated (the submission, validated against `schema` server-side). Do
+        not wrap this call in a try/except that swallows the signal."""
         global _suspend_requested
         # Await the ack so the payload is recorded before we raise: the daemon
-        # captures state/form/deadline synchronously in response to this call.
+        # captures state/schema/deadline synchronously in response to this call.
         _call({"method": "dicode.suspend",
-               "state": state, "form": form,
+               "state": state, "schema": schema,
                "deadline": deadline or 0})
         _suspend_requested = True
         raise SuspendSignal()

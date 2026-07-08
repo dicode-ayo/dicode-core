@@ -90,7 +90,7 @@ type Run struct {
 	// list queries omit them (mirrors the input-persistence fields above).
 	// Zero values mean "not suspended".
 	ResumeState    []byte // opaque task-provided state blob; nil when absent
-	ResumeForm     []byte // form schema JSON to render on resume; nil when absent
+	ResumeSchema   []byte // JSON Schema to validate the resume submission against; nil when absent
 	ResumeToken    string // unguessable resume handle; empty when absent
 	SuspendedAt    int64  // Unix ms the run suspended; 0 when absent
 	ResumeDeadline int64  // Unix ms TTL; 0 when no deadline set
@@ -254,19 +254,22 @@ func (r *Registry) FinishRunWithResult(ctx context.Context, runID, status, retur
 }
 
 // SuspendRun records a run as suspended awaiting user input, persisting the
-// opaque state/form blobs, the resume token, and the suspend timestamp. It
-// deliberately leaves finished_at NULL: suspended is a non-terminal status, so
-// the run is neither running (CleanupStaleRuns skips it) nor finished.
+// opaque state blob, the JSON Schema, the resume token, and the suspend
+// timestamp. It deliberately leaves finished_at NULL: suspended is a
+// non-terminal status, so the run is neither running (CleanupStaleRuns skips
+// it) nor finished.
 //
-// A deadline of 0 stores NULL (no TTL). state, form, and resumeParams may be nil.
-func (r *Registry) SuspendRun(ctx context.Context, runID string, state, form []byte, token string, suspendedAt, deadline int64, resumeParams []byte) error {
+// A deadline of 0 stores NULL (no TTL). state, schema, and resumeParams may be
+// nil. The schema is persisted in the legacy resume_form BLOB column (reused
+// as-is to avoid a migration).
+func (r *Registry) SuspendRun(ctx context.Context, runID string, state, schema []byte, token string, suspendedAt, deadline int64, resumeParams []byte) error {
 	var deadlineArg any
 	if deadline > 0 {
 		deadlineArg = deadline
 	}
 	return r.db.Exec(ctx,
 		`UPDATE runs SET status = ?, resume_state = ?, resume_form = ?, resume_token = ?, suspended_at = ?, resume_deadline = ?, resume_params = ? WHERE id = ?`,
-		StatusSuspended, state, form, token, suspendedAt, deadlineArg, resumeParams, runID,
+		StatusSuspended, state, schema, token, suspendedAt, deadlineArg, resumeParams, runID,
 	)
 }
 
@@ -392,7 +395,7 @@ func scanRun(rows db.Scanner, withInput, withResume bool) (*Run, error) {
 	}
 	if withResume {
 		dest = append(dest,
-			&run.ResumeState, &run.ResumeForm, &run.ResumeToken, &run.SuspendedAt, &run.ResumeDeadline,
+			&run.ResumeState, &run.ResumeSchema, &run.ResumeToken, &run.SuspendedAt, &run.ResumeDeadline,
 			&run.ResumeParams)
 	}
 	if err := rows.Scan(dest...); err != nil {

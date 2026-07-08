@@ -75,31 +75,30 @@ declare interface TaskSummary {
   enabled:      boolean;
 }
 
-/** One field in a suspend form (#95). `type` selects the input widget the
- *  WebUI renders; `options` is required for "select". */
-declare interface FormField {
-  name: string;
-  type: "string" | "text" | "number" | "boolean" | "select";
-  label: string;
-  required?: boolean;
-  default?: string | number | boolean;
-  options?: { value: string; label: string }[];
-  placeholder?: string;
-}
-
-/** The form a suspended task asks the user to fill in before resume (#95). */
-declare interface FormSchema {
+/** A JSON Schema (draft 2020-12) object describing the input a suspended task
+ *  collects before resume (#512). The daemon validates the submission against
+ *  it server-side. Loosely typed — any valid JSON Schema is accepted; the
+ *  default WebUI renderer understands `type`, `properties`, `required`, `enum`,
+ *  `default`, `title`, `description`, and `format`. */
+declare type JSONSchema = {
+  type?: string;
   title?: string;
   description?: string;
-  fields: FormField[];
-}
+  properties?: Record<string, JSONSchema>;
+  required?: string[];
+  enum?: unknown[];
+  default?: unknown;
+  format?: string;
+  [keyword: string]: unknown;
+};
 
-/** Argument to dicode.suspend() (#95). `state` is an opaque JSON blob echoed
- *  back as ctx.resume_state on resume; `form` describes the input to collect;
- *  `deadline` is an optional Unix-ms TTL. */
+/** Argument to dicode.suspend() (#512). `state` is an opaque JSON blob echoed
+ *  back as ctx.resume_state on resume; `schema` is the JSON Schema the
+ *  submitted input is validated against; `deadline` is an optional Unix-ms
+ *  TTL. */
 declare interface SuspendRequest {
-  state: unknown;
-  form: FormSchema;
+  state?: unknown;
+  schema: JSONSchema;
   deadline?: number;
 }
 
@@ -111,9 +110,9 @@ declare interface Dicode {
   run_task:       (taskID: string, params?: Record<string, string>) => Promise<unknown>;
   list_tasks:     ()                                                 => Promise<TaskSummary[]>;
   get_runs:       (taskID: string, opts?: { limit?: number })        => Promise<unknown>;
-  /** Pause the run: hand the runtime `state` + `form`, then never resolve —
+  /** Pause the run: hand the runtime `state` + `schema`, then never resolve —
    *  the process exits cleanly and the run ends as `suspended`. On resume the
-   *  task re-runs with ctx.resume_state / ctx.resume_input populated (#95). */
+   *  task re-runs with ctx.resume_state / ctx.resume_input populated (#512). */
   suspend:        (req: SuspendRequest) => Promise<never>;
   secrets_set:    (key: string, value: string) => Promise<void>;
   secrets_delete: (key: string)                => Promise<void>;
