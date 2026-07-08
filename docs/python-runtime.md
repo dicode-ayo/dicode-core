@@ -169,10 +169,12 @@ async def resume():
 ```
 
 For a multi-step wizard, define a **`steps`** map and name the next handler with
-`suspend(to=...)`. A handler may also take `ctx` as an argument
+`suspend(to=...)`. A `to` that names no defined step fails the run loudly rather
+than falling back to `main`/`resume`. A handler may also take `ctx` as an argument
 (`async def resume(ctx):`) instead of reading the module-global `ctx`. `schema`
-is a [JSON Schema](https://json-schema.org) (draft 2020-12) the daemon validates
-against before resuming.
+is a [JSON Schema](https://json-schema.org) (draft 2020-12) the daemon compiles at
+`suspend()` time (rejecting a malformed schema up front) and validates against
+before resuming.
 
 Do not wrap `suspend()` in a `try/except` that swallows the signal — the run
 fails loudly if you do. See [Suspendable Tasks](./concepts/suspendable-tasks.md)
