@@ -7,6 +7,7 @@ import type { DicodeSdk } from "../../sdk.ts";
 // re-run from the top on every resume, so nothing lives in memory between pauses.
 
 export default async function main({ dicode }: DicodeSdk) {
+  console.log("suspend-wizard: step 1 — pausing for the project name");
   await dicode.suspend({
     to: "chooseFramework",
     schema: {
@@ -27,6 +28,7 @@ export const steps = {
   // name forward in state so the confirm step can echo it back.
   async chooseFramework({ dicode, input }: DicodeSdk) {
     const project = (input as { project_name: string }).project_name;
+    console.log(`suspend-wizard: step 2 — project "${project}", pausing for the framework`);
     await dicode.suspend({
       to: "confirm",
       state: { project },
@@ -50,6 +52,7 @@ export const steps = {
   async confirm({ dicode, input, state }: DicodeSdk) {
     const project = (state as { project: string }).project;
     const framework = (input as { framework: string }).framework;
+    console.log(`suspend-wizard: step 3 — ${framework} for "${project}", pausing for confirmation`);
     await dicode.suspend({
       to: "summarize",
       state: { project, framework },
@@ -69,6 +72,7 @@ export const steps = {
   summarize({ input, state }: DicodeSdk) {
     const { project, framework } = state as { project: string; framework: string };
     const confirmed = (input as { confirmed: boolean }).confirmed;
+    console.log(`suspend-wizard: done — ${confirmed ? "created" : "skipped"} ${project} (${framework})`);
     return { project, framework, confirmed };
   },
 };
