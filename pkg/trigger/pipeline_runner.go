@@ -70,6 +70,20 @@ type PipelineRunner struct {
 // that lost the reconcile-ordering race, see #341) is rejected loudly here
 // rather than dispatched and failed mid-flight.
 func (e *Engine) firePipeline(ctx context.Context, p *task.PipelineTask, opts pkgruntime.RunOptions, source registry.TriggerSource) (string, error) {
+	// Reserve a drain slot before creating the parent run row. Refused once
+	// shutdown has begun so a chain-dispatched pipeline can't finalize past the
+	// drain (#520). Released by the runner goroutine's deferred Done, or here if
+	// we bail before spawning it.
+	if !e.trackRun() {
+		return "", errEngineShuttingDown
+	}
+	spawned := false
+	defer func() {
+		if !spawned {
+			e.runWG.Done()
+		}
+	}()
+
 	if err := e.validatePipelineRefs(p); err != nil {
 		return "", fmt.Errorf("pipeline %q failed validation: %w", p.ID, err)
 	}
@@ -162,7 +176,13 @@ func (e *Engine) firePipeline(ctx context.Context, p *task.PipelineTask, opts pk
 		triggerInput:  triggerInput,
 		triggerParams: opts.Params,
 	}
-	go r.run(runCtx)
+	// The runWG slot reserved by trackRun above transfers to this goroutine; it
+	// finalizes the parent run row (r.finish), and the DB must outlive it (#520).
+	spawned = true
+	go func() {
+		defer e.runWG.Done()
+		r.run(runCtx)
+	}()
 	return runID, nil
 }
 

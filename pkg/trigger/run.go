@@ -421,6 +421,21 @@ func (e *Engine) fireAsync(ctx context.Context, spec *task.Spec, opts pkgruntime
 		opts.RunID = uuid.New().String()
 	}
 
+	// Reserve a drain slot before creating any run record. Once shutdown has
+	// begun this is refused so no new run — including one dispatched by a chain
+	// edge from a run finalizing mid-shutdown — starts a DB write after the
+	// drain (#520). The slot is released by the run goroutine's deferred Done,
+	// or here if we bail before spawning it.
+	if !e.trackRun() {
+		return "", errEngineShuttingDown
+	}
+	spawned := false
+	defer func() {
+		if !spawned {
+			e.runWG.Done()
+		}
+	}()
+
 	runCtx, cleanup, err := e.startRun(spec, &opts, source)
 	if err != nil {
 		return "", err
@@ -441,7 +456,11 @@ func (e *Engine) fireAsync(ctx context.Context, spec *task.Spec, opts pkgruntime
 		}
 	}
 
+	spawned = true
 	go func() {
+		// First deferred statement → runs last (LIFO), after cleanup and all
+		// finalization, so the drain releases only once the DB writes are done.
+		defer e.runWG.Done()
 		defer cleanup()
 
 		// Daemon tasks are long-running; they must not consume semaphore slots

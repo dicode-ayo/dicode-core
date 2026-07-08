@@ -4,6 +4,7 @@ package trigger
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -98,6 +99,27 @@ type Engine struct {
 
 	shutdownMu  sync.RWMutex
 	shutdownCtx context.Context
+
+	// runWG tracks every in-flight run goroutine (task runs via fireAsync and
+	// pipeline-parent runs via firePipeline). Start drains it before returning
+	// so the daemon's deferred database.Close() cannot run while a run goroutine
+	// is still executing FinishRun/status writes — the DB must outlive run
+	// finalization (issue #520).
+	//
+	// Every fire that leads to a FinishRun goes through trackRun, which does the
+	// runWG.Add under wgMu and refuses (returns false) once shutdown has begun.
+	// wgMu makes Add mutually exclusive with beginShutdown's flag write, so no
+	// Add can race the drain's Wait — this both prevents the "Add called
+	// concurrently with Wait" panic and stops a chain/sweep fire spawned in a
+	// detached goroutine from touching the DB after the drain (the escaped
+	// goroutine's own Add is what gets refused).
+	wgMu         sync.Mutex
+	shuttingDown bool
+	runWG        sync.WaitGroup
+
+	// drainGrace bounds the shutdown drain of runWG. Defaults to
+	// shutdownDrainGrace; overridable in tests.
+	drainGrace time.Duration
 
 	daemonMu    sync.Mutex
 	daemonRuns  map[string]string
@@ -197,6 +219,7 @@ func New(r *registry.Registry, defaultExec pkgruntime.Executor, log *zap.Logger)
 		livePipelines:      make(map[string]*PipelineRunner),
 		deferredPipelines:  make(map[string]*task.PipelineTask),
 		guards:             newChainGuards(),
+		drainGrace:         shutdownDrainGrace,
 	}
 	e.executors[task.RuntimeDeno] = defaultExec
 	return e
@@ -359,6 +382,12 @@ func (e *Engine) Start(ctx context.Context) error {
 	<-ctx.Done()
 	e.cron.Stop()
 
+	// Latch the gate before killing/draining: from here trackRun refuses new
+	// runs, so any chain/sweep/reconciler fire triggered by a run finalizing
+	// during shutdown is turned away before it touches the DB, and no Add can
+	// race the drain's Wait below.
+	e.beginShutdown()
+
 	e.daemonMu.Lock()
 	killList := make(map[string]string, len(e.daemonRuns))
 	for k, v := range e.daemonRuns {
@@ -370,8 +399,48 @@ func (e *Engine) Start(ctx context.Context) error {
 		e.log.Info("stopping daemon on shutdown", zap.String("task", taskID), zap.String("run", runID))
 		e.KillRun(runID)
 	}
+
+	// Pipeline terminal-daemon runs are not tracked in daemonRuns (they are
+	// owned by the PipelineRunner, not the standalone-daemon machinery), so the
+	// loop above misses them. Kill them explicitly so their run goroutines exit
+	// and finalize within the drain window below instead of running past DB
+	// close.
+	e.livePipelineMu.Lock()
+	pipelineDaemonRuns := make([]string, 0, len(e.livePipelines))
+	for _, r := range e.livePipelines {
+		r.mu.Lock()
+		runID := r.daemonRunID
+		r.mu.Unlock()
+		if runID != "" {
+			pipelineDaemonRuns = append(pipelineDaemonRuns, runID)
+		}
+	}
+	e.livePipelineMu.Unlock()
+	for _, runID := range pipelineDaemonRuns {
+		e.KillRun(runID)
+	}
+
+	// Drain in-flight run goroutines before returning so the daemon's deferred
+	// database.Close() runs only after every FinishRun/status write completes.
+	// Bounded by drainGrace so a wedged run cannot hang shutdown forever.
+	drained := make(chan struct{})
+	go func() {
+		e.runWG.Wait()
+		close(drained)
+	}()
+	select {
+	case <-drained:
+	case <-time.After(e.drainGrace):
+		e.log.Warn("shutdown drain grace elapsed with runs still in flight; proceeding to close",
+			zap.Duration("grace", e.drainGrace))
+	}
 	return nil
 }
+
+// shutdownDrainGrace bounds how long Start waits for in-flight run goroutines to
+// finalize after shutdown kills are issued. A wedged run cannot exceed this
+// ceiling, so shutdown always makes progress.
+const shutdownDrainGrace = 10 * time.Second
 
 // Register adds or updates trigger registrations for the given task, routing by
 // kind: a *task.PipelineTask is validated via registerPipeline; a *task.Spec
@@ -678,6 +747,35 @@ func (e *Engine) isShuttingDown() bool {
 	ctx := e.shutdownCtx
 	e.shutdownMu.RUnlock()
 	return ctx != nil && ctx.Err() != nil
+}
+
+// errEngineShuttingDown is returned by fire paths that refuse to start a new run
+// because the engine is draining toward shutdown. Callers treat it as "do not
+// fire" — a handler surfaces it as an error; a chain/sweep dispatch skips.
+var errEngineShuttingDown = errors.New("trigger: engine is shutting down")
+
+// trackRun reserves a runWG slot for a run goroutine that is about to be
+// launched, returning false once shutdown has begun (in which case the caller
+// must not fire and must not call Done). The Add happens under wgMu, mutually
+// exclusive with beginShutdown, so it can never race the drain's Wait. On
+// success the caller owns exactly one Done.
+func (e *Engine) trackRun() bool {
+	e.wgMu.Lock()
+	defer e.wgMu.Unlock()
+	if e.shuttingDown {
+		return false
+	}
+	e.runWG.Add(1)
+	return true
+}
+
+// beginShutdown latches the shutting-down flag so no further trackRun can add to
+// runWG. It must be called before the drain's Wait so the counter only ever
+// decreases from that point on.
+func (e *Engine) beginShutdown() {
+	e.wgMu.Lock()
+	e.shuttingDown = true
+	e.wgMu.Unlock()
 }
 
 func (e *Engine) getShutdownCtx() context.Context {
