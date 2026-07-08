@@ -162,7 +162,14 @@ func (e *Engine) firePipeline(ctx context.Context, p *task.PipelineTask, opts pk
 		triggerInput:  triggerInput,
 		triggerParams: opts.Params,
 	}
-	go r.run(runCtx)
+	// Add before `go` so a shutdown drain cannot race past a not-yet-started
+	// pipeline. run finalizes the parent run row (r.finish); the DB must outlive
+	// it (issue #520).
+	e.runWG.Add(1)
+	go func() {
+		defer e.runWG.Done()
+		r.run(runCtx)
+	}()
 	return runID, nil
 }
 

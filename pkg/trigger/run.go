@@ -430,7 +430,12 @@ func (e *Engine) fireAsync(ctx context.Context, spec *task.Spec, opts pkgruntime
 		}
 	}
 
+	// Add before `go` so a shutdown drain cannot race past a not-yet-started run.
+	e.runWG.Add(1)
 	go func() {
+		// First deferred statement → runs last (LIFO), after cleanup and all
+		// finalization, so the drain releases only once the DB writes are done.
+		defer e.runWG.Done()
 		defer cleanup()
 
 		// Daemon tasks are long-running; they must not consume semaphore slots

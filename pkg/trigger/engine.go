@@ -99,6 +99,18 @@ type Engine struct {
 	shutdownMu  sync.RWMutex
 	shutdownCtx context.Context
 
+	// runWG tracks every in-flight run goroutine (task runs via fireAsync and
+	// pipeline-parent runs via firePipeline). Start drains it before returning
+	// so the daemon's deferred database.Close() cannot run while a run goroutine
+	// is still executing FinishRun/status writes — the DB must outlive run
+	// finalization (issue #520). Add is always called before `go`, never inside
+	// the goroutine, so Wait cannot race past a not-yet-started run.
+	runWG sync.WaitGroup
+
+	// drainGrace bounds the shutdown drain of runWG. Defaults to
+	// shutdownDrainGrace; overridable in tests.
+	drainGrace time.Duration
+
 	daemonMu    sync.Mutex
 	daemonRuns  map[string]string
 	daemonSpecs map[string]*task.Spec
@@ -197,6 +209,7 @@ func New(r *registry.Registry, defaultExec pkgruntime.Executor, log *zap.Logger)
 		livePipelines:      make(map[string]*PipelineRunner),
 		deferredPipelines:  make(map[string]*task.PipelineTask),
 		guards:             newChainGuards(),
+		drainGrace:         shutdownDrainGrace,
 	}
 	e.executors[task.RuntimeDeno] = defaultExec
 	return e
@@ -370,8 +383,48 @@ func (e *Engine) Start(ctx context.Context) error {
 		e.log.Info("stopping daemon on shutdown", zap.String("task", taskID), zap.String("run", runID))
 		e.KillRun(runID)
 	}
+
+	// Pipeline terminal-daemon runs are not tracked in daemonRuns (they are
+	// owned by the PipelineRunner, not the standalone-daemon machinery), so the
+	// loop above misses them. Kill them explicitly so their run goroutines exit
+	// and finalize within the drain window below instead of running past DB
+	// close.
+	e.livePipelineMu.Lock()
+	pipelineDaemonRuns := make([]string, 0, len(e.livePipelines))
+	for _, r := range e.livePipelines {
+		r.mu.Lock()
+		runID := r.daemonRunID
+		r.mu.Unlock()
+		if runID != "" {
+			pipelineDaemonRuns = append(pipelineDaemonRuns, runID)
+		}
+	}
+	e.livePipelineMu.Unlock()
+	for _, runID := range pipelineDaemonRuns {
+		e.KillRun(runID)
+	}
+
+	// Drain in-flight run goroutines before returning so the daemon's deferred
+	// database.Close() runs only after every FinishRun/status write completes.
+	// Bounded by drainGrace so a wedged run cannot hang shutdown forever.
+	drained := make(chan struct{})
+	go func() {
+		e.runWG.Wait()
+		close(drained)
+	}()
+	select {
+	case <-drained:
+	case <-time.After(e.drainGrace):
+		e.log.Warn("shutdown drain grace elapsed with runs still in flight; proceeding to close",
+			zap.Duration("grace", e.drainGrace))
+	}
 	return nil
 }
+
+// shutdownDrainGrace bounds how long Start waits for in-flight run goroutines to
+// finalize after shutdown kills are issued. A wedged run cannot exceed this
+// ceiling, so shutdown always makes progress.
+const shutdownDrainGrace = 10 * time.Second
 
 // Register adds or updates trigger registrations for the given task, routing by
 // kind: a *task.PipelineTask is validated via registerPipeline; a *task.Spec
