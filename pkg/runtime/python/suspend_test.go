@@ -578,6 +578,81 @@ async def main():
 	}
 }
 
+// TestExecute_SchemalessSuspendAndResume guards the schema-less suspend path
+// (#517): a task that calls dicode.suspend(state=...) with NO schema must suspend
+// cleanly (the Python SDK sends no `schema` field, so the daemon records no
+// constraint) rather than failing with "invalid suspend schema", and a resume
+// with input must then succeed.
+func TestExecute_SchemalessSuspendAndResume(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires uv subprocess")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	reg, ex := newSuspendExecutor(t)
+
+	spec := writePythonTask(t, "examples/schemaless", `
+async def main():
+    if ctx.state is None:
+        dicode.suspend(state={"step": "ask"})
+    return {"resumed": ctx.state is not None, "name": ctx.input.get("project_name")}
+`)
+	if err := reg.Register(spec); err != nil {
+		t.Fatal(err)
+	}
+	runID, err := reg.StartRun(ctx, spec.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := ex.Execute(ctx, spec, pkgruntime.RunOptions{RunID: runID})
+	if err != nil {
+		t.Fatalf("Execute (suspend): %v", err)
+	}
+	logs, _ := reg.GetRunLogs(ctx, runID)
+	if first.Error != nil {
+		t.Fatalf("schema-less suspend must not fail, got error: %v\nlogs:\n%s", first.Error, joinLogs(logs))
+	}
+	if !first.Suspended {
+		t.Fatalf("schema-less suspend must suspend the run\nlogs:\n%s", joinLogs(logs))
+	}
+	if len(first.ResumeSchema) != 0 {
+		t.Errorf("schema-less suspend must record no schema, got %q", first.ResumeSchema)
+	}
+
+	runID2, err := reg.StartRun(ctx, spec.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := ex.Execute(ctx, spec, pkgruntime.RunOptions{
+		RunID:       runID2,
+		Resumed:     true,
+		ResumeState: json.RawMessage(first.ResumeState),
+		ResumeInput: json.RawMessage(`{"project_name":"acme"}`),
+	})
+	if err != nil {
+		t.Fatalf("Execute (resume): %v", err)
+	}
+	logs2, _ := reg.GetRunLogs(ctx, runID2)
+	if second.Error != nil {
+		t.Fatalf("schema-less resume must succeed, got error: %v\nlogs:\n%s", second.Error, joinLogs(logs2))
+	}
+	if second.Suspended {
+		t.Fatalf("resume must not re-suspend\nlogs:\n%s", joinLogs(logs2))
+	}
+	ret, ok := second.ChainInput.(map[string]any)
+	if !ok {
+		t.Fatalf("ChainInput = %#v, want map\nlogs:\n%s", second.ChainInput, joinLogs(logs2))
+	}
+	if ret["resumed"] != true {
+		t.Errorf("ctx.state must be set on resume, got resumed=%#v", ret["resumed"])
+	}
+	if ret["name"] != "acme" {
+		t.Errorf("ctx.input[project_name] = %#v, want acme", ret["name"])
+	}
+}
+
 // TestExecute_ResumeWithNullStateDispatchesResume guards the resume-detection
 // fix (#517): a resume whose carried author state is genuinely None must still be
 // treated as a resume and dispatch the resume handler with the validated input —

@@ -1,6 +1,7 @@
 package ipc
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -751,19 +752,23 @@ func (s *Server) handleConn(conn net.Conn) {
 				reply(req.ID, nil, "ipc: permission denied (suspend)")
 				continue
 			}
-			// Probe the schema now, while the task can still react: an
-			// un-compilable schema stored here would fail every resume with a
-			// 400 and brick the run until the TTL sweep, with no author feedback.
-			if len(req.Schema) > 0 {
-				if _, err := schemavalidate.Compile(req.Schema); err != nil {
-					reply(req.ID, nil, "ipc: invalid suspend schema: "+err.Error())
-					continue
-				}
+			// A null or empty schema means "no constraint": normalize it to nil
+			// so it is neither probed as an invalid document nor persisted as the
+			// literal `null` (which would 400 every resume). A present schema must
+			// compile now, while the task can still react — an un-compilable schema
+			// stored here would brick every resume until the TTL sweep, with no
+			// author feedback.
+			schema := req.Schema
+			if len(bytes.TrimSpace(schema)) == 0 || bytes.Equal(bytes.TrimSpace(schema), []byte("null")) {
+				schema = nil
+			} else if _, err := schemavalidate.Compile(schema); err != nil {
+				reply(req.ID, nil, "ipc: invalid suspend schema: "+err.Error())
+				continue
 			}
 			s.mu.Lock()
 			s.suspend = &SuspendResult{
 				State:    req.State,
-				Schema:   req.Schema,
+				Schema:   schema,
 				Deadline: req.Deadline,
 			}
 			s.mu.Unlock()

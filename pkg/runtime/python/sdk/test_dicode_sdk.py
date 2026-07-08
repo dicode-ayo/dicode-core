@@ -376,6 +376,24 @@ class SuspendTests(SDKTestBase):
         self.assertEqual(captured["schema"]["title"], "Name?")
         self.assertEqual(captured["deadline"], 1893456000000)
 
+    def test_suspend_without_schema_omits_the_field(self):
+        # A schema-less suspend must send no `schema` field at all (not `null`),
+        # mirroring Deno's dropped-undefined-key behavior, so the daemon records
+        # no constraint instead of rejecting a `null` schema (#517).
+        captured = {}
+
+        def on_suspend(msg):
+            captured["msg"] = msg
+            return True  # ack
+        self.server.handlers["dicode.suspend"] = on_suspend
+
+        sdk = self.load_sdk()
+        with self.assertRaises(sdk.SuspendSignal):
+            sdk.dicode.suspend(state={"step": "one"})
+        self.assertNotIn("schema", captured["msg"])
+        self.assertEqual(captured["msg"]["state"],
+                         {"__step": None, "state": {"step": "one"}})
+
     def test_suspend_signal_is_exception_subclass(self):
         # Mirrors the Deno SDK: the signal is a plain Error/Exception so a broad
         # `except Exception` swallows it — exactly the footgun the wrapper's

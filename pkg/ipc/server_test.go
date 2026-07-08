@@ -2574,6 +2574,47 @@ func TestServer_Suspend_RejectsInvalidSchema(t *testing.T) {
 	}
 }
 
+// A null (or empty) schema means "no constraint": the suspend-time probe is
+// skipped and the schema is normalized to empty so it is not persisted as the
+// literal `null`, which would otherwise 400 every resume (#517). A schema-less
+// dicode.suspend (e.g. the Python approval-gate pattern) must still suspend.
+func TestServer_Suspend_NullSchemaTreatedAsAbsent(t *testing.T) {
+	cases := []struct {
+		name   string
+		schema json.RawMessage
+	}{
+		{"literal null", json.RawMessage(`null`)},
+		{"whitespace null", json.RawMessage(" null ")},
+		{"empty", json.RawMessage(``)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newTestEnv(t)
+			conn, srv := e.startWithSpec(t, nil, nil, &task.Spec{Runtime: task.RuntimeDeno}, nil)
+			msg := map[string]any{
+				"id":     "1",
+				"method": "dicode.suspend",
+				"state":  json.RawMessage(`{"step":1}`),
+			}
+			if len(tc.schema) > 0 {
+				msg["schema"] = tc.schema
+			}
+			sendMsg(t, conn, msg)
+			resp := recvMsg(t, conn)
+			if resp["error"] != nil {
+				t.Fatalf("a null/absent schema must be accepted, got error: %v", resp["error"])
+			}
+			s := srv.Suspend()
+			if s == nil {
+				t.Fatal("expected the suspend payload to be recorded")
+			}
+			if len(s.Schema) != 0 {
+				t.Fatalf("a null schema must be normalized to empty (not persisted), got %q", s.Schema)
+			}
+		})
+	}
+}
+
 // A valid schema on dicode.suspend passes the suspend-time probe and is recorded.
 func TestServer_Suspend_AcceptsValidSchema(t *testing.T) {
 	e := newTestEnv(t)
