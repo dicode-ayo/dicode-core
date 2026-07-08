@@ -60,7 +60,11 @@ func (s *Server) apiResumeRun(w http.ResponseWriter, r *http.Request) {
 
 	values := map[string]any{}
 	if r.Body != nil && r.ContentLength != 0 {
-		if err := json.NewDecoder(r.Body).Decode(&values); err != nil && err != io.EOF {
+		dec := json.NewDecoder(r.Body)
+		// Preserve numbers as json.Number so integers > 2^53 survive the
+		// re-marshal below without being coerced through float64.
+		dec.UseNumber()
+		if err := dec.Decode(&values); err != nil && err != io.EOF {
 			jsonErr(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 			return
 		}

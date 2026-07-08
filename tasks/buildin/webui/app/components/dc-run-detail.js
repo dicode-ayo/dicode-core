@@ -180,7 +180,7 @@ class DcRunDetail extends LitElement {
     const form = e.target;
     const values = {};
     for (const [name, prop] of Object.entries(props)) {
-      const el = form.elements[name];
+      const el = form.elements.namedItem(name);
       if (!el) continue;
       const v = this._coerceValue(prop, el);
       if (this._isRequired(name) && (v === '' || v === null || v === undefined)) {

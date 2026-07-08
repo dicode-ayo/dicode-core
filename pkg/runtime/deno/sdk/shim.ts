@@ -369,8 +369,8 @@ const kv: KV = {
 
 const __triggerInput__ = await __call__({ method: "input" });
 const __resume__ = await __call__({ method: "resume" }) as
-  { state?: unknown; input?: unknown } | null;
-const __resumed__ = __resume__ != null && __resume__.state != null;
+  { resumed?: boolean; state?: unknown; input?: unknown } | null;
+const __resumed__ = __resume__ != null && __resume__.resumed === true;
 
 function __unwrapState__(raw: unknown): { step: string | undefined; state: unknown } {
   if (raw && typeof raw === "object" && "__step" in (raw as Record<string, unknown>)) {

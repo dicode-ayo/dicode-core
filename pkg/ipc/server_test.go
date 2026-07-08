@@ -2542,6 +2542,98 @@ func TestServer_Suspend_DeniedForDocker(t *testing.T) {
 	}
 }
 
+// A dicode.suspend carrying a structurally-invalid schema must be rejected at
+// suspend time (#517) — while the task can still react — rather than stored and
+// left to fail every resume with a 400 until the TTL sweep.
+func TestServer_Suspend_RejectsInvalidSchema(t *testing.T) {
+	cases := []struct {
+		name   string
+		schema string
+	}{
+		{"non-string type", `{"type":123}`},
+		{"external file ref", `{"$ref":"file:///etc/passwd"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newTestEnv(t)
+			conn, srv := e.startWithSpec(t, nil, nil, &task.Spec{Runtime: task.RuntimeDeno}, nil)
+			sendMsg(t, conn, map[string]any{
+				"id":     "1",
+				"method": "dicode.suspend",
+				"state":  json.RawMessage(`{"step":1}`),
+				"schema": json.RawMessage(tc.schema),
+			})
+			resp := recvMsg(t, conn)
+			if errMsg, _ := resp["error"].(string); !strings.Contains(errMsg, "invalid suspend schema") {
+				t.Fatalf("expected invalid-schema rejection; got error=%v result=%v", resp["error"], resp["result"])
+			}
+			if srv.Suspend() != nil {
+				t.Fatal("an un-resumable schema must not be recorded")
+			}
+		})
+	}
+}
+
+// A null (or empty) schema means "no constraint": the suspend-time probe is
+// skipped and the schema is normalized to empty so it is not persisted as the
+// literal `null`, which would otherwise 400 every resume (#517). A schema-less
+// dicode.suspend (e.g. the Python approval-gate pattern) must still suspend.
+func TestServer_Suspend_NullSchemaTreatedAsAbsent(t *testing.T) {
+	cases := []struct {
+		name   string
+		schema json.RawMessage
+	}{
+		{"literal null", json.RawMessage(`null`)},
+		{"whitespace null", json.RawMessage(" null ")},
+		{"empty", json.RawMessage(``)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newTestEnv(t)
+			conn, srv := e.startWithSpec(t, nil, nil, &task.Spec{Runtime: task.RuntimeDeno}, nil)
+			msg := map[string]any{
+				"id":     "1",
+				"method": "dicode.suspend",
+				"state":  json.RawMessage(`{"step":1}`),
+			}
+			if len(tc.schema) > 0 {
+				msg["schema"] = tc.schema
+			}
+			sendMsg(t, conn, msg)
+			resp := recvMsg(t, conn)
+			if resp["error"] != nil {
+				t.Fatalf("a null/absent schema must be accepted, got error: %v", resp["error"])
+			}
+			s := srv.Suspend()
+			if s == nil {
+				t.Fatal("expected the suspend payload to be recorded")
+			}
+			if len(s.Schema) != 0 {
+				t.Fatalf("a null schema must be normalized to empty (not persisted), got %q", s.Schema)
+			}
+		})
+	}
+}
+
+// A valid schema on dicode.suspend passes the suspend-time probe and is recorded.
+func TestServer_Suspend_AcceptsValidSchema(t *testing.T) {
+	e := newTestEnv(t)
+	conn, srv := e.startWithSpec(t, nil, nil, &task.Spec{Runtime: task.RuntimeDeno}, nil)
+	sendMsg(t, conn, map[string]any{
+		"id":     "1",
+		"method": "dicode.suspend",
+		"state":  json.RawMessage(`{"step":1}`),
+		"schema": json.RawMessage(`{"type":"object","properties":{"name":{"type":"string"}}}`),
+	})
+	resp := recvMsg(t, conn)
+	if resp["error"] != nil {
+		t.Fatalf("valid schema rejected: %v", resp["error"])
+	}
+	if srv.Suspend() == nil {
+		t.Fatal("expected suspend payload recorded for a valid schema")
+	}
+}
+
 // A deno task's dicode.suspend is accepted and records the payload.
 func TestServer_Suspend_GrantedForDeno(t *testing.T) {
 	e := newTestEnv(t)

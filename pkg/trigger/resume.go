@@ -146,6 +146,7 @@ func (e *Engine) ResumeRun(ctx context.Context, token string, input []byte) (str
 
 	opts := pkgruntime.RunOptions{
 		ParentRunID: run.ID,
+		Resumed:     true,
 		ResumeState: run.ResumeState,
 		ResumeInput: input,
 	}

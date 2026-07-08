@@ -163,9 +163,11 @@ export async function resume({ input }) {
 ```
 
 For a multi-step wizard, export a **`steps`** map and name the next handler with
-`suspend({ to })`. `schema` is a [JSON Schema](https://json-schema.org) (draft
-2020-12); the daemon validates the submission against it before resuming, so
-`ctx.input` conforms.
+`suspend({ to })`. A `to` that names no exported step fails the run loudly rather
+than falling back to `main`/`resume`. `schema` is a
+[JSON Schema](https://json-schema.org) (draft 2020-12); the daemon compiles it at
+`suspend()` time (rejecting a malformed schema up front) and validates the
+submission against it before resuming, so `ctx.input` conforms.
 
 See [Suspendable Tasks](./concepts/suspendable-tasks.md) for the dispatch rules,
 the `steps` wizard shape, lifecycle (`suspended` → `resumed`), and how to resume

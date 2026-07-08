@@ -1,6 +1,7 @@
 package ipc
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -18,6 +19,7 @@ import (
 	"github.com/dicode/dicode/pkg/db"
 	mcpclient "github.com/dicode/dicode/pkg/mcp/client"
 	"github.com/dicode/dicode/pkg/registry"
+	"github.com/dicode/dicode/pkg/schemavalidate"
 	"github.com/dicode/dicode/pkg/secrets"
 	gitsource "github.com/dicode/dicode/pkg/source/git"
 	"github.com/dicode/dicode/pkg/task"
@@ -92,6 +94,11 @@ type Server struct {
 	// ctx.state / ctx.input via the "resume" IPC method. Both
 	// are nil on a first (non-resume) invocation. Set via SetResume before
 	// Start; read-only afterwards, so no mutex is needed.
+	//
+	// resumed is the authoritative resume signal reported to the SDK: carried
+	// state can be genuinely null on a resume, so its presence cannot stand in
+	// for it.
+	resumed     bool
 	resumeState json.RawMessage
 	resumeInput json.RawMessage
 
@@ -414,9 +421,11 @@ func (s *Server) Suspend() *SuspendResult {
 }
 
 // SetResume injects the prior-run state and user input for a resumed run,
-// exposed to the task as ctx.state / ctx.input (#95). Both are
-// opaque JSON blobs; nil means "not a resume". Must be called before Start.
-func (s *Server) SetResume(state, input json.RawMessage) {
+// exposed to the task as ctx.state / ctx.input (#95). resumed is the
+// authoritative resume signal the SDK dispatches on; state/input are opaque JSON
+// blobs and may be nil even on a resume. Must be called before Start.
+func (s *Server) SetResume(resumed bool, state, input json.RawMessage) {
+	s.resumed = resumed
 	s.resumeState = state
 	s.resumeInput = input
 }
@@ -637,14 +646,16 @@ func (s *Server) handleConn(conn net.Conn) {
 			// Returns the prior-run state + user input for a resumed run
 			// (#95), exposed to the task as ctx.state / ctx.input.
 			// Gated by the same cap as input — it is contextual run input.
-			// Both fields are nil on a first (non-resume) invocation.
+			// `resumed` is the resume signal the SDK dispatches on; state/input
+			// are nil on a first invocation and may be nil even on a resume.
 			if !hasCap(caps, CapInputRead) {
 				reply(req.ID, nil, "ipc: permission denied (input.read)")
 				continue
 			}
 			reply(req.ID, map[string]any{
-				"state": s.resumeState,
-				"input": s.resumeInput,
+				"resumed": s.resumed,
+				"state":   s.resumeState,
+				"input":   s.resumeInput,
 			}, "")
 
 		case "kv.get":
@@ -741,10 +752,23 @@ func (s *Server) handleConn(conn net.Conn) {
 				reply(req.ID, nil, "ipc: permission denied (suspend)")
 				continue
 			}
+			// A null or empty schema means "no constraint": normalize it to nil
+			// so it is neither probed as an invalid document nor persisted as the
+			// literal `null` (which would 400 every resume). A present schema must
+			// compile now, while the task can still react — an un-compilable schema
+			// stored here would brick every resume until the TTL sweep, with no
+			// author feedback.
+			schema := req.Schema
+			if len(bytes.TrimSpace(schema)) == 0 || bytes.Equal(bytes.TrimSpace(schema), []byte("null")) {
+				schema = nil
+			} else if _, err := schemavalidate.Compile(schema); err != nil {
+				reply(req.ID, nil, "ipc: invalid suspend schema: "+err.Error())
+				continue
+			}
 			s.mu.Lock()
 			s.suspend = &SuspendResult{
 				State:    req.State,
-				Schema:   req.Schema,
+				Schema:   schema,
 				Deadline: req.Deadline,
 			}
 			s.mu.Unlock()

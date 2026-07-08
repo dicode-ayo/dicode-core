@@ -111,6 +111,12 @@ on the `deno` and `python` runtimes. It is **not** available on `docker` /
 in. Server-side validation rejects a submission that doesn't conform (Web UI:
 `400` with the failing property; CLI: a clear error) before the task resumes.
 
+The daemon compiles the schema the moment you call `dicode.suspend`, so a
+malformed schema surfaces as an error to the task immediately — while it can
+still react — instead of silently suspending and then failing every resume
+attempt. External or `file://` `$ref`s are refused; a suspend schema must be
+self-contained.
+
 Use an `object` schema whose `properties` are the fields to collect:
 
 ```jsonc
@@ -333,6 +339,13 @@ flow works from the CLI — `dicode resume` lists the suspended run and
 - **A suspended run resumes exactly once.** The resume handle is single-use and
   consumed atomically — a second resume of the same run fails with "already
   resumed".
+
+- **`suspend({ to })` must name a handler in the exported `steps` map.** If it
+  names a step that isn't present (a typo, or a step you removed while a run was
+  mid-wizard), the resume **fails loudly** with a clear error and a non-zero exit
+  rather than silently falling back to `main`/`resume` against mid-wizard state.
+  The single-`main` and `main` + `resume` shapes (which export no `steps` map)
+  are unaffected.
 
 - **Deno / Python only.** `docker` and `podman` tasks cannot suspend; a
   `suspend()` attempt there fails with a permission-denied error rather than

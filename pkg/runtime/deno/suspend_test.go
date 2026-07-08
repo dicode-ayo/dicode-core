@@ -135,6 +135,7 @@ export default async function main({ dicode, state, input }) {
 	// Replay the stored envelope exactly as the resume path would.
 	second, err := rt.Run(ctx, spec, RunOptions{
 		RunID:       "run-loopguard-2",
+		Resumed:     true,
 		ResumeState: json.RawMessage(first.ResumeState),
 		ResumeInput: json.RawMessage(`{"project_name":"acme"}`),
 	})
@@ -199,6 +200,7 @@ export async function resume({ state, input }) {
 
 	second, err := rt.Run(ctx, spec, RunOptions{
 		RunID:       "run-twofunc-2",
+		Resumed:     true,
 		ResumeState: json.RawMessage(first.ResumeState),
 		ResumeInput: json.RawMessage(`{"project_name":"acme"}`),
 	})
@@ -286,6 +288,7 @@ export const steps = {
 	// Run 2 — chooseFramework sees the framework input, suspends to deploy.
 	r2, err := rt.Run(ctx, spec, RunOptions{
 		RunID:       "run-steps-2",
+		Resumed:     true,
 		ResumeState: json.RawMessage(r1.ResumeState),
 		ResumeInput: json.RawMessage(`{"framework":"deno"}`),
 	})
@@ -314,6 +317,7 @@ export const steps = {
 	// Run 3 — deploy sees the prior state + the new env input and finishes.
 	r3, err := rt.Run(ctx, spec, RunOptions{
 		RunID:       "run-steps-3",
+		Resumed:     true,
 		ResumeState: json.RawMessage(r2.ResumeState),
 		ResumeInput: json.RawMessage(`{"env":"prod"}`),
 	})
@@ -419,6 +423,7 @@ export default async function main({ state, input }) {
 
 	res, err := rt.Run(ctx, spec, RunOptions{
 		RunID:       "run-resume-1",
+		Resumed:     true,
 		ResumeState: json.RawMessage(`{"__step":null,"state":{"step":"ask_framework","name":"proj"}}`),
 		ResumeInput: json.RawMessage(`{"project_name":"acme"}`),
 	})
@@ -449,6 +454,118 @@ export default async function main({ state, input }) {
 	}
 	if inp["project_name"] != "acme" {
 		t.Errorf("ctx.input = %#v, want project_name=acme", inp)
+	}
+}
+
+// TestRun_ResumeWithNullStateDispatchesResume guards the resume-detection fix
+// (#517): a resume whose carried author state is genuinely null must still be
+// treated as a resume and dispatch the resume handler with the validated input —
+// not fall through to main as a fresh run and drop the submission. The signal is
+// the explicit `resumed` flag, never the presence of state.
+func TestRun_ResumeWithNullStateDispatchesResume(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires Deno subprocess")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	rt, reg, cleanup := newTestRuntime(t)
+	defer cleanup()
+
+	spec := writeProviderTask(t, "nullstate", `
+export default async function main() {
+  return { via: "main" };
+}
+export async function resume({ state, input }) {
+  return { via: "resume", stateNull: state === null || state === undefined, name: (input as any).project_name };
+}
+`)
+	if err := reg.Register(spec); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := rt.Run(ctx, spec, RunOptions{
+		RunID:       "run-nullstate-1",
+		Resumed:     true,
+		ResumeState: nil, // genuinely-null carried state
+		ResumeInput: json.RawMessage(`{"project_name":"acme"}`),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Error != nil {
+		t.Fatalf("run error: %v", res.Error)
+	}
+	ret, ok := res.ReturnValue.(map[string]any)
+	if !ok {
+		t.Fatalf("ReturnValue = %#v, want map", res.ReturnValue)
+	}
+	if ret["via"] != "resume" {
+		t.Errorf("dispatch went to %#v, want the resume handler (not a fresh main)", ret["via"])
+	}
+	if ret["stateNull"] != true {
+		t.Errorf("resume must see the null carried state, got stateNull=%#v", ret["stateNull"])
+	}
+	if ret["name"] != "acme" {
+		t.Errorf("validated submission dropped: ctx.input.project_name = %#v, want acme", ret["name"])
+	}
+}
+
+// TestRun_ResumeMissingStepFailsLoudly guards the missing-marker fix (#517): when
+// `steps` is exported but the resume marker names no matching step (typo, or the
+// task was edited mid-wizard), the run must FAIL loudly rather than silently
+// re-run main/resume against mid-wizard state.
+func TestRun_ResumeMissingStepFailsLoudly(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires Deno subprocess")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	rt, reg, cleanup := newTestRuntime(t)
+	defer cleanup()
+
+	spec := writeProviderTask(t, "missingstep", `
+export default async function main() {
+  return { via: "main" };
+}
+export const steps = {
+  async known() { return { via: "known" }; },
+};
+`)
+	if err := reg.Register(spec); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := rt.Run(ctx, spec, RunOptions{
+		RunID:       "run-missingstep-1",
+		Resumed:     true,
+		ResumeState: json.RawMessage(`{"__step":"gone","state":{}}`),
+		ResumeInput: json.RawMessage(`{"x":"y"}`),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Error == nil {
+		t.Fatalf("resume to a missing step must fail the run, got no error")
+	}
+	if res.ReturnValue != nil {
+		t.Errorf("resume to a missing step must not run main, got return %#v", res.ReturnValue)
+	}
+	if res.Suspended {
+		t.Errorf("resume to a missing step must not be classified as suspended")
+	}
+
+	logs, _ := reg.GetRunLogs(ctx, "run-missingstep-1")
+	found := false
+	for _, l := range logs {
+		if strings.Contains(l.Message, "is not an exported step function") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected a clear diagnostic naming the missing step, logs = %+v", logs)
 	}
 }
 

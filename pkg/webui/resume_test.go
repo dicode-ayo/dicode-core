@@ -105,6 +105,31 @@ func TestApiResumeRun_MissingRequiredField(t *testing.T) {
 	}
 }
 
+// A submitted integer larger than 2^53 must reach the task without being coerced
+// through float64 (#517): the endpoint decodes with json.Number so the exact
+// digits survive the re-marshal into the resume input.
+func TestApiResumeRun_LargeIntegerPreservesPrecision(t *testing.T) {
+	srv, reg := newTestServer(t)
+	fr := &fakeResumer{newRunID: "cont"}
+	srv.SetResumer(fr)
+	schema := []byte(`{"type":"object","properties":{"big":{"type":"integer"}}}`)
+	runID := seedSuspendedRun(t, reg, schema, "tok")
+
+	const big = "9007199254740993" // 2^53 + 1 — not representable exactly as float64
+	req := httptest.NewRequest(http.MethodPost, "/api/runs/"+runID+"/resume",
+		strings.NewReader(`{"big":`+big+`}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(string(fr.gotInput), big) {
+		t.Fatalf("large integer lost precision: forwarded input = %s, want it to contain %s", fr.gotInput, big)
+	}
+}
+
 func TestApiResumeRun_NotSuspended(t *testing.T) {
 	srv, reg := newTestServer(t)
 	srv.SetResumer(&fakeResumer{})

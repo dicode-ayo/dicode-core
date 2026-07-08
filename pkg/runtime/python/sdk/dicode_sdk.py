@@ -322,7 +322,7 @@ class _Context:
     def __init__(self, trigger_input):
         r = _call({"method": "resume"}) or {}
         raw = r.get("state")
-        self._resumed = raw is not None
+        self._resumed = r.get("resumed") is True
         self._step, self.state = _unwrap_state(raw)
         self.input = r.get("input") if self._resumed else trigger_input
 
@@ -353,14 +353,23 @@ def _dispatch(g):
     → main; a resume with a step marker → steps[step] (wizard shape); a resume
     without → resume() if exported, else main (two-function / single-main shape).
     g is the task module globals(). Falls through to the module-level `result`
-    for a top-level (no-main) task."""
+    for a top-level (no-main) task. When `steps` is exported but the marker names
+    no matching step (typo, or the task was edited mid-wizard), fail loudly rather
+    than silently re-running an unrelated handler against mid-wizard state."""
     main = g.get("main")
     resume = g.get("resume")
     steps = g.get("steps")
     if not ctx._resumed:
         handler = main
-    elif ctx._step is not None and isinstance(steps, dict) and callable(steps.get(ctx._step)):
-        handler = steps.get(ctx._step)
+    elif steps is not None and ctx._step is not None:
+        handler = steps.get(ctx._step) if isinstance(steps, dict) else None
+        if not callable(handler):
+            sys.stderr.write(
+                '[dicode] resume step "%s" is not an exported step function\n' % ctx._step
+            )
+            sys.stderr.flush()
+            _flush_and_close()
+            os._exit(1)
     elif callable(resume):
         handler = resume
     else:
@@ -592,9 +601,15 @@ class _Dicode:
         # captures state/schema/deadline synchronously in response to this call.
         # Persist an envelope so the runner can dispatch steps[to] on resume; the
         # author's blob rides in `state` and is unwrapped before any handler runs.
-        _call({"method": "dicode.suspend",
-               "state": {"__step": to, "state": state}, "schema": schema,
-               "deadline": deadline or 0})
+        # Omit `schema` when absent (mirroring Deno's dropped-undefined-key
+        # behavior) so a schema-less suspend carries no constraint rather than a
+        # `null` the daemon would have to reject as an invalid schema.
+        req = {"method": "dicode.suspend",
+               "state": {"__step": to, "state": state},
+               "deadline": deadline or 0}
+        if schema is not None:
+            req["schema"] = schema
+        _call(req)
         _suspend_requested = True
         raise SuspendSignal()
 

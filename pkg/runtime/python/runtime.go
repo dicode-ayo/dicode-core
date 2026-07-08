@@ -222,7 +222,7 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 
 	srv := e.BridgeDeps.NewIPCServer(runID, spec, mergedParams, opts.Input, redactor, &e.parent.BridgeDeps)
 	// Inject a resumed run's prior state + user input (#95); nil on first run.
-	srv.SetResume(opts.ResumeState, opts.ResumeInput)
+	srv.SetResume(opts.Resumed, opts.ResumeState, opts.ResumeInput)
 	socketPath, token, err := srv.Start(srvCtx)
 	if err != nil {
 		result.Error = fmt.Errorf("start socket server: %w", err)

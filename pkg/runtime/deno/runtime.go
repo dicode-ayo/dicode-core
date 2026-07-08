@@ -69,6 +69,10 @@ type RunOptions struct {
 	// task as ctx.state / ctx.input. Nil on a first (non-resume) invocation.
 	ResumeState json.RawMessage
 	ResumeInput json.RawMessage
+
+	// Resumed marks this run as a resume continuation. It is the resume signal
+	// the SDK dispatches on; carried state may legitimately be null.
+	Resumed bool
 }
 
 // RunResult is returned by Run.
@@ -250,7 +254,7 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		srv.SetCryptoHandler(d)
 	}
 	// Inject a resumed run's prior state + user input (#95); nil on first run.
-	srv.SetResume(opts.ResumeState, opts.ResumeInput)
+	srv.SetResume(opts.Resumed, opts.ResumeState, opts.ResumeInput)
 	socketPath, token, err := srv.Start(srvCtx)
 	if err != nil {
 		result.Error = fmt.Errorf("start socket server: %w", err)
@@ -306,17 +310,28 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 		"  Deno.exit(1);\n" +
 		"}\n" +
 		// Auto-dispatch (#512): a first run calls main; a resume runs steps[to]
-		// (wizard shape) if the marker names an exported step, else the exported
+		// (wizard shape) when the marker names an exported step, else the exported
 		// resume (two-function shape), else falls back to main so a single-main
 		// task keeps working. The author reads ctx.state / ctx.input, never a step
-		// switch. main is the entry (first) step.
+		// switch. main is the entry (first) step. When `steps` is exported but the
+		// marker names no matching step (typo, or the task was edited mid-wizard),
+		// fail loudly rather than silently re-running an unrelated handler against
+		// mid-wizard state.
 		"const __ctx__ = { params, kv, input, state, output, mcp, dicode };\n" +
 		"const __main__ = __mod__.default;\n" +
 		"const __resumeFn__ = __mod__.resume;\n" +
 		"const __steps__ = __mod__.steps;\n" +
 		"let __handler__ = __main__;\n" +
 		"if (__resumed__) {\n" +
-		"  if (__resumeStep__ && __steps__ && typeof __steps__[__resumeStep__] === \"function\") { __handler__ = __steps__[__resumeStep__]; }\n" +
+		"  if (__steps__ && __resumeStep__) {\n" +
+		"    if (typeof __steps__[__resumeStep__] === \"function\") { __handler__ = __steps__[__resumeStep__]; }\n" +
+		"    else {\n" +
+		"      console.error(\"[dicode] resume step \\\"\" + __resumeStep__ + \"\\\" is not an exported step function\");\n" +
+		"      await __flush__();\n" +
+		"      try { __conn__.close(); } catch {}\n" +
+		"      Deno.exit(1);\n" +
+		"    }\n" +
+		"  }\n" +
 		"  else if (typeof __resumeFn__ === \"function\") { __handler__ = __resumeFn__; }\n" +
 		"}\n" +
 		"if (typeof __handler__ !== \"function\") {\n" +
@@ -660,6 +675,7 @@ func (rt *Runtime) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 		Params:         opts.Params,
 		Input:          opts.Input,
 		PreResolvedEnv: opts.PreResolvedEnv,
+		Resumed:        opts.Resumed,
 		ResumeState:    opts.ResumeState,
 		ResumeInput:    opts.ResumeInput,
 	})

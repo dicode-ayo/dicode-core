@@ -64,6 +64,11 @@ type RunOptions struct {
 	// them to the subprocess.
 	ResumeState []byte
 	ResumeInput []byte
+
+	// Resumed marks this run as the continuation of a suspended one. It is the
+	// authoritative resume signal the SDK dispatches on — carried state may be
+	// genuinely null, so presence of state cannot stand in for it.
+	Resumed bool
 }
 
 // RunResult is returned by every Executor.
