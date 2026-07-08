@@ -744,7 +744,7 @@ func (s *Server) handleConn(conn net.Conn) {
 			s.mu.Lock()
 			s.suspend = &SuspendResult{
 				State:    req.State,
-				Form:     req.Form,
+				Schema:   req.Schema,
 				Deadline: req.Deadline,
 			}
 			s.mu.Unlock()

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/dicode/dicode/pkg/registry"
+	"github.com/dicode/dicode/pkg/schemavalidate"
 	"go.uber.org/zap"
 )
 
@@ -40,9 +41,18 @@ type ResumeResult struct {
 	RunID string `json:"runID"`
 }
 
+// ResumeInfo is the cli.resume.get response: a suspended run's JSON Schema so
+// the CLI can prompt per property, coerce values to their declared types, and
+// validate before submitting.
+type ResumeInfo struct {
+	RunID  string          `json:"runID"`
+	TaskID string          `json:"taskID"`
+	Schema json.RawMessage `json:"schema,omitempty"`
+}
+
 // SuspendedRunSummary is one row in the cli.resume.list response. Fields is the
-// list of form field names the task declared via dicode.suspend(), so the CLI
-// can hint which key=value pairs to supply.
+// list of property names the task's JSON Schema requires, so the CLI can hint
+// which key=value pairs to supply.
 type SuspendedRunSummary struct {
 	RunID       string   `json:"runID"`
 	TaskID      string   `json:"taskID"`
@@ -55,7 +65,8 @@ type SuspendedRunSummary struct {
 // The client supplies only the run id and the collected key=value input — never
 // the token: the token is read from the stored run, mirroring the webui's
 // authorization model where the session (here, the trusted control socket) is
-// the authority and the resume handle stays server-side.
+// the authority and the resume handle stays server-side. The input is validated
+// against the run's stored JSON Schema before the continuation is spawned.
 func (cs *ControlServer) handleResume(ctx context.Context, req Request) (ResumeResult, error) {
 	if cs.resumer == nil {
 		return ResumeResult{}, errors.New("resume not available (engine not wired)")
@@ -78,6 +89,10 @@ func (cs *ControlServer) handleResume(ctx context.Context, req Request) (ResumeR
 		input = []byte("{}")
 	}
 
+	if err := schemavalidate.Validate(run.ResumeSchema, input); err != nil {
+		return ResumeResult{}, fmt.Errorf("invalid resume input: %w", err)
+	}
+
 	newRunID, err := cs.resumer.ResumeRun(ctx, run.ResumeToken, input)
 	if err != nil {
 		switch {
@@ -97,6 +112,26 @@ func (cs *ControlServer) handleResume(ctx context.Context, req Request) (ResumeR
 	return ResumeResult{RunID: newRunID}, nil
 }
 
+// handleResumeGet returns a suspended run's JSON Schema so the CLI can build its
+// prompt and coerce/validate the input locally before submitting.
+func (cs *ControlServer) handleResumeGet(ctx context.Context, req Request) (ResumeInfo, error) {
+	if req.RunID == "" {
+		return ResumeInfo{}, errors.New("runID required")
+	}
+	run, err := cs.reg.GetRun(ctx, req.RunID)
+	if err != nil {
+		return ResumeInfo{}, fmt.Errorf("run %q not found", req.RunID)
+	}
+	if run.Status != registry.StatusSuspended || run.ResumeToken == "" {
+		return ResumeInfo{}, errors.New("run is not suspended")
+	}
+	info := ResumeInfo{RunID: run.ID, TaskID: run.TaskID}
+	if len(run.ResumeSchema) > 0 {
+		info.Schema = json.RawMessage(run.ResumeSchema)
+	}
+	return info, nil
+}
+
 // handleResumeList returns the runs currently awaiting resume so the CLI can
 // show the operator what's resumable without hunting through per-task logs.
 func (cs *ControlServer) handleResumeList(ctx context.Context) ([]SuspendedRunSummary, error) {
@@ -109,7 +144,7 @@ func (cs *ControlServer) handleResumeList(ctx context.Context) ([]SuspendedRunSu
 		s := SuspendedRunSummary{
 			RunID:  r.ID,
 			TaskID: r.TaskID,
-			Fields: resumeFormFieldNames(r.ResumeForm),
+			Fields: schemaRequiredFields(r.ResumeSchema),
 		}
 		if r.SuspendedAt > 0 {
 			s.SuspendedAt = time.UnixMilli(r.SuspendedAt).UTC().Format(time.RFC3339)
@@ -122,26 +157,28 @@ func (cs *ControlServer) handleResumeList(ctx context.Context) ([]SuspendedRunSu
 	return out, nil
 }
 
-// resumeFormFieldNames extracts the field names from a persisted FormSchema
-// blob. A malformed or empty schema yields no names — the listing degrades to
-// run id + task rather than failing.
-func resumeFormFieldNames(formJSON []byte) []string {
-	if len(formJSON) == 0 {
+// schemaRequiredFields extracts the required property names from a persisted
+// JSON Schema. When the schema declares no required list, it falls back to all
+// declared property names so the listing still hints at what to supply. A
+// malformed or empty schema yields no names — the listing degrades to run id +
+// task rather than failing.
+func schemaRequiredFields(schemaJSON []byte) []string {
+	if len(schemaJSON) == 0 {
 		return nil
 	}
 	var schema struct {
-		Fields []struct {
-			Name string `json:"name"`
-		} `json:"fields"`
+		Required   []string                   `json:"required"`
+		Properties map[string]json.RawMessage `json:"properties"`
 	}
-	if err := json.Unmarshal(formJSON, &schema); err != nil {
+	if err := json.Unmarshal(schemaJSON, &schema); err != nil {
 		return nil
 	}
-	names := make([]string, 0, len(schema.Fields))
-	for _, f := range schema.Fields {
-		if f.Name != "" {
-			names = append(names, f.Name)
-		}
+	if len(schema.Required) > 0 {
+		return schema.Required
+	}
+	names := make([]string, 0, len(schema.Properties))
+	for name := range schema.Properties {
+		names = append(names, name)
 	}
 	return names
 }

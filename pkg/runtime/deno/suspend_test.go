@@ -9,9 +9,9 @@ import (
 )
 
 // TestRun_SuspendYieldsSuspendedResult runs a real Deno task that calls
-// dicode.suspend({ state, form, deadline }) and asserts the run ends as a
-// clean suspend (not a failure) with the state/form/deadline captured on the
-// RunResult (#95). The SuspendSignal thrown by the SDK must exit the process
+// dicode.suspend({ state, schema, deadline }) and asserts the run ends as a
+// clean suspend (not a failure) with the state/schema/deadline captured on the
+// RunResult (#512). The SuspendSignal thrown by the SDK must exit the process
 // with code 0.
 func TestRun_SuspendYieldsSuspendedResult(t *testing.T) {
 	if testing.Short() {
@@ -27,9 +27,11 @@ func TestRun_SuspendYieldsSuspendedResult(t *testing.T) {
 export default async function main({ dicode }) {
   await dicode.suspend({
     state: { step: "ask_name", n: 42 },
-    form: {
+    schema: {
+      type: "object",
       title: "Your name?",
-      fields: [{ name: "project_name", type: "string", label: "Name", required: true }],
+      properties: { project_name: { type: "string", title: "Name" } },
+      required: ["project_name"],
     },
     deadline: 1893456000000,
   });
@@ -69,18 +71,82 @@ export default async function main({ dicode }) {
 		t.Errorf("ResumeState = %+v, want {ask_name 42}", state)
 	}
 
-	var form struct {
-		Title  string `json:"title"`
-		Fields []struct {
-			Name string `json:"name"`
+	var schema struct {
+		Title      string `json:"title"`
+		Properties map[string]struct {
 			Type string `json:"type"`
-		} `json:"fields"`
+		} `json:"properties"`
 	}
-	if err := json.Unmarshal(res.ResumeForm, &form); err != nil {
-		t.Fatalf("ResumeForm not valid JSON (%q): %v", res.ResumeForm, err)
+	if err := json.Unmarshal(res.ResumeSchema, &schema); err != nil {
+		t.Fatalf("ResumeSchema not valid JSON (%q): %v", res.ResumeSchema, err)
 	}
-	if form.Title != "Your name?" || len(form.Fields) != 1 || form.Fields[0].Name != "project_name" {
-		t.Errorf("ResumeForm = %+v, want title + one project_name field", form)
+	if schema.Title != "Your name?" || len(schema.Properties) != 1 || schema.Properties["project_name"].Type != "string" {
+		t.Errorf("ResumeSchema = %+v, want title + one project_name property", schema)
+	}
+}
+
+// TestRun_SuspendThenResumeSeesDefinedState is the loop-avoidance regression
+// guard: `state` is required, so the blob a task passes to suspend() is stored
+// and, when fed back on resume, makes ctx.resume_state defined (truthy) — the
+// signal that flips the `if (!resume_state)` guard so the task finishes instead
+// of re-suspending forever. It runs the real suspend pass, takes the captured
+// ResumeState, and replays it exactly as the daemon would.
+func TestRun_SuspendThenResumeSeesDefinedState(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires Deno subprocess")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	rt, reg, cleanup := newTestRuntime(t)
+	defer cleanup()
+
+	// The task suspends on a first run and, on resume, reports whether it saw a
+	// defined resume_state and returns the carried step.
+	spec := writeProviderTask(t, "loopguard", `
+export default async function main({ dicode, resume_state }) {
+  if (!resume_state) {
+    await dicode.suspend({
+      state: { step: "ask_name" },
+      schema: { type: "object", properties: { project_name: { type: "string" } }, required: ["project_name"] },
+    });
+  }
+  return { defined: resume_state !== undefined, step: (resume_state as any).step };
+}
+`)
+	if err := reg.Register(spec); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := rt.Run(ctx, spec, RunOptions{RunID: "run-loopguard-1"})
+	if err != nil {
+		t.Fatalf("Run (suspend): %v", err)
+	}
+	if !first.Suspended || len(first.ResumeState) == 0 {
+		t.Fatalf("first run must suspend and capture a state blob; got suspended=%v state=%q", first.Suspended, first.ResumeState)
+	}
+
+	// Replay the stored state exactly as the resume path would.
+	second, err := rt.Run(ctx, spec, RunOptions{
+		RunID:       "run-loopguard-2",
+		ResumeState: json.RawMessage(first.ResumeState),
+		ResumeInput: json.RawMessage(`{"project_name":"acme"}`),
+	})
+	if err != nil {
+		t.Fatalf("Run (resume): %v", err)
+	}
+	if second.Suspended {
+		t.Fatalf("resume must not re-suspend — the state guard failed to flip")
+	}
+	ret, ok := second.ReturnValue.(map[string]any)
+	if !ok {
+		t.Fatalf("ReturnValue = %#v, want map", second.ReturnValue)
+	}
+	if ret["defined"] != true {
+		t.Errorf("resume_state must be defined on resume, got %#v", ret["defined"])
+	}
+	if ret["step"] != "ask_name" {
+		t.Errorf("resume_state.step = %#v, want ask_name", ret["step"])
 	}
 }
 
@@ -105,7 +171,7 @@ export default async function main({ dicode }) {
   try {
     await dicode.suspend({
       state: { step: "one" },
-      form: { fields: [{ name: "x", type: "string", label: "X" }] },
+      schema: { type: "object", properties: { x: { type: "string" } } },
     });
   } catch (_e) {
     // Swallow the control-flow signal and keep going — the bug we guard against.

@@ -140,31 +140,30 @@ export interface TaskSummary {
   enabled:      boolean;
 }
 
-// One field in a suspend form (#95). `type` selects the input widget the
-// WebUI renders; `options` is required for "select".
-export interface FormField {
-  name: string;
-  type: "string" | "text" | "number" | "boolean" | "select";
-  label: string;
-  required?: boolean;
-  default?: string | number | boolean;
-  options?: { value: string; label: string }[];
-  placeholder?: string;
-}
-
-// The form a suspended task asks the user to fill in before resume (#95).
-export interface FormSchema {
+// A JSON Schema (draft 2020-12) object describing the input a suspended task
+// collects before resume (#512). The daemon validates the submission against it
+// server-side. Loosely typed — any valid JSON Schema is accepted.
+export type JSONSchema = {
+  type?: string;
   title?: string;
   description?: string;
-  fields: FormField[];
-}
+  properties?: Record<string, JSONSchema>;
+  required?: string[];
+  enum?: unknown[];
+  default?: unknown;
+  format?: string;
+  [keyword: string]: unknown;
+};
 
-// Argument to dicode.suspend() (#95). `state` is an opaque JSON blob echoed
-// back as ctx.resume_state on resume; `form` describes the input to collect;
-// `deadline` is an optional Unix-ms TTL (default applied by the engine).
+// Argument to dicode.suspend() (#512). `state` is an opaque JSON blob echoed
+// back as ctx.resume_state on resume; `schema` is the JSON Schema the submitted
+// input is validated against; `deadline` is an optional Unix-ms TTL (default
+// applied by the engine). `state` is REQUIRED — it is the only signal that
+// tells a first run (resume_state undefined) apart from a resume, so a
+// missing/null state would re-fire the guard and re-suspend forever.
 export interface SuspendRequest {
   state: unknown;
-  form: FormSchema;
+  schema: JSONSchema;
   deadline?: number;
 }
 
@@ -182,10 +181,10 @@ export interface Dicode {
   // WebUI to collapse same-group siblings (#116). Last write wins; only
   // affects the current run.
   set_group:      (label: string)      => Promise<void>;
-  // suspend pauses the run: it hands the runtime the state blob + form, then
+  // suspend pauses the run: it hands the runtime the state blob + schema, then
   // never resolves — it throws internally so the process exits cleanly and
   // the run ends as `suspended`. On resume the task is re-run with
-  // ctx.resume_state / ctx.resume_input populated (#95).
+  // ctx.resume_state / ctx.resume_input populated (#512).
   suspend:        (req: SuspendRequest) => Promise<never>;
   secrets_set:    (key: string, value: string) => Promise<void>;
   secrets_delete: (key: string)                => Promise<void>;
@@ -438,12 +437,12 @@ const dicode: Dicode = {
   set_group:      (label)           => __call__({ method: "dicode.set_group",       group: String(label ?? "") }) as Promise<void>,
   suspend:        async (req) => {
     // Await the ack so the payload is recorded before we throw — the read
-    // loop resolves this once the daemon captured state/form/deadline. The
+    // loop resolves this once the daemon captured state/schema/deadline. The
     // call then never resolves normally: it always throws.
     await __call__({
       method: "dicode.suspend",
       state: req.state ?? null,
-      form: req.form,
+      schema: req.schema,
       deadline: req.deadline ?? 0,
     });
     __suspendRequested__ = true;

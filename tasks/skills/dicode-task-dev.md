@@ -208,18 +208,24 @@ const result = await mcp.call("github-mcp", "search_repositories", { query: "dic
 Pause a run to collect input from a human, then continue. `dicode.suspend()`
 never returns: the process exits, the run becomes `suspended`, and on resume the
 task re-runs **from the top** with `resume_state` / `resume_input` populated
-(both `undefined` on a first run). Branch on `resume_state` to pick up where you
+(both `undefined` on a first run). `resume_input` is validated against the
+declared JSON Schema server-side. Branch on `resume_state` to pick up where you
 left off. No permission declaration needed; Deno/Python only (not docker/podman).
+
+`schema` is a JSON Schema (draft 2020-12) for the input object; the daemon
+validates the submission against it before resuming, so `resume_input` conforms.
 
 ```typescript
 if (!resume_state) {
   await dicode.suspend({
     state: { step: "confirm" },              // JSON-serializable; echoed back as resume_state
-    form: {
+    schema: {
+      type: "object",
       title: "Deploy to production?",
-      fields: [
-        { name: "approve", label: "Approve?", type: "boolean", required: true },
-      ],
+      properties: {
+        approve: { type: "boolean", title: "Approve?" },
+      },
+      required: ["approve"],
     },
     // deadline: optional Unix-ms; default 24h. On lapse the run is cancelled (resume_timeout).
   })
@@ -229,10 +235,14 @@ const answers = resume_input as Record<string, unknown>
 if (!answers.approve) return { deployed: false }
 ```
 
+Default WebUI renderer maps the common subset: `type:string`→text (`format:"textarea"`→textarea),
+`enum`→select, `type:boolean`→checkbox, `type:number|integer`→number; honors
+`title`/`description`/`default`/`required`.
+
 Rules: never wrap `suspend()` in a `try/catch` that swallows the control signal
 (the run fails loudly if you do); `params` survive a resume but the original
 trigger `input` does not — stash anything you need into `state`. Python uses
-`ctx.resume_state` / `ctx.resume_input` and `dicode.suspend(state=..., form=...)`.
+`ctx.resume_state` / `ctx.resume_input` and `dicode.suspend(state=..., schema=...)`.
 Full reference: [docs/concepts/suspendable-tasks.md](../../docs/concepts/suspendable-tasks.md).
 
 ### `return` — pass data to downstream chain tasks

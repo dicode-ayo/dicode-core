@@ -80,12 +80,12 @@ type RunResult struct {
 	Error       error
 
 	// Suspended is set when the task called dicode.suspend() (#95): the run
-	// paused cleanly rather than completing or failing. ResumeState/ResumeForm
+	// paused cleanly rather than completing or failing. ResumeState/ResumeSchema
 	// are the opaque state blob and form schema; ResumeDeadline is an optional
 	// Unix-ms TTL (0 = unset).
 	Suspended      bool
 	ResumeState    []byte
-	ResumeForm     []byte
+	ResumeSchema   []byte
 	ResumeDeadline int64
 }
 
@@ -455,7 +455,7 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	if sr := srv.Suspend(); sr != nil && result.Error == nil {
 		result.Suspended = true
 		result.ResumeState = sr.State
-		result.ResumeForm = sr.Form
+		result.ResumeSchema = sr.Schema
 		result.ResumeDeadline = sr.Deadline
 	}
 
@@ -657,7 +657,7 @@ func (rt *Runtime) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 	if result.Suspended {
 		r.Suspended = true
 		r.ResumeState = result.ResumeState
-		r.ResumeForm = result.ResumeForm
+		r.ResumeSchema = result.ResumeSchema
 		r.ResumeDeadline = result.ResumeDeadline
 	}
 	return r, nil

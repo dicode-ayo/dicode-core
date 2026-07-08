@@ -145,24 +145,29 @@ result = {"count": 42, "status": "ok"}
 
 ### `suspend` / `ctx.resume_state` / `ctx.resume_input`
 
-Pause a run to collect input from a human. `dicode.suspend(state=..., form=...)`
+Pause a run to collect input from a human. `dicode.suspend(state=..., schema=...)`
 never returns — it raises a control signal, the process exits, the run becomes
 `suspended`, and on resume the task re-runs from the top with `ctx.resume_state`
-(the blob you passed) and `ctx.resume_input` (the submitted form) populated (both
-`None` on a first run).
+(the blob you passed) and `ctx.resume_input` (the submitted input) populated (both
+`None` on a first run). `schema` is a [JSON Schema](https://json-schema.org)
+(draft 2020-12) the daemon validates the submission against before resuming.
 
 ```python
 if ctx.resume_state is None:
     dicode.suspend(
         state={"step": "confirm"},
-        form={"title": "Approve?", "fields": [{"name": "ok", "label": "OK?", "type": "boolean", "required": True}]},
+        schema={
+            "type": "object",
+            "properties": {"ok": {"type": "boolean", "title": "OK?"}},
+            "required": ["ok"],
+        },
     )  # unreachable — never returns
 ```
 
 Do not wrap `suspend()` in a `try/except` that swallows the signal — the run
 fails loudly if you do. See [Suspendable Tasks](./concepts/suspendable-tasks.md)
-for the form schema, lifecycle (`suspended` → `resumed`), and how to resume via
-the Web UI or `dicode resume`.
+for the JSON-Schema form, lifecycle (`suspended` → `resumed`), and how to resume
+via the Web UI or `dicode resume`.
 
 ### Async tasks
 

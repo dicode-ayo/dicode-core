@@ -27,18 +27,23 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/dicode/dicode/pkg/daemon"
 	"github.com/dicode/dicode/pkg/ipc"
+	"github.com/dicode/dicode/pkg/schemavalidate"
 	"github.com/dicode/dicode/pkg/tasktest"
 )
 
@@ -924,30 +929,252 @@ func cmdStatus(c *ipc.ControlClient, taskID string) error {
 	return nil
 }
 
-// parseResumeInput turns `field=value` CLI args into the JSON object the
-// daemon forwards to the resumed task as ctx.resume_input. An arg without an
-// `=` is a usage error. An empty arg list yields an empty object.
-func parseResumeInput(kvArgs []string) ([]byte, error) {
-	input := map[string]string{}
+// resumeProp is the subset of a JSON Schema property the CLI reads to prompt
+// for and coerce a value.
+type resumeProp struct {
+	Type        string `json:"type"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Enum        []any  `json:"enum"`
+	Default     any    `json:"default"`
+}
+
+// resumePropEntry pairs a property name with its schema, preserving the
+// author's declaration order (a map would randomize the prompt order).
+type resumePropEntry struct {
+	Name string
+	Prop resumeProp
+}
+
+// parseResumeProps extracts the ordered top-level properties and the required
+// set from a JSON Schema. An empty schema yields no properties (the resume then
+// carries whatever the caller supplied, subject to server-side validation).
+func parseResumeProps(schemaJSON []byte) ([]resumePropEntry, map[string]bool, error) {
+	required := map[string]bool{}
+	if len(bytes.TrimSpace(schemaJSON)) == 0 {
+		return nil, required, nil
+	}
+	var top struct {
+		Properties json.RawMessage `json:"properties"`
+		Required   []string        `json:"required"`
+	}
+	if err := json.Unmarshal(schemaJSON, &top); err != nil {
+		return nil, nil, err
+	}
+	for _, r := range top.Required {
+		required[r] = true
+	}
+	var entries []resumePropEntry
+	if len(bytes.TrimSpace(top.Properties)) > 0 {
+		dec := json.NewDecoder(bytes.NewReader(top.Properties))
+		if _, err := dec.Token(); err != nil { // opening '{'
+			return nil, nil, err
+		}
+		for dec.More() {
+			keyTok, err := dec.Token()
+			if err != nil {
+				return nil, nil, err
+			}
+			name, _ := keyTok.(string)
+			var p resumeProp
+			if err := dec.Decode(&p); err != nil {
+				return nil, nil, err
+			}
+			entries = append(entries, resumePropEntry{Name: name, Prop: p})
+		}
+	}
+	return entries, required, nil
+}
+
+// coerceResumeValue converts a raw CLI/prompt string to the JSON type the
+// property declares, so the resumed task sees a typed value (a number field
+// yields a JSON number, a boolean a JSON bool) rather than a string.
+func coerceResumeValue(p resumeProp, raw string) (any, error) {
+	s := strings.TrimSpace(raw)
+	// enum: match the raw string against the declared choices and return the
+	// matching entry with its original JSON type. This mirrors the WebUI's
+	// option-index approach, so a numeric enum like {enum:[1,2]} coerces to a
+	// number even when `type` is omitted — not just a bare string.
+	if len(p.Enum) > 0 {
+		for _, e := range p.Enum {
+			if fmt.Sprintf("%v", e) == s {
+				return e, nil
+			}
+		}
+		opts := make([]string, len(p.Enum))
+		for i, e := range p.Enum {
+			opts[i] = fmt.Sprintf("%v", e)
+		}
+		return nil, fmt.Errorf("must be one of %s", strings.Join(opts, ", "))
+	}
+	switch p.Type {
+	case "boolean":
+		switch strings.ToLower(s) {
+		case "true", "1", "yes", "y", "on":
+			return true, nil
+		case "false", "0", "no", "n", "off":
+			return false, nil
+		}
+		return nil, fmt.Errorf("expected a boolean (true/false), got %q", raw)
+	case "integer":
+		n, err := strconv.ParseInt(s, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("expected an integer, got %q", raw)
+		}
+		return n, nil
+	case "number":
+		f, err := strconv.ParseFloat(s, 64)
+		if err != nil {
+			return nil, fmt.Errorf("expected a number, got %q", raw)
+		}
+		return f, nil
+	case "array", "object":
+		var v any
+		if err := json.Unmarshal([]byte(raw), &v); err != nil {
+			return nil, fmt.Errorf("expected JSON for %s, got %q", p.Type, raw)
+		}
+		return v, nil
+	default:
+		return raw, nil
+	}
+}
+
+// collectResumeArgs coerces `field=value` args to their declared JSON types.
+// A field absent from the schema passes through as a string — server-side
+// validation has the final say on whether it is acceptable.
+func collectResumeArgs(entries []resumePropEntry, kvArgs []string) (map[string]any, error) {
+	props := map[string]resumeProp{}
+	for _, e := range entries {
+		props[e.Name] = e.Prop
+	}
+	out := map[string]any{}
 	for _, kv := range kvArgs {
 		parts := strings.SplitN(kv, "=", 2)
 		if len(parts) != 2 {
 			return nil, fmt.Errorf("invalid form value %q — expected field=value", kv)
 		}
-		input[parts[0]] = parts[1]
+		name, raw := parts[0], parts[1]
+		if p, ok := props[name]; ok {
+			v, err := coerceResumeValue(p, raw)
+			if err != nil {
+				return nil, fmt.Errorf("%s: %w", name, err)
+			}
+			out[name] = v
+		} else {
+			out[name] = raw
+		}
 	}
-	return json.Marshal(input)
+	return out, nil
 }
 
-// cmdResume submits collected form values as the resume input for a suspended
-// run. It sends only the run id and the key=value pairs — the daemon resolves
-// the run's resume token server-side and calls the engine's resume, returning
-// the continuation run id.
+// promptResumeInput walks the schema's properties in order, prompting on stderr
+// (so a piped stdout stays clean) and coercing each answer to its declared
+// type. An empty answer takes the property's default, or is skipped when the
+// property is optional; a required property with no default re-prompts.
+func promptResumeInput(entries []resumePropEntry, required map[string]bool) (map[string]any, error) {
+	reader := bufio.NewReader(os.Stdin)
+	out := map[string]any{}
+	for _, e := range entries {
+		p := e.Prop
+		label := p.Title
+		if label == "" {
+			label = e.Name
+		}
+		if p.Description != "" {
+			fmt.Fprintf(os.Stderr, "%s\n", p.Description)
+		}
+		if len(p.Enum) > 0 {
+			opts := make([]string, len(p.Enum))
+			for i, o := range p.Enum {
+				opts[i] = fmt.Sprintf("%v", o)
+			}
+			fmt.Fprintf(os.Stderr, "  choices: %s\n", strings.Join(opts, ", "))
+		}
+		for {
+			suffix := ""
+			if p.Default != nil {
+				suffix = fmt.Sprintf(" [%v]", p.Default)
+			} else if required[e.Name] {
+				suffix = " (required)"
+			}
+			fmt.Fprintf(os.Stderr, "%s%s: ", label, suffix)
+
+			line, err := reader.ReadString('\n')
+			eof := errors.Is(err, io.EOF)
+			if err != nil && !eof {
+				return nil, err
+			}
+			raw := strings.TrimRight(line, "\r\n")
+			if strings.TrimSpace(raw) == "" {
+				if p.Default != nil {
+					out[e.Name] = p.Default
+				} else if required[e.Name] {
+					if eof {
+						return nil, fmt.Errorf("%s is required", e.Name)
+					}
+					fmt.Fprintln(os.Stderr, "  required — please enter a value")
+					continue
+				}
+				break
+			}
+			v, err := coerceResumeValue(p, raw)
+			if err != nil {
+				if eof {
+					return nil, fmt.Errorf("%s: %w", e.Name, err)
+				}
+				fmt.Fprintf(os.Stderr, "  %v\n", err)
+				continue
+			}
+			out[e.Name] = v
+			break
+		}
+	}
+	return out, nil
+}
+
+// cmdResume submits collected resume input for a suspended run. It first pulls
+// the run's JSON Schema (cli.resume.get), then either interactively prompts per
+// property (no field=value args) or coerces the supplied field=value pairs to
+// their declared types, validates locally against the schema, and submits. The
+// daemon re-validates authoritatively and resolves the resume token itself.
 func cmdResume(c *ipc.ControlClient, runID string, kvArgs []string) error {
-	inputJSON, err := parseResumeInput(kvArgs)
+	infoResp, err := c.Send(ipc.Request{Method: "cli.resume.get", RunID: runID})
 	if err != nil {
 		return err
 	}
+	if infoResp.Error != "" {
+		return fmt.Errorf("%s", infoResp.Error)
+	}
+	var info ipc.ResumeInfo
+	if err := remarshal(infoResp.Result, &info); err != nil {
+		return err
+	}
+
+	entries, required, err := parseResumeProps(info.Schema)
+	if err != nil {
+		return fmt.Errorf("read resume schema: %w", err)
+	}
+
+	var values map[string]any
+	if len(kvArgs) == 0 {
+		values, err = promptResumeInput(entries, required)
+	} else {
+		values, err = collectResumeArgs(entries, kvArgs)
+	}
+	if err != nil {
+		return err
+	}
+
+	inputJSON, err := json.Marshal(values)
+	if err != nil {
+		return err
+	}
+	// Fail fast with a clear message before the round-trip; the daemon still
+	// validates authoritatively (an empty schema imposes no constraint).
+	if err := schemavalidate.Validate(info.Schema, inputJSON); err != nil {
+		return fmt.Errorf("invalid input: %w", err)
+	}
+
 	resp, err := c.Send(ipc.Request{
 		Method: "cli.resume",
 		RunID:  runID,

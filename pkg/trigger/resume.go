@@ -72,7 +72,7 @@ func (e *Engine) suspendRun(opts *pkgruntime.RunOptions, result *pkgruntime.RunR
 		}
 	}
 	return e.registry.SuspendRun(context.Background(), opts.RunID,
-		result.ResumeState, result.ResumeForm, token, nowMs, deadlineMs, carryJSON)
+		result.ResumeState, result.ResumeSchema, token, nowMs, deadlineMs, carryJSON)
 }
 
 // newResumeToken returns a 32-byte crypto/rand token, hex-encoded. Long and

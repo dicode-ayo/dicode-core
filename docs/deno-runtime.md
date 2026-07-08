@@ -138,21 +138,28 @@ return { count: 42, status: "ok" }
 
 ### `suspend` / `resume_state` / `resume_input`
 
-Pause a run to collect input from a human. `dicode.suspend({ state, form })`
+Pause a run to collect input from a human. `dicode.suspend({ state, schema })`
 never returns — the process exits, the run becomes `suspended`, and on resume the
 task re-runs from the top with `resume_state` (the blob you passed) and
-`resume_input` (the submitted form) populated (both `undefined` on a first run).
+`resume_input` (the submitted input) populated (both `undefined` on a first run).
+`schema` is a [JSON Schema](https://json-schema.org) (draft 2020-12) describing
+the expected input object; the daemon validates the submission against it before
+resuming, so `resume_input` conforms.
 
 ```typescript
 if (!resume_state) {
   await dicode.suspend({
     state: { step: "confirm" },
-    form: { title: "Approve?", fields: [{ name: "ok", label: "OK?", type: "boolean", required: true }] },
+    schema: {
+      type: "object",
+      properties: { ok: { type: "boolean", title: "OK?" } },
+      required: ["ok"],
+    },
   })  // unreachable — never returns
 }
 ```
 
-See [Suspendable Tasks](./concepts/suspendable-tasks.md) for the form schema,
+See [Suspendable Tasks](./concepts/suspendable-tasks.md) for the JSON-Schema form,
 lifecycle (`suspended` → `resumed`), and how to resume via the Web UI or
 `dicode resume`.
 

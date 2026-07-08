@@ -351,7 +351,7 @@ class SuspendTests(SDKTestBase):
 
         def on_suspend(msg):
             captured["state"] = msg.get("state")
-            captured["form"] = msg.get("form")
+            captured["schema"] = msg.get("schema")
             captured["deadline"] = msg.get("deadline")
             return True  # ack
         self.server.handlers["dicode.suspend"] = on_suspend
@@ -361,15 +361,15 @@ class SuspendTests(SDKTestBase):
         with self.assertRaises(sdk.SuspendSignal):
             sdk.dicode.suspend(
                 state={"step": "one", "n": 42},
-                form={"title": "Name?", "fields": [
-                    {"name": "project_name", "type": "string", "label": "Name"}]},
+                schema={"type": "object", "title": "Name?", "properties": {
+                    "project_name": {"type": "string", "title": "Name"}}},
                 deadline=1893456000000,
             )
         # The signal was raised only after the payload was acked, and the
         # module-level flag is set so the wrapper's swallow-guard can fire.
         self.assertTrue(sdk._was_suspend_requested())
         self.assertEqual(captured["state"], {"step": "one", "n": 42})
-        self.assertEqual(captured["form"]["title"], "Name?")
+        self.assertEqual(captured["schema"]["title"], "Name?")
         self.assertEqual(captured["deadline"], 1893456000000)
 
     def test_suspend_signal_is_exception_subclass(self):

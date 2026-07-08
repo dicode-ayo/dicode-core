@@ -242,6 +242,9 @@ func (cs *ControlServer) dispatch(ctx context.Context, req Request) (any, error)
 	case "cli.resume.list":
 		return cs.handleResumeList(ctx)
 
+	case "cli.resume.get":
+		return cs.handleResumeGet(ctx, req)
+
 	case "cli.secrets.list":
 		return cs.handleSecretsList(ctx)
 

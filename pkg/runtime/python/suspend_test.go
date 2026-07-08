@@ -48,9 +48,9 @@ func newSuspendExecutor(t *testing.T) (*registry.Registry, pkgruntime.Executor) 
 }
 
 // TestExecute_SuspendYieldsSuspendedResult runs a real Python task that calls
-// dicode.suspend(state=..., form=..., deadline=...) and asserts the run ends as
-// a clean suspend (not a failure) with the state/form/deadline captured on the
-// RunResult (#95). The SuspendSignal must exit the process with code 0.
+// dicode.suspend(state=..., schema=..., deadline=...) and asserts the run ends
+// as a clean suspend (not a failure) with the state/schema/deadline captured on
+// the RunResult (#512). The SuspendSignal must exit the process with code 0.
 func TestExecute_SuspendYieldsSuspendedResult(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires uv subprocess")
@@ -64,9 +64,11 @@ func TestExecute_SuspendYieldsSuspendedResult(t *testing.T) {
 async def main():
     dicode.suspend(
         state={"step": "ask_name", "n": 42},
-        form={
+        schema={
+            "type": "object",
             "title": "Your name?",
-            "fields": [{"name": "project_name", "type": "string", "label": "Name", "required": True}],
+            "properties": {"project_name": {"type": "string", "title": "Name"}},
+            "required": ["project_name"],
         },
         deadline=1893456000000,
     )
@@ -110,18 +112,17 @@ async def main():
 		t.Errorf("ResumeState = %+v, want {ask_name 42}", state)
 	}
 
-	var form struct {
-		Title  string `json:"title"`
-		Fields []struct {
-			Name string `json:"name"`
+	var schema struct {
+		Title      string `json:"title"`
+		Properties map[string]struct {
 			Type string `json:"type"`
-		} `json:"fields"`
+		} `json:"properties"`
 	}
-	if err := json.Unmarshal(res.ResumeForm, &form); err != nil {
-		t.Fatalf("ResumeForm not valid JSON (%q): %v", res.ResumeForm, err)
+	if err := json.Unmarshal(res.ResumeSchema, &schema); err != nil {
+		t.Fatalf("ResumeSchema not valid JSON (%q): %v", res.ResumeSchema, err)
 	}
-	if form.Title != "Your name?" || len(form.Fields) != 1 || form.Fields[0].Name != "project_name" {
-		t.Errorf("ResumeForm = %+v, want title + one project_name field", form)
+	if schema.Title != "Your name?" || len(schema.Properties) != 1 || schema.Properties["project_name"].Type != "string" {
+		t.Errorf("ResumeSchema = %+v, want title + one project_name property", schema)
 	}
 }
 
@@ -142,7 +143,7 @@ func TestExecute_SuspendAtTopLevelYieldsSuspendedResult(t *testing.T) {
 if ctx.resume_state is None:
     dicode.suspend(
         state={"step": "sync"},
-        form={"fields": [{"name": "x", "type": "string", "label": "X"}]},
+        schema={"type": "object", "properties": {"x": {"type": "string"}}},
     )
 result = {"reached": True}
 `)
@@ -198,7 +199,7 @@ async def main():
     try:
         dicode.suspend(
             state={"step": "one"},
-            form={"fields": [{"name": "x", "type": "string", "label": "X"}]},
+            schema={"type": "object", "properties": {"x": {"type": "string"}}},
         )
     except Exception:
         # Swallow the control-flow signal and keep going — the bug we guard against.
