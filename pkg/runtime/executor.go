@@ -59,7 +59,7 @@ type RunOptions struct {
 	// ResumeState / ResumeInput carry a suspended run's prior state and the
 	// user's form submission when the engine re-spawns a task to resume it
 	// (#95). Both are opaque JSON blobs surfaced to the task as
-	// ctx.resume_state / ctx.resume_input. Nil on a first (non-resume) run.
+	// ctx.state / ctx.input. Nil on a first (non-resume) run.
 	// Populated by the resume orchestration (PR 3); the runtime only forwards
 	// them to the subprocess.
 	ResumeState []byte

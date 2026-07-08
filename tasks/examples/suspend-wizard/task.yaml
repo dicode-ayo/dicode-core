@@ -1,0 +1,14 @@
+apiVersion: dicode/v1
+kind: Task
+name: Suspend Wizard (example)
+description: |
+  A multi-step "new project" wizard that demonstrates suspendable tasks. Trigger
+  it manually from the Web UI: the run pauses and renders an auto-generated form
+  at each step (project name → framework → confirm), then finishes with a summary.
+  Shows the steps-map + JSON-Schema resume flow with no hand-rolled step switch.
+runtime: deno
+
+trigger:
+  manual: true
+
+timeout: 30s

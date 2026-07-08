@@ -264,6 +264,7 @@ CLI dispatcher + daemon mode in one binary:
 | `hello-python/` | manual | python |
 | `nginx-start/` | daemon | docker |
 | `github-push-webhook/` | webhook + HMAC auth | deno |
+| `suspend-wizard/` | manual | deno — multi-step suspend/resume wizard with JSON-Schema forms |
 | `webui/` | webhook (SPA shell) | deno |
 | **`ai/`** | **webhook (auth)** | **deno** — generic OpenAI-compatible agent; uses `dicode.run_task()` as tools in a tool-use loop |
 | **`failure-monitor/`** | **on_failure_chain** | **deno** — AI-powered failure diagnosis; receives `{ taskID, runID, status }` via `input` |
