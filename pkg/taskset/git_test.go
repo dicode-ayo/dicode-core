@@ -12,6 +12,8 @@ import (
 	gogitconfig "github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
+
+	"github.com/dicode/dicode/internal/gitops"
 )
 
 // seededBareRepo is a bare repo on disk plus a scratch worktree used to
@@ -51,15 +53,9 @@ func newSeededBareRepo(t *testing.T) *seededBareRepo {
 
 	return &seededBareRepo{
 		bareDir: bareDir,
-		// Placeholder, non-blocked hostname so this file:// fixture passes
-		// internal/gitops.ValidateRemoteHost (wired into CloneOrPull for
-		// #489), which rejects host-less remotes. The file:// transport
-		// itself ignores Endpoint.Host entirely (only Path matters), and
-		// no production caller can reach CloneOrPull with a file:// URL
-		// anyway — pkg/taskset.ValidateRefURL only allows http/https/ssh
-		// at config-load time. See the matching comment in
-		// pkg/source/git/git_test.go's newSeededRepo.
-		url:    "file://test-fixture.invalid" + bareDir,
+		// See gitops.TestFixtureRemoteURL's doc comment for why this needs a
+		// placeholder hostname rather than a bare file:// path.
+		url:    gitops.TestFixtureRemoteURL(bareDir),
 		wt:     wt,
 		wtPath: wtPath,
 		branch: "main",

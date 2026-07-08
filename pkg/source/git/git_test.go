@@ -14,6 +14,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"go.uber.org/zap"
 
+	"github.com/dicode/dicode/internal/gitops"
 	"github.com/dicode/dicode/pkg/source"
 )
 
@@ -66,20 +67,9 @@ func newSeededRepo(t *testing.T, initialTaskID string) *seededRepo {
 
 	r := &seededRepo{
 		bareDir: bareDir,
-		// The file:// transport (plumbing/transport/file) only ever reads
-		// Endpoint.Path, never Endpoint.Host — but internal/gitops.
-		// ValidateRemoteHost (wired into CloneOrPull for #489) rejects any
-		// host-less remote, since that's indistinguishable from an
-		// unparseable/attacker-supplied URL missing a host entirely. A
-		// bare "file://" + absolute-path URL has an empty host and would
-		// be rejected. Giving it a placeholder, non-blocked hostname
-		// (RFC 2606 .invalid, so it's obviously not a real target) keeps
-		// this fixture flowing through the real CloneOrPull code path the
-		// test comment above promises, without weakening the guard: no
-		// production caller can ever reach CloneOrPull with a file://
-		// URL in the first place (pkg/taskset.ValidateRefURL only allows
-		// http/https/ssh at config-load time, see pkg/config/config.go).
-		url:    "file://test-fixture.invalid" + bareDir,
+		// See gitops.TestFixtureRemoteURL's doc comment for why this needs a
+		// placeholder hostname rather than a bare file:// path.
+		url:    gitops.TestFixtureRemoteURL(bareDir),
 		wt:     wt,
 		wtPath: wtPath,
 		branch: "main",

@@ -2,6 +2,7 @@ package gitops
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -79,6 +80,9 @@ func TestValidateRemoteHost(t *testing.T) {
 				if !strings.Contains(err.Error(), "private or internal") {
 					t.Fatalf("ValidateRemoteHost(%q) error = %q, want private/internal rejection", tc.url, err)
 				}
+				if !errors.Is(err, ErrBlockedHost) {
+					t.Fatalf("ValidateRemoteHost(%q) error = %v, want errors.Is(ErrBlockedHost)", tc.url, err)
+				}
 			} else if err != nil {
 				t.Fatalf("ValidateRemoteHost(%q) = %v, want nil", tc.url, err)
 			}
@@ -102,6 +106,9 @@ func TestValidateRemoteHost_UnparseableURL(t *testing.T) {
 	if !strings.Contains(err.Error(), "invalid remote url") {
 		t.Errorf("ValidateRemoteHost error = %q, want wrapped \"invalid remote url\"", err)
 	}
+	if !errors.Is(err, ErrNoRemoteHost) {
+		t.Errorf("ValidateRemoteHost error = %v, want errors.Is(ErrNoRemoteHost)", err)
+	}
 }
 
 // TestValidateRemoteHost_RejectsMissingHost mirrors pkg/source/git's
@@ -115,6 +122,9 @@ func TestValidateRemoteHost_RejectsMissingHost(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no remote host") {
 		t.Errorf("ValidateRemoteHost(file:///etc/passwd) error = %q, want \"no remote host\"", err)
+	}
+	if !errors.Is(err, ErrNoRemoteHost) {
+		t.Errorf("ValidateRemoteHost(file:///etc/passwd) error = %v, want errors.Is(ErrNoRemoteHost)", err)
 	}
 }
 
@@ -142,6 +152,64 @@ func TestCloneOrPull_RejectsMaliciousSSHRemote(t *testing.T) {
 			}
 			if _, statErr := os.Stat(tmpDir + "/.git"); statErr == nil {
 				t.Fatalf("CloneOrPull(%q) populated %s/.git — a clone was attempted", url, tmpDir)
+			}
+		})
+	}
+}
+
+// TestValidateRemoteHost_RejectsIPv6ZoneID is the regression test for the
+// zone-ID bypass: net.ParseIP returns nil for a zone-scoped IPv6 literal
+// like "fe80::1%eth0" (RFC 4007), so before this fix such a host fell
+// through the IP-literal branch, matched none of the hostname-suffix
+// checks, and was silently *allowed* — a real SSRF bypass for ssh://
+// remotes specifically, since they have no dial-time recheck to catch it
+// after the fact (see dialguard.go's doc comment: that layer only covers
+// http/https).
+func TestValidateRemoteHost_RejectsIPv6ZoneID(t *testing.T) {
+	cases := []string{
+		// %25 is the correctly-percent-encoded form of the zone-ID
+		// delimiter '%' inside a URI (RFC 6874); go-git's endpoint parser
+		// decodes it back to a literal '%' in ep.Host.
+		"ssh://git@[fe80::1%25eth0]/repo.git",
+		"http://[fe80::1%25eth0]/repo.git",
+		"https://[fe80::1%25eth0]/repo.git",
+	}
+	for _, u := range cases {
+		t.Run(u, func(t *testing.T) {
+			err := ValidateRemoteHost(u)
+			if err == nil {
+				t.Fatalf("ValidateRemoteHost(%q) = nil, want zone-ID rejection", u)
+			}
+			if !strings.Contains(err.Error(), "private or internal") {
+				t.Errorf("ValidateRemoteHost(%q) error = %q, want private/internal rejection", u, err)
+			}
+			if !errors.Is(err, ErrBlockedHost) {
+				t.Errorf("ValidateRemoteHost(%q) error = %v, want errors.Is(ErrBlockedHost)", u, err)
+			}
+		})
+	}
+}
+
+// TestValidateRemoteHost_RejectsTrailingDotSuffixBypass is the regression
+// test for fix #4 (defense-in-depth): a trailing dot is a valid FQDN-root
+// marker DNS resolvers strip before lookup, so
+// "metadata.google.internal." resolves identically to
+// "metadata.google.internal" — but strings.HasSuffix(host, ".internal")
+// would not match the trailing-dot form (it ends in "internal.", not
+// ".internal"), letting it slip past the hostname-suffix guard entirely.
+func TestValidateRemoteHost_RejectsTrailingDotSuffixBypass(t *testing.T) {
+	cases := []string{
+		"https://metadata.google.internal./computeMetadata/v1",
+		"https://gitserver.local./repo.git",
+	}
+	for _, u := range cases {
+		t.Run(u, func(t *testing.T) {
+			err := ValidateRemoteHost(u)
+			if err == nil {
+				t.Fatalf("ValidateRemoteHost(%q) = nil, want trailing-dot suffix rejection", u)
+			}
+			if !strings.Contains(err.Error(), "private or internal") {
+				t.Errorf("ValidateRemoteHost(%q) error = %q, want private/internal rejection", u, err)
 			}
 		})
 	}

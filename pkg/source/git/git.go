@@ -205,7 +205,13 @@ func (g *GitSource) tryCloneOrPull(ctx context.Context) error {
 // 30-second retry budget every poll interval.
 //
 // Conservatively scoped: only the unambiguous "your credentials/URL are
-// wrong" sentinels from go-git's transport layer. Everything else (network
+// wrong" sentinels from go-git's transport layer, plus gitops.ValidateRemoteHost's
+// SSRF-guard rejection (gitops.ErrBlockedHost / gitops.ErrNoRemoteHost) — a
+// deterministic, zero-I/O check whose outcome cannot change within a single
+// poll interval, so retrying it burns the full retry budget for no benefit
+// (see #510: without this case a single SSRF-blocked source stalled the
+// reconciler's initial sync by ~30s, since GitSource.Start calls cloneOrPull
+// synchronously and sources start up sequentially). Everything else (network
 // timeout, 5xx, packfile decode error mid-clone, partial response, …) is
 // treated as transient.
 func isPermanentGitError(err error) bool {
@@ -213,7 +219,9 @@ func isPermanentGitError(err error) bool {
 	case errors.Is(err, gogittransport.ErrAuthenticationRequired),
 		errors.Is(err, gogittransport.ErrAuthorizationFailed),
 		errors.Is(err, gogittransport.ErrInvalidAuthMethod),
-		errors.Is(err, gogittransport.ErrRepositoryNotFound):
+		errors.Is(err, gogittransport.ErrRepositoryNotFound),
+		errors.Is(err, gitops.ErrBlockedHost),
+		errors.Is(err, gitops.ErrNoRemoteHost):
 		return true
 	}
 	return false
