@@ -52,9 +52,18 @@ test.describe('File Change Detection', () => {
     const newContent = `export default async function main() {\n  console.log('updated by file-change test');\n  return { message: 'updated message' };\n}\n`;
     fs.writeFileSync(taskJsPath, newContent, 'utf8');
 
-    // Wait a moment for the reconciler's fsnotify to pick up the change.
-    // We verify the change took effect by running the task and checking return value.
-    await new Promise((r) => setTimeout(r, 2000));
+    // The trust-on-change approval gate (#392/#530) re-arms on this edit and
+    // holds the task pending approval, so its new code cannot run until it is
+    // re-approved. Wait for the reconciler's fsnotify to observe the change and
+    // flip the task pending, then approve the new content before running.
+    await waitForTaskCondition(
+      request,
+      MANUAL_TASK_ID,
+      (t) => t.pending_approval === true,
+      20_000,
+    );
+    const approveRes = await request.post(`/api/tasks/${encodeURIComponent(MANUAL_TASK_ID)}/approve`);
+    expect(approveRes.ok()).toBe(true);
 
     // Fire a run and wait for it to complete.
     const runRes = await request.post(`/api/tasks/${encodeURIComponent(MANUAL_TASK_ID)}/run`);
@@ -82,9 +91,19 @@ test.describe('File Change Detection', () => {
     const messages = logs.map((l) => l.message).join('\n');
     expect(messages).toContain('updated by file-change test');
 
-    // Restore original content for subsequent tests.
+    // Restore original content for subsequent tests. Approving the edit above
+    // moved the lock's approved hash, so restoring the file re-pends the task;
+    // re-approve so it returns to its clean armed state for later tests.
     const original = `export default async function main() {\n  console.log('hello from test manual task');\n  return { message: 'hello from test' };\n}\n`;
     fs.writeFileSync(taskJsPath, original, 'utf8');
+    await waitForTaskCondition(
+      request,
+      MANUAL_TASK_ID,
+      (t) => t.pending_approval === true,
+      20_000,
+    );
+    const reApproveRes = await request.post(`/api/tasks/${encodeURIComponent(MANUAL_TASK_ID)}/approve`);
+    expect(reApproveRes.ok()).toBe(true);
   });
 
   test('editing task.yaml (description) is reflected in API response', async ({ request }) => {
