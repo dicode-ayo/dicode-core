@@ -141,6 +141,57 @@ spec:
 	}
 }
 
+// TestSource_ScriptEditEmitsUpdate is the regression for #530: editing a task's
+// script file without touching task.yaml must still emit an update. The runtime
+// imports task.js/task.ts fresh per run, so a script-only edit changes task
+// behaviour; if change detection hashed only the resolved spec it would miss the
+// edit, no update would reach the reconciler, and the approval gate would never
+// re-pend the changed task.
+func TestSource_ScriptEditEmitsUpdate(t *testing.T) {
+	dir := t.TempDir()
+	taskDir := writeTaskDir(t, dir, "deploy")
+
+	tsContent := `
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: infra
+spec:
+  entries:
+    deploy:
+      ref:
+        path: ` + filepath.Join(taskDir, "task.yaml") + `
+`
+	tsPath := writeTaskSetFile(t, dir, "taskset.yaml", tsContent)
+
+	src := newTestSource(t, "infra", tsPath)
+	ch0 := make(chan source.Event, 8)
+	if err := src.syncAndEmit(context.Background(), ch0); err != nil {
+		t.Fatal(err)
+	}
+	close(ch0)
+	collectEvents(t, ch0, time.Second) // drain the initial Added
+
+	// Edit only task.js — task.yaml (and thus the resolved spec) is unchanged.
+	if err := os.WriteFile(filepath.Join(taskDir, "task.js"), []byte("// edited"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	ch := make(chan source.Event, 8)
+	if err := src.syncAndEmit(context.Background(), ch); err != nil {
+		t.Fatal(err)
+	}
+	close(ch)
+
+	events := collectEvents(t, ch, time.Second)
+	if len(events) != 1 || events[0].Kind != source.EventUpdated {
+		t.Fatalf("script edit: want 1 EventUpdated, got %d: %v", len(events), events)
+	}
+	if events[0].TaskID != "infra/deploy" {
+		t.Errorf("TaskID: %q", events[0].TaskID)
+	}
+}
+
 func TestSource_RemovedEmitted(t *testing.T) {
 	dir := t.TempDir()
 	taskDir := writeTaskDir(t, dir, "deploy")
