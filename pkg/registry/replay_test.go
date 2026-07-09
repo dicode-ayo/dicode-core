@@ -150,3 +150,39 @@ func TestReplay_RunNotFound(t *testing.T) {
 		t.Error("expected error for unknown run ID")
 	}
 }
+
+// A suspended run must not be replayable server-side: replay would spawn a
+// duplicate execution while the original still holds a live resume token.
+// The guard fires before the input check and never invokes the runner.
+func TestReplay_SuspendedRunRejected(t *testing.T) {
+	r := newTestRegistry(t)
+	ctx := context.Background()
+
+	is := NewInputStore(newTestInputCrypto(t), &mockRunner{store: map[string]string{}}, "fake-storage")
+
+	runID := uuid.New().String()
+	if _, err := r.StartRunWithID(ctx, runID, "user-task", "", "manual", "task"); err != nil {
+		t.Fatal(err)
+	}
+	key, size, storedAt, err := is.Persist(ctx, runID, PersistedInput{Source: "webhook"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.SetRunInput(ctx, runID, key, size, storedAt, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.SuspendRun(ctx, runID, []byte(`{"step":1}`), nil, "tok", time.Now().UnixMilli(), 0, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := &fakeReplayRunner{}
+	replayer := NewReplayer(r, is, runner)
+
+	_, err = replayer.Replay(ctx, runID, "", "", "")
+	if !errors.Is(err, ErrRunNotReplayable) {
+		t.Errorf("got %v, want ErrRunNotReplayable", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Errorf("runner fired %d times on a suspended run; want 0", len(runner.calls))
+	}
+}

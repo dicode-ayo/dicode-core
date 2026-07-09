@@ -2255,6 +2255,8 @@ func (s *Server) apiReplayRun(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		var taskNotFound *trigger.TaskNotFoundError
 		switch {
+		case errors.Is(err, registry.ErrRunNotReplayable):
+			jsonErr(w, "run is suspended; resume it instead of replaying: "+runID, http.StatusConflict)
 		case errors.Is(err, registry.ErrInputUnavailable):
 			jsonErr(w, "no persisted input for run: "+runID, http.StatusBadRequest)
 		case errors.Is(err, registry.ErrRunNotFound):
