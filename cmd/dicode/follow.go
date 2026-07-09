@@ -2,11 +2,14 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 
 	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/registry"
@@ -149,10 +152,98 @@ type followSession struct {
 	out    io.Writer // logs + final result (stdout)
 }
 
+// resumeSchemaMeta extracts a schema's top-level title and description, used to
+// frame a bare-approval confirmation prompt.
+func resumeSchemaMeta(schemaJSON []byte) (title, description string) {
+	if len(bytes.TrimSpace(schemaJSON)) == 0 {
+		return "", ""
+	}
+	var m struct {
+		Title       string `json:"title"`
+		Description string `json:"description"`
+	}
+	_ = json.Unmarshal(schemaJSON, &m)
+	return m.Title, m.Description
+}
+
+// printOneShotSuspended prints the scriptable one-shot view of a still-suspended
+// run: its id and the fields to supply. Used when interactive consent is not
+// available (EOF / redirected stdin), so a step is never auto-resumed.
+func (s *followSession) printOneShotSuspended(runID string, entries []resumePropEntry, required map[string]bool) {
+	fmt.Fprintf(s.out, "run %s: suspended\n", runID)
+	if fields := resumeFieldNames(entries, required); len(fields) > 0 {
+		fmt.Fprintf(s.out, "fields: %s\n", strings.Join(fields, ", "))
+	}
+	fmt.Fprintf(s.out, "resume with: dicode resume %s <field=value ...>\n", runID)
+}
+
+// collectStepInput gathers the resume input for one wizard step. Its three
+// outcomes: submit==true carries the JSON to resume with; submit==false with a
+// nil error means consent was unavailable (EOF at a confirmation gate) and the
+// caller should fall back to the one-shot view; a non-nil error aborts.
+//
+// A schema with no promptable properties is a bare-approval form. Auto-
+// submitting {} there would silently resume the run the instant it is seen — and
+// loop forever if the continuation suspends the same way — so an explicit
+// confirmation (a single Enter) is required; EOF is not consent. When {} cannot
+// even satisfy the schema (a required field absent from properties, minProperties,
+// an unsatisfiable allOf), no prompt could ever fix it, so it aborts rather than
+// spins. For promptable schemas, an object-level validation failure re-prompts,
+// but only while a re-prompt can change the input: identical input failing twice
+// (e.g. optional fields left blank at EOF) aborts instead of hot-looping.
+func (s *followSession) collectStepInput(reader *bufio.Reader, schema []byte, entries []resumePropEntry, required map[string]bool) ([]byte, bool, error) {
+	if len(entries) == 0 {
+		empty := []byte("{}")
+		if verr := schemavalidate.Validate(schema, empty); verr != nil {
+			return nil, false, fmt.Errorf("cannot resume: %w", verr)
+		}
+		if title, desc := resumeSchemaMeta(schema); title != "" || desc != "" {
+			if title != "" {
+				fmt.Fprintln(s.prompt, title)
+			}
+			if desc != "" {
+				fmt.Fprintln(s.prompt, desc)
+			}
+		}
+		fmt.Fprint(s.prompt, "Approve and continue? [Enter to confirm, Ctrl+C to abort]: ")
+		_, rerr := reader.ReadString('\n')
+		if errors.Is(rerr, io.EOF) {
+			return nil, false, nil
+		}
+		if rerr != nil {
+			return nil, false, rerr
+		}
+		return empty, true, nil
+	}
+
+	var last []byte
+	for {
+		values, perr := promptResumeInput(entries, required, reader, s.prompt)
+		if perr != nil {
+			return nil, false, perr
+		}
+		inputJSON, err := json.Marshal(values)
+		if err != nil {
+			return nil, false, err
+		}
+		if verr := schemavalidate.Validate(schema, inputJSON); verr != nil {
+			if last != nil && bytes.Equal(last, inputJSON) {
+				return nil, false, fmt.Errorf("cannot resume: %w", verr)
+			}
+			last = inputJSON
+			fmt.Fprintf(s.prompt, "  %v\n", verr)
+			continue
+		}
+		return inputJSON, true, nil
+	}
+}
+
 // follow walks a suspend wizard from an already-suspended run: it fetches the
-// run's resume form, prompts for it, submits, then waits on the continuation
-// and prints its logs. If the continuation suspends again it repeats; when it
-// reaches a terminal state it prints the final status and return value.
+// run's resume form, collects input for it, submits, then waits on the
+// continuation and prints its logs. If the continuation suspends again it
+// repeats; when it reaches a terminal state it prints the final status and
+// return value. A daemon task's continuation never settles, so it is resumed
+// one-shot (print the continuation id) rather than followed.
 func (s *followSession) follow(suspendedRunID string) error {
 	// One reader across every step: a per-step bufio.Reader would read-ahead and
 	// drop the next step's buffered answers. promptResumeInput re-wraps this with
@@ -169,24 +260,15 @@ func (s *followSession) follow(suspendedRunID string) error {
 			return fmt.Errorf("read resume schema: %w", err)
 		}
 
-		// Re-prompt the whole step on object-level schema failure rather than
-		// aborting the flow. Per-field coercion already rejects bad types, so
-		// this catches cross-field constraints the field loop can't see.
-		var inputJSON []byte
-		for {
-			values, perr := promptResumeInput(entries, required, reader, s.prompt)
-			if perr != nil {
-				return perr
-			}
-			inputJSON, err = json.Marshal(values)
-			if err != nil {
-				return err
-			}
-			if verr := schemavalidate.Validate(info.Schema, inputJSON); verr != nil {
-				fmt.Fprintf(s.prompt, "  %v\n", verr)
-				continue
-			}
-			break
+		inputJSON, submit, err := s.collectStepInput(reader, info.Schema, entries, required)
+		if err != nil {
+			return err
+		}
+		if !submit {
+			// No interactive consent (EOF at a confirmation gate): never auto-
+			// resume — leave the run suspended and show the one-shot view.
+			s.printOneShotSuspended(runID, entries, required)
+			return nil
 		}
 
 		res, err := s.client.Resume(runID, inputJSON)
@@ -194,6 +276,16 @@ func (s *followSession) follow(suspendedRunID string) error {
 			return err
 		}
 		contID := res.RunID
+
+		// A daemon continuation is long-lived and never settles; blocking on it
+		// would hang the CLI. Resume took effect — surface the continuation id
+		// one-shot and stop, matching the non-interactive resume output.
+		if info.Daemon {
+			fmt.Fprintf(s.out, "resumed: continuation run %s\n", contID)
+			fmt.Fprintf(s.out, "follow: dicode logs %s\n", contID)
+			return nil
+		}
+
 		fmt.Fprintf(s.prompt, "resumed: following continuation run %s\n", contID)
 
 		result, err := s.client.WaitRun(contID)
@@ -233,12 +325,13 @@ func (s *followSession) printLogs(runID string) {
 	}
 }
 
-// followSuspended drives the interactive wizard against a live daemon. Each
-// step's logs stream to stdout as it settles, so on SIGINT the accumulated
-// output is already printed; the handler only notes the interrupt and exits 130
-// (the shell convention). It deliberately issues no further control request —
-// the main goroutine is usually parked in WaitRun on the same connection, and
-// ControlClient.Send is not safe for concurrent use.
+// followSuspended drives the interactive wizard against a live daemon. Logs of
+// steps that have already settled are on stdout; a step still in flight when
+// SIGINT arrives has not printed its logs, and the handler deliberately issues
+// no control request to fetch them — the main goroutine is usually parked in
+// WaitRun on the same connection, and ControlClient.Send is not safe for
+// concurrent use. The handler notes the interrupt and exits 130 (the shell
+// convention); the daemon cancels the in-flight run when the connection drops.
 func followSuspended(c *ipc.ControlClient, runID string) error {
 	s := &followSession{
 		client: controlFollowClient{c: c},

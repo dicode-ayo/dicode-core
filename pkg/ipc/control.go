@@ -628,6 +628,16 @@ func (cs *ControlServer) handleRunWait(ctx context.Context, req Request) (RunRes
 	if cs.engine == nil {
 		return RunResult{}, errors.New("run wait not available (engine not wired)")
 	}
+	// A daemon body is long-lived and never reaches a terminal state, so blocking
+	// on it would park this handler until the client disconnects (and, because
+	// dispatch is serialized per connection, the disconnect isn't even observed
+	// until then). Return its current status immediately instead; the CLI falls
+	// back to the one-shot path for daemon continuations.
+	if run, err := cs.reg.GetRun(ctx, req.RunID); err == nil {
+		if spec, ok := cs.reg.Get(run.TaskID); ok && spec.Trigger.Daemon {
+			return RunResult{RunID: run.ID, Status: run.Status}, nil
+		}
+	}
 	return cs.engine.WaitRun(ctx, req.RunID)
 }
 

@@ -43,11 +43,14 @@ type ResumeResult struct {
 
 // ResumeInfo is the cli.resume.get response: a suspended run's JSON Schema so
 // the CLI can prompt per property, coerce values to their declared types, and
-// validate before submitting.
+// validate before submitting. Daemon reports whether the run's task is a daemon
+// body, whose continuation is long-lived and never settles — the CLI must not
+// block on it after resuming.
 type ResumeInfo struct {
 	RunID  string          `json:"runID"`
 	TaskID string          `json:"taskID"`
 	Schema json.RawMessage `json:"schema,omitempty"`
+	Daemon bool            `json:"daemon,omitempty"`
 }
 
 // SuspendedRunSummary is one row in the cli.resume.list response. Fields is the
@@ -128,6 +131,9 @@ func (cs *ControlServer) handleResumeGet(ctx context.Context, req Request) (Resu
 	info := ResumeInfo{RunID: run.ID, TaskID: run.TaskID}
 	if len(run.ResumeSchema) > 0 {
 		info.Schema = json.RawMessage(run.ResumeSchema)
+	}
+	if spec, ok := cs.reg.Get(run.TaskID); ok {
+		info.Daemon = spec.Trigger.Daemon
 	}
 	return info, nil
 }

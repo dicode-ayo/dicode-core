@@ -14,14 +14,16 @@ import (
 // resumeChain; waitResults maps a continuation id to its settled RunResult.
 type fakeFollowClient struct {
 	schemas     map[string][]byte          // runID -> resume JSON Schema
+	daemon      map[string]bool            // runID -> task is a daemon body
 	resumeChain map[string]string          // suspended runID -> continuation runID
 	waitResults map[string]ipc.RunResult   // continuation runID -> settled result
 	logs        map[string][]ipc.LogEntry  // runID -> log lines
 	submitted   map[string]json.RawMessage // suspended runID -> input submitted
+	waitCalls   int                        // number of WaitRun invocations
 }
 
 func (f *fakeFollowClient) ResumeGet(runID string) (ipc.ResumeInfo, error) {
-	return ipc.ResumeInfo{RunID: runID, Schema: f.schemas[runID]}, nil
+	return ipc.ResumeInfo{RunID: runID, Schema: f.schemas[runID], Daemon: f.daemon[runID]}, nil
 }
 
 func (f *fakeFollowClient) Resume(runID string, input []byte) (ipc.ResumeResult, error) {
@@ -33,6 +35,7 @@ func (f *fakeFollowClient) Resume(runID string, input []byte) (ipc.ResumeResult,
 }
 
 func (f *fakeFollowClient) WaitRun(runID string) (ipc.RunResult, error) {
+	f.waitCalls++
 	return f.waitResults[runID], nil
 }
 
@@ -190,5 +193,107 @@ func TestFollow_RepromptsUntilRequiredSupplied(t *testing.T) {
 	}
 	if got := string(client.submitted["run-1"]); got != `{"approve":"yes"}` {
 		t.Errorf("submitted = %s, want the value entered after the reprompt", got)
+	}
+}
+
+// A bare-approval schema (no properties) must NOT auto-submit; it requires an
+// explicit Enter, after which {} is submitted.
+func TestFollow_EmptyPropertiesRequiresConfirmation(t *testing.T) {
+	const confirmSchema = `{"type":"object","title":"Confirm","description":"Proceed?"}`
+	client := &fakeFollowClient{
+		schemas:     map[string][]byte{"run-1": []byte(confirmSchema)},
+		resumeChain: map[string]string{"run-1": "run-2"},
+		waitResults: map[string]ipc.RunResult{"run-2": {RunID: "run-2", Status: "success"}},
+	}
+	var out, prompt bytes.Buffer
+	// A single Enter confirms.
+	s := &followSession{client: client, in: strings.NewReader("\n"), prompt: &prompt, out: &out}
+
+	if err := s.follow("run-1"); err != nil {
+		t.Fatalf("follow: %v", err)
+	}
+	if !strings.Contains(prompt.String(), "Approve and continue?") {
+		t.Errorf("expected a confirmation prompt, got:\n%s", prompt.String())
+	}
+	if got := string(client.submitted["run-1"]); got != "{}" {
+		t.Errorf("submitted = %q, want {} after explicit confirmation", got)
+	}
+}
+
+// With no interactive consent (EOF / redirected stdin) a bare-approval schema
+// must NOT auto-resume — no Resume call, one-shot suspended output instead.
+func TestFollow_EmptyPropertiesEOFDoesNotAutoApprove(t *testing.T) {
+	const confirmSchema = `{"type":"object","title":"Confirm"}`
+	client := &fakeFollowClient{
+		schemas:     map[string][]byte{"run-1": []byte(confirmSchema)},
+		resumeChain: map[string]string{"run-1": "run-2"},
+	}
+	var out, prompt bytes.Buffer
+	s := &followSession{client: client, in: strings.NewReader(""), prompt: &prompt, out: &out}
+
+	if err := s.follow("run-1"); err != nil {
+		t.Fatalf("follow: %v", err)
+	}
+	if _, ok := client.submitted["run-1"]; ok {
+		t.Errorf("Resume must not be called without explicit consent; submitted=%v", client.submitted)
+	}
+	if !strings.Contains(out.String(), "run run-1: suspended") {
+		t.Errorf("expected one-shot suspended output, got:\n%s", out.String())
+	}
+}
+
+// An unsatisfiable schema (required field absent from properties → nothing to
+// prompt, {} always invalid) must abort with an error, not hot-loop forever.
+func TestFollow_UnsatisfiableSchemaAborts(t *testing.T) {
+	const unsat = `{"type":"object","required":["x"]}`
+	client := &fakeFollowClient{
+		schemas: map[string][]byte{"run-1": []byte(unsat)},
+	}
+	var out, prompt bytes.Buffer
+	s := &followSession{client: client, in: strings.NewReader(""), prompt: &prompt, out: &out}
+
+	err := s.follow("run-1")
+	if err == nil {
+		t.Fatal("expected an error for an unsatisfiable schema, not a spin/submit")
+	}
+	if _, ok := client.submitted["run-1"]; ok {
+		t.Errorf("must not submit for an unsatisfiable schema; submitted=%v", client.submitted)
+	}
+}
+
+// Optional-only fields left blank at EOF marshal to the same {} twice; the
+// second identical failure must abort rather than hot-loop.
+func TestFollow_RepromptTerminatesOnIdenticalInput(t *testing.T) {
+	const minProps = `{"type":"object","properties":{"note":{"type":"string"}},"minProperties":1}`
+	client := &fakeFollowClient{
+		schemas: map[string][]byte{"run-1": []byte(minProps)},
+	}
+	var out, prompt bytes.Buffer
+	s := &followSession{client: client, in: strings.NewReader(""), prompt: &prompt, out: &out}
+
+	if err := s.follow("run-1"); err == nil {
+		t.Fatal("expected abort when the identical (empty) input fails twice")
+	}
+}
+
+// A daemon task's continuation never settles, so it must be resumed one-shot
+// (continuation id printed) without ever calling WaitRun.
+func TestFollow_DaemonContinuationOneShot(t *testing.T) {
+	client := &fakeFollowClient{
+		schemas:     map[string][]byte{"run-1": []byte(oneStepSchema)},
+		daemon:      map[string]bool{"run-1": true},
+		resumeChain: map[string]string{"run-1": "run-2"},
+	}
+	var out, prompt bytes.Buffer
+	s := &followSession{client: client, in: strings.NewReader("yes\n"), prompt: &prompt, out: &out}
+
+	if err := s.follow("run-1"); err != nil {
+		t.Fatalf("follow: %v", err)
+	}
+	if client.waitCalls != 0 {
+		t.Errorf("WaitRun must not be called for a daemon continuation, got %d calls", client.waitCalls)
+	}
+	if !strings.Contains(out.String(), "resumed: continuation run run-2") {
+		t.Errorf("expected one-shot continuation output, got:\n%s", out.String())
 	}
 }
