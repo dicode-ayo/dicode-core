@@ -43,6 +43,7 @@ import (
 
 	"github.com/dicode/dicode/pkg/daemon"
 	"github.com/dicode/dicode/pkg/ipc"
+	"github.com/dicode/dicode/pkg/registry"
 	"github.com/dicode/dicode/pkg/schemavalidate"
 	"github.com/dicode/dicode/pkg/tasktest"
 )
@@ -887,6 +888,13 @@ func cmdRun(c *ipc.ControlClient, taskID string, kvArgs []string) error {
 		fmt.Fprintf(os.Stderr, "dicode: fetch logs: %v\n", logErr)
 	}
 
+	// A run that suspended on a TTY drives the whole wizard inline: prompt for
+	// the resume form, follow the continuation, repeat until it finishes. Piped
+	// stdin keeps the one-shot output below so automation still sees the id.
+	if result.Status == registry.StatusSuspended && stdinIsInteractive() {
+		return followSuspended(c, result.RunID)
+	}
+
 	fmt.Printf("run %s: %s\n", result.RunID, result.Status)
 	if result.ReturnValue != nil {
 		out, _ := json.MarshalIndent(result.ReturnValue, "", "  ")
@@ -1067,13 +1075,14 @@ func collectResumeArgs(entries []resumePropEntry, kvArgs []string) (map[string]a
 	return out, nil
 }
 
-// promptResumeInput walks the schema's properties in order, prompting on stderr
-// (so a piped stdout stays clean) and coercing each answer to its declared
-// type. An empty answer takes the property's default, or is skipped when the
-// property is optional; a required property with no default re-prompts.
-func promptResumeInput(entries []resumePropEntry, required map[string]bool) (map[string]any, error) {
-	reader := bufio.NewReader(os.Stdin)
-	out := map[string]any{}
+// promptResumeInput walks the schema's properties in order, prompting on out
+// (stderr in production, so a piped stdout stays clean) and reading answers from
+// in, coercing each to its declared type. An empty answer takes the property's
+// default, or is skipped when the property is optional; a required property with
+// no default re-prompts. in/out are injected so the loop is unit-testable.
+func promptResumeInput(entries []resumePropEntry, required map[string]bool, in io.Reader, out io.Writer) (map[string]any, error) {
+	reader := bufio.NewReader(in)
+	values := map[string]any{}
 	for _, e := range entries {
 		p := e.Prop
 		label := p.Title
@@ -1081,14 +1090,14 @@ func promptResumeInput(entries []resumePropEntry, required map[string]bool) (map
 			label = e.Name
 		}
 		if p.Description != "" {
-			fmt.Fprintf(os.Stderr, "%s\n", p.Description)
+			fmt.Fprintf(out, "%s\n", p.Description)
 		}
 		if len(p.Enum) > 0 {
 			opts := make([]string, len(p.Enum))
 			for i, o := range p.Enum {
 				opts[i] = fmt.Sprintf("%v", o)
 			}
-			fmt.Fprintf(os.Stderr, "  choices: %s\n", strings.Join(opts, ", "))
+			fmt.Fprintf(out, "  choices: %s\n", strings.Join(opts, ", "))
 		}
 		for {
 			suffix := ""
@@ -1097,7 +1106,7 @@ func promptResumeInput(entries []resumePropEntry, required map[string]bool) (map
 			} else if required[e.Name] {
 				suffix = " (required)"
 			}
-			fmt.Fprintf(os.Stderr, "%s%s: ", label, suffix)
+			fmt.Fprintf(out, "%s%s: ", label, suffix)
 
 			line, err := reader.ReadString('\n')
 			eof := errors.Is(err, io.EOF)
@@ -1107,12 +1116,12 @@ func promptResumeInput(entries []resumePropEntry, required map[string]bool) (map
 			raw := strings.TrimRight(line, "\r\n")
 			if strings.TrimSpace(raw) == "" {
 				if p.Default != nil {
-					out[e.Name] = p.Default
+					values[e.Name] = p.Default
 				} else if required[e.Name] {
 					if eof {
 						return nil, fmt.Errorf("%s is required", e.Name)
 					}
-					fmt.Fprintln(os.Stderr, "  required — please enter a value")
+					fmt.Fprintln(out, "  required — please enter a value")
 					continue
 				}
 				break
@@ -1122,14 +1131,14 @@ func promptResumeInput(entries []resumePropEntry, required map[string]bool) (map
 				if eof {
 					return nil, fmt.Errorf("%s: %w", e.Name, err)
 				}
-				fmt.Fprintf(os.Stderr, "  %v\n", err)
+				fmt.Fprintf(out, "  %v\n", err)
 				continue
 			}
-			out[e.Name] = v
+			values[e.Name] = v
 			break
 		}
 	}
-	return out, nil
+	return values, nil
 }
 
 // cmdResume submits collected resume input for a suspended run. It first pulls
@@ -1138,6 +1147,17 @@ func promptResumeInput(entries []resumePropEntry, required map[string]bool) (map
 // their declared types, validates locally against the schema, and submits. The
 // daemon re-validates authoritatively and resolves the resume token itself.
 func cmdResume(c *ipc.ControlClient, runID string, kvArgs []string) error {
+	// Interactive follow only engages for a TTY with no inline field=value args:
+	// pipes/redirects and explicit values keep the one-shot path below so scripts
+	// see the unchanged "continuation run <id>" output. Show the suspended run's
+	// logs first for context, mirroring how `dicode run` prints before it waits.
+	if len(kvArgs) == 0 && stdinIsInteractive() {
+		if logErr := cmdLogs(c, runID); logErr != nil {
+			fmt.Fprintf(os.Stderr, "dicode: fetch logs: %v\n", logErr)
+		}
+		return followSuspended(c, runID)
+	}
+
 	infoResp, err := c.Send(ipc.Request{Method: "cli.resume.get", RunID: runID})
 	if err != nil {
 		return err
@@ -1157,7 +1177,7 @@ func cmdResume(c *ipc.ControlClient, runID string, kvArgs []string) error {
 
 	var values map[string]any
 	if len(kvArgs) == 0 {
-		values, err = promptResumeInput(entries, required)
+		values, err = promptResumeInput(entries, required, os.Stdin, os.Stderr)
 	} else {
 		values, err = collectResumeArgs(entries, kvArgs)
 	}
