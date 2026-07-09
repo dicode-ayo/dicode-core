@@ -738,6 +738,14 @@ func (s *Server) handleRunResult(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	// A suspended run has produced neither output nor a return value, so the
+	// checks below would 404 it. It is not finished — it is waiting on input.
+	// Send the caller to the run page, which renders the resume form. This is
+	// where a browser lands after a webhook task's form POST suspends.
+	if run.Status == registry.StatusSuspended {
+		http.Redirect(w, r, "/hooks/webui/runs/"+runID, http.StatusSeeOther)
+		return
+	}
 	if run.OutputContentType != "" {
 		w.Header().Set("Content-Type", run.OutputContentType+"; charset=utf-8")
 		_, _ = w.Write([]byte(run.OutputContent))
