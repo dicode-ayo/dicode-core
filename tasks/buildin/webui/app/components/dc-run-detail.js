@@ -267,10 +267,10 @@ class DcRunDetail extends LitElement {
     const isRunning    = status === 'running';
     const startedAt    = run.started_at || run.StartedAt;
     const finishedAt   = run.finished_at || run.FinishedAt;
-    const trigSrc      = run.trigger_source;
-    const otype        = run.output_content_type;
-    const ocontent     = run.output_content;
-    const retval       = run.return_value;
+    const trigSrc      = run.trigger_source || run.TriggerSource;
+    const otype        = run.output_content_type || run.OutputContentType;
+    const ocontent     = run.output_content || run.OutputContent;
+    const retval       = run.return_value || run.ReturnValue;
 
     let displayRV = retval;
     if (retval) { try { displayRV = JSON.stringify(JSON.parse(retval), null, 2); } catch(_) {} }
