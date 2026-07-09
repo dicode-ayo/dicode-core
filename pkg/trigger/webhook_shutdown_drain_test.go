@@ -57,7 +57,7 @@ func TestShutdownDrainsInFlightSyncWebhookRun(t *testing.T) {
 
 	select {
 	case <-exec.started:
-	case <-time.After(2 * time.Second):
+	case <-time.After(drainWait):
 		t.Fatal("sync webhook task body never started")
 	}
 
@@ -76,14 +76,14 @@ func TestShutdownDrainsInFlightSyncWebhookRun(t *testing.T) {
 
 	select {
 	case <-startDone:
-	case <-time.After(5 * time.Second):
+	case <-time.After(drainWait):
 		t.Fatal("Start did not return after the sync-webhook run finished")
 	}
 
 	var w *httptest.ResponseRecorder
 	select {
 	case w = <-webhookDone:
-	case <-time.After(2 * time.Second):
+	case <-time.After(drainWait):
 		t.Fatal("webhook handler never returned")
 	}
 	if w.Code >= 400 {

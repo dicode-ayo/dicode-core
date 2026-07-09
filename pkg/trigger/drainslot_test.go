@@ -68,7 +68,7 @@ func TestDrainSlotOuterHeldInnerFireRefusedIsClean(t *testing.T) {
 	go func() { eng.runWG.Wait(); close(drained) }()
 	select {
 	case <-drained:
-	case <-time.After(2 * time.Second):
+	case <-time.After(drainWait):
 		t.Fatal("runWG never drained after outer release — a slot leaked")
 	}
 
