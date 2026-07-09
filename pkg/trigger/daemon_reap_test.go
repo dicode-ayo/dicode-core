@@ -19,9 +19,11 @@ import (
 //
 // The test drives a real newTestEnv teardown in a subtest (the exact structure
 // of TestPipelineDaemonTerminalStage) and then asserts no Deno subprocess
-// survives. denoruntime.ActivePIDs tracks only subprocesses this test binary
-// spawned, so the assertion is unaffected by unrelated Deno processes on the
-// host.
+// survives. denoruntime.ActivePIDs counts subprocesses this test binary spawned
+// (unaffected by unrelated Deno processes on the host) but is not scoped to a
+// single engine, so the zero-survivor assertion is only valid while pkg/trigger
+// tests run serially — a concurrent t.Parallel() test's subprocess would read
+// as a false leak here.
 func TestDaemonSubprocessReapedOnTeardown(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires Deno subprocess")
