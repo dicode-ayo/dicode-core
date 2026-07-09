@@ -248,6 +248,10 @@ type TaskSummary struct {
 	LastStatus  string `json:"lastStatus"` // "success" | "failure" | "running" | "crashlooping" | ""
 	LastRunID   string `json:"lastRunID"`  // "" if never run
 	LastRunAt   string `json:"lastRunAt"`  // RFC3339 or ""
+	// Pending is true when the approval gate is holding this task awaiting
+	// approval — a state distinct from any run status. cli.task.pending carries
+	// the detail (short content hash).
+	Pending bool `json:"pending,omitempty"`
 }
 
 // LogEntry is one log line returned by cli.logs.

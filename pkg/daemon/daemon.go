@@ -757,6 +757,18 @@ func buildControlServer(cfg *config.Config, dataDir, version string, database db
 	// `dicode task approve` — the control socket is a trusted local channel.
 	ctrlSrv.SetTaskApprover(approvalGate.Approve)
 
+	// `dicode task pending` + `dicode list` annotation — surface the tasks the
+	// gate is holding so a headless operator can discover an id to approve.
+	ctrlSrv.SetPendingApprovals(func() []ipc.PendingTask {
+		ids := approvalGate.Pending()
+		out := make([]ipc.PendingTask, 0, len(ids))
+		for _, id := range ids {
+			hash, _ := approvalGate.PendingHash(id)
+			out = append(out, ipc.PendingTask{TaskID: id, Hash: hash})
+		}
+		return out
+	})
+
 	// Wire AI-first task authoring so `dicode task create|edit|save|cancel`
 	// reuses the same source manager and author_sessions store the REST
 	// handlers use.

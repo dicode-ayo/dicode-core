@@ -101,6 +101,11 @@ const (
 	CapCLIStatus  = "cli.status"  // daemon health and uptime
 	CapCLISecrets = "cli.secrets" // list / set / delete secrets
 	CapCLIAI      = "cli.ai"      // fire the configured ai task with a prompt
+	// CapCLITaskPending gates cli.task.pending — listing tasks the approval
+	// gate is holding. Read-only and strictly weaker than cli.task.approve
+	// (which cli clients already hold), but a distinct cap so a future policy
+	// could grant discovery without approval rights.
+	CapCLITaskPending = "cli.task.pending"
 )
 
 // cliCaps is the full capability set granted to every CLI client.
@@ -112,6 +117,7 @@ func cliCaps() []string {
 		CapCLIStatus,
 		CapCLISecrets,
 		CapCLIAI,
+		CapCLITaskPending,
 	}
 }
 

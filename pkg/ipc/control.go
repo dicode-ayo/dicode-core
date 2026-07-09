@@ -47,6 +47,11 @@ type ControlServer struct {
 	// Nil when the gate is not configured (tests).
 	taskApprover func(taskID string) error
 
+	// pendingApprovals reports the tasks the approval gate is holding (id +
+	// full content hash), wired via SetPendingApprovals. Nil when the gate is
+	// not configured (tests) — cli.task.pending then reports an empty list.
+	pendingApprovals func() []PendingTask
+
 	// defaultAITask is cfg.AI.Task — the task id that `dicode ai` fires when
 	// the client doesn't supply --task. Empty when the daemon was started
 	// without config (tests).
@@ -286,6 +291,9 @@ func (cs *ControlServer) dispatch(ctx context.Context, req Request) (any, error)
 
 	case "cli.task.approve":
 		return cs.handleTaskApprove(req)
+
+	case "cli.task.pending":
+		return cs.handleTaskPending()
 
 	case "cli.auth.reset_passphrase":
 		return cs.handleAuthResetPassphrase(ctx)
@@ -570,6 +578,7 @@ func (cs *ControlServer) handlePing() DaemonStatus {
 func (cs *ControlServer) handleList() ([]TaskSummary, error) {
 	ctx := context.Background()
 	specs := cs.reg.All()
+	pending := cs.pendingTaskIDs()
 	out := make([]TaskSummary, 0, len(specs))
 	for _, s := range specs {
 		summary := TaskSummary{
@@ -577,6 +586,9 @@ func (cs *ControlServer) handleList() ([]TaskSummary, error) {
 			Name:        s.Name,
 			Description: s.Description,
 			Trigger:     triggerLabel(s),
+		}
+		if _, ok := pending[s.ID]; ok {
+			summary.Pending = true
 		}
 		if runs, err := cs.reg.ListRuns(ctx, s.ID, 1); err == nil && len(runs) > 0 {
 			r := runs[0]
