@@ -21,6 +21,14 @@ import (
 	"go.uber.org/zap"
 )
 
+// drainWait bounds every "did this happen" wait in the shutdown-drain tests.
+// These waits gate on a mock executor's goroutine being scheduled, so a value
+// tight enough to look like a timing assertion (2s) fails on a loaded CI runner
+// while passing on an idle machine. Only the negative assertions ("Start must
+// NOT return yet") use a short window, where a brief wait is the conservative
+// direction.
+const drainWait = 30 * time.Second
+
 // drainExec is a daemon body whose termination behaviour the test controls.
 // It signals when the body begins so the test can find the run's ID before
 // triggering shutdown.
@@ -98,7 +106,7 @@ func runningDaemonRunID(t *testing.T, eng *Engine, exec *drainExec, taskID strin
 	t.Helper()
 	select {
 	case <-exec.started:
-	case <-time.After(2 * time.Second):
+	case <-time.After(drainWait):
 		t.Fatal("daemon body never started")
 	}
 	var runID string
@@ -135,7 +143,7 @@ func TestShutdownDrainsInFlightRunFinalization(t *testing.T) {
 
 	select {
 	case <-startDone:
-	case <-time.After(5 * time.Second):
+	case <-time.After(drainWait):
 		t.Fatal("Start did not return after shutdown")
 	}
 
@@ -172,7 +180,7 @@ func TestShutdownDrainBoundedByGrace(t *testing.T) {
 
 	select {
 	case <-startDone:
-	case <-time.After(5 * time.Second):
+	case <-time.After(drainWait):
 		t.Fatal("Start hung past the drain grace on a wedged run")
 	}
 	elapsed := time.Since(start)
@@ -222,7 +230,7 @@ func TestShutdownGatesChainDispatch(t *testing.T) {
 
 	select {
 	case <-startDone:
-	case <-time.After(5 * time.Second):
+	case <-time.After(drainWait):
 		t.Fatal("Start did not return after shutdown")
 	}
 
@@ -272,7 +280,7 @@ func TestTrackRunGateRaceWithShutdown(t *testing.T) {
 
 	select {
 	case <-drained:
-	case <-time.After(5 * time.Second):
+	case <-time.After(drainWait):
 		t.Fatal("drain did not complete")
 	}
 	fires.Wait()

@@ -24,6 +24,14 @@ import (
 	"go.uber.org/zap"
 )
 
+// drainWait bounds every "did this happen" wait in the shutdown-drain tests.
+// These waits gate on a mock executor's goroutine being scheduled, so a value
+// tight enough to look like a timing assertion (2s) fails on a loaded CI runner
+// while passing on an idle machine. Only the negative assertions ("Start must
+// NOT return yet") use a short window, where a brief wait is the conservative
+// direction.
+const drainWait = 30 * time.Second
+
 type noopExecutor struct{}
 
 func (noopExecutor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime.RunOptions) (*pkgruntime.RunResult, error) {
@@ -121,7 +129,7 @@ func TestShutdownDrainsInFlightReplayFetch(t *testing.T) {
 
 	select {
 	case <-fetcher.started:
-	case <-time.After(2 * time.Second):
+	case <-time.After(drainWait):
 		t.Fatal("replay fetch never started")
 	}
 
@@ -140,7 +148,7 @@ func TestShutdownDrainsInFlightReplayFetch(t *testing.T) {
 
 	select {
 	case <-startDone:
-	case <-time.After(5 * time.Second):
+	case <-time.After(drainWait):
 		t.Fatal("Start did not return after the replay fetch finished")
 	}
 
@@ -149,7 +157,7 @@ func TestShutdownDrainsInFlightReplayFetch(t *testing.T) {
 		if w.Code != http.StatusOK {
 			t.Fatalf("replay = %d, want 200; body=%s", w.Code, w.Body.String())
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(drainWait):
 		t.Fatal("replay handler never returned")
 	}
 }
@@ -168,7 +176,7 @@ func TestShutdownRefusesReplayAfterShutdownLatched(t *testing.T) {
 	cancel()
 	select {
 	case <-startDone:
-	case <-time.After(5 * time.Second):
+	case <-time.After(drainWait):
 		t.Fatal("Start did not return after ctx cancel")
 	}
 
