@@ -182,8 +182,8 @@ func TestEngine_WaitRun_FollowsResumeChain(t *testing.T) {
 		done <- waitOut{status: r.Status, runID: r.RunID, ret: r.ReturnValue, err: err}
 	}()
 
-	// WaitRun must NOT return while the run is still suspended (the old bug
-	// returned {status: suspended} immediately).
+	// WaitRun must NOT return while the run is still suspended; suspended is
+	// non-terminal.
 	select {
 	case out := <-done:
 		t.Fatalf("WaitRun returned while suspended: status=%q err=%v", out.status, out.err)
