@@ -1,0 +1,48 @@
+apiVersion: dicode/v1
+kind: Task
+name: Repo Prune (example)
+description: |
+  Analyse a git repo for stale worktrees and branches (local + remote), pause for
+  a human to approve the exact deletion plan, then execute it.
+
+  The analysis phase is read-only and its output is a plan. The run suspends with
+  that plan carried in its state; on resume the plan is executed verbatim via
+  `--apply --plan`, so nothing is re-derived after approval — what a human read is
+  what runs. The script re-asserts its own guards (never the default branch, the
+  release branch, or an open PR's head) before deleting anything, so a tampered
+  plan is refused rather than trusted.
+
+  Triggered by an authenticated webhook: POST /hooks/repo-prune. A destructive
+  operation should not sit behind an unauthenticated URL.
+runtime: deno
+
+trigger:
+  webhook: /hooks/repo-prune
+  # Require a dicode session. The alternative, webhook_secret HMAC, is fine for a
+  # machine caller; a session is the right gate when a human approves the suspend.
+  auth: true
+
+permissions:
+  run: ["bash", "git", "gh", "jq"]
+  env:
+    # git/gh/jq resolution and gh's credential lookup.
+    - PATH
+    - HOME
+    # gh auth in a headless daemon; omit to fall back to ~/.config/gh.
+    - { name: GH_TOKEN, secret: gh_token }
+  fs:
+    - path: "${HOME}/dicode/dicode-core"
+      permission: rw
+
+params:
+  repo_path:
+    type: string
+    default: "${HOME}/dicode/dicode-core"
+  # Locked worktrees are locked on purpose. Opt in explicitly.
+  include_locked:
+    type: boolean
+    default: false
+
+# The analysis phase shells out to `gh pr list` once and `git rev-list` per
+# branch; a few hundred branches takes well over the 60s default.
+timeout: 600s
