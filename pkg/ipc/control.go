@@ -230,6 +230,9 @@ func (cs *ControlServer) dispatch(ctx context.Context, req Request) (any, error)
 	case "cli.run":
 		return cs.handleRun(ctx, req)
 
+	case "cli.run.wait":
+		return cs.handleRunWait(ctx, req)
+
 	case "cli.logs":
 		return cs.handleLogs(ctx, req)
 
@@ -610,6 +613,32 @@ func (cs *ControlServer) handleRun(ctx context.Context, req Request) (RunResult,
 		return RunResult{}, err
 	}
 	return cs.engine.WaitRun(ctx, runID)
+}
+
+// handleRunWait blocks until an existing run reaches a terminal or suspended
+// state and returns its RunResult. It backs the CLI's interactive follow loop:
+// after a resume spawns a continuation, the client waits on it here rather than
+// polling cli.resume.get, which sidesteps the window where the continuation has
+// been spawned but has not yet reached `suspended` (the "run is not suspended"
+// race) — WaitRun settles on the run's done signal and reads the final record.
+func (cs *ControlServer) handleRunWait(ctx context.Context, req Request) (RunResult, error) {
+	if req.RunID == "" {
+		return RunResult{}, errors.New("runID required")
+	}
+	if cs.engine == nil {
+		return RunResult{}, errors.New("run wait not available (engine not wired)")
+	}
+	// A daemon body is long-lived and never reaches a terminal state, so blocking
+	// on it would park this handler until the client disconnects (and, because
+	// dispatch is serialized per connection, the disconnect isn't even observed
+	// until then). Return its current status immediately instead; the CLI falls
+	// back to the one-shot path for daemon continuations.
+	if run, err := cs.reg.GetRun(ctx, req.RunID); err == nil {
+		if spec, ok := cs.reg.Get(run.TaskID); ok && spec.Trigger.Daemon {
+			return RunResult{RunID: run.ID, Status: run.Status}, nil
+		}
+	}
+	return cs.engine.WaitRun(ctx, req.RunID)
 }
 
 func (cs *ControlServer) handleLogs(ctx context.Context, req Request) ([]LogEntry, error) {
