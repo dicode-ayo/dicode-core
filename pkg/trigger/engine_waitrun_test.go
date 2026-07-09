@@ -151,3 +151,77 @@ func TestEngine_WaitRun_ContextCanceled(t *testing.T) {
 	e.engine.KillRun(runID)
 	waitForTerminal(t, e.engine, runID, 30*time.Second)
 }
+
+// A run that suspends is not terminal: WaitRun must keep blocking and follow
+// the resume chain, returning the continuation run's terminal result rather
+// than an intermediate {status: suspended}. Drives the suspend/resume state
+// transitions at the registry level so no live runtime is needed.
+func TestEngine_WaitRun_FollowsResumeChain(t *testing.T) {
+	e := newTestEnv(t)
+	ctx := context.Background()
+
+	const origID = "orig-run"
+	if _, err := e.reg.StartRunWithID(ctx, origID, "wizard", "", string(registry.TriggerManual), registry.RunKindTask); err != nil {
+		t.Fatalf("StartRunWithID: %v", err)
+	}
+	if _, err := e.reg.SuspendRun(ctx, origID, []byte(`{"step":1}`), nil, "tok", time.Now().UnixMilli(), 0, nil); err != nil {
+		t.Fatalf("SuspendRun: %v", err)
+	}
+
+	type waitOut struct {
+		status string
+		runID  string
+		ret    interface{}
+		err    error
+	}
+	done := make(chan waitOut, 1)
+	go func() {
+		wctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		r, err := e.engine.WaitRun(wctx, origID)
+		done <- waitOut{status: r.Status, runID: r.RunID, ret: r.ReturnValue, err: err}
+	}()
+
+	// WaitRun must NOT return while the run is still suspended (the old bug
+	// returned {status: suspended} immediately).
+	select {
+	case out := <-done:
+		t.Fatalf("WaitRun returned while suspended: status=%q err=%v", out.status, out.err)
+	case <-time.After(600 * time.Millisecond):
+	}
+
+	// Resume: mark the original resumed and spawn the continuation run that
+	// carries the real result.
+	if err := e.reg.MarkRunResumed(ctx, origID); err != nil {
+		t.Fatalf("MarkRunResumed: %v", err)
+	}
+	const contID = "cont-run"
+	if _, err := e.reg.StartRunWithID(ctx, contID, "wizard", origID, string(registry.TriggerResume), registry.RunKindTask); err != nil {
+		t.Fatalf("StartRunWithID continuation: %v", err)
+	}
+	if err := e.reg.FinishRunWithResult(ctx, contID, registry.StatusSuccess, `{"answer":42}`, "", ""); err != nil {
+		t.Fatalf("FinishRunWithResult: %v", err)
+	}
+
+	select {
+	case out := <-done:
+		if out.err != nil {
+			t.Fatalf("WaitRun err: %v", out.err)
+		}
+		if out.status != registry.StatusSuccess {
+			t.Errorf("status = %q, want success", out.status)
+		}
+		if out.runID != contID {
+			t.Errorf("runID = %q, want continuation %q", out.runID, contID)
+		}
+		m, ok := out.ret.(map[string]interface{})
+		if !ok {
+			t.Fatalf("return value %T, want map", out.ret)
+		}
+		if m["answer"].(float64) != 42 {
+			t.Errorf("answer = %v, want 42", m["answer"])
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("WaitRun did not return after resume+continuation finished")
+	}
+}

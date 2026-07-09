@@ -101,7 +101,7 @@ func (e *Engine) Run(ctx context.Context, providerID string, reqs []envresolve.P
 	if err != nil {
 		return nil, fmt.Errorf("fire provider %q: %w", providerID, err)
 	}
-	res, werr := e.WaitRun(ctx, runID)
+	res, werr := e.waitRunSettled(ctx, runID)
 	if werr != nil {
 		return nil, fmt.Errorf("wait provider %q: %w", providerID, werr)
 	}

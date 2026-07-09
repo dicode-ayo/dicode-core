@@ -506,7 +506,7 @@ func (r *PipelineRunner) runTerminalDaemon(stageIdx int, stage task.Stage, upstr
 		current := r.daemonRunID
 		r.mu.Unlock()
 
-		res, werr := e.WaitRun(context.Background(), current)
+		res, werr := e.waitRunSettled(context.Background(), current)
 		status := res.Status
 		ret := res.ReturnValue
 		if werr != nil {
@@ -660,7 +660,7 @@ func (e *Engine) fireStageRaw(ctx context.Context, st task.Stage, upstream task.
 // cancellation) is an error; on ctx cancellation it kills the orphaned stage
 // subprocess rather than leaving it running detached.
 func (e *Engine) awaitStageSuccess(ctx context.Context, runID string) (task.InputContext, error) {
-	res, werr := e.WaitRun(ctx, runID)
+	res, werr := e.waitRunSettled(ctx, runID)
 	if werr != nil {
 		// ctx cancelled (pipeline timeout or KillRun on the parent) — stop the
 		// orphaned stage subprocess rather than leaving it running detached.
@@ -977,7 +977,7 @@ func (e *Engine) runPipelineStageRerun(runner *PipelineRunner, reranTaskID strin
 	if oldDaemonRunID != "" {
 		e.KillRun(oldDaemonRunID)
 		waitCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_, _ = e.WaitRun(waitCtx, oldDaemonRunID)
+		_, _ = e.waitRunSettled(waitCtx, oldDaemonRunID)
 		cancel()
 	}
 

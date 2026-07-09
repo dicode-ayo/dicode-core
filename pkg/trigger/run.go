@@ -68,30 +68,95 @@ func (e *Engine) FireFromTask(ctx context.Context, taskID, parentRunID string, p
 		registry.TriggerManual)
 }
 
-// WaitRun blocks until the run identified by runID reaches a terminal state,
-// then returns a RunResult. Implements ipc.EngineRunner.
+// waitRunPollInterval bounds the busy-wait for the two run transitions that
+// have no completion channel to select on: suspended→(resumed|cancelled), and
+// the sub-millisecond window in which a freshly-discovered continuation run
+// exists in the DB but has not yet registered its runDone channel.
+const waitRunPollInterval = 200 * time.Millisecond
+
+// maxEmptyResumedPolls bounds how long WaitRun waits for the continuation of a
+// `resumed` run to appear before giving up and returning the resumed status.
+// The continuation is recorded microseconds after the resume flips the status,
+// so any real gap this long means the continuation failed to spawn (e.g. the
+// fire guard vetoed it or the engine is shutting down) and will never arrive.
+const maxEmptyResumedPolls = 25
+
+// WaitRun blocks until the run identified by runID reaches a state terminal for
+// the caller, then returns a RunResult. Implements ipc.EngineRunner.
 //
-// Channel lifecycle: startRun() registers a chan struct{} in runDone keyed by
-// runID. The cleanup func (deferred in fireAsync/fireSync via startRun) closes
-// that channel once the run goroutine finishes. WaitRun selects on the channel
-// so it is woken up immediately rather than polling.
+// suspended is NOT terminal: a run that called dicode.suspend() is paused
+// awaiting input and will either resume (spawning a continuation run that
+// carries the real outcome) or be cancelled at its deadline. WaitRun follows
+// that chain — on `resumed` it continues waiting on the continuation run, so a
+// `dicode.run_task` caller receives the logical task's final result rather than
+// an intermediate `suspended`. The suspend→resume hop has no completion channel
+// (the continuation is a distinct run), so it is polled; the wait is bounded
+// entirely by ctx (the caller's task context / timeout).
 //
-// Race: if WaitRun is called after the channel has already been closed and
-// deleted (i.e. the run finished before the caller reached this function), the
-// Load will return ok==false. In that case we fall through to a single DB read
-// to return the final status.
+// Engine-internal callers for which a suspended run is an error rather than a
+// pause (the pipeline runner, provider resolution) must use waitRunSettled,
+// which returns the `suspended` status directly instead of following it.
 func (e *Engine) WaitRun(ctx context.Context, runID string) (ipc.RunResult, error) {
+	emptyResumedPolls := 0
+	for {
+		res, err := e.waitRunSettled(ctx, runID)
+		if err != nil {
+			return ipc.RunResult{}, err
+		}
+		switch res.Status {
+		case registry.StatusResumed:
+			// Token consumed; the continuation run carries the real outcome.
+			// Follow it. There is a brief window where the original is `resumed`
+			// but the continuation row is not yet recorded — re-poll until it is.
+			next, err := e.resumeContinuationID(ctx, runID)
+			if err != nil {
+				return ipc.RunResult{}, err
+			}
+			if next != "" {
+				runID = next
+				emptyResumedPolls = 0
+				continue
+			}
+			emptyResumedPolls++
+			if emptyResumedPolls > maxEmptyResumedPolls {
+				// The continuation never materialized; return the resumed status
+				// rather than polling until ctx expires.
+				return res, nil
+			}
+			if err := waitRunSleep(ctx); err != nil {
+				return ipc.RunResult{}, err
+			}
+		case registry.StatusSuspended, registry.StatusRunning:
+			// Non-terminal with no channel to wait on: `suspended` has no
+			// completion channel (the resume is a separate run), and a
+			// continuation just discovered via the DB may not have registered
+			// its runDone yet. Poll until the state advances.
+			emptyResumedPolls = 0
+			if err := waitRunSleep(ctx); err != nil {
+				return ipc.RunResult{}, err
+			}
+		default:
+			// success / failure / cancelled — terminal for the caller.
+			return res, nil
+		}
+	}
+}
+
+// waitRunSettled blocks until the run's goroutine finishes (or is already done)
+// and returns its current record, including a non-terminal `suspended`. It does
+// not follow the resume chain — callers that must observe `suspended` directly
+// (the pipeline runner, provider resolution) use this; WaitRun layers
+// resume-chain following on top.
+func (e *Engine) waitRunSettled(ctx context.Context, runID string) (ipc.RunResult, error) {
 	if v, ok := e.runDone.Load(runID); ok {
 		// Run is in progress — wait for the completion channel to be closed.
 		select {
 		case <-v.(chan struct{}):
-			// Channel closed: run has finished. Fall through to DB read below.
+			// Channel closed: the run goroutine finished. Read its record.
 		case <-ctx.Done():
 			return ipc.RunResult{}, ctx.Err()
 		}
 	}
-	// Either the channel was never present (run already finished before we
-	// arrived) or it was just closed. Either way, fetch the final record.
 	run, err := e.registry.GetRun(ctx, runID)
 	if err != nil {
 		if errors.Is(err, registry.ErrRunNotFound) {
@@ -99,12 +164,43 @@ func (e *Engine) WaitRun(ctx context.Context, runID string) (ipc.RunResult, erro
 		}
 		return ipc.RunResult{}, err
 	}
-	// Prefer the persisted return_value when present. Fall back to the
-	// in-memory runReturnValue cache for tasks that opted out of
-	// persistence via `run_result.enabled: false` — without this fallback,
-	// `dicode.run_task` callers would receive nil for those tasks even
-	// though the value is available in process. The cache entry survives
-	// for runReturnValueTTL after run completion (see startRun cleanup).
+	return e.buildRunResult(runID, run), nil
+}
+
+// waitRunSleep blocks for waitRunPollInterval or until ctx is done, returning
+// ctx.Err() in the latter case.
+func waitRunSleep(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(waitRunPollInterval):
+		return nil
+	}
+}
+
+// resumeContinuationID returns the ID of the continuation run spawned when the
+// suspended run parentRunID was resumed, or "" if none is recorded yet. The
+// single-use resume token guarantees at most one such continuation.
+func (e *Engine) resumeContinuationID(ctx context.Context, parentRunID string) (string, error) {
+	children, err := e.registry.ListChildren(ctx, parentRunID, 50)
+	if err != nil {
+		return "", err
+	}
+	for _, c := range children {
+		if c.TriggerSource == registry.TriggerResume {
+			return c.ID, nil
+		}
+	}
+	return "", nil
+}
+
+// buildRunResult assembles the ipc.RunResult for a terminal run. It prefers the
+// persisted return_value, falling back to the in-memory runReturnValue cache
+// for tasks that opted out of persistence via `run_result.enabled: false` —
+// without this fallback, `dicode.run_task` callers would receive nil for those
+// tasks even though the value is available in process. The cache entry survives
+// for runReturnValueTTL after run completion (see startRun cleanup).
+func (e *Engine) buildRunResult(runID string, run *registry.Run) ipc.RunResult {
 	returnJSON := run.ReturnValue
 	if returnJSON == "" {
 		if v, ok := e.runReturnValue.Load(runID); ok {
@@ -119,7 +215,7 @@ func (e *Engine) WaitRun(ctx context.Context, runID string) (ipc.RunResult, erro
 		RunID:       runID,
 		Status:      run.Status,
 		ReturnValue: returnValue,
-	}, nil
+	}
 }
 
 // KillRun cancels a running task by its run ID.
