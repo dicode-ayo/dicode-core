@@ -14,6 +14,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"go.uber.org/zap"
 
+	"github.com/dicode/dicode/internal/gitops"
 	"github.com/dicode/dicode/pkg/source"
 )
 
@@ -66,10 +67,12 @@ func newSeededRepo(t *testing.T, initialTaskID string) *seededRepo {
 
 	r := &seededRepo{
 		bareDir: bareDir,
-		url:     "file://" + bareDir,
-		wt:      wt,
-		wtPath:  wtPath,
-		branch:  "main",
+		// See gitops.TestFixtureRemoteURL's doc comment for why this needs a
+		// placeholder hostname rather than a bare file:// path.
+		url:    gitops.TestFixtureRemoteURL(bareDir),
+		wt:     wt,
+		wtPath: wtPath,
+		branch: "main",
 	}
 
 	r.addCommit(t, initialTaskID, "init "+initialTaskID)

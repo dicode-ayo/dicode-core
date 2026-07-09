@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/bep/debounce"
+	"github.com/dicode/dicode/internal/gitops"
 	"github.com/dicode/dicode/internal/pathguard"
 	"github.com/dicode/dicode/pkg/source"
 	"github.com/dicode/dicode/pkg/task"
@@ -408,6 +409,14 @@ func (s *Source) enableClone(ctx context.Context, opts DevModeOpts) (string, err
 	}
 	if s.rootRef == nil || s.rootRef.URL == "" {
 		return "", fmt.Errorf("clone-mode requires a git source (rootRef.URL is empty)")
+	}
+	// SSRF guard (#489/#510): enableClone drives a real go-git clone against
+	// a caller-influenced URL (reachable via SetDevMode from pkg/webui/sources.go
+	// and pkg/webui/task_delete.go), so it must go through the same shared
+	// literal-host check as CloneOrPull and ListBranches before any network
+	// operation happens — otherwise it's a third, unmitigated SSRF entry point.
+	if err := gitops.ValidateRemoteHost(s.rootRef.URL); err != nil {
+		return "", fmt.Errorf("validate remote host: %w", err)
 	}
 
 	// Build the clone path defensively. ValidateRunID above already rejects

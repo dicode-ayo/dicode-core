@@ -12,6 +12,8 @@ import (
 	gogitconfig "github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
+
+	"github.com/dicode/dicode/internal/gitops"
 )
 
 // seededBareRepo is a bare repo on disk plus a scratch worktree used to
@@ -51,10 +53,12 @@ func newSeededBareRepo(t *testing.T) *seededBareRepo {
 
 	return &seededBareRepo{
 		bareDir: bareDir,
-		url:     "file://" + bareDir,
-		wt:      wt,
-		wtPath:  wtPath,
-		branch:  "main",
+		// See gitops.TestFixtureRemoteURL's doc comment for why this needs a
+		// placeholder hostname rather than a bare file:// path.
+		url:    gitops.TestFixtureRemoteURL(bareDir),
+		wt:     wt,
+		wtPath: wtPath,
+		branch: "main",
 	}
 }
 

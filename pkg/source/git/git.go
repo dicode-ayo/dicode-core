@@ -8,7 +8,6 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
-	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -206,7 +205,13 @@ func (g *GitSource) tryCloneOrPull(ctx context.Context) error {
 // 30-second retry budget every poll interval.
 //
 // Conservatively scoped: only the unambiguous "your credentials/URL are
-// wrong" sentinels from go-git's transport layer. Everything else (network
+// wrong" sentinels from go-git's transport layer, plus gitops.ValidateRemoteHost's
+// SSRF-guard rejection (gitops.ErrBlockedHost / gitops.ErrNoRemoteHost) — a
+// deterministic, zero-I/O check whose outcome cannot change within a single
+// poll interval, so retrying it burns the full retry budget for no benefit
+// (see #510: without this case a single SSRF-blocked source stalled the
+// reconciler's initial sync by ~30s, since GitSource.Start calls cloneOrPull
+// synchronously and sources start up sequentially). Everything else (network
 // timeout, 5xx, packfile decode error mid-clone, partial response, …) is
 // treated as transient.
 func isPermanentGitError(err error) bool {
@@ -214,7 +219,9 @@ func isPermanentGitError(err error) bool {
 	case errors.Is(err, gogittransport.ErrAuthenticationRequired),
 		errors.Is(err, gogittransport.ErrAuthorizationFailed),
 		errors.Is(err, gogittransport.ErrInvalidAuthMethod),
-		errors.Is(err, gogittransport.ErrRepositoryNotFound):
+		errors.Is(err, gogittransport.ErrRepositoryNotFound),
+		errors.Is(err, gitops.ErrBlockedHost),
+		errors.Is(err, gitops.ErrNoRemoteHost):
 		return true
 	}
 	return false
@@ -242,50 +249,17 @@ func (g *GitSource) syncAndEmit(ctx context.Context, ch chan<- source.Event) err
 	return nil
 }
 
-// validateRemoteHost rejects remote endpoints that point at loopback,
-// private, link-local, or otherwise internal network targets (SSRF guard,
-// #475). It inspects the literal host only: IP literals are classified with
-// gitops.IsBlockedIP; hostnames are matched against well-known internal
-// suffixes (localhost, *.local mDNS, *.internal cloud-metadata style names).
-// DNS resolution is deliberately not performed here: this is the cheap
-// first gate, rejecting the common case without a network round-trip. A
-// hostname that clears this check but *resolves* to a blocked address
-// (including on a later DNS-rebind) is caught by the second, dial-time
-// layer installed via gitops.InstallSSRFGuardedTransport (#481).
-func validateRemoteHost(ep *gogittransport.Endpoint) error {
-	// go-git stores IPv6 literals bracketed ("[::1]"); strip for parsing.
-	host := strings.ToLower(strings.Trim(ep.Host, "[]"))
-	if host == "" {
-		return fmt.Errorf("url has no remote host")
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		if gitops.IsBlockedIP(ip) {
-			return fmt.Errorf("host %q is a private or internal address; refusing to contact it", host)
-		}
-		return nil
-	}
-	if host == "localhost" ||
-		strings.HasSuffix(host, ".localhost") ||
-		strings.HasSuffix(host, ".local") ||
-		strings.HasSuffix(host, ".internal") {
-		return fmt.Errorf("host %q is a private or internal address; refusing to contact it", host)
-	}
-	return nil
-}
-
 // ListBranches contacts the remote and returns branch names sorted alphabetically.
 // tokenEnv is the name of an env var holding an HTTP auth token; pass "" for public repos.
 //
 // Remotes on loopback/private/link-local/internal hosts are rejected before
 // any connection is attempted — this function is reachable from the REST API
 // with a caller-supplied URL, so it must not be usable to probe the daemon's
-// internal network (#475).
+// internal network (#475). Uses gitops.ValidateRemoteHost, the same shared
+// guard CloneOrPull calls (#489), so there is exactly one place that can
+// drift out of sync.
 func ListBranches(ctx context.Context, repoURL, tokenEnv string) ([]string, error) {
-	ep, err := gogittransport.NewEndpoint(repoURL)
-	if err != nil {
-		return nil, fmt.Errorf("invalid url: %w", err)
-	}
-	if err := validateRemoteHost(ep); err != nil {
+	if err := gitops.ValidateRemoteHost(repoURL); err != nil {
 		return nil, err
 	}
 

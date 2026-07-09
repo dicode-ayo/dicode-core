@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dicode/dicode/internal/gitops"
 	gogittransport "github.com/go-git/go-git/v5/plumbing/transport"
 	"go.uber.org/zap"
 )
@@ -172,6 +173,46 @@ func TestCloneOrPull_ContextCancelStopsRetry(t *testing.T) {
 	}
 }
 
+// TestCloneOrPull_SSRFBlockedHostDoesNotRetry is the core regression test
+// for #510: before isPermanentGitError recognised gitops.ErrBlockedHost /
+// gitops.ErrNoRemoteHost, a deterministic, zero-I/O SSRF rejection from
+// ValidateRemoteHost was retried for the full ~30s cloneRetryMaxElapsed
+// window on every poll tick — and since GitSource.Start calls cloneOrPull
+// synchronously and sources start up sequentially in the reconciler, a
+// single SSRF-blocked source stalled the whole initial sync by ~30s. This
+// proves the op is now called exactly once and returns promptly.
+func TestCloneOrPull_SSRFBlockedHostDoesNotRetry(t *testing.T) {
+	var calls atomic.Int32
+	blockedErr := gitops.ValidateRemoteHost("ssh://git@127.0.0.1/org/repo.git")
+	if blockedErr == nil {
+		t.Fatal("ValidateRemoteHost did not reject the malicious host; test fixture is broken")
+	}
+	gs := newTestGitSource(t, func(ctx context.Context) error {
+		calls.Add(1)
+		return blockedErr
+	})
+
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	err := gs.cloneOrPull(ctx)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, gitops.ErrBlockedHost) {
+		t.Errorf("err = %v; want errors.Is(gitops.ErrBlockedHost) == true", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("call count = %d; want 1 (SSRF-blocked host must not retry)", got)
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("SSRF-blocked error took %v to surface; want <5s (regression: was burning the full %v retry budget)", elapsed, cloneRetryMaxElapsed)
+	}
+}
+
 // TestIsPermanentGitError_PermanentSentinels exercises the classifier
 // directly — the Retry test above goes through the full backoff machinery
 // which is slower; this catches regressions in the sentinel list itself.
@@ -183,6 +224,12 @@ func TestIsPermanentGitError_PermanentSentinels(t *testing.T) {
 		gogittransport.ErrRepositoryNotFound,
 		fmt.Errorf("pull: %w", gogittransport.ErrAuthenticationRequired),
 		fmt.Errorf("clone: %w", gogittransport.ErrRepositoryNotFound),
+		// Regression coverage for #510: the real error shape produced by
+		// gitops.ValidateRemoteHost (wired into CloneOrPull for #489) must
+		// also be classified as permanent, otherwise a single SSRF-blocked
+		// source burns the full ~30s retry budget on every poll tick.
+		gitops.ValidateRemoteHost("ssh://git@127.0.0.1/org/repo.git"),
+		gitops.ValidateRemoteHost("file:///etc/passwd"),
 	}
 	for _, err := range permanent {
 		if !isPermanentGitError(err) {

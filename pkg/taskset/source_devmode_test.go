@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -14,6 +15,8 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"go.uber.org/zap"
+
+	"github.com/dicode/dicode/internal/gitops"
 )
 
 // newFixtureRemote creates a bare-ish git repo at a tempdir with a single
@@ -65,7 +68,9 @@ func newFixtureRemote(t *testing.T, branch string, files map[string]string) stri
 		t.Fatalf("newFixtureRemote: push: %v", err)
 	}
 
-	return "file://" + bareDir
+	// See gitops.TestFixtureRemoteURL's doc comment for why this needs a
+	// placeholder hostname rather than a bare file:// path.
+	return gitops.TestFixtureRemoteURL(bareDir)
 }
 
 // newTestSourceWithRemote constructs a Source pointing at the given git remote URL.
@@ -334,6 +339,62 @@ spec:
 	// Still in dev mode because session "a" is active.
 	if !src.DevMode() {
 		t.Error("DevMode() = false after targeted disable of non-last session")
+	}
+}
+
+// TestSetDevMode_Branch_RejectsSSRFHost is the regression test for #510
+// item 2: enableClone (reached via SetDevMode from pkg/webui/sources.go and
+// pkg/webui/task_delete.go) drove a real go-git PlainCloneContext against
+// s.rootRef.URL with zero host validation — a third, unmitigated SSRF entry
+// point alongside CloneOrPull and ListBranches (#489). This proves a
+// malicious ssh/scp-shorthand rootRef.URL is rejected before any clone is
+// attempted: no clone directory should ever be created on disk.
+func TestSetDevMode_Branch_RejectsSSRFHost(t *testing.T) {
+	cases := []struct {
+		name string
+		url  string
+	}{
+		{name: "scp-shorthand loopback", url: "git@127.0.0.1:org/repo.git"},
+		{name: "ssh loopback", url: "ssh://git@127.0.0.1/org/repo.git"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			src := newTestSourceWithRemote(t, "ns", tc.url, "main")
+			ctx := context.Background()
+			runID := "ssrf-" + strings.ReplaceAll(tc.name, " ", "-")
+
+			_, err := src.enableClone(ctx, DevModeOpts{
+				Branch: "fix/test", Base: "main", RunID: runID,
+			})
+			if err == nil {
+				t.Fatalf("enableClone(%q) = nil error, want SSRF host rejection", tc.url)
+			}
+			if !errors.Is(err, gitops.ErrBlockedHost) {
+				t.Errorf("enableClone(%q) error = %v, want errors.Is(gitops.ErrBlockedHost)", tc.url, err)
+			}
+
+			clonePath := filepath.Join(src.DataDir(), "dev-clones", src.Namespace(), runID)
+			if _, statErr := os.Stat(clonePath); !os.IsNotExist(statErr) {
+				t.Errorf("enableClone(%q) populated %s — a clone was attempted", tc.url, clonePath)
+			}
+
+			// Also drive it through the public SetDevMode entry point to
+			// prove the guard is reachable end-to-end, not just when calling
+			// enableClone directly.
+			err = src.SetDevMode(ctx, true, DevModeOpts{
+				Branch: "fix/test", Base: "main", RunID: runID + "-public",
+			})
+			if err == nil {
+				t.Fatalf("SetDevMode with malicious url %q = nil error, want SSRF host rejection", tc.url)
+			}
+			if !errors.Is(err, gitops.ErrBlockedHost) {
+				t.Errorf("SetDevMode error = %v, want errors.Is(gitops.ErrBlockedHost)", err)
+			}
+			publicClonePath := filepath.Join(src.DataDir(), "dev-clones", src.Namespace(), runID+"-public")
+			if _, statErr := os.Stat(publicClonePath); !os.IsNotExist(statErr) {
+				t.Errorf("SetDevMode populated %s — a clone was attempted", publicClonePath)
+			}
+		})
 	}
 }
 

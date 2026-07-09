@@ -180,13 +180,25 @@ var installGuardOnce sync.Once
 // "ssh" or "git" schemes: both dial through go-git's own transports (an
 // SSH client and a bare TCP `net.Dial` respectively — the latter with no
 // injectable dialer at all) with no shared choke point with the HTTP(S)
-// client installed here. A `ref.url: git://<attacker-controlled host>` is
-// therefore NOT protected by this guard, at either the literal-host layer
-// (validateRemoteHost is only ever invoked from pkg/source/git's
-// ListBranches, not from any clone/pull path) or this dial-time layer —
-// tracked separately as a follow-up, since closing it means either
-// rejecting the "git" scheme in taskset ref validation or building a
-// dedicated guarded transport for it, both bigger than this issue's scope.
+// client installed here.
+//
+// That gap is now only partial, not total: ValidateRemoteHost's
+// literal-host check (hostguard.go) is invoked from CloneOrPull itself —
+// the actual clone/pull path, not just pkg/source/git's ListBranches — so
+// every scheme it understands (http(s), ssh, and the git@host:path SCP
+// shorthand) gets rejected before any dial when the host is a loopback/
+// private/link-local/internal literal or matches a blocked hostname suffix
+// (#489). ssh:// and SCP-shorthand remotes get that literal-host check as
+// their ONLY guard, since they never reach this dial-time layer: a hostname
+// that passes the literal check but resolves — now, or later via DNS-rebind
+// — to a blocked address is still uncaught for ssh, unlike http/https where
+// guardedDialContext closes exactly that gap. That residual, smaller gap is
+// a known limitation, not fixed here; closing it would mean either building
+// a dedicated guarded dialer for go-git's ssh transport or resolving and
+// re-checking the host before handing off to it, both bigger than #489's
+// scope. The "git" scheme itself is separately rejected outright by
+// pkg/taskset.ValidateRefURL (#486), so it never reaches CloneOrPull with a
+// caller-supplied host in practice.
 //
 // When an outbound proxy is configured (HTTPS_PROXY/HTTP_PROXY), the
 // dialer connects to the proxy's address, not the final target's — the
