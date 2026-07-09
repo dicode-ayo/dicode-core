@@ -153,8 +153,9 @@ analyse() {
 
   jq -n --argjson wd "$wt_del" --argjson wk "$wt_keep" \
         --argjson ld "$loc_del" --argjson lk "$loc_keep" --argjson rd "$rem_del" \
-        --arg d "$DEFAULT_BRANCH" '{
+        --arg d "$DEFAULT_BRANCH" --argjson il "$INCLUDE_LOCKED" '{
      default_branch:$d,
+     include_locked:($il == 1),
      worktrees:{delete:$wd, keep:$wk},
      local_branches:{delete:$ld, keep:$lk},
      remote_branches:{delete:$rd},
@@ -188,17 +189,44 @@ if [ -n "$open_heads" ]; then
   [ -z "$clash" ] || { echo "refusing: plan targets an open PR's branch: $clash" >&2; exit 1; }
 fi
 
-jq -r '.worktrees.delete[]? | .path' <<<"$plan" | while IFS= read -r p; do
+# The branch guards above have no worktree counterpart in the plan, so re-derive
+# each worktree's real state here rather than trusting the plan's classification.
+# `git worktree remove` already refuses a path that is not a registered worktree,
+# but it will happily force-remove a dirty or locked one.
+plan_include_locked=$(jq -r '.include_locked // false' <<<"$plan")
+wt_state() { # path -> "missing" | "dirty" | "locked" | "ok"
+  git worktree list --porcelain | grep -qxF "worktree $1" || { echo missing; return; }
+  if [ -n "$(git -C "$1" status --porcelain 2>/dev/null | grep -vE " ($(echo "$IGNORE_DIRTY" | tr ' ' '|'))$")" ]; then
+    echo dirty; return
+  fi
+  if git worktree list --porcelain | grep -A3 -xF "worktree $1" | grep -q '^locked'; then
+    echo locked; return
+  fi
+  echo ok
+}
+
+while IFS= read -r p; do
   [ -n "$p" ] || continue
-  git worktree unlock "$p" 2>/dev/null || true
-  git worktree remove --force "$p" && echo "worktree removed: $p"
-done
+  case "$(wt_state "$p")" in
+    missing) echo "refusing: plan names a path that is not a worktree of this repo: $p" >&2; exit 1 ;;
+    dirty)   echo "refusing: plan targets a worktree with uncommitted work: $p" >&2; exit 1 ;;
+    locked)
+      [ "$plan_include_locked" = "true" ] || {
+        echo "refusing: plan targets a locked worktree without --include-locked: $p" >&2; exit 1; }
+      git worktree unlock "$p" 2>/dev/null || true
+      ;;
+  esac
+  git worktree remove --force -- "$p" && echo "worktree removed: $p"
+done < <(jq -r '.worktrees.delete[]? | .path' <<<"$plan")
 git worktree prune
 
+# `--` terminates options on every destructive command: a ref may legally be
+# named `-D` or `--all` (git check-ref-format accepts both), and without the
+# terminator git parses it as a flag instead of a ref.
 mapfile -t locals < <(jq -r '.local_branches.delete[]?' <<<"$plan")
 if [ "${#locals[@]}" -gt 0 ]; then
   # -D not -d: squash-merged branches are not ancestors of main, so -d refuses them.
-  git branch -D "${locals[@]}" >/dev/null && echo "local branches deleted: ${#locals[@]}"
+  git branch -D -- "${locals[@]}" >/dev/null && echo "local branches deleted: ${#locals[@]}"
 fi
 
 mapfile -t remotes < <(jq -r '.remote_branches.delete[]?' <<<"$plan")
@@ -207,9 +235,12 @@ if [ "${#remotes[@]}" -gt 0 ]; then
   i=0
   while [ "$i" -lt "${#remotes[@]}" ]; do
     chunk=("${remotes[@]:$i:50}")
-    git push origin --delete "${chunk[@]}" >/dev/null 2>&1 \
-      && echo "remote branches deleted: ${#chunk[@]}" \
-      || echo "warning: a remote chunk failed (already gone?)" >&2
+    # stderr is kept: "already deleted" and "auth failed" must not look alike.
+    if git push origin --delete -- "${chunk[@]}" >/dev/null; then
+      echo "remote branches deleted: ${#chunk[@]}"
+    else
+      echo "warning: a remote chunk failed; see the git error above" >&2
+    fi
     i=$((i + 50))
   done
 fi
