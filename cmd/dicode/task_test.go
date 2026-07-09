@@ -98,6 +98,9 @@ func (noopEngine) FireFromTask(context.Context, string, string, map[string]strin
 func (noopEngine) WaitRun(context.Context, string) (ipc.RunResult, error) {
 	return ipc.RunResult{}, nil
 }
+func (noopEngine) WaitRunSettled(context.Context, string) (ipc.RunResult, error) {
+	return ipc.RunResult{}, nil
+}
 func (noopEngine) ActiveRunCount() int     { return 0 }
 func (noopEngine) ActiveTaskSlots() int    { return 0 }
 func (noopEngine) MaxConcurrentTasks() int { return 0 }

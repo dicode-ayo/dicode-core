@@ -41,6 +41,9 @@ func (m *mockEngine) FireFromTask(_ context.Context, _ string, parentRunID strin
 func (m *mockEngine) WaitRun(_ context.Context, _ string) (RunResult, error) {
 	return m.result, m.err
 }
+func (m *mockEngine) WaitRunSettled(_ context.Context, _ string) (RunResult, error) {
+	return m.result, m.err
+}
 func (m *mockEngine) ActiveRunCount() int     { return 0 }
 func (m *mockEngine) ActiveTaskSlots() int    { return 0 }
 func (m *mockEngine) MaxConcurrentTasks() int { return 0 }

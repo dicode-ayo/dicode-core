@@ -102,4 +102,27 @@ test.describe('suspend/resume webui', () => {
     });
     expect(replay.status()).toBe(409);
   });
+
+  // A browser POSTing a webhook task's form is redirected to /runs/<id>/result.
+  // A suspended run has neither output nor a return value, so that page used to
+  // 404 — the operator saw "not found" where the resume form belongs (#547).
+  test('a suspended run\'s result page redirects to the resume form', async ({ request }) => {
+    const taskRes = await request.get(`/api/tasks/${encodeURIComponent(TASK_ID)}`);
+    if (!taskRes.ok()) {
+      test.skip(true, `${TASK_ID} not registered — fixture taskset missing it?`);
+      return;
+    }
+
+    const fireRes = await request.post(
+      `/api/tasks/${encodeURIComponent(TASK_ID)}/run`,
+      { headers: { 'Content-Type': 'application/json' } },
+    );
+    expect(fireRes.ok()).toBe(true);
+    const { runId } = (await fireRes.json()) as { runId: string };
+    await waitForStatus(request, runId, 'suspended');
+
+    const res = await request.get(`/runs/${runId}/result`, { maxRedirects: 0 });
+    expect(res.status()).toBe(303);
+    expect(res.headers()['location']).toBe(`/hooks/webui/runs/${runId}`);
+  });
 });
