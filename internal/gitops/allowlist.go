@@ -30,9 +30,18 @@ type Allowlist struct {
 }
 
 // emptyAllowlist is the fail-closed default returned whenever no allowlist has
-// been configured: it authorises nothing, so absent config reproduces exactly
-// the pre-#537 behaviour.
+// been configured: it authorises nothing.
 var emptyAllowlist = &Allowlist{}
+
+// normalizeHost canonicalises a host for allowlist matching: strip IPv6
+// brackets, lowercase, and drop a trailing FQDN-root dot. The guard's
+// literal-host check and every host lookup run through this one function so an
+// entry and a URL host can only ever compare under a single canonical form — a
+// second normalization rule added to one site but not the other would let a
+// host be stored under one form and matched under another.
+func normalizeHost(host string) string {
+	return strings.TrimRight(strings.ToLower(strings.Trim(host, "[]")), ".")
+}
 
 // ParseAllowlist classifies each entry as a CIDR, a bare IP (normalised to a
 // single-address CIDR), or a hostname (lowercased and stripped of a trailing
@@ -87,7 +96,7 @@ func (a *Allowlist) AllowsHost(host string) bool {
 	if a == nil {
 		return false
 	}
-	h := strings.TrimRight(strings.ToLower(strings.Trim(host, "[]")), ".")
+	h := normalizeHost(host)
 	if h == "" {
 		return false
 	}
@@ -101,9 +110,9 @@ func (a *Allowlist) AllowsHost(host string) bool {
 }
 
 // AllowsIP reports whether ip falls inside a listed IP/CIDR entry. Hostname
-// entries are deliberately never consulted here: the dial-time layer sees only
-// resolved IPs, so a hostname entry must not authorise an arbitrary IP it
-// resolves to (the DNS-rebind case).
+// entries are never consulted here: the dial-time layer sees only resolved
+// IPs, so a hostname entry must not authorise an arbitrary IP it resolves to
+// (the DNS-rebind case).
 func (a *Allowlist) AllowsIP(ip net.IP) bool {
 	return a.allowsIP(ip)
 }

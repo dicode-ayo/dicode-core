@@ -110,9 +110,6 @@ sources:
 	}
 }
 
-// TestLoad_RejectsLegacyNotificationsBlock ensures the removed
-// `notifications:` block is rejected at load time. yaml.v3 would otherwise
-// drop it silently and operators would lose alerts without warning.
 // TestLoad_SourceSecurityAllowlist parses a valid source_security block into
 // the runtime allowlist, honouring hostnames on the literal-host layer and
 // CIDRs on the resolved-IP layer.
@@ -166,6 +163,9 @@ source_security:
 	}
 }
 
+// TestLoad_RejectsLegacyNotificationsBlock ensures the removed
+// `notifications:` block is rejected at load time. yaml.v3 would otherwise
+// drop it silently and operators would lose alerts without warning.
 func TestLoad_RejectsLegacyNotificationsBlock(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "dicode.yaml")

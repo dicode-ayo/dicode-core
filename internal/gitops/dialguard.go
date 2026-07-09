@@ -145,10 +145,16 @@ func guardedDialContext(ctx context.Context, network, address string) (net.Conn,
 	if len(candidates) == 0 {
 		return nil, fmt.Errorf("dial guard: host %q resolved to no addresses", host)
 	}
+	// Wrap ErrBlockedHost so pkg/source/git's isPermanentGitError classifies a
+	// dial-time rejection the same way it classifies the literal-host layer's:
+	// a deterministic security rejection that must not burn the ~30s per-poll
+	// retry budget (#510). A hostname-only allowlist entry on an http/https
+	// remote passes the literal-host layer but is rejected here, so without this
+	// it would otherwise retry every tick.
 	allow := activeAllowlist()
 	for _, ip := range candidates {
 		if IsBlockedIP(ip) && !allow.AllowsIP(ip) {
-			return nil, fmt.Errorf("dial guard: %q resolves to private/internal address %s; refusing to connect (permit it via source_security.allow_internal_hosts)", host, ip)
+			return nil, fmt.Errorf("dial guard: %q resolves to private/internal address %s; refusing to connect (permit it via source_security.allow_internal_hosts): %w", host, ip, ErrBlockedHost)
 		}
 	}
 

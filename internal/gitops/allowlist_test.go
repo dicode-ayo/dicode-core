@@ -180,6 +180,26 @@ func TestGuardedDialContext_HostnameEntryDoesNotAuthorizeResolvedIP(t *testing.T
 	}
 }
 
+// TestGuardedDialContext_RejectionWrapsErrBlockedHost pins that a dial-time
+// rejection wraps ErrBlockedHost, so pkg/source/git's isPermanentGitError
+// classifies it permanent and the reconciler doesn't retry-storm a
+// hostname-only-allowlisted https remote every poll (#510 parity).
+func TestGuardedDialContext_RejectionWrapsErrBlockedHost(t *testing.T) {
+	withStubs(t,
+		func(ctx context.Context, host string) ([]net.IP, error) {
+			return []net.IP{net.ParseIP("10.1.2.3")}, nil
+		},
+		failIfCalledDial(t),
+	)
+	_, err := guardedDialContext(context.Background(), "tcp", "git.corp.internal:443")
+	if err == nil {
+		t.Fatal("expected rejection for a private resolved IP")
+	}
+	if !errors.Is(err, ErrBlockedHost) {
+		t.Errorf("dial-guard rejection = %v, want errors.Is(ErrBlockedHost)", err)
+	}
+}
+
 // TestGuardedDialContext_NonAllowlistedResolvedIPStillBlocked proves an empty
 // allowlist (or one that doesn't cover the IP) still rejects at dial time.
 func TestGuardedDialContext_NonAllowlistedResolvedIPStillBlocked(t *testing.T) {
