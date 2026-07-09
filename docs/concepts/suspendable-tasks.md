@@ -308,6 +308,18 @@ runner dispatches the next handler by the `to` name with no step switch. The sam
 flow works from the CLI — `dicode resume` lists the suspended run and
 `dicode resume <run-id> project_name=acme` (etc.) submits each step.
 
+### A branching example
+
+[`tasks/examples/deploy-wizard/`](../../tasks/examples/deploy-wizard/) goes
+further: a deploy wizard where each step runs real **async work** (a candidate
+scan, a check run, the deploy itself — stand-ins that log progress) and the
+**next step is chosen at runtime**. Because `to` is a plain value, `if/else` on an
+async result or on `ctx.input` picks the branch: a failed coverage gate suspends
+to an override prompt, `prod` takes an extra confirmation, and three paths
+converge on the same deploy step. It needs no network or secrets. Same primitives
+as above — the only new idea is that the step graph is decided by code, not
+declared.
+
 ---
 
 ## Rules and gotchas
