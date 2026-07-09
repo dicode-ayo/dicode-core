@@ -1,0 +1,14 @@
+apiVersion: dicode/v1
+kind: Task
+name: Deploy Wizard (example)
+description: >
+  A branching suspend/resume wizard. Each step runs real async work (simulated
+  with delays + progress logs) and chooses the next step at runtime: a release
+  candidate is scanned, checks are run, and the flow branches on the results and
+  your answers — failed checks prompt an override, prod needs an extra
+  confirmation — before a simulated deploy. Needs no network or secrets. Trigger
+  it manually from the Web UI or `dicode run examples/deploy-wizard`.
+runtime: deno
+trigger:
+  manual: true
+timeout: 30s

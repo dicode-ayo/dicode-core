@@ -40,6 +40,10 @@ spec:
       ref:
         path: ./suspend-wizard/task.yaml
 
+    deploy-wizard:
+      ref:
+        path: ./deploy-wizard/task.yaml
+
     github-stars:
       ref:
         path: ./github-stars/task.yaml
