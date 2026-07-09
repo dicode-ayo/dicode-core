@@ -45,28 +45,237 @@ func (f *fakeFollowClient) Logs(runID string) ([]ipc.LogEntry, error) {
 
 const oneStepSchema = `{"type":"object","properties":{"approve":{"type":"string","title":"Approve?"}},"required":["approve"]}`
 
-func TestParseInteractiveFlag(t *testing.T) {
+func TestParseWizardFlags(t *testing.T) {
 	cases := []struct {
-		name    string
-		args    []string
-		wantNI  bool
-		wantRes []string
+		name       string
+		args       []string
+		wantNI     bool
+		wantFields []string
+		wantRes    []string
+		wantErr    bool
 	}{
-		{"none", []string{"task-x", "a=1"}, false, []string{"task-x", "a=1"}},
-		{"non-interactive", []string{"task-x", "--non-interactive", "a=1"}, true, []string{"task-x", "a=1"}},
-		{"batch alias", []string{"--batch", "run-1"}, true, []string{"run-1"}},
-		{"flag only", []string{"--non-interactive"}, true, nil},
+		{name: "none", args: []string{"task-x", "a=1"}, wantRes: []string{"task-x", "a=1"}},
+		{name: "non-interactive", args: []string{"task-x", "--non-interactive", "a=1"}, wantNI: true, wantRes: []string{"task-x", "a=1"}},
+		{name: "batch alias", args: []string{"--batch", "run-1"}, wantNI: true, wantRes: []string{"run-1"}},
+		{name: "flag only", args: []string{"--non-interactive"}, wantNI: true},
+		{name: "field spaced", args: []string{"wiz", "--field", "a=1", "--field", "b=2"}, wantFields: []string{"a=1", "b=2"}, wantRes: []string{"wiz"}},
+		{name: "field equals", args: []string{"wiz", "--field=a=1"}, wantFields: []string{"a=1"}, wantRes: []string{"wiz"}},
+		{name: "field mixed with params and ni", args: []string{"wiz", "p=q", "--field", "a=1", "--batch"}, wantNI: true, wantFields: []string{"a=1"}, wantRes: []string{"wiz", "p=q"}},
+		{name: "field missing arg", args: []string{"wiz", "--field"}, wantErr: true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			gotNI, gotRes := parseInteractiveFlag(c.args)
+			gotNI, gotFields, gotRes, err := parseWizardFlags(c.args)
+			if c.wantErr {
+				if err == nil {
+					t.Fatal("expected an error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
 			if gotNI != c.wantNI {
 				t.Errorf("nonInteractive = %v, want %v", gotNI, c.wantNI)
+			}
+			if strings.Join(gotFields, ",") != strings.Join(c.wantFields, ",") {
+				t.Errorf("fields = %v, want %v", gotFields, c.wantFields)
 			}
 			if strings.Join(gotRes, ",") != strings.Join(c.wantRes, ",") {
 				t.Errorf("rest = %v, want %v", gotRes, c.wantRes)
 			}
 		})
+	}
+}
+
+func TestNewPrefillPool(t *testing.T) {
+	if _, err := newPrefillPool([]string{"noeq"}); err == nil {
+		t.Error("expected error for a field without '='")
+	}
+	if _, err := newPrefillPool([]string{"=v"}); err == nil {
+		t.Error("expected error for an empty field name")
+	}
+	if _, err := newPrefillPool([]string{"a=1", "a=2"}); err == nil {
+		t.Error("expected error for a duplicate field name")
+	}
+	p, err := newPrefillPool([]string{"a=1", "b=x=y"})
+	if err != nil {
+		t.Fatalf("newPrefillPool: %v", err)
+	}
+	// Only the first '=' splits, so the value may itself contain '='.
+	if raw, ok := p.take("b"); !ok || raw != "x=y" {
+		t.Errorf("take(b) = %q,%v, want x=y,true", raw, ok)
+	}
+	// A consumed value is not handed out twice.
+	if _, ok := p.take("b"); ok {
+		t.Error("take(b) a second time must report consumed")
+	}
+	if got := p.unused(); len(got) != 1 || got[0] != "a" {
+		t.Errorf("unused = %v, want [a]", got)
+	}
+}
+
+func TestPrefillPool_NilSafe(t *testing.T) {
+	var p *prefillPool
+	if !p.empty() {
+		t.Error("nil pool must be empty")
+	}
+	if _, ok := p.take("x"); ok {
+		t.Error("nil pool must yield no value")
+	}
+	if p.unused() != nil {
+		t.Error("nil pool must have no unused fields")
+	}
+}
+
+// Pre-supplied answers auto-advance every step of a wizard under
+// --non-interactive with no stdin, coercing each value to its declared type.
+func TestFollow_PrefillAutoAdvances(t *testing.T) {
+	client := &fakeFollowClient{
+		schemas: map[string][]byte{
+			"run-1": []byte(`{"type":"object","properties":{"project_name":{"type":"string"}},"required":["project_name"]}`),
+			"run-2": []byte(`{"type":"object","properties":{"count":{"type":"integer"}},"required":["count"]}`),
+		},
+		resumeChain: map[string]string{"run-1": "run-2", "run-2": "run-3"},
+		waitResults: map[string]ipc.RunResult{
+			"run-2": {RunID: "run-2", Status: "suspended"},
+			"run-3": {RunID: "run-3", Status: "success"},
+		},
+	}
+	pool, _ := newPrefillPool([]string{"project_name=acme", "count=7"})
+	var out, prompt bytes.Buffer
+	s := &followSession{client: client, in: strings.NewReader(""), prompt: &prompt, out: &out, prefill: pool, nonInteractive: true}
+
+	if err := s.follow("run-1"); err != nil {
+		t.Fatalf("follow: %v", err)
+	}
+	if got := string(client.submitted["run-1"]); got != `{"project_name":"acme"}` {
+		t.Errorf("step-1 submitted = %s", got)
+	}
+	// count coerced to a JSON number, not the raw string.
+	if got := string(client.submitted["run-2"]); got != `{"count":7}` {
+		t.Errorf("step-2 submitted = %s, want {\"count\":7}", got)
+	}
+	if !strings.Contains(out.String(), "run run-3: success") {
+		t.Errorf("expected terminal success:\n%s", out.String())
+	}
+}
+
+// A pre-supplied value is consumed at the first step that declares it; a later
+// step sharing the field name does not inherit it.
+func TestFollow_PrefillConsumedAtFirstMatch(t *testing.T) {
+	shared := []byte(`{"type":"object","title":"Step","properties":{"value":{"type":"string"}},"required":["value"]}`)
+	client := &fakeFollowClient{
+		schemas:     map[string][]byte{"run-1": shared, "run-2": shared},
+		resumeChain: map[string]string{"run-1": "run-2"},
+		waitResults: map[string]ipc.RunResult{"run-2": {RunID: "run-2", Status: "suspended"}},
+	}
+	pool, _ := newPrefillPool([]string{"value=first"})
+	var out, prompt bytes.Buffer
+	s := &followSession{client: client, in: strings.NewReader(""), prompt: &prompt, out: &out, prefill: pool, nonInteractive: true}
+
+	err := s.follow("run-1")
+	if err == nil {
+		t.Fatal("expected a missing-field error on the second step")
+	}
+	if got := string(client.submitted["run-1"]); got != `{"value":"first"}` {
+		t.Errorf("step-1 submitted = %s, want the pre-supplied value", got)
+	}
+	if _, ok := client.submitted["run-2"]; ok {
+		t.Error("step-2 must not inherit the first step's consumed value")
+	}
+	if !strings.Contains(err.Error(), "value") {
+		t.Errorf("error should name the missing field: %v", err)
+	}
+}
+
+// Non-interactive with an unfilled required field fails deterministically,
+// naming the step and the field.
+func TestFollow_PrefillNonInteractiveMissingErrors(t *testing.T) {
+	client := &fakeFollowClient{
+		schemas: map[string][]byte{
+			"run-1": []byte(`{"type":"object","title":"New project","properties":{"project_name":{"type":"string"}},"required":["project_name"]}`),
+		},
+	}
+	pool, _ := newPrefillPool([]string{"unrelated=x"})
+	var out, prompt bytes.Buffer
+	s := &followSession{client: client, in: strings.NewReader(""), prompt: &prompt, out: &out, prefill: pool, nonInteractive: true}
+
+	err := s.follow("run-1")
+	if err == nil {
+		t.Fatal("expected a deterministic missing-field error")
+	}
+	if !strings.Contains(err.Error(), "project_name") || !strings.Contains(err.Error(), "New project") {
+		t.Errorf("error should name the field and step: %v", err)
+	}
+}
+
+// A bad type for a pre-supplied value fails before submission.
+func TestFollow_PrefillTypeMismatchErrors(t *testing.T) {
+	client := &fakeFollowClient{
+		schemas: map[string][]byte{
+			"run-1": []byte(`{"type":"object","properties":{"count":{"type":"integer"}},"required":["count"]}`),
+		},
+	}
+	pool, _ := newPrefillPool([]string{"count=notanumber"})
+	var out, prompt bytes.Buffer
+	s := &followSession{client: client, in: strings.NewReader(""), prompt: &prompt, out: &out, prefill: pool, nonInteractive: true}
+
+	if err := s.follow("run-1"); err == nil {
+		t.Fatal("expected a coercion error for count=notanumber")
+	}
+	if _, ok := client.submitted["run-1"]; ok {
+		t.Error("must not submit when a pre-supplied value fails coercion")
+	}
+}
+
+// On a TTY, pre-supplied answers fill the steps they match and un-supplied
+// steps still prompt.
+func TestFollow_PrefillInteractiveFillsGaps(t *testing.T) {
+	client := &fakeFollowClient{
+		schemas: map[string][]byte{
+			"run-1": []byte(`{"type":"object","properties":{"a":{"type":"string"}},"required":["a"]}`),
+			"run-2": []byte(`{"type":"object","properties":{"b":{"type":"string"}},"required":["b"]}`),
+		},
+		resumeChain: map[string]string{"run-1": "run-2", "run-2": "run-3"},
+		waitResults: map[string]ipc.RunResult{
+			"run-2": {RunID: "run-2", Status: "suspended"},
+			"run-3": {RunID: "run-3", Status: "success"},
+		},
+	}
+	pool, _ := newPrefillPool([]string{"a=pre"})
+	var out, prompt bytes.Buffer
+	// a is pre-supplied (no prompt); b is typed at the prompt.
+	s := &followSession{client: client, in: strings.NewReader("typed\n"), prompt: &prompt, out: &out, prefill: pool}
+
+	if err := s.follow("run-1"); err != nil {
+		t.Fatalf("follow: %v", err)
+	}
+	if got := string(client.submitted["run-1"]); got != `{"a":"pre"}` {
+		t.Errorf("step-1 submitted = %s, want the pre-supplied value", got)
+	}
+	if got := string(client.submitted["run-2"]); got != `{"b":"typed"}` {
+		t.Errorf("step-2 submitted = %s, want the prompted value", got)
+	}
+}
+
+// Pre-supplied values never consumed (typo or a branch not taken) are reported
+// after the wizard completes.
+func TestFollow_PrefillUnusedWarned(t *testing.T) {
+	client := &fakeFollowClient{
+		schemas:     map[string][]byte{"run-1": []byte(`{"type":"object","properties":{"a":{"type":"string"}},"required":["a"]}`)},
+		resumeChain: map[string]string{"run-1": "run-2"},
+		waitResults: map[string]ipc.RunResult{"run-2": {RunID: "run-2", Status: "success"}},
+	}
+	pool, _ := newPrefillPool([]string{"a=x", "typo=y"})
+	var out, prompt bytes.Buffer
+	s := &followSession{client: client, in: strings.NewReader(""), prompt: &prompt, out: &out, prefill: pool, nonInteractive: true}
+
+	if err := s.follow("run-1"); err != nil {
+		t.Fatalf("follow: %v", err)
+	}
+	if !strings.Contains(prompt.String(), "typo") {
+		t.Errorf("expected an unused-field warning naming typo:\n%s", prompt.String())
 	}
 }
 
