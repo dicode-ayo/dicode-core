@@ -172,3 +172,7 @@ spec:
               task: auth/openrouter-oauth
         net:
           - openrouter.ai
+
+    repo-prune:
+      ref:
+        path: ./repo-prune/task.yaml
