@@ -59,6 +59,10 @@ class DcRunDetail extends LitElement {
     this._status = null; this._duration = null;
     this._parent = null; this._children = null;
     this._resuming = false; this._resumeError = null;
+    // Subscribe before fetching: a run can suspend/finish in the window between
+    // the fetch returning "running" and a post-fetch subscribe, and that missed
+    // event is exactly what leaves a just-suspended run without its resume form.
+    this._wireWS();
     try {
       // Children fetch is fire-and-forget — failure here shouldn't block the
       // main run/logs load (Sub-runs panel just stays empty).
@@ -86,8 +90,6 @@ class DcRunDetail extends LitElement {
         catch (_) { this._parent = { ID: parentID }; }
       }
 
-      if (this._status === 'running') this._wireWS();
-
       await this.updateComplete;
       const logEl = this.querySelector('#log-output');
       if (logEl) logEl.scrollTop = logEl.scrollHeight;
@@ -97,6 +99,9 @@ class DcRunDetail extends LitElement {
   }
 
   _wireWS() {
+    // Idempotent — drop any prior subscriptions so a re-_load() can't double-wire.
+    this._offLog?.(); this._offLog = null;
+    this._offFinished?.(); this._offFinished = null;
     this._offLog = wsOn('run:log', d => {
       if (d.runID !== this.runid) return;
       this._logs = [...this._logs, {
@@ -117,9 +122,10 @@ class DcRunDetail extends LitElement {
       this._offFinished?.(); this._offFinished = null;
       this._status = d.status;
       this._duration = (d.durationMs / 1000).toFixed(1) + 's';
-      if (d.outputContentType) {
-        setTimeout(() => navigate(`/runs/${this.runid}`, false), 200);
-      }
+      // The WS event carries neither the resume schema (for a run that just
+      // suspended) nor the output; refetch so the resume form or the finished
+      // result renders without a manual reload.
+      get(`/api/runs/${this.runid}`).then(run => { this._run = run; }).catch(() => {});
     });
   }
 
@@ -255,16 +261,16 @@ class DcRunDetail extends LitElement {
     if (!this._run) return html`<div class="meta">Loading…</div>`;
 
     const run = this._run;
-    const taskName     = run.task_name || run.task_id;
-    const taskID       = run.task_id;
-    const status       = this._status || run.status;
+    const taskName     = run.task_name || run.TaskID || run.task_id;
+    const taskID       = run.TaskID || run.task_id;
+    const status       = this._status || run.status || run.Status;
     const isRunning    = status === 'running';
     const startedAt    = run.started_at || run.StartedAt;
     const finishedAt   = run.finished_at || run.FinishedAt;
-    const trigSrc      = run.trigger_source;
-    const otype        = run.output_content_type;
-    const ocontent     = run.output_content;
-    const retval       = run.return_value;
+    const trigSrc      = run.trigger_source || run.TriggerSource;
+    const otype        = run.output_content_type || run.OutputContentType;
+    const ocontent     = run.output_content || run.OutputContent;
+    const retval       = run.return_value || run.ReturnValue;
 
     let displayRV = retval;
     if (retval) { try { displayRV = JSON.stringify(JSON.parse(retval), null, 2); } catch(_) {} }
@@ -284,7 +290,7 @@ class DcRunDetail extends LitElement {
       ${parent ? html`
         <div class="card" style="margin-bottom:var(--space-md);display:flex;gap:var(--space-md);align-items:center">
           <span class="meta">Parent run</span>
-          <a href="/runs/${parent.ID || parent.id}">
+          <a href="runs/${parent.ID || parent.id}">
             ${parentTask ? `${parentTask} · ` : ''}<code>${(parent.ID || parent.id || '').slice(0,8)}</code>
           </a>
         </div>` : ''}
@@ -314,7 +320,7 @@ class DcRunDetail extends LitElement {
           <tbody>
             ${children.map(c => html`
               <tr>
-                <td><a href="/runs/${c.ID}">${(c.TaskID || '?')} · <code>${c.ID.slice(0,8)}</code></a></td>
+                <td><a href="runs/${c.ID}">${(c.TaskID || '?')} · <code>${c.ID.slice(0,8)}</code></a></td>
                 <td><span class="badge badge-${c.Status}">${c.Status}</span></td>
                 <td class="meta">${fmtTime(c.StartedAt)}</td>
                 <td class="meta">${fmtDuration(c.StartedAt, c.FinishedAt)}</td>

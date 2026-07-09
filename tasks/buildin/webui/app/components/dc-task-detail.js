@@ -336,7 +336,7 @@ class DcTaskDetail extends LitElement {
         <td class="meta">${fmtTime(r.StartedAt)}</td>
         <td class="meta">${fmtDuration(r.StartedAt, r.FinishedAt)}</td>
         <td>${r.Status === 'suspended' ? html`
-          <a href="/runs/${r.ID}" class="btn btn-sm">Resume ↗</a>`
+          <a href="runs/${r.ID}" class="btn btn-sm">Resume ↗</a>`
           : (r.OutputContentType || r.ReturnValue) ? html`
           <a href="/runs/${r.ID}/result" target="_blank"
              class="btn btn-sm secondary">Result</a>` : ''}</td>
