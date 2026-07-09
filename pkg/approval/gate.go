@@ -51,6 +51,7 @@ type Gate struct {
 
 	mu          sync.Mutex
 	pending     map[string]pendingEntry
+	admitted    map[string]task.Kinded
 	pendingHook func(k task.Kinded, hash string)
 	bootstrap   bool
 }
@@ -70,12 +71,13 @@ func NewGate(policy Policy, lock *Lock, arm func(task.Kinded) error, log *zap.Lo
 		log = zap.NewNop()
 	}
 	return &Gate{
-		policy:  policy,
-		lock:    lock,
-		arm:     arm,
-		hashFn:  ContentHash,
-		log:     log,
-		pending: map[string]pendingEntry{},
+		policy:   policy,
+		lock:     lock,
+		arm:      arm,
+		hashFn:   ContentHash,
+		log:      log,
+		pending:  map[string]pendingEntry{},
+		admitted: map[string]task.Kinded{},
 	}
 }
 
@@ -136,6 +138,13 @@ func (g *Gate) Admit(k task.Kinded) (armed bool, err error) {
 			zap.String("task", id), zap.Error(hashErr))
 		hash = ""
 	}
+
+	// Retain the live task handle so FireGuard can re-hash the on-disk dir at
+	// fire time — the runtime re-reads task files per run, so an edit that
+	// lands between reconcile cycles must be caught when the task is fired.
+	g.mu.Lock()
+	g.admitted[id] = k
+	g.mu.Unlock()
 
 	var by string
 	switch {
@@ -234,6 +243,9 @@ func (g *Gate) approve(id, wantHash, by string) error {
 // the lock. A re-added task goes through the gate from scratch.
 func (g *Gate) Forget(id string) {
 	g.clearPending(id)
+	g.mu.Lock()
+	delete(g.admitted, id)
+	g.mu.Unlock()
 	if err := g.lock.Remove(id); err != nil {
 		g.log.Warn("approval: lock remove failed",
 			zap.String("task", id), zap.Error(err))
@@ -272,14 +284,58 @@ func (g *Gate) PendingHash(id string) (string, bool) {
 	return ent.hash, true
 }
 
-// FireGuard vetoes any fire of a pending task. Wired into the trigger
-// engine so manual / chain / replay paths — which resolve tasks from the
-// registry rather than from armed triggers — cannot run an unapproved task.
+// FireGuard vetoes any fire of a task whose current on-disk content is not
+// approved. Wired into the trigger engine so manual / chain / replay paths —
+// which resolve tasks from the registry rather than from armed triggers —
+// cannot run an unapproved task.
+//
+// Beyond the pending-set check it re-hashes the live task dir and rejects a
+// task whose content no longer matches its approved hash. The runtime imports
+// task files fresh on every run, so an edit that lands between reconcile
+// cycles would otherwise execute new code under a stale approval before the
+// gate re-pends it. Trusted / builtin tasks (and a disabled gate) skip the
+// re-hash: their trust does not bind to a specific content hash.
 func (g *Gate) FireGuard(taskID string) error {
 	if g.IsPending(taskID) {
 		return fmt.Errorf("%w: %s", ErrPending, taskID)
 	}
+	if g.trusted(taskID) {
+		return nil
+	}
+	g.mu.Lock()
+	k, ok := g.admitted[taskID]
+	g.mu.Unlock()
+	if !ok {
+		// Never admitted (unknown to the gate); nothing to verify.
+		return nil
+	}
+	live, err := g.hashFn(k)
+	if err != nil {
+		return fmt.Errorf("%w: %s (content hash failed: %v)", ErrPending, taskID, err)
+	}
+	if !g.lock.Approved(taskID, live) {
+		return fmt.Errorf("%w: %s (content changed since approval; re-approve to run)", ErrPending, taskID)
+	}
 	return nil
+}
+
+// trusted reports whether id is approved independent of its content hash:
+// builtin tasks, operator-trusted tasks/sources, or a disabled gate. Mirrors
+// the hash-independent auto-approve arms of Admit so FireGuard never vetoes a
+// task Admit would have armed unconditionally.
+func (g *Gate) trusted(id string) bool {
+	switch {
+	case SourceOf(id) == BuiltinSource:
+		return true
+	case g.policy.TrustedTasks[id]:
+		return true
+	case g.policy.TrustedSources[SourceOf(id)]:
+		return true
+	case !g.policy.Enabled:
+		return true
+	default:
+		return false
+	}
 }
 
 func (g *Gate) clearPending(id string) {
