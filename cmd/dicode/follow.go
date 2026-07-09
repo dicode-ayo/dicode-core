@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"os/signal"
-	"sync"
 
 	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/registry"
@@ -101,28 +100,12 @@ func (f controlFollowClient) Logs(runID string) ([]ipc.LogEntry, error) {
 }
 
 // followSession carries the injectable I/O and daemon client for the wizard
-// follow loop, plus the id of the continuation currently being awaited so an
-// interrupt can flush its logs.
+// follow loop.
 type followSession struct {
 	client followClient
 	in     io.Reader // answers (stdin)
 	prompt io.Writer // prompts + step banners (stderr, keeps stdout clean)
 	out    io.Writer // logs + final result (stdout)
-
-	mu     sync.Mutex
-	curRun string
-}
-
-func (s *followSession) setCurRun(id string) {
-	s.mu.Lock()
-	s.curRun = id
-	s.mu.Unlock()
-}
-
-func (s *followSession) currentRun() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.curRun
 }
 
 // follow walks a suspend wizard from an already-suspended run: it fetches the
@@ -170,7 +153,6 @@ func (s *followSession) follow(suspendedRunID string) error {
 			return err
 		}
 		contID := res.RunID
-		s.setCurRun(contID)
 		fmt.Fprintf(s.prompt, "resumed: following continuation run %s\n", contID)
 
 		result, err := s.client.WaitRun(contID)
@@ -178,7 +160,6 @@ func (s *followSession) follow(suspendedRunID string) error {
 			return err
 		}
 		s.printLogs(contID)
-		s.setCurRun("")
 
 		if result.Status == registry.StatusSuspended {
 			fmt.Fprintf(s.prompt, "\nrun %s suspended again — next step:\n", contID)
@@ -211,9 +192,12 @@ func (s *followSession) printLogs(runID string) {
 	}
 }
 
-// followSuspended drives the interactive wizard against a live daemon. SIGINT at
-// any point flushes the in-flight continuation's logs and exits 130, matching
-// the shell convention for an interrupted foreground command.
+// followSuspended drives the interactive wizard against a live daemon. Each
+// step's logs stream to stdout as it settles, so on SIGINT the accumulated
+// output is already printed; the handler only notes the interrupt and exits 130
+// (the shell convention). It deliberately issues no further control request —
+// the main goroutine is usually parked in WaitRun on the same connection, and
+// ControlClient.Send is not safe for concurrent use.
 func followSuspended(c *ipc.ControlClient, runID string) error {
 	s := &followSession{
 		client: controlFollowClient{c: c},
@@ -228,10 +212,7 @@ func followSuspended(c *ipc.ControlClient, runID string) error {
 		if _, ok := <-sigCh; !ok {
 			return
 		}
-		fmt.Fprintln(s.prompt, "\ninterrupted — output so far:")
-		if id := s.currentRun(); id != "" {
-			s.printLogs(id)
-		}
+		fmt.Fprintln(s.prompt, "\ninterrupted")
 		os.Exit(130)
 	}()
 	return s.follow(runID)
