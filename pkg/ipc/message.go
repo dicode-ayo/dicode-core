@@ -201,6 +201,10 @@ type EngineRunner interface {
 	// so the IPC server can stamp the caller's run ID on the new run (#116).
 	FireFromTask(ctx context.Context, taskID, parentRunID string, params map[string]string) (string, error)
 	WaitRun(ctx context.Context, runID string) (RunResult, error)
+	// WaitRunSettled stops at a suspended run instead of following its resume
+	// chain. The CLI needs this to render the resume form; dicode.run_task wants
+	// WaitRun's "block until genuinely terminal" contract.
+	WaitRunSettled(ctx context.Context, runID string) (RunResult, error)
 	ActiveRunCount() int
 	ActiveTaskSlots() int
 	MaxConcurrentTasks() int

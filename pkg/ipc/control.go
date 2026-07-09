@@ -624,7 +624,10 @@ func (cs *ControlServer) handleRun(ctx context.Context, req Request) (RunResult,
 	if err != nil {
 		return RunResult{}, err
 	}
-	return cs.engine.WaitRun(ctx, runID)
+	// Settled, not WaitRun: a task that suspends must surface as `suspended` so
+	// the CLI can render its resume form. WaitRun follows the resume chain and
+	// would block until someone else answers the wizard.
+	return cs.engine.WaitRunSettled(ctx, runID)
 }
 
 // handleRunWait blocks until an existing run reaches a terminal or suspended
@@ -650,7 +653,7 @@ func (cs *ControlServer) handleRunWait(ctx context.Context, req Request) (RunRes
 			return RunResult{RunID: run.ID, Status: run.Status}, nil
 		}
 	}
-	return cs.engine.WaitRun(ctx, req.RunID)
+	return cs.engine.WaitRunSettled(ctx, req.RunID)
 }
 
 func (cs *ControlServer) handleLogs(ctx context.Context, req Request) ([]LogEntry, error) {

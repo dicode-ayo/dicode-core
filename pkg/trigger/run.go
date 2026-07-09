@@ -142,6 +142,14 @@ func (e *Engine) WaitRun(ctx context.Context, runID string) (ipc.RunResult, erro
 	}
 }
 
+// WaitRunSettled is waitRunSettled for callers outside pkg/trigger. The CLI's
+// run/resume follow mode needs to observe `suspended` to render the resume form;
+// WaitRun would block past it, through the whole resume chain, and the wizard
+// would never be shown.
+func (e *Engine) WaitRunSettled(ctx context.Context, runID string) (ipc.RunResult, error) {
+	return e.waitRunSettled(ctx, runID)
+}
+
 // waitRunSettled blocks until the run's goroutine finishes (or is already done)
 // and returns its current record, including a non-terminal `suspended`. It does
 // not follow the resume chain — callers that must observe `suspended` directly
