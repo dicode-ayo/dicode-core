@@ -464,7 +464,16 @@ func (e *Engine) Register(k task.Kinded) error {
 		// holds pipelines), but the delete is a cheap no-op safeguard if a
 		// pipeline is ever replaced in-place by a Task of the same ID.
 		delete(e.deferredPipelines, s.ID)
-		e.unregisterTriggers(s.ID)
+		// Keep the webhook path this registration is about to re-claim, so a
+		// request in flight during a reload never sees it missing. Only when the
+		// path will actually be re-added below: a disabled task arms no triggers,
+		// and registerWebhookPath refuses the reserved OAuth path.
+		keep := ""
+		if s.Enabled && s.Trigger.Webhook != "" &&
+			!(s.Trigger.Webhook == reservedOAuthCompletePath && s.ID != oauthRelayBuiltinID) {
+			keep = s.Trigger.Webhook
+		}
+		e.unregisterTriggersKeeping(s.ID, keep)
 
 		// Disabled tasks are kept in the registry for API visibility but must not
 		// be scheduled, spawned as daemons, or registered as webhook endpoints.
@@ -542,6 +551,18 @@ func (e *Engine) Unregister(id string) {
 // while already holding registerMu without deadlocking on a re-entrant lock.
 // Does NOT touch deferredPipelines (the caller handles that under registerMu).
 func (e *Engine) unregisterTriggers(id string) {
+	e.unregisterTriggersKeeping(id, "")
+}
+
+// unregisterTriggersKeeping is unregisterTriggers, except that a webhook path
+// the caller is about to re-claim for the same task is left in place.
+//
+// registerMu serialises registrations but webhook lookups only take e.mu, so a
+// request racing a re-registration would otherwise find the path gone between
+// the delete here and the re-add in registerWebhookPath, and 404. Every
+// Register re-registers (Engine.Start at boot, the reconciler on every content
+// change), so a live webhook could 404 for no reason the caller could see.
+func (e *Engine) unregisterTriggersKeeping(id, keepWebhookPath string) {
 	e.mu.Lock()
 	hadCron := false
 	if entryID, ok := e.cronEntries[id]; ok {
@@ -550,7 +571,7 @@ func (e *Engine) unregisterTriggers(id string) {
 		hadCron = true
 	}
 	for path, tid := range e.webhooks {
-		if tid == id {
+		if tid == id && path != keepWebhookPath {
 			delete(e.webhooks, path)
 		}
 	}
