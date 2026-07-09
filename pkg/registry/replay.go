@@ -11,6 +11,13 @@ import (
 // allow it. See ownership policy in Replay's doc comment.
 var ErrReplayNotPermitted = errors.New("replay: caller task may not replay this run")
 
+// ErrRunNotReplayable is returned by Replay when the target run is suspended.
+// A suspended run is mid-flight awaiting input and must be resumed (which
+// consumes its single-use token), not replayed — replaying would spawn a
+// duplicate fresh execution alongside a run that still holds a live resume
+// token, bypassing the resume flow.
+var ErrRunNotReplayable = errors.New("replay: run is suspended and must be resumed, not replayed")
+
 // ReplayRunner abstracts the trigger engine's ability to fire a task with a
 // given input as a "replay" source. Decoupled from pkg/trigger via this
 // interface to keep pkg/registry import-cycle-free. The trigger engine's
@@ -65,6 +72,9 @@ func (r *Replayer) Replay(ctx context.Context, runID, taskName, callerTaskID, ca
 	run, err := r.registry.GetRun(ctx, runID)
 	if err != nil {
 		return "", fmt.Errorf("get run: %w", err)
+	}
+	if run.Status == StatusSuspended {
+		return "", ErrRunNotReplayable
 	}
 	if run.InputStorageKey == "" {
 		return "", ErrInputUnavailable

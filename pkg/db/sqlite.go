@@ -245,6 +245,19 @@ func (s *SQLiteDB) migrate() error {
 		return fmt.Errorf("migrate run-grouping indexes: %w", err)
 	}
 
+	// Suspend/resume lookup indexes (#95). Without them the resume-token lookup
+	// (GetRunByResumeToken) and the per-minute deadline sweep (SweepExpiredSuspensions)
+	// full-scan `runs`, which grows unbounded with run history. The token index
+	// is partial: only suspended/resumed rows carry a token, so it stays tiny
+	// against a table that is overwhelmingly terminal runs.
+	_, err = s.db.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_runs_resume_token ON runs(resume_token) WHERE resume_token IS NOT NULL;
+		CREATE INDEX IF NOT EXISTS idx_runs_status_resume_deadline ON runs(status, resume_deadline);
+	`)
+	if err != nil {
+		return fmt.Errorf("migrate resume indexes: %w", err)
+	}
+
 	// author_sessions — AI-first task authoring sessions (#288).
 	_, err = s.db.Exec(`
 		CREATE TABLE IF NOT EXISTS author_sessions (

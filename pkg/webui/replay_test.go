@@ -2,12 +2,34 @@ package webui
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/dicode/dicode/pkg/registry"
 )
+
+// suspendGuardFetcher satisfies the (unexported) fetcher the Replayer depends
+// on. The suspended-run guard fires before any fetch, so Fetch must never be
+// called.
+type suspendGuardFetcher struct{ t *testing.T }
+
+func (s suspendGuardFetcher) Fetch(context.Context, string, string, int64) (registry.PersistedInput, error) {
+	s.t.Fatal("Fetch called; suspended-run guard should short-circuit before input fetch")
+	return registry.PersistedInput{}, nil
+}
+
+// suspendGuardRunner records whether a replay was ever fired.
+type suspendGuardRunner struct{ fired bool }
+
+func (s *suspendGuardRunner) FireForReplay(context.Context, string, string, any) (string, error) {
+	s.fired = true
+	return "new-run", nil
+}
 
 // apiReplayRun's failure paths can be exercised without a fully-wired
 // Replayer: when the server's Replayer is nil, the handler should return
@@ -73,5 +95,33 @@ func TestApiReplayRun_RejectsUnknownFields(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400; body = %s", w.Code, w.Body.String())
+	}
+}
+
+// A suspended run must be resumed, not replayed. The server rejects the replay
+// with 409 Conflict and never fires the runner.
+func TestApiReplayRun_409OnSuspendedRun(t *testing.T) {
+	srv, reg := newTestServer(t)
+	ctx := context.Background()
+
+	if _, err := reg.StartRunWithID(ctx, "susp-run", "user-task", "", "manual", "task"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reg.SuspendRun(ctx, "susp-run", []byte(`{"step":1}`), nil, "tok", time.Now().UnixMilli(), 0, nil); err != nil {
+		t.Fatal(err)
+	}
+	runner := &suspendGuardRunner{}
+	srv.SetReplayer(registry.NewReplayer(reg, suspendGuardFetcher{t}, runner))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/runs/susp-run/replay", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Errorf("status = %d, want 409; body = %s", w.Code, w.Body.String())
+	}
+	if runner.fired {
+		t.Error("runner fired on a suspended run; replay must be blocked")
 	}
 }

@@ -488,7 +488,7 @@ func TestSuspendRun_RoundTrip(t *testing.T) {
 	suspendedAt := time.Now().UnixMilli()
 	deadline := suspendedAt + 86_400_000
 
-	if err := r.SuspendRun(ctx, runID, state, schema, token, suspendedAt, deadline, nil); err != nil {
+	if _, err := r.SuspendRun(ctx, runID, state, schema, token, suspendedAt, deadline, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -531,7 +531,7 @@ func TestSuspendRun_NoDeadlineNilBlobs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := r.SuspendRun(ctx, runID, nil, nil, "tok", time.Now().UnixMilli(), 0, nil); err != nil {
+	if _, err := r.SuspendRun(ctx, runID, nil, nil, "tok", time.Now().UnixMilli(), 0, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -564,7 +564,7 @@ func TestCleanupStaleRuns_SkipsSuspended(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := r.SuspendRun(ctx, suspended, []byte(`{}`), nil, "tok", time.Now().UnixMilli(), 0, nil); err != nil {
+	if _, err := r.SuspendRun(ctx, suspended, []byte(`{}`), nil, "tok", time.Now().UnixMilli(), 0, nil); err != nil {
 		t.Fatal(err)
 	}
 	running, err := r.StartRun(ctx, "task-b", "")
@@ -589,5 +589,41 @@ func TestCleanupStaleRuns_SkipsSuspended(t *testing.T) {
 	}
 	if rRun.Status != StatusCancelled {
 		t.Errorf("running run status = %q, want %q", rRun.Status, StatusCancelled)
+	}
+}
+
+// A finalize that already moved a run out of `running` (e.g. a kill or shutdown
+// drain writing cancelled) must not be resurrected to suspended by a suspend
+// persist landing afterward. SuspendRun is status-guarded and reports no change.
+func TestSuspendRun_DoesNotResurrectCancelled(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	r := newTestRegistry(t)
+
+	runID, err := r.StartRun(ctx, "task-race", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.FinishRun(ctx, runID, StatusCancelled); err != nil {
+		t.Fatal(err)
+	}
+
+	suspended, err := r.SuspendRun(ctx, runID, []byte(`{"step":1}`), nil, "tok", time.Now().UnixMilli(), 0, nil)
+	if err != nil {
+		t.Fatalf("SuspendRun: %v", err)
+	}
+	if suspended {
+		t.Fatal("SuspendRun reported a change on a cancelled run; want no-op")
+	}
+
+	run, err := r.GetRun(ctx, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Status != StatusCancelled {
+		t.Errorf("status = %q, want %q (must not be resurrected)", run.Status, StatusCancelled)
+	}
+	if run.ResumeToken != "" {
+		t.Errorf("resume_token = %q, want empty (no resume state should be written)", run.ResumeToken)
 	}
 }
