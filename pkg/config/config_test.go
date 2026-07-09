@@ -113,6 +113,59 @@ sources:
 // TestLoad_RejectsLegacyNotificationsBlock ensures the removed
 // `notifications:` block is rejected at load time. yaml.v3 would otherwise
 // drop it silently and operators would lose alerts without warning.
+// TestLoad_SourceSecurityAllowlist parses a valid source_security block into
+// the runtime allowlist, honouring hostnames on the literal-host layer and
+// CIDRs on the resolved-IP layer.
+func TestLoad_SourceSecurityAllowlist(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "dicode.yaml")
+	content := `
+source_security:
+  allow_internal_hosts:
+    - git.corp.internal
+    - 10.0.0.0/8
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load = %v, want nil", err)
+	}
+	al, err := cfg.SourceSecurity.Allowlist()
+	if err != nil {
+		t.Fatalf("Allowlist() = %v, want nil", err)
+	}
+	if !al.AllowsHost("git.corp.internal") {
+		t.Error("AllowsHost(git.corp.internal) = false, want true")
+	}
+	if al.AllowsIP(nil) {
+		t.Error("AllowsIP(nil) = true, want false")
+	}
+}
+
+// TestLoad_SourceSecurityRejectsBadEntry proves a malformed entry fails at
+// load time rather than at first clone.
+func TestLoad_SourceSecurityRejectsBadEntry(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "dicode.yaml")
+	content := `
+source_security:
+  allow_internal_hosts:
+    - 10.0.0.0/999
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(cfgPath)
+	if err == nil {
+		t.Fatal("Load accepted invalid CIDR; want error")
+	}
+	if !strings.Contains(err.Error(), "allow_internal_hosts") {
+		t.Errorf("error = %v; want mention of allow_internal_hosts", err)
+	}
+}
+
 func TestLoad_RejectsLegacyNotificationsBlock(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "dicode.yaml")

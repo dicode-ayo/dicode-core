@@ -619,11 +619,26 @@ runtimes:
     version: "0.7.3"                      # pin uv version
     # disabled: true                      # disable this runtime entirely
 
+source_security:
+  # Escape hatch for self-hosting git on a private network. By default a
+  # source pointed at a loopback/private/link-local/internal host is refused
+  # under every scheme (SSRF guard). List the specific hosts/CIDRs you trust:
+  allow_internal_hosts:
+    - git.corp.internal                   # authorises ssh:// and git@host:path to this host
+    - 10.0.0.0/8                          # ALSO required for http/https (see note below)
+
 log_level: info                           # "debug", "info", "warn", "error"
 data_dir: ~/.dicode                       # where to store repo clones, sqlite db, etc.
 ```
 
 **Config variables**: `${HOME}`, `${DATADIR}` (resolves to `data_dir`), and `${CONFIGDIR}` (resolves to the directory containing `dicode.yaml`) can be used in any string value.
+
+**Self-hosting git on an internal host** (`source_security.allow_internal_hosts`): dicode refuses to contact a git remote on a loopback/private/link-local/internal address unless you allowlist it. There are two guard layers and they match on different values, so an entry's *kind* determines its reach:
+
+- A **hostname** entry (e.g. `git.corp.internal`) authorises `ssh://` and `git@host:path` remotes — those are checked only against the literal host string.
+- `http`/`https` remotes are *additionally* re-checked at connection time against the **resolved IP**, so for those you must also list the target's **IP or CIDR** (e.g. `10.0.0.0/8`). A hostname entry alone never authorises the address it resolves to — this is deliberate, so allowlisting a name can't be turned into a DNS-rebind bypass.
+
+Leave the block empty (or omit it) to keep the fully fail-closed default. A rejected clone's error names this key.
 
 **Task ID uniqueness**: task IDs (directory names) must be unique across all sources. If two sources contain a task with the same ID, the second one is skipped and an error is logged.
 

@@ -145,9 +145,10 @@ func guardedDialContext(ctx context.Context, network, address string) (net.Conn,
 	if len(candidates) == 0 {
 		return nil, fmt.Errorf("dial guard: host %q resolved to no addresses", host)
 	}
+	allow := activeAllowlist()
 	for _, ip := range candidates {
-		if IsBlockedIP(ip) {
-			return nil, fmt.Errorf("dial guard: %q resolves to private/internal address %s; refusing to connect", host, ip)
+		if IsBlockedIP(ip) && !allow.AllowsIP(ip) {
+			return nil, fmt.Errorf("dial guard: %q resolves to private/internal address %s; refusing to connect (permit it via source_security.allow_internal_hosts)", host, ip)
 		}
 	}
 
