@@ -198,7 +198,7 @@ func dispatch(c *ipc.ControlClient, args []string) error {
 		return cmdAI(c, args[1:])
 	case "task":
 		if len(args) < 2 {
-			return fmt.Errorf("usage: dicode task <test|create|edit|save|cancel|delete> [args...]")
+			return fmt.Errorf("usage: dicode task <test|create|edit|save|cancel|delete|approve|pending> [args...]")
 		}
 		return cmdTask(c, args[1:])
 	case "auth":
@@ -571,9 +571,38 @@ func cmdTask(c *ipc.ControlClient, args []string) error {
 		return cmdTaskDelete(c, args[1:])
 	case "approve":
 		return cmdTaskApprove(c, args[1:])
+	case "pending":
+		return cmdTaskPending(c)
 	default:
-		return fmt.Errorf("unknown task subcommand %q — supported: test, create, edit, save, cancel, delete, approve", args[0])
+		return fmt.Errorf("unknown task subcommand %q — supported: test, create, edit, save, cancel, delete, approve, pending", args[0])
 	}
+}
+
+// cmdTaskPending implements `dicode task pending`: lists the tasks the
+// trust-on-change approval gate is holding, each with its short content hash, so
+// an operator can copy an id straight into `dicode task approve`.
+func cmdTaskPending(c *ipc.ControlClient) error {
+	resp, err := c.Send(ipc.Request{Method: "cli.task.pending"})
+	if err != nil {
+		return err
+	}
+	if resp.Error != "" {
+		return fmt.Errorf("%s", resp.Error)
+	}
+	var tasks []ipc.PendingTask
+	if err := remarshal(resp.Result, &tasks); err != nil {
+		return err
+	}
+	if len(tasks) == 0 {
+		fmt.Println("no tasks pending approval")
+		return nil
+	}
+	fmt.Printf("%-40s %s\n", "TASK ID", "HASH")
+	for _, t := range tasks {
+		fmt.Printf("%-40s %s\n", t.TaskID, t.Hash)
+	}
+	fmt.Println("\napprove with: dicode task approve <task-id>")
+	return nil
 }
 
 // cmdTaskApprove implements `dicode task approve <task-id>`: approves a task
@@ -868,9 +897,18 @@ func cmdList(c *ipc.ControlClient) error {
 		fmt.Println("no tasks registered")
 		return nil
 	}
-	fmt.Printf("%-30s %-12s %-10s %s\n", "ID", "TRIGGER", "LAST STATUS", "NAME")
+	anyPending := false
+	fmt.Printf("%-30s %-12s %-10s %-8s %s\n", "ID", "TRIGGER", "LAST STATUS", "APPROVAL", "NAME")
 	for _, t := range tasks {
-		fmt.Printf("%-30s %-12s %-10s %s\n", t.ID, t.Trigger, orDash(t.LastStatus), t.Name)
+		approval := "-"
+		if t.Pending {
+			approval = "pending"
+			anyPending = true
+		}
+		fmt.Printf("%-30s %-12s %-10s %-8s %s\n", t.ID, t.Trigger, orDash(t.LastStatus), approval, t.Name)
+	}
+	if anyPending {
+		fmt.Println("\ntasks marked 'pending' await approval — see: dicode task pending")
 	}
 	return nil
 }
@@ -1577,6 +1615,7 @@ Commands:
                                   flags: --format=text|junit|gh-summary
   task delete <task-id> [flags]   remove a task from its source (local rm / git PR)
                                   flags: --source NAME, --force
+  task pending                    list tasks held pending by the approval gate, with their content hash
   task approve <task-id>          approve a task held pending by the approval gate
   relock [--check] [dir]          regenerate/verify all task locks (deno.lock + task.py.lock sidecars)
   deno relock [--check] [dir]     regenerate/verify a task tree's deno.lock via the pinned Deno

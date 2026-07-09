@@ -1152,7 +1152,7 @@ The testing and validation system is designed with four layers. Not all are impl
 | Unit tests | `dicode task test` | Logic bugs, wrong HTTP calls, bad return values | ✅ Implemented (Deno; Python/Docker/Podman tracked as #159) |
 | Dry run | `dicode task run --dry-run` | Secret resolution, correct endpoints | Planned |
 
-> **Note**: E2E tests use Playwright and cover core UI flows, file changes, webhooks, config, and auth. Unit tests run via `dicode task test <task-id>` or `make test-tasks` — the CLI routes through the same executor as the MCP `test_task` tool so any caller (human, built-in agent, third-party AI) gets the same results. `task validate` and `task run --dry-run` are not yet implemented. Current CLI supports: `run`, `list`, `logs`, `status`, `ai`, `task test`, `secrets`, `relay`, `version`.
+> **Note**: E2E tests use Playwright and cover core UI flows, file changes, webhooks, config, and auth. Unit tests run via `dicode task test <task-id>` or `make test-tasks` — the CLI routes through the same executor as the MCP `test_task` tool so any caller (human, built-in agent, third-party AI) gets the same results. `task validate` and `task run --dry-run` are not yet implemented. Current CLI supports: `run`, `list`, `logs`, `status`, `ai`, `task test`, `task pending`, `task approve`, `secrets`, `relay`, `version`. When the trust-on-change approval gate is holding tasks, `dicode list` marks them `pending` in an APPROVAL column and `dicode task pending` lists each held task with its short content hash — copy an id straight into `dicode task approve <task-id>`.
 
 ---
 

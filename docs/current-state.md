@@ -208,7 +208,7 @@ Unified IPC protocol replacing the old per-runtime `pkg/runtime/deno/server/`. T
 
 **Control socket** (persistent, daemon-lifetime):
 
-- `control.go` — **`ControlServer`**: listens at `~/.dicode/daemon.sock` (mode 0600). On startup writes a pre-issued CLI token to `~/.dicode/daemon.token` (mode 0600, atomic write). Handles `cli.ping`, `cli.list`, `cli.run`, `cli.logs`, `cli.status`, `cli.secrets.{list,set,delete}`. Context-aware: per-connection context cancels in-flight `cli.run` on client disconnect. CLI tokens use `tokenCLITTL` (~10 years) — daemon restart re-issues anyway
+- `control.go` — **`ControlServer`**: listens at `~/.dicode/daemon.sock` (mode 0600). On startup writes a pre-issued CLI token to `~/.dicode/daemon.token` (mode 0600, atomic write). Handles `cli.ping`, `cli.list`, `cli.run`, `cli.logs`, `cli.status`, `cli.secrets.{list,set,delete}`, `cli.task.{approve,pending}`. `cli.task.pending` lists tasks the approval gate is holding (each with a short content hash); `cli.list` also flags held tasks via `TaskSummary.Pending`. Both read the gate through `SetPendingApprovals`; a nil gate yields an empty list, not an error. Context-aware: per-connection context cancels in-flight `cli.run` on client disconnect. CLI tokens use `tokenCLITTL` (~10 years) — daemon restart re-issues anyway
 - `control_client.go` — **`ControlClient`**: `Dial(socketPath, tokenPath)` → `Send(req)` → `Close()`. Handshake decodes a union struct covering both success (`proto`) and error (`error`) envelopes
 
 - `pkg/runtime/deno/server/` **deleted** — both Deno and Python runtimes now import `pkg/ipc`
@@ -245,7 +245,7 @@ The daemon process logic, invoked via `dicode daemon`. Exported entry point: `da
 
 CLI dispatcher + daemon mode in one binary:
 
-- Subcommands: `daemon [-config dicode.yaml]`, `run <task-id> [key=value ...]`, `list`, `logs <run-id>`, `status [task-id]`, `secrets {list,set,delete}`, `version`
+- Subcommands: `daemon [-config dicode.yaml]`, `run <task-id> [key=value ...]`, `list`, `logs <run-id>`, `status [task-id]`, `task {test,create,edit,save,cancel,delete,approve,pending}`, `secrets {list,set,delete}`, `version` — `task pending` lists gate-held tasks with their content hash; `list` marks them in an APPROVAL column
 - `daemon` subcommand calls `pkg/daemon.Run()` — starts the full engine in-process
 - **Auto-start**: if `~/.dicode/daemon.sock` is not connectable, re-execs itself (`dicode daemon`) in the background, redirects stderr to `~/.dicode/daemon.log`, polls for the socket (8 second timeout)
 - Reads `~/.dicode/daemon.token` and calls `ipc.Dial()` to connect
