@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 
 	"github.com/dicode/dicode/pkg/ipc"
@@ -24,19 +25,103 @@ func stdinIsInteractive() bool {
 	return term.IsTerminal(int(os.Stdin.Fd()))
 }
 
-// parseInteractiveFlag pulls the --non-interactive opt-out (alias --batch) out
-// of a subcommand's argument list, returning whether it was present and the
-// remaining positional args (task/run id and field=value pairs) in order.
-func parseInteractiveFlag(args []string) (nonInteractive bool, rest []string) {
-	for _, a := range args {
-		switch a {
-		case "--non-interactive", "--batch":
+// parseWizardFlags pulls the wizard control flags out of a run/resume argument
+// list: the --non-interactive opt-out (alias --batch) and repeatable --field
+// name=value pre-supplied answers (both `--field name=value` and
+// `--field=name=value` spellings). The remaining positional args (task/run id
+// and any inline key=value pairs) are returned in order.
+func parseWizardFlags(args []string) (nonInteractive bool, fields, rest []string, err error) {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--non-interactive" || a == "--batch":
 			nonInteractive = true
+		case a == "--field":
+			if i+1 >= len(args) {
+				return false, nil, nil, fmt.Errorf("--field requires a name=value argument")
+			}
+			i++
+			fields = append(fields, args[i])
+		case strings.HasPrefix(a, "--field="):
+			fields = append(fields, strings.TrimPrefix(a, "--field="))
 		default:
 			rest = append(rest, a)
 		}
 	}
-	return nonInteractive, rest
+	return nonInteractive, fields, rest, nil
+}
+
+// prefillPool holds the --field name=value answers pre-supplied for a wizard.
+// Values are matched against each step's schema as the wizard advances and
+// consumed at first match, so a later step that happens to declare the same
+// field name does not inherit an earlier step's value.
+type prefillPool struct {
+	vals map[string]string
+	used map[string]bool
+}
+
+// newPrefillPool parses the raw --field arguments into a name-keyed pool.
+// Duplicate field names are rejected: the pool is matched by name, so a repeated
+// name is ambiguous.
+func newPrefillPool(fields []string) (*prefillPool, error) {
+	p := &prefillPool{vals: map[string]string{}, used: map[string]bool{}}
+	for _, f := range fields {
+		name, raw, ok := strings.Cut(f, "=")
+		if !ok {
+			return nil, fmt.Errorf("invalid --field %q — expected name=value", f)
+		}
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return nil, fmt.Errorf("invalid --field %q — empty field name", f)
+		}
+		if _, dup := p.vals[name]; dup {
+			return nil, fmt.Errorf("duplicate --field %q", name)
+		}
+		p.vals[name] = raw
+	}
+	return p, nil
+}
+
+// take returns the raw value for name and marks it consumed, if it is present
+// and not yet used. A nil pool yields no value.
+func (p *prefillPool) take(name string) (string, bool) {
+	if p == nil || p.used[name] {
+		return "", false
+	}
+	raw, ok := p.vals[name]
+	if ok {
+		p.used[name] = true
+	}
+	return raw, ok
+}
+
+// empty reports whether the pool holds no pre-supplied answers.
+func (p *prefillPool) empty() bool {
+	return p == nil || len(p.vals) == 0
+}
+
+// unused returns the names of pre-supplied answers never consumed, sorted. These
+// are typically typos or fields belonging to a branch the wizard did not take.
+func (p *prefillPool) unused() []string {
+	if p == nil {
+		return nil
+	}
+	var names []string
+	for n := range p.vals {
+		if !p.used[n] {
+			names = append(names, n)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// warnUnusedPrefill reports pre-supplied --field answers that were never
+// consumed by any step the wizard reached.
+func warnUnusedPrefill(w io.Writer, p *prefillPool) {
+	if names := p.unused(); len(names) > 0 {
+		fmt.Fprintf(w, "warning: --field value(s) never used by any step reached: %s\n", strings.Join(names, ", "))
+	}
 }
 
 // resumeFieldNames returns the property names to hint at for a non-interactive
@@ -150,6 +235,14 @@ type followSession struct {
 	in     io.Reader // answers (stdin)
 	prompt io.Writer // prompts + step banners (stderr, keeps stdout clean)
 	out    io.Writer // logs + final result (stdout)
+
+	// prefill holds --field name=value answers to auto-advance steps without
+	// prompting. nil/empty means every step is prompted (or fails under
+	// nonInteractive).
+	prefill *prefillPool
+	// nonInteractive suppresses prompting: a reached step whose required fields
+	// are not all pre-supplied fails deterministically instead of blocking.
+	nonInteractive bool
 }
 
 // resumeSchemaMeta extracts a schema's top-level title and description, used to
@@ -191,7 +284,47 @@ func (s *followSession) printOneShotSuspended(runID string, entries []resumeProp
 // spins. For promptable schemas, an object-level validation failure re-prompts,
 // but only while a re-prompt can change the input: identical input failing twice
 // (e.g. optional fields left blank at EOF) aborts instead of hot-looping.
-func (s *followSession) collectStepInput(reader *bufio.Reader, schema []byte, entries []resumePropEntry, required map[string]bool) ([]byte, bool, error) {
+func (s *followSession) collectStepInput(reader *bufio.Reader, label string, schema []byte, entries []resumePropEntry, required map[string]bool) ([]byte, bool, error) {
+	// Pull pre-supplied answers for this step's declared properties out of the
+	// pool, consuming each at first match, and coerce them to the schema's types.
+	pre := map[string]any{}
+	for _, e := range entries {
+		raw, ok := s.prefill.take(e.Name)
+		if !ok {
+			continue
+		}
+		v, err := coerceResumeValue(e.Prop, raw)
+		if err != nil {
+			return nil, false, fmt.Errorf("--field %s: %w", e.Name, err)
+		}
+		pre[e.Name] = v
+	}
+	missing := missingRequiredFields(entries, required, pre)
+
+	// Submit without prompting when nothing more can be asked (non-interactive)
+	// or every declared property of the step is pre-supplied. A partially
+	// pre-supplied interactive step falls through so its optional fields are
+	// still offered — pre-supplying the required fields must not silently drop a
+	// gap the operator would otherwise fill.
+	fullyPrefilled := len(pre) > 0 && len(pre) == len(entries)
+	if len(missing) == 0 && (s.nonInteractive || fullyPrefilled) {
+		inputJSON, err := json.Marshal(pre)
+		if err != nil {
+			return nil, false, err
+		}
+		if verr := schemavalidate.Validate(schema, inputJSON); verr != nil {
+			return nil, false, fmt.Errorf("step %q: %w", label, verr)
+		}
+		return inputJSON, true, nil
+	}
+
+	// Non-interactive with an unfilled required field: fail deterministically
+	// rather than block on a prompt an agent/CI caller cannot answer.
+	if s.nonInteractive {
+		return nil, false, fmt.Errorf("step %q: missing required field(s): %s (supply with --field %s=…)",
+			label, strings.Join(missing, ", "), missing[0])
+	}
+
 	if len(entries) == 0 {
 		empty := []byte("{}")
 		if verr := schemavalidate.Validate(schema, empty); verr != nil {
@@ -216,11 +349,25 @@ func (s *followSession) collectStepInput(reader *bufio.Reader, schema []byte, en
 		return empty, true, nil
 	}
 
+	// promptResumeInput has no notion of pre-supplied answers, so feed it only the
+	// unanswered properties and fold the pre-supplied ones into its result.
+	promptable := entries
+	if len(pre) > 0 {
+		promptable = promptable[:0:0]
+		for _, e := range entries {
+			if _, ok := pre[e.Name]; !ok {
+				promptable = append(promptable, e)
+			}
+		}
+	}
 	var last []byte
 	for {
-		values, perr := promptResumeInput(entries, required, reader, s.prompt)
+		values, perr := promptResumeInput(promptable, required, reader, s.prompt)
 		if perr != nil {
 			return nil, false, perr
+		}
+		for k, v := range pre {
+			values[k] = v
 		}
 		inputJSON, err := json.Marshal(values)
 		if err != nil {
@@ -236,6 +383,41 @@ func (s *followSession) collectStepInput(reader *bufio.Reader, schema []byte, en
 		}
 		return inputJSON, true, nil
 	}
+}
+
+// missingRequiredFields returns the required property names not answered by the
+// pre-supplied values, in declaration order first (so error messages read in
+// schema order), then any required name that is not a declared property.
+func missingRequiredFields(entries []resumePropEntry, required map[string]bool, pre map[string]any) []string {
+	var missing []string
+	seen := map[string]bool{}
+	for _, e := range entries {
+		if required[e.Name] {
+			seen[e.Name] = true
+			if _, ok := pre[e.Name]; !ok {
+				missing = append(missing, e.Name)
+			}
+		}
+	}
+	var extra []string
+	for name := range required {
+		if !seen[name] {
+			if _, ok := pre[name]; !ok {
+				extra = append(extra, name)
+			}
+		}
+	}
+	sort.Strings(extra)
+	return append(missing, extra...)
+}
+
+// stepLabel names a step for prompts and error messages: its schema title if
+// present, otherwise the suspended run id.
+func stepLabel(schema []byte, runID string) string {
+	if title, _ := resumeSchemaMeta(schema); title != "" {
+		return title
+	}
+	return runID
 }
 
 // follow walks a suspend wizard from an already-suspended run: it fetches the
@@ -260,7 +442,7 @@ func (s *followSession) follow(suspendedRunID string) error {
 			return fmt.Errorf("read resume schema: %w", err)
 		}
 
-		inputJSON, submit, err := s.collectStepInput(reader, info.Schema, entries, required)
+		inputJSON, submit, err := s.collectStepInput(reader, stepLabel(info.Schema, runID), info.Schema, entries, required)
 		if err != nil {
 			return err
 		}
@@ -305,6 +487,7 @@ func (s *followSession) follow(suspendedRunID string) error {
 			out, _ := json.MarshalIndent(result.ReturnValue, "", "  ")
 			fmt.Fprintln(s.out, string(out))
 		}
+		warnUnusedPrefill(s.prompt, s.prefill)
 		if result.Status == registry.StatusFailure {
 			return fmt.Errorf("task failed")
 		}
@@ -332,12 +515,14 @@ func (s *followSession) printLogs(runID string) {
 // WaitRun on the same connection, and ControlClient.Send is not safe for
 // concurrent use. The handler notes the interrupt and exits 130 (the shell
 // convention); the daemon cancels the in-flight run when the connection drops.
-func followSuspended(c *ipc.ControlClient, runID string) error {
+func followSuspended(c *ipc.ControlClient, runID string, prefill *prefillPool, nonInteractive bool) error {
 	s := &followSession{
-		client: controlFollowClient{c: c},
-		in:     os.Stdin,
-		prompt: os.Stderr,
-		out:    os.Stdout,
+		client:         controlFollowClient{c: c},
+		in:             os.Stdin,
+		prompt:         os.Stderr,
+		out:            os.Stdout,
+		prefill:        prefill,
+		nonInteractive: nonInteractive,
 	}
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt)

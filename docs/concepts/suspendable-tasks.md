@@ -431,6 +431,43 @@ follow: dicode logs 7f8a…
 
 The continuation runs asynchronously; follow it with `dicode logs <run-id>`.
 
+### Pre-supply a whole wizard with `--field`
+
+`dicode run` and `dicode resume` accept repeatable `--field name=value` flags that
+**pre-supply wizard answers upfront**. As each step suspends, if a matching value
+was supplied, dicode auto-answers that step (coerced to the schema's type and
+validated server-side) and advances without prompting — so a multi-step wizard
+runs in a single command:
+
+```console
+$ dicode run examples/suspend-wizard \
+    --field project_name=acme --field framework=deno --field confirmed=true
+run …: success
+{ "project": "acme", "framework": "deno", "confirmed": true }
+```
+
+Semantics:
+
+- **Matched per step, consumed at first match.** Each value is offered to the
+  next step whose schema declares that field name, then consumed. If two steps
+  share a field name, the value is used by the **first** step to reach it and
+  does not leak into the later one — supply the later step's answer interactively
+  or with a follow-up `dicode resume`.
+- **Fills the gaps interactively.** On a TTY, a step whose fields aren't all
+  pre-supplied still prompts for the missing ones; pre-supplied fields are not
+  re-asked.
+- **Deterministic under `--non-interactive`.** With `--non-interactive` (alias
+  `--batch`) or piped stdin, a reached step whose required field has no
+  pre-supplied value **fails clearly**, naming the step and the missing field,
+  rather than hanging — ideal for agents and CI.
+- **Type-checked before submit.** A value that can't coerce to its field's type
+  (e.g. `--field count=abc` for an integer) is a hard error. Values that never
+  match any step reached (a typo, or a field on a branch not taken) are reported
+  as a warning once the wizard settles.
+
+Positional `field=value` pairs on `dicode resume` still answer the current step
+one-shot; they cannot be combined with `--field` on the same command.
+
 ---
 
 ## See also
