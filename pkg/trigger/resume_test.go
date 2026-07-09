@@ -422,7 +422,7 @@ func TestSuspendedDaemonRun_KeepsSlotAndReportsSuspended(t *testing.T) {
 	if _, err := reg.StartRunWithID(ctx, runID, spec.ID, "", string(registry.TriggerDaemon), registry.RunKindTask); err != nil {
 		t.Fatalf("StartRunWithID: %v", err)
 	}
-	if err := reg.SuspendRun(ctx, runID, []byte(`{}`), nil, "tok-daemon", time.Now().UnixMilli(), 0, nil); err != nil {
+	if _, err := reg.SuspendRun(ctx, runID, []byte(`{}`), nil, "tok-daemon", time.Now().UnixMilli(), 0, nil); err != nil {
 		t.Fatalf("SuspendRun: %v", err)
 	}
 

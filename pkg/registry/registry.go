@@ -262,15 +262,24 @@ func (r *Registry) FinishRunWithResult(ctx context.Context, runID, status, retur
 // A deadline of 0 stores NULL (no TTL). state, schema, and resumeParams may be
 // nil. The schema is persisted in the legacy resume_form BLOB column (reused
 // as-is to avoid a migration).
-func (r *Registry) SuspendRun(ctx context.Context, runID string, state, schema []byte, token string, suspendedAt, deadline int64, resumeParams []byte) error {
+//
+// The UPDATE is guarded on status = running so a concurrent finalize (a kill or
+// shutdown drain that already moved the run to cancelled/failure) is not
+// clobbered back to suspended. Reports whether the row changed: false means the
+// run left `running` before the suspend landed, so no resume state was written.
+func (r *Registry) SuspendRun(ctx context.Context, runID string, state, schema []byte, token string, suspendedAt, deadline int64, resumeParams []byte) (bool, error) {
 	var deadlineArg any
 	if deadline > 0 {
 		deadlineArg = deadline
 	}
-	return r.db.Exec(ctx,
-		`UPDATE runs SET status = ?, resume_state = ?, resume_form = ?, resume_token = ?, suspended_at = ?, resume_deadline = ?, resume_params = ? WHERE id = ?`,
-		StatusSuspended, state, schema, token, suspendedAt, deadlineArg, resumeParams, runID,
+	affected, err := r.db.ExecResult(ctx,
+		`UPDATE runs SET status = ?, resume_state = ?, resume_form = ?, resume_token = ?, suspended_at = ?, resume_deadline = ?, resume_params = ? WHERE id = ? AND status = ?`,
+		StatusSuspended, state, schema, token, suspendedAt, deadlineArg, resumeParams, runID, StatusRunning,
 	)
+	if err != nil {
+		return false, err
+	}
+	return affected > 0, nil
 }
 
 // SetLogHook registers a function called after each log entry is written.

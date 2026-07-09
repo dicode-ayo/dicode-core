@@ -724,12 +724,23 @@ func (e *Engine) dispatch(ctx context.Context, spec *task.Spec, opts pkgruntime.
 	// chain — suspended is non-terminal, so success/failure chains must not
 	// fire until the continuation run reaches a real terminal state.
 	if result.Suspended {
-		if serr := e.suspendRun(&opts, result); serr != nil {
+		suspended, serr := e.suspendRun(&opts, result)
+		if serr != nil {
 			e.log.Warn("suspend run persist failed", zap.String("run", opts.RunID), zap.Error(serr))
 			if ferr := e.registry.FinishRun(context.Background(), opts.RunID, registry.StatusFailure); ferr != nil {
 				e.log.Warn("FinishRun: suspend fallback", zap.String("run", opts.RunID), zap.Error(ferr))
 			}
 			return registry.StatusFailure, &pkgruntime.RunResult{Error: serr}
+		}
+		if !suspended {
+			// A concurrent finalize (kill / shutdown drain) moved the run out of
+			// running before the suspend landed. The status guard left the row
+			// untouched; report its persisted terminal status rather than
+			// resurrecting it as suspended.
+			if run, gerr := e.registry.GetRun(context.Background(), opts.RunID); gerr == nil {
+				return run.Status, result
+			}
+			return registry.StatusCancelled, result
 		}
 		return registry.StatusSuspended, result
 	}

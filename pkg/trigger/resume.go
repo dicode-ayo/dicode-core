@@ -52,10 +52,13 @@ var (
 // an unguessable single-use resume token and records the state/form blobs plus
 // the deadline. The deadline comes from the task (result.ResumeDeadline) or
 // defaults to defaultResumeTTL from now.
-func (e *Engine) suspendRun(opts *pkgruntime.RunOptions, result *pkgruntime.RunResult) error {
+// Reports whether the run was actually suspended: false (with nil error) means
+// a concurrent finalize already moved it out of `running`, so no resume state
+// was persisted and the caller must not report it as suspended.
+func (e *Engine) suspendRun(opts *pkgruntime.RunOptions, result *pkgruntime.RunResult) (bool, error) {
 	token, err := newResumeToken()
 	if err != nil {
-		return fmt.Errorf("mint resume token: %w", err)
+		return false, fmt.Errorf("mint resume token: %w", err)
 	}
 	nowMs := time.Now().UnixMilli()
 	deadlineMs := result.ResumeDeadline
@@ -68,7 +71,7 @@ func (e *Engine) suspendRun(opts *pkgruntime.RunOptions, result *pkgruntime.RunR
 	carry := resumeCarry{Params: opts.Params, ChainDepth: e.chainDepth(opts.RunID)}
 	if len(carry.Params) > 0 || carry.ChainDepth > 0 {
 		if carryJSON, err = json.Marshal(carry); err != nil {
-			return fmt.Errorf("marshal resume params: %w", err)
+			return false, fmt.Errorf("marshal resume params: %w", err)
 		}
 	}
 	return e.registry.SuspendRun(context.Background(), opts.RunID,
