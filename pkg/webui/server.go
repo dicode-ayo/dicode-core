@@ -2240,6 +2240,17 @@ func (s *Server) apiReplayRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Hold a drain slot across Replay: its InputStore.Fetch delegates to a storage
+	// task via fireSync, a top-level run with no enclosing tracked slot. The slot
+	// makes Engine.Start's shutdown wait block until that fetch finishes its DB
+	// writes, and refuses the replay once shutdown has latched (#533).
+	release, ok := s.engine.DrainSlot()
+	if !ok {
+		jsonErr(w, "engine is shutting down", http.StatusServiceUnavailable)
+		return
+	}
+	defer release()
+
 	newRunID, err := s.replayer.Replay(r.Context(), runID, req.TaskName, "", "")
 	if err != nil {
 		var taskNotFound *trigger.TaskNotFoundError

@@ -575,21 +575,20 @@ func (e *Engine) fireWebhookTask(w http.ResponseWriter, r *http.Request, spec *t
 		}
 	}
 
-	// Reserve a drain slot for this top-level sync fire so shutdown's runWG.Wait
-	// (engine.go) waits for it before the daemon closes the DB — otherwise a
-	// sync webhook run outlasting http.Server.Shutdown's ~5s cap could hit
-	// FinishRun/chain writes against a closed DB (#529, a residual of #520).
-	// Reserved here rather than inside fireSync itself for the same reentrancy
-	// reason as the taskSem gate above: fireSync's nested if_missing/input-store
-	// calls run inside this already-tracked slot, so tracking inside fireSync
-	// would double-count (harmless for Add, but wrong semantically) and, worse,
-	// a slot reserved after shutdown latches inside a nested call would abort a
-	// sub-run whose parent is already committed to finishing.
-	if !e.trackRun() {
+	// Reserve the drain slot at this top-level fire, not inside fireSync, for the
+	// same reentrancy reason as the taskSem gate above: fireSync's nested
+	// if_missing/input-store sub-runs execute inside this already-reserved slot,
+	// so tracking inside fireSync would double-count and could abort a sub-run
+	// whose parent is already committed to finishing if shutdown latched between
+	// the outer and inner calls (#529). Without a slot here, a sync webhook run
+	// outlasting http.Server.Shutdown's ~5s cap could hit FinishRun/chain writes
+	// against a closed DB.
+	release, ok := e.DrainSlot()
+	if !ok {
 		http.Error(w, "task failed to start", http.StatusInternalServerError)
 		return
 	}
-	defer e.runWG.Done()
+	defer release()
 
 	runID, result, err := e.fireSync(context.Background(), spec, pkgruntime.RunOptions{Input: input, Params: params, WebhookCtx: webhookCtx}, registry.TriggerWebhook)
 	if err != nil {
