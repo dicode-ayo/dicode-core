@@ -43,7 +43,37 @@ func newTestEnv(t *testing.T) *testEnv {
 		t.Skipf("deno not available: %v", err)
 	}
 	eng := New(reg, rt, zap.NewNop())
+	// A testEnv never runs Engine.Start, so its shutdown drain never fires.
+	// Registering a Daemon:true spec auto-starts a standalone daemon body, and
+	// tests may leave other runs in flight; without reaping, those Deno
+	// subprocesses are orphaned (reparented to init) when the test process
+	// exits (#526). Reap them on teardown, before the LIFO-earlier db.Close.
+	t.Cleanup(func() { reapEngineRuns(eng, 10*time.Second) })
 	return &testEnv{engine: eng, reg: reg, denoRT: rt}
+}
+
+// reapEngineRuns cancels every in-flight run the engine tracks — standalone
+// daemons auto-started on Register, pipeline parents, and stage runs — and
+// waits up to grace for their Deno subprocesses to exit. It latches the
+// shutdown flag first so a restart:always daemon's kill does not immediately
+// respawn. Returns the count of Deno subprocesses still alive when it returns
+// (0 = fully reaped).
+func reapEngineRuns(eng *Engine, grace time.Duration) int {
+	eng.beginShutdown()
+	eng.runCancels.Range(func(_, v any) bool {
+		if c, ok := v.(context.CancelFunc); ok {
+			c()
+		}
+		return true
+	})
+	deadline := time.Now().Add(grace)
+	for {
+		n := len(denoruntime.ActivePIDs())
+		if n == 0 || time.Now().After(deadline) {
+			return n
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 func writeTask(t *testing.T, dir, id, script string, trigger task.TriggerConfig) *task.Spec {
