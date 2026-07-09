@@ -21,7 +21,25 @@ This closes an SSRF hole. Two guard layers now cover every scheme:
 
 `http`/`https` sources on internal addresses have already been failing since the dial-time guard landed. What changes in 0.4.1 is that `ssh` and SCP-shorthand sources — previously unguarded at the clone path — now fail the same way.
 
-**There is currently no allowlist or opt-out.** If you depend on an internal git host, do not upgrade past 0.4.0 until an operator-controlled allowlist ships. Progress is tracked in [issue #537](https://github.com/dicode-ayo/dicode-core/issues/537).
+#### Allowlisting an internal git host
+
+If you self-host git on a private network, list the specific hosts and CIDRs you trust:
+
+```yaml
+source_security:
+  allow_internal_hosts:
+    - git.corp.internal   # authorises ssh:// and git@host:path
+    - 10.0.0.0/8          # ALSO required for http/https
+```
+
+Absent config means the guard stays fully closed, so an upgrade changes nothing until you opt in.
+
+**An entry's kind determines its reach**, because the two guard layers match on different values:
+
+- A **hostname** entry authorises `ssh://` and SCP-shorthand remotes. Those are checked only against the literal host string in the URL.
+- `http`/`https` remotes are *additionally* re-checked at connection time against the **resolved IP**. For those you must also list the target's IP or CIDR.
+
+A hostname entry alone never authorises the address it resolves to. That is deliberate: otherwise allowlisting a name would become a DNS-rebind bypass.
 
 An `HTTPS_PROXY` / `HTTP_PROXY` host is exempt from the dial-time check, so an egress proxy on a private address keeps working.
 
@@ -48,5 +66,7 @@ dicode task approve <task-id>
 ```
 
 Previously a script-only edit left the resolved spec byte-identical, so the gate never re-armed and the edited code ran under the prior approval. Tasks from a source marked `trust: always`, and builtin tasks, remain exempt.
+
+To find what is being held, `dicode task pending` lists each gate-held task with its short content hash, and `dicode list` marks them in an `APPROVAL` column.
 
 If you script around `dicode`, an edit-then-run flow that used to succeed silently now needs an approve step between the two.
