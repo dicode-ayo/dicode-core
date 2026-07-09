@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/dicode/dicode/internal/gitops"
 	"github.com/dicode/dicode/pkg/approval"
 	"github.com/dicode/dicode/pkg/audit"
 	"github.com/dicode/dicode/pkg/config"
@@ -158,6 +159,15 @@ func hasDisplay() bool {
 }
 
 func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, configPath, version string, logBroadcaster *webui.LogBroadcaster, log *zap.Logger) error {
+	// 0. Install the operator-trusted git-remote allowlist (#537) before any
+	// source is polled, so both SSRF guard layers honour it from the first
+	// clone. Already validated in config.Load; the error path is defensive.
+	allowlist, err := cfg.SourceSecurity.Allowlist()
+	if err != nil {
+		return err
+	}
+	gitops.SetInternalHostAllowlist(allowlist)
+
 	// 1. Open database.
 	database, err := openDatabase(cfg)
 	if err != nil {

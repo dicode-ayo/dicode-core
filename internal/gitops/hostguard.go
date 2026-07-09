@@ -56,15 +56,13 @@ func ValidateRemoteHost(rawURL string) error {
 		return fmt.Errorf("invalid remote url: %w: %w", err, ErrNoRemoteHost)
 	}
 
-	// go-git stores IPv6 literals bracketed ("[::1]"); strip for parsing.
-	host := strings.ToLower(strings.Trim(ep.Host, "[]"))
-	// A trailing dot is a valid FQDN-root marker that DNS resolvers strip
-	// before lookup ("metadata.google.internal." resolves identically to
-	// "metadata.google.internal"), but it would otherwise slip past the
-	// literal hostname-suffix checks below (which match ".internal"/
-	// ".local" as a true suffix). Normalise before matching so that trick
-	// isn't a bypass (defense-in-depth, #489 follow-up).
-	host = strings.TrimRight(host, ".")
+	// normalizeHost strips go-git's IPv6 brackets and lowercases. It also drops
+	// a trailing FQDN-root dot: "metadata.google.internal." resolves identically
+	// to "metadata.google.internal" but would otherwise slip past the literal
+	// hostname-suffix checks below (which match ".internal"/".local" as a true
+	// suffix). Sharing this with the allowlist matcher keeps both sides comparing
+	// under one canonical form.
+	host := normalizeHost(ep.Host)
 	if host == "" {
 		return fmt.Errorf("url has no remote host: %w", ErrNoRemoteHost)
 	}
@@ -77,11 +75,21 @@ func ValidateRemoteHost(rawURL string) error {
 	// real, exploitable SSRF bypass, not just a false negative on an obscure
 	// input.
 	if strings.Contains(host, "%") {
-		return fmt.Errorf("host %q is a private or internal address; refusing to contact it: %w", host, ErrBlockedHost)
+		return fmt.Errorf("host %q is a private or internal address; refusing to contact it (permit it via source_security.allow_internal_hosts): %w", host, ErrBlockedHost)
+	}
+	// An operator-trusted allowlist entry (source_security.allow_internal_hosts)
+	// exempts a host from the internal-address checks below. Checked after the
+	// zone-ID rejection above so an allowlist can never re-open that bypass —
+	// ParseAllowlist forbids '%' in an entry, so a zone-ID host matches nothing
+	// here regardless. A hostname entry exempts this literal-host layer only;
+	// for http/https the resolved IP is re-checked at dial time against the
+	// IP/CIDR entries (guardedDialContext), which no hostname entry satisfies.
+	if activeAllowlist().AllowsHost(host) {
+		return nil
 	}
 	if ip := net.ParseIP(host); ip != nil {
 		if IsBlockedIP(ip) {
-			return fmt.Errorf("host %q is a private or internal address; refusing to contact it: %w", host, ErrBlockedHost)
+			return fmt.Errorf("host %q is a private or internal address; refusing to contact it (permit it via source_security.allow_internal_hosts): %w", host, ErrBlockedHost)
 		}
 		return nil
 	}
@@ -89,7 +97,7 @@ func ValidateRemoteHost(rawURL string) error {
 		strings.HasSuffix(host, ".localhost") ||
 		strings.HasSuffix(host, ".local") ||
 		strings.HasSuffix(host, ".internal") {
-		return fmt.Errorf("host %q is a private or internal address; refusing to contact it: %w", host, ErrBlockedHost)
+		return fmt.Errorf("host %q is a private or internal address; refusing to contact it (permit it via source_security.allow_internal_hosts): %w", host, ErrBlockedHost)
 	}
 	return nil
 }

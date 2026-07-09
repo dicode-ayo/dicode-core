@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dicode/dicode/internal/gitops"
 	"github.com/dicode/dicode/pkg/runtime/containersec"
 	"github.com/dicode/dicode/pkg/task"
 	"github.com/dicode/dicode/pkg/taskset"
@@ -275,6 +276,39 @@ type Config struct {
 	// is rejected at dispatch; this block lets an operator explicitly allow
 	// specific escapes. Appended last to minimize merge conflicts.
 	ContainerSecurity ContainerSecurityConfig `yaml:"container_security,omitempty"`
+
+	// SourceSecurity is the operator opt-out for the git-remote SSRF guard
+	// (issue #537). By default a source pointed at a loopback/private/link-
+	// local/internal host is refused under every scheme; this block names the
+	// specific internal hosts/CIDRs an operator trusts. Keyed off
+	// `source_security` rather than `sources` because the latter is reserved
+	// for the removed legacy source array and rejected outright by Load.
+	SourceSecurity SourceSecurityConfig `yaml:"source_security,omitempty"`
+}
+
+// SourceSecurityConfig configures the operator opt-out for dicode's git-remote
+// SSRF guard (issue #537). The zero value — no block in dicode.yaml — keeps the
+// guard fully fail-closed: no internal host is reachable.
+//
+// Example:
+//
+//	source_security:
+//	  allow_internal_hosts:
+//	    - git.corp.internal   # authorises ssh/SCP-shorthand to this host
+//	    - 10.0.0.0/8          # also required for http/https to resolved 10.x IPs
+//
+// A hostname entry authorises the literal-host check that ssh and SCP-shorthand
+// remotes get. http/https remotes are additionally re-checked at dial time
+// against the *resolved* IP, so those also need the target's IP or CIDR listed
+// — a hostname alone never authorises an address it resolves to (this is what
+// keeps the DNS-rebind protection intact for an allowlisted name).
+type SourceSecurityConfig struct {
+	AllowInternalHosts []string `yaml:"allow_internal_hosts,omitempty"`
+}
+
+// Allowlist parses the configured entries into the guard's runtime allowlist.
+func (c SourceSecurityConfig) Allowlist() (*gitops.Allowlist, error) {
+	return gitops.ParseAllowlist(c.AllowInternalHosts)
 }
 
 // ContainerSecurityConfig configures the security floor enforced on
@@ -632,6 +666,12 @@ func (cfg *Config) validate() error {
 		if strings.TrimSpace(c) == "" {
 			return fmt.Errorf("container_security.allowed_cap_add: entries must be non-empty capability names")
 		}
+	}
+	// source_security (issue #537): reject malformed allowlist entries at load
+	// so an operator learns of a typo'd CIDR/host at startup, not on the first
+	// blocked clone.
+	if _, err := cfg.SourceSecurity.Allowlist(); err != nil {
+		return err
 	}
 	return nil
 }
