@@ -64,6 +64,26 @@ test("confirmOverride: overriding a lower env proceeds to the deploy note", asyn
   assert.equal(calls[0].to, "runDeploy");
 });
 
+test("confirmProd: declining the prod confirmation aborts without deploying", async () => {
+  const result = await steps.confirmProd({
+    input: { confirm: false },
+    state: { candidate: { version: "1.4.0" }, env: "prod" },
+  } as never);
+  assert.equal((result as { deployed: boolean }).deployed, false);
+});
+
+test("confirmProd: confirming prod proceeds to the deploy note", async () => {
+  const { calls, suspend } = captureSuspend();
+  await expectSuspend(() =>
+    steps.confirmProd({
+      dicode: { suspend },
+      input: { confirm: true },
+      state: { candidate: { version: "1.4.0" }, env: "prod" },
+    } as never)
+  );
+  assert.equal(calls[0].to, "runDeploy");
+});
+
 test("runDeploy: performs the async deploy and returns the result", async () => {
   const result = await steps.runDeploy({
     input: { note: "ship it" },
