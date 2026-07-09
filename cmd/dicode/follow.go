@@ -21,6 +21,47 @@ func stdinIsInteractive() bool {
 	return term.IsTerminal(int(os.Stdin.Fd()))
 }
 
+// parseInteractiveFlag pulls the --non-interactive opt-out (alias --batch) out
+// of a subcommand's argument list, returning whether it was present and the
+// remaining positional args (task/run id and field=value pairs) in order.
+func parseInteractiveFlag(args []string) (nonInteractive bool, rest []string) {
+	for _, a := range args {
+		switch a {
+		case "--non-interactive", "--batch":
+			nonInteractive = true
+		default:
+			rest = append(rest, a)
+		}
+	}
+	return nonInteractive, rest
+}
+
+// resumeFieldNames returns the property names to hint at for a non-interactive
+// resume: the required set if the schema declares one, otherwise every declared
+// property, both in declaration order.
+func resumeFieldNames(entries []resumePropEntry, required map[string]bool) []string {
+	var req, all []string
+	for _, e := range entries {
+		all = append(all, e.Name)
+		if required[e.Name] {
+			req = append(req, e.Name)
+		}
+	}
+	if len(req) > 0 {
+		return req
+	}
+	return all
+}
+
+// followEngages decides whether a suspended run drives the interactive wizard.
+// It requires a TTY, no --non-interactive opt-out, and no inline field=value
+// values for the step; otherwise the caller keeps the scriptable one-shot path.
+// --non-interactive forces one-shot regardless of the TTY, so agents/CI running
+// inside an allocated PTY never block on a prompt.
+func followEngages(nonInteractive, interactive, haveInlineValues bool) bool {
+	return interactive && !nonInteractive && !haveInlineValues
+}
+
 // followClient is the daemon surface the interactive follow loop needs. The
 // production impl wraps *ipc.ControlClient; tests inject a fake to exercise the
 // schema→prompt→submit→follow core without a socket.

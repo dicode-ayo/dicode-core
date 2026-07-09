@@ -42,6 +42,55 @@ func (f *fakeFollowClient) Logs(runID string) ([]ipc.LogEntry, error) {
 
 const oneStepSchema = `{"type":"object","properties":{"approve":{"type":"string","title":"Approve?"}},"required":["approve"]}`
 
+func TestParseInteractiveFlag(t *testing.T) {
+	cases := []struct {
+		name    string
+		args    []string
+		wantNI  bool
+		wantRes []string
+	}{
+		{"none", []string{"task-x", "a=1"}, false, []string{"task-x", "a=1"}},
+		{"non-interactive", []string{"task-x", "--non-interactive", "a=1"}, true, []string{"task-x", "a=1"}},
+		{"batch alias", []string{"--batch", "run-1"}, true, []string{"run-1"}},
+		{"flag only", []string{"--non-interactive"}, true, nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			gotNI, gotRes := parseInteractiveFlag(c.args)
+			if gotNI != c.wantNI {
+				t.Errorf("nonInteractive = %v, want %v", gotNI, c.wantNI)
+			}
+			if strings.Join(gotRes, ",") != strings.Join(c.wantRes, ",") {
+				t.Errorf("rest = %v, want %v", gotRes, c.wantRes)
+			}
+		})
+	}
+}
+
+func TestFollowEngages(t *testing.T) {
+	cases := []struct {
+		name                                    string
+		nonInteractive, interactive, haveInline bool
+		want                                    bool
+	}{
+		{"tty, opt-in, no inline", false, true, false, true},
+		// --non-interactive forces one-shot even when the TTY check says interactive
+		// (the agents/CI-on-a-PTY case the flag exists for).
+		{"non-interactive overrides tty", true, true, false, false},
+		{"not a tty", false, false, false, false},
+		{"inline values force one-shot", false, true, true, false},
+		{"non-interactive and inline", true, true, true, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := followEngages(c.nonInteractive, c.interactive, c.haveInline); got != c.want {
+				t.Errorf("followEngages(%v,%v,%v) = %v, want %v",
+					c.nonInteractive, c.interactive, c.haveInline, got, c.want)
+			}
+		})
+	}
+}
+
 func TestFollow_SingleStepToSuccess(t *testing.T) {
 	client := &fakeFollowClient{
 		schemas:     map[string][]byte{"run-1": []byte(oneStepSchema)},
