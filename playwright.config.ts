@@ -59,6 +59,7 @@ export default defineConfig({
         '**/run-input-persistence.spec.ts',
         '**/task-toggle.spec.ts',
         '**/suspend-resume.spec.ts',
+        '**/cli-suspend.spec.ts',
       ],
       use: {
         ...devices['Desktop Chrome'],
