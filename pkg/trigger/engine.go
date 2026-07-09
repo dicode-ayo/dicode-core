@@ -769,6 +769,22 @@ func (e *Engine) trackRun() bool {
 	return true
 }
 
+// DrainSlot reserves a shutdown-drain slot for a synchronous top-level fire made
+// from outside pkg/trigger, returning a release func the caller must defer and
+// ok=false once shutdown has latched (the caller must then neither proceed nor
+// release). It is the exported form of the trackRun/runWG.Done pair the in-package
+// sync fire paths use, so a top-level caller that reaches fireSync indirectly —
+// the webui replay handler, whose InputStore.Fetch delegates to a storage task's
+// fireSync — is drained and refused by the same guard instead of re-deriving it.
+// release is idempotent so a double-defer cannot over-decrement runWG.
+func (e *Engine) DrainSlot() (release func(), ok bool) {
+	if !e.trackRun() {
+		return nil, false
+	}
+	var once sync.Once
+	return func() { once.Do(e.runWG.Done) }, true
+}
+
 // beginShutdown latches the shutting-down flag so no further trackRun can add to
 // runWG. It must be called before the drain's Wait so the counter only ever
 // decreases from that point on.
