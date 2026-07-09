@@ -157,6 +157,80 @@ func TestTrustedSourceArmsAndRecords(t *testing.T) {
 	}
 }
 
+// TestFireGuardVetoesEditedApprovedTask is the regression for #530: an approved
+// local-source task whose files change on disk must not run its new code until
+// re-approved, even before the reconciler re-hashes the source and re-pends the
+// task. The runtime imports task files fresh per run, so FireGuard re-hashes the
+// live dir rather than trusting the pending set alone.
+func TestFireGuardVetoesEditedApprovedTask(t *testing.T) {
+	g, _, lock := newTestGate(t, enabledPolicy())
+	spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "export default () => 1")
+
+	if armed, err := g.Admit(spec); err != nil || armed {
+		t.Fatalf("Admit = (%v, %v), want (false, nil) pending", armed, err)
+	}
+	if err := g.Approve("repo/deploy"); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+	approvedHash, _ := lock.Get("repo/deploy")
+	if err := g.FireGuard("repo/deploy"); err != nil {
+		t.Fatalf("FireGuard on freshly approved task: %v", err)
+	}
+
+	// Edit the task on disk. The reconciler has not yet re-admitted it, so the
+	// pending set is empty and the lock still holds the old approved hash.
+	if err := os.WriteFile(filepath.Join(spec.TaskDir, "task.js"),
+		[]byte("export default () => evil()"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if g.IsPending("repo/deploy") {
+		t.Fatal("precondition: task must not yet be re-pended by the reconciler")
+	}
+
+	if err := g.FireGuard("repo/deploy"); !errors.Is(err, ErrPending) {
+		t.Fatalf("FireGuard after edit = %v, want ErrPending (changed code must not run)", err)
+	}
+	if rec, _ := lock.Get("repo/deploy"); rec.Hash != approvedHash.Hash {
+		t.Fatalf("lock hash mutated by an unapproved edit: %q -> %q", approvedHash.Hash, rec.Hash)
+	}
+}
+
+// TestFireGuardAllowsEditedTrustedTask confirms the re-hash veto does not
+// regress trust:always — a trusted source's edited task still fires, since its
+// trust is not bound to a content hash.
+func TestFireGuardAllowsEditedTrustedTask(t *testing.T) {
+	p := enabledPolicy()
+	p.TrustedSources["repo"] = true
+	g, _, _ := newTestGate(t, p)
+	spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "x")
+
+	if armed, err := g.Admit(spec); err != nil || !armed {
+		t.Fatalf("Admit = (%v, %v), want armed", armed, err)
+	}
+	if err := os.WriteFile(filepath.Join(spec.TaskDir, "task.js"), []byte("y"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.FireGuard("repo/deploy"); err != nil {
+		t.Fatalf("edited trusted-source task must still fire: %v", err)
+	}
+}
+
+// TestFireGuardFailsClosedForUnadmittedTask covers the startup window: a
+// gate-enabled, non-trusted task that the gate has not yet admitted (registry
+// registration races ahead of Admit) must be vetoed, not allowed through.
+func TestFireGuardFailsClosedForUnadmittedTask(t *testing.T) {
+	g, _, _ := newTestGate(t, enabledPolicy())
+	if err := g.FireGuard("repo/never-admitted"); !errors.Is(err, ErrPending) {
+		t.Fatalf("FireGuard on un-admitted task = %v, want ErrPending (fail closed)", err)
+	}
+
+	// A disabled gate has no opinion — unknown tasks still fire.
+	gOff, _, _ := newTestGate(t, Policy{Enabled: false, TrustedSources: map[string]bool{}, TrustedTasks: map[string]bool{}})
+	if err := gOff.FireGuard("repo/never-admitted"); err != nil {
+		t.Fatalf("disabled gate must not veto: %v", err)
+	}
+}
+
 func TestTrustedTaskOverride(t *testing.T) {
 	p := enabledPolicy()
 	p.TrustedTasks["repo/deploy"] = true

@@ -675,7 +675,7 @@ func (s *Source) syncAndEmit(ctx context.Context, ch chan<- source.Event) error 
 	current := make(map[string]taskSnap, len(tasks))
 	for _, rt := range tasks {
 		current[rt.ID] = taskSnap{
-			specHash: hashKinded(rt.Kinded),
+			specHash: snapHash(rt.Kinded, rt.TaskDir),
 			kinded:   rt.Kinded,
 			taskDir:  rt.TaskDir,
 		}
@@ -774,4 +774,22 @@ func hashKinded(k task.Kinded) string {
 	b, _ := json.Marshal(k)
 	h := sha256.Sum256(b)
 	return fmt.Sprintf("%x", h)
+}
+
+// snapHash is the change-detection hash for one resolved task. It folds both
+// the resolved spec and the task directory's file content: the runtime imports
+// script files (task.js/task.ts and siblings) that the resolved spec does not
+// capture, so a script-only edit must still perturb the hash — otherwise no
+// update is emitted and the approval gate never re-pends the changed task
+// (#530). A dir-less inline task hashes its spec alone.
+func snapHash(k task.Kinded, taskDir string) string {
+	specHash := hashKinded(k)
+	if taskDir == "" {
+		return specHash
+	}
+	dirHash, err := task.Hash(taskDir)
+	if err != nil {
+		return specHash
+	}
+	return specHash + ":" + dirHash
 }
