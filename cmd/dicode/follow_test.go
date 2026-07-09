@@ -259,6 +259,30 @@ func TestFollow_PrefillInteractiveFillsGaps(t *testing.T) {
 	}
 }
 
+// On a TTY, pre-supplying a step's required field must not skip prompting for
+// that step's optional fields.
+func TestFollow_PrefillInteractiveStillPromptsOptional(t *testing.T) {
+	client := &fakeFollowClient{
+		schemas: map[string][]byte{
+			"run-1": []byte(`{"type":"object","properties":{"a":{"type":"string"},"note":{"type":"string"}},"required":["a"]}`),
+		},
+		resumeChain: map[string]string{"run-1": "run-2"},
+		waitResults: map[string]ipc.RunResult{"run-2": {RunID: "run-2", Status: "success"}},
+	}
+	pool, _ := newPrefillPool([]string{"a=pre"})
+	var out, prompt bytes.Buffer
+	// a is pre-supplied; the optional note is typed at the prompt.
+	s := &followSession{client: client, in: strings.NewReader("hello\n"), prompt: &prompt, out: &out, prefill: pool}
+
+	if err := s.follow("run-1"); err != nil {
+		t.Fatalf("follow: %v", err)
+	}
+	got := string(client.submitted["run-1"])
+	if !strings.Contains(got, `"a":"pre"`) || !strings.Contains(got, `"note":"hello"`) {
+		t.Errorf("submitted = %s, want both the pre-supplied a and the prompted note", got)
+	}
+}
+
 // Pre-supplied values never consumed (typo or a branch not taken) are reported
 // after the wizard completes.
 func TestFollow_PrefillUnusedWarned(t *testing.T) {

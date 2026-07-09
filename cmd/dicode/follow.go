@@ -301,10 +301,13 @@ func (s *followSession) collectStepInput(reader *bufio.Reader, label string, sch
 	}
 	missing := missingRequiredFields(entries, required, pre)
 
-	// Every required field is pre-supplied (or the step requires nothing and we
-	// will not prompt): submit without asking. An interactive step with no
-	// pre-supplied answer falls through so the operator still drives it.
-	if len(missing) == 0 && (len(pre) > 0 || s.nonInteractive) {
+	// Submit without prompting when nothing more can be asked (non-interactive)
+	// or every declared property of the step is pre-supplied. A partially
+	// pre-supplied interactive step falls through so its optional fields are
+	// still offered — pre-supplying the required fields must not silently drop a
+	// gap the operator would otherwise fill.
+	fullyPrefilled := len(pre) > 0 && len(pre) == len(entries)
+	if len(missing) == 0 && (s.nonInteractive || fullyPrefilled) {
 		inputJSON, err := json.Marshal(pre)
 		if err != nil {
 			return nil, false, err
@@ -346,8 +349,8 @@ func (s *followSession) collectStepInput(reader *bufio.Reader, label string, sch
 		return empty, true, nil
 	}
 
-	// Prompt only for properties not already answered by a pre-supplied value,
-	// then merge those back in before validating.
+	// promptResumeInput has no notion of pre-supplied answers, so feed it only the
+	// unanswered properties and fold the pre-supplied ones into its result.
 	promptable := entries
 	if len(pre) > 0 {
 		promptable = promptable[:0:0]
