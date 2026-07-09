@@ -306,8 +306,10 @@ func (g *Gate) FireGuard(taskID string) error {
 	k, ok := g.admitted[taskID]
 	g.mu.Unlock()
 	if !ok {
-		// Never admitted (unknown to the gate); nothing to verify.
-		return nil
+		// A gate-enabled, non-trusted task the gate has not yet admitted must
+		// not run: fail closed rather than leave a startup window open between
+		// registry registration and the gate's Admit.
+		return fmt.Errorf("%w: %s (awaiting an approval decision)", ErrPending, taskID)
 	}
 	live, err := g.hashFn(k)
 	if err != nil {

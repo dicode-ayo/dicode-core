@@ -215,6 +215,22 @@ func TestFireGuardAllowsEditedTrustedTask(t *testing.T) {
 	}
 }
 
+// TestFireGuardFailsClosedForUnadmittedTask covers the startup window: a
+// gate-enabled, non-trusted task that the gate has not yet admitted (registry
+// registration races ahead of Admit) must be vetoed, not allowed through.
+func TestFireGuardFailsClosedForUnadmittedTask(t *testing.T) {
+	g, _, _ := newTestGate(t, enabledPolicy())
+	if err := g.FireGuard("repo/never-admitted"); !errors.Is(err, ErrPending) {
+		t.Fatalf("FireGuard on un-admitted task = %v, want ErrPending (fail closed)", err)
+	}
+
+	// A disabled gate has no opinion — unknown tasks still fire.
+	gOff, _, _ := newTestGate(t, Policy{Enabled: false, TrustedSources: map[string]bool{}, TrustedTasks: map[string]bool{}})
+	if err := gOff.FireGuard("repo/never-admitted"); err != nil {
+		t.Fatalf("disabled gate must not veto: %v", err)
+	}
+}
+
 func TestTrustedTaskOverride(t *testing.T) {
 	p := enabledPolicy()
 	p.TrustedTasks["repo/deploy"] = true
