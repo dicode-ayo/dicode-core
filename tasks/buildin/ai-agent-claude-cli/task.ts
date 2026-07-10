@@ -107,10 +107,15 @@ export default async function main({ params, kv }: SDK) {
         return fail(`session_id ${JSON.stringify(sessionIdIn)} contains invalid characters; expected ^[a-zA-Z0-9_-]{1,64}$`);
     }
 
+    // Dual-mode auth: prefer an explicit CLAUDE_CODE_OAUTH_TOKEN secret
+    // (portable for headless / containerized daemons where no interactive login
+    // exists), but if it is unset fall back to the logged-in credentials at
+    // $HOME/.claude/.credentials.json — so a local daemon running as an
+    // already-logged-in user needs no token. We can't see the credential file
+    // from inside the Deno sandbox (the claude subprocess reads it, not us), so
+    // we don't hard-fail here; a genuine no-auth situation surfaces as claude's
+    // own auth error downstream.
     const oauthToken = Deno.env.get("CLAUDE_CODE_OAUTH_TOKEN") ?? "";
-    if (!oauthToken) {
-        return fail("CLAUDE_CODE_OAUTH_TOKEN is not set. Mint one via `claude setup-token` and store it as a dicode secret named CLAUDE_CODE_OAUTH_TOKEN. See tasks/buildin/ai-agent-claude-cli/README.md.");
-    }
 
     const cliPath = resolveCliPath(cliPathParam);
     if (!cliPath) {
@@ -238,13 +243,17 @@ export default async function main({ params, kv }: SDK) {
         mcpConfigPath: mcpWired ? `${claudeDir}/mcp.json` : undefined,
     });
 
+    const claudeEnv: Record<string, string> = {
+        HOME: Deno.env.get("HOME") ?? "/root",
+        PATH: Deno.env.get("PATH") ?? "/usr/local/bin:/usr/bin:/bin",
+    };
+    // Inject the token only when present. Setting it to "" would override the
+    // $HOME/.claude credential-file fallback with an empty, invalid token.
+    if (oauthToken) claudeEnv.CLAUDE_CODE_OAUTH_TOKEN = oauthToken;
+
     const cmd = new Deno.Command(cliPath, {
         args,
-        env: {
-            CLAUDE_CODE_OAUTH_TOKEN: oauthToken,
-            HOME: Deno.env.get("HOME") ?? "/root",
-            PATH: Deno.env.get("PATH") ?? "/usr/local/bin:/usr/bin:/bin",
-        },
+        env: claudeEnv,
         cwd: workdir,
         stdin: "null",
         stdout: "piped",

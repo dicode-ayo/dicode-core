@@ -76,16 +76,31 @@ Deno.test("rejects empty prompt", async () => {
     assertEquals(r.ok, false);
 });
 
-Deno.test("rejects missing OAuth token", async () => {
+Deno.test("no token: falls back to logged-in credentials (does not hard-fail)", async () => {
     Deno.env.delete("CLAUDE_CODE_OAUTH_TOKEN");
-    const r: any = await main({
-        params: makeParams([["prompt", "hi"]]),
-        kv: makeKv(), dicode: fakeDicode,
-    });
-    assertEquals(r.ok, false);
-    if (!String(r.error ?? "").includes("CLAUDE_CODE_OAUTH_TOKEN")) {
-        throw new Error(`expected OAuth-token error, got ${r.error}`);
-    }
+    const result: any = await withStubClaude(
+        `cat <<'JSON'
+{"type":"result","is_error":false,"result":"ok","session_id":"s"}
+JSON`,
+        () => main({ params: makeParams([["prompt", "hi"]]), kv: makeKv(), dicode: fakeDicode }),
+    );
+    assertEquals(result.ok, true);
+});
+
+Deno.test("no token: does not inject an empty CLAUDE_CODE_OAUTH_TOKEN into claude env", async () => {
+    // Setting the var to "" would override the $HOME/.claude credential-file
+    // fallback with an invalid empty token — it must be absent, not empty.
+    Deno.env.delete("CLAUDE_CODE_OAUTH_TOKEN");
+    const sentinelDir = await Deno.makeTempDir();
+    const sentinel = `${sentinelDir}/token-seen`;
+    await withStubClaude(
+        `printf '[%s]' "\${CLAUDE_CODE_OAUTH_TOKEN-UNSET}" > ${sentinel}
+cat <<'JSON'
+{"type":"result","is_error":false,"result":"ok","session_id":"s"}
+JSON`,
+        () => main({ params: makeParams([["prompt", "hi"]]), kv: makeKv(), dicode: fakeDicode }),
+    );
+    assertEquals((await Deno.readTextFile(sentinel)).trim(), "[UNSET]");
 });
 
 Deno.test("rejects malformed session_id", async () => {
