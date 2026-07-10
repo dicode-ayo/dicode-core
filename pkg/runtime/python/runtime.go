@@ -197,6 +197,16 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 		return result, nil
 	}
 
+	// Ephemeral per-run MCP token (opt-in via permissions.env
+	// DICODE_MCP_API_KEY): mint before anything else touches resolved, and
+	// defer the revoke unconditionally so it fires on every exit path below.
+	mcpRevoke, err := pkgruntime.ApplyMCPToken(ctx, &e.parent.BridgeDeps, e.Log, spec, runID, resolved)
+	if err != nil {
+		result.Error = err
+		return result, nil
+	}
+	defer mcpRevoke()
+
 	// Read the user's task.py.
 	scriptPath := spec.ScriptPath()
 	if scriptPath == "" {

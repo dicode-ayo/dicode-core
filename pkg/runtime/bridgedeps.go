@@ -66,6 +66,11 @@ type BridgeDeps struct {
 	// TestGuard is the approval gate's veto for dicode.tasks.test, forwarded
 	// to every per-run IPC server. Nil means allow.
 	TestGuard func(taskID string) error
+	// MCPTokenMinter mints/revokes ephemeral per-run dicode MCP API keys
+	// (SetMCPTokenMinter). Nil disables the ephemeral path: a task declaring
+	// MCPTokenEnvName then gets whatever the secrets chain resolves for that
+	// name, same as before this feature existed.
+	MCPTokenMinter MCPTokenMinter
 	// ProtectedPaths are files (dicode.lock, dicode.yaml) that hold approval
 	// state and must never be writable by a task, even when a broad write
 	// grant covers their directory. Deno emits them as --deny-write flags;
@@ -198,4 +203,13 @@ func (d *BridgeDeps) SetProviderRunner(p envresolve.ProviderRunner) {
 // of constructing a fresh instance each time.
 func (d *BridgeDeps) SetEnvResolver(r *envresolve.Resolver) {
 	d.SharedResolver = r
+}
+
+// SetMCPTokenMinter wires the ephemeral per-run MCP token minter: on a run
+// whose spec declares permissions.env MCPTokenEnvName, ApplyMCPToken mints a
+// token through it and revokes on every exit path. Nil (the default)
+// disables the ephemeral path. Mirrors the SetReplayer / SetTestGuard
+// late-wiring pattern — call after New and before Start.
+func (d *BridgeDeps) SetMCPTokenMinter(m MCPTokenMinter) {
+	d.MCPTokenMinter = m
 }

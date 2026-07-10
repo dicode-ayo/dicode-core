@@ -143,6 +143,7 @@ type Server struct {
 	scsStore           *scsStore              // underlying SQLite store for sm; nil in DB-less tests
 	dbSessions         *dbSessionStore        // persistent trusted-device tokens
 	apiKeys            *apiKeyStore           // MCP / programmatic API keys
+	mcpTokenMinter     *mcpTokenMinter        // ephemeral per-run MCP token minter over apiKeys; nil in tests (no database)
 	authoringSessions  *authoringSessionStore // AI-first authoring sessions
 	passphraseStore    *passphraseStore       // auth passphrase persisted in DB
 	cachedPassphrase   string                 // in-memory cache of stored DB value (bcrypt hash, or legacy plaintext during migration); invalidated on change
@@ -215,6 +216,28 @@ func (s *Server) RevokeAPIKeyByName(ctx context.Context, name string) error {
 	return s.apiKeys.revokeByName(ctx, name)
 }
 
+// MCPTokenMinter returns the ephemeral per-run MCP token minter for wiring
+// into the Deno/Python runtimes via their SetMCPTokenMinter. Returns a true
+// nil pkgruntime.MCPTokenMinter (not a nil-valued non-nil interface) when no
+// database is configured (tests) — callers can compare directly against nil.
+func (s *Server) MCPTokenMinter() pkgruntime.MCPTokenMinter {
+	if s.mcpTokenMinter == nil {
+		return nil
+	}
+	return s.mcpTokenMinter
+}
+
+// SweepEphemeralMCPTokens revokes every ephemeral per-run MCP API key left
+// over from a previous daemon session. Call once at startup before any new
+// run can mint one: a run that was in flight when the daemon last stopped
+// leaves its token orphaned, since nothing will ever call Revoke for it.
+func (s *Server) SweepEphemeralMCPTokens(ctx context.Context) error {
+	if s.apiKeys == nil {
+		return nil
+	}
+	return s.apiKeys.revokeByNamePrefix(ctx, ephemeralKeyPrefix)
+}
+
 // SetManagedRuntimes registers the list of managed runtimes (Deno, Python, …)
 // that will appear in the Config UI. Call this after New and before Start.
 func (s *Server) SetManagedRuntimes(runtimes []pkgruntime.ManagedRuntime) {
@@ -233,12 +256,14 @@ func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config
 
 	var dbs *dbSessionStore
 	var aks *apiKeyStore
+	var mtm *mcpTokenMinter
 	var ps *passphraseStore
 	var store *scsStore
 	var as *authoringSessionStore
 	if database != nil {
 		dbs = newDBSessionStore(database, log)
 		aks = newAPIKeyStore(database)
+		mtm = newMCPTokenMinter(aks)
 		ps = newPassphraseStore(database)
 		store = sm.Store.(*scsStore)
 		as = newAuthoringSessionStore(database)
@@ -257,6 +282,7 @@ func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config
 		scsStore:          store,
 		dbSessions:        dbs,
 		apiKeys:           aks,
+		mcpTokenMinter:    mtm,
 		authoringSessions: as,
 		passphraseStore:   ps,
 		logs:              logs,
