@@ -60,6 +60,17 @@ suspendable task run.**
    every changed task (AI-authored included) pending operator approval. Save just lands the
    task; the gate reviews it. No bespoke AI review queue — #213 collapses to the autonomy
    dial.
+5. **Agents reach dicode capabilities through one governed surface: MCP.** Every backend
+   (`ai-agent`, `ai-agent-claude-cli`, future) authors by calling dicode's MCP tools, on the
+   same skills + prompts — not each model's raw tools and not the SDK. **This only closes
+   the privilege hole if MCP carries the capability model** (see #560): (a) restrict the raw
+   model tools so the agent can't bypass MCP (`claude --allowedTools` = the dicode tools
+   only, `--permission-mode`, confined cwd); (b) add **per-agent capability scoping** to
+   `/mcp` — today it is a single daemon-wide Bearer key with no per-caller scoping, so a
+   naive "give it MCP" would hand every agent full access; (c) grow the MCP surface to the
+   governed authoring tools (write-into-clone, test, commit/PR), lifting existing REST
+   (`/api/sources/{name}/commit-push`, `/api/tasks/{id}/test`) into it. The capability-gated
+   IPC control plane stays the enforcement point; MCP is its model-agnostic front door.
 
 ### Rejected alternatives
 
@@ -72,14 +83,16 @@ suspendable task run.**
 ## Backend matrix
 
 The authoring loop needs a **tool-using** agent (write files, call `tasks.test`, `git-pr`).
+Both backends are tool-capable; they differ in **how governed** those tools are.
 
-| Backend | Chat | Tool-using authoring loop |
-|---|---|---|
-| `buildin/ai-agent` (OpenAI-compatible, `OPENAI_API_KEY`) | ✅ | ✅ — the tool-calling loop + dicode SDK via the shim. Drives `auto-fix`/`task-create` today. |
-| `buildin/ai-agent-claude-cli` (Claude Pro/Max, `CLAUDE_CODE_OAUTH_TOKEN`) | ✅ | ⚠️ Not directly — runs `claude -p` (print mode), no filesystem tools, no dicode SDK. Tool-use for Claude requires wiring dicode's `/mcp` in (`dicode mcp install` + `enable_mcp`). |
+| Backend | Chat | Authoring | Governance today |
+|---|---|---|---|
+| `buildin/ai-agent` (OpenAI-compatible, `OPENAI_API_KEY`) | ✅ | ✅ | Governed — edits go through the capability-gated dicode SDK (dev-clone, `tasks.test`, `git-pr`). Drives `auto-fix` today. |
+| `buildin/ai-agent-claude-cli` (Claude Pro/Max, `CLAUDE_CODE_OAUTH_TOKEN`) | ✅ | ✅ | **Ungoverned.** `claude -p` runs with its full default tools (Read/Write/Edit/Bash) — the task passes no `--allowedTools`/`--permission-mode`, so as a subprocess it has host-wide fs/bash as the daemon user. A privilege hole; **must be restricted + routed through MCP** (#560). |
 
-So: Claude enables chat immediately on subscription; the flagship authoring loop runs on
-OpenAI `ai-agent` today, or Claude-via-MCP as a deliberate design choice.
+The end state (decision 5): both backends run the **same governed MCP path** on the same
+prompts. Claude-via-subscription becomes a first-class authoring backend *once* its raw
+tools are restricted and MCP is capability-scoped — not before.
 
 ## Phased plan
 
