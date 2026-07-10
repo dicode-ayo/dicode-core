@@ -1,6 +1,6 @@
 # Web UI & API
 
-Dicode includes a built-in web interface and REST API. The UI is served by the dicode process itself — no separate web server needed. All frontend assets are embedded in the binary.
+Dicode includes a built-in web interface and REST API. The UI is served by the dicode process itself — no separate web server needed.
 
 ---
 
@@ -64,7 +64,7 @@ server:
 
 The UI is a single-page application (SPA) built with [Lit](https://lit.dev) web components. No npm build step — all files are plain ESM modules loaded directly by the browser.
 
-All frontend assets are embedded in the binary via `//go:embed static` and served under `/app/*`. The entry point is `static/app/index.html`, which loads `app.js` as an ES module. A catch-all route (`/*`) serves `index.html` for all unmatched paths so client-side navigation works on reload.
+The SPA is itself a dicode task — `buildin/webui` (`tasks/buildin/webui/`, entry point `index.html` loading `app/app.js` as an ES module, components under `app/components/`, routing/websocket helpers under `app/lib/`) — served at the `/hooks/webui` webhook path like any other webhook task. Because it's a task, the reconciler hot-reloads it on change, same as any task in a watched source; no binary rebuild is needed. `pkg/webui`'s own embedded static assets are limited to `dicode.js` and `dicode-oauth-broadcast.js` (the client SDK injected into webhook-served pages), not the SPA itself.
 
 ### Components
 
@@ -91,7 +91,7 @@ All real-time data flows over a single persistent WebSocket at `/ws`:
 - The server pushes log lines, run status changes, and task registration events as JSON messages
 - `lib/ws.js` handles connect, dispatch by message type, and auto-reconnect (3s backoff)
 
-> **Development note:** static files are embedded in the binary via `//go:embed static`. Changes to frontend files require a binary rebuild to take effect.
+> **Development note:** the frontend is a hot-reloaded task, not embedded in the binary — changes to files under `tasks/buildin/webui/` take effect on the next reconciler pass, no rebuild required.
 
 ---
 
@@ -131,9 +131,11 @@ Response:
 | --- | --- | --- |
 | `GET` | `/api/runs/{runID}` | Run detail |
 | `GET` | `/api/runs/{runID}/logs` | Run logs (completed) |
-| `GET` | `/api/runs/{runID}/logs/stream` | Run logs (SSE, live) |
+| `GET` | `/runs/{runID}/result` | Bare page: raw output content (or JSON return value) for a completed run, no chrome |
 | `POST` | `/api/runs/{runID}/kill` | Kill a running task |
 | `GET` | `/api/audit` | Security audit log — filter by `task_id`, `actor`, `event_type`; paginate with `limit` (≤1000, default 100) + `offset`. Newest first. |
+
+Live log streaming while a run is in progress goes over the `/ws` WebSocket (see [Real-time: WebSocket](#real-time-websocket) above), not a per-run SSE endpoint.
 
 **GET `/api/runs/{runID}`** response:
 
@@ -219,26 +221,6 @@ Response:
 }
 ```
 
-### AI generation
-
-| Method | Path | Description |
-| --- | --- | --- |
-| `POST` | `/api/generate` | Generate task from prompt |
-| `POST` | `/api/generate/confirm` | Write generated files to local source |
-
-**POST `/api/generate`**:
-
-```json
-{ "prompt": "Check the Stripe status page every 15 minutes and alert if degraded" }
-```
-
-Response (streaming JSON lines):
-
-```jsonl
-{ "type": "progress", "message": "Generating task..." }
-{ "type": "result", "files": { "task.yaml": "...", "task.js": "...", "task.test.js": "..." } }
-```
-
 ### AI authoring
 
 Session-based AI authoring endpoints for creating and editing tasks via an interactive workflow.
@@ -315,11 +297,16 @@ Response:
 
 ## API authentication
 
-The REST API has no authentication by default (localhost only). For remote access, set a shared secret:
+The REST API has no authentication by default (localhost only). Enable it with:
 
 ```yaml
 server:
-  api_secret_env: DICODE_API_SECRET
+  auth: true
 ```
 
-Include it as a header: `Authorization: Bearer <secret>`.
+Two credential kinds cover the two kinds of callers:
+
+- **Browser access** — the login session/device-token flow (Phase 2 in [security.md](security.md)): sign in once, get a session cookie plus a long-lived trusted-device cookie.
+- **Programmatic access** (the `/mcp` endpoint, CI scripts, automation) — a `dck_` API key sent as `Authorization: Bearer dck_<key>` (Phase 4 in [security.md](security.md)).
+
+See [security.md](security.md) for the full trust model.

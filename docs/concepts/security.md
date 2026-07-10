@@ -150,7 +150,7 @@ incoming request
 | `X-Frame-Options` | `SAMEORIGIN` |
 | `Referrer-Policy` | `strict-origin-when-cross-origin` |
 | `Permissions-Policy` | `camera=(), microphone=(), geolocation=()` |
-| `Content-Security-Policy` | script-src self + cdn.jsdelivr.net + esm.sh; style-src self unsafe-inline; connect-src self ws: wss: esm.sh |
+| `Content-Security-Policy` | script-src self + cdn.jsdelivr.net + esm.sh; style-src self unsafe-inline + cdn.jsdelivr.net; connect-src self ws: wss: esm.sh + cdn.jsdelivr.net; font-src self + cdn.jsdelivr.net |
 
 ### CORS
 

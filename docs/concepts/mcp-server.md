@@ -6,7 +6,7 @@ Dicode exposes its core operations as [MCP (Model Context Protocol)](https://mod
 
 ## Enabling the MCP server
 
-The MCP server runs in the same process as the WebUI. It is enabled by default.
+The `/mcp` endpoint forwards to the `buildin/mcp` dicode task (`tasks/buildin/mcp/task.ts`), which speaks JSON-RPC 2.0; the HTTP boundary is served by the WebUI process. It is enabled by default.
 
 ```yaml
 server:
@@ -157,6 +157,14 @@ Enable or disable dev mode for a TaskSet source. When enabled, the source immedi
 
 Returns the updated source entry. Changes take effect immediately — tasks from the dev path appear in the registry within seconds.
 
+### `test_task(id)`
+
+Hint-style tool: returns a pointer telling the MCP client to call `POST /api/tasks/{id}/test` directly (with its API key) to run the task's sibling test file. It does not run the test itself.
+
+```json
+{ "hint": "Call POST /api/tasks/infra/deploy-backend/test directly with your API key." }
+```
+
 ---
 
 ## Planned tools (not yet implemented)
@@ -164,7 +172,6 @@ Returns the updated source entry. Changes take effect immediately — tasks from
 | Tool | Description |
 | --- | --- |
 | `validate_task(id)` | Static validation — schema, syntax, cycle detection |
-| `test_task(id)` | Run task test file with mocked globals |
 | `dry_run_task(id)` | Execute with real secrets, intercepted HTTP |
 | `commit_task(id, source_id)` | Promote local task to git source |
 | `list_secrets` | Registered secret names (never values) |
@@ -174,6 +181,4 @@ Returns the updated source entry. Changes take effect immediately — tasks from
 
 ## Security
 
-The MCP server runs on localhost by default and is not exposed to the internet. If running dicode on a remote server and want agent access, proxy it behind authentication.
-
-There is no MCP-specific authentication in the MVP. All MCP tools operate with the same permissions as the local dicode process.
+The `/mcp` endpoint requires a `dck_` API key (Bearer) when `server.auth: true` (`pkg/webui/apikeys.go` `requireAPIKey`, wired via `requireSessionOrAPIKey`). Without auth it is open on localhost. See [security.md](security.md) Phase 4 for the full authentication model.
