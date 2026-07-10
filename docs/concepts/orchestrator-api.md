@@ -79,6 +79,38 @@ Not available in the Python SDK.
 
 ---
 
+### `dicode.suspend(req)`
+
+Pause the run and request input (a form, an approval, a webhook payload) before continuing. See [Suspendable tasks](suspendable-tasks.md) for the full request shape, resume semantics, and JSON-Schema-driven forms.
+
+```typescript
+// Deno
+await dicode.suspend({ schema, state })
+```
+
+```python
+# Python
+dicode.suspend(state=..., schema=...)
+```
+
+---
+
+### `dicode.secrets.has(key)`
+
+Return `true` if a secret with the given key exists in the secrets store, without ever returning the value. Available in both SDKs.
+
+```typescript
+// Deno
+const exists = await dicode.secrets.has("MY_TOKEN")
+```
+
+```python
+# Python
+exists = dicode.secrets.has("MY_TOKEN")
+```
+
+---
+
 ## Planned methods (not yet implemented)
 
 | Method | Description |
@@ -86,7 +118,6 @@ Not available in the Python SDK.
 | `dicode.progress(msg, data)` | Stream intermediate progress to WebUI |
 | `dicode.trigger(id, payload)` | Fire-and-forget dispatch (non-blocking) |
 | `dicode.isRunning(id)` | Check if a task has an active run |
-| `dicode.ask(question, opts)` | Suspend run and request human approval (north star) |
 | `dicode.listSecrets()` | List secret names (no values) |
 
 ---
@@ -100,7 +131,8 @@ Not available in the Python SDK.
 | `get_runs(id, opts?)` | `await dicode.get_runs(...)` | `dicode.get_runs(...)` | Implemented |
 | `secrets_set(key, val)` | `await dicode.secrets_set(...)` | — | Implemented (Deno only) |
 | `secrets_delete(key)` | `await dicode.secrets_delete(...)` | — | Implemented (Deno only) |
+| `secrets.has(key)` | `await dicode.secrets.has(...)` | `dicode.secrets.has(...)` | Implemented |
+| `suspend(req)` | `await dicode.suspend(...)` | `dicode.suspend(...)` | Implemented |
 | `progress(msg, data)` | — | — | Planned |
 | `trigger(id, payload)` | — | — | Planned |
 | `isRunning(id)` | — | — | Planned |
-| `ask(question, opts)` | — | — | Planned (north star) |

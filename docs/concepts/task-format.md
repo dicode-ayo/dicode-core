@@ -813,30 +813,31 @@ This keeps services bound to `127.0.0.1` on the host unreachable from the contai
 
 TypeScript or JavaScript. Runs via a managed Deno subprocess.
 
-Globals available: `log`, `kv`, `params`, `env`, `input`, `output`.
+Globals available: `params`, `kv`, `input`, `state`, `output`, `mcp`, `dicode`. Use `console.log`/`warn`/`error`/`debug` for logging, native `fetch` for HTTP, and `Deno.env.get()` for declared env vars.
 
 ### Example
 
 ```javascript
 // Read params and env
-const channel = params.get("slack_channel")
-const token = env.get("SLACK_TOKEN")
+const channel = await params.get("slack_channel")
+const token = Deno.env.get("SLACK_TOKEN")
 
 // Fetch data
-const res = await http.get("https://gmail.googleapis.com/gmail/v1/users/me/messages", {
-  headers: { Authorization: `Bearer ${env.get("GMAIL_TOKEN")}` }
+const res = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/messages", {
+  headers: { Authorization: `Bearer ${Deno.env.get("GMAIL_TOKEN")}` }
 })
 
-const messages = res.body.messages || []
-log.info(`Found ${messages.length} messages`)
+const { messages = [] } = await res.json()
+console.log(`Found ${messages.length} messages`)
 
 // Post to Slack
-await http.post("https://slack.com/api/chat.postMessage", {
-  headers: { Authorization: `Bearer ${token}` },
-  body: {
+await fetch("https://slack.com/api/chat.postMessage", {
+  method: "POST",
+  headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+  body: JSON.stringify({
     channel,
     text: `You have ${messages.length} unread emails`
-  }
+  })
 })
 
 // Return value available to chained tasks
@@ -943,7 +944,7 @@ Five forms, with clear source distinction:
 
 | Form | Key | Source | Effect |
 | --- | --- | --- | --- |
-| Bare name | — | Host OS env | Script reads `$VAR` at runtime via `env.get()`; forwarded from the host if set |
+| Bare name | — | Host OS env | Script reads `$VAR` at runtime via `Deno.env.get()`; forwarded from the host if set |
 | Bare pattern (`PREFIX_*`) | — | Host OS env | Forward **every** host var matching the trailing-`*` prefix, and make each matched name readable |
 | `from:` | host OS var name | Host OS env | Read `$GH_TOKEN` from OS, inject subprocess env as `API_KEY` |
 | `secret:` | secrets store key | Secrets store | Resolve encrypted secret, inject as the given name; **fails if not found** |
@@ -960,7 +961,7 @@ Two modifiers apply on top:
 **`from:` vs `secret:` — the key distinction:**
 - `from:` reads **only** from the host OS environment (`os.Getenv`). Use it to rename a host env var or make the mapping explicit.
 - `secret:` reads **only** from the dicode secrets store (set via `dicode secrets set`). Run fails immediately if the key is not in the store.
-- A bare name does **neither** — it only allowlists the var so the script can read it from the host env via `env.get()`. No injection, no secrets lookup.
+- A bare name does **neither** — it only allowlists the var so the script can read it from the host env via `Deno.env.get()`. No injection, no secrets lookup.
 - A bare **pattern** (`PREFIX_*`) is a bare name with a trailing-`*` prefix glob: at launch it expands against the host environment, forwards every matching host var's value into the subprocess, and makes each matched name readable (Deno `--allow-env`, the Python env-read filter). It pulls in a related family of vars without enumerating each — while still **not** granting blanket read the way `env_read_exposed` does. Distinct from a lone `"*"` (rejected — use `env_read_exposed`).
 
 > **Security:** a pattern never forwards the daemon's own credentials. `DICODE_MASTER_KEY`, `DICODE_API_KEY`, `DICODE_MCP_API_KEY` and the per-run IPC vars (`DICODE_SOCKET`/`DICODE_TOKEN`) are always excluded, even when a pattern like `DICODE_*` prefix-matches them.
@@ -976,8 +977,8 @@ permissions:
 
 ```typescript
 // task.ts
-export default async function main({ env }) {
-  const token = await env.get("GITHUB_TOKEN")  // reads $GITHUB_TOKEN from host env at runtime
+export default async function main() {
+  const token = Deno.env.get("GITHUB_TOKEN")  // reads $GITHUB_TOKEN from host env at runtime
 }
 ```
 
@@ -995,9 +996,9 @@ permissions:
 
 ```typescript
 // task.ts
-export default async function main({ env }) {
-  const token = await env.get("GITHUB_TOKEN")  // forwarded from the host
-  const sha = await env.get("GITHUB_SHA")
+export default async function main() {
+  const token = Deno.env.get("GITHUB_TOKEN")  // forwarded from the host
+  const sha = Deno.env.get("GITHUB_SHA")
 }
 ```
 
@@ -1015,8 +1016,8 @@ permissions:
 
 ```typescript
 // task.ts
-export default async function main({ env }) {
-  const token = await env.get("GITHUB_TOKEN")  // injected from $GH_TOKEN
+export default async function main() {
+  const token = Deno.env.get("GITHUB_TOKEN")  // injected from $GH_TOKEN
 }
 ```
 
@@ -1034,8 +1035,8 @@ permissions:
 
 ```typescript
 // task.ts
-export default async function main({ env }) {
-  const token = await env.get("SLACK_TOKEN")  // resolved from secrets store
+export default async function main() {
+  const token = Deno.env.get("SLACK_TOKEN")  // resolved from secrets store
 }
 ```
 
@@ -1059,11 +1060,11 @@ permissions:
 
 ```typescript
 // task.ts
-export default async function main({ env }) {
-  const port    = await env.get("PORT")          // from host env (bare)
-  const ghToken = await env.get("GITHUB_TOKEN")  // injected, renamed from $GH_TOKEN
-  const slToken = await env.get("SLACK_TOKEN")   // injected from secrets store
-  const level   = await env.get("LOG_LEVEL")     // literal "info"
+export default async function main() {
+  const port    = Deno.env.get("PORT")          // from host env (bare)
+  const ghToken = Deno.env.get("GITHUB_TOKEN")  // injected, renamed from $GH_TOKEN
+  const slToken = Deno.env.get("SLACK_TOKEN")   // injected from secrets store
+  const level   = Deno.env.get("LOG_LEVEL")     // literal "info"
 }
 ```
 
@@ -1159,7 +1160,7 @@ All `dicode.*` and `mcp.*` globals are **denied by default**. Each capability mu
 | `get_runs: true` | `dicode.get_runs()` |
 | `secrets_write: true` | `dicode.secrets_set(key, value)` and `dicode.secrets_delete(key)` — **write-only**, tasks can never read secrets back |
 | `secrets_has: true` | `dicode.secrets.has(key)` — boolean presence check only; never reveals the secret value |
-| `crypto: ["ctx"]` | `dicode.crypto.encrypt(ctx, data)` / `dicode.crypto.decrypt(ctx, blob)` — AES-256 encrypt/decrypt under a context-scoped sub-key; `["*"]` allows all contexts. **Daemon-private contexts (currently `dicode/run-inputs/v1`) are always denied even when `["*"]` is granted.** |
+| `crypto: ["ctx"]` | `dicode.crypto.encrypt(ctx, data)` / `dicode.crypto.decrypt(ctx, blob)` — XChaCha20-Poly1305 encrypt/decrypt under a context-scoped, Argon2id-derived sub-key; `["*"]` allows all contexts. **Daemon-private contexts (currently `dicode/run-inputs/v1`) are always denied even when `["*"]` is granted.** |
 
 ```yaml
 # An agent task that can call other tasks:
@@ -1211,7 +1212,7 @@ return output.file("report.csv", csvContent, "text/csv")
 return output.html(htmlContent, { data: { count: 5 } })
 ```
 
-See [JS Runtime — output global](./js-runtime.md#output--rich-return-values) for the full API.
+See [Deno Runtime — `output`](../deno-runtime.md#output) for the full API.
 
 ## Suppressing return-value persistence
 

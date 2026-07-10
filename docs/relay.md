@@ -25,8 +25,9 @@ relay:
 dicode daemon --config dicode.yaml
 ```
 
-On first start the daemon generates a P-256 keypair, stores it in the local
-SQLite database, and logs the public webhook URL:
+On first start the `buildin/relay-client` task generates a split P-256
+sign + decrypt identity, stores it encrypted at rest under
+`<DATADIR>/relay-store/`, and logs the public webhook URL:
 
 ```
 {"level":"info","msg":"relay connected","url":"https://relay.dicode.app/u/4a7b3c.../hooks/"}
@@ -40,7 +41,8 @@ In GitHub → Settings → Webhooks, set the Payload URL to:
 https://relay.dicode.app/u/<your-uuid>/hooks/github-push
 ```
 
-That's it. The URL is stable across restarts as long as you keep your database.
+That's it. The URL is stable across restarts as long as you keep your data
+directory (the identity blob) and your secrets master key.
 
 ---
 
@@ -50,19 +52,22 @@ That's it. The URL is stable across restarts as long as you keep your database.
 relay:
   enabled: true          # default: false
   server_url: wss://...  # relay WebSocket endpoint
+  broker_url: https://.. # optional: OAuth broker base URL override
 ```
 
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `enabled` | bool | `false` | Enable the relay client |
 | `server_url` | string | — | WebSocket URL of the relay server (must start with `wss://` in production) |
+| `broker_url` | string | derived | OAuth broker base URL. When empty, derived from `server_url` by swapping the scheme (`wss://host` → `https://host`). Set it when the broker runs on a different host, or during local development to point at a non-TLS port (e.g. `http://localhost:5553`). Must be `http://` or `https://` when set. |
 
 ---
 
 ## Stable URL
 
 The webhook URL is derived from a cryptographic keypair, not from your IP
-address or hostname. As long as the dicode SQLite database is intact:
+address or hostname. As long as the identity blob and the secrets master key
+are intact:
 
 - Restarts do not change your URL.
 - Changing networks does not change your URL.
@@ -74,35 +79,32 @@ The URL has the form:
 https://<relay-host>/u/<64-hex-chars>/hooks/
 ```
 
-The 64-hex identifier is `sha256(public_key)`. It is stable, collision-resistant,
-and cannot be guessed or squatted by another party.
+The 64-hex identifier is `sha256(sign_public_key)`. It is stable,
+collision-resistant, and cannot be guessed or squatted by another party.
 
 ---
 
-## Exporting and backing up the relay key
+## Backing up and rotating the relay identity
 
-The relay private key is stored in the SQLite database under the key
-`relay.private_key` in the `kv` table. To back it up:
+The relay identity is an encrypted blob at
+`<DATADIR>/relay-store/identity-v1.bin`. It is encrypted at rest via
+`dicode.crypto`, whose sub-keys derive from the secrets master key — a copied
+blob is only restorable alongside the same master key.
 
-```sh
-sqlite3 ~/.dicode/data.db "SELECT value FROM kv WHERE key = 'relay.private_key';"
-```
+**Backup:** copy the blob together with the master key material — the
+`<DATADIR>/master.key` file (auto-generated, chmod 600), or the
+`DICODE_MASTER_KEY` env value if you provision the key that way. The secrets
+database is not required to restore the relay identity. Restoring the blob
+on a machine with a different master key fails to decrypt, and the relay
+client regenerates a fresh identity (new UUID, new webhook URLs).
 
-To restore it on another machine, write the PEM to a temp file first, then
-insert it — this avoids storing the raw key in your shell history:
+**Rotation** (e.g. suspected key compromise): stop the daemon, delete
+`<DATADIR>/relay-store/identity-v1.bin`, restart. The relay-client task
+generates a fresh identity on next boot. All previously shared webhook URLs
+stop working; reissue them as needed.
 
-```sh
-# Export from source machine
-sqlite3 ~/.dicode/data.db "SELECT value FROM kv WHERE key = 'relay.private_key';" > /tmp/relay_key.pem
-
-# On the destination machine, import via a file variable (not an inline string)
-PEM=$(cat /tmp/relay_key.pem)
-sqlite3 ~/.dicode/data.db "INSERT OR REPLACE INTO kv (key, value) VALUES ('relay.private_key', '$PEM');"
-rm /tmp/relay_key.pem
-```
-
-Keep this value secret. Anyone with the private key can impersonate your relay
-client.
+Keep the blob and your master key secret. Anyone holding both can impersonate
+your relay client.
 
 ---
 
@@ -112,18 +114,22 @@ When connected to a relay that exposes the OAuth broker (the default at
 `relay.dicode.app`), the daemon gains two built-in tasks that perform the
 authorization flow without any provider-side app registration:
 
-- `buildin/auth-start` — generates a signed `/auth/:provider` URL via
-  `dicode.oauth.build_auth_url` and prints it for the user to open.
+- `buildin/auth-start` — signs a `/auth/:provider` URL with the daemon's
+  relay identity and prints it for the user to open.
 - `buildin/auth-relay` — receives the encrypted token delivery on the
-  reserved `/hooks/oauth-complete` path and writes the resulting
-  credentials straight into secrets via `dicode.oauth.store_token`.
+  reserved `/hooks/oauth-complete` path, verifies the broker signature,
+  ECIES-decrypts the envelope, and writes each credential to secrets via
+  `dicode.secrets_set`. It runs locked down (`silent: true`, no network,
+  no filesystem, minimal env) so decrypted tokens cannot leak through
+  logs or side channels.
 
-Plaintext tokens never reach task code: decrypt, parse, and `secrets.Set`
-all happen in Go-process memory. The full flow, security model, and
-failure modes are documented in [oauth.md](./oauth.md).
+The full flow, security model, and failure modes are documented in
+[oauth.md](./oauth.md).
 
-If the relay is disabled, the broker primitives return "not configured"
-and you should use the local OAuth flow instead (see the same doc).
+If the relay is disabled (or no broker URL can be derived),
+`buildin/auth-start` fails with "relay broker URL not configured
+(DICODE_RELAY_BROKER_URL)" — use the local OAuth flow instead (see the
+same doc).
 
 ---
 
@@ -146,6 +152,10 @@ relay:
 The relay server requires no database; nonce state and client registry are
 kept in memory. TLS termination should be handled by a reverse proxy
 (nginx, Caddy, etc.) in front of the Node process.
+
+Alternatively, the `buildin/relay-server` pipeline task runs dicode-relay
+in-process under the daemon's Deno runtime — useful for standing up a
+local or single-tenant relay without a separate deployment.
 
 > Historically the daemon repository carried a Go relay implementation at
 > `pkg/relay/server.go`. It was dropped in favour of the TypeScript relay —

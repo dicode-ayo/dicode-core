@@ -24,7 +24,8 @@ has to do manually, and the trade-offs.
 Before proposing changes, it's worth being precise about what's already in
 place, because a lot of the groundwork is done:
 
-- **Relay tunnel.** [`pkg/relay/client.go`](../../pkg/relay/client.go) in dicode-core connects outbound
+- **Relay tunnel.** The [`buildin/relay-client`](../../tasks/buildin/relay-client/) task
+  (built on `npm:dicode-relay/client`) connects outbound
   over WSS to the relay server; inbound HTTP requests at
   `https://relay.dicode.app/u/<uuid>/hooks/<path>` are forwarded down the
   tunnel as `request` messages and answered with `response` messages. The
@@ -38,9 +39,9 @@ place, because a lot of the groundwork is done:
   on the target daemon.
 - **auth-start / auth-relay tasks.** [`tasks/buildin/auth-start`](../../tasks/buildin/auth-start/) prints an
   authorize URL; [`tasks/buildin/auth-relay`](../../tasks/buildin/auth-relay/) is the reserved sink at
-  `/hooks/oauth-complete` that decrypts the envelope in Go memory and writes
-  secrets via the `dicode.oauth.store_token` IPC primitive. Plaintext tokens
-  never cross the JS runtime.
+  `/hooks/oauth-complete` that ECIES-decrypts the envelope in a locked-down
+  task (`silent: true`, no net, no fs) and writes secrets via
+  `dicode.secrets_set`.
 - **Slack is already a broker provider**, currently registered with
   `channels:read` user-token scopes and no client_secret (PKCE-only). This
   is fine for user-token reads; it is **not** what a slash-command bot
@@ -341,11 +342,11 @@ in the broker env. One-time, but a real step.
 ### Daemon-side changes required
 
 1. **Read `SLACK_TEAM_ID` from secrets and include it in the hello message.**
-   Small change to [`pkg/relay/client.go`](../../pkg/relay/client.go) hello construction, ~20 lines.
+   Small change to the npm `dicode-relay` client (hello field bindings) plus
+   [`tasks/buildin/relay-client`](../../tasks/buildin/relay-client/) to announce it.
 2. **Accept and persist the `extras` field from OAuth delivery.** Extend
-   [`pkg/relay/oauth.go`](../../pkg/relay/oauth.go) and the `dicode.oauth.store_token` IPC primitive
-   in [`pkg/ipc/server.go`](../../pkg/ipc/server.go) to write each `extras[key]` entry as a named
-   secret. ~30 lines.
+   [`tasks/buildin/auth-relay`](../../tasks/buildin/auth-relay/) to write each `extras[key]` entry as a
+   named secret via `dicode.secrets_set`. ~30 lines.
 3. **Optional: reserved `/hooks/slack-events` webhook path** so arbitrary
    user tasks can't bind it. Same policy question as Approach A; independent
    of approach choice.
@@ -353,7 +354,7 @@ in the broker env. One-time, but a real step.
 ### What the user does
 
 ```
-$ dicode auth-start provider=slack-bot
+$ dicode run buildin/auth-start provider=slack-bot
 OAuth flow started for slack-bot.
 Open this URL in a browser to authorize:
   https://relay.dicode.app/auth/slack-bot?session_id=…&sig=…
@@ -515,10 +516,10 @@ existing auth-start / auth-relay path with no protocol changes.
 
 **1. Two builtin tasks** in [`tasks/buildin/`](../../tasks/buildin/):
 
-- `slack-install-begin` — manual trigger. Calls
-  `dicode.oauth.build_auth_url("slack-config")`, prints the authorize URL,
-  returns. Essentially a thin wrapper over `auth-start` that hardcodes the
-  provider. Could alternatively be expressed as "run auth-start with
+- `slack-install-begin` — manual trigger. Signs an authorize URL for the
+  `slack-config` provider (the same signed-URL path `auth-start` uses),
+  prints it, returns. Essentially a thin wrapper over `auth-start` that
+  hardcodes the provider. Could alternatively be expressed as "run auth-start with
   provider=slack-config," in which case this task is unnecessary.
 
 - `slack-install-complete` — **chain trigger** on `buildin/auth-relay`

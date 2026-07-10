@@ -37,7 +37,6 @@ Secrets stored in the local encrypted SQLite database. This is the primary store
 **CLI:**
 ```bash
 dicode secrets set SLACK_TOKEN xoxb-1234-5678
-dicode secrets get SLACK_TOKEN      # prints value
 dicode secrets list                 # lists names only, never values
 dicode secrets delete SLACK_TOKEN
 ```

@@ -1,7 +1,6 @@
 # On-failure auto-fix loop — design
 
-**Status:** draft, awaiting review
-**Owner:** TBD
+**Status:** substantially shipped (#234, #238)
 **Epic:** [#207 — landing-page promises](https://github.com/dicode-ayo/dicode-core/issues/207)
 **Tracking issue:** [#228](https://github.com/dicode-ayo/dicode-core/issues/228)
 
@@ -77,7 +76,7 @@ Out of scope (deferred):
 
 ### 3.2 Existing primitives reused (not in scope to change)
 
-- **`pkg/taskset.SetDevMode(enabled, opts)`** — dev-ref substitution + immediate registry re-sync. Used today for human dev workflow ([source.go:121-147](../../pkg/taskset/source.go#L121-L147)).
+- **`pkg/taskset.SetDevMode(enabled, opts)`** — dev-ref substitution + immediate registry re-sync. Used today for human dev workflow ([source.go:200](../../pkg/taskset/source.go#L200)).
 - **`buildin/dicodai`** — a TaskSet `overrides:` entry defined in [`tasks/buildin/taskset.yaml:32-`](../../tasks/buildin/taskset.yaml#L32) that overrides `ai-agent` with the `dicode-task-dev` + `dicode-basics` skills preloaded.
 - **`pkg/secrets/local.go`** ChaCha20-Poly1305 + Argon2id — reused (with a per-purpose Argon2id salt) for run-input encryption. See § 4.1.
 - **`pkg/tasktest.Run`** — runs `task.test.{ts,js}` via `pkg/tasktest`. Wrapped by a new `dicode.tasks.test` SDK call.
@@ -349,18 +348,16 @@ MCP exposure: a `replay_run` MCP tool may be added later to the buildin MCP task
 
 ### 4.4 Dev mode with branch parameter
 
-Today: `Source.SetDevMode(ctx, enabled bool, localPath string)` ([pkg/taskset/source.go:124](../../pkg/taskset/source.go#L124)).
-
-Extended:
+Shipped as designed: `Source.SetDevMode(ctx, enabled bool, opts DevModeOpts)` ([pkg/taskset/source.go:200](../../pkg/taskset/source.go#L200)).
 
 ```go
 func (s *Source) SetDevMode(ctx context.Context, enabled bool, opts DevModeOpts) error
 
 type DevModeOpts struct {
-    LocalPath string  // existing: point at user's local checkout
-    Branch    string  // new: engine creates a fresh clone on this branch
-    Base      string  // new: branch to fork from when Branch doesn't exist (default: source's tracked branch)
-    RunID     string  // new: tag the clone dir with the auto-fix run ID, used for cleanup
+    LocalPath string  // point at user's local checkout
+    Branch    string  // engine creates a fresh clone on this branch
+    Base      string  // branch to fork from when Branch doesn't exist (default: source's tracked branch)
+    RunID     string  // tag the clone dir with the auto-fix run ID, used for cleanup
 }
 ```
 

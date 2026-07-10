@@ -1,5 +1,12 @@
 # dicode-relay: OAuth Broker + Relay Server Design
 
+> **Historical design (pre-PR #254).** The Go relay client described below
+> (`pkg/relay`, `dicode.oauth.*` IPC primitives) was replaced by the
+> `buildin/relay-client` TypeScript task built on `npm:dicode-relay/client`;
+> token decryption now happens in the locked-down `buildin/auth-relay` task
+> (see [docs/oauth.md](../oauth.md)). Broker-side sections still reflect the
+> dicode-relay service.
+
 ## Problem
 
 Providers like Slack require HTTPS redirect URIs and reject `http://localhost`.
@@ -40,6 +47,9 @@ PR #79 introduced a Go relay server (`pkg/relay/server.go`). However:
 JSON-over-WebSocket protocol and does not care what language the server is
 written in. The protocol spec and client code from PR #79 are kept unchanged.
 Only `server.go` is replaced by `src/relay/server.ts`.
+
+*(Superseded: PR #254 later moved the client side to the
+`buildin/relay-client` task as well — no relay code remains in Go.)*
 
 ---
 

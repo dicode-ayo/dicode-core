@@ -1,27 +1,29 @@
 # Task Store
 
-The task store lets you install pre-built tasks from a GitHub repository (or any public URL) with a single command. It's the dicode equivalent of `npm install`.
+> **Not implemented.** Everything on this page — `dicode task install`, `dicode task search`, `dicode task commit`, and the official/community task library — is planned design, not shipped behavior. `cmdTask` (`cmd/dicode/main.go`) currently handles only `test | create | edit | save | cancel | delete | approve | pending`. Today, adding a task means putting a folder with `task.yaml` (+ `task.js`/`task.ts`/`task.py`) into a watched source — see [Sources & Reconciler](./sources.md).
+
+The north star is a task store that lets you install pre-built tasks from a GitHub repository (or any public URL) with a single command — the dicode equivalent of `npm install`.
 
 ---
 
-## Installing tasks
+## Installing tasks (planned)
 
 ```bash
 dicode task install github.com/dicode/tasks/morning-email-check
 dicode task install github.com/dicode/tasks/morning-email-check --param slack_channel=#devops
 ```
 
-This:
-1. Downloads the task folder (`task.yaml` + `task.js` + `task.test.js`)
-2. Applies any `--param` overrides to `task.yaml` defaults
-3. Writes the task into your local tasks directory
+The intended flow:
+1. Download the task folder (`task.yaml` + `task.js` + `task.test.js`)
+2. Apply any `--param` overrides to `task.yaml` defaults
+3. Write the task into your local tasks directory
 4. The local source picks it up via fsnotify — task is live immediately
 
 ---
 
-## Publishing tasks
+## Publishing tasks (planned)
 
-Any task folder in a public GitHub repo is installable. There's no special registry — just a GitHub URL.
+The design goal: any task folder in a public GitHub repo is installable, with no special registry — just a GitHub URL.
 
 ```
 github.com/{owner}/{repo}/{path-to-task-folder}
@@ -33,13 +35,13 @@ dicode task install github.com/acmecorp/dicode-tasks/github-release-notifier
 dicode task install github.com/alice/automations/daily-standup-reminder
 ```
 
-For the task to be installable, it only needs `task.yaml` and `task.js` in the folder.
+For a task to be installable this way, it would only need `task.yaml` and `task.js` in the folder.
 
 ---
 
-## Parameterized tasks
+## Parameterized tasks (planned)
 
-Store tasks can declare parameters that the installer fills in:
+Store tasks would declare parameters that the installer fills in:
 
 ```yaml
 # task.yaml (in the store)
@@ -58,13 +60,13 @@ dicode task install github.com/dicode/tasks/slack-daily-digest \
   --param slack_channel=#general
 ```
 
-Optional params (those with defaults) don't need to be specified. The installer replaces the default value with the provided one.
+Optional params (those with defaults) would not need to be specified; the installer would replace the default value with the provided one.
 
 ---
 
-## Official task library
+## Official task library (aspirational)
 
-Dicode maintains an official task library at `github.com/dicode/tasks`. Categories include:
+The plan is an official task library at `github.com/dicode/tasks`, with categories such as:
 
 | Category | Examples |
 |---|---|
@@ -75,13 +77,13 @@ Dicode maintains an official task library at `github.com/dicode/tasks`. Categori
 | Finance | Invoice reminders, expense summaries, budget alerts |
 | Productivity | Calendar digests, todo summaries, meeting prep |
 
-Community contributions welcome via pull request.
+None of this exists yet.
 
 ---
 
 ## Future: searchable registry
 
-The north star is a searchable registry at `dicode.app/store`:
+The further-out north star is a searchable registry at `dicode.app/store`:
 
 ```bash
 dicode task search "slack notification"
@@ -92,18 +94,18 @@ dicode task search "slack notification"
 dicode task install dicode/tasks/slack-digest
 ```
 
-The registry indexes public GitHub repos that opt in by adding a `dicode-task` topic. Tasks can have ratings, install counts, and verified publisher badges.
+The registry would index public GitHub repos that opt in by adding a `dicode-task` topic. Tasks could have ratings, install counts, and verified publisher badges.
 
-**Revenue sharing**: paid marketplace tasks share 70% of revenue with the author. See [Business Model](./business-model.md).
+**Revenue sharing (aspirational)**: paid marketplace tasks would share 70% of revenue with the author. See [Business Model](./business-model.md).
 
 ---
 
-## Committing installed tasks
+## Committing installed tasks (planned)
 
-After installing from the store, the task lives in your local source. If you want it version-controlled in your git source:
+After installing from the store, the task would live in your local source. To version-control it in a git source:
 
 ```bash
 dicode task commit morning-email-check --to my-git-source
 ```
 
-See [Sources & Reconciler](./sources.md) for how local and git sources coexist.
+See [Sources & Reconciler](./sources.md) for how local and git sources coexist today.

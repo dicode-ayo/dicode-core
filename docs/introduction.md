@@ -69,17 +69,20 @@ The full engine is open source (AGPL-3.0). Cloud tiers gate execution volume and
 tasks git repo (or local dir)
 └── morning-email-check/
     ├── task.yaml    ← trigger (cron/webhook/manual/chain), params, env vars
-    ├── task.js      ← JavaScript logic, runs in goja (sandboxed)
-    └── task.test.js ← unit tests with mocked http/env/params
+    ├── task.js      ← task logic (task.ts and task.py also supported); JS/TS
+    │                  runs in a Deno subprocess, Python via uv (sandboxed via
+    │                  --allow-*/permission flags)
+    └── task.test.js ← unit tests with mocked globals
 
 dicode binary
 ├── Reconciler      watches sources, syncs task registry (ArgoCD-style)
-├── JS Runtime      goja + http, kv, log, params, env, dicode globals
+├── Runtimes        Deno subprocess (JS/TS), Python (uv), Docker/Podman containers;
+│                   kv, log, params, env, dicode, mcp SDK globals
 ├── Trigger engine  cron (robfig/cron), webhook, manual, chain
 ├── Secrets         provider chain: local encrypted SQLite → env vars → Vault/AWS SM
-├── WebUI + API     HTMX frontend, REST API, live log streaming
-├── MCP server      tools for AI agents: validate, test, dry-run, commit
-└── Relay client    WebSocket tunnel to dicode.app for public webhook URLs
+├── WebUI + API     REST API, live log streaming; Lit dashboard served by the buildin/webui task
+├── MCP server      buildin/mcp task: list/get/run/test tasks, sources, dev mode
+└── Relay tunnel    buildin/relay-client task: WebSocket tunnel for public webhook URLs
 ```
 
 ---

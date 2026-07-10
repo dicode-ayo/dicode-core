@@ -8,6 +8,8 @@
 
 **Tech Stack:** Go, existing project packages (no new dependencies)
 
+> **Shipped divergence:** the plan below specs `func Run(configPath string)` plus an exported `daemon.Version` var. The code that landed instead is `func Run(configPath string, portOverride int, version string)` — `version` (and a `portOverride` for onboarding) are passed as arguments rather than set on a package var, and `Run` has no return value. Everything else in this plan matches what shipped.
+
 ---
 
 ### Task 1: Create `pkg/daemon/daemon.go`

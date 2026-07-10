@@ -59,7 +59,7 @@ This task is triggered by a POST to `http://localhost:8080/hooks/github-push` (o
 
 The request body is parsed and available as the `input` global in `task.js`:
 ```javascript
-log.info(`Received push to ${input.ref}`)
+console.log(`Received push to ${input.ref}`)
 ```
 
 **Webhook authentication:** dicode supports a shared secret for webhook verification. Set `server.webhook_secret` in `dicode.yaml` and include it as:
@@ -94,8 +94,7 @@ trigger:
 
 **Trigger from CLI:**
 ```bash
-dicode task run morning-email-check
-dicode task run morning-email-check --param slack_channel=#ops
+dicode run morning-email-check slack_channel=#ops
 ```
 
 **Trigger from API:**
@@ -139,7 +138,7 @@ trigger:
     on: success
 ```
 ```javascript
-log.info(`Sending digest of ${input.count} emails`)
+console.log(`Sending digest of ${input.count} emails`)
 ```
 
 `archive-emails`:
@@ -150,9 +149,9 @@ trigger:
     on: always   # archive even if digest send fails
 ```
 
-**Cycle detection:** the reconciler runs DFS on the chain graph at task registration time. Cycles are rejected with an error.
+**Cycle detection:** the trigger engine runs DFS on the success-chain graph at task registration time. Cycles are rejected with an error.
 
-**Chain vs `dicode.trigger()`:** chain is **declarative** — `fetch-emails` has no knowledge of `send-slack-digest`. `dicode.trigger()` is **imperative** — the running task explicitly fires another. See [Task → Orchestrator API](./orchestrator-api.md).
+**Chain vs `dicode.run_task()`:** chain is **declarative** — `fetch-emails` has no knowledge of `send-slack-digest`. `dicode.run_task()` is **imperative** — the running task explicitly fires another and waits for its result. See [Task → Orchestrator API](./orchestrator-api.md).
 
 For full chain documentation including data flow and constraints, see [Task Chaining](./task-chaining.md).
 
@@ -215,7 +214,7 @@ DICODE_MAX_CONCURRENT_TASKS=8 dicode daemon
 - `0` (default) — unlimited, backwards-compatible behaviour.
 - `N > 0` — at most N tasks execute concurrently. Additional invocations queue inside the daemon and run as slots become free.
 - **Daemon tasks bypass the cap** so long-running daemons don't starve webhook/cron tasks.
-- **Synchronous webhook responses bypass the cap** — tasks fired via `fireSync` (webhooks that return a response to the HTTP caller) are not subject to the semaphore, so sync clients can never deadlock waiting for a slot. Only async triggers (cron, async webhooks, chained `dicode.trigger()` calls) count against the limit.
+- **Synchronous webhook responses bypass the cap** — tasks fired via `fireSync` (webhooks that return a response to the HTTP caller) are not subject to the semaphore, so sync clients can never deadlock waiting for a slot. Only async triggers (cron, async webhooks, chained `dicode.run_task()` calls) count against the limit.
 - **Killing a queued run** — cancelling a run that is still waiting on a slot honors the kill immediately; the run is finalized as `cancelled` and the websocket `run:finished` event fires so the UI stays in sync.
 - **Shutdown safety:** queued goroutines are unblocked when the daemon shuts down, finalized as `cancelled`, and their DB rows updated under a bounded timeout, so a full slot queue never causes a hang on `SIGTERM`.
 
@@ -227,6 +226,6 @@ the `tasks` object includes `max_concurrent_tasks`, `active_task_slots`, and
 
 ## Trigger constraints
 
-- Exactly one trigger per task. Multiple triggers are not supported (use `dicode.trigger()` from a task for complex dispatch logic).
+- Exactly one trigger per task. Multiple triggers are not supported (use `dicode.run_task()` from a task for complex dispatch logic).
 - All five trigger types coexist in the same task registry.
 - Cron, chain, and daemon tasks can also be triggered manually via the API/UI (manual trigger on a daemon task restarts it).

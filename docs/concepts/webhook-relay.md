@@ -6,7 +6,7 @@ The webhook relay lets a local dicode instance receive incoming HTTP requests (w
 
 ## How it works
 
-The dicode daemon maintains a persistent outbound WebSocket connection to a relay server. The relay server receives inbound HTTP requests at a stable public URL and forwards them over the WebSocket. The daemon reconstructs the HTTP request, forwards it to the local HTTP server, captures the response, and sends it back.
+The `buildin/relay-client` daemon task (built on `npm:dicode-relay/client`) maintains a persistent outbound WebSocket connection to a relay server. The relay server receives inbound HTTP requests at a stable public URL and forwards them over the WebSocket. The task reconstructs the HTTP request, forwards it to the local HTTP server, captures the response, and sends it back.
 
 ```
 GitHub / Slack / Stripe
@@ -23,7 +23,9 @@ GitHub / Slack / Stripe
                                  |  dicode daemon       |
                                  |  (local machine)     |
                                  |                      |
-                                 |  relay.Client        |
+                                 |  buildin/relay-client|
+                                 |  task (npm:          |
+                                 |  dicode-relay/client)|
                                  |       |              |
                                  |  local HTTP server   |
                                  |  (trigger engine,    |
@@ -44,7 +46,7 @@ relay:
   server_url: wss://relay.dicode.app   # or ws://localhost:5553 for local dev
 ```
 
-When `relay.enabled` is `true` and `server_url` is set, the daemon starts the relay client on boot. The relay client generates a stable cryptographic identity on first run (see below) and reconnects automatically with exponential backoff on disconnect.
+When `relay.enabled` is `true` and `server_url` is set, the daemon dispatches the `buildin/relay-client` daemon task on boot. The task generates a stable cryptographic identity on first run (see below) and reconnects automatically with exponential backoff on disconnect. An optional `broker_url` field overrides the OAuth broker base URL; when empty it is derived from `server_url` by swapping the scheme.
 
 ---
 
@@ -56,7 +58,7 @@ After a successful handshake the relay server returns a webhook base URL:
 https://relay.dicode.app/u/<uuid>/hooks/
 ```
 
-The `<uuid>` is derived from the daemon's ECDSA P-256 public key (`hex(sha256(uncompressed_pubkey))`). It never changes as long as the daemon's database file is preserved. Use this URL as the webhook endpoint in GitHub, Slack, Stripe, etc.
+The `<uuid>` is derived from the daemon's ECDSA P-256 signing public key (`hex(sha256(uncompressed_sign_pubkey))`). It never changes as long as the encrypted identity blob and the secrets master key are preserved. Use this URL as the webhook endpoint in GitHub, Slack, Stripe, etc.
 
 The relay also serves `/u/<uuid>/dicode.js` so that webhook task UIs work through the relay with no extra configuration.
 
@@ -64,32 +66,45 @@ The relay also serves `/u/<uuid>/dicode.js` so that webhook task UIs work throug
 
 ## Cryptographic identity
 
-On first run the daemon generates an ECDSA P-256 keypair and stores the PEM-encoded private key in the SQLite `kv` table (key: `relay.private_key`). The UUID is derived as:
+On first run the `buildin/relay-client` task generates a split P-256 identity: a **signing** keypair and a separate **decryption** keypair. The private keys are exported as a `StoredIdentity` JSON blob, encrypted via `dicode.crypto` (context `dicode/relay-identity/v1`, sub-keys derived from the secrets master key), and persisted via the configured storage task under `<DATADIR>/relay-store/`. There is no PEM file and no SQLite `kv` row. The UUID is derived from the signing key:
 
 ```
-UUID = hex(sha256(0x04 || X || Y))    // 64 lowercase hex characters
+UUID = hex(sha256(0x04 || X || Y))    // 64 lowercase hex characters, sign pubkey
 ```
 
 This identity is used for:
-1. **Relay handshake** -- the daemon proves ownership of the UUID via ECDSA challenge-response
-2. **OAuth broker** -- the daemon signs auth requests so the broker can verify the caller controls the relay UUID
-3. **Token encryption** -- the broker encrypts OAuth tokens to the daemon's public key (ECIES)
+1. **Relay handshake** -- the daemon proves ownership of the UUID via ECDSA challenge-response (sign key)
+2. **OAuth broker** -- the daemon signs auth requests so the broker can verify the caller controls the relay UUID (sign key)
+3. **Token encryption** -- the broker encrypts OAuth tokens to the daemon's decryption public key (ECIES)
+
+The task also pins the broker's public key on first connect (trust-on-first-use); a later mismatch aborts the connection. The pin is stored encrypted alongside the identity.
+
+The UUID stays stable as long as the identity blob and the secrets master key both survive. If the master key changes (passphrase rotation), the blob is unrecoverable and the task regenerates a fresh identity with a new UUID.
 
 ---
 
 ## Protocol
 
-All messages are JSON text WebSocket frames.
+Messages are protojson-encoded `ServerMessage` / `ClientMessage` envelopes
+(generated from `relay.proto`) sent as JSON text WebSocket frames — a `oneof`
+wrapper keyed by variant name (e.g. `{"hello":{...}}`), not a flat
+`{"type":...}` object. The wire format is defined by the pinned dicode-relay
+package (`npm:dicode-relay@~0.1.4`, see `deno.lock`); see
+[docs/design/relay.md](../design/relay.md) for the full protocol reference.
+Both client and broker require protocol version 3 — a broker advertising a
+lower version is rejected.
 
 ### Handshake
 
 ```
-Server -> Client   {"type":"challenge","nonce":"<64 hex chars>"}
-Client -> Server   {"type":"hello","uuid":"...","pubkey":"...","sig":"...","timestamp":N}
-Server -> Client   {"type":"welcome","url":"https://relay.dicode.app/u/<uuid>/hooks/"}
+Server -> Client   {"challenge":{"nonce":"<64 hex chars>"}}
+Client -> Server   {"hello":{"uuid":"...","pubkey":"...","decrypt_pubkey":"...","sig":"...","timestamp":N}}
+Server -> Client   {"welcome":{"url":"https://relay.dicode.app/u/<uuid>/hooks/","brokerPubkey":"...","protocol":3}}
                    or
-                   {"type":"error","message":"<reason>"}
+                   {"error":{"message":"<reason>"}}
 ```
+
+`pubkey` is the signing public key; `decrypt_pubkey` is the separate key the broker encrypts OAuth token deliveries to. `brokerPubkey` on the welcome is what the client TOFU-pins. (The client encodes `hello` with proto field names/snake_case; the server's `welcome`/`challenge`/`error` use camelCase — casing differs by direction.)
 
 Verification steps (server):
 1. Decode `pubkey` from base64 -- must be 65 bytes starting with `0x04`
@@ -101,11 +116,11 @@ Verification steps (server):
 ### Request forwarding
 
 ```
-Server -> Client   {"type":"request","id":"<uuid>","method":"POST","path":"/hooks/my-task","headers":{...},"body":"<base64>"}
-Client -> Server   {"type":"response","id":"<uuid>","status":200,"headers":{...},"body":"<base64>"}
+Server -> Client   {"request":{"id":"<uuid>","method":"POST","path":"/hooks/my-task","headers":{...},"body":"<base64>"}}
+Client -> Server   {"response":{"id":"<uuid>","status":200,"headers":{...},"body":"<base64>"}}
 ```
 
-The client handles multiple concurrent requests. Each is dispatched in a separate goroutine.
+The client handles multiple concurrent requests and sends responses as they complete.
 
 ---
 
@@ -159,11 +174,10 @@ The relay server lives at [dicode-ayo/dicode-relay](https://github.com/dicode-ay
 
 ## Reconnection
 
-The client reconnects automatically with exponential backoff (1 s initial, 60 s max, +/-20% jitter). The backoff resets after 10 s of stable connection. The daemon's UUID and webhook URLs remain the same across reconnects.
+The npm `RelayClient` reconnects the WSS connection automatically with internal exponential backoff. The `buildin/relay-client` task wraps everything outside the WSS lifecycle (missing config, storage or decrypt failures) in an outer 5 s → 60 s exponential backoff loop. The daemon's UUID and webhook URLs remain the same across reconnects.
 
 ---
 
-## What is not yet built
+## OAuth over the relay
 
-- **OAuth token delivery**: The relay client does not yet handle ECIES-encrypted token payloads from the broker. Design is in `docs/design/oauth-broker.md`.
-- **`config.relay.broker_url`**: Config field for the OAuth broker URL (for `tasks/auth/_oauth-app/task.ts` broker mode).
+Encrypted OAuth token deliveries arrive on the reserved `/hooks/oauth-complete` path, handled by `buildin/auth-relay`. See [oauth.md](../oauth.md) for the full flow.
