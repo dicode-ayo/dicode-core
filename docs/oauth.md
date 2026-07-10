@@ -35,9 +35,9 @@ dicode run buildin/auth-start provider=slack scope="channels:read chat:write"
 
 ### 2. Wait for the token delivery
 
-The relay broker exchanges the authorization code with the provider, ECIES-encrypts the token bundle to your daemon's long-lived P-256 public key, and forwards the encrypted envelope over the existing WSS tunnel to `/hooks/oauth-complete`. The `buildin/auth-relay` built-in receives it, asks the daemon to decrypt via `dicode.oauth.store_token`, and writes the result to secrets.
+The relay broker exchanges the authorization code with the provider, ECIES-encrypts the token bundle to your daemon's long-lived P-256 decryption public key, and forwards the encrypted envelope over the existing WSS tunnel to `/hooks/oauth-complete`. The `buildin/auth-relay` built-in receives it, verifies the broker signature (`broker_sig`) against the TOFU-pinned broker key, ECIES-decrypts the envelope in-task, and writes each credential to the secrets store via `dicode.secrets_set`.
 
-Plaintext tokens never cross the JS runtime boundary — decrypt, parse, and `secrets.Set` all happen in Go-process memory, so a careless `console.log(input)` in a downstream task cannot leak credentials.
+Decryption happens inside a deliberately locked-down task: `silent: true` discards stdout/stderr (so nothing token-shaped can reach log capture), `permissions.net` and `permissions.fs` are empty (no outbound network, no disk writes), and only a minimal set of env vars is exposed. The only output channels are `dicode.secrets_set` and the storage task, which sees only ciphertexts.
 
 ### 3. Consume the token
 
@@ -75,56 +75,55 @@ const res = await fetch("https://slack.com/api/auth.test", {
 
 - **ECDSA-signed initiation** — the `/auth/:provider` URL is signed by the daemon's P-256 identity key. The broker verifies the signature against the pubkey it knows for that UUID (from the live WSS registry) before starting the flow.
 - **PKCE binding in the signed payload** — the broker's own challenge is cryptographically bound to the daemon that initiated the flow, preventing challenge-swap hijacks.
-- **ECIES token delivery** — tokens are encrypted to the daemon's public key before leaving the broker process. Even a compromised relay operator or CDN cannot read them.
+- **ECIES token delivery** — tokens are encrypted to the daemon's decryption public key before leaving the broker process. Even a compromised relay operator or CDN cannot read them.
 - **Type-as-AAD domain separation** — the envelope's message-type tag is bound into AES-GCM's authenticated data. A future ciphertext that reuses this same ECIES scheme under a different type label cannot be coaxed through the daemon's decrypt path.
-- **Single-use pending sessions** — each `build_auth_url` call creates a session id that the daemon tracks and consumes on delivery. Unknown or expired sessions are rejected outright, which closes the chosen-salt oracle against the identity key.
+- **Single-use pending sessions** — each `auth-start` invocation creates a session id and persists an encrypted `{session → provider}` record; `auth-relay` consumes and deletes the record on delivery. Unknown or expired sessions are rejected outright.
 - **Reserved delivery path** — the trigger engine refuses to bind `/hooks/oauth-complete` to any task other than `buildin/auth-relay`, which keeps a user task from accidentally (or maliciously) shadowing the delivery sink.
 - **Audit log** — every successful delivery emits a structured metadata-only log entry (task, run, provider, session id, secret names written) so operators can trace incidents without the token ever reaching an observability pipeline.
 
 ### Task-level API
 
-Three IPC primitives back the built-ins. You almost never call them directly — use `dicode run buildin/auth-start` and the built-in webhook task — but they are available to any task that declares the matching permission:
+There is no dedicated OAuth IPC surface — the built-ins compose the flow
+from generic, independently gated primitives. You almost never touch these
+directly (use `dicode run buildin/auth-start` and the built-in webhook
+task), but they are what the tasks declare:
 
 ```yaml
 permissions:
   dicode:
-    oauth_init:   true   # grants dicode.oauth.build_auth_url
-    oauth_store:  true   # grants dicode.oauth.store_token
-    oauth_status: true   # grants dicode.oauth.list_status
+    crypto:                            # dicode.crypto.encrypt / decrypt,
+      - "dicode/relay-identity/v1"     # scoped to the listed contexts
+      - "dicode/oauth-pending/v1"
+    tasks:                             # dicode.run_task allowlist —
+      - buildin/local-storage          # the encrypted-blob storage backend
+    secrets_write: true                # dicode.secrets_set (auth-relay only)
+    secrets_has:   true                # dicode.secrets.has (auth-providers only)
 ```
 
-- `oauth_init`: enables `dicode.oauth.build_auth_url(provider, scope?)`.
-  Reserved for the built-in `auth-start` task.
-- `oauth_store`: enables `dicode.oauth.store_token(envelope)`.
-  Reserved for the built-in `auth-relay` task.
-- `oauth_status`: enables `dicode.oauth.list_status(providers)`. Returns
-  connection-state metadata (presence, expiry, scope, token type) for
-  the provider names supplied — never plaintext tokens. Used by the
-  built-in `auth-providers` dashboard task.
+- `dicode.crypto.encrypt(ctx, bytes)` / `dicode.crypto.decrypt(ctx, bytes)` —
+  AES-GCM with context-scoped sub-key derivation from the secrets master
+  key. `auth-start` and `auth-relay` use it for the relay identity, the
+  broker pin, and pending-session records; a task can only use contexts
+  listed under `permissions.dicode.crypto`.
+- `dicode.secrets_set(name, value)` — writes a secret. Gated by
+  `secrets_write`; only `buildin/auth-relay` holds it in this flow.
+- `dicode.secrets.has(name)` — presence check without reading the value.
+  Gated by `secrets_has`; used by the `auth-providers` dashboard.
+- `dicode.run_task(task, params)` — reaches the storage task for
+  encrypted-at-rest blobs, allowlisted per task via
+  `permissions.dicode.tasks`.
 
-```ts
-// build_auth_url: create a signed /auth/:provider URL
-const { url, session_id } = await dicode.oauth.build_auth_url("slack", "channels:read");
-
-// store_token: consume an incoming delivery envelope, decrypt in Go,
-//              and write credentials to the secrets store.
-const result = await dicode.oauth.store_token(input);
-// result.secrets is the list of secret names written; plaintext stays in Go.
-```
-
-Each is independently gated; granting one does not grant the others. The
-`oauth_init` and `oauth_store` primitives are inert on daemons where
-`relay.enabled: false`, so the built-ins degrade cleanly when the relay
-is not configured. `oauth_status` reads only from the local secrets
-store and works regardless of relay configuration.
+Each grant is independent; granting one does not grant the others. If the
+relay is not configured, `buildin/auth-start` fails fast with a clear error
+(see below) and the local flow remains available.
 
 ### Failure modes
 
 | Symptom | Cause |
 |---|---|
-| `oauth broker not configured on this daemon` | `relay.enabled: false`, or `BASE_URL` could not be derived from `relay.server_url`. |
-| `unknown or expired session` | More than ~6 minutes elapsed between `build_auth_url` and the browser completing the flow; retry. |
-| `decrypt failed` | Daemon restart between `build_auth_url` and the delivery (pending session was in memory), or the daemon's relay identity was rotated mid-flow. |
+| `relay broker URL not configured (DICODE_RELAY_BROKER_URL)` | Relay disabled, or no broker URL could be derived from `relay.server_url` (an explicit `relay.broker_url` overrides the derivation). |
+| `unknown or expired session` | More than ~6 minutes elapsed between `auth-start` and the browser completing the flow; retry. |
+| `decrypt failed` | The daemon's relay identity was rotated mid-flow, or the delivery was signed by a broker key that no longer matches the TOFU pin. |
 | `daemon not connected` | The WSS tunnel was not open when the browser hit `/auth/:provider`. Start the daemon first, wait for the `relay connected` log line, then run `auth-start`. |
 
 ---
@@ -176,8 +175,8 @@ For broker-backed providers (github, slack, google, spotify, linear, discord, gi
 For any provider you've added to your own taskset by instantiating `_oauth-app`:
 
 ```sh
-dicode secret set MY_PROVIDER_CLIENT_ID     <client-id>
-dicode secret set MY_PROVIDER_CLIENT_SECRET <client-secret>   # if needed
+dicode secrets set MY_PROVIDER_CLIENT_ID     <client-id>
+dicode secrets set MY_PROVIDER_CLIENT_SECRET <client-secret>   # if needed
 ```
 
 Then click Connect — it will redirect you to the provider's authorization screen.
@@ -271,9 +270,10 @@ card to "Connected" automatically.
 Reach the dashboard via the webui task list (Tasks → Auth Providers →
 "open webhook UI"), or directly at `http://localhost:8080/hooks/auth-providers`.
 
-The dashboard never exposes plaintext tokens — only metadata
-(presence flag, expiry, scope, token type) is fetched from the daemon.
-The underlying primitive is `dicode.oauth.list_status()` (see below).
+The dashboard never exposes plaintext tokens. Connection status is
+determined via `dicode.secrets.has(<PROVIDER>_ACCESS_TOKEN)` — a presence
+check that never reads the token value — and the provider catalogue comes
+from the broker's `GET /providers` endpoint.
 
 ---
 
@@ -426,7 +426,7 @@ http://localhost:8080/hooks/<provider>-oauth
 If your dicode instance runs on a different host or port, set the `DICODE_BASE_URL` secret:
 
 ```sh
-dicode secret set DICODE_BASE_URL https://dicode.mycompany.com
+dicode secrets set DICODE_BASE_URL https://dicode.mycompany.com
 ```
 
 The OAuth tasks pick this up automatically and use it to build the redirect URI.

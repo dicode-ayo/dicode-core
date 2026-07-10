@@ -4,9 +4,9 @@ A built-in webhook task at `/hooks/auth-providers` that surfaces every OAuth
 provider known to a dicode instance, with connection state, expiry, scope, and
 a Connect button that orchestrates the appropriate authorisation flow.
 
-The dashboard is built around one supporting daemon-side primitive,
-`dicode.oauth.list_status()`, that lets any permission-gated task introspect
-OAuth connection metadata without ever touching plaintext credentials.
+Connection status is derived from a narrow, permission-gated primitive —
+`dicode.secrets.has(<PROVIDER>_ACCESS_TOKEN)` — so the dashboard never touches
+plaintext credentials.
 
 ## Architecture
 
@@ -15,85 +15,58 @@ OAuth connection metadata without ever touching plaintext credentials.
 │  GET  /                          → index.html (Lit-based SPA)   │
 │  POST { action: "list" }         → JSON: provider statuses      │
 │  POST { action: "connect", p }   → JSON: { url, session_id? }   │
-└──────┬───────────────────────────┬──────────────────────────────┘
-       │                           │
-       ▼                           ▼
-   list_status              run_task("buildin/auth-start")    ← relay providers
-                            or direct webhook URL              ← OpenRouter (standalone)
-       │
-┌──────┴──────────────────────────────────────────────────────────┐
-│  daemon (Go)                                                    │
-│   pkg/ipc/oauth_status.go   →  secrets.Chain.Resolve            │
-│                                (env-fallback aware)             │
-└─────────────────────────────────────────────────────────────────┘
+└──────┬──────────────┬────────────┬──────────────────────────────┘
+       │              │            │
+       ▼              ▼            ▼
+  broker GET     secrets.has   run_task("buildin/auth-start")  ← relay providers
+  /providers     per provider  or direct webhook URL           ← standalone / BYO
+  (catalogue)    (status)
 ```
 
-The 15 broker-backed providers (github, google, slack, …) connect via
-[`buildin/auth-start`](../../tasks/buildin/auth-start), which calls
-`dicode.oauth.build_auth_url` and returns a signed `/auth/:provider` URL.
-OpenRouter is the only standalone PKCE provider (no relay broker); the dashboard
-opens its existing webhook directly.
+Broker-backed providers (github, google, slack, …) connect via
+[`buildin/auth-start`](../../tasks/buildin/auth-start), which signs a
+`/auth/:provider` URL with the daemon's relay identity and returns it.
+OpenRouter is the only hardcoded standalone PKCE provider (no relay broker);
+the dashboard opens its existing webhook directly. Any BYO entry instantiated
+from the `_oauth-app` template is auto-discovered (see below) and opened via
+its own webhook.
 
-## The `dicode.oauth.list_status` primitive
+## Provider catalogue and status
 
-```go
-// pkg/ipc/oauth_status.go
-type ProviderStatus struct {
-    Provider  string  `json:"provider"`             // lowercase, as supplied
-    HasToken  bool    `json:"has_token"`
-    ExpiresAt *string `json:"expires_at,omitempty"` // RFC3339 or absent
-    Scope     *string `json:"scope,omitempty"`
-    TokenType *string `json:"token_type,omitempty"`
-}
+The dashboard assembles its provider list from three sources at runtime:
 
-func listOAuthStatus(ctx context.Context, chain secrets.Chain, providers []string) ([]ProviderStatus, error)
-```
+1. **Broker catalogue** — `GET /providers` on the relay broker
+   (`DICODE_RELAY_BROKER_URL`; requires dicode-relay ≥ 0.1.5) returns the
+   live list of broker-backed providers with their flow metadata, labels,
+   and brand colors.
+2. **Standalone table** — a small hardcoded map in
+   [`task.ts`](../../tasks/buildin/auth-providers/task.ts) for providers
+   that are neither broker-backed nor template-derived. Today that is only
+   `openrouter`.
+3. **BYO auto-discovery** — `dicode.list_tasks()` is scanned for tasks whose
+   merged spec carries the `template: dicode.io/oauth-app` marker; each
+   enabled inheritor with a webhook becomes a provider card automatically.
 
-Reads `<P>_ACCESS_TOKEN`/`_EXPIRES_AT`/`_SCOPE`/`_TOKEN_TYPE` for each
-caller-supplied provider name through the daemon's `secrets.Chain`. The chain
-walks the env-var-fallback provider, so a token set via the host environment
-shows up as connected just like one written to the encrypted local store.
-
-**Why `secrets.Chain` and not `secrets.Manager`:** Manager is the write-side
-CRUD interface (List/Set/Delete) and has no read method.
-[`Chain.Resolve`](../../pkg/secrets/provider.go) is the right interface for
-read-with-env-fallback semantics.
+Per-provider connection status is a single presence check:
+`dicode.secrets.has(<PROVIDER>_ACCESS_TOKEN)`. The check returns a boolean
+and never reads the token value.
 
 ## Security model
 
-The handler enforces several invariants that together make the primitive safe
-to expose to any opt-in task:
+1. **Plaintext tokens are never read.** Status is a `secrets.has` presence
+   check; the token value never enters the task, the response, or the SPA.
 
-1. **Plaintext tokens are never read into the response.** The handler reads
-   `<P>_ACCESS_TOKEN` only to set the boolean `HasToken` flag and discards the
-   value. `_REFRESH_TOKEN` is never read. The unit test
-   `TestListOAuthStatus_PlaintextNonLeakage` proves this with a sentinel byte
-   scan against the marshalled response.
+2. **Narrow permission gates.** The task declares exactly what it needs in
+   `permissions.dicode`: `secrets_has: true` (presence checks),
+   `list_tasks: true` (BYO discovery), and a `tasks` allowlist containing
+   only `buildin/auth-start`. None of these grants implies another, and
+   none grants secret reads or writes.
 
-2. **Provider names are sanitised before any secret-key lookup.** The shared
-   helper `sanitizeProviderPrefix` ([`pkg/ipc/oauth_store.go`](../../pkg/ipc/oauth_store.go))
-   accepts only `[A-Z0-9_]{2,}` with no leading/trailing underscore, so a
-   malicious caller cannot escape into arbitrary secret-key namespaces.
+3. **Best-effort status reads.** A failed `secrets.has` or `list_tasks`
+   call is logged and degrades to `has_token: false` / an empty BYO list
+   rather than failing the whole panel.
 
-3. **Permission gate.** A new `OAuthStatus bool` field on
-   [`task.DicodePermissions`](../../pkg/task/spec.go) opts a task into the
-   primitive. The IPC dispatcher checks
-   `hasCap(caps, CapOAuthStatus)` before invocation; the cap is independent
-   of the existing `OAuthInit` (build_auth_url) and `OAuthStore`
-   (store_token) caps, and a task with one does not implicitly get the
-   others.
-
-4. **Context-aware error propagation.** `resolveOrEmpty` tolerates
-   `NotFoundError` and transient backend errors as empty values (status reads
-   are best-effort), but propagates `context.Canceled` /
-   `context.DeadlineExceeded` so cancelled requests fail fast instead of
-   silently returning false-negative `has_token: false` rows for every
-   remaining provider.
-
-5. **Batch size cap (64).** Bounds the per-call work — each provider triggers
-   up to four secret reads.
-
-6. **Webhook auth.** The dashboard task itself declares `trigger.auth: true`,
+4. **Webhook auth.** The dashboard task itself declares `trigger.auth: true`,
    so unauthenticated browsers are gated by the dicode session wall.
 
 ## Connect flow
@@ -107,7 +80,7 @@ entry — `buildin/auth-start`. No other task is callable from the dashboard.
 1.  user clicks Connect on a card (e.g. "github")
 2.  SPA → POST /hooks/auth-providers   { action: "connect", provider: "github" }
 3.  task.ts → dicode.run_task("buildin/auth-start", { provider: "github" })
-4.  auth-start calls dicode.oauth.build_auth_url(provider) → returns { url, session_id }
+4.  auth-start signs a /auth/:provider URL with the relay identity → returns { url, session_id }
 5.  task.ts forwards { url, session_id } to the SPA; SPA opens url in a new tab
 6.  user authorises with the provider; relay broker delivers the encrypted token
     to /hooks/oauth-complete; buildin/auth-relay decrypts and persists
@@ -137,12 +110,13 @@ identically to the broker-backed providers (rename landed in PR #221).
 
 ## Provider metadata
 
-The dashboard's hardcoded `KNOWN` table in [`task.ts`](../../tasks/buildin/auth-providers/task.ts)
-is the single source of UI metadata (label, brand color, standalone-ness).
-Adding a provider requires a row here and a corresponding entry in
-[`tasks/auth/taskset.yaml`](../../tasks/auth/taskset.yaml). The two lists
-are intentionally co-located in similar shapes; if drift becomes painful,
-extract a shared `providers.json` consumed by both.
+UI metadata (label, brand color, flow shape) for broker-backed providers
+comes from the broker's `GET /providers` response — adding a broker provider
+requires no dashboard change at all. Standalone providers live in the small
+`STANDALONE` map in [`task.ts`](../../tasks/buildin/auth-providers/task.ts)
+(currently only openrouter), and BYO entries carry their own metadata via
+`_oauth-app` params (`color`, task name), picked up by the `list_tasks`
+scan.
 
 ## Out of scope (explicit, with rationale)
 
