@@ -1,3 +1,4 @@
+import { notifyFailureMessage } from "./failure.ts";
 
 export default async function main({ params }: DicodeSdk) {
 // ── params ────────────────────────────────────────────────────────────────────
@@ -108,7 +109,7 @@ if (os === "linux") {
 const result = await new Deno.Command(cmd[0], { args: cmd.slice(1) }).output();
 if (!result.success) {
   const stderr = new TextDecoder().decode(result.stderr).trim();
-  throw new Error(`notification command failed (exit ${result.code}): ${stderr}`);
+  throw new Error(notifyFailureMessage(result.code, stderr));
 }
 
 console.log("notification dispatched", { title, priority, urgency, tags });
