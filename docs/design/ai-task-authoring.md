@@ -127,7 +127,11 @@ Without it, a user who pauses to answer the agent's clarifying form loses the sa
 
 - **Single-session-per-source (#283)** becomes "one active suspended authoring run per
   source" — the concurrency rule must carry over.
-- **Provider posture:** default `task-create` to OpenAI (like `dicodai`) vs. Claude-via-MCP;
-  and whether a locked-down not-configured default is acceptable flagship UX.
+- **Provider posture — decided:** the flagship authoring backend is **Claude via
+  subscription** (`ai-agent-claude-cli`), reaching dicode through the MCP surface. The MCP
+  mount is now correct (`--strict-mcp-config --mcp-config`; the old reliance on auto-loading
+  `<cwd>/.claude/mcp.json` was a no-op). Remaining sub-question: an acceptable default when
+  no `CLAUDE_CODE_OAUTH_TOKEN` is configured. Tool-restriction + per-agent MCP scoping stay
+  in #560.
 - **Auto-wire `on_failure_chain: auto-fix`** as a default vs. keep opt-in — carries
   `git_commit_push` blast radius.
