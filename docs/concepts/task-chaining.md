@@ -1,6 +1,6 @@
 # Task Chaining
 
-Tasks can be chained so that the output of one task becomes the input of another. Dicode supports two chaining styles: **declarative** (chain trigger) and **imperative** (`dicode.trigger()`).
+Tasks can be chained so that the output of one task becomes the input of another. Dicode supports two chaining styles: **declarative** (chain trigger) and **imperative** (`dicode.run_task()`).
 
 ---
 
@@ -22,7 +22,7 @@ const emails = await fetchEmails()
 return { emails, count: emails.length }   // returned value captured by dicode
 
 // task-b/task.js — send-slack-digest
-log.info(`Sending digest of ${input.count} emails`)
+console.log(`Sending digest of ${input.count} emails`)
 await postToSlack(input.emails)
 ```
 
@@ -87,9 +87,9 @@ Both `notify-slack` and `notify-email` fire when `run-report` completes. Their o
 
 ---
 
-## Imperative dispatch: `dicode.trigger()`
+## Imperative dispatch: `dicode.run_task()`
 
-For cases where the running task itself needs to decide what fires next, use `dicode.trigger()`:
+For cases where the running task itself needs to decide what fires next, use `dicode.run_task()`:
 
 ```javascript
 // scan-inventory/task.js
@@ -97,25 +97,25 @@ const items = await fetchInventory()
 const lowStock = items.filter(i => i.qty < i.threshold)
 
 if (lowStock.length > 0) {
-  await dicode.trigger("send-reorder-alert", {
+  const result = await dicode.run_task("send-reorder-alert", {
     items: lowStock,
     count: lowStock.length
   })
 }
 ```
 
-`dicode.trigger()` is **fire-and-forget** — it returns once the triggered run has been scheduled (not after it completes). The triggered task receives the passed payload as its `input`.
+`dicode.run_task()` is **fire-and-wait** — it blocks until the downstream run completes and resolves with that run's return value. The triggered task receives the passed params as its `input`.
 
 **Declarative vs imperative:**
 
-| | Chain trigger | `dicode.trigger()` |
+| | Chain trigger | `dicode.run_task()` |
 |---|---|---|
 | Who knows the relationship? | The downstream task | The upstream task |
 | Dynamic dispatch? | No — declared statically in YAML | Yes — can fire different tasks based on logic |
-| Fire-and-wait? | No (parallel with parent's next step) | No (fire-and-forget) |
+| Fire-and-wait? | No (parallel with parent's next step) | Yes — blocks until the downstream run finishes |
 | Use case | Pipeline steps, post-processing | Conditional dispatch, fan-out from logic |
 
-Both patterns coexist. You can use chain triggers for the main pipeline and `dicode.trigger()` for conditional side effects within tasks.
+Both patterns coexist. You can use chain triggers for the main pipeline and `dicode.run_task()` for conditional side effects within tasks.
 
 ---
 
@@ -140,7 +140,7 @@ The return value is stored in sqlite and injected as the `input` global in the c
 
 ## Cycle detection
 
-The reconciler runs DFS on the chain graph every time a task is added or updated. Cycles are rejected:
+The trigger engine runs DFS on the success-chain graph at task registration time. Cycles are rejected:
 
 ```
 fetch-emails → send-digest → archive → fetch-emails   ✗ cycle detected
@@ -164,24 +164,8 @@ The WebUI shows the chain as a tree. Drilling into a parent run shows all child 
 
 ---
 
-## Pipeline DAG (north star)
+## Pipeline DAG
 
-For complex multi-step workflows with fan-out, fan-in, and conditionals, a future `pipeline.yaml` format will define an explicit DAG. Individual tasks remain single-purpose; the pipeline orchestrates them.
+For multi-step workflows with explicit ordering, fan-out, and per-stage overrides, use a `kind: PipelineTask` in `task.yaml` instead of chaining single tasks together. `subtype: sequential` runs stages in order; `subtype: parallel` runs stages concurrently with optional `depends_on` for DAG ordering. Individual stages remain single-purpose `kind: Task` entries; the pipeline orchestrates them.
 
-```yaml
-# pipelines/morning-routine/pipeline.yaml
-name: morning-routine
-trigger:
-  cron: "0 9 * * *"
-steps:
-  - id: fetch
-    task: fetch-emails
-  - id: digest
-    task: send-slack-digest
-    input: $steps.fetch.output
-  - id: archive
-    task: archive-emails
-    input: $steps.fetch.output   # fan-out: both digest and archive get fetch's output
-```
-
-This is not implemented yet. Linear declarative chains plus `dicode.trigger()` are sufficient for the MVP.
+See [Task Format — Pipelines](./task-format.md#pipelines) for the full field reference and examples.

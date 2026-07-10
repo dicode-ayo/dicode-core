@@ -1,11 +1,12 @@
 # Testing & Validation
 
 > **Status**: This document describes the testing and validation system. Layer 2
-> (`dicode task test`) is implemented for the Deno runtime (`pkg/tasktest`).
-> Layer 1 (`dicode task validate`), Layer 3 (`dicode task run --dry-run`), and
-> `dicode ci init` remain planned. The mock API described under Layer 2 is the
-> long-term design; the current implementation runs Deno's built-in test runner
-> against `task.test.ts` files and parses its summary output.
+> (`dicode task test`) is implemented for the Deno runtime: `pkg/tasktest`
+> drives `deno test` and parses its summary, and `tasks/sdk-test.ts` provides
+> a real (opt-in) mock harness — `params`/`env`/`kv`/`http.mock`/`assert.*`/
+> `runTask()` — used by this repo's built-in and example tasks. Layer 1
+> (`dicode task validate`), Layer 3 (`dicode run --dry-run`), and
+> `dicode ci init` remain planned.
 
 Dicode is designed with four validation layers, each catching different classes of problems.
 
@@ -18,7 +19,7 @@ Layer 4: CI guardrails         — layers 1+2 on every push, offline-safe       
 
 ---
 
-## Layer 1 — Static validation
+## Layer 1 — Static validation (planned design — not implemented)
 
 ```bash
 dicode task validate <id>
@@ -27,7 +28,7 @@ dicode task validate --all
 
 Checks performed without executing any code:
 - `task.yaml` schema validation (required fields, valid cron expression, valid `chain.on` value)
-- `task.js` JavaScript syntax via goja compile-without-execute
+- `task.js`/`task.ts` syntax check
 - Warning if any declared `env:` secrets have no registered value in any provider
 - Chain cycle detection (DFS across all task chain declarations)
 
@@ -48,8 +49,8 @@ Checks performed without executing any code:
 dicode task test <id>
 dicode task test <id> --format=junit        # JUnit XML to stdout; human output to stderr
 dicode task test <id> --format=gh-summary   # GitHub Markdown to stdout + $GITHUB_STEP_SUMMARY
-dicode task test --all
-dicode task test <id> --watch   # re-run on file save (planned)
+dicode task test --all                      # planned — <id> is currently required
+dicode task test <id> --watch               # planned — re-run on file save
 ```
 
 Runs `task.test.ts` (Deno runtime) through the Deno test runner. The current
@@ -79,14 +80,31 @@ against the built-in task set (using `ci/dicode-tasktest.yaml`) and runs:
 The resulting JUnit XML is uploaded as a workflow artifact. The daemon log is
 uploaded on failure for post-mortem inspection.
 
-The long-term design (mocked globals, `http.mock`, `runTask()`, etc.) remains
-the target for future layers. The current implementation uses Deno's native
-`Deno.test` runner and parses its output.
+`pkg/tasktest` itself only shells out to `deno test` and parses the summary
+line — it does not provide any mocking on its own. The mocked globals below
+(`http.mock`, `env.set`, `runTask()`, `assert.*`) come from a separate,
+repo-local test harness: `tasks/sdk-test.ts`. A `task.test.ts` opts in with:
+
+```typescript
+import { setupHarness } from "../../sdk-test.ts";
+await setupHarness(import.meta.url);
+```
+
+`setupHarness` dynamically imports the sibling `task.ts`'s default export,
+intercepts `fetch` and `Deno.env.get`, and installs `test`/`params`/`env`/`kv`/
+`http`/`assert`/`runTask`/`dicode` as globals for the rest of the file. See
+[tasks/buildin/webui/task.test.ts](../../tasks/buildin/webui/task.test.ts) and
+[tasks/buildin/blob-storage/task.test.ts](../../tasks/buildin/blob-storage/task.test.ts)
+for working examples. This harness ships in this repo for the built-in/example
+tasks; it is not (yet) published as a standalone package for external task
+repos to import.
 
 ### Test file format
 
 ```javascript
 // task.test.js
+import { setupHarness } from "../../sdk-test.ts";
+await setupHarness(import.meta.url);
 
 test("sends digest when emails present", async () => {
   // Set up mocks
@@ -134,27 +152,32 @@ test("handles empty inbox gracefully", async () => {
 - `response`: `{ status, headers, body }`. `body` objects are JSON-serialized.
 - Unmatched calls throw an error (no accidental real HTTP in tests)
 
-**`env.set(key, value)`** — set env/secret values for this test
+**`http.mockOnce(method, urlPattern, response)`** — like `http.mock` but consumed after one matching call
+
+**`http.lastRequestBody(method, urlPattern)`** — the body of the most recent matching call
+
+**`env.set(key, value)`** — set env/secret values for this test (backs `Deno.env.get`)
 
 **`params.set(name, value)`** — set parameter values for this test
 
-**`kv.seed({ key: value })`** — pre-populate KV store for this test
+**`kv.set(key, value)` / `kv.get(key)` / `kv.delete(key)` / `kv.list(prefix?)`** — pre-populate or inspect the in-memory KV store for this test (there is no separate `seed` method — use `kv.set`)
 
-**`runTask()`** — execute `task.js` with the mocked globals. Returns the task's return value.
+**`runTask()`** — invoke `task.ts`'s default export with the mocked SDK context. Returns the task's return value.
 
 ### Assert API
 
-**`assert.equal(actual, expected)`** — deep equality check
-**`assert.ok(value)`** — truthy check
-**`assert.throws(fn, pattern)`** — asserts `fn` throws an error matching `pattern`
+**`assert.equal(actual, expected, msg?)`** — deep equality check
+**`assert.ok(value, msg?)`** — truthy check
+**`assert.throws(fn, pattern?)`** — asserts `fn` throws an error matching `pattern`
 **`assert.httpCalled(method, urlPattern)`** — assert HTTP mock was called
 **`assert.httpNotCalled(method, urlPattern)`** — assert HTTP mock was NOT called
-**`assert.httpCalledWith(method, urlPattern, options)`** — assert call with specific body/headers
-**`assert.httpCallCount(method, urlPattern, n)`** — assert exact call count
+**`assert.httpCalledWith(method, urlPattern, { body })`** — assert call with a specific body
+
+There is no `assert.httpCallCount` — assert on `http.lastRequestBody` or count matches yourself if you need exact call counts.
 
 ### Test isolation
 
-Each `test()` block runs in its own fresh goja runtime. State does not leak between test cases — mocks, env vars, params, and KV are reset between each `test()`.
+All tests in a `task.test.ts` run in the same Deno process — there's no per-test goja/interpreter isolation. `setupHarness`'s `test()` wrapper calls `resetMocks()` before each case, which clears the in-memory params/env/kv maps, HTTP mocks, and call log, and re-seeds params from `task.yaml` defaults. State does not leak between test cases as long as you go through the mocked globals rather than module-level variables in `task.ts`.
 
 ### Output
 
@@ -174,11 +197,11 @@ daily-backup
 
 ---
 
-## Layer 3 — Dry run
+## Layer 3 — Dry run (planned design — not implemented)
 
 ```bash
-dicode task run <id> --dry-run
-dicode task run <id> --dry-run --verbose
+dicode run <id> --dry-run
+dicode run <id> --dry-run --verbose
 ```
 
 Runs the task with:
@@ -200,7 +223,7 @@ Useful for verifying that secret resolution works and the task targets the right
 
 ---
 
-## Layer 4 — CI integration
+## Layer 4 — CI integration (planned design — not implemented)
 
 ```bash
 dicode ci init --github
@@ -251,9 +274,9 @@ Rule of thumb: if the AI can't generate passing tests for a task it just wrote, 
 
 ## Summary
 
-| Command | What it checks | Needs secrets? | Needs network? |
-|---|---|---|---|
-| `dicode task validate` | Schema, syntax, cycles | ⚠️ warns if missing | No |
-| `dicode task test` | Unit tests with mocks | No | No |
-| `dicode task run --dry-run` | End-to-end with intercepted HTTP | Yes | No |
-| `dicode task run` | Live execution | Yes | Yes |
+| Command | What it checks | Needs secrets? | Needs network? | Status |
+|---|---|---|---|---|
+| `dicode task validate` | Schema, syntax, cycles | ⚠️ warns if missing | No | Planned |
+| `dicode task test <id>` | Unit tests, mocks via `tasks/sdk-test.ts` | No | No | Implemented (Deno) |
+| `dicode run <id> --dry-run` | End-to-end with intercepted HTTP | Yes | No | Planned |
+| `dicode run <id>` | Live execution | Yes | Yes | Implemented |
