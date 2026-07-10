@@ -224,10 +224,14 @@ follow-up to the auto-fix override.)
 
 ## Limitations
 
-- **No tool-use beyond what `claude -p` supports.** This wrapper invokes the
-  CLI in print mode, which doesn't enable Claude's filesystem / bash tools.
-  For tool-using agentic loops, drive Claude's own session machinery from
-  outside dicode (or wait for an SDK that exposes it cleanly).
+- **Unsandboxed tool access (security).** `claude -p` runs with its full
+  default toolset (Read/Write/Edit/Bash) — this wrapper passes no
+  `--allowedTools`/`--disallowedTools`/`--permission-mode`. As a subprocess the
+  `claude` binary is not confined by dicode's Deno sandbox, so a turn has
+  host-wide filesystem + bash access as the daemon user, non-interactively.
+  The `run: ["claude"]` permission understates this. Hardening — restrict the
+  tools and route dicode capabilities through MCP — is tracked in
+  [#560](https://github.com/dicode-ayo/dicode-core/issues/560).
 - **No streaming today.** The wrapper waits for the full response before
   returning. Claude's `--output-format stream-json` is supported by the CLI;
   follow-up could plumb that through `dicode.output()` for live tokens.
