@@ -17,7 +17,7 @@ Merge the daemon into the `dicode` binary behind a `dicode daemon` subcommand. T
 Exported entry point for the daemon process:
 
 ```go
-func Run(ctx context.Context, cancel context.CancelFunc, configPath string) error
+func Run(configPath string, portOverride int, version string)
 ```
 
 Contains all logic currently in `cmd/dicoded/main.go`:
@@ -26,7 +26,7 @@ Contains all logic currently in `cmd/dicoded/main.go`:
 - The full `run()` function (db, secrets, registry, runtimes, reconciler, webui, control socket, relay, tray)
 - Helper functions: `buildRuntimes`, `buildSources`, `buildSecretsChain`, `buildLogger`, `deriveBrokerBaseURL`
 
-The `version` variable is set via an exported `var Version string` that `cmd/dicode/main.go` populates from its own `ldflags`-injected version.
+`version` is passed directly as a `Run()` argument (`daemon.Run(*configPath, *port, version)` in `cmd/dicode/main.go`) rather than an exported package var — no `ctx`/`cancel` parameters and no error return; `Run` owns its own signal handling and exits the process directly.
 
 ### Modified: `cmd/dicode/main.go`
 
@@ -37,7 +37,7 @@ The `version` variable is set via an exported `var Version string` that `cmd/dic
    cmd := exec.Command(self, "daemon")
    ```
 3. Update `usage()` help text to include `daemon` subcommand
-4. Set `daemon.Version = version` in `main()`
+4. Pass `version` through to `daemon.Run(*configPath, *port, version)` in `main()`
 
 ### Deleted: `cmd/dicoded/`
 

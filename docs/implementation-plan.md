@@ -18,9 +18,9 @@ This document is the ordered build roadmap. Each milestone produces something ru
 
 **Web UI as Webhook Task ✅ Complete.** The dicode dashboard SPA (`examples/webui/`) is now a self-contained webhook task served at `/hooks/webui`. The Go binary no longer embeds frontend assets. Engine SPA fallback serves `index.html` for any extensionless sub-path under a webhook with an `index.html`, enabling client-side routing for arbitrary webhook UIs. Auth enforced client-side via `dc-auth-overlay`. `handleRunResult` serves both HTML output and plain return values. Path-traversal guard added before extension check.
 
-**Webhook Relay ✅ Complete (client-side).** `pkg/relay` implements a WebSocket relay client with ECDSA P-256 cryptographic identity (PR #79). The client connects to a relay server, authenticates via challenge-response, and transparently proxies HTTP requests to the local daemon. Security hardened: path whitelist (`/hooks/*` + `/dicode.js`), `X-Relay-Base` header injection for relay-aware SDK URLs, hop-by-hop header filtering, 5 MB body limit. Go `relay.Server` available for self-hosting/tests. Production relay server is a separate Node.js service (`dicode-relay` repo) with OAuth broker support. Config variables (`${HOME}`, `${DATADIR}`, `${CONFIGDIR}`) added to `dicode.yaml`.
+**Webhook Relay ✅ Complete.** Originally shipped as `pkg/relay` (PR #79), the relay client was migrated from Go to TypeScript in PR #254 and now ships as the `buildin/relay-client` task (paired with `buildin/relay-server` for self-hosting/tests), using `npm:dicode-relay/client` for the WSS connection, ECDSA P-256 challenge-response identity, and transparent HTTP proxying to the local daemon. Status is published via `dicode.kv.set("status", ...)` and served to the WebUI at `GET /api/relay/status` (`pkg/webui/relay_status.go`). Production relay server is a separate Node.js service (`dicode-relay` repo) with OAuth broker support. Config variables (`${HOME}`, `${DATADIR}`, `${CONFIGDIR}`) added to `dicode.yaml`. See `docs/relay.md`.
 
-**OAuth Broker 🔧 In progress.** The production relay server (`dicode-relay`) implements the full OAuth broker: Grant middleware for 14 providers, ECIES token encryption, PKCE binding, session management. Daemon-side plumbing landed in PR #100: `buildin/auth-start` and `buildin/auth-complete` tasks, AAD provider binding. What remains: Go client-side ECIES decryption handler in `pkg/relay/client.go`. Design in `docs/design/oauth-broker.md`.
+**OAuth Broker ✅ Complete.** The production relay server (`dicode-relay`) implements the full OAuth broker: Grant middleware for 14 providers, ECIES token encryption, PKCE binding, session management. Daemon-side plumbing: `buildin/auth-start` signs the `/auth/:provider` URL with the daemon's relay identity; `buildin/auth-relay` receives the token delivery at `/hooks/oauth-complete`, ECIES-decrypts it, and writes credentials to the secrets store. Design in `docs/design/oauth-broker.md`.
 
 **Performance & Scalability enhancements (partial).** Max concurrent tasks semaphore in `fireAsync()` (#74), `WaitRun()` replaced polling with channel notification (#73), concurrency metrics endpoint (#75). Deno process pool (#77) and batch log writes (#76) are open PRs.
 
@@ -154,116 +154,13 @@ Logic: fan-in all source channels, handle Added/Updated → `registry.Register()
 
 ---
 
-## Milestone 4 — JS runtime ✅
+## Milestone 4 — JS runtime ✅ (superseded)
 
 **Goal**: tasks can execute. The most complex milestone.
 
-### `pkg/runtime/js/runtime.go`
+This milestone originally shipped a `goja`-based in-process JS runtime (`pkg/runtime/js/`, one `globals/*.go` file per SDK global: `log`, `env`, `params`, `http`, `kv`, `output`, `fs`). That package has since been removed entirely. JS/TS tasks now execute via `pkg/runtime/deno` — a sandboxed Deno subprocess per run, communicating with the daemon over a unix-domain socket (`pkg/ipc`) so SDK calls like `dicode.kv.set()` go through the Go control plane instead of an in-process bridge; the SDK shim is `pkg/runtime/deno/sdk/shim.ts`. Python tasks run the analogous way via `pkg/runtime/python`, with the SDK at `pkg/runtime/python/sdk/dicode_sdk.py`. See `docs/deno-runtime.md` and `docs/python-runtime.md` for the current design.
 
-```go
-type Runtime struct {
-    registry *registry.Registry
-    secrets  secrets.Chain
-    db       db.DB
-}
-
-func New(registry *Registry, secrets secrets.Chain, db db.DB) *Runtime
-func (r *Runtime) Run(ctx context.Context, spec *task.Spec, input interface{}) (*RunResult, error)
-```
-
-Each call to `Run()`:
-1. Creates a fresh `goja.Runtime`
-2. Resolves secrets for all `spec.Env` keys
-3. Injects globals (see below)
-4. Compiles + runs `task.js`
-5. Returns the JS return value + captured logs
-
-### Globals to implement (in order of priority)
-
-| Global | File | Priority |
-|---|---|---|
-| `log` | `globals/log.go` | MVP |
-| `env` | `globals/env.go` | MVP |
-| `params` | `globals/params.go` | MVP |
-| `http` | `globals/http.go` | MVP |
-| `kv` | `globals/kv.go` | MVP |
-| `output` | `globals/output.go` | MVP |
-| `fs` | `globals/fs.go` | MVP |
-| `input` | `globals/input.go` | Post-MVP (chain) |
-| `dicode` | `dicode.go` | Post-MVP (progress, trigger, isRunning, query methods) |
-| `server` | `globals/server.go` | North star (daemon tasks) |
-
-### `pkg/runtime/js/globals/output.go`
-
-Wraps return values with a content type for rich WebUI rendering:
-```javascript
-return output.html("<h1>Report</h1>...")      // rendered iframe
-return output.text("Done: 42 items")           // monospace pre block
-return output.image("image/png", base64)       // img tag
-return output.file("r.csv", csv, "text/csv")   // download button
-return output.html(html, { data: { count } })  // html for humans, data for chains
-```
-
-Returns a plain Go struct `{ ContentType, Content, Data }`. The runner stores it in sqlite alongside the run. The WebUI reads `ContentType` to decide how to render.
-
-### `pkg/runtime/js/globals/fs.go`
-
-Filesystem access. Only injected when `task.yaml` declares `fs:`. Security enforced in Go before every call:
-1. `filepath.Abs` → resolve to absolute path
-2. `filepath.EvalSymlinks` → resolve symlinks
-3. Check resolved path has a declared entry as prefix
-4. Check operation matches declared permission (`r`/`w`/`rw`)
-
-Methods: `read`, `readJSON`, `write`, `writeJSON`, `append`, `list`, `glob`, `stat`, `exists`, `mkdir`, `copy`, `move`, `delete`
-
-### `pkg/runtime/js/globals/log.go`
-```javascript
-log.info("message")
-log.warn("message")
-log.error("message")
-log.debug("message")
-```
-Captures to run log in sqlite, also forwards to zap logger.
-
-### `pkg/runtime/js/globals/http.go`
-```javascript
-const res = await http.get("https://...", { headers: {}, timeout: "30s" })
-const res = await http.post("https://...", { body: {}, headers: {} })
-// res: { status, headers, body (parsed JSON or string) }
-```
-Standard `net/http` client. No filesystem or shell access.
-
-### `pkg/runtime/js/globals/kv.go`
-```javascript
-await kv.set("key", value)
-const val = await kv.get("key")
-await kv.delete("key")
-const keys = await kv.list("prefix")
-```
-Backed by sqlite `kv` table. Namespaced per task ID.
-
-### `pkg/runtime/js/globals/env.go`
-```javascript
-const token = env.get("SLACK_TOKEN")  // resolved from secrets chain
-```
-
-### `pkg/runtime/js/globals/params.go`
-```javascript
-const channel = params.get("slack_channel")  // from task.yaml params + run-time overrides
-```
-
-**Deliverable**: `dicode task run <id>` executes a task and logs output.
-
-**Implemented**: `pkg/runtime/js/runtime.go` (goja + goja_nodejs event loop, context timeout, run record lifecycle). All MVP globals implemented:
-- `globals/log.go` — info/warn/error/debug, captured to sqlite
-- `globals/env.go` — reads from resolved secrets chain
-- `globals/params.go` — task.yaml defaults + run-time overrides
-- `globals/http.go` — GET/POST/PUT/PATCH/DELETE, JSON body, optional interceptor for dry-run
-- `globals/kv.go` — sqlite-backed, namespaced per task ID
-- `globals/output.go` — html/text/image/file typed returns for WebUI rendering
-- `globals/fs.go` — path + permission enforcement, symlink resolution
-
-14 tests passing.
+**Deliverable**: `dicode task run <id>` executes a task and logs output. ✅
 
 ---
 
@@ -458,23 +355,13 @@ Startup sequence:
 
 **Goal**: `dicode task test` works.
 
-**E2E tests (Playwright)**: implemented in PRs #18–#20. Cover core UI flows, file changes, webhooks, HMAC, config, and auth. Infrastructure in `tests/e2e/` with fixtures and helpers. Issue #99 tracks wiring the Deno test harness for built-in task tests.
+**E2E tests (Playwright)**: implemented in PRs #18–#20. Cover core UI flows, file changes, webhooks, HMAC, config, and auth. Infrastructure in `tests/e2e/` with fixtures and helpers.
 
-### `pkg/testing/harness.go`
+### `pkg/tasktest`
 
-Mock globals injected in place of real ones:
-```go
-type MockHTTP struct { ... }   // http.mock(), intercepts calls
-type MockKV  struct { ... }    // in-memory map
-type MockEnv struct { ... }    // env.set()
-type MockLog struct { ... }    // captures output
+The original design (`pkg/testing/harness.go`, an in-process `goja` runtime with `Mock*` globals) was dropped along with the goja runtime. `dicode task test <id>` is now `cli.task.test` in `pkg/ipc/control.go`, which calls `tasktest.RunByID` (`pkg/tasktest/runbyid.go`) — it runs the task's own native test tooling out-of-process (`deno test` for Deno tasks, the `uv`-provisioned interpreter's test runner for Python) against `task.test.ts`/`task.test.js`/`task.test.py`, and reports pass/fail/skip counts and duration.
 
-func RunTests(spec *task.Spec) (*TestResult, error)
-```
-
-`runTask()` in test context: evaluates `task.js` inside a `test()` block's goja runtime with mock globals injected.
-
-**Deliverable**: `dicode task test <id>` runs `task.test.js` with mocked globals, reports pass/fail per case.
+**Deliverable**: `dicode task test <id>` runs the task's test file, reports pass/fail per case. ✅
 
 ---
 
@@ -502,22 +389,13 @@ Delivered as tasks rather than a daemon-side subsystem. `defaults.on_failure_cha
 
 ---
 
-## Milestone 12 — System tray ✅
+## Milestone 12 — System tray ✅ (moved to task)
 
 **Goal**: desktop tray icon with status and quick actions.
 
-**Implemented**: `pkg/tray/` — `fyne.io/systray` (MIT licensed, DBus StatusNotifierItem on Linux — no CGo/GTK required).
+Originally implemented as `pkg/tray/` (`fyne.io/systray`, DBus StatusNotifierItem on Linux). That package is gone; the tray is now the `buildin/tray` task (`tasks/buildin/tray/`), a daemon task using `deno.land/x/systray`'s pre-compiled native helper over stdin/stdout — dropping the CGO/GTK build dependency from the dicode binary entirely (issue #59).
 
-- `pkg/tray/icon.go` — 32×32 PNG icon generated at `init()` time: purple (#7c3aed) background with white lightning bolt. No binary asset dependency.
-- `pkg/tray/tray.go` — `Run(ctx, cancel, port, log)` blocks until context cancelled:
-  - **Open Dashboard** menu item → `xdg-open http://localhost:<port>` (Linux), `open` (macOS)
-  - **Quit dicode** menu item → calls `cancel()` (shuts down server + all goroutines) then `systray.Quit()`
-  - Listens on `ctx.Done()` — icon disappears cleanly on Ctrl+C or SIGTERM
-- Controlled by `server.tray` in `dicode.yaml` (`true` = enabled, `false` = disabled for headless). Default is enabled (`true`).
-- Toggle available in the Config UI server settings section (persisted to `dicode.yaml`).
-- Uses `org.kde.StatusNotifierItem` DBus protocol — compatible with waybar, KDE, GNOME (with AppIndicator extension), etc.
-
-**Deliverable**: dicode has a tray icon on Linux/macOS/Windows desktop systems. Quit from the tray fully stops the process.
+**Deliverable**: dicode has a tray icon on Linux/macOS/Windows desktop systems. Quit from the tray fully stops the process. ✅
 
 ---
 
@@ -654,17 +532,17 @@ Wire into WebUI `/generate` endpoint. Show diff, let user confirm, write to loca
 
 ---
 
-## Milestone 15 — Webhook relay ✅ (client)
+## Milestone 15 — Webhook relay ✅ (moved to task)
 
 **Goal**: public webhook URLs for laptop users.
 
-**Implemented** (PR #79, hardened in #80):
+**Implemented** (PR #79, hardened in #80, migrated Go → TypeScript in PR #254):
 
-- `pkg/relay/client.go` — persistent WSS connection with ECDSA P-256 challenge-response authentication, exponential backoff reconnection (1s → 60s), transparent HTTP proxy to local daemon
-- `pkg/relay/server.go` — Go relay server for self-hosting and integration tests
-- `pkg/relay/keys.go` — `LoadOrGenerateIdentity()` persists P-256 keypair in SQLite, derives stable UUID from public key
+- `buildin/relay-client` — persistent WSS connection with ECDSA P-256 challenge-response authentication, exponential backoff reconnection, transparent HTTP proxy to local daemon, via `npm:dicode-relay/client`
+- `buildin/relay-server` — relay server task for self-hosting and integration tests
 - Security: path whitelist (`/hooks/*` + `/dicode.js`), `X-Relay-Base` header injection, hop-by-hop header filtering, 5 MB body limit
-- 16 client tests + key tests
+- Status published via `dicode.kv.set("status", ...)`, served to the WebUI by `pkg/webui/relay_status.go` at `GET /api/relay/status`
+- Tests: `tasks/buildin/relay-client/task.test.ts`
 
 **Production relay server**: separate Node.js service (`dicode-relay` repo) with OAuth broker support for 14+ providers.
 
@@ -672,26 +550,11 @@ Wire into WebUI `/generate` endpoint. Show diff, let user confirm, write to loca
 
 ---
 
-## Milestone 16 — Service management 🔧
+## Milestone 16 — Service management ❌ (dropped)
 
 **Goal**: `dicode service install` runs dicode on startup.
 
-### Platform implementations of `pkg/service/service.go`
-
-- `service_linux.go` — systemd unit file generator
-- `service_darwin.go` — LaunchAgent plist generator
-- `service_windows.go` — Windows Service via `golang.org/x/sys/windows/svc`
-
-Add `service` subcommand to `main.go`:
-```bash
-dicode service install [--headless]
-dicode service uninstall
-dicode service start / stop / restart
-dicode service status
-dicode service logs
-```
-
-**Deliverable**: `dicode service install` makes dicode survive reboots.
+`pkg/service/` was a dead package — a `Manager` interface with zero platform implementations and zero CLI wiring (`dicode service ...` was never a real subcommand). Deleted as dead code during the #388 architecture audit (PR #453). Not currently planned.
 
 ---
 
