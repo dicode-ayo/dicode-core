@@ -70,13 +70,12 @@ AGPL-3.0 license — copyleft that protects the project:
 ## Deployment profiles
 
 **Desktop** — default for laptops:
-- Tray icon with status
-- OS desktop notifications
+- Tray icon with status (`buildin/tray`)
+- OS desktop notifications (`buildin/notify`)
 - Relay client (laptop behind NAT -> public URLs)
-- Starts on login via `dicode service install`
 
 **Headless** — for servers and Docker:
-- `--headless` flag or `DICODE_HEADLESS=true`
+- `DICODE_ONBOARDING=silent` (or any environment without a TTY/display, which auto-selects the non-interactive surface)
 - No tray, no desktop notifications
 - Relay optional (skip if server has public IP)
 
