@@ -25,16 +25,19 @@ passphrase to exist, which is why you still want `server.auth: true` in
 yourself) and gates the rest of the HTTP surface (WebUI, REST API) behind
 the same session-cookie + API-key auth chain.
 
-### 1. Mint a Claude OAuth token
+### 1. Authenticate — token, or reuse a local login
 
-On any machine where you've signed into Claude Code with your Pro/Max account:
+Auth is **dual-mode**:
 
-```sh
-claude setup-token
-```
-
-This emits a one-year token. Store it in dicode's secrets store under the key
-`CLAUDE_CODE_OAUTH_TOKEN` (via the WebUI or `dicode secrets set`).
+- **Explicit token (recommended for servers / containers).** On any machine
+  signed into Claude Code with your Pro/Max account, run `claude setup-token`
+  (emits a one-year token) and store it in dicode's secrets store under
+  `CLAUDE_CODE_OAUTH_TOKEN` (via the WebUI or `dicode secrets set`).
+- **Reuse an existing login (local, single-user).** If the daemon runs as a
+  user whose `claude` is already logged in, you can skip the token entirely —
+  the task falls back to the credentials at `$HOME/.claude/.credentials.json`.
+  Less portable and less auditable than an explicit secret, so prefer the token
+  for shared or headless deployments.
 
 ### 2. Install the `claude` binary on the daemon host
 
