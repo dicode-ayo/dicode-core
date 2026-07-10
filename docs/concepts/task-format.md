@@ -658,6 +658,14 @@ Why it's shaped this way:
   provider blocks — leaving a valid `providers: {}` config. The status
   password comes from the local secrets store with a `default:` dev
   fallback, so a local operator can stand the relay up without Doppler.
+- Before starting the relay, the daemon body checks whether the status
+  password still matches that dev fallback (`dicode-relay-dev`). If so it
+  always logs a loud warning, and if `base_url` is not a loopback address
+  it refuses to start — a non-loopback relay guarded only by a
+  publicly-documented password is a real credential exposure, not just a
+  dev convenience. Set a real password with
+  `dicode secrets set RELAY_STATUS_PASSWORD <password>` before exposing a
+  relay beyond localhost.
 
 For a full end-to-end docker variant, see the
 [Cloudflare Tunnel worked example](../examples/cloudflare-tunnel.md).

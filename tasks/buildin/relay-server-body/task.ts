@@ -8,16 +8,77 @@
 //   stage 2: buildin/write-local persists it to ${DATADIR}/relay/relay.yaml
 //
 // (See ../relay-server/task.yaml for the pipeline wiring.) This task body
-// just bootstraps the broker signing key and hands off to startServer with
-// the pre-rendered path. OAuth secrets no longer flow through this task's
+// bootstraps the broker signing key, loads the pre-rendered config (so the
+// status-password guard below can inspect it), and hands the parsed config
+// off to startServer. OAuth secrets no longer flow through this task's
 // env — they're scoped to stage 1 of the pipeline.
 
 import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { generateKeyPairSync } from "node:crypto";
+import { loadConfig } from "npm:dicode-relay@0.2.0/config";
+import type { RelayConfig } from "npm:dicode-relay@0.2.0/config";
 import { startServer } from "npm:dicode-relay@0.2.0/start";
 import { generateSelfSignedServerCert } from "npm:dicode-relay@0.2.0/client";
 import type { DicodeSdk } from "../../sdk.ts";
+
+// The documented dev fallback from ../relay-server/task.yaml's STATUS_PASSWORD
+// entry (`default: "dicode-relay-dev"`). Convenient for local dev, but a
+// publicly-known credential must never protect a non-loopback status
+// endpoint — see issue #495.
+export const DEFAULT_STATUS_PASSWORD = "dicode-relay-dev";
+
+// isLoopbackBaseURL reports whether base_url only ever binds/advertises a
+// local address. A malformed URL is treated as non-loopback — fail toward
+// the warning, not away from it.
+export function isLoopbackBaseURL(baseURL: string): boolean {
+  let host: string;
+  try {
+    host = new URL(baseURL).hostname;
+  } catch {
+    return false;
+  }
+  // WHATWG URL.hostname renders an IPv6 literal with its brackets intact
+  // (e.g. "http://[::1]:5553" → "[::1]"), so both forms are checked.
+  if (host === "localhost" || host === "::1" || host === "[::1]") {
+    return true;
+  }
+  if (host.endsWith(".localhost")) return true;
+  // The entire 127.0.0.0/8 block is loopback, not just 127.0.0.1.
+  const ipv4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  return ipv4 !== null && ipv4.slice(1).every((o) => Number(o) <= 255) &&
+    ipv4[1] === "127";
+}
+
+// guardStatusPassword is called once at startup on the already-validated
+// RelayConfig (loaded via the relay package's own loadConfig — see main()
+// below), right before startServer. It never blocks the loopback/dev case
+// (a loud warning is enough there) but refuses to start when the same
+// well-known default is about to guard a status endpoint reachable from
+// outside the loopback interface (issue #495).
+//
+// Note: under dicode-relay 0.2.0, status.password is `string | undefined` —
+// undefined means the status endpoint is disabled entirely (/status 404s),
+// which is safe and returns from the guard immediately.
+export function guardStatusPassword(config: RelayConfig): void {
+  if (config.status.password !== DEFAULT_STATUS_PASSWORD) return;
+
+  console.warn(
+    `[relay-server] WARNING: the status endpoint is using the default dev password ` +
+      `("${DEFAULT_STATUS_PASSWORD}"). Set a real one with ` +
+      `'dicode secrets set RELAY_STATUS_PASSWORD <password>' before exposing this relay.`,
+  );
+
+  if (!isLoopbackBaseURL(config.server.base_url)) {
+    throw new Error(
+      `[relay-server] refusing to start: base_url (${config.server.base_url}) is not a ` +
+        `loopback address, but the status endpoint is still guarded by the public default ` +
+        `password ("${DEFAULT_STATUS_PASSWORD}"). Set RELAY_STATUS_PASSWORD via ` +
+        `'dicode secrets set RELAY_STATUS_PASSWORD <password>' and re-render relay.yaml ` +
+        `before exposing this relay beyond localhost.`,
+    );
+  }
+}
 
 // Pre-create the broker signing key under ${DICODE_DATADIR}/relay/ so
 // the relay's loadBrokerSigningKey() has a file to read on first run.
@@ -121,13 +182,20 @@ export default async function main(_: DicodeSdk): Promise<void> {
 
   // The pipeline's render stages (buildin/template → buildin/write-local)
   // have already rendered relay.yaml and written it to disk before this
-  // main() runs.
+  // main() runs. loadConfig throws its own "Config file not found" error
+  // when standalone-run before that render has ever happened (see the
+  // "Standalone-runnable" note in this task's task.yaml). Loading here —
+  // rather than letting startServer load from configPath — lets the
+  // status-password guard inspect the parsed config before anything binds.
   const configPath = join(dataDir, "relay", "relay.yaml");
+  const config = loadConfig(undefined, configPath);
+
+  guardStatusPassword(config);
 
   ensureSigningKey();
   await ensureServerCert();
 
-  const handle = await startServer({ configPath });
+  const handle = await startServer({ config });
 
   // First buildin to use Deno.addSignalListener directly: the relay's
   // startServer returns a long-lived http.Server rather than an abortable
