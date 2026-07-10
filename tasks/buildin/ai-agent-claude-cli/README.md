@@ -152,11 +152,13 @@ curl -fsSL -X POST http://localhost:8080/hooks/ai-claude \
 
 ### Skills + MCP wiring
 
-On every invocation, the task creates `${DICODE_DATA_DIR}/tmp/claude-cli/<uuid>/.claude/`,
-populates it with skill markdowns + `mcp.json`, and runs `claude -p` with that
-as its CWD. Claude CLI honors `.claude/` for project-local config, so the
-skills become loadable instructions and the MCP server becomes a tool surface
-the agent can call.
+On every invocation the task creates a per-session `.claude/` workdir, populates
+it with the requested skill markdowns and an `mcp.json`, and runs `claude -p`
+from that directory. **Skills** are auto-loaded from `.claude/skills/`. **MCP is
+mounted explicitly** via `--mcp-config <path> --strict-mcp-config` — the CLI does
+*not* auto-load `<cwd>/.claude/mcp.json`, and `--strict-mcp-config` loads *only*
+dicode's server, ignoring any operator-level `~/.claude.json` / project
+`.mcp.json`.
 
 Cleanup is **out-of-band**: `buildin/temp-cleanup` sweeps any leaf directory
 under `${DICODE_DATA_DIR}/tmp/<task>/<uuid>/` that's older than 1 hour, every

@@ -60,6 +60,31 @@ function fail(error: string): { ok: false; error: string } {
 // paths. Mirrors the style of ValidateRunID elsewhere in the codebase.
 const SAFE_SKILL_NAME = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$/;
 
+/**
+ * Build the `claude` CLI argument vector. Exported for unit testing.
+ *
+ * MCP: `<cwd>/.claude/mcp.json` is NOT an auto-load path for the Claude CLI
+ * (the auto-loaded project file is `.mcp.json` at the root, and even that hits a
+ * headless approval gate). So when a config was written we mount it explicitly
+ * with `--mcp-config`, and `--strict-mcp-config` loads ONLY that server —
+ * ignoring the operator's `~/.claude.json` / project `.mcp.json`. Passing
+ * neither flag (the prior behavior) meant Claude ran with zero dicode tools.
+ */
+export function buildClaudeArgs(opts: {
+    prompt: string;
+    claudeSessionId?: string;
+    model?: string;
+    systemPrompt?: string;
+    mcpConfigPath?: string;
+}): string[] {
+    const args = ["-p", opts.prompt, "--output-format", "json"];
+    if (opts.claudeSessionId) args.push("--resume", opts.claudeSessionId);
+    if (opts.model)           args.push("--model", opts.model);
+    if (opts.systemPrompt)    args.push("--append-system-prompt", opts.systemPrompt);
+    if (opts.mcpConfigPath)   args.push("--strict-mcp-config", "--mcp-config", opts.mcpConfigPath);
+    return args;
+}
+
 export default async function main({ params, kv }: SDK) {
     const prompt        = (await params.get("prompt"))        ?? "";
     const sessionIdIn   = (await params.get("session_id"))    ?? "";
@@ -117,19 +142,9 @@ export default async function main({ params, kv }: SDK) {
         console.warn("ai-agent-claude-cli: kv.get failed: " + (e instanceof Error ? e.message : String(e)));
     }
 
-    // Build args. The -p / --print mode runs one-shot and emits JSON on
-    // stdout, no interactive shell. --output-format json gives us the
-    // structured response (vs. plain text).
-    const args = ["-p", prompt, "--output-format", "json"];
-    if (claudeSessionId) {
-        args.push("--resume", claudeSessionId);
-    }
-    if (model) {
-        args.push("--model", model);
-    }
-    if (systemPrompt) {
-        args.push("--append-system-prompt", systemPrompt);
-    }
+    // Args are assembled by buildClaudeArgs() just before spawn (below), after
+    // MCP setup, so the --mcp-config flags reflect whether the config was
+    // actually written.
 
     // Per-invocation working directory. Claude CLI honors a project-local
     // `.claude/` dir at the invocation cwd: `.claude/mcp.json` configures
@@ -212,6 +227,16 @@ export default async function main({ params, kv }: SDK) {
     }
 
     console.log(`ai-agent-claude-cli: invoking ${cliPath} (resume=${claudeSessionId ? claudeSessionId.slice(0, 8) + "…" : "no"}, model=${model || "default"}, dicode_session=${dicodeSessionId.slice(0, 8)}…, mcp=${mcpWired ? "on" : "off"}, skills=${skillsWired})`);
+
+    const args = buildClaudeArgs({
+        prompt,
+        claudeSessionId,
+        model,
+        systemPrompt,
+        // <cwd>/.claude/mcp.json is not auto-loaded; mount it explicitly and
+        // strictly so only dicode's server reaches Claude.
+        mcpConfigPath: mcpWired ? `${claudeDir}/mcp.json` : undefined,
+    });
 
     const cmd = new Deno.Command(cliPath, {
         args,

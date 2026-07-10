@@ -4,7 +4,7 @@
 // manipulation; tests don't need a real binary.
 
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import main from "./task.ts";
+import main, { buildClaudeArgs } from "./task.ts";
 
 const fakeDicode = {} as any;
 
@@ -340,4 +340,61 @@ JSON`,
     if (listed.includes("passwd")) {
         throw new Error(`path-traversal slipped through; .claude/skills lists: ${listed}`);
     }
+});
+
+Deno.test("buildClaudeArgs: base args are always present", () => {
+    assertEquals(
+        buildClaudeArgs({ prompt: "hi" }).join(" "),
+        "-p hi --output-format json",
+    );
+});
+
+Deno.test("buildClaudeArgs: resume/model/system_prompt appended when set", () => {
+    const a = buildClaudeArgs({
+        prompt: "hi", claudeSessionId: "s1", model: "sonnet", systemPrompt: "sp",
+    });
+    assertEquals(a[a.indexOf("--resume") + 1], "s1");
+    assertEquals(a[a.indexOf("--model") + 1], "sonnet");
+    assertEquals(a[a.indexOf("--append-system-prompt") + 1], "sp");
+});
+
+Deno.test("buildClaudeArgs: no MCP flags when no config path (mount skipped)", () => {
+    const a = buildClaudeArgs({ prompt: "hi" });
+    assertEquals(a.includes("--mcp-config"), false);
+    assertEquals(a.includes("--strict-mcp-config"), false);
+});
+
+Deno.test("buildClaudeArgs: mounts MCP strictly + explicitly with a config path", () => {
+    const a = buildClaudeArgs({ prompt: "hi", mcpConfigPath: "/w/.claude/mcp.json" });
+    assertEquals(a.includes("--strict-mcp-config"), true);
+    const i = a.indexOf("--mcp-config");
+    assertEquals(a[i + 1], "/w/.claude/mcp.json");
+});
+
+Deno.test("passes --strict-mcp-config --mcp-config to claude when MCP is wired", async () => {
+    // The bug this guards: previously the config was written to
+    // <cwd>/.claude/mcp.json with no flag, which the CLI never auto-loads, so
+    // Claude ran with zero dicode tools. Assert the flags reach the binary.
+    Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "stub");
+    Deno.env.set("DICODE_MCP_API_KEY", "dck_test_mcp_key");
+    const sentinelDir = await Deno.makeTempDir();
+    const sentinel = `${sentinelDir}/args-recorded`;
+    const result: any = await withStubClaude(
+        `printf '%s\\n' "$@" > ${sentinel}
+cat <<'JSON'
+{"type":"result","is_error":false,"result":"ok","session_id":"s"}
+JSON`,
+        () => main({ params: makeParams([["prompt", "hi"]]), kv: makeKv(), dicode: fakeDicode }),
+    );
+    assertEquals(result.ok, true);
+    const recorded = await Deno.readTextFile(sentinel);
+    if (!recorded.includes("--strict-mcp-config")) {
+        throw new Error(`expected --strict-mcp-config in claude args, got:\n${recorded}`);
+    }
+    const lines = recorded.split("\n");
+    const i = lines.indexOf("--mcp-config");
+    if (i < 0 || !lines[i + 1]?.endsWith("/.claude/mcp.json")) {
+        throw new Error(`expected --mcp-config <…/.claude/mcp.json>, got:\n${recorded}`);
+    }
+    Deno.env.delete("DICODE_MCP_API_KEY");
 });
