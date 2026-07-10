@@ -5,6 +5,7 @@
 // No CGO, no GTK, no fyne dependency.
 
 import Systray, { type MenuItem } from "./systray/mod.ts";
+import { warnIfTrayInvisible } from "./sni.ts";
 
 // ── icon ─────────────────────────────────────────────────────────────────────
 //
@@ -98,6 +99,12 @@ export default async function main({ params }: DicodeSdk) {
 
   // Wait for the binary to be downloaded, started, and ready.
   await systray.ready();
+
+  // On bare WMs the SNI icon can be silently invisible; probe after a short
+  // grace period so the bar has a chance to register a host first.
+  setTimeout(() => {
+    warnIfTrayInvisible().catch(() => {});
+  }, 3000);
 
   systray.onClick((action) => {
     switch (action.item.title) {

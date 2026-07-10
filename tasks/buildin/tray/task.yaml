@@ -12,6 +12,9 @@ runtime: deno
 permissions:
   env:
     - DICODE_PORT
+  # Unrestricted because the systray helper binary runs from a dynamic temp
+  # path; the task also spawns xdg-open (Open Dashboard) and gdbus (SNI-host
+  # probe, see sni.ts). A future least-privilege pass must keep those covered.
   run:
     - "*"
   fs:
