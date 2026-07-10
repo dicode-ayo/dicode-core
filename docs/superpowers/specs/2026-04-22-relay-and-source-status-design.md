@@ -9,41 +9,13 @@ Addresses [#87](https://github.com/dicode-ayo/dicode-core/issues/87) and extends
 
 ## Backend
 
-### `pkg/relay.Client`
+### Relay status
 
-Add status tracking fields and a public accessor:
-
-```go
-type statusState struct {
-    mu                sync.RWMutex
-    connected         bool
-    since             time.Time
-    lastError         string
-    reconnectAttempts int
-}
-
-type Status struct {
-    Enabled           bool      `json:"enabled"`            // true when a relay client was constructed
-    Connected         bool      `json:"connected"`
-    RemoteURL         string    `json:"remote_url,omitempty"`
-    HookBaseURL       string    `json:"hook_base_url,omitempty"`
-    Since             time.Time `json:"since"`              // when the current (dis)connected state started
-    LastError         string    `json:"last_error,omitempty"`
-    ReconnectAttempts int       `json:"reconnect_attempts"`
-}
-
-func (c *Client) Status() Status { /* reads under statusState.mu */ }
-```
-
-Status updates:
-- On successful handshake (inside `runOnce`, after the welcome): `connected=true, since=now, lastError="", reconnectAttempts=0`.
-- On `runOnce` error (in `Run`'s reconnect loop): `connected=false, since=now, lastError=err.Error(), reconnectAttempts++`.
-
-The existing broker-protocol and hook-base-url fields are already tracked; `Status()` reads them under their existing mutexes and copies into the returned struct.
+The relay client is not a Go package — it runs as the `buildin/relay-client` TS task (migrated from Go in PR #254; see `docs/implementation-plan.md`). There is no `pkg/relay.Client`, no `statusState`, and no `Status()` accessor. Instead, the task publishes a JSON status blob via `dicode.kv.set("status", ...)` on every connect/disconnect/reconnect transition.
 
 ### `GET /api/relay/status`
 
-New handler in `pkg/webui` that returns `Status` as JSON. Falls back to `{"enabled": false}` when `s.relayClient == nil`. Same auth rules as the rest of `/api/*`.
+`apiRelayStatus` in `pkg/webui/relay_status.go` reads the kv row at key `"buildin/relay-client:status"` (via a direct SQL `SELECT value FROM kv WHERE key = ?`, since the kv table is namespaced by task ID) and passes the JSON straight through as the response body. Returns `{"enabled":false}` when no status row exists yet — relay disabled in config, or the task hasn't completed its first connect. The response schema (`connected`, `remote_url`, `since`, `last_error`, `reconnect_attempts`, …) is owned by the relay-client task, not by a Go struct.
 
 ### `pkg/taskset.Source`
 
@@ -66,18 +38,18 @@ Updated on every pull attempt:
 
 Thread-safe via a mutex; local (non-git) sources leave the zero value so the API can skip them.
 
-### `mcp.SourceEntry` additions
+### `pkg/webui.SourceInfo` additions
 
 ```go
-type SourceEntry struct {
+type SourceInfo struct {
     // ...existing fields...
-    LastPullAt   time.Time `json:"last_pull_at,omitempty"`
-    LastPullOK   bool      `json:"last_pull_ok,omitempty"`
-    LastPullError string   `json:"last_pull_error,omitempty"`
+    LastPullAt    *time.Time `json:"last_pull_at,omitempty"`
+    LastPullOK    bool       `json:"last_pull_ok,omitempty"`
+    LastPullError string     `json:"last_pull_error,omitempty"`
 }
 ```
 
-Additive — existing MCP clients ignore unknown fields. `SourceManager.List()` populates the three new fields from `Source.PullStatus()` when the underlying source is a live taskset.
+`LastPullAt` is a `*time.Time`, not a value: `time.Time` + `omitempty` does not omit the zero value (it serializes as `"0001-01-01T00:00:00Z"`, which is truthy in JS and would render a spurious status dot for every local / never-pulled source). Additive — existing MCP and webui clients ignore unknown fields. `SourceManager.List()` (`pkg/webui/sources.go`) populates the three new fields from `Source.PullStatus()` only once a pull has actually been attempted, leaving them nil/omitted otherwise.
 
 ## Frontend
 
@@ -135,15 +107,15 @@ Local sources don't set `last_pull_at`, so they fall through to grey and we rend
 
 | Test | File | Asserts |
 |---|---|---|
-| `TestClient_Status_WhenDisabled` | `pkg/relay/client_test.go` | Zero-value Client reports `Enabled=false` |
-| `TestClient_Status_AfterHandshake` | same | After a successful handshake simulation, `Connected=true`, `Since` populated, `LastError==""` |
-| `TestClient_Status_AfterFailure` | same | After a reconnect-loop error, `Connected=false`, `LastError` set, `ReconnectAttempts` ticked |
-| `TestRelayStatusAPI_Disabled` | `pkg/webui/server_test.go` | `/api/relay/status` with `s.relayClient==nil` returns `{"enabled":false}` |
-| `TestRelayStatusAPI_Connected` | same | With a stubbed-status Client, returns the serialized Status |
-| `TestSource_PullStatus_Initial` | `pkg/taskset/source_test.go` | New Source has zero-value PullStatus |
-| `TestSource_PullStatus_AfterOK` | same | After a successful pull tick (hit the live bare repo), `OK=true` and `LastPullAt` updated |
-| `TestSource_PullStatus_AfterError` | same | After a pull against a bogus URL, `OK=false` and `Error` populated |
-| `TestSourceManager_List_PopulatesPull` | `pkg/webui/sources_test.go` | `List()` carries PullStatus into SourceEntry for live taskset sources |
+| `TestAPIRelayStatus_Disabled` | `pkg/webui/relay_status_test.go` | `/api/relay/status` with no kv status row returns `{"enabled":false}` |
+| `TestAPIRelayStatus_FromKv` | same | With a status row present, the response passes the stored JSON through verbatim |
+| `TestSource_PullStatus_InitialZero` | `pkg/taskset/pull_status_test.go` | New Source has zero-value PullStatus |
+| `TestSource_RecordPull_Success` | same | After a successful pull, `OK=true` and `LastPullAt` updated |
+| `TestSource_RecordPull_Failure` | same | After a pull against a bogus URL, `OK=false` and `Error` populated |
+| `TestSource_RecordPull_ErrorClearedOnNextSuccess` | same | A prior error is cleared once a later pull succeeds |
+| `TestSourceManager_List_LocalSource_NoPullFieldsInJSON` | `pkg/webui/sources_test.go` | Local sources omit the pull-health fields entirely (nil `LastPullAt`, no spurious dot) |
+
+Relay-client connect/reconnect behavior is covered on the TypeScript side in `tasks/buildin/relay-client/task.test.ts` (there is no Go relay client to unit test).
 
 Frontend has no automated tests today for these components (consistent with the rest of `tasks/buildin/webui/`); manual smoke test covers it.
 

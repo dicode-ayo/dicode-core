@@ -1,6 +1,6 @@
 # Onboarding wizard — design
 
-Addresses [#85](https://github.com/dicode-ayo/issues/85). Alpha epic [#82](https://github.com/dicode-ayo/dicode-core/issues/82) Lane 3.
+Addresses [#85](https://github.com/dicode-ayo/dicode-core/issues/85). Alpha epic [#82](https://github.com/dicode-ayo/dicode-core/issues/82) Lane 3.
 
 Today [pkg/onboarding/onboarding.go](../../../pkg/onboarding/onboarding.go) detects first run and silently writes a local-only `dicode.yaml`. The site promises a guided first-run experience; this spec delivers it: a wizard that runs before the daemon starts, offers browser or CLI, picks curated tasksets, generates a dashboard passphrase, and writes a ready-to-run config.
 
@@ -60,9 +60,9 @@ Set up in [b]rowser or [c]li? [b]
 ## Architecture
 
 ```
-cmd/dicoded/main.go
+cmd/dicode (daemon subcommand)
    │
-   └── daemon.Run(configPath)
+   └── daemon.Run(configPath, port, version)
           │
           └── if onboarding.Required(configPath):
                  │
@@ -70,7 +70,7 @@ cmd/dicoded/main.go
                         │
                         ├── pick surface (browser | cli | silent)
                         ├── Result{TaskSets, LocalDir, DataDir, Port, Passphrase}
-                        ├── render yaml via DefaultConfig(Result)
+                        ├── render yaml via RenderConfig(Result)
                         └── print success block to stdout
 ```
 
@@ -82,7 +82,7 @@ cmd/dicoded/main.go
 | `pkg/onboarding/surface.go` | `PickSurface(stdin, stdout, env)` — returns `browser` / `cli` / `silent` based on TTY, DISPLAY, explicit flag. |
 | `pkg/onboarding/cli.go` | `RunCLI(stdin, stdout) (Result, error)` — bufio-based prompts. |
 | `pkg/onboarding/browser.go` | `RunBrowser(ctx) (Result, error)` — ephemeral HTTP server + embedded HTML/JS form. |
-| `pkg/onboarding/render.go` | `RenderConfig(Result) string` — generates the YAML. Replaces the current `DefaultLocalConfig`. |
+| `pkg/onboarding/render.go` | `RenderConfig(Result) string` (`pkg/onboarding/render.go:23`) — generates the YAML from a wizard `Result`. |
 | `pkg/onboarding/passphrase.go` | `GeneratePassphrase() string` — 18 random bytes → base64url → 24 chars. |
 | `pkg/onboarding/onboarding.go` | Existing file kept; add `Run(ctx, configPath) error` as the single entry point called from daemon. |
 
@@ -244,7 +244,7 @@ type Result struct {
 func RenderConfig(r Result) string
 ```
 
-Emits a commented YAML file whose structure matches the existing `DefaultLocalConfig` *plus* a `sources:` array assembled from preset selections and optional local dir *plus* `server.auth: true` and `server.secret: "<passphrase>"`.
+Emits a commented, local-only-by-default YAML file *plus* a `sources:` array assembled from preset selections and optional local dir *plus* `server.auth: true` and `server.secret: "<passphrase>"`.
 
 ### Passphrase generation
 
