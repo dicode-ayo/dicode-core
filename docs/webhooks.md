@@ -10,13 +10,16 @@ and the daemon dispatches requests directly.
 
 ```yaml
 # tasks/github-push/task.yaml
+apiVersion: dicode/v1
+kind: Task
 name: github-push
 description: Handle GitHub push events
 runtime: deno
 trigger:
   webhook: /hooks/github-push
-env:
-  - SLACK_TOKEN
+permissions:
+  env:
+    - SLACK_TOKEN
 timeout: 30s
 ```
 
@@ -38,8 +41,9 @@ signature returns HTTP 403.
 trigger:
   webhook: /hooks/github-push
   webhook_secret: "${GITHUB_WEBHOOK_SECRET}"
-env:
-  - GITHUB_WEBHOOK_SECRET
+permissions:
+  env:
+    - GITHUB_WEBHOOK_SECRET
 ```
 
 Always reference a secret, never hardcode the value.

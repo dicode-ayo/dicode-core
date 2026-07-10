@@ -16,5 +16,5 @@ storage task, and reused on subsequent restarts.
 
 | Blob | Storage key | Crypto context |
 |---|---|---|
-| Identity (PKCS8 sign + decrypt) | `relay/identity/v1` | `dicode/relay-identity/v1` |
-| Broker TOFU pin | `relay/broker-pin/v1` | `dicode/relay-broker-pin/v1` |
+| Identity (PKCS8 sign + decrypt) | `relay/identity-v1` | `dicode/relay-identity/v1` |
+| Broker TOFU pin | `relay/broker-pin-v1` | `dicode/relay-broker-pin/v1` |
