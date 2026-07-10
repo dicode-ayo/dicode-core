@@ -6,14 +6,17 @@ chain: WSS handshake → `build_auth_url` → browser consent → Grant
 callback → ECIES encrypt + broker sign → WSS delivery → daemon
 decrypt + verify + `store_token` → secrets written.
 
+This is a point-in-time manual verification runbook, not an automated
+regression suite — run it after touching the relay OAuth wire protocol.
+
 ---
 
 ## Prerequisites
 
 ```
-# Both repos checked out side by side
-/workspaces/dicode-relay/    # feat/oauth-aad-domain-sep branch
-/workspaces/dicode-core/     # feat/oauth-relay-client branch
+# Both repos checked out side by side, both on main
+/workspaces/dicode-relay/
+/workspaces/dicode-core/
 
 # Node.js 22+, Go 1.25+, Deno (auto-installed by dicode on first run)
 
