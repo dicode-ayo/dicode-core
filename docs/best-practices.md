@@ -1,7 +1,9 @@
 # Best Practices Reference: Go + HTMX + CSS
 
 > Generated 2026-03-24. Tailored to this codebase: `github.com/dicode/dicode`.
-> Go 1.25, chi v5, zap, SQLite (modernc), HTMX 1.9.x, vanilla CSS.
+> Go 1.25, chi v5, zap, SQLite (modernc), vanilla CSS. The dashboard frontend
+> is the Lit-based `tasks/buildin/webui/` task; the HTMX section below is kept
+> as legacy guidance from the retired server-embedded HTMX frontend.
 
 ---
 
@@ -798,6 +800,10 @@ The `fireAsync` function uses `context.Background()` for run goroutines. This is
 ---
 
 ## 2. HTMX Best Practices
+
+> **Legacy.** The server-embedded HTMX frontend has been replaced by the
+> Lit-based `tasks/buildin/webui/` task. This section applies only if you are
+> maintaining leftover HTMX fragments or building an HTMX-based task UI.
 
 ### 2.1 HTTP Verb Semantics
 

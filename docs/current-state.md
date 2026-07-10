@@ -1,6 +1,6 @@
 # Current State
 
-> Last updated: 2026-04-17 — OAuth broker daemon plumbing (#100), ai-agent builtin chat task (#98), design system theme.css (#92), temp file cleanup task (#91), concurrency semaphore (#74), WaitRun channel notifications (#73), concurrency metrics endpoint (#75), transparent relay proxy (#80)
+> Last updated: 2026-07-10 — suspendable tasks v2: JSON-Schema forms + server-side validation (#514), auto-dispatch main/resume/steps (#515), robustness hardening (#519); relay client/server, tray, and the MCP server now live as built-in tasks rather than Go packages
 
 This document describes exactly what exists in the codebase today — what is fully implemented, what is stubbed with interfaces and TODOs, and what exists only as documentation.
 
@@ -25,7 +25,7 @@ Full configuration loading. All structs defined and validated:
 
 - `Config`, `SourceConfig`, `DatabaseConfig`, `RelayConfig`
 - `SecretsConfig`, `SecretProviderConfig`
-- `ServerConfig` — port, secret, **auth** (global auth wall), **allowed_origins** (CORS allowlist), **trust_proxy** (XFF trust flag), MCP, tray
+- `ServerConfig` — port, secret, **auth** (global auth wall), **allowed_origins** (CORS allowlist), **trust_proxy** (XFF trust flag), MCP, TLS cert/key, bcrypt cost, device binding
 - **`DefaultsConfig`** — `OnFailureChain string` — global failure handler task ID
 - `applyDefaults()` with sensible defaults for all fields
 - `validate()` checking required fields per source type
@@ -70,33 +70,26 @@ Full TaskSet architecture — hierarchical task composition inspired by ArgoCD A
 
 ### `pkg/mcp/` ✅
 
-- `server.go` — JSON-RPC 2.0 MCP server at `POST /mcp`. Protocol version `2024-11-05`. `GET /mcp` returns server info.
-- `SourceLister` interface (`List() []SourceEntry`, `SetDevMode(...)`) — avoids import cycle with webui.
-- `SourceEntry` struct: Name, Type, URL, Path, Branch, DevMode, DevPath.
-- **Implemented tools**: `list_tasks`, `get_task`, `run_task`, `list_sources`, `switch_dev_mode`.
-- **Auth**: protected by `requireAPIKey` middleware when `server.auth: true`. Bearer token format: `dck_<32 random bytes hex>`.
-- `New(registry, sourceLister)` constructor.
+- The MCP **server** is no longer a Go package — it ships as the `buildin/mcp` task (JSON-RPC 2.0 over HTTP POST). `pkg/webui` serves an API-key-gated `/mcp` URL that forwards to it.
+- **Implemented tools** (`tasks/buildin/mcp/task.ts`): `list_tasks`, `get_task`, `run_task`, `list_sources`, `switch_dev_mode`, `test_task`.
+- **Auth**: the `/mcp` forwarder is protected by `requireAPIKey`. Bearer token format: `dck_<32 random bytes hex>`.
 - **`pkg/mcp/client/`** — lightweight HTTP JSON-RPC 2.0 MCP client: `New(port int)`, `ListTools(ctx)`, `Call(ctx, tool, args)`. Used by the socket server to proxy `mcp.list_tools` / `mcp.call` requests from task scripts to daemon MCP tasks.
 
-### `pkg/relay/` ✅
+### Relay (built-in tasks, no Go package)
 
-WebSocket relay client and self-hosting server for receiving webhooks behind NAT. Restored and hardened after the initial PR #79, then refactored to act as a transparent HTTP proxy.
+`pkg/relay` was removed — the relay client and server migrated to TypeScript built-in tasks (PR #254):
 
-- `client.go` — `Client` struct: persistent WSS connection to relay server with exponential backoff reconnection (1 s → 60 s, ±20% jitter). Receives `request` messages, makes real HTTP requests to the local daemon at `http://localhost:<port>`, and sends `response` messages back. Security: path whitelist (`/hooks/*` and `/dicode.js` only), `X-Relay-Base` header injection (set from client's UUID, incoming values stripped), hop-by-hop + `Set-Cookie` header filtering, 5 MB body limit, 25 s local request timeout. `HookBaseURL()` exposes the relay URL for SDK injection.
-- `server.go` — `Server` struct: simple relay server for self-hosting and integration tests. ECDSA P-256 challenge-response handshake, in-memory nonce store (60 s TTL), client registry, 30 s per-request forwarding timeout, 5 MB body limit. Implements `http.Handler` for embedding in tests.
-- `protocol.go` — JSON message types: `challenge`, `hello`, `welcome`, `error`, `request`, `response`. All messages are text WebSocket frames.
-- `keys.go` — `Identity` struct: P-256 keypair generation, `LoadOrGenerateIdentity(ctx, db)` persists private key in SQLite `kv` table (key: `relay.private_key`). UUID derived as `hex(sha256(uncompressed_pubkey))` — stable across restarts.
-- Tests: `client_test.go` (16 tests), `keys_test.go`, `helpers_test.go`
+- `buildin/relay-client` — maintains the WebSocket tunnel to the dicode relay broker so the daemon can receive webhooks without a public port.
+- `buildin/relay-server` / `buildin/relay-server-body` — run dicode-relay in-process under the daemon's Deno runtime for self-hosting.
 
-**Wiring**: `pkg/daemon/daemon.go` starts the relay client when `relay.enabled: true` and `relay.server_url` is set. The `webui.Server` receives the relay client via `SetRelayClient()` to expose the hook base URL to the frontend.
+**Production relay server**: the production broker is a separate TypeScript/Node.js service in the `dicode-relay` repository: OAuth broker (Grant + Express), ECIES token encryption, status dashboard, 14+ OAuth providers.
 
-**Production relay server**: The production relay server is a separate TypeScript/Node.js service in the `dicode-relay` repository. It implements the same protocol with additional features: OAuth broker (Grant + Express), ECIES token encryption, status dashboard, and support for 14 OAuth providers. The Go `relay.Server` is kept for self-hosting and testing scenarios.
-
-**OAuth broker plumbing** (PR #100): daemon-side built-in tasks (`buildin/auth-start`, `buildin/auth-complete`) handle the OAuth dance via the relay broker. `auth-start` generates a signed `/auth/<provider>` URL; `auth-complete` receives ECIES-encrypted tokens at `/hooks/oauth-complete`, decrypts in Go memory, and stores them in the secrets chain. AAD (Azure AD) provider binding added. See `docs/oauth.md`.
+**OAuth broker plumbing**: built-in tasks handle the OAuth dance via the relay broker. `buildin/auth-start` generates a signed `/auth/<provider>` URL; `buildin/auth-relay` receives ECIES-encrypted tokens at `/hooks/oauth-complete`, verifies the broker signature, decrypts, and stores them in the secrets chain. See `docs/oauth.md`.
 
 ### `pkg/metrics/` ✅
 
-- `metrics.go` — `Collector` struct: exposes `GET /api/metrics` endpoint with active task count, memory usage (RSS), CPU percentage, goroutine count. Updated on each run start/finish via `Inc()`/`Dec()` on the active counter.
+- `proc.go` (+ `proc_linux.go` / `proc_other.go`) — process metrics for `GET /api/metrics`: `DaemonMetrics` (heap alloc/sys MB, goroutine count, cumulative CPU ms on Linux) and `ChildMetrics` (active task count, aggregate child RSS/CPU on Linux, semaphore slot usage).
+- The HTTP handler is `apiMetrics` in `pkg/webui/metrics.go`; active-task concurrency counters come from the trigger engine's semaphore.
 
 ### `pkg/service/` 📄
 
@@ -114,14 +107,19 @@ WebSocket relay client and self-hosting server for receiving webhooks behind NAT
 - `CleanupStaleRuns(ctx)` — marks orphaned `running` rows as `cancelled` on startup, returns affected task IDs
 - `reconciler.go` — fan-in multi-source, OnRegister/OnUnregister callbacks, AddSource/RemoveSource for live hot-add. 13 tests passing.
 
-### `pkg/runtime/js/` ✅
+### `pkg/runtime/deno/` ✅
 
-- `runtime.go` — goja + goja_nodejs event loop, context timeout, run record lifecycle
-- All MVP globals: `log`, `env`, `params`, `http`, `kv`, `output`, `fs`
-- RunOptions carries `RunID` (pre-generated by engine), `Params`, `Input`, `ParentRunID`
-- `FinishRun` uses `context.Background()` in defer — succeeds even if run context cancelled
-- `ctx.Err() != nil` → `StatusCancelled` (not failure) on kill
-- 14 tests passing
+JS/TS execution (the former goja-based `pkg/runtime/js` is gone):
+
+- `runtime.go` / `manager.go` — one Deno subprocess per run; sandboxing via `--allow-net`/`--allow-env`/`--allow-read`/`--allow-write` flags derived from the task's declared permissions
+- SDK shim embedded from `pkg/runtime/deno/sdk/shim.ts`; SDK calls travel over the `pkg/ipc` unix socket, not raw `fetch`
+- `lock.go` — per-task Deno lockfile handling with recovery
+
+### `pkg/runtime/python/` ✅
+
+- `runtime.go` — Python tasks via a `uv`-provisioned interpreter subprocess (`pkg/uv`)
+- `guard.go` — in-interpreter enforcement of declared fs/net/run permissions
+- SDK embedded from `pkg/runtime/python/sdk/dicode_sdk.py`
 
 ### `pkg/runtime/docker/` ✅
 
@@ -174,16 +172,10 @@ WebSocket relay client and self-hosting server for receiving webhooks behind NAT
 - Audit logs: run requested via API, kill requested via API
 - Task table sorted stably; namespace headers rendered when namespaced IDs present
 - Webhook trigger labels rendered as clickable links
-- **Frontend (migrated)** — The dashboard SPA has been moved to `examples/webui/` and is served as a standalone webhook task at `/hooks/webui`. The Go binary no longer embeds the frontend assets. The server catch-all redirects `GET /*` to `/hooks/webui`. See `examples/webui/` below.
+- **Frontend (migrated)** — The dashboard SPA lives in `tasks/buildin/webui/` and is served as a standalone webhook task at `/hooks/webui`. The Go binary no longer embeds the frontend assets. The server catch-all redirects `GET /*` to `/hooks/webui`. See the built-in tasks table below.
   - `static/dicode.js` still embedded — standalone IIFE SDK injected into any webhook task UI; `window.dicode` with `run()`, `stream()`, `execute()`, `result()`, `ansiToHtml()`
 - `GET /runs/{runID}/result` — serves `OutputContent` with its MIME type, or `ReturnValue` as `application/json` when no structured output type is set
 - 11 existing + 16 new auth/security tests (public path gate, 401 enforcement, session lifecycle, device cookie, rate limiting, **extended lockout**, CORS allowlist, **malformed origin skipping**, security headers, CSP, API key generate/validate/revoke, MCP key check, **device token rotation**, **XFF trust flag**)
-
-### `pkg/tray/` ✅
-
-- `tray.go` — fyne.io/systray, Open Dashboard / Quit menu items
-- `icon.go` — generated 32×32 purple icon at init time (no binary asset)
-- Controlled by `server.tray` in config
 
 ### `pkg/onboarding/` 🔧
 
@@ -213,7 +205,7 @@ Unified IPC protocol replacing the old per-runtime `pkg/runtime/deno/server/`. T
 
 - `pkg/runtime/deno/server/` **deleted** — both Deno and Python runtimes now import `pkg/ipc`
 
-### `pkg/runtime/deno/sdk/shim.js` ✅
+### `pkg/runtime/deno/sdk/shim.ts` ✅
 
 Injected before every Deno task script. Updated for unified IPC protocol:
 - Length-prefix framing (`readExact` + 4-byte LE header) replaces newline-delimited reads
@@ -235,10 +227,10 @@ Injected before every Python task script via `buildWrapper()`. Updated for unifi
 
 The daemon process logic, invoked via `dicode daemon`. Exported entry point: `daemon.Run(configPath)`.
 
-- Full component wiring: db → secrets → registry → Deno runtime → Docker/Podman/Python runtimes → trigger engine → reconciler → HTTP gateway → webui → control socket → tray
+- Full component wiring: db → secrets → registry → Deno runtime → Docker/Podman/Python runtimes → trigger engine → reconciler → HTTP gateway → webui → control socket (the tray is the `buildin/tray` daemon task, not a wired Go component)
 - `NewControlServer(socketPath, tokenPath, ...)` — creates the CLI control socket and writes `daemon.token`
 - `buildSecretsChain(cfg, dataDir, database, log)` returns `(secrets.Chain, secrets.Manager)` — the `Manager` is passed to both `webui.New()` and `NewControlServer()`
-- Startup sequence: `CleanupOrphanedContainers` → `CleanupStaleRuns` → build runtimes → build sources → build webui → build control socket → run errgroup (reconciler + engine + webui + control socket + tray)
+- Startup sequence: `CleanupOrphanedContainers` → `CleanupStaleRuns` → build runtimes → build sources → build webui → build control socket → run errgroup (reconciler + engine + webui + control socket)
 - `make run` builds and runs `dicode daemon`
 
 ### `cmd/dicode/main.go` ✅ (single binary)
@@ -251,39 +243,53 @@ CLI dispatcher + daemon mode in one binary:
 - Reads `~/.dicode/daemon.token` and calls `ipc.Dial()` to connect
 - `DICODE_DATA_DIR` env var overrides the default data directory
 
-### `examples/` ✅
+### `tasks/examples/` ✅
 
 | Example | Trigger | Runtime |
 | --- | --- | --- |
-| `hello-cron/` | cron | deno |
-| `github-stars/` | manual | deno |
-| `gmail-to-slack/` | cron | deno |
-| `google-login/` | manual | deno |
+| `hello-cron/` | cron | js (deno) |
+| `hello-webhook/` | webhook | deno |
 | `hello-docker/` | manual | docker |
 | `hello-podman/` | manual | podman |
 | `hello-python/` | manual | python |
 | `nginx-start/` | daemon | docker |
+| `github-stars/` | manual | deno |
 | `github-push-webhook/` | webhook + HMAC auth | deno |
 | `suspend-wizard/` | manual | deno — multi-step suspend/resume wizard with JSON-Schema forms |
-| `webui/` | webhook (SPA shell) | deno |
-| **`ai/`** | **webhook (auth)** | **deno** — generic OpenAI-compatible agent; uses `dicode.run_task()` as tools in a tool-use loop |
-| **`failure-monitor/`** | **on_failure_chain** | **deno** — AI-powered failure diagnosis; receives `{ taskID, runID, status }` via `input` |
-| **`task-creator/`** | **webhook (auth)** | **deno** — AI generates `task.yaml` + `task.ts` from a plain-language description |
+| `deploy-wizard/` | manual | deno — multi-step deploy flow using suspend/resume auto-dispatch |
+| `doppler-secret-demo/` | manual | deno — resolves secrets through the `buildin/secret-providers/doppler` provider |
+| `repo-prune/` | webhook (auth) | deno |
+| `webhook-dashboard/` | webhook | deno |
+| `webhook-form/` | webhook | deno |
 
 **Built-in tasks** (`tasks/buildin/`):
 
 | Task | Description |
 | --- | --- |
-| `webui` | Dashboard SPA (served at `/hooks/webui`) |
-| `tray` | System tray icon (daemon) |
-| `notifications` | Native OS desktop notification (`notify-send` / `osascript` / `powershell`) |
-| `alert` | Chain-friendly wrapper that calls `buildin/notifications` via `dicode.run_task` |
-| `ai-agent` | Chat interface with tool-calling — discovers all registered tasks as tools, supports `task.yaml` template variables for provider config, conversation history with KV-backed compaction |
-| `auth-start` | OAuth broker: generates signed relay URL for 14+ providers |
-| `auth-complete` | OAuth broker: receives ECIES-encrypted tokens, decrypts, stores in secrets |
-| `tmp-cleanup` | Periodic cleanup of orphaned temp files in `/tmp/dicode-*` |
+| `webui` | Full dashboard SPA served as a webhook task at `/hooks/webui` |
+| `tray` | System tray icon daemon (replaced the CGO `pkg/tray/` Go package) |
+| `notify` | Native OS desktop notification via deno_notify |
+| `alert` | Chain-friendly wrapper that calls `buildin/notify` via `dicode.run_task` |
+| `ai-agent` | Chat agent for any OpenAI-compatible endpoint — discovers registered tasks as tools, KV-backed conversation history |
+| `ai-agent-claude-cli` | Wraps the official `claude` CLI as a dicode task |
+| `mcp` | MCP server (JSON-RPC 2.0 over HTTP POST); fronted by the API-key-gated `/mcp` URL |
+| `auth-start` | OAuth broker: generates a signed `/auth/:provider` relay URL |
+| `auth-relay` | Receives ECIES-encrypted OAuth tokens at `/hooks/oauth-complete`, verifies broker signature, decrypts, stores in secrets |
+| `auth-providers` | Dashboard listing every OAuth provider known to this instance |
+| `relay-client` | WebSocket tunnel to the dicode relay broker (webhooks without a public port) |
+| `relay-server` / `relay-server-body` | Run dicode-relay in-process under the daemon's Deno runtime |
+| `blob-storage` | Filesystem-backed blob store for user tasks |
+| `local-storage` | Filesystem-backed blob store (base64 payloads) |
+| `write-local` | Writes a string to a file at a given path and mode |
+| `secret-providers/doppler` | Resolves secrets from a Doppler workspace via its REST API |
+| `git-pr` | Reference git-pr implementation: opens a pull request via `gh pr create` |
+| `template` | `${VAR}` placeholder substitution in a template body |
+| `audit-export-loki` | Ships the security audit trail to Grafana Loki |
+| `temp-cleanup` | Deletes orphaned task scratch files |
+| `run-inputs-cleanup` | Hourly cleanup of expired run-input blobs |
+| `dev-clones-cleanup` | Removes dev-mode clone directories whose run ID is gone |
 
-`examples/webui/` is the full dicode dashboard SPA. It ships as a self-contained webhook task: `index.html` + Lit/LitElement components under `app/`. The engine injects `<base href="/hooks/webui/">` and the dicode SDK on every GET. Auth is enforced client-side by `dc-auth-overlay` (intercepts 401s from the REST API). Any unauthenticated REST call shows the login modal without a page redirect.
+`tasks/buildin/webui/` is the full dicode dashboard SPA. It ships as a self-contained webhook task: `index.html` + Lit/LitElement components under `app/`. The engine injects `<base href="/hooks/webui/">` and the dicode SDK on every GET. Auth is enforced client-side by `dc-auth-overlay` (intercepts 401s from the REST API). Any unauthenticated REST call shows the login modal without a page redirect.
 
 ---
 
@@ -291,14 +297,11 @@ CLI dispatcher + daemon mode in one binary:
 
 | Package | What it will contain |
 |---|---|
-| `pkg/testing/` | Task test harness (mock globals, assert, runTask) |
 | `pkg/store/` | Task store installer (`dicode task install`) |
 | `pkg/db/postgres.go` | PostgreSQL implementation |
 | `pkg/db/mysql.go` | MySQL implementation |
-| `pkg/runtime/js/globals/server.go` | `server` global (daemon tasks serving HTTP) |
-| MCP tools: `validate_task`, `test_task`, `dry_run_task`, `commit_task` | Advanced agent workflow tools |
+| MCP tools: `validate_task`, `dry_run_task`, `commit_task` | Advanced agent workflow tools (`test_task` is implemented) |
 | Multi-user RBAC | `users` table, argon2id passwords, role-based access (north star) |
-| OAuth token delivery: ECIES decryption in `pkg/relay/client.go` | Client-side ECIES decryption of broker-forwarded tokens (daemon plumbing in PR #100, ECIES decrypt handler TBD) |
 
 ---
 
@@ -324,15 +327,15 @@ make build   # compiles ./dicode binary
 make run     # builds and runs dicode daemon — web UI on :8080, control socket at ~/.dicode/daemon.sock
 make test    # go test ./...
 make lint    # go fmt + go vet
-make clean   # removes both binaries
+make clean   # removes the binary
 ```
 
 ---
 
 ## Test coverage
 
-100+ tests across: db, secrets, source/local, registry, runtime/deno, trigger (including HMAC), taskset, ipc (including gateway + control socket), webui (including auth), relay (client, keys), config, metrics, and task packages.
+100+ tests across: db, secrets, source/local, registry, runtime/deno, runtime/python, trigger (including HMAC), taskset, ipc (including gateway + control socket), webui (including auth), config, metrics, and task packages.
 
-All packages compile with `go test -race ./...` as of 2026-04-17.
+All packages compile with `go test -race ./...` as of 2026-07-10.
 
 E2E test suites (Playwright) cover core UI flows, file changes, webhooks, config, and auth (PRs #18–#20).
