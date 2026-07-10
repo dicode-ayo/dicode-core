@@ -1,23 +1,18 @@
-# AI Generation
+# AI Task Authoring
 
-Describe what you want automated in plain language. Dicode calls Claude to generate `task.yaml`, `task.js`, and `task.test.js`, validates them, and shows you a diff to review before deploying.
+Describe what you want automated in plain language. Dicode opens an interactive editing session backed by an AI agent task, which writes `task.yaml` / `task.ts` (+ test file) into a sandboxed dev-mode clone of the source; you review and save (or cancel) before the change lands.
 
 ---
 
 ## How it works
 
-1. User types a prompt in the WebUI generate box (or calls `POST /api/generate`)
-2. Dicode builds a prompt:
-   - System context: JS globals reference, 2–3 example tasks, list of existing task IDs, list of available secrets
-   - User prompt: the plain-language description
-3. Claude generates `task.yaml` + `task.js` + `task.test.js`
-4. Dicode runs Layer 1 validation (`validate_task`) on the result
-5. If validation fails, the error is fed back to Claude for retry (max 3 attempts)
-6. The generated files are shown as a diff in the WebUI
-7. User reviews and confirms (or edits and re-validates)
-8. On confirm: files are written to the local dev source
-9. The local source picks up the change via fsnotify
-10. The task appears in the registry, ready to run
+1. Start a session — `POST /api/task/create` scaffolds a new task's boilerplate, or `POST /api/task/edit` opens (or resumes) an AI editing session against an existing task, both driven by session bookkeeping in `pkg/webui/authoring*.go`.
+2. The session is served by the agent task configured as `ai.create_task` (default `buildin/task-create`, an `ai-agent` preset preloaded with the `dicode-task-create` skill), working inside a dev-mode clone of the task's source so edits are isolated from the live registry until saved.
+3. Each turn sends a prompt (and any file context) to the agent; the agent responds with proposed file changes.
+4. You review the diff in the WebUI and either continue the conversation, save, or cancel.
+5. `POST /api/task/save` applies the session's changes to the source; `POST /api/task/cancel` discards them and releases the dev-mode lock.
+
+See [Web UI & API](webui-api.md#ai-authoring) for the concrete `/api/task/*` request/response shapes.
 
 ---
 
@@ -25,145 +20,22 @@ Describe what you want automated in plain language. Dicode calls Claude to gener
 
 ```yaml
 ai:
-  provider: anthropic        # anthropic (default)
-  model: claude-sonnet-4-6   # default
-  api_key_env: ANTHROPIC_API_KEY
+  task: buildin/dicodai          # default — task-detail "AI" chat in the WebUI
+  create_task: buildin/task-create  # default — the /api/task/edit authoring agent
 ```
 
-The API key is resolved from the secrets chain (not hardcoded in `dicode.yaml`).
+`ai.task` and `ai.create_task` just point at task IDs — they carry no provider credentials themselves. Provider, model, and API key live as `params` on the agent task preset itself (see `tasks/buildin/taskset.yaml`'s `dicodai` override, which wires `buildin/ai-agent` to OpenAI via `model` / `base_url` / `api_key_env` params and an `OPENAI_API_KEY` env declaration). Point `ai.task` / `ai.create_task` at your own `ai-agent` override to swap providers, models, or skills without touching Go code.
 
 ---
 
-## What the AI generates
+## MCP vs WebUI authoring
 
-For a prompt like: *"Check the Stripe API status page every 15 minutes. If any component is degraded or down, send an ntfy notification."*
+Two paths reach the same session-based authoring flow:
 
-**`task.yaml`:**
-```yaml
-name: Stripe Status Monitor
-description: Monitors Stripe API status and alerts on degradation
-trigger:
-  cron: "*/15 * * * *"
-env:
-  - NTFY_TOKEN
-params:
-  - name: ntfy_topic
-    default: "my-dicode-alerts"
-```
-
-**`task.js`:**
-```javascript
-const res = await http.get("https://www.stripestatus.com/api/v2/components.json")
-if (!res.ok) throw new Error(`Status page unreachable: ${res.status}`)
-
-const degraded = res.body.components.filter(c =>
-  c.status !== "operational" && c.group === false
-)
-
-if (degraded.length > 0) {
-  const names = degraded.map(c => c.name).join(", ")
-  log.warn(`Stripe components degraded: ${names}`)
-  // Throw to fail the run; on_failure_chain will fire your alert task.
-  throw new Error(`Stripe degraded: ${names}`)
-} else {
-  log.info("Stripe operational")
-}
-
-return { degraded: degraded.length, components: degraded.map(c => c.name) }
-```
-
-**`task.test.js`:**
-```javascript
-test("alerts when components are degraded", async () => {
-  http.mock("GET", "https://www.stripestatus.com/api/v2/components.json", {
-    status: 200,
-    body: {
-      components: [
-        { name: "API", status: "degraded_performance", group: false },
-        { name: "Dashboard", status: "operational", group: false }
-      ]
-    }
-  })
-  env.set("NTFY_TOKEN", "test-token")
-
-  const result = await runTask()
-
-  assert.equal(result.degraded, 1)
-  assert.httpCalled("POST", "https://ntfy.sh/*")
-})
-
-test("no alert when all operational", async () => {
-  http.mock("GET", "https://www.stripestatus.com/api/v2/components.json", {
-    status: 200,
-    body: {
-      components: [
-        { name: "API", status: "operational", group: false }
-      ]
-    }
-  })
-  env.set("NTFY_TOKEN", "test-token")
-
-  const result = await runTask()
-
-  assert.equal(result.degraded, 0)
-  assert.httpNotCalled("POST", "https://ntfy.sh/*")
-})
-```
-
----
-
-## Validation retry loop
-
-If the generated code fails Layer 1 validation, the error is included in the next prompt:
-
-```
-Your previous response had validation errors:
-- task.yaml: trigger.cron: "*/15 * *" is not a valid 5-field cron expression
-- task.js: SyntaxError at line 7: Unexpected token '}'
-
-Please fix these issues and regenerate all three files.
-```
-
-Up to 3 retry attempts. If all fail, the error is shown to the user with the last-generated files for manual review.
-
----
-
-## MCP vs WebUI generation
-
-Two paths to AI generation:
-
-| | WebUI | MCP (agent) |
+| | WebUI | MCP / CLI |
 |---|---|---|
-| Who triggers it? | Human user | AI agent |
-| Confirmation? | User reviews diff and clicks confirm | Agent decides to commit |
-| Use case | Interactive task creation | Autonomous task development |
+| Who triggers it? | Human user via the WebUI | `dicode task create --ai` / `dicode task edit`, or an MCP-connected agent |
+| Confirmation? | User reviews the diff and clicks save | Caller decides when to save |
+| Use case | Interactive task creation | Scripted or agent-driven task development |
 
-The WebUI uses `pkg/ai/generator.go` directly. The MCP path uses `write_task_file` + `validate_task` + `test_task` + `commit_task` — the agent controls the loop.
-
----
-
-## Prompt construction
-
-The generator builds a structured prompt:
-
-```
-System:
-You are a dicode task developer. Generate task.yaml, task.js, and task.test.js.
-
-## JS Runtime Reference
-[globals reference from tasks/skills/dicode-task-dev.md]
-
-## Example tasks
-[2-3 curated examples]
-
-## Existing tasks
-[list of task IDs in the registry]
-
-## Available secrets
-[list of secret names from secrets chain]
-
-User:
-[user's plain-language description]
-```
-
-The existing tasks list prevents ID collisions. The available secrets list lets Claude use real secret names in the generated `env:` declarations.
+The dicode MCP surface itself (`tasks/buildin/mcp/task.ts`) only exposes `list_tasks`, `get_task`, `run_task`, `list_sources`, `switch_dev_mode`, and `test_task` — an MCP agent drives task authoring by calling the same `/api/task/*` authoring endpoints directly (with its API key), not through a dedicated MCP tool.
