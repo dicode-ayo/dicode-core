@@ -37,8 +37,10 @@ The dashboard assembles its provider list from three sources at runtime:
 
 1. **Broker catalogue** — `GET /providers` on the relay broker
    (`DICODE_RELAY_BROKER_URL`; requires dicode-relay ≥ 0.1.5) returns the
-   live list of broker-backed providers with their flow metadata, labels,
-   and brand colors.
+   live list of broker-backed providers with flow metadata only —
+   `{key, pkce, scopes, secret_required, configured}`. No labels or brand
+   colors; the SPA card falls back to the provider key and a neutral color
+   (`meta.color` defaulting to `#888`) plus a per-key bundled SVG icon.
 2. **Standalone table** — a small hardcoded map in
    [`task.ts`](../../tasks/buildin/auth-providers/task.ts) for providers
    that are neither broker-backed nor template-derived. Today that is only
@@ -110,11 +112,13 @@ identically to the broker-backed providers (rename landed in PR #221).
 
 ## Provider metadata
 
-UI metadata (label, brand color, flow shape) for broker-backed providers
-comes from the broker's `GET /providers` response — adding a broker provider
-requires no dashboard change at all. Standalone providers live in the small
-`STANDALONE` map in [`task.ts`](../../tasks/buildin/auth-providers/task.ts)
-(currently only openrouter), and BYO entries carry their own metadata via
+The broker's `GET /providers` response supplies flow metadata only (`key`,
+`pkce`, `scopes`, `secret_required`, `configured`) — adding a broker provider
+requires no dashboard change, but its card carries no label or brand color
+from the broker; the SPA falls back to the provider key and a neutral color.
+Standalone providers live in the small `STANDALONE` map in
+[`task.ts`](../../tasks/buildin/auth-providers/task.ts) (currently only
+openrouter), and BYO entries carry their own label/color metadata via
 `_oauth-app` params (`color`, task name), picked up by the `list_tasks`
 scan.
 

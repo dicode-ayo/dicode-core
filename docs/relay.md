@@ -91,10 +91,12 @@ The relay identity is an encrypted blob at
 `dicode.crypto`, whose sub-keys derive from the secrets master key — a copied
 blob is only restorable alongside the same master key.
 
-**Backup:** copy the blob together with the secrets database (which holds the
-master key material). Restoring the blob on a machine with a different master
-key fails to decrypt, and the relay client regenerates a fresh identity (new
-UUID, new webhook URLs).
+**Backup:** copy the blob together with the master key material — the
+`<DATADIR>/master.key` file (auto-generated, chmod 600), or the
+`DICODE_MASTER_KEY` env value if you provision the key that way. The secrets
+database is not required to restore the relay identity. Restoring the blob
+on a machine with a different master key fails to decrypt, and the relay
+client regenerates a fresh identity (new UUID, new webhook URLs).
 
 **Rotation** (e.g. suspected key compromise): stop the daemon, delete
 `<DATADIR>/relay-store/identity-v1.bin`, restart. The relay-client task

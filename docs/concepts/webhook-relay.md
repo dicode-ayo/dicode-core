@@ -85,19 +85,26 @@ The UUID stays stable as long as the identity blob and the secrets master key bo
 
 ## Protocol
 
-All messages are JSON text WebSocket frames.
+Messages are protojson-encoded `ServerMessage` / `ClientMessage` envelopes
+(generated from `relay.proto`) sent as JSON text WebSocket frames — a `oneof`
+wrapper keyed by variant name (e.g. `{"hello":{...}}`), not a flat
+`{"type":...}` object. The wire format is defined by the pinned dicode-relay
+package (`npm:dicode-relay@~0.1.4`, see `deno.lock`); see
+[docs/design/relay.md](../design/relay.md) for the full protocol reference.
+Both client and broker require protocol version 3 — a broker advertising a
+lower version is rejected.
 
 ### Handshake
 
 ```
-Server -> Client   {"type":"challenge","nonce":"<64 hex chars>"}
-Client -> Server   {"type":"hello","uuid":"...","pubkey":"...","decrypt_pubkey":"...","sig":"...","timestamp":N}
-Server -> Client   {"type":"welcome","url":"https://relay.dicode.app/u/<uuid>/hooks/","broker_pubkey":"...","protocol":2}
+Server -> Client   {"challenge":{"nonce":"<64 hex chars>"}}
+Client -> Server   {"hello":{"uuid":"...","pubkey":"...","decrypt_pubkey":"...","sig":"...","timestamp":N}}
+Server -> Client   {"welcome":{"url":"https://relay.dicode.app/u/<uuid>/hooks/","brokerPubkey":"...","protocol":3}}
                    or
-                   {"type":"error","message":"<reason>"}
+                   {"error":{"message":"<reason>"}}
 ```
 
-`pubkey` is the signing public key; `decrypt_pubkey` is the separate key the broker encrypts OAuth token deliveries to. `broker_pubkey` on the welcome is what the client TOFU-pins.
+`pubkey` is the signing public key; `decrypt_pubkey` is the separate key the broker encrypts OAuth token deliveries to. `brokerPubkey` on the welcome is what the client TOFU-pins. (The client encodes `hello` with proto field names/snake_case; the server's `welcome`/`challenge`/`error` use camelCase — casing differs by direction.)
 
 Verification steps (server):
 1. Decode `pubkey` from base64 -- must be 65 bytes starting with `0x04`
@@ -109,8 +116,8 @@ Verification steps (server):
 ### Request forwarding
 
 ```
-Server -> Client   {"type":"request","id":"<uuid>","method":"POST","path":"/hooks/my-task","headers":{...},"body":"<base64>"}
-Client -> Server   {"type":"response","id":"<uuid>","status":200,"headers":{...},"body":"<base64>"}
+Server -> Client   {"request":{"id":"<uuid>","method":"POST","path":"/hooks/my-task","headers":{...},"body":"<base64>"}}
+Client -> Server   {"response":{"id":"<uuid>","status":200,"headers":{...},"body":"<base64>"}}
 ```
 
 The client handles multiple concurrent requests and sends responses as they complete.

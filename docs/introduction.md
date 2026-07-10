@@ -69,8 +69,9 @@ The full engine is open source (AGPL-3.0). Cloud tiers gate execution volume and
 tasks git repo (or local dir)
 └── morning-email-check/
     ├── task.yaml    ← trigger (cron/webhook/manual/chain), params, env vars
-    ├── task.js      ← task logic (task.ts and task.py also supported), runs in a
-    │                  Deno subprocess (sandboxed via --allow-* flags)
+    ├── task.js      ← task logic (task.ts and task.py also supported); JS/TS
+    │                  runs in a Deno subprocess, Python via uv (sandboxed via
+    │                  --allow-*/permission flags)
     └── task.test.js ← unit tests with mocked globals
 
 dicode binary

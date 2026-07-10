@@ -159,10 +159,17 @@ Returns the updated source entry. Changes take effect immediately — tasks from
 
 ### `test_task(id)`
 
-Hint-style tool: returns a pointer telling the MCP client to call `POST /api/tasks/{id}/test` directly (with its API key) to run the task's sibling test file. It does not run the test itself.
+Hint-style tool: returns a text pointer telling the MCP client to call `POST /api/tasks/{id}/test` directly (with its API key) to run the task's sibling test file. It does not run the test itself.
 
 ```json
-{ "hint": "Call POST /api/tasks/infra/deploy-backend/test directly with your API key." }
+{
+  "content": [
+    {
+      "type": "text",
+      "text": "Task tests are not exposed via the dicode task SDK. Call `POST /api/tasks/infra/deploy-backend/test` directly with your API key."
+    }
+  ]
+}
 ```
 
 ---

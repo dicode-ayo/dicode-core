@@ -18,7 +18,7 @@ dicode daemon --config /path/to/dicode.yaml --port 8080
 dicode list
 ```
 
-On first run (no `dicode.yaml` in the working directory), the onboarding wizard runs. It picks a surface automatically: a non-TTY session (systemd, Docker, CI) gets a silent default config, a TTY with no display (`$DISPLAY`/`$WAYLAND_DISPLAY` unset) gets the CLI wizard, and a TTY with a display prompts to open the browser wizard. Set `DICODE_ONBOARDING=silent|cli|browser` to force a surface.
+On first run (no `dicode.yaml` in the working directory), the onboarding wizard runs. It picks a surface automatically: a non-TTY session (systemd, Docker, CI) gets a silent default config, a TTY with no display (`$DISPLAY`/`$WAYLAND_DISPLAY` unset) gets the CLI wizard, and a TTY with a display prompts you to choose browser or CLI (default: browser). Set `DICODE_ONBOARDING=silent|cli|browser` to force a surface.
 
 To run dicode under a process supervisor (systemd, launchd, a Docker restart policy, etc.), point it at `dicode daemon --config <path>` — there is no built-in service-install command.
 

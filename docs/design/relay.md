@@ -106,17 +106,29 @@ Using SHA-256 of the uncompressed public key as the identifier means:
 
 ## Protocol Specification
 
-All messages are JSON objects sent over a single WebSocket connection (text
-frames). The connection is always initiated by the client (dicode daemon).
+Messages are protojson-encoded `ServerMessage` / `ClientMessage` envelopes
+(generated from `relay.proto`, dicode-relay#199) sent as JSON text frames over
+a single WebSocket connection — a `oneof` wrapper keyed by variant name, e.g.
+`{"hello":{...}}`, not a flat `{"type":...}` object. The connection is always
+initiated by the client (dicode daemon). The pinned dicode-relay version
+(`npm:dicode-relay@~0.1.4`, `deno.lock`) is the source of truth for the wire
+format; `PROTOCOL_VERSION = 3` in `src/relay/server.ts`, and the client
+(`src/client/handshake.ts`, `BROKER_PROTOCOL_MIN = 3`) rejects any broker
+advertising a lower version.
+
+The client encodes its own outbound messages with `useProtoFieldName: true`
+(snake_case field names, e.g. `decrypt_pubkey`); the server's default
+`toJson()` output uses camelCase (e.g. `brokerPubkey`). Field casing therefore
+differs by direction — see the examples below.
 
 ### Handshake
 
 ```
-Server → Client  {"type":"challenge","nonce":"<64 hex chars>"}
-Client → Server  {"type":"hello","uuid":"<64 hex>","pubkey":"<base64>","decrypt_pubkey":"<base64>","sig":"<base64>","timestamp":<unix>}
-Server → Client  {"type":"welcome","url":"https://relay.example.com/u/<uuid>/hooks/","broker_pubkey":"<base64>","protocol":2}
+Server → Client  {"challenge":{"nonce":"<64 hex chars>"}}
+Client → Server  {"hello":{"uuid":"<64 hex>","pubkey":"<base64>","decrypt_pubkey":"<base64>","sig":"<base64>","timestamp":<unix>}}
+Server → Client  {"welcome":{"url":"https://relay.example.com/u/<uuid>/hooks/","brokerPubkey":"<base64>","protocol":3}}
                  or
-                 {"type":"error","message":"<reason>"}
+                 {"error":{"message":"<reason>"}}
 ```
 
 **Challenge**: 32 random bytes encoded as 64 lowercase hex characters.
@@ -133,10 +145,10 @@ Server → Client  {"type":"welcome","url":"https://relay.example.com/u/<uuid>/h
   timestamp)` using the signing private key. ASN.1 DER encoding.
 - `timestamp`: Unix seconds at signing time.
 
-**Welcome fields**: `broker_pubkey` is the base64 SPKI DER key the broker uses
+**Welcome fields**: `brokerPubkey` is the base64 SPKI DER key the broker uses
 to sign delivery envelopes (the client TOFU-pins it); `protocol` announces the
-protocol version (≥ 2 means the broker understands the split sign/decrypt
-model).
+protocol version. Both sides reject `protocol < 3` — v3 means "types
+generated from proto".
 
 **Verification steps** (server):
 1. Decode `pubkey` from base64; reject if not 65 bytes starting with `0x04`.
@@ -148,23 +160,25 @@ model).
 ### Webhook forwarding
 
 ```
-Server → Client  {
-  "type":    "request",
+Server → Client  {"request": {
   "id":      "<uuid>",
   "method":  "POST",
   "path":    "/hooks/my-task",
-  "headers": {"X-Hub-Signature-256": ["sha256=..."]},
+  "headers": {"X-Hub-Signature-256": {"values": ["sha256=..."]}},
   "body":    "<base64>"
-}
+}}
 
-Client → Server  {
-  "type":    "response",
+Client → Server  {"response": {
   "id":      "<uuid>",
   "status":  200,
-  "headers": {"Content-Type": ["application/json"]},
+  "headers": {"Content-Type": {"values": ["application/json"]}},
   "body":    "<base64>"
-}
+}}
 ```
+
+`headers` is a proto3 map whose value type (`HeaderValues`) wraps a repeated
+string as `{"values": [...]}`, since proto3 maps can't hold repeated values
+directly.
 
 The `id` field correlates requests and responses. The relay server may
 send multiple requests concurrently; the client handles them concurrently

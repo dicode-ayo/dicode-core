@@ -101,10 +101,11 @@ permissions:
 ```
 
 - `dicode.crypto.encrypt(ctx, bytes)` / `dicode.crypto.decrypt(ctx, bytes)` —
-  AES-GCM with context-scoped sub-key derivation from the secrets master
-  key. `auth-start` and `auth-relay` use it for the relay identity, the
-  broker pin, and pending-session records; a task can only use contexts
-  listed under `permissions.dicode.crypto`.
+  XChaCha20-Poly1305 (context bound into the AEAD's associated data), with
+  context-scoped sub-key derivation from the secrets master key. `auth-start`
+  and `auth-relay` use it for the relay identity, the broker pin, and
+  pending-session records; a task can only use contexts listed under
+  `permissions.dicode.crypto`.
 - `dicode.secrets_set(name, value)` — writes a secret. Gated by
   `secrets_write`; only `buildin/auth-relay` holds it in this flow.
 - `dicode.secrets.has(name)` — presence check without reading the value.
@@ -122,8 +123,9 @@ relay is not configured, `buildin/auth-start` fails fast with a clear error
 | Symptom | Cause |
 |---|---|
 | `relay broker URL not configured (DICODE_RELAY_BROKER_URL)` | Relay disabled, or no broker URL could be derived from `relay.server_url` (an explicit `relay.broker_url` overrides the derivation). |
-| `unknown or expired session` | More than ~6 minutes elapsed between `auth-start` and the browser completing the flow; retry. |
-| `decrypt failed` | The daemon's relay identity was rotated mid-flow, or the delivery was signed by a broker key that no longer matches the TOFU pin. |
+| `unknown or expired session` | More than ~5 minutes (the broker's session TTL) elapsed between `auth-start` and the browser completing the flow; retry. |
+| `broker signature verification failed` | The delivery was signed by a broker key that no longer matches the TOFU pin. |
+| `decrypt failed` | The daemon's relay identity was rotated mid-flow. |
 | `daemon not connected` | The WSS tunnel was not open when the browser hit `/auth/:provider`. Start the daemon first, wait for the `relay connected` log line, then run `auth-start`. |
 
 ---

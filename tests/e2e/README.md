@@ -3,7 +3,7 @@
 Playwright suite covering the REST API, webhook triggers, cron, file-change
 reconciliation, the SPA at `/hooks/webui`, the auth flow, auth-provider
 connections, dev-mode/clone-mode, task suspend/resume, run-input persistence,
-and the MCP JSON-RPC surface. 113 tests, ~3.5 min end-to-end (121 with the
+and the MCP JSON-RPC surface. 124 tests, ~3.5 min end-to-end (132 with the
 opt-in relay project).
 
 ## One-time setup
@@ -103,7 +103,7 @@ file.
 
 | Project | Server config | What runs | storageState |
 |---|---|---|---|
-| `unauthenticated` | `auth: false`, no passphrase | webhooks, cron, file-change, config, mcp, dev-mode-clone, run-input-persistence, task-toggle, suspend-resume, cli-suspend specs | seeded session |
+| `unauthenticated` | `auth: false`, no passphrase | webhooks, webhooks-secure, cron, file-change, config, mcp, dev-mode-clone, run-input-persistence, task-toggle, suspend-resume, cli-suspend specs | seeded session |
 | `webui` | same as above | `webui-task.spec.ts` — SPA tests | seeded session |
 | `authenticated` | `auth: true`, `secret: test-passphrase-12345` | `auth.spec.ts`, `auth-providers.spec.ts` | none (tests the login flow) |
 | `relay` | separate broker + daemon pair on random ports, not the shared global-setup daemon | `relay-protocol.spec.ts`, `relay-buildin.spec.ts` — opt-in via `DICODE_E2E_RELAY=1` | none |
@@ -113,8 +113,8 @@ The authenticated project is a separate server start, hence a separate
 
 ## Test inventory
 
-113 non-relay tests total: 76 in `unauthenticated` + 14 in `webui` + 23 in
-`authenticated` (121 including the 8 opt-in `relay` tests).
+124 non-relay tests total: 87 in `unauthenticated` + 14 in `webui` + 23 in
+`authenticated` (132 including the 8 opt-in `relay` tests).
 
 ### [webhooks.spec.ts](webhooks.spec.ts) — Open Webhook (8 tests)
 
@@ -294,7 +294,7 @@ relay-broker and standalone (BYO token) flows.
 | 9 | connect with standalone openrouter returns the webhook URL | BYO-token provider returns a webhook URL to POST the token to. |
 | 10 | connect with unknown provider returns 5xx | Unknown provider id fails loudly rather than silently. |
 
-### [dev-mode-clone.spec.ts](dev-mode-clone.spec.ts) — Dev-mode clone + on_failure_chain (11 tests)
+### [dev-mode-clone.spec.ts](dev-mode-clone.spec.ts) — Dev-mode clone + on_failure_chain (22 tests)
 
 Runs in the `unauthenticated` project. Covers the dev-mode-with-branch and
 `on_failure_chain` features from #236/#241: local-path dev mode, clone-mode
@@ -306,8 +306,8 @@ structured forms of `on_failure_chain`.
 |---|---|---|
 | 1 | PATCH local_path → 200 with local_path in body | Local-path dev mode is unaffected by the clone-mode addition. |
 | 2 | clone-mode enable returns 200 with branch/run_id in body (git source only) | Enabling clone-mode against a git source returns the resolved branch and run id. |
-| 3 | run_id validation rejects malformed ids → 400 | `ValidateRunID` rejects disallowed characters/shapes. |
-| 4 | branch validation rejects malformed branch names → 400 | `ValidateBranchName` rejects disallowed characters/shapes. |
+| 3 | run_id validation rejects malformed ids → 400 (parameterized: 6 cases via `invalidRunIDs`) | `ValidateRunID` rejects disallowed characters/shapes. |
+| 4 | branch validation rejects malformed branch names → 400 (parameterized: 7 cases via `invalidBranchNames`) | `ValidateBranchName` rejects disallowed characters/shapes. |
 | 5 | empty branch → 200 (local-path/disable path, not clone-mode) | An empty branch string takes the local-path/disable code path rather than erroring. |
 | 6 | second concurrent clone-mode enable → 400 dev-mode busy (git source only) | Concurrency guard prevents two clone-mode enables racing. |
 | 7 | tools/list: switch_dev_mode schema includes branch, base, run_id | MCP tool schema advertises the new clone-mode params. |

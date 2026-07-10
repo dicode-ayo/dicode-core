@@ -1,9 +1,11 @@
 # git-pr (buildin)
 
-Opens a GitHub pull request via the `gh` CLI. Used by the auto-fix flow —
-auto-fix invokes whichever PR task is named in `params.pr_task` (this is
-the reference implementation, replaceable by installing your own task and
-pointing auto-fix at it).
+Opens a GitHub pull request via the `gh` CLI. Used by the auto-fix flow's
+`dicode-auto-fix` skill, which currently calls this task by name (`git-pr`).
+Swapping in a different PR task today requires editing the skill prompt
+(`tasks/skills/dicode-auto-fix.md`) and the auto-fix task's `dicode.tasks`
+permission in `tasks/buildin/taskset.yaml` — there is no `params.pr_task`
+override read by any Go or task code yet.
 
 ## PAT prerequisite
 

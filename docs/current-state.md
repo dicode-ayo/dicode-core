@@ -70,9 +70,9 @@ Full TaskSet architecture — hierarchical task composition inspired by ArgoCD A
 
 ### `pkg/mcp/` ✅
 
-- The MCP **server** is no longer a Go package — it ships as the `buildin/mcp` task (JSON-RPC 2.0 over HTTP POST). `pkg/webui` serves an API-key-gated `/mcp` URL that forwards to it.
+- The MCP **server** is no longer a Go package — it ships as the `buildin/mcp` task (JSON-RPC 2.0 over HTTP POST). `pkg/webui` serves a session-or-API-key-gated `/mcp` URL that forwards to it.
 - **Implemented tools** (`tasks/buildin/mcp/task.ts`): `list_tasks`, `get_task`, `run_task`, `list_sources`, `switch_dev_mode`, `test_task`.
-- **Auth**: the `/mcp` forwarder is protected by `requireAPIKey`. Bearer token format: `dck_<32 random bytes hex>`.
+- **Auth**: the `/mcp` forwarder accepts either a session cookie or a Bearer API key (`requireSessionOrAPIKey` in `pkg/webui/server.go`), not API-key-only. Bearer token format: `dck_<32 random bytes hex>`.
 - **`pkg/mcp/client/`** — lightweight HTTP JSON-RPC 2.0 MCP client: `New(port int)`, `ListTools(ctx)`, `Call(ctx, tool, args)`. Used by the socket server to proxy `mcp.list_tools` / `mcp.call` requests from task scripts to daemon MCP tasks.
 
 ### Relay (built-in tasks, no Go package)
