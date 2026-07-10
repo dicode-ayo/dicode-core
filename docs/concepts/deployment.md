@@ -4,100 +4,23 @@ Dicode is a single binary. No dependencies, no runtime, no database server. Drop
 
 ---
 
-## Desktop
-
-The default mode for developer machines. Includes system tray icon and OS desktop notifications.
+## Running the daemon
 
 ```bash
 # Download binary (macOS/Linux/Windows)
 curl -sL https://dicode.app/install.sh | sh
 
-# Start dicode
-dicode
+# Run in the foreground with a specific config
+dicode daemon --config /path/to/dicode.yaml --port 8080
 
-# Start with tray icon
-dicode --tray
-
-# Start with specific config
-dicode --config /path/to/dicode.yaml
+# Or just run any CLI command — it auto-starts the daemon in the
+# background (using ./dicode.yaml) if one isn't already running
+dicode list
 ```
 
-On first run (no `dicode.yaml` in the current directory), the onboarding wizard opens in your browser.
+On first run (no `dicode.yaml` in the working directory), the onboarding wizard runs. It picks a surface automatically: a non-TTY session (systemd, Docker, CI) gets a silent default config, a TTY with no display (`$DISPLAY`/`$WAYLAND_DISPLAY` unset) gets the CLI wizard, and a TTY with a display prompts to open the browser wizard. Set `DICODE_ONBOARDING=silent|cli|browser` to force a surface.
 
----
-
-## Headless (server / VPS)
-
-For machines without a display. No tray icon, no desktop notifications.
-
-```bash
-dicode --headless
-# or
-DICODE_HEADLESS=true dicode
-```
-
-The `--headless` flag is automatically applied when no display is detected (`$DISPLAY` is unset on Linux).
-
----
-
-## Run on startup
-
-### Desktop (macOS)
-
-```bash
-dicode service install
-```
-
-Creates a LaunchAgent at `~/Library/LaunchAgents/app.dicode.plist`. Dicode starts on login and restarts automatically if it crashes.
-
-### Desktop (Linux — XDG autostart)
-
-```bash
-dicode service install
-```
-
-Creates `~/.config/autostart/dicode.desktop`. Starts with the desktop session.
-
-### Desktop (Windows)
-
-```bash
-dicode service install
-```
-
-Adds a registry entry under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
-
-### Server (systemd)
-
-```bash
-sudo dicode service install --headless
-```
-
-Creates `/etc/systemd/system/dicode.service` and enables it. Dicode starts on boot and restarts on failure.
-
-```bash
-# After install
-sudo systemctl status dicode
-sudo journalctl -u dicode -f
-```
-
-### Windows Service
-
-```bash
-dicode service install --headless
-```
-
-Registers dicode as a Windows Service.
-
-### Other `service` commands
-
-```bash
-dicode service start
-dicode service stop
-dicode service restart
-dicode service status
-dicode service logs
-dicode service uninstall
-```
+To run dicode under a process supervisor (systemd, launchd, a Docker restart policy, etc.), point it at `dicode daemon --config <path>` — there is no built-in service-install command.
 
 ---
 
@@ -109,7 +32,7 @@ docker run -d \
   -p 8080:8080 \
   -v ~/.dicode:/data \
   -v ~/tasks:/tasks \
-  -e DICODE_HEADLESS=true \
+  -e DICODE_DATA_DIR=/data \
   -e ANTHROPIC_API_KEY=... \
   ghcr.io/dicode/dicode:latest
 ```
@@ -125,7 +48,6 @@ services:
       - ./data:/data
       - ./tasks:/tasks
     environment:
-      DICODE_HEADLESS: "true"
       DICODE_DATA_DIR: /data
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
     restart: unless-stopped
@@ -181,20 +103,19 @@ See [`deploy/helm/dicode/README.md`](https://github.com/dicode-ayo/dicode-core/t
 ### `dicode.yaml`
 
 ```yaml
-# Task sources — where tasks come from
-sources:
-  - type: git
-    id: main                     # unique source ID
-    url: https://github.com/you/tasks
-    branch: main
-    poll_interval: 60s
-    auth:
-      type: token
-      token_env: GITHUB_TOKEN
-  - type: local                  # optional: for local dev
-    id: dev
-    path: ~/tasks-dev
-    watch: true
+# Task sources — where tasks come from, as entries of the root TaskSet
+spec:
+  entries:
+    main:
+      ref:
+        url: https://github.com/you/tasks
+        branch: main
+        poll_interval: 60s
+        auth:
+          token_env: GITHUB_TOKEN
+    dev:                          # optional: for local dev
+      ref:
+        path: ~/tasks-dev
 
 # Storage
 database:
@@ -205,7 +126,7 @@ database:
 # WebSocket relay (for webhook URLs on laptops)
 relay:
   enabled: true
-  token_env: DICODE_RELAY_TOKEN  # from dicode.app account
+  server_url: wss://relay.dicode.app
 
 # Secrets
 secrets:
@@ -222,15 +143,14 @@ defaults:
 # Server
 server:
   port: 8080
-  api_secret_env: DICODE_API_SECRET  # optional: protect REST API
-  mcp: true                          # enable MCP server at /mcp
-  tray: false                        # enable system tray icon
+  auth: true    # enable the global auth wall (passphrase login)
+  mcp: true     # enable MCP server at /mcp
 
-# AI generation
+# AI generation — task id invoked for AI chat/edit; defaults to
+# buildin/dicodai, a buildin/ai-agent preset. Provider/model/api key are
+# params on that task's own config, not top-level dicode.yaml keys.
 ai:
-  provider: anthropic
-  model: claude-sonnet-4-6
-  api_key_env: ANTHROPIC_API_KEY
+  task: buildin/dicodai
 
 # Logging
 log_level: info   # debug | info | warn | error
@@ -240,45 +160,42 @@ log_level: info   # debug | info | warn | error
 
 | Variable | Description |
 |---|---|
-| `DICODE_CONFIG` | Path to config file (default: `dicode.yaml`) |
-| `DICODE_HEADLESS` | Set to `true` to disable tray/desktop notifications |
 | `DICODE_DATA_DIR` | Directory for DB and master key (default: `~/.dicode`) |
 | `DICODE_MASTER_KEY` | Master encryption key (overrides `~/.dicode/master.key`) |
-| `DICODE_API_SECRET` | REST API auth secret |
-| `DICODE_RELAY_TOKEN` | Webhook relay account token |
+| `DICODE_ONBOARDING` | Force the first-run wizard surface: `silent`, `cli`, or `browser` |
 
 ---
 
 ## CLI reference
 
 ```
-dicode [--config <path>] [--tray] [--headless]
+dicode daemon [--config <path>] [--port N]     Run the daemon in the foreground
 
-Subcommands:
-  dicode version                         Print version
+dicode version                                 Print version
+dicode list                                     List all registered tasks
+dicode run <task-id> [key=value ...]           Trigger a task run and wait for the result
+dicode logs <run-id>                           Fetch log lines for a run
+dicode status [task-id]                        Daemon health or latest run for a task
+dicode resume [run-id]                         List suspended runs, or resume one
 
-  dicode task validate <id|--all>        Schema + syntax + cycle check
-  dicode task test <id|--all> [--watch]  Run task.test.js
-  dicode task run <id> [options]         Execute a task
-    --dry-run                            Intercepted HTTP, no side effects
-    --verbose                            Show full log
-    --param key=value                    Override a parameter
-  dicode task commit <id> --to <source>  Promote local task to git
-  dicode task diff <id>                  Show changes vs committed version
-  dicode task install <url> [--param k=v] Install from store
+dicode task test <task-id>                     Run the task's sibling task.test.* through its runtime
+dicode task create <name> [--ai]               Scaffold a task; with --ai, open an edit session
+dicode task edit <task-id> <prompt>             Open or resume an AI edit session
+dicode task save <session-id>                  Apply a session's changes
+dicode task cancel <session-id>                Discard a session
+dicode task delete <task-id>                   Delete a task
+dicode task approve <task-id>                  Approve a changed task (see the approval gate)
+dicode task pending                            List tasks awaiting approval
 
-  dicode secrets set <key> <value>
-  dicode secrets get <key>
-  dicode secrets list
-  dicode secrets delete <key>
+dicode secrets list                            List secret keys
+dicode secrets set <key> <value>               Store a secret
+dicode secrets delete <key>                    Delete a secret
 
-  dicode ci init --github|--gitlab       Generate CI workflow file
+dicode relay trust-broker                      Trust the relay's OAuth broker
 
-  dicode service install [--headless]    Install as system service
-  dicode service uninstall
-  dicode service start|stop|restart
-  dicode service status
-  dicode service logs
+dicode ai <prompt> [flags]                     Run the configured AI task with a prompt
 
-  dicode relay status                    Show relay connection status
+dicode auth reset-passphrase                   Reset the server auth passphrase
+
+dicode mcp install|uninstall|print-config      Manage the MCP client integration
 ```

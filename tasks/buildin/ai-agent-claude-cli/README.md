@@ -17,13 +17,13 @@ endpoints, per-token API key billing). Pick one:
 
 ## Setup
 
-> **Run with `server.auth: true`.** The webhook (`/hooks/ai-claude`)
-> is unauthenticated by default — pending [#96](https://github.com/dicode-ayo/dicode-core/issues/96)
-> for per-task webhook auth. Until that lands, anyone who can reach the
-> daemon's port can invoke the operator's Claude subscription quota.
-> Setting `server.auth: true` in `dicode.yaml` gates the whole HTTP
-> surface behind the session-cookie + API-key auth chain, which is the
-> recommended posture for any deployment beyond a personal laptop.
+The task ships with `trigger.auth: true`, so `/hooks/ai-claude` already
+requires a dicode session — an unauthenticated caller can't invoke the
+operator's Claude subscription quota. Getting a session at all requires a
+passphrase to exist, which is why you still want `server.auth: true` in
+`dicode.yaml`: it auto-generates one on first boot (or set `server.secret`
+yourself) and gates the rest of the HTTP surface (WebUI, REST API) behind
+the same session-cookie + API-key auth chain.
 
 ### 1. Mint a Claude OAuth token
 
@@ -115,10 +115,14 @@ spec:
 
 ### 3. Verify
 
-Once the secret is set and the binary is reachable, fire the task:
+Once the secret is set and the binary is reachable, fire the task. Because
+the webhook requires a session, either curl with a saved session cookie
+(`curl -c cookies.txt -X POST .../api/auth/login -d '{"password":"..."}'`
+then `-b cookies.txt` on the calls below) or drive it through the WebUI:
 
 ```sh
 curl -fsSL -X POST http://localhost:8080/hooks/ai-claude \
+  -b cookies.txt \
   -H 'Content-Type: application/json' \
   -d '{"prompt":"In one sentence, what is dicode?"}'
 ```
@@ -127,6 +131,7 @@ The response includes a `session_id` you can pass back on the next call:
 
 ```sh
 curl -fsSL -X POST http://localhost:8080/hooks/ai-claude \
+  -b cookies.txt \
   -H 'Content-Type: application/json' \
   -d '{"prompt":"And how does it work?","session_id":"sess-..."}'
 ```

@@ -245,14 +245,12 @@ the daemon.
 ## Limitations
 
 - **Single replica only.** The daemon does not yet have leader
-  election (issue [#215](https://github.com/dicode-ayo/dicode-core/issues/215)
-  follow-up). Setting `replicaCount > 1` will run cron triggers more
+  election. Setting `replicaCount > 1` will run cron triggers more
   than once and is **not** supported. If you need horizontal scaling
   before that lands, deploy multiple Helm releases each with a
   different source.
 - **No Postgres support yet.** SQLite + RWO PVC is the only persistence
-  story. Postgres tracked in
-  [#216](https://github.com/dicode-ayo/dicode-core/issues/216).
+  story.
 - **No NetworkPolicy.** If you have a cluster-wide default-deny
   policy, vendor in your own — a follow-up issue will add an opt-in
   NetworkPolicy template.

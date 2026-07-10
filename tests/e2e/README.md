@@ -1,8 +1,10 @@
 # e2e tests
 
 Playwright suite covering the REST API, webhook triggers, cron, file-change
-reconciliation, the SPA at `/hooks/webui`, the auth flow, and the MCP
-JSON-RPC surface. 70 tests, ~3.5 min end-to-end.
+reconciliation, the SPA at `/hooks/webui`, the auth flow, auth-provider
+connections, dev-mode/clone-mode, task suspend/resume, run-input persistence,
+and the MCP JSON-RPC surface. 113 tests, ~3.5 min end-to-end (121 with the
+opt-in relay project).
 
 ## One-time setup
 
@@ -97,20 +99,22 @@ file.
 
 ## Projects
 
-`playwright.config.ts` defines three projects:
+`playwright.config.ts` defines four projects:
 
 | Project | Server config | What runs | storageState |
 |---|---|---|---|
-| `unauthenticated` | `auth: false`, no passphrase | webhooks, cron, file-change, config specs | seeded session |
+| `unauthenticated` | `auth: false`, no passphrase | webhooks, cron, file-change, config, mcp, dev-mode-clone, run-input-persistence, task-toggle, suspend-resume, cli-suspend specs | seeded session |
 | `webui` | same as above | `webui-task.spec.ts` — SPA tests | seeded session |
-| `authenticated` | `auth: true`, `secret: test-passphrase-12345` | `auth.spec.ts` only | none (tests the login flow) |
+| `authenticated` | `auth: true`, `secret: test-passphrase-12345` | `auth.spec.ts`, `auth-providers.spec.ts` | none (tests the login flow) |
+| `relay` | separate broker + daemon pair on random ports, not the shared global-setup daemon | `relay-protocol.spec.ts`, `relay-buildin.spec.ts` — opt-in via `DICODE_E2E_RELAY=1` | none |
 
 The authenticated project is a separate server start, hence a separate
 `make` target.
 
 ## Test inventory
 
-70 tests total: 43 in `unauthenticated` + 14 in `webui` + 13 in `authenticated`.
+113 non-relay tests total: 76 in `unauthenticated` + 14 in `webui` + 23 in
+`authenticated` (121 including the 8 opt-in `relay` tests).
 
 ### [webhooks.spec.ts](webhooks.spec.ts) — Open Webhook (8 tests)
 
@@ -156,7 +160,7 @@ accommodate the 90 s wait.
 | 4 | task list shows last run status after cron fires | `dc-task-list` row for `hello-cron` gets a status `.badge`. |
 | 5 | cron task detail shows trigger label with cron expression | `dc-task-detail` trigger card text matches `/cron|every minute|\*/i`. |
 
-### [file-change.spec.ts](file-change.spec.ts) — File Change Detection (4 tests)
+### [file-change.spec.ts](file-change.spec.ts) — File Change Detection (5 tests)
 
 Mutates the per-run temp copy of fixtures and verifies the reconciler picks
 changes up via fsnotify.
@@ -166,9 +170,10 @@ changes up via fsnotify.
 | 1 | editing task.js updates task behaviour | New `console.log` appears in a fresh run's logs after rewrite. |
 | 2 | editing task.yaml (description) is reflected in API response | `/api/tasks/{id}.description` updates within 20 s. |
 | 3 | UI reflects file changes after reconciler picks them up | `dc-task-detail` still resolves after a task script rewrite. |
-| 4 | file edit is idempotent — restoring original brings task back | Undoing the edit restores the original description. |
+| 4 | fsnotify pickup latency is within budget (< 1500 ms) | Reconciler picks up an edit fast enough for the UI's "instant reload" claim. |
+| 5 | file edit is idempotent — restoring original brings task back | Undoing the edit restores the original description. |
 
-### [mcp.spec.ts](mcp.spec.ts) — MCP JSON-RPC surface (10 tests)
+### [mcp.spec.ts](mcp.spec.ts) — MCP JSON-RPC surface (11 tests)
 
 Covers the buildin/mcp dicode task served at `/mcp` (via the API-key-gated
 forwarder in pkg/webui that re-dispatches to `/hooks/mcp`).
@@ -185,19 +190,23 @@ forwarder in pkg/webui that re-dispatches to `/hooks/mcp`).
 | 8 | unknown method returns -32601 | Method-not-found path. |
 | 9 | tools/call with unknown tool name returns -32603 | Tool-not-found path. |
 | 10 | empty body returns parse error -32700 with id:null | Parse-error response shape per JSON-RPC 2.0. |
+| 11 | direct POST /hooks/mcp is rejected (no session) | Only the API-key forwarder at `/mcp` may reach the buildin task; direct webhook posts are session-gated. |
 
-### [config.spec.ts](config.spec.ts) — Config API + UI (9 tests)
+### [config.spec.ts](config.spec.ts) — Config API + UI (12 tests)
 
-#### Config API (6 tests)
+#### Config API (9 tests)
 
 | # | Test | Verifies |
 |---|---|---|
 | 1 | GET /api/config returns config object with our test port | `server.port` = 8765 round-trips. |
 | 2 | GET /api/config does not leak secret field | `server.secret` is absent under any casing (`json:"-"` respected). |
-| 3 | GET /api/config returns sources array including e2e-tests | `sources[]` contains the `e2e-tests` local source. |
-| 4 | GET /api/config/raw returns YAML content | Raw-YAML endpoint returns the live `dicode.yaml` contents. |
-| 5 | POST /api/config/raw rejects invalid YAML with 400 | Bad YAML is refused before persistence. |
-| 6 | POST /api/config/raw persists valid YAML and round-trips a marker | Writes + reads a comment marker, then restores the original. |
+| 3 | GET /api/config exposes spec.entries including e2e-tests | `spec.entries` contains the `e2e-tests` source in the current TaskSet shape. |
+| 4 | GET /api/sources lists e2e-tests as a taskset source | `/api/sources` surfaces the same source by name. |
+| 5 | POST /api/settings/sources rejects a git:// url with 400 | The `git://` scheme (no auth support) is rejected at validation. |
+| 6 | GET /api/settings/sources/git/branches (preview) rejects a git:// url with 400 | Same scheme guard on the branch-preview endpoint. |
+| 7 | GET /api/config/raw returns YAML content | Raw-YAML endpoint returns the live `dicode.yaml` contents. |
+| 8 | POST /api/config/raw rejects invalid YAML with 400 | Bad YAML is refused before persistence. |
+| 9 | POST /api/config/raw persists valid YAML and round-trips a marker | Writes + reads a comment marker, then restores the original. |
 
 #### Config UI (3 tests)
 
@@ -266,6 +275,99 @@ Runs in the `authenticated` project (server started with `auth: true` and
 | 12 | GET /api/auth/passphrase status returns source after login | `source: "yaml"` (fixture sets `server.secret` in YAML). |
 | 13 | POST /api/auth/logout invalidates session | Post-logout, `/api/tasks` returns 401 again. |
 
+### [auth-providers.spec.ts](auth-providers.spec.ts) — Auth Providers dashboard (10 tests)
+
+Runs in the `authenticated` project. Covers the buildin/auth-providers task:
+listing configured OAuth providers and driving `connect` for both
+relay-broker and standalone (BYO token) flows.
+
+| # | Test | Verifies |
+|---|---|---|
+| 1 | GET /hooks/auth-providers serves index.html with SDK injected | Dashboard page loads for a logged-in session. |
+| 2 | list action returns provider rows with has_token false by default | No secret configured → `has_token: false`. |
+| 3 | list returns the post-#256 PublicProviderInfo shape | Response matches the current provider-info schema. |
+| 4 | list reports has_token=true when an ACCESS_TOKEN secret is set | Presence of the configured secret flips `has_token`. |
+| 5 | list returns standalones only when relay is disabled (BYO without relay) | Broker-backed providers are hidden when `relay.enabled` is false. |
+| 6 | connect with broker provider when relay is disabled returns a useful 5xx | Clear error instead of a silent failure when relay is off. |
+| 7 | list auto-discovers _oauth-app inheritors via the template marker | Tasks inheriting the `_oauth-app` template are surfaced automatically. |
+| 8 | connect routes _oauth-app inheritors to their webhook | Connect action resolves to the inheriting task's webhook. |
+| 9 | connect with standalone openrouter returns the webhook URL | BYO-token provider returns a webhook URL to POST the token to. |
+| 10 | connect with unknown provider returns 5xx | Unknown provider id fails loudly rather than silently. |
+
+### [dev-mode-clone.spec.ts](dev-mode-clone.spec.ts) — Dev-mode clone + on_failure_chain (11 tests)
+
+Runs in the `unauthenticated` project. Covers the dev-mode-with-branch and
+`on_failure_chain` features from #236/#241: local-path dev mode, clone-mode
+(requires a git-type source, skipped otherwise), `run_id`/branch validation,
+the MCP `switch_dev_mode` tool schema, and both the bare-string and
+structured forms of `on_failure_chain`.
+
+| # | Test | Verifies |
+|---|---|---|
+| 1 | PATCH local_path → 200 with local_path in body | Local-path dev mode is unaffected by the clone-mode addition. |
+| 2 | clone-mode enable returns 200 with branch/run_id in body (git source only) | Enabling clone-mode against a git source returns the resolved branch and run id. |
+| 3 | run_id validation rejects malformed ids → 400 | `ValidateRunID` rejects disallowed characters/shapes. |
+| 4 | branch validation rejects malformed branch names → 400 | `ValidateBranchName` rejects disallowed characters/shapes. |
+| 5 | empty branch → 200 (local-path/disable path, not clone-mode) | An empty branch string takes the local-path/disable code path rather than erroring. |
+| 6 | second concurrent clone-mode enable → 400 dev-mode busy (git source only) | Concurrency guard prevents two clone-mode enables racing. |
+| 7 | tools/list: switch_dev_mode schema includes branch, base, run_id | MCP tool schema advertises the new clone-mode params. |
+| 8 | tools/call switch_dev_mode round-trips branch/base/run_id in hint text | MCP tool call surfaces the params it was given back in its response. |
+| 9 | loop-target fixture (bare-string on_failure_chain) is registered without error | Legacy bare-string `on_failure_chain: task-id` still parses at startup. |
+| 10 | will-fail fires chain-target with user params + reserved keys in input | Structured-form `on_failure_chain` merges user params with reserved chain metadata. |
+| 11 | chain-fired run that fails does not trigger its own on_failure_chain | Chain-triggered runs don't recursively re-chain on failure. |
+
+### [run-input-persistence.spec.ts](run-input-persistence.spec.ts) — Run-input persistence (7 tests)
+
+Runs in the `unauthenticated` project. Covers the run-input persistence
+pipeline from #233: encrypted-at-rest storage of sensitive webhook
+input, redaction, and retention-driven cleanup.
+
+| # | Test | Verifies |
+|---|---|---|
+| 1 | encrypted blob is written to ${DATADIR}/run-inputs/<runID>.bin | A sensitive webhook POST results in an on-disk encrypted blob. |
+| 2 | plaintext sensitive values are absent from the on-disk blob | The blob is genuinely encrypted, not just relocated. |
+| 3 | GET /api/runs/<runID> returns InputStorageKey, InputSize>0, InputStoredAt>0, InputPinned=0 | Run metadata reflects the persisted input correctly. |
+| 4 | InputRedactedFields lists all expected sensitive dotted paths | Redaction covers every configured sensitive field path. |
+| 5 | e2e-tests/run-inputs-cleanup runs to completion without error | The cleanup task itself is registered and runnable. |
+| 6 | persisted blob is NOT deleted by cleanup (default 30-day retention is far in the future) | Default retention doesn't prematurely delete recent blobs. |
+| 7 | SKIP: asserting deletion requires dicode.yaml defaults.run_inputs.retention: 0s | Placeholder — the e2e harness doesn't yet parameterize retention, so actual deletion isn't exercised. |
+
+### [task-toggle.spec.ts](task-toggle.spec.ts) — Task enable/disable toggle (5 tests)
+
+Runs in the `unauthenticated` project. Covers `PATCH /api/tasks/{id}/overrides`
+and the corresponding WebUI toggle.
+
+| # | Test | Verifies |
+|---|---|---|
+| 1 | PATCH /api/tasks/{id}/overrides sets enabled=false | Override API disables a task. |
+| 2 | PATCH unknown task returns 404 | Unknown task id is rejected. |
+| 3 | PATCH unknown field returns 400 | Unsupported override field is rejected. |
+| 4 | UI toggle flips the row and persists across reload | Task-list toggle control reflects and survives a page reload. |
+| 5 | dc-toast surfaces a visible message when the API rejects a toggle | UI shows an error toast on a failed toggle. |
+
+### [suspend-resume.spec.ts](suspend-resume.spec.ts) — Suspend/resume WebUI (2 tests)
+
+Runs in the `unauthenticated` project. Covers the suspend/resume WebUI
+surface from #512: a task calling `dicode.suspend()`, the resulting
+`suspended` run with a JSON Schema, submitting the form via
+`POST /api/runs/<id>/resume`, and the continuation run.
+
+| # | Test | Verifies |
+|---|---|---|
+| 1 | suspend → fill form → resume spawns the continuation | Full round-trip: suspend, submit input, continuation run succeeds with the submitted value. |
+| 2 | a suspended run's result page redirects to the resume form | Visiting a suspended run's result page routes to the resume form instead of a normal run-detail view. |
+
+### [cli-suspend.spec.ts](cli-suspend.spec.ts) — CLI suspend/resume (3 tests)
+
+Runs in the `unauthenticated` project. Drives the real `dicode` binary
+(not just the WebUI) against a suspending task, non-TTY only.
+
+| # | Test | Verifies |
+|---|---|---|
+| 1 | run --non-interactive prints the suspended run id and exits | `dicode run --non-interactive` doesn't hang on a suspending task; prints the run id and exits. |
+| 2 | run --field auto-advances the wizard to success | Pre-supplied `--field` answers let a suspending task's wizard auto-advance to completion. |
+| 3 | resume with no args lists the suspended run | Bare `dicode resume` lists suspended runs rather than erroring. |
+
 ## Fixtures
 
 [fixtures/tasks/](fixtures/tasks/) — four test tasks exercising each trigger
@@ -292,6 +394,19 @@ DICODE_E2E_RELAY=1 npx playwright test --project=relay
 
 Requires `dicode-relay` as a dev dependency (already in `package.json` after
 `npm install`).
+
+Two specs cover the relay-client + auth-relay integration from different
+angles:
+
+| Spec | Relay source | Purpose |
+|---|---|---|
+| [relay-protocol.spec.ts](relay-protocol.spec.ts) | Separate `node dicode-relay` subprocess | Fastest protocol-level signal: independent broker startup, no daemon task supervision involved |
+| [relay-buildin.spec.ts](relay-buildin.spec.ts) | `buildin/relay-server-body` runs inside the daemon | Production-path coverage: relay broker is a Deno daemon task supervised by the trigger engine |
+
+`relay-buildin.spec.ts` pre-writes `${DATADIR}/relay/relay.yaml` with an
+ephemeral port, then uses `spec.entries` overrides in the daemon config to
+inject `DICODE_E2E_MOCK_PROVIDER=1` into the relay-server-body task subprocess
+so `/_test/deliver` is available.
 
 ### What the relay suite tests
 

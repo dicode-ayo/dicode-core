@@ -29,10 +29,11 @@ Git is fully optional. You can run dicode entirely on your machine with no GitHu
 Auto-generated on first run when you choose "local only" in the onboarding wizard:
 
 ```yaml
-sources:
-  - type: local
-    path: ~/dicode-tasks
-    watch: true
+spec:
+  entries:
+    main:
+      ref:
+        path: ~/dicode-tasks
 
 database:
   type: sqlite
@@ -81,25 +82,22 @@ When you're ready to version-control your tasks:
 
 1. Add a git source to `dicode.yaml`:
    ```yaml
-   sources:
-     - type: local
-       path: ~/dicode-tasks
-       watch: true
-     - type: git
-       id: my-repo
-       url: https://github.com/you/tasks
-       branch: main
-       auth:
-         type: token
-         token_env: GITHUB_TOKEN
+   spec:
+     entries:
+       main:
+         ref:
+           path: ~/dicode-tasks
+       my-repo:
+         ref:
+           url: https://github.com/you/tasks
+           branch: main
+           auth:
+             token_env: GITHUB_TOKEN
    ```
 
-2. Commit each local task to the git source:
-   ```bash
-   dicode task commit morning-email-check --to my-repo
-   ```
+2. Move each task folder from the local source directory into a checkout of the git source and push, or use `POST /api/sources/{name}/commit-push` to commit and push a task's files to the git source directly from the WebUI/API.
 
-3. Once all tasks are committed, remove the local source from config.
+3. Once all tasks are committed, remove the local source entry from config.
 
 Tasks don't need to change — the same `task.yaml` and `task.js` work in both modes. The only thing that changes is where they're stored.
 
@@ -114,12 +112,10 @@ Requires `ANTHROPIC_API_KEY` in your environment or secrets store:
 dicode secrets set ANTHROPIC_API_KEY sk-ant-...
 ```
 
-Then in `dicode.yaml`:
+`dicode.yaml`'s `ai:` block only names which task handles AI requests (defaults to `buildin/dicodai`, an `ai-agent` preset); provider, model, and `api_key_env` are params on that task, not top-level config keys:
 ```yaml
 ai:
-  provider: anthropic
-  model: claude-sonnet-4-6
-  api_key_env: ANTHROPIC_API_KEY
+  task: buildin/dicodai
 ```
 
 ---

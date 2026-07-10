@@ -1,7 +1,9 @@
 # git-pr (buildin)
 
-Opens a GitHub pull request via the `gh` CLI. Used by the auto-fix flow
-when `params.mode == "review"`.
+Opens a GitHub pull request via the `gh` CLI. Used by the auto-fix flow —
+auto-fix invokes whichever PR task is named in `params.pr_task` (this is
+the reference implementation, replaceable by installing your own task and
+pointing auto-fix at it).
 
 ## PAT prerequisite
 
