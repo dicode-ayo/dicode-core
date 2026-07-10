@@ -93,11 +93,25 @@ divergence bites at Phase 1.
 | **2 — One seam + validator** | Extract the single agent-runner across chat/handleAI/authoring; field-keyed `Spec.Validate` + a `dicode validate` verb; mocked-LLM CI coverage. | #217 (validator) |
 | **3 — Surface + autonomy** | `dc-ai-edit-panel` with diff apply, `dc-task-create` entry, streaming events; optional `ai.deploy_mode` dial + opt-in `on_failure_chain: auto-fix`. | #120 · #213 residual |
 
+## Verified: clone survival across suspend
+
+The load-bearing question for the session-as-run model — *does a suspended run keep its
+dev-mode clone?* — was checked against the code (2026-07-10):
+
+- The **run row survives** suspension: the registry stale-run sweep deliberately skips
+  suspended runs (`registry.go:28`, `TestCleanupStaleRuns_SkipsSuspended`). ✅
+- **Suspending does not tear down the clone**: `SetDevMode(false)` only fires from the
+  task-delete flow, not from the suspend path. ✅
+- **But `dev-clones-cleanup` would reap it.** Its `collectActiveRunIDs` protects only clones
+  whose run is `Status === "running"` (`task.ts:29`) and sweeps every 15 min. A *suspended*
+  run isn't "running", so its clone is classed an orphan and deleted within ≤15 minutes. ❌
+
+**Phase-1 prerequisite (one line):** extend `collectActiveRunIDs` to protect non-terminal
+runs (`running` **or** `suspended`), matching the registry's already-correct behavior.
+Without it, a user who pauses to answer the agent's clarifying form loses the sandbox.
+
 ## Open questions
 
-- **Does a suspended run retain its dev-mode clone sandbox across suspend→resume?** The
-  clone lifecycle must survive suspension for the session-as-run model to hold. **Verify
-  against the suspend v2 state model before Phase 1.**
 - **Single-session-per-source (#283)** becomes "one active suspended authoring run per
   source" — the concurrency rule must carry over.
 - **Provider posture:** default `task-create` to OpenAI (like `dicodai`) vs. Claude-via-MCP;
