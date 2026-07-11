@@ -495,6 +495,9 @@ func (s *Server) Handler() http.Handler {
 			r.Get("/audit", s.apiQueryAudit)
 			r.Get("/runs/{runID}", s.apiGetRun)
 			r.Get("/runs/{runID}/logs", s.apiGetLogs)
+			// Aggregated logs across a run's whole root_run_id group (#569) —
+			// e.g. every turn of a suspend/resume conversation, interleaved by ts.
+			r.Get("/runs/{runID}/group-logs", s.apiGetGroupLogs)
 			r.Post("/runs/{runID}/kill", s.apiKillRun)
 
 			// Secrets management (protected by main session via requireAuth above).
@@ -2072,12 +2075,15 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	s.gateway.ServeHTTP(w, r)
 }
 
-// apiQueryRuns handles GET /api/runs with one of two filter modes (#116):
-//   - ?parent=<runID>          → list child runs of <runID>
-//   - ?group=<label>&task=<id> → list same-group siblings for a task
+// apiQueryRuns handles GET /api/runs with one of three filter modes:
+//   - ?parent=<runID>          → list immediate child runs of <runID> (#116)
+//   - ?group=<label>&task=<id> → list same-group siblings for a task (#116)
+//   - ?root=<runID>            → list <runID>'s whole descendant tree —
+//     chain / pipeline stages / suspend-resume continuations — collapsed
+//     under their shared root_run_id, oldest first (#569)
 //
-// Either filter is required; group requires task to scope the lookup since
-// labels are task-local.
+// Exactly one filter is required; group additionally requires task to scope
+// the lookup since labels are task-local.
 func (s *Server) apiQueryRuns(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	limit := 50
@@ -2086,9 +2092,10 @@ func (s *Server) apiQueryRuns(w http.ResponseWriter, r *http.Request) {
 	}
 	parent := q.Get("parent")
 	group := q.Get("group")
+	root := q.Get("root")
 	taskID := q.Get("task")
-	if parent == "" && group == "" {
-		jsonErr(w, "missing filter: provide ?parent=<id> or ?group=<label>&task=<id>", http.StatusBadRequest)
+	if parent == "" && group == "" && root == "" {
+		jsonErr(w, "missing filter: provide ?parent=<id>, ?root=<id>, or ?group=<label>&task=<id>", http.StatusBadRequest)
 		return
 	}
 	if group != "" && taskID == "" {
@@ -2099,9 +2106,12 @@ func (s *Server) apiQueryRuns(w http.ResponseWriter, r *http.Request) {
 		runs []*registry.Run
 		err  error
 	)
-	if parent != "" {
+	switch {
+	case root != "":
+		runs, err = s.registry.ListRunGroup(r.Context(), root, limit)
+	case parent != "":
 		runs, err = s.registry.ListChildren(r.Context(), parent, limit)
-	} else {
+	default:
 		runs, err = s.registry.ListByGroup(r.Context(), taskID, group, limit)
 	}
 	if err != nil {
@@ -2197,6 +2207,48 @@ func (s *Server) apiGetLogs(w http.ResponseWriter, r *http.Request) {
 	for i, l := range logs {
 		out[i] = LogEntryJSON{
 			ID:      l.ID,
+			Level:   l.Level,
+			Message: l.Message,
+			Ts:      l.Ts.UnixMilli(),
+		}
+	}
+	jsonOK(w, out)
+}
+
+// GroupLogEntryJSON is the JSON shape returned by GET
+// /api/runs/{runID}/group-logs — LogEntryJSON plus RunID, since entries in an
+// aggregated view span multiple runs and the caller needs to attribute each
+// line to its run (#569).
+type GroupLogEntryJSON struct {
+	ID      int64  `json:"id"`
+	RunID   string `json:"run_id"`
+	Level   string `json:"level"`
+	Message string `json:"message"`
+	Ts      int64  `json:"ts"` // Unix milliseconds
+}
+
+// apiGetGroupLogs handles GET /api/runs/{runID}/group-logs: the union of log
+// entries for every run sharing {runID}'s root_run_id (its whole descendant
+// tree), interleaved chronologically. {runID} need not itself be the root —
+// GetRunGroupLogs resolves its group membership via COALESCE(root_run_id, id).
+func (s *Server) apiGetGroupLogs(w http.ResponseWriter, r *http.Request) {
+	runID := chi.URLParam(r, "runID")
+	run, err := s.registry.GetRun(r.Context(), runID)
+	if err != nil {
+		jsonErr(w, "run not found", http.StatusNotFound)
+		return
+	}
+	logs, err := s.registry.GetRunGroupLogs(r.Context(), run.RootRunID)
+	if err != nil {
+		s.log.Error("get run group logs", zap.String("run", runID), zap.Error(err))
+		jsonErr(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	out := make([]GroupLogEntryJSON, len(logs))
+	for i, l := range logs {
+		out[i] = GroupLogEntryJSON{
+			ID:      l.ID,
+			RunID:   l.RunID,
 			Level:   l.Level,
 			Message: l.Message,
 			Ts:      l.Ts.UnixMilli(),
