@@ -60,6 +60,7 @@ export default defineConfig({
         '**/task-toggle.spec.ts',
         '**/suspend-resume.spec.ts',
         '**/cli-suspend.spec.ts',
+        '**/run-tree-collapse.spec.ts',
       ],
       use: {
         ...devices['Desktop Chrome'],

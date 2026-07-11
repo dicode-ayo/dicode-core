@@ -187,6 +187,46 @@ func TestResumeRun_SeedsContinuationAndConsumesToken(t *testing.T) {
 	}
 }
 
+// TestResumeRun_ContinuationSharesRoot verifies #569: a resume continuation's
+// root_run_id is the ORIGINAL suspended run's ID (which is its own root,
+// since it has no parent), not the continuation's own ID. This is what lets
+// the WebUI collapse a whole suspend/resume conversation into one group.
+func TestResumeRun_ContinuationSharesRoot(t *testing.T) {
+	exec := &suspendExec{}
+	eng, reg := newSuspendEnv(t, exec)
+
+	spec := &task.Spec{ID: "wiz", Name: "wiz", Runtime: task.RuntimeDeno, Trigger: task.TriggerConfig{Manual: true}, Enabled: true}
+	if err := reg.Register(spec); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	origID, err := eng.FireManual(context.Background(), "wiz", nil)
+	if err != nil {
+		t.Fatalf("FireManual: %v", err)
+	}
+	orig := waitStatus(t, reg, origID, registry.StatusSuspended)
+	if orig.RootRunID != origID {
+		t.Fatalf("suspended run RootRunID = %q, want self %q", orig.RootRunID, origID)
+	}
+
+	newID, err := eng.ResumeRun(context.Background(), orig.ResumeToken, []byte(`{"project_name":"acme"}`))
+	if err != nil {
+		t.Fatalf("ResumeRun: %v", err)
+	}
+	cont := waitStatus(t, reg, newID, registry.StatusSuccess)
+	if cont.RootRunID != origID {
+		t.Errorf("continuation RootRunID = %q, want original run %q", cont.RootRunID, origID)
+	}
+
+	group, err := reg.ListRunGroup(context.Background(), origID, 50)
+	if err != nil {
+		t.Fatalf("ListRunGroup: %v", err)
+	}
+	if len(group) != 2 {
+		t.Fatalf("len(group) = %d, want 2 (original + continuation): %+v", len(group), group)
+	}
+}
+
 func TestResumeRun_TokenIsSingleUse(t *testing.T) {
 	eng, reg := newSuspendEnv(t, &suspendExec{})
 	spec := &task.Spec{ID: "wiz", Name: "wiz", Runtime: task.RuntimeDeno, Trigger: task.TriggerConfig{Manual: true}, Enabled: true}

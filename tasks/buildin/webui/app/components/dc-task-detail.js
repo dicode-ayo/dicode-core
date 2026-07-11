@@ -246,16 +246,20 @@ class DcTaskDetail extends LitElement {
     });
   }
 
-  // ── Run-list grouping (#114) ────────────────────────────────────────────
+  // ── Run-list grouping (#114 / #569) ─────────────────────────────────────
   // The flat list of runs returned by /api/tasks/{id}/runs is collapsed by
   // two rules so the user sees one row per logical event:
   //
-  //   1. Hide rows whose ParentRunID is set — those are stage runs (a
-  //      pipeline stage, or a sub-task fired via dicode.run_task). A toggle
-  //      restores the flat view for debugging.
+  //   1. Hide rows that aren't their own root_run_id — those are members of
+  //      some other row's descendant tree (a pipeline stage, a chain hop, a
+  //      suspend/resume continuation, a sub-task fired via dicode.run_task).
+  //      A toggle restores the flat view for debugging.
   //   2. Collapse consecutive top-level rows with the same non-empty Group
   //      into one row ("N runs in this session, last 3m ago"). Tasks tag
   //      themselves via dicode.set_group() — see the ai-agent buildin (#112).
+  //      This is orthogonal to root_run_id grouping: Group is a free-text
+  //      label the task applies to itself; root_run_id is the structural
+  //      parent/child tree. A root-level run can carry both.
   //
   // The result is a list of "items" where each item is either:
   //   { kind: 'single', run }              — one row
@@ -264,7 +268,14 @@ class DcTaskDetail extends LitElement {
     const all = this._runs || [];
     if (this._showStages) return all.map(run => ({ kind: 'single', run }));
 
-    const top = all.filter(r => !(r.ParentRunID || r.parent_run_id));
+    // A run pushed live via the run:started/run:finished websocket events
+    // (see _load) carries only {ID, Status, StartedAt, ...} — no RootRunID.
+    // Treat a missing RootRunID as "top-level" (same as the pre-#569
+    // ParentRunID-absence check) rather than hiding it until the next poll.
+    const top = all.filter(r => {
+      const root = r.RootRunID || r.root_run_id;
+      return root ? root === r.ID : !(r.ParentRunID || r.parent_run_id);
+    });
     const items = [];
     for (const run of top) {
       const group = run.Group || run.group;
@@ -282,9 +293,12 @@ class DcTaskDetail extends LitElement {
     return items;
   }
 
-  // _toggleExpand expands or collapses an inline children panel. On first
-  // expand it lazily fetches /api/runs?parent=<id>; subsequent toggles flip
-  // the visibility without re-fetching.
+  // _toggleExpand expands or collapses a run's whole descendant tree. On
+  // first expand it lazily fetches /api/runs?root=<id> — the run's entire
+  // root_run_id group (every chain hop, pipeline stage, and suspend/resume
+  // continuation), not just its immediate children — so a multi-hop tree
+  // renders fully nested from one click (#569). Subsequent toggles flip
+  // visibility without re-fetching.
   async _toggleExpand(runID) {
     const next = new Set(this._expanded);
     if (next.has(runID)) {
@@ -296,9 +310,9 @@ class DcTaskDetail extends LitElement {
     this._expanded = next;
     if (!this._children.has(runID)) {
       try {
-        const kids = await get(`/api/runs?parent=${encodeURIComponent(runID)}&limit=50`);
+        const group = await get(`/api/runs?root=${encodeURIComponent(runID)}&limit=200`);
         const cm = new Map(this._children);
-        cm.set(runID, kids || []);
+        cm.set(runID, group || []);
         this._children = cm;
       } catch (e) {
         const cm = new Map(this._children);
@@ -308,14 +322,28 @@ class DcTaskDetail extends LitElement {
     }
   }
 
+  // _renderDescendants recursively renders every member of `group` (the full
+  // root_run_id group fetched once by _toggleExpand) whose parent is
+  // parentID, then that member's own children, and so on — the whole tree
+  // renders from the one top-level expand toggle rather than requiring a
+  // click per level (#569).
+  _renderDescendants(parentID, group, indent) {
+    const kids = group.filter(r => (r.ParentRunID || r.parent_run_id) === parentID && r.ID !== parentID);
+    if (!kids.length) return '';
+    return kids.map(kid => html`
+      ${this._renderRunRow(kid, { indent, isChild: true })}
+      ${this._renderDescendants(kid.ID, group, indent + 1)}
+    `);
+  }
+
   _renderRunRow(r, opts) {
     const indent = opts?.indent || 0;
     const hint   = opts?.hint;
-    const expandedKid = !!opts?.isChild;
+    const isChild = !!opts?.isChild;
     const padding = indent ? `padding-left:${indent * 1.5}rem` : '';
     const expanded = this._expanded.has(r.ID);
     const kids = this._children.get(r.ID) || [];
-    const showExpand = !expandedKid; // sub-rows don't recurse further by default
+    const showExpand = !isChild; // the whole tree expands from the top-level toggle; sub-rows don't get their own
     // registry.Run has no JSON tags, so the kind serializes as `Kind`
     // ("task" | "pipeline"); badge pipeline parents so operators can tell a
     // pipeline run (whose stage children expand below) from a plain task run.
@@ -325,7 +353,7 @@ class DcTaskDetail extends LitElement {
         <td style=${padding}>
           ${showExpand ? html`<button class="btn btn-sm secondary"
             style="padding:0 .35rem;margin-right:.35rem;font-family:monospace"
-            title="Show stage runs"
+            title="Show descendant runs"
             @click=${() => this._toggleExpand(r.ID)}>${expanded ? '▾' : '▸'}</button>` : ''}
           <a href="runs/${r.ID}">${r.ID.slice(0,8)}</a>
           ${isPipeline ? html`<span class="badge" title="Pipeline run"
@@ -341,7 +369,7 @@ class DcTaskDetail extends LitElement {
           <a href="/runs/${r.ID}/result" target="_blank"
              class="btn btn-sm secondary">Result</a>` : ''}</td>
       </tr>
-      ${expanded ? (kids.length ? kids.map(kid => this._renderRunRow(kid, { indent: indent + 1, isChild: true })) : html`
+      ${!isChild && expanded ? (kids.length ? this._renderDescendants(r.ID, kids, indent + 1) : html`
         <tr><td colspan="5" class="meta" style="padding-left:${(indent + 1) * 1.5}rem">No sub-runs.</td></tr>
       `) : ''}`;
   }

@@ -61,6 +61,13 @@ type Run struct {
 	StartedAt   time.Time
 	FinishedAt  *time.Time
 	ParentRunID string
+	// RootRunID is the topmost ancestor of this run's parent chain (chain /
+	// pipeline stage / replay / suspend-resume continuation) — the run's own
+	// ID when it has no parent. Set once at insert time by StartRunWithID and
+	// never updated; used to collapse a whole descendant tree (a suspend/
+	// resume conversation, a pipeline and its stages, a chain) into one
+	// group via ListRunGroup (#569).
+	RootRunID string
 	// Group is a free-text label set by the task itself via dicode.set_group().
 	// Used by the WebUI to collapse same-group siblings in the run list (#114).
 	// Column name on disk is `run_group` because GROUP is a SQL keyword.
@@ -198,19 +205,59 @@ func (r *Registry) StartRun(ctx context.Context, taskID, parentRunID string) (st
 // StartRunWithID records a new run using a caller-supplied ID.
 // Use this when the run ID must be known before execution begins (e.g. async fire).
 // kind may be "task" or "pipeline"; empty defaults to "task".
+//
+// root_run_id is computed here and never revisited: a parentless run is its
+// own root; a child inherits its parent's root_run_id. Every path that
+// threads parentRunID — chains, pipeline stages, replay, and suspend/resume
+// continuations (trigger.ResumeRun sets ParentRunID to the suspended run) —
+// goes through this one write path, so they all inherit the correct root
+// automatically.
 func (r *Registry) StartRunWithID(ctx context.Context, id, taskID, parentRunID, triggerSource, kind string) (string, error) {
 	if kind == "" {
 		kind = RunKindTask
 	}
+	rootRunID := id
+	if parentRunID != "" {
+		parentRoot, err := r.getRootRunID(ctx, parentRunID)
+		if err != nil {
+			return "", fmt.Errorf("start run: resolve parent root: %w", err)
+		}
+		if parentRoot != "" {
+			rootRunID = parentRoot
+		} else {
+			// Parent row missing (or, defensively, has no root of its own) —
+			// fall back to the parent ID itself rather than self-rooting, so
+			// the run still groups under its immediate parent if that row
+			// shows up later (e.g. a write-order race).
+			rootRunID = parentRunID
+		}
+	}
 	now := time.Now().UnixMilli()
 	err := r.db.Exec(ctx,
-		`INSERT INTO runs (id, task_id, status, started_at, parent_run_id, trigger_source, kind) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		id, taskID, StatusRunning, now, parentRunID, triggerSource, kind,
+		`INSERT INTO runs (id, task_id, status, started_at, parent_run_id, trigger_source, kind, root_run_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, taskID, StatusRunning, now, parentRunID, triggerSource, kind, rootRunID,
 	)
 	if err != nil {
 		return "", fmt.Errorf("start run: %w", err)
 	}
 	return id, nil
+}
+
+// getRootRunID returns the root_run_id of the given run, or "" if the run row
+// doesn't exist (or, defensively, if its root_run_id is somehow empty).
+func (r *Registry) getRootRunID(ctx context.Context, runID string) (string, error) {
+	var root string
+	err := r.db.Query(ctx,
+		`SELECT COALESCE(root_run_id, '') FROM runs WHERE id = ?`,
+		[]any{runID},
+		func(rows db.Scanner) error {
+			if rows.Next() {
+				return rows.Scan(&root)
+			}
+			return nil
+		},
+	)
+	return root, err
 }
 
 // SetRunResult stores a JSON-encoded return value and optional structured output for a finished run.
@@ -361,7 +408,7 @@ func (r *Registry) BulkAppendLogs(ctx context.Context, entries []PendingLogEntry
 // means extending this list plus scanRun — nothing else.
 const runColumns = `id, task_id, COALESCE(kind, 'task'), status, started_at, finished_at, parent_run_id, trigger_source,
         COALESCE(return_value, ''), COALESCE(output_content_type, ''), COALESCE(output_content, ''),
-        COALESCE(fail_reason, ''), COALESCE(run_group, '')`
+        COALESCE(fail_reason, ''), COALESCE(run_group, ''), COALESCE(root_run_id, id)`
 
 // runInputColumns are the input-persistence columns GetRun additionally
 // selects (appended after runColumns). queryRuns deliberately omits them:
@@ -396,7 +443,7 @@ func scanRun(rows db.Scanner, withInput, withResume bool) (*Run, error) {
 	dest := []any{
 		&run.ID, &run.TaskID, &run.Kind, &run.Status, &startedMs, &finishedMs, &parentID,
 		&tsStr, &run.ReturnValue, &run.OutputContentType, &run.OutputContent,
-		&run.FailureReason, &run.Group,
+		&run.FailureReason, &run.Group, &run.RootRunID,
 	}
 	if withInput {
 		dest = append(dest,
@@ -499,6 +546,46 @@ func (r *Registry) ListByGroup(ctx context.Context, taskID, group string, limit 
 	return r.queryRuns(ctx,
 		`WHERE task_id = ? AND run_group = ? ORDER BY started_at DESC LIMIT ?`,
 		[]any{taskID, group, limit})
+}
+
+// ListRunGroup returns every run sharing the given root_run_id — a run's
+// whole descendant tree (chain, pipeline + stages, or a suspend/resume
+// conversation), oldest first so the group reads top-to-bottom as a
+// conversation/timeline (#569). rootRunID is typically a run's own ID (a run
+// is always a member of its own group).
+func (r *Registry) ListRunGroup(ctx context.Context, rootRunID string, limit int) ([]*Run, error) {
+	return r.queryRuns(ctx,
+		`WHERE COALESCE(root_run_id, id) = ? ORDER BY started_at ASC LIMIT ?`,
+		[]any{rootRunID, limit})
+}
+
+// GetRunGroupLogs returns log entries for every run in rootRunID's group
+// (see ListRunGroup), ordered by timestamp then log ID so entries from
+// different member runs interleave chronologically rather than being grouped
+// per-run (#569).
+func (r *Registry) GetRunGroupLogs(ctx context.Context, rootRunID string) ([]*LogEntry, error) {
+	var logs []*LogEntry
+	err := r.db.Query(ctx,
+		`SELECT l.id, l.run_id, l.ts, l.level, l.message
+		 FROM run_logs l
+		 JOIN runs r ON r.id = l.run_id
+		 WHERE COALESCE(r.root_run_id, r.id) = ?
+		 ORDER BY l.ts ASC, l.id ASC`,
+		[]any{rootRunID},
+		func(rows db.Scanner) error {
+			for rows.Next() {
+				e := &LogEntry{}
+				var tsMs int64
+				if err := rows.Scan(&e.ID, &e.RunID, &tsMs, &e.Level, &e.Message); err != nil {
+					return err
+				}
+				e.Ts = time.UnixMilli(tsMs)
+				logs = append(logs, e)
+			}
+			return nil
+		},
+	)
+	return logs, err
 }
 
 // queryRuns runs a `SELECT … FROM runs <whereAndLimitClause>` and decodes rows

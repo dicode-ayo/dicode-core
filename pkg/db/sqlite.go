@@ -201,11 +201,22 @@ func (s *SQLiteDB) migrate() error {
 		// ctx.params and honors the same chain-depth ceiling. NULL when the
 		// suspended run carried neither.
 		{"resume_params", "BLOB"},
+		// root_run_id (#569) — the topmost ancestor of a run's parent chain
+		// (chain / pipeline stage / replay / suspend-resume continuation). A
+		// parentless run is its own root. Denormalized at insert time
+		// (Registry.StartRunWithID) so grouping a run's whole descendant tree
+		// under one collapsible unit (ListRunGroup) is a single indexed WHERE
+		// instead of a recursive walk. NULL only for rows written before this
+		// migration, until backfillRootRunID runs.
+		{"root_run_id", "TEXT"},
 	}
 	for _, m := range runsMigrations {
 		if err := addColumnIfMissing(ctx, s.db, "runs", m.name, m.ddl); err != nil {
 			return fmt.Errorf("migrate runs.%s: %w", m.name, err)
 		}
+	}
+	if err := backfillRootRunID(ctx, s.db); err != nil {
+		return fmt.Errorf("backfill root_run_id: %w", err)
 	}
 
 	// ua_family on trusted-device rows. Nullable on purpose: rows issued
@@ -243,6 +254,13 @@ func (s *SQLiteDB) migrate() error {
 	`)
 	if err != nil {
 		return fmt.Errorf("migrate run-grouping indexes: %w", err)
+	}
+
+	// root_run_id index (#569) — ListRunGroup and GetRunGroupLogs both filter
+	// on it; without an index they'd full-scan runs/run_logs as history grows.
+	_, err = s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_runs_root_run_id ON runs(root_run_id);`)
+	if err != nil {
+		return fmt.Errorf("migrate root_run_id index: %w", err)
 	}
 
 	// Suspend/resume lookup indexes (#95). Without them the resume-token lookup
@@ -327,6 +345,57 @@ func (s *SQLiteDB) migrate() error {
 		return fmt.Errorf("migrate audit_log: %w", err)
 	}
 
+	return nil
+}
+
+// backfillRootRunID fills root_run_id on rows written before the #569
+// migration. It only ever touches rows where root_run_id IS NULL, so on every
+// startup after the first it's a cheap no-op (new rows always insert with
+// root_run_id set by Registry.StartRunWithID).
+//
+// Parentless rows get root_run_id = id directly. Child rows resolve by
+// walking the parent_run_id chain one hop per pass — bounded to
+// maxRootBackfillPasses so a pathological chain can't loop forever — until no
+// more rows can be resolved. Any row still NULL afterwards (its parent chain
+// bottoms out at a missing/deleted row, or the chain is deeper than the pass
+// bound) falls back to root_run_id = id: it renders as its own top-level
+// group rather than joining its ancestor's, which is the safe degradation.
+func backfillRootRunID(ctx context.Context, db *sql.DB) error {
+	if _, err := db.ExecContext(ctx,
+		`UPDATE runs SET root_run_id = id
+		 WHERE root_run_id IS NULL AND (parent_run_id IS NULL OR parent_run_id = '')`,
+	); err != nil {
+		return fmt.Errorf("backfill root rows: %w", err)
+	}
+	const maxRootBackfillPasses = 100
+	for i := 0; i < maxRootBackfillPasses; i++ {
+		res, err := db.ExecContext(ctx,
+			`UPDATE runs SET root_run_id = (
+			     SELECT p.root_run_id FROM runs p WHERE p.id = runs.parent_run_id
+			 )
+			 WHERE root_run_id IS NULL
+			   AND parent_run_id IS NOT NULL AND parent_run_id != ''
+			   AND EXISTS (
+			       SELECT 1 FROM runs p
+			       WHERE p.id = runs.parent_run_id AND p.root_run_id IS NOT NULL
+			   )`,
+		)
+		if err != nil {
+			return fmt.Errorf("backfill child rows (pass %d): %w", i, err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("backfill child rows (pass %d): rows affected: %w", i, err)
+		}
+		if n == 0 {
+			break
+		}
+	}
+	// Stragglers: orphaned parent_run_id (parent row missing/deleted) or a
+	// chain deeper than maxRootBackfillPasses. Self-root them.
+	if _, err := db.ExecContext(ctx, `UPDATE runs SET root_run_id = id WHERE root_run_id IS NULL`); err != nil {
+		return fmt.Errorf("backfill straggler rows: %w", err)
+	}
 	return nil
 }
 

@@ -623,6 +623,72 @@ func TestAPI_QueryRuns_ByParentAndGroup(t *testing.T) {
 	}
 }
 
+// #569: GET /api/runs?root=<id> collapses a run's whole descendant tree
+// (chain / pipeline stages / suspend-resume continuations), and
+// GET /api/runs/{id}/group-logs aggregates every member's log lines.
+func TestAPI_QueryRuns_ByRoot_And_GroupLogs(t *testing.T) {
+	srv, reg := newTestServer(t)
+	ctx := context.Background()
+
+	rootID, err := reg.StartRun(ctx, "task-a", "")
+	if err != nil {
+		t.Fatalf("StartRun root: %v", err)
+	}
+	childID, _ := reg.StartRun(ctx, "child-task", rootID)
+	grandchildID, _ := reg.StartRun(ctx, "grandchild-task", childID)
+	// Unrelated tree — must not appear.
+	_, _ = reg.StartRun(ctx, "other-task", "")
+
+	if err := reg.AppendLog(ctx, rootID, "info", "root said hi"); err != nil {
+		t.Fatalf("AppendLog: %v", err)
+	}
+	if err := reg.AppendLog(ctx, grandchildID, "info", "grandchild said bye"); err != nil {
+		t.Fatalf("AppendLog: %v", err)
+	}
+
+	// ── root filter ───────────────────────────────────────────────────────
+	req := httptest.NewRequest(http.MethodGet, "/api/runs?root="+rootID, nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("root query: status %d body=%s", w.Code, w.Body.String())
+	}
+	var group []map[string]any
+	_ = json.NewDecoder(w.Body).Decode(&group)
+	if len(group) != 3 {
+		t.Fatalf("expected 3 runs in group, got %d (%v)", len(group), group)
+	}
+	got := map[string]bool{}
+	for _, r := range group {
+		got[r["ID"].(string)] = true
+		if r["RootRunID"] != rootID {
+			t.Errorf("member %v RootRunID = %v, want %q", r["ID"], r["RootRunID"], rootID)
+		}
+	}
+	if !got[rootID] || !got[childID] || !got[grandchildID] {
+		t.Errorf("group missing expected members: %v", got)
+	}
+
+	// ── group-logs aggregation, addressed via a non-root member ─────────────
+	req = httptest.NewRequest(http.MethodGet, "/api/runs/"+grandchildID+"/group-logs", nil)
+	w = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("group-logs: status %d body=%s", w.Code, w.Body.String())
+	}
+	var logs []map[string]any
+	_ = json.NewDecoder(w.Body).Decode(&logs)
+	if len(logs) != 2 {
+		t.Fatalf("expected 2 aggregated log lines, got %d (%v)", len(logs), logs)
+	}
+	if logs[0]["message"] != "root said hi" || logs[0]["run_id"] != rootID {
+		t.Errorf("first log entry = %v, want root's line", logs[0])
+	}
+	if logs[1]["message"] != "grandchild said bye" || logs[1]["run_id"] != grandchildID {
+		t.Errorf("second log entry = %v, want grandchild's line", logs[1])
+	}
+}
+
 func TestAPI_GetRun_and_Logs(t *testing.T) {
 	srv, reg := newTestServer(t)
 	registerTask(t, reg, "log-task", `log.info("hello"); return 1`)
