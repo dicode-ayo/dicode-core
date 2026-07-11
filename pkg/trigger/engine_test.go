@@ -435,7 +435,7 @@ func TestEngine_Cron_Register(t *testing.T) {
 	e.engine.Register(spec)
 
 	e.engine.mu.Lock()
-	_, ok := e.engine.cronEntries["cron-task"]
+	_, ok := e.engine.cronArmed["cron-task"]
 	e.engine.mu.Unlock()
 	if !ok {
 		t.Fatal("cron entry not registered")
@@ -444,7 +444,7 @@ func TestEngine_Cron_Register(t *testing.T) {
 	e.engine.Unregister("cron-task")
 
 	e.engine.mu.Lock()
-	_, ok = e.engine.cronEntries["cron-task"]
+	_, ok = e.engine.cronArmed["cron-task"]
 	e.engine.mu.Unlock()
 	if ok {
 		t.Fatal("cron entry should be removed")
@@ -1481,7 +1481,7 @@ func TestEngine_DisabledTask_NoCronScheduled(t *testing.T) {
 	e.engine.Register(spec)
 
 	e.engine.mu.Lock()
-	_, hasCron := e.engine.cronEntries[spec.ID]
+	_, hasCron := e.engine.cronArmed[spec.ID]
 	e.engine.mu.Unlock()
 
 	if hasCron {
