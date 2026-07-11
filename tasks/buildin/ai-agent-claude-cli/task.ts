@@ -120,12 +120,14 @@ export function isChatEnd(message: string): boolean {
     return message.trim() === "";
 }
 
-// chatSchema is the resume form for one chat turn: a single required `message`
-// field. The banner text lives on BOTH the schema and the `message` property —
-// the CLI's interactive resume prompt renders the *property* description above
-// the input (cmd/dicode/main.go promptResumeInput), while the no-field
-// confirmation path renders the schema-level one; setting both keeps the reply
-// visible regardless of which renderer runs.
+// chatSchema is the resume form for one chat turn: a single `message` field,
+// intentionally NOT required so the interactive CLI prompt accepts a blank line
+// — which steps.turn reads as the end-of-chat signal (isChatEnd). The banner
+// text lives on BOTH the schema and the `message` property — the CLI's
+// interactive resume prompt renders the *property* description above the input
+// (cmd/dicode/main.go promptResumeInput), while the no-field confirmation path
+// renders the schema-level one; setting both keeps the reply visible regardless
+// of which renderer runs.
 function chatSchema(description: string): JSONSchema {
     return {
         type: "object",
@@ -134,7 +136,6 @@ function chatSchema(description: string): JSONSchema {
         properties: {
             message: { type: "string", title: "Message", description },
         },
-        required: ["message"],
     };
 }
 

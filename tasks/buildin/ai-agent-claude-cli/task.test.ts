@@ -98,7 +98,9 @@ Deno.test("no prompt on a fresh run opens the chat loop (suspends to turn)", asy
     assertEquals(calls.length, 1);
     assertEquals(calls[0].to, "turn");
     assertEquals(calls[0].state.claudeSessionId, "");
-    assertEquals(calls[0].schema.required, ["message"]);
+    // `message` is intentionally NOT required so a blank line ends the chat.
+    assertEquals(calls[0].schema.required, undefined);
+    assertEquals(typeof calls[0].schema.properties.message, "object");
     // chatId keys the workdir across turns; must be seeded on the first suspend.
     if (typeof calls[0].state.chatId !== "string" || !calls[0].state.chatId) {
         throw new Error(`expected a seeded chatId, got ${calls[0].state.chatId}`);
