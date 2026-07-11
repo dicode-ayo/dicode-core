@@ -131,15 +131,36 @@ func (s *apiKeyStore) revoke(ctx context.Context, id string) error {
 // shape, so the chance of collision is vanishingly small.
 const cliManagedKeyPrefix = "dicode-cli/"
 
-// revokeByName deletes API keys with the given exact name. Restricted
-// to the CLI-managed namespace (`dicode-cli/...`) so a CLI install
-// flow can't accidentally sweep dashboard-created keys that happen to
-// share a friendly name. Returns nil when no rows matched (idempotent).
+// ephemeralKeyPrefix scopes API-key names minted for ephemeral per-run MCP
+// tokens (see mcpTokenMinter) — one key per run, minted at run start and
+// revoked when the run ends. Distinct from cliManagedKeyPrefix so the two
+// tool-managed namespaces, and operator-created (dashboard) keys, never
+// collide.
+const ephemeralKeyPrefix = "ephemeral/run/"
+
+// revokeByName deletes API keys with the given exact name. Restricted to
+// the CLI-managed (`dicode-cli/...`) and ephemeral per-run MCP token
+// (`ephemeral/run/...`) namespaces so a tool-driven revoke can't
+// accidentally sweep dashboard-created keys that happen to share a friendly
+// name. Returns nil when no rows matched (idempotent).
 func (s *apiKeyStore) revokeByName(ctx context.Context, name string) error {
-	if !strings.HasPrefix(name, cliManagedKeyPrefix) {
-		return fmt.Errorf("revokeByName refused: name %q is not in the CLI-managed namespace %q", name, cliManagedKeyPrefix)
+	if !strings.HasPrefix(name, cliManagedKeyPrefix) && !strings.HasPrefix(name, ephemeralKeyPrefix) {
+		return fmt.Errorf("revokeByName refused: name %q is not in a tool-managed namespace (%q, %q)", name, cliManagedKeyPrefix, ephemeralKeyPrefix)
 	}
 	return s.db.Exec(ctx, `DELETE FROM api_keys WHERE name = ?`, name)
+}
+
+// revokeByNamePrefix deletes every API key whose name begins with prefix.
+// Restricted to the ephemeral per-run MCP token namespace so it can't be
+// repurposed to bulk-delete CLI-managed or operator (dashboard) keys. Used
+// at daemon startup to sweep tokens orphaned by a run that was in flight
+// when the daemon last stopped — nothing will ever call Revoke for it.
+// Returns nil when no rows matched (idempotent).
+func (s *apiKeyStore) revokeByNamePrefix(ctx context.Context, prefix string) error {
+	if prefix != ephemeralKeyPrefix {
+		return fmt.Errorf("revokeByNamePrefix refused: prefix %q is not the ephemeral MCP token namespace %q", prefix, ephemeralKeyPrefix)
+	}
+	return s.db.Exec(ctx, `DELETE FROM api_keys WHERE name LIKE ?`, prefix+"%")
 }
 
 // APIKeyInfo is the public representation of an API key.

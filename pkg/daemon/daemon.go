@@ -221,6 +221,14 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 		return err
 	}
 
+	// 8.6. Ephemeral per-run MCP token minter: sweep tokens orphaned by a
+	// previous daemon session, then wire the minter into both runtimes so
+	// `permissions.env: [DICODE_MCP_API_KEY]` tasks get one auto-revoked
+	// per-run key instead of `dicode mcp install`'s operator-managed key.
+	if err := wireMCPTokenMinter(ctx, srv, denoRT, pythonRT, log); err != nil {
+		return err
+	}
+
 	// 9. Control socket for CLI clients.
 	ctrlSrv, err := buildControlServer(cfg, dataDir, version, database, reg, rec, eng, localSecrets, srv, sourceMgr, approvalGate, log)
 	if err != nil {
@@ -830,6 +838,27 @@ func wireCryptoIPC(secretsChain secrets.Chain, denoRT *denoruntime.Runtime, log 
 	} else {
 		denoRT.SetCryptoHandler(cryptoDeriver)
 	}
+}
+
+// wireMCPTokenMinter sweeps ephemeral per-run MCP API keys orphaned by a
+// previous daemon session (a run in flight when the daemon last stopped
+// leaves its token behind — nothing will ever call Revoke for it) and then
+// wires the minter into both runtimes so a run whose spec declares
+// permissions.env DICODE_MCP_API_KEY gets a fresh key at start and has it
+// revoked at end, instead of relying on a static `dicode mcp install` key.
+// srv.MCPTokenMinter() is nil when no database is configured (tests); the
+// static-secret path then still works unchanged.
+func wireMCPTokenMinter(ctx context.Context, srv *webui.Server, denoRT *denoruntime.Runtime, pythonRT *pythonruntime.Runtime, log *zap.Logger) error {
+	if err := srv.SweepEphemeralMCPTokens(ctx); err != nil {
+		return fmt.Errorf("sweep orphaned ephemeral MCP tokens: %w", err)
+	}
+	if minter := srv.MCPTokenMinter(); minter != nil {
+		denoRT.SetMCPTokenMinter(minter)
+		pythonRT.SetMCPTokenMinter(minter)
+	} else {
+		log.Debug("ephemeral MCP token minter not wired (no database) — DICODE_MCP_API_KEY falls back to the secrets chain")
+	}
+	return nil
 }
 
 // initAuditPruning builds the audit store and runs the startup prune pass
