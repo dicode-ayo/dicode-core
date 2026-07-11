@@ -89,6 +89,10 @@ permissions:
     # who stored the token via `dicode secrets set` or the WebUI.
     - name: CLAUDE_CODE_OAUTH_TOKEN
       secret: CLAUDE_CODE_OAUTH_TOKEN
+      # Dual-mode auth: when the secret is unset the task falls back to the
+      # logged-in $HOME/.claude credentials, so a missing secret must resolve to
+      # empty rather than failing the run before task.ts can fall back.
+      optional: true
     # HOME is required so the CLI can read/write its credential cache
     # at $HOME/.claude/.credentials.json. Without HOME set, it falls
     # back to '/' and refuses to persist state.
@@ -106,6 +110,10 @@ permissions:
     # dicode-task tool access).
     - name: DICODE_MCP_API_KEY
       secret: DICODE_MCP_API_KEY
+      # The daemon mints an ephemeral per-run MCP token and injects it over this
+      # entry (#564), so `dicode mcp install` isn't required; a missing secret
+      # must resolve to empty rather than failing the run before that injection.
+      optional: true
 
   fs:
     # Credential + session state cache. The CLI re-reads the OAuth token
