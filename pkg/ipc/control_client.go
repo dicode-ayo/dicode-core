@@ -13,6 +13,11 @@ import (
 type ControlClient struct {
 	conn net.Conn
 	caps []string
+
+	// socketPath/tokenPath let SendFresh open an independent connection for a
+	// request that must not wait behind one already in flight on conn.
+	socketPath string
+	tokenPath  string
 }
 
 // Dial connects to the daemon control socket at socketPath and authenticates.
@@ -30,7 +35,7 @@ func Dial(socketPath, tokenPath string) (*ControlClient, error) {
 		return nil, fmt.Errorf("connect to daemon at %s: %w", socketPath, err)
 	}
 
-	c := &ControlClient{conn: conn}
+	c := &ControlClient{conn: conn, socketPath: socketPath, tokenPath: tokenPath}
 	if err := c.handshake(tok); err != nil {
 		conn.Close()
 		return nil, err
@@ -78,6 +83,20 @@ func (c *ControlClient) Send(req Request) (Response, error) {
 		return Response{}, fmt.Errorf("recv: %w", err)
 	}
 	return resp, nil
+}
+
+// SendFresh performs req on a brand-new connection, independent of any
+// request in flight on c's own connection. Send is half-duplex on a single
+// synchronous connection (one fixed request ID, one reader), so a caller that
+// needs to issue a request while c is blocked in Send elsewhere (e.g.
+// cancelling a run mid-cli.run.wait) must use SendFresh rather than Send.
+func (c *ControlClient) SendFresh(req Request) (Response, error) {
+	fresh, err := Dial(c.socketPath, c.tokenPath)
+	if err != nil {
+		return Response{}, err
+	}
+	defer fresh.Close()
+	return fresh.Send(req)
 }
 
 // Close closes the underlying connection.

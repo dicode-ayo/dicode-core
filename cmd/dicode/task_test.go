@@ -101,6 +101,7 @@ func (noopEngine) WaitRun(context.Context, string) (ipc.RunResult, error) {
 func (noopEngine) WaitRunSettled(context.Context, string) (ipc.RunResult, error) {
 	return ipc.RunResult{}, nil
 }
+func (noopEngine) KillRun(string) bool     { return false }
 func (noopEngine) ActiveRunCount() int     { return 0 }
 func (noopEngine) ActiveTaskSlots() int    { return 0 }
 func (noopEngine) MaxConcurrentTasks() int { return 0 }

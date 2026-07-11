@@ -205,6 +205,10 @@ type EngineRunner interface {
 	// chain. The CLI needs this to render the resume form; dicode.run_task wants
 	// WaitRun's "block until genuinely terminal" contract.
 	WaitRunSettled(ctx context.Context, runID string) (RunResult, error)
+	// KillRun cancels an in-flight run by id, e.g. the CLI's Ctrl+C-during-a-turn
+	// cancellation (cli.run.cancel). Returns false when the run is not currently
+	// cancellable (already terminal, or the id is unknown).
+	KillRun(runID string) bool
 	ActiveRunCount() int
 	ActiveTaskSlots() int
 	MaxConcurrentTasks() int

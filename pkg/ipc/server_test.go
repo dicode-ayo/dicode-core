@@ -44,6 +44,7 @@ func (m *mockEngine) WaitRun(_ context.Context, _ string) (RunResult, error) {
 func (m *mockEngine) WaitRunSettled(_ context.Context, _ string) (RunResult, error) {
 	return m.result, m.err
 }
+func (m *mockEngine) KillRun(_ string) bool   { return false }
 func (m *mockEngine) ActiveRunCount() int     { return 0 }
 func (m *mockEngine) ActiveTaskSlots() int    { return 0 }
 func (m *mockEngine) MaxConcurrentTasks() int { return 0 }

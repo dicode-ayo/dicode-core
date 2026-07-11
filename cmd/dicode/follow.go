@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,8 @@ import (
 	"os/signal"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/registry"
@@ -23,6 +26,69 @@ import (
 // scriptable one-shot behavior.
 func stdinIsInteractive() bool {
 	return term.IsTerminal(int(os.Stdin.Fd()))
+}
+
+// stderrIsInteractive reports whether stderr is a terminal. Gates the
+// progress spinner: piped/redirected stderr (and the unit tests, which write
+// to a bytes.Buffer) get no spinner bytes.
+func stderrIsInteractive() bool {
+	return term.IsTerminal(int(os.Stderr.Fd()))
+}
+
+// flushStdin discards any input the OS has buffered for stdin, so keystrokes
+// typed while a blocking daemon call (WaitRun) was in flight are not fed to
+// the next prompt. No-op when stdin isn't a TTY — a piped/redirected input
+// stream has no line-discipline buffer to flush, and its bytes are the
+// caller's scripted answers, not stray keystrokes.
+func flushStdin() {
+	if !stdinIsInteractive() {
+		return
+	}
+	flushStdinFD(int(os.Stdin.Fd()))
+}
+
+// spinnerFrames cycle to animate the "working…" indicator shown on s.prompt
+// while a blocking daemon call is in flight.
+var spinnerFrames = [...]rune{'⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'}
+
+const (
+	spinnerInterval   = 90 * time.Millisecond
+	spinnerClearWidth = 20 // wide enough to blank "⠋ working… " plus slack
+)
+
+// startSpinner starts an animated "working…" line on w, redrawn in place
+// with \r every spinnerInterval. active gates it: when false (stderr is not a
+// TTY) it is a no-op and the returned stop func writes nothing, so no
+// spinner bytes ever reach a non-interactive w (piped output, or a test's
+// bytes.Buffer). The stop func halts the goroutine and clears the line so
+// whatever prints next starts clean; it is safe to call more than once.
+func startSpinner(w io.Writer, active bool) func() {
+	if !active {
+		return func() {}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		ticker := time.NewTicker(spinnerInterval)
+		defer ticker.Stop()
+		for i := 0; ; i++ {
+			fmt.Fprintf(w, "\r%c working… ", spinnerFrames[i%len(spinnerFrames)])
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			cancel()
+			<-stopped
+			fmt.Fprint(w, "\r"+strings.Repeat(" ", spinnerClearWidth)+"\r")
+		})
+	}
 }
 
 // parseWizardFlags pulls the wizard control flags out of a run/resume argument
@@ -160,6 +226,9 @@ type followClient interface {
 	Resume(runID string, input []byte) (ipc.ResumeResult, error)
 	// WaitRun blocks until runID reaches a terminal or suspended state.
 	WaitRun(runID string) (ipc.RunResult, error)
+	// Cancel asks the daemon to kill an in-flight run — used when the operator
+	// interrupts a blocking WaitRun (Ctrl+C).
+	Cancel(runID string) error
 	// Logs returns the accumulated log lines of a run.
 	Logs(runID string) ([]ipc.LogEntry, error)
 }
@@ -211,6 +280,21 @@ func (f controlFollowClient) WaitRun(runID string) (ipc.RunResult, error) {
 		return ipc.RunResult{}, err
 	}
 	return res, nil
+}
+
+// Cancel sends cli.run.cancel on a fresh connection (SendFresh), not f.c's own
+// connection — that one is typically parked inside a concurrent WaitRun's
+// blocking Send, and ControlClient.Send is not safe for concurrent use on a
+// single connection.
+func (f controlFollowClient) Cancel(runID string) error {
+	resp, err := f.c.SendFresh(ipc.Request{Method: "cli.run.cancel", RunID: runID})
+	if err != nil {
+		return err
+	}
+	if resp.Error != "" {
+		return fmt.Errorf("%s", resp.Error)
+	}
+	return nil
 }
 
 func (f controlFollowClient) Logs(runID string) ([]ipc.LogEntry, error) {
@@ -468,10 +552,13 @@ func (s *followSession) follow(suspendedRunID string) error {
 			return nil
 		}
 
-		result, err := s.client.WaitRun(contID)
+		result, err := s.waitRunInterruptible(contID)
 		if err != nil {
 			return err
 		}
+		// Discard input typed while the turn was in flight before the next
+		// step (or the terminal banner below) reads from s.in.
+		flushStdin()
 
 		if result.Status == registry.StatusSuspended {
 			// Quiet between turns: the next step's banner (the schema
@@ -499,6 +586,54 @@ func (s *followSession) follow(suspendedRunID string) error {
 	}
 }
 
+// errRunCancelled is returned by follow when the operator interrupts a
+// blocking WaitRun (Ctrl+C) and the in-flight run was cancelled on the daemon
+// in response. followSuspended treats it as a clean exit (130), not a crash.
+var errRunCancelled = errors.New("run cancelled by interrupt")
+
+// waitRunInterruptible wraps s.client.WaitRun(runID) with the two niceties an
+// interactive terminal gets around a blocking daemon call: an animated
+// spinner on s.prompt (stderr-TTY gated) for the duration, and — TTY stdin
+// only — a SIGINT handler that cancels the run on the daemon rather than
+// merely exiting the CLI. The signal handler is installed only for this call
+// and removed before it returns, so nothing is left listening between turns.
+func (s *followSession) waitRunInterruptible(runID string) (ipc.RunResult, error) {
+	stopSpinner := startSpinner(s.prompt, stderrIsInteractive())
+	defer stopSpinner()
+
+	type outcome struct {
+		res ipc.RunResult
+		err error
+	}
+	doneCh := make(chan outcome, 1)
+	go func() {
+		res, err := s.client.WaitRun(runID)
+		doneCh <- outcome{res, err}
+	}()
+
+	// A nil sigCh is never ready in the select below, so a non-interactive
+	// stdin (piped input, or the follow tests' fakes) leaves Ctrl+C handling
+	// off entirely and this degenerates to a plain wait on doneCh.
+	var sigCh chan os.Signal
+	if stdinIsInteractive() {
+		sigCh = make(chan os.Signal, 1)
+		signal.Notify(sigCh, os.Interrupt)
+		defer signal.Stop(sigCh)
+	}
+
+	select {
+	case out := <-doneCh:
+		return out.res, out.err
+	case <-sigCh:
+		stopSpinner()
+		fmt.Fprint(s.prompt, "\n^C — cancelling…\n")
+		if cerr := s.client.Cancel(runID); cerr != nil {
+			fmt.Fprintf(s.prompt, "dicode: cancel run: %v\n", cerr)
+		}
+		return ipc.RunResult{}, errRunCancelled
+	}
+}
+
 // printLogs fetches and prints a run's log lines, matching cmdLogs's format. A
 // fetch error is noted on the prompt stream but does not abort the follow.
 func (s *followSession) printLogs(runID string) {
@@ -512,13 +647,11 @@ func (s *followSession) printLogs(runID string) {
 	}
 }
 
-// followSuspended drives the interactive wizard against a live daemon. Logs of
-// steps that have already settled are on stdout; a step still in flight when
-// SIGINT arrives has not printed its logs, and the handler deliberately issues
-// no control request to fetch them — the main goroutine is usually parked in
-// WaitRun on the same connection, and ControlClient.Send is not safe for
-// concurrent use. The handler notes the interrupt and exits 130 (the shell
-// convention); the daemon cancels the in-flight run when the connection drops.
+// followSuspended drives the interactive wizard against a live daemon.
+// SIGINT during a blocking turn cancels the run and unwinds via
+// errRunCancelled (see waitRunInterruptible); outside a turn (e.g. at a
+// prompt) SIGINT has no handler installed and falls back to the OS default,
+// terminating the process the same way it always has.
 func followSuspended(c *ipc.ControlClient, runID string, prefill *prefillPool, nonInteractive bool) error {
 	s := &followSession{
 		client:         controlFollowClient{c: c},
@@ -528,15 +661,9 @@ func followSuspended(c *ipc.ControlClient, runID string, prefill *prefillPool, n
 		prefill:        prefill,
 		nonInteractive: nonInteractive,
 	}
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt)
-	defer signal.Stop(sigCh)
-	go func() {
-		if _, ok := <-sigCh; !ok {
-			return
-		}
-		fmt.Fprintln(s.prompt, "\ninterrupted")
+	err := s.follow(runID)
+	if errors.Is(err, errRunCancelled) {
 		os.Exit(130)
-	}()
-	return s.follow(runID)
+	}
+	return err
 }
