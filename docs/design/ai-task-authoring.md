@@ -123,6 +123,49 @@ dev-mode clone?* — was checked against the code (2026-07-10):
 runs (`running` **or** `suspended`), matching the registry's already-correct behavior.
 Without it, a user who pauses to answer the agent's clarifying form loses the sandbox.
 
+## AI interactions as suspend/resume conversations
+
+Every AI interaction — chat *and* authoring — becomes **one conversation = one suspend/resume
+loop**. The agent produces a turn, `suspend`s with a JSON-Schema form for the next message, and
+`resume` feeds the reply back in. This unifies chat and authoring onto a single model and gives
+combined logs, one UI surface, and run-carried state instead of KV `session_id` threading.
+
+**Verified readiness (2026-07-11):**
+- **Unbounded loop ✅** — resume *preserves* chain depth (`resume.go:20`), so a chat never hits
+  the `maxSuccessChainDepth`/`MaxDepth` ceilings. No turn cap.
+- **"One run" ❌ not native** — resume does not re-invoke the same run; it **spawns a new
+  continuation run** (`ParentRunID` = the suspended run, `resume.go:150`). So a conversation is a
+  *chain of runs* linked by `parent_run_id`, and logs key by `run_id` — scattered, not combined.
+  This is the foundational prerequisite (#569): collapse a run's descendant tree under its root
+  (extends the existing `run_group`, #114/#116) so the conversation reads as one grouped unit in
+  UI and CI. General infra — also helps pipelines/subtasks/auto-fix.
+
+**Two states, decoupled — this is the key design call:**
+
+| Concern | Store | Model | Consumer |
+|---|---|---|---|
+| Agent's LLM context (full-fidelity messages, intra-turn tool calls) | `resume_state`, offloaded when big | **cumulative** (self-contained per turn) | the model, on resume |
+| Conversation record (per-turn input/output, timeline) | the **run tree** (#569) | linked (`parent_run_id` chain) | humans — UI, CI, audit |
+
+Cumulative state is simplest (read one self-contained blob on resume, no reconstruction), and
+because the run tree independently holds the per-turn record, the cumulative state stays *purely*
+the model's view — it never doubles as the audit log. The trade-off: cumulative grows every turn
+and is re-persisted per suspend, so **big-state offload is a required companion, not optional** —
+store a structured `{store, key}` reference in `resume_state`, offload the blob to
+`buildin/blob-storage` / `buildin/local-storage`, rehydrate on resume via the storage task's `get`
+(never a raw fetchable URL — SSRF/coupling), GC keyed to the root run on conversation end.
+
+**Ending a conversation:** the run ends when the handler **returns instead of suspending**,
+triggered by (a) an explicit end-marker in the resume input → `success` (primary), (b) idle TTL —
+the authoring purge loop already does this — or (c) agent goal-completion. Plus a cumulative
+turn/token backstop against runaway chats. No new terminal status needed; map a clean close to
+`success`, reserve `cancelled` for a genuine abort.
+
+**Migration scope:** migrating `ai-agent` migrates the fleet (`dicodai`/`auto-fix`/`task-create`
+are overrides of it). The **drivers** — `/api/ai/chat`, the WebUI chat panel, `dicode ai` — switch
+from fire-a-run-per-turn to drive suspend→resume. Phase order: **#569 run-tree** →
+**state offload** → **migrate `ai-agent` + drivers**.
+
 ## Open questions
 
 - **Single-session-per-source (#283)** becomes "one active suspended authoring run per
