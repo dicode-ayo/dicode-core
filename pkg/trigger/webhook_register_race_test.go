@@ -53,7 +53,7 @@ func TestUnregisterTriggersKeeping_RetainsReclaimedPath(t *testing.T) {
 		t.Fatalf("Register: %v", err)
 	}
 
-	eng.unregisterTriggersKeeping(spec.ID, spec.Trigger.Webhook)
+	eng.unregisterTriggersKeeping(spec.ID, spec.Trigger.Webhook, "")
 
 	eng.mu.Lock()
 	got, ok := eng.webhooks["/hooks/keep"]
@@ -72,7 +72,7 @@ func TestUnregisterTriggersKeeping_DropsUnclaimedPath(t *testing.T) {
 		t.Fatalf("Register: %v", err)
 	}
 
-	eng.unregisterTriggersKeeping(spec.ID, "/hooks/new")
+	eng.unregisterTriggersKeeping(spec.ID, "/hooks/new", "")
 
 	eng.mu.Lock()
 	_, stillThere := eng.webhooks["/hooks/old"]

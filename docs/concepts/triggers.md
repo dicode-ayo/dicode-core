@@ -38,7 +38,7 @@ Uses standard 5-field cron syntax:
 
 Schedule is evaluated in the dicode process's local timezone. Set the `TZ` environment variable to control the timezone on headless/Docker deployments.
 
-**Implementation:** `robfig/cron` v3. The cron scheduler is managed by the trigger engine — when a task is added or updated, the engine cancels any existing cron registration and creates a new one. When a task is removed, the registration is cancelled.
+**Implementation:** `robfig/cron` v3. The cron scheduler is managed by the trigger engine. A task is re-registered on every reconciler reload (e.g. an unrelated file change elsewhere in the same source, or any edit to the task itself) and at daemon startup — this can happen far more often than the schedule actually changes. When the incoming cron expression is byte-identical to what's already armed, the engine leaves the existing registration alone rather than tearing it down and re-adding it; only a genuine schedule change (or the task being removed/disabled) cancels the old registration and arms a new one. This avoids a tick landing in the gap between cancel and re-add and being silently dropped, and it means a no-op reload never resets the task's persisted `next_run_at` (see Missed-run catchup below).
 
 **Missed-run catchup:** dicode persists each cron task's next scheduled time in the database (`cron_jobs` table). On startup, any task whose recorded `next_run_at` is in the past (but within the last 24 hours) is fired immediately with `trigger_source = "cron-catchup"`. This prevents silent skips when dicode restarts mid-schedule (e.g. after an OS reboot or deploy).
 

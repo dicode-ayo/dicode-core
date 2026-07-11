@@ -31,9 +31,21 @@ type Engine struct {
 	log       *zap.Logger
 	audit     *audit.Store // best-effort audit emission; nil-safe, wired by SetDB
 
-	mu                 sync.Mutex
-	cronEntries        map[string]cron.EntryID // taskID → cron entry
-	webhooks           map[string]string       // webhook path → taskID
+	mu          sync.Mutex
+	cronEntries map[string]cron.EntryID // taskID → cron entry
+
+	// cronSchedules tracks the cron expression string currently armed for each
+	// task ID, alongside cronEntries' opaque cron.EntryID. A re-registration
+	// (Engine.Start at boot, or the reconciler on every content-hash change —
+	// see the package doc's "no restart needed after git push") compares the
+	// incoming schedule against this map before tearing anything down: an
+	// unchanged schedule is left alone by unregisterTriggersKeeping and
+	// scheduleCron short-circuits the re-add, so a tick can never land in the
+	// remove/re-add gap and be silently dropped (#550). Always kept in sync
+	// with cronEntries under mu — an entry exists in one iff it exists in the
+	// other.
+	cronSchedules      map[string]string // taskID → armed cron expr
+	webhooks           map[string]string // webhook path → taskID
 	webhookReplayCache *replayCache
 
 	// fireGuard, when set, can veto any run before it starts (approval gate,
@@ -209,6 +221,7 @@ func New(r *registry.Registry, defaultExec pkgruntime.Executor, log *zap.Logger)
 		cron:               cron.New(),
 		log:                log,
 		cronEntries:        make(map[string]cron.EntryID),
+		cronSchedules:      make(map[string]string),
 		webhooks:           make(map[string]string),
 		webhookReplayCache: newReplayCache(1 * time.Hour),
 		daemonRuns:         make(map[string]string),
@@ -474,7 +487,18 @@ func (e *Engine) Register(k task.Kinded) error {
 			!(s.Trigger.Webhook == reservedOAuthCompletePath && s.ID != oauthRelayBuiltinID) {
 			keep = s.Trigger.Webhook
 		}
-		e.unregisterTriggersKeeping(s.ID, keep)
+		// Same idea for cron (#550): only offer the new schedule as "keepable"
+		// when this registration will actually re-arm cron below (enabled +
+		// has a cron trigger). unregisterTriggersKeeping compares this against
+		// the currently-armed schedule and leaves the existing cron.Cron entry
+		// + cron_jobs row untouched when they match, instead of unconditionally
+		// removing and re-adding — which would otherwise open a gap where a
+		// tick lands on no entry and is silently lost.
+		keepCron := ""
+		if s.Enabled && s.Trigger.Cron != "" {
+			keepCron = s.Trigger.Cron
+		}
+		e.unregisterTriggersKeeping(s.ID, keep, keepCron)
 
 		// Disabled tasks are kept in the registry for API visibility but must not
 		// be scheduled, spawned as daemons, or registered as webhook endpoints.
@@ -552,18 +576,30 @@ func (e *Engine) Unregister(id string) {
 // while already holding registerMu without deadlocking on a re-entrant lock.
 // Does NOT touch deferredPipelines (the caller handles that under registerMu).
 func (e *Engine) unregisterTriggers(id string) {
-	e.unregisterTriggersKeeping(id, "")
+	e.unregisterTriggersKeeping(id, "", "")
 }
 
 // unregisterTriggersKeeping is unregisterTriggers, except that a webhook path
-// the caller is about to re-claim for the same task is left in place.
+// and/or a cron schedule the caller is about to re-claim for the same task are
+// left in place.
 //
 // registerMu serialises registrations but webhook lookups only take e.mu, so a
 // request racing a re-registration would otherwise find the path gone between
 // the delete here and the re-add in registerWebhookPath, and 404. Every
 // Register re-registers (Engine.Start at boot, the reconciler on every content
 // change), so a live webhook could 404 for no reason the caller could see.
-func (e *Engine) unregisterTriggersKeeping(id, keepWebhookPath string) {
+//
+// The cron case (#550) is the same shape but the fix differs: a cron.EntryID
+// is opaque, so re-registration may legitimately need a NEW entry if the
+// schedule string changed. When keepCronExpr matches the schedule currently
+// armed for id, the existing cron.Cron entry and cron_jobs row are left
+// completely untouched here — scheduleCron then no-ops the re-add too (see
+// its keepCronExpr check), so a no-op re-registration neither drops a tick
+// (no remove/re-add gap) nor resets next_run_at (which catchupMissedCronRuns
+// relies on across restarts). When the schedule differs, or keepCronExpr=""
+// (task removed/disabled/no longer has a cron trigger), the entry is removed
+// and the cron_jobs row deleted exactly as before.
+func (e *Engine) unregisterTriggersKeeping(id, keepWebhookPath, keepCronExpr string) {
 	// Match the trailing-slash normalisation registerWebhookPath applies to map
 	// keys, so the keep comparison below doesn't delete (then transiently drop)
 	// a path the caller is about to re-claim.
@@ -571,9 +607,17 @@ func (e *Engine) unregisterTriggersKeeping(id, keepWebhookPath string) {
 	e.mu.Lock()
 	hadCron := false
 	if entryID, ok := e.cronEntries[id]; ok {
-		e.cron.Remove(entryID)
-		delete(e.cronEntries, id)
-		hadCron = true
+		if keepCronExpr != "" && e.cronSchedules[id] == keepCronExpr {
+			// No-op re-registration: same schedule as before. Leave the armed
+			// cron.Cron entry alone — removing it here would open a window
+			// with no entry for this task, in which an in-flight tick would
+			// be silently lost.
+		} else {
+			e.cron.Remove(entryID)
+			delete(e.cronEntries, id)
+			delete(e.cronSchedules, id)
+			hadCron = true
+		}
 	}
 	for path, tid := range e.webhooks {
 		if tid == id && path != keepWebhookPath {
@@ -646,7 +690,21 @@ func (e *Engine) registerPipelineCron(p *task.PipelineTask) {
 // row. next_run_at is advanced only when fire() succeeds, so a failed dispatch
 // doesn't silently skip the missed run on the next restart. Shared by kind: Task
 // (registerCron) and kind: PipelineTask (registerPipelineCron).
+//
+// No-op short-circuit (#550): when id already has a cron entry armed with this
+// exact cronExpr — which is only possible because unregisterTriggersKeeping
+// left it alone for a matching keepCronExpr — there is nothing to do. Adding a
+// second entry would duplicate fires; removing and re-adding would reopen the
+// tick-loss gap this function exists to avoid and would reset next_run_at,
+// which catchupMissedCronRuns relies on surviving a no-op reload.
 func (e *Engine) scheduleCron(id, cronExpr string, fire func() error) {
+	e.mu.Lock()
+	if existing, ok := e.cronSchedules[id]; ok && existing == cronExpr {
+		e.mu.Unlock()
+		return
+	}
+	e.mu.Unlock()
+
 	entryID, err := e.cron.AddFunc(cronExpr, func() {
 		if ferr := fire(); ferr == nil && e.db != nil {
 			if next, nerr := cronNextRun(cronExpr); nerr == nil {
@@ -670,6 +728,7 @@ func (e *Engine) scheduleCron(id, cronExpr string, fire func() error) {
 	}
 	e.mu.Lock()
 	e.cronEntries[id] = entryID
+	e.cronSchedules[id] = cronExpr
 	e.mu.Unlock()
 
 	if e.db != nil {
