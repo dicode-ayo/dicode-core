@@ -23,8 +23,13 @@ trigger:
 params:
   prompt:
     type: string
-    required: true
-    description: "User message to send to Claude."
+    required: false
+    default: ""
+    description: |
+      User message to send to Claude. Non-empty runs one turn and returns
+      { ok, reply, session_id, ... }. Empty on a fresh run opens an
+      interactive chat loop (suspend/resume): each turn collects a message
+      and replies; a blank message ends the chat.
   session_id:
     type: string
     default: ""

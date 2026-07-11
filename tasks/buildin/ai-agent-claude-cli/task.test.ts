@@ -4,9 +4,23 @@
 // manipulation; tests don't need a real binary.
 
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import main, { buildClaudeArgs } from "./task.ts";
+import main, { buildClaudeArgs, decideEntryMode, isChatEnd, steps } from "./task.ts";
 
 const fakeDicode = {} as any;
+
+// A dicode stub whose suspend() records the request and throws a sentinel —
+// dicode.suspend never returns in production (the process exits), so tests must
+// stop execution the same way and inspect the recorded suspend calls.
+class SuspendSignal extends Error {}
+function makeSuspendDicode() {
+    const calls: any[] = [];
+    return {
+        calls,
+        dicode: {
+            suspend: (req: any) => { calls.push(req); throw new SuspendSignal(); },
+        } as any,
+    };
+}
 
 // makeParams returns an SDK-shaped Params object whose .get() is async,
 // matching pkg/runtime/deno/sdk/shim.ts. The task code awaits these calls;
@@ -70,10 +84,25 @@ ${stubBody}
     }
 }
 
-Deno.test("rejects empty prompt", async () => {
+Deno.test("no prompt on a fresh run opens the chat loop (suspends to turn)", async () => {
     Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "stub");
-    const r: any = await main({ params: makeParams([]), kv: makeKv(), dicode: fakeDicode });
-    assertEquals(r.ok, false);
+    const { calls, dicode } = makeSuspendDicode();
+    let signalled = false;
+    try {
+        await main({ params: makeParams([]), kv: makeKv(), dicode });
+    } catch (e) {
+        if (e instanceof SuspendSignal) signalled = true;
+        else throw e;
+    }
+    assertEquals(signalled, true);
+    assertEquals(calls.length, 1);
+    assertEquals(calls[0].to, "turn");
+    assertEquals(calls[0].state.claudeSessionId, "");
+    assertEquals(calls[0].schema.required, ["message"]);
+    // chatId keys the workdir across turns; must be seeded on the first suspend.
+    if (typeof calls[0].state.chatId !== "string" || !calls[0].state.chatId) {
+        throw new Error(`expected a seeded chatId, got ${calls[0].state.chatId}`);
+    }
 });
 
 Deno.test("no token: falls back to logged-in credentials (does not hard-fail)", async () => {
@@ -424,4 +453,105 @@ JSON`,
         throw new Error(`expected --mcp-config <…/.claude/mcp.json>, got:\n${recorded}`);
     }
     Deno.env.delete("DICODE_MCP_API_KEY");
+});
+
+// --- chat loop -----------------------------------------------------------
+
+Deno.test("decideEntryMode: non-empty prompt → one-shot, empty → chat-start", () => {
+    assertEquals(decideEntryMode("hi"), "one-shot");
+    assertEquals(decideEntryMode(""), "chat-start");
+    assertEquals(decideEntryMode("   "), "chat-start");
+});
+
+Deno.test("isChatEnd: blank/whitespace ends, content continues", () => {
+    assertEquals(isChatEnd(""), true);
+    assertEquals(isChatEnd("   "), true);
+    assertEquals(isChatEnd("\n\t"), true);
+    assertEquals(isChatEnd("hello"), false);
+});
+
+Deno.test("steps.turn: a blank message ends the chat (returns, no Claude call)", async () => {
+    const { calls, dicode } = makeSuspendDicode();
+    const result: any = await steps.turn({
+        params: makeParams([]),
+        kv: makeKv(),
+        input: { message: "   " },
+        state: { claudeSessionId: "sess-prior", chatId: "c1" },
+        dicode,
+        output: {} as any,
+        mcp: {} as any,
+    } as any);
+    assertEquals(result.ok, true);
+    assertEquals(result.reply, "(chat ended)");
+    assertEquals(result.session_id, "sess-prior");
+    assertEquals(calls.length, 0); // never suspended onward
+});
+
+Deno.test("steps.turn: a message runs one turn and suspends back with the reply", async () => {
+    Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "stub");
+    const { calls, dicode } = makeSuspendDicode();
+    let signalled = false;
+    await withStubClaude(
+        `cat <<'JSON'
+{"type":"result","is_error":false,"result":"pong","session_id":"sess-new","model":"claude-sonnet-4"}
+JSON`,
+        async () => {
+            try {
+                await steps.turn({
+                    params: makeParams([]),
+                    kv: makeKv(),
+                    input: { message: "ping" },
+                    state: { claudeSessionId: "", chatId: "chat-abc" },
+                    dicode,
+                    output: {} as any,
+                    mcp: {} as any,
+                } as any);
+            } catch (e) {
+                if (e instanceof SuspendSignal) signalled = true;
+                else throw e;
+            }
+        },
+    );
+    assertEquals(signalled, true);
+    assertEquals(calls.length, 1);
+    assertEquals(calls[0].to, "turn");
+    // Claude's new session id is carried forward; chatId (the workdir key) is stable.
+    assertEquals(calls[0].state.claudeSessionId, "sess-new");
+    assertEquals(calls[0].state.chatId, "chat-abc");
+    // The reply becomes the next prompt's banner — on the schema and the field.
+    assertEquals(calls[0].schema.description, "pong");
+    assertEquals(calls[0].schema.properties.message.description, "pong");
+});
+
+Deno.test("steps.turn: resumes Claude's prior session via --resume", async () => {
+    Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "stub");
+    const { dicode } = makeSuspendDicode();
+    const sentinelDir = await Deno.makeTempDir();
+    const sentinel = `${sentinelDir}/args-recorded`;
+    await withStubClaude(
+        `printf '%s\\n' "$@" > ${sentinel}
+cat <<'JSON'
+{"type":"result","is_error":false,"result":"ok","session_id":"sess-2"}
+JSON`,
+        async () => {
+            try {
+                await steps.turn({
+                    params: makeParams([]),
+                    kv: makeKv(),
+                    input: { message: "again" },
+                    state: { claudeSessionId: "sess-1", chatId: "chat-xyz" },
+                    dicode,
+                    output: {} as any,
+                    mcp: {} as any,
+                } as any);
+            } catch (e) {
+                if (!(e instanceof SuspendSignal)) throw e;
+            }
+        },
+    );
+    const lines = (await Deno.readTextFile(sentinel)).split("\n");
+    const i = lines.indexOf("--resume");
+    if (i < 0 || lines[i + 1] !== "sess-1") {
+        throw new Error(`expected --resume sess-1, got:\n${lines.join(" ")}`);
+    }
 });
