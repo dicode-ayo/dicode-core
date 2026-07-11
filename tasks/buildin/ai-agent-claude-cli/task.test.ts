@@ -386,6 +386,18 @@ Deno.test("buildClaudeArgs: mounts MCP strictly + explicitly with a config path"
     assertEquals(a[i + 1], "/w/.claude/mcp.json");
 });
 
+Deno.test("buildClaudeArgs: allowlists the dicode MCP tools when MCP is wired", () => {
+    // Without this, `claude -p` refuses un-allowlisted tools (can't prompt),
+    // so it sees the dicode tools but never calls them. Scoped to `mcp__dicode`
+    // so the agent gets dicode's surface, not raw Bash/Write host access.
+    const a = buildClaudeArgs({ prompt: "hi", mcpConfigPath: "/w/.claude/mcp.json" });
+    const i = a.indexOf("--allowedTools");
+    assertEquals(i >= 0, true);
+    assertEquals(a[i + 1], "mcp__dicode");
+    // No allowlist flag when MCP isn't mounted.
+    assertEquals(buildClaudeArgs({ prompt: "hi" }).includes("--allowedTools"), false);
+});
+
 Deno.test("passes --strict-mcp-config --mcp-config to claude when MCP is wired", async () => {
     // The bug this guards: previously the config was written to
     // <cwd>/.claude/mcp.json with no flag, which the CLI never auto-loads, so

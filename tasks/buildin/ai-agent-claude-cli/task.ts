@@ -81,7 +81,14 @@ export function buildClaudeArgs(opts: {
     if (opts.claudeSessionId) args.push("--resume", opts.claudeSessionId);
     if (opts.model)           args.push("--model", opts.model);
     if (opts.systemPrompt)    args.push("--append-system-prompt", opts.systemPrompt);
-    if (opts.mcpConfigPath)   args.push("--strict-mcp-config", "--mcp-config", opts.mcpConfigPath);
+    if (opts.mcpConfigPath) {
+        args.push("--strict-mcp-config", "--mcp-config", opts.mcpConfigPath);
+        // Auto-approve the dicode MCP tools so the agent can call them
+        // non-interactively — `claude -p` refuses un-allowlisted tools rather
+        // than prompting. Scoped to the `dicode` server only, so the agent gets
+        // dicode's governed tool surface and NOT raw Bash/Write/Read host access.
+        args.push("--allowedTools", "mcp__dicode");
+    }
     return args;
 }
 
