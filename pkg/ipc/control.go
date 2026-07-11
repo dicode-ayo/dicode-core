@@ -238,6 +238,9 @@ func (cs *ControlServer) dispatch(ctx context.Context, req Request) (any, error)
 	case "cli.run.wait":
 		return cs.handleRunWait(ctx, req)
 
+	case "cli.run.cancel":
+		return cs.handleRunCancel(req)
+
 	case "cli.logs":
 		return cs.handleLogs(ctx, req)
 
@@ -654,6 +657,28 @@ func (cs *ControlServer) handleRunWait(ctx context.Context, req Request) (RunRes
 		}
 	}
 	return cs.engine.WaitRunSettled(ctx, req.RunID)
+}
+
+// RunCancelResult is the cli.run.cancel response. Killed is false when the
+// run was not currently cancellable (already terminal, or the id unknown) —
+// not an error, since the caller (an interactive follow loop reacting to
+// Ctrl+C) treats either outcome the same way: stop waiting on the run.
+type RunCancelResult struct {
+	Killed bool `json:"killed"`
+}
+
+// handleRunCancel kills an in-flight run by id. Backs the CLI's Ctrl+C-during-
+// a-turn cancellation: the follow loop sends this on a separate connection
+// while its primary connection is still blocked in cli.run.wait, since
+// ControlClient.Send is not safe for concurrent use on one connection.
+func (cs *ControlServer) handleRunCancel(req Request) (RunCancelResult, error) {
+	if req.RunID == "" {
+		return RunCancelResult{}, errors.New("runID required")
+	}
+	if cs.engine == nil {
+		return RunCancelResult{}, errors.New("run cancel not available (engine not wired)")
+	}
+	return RunCancelResult{Killed: cs.engine.KillRun(req.RunID)}, nil
 }
 
 func (cs *ControlServer) handleLogs(ctx context.Context, req Request) ([]LogEntry, error) {

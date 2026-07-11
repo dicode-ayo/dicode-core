@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dicode/dicode/pkg/ipc"
 )
@@ -20,6 +21,7 @@ type fakeFollowClient struct {
 	logs        map[string][]ipc.LogEntry  // runID -> log lines
 	submitted   map[string]json.RawMessage // suspended runID -> input submitted
 	waitCalls   int                        // number of WaitRun invocations
+	cancelled   []string                   // runIDs passed to Cancel, in order
 }
 
 func (f *fakeFollowClient) ResumeGet(runID string) (ipc.ResumeInfo, error) {
@@ -37,6 +39,11 @@ func (f *fakeFollowClient) Resume(runID string, input []byte) (ipc.ResumeResult,
 func (f *fakeFollowClient) WaitRun(runID string) (ipc.RunResult, error) {
 	f.waitCalls++
 	return f.waitResults[runID], nil
+}
+
+func (f *fakeFollowClient) Cancel(runID string) error {
+	f.cancelled = append(f.cancelled, runID)
+	return nil
 }
 
 func (f *fakeFollowClient) Logs(runID string) ([]ipc.LogEntry, error) {
@@ -531,5 +538,68 @@ func TestFollow_DaemonContinuationOneShot(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "resumed: continuation run run-2") {
 		t.Errorf("expected one-shot continuation output, got:\n%s", out.String())
+	}
+}
+
+// ── interactive-UX helpers: no-op off a TTY ─────────────────────────────────
+
+// startSpinner(w, false) must never write to w — the gate for piped/CI
+// output and every bytes.Buffer-backed test above.
+func TestStartSpinner_NoopWhenInactive(t *testing.T) {
+	var buf bytes.Buffer
+	stop := startSpinner(&buf, false)
+	stop()
+	stop() // must tolerate a repeat call without panicking
+	if buf.Len() != 0 {
+		t.Fatalf("inactive spinner wrote %q, want nothing", buf.String())
+	}
+}
+
+// An active spinner animates frames and leaves the line cleared (ending in a
+// bare \r) once stopped, so whatever prints next starts clean.
+func TestStartSpinner_ActiveAnimatesAndClearsOnStop(t *testing.T) {
+	var buf bytes.Buffer
+	stop := startSpinner(&buf, true)
+	time.Sleep(3 * spinnerInterval)
+	stop()
+	stop() // idempotent
+	got := buf.String()
+	if !strings.Contains(got, "working") {
+		t.Fatalf("active spinner wrote no frames: %q", got)
+	}
+	if !strings.HasSuffix(got, "\r") {
+		t.Fatalf("stop() must leave the line cleared (trailing \\r), got %q", got)
+	}
+}
+
+// flushStdin must not panic regardless of TTY state; under `go test` stdin is
+// not a TTY, so this also exercises the no-op path directly.
+func TestFlushStdin_NoopWhenStdinNotATTY(t *testing.T) {
+	flushStdin()
+}
+
+// waitRunInterruptible must degrade to a plain WaitRun when neither stdin nor
+// stderr is a TTY: no spinner bytes on prompt, no Cancel call, and the result
+// passes through unchanged. This is the path every fakeFollowClient-backed
+// test above runs (go test's stdin/stderr are not TTYs).
+func TestWaitRunInterruptible_NonTTY_NoSpinnerNoCancel(t *testing.T) {
+	client := &fakeFollowClient{
+		waitResults: map[string]ipc.RunResult{"run-1": {RunID: "run-1", Status: "success"}},
+	}
+	var prompt bytes.Buffer
+	s := &followSession{client: client, prompt: &prompt}
+
+	res, err := s.waitRunInterruptible("run-1")
+	if err != nil {
+		t.Fatalf("waitRunInterruptible: %v", err)
+	}
+	if res.Status != "success" {
+		t.Fatalf("status = %q, want success", res.Status)
+	}
+	if prompt.Len() != 0 {
+		t.Fatalf("non-TTY prompt got spinner bytes: %q", prompt.String())
+	}
+	if len(client.cancelled) != 0 {
+		t.Fatalf("Cancel must not be called absent a real interrupt, got %v", client.cancelled)
 	}
 }
