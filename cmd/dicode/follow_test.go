@@ -383,8 +383,11 @@ func TestFollow_MultiStepWizard(t *testing.T) {
 	if got := string(client.submitted["run-2"]); got != `{"env":"prod"}` {
 		t.Errorf("step-2 submitted = %s, want {\"env\":\"prod\"}", got)
 	}
-	if !strings.Contains(prompt.String(), "suspended again") {
-		t.Errorf("expected re-prompt banner for the second step:\n%s", prompt.String())
+	// The second step is reached (its enum answer was submitted above); the
+	// interactive stream stays quiet between turns — the step's own banner
+	// introduces it, no "suspended again" plumbing line.
+	if strings.Contains(prompt.String(), "suspended again") {
+		t.Errorf("did not expect the removed 'suspended again' plumbing line:\n%s", prompt.String())
 	}
 	if !strings.Contains(out.String(), "run run-3: success") {
 		t.Errorf("expected terminal success on run-3:\n%s", out.String())

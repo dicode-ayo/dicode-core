@@ -3,18 +3,26 @@
 // buildin/ai-agent-claude-cli — wraps `claude -p` to call Claude with the
 // operator's Pro/Max subscription instead of an Anthropic API key.
 //
-// Session-id strategy (mirrors buildin/ai-agent):
-//   - Callers pass a dicode-side session_id (or omit; we generate a UUID).
-//   - We store kv["claude:<dicode_uuid>"] = <claude_cli_session_id> so a
-//     repeat call with the same dicode_uuid resolves to the right Claude
-//     session via --resume. The CLI's session_id never leaks to clients.
-//   - The bare-return shape { session_id, reply, model, ... } matches
-//     buildin/ai-agent so the same chat UI shape works in both presets.
+// Two shapes over one Claude-invocation core (runClaudeTurn):
+//   - One-shot (a non-empty `prompt` param): run one Claude turn and return
+//     { ok, reply, session_id, model, ... }. A dicode-side session_id maps to
+//     the Claude CLI session via kv["claude:<dicode_uuid>"] so a repeat call
+//     resumes the right conversation; the CLI's session_id never leaks to
+//     clients. The bare-return shape matches buildin/ai-agent so the same chat
+//     UI works in both presets.
+//   - Chat loop (no `prompt` on a fresh run): suspend to a `turn` step that
+//     collects a message, runs one turn, and suspends back to itself — a
+//     terminal chat via `dicode run` with no CLI changes. Claude's own session
+//     carries the conversation, so the suspend `state` just holds the CLI
+//     session id (plus a stable chat id keying the cwd that --resume needs);
+//     no kv session mapping is used on this path. A blank message ends it.
 //
 // Logging: console.error / console.log are captured by the runtime as
 // the run's stderr/stdout log entries. Error returns log to console.error
 // so operators can see what went wrong even when the run exits 0 (returns
 // a value, not throws).
+
+import type { Dicode, DicodeSdk, JSONSchema } from "../../sdk.ts";
 
 interface Params {
     get: (key: string) => Promise<string | null>;
@@ -44,8 +52,15 @@ interface ClaudeResponse {
 interface SDK {
     params: Params;
     kv: KV;
-    dicode?: any;
+    dicode: Dicode;
 }
+
+// The outcome of one Claude turn. Success carries the reply and the CLI's new
+// session id (the caller decides where to persist it); failure carries a
+// redacted error already logged via fail().
+type TurnResult =
+    | { ok: true; reply: string; claudeSessionId: string; model: string; total_cost_usd: number; usage: unknown }
+    | { ok: false; error: string };
 
 function fail(error: string): { ok: false; error: string } {
     // Surface in the run log as well — return-value-only errors are
@@ -92,9 +107,169 @@ export function buildClaudeArgs(opts: {
     return args;
 }
 
-export default async function main({ params, kv }: SDK) {
-    const prompt        = (await params.get("prompt"))        ?? "";
-    const sessionIdIn   = (await params.get("session_id"))    ?? "";
+// decideEntryMode picks the shape of a fresh run: a non-empty prompt runs one
+// turn and returns; an empty prompt opens the interactive chat loop. Pure so the
+// branch can be unit-tested without a live Claude.
+export function decideEntryMode(prompt: string): "one-shot" | "chat-start" {
+    return prompt.trim() !== "" ? "one-shot" : "chat-start";
+}
+
+// isChatEnd terminates the chat loop: a blank/whitespace message is the "end"
+// signal (the step returns instead of suspending onward).
+export function isChatEnd(message: string): boolean {
+    return message.trim() === "";
+}
+
+// chatSchema is the resume form for one chat turn: a single `message` field,
+// intentionally NOT required so the interactive CLI prompt accepts a blank line
+// — which steps.turn reads as the end-of-chat signal (isChatEnd). The banner
+// text lives on BOTH the schema and the `message` property — the CLI's
+// interactive resume prompt renders the *property* description above the input
+// (cmd/dicode/main.go promptResumeInput), while the no-field confirmation path
+// renders the schema-level one; setting both keeps the reply visible regardless
+// of which renderer runs.
+function chatSchema(description: string): JSONSchema {
+    return {
+        type: "object",
+        title: "Chat",
+        description,
+        properties: {
+            message: { type: "string", title: "Message", description },
+        },
+    };
+}
+
+export default async function main({ params, kv, dicode }: SDK) {
+    const prompt = (await params.get("prompt")) ?? "";
+
+    if (decideEntryMode(prompt) === "chat-start") {
+        // No prompt on a fresh run → open the chat loop. Claude's own session
+        // carries the conversation across turns; seed it empty. chatId keys the
+        // per-invocation workdir, which must stay constant across turns because
+        // Claude CLI's `--resume` only finds sessions created in the same cwd.
+        const chatId = crypto.randomUUID();
+        await dicode.suspend({
+            to: "turn",
+            state: { claudeSessionId: "", chatId },
+            schema: chatSchema("Message Claude — leave blank to end."),
+        });
+        return; // unreachable — suspend() never returns
+    }
+
+    return await oneShotTurn({ prompt, params, kv });
+}
+
+export const steps = {
+    // One chat turn: read the submitted message, run Claude resuming its prior
+    // session, then suspend back to `turn` with the reply as the next banner.
+    // A blank message returns (ends the run → the CLI's resume loop exits).
+    async turn({ params, input, state, dicode }: DicodeSdk) {
+        const carried = (state ?? {}) as { claudeSessionId?: string; chatId?: string };
+        const message = String((input as { message?: string } | undefined)?.message ?? "");
+        const prior = carried.claudeSessionId ?? "";
+
+        if (isChatEnd(message)) {
+            return { ok: true, reply: "(chat ended)", session_id: prior };
+        }
+
+        // chatId is minted in main() and carried forward; default-guard it so a
+        // hand-crafted resume without one still runs (a fresh cwd, no --resume).
+        const chatId = carried.chatId ?? crypto.randomUUID();
+        const turn = await runClaudeTurn({ message, priorClaudeSessionId: prior, workdirKey: chatId, params });
+        if (!turn.ok) return turn;
+
+        await dicode.suspend({
+            to: "turn",
+            state: { claudeSessionId: turn.claudeSessionId, chatId },
+            schema: chatSchema(turn.reply),
+        });
+        return; // unreachable — suspend() never returns
+    },
+};
+
+// oneShotTurn is the backward-compatible single-turn path: it owns the
+// dicode↔claude session_id mapping (kv["claude:<dicode_uuid>"]) and returns the
+// buildin/ai-agent-shaped result. The Claude invocation itself is delegated to
+// runClaudeTurn, shared with the chat loop.
+async function oneShotTurn(
+    { prompt, params, kv }: { prompt: string; params: Params; kv: KV },
+): Promise<unknown> {
+    const sessionIdIn = (await params.get("session_id")) ?? "";
+    // session_id is the dicode-side handle. Reject anything not flat-id shaped so
+    // a hostile caller can't forge a key that hits arbitrary KV entries below.
+    if (sessionIdIn && !SESSION_ID_RE.test(sessionIdIn)) {
+        return fail(`session_id ${JSON.stringify(sessionIdIn)} contains invalid characters; expected ^[a-zA-Z0-9_-]{1,64}$`);
+    }
+
+    // dicode-side session id. Generate one if the caller didn't pass one
+    // (matches buildin/ai-agent's UX: first turn returns a fresh uuid).
+    const dicodeSessionId = sessionIdIn || crypto.randomUUID();
+
+    // Look up the Claude-side session id for this dicode session, if any.
+    // First call: kv miss → no --resume → CLI mints a new Claude session.
+    //
+    // Concurrency note: two browser tabs sharing the same localStorage
+    // dicode_uuid will fire simultaneous `claude --resume <same-id>`
+    // subprocesses. The Claude CLI's behaviour under concurrent writes to the
+    // same session is undefined; the kv-set ordering below is non-deterministic.
+    // Same pre-existing pattern as buildin/ai-agent. Mitigation if this becomes
+    // a problem: a per-session lock via kv.set with a TTL'd lease, or a fresh
+    // dicode_uuid per browser tab.
+    let claudeSessionId = "";
+    try {
+        const stored = await kv.get(KV_PREFIX + dicodeSessionId);
+        if (typeof stored === "string") claudeSessionId = stored;
+    } catch (e) {
+        // KV miss is normal; transient KV errors are non-fatal — worst case the
+        // next turn starts a fresh Claude session.
+        console.warn("ai-agent-claude-cli: kv.get failed: " + (e instanceof Error ? e.message : String(e)));
+    }
+
+    const turn = await runClaudeTurn({
+        message: prompt,
+        priorClaudeSessionId: claudeSessionId,
+        // Workdir keyed on the (shape-validated) dicode session id so a
+        // follow-up --resume lands in the same cwd the session was created in.
+        workdirKey: dicodeSessionId,
+        params,
+    });
+    if (!turn.ok) return turn;
+
+    // Persist the dicode → claude session id mapping. KV writes are
+    // fire-and-forget per the SDK shim (no ack); the next call with this
+    // dicode_uuid reads it via kv.get above. Skip the write when the CLI didn't
+    // return a session id so a stale mapping isn't introduced.
+    if (turn.claudeSessionId && turn.claudeSessionId !== claudeSessionId) {
+        try {
+            await kv.set(KV_PREFIX + dicodeSessionId, turn.claudeSessionId);
+        } catch (e) {
+            console.warn("ai-agent-claude-cli: kv.set failed (non-fatal): " + (e instanceof Error ? e.message : String(e)));
+        }
+    }
+
+    return {
+        ok:             true,
+        reply:          turn.reply,
+        session_id:     dicodeSessionId,
+        model:          turn.model,
+        total_cost_usd: turn.total_cost_usd,
+        usage:          turn.usage,
+    };
+}
+
+// runClaudeTurn is the reusable Claude-invocation core: resolve auth + binary,
+// build the per-invocation .claude/ workdir (mcp.json + skills), spawn
+// `claude -p`, and decode the response. It is session-mapping-agnostic — the
+// caller passes the prior Claude session id and the workdir key, and gets back
+// the new session id to persist (or carry in suspend state) however it likes.
+async function runClaudeTurn(opts: {
+    message: string;
+    priorClaudeSessionId: string;
+    workdirKey: string;
+    params: Params;
+}): Promise<TurnResult> {
+    const { message, priorClaudeSessionId, workdirKey, params } = opts;
+
     const model         = (await params.get("model"))         ?? "";
     const systemPrompt  = (await params.get("system_prompt")) ?? "";
     const cliPathParam  = (await params.get("cli_path"))      ?? "";
@@ -103,16 +278,6 @@ export default async function main({ params, kv }: SDK) {
     const enableMcp     = ((await params.get("enable_mcp"))   ?? "true").toLowerCase() !== "false";
     const mcpURL        = (await params.get("mcp_url"))       ?? "http://localhost:8080/mcp";
     const workdirBase   = (await params.get("workdir_base"))  ?? "";
-
-    if (!prompt) {
-        return fail("prompt is required");
-    }
-    // session_id is the dicode-side handle. Reject anything not flat-id
-    // shaped so a hostile caller can't forge a key that hits arbitrary
-    // KV entries via the kv.get below.
-    if (sessionIdIn && !SESSION_ID_RE.test(sessionIdIn)) {
-        return fail(`session_id ${JSON.stringify(sessionIdIn)} contains invalid characters; expected ^[a-zA-Z0-9_-]{1,64}$`);
-    }
 
     // Dual-mode auth: prefer an explicit CLAUDE_CODE_OAUTH_TOKEN secret
     // (portable for headless / containerized daemons where no interactive login
@@ -129,77 +294,46 @@ export default async function main({ params, kv }: SDK) {
         return fail("claude binary not found. Set the cli_path param, or install via one of the paths in tasks/buildin/ai-agent-claude-cli/README.md.");
     }
 
-    // dicode-side session id. Generate one if the caller didn't pass one
-    // (matches buildin/ai-agent's UX: first turn returns a fresh uuid).
-    const dicodeSessionId = sessionIdIn || crypto.randomUUID();
-
-    // Look up the Claude-side session id for this dicode session, if any.
-    // First call: kv miss → no --resume → CLI mints a new Claude session.
-    //
-    // Concurrency note: two browser tabs sharing the same localStorage
-    // dicode_uuid will fire simultaneous `claude --resume <same-id>`
-    // subprocesses. The Claude CLI's behaviour under concurrent writes
-    // to the same session is undefined; the kv-set ordering at the
-    // bottom of this function is non-deterministic. Same pre-existing
-    // pattern as buildin/ai-agent. Mitigation if this becomes a problem:
-    // a per-session lock via kv.set with a TTL'd lease, or a fresh
-    // dicode_uuid per browser tab.
-    let claudeSessionId = "";
-    try {
-        const stored = await kv.get(KV_PREFIX + dicodeSessionId);
-        if (typeof stored === "string") claudeSessionId = stored;
-    } catch (e) {
-        // KV miss is normal; transient KV errors are non-fatal — worst
-        // case the next turn starts a fresh Claude session.
-        console.warn("ai-agent-claude-cli: kv.get failed: " + (e instanceof Error ? e.message : String(e)));
-    }
-
-    // Args are assembled by buildClaudeArgs() just before spawn (below), after
-    // MCP setup, so the --mcp-config flags reflect whether the config was
-    // actually written.
-
     // Per-invocation working directory. Claude CLI honors a project-local
     // `.claude/` dir at the invocation cwd: `.claude/mcp.json` configures
     // additional MCP servers, `.claude/skills/*.md` are loaded as skills.
     //
-    // The workdir is keyed on the *dicode* session_id (which is already
-    // shape-validated by SESSION_ID_RE above), NOT a fresh per-invocation
-    // uuid. Reason: Claude CLI's conversation state is cwd-scoped — a
-    // `--resume <claude_session_id>` invocation can only find sessions
-    // that were created in the same working directory. If we used a
-    // fresh uuid each turn, every `--resume` would fail with "No
-    // conversation found".
+    // workdirKey (dicode session id for one-shot, chat id for the loop) is
+    // stable across a conversation's turns — it MUST be, because Claude CLI's
+    // conversation state is cwd-scoped: a `--resume <claude_session_id>` can
+    // only find sessions created in the same working directory. A fresh key per
+    // turn would fail every `--resume` with "No conversation found".
     //
-    // workdir_base resolves via the ${DATADIR} template variable at
-    // spec-load time (see task.yaml), so we don't depend on
-    // DICODE_DATA_DIR being set in the spawned env.
+    // workdir_base resolves via the ${DATADIR} template variable at spec-load
+    // time (see task.yaml), so we don't depend on DICODE_DATA_DIR being set in
+    // the spawned env.
     //
-    // Cleanup is handled out-of-band by buildin/temp-cleanup, which
-    // sweeps ${DATADIR}/tmp/<task>/<uuid>/ leaves older than 1 hour
-    // on its 10-minute cron. Active sessions keep their workdir mtime
-    // fresh (we rewrite mcp.json + skills on every turn) so they're
-    // never preempted; idle sessions are reaped after the TTL.
+    // Cleanup is handled out-of-band by buildin/temp-cleanup, which sweeps
+    // ${DATADIR}/tmp/<task>/<key>/ leaves older than 1 hour on its 10-minute
+    // cron. Active sessions keep their workdir mtime fresh (we rewrite mcp.json
+    // + skills on every turn) so they're never preempted; idle sessions are
+    // reaped after the TTL.
     if (!workdirBase) {
         return fail("workdir_base param is empty; expected the default ${DATADIR}/tmp/claude-cli to resolve at spec-load time");
     }
-    const workdir = `${workdirBase}/${dicodeSessionId}`;
+    const workdir = `${workdirBase}/${workdirKey}`;
     const claudeDir = `${workdir}/.claude`;
 
     // Wrap setup in a try/catch so any unexpected error (NotCapable when
-    // permissions.fs is mis-scoped, ENOSPC, an immutable mount, …) comes
-    // back to the caller as a structured { ok: false, error } via fail()
-    // rather than as an uncaught Deno promise rejection that the runtime
-    // surfaces only in the run log.
+    // permissions.fs is mis-scoped, ENOSPC, an immutable mount, …) comes back to
+    // the caller as a structured { ok: false, error } via fail() rather than as
+    // an uncaught Deno promise rejection that the runtime surfaces only in the
+    // run log.
     let mcpWired = false;
     let skillsWired = 0;
     const mcpKey = Deno.env.get("DICODE_MCP_API_KEY") ?? "";
     try {
         await Deno.mkdir(`${claudeDir}/skills`, { recursive: true });
 
-        // MCP wiring: write .claude/mcp.json so Claude can call dicode tasks
-        // as MCP tools. The API key is the same one the operator's local
-        // Claude Code uses (stashed by `dicode mcp install`); empty = skip
-        // and let Claude run without dicode-task tool access.
+        // MCP wiring: write .claude/mcp.json so Claude can call dicode tasks as
+        // MCP tools. The API key is the same one the operator's local Claude Code
+        // uses (stashed by `dicode mcp install`); empty = skip and let Claude run
+        // without dicode-task tool access.
         if (enableMcp && mcpKey) {
             const mcpConfig = {
                 mcpServers: {
@@ -215,8 +349,8 @@ export default async function main({ params, kv }: SDK) {
         }
 
         // Skills wiring: copy each named skill file from skills_dir into
-        // .claude/skills/. Names are validated against a strict regex to
-        // defang any attempt at traversal via "../" or absolute paths.
+        // .claude/skills/. Names are validated against a strict regex to defang
+        // any attempt at traversal via "../" or absolute paths.
         if (skillsParam && skillsDir) {
             const names = skillsParam.split(",").map((s) => s.trim()).filter(Boolean);
             for (const name of names) {
@@ -238,11 +372,11 @@ export default async function main({ params, kv }: SDK) {
         return fail(`workdir setup failed at ${workdir}: ${e instanceof Error ? e.message : String(e)}`);
     }
 
-    console.log(`ai-agent-claude-cli: invoking ${cliPath} (resume=${claudeSessionId ? claudeSessionId.slice(0, 8) + "…" : "no"}, model=${model || "default"}, dicode_session=${dicodeSessionId.slice(0, 8)}…, mcp=${mcpWired ? "on" : "off"}, skills=${skillsWired})`);
+    console.log(`ai-agent-claude-cli: invoking ${cliPath} (resume=${priorClaudeSessionId ? priorClaudeSessionId.slice(0, 8) + "…" : "no"}, model=${model || "default"}, workdir=${workdirKey.slice(0, 8)}…, mcp=${mcpWired ? "on" : "off"}, skills=${skillsWired})`);
 
     const args = buildClaudeArgs({
-        prompt,
-        claudeSessionId,
+        prompt: message,
+        claudeSessionId: priorClaudeSessionId,
         model,
         systemPrompt,
         // <cwd>/.claude/mcp.json is not auto-loaded; mount it explicitly and
@@ -267,22 +401,18 @@ export default async function main({ params, kv }: SDK) {
         stderr: "piped",
     });
 
-    return await runClaudeAndDecode(cmd, oauthToken, mcpKey, kv, dicodeSessionId, claudeSessionId, model);
+    return await runClaudeAndDecode(cmd, oauthToken, mcpKey, model);
 }
 
-// runClaudeAndDecode is the post-setup half of main: spawn claude,
-// parse the JSON response, persist the session-id mapping, and return
-// the structured result. Split out so the surrounding try/finally in
-// main() keeps cleanup logic together.
+// runClaudeAndDecode is the post-setup half of runClaudeTurn: spawn claude,
+// parse the JSON response, and return the structured turn result. Split out so
+// the surrounding setup logic in runClaudeTurn stays readable.
 async function runClaudeAndDecode(
     cmd: Deno.Command,
     oauthToken: string,
     mcpKey: string,
-    kv: KV,
-    dicodeSessionId: string,
-    claudeSessionId: string,
     fallbackModel: string,
-): Promise<unknown> {
+): Promise<TurnResult> {
     let out: Deno.CommandOutput;
     try {
         out = await cmd.output();
@@ -293,12 +423,11 @@ async function runClaudeAndDecode(
     const stdout = new TextDecoder().decode(out.stdout).trim();
     const stderr = new TextDecoder().decode(out.stderr).trim();
 
-    // redact strips secrets from any stream we surface to callers.
-    // Uses replaceAll so multi-occurrence leaks (CLI repeats the
-    // diagnostic) are fully scrubbed; String.replace would only catch
-    // the first match. Both the OAuth token AND the dicode MCP API key
-    // are sensitive — strip both, even though neither should ever leave
-    // their respective stores.
+    // redact strips secrets from any stream we surface to callers. Uses
+    // replaceAll so multi-occurrence leaks (CLI repeats the diagnostic) are fully
+    // scrubbed; String.replace would only catch the first match. Both the OAuth
+    // token AND the dicode MCP API key are sensitive — strip both, even though
+    // neither should ever leave their respective stores.
     const redact = (s: string) => {
         let r = s;
         if (oauthToken) r = r.replaceAll(oauthToken, "<redacted>");
@@ -307,9 +436,8 @@ async function runClaudeAndDecode(
     };
 
     if (!out.success) {
-        // Surface stderr for operator debugging; don't leak the OAuth
-        // token even if the CLI ever logs it (it shouldn't, but defense
-        // in depth).
+        // Surface stderr for operator debugging; don't leak the OAuth token even
+        // if the CLI ever logs it (it shouldn't, but defense in depth).
         return fail(`claude exited ${out.code}: ${redact(stderr) || "(no stderr)"}`);
     }
 
@@ -317,9 +445,9 @@ async function runClaudeAndDecode(
     try {
         parsed = JSON.parse(stdout);
     } catch (_e) {
-        // stdout is normally JSON; if Claude ever logs an OAuth-token-
-        // bearing diagnostic to stdout instead, the redact() guard keeps
-        // it out of the run log.
+        // stdout is normally JSON; if Claude ever logs an OAuth-token-bearing
+        // diagnostic to stdout instead, the redact() guard keeps it out of the
+        // run log.
         return fail(`claude returned non-JSON output: ${redact(stdout.slice(0, 500))}`);
     }
 
@@ -327,34 +455,20 @@ async function runClaudeAndDecode(
         return fail(parsed.result ?? "claude reported an error");
     }
 
-    // Persist the dicode → claude session id mapping. KV writes are
-    // fire-and-forget per the SDK shim (no ack); the next call with this
-    // dicode_uuid will read it via kv.get above. If the CLI didn't return
-    // a session_id (shouldn't happen in normal flow but defend against it),
-    // we skip the write so a stale mapping isn't introduced.
-    const newClaudeSessionId = parsed.session_id ?? "";
-    if (newClaudeSessionId && newClaudeSessionId !== claudeSessionId) {
-        try {
-            await kv.set(KV_PREFIX + dicodeSessionId, newClaudeSessionId);
-        } catch (e) {
-            console.warn("ai-agent-claude-cli: kv.set failed (non-fatal): " + (e instanceof Error ? e.message : String(e)));
-        }
-    }
-
     console.log(`ai-agent-claude-cli: ok (model=${parsed.model ?? "?"}, cost=$${parsed.total_cost_usd ?? 0})`);
 
     return {
-        ok:             true,
-        reply:          parsed.result ?? "",
-        session_id:     dicodeSessionId,
-        model:          parsed.model ?? fallbackModel,
-        total_cost_usd: parsed.total_cost_usd ?? 0,
-        usage:          parsed.usage ?? null,
+        ok:              true,
+        reply:           parsed.result ?? "",
+        claudeSessionId: parsed.session_id ?? "",
+        model:           parsed.model ?? fallbackModel,
+        total_cost_usd:  parsed.total_cost_usd ?? 0,
+        usage:           parsed.usage ?? null,
     };
 }
 
-// resolveCliPath returns an absolute path to the `claude` binary, or
-// empty if none can be found. Order:
+// resolveCliPath returns an absolute path to the `claude` binary, or empty if
+// none can be found. Order:
 //   1. explicit cli_path param
 //   2. CLAUDE_CLI_PATH env (set by the operator at daemon startup)
 //   3. Deno.Command resolution against PATH
@@ -362,8 +476,8 @@ function resolveCliPath(cliPathParam: string): string {
     if (cliPathParam) return cliPathParam;
     const envPath = Deno.env.get("CLAUDE_CLI_PATH") ?? "";
     if (envPath) return envPath;
-    // Lean on PATH resolution — Deno.Command will spawn `claude` from
-    // PATH if we don't pass an absolute path. Returning the bare name
-    // is enough; the actual lookup happens at exec time.
+    // Lean on PATH resolution — Deno.Command will spawn `claude` from PATH if we
+    // don't pass an absolute path. Returning the bare name is enough; the actual
+    // lookup happens at exec time.
     return "claude";
 }

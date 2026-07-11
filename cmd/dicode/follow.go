@@ -468,20 +468,24 @@ func (s *followSession) follow(suspendedRunID string) error {
 			return nil
 		}
 
-		fmt.Fprintf(s.prompt, "resumed: following continuation run %s\n", contID)
-
 		result, err := s.client.WaitRun(contID)
 		if err != nil {
 			return err
 		}
-		s.printLogs(contID)
 
 		if result.Status == registry.StatusSuspended {
-			fmt.Fprintf(s.prompt, "\nrun %s suspended again — next step:\n", contID)
+			// Quiet between turns: the next step's banner (the schema
+			// description) introduces it, and per-turn task logs stay out of the
+			// interactive stream — `dicode logs <id>` still has them. A blank
+			// line separates turns.
+			fmt.Fprintln(s.prompt)
 			runID = contID
 			continue
 		}
 
+		// Terminal: surface the run's logs (to see what a completed run did, or
+		// why it failed), then the status + return value.
+		s.printLogs(contID)
 		fmt.Fprintf(s.out, "run %s: %s\n", contID, result.Status)
 		if result.ReturnValue != nil {
 			out, _ := json.MarshalIndent(result.ReturnValue, "", "  ")
