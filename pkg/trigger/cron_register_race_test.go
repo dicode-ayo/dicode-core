@@ -32,6 +32,69 @@ func cronJobsRow(t *testing.T, d db.DB, id string) (cronExpr string, nextRunAt i
 	return
 }
 
+// TestScheduleCron_StaleTickCallbackDoesNotClobberNewSchedule exercises the
+// UPDATE cron_jobs ... WHERE task_id=? AND cron_expr=? guard directly at the
+// SQL level (not via real goroutine timing, which would be flaky): robfig/cron
+// runs each tick's Job.Run() in its own goroutine, and e.cron.Remove doesn't
+// cancel one already in flight, so a tick dispatched under an OLD schedule can
+// still be persisting its next_run_at after a genuine schedule change has
+// already moved the row to a NEW cron_expr. Without constraining the UPDATE by
+// cron_expr, that stale write would silently overwrite the new schedule's
+// next_run_at with a value computed from the expression the old closure
+// captured. This directly simulates that interleaving: seed the row as if the
+// new schedule already registered, then run the exact stale-closure UPDATE for
+// the old schedule and assert it is a no-op.
+func TestScheduleCron_StaleTickCallbackDoesNotClobberNewSchedule(t *testing.T) {
+	_, _, d := raceEnv(t)
+	ctx := context.Background()
+	const id = "reschedule-me"
+
+	// The new schedule ("*/5 * * * *") has already been armed and its row
+	// written by a fresh registerCron/scheduleCron call.
+	if err := d.Exec(ctx,
+		`INSERT INTO cron_jobs(task_id,cron_expr,next_run_at) VALUES(?,?,?)`,
+		id, "*/5 * * * *", int64(2000),
+	); err != nil {
+		t.Fatalf("seed cron_jobs row: %v", err)
+	}
+
+	// A tick dispatched under the OLD schedule ("* * * * *") before the
+	// reschedule finishes running now and reaches the same UPDATE
+	// scheduleCron's cron.AddFunc closure performs, still holding the old
+	// cronExpr it was dispatched with.
+	if err := d.Exec(ctx,
+		`UPDATE cron_jobs SET last_run_at=?, next_run_at=? WHERE task_id=? AND cron_expr=?`,
+		int64(9999), int64(9999), id, "* * * * *",
+	); err != nil {
+		t.Fatalf("stale UPDATE: %v", err)
+	}
+
+	cronExpr, nextRunAt, found := cronJobsRow(t, d, id)
+	if !found {
+		t.Fatal("cron_jobs row disappeared")
+	}
+	if cronExpr != "*/5 * * * *" || nextRunAt != 2000 {
+		t.Errorf("stale tick callback clobbered the row: cron_expr=%q next_run_at=%d, want cron_expr=%q next_run_at=2000 (unchanged)",
+			cronExpr, nextRunAt, "*/5 * * * *")
+	}
+
+	// A tick dispatched under the CURRENT schedule must still persist normally.
+	if err := d.Exec(ctx,
+		`UPDATE cron_jobs SET last_run_at=?, next_run_at=? WHERE task_id=? AND cron_expr=?`,
+		int64(3000), int64(3300), id, "*/5 * * * *",
+	); err != nil {
+		t.Fatalf("current-schedule UPDATE: %v", err)
+	}
+	cronExpr, nextRunAt, found = cronJobsRow(t, d, id)
+	if !found {
+		t.Fatal("cron_jobs row disappeared")
+	}
+	if cronExpr != "*/5 * * * *" || nextRunAt != 3300 {
+		t.Errorf("current-schedule tick callback failed to persist: cron_expr=%q next_run_at=%d, want cron_expr=%q next_run_at=3300",
+			cronExpr, nextRunAt, "*/5 * * * *")
+	}
+}
+
 // TestCronReRegister_NoOpKeepsSameCronEntry is the cron analogue of
 // TestUnregisterTriggersKeeping_RetainsReclaimedPath: re-registering a task
 // whose cron schedule is unchanged must not remove-and-re-add the

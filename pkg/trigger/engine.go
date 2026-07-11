@@ -728,9 +728,19 @@ func (e *Engine) scheduleCron(id, cronExpr string, keptCron bool, fire func() er
 	entryID, err := e.cron.AddFunc(cronExpr, func() {
 		if ferr := fire(); ferr == nil && e.db != nil {
 			if next, nerr := cronNextRun(cronExpr); nerr == nil {
+				// Constrain by cron_expr, not just task_id: robfig/cron runs each
+				// tick's Job.Run() in its own goroutine and e.cron.Remove doesn't
+				// cancel one already in flight, so a tick dispatched under the OLD
+				// schedule can still be running here after a genuine schedule
+				// change has removed this entry and armed a new one with a
+				// different cronExpr (and a different row via the INSERT below).
+				// Without this guard, that stale write would silently overwrite
+				// the new schedule's next_run_at with a value computed from the
+				// expression this closure captured — the WHERE clause makes it a
+				// no-op once the row's cron_expr no longer matches.
 				if dbErr := e.db.Exec(context.Background(),
-					`UPDATE cron_jobs SET last_run_at=?, next_run_at=? WHERE task_id=?`,
-					time.Now().Unix(), next.Unix(), id,
+					`UPDATE cron_jobs SET last_run_at=?, next_run_at=? WHERE task_id=? AND cron_expr=?`,
+					time.Now().Unix(), next.Unix(), id, cronExpr,
 				); dbErr != nil {
 					e.log.Warn("cron: failed to persist next_run_at",
 						zap.String("task", id), zap.Error(dbErr))
