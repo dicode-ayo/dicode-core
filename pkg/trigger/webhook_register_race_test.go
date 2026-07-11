@@ -20,7 +20,11 @@ func (immediateExec) Execute(_ context.Context, _ *task.Spec, opts pkgruntime.Ru
 	return &pkgruntime.RunResult{RunID: opts.RunID}, nil
 }
 
-func raceEnv(t *testing.T) (*Engine, *registry.Registry) {
+// raceEnv builds a minimal Engine + Registry backed by an in-memory sqlite DB,
+// wired to immediateExec so no real subprocess is ever launched. Shared by the
+// webhook and cron register-race test files (pkg/trigger/cron_register_race_test.go)
+// so the two don't maintain near-identical copies of the same setup.
+func raceEnv(t *testing.T) (*Engine, *registry.Registry, db.DB) {
 	t.Helper()
 	d, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
 	if err != nil {
@@ -30,16 +34,25 @@ func raceEnv(t *testing.T) (*Engine, *registry.Registry) {
 	reg := registry.New(d)
 	eng := New(reg, immediateExec{}, zap.NewNop())
 	eng.RegisterExecutor(task.RuntimeDocker, immediateExec{})
-	return eng, reg
+	eng.SetDB(d)
+	return eng, reg, d
 }
 
-func webhookSpec(id, path string, enabled bool) *task.Spec {
+// raceSpec builds a minimal task.Spec for the register-race tests, wired to
+// the docker runtime + raceEnv's immediateExec so no real subprocess is ever
+// launched. Shared by cronSpec and webhookSpec, which differ only in which
+// trigger shape they set.
+func raceSpec(id string, enabled bool, trigger task.TriggerConfig) *task.Spec {
 	return &task.Spec{
 		ID: id, Name: id, Runtime: task.RuntimeDocker,
 		Docker:  &task.DockerConfig{Image: "alpine"},
-		Trigger: task.TriggerConfig{Webhook: path},
+		Trigger: trigger,
 		Enabled: enabled,
 	}
+}
+
+func webhookSpec(id, path string, enabled bool) *task.Spec {
+	return raceSpec(id, enabled, task.TriggerConfig{Webhook: path})
 }
 
 // The invariant behind the fix: re-registering a task must never take its own
@@ -47,7 +60,7 @@ func webhookSpec(id, path string, enabled bool) *task.Spec {
 // serialised by registerMu but lookups only take e.mu, so a path deleted here
 // and re-added a moment later is a live 404 for any request in between.
 func TestUnregisterTriggersKeeping_RetainsReclaimedPath(t *testing.T) {
-	eng, _ := raceEnv(t)
+	eng, _, _ := raceEnv(t)
 	spec := webhookSpec("keep", "/hooks/keep", true)
 	if err := eng.Register(spec); err != nil {
 		t.Fatalf("Register: %v", err)
@@ -66,7 +79,7 @@ func TestUnregisterTriggersKeeping_RetainsReclaimedPath(t *testing.T) {
 // The complement: a path that is NOT being re-claimed is still torn down, so a
 // renamed, disabled, or removed task frees its route.
 func TestUnregisterTriggersKeeping_DropsUnclaimedPath(t *testing.T) {
-	eng, _ := raceEnv(t)
+	eng, _, _ := raceEnv(t)
 	spec := webhookSpec("drop", "/hooks/old", true)
 	if err := eng.Register(spec); err != nil {
 		t.Fatalf("Register: %v", err)
@@ -85,7 +98,7 @@ func TestUnregisterTriggersKeeping_DropsUnclaimedPath(t *testing.T) {
 // A disabled task arms no triggers, so re-registering it must free the route
 // rather than keep it (Register passes keep="" when !Enabled).
 func TestRegister_DisabledTaskReleasesWebhookPath(t *testing.T) {
-	eng, _ := raceEnv(t)
+	eng, _, _ := raceEnv(t)
 	if err := eng.Register(webhookSpec("toggle", "/hooks/toggle", true)); err != nil {
 		t.Fatalf("Register enabled: %v", err)
 	}
@@ -105,7 +118,7 @@ func TestRegister_DisabledTaskReleasesWebhookPath(t *testing.T) {
 // Every fire must be served. Before the fix this 404s intermittently, which is
 // what made TestShutdownDrainsInFlightSyncWebhookRun flake — its body never ran.
 func TestWebhookNeverFourOhFoursDuringReRegister(t *testing.T) {
-	eng, reg := raceEnv(t)
+	eng, reg, _ := raceEnv(t)
 	spec := webhookSpec("hot", "/hooks/hot", true)
 	if err := reg.Register(spec); err != nil {
 		t.Fatalf("reg.Register: %v", err)
