@@ -77,6 +77,39 @@ test("removes orphan clones, keeps active run", async () => {
   }
 });
 
+test("protects a suspended run's clone, sweeps a terminal run's clone", async () => {
+  // A suspended run is an AI chat/authoring session paused awaiting user input;
+  // its sandbox must survive the sweep. A terminal run's clone is fair game.
+  const dataDir = await Deno.makeTempDir({ prefix: "dc-cleanup-susp-" });
+  try {
+    await makeCloneTree(dataDir, [
+      { source: "buildin", runID: "run-suspended-1" },
+      { source: "buildin", runID: "run-failed-1" },
+    ]);
+
+    env.set("DICODE_DATADIR", dataDir);
+
+    dicode.list_tasks = async () => [{ id: "my-task" }];
+    dicode.get_runs = async (_id: string) => {
+      return [
+        { ID: "run-suspended-1", Status: "suspended" },
+        { ID: "run-failed-1",    Status: "failed" },
+      ];
+    };
+
+    const result = await runTask() as { ok: boolean; removed: number; kept: number };
+
+    assert.equal(result.ok, true);
+    assert.equal(result.removed, 1);
+    assert.equal(result.kept, 1);
+
+    const remaining = await listCloneDirs(dataDir);
+    assert.equal(JSON.stringify(remaining), JSON.stringify(["run-suspended-1"]));
+  } finally {
+    await Deno.remove(dataDir, { recursive: true });
+  }
+});
+
 test("returns early with note when dev-clones dir does not exist", async () => {
   const dataDir = await Deno.makeTempDir({ prefix: "dc-cleanup-ne-" });
   // Do NOT create dev-clones under it — task should detect NotFound.
