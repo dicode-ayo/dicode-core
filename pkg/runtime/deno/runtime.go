@@ -234,12 +234,17 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	// Ephemeral per-run MCP token (opt-in via permissions.env
 	// DICODE_MCP_API_KEY): mint before anything else touches resolved, and
 	// defer the revoke unconditionally so it fires on every exit path below.
-	mcpRevoke, err := pkgruntime.ApplyMCPToken(ctx, rt.live(), rt.Log, spec, runID, resolved)
+	mcpToken, mcpRevoke, err := pkgruntime.ApplyMCPToken(ctx, rt.live(), rt.Log, spec, runID, resolved)
 	if err != nil {
 		result.Error = err
 		return result, nil
 	}
 	defer mcpRevoke()
+	// The redactor was snapshot before the mint; fold the token in so it is
+	// scrubbed from run logs like any other secret.
+	if mcpToken != "" {
+		redactor = redactor.WithExtra(mcpToken)
+	}
 
 	taskPath := spec.ScriptPath()
 	if taskPath == "" {

@@ -604,7 +604,9 @@ func (s *Server) Handler() http.Handler {
 
 	// Commit-push endpoint — API-key gated, mounted outside the session-auth
 	// group so IPC tasks and CI scripts can call it with a Bearer token.
-	r.With(s.requireAPIKey).Post("/api/sources/{name}/commit-push", s.apiCommitPush)
+	// Ephemeral per-run tokens are denied: an agent must not push the source
+	// changes it just authored (see requireNonEphemeralAPIKey).
+	r.With(s.requireNonEphemeralAPIKey).Post("/api/sources/{name}/commit-push", s.apiCommitPush)
 
 	// Replay endpoint — accepts either a session cookie (WebUI replay button)
 	// or a Bearer API key (CLI / auto-fix scripts). Mounted outside the
@@ -617,9 +619,11 @@ func (s *Server) Handler() http.Handler {
 	// from the client.
 	r.With(s.requireSessionOrAPIKey).Post("/api/runs/{runID}/resume", s.apiResumeRun)
 
-	// Approval-gate approve endpoint (#398) — same auth posture as replay:
-	// session cookie (WebUI approve button) or Bearer API key.
-	r.With(s.requireSessionOrAPIKey).Post("/api/tasks/{id}/approve", s.apiApproveTask)
+	// Approval-gate approve endpoint (#398) — session cookie (WebUI approve
+	// button) or Bearer API key, but NOT an ephemeral per-run token: the
+	// approval gate's whole purpose is that a human, not the authoring agent,
+	// clears a changed task (see requireSessionOrNonEphemeralAPIKey).
+	r.With(s.requireSessionOrNonEphemeralAPIKey).Post("/api/tasks/{id}/approve", s.apiApproveTask)
 
 	// Tokenized approve link (#398) — the single-use token in the URL is the
 	// auth, so these stay outside the session groups. GET renders a confirm

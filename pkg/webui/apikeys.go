@@ -60,32 +60,48 @@ func (s *apiKeyStore) generate(ctx context.Context, name string) (raw string, in
 	return raw, info, nil
 }
 
-// Validate checks a raw key against stored hashes, updates last_used, and
-// returns true if valid and not expired.
-func (s *apiKeyStore) validate(ctx context.Context, raw string) bool {
+// lookup checks a raw key against stored hashes, updates last_used, and
+// returns the key's name when valid and not expired.
+func (s *apiKeyStore) lookup(ctx context.Context, raw string) (name string, ok bool) {
 	if !strings.HasPrefix(raw, apiKeyPrefix) {
-		return false
+		return "", false
 	}
 	hash := hashAPIKey(raw)
 	now := time.Now().Unix()
-	found := false
 
 	var id string
 	_ = s.db.Query(ctx,
-		`SELECT id FROM api_keys WHERE key_hash = ? AND (expires_at IS NULL OR expires_at > ?)`,
+		`SELECT id, name FROM api_keys WHERE key_hash = ? AND (expires_at IS NULL OR expires_at > ?)`,
 		[]any{hash, now},
 		func(rows db.Scanner) error {
 			if rows.Next() {
-				found = true
-				return rows.Scan(&id)
+				ok = true
+				return rows.Scan(&id, &name)
 			}
 			return nil
 		},
 	)
-	if found && id != "" {
+	if ok && id != "" {
 		_ = s.db.Exec(ctx, `UPDATE api_keys SET last_used = ? WHERE id = ?`, now, id)
+		return name, true
 	}
-	return found
+	return "", false
+}
+
+// validate reports whether raw is a valid, unexpired API key.
+func (s *apiKeyStore) validate(ctx context.Context, raw string) bool {
+	_, ok := s.lookup(ctx, raw)
+	return ok
+}
+
+// validateNonEphemeral is validate that additionally rejects keys minted in
+// the ephemeral per-run MCP token namespace. Governance endpoints (approve,
+// commit-push) gate on this so a prompt-injected agent holding its own run's
+// ephemeral token can't approve or push the very task it just authored —
+// which would invert the trust-on-change approval gate (#392).
+func (s *apiKeyStore) validateNonEphemeral(ctx context.Context, raw string) bool {
+	name, ok := s.lookup(ctx, raw)
+	return ok && !strings.HasPrefix(name, ephemeralKeyPrefix)
 }
 
 // List returns all API keys (without hashes).
@@ -184,20 +200,33 @@ func hashAPIKey(raw string) string {
 // requireAPIKey is a middleware that checks for a valid Bearer API key.
 // Only active when server.auth is true.
 func (s *Server) requireAPIKey(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !s.cfg.Server.Auth {
+	return s.apiKeyMiddleware(s.apiKeys.validate)(next)
+}
+
+// requireNonEphemeralAPIKey is requireAPIKey that additionally rejects
+// ephemeral per-run MCP tokens, for governance endpoints an agent must not
+// reach with its own run's token (see validateNonEphemeral).
+func (s *Server) requireNonEphemeralAPIKey(next http.Handler) http.Handler {
+	return s.apiKeyMiddleware(s.apiKeys.validateNonEphemeral)(next)
+}
+
+func (s *Server) apiKeyMiddleware(validate func(context.Context, string) bool) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !s.cfg.Server.Auth {
+				next.ServeHTTP(w, r)
+				return
+			}
+			raw := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+			if raw == "" || !validate(r.Context(), raw) {
+				s.auditDenied(r, "invalid or missing API key")
+				w.Header().Set("WWW-Authenticate", `Bearer realm="dicode"`)
+				jsonErr(w, "invalid or missing API key", http.StatusUnauthorized)
+				return
+			}
 			next.ServeHTTP(w, r)
-			return
-		}
-		raw := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if raw == "" || !s.apiKeys.validate(r.Context(), raw) {
-			s.auditDenied(r, "invalid or missing API key")
-			w.Header().Set("WWW-Authenticate", `Bearer realm="dicode"`)
-			jsonErr(w, "invalid or missing API key", http.StatusUnauthorized)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
+		})
+	}
 }
 
 // apiListAPIKeys lists all API keys (no raw values).

@@ -96,6 +96,45 @@ func TestRevokeByNamePrefix_SweepsEphemeralOnly(t *testing.T) {
 	}
 }
 
+// TestValidateNonEphemeral covers the governance-endpoint guard: a valid
+// ephemeral per-run token is rejected while operator, CLI-managed, and
+// dashboard keys still pass. This is what stops a prompt-injected agent from
+// approving or pushing the task it just authored with its own run token.
+func TestValidateNonEphemeral(t *testing.T) {
+	ctx := context.Background()
+	keys := newTestAPIKeyStore(t)
+
+	ephemeral, err := newMCPTokenMinter(keys).Mint(ctx, "run-x")
+	if err != nil {
+		t.Fatalf("mint ephemeral: %v", err)
+	}
+	cliKey, _, err := keys.generate(ctx, cliManagedKeyPrefix+"laptop")
+	if err != nil {
+		t.Fatalf("generate cli key: %v", err)
+	}
+	dashKey, _, err := keys.generate(ctx, "my dashboard key")
+	if err != nil {
+		t.Fatalf("generate dashboard key: %v", err)
+	}
+
+	// Ephemeral token is a valid key but must fail the governance check.
+	if !keys.validate(ctx, ephemeral) {
+		t.Fatal("precondition: ephemeral token should be a valid key")
+	}
+	if keys.validateNonEphemeral(ctx, ephemeral) {
+		t.Error("ephemeral token passed validateNonEphemeral")
+	}
+	if !keys.validateNonEphemeral(ctx, cliKey) {
+		t.Error("CLI-managed key rejected by validateNonEphemeral")
+	}
+	if !keys.validateNonEphemeral(ctx, dashKey) {
+		t.Error("dashboard key rejected by validateNonEphemeral")
+	}
+	if keys.validateNonEphemeral(ctx, "dck_not-a-real-key") {
+		t.Error("bogus key passed validateNonEphemeral")
+	}
+}
+
 // TestRevokeByNamePrefix_RefusesOtherPrefixes guards against the sweep
 // primitive being repurposed to bulk-delete keys outside the ephemeral
 // namespace.
