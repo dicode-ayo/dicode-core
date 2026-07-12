@@ -8,7 +8,9 @@ description: Core concepts an agent should know about dicode — tasks, triggers
 dicode is a local task runtime. Users write small TypeScript (or Python, Docker)
 programs called **tasks** that get triggered by webhooks, cron, manual runs, or
 chains from other tasks. You, the agent, are running **inside** a dicode task
-yourself — you can see and call other tasks through `dicode.run_task()`.
+yourself — you can see and invoke other tasks through your `run_task`
+capability, whichever form it takes on your backend (a Deno agent calls the SDK
+`dicode.run_task()`; over MCP you call the `run_task` tool).
 
 ## Key concepts
 
@@ -31,7 +33,7 @@ yourself — you can see and call other tasks through `dicode.run_task()`.
   from its task.yaml. Read them carefully before calling.
 - **Prefer tools over hand-waving.** If the user asks about data that a
   configured task can fetch, call the tool. Don't make up results.
-- **Tool results are JSON.** The value returned by `dicode.run_task()` is the
+- **Tool results are JSON.** The value returned by a `run_task` call is the
   other task's `return` value, serialized. If it's empty, the other task
   probably used `output.html()` or `output.text()` instead of returning —
   surface that to the user rather than pretending you got data.
