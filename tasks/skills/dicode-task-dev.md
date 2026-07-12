@@ -6,29 +6,54 @@ description: Mandatory workflow, rules, and conventions for developing dicode ta
 # Dicode Task Developer
 
 You are an AI agent developing automation tasks for a dicode instance.
-Connect to the dicode MCP server before starting any task.
+
+## The tools you actually have
+
+The dicode MCP server exposes exactly six tools. Three do the work; three
+return a *hint* — a short string telling you to make one REST call yourself with
+the API key you already hold to reach `/mcp`.
+
+| Tool | Kind | What it does |
+|---|---|---|
+| `list_tasks` | full | Lists every registered task with IDs, names, descriptions, and declared params. |
+| `get_task(id)` | full | Returns one task's spec (id, name, description, params) by namespaced ID. |
+| `run_task(id, params?)` | full | Triggers a task, blocks until it finishes, returns its run result. `params` is a string-valued object. |
+| `list_sources` | hint | Returns text telling you to call `GET /api/sources` directly to enumerate sources. |
+| `switch_dev_mode(source, enabled, …)` | hint | Returns text telling you to call `PATCH /api/sources/{name}/dev` directly to toggle dev mode. |
+| `test_task(id)` | hint | Returns text telling you to call `POST /api/tasks/{id}/test` directly to run a task's sibling test file. |
+
+There is no MCP tool that lists secrets, dumps the JS API, fetches example
+tasks, writes files, validates, dry-runs, or commits. Discover credentials with
+the `dicode secrets list` CLI, read this skill and `tasks/examples/*` for the
+SDK surface and patterns, and write files through the editor / dev-mode clone —
+not through an MCP call.
 
 ## Mandatory workflow
 
 Follow this order every time — no exceptions:
 
-1. `list_tasks` — check if a similar task already exists (avoid duplicates)
-2. `list_secrets` — know what credentials are available before writing code
-3. `get_js_api` — understand available globals and their exact signatures
-4. `get_example_tasks` — use as style and pattern reference
-5. Write files via `write_task_file`:
+1. `list_tasks` — check if a similar task already exists (avoid duplicates);
+   `get_task("<id>")` to read a close analog's spec and copy its patterns.
+2. Know what credentials exist — `dicode secrets list` on the CLI. Never invent
+   secret names; declare only what exists under `permissions.env`.
+3. Enter dev mode on the target source — `switch_dev_mode` returns a hint;
+   follow it with the `PATCH /api/sources/{name}/dev` call it describes so your
+   edits land in a writable clone.
+4. Write the three files (via the editor / dev-mode clone):
    - `<task-id>/task.yaml` — trigger, params, env declarations
    - `<task-id>/task.ts`   — task logic (TypeScript for `runtime: deno`; use `task.py` for `runtime: python`)
    - `<task-id>/task.test.ts` — unit tests (required, no exceptions)
-6. `validate_task("<task-id>")` — fix ALL errors before proceeding
-7. Run the task's tests — ALL tests must pass before proceeding. From the CLI: `dicode task test <task-id>` (or `make test-tasks` for the full sweep). From the HTTP API: `POST /api/tasks/{id}/test`. Deno runtime only today; Python + Docker parity tracked in [#159](https://github.com/dicode-ayo/dicode-core/issues/159).
-8. `dry_run_task("<task-id>")` — verify HTTP calls and secret resolution
-9. `commit_task("<task-id>", "<source-id>")` — only when 6–8 are clean
+5. Test — ALL tests must pass before proceeding. `test_task("<task-id>")`
+   returns a hint pointing at `POST /api/tasks/{id}/test`; make that call. On the
+   CLI: `dicode task test <task-id>` (or `make test-tasks` for the full sweep).
+   Deno runtime only today; Python + Docker parity tracked in [#159](https://github.com/dicode-ayo/dicode-core/issues/159).
+6. Exercise it — `run_task("<task-id>", { key: "value" })` triggers a real run
+   and returns the result; verify HTTP calls and secret resolution from it.
 
 ## Hard rules
 
-- **Never commit** if `validate_task` returns any errors or task tests fail
-- **Always write `task.test.ts`** — a task without tests will not be committed
+- **Never ship** a task whose `task.yaml` fails to parse or whose tests fail
+- **Always write `task.test.ts`** — a task without tests should not ship
 - `task.ts` **must return a JSON-serializable value** — required for chain triggers
 - **Never hardcode secrets** — use `env.get("VAR")` in the script; declare the var in `permissions.env`
 - **Never declare `DICODE_SOCKET` or `DICODE_TOKEN` in `permissions.env`** — these are internal IPC variables injected automatically; declaring them leaks the token to user code
