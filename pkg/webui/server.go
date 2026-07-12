@@ -608,16 +608,19 @@ func (s *Server) Handler() http.Handler {
 	// changes it just authored (see requireNonEphemeralAPIKey).
 	r.With(s.requireNonEphemeralAPIKey).Post("/api/sources/{name}/commit-push", s.apiCommitPush)
 
-	// Replay endpoint — accepts either a session cookie (WebUI replay button)
-	// or a Bearer API key (CLI / auto-fix scripts). Mounted outside the
-	// session-only group so machine callers without cookies still work.
-	r.With(s.requireSessionOrAPIKey).Post("/api/runs/{runID}/replay", s.apiReplayRun)
+	// Replay endpoint — session cookie (WebUI replay button) or Bearer API key
+	// (CLI / auto-fix scripts). Mounted outside the session-only group so
+	// machine callers without cookies still work. An ephemeral per-run token
+	// is denied: it must not re-drive arbitrary runs across the fleet.
+	r.With(s.requireSessionOrNonEphemeralAPIKey).Post("/api/runs/{runID}/replay", s.apiReplayRun)
 
 	// Resume endpoint (#95) — a suspended run's form submission. Same auth
-	// posture as replay: session cookie (WebUI form) or Bearer API key. The
-	// raw resume_token is resolved server-side from the run, never trusted
-	// from the client.
-	r.With(s.requireSessionOrAPIKey).Post("/api/runs/{runID}/resume", s.apiResumeRun)
+	// posture as replay: session cookie (WebUI form) or non-ephemeral Bearer
+	// key; the driving CLI uses its own managed key, so denying the ephemeral
+	// per-run token here costs nothing and walls agents off from resuming
+	// other runs with attacker-chosen input. The raw resume_token is resolved
+	// server-side from the run, never trusted from the client.
+	r.With(s.requireSessionOrNonEphemeralAPIKey).Post("/api/runs/{runID}/resume", s.apiResumeRun)
 
 	// Approval-gate approve endpoint (#398) — session cookie (WebUI approve
 	// button) or Bearer API key, but NOT an ephemeral per-run token: the

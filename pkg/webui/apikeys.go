@@ -98,7 +98,7 @@ func (s *apiKeyStore) validate(ctx context.Context, raw string) bool {
 // the ephemeral per-run MCP token namespace. Governance endpoints (approve,
 // commit-push) gate on this so a prompt-injected agent holding its own run's
 // ephemeral token can't approve or push the very task it just authored —
-// which would invert the trust-on-change approval gate (#392).
+// which would invert the trust-on-change approval gate.
 func (s *apiKeyStore) validateNonEphemeral(ctx context.Context, raw string) bool {
 	name, ok := s.lookup(ctx, raw)
 	return ok && !strings.HasPrefix(name, ephemeralKeyPrefix)
@@ -257,6 +257,14 @@ func (s *Server) apiCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
 		jsonErr(w, "name is required", http.StatusBadRequest)
+		return
+	}
+	// The tool-managed namespaces are reserved: a dashboard key named into
+	// them would be denied at governance endpoints (validateNonEphemeral) and
+	// swept by the startup revoke — surprising data loss. Keep them off-limits
+	// to operator-chosen names.
+	if strings.HasPrefix(body.Name, ephemeralKeyPrefix) || strings.HasPrefix(body.Name, cliManagedKeyPrefix) {
+		jsonErr(w, "name uses a reserved prefix", http.StatusBadRequest)
 		return
 	}
 	raw, info, err := s.apiKeys.generate(r.Context(), body.Name)

@@ -579,17 +579,19 @@ func (s *Server) handleConn(conn net.Conn) {
 					)
 					continue
 				}
-				// Replace the run's redactor with a new one carrying
-				// these values. Prior redactor values (from secrets
-				// resolved at consumer-launch time) are NOT preserved
-				// here — the existing redactor doesn't expose its
-				// inner values. This is acceptable because a provider
-				// task is itself a CHILD run; its redactor only needs
-				// to scrub the values the provider just returned.
+				// Fold these values into the run's redactor, preserving
+				// what it already scrubs — the secrets resolved at launch
+				// and any ephemeral per-run MCP token. Replacing it wholesale
+				// would drop those and re-expose them on later log lines from
+				// this same run.
 				//
 				// atomic.Store synchronises with the atomic.Load on the
 				// "log" hot path; no mutex needed here.
-				s.redactor.Store(secrets.NewRedactor(sm))
+				extra := make([]string, 0, len(sm))
+				for _, v := range sm {
+					extra = append(extra, v)
+				}
+				s.redactor.Store(s.redactor.Load().WithExtra(extra...))
 
 				// Persist key names + [redacted] placeholders to the run
 				// log so operators can audit which secrets the provider

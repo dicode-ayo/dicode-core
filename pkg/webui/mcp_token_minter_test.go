@@ -2,6 +2,9 @@ package webui
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/dicode/dicode/pkg/db"
@@ -132,6 +135,37 @@ func TestValidateNonEphemeral(t *testing.T) {
 	}
 	if keys.validateNonEphemeral(ctx, "dck_not-a-real-key") {
 		t.Error("bogus key passed validateNonEphemeral")
+	}
+}
+
+// TestCreateAPIKey_RejectsReservedPrefix covers the dashboard-create guard:
+// operator-chosen names must not land in a tool-managed namespace, where they
+// would be denied at governance endpoints and swept at startup.
+func TestCreateAPIKey_RejectsReservedPrefix(t *testing.T) {
+	srv, _, _ := newApprovalTestServer(t, true)
+	h := srv.Handler()
+	cookie := login(t, h, "hunter2", false)
+	if cookie == nil {
+		t.Fatal("login failed")
+	}
+
+	for _, name := range []string{ephemeralKeyPrefix + "foo", cliManagedKeyPrefix + "bar"} {
+		req := httptest.NewRequest(http.MethodPost, "/api/auth/keys", strings.NewReader(`{"name":"`+name+`"}`))
+		req.AddCookie(cookie)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("name %q: status = %d, want 400: %s", name, w.Code, w.Body.String())
+		}
+	}
+
+	// A normal name still succeeds.
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/keys", strings.NewReader(`{"name":"my key"}`))
+	req.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("normal name: status = %d, want 200: %s", w.Code, w.Body.String())
 	}
 }
 

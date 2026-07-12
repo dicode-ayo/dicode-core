@@ -291,6 +291,29 @@ func TestAPI_ApproveTask_RejectsEphemeralToken(t *testing.T) {
 	}
 }
 
+// TestAPI_ResumeReplay_RejectEphemeralToken pins that an agent's ephemeral
+// per-run token cannot drive resume/replay of arbitrary runs. A 401 at the
+// auth layer is enough — the handler is never reached, so the target run need
+// not exist.
+func TestAPI_ResumeReplay_RejectEphemeralToken(t *testing.T) {
+	srv, _, _ := newApprovalTestServer(t, true)
+	ephemeral, err := newMCPTokenMinter(srv.apiKeys).Mint(context.Background(), "run-self")
+	if err != nil {
+		t.Fatalf("mint ephemeral: %v", err)
+	}
+	h := srv.Handler()
+
+	for _, path := range []string{"/api/runs/other-run/resume", "/api/runs/other-run/replay"} {
+		req := httptest.NewRequest(http.MethodPost, path, nil)
+		req.Header.Set("Authorization", "Bearer "+ephemeral)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusUnauthorized {
+			t.Errorf("%s with ephemeral token: status = %d, want 401: %s", path, w.Code, w.Body.String())
+		}
+	}
+}
+
 func TestAPI_ApproveTask_SessionCookieWorks(t *testing.T) {
 	srv, reg, _ := newApprovalTestServer(t, true)
 	registerMinimalTask(t, reg, "repo/pending-task")
