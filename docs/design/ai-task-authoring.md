@@ -166,6 +166,86 @@ are overrides of it). The **drivers** — `/api/ai/chat`, the WebUI chat panel, 
 from fire-a-run-per-turn to drive suspend→resume. Phase order: **#569 run-tree** →
 **state offload** → **migrate `ai-agent` + drivers**.
 
+## Verified convergence design (2026-07-12)
+
+A code-grounded design pass on *"one selectable ai-task runs the whole loop/create logic;
+the user swaps model/provider; prompts + skills are preserved"*. The finding: this is
+**assembly of existing parts**, and the shared code is one ~120-line module. Every claim
+below was checked against `main`.
+
+### The seam — a shared turn module, not a mega-task
+
+Provider is a dial by **task id + params + yaml overrides**, not a `provider:` param on a
+single task. A single task carrying every backend would need the **union** of their
+permissions (`net:` for the OpenAI family vs `run:["claude"]` + fs + env for the CLI
+family) — a least-privilege violation. So:
+
+- **`tasks/buildin/ai-agent-core/chat.ts`** — the shared turn envelope extracted from the
+  claude-cli slice that already ships (`decideEntryMode`/`isChatEnd`/`chatSchema`/
+  `steps.turn`, plus the skill-name validation duplicated across both tasks today). Exposes
+  one seam:
+
+  ```
+  runTurn({ message, systemPrompt, skills, params, state }) → { reply, state }   // state provider-opaque
+  ```
+
+- **`ai-agent/task.ts`** = OpenAI `runTurn` (its existing tool loop), `state = {messages,
+  summary}` carried in `resume_state` — the KV `chat:<id>` threading is retired.
+- **`ai-agent-claude-cli/task.ts`** = `runTurn` = the already-factored `runClaudeTurn`,
+  `state = {claudeSessionId, chatId}`.
+- Provider/persona stays a **yaml override** (`dicodai`/`auto-fix`/`task-create`), sharing
+  the skills library, not copied prompts.
+
+**Extensibility:** a `codex`/`gemini` CLI backend = one new task dir + one `taskset.yaml`
+line (1 existing file changed). A local vLLM / any OpenAI-compat = 0 code, 1 yaml stanza.
+
+### Dedup — reuse, do not rebuild
+
+- **Big-state offload (#570) reuses `registry.InputStore`.** Go already has the exact
+  mechanism: marshal → AES-encrypt (`InputCrypto`) → delegate `{op,key,value}` to a
+  config-dialed storage task (`run_inputs.storage_task`, default `buildin/local-storage`),
+  reference on the runs row, GC by a cleanup buildin. #570 is a threshold-check on
+  `len(resume_state)` at the suspend write + an InputStore sibling (`prefix: resume-state/`,
+  keyed by **root run id** for conversation-scoped GC). The `{store,key}` reference is
+  **internal to Go, invisible to tasks** (and encrypted) — not a task-side protocol. The
+  8 MiB IPC frame cap makes this non-optional, not a nicety.
+- **Suspend/end notification reuses the `approvalNotifier` pattern.** The WebUI already
+  broadcasts `run:finished` with `Status:"suspended"` off `runFinishedHook`. Missing is
+  only a `notify_task` fire — a ~50-line `suspendNotifier` mirroring
+  `pkg/daemon/approval_notify.go` on the same hook (suspend → the agent awaits input;
+  conversation-end → `root_run_id != run_id`). Not in the agent tasks: they'd each need
+  `dicode.tasks` grants and it would miss non-AI suspending tasks.
+- **Provider dial, run grouping, dispatch** — reuse `cfg.AI.Task`/params, `root_run_id`
+  (#569), `handleAI`. No Go provider interface, no prompt-template engine, no second
+  notification or storage system.
+
+### Corrections that shape the order
+
+- **The shared skills are factually wrong**, so "skills preserved across providers" is
+  false *in content* today: `dicode-task-dev.md` names seven MCP tools that do not exist;
+  `dicode-basics.md` carries SDK-surface wording wrong on the MCP path. Fixing skill truth
+  is a prerequisite, not polish.
+- **Keep `ai-agent` on the capability-gated SDK until per-agent MCP scoping (#560) lands.**
+  Converging it onto the current single-bearer MCP surface would be a governance
+  *downgrade*. The seam is indifferent — tool dispatch lives inside each `runTurn`.
+- **`task.Hash` digests only a task's own dir**, so a shared module outside it doesn't bust
+  importers' content hashes — an edited `chat.ts` would bypass the #392 approval gate for
+  *user-source* importers (moot for gate-exempt buildins). Follow-up: an optional
+  `hash_include:` in task.yaml folded into `Hash()`.
+
+### Ordered plan
+
+| # | Step | Reuses |
+|---|---|---|
+| 1 | **#566** — protect `suspended` dev-clones (one line) | — |
+| 2 | **Skill-truth fix** — real MCP tool surface in the shared `.md`s | `tasks/skills/` |
+| 3 | **#570** — `resume_state` offload in Go | `InputStore`/`InputCrypto`, `local-storage`, `root_run_id` |
+| 4 | **Seam + #571a** — extract `ai-agent-core/chat.ts`; migrate `ai-agent` onto it | claude-cli envelope, #569, #570 |
+| 5 | **#571b** — drivers (`handleAI` / `/api/ai/chat` / `dicode ai`) drive suspend→resume | shipped CLI resume loop |
+| 6 | **Suspend-notify** — `suspendNotifier` on `runFinishedHook` | `approval_notify` pattern, `buildin/notify` |
+| 7 | **`task-create` + prompt-threading** — kills #288 | `auto-fix` override, `handleAI` |
+| 8 | Follow-up — `hash_include` for shared-module hash coverage | — |
+
 ## Open questions
 
 - **Single-session-per-source (#283)** becomes "one active suspended authoring run per
