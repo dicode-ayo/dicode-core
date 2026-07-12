@@ -1,7 +1,7 @@
 // Sweeps orphaned dev-mode clone directories.
 //
 // Layout: ${DATADIR}/dev-clones/<sourceName>/<runID>/
-// A clone is orphan iff its <runID> is not in the set of currently-running
+// A clone is orphan iff its <runID> is not in the set of non-terminal
 // run IDs (across all registered tasks). Files/dirs that do not fit the
 // layout are left alone.
 //
@@ -26,7 +26,9 @@ async function collectActiveRunIDs(dicode: Dicode): Promise<Set<string>> {
       continue; // task may have been deregistered between list_tasks and get_runs
     }
     for (const r of runs) {
-      if (r.Status === "running") active.add(r.ID);
+      // A suspended run is paused awaiting user input (an AI chat/authoring
+      // session), so its dev-clone is still live — protect any non-terminal run.
+      if (r.Status === "running" || r.Status === "suspended") active.add(r.ID);
     }
   }
   return active;
