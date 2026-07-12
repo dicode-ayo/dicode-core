@@ -34,6 +34,29 @@ func TestRedactor_EmptyValueMap(t *testing.T) {
 	}
 }
 
+func TestRedactor_WithExtra(t *testing.T) {
+	t.Parallel()
+
+	// Extra value folds in on top of the base secrets.
+	base := NewRedactor(map[string]string{"A": "alpha"})
+	r := base.WithExtra("bravo")
+	if got := r.RedactString("alpha bravo"); got != RedactionMarker+" "+RedactionMarker {
+		t.Errorf("WithExtra redaction = %q", got)
+	}
+	// The original is untouched — WithExtra returns a new Redactor.
+	if got := base.RedactString("alpha bravo"); got != RedactionMarker+" bravo" {
+		t.Errorf("base mutated by WithExtra: %q", got)
+	}
+	// Safe on nil and zero receivers, and empty extras are dropped.
+	var nilR *Redactor
+	if got := nilR.WithExtra("token").RedactString("token"); got != RedactionMarker {
+		t.Errorf("nil.WithExtra = %q", got)
+	}
+	if got := base.WithExtra("").RedactString("alpha"); got != RedactionMarker {
+		t.Errorf("empty extra should be a no-op add: %q", got)
+	}
+}
+
 func TestRedactor_SingleValue(t *testing.T) {
 	t.Parallel()
 	r := NewRedactor(map[string]string{"MY_TOKEN": "s3cr3t"})

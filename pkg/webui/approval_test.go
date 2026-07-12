@@ -259,6 +259,61 @@ func TestAPI_ApproveTask_RequiresAuth(t *testing.T) {
 	}
 }
 
+// TestAPI_ApproveTask_RejectsEphemeralToken is the regression for the
+// self-approval inversion: an agent's own ephemeral per-run MCP token is a
+// valid API key, but it must not let that agent approve the task it just
+// authored. The gate must stay pending.
+func TestAPI_ApproveTask_RejectsEphemeralToken(t *testing.T) {
+	srv, reg, _ := newApprovalTestServer(t, true)
+	registerMinimalTask(t, reg, "repo/pending-task")
+	gate := newFakeGate()
+	gate.pending["repo/pending-task"] = "hash-1"
+	srv.SetApprovalGate(gate)
+
+	ephemeral, err := newMCPTokenMinter(srv.apiKeys).Mint(context.Background(), "run-self")
+	if err != nil {
+		t.Fatalf("mint ephemeral: %v", err)
+	}
+	// Sanity: it really is a valid key, just not one allowed here.
+	if !srv.apiKeys.validate(context.Background(), ephemeral) {
+		t.Fatal("precondition: ephemeral token should validate as a key")
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks/repo%2Fpending-task/approve", nil)
+	req.Header.Set("Authorization", "Bearer "+ephemeral)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("ephemeral token: status = %d, want 401: %s", w.Code, w.Body.String())
+	}
+	if !gate.IsPending("repo/pending-task") {
+		t.Fatal("ephemeral token must not approve the task")
+	}
+}
+
+// TestAPI_ResumeReplay_RejectEphemeralToken pins that an agent's ephemeral
+// per-run token cannot drive resume/replay of arbitrary runs. A 401 at the
+// auth layer is enough — the handler is never reached, so the target run need
+// not exist.
+func TestAPI_ResumeReplay_RejectEphemeralToken(t *testing.T) {
+	srv, _, _ := newApprovalTestServer(t, true)
+	ephemeral, err := newMCPTokenMinter(srv.apiKeys).Mint(context.Background(), "run-self")
+	if err != nil {
+		t.Fatalf("mint ephemeral: %v", err)
+	}
+	h := srv.Handler()
+
+	for _, path := range []string{"/api/runs/other-run/resume", "/api/runs/other-run/replay"} {
+		req := httptest.NewRequest(http.MethodPost, path, nil)
+		req.Header.Set("Authorization", "Bearer "+ephemeral)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusUnauthorized {
+			t.Errorf("%s with ephemeral token: status = %d, want 401: %s", path, w.Code, w.Body.String())
+		}
+	}
+}
+
 func TestAPI_ApproveTask_SessionCookieWorks(t *testing.T) {
 	srv, reg, _ := newApprovalTestServer(t, true)
 	registerMinimalTask(t, reg, "repo/pending-task")

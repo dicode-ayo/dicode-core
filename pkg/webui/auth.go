@@ -145,23 +145,37 @@ func (s *Server) hasValidSession(w http.ResponseWriter, r *http.Request) bool {
 // Used by endpoints that need to be reachable from both the WebUI (cookies)
 // and CLI/CI tooling (Bearer). When server.auth is disabled this is a no-op.
 func (s *Server) requireSessionOrAPIKey(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !s.cfg.Server.Auth {
-			next.ServeHTTP(w, r)
-			return
-		}
-		if raw := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "); raw != "" && s.apiKeys.validate(r.Context(), raw) {
-			next.ServeHTTP(w, r)
-			return
-		}
-		if s.hasValidSession(w, r) {
-			next.ServeHTTP(w, r)
-			return
-		}
-		s.auditDenied(r, "no valid session or API key")
-		w.Header().Set("WWW-Authenticate", `Bearer realm="dicode"`)
-		jsonErr(w, "unauthorized", http.StatusUnauthorized)
-	})
+	return s.sessionOrAPIKeyMiddleware(s.apiKeys.validate)(next)
+}
+
+// requireSessionOrNonEphemeralAPIKey is requireSessionOrAPIKey that rejects
+// ephemeral per-run MCP tokens on the Bearer path (a session cookie is still
+// accepted). Governance endpoints an agent must not self-serve — task
+// approval above all — gate on this (see validateNonEphemeral).
+func (s *Server) requireSessionOrNonEphemeralAPIKey(next http.Handler) http.Handler {
+	return s.sessionOrAPIKeyMiddleware(s.apiKeys.validateNonEphemeral)(next)
+}
+
+func (s *Server) sessionOrAPIKeyMiddleware(validate func(context.Context, string) bool) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !s.cfg.Server.Auth {
+				next.ServeHTTP(w, r)
+				return
+			}
+			if raw := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "); raw != "" && validate(r.Context(), raw) {
+				next.ServeHTTP(w, r)
+				return
+			}
+			if s.hasValidSession(w, r) {
+				next.ServeHTTP(w, r)
+				return
+			}
+			s.auditDenied(r, "no valid session or API key")
+			w.Header().Set("WWW-Authenticate", `Bearer realm="dicode"`)
+			jsonErr(w, "unauthorized", http.StatusUnauthorized)
+		})
+	}
 }
 
 // requireAuth is a middleware that enforces authentication when server.auth is

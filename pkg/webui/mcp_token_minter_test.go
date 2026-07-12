@@ -2,6 +2,9 @@ package webui
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/dicode/dicode/pkg/db"
@@ -93,6 +96,76 @@ func TestRevokeByNamePrefix_SweepsEphemeralOnly(t *testing.T) {
 	}
 	if !keys.validate(ctx, dashKey) {
 		t.Error("dashboard key was swept but should survive")
+	}
+}
+
+// TestValidateNonEphemeral covers the governance-endpoint guard: a valid
+// ephemeral per-run token is rejected while operator, CLI-managed, and
+// dashboard keys still pass. This is what stops a prompt-injected agent from
+// approving or pushing the task it just authored with its own run token.
+func TestValidateNonEphemeral(t *testing.T) {
+	ctx := context.Background()
+	keys := newTestAPIKeyStore(t)
+
+	ephemeral, err := newMCPTokenMinter(keys).Mint(ctx, "run-x")
+	if err != nil {
+		t.Fatalf("mint ephemeral: %v", err)
+	}
+	cliKey, _, err := keys.generate(ctx, cliManagedKeyPrefix+"laptop")
+	if err != nil {
+		t.Fatalf("generate cli key: %v", err)
+	}
+	dashKey, _, err := keys.generate(ctx, "my dashboard key")
+	if err != nil {
+		t.Fatalf("generate dashboard key: %v", err)
+	}
+
+	// Ephemeral token is a valid key but must fail the governance check.
+	if !keys.validate(ctx, ephemeral) {
+		t.Fatal("precondition: ephemeral token should be a valid key")
+	}
+	if keys.validateNonEphemeral(ctx, ephemeral) {
+		t.Error("ephemeral token passed validateNonEphemeral")
+	}
+	if !keys.validateNonEphemeral(ctx, cliKey) {
+		t.Error("CLI-managed key rejected by validateNonEphemeral")
+	}
+	if !keys.validateNonEphemeral(ctx, dashKey) {
+		t.Error("dashboard key rejected by validateNonEphemeral")
+	}
+	if keys.validateNonEphemeral(ctx, "dck_not-a-real-key") {
+		t.Error("bogus key passed validateNonEphemeral")
+	}
+}
+
+// TestCreateAPIKey_RejectsReservedPrefix covers the dashboard-create guard:
+// operator-chosen names must not land in a tool-managed namespace, where they
+// would be denied at governance endpoints and swept at startup.
+func TestCreateAPIKey_RejectsReservedPrefix(t *testing.T) {
+	srv, _, _ := newApprovalTestServer(t, true)
+	h := srv.Handler()
+	cookie := login(t, h, "hunter2", false)
+	if cookie == nil {
+		t.Fatal("login failed")
+	}
+
+	for _, name := range []string{ephemeralKeyPrefix + "foo", cliManagedKeyPrefix + "bar"} {
+		req := httptest.NewRequest(http.MethodPost, "/api/auth/keys", strings.NewReader(`{"name":"`+name+`"}`))
+		req.AddCookie(cookie)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("name %q: status = %d, want 400: %s", name, w.Code, w.Body.String())
+		}
+	}
+
+	// A normal name still succeeds.
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/keys", strings.NewReader(`{"name":"my key"}`))
+	req.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("normal name: status = %d, want 200: %s", w.Code, w.Body.String())
 	}
 }
 

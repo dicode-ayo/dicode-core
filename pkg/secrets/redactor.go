@@ -21,6 +21,10 @@ const RedactionMarker = "<REDACTED>"
 type Redactor struct {
 	// nil when there are no values to redact — the hot path bails early.
 	replacer *strings.Replacer
+	// The deduped, non-empty values this redactor was built from, retained
+	// so WithExtra can rebuild rather than compose (a strings.Replacer is
+	// opaque and cannot be extended in place).
+	values []string
 }
 
 // NewRedactor returns a Redactor that replaces every distinct non-empty
@@ -33,6 +37,26 @@ type Redactor struct {
 // Duplicates are dropped so repeated secret registration doesn't produce
 // a duplicate-key argument to strings.NewReplacer (which would panic).
 func NewRedactor(values map[string]string) *Redactor {
+	vals := make([]string, 0, len(values))
+	for _, v := range values {
+		vals = append(vals, v)
+	}
+	return redactorFromValues(vals)
+}
+
+// WithExtra returns a new Redactor that redacts everything r does plus each
+// non-empty value in extra. Safe on a nil or zero-value receiver. Used to
+// fold in a value that only becomes known after the run's secrets were
+// resolved — e.g. an ephemeral per-run token minted after ResolveRunEnv.
+func (r *Redactor) WithExtra(extra ...string) *Redactor {
+	var base []string
+	if r != nil {
+		base = r.values
+	}
+	return redactorFromValues(append(append([]string(nil), base...), extra...))
+}
+
+func redactorFromValues(values []string) *Redactor {
 	if len(values) == 0 {
 		return &Redactor{}
 	}
@@ -62,7 +86,7 @@ func NewRedactor(values map[string]string) *Redactor {
 	for _, v := range uniq {
 		pairs = append(pairs, v, RedactionMarker)
 	}
-	return &Redactor{replacer: strings.NewReplacer(pairs...)}
+	return &Redactor{replacer: strings.NewReplacer(pairs...), values: uniq}
 }
 
 // RedactString returns s with every occurrence of a known secret value

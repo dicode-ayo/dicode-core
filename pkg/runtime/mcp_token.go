@@ -50,24 +50,31 @@ func WantsMCPToken(spec *task.Spec) bool {
 // doesn't declare the env entry or no minter is wired (legacy/test path:
 // the static-secret env value, if any, is left untouched).
 //
+// The minted token value is returned so the caller can fold it into the
+// run-log redactor (secrets.Redactor.WithExtra) before any log stream or IPC
+// server is wired: the redactor is snapshot from the secrets resolved for the
+// run, which do not include a token minted after resolution, so without this
+// the ephemeral key would pass through run logs unredacted. token is "" when
+// nothing was minted.
+//
 // Callers MUST defer the returned revoke unconditionally, immediately after
 // this call returns, so the token is revoked on every exit path (success,
 // error, timeout, panic). Revoke runs against context.Background() rather
 // than the run's ctx: a timed-out or canceled run is exactly the case where
 // revocation matters most, and it must not be defeated by the same
 // cancellation that ended the run.
-func ApplyMCPToken(ctx context.Context, live *BridgeDeps, log *zap.Logger, spec *task.Spec, runID string, resolved map[string]string) (revoke func(), err error) {
+func ApplyMCPToken(ctx context.Context, live *BridgeDeps, log *zap.Logger, spec *task.Spec, runID string, resolved map[string]string) (token string, revoke func(), err error) {
 	noop := func() {}
 	minter := live.MCPTokenMinter
 	if minter == nil || !WantsMCPToken(spec) {
-		return noop, nil
+		return "", noop, nil
 	}
-	token, err := minter.Mint(ctx, runID)
+	token, err = minter.Mint(ctx, runID)
 	if err != nil {
-		return noop, fmt.Errorf("mint mcp token: %w", err)
+		return "", noop, fmt.Errorf("mint mcp token: %w", err)
 	}
 	resolved[MCPTokenEnvName] = token
-	return func() {
+	return token, func() {
 		if rerr := minter.Revoke(context.Background(), runID); rerr != nil && log != nil {
 			log.Warn("revoke ephemeral mcp token failed", zap.String("run", runID), zap.Error(rerr))
 		}

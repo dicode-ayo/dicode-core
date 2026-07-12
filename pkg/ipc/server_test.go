@@ -1565,6 +1565,66 @@ func TestServer_SecretOutputRoutedAndRedacted(t *testing.T) {
 	}
 }
 
+// TestServer_SecretOutput_PreservesExistingRedaction is the regression for
+// the leak reopening on the output.secret path: a value the run's redactor
+// already scrubs (e.g. the ephemeral per-run MCP token folded in at launch)
+// must stay redacted after the task emits a secret output — the redactor is
+// extended, not replaced.
+func TestServer_SecretOutput_PreservesExistingRedaction(t *testing.T) {
+	const priorSecret = "mcp-token-abc123"
+	const newSecret = "postgres://x"
+
+	e := newTestEnv(t)
+	runID := fmt.Sprintf("test-%d", time.Now().UnixNano())
+	srv := New(runID, "test-task", e.secret, e.reg, e.db, nil, nil, zap.NewNop(), nil, nil)
+	srv.SetRedactor(secrets.NewRedactor(map[string]string{"DICODE_MCP_API_KEY": priorSecret}))
+
+	socketPath, token, err := srv.Start(context.Background())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(srv.Stop)
+	conn := dial(t, socketPath)
+	t.Cleanup(func() { conn.Close() })
+	doHandshake(t, conn, token)
+
+	// The task emits a secret output — this rebuilds the run redactor.
+	sendMsg(t, conn, map[string]any{
+		"method":    "output",
+		"secret":    true,
+		"secretMap": map[string]string{"PG_URL": newSecret},
+	})
+	// Then logs a line containing both the prior token and the new secret.
+	sendMsg(t, conn, map[string]any{
+		"method":  "log",
+		"level":   "info",
+		"message": "dump: " + priorSecret + " and " + newSecret,
+	})
+	time.Sleep(50 * time.Millisecond)
+	conn.Close()
+	srv.Stop()
+
+	logs, err := e.reg.GetRunLogs(context.Background(), srv.runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var line string
+	for _, l := range logs {
+		if strings.HasPrefix(l.Message, "dump: ") {
+			line = l.Message
+		}
+	}
+	if line == "" {
+		t.Fatalf("dump log line not found in %d entries", len(logs))
+	}
+	if strings.Contains(line, priorSecret) {
+		t.Errorf("prior redactor value leaked after secret output: %q", line)
+	}
+	if strings.Contains(line, newSecret) {
+		t.Errorf("newly-output secret leaked: %q", line)
+	}
+}
+
 // TestServer_SecretOutputRejectsNestedMap verifies that a SecretMap whose
 // values are objects (rather than strings) is logged-and-dropped: nothing
 // arrives on the SetSecretOutput channel.
