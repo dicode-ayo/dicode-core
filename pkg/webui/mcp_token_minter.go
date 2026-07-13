@@ -21,11 +21,14 @@ func newMCPTokenMinter(keys *apiKeyStore) *mcpTokenMinter {
 }
 
 // Mint generates a fresh API key named for this run and returns the raw
-// value. The token is full-surface — the same permissions as an
-// operator-managed key — not yet scoped to the task's declared
-// capabilities; per-capability scoping is a follow-on.
-func (m *mcpTokenMinter) Mint(ctx context.Context, runID string) (string, error) {
-	raw, _, err := m.keys.generate(ctx, ephemeralKeyPrefix+runID)
+// value. The key is stored with scope, restricting the MCP tool surface it
+// may call (via /mcp's mcpScopeCheck) to exactly the calling task's own
+// declared permissions.dicode — never more than the task could already do
+// directly. scope is stored as given, including the zero value MCPScope{}
+// (a spec with no dicode permissions declared), which correctly denies
+// every scoped tool call; it is never treated as "unscoped".
+func (m *mcpTokenMinter) Mint(ctx context.Context, runID string, scope pkgruntime.MCPScope) (string, error) {
+	raw, _, err := m.keys.generateScoped(ctx, ephemeralKeyPrefix+runID, &scope)
 	return raw, err
 }
 

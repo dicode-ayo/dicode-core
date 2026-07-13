@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/dicode/dicode/pkg/db"
+	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 )
@@ -26,7 +27,19 @@ func newAPIKeyStore(d db.DB) *apiKeyStore { return &apiKeyStore{db: d} }
 
 // Generate creates a new API key, stores its hash, and returns the raw key.
 // The raw key is returned only once — callers must present it to the user.
+// Unscoped (full access) — see generateScoped for the scoped variant used by
+// ephemeral per-run MCP tokens.
 func (s *apiKeyStore) generate(ctx context.Context, name string) (raw string, info APIKeyInfo, err error) {
+	return s.generateScoped(ctx, name, nil)
+}
+
+// generateScoped is generate with an optional MCP capability scope. A nil
+// scope stores NULL in the scopes column — unscoped/full access, identical
+// to generate's current behavior. A non-nil scope (including the zero value
+// MCPScope{}, which authorizes nothing) is JSON-marshaled and stored, so a
+// caller reading it back via scopeFor gets an enforced restriction rather
+// than an accidental full-access key.
+func (s *apiKeyStore) generateScoped(ctx context.Context, name string, scope *pkgruntime.MCPScope) (raw string, info APIKeyInfo, err error) {
 	rawBytes, err := randomToken()
 	if err != nil {
 		return "", APIKeyInfo{}, err
@@ -45,9 +58,18 @@ func (s *apiKeyStore) generate(ctx context.Context, name string) (raw string, in
 	id := uuid.New().String()
 	now := time.Now().Unix()
 
+	var scopesJSON any // nil -> SQL NULL
+	if scope != nil {
+		b, merr := json.Marshal(scope)
+		if merr != nil {
+			return "", APIKeyInfo{}, fmt.Errorf("marshal mcp scope: %w", merr)
+		}
+		scopesJSON = string(b)
+	}
+
 	if err = s.db.Exec(ctx,
-		`INSERT INTO api_keys (id, name, key_hash, prefix, created_at) VALUES (?, ?, ?, ?, ?)`,
-		id, name, hash, prefix, now,
+		`INSERT INTO api_keys (id, name, key_hash, prefix, created_at, scopes) VALUES (?, ?, ?, ?, ?, ?)`,
+		id, name, hash, prefix, now, scopesJSON,
 	); err != nil {
 		return "", APIKeyInfo{}, err
 	}
@@ -58,6 +80,48 @@ func (s *apiKeyStore) generate(ctx context.Context, name string) (raw string, in
 		CreatedAt: time.Unix(now, 0),
 	}
 	return raw, info, nil
+}
+
+// scopeFor looks up raw's stored MCP scope by hash (same validity rules as
+// lookup: must exist and be unexpired). found reports whether the key
+// validated at all; scope is nil when found but the key is unscoped (NULL/
+// empty scopes column — full access), or non-nil (possibly the zero value,
+// which denies everything) when the key carries an explicit scope.
+func (s *apiKeyStore) scopeFor(ctx context.Context, raw string) (scope *pkgruntime.MCPScope, found bool) {
+	if !strings.HasPrefix(raw, apiKeyPrefix) {
+		return nil, false
+	}
+	hash := hashAPIKey(raw)
+	now := time.Now().Unix()
+
+	var id string
+	var scopesJSON *string
+	_ = s.db.Query(ctx,
+		`SELECT id, scopes FROM api_keys WHERE key_hash = ? AND (expires_at IS NULL OR expires_at > ?)`,
+		[]any{hash, now},
+		func(rows db.Scanner) error {
+			if rows.Next() {
+				found = true
+				return rows.Scan(&id, &scopesJSON)
+			}
+			return nil
+		},
+	)
+	if !found || id == "" {
+		return nil, false
+	}
+	if scopesJSON == nil || *scopesJSON == "" {
+		return nil, true
+	}
+	var s2 pkgruntime.MCPScope
+	if err := json.Unmarshal([]byte(*scopesJSON), &s2); err != nil {
+		// Corrupt/unrecognized scope data: fail closed (deny everything)
+		// rather than silently falling back to unscoped/full access. This
+		// should never happen since only generateScoped ever writes this
+		// column.
+		return &pkgruntime.MCPScope{}, true
+	}
+	return &s2, true
 }
 
 // lookup checks a raw key against stored hashes, updates last_used, and
