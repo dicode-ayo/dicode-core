@@ -42,7 +42,7 @@ func (n suspendNotifier) onRunFinished(taskID, runID, status, triggerSource stri
 			body += " Resume: " + resume
 		}
 		n.dispatch(taskID, runID, map[string]string{
-			// Rendered fields for buildin/notify (title + body required);
+			// Rendered fields for buildin/notifications (title + body required);
 			// structured fields for custom delivery tasks.
 			"title": "dicode: an agent needs your reply", "body": body, "priority": "default",
 			"event": "suspended", "run_id": runID, "task_id": taskID, "resume_url": resume,
@@ -74,7 +74,7 @@ func (n suspendNotifier) dispatch(taskID, runID string, params map[string]string
 			}
 		}()
 		if err := n.fire(n.notifyTask, params); err != nil && n.log != nil {
-			// Best-effort and default-on (buildin/notify), which legitimately
+			// Best-effort and default-on (buildin/notifications), which legitimately
 			// fails on a headless daemon with no desktop — Debug, not Warn, so
 			// it doesn't spam a server's log every suspend.
 			n.log.Debug("suspend notify task did not fire",

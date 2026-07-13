@@ -179,7 +179,7 @@ type AIConfig struct {
 
 	// NotifyTask is fired when a run suspends awaiting input (and when a
 	// suspended conversation ends), so the operator gets pinged to come answer
-	// the agent. Defaults to "buildin/notify" (a native desktop notification)
+	// the agent. Defaults to "buildin/notifications" (a native desktop notification)
 	// for a zero-config ping — a delivery task (slack/ntfy/email) can be swapped
 	// in and receives both a rendered title/body and the structured
 	// run_id/task_id/resume_url. Fires for any suspending run, not only AI ones.
@@ -588,10 +588,10 @@ func applyDefaults(cfg *Config, configDir string) {
 	if cfg.AI.CreateSessionTTL == 0 {
 		cfg.AI.CreateSessionTTL = 24 * time.Hour
 	}
-	// AI.NotifyTask defaults to buildin/notify so a suspended agent pings the
+	// AI.NotifyTask defaults to buildin/notifications so a suspended agent pings the
 	// operator out of the box. Same empty-or-default rule as AI.Task.
 	if cfg.AI.NotifyTask == "" {
-		cfg.AI.NotifyTask = "buildin/notify"
+		cfg.AI.NotifyTask = "buildin/notifications"
 	}
 	// RunInputs defaults: 30-day retention, local-storage backend.
 	if cfg.Defaults.RunInputs.Retention == 0 {
