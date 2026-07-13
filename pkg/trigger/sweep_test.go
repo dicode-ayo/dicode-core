@@ -67,7 +67,7 @@ func TestEngineSweep_FiresFinishHookAndResumeTimeoutChain(t *testing.T) {
 	eng, reg := newSuspendEnv(t, exec)
 
 	rec := &finishHookRecorder{}
-	eng.SetRunFinishedHook(rec.hook)
+	eng.AddRunFinishedHook(rec.hook)
 
 	wiz := &task.Spec{ID: "wiz", Name: "wiz", Runtime: task.RuntimeDeno, Trigger: task.TriggerConfig{Manual: true}, Enabled: true}
 	after := &task.Spec{ID: "after", Name: "after", Runtime: task.RuntimeDeno, Enabled: true,
@@ -121,7 +121,7 @@ func TestEngineSweep_ResumedRunNotDoubleFinished(t *testing.T) {
 	eng, reg := newSuspendEnv(t, exec)
 
 	rec := &finishHookRecorder{}
-	eng.SetRunFinishedHook(rec.hook)
+	eng.AddRunFinishedHook(rec.hook)
 
 	wiz := &task.Spec{ID: "wiz", Name: "wiz", Runtime: task.RuntimeDeno, Trigger: task.TriggerConfig{Manual: true}, Enabled: true}
 	if err := reg.Register(wiz); err != nil {

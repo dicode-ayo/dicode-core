@@ -312,7 +312,7 @@ func New(port int, r *registry.Registry, eng *trigger.Engine, cfg *config.Config
 	})
 
 	// Wire run finished hook → broadcast run:finished
-	eng.SetRunFinishedHook(func(taskID, runID, status, triggerSource string, durationMs int64) {
+	eng.AddRunFinishedHook(func(taskID, runID, status, triggerSource string, durationMs int64) {
 		taskName := taskID
 		var outputContentType, returnValue string
 		if spec, ok := r.Get(taskID); ok {

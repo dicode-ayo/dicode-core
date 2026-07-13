@@ -726,6 +726,28 @@ func buildWebUI(ctx context.Context, cfg *config.Config, configPath, version, da
 			notifier.notify(id, hash)
 		}()
 	})
+	// Notify on suspend (and on a suspended conversation's end) so the operator
+	// gets pinged to come answer a paused agent (#584). Composes with the
+	// WebUI's run:finished broadcast via AddRunFinishedHook; a no-op when
+	// ai.notify_task is unset.
+	suspendNotify := suspendNotifier{
+		notifyTask: cfg.AI.NotifyTask,
+		resumeURL:  func(runID string) string { return srv.WebUIBaseURL() + "/?run=" + runID },
+		rootRunID: func(runID string) (string, bool) {
+			run, err := reg.GetRun(ctx, runID)
+			if err != nil || run == nil {
+				return "", false
+			}
+			return run.RootRunID, true
+		},
+		fire: func(id string, params map[string]string) error {
+			_, err := eng.FireManual(ctx, id, params)
+			return err
+		},
+		log: log,
+	}
+	eng.AddRunFinishedHook(suspendNotify.onRunFinished)
+
 	if replayer != nil {
 		srv.SetReplayer(replayer)
 	}

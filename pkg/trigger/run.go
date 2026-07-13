@@ -445,7 +445,7 @@ func (e *Engine) runTask(runCtx context.Context, spec *task.Spec, opts pkgruntim
 		e.log.Warn("run finished", runFields...)
 	}
 
-	if h := e.runFinishedHook; h != nil {
+	for _, h := range e.runFinishedHooks {
 		h(spec.ID, opts.RunID, status, string(source), elapsed.Milliseconds())
 	}
 
@@ -484,7 +484,7 @@ func (e *Engine) finalizeCancelled(spec *task.Spec, opts pkgruntime.RunOptions, 
 			zap.String("task", spec.ID),
 			zap.Error(err))
 	}
-	if h := e.runFinishedHook; h != nil {
+	for _, h := range e.runFinishedHooks {
 		// Duration is 0 — the run never executed.
 		h(spec.ID, opts.RunID, registry.StatusCancelled, string(source), 0)
 	}

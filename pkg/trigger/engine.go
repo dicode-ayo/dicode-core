@@ -171,8 +171,8 @@ type Engine struct {
 	taskWaiting atomic.Int64  // goroutines parked waiting for a semaphore slot
 	started     atomic.Bool   // set to true by Start(); guards SetMaxConcurrentTasks
 
-	runFinishedHook func(taskID, runID, status, triggerSource string, durationMs int64)
-	runStartedHook  func(taskID, runID, triggerSource string)
+	runFinishedHooks []func(taskID, runID, status, triggerSource string, durationMs int64)
+	runStartedHook   func(taskID, runID, triggerSource string)
 
 	// denoRuntime / pythonRuntime are typed runtime handles needed by the
 	// Engine's ProviderRunner implementation (issue #119). The engine swaps
@@ -321,11 +321,12 @@ func (e *Engine) SetRunStartedHook(fn func(taskID, runID, triggerSource string))
 	e.runStartedHook = fn
 }
 
-// SetRunFinishedHook registers a callback invoked after every run completes.
-// Called from the goroutine that ran the task, so the hook must be non-blocking
-// (e.g. send to a buffered channel).
-func (e *Engine) SetRunFinishedHook(fn func(taskID, runID, status, triggerSource string, durationMs int64)) {
-	e.runFinishedHook = fn
+// AddRunFinishedHook registers a callback invoked after every run completes
+// (including a suspend). Hooks are called, in registration order, from the
+// goroutine that ran the task, so each must be non-blocking (e.g. send to a
+// buffered channel or spawn a goroutine). Multiple subscribers compose.
+func (e *Engine) AddRunFinishedHook(fn func(taskID, runID, status, triggerSource string, durationMs int64)) {
+	e.runFinishedHooks = append(e.runFinishedHooks, fn)
 }
 
 // SetDefaultsOnFailureChain sets the global on_failure_chain to fire when any task fails.

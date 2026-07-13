@@ -176,6 +176,17 @@ type AIConfig struct {
 	// who want effectively-never auto-cancel can set a very large value
 	// (e.g. 8760h).
 	CreateSessionTTL time.Duration `yaml:"create_session_ttl,omitempty"`
+
+	// NotifyTask is fired when a run suspends awaiting input (and when a
+	// suspended conversation ends), so the operator gets pinged to come answer
+	// the agent. Defaults to "buildin/notify" (a native desktop notification)
+	// for a zero-config ping — a delivery task (slack/ntfy/email) can be swapped
+	// in and receives both a rendered title/body and the structured
+	// run_id/task_id/resume_url. Fires for any suspending run, not only AI ones.
+	// Empty-string and absent both resolve to the default (matches AI.Task);
+	// point it at a builtin or trusted task — an untrusted notify task would sit
+	// pending the approval gate and never fire.
+	NotifyTask string `yaml:"notify_task,omitempty"`
 }
 
 // TrustPolicy is the per-source / per-task trust declaration under the
@@ -576,6 +587,11 @@ func applyDefaults(cfg *Config, configDir string) {
 	// to free shared boxes overnight.
 	if cfg.AI.CreateSessionTTL == 0 {
 		cfg.AI.CreateSessionTTL = 24 * time.Hour
+	}
+	// AI.NotifyTask defaults to buildin/notify so a suspended agent pings the
+	// operator out of the box. Same empty-or-default rule as AI.Task.
+	if cfg.AI.NotifyTask == "" {
+		cfg.AI.NotifyTask = "buildin/notify"
 	}
 	// RunInputs defaults: 30-day retention, local-storage backend.
 	if cfg.Defaults.RunInputs.Retention == 0 {
