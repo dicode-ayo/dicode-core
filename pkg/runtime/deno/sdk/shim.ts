@@ -260,6 +260,28 @@ async function __readMsg__(): Promise<IpcResponse | HandshakeResponse> {
   return JSON.parse(__dec__.decode(body));
 }
 
+// Deno.Conn.write() is not guaranteed to consume the whole buffer — a single
+// write on a Unix socket accepts only what fits in the send buffer (~128 KB),
+// so a frame larger than that must be written in a loop or the tail is lost and
+// the daemon blocks forever on the truncated frame. The first error is captured
+// rather than thrown: a rejection here would poison the shared write queue
+// (silently dropping every later frame) and surface as an uncaught rejection
+// that kills the process; instead later calls reject via the __writeErr__ guard.
+let __writeErr__: Error | null = null;
+async function __writeAll__(buf: Uint8Array): Promise<void> {
+  if (__writeErr__) return;
+  try {
+    let n = 0;
+    while (n < buf.length) {
+      const w = await __conn__.write(buf.subarray(n));
+      if (w <= 0) throw new Error("ipc: socket write made no progress");
+      n += w;
+    }
+  } catch (e) {
+    __writeErr__ = e instanceof Error ? e : new Error(String(e));
+  }
+}
+
 let __wq__: Promise<void> = Promise.resolve();
 function __writeMsg__(obj: IpcRequest | { token: string }): void {
   const body = __enc__.encode(JSON.stringify(obj));
@@ -272,7 +294,10 @@ function __writeMsg__(obj: IpcRequest | { token: string }): void {
   const frame = new Uint8Array(4 + len);
   frame.set(hdr);
   frame.set(body, 4);
-  __wq__ = __wq__.then(() => { __conn__.write(frame); });
+  // Return the write promise so the queue actually serializes frames (partial
+  // writes would otherwise interleave and corrupt framing) and __flush__ waits
+  // for in-flight bytes before the connection closes.
+  __wq__ = __wq__.then(() => __writeAll__(frame));
 }
 
 // ── handshake ─────────────────────────────────────────────────────────────────
@@ -303,6 +328,10 @@ let __nid__ = 0;
 // ── call helpers ──────────────────────────────────────────────────────────────
 
 function __call__(req: IpcRequest): Promise<unknown> {
+  // A prior frame write failed and the socket is dead: reject now rather than
+  // register a resolver the (broken) read loop will never call — which would
+  // hang the task until its timeout.
+  if (__writeErr__) return Promise.reject(new Error(__writeErr__.message));
   const id = String(++__nid__);
   __writeMsg__({ ...req, id });
   return new Promise((resolve, reject) =>

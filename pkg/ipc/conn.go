@@ -3,11 +3,17 @@ package ipc
 import (
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 )
 
 const maxMessageSize = 8 * 1024 * 1024 // 8 MiB — guards against runaway allocations
+
+// ErrMessageTooLarge is returned by writeMsg when the marshaled message exceeds
+// maxMessageSize. The connection is still healthy — callers can reply with an
+// error to the specific request instead of tearing the connection down.
+var ErrMessageTooLarge = errors.New("ipc: outbound message too large")
 
 // writeMsg encodes v as JSON and writes it with a 4-byte little-endian length prefix.
 func writeMsg(w io.Writer, v any) error {
@@ -16,7 +22,7 @@ func writeMsg(w io.Writer, v any) error {
 		return fmt.Errorf("ipc: marshal: %w", err)
 	}
 	if len(data) > maxMessageSize {
-		return fmt.Errorf("ipc: outbound message too large (%d bytes)", len(data))
+		return fmt.Errorf("%w (%d bytes)", ErrMessageTooLarge, len(data))
 	}
 	var hdr [4]byte
 	binary.LittleEndian.PutUint32(hdr[:], uint32(len(data)))
