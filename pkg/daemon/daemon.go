@@ -733,13 +733,6 @@ func buildWebUI(ctx context.Context, cfg *config.Config, configPath, version, da
 	suspendNotify := suspendNotifier{
 		notifyTask: cfg.AI.NotifyTask,
 		resumeURL:  func(runID string) string { return srv.WebUIBaseURL() + "/?run=" + runID },
-		rootRunID: func(runID string) (string, bool) {
-			run, err := reg.GetRun(ctx, runID)
-			if err != nil || run == nil {
-				return "", false
-			}
-			return run.RootRunID, true
-		},
 		fire: func(id string, params map[string]string) error {
 			_, err := eng.FireManual(ctx, id, params)
 			return err

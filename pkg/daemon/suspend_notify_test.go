@@ -62,35 +62,36 @@ func TestSuspendNotifier_SkipsOwnRuns(t *testing.T) {
 	}
 }
 
-func TestSuspendNotifier_EndOnlyForContinuationTree(t *testing.T) {
+func TestSuspendNotifier_EndOnlyForResumeContinuation(t *testing.T) {
 	done := make(chan map[string]string, 1)
-	// root != runID → a resumed conversation ending → notify.
 	n := &suspendNotifier{
 		notifyTask: "buildin/notify",
-		rootRunID:  func(string) (string, bool) { return "root-1", true },
 		fire:       func(_ string, p map[string]string) error { done <- p; return nil },
 		log:        zap.NewNop(),
 	}
-	n.onRunFinished("t", "run-2", string(registry.StatusSuccess), "chain", 5)
+	// A resume continuation reaching a terminal state → conversation ended.
+	n.onRunFinished("t", "run-2", string(registry.StatusSuccess), string(registry.TriggerResume), 5)
 	p := <-done
 	if p["event"] != "ended" || p["status"] != string(registry.StatusSuccess) {
 		t.Errorf("end params wrong: %+v", p)
 	}
 }
 
-func TestSuspendNotifier_NoEndForOneShot(t *testing.T) {
-	fired := make(chan struct{}, 1)
-	// root == runID → a plain one-shot success, NOT a conversation end.
-	n := &suspendNotifier{
-		notifyTask: "buildin/notify",
-		rootRunID:  func(id string) (string, bool) { return id, true },
-		fire:       func(string, map[string]string) error { fired <- struct{}{}; return nil },
-		log:        zap.NewNop(),
-	}
-	n.onRunFinished("t", "run-solo", string(registry.StatusSuccess), "manual", 3)
-	select {
-	case <-fired:
-		t.Error("a one-shot success (root == self) must not fire a conversation-end notification")
-	default:
+func TestSuspendNotifier_NoEndForChainOrOneShot(t *testing.T) {
+	// Chain children and pipeline stages inherit root != self but are NOT
+	// conversation ends; only a resume-sourced terminal run is.
+	for _, src := range []string{"manual", "chain", "pipeline", "cron", "webhook"} {
+		fired := make(chan struct{}, 1)
+		n := &suspendNotifier{
+			notifyTask: "buildin/notify",
+			fire:       func(string, map[string]string) error { fired <- struct{}{}; return nil },
+			log:        zap.NewNop(),
+		}
+		n.onRunFinished("t", "run-x", string(registry.StatusSuccess), src, 3)
+		select {
+		case <-fired:
+			t.Errorf("trigger source %q must not fire a conversation-end notification", src)
+		default:
+		}
 	}
 }

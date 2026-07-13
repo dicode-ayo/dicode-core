@@ -18,17 +18,13 @@ type suspendNotifier struct {
 	// resumeURL builds the WebUI link an operator follows to answer a suspended
 	// run. May be nil (the notification still carries run_id/task_id).
 	resumeURL func(runID string) string
-	// rootRunID returns the run's topmost ancestor, used to fire the end event
-	// only for a continuation tree (a resumed conversation), not every one-shot
-	// success. ok is false when the lookup fails.
-	rootRunID func(runID string) (rootID string, ok bool)
 	fire      func(taskID string, params map[string]string) error
 	log       *zap.Logger
 }
 
 // onRunFinished is the engine run-finished hook. It must be non-blocking; the
 // fire itself is dispatched on a goroutine.
-func (n suspendNotifier) onRunFinished(taskID, runID, status, _ string, _ int64) {
+func (n suspendNotifier) onRunFinished(taskID, runID, status, triggerSource string, _ int64) {
 	if n.notifyTask == "" || taskID == n.notifyTask {
 		// Disabled, or this is the notify task's own run — never notify about
 		// that (and it breaks a fire→finish→fire loop).
@@ -53,14 +49,11 @@ func (n suspendNotifier) onRunFinished(taskID, runID, status, _ string, _ int64)
 		})
 
 	case string(registry.StatusSuccess), string(registry.StatusCancelled), string(registry.StatusFailure):
-		// A conversation ended only if this run is a continuation of a suspend
-		// chain (root != self). A plain one-shot run (root == self) is not a
-		// conversation end and must not notify.
-		if n.rootRunID == nil {
-			return
-		}
-		root, ok := n.rootRunID(runID)
-		if !ok || root == "" || root == runID {
+		// A conversation ended only when THIS terminal run is a resume
+		// continuation. Chain children and pipeline stages also inherit
+		// root != self, so the trigger source — unique to resumed runs — is the
+		// precise discriminator (and avoids a per-run registry lookup).
+		if triggerSource != string(registry.TriggerResume) {
 			return
 		}
 		n.dispatch(taskID, runID, map[string]string{
