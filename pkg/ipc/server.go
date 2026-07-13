@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -505,9 +506,15 @@ func (s *Server) handleConn(conn net.Conn) {
 			r.Result = nil
 		}
 		if werr := writeMsg(conn, r); werr != nil {
-			// A dropped reply (peer gone, or a response above the frame cap)
-			// would leave the task hung awaiting an ack. Surface it and close
-			// the connection so its read loop unblocks and fails the call.
+			// A result too large to frame leaves the connection healthy — reply
+			// with an error to this one request so the caller rejects instead of
+			// hanging, keeping the run's other calls working.
+			if r.Error == "" && errors.Is(werr, ErrMessageTooLarge) {
+				_ = writeMsg(conn, Response{ID: id, Error: "ipc: response too large to return"})
+				return
+			}
+			// A genuine write failure (peer gone) means the socket is dead;
+			// surface it and close so the task's read loop unblocks.
 			s.log.Warn("ipc: reply write failed", zap.String("run", s.runID), zap.Error(werr))
 			_ = conn.Close()
 		}

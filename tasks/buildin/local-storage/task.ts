@@ -31,9 +31,7 @@ function base64Decode(s: string): Uint8Array {
 }
 
 function base64Encode(b: Uint8Array): string {
-  // Build the binary string in chunks. A per-byte `s += ...` loop is
-  // quadratic for multi-MB blobs and blows past the task timeout; the
-  // subarray+apply form is linear. The chunk stays well under the
+  // Chunked so a multi-MB blob encodes in linear time; CHUNK stays under the
   // argument-count limit of String.fromCharCode.
   const CHUNK = 0x8000;
   let s = "";
