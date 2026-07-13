@@ -32,7 +32,7 @@ func (e *Engine) SweepExpiredSuspensions(ctx context.Context, nowMs int64) ([]st
 				zap.String("run", runID), zap.Error(gerr))
 			continue
 		}
-		if h := e.runFinishedHook; h != nil {
+		for _, h := range e.runFinishedHooks {
 			// Duration 0: the suspended body isn't re-executed on timeout.
 			h(run.TaskID, run.ID, registry.StatusCancelled, string(run.TriggerSource), 0)
 		}
