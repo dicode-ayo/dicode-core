@@ -2150,18 +2150,6 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	s.gateway.ServeHTTP(w, r)
 }
 
-// mcpJSONRPCCall is the minimal JSON-RPC 2.0 envelope mcpScopeCheck needs to
-// decide whether a scoped ephemeral MCP token may make this call. Fields
-// beyond what enforcement needs are ignored.
-type mcpJSONRPCCall struct {
-	ID     any    `json:"id"`
-	Method string `json:"method"`
-	Params struct {
-		Name      string         `json:"name"`
-		Arguments map[string]any `json:"arguments"`
-	} `json:"params"`
-}
-
 // mcpScopeCheck decides whether a scoped ephemeral MCP token (scope) may
 // make the JSON-RPC call encoded in body, without performing any I/O — pure
 // so it's cheap to table-test. scope is never nil here (callers only invoke
@@ -2179,19 +2167,34 @@ type mcpJSONRPCCall struct {
 //     an unrecognized name is left for the task's own "unknown tool" error.
 //   - any other method: always allowed — let the task's own
 //     "-32601 method not found" path handle it.
-//   - a body that doesn't parse as JSON-RPC: always allowed — let the
-//     task's own "-32700 parse error" path handle it, no second error shape.
+//   - a body whose top level isn't a JSON object at all (invalid JSON, or a
+//     JSON array/scalar/etc): always allowed — let the task's own
+//     "-32700 parse error" path handle it, no second error shape.
+//
+// The top-level decode is intentionally into a generic map rather than a
+// typed struct: with a typed struct, a single sibling field failing to
+// type-match (e.g. params.arguments sent as a string instead of an object)
+// makes encoding/json return a non-nil error *after* it has already
+// populated every other field it could, including method and params.name —
+// and treating "any decode error" as "not JSON-RPC, allow" would then
+// discard those correctly-decoded, security-relevant fields and bypass
+// enforcement entirely. Decoding into map[string]any never fails that way;
+// each field of interest is instead extracted defensively below via a
+// type assertion that degrades to its zero value on a shape mismatch,
+// rather than aborting the whole check.
 //
 // Returns allowed, the request's id (for echoing back in a denial), and a
 // human-readable denial message (empty when allowed).
 func mcpScopeCheck(scope *pkgruntime.MCPScope, body []byte) (allowed bool, id any, deniedMsg string) {
-	var call mcpJSONRPCCall
-	if err := json.Unmarshal(body, &call); err != nil {
+	var raw map[string]any
+	if err := json.Unmarshal(body, &raw); err != nil {
+		// Top level isn't a JSON object at all: genuinely not JSON-RPC.
 		return true, nil, ""
 	}
-	id = call.ID
+	id = raw["id"]
 
-	switch call.Method {
+	method, _ := raw["method"].(string)
+	switch method {
 	case "tools/call":
 		// fall through to the tool-name switch below.
 	default:
@@ -2200,7 +2203,8 @@ func mcpScopeCheck(scope *pkgruntime.MCPScope, body []byte) (allowed bool, id an
 		return true, id, ""
 	}
 
-	name := call.Params.Name
+	params, _ := raw["params"].(map[string]any)
+	name, _ := params["name"].(string)
 	switch name {
 	case "list_tasks", "get_task":
 		if scope.ListTasks {
@@ -2208,7 +2212,12 @@ func mcpScopeCheck(scope *pkgruntime.MCPScope, body []byte) (allowed bool, id an
 		}
 		return false, id, fmt.Sprintf("capability not granted: %s", name)
 	case "run_task":
-		taskID, _ := call.Params.Arguments["id"].(string)
+		// arguments failing to type-match as an object (e.g. sent as a
+		// string or number) degrades to "no id available" rather than
+		// aborting the check — the existing taskID == "" deny-by-default
+		// branch below still closes the gap.
+		arguments, _ := params["arguments"].(map[string]any)
+		taskID, _ := arguments["id"].(string)
 		for _, allowedID := range scope.RunTaskIDs {
 			if allowedID == "*" || allowedID == taskID {
 				return true, id, ""

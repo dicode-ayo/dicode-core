@@ -215,6 +215,46 @@ func TestMcpScopeCheck(t *testing.T) {
 			wantAllowed: true,
 		},
 		{
+			name:        "top-level JSON array (valid JSON, not an object) passes through",
+			scope:       zeroScope,
+			body:        []byte(`[1,2,3]`),
+			wantAllowed: true,
+		},
+		{
+			name:  "list_tasks denied when ListTasks false even if arguments is a malformed non-object (regression for #567 bypass)",
+			scope: zeroScope,
+			// arguments is a string, not an object: with a typed struct
+			// decode this makes json.Unmarshal return a non-nil
+			// UnmarshalTypeError for Params.Arguments even though method
+			// and params.name decoded fine — the bug treated that error as
+			// "not JSON-RPC, allow" and let list_tasks through despite
+			// ListTasks: false. Must be denied.
+			body:        []byte(`{"jsonrpc":"2.0","id":15,"method":"tools/call","params":{"name":"list_tasks","arguments":"x"}}`),
+			wantAllowed: false,
+		},
+		{
+			name:  "run_task denied when arguments is a malformed non-object (id unrecoverable, deny-closed)",
+			scope: fullScope,
+			// arguments is a number, not an object: taskID can't be
+			// recovered, so this must fall into the existing
+			// deny-by-default (taskID == "") branch rather than bypassing
+			// enforcement the way the pre-fix "any decode error → allow"
+			// logic did. fullScope's RunTaskIDs ("repo/allowed") does not
+			// contain "*", so an unrecoverable/empty id must not match.
+			body:        []byte(`{"jsonrpc":"2.0","id":16,"method":"tools/call","params":{"name":"run_task","arguments":42}}`),
+			wantAllowed: false,
+		},
+		{
+			name:  "run_task allowed when arguments is a malformed non-object but scope wildcards all ids",
+			scope: wildcardScope,
+			// Same unrecoverable-id shape as above, but RunTaskIDs contains
+			// "*" so it matches regardless of the (unrecoverable) task id —
+			// consistent with the existing wildcard behavior for a
+			// well-formed request.
+			body:        []byte(`{"jsonrpc":"2.0","id":17,"method":"tools/call","params":{"name":"run_task","arguments":42}}`),
+			wantAllowed: true,
+		},
+		{
 			name:        "unknown method passes through",
 			scope:       zeroScope,
 			body:        rpcBody(t, 14, "some/other-method", "", nil),
