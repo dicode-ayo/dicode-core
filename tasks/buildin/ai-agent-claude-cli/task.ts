@@ -22,7 +22,12 @@
 // so operators can see what went wrong even when the run exits 0 (returns
 // a value, not throws).
 
-import type { Dicode, DicodeSdk, JSONSchema } from "../../sdk.ts";
+import type { Dicode, DicodeSdk } from "../../sdk.ts";
+import { chatStart, chatTurn, decideEntryMode, isChatEnd, SAFE_SKILL_NAME } from "../ai-agent-core/chat.ts";
+
+// Re-exported so the task's tests (and any importer) reach the shared envelope
+// helpers through the task module.
+export { decideEntryMode, isChatEnd };
 
 interface Params {
     get: (key: string) => Promise<string | null>;
@@ -70,11 +75,6 @@ function fail(error: string): { ok: false; error: string } {
     return { ok: false, error };
 }
 
-// SAFE_SKILL_NAME caps skill filenames to a flat identifier so the
-// `skills` param can't traverse out of skills_dir via "../" or absolute
-// paths. Mirrors the style of ValidateRunID elsewhere in the codebase.
-const SAFE_SKILL_NAME = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$/;
-
 /**
  * Build the `claude` CLI argument vector. Exported for unit testing.
  *
@@ -107,38 +107,6 @@ export function buildClaudeArgs(opts: {
     return args;
 }
 
-// decideEntryMode picks the shape of a fresh run: a non-empty prompt runs one
-// turn and returns; an empty prompt opens the interactive chat loop. Pure so the
-// branch can be unit-tested without a live Claude.
-export function decideEntryMode(prompt: string): "one-shot" | "chat-start" {
-    return prompt.trim() !== "" ? "one-shot" : "chat-start";
-}
-
-// isChatEnd terminates the chat loop: a blank/whitespace message is the "end"
-// signal (the step returns instead of suspending onward).
-export function isChatEnd(message: string): boolean {
-    return message.trim() === "";
-}
-
-// chatSchema is the resume form for one chat turn: a single `message` field,
-// intentionally NOT required so the interactive CLI prompt accepts a blank line
-// — which steps.turn reads as the end-of-chat signal (isChatEnd). The banner
-// text lives on BOTH the schema and the `message` property — the CLI's
-// interactive resume prompt renders the *property* description above the input
-// (cmd/dicode/main.go promptResumeInput), while the no-field confirmation path
-// renders the schema-level one; setting both keeps the reply visible regardless
-// of which renderer runs.
-function chatSchema(description: string): JSONSchema {
-    return {
-        type: "object",
-        title: "Chat",
-        description,
-        properties: {
-            message: { type: "string", title: "Message", description },
-        },
-    };
-}
-
 export default async function main({ params, kv, dicode }: SDK) {
     const prompt = (await params.get("prompt")) ?? "";
 
@@ -148,42 +116,49 @@ export default async function main({ params, kv, dicode }: SDK) {
         // per-invocation workdir, which must stay constant across turns because
         // Claude CLI's `--resume` only finds sessions created in the same cwd.
         const chatId = crypto.randomUUID();
-        await dicode.suspend({
-            to: "turn",
-            state: { claudeSessionId: "", chatId },
-            schema: chatSchema("Message Claude — leave blank to end."),
-        });
+        await chatStart(dicode, { claudeSessionId: "", chatId }, "Message Claude — leave blank to end.");
         return; // unreachable — suspend() never returns
     }
 
     return await oneShotTurn({ prompt, params, kv });
 }
 
+// The Claude-side state carried across chat turns: the CLI session id (drives
+// --resume) and a stable workdir key.
+interface ClaudeChatState {
+    claudeSessionId?: string;
+    chatId?: string;
+}
+
 export const steps = {
-    // One chat turn: read the submitted message, run Claude resuming its prior
-    // session, then suspend back to `turn` with the reply as the next banner.
-    // A blank message returns (ends the run → the CLI's resume loop exits).
-    async turn({ params, input, state, dicode }: DicodeSdk) {
-        const carried = (state ?? {}) as { claudeSessionId?: string; chatId?: string };
-        const message = String((input as { message?: string } | undefined)?.message ?? "");
-        const prior = carried.claudeSessionId ?? "";
-
-        if (isChatEnd(message)) {
-            return { ok: true, reply: "(chat ended)", session_id: prior };
-        }
-
-        // chatId is minted in main() and carried forward; default-guard it so a
-        // hand-crafted resume without one still runs (a fresh cwd, no --resume).
-        const chatId = carried.chatId ?? crypto.randomUUID();
-        const turn = await runClaudeTurn({ message, priorClaudeSessionId: prior, workdirKey: chatId, params });
-        if (!turn.ok) return turn;
-
-        await dicode.suspend({
-            to: "turn",
-            state: { claudeSessionId: turn.claudeSessionId, chatId },
-            schema: chatSchema(turn.reply),
-        });
-        return; // unreachable — suspend() never returns
+    // One chat turn: run Claude resuming its prior session. The envelope owns the
+    // suspend/resume loop; runTurn here is just the Claude invocation, and onEnd
+    // reports the CLI session id carried in state when a blank message ends it.
+    turn(ctx: DicodeSdk) {
+        const { params } = ctx;
+        return chatTurn(
+            ctx,
+            async ({ message, state }) => {
+                const carried = (state ?? {}) as ClaudeChatState;
+                // chatId is minted in main() and carried forward; default-guard it
+                // so a hand-crafted resume without one still runs (fresh cwd, no
+                // --resume).
+                const chatId = carried.chatId ?? crypto.randomUUID();
+                const turn = await runClaudeTurn({
+                    message,
+                    priorClaudeSessionId: carried.claudeSessionId ?? "",
+                    workdirKey: chatId,
+                    params,
+                });
+                if (!turn.ok) return turn;
+                return { ok: true, reply: turn.reply, state: { claudeSessionId: turn.claudeSessionId, chatId } };
+            },
+            (state) => ({
+                ok: true,
+                reply: "(chat ended)",
+                session_id: (state as ClaudeChatState | undefined)?.claudeSessionId ?? "",
+            }),
+        );
     },
 };
 
