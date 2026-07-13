@@ -12,7 +12,7 @@ import (
 func TestSuspendNotifier_FiresOnSuspendWithRenderedAndStructuredParams(t *testing.T) {
 	done := make(chan map[string]string, 1)
 	n := &suspendNotifier{
-		notifyTask: "buildin/notify",
+		notifyTask: "buildin/notifications",
 		resumeURL:  func(runID string) string { return "http://ui/?run=" + runID },
 		fire: func(_ string, params map[string]string) error {
 			done <- params
@@ -25,7 +25,7 @@ func TestSuspendNotifier_FiresOnSuspendWithRenderedAndStructuredParams(t *testin
 
 	params := <-done
 	if params["title"] == "" || params["body"] == "" {
-		t.Errorf("buildin/notify needs title+body; got %+v", params)
+		t.Errorf("buildin/notifications needs title+body; got %+v", params)
 	}
 	if params["event"] != "suspended" || params["run_id"] != "run-9" || params["task_id"] != "repo/agent" {
 		t.Errorf("structured params wrong: %+v", params)
@@ -51,12 +51,12 @@ func TestSuspendNotifier_DisabledWhenNoTask(t *testing.T) {
 func TestSuspendNotifier_SkipsOwnRuns(t *testing.T) {
 	fired := false
 	n := &suspendNotifier{
-		notifyTask: "buildin/notify",
+		notifyTask: "buildin/notifications",
 		fire:       func(string, map[string]string) error { fired = true; return nil },
 		log:        zap.NewNop(),
 	}
 	// The notify task's own run must not notify (would loop / self-spam).
-	n.onRunFinished("buildin/notify", "r", string(registry.StatusSuspended), "manual", 0)
+	n.onRunFinished("buildin/notifications", "r", string(registry.StatusSuspended), "manual", 0)
 	if fired {
 		t.Error("notify task's own run must not fire a notification")
 	}
@@ -65,7 +65,7 @@ func TestSuspendNotifier_SkipsOwnRuns(t *testing.T) {
 func TestSuspendNotifier_EndOnlyForResumeContinuation(t *testing.T) {
 	done := make(chan map[string]string, 1)
 	n := &suspendNotifier{
-		notifyTask: "buildin/notify",
+		notifyTask: "buildin/notifications",
 		fire:       func(_ string, p map[string]string) error { done <- p; return nil },
 		log:        zap.NewNop(),
 	}
@@ -83,7 +83,7 @@ func TestSuspendNotifier_NoEndForChainOrOneShot(t *testing.T) {
 	for _, src := range []string{"manual", "chain", "pipeline", "cron", "webhook"} {
 		fired := make(chan struct{}, 1)
 		n := &suspendNotifier{
-			notifyTask: "buildin/notify",
+			notifyTask: "buildin/notifications",
 			fire:       func(string, map[string]string) error { fired <- struct{}{}; return nil },
 			log:        zap.NewNop(),
 		}
