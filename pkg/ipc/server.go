@@ -504,7 +504,13 @@ func (s *Server) handleConn(conn net.Conn) {
 			r.Error = errMsg
 			r.Result = nil
 		}
-		_ = writeMsg(conn, r)
+		if werr := writeMsg(conn, r); werr != nil {
+			// A dropped reply (peer gone, or a response above the frame cap)
+			// would leave the task hung awaiting an ack. Surface it and close
+			// the connection so its read loop unblocks and fails the call.
+			s.log.Warn("ipc: reply write failed", zap.String("run", s.runID), zap.Error(werr))
+			_ = conn.Close()
+		}
 	}
 
 	for {

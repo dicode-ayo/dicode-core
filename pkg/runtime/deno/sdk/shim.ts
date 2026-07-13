@@ -260,6 +260,15 @@ async function __readMsg__(): Promise<IpcResponse | HandshakeResponse> {
   return JSON.parse(__dec__.decode(body));
 }
 
+// Deno.Conn.write() is not guaranteed to consume the whole buffer — a single
+// write on a Unix socket accepts only what fits in the send buffer (~128 KB),
+// so a larger frame must be written in a loop or the tail is silently lost and
+// the daemon blocks forever on the truncated frame.
+async function __writeAll__(buf: Uint8Array): Promise<void> {
+  let n = 0;
+  while (n < buf.length) n += await __conn__.write(buf.subarray(n));
+}
+
 let __wq__: Promise<void> = Promise.resolve();
 function __writeMsg__(obj: IpcRequest | { token: string }): void {
   const body = __enc__.encode(JSON.stringify(obj));
@@ -272,7 +281,10 @@ function __writeMsg__(obj: IpcRequest | { token: string }): void {
   const frame = new Uint8Array(4 + len);
   frame.set(hdr);
   frame.set(body, 4);
-  __wq__ = __wq__.then(() => { __conn__.write(frame); });
+  // Return the write promise so the queue actually serializes frames (partial
+  // writes would otherwise interleave and corrupt framing) and __flush__ waits
+  // for in-flight bytes before the connection closes.
+  __wq__ = __wq__.then(() => __writeAll__(frame));
 }
 
 // ── handshake ─────────────────────────────────────────────────────────────────
@@ -290,13 +302,25 @@ const __pending__ = new Map<string, (msg: IpcResponse) => void>();
 let __nid__ = 0;
 
 (async () => {
+  let closeErr = "ipc: connection closed";
   while (true) {
     let msg: IpcResponse;
-    try { msg = await __readMsg__() as IpcResponse; } catch { break; }
+    try {
+      msg = await __readMsg__() as IpcResponse;
+    } catch (e) {
+      closeErr = `ipc: connection closed (${e instanceof Error ? e.message : String(e)})`;
+      break;
+    }
     if (msg.id) {
       const resolve = __pending__.get(msg.id);
       if (resolve) { __pending__.delete(msg.id); resolve(msg); }
     }
+  }
+  // The socket closed (peer gone, framing error, oversize frame). Fail every
+  // in-flight call loudly instead of leaving the task hung until its timeout.
+  for (const [id, resolve] of __pending__) {
+    __pending__.delete(id);
+    resolve({ id, error: closeErr } as IpcResponse);
   }
 })();
 
