@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -209,6 +210,17 @@ func TestMcpScopeCheck(t *testing.T) {
 			wantAllowed: true,
 		},
 		{
+			name:  "unrecognized tool name denied under restrictive scope (fail-closed default)",
+			scope: zeroScope,
+			// A tool name that doesn't match any case in the switch —
+			// including a hypothetical future tool this switch hasn't been
+			// taught about yet. Before the fail-closed fix this fell into
+			// the allow-everything default; it must now be denied just like
+			// any other capability the scope doesn't grant.
+			body:        rpcBody(t, 18, "tools/call", "totally_unknown_tool", map[string]any{}),
+			wantAllowed: false,
+		},
+		{
 			name:        "malformed non-JSON-RPC body passes through",
 			scope:       zeroScope,
 			body:        []byte("not json"),
@@ -384,5 +396,43 @@ func TestHandleMCP_UnscopedKey_AlwaysForwarded(t *testing.T) {
 
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404 (forwarded to an empty gateway): %s", w.Code, w.Body.String())
+	}
+}
+
+// TestHandleMCP_ScopedKey_OversizedBodyRejected covers the body-size cap: a
+// scoped caller posting more than testTaskMaxBodyBytes gets a 400 from the
+// http.MaxBytesReader-wrapped read in handleMCP, rather than the body being
+// buffered in full and either forwarded to the gateway or handed to
+// mcpScopeCheck. The body content doesn't need to be valid JSON-RPC —
+// MaxBytesReader rejects purely on byte count, before mcpScopeCheck ever
+// runs.
+func TestHandleMCP_ScopedKey_OversizedBodyRejected(t *testing.T) {
+	srv, _, _ := newApprovalTestServer(t, true)
+	h := srv.Handler()
+
+	raw, _, err := srv.apiKeys.generateScoped(context.Background(), "scoped-mcp-key",
+		&pkgruntime.MCPScope{RunTaskIDs: []string{"repo/allowed"}})
+	if err != nil {
+		t.Fatalf("generateScoped: %v", err)
+	}
+
+	oversized := bytes.Repeat([]byte("a"), testTaskMaxBodyBytes+1)
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(oversized))
+	req.Header.Set("Authorization", "Bearer "+raw)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (oversized body rejected): %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v (%s)", err, w.Body.String())
+	}
+	if resp.Error == "" {
+		t.Error("expected a non-empty error message in the rejection body")
 	}
 }

@@ -2124,7 +2124,14 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 		// second auth gate. scope == nil: unscoped operator/CLI/dashboard
 		// key — full access, forward unchanged.
 		if found && scope != nil {
-			body, err := io.ReadAll(r.Body)
+			// Cap the read like every other request body in this file (see
+			// apiTestTask / testTaskMaxBodyBytes below): MCP JSON-RPC
+			// envelopes are small, so 64KB is generous headroom while still
+			// preventing a scoped caller from streaming an unbounded body at
+			// the daemon before mcpScopeCheck even runs. A MaxBytesReader
+			// overflow surfaces here as a plain io.ReadAll error, handled by
+			// the same 400 branch as any other malformed read.
+			body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, testTaskMaxBodyBytes))
 			if err != nil {
 				jsonErr(w, "failed to read request body", http.StatusBadRequest)
 				return
@@ -2161,10 +2168,17 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 //   - tools/call list_tasks / get_task: requires scope.ListTasks.
 //   - tools/call run_task: requires scope.RunTaskIDs to contain "*" or the
 //     call's params.arguments["id"].
-//   - tools/call for any other tool name (list_sources, switch_dev_mode,
-//     test_task, or an unrecognized name): always allowed — those three
-//     hint tools exercise no dicode capability and are unscoped by design;
-//     an unrecognized name is left for the task's own "unknown tool" error.
+//   - tools/call list_sources / switch_dev_mode / test_task: always
+//     allowed — these three hint tools exercise no dicode capability and are
+//     unscoped by design.
+//   - tools/call for any other (unrecognized, or future) tool name: denied.
+//     This is fail-closed: nothing ties this switch to
+//     tasks/buildin/mcp/task.ts's TOOLS/dispatchTool list, so a future tool
+//     added there that exercises a real scoped capability must not silently
+//     inherit full access just because this switch doesn't know its name
+//     yet. Note this only affects a *scoped* caller — an unscoped caller
+//     (scope == nil) never reaches mcpScopeCheck at all and still gets the
+//     task's own "unknown tool" error unchanged.
 //   - any other method: always allowed — let the task's own
 //     "-32601 method not found" path handle it.
 //   - a body whose top level isn't a JSON object at all (invalid JSON, or a
@@ -2227,10 +2241,16 @@ func mcpScopeCheck(scope *pkgruntime.MCPScope, body []byte) (allowed bool, id an
 			return false, id, fmt.Sprintf("capability not granted: %s for task %q", name, taskID)
 		}
 		return false, id, fmt.Sprintf("capability not granted: %s", name)
-	default:
-		// list_sources, switch_dev_mode, test_task (unscoped by design), or
-		// an unrecognized tool name (left for the task's own error).
+	case "list_sources", "switch_dev_mode", "test_task":
+		// Unscoped by design: hint-only tools that exercise no dicode
+		// capability.
 		return true, id, ""
+	default:
+		// Fail closed: an unrecognized tool name — including any future
+		// tool added to tasks/buildin/mcp/task.ts that this switch hasn't
+		// been taught about — is denied rather than silently inheriting
+		// full access from a scoped token.
+		return false, id, fmt.Sprintf("capability not granted: %s", name)
 	}
 }
 
