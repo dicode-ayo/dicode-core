@@ -798,9 +798,9 @@ func (cs *ControlServer) handleMetrics() MetricsSnapshot {
 // bare string (treated as the reply with an empty session id), or any other
 // value (marshalled back into reply as JSON text).
 func (cs *ControlServer) handleAI(ctx context.Context, req Request) (AIResult, error) {
-	if req.Prompt == "" {
-		return AIResult{}, errors.New("prompt required")
-	}
+	// A blank prompt is the chat-mode entry: the agent opens the conversation
+	// by suspending for the first message (handled below), rather than running
+	// a single one-shot turn.
 	taskID := req.TaskID
 	if taskID == "" {
 		taskID = cs.defaultAITask
@@ -812,7 +812,10 @@ func (cs *ControlServer) handleAI(ctx context.Context, req Request) (AIResult, e
 		return AIResult{}, fmt.Errorf("ai task %q not registered", taskID)
 	}
 
-	params := map[string]string{"prompt": req.Prompt}
+	params := map[string]string{}
+	if req.Prompt != "" {
+		params["prompt"] = req.Prompt
+	}
 	if req.SessionID != "" {
 		params["session_id"] = req.SessionID
 	}
@@ -821,7 +824,10 @@ func (cs *ControlServer) handleAI(ctx context.Context, req Request) (AIResult, e
 	if err != nil {
 		return AIResult{}, err
 	}
-	run, err := cs.engine.WaitRun(ctx, runID)
+	// WaitRunSettled (not WaitRun): a chat-start run suspends awaiting the first
+	// message and is never resumed here, so WaitRun — which follows the resume
+	// chain — would block forever. WaitRunSettled returns on the suspend.
+	run, err := cs.engine.WaitRunSettled(ctx, runID)
 	if err != nil {
 		return AIResult{}, err
 	}
@@ -829,6 +835,12 @@ func (cs *ControlServer) handleAI(ctx context.Context, req Request) (AIResult, e
 		TaskID:    taskID,
 		RunID:     run.RunID,
 		SessionID: req.SessionID,
+	}
+	// Chat mode: the agent suspended awaiting the first message. Hand the
+	// suspended run back so the CLI drives the resume loop from it.
+	if run.Status == registry.StatusSuspended {
+		out.Suspended = true
+		return out, nil
 	}
 	if run.Status != "success" {
 		// Surface the run id in the error so the CLI user can jump straight

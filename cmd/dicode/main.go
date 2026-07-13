@@ -1431,9 +1431,8 @@ func cmdAI(c *ipc.ControlClient, args []string) error {
 			positional = append(positional, a)
 		}
 	}
-	if len(positional) == 0 {
-		return fmt.Errorf("usage: dicode ai <prompt> [--session-id ID] [--task TASK_ID]")
-	}
+	// No prompt → chat mode: the agent opens an interactive suspend/resume
+	// conversation. A prompt runs a single one-shot turn (backward compatible).
 	prompt := strings.Join(positional, " ")
 
 	resp, err := c.Send(ipc.Request{
@@ -1452,6 +1451,18 @@ func cmdAI(c *ipc.ControlClient, args []string) error {
 	if err := remarshal(resp.Result, &result); err != nil {
 		return err
 	}
+
+	// Chat mode: the agent suspended for the first message. Drive the same
+	// suspend/resume follow loop the wizard path uses; each typed message is a
+	// resume turn, a blank line ends the chat.
+	if result.Suspended {
+		if !stdinIsInteractive() {
+			return fmt.Errorf("chat mode needs an interactive terminal — pass a prompt for a one-shot turn")
+		}
+		prefill, _ := newPrefillPool(nil)
+		return followSuspended(c, result.RunID, prefill, false)
+	}
+
 	// Emit session_id to stderr on first turn so pipelines that consume the
 	// reply on stdout stay clean. When the caller already passed --session-id
 	// we skip this — they already have the id.
