@@ -315,6 +315,10 @@ type AIResult struct {
 	RunID     string `json:"runID"`
 	SessionID string `json:"sessionID"`
 	Reply     string `json:"reply"`
+	// Suspended is true when a blank-prompt chat run paused awaiting the first
+	// message. The CLI then drives the suspend/resume loop from RunID rather
+	// than printing Reply.
+	Suspended bool `json:"suspended,omitempty"`
 }
 
 // TaskCreateResult is the cli.task.create response. TaskID is the
