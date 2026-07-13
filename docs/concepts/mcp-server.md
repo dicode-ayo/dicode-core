@@ -189,3 +189,15 @@ Hint-style tool: returns a text pointer telling the MCP client to call `POST /ap
 ## Security
 
 The `/mcp` endpoint requires a `dck_` API key (Bearer) when `server.auth: true` (`pkg/webui/apikeys.go` `requireAPIKey`, wired via `requireSessionOrAPIKey`). Without auth it is open on localhost. See [security.md](security.md) Phase 4 for the full authentication model.
+
+### Ephemeral per-run tokens are capability-scoped
+
+A task that declares `permissions.env: [{name: DICODE_MCP_API_KEY}]` gets a fresh Bearer key minted at run start and revoked at run end, instead of a static secret — see `tasks/buildin/ai-agent-claude-cli` for an example consumer. That key's MCP tool surface is scoped 1:1 to the task's own declared `permissions.dicode`:
+
+- `list_tasks` / `get_task` require `permissions.dicode.list_tasks: true`.
+- `run_task` requires the target task ID to appear in `permissions.dicode.tasks` (or `["*"]` for any task).
+- `list_sources`, `switch_dev_mode`, and `test_task` are always allowed — they're hint-only tools that exercise no dicode capability.
+
+A task with no `permissions.dicode` block at all gets a token that can call none of the scoped tools. Enforcement happens in `pkg/webui`'s `/mcp` handler, before the request ever reaches the `buildin/mcp` task — the task itself always runs with full `list_tasks`/`run_task` permissions and isn't relied on to self-restrict. A denied call gets a JSON-RPC error back (HTTP 200, `error.code: -32001`) rather than being forwarded.
+
+Operator-, CLI-, and dashboard-created API keys (`dicode mcp install`, the dashboard's Create API Key) are **unscoped** — full access, exactly as before this feature — since they aren't tied to a single task's declared permissions.

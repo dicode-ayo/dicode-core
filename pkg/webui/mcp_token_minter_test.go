@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/dicode/dicode/pkg/db"
+	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 )
 
 // newTestAPIKeyStore builds an apiKeyStore over a fresh in-memory SQLite DB.
@@ -28,7 +29,7 @@ func TestMCPTokenMinter_MintValidateRevoke(t *testing.T) {
 	keys := newTestAPIKeyStore(t)
 	minter := newMCPTokenMinter(keys)
 
-	token, err := minter.Mint(ctx, "run-123")
+	token, err := minter.Mint(ctx, "run-123", pkgruntime.MCPScope{ListTasks: true, RunTaskIDs: []string{"*"}})
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
 	}
@@ -107,7 +108,7 @@ func TestValidateNonEphemeral(t *testing.T) {
 	ctx := context.Background()
 	keys := newTestAPIKeyStore(t)
 
-	ephemeral, err := newMCPTokenMinter(keys).Mint(ctx, "run-x")
+	ephemeral, err := newMCPTokenMinter(keys).Mint(ctx, "run-x", pkgruntime.MCPScope{ListTasks: true, RunTaskIDs: []string{"*"}})
 	if err != nil {
 		t.Fatalf("mint ephemeral: %v", err)
 	}
