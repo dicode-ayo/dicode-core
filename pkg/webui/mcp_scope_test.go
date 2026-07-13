@@ -98,6 +98,41 @@ func TestScopeFor_UnknownKey(t *testing.T) {
 	}
 }
 
+// TestScopeFor_CorruptScopesColumn_FailsClosed writes a malformed JSON
+// string directly into a real key's scopes column (bypassing
+// generateScoped, which only ever writes valid JSON) and asserts scopeFor
+// still fails closed: it must return a non-nil zero-value MCPScope{} (deny
+// everything), never nil (which mcpScopeCheck/handleMCP would read as
+// unscoped/full access) and never found == false (which would be treated as
+// an invalid key rather than a corrupt-but-present one).
+func TestScopeFor_CorruptScopesColumn_FailsClosed(t *testing.T) {
+	ctx := context.Background()
+	keys := newTestAPIKeyStore(t)
+
+	raw, _, err := keys.generateScoped(ctx, "corrupt-scope-key", &pkgruntime.MCPScope{ListTasks: true})
+	if err != nil {
+		t.Fatalf("generateScoped: %v", err)
+	}
+
+	if err := keys.db.Exec(ctx,
+		`UPDATE api_keys SET scopes = ? WHERE key_hash = ?`,
+		"not valid json", hashAPIKey(raw),
+	); err != nil {
+		t.Fatalf("corrupt scopes column: %v", err)
+	}
+
+	got, found := keys.scopeFor(ctx, raw)
+	if !found {
+		t.Fatal("scopeFor: key not found")
+	}
+	if got == nil {
+		t.Fatal("scopeFor: expected a non-nil (zero-value) scope for corrupt data, got nil (unscoped)")
+	}
+	if !reflect.DeepEqual(*got, pkgruntime.MCPScope{}) {
+		t.Errorf("scopeFor() = %+v, want zero value (deny-all)", *got)
+	}
+}
+
 // ── mcpScopeCheck table tests ────────────────────────────────────────────────
 
 func rpcBody(t *testing.T, id any, method, toolName string, args map[string]any) []byte {
@@ -230,6 +265,25 @@ func TestMcpScopeCheck(t *testing.T) {
 			name:        "top-level JSON array (valid JSON, not an object) passes through",
 			scope:       zeroScope,
 			body:        []byte(`[1,2,3]`),
+			wantAllowed: true,
+		},
+		{
+			name:  "JSON-RPC batch array containing a disallowed call passes through (safe: never dispatched)",
+			scope: zeroScope,
+			// Same "not a JSON object" pass-through as above, but shaped
+			// like a JSON-RPC batch request whose single element would be
+			// a denied run_task call if sent as a top-level object.
+			// json.Unmarshal into map[string]any fails for a top-level
+			// array, so mcpScopeCheck allows it through unchanged — this
+			// is safe despite looking like a bypass because
+			// tasks/buildin/mcp/task.ts's handle() reads req.method off
+			// the array itself (not off its elements): arrays have no
+			// .method property, so `method` is undefined/"" in JS and the
+			// switch always falls to the "-32601 method not found"
+			// default. No tool is ever dispatched for a batch array, so
+			// there's no real capability exercised despite the Go-layer
+			// scope check allowing it through.
+			body:        []byte(`[{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"run_task","arguments":{"id":"some-disallowed-task"}}}]`),
 			wantAllowed: true,
 		},
 		{
