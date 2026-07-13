@@ -4,18 +4,16 @@
 // operator's Pro/Max subscription instead of an Anthropic API key.
 //
 // Two shapes over one Claude-invocation core (runClaudeTurn):
-//   - One-shot (a non-empty `prompt` param): run one Claude turn and return
-//     { ok, reply, session_id, model, ... }. A dicode-side session_id maps to
-//     the Claude CLI session via kv["claude:<dicode_uuid>"] so a repeat call
-//     resumes the right conversation; the CLI's session_id never leaks to
-//     clients. The bare-return shape matches buildin/ai-agent so the same chat
-//     UI works in both presets.
+//   - One-shot (a non-empty `prompt` param): run one stateless Claude turn and
+//     return { ok, reply, session_id, model, ... }. Each call is a fresh Claude
+//     session — no --resume, no cross-call state. The bare-return shape matches
+//     buildin/ai-agent so the same chat UI works in both presets.
 //   - Chat loop (no `prompt` on a fresh run): suspend to a `turn` step that
 //     collects a message, runs one turn, and suspends back to itself — a
 //     terminal chat via `dicode run` with no CLI changes. Claude's own session
 //     carries the conversation, so the suspend `state` just holds the CLI
-//     session id (plus a stable chat id keying the cwd that --resume needs);
-//     no kv session mapping is used on this path. A blank message ends it.
+//     session id (plus a stable chat id keying the cwd that --resume needs).
+//     A blank message ends it.
 //
 // Logging: console.error / console.log are captured by the runtime as
 // the run's stderr/stdout log entries. Error returns log to console.error
@@ -34,14 +32,6 @@ interface Params {
     all: () => Promise<Record<string, string>>;
 }
 
-interface KV {
-    get: (key: string) => Promise<unknown>;
-    set: (key: string, value: unknown) => Promise<void>;
-}
-
-const SESSION_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
-const KV_PREFIX = "claude:";
-
 interface ClaudeResponse {
     type: string;
     subtype?: string;
@@ -56,7 +46,6 @@ interface ClaudeResponse {
 
 interface SDK {
     params: Params;
-    kv: KV;
     dicode: Dicode;
 }
 
@@ -107,7 +96,7 @@ export function buildClaudeArgs(opts: {
     return args;
 }
 
-export default async function main({ params, kv, dicode }: SDK) {
+export default async function main({ params, dicode }: SDK) {
     const prompt = (await params.get("prompt")) ?? "";
 
     if (decideEntryMode(prompt) === "chat-start") {
@@ -120,7 +109,7 @@ export default async function main({ params, kv, dicode }: SDK) {
         return; // unreachable — suspend() never returns
     }
 
-    return await oneShotTurn({ prompt, params, kv });
+    return await oneShotTurn({ prompt, params });
 }
 
 // The Claude-side state carried across chat turns: the CLI session id (drives
@@ -162,70 +151,29 @@ export const steps = {
     },
 };
 
-// oneShotTurn is the backward-compatible single-turn path: it owns the
-// dicode↔claude session_id mapping (kv["claude:<dicode_uuid>"]) and returns the
-// buildin/ai-agent-shaped result. The Claude invocation itself is delegated to
-// runClaudeTurn, shared with the chat loop.
+// oneShotTurn runs a single stateless Claude turn and returns the
+// buildin/ai-agent-shaped result. Each call starts a fresh Claude session (no
+// --resume); multi-turn conversation lives on the chat loop. The Claude
+// invocation itself is delegated to runClaudeTurn, shared with the chat loop.
 async function oneShotTurn(
-    { prompt, params, kv }: { prompt: string; params: Params; kv: KV },
+    { prompt, params }: { prompt: string; params: Params },
 ): Promise<unknown> {
-    const sessionIdIn = (await params.get("session_id")) ?? "";
-    // session_id is the dicode-side handle. Reject anything not flat-id shaped so
-    // a hostile caller can't forge a key that hits arbitrary KV entries below.
-    if (sessionIdIn && !SESSION_ID_RE.test(sessionIdIn)) {
-        return fail(`session_id ${JSON.stringify(sessionIdIn)} contains invalid characters; expected ^[a-zA-Z0-9_-]{1,64}$`);
-    }
-
-    // dicode-side session id. Generate one if the caller didn't pass one
-    // (matches buildin/ai-agent's UX: first turn returns a fresh uuid).
-    const dicodeSessionId = sessionIdIn || crypto.randomUUID();
-
-    // Look up the Claude-side session id for this dicode session, if any.
-    // First call: kv miss → no --resume → CLI mints a new Claude session.
-    //
-    // Concurrency note: two browser tabs sharing the same localStorage
-    // dicode_uuid will fire simultaneous `claude --resume <same-id>`
-    // subprocesses. The Claude CLI's behaviour under concurrent writes to the
-    // same session is undefined; the kv-set ordering below is non-deterministic.
-    // Same pre-existing pattern as buildin/ai-agent. Mitigation if this becomes
-    // a problem: a per-session lock via kv.set with a TTL'd lease, or a fresh
-    // dicode_uuid per browser tab.
-    let claudeSessionId = "";
-    try {
-        const stored = await kv.get(KV_PREFIX + dicodeSessionId);
-        if (typeof stored === "string") claudeSessionId = stored;
-    } catch (e) {
-        // KV miss is normal; transient KV errors are non-fatal — worst case the
-        // next turn starts a fresh Claude session.
-        console.warn("ai-agent-claude-cli: kv.get failed: " + (e instanceof Error ? e.message : String(e)));
-    }
+    // A fresh id keys the per-invocation workdir and is echoed back as the
+    // handle; it threads no state, so a new one per call is correct.
+    const sessionId = crypto.randomUUID();
 
     const turn = await runClaudeTurn({
         message: prompt,
-        priorClaudeSessionId: claudeSessionId,
-        // Workdir keyed on the (shape-validated) dicode session id so a
-        // follow-up --resume lands in the same cwd the session was created in.
-        workdirKey: dicodeSessionId,
+        priorClaudeSessionId: "",
+        workdirKey: sessionId,
         params,
     });
     if (!turn.ok) return turn;
 
-    // Persist the dicode → claude session id mapping. KV writes are
-    // fire-and-forget per the SDK shim (no ack); the next call with this
-    // dicode_uuid reads it via kv.get above. Skip the write when the CLI didn't
-    // return a session id so a stale mapping isn't introduced.
-    if (turn.claudeSessionId && turn.claudeSessionId !== claudeSessionId) {
-        try {
-            await kv.set(KV_PREFIX + dicodeSessionId, turn.claudeSessionId);
-        } catch (e) {
-            console.warn("ai-agent-claude-cli: kv.set failed (non-fatal): " + (e instanceof Error ? e.message : String(e)));
-        }
-    }
-
     return {
         ok:             true,
         reply:          turn.reply,
-        session_id:     dicodeSessionId,
+        session_id:     sessionId,
         model:          turn.model,
         total_cost_usd: turn.total_cost_usd,
         usage:          turn.usage,

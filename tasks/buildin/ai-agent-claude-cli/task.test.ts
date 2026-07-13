@@ -1,7 +1,7 @@
-// Tests for buildin/ai-agent-claude-cli — verify input validation,
-// the JSON parsing path, and the dicode↔claude session_id mapping
-// stored via kv. The actual `claude` CLI is stubbed via PATH
-// manipulation; tests don't need a real binary.
+// Tests for buildin/ai-agent-claude-cli — verify the one-shot single-turn
+// path, the JSON parsing path, and the suspend/resume chat loop. The actual
+// `claude` CLI is stubbed via PATH manipulation; tests don't need a real
+// binary.
 
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import main, { buildClaudeArgs, decideEntryMode, isChatEnd, steps } from "./task.ts";
@@ -44,15 +44,6 @@ function makeParams(entries: Array<[string, string]>) {
     };
 }
 
-function makeKv() {
-    const store = new Map<string, unknown>();
-    return {
-        store,
-        get: (k: string) => Promise.resolve(store.get(k) ?? null),
-        set: (k: string, v: unknown) => { store.set(k, v); return Promise.resolve(); },
-    };
-}
-
 async function withStubClaude<T>(
     stubBody: string,
     fn: () => Promise<T>,
@@ -89,7 +80,7 @@ Deno.test("no prompt on a fresh run opens the chat loop (suspends to turn)", asy
     const { calls, dicode } = makeSuspendDicode();
     let signalled = false;
     try {
-        await main({ params: makeParams([]), kv: makeKv(), dicode });
+        await main({ params: makeParams([]), dicode });
     } catch (e) {
         if (e instanceof SuspendSignal) signalled = true;
         else throw e;
@@ -113,7 +104,7 @@ Deno.test("no token: falls back to logged-in credentials (does not hard-fail)", 
         `cat <<'JSON'
 {"type":"result","is_error":false,"result":"ok","session_id":"s"}
 JSON`,
-        () => main({ params: makeParams([["prompt", "hi"]]), kv: makeKv(), dicode: fakeDicode }),
+        () => main({ params: makeParams([["prompt", "hi"]]), dicode: fakeDicode }),
     );
     assertEquals(result.ok, true);
 });
@@ -129,29 +120,13 @@ Deno.test("no token: does not inject an empty CLAUDE_CODE_OAUTH_TOKEN into claud
 cat <<'JSON'
 {"type":"result","is_error":false,"result":"ok","session_id":"s"}
 JSON`,
-        () => main({ params: makeParams([["prompt", "hi"]]), kv: makeKv(), dicode: fakeDicode }),
+        () => main({ params: makeParams([["prompt", "hi"]]), dicode: fakeDicode }),
     );
     assertEquals((await Deno.readTextFile(sentinel)).trim(), "[UNSET]");
 });
 
-Deno.test("rejects malformed session_id", async () => {
-    Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "stub");
-    const r: any = await main({
-        params: makeParams([
-            ["prompt", "hi"],
-            ["session_id", "../etc/passwd"],
-        ]),
-        kv: makeKv(), dicode: fakeDicode,
-    });
-    assertEquals(r.ok, false);
-    if (!String(r.error ?? "").includes("invalid characters")) {
-        throw new Error(`expected invalid-characters error, got ${r.error}`);
-    }
-});
-
 Deno.test("happy path returns reply + session_id", async () => {
     Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "stub");
-    const kv = makeKv();
     const result: any = await withStubClaude(
         `cat <<'JSON'
 {"type":"result","subtype":"success","is_error":false,"result":"hello world","session_id":"sess-abc123","model":"claude-sonnet-4","total_cost_usd":0.001}
@@ -159,60 +134,17 @@ JSON`,
         () =>
             main({
                 params: makeParams([["prompt", "say hello"]]),
-                kv, dicode: fakeDicode,
+                dicode: fakeDicode,
             }),
     );
     assertEquals(result.ok, true);
     assertEquals(result.reply, "hello world");
     assertEquals(result.model, "claude-sonnet-4");
-    // Dicode-side session_id is a fresh UUID — the Claude CLI's id stays
-    // server-side via the kv mapping below.
+    // One-shot is stateless: the returned session_id is a fresh UUID keying the
+    // per-invocation workdir, not the Claude CLI's own id.
     if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(result.session_id)) {
         throw new Error(`expected uuid-shaped session_id, got ${result.session_id}`);
     }
-    assertEquals(kv.store.get("claude:" + result.session_id), "sess-abc123");
-});
-
-Deno.test("reuses kv-mapped Claude session on follow-up turns", async () => {
-    Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "stub");
-    const kv = makeKv();
-    const dicodeId = "abc-123-uuid";
-    kv.store.set("claude:" + dicodeId, "sess-pre-existing");
-
-    const result: any = await withStubClaude(
-        `cat <<'JSON'
-{"type":"result","is_error":false,"result":"continued","session_id":"sess-pre-existing"}
-JSON`,
-        () =>
-            main({
-                params: makeParams([
-                    ["prompt", "continue"],
-                    ["session_id", dicodeId],
-                ]),
-                kv, dicode: fakeDicode,
-            }),
-    );
-    assertEquals(result.ok, true);
-    assertEquals(result.session_id, dicodeId);  // dicode id unchanged
-});
-
-Deno.test("rotates Claude session_id mapping when CLI returns a new one", async () => {
-    Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "stub");
-    const kv = makeKv();
-    const dicodeId = "rot-uuid-xyz";
-    kv.store.set("claude:" + dicodeId, "sess-old");
-
-    await withStubClaude(
-        `cat <<'JSON'
-{"type":"result","is_error":false,"result":"ok","session_id":"sess-new"}
-JSON`,
-        () =>
-            main({
-                params: makeParams([["prompt", "..."], ["session_id", dicodeId]]),
-                kv, dicode: fakeDicode,
-            }),
-    );
-    assertEquals(kv.store.get("claude:" + dicodeId), "sess-new");
 });
 
 Deno.test("surfaces is_error: true responses", async () => {
@@ -224,7 +156,7 @@ JSON`,
         () =>
             main({
                 params: makeParams([["prompt", "anything"]]),
-                kv: makeKv(), dicode: fakeDicode,
+                dicode: fakeDicode,
             }),
     );
     assertEquals(result.ok, false);
@@ -241,7 +173,7 @@ exit 2`,
         () =>
             main({
                 params: makeParams([["prompt", "anything"]]),
-                kv: makeKv(), dicode: fakeDicode,
+                dicode: fakeDicode,
             }),
     );
     assertEquals(result.ok, false);
@@ -258,7 +190,7 @@ exit 1`,
         () =>
             main({
                 params: makeParams([["prompt", "anything"]]),
-                kv: makeKv(), dicode: fakeDicode,
+                dicode: fakeDicode,
             }),
     );
     assertEquals(result.ok, false);
@@ -281,7 +213,7 @@ exit 1`,
         () =>
             main({
                 params: makeParams([["prompt", "anything"]]),
-                kv: makeKv(), dicode: fakeDicode,
+                dicode: fakeDicode,
             }),
     );
     assertEquals(result.ok, false);
@@ -303,7 +235,7 @@ Deno.test("redacts token in JSON-parse-failure path too", async () => {
         () =>
             main({
                 params: makeParams([["prompt", "anything"]]),
-                kv: makeKv(), dicode: fakeDicode,
+                dicode: fakeDicode,
             }),
     );
     assertEquals(result.ok, false);
@@ -328,7 +260,7 @@ JSON`,
         () =>
             main({
                 params: makeParams([["prompt", "hi"]]),
-                kv: makeKv(), dicode: fakeDicode,
+                dicode: fakeDicode,
             }),
     );
     assertEquals(result.ok, true);
@@ -353,7 +285,7 @@ JSON`,
         () =>
             main({
                 params: makeParams([["prompt", "hi"]]),
-                kv: makeKv(), dicode: fakeDicode,
+                dicode: fakeDicode,
             }),
     );
     assertEquals(result.ok, true);
@@ -378,7 +310,7 @@ JSON`,
                     ["skills", "../../etc/passwd,legit-skill"],
                     ["skills_dir", skillsDir],
                 ]),
-                kv: makeKv(), dicode: fakeDicode,
+                dicode: fakeDicode,
             }),
     );
     assertEquals(result.ok, true);
@@ -442,7 +374,7 @@ Deno.test("passes --strict-mcp-config --mcp-config to claude when MCP is wired",
 cat <<'JSON'
 {"type":"result","is_error":false,"result":"ok","session_id":"s"}
 JSON`,
-        () => main({ params: makeParams([["prompt", "hi"]]), kv: makeKv(), dicode: fakeDicode }),
+        () => main({ params: makeParams([["prompt", "hi"]]), dicode: fakeDicode }),
     );
     assertEquals(result.ok, true);
     const recorded = await Deno.readTextFile(sentinel);
@@ -476,7 +408,6 @@ Deno.test("steps.turn: a blank message ends the chat (returns, no Claude call)",
     const { calls, dicode } = makeSuspendDicode();
     const result: any = await steps.turn({
         params: makeParams([]),
-        kv: makeKv(),
         input: { message: "   " },
         state: { claudeSessionId: "sess-prior", chatId: "c1" },
         dicode,
@@ -501,7 +432,6 @@ JSON`,
             try {
                 await steps.turn({
                     params: makeParams([]),
-                    kv: makeKv(),
                     input: { message: "ping" },
                     state: { claudeSessionId: "", chatId: "chat-abc" },
                     dicode,
@@ -539,7 +469,6 @@ JSON`,
             try {
                 await steps.turn({
                     params: makeParams([]),
-                    kv: makeKv(),
                     input: { message: "again" },
                     state: { claudeSessionId: "sess-1", chatId: "chat-xyz" },
                     dicode,

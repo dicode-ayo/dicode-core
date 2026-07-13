@@ -2,9 +2,7 @@
 //
 // Calls an OpenAI-compatible chat completions API (OpenAI, Anthropic via
 // openai-compat, Ollama, LM Studio, Together, ...) with a tool-use loop that
-// lets the model call other dicode tasks as tools. Conversation history is
-// persisted per session in KV and lazily compacted when it exceeds
-// max_history_tokens.
+// lets the model call other dicode tasks as tools.
 //
 // The task bare-returns { session_id, reply } so browser UIs can parse it
 // as application/json. Never call output.html() here — that would override
@@ -12,9 +10,8 @@
 //
 // Two shapes over one turn core (runAgentTurn), sharing the suspend/resume
 // envelope with the other ai-agent presets:
-//   - One-shot (a non-empty `prompt`): run one turn and return
-//     { session_id, reply }, threading conversation history through KV under
-//     chat:<sessionId> — the drivers depend on this.
+//   - One-shot (a non-empty `prompt`): run a single stateless turn and return
+//     { session_id, reply }. No conversation is carried between one-shot calls.
 //   - Chat loop (blank `prompt` on a fresh run): suspend to a `turn` step that
 //     collects a message, runs one turn, and suspends back. The conversation
 //     rides in the suspend `state` blob (resume_state), not KV. A blank message
@@ -417,8 +414,8 @@ async function resolveAgentRuntime(
 
 // runAgentTurn runs the tool-use loop for a single user message against a
 // resolved runtime, mutating `session` in place and returning the reply. The
-// caller owns where `session` comes from and goes to (KV for one-shot,
-// resume_state for the chat loop).
+// caller owns the session's lifetime: one-shot runs a fresh empty session; the
+// chat loop carries it forward in resume_state.
 async function runAgentTurn(
   session: SessionState,
   message: string,
@@ -430,11 +427,8 @@ async function runAgentTurn(
   // Append user turn
   session.messages.push({ role: "user", content: message });
 
-  // The entire agent loop is wrapped in try/finally so the session — and
-  // all the tool round-trips it successfully completed — is persisted to
-  // KV even if an API call, tool dispatch, or compaction throws. Before
-  // this guard, a single rate-limit blip mid-loop silently discarded the
-  // whole turn plus any prior successful tool calls.
+  // Wrap the loop in try/finally so `session` is stamped with updated_at on
+  // exit even when an API call, tool dispatch, or compaction throws mid-loop.
   try {
     let iterations = 0;
     while (iterations++ < maxToolIterations) {
@@ -560,7 +554,7 @@ async function runAgentTurn(
   return last?.role === "assistant" ? last.content : "";
 }
 
-export default async function main({ params, kv, dicode }: DicodeSdk) {
+export default async function main({ params, dicode }: DicodeSdk) {
   requireTaskId(dicode);
 
   const prompt = (await params.get("prompt")) ?? "";
@@ -573,18 +567,17 @@ export default async function main({ params, kv, dicode }: DicodeSdk) {
     return; // unreachable — suspend() never returns
   }
 
-  return await oneShotTurn({ prompt, params, kv, dicode });
+  return await oneShotTurn({ prompt, params, dicode });
 }
 
-// oneShotTurn is the backward-compatible single-turn path: it threads
-// conversation history through KV under chat:<sessionId> (the drivers depend on
-// this), tags the run's group, and returns the { session_id, reply } shape the
-// browser UIs parse as application/json.
+// oneShotTurn runs a single stateless turn: it tags the run's group and returns
+// the { session_id, reply } shape the browser UIs parse as application/json.
+// Multi-turn conversation lives on the chat loop (carried in resume_state), not
+// here — one-shot calls share no history.
 async function oneShotTurn(
-  { prompt, params, kv, dicode }: {
+  { prompt, params, dicode }: {
     prompt: string;
     params: DicodeSdk["params"];
-    kv: DicodeSdk["kv"];
     dicode: Dicode;
   },
 ): Promise<unknown> {
@@ -611,30 +604,12 @@ async function oneShotTurn(
     return response;
   }
 
-  // Load or init session state from KV
-  const key = `chat:${sessionId}`;
-  const stored = (await kv.get(key)) as SessionState | null;
-  const session: SessionState = stored ?? {
+  const session: SessionState = {
     messages: [],
     created_at: Date.now(),
     updated_at: Date.now(),
   };
-
-  let reply = "";
-  try {
-    reply = await runAgentTurn(session, prompt, resolved.runtime, dicode);
-  } finally {
-    // Best-effort persistence. If KV itself is broken the task was going
-    // to fail anyway, and we don't want the KV error to shadow the real
-    // error from the loop body. Log and move on.
-    try {
-      await kv.set(key, session);
-    } catch (e) {
-      console.error(
-        `ai-agent: failed to persist session ${sessionId.slice(0, 8)} to KV: ${e instanceof Error ? e.message : String(e)}`,
-      );
-    }
-  }
+  const reply = await runAgentTurn(session, prompt, resolved.runtime, dicode);
 
   // Bare return → dicode serializes as application/json.
   // Do NOT call output.html() here; it would override Content-Type and the
