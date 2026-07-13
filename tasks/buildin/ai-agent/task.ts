@@ -9,7 +9,19 @@
 // The task bare-returns { session_id, reply } so browser UIs can parse it
 // as application/json. Never call output.html() here — that would override
 // the content type.
+//
+// Two shapes over one turn core (runAgentTurn), sharing the suspend/resume
+// envelope with the other ai-agent presets:
+//   - One-shot (a non-empty `prompt`): run one turn and return
+//     { session_id, reply }, threading conversation history through KV under
+//     chat:<sessionId> — the drivers depend on this.
+//   - Chat loop (blank `prompt` on a fresh run): suspend to a `turn` step that
+//     collects a message, runs one turn, and suspends back. The conversation
+//     rides in the suspend `state` blob (resume_state), not KV. A blank message
+//     ends it.
 import OpenAI from "npm:openai@4";
+import type { Dicode, DicodeSdk } from "../../sdk.ts";
+import { chatStart, chatTurn, decideEntryMode } from "../ai-agent-core/chat.ts";
 
 type Role = "system" | "user" | "assistant" | "tool";
 
@@ -224,31 +236,47 @@ interface NotConfiguredResponse {
   hint: string;
 }
 
-export default async function main({ params, kv, dicode }: DicodeSdk) {
-  // Self-identity check before anything else. dicode.task_id is populated
-  // from the IPC handshake and is used below to exclude this task from its
-  // own tool list. An empty value would silently turn that filter into a
-  // no-op, letting the agent call itself as a tool and recurse up to
-  // max_tool_iterations deep per turn. Fail loud instead.
+// requireTaskId fails loud when the IPC handshake didn't populate task_id.
+// dicode.task_id excludes this task from its own tool list; an empty value
+// would silently turn that filter into a no-op, letting the agent call itself
+// as a tool and recurse up to max_tool_iterations deep per turn.
+function requireTaskId(dicode: Dicode): void {
   if (!dicode.task_id) {
     throw new Error(
       "ai-agent: dicode.task_id is empty — refusing to run without a self-identity. " +
         "This indicates the IPC handshake did not populate task_id; check the dicode daemon version.",
     );
   }
+}
 
-  const prompt = (await params.get("prompt")) ?? "";
-  if (!prompt) throw new Error("prompt param is required");
+// AgentRuntime bundles everything one turn needs. Resolved fresh per run from
+// params — each suspend/resume re-enters the file, so nothing is cached.
+interface AgentRuntime {
+  client: OpenAI;
+  model: string;
+  systemPromptBase: string;
+  skillsBlob: string;
+  // deno-lint-ignore no-explicit-any
+  tools: any[];
+  toolNameToTaskId: Record<string, string>;
+  compactionCfg: CompactionConfig;
+  maxToolIterations: number;
+  responseMaxTokens: number;
+}
 
-  // Hybrid session id: use provided or auto-generate
-  let sessionId = (await params.get("session_id")) ?? "";
-  if (!sessionId) sessionId = crypto.randomUUID();
+type ResolveResult =
+  | { ok: true; runtime: AgentRuntime }
+  | { ok: false; missing: string[]; hint: string };
 
-  // Tag the run so the WebUI collapses every turn of a single chat into
-  // one expandable row in the run list (#112). Tool-call children are
-  // already linked via parent_run_id by the engine (#116), so the run
-  // detail view can render this turn as a timeline of sub-runs (#113).
-  await dicode.set_group(`chat:${sessionId}`);
+// resolveAgentRuntime reads the provider config + tunables from params, resolves
+// the API key, loads skills, and builds the tool list. Returns a structured
+// not_configured result when model/base_url are missing (the caller shapes the
+// response); throws on a bad tunable or a missing api key env var.
+async function resolveAgentRuntime(
+  params: DicodeSdk["params"],
+  dicode: Dicode,
+): Promise<ResolveResult> {
+  requireTaskId(dicode);
 
   // Tools: dicode task ids the agent may call. Empty = all except self.
   const toolFilter = ((await params.get("tools")) ?? "")
@@ -290,17 +318,14 @@ export default async function main({ params, kv, dicode }: DicodeSdk) {
   if (!baseURL) missing.push("base_url");
 
   if (missing.length > 0) {
-    const response: NotConfiguredResponse = {
-      session_id: sessionId,
-      reply: null,
-      error: "not_configured",
+    return {
+      ok: false,
       missing,
       hint:
         "This is the generic ai-agent buildin. It has no provider configured. " +
         "Either pass model/base_url/api_key_env as params, or use a " +
         "provider-specific sibling task (e.g. examples/ai-agent-ollama).",
     };
-    return response;
   }
 
   // API key resolution is purely param-driven, with no URL sniffing.
@@ -336,20 +361,10 @@ export default async function main({ params, kv, dicode }: DicodeSdk) {
   console.log(
     `ai-agent[${new Date().toISOString()}]: task=${dicode.task_id} ` +
       `run=${dicode.run_id.slice(0, 8)} model=${model} baseURL=${baseURL} ` +
-      `session=${sessionId.slice(0, 8)} tools=${toolFilter.length || "*"} ` +
-      `skills=${skillNames.length}`,
+      `tools=${toolFilter.length || "*"} skills=${skillNames.length}`,
   );
 
   const client = new OpenAI({ apiKey, baseURL });
-
-  // Load or init session state from KV
-  const key = `chat:${sessionId}`;
-  const stored = (await kv.get(key)) as SessionState | null;
-  const session: SessionState = stored ?? {
-    messages: [],
-    created_at: Date.now(),
-    updated_at: Date.now(),
-  };
 
   // Build tool list from list_tasks(), filtered by toolFilter. When no
   // explicit allowlist is supplied we exclude exactly this task's own id
@@ -379,15 +394,41 @@ export default async function main({ params, kv, dicode }: DicodeSdk) {
     };
   });
 
-  // Append user turn
-  session.messages.push({ role: "user", content: prompt });
-
-  const compactionCfg: CompactionConfig = {
-    maxHistoryTokens,
-    keepTurns: compactionKeepTurns,
-    summaryMaxTokens: compactionMaxTokens,
-    model: compactionModel,
+  return {
+    ok: true,
+    runtime: {
+      client,
+      model,
+      systemPromptBase,
+      skillsBlob,
+      tools,
+      toolNameToTaskId,
+      compactionCfg: {
+        maxHistoryTokens,
+        keepTurns: compactionKeepTurns,
+        summaryMaxTokens: compactionMaxTokens,
+        model: compactionModel,
+      },
+      maxToolIterations,
+      responseMaxTokens,
+    },
   };
+}
+
+// runAgentTurn runs the tool-use loop for a single user message against a
+// resolved runtime, mutating `session` in place and returning the reply. The
+// caller owns where `session` comes from and goes to (KV for one-shot,
+// resume_state for the chat loop).
+async function runAgentTurn(
+  session: SessionState,
+  message: string,
+  rt: AgentRuntime,
+  dicode: Dicode,
+): Promise<string> {
+  const { client, model, systemPromptBase, skillsBlob, tools, toolNameToTaskId, compactionCfg, maxToolIterations, responseMaxTokens } = rt;
+
+  // Append user turn
+  session.messages.push({ role: "user", content: message });
 
   // The entire agent loop is wrapped in try/finally so the session — and
   // all the tool round-trips it successfully completed — is persisted to
@@ -513,6 +554,76 @@ export default async function main({ params, kv, dicode }: DicodeSdk) {
     }
   } finally {
     session.updated_at = Date.now();
+  }
+
+  const last = session.messages[session.messages.length - 1];
+  return last?.role === "assistant" ? last.content : "";
+}
+
+export default async function main({ params, kv, dicode }: DicodeSdk) {
+  requireTaskId(dicode);
+
+  const prompt = (await params.get("prompt")) ?? "";
+
+  if (decideEntryMode(prompt) === "chat-start") {
+    // Blank prompt on a fresh run → open the chat loop. The conversation rides
+    // in the suspend `state` blob (resume_state), seeded empty; steps.turn runs
+    // each turn. A blank message ends it.
+    await chatStart(dicode, { messages: [] }, "Message the agent — leave blank to end.");
+    return; // unreachable — suspend() never returns
+  }
+
+  return await oneShotTurn({ prompt, params, kv, dicode });
+}
+
+// oneShotTurn is the backward-compatible single-turn path: it threads
+// conversation history through KV under chat:<sessionId> (the drivers depend on
+// this), tags the run's group, and returns the { session_id, reply } shape the
+// browser UIs parse as application/json.
+async function oneShotTurn(
+  { prompt, params, kv, dicode }: {
+    prompt: string;
+    params: DicodeSdk["params"];
+    kv: DicodeSdk["kv"];
+    dicode: Dicode;
+  },
+): Promise<unknown> {
+  // Hybrid session id: use provided or auto-generate
+  let sessionId = (await params.get("session_id")) ?? "";
+  if (!sessionId) sessionId = crypto.randomUUID();
+
+  // Tag the run so the WebUI collapses every turn of a single chat into
+  // one expandable row in the run list (#112). Tool-call children are
+  // already linked via parent_run_id by the engine (#116), so the run
+  // detail view can render this turn as a timeline of sub-runs (#113).
+  // set_group is provided by the runtime shim but not yet on the typed surface.
+  await (dicode as Dicode & { set_group(label: string): Promise<void> }).set_group(`chat:${sessionId}`);
+
+  const resolved = await resolveAgentRuntime(params, dicode);
+  if (!resolved.ok) {
+    const response: NotConfiguredResponse = {
+      session_id: sessionId,
+      reply: null,
+      error: "not_configured",
+      missing: resolved.missing,
+      hint: resolved.hint,
+    };
+    return response;
+  }
+
+  // Load or init session state from KV
+  const key = `chat:${sessionId}`;
+  const stored = (await kv.get(key)) as SessionState | null;
+  const session: SessionState = stored ?? {
+    messages: [],
+    created_at: Date.now(),
+    updated_at: Date.now(),
+  };
+
+  let reply = "";
+  try {
+    reply = await runAgentTurn(session, prompt, resolved.runtime, dicode);
+  } finally {
     // Best-effort persistence. If KV itself is broken the task was going
     // to fail anyway, and we don't want the KV error to shadow the real
     // error from the loop body. Log and move on.
@@ -525,11 +636,32 @@ export default async function main({ params, kv, dicode }: DicodeSdk) {
     }
   }
 
-  const last = session.messages[session.messages.length - 1];
-  const reply = last?.role === "assistant" ? last.content : "";
-
   // Bare return → dicode serializes as application/json.
   // Do NOT call output.html() here; it would override Content-Type and the
   // browser UI would have to parse HTML instead of JSON.
   return { session_id: sessionId, reply };
 }
+
+export const steps = {
+  // One chat turn: run one OpenAI turn for the submitted message. The envelope
+  // owns the suspend/resume loop; runTurn here carries the cumulative
+  // {messages, summary} forward in the suspend state (not KV).
+  turn(ctx: DicodeSdk) {
+    const { params, dicode } = ctx;
+    return chatTurn(ctx, async ({ message, state }) => {
+      const resolved = await resolveAgentRuntime(params, dicode);
+      if (!resolved.ok) {
+        return { ok: false, error: "not_configured", missing: resolved.missing, hint: resolved.hint };
+      }
+      const carried = (state ?? {}) as { messages?: StoredMessage[]; summary?: string };
+      const session: SessionState = {
+        messages: carried.messages ?? [],
+        summary: carried.summary,
+        created_at: Date.now(),
+        updated_at: Date.now(),
+      };
+      const reply = await runAgentTurn(session, message, resolved.runtime, dicode);
+      return { ok: true, reply, state: { messages: session.messages, summary: session.summary } };
+    });
+  },
+};

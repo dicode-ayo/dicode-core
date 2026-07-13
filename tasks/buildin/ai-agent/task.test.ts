@@ -14,6 +14,41 @@
 import { setupHarness } from "../../sdk-test.ts";
 await setupHarness(import.meta.url);
 
+// Loaded AFTER setupHarness patches globalThis.fetch — a static import would
+// evaluate task.ts's `npm:openai` dependency before the patch, so the client
+// the task builds would bind the real fetch and skip the http mocks.
+const { steps } = await import("./task.ts") as {
+  steps: { turn: (ctx: unknown) => Promise<unknown> };
+};
+
+// dicode.suspend never returns in production (the process exits). Tests must
+// stop execution the same way: install a suspend that records the request and
+// throws a sentinel, then inspect the recorded calls.
+class SuspendSignal extends Error {}
+function recordSuspend(): Array<Record<string, unknown>> {
+  const calls: Array<Record<string, unknown>> = [];
+  (dicode as Record<string, unknown>).suspend = (req: Record<string, unknown>) => {
+    calls.push(req);
+    throw new SuspendSignal();
+  };
+  return calls;
+}
+
+// Drive one chat turn through steps.turn with the harness mocks, mirroring how
+// the runner dispatches a resume.
+// deno-lint-ignore no-explicit-any
+function runTurnStep(input: unknown, state: unknown): Promise<any> {
+  return steps.turn({
+    params,
+    kv,
+    input,
+    state,
+    dicode,
+    output: {},
+    mcp: {},
+  }) as Promise<Record<string, unknown>>;
+}
+
 // Minimal OpenAI chat completion response body.
 function completion(content: string, tool_calls?: unknown[]) {
   return {
@@ -159,11 +194,24 @@ test("throws when api key env var is not set (hosted provider)", async () => {
   await assert.throws(() => runTask(), /OPENAI_API_KEY not set/);
 });
 
-test("throws when prompt is empty", async () => {
-  useLocal();
-  // prompt intentionally not set
+test("blank prompt on a fresh run opens the chat loop (suspends to turn)", async () => {
+  // prompt intentionally not set → chat-start, not the one-shot path.
+  const calls = recordSuspend();
+  let signalled = false;
+  try {
+    await runTask();
+  } catch (e) {
+    if (e instanceof SuspendSignal) signalled = true;
+    else throw e;
+  }
 
-  await assert.throws(() => runTask(), /prompt param is required/);
+  assert.equal(signalled, true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].to, "turn");
+  // `message` is intentionally NOT required so a blank line ends the chat.
+  assert.equal((calls[0].schema as Record<string, unknown>).required, undefined);
+  // Conversation state rides in the suspend blob, seeded empty.
+  assert.equal((calls[0].state as Record<string, unknown>).messages, []);
 });
 
 test("compaction fires when history exceeds max_history_tokens", async () => {
@@ -262,4 +310,90 @@ test("refuses to run when dicode.task_id is empty", async () => {
   dicode.task_id = "";
 
   await assert.throws(() => runTask(), /dicode\.task_id is empty/);
+});
+
+// --- chat loop -------------------------------------------------------------
+
+test("chat turn runs one OpenAI turn and suspends back with the reply", async () => {
+  useLocal();
+  const calls = recordSuspend();
+
+  http.mock("POST", "http://localhost:11434/v1/chat/completions", {
+    status: 200,
+    body: completion("pong"),
+  });
+
+  let signalled = false;
+  try {
+    await runTurnStep({ message: "ping" }, { messages: [] });
+  } catch (e) {
+    if (e instanceof SuspendSignal) signalled = true;
+    else throw e;
+  }
+
+  assert.equal(signalled, true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].to, "turn");
+  // The reply becomes the next prompt's banner.
+  assert.equal((calls[0].schema as Record<string, unknown>).description, "pong");
+  // Cumulative conversation is carried forward in the suspend state (not KV).
+  const msgs = (calls[0].state as { messages: Array<{ role: string; content: string }> }).messages;
+  assert.equal(msgs[0].role, "user");
+  assert.equal(msgs[0].content, "ping");
+  assert.equal(msgs[msgs.length - 1].role, "assistant");
+  assert.equal(msgs[msgs.length - 1].content, "pong");
+});
+
+test("chat turn threads prior messages from the carried state", async () => {
+  useLocal();
+  recordSuspend();
+
+  http.mock("POST", "http://localhost:11434/v1/chat/completions", {
+    status: 200,
+    body: completion("second reply"),
+  });
+
+  try {
+    await runTurnStep(
+      { message: "second message" },
+      { messages: [{ role: "user", content: "first message" }, { role: "assistant", content: "first reply" }] },
+    );
+  } catch (e) {
+    if (!(e instanceof SuspendSignal)) throw e;
+  }
+
+  // The prior turns from state are replayed to the model on this turn.
+  const sent = http.lastRequestBody("POST", "http://localhost:11434/v1/chat/completions");
+  const contents: string[] = (sent.messages ?? []).map((m: { content: string }) => m.content);
+  assert.ok(contents.includes("first message"), "prior user turn must be replayed");
+  assert.ok(contents.includes("first reply"), "prior assistant turn must be replayed");
+  assert.ok(contents.includes("second message"), "new user turn must be present");
+});
+
+test("chat turn: a blank message ends the chat (returns, no OpenAI call)", async () => {
+  useLocal();
+  const calls = recordSuspend();
+
+  const result = await runTurnStep(
+    { message: "   " },
+    { messages: [{ role: "user", content: "hi" }, { role: "assistant", content: "hello" }] },
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.reply, "(chat ended)");
+  assert.equal(calls.length, 0); // never suspended onward
+  assert.httpNotCalled("POST", "http://localhost:11434/v1/chat/completions");
+});
+
+test("chat turn surfaces not_configured when no provider is set", async () => {
+  // No useLocal(): model/base_url unset. The turn returns a failure the envelope
+  // hands back verbatim instead of suspending onward.
+  const calls = recordSuspend();
+
+  const result = await runTurnStep({ message: "hi" }, { messages: [] });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error, "not_configured");
+  assert.ok(result.missing.includes("model"));
+  assert.equal(calls.length, 0);
 });

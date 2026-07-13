@@ -1,0 +1,95 @@
+// buildin/ai-agent-core — the shared suspend/resume "chat turn" envelope used
+// by every ai-agent preset. Provider is the only difference between the tasks
+// that build on this: each supplies a `runTurn` that executes one turn against
+// its backend; opening the loop, ending it, and re-suspending for the next
+// message all live here.
+//
+// `state` is provider-opaque: the envelope carries it through suspend/resume
+// verbatim and hands it back to `runTurn`. For the Claude CLI it is the CLI
+// session id + workdir key; for the OpenAI loop it is the cumulative
+// {messages, summary}. The envelope never looks inside it.
+
+import type { Dicode, JSONSchema } from "../../sdk.ts";
+
+// SAFE_SKILL_NAME caps skill filenames to a flat identifier so a `skills` param
+// can't traverse out of skills_dir via "../" or absolute paths (the "/" is
+// outside the class, so a traversal segment never matches). Mirrors the style
+// of ValidateRunID elsewhere in the codebase.
+export const SAFE_SKILL_NAME = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$/;
+
+// decideEntryMode picks the shape of a fresh run: a non-empty prompt runs one
+// turn and returns; an empty prompt opens the interactive chat loop. Pure so the
+// branch can be unit-tested without a live provider.
+export function decideEntryMode(prompt: string): "one-shot" | "chat-start" {
+    return prompt.trim() !== "" ? "one-shot" : "chat-start";
+}
+
+// isChatEnd terminates the chat loop: a blank/whitespace message is the "end"
+// signal (the turn returns instead of suspending onward).
+export function isChatEnd(message: string): boolean {
+    return message.trim() === "";
+}
+
+// chatSchema is the resume form for one chat turn: a single `message` field,
+// intentionally NOT required so the interactive CLI prompt accepts a blank line
+// — which chatTurn reads as the end-of-chat signal (isChatEnd). The banner text
+// lives on BOTH the schema and the `message` property — the CLI's interactive
+// resume prompt renders the *property* description above the input
+// (cmd/dicode/main.go promptResumeInput), while the no-field confirmation path
+// renders the schema-level one; setting both keeps the reply visible regardless
+// of which renderer runs.
+export function chatSchema(description: string): JSONSchema {
+    return {
+        type: "object",
+        title: "Chat",
+        description,
+        properties: {
+            message: { type: "string", title: "Message", description },
+        },
+    };
+}
+
+// The outcome of one provider turn. Success carries the reply plus the new
+// opaque state to carry into the next turn; failure is any object the provider
+// wants surfaced as the run's result (chatTurn returns it verbatim).
+export type TurnResult =
+    | { ok: true; reply: string; state: unknown }
+    | { ok: false; [k: string]: unknown };
+
+// runTurn is the provider seam: run one turn for `message` given the carried
+// `state`, returning the reply plus the state to carry forward.
+export type RunTurn = (args: { message: string; state: unknown }) => Promise<TurnResult>;
+
+// chatStart opens a fresh chat: suspend to the `turn` step with the seed state
+// and a banner. Never returns — suspend() exits the process.
+export function chatStart(dicode: Dicode, initialState: unknown, banner: string): Promise<never> {
+    return dicode.suspend({
+        to: "turn",
+        state: initialState,
+        schema: chatSchema(banner),
+    });
+}
+
+// chatTurn runs one iteration of the loop: read the submitted message; a blank
+// message ends the chat (onEnd), otherwise run the provider turn and suspend
+// back to `turn` with the new state and the reply as the next banner. onEnd
+// defaults to a bare end marker; providers that carry an identity in `state`
+// (e.g. a session id) shape their own end result.
+export async function chatTurn(
+    ctx: { input: unknown; state?: unknown; dicode: Dicode },
+    runTurn: RunTurn,
+    onEnd: (state: unknown) => unknown = () => ({ ok: true, reply: "(chat ended)" }),
+): Promise<unknown> {
+    const message = String((ctx.input as { message?: string } | undefined)?.message ?? "");
+    if (isChatEnd(message)) return onEnd(ctx.state);
+
+    const turn = await runTurn({ message, state: ctx.state });
+    if (!turn.ok) return turn;
+
+    await ctx.dicode.suspend({
+        to: "turn",
+        state: turn.state,
+        schema: chatSchema(turn.reply),
+    });
+    // unreachable — suspend() never returns
+}
