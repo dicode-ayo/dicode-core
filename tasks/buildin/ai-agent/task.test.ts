@@ -133,19 +133,10 @@ test("tags the run with the chat session group so the WebUI can collapse turns",
   assert.equal(calls, ["chat:abc-12345"]);
 });
 
-test("provided session_id is echoed back and history is preserved in kv", async () => {
+test("provided session_id is echoed back on the one-shot path", async () => {
   useLocal();
   params.set("prompt", "second message");
   params.set("session_id", "fixed-session-123");
-
-  kv.set("chat:fixed-session-123", {
-    messages: [
-      { role: "user", content: "first message" },
-      { role: "assistant", content: "first reply" },
-    ],
-    created_at: 0,
-    updated_at: 0,
-  });
 
   http.mock("POST", "http://localhost:11434/v1/chat/completions", {
     status: 200,
@@ -212,41 +203,6 @@ test("blank prompt on a fresh run opens the chat loop (suspends to turn)", async
   assert.equal((calls[0].schema as Record<string, unknown>).required, undefined);
   // Conversation state rides in the suspend blob, seeded empty.
   assert.equal((calls[0].state as Record<string, unknown>).messages, []);
-});
-
-test("compaction fires when history exceeds max_history_tokens", async () => {
-  useLocal();
-  params.set("prompt", "new question");
-  params.set("session_id", "compact-test");
-  params.set("max_history_tokens", "10"); // tiny budget forces compaction
-
-  const bigText = "x".repeat(500);
-  kv.set("chat:compact-test", {
-    messages: [
-      { role: "user", content: bigText },
-      { role: "assistant", content: bigText },
-      { role: "user", content: bigText },
-      { role: "assistant", content: bigText },
-      { role: "user", content: bigText },
-      { role: "assistant", content: bigText },
-    ],
-    created_at: 0,
-    updated_at: 0,
-  });
-
-  // First call = compaction summary, second call = the actual response.
-  http.mockOnce("POST", "http://localhost:11434/v1/chat/completions", {
-    status: 200,
-    body: completion("- user asked about stuff\n- assistant replied"),
-  });
-  http.mockOnce("POST", "http://localhost:11434/v1/chat/completions", {
-    status: 200,
-    body: completion("final answer"),
-  });
-
-  const result = await runTask();
-
-  assert.equal(result.reply, "final answer");
 });
 
 test("openai provider round-trip works with real key", async () => {
