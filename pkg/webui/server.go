@@ -2450,6 +2450,22 @@ func (s *Server) apiAddSource(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "name is required", http.StatusBadRequest)
 		return
 	}
+	if err := validateSourceName(name); err != nil {
+		jsonErr(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Reject collisions against the live config's spec.entries — the same
+	// map apiAddSource itself writes into below and that SourceManager.List
+	// reads from, so this is the single source of truth for "does this name
+	// already exist" rather than re-reading dicode.yaml from disk.
+	s.cfgMu.RLock()
+	_, exists := s.cfg.Spec.Entries[name]
+	s.cfgMu.RUnlock()
+	if exists {
+		jsonErr(w, "source \""+name+"\" already exists", http.StatusConflict)
+		return
+	}
 
 	var ref taskset.Ref
 	if url := strings.TrimSpace(body.URL); url != "" {
