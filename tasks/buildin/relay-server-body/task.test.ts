@@ -35,7 +35,7 @@ import { assertEquals, assertThrows } from "jsr:@std/assert@1";
 import { createPrivateKey, generateKeyPairSync } from "node:crypto";
 import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { startServer } from "npm:dicode-relay@^0.1.6/start";
+import { startServer } from "npm:dicode-relay@0.1.9/start";
 
 import { ensureSigningKey } from "./task.ts";
 

@@ -9,7 +9,7 @@ import {
   RelayClient,
   type StoredIdentity,
   type TofuResult,
-} from "npm:dicode-relay@^0.1.4/client";
+} from "npm:dicode-relay@0.1.9/client";
 
 import type { DicodeSdk } from "../../sdk.ts";
 
