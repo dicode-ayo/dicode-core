@@ -14,9 +14,13 @@ import (
 	"time"
 
 	"github.com/dicode/dicode/pkg/config"
+	"github.com/dicode/dicode/pkg/db"
+	"github.com/dicode/dicode/pkg/ipc"
+	"github.com/dicode/dicode/pkg/registry"
 	"github.com/dicode/dicode/pkg/source"
 	"github.com/dicode/dicode/pkg/task"
 	"github.com/dicode/dicode/pkg/taskset"
+	"github.com/dicode/dicode/pkg/trigger"
 	"go.uber.org/zap"
 )
 
@@ -509,5 +513,168 @@ func TestApiSaveConfigRaw_ReResolvesSourceOverrides(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for refresh-driven Updated event after raw-config save")
+	}
+}
+
+// newTestServerWithReconciler builds a Server wired to a real, running
+// *registry.Reconciler — unlike newTestServer/newTestServerWithSourceMgr
+// (server_test.go), which always construct with reconciler=nil, so the
+// s.reconciler != nil branches in apiAddSource/apiRemoveSource (including
+// reconcileClaimAfterAdd) are never exercised by any other test in this
+// package. The reconciler is started with zero initial sources; sources can
+// still be added dynamically via rec.AddSource, exactly as apiAddSource does.
+//
+// Unlike newTestServerWithSourceMgr, the trigger engine is built with a nil
+// default executor instead of a real denoruntime.New(...) — this test never
+// runs a task, only exercises the add/remove-source race, so it deliberately
+// avoids denoruntime's "ensure deno binary is cached, else download it" step
+// (which requires network access many sandboxes don't have) rather than
+// t.Skipf-ing when it's unavailable.
+func newTestServerWithReconciler(t *testing.T, cfg *config.Config) (*Server, *registry.Reconciler, *SourceManager) {
+	t.Helper()
+	d, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("db: %v", err)
+	}
+	t.Cleanup(func() { d.Close() })
+
+	reg := registry.New(d)
+	eng := trigger.New(reg, nil, zap.NewNop())
+
+	rec := registry.NewReconciler(reg, nil, "", zap.NewNop())
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = rec.Run(ctx) }()
+
+	sourceMgr := NewSourceManager(cfg, nil, t.TempDir(), zap.NewNop())
+
+	srv, err := New(8080, reg, eng, cfg, "", nil, rec, sourceMgr, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
+	if err != nil {
+		t.Fatalf("New server: %v", err)
+	}
+	sourceMgr.BindCfgMutex(&srv.cfgMu)
+	return srv, rec, sourceMgr
+}
+
+// blockingSource is a source.Source whose Start blocks until the test closes
+// unblock. It lets a test deterministically hold open the exact window
+// pkg/registry/reconciler.go's startSource leaves between calling src.Start
+// and populating rc.cancels[id] (cancels is only set *after* Start returns),
+// instead of relying on real timing to hit that window.
+type blockingSource struct {
+	id      string
+	unblock chan struct{}
+	ch      chan source.Event
+}
+
+func newBlockingSource(id string) *blockingSource {
+	return &blockingSource{id: id, unblock: make(chan struct{}), ch: make(chan source.Event, 1)}
+}
+
+func (b *blockingSource) ID() string { return b.id }
+
+func (b *blockingSource) Start(ctx context.Context) (<-chan source.Event, error) {
+	select {
+	case <-b.unblock:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return b.ch, nil
+}
+
+func (b *blockingSource) Sync(context.Context) error { return nil }
+
+// TestApiAddSource_ConcurrentRemove_NoOrphan is a regression test for the
+// race the 3fafc3f atomic-claim fix introduced between apiAddSource and
+// apiRemoveSource:
+//
+//  1. apiAddSource claims cfg.Spec.Entries[name] under s.cfgMu, then calls
+//     reconciler.AddSource(ts) — which calls ts.Start synchronously *before*
+//     populating rc.cancels[id] (pkg/registry/reconciler.go's startSource).
+//  2. While that Start call is still in flight, a concurrent apiRemoveSource
+//     for the same name sees the already-claimed config entry, deletes it,
+//     and calls reconciler.RemoveSource(id) — which misses (rc.cancels[id]
+//     isn't populated yet) and is a silent no-op.
+//  3. AddSource then finishes. Without the reconcileClaimAfterAdd guard,
+//     apiAddSource would unconditionally register the source with
+//     sourceMgr — leaving a live, registered source with no corresponding
+//     cfg.Spec.Entries entry: an orphan, the exact failure mode the 3fafc3f
+//     rollback was built to prevent, from the other direction.
+//
+// This drives the real *registry.Reconciler (not a mock) with a
+// blockingSource to reproduce the ordering precondition deterministically
+// instead of relying on real timing, then asserts the post-add state is
+// always fully consistent: either the source is completely removed (no
+// config entry, not registered with sourceMgr) or completely present
+// (config entry AND registered) — never the split, orphaned state.
+func TestApiAddSource_ConcurrentRemove_NoOrphan(t *testing.T) {
+	const name = "race-add-remove"
+	const id = "race-add-remove-id"
+
+	cfg := &config.Config{Server: config.ServerConfig{Port: 8080}}
+	cfg.Spec.Entries = map[string]*taskset.Entry{}
+
+	srv, rec, sourceMgr := newTestServerWithReconciler(t, cfg)
+
+	// Step 1: claim the config entry exactly as apiAddSource's updateConfig
+	// callback does before calling reconciler.AddSource.
+	if err := srv.updateConfig(func(cfg *config.Config) error {
+		cfg.Spec.Entries[name] = &taskset.Entry{Ref: &taskset.Ref{Path: "/tmp/" + name}}
+		return nil
+	}); err != nil {
+		t.Fatalf("claim entry: %v", err)
+	}
+
+	// Step 2: start reconciler.AddSource(bs) — the same call apiAddSource
+	// makes — in the background. bs.Start blocks until unblocked, holding
+	// open the window where rc.cancels[id] is not yet populated.
+	bs := newBlockingSource(id)
+	addDone := make(chan error, 1)
+	go func() { addDone <- rec.AddSource(bs) }()
+
+	// Give the AddSource goroutine a moment to actually enter bs.Start so
+	// the RemoveSource-misses-and-no-ops step below reliably lands inside
+	// the race window. (The regression assertions after unblocking do not
+	// themselves depend on this timing — they hold regardless of when
+	// apiRemoveSource's delete lands relative to bs.Start.)
+	time.Sleep(20 * time.Millisecond)
+
+	// Step 3: apiRemoveSource racing in concurrently — delete the config
+	// entry and call reconciler.RemoveSource(id), reproducing exactly what
+	// apiRemoveSource does. This call is expected to be a no-op teardown
+	// (rc.cancels[id] not populated yet, since bs.Start is still blocked),
+	// which is the precondition for the orphan bug.
+	if err := srv.updateConfig(func(cfg *config.Config) error {
+		delete(cfg.Spec.Entries, name)
+		return nil
+	}); err != nil {
+		t.Fatalf("remove entry: %v", err)
+	}
+	rec.RemoveSource(id)
+
+	// Step 4: let AddSource finish.
+	close(bs.unblock)
+	if err := <-addDone; err != nil {
+		t.Fatalf("reconciler.AddSource: %v", err)
+	}
+
+	// Step 5: run the exact post-AddSource logic apiAddSource uses.
+	if srv.reconcileClaimAfterAdd(name, id) {
+		sourceMgr.Register(name, taskset.NewSource(id, name, &taskset.Ref{Path: "/tmp/" + name}, "", t.TempDir(), false, 0, zap.NewNop()))
+	}
+
+	// Step 6: assert full consistency — the orphan state (registered but no
+	// config entry) must never occur.
+	srv.cfgMu.RLock()
+	_, cfgPresent := srv.cfg.Spec.Entries[name]
+	srv.cfgMu.RUnlock()
+	_, mgrPresent := sourceMgr.Get(name)
+
+	if mgrPresent != cfgPresent {
+		t.Fatalf("orphan reproduced: sourceMgr registered=%v but cfg.Spec.Entries present=%v (name=%q) — want both true or both false",
+			mgrPresent, cfgPresent, name)
+	}
+	if cfgPresent {
+		t.Fatalf("concurrent apiRemoveSource deleted cfg.Spec.Entries[%q] first; reconcileClaimAfterAdd should not have let it come back, but cfg entry present=%v", name, cfgPresent)
 	}
 }

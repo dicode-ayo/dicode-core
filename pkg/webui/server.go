@@ -2547,12 +2547,61 @@ func (s *Server) apiAddSource(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if s.sourceMgr != nil {
+
+	// reconcileClaimAfterAdd guards against a race with apiRemoveSource: see
+	// its doc comment for the full mechanics. Only register ts with
+	// sourceMgr if our cfg.Spec.Entries[name] claim is still standing.
+	if s.reconcileClaimAfterAdd(name, id) && s.sourceMgr != nil {
 		s.sourceMgr.Register(name, ts)
 	}
 
 	s.log.Info("source added", zap.String("name", name))
 	jsonOK(w, map[string]string{"status": "ok"})
+}
+
+// reconcileClaimAfterAdd re-validates, immediately after s.reconciler.AddSource
+// for (name, id) has returned successfully, that the cfg.Spec.Entries[name]
+// claim made earlier by apiAddSource's updateConfig callback is still ours.
+// Call it right before registering the newly started source with sourceMgr.
+//
+// Why the re-check is needed: reconciler.AddSource's underlying startSource
+// calls src.Start synchronously *before* it populates rc.cancels[id] (see
+// pkg/registry/reconciler.go's startSource). If a concurrent apiRemoveSource
+// ran while that Start was in flight, it would have seen our claimed
+// cfg.Spec.Entries[name], deleted it, and called reconciler.RemoveSource(id)
+// — but that call would have missed (rc.cancels[id] not populated yet) and
+// been a silent no-op, leaving AddSource free to finish "successfully" a
+// moment later. Without this re-check apiAddSource would unconditionally
+// register a live source in sourceMgr with no corresponding config entry:
+// the orphan the 3fafc3f rollback was built to prevent, from the other
+// direction.
+//
+// Re-checking here — now that AddSource has returned and rc.cancels[id] is
+// guaranteed populated — lets us detect that lost race and self-clean via the
+// same teardown apiRemoveSource itself uses (reconciler.RemoveSource),
+// instead of registering an orphan. We must NOT resurrect the config entry:
+// the concurrent delete already won and its caller has already been told the
+// source is gone.
+//
+// Returns true if the claim still holds and the caller should proceed to
+// register the source with sourceMgr; false if a concurrent removal won the
+// race — in which case this function has already torn the source back down
+// via reconciler.RemoveSource(id) and the caller must not register it.
+// A nil s.reconciler always returns true (nothing to race against).
+func (s *Server) reconcileClaimAfterAdd(name, id string) bool {
+	if s.reconciler == nil {
+		return true
+	}
+	s.cfgMu.RLock()
+	_, stillClaimed := s.cfg.Spec.Entries[name]
+	s.cfgMu.RUnlock()
+	if stillClaimed {
+		return true
+	}
+	s.reconciler.RemoveSource(id)
+	s.log.Info("source removed concurrently while being added; cleaned up orphaned source",
+		zap.String("name", name), zap.String("id", id))
+	return false
 }
 
 // apiListGitBranches lists remote branches for a git URL — used by the config
