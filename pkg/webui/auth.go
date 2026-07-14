@@ -62,9 +62,12 @@ tunnel such as <a href="https://tailscale.com/">Tailscale</a> or
 </html>`
 
 // webhookAuthGuard checks whether the task associated with the requested webhook
-// path has trigger.auth: true. If it does, and the request carries no valid
-// dicode session, the request is rejected (401 JSON for API callers, redirect
-// for browsers). Public webhooks (no auth: true) pass through unchanged.
+// path has trigger.auth: true. If it does, the request is rejected unless it
+// carries a valid dicode session. A request arriving via the relay (trusted
+// X-Relay-Base) can never be authenticated and is refused outright — HTML
+// explainer for browsers, JSON 401 otherwise. A direct request with no session
+// gets a JSON 401 for API callers or a /login redirect for browsers. Public
+// webhooks (no auth: true) pass through unchanged.
 //
 // The match is longest-prefix so overlapping paths resolve to the most specific
 // spec — the gateway already routes this way, and the auth decision must agree.
