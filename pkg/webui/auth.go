@@ -2,6 +2,8 @@ package webui
 
 import (
 	"context"
+	"fmt"
+	"html"
 	"net"
 	"net/http"
 	"net/url"
@@ -26,6 +28,38 @@ func (s *Server) auditDenied(r *http.Request, reason string) {
 		Reason:     reason,
 	})
 }
+
+// relayAuthBlockedPage explains, to a browser that reached a session-gated
+// webhook through the public relay URL, why it can't be served there and where
+// to go instead. Printf args: %d = daemon port, %s = webhook path.
+const relayAuthBlockedPage = `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Login required — not available via relay</title>
+<style>
+  body { font-family: system-ui, sans-serif; background: #1e1e2e; color: #cdd6f4;
+         margin: 0; display: flex; min-height: 100vh; align-items: center; justify-content: center; }
+  main { max-width: 34rem; padding: 2rem; }
+  h1 { color: #f9e2af; font-size: 1.3rem; margin: 0 0 1rem; }
+  p { line-height: 1.6; margin: 0 0 1rem; }
+  code { background: #302d41; padding: .15em .4em; border-radius: 4px; font-size: .9em; word-break: break-all; }
+  a { color: #89b4fa; }
+</style>
+</head>
+<body>
+<main>
+<h1>This page needs a login — and the public relay URL can't provide one</h1>
+<p>Session logins never travel over the relay (it forwards webhooks only and
+strips credentials), so a page behind <code>auth: true</code> can't be served here.</p>
+<p>Open it on your dicode server's own address, e.g.
+<code>http://YOUR-DICODE-HOST:%d%s</code>, or reach your server remotely with a
+tunnel such as <a href="https://tailscale.com/">Tailscale</a> or
+<a href="https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/">cloudflared</a>.</p>
+</main>
+</body>
+</html>`
 
 // webhookAuthGuard checks whether the task associated with the requested webhook
 // path has trigger.auth: true. If it does, and the request carries no valid
@@ -69,6 +103,29 @@ func (s *Server) webhookAuthGuard(w http.ResponseWriter, r *http.Request, next h
 
 	if !requiresAuth {
 		next.ServeHTTP(w, r)
+		return
+	}
+
+	// A relayed request carries a trusted X-Relay-Base header — the forwarder
+	// stamps it and drops any inbound copy. Such a request can never carry a
+	// legitimate session: the relay strips every credential header (cookie,
+	// authorization, x-api-key) and forwards only /hooks/*, so /login is
+	// unreachable and no cookie survives the hop. Reject an auth-gated webhook
+	// here BEFORE evaluating any session, so a credential that somehow survived
+	// forwarding can never authenticate a relayed request — the forwarder
+	// strip-list stays defense-in-depth, not the load-bearing control.
+	if r.Header.Get("X-Relay-Base") != "" {
+		s.auditDenied(r, "auth-gated webhook not reachable via relay")
+		// A human who clicked the public relay link gets an explainer page
+		// pointing at the daemon's own address / a tunnel; API callers get JSON.
+		// Without this a browser renders the raw JSON error in the viewport.
+		if r.Method == http.MethodGet && strings.Contains(r.Header.Get("Accept"), "text/html") {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = fmt.Fprintf(w, relayAuthBlockedPage, s.port, html.EscapeString(r.URL.Path))
+			return
+		}
+		jsonErr(w, "this webhook requires authentication and is not reachable via the public relay URL; open it on the daemon's own address, or reach your server via a tunnel (Tailscale/cloudflared)", http.StatusUnauthorized)
 		return
 	}
 
