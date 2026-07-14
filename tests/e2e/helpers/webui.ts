@@ -50,7 +50,7 @@ export async function waitForConfigPage(page: Page): Promise<void> {
   await page.waitForSelector('dc-config', { timeout: 10_000 });
   await page.waitForFunction(() => {
     const el = document.querySelector('dc-config');
-    return !!el && !el.textContent?.includes('Loading');
+    return !!el && el.textContent?.trim() !== '' && !el.textContent?.includes('Loading');
   }, { timeout: 15_000 });
 }
 

@@ -125,10 +125,6 @@ test.describe('Config UI', () => {
     await gotoWebui(page);
     await navigateInSpa(page, '/config');
     await waitForConfigPage(page);
-    // Extra guard beyond waitForConfigPage's "not Loading" check: confirm
-    // the component actually rendered non-empty content, not just an empty
-    // shadow root mid-hydration.
-    await page.waitForFunction(() => document.querySelector('dc-config')?.textContent !== '', { timeout: 15_000 });
 
     await expect(page).toHaveURL(/\/config/);
   });

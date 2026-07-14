@@ -2537,8 +2537,17 @@ func (s *Server) apiAddSource(w http.ResponseWriter, r *http.Request) {
 			// Registration failed after the claim succeeded: roll back so a
 			// source that never actually started doesn't linger as a
 			// phantom entry in cfg.Spec.Entries (and on disk).
+			//
+			// Only delete if cfg.Spec.Entries[name] is still THIS request's
+			// entry pointer. Comparing by name presence alone is an ABA
+			// hazard: if this rollback runs late (e.g. after a concurrent
+			// DELETE + re-POST for the same name), cfg.Spec.Entries[name]
+			// could already hold a newer, unrelated entry that has since won
+			// the name — deleting it would silently destroy that valid claim.
 			if rollbackErr := s.updateConfig(func(cfg *config.Config) error {
-				delete(cfg.Spec.Entries, name)
+				if cfg.Spec.Entries[name] == entry {
+					delete(cfg.Spec.Entries, name)
+				}
 				return nil
 			}); rollbackErr != nil {
 				s.log.Warn("source claim rollback failed", zap.String("name", name), zap.Error(rollbackErr))
@@ -2548,10 +2557,11 @@ func (s *Server) apiAddSource(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// reconcileClaimAfterAdd guards against a race with apiRemoveSource: see
-	// its doc comment for the full mechanics. Only register ts with
-	// sourceMgr if our cfg.Spec.Entries[name] claim is still standing.
-	if s.reconcileClaimAfterAdd(name, id) && s.sourceMgr != nil {
+	// reconcileClaimAfterAdd guards against a race with apiRemoveSource (and,
+	// via the entry pointer, a subsequent concurrent re-add): see its doc
+	// comment for the full mechanics. Only register ts with sourceMgr if our
+	// cfg.Spec.Entries[name] claim — this exact *entry — is still standing.
+	if s.reconcileClaimAfterAdd(name, id, entry) && s.sourceMgr != nil {
 		s.sourceMgr.Register(name, ts)
 	}
 
@@ -2561,8 +2571,9 @@ func (s *Server) apiAddSource(w http.ResponseWriter, r *http.Request) {
 
 // reconcileClaimAfterAdd re-validates, immediately after s.reconciler.AddSource
 // for (name, id) has returned successfully, that the cfg.Spec.Entries[name]
-// claim made earlier by apiAddSource's updateConfig callback is still ours.
-// Call it right before registering the newly started source with sourceMgr.
+// claim made earlier by apiAddSource's updateConfig callback — specifically,
+// THIS request's entry pointer — is still the one occupying that slot. Call
+// it right before registering the newly started source with sourceMgr.
 //
 // Why the re-check is needed: reconciler.AddSource's underlying startSource
 // calls src.Start synchronously *before* it populates rc.cancels[id] (see
@@ -2576,30 +2587,44 @@ func (s *Server) apiAddSource(w http.ResponseWriter, r *http.Request) {
 // the orphan the 3fafc3f rollback was built to prevent, from the other
 // direction.
 //
-// Re-checking here — now that AddSource has returned and rc.cancels[id] is
-// guaranteed populated — lets us detect that lost race and self-clean via the
-// same teardown apiRemoveSource itself uses (reconciler.RemoveSource),
-// instead of registering an orphan. We must NOT resurrect the config entry:
-// the concurrent delete already won and its caller has already been told the
-// source is gone.
+// Why identity, not just name presence: name presence alone is an ABA
+// hazard. If, after the concurrent delete above, a THIRD request re-adds the
+// same name before this call runs, cfg.Spec.Entries[name] is present again
+// but holds a different, newer *taskset.Entry. Treating "present" as "still
+// ours" would register this request's now-stale ts into sourceMgr on top of
+// (or racing with) the newer request's own registration, and would leak this
+// source's reconciler-side registration forever (nothing else will ever call
+// RemoveSource(id) for it). Comparing against the specific entry pointer this
+// request claimed distinguishes "our claim still stands" from "the slot is
+// now occupied by someone else's newer claim" — both cases must self-clean
+// via reconciler.RemoveSource(id) and must NOT touch the entry actually
+// occupying the slot (whether that's nothing, or a newer valid claim).
 //
-// Returns true if the claim still holds and the caller should proceed to
-// register the source with sourceMgr; false if a concurrent removal won the
-// race — in which case this function has already torn the source back down
-// via reconciler.RemoveSource(id) and the caller must not register it.
+// Re-checking here — now that AddSource has returned and rc.cancels[id] is
+// guaranteed populated — lets us detect a lost race and self-clean via the
+// same teardown apiRemoveSource itself uses (reconciler.RemoveSource),
+// instead of registering an orphan. We must NOT resurrect or otherwise
+// mutate cfg.Spec.Entries[name]: whatever is (or isn't) there already
+// reflects the outcome of whichever concurrent request won.
+//
+// Returns true if entry is still the one occupying cfg.Spec.Entries[name]
+// and the caller should proceed to register the source with sourceMgr; false
+// if a concurrent removal — or removal-then-re-add — won the race, in which
+// case this function has already torn the source back down via
+// reconciler.RemoveSource(id) and the caller must not register it.
 // A nil s.reconciler always returns true (nothing to race against).
-func (s *Server) reconcileClaimAfterAdd(name, id string) bool {
+func (s *Server) reconcileClaimAfterAdd(name, id string, entry *taskset.Entry) bool {
 	if s.reconciler == nil {
 		return true
 	}
 	s.cfgMu.RLock()
-	_, stillClaimed := s.cfg.Spec.Entries[name]
+	current := s.cfg.Spec.Entries[name]
 	s.cfgMu.RUnlock()
-	if stillClaimed {
+	if current == entry {
 		return true
 	}
 	s.reconciler.RemoveSource(id)
-	s.log.Info("source removed concurrently while being added; cleaned up orphaned source",
+	s.log.Info("source removed (or replaced by a newer claim) concurrently while being added; cleaned up orphaned source",
 		zap.String("name", name), zap.String("id", id))
 	return false
 }
