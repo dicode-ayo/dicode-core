@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -757,5 +758,82 @@ func TestWebhookAuthGuard_TrailingSlashPattern(t *testing.T) {
 	h.ServeHTTP(w, req)
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("trailing-slash pattern must still gate nested paths: got %d", w.Code)
+	}
+}
+
+// TestWebhookAuthGuard_RelayRejectsAuthWebhook covers the relay branch: an
+// auth:true webhook reached through the relay (trusted X-Relay-Base) can never
+// carry a session (the relay strips credentials and only forwards /hooks/*), so
+// it is rejected before any session is evaluated — a browser GET gets an HTML
+// explainer instead of an unreachable /login bounce, an API call gets JSON. A
+// public webhook still passes through, and the direct (non-relay) path still
+// redirects to /login.
+func TestWebhookAuthGuard_RelayRejectsAuthWebhook(t *testing.T) {
+	srv := newAuthServer(t, "hunter2")
+
+	if err := srv.registry.Register(&task.Spec{
+		ID:      "buildin/ai-claude",
+		Trigger: task.TriggerConfig{Webhook: "/hooks/ai-claude", WebhookAuth: true},
+	}); err != nil {
+		t.Fatalf("register protected: %v", err)
+	}
+	if err := srv.registry.Register(&task.Spec{
+		ID:      "buildin/open",
+		Trigger: task.TriggerConfig{Webhook: "/hooks/open", WebhookAuth: false},
+	}); err != nil {
+		t.Fatalf("register open: %v", err)
+	}
+
+	h := srv.Handler()
+	const relayBase = "/u/0000000000000000000000000000000000000000000000000000000000000000"
+
+	// Relayed browser GET → 401 with an HTML explainer, NOT a login redirect.
+	req := httptest.NewRequest(http.MethodGet, "/hooks/ai-claude", nil)
+	req.Header.Set("X-Relay-Base", relayBase)
+	req.Header.Set("Accept", "text/html")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("relayed browser GET: expected 401, got %d", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.Contains(ct, "text/html") {
+		t.Errorf("relayed browser GET: expected HTML explainer, got Content-Type %q", ct)
+	}
+	if loc := w.Header().Get("Location"); loc != "" {
+		t.Errorf("relayed browser GET must not redirect to login, got Location %q", loc)
+	}
+
+	// Relayed API POST (no text/html Accept) → 401 JSON.
+	req = httptest.NewRequest(http.MethodPost, "/hooks/ai-claude", nil)
+	req.Header.Set("X-Relay-Base", relayBase)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("relayed API POST: expected 401, got %d", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.Contains(ct, "application/json") {
+		t.Errorf("relayed API POST: expected JSON error, got Content-Type %q", ct)
+	}
+
+	// Relayed request to a public webhook still passes through (not 401): the
+	// relay reject must only fire for auth:true.
+	req = httptest.NewRequest(http.MethodPost, "/hooks/open", nil)
+	req.Header.Set("X-Relay-Base", relayBase)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code == http.StatusUnauthorized {
+		t.Errorf("relayed public webhook: expected pass-through, got 401")
+	}
+
+	// Direct (no relay header) browser GET still redirects to /login unchanged.
+	req = httptest.NewRequest(http.MethodGet, "/hooks/ai-claude", nil)
+	req.Header.Set("Accept", "text/html")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusSeeOther {
+		t.Errorf("direct browser GET: expected 303 login redirect, got %d", w.Code)
+	}
+	if loc := w.Header().Get("Location"); !strings.HasPrefix(loc, "/login") {
+		t.Errorf("direct browser GET: expected /login redirect, got Location %q", loc)
 	}
 }
