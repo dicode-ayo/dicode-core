@@ -54,6 +54,7 @@ export default defineConfig({
         '**/webhooks-secure.spec.ts',
         '**/cron.spec.ts',
         '**/config.spec.ts',
+        '**/add-source.spec.ts',
         '**/mcp.spec.ts',
         '**/dev-mode-clone.spec.ts',
         '**/run-input-persistence.spec.ts',

@@ -232,6 +232,82 @@ func TestApiAddSource_MissingURLAndPath(t *testing.T) {
 	}
 }
 
+// TestApiAddSource_DuplicateName verifies that adding a source whose name
+// already exists in spec.entries is rejected with 409, and that the
+// pre-existing entry is left untouched (config.spec.entries.buildin comes
+// from the seed config written by newTestServerWithConfigPath).
+func TestApiAddSource_DuplicateName(t *testing.T) {
+	srv, _ := newTestServerWithConfigPath(t)
+
+	body := `{"name":"buildin","path":"/tmp/other-tasks"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/settings/sources", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("got %d; want 409 for duplicate name; body=%s", w.Code, w.Body.String())
+	}
+
+	srv.cfgMu.RLock()
+	entry := srv.cfg.Spec.Entries["buildin"]
+	srv.cfgMu.RUnlock()
+	if entry == nil || entry.Ref == nil {
+		t.Fatal("expected pre-existing buildin entry to survive rejected duplicate add")
+	}
+	if entry.Ref.Path != "/tmp/buildin/taskset.yaml" {
+		t.Errorf("buildin entry was overwritten by rejected duplicate add: path = %q", entry.Ref.Path)
+	}
+}
+
+// TestApiAddSource_InvalidNameSlug verifies that a name containing
+// characters unsafe for a spec.entries key / task-id namespace segment
+// (here, a path separator) is rejected with 400 and never persisted.
+func TestApiAddSource_InvalidNameSlug(t *testing.T) {
+	srv, _ := newTestServerWithConfigPath(t)
+
+	body := `{"name":"bad/name","path":"/tmp/tasks"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/settings/sources", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("got %d; want 400 for invalid name slug; body=%s", w.Code, w.Body.String())
+	}
+
+	srv.cfgMu.RLock()
+	_, exists := srv.cfg.Spec.Entries["bad/name"]
+	srv.cfgMu.RUnlock()
+	if exists {
+		t.Error("invalid name should not have been persisted to spec.entries")
+	}
+}
+
+// TestApiAddSource_ValidSlugName is the positive counterpart to
+// TestApiAddSource_InvalidNameSlug: a name using the full allowed character
+// set (letters, digits, '-', '_', '.') is accepted.
+func TestApiAddSource_ValidSlugName(t *testing.T) {
+	srv, _ := newTestServerWithConfigPath(t)
+
+	body := `{"name":"my-source_2.local","path":"/tmp/tasks"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/settings/sources", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d; want 200 for valid slug name; body=%s", w.Code, w.Body.String())
+	}
+
+	srv.cfgMu.RLock()
+	entry := srv.cfg.Spec.Entries["my-source_2.local"]
+	srv.cfgMu.RUnlock()
+	if entry == nil || entry.Ref == nil {
+		t.Fatal("expected my-source_2.local entry in config after add")
+	}
+}
+
 // TestApiRemoveSource_HappyPath adds then removes a source, verifying it
 // disappears from the config.
 func TestApiRemoveSource_HappyPath(t *testing.T) {
