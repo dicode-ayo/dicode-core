@@ -3,11 +3,13 @@ package webui
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -257,6 +259,70 @@ func TestApiAddSource_DuplicateName(t *testing.T) {
 	}
 	if entry.Ref.Path != "/tmp/buildin/taskset.yaml" {
 		t.Errorf("buildin entry was overwritten by rejected duplicate add: path = %q", entry.Ref.Path)
+	}
+}
+
+// TestApiAddSource_ConcurrentDuplicateName_TOCTOU fires two concurrent
+// POST /api/settings/sources requests for the same brand-new name and
+// asserts exactly one succeeds (200) and the other is rejected (409).
+//
+// This guards against the check-then-act race in apiAddSource: reading
+// cfg.Spec.Entries[name] to decide "does it already exist" and later
+// writing cfg.Spec.Entries[name] = entry must happen inside a single
+// s.cfgMu.Lock critical section (see the updateConfig mutate callback in
+// apiAddSource). If the check and the write were split across two lock
+// acquisitions (as they were before this fix, via a separate RLock/RUnlock
+// existence check ahead of the later write), two concurrent requests for
+// the same never-before-seen name could both observe "not present" and
+// both proceed to claim it, so a rerun of this test with that older code
+// path intermittently reported 2 OKs (or, depending on write-write
+// ordering, silently dropped one caller's config data) instead of exactly
+// one OK and one Conflict. Iterating with a fresh name each pass keeps the
+// assertion meaningful even though the race window is small.
+func TestApiAddSource_ConcurrentDuplicateName_TOCTOU(t *testing.T) {
+	srv, _ := newTestServerWithConfigPath(t)
+
+	const iterations = 50
+	for i := 0; i < iterations; i++ {
+		name := fmt.Sprintf("race-source-%d", i)
+		body := `{"name":"` + name + `","path":"/tmp/race"}`
+
+		var wg sync.WaitGroup
+		codes := make([]int, 2)
+		for g := 0; g < 2; g++ {
+			wg.Add(1)
+			go func(idx int) {
+				defer wg.Done()
+				req := httptest.NewRequest(http.MethodPost, "/api/settings/sources", strings.NewReader(body))
+				req.Header.Set("Content-Type", "application/json")
+				w := httptest.NewRecorder()
+				srv.Handler().ServeHTTP(w, req)
+				codes[idx] = w.Code
+			}(g)
+		}
+		wg.Wait()
+
+		okCount, conflictCount := 0, 0
+		for _, c := range codes {
+			switch c {
+			case http.StatusOK:
+				okCount++
+			case http.StatusConflict:
+				conflictCount++
+			default:
+				t.Fatalf("iteration %d: unexpected status %d for %q", i, c, name)
+			}
+		}
+		if okCount != 1 || conflictCount != 1 {
+			t.Fatalf("iteration %d: got %d OK / %d Conflict for two concurrent adds of %q; want exactly 1 OK and 1 Conflict (TOCTOU race in the duplicate-name check)", i, okCount, conflictCount, name)
+		}
+
+		srv.cfgMu.RLock()
+		_, exists := srv.cfg.Spec.Entries[name]
+		srv.cfgMu.RUnlock()
+		if !exists {
+			t.Fatalf("iteration %d: winning request's entry %q missing from cfg.Spec.Entries after both requests completed", i, name)
+		}
 	}
 }
 

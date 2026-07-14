@@ -2432,6 +2432,11 @@ func (s *Server) apiSaveServerSettings(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]string{"status": "ok"})
 }
 
+// errSourceExists aborts the apiAddSource updateConfig mutate so a duplicate
+// name never triggers a config persist — see the TOCTOU comment inline in
+// apiAddSource for why the check and the map write must share one mutate call.
+var errSourceExists = errors.New("source exists")
+
 func (s *Server) apiAddSource(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Name     string `json:"name"`
@@ -2452,18 +2457,6 @@ func (s *Server) apiAddSource(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := validateSourceName(name); err != nil {
 		jsonErr(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	// Reject collisions against the live config's spec.entries — the same
-	// map apiAddSource itself writes into below and that SourceManager.List
-	// reads from, so this is the single source of truth for "does this name
-	// already exist" rather than re-reading dicode.yaml from disk.
-	s.cfgMu.RLock()
-	_, exists := s.cfg.Spec.Entries[name]
-	s.cfgMu.RUnlock()
-	if exists {
-		jsonErr(w, "source \""+name+"\" already exists", http.StatusConflict)
 		return
 	}
 
@@ -2497,6 +2490,35 @@ func (s *Server) apiAddSource(w http.ResponseWriter, r *http.Request) {
 	if id == "" {
 		id = ref.Path
 	}
+
+	// Atomically check-and-claim the name against the live config's
+	// spec.entries — the same map that SourceManager.List reads from, so
+	// this is the single source of truth for "does this name already
+	// exist" rather than re-reading dicode.yaml from disk. The existence
+	// check and the map write both happen inside updateConfig's mutate
+	// callback, i.e. under a single s.cfgMu.Lock critical section, so two
+	// concurrent requests for the same brand-new name can't both observe
+	// "not present" before either writes back (TOCTOU). errSourceExists
+	// aborts the mutate before persistConfigLocked runs, so a rejected
+	// duplicate never touches disk or the in-memory map.
+	persistErr := s.updateConfig(func(cfg *config.Config) error {
+		if cfg.Spec.Entries == nil {
+			cfg.Spec.Entries = make(map[string]*taskset.Entry)
+		}
+		if _, exists := cfg.Spec.Entries[name]; exists {
+			return errSourceExists
+		}
+		cfg.Spec.Entries[name] = entry
+		return nil
+	})
+	if errors.Is(persistErr, errSourceExists) {
+		jsonErr(w, "source \""+name+"\" already exists", http.StatusConflict)
+		return
+	}
+	if persistErr != nil {
+		s.log.Warn("source persist failed", zap.Error(persistErr))
+	}
+
 	// Match the daemon's buildTaskSetSourceFromEntry: forward entry.Overrides
 	// so the source applies any future overrides patched in via the REST API.
 	// entry.Overrides is always nil for a freshly constructed entry today;
@@ -2506,9 +2528,21 @@ func (s *Server) apiAddSource(w http.ResponseWriter, r *http.Request) {
 	if entry.Overrides != nil {
 		opts = append(opts, taskset.WithParentOverrides(entry.Overrides))
 	}
+	// The claim above is deliberately done before this potentially slow,
+	// filesystem/network-touching registration step so the two are not
+	// serialised behind s.cfgMu — only the fast map check-and-write is.
 	ts := taskset.NewSource(id, name, &ref, "", s.dataDir, false, ref.PollInterval, s.log, opts...)
 	if s.reconciler != nil {
 		if err := s.reconciler.AddSource(ts); err != nil {
+			// Registration failed after the claim succeeded: roll back so a
+			// source that never actually started doesn't linger as a
+			// phantom entry in cfg.Spec.Entries (and on disk).
+			if rollbackErr := s.updateConfig(func(cfg *config.Config) error {
+				delete(cfg.Spec.Entries, name)
+				return nil
+			}); rollbackErr != nil {
+				s.log.Warn("source claim rollback failed", zap.String("name", name), zap.Error(rollbackErr))
+			}
 			jsonErr(w, "start source: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -2517,16 +2551,6 @@ func (s *Server) apiAddSource(w http.ResponseWriter, r *http.Request) {
 		s.sourceMgr.Register(name, ts)
 	}
 
-	persistErr := s.updateConfig(func(cfg *config.Config) error {
-		if cfg.Spec.Entries == nil {
-			cfg.Spec.Entries = make(map[string]*taskset.Entry)
-		}
-		cfg.Spec.Entries[name] = entry
-		return nil
-	})
-	if persistErr != nil {
-		s.log.Warn("source persist failed", zap.Error(persistErr))
-	}
 	s.log.Info("source added", zap.String("name", name))
 	jsonOK(w, map[string]string{"status": "ok"})
 }
