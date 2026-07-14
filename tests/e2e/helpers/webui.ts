@@ -45,6 +45,15 @@ export async function waitForRunDetail(page: Page): Promise<void> {
   }, { timeout: 15_000 });
 }
 
+/** Wait for the config page component to finish loading. */
+export async function waitForConfigPage(page: Page): Promise<void> {
+  await page.waitForSelector('dc-config', { timeout: 10_000 });
+  await page.waitForFunction(() => {
+    const el = document.querySelector('dc-config');
+    return !!el && !el.textContent?.includes('Loading');
+  }, { timeout: 15_000 });
+}
+
 /** Navigate the SPA client-side via window.navigate. Caller should already be on /hooks/webui. */
 export async function navigateInSpa(page: Page, spaPath: string): Promise<void> {
   await page.evaluate((p) => window.navigate(p), spaPath);

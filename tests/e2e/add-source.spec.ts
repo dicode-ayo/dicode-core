@@ -14,17 +14,13 @@
  */
 
 import { test, expect } from '@playwright/test';
-import { gotoWebui, navigateInSpa } from './helpers/webui';
+import { gotoWebui, navigateInSpa, waitForConfigPage } from './helpers/webui';
 import type { Page } from '@playwright/test';
 
 async function openConfigPage(page: Page): Promise<void> {
   await gotoWebui(page);
   await navigateInSpa(page, '/config');
-  await page.waitForSelector('dc-config', { timeout: 10_000 });
-  await page.waitForFunction(() => {
-    const el = document.querySelector('dc-config');
-    return !!el && !el.textContent?.includes('Loading');
-  }, { timeout: 15_000 });
+  await waitForConfigPage(page);
   // Reveal the add-source form — it starts collapsed inside <details>.
   await page.locator('dc-config summary', { hasText: 'Add source' }).click();
   await expect(page.locator('#new-src-name')).toBeVisible();
