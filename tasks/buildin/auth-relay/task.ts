@@ -20,7 +20,7 @@ import {
   Identity,
   decryptTokenEnvelope,
   type StoredIdentity,
-} from "npm:dicode-relay@^0.1.4/client";
+} from "npm:dicode-relay@0.1.9/client";
 
 const IDENTITY_CTX   = "dicode/relay-identity/v1";
 const BROKER_PIN_CTX = "dicode/relay-broker-pin/v1";

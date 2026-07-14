@@ -6,6 +6,7 @@
     "jsr:@std/internal@^1.0.12": "1.0.13",
     "jsr:@std/yaml@1": "1.1.0",
     "npm:@types/node@*": "22.15.15",
+    "npm:dicode-relay@0.1.9": "0.1.9",
     "npm:dicode-relay@~0.1.4": "0.1.4",
     "npm:dicode-relay@~0.1.6": "0.1.6",
     "npm:openai@4": "4.104.0"
@@ -167,7 +168,7 @@
         "express",
         "express-basic-auth",
         "grant",
-        "js-yaml",
+        "js-yaml@4.1.1",
         "lru-cache",
         "uuid@14.0.0",
         "ws",
@@ -182,7 +183,23 @@
         "express",
         "express-basic-auth",
         "grant",
-        "js-yaml",
+        "js-yaml@4.1.1",
+        "lru-cache",
+        "uuid@14.0.0",
+        "ws",
+        "zod"
+      ],
+      "bin": true
+    },
+    "dicode-relay@0.1.9": {
+      "integrity": "sha512-ijrXxSppayECxAK0dojpmNg2vjvIVZvOF++6nt8sHDn1jJA3leixk2US7Pk4omsj88yzxVHru8uvqKcQOf2O0Q==",
+      "dependencies": [
+        "@bufbuild/protobuf",
+        "escape-html",
+        "express",
+        "express-basic-auth",
+        "grant",
+        "js-yaml@5.2.1",
         "lru-cache",
         "uuid@14.0.0",
         "ws",
@@ -433,6 +450,13 @@
     },
     "js-yaml@4.1.1": {
       "integrity": "sha512-qQKT4zQxXl8lLwBtHMWwaTcGfFOZviOJet3Oy/xmGk2gZH677CJM9EvtfdSkgWcATZhj/55JZ0rmy3myCT5lsA==",
+      "dependencies": [
+        "argparse"
+      ],
+      "bin": true
+    },
+    "js-yaml@5.2.1": {
+      "integrity": "sha512-zfLtNfQqxVqq3uaTqSkh4x4hZw3KHobGUA0fJUj4wawW8bsQLTVqpHdXSIzidh7o+4lEW36tANuAGdaFx6Zgnw==",
       "dependencies": [
         "argparse"
       ],

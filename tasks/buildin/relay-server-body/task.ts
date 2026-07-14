@@ -15,7 +15,7 @@
 import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { generateKeyPairSync } from "node:crypto";
-import { startServer } from "npm:dicode-relay@^0.1.6/start";
+import { startServer } from "npm:dicode-relay@0.1.9/start";
 import type { DicodeSdk } from "../../sdk.ts";
 
 // Pre-create the broker signing key under ${DICODE_DATADIR}/relay/ so
