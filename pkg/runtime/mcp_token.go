@@ -19,12 +19,38 @@ const MCPTokenEnvName = "DICODE_MCP_API_KEY"
 // over its API-key store; the interface lives here so pkg/runtime does not
 // need to import pkg/webui.
 //
-// MVP scope: the minted token is full-surface — the same permissions as an
-// operator-managed key — not yet scoped to the task's declared capabilities.
-// Per-capability scoping is a follow-on.
+// The minted token carries the MCPScope passed to Mint, so it authorizes
+// only the MCP capabilities the calling task's own permissions.dicode
+// already grants it — never more than the task could already do directly.
 type MCPTokenMinter interface {
-	Mint(ctx context.Context, runID string) (token string, err error)
+	Mint(ctx context.Context, runID string, scope MCPScope) (token string, err error)
 	Revoke(ctx context.Context, runID string) error
+}
+
+// MCPScope is the set of MCP-server capabilities an ephemeral per-run token
+// authorizes, derived from the owning task's declared dicode permissions.
+// A zero-value MCPScope (used when the calling spec declares no dicode
+// permissions at all) authorizes nothing.
+type MCPScope struct {
+	ListTasks  bool     `json:"list_tasks,omitempty"`
+	RunTaskIDs []string `json:"run_task_ids,omitempty"` // nil = deny run_task; "*" = any task
+}
+
+// MCPScopeFor derives the MCP capability scope an ephemeral token minted for
+// spec should carry, from spec's own declared permissions.dicode. Mirrors
+// exactly what the task itself is allowed to do via the dicode SDK — the
+// token must not grant the MCP caller anything the task couldn't already do
+// directly.
+func MCPScopeFor(spec *task.Spec) MCPScope {
+	if spec == nil || spec.Permissions.Dicode == nil {
+		return MCPScope{}
+	}
+	d := spec.Permissions.Dicode
+	scope := MCPScope{ListTasks: d.ListTasks}
+	if len(d.Tasks) > 0 {
+		scope.RunTaskIDs = append([]string(nil), d.Tasks...)
+	}
+	return scope
 }
 
 // WantsMCPToken reports whether spec declares a permissions.env entry named
@@ -69,7 +95,7 @@ func ApplyMCPToken(ctx context.Context, live *BridgeDeps, log *zap.Logger, spec 
 	if minter == nil || !WantsMCPToken(spec) {
 		return "", noop, nil
 	}
-	token, err = minter.Mint(ctx, runID)
+	token, err = minter.Mint(ctx, runID, MCPScopeFor(spec))
 	if err != nil {
 		return "", noop, fmt.Errorf("mint mcp token: %w", err)
 	}

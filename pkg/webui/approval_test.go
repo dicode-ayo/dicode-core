@@ -15,6 +15,7 @@ import (
 	"github.com/dicode/dicode/pkg/db"
 	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/registry"
+	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	"github.com/dicode/dicode/pkg/task"
 	"github.com/dicode/dicode/pkg/trigger"
 	"go.uber.org/zap"
@@ -270,7 +271,7 @@ func TestAPI_ApproveTask_RejectsEphemeralToken(t *testing.T) {
 	gate.pending["repo/pending-task"] = "hash-1"
 	srv.SetApprovalGate(gate)
 
-	ephemeral, err := newMCPTokenMinter(srv.apiKeys).Mint(context.Background(), "run-self")
+	ephemeral, err := newMCPTokenMinter(srv.apiKeys).Mint(context.Background(), "run-self", pkgruntime.MCPScope{ListTasks: true, RunTaskIDs: []string{"*"}})
 	if err != nil {
 		t.Fatalf("mint ephemeral: %v", err)
 	}
@@ -297,7 +298,7 @@ func TestAPI_ApproveTask_RejectsEphemeralToken(t *testing.T) {
 // not exist.
 func TestAPI_ResumeReplay_RejectEphemeralToken(t *testing.T) {
 	srv, _, _ := newApprovalTestServer(t, true)
-	ephemeral, err := newMCPTokenMinter(srv.apiKeys).Mint(context.Background(), "run-self")
+	ephemeral, err := newMCPTokenMinter(srv.apiKeys).Mint(context.Background(), "run-self", pkgruntime.MCPScope{ListTasks: true, RunTaskIDs: []string{"*"}})
 	if err != nil {
 		t.Fatalf("mint ephemeral: %v", err)
 	}

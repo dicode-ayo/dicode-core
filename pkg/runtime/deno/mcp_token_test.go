@@ -24,7 +24,7 @@ func newFakeMCPTokenMinter() *fakeMCPTokenMinter {
 	return &fakeMCPTokenMinter{minted: map[string]string{}, revoked: map[string]bool{}}
 }
 
-func (f *fakeMCPTokenMinter) Mint(_ context.Context, runID string) (string, error) {
+func (f *fakeMCPTokenMinter) Mint(_ context.Context, runID string, _ pkgruntime.MCPScope) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.nextTok++

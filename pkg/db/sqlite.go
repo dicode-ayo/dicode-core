@@ -232,6 +232,15 @@ func (s *SQLiteDB) migrate() error {
 		return fmt.Errorf("migrate sessions.drift_reason: %w", err)
 	}
 
+	// scopes (#567) — JSON-encoded runtime.MCPScope for ephemeral per-run MCP
+	// API keys, restricting the MCP tool surface a key may call to the
+	// owning task's own declared permissions.dicode. NULL/empty means
+	// unscoped (full access) — the default, so every existing dashboard- or
+	// CLI-managed key keeps working unchanged.
+	if err := addColumnIfMissing(ctx, s.db, "api_keys", "scopes", "TEXT"); err != nil {
+		return fmt.Errorf("migrate api_keys.scopes: %w", err)
+	}
+
 	// scs_sessions — SQLite-backed store for alexedwards/scs/v2 session
 	// manager. Replaces the former in-memory sessionStore.
 	_, err = s.db.Exec(`

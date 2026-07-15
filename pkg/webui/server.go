@@ -2,6 +2,7 @@
 package webui
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"embed"
@@ -2089,6 +2090,14 @@ func randomRunID() string {
 // to /hooks/mcp. GET returns a small server-info doc (so a curl probe still
 // succeeds the way the old Go MCP server did); POST rewrites the URL path
 // and re-enters the trigger engine's webhook dispatch via the gateway.
+//
+// Before forwarding a POST, a Bearer-authenticated caller holding a scoped
+// ephemeral per-run MCP token (#567) is checked against mcpScopeCheck: the
+// buildin/mcp task itself always runs with full dicode permissions
+// (list_tasks: true, tasks: ["*"]), so it cannot be relied on to
+// self-restrict — enforcement has to happen here, before the request ever
+// reaches it. Session-cookie callers and unscoped (operator/CLI/dashboard)
+// API keys are unaffected and forward exactly as before this change.
 func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		w.Header().Set("Content-Type", "application/json")
@@ -2104,8 +2113,145 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+
+	// Scoping only applies to Bearer API-key auth. A session-cookie caller
+	// (browser dashboard) has no ephemeral scope to check — forward as today.
+	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if token != "" {
+		scope, found := s.apiKeys.scopeFor(r.Context(), token)
+		// !found: the api-key middleware upstream (requireSessionOrAPIKey)
+		// already validated this token: this is a defensive no-op, not a
+		// second auth gate. scope == nil: unscoped operator/CLI/dashboard
+		// key — full access, forward unchanged.
+		if found && scope != nil {
+			// Cap the read like every other request body in this file (see
+			// apiTestTask / testTaskMaxBodyBytes below): MCP JSON-RPC
+			// envelopes are small, so 64KB is generous headroom while still
+			// preventing a scoped caller from streaming an unbounded body at
+			// the daemon before mcpScopeCheck even runs. A MaxBytesReader
+			// overflow surfaces here as a plain io.ReadAll error, handled by
+			// the same 400 branch as any other malformed read.
+			body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, testTaskMaxBodyBytes))
+			if err != nil {
+				jsonErr(w, "failed to read request body", http.StatusBadRequest)
+				return
+			}
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			if allowed, id, deniedMsg := mcpScopeCheck(scope, body); !allowed {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"jsonrpc": "2.0",
+					"id":      id,
+					"error": map[string]any{
+						"code":    -32001,
+						"message": deniedMsg,
+					},
+				})
+				return
+			}
+		}
+	}
+
 	r.URL.Path = "/hooks/mcp"
 	s.gateway.ServeHTTP(w, r)
+}
+
+// mcpScopeCheck decides whether a scoped ephemeral MCP token (scope) may
+// make the JSON-RPC call encoded in body, without performing any I/O — pure
+// so it's cheap to table-test. scope is never nil here (callers only invoke
+// this once they've already established the key is scoped); a zero-value
+// *MCPScope correctly denies every tools/call.
+//
+//   - initialize / tools/list: always allowed (discovery, exercises no
+//     dicode capability).
+//   - tools/call list_tasks / get_task: requires scope.ListTasks.
+//   - tools/call run_task: requires scope.RunTaskIDs to contain "*" or the
+//     call's params.arguments["id"].
+//   - tools/call list_sources / switch_dev_mode / test_task: always
+//     allowed — these three hint tools exercise no dicode capability and are
+//     unscoped by design.
+//   - tools/call for any other (unrecognized, or future) tool name: denied.
+//     This is fail-closed: nothing ties this switch to
+//     tasks/buildin/mcp/task.ts's TOOLS/dispatchTool list, so a future tool
+//     added there that exercises a real scoped capability must not silently
+//     inherit full access just because this switch doesn't know its name
+//     yet. Note this only affects a *scoped* caller — an unscoped caller
+//     (scope == nil) never reaches mcpScopeCheck at all and still gets the
+//     task's own "unknown tool" error unchanged.
+//   - any other method: always allowed — let the task's own
+//     "-32601 method not found" path handle it.
+//   - a body whose top level isn't a JSON object at all (invalid JSON, or a
+//     JSON array/scalar/etc): always allowed — let the task's own
+//     "-32700 parse error" path handle it, no second error shape.
+//
+// The top-level decode is intentionally into a generic map rather than a
+// typed struct: with a typed struct, a single sibling field failing to
+// type-match (e.g. params.arguments sent as a string instead of an object)
+// makes encoding/json return a non-nil error *after* it has already
+// populated every other field it could, including method and params.name —
+// and treating "any decode error" as "not JSON-RPC, allow" would then
+// discard those correctly-decoded, security-relevant fields and bypass
+// enforcement entirely. Decoding into map[string]any never fails that way;
+// each field of interest is instead extracted defensively below via a
+// type assertion that degrades to its zero value on a shape mismatch,
+// rather than aborting the whole check.
+//
+// Returns allowed, the request's id (for echoing back in a denial), and a
+// human-readable denial message (empty when allowed).
+func mcpScopeCheck(scope *pkgruntime.MCPScope, body []byte) (allowed bool, id any, deniedMsg string) {
+	var raw map[string]any
+	if err := json.Unmarshal(body, &raw); err != nil {
+		// Top level isn't a JSON object at all: genuinely not JSON-RPC.
+		return true, nil, ""
+	}
+	id = raw["id"]
+
+	method, _ := raw["method"].(string)
+	switch method {
+	case "tools/call":
+		// fall through to the tool-name switch below.
+	default:
+		// initialize, tools/list, unknown methods, and anything else: no
+		// scoped capability is exercised here, let the task handle it.
+		return true, id, ""
+	}
+
+	params, _ := raw["params"].(map[string]any)
+	name, _ := params["name"].(string)
+	switch name {
+	case "list_tasks", "get_task":
+		if scope.ListTasks {
+			return true, id, ""
+		}
+		return false, id, fmt.Sprintf("capability not granted: %s", name)
+	case "run_task":
+		// arguments failing to type-match as an object (e.g. sent as a
+		// string or number) degrades to "no id available" rather than
+		// aborting the check — the existing taskID == "" deny-by-default
+		// branch below still closes the gap.
+		arguments, _ := params["arguments"].(map[string]any)
+		taskID, _ := arguments["id"].(string)
+		for _, allowedID := range scope.RunTaskIDs {
+			if allowedID == "*" || allowedID == taskID {
+				return true, id, ""
+			}
+		}
+		if taskID != "" {
+			return false, id, fmt.Sprintf("capability not granted: %s for task %q", name, taskID)
+		}
+		return false, id, fmt.Sprintf("capability not granted: %s", name)
+	case "list_sources", "switch_dev_mode", "test_task":
+		// Unscoped by design: hint-only tools that exercise no dicode
+		// capability.
+		return true, id, ""
+	default:
+		// Fail closed: an unrecognized tool name — including any future
+		// tool added to tasks/buildin/mcp/task.ts that this switch hasn't
+		// been taught about — is denied rather than silently inheriting
+		// full access from a scoped token.
+		return false, id, fmt.Sprintf("capability not granted: %s", name)
+	}
 }
 
 // apiQueryRuns handles GET /api/runs with one of three filter modes:
