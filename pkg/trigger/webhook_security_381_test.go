@@ -23,7 +23,7 @@ func TestVerifyWebhookSignature_GetWithSecret_Rejected(t *testing.T) {
 	spec := &task.Spec{Trigger: task.TriggerConfig{WebhookSecret: secret}}
 	req := httptest.NewRequest(http.MethodGet, "/hooks/test?foo=bar", nil)
 	req.Header.Set(webhookSignatureHeader, signBody(secret, nil))
-	if _, err := verifyWebhookSignature(spec, req, nil); err == nil {
+	if _, _, err := verifyWebhookSignature(spec, req, nil); err == nil {
 		t.Error("GET with webhook_secret must be rejected, got nil")
 	}
 }
@@ -32,7 +32,7 @@ func TestVerifyWebhookSignature_GetWithSecret_Rejected(t *testing.T) {
 func TestVerifyWebhookSignature_GetWithoutSecret_Allowed(t *testing.T) {
 	spec := &task.Spec{Trigger: task.TriggerConfig{WebhookSecret: ""}}
 	req := httptest.NewRequest(http.MethodGet, "/hooks/test", nil)
-	if _, err := verifyWebhookSignature(spec, req, nil); err != nil {
+	if _, _, err := verifyWebhookSignature(spec, req, nil); err != nil {
 		t.Errorf("GET without secret must pass: %v", err)
 	}
 }
@@ -48,7 +48,7 @@ func TestVerifyWebhookSignature_TimestampInHMAC_CorrectSig_Passes(t *testing.T) 
 	req.Header.Set(webhookTimestampHeader, tsStr)
 	req.Header.Set(webhookSignatureHeader, signBodyWithTimestamp(secret, tsStr, body))
 
-	if _, err := verifyWebhookSignature(spec, req, body); err != nil {
+	if _, _, err := verifyWebhookSignature(spec, req, body); err != nil {
 		t.Errorf("correct ts+body signature should pass: %v", err)
 	}
 }
@@ -65,7 +65,7 @@ func TestVerifyWebhookSignature_TimestampPresent_BodyOnlySig_Fails(t *testing.T)
 	// Wrong: signing body only, not ts + "\n" + body.
 	req.Header.Set(webhookSignatureHeader, signBody(secret, body))
 
-	if _, err := verifyWebhookSignature(spec, req, body); err == nil {
+	if _, _, err := verifyWebhookSignature(spec, req, body); err == nil {
 		t.Error("body-only sig with timestamp present should fail; got nil")
 	}
 }
@@ -82,7 +82,7 @@ func TestVerifyWebhookSignature_NoTimestamp_BodyOnlySig_Passes(t *testing.T) {
 	req.Header.Set(webhookSignatureHeader, signBody(secret, body))
 	// No X-Dicode-Timestamp header.
 
-	if _, err := verifyWebhookSignature(spec, req, body); err != nil {
+	if _, _, err := verifyWebhookSignature(spec, req, body); err != nil {
 		t.Errorf("body-only sig without timestamp should still work: %v", err)
 	}
 }
@@ -100,7 +100,7 @@ func TestVerifyWebhookSignature_RequireTimestamp_MissingHeader_Fails(t *testing.
 	req.Header.Set(webhookSignatureHeader, signBody(secret, body))
 	// No X-Dicode-Timestamp header — must be rejected when require_timestamp is set.
 
-	if _, err := verifyWebhookSignature(spec, req, body); err == nil {
+	if _, _, err := verifyWebhookSignature(spec, req, body); err == nil {
 		t.Error("missing timestamp with require_timestamp=true should fail; got nil")
 	}
 }
@@ -118,7 +118,7 @@ func TestVerifyWebhookSignature_RequireTimestamp_WithHeader_Passes(t *testing.T)
 	req.Header.Set(webhookTimestampHeader, tsStr)
 	req.Header.Set(webhookSignatureHeader, signBodyWithTimestamp(secret, tsStr, body))
 
-	if _, err := verifyWebhookSignature(spec, req, body); err != nil {
+	if _, _, err := verifyWebhookSignature(spec, req, body); err != nil {
 		t.Errorf("ts+body signature with require_timestamp=true should pass: %v", err)
 	}
 }
@@ -134,10 +134,10 @@ func TestCheckWebhookReplay_DistinctTimestamps_SameBody_BothAccepted(t *testing.
 	ts1 := strconv.FormatInt(time.Now().Unix(), 10)
 	ts2 := strconv.FormatInt(time.Now().Unix()+1, 10)
 
-	if err := e.checkWebhookReplay(secret, nil, ts1, body); err != nil {
+	if err := e.checkWebhookReplay(secret, nil, webhookHMACPreimageDigest(secret, ts1, body)); err != nil {
 		t.Fatalf("first (ts1, body) pair should be accepted: %v", err)
 	}
-	if err := e.checkWebhookReplay(secret, nil, ts2, body); err != nil {
+	if err := e.checkWebhookReplay(secret, nil, webhookHMACPreimageDigest(secret, ts2, body)); err != nil {
 		t.Errorf("second request with a distinct timestamp over the same body must not be treated as a replay: %v", err)
 	}
 }
@@ -149,10 +149,11 @@ func TestCheckWebhookReplay_SameTimestampAndBody_Rejected(t *testing.T) {
 	body := []byte(`{"event":"push"}`)
 	tsStr := strconv.FormatInt(time.Now().Unix(), 10)
 
-	if err := e.checkWebhookReplay(secret, nil, tsStr, body); err != nil {
+	digest := webhookHMACPreimageDigest(secret, tsStr, body)
+	if err := e.checkWebhookReplay(secret, nil, digest); err != nil {
 		t.Fatalf("first (ts, body) pair should be accepted: %v", err)
 	}
-	if err := e.checkWebhookReplay(secret, nil, tsStr, body); err == nil {
+	if err := e.checkWebhookReplay(secret, nil, digest); err == nil {
 		t.Error("replaying the exact same (ts, body) pair should be rejected")
 	}
 }

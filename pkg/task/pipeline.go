@@ -157,6 +157,7 @@ func (p *PipelineTask) Validate() error {
 	if p.Trigger.count() > 1 {
 		return fmt.Errorf("pipeline: at most one trigger type may be set")
 	}
+	p.Warnings = append(p.Warnings, webhookSecretGatedFieldWarnings(p.Trigger.WebhookSecret, p.Trigger.ReplayProtection, p.Trigger.RequireTimestamp)...)
 	if len(p.Stages) == 0 {
 		return fmt.Errorf("pipeline: at least one stage is required")
 	}

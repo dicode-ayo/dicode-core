@@ -436,18 +436,27 @@ When a signed webhook arrives:
    - **Already seen (within 1 hour)** → HTTP 409 Conflict.
    - **Not seen** → request accepted, digest recorded.
 
-Keying on `(ts, body)` rather than `body` alone fixes two gaps in the
+Keying on `(ts, body)` rather than `body` alone fixes a real gap in the
 body-only key: two legitimate requests with an identical body at different
-timestamps no longer collide as a false replay, and a captured
-(timestamp, body) pair can't be re-admitted by a daemon restart landing
-inside the timestamp's own 5-minute tolerance window (the cache is
-in-memory and does not survive a restart — see below).
+timestamps no longer collide as a false replay. It does **not**, by itself,
+change daemon-restart exposure — the cache is purely in-memory (see below)
+and starts empty after every restart regardless of key shape, so a captured
+request that is still inside its own timestamp tolerance window is
+re-admitted after a restart under either keying scheme. What actually bounds
+that exposure is the timestamp-tolerance check itself, which runs
+independently of the cache and rejects any timestamp older than 5 minutes;
+`require_timestamp` (below) extends that bound to senders who would
+otherwise send no timestamp — and therefore have no expiry — at all.
 
 The cache is bounded to 10,000 entries with FIFO eviction. Entries older
 than 1 hour are lazily pruned. The cache lives in-memory on the Engine
-instance — a daemon restart clears it, which is acceptable (the attacker
-would need to re-capture a fresh request, and — if `require_timestamp` is
-set — one whose timestamp is still inside the 5-minute tolerance window).
+instance — a daemon restart clears it. That's only a bounded exposure when a
+timestamp is present: a captured request whose timestamp has since aged past
+the 5-minute tolerance is rejected regardless of the cache being empty.
+Without `require_timestamp`, a sender that never sends a timestamp has no
+such bound — its signature stays valid indefinitely — so a restart (or
+simply outliving the 1-hour cache TTL) re-admits it exactly as it did before
+this change.
 
 Replay protection is enabled by default when `webhook_secret` is set.
 Per-task opt-out via `replay_protection: false` in `task.yaml`.
