@@ -357,12 +357,12 @@ trigger:
 			mustMatch: []string{"require_timestamp", "webhook_secret is empty"},
 		},
 		{
-			name: "replay_protection without webhook_secret warns",
+			name: "replay_protection true without webhook_secret warns",
 			yaml: `
 name: t
 trigger:
   webhook: /hooks/t
-  replay_protection: false
+  replay_protection: true
 `,
 			mustMatch: []string{"replay_protection", "webhook_secret is empty"},
 		},
@@ -373,6 +373,19 @@ name: t
 trigger:
   webhook: /hooks/t
   require_timestamp: false
+`,
+			mustMatch: nil,
+		},
+		{
+			// false matches the no-op default when there's no secret to
+			// protect either way — a legitimate, self-consistent config, not
+			// a misconfiguration worth warning about.
+			name: "replay_protection false without webhook_secret does not warn",
+			yaml: `
+name: t
+trigger:
+  webhook: /hooks/t
+  replay_protection: false
 `,
 			mustMatch: nil,
 		},

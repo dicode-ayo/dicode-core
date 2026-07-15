@@ -370,11 +370,11 @@ When `webhook_secret` is absent the webhook is open (backwards-compatible). When
 
 ### Signature verification
 
-`verifyWebhookSignature(spec, r, body []byte) (tsStr string, err error)` in
+`verifyWebhookSignature(spec, r, body []byte) (tsStr string, digest []byte, err error)` in
 [webhook.go](../../pkg/trigger/webhook.go):
 
 ```text
-1. If no secret configured → return ("", nil) (open webhook)
+1. If no secret configured → return ("", nil, nil) (open webhook)
 2. If X-Dicode-Timestamp is absent:
    - Reject if trigger.require_timestamp is set (default false)
    - Otherwise check X-Hub-Signature-256 against HMAC-SHA256(secret, body)
@@ -383,8 +383,9 @@ When `webhook_secret` is absent the webhook is open (backwards-compatible). When
    - Reject if |now - ts| > 5 minutes  (replay protection)
    - Check X-Hub-Signature-256 against HMAC-SHA256(secret, "<ts>\n<body>")
    - hmac.Equal(got, expected)  ← constant-time comparison
-   - Return the raw timestamp string so the caller can bind it into the
-     replay-cache key
+   - Return the raw timestamp string and the computed HMAC digest so the
+     caller can bind both into the replay-cache key without a second HMAC
+     pass over the body
 ```
 
 ### Raw body capture

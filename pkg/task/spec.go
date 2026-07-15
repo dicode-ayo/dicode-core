@@ -759,7 +759,7 @@ func webhookSecretGatedFieldWarnings(webhookSecret string, replayProtection, req
 		return nil
 	}
 	var warnings []string
-	if replayProtection != nil {
+	if replayProtection != nil && *replayProtection {
 		warnings = append(warnings, "trigger.replay_protection is set but trigger.webhook_secret is empty — the webhook is unauthenticated and replay_protection has no effect")
 	}
 	if requireTimestamp != nil && *requireTimestamp {
