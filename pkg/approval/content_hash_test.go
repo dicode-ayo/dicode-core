@@ -36,7 +36,7 @@ func TestContentHashStableAcrossCalls(t *testing.T) {
 		s.Runtime = task.RuntimeDeno
 		s.Permissions.Net = []string{"api.github.com"}
 		s.Permissions.Dicode = &task.DicodePermissions{Tasks: []string{"repo/other"}}
-		s.Trigger.WebhookAuth = true
+		s.Trigger.WebhookAuth = task.WebhookAuthSession
 	})
 	h1 := mustHash(t, spec)
 	h2 := mustHash(t, spec)
@@ -58,7 +58,7 @@ func TestContentHashFoldsResolvedSecurityFields(t *testing.T) {
 		"fs write grant":   func(s *task.Spec) { s.Permissions.FS = []task.FSEntry{{Path: "/etc", Permission: "w"}} },
 		"dicode tasks":     func(s *task.Spec) { s.Permissions.Dicode = &task.DicodePermissions{Tasks: []string{"*"}} },
 		"runtime swap":     func(s *task.Spec) { s.Runtime = task.Runtime("python") },
-		"webhook auth off": func(s *task.Spec) { s.Trigger.WebhookAuth = true },
+		"webhook auth on":  func(s *task.Spec) { s.Trigger.WebhookAuth = task.WebhookAuthSession },
 		"param default":    func(s *task.Spec) { s.Params = task.Params{{Name: "url", Default: "https://evil.example"}} },
 		"timeout widened":  func(s *task.Spec) { s.Timeout = 4 * time.Hour },
 	}
@@ -69,6 +69,35 @@ func TestContentHashFoldsResolvedSecurityFields(t *testing.T) {
 		if got == baseHash {
 			t.Errorf("%s: hash unchanged despite elevated resolved field", name)
 		}
+	}
+}
+
+// TestContentHashDistinguishesAuthModes: session and any are distinct security
+// postures (any opens a relay-reachable HMAC path), so they must hash
+// differently — switching to any re-pends the task for approval. none and
+// session keep the pre-tri-value bool wire format (see WebhookAuthMode.
+// MarshalJSON), so an existing auth: true task does not spuriously re-pend.
+func TestContentHashDistinguishesAuthModes(t *testing.T) {
+	base := writeTaskDir(t, t.TempDir(), "repo/deploy", "x")
+	withSecret := func(m task.WebhookAuthMode) func(*task.Spec) {
+		return func(s *task.Spec) {
+			s.Trigger.Webhook = "/hooks/x"
+			s.Trigger.WebhookSecret = "s3cr3t"
+			s.Trigger.WebhookAuth = m
+		}
+	}
+	none := mustHash(t, specVariant(base, withSecret(task.WebhookAuthNone)))
+	session := mustHash(t, specVariant(base, withSecret(task.WebhookAuthSession)))
+	anyMode := mustHash(t, specVariant(base, withSecret(task.WebhookAuthAny)))
+
+	if session == anyMode {
+		t.Error("session and any must hash differently (any opens an HMAC-over-relay path)")
+	}
+	if none == session {
+		t.Error("none and session must hash differently")
+	}
+	if none == anyMode {
+		t.Error("none and any must hash differently")
 	}
 }
 

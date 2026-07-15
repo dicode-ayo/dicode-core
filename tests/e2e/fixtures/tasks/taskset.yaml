@@ -16,6 +16,9 @@ spec:
     hello-webhook-secure:
       ref:
         path: FIXTURES_TASKS_DIR/hello-webhook-secure/task.yaml
+    hello-webhook-any:
+      ref:
+        path: FIXTURES_TASKS_DIR/hello-webhook-any/task.yaml
     chain-target:
       ref:
         path: FIXTURES_TASKS_DIR/chain-target/task.yaml

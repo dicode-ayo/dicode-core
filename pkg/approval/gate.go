@@ -436,13 +436,13 @@ type resolvedSecurityFields struct {
 	// are deliberately excluded: TriggerPatch cannot set them, the secret
 	// is already covered by the dir hash, and a secret must never feed a
 	// non-secret hash input.
-	Webhook     string             `json:"webhook"`
-	WebhookAuth bool               `json:"webhook_auth"`
-	Cron        string             `json:"cron"`
-	Manual      bool               `json:"manual"`
-	Daemon      bool               `json:"daemon"`
-	Restart     string             `json:"restart"`
-	Chain       *task.ChainTrigger `json:"chain,omitempty"`
+	Webhook     string               `json:"webhook"`
+	WebhookAuth task.WebhookAuthMode `json:"webhook_auth"`
+	Cron        string               `json:"cron"`
+	Manual      bool                 `json:"manual"`
+	Daemon      bool                 `json:"daemon"`
+	Restart     string               `json:"restart"`
+	Chain       *task.ChainTrigger   `json:"chain,omitempty"`
 }
 
 // resolvedPipelineSecurityFields mirrors resolvedSecurityFields for
@@ -453,12 +453,12 @@ type resolvedSecurityFields struct {
 // approval. PipelineTrigger has no Daemon/Restart; WebhookSecret and
 // ReplayProtection are excluded for the same reasons as on Spec.
 type resolvedPipelineSecurityFields struct {
-	Timeout     time.Duration      `json:"timeout"`
-	Webhook     string             `json:"webhook"`
-	WebhookAuth bool               `json:"webhook_auth"`
-	Cron        string             `json:"cron"`
-	Manual      bool               `json:"manual"`
-	Chain       *task.ChainTrigger `json:"chain,omitempty"`
+	Timeout     time.Duration        `json:"timeout"`
+	Webhook     string               `json:"webhook"`
+	WebhookAuth task.WebhookAuthMode `json:"webhook_auth"`
+	Cron        string               `json:"cron"`
+	Manual      bool                 `json:"manual"`
+	Chain       *task.ChainTrigger   `json:"chain,omitempty"`
 }
 
 // hashDirResolved combines the task-dir hash with the canonical JSON of the

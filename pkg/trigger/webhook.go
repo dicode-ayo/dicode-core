@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/dicode/dicode/internal/pathguard"
+	"github.com/dicode/dicode/pkg/ipc"
 	"github.com/dicode/dicode/pkg/registry"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	"github.com/dicode/dicode/pkg/task"
@@ -52,6 +53,13 @@ func (e *Engine) registerWebhookPath(id, path string) {
 			zap.String("path", reservedOAuthCompletePath))
 		return
 	}
+	// Normalise a trailing slash away so the map key matches how the gateway
+	// dispatches (ipc.PathMatches trims the pattern's trailing slash before
+	// prefix-matching). Without this, a `/hooks/x/` registration is dispatched
+	// for `/hooks/x/sub` by the gateway but missed by resolveWebhookPath's exact
+	// segment walk — the request 404s at the handler and the auth guard (which
+	// shares this lookup) reads it as public.
+	path = strings.TrimSuffix(path, "/")
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	// Reject duplicate registrations: a task from a watched repo must not be
@@ -341,21 +349,27 @@ func (e *Engine) handlePipelineWebhook(w http.ResponseWriter, r *http.Request, p
 	body := readWebhookBody(r)
 	input, _ := decodeWebhookPayload(r, body) // isForm ignored — pipelines don't redirect
 
-	if err := verifyWebhookSignatureSecret(pipe.Trigger.WebhookSecret, r, body); err != nil {
-		e.log.Warn("pipeline webhook signature verification failed",
-			zap.String("path", r.URL.Path), zap.String("task", pipe.ID), zap.Error(err))
-		http.Error(w, "forbidden: "+err.Error(), http.StatusForbidden)
-		return
-	}
+	// A session-authenticated request (auth: any, direct with a valid session)
+	// was already vouched for by the auth guard; skip BOTH signature and replay.
+	// Skipping only the signature would leave checkWebhookReplay to 409 a browser
+	// that legitimately submits the same body twice.
+	if !ipc.SessionAuthed(r.Context()) {
+		if err := verifyWebhookSignatureSecret(pipe.Trigger.WebhookSecret, r, body); err != nil {
+			e.log.Warn("pipeline webhook signature verification failed",
+				zap.String("path", r.URL.Path), zap.String("task", pipe.ID), zap.Error(err))
+			http.Error(w, "forbidden: "+err.Error(), http.StatusForbidden)
+			return
+		}
 
-	// Replay protection: reject duplicate bodies within the nonce cache TTL.
-	if err := e.checkWebhookReplay(pipe.Trigger.WebhookSecret, pipe.Trigger.ReplayProtection, body); err != nil {
-		e.log.Warn("pipeline webhook replay rejected",
-			zap.String("path", r.URL.Path),
-			zap.String("task", pipe.ID),
-		)
-		writeWebhookReplayRejected(w)
-		return
+		// Replay protection: reject duplicate bodies within the nonce cache TTL.
+		if err := e.checkWebhookReplay(pipe.Trigger.WebhookSecret, pipe.Trigger.ReplayProtection, body); err != nil {
+			e.log.Warn("pipeline webhook replay rejected",
+				zap.String("path", r.URL.Path),
+				zap.String("task", pipe.ID),
+			)
+			writeWebhookReplayRejected(w)
+			return
+		}
 	}
 
 	params := flatStringMap(input)
@@ -477,6 +491,49 @@ func (e *Engine) resolveWebhookPath(path string) (taskID, matchedHook, assetPath
 	return "", "", "", false
 }
 
+// WebhookAuthInfo describes the auth posture of the webhook that claims a URL
+// path. Matched is false when no registered webhook claims the path. IsAsset is
+// true when the path resolves to a static asset under a webhook UI (a sub-path
+// of the hook), rather than the hook endpoint itself — such requests must never
+// fall through to HMAC, or an auth: any webhook's UI assets would be served to
+// unauthenticated callers.
+type WebhookAuthInfo struct {
+	Matched   bool
+	TaskID    string
+	Mode      task.WebhookAuthMode
+	HasSecret bool
+	IsAsset   bool
+}
+
+// ResolveWebhookAuth reports the auth posture of the webhook claiming urlPath,
+// resolved through the SAME longest-prefix lookup the gateway dispatches on
+// (resolveWebhookPath). The auth guard consumes this so the decision it makes
+// and the route the gateway will serve can never diverge.
+//
+// A path claimed at the gateway but not yet present in the engine's webhooks map
+// (a daemon task whose route is reserved before it starts) returns Matched:false
+// — the guard then treats it as public, and the gateway 404s it, so nothing is
+// served and no auth is bypassed.
+func (e *Engine) ResolveWebhookAuth(urlPath string) WebhookAuthInfo {
+	taskID, _, assetPath, ok := e.resolveWebhookPath(urlPath)
+	if !ok {
+		return WebhookAuthInfo{}
+	}
+	k, ok := e.registry.GetKinded(taskID)
+	if !ok {
+		return WebhookAuthInfo{}
+	}
+	isAsset := assetPath != ""
+	switch t := k.(type) {
+	case *task.Spec:
+		return WebhookAuthInfo{Matched: true, TaskID: taskID, Mode: t.Trigger.WebhookAuth, HasSecret: t.Trigger.WebhookSecret != "", IsAsset: isAsset}
+	case *task.PipelineTask:
+		return WebhookAuthInfo{Matched: true, TaskID: taskID, Mode: t.Trigger.WebhookAuth, HasSecret: t.Trigger.WebhookSecret != "", IsAsset: isAsset}
+	default:
+		return WebhookAuthInfo{}
+	}
+}
+
 // serveTaskUI serves the task directory's index.html with the dicode client
 // SDK injected, when one is present. Returns false — without writing to w —
 // when the task has no readable index.html, so callers fall through to their
@@ -511,25 +568,31 @@ func (e *Engine) fireWebhookTask(w http.ResponseWriter, r *http.Request, spec *t
 	body := readWebhookBody(r)
 	input, isFormSubmit := decodeWebhookPayload(r, body)
 
-	// Verify HMAC signature when a secret is configured on the task.
-	if err := verifyWebhookSignature(spec, r, body); err != nil {
-		e.log.Warn("webhook signature verification failed",
-			zap.String("path", path),
-			zap.String("task", taskID),
-			zap.Error(err),
-		)
-		http.Error(w, "forbidden: "+err.Error(), http.StatusForbidden)
-		return
-	}
+	// A session-authenticated request (auth: any, direct with a valid session)
+	// was already vouched for by the auth guard; skip BOTH signature and replay.
+	// Skipping only the signature would leave checkWebhookReplay to 409 a browser
+	// that legitimately submits the same body twice.
+	if !ipc.SessionAuthed(r.Context()) {
+		// Verify HMAC signature when a secret is configured on the task.
+		if err := verifyWebhookSignature(spec, r, body); err != nil {
+			e.log.Warn("webhook signature verification failed",
+				zap.String("path", path),
+				zap.String("task", taskID),
+				zap.Error(err),
+			)
+			http.Error(w, "forbidden: "+err.Error(), http.StatusForbidden)
+			return
+		}
 
-	// Replay protection: reject duplicate bodies within the nonce cache TTL.
-	if err := e.checkWebhookReplay(spec.Trigger.WebhookSecret, spec.Trigger.ReplayProtection, body); err != nil {
-		e.log.Warn("webhook replay rejected",
-			zap.String("path", path),
-			zap.String("task", taskID),
-		)
-		writeWebhookReplayRejected(w)
-		return
+		// Replay protection: reject duplicate bodies within the nonce cache TTL.
+		if err := e.checkWebhookReplay(spec.Trigger.WebhookSecret, spec.Trigger.ReplayProtection, body); err != nil {
+			e.log.Warn("webhook replay rejected",
+				zap.String("path", path),
+				zap.String("task", taskID),
+			)
+			writeWebhookReplayRejected(w)
+			return
+		}
 	}
 
 	// Extract a flat string map from the input so it is accessible via

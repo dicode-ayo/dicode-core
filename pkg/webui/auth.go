@@ -61,68 +61,105 @@ tunnel such as <a href="https://tailscale.com/">Tailscale</a> or
 </body>
 </html>`
 
-// webhookAuthGuard checks whether the task associated with the requested webhook
-// path has trigger.auth: true. If it does, the request is rejected unless it
-// carries a valid dicode session. A request arriving via the relay (trusted
-// X-Relay-Base) can never be authenticated and is refused outright — HTML
-// explainer for browsers, JSON 401 otherwise. A direct request with no session
-// gets a JSON 401 for API callers or a /login redirect for browsers. Public
-// webhooks (no auth: true) pass through unchanged.
-//
-// The match is longest-prefix so overlapping paths resolve to the most specific
-// spec — the gateway already routes this way, and the auth decision must agree.
-// With a short-prefix-wins loop, a public `/hooks/ai` would shadow a private
-// `/hooks/ai/dicodai` and silently drop `auth: true` at the door.
-func (s *Server) webhookAuthGuard(w http.ResponseWriter, r *http.Request, next http.Handler) {
-	var requiresAuth bool
-	var bestLen = -1
-	// Consider every task kind: a kind: PipelineTask can also carry a webhook
-	// trigger with auth: true, and its protection must be enforced here just
-	// like a kind: Task's. Using AllKinded (not All) is what keeps a pipeline
-	// webhook from being silently public.
-	for _, k := range s.registry.AllKinded() {
-		var wp string
-		var auth bool
-		switch t := k.(type) {
-		case *task.Spec:
-			wp, auth = t.Trigger.Webhook, t.Trigger.WebhookAuth
-		case *task.PipelineTask:
-			wp, auth = t.Trigger.Webhook, t.Trigger.WebhookAuth
-		default:
-			continue
-		}
-		if wp == "" || !ipc.PathMatches(wp, r.URL.Path) {
-			continue
-		}
-		// Compare normalised pattern length so a trailing slash on the
-		// registered webhook cannot artificially shorten the match and
-		// shadow a longer protected path.
-		l := len(strings.TrimSuffix(wp, "/"))
-		if l > bestLen {
-			bestLen = l
-			requiresAuth = auth
-		}
-	}
+// webhookAuthOutcome is the decision resolveWebhookAuth reaches for a request to
+// a webhook path.
+type webhookAuthOutcome int
 
-	if !requiresAuth {
+const (
+	webhookPass        webhookAuthOutcome = iota // public — serve as-is
+	webhookPassSession                           // session-authed — serve, mark ctx session-authed
+	webhookHMAC                                  // fall through so downstream HMAC gates
+	webhookDeny                                  // reject
+)
+
+// resolveWebhookAuth is the pure, table-testable auth decision for a webhook
+// request. It never consults the session on a relayed request (session
+// evaluation has side effects that must not be relay-drivable).
+//
+// HMAC fall-through ("any" mode) is restricted to a non-GET request for the hook
+// endpoint itself: a GET or a static-asset sub-path is served by the webhook
+// handler as UI before any signature check, so letting either fall through would
+// publish an auth-gated UI to unauthenticated callers.
+//
+// The session outcome differs by mode. "any" is session-OR-HMAC, so a session
+// alone authenticates — webhookPassSession stamps the request so the handler
+// skips signature + replay. "session" keeps AND semantics: a session satisfies
+// the guard, but if a webhook_secret is also configured the handler must still
+// verify the signature, so the request passes WITHOUT the skip flag.
+func resolveWebhookAuth(mode task.WebhookAuthMode, hasSecret, isAsset bool, method string, relayed, hasSession bool) webhookAuthOutcome {
+	if !mode.Enabled() {
+		return webhookPass
+	}
+	canHMAC := mode == task.WebhookAuthAny && hasSecret && method != http.MethodGet && !isAsset
+	if relayed {
+		if canHMAC {
+			return webhookHMAC
+		}
+		return webhookDeny
+	}
+	if hasSession {
+		if mode == task.WebhookAuthAny {
+			return webhookPassSession
+		}
+		return webhookPass
+	}
+	if canHMAC {
+		return webhookHMAC
+	}
+	return webhookDeny
+}
+
+// webhookAuthGuard enforces a webhook's trigger.auth posture. The matched
+// webhook is resolved through the engine's own path lookup (ResolveWebhookAuth),
+// the same one the gateway dispatches on, so the guard and the served route can
+// never disagree — a public `/hooks/ai` cannot shadow a protected
+// `/hooks/ai/dicodai`.
+//
+//   - Public (no auth) → pass through.
+//   - session → a valid dicode session is required for GET (UI) and POST (run).
+//   - any → session OR a valid HMAC signature. HMAC is the only credential that
+//     survives the relay, so a relayed non-GET falls through to the signature
+//     check; a session (never relayed) marks the request context so the
+//     downstream handler skips signature + replay.
+//
+// A relayed request (trusted X-Relay-Base, stamped by the forwarder) is checked
+// BEFORE any session evaluation: the relay strips every credential header, so no
+// session can legitimately arrive relayed, and hasValidSession has side effects
+// (device-token renewal, cookie clearing) that must not be relay-drivable.
+func (s *Server) webhookAuthGuard(w http.ResponseWriter, r *http.Request, next http.Handler) {
+	info := s.engine.ResolveWebhookAuth(r.URL.Path)
+	if !info.Mode.Enabled() {
 		next.ServeHTTP(w, r)
 		return
 	}
 
-	// A relayed request carries a trusted X-Relay-Base header — the forwarder
-	// stamps it and drops any inbound copy. Such a request can never carry a
-	// legitimate session: the relay strips every credential header (cookie,
-	// authorization, x-api-key) and forwards only /hooks/*, so /login is
-	// unreachable and no cookie survives the hop. Reject an auth-gated webhook
-	// here BEFORE evaluating any session, so a credential that somehow survived
-	// forwarding can never authenticate a relayed request — the forwarder
-	// strip-list stays defense-in-depth, not the load-bearing control.
-	if r.Header.Get("X-Relay-Base") != "" {
+	relayed := r.Header.Get("X-Relay-Base") != ""
+	hasSession := false
+	if !relayed {
+		hasSession = s.hasValidSession(w, r)
+	}
+
+	switch resolveWebhookAuth(info.Mode, info.HasSecret, info.IsAsset, r.Method, relayed, hasSession) {
+	case webhookPassSession:
+		next.ServeHTTP(w, r.WithContext(ipc.WithSessionAuth(r.Context())))
+	case webhookHMAC, webhookPass:
+		next.ServeHTTP(w, r)
+	default: // webhookDeny
+		s.denyWebhook(w, r, relayed)
+	}
+}
+
+// denyWebhook renders the rejection for an auth-gated webhook. A relayed request
+// gets the "not reachable via relay" explainer (HTML for browsers, JSON
+// otherwise); a direct request gets a /login redirect for browsers or a JSON 401
+// for API callers.
+func (s *Server) denyWebhook(w http.ResponseWriter, r *http.Request, relayed bool) {
+	isBrowserGet := r.Method == http.MethodGet &&
+		strings.Contains(r.Header.Get("Accept"), "text/html")
+
+	if relayed {
 		s.auditDenied(r, "auth-gated webhook not reachable via relay")
-		// A human who clicked the public relay link gets an explainer page
-		// pointing at the daemon's own address / a tunnel; API callers get JSON.
-		// Without this a browser renders the raw JSON error in the viewport.
-		if r.Method == http.MethodGet && strings.Contains(r.Header.Get("Accept"), "text/html") {
+		if isBrowserGet {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusUnauthorized)
 			_, _ = fmt.Fprintf(w, relayAuthBlockedPage, s.port, html.EscapeString(r.URL.Path))
@@ -132,19 +169,7 @@ func (s *Server) webhookAuthGuard(w http.ResponseWriter, r *http.Request, next h
 		return
 	}
 
-	// Task requires a valid dicode session.
-	if s.hasValidSession(w, r) {
-		next.ServeHTTP(w, r)
-		return
-	}
-
 	s.auditDenied(r, "webhook requires authenticated session")
-
-	// For webhook paths, a GET from a browser includes "text/html" in Accept.
-	// API clients (curl, fetch without custom headers, etc.) typically don't,
-	// so we use that to decide redirect vs 401.
-	isBrowserGet := r.Method == http.MethodGet &&
-		strings.Contains(r.Header.Get("Accept"), "text/html")
 	if !isBrowserGet {
 		jsonErr(w, "unauthorized", http.StatusUnauthorized)
 		return
