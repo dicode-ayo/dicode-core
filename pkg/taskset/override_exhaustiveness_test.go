@@ -226,7 +226,7 @@ func TestApplyTriggerPatch_Exhaustive(t *testing.T) {
 			return expectEq(tc.Webhook, "/hooks/x")
 		}},
 		"Auth": {TriggerPatch{Auth: boolPtr(true)}, func(tc task.TriggerConfig) error {
-			return expectEq(tc.WebhookAuth, true)
+			return expectEq(tc.WebhookAuth, task.WebhookAuthSession)
 		}},
 		"Manual": {TriggerPatch{Manual: boolPtr(true)}, func(tc task.TriggerConfig) error {
 			return expectEq(tc.Manual, true)

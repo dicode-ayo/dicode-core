@@ -61,6 +61,57 @@ func login(t *testing.T, h http.Handler, password string, trust bool) *http.Cook
 	return nil
 }
 
+// armSpecWebhook registers an enabled webhook Spec on both the registry and the
+// trigger engine, mirroring a live daemon. The engine's webhook dispatch map is
+// what the auth guard resolves against, so a registry-only registration would
+// not be seen (and would 404 as an inactive path).
+func armSpecWebhook(t *testing.T, srv *Server, id, path string, mode task.WebhookAuthMode, secret string) {
+	t.Helper()
+	s := &task.Spec{
+		ID:      id,
+		Name:    id,
+		Enabled: true,
+		Trigger: task.TriggerConfig{Webhook: path, WebhookAuth: mode, WebhookSecret: secret},
+	}
+	if err := srv.registry.Register(s); err != nil {
+		t.Fatalf("register %s: %v", id, err)
+	}
+	if err := srv.engine.Register(s); err != nil {
+		t.Fatalf("engine register %s: %v", id, err)
+	}
+}
+
+// armPipelineWebhook registers a minimal valid enabled pipeline (one stage, plus
+// its stage task) on both the registry and the engine, so its webhook path lands
+// in the engine's dispatch map.
+func armPipelineWebhook(t *testing.T, srv *Server, id, path string, mode task.WebhookAuthMode) {
+	t.Helper()
+	stageID := id + "-stage"
+	stage := &task.Spec{ID: stageID, Name: stageID, Enabled: true}
+	if err := srv.registry.Register(stage); err != nil {
+		t.Fatalf("register stage %s: %v", stageID, err)
+	}
+	if err := srv.engine.Register(stage); err != nil {
+		t.Fatalf("engine register stage %s: %v", stageID, err)
+	}
+	p := &task.PipelineTask{
+		APIVersion: "dicode/v1",
+		Kind:       task.KindPipelineTask,
+		ID:         id,
+		Name:       id,
+		Subtype:    "sequential",
+		Enabled:    true,
+		Trigger:    task.PipelineTrigger{Webhook: path, WebhookAuth: mode},
+		Stages:     []task.Stage{{Task: stageID}},
+	}
+	if err := srv.registry.Register(p); err != nil {
+		t.Fatalf("register pipeline %s: %v", id, err)
+	}
+	if err := srv.engine.Register(p); err != nil {
+		t.Fatalf("engine register pipeline %s: %v", id, err)
+	}
+}
+
 // ── Auth wall ─────────────────────────────────────────────────────────────────
 
 func TestAuth_PublicPathsAlwaysAccessible(t *testing.T) {
@@ -621,18 +672,8 @@ func TestWebhookAuthGuard_LongestPrefixWins(t *testing.T) {
 	// matters: "ai-agent" sorts before "dicodai" alphabetically, so the
 	// bug-producing iteration order is exactly what registry.All()
 	// produces on real deployments.
-	if err := srv.registry.Register(&task.Spec{
-		ID:      "buildin/ai-agent",
-		Trigger: task.TriggerConfig{Webhook: "/hooks/ai", WebhookAuth: false},
-	}); err != nil {
-		t.Fatalf("register ai-agent: %v", err)
-	}
-	if err := srv.registry.Register(&task.Spec{
-		ID:      "buildin/dicodai",
-		Trigger: task.TriggerConfig{Webhook: "/hooks/ai/dicodai", WebhookAuth: true},
-	}); err != nil {
-		t.Fatalf("register dicodai: %v", err)
-	}
+	armSpecWebhook(t, srv, "buildin/ai-agent", "/hooks/ai", task.WebhookAuthNone, "")
+	armSpecWebhook(t, srv, "buildin/dicodai", "/hooks/ai/dicodai", task.WebhookAuthSession, "")
 
 	h := srv.Handler()
 
@@ -663,18 +704,8 @@ func TestWebhookAuthGuard_LongestPrefixWins(t *testing.T) {
 func TestWebhookAuthGuard_PipelineAuth(t *testing.T) {
 	srv := newAuthServer(t, "hunter2")
 
-	if err := srv.registry.Register(&task.PipelineTask{
-		ID:      "deploy-pipe",
-		Trigger: task.PipelineTrigger{Webhook: "/hooks/deploy", WebhookAuth: true},
-	}); err != nil {
-		t.Fatalf("register protected pipeline: %v", err)
-	}
-	if err := srv.registry.Register(&task.PipelineTask{
-		ID:      "public-pipe",
-		Trigger: task.PipelineTrigger{Webhook: "/hooks/public", WebhookAuth: false},
-	}); err != nil {
-		t.Fatalf("register public pipeline: %v", err)
-	}
+	armPipelineWebhook(t, srv, "deploy-pipe", "/hooks/deploy", task.WebhookAuthSession)
+	armPipelineWebhook(t, srv, "public-pipe", "/hooks/public", task.WebhookAuthNone)
 
 	h := srv.Handler()
 
@@ -704,18 +735,8 @@ func TestWebhookAuthGuard_PipelineAuth(t *testing.T) {
 func TestWebhookAuthGuard_LongestPrefixWins_Inverse(t *testing.T) {
 	srv := newAuthServer(t, "hunter2")
 
-	if err := srv.registry.Register(&task.Spec{
-		ID:      "buildin/ai-agent",
-		Trigger: task.TriggerConfig{Webhook: "/hooks/ai", WebhookAuth: true},
-	}); err != nil {
-		t.Fatalf("register ai-agent: %v", err)
-	}
-	if err := srv.registry.Register(&task.Spec{
-		ID:      "buildin/dicodai",
-		Trigger: task.TriggerConfig{Webhook: "/hooks/ai/dicodai", WebhookAuth: false},
-	}); err != nil {
-		t.Fatalf("register dicodai: %v", err)
-	}
+	armSpecWebhook(t, srv, "buildin/ai-agent", "/hooks/ai", task.WebhookAuthSession, "")
+	armSpecWebhook(t, srv, "buildin/dicodai", "/hooks/ai/dicodai", task.WebhookAuthNone, "")
 
 	h := srv.Handler()
 
@@ -745,12 +766,7 @@ func TestWebhookAuthGuard_LongestPrefixWins_Inverse(t *testing.T) {
 func TestWebhookAuthGuard_TrailingSlashPattern(t *testing.T) {
 	srv := newAuthServer(t, "hunter2")
 
-	if err := srv.registry.Register(&task.Spec{
-		ID:      "buildin/trailing",
-		Trigger: task.TriggerConfig{Webhook: "/hooks/trail/", WebhookAuth: true},
-	}); err != nil {
-		t.Fatalf("register: %v", err)
-	}
+	armSpecWebhook(t, srv, "buildin/trailing", "/hooks/trail/", task.WebhookAuthSession, "")
 
 	h := srv.Handler()
 	req := httptest.NewRequest(http.MethodPost, "/hooks/trail/sub", nil)
@@ -771,18 +787,8 @@ func TestWebhookAuthGuard_TrailingSlashPattern(t *testing.T) {
 func TestWebhookAuthGuard_RelayRejectsAuthWebhook(t *testing.T) {
 	srv := newAuthServer(t, "hunter2")
 
-	if err := srv.registry.Register(&task.Spec{
-		ID:      "buildin/ai-claude",
-		Trigger: task.TriggerConfig{Webhook: "/hooks/ai-claude", WebhookAuth: true},
-	}); err != nil {
-		t.Fatalf("register protected: %v", err)
-	}
-	if err := srv.registry.Register(&task.Spec{
-		ID:      "buildin/open",
-		Trigger: task.TriggerConfig{Webhook: "/hooks/open", WebhookAuth: false},
-	}); err != nil {
-		t.Fatalf("register open: %v", err)
-	}
+	armSpecWebhook(t, srv, "buildin/ai-claude", "/hooks/ai-claude", task.WebhookAuthSession, "")
+	armSpecWebhook(t, srv, "buildin/open", "/hooks/open", task.WebhookAuthNone, "")
 
 	h := srv.Handler()
 	const relayBase = "/u/0000000000000000000000000000000000000000000000000000000000000000"
@@ -835,5 +841,111 @@ func TestWebhookAuthGuard_RelayRejectsAuthWebhook(t *testing.T) {
 	}
 	if loc := w.Header().Get("Location"); !strings.HasPrefix(loc, "/login") {
 		t.Errorf("direct browser GET: expected /login redirect, got Location %q", loc)
+	}
+}
+
+// TestResolveWebhookAuth is the pure decision table — no server, no I/O.
+func TestResolveWebhookAuth(t *testing.T) {
+	const P, G = http.MethodPost, http.MethodGet
+	cases := []struct {
+		name       string
+		mode       task.WebhookAuthMode
+		hasSecret  bool
+		isAsset    bool
+		method     string
+		relayed    bool
+		hasSession bool
+		want       webhookAuthOutcome
+	}{
+		{"public passes", task.WebhookAuthNone, false, false, P, false, false, webhookPass},
+		{"public passes even relayed", task.WebhookAuthNone, false, false, P, true, false, webhookPass},
+		// session mode: a session passes WITHOUT the skip flag, so a configured
+		// secret still ANDs (the handler verifies the signature).
+		{"session+session passes (no skip flag)", task.WebhookAuthSession, false, false, P, false, true, webhookPass},
+		{"session+secret+session passes (AND preserved)", task.WebhookAuthSession, true, false, P, false, true, webhookPass},
+		{"session no session denies", task.WebhookAuthSession, false, false, P, false, false, webhookDeny},
+		{"session relayed denies", task.WebhookAuthSession, true, false, P, true, false, webhookDeny},
+		// any mode: a session alone authenticates and skips HMAC+replay.
+		{"any+session skips HMAC", task.WebhookAuthAny, true, false, P, false, true, webhookPassSession},
+		{"any direct POST no session → HMAC", task.WebhookAuthAny, true, false, P, false, false, webhookHMAC},
+		{"any direct GET never falls through", task.WebhookAuthAny, true, false, G, false, false, webhookDeny},
+		{"any relayed POST → HMAC", task.WebhookAuthAny, true, false, P, true, false, webhookHMAC},
+		{"any relayed GET denies", task.WebhookAuthAny, true, false, G, true, false, webhookDeny},
+		{"any without secret denies", task.WebhookAuthAny, false, false, P, false, false, webhookDeny},
+		// Asset sub-paths must never fall through to HMAC, even a non-GET one —
+		// that would serve auth-gated UI assets to unauthenticated callers.
+		{"any asset POST no session denies", task.WebhookAuthAny, true, true, P, false, false, webhookDeny},
+		{"any asset POST relayed denies", task.WebhookAuthAny, true, true, P, true, false, webhookDeny},
+		{"any asset POST with session skips", task.WebhookAuthAny, true, true, P, false, true, webhookPassSession},
+		// Relayed requests must never honour a session, even one that somehow
+		// surfaced — HMAC is the only relay credential.
+		{"any relayed ignores session", task.WebhookAuthAny, true, false, P, true, true, webhookHMAC},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := resolveWebhookAuth(tc.mode, tc.hasSecret, tc.isAsset, tc.method, tc.relayed, tc.hasSession)
+			if got != tc.want {
+				t.Errorf("resolveWebhookAuth = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestWebhookAuthGuard_AnyMode exercises the guard's decisions for auth: any.
+// The guard's only rejection output is a 401/redirect; any other status means
+// it delegated the request downstream (to the HMAC-gated handler), which is the
+// machine-caller-over-relay path this feature unlocks. The test gateway has no
+// route registered, so a delegated request surfaces as 404 — distinct from the
+// guard's own 401.
+func TestWebhookAuthGuard_AnyMode(t *testing.T) {
+	srv := newAuthServer(t, "hunter2")
+	armSpecWebhook(t, srv, "buildin/ai-claude", "/hooks/ai-claude", task.WebhookAuthAny, "s3cr3t")
+	h := srv.Handler()
+
+	// Direct POST, no session → guard delegates to HMAC (not its own 401).
+	req := httptest.NewRequest(http.MethodPost, "/hooks/ai-claude", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code == http.StatusUnauthorized {
+		t.Errorf("any POST no session: guard must delegate to HMAC, got its own 401")
+	}
+
+	// Direct GET, no session → guard denies (GET must never fall through to HMAC,
+	// or an auth-gated UI would be served). Non-browser GET → 401.
+	req = httptest.NewRequest(http.MethodGet, "/hooks/ai-claude", nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("any GET no session: expected guard 401, got %d", w.Code)
+	}
+
+	// Relayed POST → guard delegates to HMAC (the whole point: a signed machine
+	// caller authenticates over the relay).
+	req = httptest.NewRequest(http.MethodPost, "/hooks/ai-claude", nil)
+	req.Header.Set("X-Relay-Base", "/u/0000000000000000000000000000000000000000000000000000000000000000")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code == http.StatusUnauthorized {
+		t.Errorf("any relayed POST: guard must delegate to HMAC, got its own 401")
+	}
+
+	// Direct POST with a valid session → guard delegates (session path); the
+	// downstream skip of signature/replay is covered in the trigger package.
+	req = httptest.NewRequest(http.MethodPost, "/hooks/ai-claude", nil)
+	req.AddCookie(login(t, h, "hunter2", false))
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code == http.StatusUnauthorized {
+		t.Errorf("any POST with session: expected delegation, got 401")
+	}
+
+	// Unsigned POST to a static-asset sub-path must NOT fall through to HMAC —
+	// that would serve the auth-gated UI unauthenticated. The guard denies it
+	// (401) rather than delegating.
+	req = httptest.NewRequest(http.MethodPost, "/hooks/ai-claude/app.js", nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("any unsigned POST to asset sub-path: expected guard 401, got %d", w.Code)
 	}
 }
