@@ -414,8 +414,8 @@ func newArmDisarm(cfg *config.Config, eng *trigger.Engine, gateway *ipc.Gateway,
 		if !isSpec {
 			return nil
 		}
-		if spec.Trigger.WebhookAuth.RequiresSession() && !cfg.Server.Auth {
-			log.Warn("task declares trigger.auth:true but server.auth is disabled — any password logs in",
+		if spec.Trigger.WebhookAuth.Enabled() && !cfg.Server.Auth {
+			log.Warn("task declares trigger.auth but server.auth is disabled — any password logs in (and an auth: any webhook's session path then bypasses HMAC)",
 				zap.String("task", spec.ID),
 				zap.String("webhook", spec.Trigger.Webhook),
 				zap.String("hint", "set server.auth: true in dicode.yaml to require a real passphrase"))

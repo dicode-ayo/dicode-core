@@ -132,6 +132,19 @@ trigger:
 - `dicode.js` handles 401 automatically: silent refresh via device token, then redirects to login
 - Open webhooks (no `auth: true`) remain fully public — no behaviour change
 
+`auth` accepts three values:
+
+- `true` / `"session"` — a valid dicode session is required (as above). If a `webhook_secret` is also set, a session **and** a valid HMAC signature are both required.
+- `"any"` — a valid session **or** a valid HMAC signature authenticates. Requires a `webhook_secret`. Because HMAC is the only credential that traverses the [relay](../webhooks.md), this is the way to let a **signed machine caller** authenticate over the public relay URL while a browser still uses its session directly. A plain browser (no signature) still can't authenticate over the relay — that stays a tunnel's job. `GET`/UI-asset requests always require a session, never a signature.
+- absent / `false` — public.
+
+```yaml
+trigger:
+  webhook: /hooks/my-machine-endpoint
+  auth: any
+  webhook_secret: "${MY_WEBHOOK_SECRET}"
+```
+
 **Manual** — only fires when explicitly triggered via API or UI:
 
 ```yaml

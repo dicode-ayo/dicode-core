@@ -74,15 +74,23 @@ const (
 
 // resolveWebhookAuth is the pure, table-testable auth decision for a webhook
 // request. It never consults the session on a relayed request (session
-// evaluation has side effects that must not be relay-drivable), and it only
-// lets "any" fall through to HMAC for non-GET methods — a GET is served by the
-// webhook handler as UI/assets before any signature check, so falling GET
-// through would publish an auth-gated UI.
-func resolveWebhookAuth(mode task.WebhookAuthMode, hasSecret bool, method string, relayed, hasSession bool) webhookAuthOutcome {
+// evaluation has side effects that must not be relay-drivable).
+//
+// HMAC fall-through ("any" mode) is restricted to a non-GET request for the hook
+// endpoint itself: a GET or a static-asset sub-path is served by the webhook
+// handler as UI before any signature check, so letting either fall through would
+// publish an auth-gated UI to unauthenticated callers.
+//
+// The session outcome differs by mode. "any" is session-OR-HMAC, so a session
+// alone authenticates — webhookPassSession stamps the request so the handler
+// skips signature + replay. "session" keeps AND semantics: a session satisfies
+// the guard, but if a webhook_secret is also configured the handler must still
+// verify the signature, so the request passes WITHOUT the skip flag.
+func resolveWebhookAuth(mode task.WebhookAuthMode, hasSecret, isAsset bool, method string, relayed, hasSession bool) webhookAuthOutcome {
 	if !mode.Enabled() {
 		return webhookPass
 	}
-	canHMAC := mode == task.WebhookAuthAny && hasSecret && method != http.MethodGet
+	canHMAC := mode == task.WebhookAuthAny && hasSecret && method != http.MethodGet && !isAsset
 	if relayed {
 		if canHMAC {
 			return webhookHMAC
@@ -90,7 +98,10 @@ func resolveWebhookAuth(mode task.WebhookAuthMode, hasSecret bool, method string
 		return webhookDeny
 	}
 	if hasSession {
-		return webhookPassSession
+		if mode == task.WebhookAuthAny {
+			return webhookPassSession
+		}
+		return webhookPass
 	}
 	if canHMAC {
 		return webhookHMAC
@@ -128,7 +139,7 @@ func (s *Server) webhookAuthGuard(w http.ResponseWriter, r *http.Request, next h
 		hasSession = s.hasValidSession(w, r)
 	}
 
-	switch resolveWebhookAuth(info.Mode, info.HasSecret, r.Method, relayed, hasSession) {
+	switch resolveWebhookAuth(info.Mode, info.HasSecret, info.IsAsset, r.Method, relayed, hasSession) {
 	case webhookPassSession:
 		next.ServeHTTP(w, r.WithContext(ipc.WithSessionAuth(r.Context())))
 	case webhookHMAC, webhookPass:

@@ -492,12 +492,17 @@ func (e *Engine) resolveWebhookPath(path string) (taskID, matchedHook, assetPath
 }
 
 // WebhookAuthInfo describes the auth posture of the webhook that claims a URL
-// path. Matched is false when no registered webhook claims the path.
+// path. Matched is false when no registered webhook claims the path. IsAsset is
+// true when the path resolves to a static asset under a webhook UI (a sub-path
+// of the hook), rather than the hook endpoint itself — such requests must never
+// fall through to HMAC, or an auth: any webhook's UI assets would be served to
+// unauthenticated callers.
 type WebhookAuthInfo struct {
 	Matched   bool
 	TaskID    string
 	Mode      task.WebhookAuthMode
 	HasSecret bool
+	IsAsset   bool
 }
 
 // ResolveWebhookAuth reports the auth posture of the webhook claiming urlPath,
@@ -510,7 +515,7 @@ type WebhookAuthInfo struct {
 // — the guard then treats it as public, and the gateway 404s it, so nothing is
 // served and no auth is bypassed.
 func (e *Engine) ResolveWebhookAuth(urlPath string) WebhookAuthInfo {
-	taskID, _, _, ok := e.resolveWebhookPath(urlPath)
+	taskID, _, assetPath, ok := e.resolveWebhookPath(urlPath)
 	if !ok {
 		return WebhookAuthInfo{}
 	}
@@ -518,11 +523,12 @@ func (e *Engine) ResolveWebhookAuth(urlPath string) WebhookAuthInfo {
 	if !ok {
 		return WebhookAuthInfo{}
 	}
+	isAsset := assetPath != ""
 	switch t := k.(type) {
 	case *task.Spec:
-		return WebhookAuthInfo{Matched: true, TaskID: taskID, Mode: t.Trigger.WebhookAuth, HasSecret: t.Trigger.WebhookSecret != ""}
+		return WebhookAuthInfo{Matched: true, TaskID: taskID, Mode: t.Trigger.WebhookAuth, HasSecret: t.Trigger.WebhookSecret != "", IsAsset: isAsset}
 	case *task.PipelineTask:
-		return WebhookAuthInfo{Matched: true, TaskID: taskID, Mode: t.Trigger.WebhookAuth, HasSecret: t.Trigger.WebhookSecret != ""}
+		return WebhookAuthInfo{Matched: true, TaskID: taskID, Mode: t.Trigger.WebhookAuth, HasSecret: t.Trigger.WebhookSecret != "", IsAsset: isAsset}
 	default:
 		return WebhookAuthInfo{}
 	}

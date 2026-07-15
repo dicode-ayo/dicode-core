@@ -851,29 +851,39 @@ func TestResolveWebhookAuth(t *testing.T) {
 		name       string
 		mode       task.WebhookAuthMode
 		hasSecret  bool
+		isAsset    bool
 		method     string
 		relayed    bool
 		hasSession bool
 		want       webhookAuthOutcome
 	}{
-		{"public passes", task.WebhookAuthNone, false, P, false, false, webhookPass},
-		{"public passes even relayed", task.WebhookAuthNone, false, P, true, false, webhookPass},
-		{"session+session passes", task.WebhookAuthSession, false, P, false, true, webhookPassSession},
-		{"session no session denies", task.WebhookAuthSession, false, P, false, false, webhookDeny},
-		{"session relayed denies", task.WebhookAuthSession, true, P, true, false, webhookDeny},
-		{"any+session passes", task.WebhookAuthAny, true, P, false, true, webhookPassSession},
-		{"any direct POST no session → HMAC", task.WebhookAuthAny, true, P, false, false, webhookHMAC},
-		{"any direct GET never falls through", task.WebhookAuthAny, true, G, false, false, webhookDeny},
-		{"any relayed POST → HMAC", task.WebhookAuthAny, true, P, true, false, webhookHMAC},
-		{"any relayed GET denies", task.WebhookAuthAny, true, G, true, false, webhookDeny},
-		{"any without secret denies", task.WebhookAuthAny, false, P, false, false, webhookDeny},
+		{"public passes", task.WebhookAuthNone, false, false, P, false, false, webhookPass},
+		{"public passes even relayed", task.WebhookAuthNone, false, false, P, true, false, webhookPass},
+		// session mode: a session passes WITHOUT the skip flag, so a configured
+		// secret still ANDs (the handler verifies the signature).
+		{"session+session passes (no skip flag)", task.WebhookAuthSession, false, false, P, false, true, webhookPass},
+		{"session+secret+session passes (AND preserved)", task.WebhookAuthSession, true, false, P, false, true, webhookPass},
+		{"session no session denies", task.WebhookAuthSession, false, false, P, false, false, webhookDeny},
+		{"session relayed denies", task.WebhookAuthSession, true, false, P, true, false, webhookDeny},
+		// any mode: a session alone authenticates and skips HMAC+replay.
+		{"any+session skips HMAC", task.WebhookAuthAny, true, false, P, false, true, webhookPassSession},
+		{"any direct POST no session → HMAC", task.WebhookAuthAny, true, false, P, false, false, webhookHMAC},
+		{"any direct GET never falls through", task.WebhookAuthAny, true, false, G, false, false, webhookDeny},
+		{"any relayed POST → HMAC", task.WebhookAuthAny, true, false, P, true, false, webhookHMAC},
+		{"any relayed GET denies", task.WebhookAuthAny, true, false, G, true, false, webhookDeny},
+		{"any without secret denies", task.WebhookAuthAny, false, false, P, false, false, webhookDeny},
+		// Asset sub-paths must never fall through to HMAC, even a non-GET one —
+		// that would serve auth-gated UI assets to unauthenticated callers.
+		{"any asset POST no session denies", task.WebhookAuthAny, true, true, P, false, false, webhookDeny},
+		{"any asset POST relayed denies", task.WebhookAuthAny, true, true, P, true, false, webhookDeny},
+		{"any asset POST with session skips", task.WebhookAuthAny, true, true, P, false, true, webhookPassSession},
 		// Relayed requests must never honour a session, even one that somehow
 		// surfaced — HMAC is the only relay credential.
-		{"any relayed ignores session", task.WebhookAuthAny, true, P, true, true, webhookHMAC},
+		{"any relayed ignores session", task.WebhookAuthAny, true, false, P, true, true, webhookHMAC},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := resolveWebhookAuth(tc.mode, tc.hasSecret, tc.method, tc.relayed, tc.hasSession)
+			got := resolveWebhookAuth(tc.mode, tc.hasSecret, tc.isAsset, tc.method, tc.relayed, tc.hasSession)
 			if got != tc.want {
 				t.Errorf("resolveWebhookAuth = %d, want %d", got, tc.want)
 			}
@@ -927,5 +937,15 @@ func TestWebhookAuthGuard_AnyMode(t *testing.T) {
 	h.ServeHTTP(w, req)
 	if w.Code == http.StatusUnauthorized {
 		t.Errorf("any POST with session: expected delegation, got 401")
+	}
+
+	// Unsigned POST to a static-asset sub-path must NOT fall through to HMAC —
+	// that would serve the auth-gated UI unauthenticated. The guard denies it
+	// (401) rather than delegating.
+	req = httptest.NewRequest(http.MethodPost, "/hooks/ai-claude/app.js", nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("any unsigned POST to asset sub-path: expected guard 401, got %d", w.Code)
 	}
 }

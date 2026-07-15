@@ -113,6 +113,25 @@ test.describe('Webhook auth: any (session OR HMAC)', () => {
     expect(res.status()).toBe(403);
   });
 
+  // ── Static UI assets stay session-gated (asset fall-through fix) ───────────
+  test('unsigned POST to a static asset sub-path is not served', async ({ request }) => {
+    const res = await request.post(`${ANY_WEBHOOK_PATH}/app.js`, {
+      headers: { 'Content-Type': 'application/json' },
+      data: { via: 'asset-probe' },
+    });
+    expect(res.status()).not.toBe(200);
+    expect(await res.text()).not.toContain('hello-webhook-any-asset-marker');
+  });
+
+  test('GET to a static asset sub-path without a session is not served', async ({ request }) => {
+    const res = await request.get(`${ANY_WEBHOOK_PATH}/app.js`, {
+      headers: { Accept: 'text/html' },
+      maxRedirects: 0,
+    });
+    expect(res.status()).not.toBe(200);
+    expect(await res.text()).not.toContain('hello-webhook-any-asset-marker');
+  });
+
   test('relayed browser GET → 401 HTML explainer, not a login bounce', async ({ request }) => {
     const res = await request.get(ANY_WEBHOOK_PATH, {
       headers: { Accept: 'text/html', 'X-Relay-Base': RELAY_BASE },

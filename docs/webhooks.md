@@ -61,6 +61,19 @@ trigger:
 
 Public webhooks (no `auth: true`) remain fully open.
 
+`auth` is tri-valued:
+
+- `true` / `"session"` — session required. With a `webhook_secret` also set, session **and** signature are both required.
+- `"any"` — session **or** a valid HMAC signature (requires `webhook_secret`). Lets a signed machine caller authenticate over the public relay URL, where session cookies never travel; a browser still authenticates directly via its session. `GET`/asset requests always require a session, never a signature.
+- absent / `false` — public.
+
+```yaml
+trigger:
+  webhook: /hooks/my-machine-endpoint
+  auth: any
+  webhook_secret: "${MY_WEBHOOK_SECRET}"
+```
+
 ### GET requests not supported with webhook_secret
 
 When `webhook_secret` is configured, only POST requests are accepted.
