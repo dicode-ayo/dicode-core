@@ -107,18 +107,85 @@ type ChainTrigger struct {
 	Overrides *Overrides     `yaml:"overrides,omitempty"` // per-firing override applied to the downstream spec
 }
 
+// WebhookAuthMode is the auth posture of a webhook trigger. In YAML it accepts a
+// bool (true = session, false/absent = public) or a string ("session", "any").
+//   - session: a valid dicode session is required for GET (UI) and POST (run);
+//     a webhook_secret, if also set, still ANDs on top.
+//   - any: session OR a valid HMAC signature. HMAC is the only auth that
+//     traverses the relay, so this is the machine-caller-over-relay path.
+type WebhookAuthMode string
+
+const (
+	WebhookAuthNone    WebhookAuthMode = ""
+	WebhookAuthSession WebhookAuthMode = "session"
+	WebhookAuthAny     WebhookAuthMode = "any"
+)
+
+// Enabled reports whether the webhook is auth-gated at all.
+func (m WebhookAuthMode) Enabled() bool { return m != WebhookAuthNone }
+
+// RequiresSession reports whether a session is the sole accepted credential
+// (session mode). Distinguished from "any", where HMAC is an alternative.
+func (m WebhookAuthMode) RequiresSession() bool { return m == WebhookAuthSession }
+
+// MarshalJSON preserves the pre-tri-value wire format so approval content
+// hashes stay stable across the bool→WebhookAuthMode change: none→false,
+// session→true (byte-identical to the old bool encoding, so an existing
+// auth: true task does not spuriously re-pend), any→"any" (distinct, so
+// switching a task to "any" re-pends it — it opens a relay-reachable HMAC path).
+func (m WebhookAuthMode) MarshalJSON() ([]byte, error) {
+	switch m {
+	case WebhookAuthAny:
+		return []byte(`"any"`), nil
+	case WebhookAuthSession:
+		return []byte(`true`), nil
+	default:
+		return []byte(`false`), nil
+	}
+}
+
+// UnmarshalYAML accepts a bool (back-compat: true→session, false→none) or a
+// string ("session"/"any"). Any other scalar or node kind is an error.
+func (m *WebhookAuthMode) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind != yaml.ScalarNode {
+		return fmt.Errorf("trigger.auth must be a bool or string, got %s", value.Tag)
+	}
+	switch value.Tag {
+	case "!!bool":
+		var b bool
+		if err := value.Decode(&b); err != nil {
+			return err
+		}
+		if b {
+			*m = WebhookAuthSession
+		} else {
+			*m = WebhookAuthNone
+		}
+		return nil
+	case "!!str":
+		switch WebhookAuthMode(value.Value) {
+		case WebhookAuthNone, WebhookAuthSession, WebhookAuthAny:
+			*m = WebhookAuthMode(value.Value)
+			return nil
+		}
+		return fmt.Errorf("invalid trigger.auth %q (want true, false, \"session\", or \"any\")", value.Value)
+	default:
+		return fmt.Errorf("trigger.auth must be a bool or string, got %s", value.Tag)
+	}
+}
+
 // TriggerConfig defines how a task is triggered.
 // Exactly one of Cron, Webhook, Manual, Chain, or Daemon should be set.
 type TriggerConfig struct {
-	Cron             string        `yaml:"cron,omitempty"`              // cron expression e.g. "0 9 * * *"
-	Webhook          string        `yaml:"webhook,omitempty"`           // HTTP path e.g. "/hooks/my-task"
-	WebhookSecret    string        `yaml:"webhook_secret,omitempty"`    // HMAC-SHA256 secret for webhook auth
-	WebhookAuth      bool          `yaml:"auth,omitempty"`              // require dicode session for GET (UI) and POST (run)
-	ReplayProtection *bool         `yaml:"replay_protection,omitempty"` // nonce-cache replay guard; default true when webhook_secret is set
-	Manual           bool          `yaml:"manual,omitempty"`            // only via explicit trigger
-	Chain            *ChainTrigger `yaml:"chain,omitempty"`             // fire when another task completes
-	Daemon           bool          `yaml:"daemon,omitempty"`            // start on app start, restart on exit
-	Restart          string        `yaml:"restart,omitempty"`           // daemon only: "always"(default)|"on-failure"|"never"
+	Cron             string          `yaml:"cron,omitempty"`              // cron expression e.g. "0 9 * * *"
+	Webhook          string          `yaml:"webhook,omitempty"`           // HTTP path e.g. "/hooks/my-task"
+	WebhookSecret    string          `yaml:"webhook_secret,omitempty"`    // HMAC-SHA256 secret for webhook auth
+	WebhookAuth      WebhookAuthMode `yaml:"auth,omitempty"`              // session-required (true/"session") or session-OR-HMAC ("any")
+	ReplayProtection *bool           `yaml:"replay_protection,omitempty"` // nonce-cache replay guard; default true when webhook_secret is set
+	Manual           bool            `yaml:"manual,omitempty"`            // only via explicit trigger
+	Chain            *ChainTrigger   `yaml:"chain,omitempty"`             // fire when another task completes
+	Daemon           bool            `yaml:"daemon,omitempty"`            // start on app start, restart on exit
+	Restart          string          `yaml:"restart,omitempty"`           // daemon only: "always"(default)|"on-failure"|"never"
 }
 
 // Param defines a user-configurable input for a task.
@@ -661,6 +728,11 @@ func (s *Spec) validate() error {
 	}
 	if s.Trigger.Webhook != "" {
 		triggers++
+	}
+	// "any" mode has a dead HMAC path (and misleadingly implies relay-reachability)
+	// without a secret to verify against.
+	if s.Trigger.WebhookAuth == WebhookAuthAny && s.Trigger.WebhookSecret == "" {
+		return fmt.Errorf(`trigger.auth: "any" requires webhook_secret (the HMAC path has nothing to verify without it)`)
 	}
 	if s.Trigger.Manual {
 		triggers++

@@ -788,6 +788,10 @@ func TestSPA_RunRoute(t *testing.T) {
 
 func registerWebhookTask(t *testing.T, reg *registry.Registry, srv *Server, id, hookPath string, requireAuth bool) *task.Spec {
 	t.Helper()
+	authMode := task.WebhookAuthNone
+	if requireAuth {
+		authMode = task.WebhookAuthSession
+	}
 	dir := t.TempDir()
 	td := filepath.Join(dir, id)
 	_ = os.MkdirAll(td, 0755)
@@ -797,13 +801,14 @@ func registerWebhookTask(t *testing.T, reg *registry.Registry, srv *Server, id, 
 	spec := &task.Spec{
 		ID:      id,
 		Name:    id,
+		Enabled: true, // the engine only maps webhooks for enabled tasks
 		Runtime: task.RuntimeDeno,
-		Trigger: task.TriggerConfig{Webhook: hookPath, WebhookAuth: requireAuth},
+		Trigger: task.TriggerConfig{Webhook: hookPath, WebhookAuth: authMode},
 		Timeout: 5 * time.Second,
 		TaskDir: td,
 	}
 	_ = reg.Register(spec)
-	srv.engine.Register(spec)
+	_ = srv.engine.Register(spec)
 	return spec
 }
 

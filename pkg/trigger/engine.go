@@ -564,6 +564,10 @@ func (e *Engine) unregisterTriggers(id string) {
 // Register re-registers (Engine.Start at boot, the reconciler on every content
 // change), so a live webhook could 404 for no reason the caller could see.
 func (e *Engine) unregisterTriggersKeeping(id, keepWebhookPath string) {
+	// Match the trailing-slash normalisation registerWebhookPath applies to map
+	// keys, so the keep comparison below doesn't delete (then transiently drop)
+	// a path the caller is about to re-claim.
+	keepWebhookPath = strings.TrimSuffix(keepWebhookPath, "/")
 	e.mu.Lock()
 	hadCron := false
 	if entryID, ok := e.cronEntries[id]; ok {

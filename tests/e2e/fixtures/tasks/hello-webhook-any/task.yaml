@@ -1,0 +1,12 @@
+apiVersion: dicode/v1
+kind: Task
+name: Hello Webhook Any
+description: >
+  A webhook task with trigger.auth "any" (session OR HMAC) for e2e testing of
+  core#610. A valid dicode session OR a valid HMAC signature authenticates.
+runtime: js
+trigger:
+  webhook: /hooks/test-webhook-any
+  auth: any
+  webhook_secret: "${TEST_WEBHOOK_SECRET}"
+timeout: 10s

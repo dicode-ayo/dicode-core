@@ -173,22 +173,22 @@ func TestApplyTriggerPatch_WebhookAuth(t *testing.T) {
 	// the dicode session cookie.
 	tr := task.TriggerConfig{Webhook: "/hooks/ai/dicodai"}
 	applyTriggerPatch(&tr, &TriggerPatch{Auth: boolPtr(true)})
-	if !tr.WebhookAuth {
-		t.Error("WebhookAuth should be true after auth patch")
+	if tr.WebhookAuth != task.WebhookAuthSession {
+		t.Errorf("WebhookAuth should be session after auth patch, got %q", tr.WebhookAuth)
 	}
 	// Flipping it back off must also work.
 	applyTriggerPatch(&tr, &TriggerPatch{Auth: boolPtr(false)})
-	if tr.WebhookAuth {
-		t.Error("WebhookAuth should be false after auth:false patch")
+	if tr.WebhookAuth.Enabled() {
+		t.Errorf("WebhookAuth should be none after auth:false patch, got %q", tr.WebhookAuth)
 	}
 }
 
 func TestApplyTriggerPatch_AuthNilPreservesWebhookAuth(t *testing.T) {
 	// A nil Auth pointer must not clobber an existing WebhookAuth value —
 	// otherwise a webhook-only patch would silently disable auth.
-	tr := task.TriggerConfig{Webhook: "/hooks/x", WebhookAuth: true}
+	tr := task.TriggerConfig{Webhook: "/hooks/x", WebhookAuth: task.WebhookAuthSession}
 	applyTriggerPatch(&tr, &TriggerPatch{Webhook: strPtr("/hooks/y")})
-	if !tr.WebhookAuth {
+	if tr.WebhookAuth != task.WebhookAuthSession {
 		t.Error("WebhookAuth should be preserved when Auth is nil")
 	}
 }
@@ -209,12 +209,12 @@ func TestApplyTriggerPatch_TypeSwitchClearsAuth(t *testing.T) {
 		{"Daemon", &TriggerPatch{Daemon: boolPtr(true)}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			tr := task.TriggerConfig{Webhook: "/hooks/x", WebhookAuth: true}
+			tr := task.TriggerConfig{Webhook: "/hooks/x", WebhookAuth: task.WebhookAuthSession}
 			applyTriggerPatch(&tr, tc.patch)
 			if tr.Webhook != "" {
 				t.Errorf("%s patch should clear Webhook, got %q", tc.name, tr.Webhook)
 			}
-			if tr.WebhookAuth {
+			if tr.WebhookAuth.Enabled() {
 				t.Errorf("%s patch should clear WebhookAuth alongside Webhook", tc.name)
 			}
 		})

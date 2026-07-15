@@ -35,13 +35,13 @@ type PipelineTask struct {
 // Notably no Daemon: a pipeline is daemon-shaped iff its terminal stage is a
 // kind: Task with trigger.daemon: true.
 type PipelineTrigger struct {
-	Manual           bool          `yaml:"manual,omitempty"`
-	Cron             string        `yaml:"cron,omitempty"`
-	Webhook          string        `yaml:"webhook,omitempty"`
-	WebhookSecret    string        `yaml:"webhook_secret,omitempty"`
-	WebhookAuth      bool          `yaml:"auth,omitempty"`
-	ReplayProtection *bool         `yaml:"replay_protection,omitempty"`
-	Chain            *ChainTrigger `yaml:"chain,omitempty"`
+	Manual           bool            `yaml:"manual,omitempty"`
+	Cron             string          `yaml:"cron,omitempty"`
+	Webhook          string          `yaml:"webhook,omitempty"`
+	WebhookSecret    string          `yaml:"webhook_secret,omitempty"`
+	WebhookAuth      WebhookAuthMode `yaml:"auth,omitempty"`
+	ReplayProtection *bool           `yaml:"replay_protection,omitempty"`
+	Chain            *ChainTrigger   `yaml:"chain,omitempty"`
 }
 
 // Stage is one entry in a PipelineTask.Stages list: a task ID plus optional
@@ -155,6 +155,9 @@ func (p *PipelineTask) Validate() error {
 	}
 	if p.Trigger.count() > 1 {
 		return fmt.Errorf("pipeline: at most one trigger type may be set")
+	}
+	if p.Trigger.WebhookAuth == WebhookAuthAny && p.Trigger.WebhookSecret == "" {
+		return fmt.Errorf(`pipeline: trigger.auth: "any" requires webhook_secret (the HMAC path has nothing to verify without it)`)
 	}
 	if len(p.Stages) == 0 {
 		return fmt.Errorf("pipeline: at least one stage is required")

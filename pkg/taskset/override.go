@@ -73,7 +73,7 @@ func applyTriggerPatch(t *task.TriggerConfig, p *TriggerPatch) {
 	if p.Cron != nil {
 		t.Cron = *p.Cron
 		t.Webhook = ""
-		t.WebhookAuth = false
+		t.WebhookAuth = task.WebhookAuthNone
 		t.Manual = false
 		t.Chain = nil
 		t.Daemon = false
@@ -86,13 +86,19 @@ func applyTriggerPatch(t *task.TriggerConfig, p *TriggerPatch) {
 		t.Daemon = false
 	}
 	if p.Auth != nil {
-		t.WebhookAuth = *p.Auth
+		// TriggerPatch.Auth is a *bool; taskset overrides can toggle session vs
+		// public but cannot select "any" (that stays a task-spec-level opt-in).
+		if *p.Auth {
+			t.WebhookAuth = task.WebhookAuthSession
+		} else {
+			t.WebhookAuth = task.WebhookAuthNone
+		}
 	}
 	if p.Manual != nil {
 		t.Manual = *p.Manual
 		t.Cron = ""
 		t.Webhook = ""
-		t.WebhookAuth = false
+		t.WebhookAuth = task.WebhookAuthNone
 		t.Chain = nil
 		t.Daemon = false
 	}
@@ -100,7 +106,7 @@ func applyTriggerPatch(t *task.TriggerConfig, p *TriggerPatch) {
 		t.Chain = p.Chain
 		t.Cron = ""
 		t.Webhook = ""
-		t.WebhookAuth = false
+		t.WebhookAuth = task.WebhookAuthNone
 		t.Manual = false
 		t.Daemon = false
 	}
@@ -108,7 +114,7 @@ func applyTriggerPatch(t *task.TriggerConfig, p *TriggerPatch) {
 		t.Daemon = *p.Daemon
 		t.Cron = ""
 		t.Webhook = ""
-		t.WebhookAuth = false
+		t.WebhookAuth = task.WebhookAuthNone
 		t.Manual = false
 		t.Chain = nil
 	}
