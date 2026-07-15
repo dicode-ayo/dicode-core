@@ -95,6 +95,25 @@ time window. This means a captured request cannot be replayed even after the
 1-hour replay cache expires, because the timestamp value changes with every
 legitimately signed request.
 
+Because sending `X-Dicode-Timestamp` is optional, a sender that never sends it
+(intentionally or not) stays replayable indefinitely once the request leaves
+the 1-hour cache window or the daemon restarts — a downgrade attack isn't
+possible (stripping the header breaks the signature), but a permanently
+timestamp-less signer is. Set `require_timestamp: true` to close that gap by
+rejecting any request that omits the header — recommended for any
+relay-exposed webhook, where requests already leave your network boundary:
+
+```yaml
+trigger:
+  webhook: /hooks/my-task
+  webhook_secret: "${SECRET}"
+  require_timestamp: true
+```
+
+`require_timestamp` defaults to `false` so senders that can't be made to emit
+a custom header — GitHub's webhook delivery, for example — keep working
+unmodified with the plain `HMAC-SHA256(secret, body)` preimage above.
+
 Example — signing a request with a timestamp in Python:
 
 ```python
@@ -113,9 +132,18 @@ headers = {
 ### Replay protection
 
 When `webhook_secret` is set, dicode automatically rejects duplicate webhook
-bodies within a 1-hour window. This prevents an attacker who captures a valid
-request from replaying it — the task fires once and subsequent identical
-requests return HTTP 409.
+requests within a 1-hour window. This prevents an attacker who captures a
+valid request from replaying it — the task fires once and subsequent
+duplicates return HTTP 409.
+
+The replay cache is keyed on the exact same preimage the signature covers:
+`HMAC(secret, "<timestamp>\n<body>")` when the request carries
+`X-Dicode-Timestamp`, or `HMAC(secret, body)` when it doesn't. Binding the
+timestamp into the key (rather than hashing the body alone) means two
+legitimately distinct requests with an identical body — a `{}` heartbeat sent
+twice a minute apart, say — don't collide as a false-positive replay, and a
+captured (timestamp, body) pair can't be re-admitted by a daemon restart that
+happens to land within the timestamp's own 5-minute tolerance window.
 
 Replay protection is enabled by default. Opt out per task if your sender
 legitimately sends byte-identical payloads:

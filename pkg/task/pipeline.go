@@ -41,6 +41,7 @@ type PipelineTrigger struct {
 	WebhookSecret    string        `yaml:"webhook_secret,omitempty"`
 	WebhookAuth      bool          `yaml:"auth,omitempty"`
 	ReplayProtection *bool         `yaml:"replay_protection,omitempty"`
+	RequireTimestamp *bool         `yaml:"require_timestamp,omitempty"`
 	Chain            *ChainTrigger `yaml:"chain,omitempty"`
 }
 

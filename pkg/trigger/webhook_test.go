@@ -33,7 +33,7 @@ func signBodyWithTimestamp(secret, tsStr string, body []byte) string {
 func TestVerifyWebhookSignature_NoSecret_Passes(t *testing.T) {
 	spec := &task.Spec{Trigger: task.TriggerConfig{WebhookSecret: ""}}
 	req := httptest.NewRequest("POST", "/hooks/test", nil)
-	if err := verifyWebhookSignature(spec, req, []byte("body")); err != nil {
+	if _, err := verifyWebhookSignature(spec, req, []byte("body")); err != nil {
 		t.Errorf("expected nil (no secret), got: %v", err)
 	}
 }
@@ -46,7 +46,7 @@ func TestVerifyWebhookSignature_ValidSignature_Passes(t *testing.T) {
 	req := httptest.NewRequest("POST", "/hooks/test", nil)
 	req.Header.Set(webhookSignatureHeader, signBody(secret, body))
 
-	if err := verifyWebhookSignature(spec, req, body); err != nil {
+	if _, err := verifyWebhookSignature(spec, req, body); err != nil {
 		t.Errorf("expected nil for valid signature, got: %v", err)
 	}
 }
@@ -58,7 +58,7 @@ func TestVerifyWebhookSignature_WrongSecret_Fails(t *testing.T) {
 	req := httptest.NewRequest("POST", "/hooks/test", nil)
 	req.Header.Set(webhookSignatureHeader, signBody("wrong-secret", body))
 
-	if err := verifyWebhookSignature(spec, req, body); err == nil {
+	if _, err := verifyWebhookSignature(spec, req, body); err == nil {
 		t.Error("expected error for wrong secret, got nil")
 	}
 }
@@ -70,7 +70,7 @@ func TestVerifyWebhookSignature_MissingHeader_Fails(t *testing.T) {
 	req := httptest.NewRequest("POST", "/hooks/test", nil)
 	// No signature header set.
 
-	if err := verifyWebhookSignature(spec, req, body); err == nil {
+	if _, err := verifyWebhookSignature(spec, req, body); err == nil {
 		t.Error("expected error for missing signature header, got nil")
 	}
 }
@@ -85,8 +85,10 @@ func TestVerifyWebhookSignature_ReplayProtection_Fresh_Passes(t *testing.T) {
 	req.Header.Set(webhookSignatureHeader, signBodyWithTimestamp(secret, tsStr, body))
 	req.Header.Set(webhookTimestampHeader, tsStr)
 
-	if err := verifyWebhookSignature(spec, req, body); err != nil {
+	if got, err := verifyWebhookSignature(spec, req, body); err != nil {
 		t.Errorf("fresh timestamp should pass, got: %v", err)
+	} else if got != tsStr {
+		t.Errorf("expected returned timestamp %q, got %q", tsStr, got)
 	}
 }
 
@@ -104,7 +106,7 @@ func TestVerifyWebhookSignature_ReplayProtection_Stale_Fails(t *testing.T) {
 	req.Header.Set(webhookSignatureHeader, signBodyWithTimestamp(secret, staleTsStr, body))
 	req.Header.Set(webhookTimestampHeader, staleTsStr)
 
-	if err := verifyWebhookSignature(spec, req, body); err == nil {
+	if _, err := verifyWebhookSignature(spec, req, body); err == nil {
 		t.Error("stale timestamp should fail, got nil")
 	}
 }
@@ -118,7 +120,7 @@ func TestVerifyWebhookSignature_InvalidTimestamp_Fails(t *testing.T) {
 	req.Header.Set(webhookSignatureHeader, signBody(secret, body))
 	req.Header.Set(webhookTimestampHeader, "not-a-number")
 
-	if err := verifyWebhookSignature(spec, req, body); err == nil {
+	if _, err := verifyWebhookSignature(spec, req, body); err == nil {
 		t.Error("invalid timestamp should fail, got nil")
 	}
 }

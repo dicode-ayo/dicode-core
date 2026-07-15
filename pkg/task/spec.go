@@ -115,6 +115,7 @@ type TriggerConfig struct {
 	WebhookSecret    string        `yaml:"webhook_secret,omitempty"`    // HMAC-SHA256 secret for webhook auth
 	WebhookAuth      bool          `yaml:"auth,omitempty"`              // require dicode session for GET (UI) and POST (run)
 	ReplayProtection *bool         `yaml:"replay_protection,omitempty"` // nonce-cache replay guard; default true when webhook_secret is set
+	RequireTimestamp *bool         `yaml:"require_timestamp,omitempty"` // reject requests missing X-Dicode-Timestamp; default false (GitHub-style signers send no timestamp)
 	Manual           bool          `yaml:"manual,omitempty"`            // only via explicit trigger
 	Chain            *ChainTrigger `yaml:"chain,omitempty"`             // fire when another task completes
 	Daemon           bool          `yaml:"daemon,omitempty"`            // start on app start, restart on exit
