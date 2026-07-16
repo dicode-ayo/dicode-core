@@ -68,9 +68,12 @@ console.log(`Received push to ${input.ref}`)
 
 Requests with an invalid or missing secret are rejected with 401.
 
-**Replay protection:** when `webhook_secret` is set, dicode rejects duplicate webhook bodies within a 1-hour window (HTTP 409). Opt out per task:
-- `replay_protection: false` — allow byte-identical payloads (e.g. idempotent senders)
-- Default: `true` (protection enabled whenever a secret is configured)
+**Replay protection:** when `webhook_secret` is set, dicode rejects a duplicate request within a 1-hour window (HTTP 409). The cache keys on the HMAC digest, which folds in `X-Dicode-Timestamp` when the sender includes it — so two legitimate requests with an identical body but distinct timestamps never collide. Options per task:
+- `replay_protection: false` — allow duplicate requests (e.g. idempotent senders)
+- `require_timestamp: true` — reject any request missing `X-Dicode-Timestamp`, closing the replay window for timestamp-less signers (recommended for relay-exposed webhooks). Defaults to `false` for GitHub-style body-only signers.
+- Default: `replay_protection: true` whenever a secret is configured.
+
+See [Webhooks](../webhooks.md) for the full HMAC signing and timestamp-binding details.
 
 **Path rules:**
 - Must start with `/`
