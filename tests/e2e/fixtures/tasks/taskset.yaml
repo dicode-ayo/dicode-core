@@ -19,6 +19,12 @@ spec:
     hello-webhook-any:
       ref:
         path: FIXTURES_TASKS_DIR/hello-webhook-any/task.yaml
+    hello-webhook-any-downgrade:
+      ref:
+        path: FIXTURES_TASKS_DIR/hello-webhook-any-downgrade/task.yaml
+    hello-webhook-any-ts:
+      ref:
+        path: FIXTURES_TASKS_DIR/hello-webhook-any-ts/task.yaml
     chain-target:
       ref:
         path: FIXTURES_TASKS_DIR/chain-target/task.yaml

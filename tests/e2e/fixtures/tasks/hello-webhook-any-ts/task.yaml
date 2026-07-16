@@ -1,0 +1,14 @@
+apiVersion: dicode/v1
+kind: Task
+name: Hello Webhook Any (require_timestamp)
+description: >
+  An auth: any webhook with require_timestamp: true, for e2e testing of core#605:
+  a signed request must carry a valid X-Dicode-Timestamp, and the replay cache is
+  keyed on the (timestamp, body) digest.
+runtime: js
+trigger:
+  webhook: /hooks/test-webhook-ts
+  auth: any
+  webhook_secret: "${TEST_WEBHOOK_SECRET}"
+  require_timestamp: true
+timeout: 10s
