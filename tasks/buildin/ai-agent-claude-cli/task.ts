@@ -21,7 +21,7 @@
 // a value, not throws).
 
 import type { Dicode, DicodeSdk } from "../../sdk.ts";
-import { chatStart, chatTurn, decideEntryMode, isChatEnd, SAFE_SKILL_NAME } from "../ai-agent-core/chat.ts";
+import { chatStart, chatTurn, decideEntryMode, isChatEnd, isValidSessionId, SAFE_SKILL_NAME } from "../ai-agent-core/chat.ts";
 
 // Re-exported so the task's tests (and any importer) reach the shared envelope
 // helpers through the task module.
@@ -129,13 +129,32 @@ export const steps = {
             ctx,
             async ({ message, state }) => {
                 const carried = (state ?? {}) as ClaudeChatState;
-                // chatId is minted in main() and carried forward; default-guard it
-                // so a hand-crafted resume without one still runs (fresh cwd, no
-                // --resume).
-                const chatId = carried.chatId ?? crypto.randomUUID();
+
+                // chatId is minted in main() and carried forward; it becomes a
+                // filesystem path component (the per-invocation workdir), so a
+                // hand-crafted resume can't be trusted to hand back a safe value —
+                // validate as a UUID and mint a fresh one (fresh cwd, no --resume)
+                // rather than let an off-shape string reach Deno.Command's cwd.
+                let chatId = carried.chatId ?? "";
+                if (chatId && !isValidSessionId(chatId)) {
+                    console.warn(`ai-agent-claude-cli: rejected invalid chatId in resume state; starting a fresh workdir`);
+                    chatId = "";
+                }
+                if (!chatId) chatId = crypto.randomUUID();
+
+                // claudeSessionId becomes the `claude --resume <id>` subprocess
+                // argument. Same reasoning: validate before use, and treat an
+                // off-shape carried value as absent (fresh Claude session) rather
+                // than pass it through to the CLI invocation.
+                let priorClaudeSessionId = carried.claudeSessionId ?? "";
+                if (priorClaudeSessionId && !isValidSessionId(priorClaudeSessionId)) {
+                    console.warn(`ai-agent-claude-cli: rejected invalid claudeSessionId in resume state; starting a fresh Claude session`);
+                    priorClaudeSessionId = "";
+                }
+
                 const turn = await runClaudeTurn({
                     message,
-                    priorClaudeSessionId: carried.claudeSessionId ?? "",
+                    priorClaudeSessionId,
                     workdirKey: chatId,
                     params,
                 });

@@ -420,6 +420,13 @@ Deno.test("steps.turn: a blank message ends the chat (returns, no Claude call)",
     assertEquals(calls.length, 0); // never suspended onward
 });
 
+// UUID-shaped fixtures: chatId/claudeSessionId now go through isValidSessionId
+// before use, so carried-state fixtures in these tests must be UUID-shaped to
+// exercise the "valid, passed through" path. The off-shape/rejection path is
+// covered separately below.
+const VALID_CHAT_ID = "11111111-1111-1111-1111-111111111111";
+const VALID_PRIOR_SESSION_ID = "33333333-3333-3333-3333-333333333333";
+
 Deno.test("steps.turn: a message runs one turn and suspends back with the reply", async () => {
     Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "stub");
     const { calls, dicode } = makeSuspendDicode();
@@ -433,7 +440,7 @@ JSON`,
                 await steps.turn({
                     params: makeParams([]),
                     input: { message: "ping" },
-                    state: { claudeSessionId: "", chatId: "chat-abc" },
+                    state: { claudeSessionId: "", chatId: VALID_CHAT_ID },
                     dicode,
                     output: {} as any,
                     mcp: {} as any,
@@ -449,7 +456,7 @@ JSON`,
     assertEquals(calls[0].to, "turn");
     // Claude's new session id is carried forward; chatId (the workdir key) is stable.
     assertEquals(calls[0].state.claudeSessionId, "sess-new");
-    assertEquals(calls[0].state.chatId, "chat-abc");
+    assertEquals(calls[0].state.chatId, VALID_CHAT_ID);
     // The reply becomes the next prompt's banner — on the schema and the field.
     assertEquals(calls[0].schema.description, "pong");
     assertEquals(calls[0].schema.properties.message.description, "pong");
@@ -470,7 +477,7 @@ JSON`,
                 await steps.turn({
                     params: makeParams([]),
                     input: { message: "again" },
-                    state: { claudeSessionId: "sess-1", chatId: "chat-xyz" },
+                    state: { claudeSessionId: VALID_PRIOR_SESSION_ID, chatId: "chat-xyz" },
                     dicode,
                     output: {} as any,
                     mcp: {} as any,
@@ -482,7 +489,78 @@ JSON`,
     );
     const lines = (await Deno.readTextFile(sentinel)).split("\n");
     const i = lines.indexOf("--resume");
-    if (i < 0 || lines[i + 1] !== "sess-1") {
-        throw new Error(`expected --resume sess-1, got:\n${lines.join(" ")}`);
+    if (i < 0 || lines[i + 1] !== VALID_PRIOR_SESSION_ID) {
+        throw new Error(`expected --resume ${VALID_PRIOR_SESSION_ID}, got:\n${lines.join(" ")}`);
+    }
+});
+
+Deno.test("steps.turn: rejects a path-traversal chatId in resume state; falls back to a fresh UUID workdir", async () => {
+    Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "stub");
+    const { dicode } = makeSuspendDicode();
+    const sentinelDir = await Deno.makeTempDir();
+    const sentinel = `${sentinelDir}/cwd-recorded`;
+    await withStubClaude(
+        `pwd > ${sentinel}
+cat <<'JSON'
+{"type":"result","is_error":false,"result":"ok","session_id":"sess-new"}
+JSON`,
+        async () => {
+            try {
+                await steps.turn({
+                    params: makeParams([]),
+                    input: { message: "hi" },
+                    state: { claudeSessionId: "", chatId: "../../../../tmp/dicode-chatid-escape" },
+                    dicode,
+                    output: {} as any,
+                    mcp: {} as any,
+                } as any);
+            } catch (e) {
+                if (!(e instanceof SuspendSignal)) throw e;
+            }
+        },
+    );
+    const recordedCwd = (await Deno.readTextFile(sentinel)).trim();
+    if (recordedCwd.includes("dicode-chatid-escape")) {
+        throw new Error(`chatId path traversal reached the subprocess cwd: ${recordedCwd}`);
+    }
+    const basename = recordedCwd.split("/").pop() ?? "";
+    if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(basename)) {
+        throw new Error(`expected a fresh UUID-shaped workdir, got cwd: ${recordedCwd}`);
+    }
+});
+
+Deno.test("steps.turn: rejects a flag-shaped claudeSessionId in resume state; omits --resume entirely", async () => {
+    Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "stub");
+    const { dicode } = makeSuspendDicode();
+    const sentinelDir = await Deno.makeTempDir();
+    const sentinel = `${sentinelDir}/args-recorded`;
+    await withStubClaude(
+        `printf '%s\\n' "$@" > ${sentinel}
+cat <<'JSON'
+{"type":"result","is_error":false,"result":"ok","session_id":"sess-new"}
+JSON`,
+        async () => {
+            try {
+                await steps.turn({
+                    params: makeParams([]),
+                    input: { message: "hi" },
+                    // A crafted resume submission trying to smuggle an extra CLI flag
+                    // in as the "session id".
+                    state: { claudeSessionId: "--dangerously-skip-permissions", chatId: VALID_CHAT_ID },
+                    dicode,
+                    output: {} as any,
+                    mcp: {} as any,
+                } as any);
+            } catch (e) {
+                if (!(e instanceof SuspendSignal)) throw e;
+            }
+        },
+    );
+    const args = (await Deno.readTextFile(sentinel)).split("\n");
+    if (args.includes("--resume")) {
+        throw new Error(`expected --resume to be omitted for an invalid carried claudeSessionId, got:\n${args.join(" ")}`);
+    }
+    if (args.includes("--dangerously-skip-permissions")) {
+        throw new Error(`malicious claudeSessionId leaked into claude args:\n${args.join(" ")}`);
     }
 });

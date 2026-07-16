@@ -18,7 +18,7 @@
 //     ends it.
 import OpenAI from "npm:openai@4";
 import type { Dicode, DicodeSdk } from "../../sdk.ts";
-import { chatStart, chatTurn, decideEntryMode } from "../ai-agent-core/chat.ts";
+import { chatStart, chatTurn, decideEntryMode, isValidSessionId } from "../ai-agent-core/chat.ts";
 
 type Role = "system" | "user" | "assistant" | "tool";
 
@@ -581,16 +581,23 @@ async function oneShotTurn(
     dicode: Dicode;
   },
 ): Promise<unknown> {
-  // Hybrid session id: use provided or auto-generate
+  // Hybrid session id: use provided or auto-generate. A caller-supplied value
+  // ends up in the `chat:<id>` run-group label (and is echoed back as the
+  // continuation handle), so validate it the same way claude-cli validates its
+  // carried session/chat ids — an off-shape value is treated as absent rather
+  // than passed through.
   let sessionId = (await params.get("session_id")) ?? "";
+  if (sessionId && !isValidSessionId(sessionId)) {
+    console.warn(`ai-agent: rejected invalid session_id param; generating a fresh one`);
+    sessionId = "";
+  }
   if (!sessionId) sessionId = crypto.randomUUID();
 
   // Tag the run so the WebUI collapses every turn of a single chat into
   // one expandable row in the run list (#112). Tool-call children are
   // already linked via parent_run_id by the engine (#116), so the run
   // detail view can render this turn as a timeline of sub-runs (#113).
-  // set_group is provided by the runtime shim but not yet on the typed surface.
-  await (dicode as Dicode & { set_group(label: string): Promise<void> }).set_group(`chat:${sessionId}`);
+  await dicode.set_group(`chat:${sessionId}`);
 
   const resolved = await resolveAgentRuntime(params, dicode);
   if (!resolved.ok) {
