@@ -18,7 +18,16 @@ runtime: deno
 
 trigger:
   webhook: /hooks/ai-claude
-  auth: true
+  # session OR HMAC: a browser authenticates directly via its dicode session,
+  # while a machine caller signs a POST and authenticates over the public relay
+  # URL (session cookies never cross the relay). Set AI_CLAUDE_WEBHOOK_SECRET in
+  # the daemon env to enable the HMAC/relay path — when it is unset the secret is
+  # unresolved and the webhook safely degrades to session-only (see
+  # normalizeWebhookAuth in pkg/task). require_timestamp closes the replay window
+  # for this relay-exposed, MCP-capable agent (see docs/webhooks.md).
+  auth: any
+  webhook_secret: "${AI_CLAUDE_WEBHOOK_SECRET}"
+  require_timestamp: true
 
 params:
   prompt:

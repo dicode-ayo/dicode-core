@@ -174,6 +174,34 @@ func (m *WebhookAuthMode) UnmarshalYAML(value *yaml.Node) error {
 	}
 }
 
+// webhookSecretResolved reports whether s is a usable HMAC secret rather than an
+// empty string or an unresolved ${VAR} placeholder (the referenced env var was
+// not set at load time). The ${ check is a heuristic — a real secret is opaque
+// random bytes and won't contain "${" — and it fails safe: a false "unresolved"
+// only downgrades auth: any to session.
+func webhookSecretResolved(s string) bool {
+	return s != "" && !strings.Contains(s, "${")
+}
+
+// normalizeWebhookAuth downgrades an auth: any webhook that has no resolved
+// webhook_secret to plain session auth. auth: any authenticates a machine caller
+// by HMAC over the untrusted relay, so it MUST verify against a real secret;
+// serving it against an unresolved ${VAR} placeholder would let anyone who can
+// read the (often committed) task.yaml sign a valid request. Downgrading to
+// session — and clearing the placeholder so session mode doesn't demand an
+// impossible browser signature — keeps the webhook working (browser/session
+// auth) with the relay HMAC path simply not offered. Runs after template
+// expansion, the only point where a real secret is distinguishable from a
+// placeholder.
+func normalizeWebhookAuth(s *Spec) {
+	if s.Trigger.WebhookAuth == WebhookAuthAny && !webhookSecretResolved(s.Trigger.WebhookSecret) {
+		s.Trigger.WebhookAuth = WebhookAuthSession
+		s.Trigger.WebhookSecret = ""
+		s.Warnings = append(s.Warnings,
+			`trigger.auth: "any" needs a resolved webhook_secret but none is set — serving session auth only (the HMAC/relay path is disabled)`)
+	}
+}
+
 // TriggerConfig defines how a task is triggered.
 // Exactly one of Cron, Webhook, Manual, Chain, or Daemon should be set.
 type TriggerConfig struct {
@@ -651,6 +679,10 @@ func LoadDirWithVars(dir string, extras map[string]string) (*Spec, error) {
 	// keys. Kept narrow — see expandSpec for the allowlist and
 	// pkg/task/template.go for the resolution rules.
 	expandSpec(&spec, builtinVars(dir, extras))
+
+	// Runs AFTER expansion: it can only tell a real secret from an unresolved
+	// ${VAR} placeholder once expansion has been attempted.
+	normalizeWebhookAuth(&spec)
 
 	if spec.Runtime == "" || spec.Runtime == "js" {
 		spec.Runtime = RuntimeDeno
