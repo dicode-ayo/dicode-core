@@ -209,7 +209,8 @@ func TestIsPathUnderDir(t *testing.T) {
 		want bool
 	}{
 		{"direct child", "/data/relay/mtls-cert.pem", "/data", true},
-		{"same dir", "/data/x", "/data", true},
+		{"child in dir", "/data/x", "/data", true},
+		{"dir itself", "/data", "/data", true},
 		{"outside", "/etc/ssl/broker.pem", "/data", false},
 		{"parent traversal", "/data/../etc/x", "/data", false},
 		{"prefix-but-not-under", "/database/x", "/data", false},

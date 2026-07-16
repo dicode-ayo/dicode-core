@@ -80,14 +80,16 @@ export async function ensureServerCert(): Promise<void> {
   if (certExists) rmSync(certPath);
   if (keyExists) rmSync(keyPath);
 
-  const hosts: string[] = [];
+  // Loopback SANs are listed explicitly so a same-box daemon dialing
+  // localhost verifies regardless of the helper's own default SANs.
+  const hosts: string[] = ["127.0.0.1", "localhost"];
   const baseURL = Deno.env.get("BASE_URL");
   if (baseURL) {
     try {
       const host = new URL(baseURL).hostname;
       if (host !== "") hosts.push(host);
     } catch {
-      // BASE_URL unparsable — SANs fall back to localhost/127.0.0.1.
+      // BASE_URL unparsable — the loopback SANs above still apply.
     }
   }
 
