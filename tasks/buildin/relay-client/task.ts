@@ -123,10 +123,23 @@ async function runOnce(sdk: DicodeSdk): Promise<void> {
   // derives the daemon uuid from the peer certificate.
   const { certPem, keyPem } = await identity.mintClientCert();
 
-  // Optional CA for verifying the broker's server cert. Absent → the
-  // platform trust store (WebPKI), which is correct for the hosted relay.
-  // Set (env-borne PEM) for self-hosted brokers with self-signed certs.
-  const caPem = Deno.env.get("DICODE_RELAY_CA_PEM");
+  // CA for verifying the broker's server cert. Absent → the platform trust
+  // store (WebPKI), correct for the hosted relay. For a self-hosted broker
+  // the daemon exports the operator's ca_file as env-borne PEM. As a fallback
+  // — read each connect so it self-heals — trust the in-process relay-server's
+  // self-signed cert at its known data-dir path once it has been generated
+  // (which happens after the daemon boot that would have exported the PEM).
+  let caPem = Deno.env.get("DICODE_RELAY_CA_PEM") ?? "";
+  if (caPem === "") {
+    const datadir = Deno.env.get("DICODE_DATADIR");
+    if (datadir) {
+      try {
+        caPem = await Deno.readTextFile(`${datadir}/relay/mtls-cert.pem`);
+      } catch {
+        // Not present (or not readable) → fall through to WebPKI.
+      }
+    }
+  }
 
   const client = new RelayClient({
     serverURL:      url,
@@ -135,7 +148,7 @@ async function runOnce(sdk: DicodeSdk): Promise<void> {
     tls: {
       certPem,
       keyPem,
-      ...(caPem && caPem !== "" ? { ca: caPem } : {}),
+      ...(caPem !== "" ? { ca: caPem } : {}),
     },
     // The channel is TLS-server-authenticated, so the broker key is trusted
     // and persisted unconditionally (auth-relay reads it out-of-band to

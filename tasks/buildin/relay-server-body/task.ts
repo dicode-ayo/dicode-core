@@ -12,7 +12,7 @@
 // the pre-rendered path. OAuth secrets no longer flow through this task's
 // env — they're scoped to stage 1 of the pipeline.
 
-import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { generateKeyPairSync } from "node:crypto";
 import { startServer } from "npm:dicode-relay@0.2.0/start";
@@ -68,10 +68,17 @@ export async function ensureServerCert(): Promise<void> {
   }
   const certPath = join(dataDir, "relay", "mtls-cert.pem");
   const keyPath = join(dataDir, "relay", "mtls-key.pem");
-  if (existsSync(certPath) && existsSync(keyPath)) {
+  const certExists = existsSync(certPath);
+  const keyExists = existsSync(keyPath);
+  if (certExists && keyExists) {
     chmodSync(keyPath, 0o600);
     return;
   }
+  // Partial state — a crash between the two writes below leaves one file
+  // orphaned. Clear it so the exclusive-create writes don't EEXIST-fail on
+  // every subsequent boot; regenerate the pair together.
+  if (certExists) rmSync(certPath);
+  if (keyExists) rmSync(keyPath);
 
   const hosts: string[] = [];
   const baseURL = Deno.env.get("BASE_URL");

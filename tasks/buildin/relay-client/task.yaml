@@ -28,6 +28,12 @@ permissions:
     # "*" is the minimum viable scope. The connection target's server cert is
     # verified over TLS (WebPKI, or DICODE_RELAY_CA_PEM for self-hosted brokers).
     - "*"
+  fs:
+    # Read-only, for the self-heal fallback that trusts the in-process
+    # relay-server's self-signed cert at ${DICODE_DATADIR}/relay/mtls-cert.pem
+    # when no CA PEM was exported (single-box first-boot bootstrap).
+    - path: "${DICODE_DATADIR}/relay"
+      permission: r
   env:
     - DICODE_RELAY_SERVER_URL
     - DICODE_RELAY_LOCAL_PORT

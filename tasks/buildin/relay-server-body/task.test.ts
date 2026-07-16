@@ -192,6 +192,30 @@ Deno.test(
 );
 
 Deno.test(
+  "ensureServerCert recovers from partial state (cert present, key missing)",
+  async () => {
+    clearRelayEnv();
+    const datadir = Deno.makeTempDirSync({ prefix: "dicode-relay-test-" });
+    Deno.env.set("DICODE_DATADIR", datadir);
+
+    // Simulate a crash between the two writes: an orphaned cert, no key.
+    const relayDir = join(datadir, "relay");
+    mkdirSync(relayDir, { recursive: true });
+    const certPath = join(relayDir, "mtls-cert.pem");
+    const keyPath = join(relayDir, "mtls-key.pem");
+    writeFileSync(certPath, "stale orphan cert");
+
+    // Must not throw with a misleading EEXIST — it clears the orphan and
+    // regenerates both into a consistent, loadable pair.
+    await ensureServerCert();
+
+    const cert = new X509Certificate(readFileSync(certPath, "utf8"));
+    assertEquals(cert.publicKey.asymmetricKeyType, "ec");
+    createPrivateKey(readFileSync(keyPath, "utf8"));
+  },
+);
+
+Deno.test(
   "staged datadir + pre-rendered relay.yaml → startServer({dryRun:true}) resolves",
   async () => {
     clearRelayEnv();

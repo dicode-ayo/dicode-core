@@ -649,11 +649,19 @@ func (cfg *Config) validate() error {
 			return fmt.Errorf("relay.broker_url: missing host in %q", cfg.Relay.BrokerURL)
 		}
 	}
-	// The relay control channel is mTLS-only as of protocol v4 — a ws://
-	// server_url can never establish a TLS client-cert handshake. Fail closed
-	// with a clear message rather than looping on connection errors.
-	if cfg.Relay.ServerURL != "" && strings.HasPrefix(cfg.Relay.ServerURL, "ws://") {
-		return fmt.Errorf("relay.server_url: must use wss:// — the relay control channel requires mTLS (got %q)", cfg.Relay.ServerURL)
+	// The relay control channel is mTLS-only — the server_url must be wss://.
+	// A ws:// (or any non-wss) URL can never establish a TLS client-cert
+	// handshake, so fail closed with a clear message rather than looping on
+	// connection errors at runtime. Only enforced when the relay is enabled:
+	// a disabled relay's stale server_url is inert and must not block boot.
+	if cfg.Relay.Enabled && cfg.Relay.ServerURL != "" {
+		u, err := url.Parse(cfg.Relay.ServerURL)
+		if err != nil {
+			return fmt.Errorf("relay.server_url: %w", err)
+		}
+		if u.Scheme != "wss" {
+			return fmt.Errorf("relay.server_url: must use wss:// — the relay control channel requires mTLS (got scheme %q in %q)", u.Scheme, cfg.Relay.ServerURL)
+		}
 	}
 	// bcrypt cost: x/crypto/bcrypt's MinCost = 4, MaxCost = 31, but anything
 	// above ~14 is multi-second per login on commodity hardware and serves no

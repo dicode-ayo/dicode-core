@@ -177,3 +177,47 @@ func TestRelayServerBodyGateLeavesOtherTasksAlone(t *testing.T) {
 		t.Error("gate disabled an unrelated task (buildin/relay-client)")
 	}
 }
+
+func TestPemContainsCertificate(t *testing.T) {
+	// A minimal but structurally valid CERTIFICATE PEM block.
+	const certPEM = `-----BEGIN CERTIFICATE-----
+MIIBFDCBu6ADAgECAgEBMAoGCCqGSM49BAMCMA8xDTALBgNVBAMTBHRlc3QwHhcN
+-----END CERTIFICATE-----`
+	for _, tc := range []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"valid cert block", certPEM, true},
+		{"empty", "", false},
+		{"garbage", "not a pem file at all", false},
+		{"wrong block type", "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := pemContainsCertificate([]byte(tc.in)); got != tc.want {
+				t.Errorf("pemContainsCertificate(%q) = %v, want %v", tc.name, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestIsPathUnderDir(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		path string
+		dir  string
+		want bool
+	}{
+		{"direct child", "/data/relay/mtls-cert.pem", "/data", true},
+		{"same dir", "/data/x", "/data", true},
+		{"outside", "/etc/ssl/broker.pem", "/data", false},
+		{"parent traversal", "/data/../etc/x", "/data", false},
+		{"prefix-but-not-under", "/database/x", "/data", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isPathUnderDir(tc.path, tc.dir); got != tc.want {
+				t.Errorf("isPathUnderDir(%q, %q) = %v, want %v", tc.path, tc.dir, got, tc.want)
+			}
+		})
+	}
+}
