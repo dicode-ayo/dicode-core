@@ -41,6 +41,11 @@ permissions:
     # Named entries forward their host values into the subprocess.
     - DICODE_DATADIR
     - DICODE_VERSION
+    # Adds the broker's hostname to the self-signed mTLS cert's SANs so a
+    # hostname-addressed daemon can verify it. Absent → SANs fall back to
+    # localhost/127.0.0.1 (the single-box dev case).
+    - name: BASE_URL
+      optional: true
     # Optional mock-provider flag. Production never sets it; tests override
     # value: "1" via spec.entries overrides to enable /_test/deliver.
     - name: DICODE_E2E_MOCK_PROVIDER

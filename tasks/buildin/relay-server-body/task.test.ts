@@ -31,13 +31,14 @@
  * from the task body's happy path.
  */
 
-import { assertEquals, assertThrows } from "jsr:@std/assert@1";
+import { assertEquals, assertRejects, assertThrows } from "jsr:@std/assert@1";
 import { createPrivateKey, generateKeyPairSync } from "node:crypto";
 import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { startServer } from "npm:dicode-relay@0.1.9/start";
+import { startServer } from "npm:dicode-relay@0.2.0/start";
 
-import { ensureSigningKey } from "./task.ts";
+import { X509Certificate } from "node:crypto";
+import { ensureServerCert, ensureSigningKey } from "./task.ts";
 
 // Doppler-fed env vars that the daemon would otherwise populate. We clear
 // all of them before each test so fixtures are deterministic regardless of
@@ -145,6 +146,75 @@ Deno.test(
   },
 );
 
+Deno.test("ensureServerCert throws when DICODE_DATADIR is unset", async () => {
+  clearRelayEnv();
+  Deno.env.delete("DICODE_DATADIR");
+  await assertRejects(() => ensureServerCert(), Error, "DICODE_DATADIR");
+});
+
+Deno.test(
+  "ensureServerCert on fresh datadir writes a parseable P-256 cert at 0o600 key",
+  async () => {
+    clearRelayEnv();
+    const datadir = Deno.makeTempDirSync({ prefix: "dicode-relay-test-" });
+    Deno.env.set("DICODE_DATADIR", datadir);
+    // Exercise the BASE_URL host path (SAN content is asserted in the relay
+    // package's own Node-side mTLS connect tests; node:crypto's
+    // X509Certificate.subjectAltName is not readable under Deno node-compat).
+    Deno.env.set("BASE_URL", "https://relay.test.example");
+
+    await ensureServerCert();
+
+    const certPath = join(datadir, "relay", "mtls-cert.pem");
+    const keyPath = join(datadir, "relay", "mtls-key.pem");
+    const cert = new X509Certificate(readFileSync(certPath, "utf8"));
+    assertEquals(cert.publicKey.asymmetricKeyType, "ec");
+    createPrivateKey(readFileSync(keyPath, "utf8")); // throws if malformed
+    assertEquals(statSync(keyPath).mode & 0o777, 0o600);
+  },
+);
+
+Deno.test(
+  "ensureServerCert is idempotent — preserves existing cert/key on subsequent calls",
+  async () => {
+    clearRelayEnv();
+    const datadir = Deno.makeTempDirSync({ prefix: "dicode-relay-test-" });
+    Deno.env.set("DICODE_DATADIR", datadir);
+
+    await ensureServerCert();
+    const certPath = join(datadir, "relay", "mtls-cert.pem");
+    const before = readFileSync(certPath, "utf8");
+
+    await ensureServerCert(); // must not throw, must not regenerate.
+
+    assertEquals(readFileSync(certPath, "utf8"), before);
+  },
+);
+
+Deno.test(
+  "ensureServerCert recovers from partial state (cert present, key missing)",
+  async () => {
+    clearRelayEnv();
+    const datadir = Deno.makeTempDirSync({ prefix: "dicode-relay-test-" });
+    Deno.env.set("DICODE_DATADIR", datadir);
+
+    // Simulate a crash between the two writes: an orphaned cert, no key.
+    const relayDir = join(datadir, "relay");
+    mkdirSync(relayDir, { recursive: true });
+    const certPath = join(relayDir, "mtls-cert.pem");
+    const keyPath = join(relayDir, "mtls-key.pem");
+    writeFileSync(certPath, "stale orphan cert");
+
+    // Must not throw with a misleading EEXIST — it clears the orphan and
+    // regenerates both into a consistent, loadable pair.
+    await ensureServerCert();
+
+    const cert = new X509Certificate(readFileSync(certPath, "utf8"));
+    assertEquals(cert.publicKey.asymmetricKeyType, "ec");
+    createPrivateKey(readFileSync(keyPath, "utf8"));
+  },
+);
+
 Deno.test(
   "staged datadir + pre-rendered relay.yaml → startServer({dryRun:true}) resolves",
   async () => {
@@ -164,6 +234,10 @@ server:
   tls:
     cert_file: ""
     key_file: ""
+  mtls:
+    port: 5554
+    cert_file: ""
+    key_file: ""
 status:
   password: "test-pass"
 relay:
@@ -171,7 +245,6 @@ relay:
   ping_interval_ms: 30000
   pong_timeout_ms: 10000
   request_timeout_ms: 30000
-  nonce_ttl_ms: 60000
 broker:
   session_ttl_ms: 300000
   signing_key_file: ${datadir}/relay/broker-signing.key

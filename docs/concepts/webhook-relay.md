@@ -43,10 +43,11 @@ No inbound ports, no NAT traversal, no third-party accounts required.
 ```yaml
 relay:
   enabled: true
-  server_url: wss://relay.dicode.app   # or ws://localhost:5553 for local dev
+  server_url: wss://relay.dicode.app:5554   # broker mTLS endpoint
+  broker_url: https://relay.dicode.app      # public OAuth/webhook base URL
 ```
 
-When `relay.enabled` is `true` and `server_url` is set, the daemon dispatches the `buildin/relay-client` daemon task on boot. The task generates a stable cryptographic identity on first run (see below) and reconnects automatically with exponential backoff on disconnect. An optional `broker_url` field overrides the OAuth broker base URL; when empty it is derived from `server_url` by swapping the scheme.
+When `relay.enabled` is `true` and `server_url` is set, the daemon dispatches the `buildin/relay-client` daemon task on boot. The task generates a stable cryptographic identity on first run (see below) and reconnects automatically with exponential backoff on disconnect. `server_url` must be `wss://` — it points at the broker's dedicated mTLS listener. `broker_url` is the public base URL for OAuth and webhook delivery; because the mTLS and public listeners run on different ports, set it explicitly. An optional `ca_file` supplies a PEM CA for a self-signed broker.
 
 ---
 
@@ -73,11 +74,11 @@ UUID = hex(sha256(0x04 || X || Y))    // 64 lowercase hex characters, sign pubke
 ```
 
 This identity is used for:
-1. **Relay handshake** -- the daemon proves ownership of the UUID via ECDSA challenge-response (sign key)
+1. **Relay handshake** -- the daemon presents a self-signed X.509 client certificate wrapping the sign key; the broker derives the UUID from the cert and mutual TLS proves key ownership (sign key)
 2. **OAuth broker** -- the daemon signs auth requests so the broker can verify the caller controls the relay UUID (sign key)
 3. **Token encryption** -- the broker encrypts OAuth tokens to the daemon's decryption public key (ECIES)
 
-The task also pins the broker's public key on first connect (trust-on-first-use); a later mismatch aborts the connection. The pin is stored encrypted alongside the identity.
+The daemon authenticates the broker by verifying its TLS server certificate — the platform trust store (WebPKI) for the hosted relay, or the CA in `relay.ca_file` for a self-signed broker. There is no first-use key pin; trust comes from the authenticated TLS channel.
 
 The UUID stays stable as long as the identity blob and the secrets master key both survive. If the master key changes (passphrase rotation), the blob is unrecoverable and the task regenerates a fresh identity with a new UUID.
 
@@ -85,33 +86,40 @@ The UUID stays stable as long as the identity blob and the secrets master key bo
 
 ## Protocol
 
+The daemon connects to the broker's dedicated mTLS listener (default port 5554),
+separate from the public webhook/OAuth listener (default 5553). It presents a
+self-signed client certificate; the broker derives the UUID from the cert key,
+and TLS 1.3 proves ownership without any application-level challenge or
+signature. The mTLS listener requires end-to-end TLS passthrough — a
+TLS-terminating proxy in front of it strips the client cert and every
+connection is rejected (close code 4401).
+
 Messages are protojson-encoded `ServerMessage` / `ClientMessage` envelopes
 (generated from `relay.proto`) sent as JSON text WebSocket frames — a `oneof`
 wrapper keyed by variant name (e.g. `{"hello":{...}}`), not a flat
 `{"type":...}` object. The wire format is defined by the pinned dicode-relay
-package (`npm:dicode-relay@~0.1.4`, see `deno.lock`); see
+package (`npm:dicode-relay@~0.2.0`, see `deno.lock`); see
 [docs/design/relay.md](../design/relay.md) for the full protocol reference.
-Both client and broker require protocol version 3 — a broker advertising a
+Both client and broker require protocol version 4 — a broker advertising a
 lower version is rejected.
 
 ### Handshake
 
+After the TLS handshake, over the established mTLS connection:
+
 ```
-Server -> Client   {"challenge":{"nonce":"<64 hex chars>"}}
-Client -> Server   {"hello":{"uuid":"...","pubkey":"...","decrypt_pubkey":"...","sig":"...","timestamp":N}}
-Server -> Client   {"welcome":{"url":"https://relay.dicode.app/u/<uuid>/hooks/","brokerPubkey":"...","protocol":3}}
+Client -> Server   {"hello":{"uuid":"...","pubkey":"...","decrypt_pubkey":"..."}}
+Server -> Client   {"welcome":{"url":"https://relay.dicode.app/u/<uuid>/hooks/","brokerPubkey":"...","protocol":4}}
                    or
                    {"error":{"message":"<reason>"}}
 ```
 
-`pubkey` is the signing public key; `decrypt_pubkey` is the separate key the broker encrypts OAuth token deliveries to. `brokerPubkey` on the welcome is what the client TOFU-pins. (The client encodes `hello` with proto field names/snake_case; the server's `welcome`/`challenge`/`error` use camelCase — casing differs by direction.)
+`pubkey` is the signing public key (matching the client-certificate key); `decrypt_pubkey` is the separate key the broker encrypts OAuth token deliveries to. `brokerPubkey` on the welcome is the broker's delivery-signing key, which the daemon persists unconditionally. (The client encodes `hello` with proto field names/snake_case; the server's `welcome`/`error` use camelCase — casing differs by direction.)
 
-Verification steps (server):
-1. Decode `pubkey` from base64 -- must be 65 bytes starting with `0x04`
-2. Verify `hex(sha256(pubkey_bytes)) == uuid`
-3. Verify `timestamp` within +/-30 s of server clock
-4. Verify nonce not seen in last 60 s
-5. Verify ECDSA signature over `sha256(nonce_bytes || timestamp_big_endian_uint64)`
+Broker admission checks:
+1. A client certificate is present, with a P-256 key
+2. Decode `pubkey` from base64 -- must be 65 bytes starting with `0x04`, matching the cert key
+3. Verify `hex(sha256(cert_pubkey)) == uuid`
 
 ### Request forwarding
 
@@ -158,8 +166,8 @@ The production relay server is a separate TypeScript/Node.js service (`dicode-re
 ### Self-hosted
 
 The relay server lives at [dicode-ayo/dicode-relay](https://github.com/dicode-ayo/dicode-relay) — a Node.js service that can run standalone for environments where you control the infrastructure:
-- Same protocol, same handshake verification
-- In-memory nonce store, client registry
+- Same protocol, same mTLS admission
+- Dedicated mTLS listener (default 5554) requiring TLS passthrough, plus the public listener (default 5553); daemons trust its self-signed server cert via `relay.ca_file`
 - Optional OAuth broker (configurable via `relay.yaml`)
 - Published as a Docker image; suitable for embedding in tests and single-user self-hosting
 

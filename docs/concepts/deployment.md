@@ -191,8 +191,6 @@ dicode secrets list                            List secret keys
 dicode secrets set <key> <value>               Store a secret
 dicode secrets delete <key>                    Delete a secret
 
-dicode relay trust-broker                      Trust the relay's OAuth broker
-
 dicode ai <prompt> [flags]                     Run the configured AI task with a prompt
 
 dicode auth reset-passphrase                   Reset the server auth passphrase

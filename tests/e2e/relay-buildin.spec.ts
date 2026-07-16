@@ -50,7 +50,9 @@ const BUILDIN_TASKSET = path.join(REPO_ROOT, 'tasks/buildin/taskset.yaml');
 let daemonProc: ChildProcess | null = null;
 let tempDir = '';
 let relayPort = 0;
+let mtlsPort = 0;
 let webuiPort = 0;
+let caCertPath = '';
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -86,7 +88,26 @@ async function waitForUrl(url: string, timeoutMs = 30_000): Promise<void> {
  * relay-server-body reads this file on startup regardless of how it was
  * produced, so writing it here is the fastest way to configure the test relay.
  */
-function writeRelayConfig(dataDir: string, port: number): void {
+/**
+ * Pre-generate the broker's mTLS server cert into ${dataDir}/relay/. Writing
+ * it before daemon start mirrors an operator provisioning the cert (and lets
+ * relay-server-body's ensureServerCert skip regeneration). Returns the cert
+ * path so the daemon can trust it via relay.ca_file.
+ */
+async function writeMtlsCert(dataDir: string): Promise<string> {
+  const relayDir = path.join(dataDir, 'relay');
+  fs.mkdirSync(relayDir, { recursive: true });
+  const { generateSelfSignedServerCert } = (await import(
+    path.join(REPO_ROOT, 'node_modules', 'dicode-relay', 'dist', 'client', 'index.js')
+  )) as { generateSelfSignedServerCert: (o: { hosts?: string[] }) => Promise<{ certPem: string; keyPem: string }> };
+  const { certPem, keyPem } = await generateSelfSignedServerCert({ hosts: ['127.0.0.1', 'localhost'] });
+  const certPath = path.join(relayDir, 'mtls-cert.pem');
+  fs.writeFileSync(certPath, certPem, 'utf8');
+  fs.writeFileSync(path.join(relayDir, 'mtls-key.pem'), keyPem, { mode: 0o600 });
+  return certPath;
+}
+
+function writeRelayConfig(dataDir: string, port: number, mtlsP: number): void {
   const relayDir = path.join(dataDir, 'relay');
   fs.mkdirSync(relayDir, { recursive: true });
   fs.writeFileSync(
@@ -97,6 +118,10 @@ function writeRelayConfig(dataDir: string, port: number): void {
   tls:
     cert_file: ""
     key_file: ""
+  mtls:
+    port: ${mtlsP}
+    cert_file: ${dataDir}/relay/mtls-cert.pem
+    key_file: ${dataDir}/relay/mtls-key.pem
 status:
   password: test-pw
 relay:
@@ -104,7 +129,6 @@ relay:
   ping_interval_ms: 30000
   pong_timeout_ms: 10000
   request_timeout_ms: 30000
-  nonce_ttl_ms: 60000
 broker:
   session_ttl_ms: 300000
   signing_key_file: ${dataDir}/relay/broker-signing.key
@@ -118,7 +142,7 @@ broker:
  * Write the daemon config using spec.entries format (not the deprecated
  * sources: array) so per-task overrides can be nested under the buildin entry.
  */
-function writeDaemonConfig(dir: string, webuiP: number, relayP: number): string {
+function writeDaemonConfig(dir: string, webuiP: number, relayP: number, mtlsP: number, caPath: string): string {
   const cfgPath = path.join(dir, 'dicode.yaml');
   fs.writeFileSync(
     cfgPath,
@@ -143,8 +167,9 @@ spec:
                 value: "1"
 relay:
   enabled: true
-  server_url: "ws://127.0.0.1:${relayP}/"
+  server_url: "wss://127.0.0.1:${mtlsP}/"
   broker_url: "http://127.0.0.1:${relayP}"
+  ca_file: "${caPath}"
 `,
     'utf8',
   );
@@ -222,16 +247,20 @@ test.describe('relay-buildin', () => {
 
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dicode-e2e-relay-buildin-'));
     relayPort = await freePort();
+    mtlsPort = await freePort();
     webuiPort = await freePort();
 
     console.log(
-      `[relay-buildin e2e] tempDir=${tempDir} relayPort=${relayPort} webuiPort=${webuiPort}`,
+      `[relay-buildin e2e] tempDir=${tempDir} relayPort=${relayPort} mtlsPort=${mtlsPort} webuiPort=${webuiPort}`,
     );
 
-    // Pre-write relay.yaml so relay-server-body can bind to the ephemeral port.
-    writeRelayConfig(tempDir, relayPort);
+    // Pre-generate the mTLS server cert (before daemon boot, so the daemon's
+    // ca_file read succeeds and relay-server-body reuses it), then write the
+    // relay + daemon configs.
+    caCertPath = await writeMtlsCert(tempDir);
+    writeRelayConfig(tempDir, relayPort, mtlsPort);
 
-    const daemonCfgPath = writeDaemonConfig(tempDir, webuiPort, relayPort);
+    const daemonCfgPath = writeDaemonConfig(tempDir, webuiPort, relayPort, mtlsPort, caCertPath);
 
     daemonProc = spawnDaemon(daemonCfgPath);
     // Wait for the daemon's REST API to become available.

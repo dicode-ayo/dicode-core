@@ -191,7 +191,7 @@ func dispatch(c *ipc.ControlClient, args []string) error {
 		return cmdSecrets(c, args[1:])
 	case "relay":
 		if len(args) < 2 {
-			return fmt.Errorf("usage: dicode relay <trust-broker> [--yes]")
+			return fmt.Errorf("usage: dicode relay <subcommand>")
 		}
 		return cmdRelay(c, args[1:])
 	case "ai":
@@ -849,33 +849,12 @@ func cmdTaskDelete(c *ipc.ControlClient, args []string) error {
 	return nil
 }
 
-func cmdRelay(c *ipc.ControlClient, args []string) error {
+func cmdRelay(_ *ipc.ControlClient, args []string) error {
 	switch args[0] {
 	case "trust-broker":
-		force := false
-		for _, a := range args[1:] {
-			switch a {
-			case "--yes", "-y":
-				force = true
-			default:
-				return fmt.Errorf("unknown flag %q — usage: dicode relay trust-broker --yes", a)
-			}
-		}
-		if !force {
-			fmt.Fprintln(os.Stderr, "This will clear the pinned broker signing key.")
-			fmt.Fprintln(os.Stderr, "The next relay reconnect will trust-on-first-use the broker's current key.")
-			fmt.Fprintln(os.Stderr, "Re-run with --yes to confirm.")
-			return fmt.Errorf("aborted")
-		}
-		resp, err := c.Send(ipc.Request{Method: "cli.relay.trust_broker"})
-		if err != nil {
-			return err
-		}
-		if resp.Error != "" {
-			return fmt.Errorf("%s", resp.Error)
-		}
-		fmt.Println("Broker pubkey pin cleared. Restart the daemon to accept the new broker key.")
-		return nil
+		return fmt.Errorf("'dicode relay trust-broker' was removed: the relay now authenticates the " +
+			"broker over TLS. For a self-signed broker, set relay.ca_file in dicode.yaml to the " +
+			"broker's server certificate")
 	default:
 		return fmt.Errorf("unknown relay subcommand %q", args[0])
 	}
@@ -1634,7 +1613,6 @@ Commands:
   secrets list                    list secret keys
   secrets set <key> <value>       store a secret
   secrets delete <key>            delete a secret
-  relay trust-broker --yes        clear the pinned broker signing key (TOFU re-pin on reconnect)
   mcp install                     mint an API key + run 'claude mcp add' (zero-touch)
   mcp uninstall                   revoke the key + run 'claude mcp remove dicode'
   mcp print-config                print the install command + .claude/mcp.json snippet

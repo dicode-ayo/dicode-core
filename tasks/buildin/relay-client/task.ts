@@ -8,16 +8,15 @@ import {
   Identity,
   RelayClient,
   type StoredIdentity,
-  type TofuResult,
-} from "npm:dicode-relay@0.1.9/client";
+} from "npm:dicode-relay@0.2.0/client";
 
 import type { DicodeSdk } from "../../sdk.ts";
 
 const IDENTITY_CTX   = "dicode/relay-identity/v1";
-const BROKER_PIN_CTX = "dicode/relay-broker-pin/v1";
+const BROKER_KEY_CTX = "dicode/relay-broker-key/v1";
 const PREFIX         = "relay/";
 const ID_KEY         = "relay/identity-v1";
-const BROKER_PIN_KEY = "relay/broker-pin-v1";
+const BROKER_KEY_KEY = "relay/broker-key-v1";
 const ROOT_DEFAULT   = "relay-store"; // appended under the storage task's data dir
 
 function b64encode(bytes: Uint8Array): string {
@@ -119,21 +118,42 @@ async function runOnce(sdk: DicodeSdk): Promise<void> {
   // ── identity load-or-generate ───────────────────────────────────────
   const identity = await loadOrGenerateIdentity(sdk, storageTask);
 
-  // ── TOFU pin via storage task ───────────────────────────────────────
-  const tofuCheckAndPin = async (brokerPubkeyB64: string): Promise<TofuResult> => {
-    const stored = await fetchPin(sdk, storageTask);
-    if (stored === null) {
-      await savePin(sdk, storageTask, brokerPubkeyB64);
-      return "new";
+  // ── mTLS client cert (wraps the identity sign key) ──────────────────
+  // Regenerated per boot; only the SPKI matters to the broker, which
+  // derives the daemon uuid from the peer certificate.
+  const { certPem, keyPem } = await identity.mintClientCert();
+
+  // CA for verifying the broker's server cert. Absent → the platform trust
+  // store (WebPKI), correct for the hosted relay. For a self-hosted broker
+  // the daemon exports the operator's ca_file as env-borne PEM. As a fallback
+  // — read each connect so it self-heals — trust the in-process relay-server's
+  // self-signed cert at its known data-dir path once it has been generated
+  // (which happens after the daemon boot that would have exported the PEM).
+  let caPem = Deno.env.get("DICODE_RELAY_CA_PEM") ?? "";
+  if (caPem === "") {
+    const datadir = Deno.env.get("DICODE_DATADIR");
+    if (datadir) {
+      try {
+        caPem = await Deno.readTextFile(`${datadir}/relay/mtls-cert.pem`);
+      } catch {
+        // Not present (or not readable) → fall through to WebPKI.
+      }
     }
-    return stored === brokerPubkeyB64 ? "match" : "mismatch";
-  };
+  }
 
   const client = new RelayClient({
     serverURL:      url,
     localPort,
     identity,
-    tofuCheckAndPin,
+    tls: {
+      certPem,
+      keyPem,
+      ...(caPem !== "" ? { ca: caPem } : {}),
+    },
+    // The channel is TLS-server-authenticated, so the broker key is trusted
+    // and persisted unconditionally (auth-relay reads it out-of-band to
+    // verify OAuth delivery envelope signatures).
+    onBrokerPubkey: (brokerKeyB64: string) => saveBrokerKey(sdk, storageTask, brokerKeyB64),
     log: console,
     onStatus: (s) => {
       void sdk.kv.set("status", s);
@@ -228,17 +248,10 @@ async function putBlob(
   if (!res.ok) throw new Error(`storage put failed: ${res.error ?? "unknown"}`);
 }
 
-async function fetchPin(sdk: DicodeSdk, storageTask: string): Promise<string | null> {
-  const enc = await fetchBlob(sdk, storageTask, BROKER_PIN_KEY);
-  if (!enc) return null;
-  const pt = await sdk.dicode.crypto.decrypt(BROKER_PIN_CTX, enc);
-  return new TextDecoder().decode(pt);
-}
-
-async function savePin(sdk: DicodeSdk, storageTask: string, pubkeyB64: string): Promise<void> {
+async function saveBrokerKey(sdk: DicodeSdk, storageTask: string, pubkeyB64: string): Promise<void> {
   const pt = new TextEncoder().encode(pubkeyB64);
-  const ct = await sdk.dicode.crypto.encrypt(BROKER_PIN_CTX, pt);
-  await putBlob(sdk, storageTask, BROKER_PIN_KEY, ct);
+  const ct = await sdk.dicode.crypto.encrypt(BROKER_KEY_CTX, pt);
+  await putBlob(sdk, storageTask, BROKER_KEY_KEY, ct);
 }
 
 function rootFor(): string {

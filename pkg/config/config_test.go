@@ -470,6 +470,68 @@ relay:
 	}
 }
 
+// TestLoad_RelayServerURL_RequiresWSS covers the mTLS invariant: when the
+// relay is enabled, server_url must be wss://. A ws:// or any other scheme
+// fails at Load() with a clear message rather than looping on connection
+// errors at runtime.
+func TestLoad_RelayServerURL_RequiresWSS(t *testing.T) {
+	for _, badURL := range []string{
+		"ws://127.0.0.1:5554/",   // plaintext ws
+		"http://127.0.0.1:5554",  // wrong scheme entirely (not caught by a literal ws:// prefix check)
+		"https://127.0.0.1:5554", // https, still not wss
+	} {
+		t.Run(badURL, func(t *testing.T) {
+			dir := t.TempDir()
+			cfgPath := filepath.Join(dir, "dicode.yaml")
+			content := fmt.Sprintf(`
+spec:
+  entries:
+    local:
+      ref:
+        path: ${CONFIGDIR}/tasks
+relay:
+  enabled: true
+  server_url: %q
+  broker_url: http://127.0.0.1:5553
+`, badURL)
+			if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Load(cfgPath)
+			if err == nil {
+				t.Fatalf("Load(server_url=%q): expected error, got nil", badURL)
+			}
+			if !strings.Contains(err.Error(), "wss://") {
+				t.Errorf("error should mention wss://, got: %v", err)
+			}
+		})
+	}
+}
+
+// TestLoad_RelayServerURL_DisabledRelayAllowsPlaintext ensures the wss:// guard
+// is gated on relay.enabled: a disabled relay with a stale ws:// server_url
+// (e.g. left over from local dev) must not block the whole daemon from booting.
+func TestLoad_RelayServerURL_DisabledRelayAllowsPlaintext(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "dicode.yaml")
+	content := `
+spec:
+  entries:
+    local:
+      ref:
+        path: ${CONFIGDIR}/tasks
+relay:
+  enabled: false
+  server_url: ws://127.0.0.1:5554/
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(cfgPath); err != nil {
+		t.Errorf("disabled relay with ws:// server_url should load, got: %v", err)
+	}
+}
+
 func TestLoadExecutionMaxConcurrentTasks(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "dicode.yaml")

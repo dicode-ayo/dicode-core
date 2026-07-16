@@ -22,7 +22,7 @@
  *   DICODE_E2E_RELAY=1 npx playwright test --project=relay
  *
  * Prerequisites:
- *   - npm install (dicode-relay@^0.1.4 in devDependencies)
+ *   - npm install (dicode-relay@^0.2.0 in devDependencies)
  *   - make build (or the dicode binary must already exist)
  *   - Deno on PATH (the relay-client task is Deno-based)
  */
@@ -46,7 +46,9 @@ let brokerProc: ChildProcess | null = null;
 let daemonProc: ChildProcess | null = null;
 let tempDir = '';
 let relayPort = 0;
+let mtlsPort = 0;
 let webuiPort = 0;
+let caCertPath = '';
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -75,11 +77,37 @@ async function waitForUrl(url: string, timeoutMs = 30_000): Promise<void> {
   throw new Error(`URL ${url} did not become ready within ${timeoutMs}ms`);
 }
 
-function writeRelayConfig(dir: string, port: number): string {
+// Generate the broker's mTLS server cert/key into `dir` and return their
+// paths. The daemon trusts the cert via relay.ca_file. Uses the exported
+// helper from the installed dicode-relay package (same code path as the
+// buildin relay-server's ensureServerCert).
+async function writeMtlsCert(dir: string): Promise<{ certPath: string; keyPath: string }> {
+  const { generateSelfSignedServerCert } = (await import(
+    path.join(REPO_ROOT, 'node_modules', 'dicode-relay', 'dist', 'client', 'index.js')
+  )) as { generateSelfSignedServerCert: (o: { hosts?: string[] }) => Promise<{ certPem: string; keyPem: string }> };
+  const { certPem, keyPem } = await generateSelfSignedServerCert({ hosts: ['127.0.0.1', 'localhost'] });
+  const certPath = path.join(dir, 'mtls-cert.pem');
+  const keyPath = path.join(dir, 'mtls-key.pem');
+  fs.writeFileSync(certPath, certPem, 'utf8');
+  fs.writeFileSync(keyPath, keyPem, { mode: 0o600 });
+  return { certPath, keyPath };
+}
+
+function writeRelayConfig(
+  dir: string,
+  port: number,
+  mtlsP: number,
+  mtlsCertPath: string,
+  mtlsKeyPath: string,
+): string {
   const cfgPath = path.join(dir, 'relay.yaml');
   const content = `server:
   port: ${port}
   base_url: "http://127.0.0.1:${port}"
+  mtls:
+    port: ${mtlsP}
+    cert_file: "${mtlsCertPath}"
+    key_file: "${mtlsKeyPath}"
 relay: {}
 broker:
   signing_key_file: ""
@@ -88,7 +116,14 @@ broker:
   return cfgPath;
 }
 
-function writeDaemonConfig(dir: string, webuiP: number, relayP: number, _relayConfigPath: string): string {
+function writeDaemonConfig(
+  dir: string,
+  webuiP: number,
+  relayP: number,
+  mtlsP: number,
+  caPath: string,
+  _relayConfigPath: string,
+): string {
   // The relay-client task declares permissions.dicode.tasks: [buildin/local-storage],
   // so local-storage must be registered under the canonical "buildin" namespace.
   // We mount the full buildin taskset under a "buildin" source so IPC security
@@ -112,8 +147,9 @@ sources:
     path: ${buildinTasksetPath}
 relay:
   enabled: true
-  server_url: "ws://127.0.0.1:${relayP}/"
+  server_url: "wss://127.0.0.1:${mtlsP}/"
   broker_url: "http://127.0.0.1:${relayP}"
+  ca_file: "${caPath}"
 `,
     'utf8',
   );
@@ -173,18 +209,21 @@ test.describe('relay-protocol', () => {
 
     if (!fs.existsSync(RELAY_BIN)) {
       throw new Error(
-        `dicode-relay not installed; run: npm install --save-dev dicode-relay@^0.1.4`,
+        `dicode-relay not installed; run: npm install --save-dev dicode-relay@^0.2.0`,
       );
     }
 
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dicode-e2e-relay-'));
     relayPort = await freePort();
+    mtlsPort = await freePort();
     webuiPort = await freePort();
 
-    console.log(`[relay e2e] tempDir=${tempDir} relayPort=${relayPort} webuiPort=${webuiPort}`);
+    console.log(`[relay e2e] tempDir=${tempDir} relayPort=${relayPort} mtlsPort=${mtlsPort} webuiPort=${webuiPort}`);
 
-    // Write relay broker config.
-    const relayCfgPath = writeRelayConfig(tempDir, relayPort);
+    // Generate the broker's mTLS server cert and write the broker config.
+    const { certPath, keyPath } = await writeMtlsCert(tempDir);
+    caCertPath = certPath;
+    const relayCfgPath = writeRelayConfig(tempDir, relayPort, mtlsPort, certPath, keyPath);
 
     // Start broker.
     brokerProc = spawn('node', [RELAY_BIN, '--config', relayCfgPath], {
@@ -204,7 +243,7 @@ test.describe('relay-protocol', () => {
     console.log('[relay e2e] broker is ready');
 
     // Write daemon config.
-    const daemonCfgPath = writeDaemonConfig(tempDir, webuiPort, relayPort, relayCfgPath);
+    const daemonCfgPath = writeDaemonConfig(tempDir, webuiPort, relayPort, mtlsPort, caCertPath, relayCfgPath);
 
     // Start daemon.
     daemonProc = spawnDaemon(daemonCfgPath);

@@ -9,7 +9,7 @@
   "devDependencies": {
     "@playwright/test": "^1.49.0",
     "@types/node": "^22.0.0",
-    "dicode-relay": "^0.1.4"
+    "dicode-relay": "^0.2.0"
   },
   "overrides": {
     "uuid": "^11.1.1"
