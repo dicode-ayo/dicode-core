@@ -102,3 +102,56 @@ trigger:
 		}
 	})
 }
+
+// TestLoadPipelineDir_AuthAnySecretResolution is the kind: PipelineTask mirror:
+// the same downgrade guard applies, and (unlike before) a pipeline's
+// webhook_secret ${VAR} is now actually expanded.
+func TestLoadPipelineDir_AuthAnySecretResolution(t *testing.T) {
+	dir := t.TempDir()
+	td := filepath.Join(dir, "pipe-hook")
+	if err := os.MkdirAll(td, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	yaml := `apiVersion: dicode/v1
+kind: PipelineTask
+name: pipe-hook
+subtype: sequential
+trigger:
+  webhook: /hooks/pipe
+  auth: any
+  webhook_secret: "${PIPE_TEST_WEBHOOK_SECRET}"
+stages:
+  - task: some-stage
+`
+	if err := os.WriteFile(filepath.Join(td, "task.yaml"), []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("secret unset → session-only", func(t *testing.T) {
+		os.Unsetenv("PIPE_TEST_WEBHOOK_SECRET")
+		p, err := LoadPipelineDir(td, nil)
+		if err != nil {
+			t.Fatalf("LoadPipelineDir: %v", err)
+		}
+		if p.Trigger.WebhookAuth != WebhookAuthSession {
+			t.Errorf("mode = %q, want session (downgraded)", p.Trigger.WebhookAuth)
+		}
+		if p.Trigger.WebhookSecret != "" {
+			t.Errorf("secret should be cleared, got %q", p.Trigger.WebhookSecret)
+		}
+	})
+
+	t.Run("secret set → auth: any with resolved secret", func(t *testing.T) {
+		t.Setenv("PIPE_TEST_WEBHOOK_SECRET", "pipe-real-secret")
+		p, err := LoadPipelineDir(td, nil)
+		if err != nil {
+			t.Fatalf("LoadPipelineDir: %v", err)
+		}
+		if p.Trigger.WebhookAuth != WebhookAuthAny {
+			t.Errorf("mode = %q, want any", p.Trigger.WebhookAuth)
+		}
+		if p.Trigger.WebhookSecret != "pipe-real-secret" {
+			t.Errorf("secret = %q, want the resolved value", p.Trigger.WebhookSecret)
+		}
+	})
+}

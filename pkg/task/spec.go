@@ -183,23 +183,28 @@ func webhookSecretResolved(s string) bool {
 	return s != "" && !strings.Contains(s, "${")
 }
 
-// normalizeWebhookAuth downgrades an auth: any webhook that has no resolved
+// normalizeWebhookAuthFields downgrades an auth: any webhook that has no resolved
 // webhook_secret to plain session auth. auth: any authenticates a machine caller
 // by HMAC over the untrusted relay, so it MUST verify against a real secret;
 // serving it against an unresolved ${VAR} placeholder would let anyone who can
 // read the (often committed) task.yaml sign a valid request. Downgrading to
 // session — and clearing the placeholder so session mode doesn't demand an
 // impossible browser signature — keeps the webhook working (browser/session
-// auth) with the relay HMAC path simply not offered. Runs after template
+// auth) with the relay HMAC path simply not offered. Must run after template
 // expansion, the only point where a real secret is distinguishable from a
-// placeholder.
-func normalizeWebhookAuth(s *Spec) {
-	if s.Trigger.WebhookAuth == WebhookAuthAny && !webhookSecretResolved(s.Trigger.WebhookSecret) {
-		s.Trigger.WebhookAuth = WebhookAuthSession
-		s.Trigger.WebhookSecret = ""
-		s.Warnings = append(s.Warnings,
+// placeholder. Shared by kind: Task and kind: PipelineTask.
+func normalizeWebhookAuthFields(mode *WebhookAuthMode, secret *string, warnings *[]string) {
+	if *mode == WebhookAuthAny && !webhookSecretResolved(*secret) {
+		*mode = WebhookAuthSession
+		*secret = ""
+		*warnings = append(*warnings,
 			`trigger.auth: "any" needs a resolved webhook_secret but none is set — serving session auth only (the HMAC/relay path is disabled)`)
 	}
+}
+
+// normalizeWebhookAuth applies normalizeWebhookAuthFields to a kind: Task spec.
+func normalizeWebhookAuth(s *Spec) {
+	normalizeWebhookAuthFields(&s.Trigger.WebhookAuth, &s.Trigger.WebhookSecret, &s.Warnings)
 }
 
 // TriggerConfig defines how a task is triggered.
