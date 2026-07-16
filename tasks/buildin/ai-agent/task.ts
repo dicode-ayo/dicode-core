@@ -18,7 +18,7 @@
 //     ends it.
 import OpenAI from "npm:openai@4";
 import type { Dicode, DicodeSdk } from "../../sdk.ts";
-import { chatStart, chatTurn, decideEntryMode, isValidSessionId } from "../ai-agent-core/chat.ts";
+import { chatStart, chatTurn, decideEntryMode, resolveSessionId } from "../ai-agent-core/chat.ts";
 
 type Role = "system" | "user" | "assistant" | "tool";
 
@@ -586,12 +586,7 @@ async function oneShotTurn(
   // continuation handle), so validate it the same way claude-cli validates its
   // carried session/chat ids — an off-shape value is treated as absent rather
   // than passed through.
-  let sessionId = (await params.get("session_id")) ?? "";
-  if (sessionId && !isValidSessionId(sessionId)) {
-    console.warn(`ai-agent: rejected invalid session_id param; generating a fresh one`);
-    sessionId = "";
-  }
-  if (!sessionId) sessionId = crypto.randomUUID();
+  const sessionId = resolveSessionId(await params.get("session_id") ?? undefined, "ai-agent: session_id", { autoMint: true });
 
   // Tag the run so the WebUI collapses every turn of a single chat into
   // one expandable row in the run list (#112). Tool-call children are

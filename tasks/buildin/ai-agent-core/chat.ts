@@ -32,6 +32,28 @@ export function isValidSessionId(id: string): boolean {
     return SESSION_ID_RE.test(id);
 }
 
+// resolveSessionId centralizes the "validate a carried/param-supplied id;
+// reject it if off-shape; optionally mint a fresh one" shape shared by every
+// place a chat/session id enters (ai-agent-claude-cli's chatId + claudeSessionId,
+// ai-agent's session_id). `autoMint: true` means absent-or-invalid becomes a
+// fresh crypto.randomUUID() (used where the caller needs a stable handle
+// regardless, e.g. a workdir key); `autoMint: false` means absent-or-invalid
+// becomes "" (used where the caller should treat it as "no prior session",
+// e.g. --resume — omitting the flag rather than resuming a hijacked one).
+export function resolveSessionId(
+    carried: string | undefined,
+    label: string,
+    opts: { autoMint: boolean },
+): string {
+    const id = carried ?? "";
+    if (id && !isValidSessionId(id)) {
+        console.warn(`${label}: rejected invalid session id; ${opts.autoMint ? "minting a fresh one" : "treating as absent"}`);
+        return opts.autoMint ? crypto.randomUUID() : "";
+    }
+    if (!id && opts.autoMint) return crypto.randomUUID();
+    return id;
+}
+
 // decideEntryMode picks the shape of a fresh run: a non-empty prompt runs one
 // turn and returns; an empty prompt opens the interactive chat loop. Pure so the
 // branch can be unit-tested without a live provider.

@@ -12,6 +12,7 @@
  *   make test-tasks
  */
 import { setupHarness } from "../../sdk-test.ts";
+import { isValidSessionId } from "../ai-agent-core/chat.ts";
 await setupHarness(import.meta.url);
 
 // Loaded AFTER setupHarness patches globalThis.fetch — a static import would
@@ -168,8 +169,7 @@ test("rejects a malformed session_id param; generates a fresh UUID instead of ec
 
   const result = await runTask();
 
-  const uuidRe = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
-  assert.ok(uuidRe.test(result.session_id as string), `expected a fresh UUID, got ${result.session_id}`);
+  assert.ok(isValidSessionId(result.session_id as string), `expected a fresh UUID, got ${result.session_id}`);
 
   const calls = (dicode as Record<string, unknown>)._setGroupCalls as string[];
   assert.equal(calls.length, 1);

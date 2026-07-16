@@ -38,13 +38,15 @@ token cache the CLI maintains under `$HOME/.claude/`.
 
 The interactive chat loop carries two ids across suspend/resume turns: a
 dicode-minted `chatId` (keys the per-invocation workdir) and the Claude CLI's
-own `claudeSessionId` (passed to `--resume`). Both are attacker-influenceable
-via a crafted resume submission, so the wrapper validates each as a UUID
-before use — an off-shape `chatId` gets a fresh workdir instead of reaching
-`Deno.Command`'s `cwd` (defanging path traversal), and an off-shape
-`claudeSessionId` is dropped instead of reaching the `--resume` subprocess
-argument (defanging argument injection). The wrapper also redacts the OAuth
-token from any error output forwarded back to the caller.
+own `claudeSessionId` (passed to `--resume`). dicode's resume API only ever
+lets a caller submit the chat `message`; the carried ids themselves are
+server round-tripped from this task's own prior `suspend()` call, not
+directly client-suppliable. Even so, the wrapper validates each as a UUID
+before use as defense-in-depth — an off-shape `chatId` gets a fresh workdir
+instead of reaching `Deno.Command`'s `cwd`, and an off-shape `claudeSessionId`
+is dropped instead of reaching the `--resume` subprocess argument — so the
+sink stays safe regardless of how the id got there. The wrapper also redacts
+the OAuth token from any error output forwarded back to the caller.
 
 ## Install paths
 
