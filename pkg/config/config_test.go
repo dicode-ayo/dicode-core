@@ -470,6 +470,35 @@ relay:
 	}
 }
 
+// TestLoad_RelayServerURL_RejectsPlaintextWS covers the mTLS invariant: the
+// relay control channel requires wss://, so a ws:// server_url fails at Load()
+// with a clear message rather than looping on connection errors at runtime.
+func TestLoad_RelayServerURL_RejectsPlaintextWS(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "dicode.yaml")
+	content := `
+spec:
+  entries:
+    local:
+      ref:
+        path: ${CONFIGDIR}/tasks
+relay:
+  enabled: true
+  server_url: ws://127.0.0.1:5554/
+  broker_url: http://127.0.0.1:5553
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(cfgPath)
+	if err == nil {
+		t.Fatal("Load(server_url=ws://…): expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "wss://") {
+		t.Errorf("error should mention wss://, got: %v", err)
+	}
+}
+
 func TestLoadExecutionMaxConcurrentTasks(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "dicode.yaml")

@@ -25,7 +25,7 @@ func TestEnforcement_Env_RelayImportNeedsReadExposed(t *testing.T) {
 	e := newTestEnv(t)
 	t.Setenv("DICODE_DATADIR", "/tmp/relay-repro-datadir")
 
-	const script = `import { startServer } from "npm:dicode-relay@^0.1.6/start";
+	const script = `import { startServer } from "npm:dicode-relay@0.2.0/start";
 export default async function main() {
   return typeof startServer + ":" + (Deno.env.get("DICODE_DATADIR") ?? "MISSING");
 }`

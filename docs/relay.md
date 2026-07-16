@@ -16,7 +16,8 @@ webhook tasks work exactly as they do in production — the relay is transparent
 ```yaml
 relay:
   enabled: true
-  server_url: wss://relay.dicode.app
+  server_url: wss://relay.dicode.app:5554   # broker mTLS endpoint
+  broker_url: https://relay.dicode.app      # public OAuth/webhook base URL
 ```
 
 **2. Start the daemon:**
@@ -50,16 +51,18 @@ directory (the identity blob) and your secrets master key.
 
 ```yaml
 relay:
-  enabled: true          # default: false
-  server_url: wss://...  # relay WebSocket endpoint
-  broker_url: https://.. # optional: OAuth broker base URL override
+  enabled: true             # default: false
+  server_url: wss://...     # broker mTLS endpoint
+  broker_url: https://...   # public OAuth/webhook base URL
+  ca_file: /path/ca.pem     # optional: CA for a self-signed broker
 ```
 
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `enabled` | bool | `false` | Enable the relay client |
-| `server_url` | string | — | WebSocket URL of the relay server (must start with `wss://` in production) |
-| `broker_url` | string | derived | OAuth broker base URL. When empty, derived from `server_url` by swapping the scheme (`wss://host` → `https://host`). Set it when the broker runs on a different host, or during local development to point at a non-TLS port (e.g. `http://localhost:5553`). Must be `http://` or `https://` when set. |
+| `server_url` | string | — | WebSocket URL of the broker's mTLS listener (e.g. `wss://relay.example:5554`). Must start with `wss://`; a `ws://` URL is rejected at config load because mTLS requires TLS |
+| `broker_url` | string | derived | Public base URL for OAuth and webhook delivery (e.g. `https://relay.example`). The mTLS and public listeners run on different ports, so set this explicitly. When empty and `server_url` carries an explicit port, the daemon warns at boot. Must be `http://` or `https://` when set |
+| `ca_file` | string | — | PEM CA bundle used to verify the broker's server certificate. Set it for a self-hosted broker with a self-signed cert; leave empty for the hosted relay, which is verified against the platform trust store (WebPKI) |
 
 ---
 
@@ -79,8 +82,10 @@ The URL has the form:
 https://<relay-host>/u/<64-hex-chars>/hooks/
 ```
 
-The 64-hex identifier is `sha256(sign_public_key)`. It is stable,
-collision-resistant, and cannot be guessed or squatted by another party.
+The 64-hex identifier is `sha256(sign_public_key)`. The broker derives it from
+the daemon's mTLS client certificate, which wraps that same signing key, so the
+URL is stable across the mTLS transport. It is collision-resistant and cannot
+be guessed or squatted by another party.
 
 ---
 
@@ -141,22 +146,42 @@ single-process TypeScript/Node.js 22 service that combines the WebSocket
 tunnel and the OAuth broker. A ready-to-run Docker image is published via
 the repo's release pipeline (see the relay repo's `Dockerfile`).
 
-Configure clients to point at your self-hosted instance:
+The broker exposes **two listeners**:
+
+- **mTLS listener** (`server.mtls.port`, default 5554) — where daemons
+  connect. It authenticates each daemon by its client certificate, so it
+  requires **end-to-end TLS passthrough**. Expose it directly or behind an
+  L4/TCP load balancer only; **never** behind a TLS-terminating proxy
+  (Cloudflare orange-cloud, nginx `listen ... ssl`, etc.). Termination strips
+  the client certificate and every connection is rejected with WS close code
+  4401.
+- **Public listener** (`server.port`, default 5553) — inbound webhooks and the
+  OAuth callback flow. This one *may* sit behind a TLS-terminating reverse
+  proxy (nginx, Caddy, Cloudflare).
+
+Configure clients to point `server_url` at the mTLS listener and `broker_url`
+at the public base URL:
 
 ```yaml
 relay:
   enabled: true
-  server_url: wss://relay.example.com
+  server_url: wss://relay.example.com:5554
+  broker_url: https://relay.example.com
+  ca_file: /etc/dicode/relay-ca.pem
 ```
 
-The relay server requires no database; nonce state and client registry are
-kept in memory. TLS termination should be handled by a reverse proxy
-(nginx, Caddy, etc.) in front of the Node process.
+The relay server requires no database; the client registry is kept in memory.
 
 Alternatively, the `buildin/relay-server` pipeline task runs dicode-relay
 in-process under the daemon's Deno runtime — useful for standing up a
-local or single-tenant relay without a separate deployment.
+local or single-tenant relay without a separate deployment. On first run it
+auto-generates a self-signed mTLS server certificate at
+`${DICODE_DATADIR}/relay/mtls-cert.pem` (CA:FALSE, SANs covering `localhost`
+and the `BASE_URL` host). Point each connecting daemon's `relay.ca_file` at
+that PEM so it trusts the broker; the hosted relay needs no `ca_file` because
+its certificate chains to a public CA.
 
-> Historically the daemon repository carried a Go relay implementation at
-> `pkg/relay/server.go`. It was dropped in favour of the TypeScript relay —
-> see [`docs/design/oauth-broker.md`](design/oauth-broker.md) for rationale.
+> The daemon repository no longer carries a Go relay implementation; the former
+> `pkg/relay/server.go` and `pkg/relay/oauth.go` are gone in favour of the
+> TypeScript relay — see [`docs/design/oauth-broker.md`](design/oauth-broker.md)
+> for rationale.

@@ -2,7 +2,7 @@
 
 End-to-end test of the relay broker OAuth flow between a local
 `dicode-relay` (TypeScript) and `dicode daemon` (Go). Exercises the full
-chain: WSS handshake → `build_auth_url` → browser consent → Grant
+chain: mTLS handshake → `build_auth_url` → browser consent → Grant
 callback → ECIES encrypt + broker sign → WSS delivery → daemon
 decrypt + verify + `store_token` → secrets written.
 
@@ -37,11 +37,12 @@ cd /workspaces/dicode-relay
 # Create a minimal .env for local dev
 cat > .env <<EOF
 PORT=5553
+MTLS_PORT=5554
 BASE_URL=http://localhost:5553
 SLACK_CLIENT_ID=<your-slack-client-id>
 EOF
 
-# Start the relay (auto-generates broker signing key on first run)
+# Start the relay (auto-generates broker signing + mTLS server certs on first run)
 node --env-file=.env dist/index.js
 # Or if not built yet:
 npm run build && node --env-file=.env dist/index.js
@@ -53,7 +54,9 @@ SLACK_CLIENT_ID=<id> npm run dev
 
 ```
 broker: generated signing key at /workspaces/dicode-relay/broker-signing-key.pem
-dicode-relay listening on port 5553
+broker: generated mTLS server cert at /workspaces/dicode-relay/broker-mtls-cert.pem
+dicode-relay public listener on port 5553
+dicode-relay mTLS listener on port 5554
 Base URL: http://localhost:5553
 ```
 
@@ -71,10 +74,12 @@ make build
 
 # Ensure dicode.yaml points at the local relay
 # (should already be set from the existing config)
-grep -A2 'relay:' dicode.yaml
+grep -A4 'relay:' dicode.yaml
 # relay:
 #   enabled: true
-#   server_url: ws://localhost:5553
+#   server_url: wss://localhost:5554
+#   broker_url: http://localhost:5553
+#   ca_file: /workspaces/dicode-relay/broker-mtls-cert.pem
 
 # Start the daemon
 ./dicode daemon
@@ -84,11 +89,12 @@ grep -A2 'relay:' dicode.yaml
 
 ```
 {"level":"info","msg":"relay connected","url":"http://localhost:5553/u/<your-uuid>/hooks/"}
-{"level":"info","msg":"relay: pinned broker signing key (trust-on-first-use)","pubkey":"MFkwEwYH…"}
+{"level":"info","msg":"relay: stored broker signing key","pubkey":"MFkwEwYH…"}
 ```
 
-The first line confirms the WSS tunnel is up. The second confirms
-TOFU pinning of the broker's signing key.
+The first line confirms the mTLS tunnel is up (the daemon verified the broker's
+server cert against `ca_file` and presented its client cert). The second
+confirms the broker's delivery-signing key was persisted.
 
 **Note your UUID** from the `url` field — you'll need it later.
 
@@ -200,40 +206,41 @@ Check the daemon run log to confirm:
 
 ---
 
-## Step 7: Verify TOFU broker key pinning
+## Step 7: Verify broker server-cert verification
 
-Test that the daemon rejects a relay with a different signing key.
+Test that the daemon rejects a broker whose server cert is not trusted by
+`relay.ca_file`.
 
 ```bash
 # Stop the relay server (Ctrl-C)
 
-# Delete the auto-generated broker key
-rm /workspaces/dicode-relay/broker-signing-key.pem
+# Delete the auto-generated mTLS server cert
+rm /workspaces/dicode-relay/broker-mtls-cert.pem
 
-# Restart the relay — it generates a NEW key
+# Restart the relay — it generates a NEW self-signed mTLS cert
 node --env-file=.env dist/index.js
 ```
 
-**Expected daemon behavior:** The relay client reconnects but the
-handshake fails because the new broker pubkey doesn't match the
-pinned one. The daemon log should show:
-
-```
-relay: BROKER PUBKEY CHANGED — the relay server presented a different
-signing key than the one pinned on first connect. If the relay operator
-rotated their key, run `dicode relay trust-broker --yes` to accept the
-new key. Connection rejected to prevent token substitution attacks.
-```
+**Expected daemon behavior:** The relay client reconnects but the TLS
+handshake fails, because the broker now presents a certificate the daemon's
+`ca_file` does not trust. The daemon log should show a TLS verification error
+(e.g. `x509: certificate signed by unknown authority`) and the connection is
+not established.
 
 **Recovery:**
 
 ```bash
-./dicode relay trust-broker --yes
-# → Broker pubkey pin cleared. Restart the daemon to accept the new broker key.
+# Point relay.ca_file at the new cert (self-signed broker),
+# then restart the daemon.
+#   relay:
+#     ca_file: /workspaces/dicode-relay/broker-mtls-cert.pem
 
-# Restart the daemon
-# (or just wait — the relay client will reconnect and re-pin automatically)
+./dicode daemon
 ```
+
+For the hosted relay, whose cert chains to a public CA, there is no `ca_file`
+to update — a verification failure there means the platform trust store is out
+of date.
 
 ---
 
@@ -255,12 +262,13 @@ cleaned up:
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `oauth broker not configured on this daemon` | `relay.enabled: false` in dicode.yaml, or `server_url` has wrong scheme | Set `enabled: true` and `server_url: ws://localhost:5553` |
-| `daemon not connected` on browser | Daemon hasn't connected the WSS tunnel yet | Wait for `relay connected` in daemon log, then retry |
+| `oauth broker not configured on this daemon` | `relay.enabled: false` in dicode.yaml, or `server_url` has wrong scheme | Set `enabled: true` and `server_url: wss://localhost:5554` |
+| `daemon not connected` on browser | Daemon hasn't connected the mTLS tunnel yet | Wait for `relay connected` in daemon log, then retry |
+| TLS verification failure on connect (`certificate signed by unknown authority`) | Broker server cert not trusted, or its cert was regenerated | Set/update `relay.ca_file` to the broker's cert (self-signed), or ensure the system trust store is current (WebPKI) |
+| Connection rejected, WS close 4401 | mTLS listener sits behind a TLS-terminating proxy that stripped the client cert | Expose the mTLS port directly or via an L4/TCP load balancer only |
 | `invalid signature` at `/auth/slack` | Clock skew > 30s between relay and daemon | Sync clocks; check `timestamp` query param |
 | `unknown provider: slack` | `SLACK_CLIENT_ID` not set in relay env | Add to `.env` and restart relay |
 | `Encryption failed` at callback | Daemon disconnected between auth-start and callback | Ensure daemon stays connected; retry the flow |
-| `BROKER PUBKEY CHANGED` on reconnect | Broker key was regenerated (new .pem file) | Run `dicode relay trust-broker --yes` then restart daemon |
 | Token not appearing in secrets | Check daemon log for `store_token` errors | `./dicode logs <run-id>` on the auth-relay run |
 
 ---
@@ -269,14 +277,14 @@ cleaned up:
 
 | Layer | What's exercised |
 |---|---|
-| WSS tunnel | Real WebSocket handshake with ECDSA challenge-response |
+| mTLS tunnel | Real mutual-TLS WebSocket handshake; broker derives the UUID from the client cert |
+| Server-cert verification | Daemon verifies the broker cert via `ca_file` (self-signed) or WebPKI |
 | ECDSA signing | Daemon signs `/auth/:provider` URL; broker verifies |
 | PKCE binding | Challenge bound into signed payload |
 | Grant OAuth | Real code exchange with Slack (or whichever provider) |
 | ECIES encryption | Broker encrypts token to daemon pubkey |
 | Type-as-AAD | Domain separation via GCM authenticated data |
 | Broker signing | Broker signs envelope; daemon verifies |
-| TOFU pinning | Daemon pins broker pubkey on first connect |
 | Pending sessions | Session created on build_auth_url, consumed on delivery |
 | Secret storage | Token written to encrypted SQLite via secrets manager |
 | Stale cleanup | Re-auth deletes previous secrets before writing new ones |

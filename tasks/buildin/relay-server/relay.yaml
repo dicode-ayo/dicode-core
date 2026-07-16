@@ -4,6 +4,16 @@ server:
   tls:
     cert_file: ""
     key_file: ""
+  # mTLS control channel: the port daemons dial. The cert/key pair is the
+  # self-signed one relay-server-body provisions under DICODE_DATADIR on first
+  # run. Expose this port with TLS passthrough only — never behind a
+  # TLS-terminating proxy (it would strip the daemon's client certificate).
+  # For a prod wildcard cert, run the standalone dicode-relay with
+  # MTLS_CERT_FILE/MTLS_KEY_FILE instead of this in-process buildin.
+  mtls:
+    port: 5554
+    cert_file: ${DICODE_DATADIR}/relay/mtls-cert.pem
+    key_file: ${DICODE_DATADIR}/relay/mtls-key.pem
 status:
   password: ${STATUS_PASSWORD}
 relay:
@@ -11,7 +21,6 @@ relay:
   ping_interval_ms: 30000
   pong_timeout_ms: 10000
   request_timeout_ms: 30000
-  nonce_ttl_ms: 60000
 broker:
   session_ttl_ms: 300000
   signing_key_file: ${DICODE_DATADIR}/relay/broker-signing.key

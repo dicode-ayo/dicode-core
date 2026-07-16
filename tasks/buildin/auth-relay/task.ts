@@ -20,14 +20,14 @@ import {
   Identity,
   decryptTokenEnvelope,
   type StoredIdentity,
-} from "npm:dicode-relay@0.1.9/client";
+} from "npm:dicode-relay@0.2.0/client";
 
 const IDENTITY_CTX   = "dicode/relay-identity/v1";
-const BROKER_PIN_CTX = "dicode/relay-broker-pin/v1";
+const BROKER_KEY_CTX = "dicode/relay-broker-key/v1";
 const PENDING_CTX    = "dicode/oauth-pending/v1";
 const PREFIX         = "relay/";
 const ID_KEY         = "relay/identity-v1";
-const BROKER_PIN_KEY = "relay/broker-pin-v1";
+const BROKER_KEY_KEY = "relay/broker-key-v1";
 
 function b64decode(s: string): Uint8Array {
   return Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
@@ -55,10 +55,11 @@ export default async function main({ input, dicode }: DicodeSdk) {
   // 1. Load identity.
   const identity = await loadIdentity(dicode, storageTask, root);
 
-  // 2. Load broker pubkey (TOFU-pinned by relay-client task on first connect).
-  const brokerPubkey = await loadBrokerPin(dicode, storageTask, root);
+  // 2. Load broker delivery-signing pubkey (persisted by the relay-client
+  //    task from the welcome frame over the TLS-authenticated channel).
+  const brokerPubkey = await loadBrokerKey(dicode, storageTask, root);
   if (!brokerPubkey) {
-    throw new Error("broker pubkey not pinned — has the relay-client connected yet?");
+    throw new Error("broker key not yet received — has the relay-client connected since upgrading to 0.2.0?");
   }
 
   // 3. Verify broker_sig + ECIES-decrypt. Throws if either fails.
@@ -124,17 +125,17 @@ async function loadIdentity(
   return await Identity.import(stored);
 }
 
-async function loadBrokerPin(
+async function loadBrokerKey(
   dicode: DicodeSdk["dicode"],
   storageTask: string,
   root: string,
 ): Promise<string | null> {
   const res = unwrapRunResult(await dicode.run_task(storageTask, {
-    op: "get", key: BROKER_PIN_KEY, prefix: PREFIX, root,
+    op: "get", key: BROKER_KEY_KEY, prefix: PREFIX, root,
   }));
   if (!res.ok || !res.value) return null;
   const ct = b64decode(res.value);
-  const pt = await dicode.crypto.decrypt(BROKER_PIN_CTX, ct);
+  const pt = await dicode.crypto.decrypt(BROKER_KEY_CTX, ct);
   return new TextDecoder().decode(pt);
 }
 

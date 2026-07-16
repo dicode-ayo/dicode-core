@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -657,6 +658,50 @@ func buildWebUI(ctx context.Context, cfg *config.Config, configPath, version, da
 		if brokerURL := cfg.Relay.ResolvedBrokerURL(); brokerURL != "" {
 			if err := os.Setenv("DICODE_RELAY_BROKER_URL", brokerURL); err != nil {
 				return nil, fmt.Errorf("setenv DICODE_RELAY_BROKER_URL: %w", err)
+			}
+		}
+
+		// The mTLS control channel runs on a different port than the public
+		// OAuth/webhook listener. When server_url carries an explicit port and
+		// broker_url is unset, ResolvedBrokerURL derives an OAuth base URL on
+		// the *mTLS* port, which is wrong. Warn so the operator sets broker_url.
+		if cfg.Relay.BrokerURL == "" {
+			if u, err := url.Parse(cfg.Relay.ServerURL); err == nil && u.Port() != "" {
+				log.Warn(
+					"relay: server_url has an explicit port but broker_url is unset — " +
+						"the OAuth broker URL is derived from server_url and will point at " +
+						"the mTLS control-channel port, not the public listener. Set " +
+						"relay.broker_url to the public https:// endpoint.",
+				)
+			}
+		}
+
+		// Read the optional CA cert for verifying a self-hosted broker's server
+		// cert and hand it to the relay task as env-borne PEM (public material,
+		// so no fs-read grant needed on the task).
+		//
+		// A not-yet-present file is tolerated with a warning rather than a fatal
+		// error: on a single box running both the buildin relay-server and the
+		// relay-client, the server task generates the cert only after this boot
+		// path runs. The operator restarts once and the cert is picked up. Other
+		// read errors (permissions, a directory, etc.) are genuine misconfig and
+		// fail fast.
+		if cfg.Relay.CAFile != "" {
+			caPEM, err := os.ReadFile(cfg.Relay.CAFile)
+			switch {
+			case err == nil:
+				if err := os.Setenv("DICODE_RELAY_CA_PEM", string(caPEM)); err != nil {
+					return nil, fmt.Errorf("setenv DICODE_RELAY_CA_PEM: %w", err)
+				}
+			case os.IsNotExist(err):
+				log.Warn(
+					"relay.ca_file does not exist yet — the relay client will verify the " +
+						"broker against the platform trust store until it is created. If the " +
+						"broker cert is self-signed (e.g. the in-process relay-server), restart " +
+						"the daemon once the cert has been generated at: " + cfg.Relay.CAFile,
+				)
+			default:
+				return nil, fmt.Errorf("relay.ca_file: %w", err)
 			}
 		}
 

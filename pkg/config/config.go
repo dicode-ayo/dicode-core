@@ -111,15 +111,23 @@ type ExecutionConfig struct {
 // The relay allows a local dicode instance to receive webhooks from external
 // services (GitHub, Slack, etc.) without port forwarding.
 type RelayConfig struct {
-	Enabled   bool   `yaml:"enabled"`
-	ServerURL string `yaml:"server_url"` // wss://relay.dicode.app
-	// BrokerURL overrides the OAuth broker base URL. When empty, the daemon
-	// derives it from ServerURL by swapping the scheme (wss://host →
-	// https://host). Set this when the broker runs on a different host than
-	// the WSS relay endpoint, or during local development to point at a
-	// broker on a non-TLS port (e.g. http://localhost:5553). Must be http://
-	// or https:// when set.
+	Enabled bool `yaml:"enabled"`
+	// ServerURL is the broker's mTLS control-channel endpoint the daemon
+	// dials, e.g. wss://relay.dicode.app:5554. This is a different port than
+	// the public webhook/OAuth listener — set BrokerURL when they differ.
+	ServerURL string `yaml:"server_url"`
+	// BrokerURL overrides the OAuth broker base URL (the public listener).
+	// When empty, the daemon derives it from ServerURL by swapping the
+	// scheme (wss://host → https://host) — but since the mTLS control channel
+	// runs on a different port than the public listener, BrokerURL is
+	// effectively required whenever ServerURL carries an explicit non-default
+	// port. Must be http:// or https:// when set.
 	BrokerURL string `yaml:"broker_url,omitempty"`
+	// CAFile is a PEM CA certificate for verifying the broker's server
+	// certificate. Empty → the platform trust store (WebPKI), correct for the
+	// hosted relay. Set for self-hosted brokers with self-signed certs; the
+	// daemon reads the file at boot and passes its contents to the relay task.
+	CAFile string `yaml:"ca_file,omitempty"`
 }
 
 // ResolvedBrokerURL returns the HTTP(S) OAuth broker base URL that the
@@ -640,6 +648,12 @@ func (cfg *Config) validate() error {
 		if u.Host == "" {
 			return fmt.Errorf("relay.broker_url: missing host in %q", cfg.Relay.BrokerURL)
 		}
+	}
+	// The relay control channel is mTLS-only as of protocol v4 — a ws://
+	// server_url can never establish a TLS client-cert handshake. Fail closed
+	// with a clear message rather than looping on connection errors.
+	if cfg.Relay.ServerURL != "" && strings.HasPrefix(cfg.Relay.ServerURL, "ws://") {
+		return fmt.Errorf("relay.server_url: must use wss:// — the relay control channel requires mTLS (got %q)", cfg.Relay.ServerURL)
 	}
 	// bcrypt cost: x/crypto/bcrypt's MinCost = 4, MaxCost = 31, but anything
 	// above ~14 is multi-second per login on commodity hardware and serves no

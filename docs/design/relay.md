@@ -64,9 +64,9 @@ and SDK injection in webhook task UIs).
 ### Key generation (first run)
 
 1. The `buildin/relay-client` task generates a split P-256 identity via Web
-   Crypto: a **signing** keypair (WSS handshake, `/auth/:provider` request
-   signatures) and a separate **decryption** keypair (ECIES recipient for
-   OAuth token deliveries).
+   Crypto: a **signing** keypair (mTLS client certificate, `/auth/:provider`
+   request signatures) and a separate **decryption** keypair (ECIES recipient
+   for OAuth token deliveries).
 2. The private keys are exported as a `StoredIdentity` JSON blob (PKCS8,
    base64), encrypted via `dicode.crypto` under context
    `dicode/relay-identity/v1`, and persisted through the configured storage
@@ -76,6 +76,11 @@ and SDK injection in webhook task UIs).
    lowercase hex characters. The uncompressed form is the 65-byte encoding
    `0x04 || X || Y`.
 
+The signing key doubles as the mTLS **client certificate** key. The task wraps
+it in a self-signed X.509 leaf (CA:FALSE) presented on the WSS connection. The
+broker derives the UUID from the peer certificate's public key, so the cert
+carries the same identity as the signing key without a separate identifier.
+
 ### Reconnection (stable identity)
 
 On every subsequent start the task fetches the encrypted blob, decrypts it via
@@ -84,23 +89,28 @@ webhook URL. The URL never changes as long as the identity blob and the
 secrets master key are preserved. If decryption fails (e.g. the master key was
 rotated), the task regenerates a fresh identity — new UUID, new URLs.
 
-### Broker pin (trust-on-first-use)
+### Broker authentication (server-cert verification)
 
-On the first successful handshake the client stores the broker's public key
-(from the `welcome` message) encrypted under context
-`dicode/relay-broker-pin/v1` (key `relay/broker-pin-v1`). Subsequent connects
-compare the presented broker key against the pin and abort on mismatch, so a
-relay endpoint swapped out from under the operator cannot silently take over
-OAuth deliveries.
+The daemon authenticates the broker through normal TLS server-certificate
+verification on the mTLS connection: the platform trust store (WebPKI) for the
+hosted relay, or an explicit CA supplied via `relay.ca_file` for a self-hosted
+broker with a self-signed cert. Trust derives from the authenticated TLS
+channel, not from an application-level pin — there is no first-use pinning step
+and no reconnect-time comparison.
+
+The broker's OAuth delivery-signing public key still arrives in the `welcome`
+frame and is persisted unconditionally, because the TLS channel already
+authenticates the broker that sent it. Delivery envelopes remain
+`broker_sig`-signed under that key.
 
 ### UUID derivation rationale
 
 Using SHA-256 of the uncompressed public key as the identifier means:
-- The relay server can verify `hex(sha256(presented_pubkey)) == claimed_uuid`
-  without any server-side user database.
+- The broker can verify `hex(sha256(cert_pubkey)) == uuid` straight from the
+  presented client certificate, without any server-side user database.
 - The identifier is collision-resistant (SHA-256 preimage resistance).
-- Clients cannot choose an arbitrary UUID; they must control the corresponding
-  private key.
+- Clients cannot choose an arbitrary UUID; they must control the private key
+  behind the client certificate.
 
 ---
 
@@ -111,9 +121,9 @@ Messages are protojson-encoded `ServerMessage` / `ClientMessage` envelopes
 a single WebSocket connection — a `oneof` wrapper keyed by variant name, e.g.
 `{"hello":{...}}`, not a flat `{"type":...}` object. The connection is always
 initiated by the client (dicode daemon). The pinned dicode-relay version
-(`npm:dicode-relay@~0.1.4`, `deno.lock`) is the source of truth for the wire
-format; `PROTOCOL_VERSION = 3` in `src/relay/server.ts`, and the client
-(`src/client/handshake.ts`, `BROKER_PROTOCOL_MIN = 3`) rejects any broker
+(`npm:dicode-relay@~0.2.0`, `deno.lock`) is the source of truth for the wire
+format; `PROTOCOL_VERSION = 4` in `src/relay/server.ts`, and the client
+(`src/client/handshake.ts`, `BROKER_PROTOCOL_MIN = 4`) rejects any broker
 advertising a lower version.
 
 The client encodes its own outbound messages with `useProtoFieldName: true`
@@ -121,41 +131,71 @@ The client encodes its own outbound messages with `useProtoFieldName: true`
 `toJson()` output uses camelCase (e.g. `brokerPubkey`). Field casing therefore
 differs by direction — see the examples below.
 
+### Transport: mutual TLS
+
+The daemon connects to the broker's **dedicated mTLS listener**
+(`server.mtls.port`, default 5554), separate from the public webhook/OAuth
+listener (`server.port`, default 5553). The connection carries the identity in
+the TLS layer:
+
+- The daemon presents its self-signed X.509 **client certificate** (the signing
+  key from [Key generation](#key-generation-first-run)). The TLS 1.3
+  CertificateVerify message signs the handshake transcript with the cert's
+  private key, channel-binding the key to this specific connection.
+- The broker requires a client cert, derives `uuid = hex(sha256(cert_pubkey))`
+  from the peer certificate, and admits the connection as that UUID. There is no
+  application-level challenge, nonce, or signature exchange — TLS itself proves
+  key ownership.
+- The daemon verifies the broker's **server certificate** by normal TLS:
+  WebPKI for the hosted relay, or the CA in `relay.ca_file` for a self-hosted
+  broker with a self-signed cert.
+
+Because identity is a property of the certificate key, the `/u/<uuid>` webhook
+URL is unchanged from earlier protocol versions that derived the UUID from the
+same signing key.
+
+The mTLS listener requires **end-to-end TLS passthrough**. It must be exposed
+directly or behind an L4/TCP load balancer — never behind a TLS-terminating
+proxy, which strips the client certificate and causes every connection to be
+rejected (close code 4401). The public listener (5553) may sit behind a
+terminating proxy.
+
 ### Handshake
 
+After the TLS handshake completes, the client opens with `hello` and the broker
+replies `welcome`:
+
 ```
-Server → Client  {"challenge":{"nonce":"<64 hex chars>"}}
-Client → Server  {"hello":{"uuid":"<64 hex>","pubkey":"<base64>","decrypt_pubkey":"<base64>","sig":"<base64>","timestamp":<unix>}}
-Server → Client  {"welcome":{"url":"https://relay.example.com/u/<uuid>/hooks/","brokerPubkey":"<base64>","protocol":3}}
+Client → Server  {"hello":{"uuid":"<64 hex>","pubkey":"<base64>","decrypt_pubkey":"<base64>"}}
+Server → Client  {"welcome":{"url":"https://relay.example.com/u/<uuid>/hooks/","brokerPubkey":"<base64>","protocol":4}}
                  or
                  {"error":{"message":"<reason>"}}
 ```
 
-**Challenge**: 32 random bytes encoded as 64 lowercase hex characters.
-
 **Hello fields**:
-- `uuid`: 64 hex chars derived as `hex(sha256(uncompressed_sign_pubkey))`.
+- `uuid`: 64 hex chars derived as `hex(sha256(uncompressed_sign_pubkey))`. The
+  broker cross-checks it against the UUID derived from the client cert.
 - `pubkey`: base64 (standard encoding) of the 65-byte uncompressed P-256
-  **signing** public key, used for ECDSA verification (handshake and
-  `/auth/:provider` signatures).
+  **signing** public key. It matches the client-certificate key and is also
+  used to verify `/auth/:provider` request signatures on the public listener.
 - `decrypt_pubkey`: base64 (standard encoding) of the 65-byte uncompressed
   P-256 **decryption** public key — the ECIES recipient for OAuth token
   deliveries.
-- `sig`: base64 ECDSA signature over `sha256(nonce_bytes || big-endian uint64
-  timestamp)` using the signing private key. ASN.1 DER encoding.
-- `timestamp`: Unix seconds at signing time.
 
 **Welcome fields**: `brokerPubkey` is the base64 SPKI DER key the broker uses
-to sign delivery envelopes (the client TOFU-pins it); `protocol` announces the
-protocol version. Both sides reject `protocol < 3` — v3 means "types
-generated from proto".
+to sign delivery envelopes; the daemon persists it unconditionally, since the
+TLS channel already authenticates the broker. `protocol` announces the protocol
+version. Both sides reject `protocol < 4`.
 
-**Verification steps** (server):
-1. Decode `pubkey` from base64; reject if not 65 bytes starting with `0x04`.
-2. Verify `hex(sha256(pubkey_bytes)) == uuid`; reject if mismatch.
-3. Verify `timestamp` is within ±30 seconds of server clock; reject if outside.
-4. Verify nonce has not been seen in the last 60 seconds; reject if replayed.
-5. Verify ECDSA signature over `sha256(nonce_bytes || timestamp_be_uint64)`.
+**Broker admission checks**:
+1. A client certificate is present (reject with close code 4401 otherwise — a
+   TLS-terminating proxy in front of the listener triggers this).
+2. The certificate key is P-256 (reject with 4402 otherwise).
+3. `hex(sha256(cert_pubkey)) == hello.uuid` and the `hello.pubkey` matches the
+   cert key; reject the `hello` (close code 4400) on mismatch.
+
+Close codes on the mTLS listener: **4400** bad hello, **4401** no client
+certificate (or one stripped by a proxy), **4402** certificate key not P-256.
 
 ### Webhook forwarding
 
@@ -198,10 +238,10 @@ within 10 seconds of a ping.
 
 | Attack | Mitigation |
 |---|---|
-| UUID squatting | Server verifies `hex(sha256(pubkey)) == uuid`; you must hold the private key |
-| Challenge replay | Timestamp must be within ±30 s; nonce is single-use (60 s TTL) |
-| Signature forgery | ECDSA P-256; only the holder of the private key can sign |
-| Connection hijacking | TLS (WSS) in production; MitM cannot read or inject frames |
+| UUID squatting | Broker derives the UUID from the client cert key and verifies `hex(sha256(cert_pubkey)) == uuid`; you must hold the private key |
+| Signature/handshake relay (relay #98) | TLS 1.3 CertificateVerify channel-binds the key to the connection transcript; a captured handshake cannot be replayed onto another connection, so a MitM cannot claim another daemon's UUID |
+| Rogue broker | The daemon verifies the broker's server cert (WebPKI or `relay.ca_file`); a substituted endpoint fails TLS and cannot receive OAuth deliveries |
+| Connection hijacking | Mutual TLS 1.3; a MitM cannot read or inject frames, nor present a valid client cert |
 | Enumeration of UUIDs | UUIDs are SHA-256 hashes; not guessable from the public URL |
 
 ### Not prevented
