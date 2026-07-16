@@ -130,9 +130,17 @@ func LoadPipelineDir(dir string, extras map[string]string) (*PipelineTask, error
 // fs paths, reusing expandOverrides (which mirrors the envFallback policy from
 // expandSpec: Params[].Default gets envFallback=false, Fs[].Path gets true).
 func expandPipeline(p *PipelineTask, vars map[string]string) {
+	// trigger.webhook_secret: same env-fallback policy as kind: Task (see
+	// expandSpec) — resolved server-side, never readable from task code.
+	p.Trigger.WebhookSecret = expandString(p.Trigger.WebhookSecret, vars, true)
 	for i := range p.Stages {
 		expandOverrides(p.Stages[i].Overrides, vars)
 	}
+	// After expansion: downgrade auth: any to session when the secret is empty
+	// or an unresolved ${VAR} placeholder, so a committed placeholder is never
+	// served as a live HMAC key (mirrors normalizeWebhookAuth for kind: Task).
+	normalizeWebhookAuthFields(&p.Trigger.WebhookAuth, &p.Trigger.WebhookSecret,
+		&p.Trigger.ReplayProtection, &p.Trigger.RequireTimestamp, &p.Warnings)
 }
 
 // Validate runs all load-time (non-registry) checks. Cross-spec checks (stage

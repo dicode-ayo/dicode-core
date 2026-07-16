@@ -227,6 +227,48 @@ Then point `on_failure_chain` at `buildin/auto-fix-claude` instead of
 selects which agent task drives the loop; if it doesn't yet, this is a small
 follow-up to the auto-fix override.)
 
+## Webhook auth (session or HMAC)
+
+The task's trigger is `auth: any`: a request authenticates with **either** a valid
+dicode session **or** a valid HMAC signature.
+
+- **Browser / WebUI chat** — authenticates with your dicode session, directly on
+  the daemon's own address. Session cookies never travel over the relay, so the
+  chat UI is **not** reachable through the public relay URL; open it on the
+  daemon's host (or reach the host with a tunnel such as Tailscale/cloudflared).
+  The UI assets (`index.html`, `chat.js`, `style.css`) always require a session —
+  they never fall through to HMAC.
+- **Machine / programmatic** — signs a POST with the shared secret and can
+  authenticate over the public relay URL, where session auth can't reach.
+
+Enable the HMAC path by setting the secret in the daemon environment:
+
+```bash
+export AI_CLAUDE_WEBHOOK_SECRET="$(openssl rand -hex 32)"
+```
+
+When `AI_CLAUDE_WEBHOOK_SECRET` is **unset**, the webhook safely degrades to
+**session-only** (the placeholder is never served as a real secret) — you'll see
+a load-time warning to that effect. `require_timestamp: true` is set, so every
+signed request must also carry a fresh `X-Dicode-Timestamp` — mandatory here
+because this webhook points an MCP-capable agent at the untrusted relay, and the
+timestamp closes the replay window. Sign the request as:
+
+```
+X-Hub-Signature-256: sha256=HMAC-SHA256(secret, "<unix_ts>\n<body>")
+X-Dicode-Timestamp: <unix_ts>
+```
+
+See [docs/webhooks.md](../../../docs/webhooks.md) for a full signing example.
+
+> **Relay caveat — short/programmatic turns only.** The relay forwarder aborts
+> at **25 s**, but a chat turn can run up to 5 minutes, and `?wait=false` can't
+> be selected over the relay (the broker drops query strings). So a long
+> synchronous turn over the relay will 502 regardless of auth. Enabling the HMAC
+> path makes the webhook *reachable*; completing long turns over the relay needs
+> an async, pollable surface (separate work). Use it for short or fire-and-forget
+> turns until then.
+
 ## Limitations
 
 - **Unsandboxed tool access (security).** `claude -p` runs with its full
