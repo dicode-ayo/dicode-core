@@ -156,31 +156,35 @@ test.describe('Webhook auth: any (session OR HMAC)', () => {
 // as a live HMAC key. The fixture references DICODE_E2E_DOWNGRADE_UNSET, which
 // the harness never sets.
 test.describe('Webhook auth: any downgrade (no resolved secret)', () => {
-  test('unsigned POST, no session → denied (not run via HMAC)', async ({ request }) => {
+  test('unsigned POST, no session → 401 (not run via HMAC)', async ({ request }) => {
     const res = await request.post(DOWNGRADE_PATH, {
       headers: { 'Content-Type': 'application/json' },
       data: { via: 'unsigned' },
       maxRedirects: 0,
     });
-    // Downgraded to session: a no-session POST is rejected (401), never 200.
-    expect(res.status()).not.toBe(200);
-    expect([401, 303]).toContain(res.status());
+    // Downgraded to session → 401. A still-`any` webhook would 403 (missing sig),
+    // so 401 specifically proves the downgrade happened.
+    expect(res.status()).toBe(401);
   });
 
-  test('POST signed with the placeholder literal → denied (placeholder is not a key)', async ({ request }) => {
+  test('POST signed with the placeholder literal → 401 (placeholder is not a key)', async ({ request }) => {
     // An attacker who read the committed task.yaml signs with the public literal.
+    // A fresh timestamp is included so that, under a regression where the webhook
+    // stayed auth: any (require_timestamp still enforced), the request would reach
+    // the signature comparison and — if the literal were the live key — return 200.
+    // The downgrade makes it session-only, so the signature is moot: 401.
+    const ts = String(Math.floor(Date.now() / 1000));
     const body = JSON.stringify({ via: 'placeholder-attack' });
     const res = await request.post(DOWNGRADE_PATH, {
       headers: {
         'Content-Type': 'application/json',
-        'X-Hub-Signature-256': sign('${DICODE_E2E_DOWNGRADE_UNSET}', body),
+        'X-Dicode-Timestamp': ts,
+        'X-Hub-Signature-256': signWithTs('${DICODE_E2E_DOWNGRADE_UNSET}', ts, body),
       },
       data: JSON.parse(body),
       maxRedirects: 0,
     });
-    // The webhook is session-only now; the signature is irrelevant. Never 200.
-    expect(res.status()).not.toBe(200);
-    expect([401, 303]).toContain(res.status());
+    expect(res.status()).toBe(401);
   });
 
   test('POST with a valid session → 200 (session path still works)', async ({ request }) => {
