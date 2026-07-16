@@ -193,18 +193,28 @@ func webhookSecretResolved(s string) bool {
 // auth) with the relay HMAC path simply not offered. Must run after template
 // expansion, the only point where a real secret is distinguishable from a
 // placeholder. Shared by kind: Task and kind: PipelineTask.
-func normalizeWebhookAuthFields(mode *WebhookAuthMode, secret *string, warnings *[]string) {
-	if *mode == WebhookAuthAny && !webhookSecretResolved(*secret) {
-		*mode = WebhookAuthSession
-		*secret = ""
-		*warnings = append(*warnings,
-			`trigger.auth: "any" needs a resolved webhook_secret but none is set — serving session auth only (the HMAC/relay path is disabled)`)
+func normalizeWebhookAuthFields(mode *WebhookAuthMode, secret *string, replayProtection, requireTimestamp **bool, warnings *[]string) {
+	if *mode != WebhookAuthAny || webhookSecretResolved(*secret) {
+		return
 	}
+	*mode = WebhookAuthSession
+	*secret = ""
+	// replay_protection / require_timestamp only act on the HMAC path, which
+	// needs a secret — so once we've cleared it they are dead options. Clear
+	// them too, or a re-validation pass (the taskset resolver re-runs Validate,
+	// which rebuilds Warnings from scratch) would drop the downgrade note and
+	// surface a misleading "webhook_secret is empty — the webhook is
+	// unauthenticated" warning on a webhook that is in fact session-gated.
+	*replayProtection = nil
+	*requireTimestamp = nil
+	*warnings = append(*warnings,
+		`trigger.auth: "any" needs a resolved webhook_secret but none is set — serving session auth only (the HMAC/relay path is disabled)`)
 }
 
 // normalizeWebhookAuth applies normalizeWebhookAuthFields to a kind: Task spec.
 func normalizeWebhookAuth(s *Spec) {
-	normalizeWebhookAuthFields(&s.Trigger.WebhookAuth, &s.Trigger.WebhookSecret, &s.Warnings)
+	normalizeWebhookAuthFields(&s.Trigger.WebhookAuth, &s.Trigger.WebhookSecret,
+		&s.Trigger.ReplayProtection, &s.Trigger.RequireTimestamp, &s.Warnings)
 }
 
 // TriggerConfig defines how a task is triggered.

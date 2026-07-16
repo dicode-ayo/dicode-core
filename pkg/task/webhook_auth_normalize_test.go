@@ -77,6 +77,12 @@ trigger:
 		if spec.Trigger.WebhookSecret != "" {
 			t.Errorf("secret should be cleared, got %q", spec.Trigger.WebhookSecret)
 		}
+		// require_timestamp / replay_protection are HMAC-path options; the
+		// downgrade must clear them so a re-validation pass doesn't surface a
+		// misleading "unauthenticated" warning.
+		if spec.Trigger.RequireTimestamp != nil {
+			t.Errorf("require_timestamp should be cleared on downgrade, got %v", *spec.Trigger.RequireTimestamp)
+		}
 		found := false
 		for _, w := range spec.Warnings {
 			if strings.Contains(w, "session auth only") {
@@ -85,6 +91,16 @@ trigger:
 		}
 		if !found {
 			t.Errorf("expected a downgrade warning, got %v", spec.Warnings)
+		}
+		// Re-validate (as the taskset resolver does) — must NOT surface the
+		// misleading "unauthenticated" gated-field warning for a session webhook.
+		if err := spec.Validate(); err != nil {
+			t.Fatalf("re-validate: %v", err)
+		}
+		for _, w := range spec.Warnings {
+			if strings.Contains(w, "unauthenticated") {
+				t.Errorf("re-validation surfaced a misleading warning: %q", w)
+			}
 		}
 	})
 

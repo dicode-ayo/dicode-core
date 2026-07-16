@@ -139,7 +139,8 @@ func expandPipeline(p *PipelineTask, vars map[string]string) {
 	// After expansion: downgrade auth: any to session when the secret is empty
 	// or an unresolved ${VAR} placeholder, so a committed placeholder is never
 	// served as a live HMAC key (mirrors normalizeWebhookAuth for kind: Task).
-	normalizeWebhookAuthFields(&p.Trigger.WebhookAuth, &p.Trigger.WebhookSecret, &p.Warnings)
+	normalizeWebhookAuthFields(&p.Trigger.WebhookAuth, &p.Trigger.WebhookSecret,
+		&p.Trigger.ReplayProtection, &p.Trigger.RequireTimestamp, &p.Warnings)
 }
 
 // Validate runs all load-time (non-registry) checks. Cross-spec checks (stage
