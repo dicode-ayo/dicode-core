@@ -41,6 +41,7 @@ type PipelineTrigger struct {
 	WebhookSecret    string          `yaml:"webhook_secret,omitempty"`
 	WebhookAuth      WebhookAuthMode `yaml:"auth,omitempty"`
 	ReplayProtection *bool           `yaml:"replay_protection,omitempty"`
+	RequireTimestamp *bool           `yaml:"require_timestamp,omitempty"`
 	Chain            *ChainTrigger   `yaml:"chain,omitempty"`
 }
 
@@ -159,6 +160,7 @@ func (p *PipelineTask) Validate() error {
 	if p.Trigger.WebhookAuth == WebhookAuthAny && p.Trigger.WebhookSecret == "" {
 		return fmt.Errorf(`pipeline: trigger.auth: "any" requires webhook_secret (the HMAC path has nothing to verify without it)`)
 	}
+	p.Warnings = append(p.Warnings, webhookSecretGatedFieldWarnings(p.Trigger.WebhookSecret, p.Trigger.ReplayProtection, p.Trigger.RequireTimestamp)...)
 	if len(p.Stages) == 0 {
 		return fmt.Errorf("pipeline: at least one stage is required")
 	}

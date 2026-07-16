@@ -370,18 +370,22 @@ When `webhook_secret` is absent the webhook is open (backwards-compatible). When
 
 ### Signature verification
 
-`verifyWebhookSignature(spec, r, body []byte)` in [engine.go](../../pkg/trigger/engine.go):
+`verifyWebhookSignature(spec, r, body []byte) (tsStr string, digest []byte, err error)` in
+[webhook.go](../../pkg/trigger/webhook.go):
 
 ```text
-1. If no secret configured → return nil (open webhook)
-2. Check X-Dicode-Timestamp if present:
+1. If no secret configured → return ("", nil, nil) (open webhook)
+2. If X-Dicode-Timestamp is absent:
+   - Reject if trigger.require_timestamp is set (default false)
+   - Otherwise check X-Hub-Signature-256 against HMAC-SHA256(secret, body)
+3. If X-Dicode-Timestamp is present:
    - Parse as Unix int64
    - Reject if |now - ts| > 5 minutes  (replay protection)
-3. Check X-Hub-Signature-256:
-   - Reject if header is missing
-   - Compute HMAC-SHA256(secret, body)
-   - Expected = "sha256=" + hex(mac)
+   - Check X-Hub-Signature-256 against HMAC-SHA256(secret, "<ts>\n<body>")
    - hmac.Equal(got, expected)  ← constant-time comparison
+   - Return the raw timestamp string and the computed HMAC digest so the
+     caller can bind both into the replay-cache key without a second HMAC
+     pass over the body
 ```
 
 ### Raw body capture
@@ -418,23 +422,69 @@ webhookMaxBodyBytes       = 5 << 20  // 5 MB
 
 Even with timestamp validation, an attacker can replay a captured request
 within the 5-minute tolerance window. To close this gap, dicode maintains a
-bounded in-memory nonce cache keyed on the HMAC digest of the request body.
+bounded in-memory nonce cache keyed on `HMAC(secret, "<ts>\n<body>")` when
+the request carried a timestamp, or `HMAC(secret, body)` when it didn't —
+the same preimage the signature itself covers, so the cache key changes
+exactly when the signed content changes.
 
 When a signed webhook arrives:
 
 1. HMAC signature is verified (unchanged).
-2. Timestamp is checked if `X-Dicode-Timestamp` is present (unchanged).
-3. The HMAC digest is looked up in the nonce cache:
+2. Timestamp is checked if `X-Dicode-Timestamp` is present (unchanged); the
+   verified timestamp string is threaded into the replay check.
+3. The HMAC digest — computed over `(ts, body)` when a timestamp was sent, or
+   `body` alone otherwise — is looked up in the nonce cache:
    - **Already seen (within 1 hour)** → HTTP 409 Conflict.
    - **Not seen** → request accepted, digest recorded.
 
+Keying on `(ts, body)` rather than `body` alone fixes a real gap in the
+body-only key: two legitimate requests with an identical body at different
+timestamps no longer collide as a false replay. It does **not**, by itself,
+change daemon-restart exposure — the cache is purely in-memory (see below)
+and starts empty after every restart regardless of key shape, so a captured
+request that is still inside its own timestamp tolerance window is
+re-admitted after a restart under either keying scheme. What actually bounds
+that exposure is the timestamp-tolerance check itself, which runs
+independently of the cache and rejects any timestamp older than 5 minutes;
+`require_timestamp` (below) extends that bound to senders who would
+otherwise send no timestamp — and therefore have no expiry — at all.
+
 The cache is bounded to 10,000 entries with FIFO eviction. Entries older
 than 1 hour are lazily pruned. The cache lives in-memory on the Engine
-instance — a daemon restart clears it, which is acceptable (the attacker
-would need to re-capture a fresh request).
+instance — a daemon restart clears it. That's only a bounded exposure when a
+timestamp is present: a captured request whose timestamp has since aged past
+the 5-minute tolerance is rejected regardless of the cache being empty.
+Without `require_timestamp`, a sender that never sends a timestamp has no
+such bound — its signature stays valid indefinitely — so a restart (or
+simply outliving the 1-hour cache TTL) re-admits it exactly as it did before
+this change.
 
 Replay protection is enabled by default when `webhook_secret` is set.
 Per-task opt-out via `replay_protection: false` in `task.yaml`.
+
+### Mandatory timestamp (`require_timestamp`)
+
+`X-Dicode-Timestamp` is optional by default so senders that sign only the
+body — GitHub's webhook delivery, notably — keep working unmodified (see
+[GitHub compatibility](#github-compatibility) above). The tradeoff: a sender
+that never sends a timestamp is replayable indefinitely once its request
+ages out of the 1-hour nonce cache or the daemon restarts, since a fixed
+body always hashes to the same digest.
+
+Set `require_timestamp: true` in `trigger` to close that gap by rejecting any
+request that omits `X-Dicode-Timestamp` outright — recommended for any
+webhook exposed through the relay tunnel, where requests already cross a
+public network boundary before reaching the daemon:
+
+```yaml
+trigger:
+  webhook: /hooks/my-task
+  webhook_secret: "${MY_WEBHOOK_SECRET}"
+  require_timestamp: true
+```
+
+`require_timestamp` defaults to `false` (unset) and has no effect on
+requests when `webhook_secret` is absent (open webhooks are unaffected).
 
 ---
 

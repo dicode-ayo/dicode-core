@@ -340,6 +340,90 @@ docker:
 	}
 }
 
+func TestWebhookSecretGatedFields_Warnings(t *testing.T) {
+	cases := []struct {
+		name      string
+		yaml      string
+		mustMatch []string // substrings that must appear in s.Warnings
+	}{
+		{
+			name: "require_timestamp without webhook_secret warns",
+			yaml: `
+name: t
+trigger:
+  webhook: /hooks/t
+  require_timestamp: true
+`,
+			mustMatch: []string{"require_timestamp", "webhook_secret is empty"},
+		},
+		{
+			name: "replay_protection true without webhook_secret warns",
+			yaml: `
+name: t
+trigger:
+  webhook: /hooks/t
+  replay_protection: true
+`,
+			mustMatch: []string{"replay_protection", "webhook_secret is empty"},
+		},
+		{
+			name: "require_timestamp false without webhook_secret does not warn",
+			yaml: `
+name: t
+trigger:
+  webhook: /hooks/t
+  require_timestamp: false
+`,
+			mustMatch: nil,
+		},
+		{
+			// false matches the no-op default when there's no secret to
+			// protect either way — a legitimate, self-consistent config, not
+			// a misconfiguration worth warning about.
+			name: "replay_protection false without webhook_secret does not warn",
+			yaml: `
+name: t
+trigger:
+  webhook: /hooks/t
+  replay_protection: false
+`,
+			mustMatch: nil,
+		},
+		{
+			name: "require_timestamp with webhook_secret has no warning",
+			yaml: `
+name: t
+trigger:
+  webhook: /hooks/t
+  webhook_secret: "shh"
+  require_timestamp: true
+  replay_protection: true
+`,
+			mustMatch: nil,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var s Spec
+			if err := yaml.NewDecoder(strings.NewReader(strings.TrimSpace(tc.yaml))).Decode(&s); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if err := s.validate(); err != nil {
+				t.Fatalf("validate: %v", err)
+			}
+			joined := strings.Join(s.Warnings, "|")
+			for _, want := range tc.mustMatch {
+				if !strings.Contains(joined, want) {
+					t.Errorf("missing warning containing %q; got %v", want, s.Warnings)
+				}
+			}
+			if len(tc.mustMatch) == 0 && len(s.Warnings) != 0 {
+				t.Errorf("expected no warnings, got %v", s.Warnings)
+			}
+		})
+	}
+}
+
 func TestChainTrigger_Params_Parses(t *testing.T) {
 	src := strings.TrimSpace(`
 name: downstream

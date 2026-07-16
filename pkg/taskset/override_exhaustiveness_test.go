@@ -312,6 +312,7 @@ func TestCopySpec_Exhaustive(t *testing.T) {
 	allowlist := map[string]string{
 		"Warnings":                 "load-time diagnostics; append-only during validate(), never mutated post-copy",
 		"Trigger.ReplayProtection": "*bool read-only after load; no merge path writes through it",
+		"Trigger.RequireTimestamp": "*bool read-only after load; no merge path writes through it",
 		"Provider":                 "provider config read-only after load; no merge path writes through it",
 		"RunResult":                "run-result config read-only after load; no merge path writes through it",
 		"AutoFix":                  "auto-fix config read-only after load; no merge path writes through it",

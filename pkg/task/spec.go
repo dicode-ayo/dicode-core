@@ -182,6 +182,7 @@ type TriggerConfig struct {
 	WebhookSecret    string          `yaml:"webhook_secret,omitempty"`    // HMAC-SHA256 secret for webhook auth
 	WebhookAuth      WebhookAuthMode `yaml:"auth,omitempty"`              // session-required (true/"session") or session-OR-HMAC ("any")
 	ReplayProtection *bool           `yaml:"replay_protection,omitempty"` // nonce-cache replay guard; default true when webhook_secret is set
+	RequireTimestamp *bool           `yaml:"require_timestamp,omitempty"` // reject requests missing X-Dicode-Timestamp; default false (GitHub-style signers send no timestamp)
 	Manual           bool            `yaml:"manual,omitempty"`            // only via explicit trigger
 	Chain            *ChainTrigger   `yaml:"chain,omitempty"`             // fire when another task completes
 	Daemon           bool            `yaml:"daemon,omitempty"`            // start on app start, restart on exit
@@ -787,6 +788,7 @@ func (s *Spec) validate() error {
 	if triggers > 1 {
 		return fmt.Errorf("only one trigger type is allowed per task")
 	}
+	s.Warnings = append(s.Warnings, webhookSecretGatedFieldWarnings(s.Trigger.WebhookSecret, s.Trigger.ReplayProtection, s.Trigger.RequireTimestamp)...)
 	if s.OnFailureChain != nil {
 		warns, err := s.OnFailureChain.Validate()
 		if err != nil {
@@ -815,6 +817,27 @@ func (s *Spec) validate() error {
 		// Any other non-empty runtime is accepted; executor presence is checked at run time.
 	}
 	return nil
+}
+
+// webhookSecretGatedFieldWarnings flags trigger.replay_protection /
+// trigger.require_timestamp set without a trigger.webhook_secret. Both
+// fields only take effect inside the HMAC verification path
+// (verifyWebhookSignatureSecret / checkWebhookReplay in pkg/trigger), which
+// returns immediately, unauthenticated, whenever the secret is empty — so
+// without a secret they are silent no-ops rather than the hardening the
+// operator likely intended.
+func webhookSecretGatedFieldWarnings(webhookSecret string, replayProtection, requireTimestamp *bool) []string {
+	if webhookSecret != "" {
+		return nil
+	}
+	var warnings []string
+	if replayProtection != nil && *replayProtection {
+		warnings = append(warnings, "trigger.replay_protection is set but trigger.webhook_secret is empty — the webhook is unauthenticated and replay_protection has no effect")
+	}
+	if requireTimestamp != nil && *requireTimestamp {
+		warnings = append(warnings, "trigger.require_timestamp is set but trigger.webhook_secret is empty — the webhook is unauthenticated and require_timestamp has no effect")
+	}
+	return warnings
 }
 
 // dockerHardeningWarnings flags container settings that visibly weaken

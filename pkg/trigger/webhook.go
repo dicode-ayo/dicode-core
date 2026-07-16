@@ -245,19 +245,40 @@ else { pre.innerHTML = logs.map(l => {
 </body>
 </html>`
 
+// webhookHMACPreimageDigest computes hex(HMAC-SHA256(secret, preimage)), where
+// preimage is "<tsStr>\n<body>" when tsStr is non-empty, or bare body
+// otherwise. This is the single preimage construction shared by signature
+// verification and the replay-cache key, so the two can never drift apart.
+func webhookHMACPreimageDigest(secret, tsStr string, body []byte) []byte {
+	mac := hmac.New(sha256.New, []byte(secret))
+	if tsStr != "" {
+		mac.Write([]byte(tsStr))
+		mac.Write([]byte("\n"))
+	}
+	mac.Write(body)
+	return mac.Sum(nil)
+}
+
 // verifyWebhookSignature validates HMAC-SHA256 signature and optional replay
-// protection for a webhook request. Returns nil when the request is authentic.
-// When no secret is configured on the task the check is skipped (open webhook).
-func verifyWebhookSignature(spec *task.Spec, r *http.Request, body []byte) error {
-	return verifyWebhookSignatureSecret(spec.Trigger.WebhookSecret, r, body)
+// protection for a webhook request. Returns the parsed X-Dicode-Timestamp
+// value (empty if absent) and the request's HMAC digest (nil if
+// unauthenticated) so the caller can pass both into checkWebhookReplay
+// without recomputing the digest. When no secret is configured on the task
+// the check is skipped (open webhook).
+func verifyWebhookSignature(spec *task.Spec, r *http.Request, body []byte) (string, []byte, error) {
+	requireTimestamp := spec.Trigger.RequireTimestamp != nil && *spec.Trigger.RequireTimestamp
+	return verifyWebhookSignatureSecret(spec.Trigger.WebhookSecret, requireTimestamp, r, body)
 }
 
 // verifyWebhookSignatureSecret is the kind-agnostic HMAC verification core,
 // shared by kind: Task (verifyWebhookSignature) and kind: PipelineTask webhook
 // dispatch. An empty secret means the webhook is unauthenticated (back-compat).
-func verifyWebhookSignatureSecret(secret string, r *http.Request, body []byte) error {
+// Returns the parsed X-Dicode-Timestamp value (empty if absent) and the
+// already-computed HMAC digest so callers can bind both into the
+// replay-cache key without a second HMAC pass over the body.
+func verifyWebhookSignatureSecret(secret string, requireTimestamp bool, r *http.Request, body []byte) (string, []byte, error) {
 	if secret == "" {
-		return nil // unauthenticated webhook — allowed for backwards-compat
+		return "", nil, nil // unauthenticated webhook — allowed for backwards-compat
 	}
 
 	// GET requests have no body — HMAC(secret, "") is a constant that doesn't
@@ -266,64 +287,73 @@ func verifyWebhookSignatureSecret(secret string, r *http.Request, body []byte) e
 	// (b) signature reuse across different query strings. Reject GET when a
 	// secret is configured.
 	if r.Method == http.MethodGet {
-		return fmt.Errorf("webhook_secret requires POST; GET is not supported for authenticated webhooks")
+		return "", nil, fmt.Errorf("webhook_secret requires POST; GET is not supported for authenticated webhooks")
 	}
 
-	// Validate the optional timestamp and capture it for inclusion in the HMAC
-	// preimage. When X-Dicode-Timestamp is present the signature must cover
-	// "timestamp_str\nbody" rather than just the body — this binds the signature
-	// to a specific time window so a captured request cannot be replayed after
-	// the 1-hour replay cache expires (the timestamp changes each signed request).
-	var tsStr string
-	if raw := r.Header.Get(webhookTimestampHeader); raw != "" {
+	// The timestamp is optional by default (GitHub and other third-party
+	// senders sign only the body and cannot be made to send a custom header,
+	// so requiring it unconditionally would break that documented
+	// GitHub-compatible mode). When present it is validated and folded into
+	// the HMAC preimage; when trigger.require_timestamp is set, its absence
+	// is rejected outright — a body-only signature is otherwise replayable
+	// indefinitely once the in-memory replay cache expires or the daemon
+	// restarts, since a fixed body always hashes to the same digest.
+	raw := r.Header.Get(webhookTimestampHeader)
+	if raw == "" {
+		if requireTimestamp {
+			return "", nil, fmt.Errorf("missing %s header (required by trigger.require_timestamp)", webhookTimestampHeader)
+		}
+	} else {
 		ts, err := strconv.ParseInt(raw, 10, 64)
 		if err != nil {
-			return fmt.Errorf("invalid %s header", webhookTimestampHeader)
+			return "", nil, fmt.Errorf("invalid %s header", webhookTimestampHeader)
 		}
 		age := time.Since(time.Unix(ts, 0))
 		if age < 0 {
 			age = -age
 		}
 		if age > webhookTimestampTolerance {
-			return fmt.Errorf("webhook timestamp out of tolerance window (%v)", age.Round(time.Second))
+			return "", nil, fmt.Errorf("webhook timestamp out of tolerance window (%v)", age.Round(time.Second))
 		}
-		tsStr = raw
 	}
 
 	got := r.Header.Get(webhookSignatureHeader)
 	if got == "" {
-		return fmt.Errorf("missing %s header", webhookSignatureHeader)
+		return "", nil, fmt.Errorf("missing %s header", webhookSignatureHeader)
 	}
 
-	mac := hmac.New(sha256.New, []byte(secret))
-	if tsStr != "" {
-		// Include timestamp in signed payload: "<ts_unix_str>\n<body>"
-		mac.Write([]byte(tsStr))
-		mac.Write([]byte("\n"))
-	}
-	mac.Write(body)
-	want := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+	// Preimage is "<ts_unix_str>\n<body>" when a timestamp was sent, body alone
+	// otherwise — computed once here and reused by checkWebhookReplay.
+	digest := webhookHMACPreimageDigest(secret, raw, body)
+	want := "sha256=" + hex.EncodeToString(digest)
 
 	if !hmac.Equal([]byte(got), []byte(want)) {
-		return fmt.Errorf("signature mismatch")
+		return "", nil, fmt.Errorf("signature mismatch")
 	}
-	return nil
+	return raw, digest, nil
 }
 
-// checkWebhookReplay returns an error if the webhook body is a replay.
-// When the task has no secret (open webhook) or replay_protection is
-// explicitly false, this is a no-op.
-func (e *Engine) checkWebhookReplay(secret string, replayProtection *bool, body []byte) error {
+// checkWebhookReplay returns an error if the webhook (timestamp, body) pair is
+// a replay. When the task has no secret (open webhook) or replay_protection is
+// explicitly false, this is a no-op. digest must be the exact HMAC digest
+// returned by verifyWebhookSignature(Secret) for this request (nil when the
+// webhook is unauthenticated) — reusing it means the signature preimage and
+// the replay-cache key can never drift apart, and avoids a second HMAC pass
+// over the (up to 5 MB) request body on every authenticated request. Binding
+// the timestamp into the digest (done by the caller via
+// verifyWebhookSignatureSecret) means two distinct timestamps over an
+// identical body never collide, and a digest can only be re-admitted by an
+// attacker who reuses the very (timestamp, body) pair the cache already
+// rejects, not merely by outlasting a daemon restart within the signature's
+// own tolerance window.
+func (e *Engine) checkWebhookReplay(secret string, replayProtection *bool, digest []byte) error {
 	if secret == "" {
 		return nil
 	}
 	if replayProtection != nil && !*replayProtection {
 		return nil
 	}
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write(body)
-	digest := hex.EncodeToString(mac.Sum(nil))
-	if e.webhookReplayCache.seen(digest) {
+	if e.webhookReplayCache.seen(hex.EncodeToString(digest)) {
 		return fmt.Errorf("duplicate webhook (replay)")
 	}
 	return nil
@@ -354,15 +384,17 @@ func (e *Engine) handlePipelineWebhook(w http.ResponseWriter, r *http.Request, p
 	// Skipping only the signature would leave checkWebhookReplay to 409 a browser
 	// that legitimately submits the same body twice.
 	if !ipc.SessionAuthed(r.Context()) {
-		if err := verifyWebhookSignatureSecret(pipe.Trigger.WebhookSecret, r, body); err != nil {
+		requireTimestamp := pipe.Trigger.RequireTimestamp != nil && *pipe.Trigger.RequireTimestamp
+		_, digest, err := verifyWebhookSignatureSecret(pipe.Trigger.WebhookSecret, requireTimestamp, r, body)
+		if err != nil {
 			e.log.Warn("pipeline webhook signature verification failed",
 				zap.String("path", r.URL.Path), zap.String("task", pipe.ID), zap.Error(err))
 			http.Error(w, "forbidden: "+err.Error(), http.StatusForbidden)
 			return
 		}
 
-		// Replay protection: reject duplicate bodies within the nonce cache TTL.
-		if err := e.checkWebhookReplay(pipe.Trigger.WebhookSecret, pipe.Trigger.ReplayProtection, body); err != nil {
+		// Replay protection: reject duplicate (timestamp, body) pairs within the nonce cache TTL.
+		if err := e.checkWebhookReplay(pipe.Trigger.WebhookSecret, pipe.Trigger.ReplayProtection, digest); err != nil {
 			e.log.Warn("pipeline webhook replay rejected",
 				zap.String("path", r.URL.Path),
 				zap.String("task", pipe.ID),
@@ -574,7 +606,8 @@ func (e *Engine) fireWebhookTask(w http.ResponseWriter, r *http.Request, spec *t
 	// that legitimately submits the same body twice.
 	if !ipc.SessionAuthed(r.Context()) {
 		// Verify HMAC signature when a secret is configured on the task.
-		if err := verifyWebhookSignature(spec, r, body); err != nil {
+		_, digest, err := verifyWebhookSignature(spec, r, body)
+		if err != nil {
 			e.log.Warn("webhook signature verification failed",
 				zap.String("path", path),
 				zap.String("task", taskID),
@@ -584,8 +617,8 @@ func (e *Engine) fireWebhookTask(w http.ResponseWriter, r *http.Request, spec *t
 			return
 		}
 
-		// Replay protection: reject duplicate bodies within the nonce cache TTL.
-		if err := e.checkWebhookReplay(spec.Trigger.WebhookSecret, spec.Trigger.ReplayProtection, body); err != nil {
+		// Replay protection: reject duplicate (timestamp, body) pairs within the nonce cache TTL.
+		if err := e.checkWebhookReplay(spec.Trigger.WebhookSecret, spec.Trigger.ReplayProtection, digest); err != nil {
 			e.log.Warn("webhook replay rejected",
 				zap.String("path", path),
 				zap.String("task", taskID),
