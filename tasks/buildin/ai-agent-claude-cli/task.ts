@@ -135,13 +135,22 @@ export const steps = {
                 // hand-crafted resume can't be trusted to hand back a safe value —
                 // validate as a UUID and mint a fresh one (fresh cwd, no --resume)
                 // rather than let an off-shape string reach Deno.Command's cwd.
+                const hasValidChatId = !!carried.chatId && isValidSessionId(carried.chatId);
                 const chatId = resolveSessionId(carried.chatId, "ai-agent-claude-cli: chatId", { autoMint: true });
 
                 // claudeSessionId becomes the `claude --resume <id>` subprocess
                 // argument. Same reasoning: validate before use, and treat an
                 // off-shape carried value as absent (fresh Claude session) rather
-                // than pass it through to the CLI invocation.
-                const priorClaudeSessionId = resolveSessionId(carried.claudeSessionId, "ai-agent-claude-cli: claudeSessionId", { autoMint: false });
+                // than pass it through to the CLI invocation. Also: Claude CLI
+                // sessions are cwd-scoped (--resume only finds sessions created in
+                // the same workdir), so if chatId had to be replaced above, any
+                // carried claudeSessionId is now orphaned for the NEW workdir too
+                // — drop it rather than pass a validly-shaped but unresumable id
+                // to --resume (which would fail the turn instead of gracefully
+                // starting a fresh session).
+                const priorClaudeSessionId = hasValidChatId
+                    ? resolveSessionId(carried.claudeSessionId, "ai-agent-claude-cli: claudeSessionId", { autoMint: false })
+                    : "";
 
                 const turn = await runClaudeTurn({
                     message,

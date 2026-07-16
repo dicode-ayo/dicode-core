@@ -587,3 +587,38 @@ JSON`,
         throw new Error(`malicious claudeSessionId leaked into claude args:\n${args.join(" ")}`);
     }
 });
+
+Deno.test("steps.turn: an invalid chatId also drops a valid carried claudeSessionId (cwd-scoped --resume would otherwise fail)", async () => {
+    // Regression for a bug caught in review: Claude CLI sessions are
+    // cwd-scoped, so pairing a fresh workdir (minted because chatId was
+    // off-shape) with the OLD claudeSessionId would make --resume fail
+    // ("No conversation found") instead of gracefully starting fresh.
+    Deno.env.set("CLAUDE_CODE_OAUTH_TOKEN", "stub");
+    const { dicode } = makeSuspendDicode();
+    const sentinelDir = await Deno.makeTempDir();
+    const sentinel = `${sentinelDir}/args-recorded`;
+    await withStubClaude(
+        `printf '%s\\n' "$@" > ${sentinel}
+cat <<'JSON'
+{"type":"result","is_error":false,"result":"ok","session_id":"sess-new"}
+JSON`,
+        async () => {
+            try {
+                await steps.turn({
+                    params: makeParams([]),
+                    input: { message: "hi" },
+                    state: { claudeSessionId: VALID_PRIOR_SESSION_ID, chatId: "not-a-uuid" },
+                    dicode,
+                    output: {} as any,
+                    mcp: {} as any,
+                } as any);
+            } catch (e) {
+                if (!(e instanceof SuspendSignal)) throw e;
+            }
+        },
+    );
+    const args = (await Deno.readTextFile(sentinel)).split("\n");
+    if (args.includes("--resume")) {
+        throw new Error(`expected --resume to be omitted when chatId had to be replaced, got:\n${args.join(" ")}`);
+    }
+});
