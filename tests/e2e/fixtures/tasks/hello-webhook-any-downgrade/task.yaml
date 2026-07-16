@@ -1,0 +1,15 @@
+apiVersion: dicode/v1
+kind: Task
+name: Hello Webhook Any (downgrade)
+description: >
+  An auth: any webhook whose webhook_secret references an env var the test
+  harness never sets. It exercises the core#611 safety guard: the unresolved
+  ${...} placeholder must NOT be served as a live HMAC key — the webhook
+  degrades to session-only.
+runtime: js
+trigger:
+  webhook: /hooks/test-webhook-downgrade
+  auth: any
+  webhook_secret: "${DICODE_E2E_DOWNGRADE_UNSET}"
+  require_timestamp: true
+timeout: 10s
