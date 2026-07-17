@@ -781,3 +781,51 @@ func TestHash_IncludeOrderIndependent(t *testing.T) {
 		t.Fatalf("include order changed the hash: %q vs %q", forward, reverse)
 	}
 }
+
+// TestHash_IncludeEscapingSiblingScopeIsRejected is the path-traversal
+// regression: hash_include must not be able to walk arbitrarily far up the
+// filesystem to read host files unrelated to the taskset (e.g. "/etc/passwd"
+// via enough "../" hops) — it is bounded to dir's parent directory (the
+// sibling-task scope the feature exists for). Reported by CodeQL as
+// "Uncontrolled data used in path expression" against the pre-fix code.
+func TestHash_IncludeEscapingSiblingScopeIsRejected(t *testing.T) {
+	// tasksRoot/task-a is the task dir; tasksRoot/../outside sits one level
+	// above tasksRoot itself, i.e. two hops up from task-a — outside the
+	// sibling-task boundary (tasksRoot).
+	parent := t.TempDir()
+	tasksRoot := filepath.Join(parent, "tasks-root")
+	outside := filepath.Join(parent, "outside")
+	if err := os.MkdirAll(outside, 0755); err != nil {
+		t.Fatalf("mkdir outside: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("host-secret"), 0644); err != nil {
+		t.Fatalf("write outside file: %v", err)
+	}
+
+	dir := filepath.Join(tasksRoot, "task-a")
+	writeTaskFiles(t, dir, "name: a\n", "js")
+
+	_, err := Hash(dir, "../../outside/secret.txt")
+	if err == nil {
+		t.Fatal("Hash allowed a hash_include entry to escape the sibling-task boundary — path traversal not rejected")
+	}
+}
+
+// TestHash_IncludeWithinSiblingScopeStillAllowed is the control for the test
+// above: a "../" that stays within the sibling-task boundary (one hop up,
+// into a sibling of dir) must still be accepted — this is the feature's
+// entire purpose (a sibling buildin task's shared helper library).
+func TestHash_IncludeWithinSiblingScopeStillAllowed(t *testing.T) {
+	tasksRoot := t.TempDir()
+	sibling := filepath.Join(tasksRoot, "sibling.ts")
+	if err := os.WriteFile(sibling, []byte("shared"), 0644); err != nil {
+		t.Fatalf("write sibling: %v", err)
+	}
+
+	dir := filepath.Join(tasksRoot, "task-a")
+	writeTaskFiles(t, dir, "name: a\n", "js")
+
+	if _, err := Hash(dir, "../sibling.ts"); err != nil {
+		t.Fatalf("Hash rejected an in-bounds sibling include: %v", err)
+	}
+}

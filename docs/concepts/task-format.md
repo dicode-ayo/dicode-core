@@ -1402,6 +1402,16 @@ Notes:
   change rather than a silent no-op.
 - This is moot for gate-exempt buildin tasks; it matters for **user-source**
   tasks that import a shared library the operator has approved separately.
+- Each entry is bounded to the task's **parent directory** — i.e. the
+  directory containing the task and its siblings (this is exactly the scope
+  the two examples above use: one `../` hop up, then anywhere below that).
+  An entry that tries to escape further up the filesystem (e.g.
+  `../../../../etc/passwd`) is rejected outright rather than read.
+- Don't point `hash_include` at anything containing secret material. Its
+  content is folded into the same digest the approval gate persists in
+  `dicode.lock`, which is designed to be committed/shared — use
+  `permissions.dicode.crypto` or the secrets store for sensitive data
+  instead.
 
 ---
 

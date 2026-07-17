@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 )
 
 // maxHashedFileBytes bounds the contents read into the digest per file. The
@@ -83,6 +84,33 @@ func walkTree(root, labelPrefix string) ([]hashEntry, error) {
 	return entries, nil
 }
 
+// resolveInclude validates and resolves a single hash_include entry against
+// dir, returning the absolute path Hash may safely read.
+//
+// includes are meant to reach a *sibling* task's file (see the Hash doc
+// comment's "shared buildin helper library" example) — never an arbitrary
+// host path. So the resolved path is required to stay within dir's parent
+// directory (the directory containing dir and its siblings): this bounds
+// "../" traversal to exactly the sibling-task scope the feature is for,
+// instead of letting a task.yaml author's hash_include value walk arbitrarily
+// far up the filesystem (e.g. "../../../../etc/shadow") to read and fold
+// host files having nothing to do with the taskset into the digest. The
+// check runs before any filesystem call touches the resolved path, so an
+// out-of-bounds entry is rejected rather than stat'd/read/walked.
+func resolveInclude(dir, inc string) (string, error) {
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return "", fmt.Errorf("resolve %s: %w", dir, err)
+	}
+	boundary := filepath.Dir(absDir)
+	abs := filepath.Clean(filepath.Join(absDir, filepath.FromSlash(inc)))
+	rel, err := filepath.Rel(boundary, abs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("hash_include %q escapes %s — hash_include may only reference paths within the task's parent directory (sibling tasks/libraries), not arbitrary host paths", inc, boundary)
+	}
+	return abs, nil
+}
+
 // Hash computes a content hash over the regular files under dir, recursively,
 // in sorted dir-relative path order. The runtime allows the task script to
 // import any sibling file (the Deno sandbox allow-reads the whole task dir;
@@ -120,6 +148,16 @@ func walkTree(root, labelPrefix string) ([]hashEntry, error) {
 // name, and a missing include folds in a sentinel rather than silently
 // contributing nothing, so a mistyped or deleted include path still changes
 // the hash instead of degrading to a no-op.
+//
+// Each include is resolved via resolveInclude, which bounds it to dir's
+// parent directory (the sibling-task scope this feature is for) — an entry
+// that tries to escape that boundary (e.g. "../../../../etc/shadow") is
+// rejected with an error rather than read. Content folded in via
+// hash_include still flows into the hash the approval gate persists in
+// dicode.lock (a file its own doc comment documents as committable/shared —
+// see pkg/approval/lock.go), so hash_include must never be pointed at a path
+// containing secret material: prefer permissions.dicode.crypto / the secrets
+// store for anything sensitive.
 func Hash(dir string, includes ...string) (string, error) {
 	entries, err := walkTree(dir, "")
 	if err != nil {
@@ -133,7 +171,10 @@ func Hash(dir string, includes ...string) (string, error) {
 			continue
 		}
 		label := "include:" + filepath.ToSlash(inc)
-		incAbs := filepath.Join(dir, filepath.FromSlash(inc))
+		incAbs, err := resolveInclude(dir, inc)
+		if err != nil {
+			return "", err
+		}
 		info, err := os.Lstat(incAbs)
 		if err != nil {
 			if os.IsNotExist(err) {
