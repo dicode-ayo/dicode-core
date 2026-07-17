@@ -957,3 +957,116 @@ func TestScanDir_HonorsHashInclude(t *testing.T) {
 		t.Fatalf("ScanDir ignored an edit to a hash_include'd shared module: before == after == %q", before["task-a"])
 	}
 }
+
+// TestHash_IncludeSymlinkTargetContentIsHashed is the regression for a
+// finding caught in review: when the hash_include entry ITSELF is a
+// symlink (an alias to the real shared file), resolveInclude now resolves
+// through it and hashes the REAL target's content — unlike an ordinary
+// in-dir symlink (TestHash_SymlinkTargetStringHashed_NotFollowed), which
+// deliberately hashes only the target string. If it didn't, editing the
+// content behind an included symlink would reopen the exact gap
+// hash_include exists to close (#585): the code that actually runs would
+// change on next spawn without the hash ever reflecting it.
+func TestHash_IncludeSymlinkTargetContentIsHashed(t *testing.T) {
+	tasksRoot := t.TempDir()
+	real := filepath.Join(tasksRoot, "real.ts")
+	if err := os.WriteFile(real, []byte("v1"), 0644); err != nil {
+		t.Fatalf("write real: %v", err)
+	}
+	alias := filepath.Join(tasksRoot, "alias.ts")
+	if err := os.Symlink(real, alias); err != nil {
+		t.Skipf("symlinks unsupported here: %v", err)
+	}
+
+	dir := filepath.Join(tasksRoot, "task-a")
+	writeTaskFiles(t, dir, "name: a\n", "js")
+
+	before, err := Hash(dir, "../alias.ts")
+	if err != nil {
+		t.Fatalf("before: %v", err)
+	}
+	if err := os.WriteFile(real, []byte("v2"), 0644); err != nil {
+		t.Fatalf("rewrite real: %v", err)
+	}
+	after, err := Hash(dir, "../alias.ts")
+	if err != nil {
+		t.Fatalf("after: %v", err)
+	}
+	if before == after {
+		t.Fatalf("Hash ignored a content edit behind a hash_include symlink alias: before == after == %q", before)
+	}
+}
+
+// TestHash_IncludeSymlinkDirTargetContentIsHashed is the directory-include
+// counterpart of the test above: the include entry is a symlink TO A
+// DIRECTORY, and a file edited inside the real directory (reached only
+// through the symlink) must still change the hash.
+func TestHash_IncludeSymlinkDirTargetContentIsHashed(t *testing.T) {
+	tasksRoot := t.TempDir()
+	realDir := filepath.Join(tasksRoot, "real-shared")
+	if err := os.MkdirAll(realDir, 0755); err != nil {
+		t.Fatalf("mkdir realDir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(realDir, "helper.ts"), []byte("v1"), 0644); err != nil {
+		t.Fatalf("write helper: %v", err)
+	}
+	aliasDir := filepath.Join(tasksRoot, "alias-shared")
+	if err := os.Symlink(realDir, aliasDir); err != nil {
+		t.Skipf("symlinks unsupported here: %v", err)
+	}
+
+	dir := filepath.Join(tasksRoot, "task-a")
+	writeTaskFiles(t, dir, "name: a\n", "js")
+
+	before, err := Hash(dir, "../alias-shared")
+	if err != nil {
+		t.Fatalf("before: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(realDir, "helper.ts"), []byte("v2"), 0644); err != nil {
+		t.Fatalf("rewrite helper: %v", err)
+	}
+	after, err := Hash(dir, "../alias-shared")
+	if err != nil {
+		t.Fatalf("after: %v", err)
+	}
+	if before == after {
+		t.Fatalf("Hash ignored a content edit inside a hash_include symlinked directory: before == after == %q", before)
+	}
+}
+
+// TestHash_InDirFifoIsSkipped covers walkTree's own entry classification
+// (used for the main dir walk and directory includes) with a real stat
+// (d.Info()) rather than the raw directory-entry type (d.Type()) — the
+// latter can report 0 ("unknown", indistinguishable from "regular") on
+// filesystems that don't populate d_type, which would otherwise let a FIFO
+// slip through IsRegular() and into a blocking os.ReadFile. This doesn't
+// reproduce the DT_UNKNOWN condition itself (filesystem-dependent, not
+// under test control), but pins that a FIFO sitting directly in the walked
+// dir is still skipped, not hashed as content, after the d.Info() switch.
+func TestHash_InDirFifoIsSkipped(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "task-a")
+	writeTaskFiles(t, dir, "name: a\n", "js")
+	fifoPath := filepath.Join(dir, "a.fifo")
+	if err := syscall.Mkfifo(fifoPath, 0644); err != nil {
+		t.Skipf("mkfifo unsupported here: %v", err)
+	}
+
+	done := make(chan struct{})
+	var hash string
+	var hashErr error
+	go func() {
+		hash, hashErr = Hash(dir)
+		close(done)
+	}()
+	select {
+	case <-done:
+		if hashErr != nil {
+			t.Fatalf("Hash errored on an in-dir FIFO: %v", hashErr)
+		}
+		if hash == "" {
+			t.Fatal("Hash returned an empty digest")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Hash blocked reading an in-dir FIFO instead of skipping it")
+	}
+}

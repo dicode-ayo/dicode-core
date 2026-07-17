@@ -789,6 +789,9 @@ func (s *Spec) validate() error {
 		if filepath.IsAbs(inc) {
 			return fmt.Errorf("hash_include: %q must be relative to the task directory, not absolute", inc)
 		}
+		if !hashIncludeLexicallyInBounds(inc) {
+			return fmt.Errorf("hash_include: %q must resolve within the task's parent directory — at most one \"..\" hop up (e.g. \"../sibling-task/file.ts\"), never further up the filesystem or to the parent directory itself", inc)
+		}
 	}
 	triggers := 0
 	if s.Trigger.Cron != "" {
@@ -884,6 +887,39 @@ func (s *Spec) validate() error {
 		// Any other non-empty runtime is accepted; executor presence is checked at run time.
 	}
 	return nil
+}
+
+// hashIncludeLexicallyInBounds reports whether inc, as a hash_include entry,
+// stays within the strict-descendant boundary task.Hash's resolveInclude
+// enforces at hash time — dir's parent directory, i.e. at most one ".." hop
+// up from the task's own directory. Checked here too, at config-load time,
+// rather than leaving it to fail only inside task.Hash later: an entry that
+// fails there causes pkg/taskset/source.go's snapHash to silently fall back
+// to a spec-only hash, dropping ALL dir-content change detection for the
+// task (not just the broken include's contribution) until the entry is
+// fixed — a config error should surface immediately instead.
+//
+// Purely lexical, no filesystem access (symlink-aware containment is
+// task.Hash's job, once an absolute dir is known — see resolveInclude).
+// filepath.Join(dir, inc) always cleans inc as a standalone relative path
+// first, so counting inc's own leading ".." segments (via filepath.Clean
+// from a virtual "." origin) determines how many levels above dir the
+// resolved path would land, independent of dir's actual value — true for
+// any clean, non-".."-containing absolute dir, i.e. any real filesystem
+// path.
+func hashIncludeLexicallyInBounds(inc string) bool {
+	cleaned := filepath.Clean(filepath.FromSlash(inc))
+	if cleaned == ".." {
+		return false // resolves to exactly the boundary itself
+	}
+	depth := 0
+	for _, seg := range strings.Split(cleaned, string(filepath.Separator)) {
+		if seg != ".." {
+			break
+		}
+		depth++
+	}
+	return depth <= 1
 }
 
 // webhookSecretGatedFieldWarnings flags trigger.replay_protection /

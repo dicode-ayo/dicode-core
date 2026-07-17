@@ -75,19 +75,35 @@ func walkTree(root, labelPrefix string) ([]hashEntry, error) {
 			}
 			return nil
 		}
+		// Classify via a real stat (d.Info(), backed by Lstat), not
+		// d.Type(): the latter comes straight from the raw directory entry
+		// with no syscall, and on filesystems that don't populate d_type
+		// (DT_UNKNOWN — some FUSE/NFS mounts, older XFS configurations) Go
+		// reports it as 0, which is indistinguishable from "regular file" —
+		// IsRegular() would then wrongly accept a FIFO/socket/device for
+		// os.ReadFile below, which can block indefinitely on a FIFO with no
+		// writer. d.Info() is cached by the walker per entry, so this isn't
+		// an extra syscall over what a portable classification requires.
+		info, err := d.Info()
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil // vanished mid-walk (race) — skip, don't fail the scan
+			}
+			return err
+		}
 		rel, err := filepath.Rel(root, path)
 		if err != nil {
 			return err
 		}
 		label := labelPrefix + filepath.ToSlash(rel)
 		switch {
-		case d.Type()&fs.ModeSymlink != 0:
+		case info.Mode()&fs.ModeSymlink != 0:
 			target, err := os.Readlink(path)
 			if err != nil {
 				return fmt.Errorf("readlink %s: %w", path, err)
 			}
 			entries = append(entries, hashEntry{label: label, isLink: true, target: target})
-		case d.Type().IsRegular():
+		case info.Mode().IsRegular():
 			entries = append(entries, hashEntry{label: label, abs: path})
 		}
 		return nil
@@ -135,14 +151,41 @@ func resolveInclude(absDir, boundary, inc string) (string, error) {
 		return "", fmt.Errorf("hash_include %q escapes %s — hash_include may only reference paths strictly within the task's parent directory (sibling tasks/libraries), not arbitrary host paths", inc, boundary)
 	}
 
-	within, err := pathguard.WithinResolved(boundary, candidate)
+	// Resolve every symlink in the path — including a top-level one AT
+	// candidate itself — before using it for anything, and return that
+	// resolved path rather than the lexical one. This closes two gaps at
+	// once, both only reachable through a real symlink on disk:
+	//  1. A git-committed symlink INSIDE the boundary that physically
+	//     redirects outside it (go-git materializes repo-committed
+	//     symlinks as real on-disk links) would otherwise pass the purely
+	//     lexical check above.
+	//  2. If the include entry itself names a symlink (an alias to the
+	//     real shared file/dir), Hash operating on the resolved real path
+	//     — instead of the symlink's target STRING the way an ordinary
+	//     in-dir symlink is treated — means editing the content behind it
+	//     actually changes the digest. hash_include's whole purpose is
+	//     detecting edits to a module living outside dir; a symlink
+	//     indirection to that module must not reopen the exact gap the
+	//     feature exists to close.
+	// Inlines pathguard.WithinResolved (rather than calling it directly) so
+	// the resolved path it computes internally can be returned to the
+	// caller instead of discarded.
+	realBoundary, err := filepath.EvalSymlinks(filepath.Clean(boundary))
+	if err != nil {
+		return "", fmt.Errorf("hash_include %q: %w", inc, err)
+	}
+	realCandidate, err := pathguard.ResolveExisting(candidate)
+	if err != nil {
+		return "", fmt.Errorf("hash_include %q: %w", inc, err)
+	}
+	within, err := pathguard.Within(realBoundary, realCandidate)
 	if err != nil {
 		return "", fmt.Errorf("hash_include %q: %w", inc, err)
 	}
 	if !within {
 		return "", fmt.Errorf("hash_include %q resolves outside %s through a symlink", inc, boundary)
 	}
-	return candidate, nil
+	return realCandidate, nil
 }
 
 // Hash computes a content hash over the regular files under dir, recursively,

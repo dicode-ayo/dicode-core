@@ -222,6 +222,65 @@ func TestSpec_Validate_RejectsAbsoluteHashIncludeEntry(t *testing.T) {
 	}
 }
 
+// TestSpec_Validate_RejectsLexicallyOutOfScopeHashInclude is the regression
+// for a finding caught in review: a hash_include entry that resolves past
+// the task's parent directory boundary (task.Hash's resolveInclude enforces
+// this at hash time) must be rejected here too, at config-load time —
+// otherwise it only fails inside task.Hash later, where
+// pkg/taskset/source.go's snapHash silently falls back to a spec-only hash
+// on any Hash() error, dropping ALL dir-content change detection for the
+// task (not just the broken include) until the entry is fixed.
+func TestSpec_Validate_RejectsLexicallyOutOfScopeHashInclude(t *testing.T) {
+	cases := []string{
+		"..",                   // exactly the boundary itself
+		"../..",                // one hop past the boundary
+		"../../outside",        // two hops up, then a path
+		"sub/../../../outside", // "sub/.." cancels to the start; the remaining two ".." net two hops up
+	}
+	for _, inc := range cases {
+		t.Run(inc, func(t *testing.T) {
+			s := Spec{
+				Name:        "test",
+				Runtime:     RuntimeDeno,
+				Trigger:     TriggerConfig{Manual: true},
+				HashInclude: []string{inc},
+			}
+			err := s.Validate()
+			if err == nil {
+				t.Fatalf("hash_include %q must be rejected as lexically out of scope", inc)
+			}
+			if !strings.Contains(err.Error(), "hash_include") {
+				t.Errorf("error should mention hash_include, got %v", err)
+			}
+		})
+	}
+}
+
+// TestSpec_Validate_AcceptsLexicallyInScopeHashInclude is the control for
+// the test above: entries that stay within the one-hop sibling-task
+// boundary (or don't escape dir at all) must still validate.
+func TestSpec_Validate_AcceptsLexicallyInScopeHashInclude(t *testing.T) {
+	cases := []string{
+		"../sibling-task/file.ts", // one hop up, then down — the feature's actual use case
+		"../sibling.ts",
+		"foo.ts",     // stays inside dir itself — redundant but harmless
+		"lib/foo.ts", // same, nested
+	}
+	for _, inc := range cases {
+		t.Run(inc, func(t *testing.T) {
+			s := Spec{
+				Name:        "test",
+				Runtime:     RuntimeDeno,
+				Trigger:     TriggerConfig{Manual: true},
+				HashInclude: []string{inc},
+			}
+			if err := s.Validate(); err != nil {
+				t.Fatalf("hash_include %q should validate, got %v", inc, err)
+			}
+		})
+	}
+}
+
 func TestSpec_RunResultOverride_Omitted(t *testing.T) {
 	yamlSrc := []byte(`
 name: test
