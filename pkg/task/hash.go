@@ -26,6 +26,63 @@ var heavyDirs = map[string]bool{
 	".git":         true,
 }
 
+// hashEntry is one file or symlink folded into a Hash digest. label is the
+// string written into the digest to identify the entry — for in-dir entries
+// it's the dir-relative slash path; for hash_include entries it's prefixed
+// with "include:" (see Hash) so an include can never collide with an in-dir
+// path of the same name. abs is the absolute filesystem path read to fill in
+// file content (unused for symlinks, whose target string is the content).
+type hashEntry struct {
+	label  string
+	abs    string
+	isLink bool
+	target string
+	// missing marks an include path that doesn't exist. Folded into the
+	// digest as a sentinel (rather than silently contributing nothing) so
+	// deleting or mistyping a hash_include entry still changes the hash.
+	missing bool
+}
+
+// walkTree walks root recursively (skipping heavyDirs, same rules as the
+// top-level dir walk) and appends one hashEntry per regular file or symlink,
+// labelling each with labelPrefix + the root-relative slash path. Shared by
+// Hash's own dir walk (labelPrefix "") and by hash_include directory entries
+// (labelPrefix "include:<path>/").
+func walkTree(root, labelPrefix string) ([]hashEntry, error) {
+	var entries []hashEntry
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if path != root && heavyDirs[d.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		label := labelPrefix + filepath.ToSlash(rel)
+		switch {
+		case d.Type()&fs.ModeSymlink != 0:
+			target, err := os.Readlink(path)
+			if err != nil {
+				return fmt.Errorf("readlink %s: %w", path, err)
+			}
+			entries = append(entries, hashEntry{label: label, isLink: true, target: target})
+		case d.Type().IsRegular():
+			entries = append(entries, hashEntry{label: label, abs: path})
+		}
+		return nil
+	})
+	if err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
+	return entries, nil
+}
+
 // Hash computes a content hash over the regular files under dir, recursively,
 // in sorted dir-relative path order. The runtime allows the task script to
 // import any sibling file (the Deno sandbox allow-reads the whole task dir;
@@ -50,69 +107,92 @@ var heavyDirs = map[string]bool{
 // block and they carry no task content.
 //
 // A missing dir hashes like an empty one (callers race task removal).
-func Hash(dir string) (string, error) {
-	type entry struct {
-		rel    string
-		isLink bool
-		target string
-	}
-	var entries []entry
-	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			if path != dir && heavyDirs[d.Name()] {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		rel, err := filepath.Rel(dir, path)
-		if err != nil {
-			return err
-		}
-		rel = filepath.ToSlash(rel)
-		switch {
-		case d.Type()&fs.ModeSymlink != 0:
-			target, err := os.Readlink(path)
-			if err != nil {
-				return fmt.Errorf("readlink %s: %w", path, err)
-			}
-			entries = append(entries, entry{rel: rel, isLink: true, target: target})
-		case d.Type().IsRegular():
-			entries = append(entries, entry{rel: rel})
-		}
-		return nil
-	})
-	if err != nil && !os.IsNotExist(err) {
+//
+// includes (task.yaml's hash_include field) name additional files or
+// directories, each resolved relative to dir, whose content is folded into
+// the same digest — for a task that imports a shared module living outside
+// its own dir (e.g. a sibling buildin task's helper library), editing that
+// module would otherwise never perturb this task's hash and so would never
+// re-trip the reconciler reload or the #392 approval-gate re-pend (#585). A
+// directory include is walked recursively like dir itself; a file include is
+// hashed as a single entry. Each include is labelled "include:<path>[/...]"
+// in the digest so it can never collide with an in-dir path of the same
+// name, and a missing include folds in a sentinel rather than silently
+// contributing nothing, so a mistyped or deleted include path still changes
+// the hash instead of degrading to a no-op.
+func Hash(dir string, includes ...string) (string, error) {
+	entries, err := walkTree(dir, "")
+	if err != nil {
 		return "", fmt.Errorf("hash %s: %w", dir, err)
 	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].rel < entries[j].rel })
+
+	sortedIncludes := append([]string(nil), includes...)
+	sort.Strings(sortedIncludes)
+	for _, inc := range sortedIncludes {
+		if inc == "" {
+			continue
+		}
+		label := "include:" + filepath.ToSlash(inc)
+		incAbs := filepath.Join(dir, filepath.FromSlash(inc))
+		info, err := os.Lstat(incAbs)
+		if err != nil {
+			if os.IsNotExist(err) {
+				entries = append(entries, hashEntry{label: label, missing: true})
+				continue
+			}
+			return "", fmt.Errorf("hash include %s: %w", inc, err)
+		}
+		switch {
+		case info.Mode()&fs.ModeSymlink != 0:
+			target, err := os.Readlink(incAbs)
+			if err != nil {
+				return "", fmt.Errorf("hash include %s: readlink: %w", inc, err)
+			}
+			entries = append(entries, hashEntry{label: label, isLink: true, target: target})
+		case info.IsDir():
+			sub, err := walkTree(incAbs, label+"/")
+			if err != nil {
+				return "", fmt.Errorf("hash include %s: %w", inc, err)
+			}
+			entries = append(entries, sub...)
+		default:
+			entries = append(entries, hashEntry{label: label, abs: incAbs})
+		}
+	}
+
+	sort.Slice(entries, func(i, j int) bool { return entries[i].label < entries[j].label })
 
 	h := sha256.New()
 	for _, e := range entries {
-		// Path and kind act as separators so hash(A+B) != hash(AB) and a
+		// Label and kind act as separators so hash(A+B) != hash(AB) and a
 		// regular file can never collide with a link whose target holds the
 		// same bytes.
 		kind := byte('f')
-		if e.isLink {
+		switch {
+		case e.isLink:
 			kind = 'l'
+		case e.missing:
+			kind = 'm'
 		}
-		fmt.Fprintf(h, "%s\x00%c\x00", e.rel, kind)
-		if e.isLink {
+		fmt.Fprintf(h, "%s\x00%c\x00", e.label, kind)
+		switch {
+		case e.isLink:
 			h.Write([]byte(e.target))
-		} else {
-			abs := filepath.Join(dir, filepath.FromSlash(e.rel))
-			info, err := os.Stat(abs)
+		case e.missing:
+			// No content to fold in beyond the label+kind separator above —
+			// that alone is enough to make a missing include distinguishable
+			// from both "not configured" and "present with any content".
+		default:
+			info, err := os.Stat(e.abs)
 			if err != nil {
-				return "", fmt.Errorf("hash %s: %w", abs, err)
+				return "", fmt.Errorf("hash %s: %w", e.abs, err)
 			}
 			if info.Size() > maxHashedFileBytes {
 				fmt.Fprintf(h, "%d\x00%d", info.Size(), info.ModTime().UnixNano())
 			} else {
-				data, err := os.ReadFile(abs)
+				data, err := os.ReadFile(e.abs)
 				if err != nil {
-					return "", fmt.Errorf("hash %s: %w", abs, err)
+					return "", fmt.Errorf("hash %s: %w", e.abs, err)
 				}
 				h.Write(data)
 			}

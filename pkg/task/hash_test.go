@@ -596,3 +596,188 @@ func TestScanDir_SkipsDirsWithoutTaskYaml(t *testing.T) {
 		t.Errorf("scratch dir without task.yaml should not register")
 	}
 }
+
+// ── hash_include (#585) ─────────────────────────────────────────────────
+
+// TestHash_IncludeFileEditChangesHash is the core regression gate for #585:
+// a shared module living outside the task dir must perturb the hash when
+// edited, as long as it's named in includes — otherwise the approval gate
+// never re-pends importers of a changed shared module.
+func TestHash_IncludeFileEditChangesHash(t *testing.T) {
+	root := t.TempDir()
+	shared := filepath.Join(root, "shared", "chat.ts")
+	if err := os.MkdirAll(filepath.Dir(shared), 0755); err != nil {
+		t.Fatalf("mkdir shared: %v", err)
+	}
+	if err := os.WriteFile(shared, []byte("export const v = 1\n"), 0644); err != nil {
+		t.Fatalf("write shared v1: %v", err)
+	}
+
+	dir := filepath.Join(root, "task-a")
+	writeTaskFiles(t, dir, "name: a\nhash_include: [\"../shared/chat.ts\"]\n", "import '../shared/chat.ts'\n")
+
+	before, err := Hash(dir, "../shared/chat.ts")
+	if err != nil {
+		t.Fatalf("before: %v", err)
+	}
+	if err := os.WriteFile(shared, []byte("export const v = 2\n"), 0644); err != nil {
+		t.Fatalf("rewrite shared: %v", err)
+	}
+	after, err := Hash(dir, "../shared/chat.ts")
+	if err != nil {
+		t.Fatalf("after: %v", err)
+	}
+	if before == after {
+		t.Fatalf("Hash ignored an edit to an included shared module: before == after == %q", before)
+	}
+}
+
+// TestHash_WithoutInclude_SharedModuleEditInvisible is the control for the
+// test above: without hash_include, the same edit to the same shared module
+// must NOT change the hash — this is the pre-#585 hole the feature closes,
+// pinned here so a future refactor can't silently make Hash always walk
+// outward (which would break the "sandbox only reads TaskDir" invariant).
+func TestHash_WithoutInclude_SharedModuleEditInvisible(t *testing.T) {
+	root := t.TempDir()
+	shared := filepath.Join(root, "shared", "chat.ts")
+	if err := os.MkdirAll(filepath.Dir(shared), 0755); err != nil {
+		t.Fatalf("mkdir shared: %v", err)
+	}
+	if err := os.WriteFile(shared, []byte("export const v = 1\n"), 0644); err != nil {
+		t.Fatalf("write shared v1: %v", err)
+	}
+
+	dir := filepath.Join(root, "task-a")
+	writeTaskFiles(t, dir, "name: a\n", "import '../shared/chat.ts'\n")
+
+	before, err := Hash(dir) // no includes
+	if err != nil {
+		t.Fatalf("before: %v", err)
+	}
+	if err := os.WriteFile(shared, []byte("export const v = 2\n"), 0644); err != nil {
+		t.Fatalf("rewrite shared: %v", err)
+	}
+	after, err := Hash(dir)
+	if err != nil {
+		t.Fatalf("after: %v", err)
+	}
+	if before != after {
+		t.Fatalf("Hash without includes unexpectedly saw an out-of-dir edit: %q -> %q", before, after)
+	}
+}
+
+// TestHash_IncludeDirWalkedRecursively covers a directory include: every
+// file under it participates in the digest, not just the top level.
+func TestHash_IncludeDirWalkedRecursively(t *testing.T) {
+	root := t.TempDir()
+	sharedDir := filepath.Join(root, "shared")
+	nested := filepath.Join(sharedDir, "nested")
+	if err := os.MkdirAll(nested, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nested, "deep.ts"), []byte("v1"), 0644); err != nil {
+		t.Fatalf("write deep.ts: %v", err)
+	}
+
+	dir := filepath.Join(root, "task-a")
+	writeTaskFiles(t, dir, "name: a\n", "js")
+
+	before, err := Hash(dir, "../shared")
+	if err != nil {
+		t.Fatalf("before: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nested, "deep.ts"), []byte("v2"), 0644); err != nil {
+		t.Fatalf("rewrite deep.ts: %v", err)
+	}
+	after, err := Hash(dir, "../shared")
+	if err != nil {
+		t.Fatalf("after: %v", err)
+	}
+	if before == after {
+		t.Fatalf("Hash ignored an edit nested inside a directory include: before == after == %q", before)
+	}
+}
+
+// TestHash_MissingIncludeFoldsSentinel_NotError: a hash_include path that
+// doesn't exist (deleted shared module, typo) must not error the hash — the
+// reconciler runs Hash on every poll and a hard error there would break
+// change-detection for the whole task — but it must still perturb the
+// digest relative to "include not configured at all", so a deleted include
+// is itself a detectable change rather than a silent no-op.
+func TestHash_MissingIncludeFoldsSentinel_NotError(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "task-a")
+	writeTaskFiles(t, dir, "name: a\n", "js")
+
+	withMissingInclude, err := Hash(dir, "../nonexistent/module.ts")
+	if err != nil {
+		t.Fatalf("Hash errored on a missing include: %v", err)
+	}
+	withoutInclude, err := Hash(dir)
+	if err != nil {
+		t.Fatalf("Hash: %v", err)
+	}
+	if withMissingInclude == withoutInclude {
+		t.Fatalf("a missing include produced the same hash as no include at all: %q", withMissingInclude)
+	}
+}
+
+// TestHash_IncludeLabelDoesNotCollideWithInDirFile: an include path and an
+// in-dir file of the same base name must not be hashed as the same digest
+// contribution — the "include:" label prefix exists precisely to keep these
+// two namespaces distinct (see the Hash doc comment).
+func TestHash_IncludeLabelDoesNotCollideWithInDirFile(t *testing.T) {
+	root := t.TempDir()
+	shared := filepath.Join(root, "shared.ts")
+	if err := os.WriteFile(shared, []byte("shared-content"), 0644); err != nil {
+		t.Fatalf("write shared: %v", err)
+	}
+
+	// Task with an in-dir file literally named "shared.ts" plus an include of
+	// the same base name pointing outside — these must be treated as two
+	// independent entries in the digest, not merged/aliased.
+	dir := filepath.Join(root, "task-a")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "shared.ts"), []byte("in-dir-content"), 0644); err != nil {
+		t.Fatalf("write in-dir shared.ts: %v", err)
+	}
+
+	withInclude, err := Hash(dir, "../shared.ts")
+	if err != nil {
+		t.Fatalf("withInclude: %v", err)
+	}
+	withoutInclude, err := Hash(dir)
+	if err != nil {
+		t.Fatalf("withoutInclude: %v", err)
+	}
+	if withInclude == withoutInclude {
+		t.Fatalf("including an out-of-dir file with the same base name as an in-dir file was a no-op: %q", withInclude)
+	}
+}
+
+// TestHash_IncludeOrderIndependent: includes are sorted before hashing, so
+// declaring them in a different order in task.yaml must not change the hash
+// — otherwise reordering an unrelated list would spuriously re-pend approval.
+func TestHash_IncludeOrderIndependent(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"one.ts", "two.ts"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(name), 0644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	dir := filepath.Join(root, "task-a")
+	writeTaskFiles(t, dir, "name: a\n", "js")
+
+	forward, err := Hash(dir, "../one.ts", "../two.ts")
+	if err != nil {
+		t.Fatalf("forward: %v", err)
+	}
+	reverse, err := Hash(dir, "../two.ts", "../one.ts")
+	if err != nil {
+		t.Fatalf("reverse: %v", err)
+	}
+	if forward != reverse {
+		t.Fatalf("include order changed the hash: %q vs %q", forward, reverse)
+	}
+}

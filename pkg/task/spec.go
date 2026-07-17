@@ -559,6 +559,18 @@ type Spec struct {
 	// Independent of RunInputs (which controls persistence). Used by #238.
 	AutoFix *AutoFixConfig `yaml:"auto_fix,omitempty" json:"auto_fix,omitempty"`
 
+	// HashInclude names additional files or directories, each resolved
+	// relative to TaskDir, whose content is folded into this task's content
+	// hash (task.Hash) alongside its own dir. A task can import a shared
+	// module living outside its own dir (e.g. a sibling buildin task's
+	// helper library); without this, editing that module never perturbs the
+	// importer's hash, so it never re-trips the reconciler reload or the
+	// #392 approval-gate re-pend for the importer (#585). Most tasks don't
+	// need this — the Deno/Python sandbox already only reads within TaskDir,
+	// so only a task that explicitly imports a path outside it should set
+	// this to the same path(s) it imports.
+	HashInclude []string `yaml:"hash_include,omitempty" json:"hash_include,omitempty"`
+
 	// Enabled is false when this task has been disabled via an override or
 	// entry-level `enabled: false`. Disabled tasks remain in the registry and
 	// appear in the API (with enabled:false) but are not scheduled, spawned,
@@ -768,6 +780,14 @@ func (s *Spec) validate() error {
 	for _, e := range s.Permissions.Env {
 		if e.Name == "*" {
 			return fmt.Errorf(`permissions.env: a name-only "*" entry is no longer accepted; set "env_read_exposed: true" to grant the Deno sandbox bare --allow-env`)
+		}
+	}
+	for _, inc := range s.HashInclude {
+		if inc == "" {
+			return fmt.Errorf("hash_include: entries must not be empty")
+		}
+		if filepath.IsAbs(inc) {
+			return fmt.Errorf("hash_include: %q must be relative to the task directory, not absolute", inc)
 		}
 	}
 	triggers := 0

@@ -159,6 +159,69 @@ permissions:
 	}
 }
 
+func TestSpec_HashInclude_Parses(t *testing.T) {
+	yamlSrc := []byte(`
+name: test
+runtime: deno
+trigger: { manual: true }
+hash_include:
+  - "../ai-agent-core/chat.ts"
+  - "../shared"
+`)
+	var s Spec
+	if err := yaml.Unmarshal(yamlSrc, &s); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"../ai-agent-core/chat.ts", "../shared"}
+	if len(s.HashInclude) != len(want) {
+		t.Fatalf("HashInclude = %v, want %v", s.HashInclude, want)
+	}
+	for i, w := range want {
+		if s.HashInclude[i] != w {
+			t.Errorf("HashInclude[%d] = %q, want %q", i, s.HashInclude[i], w)
+		}
+	}
+	if err := s.Validate(); err != nil {
+		t.Fatalf("valid hash_include should validate, got %v", err)
+	}
+}
+
+func TestSpec_Validate_RejectsEmptyHashIncludeEntry(t *testing.T) {
+	s := Spec{
+		Name:    "test",
+		Runtime: RuntimeDeno,
+		Trigger: TriggerConfig{Manual: true},
+		HashInclude: []string{
+			"",
+		},
+	}
+	err := s.Validate()
+	if err == nil {
+		t.Fatal("an empty hash_include entry must be rejected")
+	}
+	if !strings.Contains(err.Error(), "hash_include") {
+		t.Errorf("error should mention hash_include, got %v", err)
+	}
+}
+
+func TestSpec_Validate_RejectsAbsoluteHashIncludeEntry(t *testing.T) {
+	s := Spec{
+		Name:    "test",
+		Runtime: RuntimeDeno,
+		Trigger: TriggerConfig{Manual: true},
+		HashInclude: []string{
+			"/etc/passwd",
+		},
+	}
+	err := s.Validate()
+	if err == nil {
+		t.Fatal("an absolute hash_include entry must be rejected")
+	}
+	if !strings.Contains(err.Error(), "hash_include") {
+		t.Errorf("error should mention hash_include, got %v", err)
+	}
+}
+
 func TestSpec_RunResultOverride_Omitted(t *testing.T) {
 	yamlSrc := []byte(`
 name: test
