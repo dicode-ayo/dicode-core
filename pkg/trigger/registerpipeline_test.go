@@ -39,7 +39,7 @@ func TestPipelineCronRegistered(t *testing.T) {
 	registerStageAndPipeline(t, env, pipe)
 
 	env.engine.mu.Lock()
-	_, ok := env.engine.cronEntries["p"]
+	_, ok := env.engine.cronArmed["p"]
 	env.engine.mu.Unlock()
 	if !ok {
 		t.Fatal("no cron entry registered for cron-triggered pipeline")
@@ -198,7 +198,7 @@ func TestColdStartDeferredPipeline(t *testing.T) {
 	}
 	// It must NOT be scheduled yet (no cron entry).
 	env.engine.mu.Lock()
-	_, scheduled := env.engine.cronEntries["p"]
+	_, scheduled := env.engine.cronArmed["p"]
 	env.engine.mu.Unlock()
 	if scheduled {
 		t.Fatal("pipeline should not be scheduled before its stage exists")
@@ -224,7 +224,7 @@ func TestColdStartDeferredPipeline(t *testing.T) {
 	// 3. The pipeline must now be scheduled (cron entry appears) and dropped
 	// from the deferred set.
 	env.engine.mu.Lock()
-	_, scheduled = env.engine.cronEntries["p"]
+	_, scheduled = env.engine.cronArmed["p"]
 	env.engine.mu.Unlock()
 	if !scheduled {
 		t.Fatal("pipeline was not scheduled after its stage registered (deferred-retry failed)")
@@ -336,7 +336,7 @@ func TestColdStartDeferredPipeline_DisabledNotDeferred(t *testing.T) {
 		t.Fatal("disabled pipeline with a missing stage must not be deferred")
 	}
 	env.engine.mu.Lock()
-	_, scheduled := env.engine.cronEntries["p"]
+	_, scheduled := env.engine.cronArmed["p"]
 	env.engine.mu.Unlock()
 	if scheduled {
 		t.Fatal("disabled pipeline must not schedule a cron entry")
@@ -403,7 +403,7 @@ func TestColdStartDeferredPipeline_GenuinelyMissingStaysUnscheduled(t *testing.T
 	}
 
 	env.engine.mu.Lock()
-	_, scheduled := env.engine.cronEntries["p"]
+	_, scheduled := env.engine.cronArmed["p"]
 	env.engine.mu.Unlock()
 	if scheduled {
 		t.Fatal("pipeline with a genuinely-missing stage must never schedule")
@@ -456,7 +456,7 @@ func TestColdStartDeferredPipeline_DroppedOnUnregister(t *testing.T) {
 		t.Fatal(err)
 	}
 	env.engine.mu.Lock()
-	_, scheduled := env.engine.cronEntries["p"]
+	_, scheduled := env.engine.cronArmed["p"]
 	env.engine.mu.Unlock()
 	if scheduled {
 		t.Fatal("dropped pipeline must not be resurrected by a later stage registration")

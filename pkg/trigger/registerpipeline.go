@@ -140,12 +140,46 @@ func (e *Engine) detectPipelineCycle(p *task.PipelineTask) string {
 // stale deferred entry is dropped if an enabled pipeline is re-registered
 // disabled).
 //
+// Trigger teardown (#550, generalized to pipelines): unlike the *task.Spec
+// branch of Register, this function used to route straight to arming
+// cron/webhook without ever calling unregisterTriggersKeeping — so a
+// re-registered pipeline whose cron schedule changed left its OLD cron.EntryID
+// permanently orphaned in the scheduler (a second entry was added alongside
+// it, both firing forever), and a changed webhook path never released the old
+// path. This now mirrors the *task.Spec branch exactly: compute which
+// webhook/cron the incoming registration will actually re-claim and call
+// unregisterTriggersKeeping unconditionally, before either early-return below,
+// so every registration — including one that ends up disabled or deferred —
+// tears down whatever it isn't re-claiming.
+//
 // NOTE: registerPipeline must be called with e.registerMu already held (Engine.Register does this),
 // which is also what guards deferredPipelines.
 func (e *Engine) registerPipeline(p *task.PipelineTask) error {
 	if err := p.Validate(); err != nil {
 		return err
 	}
+
+	// Keep the webhook path / cron schedule this registration is about to
+	// re-claim, exactly as the *task.Spec branch of Register does. Only offer
+	// them as "keepable" when this registration will actually re-arm the
+	// trigger below (enabled + has that trigger); a disabled pipeline offers
+	// neither, forcing unregisterTriggersKeeping to fully tear down any
+	// previously-armed trigger.
+	keepWebhook := ""
+	if p.Enabled && p.Trigger.Webhook != "" &&
+		!(p.Trigger.Webhook == reservedOAuthCompletePath && p.ID != oauthRelayBuiltinID) {
+		keepWebhook = p.Trigger.Webhook
+	}
+	keepCron := ""
+	if p.Enabled && p.Trigger.Cron != "" {
+		keepCron = p.Trigger.Cron
+	}
+	// keptCron tells scheduleCron (via registerPipelineCron below) whether the
+	// armed cron entry already matches this schedule — see the doc on
+	// unregisterTriggersKeeping / scheduleCron for why this avoids a redundant
+	// re-check.
+	keptCron := e.unregisterTriggersKeeping(p.ID, keepWebhook, keepCron)
+
 	// Short-circuit a disabled pipeline before the registry-ref check: it
 	// schedules no triggers regardless of whether its stages ever arrive, so
 	// deferring it on a missing stage is pointless churn (it would sit in
@@ -180,7 +214,7 @@ func (e *Engine) registerPipeline(p *task.PipelineTask) error {
 	// Schedule cron/webhook triggers. Manual pipelines fire via FireManual and
 	// chain pipelines via FireChain (Task 16), so neither needs scheduling here.
 	if p.Trigger.Cron != "" {
-		e.registerPipelineCron(p)
+		e.registerPipelineCron(p, keptCron)
 	}
 	if p.Trigger.Webhook != "" {
 		e.registerWebhookPath(p.ID, p.Trigger.Webhook)
