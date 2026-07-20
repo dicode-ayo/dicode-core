@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
 	"sync"
 	"time"
 
@@ -14,6 +15,25 @@ import (
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
 )
+
+// sourceNameRe restricts a source's `spec.entries` key to a safe identifier.
+// The name is used verbatim as a YAML map key and as the first path segment
+// of every task ID under that source (namespace/task-dir — see
+// pkg/taskset/resolver.go joinNamespace), so it must not contain '/' or other
+// characters that could be misread as a path separator or break YAML/JSON
+// round-tripping. Mirrors the identifier pattern already used for other
+// user-supplied tokens embedded into a namespace elsewhere in this codebase
+// (e.g. container volume names in pkg/runtime/containersec/policy.go).
+var sourceNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
+
+// validateSourceName returns an error describing why name is not a valid
+// source (spec.entries) name, or nil if it is valid.
+func validateSourceName(name string) error {
+	if !sourceNameRe.MatchString(name) {
+		return fmt.Errorf("name must start with a letter or digit and contain only letters, digits, '-', '_', or '.' (max 64 characters)")
+	}
+	return nil
+}
 
 // SourceInfo is the JSON representation of a source for the API and for the
 // MCP task that consumes /api/sources. LastPullAt is a pointer because

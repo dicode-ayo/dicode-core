@@ -2,6 +2,13 @@ import { LitElement, html } from 'https://esm.sh/lit@3';
 import { get, post, del } from '../lib/api.js';
 import { monacoTheme } from '../lib/theme.js';
 
+// Mirrors pkg/webui/sources.go sourceNameRe: a source name becomes both a
+// spec.entries YAML map key and the first path segment of every task ID
+// under that source, so it's restricted to a safe identifier. This is a
+// client-side pre-check for fast feedback only — the server enforces the
+// same rule authoritatively.
+const SOURCE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
+
 class DcConfig extends LitElement {
   createRenderRoot() { return this; } // Monaco needs direct DOM access
 
@@ -93,8 +100,14 @@ class DcConfig extends LitElement {
   }
 
   async _addSource() {
+    const name = this.querySelector('#new-src-name')?.value.trim() || '';
+    if (!name) { this._srcStatus = 'Error: name is required'; return; }
+    if (!SOURCE_NAME_RE.test(name)) {
+      this._srcStatus = "Error: name must start with a letter or digit and contain only letters, digits, '-', '_', or '.' (max 64 characters)";
+      return;
+    }
     const type = this._srcType;
-    const body = { type };
+    const body = { name };
     if (type === 'local') {
       body.path = this.querySelector('#new-src-path')?.value;
     } else {
@@ -102,7 +115,7 @@ class DcConfig extends LitElement {
       body.branch    = this.querySelector('#new-src-branch')?.value || 'main';
       body.token_env = this.querySelector('#new-src-token-env')?.value;
     }
-    try { await post('/api/settings/sources', body); this._load(); }
+    try { await post('/api/settings/sources', body); this._srcStatus = ''; this._load(); }
     catch(e) { this._srcStatus = 'Error: ' + e.message; }
   }
 
@@ -214,6 +227,13 @@ class DcConfig extends LitElement {
         <details>
           <summary style="cursor:pointer;font-size:0.85rem;color:var(--lavender);user-select:none">+ Add source</summary>
           <div class="cfg-form" style="margin-top:0.75rem">
+            <div class="field"><label>Name</label>
+              <input id="new-src-name" placeholder="my-source">
+              <div class="hint">
+                Used as this source's <code>spec.entries</code> key and task-id prefix
+                (e.g. <code>my-source/some-task</code>). Letters, digits, '-', '_', or '.' only.
+              </div>
+            </div>
             <div class="field"><label>Type</label>
               <select id="new-src-type" @change=${e => { this._srcType = e.target.value; }}>
                 <option value="local">local</option>

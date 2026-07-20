@@ -10,7 +10,7 @@
  */
 
 import { test, expect } from '@playwright/test';
-import { gotoWebui, navigateInSpa } from './helpers/webui';
+import { gotoWebui, navigateInSpa, waitForConfigPage } from './helpers/webui';
 
 test.describe('Config API', () => {
   test('GET /api/config returns config object with our test port', async ({ request }) => {
@@ -124,11 +124,7 @@ test.describe('Config UI', () => {
   test('navigating to /config shows config page', async ({ page }) => {
     await gotoWebui(page);
     await navigateInSpa(page, '/config');
-    await page.waitForSelector('dc-config', { timeout: 10_000 });
-    await page.waitForFunction(() => {
-      const el = document.querySelector('dc-config');
-      return !!el && !el.textContent?.includes('Loading') && el.textContent !== '';
-    }, { timeout: 15_000 });
+    await waitForConfigPage(page);
 
     await expect(page).toHaveURL(/\/config/);
   });

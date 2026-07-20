@@ -3,18 +3,24 @@ package webui
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/dicode/dicode/pkg/config"
+	"github.com/dicode/dicode/pkg/db"
+	"github.com/dicode/dicode/pkg/ipc"
+	"github.com/dicode/dicode/pkg/registry"
 	"github.com/dicode/dicode/pkg/source"
 	"github.com/dicode/dicode/pkg/task"
 	"github.com/dicode/dicode/pkg/taskset"
+	"github.com/dicode/dicode/pkg/trigger"
 	"go.uber.org/zap"
 )
 
@@ -232,6 +238,146 @@ func TestApiAddSource_MissingURLAndPath(t *testing.T) {
 	}
 }
 
+// TestApiAddSource_DuplicateName verifies that adding a source whose name
+// already exists in spec.entries is rejected with 409, and that the
+// pre-existing entry is left untouched (config.spec.entries.buildin comes
+// from the seed config written by newTestServerWithConfigPath).
+func TestApiAddSource_DuplicateName(t *testing.T) {
+	srv, _ := newTestServerWithConfigPath(t)
+
+	body := `{"name":"buildin","path":"/tmp/other-tasks"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/settings/sources", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("got %d; want 409 for duplicate name; body=%s", w.Code, w.Body.String())
+	}
+
+	srv.cfgMu.RLock()
+	entry := srv.cfg.Spec.Entries["buildin"]
+	srv.cfgMu.RUnlock()
+	if entry == nil || entry.Ref == nil {
+		t.Fatal("expected pre-existing buildin entry to survive rejected duplicate add")
+	}
+	if entry.Ref.Path != "/tmp/buildin/taskset.yaml" {
+		t.Errorf("buildin entry was overwritten by rejected duplicate add: path = %q", entry.Ref.Path)
+	}
+}
+
+// TestApiAddSource_ConcurrentDuplicateName_TOCTOU fires two concurrent
+// POST /api/settings/sources requests for the same brand-new name and
+// asserts exactly one succeeds (200) and the other is rejected (409).
+//
+// This guards against the check-then-act race in apiAddSource: reading
+// cfg.Spec.Entries[name] to decide "does it already exist" and later
+// writing cfg.Spec.Entries[name] = entry must happen inside a single
+// s.cfgMu.Lock critical section (see the updateConfig mutate callback in
+// apiAddSource). If the check and the write were split across two lock
+// acquisitions (as they were before this fix, via a separate RLock/RUnlock
+// existence check ahead of the later write), two concurrent requests for
+// the same never-before-seen name could both observe "not present" and
+// both proceed to claim it, so a rerun of this test with that older code
+// path intermittently reported 2 OKs (or, depending on write-write
+// ordering, silently dropped one caller's config data) instead of exactly
+// one OK and one Conflict. Iterating with a fresh name each pass keeps the
+// assertion meaningful even though the race window is small.
+func TestApiAddSource_ConcurrentDuplicateName_TOCTOU(t *testing.T) {
+	srv, _ := newTestServerWithConfigPath(t)
+
+	const iterations = 50
+	for i := 0; i < iterations; i++ {
+		name := fmt.Sprintf("race-source-%d", i)
+		body := `{"name":"` + name + `","path":"/tmp/race"}`
+
+		var wg sync.WaitGroup
+		codes := make([]int, 2)
+		for g := 0; g < 2; g++ {
+			wg.Add(1)
+			go func(idx int) {
+				defer wg.Done()
+				req := httptest.NewRequest(http.MethodPost, "/api/settings/sources", strings.NewReader(body))
+				req.Header.Set("Content-Type", "application/json")
+				w := httptest.NewRecorder()
+				srv.Handler().ServeHTTP(w, req)
+				codes[idx] = w.Code
+			}(g)
+		}
+		wg.Wait()
+
+		okCount, conflictCount := 0, 0
+		for _, c := range codes {
+			switch c {
+			case http.StatusOK:
+				okCount++
+			case http.StatusConflict:
+				conflictCount++
+			default:
+				t.Fatalf("iteration %d: unexpected status %d for %q", i, c, name)
+			}
+		}
+		if okCount != 1 || conflictCount != 1 {
+			t.Fatalf("iteration %d: got %d OK / %d Conflict for two concurrent adds of %q; want exactly 1 OK and 1 Conflict (TOCTOU race in the duplicate-name check)", i, okCount, conflictCount, name)
+		}
+
+		srv.cfgMu.RLock()
+		_, exists := srv.cfg.Spec.Entries[name]
+		srv.cfgMu.RUnlock()
+		if !exists {
+			t.Fatalf("iteration %d: winning request's entry %q missing from cfg.Spec.Entries after both requests completed", i, name)
+		}
+	}
+}
+
+// TestApiAddSource_InvalidNameSlug verifies that a name containing
+// characters unsafe for a spec.entries key / task-id namespace segment
+// (here, a path separator) is rejected with 400 and never persisted.
+func TestApiAddSource_InvalidNameSlug(t *testing.T) {
+	srv, _ := newTestServerWithConfigPath(t)
+
+	body := `{"name":"bad/name","path":"/tmp/tasks"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/settings/sources", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("got %d; want 400 for invalid name slug; body=%s", w.Code, w.Body.String())
+	}
+
+	srv.cfgMu.RLock()
+	_, exists := srv.cfg.Spec.Entries["bad/name"]
+	srv.cfgMu.RUnlock()
+	if exists {
+		t.Error("invalid name should not have been persisted to spec.entries")
+	}
+}
+
+// TestApiAddSource_ValidSlugName is the positive counterpart to
+// TestApiAddSource_InvalidNameSlug: a name using the full allowed character
+// set (letters, digits, '-', '_', '.') is accepted.
+func TestApiAddSource_ValidSlugName(t *testing.T) {
+	srv, _ := newTestServerWithConfigPath(t)
+
+	body := `{"name":"my-source_2.local","path":"/tmp/tasks"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/settings/sources", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d; want 200 for valid slug name; body=%s", w.Code, w.Body.String())
+	}
+
+	srv.cfgMu.RLock()
+	entry := srv.cfg.Spec.Entries["my-source_2.local"]
+	srv.cfgMu.RUnlock()
+	if entry == nil || entry.Ref == nil {
+		t.Fatal("expected my-source_2.local entry in config after add")
+	}
+}
+
 // TestApiRemoveSource_HappyPath adds then removes a source, verifying it
 // disappears from the config.
 func TestApiRemoveSource_HappyPath(t *testing.T) {
@@ -367,5 +513,348 @@ func TestApiSaveConfigRaw_ReResolvesSourceOverrides(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for refresh-driven Updated event after raw-config save")
+	}
+}
+
+// newTestServerWithReconciler builds a Server wired to a real, running
+// *registry.Reconciler — unlike newTestServer/newTestServerWithSourceMgr
+// (server_test.go), which always construct with reconciler=nil, so the
+// s.reconciler != nil branches in apiAddSource/apiRemoveSource (including
+// reconcileClaimAfterAdd) are never exercised by any other test in this
+// package. The reconciler is started with zero initial sources; sources can
+// still be added dynamically via rec.AddSource, exactly as apiAddSource does.
+//
+// Unlike newTestServerWithSourceMgr, the trigger engine is built with a nil
+// default executor instead of a real denoruntime.New(...) — this test never
+// runs a task, only exercises the add/remove-source race, so it deliberately
+// avoids denoruntime's "ensure deno binary is cached, else download it" step
+// (which requires network access many sandboxes don't have) rather than
+// t.Skipf-ing when it's unavailable.
+func newTestServerWithReconciler(t *testing.T, cfg *config.Config) (*Server, *registry.Reconciler, *SourceManager) {
+	t.Helper()
+	d, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("db: %v", err)
+	}
+	t.Cleanup(func() { d.Close() })
+
+	reg := registry.New(d)
+	eng := trigger.New(reg, nil, zap.NewNop())
+
+	rec := registry.NewReconciler(reg, nil, "", zap.NewNop())
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = rec.Run(ctx) }()
+
+	sourceMgr := NewSourceManager(cfg, nil, t.TempDir(), zap.NewNop())
+
+	srv, err := New(8080, reg, eng, cfg, "", nil, rec, sourceMgr, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
+	if err != nil {
+		t.Fatalf("New server: %v", err)
+	}
+	sourceMgr.BindCfgMutex(&srv.cfgMu)
+	return srv, rec, sourceMgr
+}
+
+// blockingSource is a source.Source whose Start blocks until the test closes
+// unblock. It lets a test deterministically hold open the exact window
+// pkg/registry/reconciler.go's startSource leaves between calling src.Start
+// and populating rc.cancels[id] (cancels is only set *after* Start returns),
+// instead of relying on real timing to hit that window.
+//
+// startedCtx is a buffered(1) channel that receives the per-source ctx
+// (srcCtx) passed into Start, the moment Start is entered. Tests that need to
+// observe whether the reconciler later cancelled this source (via
+// RemoveSource, after Start already returned) can receive from startedCtx
+// once and then check ctx.Err() — context.CancelFunc marks a context's Err()
+// permanently once called, even if nothing is still selecting on Done(), so
+// this is a reliable after-the-fact signal that cleanup ran.
+type blockingSource struct {
+	id         string
+	unblock    chan struct{}
+	ch         chan source.Event
+	startedCtx chan context.Context
+}
+
+func newBlockingSource(id string) *blockingSource {
+	return &blockingSource{
+		id:         id,
+		unblock:    make(chan struct{}),
+		ch:         make(chan source.Event, 1),
+		startedCtx: make(chan context.Context, 1),
+	}
+}
+
+func (b *blockingSource) ID() string { return b.id }
+
+func (b *blockingSource) Start(ctx context.Context) (<-chan source.Event, error) {
+	select {
+	case b.startedCtx <- ctx:
+	default:
+	}
+	select {
+	case <-b.unblock:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return b.ch, nil
+}
+
+func (b *blockingSource) Sync(context.Context) error { return nil }
+
+// TestApiAddSource_ConcurrentRemove_NoOrphan is a regression test for the
+// race the 3fafc3f atomic-claim fix introduced between apiAddSource and
+// apiRemoveSource:
+//
+//  1. apiAddSource claims cfg.Spec.Entries[name] under s.cfgMu, then calls
+//     reconciler.AddSource(ts) — which calls ts.Start synchronously *before*
+//     populating rc.cancels[id] (pkg/registry/reconciler.go's startSource).
+//  2. While that Start call is still in flight, a concurrent apiRemoveSource
+//     for the same name sees the already-claimed config entry, deletes it,
+//     and calls reconciler.RemoveSource(id) — which misses (rc.cancels[id]
+//     isn't populated yet) and is a silent no-op.
+//  3. AddSource then finishes. Without the reconcileClaimAfterAdd guard,
+//     apiAddSource would unconditionally register the source with
+//     sourceMgr — leaving a live, registered source with no corresponding
+//     cfg.Spec.Entries entry: an orphan, the exact failure mode the 3fafc3f
+//     rollback was built to prevent, from the other direction.
+//
+// This drives the real *registry.Reconciler (not a mock) with a
+// blockingSource to reproduce the ordering precondition deterministically
+// instead of relying on real timing, then asserts the post-add state is
+// always fully consistent: either the source is completely removed (no
+// config entry, not registered with sourceMgr) or completely present
+// (config entry AND registered) — never the split, orphaned state.
+func TestApiAddSource_ConcurrentRemove_NoOrphan(t *testing.T) {
+	const name = "race-add-remove"
+	const id = "race-add-remove-id"
+
+	cfg := &config.Config{Server: config.ServerConfig{Port: 8080}}
+	cfg.Spec.Entries = map[string]*taskset.Entry{}
+
+	srv, rec, sourceMgr := newTestServerWithReconciler(t, cfg)
+
+	// Step 1: claim the config entry exactly as apiAddSource's updateConfig
+	// callback does before calling reconciler.AddSource. claimedEntry mirrors
+	// the `entry` variable apiAddSource keeps in scope for the identity check
+	// in reconcileClaimAfterAdd.
+	claimedEntry := &taskset.Entry{Ref: &taskset.Ref{Path: "/tmp/" + name}}
+	if err := srv.updateConfig(func(cfg *config.Config) error {
+		cfg.Spec.Entries[name] = claimedEntry
+		return nil
+	}); err != nil {
+		t.Fatalf("claim entry: %v", err)
+	}
+
+	// Step 2: start reconciler.AddSource(bs) — the same call apiAddSource
+	// makes — in the background. bs.Start blocks until unblocked, holding
+	// open the window where rc.cancels[id] is not yet populated.
+	bs := newBlockingSource(id)
+	addDone := make(chan error, 1)
+	go func() { addDone <- rec.AddSource(bs) }()
+
+	// Give the AddSource goroutine a moment to actually enter bs.Start so
+	// the RemoveSource-misses-and-no-ops step below reliably lands inside
+	// the race window. (The regression assertions after unblocking do not
+	// themselves depend on this timing — they hold regardless of when
+	// apiRemoveSource's delete lands relative to bs.Start.)
+	time.Sleep(20 * time.Millisecond)
+
+	// Step 3: apiRemoveSource racing in concurrently — delete the config
+	// entry and call reconciler.RemoveSource(id), reproducing exactly what
+	// apiRemoveSource does. This call is expected to be a no-op teardown
+	// (rc.cancels[id] not populated yet, since bs.Start is still blocked),
+	// which is the precondition for the orphan bug.
+	if err := srv.updateConfig(func(cfg *config.Config) error {
+		delete(cfg.Spec.Entries, name)
+		return nil
+	}); err != nil {
+		t.Fatalf("remove entry: %v", err)
+	}
+	rec.RemoveSource(id)
+
+	// Step 4: let AddSource finish.
+	close(bs.unblock)
+	if err := <-addDone; err != nil {
+		t.Fatalf("reconciler.AddSource: %v", err)
+	}
+
+	// Step 5: run the exact post-AddSource logic apiAddSource uses. The entry
+	// claimed in Step 1 was deleted (never replaced) by Step 3, so
+	// cfg.Spec.Entries[name] is nil here — reconcileClaimAfterAdd's identity
+	// check (nil != claimedEntry) reports "lost the race" just like the old
+	// name-presence check did for this scenario.
+	if srv.reconcileClaimAfterAdd(name, id, claimedEntry) {
+		sourceMgr.Register(name, taskset.NewSource(id, name, &taskset.Ref{Path: "/tmp/" + name}, "", t.TempDir(), false, 0, zap.NewNop()))
+	}
+
+	// Step 6: assert full consistency — the orphan state (registered but no
+	// config entry) must never occur.
+	srv.cfgMu.RLock()
+	_, cfgPresent := srv.cfg.Spec.Entries[name]
+	srv.cfgMu.RUnlock()
+	_, mgrPresent := sourceMgr.Get(name)
+
+	if mgrPresent != cfgPresent {
+		t.Fatalf("orphan reproduced: sourceMgr registered=%v but cfg.Spec.Entries present=%v (name=%q) — want both true or both false",
+			mgrPresent, cfgPresent, name)
+	}
+	if cfgPresent {
+		t.Fatalf("concurrent apiRemoveSource deleted cfg.Spec.Entries[%q] first; reconcileClaimAfterAdd should not have let it come back, but cfg entry present=%v", name, cfgPresent)
+	}
+}
+
+// TestApiAddSource_ABA_ReAddDuringSlowAddSource_NoStaleClobber is a
+// regression test for the ABA race left behind by the fix that produced
+// TestApiAddSource_ConcurrentRemove_NoOrphan above: comparing
+// cfg.Spec.Entries[name] by NAME PRESENCE (both in the AddSource-failure
+// rollback and in reconcileClaimAfterAdd) is not enough, because the slot can
+// be reoccupied by a completely different *taskset.Entry between the claim
+// and the re-check.
+//
+// Sequence reproduced here (matching the bug report):
+//  1. Request A claims cfg.Spec.Entries[name] = entryA, then starts the slow
+//     reconciler.AddSource(bsA) — bsA.Start blocks, holding open the window
+//     before rc.cancels[idA] is populated (same precondition as the sibling
+//     test above).
+//  2. Request B (DELETE) races in while A's AddSource is in flight: sees
+//     entryA present, deletes cfg.Spec.Entries[name], and calls
+//     reconciler.RemoveSource(idA) — which misses (rc.cancels[idA] not
+//     populated yet) and is a silent no-op, exactly like the sibling test.
+//  3. Request C (POST) re-adds the now-free name: claims
+//     cfg.Spec.Entries[name] = entryC (a brand-new pointer) and completes its
+//     own reconciler.AddSource(tsC) + sourceMgr.Register(tsC) synchronously.
+//  4. A's slow AddSource(bsA) finally returns. reconcileClaimAfterAdd for A
+//     must detect that cfg.Spec.Entries[name] is now entryC, not entryA —
+//     NOT treat "name present" as "still claimed" — self-clean bsA/tsA via
+//     reconciler.RemoveSource(idA), and leave entryC/tsC completely alone.
+//
+// On the pre-fix (name-presence-only) code, step 4 would wrongly report
+// "still claimed" (the name IS present — it's just entryC, not entryA), so
+// apiAddSource would register the stale tsA into sourceMgr on top of C's
+// tsC, and bsA's reconciler-side registration (rc.cancels[idA]) would never
+// be cleaned up — a permanent orphan.
+func TestApiAddSource_ABA_ReAddDuringSlowAddSource_NoStaleClobber(t *testing.T) {
+	const name = "race-aba"
+	const idA = "race-aba-id-a"
+	const idC = "race-aba-id-c"
+
+	cfg := &config.Config{Server: config.ServerConfig{Port: 8080}}
+	cfg.Spec.Entries = map[string]*taskset.Entry{}
+
+	srv, rec, sourceMgr := newTestServerWithReconciler(t, cfg)
+
+	// Step 1: Request A claims cfg.Spec.Entries[name] = entryA, mirroring the
+	// `entry` variable apiAddSource keeps in scope for its identity checks.
+	entryA := &taskset.Entry{Ref: &taskset.Ref{Path: "/tmp/" + idA}}
+	if err := srv.updateConfig(func(cfg *config.Config) error {
+		cfg.Spec.Entries[name] = entryA
+		return nil
+	}); err != nil {
+		t.Fatalf("claim entryA: %v", err)
+	}
+
+	// Step 2: Request A starts reconciler.AddSource(bsA) in the background;
+	// bsA.Start blocks, holding open the window before rc.cancels[idA] is
+	// populated.
+	bsA := newBlockingSource(idA)
+	addADone := make(chan error, 1)
+	go func() { addADone <- rec.AddSource(bsA) }()
+
+	// Give the AddSource goroutine a moment to actually enter bsA.Start so
+	// the RemoveSource-misses-and-no-ops step below reliably lands inside the
+	// race window.
+	time.Sleep(20 * time.Millisecond)
+
+	// Step 3: Request B (DELETE) races in: deletes cfg.Spec.Entries[name]
+	// (currently entryA) and calls reconciler.RemoveSource(idA) — a no-op
+	// since rc.cancels[idA] isn't populated yet (bsA.Start is still
+	// blocked), reproducing exactly what apiRemoveSource does.
+	if err := srv.updateConfig(func(cfg *config.Config) error {
+		delete(cfg.Spec.Entries, name)
+		return nil
+	}); err != nil {
+		t.Fatalf("remove entryA: %v", err)
+	}
+	rec.RemoveSource(idA)
+
+	// Step 4: Request C (POST) re-adds "name" — the slot is free again — and
+	// claims a brand-new *taskset.Entry (entryC). Its underlying source
+	// (bsC) does not block, so reconciler.AddSource(bsC) and
+	// sourceMgr.Register both complete synchronously here, exactly as
+	// apiAddSource does end-to-end for a fast, non-racing request.
+	entryC := &taskset.Entry{Ref: &taskset.Ref{Path: "/tmp/" + idC}}
+	if err := srv.updateConfig(func(cfg *config.Config) error {
+		if _, exists := cfg.Spec.Entries[name]; exists {
+			t.Fatalf("expected name %q to be free before C's claim (B's delete should have landed)", name)
+		}
+		cfg.Spec.Entries[name] = entryC
+		return nil
+	}); err != nil {
+		t.Fatalf("claim entryC: %v", err)
+	}
+	bsC := newBlockingSource(idC)
+	close(bsC.unblock) // C's Start never actually blocks; only A holds the race window
+	if err := rec.AddSource(bsC); err != nil {
+		t.Fatalf("reconciler.AddSource(bsC): %v", err)
+	}
+	tsC := taskset.NewSource(idC, name, entryC.Ref, "", t.TempDir(), false, 0, zap.NewNop())
+	if !srv.reconcileClaimAfterAdd(name, idC, entryC) {
+		t.Fatalf("C's own claim should still be standing immediately after C claims and registers it")
+	}
+	sourceMgr.Register(name, tsC)
+
+	// Step 5: A's slow AddSource finally returns.
+	close(bsA.unblock)
+	if err := <-addADone; err != nil {
+		t.Fatalf("reconciler.AddSource(bsA): %v", err)
+	}
+
+	// Step 6: run apiAddSource's post-AddSource logic for request A. This is
+	// the exact call the bug report identifies: on the pre-fix, name-presence
+	// -only code this wrongly reports "still claimed" (cfg.Spec.Entries[name]
+	// exists — it's just entryC now, not entryA) and would register the
+	// stale tsA into sourceMgr, clobbering/racing with C's already-registered
+	// tsC. The fix must compare identity (entryA) against what's actually in
+	// the slot (entryC) and treat A as having lost the race.
+	tsA := taskset.NewSource(idA, name, entryA.Ref, "", t.TempDir(), false, 0, zap.NewNop())
+	if srv.reconcileClaimAfterAdd(name, idA, entryA) {
+		sourceMgr.Register(name, tsA)
+	}
+
+	// Step 7: assert the end state reflects ONLY C's source, never A's stale
+	// one.
+	got, ok := sourceMgr.Get(name)
+	if !ok {
+		t.Fatalf("expected sourceMgr to have an entry for %q", name)
+	}
+	if got.ID() != idC {
+		t.Fatalf("sourceMgr[%q] has id %q, want C's id %q — stale A must not clobber C's registration", name, got.ID(), idC)
+	}
+
+	// cfg.Spec.Entries[name] must still be C's entry — A's belated
+	// reconcileClaimAfterAdd call must not have touched it.
+	srv.cfgMu.RLock()
+	finalEntry := srv.cfg.Spec.Entries[name]
+	srv.cfgMu.RUnlock()
+	if finalEntry != entryC {
+		t.Fatalf("cfg.Spec.Entries[%q] was mutated by A's losing claim; want it untouched at entryC", name)
+	}
+
+	// A's reconciler-side registration must have been cleaned up (via
+	// reconciler.RemoveSource(idA) inside reconcileClaimAfterAdd), not left
+	// as a permanent orphan. bsA's captured srcCtx will have been cancelled
+	// if and only if that cleanup ran — RemoveSource looks up rc.cancels[idA]
+	// (now populated, since AddSource(bsA) has returned) and invokes its
+	// CancelFunc, which permanently marks the context's Err() even though
+	// bsA.Start has already returned and nothing is still selecting on
+	// Done().
+	select {
+	case srcCtx := <-bsA.startedCtx:
+		if srcCtx.Err() == nil {
+			t.Fatalf("bsA's per-source context was never cancelled after losing the ABA race; reconciler.RemoveSource(idA) should have run — orphaned source leak")
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("bsA.Start was never observed to run")
 	}
 }
