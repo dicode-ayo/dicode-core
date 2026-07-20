@@ -71,8 +71,20 @@ func TestDaemonSubprocessReapedOnTeardown(t *testing.T) {
 		}
 
 		daemonChild := findStageChild(t, env, parentRunID, "reap-b", registry.StatusRunning, 20*time.Second)
-		// Standalone daemon + pipeline-stage daemon are both live now.
-		if n := len(denoruntime.ActivePIDs()); n < 2 {
+		// Standalone daemon + pipeline-stage daemon are both live now. The
+		// standalone daemon's PID registration is an independently-scheduled
+		// async path from the stage run reaching StatusRunning above, so poll
+		// briefly instead of reading ActivePIDs once.
+		deadline := time.Now().Add(5 * time.Second)
+		var n int
+		for {
+			n = len(denoruntime.ActivePIDs())
+			if n >= 2 || time.Now().After(deadline) {
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		if n < 2 {
 			t.Fatalf("expected >=2 live Deno subprocesses (standalone + stage), got %d", n)
 		}
 		// Kill only the pipeline stage run, exactly as the pipeline tests do. The
