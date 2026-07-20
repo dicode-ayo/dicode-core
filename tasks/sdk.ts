@@ -122,6 +122,10 @@ export interface Dicode {
   run_task(taskID: string, params?: Record<string, string>): Promise<unknown>;
   list_tasks(): Promise<unknown[]>;
   get_runs(taskID: string, opts?: { limit?: number }): Promise<unknown[]>;
+  // set_group labels the current run with a free-text string used by the
+  // WebUI to collapse same-group siblings (#116). Last write wins; only
+  // affects the current run.
+  set_group(label: string): Promise<void>;
   // Pause the run: hand the runtime `schema` + carried `state`, then never
   // resolve — the process exits cleanly and the run ends as `suspended`. On
   // resume the runner dispatches the matching handler (steps[to], resume, or

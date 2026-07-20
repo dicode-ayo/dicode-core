@@ -21,7 +21,7 @@
 // a value, not throws).
 
 import type { Dicode, DicodeSdk } from "../../sdk.ts";
-import { chatStart, chatTurn, decideEntryMode, isChatEnd, SAFE_SKILL_NAME } from "../ai-agent-core/chat.ts";
+import { chatStart, chatTurn, decideEntryMode, isChatEnd, isValidSessionId, resolveSessionId, SAFE_SKILL_NAME } from "../ai-agent-core/chat.ts";
 
 // Re-exported so the task's tests (and any importer) reach the shared envelope
 // helpers through the task module.
@@ -129,13 +129,32 @@ export const steps = {
             ctx,
             async ({ message, state }) => {
                 const carried = (state ?? {}) as ClaudeChatState;
-                // chatId is minted in main() and carried forward; default-guard it
-                // so a hand-crafted resume without one still runs (fresh cwd, no
-                // --resume).
-                const chatId = carried.chatId ?? crypto.randomUUID();
+
+                // chatId is minted in main() and carried forward; it becomes a
+                // filesystem path component (the per-invocation workdir), so a
+                // hand-crafted resume can't be trusted to hand back a safe value —
+                // validate as a UUID and mint a fresh one (fresh cwd, no --resume)
+                // rather than let an off-shape string reach Deno.Command's cwd.
+                const hasValidChatId = !!carried.chatId && isValidSessionId(carried.chatId);
+                const chatId = resolveSessionId(carried.chatId, "ai-agent-claude-cli: chatId", { autoMint: true });
+
+                // claudeSessionId becomes the `claude --resume <id>` subprocess
+                // argument. Same reasoning: validate before use, and treat an
+                // off-shape carried value as absent (fresh Claude session) rather
+                // than pass it through to the CLI invocation. Also: Claude CLI
+                // sessions are cwd-scoped (--resume only finds sessions created in
+                // the same workdir), so if chatId had to be replaced above, any
+                // carried claudeSessionId is now orphaned for the NEW workdir too
+                // — drop it rather than pass a validly-shaped but unresumable id
+                // to --resume (which would fail the turn instead of gracefully
+                // starting a fresh session).
+                const priorClaudeSessionId = hasValidChatId
+                    ? resolveSessionId(carried.claudeSessionId, "ai-agent-claude-cli: claudeSessionId", { autoMint: false })
+                    : "";
+
                 const turn = await runClaudeTurn({
                     message,
-                    priorClaudeSessionId: carried.claudeSessionId ?? "",
+                    priorClaudeSessionId,
                     workdirKey: chatId,
                     params,
                 });
@@ -145,7 +164,10 @@ export const steps = {
             (state) => ({
                 ok: true,
                 reply: "(chat ended)",
-                session_id: (state as ClaudeChatState | undefined)?.claudeSessionId ?? "",
+                // A blank message short-circuits straight to this callback — the
+                // runTurn validation above never runs — so validate here too rather
+                // than echo a possibly off-shape carried id back to the caller.
+                session_id: resolveSessionId((state as ClaudeChatState | undefined)?.claudeSessionId, "ai-agent-claude-cli: claudeSessionId(end)", { autoMint: false }),
             }),
         );
     },
@@ -192,6 +214,19 @@ async function runClaudeTurn(opts: {
     params: Params;
 }): Promise<TurnResult> {
     const { message, priorClaudeSessionId, workdirKey, params } = opts;
+
+    // Defense-in-depth: workdirKey becomes Deno.Command's cwd and
+    // priorClaudeSessionId (when non-empty) becomes the `--resume` argument.
+    // Both callers (steps.turn, oneShotTurn) already validate/self-generate
+    // these before calling in, so this should never trip — but runClaudeTurn
+    // is the function that actually owns the sink, so it shouldn't rely
+    // entirely on caller discipline to keep an off-shape id from reaching it.
+    if (!isValidSessionId(workdirKey)) {
+        return fail(`internal error: workdirKey is not a valid session id — refusing to build a workdir path from it`);
+    }
+    if (priorClaudeSessionId && !isValidSessionId(priorClaudeSessionId)) {
+        return fail(`internal error: priorClaudeSessionId is not a valid session id — refusing to pass it to --resume`);
+    }
 
     const model         = (await params.get("model"))         ?? "";
     const systemPrompt  = (await params.get("system_prompt")) ?? "";

@@ -17,6 +17,43 @@ import type { Dicode, JSONSchema } from "../../sdk.ts";
 // of ValidateRunID elsewhere in the codebase.
 export const SAFE_SKILL_NAME = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$/;
 
+// SESSION_ID_RE caps chat/session identifiers to the UUID shape dicode itself
+// mints via crypto.randomUUID() — and the shape the Claude CLI's own session
+// ids take. Every place a chat/session id is carried through resume `state` or
+// accepted as a param is attacker-influenceable (a resume submission, or a
+// hand-crafted webhook body); once such a value reaches a subprocess arg
+// (`claude --resume <id>`), a filesystem path component (the per-invocation
+// workdir), or a KV/run-group key, an unvalidated string is a path-traversal /
+// argument-injection vector. Reject anything off-shape rather than trying to
+// escape it — the caller falls back to minting a fresh id.
+export const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function isValidSessionId(id: string): boolean {
+    return SESSION_ID_RE.test(id);
+}
+
+// resolveSessionId centralizes the "validate a carried/param-supplied id;
+// reject it if off-shape; optionally mint a fresh one" shape shared by every
+// place a chat/session id enters (ai-agent-claude-cli's chatId + claudeSessionId,
+// ai-agent's session_id). `autoMint: true` means absent-or-invalid becomes a
+// fresh crypto.randomUUID() (used where the caller needs a stable handle
+// regardless, e.g. a workdir key); `autoMint: false` means absent-or-invalid
+// becomes "" (used where the caller should treat it as "no prior session",
+// e.g. --resume — omitting the flag rather than resuming a hijacked one).
+export function resolveSessionId(
+    carried: string | undefined,
+    label: string,
+    opts: { autoMint: boolean },
+): string {
+    const id = carried ?? "";
+    if (id && !isValidSessionId(id)) {
+        console.warn(`${label}: rejected invalid session id; ${opts.autoMint ? "minting a fresh one" : "treating as absent"}`);
+        return opts.autoMint ? crypto.randomUUID() : "";
+    }
+    if (!id && opts.autoMint) return crypto.randomUUID();
+    return id;
+}
+
 // decideEntryMode picks the shape of a fresh run: a non-empty prompt runs one
 // turn and returns; an empty prompt opens the interactive chat loop. Pure so the
 // branch can be unit-tested without a live provider.

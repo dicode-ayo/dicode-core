@@ -12,6 +12,7 @@
  *   make test-tasks
  */
 import { setupHarness } from "../../sdk-test.ts";
+import { isValidSessionId } from "../ai-agent-core/chat.ts";
 await setupHarness(import.meta.url);
 
 // Loaded AFTER setupHarness patches globalThis.fetch — a static import would
@@ -114,13 +115,18 @@ test("first turn auto-generates a session_id and returns reply", async () => {
   assert.httpCalled("POST", "http://localhost:11434/v1/chat/completions");
 });
 
+// A UUID-shaped fixture: session_id now goes through isValidSessionId before
+// it's used as the chat: group label / echoed back, so a valid-path test needs
+// a UUID-shaped value. The rejection path is covered separately below.
+const VALID_SESSION_ID = "44444444-4444-4444-4444-444444444444";
+
 test("tags the run with the chat session group so the WebUI can collapse turns", async () => {
   // #112: every chat turn calls dicode.set_group(`chat:<sessionId>`) so all
   // turns of one conversation collapse into one expandable row in the run
   // list, while a new session_id produces a new group row.
   useLocal();
   params.set("prompt", "hello");
-  params.set("session_id", "abc-12345");
+  params.set("session_id", VALID_SESSION_ID);
 
   http.mock("POST", "http://localhost:11434/v1/chat/completions", {
     status: 200,
@@ -130,13 +136,13 @@ test("tags the run with the chat session group so the WebUI can collapse turns",
   await runTask();
 
   const calls = (dicode as Record<string, unknown>)._setGroupCalls as string[];
-  assert.equal(calls, ["chat:abc-12345"]);
+  assert.equal(calls, [`chat:${VALID_SESSION_ID}`]);
 });
 
 test("provided session_id is echoed back on the one-shot path", async () => {
   useLocal();
   params.set("prompt", "second message");
-  params.set("session_id", "fixed-session-123");
+  params.set("session_id", VALID_SESSION_ID);
 
   http.mock("POST", "http://localhost:11434/v1/chat/completions", {
     status: 200,
@@ -145,8 +151,30 @@ test("provided session_id is echoed back on the one-shot path", async () => {
 
   const result = await runTask();
 
-  assert.equal(result.session_id, "fixed-session-123");
+  assert.equal(result.session_id, VALID_SESSION_ID);
   assert.equal(result.reply, "second reply");
+});
+
+test("rejects a malformed session_id param; generates a fresh UUID instead of echoing it", async () => {
+  useLocal();
+  params.set("prompt", "hello");
+  // A crafted caller trying to smuggle something odd into the run-group label
+  // / KV-style handle instead of a dicode-minted UUID.
+  params.set("session_id", "../../etc/passwd\nSET x=1");
+
+  http.mock("POST", "http://localhost:11434/v1/chat/completions", {
+    status: 200,
+    body: completion("hi"),
+  });
+
+  const result = await runTask();
+
+  assert.ok(isValidSessionId(result.session_id as string), `expected a fresh UUID, got ${result.session_id}`);
+
+  const calls = (dicode as Record<string, unknown>)._setGroupCalls as string[];
+  assert.equal(calls.length, 1);
+  assert.ok(!calls[0].includes("passwd"), `malformed session_id leaked into set_group label: ${calls[0]}`);
+  assert.equal(calls[0], `chat:${result.session_id}`);
 });
 
 test("tool-use loop calls run_task and feeds result back to model", async () => {
