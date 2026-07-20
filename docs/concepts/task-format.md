@@ -1173,7 +1173,7 @@ All `dicode.*` and `mcp.*` globals are **denied by default**. Each capability mu
 | `get_runs: true` | `dicode.get_runs()` |
 | `secrets_write: true` | `dicode.secrets_set(key, value)` and `dicode.secrets_delete(key)` — **write-only**, tasks can never read secrets back |
 | `secrets_has: true` | `dicode.secrets.has(key)` — boolean presence check only; never reveals the secret value |
-| `crypto: ["ctx"]` | `dicode.crypto.encrypt(ctx, data)` / `dicode.crypto.decrypt(ctx, blob)` — XChaCha20-Poly1305 encrypt/decrypt under a context-scoped sub-key; `["*"]` allows all contexts. Sub-keys are derived via HKDF-SHA256 (encrypt always uses this; decrypt falls back to the legacy Argon2id derivation so blobs sealed before this change keep working — see #607). **Daemon-private contexts (currently `dicode/run-inputs/v1`) are always denied even when `["*"]` is granted.** |
+| `crypto: ["ctx"]` | `dicode.crypto.encrypt(ctx, data)` / `dicode.crypto.decrypt(ctx, blob)` — XChaCha20-Poly1305 encrypt/decrypt under a context-scoped sub-key; `["*"]` allows all contexts. Sub-keys are derived via HKDF-SHA256 (encrypt always uses this; decrypt falls back to the legacy Argon2id derivation so blobs sealed before this change keep working — see #607). **Daemon-private contexts (currently `dicode/run-inputs/v1` and `dicode/approval-lock/v1`) are always denied even when `["*"]` is granted.** |
 
 ```yaml
 # An agent task that can call other tasks:
