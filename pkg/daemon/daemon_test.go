@@ -178,6 +178,29 @@ func TestRelayServerBodyGateLeavesOtherTasksAlone(t *testing.T) {
 	}
 }
 
+// TestRelayConfigured covers the boot gate that decides whether to export
+// the DICODE_RELAY_* env vars and dispatch relay-client. It must fire for the
+// single-URL shorthand AND for a server_urls-only HA deployment.
+func TestRelayConfigured(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  config.Config
+		want bool
+	}{
+		{"disabled", config.Config{Relay: config.RelayConfig{ServerURL: "wss://a.example"}}, false},
+		{"enabled, no url", config.Config{Relay: config.RelayConfig{Enabled: true}}, false},
+		{"enabled, shorthand", config.Config{Relay: config.RelayConfig{Enabled: true, ServerURL: "wss://a.example"}}, true},
+		{"enabled, server_urls only", config.Config{Relay: config.RelayConfig{Enabled: true, ServerURLs: []string{"wss://a.example"}}}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := tc.cfg
+			if got := relayConfigured(&cfg); got != tc.want {
+				t.Errorf("relayConfigured() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestPemContainsCertificate(t *testing.T) {
 	// A minimal but structurally valid CERTIFICATE PEM block.
 	const certPEM = `-----BEGIN CERTIFICATE-----

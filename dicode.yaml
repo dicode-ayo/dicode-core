@@ -15,6 +15,12 @@ database:
 relay:
   enabled: true
   server_url: ws://localhost:5553
+  # For an HA relay with multiple broker instances, replace server_url with a
+  # server_urls list (one wss:// mTLS endpoint per instance, TLS passthrough).
+  # server_url and server_urls are mutually exclusive.
+  # server_urls:
+  #   - wss://relay-a.example.com:5554
+  #   - wss://relay-b.example.com:5554
 log_level: info
 # ai:
 #   task: buildin/dicodai  # task id invoked for AI operations (webui + CLI)

@@ -115,7 +115,15 @@ type RelayConfig struct {
 	// ServerURL is the broker's mTLS control-channel endpoint the daemon
 	// dials, e.g. wss://relay.dicode.app:5554. This is a different port than
 	// the public webhook/OAuth listener — set BrokerURL when they differ.
+	// Single-instance shorthand; mutually exclusive with ServerURLs.
 	ServerURL string `yaml:"server_url"`
+	// ServerURLs lists one mTLS control-channel endpoint per broker instance
+	// for an HA relay deployment. The daemon holds one independent connection
+	// per entry, all sharing its identity/cert, so every instance registers
+	// the same daemon uuid and any instance can forward inbound webhooks —
+	// no directory, no mesh, instant failover. Mutually exclusive with
+	// ServerURL. Every entry must be wss:// and end-to-end TLS passthrough.
+	ServerURLs []string `yaml:"server_urls,omitempty"`
 	// BrokerURL overrides the OAuth broker base URL (the public listener).
 	// When empty, the daemon derives it from ServerURL by swapping the
 	// scheme (wss://host → https://host) — but since the mTLS control channel
@@ -141,18 +149,35 @@ type RelayConfig struct {
 // slash. Operators writing broker_url: https://host/ in dicode.yaml get
 // the slash stripped here.
 func (r RelayConfig) ResolvedBrokerURL() string {
+	primary := r.PrimaryServerURL()
 	var raw string
 	switch {
 	case r.BrokerURL != "":
 		raw = r.BrokerURL
-	case strings.HasPrefix(r.ServerURL, "wss://"):
-		raw = "https://" + strings.TrimPrefix(r.ServerURL, "wss://")
-	case strings.HasPrefix(r.ServerURL, "ws://"):
-		raw = "http://" + strings.TrimPrefix(r.ServerURL, "ws://")
+	case strings.HasPrefix(primary, "wss://"):
+		raw = "https://" + strings.TrimPrefix(primary, "wss://")
+	case strings.HasPrefix(primary, "ws://"):
+		raw = "http://" + strings.TrimPrefix(primary, "ws://")
 	default:
 		return ""
 	}
 	return strings.TrimRight(raw, "/")
+}
+
+// PrimaryServerURL returns the single control-channel URL that per-connection
+// derivations (OAuth broker origin, port-mismatch warning) key off. It is
+// ServerURL when the single-instance shorthand is used, otherwise the first
+// ServerURLs entry — all instances of one relay deployment share one public
+// OAuth origin. Returns "" when neither is set. ServerURL and ServerURLs are
+// mutually exclusive (enforced at config load), so at most one branch applies.
+func (r RelayConfig) PrimaryServerURL() string {
+	if r.ServerURL != "" {
+		return r.ServerURL
+	}
+	if len(r.ServerURLs) > 0 {
+		return r.ServerURLs[0]
+	}
+	return ""
 }
 
 // AIConfig points the WebUI and CLI at a single task for AI operations.
@@ -649,18 +674,51 @@ func (cfg *Config) validate() error {
 			return fmt.Errorf("relay.broker_url: missing host in %q", cfg.Relay.BrokerURL)
 		}
 	}
-	// The relay control channel is mTLS-only — the server_url must be wss://.
-	// A ws:// (or any non-wss) URL can never establish a TLS client-cert
-	// handshake, so fail closed with a clear message rather than looping on
-	// connection errors at runtime. Only enforced when the relay is enabled:
-	// a disabled relay's stale server_url is inert and must not block boot.
-	if cfg.Relay.Enabled && cfg.Relay.ServerURL != "" {
-		u, err := url.Parse(cfg.Relay.ServerURL)
-		if err != nil {
-			return fmt.Errorf("relay.server_url: %w", err)
+	// server_url (single-instance shorthand) and server_urls (HA fan-out list)
+	// are mutually exclusive — the relay client library also throws on both,
+	// but a config-time error is clearer than a task crash loop.
+	if cfg.Relay.ServerURL != "" && len(cfg.Relay.ServerURLs) > 0 {
+		return fmt.Errorf("relay: set either server_url or server_urls, not both")
+	}
+	// The relay control channel is mTLS-only — every control-channel URL must
+	// be wss://. A ws:// (or any non-wss) URL can never establish a TLS
+	// client-cert handshake, so fail closed with a clear message rather than
+	// looping on connection errors at runtime. Only enforced when the relay is
+	// enabled: a disabled relay's stale server_url is inert and must not block
+	// boot. When enabled, at least one control-channel URL is required.
+	if cfg.Relay.Enabled {
+		urls := cfg.Relay.ServerURLs
+		single := len(urls) == 0
+		if single {
+			// PrimaryServerURL collapses to server_url here; validate it the
+			// same way so single and list configs share one wss check.
+			if cfg.Relay.ServerURL != "" {
+				urls = []string{cfg.Relay.ServerURL}
+			}
 		}
-		if u.Scheme != "wss" {
-			return fmt.Errorf("relay.server_url: must use wss:// — the relay control channel requires mTLS (got scheme %q in %q)", u.Scheme, cfg.Relay.ServerURL)
+		if len(urls) == 0 {
+			return fmt.Errorf("relay: enabled but no control-channel URL set — set server_url or server_urls")
+		}
+		seen := make(map[string]struct{}, len(urls))
+		for i, raw := range urls {
+			field := "relay.server_url"
+			if !single {
+				field = fmt.Sprintf("relay.server_urls[%d]", i)
+			}
+			if raw == "" {
+				return fmt.Errorf("%s: empty control-channel URL", field)
+			}
+			if _, dup := seen[raw]; dup {
+				return fmt.Errorf("%s: duplicate control-channel URL %q", field, raw)
+			}
+			seen[raw] = struct{}{}
+			u, err := url.Parse(raw)
+			if err != nil {
+				return fmt.Errorf("%s: %w", field, err)
+			}
+			if u.Scheme != "wss" {
+				return fmt.Errorf("%s: must use wss:// — the relay control channel requires mTLS (got scheme %q in %q)", field, u.Scheme, raw)
+			}
 		}
 	}
 	// bcrypt cost: x/crypto/bcrypt's MinCost = 4, MaxCost = 31, but anything

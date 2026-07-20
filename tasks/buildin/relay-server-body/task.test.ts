@@ -42,9 +42,9 @@ import { createPrivateKey, generateKeyPairSync } from "node:crypto";
 import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
-import { defaultConfig, loadConfig } from "npm:dicode-relay@0.2.0/config";
-import type { RelayConfig } from "npm:dicode-relay@0.2.0/config";
-import { startServer } from "npm:dicode-relay@0.2.0/start";
+import { defaultConfig, loadConfig } from "npm:dicode-relay@0.2.1/config";
+import type { RelayConfig } from "npm:dicode-relay@0.2.1/config";
+import { startServer } from "npm:dicode-relay@0.2.1/start";
 
 import { X509Certificate } from "node:crypto";
 import {
@@ -278,7 +278,7 @@ broker:
 // configWith builds a RelayConfig fixture from the schema's own defaults
 // (per config.d.ts's own guidance: "Use defaultConfig() in tests instead of
 // duplicating default values") with just base_url/password overridden.
-// dicode-relay@0.2.0's status.password is `string | undefined` after the
+// dicode-relay@0.2.1's status.password is `string | undefined` after the
 // schema's transform — undefined is the "no password configured → /status
 // 404s" sentinel ("" is rejected by the schema's min(1) at load time, so a
 // parsed config never carries it).

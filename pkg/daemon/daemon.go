@@ -134,7 +134,7 @@ func resolveDataDir(cfg *config.Config) (string, error) {
 // relayConfigured reports whether the operator has configured the dicode-relay
 // server. It mirrors the gate used when exporting DICODE_RELAY_* env vars at boot.
 func relayConfigured(cfg *config.Config) bool {
-	return cfg.Relay.Enabled && cfg.Relay.ServerURL != ""
+	return cfg.Relay.Enabled && cfg.Relay.PrimaryServerURL() != ""
 }
 
 // pemContainsCertificate reports whether pemBytes holds at least one PEM
@@ -699,8 +699,17 @@ func buildWebUI(ctx context.Context, cfg *config.Config, configPath, version, da
 		}
 	}
 	if relayConfigured(cfg) {
-		if err := os.Setenv("DICODE_RELAY_SERVER_URL", cfg.Relay.ServerURL); err != nil {
+		// Rule: DICODE_RELAY_SERVER_URL always carries the primary (single) URL
+		// as the shorthand the task falls back to; DICODE_RELAY_SERVER_URLS
+		// carries the comma-joined full list and is set only for a server_urls
+		// deployment. The task prefers the list var when present.
+		if err := os.Setenv("DICODE_RELAY_SERVER_URL", cfg.Relay.PrimaryServerURL()); err != nil {
 			return nil, fmt.Errorf("setenv DICODE_RELAY_SERVER_URL: %w", err)
+		}
+		if len(cfg.Relay.ServerURLs) > 0 {
+			if err := os.Setenv("DICODE_RELAY_SERVER_URLS", strings.Join(cfg.Relay.ServerURLs, ",")); err != nil {
+				return nil, fmt.Errorf("setenv DICODE_RELAY_SERVER_URLS: %w", err)
+			}
 		}
 		if err := os.Setenv("DICODE_RELAY_LOCAL_PORT", fmt.Sprintf("%d", port)); err != nil {
 			return nil, fmt.Errorf("setenv DICODE_RELAY_LOCAL_PORT: %w", err)
@@ -718,7 +727,7 @@ func buildWebUI(ctx context.Context, cfg *config.Config, configPath, version, da
 		// broker_url. A bare :443 is the https default and derives correctly, so
 		// it is not worth a warning.
 		if cfg.Relay.BrokerURL == "" {
-			if u, err := url.Parse(cfg.Relay.ServerURL); err == nil && u.Port() != "" && u.Port() != "443" {
+			if u, err := url.Parse(cfg.Relay.PrimaryServerURL()); err == nil && u.Port() != "" && u.Port() != "443" {
 				log.Warn(
 					"relay: server_url has an explicit port but broker_url is unset — " +
 						"the OAuth broker URL is derived from server_url and will point at " +

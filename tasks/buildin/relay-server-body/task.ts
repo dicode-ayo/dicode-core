@@ -16,10 +16,10 @@
 import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { generateKeyPairSync } from "node:crypto";
-import { loadConfig } from "npm:dicode-relay@0.2.0/config";
-import type { RelayConfig } from "npm:dicode-relay@0.2.0/config";
-import { startServer } from "npm:dicode-relay@0.2.0/start";
-import { generateSelfSignedServerCert } from "npm:dicode-relay@0.2.0/client";
+import { loadConfig } from "npm:dicode-relay@0.2.1/config";
+import type { RelayConfig } from "npm:dicode-relay@0.2.1/config";
+import { startServer } from "npm:dicode-relay@0.2.1/start";
+import { generateSelfSignedServerCert } from "npm:dicode-relay@0.2.1/client";
 import type { DicodeSdk } from "../../sdk.ts";
 
 // The documented dev fallback from ../relay-server/task.yaml's STATUS_PASSWORD
