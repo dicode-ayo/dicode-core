@@ -167,3 +167,8 @@ func (fakeDeriver) DeriveSubKey(_ string) ([]byte, error) {
 	key := make([]byte, 32)
 	return key, nil
 }
+
+func (fakeDeriver) DeriveSubKeyHKDF(_ string) ([]byte, error) {
+	key := make([]byte, 32)
+	return key, nil
+}

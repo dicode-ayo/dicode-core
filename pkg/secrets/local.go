@@ -3,13 +3,16 @@ package secrets
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
 	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/chacha20poly1305"
+	"golang.org/x/crypto/hkdf"
 )
 
 // LocalProvider stores secrets encrypted in SQLite using ChaCha20-Poly1305.
@@ -133,14 +136,50 @@ func (l *LocalProvider) decrypt(ciphertext, nonce []byte) ([]byte, error) {
 // Determinism: same master + same context → same key. Two different
 // contexts → independent keys (a leak of one does not reveal the other).
 func (l *LocalProvider) DeriveSubKey(context string) ([]byte, error) {
-	if context == "" {
-		return nil, fmt.Errorf("DeriveSubKey: context required")
-	}
-	if l.masterKey == nil {
-		return nil, fmt.Errorf("DeriveSubKey: master key unavailable")
+	if err := l.checkSubKeyContext(context, "DeriveSubKey"); err != nil {
+		return nil, err
 	}
 	// Same Argon2id parameters as the primary derivation; salt = context bytes.
 	return argon2.IDKey(l.masterKey, []byte(context), 1, 64*1024, 4, 32), nil
+}
+
+// checkSubKeyContext validates the preconditions shared by DeriveSubKey and
+// DeriveSubKeyHKDF, prefixing errors with the caller's name.
+func (l *LocalProvider) checkSubKeyContext(context, callerName string) error {
+	if context == "" {
+		return fmt.Errorf("%s: context required", callerName)
+	}
+	if l.masterKey == nil {
+		return fmt.Errorf("%s: master key unavailable", callerName)
+	}
+	return nil
+}
+
+// DeriveSubKeyHKDF returns a 32-byte key derived from the master key via
+// HKDF-SHA256 (RFC 5869), with `context` as the HKDF `info` parameter and no
+// salt. Unlike DeriveSubKey (Argon2id), this is cheap to call repeatedly —
+// HKDF-SHA256 is the correct primitive for high-entropy input keying
+// material (our 32-byte random master key), where Argon2id's memory-hard
+// design buys nothing over its password-oriented use case but still costs
+// 64 MiB + 4 threads per call. See issue #607.
+//
+// Same determinism properties as DeriveSubKey: same master + same context →
+// same key; different contexts → independent keys. A given context string
+// always derives to a *different* key than DeriveSubKey(context) would
+// produce, since the two use unrelated KDFs — callers that need to read
+// blobs written under the legacy Argon2id derivation must keep using
+// DeriveSubKey for those contexts (see cryptoHandler in pkg/ipc/crypto.go
+// for the encrypt-HKDF/decrypt-fallback-to-Argon2id pattern this enables).
+func (l *LocalProvider) DeriveSubKeyHKDF(context string) ([]byte, error) {
+	if err := l.checkSubKeyContext(context, "DeriveSubKeyHKDF"); err != nil {
+		return nil, err
+	}
+	key := make([]byte, 32)
+	r := hkdf.New(sha256.New, l.masterKey, nil, []byte(context))
+	if _, err := io.ReadFull(r, key); err != nil {
+		return nil, fmt.Errorf("DeriveSubKeyHKDF: %w", err)
+	}
+	return key, nil
 }
 
 // loadOrCreateMasterKey returns the raw master key bytes.

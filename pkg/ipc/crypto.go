@@ -7,20 +7,36 @@ import (
 	"golang.org/x/crypto/chacha20poly1305"
 )
 
-// SubKeyDeriver mirrors secrets.LocalProvider.DeriveSubKey — taken as an
-// interface so the IPC layer doesn't depend on pkg/secrets directly.
+// SubKeyDeriver mirrors secrets.LocalProvider.DeriveSubKey /
+// DeriveSubKeyHKDF — taken as an interface so the IPC layer doesn't depend
+// on pkg/secrets directly.
 type SubKeyDeriver interface {
+	// DeriveSubKey is the legacy Argon2id derivation. Only used here to
+	// decrypt blobs written before the HKDF migration (see DeriveSubKeyHKDF).
 	DeriveSubKey(context string) ([]byte, error)
+	// DeriveSubKeyHKDF derives via HKDF-SHA256, the primitive actually
+	// suited to our high-entropy master key. See issue #607.
+	DeriveSubKeyHKDF(context string) ([]byte, error)
 }
 
 // cryptoHandler implements dicode.crypto.{encrypt, decrypt}. It derives a
 // per-context sub-key on each call and uses XChaCha20-Poly1305 with the
 // context bytes bound into AAD.
 //
-// Sub-keys are NOT cached: re-derivation is O(Argon2id) but happens once
-// per encrypt/decrypt call (rare, not hot-path). Caching across IPC calls
-// would add lifecycle complexity (passphrase change invalidation, etc.)
-// for negligible perf gain at our call rates.
+// Key derivation: Encrypt always derives via HKDF-SHA256 (DeriveSubKeyHKDF)
+// — cheap enough to call on every request, unlike the Argon2id primary/
+// sub-key derivation used elsewhere in dicode, which is deliberately
+// memory-hard for low-entropy inputs (passwords) and not needed here since
+// the master key is already 32 random bytes (issue #607: a task calling
+// dicode.crypto in a loop was burning 64 MiB × 4 threads per call). Decrypt
+// tries the HKDF key first and, on AEAD-open failure, falls back to the
+// legacy Argon2id-derived key — so blobs encrypted before this migration
+// keep decrypting with no blob-format change and no forced re-encryption.
+//
+// Sub-keys are NOT cached across calls: HKDF-SHA256 is fast enough (unlike
+// Argon2id) that per-call re-derivation is no longer a meaningful cost, so
+// the cache-invalidation complexity (passphrase change, etc.) isn't worth
+// taking on.
 type cryptoHandler struct {
 	deriver SubKeyDeriver
 }
@@ -45,7 +61,7 @@ func (h *cryptoHandler) Encrypt(context string, plaintext []byte) ([]byte, error
 	if len(plaintext) > maxCryptoPlaintextBytes {
 		return nil, fmt.Errorf("plaintext too large: %d bytes (cap %d)", len(plaintext), maxCryptoPlaintextBytes)
 	}
-	key, err := h.deriver.DeriveSubKey(context)
+	key, err := h.deriver.DeriveSubKeyHKDF(context)
 	if err != nil {
 		return nil, fmt.Errorf("derive: %w", err)
 	}
@@ -63,7 +79,24 @@ func (h *cryptoHandler) Encrypt(context string, plaintext []byte) ([]byte, error
 	return out, nil
 }
 
-// Decrypt opens a blob produced by Encrypt under the same context.
+// Decrypt opens a blob produced by Encrypt under the same context. It tries
+// the current HKDF-derived key first, then falls back to the legacy
+// Argon2id-derived key — Encrypt has always used HKDF since the #607
+// migration, but blobs sealed before that change (or by a caller still
+// holding one from before an upgrade) were sealed under the Argon2id key,
+// and there's no version tag in the blob to tell the two apart up front.
+//
+// Cost note: a blob that only opens under the legacy key (or doesn't open
+// under either) still pays the full Argon2id derivation on every Decrypt
+// call, exactly as every call did before this migration — this isn't a new
+// cost, but it also isn't a new saving: nothing here re-encrypts a
+// successfully-legacy-opened blob under the new key, so a long-lived blob
+// that's decrypted far more often than it's re-encrypted (e.g. a stored
+// identity that's read on every reconnect but re-sealed only on rotation)
+// keeps paying it indefinitely. Callers that persist `dicode.crypto`
+// ciphertext and want the fast path should re-encrypt and re-persist after
+// a legacy-fallback decrypt; this handler has no storage access to do that
+// itself.
 func (h *cryptoHandler) Decrypt(context string, blob []byte) ([]byte, error) {
 	if context == "" {
 		return nil, fmt.Errorf("context required")
@@ -74,18 +107,38 @@ func (h *cryptoHandler) Decrypt(context string, blob []byte) ([]byte, error) {
 	if len(blob) < chacha20poly1305.NonceSizeX+chacha20poly1305.Overhead {
 		return nil, fmt.Errorf("blob too short")
 	}
-	key, err := h.deriver.DeriveSubKey(context)
+
+	hkdfKey, err := h.deriver.DeriveSubKeyHKDF(context)
 	if err != nil {
 		return nil, fmt.Errorf("derive: %w", err)
 	}
+	pt, hkdfErr := openWithKey(hkdfKey, context, blob)
+	if hkdfErr == nil {
+		return pt, nil
+	}
+
+	legacyKey, err := h.deriver.DeriveSubKey(context)
+	if err != nil {
+		return nil, fmt.Errorf("derive (legacy): %w", err)
+	}
+	pt, err = openWithKey(legacyKey, context, blob)
+	if err != nil {
+		// Report both attempts: a blob that's actually HKDF-sealed but
+		// corrupted/truncated would otherwise fail with only the legacy
+		// attempt's error, which reads exactly like "never HKDF-sealed" and
+		// hides which code path actually applies to this blob.
+		return nil, fmt.Errorf("open: hkdf attempt: %v; legacy attempt: %w", hkdfErr, err)
+	}
+	return pt, nil
+}
+
+// openWithKey opens blob (nonce prefix + ciphertext) under key, with context
+// bound as AAD. Shared by Decrypt's HKDF-first / Argon2id-fallback attempts.
+func openWithKey(key []byte, context string, blob []byte) ([]byte, error) {
 	aead, err := chacha20poly1305.NewX(key)
 	if err != nil {
 		return nil, fmt.Errorf("aead: %w", err)
 	}
 	nonce, ct := blob[:aead.NonceSize()], blob[aead.NonceSize():]
-	pt, err := aead.Open(nil, nonce, ct, []byte(context))
-	if err != nil {
-		return nil, fmt.Errorf("open: %w", err)
-	}
-	return pt, nil
+	return aead.Open(nil, nonce, ct, []byte(context))
 }

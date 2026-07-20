@@ -78,8 +78,13 @@ type Manager interface {
 // Callers must type-assert: `if d, ok := provider.(SubKeyDeriver); ok { ... }`.
 // A provider that doesn't implement this interface signals that sub-key
 // derivation is unavailable; callers must have a fallback or an error path.
+//
+// DeriveSubKey is the legacy Argon2id derivation. DeriveSubKeyHKDF derives
+// via HKDF-SHA256, the primitive suited to our high-entropy master key —
+// see LocalProvider.DeriveSubKeyHKDF and issue #607.
 type SubKeyDeriver interface {
 	DeriveSubKey(context string) ([]byte, error)
+	DeriveSubKeyHKDF(context string) ([]byte, error)
 }
 
 // NotFoundError is returned when no provider in the chain has the requested key.

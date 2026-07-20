@@ -72,6 +72,67 @@ func TestLocalProvider_DeriveSubKey_RejectsEmptyContext(t *testing.T) {
 	}
 }
 
+func TestLocalProvider_DeriveSubKeyHKDF_SameContextDeterministic(t *testing.T) {
+	p := newTestLocalProvider(t)
+	k1, err := p.DeriveSubKeyHKDF("dicode/run-inputs/v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	k2, err := p.DeriveSubKeyHKDF("dicode/run-inputs/v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(k1, k2) {
+		t.Error("same context should yield same key")
+	}
+	if len(k1) != 32 {
+		t.Errorf("expected 32-byte key, got %d", len(k1))
+	}
+}
+
+func TestLocalProvider_DeriveSubKeyHKDF_DifferentContextsDistinct(t *testing.T) {
+	p := newTestLocalProvider(t)
+	k1, err := p.DeriveSubKeyHKDF("dicode/run-inputs/v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	k2, err := p.DeriveSubKeyHKDF("dicode/other-purpose/v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(k1, k2) {
+		t.Error("different contexts must yield different keys")
+	}
+}
+
+func TestLocalProvider_DeriveSubKeyHKDF_RejectsEmptyContext(t *testing.T) {
+	p := newTestLocalProvider(t)
+	_, err := p.DeriveSubKeyHKDF("")
+	if err == nil {
+		t.Error("expected error for empty context")
+	}
+}
+
+// TestLocalProvider_DeriveSubKeyHKDF_DiffersFromArgon2id is the core
+// regression for #607: the same context must derive to two different keys
+// depending on which method is called, since they use unrelated KDFs. This
+// is what makes Decrypt's HKDF-first/Argon2id-fallback pattern in
+// pkg/ipc/crypto.go actually distinguish pre- and post-migration blobs.
+func TestLocalProvider_DeriveSubKeyHKDF_DiffersFromArgon2id(t *testing.T) {
+	p := newTestLocalProvider(t)
+	hkdfKey, err := p.DeriveSubKeyHKDF("dicode/run-inputs/v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	argonKey, err := p.DeriveSubKey("dicode/run-inputs/v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(hkdfKey, argonKey) {
+		t.Error("HKDF- and Argon2id-derived keys for the same context must differ")
+	}
+}
+
 func TestNewLocalProvider_UnsetsMasterKeyEnvVar(t *testing.T) {
 	key := make([]byte, 32)
 	for i := range key {
@@ -107,5 +168,12 @@ func TestSubKeyDeriver_TypeAssertion(t *testing.T) {
 	}
 	if len(k) != 32 {
 		t.Errorf("len = %d, want 32", len(k))
+	}
+	hk, err := deriver.DeriveSubKeyHKDF("dicode/test/v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hk) != 32 {
+		t.Errorf("len = %d, want 32", len(hk))
 	}
 }
