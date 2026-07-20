@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -594,5 +595,478 @@ func TestScanDir_SkipsDirsWithoutTaskYaml(t *testing.T) {
 	}
 	if _, ok := got["scratch"]; ok {
 		t.Errorf("scratch dir without task.yaml should not register")
+	}
+}
+
+// ── hash_include (#585) ─────────────────────────────────────────────────
+
+// TestHash_IncludeFileEditChangesHash is the core regression gate for #585:
+// a shared module living outside the task dir must perturb the hash when
+// edited, as long as it's named in includes — otherwise the approval gate
+// never re-pends importers of a changed shared module.
+func TestHash_IncludeFileEditChangesHash(t *testing.T) {
+	root := t.TempDir()
+	shared := filepath.Join(root, "shared", "chat.ts")
+	if err := os.MkdirAll(filepath.Dir(shared), 0755); err != nil {
+		t.Fatalf("mkdir shared: %v", err)
+	}
+	if err := os.WriteFile(shared, []byte("export const v = 1\n"), 0644); err != nil {
+		t.Fatalf("write shared v1: %v", err)
+	}
+
+	dir := filepath.Join(root, "task-a")
+	writeTaskFiles(t, dir, "name: a\nhash_include: [\"../shared/chat.ts\"]\n", "import '../shared/chat.ts'\n")
+
+	before, err := Hash(dir, "../shared/chat.ts")
+	if err != nil {
+		t.Fatalf("before: %v", err)
+	}
+	if err := os.WriteFile(shared, []byte("export const v = 2\n"), 0644); err != nil {
+		t.Fatalf("rewrite shared: %v", err)
+	}
+	after, err := Hash(dir, "../shared/chat.ts")
+	if err != nil {
+		t.Fatalf("after: %v", err)
+	}
+	if before == after {
+		t.Fatalf("Hash ignored an edit to an included shared module: before == after == %q", before)
+	}
+}
+
+// TestHash_WithoutInclude_SharedModuleEditInvisible is the control for the
+// test above: without hash_include, the same edit to the same shared module
+// must NOT change the hash — this is the pre-#585 hole the feature closes,
+// pinned here so a future refactor can't silently make Hash always walk
+// outward (which would break the "sandbox only reads TaskDir" invariant).
+func TestHash_WithoutInclude_SharedModuleEditInvisible(t *testing.T) {
+	root := t.TempDir()
+	shared := filepath.Join(root, "shared", "chat.ts")
+	if err := os.MkdirAll(filepath.Dir(shared), 0755); err != nil {
+		t.Fatalf("mkdir shared: %v", err)
+	}
+	if err := os.WriteFile(shared, []byte("export const v = 1\n"), 0644); err != nil {
+		t.Fatalf("write shared v1: %v", err)
+	}
+
+	dir := filepath.Join(root, "task-a")
+	writeTaskFiles(t, dir, "name: a\n", "import '../shared/chat.ts'\n")
+
+	before, err := Hash(dir) // no includes
+	if err != nil {
+		t.Fatalf("before: %v", err)
+	}
+	if err := os.WriteFile(shared, []byte("export const v = 2\n"), 0644); err != nil {
+		t.Fatalf("rewrite shared: %v", err)
+	}
+	after, err := Hash(dir)
+	if err != nil {
+		t.Fatalf("after: %v", err)
+	}
+	if before != after {
+		t.Fatalf("Hash without includes unexpectedly saw an out-of-dir edit: %q -> %q", before, after)
+	}
+}
+
+// TestHash_IncludeDirWalkedRecursively covers a directory include: every
+// file under it participates in the digest, not just the top level.
+func TestHash_IncludeDirWalkedRecursively(t *testing.T) {
+	root := t.TempDir()
+	sharedDir := filepath.Join(root, "shared")
+	nested := filepath.Join(sharedDir, "nested")
+	if err := os.MkdirAll(nested, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nested, "deep.ts"), []byte("v1"), 0644); err != nil {
+		t.Fatalf("write deep.ts: %v", err)
+	}
+
+	dir := filepath.Join(root, "task-a")
+	writeTaskFiles(t, dir, "name: a\n", "js")
+
+	before, err := Hash(dir, "../shared")
+	if err != nil {
+		t.Fatalf("before: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nested, "deep.ts"), []byte("v2"), 0644); err != nil {
+		t.Fatalf("rewrite deep.ts: %v", err)
+	}
+	after, err := Hash(dir, "../shared")
+	if err != nil {
+		t.Fatalf("after: %v", err)
+	}
+	if before == after {
+		t.Fatalf("Hash ignored an edit nested inside a directory include: before == after == %q", before)
+	}
+}
+
+// TestHash_MissingIncludeFoldsSentinel_NotError: a hash_include path that
+// doesn't exist (deleted shared module, typo) must not error the hash — the
+// reconciler runs Hash on every poll and a hard error there would break
+// change-detection for the whole task — but it must still perturb the
+// digest relative to "include not configured at all", so a deleted include
+// is itself a detectable change rather than a silent no-op.
+func TestHash_MissingIncludeFoldsSentinel_NotError(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "task-a")
+	writeTaskFiles(t, dir, "name: a\n", "js")
+
+	withMissingInclude, err := Hash(dir, "../nonexistent/module.ts")
+	if err != nil {
+		t.Fatalf("Hash errored on a missing include: %v", err)
+	}
+	withoutInclude, err := Hash(dir)
+	if err != nil {
+		t.Fatalf("Hash: %v", err)
+	}
+	if withMissingInclude == withoutInclude {
+		t.Fatalf("a missing include produced the same hash as no include at all: %q", withMissingInclude)
+	}
+}
+
+// TestHash_IncludeLabelDoesNotCollideWithInDirFile: an include path and an
+// in-dir file of the same base name must not be hashed as the same digest
+// contribution — the "include:" label prefix exists precisely to keep these
+// two namespaces distinct (see the Hash doc comment).
+func TestHash_IncludeLabelDoesNotCollideWithInDirFile(t *testing.T) {
+	root := t.TempDir()
+	shared := filepath.Join(root, "shared.ts")
+	if err := os.WriteFile(shared, []byte("shared-content"), 0644); err != nil {
+		t.Fatalf("write shared: %v", err)
+	}
+
+	// Task with an in-dir file literally named "shared.ts" plus an include of
+	// the same base name pointing outside — these must be treated as two
+	// independent entries in the digest, not merged/aliased.
+	dir := filepath.Join(root, "task-a")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "shared.ts"), []byte("in-dir-content"), 0644); err != nil {
+		t.Fatalf("write in-dir shared.ts: %v", err)
+	}
+
+	withInclude, err := Hash(dir, "../shared.ts")
+	if err != nil {
+		t.Fatalf("withInclude: %v", err)
+	}
+	withoutInclude, err := Hash(dir)
+	if err != nil {
+		t.Fatalf("withoutInclude: %v", err)
+	}
+	if withInclude == withoutInclude {
+		t.Fatalf("including an out-of-dir file with the same base name as an in-dir file was a no-op: %q", withInclude)
+	}
+}
+
+// TestHash_IncludeOrderIndependent: includes are sorted before hashing, so
+// declaring them in a different order in task.yaml must not change the hash
+// — otherwise reordering an unrelated list would spuriously re-pend approval.
+func TestHash_IncludeOrderIndependent(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"one.ts", "two.ts"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(name), 0644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	dir := filepath.Join(root, "task-a")
+	writeTaskFiles(t, dir, "name: a\n", "js")
+
+	forward, err := Hash(dir, "../one.ts", "../two.ts")
+	if err != nil {
+		t.Fatalf("forward: %v", err)
+	}
+	reverse, err := Hash(dir, "../two.ts", "../one.ts")
+	if err != nil {
+		t.Fatalf("reverse: %v", err)
+	}
+	if forward != reverse {
+		t.Fatalf("include order changed the hash: %q vs %q", forward, reverse)
+	}
+}
+
+// TestHash_IncludeEscapingSiblingScopeIsRejected is the path-traversal
+// regression: hash_include must not be able to walk arbitrarily far up the
+// filesystem to read host files unrelated to the taskset (e.g. "/etc/passwd"
+// via enough "../" hops) — it is bounded to dir's parent directory (the
+// sibling-task scope the feature exists for). Reported by CodeQL as
+// "Uncontrolled data used in path expression" against the pre-fix code.
+func TestHash_IncludeEscapingSiblingScopeIsRejected(t *testing.T) {
+	// tasksRoot/task-a is the task dir; tasksRoot/../outside sits one level
+	// above tasksRoot itself, i.e. two hops up from task-a — outside the
+	// sibling-task boundary (tasksRoot).
+	parent := t.TempDir()
+	tasksRoot := filepath.Join(parent, "tasks-root")
+	outside := filepath.Join(parent, "outside")
+	if err := os.MkdirAll(outside, 0755); err != nil {
+		t.Fatalf("mkdir outside: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("host-secret"), 0644); err != nil {
+		t.Fatalf("write outside file: %v", err)
+	}
+
+	dir := filepath.Join(tasksRoot, "task-a")
+	writeTaskFiles(t, dir, "name: a\n", "js")
+
+	_, err := Hash(dir, "../../outside/secret.txt")
+	if err == nil {
+		t.Fatal("Hash allowed a hash_include entry to escape the sibling-task boundary — path traversal not rejected")
+	}
+}
+
+// TestHash_IncludeWithinSiblingScopeStillAllowed is the control for the test
+// above: a "../" that stays within the sibling-task boundary (one hop up,
+// into a sibling of dir) must still be accepted — this is the feature's
+// entire purpose (a sibling buildin task's shared helper library).
+func TestHash_IncludeWithinSiblingScopeStillAllowed(t *testing.T) {
+	tasksRoot := t.TempDir()
+	sibling := filepath.Join(tasksRoot, "sibling.ts")
+	if err := os.WriteFile(sibling, []byte("shared"), 0644); err != nil {
+		t.Fatalf("write sibling: %v", err)
+	}
+
+	dir := filepath.Join(tasksRoot, "task-a")
+	writeTaskFiles(t, dir, "name: a\n", "js")
+
+	if _, err := Hash(dir, "../sibling.ts"); err != nil {
+		t.Fatalf("Hash rejected an in-bounds sibling include: %v", err)
+	}
+}
+
+// TestHash_IncludeExactlyTheBoundaryIsRejected is the regression for a
+// critical off-by-one caught in review: hash_include: [".."] resolves to
+// EXACTLY dir's parent directory (the boundary itself), which the original
+// "rel == '..' or has prefix '../'" check did not reject (rel == "." in that
+// case). Left unfixed, this would let a single hash_include entry pull the
+// ENTIRE taskset root — every sibling task, not just one — into this task's
+// content hash, defeating the whole point of scoping to "sibling task".
+func TestHash_IncludeExactlyTheBoundaryIsRejected(t *testing.T) {
+	tasksRoot := t.TempDir()
+	dirA := filepath.Join(tasksRoot, "task-a")
+	writeTaskFiles(t, dirA, "name: a\n", "js")
+	dirB := filepath.Join(tasksRoot, "task-b")
+	writeTaskFiles(t, dirB, "name: b\n", "js")
+
+	if _, err := Hash(dirA, ".."); err == nil {
+		t.Fatal("Hash accepted hash_include: [\"..\"] — the boundary itself, which would pull in every sibling task, not just one")
+	}
+}
+
+// TestHash_IncludeThroughSymlinkedIntermediateDirIsRejected is the
+// regression for the git-committed-symlink escape caught in review:
+// resolveInclude's lexical containment check alone can't see that a
+// directory COMPONENT of the include path is itself a symlink pointing
+// outside the sibling-task boundary — go-git materializes repo-committed
+// symlinks as real on-disk links, so this is reachable from an ordinary git
+// source, not just a local filesystem trick. pathguard.WithinResolved must
+// catch it.
+func TestHash_IncludeThroughSymlinkedIntermediateDirIsRejected(t *testing.T) {
+	parent := t.TempDir()
+	tasksRoot := filepath.Join(parent, "tasks-root")
+	if err := os.MkdirAll(tasksRoot, 0755); err != nil {
+		t.Fatalf("mkdir tasksRoot: %v", err)
+	}
+	outside := filepath.Join(parent, "outside")
+	if err := os.MkdirAll(outside, 0755); err != nil {
+		t.Fatalf("mkdir outside: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("host-secret"), 0644); err != nil {
+		t.Fatalf("write outside file: %v", err)
+	}
+
+	// A symlinked directory INSIDE the sibling-task boundary that physically
+	// redirects outside it.
+	evilLink := filepath.Join(tasksRoot, "evil-link")
+	if err := os.Symlink(outside, evilLink); err != nil {
+		t.Skipf("symlinks unsupported here: %v", err)
+	}
+
+	dir := filepath.Join(tasksRoot, "task-a")
+	writeTaskFiles(t, dir, "name: a\n", "js")
+
+	// Lexically, "../evil-link/secret.txt" looks like it stays inside
+	// tasksRoot (the boundary) — only resolving the symlink reveals it
+	// actually reaches outside/secret.txt.
+	if _, err := Hash(dir, "../evil-link/secret.txt"); err == nil {
+		t.Fatal("Hash followed a git-committed symlink out of the sibling-task boundary — path traversal via intermediate symlink not rejected")
+	}
+}
+
+// TestHash_IncludeFifoIsSkippedNotRead is the regression for a hang caught
+// in review: a hash_include entry naming a non-regular, non-symlink,
+// non-directory path (a FIFO here) must be silently skipped, exactly like
+// walkTree already does for the same file types found during a normal dir
+// walk — not read via os.ReadFile, which blocks indefinitely on a FIFO with
+// no writer.
+func TestHash_IncludeFifoIsSkippedNotRead(t *testing.T) {
+	tasksRoot := t.TempDir()
+	fifoPath := filepath.Join(tasksRoot, "a.fifo")
+	if err := syscall.Mkfifo(fifoPath, 0644); err != nil {
+		t.Skipf("mkfifo unsupported here: %v", err)
+	}
+
+	dir := filepath.Join(tasksRoot, "task-a")
+	writeTaskFiles(t, dir, "name: a\n", "js")
+
+	done := make(chan struct{})
+	var hash string
+	var hashErr error
+	go func() {
+		hash, hashErr = Hash(dir, "../a.fifo")
+		close(done)
+	}()
+	select {
+	case <-done:
+		if hashErr != nil {
+			t.Fatalf("Hash errored on a FIFO include: %v", hashErr)
+		}
+		if hash == "" {
+			t.Fatal("Hash returned an empty digest")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Hash blocked reading a FIFO hash_include entry instead of skipping it")
+	}
+}
+
+// TestScanDir_HonorsHashInclude is the regression for a gap caught in
+// review: ScanDir (the change-detection primitive for the flat local/git
+// source types, which never fully load a task.Spec) must still read each
+// task's hash_include list — via the lightweight readHashInclude parse —
+// or hash_include silently does nothing for any task registered through
+// those source types, even though the same task registered via a taskset.yaml
+// source (pkg/taskset/source.go's snapHash) would correctly honor it.
+func TestScanDir_HonorsHashInclude(t *testing.T) {
+	root := t.TempDir()
+	shared := filepath.Join(root, "shared.ts")
+	if err := os.WriteFile(shared, []byte("v1"), 0644); err != nil {
+		t.Fatalf("write shared: %v", err)
+	}
+	writeTaskFiles(t, filepath.Join(root, "task-a"),
+		"name: a\nhash_include: [\"../shared.ts\"]\n", "js")
+
+	before, err := ScanDir(root)
+	if err != nil {
+		t.Fatalf("ScanDir before: %v", err)
+	}
+	if err := os.WriteFile(shared, []byte("v2"), 0644); err != nil {
+		t.Fatalf("rewrite shared: %v", err)
+	}
+	after, err := ScanDir(root)
+	if err != nil {
+		t.Fatalf("ScanDir after: %v", err)
+	}
+	if before["task-a"] == after["task-a"] {
+		t.Fatalf("ScanDir ignored an edit to a hash_include'd shared module: before == after == %q", before["task-a"])
+	}
+}
+
+// TestHash_IncludeSymlinkTargetContentIsHashed is the regression for a
+// finding caught in review: when the hash_include entry ITSELF is a
+// symlink (an alias to the real shared file), resolveInclude now resolves
+// through it and hashes the REAL target's content — unlike an ordinary
+// in-dir symlink (TestHash_SymlinkTargetStringHashed_NotFollowed), which
+// deliberately hashes only the target string. If it didn't, editing the
+// content behind an included symlink would reopen the exact gap
+// hash_include exists to close (#585): the code that actually runs would
+// change on next spawn without the hash ever reflecting it.
+func TestHash_IncludeSymlinkTargetContentIsHashed(t *testing.T) {
+	tasksRoot := t.TempDir()
+	real := filepath.Join(tasksRoot, "real.ts")
+	if err := os.WriteFile(real, []byte("v1"), 0644); err != nil {
+		t.Fatalf("write real: %v", err)
+	}
+	alias := filepath.Join(tasksRoot, "alias.ts")
+	if err := os.Symlink(real, alias); err != nil {
+		t.Skipf("symlinks unsupported here: %v", err)
+	}
+
+	dir := filepath.Join(tasksRoot, "task-a")
+	writeTaskFiles(t, dir, "name: a\n", "js")
+
+	before, err := Hash(dir, "../alias.ts")
+	if err != nil {
+		t.Fatalf("before: %v", err)
+	}
+	if err := os.WriteFile(real, []byte("v2"), 0644); err != nil {
+		t.Fatalf("rewrite real: %v", err)
+	}
+	after, err := Hash(dir, "../alias.ts")
+	if err != nil {
+		t.Fatalf("after: %v", err)
+	}
+	if before == after {
+		t.Fatalf("Hash ignored a content edit behind a hash_include symlink alias: before == after == %q", before)
+	}
+}
+
+// TestHash_IncludeSymlinkDirTargetContentIsHashed is the directory-include
+// counterpart of the test above: the include entry is a symlink TO A
+// DIRECTORY, and a file edited inside the real directory (reached only
+// through the symlink) must still change the hash.
+func TestHash_IncludeSymlinkDirTargetContentIsHashed(t *testing.T) {
+	tasksRoot := t.TempDir()
+	realDir := filepath.Join(tasksRoot, "real-shared")
+	if err := os.MkdirAll(realDir, 0755); err != nil {
+		t.Fatalf("mkdir realDir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(realDir, "helper.ts"), []byte("v1"), 0644); err != nil {
+		t.Fatalf("write helper: %v", err)
+	}
+	aliasDir := filepath.Join(tasksRoot, "alias-shared")
+	if err := os.Symlink(realDir, aliasDir); err != nil {
+		t.Skipf("symlinks unsupported here: %v", err)
+	}
+
+	dir := filepath.Join(tasksRoot, "task-a")
+	writeTaskFiles(t, dir, "name: a\n", "js")
+
+	before, err := Hash(dir, "../alias-shared")
+	if err != nil {
+		t.Fatalf("before: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(realDir, "helper.ts"), []byte("v2"), 0644); err != nil {
+		t.Fatalf("rewrite helper: %v", err)
+	}
+	after, err := Hash(dir, "../alias-shared")
+	if err != nil {
+		t.Fatalf("after: %v", err)
+	}
+	if before == after {
+		t.Fatalf("Hash ignored a content edit inside a hash_include symlinked directory: before == after == %q", before)
+	}
+}
+
+// TestHash_InDirFifoIsSkipped covers walkTree's own entry classification
+// (used for the main dir walk and directory includes) with a real stat
+// (d.Info()) rather than the raw directory-entry type (d.Type()) — the
+// latter can report 0 ("unknown", indistinguishable from "regular") on
+// filesystems that don't populate d_type, which would otherwise let a FIFO
+// slip through IsRegular() and into a blocking os.ReadFile. This doesn't
+// reproduce the DT_UNKNOWN condition itself (filesystem-dependent, not
+// under test control), but pins that a FIFO sitting directly in the walked
+// dir is still skipped, not hashed as content, after the d.Info() switch.
+func TestHash_InDirFifoIsSkipped(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "task-a")
+	writeTaskFiles(t, dir, "name: a\n", "js")
+	fifoPath := filepath.Join(dir, "a.fifo")
+	if err := syscall.Mkfifo(fifoPath, 0644); err != nil {
+		t.Skipf("mkfifo unsupported here: %v", err)
+	}
+
+	done := make(chan struct{})
+	var hash string
+	var hashErr error
+	go func() {
+		hash, hashErr = Hash(dir)
+		close(done)
+	}()
+	select {
+	case <-done:
+		if hashErr != nil {
+			t.Fatalf("Hash errored on an in-dir FIFO: %v", hashErr)
+		}
+		if hash == "" {
+			t.Fatal("Hash returned an empty digest")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Hash blocked reading an in-dir FIFO instead of skipping it")
 	}
 }

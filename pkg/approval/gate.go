@@ -463,8 +463,10 @@ type resolvedPipelineSecurityFields struct {
 
 // hashDirResolved combines the task-dir hash with the canonical JSON of the
 // resolved security fields under the versioned domain prefix, NUL-delimited.
-func hashDirResolved(taskID, dir string, resolved any) (string, error) {
-	dirHash, err := task.Hash(dir)
+// hashInclude is forwarded to task.Hash unchanged — see task.Spec.HashInclude
+// (#585) for why a task may need its content hash to cover files outside dir.
+func hashDirResolved(taskID, dir string, resolved any, hashInclude ...string) (string, error) {
+	dirHash, err := task.Hash(dir, hashInclude...)
 	if err != nil {
 		return "", err
 	}
@@ -528,7 +530,7 @@ func ContentHash(k task.Kinded) (string, error) {
 				Daemon:      s.Trigger.Daemon,
 				Restart:     s.Trigger.Restart,
 				Chain:       s.Trigger.Chain,
-			})
+			}, s.HashInclude...)
 		}
 		// Dir-less fallback: hash a shallow copy with secrets stripped so the
 		// committable lock never embeds a digest over secret material.

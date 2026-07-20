@@ -98,6 +98,7 @@ permissions:
 | `mcp_exposed` | bool | | When `false` (default), the task is hidden from MCP `tools/list` and `tools/call`. Set to `true` to expose the task to MCP clients. |
 | `run_result` | object | | Per-task return-value persistence config — see [Suppressing return-value persistence](#suppressing-return-value-persistence) |
 | `run_result.enabled` | bool | | When `false`, the JSON return value is not written to `runs.return_value`; in-memory delivery (`dicode.run_task`, chain `input.output`) is unaffected. Default `true`. |
+| `hash_include` | list of strings | | Extra files/directories outside this task's own directory whose content should also count toward its content hash — see [Content hash and `hash_include`](#content-hash-and-hash_include) below. |
 
 ### Trigger types
 
@@ -1350,6 +1351,74 @@ permissions:
 - `task.test.js` / `task.test.ts` is optional. `dicode task test` skips tasks without it.
 - Any other files in the folder are ignored (useful for README, schema files, etc.).
 - Subdirectories are ignored — task folders are flat.
+
+These rules govern which files the **config loader** reads to build a task's
+`Spec`. The **content hash** used for change detection and the approval gate
+(see below) is a separate mechanism and does cover a task's full directory
+tree, subdirectories included — see the next section.
+
+---
+
+## Content hash and `hash_include`
+
+Every reconciler poll (~30s) computes a content hash per task and diffs it
+against the registry: an unchanged hash is a no-op, a changed hash reloads the
+task, and (when the [approval gate](./security.md#approval-lock-integrity-hmac-signed-dicodelock)
+is enabled) re-pends it for operator approval.
+
+By default the hash covers **every file recursively under the task's own
+directory** — `task.yaml`, the script, and any sibling file it imports (e.g.
+`lib/helper.ts`). This matches what's actually reachable: the Deno sandbox
+allow-reads the whole task directory and Python imports sibling modules, so
+any in-dir file is executable content whether or not the config loader itself
+reads it.
+
+That coverage stops at the directory boundary. A task that imports a **shared
+module living outside its own directory** — e.g. a sibling buildin task's
+helper library — has a blind spot: editing that module changes the code that
+runs on the task's next invocation (Deno/Python re-read the file at exec
+time), but does **not** change this task's content hash, so it silently skips
+both the reconciler reload and the approval-gate re-pend.
+
+`hash_include` closes that gap. List the extra files or directories (each
+resolved relative to the task's own directory) that the task imports from
+outside it:
+
+```yaml
+name: my-task
+hash_include:
+  - "../shared-lib/helper.ts"
+  - "../shared-lib/vendored"   # directories are walked recursively
+```
+
+Notes:
+
+- Only tasks that actually import something outside their own directory need
+  this — the default (no `hash_include`) already covers everything a normal,
+  self-contained task can reach.
+- A missing `hash_include` path (e.g. the shared module was deleted, or the
+  path has a typo) does not error the hash computation — it still folds in a
+  distinguishing marker, so the missing/mistyped path is itself a detectable
+  change rather than a silent no-op.
+- This is moot for gate-exempt buildin tasks; it matters for **user-source**
+  tasks that import a shared library the operator has approved separately.
+- Each entry must resolve to a **strict descendant** of the task's parent
+  directory — i.e. somewhere under the directory containing the task and its
+  siblings, but not that directory itself (this is exactly the scope the two
+  examples above use: one `../` hop up, then anywhere below that). An entry
+  that tries to escape further up the filesystem (e.g.
+  `../../../../etc/passwd`), or that resolves to the parent directory itself
+  (e.g. bare `..`, which would pull every *other* sibling task into this
+  one's hash too), is rejected outright rather than read — including when
+  the escape only becomes visible after resolving a symlink partway through
+  the path. A task nested more than one directory below its taskset root
+  that needs to reach a shared module further up is out of scope for this
+  feature today.
+- Don't point `hash_include` at anything containing secret material. Its
+  content is folded into the same digest the approval gate persists in
+  `dicode.lock`, which is designed to be committed/shared — use
+  `permissions.dicode.crypto` or the secrets store for sensitive data
+  instead.
 
 ---
 

@@ -1,6 +1,8 @@
 package approval
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -344,5 +346,97 @@ func TestOverrideElevationRePend(t *testing.T) {
 				t.Fatalf("lock record changed on re-pend: %+v → %+v (ok=%v)", approvedRec, rec, ok)
 			}
 		})
+	}
+}
+
+// TestHashIncludeRePendsOnSharedModuleEdit is the approval-gate integrity
+// regression for issue #585: task.Hash only digests a task's own dir, so
+// without hash_include, editing a shared module living outside it never
+// re-pends importers even though the new code runs on next spawn (Deno
+// re-reads at exec). hash_include closes that gap end-to-end through the
+// real Gate, not just at the task.Hash unit level.
+func TestHashIncludeRePendsOnSharedModuleEdit(t *testing.T) {
+	root := t.TempDir()
+	shared := filepath.Join(root, "shared", "helper.ts")
+	if err := os.MkdirAll(filepath.Dir(shared), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(shared, []byte("export const v = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	base := writeTaskDir(t, root, "repo/importer", "import '../shared/helper.ts'")
+	withInclude := specVariant(base, func(s *task.Spec) {
+		s.HashInclude = []string{"../shared/helper.ts"}
+	})
+
+	g, arm, lock := newTestGate(t, enabledPolicy())
+	if armed, err := g.Admit(withInclude); err != nil || armed {
+		t.Fatalf("Admit initial = (%v, %v), want pending", armed, err)
+	}
+	if err := g.Approve("repo/importer"); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+	approvedRec, _ := lock.Get("repo/importer")
+
+	// Edit ONLY the shared module — the task dir itself is byte-identical.
+	if err := os.WriteFile(shared, []byte("export const v = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	armed, err := g.Admit(withInclude)
+	if err != nil {
+		t.Fatalf("Admit after shared-module edit: %v", err)
+	}
+	if armed {
+		t.Fatal("editing a hash_include'd shared module must re-pend the importer, got armed")
+	}
+	if !g.IsPending("repo/importer") {
+		t.Fatal("importer not in pending set after shared-module edit")
+	}
+	if got := arm.armedIDs(); len(got) != 1 {
+		t.Fatalf("armed = %v, want only the original approval", got)
+	}
+	if rec, ok := lock.Get("repo/importer"); !ok || rec != approvedRec {
+		t.Fatalf("lock record changed on re-pend: %+v -> %+v (ok=%v)", approvedRec, rec, ok)
+	}
+}
+
+// TestWithoutHashInclude_SharedModuleEditDoesNotRePend is the control for
+// the test above: the identical edit, without hash_include configured, must
+// NOT re-pend — pinning the pre-#585 gap this feature closes, so a future
+// change can't silently make every task's approval hash-sensitive to the
+// whole filesystem (which would defeat the "operator approves the source,
+// not every transitive file" trusted-author model task.Hash documents).
+func TestWithoutHashInclude_SharedModuleEditDoesNotRePend(t *testing.T) {
+	root := t.TempDir()
+	shared := filepath.Join(root, "shared", "helper.ts")
+	if err := os.MkdirAll(filepath.Dir(shared), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(shared, []byte("export const v = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	base := writeTaskDir(t, root, "repo/importer", "import '../shared/helper.ts'")
+
+	g, _, _ := newTestGate(t, enabledPolicy())
+	if armed, err := g.Admit(base); err != nil || armed {
+		t.Fatalf("Admit initial = (%v, %v), want pending", armed, err)
+	}
+	if err := g.Approve("repo/importer"); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+
+	if err := os.WriteFile(shared, []byte("export const v = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	armed, err := g.Admit(base)
+	if err != nil {
+		t.Fatalf("Admit after shared-module edit: %v", err)
+	}
+	if !armed {
+		t.Fatal("without hash_include, a shared-module-only edit must stay armed (approval scope is dir-only by design without it)")
 	}
 }

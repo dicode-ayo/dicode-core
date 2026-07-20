@@ -559,6 +559,18 @@ type Spec struct {
 	// Independent of RunInputs (which controls persistence). Used by #238.
 	AutoFix *AutoFixConfig `yaml:"auto_fix,omitempty" json:"auto_fix,omitempty"`
 
+	// HashInclude names additional files or directories, each resolved
+	// relative to TaskDir, whose content is folded into this task's content
+	// hash (task.Hash) alongside its own dir. A task can import a shared
+	// module living outside its own dir (e.g. a sibling buildin task's
+	// helper library); without this, editing that module never perturbs the
+	// importer's hash, so it never re-trips the reconciler reload or the
+	// #392 approval-gate re-pend for the importer (#585). Most tasks don't
+	// need this — the Deno/Python sandbox already only reads within TaskDir,
+	// so only a task that explicitly imports a path outside it should set
+	// this to the same path(s) it imports.
+	HashInclude []string `yaml:"hash_include,omitempty" json:"hash_include,omitempty"`
+
 	// Enabled is false when this task has been disabled via an override or
 	// entry-level `enabled: false`. Disabled tasks remain in the registry and
 	// appear in the API (with enabled:false) but are not scheduled, spawned,
@@ -770,6 +782,17 @@ func (s *Spec) validate() error {
 			return fmt.Errorf(`permissions.env: a name-only "*" entry is no longer accepted; set "env_read_exposed: true" to grant the Deno sandbox bare --allow-env`)
 		}
 	}
+	for _, inc := range s.HashInclude {
+		if inc == "" {
+			return fmt.Errorf("hash_include: entries must not be empty")
+		}
+		if filepath.IsAbs(inc) {
+			return fmt.Errorf("hash_include: %q must be relative to the task directory, not absolute", inc)
+		}
+		if !hashIncludeLexicallyInBounds(inc) {
+			return fmt.Errorf("hash_include: %q must resolve within the task's parent directory — at most one \"..\" hop up (e.g. \"../sibling-task/file.ts\"), never further up the filesystem or to the parent directory itself", inc)
+		}
+	}
 	triggers := 0
 	if s.Trigger.Cron != "" {
 		triggers++
@@ -864,6 +887,39 @@ func (s *Spec) validate() error {
 		// Any other non-empty runtime is accepted; executor presence is checked at run time.
 	}
 	return nil
+}
+
+// hashIncludeLexicallyInBounds reports whether inc, as a hash_include entry,
+// stays within the strict-descendant boundary task.Hash's resolveInclude
+// enforces at hash time — dir's parent directory, i.e. at most one ".." hop
+// up from the task's own directory. Checked here too, at config-load time,
+// rather than leaving it to fail only inside task.Hash later: an entry that
+// fails there causes pkg/taskset/source.go's snapHash to silently fall back
+// to a spec-only hash, dropping ALL dir-content change detection for the
+// task (not just the broken include's contribution) until the entry is
+// fixed — a config error should surface immediately instead.
+//
+// Purely lexical, no filesystem access (symlink-aware containment is
+// task.Hash's job, once an absolute dir is known — see resolveInclude).
+// filepath.Join(dir, inc) always cleans inc as a standalone relative path
+// first, so counting inc's own leading ".." segments (via filepath.Clean
+// from a virtual "." origin) determines how many levels above dir the
+// resolved path would land, independent of dir's actual value — true for
+// any clean, non-".."-containing absolute dir, i.e. any real filesystem
+// path.
+func hashIncludeLexicallyInBounds(inc string) bool {
+	cleaned := filepath.Clean(filepath.FromSlash(inc))
+	if cleaned == ".." {
+		return false // resolves to exactly the boundary itself
+	}
+	depth := 0
+	for _, seg := range strings.Split(cleaned, string(filepath.Separator)) {
+		if seg != ".." {
+			break
+		}
+		depth++
+	}
+	return depth <= 1
 }
 
 // webhookSecretGatedFieldWarnings flags trigger.replay_protection /

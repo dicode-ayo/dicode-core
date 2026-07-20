@@ -244,7 +244,7 @@ line (1 existing file changed). A local vLLM / any OpenAI-compat = 0 code, 1 yam
 | 5 | **#571b** — drivers (`handleAI` / `/api/ai/chat` / `dicode ai`) drive suspend→resume | shipped CLI resume loop |
 | 6 | **Suspend-notify** — `suspendNotifier` on `runFinishedHook` | `approval_notify` pattern, `buildin/notify` |
 | 7 | **`task-create` + prompt-threading** — kills #288 | `auto-fix` override, `handleAI` |
-| 8 | Follow-up — `hash_include` for shared-module hash coverage | — |
+| 8 | ~~Follow-up — `hash_include` for shared-module hash coverage~~ — done (#585) | — |
 
 ## Open questions
 

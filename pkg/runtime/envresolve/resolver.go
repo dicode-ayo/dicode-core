@@ -287,7 +287,7 @@ func contentHashOf(spec *task.Spec) (string, error) {
 	if spec.TaskDir == "" {
 		return "", nil
 	}
-	h, err := task.Hash(spec.TaskDir)
+	h, err := task.Hash(spec.TaskDir, spec.HashInclude...)
 	if err != nil {
 		return "", err
 	}

@@ -787,7 +787,11 @@ func snapHash(k task.Kinded, taskDir string) string {
 	if taskDir == "" {
 		return specHash
 	}
-	dirHash, err := task.Hash(taskDir)
+	var hashInclude []string
+	if s, ok := k.(*task.Spec); ok {
+		hashInclude = s.HashInclude
+	}
+	dirHash, err := task.Hash(taskDir, hashInclude...)
 	if err != nil {
 		return specHash
 	}
