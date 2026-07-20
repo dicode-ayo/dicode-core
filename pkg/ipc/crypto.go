@@ -85,6 +85,18 @@ func (h *cryptoHandler) Encrypt(context string, plaintext []byte) ([]byte, error
 // migration, but blobs sealed before that change (or by a caller still
 // holding one from before an upgrade) were sealed under the Argon2id key,
 // and there's no version tag in the blob to tell the two apart up front.
+//
+// Cost note: a blob that only opens under the legacy key (or doesn't open
+// under either) still pays the full Argon2id derivation on every Decrypt
+// call, exactly as every call did before this migration — this isn't a new
+// cost, but it also isn't a new saving: nothing here re-encrypts a
+// successfully-legacy-opened blob under the new key, so a long-lived blob
+// that's decrypted far more often than it's re-encrypted (e.g. a stored
+// identity that's read on every reconnect but re-sealed only on rotation)
+// keeps paying it indefinitely. Callers that persist `dicode.crypto`
+// ciphertext and want the fast path should re-encrypt and re-persist after
+// a legacy-fallback decrypt; this handler has no storage access to do that
+// itself.
 func (h *cryptoHandler) Decrypt(context string, blob []byte) ([]byte, error) {
 	if context == "" {
 		return nil, fmt.Errorf("context required")
@@ -100,8 +112,11 @@ func (h *cryptoHandler) Decrypt(context string, blob []byte) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("derive: %w", err)
 	}
+	hkdfErr := (error)(nil)
 	if pt, err := openWithKey(hkdfKey, context, blob); err == nil {
 		return pt, nil
+	} else {
+		hkdfErr = err
 	}
 
 	legacyKey, err := h.deriver.DeriveSubKey(context)
@@ -110,7 +125,11 @@ func (h *cryptoHandler) Decrypt(context string, blob []byte) ([]byte, error) {
 	}
 	pt, err := openWithKey(legacyKey, context, blob)
 	if err != nil {
-		return nil, fmt.Errorf("open: %w", err)
+		// Report both attempts: a blob that's actually HKDF-sealed but
+		// corrupted/truncated would otherwise fail with only the legacy
+		// attempt's error, which reads exactly like "never HKDF-sealed" and
+		// hides which code path actually applies to this blob.
+		return nil, fmt.Errorf("open: hkdf attempt: %v; legacy attempt: %w", hkdfErr, err)
 	}
 	return pt, nil
 }

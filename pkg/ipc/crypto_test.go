@@ -3,6 +3,7 @@ package ipc
 import (
 	"bytes"
 	"crypto/sha256"
+	"strings"
 	"testing"
 
 	"golang.org/x/crypto/chacha20poly1305"
@@ -103,6 +104,27 @@ func TestCryptoHandler_TamperedCiphertextRejected(t *testing.T) {
 	ct[chacha20poly1305.NonceSizeX] ^= 0xff
 	if _, err := h.Decrypt("ctx", ct); err == nil {
 		t.Error("expected error for tampered ciphertext")
+	}
+}
+
+// TestCryptoHandler_TamperedCiphertextErrorMentionsBothAttempts guards a
+// code-review fix: a blob that's genuinely HKDF-sealed but corrupted must
+// not fail with an error that only describes the (irrelevant) legacy
+// Argon2id attempt — that reads exactly like "this was never HKDF-sealed"
+// and hides which derivation path actually applies to the blob.
+func TestCryptoHandler_TamperedCiphertextErrorMentionsBothAttempts(t *testing.T) {
+	h := newCryptoHandler(stubDeriver{})
+	ct, err := h.Encrypt("ctx", []byte("data"))
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	ct[chacha20poly1305.NonceSizeX] ^= 0xff
+	_, err = h.Decrypt("ctx", ct)
+	if err == nil {
+		t.Fatal("expected error for tampered ciphertext")
+	}
+	if !strings.Contains(err.Error(), "hkdf attempt") || !strings.Contains(err.Error(), "legacy attempt") {
+		t.Errorf("expected error to mention both attempts, got: %v", err)
 	}
 }
 

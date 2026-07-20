@@ -346,6 +346,11 @@ func wireRunInputPersistence(cfg *config.Config, secretsChain secrets.Chain, reg
 		log.Warn("run-input persistence: no SubKeyDeriver available in secrets chain — persistence disabled")
 		return nil
 	}
+	// Intentionally still Argon2id (DeriveSubKey), not the faster
+	// DeriveSubKeyHKDF added for dicode.crypto in #607: this key is derived
+	// once at startup, not in a task-controlled loop, so the perf motivation
+	// for that migration doesn't apply here, and re-keying the replay-cache
+	// encryption across a restart needs its own migration review.
 	key, err := deriver.DeriveSubKey("dicode/run-inputs/v1")
 	if err != nil {
 		log.Warn("run-input persistence: sub-key derive failed", zap.Error(err))
@@ -519,6 +524,13 @@ func setupApprovalGate(ctx context.Context, cfg *config.Config, configPath strin
 	// never task-reachable and survives across restarts even if the SQLite DB
 	// is wiped. Silently falls back to unsigned mode when no SubKeyDeriver is
 	// available (e.g. stripped test builds without a local provider).
+	//
+	// Intentionally still Argon2id (DeriveSubKey), not the faster
+	// DeriveSubKeyHKDF added for dicode.crypto in #607: this key is derived
+	// once at startup, not in a task-controlled loop, so the perf motivation
+	// for that migration doesn't apply here, and re-keying it would change
+	// what verifies an already-persisted dicode.lock across an upgrade —
+	// needs its own migration review.
 	var lockSigningKey []byte
 	for _, p := range secretsChain {
 		if d, ok := p.(secrets.SubKeyDeriver); ok {
