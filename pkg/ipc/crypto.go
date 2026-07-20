@@ -112,18 +112,16 @@ func (h *cryptoHandler) Decrypt(context string, blob []byte) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("derive: %w", err)
 	}
-	hkdfErr := (error)(nil)
-	if pt, err := openWithKey(hkdfKey, context, blob); err == nil {
+	pt, hkdfErr := openWithKey(hkdfKey, context, blob)
+	if hkdfErr == nil {
 		return pt, nil
-	} else {
-		hkdfErr = err
 	}
 
 	legacyKey, err := h.deriver.DeriveSubKey(context)
 	if err != nil {
 		return nil, fmt.Errorf("derive (legacy): %w", err)
 	}
-	pt, err := openWithKey(legacyKey, context, blob)
+	pt, err = openWithKey(legacyKey, context, blob)
 	if err != nil {
 		// Report both attempts: a blob that's actually HKDF-sealed but
 		// corrupted/truncated would otherwise fail with only the legacy
