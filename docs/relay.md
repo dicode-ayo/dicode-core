@@ -52,17 +52,46 @@ directory (the identity blob) and your secrets master key.
 ```yaml
 relay:
   enabled: true             # default: false
-  server_url: wss://...     # broker mTLS endpoint
+  server_url: wss://...     # broker mTLS endpoint (single-instance shorthand)
   broker_url: https://...   # public OAuth/webhook base URL
   ca_file: /path/ca.pem     # optional: CA for a self-signed broker
 ```
 
+For a high-availability relay deployment with more than one broker instance,
+list every instance's mTLS endpoint under `server_urls` instead of `server_url`:
+
+```yaml
+relay:
+  enabled: true
+  server_urls:              # one mTLS endpoint per broker instance
+    - wss://relay-a.example.com:5554
+    - wss://relay-b.example.com:5554
+  broker_url: https://relay.example.com   # shared public OAuth/webhook base URL
+```
+
+The daemon holds one independent mTLS connection per entry, all sharing its
+identity and client certificate, so every instance registers the same daemon
+uuid and any instance can forward an inbound webhook locally — no directory, no
+mesh, instant failover.
+
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `enabled` | bool | `false` | Enable the relay client |
-| `server_url` | string | — | WebSocket URL of the broker's mTLS listener (e.g. `wss://relay.example:5554`). Must start with `wss://`; a `ws://` URL is rejected at config load because mTLS requires TLS |
-| `broker_url` | string | derived | Public base URL for OAuth and webhook delivery (e.g. `https://relay.example`). The mTLS and public listeners run on different ports, so set this explicitly. When empty and `server_url` carries an explicit port, the daemon warns at boot. Must be `http://` or `https://` when set |
+| `server_url` | string | — | WebSocket URL of the broker's mTLS listener (e.g. `wss://relay.example:5554`). Must start with `wss://`; a `ws://` URL is rejected at config load because mTLS requires TLS. Single-instance shorthand — mutually exclusive with `server_urls` |
+| `server_urls` | string list | — | One mTLS listener URL per broker instance for an HA deployment. Every entry must be `wss://`; duplicate or empty entries are rejected at config load. Mutually exclusive with `server_url`; when the relay is enabled exactly one of the two must be set. The OAuth broker origin is derived from the first entry when `broker_url` is unset |
+| `broker_url` | string | derived | Public base URL for OAuth and webhook delivery (e.g. `https://relay.example`). The mTLS and public listeners run on different ports, so set this explicitly. When empty it is derived from the (first) control-channel URL, and the daemon warns at boot if that URL carries an explicit non-default port. Must be `http://` or `https://` when set |
 | `ca_file` | string | — | PEM CA bundle used to verify the broker's server certificate. Set it for a self-hosted broker with a self-signed cert; leave empty for the hosted relay, which is verified against the platform trust store (WebPKI) |
+
+**Every `server_urls` entry must be an mTLS control endpoint reachable with
+end-to-end TLS passthrough (L4 only)** — never behind a terminating proxy
+(Cloudflare orange-cloud, nginx `listen ... ssl`, etc.), which strips the
+client certificate and the broker closes the connection with code 4401. Only
+the separate public webhook/OAuth listener (`broker_url`) may sit behind such a
+proxy. A multi-instance broker deployment must also run with
+`server.multi_instance: true` and a **shared broker signing key and mTLS
+certificate** across all instances: the daemon persists the broker public key
+per connection (last write wins), so OAuth `broker_sig` verification is only
+consistent when every instance presents the identical key.
 
 ---
 

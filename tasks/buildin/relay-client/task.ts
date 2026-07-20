@@ -8,7 +8,7 @@ import {
   Identity,
   RelayClient,
   type StoredIdentity,
-} from "npm:dicode-relay@0.2.0/client";
+} from "npm:dicode-relay@0.2.1/client";
 
 import type { DicodeSdk } from "../../sdk.ts";
 
@@ -102,14 +102,30 @@ export default async function main(sdk: DicodeSdk): Promise<void> {
   }
 }
 
+// Resolve the broker control-channel URL list. Prefer the multi-instance
+// DICODE_RELAY_SERVER_URLS (comma-separated) and fall back to the single
+// DICODE_RELAY_SERVER_URL shorthand. A one-element list keeps a single code
+// path — the library emits the flat onStatus shape for one URL and adds an
+// optional endpoints[] breakdown for many.
+export function resolveServerURLs(): string[] {
+  const multi = Deno.env.get("DICODE_RELAY_SERVER_URLS") ?? "";
+  const urls = multi
+    .split(",")
+    .map((u) => u.trim())
+    .filter((u) => u !== "");
+  if (urls.length > 0) return urls;
+  const single = (Deno.env.get("DICODE_RELAY_SERVER_URL") ?? "").trim();
+  return single !== "" ? [single] : [];
+}
+
 async function runOnce(sdk: DicodeSdk): Promise<void> {
-  const url = Deno.env.get("DICODE_RELAY_SERVER_URL");
+  const serverURLs = resolveServerURLs();
   const portStr = Deno.env.get("DICODE_RELAY_LOCAL_PORT") ?? "";
   const localPort = Number(portStr);
   const storageTask = Deno.env.get("DICODE_STORAGE_TASK") ?? "buildin/local-storage";
 
-  if (!url) {
-    throw new Error("relay-client: DICODE_RELAY_SERVER_URL not set");
+  if (serverURLs.length === 0) {
+    throw new Error("relay-client: no relay server URL set (DICODE_RELAY_SERVER_URLS / DICODE_RELAY_SERVER_URL)");
   }
   if (!Number.isFinite(localPort) || localPort <= 0) {
     throw new Error(`relay-client: DICODE_RELAY_LOCAL_PORT invalid (${portStr})`);
@@ -142,7 +158,7 @@ async function runOnce(sdk: DicodeSdk): Promise<void> {
   }
 
   const client = new RelayClient({
-    serverURL:      url,
+    serverURLs,
     localPort,
     identity,
     tls: {

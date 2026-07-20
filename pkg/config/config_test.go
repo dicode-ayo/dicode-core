@@ -532,6 +532,129 @@ relay:
 	}
 }
 
+// TestResolvedBrokerURL_DerivesFromFirstServerURL covers the HA-list path:
+// with server_urls set, the OAuth broker origin derives from the FIRST entry
+// (all instances of one deployment share one public origin).
+func TestResolvedBrokerURL_DerivesFromFirstServerURL(t *testing.T) {
+	r := RelayConfig{ServerURLs: []string{"wss://a.example:5554", "wss://b.example:5554"}}
+	if got := r.ResolvedBrokerURL(); got != "https://a.example:5554" {
+		t.Errorf("ResolvedBrokerURL() = %q, want derivation from the first entry", got)
+	}
+	// Explicit broker_url still wins over the derived origin.
+	r.BrokerURL = "https://broker.example.com"
+	if got := r.ResolvedBrokerURL(); got != "https://broker.example.com" {
+		t.Errorf("ResolvedBrokerURL() = %q, want the explicit broker_url", got)
+	}
+}
+
+// TestPrimaryServerURL covers the XOR collapse: ServerURL when the shorthand
+// is used, else the first list entry, else "".
+func TestPrimaryServerURL(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		r    RelayConfig
+		want string
+	}{
+		{"shorthand", RelayConfig{ServerURL: "wss://a.example"}, "wss://a.example"},
+		{"list first", RelayConfig{ServerURLs: []string{"wss://a.example", "wss://b.example"}}, "wss://a.example"},
+		{"neither", RelayConfig{}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.r.PrimaryServerURL(); got != tc.want {
+				t.Errorf("PrimaryServerURL() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestLoad_RelayServerURLs covers the server_urls list validator: both-set is
+// rejected, an enabled relay needs at least one URL, every list entry must be
+// wss://, and duplicate/empty entries are rejected at load time.
+func TestLoad_RelayServerURLs(t *testing.T) {
+	write := func(t *testing.T, relay string) (*Config, error) {
+		t.Helper()
+		dir := t.TempDir()
+		cfgPath := filepath.Join(dir, "dicode.yaml")
+		content := `
+spec:
+  entries:
+    local:
+      ref:
+        path: ${CONFIGDIR}/tasks
+relay:
+` + relay
+		if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return Load(cfgPath)
+	}
+
+	t.Run("both server_url and server_urls rejected", func(t *testing.T) {
+		_, err := write(t, `  enabled: true
+  server_url: wss://a.example:5554
+  server_urls:
+    - wss://b.example:5554
+  broker_url: https://a.example
+`)
+		if err == nil || !strings.Contains(err.Error(), "not both") {
+			t.Fatalf("expected both-set rejection, got: %v", err)
+		}
+	})
+
+	t.Run("enabled requires at least one URL", func(t *testing.T) {
+		_, err := write(t, `  enabled: true
+`)
+		if err == nil || !strings.Contains(err.Error(), "no control-channel URL") {
+			t.Fatalf("expected at-least-one requirement, got: %v", err)
+		}
+	})
+
+	t.Run("non-wss list entry rejected", func(t *testing.T) {
+		_, err := write(t, `  enabled: true
+  server_urls:
+    - wss://a.example:5554
+    - ws://b.example:5554
+  broker_url: https://a.example
+`)
+		if err == nil || !strings.Contains(err.Error(), "wss://") {
+			t.Fatalf("expected non-wss rejection, got: %v", err)
+		}
+		if err != nil && !strings.Contains(err.Error(), "server_urls[1]") {
+			t.Errorf("error should point at the offending index, got: %v", err)
+		}
+	})
+
+	t.Run("duplicate list entry rejected", func(t *testing.T) {
+		_, err := write(t, `  enabled: true
+  server_urls:
+    - wss://a.example:5554
+    - wss://a.example:5554
+  broker_url: https://a.example
+`)
+		if err == nil || !strings.Contains(err.Error(), "duplicate") {
+			t.Fatalf("expected duplicate rejection, got: %v", err)
+		}
+	})
+
+	t.Run("valid list loads and derives broker from first", func(t *testing.T) {
+		cfg, err := write(t, `  enabled: true
+  server_urls:
+    - wss://a.example:5554
+    - wss://b.example:5554
+  broker_url: https://a.example
+`)
+		if err != nil {
+			t.Fatalf("valid server_urls should load, got: %v", err)
+		}
+		if len(cfg.Relay.ServerURLs) != 2 {
+			t.Errorf("ServerURLs = %v, want 2 entries", cfg.Relay.ServerURLs)
+		}
+		if got := cfg.Relay.PrimaryServerURL(); got != "wss://a.example:5554" {
+			t.Errorf("PrimaryServerURL() = %q, want the first entry", got)
+		}
+	})
+}
+
 func TestLoadExecutionMaxConcurrentTasks(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "dicode.yaml")

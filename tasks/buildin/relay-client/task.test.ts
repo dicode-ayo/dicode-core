@@ -14,7 +14,7 @@
  * with an inline assert so the file runs without registry access.
  */
 
-import { isAbortedHandshakeFault } from "./task.ts";
+import { isAbortedHandshakeFault, resolveServerURLs } from "./task.ts";
 
 function assertEq(got: unknown, want: unknown, msg: string): void {
   if (got !== want) {
@@ -96,4 +96,51 @@ Deno.test("does not swallow non-Error values", () => {
   );
   assertEq(isAbortedHandshakeFault(null), false, "null must stay fatal");
   assertEq(isAbortedHandshakeFault(undefined), false, "undefined must stay fatal");
+});
+
+// ── resolveServerURLs: multi-URL precedence (issue #624) ────────────────
+function withEnv(vars: Record<string, string | undefined>, fn: () => void): void {
+  const saved: Record<string, string | undefined> = {};
+  for (const k of ["DICODE_RELAY_SERVER_URLS", "DICODE_RELAY_SERVER_URL"]) {
+    saved[k] = Deno.env.get(k);
+    if (vars[k] === undefined) Deno.env.delete(k);
+    else Deno.env.set(k, vars[k]!);
+  }
+  try {
+    fn();
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) Deno.env.delete(k);
+      else Deno.env.set(k, v);
+    }
+  }
+}
+
+Deno.test("resolveServerURLs: falls back to the single-URL shorthand", () => {
+  withEnv({ DICODE_RELAY_SERVER_URL: "wss://a.example:5554" }, () => {
+    assertEq(
+      JSON.stringify(resolveServerURLs()),
+      JSON.stringify(["wss://a.example:5554"]),
+      "single URL",
+    );
+  });
+});
+
+Deno.test("resolveServerURLs: prefers the list, trims and drops empties", () => {
+  withEnv({
+    DICODE_RELAY_SERVER_URLS: " wss://a.example:5554 , ,wss://b.example:5554,",
+    DICODE_RELAY_SERVER_URL: "wss://ignored.example:5554",
+  }, () => {
+    assertEq(
+      JSON.stringify(resolveServerURLs()),
+      JSON.stringify(["wss://a.example:5554", "wss://b.example:5554"]),
+      "list wins over shorthand",
+    );
+  });
+});
+
+Deno.test("resolveServerURLs: empty when neither var is set", () => {
+  withEnv({}, () => {
+    assertEq(JSON.stringify(resolveServerURLs()), JSON.stringify([]), "no config");
+  });
 });

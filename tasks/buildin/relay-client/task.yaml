@@ -36,6 +36,7 @@ permissions:
       permission: r
   env:
     - DICODE_RELAY_SERVER_URL
+    - DICODE_RELAY_SERVER_URLS
     - DICODE_RELAY_LOCAL_PORT
     - DICODE_STORAGE_TASK
     - DICODE_DATADIR

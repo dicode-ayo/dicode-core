@@ -47,7 +47,20 @@ relay:
   broker_url: https://relay.dicode.app      # public OAuth/webhook base URL
 ```
 
-When `relay.enabled` is `true` and `server_url` is set, the daemon dispatches the `buildin/relay-client` daemon task on boot. The task generates a stable cryptographic identity on first run (see below) and reconnects automatically with exponential backoff on disconnect. `server_url` must be `wss://` — it points at the broker's dedicated mTLS listener. `broker_url` is the public base URL for OAuth and webhook delivery; because the mTLS and public listeners run on different ports, set it explicitly. An optional `ca_file` supplies a PEM CA for a self-signed broker.
+When `relay.enabled` is `true` and a control-channel URL is set, the daemon dispatches the `buildin/relay-client` daemon task on boot. The task generates a stable cryptographic identity on first run (see below) and reconnects automatically with exponential backoff on disconnect. `server_url` must be `wss://` — it points at the broker's dedicated mTLS listener. `broker_url` is the public base URL for OAuth and webhook delivery; because the mTLS and public listeners run on different ports, set it explicitly. An optional `ca_file` supplies a PEM CA for a self-signed broker.
+
+For a high-availability relay with more than one broker instance, replace `server_url` with a `server_urls` list — one `wss://` mTLS endpoint per instance:
+
+```yaml
+relay:
+  enabled: true
+  server_urls:
+    - wss://relay-a.dicode.app:5554
+    - wss://relay-b.dicode.app:5554
+  broker_url: https://relay.dicode.app      # shared public base URL
+```
+
+The daemon opens one independent mTLS connection per entry, all sharing its identity and client certificate, so every instance registers the same daemon uuid and any of them can forward an inbound webhook locally — no directory, no mesh, instant failover. `server_url` and `server_urls` are mutually exclusive, every entry must be `wss://`, and duplicate/empty entries are rejected at config load. Each entry must reach the broker's mTLS listener with **end-to-end TLS passthrough (L4 only)** — a terminating proxy strips the client certificate and the broker closes with code 4401. A multi-instance deployment must additionally run the brokers with `server.multi_instance: true` and a **shared broker signing key and mTLS certificate**, so the per-connection broker-pubkey persistence stays consistent for OAuth `broker_sig` verification.
 
 ---
 
