@@ -1,0 +1,9 @@
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: ops
+spec:
+  entries:
+    relay-edge:
+      ref:
+        path: ./relay-edge/task.yaml
