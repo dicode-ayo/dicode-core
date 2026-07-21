@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	"github.com/dicode/dicode/pkg/runtime/containersec"
 	"github.com/dicode/dicode/pkg/task"
 	"go.uber.org/zap"
@@ -289,29 +290,44 @@ func TestValidateArgvSafety_SafeConfigPasses(t *testing.T) {
 	}
 }
 
-// TestBuildArgs_ResolvedEnvReachesArgv pins that a task's resolved
-// permissions.env (including secret-store values) lands in the podman argv as
-// -e KEY=VALUE, and that a resolved value wins over a literal env_vars entry
-// of the same name.
-func TestBuildArgs_ResolvedEnvReachesArgv(t *testing.T) {
+// TestBuildArgs_EnvForwardedNameOnly pins that env keys are forwarded to the
+// container name-only (`-e KEY`) and that NO value — literal or resolved
+// secret — ever appears on the podman argv, where it would be readable via
+// ps / /proc/<pid>/cmdline.
+func TestBuildArgs_EnvForwardedNameOnly(t *testing.T) {
 	cfg := &task.DockerConfig{
 		Image:   "alpine",
 		EnvVars: map[string]string{"LITERAL": "keep", "TOKEN": "placeholder"},
 	}
 	resolved := map[string]string{"TOKEN": "real-secret", "HOST": "api.local"}
+	mergedEnv := pkgruntime.BuildContainerEnv(cfg.EnvVars, resolved)
 	e := &executor{podmanPath: "/usr/bin/podman"}
-	args := e.buildArgs(cfg, "alpine", "dicode-run1", "run1", "task1", "", resolved)
+	args := e.buildArgs(cfg, "alpine", "dicode-run1", "run1", "task1", "", mergedEnv)
 
-	if !argsContainPair(args, "-e", "LITERAL=keep") {
-		t.Errorf("literal env var missing: %v", args)
+	for _, key := range []string{"LITERAL", "TOKEN", "HOST"} {
+		if !argsContainPair(args, "-e", key) {
+			t.Errorf("env key %q not forwarded name-only: %v", key, args)
+		}
 	}
-	if !argsContainPair(args, "-e", "HOST=api.local") {
-		t.Errorf("resolved env var missing: %v", args)
+	// No KEY=VALUE token, and no secret/literal value substring, may appear.
+	for _, forbidden := range []string{
+		"LITERAL=keep", "TOKEN=real-secret", "TOKEN=placeholder", "HOST=api.local",
+		"real-secret", "placeholder", "api.local", "keep",
+	} {
+		if slices.Contains(args, forbidden) {
+			t.Errorf("value leaked onto argv: %q in %v", forbidden, args)
+		}
 	}
-	if !argsContainPair(args, "-e", "TOKEN=real-secret") {
-		t.Errorf("resolved value did not win over literal: %v", args)
+
+	// The values instead live in mergedEnv, which Execute appends onto the
+	// podman process's cmd.Env — resolved value winning over the literal.
+	if !slices.Contains(mergedEnv, "TOKEN=real-secret") {
+		t.Errorf("resolved value missing from env slice: %v", mergedEnv)
 	}
-	if argsContainPair(args, "-e", "TOKEN=placeholder") {
-		t.Errorf("literal placeholder leaked despite resolved override: %v", args)
+	if slices.Contains(mergedEnv, "TOKEN=placeholder") {
+		t.Errorf("literal placeholder survived resolved override in env slice: %v", mergedEnv)
+	}
+	if !slices.Contains(mergedEnv, "LITERAL=keep") {
+		t.Errorf("literal value missing from env slice: %v", mergedEnv)
 	}
 }
