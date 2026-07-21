@@ -19,7 +19,9 @@ import (
 	"github.com/dicode/dicode/pkg/registry"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	"github.com/dicode/dicode/pkg/runtime/containersec"
+	"github.com/dicode/dicode/pkg/runtime/envresolve"
 	"github.com/dicode/dicode/pkg/runtime/imagegc"
+	"github.com/dicode/dicode/pkg/secrets"
 	"github.com/dicode/dicode/pkg/task"
 	dockerbuild "github.com/docker/docker/api/types/build"
 	"github.com/docker/docker/api/types/container"
@@ -34,6 +36,12 @@ import (
 type RunOptions struct {
 	RunID       string
 	ParentRunID string
+	// PreResolvedEnv, when set, carries the task's declared permissions.env
+	// after the trigger engine's resolver produced values (including
+	// secret-store values). Its .Env is merged into the container env and
+	// its .Secrets feed the run-log redactor. Nil leaves the container with
+	// only the literal docker.env_vars.
+	PreResolvedEnv *envresolve.Resolved
 }
 
 // RunResult is returned by Run.
@@ -80,6 +88,15 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	defer dc.Close()
 
 	cfg := spec.Docker
+
+	// PreResolvedEnv is already resolved by the trigger engine, so derive the
+	// env map and redactor directly — no resolver is constructed here.
+	var resolvedEnv map[string]string
+	var redactor *secrets.Redactor
+	if opts.PreResolvedEnv != nil {
+		resolvedEnv = opts.PreResolvedEnv.Env
+		redactor = secrets.NewRedactor(opts.PreResolvedEnv.Secrets)
+	}
 
 	// Security floor (issue #380): task.yaml is untrusted input. Reject
 	// dangerous host config (host network namespace, dangerous cap_add,
@@ -147,11 +164,7 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	if cfg.User != "" {
 		containerCfg.User = cfg.User
 	}
-	var envList []string
-	for k, v := range cfg.EnvVars {
-		envList = append(envList, k+"="+v)
-	}
-	containerCfg.Env = envList
+	containerCfg.Env = pkgruntime.BuildContainerEnv(cfg.EnvVars, resolvedEnv)
 
 	portBindings := nat.PortMap{}
 	exposedPorts := nat.PortSet{}
@@ -233,9 +246,9 @@ func (rt *Runtime) Run(ctx context.Context, spec *task.Spec, opts RunOptions) (*
 	logDone := make(chan struct{})
 	go func() {
 		defer close(logDone)
-		rt.streamLines(runID, stdoutR, "info")
+		rt.streamLines(runID, stdoutR, "info", redactor)
 	}()
-	go func() { rt.streamLines(runID, stderrR, "warn") }()
+	go func() { rt.streamLines(runID, stderrR, "warn", redactor) }()
 
 	go func() {
 		<-ctx.Done()
@@ -418,12 +431,13 @@ func (rt *Runtime) maybePull(ctx context.Context, dc *dockerclient.Client, img, 
 	return nil
 }
 
-// streamLines reads lines from r and appends them to the run log.
-func (rt *Runtime) streamLines(runID string, r io.Reader, level string) {
+// streamLines reads lines from r and appends them to the run log, redacting
+// resolved secret values first. A nil redactor is a passthrough.
+func (rt *Runtime) streamLines(runID string, r io.Reader, level string, redactor *secrets.Redactor) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
-		_ = rt.registry.AppendLog(context.Background(), runID, level, scanner.Text())
+		_ = rt.registry.AppendLog(context.Background(), runID, level, redactor.RedactString(scanner.Text()))
 	}
 	if err := scanner.Err(); err != nil {
 		rt.log.Warn("stream scanner error", zap.String("run", runID), zap.Error(err))
@@ -433,8 +447,9 @@ func (rt *Runtime) streamLines(runID string, r io.Reader, level string) {
 // Execute implements runtime.Executor.
 func (rt *Runtime) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime.RunOptions) (*pkgruntime.RunResult, error) {
 	result, err := rt.Run(ctx, spec, RunOptions{
-		RunID:       opts.RunID,
-		ParentRunID: opts.ParentRunID,
+		RunID:          opts.RunID,
+		ParentRunID:    opts.ParentRunID,
+		PreResolvedEnv: opts.PreResolvedEnv,
 	})
 	if err != nil {
 		return nil, err

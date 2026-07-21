@@ -45,6 +45,7 @@ import (
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	"github.com/dicode/dicode/pkg/runtime/containersec"
 	"github.com/dicode/dicode/pkg/runtime/imagegc"
+	"github.com/dicode/dicode/pkg/secrets"
 	"github.com/dicode/dicode/pkg/task"
 	"go.uber.org/zap"
 )
@@ -110,6 +111,15 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 	cfg := spec.Docker
 	containerName := "dicode-" + runID
 
+	// PreResolvedEnv is already resolved by the trigger engine, so derive the
+	// env map and redactor directly — no resolver is constructed here.
+	var resolvedEnv map[string]string
+	var redactor *secrets.Redactor
+	if opts.PreResolvedEnv != nil {
+		resolvedEnv = opts.PreResolvedEnv.Env
+		redactor = secrets.NewRedactor(opts.PreResolvedEnv.Secrets)
+	}
+
 	// Security floor (issue #380): task.yaml is untrusted input. Reject
 	// dangerous host config (host network namespace, dangerous cap_add,
 	// isolation-weakening security_opt, bind mounts of sensitive host paths)
@@ -153,7 +163,7 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 		return result, nil
 	}
 
-	args := e.buildArgs(cfg, imageTag, containerName, runID, spec.ID, effectiveNetMode)
+	args := e.buildArgs(cfg, imageTag, containerName, runID, spec.ID, effectiveNetMode, resolvedEnv)
 
 	e.log.Info("podman run",
 		zap.String("task", spec.ID),
@@ -186,7 +196,7 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 		scanner := bufio.NewScanner(stdout)
 		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 		for scanner.Scan() {
-			_ = e.reg.AppendLog(context.Background(), runID, "info", scanner.Text())
+			_ = e.reg.AppendLog(context.Background(), runID, "info", redactor.RedactString(scanner.Text()))
 		}
 		if err := scanner.Err(); err != nil {
 			e.log.Warn("stdout scanner error", zap.String("run", runID), zap.Error(err))
@@ -196,7 +206,7 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 		scanner := bufio.NewScanner(stderr)
 		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 		for scanner.Scan() {
-			_ = e.reg.AppendLog(context.Background(), runID, "warn", scanner.Text())
+			_ = e.reg.AppendLog(context.Background(), runID, "warn", redactor.RedactString(scanner.Text()))
 		}
 		if err := scanner.Err(); err != nil {
 			e.log.Warn("stderr scanner error", zap.String("run", runID), zap.Error(err))
@@ -299,7 +309,7 @@ func (e *executor) buildImage(ctx context.Context, spec *task.Spec, runID, netMo
 	return tag, nil
 }
 
-func (e *executor) buildArgs(cfg *task.DockerConfig, imageTag, containerName, runID, taskID, netMode string) []string {
+func (e *executor) buildArgs(cfg *task.DockerConfig, imageTag, containerName, runID, taskID, netMode string, resolvedEnv map[string]string) []string {
 	args := []string{
 		"run", "--rm",
 		"--name", containerName,
@@ -312,8 +322,8 @@ func (e *executor) buildArgs(cfg *task.DockerConfig, imageTag, containerName, ru
 	for _, v := range cfg.Volumes {
 		args = append(args, "-v", v)
 	}
-	for k, v := range cfg.EnvVars {
-		args = append(args, "-e", k+"="+v)
+	for _, kv := range pkgruntime.BuildContainerEnv(cfg.EnvVars, resolvedEnv) {
+		args = append(args, "-e", kv)
 	}
 	if cfg.WorkingDir != "" {
 		args = append(args, "--workdir", cfg.WorkingDir)

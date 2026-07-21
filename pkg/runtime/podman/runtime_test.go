@@ -55,7 +55,7 @@ func TestBuildArgs_HardeningFlags(t *testing.T) {
 		User:        "65532:65532",
 	}
 	e := &executor{podmanPath: "/usr/bin/podman"}
-	args := e.buildArgs(cfg, "cloudflare/cloudflared:latest", "dicode-run1", "run1", "task1", "bridge")
+	args := e.buildArgs(cfg, "cloudflare/cloudflared:latest", "dicode-run1", "run1", "task1", "bridge", nil)
 
 	if !argsContainPair(args, "--network", "bridge") {
 		t.Errorf("missing --network bridge in %v", args)
@@ -91,7 +91,7 @@ func TestBuildArgs_OmitsHardeningWhenUnset(t *testing.T) {
 	// buildArgs must not inject any --network flag — the runtime picks its default.
 	cfg := &task.DockerConfig{Image: "alpine"}
 	e := &executor{podmanPath: "/usr/bin/podman"}
-	args := e.buildArgs(cfg, "alpine", "dicode-run1", "run1", "task1", "")
+	args := e.buildArgs(cfg, "alpine", "dicode-run1", "run1", "task1", "", nil)
 
 	joined := strings.Join(args, " ")
 	for _, forbidden := range []string{"--network", "--add-host", "--cap-drop", "--cap-add", "--security-opt", "--read-only", "--user"} {
@@ -108,7 +108,7 @@ func TestBuildArgs_NetworkNone_ZeroDefaultPerms(t *testing.T) {
 	cfg := &task.DockerConfig{Image: "alpine"}
 	e := &executor{podmanPath: "/usr/bin/podman"}
 	// EffectiveNetworkMode returns "none" when permissions.net is empty and no ports.
-	args := e.buildArgs(cfg, "alpine", "dicode-run1", "run1", "task1", "none")
+	args := e.buildArgs(cfg, "alpine", "dicode-run1", "run1", "task1", "none", nil)
 
 	if !argsContainPair(args, "--network", "none") {
 		t.Errorf("expected --network none for zero-default isolation; args=%v", args)
@@ -121,7 +121,7 @@ func TestBuildArgs_NetworkBridge_WhenPermissionsNetWildcard(t *testing.T) {
 	cfg := &task.DockerConfig{Image: "alpine"}
 	e := &executor{podmanPath: "/usr/bin/podman"}
 	// EffectiveNetworkMode returns "" when permissions.net is non-empty.
-	args := e.buildArgs(cfg, "alpine", "dicode-run1", "run1", "task1", "")
+	args := e.buildArgs(cfg, "alpine", "dicode-run1", "run1", "task1", "", nil)
 
 	joined := strings.Join(args, " ")
 	if strings.Contains(joined, "--network none") {
@@ -144,7 +144,7 @@ func TestBuildArgs_HardeningPrecedesImage(t *testing.T) {
 		Command:     []string{"echo", "hi"},
 	}
 	e := &executor{podmanPath: "/usr/bin/podman"}
-	args := e.buildArgs(cfg, "alpine", "dicode-run1", "run1", "task1", "bridge")
+	args := e.buildArgs(cfg, "alpine", "dicode-run1", "run1", "task1", "bridge", nil)
 
 	imageIdx := slices.Index(args, "alpine")
 	if imageIdx < 0 {
@@ -286,5 +286,32 @@ func TestValidateArgvSafety_SafeConfigPasses(t *testing.T) {
 	// Built image tags look like dicode-<task>:<hash> and must pass too.
 	if err := validateArgvSafety(&task.DockerConfig{}, "dicode-mytask:a1b2c3d4e5f6"); err != nil {
 		t.Errorf("built image tag rejected: %v", err)
+	}
+}
+
+// TestBuildArgs_ResolvedEnvReachesArgv pins that a task's resolved
+// permissions.env (including secret-store values) lands in the podman argv as
+// -e KEY=VALUE, and that a resolved value wins over a literal env_vars entry
+// of the same name.
+func TestBuildArgs_ResolvedEnvReachesArgv(t *testing.T) {
+	cfg := &task.DockerConfig{
+		Image:   "alpine",
+		EnvVars: map[string]string{"LITERAL": "keep", "TOKEN": "placeholder"},
+	}
+	resolved := map[string]string{"TOKEN": "real-secret", "HOST": "api.local"}
+	e := &executor{podmanPath: "/usr/bin/podman"}
+	args := e.buildArgs(cfg, "alpine", "dicode-run1", "run1", "task1", "", resolved)
+
+	if !argsContainPair(args, "-e", "LITERAL=keep") {
+		t.Errorf("literal env var missing: %v", args)
+	}
+	if !argsContainPair(args, "-e", "HOST=api.local") {
+		t.Errorf("resolved env var missing: %v", args)
+	}
+	if !argsContainPair(args, "-e", "TOKEN=real-secret") {
+		t.Errorf("resolved value did not win over literal: %v", args)
+	}
+	if argsContainPair(args, "-e", "TOKEN=placeholder") {
+		t.Errorf("literal placeholder leaked despite resolved override: %v", args)
 	}
 }
