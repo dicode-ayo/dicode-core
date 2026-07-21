@@ -1,0 +1,63 @@
+apiVersion: dicode/v1
+kind: Task
+name: relay-edge
+description: >-
+  Reconcile the Cloudflare edge for a self-hosted bootstrap relay: a proxied
+  hostname for the public webhook/OAuth listener via a CF Tunnel, and a grey
+  (unproxied) A record for the mTLS control channel that must never be proxied.
+
+runtime: deno
+
+trigger:
+  manual: true
+  cron: "0 * * * *"
+
+permissions:
+  net:
+    - api.cloudflare.com
+  env:
+    - name: CLOUDFLARE_API_TOKEN
+      secret: cloudflare_api_token
+    - CLOUDFLARE_ACCOUNT_ID
+
+params:
+  zone:
+    type: string
+    required: true
+    description: The Cloudflare zone the records live in, e.g. "dicode.io".
+  public_hostname:
+    type: string
+    required: true
+    description: >-
+      Proxied hostname for the public HTTP webhook/OAuth listener, fronted by a
+      CF Tunnel, e.g. "relay.dicode.io".
+  control_hostname:
+    type: string
+    required: true
+    description: >-
+      Grey (unproxied) hostname for the mTLS control channel, e.g.
+      "broker.relay.dicode.io". Never proxied — Cloudflare would strip the
+      client cert.
+  control_ip:
+    type: string
+    required: true
+    description: Public IP of the host serving the :5554 control channel.
+  tunnel_name:
+    type: string
+    default: ""
+    description: >-
+      Optional named Cloudflare Tunnel to manage. When set, the tunnel is
+      ensured (created + ingress-configured when missing) and the public record
+      is pointed at it. When empty, the public record is left unmanaged.
+  local_port:
+    type: number
+    default: 5553
+    description: Local port the tunnel forwards the public hostname to.
+  dry_run:
+    type: boolean
+    default: true
+    description: >-
+      When true (the default, and what the cron drift check uses), compute the
+      plan and make zero mutating calls. Set false for a manual apply.
+
+timeout: 60s
