@@ -11,6 +11,21 @@
  *
  * Runs in the unauthenticated project (server.auth=false) alongside
  * config.spec.ts, which documents the same auth posture.
+ *
+ * Issue #621: the first test below used to point its local-source add at
+ * DICODE_E2E_TASKSET_PATH — the EXACT SAME taskset.yaml the fixture-seeded
+ * "e2e-tests" source (tests/e2e/fixtures/dicode-unauth.yaml) already watches.
+ * Adding a second source pointed at a path an existing source is already
+ * watching let the two sources collide on the reconciler's internal
+ * Source.ID()-keyed teardown bookkeeping (fixed separately in
+ * pkg/webui/server.go / pkg/daemon/daemon.go via taskset.SourceID), and
+ * caused cron.spec.ts's "task list shows last run status after cron fires"
+ * test — which runs in the same file-alphabetical order right after this one
+ * in the shared "unauthenticated" project daemon — to fail with a 90s
+ * timeout as e2e-tests/hello-cron cycled register/unregister. It now uses
+ * DICODE_E2E_ADD_SOURCE_TASKSET_PATH, a dedicated fixture
+ * (tests/e2e/fixtures/add-source-tasks/) in its own separate temp directory
+ * that no other source ever watches.
  */
 
 import { test, expect } from '@playwright/test';
@@ -28,8 +43,10 @@ async function openConfigPage(page: Page): Promise<void> {
 
 test.describe('Config UI — Add source', () => {
   test('adds a local source through the real form and it appears via the API', async ({ page, request }) => {
-    const tasksetPath = process.env.DICODE_E2E_TASKSET_PATH;
-    test.skip(!tasksetPath, 'DICODE_E2E_TASKSET_PATH not set — cannot exercise a local source add');
+    // A dedicated, isolated fixture (issue #621) — never the same path/watch
+    // root as the "e2e-tests" source already seeded by dicode-unauth.yaml.
+    const tasksetPath = process.env.DICODE_E2E_ADD_SOURCE_TASKSET_PATH;
+    test.skip(!tasksetPath, 'DICODE_E2E_ADD_SOURCE_TASKSET_PATH not set — cannot exercise a local source add');
 
     const name = `e2e-add-local-${Date.now()}`;
 

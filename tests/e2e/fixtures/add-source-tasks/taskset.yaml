@@ -1,0 +1,15 @@
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: e2e-add-source
+spec:
+  entries:
+    # Only entry in this taskset — deliberately minimal and isolated from the
+    # main tests/e2e/fixtures/tasks/taskset.yaml tree (issue #621: this file
+    # and its parent directory must never be the same path/watch-root an
+    # existing source is already watching, or dynamically adding a second
+    # source pointed here can spuriously disturb that other source's
+    # reconciler bookkeeping).
+    hello-isolated:
+      ref:
+        path: ADD_SOURCE_FIXTURES_TASKS_DIR/hello-isolated/task.yaml

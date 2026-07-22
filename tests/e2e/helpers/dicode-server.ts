@@ -10,20 +10,28 @@
  *  2. Creates a temp directory per test run.
  *  3. Copies the test task fixtures into the temp dir (so tests can mutate them).
  *  4. Writes a concrete taskset.yaml and dicode.yaml from the fixture templates.
- *  5. Spawns the dicode process.
- *  6. Waits until /api/tasks returns < 500 (server is up).
- *  7. Writes state to a temp file so teardown can find the PID.
- *  8. Exports env vars so individual test files can locate the temp task dir.
+ *  5. Copies the add-source-tasks fixture into its OWN, separate temp
+ *     directory and writes its own resolved taskset.yaml (issue #621: this
+ *     must never be the same path/watch-root as the taskset.yaml from step 3
+ *     — see the doc comment on writeAddSourceTaskset below).
+ *  6. Spawns the dicode process.
+ *  7. Waits until /api/tasks returns < 500 (server is up).
+ *  8. Writes state to a temp file so teardown can find the PID(s)/dir(s).
+ *  9. Exports env vars so individual test files can locate the temp task dirs.
  *
  * Environment variables consumed:
  *   DICODE_AUTH_MODE        — "authenticated" | "unauthenticated" (default)
  *   TEST_WEBHOOK_SECRET     — HMAC secret forwarded to the test server env
  *
  * Environment variables produced (readable in test files):
- *   DICODE_E2E_TEMP_DIR     — absolute path to the temp directory
- *   DICODE_E2E_TASKSET_PATH — absolute path to the resolved taskset.yaml
- *   DICODE_E2E_CONFIG_PATH  — absolute path to the resolved dicode.yaml
- *   DICODE_E2E_TASKS_DIR    — absolute path to the copied tasks/ subdir
+ *   DICODE_E2E_TEMP_DIR                — absolute path to the temp directory
+ *   DICODE_E2E_TASKSET_PATH            — absolute path to the resolved taskset.yaml
+ *   DICODE_E2E_CONFIG_PATH             — absolute path to the resolved dicode.yaml
+ *   DICODE_E2E_TASKS_DIR               — absolute path to the copied tasks/ subdir
+ *   DICODE_E2E_ADD_SOURCE_TASKSET_PATH — absolute path to the add-source-tasks
+ *                                        fixture's own resolved taskset.yaml,
+ *                                        in its own separate temp dir (issue
+ *                                        #621 — see writeAddSourceTaskset)
  */
 
 import { execFileSync, spawn } from 'child_process';
@@ -35,6 +43,7 @@ export const REPO_ROOT = path.resolve(__dirname, '../../..');
 export const BINARY = path.join(REPO_ROOT, 'dicode');
 const FIXTURES_DIR = path.join(REPO_ROOT, 'tests/e2e/fixtures');
 const TASKS_DIR = path.join(FIXTURES_DIR, 'tasks');
+const ADD_SOURCE_FIXTURES_DIR = path.join(FIXTURES_DIR, 'add-source-tasks');
 
 // Fixed path for the Playwright storage state — see writeAuthState below.
 export const AUTH_STATE_PATH = path.join(REPO_ROOT, 'tests/e2e/.auth-state.json');
@@ -50,6 +59,9 @@ interface E2EState {
   tempDir: string;
   configPath: string;
   tasksetPath: string;
+  // Separate root from tempDir (see writeAddSourceTaskset's doc comment) —
+  // tracked here so teardown can remove it independently of tempDir.
+  addSourceTempDir: string;
 }
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
@@ -130,6 +142,37 @@ function writeTaskset(tempDir: string): { tasksetPath: string; tasksDir: string 
 }
 
 /**
+ * Copy the add-source-tasks fixture into its own, brand-new temp directory
+ * (a distinct fs.mkdtempSync root — NOT a subdirectory of the main tempDir)
+ * and write its resolved taskset.yaml. Returns the path to that taskset.yaml.
+ *
+ * Why a fully separate root rather than a subdirectory of tempDir: tempDir IS
+ * data_dir (see setup() below), and the main "e2e-tests" source's fsnotify
+ * watch root is the directory containing ITS taskset.yaml — which is tempDir
+ * itself. A subdirectory of tempDir would still be a distinct watch root from
+ * tempDir, so it wouldn't literally recreate the issue #621 collision, but a
+ * fully independent root is simpler to reason about and to tear down (its own
+ * fs.rmSync, no risk of the two cleanups racing over shared ancestry) — see
+ * teardown() below.
+ *
+ * This fixture is deliberately never referenced by tests/e2e/fixtures/dicode-
+ * unauth.yaml|dicode-auth.yaml's spec.entries: the whole point is that no
+ * source watches it until add-source.spec.ts's own test dynamically adds one
+ * pointed here via the real "Add source" form.
+ */
+function writeAddSourceTaskset(): { tasksetPath: string; tempDir: string } {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dicode-e2e-add-source-'));
+  const tasksDir = path.join(tempDir, 'tasks');
+  copyDirSync(ADD_SOURCE_FIXTURES_DIR, tasksDir);
+
+  const template = fs.readFileSync(path.join(ADD_SOURCE_FIXTURES_DIR, 'taskset.yaml'), 'utf8');
+  const content = template.replace(/ADD_SOURCE_FIXTURES_TASKS_DIR/g, tasksDir);
+  const tasksetPath = path.join(tempDir, 'taskset.yaml');
+  fs.writeFileSync(tasksetPath, content, 'utf8');
+  return { tasksetPath, tempDir };
+}
+
+/**
  * Instantiate a config template (replacing TEMP_DATA_DIR and TEMP_TASKSET_PATH)
  * and write it to tempDir/dicode.yaml.
  */
@@ -173,10 +216,12 @@ export async function setup(): Promise<void> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dicode-e2e-'));
   const { tasksetPath, tasksDir } = writeTaskset(tempDir);
   const configPath = writeConfig(templateName, tempDir, tasksetPath);
+  const { tasksetPath: addSourceTasksetPath, tempDir: addSourceTempDir } = writeAddSourceTaskset();
 
   console.log(`[e2e] Starting dicode (${authMode})`);
   console.log(`[e2e] Temp dir: ${tempDir}`);
   console.log(`[e2e] Config:   ${configPath}`);
+  console.log(`[e2e] Add-source fixture temp dir: ${addSourceTempDir}`);
 
   const serverEnv: NodeJS.ProcessEnv = {
     ...process.env,
@@ -217,6 +262,7 @@ export async function setup(): Promise<void> {
     tempDir,
     configPath,
     tasksetPath,
+    addSourceTempDir,
   };
   fs.writeFileSync(STATE_FILE, JSON.stringify(state), 'utf8');
 
@@ -225,6 +271,7 @@ export async function setup(): Promise<void> {
   process.env.DICODE_E2E_TASKSET_PATH = tasksetPath;
   process.env.DICODE_E2E_CONFIG_PATH = configPath;
   process.env.DICODE_E2E_TASKS_DIR = tasksDir;
+  process.env.DICODE_E2E_ADD_SOURCE_TASKSET_PATH = addSourceTasksetPath;
 
   await waitForReady(BASE_URL);
   console.log('[e2e] dicode is ready.');
@@ -303,6 +350,11 @@ export async function teardown(): Promise<void> {
 
   if (state.tempDir && fs.existsSync(state.tempDir)) {
     fs.rmSync(state.tempDir, { recursive: true, force: true });
+  }
+  // Separate root from tempDir (see writeAddSourceTaskset) — cleaned up
+  // independently since it's never nested under tempDir.
+  if (state.addSourceTempDir && fs.existsSync(state.addSourceTempDir)) {
+    fs.rmSync(state.addSourceTempDir, { recursive: true, force: true });
   }
   fs.rmSync(STATE_FILE, { force: true });
   fs.rmSync(AUTH_STATE_PATH, { force: true });
