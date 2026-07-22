@@ -4,6 +4,7 @@
 package taskset
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/dicode/dicode/pkg/task"
@@ -34,10 +35,24 @@ type RefAuth struct {
 func (r *Ref) IsGit() bool { return r.URL != "" }
 
 // SourceID computes the canonical Source.ID() for a named entry pointing at
-// ref. It is name-qualified — "<name>:<url-or-path>" — so two different
-// dicode.yaml entries that happen to reference the identical git URL or
-// local path (e.g. a dynamically-added source pointed at a path an existing
-// source already watches, issue #621) never collide on Source.ID().
+// ref. It is name-qualified so two different dicode.yaml entries that happen
+// to reference the identical git URL or local path (e.g. a dynamically-added
+// source pointed at a path an existing source already watches, issue #621)
+// never collide on Source.ID().
+//
+// The encoding is length-prefixed — "<len(name)>:<name>:<url-or-path>" —
+// rather than a plain "<name>:<url-or-path>" concatenation. A plain
+// concatenation is only collision-free if name can never itself contain a
+// ':'; that precondition is enforced for API-added sources by
+// validateSourceName, but NOT for source names read from dicode.yaml's
+// spec.entries keys or nested taskset.yaml entries (pkg/config and
+// pkg/taskset's loaders validate the ref, not the entry-name charset), so a
+// name like "a:b" paired with path "c" would otherwise produce the same
+// string as name "a" paired with path "b:c". Length-prefixing pins down
+// exactly where the name ends regardless of what characters name or target
+// contain, so two different (name, target) pairs can never collide — the
+// digit run before the first ':' can never be misread as part of a shorter
+// name, since name's own length is encoded before any of its bytes appear.
 //
 // Every call site that constructs a taskset.Source (pkg/webui's
 // apiAddSource/apiRemoveSource and pkg/daemon's buildTaskSetSourceFromEntry)
@@ -55,7 +70,7 @@ func SourceID(name string, ref *Ref) string {
 	if target == "" {
 		target = ref.Path
 	}
-	return name + ":" + target
+	return fmt.Sprintf("%d:%s:%s", len(name), name, target)
 }
 
 // effectiveBranch returns the branch, defaulting to "main".
