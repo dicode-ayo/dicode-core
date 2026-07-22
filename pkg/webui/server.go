@@ -2061,9 +2061,13 @@ func (s *Server) apiTestTask(w http.ResponseWriter, r *http.Request) {
 
 // scopeForRequest extracts a Bearer token from r's Authorization header and
 // resolves its stored MCP scope, if any. found mirrors apiKeyStore.scopeFor:
-// false when there's no Bearer token or it doesn't validate; scope nil when
-// found but unscoped (full access).
+// false when there's no Bearer token, no key store is configured (database
+// nil — auth features disabled, see New's doc comment), or the token doesn't
+// validate; scope nil when found but unscoped (full access).
 func (s *Server) scopeForRequest(r *http.Request) (scope *pkgruntime.MCPScope, found bool) {
+	if s.apiKeys == nil {
+		return nil, false
+	}
 	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if token == "" {
 		return nil, false
