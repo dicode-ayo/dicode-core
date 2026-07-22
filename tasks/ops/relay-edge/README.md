@@ -48,8 +48,11 @@ that is ever proxied throws and no API call is made.
 - **Provisions** the CF Tunnel (when `tunnel_name` is set) and the DNS records.
 - On tunnel creation it stores the connector token in kv under `tunnel_token`
   (Cloudflare returns it only once, at creation).
-- It does **not** run `cloudflared`. The operator — or a follow-up sidecar task —
-  reads `tunnel_token` from kv and runs the connector with it.
+- It does **not** run `cloudflared`. The operator — or the
+  [`ops/relay-cloudflared`](../relay-cloudflared/) sidecar task — reads
+  `tunnel_token` from kv and runs the connector with it. When that sidecar runs
+  the connector, set `ingress_host=host.docker.internal` here so the ingress
+  targets the host from inside the container.
 
 ## Required Cloudflare API token scopes
 
@@ -75,6 +78,7 @@ export CLOUDFLARE_ACCOUNT_ID=<account-id>
 | `control_ip` | string | — (required) | Public IP of the host serving `:5554`. |
 | `tunnel_name` | string | `""` | Named CF Tunnel to manage. Empty → the public record is left unmanaged. |
 | `local_port` | number | `5553` | Local port the tunnel forwards the public hostname to. |
+| `ingress_host` | string | `localhost` | Host cloudflared connects to for the local listener. Set `host.docker.internal` when running the [`ops/relay-cloudflared`](../relay-cloudflared/) containerized sidecar; keep `localhost` for a host-run connector. |
 | `dry_run` | bool | `true` | Plan only, zero mutations. The cron drift check uses this default. |
 
 ## Usage

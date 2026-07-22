@@ -83,6 +83,24 @@ test("apply creates the control A (proxied:false) and the public CNAME (proxied:
   });
 });
 
+test("tunnel ingress points cloudflared at the ingress_host, not localhost", async () => {
+  setCreds();
+  setParams({ tunnel_name: "relay-tunnel", ingress_host: "host.docker.internal" });
+  http.mock("GET", ZONES, ok([{ id: "zone123" }]));
+  http.mock("GET", TUNNELS, ok([])); // no existing tunnel → plan a create
+  http.mock("GET", DNS, ok([]));
+
+  const result = await runTask();
+
+  const create = result.changes.find((c: { action: string }) => c.action === "tunnel-create");
+  // Exact-match the plan string (not a substring/URL contains-check) so the
+  // ingress is pinned to host.docker.internal, never localhost.
+  assert.equal(
+    create.to,
+    "create tunnel + ingress relay.dicode.io → http://host.docker.internal:5553",
+  );
+});
+
 test("a CF success:false envelope surfaces the errors", async () => {
   setCreds();
   setParams();

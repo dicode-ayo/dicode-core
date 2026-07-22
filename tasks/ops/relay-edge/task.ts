@@ -105,11 +105,13 @@ async function ensureTunnel(cf: CF, account: string, opts: {
   tunnel_name: string;
   public_hostname: string;
   local_port: number;
+  ingress_host: string;
   dry_run: boolean;
   plan: PlanEntry[];
   kv: KV;
 }): Promise<{ tunnelId: string | null; tokenStored: boolean }> {
-  const { tunnel_name, public_hostname, local_port, dry_run, plan, kv } = opts;
+  const { tunnel_name, public_hostname, local_port, ingress_host, dry_run, plan, kv } = opts;
+  const service = `http://${ingress_host}:${local_port}`;
   const existing = await cf(
     "GET",
     `/accounts/${account}/cfd_tunnel?name=${encodeURIComponent(tunnel_name)}&is_deleted=false`,
@@ -123,7 +125,7 @@ async function ensureTunnel(cf: CF, account: string, opts: {
       action: "tunnel-create",
       name: tunnel_name,
       from: null,
-      to: `create tunnel + ingress ${public_hostname} → http://localhost:${local_port}`,
+      to: `create tunnel + ingress ${public_hostname} → ${service}`,
     });
     return { tunnelId: null, tokenStored: false };
   }
@@ -139,7 +141,7 @@ async function ensureTunnel(cf: CF, account: string, opts: {
   await cf("PUT", `/accounts/${account}/cfd_tunnel/${tunnelId}/configurations`, {
     config: {
       ingress: [
-        { hostname: public_hostname, service: `http://localhost:${local_port}` },
+        { hostname: public_hostname, service },
         { service: "http_status:404" },
       ],
     },
@@ -194,6 +196,7 @@ export default async function main({ params, kv }: DicodeSdk) {
   const control_ip = (await params.get("control_ip")) ?? "";
   const tunnel_name = (await params.get("tunnel_name")) ?? "";
   const local_port = Number((await params.get("local_port")) ?? "5553");
+  const ingress_host = (await params.get("ingress_host")) ?? "localhost";
   // Default (and the cron drift run) is safe: dry_run unless explicitly false.
   const dry_run = (await params.get("dry_run")) !== "false";
 
@@ -210,7 +213,7 @@ export default async function main({ params, kv }: DicodeSdk) {
   let tunnelId: string | null = null;
   let tokenStored = false;
   if (tunnel_name) {
-    const t = await ensureTunnel(cf, account, { tunnel_name, public_hostname, local_port, dry_run, plan, kv });
+    const t = await ensureTunnel(cf, account, { tunnel_name, public_hostname, local_port, ingress_host, dry_run, plan, kv });
     tunnelId = t.tunnelId;
     tokenStored = t.tokenStored;
   }

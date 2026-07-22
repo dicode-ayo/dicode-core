@@ -891,6 +891,52 @@ func TestLoadDir_BuildinTasksParse(t *testing.T) {
 	}
 }
 
+// TestLoadDir_OpsTasksParse walks every on-disk `tasks/ops/*/task.yaml` and
+// asserts LoadKindedDir succeeds — the same reconciler path that runs the
+// strict validator. Ops tasks ship with no Deno test that exercises the Go
+// loader, so without this a spec the reconciler would reject (e.g. two trigger
+// types on one task) can pass CI and never register at runtime.
+func TestLoadDir_OpsTasksParse(t *testing.T) {
+	_, thisFile, _, ok := goruntime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller(0) failed; cannot anchor tasks/ops path")
+	}
+	pkgDir := filepath.Dir(thisFile)               // .../pkg/task
+	repoRoot := filepath.Dir(filepath.Dir(pkgDir)) // .../
+	opsRoot := filepath.Join(repoRoot, "tasks", "ops")
+	if _, err := os.Stat(opsRoot); err != nil {
+		t.Skipf("tasks/ops not found at %s: %v", opsRoot, err)
+	}
+
+	var taskDirs []string
+	err := filepath.Walk(opsRoot, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() || filepath.Base(path) != "task.yaml" {
+			return nil
+		}
+		taskDirs = append(taskDirs, filepath.Dir(path))
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", opsRoot, err)
+	}
+	if len(taskDirs) == 0 {
+		t.Fatalf("no task.yaml files found under %s", opsRoot)
+	}
+
+	for _, dir := range taskDirs {
+		rel, _ := filepath.Rel(repoRoot, dir)
+		t.Run(rel, func(t *testing.T) {
+			extras := map[string]string{VarTaskSetDir: opsRoot}
+			if _, err := LoadKindedDir(dir, extras); err != nil {
+				t.Fatalf("LoadKindedDir(%s): %v", dir, err)
+			}
+		})
+	}
+}
+
 // TestScriptPath_SymlinkRejected verifies that ScriptPath returns empty string
 // when task.py (or any other script) is a symlink, preventing the daemon from
 // reading files outside the task directory via symlink traversal.
