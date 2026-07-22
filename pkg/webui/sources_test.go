@@ -464,6 +464,7 @@ func TestApiAddSource_SharedPathWithExistingSource_RemoveDoesNotOrphanNames(t *t
 		"e2e-tests": {Ref: &taskset.Ref{Path: tsPath, Watch: &watchTrue}},
 	}
 	srv, rec, _ := newTestServerWithReconciler(t, cfg)
+	<-rec.Ready() // Run's goroutine must set rc.runCtx before AddSource below.
 
 	preexisting := taskset.NewSource(
 		taskset.SourceID("e2e-tests", cfg.Spec.Entries["e2e-tests"].Ref),
