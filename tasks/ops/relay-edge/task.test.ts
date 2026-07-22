@@ -93,7 +93,12 @@ test("tunnel ingress points cloudflared at the ingress_host, not localhost", asy
   const result = await runTask();
 
   const create = result.changes.find((c: { action: string }) => c.action === "tunnel-create");
-  assert.ok(String(create.to).includes("http://host.docker.internal:5553"));
+  // Exact-match the plan string (not a substring/URL contains-check) so the
+  // ingress is pinned to host.docker.internal, never localhost.
+  assert.equal(
+    create.to,
+    "create tunnel + ingress relay.dicode.io → http://host.docker.internal:5553",
+  );
 });
 
 test("a CF success:false envelope surfaces the errors", async () => {
