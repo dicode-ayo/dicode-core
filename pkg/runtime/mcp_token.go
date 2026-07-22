@@ -34,19 +34,28 @@ type MCPTokenMinter interface {
 type MCPScope struct {
 	ListTasks  bool     `json:"list_tasks,omitempty"`
 	RunTaskIDs []string `json:"run_task_ids,omitempty"` // nil = deny run_task; "*" = any task
+	// TestTasks gates POST /api/tasks/{id}/test — the REST endpoint the
+	// JSON-RPC test_task hint tool points MCP clients at. The hint tool
+	// call itself stays an unconditionally-allowed hint (see
+	// mcpScopeCheck in pkg/webui/server.go), but the REST endpoint it
+	// points to runs the task's sibling test file with full host
+	// permissions, so it's separately gated on this flag (#590).
+	TestTasks bool `json:"test_tasks,omitempty"`
 }
 
 // MCPScopeFor derives the MCP capability scope an ephemeral token minted for
 // spec should carry, from spec's own declared permissions.dicode. Mirrors
 // exactly what the task itself is allowed to do via the dicode SDK — the
 // token must not grant the MCP caller anything the task couldn't already do
-// directly.
+// directly. This covers both the JSON-RPC tools/call surface (ListTasks,
+// RunTaskIDs) and the REST /api/tasks/{id}/test surface reachable with the
+// same Bearer token (TestTasks).
 func MCPScopeFor(spec *task.Spec) MCPScope {
 	if spec == nil || spec.Permissions.Dicode == nil {
 		return MCPScope{}
 	}
 	d := spec.Permissions.Dicode
-	scope := MCPScope{ListTasks: d.ListTasks}
+	scope := MCPScope{ListTasks: d.ListTasks, TestTasks: d.TasksTest}
 	if len(d.Tasks) > 0 {
 		scope.RunTaskIDs = append([]string(nil), d.Tasks...)
 	}

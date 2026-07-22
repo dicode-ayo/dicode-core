@@ -453,6 +453,94 @@ func TestHandleMCP_UnscopedKey_AlwaysForwarded(t *testing.T) {
 	}
 }
 
+// ── apiTestTask scope enforcement (#590) ────────────────────────────────────
+
+// TestApiTestTask_ScopedKey_DeniesWithoutTasksTest covers the gap #590
+// closes: a scoped ephemeral MCP token whose minting task did not declare
+// permissions.dicode.tasks_test (MCPScope.TestTasks left at its zero value)
+// must be refused with 403 at POST /api/tasks/{id}/test, before the sibling
+// test file — which runs with full host permissions — ever executes. This
+// test fails against the pre-fix code, where apiTestTask performed no scope
+// check at all and any valid Bearer token (scoped or not) reached the
+// runner.
+func TestApiTestTask_ScopedKey_DeniesWithoutTasksTest(t *testing.T) {
+	srv := newAuthServer(t, "hunter2")
+	registerMinimalTask(t, srv.registry, "some-task")
+
+	raw, _, err := srv.apiKeys.generateScoped(context.Background(), "scoped-no-test",
+		&pkgruntime.MCPScope{ListTasks: true, RunTaskIDs: []string{"*"}})
+	if err != nil {
+		t.Fatalf("generateScoped: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks/some-task/test", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer "+raw)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (capability not granted): %s", w.Code, w.Body.String())
+	}
+}
+
+// TestApiTestTask_ScopedKey_AllowsWithTasksTest covers the positive path: a
+// scoped ephemeral token whose minting task DID declare
+// permissions.dicode.tasks_test (MCPScope.TestTasks: true) must not be
+// blocked by the new scope check — it proceeds to whatever the existing
+// unscoped behavior produces. The fixture registry has no task registered
+// under this ID, so 404 (not 403) is the signal that the scope check let it
+// through.
+func TestApiTestTask_ScopedKey_AllowsWithTasksTest(t *testing.T) {
+	srv := newAuthServer(t, "hunter2")
+
+	raw, _, err := srv.apiKeys.generateScoped(context.Background(), "scoped-with-test",
+		&pkgruntime.MCPScope{TestTasks: true})
+	if err != nil {
+		t.Fatalf("generateScoped: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks/no-such-task/test", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer "+raw)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code == http.StatusForbidden {
+		t.Fatalf("scoped token with TestTasks: true must not be denied by the scope check: %s", w.Body.String())
+	}
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 (past the scope check, no such task): %s", w.Code, w.Body.String())
+	}
+}
+
+// TestApiTestTask_UnscopedKey_Unaffected is the regression guard proving
+// unscoped/operator keys keep working exactly as before #590's fix: a key
+// minted via generate (or generateScoped(..., nil)) carries scopeFor == nil,
+// so it must never be denied by the new TestTasks check regardless of the
+// requested task ID.
+func TestApiTestTask_UnscopedKey_Unaffected(t *testing.T) {
+	srv := newAuthServer(t, "hunter2")
+
+	raw, _, err := srv.apiKeys.generate(context.Background(), "operator-key")
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks/no-such-task/test", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer "+raw)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code == http.StatusForbidden {
+		t.Fatalf("unscoped key must not be denied by the scope check: %s", w.Body.String())
+	}
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 (past the scope check, no such task): %s", w.Code, w.Body.String())
+	}
+}
+
 // TestHandleMCP_ScopedKey_OversizedBodyRejected covers the body-size cap: a
 // scoped caller posting more than testTaskMaxBodyBytes gets a 400 from the
 // http.MaxBytesReader-wrapped read in handleMCP, rather than the body being
