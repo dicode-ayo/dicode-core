@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -538,6 +539,67 @@ func TestApiTestTask_UnscopedKey_Unaffected(t *testing.T) {
 	}
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404 (past the scope check, no such task): %s", w.Code, w.Body.String())
+	}
+}
+
+// TestApiTestTask_ScopedKey_ApprovalGateStillEnforced proves the capability
+// check does NOT bypass the approval gate: a scoped token that DOES carry
+// TestTasks: true (so it clears the new #590 check) must still be refused
+// with 409 when the task is held pending approval — the two gates are
+// independent, and satisfying the first must never grant a free pass past
+// the second.
+func TestApiTestTask_ScopedKey_ApprovalGateStillEnforced(t *testing.T) {
+	srv := newAuthServer(t, "hunter2")
+	registerMinimalTask(t, srv.registry, "pending-task")
+	srv.SetTestGuard(func(id string) error {
+		return errors.New("task pending approval: " + id)
+	})
+
+	raw, _, err := srv.apiKeys.generateScoped(context.Background(), "scoped-with-test",
+		&pkgruntime.MCPScope{TestTasks: true})
+	if err != nil {
+		t.Fatalf("generateScoped: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks/pending-task/test", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer "+raw)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (approval gate still enforced despite TestTasks: true): %s", w.Code, w.Body.String())
+	}
+}
+
+// TestApiTestTask_ScopedKey_DeniedBeforeApprovalGateChecked proves the
+// ordering the two gates run in matters: a scoped token lacking
+// TestTasks (zero-value scope) hitting the SAME pending-approval task as
+// above must get 403 — the capability denial — not 409. Getting 409 would
+// leak the task's approval-pending status to a caller that was never
+// entitled to invoke this endpoint at all; the scope check must run and
+// fail BEFORE s.testGuard is ever consulted.
+func TestApiTestTask_ScopedKey_DeniedBeforeApprovalGateChecked(t *testing.T) {
+	srv := newAuthServer(t, "hunter2")
+	registerMinimalTask(t, srv.registry, "pending-task")
+	srv.SetTestGuard(func(id string) error {
+		return errors.New("task pending approval: " + id)
+	})
+
+	raw, _, err := srv.apiKeys.generateScoped(context.Background(), "scoped-no-test",
+		&pkgruntime.MCPScope{})
+	if err != nil {
+		t.Fatalf("generateScoped: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks/pending-task/test", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer "+raw)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (capability denial, not a leak of approval-pending status via 409): %s", w.Code, w.Body.String())
 	}
 }
 

@@ -1963,23 +1963,33 @@ type testTaskResponse struct {
 //   - 408 — runner timed out
 //   - 409 — task is held pending approval (test code must not execute)
 //   - 422 — params payload failed schema validation
+//
+// scopeForRequest extracts a Bearer token from r's Authorization header and
+// resolves its stored MCP scope, if any. found mirrors apiKeyStore.scopeFor:
+// false when there's no Bearer token or it doesn't validate; scope nil when
+// found but unscoped (full access).
+func (s *Server) scopeForRequest(r *http.Request) (scope *pkgruntime.MCPScope, found bool) {
+	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if token == "" {
+		return nil, false
+	}
+	return s.apiKeys.scopeFor(r.Context(), token)
+}
+
 func (s *Server) apiTestTask(w http.ResponseWriter, r *http.Request) {
 	id := taskIDParam(r)
 
 	// Scope check for ephemeral MCP tokens (#590). Mirrors the pattern in
 	// handleMCP: only a Bearer-authenticated caller can carry a scope at
 	// all, and only a non-nil scope actually restricts anything.
-	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if token != "" {
-		scope, found := s.apiKeys.scopeFor(r.Context(), token)
-		// !found: requireAPIKey upstream already validated this token —
-		// this is a defensive no-op, not a second auth gate. scope == nil:
-		// unscoped operator/CLI/dashboard key — full access, proceed
-		// unrestricted exactly as before this change.
-		if found && scope != nil && !scope.TestTasks {
-			jsonErr(w, "capability not granted: test_task", http.StatusForbidden)
-			return
-		}
+	scope, found := s.scopeForRequest(r)
+	// !found: requireAPIKey upstream already validated this token —
+	// this is a defensive no-op, not a second auth gate. scope == nil:
+	// unscoped operator/CLI/dashboard key — full access, proceed
+	// unrestricted exactly as before this change.
+	if found && scope != nil && !scope.TestTasks {
+		jsonErr(w, "capability not granted: test_task", http.StatusForbidden)
+		return
 	}
 
 	// Approval-gate veto: the sibling test file runs with full host
@@ -2140,40 +2150,37 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 
 	// Scoping only applies to Bearer API-key auth. A session-cookie caller
 	// (browser dashboard) has no ephemeral scope to check — forward as today.
-	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if token != "" {
-		scope, found := s.apiKeys.scopeFor(r.Context(), token)
-		// !found: the api-key middleware upstream (requireSessionOrAPIKey)
-		// already validated this token: this is a defensive no-op, not a
-		// second auth gate. scope == nil: unscoped operator/CLI/dashboard
-		// key — full access, forward unchanged.
-		if found && scope != nil {
-			// Cap the read like every other request body in this file (see
-			// apiTestTask / testTaskMaxBodyBytes below): MCP JSON-RPC
-			// envelopes are small, so 64KB is generous headroom while still
-			// preventing a scoped caller from streaming an unbounded body at
-			// the daemon before mcpScopeCheck even runs. A MaxBytesReader
-			// overflow surfaces here as a plain io.ReadAll error, handled by
-			// the same 400 branch as any other malformed read.
-			body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, testTaskMaxBodyBytes))
-			if err != nil {
-				jsonErr(w, "failed to read request body", http.StatusBadRequest)
-				return
-			}
-			r.Body = io.NopCloser(bytes.NewReader(body))
-			if allowed, id, deniedMsg := mcpScopeCheck(scope, body); !allowed {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusOK)
-				_ = json.NewEncoder(w).Encode(map[string]any{
-					"jsonrpc": "2.0",
-					"id":      id,
-					"error": map[string]any{
-						"code":    -32001,
-						"message": deniedMsg,
-					},
-				})
-				return
-			}
+	scope, found := s.scopeForRequest(r)
+	// !found: the api-key middleware upstream (requireSessionOrAPIKey)
+	// already validated this token: this is a defensive no-op, not a
+	// second auth gate. scope == nil: unscoped operator/CLI/dashboard
+	// key — full access, forward unchanged.
+	if found && scope != nil {
+		// Cap the read like every other request body in this file (see
+		// apiTestTask / testTaskMaxBodyBytes below): MCP JSON-RPC
+		// envelopes are small, so 64KB is generous headroom while still
+		// preventing a scoped caller from streaming an unbounded body at
+		// the daemon before mcpScopeCheck even runs. A MaxBytesReader
+		// overflow surfaces here as a plain io.ReadAll error, handled by
+		// the same 400 branch as any other malformed read.
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, testTaskMaxBodyBytes))
+		if err != nil {
+			jsonErr(w, "failed to read request body", http.StatusBadRequest)
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		if allowed, id, deniedMsg := mcpScopeCheck(scope, body); !allowed {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"jsonrpc": "2.0",
+				"id":      id,
+				"error": map[string]any{
+					"code":    -32001,
+					"message": deniedMsg,
+				},
+			})
+			return
 		}
 	}
 
