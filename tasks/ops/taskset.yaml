@@ -7,3 +7,6 @@ spec:
     relay-edge:
       ref:
         path: ./relay-edge/task.yaml
+    relay-cloudflared:
+      ref:
+        path: ./relay-cloudflared/task.yaml

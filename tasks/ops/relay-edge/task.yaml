@@ -9,7 +9,9 @@ description: >-
 runtime: deno
 
 trigger:
-  manual: true
+  # Cron is the drift check (dry_run defaults true). A manual apply is an
+  # explicit `dicode run ops/relay-edge dry_run=false …`, which works on any
+  # registered task regardless of its trigger — a task may declare only one.
   cron: "0 * * * *"
 
 permissions:
@@ -53,6 +55,13 @@ params:
     type: number
     default: 5553
     description: Local port the tunnel forwards the public hostname to.
+  ingress_host:
+    type: string
+    default: "localhost"
+    description: >-
+      Host cloudflared connects to for the local listener. Keep "localhost" when
+      cloudflared runs on the host; set "host.docker.internal" when running the
+      ops/relay-cloudflared containerized sidecar.
   dry_run:
     type: boolean
     default: true

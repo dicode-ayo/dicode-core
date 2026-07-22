@@ -1,0 +1,48 @@
+apiVersion: dicode/v1
+kind: Task
+name: relay-cloudflared
+description: >-
+  Run the Cloudflare Tunnel connector (cloudflared) that relay-edge provisioned,
+  as a supervised container. It dials Cloudflare's edge and forwards the proxied
+  public webhook/OAuth hostname into the host's local dicode listener on :5553.
+
+runtime: docker
+
+trigger:
+  daemon: true
+  # cloudflared retries its edge connections internally; restart only when the
+  # container/process itself exits abnormally, not on a clean operator stop.
+  restart: on-failure
+
+docker:
+  # Pin a specific release — never :latest (supply chain). The operator must
+  # bump this to a current cloudflared release (ideally by @sha256 digest);
+  # see README. This tag is a plausible recent stable, not a verified latest.
+  image: cloudflare/cloudflared:2025.8.1
+  # The token is read from TUNNEL_TOKEN (below), never placed on argv.
+  command: ["tunnel", "run"]
+  # Reach the host's :5553 listener from inside the bridge network without
+  # joining the host network namespace (which would trip containersec).
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  cap_drop:
+    - ALL
+  security_opt:
+    - "no-new-privileges:true"
+  # Token-based, remotely-managed config: cloudflared writes no credentials or
+  # config to disk, so a read-only rootfs is sufficient. If a future connector
+  # feature needs a writable path it crash-loops (restart: on-failure) with a
+  # clear error — the operator then drops this flag (see README).
+  read_only: true
+
+permissions:
+  # cloudflared dials Cloudflare's anycast edge over dynamic, region-dependent
+  # hostnames, so a static allowlist isn't feasible. For docker "*" grants an
+  # unrestricted bridge network (per-host net filtering isn't enforced for
+  # containers — it only warns); an empty net would default to network "none".
+  net: ["*"]
+  env:
+    # Resolved from the secret store into the container env by the trigger
+    # engine (#629) — the value reaches the process env, never the argv.
+    - name: TUNNEL_TOKEN
+      secret: cloudflared_tunnel_token
