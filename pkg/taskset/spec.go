@@ -4,6 +4,7 @@
 package taskset
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/dicode/dicode/pkg/task"
@@ -32,6 +33,45 @@ type RefAuth struct {
 
 // IsGit reports whether this is a git ref (URL is non-empty).
 func (r *Ref) IsGit() bool { return r.URL != "" }
+
+// SourceID computes the canonical Source.ID() for a named entry pointing at
+// ref. It is name-qualified so two different dicode.yaml entries that happen
+// to reference the identical git URL or local path (e.g. a dynamically-added
+// source pointed at a path an existing source already watches, issue #621)
+// never collide on Source.ID().
+//
+// The encoding is length-prefixed — "<len(name)>:<name>:<url-or-path>" —
+// rather than a plain "<name>:<url-or-path>" concatenation. A plain
+// concatenation is only collision-free if name can never itself contain a
+// ':'; that precondition is enforced for API-added sources by
+// validateSourceName, but NOT for source names read from dicode.yaml's
+// spec.entries keys or nested taskset.yaml entries (pkg/config and
+// pkg/taskset's loaders validate the ref, not the entry-name charset), so a
+// name like "a:b" paired with path "c" would otherwise produce the same
+// string as name "a" paired with path "b:c". Length-prefixing pins down
+// exactly where the name ends regardless of what characters name or target
+// contain, so two different (name, target) pairs can never collide — the
+// digit run before the first ':' can never be misread as part of a shorter
+// name, since name's own length is encoded before any of its bytes appear.
+//
+// Every call site that constructs a taskset.Source (pkg/webui's
+// apiAddSource/apiRemoveSource and pkg/daemon's buildTaskSetSourceFromEntry)
+// must use this helper so the ID stays consistent between add and remove.
+//
+// Before this helper existed, ID was just ref.URL (or ref.Path when URL was
+// empty) with no name component. pkg/registry/reconciler.go's Reconciler
+// keys its cancel-function bookkeeping (rc.cancels) by Source.ID() alone,
+// so a collision there silently overwrote one source's cancel func with the
+// other's — the second AddSource for a colliding ref would clobber the
+// first's teardown entry, and a later RemoveSource(id) for either name could
+// cancel the wrong source's context.
+func SourceID(name string, ref *Ref) string {
+	target := ref.URL
+	if target == "" {
+		target = ref.Path
+	}
+	return fmt.Sprintf("%d:%s:%s", len(name), name, target)
+}
 
 // effectiveBranch returns the branch, defaulting to "main".
 func (r *Ref) effectiveBranch() string {

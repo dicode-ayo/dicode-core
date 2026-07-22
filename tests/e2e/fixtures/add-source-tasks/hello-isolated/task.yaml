@@ -1,0 +1,12 @@
+apiVersion: dicode/v1
+kind: Task
+name: Hello Isolated
+description: >-
+  A trivial manual-only task used exclusively by add-source.spec.ts's
+  "adds a local source through the real form" test. Manual trigger only —
+  no cron, no webhook — so it can never collide with anything cron.spec.ts
+  (or any other spec) polls for or fires (issue #621).
+runtime: deno
+trigger:
+  manual: true
+timeout: 10s

@@ -2632,10 +2632,13 @@ func (s *Server) apiAddSource(w http.ResponseWriter, r *http.Request) {
 
 	entry := &taskset.Entry{Ref: &ref}
 
-	id := ref.URL
-	if id == "" {
-		id = ref.Path
-	}
+	// Name-qualified so two different source names that happen to reference
+	// the identical git URL or local path (e.g. a source added here pointing
+	// at a path an existing source already watches, issue #621) never
+	// collide on Source.ID() — see taskset.SourceID's doc comment for why
+	// that collision matters (pkg/registry/reconciler.go's rc.cancels is
+	// keyed by this exact value).
+	id := taskset.SourceID(name, &ref)
 
 	// Atomically check-and-claim the name against the live config's
 	// spec.entries — the same map that SourceManager.List reads from, so
@@ -2881,10 +2884,9 @@ func (s *Server) apiRemoveSource(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.reconciler != nil && entry.Ref != nil {
-		id := entry.Ref.URL
-		if id == "" {
-			id = entry.Ref.Path
-		}
+		// Must match the id apiAddSource claimed via taskset.SourceID — see
+		// its call site's comment for why the name component is required.
+		id := taskset.SourceID(name, entry.Ref)
 		s.reconciler.RemoveSource(id)
 	}
 	if persistErr != nil {
