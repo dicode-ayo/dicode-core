@@ -170,6 +170,8 @@ The reconciler is the component that consumes events from all sources and keeps 
 
 Each task belongs to exactly one source. When a task is registered, the source ID is recorded. This matters for `dicode task commit` — it knows which source to commit to.
 
+Internally, each source's identity (used by the reconciler to track and tear down its watch/poll loop) is derived from **both** its `spec.entries` name and its `ref` (git URL or local path) — not the ref alone. Two entries that happen to reference the identical `taskset.yaml` path or git URL (e.g. a source added dynamically via the web UI's "Add source" form pointed at a path another entry already watches) still get distinct internal IDs, so removing one never disturbs the other's reconciler bookkeeping.
+
 ---
 
 ## Migration from old `sources:` array

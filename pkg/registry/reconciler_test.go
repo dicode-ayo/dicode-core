@@ -11,6 +11,7 @@ import (
 	"github.com/dicode/dicode/pkg/db"
 	"github.com/dicode/dicode/pkg/source"
 	"github.com/dicode/dicode/pkg/task"
+	"github.com/dicode/dicode/pkg/taskset"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -492,5 +493,111 @@ func TestReconciler_QueuedWarnLoggedOnce(t *testing.T) {
 	// The repeat re-checks must still leave a trail at debug level.
 	if debugCount := logs.FilterMessage("task still references unknown provider; remains queued for retry").Len(); debugCount == 0 {
 		t.Fatal("expected repeat queued re-checks to be logged at debug, got none")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Source.ID() collision regression coverage (issue #621)
+// ---------------------------------------------------------------------------
+//
+// pkg/webui's apiAddSource/apiRemoveSource and pkg/daemon's
+// buildTaskSetSourceFromEntry all construct the id passed into
+// taskset.NewSource, and rc.cancels below is keyed by exactly that value
+// (via src.ID()). Before taskset.SourceID existed, that id was just
+// ref.URL (or ref.Path when URL was empty) — with no name component — so
+// two different dicode.yaml entries (or an existing entry and a
+// dynamically-added one) referencing the identical path or URL collided:
+// the second AddSource silently overwrote the first source's entry in
+// rc.cancels, orphaning its cancel func, and a later RemoveSource(id) for
+// either name could tear down the wrong source's context.
+
+// TestReconciler_NameQualifiedSourceIDs_RemoveDoesNotClobberOther is the
+// regression guard: two sources built with taskset.SourceID for different
+// names sharing the same underlying ref path get distinct cancel-bookkeeping
+// entries, and removing one leaves the other's entirely untouched. Using the
+// pre-fix formula (id := ref.Path, ignoring name) for both sources here would
+// collide, cancels would hold a single entry after both AddSource calls, and
+// the len(rc.cancels) == 2 assertion below would fail — this test would not
+// have passed against that code.
+func TestReconciler_NameQualifiedSourceIDs_RemoveDoesNotClobberOther(t *testing.T) {
+	sharedRef := &taskset.Ref{Path: "/tmp/shared/taskset.yaml"}
+	idA := taskset.SourceID("e2e-tests", sharedRef)
+	idB := taskset.SourceID("e2e-add-local-123", sharedRef)
+	if idA == idB {
+		t.Fatalf("test setup invalid: idA and idB must differ, both = %q", idA)
+	}
+
+	fsA := newFakeSource(idA)
+	fsB := newFakeSource(idB)
+	_, rec := newTestReconciler(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = rec.Run(ctx) }()
+	<-rec.Ready()
+
+	if err := rec.AddSource(fsA); err != nil {
+		t.Fatalf("AddSource(fsA): %v", err)
+	}
+	if err := rec.AddSource(fsB); err != nil {
+		t.Fatalf("AddSource(fsB): %v", err)
+	}
+
+	rec.mu.Lock()
+	n := len(rec.cancels)
+	_, hasA := rec.cancels[idA]
+	_, hasB := rec.cancels[idB]
+	rec.mu.Unlock()
+	if n != 2 || !hasA || !hasB {
+		t.Fatalf("expected both sources tracked independently in rc.cancels (len=2, idA and idB both present); got len=%d hasA=%v hasB=%v — a Source.ID() collision would clobber one entry", n, hasA, hasB)
+	}
+
+	rec.RemoveSource(idA)
+
+	rec.mu.Lock()
+	n = len(rec.cancels)
+	_, hasA = rec.cancels[idA]
+	_, hasB = rec.cancels[idB]
+	rec.mu.Unlock()
+	if n != 1 || hasA || !hasB {
+		t.Fatalf("expected only idB to remain after RemoveSource(idA); got len=%d hasA=%v hasB=%v", n, hasA, hasB)
+	}
+}
+
+// TestReconciler_CollidingSourceIDs_SecondAddClobbersFirstCancel documents the
+// hazard class itself: the reconciler has no duplicate-ID guard, so if two
+// sources are ever constructed with the SAME id (as every call site did
+// before taskset.SourceID was introduced, whenever two entries shared a path
+// or URL), the second AddSource silently overwrites the first's cancel func
+// in rc.cancels. This is not a call the reconciler can safely make on its own
+// (a legitimate re-add-after-remove also reuses the same id) — the fix is
+// upstream, at the call sites that mint ids (see the name-qualified test
+// above). This test exists so a future change to startSource that
+// reintroduces this exact silent-overwrite behavior is caught if the
+// call-site fix above is ever reverted or bypassed.
+func TestReconciler_CollidingSourceIDs_SecondAddClobbersFirstCancel(t *testing.T) {
+	const collidingID = "/tmp/shared/taskset.yaml" // pre-fix formula: id == ref.Path, no name
+
+	fsA := newFakeSource(collidingID)
+	fsB := newFakeSource(collidingID)
+	_, rec := newTestReconciler(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = rec.Run(ctx) }()
+	<-rec.Ready()
+
+	if err := rec.AddSource(fsA); err != nil {
+		t.Fatalf("AddSource(fsA): %v", err)
+	}
+	if err := rec.AddSource(fsB); err != nil {
+		t.Fatalf("AddSource(fsB): %v", err)
+	}
+
+	rec.mu.Lock()
+	n := len(rec.cancels)
+	rec.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("expected the colliding ids to overwrite one another in rc.cancels (len=1, documenting the hazard); got len=%d", n)
 	}
 }

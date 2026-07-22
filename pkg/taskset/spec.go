@@ -33,6 +33,31 @@ type RefAuth struct {
 // IsGit reports whether this is a git ref (URL is non-empty).
 func (r *Ref) IsGit() bool { return r.URL != "" }
 
+// SourceID computes the canonical Source.ID() for a named entry pointing at
+// ref. It is name-qualified — "<name>:<url-or-path>" — so two different
+// dicode.yaml entries that happen to reference the identical git URL or
+// local path (e.g. a dynamically-added source pointed at a path an existing
+// source already watches, issue #621) never collide on Source.ID().
+//
+// Every call site that constructs a taskset.Source (pkg/webui's
+// apiAddSource/apiRemoveSource and pkg/daemon's buildTaskSetSourceFromEntry)
+// must use this helper so the ID stays consistent between add and remove.
+//
+// Before this helper existed, ID was just ref.URL (or ref.Path when URL was
+// empty) with no name component. pkg/registry/reconciler.go's Reconciler
+// keys its cancel-function bookkeeping (rc.cancels) by Source.ID() alone,
+// so a collision there silently overwrote one source's cancel func with the
+// other's — the second AddSource for a colliding ref would clobber the
+// first's teardown entry, and a later RemoveSource(id) for either name could
+// cancel the wrong source's context.
+func SourceID(name string, ref *Ref) string {
+	target := ref.URL
+	if target == "" {
+		target = ref.Path
+	}
+	return name + ":" + target
+}
+
 // effectiveBranch returns the branch, defaulting to "main".
 func (r *Ref) effectiveBranch() string {
 	if r.Branch != "" {

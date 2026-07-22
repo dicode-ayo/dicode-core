@@ -423,6 +423,89 @@ func TestApiRemoveSource_NotFound(t *testing.T) {
 	}
 }
 
+// TestApiAddSource_SharedPathWithExistingSource_RemoveDoesNotOrphanNames is
+// HTTP-level coverage for issue #621's scenario: adding a second source
+// through the real API whose path is identical to an already-configured
+// source's path (e.g. add-source.spec.ts's first test pointing at the same
+// taskset.yaml an "e2e-tests" source already watches). It exercises the real
+// apiAddSource/apiRemoveSource handlers end-to-end (via
+// newTestServerWithReconciler) and confirms cfg.Spec.Entries bookkeeping for
+// the two names stays independent.
+//
+// Note this alone would NOT have caught the Source.ID() collision fixed by
+// taskset.SourceID: cfg.Spec.Entries is keyed by name, not by Source.ID(), so
+// this test's assertions pass identically with or without that fix. The
+// actual regression proof — that rc.cancels itself keeps the two sources'
+// teardown bookkeeping independent, which DOES fail without the fix — is
+// pkg/registry/reconciler_test.go's
+// TestReconciler_NameQualifiedSourceIDs_RemoveDoesNotClobberOther. This test
+// is kept as HTTP-level sanity coverage for the same scenario.
+func TestApiAddSource_SharedPathWithExistingSource_RemoveDoesNotOrphanNames(t *testing.T) {
+	repoDir := t.TempDir()
+	taskDir := filepath.Join(repoDir, "hello")
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatalf("mkdir task: %v", err)
+	}
+	taskYAML := "kind: Task\napiVersion: dicode/v1\nname: hello\nruntime: deno\ntrigger:\n  manual: true\n"
+	if err := os.WriteFile(filepath.Join(taskDir, "task.yaml"), []byte(taskYAML), 0o644); err != nil {
+		t.Fatalf("write task.yaml: %v", err)
+	}
+	tsPath := filepath.Join(repoDir, "taskset.yaml")
+	tsContent := "apiVersion: dicode/v1\nkind: TaskSet\nmetadata:\n  name: e2e-tests\nspec:\n  entries:\n    hello:\n      ref:\n        path: " + filepath.Join(taskDir, "task.yaml") + "\n"
+	if err := os.WriteFile(tsPath, []byte(tsContent), 0o644); err != nil {
+		t.Fatalf("write taskset.yaml: %v", err)
+	}
+
+	// "e2e-tests" is pre-configured (mirrors the fixture-seeded source),
+	// already watching tsPath before the dynamic add.
+	watchTrue := true
+	cfg := &config.Config{}
+	cfg.Spec.Entries = map[string]*taskset.Entry{
+		"e2e-tests": {Ref: &taskset.Ref{Path: tsPath, Watch: &watchTrue}},
+	}
+	srv, rec, _ := newTestServerWithReconciler(t, cfg)
+
+	preexisting := taskset.NewSource(
+		taskset.SourceID("e2e-tests", cfg.Spec.Entries["e2e-tests"].Ref),
+		"e2e-tests", cfg.Spec.Entries["e2e-tests"].Ref, "", t.TempDir(), false, time.Hour, zap.NewNop(),
+	)
+	if err := rec.AddSource(preexisting); err != nil {
+		t.Fatalf("seed pre-existing source: %v", err)
+	}
+
+	// Add a second source, through the real HTTP handler, pointed at the
+	// IDENTICAL taskset.yaml — exactly add-source.spec.ts's first test.
+	addName := "e2e-add-local-621"
+	addBody := `{"name":"` + addName + `","path":"` + strings.ReplaceAll(tsPath, `\`, `\\`) + `"}`
+	addReq := httptest.NewRequest(http.MethodPost, "/api/settings/sources", strings.NewReader(addBody))
+	addReq.Header.Set("Content-Type", "application/json")
+	addW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(addW, addReq)
+	if addW.Code != http.StatusOK {
+		t.Fatalf("add returned %d; body=%s", addW.Code, addW.Body.String())
+	}
+
+	// Remove the newly-added source via the real HTTP handler.
+	delReq := httptest.NewRequest(http.MethodDelete, "/api/settings/sources/"+addName, nil)
+	delW := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(delW, delReq)
+	if delW.Code != http.StatusOK {
+		t.Fatalf("delete returned %d; body=%s", delW.Code, delW.Body.String())
+	}
+
+	// The pre-existing "e2e-tests" config entry must be completely untouched.
+	srv.cfgMu.RLock()
+	entry := srv.cfg.Spec.Entries["e2e-tests"]
+	_, addStillPresent := srv.cfg.Spec.Entries[addName]
+	srv.cfgMu.RUnlock()
+	if entry == nil || entry.Ref == nil || entry.Ref.Path != tsPath {
+		t.Fatalf("e2e-tests config entry was disturbed by the add/remove of %q: %+v", addName, entry)
+	}
+	if addStillPresent {
+		t.Fatalf("%q config entry should have been removed by DELETE", addName)
+	}
+}
+
 // TestApiSaveConfigRaw_ReResolvesSourceOverrides asserts parity between the two
 // override-mutation surfaces: a raw-config save that changes an entry's
 // overrides must drive the same re-resolve → EventUpdated → re-Admit pipeline

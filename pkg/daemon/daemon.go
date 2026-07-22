@@ -1260,10 +1260,11 @@ func buildTaskSetSourceFromEntry(name string, entry *taskset.Entry, dataDir stri
 	// The entry key is the namespace. The ref points at the taskset.yaml.
 	// applyDefaults has already expanded ${VAR} and set branch/poll defaults.
 	ref := entry.Ref
-	id := ref.URL
-	if id == "" {
-		id = ref.Path
-	}
+	// Name-qualified — see taskset.SourceID's doc comment (issue #621: two
+	// entries referencing the identical git URL or local path must never
+	// collide on Source.ID(), which pkg/registry/reconciler.go's rc.cancels
+	// keys its teardown bookkeeping by).
+	id := taskset.SourceID(name, ref)
 	pollInterval := ref.PollInterval
 
 	var opts []taskset.SourceOption
