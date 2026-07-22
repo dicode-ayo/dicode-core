@@ -1963,19 +1963,6 @@ type testTaskResponse struct {
 //   - 408 — runner timed out
 //   - 409 — task is held pending approval (test code must not execute)
 //   - 422 — params payload failed schema validation
-//
-// scopeForRequest extracts a Bearer token from r's Authorization header and
-// resolves its stored MCP scope, if any. found mirrors apiKeyStore.scopeFor:
-// false when there's no Bearer token or it doesn't validate; scope nil when
-// found but unscoped (full access).
-func (s *Server) scopeForRequest(r *http.Request) (scope *pkgruntime.MCPScope, found bool) {
-	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if token == "" {
-		return nil, false
-	}
-	return s.apiKeys.scopeFor(r.Context(), token)
-}
-
 func (s *Server) apiTestTask(w http.ResponseWriter, r *http.Request) {
 	id := taskIDParam(r)
 
@@ -2070,6 +2057,18 @@ func (s *Server) apiTestTask(w http.ResponseWriter, r *http.Request) {
 	// "the runner completed and we have a verdict to return"; the verdict
 	// itself lives in the body's `status` field.
 	jsonOK(w, buildTestTaskResponse(res, runErr, randomRunID()))
+}
+
+// scopeForRequest extracts a Bearer token from r's Authorization header and
+// resolves its stored MCP scope, if any. found mirrors apiKeyStore.scopeFor:
+// false when there's no Bearer token or it doesn't validate; scope nil when
+// found but unscoped (full access).
+func (s *Server) scopeForRequest(r *http.Request) (scope *pkgruntime.MCPScope, found bool) {
+	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if token == "" {
+		return nil, false
+	}
+	return s.apiKeys.scopeFor(r.Context(), token)
 }
 
 // buildTestTaskResponse maps a tasktest.Result + runErr into the HTTP wire
