@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	"github.com/dicode/dicode/pkg/runtime/containersec"
 	"github.com/dicode/dicode/pkg/task"
 	"go.uber.org/zap"
@@ -55,7 +56,7 @@ func TestBuildArgs_HardeningFlags(t *testing.T) {
 		User:        "65532:65532",
 	}
 	e := &executor{podmanPath: "/usr/bin/podman"}
-	args := e.buildArgs(cfg, "cloudflare/cloudflared:latest", "dicode-run1", "run1", "task1", "bridge")
+	args := e.buildArgs(cfg, "cloudflare/cloudflared:latest", "dicode-run1", "run1", "task1", "bridge", nil)
 
 	if !argsContainPair(args, "--network", "bridge") {
 		t.Errorf("missing --network bridge in %v", args)
@@ -91,7 +92,7 @@ func TestBuildArgs_OmitsHardeningWhenUnset(t *testing.T) {
 	// buildArgs must not inject any --network flag — the runtime picks its default.
 	cfg := &task.DockerConfig{Image: "alpine"}
 	e := &executor{podmanPath: "/usr/bin/podman"}
-	args := e.buildArgs(cfg, "alpine", "dicode-run1", "run1", "task1", "")
+	args := e.buildArgs(cfg, "alpine", "dicode-run1", "run1", "task1", "", nil)
 
 	joined := strings.Join(args, " ")
 	for _, forbidden := range []string{"--network", "--add-host", "--cap-drop", "--cap-add", "--security-opt", "--read-only", "--user"} {
@@ -108,7 +109,7 @@ func TestBuildArgs_NetworkNone_ZeroDefaultPerms(t *testing.T) {
 	cfg := &task.DockerConfig{Image: "alpine"}
 	e := &executor{podmanPath: "/usr/bin/podman"}
 	// EffectiveNetworkMode returns "none" when permissions.net is empty and no ports.
-	args := e.buildArgs(cfg, "alpine", "dicode-run1", "run1", "task1", "none")
+	args := e.buildArgs(cfg, "alpine", "dicode-run1", "run1", "task1", "none", nil)
 
 	if !argsContainPair(args, "--network", "none") {
 		t.Errorf("expected --network none for zero-default isolation; args=%v", args)
@@ -121,7 +122,7 @@ func TestBuildArgs_NetworkBridge_WhenPermissionsNetWildcard(t *testing.T) {
 	cfg := &task.DockerConfig{Image: "alpine"}
 	e := &executor{podmanPath: "/usr/bin/podman"}
 	// EffectiveNetworkMode returns "" when permissions.net is non-empty.
-	args := e.buildArgs(cfg, "alpine", "dicode-run1", "run1", "task1", "")
+	args := e.buildArgs(cfg, "alpine", "dicode-run1", "run1", "task1", "", nil)
 
 	joined := strings.Join(args, " ")
 	if strings.Contains(joined, "--network none") {
@@ -144,7 +145,7 @@ func TestBuildArgs_HardeningPrecedesImage(t *testing.T) {
 		Command:     []string{"echo", "hi"},
 	}
 	e := &executor{podmanPath: "/usr/bin/podman"}
-	args := e.buildArgs(cfg, "alpine", "dicode-run1", "run1", "task1", "bridge")
+	args := e.buildArgs(cfg, "alpine", "dicode-run1", "run1", "task1", "bridge", nil)
 
 	imageIdx := slices.Index(args, "alpine")
 	if imageIdx < 0 {
@@ -286,5 +287,47 @@ func TestValidateArgvSafety_SafeConfigPasses(t *testing.T) {
 	// Built image tags look like dicode-<task>:<hash> and must pass too.
 	if err := validateArgvSafety(&task.DockerConfig{}, "dicode-mytask:a1b2c3d4e5f6"); err != nil {
 		t.Errorf("built image tag rejected: %v", err)
+	}
+}
+
+// TestBuildArgs_EnvForwardedNameOnly pins that env keys are forwarded to the
+// container name-only (`-e KEY`) and that NO value — literal or resolved
+// secret — ever appears on the podman argv, where it would be readable via
+// ps / /proc/<pid>/cmdline.
+func TestBuildArgs_EnvForwardedNameOnly(t *testing.T) {
+	cfg := &task.DockerConfig{
+		Image:   "alpine",
+		EnvVars: map[string]string{"LITERAL": "keep", "TOKEN": "placeholder"},
+	}
+	resolved := map[string]string{"TOKEN": "real-secret", "HOST": "api.local"}
+	mergedEnv := pkgruntime.BuildContainerEnv(cfg.EnvVars, resolved)
+	e := &executor{podmanPath: "/usr/bin/podman"}
+	args := e.buildArgs(cfg, "alpine", "dicode-run1", "run1", "task1", "", mergedEnv)
+
+	for _, key := range []string{"LITERAL", "TOKEN", "HOST"} {
+		if !argsContainPair(args, "-e", key) {
+			t.Errorf("env key %q not forwarded name-only: %v", key, args)
+		}
+	}
+	// No KEY=VALUE token, and no secret/literal value substring, may appear.
+	for _, forbidden := range []string{
+		"LITERAL=keep", "TOKEN=real-secret", "TOKEN=placeholder", "HOST=api.local",
+		"real-secret", "placeholder", "api.local", "keep",
+	} {
+		if slices.Contains(args, forbidden) {
+			t.Errorf("value leaked onto argv: %q in %v", forbidden, args)
+		}
+	}
+
+	// The values instead live in mergedEnv, which Execute appends onto the
+	// podman process's cmd.Env — resolved value winning over the literal.
+	if !slices.Contains(mergedEnv, "TOKEN=real-secret") {
+		t.Errorf("resolved value missing from env slice: %v", mergedEnv)
+	}
+	if slices.Contains(mergedEnv, "TOKEN=placeholder") {
+		t.Errorf("literal placeholder survived resolved override in env slice: %v", mergedEnv)
+	}
+	if !slices.Contains(mergedEnv, "LITERAL=keep") {
+		t.Errorf("literal value missing from env slice: %v", mergedEnv)
 	}
 }

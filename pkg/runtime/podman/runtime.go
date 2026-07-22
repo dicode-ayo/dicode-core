@@ -45,6 +45,7 @@ import (
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	"github.com/dicode/dicode/pkg/runtime/containersec"
 	"github.com/dicode/dicode/pkg/runtime/imagegc"
+	"github.com/dicode/dicode/pkg/secrets"
 	"github.com/dicode/dicode/pkg/task"
 	"go.uber.org/zap"
 )
@@ -110,6 +111,15 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 	cfg := spec.Docker
 	containerName := "dicode-" + runID
 
+	// PreResolvedEnv is already resolved by the trigger engine, so derive the
+	// env map and redactor directly — no resolver is constructed here.
+	var resolvedEnv map[string]string
+	var redactor *secrets.Redactor
+	if opts.PreResolvedEnv != nil {
+		resolvedEnv = opts.PreResolvedEnv.Env
+		redactor = secrets.NewRedactor(opts.PreResolvedEnv.Secrets)
+	}
+
 	// Security floor (issue #380): task.yaml is untrusted input. Reject
 	// dangerous host config (host network namespace, dangerous cap_add,
 	// isolation-weakening security_opt, bind mounts of sensitive host paths)
@@ -153,7 +163,13 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 		return result, nil
 	}
 
-	args := e.buildArgs(cfg, imageTag, containerName, runID, spec.ID, effectiveNetMode)
+	// Merge literal env_vars with the resolved (secret) env once. The values
+	// go into the podman process's own environment (cmd.Env below) and are
+	// forwarded into the container name-only via `-e KEY`, so no secret value
+	// ever appears on the podman argv (readable via ps / /proc/<pid>/cmdline).
+	mergedEnv := pkgruntime.BuildContainerEnv(cfg.EnvVars, resolvedEnv)
+
+	args := e.buildArgs(cfg, imageTag, containerName, runID, spec.ID, effectiveNetMode, mergedEnv)
 
 	e.log.Info("podman run",
 		zap.String("task", spec.ID),
@@ -163,6 +179,10 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 	)
 
 	cmd := exec.CommandContext(ctx, e.podmanPath, args...) //nolint:gosec
+	// Carry the container env values in podman's own environment so `-e KEY`
+	// (name-only) can pull them in without exposing them on argv. Appending
+	// after os.Environ() lets a forwarded key override an ambient one.
+	cmd.Env = append(os.Environ(), mergedEnv...)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -186,7 +206,7 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 		scanner := bufio.NewScanner(stdout)
 		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 		for scanner.Scan() {
-			_ = e.reg.AppendLog(context.Background(), runID, "info", scanner.Text())
+			_ = e.reg.AppendLog(context.Background(), runID, "info", redactor.RedactString(scanner.Text()))
 		}
 		if err := scanner.Err(); err != nil {
 			e.log.Warn("stdout scanner error", zap.String("run", runID), zap.Error(err))
@@ -196,7 +216,7 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 		scanner := bufio.NewScanner(stderr)
 		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 		for scanner.Scan() {
-			_ = e.reg.AppendLog(context.Background(), runID, "warn", scanner.Text())
+			_ = e.reg.AppendLog(context.Background(), runID, "warn", redactor.RedactString(scanner.Text()))
 		}
 		if err := scanner.Err(); err != nil {
 			e.log.Warn("stderr scanner error", zap.String("run", runID), zap.Error(err))
@@ -299,7 +319,7 @@ func (e *executor) buildImage(ctx context.Context, spec *task.Spec, runID, netMo
 	return tag, nil
 }
 
-func (e *executor) buildArgs(cfg *task.DockerConfig, imageTag, containerName, runID, taskID, netMode string) []string {
+func (e *executor) buildArgs(cfg *task.DockerConfig, imageTag, containerName, runID, taskID, netMode string, mergedEnv []string) []string {
 	args := []string{
 		"run", "--rm",
 		"--name", containerName,
@@ -312,8 +332,10 @@ func (e *executor) buildArgs(cfg *task.DockerConfig, imageTag, containerName, ru
 	for _, v := range cfg.Volumes {
 		args = append(args, "-v", v)
 	}
-	for k, v := range cfg.EnvVars {
-		args = append(args, "-e", k+"="+v)
+	// Forward each key name-only; podman reads the value from its own env
+	// (cmd.Env), keeping secret values off the argv.
+	for _, kv := range mergedEnv {
+		args = append(args, "-e", kv[:strings.IndexByte(kv, '=')])
 	}
 	if cfg.WorkingDir != "" {
 		args = append(args, "--workdir", cfg.WorkingDir)
