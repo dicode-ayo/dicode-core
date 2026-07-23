@@ -384,8 +384,11 @@ Deno.test("buildClaudeArgs: denies the dangerous built-in tools unconditionally 
     for (const tool of dangerous) {
         assertEquals(denied.includes(tool), true);
     }
-    // The MCP-wired path keeps its existing allowlist alongside the denylist.
-    assertEquals(withMcp.includes("--allowedTools"), true);
+    // The MCP-wired path keeps its existing allowlist alongside the denylist —
+    // assert the actual value, not just presence of the flag.
+    const iAllowed = withMcp.indexOf("--allowedTools");
+    assertEquals(iAllowed >= 0, true);
+    assertEquals(withMcp[iAllowed + 1], "mcp__dicode");
 });
 
 Deno.test("passes --strict-mcp-config --mcp-config to claude when MCP is wired", async () => {
