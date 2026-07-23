@@ -363,29 +363,26 @@ Deno.test("buildClaudeArgs: allowlists the dicode MCP tools when MCP is wired", 
 });
 
 Deno.test("buildClaudeArgs: denies the dangerous built-in tools unconditionally (#560 fail-closed)", () => {
-    // The bug this guards: when mcpConfigPath is unset (MCP disabled, or MCP
-    // wiring failed), buildClaudeArgs used to push no --allowedTools AND no
-    // --disallowedTools, so Claude silently fell back to its full default
-    // toolset — Bash/Read/Write/Edit/etc — with real host fs+exec access as
-    // the daemon's OS user. --disallowedTools must be present, and must deny
-    // every dangerous built-in tool, regardless of MCP wiring state.
+    // The no-mcpConfigPath case (the actual fail-open bug this issue is
+    // about) is already covered by "base args are always present" above with
+    // an exact-string match on the whole --disallowedTools value — a
+    // stronger check than repeating it here. This test covers what that one
+    // doesn't: that the denylist survives, tool-for-tool, when MCP IS wired
+    // alongside --allowedTools.
     const dangerous = [
         "Bash", "Read", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch",
         "Glob", "Grep", "Task", "KillShell",
     ];
 
-    const withoutMcp = buildClaudeArgs({ prompt: "hi" });
-    const iNoMcp = withoutMcp.indexOf("--disallowedTools");
-    assertEquals(iNoMcp >= 0, true);
-    for (const tool of dangerous) {
-        assertEquals(withoutMcp[iNoMcp + 1].includes(tool), true);
-    }
-
     const withMcp = buildClaudeArgs({ prompt: "hi", mcpConfigPath: "/w/.claude/mcp.json" });
     const iMcp = withMcp.indexOf("--disallowedTools");
     assertEquals(iMcp >= 0, true);
+    // Exact membership (split on comma), not substring — "Edit" is a
+    // substring of "NotebookEdit", so a plain .includes() on the joined
+    // string wouldn't catch "Edit" going missing while "NotebookEdit" stays.
+    const denied = withMcp[iMcp + 1].split(",");
     for (const tool of dangerous) {
-        assertEquals(withMcp[iMcp + 1].includes(tool), true);
+        assertEquals(denied.includes(tool), true);
     }
     // The MCP-wired path keeps its existing allowlist alongside the denylist.
     assertEquals(withMcp.includes("--allowedTools"), true);

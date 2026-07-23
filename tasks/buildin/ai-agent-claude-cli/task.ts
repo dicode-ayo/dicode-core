@@ -64,16 +64,6 @@ function fail(error: string): { ok: false; error: string } {
     return { ok: false, error };
 }
 
-/**
- * Build the `claude` CLI argument vector. Exported for unit testing.
- *
- * MCP: `<cwd>/.claude/mcp.json` is NOT an auto-load path for the Claude CLI
- * (the auto-loaded project file is `.mcp.json` at the root, and even that hits a
- * headless approval gate). So when a config was written we mount it explicitly
- * with `--mcp-config`, and `--strict-mcp-config` loads ONLY that server —
- * ignoring the operator's `~/.claude.json` / project `.mcp.json`. Passing
- * neither flag (the prior behavior) meant Claude ran with zero dicode tools.
- */
 // Claude's built-in filesystem/exec/network/agent tools — never dicode's
 // mcp__dicode tools, which are the intended capability surface. Deny-listed
 // unconditionally below regardless of MCP wiring state; see the comment at
@@ -86,6 +76,16 @@ const DANGEROUS_BUILTIN_TOOLS = [
     "Glob", "Grep", "Task", "KillShell",
 ];
 
+/**
+ * Build the `claude` CLI argument vector. Exported for unit testing.
+ *
+ * MCP: `<cwd>/.claude/mcp.json` is NOT an auto-load path for the Claude CLI
+ * (the auto-loaded project file is `.mcp.json` at the root, and even that hits a
+ * headless approval gate). So when a config was written we mount it explicitly
+ * with `--mcp-config`, and `--strict-mcp-config` loads ONLY that server —
+ * ignoring the operator's `~/.claude.json` / project `.mcp.json`. Passing
+ * neither flag (the prior behavior) meant Claude ran with zero dicode tools.
+ */
 export function buildClaudeArgs(opts: {
     prompt: string;
     claudeSessionId?: string;
