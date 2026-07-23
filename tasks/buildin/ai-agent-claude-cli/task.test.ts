@@ -324,7 +324,7 @@ JSON`,
 Deno.test("buildClaudeArgs: base args are always present", () => {
     assertEquals(
         buildClaudeArgs({ prompt: "hi" }).join(" "),
-        "-p hi --output-format json",
+        "-p hi --output-format json --disallowedTools Bash,Read,Write,Edit,NotebookEdit,WebFetch,WebSearch",
     );
 });
 
@@ -360,6 +360,32 @@ Deno.test("buildClaudeArgs: allowlists the dicode MCP tools when MCP is wired", 
     assertEquals(a[i + 1], "mcp__dicode");
     // No allowlist flag when MCP isn't mounted.
     assertEquals(buildClaudeArgs({ prompt: "hi" }).includes("--allowedTools"), false);
+});
+
+Deno.test("buildClaudeArgs: denies the dangerous built-in tools unconditionally (#560 fail-closed)", () => {
+    // The bug this guards: when mcpConfigPath is unset (MCP disabled, or MCP
+    // wiring failed), buildClaudeArgs used to push no --allowedTools AND no
+    // --disallowedTools, so Claude silently fell back to its full default
+    // toolset — Bash/Read/Write/Edit/etc — with real host fs+exec access as
+    // the daemon's OS user. --disallowedTools must be present, and must deny
+    // every dangerous built-in tool, regardless of MCP wiring state.
+    const dangerous = ["Bash", "Read", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch"];
+
+    const withoutMcp = buildClaudeArgs({ prompt: "hi" });
+    const iNoMcp = withoutMcp.indexOf("--disallowedTools");
+    assertEquals(iNoMcp >= 0, true);
+    for (const tool of dangerous) {
+        assertEquals(withoutMcp[iNoMcp + 1].includes(tool), true);
+    }
+
+    const withMcp = buildClaudeArgs({ prompt: "hi", mcpConfigPath: "/w/.claude/mcp.json" });
+    const iMcp = withMcp.indexOf("--disallowedTools");
+    assertEquals(iMcp >= 0, true);
+    for (const tool of dangerous) {
+        assertEquals(withMcp[iMcp + 1].includes(tool), true);
+    }
+    // The MCP-wired path keeps its existing allowlist alongside the denylist.
+    assertEquals(withMcp.includes("--allowedTools"), true);
 });
 
 Deno.test("passes --strict-mcp-config --mcp-config to claude when MCP is wired", async () => {

@@ -271,13 +271,17 @@ See [docs/webhooks.md](../../../docs/webhooks.md) for a full signing example.
 
 ## Limitations
 
-- **Unsandboxed tool access (security).** `claude -p` runs with its full
-  default toolset (Read/Write/Edit/Bash) — this wrapper passes no
-  `--allowedTools`/`--disallowedTools`/`--permission-mode`. As a subprocess the
-  `claude` binary is not confined by dicode's Deno sandbox, so a turn has
-  host-wide filesystem + bash access as the daemon user, non-interactively.
-  The `run: ["claude"]` permission understates this. Hardening — restrict the
-  tools and route dicode capabilities through MCP — is tracked in
+- **Partially governed tool access (security).** The wrapper always passes
+  `--disallowedTools` denying Claude's dangerous built-in tools (Bash, Read,
+  Write, Edit, NotebookEdit, WebFetch, WebSearch) — fail-closed, regardless of
+  whether MCP wiring succeeded. When MCP is wired (the default), it also
+  passes `--allowedTools mcp__dicode` so the agent can call dicode's governed
+  tool surface. As a subprocess the `claude` binary is still not confined by
+  dicode's Deno sandbox, so the `run: ["claude"]` permission still understates
+  what the binary itself can do at the OS level — but it can no longer reach
+  host filesystem/bash/network tools through Claude's own tool-call interface.
+  Growing the MCP surface to more governed authoring tools (write-into-clone,
+  test, commit/PR) is still open, tracked in
   [#560](https://github.com/dicode-ayo/dicode-core/issues/560).
 - **No streaming today.** The wrapper waits for the full response before
   returning. Claude's `--output-format stream-json` is supported by the CLI;

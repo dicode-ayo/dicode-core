@@ -88,7 +88,7 @@ Both backends are tool-capable; they differ in **how governed** those tools are.
 | Backend | Chat | Authoring | Governance today |
 |---|---|---|---|
 | `buildin/ai-agent` (OpenAI-compatible, `OPENAI_API_KEY`) | ✅ | ✅ | Governed — edits go through the capability-gated dicode SDK (dev-clone, `tasks.test`, `git-pr`). Drives `auto-fix` today. |
-| `buildin/ai-agent-claude-cli` (Claude Pro/Max, `CLAUDE_CODE_OAUTH_TOKEN`) | ✅ | ✅ | **Ungoverned.** `claude -p` runs with its full default tools (Read/Write/Edit/Bash) — the task passes no `--allowedTools`/`--permission-mode`, so as a subprocess it has host-wide fs/bash as the daemon user. A privilege hole; **must be restricted + routed through MCP** (#560). |
+| `buildin/ai-agent-claude-cli` (Claude Pro/Max, `CLAUDE_CODE_OAUTH_TOKEN`) | ✅ | ✅ | **Partially governed.** The task always passes `--disallowedTools` denying Claude's built-in Read/Write/Edit/Bash/NotebookEdit/WebFetch/WebSearch tools (fail-closed, regardless of MCP wiring), and `--allowedTools mcp__dicode` when MCP is wired. Still tracked as partially-governed: the MCP surface itself only covers the tools it exposes today, so growing it to the full governed authoring toolset (write-into-clone, test, commit/PR) is open work (#560). |
 
 The end state (decision 5): both backends run the **same governed MCP path** on the same
 prompts. Claude-via-subscription becomes a first-class authoring backend *once* its raw
