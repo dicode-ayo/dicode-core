@@ -74,10 +74,17 @@ function fail(error: string): { ok: false; error: string } {
  * ignoring the operator's `~/.claude.json` / project `.mcp.json`. Passing
  * neither flag (the prior behavior) meant Claude ran with zero dicode tools.
  */
-// Claude's built-in filesystem/exec/network tools — never dicode's mcp__dicode
-// tools, which are the intended capability surface. Deny-listed unconditionally
-// below regardless of MCP wiring state; see the comment at the call site.
-const DANGEROUS_BUILTIN_TOOLS = ["Bash", "Read", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch"];
+// Claude's built-in filesystem/exec/network/agent tools — never dicode's
+// mcp__dicode tools, which are the intended capability surface. Deny-listed
+// unconditionally below regardless of MCP wiring state; see the comment at
+// the call site. Covers every built-in tool that can read/write the host fs,
+// run subprocesses, reach the network, or spawn a sub-agent that could reach
+// any of those transitively (Task) — not just the most obviously dangerous
+// four (Bash/Read/Write/Edit).
+const DANGEROUS_BUILTIN_TOOLS = [
+    "Bash", "Read", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch",
+    "Glob", "Grep", "Task", "KillShell",
+];
 
 export function buildClaudeArgs(opts: {
     prompt: string;

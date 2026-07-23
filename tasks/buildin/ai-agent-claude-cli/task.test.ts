@@ -324,7 +324,7 @@ JSON`,
 Deno.test("buildClaudeArgs: base args are always present", () => {
     assertEquals(
         buildClaudeArgs({ prompt: "hi" }).join(" "),
-        "-p hi --output-format json --disallowedTools Bash,Read,Write,Edit,NotebookEdit,WebFetch,WebSearch",
+        "-p hi --output-format json --disallowedTools Bash,Read,Write,Edit,NotebookEdit,WebFetch,WebSearch,Glob,Grep,Task,KillShell",
     );
 });
 
@@ -369,7 +369,10 @@ Deno.test("buildClaudeArgs: denies the dangerous built-in tools unconditionally 
     // toolset — Bash/Read/Write/Edit/etc — with real host fs+exec access as
     // the daemon's OS user. --disallowedTools must be present, and must deny
     // every dangerous built-in tool, regardless of MCP wiring state.
-    const dangerous = ["Bash", "Read", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch"];
+    const dangerous = [
+        "Bash", "Read", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch",
+        "Glob", "Grep", "Task", "KillShell",
+    ];
 
     const withoutMcp = buildClaudeArgs({ prompt: "hi" });
     const iNoMcp = withoutMcp.indexOf("--disallowedTools");

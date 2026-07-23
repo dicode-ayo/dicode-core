@@ -273,8 +273,8 @@ See [docs/webhooks.md](../../../docs/webhooks.md) for a full signing example.
 
 - **Partially governed tool access (security).** The wrapper always passes
   `--disallowedTools` denying Claude's dangerous built-in tools (Bash, Read,
-  Write, Edit, NotebookEdit, WebFetch, WebSearch) — fail-closed, regardless of
-  whether MCP wiring succeeded. When MCP is wired (the default), it also
+  Write, Edit, NotebookEdit, WebFetch, WebSearch, Glob, Grep, Task, KillShell)
+  — fail-closed, regardless of whether MCP wiring succeeded. When MCP is wired (the default), it also
   passes `--allowedTools mcp__dicode` so the agent can call dicode's governed
   tool surface. As a subprocess the `claude` binary is still not confined by
   dicode's Deno sandbox, so the `run: ["claude"]` permission still understates
