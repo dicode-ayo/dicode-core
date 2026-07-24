@@ -9,7 +9,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/hmac"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -28,6 +27,7 @@ import (
 	"github.com/dicode/dicode/pkg/registry"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	"github.com/dicode/dicode/pkg/task"
+	"github.com/dicode/dicode/pkg/webhooksign"
 	"go.uber.org/zap"
 )
 
@@ -179,9 +179,12 @@ const (
 	// webhookTimestampTolerance is the replay-protection window.
 	webhookTimestampTolerance = 5 * time.Minute
 	// webhookSignatureHeader is the default signature header (GitHub-compatible).
-	webhookSignatureHeader = "X-Hub-Signature-256"
+	// Local alias for webhooksign.SignatureHeader — kept to minimize churn in
+	// this file's many call sites.
+	webhookSignatureHeader = webhooksign.SignatureHeader
 	// webhookTimestampHeader carries the Unix timestamp for replay protection.
-	webhookTimestampHeader = "X-Dicode-Timestamp"
+	// Local alias for webhooksign.TimestampHeader.
+	webhookTimestampHeader = webhooksign.TimestampHeader
 )
 
 // taskErrorPage is the HTML template for task failures that produce no output.
@@ -249,14 +252,10 @@ else { pre.innerHTML = logs.map(l => {
 // preimage is "<tsStr>\n<body>" when tsStr is non-empty, or bare body
 // otherwise. This is the single preimage construction shared by signature
 // verification and the replay-cache key, so the two can never drift apart.
+// Thin wrapper over pkg/webhooksign — the shared source of truth also used by
+// the `dicode webhook sign` CLI command.
 func webhookHMACPreimageDigest(secret, tsStr string, body []byte) []byte {
-	mac := hmac.New(sha256.New, []byte(secret))
-	if tsStr != "" {
-		mac.Write([]byte(tsStr))
-		mac.Write([]byte("\n"))
-	}
-	mac.Write(body)
-	return mac.Sum(nil)
+	return webhooksign.PreimageDigest(secret, tsStr, body)
 }
 
 // verifyWebhookSignature validates HMAC-SHA256 signature and optional replay
@@ -325,7 +324,7 @@ func verifyWebhookSignatureSecret(secret string, requireTimestamp bool, r *http.
 	// Preimage is "<ts_unix_str>\n<body>" when a timestamp was sent, body alone
 	// otherwise — computed once here and reused by checkWebhookReplay.
 	digest := webhookHMACPreimageDigest(secret, raw, body)
-	want := "sha256=" + hex.EncodeToString(digest)
+	want := webhooksign.SignatureValue(digest)
 
 	if !hmac.Equal([]byte(got), []byte(want)) {
 		return "", nil, fmt.Errorf("signature mismatch")

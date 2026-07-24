@@ -1152,7 +1152,7 @@ The testing and validation system is designed with four layers. Not all are impl
 | Unit tests | `dicode task test` | Logic bugs, wrong HTTP calls, bad return values | ✅ Implemented (Deno; Python/Docker/Podman tracked as #159) |
 | Dry run | `dicode task run --dry-run` | Secret resolution, correct endpoints | Planned |
 
-> **Note**: E2E tests use Playwright and cover core UI flows, file changes, webhooks, config, and auth. Unit tests run via `dicode task test <task-id>` or `make test-tasks` — the CLI routes through the same executor as the MCP `test_task` tool so any caller (human, built-in agent, third-party AI) gets the same results. `task validate` and `task run --dry-run` are not yet implemented. Current CLI supports: `run`, `list`, `logs`, `status`, `ai`, `task test`, `task pending`, `task approve`, `secrets`, `relay`, `version`. When the trust-on-change approval gate is holding tasks, `dicode list` marks them `pending` in an APPROVAL column and `dicode task pending` lists each held task with its short content hash — copy an id straight into `dicode task approve <task-id>`.
+> **Note**: E2E tests use Playwright and cover core UI flows, file changes, webhooks, config, and auth. Unit tests run via `dicode task test <task-id>` or `make test-tasks` — the CLI routes through the same executor as the MCP `test_task` tool so any caller (human, built-in agent, third-party AI) gets the same results. `task validate` and `task run --dry-run` are not yet implemented. Current CLI supports: `run`, `list`, `logs`, `status`, `ai`, `task test`, `task pending`, `task approve`, `secrets`, `relay`, `webhook sign`, `version`. When the trust-on-change approval gate is holding tasks, `dicode list` marks them `pending` in an APPROVAL column and `dicode task pending` lists each held task with its short content hash — copy an id straight into `dicode task approve <task-id>`.
 
 ---
 
@@ -1399,6 +1399,8 @@ trigger:
 ```
 
 dicode verifies `X-Hub-Signature-256: sha256=<hmac>` before the task script runs. The format is GitHub-compatible — point a GitHub webhook at a dicode endpoint with the same secret and it works out of the box. Requests older than 5 minutes are rejected (replay protection via `X-Dicode-Timestamp`).
+
+Calling a protected webhook yourself (from a script, CI job, or another service)? `dicode webhook sign --secret <secret> --data '<body>'` computes the same HMAC and prints the header lines to send — see [docs/webhooks.md](docs/webhooks.md#signing-with-the-dicode-webhook-sign-cli).
 
 See `examples/github-push-webhook/` for a full working example.
 

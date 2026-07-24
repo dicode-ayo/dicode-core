@@ -52,6 +52,7 @@ export default defineConfig({
         '**/file-change.spec.ts',
         '**/webhooks.spec.ts',
         '**/webhooks-secure.spec.ts',
+        '**/webhook-sign-cli.spec.ts',
         '**/cron.spec.ts',
         '**/config.spec.ts',
         '**/add-source.spec.ts',
