@@ -149,7 +149,7 @@ you and prints the exact header lines to send. It's pure local crypto — no
 running daemon required — so it works in a shell script, a CI job, or another
 service that needs to call a protected dicode webhook.
 
-```
+```text
 dicode webhook sign --secret <secret> [flags]
 
 Flags:
@@ -169,7 +169,7 @@ Flags:
 Output goes to stdout as the two header lines (the timestamp line is omitted
 with `--no-timestamp`):
 
-```
+```text
 X-Hub-Signature-256: sha256=<hex>
 X-Dicode-Timestamp: <unix_ts>
 ```
