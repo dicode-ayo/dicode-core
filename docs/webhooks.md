@@ -142,6 +142,54 @@ headers = {
 }
 ```
 
+### Signing with the `dicode webhook sign` CLI
+
+Rather than hand-rolling the HMAC above, `dicode webhook sign` computes it for
+you and prints the exact header lines to send. It's pure local crypto — no
+running daemon required — so it works in a shell script, a CI job, or another
+service that needs to call a protected dicode webhook.
+
+```text
+dicode webhook sign --secret <secret> [flags]
+
+Flags:
+  --secret <value>       HMAC secret (required)
+  --data <string>        inline request body
+  --data-file <path>     read the request body from a file
+                          (default: read the body from stdin if neither
+                          --data nor --data-file is given)
+  --timestamp <unix-sec> explicit Unix timestamp to sign
+                          (default: current time; mutually exclusive with
+                          --no-timestamp)
+  --no-timestamp         omit the timestamp and sign the bare body
+                          (GitHub-compatible mode; mutually exclusive with
+                          --timestamp)
+```
+
+Output goes to stdout as the two header lines (the timestamp line is omitted
+with `--no-timestamp`):
+
+```text
+X-Hub-Signature-256: sha256=<hex>
+X-Dicode-Timestamp: <unix_ts>
+```
+
+Example — sign a payload and curl it straight at a protected webhook:
+
+```bash
+BODY='{"hello":"world"}'
+HEADERS=$(dicode webhook sign --secret "$MY_WEBHOOK_SECRET" --data "$BODY")
+
+curl -X POST https://your-host/hooks/my-task \
+  -H "Content-Type: application/json" \
+  -H "$(echo "$HEADERS" | grep '^X-Hub-Signature-256:')" \
+  -H "$(echo "$HEADERS" | grep '^X-Dicode-Timestamp:')" \
+  -d "$BODY"
+```
+
+Use `--no-timestamp` when you need the plain `HMAC-SHA256(secret, body)`
+preimage — the same GitHub-compatible mode described above.
+
 ### Replay protection
 
 When `webhook_secret` is set, dicode automatically rejects duplicate webhook

@@ -24,6 +24,9 @@
 //	secrets list                    list secret keys
 //	secrets set <key> <value>       store a secret
 //	secrets delete <key>            delete a secret
+//	webhook sign [flags]            HMAC-sign a webhook body/timestamp, printing
+//	                                the headers a caller needs to hit a protected
+//	                                dicode webhook (no daemon required)
 //	version                         print version and exit
 package main
 
@@ -90,6 +93,17 @@ func main() {
 	// contract as `deno`/`python` above.
 	if os.Args[1] == "relock" {
 		if err := cmdRelock(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "dicode: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	// `webhook` is a pure local-crypto helper (sign a webhook body/timestamp
+	// with dicode's HMAC scheme). Same daemon-free contract as deno/python/
+	// relock above — no daemon connection is needed to compute an HMAC.
+	if os.Args[1] == "webhook" {
+		if err := cmdWebhook(os.Args[2:]); err != nil {
 			fmt.Fprintf(os.Stderr, "dicode: %v\n", err)
 			os.Exit(1)
 		}
@@ -1613,6 +1627,10 @@ Commands:
   secrets list                    list secret keys
   secrets set <key> <value>       store a secret
   secrets delete <key>            delete a secret
+  webhook sign [flags]            HMAC-sign a webhook body, printing the
+                                  headers to send a protected webhook request
+                                  flags: --secret (required), --data,
+                                  --data-file, --timestamp, --no-timestamp
   mcp install                     mint an API key + run 'claude mcp add' (zero-touch)
   mcp uninstall                   revoke the key + run 'claude mcp remove dicode'
   mcp print-config                print the install command + .claude/mcp.json snippet
