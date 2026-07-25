@@ -52,6 +52,23 @@ jobs:
       - name: Run Deno tests for tasks/buildin/*
         run: deno test --allow-all --config=tasks/deno.json 'tasks/buildin/**/task.test.ts'
 
+      # Only tasks/examples/** entries that ship a task.test.ts run here — see
+      # issue #551. Today that's deploy-wizard, repo-prune, and suspend-wizard,
+      # all runtime: deno. The Layer-2 unit-test harness (tasks/sdk-test.ts)
+      # only supports the Deno runtime (#159), so a docker/podman/python
+      # example (hello-docker, hello-podman, hello-python, nginx-start) can't
+      # ship a task.test.ts today — nothing is silently skipped, there's
+      # simply nothing else the glob could match yet.
+      - name: Run Deno tests for tasks/examples/*
+        run: deno test --allow-all --config=tasks/deno.json 'tasks/examples/**/task.test.ts'
+
+      # repo-prune's task.test.ts mocks Deno.Command, so it never exercises
+      # prune-stale-refs.sh itself — the script that does the actual
+      # branch/worktree deletion. This shell-level suite drives the real
+      # script against a throwaway repo (gh stubbed on PATH, no network).
+      - name: Run repo-prune shell guard tests
+        run: bash tasks/examples/repo-prune/prune-stale-refs.test.sh
+
   test-tasks-cli:
     name: Test buildin tasks (dicode CLI)
     runs-on: ubuntu-latest

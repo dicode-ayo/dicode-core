@@ -1173,7 +1173,7 @@ Write a sibling `task.test.ts` (or `.js` / `.mjs`) and run it through the task's
 
 ```bash
 dicode task test buildin/webui           # via the daemon (CLI → IPC → executor)
-make test-tasks                          # or directly: every task.test.* in tasks/buildin/
+make test-tasks                          # or directly: every task.test.* in tasks/buildin/ and tasks/examples/
 ```
 
 The harness (`tasks/sdk-test.ts`) provides in-memory mocks for the production SDK: `params.set`, `env.set`, `kv.set/get`, `http.mock` / `mockOnce`, `assert.*`, plus `runTask()` which invokes the task's default export. Each `test()` case gets a fresh mock state. See [tasks/buildin/webui/task.test.ts](tasks/buildin/webui/task.test.ts) and [tasks/buildin/ai-agent/task.test.ts](tasks/buildin/ai-agent/task.test.ts) for working examples.
