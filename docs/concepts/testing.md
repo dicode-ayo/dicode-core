@@ -68,6 +68,19 @@ summary line.
 When `--format=junit` is used, human-readable output goes to stderr so CI logs
 remain readable alongside the machine-readable XML.
 
+### CI job: `test-tasks`
+
+The `.github/workflows/ci.yml` job `test-tasks` runs `deno test` directly
+(no daemon) against every `task.test.ts` under **both** `tasks/buildin/**`
+and `tasks/examples/**`, plus `tasks/examples/repo-prune/prune-stale-refs.test.sh`
+(a shell-level suite that drives the real prune script against a throwaway
+repo — `task.test.ts` only mocks `Deno.Command`, so it never exercises the
+script that actually deletes branches/worktrees). `make test-tasks` runs the
+same three commands locally. Only `runtime: deno` tasks can ship a
+`task.test.ts` today — the harness below doesn't support Python/Docker/Podman
+(#159) — so nothing under `tasks/examples/**` is silently excluded; there's
+simply nothing else the glob could match yet.
+
 ### CI job: `test-tasks-cli`
 
 The `.github/workflows/ci.yml` job `test-tasks-cli` boots the dicode daemon

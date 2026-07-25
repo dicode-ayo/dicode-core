@@ -93,10 +93,13 @@ test-e2e-ui:
 # by the managed-runtime bootstrap. Fall back to $PATH.
 DENO := $(shell ls -1t $(HOME)/.cache/dicode/deno/*/deno 2>/dev/null | head -1 || which deno 2>/dev/null)
 
-## test-tasks: run Deno unit tests for tasks/buildin/*/task.test.ts
+## test-tasks: run Deno unit tests for tasks/buildin/**/task.test.ts and tasks/examples/**/task.test.ts,
+## plus repo-prune's shell guard tests
 test-tasks:
 	@test -n "$(DENO)" || { echo "deno not found — install or run dicode daemon once to bootstrap"; exit 1; }
 	$(DENO) test --allow-all --config=tasks/deno.json 'tasks/buildin/**/task.test.ts'
+	$(DENO) test --allow-all --config=tasks/deno.json 'tasks/examples/**/task.test.ts'
+	bash tasks/examples/repo-prune/prune-stale-refs.test.sh
 
 ## dev-relay-config: render a minimal local relay.yaml (no Doppler) for dev — see issue #459
 dev-relay-config:
