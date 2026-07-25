@@ -86,6 +86,7 @@ permissions:
 | `permissions.dicode.tasks` | list of strings | | Task IDs the script may invoke via `dicode.run_task()`; use `["*"]` for all |
 | `permissions.dicode.mcp` | list of strings | | MCP daemon task IDs the script may call via `mcp.call()`; use `["*"]` for all |
 | `permissions.dicode.list_tasks` | bool | | Allow `dicode.list_tasks()` |
+| `permissions.dicode.tasks_test` | bool | | Allow `dicode.tasks.test()` (runs a task's sibling test file via `pkg/tasktest`). Also gates the ephemeral per-run MCP token's access to `POST /api/tasks/{id}/test` — a scoped token whose task doesn't set this is refused with 403 on that REST endpoint, even though the JSON-RPC `test_task` hint tool that points to it is itself always allowed. |
 | `permissions.dicode.get_runs` | bool | | Allow `dicode.get_runs()` |
 | `permissions.dicode.secrets_write` | bool | | Allow `dicode.secrets_set()` and `dicode.secrets_delete()` — write-only, no read |
 | `permissions.dicode.secrets_has` | bool | | Allow `dicode.secrets.has(key)` — boolean presence check, never returns the value |

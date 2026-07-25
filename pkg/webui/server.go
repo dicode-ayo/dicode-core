@@ -1941,7 +1941,14 @@ type testTaskResponse struct {
 // returns a structured result. Closes #208.
 //
 // Authentication: requireAPIKey (Bearer); mirrors /mcp's auth posture so
-// the same API key works across both surfaces.
+// the same API key works across both surfaces. A scoped ephemeral per-run
+// MCP token (#567) additionally needs scope.TestTasks — i.e. the minting
+// task must declare permissions.dicode.tasks_test: true — or the request is
+// refused with 403 before the test file ever runs (#590: this REST endpoint
+// is what the JSON-RPC test_task hint tool points MCP clients at, and it
+// runs the sibling test file with full host permissions, so it must not be
+// reachable by every scoped token regardless of declared capabilities).
+// Unscoped operator/CLI/dashboard keys are unaffected.
 //
 // Body (optional): {"params": {...}, "timeout_s": int}. params are validated
 // against the task's declared schema (422 on mismatch, with per-field detail).
@@ -1951,12 +1958,26 @@ type testTaskResponse struct {
 // Status codes:
 //   - 200 — runner completed (regardless of test pass/fail; see status field)
 //   - 401 — bad/missing API key (handled upstream by requireAPIKey)
+//   - 403 — scoped ephemeral token lacks permissions.dicode.tasks_test
 //   - 404 — task ID not registered
 //   - 408 — runner timed out
 //   - 409 — task is held pending approval (test code must not execute)
 //   - 422 — params payload failed schema validation
 func (s *Server) apiTestTask(w http.ResponseWriter, r *http.Request) {
 	id := taskIDParam(r)
+
+	// Scope check for ephemeral MCP tokens (#590). Mirrors the pattern in
+	// handleMCP: only a Bearer-authenticated caller can carry a scope at
+	// all, and only a non-nil scope actually restricts anything.
+	scope, found := s.scopeForRequest(r)
+	// !found: requireAPIKey upstream already validated this token —
+	// this is a defensive no-op, not a second auth gate. scope == nil:
+	// unscoped operator/CLI/dashboard key — full access, proceed
+	// unrestricted exactly as before this change.
+	if found && scope != nil && !scope.TestTasks {
+		jsonErr(w, "capability not granted: test_task", http.StatusForbidden)
+		return
+	}
 
 	// Approval-gate veto: the sibling test file runs with full host
 	// permissions, so a pending (unapproved) task must be refused here just
@@ -2038,6 +2059,22 @@ func (s *Server) apiTestTask(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, buildTestTaskResponse(res, runErr, randomRunID()))
 }
 
+// scopeForRequest extracts a Bearer token from r's Authorization header and
+// resolves its stored MCP scope, if any. found mirrors apiKeyStore.scopeFor:
+// false when there's no Bearer token, no key store is configured (database
+// nil — auth features disabled, see New's doc comment), or the token doesn't
+// validate; scope nil when found but unscoped (full access).
+func (s *Server) scopeForRequest(r *http.Request) (scope *pkgruntime.MCPScope, found bool) {
+	if s.apiKeys == nil {
+		return nil, false
+	}
+	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if token == "" {
+		return nil, false
+	}
+	return s.apiKeys.scopeFor(r.Context(), token)
+}
+
 // buildTestTaskResponse maps a tasktest.Result + runErr into the HTTP wire
 // shape. status is derived from exit code + parsed counts:
 //   - "errored" if Result.Error non-empty or runErr non-nil and not a clean
@@ -2116,40 +2153,37 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 
 	// Scoping only applies to Bearer API-key auth. A session-cookie caller
 	// (browser dashboard) has no ephemeral scope to check — forward as today.
-	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if token != "" {
-		scope, found := s.apiKeys.scopeFor(r.Context(), token)
-		// !found: the api-key middleware upstream (requireSessionOrAPIKey)
-		// already validated this token: this is a defensive no-op, not a
-		// second auth gate. scope == nil: unscoped operator/CLI/dashboard
-		// key — full access, forward unchanged.
-		if found && scope != nil {
-			// Cap the read like every other request body in this file (see
-			// apiTestTask / testTaskMaxBodyBytes below): MCP JSON-RPC
-			// envelopes are small, so 64KB is generous headroom while still
-			// preventing a scoped caller from streaming an unbounded body at
-			// the daemon before mcpScopeCheck even runs. A MaxBytesReader
-			// overflow surfaces here as a plain io.ReadAll error, handled by
-			// the same 400 branch as any other malformed read.
-			body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, testTaskMaxBodyBytes))
-			if err != nil {
-				jsonErr(w, "failed to read request body", http.StatusBadRequest)
-				return
-			}
-			r.Body = io.NopCloser(bytes.NewReader(body))
-			if allowed, id, deniedMsg := mcpScopeCheck(scope, body); !allowed {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusOK)
-				_ = json.NewEncoder(w).Encode(map[string]any{
-					"jsonrpc": "2.0",
-					"id":      id,
-					"error": map[string]any{
-						"code":    -32001,
-						"message": deniedMsg,
-					},
-				})
-				return
-			}
+	scope, found := s.scopeForRequest(r)
+	// !found: the api-key middleware upstream (requireSessionOrAPIKey)
+	// already validated this token: this is a defensive no-op, not a
+	// second auth gate. scope == nil: unscoped operator/CLI/dashboard
+	// key — full access, forward unchanged.
+	if found && scope != nil {
+		// Cap the read like every other request body in this file (see
+		// apiTestTask / testTaskMaxBodyBytes below): MCP JSON-RPC
+		// envelopes are small, so 64KB is generous headroom while still
+		// preventing a scoped caller from streaming an unbounded body at
+		// the daemon before mcpScopeCheck even runs. A MaxBytesReader
+		// overflow surfaces here as a plain io.ReadAll error, handled by
+		// the same 400 branch as any other malformed read.
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, testTaskMaxBodyBytes))
+		if err != nil {
+			jsonErr(w, "failed to read request body", http.StatusBadRequest)
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		if allowed, id, deniedMsg := mcpScopeCheck(scope, body); !allowed {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"jsonrpc": "2.0",
+				"id":      id,
+				"error": map[string]any{
+					"code":    -32001,
+					"message": deniedMsg,
+				},
+			})
+			return
 		}
 	}
 
@@ -2170,7 +2204,13 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 //     call's params.arguments["id"].
 //   - tools/call list_sources / switch_dev_mode / test_task: always
 //     allowed — these three hint tools exercise no dicode capability and are
-//     unscoped by design.
+//     unscoped by design. For test_task specifically: this only covers the
+//     JSON-RPC hint call itself, which just returns pointer text ("call
+//     POST /api/tasks/{id}/test directly"). The REST endpoint it points
+//     callers at is a separate surface reachable with the same Bearer
+//     token, and IS scope-gated — on scope.TestTasks, checked directly in
+//     apiTestTask (#590) — so don't conflate "the hint call is always
+//     allowed" with "the REST call it points to is always allowed".
 //   - tools/call for any other (unrecognized, or future) tool name: denied.
 //     This is fail-closed: nothing ties this switch to
 //     tasks/buildin/mcp/task.ts's TOOLS/dispatchTool list, so a future tool

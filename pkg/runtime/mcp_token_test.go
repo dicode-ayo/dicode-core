@@ -63,6 +63,27 @@ func TestMCPScopeFor(t *testing.T) {
 			}},
 			want: MCPScope{},
 		},
+		{
+			name: "TasksTest true is carried through",
+			spec: &task.Spec{Permissions: task.Permissions{
+				Dicode: &task.DicodePermissions{TasksTest: true},
+			}},
+			want: MCPScope{TestTasks: true},
+		},
+		{
+			name: "TasksTest unset yields TestTasks false",
+			spec: &task.Spec{Permissions: task.Permissions{
+				Dicode: &task.DicodePermissions{ListTasks: true},
+			}},
+			want: MCPScope{ListTasks: true, TestTasks: false},
+		},
+		{
+			name: "ListTasks, Tasks, and TasksTest together",
+			spec: &task.Spec{Permissions: task.Permissions{
+				Dicode: &task.DicodePermissions{ListTasks: true, Tasks: []string{"a"}, TasksTest: true},
+			}},
+			want: MCPScope{ListTasks: true, RunTaskIDs: []string{"a"}, TestTasks: true},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
