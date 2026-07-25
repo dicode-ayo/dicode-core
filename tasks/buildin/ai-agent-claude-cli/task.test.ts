@@ -324,7 +324,7 @@ JSON`,
 Deno.test("buildClaudeArgs: base args are always present", () => {
     assertEquals(
         buildClaudeArgs({ prompt: "hi" }).join(" "),
-        "-p hi --output-format json",
+        "-p hi --output-format json --disallowedTools Bash,Read,Write,Edit,NotebookEdit,WebFetch,WebSearch,Glob,Grep,Task,KillShell",
     );
 });
 
@@ -360,6 +360,35 @@ Deno.test("buildClaudeArgs: allowlists the dicode MCP tools when MCP is wired", 
     assertEquals(a[i + 1], "mcp__dicode");
     // No allowlist flag when MCP isn't mounted.
     assertEquals(buildClaudeArgs({ prompt: "hi" }).includes("--allowedTools"), false);
+});
+
+Deno.test("buildClaudeArgs: denies the dangerous built-in tools unconditionally (#560 fail-closed)", () => {
+    // The no-mcpConfigPath case (the actual fail-open bug this issue is
+    // about) is already covered by "base args are always present" above with
+    // an exact-string match on the whole --disallowedTools value — a
+    // stronger check than repeating it here. This test covers what that one
+    // doesn't: that the denylist survives, tool-for-tool, when MCP IS wired
+    // alongside --allowedTools.
+    const dangerous = [
+        "Bash", "Read", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch",
+        "Glob", "Grep", "Task", "KillShell",
+    ];
+
+    const withMcp = buildClaudeArgs({ prompt: "hi", mcpConfigPath: "/w/.claude/mcp.json" });
+    const iMcp = withMcp.indexOf("--disallowedTools");
+    assertEquals(iMcp >= 0, true);
+    // Exact membership (split on comma), not substring — "Edit" is a
+    // substring of "NotebookEdit", so a plain .includes() on the joined
+    // string wouldn't catch "Edit" going missing while "NotebookEdit" stays.
+    const denied = withMcp[iMcp + 1].split(",");
+    for (const tool of dangerous) {
+        assertEquals(denied.includes(tool), true);
+    }
+    // The MCP-wired path keeps its existing allowlist alongside the denylist —
+    // assert the actual value, not just presence of the flag.
+    const iAllowed = withMcp.indexOf("--allowedTools");
+    assertEquals(iAllowed >= 0, true);
+    assertEquals(withMcp[iAllowed + 1], "mcp__dicode");
 });
 
 Deno.test("passes --strict-mcp-config --mcp-config to claude when MCP is wired", async () => {

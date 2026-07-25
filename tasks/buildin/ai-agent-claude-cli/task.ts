@@ -64,6 +64,18 @@ function fail(error: string): { ok: false; error: string } {
     return { ok: false, error };
 }
 
+// Claude's built-in filesystem/exec/network/agent tools — never dicode's
+// mcp__dicode tools, which are the intended capability surface. Deny-listed
+// unconditionally below regardless of MCP wiring state; see the comment at
+// the call site. Covers every built-in tool that can read/write the host fs,
+// run subprocesses, reach the network, or spawn a sub-agent that could reach
+// any of those transitively (Task) — not just the most obviously dangerous
+// four (Bash/Read/Write/Edit).
+const DANGEROUS_BUILTIN_TOOLS = [
+    "Bash", "Read", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch",
+    "Glob", "Grep", "Task", "KillShell",
+];
+
 /**
  * Build the `claude` CLI argument vector. Exported for unit testing.
  *
@@ -93,6 +105,15 @@ export function buildClaudeArgs(opts: {
         // dicode's governed tool surface and NOT raw Bash/Write/Read host access.
         args.push("--allowedTools", "mcp__dicode");
     }
+    // Fail-closed (#560): deny the dangerous built-in tools unconditionally,
+    // not just when MCP happens to be wired. Before this, an unset
+    // mcpConfigPath (MCP disabled, or MCP wiring failed) pushed NO
+    // --allowedTools/--disallowedTools at all, so Claude silently fell back to
+    // its full default toolset — Bash/Read/Write/Edit/etc — with real host
+    // filesystem + subprocess-exec access as the daemon's OS user,
+    // non-interactively. This list must reach the CLI on every invocation,
+    // independent of whether the mcp__dicode allowlist above was added.
+    args.push("--disallowedTools", DANGEROUS_BUILTIN_TOOLS.join(","));
     return args;
 }
 
