@@ -54,6 +54,21 @@ type Gate struct {
 	admitted    map[string]task.Kinded
 	pendingHook func(k task.Kinded, hash string)
 	bootstrap   bool
+
+	// approvedFiles is the last-known-approved content snapshot per task ID
+	// (dir-relative path -> file content), refreshed every time Admit treats
+	// the current on-disk dir as approved content (the already-approved-hash
+	// fast path and every auto-approve path) and promoted from pendingFiles
+	// on a successful approve(). pendingFiles is the current pending (not
+	// yet approved) content snapshot, taken whenever Admit holds a task
+	// pending. Both are in-memory only — like pending and admitted above,
+	// they are rebuilt by re-admit on daemon restart, not persisted; a diff
+	// requested immediately after a restart, before the reconciler has
+	// re-admitted the task, has no baseline (Diff reports HasBaseline=false).
+	// Dir-less (inline) tasks never get an entry in either map (see
+	// taskDirOf) — nothing to snapshot.
+	approvedFiles map[string]map[string]string
+	pendingFiles  map[string]map[string]string
 }
 
 // pendingEntry captures the task (and the hash observed at decision time) so
@@ -71,13 +86,15 @@ func NewGate(policy Policy, lock *Lock, arm func(task.Kinded) error, log *zap.Lo
 		log = zap.NewNop()
 	}
 	return &Gate{
-		policy:   policy,
-		lock:     lock,
-		arm:      arm,
-		hashFn:   ContentHash,
-		log:      log,
-		pending:  map[string]pendingEntry{},
-		admitted: map[string]task.Kinded{},
+		policy:        policy,
+		lock:          lock,
+		arm:           arm,
+		hashFn:        ContentHash,
+		log:           log,
+		pending:       map[string]pendingEntry{},
+		admitted:      map[string]task.Kinded{},
+		approvedFiles: map[string]map[string]string{},
+		pendingFiles:  map[string]map[string]string{},
 	}
 }
 
@@ -159,6 +176,7 @@ func (g *Gate) Admit(k task.Kinded) (armed bool, err error) {
 	case g.lock.Approved(id, hash):
 		// Already approved at exactly this hash; keep the original record.
 		g.clearPending(id)
+		g.snapshotApproved(id, taskDirOf(k))
 		return true, g.arm(k)
 	case g.Bootstrapping():
 		// Adoption window: seed the current inventory as approved rather
@@ -170,14 +188,21 @@ func (g *Gate) Admit(k task.Kinded) (armed bool, err error) {
 		g.pending[id] = pendingEntry{kinded: k, hash: hash}
 		hook := g.pendingHook
 		g.mu.Unlock()
+		// Snapshot the current (new, not-yet-approved) dir at the same point
+		// the pending entry is recorded, so a later Diff has the exact
+		// content the operator is being asked to review.
+		g.snapshotPending(id, taskDirOf(k))
 		if hook != nil && (!was || prev.hash != hash) {
 			hook(k, hash)
 		}
 		return false, nil
 	}
 
-	// Auto-approve path (builtin / trusted / gate disabled): keep the lock
-	// current as the running inventory, then arm.
+	// Auto-approve path (builtin / trusted / gate disabled / bootstrap): keep
+	// the lock current as the running inventory, then arm. The current dir
+	// IS the approved content on this path, so refresh the baseline snapshot
+	// used by Diff — the cheapest place to keep it current without extra
+	// plumbing.
 	g.clearPending(id)
 	if hash != "" {
 		if err := g.lock.Record(id, hash, by); err != nil {
@@ -187,7 +212,60 @@ func (g *Gate) Admit(k task.Kinded) (armed bool, err error) {
 				zap.String("task", id), zap.Error(err))
 		}
 	}
+	g.snapshotApproved(id, taskDirOf(k))
 	return true, g.arm(k)
+}
+
+// taskDirOf returns k's on-disk task directory, mirroring the *task.Spec /
+// *task.PipelineTask type switch in ContentHash — those are the only two
+// task.Kinded implementations that carry a TaskDir. Returns "" for anything
+// else (dir-less inline taskset entries), which the snapshot helpers below
+// and Diff both treat as "nothing to snapshot / diff".
+func taskDirOf(k task.Kinded) string {
+	switch s := k.(type) {
+	case *task.Spec:
+		return s.TaskDir
+	case *task.PipelineTask:
+		return s.TaskDir
+	default:
+		return ""
+	}
+}
+
+// snapshotApproved refreshes approvedFiles[id] from dir's current on-disk
+// content. Called from every Admit path that treats the current dir as
+// already-approved content. A dir-less task (empty dir) is a no-op — there
+// is nothing to snapshot. Snapshot failures are logged, not fatal: Admit's
+// arm/lock decision must not be blocked by a diff-support snapshot.
+func (g *Gate) snapshotApproved(id, dir string) {
+	if dir == "" {
+		return
+	}
+	snap, err := snapshotDir(dir)
+	if err != nil {
+		g.log.Warn("approval: approved snapshot failed", zap.String("task", id), zap.Error(err))
+		return
+	}
+	g.mu.Lock()
+	g.approvedFiles[id] = snap
+	g.mu.Unlock()
+}
+
+// snapshotPending refreshes pendingFiles[id] from dir's current (new,
+// not-yet-approved) on-disk content. See snapshotApproved for the dir-less
+// / failure handling, which mirrors this.
+func (g *Gate) snapshotPending(id, dir string) {
+	if dir == "" {
+		return
+	}
+	snap, err := snapshotDir(dir)
+	if err != nil {
+		g.log.Warn("approval: pending snapshot failed", zap.String("task", id), zap.Error(err))
+		return
+	}
+	g.mu.Lock()
+	g.pendingFiles[id] = snap
+	g.mu.Unlock()
 }
 
 // Approve approves a pending task: records its observed hash in the lock and
@@ -230,10 +308,17 @@ func (g *Gate) approve(id, wantHash, by string) error {
 		return fmt.Errorf("arm %q: %w", id, err)
 	}
 	// Clear only the entry we approved: a concurrent Admit may have re-pended
-	// the task at a newer hash, and that newer version must stay held.
+	// the task at a newer hash, and that newer version must stay held. The
+	// same guard gates promoting pendingFiles -> approvedFiles: if a newer
+	// pend raced in, pendingFiles[id] now holds THAT (unapproved) content,
+	// not what was just approved, so it must not become the new baseline.
 	g.mu.Lock()
 	if cur, ok := g.pending[id]; ok && cur.hash == ent.hash {
 		delete(g.pending, id)
+		if pf, ok := g.pendingFiles[id]; ok {
+			g.approvedFiles[id] = pf
+			delete(g.pendingFiles, id)
+		}
 	}
 	g.mu.Unlock()
 	return nil
@@ -245,6 +330,8 @@ func (g *Gate) Forget(id string) {
 	g.clearPending(id)
 	g.mu.Lock()
 	delete(g.admitted, id)
+	delete(g.approvedFiles, id)
+	delete(g.pendingFiles, id)
 	g.mu.Unlock()
 	if err := g.lock.Remove(id); err != nil {
 		g.log.Warn("approval: lock remove failed",

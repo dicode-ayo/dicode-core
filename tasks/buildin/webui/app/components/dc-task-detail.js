@@ -30,6 +30,10 @@ class DcTaskDetail extends LitElement {
     _showStages:      { state: true },
     _expanded:        { state: true }, // Set<runID> — top-level rows with children currently expanded
     _children:        { state: true }, // Map<parentRunID, Run[]> — lazily-fetched child rows
+    _diffOpen:        { state: true }, // pending-approval diff panel expand/collapse
+    _diff:            { state: true }, // last-fetched GET /pending-diff body, or null
+    _diffError:       { state: true },
+    _diffLoading:     { state: true },
   };
 
   constructor() {
@@ -41,6 +45,7 @@ class DcTaskDetail extends LitElement {
     this._showStages = false;
     this._expanded = new Set();
     this._children = new Map();
+    this._diffOpen = false; this._diff = null; this._diffError = ''; this._diffLoading = false;
     this._editor = null;
     this._relayBase = '';
     this._offStarted = null; this._offFinished = null;
@@ -78,6 +83,7 @@ class DcTaskDetail extends LitElement {
     if (!this.taskid) return;
     this._task = null; this._runs = null; this._error = null;
     this._editorOpen = false; this._triggerOpen = false;
+    this._diffOpen = false; this._diff = null; this._diffError = ''; this._diffLoading = false;
     try {
       const [task, runs, base] = await Promise.all([
         get(`/api/tasks/${encodeURIComponent(this.taskid)}`),
@@ -129,6 +135,66 @@ class DcTaskDetail extends LitElement {
       await post(`/api/tasks/${encodeURIComponent(this.taskid)}/approve`);
       await this._load();
     } catch(e) { alert('Approve failed: ' + e.message); }
+  }
+
+  // _toggleDiff expands/collapses the "what changed" panel for a pending
+  // task, fetching it lazily on first expand (not on every render).
+  async _toggleDiff() {
+    this._diffOpen = !this._diffOpen;
+    if (this._diffOpen && !this._diff && !this._diffLoading) {
+      this._diffLoading = true;
+      this._diffError = '';
+      try {
+        this._diff = await get(`/api/tasks/${encodeURIComponent(this.taskid)}/pending-diff`);
+      } catch(e) {
+        this._diffError = e.message;
+      } finally {
+        this._diffLoading = false;
+      }
+    }
+  }
+
+  // _renderDiffLine splits one "+ "/"- "/"  " prefixed line of a FileDiff's
+  // UnifiedDiff (see pkg/approval/diff.go) into a colored span. A line
+  // matching none of those prefixes is the snapshotPlaceholder note
+  // (binary/too-large/uncaptured) and renders in muted italic.
+  _renderDiffLine(line) {
+    if (line.startsWith('+ ')) return html`<span style="display:block;background:rgba(63,185,80,0.15);color:#3fb950">${line.slice(2)}</span>`;
+    if (line.startsWith('- ')) return html`<span style="display:block;background:rgba(248,81,73,0.15);color:#f85149">${line.slice(2)}</span>`;
+    if (line.startsWith('  ')) return html`<span style="display:block;color:var(--muted)">${line.slice(2)}</span>`;
+    return html`<span style="display:block;color:var(--muted);font-style:italic">${line}</span>`;
+  }
+
+  _renderDiffPanel() {
+    if (this._diffLoading) return html`<div class="meta" style="margin-top:0.5rem">Loading diff…</div>`;
+    if (this._diffError) return html`<p style="color:#f85149;margin-top:0.5rem">Failed to load diff: ${this._diffError}</p>`;
+    if (!this._diff) return '';
+    const diff = this._diff;
+    const files = diff.files || [];
+    if (files.length === 0) {
+      return html`<p class="meta" style="margin-top:0.5rem">No file-level diff available for this task.</p>`;
+    }
+    const anySecurityRelevant = files.some(f => f.security_relevant);
+    return html`
+      <div class="card" style="margin-top:0.75rem;margin-bottom:var(--space-md)">
+        ${!diff.has_baseline ? html`
+          <div style="background:rgba(210,153,34,0.12);border:1px solid #d29922;color:#d29922;padding:0.5rem 0.75rem;border-radius:6px;margin-bottom:0.75rem;font-size:0.85rem">
+            No prior approved version is cached for this task (fresh daemon session) — the files below are shown as new content, not a diff against a known-good baseline.
+          </div>` : ''}
+        ${anySecurityRelevant ? html`
+          <div style="background:rgba(248,81,73,0.12);border:1px solid #f85149;color:#f85149;padding:0.5rem 0.75rem;border-radius:6px;margin-bottom:0.75rem;font-size:0.85rem">
+            &#9888; This change touches security-relevant fields (permissions, env, triggers, …). Review carefully before approving.
+          </div>` : ''}
+        ${files.map(f => html`
+          <div style="margin-bottom:1rem">
+            <div style="font-family:monospace;font-weight:600;margin-bottom:0.35rem;display:flex;align-items:center;gap:0.5rem">
+              <span>${f.path}</span>
+              <span style="font-size:0.7rem;padding:0.05rem 0.4rem;border-radius:3px;background:var(--bg-alt);color:var(--muted);text-transform:uppercase">${f.status}</span>
+              ${f.security_relevant ? html`<span style="font-size:0.7rem;padding:0.05rem 0.4rem;border-radius:3px;background:rgba(248,81,73,0.18);color:#f85149;border:1px solid rgba(248,81,73,0.45)">security-relevant</span>` : ''}
+            </div>
+            <pre style="background:var(--bg-alt);padding:0.6rem 0.75rem;border-radius:6px;overflow-x:auto;font-size:0.8rem;line-height:1.45;margin:0;white-space:pre">${(f.unified_diff || '').split('\n').filter(l => l !== '').map(l => this._renderDiffLine(l))}</pre>
+          </div>`)}
+      </div>`;
   }
 
   _openEditor() {
@@ -527,9 +593,11 @@ class DcTaskDetail extends LitElement {
         ${needsApproval ? html`<span title="This task is new or changed and its triggers are not armed until approved"
           style="padding:0 0.45rem;font-size:0.75rem;border-radius:3px;background:rgba(210,153,34,0.18);color:#d29922;border:1px solid rgba(210,153,34,0.45)">pending approval</span>` : ''}
         ${needsApproval ? html`<button class="btn" style="background:#d29922" @click=${() => this._approve()}>&#10003; Approve</button>` : ''}
+        ${needsApproval ? html`<button class="btn btn-sm secondary" @click=${() => this._toggleDiff()}>${this._diffOpen ? 'Hide diff' : 'View diff'}</button>` : ''}
         <button class="btn" @click=${() => this._run()}>&#9654; Run now</button>
         ${hasEditor ? html`<button class="btn" style="background:var(--muted)" @click=${() => this._openEditor()}>&#9998; Edit code</button>` : ''}
       </div>
+      ${needsApproval && this._diffOpen ? this._renderDiffPanel() : ''}
       ${task.description ? html`<div class="task-desc">${unsafeHTML(marked.parse(task.description))}</div>` : ''}
 
       <div class="card" style="margin-bottom:var(--space-md);display:flex;align-items:center;gap:0.75rem">

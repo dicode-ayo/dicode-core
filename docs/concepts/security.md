@@ -731,6 +731,102 @@ treats the file as tampered.
 
 ---
 
+## Pending-Change Diff (#604)
+
+Before this feature the operator approved a pending (content-changed) task
+**blind**: `dicode.lock` only ever stores a content hash, never file bytes, so
+by the time a task shows up pending, the working tree already holds the *new*
+content and there is no "before" snapshot on disk to diff against. `pkg/approval.Gate`
+now keeps an in-memory snapshot cache to close that gap, and the WebUI surfaces
+it wherever an operator can click Approve.
+
+### Snapshot cache
+
+`Gate` maintains two additional maps, guarded by the same mutex as `pending`:
+
+- `approvedFiles[taskID]` — the last-known-approved content snapshot (dir-relative
+  path → file text), refreshed whenever `Admit` treats the current on-disk dir as
+  already-approved content (the already-approved-hash fast path, and every
+  auto-approve path: builtin / trusted-source / trusted-task / gate-disabled /
+  bootstrap).
+- `pendingFiles[taskID]` — the current pending (not yet approved) content
+  snapshot, taken the moment a task is held pending. On a successful `Approve` /
+  `ApproveIfHash`, this is promoted to `approvedFiles[taskID]` and cleared —
+  becoming the new baseline for the *next* change.
+
+Each snapshot is built by `snapshotDir` (`pkg/approval/snapshot.go`), which walks
+the task directory the same way `task.Hash`'s walker does (skipping
+`node_modules` and `.git`). To keep this cheap enough to run on every `Admit` —
+including every ~30s reconcile poll — each snapshot is bounded: at most 256 KiB
+read per file and 200 files per task. A file over either cap, or one that fails
+UTF-8 validation (binary), gets a placeholder entry ("binary or file too large
+to diff") instead of its raw bytes, so the file still shows up as changed even
+when its content can't be rendered.
+
+**This cache is in-memory only** — like the gate's `pending`/`admitted` maps, it
+is rebuilt by re-`Admit` on daemon restart, not persisted to disk. A diff
+requested immediately after a fresh daemon start, before the reconciler has
+re-admitted a task at least once, has no cached baseline: `Diff.HasBaseline` is
+`false`, and the pending files are reported as `"added"` instead of `"modified"`
+so the UI still shows *something* useful — just without a real "before" to
+compare against. This is a deliberate, documented tradeoff, not a bug: solving
+restart-persistence for the diff cache is out of scope for this change.
+
+### What the diff shows
+
+`Gate.Diff(taskID)` returns a `Diff{ TaskID, HasBaseline, Files []FileDiff }`.
+Each `FileDiff` is `{ Path, Status, UnifiedDiff, SecurityRelevant }` — only
+changed files are included (`Status` is `"added"`, `"removed"`, or `"modified"`;
+unchanged files are omitted entirely). `UnifiedDiff` is a readable ` `/`-`/`+`
+prefixed rendering (line-mode diff via `github.com/sergi/go-diff/diffmatchpatch`),
+not byte-perfect POSIX unified diff format — just clear text for a human to
+scan before clicking Approve.
+
+Two surfaces expose it:
+
+- `GET /api/tasks/{id}/pending-diff` — same auth group as
+  `POST /api/tasks/{id}/approve` (session cookie or non-ephemeral API key).
+  `200` with the `Diff` body, `404` unknown task, `409` task not pending,
+  `503` gate not wired. The dashboard's task-detail pending-approval banner
+  (`dc-task-detail.js`) adds a "View diff" toggle next to Approve that fetches
+  this endpoint and renders each file's diff inline.
+- The tokenized `/approve/{token}` link page — no session, the token itself is
+  the auth boundary. It fetches the same `Diff` server-side and renders it into
+  the bare HTML/CSS confirm page (no JS, per that page's existing constraint),
+  with colored +/− lines and a "no baseline" notice when `HasBaseline` is false.
+
+Dir-less (inline taskset) tasks have no files to snapshot — `Diff` returns
+gracefully (`Files` empty, no error) rather than treating the absence of a
+task directory as a failure.
+
+### Security-relevant highlighting
+
+A `FileDiff` is flagged `SecurityRelevant: true` when an added or removed line
+in its `UnifiedDiff` touches one of the YAML keys folded into the approval
+gate's content hash (see `ContentHash`'s doc comment in `pkg/approval/gate.go`
+for the authoritative list this mirrors):
+
+`permissions`, `env`, `run`, `net`, `fs`, `sys`, `dicode`, `git_commit_push`,
+`webhook`, `webhook_auth`, `cron`, `manual`, `daemon`, `chain` — each matched
+only when immediately followed (after optional whitespace) by a colon, so a
+substring hit like `environment:` or `blockchain:` does not false-positive.
+
+Both the dashboard and the token-link confirm page show a highlighted warning
+banner ("This change touches security-relevant fields…") whenever any file in
+the diff is flagged, drawing the operator's eye to exactly the changes that
+could widen what the task can touch or how/whether it fires — permission
+grants, env var wiring, or a trigger rewire (e.g. a manual task quietly turned
+into an unauthenticated webhook) — without requiring them to read every line
+of every file.
+
+**Out of scope for this change:** `dicode task approve` (the CLI) does not
+show a diff — the issue explicitly marked this "ideally," not required, to
+keep the change's surface area small. The WebUI approve button, the
+task-detail pending banner, and the tokenized approve-link page are covered;
+a CLI diff view can follow later if wanted.
+
+---
+
 ## Database Schema Summary
 
 These tables are created in the SQLite migration in `pkg/db/sqlite.go`:
@@ -846,3 +942,4 @@ Top-level security blocks in `Config` (siblings of `server:`, not nested under i
 | Daemon crypto namespace isolated | `permissions.dicode.crypto: ["*"]` never grants access to daemon-private sub-keys (e.g. `dicode/run-inputs/v1`); these are listed in `daemonPrivateCryptoContexts` in `pkg/ipc/server.go` and denied before any grant check |
 | Replay retarget blocked | A task-scoped `dicode.runs.replay` call cannot redirect the replay at a different task ID — the target is pinned to the original run's task |
 | `dicode` permission overrides are exhaustive | `mergeDicodePerms` merges all `DicodePermissions` fields including `secrets_has` and `crypto`; added exhaustiveness test guards against future fields being silently dropped |
+| Pending-approval changes are reviewable, not blind | `Gate.Diff` (#604) surfaces a file-level diff of a pending task's changes — including a security-relevant highlight for permission/env/trigger edits — on both the dashboard's Approve button and the tokenized `/approve/{token}` link page before the operator confirms |
