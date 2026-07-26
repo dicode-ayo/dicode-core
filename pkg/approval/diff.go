@@ -64,8 +64,7 @@ var securityFieldPattern = regexp.MustCompile(
 // error if id is not currently pending.
 func (g *Gate) Diff(id string) (Diff, error) {
 	g.mu.Lock()
-	_, isPending := g.pending[id]
-	pendingSnap := g.pendingFiles[id]
+	ent, isPending := g.pending[id]
 	approvedSnap, hasBaseline := g.approvedFiles[id]
 	g.mu.Unlock()
 
@@ -73,12 +72,13 @@ func (g *Gate) Diff(id string) (Diff, error) {
 		return Diff{}, fmt.Errorf("task %q is not pending approval", id)
 	}
 
+	pendingSnap := ent.files
 	out := Diff{TaskID: id, HasBaseline: hasBaseline}
 
 	// pendingSnap is nil exactly when the task is dir-less (taskDirOf
-	// returned "" so snapshotPending never ran and the map key was never
-	// set) — an in-dir task always gets at least an empty, non-nil map from
-	// snapshotDir. Nothing to diff for an inline task.
+	// returned "" so the pending snapshot was never captured — see
+	// pendingEntry.files) — an in-dir task always gets at least an empty,
+	// non-nil map from snapshotDir. Nothing to diff for an inline task.
 	if pendingSnap == nil {
 		return out, nil
 	}

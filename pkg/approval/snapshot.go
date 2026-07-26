@@ -155,8 +155,8 @@ func snapshotDir(dir string) (map[string]string, error) {
 			continue
 		}
 		// Redact literal YAML "value:" scalars (task.EnvEntry.Value secrets)
-		// before the content ever lands in the map Gate.approvedFiles /
-		// pendingFiles hold and Gate.Diff renders — see redactValueLines.
+		// before the content ever lands in the maps Gate.approvedFiles and
+		// pendingEntry.files hold and Gate.Diff renders — see redactValueLines.
 		out[rel] = redactValueLines(string(data))
 	}
 	return out, nil
