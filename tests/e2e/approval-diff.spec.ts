@@ -105,7 +105,12 @@ test.describe('Approval pending-diff', () => {
       await navigateInSpa(page, `/tasks/${MANUAL_TASK_ID}`);
       await waitForTaskDetail(page);
 
-      await expect(page.locator('span', { hasText: 'pending approval' })).toBeVisible();
+      // Scope to the badge's own title attribute rather than a bare text
+      // match: the task-detail page also streams live daemon log lines (e.g.
+      // "... WARN  task held pending approval — tri…"), which contain
+      // "pending approval" as a substring and made a plain hasText locator
+      // resolve to multiple elements (a real strict-mode failure hit in CI).
+      await expect(page.locator('span[title="This task is new or changed and its triggers are not armed until approved"]')).toBeVisible();
       const viewDiffBtn = page.locator('button', { hasText: 'View diff' });
       await expect(viewDiffBtn).toBeVisible();
 

@@ -763,6 +763,26 @@ UTF-8 validation (binary), gets a placeholder entry ("binary or file too large
 to diff") instead of its raw bytes, so the file still shows up as changed even
 when its content can't be rendered.
 
+**Literal secret values are redacted before storage.** `task.EnvEntry.Value`
+(`pkg/task/spec.go`) lets a task's `permissions.env` block carry a literal
+secret value inline in `task.yaml`, as opposed to `Secret` (a secrets-store key
+*name* reference). `snapshotDir` runs every captured text file through
+`redactValueLines`, which blanks the scalar half of any line matching a YAML
+`value:` mapping entry (`^([ \t]*(?:-[ \t]*)?"?value"?[ \t]*:)[ \t]*(.*)$`,
+multiline) to the same `<redacted>` placeholder (`redactedEnvValue`) that
+`ContentHash`'s `sanitizePermissions` already uses for the content hash — see
+that doc comment in `pkg/approval/gate.go` for why a literal env value must
+never appear in a low-entropy, offline-attackable form. The `key:` prefix and
+line structure are kept intact, so a diff still shows *that* the field
+changed, never *what* it changed to/from. This happens once, at snapshot read
+time — `Gate.approvedFiles` / `pendingFiles` never hold the un-redacted bytes,
+so the literal cannot reach `Gate.Diff`'s output on any surface (the REST
+endpoint, the dashboard panel, or the unauthenticated `/approve/{token}`
+confirm page). The redaction is deliberately generic — any YAML `value:` line
+in any snapshotted file, not only ones provably inside `permissions.env` —
+since the snapshot has no field-path-aware YAML parse and erring toward
+over-redaction is the right tradeoff for a security fix.
+
 **This cache is in-memory only** — like the gate's `pending`/`admitted` maps, it
 is rebuilt by re-`Admit` on daemon restart, not persisted to disk. A diff
 requested immediately after a fresh daemon start, before the reconciler has

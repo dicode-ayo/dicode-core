@@ -4,6 +4,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"unicode/utf8"
 )
@@ -39,6 +40,40 @@ var snapshotHeavyDirs = map[string]bool{
 	".git":         true,
 }
 
+// valueLinePattern matches a YAML mapping entry named exactly "value" — e.g.
+// `  value: "sk-live-secret"` or `- value: secret` — capturing the key
+// portion (leading indentation, optional list-item dash, optional quotes
+// around the key name, and the colon) in group 1 and the scalar that follows
+// in group 2. See redactValueLines for why this exists.
+var valueLinePattern = regexp.MustCompile(`(?m)^([ \t]*(?:-[ \t]*)?"?value"?[ \t]*:)[ \t]*(.*)$`)
+
+// redactValueLines blanks the scalar portion of every YAML "value:" line in
+// content, replacing it with redactedEnvValue while keeping the "key:"
+// prefix and line structure intact — so a diff still shows *that* the field
+// changed, never *what* it changed to/from.
+//
+// This exists because task.EnvEntry.Value (pkg/task/spec.go) lets a task's
+// permissions.env block carry a literal secret value inline in task.yaml (as
+// opposed to Secret, a secrets-store key name reference). ContentHash
+// (gate.go's sanitizePermissions/redactedEnvValue) already keeps that literal
+// out of the committable dicode.lock; snapshotDir must keep it out of the
+// pending-change diff surface (REST endpoint, WebUI panel, and the
+// unauthenticated /approve/{token} confirm page) the same way — reusing the
+// same redactedEnvValue placeholder for consistency.
+//
+// Deliberately generic: this redacts any line that looks like a YAML
+// "value:" mapping entry in any snapshotted file, not just ones provably
+// inside permissions.env — a snapshot has no field-path-aware YAML parse, and
+// erring toward over-redaction is the correct tradeoff for a security fix. As
+// of this writing task.Spec's YAML schema (pkg/task/spec.go) has exactly one
+// top-level "value" key — EnvEntry.Value — so this should not blank any other
+// legitimate field in a task.yaml; a non-YAML script file containing a
+// literal "value:" line would still get blanked, but that false-positive
+// blast radius is negligible next to the alternative of leaking a secret.
+func redactValueLines(content string) string {
+	return valueLinePattern.ReplaceAllString(content, "$1 "+redactedEnvValue)
+}
+
 // snapshotDir walks dir the same way task/hash.go's Hash walker does (same
 // heavyDirs skip list, same fs.DirEntry.Info()-based regular-file
 // classification) and returns a map of dir-relative slash path to file
@@ -55,6 +90,14 @@ var snapshotHeavyDirs = map[string]bool{
 // UTF-8 text (binary), is stored as snapshotPlaceholder instead of its raw
 // bytes — so the map's key set still reflects every observed file even
 // though not every value is diffable text.
+//
+// Text file content is passed through redactValueLines before being stored:
+// any literal YAML "value:" scalar (e.g. a permissions.env literal secret,
+// task.EnvEntry.Value) is blanked to redactedEnvValue right here, at read
+// time — never held in the map, never reaching Gate.Diff's output on any
+// surface. This is the pending-change-diff analog of gate.go's
+// sanitizePermissions/redactedEnvValue, which does the same for the content
+// hash.
 //
 // A missing dir returns an empty map (no error) — callers may race task
 // removal, matching Hash's behavior for the same case. Symlinks, sockets,
@@ -111,7 +154,10 @@ func snapshotDir(dir string) (map[string]string, error) {
 			out[rel] = snapshotPlaceholder
 			continue
 		}
-		out[rel] = string(data)
+		// Redact literal YAML "value:" scalars (task.EnvEntry.Value secrets)
+		// before the content ever lands in the map Gate.approvedFiles /
+		// pendingFiles hold and Gate.Diff renders — see redactValueLines.
+		out[rel] = redactValueLines(string(data))
 	}
 	return out, nil
 }
