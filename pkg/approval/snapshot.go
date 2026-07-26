@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 	"unicode/utf8"
 )
 
@@ -43,14 +44,34 @@ var snapshotHeavyDirs = map[string]bool{
 // valueLinePattern matches a YAML mapping entry named exactly "value" — e.g.
 // `  value: "sk-live-secret"` or `- value: secret` — capturing the key
 // portion (leading indentation, optional list-item dash, optional quotes
-// around the key name, and the colon) in group 1 and the scalar that follows
-// in group 2. See redactValueLines for why this exists.
+// around the key name, and the colon) in group 1 and the scalar (or, per
+// blockScalarHeaderPattern below, block-scalar header) that follows in
+// group 2. See redactValueLines for why this exists.
 var valueLinePattern = regexp.MustCompile(`(?m)^([ \t]*(?:-[ \t]*)?"?value"?[ \t]*:)[ \t]*(.*)$`)
 
-// redactValueLines blanks the scalar portion of every YAML "value:" line in
-// content, replacing it with redactedEnvValue while keeping the "key:"
-// prefix and line structure intact — so a diff still shows *that* the field
-// changed, never *what* it changed to/from.
+// valueKeyIndentPattern captures just the leading-whitespace-plus-optional-
+// list-dash portion of a matched "value:" line (i.e. valueLinePattern's group
+// 1 minus the key name and colon) so redactValueLines can measure the
+// "value:" key's own column for the block-scalar case, without changing
+// valueLinePattern itself (its exact shape is documented and relied on
+// elsewhere — see docs/concepts/security.md's Pending-Change Diff section).
+var valueKeyIndentPattern = regexp.MustCompile(`^[ \t]*(?:-[ \t]*)?`)
+
+// blockScalarHeaderPattern matches a YAML block-scalar header: a literal
+// (`|`) or folded (`>`) indicator, optionally followed by a chomping
+// indicator (`-`/`+`), an explicit indentation indicator (a single digit),
+// in either order, then optional trailing whitespace and/or a comment. This
+// intentionally doesn't distinguish which of the two optional indicators
+// came first (YAML permits either order) or validate the digit range — a
+// loose match here only ever leads to *more* redaction, never less.
+var blockScalarHeaderPattern = regexp.MustCompile(`^[|>][+\-0-9]{0,2}[ \t]*(#.*)?$`)
+
+// redactValueLines blanks every YAML "value:" line in content — both the
+// inline-scalar form (`value: "secret"` on one line) and the block-scalar
+// form (`value: |` or `value: >`, whose actual content lives on the
+// following, more-indented lines) — replacing the secret material with
+// redactedEnvValue while keeping enough structure intact that a diff still
+// shows *that* the field changed, never *what* it changed to/from.
 //
 // This exists because task.EnvEntry.Value (pkg/task/spec.go) lets a task's
 // permissions.env block carry a literal secret value inline in task.yaml (as
@@ -70,8 +91,79 @@ var valueLinePattern = regexp.MustCompile(`(?m)^([ \t]*(?:-[ \t]*)?"?value"?[ \t
 // legitimate field in a task.yaml; a non-YAML script file containing a
 // literal "value:" line would still get blanked, but that false-positive
 // blast radius is negligible next to the alternative of leaking a secret.
+//
+// Block-scalar handling is a heuristic, not a YAML parse: when a matched
+// "value:" line's scalar portion is itself a block-scalar header
+// (blockScalarHeaderPattern), the header line is preserved verbatim (so the
+// diff still shows the field is present/changed) and every following line
+// that is either blank or indented strictly more than the "value:" key's own
+// column (valueKeyIndentPattern) is treated as swallowed content — the block
+// ends at the first non-blank line at or below that indentation, or at
+// end-of-file, matching YAML's indentation-based block-scalar termination
+// rule closely enough for a defense-in-depth text scrub. The swallowed run is
+// collapsed into a single redactedEnvValue placeholder line rather than
+// preserving the original line count exactly — simpler to get right, and the
+// diff already communicates "this block changed" via the preserved header
+// line and surrounding hunk. Known imprecisions, both of which only ever
+// over-redact: an explicit indentation indicator (e.g. "|2") is not decoded
+// to find the "true" content column, and a trailing run of blank lines with
+// no further content after them is swallowed even though strict YAML would
+// attribute at most one trailing newline to the scalar.
 func redactValueLines(content string) string {
-	return valueLinePattern.ReplaceAllString(content, "$1 "+redactedEnvValue)
+	lines := strings.Split(content, "\n")
+	for i := 0; i < len(lines); i++ {
+		m := valueLinePattern.FindStringSubmatch(lines[i])
+		if m == nil {
+			continue
+		}
+		scalar := strings.TrimRight(m[2], " \t\r")
+		if !blockScalarHeaderPattern.MatchString(scalar) {
+			// Inline scalar on the same line: blank just the value,
+			// keep the "key:" prefix (existing, pre-block-scalar-fix
+			// behavior).
+			lines[i] = m[1] + " " + redactedEnvValue
+			continue
+		}
+		// Block scalar: keep the header line, swallow the indented
+		// content that follows into one placeholder line.
+		keyIndent := len(valueKeyIndentPattern.FindString(lines[i]))
+		j := i + 1
+		swallowedAny := false
+		for j < len(lines) {
+			if strings.TrimSpace(lines[j]) == "" {
+				swallowedAny = true
+				j++
+				continue
+			}
+			if leadingIndent(lines[j]) > keyIndent {
+				swallowedAny = true
+				j++
+				continue
+			}
+			break
+		}
+		if swallowedAny {
+			rest := append([]string{redactedEnvValue}, lines[j:]...)
+			lines = append(lines[:i+1], rest...)
+		}
+		// i is left at the header line; the loop's i++ resumes scanning
+		// at the placeholder (which cannot itself match valueLinePattern)
+		// or, if nothing was swallowed, at the very next line.
+	}
+	return strings.Join(lines, "\n")
+}
+
+// leadingIndent returns the number of leading space/tab characters in s —
+// used to compare a line's indentation column against a "value:" block
+// scalar's key column. Byte-counted, not display-width-aware (a mix of tabs
+// and spaces could in principle be measured differently); acceptable for
+// this heuristic, same tradeoff as the rest of redactValueLines.
+func leadingIndent(s string) int {
+	n := 0
+	for n < len(s) && (s[n] == ' ' || s[n] == '\t') {
+		n++
+	}
+	return n
 }
 
 // snapshotDir walks dir the same way task/hash.go's Hash walker does (same

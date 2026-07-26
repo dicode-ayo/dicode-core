@@ -34,9 +34,12 @@ type FileDiff struct {
 	Status string `json:"status"`
 	// UnifiedDiff is a human-readable rendering of the change, "-"/"+"/" "
 	// prefixed lines (not byte-perfect POSIX unified diff format — just
-	// clear and readable). For a file whose content wasn't captured by the
-	// snapshot (binary, too large, or beyond the per-task file cap — see
-	// snapshotPlaceholder) this instead carries that placeholder note.
+	// clear and readable). This instead carries the snapshotPlaceholder
+	// note verbatim only when NEITHER side's content was captured by the
+	// snapshot (both binary/too-large/beyond-the-per-task-file-cap — see
+	// snapshotPlaceholder); when only one side is a placeholder, the other
+	// side's real content is still rendered, as a full add/remove against
+	// an empty counterpart (see unifiedDiffText).
 	UnifiedDiff string `json:"unified_diff"`
 	// SecurityRelevant is true when an added or removed line in the diff
 	// touches one of the YAML keys matched by securityFieldPattern.
@@ -130,12 +133,23 @@ func (g *Gate) Diff(id string) (Diff, error) {
 // readability). Not byte-perfect POSIX unified diff format, just clear text
 // for a human operator to review.
 //
-// Either side being snapshotPlaceholder (binary / too large / uncaptured)
+// Both sides being snapshotPlaceholder (binary / too large / uncaptured)
 // short-circuits to the placeholder text itself: there is no meaningful line
-// diff to render against content that was never read.
+// diff to render when neither side was ever read. When only one side is a
+// placeholder, that side is treated as empty and the diff still runs, so the
+// available side's real content (e.g. pending content that has since shrunk
+// under the snapshot cap, even though the approved baseline was captured as
+// a placeholder) is rendered as a full add/remove rather than being hidden
+// behind the placeholder note.
 func unifiedDiffText(oldText, newText string) string {
-	if oldText == snapshotPlaceholder || newText == snapshotPlaceholder {
+	if oldText == snapshotPlaceholder && newText == snapshotPlaceholder {
 		return snapshotPlaceholder
+	}
+	if oldText == snapshotPlaceholder {
+		oldText = ""
+	}
+	if newText == snapshotPlaceholder {
+		newText = ""
 	}
 
 	dmp := diffmatchpatch.New()

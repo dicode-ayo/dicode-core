@@ -742,17 +742,25 @@ it wherever an operator can click Approve.
 
 ### Snapshot cache
 
-`Gate` maintains two additional maps, guarded by the same mutex as `pending`:
+`Gate` maintains one additional map, guarded by the same mutex as `pending`:
 
 - `approvedFiles[taskID]` — the last-known-approved content snapshot (dir-relative
   path → file text), refreshed whenever `Admit` treats the current on-disk dir as
   already-approved content (the already-approved-hash fast path, and every
   auto-approve path: builtin / trusted-source / trusted-task / gate-disabled /
   bootstrap).
-- `pendingFiles[taskID]` — the current pending (not yet approved) content
-  snapshot, taken the moment a task is held pending. On a successful `Approve` /
-  `ApproveIfHash`, this is promoted to `approvedFiles[taskID]` and cleared —
-  becoming the new baseline for the *next* change.
+
+The current pending (not yet approved) content snapshot lives alongside the
+task and its observed hash on `pendingEntry.files`, itself a value in the
+existing `pending[taskID]` map — not a standalone map. Keeping hash and files
+on the same struct, written together in one critical section, means a reader
+can never observe a hash paired with a snapshot from a different generation
+(the fix for a race where `approve()` could promote a snapshot that was stale
+relative to the pending hash it was being matched against). On a successful
+`Approve` / `ApproveIfHash`, `pendingEntry.files` is promoted to
+`approvedFiles[taskID]` and the pending entry is deleted — becoming the new
+baseline for the *next* change. `Forget` (task removal) clears both the
+pending entry and `approvedFiles[taskID]`.
 
 Each snapshot is built by `snapshotDir` (`pkg/approval/snapshot.go`), which walks
 the task directory the same way `task.Hash`'s walker does (skipping

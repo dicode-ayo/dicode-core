@@ -249,6 +249,72 @@ func TestDiffRedactsLiteralEnvSecretValue(t *testing.T) {
 	}
 }
 
+// TestDiffRedactsBlockScalarEnvSecretValue is the regression for the
+// follow-up CodeRabbit finding on #636: TestDiffRedactsLiteralEnvSecretValue
+// above only covers the inline-scalar form (`value: "secret"` on one line).
+// A task.yaml author using YAML block-scalar syntax (`value: |`) for a
+// permissions.env literal secret has the actual secret content on the
+// following, more-indented lines — which redactValueLines's original
+// inline-only pattern did not touch at all, leaking it unredacted into the
+// diff. This asserts neither block-scalar content line reaches the diff.
+func TestDiffRedactsBlockScalarEnvSecretValue(t *testing.T) {
+	g, _, _ := newTestGate(t, enabledPolicy())
+	spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "x")
+	yamlPath := filepath.Join(spec.TaskDir, "task.yaml")
+
+	if armed, err := g.Admit(spec); err != nil || armed {
+		t.Fatalf("Admit = (%v, %v), want pending", armed, err)
+	}
+	if err := g.Approve("repo/deploy"); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+
+	const secret1 = "super-secret-line-1"
+	const secret2 = "super-secret-line-2"
+	updated := "name: repo/deploy\n" +
+		"permissions:\n" +
+		"  env:\n" +
+		"    - name: API_KEY\n" +
+		"      value: |\n" +
+		"        " + secret1 + "\n" +
+		"        " + secret2 + "\n"
+	if err := os.WriteFile(yamlPath, []byte(updated), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if armed, err := g.Admit(spec); err != nil || armed {
+		t.Fatalf("Admit changed = (%v, %v), want pending", armed, err)
+	}
+
+	d, err := g.Diff("repo/deploy")
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+	var yamlDiff *FileDiff
+	for i := range d.Files {
+		if d.Files[i].Path == "task.yaml" {
+			yamlDiff = &d.Files[i]
+		}
+	}
+	if yamlDiff == nil {
+		t.Fatalf("no task.yaml entry in Files: %+v", d.Files)
+	}
+	if strings.Contains(yamlDiff.UnifiedDiff, secret1) {
+		t.Errorf("unified diff must not contain the literal block-scalar secret line 1: %q", yamlDiff.UnifiedDiff)
+	}
+	if strings.Contains(yamlDiff.UnifiedDiff, secret2) {
+		t.Errorf("unified diff must not contain the literal block-scalar secret line 2: %q", yamlDiff.UnifiedDiff)
+	}
+	if !strings.Contains(yamlDiff.UnifiedDiff, redactedEnvValue) {
+		t.Errorf("unified diff must show %q in place of the block-scalar secret: %q", redactedEnvValue, yamlDiff.UnifiedDiff)
+	}
+	if !strings.Contains(yamlDiff.UnifiedDiff, "value: |") {
+		t.Errorf("unified diff must still show the block-scalar header line so the field's presence/change is visible: %q", yamlDiff.UnifiedDiff)
+	}
+	if !yamlDiff.SecurityRelevant {
+		t.Errorf("task.yaml diff with a permissions.env change must still be SecurityRelevant: %q", yamlDiff.UnifiedDiff)
+	}
+}
+
 // TestDiffErrorsOnNonPendingOrUnknownTask covers Diff's error path: an
 // approved (non-pending) task and an entirely unknown task ID both fail.
 func TestDiffErrorsOnNonPendingOrUnknownTask(t *testing.T) {
@@ -398,5 +464,43 @@ func TestApproveIfHashRejectsStaleTokenAfterRepend(t *testing.T) {
 	}
 	if got := arm.armedIDs(); len(got) != 1 || got[0] != "repo/deploy" {
 		t.Fatalf("armed after legitimate H2 approval = %v", got)
+	}
+}
+
+// TestUnifiedDiffTextOneSidedPlaceholderShowsRealContent is the regression
+// for a CodeRabbit finding on #636: unifiedDiffText used to short-circuit to
+// the snapshotPlaceholder note whenever EITHER side was a placeholder, which
+// hid perfectly available, readable content on the non-placeholder side
+// (e.g. the approved baseline was captured as a placeholder because the file
+// used to be too large/binary, but the current pending content has since
+// shrunk into fully-captured text). Only BOTH sides being placeholders
+// should short-circuit; a single placeholder side must be treated as empty
+// so the real side still renders as a full add/remove.
+func TestUnifiedDiffTextOneSidedPlaceholderShowsRealContent(t *testing.T) {
+	const real = "hello\nworld\n"
+
+	if got := unifiedDiffText(snapshotPlaceholder, snapshotPlaceholder); got != snapshotPlaceholder {
+		t.Errorf("both sides placeholder: got %q, want the placeholder note verbatim", got)
+	}
+
+	// Old (approved) side is a placeholder, new (pending) side has shrunk
+	// into real, captured content: the real content must be visible, not
+	// hidden behind the placeholder note.
+	got := unifiedDiffText(snapshotPlaceholder, real)
+	if strings.Contains(got, snapshotPlaceholder) {
+		t.Errorf("old-side-only placeholder must not short-circuit to the placeholder note: %q", got)
+	}
+	if !strings.Contains(got, "hello") || !strings.Contains(got, "world") {
+		t.Errorf("old-side-only placeholder must still render the new side's real content: %q", got)
+	}
+
+	// Symmetric case: new side is the placeholder, old side has real
+	// content that must still show as a removal.
+	got = unifiedDiffText(real, snapshotPlaceholder)
+	if strings.Contains(got, snapshotPlaceholder) {
+		t.Errorf("new-side-only placeholder must not short-circuit to the placeholder note: %q", got)
+	}
+	if !strings.Contains(got, "hello") || !strings.Contains(got, "world") {
+		t.Errorf("new-side-only placeholder must still render the old side's real content: %q", got)
 	}
 }

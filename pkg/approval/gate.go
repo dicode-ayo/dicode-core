@@ -205,7 +205,27 @@ func (g *Gate) Admit(k task.Kinded) (armed bool, err error) {
 			// I/O stays outside the lock, same as before. Snapshot the
 			// current (new, not-yet-approved) dir so a later Diff has the
 			// exact content the operator is being asked to review.
-			files = g.takeSnapshot(id, taskDirOf(k), "pending")
+			//
+			// Two distinct "no new snapshot" cases must not be conflated:
+			// a genuinely dir-less task (taskDirOf returns "" — an inline
+			// taskset entry with nothing to ever snapshot) correctly gets
+			// files == nil, matching pendingEntry.files' nil-means-
+			// nothing-captured convention. But a dir-backed task whose
+			// takeSnapshot call merely failed (transient I/O error,
+			// already logged by takeSnapshot) must NOT fall through to
+			// nil here: the task really is pending on new, security-
+			// relevant content, and discarding prev.files would make
+			// Gate.Diff silently report an empty diff for it instead of
+			// showing (slightly stale) real content. So: only overwrite
+			// files with the new snapshot when the dir is non-empty AND
+			// the snapshot actually succeeded; otherwise keep whatever
+			// files already held (nil for dir-less, prev.files as a
+			// best-effort fallback for a snapshot failure).
+			if dir := taskDirOf(k); dir == "" {
+				files = nil
+			} else if snap := g.takeSnapshot(id, dir, "pending"); snap != nil {
+				files = snap
+			}
 		}
 
 		g.mu.Lock()
