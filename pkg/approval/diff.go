@@ -216,6 +216,7 @@ func (g *Gate) Diff(id string) (Diff, error) {
 	g.mu.Lock()
 	ent, isPending := g.pending[id]
 	approvedSnap, hasBaseline := g.approvedFiles[id]
+	approvedResolved, hadResolved := g.approvedResolved[id]
 	g.mu.Unlock()
 
 	if !isPending {
@@ -225,11 +226,16 @@ func (g *Gate) Diff(id string) (Diff, error) {
 	pendingSnap := ent.files
 	out := Diff{TaskID: id, HasBaseline: hasBaseline}
 
-	// pendingSnap is nil exactly when the task is dir-less (taskDirOf
-	// returned "" so the pending snapshot was never captured — see
-	// pendingEntry.files) — an in-dir task always gets at least an empty,
-	// non-nil map from snapshotDir. Nothing to diff for an inline task.
+	// No pending snapshot: either the task is dir-less (an inline taskset
+	// entry, taskDirOf == "") or the snapshot failed on this task's first
+	// pend, when there is no earlier files map to fall back on. Either way
+	// the gate is holding the task on a hash change this surface cannot
+	// account for at all, which is the one thing it must never render as
+	// "nothing changed" — returning early here previously skipped the
+	// completeness check below and produced exactly that.
 	if pendingSnap == nil {
+		out.Incomplete = true
+		out.IncompleteReason = "No file snapshot is available for this task, so nothing about the change can be shown here. Review the change at its source before approving."
 		return out, nil
 	}
 
@@ -290,15 +296,22 @@ func (g *Gate) Diff(id string) (Diff, error) {
 		out.Files = append(out.Files, fd)
 	}
 
-	// The gate held this task because its content hash changed, and that hash
-	// covers more than these files (resolved permissions, runtime and trigger
-	// shape, which taskset overrides can rewrite from outside the task dir).
-	// Finding nothing here therefore does not mean nothing changed — it means
-	// the change is somewhere this surface cannot see.
-	if len(out.Files) == 0 {
+	// The content hash covers more than these files: the resolved permissions,
+	// runtime and trigger shape, which taskset overrides rewrite from outside
+	// the task directory entirely. Compare those directly rather than
+	// inferring from an empty file list — a commit that edits a file AND
+	// widens permissions via an override produces a perfectly ordinary-looking
+	// file diff, and the override half would otherwise never be mentioned.
+	outsideChanged := hadResolved && ent.resolved != "" && approvedResolved != ent.resolved
+
+	switch {
+	case outsideChanged:
 		out.Incomplete = true
-		out.IncompleteReason = "The task's own files are unchanged, so this task was re-held by something outside its directory — most likely taskset overrides to its permissions, runtime or trigger. That cannot be shown here. Review the source change (e.g. git log for the taskset) before approving."
-	} else if out.Incomplete {
+		out.IncompleteReason = "This task's resolved permissions, runtime or trigger changed — a taskset override outside the task directory. That change is not in the file diff below and cannot be shown here. Review the taskset source before approving."
+	case len(out.Files) == 0:
+		out.Incomplete = true
+		out.IncompleteReason = "The task's own files are unchanged, so this task was re-held by something outside its directory — a taskset override to its permissions, runtime or trigger, or a hash_include target elsewhere in the source. That cannot be shown here. Review the source change before approving."
+	case out.Incomplete:
 		out.IncompleteReason = "Part of this change cannot be displayed: one or more files differ only inside redacted or uncaptured content. Review those files at the source before approving."
 	}
 	return out, nil

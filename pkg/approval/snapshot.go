@@ -77,13 +77,14 @@ var snapshotHeavyDirs = map[string]bool{
 	".git":         true,
 }
 
-// valueLinePattern matches a YAML mapping entry named exactly "value" or
-// "default" — e.g. `  value: "sk-live-secret"` or `- default: secret` —
+// valueLinePattern matches a YAML mapping entry naming a field that can carry
+// an inline secret — "value", "default" or "webhook_secret" — e.g.
+// `  value: "sk-live-secret"` or `- default: secret` —
 // capturing the key portion (leading indentation, optional list-item dash,
 // optional quotes around the key name, and the colon) in group 1 and the
 // scalar (or, per blockScalarHeaderPattern below, block-scalar header) that
 // follows in group 2. See redactValueLines for why this exists.
-var valueLinePattern = regexp.MustCompile(`(?m)^([ \t]*(?:-[ \t]*)?"?(?:value|default)"?[ \t]*:)[ \t]*(.*)$`)
+var valueLinePattern = regexp.MustCompile(`(?m)^([ \t]*(?:-[ \t]*)?"?(?:value|default|webhook_secret)"?[ \t]*:)[ \t]*(.*)$`)
 
 // valueKeyIndentPattern captures just the leading-whitespace-plus-optional-
 // list-dash portion of a matched "value:" line (i.e. valueLinePattern's group
@@ -422,10 +423,17 @@ func redactSecrets(content string) string {
 	return out
 }
 
-// yamlSecretScalars returns every scalar bound to a `value` or `default` key
-// anywhere in content, across all documents. Key matching is
-// case-insensitive: yaml.v3 field binding is, so `Value:` reaches
+// yamlSecretScalars returns every scalar bound to a `value`, `default` or
+// `webhook_secret` key anywhere in content, across all documents. Key matching
+// is case-insensitive: yaml.v3 field binding is, so `Value:` reaches
 // EnvEntry.Value just as `value:` does.
+//
+// webhook_secret is the HMAC key authenticating inbound webhook requests
+// (task.TriggerSpec.WebhookSecret). ContentHash already strips it so it never
+// reaches the committable lock; without the same treatment here an inline
+// literal rendered verbatim on the session-less /approve/{token} page, handing
+// anyone who saw an approve link the ability to forge authenticated triggers
+// for that task.
 func yamlSecretScalars(content string) []string {
 	var found []string
 	dec := yaml.NewDecoder(strings.NewReader(content))
@@ -447,7 +455,7 @@ func collectSecretScalars(n *yaml.Node, out *[]string) {
 		for i := 0; i+1 < len(n.Content); i += 2 {
 			k, v := n.Content[i], n.Content[i+1]
 			switch strings.ToLower(k.Value) {
-			case "value", "default":
+			case "value", "default", "webhook_secret":
 				if v.Kind == yaml.ScalarNode && v.Value != "" {
 					*out = append(*out, v.Value)
 				}

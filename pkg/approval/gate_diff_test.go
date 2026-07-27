@@ -955,3 +955,84 @@ func TestDiffIncompleteWhenOnlyOutsideTaskDir(t *testing.T) {
 		t.Fatal("a pending task with no file changes must report Incomplete with a reason, not an empty all-clear")
 	}
 }
+
+// TestDiffFlagsOutOfDirChangeAlongsideFileChange covers a change that spans
+// both sides of the snapshot's horizon: an ordinary file edit plus a taskset
+// override widening permissions. The file edit renders normally, so an
+// empty-Files check cannot notice the override half — the operator would see
+// a plausible cosmetic diff and no mention of the widening at all.
+func TestDiffFlagsOutOfDirChangeAlongsideFileChange(t *testing.T) {
+	g, _, _ := newTestGate(t, enabledPolicy())
+	root := t.TempDir()
+	spec := writeTaskDir(t, root, "repo/combo", "VERSION_A\n")
+	if _, err := g.Admit(spec); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Approve("repo/combo"); err != nil {
+		t.Fatal(err)
+	}
+
+	// One commit: cosmetic file edit AND an out-of-dir permissions widening.
+	if err := os.WriteFile(filepath.Join(spec.TaskDir, "task.js"), []byte("VERSION_B\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	widened := &task.Spec{ID: "repo/combo", TaskDir: spec.TaskDir,
+		Permissions: task.Permissions{Net: []string{"*"}}}
+	if _, err := g.Admit(widened); err != nil {
+		t.Fatal(err)
+	}
+
+	d, err := g.Diff("repo/combo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Files) == 0 {
+		t.Fatal("expected the file edit to render; this test is about the override being missed alongside it")
+	}
+	if !d.Incomplete {
+		t.Error("a permissions widening outside the task dir must mark the diff incomplete even when files also changed")
+	}
+	if !strings.Contains(d.IncompleteReason, "outside the task directory") {
+		t.Errorf("reason should name the out-of-dir change, got: %q", d.IncompleteReason)
+	}
+}
+
+// TestDiffIncompleteWhenNoPendingSnapshot covers the early return for a task
+// with no pending snapshot (dir-less, or a snapshot failure on first pend).
+// The gate is holding it on a hash change this surface cannot account for at
+// all, which must never render as an empty all-clear.
+func TestDiffIncompleteWhenNoPendingSnapshot(t *testing.T) {
+	g, _, _ := newTestGate(t, enabledPolicy())
+	inline := &task.Spec{ID: "repo/inline"} // no TaskDir
+	if _, err := g.Admit(inline); err != nil {
+		t.Fatal(err)
+	}
+	d, err := g.Diff("repo/inline")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Files) != 0 {
+		t.Fatalf("expected no files for a dir-less task, got %+v", d.Files)
+	}
+	if !d.Incomplete || d.IncompleteReason == "" {
+		t.Fatal("a pending task with no snapshot must report Incomplete with a reason")
+	}
+}
+
+// TestRedactSecretsCoversWebhookSecret pins the inline HMAC key out of every
+// diff surface. trigger.webhook_secret authenticates inbound webhook requests;
+// ContentHash already strips it so it never reaches the committable lock, and
+// the diff — which includes the session-less /approve/{token} page — must not
+// be the weaker surface. Leaking it hands any approve-link holder the ability
+// to forge authenticated triggers for that task.
+func TestRedactSecretsCoversWebhookSecret(t *testing.T) {
+	in := "name: t\ntrigger:\n  webhook: /hooks/x\n  webhook_secret: SUPERSECRET_HMAC_abc123\n  auth: any\n"
+	out := redactSecrets(in)
+	if strings.Contains(out, "SUPERSECRET_HMAC_abc123") {
+		t.Errorf("inline webhook_secret survived redaction:\n%s", out)
+	}
+	// The field must still be visibly present, so a diff shows that it changed.
+	if !strings.Contains(out, "webhook_secret:") {
+		t.Errorf("redaction removed the key as well as the value:\n%s", out)
+	}
+}

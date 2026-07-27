@@ -70,6 +70,12 @@ type Gate struct {
 	// Dir-less (inline) tasks never get a snapshot (see taskDirOf) — nothing
 	// to snapshot.
 	approvedFiles map[string]map[string]snapshotValue
+
+	// approvedResolved is the resolvedFieldsDigest of the last-approved
+	// version, so Diff can tell that a task was re-held by a change outside
+	// its directory (a taskset override widening permissions or rewiring a
+	// trigger) even when files inside the directory also changed.
+	approvedResolved map[string]string
 }
 
 // pendingEntry captures the task, the hash observed at decision time, and
@@ -82,9 +88,10 @@ type Gate struct {
 // being matched against (previously hash and files lived in two separate
 // maps, updated under two separate lock acquisitions).
 type pendingEntry struct {
-	kinded task.Kinded
-	hash   string
-	files  map[string]snapshotValue
+	kinded   task.Kinded
+	hash     string
+	files    map[string]snapshotValue
+	resolved string
 }
 
 // NewGate builds a Gate. arm is invoked for every task that passes the gate
@@ -95,14 +102,15 @@ func NewGate(policy Policy, lock *Lock, arm func(task.Kinded) error, log *zap.Lo
 		log = zap.NewNop()
 	}
 	return &Gate{
-		policy:        policy,
-		lock:          lock,
-		arm:           arm,
-		hashFn:        ContentHash,
-		log:           log,
-		pending:       map[string]pendingEntry{},
-		admitted:      map[string]task.Kinded{},
-		approvedFiles: map[string]map[string]snapshotValue{},
+		policy:           policy,
+		lock:             lock,
+		arm:              arm,
+		hashFn:           ContentHash,
+		log:              log,
+		pending:          map[string]pendingEntry{},
+		admitted:         map[string]task.Kinded{},
+		approvedFiles:    map[string]map[string]snapshotValue{},
+		approvedResolved: map[string]string{},
 	}
 }
 
@@ -185,6 +193,7 @@ func (g *Gate) Admit(k task.Kinded) (armed bool, err error) {
 		// Already approved at exactly this hash; keep the original record.
 		g.clearPending(id)
 		g.snapshotApprovedIfMissing(id, taskDirOf(k))
+		g.recordApprovedResolved(id, k)
 		return true, g.arm(k)
 	case g.Bootstrapping():
 		// Adoption window: seed the current inventory as approved rather
@@ -232,7 +241,7 @@ func (g *Gate) Admit(k task.Kinded) (armed bool, err error) {
 		// hash and files are written together in one critical section: a
 		// concurrent Approve/ApproveIfHash can never observe a pending[id]
 		// whose hash and files disagree on which generation they describe.
-		g.pending[id] = pendingEntry{kinded: k, hash: hash, files: files}
+		g.pending[id] = pendingEntry{kinded: k, hash: hash, files: files, resolved: resolvedFieldsDigest(k)}
 		hook := g.pendingHook
 		g.mu.Unlock()
 		if hook != nil && changed {
@@ -256,6 +265,7 @@ func (g *Gate) Admit(k task.Kinded) (armed bool, err error) {
 		}
 	}
 	g.snapshotApprovedIfMissing(id, taskDirOf(k))
+	g.recordApprovedResolved(id, k)
 	return true, g.arm(k)
 }
 
@@ -325,6 +335,22 @@ func (g *Gate) snapshotApprovedIfMissing(id, dir string) {
 	g.snapshotApproved(id, dir)
 }
 
+// recordApprovedResolved pins the resolved-fields digest of content the gate
+// has just treated as approved. Unlike the file snapshot this is refreshed
+// unconditionally: it costs a marshal rather than a directory walk, and a
+// stale value here would make Diff either miss an out-of-dir change or invent
+// one.
+func (g *Gate) recordApprovedResolved(id string, k task.Kinded) {
+	d := resolvedFieldsDigest(k)
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if d == "" {
+		delete(g.approvedResolved, id)
+		return
+	}
+	g.approvedResolved[id] = d
+}
+
 // Approve approves a pending task: records its observed hash in the lock and
 // arms its triggers. Returns an error when the task is not pending.
 func (g *Gate) Approve(id string) error {
@@ -377,6 +403,7 @@ func (g *Gate) approve(id, wantHash, by string) error {
 		delete(g.pending, id)
 		if cur.files != nil {
 			g.approvedFiles[id] = cur.files
+			g.approvedResolved[id] = cur.resolved
 		}
 	}
 	g.mu.Unlock()
@@ -390,6 +417,7 @@ func (g *Gate) Forget(id string) {
 	g.mu.Lock()
 	delete(g.admitted, id)
 	delete(g.approvedFiles, id)
+	delete(g.approvedResolved, id)
 	g.mu.Unlock()
 	if err := g.lock.Remove(id); err != nil {
 		g.log.Warn("approval: lock remove failed",
@@ -658,31 +686,83 @@ func hashDirResolved(taskID, dir string, resolved any, hashInclude ...string) (s
 // *task.Spec the marshalled copy has Trigger.WebhookSecret cleared and env
 // literal values redacted (TriggerConfig carries yaml tags only, so every
 // exported field — secret included — would otherwise marshal by Go name).
+// resolvedPipelineFieldsOf builds the pipeline equivalent of
+// resolvedSecurityFields.
+func resolvedPipelineFieldsOf(s *task.PipelineTask) resolvedPipelineSecurityFields {
+	return resolvedPipelineSecurityFields{
+		Timeout:     s.Timeout,
+		Webhook:     s.Trigger.Webhook,
+		WebhookAuth: s.Trigger.WebhookAuth,
+		Cron:        s.Trigger.Cron,
+		Manual:      s.Trigger.Manual,
+		Chain:       s.Trigger.Chain,
+	}
+}
+
+// resolvedFieldsOf returns the post-override security fields ContentHash
+// folds in alongside the directory digest, or nil for a kind that has none.
+// Shared with ResolvedFieldsDigest so the two can never describe different
+// field sets.
+func resolvedFieldsOf(k task.Kinded) any {
+	switch s := k.(type) {
+	case *task.Spec:
+		if s.TaskDir == "" {
+			return nil
+		}
+		var params []resolvedParam
+		for _, p := range s.Params {
+			params = append(params, resolvedParam{
+				Name:     p.Name,
+				Default:  p.Default,
+				Required: p.Required,
+			})
+		}
+		return resolvedSecurityFields{
+			Permissions: sanitizePermissions(s.Permissions),
+			Runtime:     s.Runtime,
+			Params:      params,
+			Timeout:     s.Timeout,
+			Webhook:     s.Trigger.Webhook,
+			WebhookAuth: s.Trigger.WebhookAuth,
+			Cron:        s.Trigger.Cron,
+			Manual:      s.Trigger.Manual,
+			Daemon:      s.Trigger.Daemon,
+			Restart:     s.Trigger.Restart,
+			Chain:       s.Trigger.Chain,
+		}
+	case *task.PipelineTask:
+		if s.TaskDir == "" {
+			return nil
+		}
+		return resolvedPipelineFieldsOf(s)
+	default:
+		return nil
+	}
+}
+
+// resolvedFieldsDigest hashes resolvedFieldsOf(k). The diff compares this
+// between baseline and pending to notice a change that never touches the task
+// directory — taskset overrides can widen permissions or rewire triggers from
+// the parent taskset.yaml, which the content hash folds in but a directory
+// snapshot cannot see. Returns "" when there are no resolved fields.
+func resolvedFieldsDigest(k task.Kinded) string {
+	rf := resolvedFieldsOf(k)
+	if rf == nil {
+		return ""
+	}
+	b, err := json.Marshal(rf)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
 func ContentHash(k task.Kinded) (string, error) {
 	switch s := k.(type) {
 	case *task.Spec:
 		if s.TaskDir != "" {
-			var params []resolvedParam
-			for _, p := range s.Params {
-				params = append(params, resolvedParam{
-					Name:     p.Name,
-					Default:  p.Default,
-					Required: p.Required,
-				})
-			}
-			return hashDirResolved(k.TaskID(), s.TaskDir, resolvedSecurityFields{
-				Permissions: sanitizePermissions(s.Permissions),
-				Runtime:     s.Runtime,
-				Params:      params,
-				Timeout:     s.Timeout,
-				Webhook:     s.Trigger.Webhook,
-				WebhookAuth: s.Trigger.WebhookAuth,
-				Cron:        s.Trigger.Cron,
-				Manual:      s.Trigger.Manual,
-				Daemon:      s.Trigger.Daemon,
-				Restart:     s.Trigger.Restart,
-				Chain:       s.Trigger.Chain,
-			}, s.HashInclude...)
+			return hashDirResolved(k.TaskID(), s.TaskDir, resolvedFieldsOf(k), s.HashInclude...)
 		}
 		// Dir-less fallback: hash a shallow copy with secrets stripped so the
 		// committable lock never embeds a digest over secret material.
@@ -692,14 +772,7 @@ func ContentHash(k task.Kinded) (string, error) {
 		return hashJSON(k.TaskID(), &c)
 	case *task.PipelineTask:
 		if s.TaskDir != "" {
-			return hashDirResolved(k.TaskID(), s.TaskDir, resolvedPipelineSecurityFields{
-				Timeout:     s.Timeout,
-				Webhook:     s.Trigger.Webhook,
-				WebhookAuth: s.Trigger.WebhookAuth,
-				Cron:        s.Trigger.Cron,
-				Manual:      s.Trigger.Manual,
-				Chain:       s.Trigger.Chain,
-			})
+			return hashDirResolved(k.TaskID(), s.TaskDir, resolvedPipelineFieldsOf(s))
 		}
 	}
 	return hashJSON(k.TaskID(), k)
