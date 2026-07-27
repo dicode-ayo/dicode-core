@@ -69,7 +69,7 @@ type Gate struct {
 	// re-admitted the task, has no baseline (Diff reports HasBaseline=false).
 	// Dir-less (inline) tasks never get a snapshot (see taskDirOf) — nothing
 	// to snapshot.
-	approvedFiles map[string]map[string]string
+	approvedFiles map[string]map[string]snapshotValue
 }
 
 // pendingEntry captures the task, the hash observed at decision time, and
@@ -84,7 +84,7 @@ type Gate struct {
 type pendingEntry struct {
 	kinded task.Kinded
 	hash   string
-	files  map[string]string
+	files  map[string]snapshotValue
 }
 
 // NewGate builds a Gate. arm is invoked for every task that passes the gate
@@ -102,7 +102,7 @@ func NewGate(policy Policy, lock *Lock, arm func(task.Kinded) error, log *zap.Lo
 		log:           log,
 		pending:       map[string]pendingEntry{},
 		admitted:      map[string]task.Kinded{},
-		approvedFiles: map[string]map[string]string{},
+		approvedFiles: map[string]map[string]snapshotValue{},
 	}
 }
 
@@ -282,7 +282,7 @@ func taskDirOf(k task.Kinded) string {
 // by a diff-support snapshot) — callers store the nil as-is, matching
 // taskDirOf's dir-less contract and pendingEntry.files' nil-means-nothing-
 // captured convention.
-func (g *Gate) takeSnapshot(id, dir, what string) map[string]string {
+func (g *Gate) takeSnapshot(id, dir, what string) map[string]snapshotValue {
 	if dir == "" {
 		return nil
 	}

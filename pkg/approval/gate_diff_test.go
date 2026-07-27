@@ -8,6 +8,107 @@ import (
 	"testing"
 )
 
+// TestDiffFlagsChangedFileEvenWhenBothSidesAreCapped is the regression for a
+// review finding on #604's diff surface: two different versions of a file
+// that both hit a snapshot cap (oversized, or binary) must not both collapse
+// to the same bare snapshotPlaceholder string and compare as "unchanged" —
+// the underlying content hash gated approval specifically because this file
+// changed, so Diff must surface that as "modified" (with a too-large/binary
+// note, since the content itself was never captured), not silently drop it
+// from Files. Exercises the binary path (sha256 content fingerprint, exact
+// and deterministic — the size+mtime path for oversized text files depends
+// on filesystem mtime granularity and is covered structurally, not by exact
+// value, since a flaky mtime collision would be a false test failure rather
+// than a real one).
+func TestDiffFlagsChangedFileEvenWhenBothSidesAreCapped(t *testing.T) {
+	g, _, _ := newTestGate(t, enabledPolicy())
+	spec := writeTaskDir(t, t.TempDir(), "repo/binfile", "unused\n")
+	binPath := filepath.Join(spec.TaskDir, "task.bin")
+
+	binaryA := append([]byte{0xff, 0xfe, 0x00, 0x01}, []byte(strings.Repeat("A", 64))...)
+	if err := os.WriteFile(binPath, binaryA, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Admit(spec); err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+	if err := g.Approve("repo/binfile"); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+
+	// Different binary content, same invalid-UTF-8 shape — both versions hit
+	// the "binary" placeholder path and, before this fix, would have stored
+	// the identical bare snapshotPlaceholder string for both.
+	binaryB := append([]byte{0xff, 0xfe, 0x00, 0x01}, []byte(strings.Repeat("B", 64))...)
+	if err := os.WriteFile(binPath, binaryB, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Admit(spec); err != nil {
+		t.Fatalf("Admit changed: %v", err)
+	}
+
+	d, err := g.Diff("repo/binfile")
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+	var bin *FileDiff
+	for i := range d.Files {
+		if d.Files[i].Path == "task.bin" {
+			bin = &d.Files[i]
+		}
+	}
+	if bin == nil {
+		t.Fatalf("task.bin missing from Diff().Files entirely — the changed binary file vanished instead of surfacing as modified: %+v", d.Files)
+	}
+	if bin.Status != "modified" {
+		t.Errorf("Status = %q, want %q", bin.Status, "modified")
+	}
+	if bin.UnifiedDiff != snapshotPlaceholder {
+		t.Errorf("UnifiedDiff = %q, want the placeholder note (content was never captured)", bin.UnifiedDiff)
+	}
+}
+
+// TestDiffTreatsIdenticalCappedFilesAsUnchanged is the flip side of
+// TestDiffFlagsChangedFileEvenWhenBothSidesAreCapped: a file that hits a
+// snapshot cap but is genuinely byte-identical between the approved and
+// pending snapshots must still be reported unchanged (omitted from Files),
+// not spuriously flagged as modified just because it was capped.
+func TestDiffTreatsIdenticalCappedFilesAsUnchanged(t *testing.T) {
+	g, _, _ := newTestGate(t, enabledPolicy())
+	spec := writeTaskDir(t, t.TempDir(), "repo/binfile2", "unused\n")
+	binPath := filepath.Join(spec.TaskDir, "task.bin")
+
+	binary := append([]byte{0xff, 0xfe, 0x00, 0x01}, []byte(strings.Repeat("Z", 64))...)
+	if err := os.WriteFile(binPath, binary, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Admit(spec); err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+	if err := g.Approve("repo/binfile2"); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+
+	// A second, unrelated file changes so the task re-pends; task.bin itself
+	// is untouched.
+	if err := os.WriteFile(filepath.Join(spec.TaskDir, "task.js"), []byte("unused v2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Admit(spec); err != nil {
+		t.Fatalf("Admit changed: %v", err)
+	}
+
+	d, err := g.Diff("repo/binfile2")
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+	for _, f := range d.Files {
+		if f.Path == "task.bin" {
+			t.Fatalf("task.bin reported as %q but its content did not change — spurious diff entry: %+v", f.Status, f)
+		}
+	}
+}
+
 // TestDiffShowsModifiedFileAfterApproval is the core regression for #604: once
 // a task has been approved and its content later changes, Diff must report
 // the changed file with the correct added/removed lines against the cached

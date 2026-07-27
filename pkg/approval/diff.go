@@ -138,6 +138,43 @@ func touchesSecurityBlock(diff string) bool {
 	return false
 }
 
+// snapshotValuesEqual reports whether two snapshotValues for the same path
+// represent the same content, for Gate.Diff's added/removed/modified/
+// unchanged classification.
+//
+// Two placeholders compare by Fingerprint rather than always being treated
+// as equal — otherwise two different oversized/binary files that both hit
+// the same cap would collapse to the identical bare snapshotPlaceholder
+// string and this file's real change would silently vanish from
+// Diff().Files instead of surfacing as "modified". An empty Fingerprint
+// (the stat/hash itself failed, a rare race) cannot vouch for equality, so
+// it fails toward "modified" rather than toward hiding a possible change —
+// the same over-flag-rather-than-under-flag bias securityFieldPattern and
+// redactValueLines already take for this feature.
+func snapshotValuesEqual(a, b snapshotValue) bool {
+	if a.Placeholder != b.Placeholder {
+		return false
+	}
+	if a.Placeholder {
+		if a.Fingerprint == "" || b.Fingerprint == "" {
+			return false
+		}
+		return a.Fingerprint == b.Fingerprint
+	}
+	return a.Content == b.Content
+}
+
+// snapshotDisplayText returns the text to feed unifiedDiffText for v: the
+// real content, or the bare snapshotPlaceholder constant for a placeholder
+// (never its Fingerprint — that stays internal to Gate.Diff's status
+// classification and must never reach a rendering surface).
+func snapshotDisplayText(v snapshotValue) string {
+	if v.Placeholder {
+		return snapshotPlaceholder
+	}
+	return v.Content
+}
+
 // Diff computes the file-level diff between id's cached approved-content
 // snapshot (if any) and its current pending-content snapshot. Returns an
 // error if id is not currently pending.
@@ -176,8 +213,8 @@ func (g *Gate) Diff(id string) (Diff, error) {
 	sort.Strings(sorted)
 
 	for _, p := range sorted {
-		newContent, inPending := pendingSnap[p]
-		oldContent, inApproved := approvedSnap[p]
+		newVal, inPending := pendingSnap[p]
+		oldVal, inApproved := approvedSnap[p]
 
 		var status string
 		switch {
@@ -185,13 +222,13 @@ func (g *Gate) Diff(id string) (Diff, error) {
 			status = "added"
 		case !inPending && inApproved:
 			status = "removed"
-		case inPending && inApproved && newContent != oldContent:
+		case inPending && inApproved && !snapshotValuesEqual(oldVal, newVal):
 			status = "modified"
 		default:
 			continue // unchanged
 		}
 
-		udiff := unifiedDiffText(oldContent, newContent)
+		udiff := unifiedDiffText(snapshotDisplayText(oldVal), snapshotDisplayText(newVal))
 		fd := FileDiff{
 			Path:             p,
 			Status:           status,

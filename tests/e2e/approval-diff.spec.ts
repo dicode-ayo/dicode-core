@@ -100,9 +100,16 @@ async function withPendingChange(
   } finally {
     // Restore exact original bytes: the content hash returns to the
     // already-approved record, so the reconciler re-arms it without any
-    // explicit re-approval, leaving a clean baseline for later specs.
-    fs.writeFileSync(taskJsPath, original, 'utf8');
-    await waitForTaskCondition(request, MANUAL_TASK_ID, (t) => t.pending_approval !== true);
+    // explicit re-approval, leaving a clean baseline for later specs. Errors
+    // here are logged rather than thrown so a genuine failure from body()
+    // above isn't masked by a cleanup problem — losing the real failure's
+    // message would make the next CI run harder to diagnose than this one.
+    try {
+      fs.writeFileSync(taskJsPath, original, 'utf8');
+      await waitForTaskCondition(request, MANUAL_TASK_ID, (t) => t.pending_approval !== true);
+    } catch (cleanupError) {
+      console.error('withPendingChange cleanup failed:', cleanupError);
+    }
   }
 }
 

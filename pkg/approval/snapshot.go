@@ -1,6 +1,8 @@
 package approval
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -25,12 +27,30 @@ const maxSnapshotFileBytes = 256 * 1024 // 256 KiB
 // placeholder value instead of their content.
 const maxSnapshotFiles = 200
 
-// snapshotPlaceholder is the value stored for a file whose content was not
+// snapshotPlaceholder is the display text for a file whose content was not
 // captured — because it is binary (fails UTF-8 validation), larger than
 // maxSnapshotFileBytes, or beyond maxSnapshotFiles. Diff never synthesizes a
 // line-level unified diff for these; FileDiff.UnifiedDiff carries this
 // string verbatim instead.
 const snapshotPlaceholder = "binary or file too large to diff"
+
+// snapshotValue is one file's captured state. When Placeholder is false,
+// Content holds the (redacted) text. When Placeholder is true, Content is
+// unused and Fingerprint carries an opaque per-version marker — see
+// snapshotFingerprint — so Gate.Diff can tell "capped but identical" apart
+// from "capped and different" without ever holding two full oversized/binary
+// files in memory to compare byte-for-byte.
+//
+// Without Fingerprint, two different files that both hit the same cap would
+// both collapse to the bare snapshotPlaceholder string and compare equal —
+// a real change in an oversized file would silently vanish from Diff().Files
+// instead of surfacing as "modified", which is exactly the file an attacker
+// would pick to hide a payload from this review surface.
+type snapshotValue struct {
+	Content     string
+	Placeholder bool
+	Fingerprint string
+}
 
 // snapshotHeavyDirs mirrors task/hash.go's heavyDirs: directories that hold
 // no task content and can dominate walk cost. Kept as its own copy (rather
@@ -170,8 +190,8 @@ func leadingIndent(s string) int {
 
 // snapshotDir walks dir the same way task/hash.go's Hash walker does (same
 // heavyDirs skip list, same fs.DirEntry.Info()-based regular-file
-// classification) and returns a map of dir-relative slash path to file
-// content, for Gate.Diff to compare snapshots taken at different times.
+// classification) and returns a map of dir-relative slash path to
+// snapshotValue, for Gate.Diff to compare snapshots taken at different times.
 //
 // This is a distinct walk from Hash's: the approval lock (pkg/approval/lock.go)
 // only ever stores a content hash, never file bytes, so there is no
@@ -181,9 +201,11 @@ func leadingIndent(s string) int {
 //
 // Every file is capped at maxSnapshotFileBytes and the whole dir at
 // maxSnapshotFiles; a file over either bound, or one that is not valid
-// UTF-8 text (binary), is stored as snapshotPlaceholder instead of its raw
-// bytes — so the map's key set still reflects every observed file even
-// though not every value is diffable text.
+// UTF-8 text (binary), is stored as a placeholder snapshotValue (see its doc
+// comment for why it still carries a per-version Fingerprint rather than
+// collapsing every capped file to one indistinguishable value) instead of
+// its raw bytes — so the map's key set still reflects every observed file
+// even though not every value is diffable text.
 //
 // Text file content is passed through redactValueLines before being stored:
 // any literal YAML "value:" scalar (e.g. a permissions.env literal secret,
@@ -197,7 +219,7 @@ func leadingIndent(s string) int {
 // removal, matching Hash's behavior for the same case. Symlinks, sockets,
 // devices, and other non-regular entries are skipped entirely (no text
 // content to diff), matching Hash's walkTree classification.
-func snapshotDir(dir string) (map[string]string, error) {
+func snapshotDir(dir string) (map[string]snapshotValue, error) {
 	var paths []string
 	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -231,27 +253,78 @@ func snapshotDir(dir string) (map[string]string, error) {
 	}
 	sort.Strings(paths)
 
-	out := make(map[string]string, len(paths))
+	out := make(map[string]snapshotValue, len(paths))
 	for i, rel := range paths {
 		if i >= maxSnapshotFiles {
-			out[rel] = snapshotPlaceholder
+			// Beyond the file-count cap: stat only (no content read) for a
+			// size+mtime fingerprint — cheap, and this file was never going
+			// to be read anyway.
+			abs := filepath.Join(dir, filepath.FromSlash(rel))
+			out[rel] = snapshotValue{Placeholder: true, Fingerprint: statFingerprint(abs)}
 			continue
 		}
 		abs := filepath.Join(dir, filepath.FromSlash(rel))
 		info, statErr := os.Stat(abs)
 		if statErr != nil || info.Size() > maxSnapshotFileBytes {
-			out[rel] = snapshotPlaceholder
+			// Oversized (or vanished mid-scan): size+mtime only, matching
+			// task/hash.go's maxHashedFileBytes tradeoff for large files —
+			// reading the full content just to fingerprint it would defeat
+			// the point of the size cap.
+			var fp string
+			if statErr == nil {
+				fp = fileInfoFingerprint(info)
+			}
+			out[rel] = snapshotValue{Placeholder: true, Fingerprint: fp}
 			continue
 		}
 		data, readErr := os.ReadFile(abs)
 		if readErr != nil || !utf8.Valid(data) {
-			out[rel] = snapshotPlaceholder
+			// Binary (or a read race): the bytes are already in memory (or
+			// weren't, on a read error), so hash them directly rather than
+			// falling back to size+mtime — strictly stronger, and free here.
+			var fp string
+			if readErr == nil {
+				fp = contentFingerprint(data)
+			} else {
+				fp = fileInfoFingerprint(info)
+			}
+			out[rel] = snapshotValue{Placeholder: true, Fingerprint: fp}
 			continue
 		}
 		// Redact literal YAML "value:" scalars (task.EnvEntry.Value secrets)
 		// before the content ever lands in the maps Gate.approvedFiles and
 		// pendingEntry.files hold and Gate.Diff renders — see redactValueLines.
-		out[rel] = redactValueLines(string(data))
+		out[rel] = snapshotValue{Content: redactValueLines(string(data))}
 	}
 	return out, nil
+}
+
+// statFingerprint stats path and returns a size+mtime descriptor, or "" if
+// the stat itself fails (file vanished mid-scan — matches snapshotDir's
+// existing tolerant handling of that race elsewhere).
+func statFingerprint(path string) string {
+	info, err := os.Stat(path)
+	if err != nil {
+		return ""
+	}
+	return fileInfoFingerprint(info)
+}
+
+// fileInfoFingerprint renders a stat result as a fingerprint distinguishing
+// this version of a capped file from a different one. Not a content hash —
+// two different files of the same size written at the same mtime would
+// collide — but it is the same tradeoff task/hash.go's content hash already
+// makes for oversized files (size+mtime, not full content), so this closes
+// the gap to that existing, accepted risk model rather than exceeding it.
+func fileInfoFingerprint(info fs.FileInfo) string {
+	return fmt.Sprintf("size=%d mtime=%d", info.Size(), info.ModTime().UnixNano())
+}
+
+// contentFingerprint hashes bytes already held in memory (the binary-file
+// case, where snapshotDir has already paid the read cost) into a strong,
+// version-distinguishing fingerprint — no reason to fall back to the weaker
+// size+mtime descriptor when the real bytes are right there.
+func contentFingerprint(data []byte) string {
+	sum := sha256.Sum256(data)
+	return fmt.Sprintf("sha256=%x", sum)
 }
