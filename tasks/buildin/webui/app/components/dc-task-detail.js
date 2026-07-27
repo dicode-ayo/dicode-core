@@ -35,6 +35,7 @@ class DcTaskDetail extends LitElement {
     _diffError:       { state: true },
     _diffLoading:     { state: true },
     _monacoOff:       { state: true }, // Monaco unreachable — render diffs as text
+    _ackIncomplete:   { state: true }, // operator acknowledged an incomplete diff
   };
 
   constructor() {
@@ -49,6 +50,7 @@ class DcTaskDetail extends LitElement {
     this._diffOpen = false; this._diff = null; this._diffError = ''; this._diffLoading = false;
     this._diffEditors = new Map();
     this._monacoOff = false;
+    this._ackIncomplete = false;
     this._editor = null;
     this._relayBase = '';
     this._offStarted = null; this._offFinished = null;
@@ -89,7 +91,7 @@ class DcTaskDetail extends LitElement {
     this._task = null; this._runs = null; this._error = null;
     this._editorOpen = false; this._triggerOpen = false;
     this._disposeDiffEditors();
-    this._diffOpen = false; this._diff = null; this._diffError = ''; this._diffLoading = false;
+    this._diffOpen = false; this._diff = null; this._diffError = ''; this._diffLoading = false; this._ackIncomplete = false;
     try {
       const [task, runs, base] = await Promise.all([
         get(`/api/tasks/${encodeURIComponent(this.taskid)}`),
@@ -150,11 +152,27 @@ class DcTaskDetail extends LitElement {
   // and the tokenized link remain as escape hatches, and neither of those
   // pretends a review happened.
   get _approveArmed() {
-    return this._diffOpen && !!this._diff && !this._diffLoading && !this._diffError;
+    if (!this._diffOpen || !this._diff || this._diffLoading || this._diffError) return false;
+    // An incomplete diff cannot be approved in one click. The gate held this
+    // task for a reason the diff does not account for, so approving here is
+    // approving something unseen — it stays possible, but only as a
+    // deliberate, separately-labelled act.
+    if (this._diff.incomplete && !this._ackIncomplete) return false;
+    return true;
+  }
+
+  get _diffIncomplete() {
+    return !!(this._diff && this._diff.incomplete);
   }
 
   async _approve() {
     if (!this._approveArmed) {
+      // Second stage of the incomplete-diff path: the panel and its warning
+      // are already on screen, so this click is the acknowledgement.
+      if (this._diffOpen && this._diff && !this._diffLoading && !this._diffError && this._diffIncomplete) {
+        this._ackIncomplete = true;
+        return;
+      }
       await this._openDiff();
       return;
     }
@@ -214,8 +232,17 @@ class DcTaskDetail extends LitElement {
     if (!this._diff) return '';
     const diff = this._diff;
     const files = diff.files || [];
+    // An empty file list is never an all-clear: the gate held this task for
+    // a reason, and if it is not in these files it is somewhere this surface
+    // cannot see. Say that instead of printing reassuring copy.
     if (files.length === 0) {
-      return html`<p class="meta" style="margin-top:0.5rem">No file-level diff available for this task.</p>`;
+      return html`
+        <div class="card" style="margin-top:0.75rem;margin-bottom:var(--space-md)">
+          <div style="background:rgba(248,81,73,0.12);border:1px solid #f85149;color:#f85149;padding:0.6rem 0.8rem;border-radius:6px;font-size:0.9rem">
+            &#9888; <strong>This diff cannot show why the task changed.</strong>
+            <div style="margin-top:0.4rem;color:var(--fg)">${diff.incomplete_reason || 'No file-level changes were found, yet the gate is holding this task.'}</div>
+          </div>
+        </div>`;
     }
     const anySecurityRelevant = files.some(f => f.security_relevant);
     return html`
@@ -223,6 +250,10 @@ class DcTaskDetail extends LitElement {
         ${!diff.has_baseline ? html`
           <div style="background:rgba(210,153,34,0.12);border:1px solid #d29922;color:#d29922;padding:0.5rem 0.75rem;border-radius:6px;margin-bottom:0.75rem;font-size:0.85rem">
             No prior approved version is cached for this task (fresh daemon session) — the files below are shown as new content, not a diff against a known-good baseline.
+          </div>` : ''}
+        ${diff.incomplete ? html`
+          <div style="background:rgba(248,81,73,0.12);border:1px solid #f85149;color:#f85149;padding:0.5rem 0.75rem;border-radius:6px;margin-bottom:0.75rem;font-size:0.85rem">
+            &#9888; <strong>Incomplete diff.</strong> ${diff.incomplete_reason || 'Part of this change cannot be displayed.'}
           </div>` : ''}
         ${anySecurityRelevant ? html`
           <div style="background:rgba(248,81,73,0.12);border:1px solid #f85149;color:#f85149;padding:0.5rem 0.75rem;border-radius:6px;margin-bottom:0.75rem;font-size:0.85rem">
@@ -234,6 +265,7 @@ class DcTaskDetail extends LitElement {
               <span>${f.path}</span>
               <span style="font-size:0.7rem;padding:0.05rem 0.4rem;border-radius:3px;background:var(--bg-alt);color:var(--muted);text-transform:uppercase">${f.status}</span>
               ${f.security_relevant ? html`<span style="font-size:0.7rem;padding:0.05rem 0.4rem;border-radius:3px;background:rgba(248,81,73,0.18);color:#f85149;border:1px solid rgba(248,81,73,0.45)">security-relevant</span>` : ''}
+              ${f.content_hidden ? html`<span title="This file changed, but the change is inside redacted or uncaptured content and cannot be shown here" style="font-size:0.7rem;padding:0.05rem 0.4rem;border-radius:3px;background:rgba(248,81,73,0.18);color:#f85149;border:1px solid rgba(248,81,73,0.45)">change not shown</span>` : ''}
             </div>
             ${this._hasInlineSides(f)
               ? html`<div class="dc-diff-editor" data-diff-path=${f.path}
@@ -708,8 +740,12 @@ class DcTaskDetail extends LitElement {
         ${needsApproval ? html`<span title="This task is new or changed and its triggers are not armed until approved"
           style="padding:0 0.45rem;font-size:0.75rem;border-radius:3px;background:rgba(210,153,34,0.18);color:#d29922;border:1px solid rgba(210,153,34,0.45)">pending approval</span>` : ''}
         ${needsApproval ? html`<button class="btn" style="background:#d29922" @click=${() => this._approve()}
-          title=${this._approveArmed ? 'Approve this version and arm its triggers' : 'Show what changed before approving'}
-          >${this._approveArmed ? html`&#10003; Approve` : html`&#9998; Review changes`}</button>` : ''}
+          title=${this._approveArmed
+            ? (this._diffIncomplete ? 'Approve despite an incomplete diff' : 'Approve this version and arm its triggers')
+            : (this._diffIncomplete ? 'This diff cannot show the whole change — read the warning first' : 'Show what changed before approving')}
+          >${this._approveArmed
+            ? (this._diffIncomplete ? html`&#9888; Approve anyway` : html`&#10003; Approve`)
+            : (this._diffIncomplete ? html`&#9888; Approve without a full diff` : html`&#9998; Review changes`)}</button>` : ''}
         ${needsApproval ? html`<button class="btn btn-sm secondary" @click=${() => this._toggleDiff()}>${this._diffOpen ? 'Hide diff' : 'View diff'}</button>` : ''}
         <button class="btn" @click=${() => this._run()}>&#9654; Run now</button>
         ${hasEditor ? html`<button class="btn" style="background:var(--muted)" @click=${() => this._openEditor()}>&#9998; Edit code</button>` : ''}

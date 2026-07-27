@@ -176,6 +176,9 @@ details.diff-toggle summary{cursor:pointer;color:#8c96a3;font-size:0.85rem;margi
     {{if not .Diff.HasBaseline}}
       <div class="no-baseline">No prior approved version is cached for this task (fresh daemon session) — the files below are shown as new content, not a diff against a known-good baseline.</div>
     {{end}}
+    {{if .Diff.Incomplete}}
+      <div class="warn-banner">&#9888; <strong>Incomplete diff.</strong> {{.Diff.IncompleteReason}}</div>
+    {{end}}
     {{if .Diff.AnySecurityRelevant}}
       <div class="warn-banner">&#9888; This change touches security-relevant fields (permissions, env, triggers, …). Review carefully before approving.</div>
     {{end}}
@@ -185,6 +188,7 @@ details.diff-toggle summary{cursor:pointer;color:#8c96a3;font-size:0.85rem;margi
           <span>{{.Path}}</span>
           <span class="status-badge">{{.Status}}</span>
           {{if .SecurityRelevant}}<span class="sec-badge">security-relevant</span>{{end}}
+          {{if .ContentHidden}}<span class="sec-badge">change not shown</span>{{end}}
         </div>
         <pre class="diffblock">{{range .Lines}}<span class="diffline {{.Class}}">{{.Text}}</span>{{end}}</pre>
       </div>
@@ -209,6 +213,8 @@ type approvePageData struct {
 type diffPageView struct {
 	HasBaseline         bool
 	AnySecurityRelevant bool
+	Incomplete          bool
+	IncompleteReason    string
 	Files               []diffFileView
 }
 
@@ -216,6 +222,7 @@ type diffFileView struct {
 	Path             string
 	Status           string
 	SecurityRelevant bool
+	ContentHidden    bool
 	Lines            []diffLineView
 }
 
@@ -230,9 +237,13 @@ type diffLineView struct {
 // can render add/remove/context lines with distinct colors. A line matching
 // none of those prefixes (the snapshotPlaceholder note) is classed "note".
 func buildDiffPageView(d approval.Diff) diffPageView {
-	view := diffPageView{HasBaseline: d.HasBaseline}
+	view := diffPageView{
+		HasBaseline:      d.HasBaseline,
+		Incomplete:       d.Incomplete,
+		IncompleteReason: d.IncompleteReason,
+	}
 	for _, f := range d.Files {
-		fv := diffFileView{Path: f.Path, Status: f.Status, SecurityRelevant: f.SecurityRelevant}
+		fv := diffFileView{Path: f.Path, Status: f.Status, SecurityRelevant: f.SecurityRelevant, ContentHidden: f.ContentHidden}
 		if f.SecurityRelevant {
 			view.AnySecurityRelevant = true
 		}

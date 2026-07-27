@@ -53,6 +53,19 @@ type snapshotValue struct {
 	Content     string
 	Placeholder bool
 	Fingerprint string
+	// Digest is a hash of the file's RAW bytes, taken before redaction. It,
+	// not Content, decides whether a file changed.
+	//
+	// Comparing redacted text conflates "identical" with "identically
+	// scrubbed", and redaction is driven by file content the attacker
+	// controls. A block-scalar marker planted at column 0 makes
+	// redactValueLines swallow everything indented below it into one
+	// <redacted> line, so two entirely different versions of a task script
+	// scrub to the same string, compare equal, and drop out of Diff().Files
+	// altogether — the file becomes permanently invisible to review while
+	// the content hash still pends the task. Deciding on raw bytes means
+	// nothing the scrub does can make a changed file look unchanged.
+	Digest string
 }
 
 // snapshotHeavyDirs mirrors task/hash.go's heavyDirs: directories that hold
@@ -300,7 +313,10 @@ func snapshotDir(dir string) (map[string]snapshotValue, error) {
 		// Redact literal YAML "value:" scalars (task.EnvEntry.Value secrets)
 		// before the content ever lands in the maps Gate.approvedFiles and
 		// pendingEntry.files hold and Gate.Diff renders — see redactValueLines.
-		out[rel] = snapshotValue{Content: redactSecrets(string(data))}
+		out[rel] = snapshotValue{
+			Content: redactSecrets(string(data)),
+			Digest:  contentFingerprint(data),
+		}
 	}
 	return out, nil
 }

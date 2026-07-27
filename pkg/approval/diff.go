@@ -25,6 +25,22 @@ type Diff struct {
 	// Files holds one entry per changed file (added, removed, or modified).
 	// Unchanged files are omitted.
 	Files []FileDiff `json:"files"`
+	// Incomplete marks a diff that cannot fully account for why the task is
+	// pending. A renderer MUST present this as a warning and MUST NOT offer
+	// one-click approval against it.
+	//
+	// The gate holds a task because its content hash changed. That hash folds
+	// in more than the task directory's file bytes — the resolved permissions,
+	// runtime and trigger shape, which taskset overrides can change from
+	// outside the directory entirely — while this diff is built only from
+	// directory snapshots. Whenever the two disagree, or a file's change lands
+	// somewhere the snapshot cannot render, the honest answer is "the review
+	// surface cannot show you this", not an empty list that reads as "nothing
+	// changed".
+	Incomplete bool `json:"incomplete,omitempty"`
+	// IncompleteReason is operator-facing prose explaining what the diff
+	// cannot show, and what to do instead.
+	IncompleteReason string `json:"incomplete_reason,omitempty"`
 }
 
 // FileDiff is one changed file between the approved and pending snapshots.
@@ -44,6 +60,10 @@ type FileDiff struct {
 	// SecurityRelevant is true when an added or removed line in the diff
 	// touches one of the YAML keys matched by securityFieldPattern.
 	SecurityRelevant bool `json:"security_relevant"`
+	// ContentHidden marks a file known to have changed (its raw digest
+	// differs) whose rendered diff shows nothing or shows only redacted or
+	// uncaptured regions. The change is real and unreviewable here.
+	ContentHidden bool `json:"content_hidden,omitempty"`
 	// OldContent and NewContent are the two sides of UnifiedDiff's hunks
 	// reconstructed as plain text, for a client-side diff viewer to render
 	// itself. Deliberately derived from the hunked diff rather than the whole
@@ -168,7 +188,14 @@ func snapshotValuesEqual(a, b snapshotValue) bool {
 		}
 		return a.Fingerprint == b.Fingerprint
 	}
-	return a.Content == b.Content
+	// Raw-bytes digests, never the redacted Content: redaction is driven by
+	// attacker-controlled file content and can collapse two different
+	// versions to the same text (see snapshotValue.Digest). A missing digest
+	// falls back to content equality but fails toward "modified".
+	if a.Digest == "" || b.Digest == "" {
+		return false
+	}
+	return a.Digest == b.Digest
 }
 
 // snapshotDisplayText returns the text to feed unifiedDiffText for v: the
@@ -242,6 +269,15 @@ func (g *Gate) Diff(id string) (Diff, error) {
 			UnifiedDiff:      udiff,
 			SecurityRelevant: securityFieldPattern.MatchString(udiff) || touchesSecurityBlock(udiff),
 		}
+		// The file is known to differ, but the rendering shows nothing an
+		// operator can read: either both sides were uncaptured, or redaction
+		// collapsed the differing regions to the same text. Say so — a real
+		// change that renders blank is the one case where silence is a lie.
+		if !renderedDiffHasContent(udiff) {
+			fd.ContentHidden = true
+			fd.SecurityRelevant = true
+			out.Incomplete = true
+		}
 		// Flagging runs against the full diff above, before hunking drops
 		// context — elision must never hide a security-relevant line from the
 		// check, only from the rendering. touchesSecurityBlock depends on this
@@ -253,7 +289,33 @@ func (g *Gate) Diff(id string) (Diff, error) {
 		}
 		out.Files = append(out.Files, fd)
 	}
+
+	// The gate held this task because its content hash changed, and that hash
+	// covers more than these files (resolved permissions, runtime and trigger
+	// shape, which taskset overrides can rewrite from outside the task dir).
+	// Finding nothing here therefore does not mean nothing changed — it means
+	// the change is somewhere this surface cannot see.
+	if len(out.Files) == 0 {
+		out.Incomplete = true
+		out.IncompleteReason = "The task's own files are unchanged, so this task was re-held by something outside its directory — most likely taskset overrides to its permissions, runtime or trigger. That cannot be shown here. Review the source change (e.g. git log for the taskset) before approving."
+	} else if out.Incomplete {
+		out.IncompleteReason = "Part of this change cannot be displayed: one or more files differ only inside redacted or uncaptured content. Review those files at the source before approving."
+	}
 	return out, nil
+}
+
+// renderedDiffHasContent reports whether a rendered diff actually shows the
+// operator a changed line. A diff of only context, elision markers or
+// placeholder notes carries no reviewable change even though the file differs.
+func renderedDiffHasContent(udiff string) bool {
+	for _, line := range strings.Split(udiff, "\n") {
+		if strings.HasPrefix(line, "+ ") || strings.HasPrefix(line, "- ") {
+			if strings.TrimSpace(line[2:]) != "" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // hunkSides reconstructs the two sides of a hunked diff as plain text: a

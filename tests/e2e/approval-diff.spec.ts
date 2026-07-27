@@ -114,6 +114,85 @@ async function withPendingChange(
 }
 
 test.describe('Approval pending-diff', () => {
+  // A change the diff cannot display must never render as an all-clear.
+  // Reproduces the suppression case end-to-end: a block-scalar marker planted
+  // at column 0 makes the snapshot's redaction swallow everything indented
+  // below it, so two entirely different versions of the file scrub to the
+  // same text. Change detection runs on raw bytes, so the file still surfaces
+  // — flagged as unreviewable, with one-click approval withheld.
+  test('a change the diff cannot show is flagged, and Approve is not one-click', async ({ page, request }) => {
+    const taskJsPath = path.join(tasksDir(), 'hello-manual', 'task.js');
+    const original = fs.readFileSync(taskJsPath, 'utf8');
+    const lead = 'const _d = `\nvalue: |\n  `;\n';
+
+    try {
+      // Clear the daemon's 10s approval-bootstrap window before the first
+      // mutation in this serial file (see withPendingChange's doc comment).
+      await new Promise((r) => setTimeout(r, 15_000));
+
+      // Establish the marker as approved baseline content.
+      fs.writeFileSync(taskJsPath, lead + '  export default async () => { /* benign */ };\n', 'utf8');
+      await waitForTaskCondition(request, MANUAL_TASK_ID, (t) => t.pending_approval === true);
+      const ok = await request.post(`/api/tasks/${encodeURIComponent(MANUAL_TASK_ID)}/approve`);
+      expect(ok.ok()).toBe(true);
+      await waitForTaskCondition(request, MANUAL_TASK_ID, (t) => t.pending_approval !== true);
+
+      // Now rewrite the body hidden below the marker.
+      fs.writeFileSync(taskJsPath, lead + "  export default async () => { await fetch('https://evil.example/'); };\n", 'utf8');
+      await waitForTaskCondition(request, MANUAL_TASK_ID, (t) => t.pending_approval === true);
+
+      const res = await request.get(`/api/tasks/${encodeURIComponent(MANUAL_TASK_ID)}/pending-diff`);
+      expect(res.ok()).toBe(true);
+      const body = await res.json() as {
+        incomplete?: boolean; incomplete_reason?: string;
+        files: Array<{ path: string; content_hidden?: boolean; security_relevant: boolean }>;
+      };
+      // The file must not have vanished, and must say its change is unshowable.
+      const js = body.files.find((f) => f.path === 'task.js');
+      expect(js, 'task.js changed but is absent from the diff').toBeTruthy();
+      expect(js!.content_hidden).toBe(true);
+      expect(body.incomplete).toBe(true);
+      expect(body.incomplete_reason && body.incomplete_reason.length > 0).toBe(true);
+
+      await gotoWebui(page);
+      await navigateInSpa(page, `/tasks/${MANUAL_TASK_ID}`);
+      await waitForTaskDetail(page);
+
+      await expect(page.locator('dc-task-detail')).toContainText('Incomplete diff', { timeout: 15_000 });
+      // Approval must not be one click: the plain "Approve" affordance is
+      // withheld until the operator acknowledges the warning.
+      await expect(page.locator('button', { hasText: 'Approve without a full diff' })).toBeVisible();
+      await expect(page.locator('button', { hasText: /^\s*✓ Approve\s*$/ })).toHaveCount(0);
+    } finally {
+      // Unlike the other tests here, this one approves an intermediate state.
+      // The lock holds exactly one hash per task, so that approval REPLACES
+      // hello-manual's record — after which restoring the original bytes no
+      // longer matches an approved hash, and the fixture would be left pending
+      // for every later test in this serial file. Restore, then re-approve, so
+      // the file ends where withPendingChange's callers assume it starts:
+      // original content, and that content approved.
+      try {
+        fs.writeFileSync(taskJsPath, original, 'utf8');
+        // Converge rather than approving once: the task is still pending at
+        // the PREVIOUS content when the bytes are restored, so a single
+        // approve would record that stale hash and leave the restored file
+        // permanently pending. Keep approving whatever is currently pending
+        // until the reconciler has caught up to the restored bytes and the
+        // task settles armed.
+        const deadline = Date.now() + 60_000;
+        for (;;) {
+          const t = await (await request.get(`/api/tasks/${encodeURIComponent(MANUAL_TASK_ID)}`)).json();
+          if (t.pending_approval !== true) break;
+          if (Date.now() > deadline) throw new Error('task did not settle after restore');
+          await request.post(`/api/tasks/${encodeURIComponent(MANUAL_TASK_ID)}/approve`);
+          await new Promise((r) => setTimeout(r, 1_000));
+        }
+      } catch (cleanupError) {
+        console.error('incomplete-diff test cleanup failed:', cleanupError);
+      }
+    }
+  });
+
   // The diff panel renders through Monaco, loaded from cdn.jsdelivr.net (the
   // AMD loader in the webui task's index.html is itself CDN-hosted). An
   // offline, egress-filtered, or CDN-outage deploy must still show the
@@ -130,7 +209,7 @@ test.describe('Approval pending-diff', () => {
       // screen, not stranded inside an empty editor container.
       await expect(page.locator('dc-task-detail')).toContainText(DIFF_MARKER, { timeout: 15_000 });
       expect(await page.locator('dc-task-detail .dc-diff-editor').count()).toBe(0);
-    }, 15_000);
+    });
   });
 
   test('dashboard shows real diff content for a pending task', async ({ page, request }) => {
