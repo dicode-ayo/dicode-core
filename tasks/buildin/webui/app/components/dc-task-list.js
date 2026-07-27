@@ -100,12 +100,11 @@ class DcTaskList extends LitElement {
     } catch(e) { alert('Failed to run task: ' + e.message); }
   }
 
-  async _approve(taskID) {
-    if (!confirm(`Approve task "${taskID}"? Its triggers will arm and the current version will be trusted.`)) return;
-    try {
-      await post(`/api/tasks/${encodeURIComponent(taskID)}/approve`);
-      await this._load();
-    } catch(e) { this._toast('Approve failed: ' + e.message); }
+  // A table row has nowhere to render a diff, so the list never approves —
+  // it hands off to the detail page, whose Approve gate shows the change
+  // before it can be confirmed.
+  _review(taskID) {
+    navigate('/tasks/' + taskID);
   }
 
   // Group tasks by top-level namespace segment, applying the active
@@ -213,7 +212,7 @@ class DcTaskList extends LitElement {
               : html`<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="9"/></svg>`}
           </button>
           ${needsApproval
-            ? html`<button class="btn btn-sm btn-approve" title="Approve this task version" @click=${() => this._approve(t.id)}>&#10003; Approve</button>`
+            ? html`<button class="btn btn-sm btn-approve" title="Review what changed, then approve" @click=${() => this._review(t.id)}>&#9998; Review</button>`
             : ''}
           <button class="btn btn-sm" @click=${() => this._run(t.id)}>&#9654; Run</button>
         </td>

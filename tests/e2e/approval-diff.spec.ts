@@ -134,6 +134,39 @@ test.describe('Approval pending-diff', () => {
     }
   });
 
+  test('the task list cannot approve — it hands off to the detail page gate', async ({ page, request }) => {
+    const taskJsPath = path.join(tasksDir(), 'hello-manual', 'task.js');
+    const original = fs.readFileSync(taskJsPath, 'utf8');
+
+    try {
+      fs.writeFileSync(taskJsPath, original + `\n${DIFF_MARKER}\n`, 'utf8');
+      await waitForTaskCondition(request, MANUAL_TASK_ID, (t) => t.pending_approval === true);
+
+      await gotoWebui(page);
+
+      // A table row has nowhere to show a diff, so the row must not offer
+      // approval at all — otherwise it is a one-click bypass of the gate.
+      await expect(page.locator('dc-task-list button', { hasText: 'Review' }).first()).toBeVisible();
+      await expect(page.locator('dc-task-list button', { hasText: 'Approve' })).toHaveCount(0);
+
+      await page.locator('dc-task-list button', { hasText: 'Review' }).first().click({ force: true });
+      await waitForTaskDetail(page);
+      await expect(page.locator('button', { hasText: 'Review & approve' })).toBeVisible();
+
+      const afterHandoff = await (
+        await request.get(`/api/tasks/${encodeURIComponent(MANUAL_TASK_ID)}`)
+      ).json() as Record<string, unknown>;
+      expect(afterHandoff.pending_approval).toBe(true);
+    } finally {
+      fs.writeFileSync(taskJsPath, original, 'utf8');
+      await waitForTaskCondition(
+        request,
+        MANUAL_TASK_ID,
+        (t) => t.pending_approval !== true,
+      );
+    }
+  });
+
   test('Approve reveals the diff first and only approves on a second, explicit click', async ({ page, request }) => {
     const taskJsPath = path.join(tasksDir(), 'hello-manual', 'task.js');
     const original = fs.readFileSync(taskJsPath, 'utf8');
