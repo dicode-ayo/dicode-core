@@ -1,5 +1,6 @@
 import { LitElement, html } from 'https://esm.sh/lit@3';
 import { get } from '../lib/api.js';
+import { wsOn } from '../lib/ws.js';
 
 // dc-nav renders additional <a> nav entries contributed by tasks via their
 // task.yaml `webui.nav` block (#222). It fetches /api/tasks, picks kind:
@@ -20,11 +21,18 @@ class DcNav extends LitElement {
   constructor() {
     super();
     this._entries = [];
+    this._offChanged = null;
   }
 
   connectedCallback() {
     super.connectedCallback();
     this._load();
+    this._offChanged = wsOn('tasks:changed', () => this._load());
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    this._offChanged?.();
   }
 
   async _load() {
@@ -54,6 +62,7 @@ class DcNav extends LitElement {
         label,
         order: t.webui.nav.order || 0,
         path,
+        icon: t.webui.nav.icon,
       });
     }
 
@@ -62,7 +71,10 @@ class DcNav extends LitElement {
   }
 
   render() {
-    return html`${this._entries.map(e => html`<a href=${e.path}>${e.label}</a>`)}`;
+    // Icon prefix mirrors the header's own "&#9889; dicode" unicode-glyph
+    // convention (index.html) rather than adding an icon font/sprite dep —
+    // `icon` is just an arbitrary emoji/short-text string (renderer-defined).
+    return html`${this._entries.map(e => html`<a href=${e.path}>${e.icon ? `${e.icon} ` : ''}${e.label}</a>`)}`;
   }
 }
 

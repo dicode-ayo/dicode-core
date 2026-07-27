@@ -26,6 +26,7 @@ trigger:
 webui:
   nav:
     label: "Auth Providers"
+    icon: "🔑"
 
 params:
   providers:
