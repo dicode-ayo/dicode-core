@@ -265,4 +265,23 @@ test.describe('WebUI dashboard — Navigation', () => {
     await page.locator('nav a', { hasText: 'Tasks' }).first().click({ force: true });
     await page.waitForSelector('dc-task-list', { timeout: 10_000 });
   });
+
+  // Regression for #222 — a task can contribute a first-class nav entry via
+  // its task.yaml `webui.nav` block. buildin/auth-providers dogfoods this
+  // (webui.nav.label: "Auth Providers", webui.nav.icon: "🔑"); dc-nav renders
+  // it as a plain root-relative <a href="/hooks/auth-providers"> sibling of
+  // the static links, which is a full page navigation (app.js's click
+  // interceptor leaves root-relative hrefs alone) into that task's own
+  // webhook-served SPA. The icon is rendered as a plain text/emoji prefix on
+  // the link label (no icon-font/sprite dependency).
+  test('task-contributed nav link (Auth Providers) is present and navigates to its webhook page', async ({ page }) => {
+    const navLink = page.locator('nav a', { hasText: 'Auth Providers' });
+    await expect(navLink).toBeVisible({ timeout: 10_000 });
+    await expect(navLink).toHaveAttribute('href', '/hooks/auth-providers');
+    await expect(navLink).toHaveText('🔑 Auth Providers');
+
+    await navLink.click();
+    await page.waitForURL(/\/hooks\/auth-providers/, { timeout: 10_000 });
+    await expect(page).toHaveTitle(/Auth Providers/);
+  });
 });

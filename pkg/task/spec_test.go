@@ -317,6 +317,86 @@ provider:
 	}
 }
 
+// TestSpec_WebuiNav_RoundTrip verifies that a webui.nav block decodes into
+// Spec.Webui.Nav.{Label,Order,Icon} (#222).
+func TestSpec_WebuiNav_RoundTrip(t *testing.T) {
+	src := strings.TrimSpace(`
+name: auth-providers
+runtime: deno
+trigger:
+  webhook: /hooks/auth-providers
+webui:
+  nav:
+    label: "Auth Providers"
+    order: 5
+    icon: "key"
+`)
+	var s Spec
+	if err := yaml.NewDecoder(strings.NewReader(src)).Decode(&s); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if s.Webui == nil || s.Webui.Nav == nil {
+		t.Fatalf("Webui.Nav not parsed, got %+v", s.Webui)
+	}
+	if s.Webui.Nav.Label != "Auth Providers" {
+		t.Errorf("Label = %q, want %q", s.Webui.Nav.Label, "Auth Providers")
+	}
+	if s.Webui.Nav.Order != 5 {
+		t.Errorf("Order = %d, want 5", s.Webui.Nav.Order)
+	}
+	if s.Webui.Nav.Icon != "key" {
+		t.Errorf("Icon = %q, want %q", s.Webui.Nav.Icon, "key")
+	}
+	if err := s.validate(); err != nil {
+		t.Fatalf("valid webui.nav should validate, got %v", err)
+	}
+}
+
+// TestSpec_Validate_RejectsEmptyWebuiNavLabel ensures a webui.nav block with
+// an empty label is rejected at config-load time with a clear error (#222).
+func TestSpec_Validate_RejectsEmptyWebuiNavLabel(t *testing.T) {
+	src := strings.TrimSpace(`
+name: bad-nav
+runtime: deno
+trigger: { manual: true }
+webui:
+  nav:
+    order: 1
+`)
+	var s Spec
+	if err := yaml.NewDecoder(strings.NewReader(src)).Decode(&s); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	err := s.validate()
+	if err == nil {
+		t.Fatal("a webui.nav block with empty label must be rejected")
+	}
+	if !strings.Contains(err.Error(), "webui.nav.label") {
+		t.Errorf("error should mention webui.nav.label, got %v", err)
+	}
+}
+
+// TestSpec_WebuiNav_Omitted verifies a spec with no webui key at all still
+// validates fine (nil-safe) — the common case for tasks not opting into nav
+// contribution (#222).
+func TestSpec_WebuiNav_Omitted(t *testing.T) {
+	src := strings.TrimSpace(`
+name: plain-task
+runtime: deno
+trigger: { manual: true }
+`)
+	var s Spec
+	if err := yaml.NewDecoder(strings.NewReader(src)).Decode(&s); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if s.Webui != nil {
+		t.Errorf("Webui should be nil when omitted, got %+v", s.Webui)
+	}
+	if err := s.validate(); err != nil {
+		t.Fatalf("spec with no webui key should validate, got %v", err)
+	}
+}
+
 func TestDockerConfig_HardeningFields_Parse(t *testing.T) {
 	src := strings.TrimSpace(`
 name: tunnel

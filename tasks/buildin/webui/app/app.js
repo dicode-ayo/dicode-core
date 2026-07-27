@@ -19,6 +19,7 @@ import './components/dc-notif-panel.js';
 import './components/dc-metrics.js';
 import './components/dc-relay-status.js';
 import './components/dc-toast.js';
+import './components/dc-nav.js';
 
 // ── Auth overlay ──────────────────────────────────────────────────────────────
 // Inject a single <dc-auth-overlay> into the document body. The API client

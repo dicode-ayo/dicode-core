@@ -490,6 +490,26 @@ type DicodePermissions struct {
 	AuditQuery bool `yaml:"audit_query,omitempty" json:"audit_query,omitempty"`
 }
 
+// WebuiNav declares a first-class navigation entry a task contributes to the
+// main webui header, linking to this task's own webhook-served page (see
+// WebuiConfig).
+type WebuiNav struct {
+	// Label is the link text shown in the nav. Required.
+	Label string `yaml:"label" json:"label"`
+	// Order controls left-to-right position among contributed nav entries
+	// (ascending; default 0). Entries with equal Order are sorted by task ID.
+	Order int `yaml:"order,omitempty" json:"order,omitempty"`
+	// Icon is an optional icon identifier for the nav entry (renderer-defined).
+	Icon string `yaml:"icon,omitempty" json:"icon,omitempty"`
+}
+
+// WebuiConfig lets a task contribute a first-class navigation entry to the
+// main webui header, linking to this task's own webhook-served page (see
+// tasks/buildin/auth-providers for a self-contained SPA task this targets).
+type WebuiConfig struct {
+	Nav *WebuiNav `yaml:"nav,omitempty" json:"nav,omitempty"`
+}
+
 // ProviderConfig declares secret-provider settings on a task that
 // implements the issue #119 provider contract (calls dicode.output(map,
 // { secret: true }) with a flat Record<string,string>).
@@ -537,6 +557,11 @@ type Spec struct {
 	// the given config. The reconciler uses this to gate cache_ttl
 	// validation; the resolver uses it to look up the TTL.
 	Provider *ProviderConfig `yaml:"provider,omitempty" json:"provider,omitempty"`
+
+	// Webui lets a task contribute a first-class navigation entry to the
+	// main webui header, linking to this task's own webhook-served page.
+	// nil = no nav contribution (default).
+	Webui *WebuiConfig `yaml:"webui,omitempty" json:"webui,omitempty"`
 
 	// RunInputs configures per-task input persistence. Overrides the global
 	// defaults.run_inputs from dicode.yaml for this task only.
@@ -781,6 +806,9 @@ func (s *Spec) validate() error {
 		if e.Name == "*" {
 			return fmt.Errorf(`permissions.env: a name-only "*" entry is no longer accepted; set "env_read_exposed: true" to grant the Deno sandbox bare --allow-env`)
 		}
+	}
+	if s.Webui != nil && s.Webui.Nav != nil && s.Webui.Nav.Label == "" {
+		return fmt.Errorf("webui.nav.label is required")
 	}
 	for _, inc := range s.HashInclude {
 		if inc == "" {

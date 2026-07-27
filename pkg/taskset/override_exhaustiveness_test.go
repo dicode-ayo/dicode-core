@@ -316,6 +316,7 @@ func TestCopySpec_Exhaustive(t *testing.T) {
 		"Provider":                 "provider config read-only after load; no merge path writes through it",
 		"RunResult":                "run-result config read-only after load; no merge path writes through it",
 		"AutoFix":                  "auto-fix config read-only after load; no merge path writes through it",
+		"Webui":                    "webui nav config read-only after load; no merge/override path writes through it",
 	}
 
 	orig := &task.Spec{}

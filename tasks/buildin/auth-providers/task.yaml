@@ -23,6 +23,11 @@ trigger:
   webhook: /hooks/auth-providers
   auth: true
 
+webui:
+  nav:
+    label: "Auth Providers"
+    icon: "🔑"
+
 params:
   providers:
     type: string
