@@ -34,6 +34,7 @@ class DcTaskDetail extends LitElement {
     _diff:            { state: true }, // last-fetched GET /pending-diff body, or null
     _diffError:       { state: true },
     _diffLoading:     { state: true },
+    _approveArmed:    { state: true }, // diff has been shown; Approve now confirms
   };
 
   constructor() {
@@ -45,7 +46,7 @@ class DcTaskDetail extends LitElement {
     this._showStages = false;
     this._expanded = new Set();
     this._children = new Map();
-    this._diffOpen = false; this._diff = null; this._diffError = ''; this._diffLoading = false;
+    this._diffOpen = false; this._diff = null; this._diffError = ''; this._diffLoading = false; this._approveArmed = false;
     this._editor = null;
     this._relayBase = '';
     this._offStarted = null; this._offFinished = null;
@@ -83,7 +84,7 @@ class DcTaskDetail extends LitElement {
     if (!this.taskid) return;
     this._task = null; this._runs = null; this._error = null;
     this._editorOpen = false; this._triggerOpen = false;
-    this._diffOpen = false; this._diff = null; this._diffError = ''; this._diffLoading = false;
+    this._diffOpen = false; this._diff = null; this._diffError = ''; this._diffLoading = false; this._approveArmed = false;
     try {
       const [task, runs, base] = await Promise.all([
         get(`/api/tasks/${encodeURIComponent(this.taskid)}`),
@@ -129,29 +130,47 @@ class DcTaskDetail extends LitElement {
     } catch(e) { alert('Failed: ' + e.message); }
   }
 
+  // The first click reveals the change and arms the button; only the second
+  // one approves. Approving is a trust decision that arms triggers, so the
+  // diff must be on screen before it can be taken — matching the tokenized
+  // /approve/{token} page, which never offers approval without the diff.
   async _approve() {
-    if (!confirm(`Approve task "${this.taskid}"? Its triggers will arm and the current version will be trusted.`)) return;
+    if (!this._approveArmed) {
+      await this._openDiff();
+      this._approveArmed = true;
+      return;
+    }
     try {
       await post(`/api/tasks/${encodeURIComponent(this.taskid)}/approve`);
       await this._load();
     } catch(e) { alert('Approve failed: ' + e.message); }
   }
 
-  // _toggleDiff expands/collapses the "what changed" panel for a pending
-  // task, fetching it lazily on first expand (not on every render).
-  async _toggleDiff() {
-    this._diffOpen = !this._diffOpen;
-    if (this._diffOpen && !this._diff && !this._diffLoading) {
-      this._diffLoading = true;
-      this._diffError = '';
-      try {
-        this._diff = await get(`/api/tasks/${encodeURIComponent(this.taskid)}/pending-diff`);
-      } catch(e) {
-        this._diffError = e.message;
-      } finally {
-        this._diffLoading = false;
-      }
+  // _openDiff expands the "what changed" panel, fetching it lazily on first
+  // expand (not on every render).
+  async _openDiff() {
+    this._diffOpen = true;
+    if (this._diff || this._diffLoading) return;
+    this._diffLoading = true;
+    this._diffError = '';
+    try {
+      this._diff = await get(`/api/tasks/${encodeURIComponent(this.taskid)}/pending-diff`);
+    } catch(e) {
+      this._diffError = e.message;
+    } finally {
+      this._diffLoading = false;
     }
+  }
+
+  // Collapsing the diff disarms a pending approval: the operator must not be
+  // able to confirm a change they have hidden from themselves.
+  async _toggleDiff() {
+    if (this._diffOpen) {
+      this._diffOpen = false;
+      this._approveArmed = false;
+      return;
+    }
+    await this._openDiff();
   }
 
   // _renderDiffLine splits one "+ "/"- "/"  " prefixed line of a FileDiff's
@@ -592,7 +611,9 @@ class DcTaskDetail extends LitElement {
         <h1 style="margin:0">${task.name}</h1>
         ${needsApproval ? html`<span title="This task is new or changed and its triggers are not armed until approved"
           style="padding:0 0.45rem;font-size:0.75rem;border-radius:3px;background:rgba(210,153,34,0.18);color:#d29922;border:1px solid rgba(210,153,34,0.45)">pending approval</span>` : ''}
-        ${needsApproval ? html`<button class="btn" style="background:#d29922" @click=${() => this._approve()}>&#10003; Approve</button>` : ''}
+        ${needsApproval ? html`<button class="btn" style="background:#d29922" @click=${() => this._approve()}
+          title=${this._approveArmed ? 'Approve this version and arm its triggers' : 'Show what changed before approving'}
+          >&#10003; ${this._approveArmed ? 'Confirm approve' : 'Review & approve'}</button>` : ''}
         ${needsApproval ? html`<button class="btn btn-sm secondary" @click=${() => this._toggleDiff()}>${this._diffOpen ? 'Hide diff' : 'View diff'}</button>` : ''}
         <button class="btn" @click=${() => this._run()}>&#9654; Run now</button>
         ${hasEditor ? html`<button class="btn" style="background:var(--muted)" @click=${() => this._openEditor()}>&#9998; Edit code</button>` : ''}

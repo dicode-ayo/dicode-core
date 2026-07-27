@@ -133,4 +133,52 @@ test.describe('Approval pending-diff', () => {
       );
     }
   });
+
+  test('Approve reveals the diff first and only approves on a second, explicit click', async ({ page, request }) => {
+    const taskJsPath = path.join(tasksDir(), 'hello-manual', 'task.js');
+    const original = fs.readFileSync(taskJsPath, 'utf8');
+
+    try {
+      fs.writeFileSync(taskJsPath, original + `\n${DIFF_MARKER}\n`, 'utf8');
+      await waitForTaskCondition(request, MANUAL_TASK_ID, (t) => t.pending_approval === true);
+
+      await gotoWebui(page);
+      await navigateInSpa(page, `/tasks/${MANUAL_TASK_ID}`);
+      await waitForTaskDetail(page);
+
+      const reviewBtn = page.locator('button', { hasText: 'Review & approve' });
+      const confirmBtn = page.locator('button', { hasText: 'Confirm approve' });
+      await expect(reviewBtn).toBeVisible();
+
+      // The whole point of the gate: the first click must not approve.
+      await reviewBtn.click({ force: true });
+      await expect(page.locator('dc-task-detail')).toContainText(DIFF_MARKER, { timeout: 10_000 });
+      await expect(confirmBtn).toBeVisible();
+      const afterFirstClick = await (
+        await request.get(`/api/tasks/${encodeURIComponent(MANUAL_TASK_ID)}`)
+      ).json() as Record<string, unknown>;
+      expect(afterFirstClick.pending_approval).toBe(true);
+
+      // Hiding the diff must disarm — approval cannot be confirmed against a
+      // change the operator has collapsed back out of view.
+      await page.locator('button', { hasText: 'Hide diff' }).click({ force: true });
+      await expect(reviewBtn).toBeVisible();
+
+      await reviewBtn.click({ force: true });
+      await expect(confirmBtn).toBeVisible();
+      await confirmBtn.click({ force: true });
+
+      await waitForTaskCondition(request, MANUAL_TASK_ID, (t) => t.pending_approval !== true);
+    } finally {
+      // Restoring the original bytes returns the content hash to the record
+      // approved by the confirm click above (or by bootstrap, if the test
+      // failed before it), so the task is left armed either way.
+      fs.writeFileSync(taskJsPath, original, 'utf8');
+      await waitForTaskCondition(
+        request,
+        MANUAL_TASK_ID,
+        (t) => t.pending_approval !== true,
+      );
+    }
+  });
 });
