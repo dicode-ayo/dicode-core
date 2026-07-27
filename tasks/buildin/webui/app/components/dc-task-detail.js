@@ -47,6 +47,7 @@ class DcTaskDetail extends LitElement {
     this._expanded = new Set();
     this._children = new Map();
     this._diffOpen = false; this._diff = null; this._diffError = ''; this._diffLoading = false; this._approveArmed = false;
+    this._diffEditors = new Map();
     this._editor = null;
     this._relayBase = '';
     this._offStarted = null; this._offFinished = null;
@@ -57,6 +58,7 @@ class DcTaskDetail extends LitElement {
       this._cleanup();
       this._load();
     }
+    if (this._diffOpen) this._mountDiffEditors();
   }
 
   connectedCallback() {
@@ -78,12 +80,14 @@ class DcTaskDetail extends LitElement {
     this._offStarted?.(); this._offStarted = null;
     this._offFinished?.(); this._offFinished = null;
     if (this._editor) { this._editor.dispose(); this._editor = null; }
+    this._disposeDiffEditors();
   }
 
   async _load() {
     if (!this.taskid) return;
     this._task = null; this._runs = null; this._error = null;
     this._editorOpen = false; this._triggerOpen = false;
+    this._disposeDiffEditors();
     this._diffOpen = false; this._diff = null; this._diffError = ''; this._diffLoading = false; this._approveArmed = false;
     try {
       const [task, runs, base] = await Promise.all([
@@ -171,6 +175,7 @@ class DcTaskDetail extends LitElement {
     if (this._diffOpen) {
       this._diffOpen = false;
       this._approveArmed = false;
+      this._disposeDiffEditors();
       return;
     }
     await this._openDiff();
@@ -214,9 +219,74 @@ class DcTaskDetail extends LitElement {
               <span style="font-size:0.7rem;padding:0.05rem 0.4rem;border-radius:3px;background:var(--bg-alt);color:var(--muted);text-transform:uppercase">${f.status}</span>
               ${f.security_relevant ? html`<span style="font-size:0.7rem;padding:0.05rem 0.4rem;border-radius:3px;background:rgba(248,81,73,0.18);color:#f85149;border:1px solid rgba(248,81,73,0.45)">security-relevant</span>` : ''}
             </div>
-            <pre style="background:var(--bg-alt);padding:0.6rem 0.75rem;border-radius:6px;overflow-x:auto;font-size:0.8rem;line-height:1.45;margin:0;white-space:pre">${(f.unified_diff || '').split('\n').filter(l => l !== '').map(l => this._renderDiffLine(l))}</pre>
+            ${this._hasInlineSides(f)
+              ? html`<div class="dc-diff-editor" data-diff-path=${f.path}
+                       style="height:${this._diffEditorHeight(f)}px;border-radius:6px;overflow:hidden;border:1px solid var(--border)"></div>`
+              : html`<pre style="background:var(--bg-alt);padding:0.6rem 0.75rem;border-radius:6px;overflow-x:auto;font-size:0.8rem;line-height:1.45;margin:0;white-space:pre">${(f.unified_diff || '').split('\n').filter(l => l !== '').map(l => this._renderDiffLine(l))}</pre>`}
           </div>`)}
       </div>`;
+  }
+
+  // Monaco needs both sides verbatim; the API omits them for oversized and
+  // binary files (see maxInlineContentBytes), which fall back to the hunked
+  // text rendering.
+  _hasInlineSides(f) {
+    return typeof f.old_content === 'string' || typeof f.new_content === 'string';
+  }
+
+  // Sized to the change rather than the file: hideUnchangedRegions collapses
+  // the rest, so a 3k-line file with one edit needs a few hundred pixels, not
+  // a 56,000px page.
+  _diffEditorHeight(f) {
+    const changed = (f.unified_diff || '').split('\n').filter(l => l.startsWith('+ ') || l.startsWith('- ')).length;
+    return Math.min(600, Math.max(160, (changed + 8) * 19));
+  }
+
+  // Mounts a Monaco diff editor into every .dc-diff-editor placeholder the
+  // last render produced. Monaco owns its own DOM, so Lit must not re-render
+  // into a mounted container — each is keyed by path and mounted once.
+  _mountDiffEditors() {
+    const nodes = this.querySelectorAll('.dc-diff-editor');
+    if (!nodes.length || !this._diff) return;
+    const pending = [...nodes].filter(n => !this._diffEditors.has(n.dataset.diffPath));
+    if (!pending.length) return;
+
+    const mount = () => {
+      for (const node of pending) {
+        const f = (this._diff.files || []).find(x => x.path === node.dataset.diffPath);
+        if (!f || this._diffEditors.has(f.path) || !node.isConnected) continue;
+        const lang = f.path.endsWith('.ts') ? 'typescript'
+          : f.path.endsWith('.py') ? 'python'
+          : f.path.endsWith('.yaml') || f.path.endsWith('.yml') ? 'yaml'
+          : 'javascript';
+        const ed = monaco.editor.createDiffEditor(node, {
+          theme: monacoTheme(), fontSize: 13, readOnly: true, renderSideBySide: false,
+          minimap: { enabled: false }, scrollBeyondLastLine: false, automaticLayout: true,
+          hideUnchangedRegions: { enabled: true, contextLineCount: 3, minimumLineCount: 3 },
+        });
+        ed.setModel({
+          original: monaco.editor.createModel(f.old_content || '', lang),
+          modified: monaco.editor.createModel(f.new_content || '', lang),
+        });
+        this._diffEditors.set(f.path, ed);
+      }
+    };
+
+    if (window.monaco?.editor?.createDiffEditor) { mount(); return; }
+    require.config({ paths: { vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs' } });
+    require(['vs/editor/editor.main'], mount);
+  }
+
+  // Monaco editors are not garbage-collected with their container — models
+  // and the editor itself leak across task navigations without this.
+  _disposeDiffEditors() {
+    for (const ed of this._diffEditors.values()) {
+      const m = ed.getModel();
+      m?.original?.dispose();
+      m?.modified?.dispose();
+      ed.dispose();
+    }
+    this._diffEditors.clear();
   }
 
   _openEditor() {

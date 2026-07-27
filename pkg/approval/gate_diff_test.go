@@ -1,6 +1,7 @@
 package approval
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -503,4 +504,115 @@ func TestUnifiedDiffTextOneSidedPlaceholderShowsRealContent(t *testing.T) {
 	if !strings.Contains(got, "hello") || !strings.Contains(got, "world") {
 		t.Errorf("new-side-only placeholder must still render the old side's real content: %q", got)
 	}
+}
+
+// TestDiffHunksLongContext is the regression for the payload/scroll blowup: a
+// one-line edit to a large file must not ship the whole file as context.
+func TestDiffHunksLongContext(t *testing.T) {
+	g, _, _ := newTestGate(t, enabledPolicy())
+
+	var b strings.Builder
+	for i := 0; i < 500; i++ {
+		fmt.Fprintf(&b, "const filler_%d = 'padding';\n", i)
+	}
+	original := b.String()
+	spec := writeTaskDir(t, t.TempDir(), "repo/big", original)
+
+	if _, err := g.Admit(spec); err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+	if err := g.Approve("repo/big"); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+
+	changed := strings.Replace(original, "const filler_250 = 'padding';", "const filler_250 = 'CHANGED';", 1)
+	if err := os.WriteFile(filepath.Join(spec.TaskDir, "task.js"), []byte(changed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Admit(spec); err != nil {
+		t.Fatalf("Admit changed: %v", err)
+	}
+
+	d, err := g.Diff("repo/big")
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+	var js *FileDiff
+	for i := range d.Files {
+		if d.Files[i].Path == "task.js" {
+			js = &d.Files[i]
+		}
+	}
+	if js == nil {
+		t.Fatalf("no task.js entry: %+v", d.Files)
+	}
+
+	lines := strings.Split(strings.TrimSuffix(js.UnifiedDiff, "\n"), "\n")
+	if len(lines) > 4*diffContextLines+4 {
+		t.Errorf("context not elided: %d lines rendered for a 1-line change:\n%s", len(lines), js.UnifiedDiff)
+	}
+	if !strings.Contains(js.UnifiedDiff, "CHANGED") {
+		t.Errorf("hunking dropped the change itself:\n%s", js.UnifiedDiff)
+	}
+	if !strings.Contains(js.UnifiedDiff, "unchanged lines") {
+		t.Errorf("want an elision marker for dropped context:\n%s", js.UnifiedDiff)
+	}
+	// Both sides ship as reconstructed hunks for a client-side viewer, and
+	// must stay small — shipping whole files here costs more than the
+	// unhunked diff this replaced.
+	if js.OldContent == "" || js.NewContent == "" {
+		t.Fatalf("want both sides reconstructed, got old=%d new=%d bytes", len(js.OldContent), len(js.NewContent))
+	}
+	if !strings.Contains(js.NewContent, "CHANGED") || strings.Contains(js.OldContent, "CHANGED") {
+		t.Error("reconstructed sides are stale or the wrong way round")
+	}
+	if n := strings.Count(js.NewContent, "\n"); n > 4*diffContextLines+4 {
+		t.Errorf("new side carries the whole file (%d lines), not just its hunks", n)
+	}
+}
+
+// TestDiffSecurityFlagSurvivesHunking guards the ordering inside Diff:
+// flagging runs against the full diff, so a security-relevant line must still
+// be flagged when it sits far enough into a large file that hunking elides
+// everything around it.
+func TestDiffSecurityFlagSurvivesHunking(t *testing.T) {
+	g, _, _ := newTestGate(t, enabledPolicy())
+
+	var b strings.Builder
+	for i := 0; i < 300; i++ {
+		fmt.Fprintf(&b, "# filler %d\n", i)
+	}
+	original := b.String()
+	spec := writeTaskDir(t, t.TempDir(), "repo/perm", "unused\n")
+	yamlPath := filepath.Join(spec.TaskDir, "task.yaml")
+	if err := os.WriteFile(yamlPath, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Admit(spec); err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+	if err := g.Approve("repo/perm"); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+
+	if err := os.WriteFile(yamlPath, []byte(original+"permissions:\n  net:\n    - evil.example.com\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Admit(spec); err != nil {
+		t.Fatalf("Admit changed: %v", err)
+	}
+
+	d, err := g.Diff("repo/perm")
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+	for _, f := range d.Files {
+		if f.Path == "task.yaml" {
+			if !f.SecurityRelevant {
+				t.Errorf("permissions change not flagged after hunking:\n%s", f.UnifiedDiff)
+			}
+			return
+		}
+	}
+	t.Fatal("no task.yaml entry in diff")
 }

@@ -803,25 +803,50 @@ restart-persistence for the diff cache is out of scope for this change.
 ### What the diff shows
 
 `Gate.Diff(taskID)` returns a `Diff{ TaskID, HasBaseline, Files []FileDiff }`.
-Each `FileDiff` is `{ Path, Status, UnifiedDiff, SecurityRelevant }` — only
-changed files are included (`Status` is `"added"`, `"removed"`, or `"modified"`;
-unchanged files are omitted entirely). `UnifiedDiff` is a readable ` `/`-`/`+`
-prefixed rendering (line-mode diff via `github.com/sergi/go-diff/diffmatchpatch`),
-not byte-perfect POSIX unified diff format — just clear text for a human to
-scan before clicking Approve.
+Each `FileDiff` is `{ Path, Status, UnifiedDiff, SecurityRelevant, OldContent,
+NewContent }` — only changed files are included (`Status` is `"added"`,
+`"removed"`, or `"modified"`; unchanged files are omitted entirely).
+`UnifiedDiff` is a readable ` `/`-`/`+` prefixed rendering (line-mode diff via
+`github.com/sergi/go-diff/diffmatchpatch`), not byte-perfect POSIX unified diff
+format — just clear text for a human to scan before clicking Approve.
+
+**Hunking.** `UnifiedDiff` keeps `diffContextLines` (3) of context either side
+of each change and collapses longer runs into a `⋯ N unchanged lines` marker.
+Without this the entire file ships as context: a one-line edit to a 3,000-line
+task rendered 3,005 lines and a 56,000px page, and ten such files came to
+1.2 MB — burying the change the diff exists to surface. The marker matches none
+of the ` `/`-`/`+` prefixes, so both renderers already class it as a note
+without special-casing elision. Security-relevant flagging runs against the
+*full* diff before hunking, so elision can never hide a flagged line from the
+check — only from the rendering.
+
+`OldContent`/`NewContent` are the two sides of those hunks reconstructed as
+plain text, for a client-side viewer to render itself. They are deliberately
+derived from the hunked diff rather than the whole file: shipping both full
+sides costs *more* than the unhunked diff it replaced (measured 1.2 MB → 2.3 MB
+across ten changed files, versus 15 KB hunked). Both are omitted when either
+side is a placeholder or would exceed `maxInlineContentBytes` (128 KiB), which
+is only reachable when a file changes nearly end-to-end; a client must fall
+back to `UnifiedDiff` when they are absent.
 
 Two surfaces expose it:
 
 - `GET /api/tasks/{id}/pending-diff` — same auth group as
   `POST /api/tasks/{id}/approve` (session cookie or non-ephemeral API key).
   `200` with the `Diff` body, `404` unknown task, `409` task not pending,
-  `503` gate not wired. The dashboard's task-detail pending-approval banner
-  (`dc-task-detail.js`) adds a "View diff" toggle next to Approve that fetches
-  this endpoint and renders each file's diff inline.
+  `503` gate not wired. The dashboard's task-detail page opens this panel by
+  default for a pending task and mounts a Monaco diff editor per file from
+  `OldContent`/`NewContent` (virtualized, syntax-highlighted, folds unchanged
+  regions), falling back to the `UnifiedDiff` text rendering when the sides are
+  absent. Approve is only offered while the panel is open — collapsing it
+  reverts the button to re-opening the diff, and the task list has no approve
+  action at all, only a "Review" hand-off to this page.
 - The tokenized `/approve/{token}` link page — no session, the token itself is
   the auth boundary. It fetches the same `Diff` server-side and renders it into
   the bare HTML/CSS confirm page (no JS, per that page's existing constraint),
   with colored +/− lines and a "no baseline" notice when `HasBaseline` is false.
+  Monaco cannot serve this page, so the hunked `UnifiedDiff` text is what keeps
+  it readable for large changes.
 
 Dir-less (inline taskset) tasks have no files to snapshot — `Diff` returns
 gracefully (`Files` empty, no error) rather than treating the absence of a

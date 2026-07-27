@@ -44,7 +44,29 @@ type FileDiff struct {
 	// SecurityRelevant is true when an added or removed line in the diff
 	// touches one of the YAML keys matched by securityFieldPattern.
 	SecurityRelevant bool `json:"security_relevant"`
+	// OldContent and NewContent are the two sides of UnifiedDiff's hunks
+	// reconstructed as plain text, for a client-side diff viewer to render
+	// itself. Deliberately derived from the hunked diff rather than the whole
+	// file: shipping both full sides costs more than the unhunked diff it
+	// replaced (measured: 1.2MB -> 2.3MB across ten changed files), and a
+	// viewer fed the hunks shows the same changes. Elision markers appear in
+	// both sides as ordinary context, so they survive as visible context in
+	// the viewer. Empty when the file exceeds maxInlineContentBytes or either
+	// side is a placeholder — a client must fall back to UnifiedDiff then.
+	OldContent string `json:"old_content,omitempty"`
+	NewContent string `json:"new_content,omitempty"`
 }
+
+// maxInlineContentBytes bounds a single reconstructed side. Only reachable
+// when a file is changed nearly end-to-end (hunking elides nothing), where
+// the plain hunked text is the more useful rendering anyway.
+const maxInlineContentBytes = 128 * 1024
+
+// diffContextLines is how many unchanged lines are kept either side of a
+// change in UnifiedDiff. Without this the whole file is emitted as context:
+// a one-line edit to a 3k-line task shipped ~3,005 lines and rendered a
+// 56,000px page, which buries the change it exists to surface.
+const diffContextLines = 3
 
 // securityFieldPattern matches an added or removed unified-diff line that
 // touches one of the YAML keys folded into the approval gate's content hash
@@ -116,14 +138,102 @@ func (g *Gate) Diff(id string) (Diff, error) {
 		}
 
 		udiff := unifiedDiffText(oldContent, newContent)
-		out.Files = append(out.Files, FileDiff{
+		fd := FileDiff{
 			Path:             p,
 			Status:           status,
 			UnifiedDiff:      udiff,
 			SecurityRelevant: securityFieldPattern.MatchString(udiff),
-		})
+		}
+		// Flagging runs against the full diff above, before hunking drops
+		// context — elision must never hide a security-relevant line from the
+		// check, only from the rendering.
+		fd.UnifiedDiff = hunked(fd.UnifiedDiff)
+		if udiff != snapshotPlaceholder {
+			fd.OldContent, fd.NewContent = hunkSides(fd.UnifiedDiff)
+		}
+		out.Files = append(out.Files, fd)
 	}
 	return out, nil
+}
+
+// hunkSides reconstructs the two sides of a hunked diff as plain text: a
+// context or elision line belongs to both, a "- " line only to the old side,
+// a "+ " line only to the new. Returns ("", "") when either side would exceed
+// maxInlineContentBytes, leaving the caller's UnifiedDiff as the rendering.
+func hunkSides(hunkedDiff string) (oldSide, newSide string) {
+	var o, n strings.Builder
+	for _, l := range strings.Split(strings.TrimSuffix(hunkedDiff, "\n"), "\n") {
+		switch {
+		case strings.HasPrefix(l, "+ "):
+			n.WriteString(l[2:])
+			n.WriteString("\n")
+		case strings.HasPrefix(l, "- "):
+			o.WriteString(l[2:])
+			o.WriteString("\n")
+		case strings.HasPrefix(l, "  "):
+			o.WriteString(l[2:])
+			o.WriteString("\n")
+			n.WriteString(l[2:])
+			n.WriteString("\n")
+		default: // elision marker / placeholder note — context on both sides
+			o.WriteString(l)
+			o.WriteString("\n")
+			n.WriteString(l)
+			n.WriteString("\n")
+		}
+	}
+	if o.Len() > maxInlineContentBytes || n.Len() > maxInlineContentBytes {
+		return "", ""
+	}
+	return o.String(), n.String()
+}
+
+// hunked drops runs of unchanged context longer than 2*diffContextLines from
+// a rendered diff, replacing each with a muted "⋯ N unchanged lines" marker.
+// The marker matches none of the "+ "/"- "/"  " prefixes, so both renderers
+// already class it as a note without needing to know about elision.
+//
+// A diff with no changed lines at all is returned unmodified: that is the
+// snapshotPlaceholder note (or an empty diff), not context worth eliding.
+func hunked(diff string) string {
+	lines := strings.Split(strings.TrimSuffix(diff, "\n"), "\n")
+	keep := make([]bool, len(lines))
+	changed := false
+	for i, l := range lines {
+		if !strings.HasPrefix(l, "+ ") && !strings.HasPrefix(l, "- ") {
+			continue
+		}
+		changed = true
+		for j := i - diffContextLines; j <= i+diffContextLines; j++ {
+			if j >= 0 && j < len(lines) {
+				keep[j] = true
+			}
+		}
+	}
+	if !changed {
+		return diff
+	}
+
+	var b strings.Builder
+	for i := 0; i < len(lines); i++ {
+		if keep[i] {
+			b.WriteString(lines[i])
+			b.WriteString("\n")
+			continue
+		}
+		run := 0
+		for i+run < len(lines) && !keep[i+run] {
+			run++
+		}
+		if run == 1 {
+			b.WriteString(lines[i])
+		} else {
+			fmt.Fprintf(&b, "⋯ %d unchanged lines", run)
+		}
+		b.WriteString("\n")
+		i += run - 1
+	}
+	return b.String()
 }
 
 // unifiedDiffText renders a simple, readable "-"/"+"/" " prefixed diff of
