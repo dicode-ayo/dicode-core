@@ -146,12 +146,20 @@ test.describe('Approval pending-diff', () => {
     await withPendingChange(request, async () => {
       await gotoWebui(page);
 
+      // Scope to hello-manual's own row via its data-task-id: in the full
+      // suite other fixtures (e.g. add-source.spec.ts's "Hello Isolated"
+      // task) can be pending at the same time, and an unscoped .first() flakily
+      // grabbed whichever row rendered first — a real failure hit in CI,
+      // navigating to the wrong task entirely.
+      const row = page.locator(`dc-task-list tr[data-task-id="${MANUAL_TASK_ID}"]`);
+      const reviewBtn = row.locator('button', { hasText: 'Review' });
+
       // A table row has nowhere to show a diff, so the row must not offer
       // approval at all — otherwise it is a one-click bypass of the gate.
-      await expect(page.locator('dc-task-list button', { hasText: 'Review' }).first()).toBeVisible();
+      await expect(reviewBtn).toBeVisible();
       await expect(page.locator('dc-task-list button', { hasText: 'Approve' })).toHaveCount(0);
 
-      await page.locator('dc-task-list button', { hasText: 'Review' }).first().click({ force: true });
+      await reviewBtn.click({ force: true });
       await waitForTaskDetail(page);
       await expect(page.locator('dc-task-detail')).toContainText(DIFF_MARKER, { timeout: 10_000 });
 
