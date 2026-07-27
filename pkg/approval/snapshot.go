@@ -3,6 +3,7 @@ package approval
 import (
 	"crypto/sha256"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -10,6 +11,8 @@ import (
 	"sort"
 	"strings"
 	"unicode/utf8"
+
+	"gopkg.in/yaml.v3"
 )
 
 // maxSnapshotFileBytes bounds the content read into a single file's diff
@@ -266,13 +269,16 @@ func snapshotDir(dir string) (map[string]snapshotValue, error) {
 		abs := filepath.Join(dir, filepath.FromSlash(rel))
 		info, statErr := os.Stat(abs)
 		if statErr != nil || info.Size() > maxSnapshotFileBytes {
-			// Oversized (or vanished mid-scan): size+mtime only, matching
-			// task/hash.go's maxHashedFileBytes tradeoff for large files —
-			// reading the full content just to fingerprint it would defeat
-			// the point of the size cap.
+			// Oversized (or vanished mid-scan). Fingerprint by streaming the
+			// content, not size+mtime: maxSnapshotFileBytes bounds how much
+			// is held in memory for the gate's lifetime and rendered as diff
+			// text, not how much may be read, and a streamed hash is O(1)
+			// memory over I/O task.Hash already performs on the same
+			// schedule. Size+mtime here would leave the diff blind exactly
+			// where the hash is not — see maxFingerprintReadBytes.
 			var fp string
 			if statErr == nil {
-				fp = fileInfoFingerprint(info)
+				fp = streamFingerprint(abs, info)
 			}
 			out[rel] = snapshotValue{Placeholder: true, Fingerprint: fp}
 			continue
@@ -294,7 +300,7 @@ func snapshotDir(dir string) (map[string]snapshotValue, error) {
 		// Redact literal YAML "value:" scalars (task.EnvEntry.Value secrets)
 		// before the content ever lands in the maps Gate.approvedFiles and
 		// pendingEntry.files hold and Gate.Diff renders — see redactValueLines.
-		out[rel] = snapshotValue{Content: redactValueLines(string(data))}
+		out[rel] = snapshotValue{Content: redactSecrets(string(data))}
 	}
 	return out, nil
 }
@@ -327,4 +333,114 @@ func fileInfoFingerprint(info fs.FileInfo) string {
 func contentFingerprint(data []byte) string {
 	sum := sha256.Sum256(data)
 	return fmt.Sprintf("sha256=%x", sum)
+}
+
+// maxFingerprintReadBytes mirrors task/hash.go's maxHashedFileBytes. The
+// content hash reads a file this far before falling back to a size+mtime
+// descriptor, so the snapshot must be sensitive to content over exactly the
+// same range: any narrower and a change the hash notices — one that pends the
+// task and puts an operator in front of the diff — could be invisible in that
+// diff. Verified reachable before this bound existed: a same-size edit to a
+// 320 KiB file with mtime restored (touch -r) held the task pending and
+// produced a diff listing zero changed files.
+const maxFingerprintReadBytes = 1 << 20 // 1 MiB
+
+// streamFingerprint hashes path's content without holding it in memory. Past
+// maxFingerprintReadBytes it falls back to size+mtime, which is precisely
+// where task.Hash stops reading too — beyond that bound the hash cannot
+// detect a same-size, same-mtime change either, so the diff is no blinder
+// than the gate that feeds it.
+func streamFingerprint(path string, info fs.FileInfo) string {
+	if info.Size() > maxFingerprintReadBytes {
+		return fileInfoFingerprint(info)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return fileInfoFingerprint(info)
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return fileInfoFingerprint(info)
+	}
+	return fmt.Sprintf("sha256=%x", h.Sum(nil))
+}
+
+// minSweptSecretLen bounds the structural sweep below. A literal shorter than
+// this is not credential material, and blanking every occurrence of e.g.
+// "true" or "8080" across a file would wreck the diff it is meant to protect.
+// Short literals are left to redactValueLines' line scrub.
+const minSweptSecretLen = 6
+
+// redactSecrets scrubs literal env secrets out of content before it is stored
+// in a snapshot and rendered to the diff surfaces — including the
+// unauthenticated /approve/{token} page.
+//
+// Two passes, because neither alone is sufficient:
+//
+//  1. redactValueLines rewrites `value:`/`default:` lines in place. This is
+//     what keeps the diff readable — the key and line structure survive, so an
+//     operator still sees *that* the field changed.
+//  2. A structural sweep then parses content as YAML, collects every scalar
+//     actually bound to a `value`/`default` key, and blanks any that survived
+//     pass 1 verbatim.
+//
+// Pass 2 exists because pass 1 is line-anchored and YAML is not. Verified
+// leaks it catches: flow mappings (`env: [{name: A, value: sk-live-x}]`),
+// flow sequence entries, plain and quoted scalars spanning multiple lines
+// (only the first line matched), and non-lowercase keys (`Value:`). All are
+// legal task.yaml that yaml.v3 binds to EnvEntry.Value/Default, so all would
+// have reached the diff intact. Working from the parsed value rather than the
+// syntax makes the sweep independent of how the secret was written.
+//
+// A parse failure yields no sweep — a non-YAML file (a script, say) has no
+// bound scalars to find, and pass 1 has already run over it.
+func redactSecrets(content string) string {
+	out := redactValueLines(content)
+	for _, secret := range yamlSecretScalars(content) {
+		if len(secret) < minSweptSecretLen {
+			continue
+		}
+		out = strings.ReplaceAll(out, secret, redactedEnvValue)
+	}
+	return out
+}
+
+// yamlSecretScalars returns every scalar bound to a `value` or `default` key
+// anywhere in content, across all documents. Key matching is
+// case-insensitive: yaml.v3 field binding is, so `Value:` reaches
+// EnvEntry.Value just as `value:` does.
+func yamlSecretScalars(content string) []string {
+	var found []string
+	dec := yaml.NewDecoder(strings.NewReader(content))
+	for {
+		var doc yaml.Node
+		if err := dec.Decode(&doc); err != nil {
+			break // EOF or malformed — keep whatever earlier documents yielded
+		}
+		collectSecretScalars(&doc, &found)
+	}
+	return found
+}
+
+func collectSecretScalars(n *yaml.Node, out *[]string) {
+	if n == nil {
+		return
+	}
+	if n.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			k, v := n.Content[i], n.Content[i+1]
+			switch strings.ToLower(k.Value) {
+			case "value", "default":
+				if v.Kind == yaml.ScalarNode && v.Value != "" {
+					*out = append(*out, v.Value)
+				}
+			}
+			collectSecretScalars(v, out)
+		}
+		return
+	}
+	for _, c := range n.Content {
+		collectSecretScalars(c, out)
+	}
 }

@@ -34,7 +34,6 @@ class DcTaskDetail extends LitElement {
     _diff:            { state: true }, // last-fetched GET /pending-diff body, or null
     _diffError:       { state: true },
     _diffLoading:     { state: true },
-    _approveArmed:    { state: true }, // diff has been shown; Approve now confirms
     _monacoOff:       { state: true }, // Monaco unreachable — render diffs as text
   };
 
@@ -47,7 +46,7 @@ class DcTaskDetail extends LitElement {
     this._showStages = false;
     this._expanded = new Set();
     this._children = new Map();
-    this._diffOpen = false; this._diff = null; this._diffError = ''; this._diffLoading = false; this._approveArmed = false;
+    this._diffOpen = false; this._diff = null; this._diffError = ''; this._diffLoading = false;
     this._diffEditors = new Map();
     this._monacoOff = false;
     this._editor = null;
@@ -90,7 +89,7 @@ class DcTaskDetail extends LitElement {
     this._task = null; this._runs = null; this._error = null;
     this._editorOpen = false; this._triggerOpen = false;
     this._disposeDiffEditors();
-    this._diffOpen = false; this._diff = null; this._diffError = ''; this._diffLoading = false; this._approveArmed = false;
+    this._diffOpen = false; this._diff = null; this._diffError = ''; this._diffLoading = false;
     try {
       const [task, runs, base] = await Promise.all([
         get(`/api/tasks/${encodeURIComponent(this.taskid)}`),
@@ -140,11 +139,20 @@ class DcTaskDetail extends LitElement {
     } catch(e) { alert('Failed: ' + e.message); }
   }
 
-  // Approving is only offered while the change is on screen. The panel opens
-  // by default, so this is normally a single click; if the operator has
-  // collapsed the diff, the button reverts to re-opening it rather than
-  // approving something no longer in view. Mirrors the tokenized
-  // /approve/{token} page, which never offers approval without the diff.
+  // Approval is offered only while a fetched diff is actually rendered.
+  // Derived rather than latched: a flag set when the fetch *starts* let a
+  // double-click approve against a "Loading diff…" panel, and a flag that
+  // survived an error let it approve against an error message. Both are
+  // approving without having seen the change.
+  //
+  // A failed fetch therefore does NOT arm. That deliberately blocks approval
+  // in the dashboard when the diff endpoint is broken; `dicode task approve`
+  // and the tokenized link remain as escape hatches, and neither of those
+  // pretends a review happened.
+  get _approveArmed() {
+    return this._diffOpen && !!this._diff && !this._diffLoading && !this._diffError;
+  }
+
   async _approve() {
     if (!this._approveArmed) {
       await this._openDiff();
@@ -156,27 +164,33 @@ class DcTaskDetail extends LitElement {
     } catch(e) { alert('Approve failed: ' + e.message); }
   }
 
-  // Arms approval: a failed fetch still arms, so a broken diff endpoint
-  // cannot lock an operator out of approving — the panel shows the error.
   async _openDiff() {
     this._diffOpen = true;
-    this._approveArmed = true;
     if (this._diff || this._diffLoading) return;
     this._diffLoading = true;
     this._diffError = '';
+    // The element is reused across task navigations, so a slow response can
+    // outlive the task that asked for it. Bind the result to the task it was
+    // requested for and drop it otherwise — rendering task A's files under
+    // task B's heading would put an operator one click from approving B
+    // having reviewed A.
+    const requestedFor = this.taskid;
     try {
-      this._diff = await get(`/api/tasks/${encodeURIComponent(this.taskid)}/pending-diff`);
+      const body = await get(`/api/tasks/${encodeURIComponent(requestedFor)}/pending-diff`);
+      if (this.taskid !== requestedFor) return;
+      if (body && body.task_id && body.task_id !== requestedFor) return;
+      this._diff = body;
     } catch(e) {
+      if (this.taskid !== requestedFor) return;
       this._diffError = e.message;
     } finally {
-      this._diffLoading = false;
+      if (this.taskid === requestedFor) this._diffLoading = false;
     }
   }
 
   async _toggleDiff() {
     if (this._diffOpen) {
       this._diffOpen = false;
-      this._approveArmed = false;
       this._disposeDiffEditors();
       return;
     }
@@ -277,12 +291,13 @@ class DcTaskDetail extends LitElement {
       }
     };
 
-    if (window.monaco?.editor?.createDiffEditor) { mount(); return; }
+    const guarded = () => { try { mount(); } catch { this._monacoOff = true; } };
+    if (window.monaco?.editor?.createDiffEditor) { guarded(); return; }
     // The AMD loader is itself CDN-hosted (index.html), so an offline or
     // egress-filtered deploy has no `require` at all.
     if (typeof require === 'undefined') { this._monacoOff = true; return; }
     require.config({ paths: { vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs' } });
-    require(['vs/editor/editor.main'], mount, () => { this._monacoOff = true; });
+    require(['vs/editor/editor.main'], guarded, () => { this._monacoOff = true; });
   }
 
   // Monaco editors are not garbage-collected with their container — models

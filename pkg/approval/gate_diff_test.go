@@ -826,3 +826,45 @@ func TestDiffFlagsPermissionWidening(t *testing.T) {
 		})
 	}
 }
+
+// TestRedactSecretsCoversNonLineFormats covers literal env secrets written in
+// YAML forms the line scrub cannot see. Both surfaces this feeds — the REST
+// endpoint and the unauthenticated /approve/{token} page — must never carry
+// the literal.
+//
+// Known still-uncovered forms are asserted as such in
+// TestRedactSecretsKnownGaps rather than silently omitted.
+func TestRedactSecretsCoversNonLineFormats(t *testing.T) {
+	cases := map[string]string{
+		"flow mapping":  "permissions:\n  env: [{name: A, value: sk-live-FLOWSTYLE}]\n",
+		"flow seq item": "permissions:\n  env:\n    - {name: A, value: sk-live-FLOWSEQ}\n",
+		"uppercase key": "permissions:\n  env:\n    - name: A\n      Value: sk-live-UPPERKEY\n",
+		"default key":   "permissions:\n  env:\n    - name: A\n      default: sk-live-DEFAULTKEY\n",
+	}
+	for name, in := range cases {
+		out := redactSecrets(in)
+		if strings.Contains(out, "sk-live-") {
+			t.Errorf("%s: literal survived redaction:\n%s", name, out)
+		}
+	}
+}
+
+// TestRedactSecretsKnownGaps pins the forms redaction does NOT yet cover, so
+// the gap is visible in the test suite rather than discovered on a leak. Each
+// is a legal task.yaml that binds to EnvEntry.Value. See issue for the
+// YAML-node-driven redaction that closes them.
+func TestRedactSecretsKnownGaps(t *testing.T) {
+	gaps := map[string]string{
+		// A multiline scalar's parsed value ("a b") never appears verbatim in
+		// the bytes ("a\n  b"), so the content sweep cannot match it.
+		"plain multiline scalar": "permissions:\n  env:\n    - name: A\n      value: part-one\n        sk-live-CONTINUATION\n",
+		// The documented KEY=VALUE shorthand is a bare seq string, not a
+		// mapping under a value: key, so the sweep never collects it.
+		"KEY=VALUE shorthand": "permissions:\n  env:\n    - TOKEN=sk-live-SHORTHAND\n",
+	}
+	for name, in := range gaps {
+		if !strings.Contains(redactSecrets(in), "sk-live-") {
+			t.Errorf("%s is now redacted — good; remove it from the known-gap list", name)
+		}
+	}
+}

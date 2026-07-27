@@ -123,6 +123,13 @@ func touchesSecurityBlock(diff string) bool {
 			continue
 		}
 		body := strings.TrimLeft(line[2:], " \t")
+		// A comment carries no structure and YAML permits it at any column,
+		// so a `# note` at column 0 inside a permissions block must not read
+		// as the block ending — that would un-scope every changed line after
+		// it, and a comment is trivial to introduce alongside a widening.
+		if strings.HasPrefix(body, "#") {
+			continue
+		}
 		if inBlock && indent <= blockIndent && body != "" {
 			inBlock = false
 		}
