@@ -41,13 +41,13 @@ var snapshotHeavyDirs = map[string]bool{
 	".git":         true,
 }
 
-// valueLinePattern matches a YAML mapping entry named exactly "value" — e.g.
-// `  value: "sk-live-secret"` or `- value: secret` — capturing the key
-// portion (leading indentation, optional list-item dash, optional quotes
-// around the key name, and the colon) in group 1 and the scalar (or, per
-// blockScalarHeaderPattern below, block-scalar header) that follows in
-// group 2. See redactValueLines for why this exists.
-var valueLinePattern = regexp.MustCompile(`(?m)^([ \t]*(?:-[ \t]*)?"?value"?[ \t]*:)[ \t]*(.*)$`)
+// valueLinePattern matches a YAML mapping entry named exactly "value" or
+// "default" — e.g. `  value: "sk-live-secret"` or `- default: secret` —
+// capturing the key portion (leading indentation, optional list-item dash,
+// optional quotes around the key name, and the colon) in group 1 and the
+// scalar (or, per blockScalarHeaderPattern below, block-scalar header) that
+// follows in group 2. See redactValueLines for why this exists.
+var valueLinePattern = regexp.MustCompile(`(?m)^([ \t]*(?:-[ \t]*)?"?(?:value|default)"?[ \t]*:)[ \t]*(.*)$`)
 
 // valueKeyIndentPattern captures just the leading-whitespace-plus-optional-
 // list-dash portion of a matched "value:" line (i.e. valueLinePattern's group
@@ -73,9 +73,13 @@ var blockScalarHeaderPattern = regexp.MustCompile(`^[|>][+\-0-9]{0,2}[ \t]*(#.*)
 // redactedEnvValue while keeping enough structure intact that a diff still
 // shows *that* the field changed, never *what* it changed to/from.
 //
-// This exists because task.EnvEntry.Value (pkg/task/spec.go) lets a task's
-// permissions.env block carry a literal secret value inline in task.yaml (as
-// opposed to Secret, a secrets-store key name reference). ContentHash
+// This exists because task.EnvEntry.Value and task.EnvEntry.Default
+// (pkg/task/spec.go) both let a task's permissions.env block carry a literal
+// secret inline in task.yaml (as opposed to Secret, a secrets-store key name
+// reference). Default is injected as the env var's value whenever the named
+// secret is absent from the store (pkg/runtime/envresolve/resolver.go), and
+// its documented use is exactly a credential fallback — so it carries the
+// same class of material as Value and must be blanked on the same surfaces. ContentHash
 // (gate.go's sanitizePermissions/redactedEnvValue) already keeps that literal
 // out of the committable dicode.lock; snapshotDir must keep it out of the
 // pending-change diff surface (REST endpoint, WebUI panel, and the
@@ -83,14 +87,12 @@ var blockScalarHeaderPattern = regexp.MustCompile(`^[|>][+\-0-9]{0,2}[ \t]*(#.*)
 // same redactedEnvValue placeholder for consistency.
 //
 // Deliberately generic: this redacts any line that looks like a YAML
-// "value:" mapping entry in any snapshotted file, not just ones provably
-// inside permissions.env — a snapshot has no field-path-aware YAML parse, and
-// erring toward over-redaction is the correct tradeoff for a security fix. As
-// of this writing task.Spec's YAML schema (pkg/task/spec.go) has exactly one
-// top-level "value" key — EnvEntry.Value — so this should not blank any other
-// legitimate field in a task.yaml; a non-YAML script file containing a
-// literal "value:" line would still get blanked, but that false-positive
-// blast radius is negligible next to the alternative of leaking a secret.
+// "value:"/"default:" mapping entry in any snapshotted file, not just ones
+// provably inside permissions.env — a snapshot has no field-path-aware YAML
+// parse, and erring toward over-redaction is the correct tradeoff for a
+// security fix. This does blank param defaults (task.Param.Default), which
+// are not secrets; that cost is accepted, since a param default is
+// reconstructible from the task source while a leaked credential is not.
 //
 // Block-scalar handling is a heuristic, not a YAML parse: when a matched
 // "value:" line's scalar portion is itself a block-scalar header

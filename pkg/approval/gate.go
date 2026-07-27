@@ -515,13 +515,17 @@ const contentHashDomain = "dicode-approval-content-v1"
 // which matches the WebhookSecret exclusion rationale.
 const redactedEnvValue = "<redacted>"
 
-// sanitizePermissions returns p with every non-empty Env literal Value
-// replaced by redactedEnvValue. The Env slice is copied before mutation so
-// the caller's spec is never touched; name/secret/from refs are kept.
+// sanitizePermissions returns p with every non-empty Env literal Value and
+// Default replaced by redactedEnvValue. Default is included because
+// envresolve injects it as the env var's value when the named secret is
+// absent, so it holds the same class of material as Value and must not reach
+// the hash in a low-entropy, offline-attackable form either. The Env slice is
+// copied before mutation so the caller's spec is never touched;
+// name/secret/from refs are kept.
 func sanitizePermissions(p task.Permissions) task.Permissions {
 	needsRedact := false
 	for _, e := range p.Env {
-		if e.Value != "" {
+		if e.Value != "" || e.Default != "" {
 			needsRedact = true
 			break
 		}
@@ -534,6 +538,9 @@ func sanitizePermissions(p task.Permissions) task.Permissions {
 	for i := range env {
 		if env[i].Value != "" {
 			env[i].Value = redactedEnvValue
+		}
+		if env[i].Default != "" {
+			env[i].Default = redactedEnvValue
 		}
 	}
 	p.Env = env

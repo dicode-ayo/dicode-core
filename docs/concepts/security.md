@@ -774,10 +774,12 @@ when its content can't be rendered.
 **Literal secret values are redacted before storage.** `task.EnvEntry.Value`
 (`pkg/task/spec.go`) lets a task's `permissions.env` block carry a literal
 secret value inline in `task.yaml`, as opposed to `Secret` (a secrets-store key
-*name* reference). `snapshotDir` runs every captured text file through
-`redactValueLines`, which blanks the scalar half of any line matching a YAML
-`value:` mapping entry (`^([ \t]*(?:-[ \t]*)?"?value"?[ \t]*:)[ \t]*(.*)$`,
-multiline) to the same `<redacted>` placeholder (`redactedEnvValue`) that
+*name* reference). `task.EnvEntry.Default` carries the same class of material — `envresolve`
+injects it as the variable's value whenever the named secret is absent from
+the store — so it is redacted identically. `snapshotDir` runs every captured
+text file through `redactValueLines`, which blanks the scalar half of any line
+matching a YAML `value:` or `default:` mapping entry
+(`^([ \t]*(?:-[ \t]*)?"?(?:value|default)"?[ \t]*:)[ \t]*(.*)$`, multiline) to the same `<redacted>` placeholder (`redactedEnvValue`) that
 `ContentHash`'s `sanitizePermissions` already uses for the content hash — see
 that doc comment in `pkg/approval/gate.go` for why a literal env value must
 never appear in a low-entropy, offline-attackable form. The `key:` prefix and
@@ -853,6 +855,18 @@ gracefully (`Files` empty, no error) rather than treating the absence of a
 task directory as a failure.
 
 ### Security-relevant highlighting
+
+Flagging combines two checks, both run against the *full* diff before hunking
+elides context. `securityFieldPattern` matches a changed line that itself names
+a security key (`permissions:`, `net:`, `cron:`, …), which catches a block being
+added. `touchesSecurityBlock` tracks YAML indentation to flag a changed line
+*anywhere inside* a `permissions:` or `trigger:` block, which catches one being
+**widened** — appending a host to an already-approved `net:` allowlist changes
+only a list item and names no key, so the pattern alone misses it. Widening an
+existing block is both the likelier change under trust-on-change and the
+stealthier one, so it must flag too. `touchesSecurityBlock` depends on the
+pre-hunk ordering directly: elided context would drop the `permissions:` opener
+that puts a changed line in scope.
 
 A `FileDiff` is flagged `SecurityRelevant: true` when an added or removed line
 in its `UnifiedDiff` touches one of the YAML keys folded into the approval

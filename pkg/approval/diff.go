@@ -84,6 +84,60 @@ const diffContextLines = 3
 var securityFieldPattern = regexp.MustCompile(
 	`(?m)^[-+].*\b(permissions|env|run|net|fs|sys|dicode|git_commit_push|webhook|webhook_auth|cron|daemon|manual|chain)[ \t]*:`)
 
+// securityBlockPattern matches the top-level YAML key that opens a block
+// whose entire subtree is security-relevant. A changed line anywhere inside
+// such a block counts, which securityFieldPattern alone cannot express.
+var securityBlockPattern = regexp.MustCompile(`^(permissions|trigger)[ \t]*:`)
+
+// diffLineIndent returns the indentation column of a rendered diff line,
+// ignoring its "+ "/"- "/"  " prefix. Elision markers and placeholder notes
+// carry no prefix and no meaningful indentation, so they report -1 and are
+// skipped by the block scan rather than closing a block they sit inside.
+func diffLineIndent(line string) int {
+	if len(line) < 2 || (line[0] != '+' && line[0] != '-' && line[0] != ' ') || line[1] != ' ' {
+		return -1
+	}
+	return leadingIndent(line[2:])
+}
+
+// touchesSecurityBlock reports whether any added or removed line in diff sits
+// inside a `permissions:` or `trigger:` block.
+//
+// securityFieldPattern only fires on a changed line that itself names a
+// security key, so it catches a permissions block being *added* but misses it
+// being *widened* — appending a host to an already-approved `net:` allowlist
+// changes only a list item, whose line names no key at all. Widening an
+// existing block is both the likelier change in a trust-on-change model and
+// the stealthier one, so it must flag too.
+//
+// Block membership is tracked by indentation over the diff's own line
+// sequence, including context lines, which is why hunking must run after
+// flagging: elided context would otherwise drop the `permissions:` opener
+// that puts a changed line in scope.
+func touchesSecurityBlock(diff string) bool {
+	inBlock := false
+	blockIndent := 0
+	for _, line := range strings.Split(diff, "\n") {
+		indent := diffLineIndent(line)
+		if indent < 0 {
+			continue
+		}
+		body := strings.TrimLeft(line[2:], " \t")
+		if inBlock && indent <= blockIndent && body != "" {
+			inBlock = false
+		}
+		if !inBlock && securityBlockPattern.MatchString(body) && indent == 0 {
+			inBlock = true
+			blockIndent = indent
+			continue
+		}
+		if inBlock && (line[0] == '+' || line[0] == '-') {
+			return true
+		}
+	}
+	return false
+}
+
 // Diff computes the file-level diff between id's cached approved-content
 // snapshot (if any) and its current pending-content snapshot. Returns an
 // error if id is not currently pending.
@@ -142,11 +196,13 @@ func (g *Gate) Diff(id string) (Diff, error) {
 			Path:             p,
 			Status:           status,
 			UnifiedDiff:      udiff,
-			SecurityRelevant: securityFieldPattern.MatchString(udiff),
+			SecurityRelevant: securityFieldPattern.MatchString(udiff) || touchesSecurityBlock(udiff),
 		}
 		// Flagging runs against the full diff above, before hunking drops
 		// context — elision must never hide a security-relevant line from the
-		// check, only from the rendering.
+		// check, only from the rendering. touchesSecurityBlock depends on this
+		// ordering directly: it needs the unelided context to see which block
+		// a changed line sits in.
 		fd.UnifiedDiff = hunked(fd.UnifiedDiff)
 		if udiff != snapshotPlaceholder {
 			fd.OldContent, fd.NewContent = hunkSides(fd.UnifiedDiff)

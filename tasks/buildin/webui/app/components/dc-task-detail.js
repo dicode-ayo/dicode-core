@@ -35,6 +35,7 @@ class DcTaskDetail extends LitElement {
     _diffError:       { state: true },
     _diffLoading:     { state: true },
     _approveArmed:    { state: true }, // diff has been shown; Approve now confirms
+    _monacoOff:       { state: true }, // Monaco unreachable — render diffs as text
   };
 
   constructor() {
@@ -48,6 +49,7 @@ class DcTaskDetail extends LitElement {
     this._children = new Map();
     this._diffOpen = false; this._diff = null; this._diffError = ''; this._diffLoading = false; this._approveArmed = false;
     this._diffEditors = new Map();
+    this._monacoOff = false;
     this._editor = null;
     this._relayBase = '';
     this._offStarted = null; this._offFinished = null;
@@ -229,8 +231,11 @@ class DcTaskDetail extends LitElement {
 
   // Monaco needs both sides verbatim; the API omits them for oversized and
   // binary files (see maxInlineContentBytes), which fall back to the hunked
-  // text rendering.
+  // text rendering — as does an unreachable Monaco. A diff surface that
+  // renders nothing must never be what an operator approves against, so the
+  // text path stays reachable whenever Monaco is not.
   _hasInlineSides(f) {
+    if (this._monacoOff) return false;
     return typeof f.old_content === 'string' || typeof f.new_content === 'string';
   }
 
@@ -273,8 +278,11 @@ class DcTaskDetail extends LitElement {
     };
 
     if (window.monaco?.editor?.createDiffEditor) { mount(); return; }
+    // The AMD loader is itself CDN-hosted (index.html), so an offline or
+    // egress-filtered deploy has no `require` at all.
+    if (typeof require === 'undefined') { this._monacoOff = true; return; }
     require.config({ paths: { vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs' } });
-    require(['vs/editor/editor.main'], mount);
+    require(['vs/editor/editor.main'], mount, () => { this._monacoOff = true; });
   }
 
   // Monaco editors are not garbage-collected with their container — models

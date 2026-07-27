@@ -107,6 +107,25 @@ async function withPendingChange(
 }
 
 test.describe('Approval pending-diff', () => {
+  // The diff panel renders through Monaco, loaded from cdn.jsdelivr.net (the
+  // AMD loader in the webui task's index.html is itself CDN-hosted). An
+  // offline, egress-filtered, or CDN-outage deploy must still show the
+  // change: a review surface that renders nothing while leaving Approve
+  // clickable is the blind approval this whole feature exists to prevent.
+  test('diff still renders as text when the Monaco CDN is unreachable', async ({ page, request }) => {
+    await page.route('**cdn.jsdelivr.net/**', (r) => r.abort());
+    await withPendingChange(request, async () => {
+      await gotoWebui(page);
+      await navigateInSpa(page, `/tasks/${MANUAL_TASK_ID}`);
+      await waitForTaskDetail(page);
+
+      // Falls back to the prefixed-text rendering — the marker must be on
+      // screen, not stranded inside an empty editor container.
+      await expect(page.locator('dc-task-detail')).toContainText(DIFF_MARKER, { timeout: 15_000 });
+      expect(await page.locator('dc-task-detail .dc-diff-editor').count()).toBe(0);
+    }, 15_000);
+  });
+
   test('dashboard shows real diff content for a pending task', async ({ page, request }) => {
     await withPendingChange(request, async () => {
       // The pending-diff API itself must report the added line.
@@ -139,7 +158,7 @@ test.describe('Approval pending-diff', () => {
       // actually land in the DOM rather than asserting immediately.
       await expect(page.locator('dc-task-detail')).toContainText(DIFF_MARKER, { timeout: 10_000 });
       await expect(page.locator('dc-task-detail')).toContainText('task.js');
-    }, 15_000);
+    });
   });
 
   test('the task list cannot approve — it hands off to the detail page gate', async ({ page, request }) => {

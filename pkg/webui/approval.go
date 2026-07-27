@@ -186,8 +186,7 @@ details.diff-toggle summary{cursor:pointer;color:#8c96a3;font-size:0.85rem;margi
           <span class="status-badge">{{.Status}}</span>
           {{if .SecurityRelevant}}<span class="sec-badge">security-relevant</span>{{end}}
         </div>
-        <pre class="diffblock">{{range .Lines}}<span class="diffline {{.Class}}">{{.Text}}</span>
-{{end}}</pre>
+        <pre class="diffblock">{{range .Lines}}<span class="diffline {{.Class}}">{{.Text}}</span>{{end}}</pre>
       </div>
     {{end}}
   </details>

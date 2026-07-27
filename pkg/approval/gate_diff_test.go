@@ -616,3 +616,112 @@ func TestDiffSecurityFlagSurvivesHunking(t *testing.T) {
 	}
 	t.Fatal("no task.yaml entry in diff")
 }
+
+// TestDiffRedactsLiteralEnvSecrets covers both literal-secret carriers in
+// permissions.env: Value and Default. Default is injected as the env var's
+// value when the named secret is missing (pkg/runtime/envresolve), so it
+// holds the same class of material and must not reach the diff surfaces —
+// which include the unauthenticated /approve/{token} page.
+func TestDiffRedactsLiteralEnvSecrets(t *testing.T) {
+	g, _, _ := newTestGate(t, enabledPolicy())
+	spec := writeTaskDir(t, t.TempDir(), "repo/creds", "unused\n")
+	yamlPath := filepath.Join(spec.TaskDir, "task.yaml")
+
+	base := "name: creds\npermissions:\n  env:\n    - name: A\n      value: keep-me-secret\n"
+	if err := os.WriteFile(yamlPath, []byte(base), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Admit(spec); err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+	if err := g.Approve("repo/creds"); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+
+	changed := base + "    - name: B\n      secret: B\n      default: pr0d-fallback-Passw0rd\n"
+	if err := os.WriteFile(yamlPath, []byte(changed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Admit(spec); err != nil {
+		t.Fatalf("Admit changed: %v", err)
+	}
+
+	d, err := g.Diff("repo/creds")
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+	for _, f := range d.Files {
+		for _, leak := range []string{"pr0d-fallback-Passw0rd", "keep-me-secret"} {
+			if strings.Contains(f.UnifiedDiff, leak) {
+				t.Errorf("%s: literal secret %q leaked into UnifiedDiff:\n%s", f.Path, leak, f.UnifiedDiff)
+			}
+			if strings.Contains(f.OldContent, leak) || strings.Contains(f.NewContent, leak) {
+				t.Errorf("%s: literal secret %q leaked into inlined content sides", f.Path, leak)
+			}
+		}
+	}
+}
+
+// TestDiffFlagsPermissionWidening covers the escalation securityFieldPattern
+// alone misses: appending to an already-approved permissions block changes
+// only a list item, naming no security key on the changed line itself.
+func TestDiffFlagsPermissionWidening(t *testing.T) {
+	base := "name: t\nruntime: js\npermissions:\n  net:\n    - api.github.com\n  env:\n    - name: A\n      secret: A\n"
+
+	cases := []struct {
+		name    string
+		changed string
+		want    bool
+	}{
+		{"add host to existing net allowlist",
+			"name: t\nruntime: js\npermissions:\n  net:\n    - api.github.com\n    - evil.example.com\n  env:\n    - name: A\n      secret: A\n", true},
+		{"add var to existing env block",
+			base + "    - name: STOLEN\n      secret: PROD_ROOT\n", true},
+		{"repoint an env var at another secret",
+			"name: t\nruntime: js\npermissions:\n  net:\n    - api.github.com\n  env:\n    - name: A\n      secret: PROD_ROOT\n", true},
+		{"add a trigger sub-key",
+			base + "trigger:\n  cron: \"* * * * *\"\n", true},
+		{"cosmetic change outside any security block",
+			"name: t RENAMED\nruntime: js\npermissions:\n  net:\n    - api.github.com\n  env:\n    - name: A\n      secret: A\n", false},
+		{"add an unrelated top-level key",
+			base + "description: now documented\n", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			g, _, _ := newTestGate(t, enabledPolicy())
+			spec := writeTaskDir(t, t.TempDir(), "repo/perm", "unused\n")
+			yamlPath := filepath.Join(spec.TaskDir, "task.yaml")
+			if err := os.WriteFile(yamlPath, []byte(base), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := g.Admit(spec); err != nil {
+				t.Fatalf("Admit: %v", err)
+			}
+			if err := g.Approve("repo/perm"); err != nil {
+				t.Fatalf("Approve: %v", err)
+			}
+			if err := os.WriteFile(yamlPath, []byte(tc.changed), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := g.Admit(spec); err != nil {
+				t.Fatalf("Admit changed: %v", err)
+			}
+			d, err := g.Diff("repo/perm")
+			if err != nil {
+				t.Fatalf("Diff: %v", err)
+			}
+			for _, f := range d.Files {
+				if f.Path != "task.yaml" {
+					continue
+				}
+				if f.SecurityRelevant != tc.want {
+					t.Errorf("SecurityRelevant = %v, want %v for %q:\n%s",
+						f.SecurityRelevant, tc.want, tc.name, f.UnifiedDiff)
+				}
+				return
+			}
+			t.Fatal("no task.yaml entry in diff")
+		})
+	}
+}
