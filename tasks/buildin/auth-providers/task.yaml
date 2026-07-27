@@ -23,6 +23,10 @@ trigger:
   webhook: /hooks/auth-providers
   auth: true
 
+webui:
+  nav:
+    label: "Auth Providers"
+
 params:
   providers:
     type: string

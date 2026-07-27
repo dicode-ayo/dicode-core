@@ -100,6 +100,10 @@ permissions:
 | `run_result` | object | | Per-task return-value persistence config — see [Suppressing return-value persistence](#suppressing-return-value-persistence) |
 | `run_result.enabled` | bool | | When `false`, the JSON return value is not written to `runs.return_value`; in-memory delivery (`dicode.run_task`, chain `input.output`) is unaffected. Default `true`. |
 | `hash_include` | list of strings | | Extra files/directories outside this task's own directory whose content should also count toward its content hash — see [Content hash and `hash_include`](#content-hash-and-hash_include) below. |
+| `webui` | object | | Contribute a first-class navigation entry to the main WebUI header — see [WebUI navigation](#webui-navigation-webuinav) below. |
+| `webui.nav.label` | string | | Link text shown in the WebUI header nav. Required if `webui.nav` is set. |
+| `webui.nav.order` | int | | Sort position among contributed nav entries, ascending (default `0`). Ties break by task ID. |
+| `webui.nav.icon` | string | | Optional icon identifier for the nav entry (renderer-defined). |
 
 ### Trigger types
 
@@ -1267,6 +1271,23 @@ What does **not** change:
 - `stdout`/`stderr` log lines persist normally. Combine with [`silent: true`](#) on the task spec when the script may print plaintext credentials.
 
 **Security note:** this flag suppresses the persisted *return value* only. A task that wants to handle plaintext credentials end-to-end should typically combine `run_result.enabled: false`, `run_inputs.enabled: false`, `silent: true`, and the tightest possible `permissions.{net,fs,env}` allowlists to remove every exfiltration channel.
+
+## WebUI navigation (`webui.nav`)
+
+Any task with a `trigger.webhook` (typically one that ships its own `index.html` and is served as a self-contained SPA at `/hooks/<path>` — see [`tasks/buildin/auth-providers`](../../tasks/buildin/auth-providers)) can contribute a first-class link in the main WebUI's header `<nav>`, instead of only being reachable by drilling into the Tasks list and clicking through to its webhook UI:
+
+```yaml
+trigger:
+  webhook: /hooks/auth-providers
+  auth: true
+webui:
+  nav:
+    label: "Auth Providers"
+    order: 10   # optional; default 0, ascending, ties break by task ID
+    icon: "key" # optional; renderer-defined
+```
+
+The main WebUI's `dc-nav` component reads `GET /api/tasks`, picks every `kind: Task` entry with `webui.nav.label` set, and renders a plain `<a href="{trigger.webhook}">{label}</a>` next to the static nav links. Because the link is root-relative (`/hooks/...`), clicking it is an ordinary full-page navigation into the contributing task's own webhook-served page — no iframe, no client-side router wiring required. A task that sets `webui.nav` without a `trigger.webhook` is skipped (logged as a console warning in the browser) rather than failing to load the header.
 
 ## Task ID
 

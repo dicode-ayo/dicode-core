@@ -58,6 +58,10 @@ server:
 
 - Edit `dicode.yaml` directly in Monaco editor
 
+### Task-contributed nav links
+
+Any task can add itself to the header `<nav>` next to Tasks/Sources/Config/Secrets/Security/Metrics by setting a `webui.nav` block in its `task.yaml` (see [Task Format — `webui.nav`](task-format.md#webui-navigation-webuinav)). The `<dc-nav>` component reads `GET /api/tasks`, picks entries with `webui.nav.label` set, and renders one link per entry pointing at that task's own `trigger.webhook` path — a plain full-page navigation into the task's self-contained SPA (e.g. `buildin/auth-providers` adds an "Auth Providers" link this way). No source change to `pkg/webui` is needed: `GET /api/tasks` embeds the full task spec, so a new `webui` field on `task.Spec` is automatically surfaced in the JSON response.
+
 ---
 
 ## Frontend
@@ -78,6 +82,7 @@ The SPA is itself a dicode task — `buildin/webui` (`tasks/buildin/webui/`, ent
 | `components/dc-sources.js` | `<dc-sources>` | Sources manager with dev mode toggle |
 | `components/dc-log-bar.js` | `<dc-log-bar>` | Global log bar (bottom of every page) |
 | `components/dc-notif-panel.js` | `<dc-notif-panel>` | Notification panel |
+| `components/dc-nav.js` | `<dc-nav>` | Task-contributed header nav links (`webui.nav`) |
 
 ### Client-side routing
 
