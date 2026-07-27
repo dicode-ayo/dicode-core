@@ -27,10 +27,11 @@ const DIFF_MARKER = '// e2e-diff-probe-marker';
 // fsnotify (pkg/taskset/source.go) is meant to make same-machine edits show
 // up far faster than that in practice (file-change.spec.ts's equivalent wait
 // uses a 20s budget). This test adds a fixed 15s pre-mutation delay (see
-// below) to clear the daemon's 10s approval-bootstrap window, plus some
-// margin for CPU contention from the fixture set's own per-minute cron/
-// storage tasks — mirrors cron.spec.ts's spec-level override for the same
-// class of "wait on the real daemon's background loops" test.
+// withPendingChange's preMutateDelayMs) to clear the daemon's 10s approval-
+// bootstrap window, plus some margin for CPU contention from the fixture
+// set's own per-minute cron/storage tasks — mirrors cron.spec.ts's spec-
+// level override for the same class of "wait on the real daemon's
+// background loops" test.
 test.setTimeout(120_000);
 
 function tasksDir(): string {
@@ -58,38 +59,56 @@ async function waitForTaskCondition(
   throw new Error(`Task ${taskID} did not satisfy condition within ${timeoutMs}ms`);
 }
 
+/**
+ * withPendingChange appends DIFF_MARKER to hello-manual/task.js, waits for
+ * the gate to hold it pending, runs body, then — always, even on failure —
+ * restores the original bytes and waits for pending_approval to clear again.
+ * Shared mutate/wait/restore scaffolding for every test in this file.
+ *
+ * preMutateDelayMs, when > 0, waits out the daemon's fixed 10s approval-
+ * bootstrap window (pkg/daemon/daemon.go's bootstrapSettle) before writing.
+ * During that window Admit's Bootstrapping() branch auto-approves whatever
+ * content is CURRENTLY on disk as the baseline, so mutating too early bakes
+ * the marker in as "already approved" and pending_approval never flips true
+ * (confirmed by direct repro: three consecutive real timeouts each fired
+ * almost exactly at that run's configured budget, not at some contention-
+ * dependent duration — the task only ever re-pended once cleanup's finally
+ * block restored the original bytes against that marker-inclusive
+ * baseline). Only the first test in this serial-execution file needs this —
+ * by the time later tests run, the daemon has long since cleared the
+ * window.
+ */
+async function withPendingChange(
+  request: import('@playwright/test').APIRequestContext,
+  body: () => Promise<void>,
+  preMutateDelayMs = 0,
+): Promise<void> {
+  const taskJsPath = path.join(tasksDir(), 'hello-manual', 'task.js');
+  const original = fs.readFileSync(taskJsPath, 'utf8');
+
+  try {
+    if (preMutateDelayMs > 0) {
+      await new Promise((r) => setTimeout(r, preMutateDelayMs));
+    }
+    // Append a distinctive, easy-to-assert-on line so the task's content
+    // hash changes (re-pending it) and the diff has an unambiguous added
+    // line to look for.
+    fs.writeFileSync(taskJsPath, original + `\n${DIFF_MARKER}\n`, 'utf8');
+    await waitForTaskCondition(request, MANUAL_TASK_ID, (t) => t.pending_approval === true);
+
+    await body();
+  } finally {
+    // Restore exact original bytes: the content hash returns to the
+    // already-approved record, so the reconciler re-arms it without any
+    // explicit re-approval, leaving a clean baseline for later specs.
+    fs.writeFileSync(taskJsPath, original, 'utf8');
+    await waitForTaskCondition(request, MANUAL_TASK_ID, (t) => t.pending_approval !== true);
+  }
+}
+
 test.describe('Approval pending-diff', () => {
   test('dashboard shows a View diff affordance with real diff content for a pending task', async ({ page, request }) => {
-    const taskJsPath = path.join(tasksDir(), 'hello-manual', 'task.js');
-    const original = fs.readFileSync(taskJsPath, 'utf8');
-
-    try {
-      // The daemon's approval gate holds a fixed bootstrapSettle = 10s
-      // first-run seeding window (pkg/daemon/daemon.go) after startup, during
-      // which Admit's Bootstrapping() branch auto-approves whatever content
-      // is CURRENTLY on disk as the baseline — no "pending" transition. This
-      // global-setup fixture's daemon starts fresh (no dicode.lock) for every
-      // spec file, so if we mutate the file before that window closes, our
-      // marker gets silently baked in as the approved baseline and
-      // pending_approval never flips true (confirmed by direct repro: three
-      // consecutive real timeouts each fired almost exactly at that run's
-      // configured budget, not at some contention-dependent duration — the
-      // task only ever re-pended once cleanup's finally block restored the
-      // original bytes against that marker-inclusive baseline). Wait out the
-      // window with a safety margin before mutating.
-      await new Promise((r) => setTimeout(r, 15_000));
-
-      // Append a distinctive, easy-to-assert-on line so the task's content
-      // hash changes (re-pending it) and the diff has an unambiguous added
-      // line to look for.
-      fs.writeFileSync(taskJsPath, original + `\n${DIFF_MARKER}\n`, 'utf8');
-
-      await waitForTaskCondition(
-        request,
-        MANUAL_TASK_ID,
-        (t) => t.pending_approval === true,
-      );
-
+    await withPendingChange(request, async () => {
       // The pending-diff API itself must report the added line.
       const diffRes = await request.get(`/api/tasks/${encodeURIComponent(MANUAL_TASK_ID)}/pending-diff`);
       expect(diffRes.ok()).toBe(true);
@@ -121,27 +140,11 @@ test.describe('Approval pending-diff', () => {
       // actually land in the DOM rather than asserting immediately.
       await expect(page.locator('dc-task-detail')).toContainText(DIFF_MARKER, { timeout: 10_000 });
       await expect(page.locator('dc-task-detail')).toContainText('task.js');
-    } finally {
-      // Restore exact original bytes: the content hash returns to the
-      // already-approved record, so the reconciler re-arms it without any
-      // explicit re-approval, leaving a clean baseline for later specs.
-      fs.writeFileSync(taskJsPath, original, 'utf8');
-      await waitForTaskCondition(
-        request,
-        MANUAL_TASK_ID,
-        (t) => t.pending_approval !== true,
-      );
-    }
+    }, 15_000);
   });
 
   test('the task list cannot approve — it hands off to the detail page gate', async ({ page, request }) => {
-    const taskJsPath = path.join(tasksDir(), 'hello-manual', 'task.js');
-    const original = fs.readFileSync(taskJsPath, 'utf8');
-
-    try {
-      fs.writeFileSync(taskJsPath, original + `\n${DIFF_MARKER}\n`, 'utf8');
-      await waitForTaskCondition(request, MANUAL_TASK_ID, (t) => t.pending_approval === true);
-
+    await withPendingChange(request, async () => {
       await gotoWebui(page);
 
       // A table row has nowhere to show a diff, so the row must not offer
@@ -157,24 +160,11 @@ test.describe('Approval pending-diff', () => {
         await request.get(`/api/tasks/${encodeURIComponent(MANUAL_TASK_ID)}`)
       ).json() as Record<string, unknown>;
       expect(afterHandoff.pending_approval).toBe(true);
-    } finally {
-      fs.writeFileSync(taskJsPath, original, 'utf8');
-      await waitForTaskCondition(
-        request,
-        MANUAL_TASK_ID,
-        (t) => t.pending_approval !== true,
-      );
-    }
+    });
   });
 
   test('Approve reveals the diff first and only approves on a second, explicit click', async ({ page, request }) => {
-    const taskJsPath = path.join(tasksDir(), 'hello-manual', 'task.js');
-    const original = fs.readFileSync(taskJsPath, 'utf8');
-
-    try {
-      fs.writeFileSync(taskJsPath, original + `\n${DIFF_MARKER}\n`, 'utf8');
-      await waitForTaskCondition(request, MANUAL_TASK_ID, (t) => t.pending_approval === true);
-
+    await withPendingChange(request, async () => {
       await gotoWebui(page);
       await navigateInSpa(page, `/tasks/${MANUAL_TASK_ID}`);
       await waitForTaskDetail(page);
@@ -202,16 +192,10 @@ test.describe('Approval pending-diff', () => {
       await confirmBtn.click({ force: true });
 
       await waitForTaskCondition(request, MANUAL_TASK_ID, (t) => t.pending_approval !== true);
-    } finally {
-      // Restoring the original bytes returns the content hash to the record
-      // approved by the confirm click above (or by bootstrap, if the test
-      // failed before it), so the task is left armed either way.
-      fs.writeFileSync(taskJsPath, original, 'utf8');
-      await waitForTaskCondition(
-        request,
-        MANUAL_TASK_ID,
-        (t) => t.pending_approval !== true,
-      );
-    }
+      // Restoring the original bytes in withPendingChange's finally returns
+      // the content hash to the record approved by the confirm click above
+      // (or by bootstrap, if the test failed before it), so the task is
+      // left armed either way.
+    });
   });
 });
