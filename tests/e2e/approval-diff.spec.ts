@@ -5,8 +5,8 @@
  * surface. Reuses the file-change.spec.ts pattern (mutate a fixture task's
  * file in the temp copy at DICODE_E2E_TASKS_DIR, poll the API until the
  * reconciler flips pending_approval) but drives the dashboard afterwards to
- * confirm the "View diff" affordance renders real diff content instead of
- * leaving the operator to approve blind.
+ * confirm the diff panel renders real diff content, opens by default, and is
+ * the only path to approval — instead of leaving the operator to approve blind.
  *
  * Uses hello-manual, the same fixture task file-change.spec.ts mutates —
  * safe under this suite's serial (workers: 1, fullyParallel: false)
@@ -107,7 +107,7 @@ async function withPendingChange(
 }
 
 test.describe('Approval pending-diff', () => {
-  test('dashboard shows a View diff affordance with real diff content for a pending task', async ({ page, request }) => {
+  test('dashboard shows real diff content for a pending task', async ({ page, request }) => {
     await withPendingChange(request, async () => {
       // The pending-diff API itself must report the added line.
       const diffRes = await request.get(`/api/tasks/${encodeURIComponent(MANUAL_TASK_ID)}/pending-diff`);
@@ -130,10 +130,9 @@ test.describe('Approval pending-diff', () => {
       // "pending approval" as a substring and made a plain hasText locator
       // resolve to multiple elements (a real strict-mode failure hit in CI).
       await expect(page.locator('span[title="This task is new or changed and its triggers are not armed until approved"]')).toBeVisible();
-      const viewDiffBtn = page.locator('button', { hasText: 'View diff' });
-      await expect(viewDiffBtn).toBeVisible();
 
-      await viewDiffBtn.click({ force: true });
+      // The panel is up from the start for a pending task, so the toggle
+      // offers to collapse it rather than to reveal it.
       await expect(page.locator('button', { hasText: 'Hide diff' })).toBeVisible();
 
       // The diff panel fetches asynchronously — wait for the marker text to
@@ -154,7 +153,7 @@ test.describe('Approval pending-diff', () => {
 
       await page.locator('dc-task-list button', { hasText: 'Review' }).first().click({ force: true });
       await waitForTaskDetail(page);
-      await expect(page.locator('button', { hasText: 'Review & approve' })).toBeVisible();
+      await expect(page.locator('dc-task-detail')).toContainText(DIFF_MARKER, { timeout: 10_000 });
 
       const afterHandoff = await (
         await request.get(`/api/tasks/${encodeURIComponent(MANUAL_TASK_ID)}`)
@@ -163,34 +162,35 @@ test.describe('Approval pending-diff', () => {
     });
   });
 
-  test('Approve reveals the diff first and only approves on a second, explicit click', async ({ page, request }) => {
+  test('a pending task opens with the diff already up, and hiding it disarms Approve', async ({ page, request }) => {
     await withPendingChange(request, async () => {
       await gotoWebui(page);
       await navigateInSpa(page, `/tasks/${MANUAL_TASK_ID}`);
       await waitForTaskDetail(page);
 
-      const reviewBtn = page.locator('button', { hasText: 'Review & approve' });
-      const confirmBtn = page.locator('button', { hasText: 'Confirm approve' });
-      await expect(reviewBtn).toBeVisible();
+      const approveBtn = page.locator('button', { hasText: 'Approve' });
+      const reviewBtn = page.locator('button', { hasText: 'Review changes' });
 
-      // The whole point of the gate: the first click must not approve.
-      await reviewBtn.click({ force: true });
+      // Landing on a pending task must show the change without any click.
       await expect(page.locator('dc-task-detail')).toContainText(DIFF_MARKER, { timeout: 10_000 });
-      await expect(confirmBtn).toBeVisible();
-      const afterFirstClick = await (
-        await request.get(`/api/tasks/${encodeURIComponent(MANUAL_TASK_ID)}`)
-      ).json() as Record<string, unknown>;
-      expect(afterFirstClick.pending_approval).toBe(true);
+      await expect(page.locator('button', { hasText: 'Hide diff' })).toBeVisible();
+      await expect(approveBtn).toBeVisible();
 
-      // Hiding the diff must disarm — approval cannot be confirmed against a
-      // change the operator has collapsed back out of view.
+      // Collapsing the diff disarms: approval is not offered against a change
+      // the operator has put back out of view.
       await page.locator('button', { hasText: 'Hide diff' }).click({ force: true });
       await expect(reviewBtn).toBeVisible();
+      await expect(approveBtn).toHaveCount(0);
 
+      // …and the disarmed button re-opens the diff rather than approving.
       await reviewBtn.click({ force: true });
-      await expect(confirmBtn).toBeVisible();
-      await confirmBtn.click({ force: true });
+      await expect(page.locator('dc-task-detail')).toContainText(DIFF_MARKER, { timeout: 10_000 });
+      const afterReopen = await (
+        await request.get(`/api/tasks/${encodeURIComponent(MANUAL_TASK_ID)}`)
+      ).json() as Record<string, unknown>;
+      expect(afterReopen.pending_approval).toBe(true);
 
+      await approveBtn.click({ force: true });
       await waitForTaskCondition(request, MANUAL_TASK_ID, (t) => t.pending_approval !== true);
       // Restoring the original bytes in withPendingChange's finally returns
       // the content hash to the record approved by the confirm click above

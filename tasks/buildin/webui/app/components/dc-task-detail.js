@@ -100,6 +100,10 @@ class DcTaskDetail extends LitElement {
       else if (t.chain || t.Chain) this._triggerType = 'chain';
       else if (t.daemon || t.Daemon) this._triggerType = 'daemon';
       else this._triggerType = 'manual';
+      // A pending task's whole reason for being on screen is the change
+      // awaiting review, so it opens with the diff already up rather than
+      // behind a click.
+      if (task.pending_approval) this._openDiff();
     } catch(e) {
       this._error = e.message;
       return;
@@ -130,14 +134,14 @@ class DcTaskDetail extends LitElement {
     } catch(e) { alert('Failed: ' + e.message); }
   }
 
-  // The first click reveals the change and arms the button; only the second
-  // one approves. Approving is a trust decision that arms triggers, so the
-  // diff must be on screen before it can be taken — matching the tokenized
+  // Approving is only offered while the change is on screen. The panel opens
+  // by default, so this is normally a single click; if the operator has
+  // collapsed the diff, the button reverts to re-opening it rather than
+  // approving something no longer in view. Mirrors the tokenized
   // /approve/{token} page, which never offers approval without the diff.
   async _approve() {
     if (!this._approveArmed) {
       await this._openDiff();
-      this._approveArmed = true;
       return;
     }
     try {
@@ -146,10 +150,11 @@ class DcTaskDetail extends LitElement {
     } catch(e) { alert('Approve failed: ' + e.message); }
   }
 
-  // _openDiff expands the "what changed" panel, fetching it lazily on first
-  // expand (not on every render).
+  // Arms approval: a failed fetch still arms, so a broken diff endpoint
+  // cannot lock an operator out of approving — the panel shows the error.
   async _openDiff() {
     this._diffOpen = true;
+    this._approveArmed = true;
     if (this._diff || this._diffLoading) return;
     this._diffLoading = true;
     this._diffError = '';
@@ -162,8 +167,6 @@ class DcTaskDetail extends LitElement {
     }
   }
 
-  // Collapsing the diff disarms a pending approval: the operator must not be
-  // able to confirm a change they have hidden from themselves.
   async _toggleDiff() {
     if (this._diffOpen) {
       this._diffOpen = false;
@@ -613,7 +616,7 @@ class DcTaskDetail extends LitElement {
           style="padding:0 0.45rem;font-size:0.75rem;border-radius:3px;background:rgba(210,153,34,0.18);color:#d29922;border:1px solid rgba(210,153,34,0.45)">pending approval</span>` : ''}
         ${needsApproval ? html`<button class="btn" style="background:#d29922" @click=${() => this._approve()}
           title=${this._approveArmed ? 'Approve this version and arm its triggers' : 'Show what changed before approving'}
-          >&#10003; ${this._approveArmed ? 'Confirm approve' : 'Review & approve'}</button>` : ''}
+          >${this._approveArmed ? html`&#10003; Approve` : html`&#9998; Review changes`}</button>` : ''}
         ${needsApproval ? html`<button class="btn btn-sm secondary" @click=${() => this._toggleDiff()}>${this._diffOpen ? 'Hide diff' : 'View diff'}</button>` : ''}
         <button class="btn" @click=${() => this._run()}>&#9654; Run now</button>
         ${hasEditor ? html`<button class="btn" style="background:var(--muted)" @click=${() => this._openEditor()}>&#9998; Edit code</button>` : ''}
