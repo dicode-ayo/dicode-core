@@ -7,7 +7,7 @@
     "test:e2e:headed": "playwright test --headed"
   },
   "devDependencies": {
-    "@playwright/test": "^1.49.0",
+    "@playwright/test": "^1.56.1",
     "@types/node": "^22.0.0",
     "dicode-relay": "^0.2.0"
   },
