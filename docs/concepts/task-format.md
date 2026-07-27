@@ -103,7 +103,7 @@ permissions:
 | `webui` | object | | Contribute a first-class navigation entry to the main WebUI header — see [WebUI navigation](#webui-navigation-webuinav) below. |
 | `webui.nav.label` | string | | Link text shown in the WebUI header nav. Required if `webui.nav` is set. |
 | `webui.nav.order` | int | | Sort position among contributed nav entries, ascending (default `0`). Ties break by task ID. |
-| `webui.nav.icon` | string | | Optional icon identifier for the nav entry (renderer-defined). |
+| `webui.nav.icon` | string | | Optional text or emoji prefix rendered verbatim before the nav label. |
 
 ### Trigger types
 
@@ -1284,10 +1284,10 @@ webui:
   nav:
     label: "Auth Providers"
     order: 10   # optional; default 0, ascending, ties break by task ID
-    icon: "key" # optional; renderer-defined
+    icon: "🔑" # optional; rendered literally before the label
 ```
 
-The main WebUI's `dc-nav` component reads `GET /api/tasks`, picks every `kind: Task` entry with `webui.nav.label` set, and renders a plain `<a href="{trigger.webhook}">{label}</a>` next to the static nav links. Because the link is root-relative (`/hooks/...`), clicking it is an ordinary full-page navigation into the contributing task's own webhook-served page — no iframe, no client-side router wiring required. A task that sets `webui.nav` without a `trigger.webhook` is skipped (logged as a console warning in the browser) rather than failing to load the header.
+The main WebUI's `dc-nav` component reads `GET /api/tasks`, picks every `kind: Task` entry with `webui.nav.label` set, and renders a plain `<a href="{trigger.webhook}">{label}</a>` next to the static nav links, prefixed with `icon` verbatim (as literal text/emoji, not a resolved identifier) when set. Because the link is root-relative (`/hooks/...`), clicking it is an ordinary full-page navigation into the contributing task's own webhook-served page — no iframe, no client-side router wiring required. A task that sets `webui.nav` without a `trigger.webhook` is skipped (logged as a console warning in the browser) rather than failing to load the header.
 
 ## Task ID
 
