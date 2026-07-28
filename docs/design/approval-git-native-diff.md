@@ -1,241 +1,183 @@
-# Git-Native Approval Diff
+# Approval Review: Minimal Git-Native Diff
 
 ## Problem
 
-The trust-on-change approval gate holds a task pending when its content hash
-changes and does not arm its triggers until an operator approves. To approve
-responsibly the operator needs to see *what changed* — and `dicode.lock` stores
-only a hash, never file bytes, so by the time a task is pending the working tree
-already holds the new content and there is no "before" on disk.
+The approval gate holds a task pending when its content hash changes and does
+not arm its triggers until an operator approves. To approve, the operator wants
+to see what changed — and `dicode.lock` stores only a hash, so by the time a
+task is pending the working tree already holds the new content and there is no
+"before" on disk.
 
-The shipped answer (#604 / PR #636) reconstructs the "before" itself:
-`pkg/approval.Gate` keeps in-memory content snapshots per task, refreshed on
-every approve and on every already-approved re-admit, and `Gate.Diff` renders
-them. Everything downstream follows from that choice:
+The shipped answer (#604 / PR #636) reconstructs the "before" itself: an
+in-memory content snapshot per task, redacted before display, diffed and hunked
+and rendered. 3,610 lines. Twelve follow-ups are open against it.
 
-- the baseline is **in-memory only**, so a daemon restart loses it — and
-  `git pull` → restart → review is the ordinary workflow (#642);
-- the snapshot holds **raw file bytes**, which must then be redacted before
-  reaching the session-less `/approve/{token}` page, and the redaction is a line
-  pattern that multiline scalars and `- KEY=VALUE` env shorthand walk straight
-  past (#643);
-- a task that fails to parse drops out of the snapshot, destroying the baseline
-  and reporting it as a routine restart (#648);
-- security relevance is decided by **grepping the rendered diff text**, so it
-  fires on `// TODO: net: ...` in a comment (#651);
-- change sites the directory snapshot cannot see — taskset overrides,
-  `hash_include` targets — need a synthetic `(resolved config)` entry to be
-  visible at all (#646).
+Almost none of those follow-ups are implementation defects. They are the cost of
+a threat model the feature does not actually have.
 
-Twelve follow-ups are open against that surface. Most are not defects in the
-implementation; they are consequences of maintaining a private, unversioned,
-in-memory copy of history in a system whose sources are **already git
-repositories with full history on disk**.
+---
 
-This document proposes deriving the baseline from git instead.
+## Threat model
+
+**The approval gate is a deploy guard for a trusted author, not an adversarial
+review surface.**
+
+For a git source, the person who changed the task is a person with write access
+to the repository. That access is the trust boundary, and it is enforced by the
+git host — with its own auth, history, attribution, and whatever branch
+protection the operator configured. The gate is not the thing standing between
+an attacker and execution; it is the thing that stops a `git push` from becoming
+a `cron` run before a human has looked.
+
+Everything expensive in the shipped surface follows from assuming otherwise:
+
+| Machinery | Assumes |
+|---|---|
+| Byte-level secret redaction | a hostile committer plants secrets to leak them through our renderer |
+| `ContentHidden` / `Incomplete` contract | a hostile committer crafts content that renders as an all-clear |
+| Streamed fingerprints for capped files | a hostile committer hides a change behind a size cap |
+| `securityFieldPattern` text flagging | the reviewer cannot be trusted to notice a permissions change |
+
+Against a trusted author each of those is machinery guarding a door that is not
+the way in. The review surface's real job is: **remind me what I changed since I
+last approved this.**
 
 ---
 
 ## Design
 
-Three independent pieces, each replacing one job the snapshot currently does.
-
-### 1. The baseline is a commit
-
-`dicode.lock` records, per task:
+Record the commit at pend time, alongside the hash that already governs
+execution:
 
 ```yaml
 tasks:
   repo/deploy:
-    hash: <content hash>          # unchanged — governs execution
-    commit: <40-hex sha>          # new — what the approved content was
-    branch: main                  # new — retrieval hint, see §3
+    hash: <content hash>
+    commit: <40-hex sha>
     approved_by: manual
     approved_at: 2026-07-28T...
 ```
 
-The diff is then `DiffTree(approvedCommit.Tree(), currentCommit.Tree())` scoped
-to the task's directory prefix. `go-git/v5` v5.19.1 has the whole surface
-already: `Tree.Diff` / `DiffTreeWithOptions`, `Change.Patch()`,
-`Changes.Patch()`, `Patch.String()`, `ResolveRevision`, `CommitObject`.
+Render the diff with `go-git`: `DiffTree` between the approved commit's tree and
+the current one, filtered to the task's directory prefix plus any resolved
+`hash_include` paths. `Change.Patch()` already produces a hunked unified diff
+with real line numbers, so we render its output directly.
 
-This works because **clones are full**. `internal/gitops/clone.go`:
+This works because clones are full — `internal/gitops/clone.go:24`, "no Depth
+limit… See #175" — so the history is on disk.
 
-> Clones are full (no Depth limit) so that go-git's PullContext can always
-> compute a merge base when the remote advances. See #175.
+**Capture the commit in `pendingEntry`, not at approve time.** `pendingEntry`
+already writes `hash` and `files` in one critical section, with a doc comment
+explaining why they cannot disagree on generation; that invariant exists because
+a race once let `approve()` promote a snapshot stale relative to its hash.
+Reading `HEAD` at approve time reintroduces it.
 
-so the history needed to diff is, in the ordinary case, already on disk.
+**When the objects are not local, say so and move on.** No fetch ladder, no
+retrieval hints, no background repair. Rewritten history, a divergent branch
+switch, a source that is not git, a task with no recorded commit yet — all
+render the same one-line statement that a diff is not available, and approval
+proceeds normally. The operator reviews at the source. This is the honest
+behaviour for a convenience feature, and it is one branch instead of a
+subsystem.
 
-**The commit is captured at pend time, not at approve time.** `pendingEntry`
-already carries `hash` and `files` written together in one critical section,
-with a doc comment explaining why they can never disagree on generation — that
-invariant exists because an earlier race let `approve()` promote a snapshot
-stale relative to the hash it was matched against. Reading `HEAD` at approve
-time reintroduces exactly that race: a pull can land between admit and approve,
-and the recorded commit would not correspond to the hashed content.
-
-### 2. Resolved settings are compared structurally, not textually
-
-The content hash folds in more than the task directory: the resolved
-permissions, runtime, params, timeout and trigger, which taskset overrides can
-rewrite from outside the directory entirely, and `hash_include` targets that
-live at other paths.
-
-These get their own comparison, on **parsed values** rather than rendered text.
-`resolvedSecurityFields` already enumerates the fields; `approvedResolved`
-already stores the resolved form — in memory. Persist it alongside the lock
-record and compare field by field.
-
-This subsumes three follow-ups at once: it is how override changes become
-visible (#646), and comparing parsed values rather than grepping rendered text
-is the actual fix for security flagging firing on comments (#651).
-
-### 3. Retrieval ladder
-
-Diffing is a purely local computation. `Repository.CommitObject(h)` is
-`object.GetCommit(r.Storer, h)` — the local object storer, no network. Git's
-wire protocol has no diff operation at all (`upload-pack` advertises refs,
-negotiates want/have, ships a packfile), which is why GitHub and GitLab expose
-compare as a REST API: their servers compute it out of band.
-
-So having both objects locally is a hard precondition, and when it fails:
-
-1. **Object is local** — the common case. No network.
-2. **Fetch the exact SHA** (`<sha>:refs/dicode/baseline/<task>`). Cheapest, but
-   go-git returns `ErrExactSHA1NotSupported` unless the server advertises
-   `allow-reachable-sha1-in-want` or `allow-tip-sha1-in-want`
-   (`remote.go:1190`). Stock git has `uploadpack.allowReachableSHA1InWant` off
-   by default, so this cannot be the only rung.
-3. **Fetch the recorded branch.** Always servable, costs more. This is what the
-   `branch` field in the lock record is for — it is a retrieval hint, not part
-   of the commit's identity.
-4. **Honest failure** — `Incomplete` + a reason naming the real cause,
-   one-click approval withheld.
-
-Constraints on the fetch:
-
-- **Fetch at pend time, not at review time.** The reconciler already does
-  network I/O; the approve screen must not. This also means the session-less
-  `/approve/{token}` page never triggers an outbound fetch, which would
-  otherwise be a request an unauthenticated caller can cause.
-- **Route through `internal/gitops`, never go-git directly.**
-  `ValidateRemoteHost` is the only guard `ssh://` and SCP-shorthand remotes
-  get; its own comment calls failing open there "a real, exploitable SSRF
-  bypass".
-- **Auth must reach it.** The fetch needs the source's credentials
-  (`gitops.HTTPAuth(tokenEnv)`), and `pkg/approval` currently knows nothing
-  about sources. This wants an injected `fetchBaseline` callback — the same
-  decoupling the gate already uses for `arm` and `hashFn`. It is the first time
-  the gate gets credentialed network access.
-- **Pin what you fetch** into `refs/dicode/baseline/...` so it is not an
-  unreferenced object subject to gc.
-- **Back off.** A task pending across reconcile cycles must not fetch every
-  30s; cache the failure per `(task, sha)`.
-
-### 4. Approval stays bound to the content hash
-
-The gate protects **what the daemon executes**, which is the working tree, not
-the commit. `FireGuard` re-hashes the on-disk directory at fire time precisely
-because "the runtime imports task files fresh on every run". A commit-range
-review plus a content-hash-bound approve is coherent; a commit-range review
-alone is not.
-
-So the commit is for *display*; the hash remains the thing approval binds to
-(#645). Nothing in this design changes that.
-
-### 5. Local sources are ungated by default
-
-Local folder sources have no commits, so none of the above applies to them.
-They become ungated **by default policy**, not by deleting the gate's local
-path: per-source trust in `dicode.yaml` already expresses both answers, and an
-operator who wants their local folder gated keeps that option.
-
-Accepted residual risk: for local sources, `FireGuard`'s fire-time re-hash
-becomes the only thing between generated code and a scheduled run holding
-credentials. This matters because local folders are where AI-authored tasks
-land.
-
-### 6. What the unauthenticated approve page renders
-
-The `/approve/{token}` page has no session — the token is the only boundary. It
-renders the commit range, the **structured resolved-settings diff** (safe to
-redact properly, because it operates on parsed values rather than grepping
-text), and a deep link to the host's compare view where one exists. Task file
-content requires a session.
-
-This is what actually closes #643: the session-less page stops rendering task
-bytes at all, rather than rendering them through a redaction pass that keeps
-being incomplete.
+**No redaction, no flagging, no completeness contract.** The diff shows the
+commit range. If it cannot, it says so.
 
 ---
 
-## What this removes
+## What survives the reframing
 
-| Follow-up | Effect |
-|---|---|
-| #642 persist the snapshot | **Gone.** The baseline is a commit; objects are on disk. |
-| #643 redact from the YAML node tree | **Gone.** The session-less page renders no file bytes. |
-| #640 synthetic Monaco line numbers | **Gone** with the hunked-snapshot rendering. |
-| #641 key the diff file list | **Gone** with the same. |
-| #646 `hash_include` invisible | **Fixed** by §2. |
-| #651 flagging is a text match | **Fixed** by §2. |
-| #648 parse error destroys the baseline | **Fixed** — a parse failure no longer erases anything, because the baseline is not derived from parsing the current tree. |
-| #645 bind approval to the reviewed hash | **Unaffected** — still required (§4). |
-| #649 unparseable task vanishes from the UI | **Unaffected.** |
-| #650 pending tasks presented as live | **Unaffected.** |
-| #652 effective permissions not shown | **Unaffected.** |
-| #639 `/login` passphrase | **Unrelated.** |
+Three things, none of which is about threat models.
 
-Deleted machinery: the per-task content snapshot maps, the streamed
-fingerprints for capped/binary files, the byte-level redaction pass, the
-`(resolved config)` synthetic entry (superseded by a real structured
-comparison), and the `HasBaseline` in-memory caveat.
+**1. The `/approve/{token}` page renders no file content.** That URL arms a task
+and travels through Slack, email, or ntfy. Whatever it displays is visible to
+everyone with access to that channel — a disclosure question independent of who
+is trusted to commit. It shows the task, the commit range, and a link. This is
+why the redaction pass can be deleted rather than fixed: nothing on that page
+renders repo bytes.
+
+**2. Approval binds to the hash that was displayed (#645).** Correctness, not
+protection: today the button can arm a version that was never on screen, because
+the task can re-pend between the render and the click. Already implemented.
+
+**3. Pending tasks must look pending (#650).** They currently render with a
+green dot and a "Disable task" tooltip, advertise webhook URLs that 404, and
+`Run` is a silent no-op. A convenience feature that hides its own state is worse
+than no feature.
 
 ---
 
-## What this does not solve
+## What gets deleted
 
-- **Working tree vs. HEAD.** The daemon runs the checkout, not the commit. A
-  dirty clone, a partial pull, or an operator editing the checkout means the
-  reviewed commit is not the executed artifact. Mitigated, not eliminated, by
-  §4.
-- **Rewritten history.** A force-push or rebase that orphans the approved
-  commit, followed by remote gc, leaves the SHA a permanently dangling
-  identifier. This is the terminal case of the ladder in §3.
-- **Divergent branch switch.** Verified experimentally against the real
-  clone/pull options: repointing a `SingleBranch` clone at another branch fails
-  the pull with `object not found`, which `IsReclonableError` matches, so
-  `CloneOrPull` wipes the directory and re-clones. If the approved commit is not
-  an ancestor of the new tip it is absent locally — recoverable via rung 3,
-  since the commit is still on the remote.
-- **First review after adoption.** A task approved before this lands has a hash
-  but no commit. Its first review under the new scheme has no baseline commit
-  and must degrade honestly rather than badge every file as added.
-- **Dir-less / inline taskset tasks.** No directory, no commit range.
+| Location | Removed | Kept |
+|---|---|---|
+| `pkg/approval/snapshot.go` | all 470 lines — `snapshotDir`, the file/size caps, `statFingerprint` / `contentFingerprint` / `streamFingerprint`, `redactValueLines`, `redactSecrets`, `yamlSecretScalars`, `collectSecretScalars` and their patterns | — |
+| `pkg/approval/diff.go` | `securityFieldPattern`, `securityBlockPattern`, `touchesSecurityBlock`, `diffLineIndent`, `snapshotValuesEqual`, `snapshotDisplayText`, `renderedDiffHasContent`, `hunkSides`, `hunked`, `unifiedDiffText`, `resolvedConfigPath`, `maxInlineContentBytes`, `diffContextLines` | a much smaller `Diff` / `FileDiff`, `Gate.Diff` rewritten against `DiffTree` |
+| `pkg/approval/gate.go` | `approvedFiles`, `approvedResolved`, `takeSnapshot`, `snapshotApproved`, `snapshotApprovedIfMissing`, `recordApprovedResolved`, `resolvedFieldsText`, `redactParamsForDisplay` | `resolvedFieldsOf` and `sanitizePermissions` — both are **content-hash** machinery, not display |
+| `pkg/webui/approval.go` | the token page's file-diff template block | the confirm/redeem flow |
+| `dc-task-detail.js` | Monaco diff editors, the text fallback renderer, the incomplete banner and its acknowledgement flow | a plain diff panel |
+| `gate_diff_test.go`, `approval-diff.spec.ts` | the tests for all of the above | the pend → review → approve path |
 
-## Deliberately not adopted
+Roughly 2,500 of #636's 3,610 lines.
 
-**Linking out to the host's compare view as the review surface.** The GitHub
-compare API returns per-file patches, but: the changed-file list appears only on
-the first page and is capped at 300 files, large diffs time out with a 5xx, and
-there is no path/subdirectory parameter on either the API or the web URL — so a
-task's file can be genuinely absent from the response in a large compare.
-Self-hosted Gitea, bare repos over SSH and `file://` remotes have no web UI at
-all. Computing the diff locally is strictly more capable and has no auth, rate
-limit, or network dependency at review time. A deep link remains as a
-convenience, not as the review surface.
+Note `sanitizePermissions` and `resolvedFieldsOf` specifically: they look like
+display helpers and are not. `ContentHash` must stay sensitive to a repointed
+`params[].default`, which is why the redaction for display lives outside
+`resolvedFieldsOf`. Deleting them changes what the gate holds on.
+
+---
+
+## Issue disposition
+
+**Close — the mechanism they describe no longer exists**
+
+- #640 synthetic Monaco line numbers — `Change.Patch()` carries real ones
+- #641 key the diff file list — the panel that needed keying is gone
+- #642 persist the snapshot — the baseline is a commit, not a snapshot
+- #643 redact from the YAML node tree — nothing renders repo bytes to a
+  session-less viewer
+- #646 `hash_include` changes invisible — folded into the diff scope
+- #651 security flagging is a text match — flagging removed
+
+**Keep**
+
+- #645 bind approval to the reviewed hash — implemented, ready to land
+- #649 an unparseable task vanishes from the UI with no error — real bug,
+  independent of rendering
+- #650 pending tasks presented as live and healthy — see above
+- #652 show effective permissions on the review screen — the highest-value
+  remaining item under this framing: knowing what a task *can do* beats a
+  prettier rendering of what changed
+- #639 `/login` accepts any passphrase when none is configured — unrelated to
+  this work, do not close
+
+**Merge into #649**
+
+- #648 a parse error destroys the baseline and reports it as a routine restart —
+  the underlying event is #649's eviction. Under this design the harm changes
+  shape: `Gate.Forget` calls `lock.Remove` (`gate.go:443`), so an eviction
+  deletes the commit record and the task returns as brand new. One issue should
+  cover "a parse failure evicts the task and erases its approval record."
 
 ---
 
 ## Open questions
 
-1. What does a review render when the task changed but **no commit changed** —
-   a dirty working tree, or a taskset override in a different repo? The
-   structured settings diff covers the override case; the dirty-tree case has
-   no "before" commit to name.
-2. Migration: do existing lock records get a commit backfilled at first
-   re-approval, or does the daemon attempt to resolve one at startup?
-3. Does the deep link belong on the session-less page at all, given it leaks
-   the repo URL and commit SHA to whoever holds the token?
-4. Should the structured settings diff be persisted in `dicode.lock` (visible,
-   diffable, human-editable) or in the database (larger, not hand-edited)?
+1. **Migration.** Existing lock records have a hash and no commit. The v3 MAC
+   covers canonical JSON of `map[string]Record` (`lock.go:181`) and `Record` has
+   no `omitempty`, so adding fields naively makes every existing lock load as
+   *tampered* — all records discarded, mass forced re-approval. Needs
+   `omitempty` or a version bump, deliberately.
+2. **Dirty working trees.** The daemon runs the checkout, not the commit, so a
+   file present in the task dir but in no commit is folded into the hash forever
+   and never appears in any commit range. Cheap guard: compare the task-dir hash
+   computed from the recorded commit's tree against the pending hash, and state
+   that the diff is partial when they differ. Worth it, or over-protection?
+3. **Local sources.** They have no commits, so they always render "no diff
+   available". Is that acceptable, or do they keep a directory snapshot? Note
+   the tension: *"git already guards it"* argues for relaxing gating on **git**
+   sources, but local folders — where AI-authored tasks land — are exactly where
+   git guards nothing.
+4. **Unbounded blob diffs.** `Change.Patch()` loads full blobs and diffs them in
+   memory with no cap; `maxSnapshotFileBytes` went away with the snapshot. A
+   large file in a task dir becomes an unbounded-memory diff.
