@@ -103,16 +103,29 @@ const diffContextLines = 3
 // the task can touch or how/whether it fires, so FileDiff.SecurityRelevant
 // flags it for the operator regardless of anywhere else in the diff.
 //
+// The container keys (image, volumes, network_mode, cap_add/cap_drop,
+// privileged, user, env_vars, entrypoint, command, ports, devices, pid_mode,
+// ipc_mode) and runtime are included because the docker/podman block decides
+// what the container may reach independently of permissions — and in the case
+// of network_mode, overrides permissions.net outright. Without them a change
+// from a hardened spec to `image: attacker/x`, `volumes: [/:/host]`,
+// `network_mode: host`, `cap_add: [SYS_ADMIN]`, `user: root` rendered with no
+// flag at all, while permissions changes two lines away were flagged — which
+// is precisely backwards.
+//
 // The key is required to be immediately followed (after optional
 // whitespace) by a colon, so e.g. "environment:" or "blockchain:" — which
 // merely contain "env"/"chain" as a substring — do not false-positive.
 var securityFieldPattern = regexp.MustCompile(
-	`(?m)^[-+].*\b(permissions|env|run|net|fs|sys|dicode|git_commit_push|webhook|webhook_auth|cron|daemon|manual|chain)[ \t]*:`)
+	`(?m)^[-+].*\b(permissions|env|run|net|fs|sys|dicode|git_commit_push|webhook|webhook_auth|cron|daemon|manual|chain|` +
+		`runtime|image|volumes|network_mode|cap_add|cap_drop|privileged|user|env_vars|entrypoint|command|ports|devices|pid_mode|ipc_mode)[ \t]*:`)
 
 // securityBlockPattern matches the top-level YAML key that opens a block
 // whose entire subtree is security-relevant. A changed line anywhere inside
 // such a block counts, which securityFieldPattern alone cannot express.
-var securityBlockPattern = regexp.MustCompile(`^(permissions|trigger)[ \t]*:`)
+// docker/podman are included for the same reason as their keys above: every
+// field under them shapes what the container can reach.
+var securityBlockPattern = regexp.MustCompile(`^(permissions|trigger|docker|podman)[ \t]*:`)
 
 // diffLineIndent returns the indentation column of a rendered diff line,
 // ignoring its "+ "/"- "/"  " prefix. Elision markers and placeholder notes

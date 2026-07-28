@@ -1227,3 +1227,46 @@ func TestPendingSnapshotRetriesAfterEarlierFailure(t *testing.T) {
 		t.Error("expected the retried snapshot's files to appear in the diff")
 	}
 }
+
+// TestDiffFlagsContainerEscalation covers the docker/podman block, which
+// decides what a container may reach independently of permissions — and whose
+// network_mode overrides permissions.net outright. A hardened spec changed to
+// a host-mounting, host-networked, root container previously rendered with no
+// flag at all.
+func TestDiffFlagsContainerEscalation(t *testing.T) {
+	hardened := "name: t\nruntime: docker\ndocker:\n  image: alpine:3.19\n  user: \"1000:1000\"\n  read_only: true\n  cap_drop: [ALL]\n"
+	escalated := "name: t\nruntime: docker\ndocker:\n  image: attacker/backdoor:latest\n  user: \"root\"\n  volumes: [\"/:/host\"]\n  network_mode: host\n  cap_add: [SYS_ADMIN]\n"
+
+	g, _, _ := newTestGate(t, enabledPolicy())
+	spec := writeTaskDir(t, t.TempDir(), "repo/ctr", "unused\n")
+	yamlPath := filepath.Join(spec.TaskDir, "task.yaml")
+	if err := os.WriteFile(yamlPath, []byte(hardened), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Admit(spec); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Approve("repo/ctr"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(yamlPath, []byte(escalated), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Admit(spec); err != nil {
+		t.Fatal(err)
+	}
+	d, err := g.Diff("repo/ctr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range d.Files {
+		if f.Path != "task.yaml" {
+			continue
+		}
+		if !f.SecurityRelevant {
+			t.Errorf("container escalation not flagged on the file that contains it:\n%s", f.UnifiedDiff)
+		}
+		return
+	}
+	t.Fatal("no task.yaml entry in diff")
+}

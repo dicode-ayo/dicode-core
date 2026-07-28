@@ -270,7 +270,7 @@ class DcTaskDetail extends LitElement {
             ${this._hasInlineSides(f)
               ? html`<div class="dc-diff-editor" data-diff-path=${f.path}
                        style="height:${this._diffEditorHeight(f)}px;border-radius:6px;overflow:hidden;border:1px solid var(--border)"></div>`
-              : html`<pre style="background:var(--bg-alt);padding:0.6rem 0.75rem;border-radius:6px;overflow-x:auto;font-size:0.8rem;line-height:1.45;margin:0;white-space:pre">${(f.unified_diff || '').split('\n').filter(l => l !== '').map(l => this._renderDiffLine(l))}</pre>`}
+              : html`<pre style="background:var(--bg-alt);padding:0.6rem 0.75rem;border-radius:6px;overflow-x:auto;font-size:0.8rem;line-height:1.45;margin:0;white-space:pre-wrap;overflow-wrap:anywhere">${(f.unified_diff || '').split('\n').filter(l => l !== '').map(l => this._renderDiffLine(l))}</pre>`}
           </div>`)}
       </div>`;
   }
@@ -285,12 +285,17 @@ class DcTaskDetail extends LitElement {
     return typeof f.old_content === 'string' || typeof f.new_content === 'string';
   }
 
-  // Sized to the change rather than the file: hideUnchangedRegions collapses
-  // the rest, so a 3k-line file with one edit needs a few hundred pixels, not
-  // a 56,000px page.
+  // Sized to the rendered content, not to a fixed window. hideUnchangedRegions
+  // collapses the untouched bulk, so this stays small for a one-line edit —
+  // but a diff that does not fit must grow the page rather than hide its tail
+  // behind an inner scrollbar, which reads as "the diff ends here" while
+  // Approve stays pinned in view above it.
   _diffEditorHeight(f) {
-    const changed = (f.unified_diff || '').split('\n').filter(l => l.startsWith('+ ') || l.startsWith('- ')).length;
-    return Math.min(600, Math.max(160, (changed + 8) * 19));
+    const lines = (f.unified_diff || '').split('\n').filter((l) => l !== '');
+    // Wrapping turns a long line into several rows; approximate rather than
+    // measure, and err high — extra whitespace is harmless, a hidden tail is not.
+    const rows = lines.reduce((n, l) => n + Math.max(1, Math.ceil(l.length / 110)), 0);
+    return Math.min(2400, Math.max(160, (rows + 4) * 19));
   }
 
   // Mounts a Monaco diff editor into every .dc-diff-editor placeholder the
@@ -314,6 +319,11 @@ class DcTaskDetail extends LitElement {
           theme: monacoTheme(), fontSize: 13, readOnly: true, renderSideBySide: false,
           minimap: { enabled: false }, scrollBeyondLastLine: false, automaticLayout: true,
           hideUnchangedRegions: { enabled: true, contextLineCount: 3, minimumLineCount: 3 },
+          // A review surface must never clip a changed line out of sight: a
+          // payload appended past the right edge renders as a benign line, or
+          // as one byte-identical to the line it replaced.
+          wordWrap: 'on',
+          scrollbar: { alwaysConsumeMouseWheel: false },
         });
         ed.setModel({
           original: monaco.editor.createModel(f.old_content || '', lang),

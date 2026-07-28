@@ -148,7 +148,7 @@ button{background:#3fb950;color:#fff;border:none;border-radius:6px;padding:0.6re
 .file-header{font-family:monospace;font-weight:600;margin-bottom:0.35rem;display:flex;align-items:center;gap:0.5rem}
 .status-badge{font-size:0.7rem;padding:0.05rem 0.4rem;border-radius:3px;background:#2a2d36;color:#8c96a3;text-transform:uppercase}
 .sec-badge{font-size:0.7rem;padding:0.05rem 0.4rem;border-radius:3px;background:rgba(248,81,73,0.18);color:#f85149;border:1px solid rgba(248,81,73,0.45)}
-pre.diffblock{background:#0d0f13;padding:0.6rem 0.75rem;border-radius:6px;overflow-x:auto;font-size:0.8rem;line-height:1.45;margin:0;white-space:pre}
+pre.diffblock{background:#0d0f13;padding:0.6rem 0.75rem;border-radius:6px;font-size:0.8rem;line-height:1.45;margin:0;white-space:pre-wrap;overflow-wrap:anywhere}
 .diffline{display:block}
 .diffline.add{background:rgba(63,185,80,0.15);color:#3fb950}
 .diffline.del{background:rgba(248,81,73,0.15);color:#f85149}
