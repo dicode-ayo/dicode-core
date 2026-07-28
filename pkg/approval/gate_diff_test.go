@@ -924,11 +924,11 @@ func TestDiffSuppressionAttack(t *testing.T) {
 	}
 }
 
-// TestDiffIncompleteWhenOnlyOutsideTaskDir covers the taskset-override case:
-// the content hash folds in resolved permissions/trigger, which live outside
-// the task dir, so a task can pend with every file byte-identical. An empty
-// Files list must never render as "nothing changed".
-func TestDiffIncompleteWhenOnlyOutsideTaskDir(t *testing.T) {
+// TestDiffRendersPureResolvedConfigChange covers a task re-held with every
+// file in its directory byte-identical — a taskset override rewriting its
+// permissions. Nothing in the directory changed, so the resolved-config entry
+// is the only thing that can carry it.
+func TestDiffRendersPureResolvedConfigChange(t *testing.T) {
 	g, _, _ := newTestGate(t, enabledPolicy())
 	spec := writeTaskDir(t, t.TempDir(), "repo/ovr", "export default () => {}\n")
 	if _, err := g.Admit(spec); err != nil {
@@ -948,20 +948,23 @@ func TestDiffIncompleteWhenOnlyOutsideTaskDir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(d.Files) != 0 {
-		t.Fatalf("expected no file-level changes, got %+v", d.Files)
+	if len(d.Files) != 1 || d.Files[0].Path != resolvedConfigPath {
+		t.Fatalf("want exactly the resolved-config entry, got %+v", d.Files)
 	}
-	if !d.Incomplete || d.IncompleteReason == "" {
-		t.Fatal("a pending task with no file changes must report Incomplete with a reason, not an empty all-clear")
+	if !strings.Contains(d.Files[0].UnifiedDiff, "*") {
+		t.Errorf("the widened net value should be visible:\n%s", d.Files[0].UnifiedDiff)
+	}
+	if d.Incomplete {
+		t.Errorf("the change is rendered, so it is not incomplete: %q", d.IncompleteReason)
 	}
 }
 
-// TestDiffFlagsOutOfDirChangeAlongsideFileChange covers a change that spans
-// both sides of the snapshot's horizon: an ordinary file edit plus a taskset
-// override widening permissions. The file edit renders normally, so an
-// empty-Files check cannot notice the override half — the operator would see
-// a plausible cosmetic diff and no mention of the widening at all.
-func TestDiffFlagsOutOfDirChangeAlongsideFileChange(t *testing.T) {
+// TestDiffRendersResolvedConfigChange covers a change that spans both sides of
+// the snapshot's horizon: an ordinary file edit plus a taskset override
+// widening permissions. The override never touches the task directory, so no
+// file diff can carry it — it is rendered as its own entry instead, showing
+// the actual before/after rather than merely warning that something changed.
+func TestDiffRendersResolvedConfigChange(t *testing.T) {
 	g, _, _ := newTestGate(t, enabledPolicy())
 	root := t.TempDir()
 	spec := writeTaskDir(t, root, "repo/combo", "VERSION_A\n")
@@ -986,14 +989,63 @@ func TestDiffFlagsOutOfDirChangeAlongsideFileChange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(d.Files) == 0 {
-		t.Fatal("expected the file edit to render; this test is about the override being missed alongside it")
+	var fileSeen bool
+	var resolved *FileDiff
+	for i := range d.Files {
+		switch d.Files[i].Path {
+		case "task.js":
+			fileSeen = true
+		case resolvedConfigPath:
+			resolved = &d.Files[i]
+		}
 	}
-	if !d.Incomplete {
-		t.Error("a permissions widening outside the task dir must mark the diff incomplete even when files also changed")
+	if !fileSeen {
+		t.Error("the in-directory file edit should still render")
 	}
-	if !strings.Contains(d.IncompleteReason, "outside the task directory") {
-		t.Errorf("reason should name the out-of-dir change, got: %q", d.IncompleteReason)
+	if resolved == nil {
+		t.Fatalf("the out-of-dir permissions widening is not in the diff: %+v", d.Files)
+	}
+	if !resolved.SecurityRelevant {
+		t.Error("resolved-config changes are security-bearing by construction")
+	}
+	if !strings.Contains(resolved.UnifiedDiff, "*") {
+		t.Errorf("the widened net value should be visible:\n%s", resolved.UnifiedDiff)
+	}
+	// It is shown, so it does not need the "cannot be displayed" warning.
+	if d.Incomplete {
+		t.Errorf("a rendered change must not also be reported as unshowable: %q", d.IncompleteReason)
+	}
+}
+
+// TestDiffNoResolvedEntryWhenUnchanged guards against the entry appearing on
+// every diff: an in-directory edit that leaves the resolved fields alone must
+// not produce a spurious "(resolved config)" entry.
+func TestDiffNoResolvedEntryWhenUnchanged(t *testing.T) {
+	g, _, _ := newTestGate(t, enabledPolicy())
+	spec := writeTaskDir(t, t.TempDir(), "repo/plain", "VERSION_A\n")
+	if _, err := g.Admit(spec); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Approve("repo/plain"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(spec.TaskDir, "task.js"), []byte("VERSION_B\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Admit(spec); err != nil {
+		t.Fatal(err)
+	}
+	d, err := g.Diff("repo/plain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range d.Files {
+		if f.Path == resolvedConfigPath {
+			t.Errorf("resolved config is unchanged but was rendered:\n%s", f.UnifiedDiff)
+		}
+	}
+	if d.Incomplete {
+		t.Errorf("an ordinary visible file change must not be flagged incomplete: %q", d.IncompleteReason)
 	}
 }
 

@@ -71,10 +71,11 @@ type Gate struct {
 	// to snapshot.
 	approvedFiles map[string]map[string]snapshotValue
 
-	// approvedResolved is the resolvedFieldsDigest of the last-approved
-	// version, so Diff can tell that a task was re-held by a change outside
-	// its directory (a taskset override widening permissions or rewiring a
-	// trigger) even when files inside the directory also changed.
+	// approvedResolved is the rendered resolved-fields text of the
+	// last-approved version, so Diff can show what the post-override
+	// permissions, runtime and trigger actually were — including when the
+	// change came from a taskset override outside the task directory, which
+	// no directory snapshot can see.
 	approvedResolved map[string]string
 }
 
@@ -241,7 +242,7 @@ func (g *Gate) Admit(k task.Kinded) (armed bool, err error) {
 		// hash and files are written together in one critical section: a
 		// concurrent Approve/ApproveIfHash can never observe a pending[id]
 		// whose hash and files disagree on which generation they describe.
-		g.pending[id] = pendingEntry{kinded: k, hash: hash, files: files, resolved: resolvedFieldsDigest(k)}
+		g.pending[id] = pendingEntry{kinded: k, hash: hash, files: files, resolved: resolvedFieldsText(k)}
 		hook := g.pendingHook
 		g.mu.Unlock()
 		if hook != nil && changed {
@@ -335,13 +336,12 @@ func (g *Gate) snapshotApprovedIfMissing(id, dir string) {
 	g.snapshotApproved(id, dir)
 }
 
-// recordApprovedResolved pins the resolved-fields digest of content the gate
-// has just treated as approved. Unlike the file snapshot this is refreshed
+// recordApprovedResolved pins the resolved-fields text of content the gate has
+// just treated as approved. Unlike the file snapshot this is refreshed
 // unconditionally: it costs a marshal rather than a directory walk, and a
-// stale value here would make Diff either miss an out-of-dir change or invent
-// one.
+// stale value here would make Diff either miss a change or invent one.
 func (g *Gate) recordApprovedResolved(id string, k task.Kinded) {
-	d := resolvedFieldsDigest(k)
+	d := resolvedFieldsText(k)
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if d == "" {
@@ -740,22 +740,30 @@ func resolvedFieldsOf(k task.Kinded) any {
 	}
 }
 
-// resolvedFieldsDigest hashes resolvedFieldsOf(k). The diff compares this
-// between baseline and pending to notice a change that never touches the task
-// directory — taskset overrides can widen permissions or rewire triggers from
-// the parent taskset.yaml, which the content hash folds in but a directory
-// snapshot cannot see. Returns "" when there are no resolved fields.
-func resolvedFieldsDigest(k task.Kinded) string {
+// resolvedFieldsText renders resolvedFieldsOf(k) as indented JSON for the
+// diff to show directly, rather than merely detecting that it changed.
+//
+// These fields are what the content hash folds in beyond the directory's
+// bytes, and taskset overrides rewrite them from outside the task directory.
+// Comparing a digest could only ever say "something out here changed" — and
+// could not tell that apart from an in-directory task.yaml edit, which alters
+// the same resolved fields and is already visible in the file diff. Rendering
+// the values instead means the operator sees the actual before/after whatever
+// its origin, so no such distinction has to be drawn or explained.
+//
+// Env literal values are already redacted by sanitizePermissions, and
+// WebhookSecret is excluded from resolvedSecurityFields entirely, so this
+// carries no secret material. Returns "" when there are no resolved fields.
+func resolvedFieldsText(k task.Kinded) string {
 	rf := resolvedFieldsOf(k)
 	if rf == nil {
 		return ""
 	}
-	b, err := json.Marshal(rf)
+	b, err := json.MarshalIndent(rf, "", "  ")
 	if err != nil {
 		return ""
 	}
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:])
+	return string(b) + "\n"
 }
 
 func ContentHash(k task.Kinded) (string, error) {

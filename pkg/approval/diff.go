@@ -77,6 +77,11 @@ type FileDiff struct {
 	NewContent string `json:"new_content,omitempty"`
 }
 
+// resolvedConfigPath is the synthetic entry under which Diff renders the
+// resolved (post-override) security fields. Parenthesised and spaced so it
+// cannot collide with a real dir-relative file path.
+const resolvedConfigPath = "(resolved config)"
+
 // maxInlineContentBytes bounds a single reconstructed side. Only reachable
 // when a file is changed nearly end-to-end (hunking elides nothing), where
 // the plain hunked text is the more useful rendering anyway.
@@ -298,16 +303,26 @@ func (g *Gate) Diff(id string) (Diff, error) {
 
 	// The content hash covers more than these files: the resolved permissions,
 	// runtime and trigger shape, which taskset overrides rewrite from outside
-	// the task directory entirely. Compare those directly rather than
-	// inferring from an empty file list — a commit that edits a file AND
-	// widens permissions via an override produces a perfectly ordinary-looking
-	// file diff, and the override half would otherwise never be mentioned.
-	outsideChanged := hadResolved && ent.resolved != "" && approvedResolved != ent.resolved
+	// the task directory entirely. Render those as their own entry so the
+	// operator sees the actual before/after — whether the change came from an
+	// override or from an edit to task.yaml, which alters the same fields and
+	// is already visible in the file diff. Flagging instead of rendering could
+	// not tell those apart, and cried wolf on the ordinary in-directory case.
+	if hadResolved && ent.resolved != "" && approvedResolved != ent.resolved {
+		rdiff := unifiedDiffText(approvedResolved, ent.resolved)
+		out.Files = append(out.Files, FileDiff{
+			Path:   resolvedConfigPath,
+			Status: "modified",
+			// Every field here is security-bearing by construction — that is
+			// the criterion for being in resolvedSecurityFields at all.
+			SecurityRelevant: true,
+			UnifiedDiff:      hunked(rdiff),
+		})
+		last := &out.Files[len(out.Files)-1]
+		last.OldContent, last.NewContent = hunkSides(last.UnifiedDiff)
+	}
 
 	switch {
-	case outsideChanged:
-		out.Incomplete = true
-		out.IncompleteReason = "This task's resolved permissions, runtime or trigger changed — a taskset override outside the task directory. That change is not in the file diff below and cannot be shown here. Review the taskset source before approving."
 	case len(out.Files) == 0:
 		out.Incomplete = true
 		out.IncompleteReason = "The task's own files are unchanged, so this task was re-held by something outside its directory — a taskset override to its permissions, runtime or trigger, or a hash_include target elsewhere in the source. That cannot be shown here. Review the source change before approving."
