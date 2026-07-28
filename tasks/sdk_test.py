@@ -102,7 +102,6 @@ class _State:
         self.task_source: Optional[str] = None
         self.task_path: Optional[str] = None
         self.dicode: "MockDicode" = None  # type: ignore[assignment] — set in reset_mocks()
-        self.input: Any = None
         self._httpx_patched = False
 
 
@@ -112,14 +111,23 @@ _state = _State()
 def reset_mocks() -> None:
     """Reset every mock to a fresh, empty state. Wired to run automatically
     before each test case via the autouse `_dicode_harness_reset` fixture
-    below — task.test.py files don't normally need to call this directly."""
+    below — task.test.py files don't normally need to call this directly.
+
+    Resets `ctx` in place (not by rebinding the module-level name) because a
+    task.test.py imports `ctx` by value at `from sdk_test import ctx` time —
+    rebinding `sdk_test.ctx` to a new `_Ctx()` here would leave that already
+    -bound reference stale. Mutating the existing object's fields is what
+    every importer actually observes on the next test."""
     _state.params = {}
     _state.env = {}
     _state.kv = {}
     _state.http_mocks = []
     _state.http_calls = []
     _state.dicode = MockDicode()
-    _state.input = None
+    ctx.state = None
+    ctx.input = None
+    ctx._resumed = False
+    ctx._step = None
 
 
 @pytest.fixture(autouse=True)
@@ -400,8 +408,8 @@ ctx = _Ctx()
 
 def set_input(value: Any) -> None:
     """Set the value `run_task()`'s injected `input` global (and `ctx.input`)
-    will see on the next call — mirrors tasks/sdk-test.ts's `input` global."""
-    _state.input = value
+    will see on the next call — mirrors tasks/sdk-test.ts's `input` global.
+    `ctx` is the single source of truth; reset_mocks() clears it every test."""
     ctx.input = value
 
 
@@ -590,7 +598,7 @@ def run_task() -> Any:
         "dicode": _state.dicode,
         "mcp": mcp,
         "ctx": ctx,
-        "input": _state.input,
+        "input": ctx.input,
     }
     code = compile(_state.task_source, _state.task_path or "<task.py>", "exec")
     exec(code, namespace)  # noqa: S102 — intentional: this *is* the harness's job.
