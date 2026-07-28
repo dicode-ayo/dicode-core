@@ -93,15 +93,20 @@ func Run(ctx context.Context, spec *task.Spec) (Result, error) {
 }
 
 // findTestFile picks the first task.test.* that exists in the task dir.
-// The Deno/TS extensions are checked first (matching the priority order used
-// by pkg/task.ScriptPath, ts-preferred-over-js); .py is appended last since
-// a given task dir only ever has one runtime's script (and therefore only
-// ever one of these test files) in practice — the ordering here is purely
-// defensive for hand-constructed specs, not a meaningful priority between
-// runtimes. Symlinks are rejected to stay consistent with the production
-// script-path policy.
+// For a Python-runtime spec, only .py is considered — otherwise a stale
+// task.test.ts left behind in a task dir that was converted to
+// runtime: python would silently shadow the real task.test.py and get run
+// through the wrong runtime. For every other runtime (including unset/""),
+// the Deno/TS extensions are checked first (matching the priority order used
+// by pkg/task.ScriptPath, ts-preferred-over-js), with .py checked last as a
+// defensive fallback for hand-constructed specs. Symlinks are rejected to
+// stay consistent with the production script-path policy.
 func findTestFile(spec *task.Spec) (string, error) {
-	for _, ext := range []string{".ts", ".js", ".mjs", ".py"} {
+	exts := []string{".ts", ".js", ".mjs", ".py"}
+	if spec.Runtime == runtimePython {
+		exts = []string{".py"}
+	}
+	for _, ext := range exts {
 		p := filepath.Join(spec.TaskDir, "task.test"+ext)
 		if fi, err := os.Lstat(p); err == nil && fi.Mode()&os.ModeSymlink == 0 {
 			return p, nil

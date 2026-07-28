@@ -42,7 +42,7 @@ Follow this order every time — no exceptions:
 4. Write the three files (via the editor / dev-mode clone):
    - `<task-id>/task.yaml` — trigger, params, env declarations
    - `<task-id>/task.ts`   — task logic (TypeScript for `runtime: deno`; use `task.py` for `runtime: python`)
-   - `<task-id>/task.test.ts` — unit tests (required, no exceptions)
+   - `<task-id>/task.test.ts` (or `task.test.py` for `runtime: python`) — unit tests (required, no exceptions)
 5. Test — ALL tests must pass before proceeding. `test_task("<task-id>")`
    returns a hint pointing at `POST /api/tasks/{id}/test`; make that call. On the
    CLI: `dicode task test <task-id>` (or `make test-tasks` for the full sweep).

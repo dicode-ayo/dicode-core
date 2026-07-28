@@ -74,9 +74,9 @@ Design notes / how this differs from the Deno harness (tasks/sdk-test.ts)
   as simple as the Deno one (a single subprocess, no dependency
   introspection) while letting every test file declare exactly the
   dependencies it needs.
-* Because pytest is not necessarily on this interpreter's path outside a
-  `uv run` invocation, `import pytest` is deferred to inside
-  run_pytest_main() rather than done at module import time.
+* This module imports pytest at module scope (the autouse fixture below is
+  declared with `@pytest.fixture`), so it is only importable from inside a
+  `uv run` invocation of a task.test.py that declares pytest.
 """
 
 from __future__ import annotations
@@ -113,17 +113,20 @@ def reset_mocks() -> None:
     before each test case via the autouse `_dicode_harness_reset` fixture
     below — task.test.py files don't normally need to call this directly.
 
-    Resets `ctx` in place (not by rebinding the module-level name) because a
-    task.test.py imports `ctx` by value at `from sdk_test import ctx` time —
-    rebinding `sdk_test.ctx` to a new `_Ctx()` here would leave that already
-    -bound reference stale. Mutating the existing object's fields is what
-    every importer actually observes on the next test."""
+    Resets `ctx` and `dicode` in place (not by rebinding the module-level
+    name) because a task.test.py imports both by value at `from sdk_test
+    import ctx, dicode` time — rebinding `sdk_test.ctx`/`sdk_test.dicode` to
+    a fresh instance here would leave those already-bound references stale.
+    Mutating the existing objects' fields/state is what every importer
+    actually observes on the next test. Same reasoning applies to `output`:
+    its `calls` list is cleared in place rather than replaced."""
     _state.params = {}
     _state.env = {}
     _state.kv = {}
     _state.http_mocks = []
     _state.http_calls = []
-    _state.dicode = MockDicode()
+    dicode._reset()
+    output.calls.clear()
     ctx.state = None
     ctx.input = None
     ctx._resumed = False
@@ -371,6 +374,13 @@ class MockDicode:
     async def set_group_async(self, label: Any) -> None:
         self.set_group(label)
 
+    def _reset(self) -> None:
+        self.__init__()
+
+
+dicode = MockDicode()
+_state.dicode = dicode
+
 
 class _MCP:
     def list_tools(self, name: str) -> list:
@@ -469,6 +479,8 @@ def _fake_httpx_response(httpx_mod: Any, method: str, url: str, kwargs: dict) ->
     body_sent = kwargs.get("json")
     if body_sent is None:
         body_sent = kwargs.get("data")
+    if body_sent is None:
+        body_sent = kwargs.get("content")
     _record_http_call(method, url, body_sent)
 
     m = _find_http_mock(method, url)
@@ -632,6 +644,4 @@ def run_pytest_main(test_file: str) -> None:
     harness — pkg/tasktest/tasktest_test.go's TestRun_Python fixture bakes in
     the same flag.)
     """
-    import pytest as _pytest
-
-    raise SystemExit(_pytest.main([test_file, "-q", "--no-header", "--import-mode=importlib"]))
+    raise SystemExit(pytest.main([test_file, "-q", "--no-header", "--import-mode=importlib"]))

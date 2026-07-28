@@ -186,13 +186,12 @@ func TestFindTestFile_PyNotConfusedByPassedCount(t *testing.T) {
 	}
 }
 
-// TestRun_Python is the regression-coverage test for #159 Phase 2: before
-// this change, a python-runtime spec always returned ErrUnsupportedRuntime
-// regardless of whether a task.test.py existed. It builds a minimal
-// self-testing PEP 723 task.test.py (the same shape documented in
-// tasks/sdk_test.py / demonstrated by tasks/examples/hello-python) and drives
-// it through the real uv binary end-to-end.
-func TestRun_Python(t *testing.T) {
+// runPythonFixture skips (via t.Skip) if uv can't be provisioned, writes src
+// as task.test.py in a fresh temp dir, and drives it through the real Run()
+// end-to-end. Shared by TestRun_Python and TestRun_PythonFailure, which
+// differ only in the script body and expected pass/fail counts.
+func runPythonFixture(t *testing.T, id, src string) Result {
+	t.Helper()
 	if testing.Short() {
 		t.Skip("requires uv subprocess")
 	}
@@ -202,7 +201,26 @@ func TestRun_Python(t *testing.T) {
 
 	dir := t.TempDir()
 	testFile := filepath.Join(dir, "task.test.py")
-	src := `# /// script
+	if err := os.WriteFile(testFile, []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	spec := &task.Spec{ID: id, TaskDir: dir, Runtime: task.Runtime("python")}
+	res, err := Run(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("Run: %v\noutput:\n%s", err, res.Output)
+	}
+	return res
+}
+
+// TestRun_Python is the regression-coverage test for #159 Phase 2: before
+// this change, a python-runtime spec always returned ErrUnsupportedRuntime
+// regardless of whether a task.test.py existed. It builds a minimal
+// self-testing PEP 723 task.test.py (the same shape documented in
+// tasks/sdk_test.py / demonstrated by tasks/examples/hello-python) and drives
+// it through the real uv binary end-to-end.
+func TestRun_Python(t *testing.T) {
+	res := runPythonFixture(t, "examples/py-tasktest-fixture", `# /// script
 # requires-python = ">=3.11"
 # dependencies = ["pytest"]
 # ///
@@ -218,19 +236,7 @@ if __name__ == "__main__":
     import pytest
 
     raise SystemExit(pytest.main([__file__, "-q", "--no-header", "--import-mode=importlib"]))
-`
-	if err := os.WriteFile(testFile, []byte(src), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	spec := &task.Spec{ID: "examples/py-tasktest-fixture", TaskDir: dir, Runtime: task.Runtime("python")}
-	res, err := Run(context.Background(), spec)
-	if err != nil {
-		t.Fatalf("Run: %v\noutput:\n%s", err, res.Output)
-	}
-	if _, ok := err.(*ErrUnsupportedRuntime); ok {
-		t.Fatalf("python runtime must no longer be unsupported: %v", err)
-	}
+`)
 	if res.Runtime != "python" {
 		t.Errorf("Runtime = %q, want %q", res.Runtime, "python")
 	}
@@ -246,16 +252,7 @@ if __name__ == "__main__":
 // as a failure (non-zero Failed, non-zero ExitCode, no Error string — a
 // clean parse of a failing summary is not the same as a crash).
 func TestRun_PythonFailure(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires uv subprocess")
-	}
-	if _, err := uvpkg.EnsureUv(uvpkg.DefaultVersion); err != nil {
-		t.Skipf("uv provisioning failed (offline?): %v", err)
-	}
-
-	dir := t.TempDir()
-	testFile := filepath.Join(dir, "task.test.py")
-	src := `# /// script
+	res := runPythonFixture(t, "examples/py-tasktest-fixture-fail", `# /// script
 # requires-python = ">=3.11"
 # dependencies = ["pytest"]
 # ///
@@ -267,16 +264,7 @@ if __name__ == "__main__":
     import pytest
 
     raise SystemExit(pytest.main([__file__, "-q", "--no-header", "--import-mode=importlib"]))
-`
-	if err := os.WriteFile(testFile, []byte(src), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	spec := &task.Spec{ID: "examples/py-tasktest-fixture-fail", TaskDir: dir, Runtime: task.Runtime("python")}
-	res, err := Run(context.Background(), spec)
-	if err != nil {
-		t.Fatalf("Run: %v\noutput:\n%s", err, res.Output)
-	}
+`)
 	if res.Failed != 1 || res.Passed != 0 {
 		t.Errorf("Passed=%d Failed=%d; want 0/1\noutput:\n%s", res.Passed, res.Failed, res.Output)
 	}
