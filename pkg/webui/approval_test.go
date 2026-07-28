@@ -26,10 +26,38 @@ type fakeApprovalGate struct {
 	mu       sync.Mutex
 	pending  map[string]string // task id → observed hash
 	approved []string
+	diffs    map[string]approval.Diff // task id → canned Diff for the test to assert against
+	diffErrs map[string]error         // task id → error Diff should return instead
 }
 
 func newFakeGate() *fakeApprovalGate {
 	return &fakeApprovalGate{pending: map[string]string{}}
+}
+
+// setDiff stashes the Diff Diff(id) should return, for tests that don't need
+// the real gate's snapshot machinery.
+func (g *fakeApprovalGate) setDiff(id string, d approval.Diff) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.diffs == nil {
+		g.diffs = map[string]approval.Diff{}
+	}
+	g.diffs[id] = d
+}
+
+func (g *fakeApprovalGate) Diff(id string) (approval.Diff, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if err, ok := g.diffErrs[id]; ok {
+		return approval.Diff{}, err
+	}
+	if d, ok := g.diffs[id]; ok {
+		return d, nil
+	}
+	if _, ok := g.pending[id]; !ok {
+		return approval.Diff{}, fmt.Errorf("task %q is not pending approval", id)
+	}
+	return approval.Diff{TaskID: id}, nil
 }
 
 func (g *fakeApprovalGate) IsPending(id string) bool {
@@ -339,6 +367,92 @@ func TestAPI_ApproveTask_SessionCookieWorks(t *testing.T) {
 	}
 }
 
+// ── GET /api/tasks/{id}/pending-diff ─────────────────────────────────────────
+
+func TestAPI_ApprovalDiff_HappyPath(t *testing.T) {
+	srv, reg, _ := newApprovalTestServer(t, false)
+	registerMinimalTask(t, reg, "repo/pending-task")
+	gate := newFakeGate()
+	gate.pending["repo/pending-task"] = "hash-1"
+	gate.setDiff("repo/pending-task", approval.Diff{
+		TaskID:      "repo/pending-task",
+		HasBaseline: true,
+		Files: []approval.FileDiff{
+			{Path: "task.js", Status: "modified", UnifiedDiff: "- old\n+ new\n", SecurityRelevant: false},
+		},
+	})
+	srv.SetApprovalGate(gate)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/repo%2Fpending-task/pending-diff", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", w.Code, w.Body.String())
+	}
+	var d approval.Diff
+	if err := json.NewDecoder(w.Body).Decode(&d); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !d.HasBaseline {
+		t.Error("HasBaseline = false, want true")
+	}
+	if len(d.Files) != 1 || d.Files[0].Path != "task.js" {
+		t.Fatalf("Files = %+v", d.Files)
+	}
+}
+
+func TestAPI_ApprovalDiff_UnknownTask404(t *testing.T) {
+	srv, _, _ := newApprovalTestServer(t, false)
+	srv.SetApprovalGate(newFakeGate())
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/ghost/pending-diff", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestAPI_ApprovalDiff_NotPending409(t *testing.T) {
+	srv, reg, _ := newApprovalTestServer(t, false)
+	registerMinimalTask(t, reg, "repo/normal-task")
+	srv.SetApprovalGate(newFakeGate())
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/repo%2Fnormal-task/pending-diff", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestAPI_ApprovalDiff_NoGate503(t *testing.T) {
+	srv, reg, _ := newApprovalTestServer(t, false)
+	registerMinimalTask(t, reg, "repo/x")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/repo%2Fx/pending-diff", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestAPI_ApprovalDiff_RequiresAuth(t *testing.T) {
+	srv, reg, _ := newApprovalTestServer(t, true)
+	registerMinimalTask(t, reg, "repo/pending-task")
+	gate := newFakeGate()
+	gate.pending["repo/pending-task"] = "hash-1"
+	srv.SetApprovalGate(gate)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/repo%2Fpending-task/pending-diff", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401: %s", w.Code, w.Body.String())
+	}
+}
+
 // ── Tokenized approve link ───────────────────────────────────────────────────
 
 // tokenFromLink extracts the raw token from a MintApproveLink URL.
@@ -407,6 +521,49 @@ func TestApproveLink_GetConfirmPageDoesNotConsume(t *testing.T) {
 	h.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("POST after GETs: status = %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestApproveLink_ConfirmPageShowsDiff is the regression for #604 on the
+// tokenized link surface: the confirm page must render the pending diff
+// (the changed file, its +/- lines, and a security-relevant warning) so an
+// operator approving from a notification link — no session, no dashboard —
+// isn't approving blind either.
+func TestApproveLink_ConfirmPageShowsDiff(t *testing.T) {
+	srv, gate, _ := newTokenLinkServer(t)
+	gate.setDiff("repo/pending-task", approval.Diff{
+		TaskID:      "repo/pending-task",
+		HasBaseline: true,
+		Files: []approval.FileDiff{
+			{
+				Path:             "task.yaml",
+				Status:           "modified",
+				UnifiedDiff:      "  name: repo/pending-task\n- permissions: {}\n+ permissions:\n+   net: [\"*\"]\n",
+				SecurityRelevant: true,
+			},
+		},
+	})
+	link, err := srv.MintApproveLink(context.Background(), "repo/pending-task")
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	token := tokenFromLink(t, link)
+
+	req := httptest.NewRequest(http.MethodGet, "/approve/"+token, nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "task.yaml") {
+		t.Errorf("confirm page missing changed file name: %s", body)
+	}
+	if !strings.Contains(body, "net") {
+		t.Errorf("confirm page missing diff content: %s", body)
+	}
+	if !strings.Contains(body, "security-relevant") {
+		t.Errorf("confirm page missing security-relevant badge: %s", body)
 	}
 }
 

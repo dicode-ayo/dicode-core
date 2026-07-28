@@ -54,13 +54,45 @@ type Gate struct {
 	admitted    map[string]task.Kinded
 	pendingHook func(k task.Kinded, hash string)
 	bootstrap   bool
+
+	// approvedFiles is the last-known-approved content snapshot per task ID
+	// (dir-relative path -> file content), refreshed every time Admit treats
+	// the current on-disk dir as approved content (the already-approved-hash
+	// fast path and every auto-approve path, each guarded by
+	// snapshotApprovedIfMissing so a repeat poll at an already-cached hash
+	// skips the walk) and promoted from a pendingEntry's own files on a
+	// successful approve(). The current pending (not yet approved) content
+	// snapshot lives on pendingEntry.files itself (see below) rather than in
+	// a standalone map — this is in-memory only, like pending and admitted
+	// above: rebuilt by re-admit on daemon restart, not persisted, so a diff
+	// requested immediately after a restart, before the reconciler has
+	// re-admitted the task, has no baseline (Diff reports HasBaseline=false).
+	// Dir-less (inline) tasks never get a snapshot (see taskDirOf) — nothing
+	// to snapshot.
+	approvedFiles map[string]map[string]snapshotValue
+
+	// approvedResolved is the rendered resolved-fields text of the
+	// last-approved version, so Diff can show what the post-override
+	// permissions, runtime and trigger actually were — including when the
+	// change came from a taskset override outside the task directory, which
+	// no directory snapshot can see.
+	approvedResolved map[string]string
 }
 
-// pendingEntry captures the task (and the hash observed at decision time) so
-// Approve can record exactly what the operator saw and arm it.
+// pendingEntry captures the task, the hash observed at decision time, and
+// the content snapshot taken at that same moment (dir-relative path -> file
+// content; nil for a dir-less task or a snapshot failure). hash and files
+// are always written together in a single critical section (see Admit's
+// default case) so a reader can never observe a hash paired with a snapshot
+// from a different generation — the fix for a race where approve() could
+// promote a snapshot that was stale relative to the pending hash it was
+// being matched against (previously hash and files lived in two separate
+// maps, updated under two separate lock acquisitions).
 type pendingEntry struct {
-	kinded task.Kinded
-	hash   string
+	kinded   task.Kinded
+	hash     string
+	files    map[string]snapshotValue
+	resolved string
 }
 
 // NewGate builds a Gate. arm is invoked for every task that passes the gate
@@ -71,13 +103,15 @@ func NewGate(policy Policy, lock *Lock, arm func(task.Kinded) error, log *zap.Lo
 		log = zap.NewNop()
 	}
 	return &Gate{
-		policy:   policy,
-		lock:     lock,
-		arm:      arm,
-		hashFn:   ContentHash,
-		log:      log,
-		pending:  map[string]pendingEntry{},
-		admitted: map[string]task.Kinded{},
+		policy:           policy,
+		lock:             lock,
+		arm:              arm,
+		hashFn:           ContentHash,
+		log:              log,
+		pending:          map[string]pendingEntry{},
+		admitted:         map[string]task.Kinded{},
+		approvedFiles:    map[string]map[string]snapshotValue{},
+		approvedResolved: map[string]string{},
 	}
 }
 
@@ -159,6 +193,8 @@ func (g *Gate) Admit(k task.Kinded) (armed bool, err error) {
 	case g.lock.Approved(id, hash):
 		// Already approved at exactly this hash; keep the original record.
 		g.clearPending(id)
+		g.snapshotApprovedIfMissing(id, taskDirOf(k))
+		g.recordApprovedResolved(id, k)
 		return true, g.arm(k)
 	case g.Bootstrapping():
 		// Adoption window: seed the current inventory as approved rather
@@ -167,17 +203,68 @@ func (g *Gate) Admit(k task.Kinded) (armed bool, err error) {
 	default:
 		g.mu.Lock()
 		prev, was := g.pending[id]
-		g.pending[id] = pendingEntry{kinded: k, hash: hash}
+		g.mu.Unlock()
+
+		// An unchanged pending hash means the on-disk content is guaranteed
+		// byte-identical to what's already cached on prev.files — skip the
+		// directory walk + reads entirely and reuse it. Only a genuinely new
+		// hash (or the task's first time pending) re-snapshots.
+		changed := !was || prev.hash != hash
+		files := prev.files
+		dir := taskDirOf(k)
+		// A dir-backed task whose very first takeSnapshot call failed
+		// (transient I/O error) is left with files == nil, and every later
+		// Admit at that same (unchanged) hash sets changed = false — without
+		// this second condition the walk below would never run again, and
+		// Gate.Diff would report that task Incomplete forever even once the
+		// transient failure has cleared.
+		if changed || (dir != "" && files == nil) {
+			// I/O stays outside the lock, same as before. Snapshot the
+			// current (new, not-yet-approved) dir so a later Diff has the
+			// exact content the operator is being asked to review.
+			//
+			// Two distinct "no new snapshot" cases must not be conflated:
+			// a genuinely dir-less task (dir == "" — an inline taskset entry
+			// with nothing to ever snapshot) correctly gets files == nil,
+			// matching pendingEntry.files' nil-means-nothing-captured
+			// convention. But a dir-backed task whose takeSnapshot call
+			// merely failed (transient I/O error, already logged by
+			// takeSnapshot) must NOT fall through to nil here: the task
+			// really is pending on new, security-relevant content, and
+			// discarding prev.files would make Gate.Diff silently report an
+			// empty diff for it instead of showing (slightly stale) real
+			// content. So: only overwrite files with the new snapshot when
+			// the dir is non-empty AND the snapshot actually succeeded;
+			// otherwise keep whatever files already held (nil for dir-less,
+			// prev.files as a best-effort fallback for a snapshot failure).
+			if dir == "" {
+				files = nil
+			} else if snap := g.takeSnapshot(id, dir, "pending"); snap != nil {
+				files = snap
+			}
+		}
+
+		g.mu.Lock()
+		// hash and files are written together in one critical section: a
+		// concurrent Approve/ApproveIfHash can never observe a pending[id]
+		// whose hash and files disagree on which generation they describe.
+		g.pending[id] = pendingEntry{kinded: k, hash: hash, files: files, resolved: resolvedFieldsText(k)}
 		hook := g.pendingHook
 		g.mu.Unlock()
-		if hook != nil && (!was || prev.hash != hash) {
+		if hook != nil && changed {
 			hook(k, hash)
 		}
 		return false, nil
 	}
 
-	// Auto-approve path (builtin / trusted / gate disabled): keep the lock
-	// current as the running inventory, then arm.
+	// Auto-approve path (builtin / trusted / gate disabled / bootstrap): keep
+	// the lock current as the running inventory, then arm. The current dir IS
+	// the approved content on this path, so the baseline snapshot used by
+	// Diff must track it — but only a genuine hash change means this
+	// generation was never snapshotted. Checked (cheap: an in-memory map
+	// lookup) before Record below overwrites the prior hash, since after that
+	// Approved(id, hash) would trivially be true either way.
+	hashUnchanged := g.lock.Approved(id, hash)
 	g.clearPending(id)
 	if hash != "" {
 		if err := g.lock.Record(id, hash, by); err != nil {
@@ -187,7 +274,102 @@ func (g *Gate) Admit(k task.Kinded) (armed bool, err error) {
 				zap.String("task", id), zap.Error(err))
 		}
 	}
+	if hashUnchanged {
+		// Common case on every ~30s reconcile poll of an unchanged trusted
+		// task: the cached baseline is already current, so skip the
+		// directory walk entirely, same as before this fix.
+		g.snapshotApprovedIfMissing(id, taskDirOf(k))
+	} else {
+		// The hash just changed (or this is the task's first Admit): the
+		// cached baseline, if any, describes a stale generation. Refresh
+		// unconditionally so a later Diff — reachable once trust is revoked
+		// or the gate is re-enabled — compares against what was actually
+		// last approved, not whatever was cached from an earlier version.
+		g.snapshotApproved(id, taskDirOf(k))
+	}
+	g.recordApprovedResolved(id, k)
 	return true, g.arm(k)
+}
+
+// taskDirOf returns k's on-disk task directory, mirroring the *task.Spec /
+// *task.PipelineTask type switch in ContentHash — those are the only two
+// task.Kinded implementations that carry a TaskDir. Returns "" for anything
+// else (dir-less inline taskset entries), which the snapshot helpers below
+// and Diff both treat as "nothing to snapshot / diff".
+func taskDirOf(k task.Kinded) string {
+	switch s := k.(type) {
+	case *task.Spec:
+		return s.TaskDir
+	case *task.PipelineTask:
+		return s.TaskDir
+	default:
+		return ""
+	}
+}
+
+// takeSnapshot captures dir's current on-disk content for id's what-labeled
+// snapshot (used in the warning log line only), without touching the gate
+// lock. Returns nil for a dir-less task (nothing to snapshot) or a snapshot
+// failure (logged, not fatal: Admit's arm/lock decision must not be blocked
+// by a diff-support snapshot) — callers store the nil as-is, matching
+// taskDirOf's dir-less contract and pendingEntry.files' nil-means-nothing-
+// captured convention.
+func (g *Gate) takeSnapshot(id, dir, what string) map[string]snapshotValue {
+	if dir == "" {
+		return nil
+	}
+	snap, err := snapshotDir(dir)
+	if err != nil {
+		g.log.Warn("approval: "+what+" snapshot failed", zap.String("task", id), zap.Error(err))
+		return nil
+	}
+	return snap
+}
+
+// snapshotApproved unconditionally refreshes approvedFiles[id] from dir's
+// current on-disk content. Called from every Admit path that treats the
+// current dir as already-approved content. A dir-less task, or a snapshot
+// failure, leaves approvedFiles[id] untouched (see takeSnapshot).
+func (g *Gate) snapshotApproved(id, dir string) {
+	snap := g.takeSnapshot(id, dir, "approved")
+	if snap == nil {
+		return
+	}
+	g.mu.Lock()
+	g.approvedFiles[id] = snap
+	g.mu.Unlock()
+}
+
+// snapshotApprovedIfMissing calls snapshotApproved only when approvedFiles[id]
+// is not yet cached — after a daemon restart (nothing cached yet) or a
+// task's first-ever Admit. A cache hit means the baseline is already current
+// (kept current by approve()'s direct promotion on the gated path, or
+// simply accepted as-is on the trust/bootstrap paths — see Gate's
+// approvedFiles doc comment), so this skips the directory walk + reads on
+// every repeat ~30s reconcile poll at an already-known task.
+func (g *Gate) snapshotApprovedIfMissing(id, dir string) {
+	g.mu.Lock()
+	_, exists := g.approvedFiles[id]
+	g.mu.Unlock()
+	if exists {
+		return
+	}
+	g.snapshotApproved(id, dir)
+}
+
+// recordApprovedResolved pins the resolved-fields text of content the gate has
+// just treated as approved. Unlike the file snapshot this is refreshed
+// unconditionally: it costs a marshal rather than a directory walk, and a
+// stale value here would make Diff either miss a change or invent one.
+func (g *Gate) recordApprovedResolved(id string, k task.Kinded) {
+	d := resolvedFieldsText(k)
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if d == "" {
+		delete(g.approvedResolved, id)
+		return
+	}
+	g.approvedResolved[id] = d
 }
 
 // Approve approves a pending task: records its observed hash in the lock and
@@ -230,10 +412,20 @@ func (g *Gate) approve(id, wantHash, by string) error {
 		return fmt.Errorf("arm %q: %w", id, err)
 	}
 	// Clear only the entry we approved: a concurrent Admit may have re-pended
-	// the task at a newer hash, and that newer version must stay held.
+	// the task at a newer hash, and that newer version must stay held. The
+	// same guard gates promoting the pending snapshot -> approvedFiles: if a
+	// newer pend raced in, cur.hash no longer equals ent.hash, so cur.files
+	// (that newer, unapproved content) must not become the new baseline.
+	// cur is read fresh here, so cur.files is guaranteed to be the exact
+	// snapshot pendingEntry paired with cur.hash — see pendingEntry's doc
+	// comment on why hash and files can never disagree on generation.
 	g.mu.Lock()
 	if cur, ok := g.pending[id]; ok && cur.hash == ent.hash {
 		delete(g.pending, id)
+		if cur.files != nil {
+			g.approvedFiles[id] = cur.files
+			g.approvedResolved[id] = cur.resolved
+		}
 	}
 	g.mu.Unlock()
 	return nil
@@ -245,6 +437,8 @@ func (g *Gate) Forget(id string) {
 	g.clearPending(id)
 	g.mu.Lock()
 	delete(g.admitted, id)
+	delete(g.approvedFiles, id)
+	delete(g.approvedResolved, id)
 	g.mu.Unlock()
 	if err := g.lock.Remove(id); err != nil {
 		g.log.Warn("approval: lock remove failed",
@@ -370,13 +564,17 @@ const contentHashDomain = "dicode-approval-content-v1"
 // which matches the WebhookSecret exclusion rationale.
 const redactedEnvValue = "<redacted>"
 
-// sanitizePermissions returns p with every non-empty Env literal Value
-// replaced by redactedEnvValue. The Env slice is copied before mutation so
-// the caller's spec is never touched; name/secret/from refs are kept.
+// sanitizePermissions returns p with every non-empty Env literal Value and
+// Default replaced by redactedEnvValue. Default is included because
+// envresolve injects it as the env var's value when the named secret is
+// absent, so it holds the same class of material as Value and must not reach
+// the hash in a low-entropy, offline-attackable form either. The Env slice is
+// copied before mutation so the caller's spec is never touched;
+// name/secret/from refs are kept.
 func sanitizePermissions(p task.Permissions) task.Permissions {
 	needsRedact := false
 	for _, e := range p.Env {
-		if e.Value != "" {
+		if e.Value != "" || e.Default != "" {
 			needsRedact = true
 			break
 		}
@@ -390,6 +588,9 @@ func sanitizePermissions(p task.Permissions) task.Permissions {
 		if env[i].Value != "" {
 			env[i].Value = redactedEnvValue
 		}
+		if env[i].Default != "" {
+			env[i].Default = redactedEnvValue
+		}
 	}
 	p.Env = env
 	return p
@@ -398,6 +599,9 @@ func sanitizePermissions(p task.Permissions) task.Permissions {
 // resolvedParam is the minimal override-mutable tuple of a task.Param folded
 // into the hash. Description (and Type, which mergeParams cannot touch) are
 // deliberately excluded so cosmetic param edits do not churn approvals.
+// Default is carried raw here (ContentHash must stay sensitive to a
+// repointed default — see resolvedSecurityFields.Params) and redacted only
+// where resolvedFieldsText renders it for display — see there for why.
 type resolvedParam struct {
 	Name     string `json:"name"`
 	Default  string `json:"default"`
@@ -506,31 +710,124 @@ func hashDirResolved(taskID, dir string, resolved any, hashInclude ...string) (s
 // *task.Spec the marshalled copy has Trigger.WebhookSecret cleared and env
 // literal values redacted (TriggerConfig carries yaml tags only, so every
 // exported field — secret included — would otherwise marshal by Go name).
+// resolvedPipelineFieldsOf builds the pipeline equivalent of
+// resolvedSecurityFields.
+func resolvedPipelineFieldsOf(s *task.PipelineTask) resolvedPipelineSecurityFields {
+	return resolvedPipelineSecurityFields{
+		Timeout:     s.Timeout,
+		Webhook:     s.Trigger.Webhook,
+		WebhookAuth: s.Trigger.WebhookAuth,
+		Cron:        s.Trigger.Cron,
+		Manual:      s.Trigger.Manual,
+		Chain:       s.Trigger.Chain,
+	}
+}
+
+// resolvedFieldsOf returns the post-override security fields ContentHash
+// folds in alongside the directory digest, or nil for a kind that has none.
+// Shared with ResolvedFieldsDigest so the two can never describe different
+// field sets.
+func resolvedFieldsOf(k task.Kinded) any {
+	switch s := k.(type) {
+	case *task.Spec:
+		if s.TaskDir == "" {
+			return nil
+		}
+		var params []resolvedParam
+		for _, p := range s.Params {
+			params = append(params, resolvedParam{
+				Name:     p.Name,
+				Default:  p.Default,
+				Required: p.Required,
+			})
+		}
+		return resolvedSecurityFields{
+			Permissions: sanitizePermissions(s.Permissions),
+			Runtime:     s.Runtime,
+			Params:      params,
+			Timeout:     s.Timeout,
+			Webhook:     s.Trigger.Webhook,
+			WebhookAuth: s.Trigger.WebhookAuth,
+			Cron:        s.Trigger.Cron,
+			Manual:      s.Trigger.Manual,
+			Daemon:      s.Trigger.Daemon,
+			Restart:     s.Trigger.Restart,
+			Chain:       s.Trigger.Chain,
+		}
+	case *task.PipelineTask:
+		if s.TaskDir == "" {
+			return nil
+		}
+		return resolvedPipelineFieldsOf(s)
+	default:
+		return nil
+	}
+}
+
+// resolvedFieldsText renders resolvedFieldsOf(k) as indented JSON for the
+// diff to show directly, rather than merely detecting that it changed.
+//
+// These fields are what the content hash folds in beyond the directory's
+// bytes, and taskset overrides rewrite them from outside the task directory.
+// Comparing a digest could only ever say "something out here changed" — and
+// could not tell that apart from an in-directory task.yaml edit, which alters
+// the same resolved fields and is already visible in the file diff. Rendering
+// the values instead means the operator sees the actual before/after whatever
+// its origin, so no such distinction has to be drawn or explained.
+//
+// Env literal values are already redacted by sanitizePermissions, and
+// WebhookSecret is excluded from resolvedSecurityFields entirely. Param
+// defaults are redacted here, for display only — see redactParamsForDisplay
+// for why they cannot be blanked in resolvedFieldsOf itself. Returns "" when
+// there are no resolved fields.
+func resolvedFieldsText(k task.Kinded) string {
+	rf := resolvedFieldsOf(k)
+	if rf == nil {
+		return ""
+	}
+	b, err := json.MarshalIndent(redactParamsForDisplay(rf), "", "  ")
+	if err != nil {
+		return ""
+	}
+	return string(b) + "\n"
+}
+
+// redactParamsForDisplay returns rf with any resolvedSecurityFields.Params
+// defaults blanked, for rendering only — resolvedFieldsOf's return value
+// (unmodified) is what ContentHash hashes, and must stay that way.
+//
+// A param default is task-author-controlled ordinary program input — often a
+// URL or a limit, not a secret — and TestContentHashFoldsParamDefault pins
+// that an override repointing one (e.g. at an attacker endpoint) must still
+// perturb the hash and re-pend the task; blanking it in resolvedFieldsOf
+// would defeat that. But once rendered, this is the same surface
+// redactValueLines already blanks task.Param.Default on for the file
+// snapshot: "not secrets; that cost is accepted, since a param default is
+// reconstructible from the task source while a leaked credential is not."
+// A task author who wants a credential-shaped default is free to set one, so
+// the same over-redaction tradeoff applies here — this has no field-path-
+// aware way to tell a URL default from a credential one either.
+func redactParamsForDisplay(rf any) any {
+	sf, ok := rf.(resolvedSecurityFields)
+	if !ok || len(sf.Params) == 0 {
+		return rf
+	}
+	redacted := make([]resolvedParam, len(sf.Params))
+	copy(redacted, sf.Params)
+	for i := range redacted {
+		if redacted[i].Default != "" {
+			redacted[i].Default = redactedEnvValue
+		}
+	}
+	sf.Params = redacted
+	return sf
+}
+
 func ContentHash(k task.Kinded) (string, error) {
 	switch s := k.(type) {
 	case *task.Spec:
 		if s.TaskDir != "" {
-			var params []resolvedParam
-			for _, p := range s.Params {
-				params = append(params, resolvedParam{
-					Name:     p.Name,
-					Default:  p.Default,
-					Required: p.Required,
-				})
-			}
-			return hashDirResolved(k.TaskID(), s.TaskDir, resolvedSecurityFields{
-				Permissions: sanitizePermissions(s.Permissions),
-				Runtime:     s.Runtime,
-				Params:      params,
-				Timeout:     s.Timeout,
-				Webhook:     s.Trigger.Webhook,
-				WebhookAuth: s.Trigger.WebhookAuth,
-				Cron:        s.Trigger.Cron,
-				Manual:      s.Trigger.Manual,
-				Daemon:      s.Trigger.Daemon,
-				Restart:     s.Trigger.Restart,
-				Chain:       s.Trigger.Chain,
-			}, s.HashInclude...)
+			return hashDirResolved(k.TaskID(), s.TaskDir, resolvedFieldsOf(k), s.HashInclude...)
 		}
 		// Dir-less fallback: hash a shallow copy with secrets stripped so the
 		// committable lock never embeds a digest over secret material.
@@ -540,14 +837,7 @@ func ContentHash(k task.Kinded) (string, error) {
 		return hashJSON(k.TaskID(), &c)
 	case *task.PipelineTask:
 		if s.TaskDir != "" {
-			return hashDirResolved(k.TaskID(), s.TaskDir, resolvedPipelineSecurityFields{
-				Timeout:     s.Timeout,
-				Webhook:     s.Trigger.Webhook,
-				WebhookAuth: s.Trigger.WebhookAuth,
-				Cron:        s.Trigger.Cron,
-				Manual:      s.Trigger.Manual,
-				Chain:       s.Trigger.Chain,
-			})
+			return hashDirResolved(k.TaskID(), s.TaskDir, resolvedPipelineFieldsOf(s))
 		}
 	}
 	return hashJSON(k.TaskID(), k)

@@ -50,6 +50,7 @@ export default defineConfig({
       name: 'unauthenticated',
       testMatch: [
         '**/file-change.spec.ts',
+        '**/approval-diff.spec.ts',
         '**/webhooks.spec.ts',
         '**/webhooks-secure.spec.ts',
         '**/webhook-sign-cli.spec.ts',

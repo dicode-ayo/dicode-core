@@ -629,6 +629,11 @@ func (s *Server) Handler() http.Handler {
 	// clears a changed task (see requireSessionOrNonEphemeralAPIKey).
 	r.With(s.requireSessionOrNonEphemeralAPIKey).Post("/api/tasks/{id}/approve", s.apiApproveTask)
 
+	// Pending-diff endpoint (#604) — same auth group as approve: an operator
+	// reviewing what changed before clicking Approve needs the same trust
+	// boundary as actually approving it.
+	r.With(s.requireSessionOrNonEphemeralAPIKey).Get("/api/tasks/{id}/pending-diff", s.apiApprovalDiff)
+
 	// Tokenized approve link (#398) — the single-use token in the URL is the
 	// auth, so these stay outside the session groups. GET renders a confirm
 	// page without consuming the token (link prefetchers must not approve);
