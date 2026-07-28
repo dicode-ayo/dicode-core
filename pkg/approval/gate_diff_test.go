@@ -1088,3 +1088,142 @@ func TestRedactSecretsCoversWebhookSecret(t *testing.T) {
 		t.Errorf("redaction removed the key as well as the value:\n%s", out)
 	}
 }
+
+// TestDiffRedactsParamDefault is the regression for a params[].default leak:
+// resolvedFieldsOf feeds both ContentHash and resolvedFieldsText, and the
+// latter (since 7574aba) is what Diff renders verbatim onto every diff
+// surface, including the session-less /approve/{token} page. A param default
+// is task-author-controlled and can carry a credential — the same class of
+// material as permissions.env's Value/Default — so it must be redacted the
+// same way rather than reaching the rendered diff intact.
+func TestDiffRedactsParamDefault(t *testing.T) {
+	g, _, _ := newTestGate(t, enabledPolicy())
+	spec := writeTaskDir(t, t.TempDir(), "repo/paramsecret", "export default () => {}\n")
+	if _, err := g.Admit(spec); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Approve("repo/paramsecret"); err != nil {
+		t.Fatal(err)
+	}
+
+	secret := "sk-live-PARAMSECRET"
+	widened := &task.Spec{ID: "repo/paramsecret", TaskDir: spec.TaskDir,
+		Params: []task.Param{{Name: "api_key", Default: secret, Required: true}}}
+	if _, err := g.Admit(widened); err != nil {
+		t.Fatal(err)
+	}
+
+	d, err := g.Diff("repo/paramsecret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var resolved *FileDiff
+	for i := range d.Files {
+		if d.Files[i].Path == resolvedConfigPath {
+			resolved = &d.Files[i]
+		}
+	}
+	if resolved == nil {
+		t.Fatalf("expected a resolved-config entry for the new param default, got: %+v", d.Files)
+	}
+	if strings.Contains(resolved.UnifiedDiff, secret) {
+		t.Errorf("param default leaked into the diff:\n%s", resolved.UnifiedDiff)
+	}
+	// json.MarshalIndent HTML-escapes redactedEnvValue's angle brackets by
+	// default, so match on the bare word rather than the constant's literal
+	// "<redacted>" text.
+	if !strings.Contains(resolved.UnifiedDiff, "redacted") {
+		t.Errorf("expected the redacted placeholder in the diff:\n%s", resolved.UnifiedDiff)
+	}
+}
+
+// TestTrustedTaskRefreshesApprovedBaselineOnHashChange is the regression for
+// a stale Diff baseline on the auto-approve path: snapshotApprovedIfMissing
+// only snapshots when approvedFiles[id] is not yet cached, so a second
+// (changed) hash sailing through as trusted left the baseline pinned to the
+// FIRST trusted version forever. Once trust is later revoked and the task
+// pends again, Diff must compare against the version that was actually last
+// approved, not a stale first snapshot from before the intervening edit.
+func TestTrustedTaskRefreshesApprovedBaselineOnHashChange(t *testing.T) {
+	p := enabledPolicy()
+	p.TrustedTasks["repo/trust"] = true
+	g, _, _ := newTestGate(t, p)
+	root := t.TempDir()
+
+	if _, err := g.Admit(writeTaskDir(t, root, "repo/trust", "VERSION_A\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Admit(writeTaskDir(t, root, "repo/trust", "VERSION_B\n")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Revoke trust, then pend a further change.
+	delete(p.TrustedTasks, "repo/trust")
+	armed, err := g.Admit(writeTaskDir(t, root, "repo/trust", "VERSION_C\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if armed {
+		t.Fatal("expected the task to pend once trust is revoked and content changes again")
+	}
+
+	d, err := g.Diff("repo/trust")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var jsDiff *FileDiff
+	for i := range d.Files {
+		if d.Files[i].Path == "task.js" {
+			jsDiff = &d.Files[i]
+		}
+	}
+	if jsDiff == nil {
+		t.Fatalf("task.js not in diff: %+v", d.Files)
+	}
+	if strings.Contains(jsDiff.UnifiedDiff, "VERSION_A") {
+		t.Errorf("diff baseline is stale — compared against the first trusted version instead of the last one:\n%s", jsDiff.UnifiedDiff)
+	}
+	if !strings.Contains(jsDiff.UnifiedDiff, "- VERSION_B") {
+		t.Errorf("expected the last-approved version (B) as the diff's old side:\n%s", jsDiff.UnifiedDiff)
+	}
+}
+
+// TestPendingSnapshotRetriesAfterEarlierFailure is the regression for a stuck
+// snapshot: if a dir-backed task's first takeSnapshot call fails, files stays
+// nil, and every later Admit at that same (unchanged) hash sets changed =
+// false — before this fix, the walk below never ran again, and Diff stayed
+// Incomplete forever even once the underlying failure had cleared. This seeds
+// the exact stuck state a failure leaves behind (files == nil, hash pinned)
+// rather than the I/O failure that produces it — root in this sandbox
+// bypasses the permission errors that would normally trigger it, and the
+// fix's condition is what's under test either way.
+func TestPendingSnapshotRetriesAfterEarlierFailure(t *testing.T) {
+	g, _, _ := newTestGate(t, enabledPolicy())
+	spec := writeTaskDir(t, t.TempDir(), "repo/retry", "export default () => {}\n")
+
+	hash, err := g.hashFn(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.mu.Lock()
+	g.pending[spec.ID] = pendingEntry{kinded: spec, hash: hash, files: nil, resolved: resolvedFieldsText(spec)}
+	g.mu.Unlock()
+
+	// Same hash, same content: an ordinary reconcile poll finding nothing
+	// changed. The task dir is real and readable, so a retried snapshot
+	// succeeds this time.
+	if _, err := g.Admit(spec); err != nil {
+		t.Fatal(err)
+	}
+
+	d, err := g.Diff(spec.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Incomplete {
+		t.Errorf("expected the retried snapshot to succeed and clear Incomplete, got reason: %q", d.IncompleteReason)
+	}
+	if len(d.Files) == 0 {
+		t.Error("expected the retried snapshot's files to appear in the diff")
+	}
+}

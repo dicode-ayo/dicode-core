@@ -211,27 +211,33 @@ func (g *Gate) Admit(k task.Kinded) (armed bool, err error) {
 		// hash (or the task's first time pending) re-snapshots.
 		changed := !was || prev.hash != hash
 		files := prev.files
-		if changed {
+		dir := taskDirOf(k)
+		// A dir-backed task whose very first takeSnapshot call failed
+		// (transient I/O error) is left with files == nil, and every later
+		// Admit at that same (unchanged) hash sets changed = false — without
+		// this second condition the walk below would never run again, and
+		// Gate.Diff would report that task Incomplete forever even once the
+		// transient failure has cleared.
+		if changed || (dir != "" && files == nil) {
 			// I/O stays outside the lock, same as before. Snapshot the
 			// current (new, not-yet-approved) dir so a later Diff has the
 			// exact content the operator is being asked to review.
 			//
 			// Two distinct "no new snapshot" cases must not be conflated:
-			// a genuinely dir-less task (taskDirOf returns "" — an inline
-			// taskset entry with nothing to ever snapshot) correctly gets
-			// files == nil, matching pendingEntry.files' nil-means-
-			// nothing-captured convention. But a dir-backed task whose
-			// takeSnapshot call merely failed (transient I/O error,
-			// already logged by takeSnapshot) must NOT fall through to
-			// nil here: the task really is pending on new, security-
-			// relevant content, and discarding prev.files would make
-			// Gate.Diff silently report an empty diff for it instead of
-			// showing (slightly stale) real content. So: only overwrite
-			// files with the new snapshot when the dir is non-empty AND
-			// the snapshot actually succeeded; otherwise keep whatever
-			// files already held (nil for dir-less, prev.files as a
-			// best-effort fallback for a snapshot failure).
-			if dir := taskDirOf(k); dir == "" {
+			// a genuinely dir-less task (dir == "" — an inline taskset entry
+			// with nothing to ever snapshot) correctly gets files == nil,
+			// matching pendingEntry.files' nil-means-nothing-captured
+			// convention. But a dir-backed task whose takeSnapshot call
+			// merely failed (transient I/O error, already logged by
+			// takeSnapshot) must NOT fall through to nil here: the task
+			// really is pending on new, security-relevant content, and
+			// discarding prev.files would make Gate.Diff silently report an
+			// empty diff for it instead of showing (slightly stale) real
+			// content. So: only overwrite files with the new snapshot when
+			// the dir is non-empty AND the snapshot actually succeeded;
+			// otherwise keep whatever files already held (nil for dir-less,
+			// prev.files as a best-effort fallback for a snapshot failure).
+			if dir == "" {
 				files = nil
 			} else if snap := g.takeSnapshot(id, dir, "pending"); snap != nil {
 				files = snap
@@ -252,10 +258,13 @@ func (g *Gate) Admit(k task.Kinded) (armed bool, err error) {
 	}
 
 	// Auto-approve path (builtin / trusted / gate disabled / bootstrap): keep
-	// the lock current as the running inventory, then arm. The current dir
-	// IS the approved content on this path, so refresh the baseline snapshot
-	// used by Diff when it isn't already cached — the cheapest place to keep
-	// it current without extra plumbing.
+	// the lock current as the running inventory, then arm. The current dir IS
+	// the approved content on this path, so the baseline snapshot used by
+	// Diff must track it — but only a genuine hash change means this
+	// generation was never snapshotted. Checked (cheap: an in-memory map
+	// lookup) before Record below overwrites the prior hash, since after that
+	// Approved(id, hash) would trivially be true either way.
+	hashUnchanged := g.lock.Approved(id, hash)
 	g.clearPending(id)
 	if hash != "" {
 		if err := g.lock.Record(id, hash, by); err != nil {
@@ -265,7 +274,19 @@ func (g *Gate) Admit(k task.Kinded) (armed bool, err error) {
 				zap.String("task", id), zap.Error(err))
 		}
 	}
-	g.snapshotApprovedIfMissing(id, taskDirOf(k))
+	if hashUnchanged {
+		// Common case on every ~30s reconcile poll of an unchanged trusted
+		// task: the cached baseline is already current, so skip the
+		// directory walk entirely, same as before this fix.
+		g.snapshotApprovedIfMissing(id, taskDirOf(k))
+	} else {
+		// The hash just changed (or this is the task's first Admit): the
+		// cached baseline, if any, describes a stale generation. Refresh
+		// unconditionally so a later Diff — reachable once trust is revoked
+		// or the gate is re-enabled — compares against what was actually
+		// last approved, not whatever was cached from an earlier version.
+		g.snapshotApproved(id, taskDirOf(k))
+	}
 	g.recordApprovedResolved(id, k)
 	return true, g.arm(k)
 }
@@ -578,6 +599,9 @@ func sanitizePermissions(p task.Permissions) task.Permissions {
 // resolvedParam is the minimal override-mutable tuple of a task.Param folded
 // into the hash. Description (and Type, which mergeParams cannot touch) are
 // deliberately excluded so cosmetic param edits do not churn approvals.
+// Default is carried raw here (ContentHash must stay sensitive to a
+// repointed default — see resolvedSecurityFields.Params) and redacted only
+// where resolvedFieldsText renders it for display — see there for why.
 type resolvedParam struct {
 	Name     string `json:"name"`
 	Default  string `json:"default"`
@@ -752,18 +776,51 @@ func resolvedFieldsOf(k task.Kinded) any {
 // its origin, so no such distinction has to be drawn or explained.
 //
 // Env literal values are already redacted by sanitizePermissions, and
-// WebhookSecret is excluded from resolvedSecurityFields entirely, so this
-// carries no secret material. Returns "" when there are no resolved fields.
+// WebhookSecret is excluded from resolvedSecurityFields entirely. Param
+// defaults are redacted here, for display only — see redactParamsForDisplay
+// for why they cannot be blanked in resolvedFieldsOf itself. Returns "" when
+// there are no resolved fields.
 func resolvedFieldsText(k task.Kinded) string {
 	rf := resolvedFieldsOf(k)
 	if rf == nil {
 		return ""
 	}
-	b, err := json.MarshalIndent(rf, "", "  ")
+	b, err := json.MarshalIndent(redactParamsForDisplay(rf), "", "  ")
 	if err != nil {
 		return ""
 	}
 	return string(b) + "\n"
+}
+
+// redactParamsForDisplay returns rf with any resolvedSecurityFields.Params
+// defaults blanked, for rendering only — resolvedFieldsOf's return value
+// (unmodified) is what ContentHash hashes, and must stay that way.
+//
+// A param default is task-author-controlled ordinary program input — often a
+// URL or a limit, not a secret — and TestContentHashFoldsParamDefault pins
+// that an override repointing one (e.g. at an attacker endpoint) must still
+// perturb the hash and re-pend the task; blanking it in resolvedFieldsOf
+// would defeat that. But once rendered, this is the same surface
+// redactValueLines already blanks task.Param.Default on for the file
+// snapshot: "not secrets; that cost is accepted, since a param default is
+// reconstructible from the task source while a leaked credential is not."
+// A task author who wants a credential-shaped default is free to set one, so
+// the same over-redaction tradeoff applies here — this has no field-path-
+// aware way to tell a URL default from a credential one either.
+func redactParamsForDisplay(rf any) any {
+	sf, ok := rf.(resolvedSecurityFields)
+	if !ok || len(sf.Params) == 0 {
+		return rf
+	}
+	redacted := make([]resolvedParam, len(sf.Params))
+	copy(redacted, sf.Params)
+	for i := range redacted {
+		if redacted[i].Default != "" {
+			redacted[i].Default = redactedEnvValue
+		}
+	}
+	sf.Params = redacted
+	return sf
 }
 
 func ContentHash(k task.Kinded) (string, error) {
