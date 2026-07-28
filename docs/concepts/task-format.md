@@ -10,6 +10,9 @@ tasks/
     └── task.test.ts    ← optional: unit tests
 ```
 
+(A `runtime: python` task has the same shape with `task.py` / `task.test.py`
+instead — see [`task.test.js`](#tasktestjs) below.)
+
 When using a TaskSet source, the folder name is not the task ID — instead, the ID is built from the namespace path (e.g. `infra/morning-email-check`).
 
 ---
@@ -897,7 +900,14 @@ See [Python Runtime](../python-runtime.md) for full documentation.
 
 ## `task.test.js`
 
-Unit test file. Uses a mock-aware test harness injected by the runtime.
+Unit test file. Uses a mock-aware test harness injected by the runtime:
+`task.test.ts`/`.js`/`.mjs` for `runtime: deno` (harness: `tasks/sdk-test.ts`),
+or `task.test.py` for `runtime: python` (harness: `tasks/sdk_test.py` — note
+a Python test file is itself a PEP 723 script and has a couple of
+non-obvious requirements around how it's invoked; see
+[Testing & Validation § Python](./testing.md#python) before writing one).
+`runtime: docker`/`podman` tasks cannot ship a test file yet (tracked as
+[#159](https://github.com/dicode-ayo/dicode-core/issues/159) Phase 3).
 
 See [Testing & Validation](./testing.md) for full documentation.
 
@@ -1378,7 +1388,7 @@ permissions:
 - `task.yaml` is always required. A folder without it is ignored.
 - The script file (`task.ts`, `task.js`, or `task.py`) is required for code runtimes; omit it only for `runtime: docker` or `runtime: podman`.
 - Container tasks using `docker.build` need a `Dockerfile` in the task folder (or at the path set in `docker.build.dockerfile`).
-- `task.test.js` / `task.test.ts` is optional. `dicode task test` skips tasks without it.
+- `task.test.js` / `task.test.ts` / `task.test.py` is optional. `dicode task test` skips tasks without it.
 - Any other files in the folder are ignored (useful for README, schema files, etc.).
 - Subdirectories are ignored — task folders are flat.
 

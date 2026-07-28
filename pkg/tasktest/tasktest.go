@@ -1,8 +1,9 @@
-// Package tasktest runs a task's sibling test file (task.test.ts / .js / .mjs)
-// through the appropriate runtime and returns a structured result.
+// Package tasktest runs a task's sibling test file (task.test.ts / .js /
+// .mjs / .py) through the appropriate runtime and returns a structured
+// result.
 //
-// Phase 1 supports the Deno runtime only — see issue #159 for Python,
-// Docker, and Podman parity.
+// Phase 2 (#159) adds Python (via uv + pytest) alongside the Phase 1 Deno
+// support. Docker and Podman remain unsupported — see issue #159 Phase 3.
 package tasktest
 
 import (
@@ -20,7 +21,17 @@ import (
 	"github.com/dicode/dicode/internal/fsutil"
 	"github.com/dicode/dicode/pkg/deno"
 	"github.com/dicode/dicode/pkg/task"
+	uvpkg "github.com/dicode/dicode/pkg/uv"
 )
+
+// runtimePython matches spec.Runtime's literal value for Python tasks.
+// pkg/task's typed Runtime consts (RuntimeDeno, RuntimeDocker, RuntimePodman)
+// don't include Python — it's the untyped default case in
+// pkg/task/spec.go's validate() runtime switch (see also
+// pkg/runtime/python/runtime.go's Name() and daemon.go's task.Runtime("python")
+// wiring) — so this mirrors the same bare string literal rather than invent a
+// cross-package shared constant for one string.
+const runtimePython task.Runtime = "python"
 
 // Result summarises a task test run. Output is captured combined stdout +
 // stderr so callers (CLI, MCP) can display it verbatim; the integer fields
@@ -43,7 +54,8 @@ type Result struct {
 var ErrNoTestFile = fmt.Errorf("task has no test file")
 
 // ErrUnsupportedRuntime signals a task whose runtime this package doesn't
-// yet cover. Phase 1 handles Deno only.
+// yet cover. Phase 2 handles Deno and Python; Docker and Podman remain
+// unsupported (#159 Phase 3).
 type ErrUnsupportedRuntime struct{ Runtime string }
 
 func (e *ErrUnsupportedRuntime) Error() string {
@@ -72,6 +84,8 @@ func Run(ctx context.Context, spec *task.Spec) (Result, error) {
 	// a task.Spec without going through the loader.
 	case task.RuntimeDeno, "", "js":
 		return runDeno(ctx, spec, testFile)
+	case runtimePython:
+		return runPython(ctx, spec, testFile)
 	default:
 		return Result{TaskID: spec.ID, Runtime: string(spec.Runtime), TestFile: testFile},
 			&ErrUnsupportedRuntime{Runtime: string(spec.Runtime)}
@@ -79,10 +93,15 @@ func Run(ctx context.Context, spec *task.Spec) (Result, error) {
 }
 
 // findTestFile picks the first task.test.* that exists in the task dir.
-// Mirrors the extension priority used by pkg/task.ScriptPath.
-// Symlinks are rejected to stay consistent with the production script-path policy.
+// The Deno/TS extensions are checked first (matching the priority order used
+// by pkg/task.ScriptPath, ts-preferred-over-js); .py is appended last since
+// a given task dir only ever has one runtime's script (and therefore only
+// ever one of these test files) in practice — the ordering here is purely
+// defensive for hand-constructed specs, not a meaningful priority between
+// runtimes. Symlinks are rejected to stay consistent with the production
+// script-path policy.
 func findTestFile(spec *task.Spec) (string, error) {
-	for _, ext := range []string{".ts", ".js", ".mjs"} {
+	for _, ext := range []string{".ts", ".js", ".mjs", ".py"} {
 		p := filepath.Join(spec.TaskDir, "task.test"+ext)
 		if fi, err := os.Lstat(p); err == nil && fi.Mode()&os.ModeSymlink == 0 {
 			return p, nil
@@ -107,6 +126,32 @@ func denoConfigPath(taskDir string) string {
 	return path
 }
 
+// runCaptured runs name(args...) to completion, capturing combined
+// stdout+stderr and reporting the elapsed duration and process exit code
+// (0 on a clean exit, the real code on a normal non-zero exit, -1 if the
+// process couldn't be waited on at all — e.g. it never started or was
+// killed by a signal). Shared by runDeno and runPython, whose only
+// differences are how they build argv and how they parse the resulting
+// output.
+func runCaptured(ctx context.Context, name string, args ...string) (output string, exitCode int, dur time.Duration) {
+	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // args are a runtime-provisioned binary plus a registry-sourced task path, not raw user input.
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+
+	start := time.Now()
+	runErr := cmd.Run()
+	dur = time.Since(start)
+	if runErr != nil {
+		if ee, ok := runErr.(*exec.ExitError); ok {
+			exitCode = ee.ExitCode()
+		} else {
+			exitCode = -1
+		}
+	}
+	return buf.String(), exitCode, dur
+}
+
 func runDeno(ctx context.Context, spec *task.Spec, testFile string) (Result, error) {
 	denoPath, err := deno.EnsureDeno(deno.DefaultVersion)
 	if err != nil {
@@ -120,24 +165,7 @@ func runDeno(ctx context.Context, spec *task.Spec, testFile string) (Result, err
 	}
 	args = append(args, testFile)
 
-	cmd := exec.CommandContext(ctx, denoPath, args...) //nolint:gosec
-	var buf bytes.Buffer
-	cmd.Stdout = &buf
-	cmd.Stderr = &buf
-
-	start := time.Now()
-	runErr := cmd.Run()
-	dur := time.Since(start)
-	exitCode := 0
-	if runErr != nil {
-		if ee, ok := runErr.(*exec.ExitError); ok {
-			exitCode = ee.ExitCode()
-		} else {
-			exitCode = -1
-		}
-	}
-
-	output := buf.String()
+	output, exitCode, dur := runCaptured(ctx, denoPath, args...)
 	passed, failed, skipped := parseDenoSummary(output)
 
 	res := Result{
@@ -186,3 +214,107 @@ func parseDenoSummary(output string) (passed, failed, skipped int) {
 var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
 
 func stripANSI(s string) string { return ansiRe.ReplaceAllString(s, "") }
+
+// runPython executes a Python task's test file via the managed uv binary.
+//
+// Contract with the test file (mirrors what `tasks/sdk_test.py` documents
+// and what `tasks/examples/hello-python/task.test.py` demonstrates): a
+// task.test.py is itself a PEP 723 script declaring `pytest` (plus whatever
+// the adjacent task.py needs, e.g. `httpx`) in its inline `dependencies`,
+// and ends with:
+//
+//	if __name__ == "__main__":
+//	    from sdk_test import run_pytest_main
+//	    run_pytest_main(__file__)
+//
+// So a single `uv run <testFile>` is enough — uv provisions the declared
+// dependencies into an ephemeral venv (exactly like it does for the
+// production wrapper in pkg/runtime/python/runtime.go's buildUvRunArgs) and
+// executes the file as `__main__`, which in turn invokes pytest.main()
+// against itself. This keeps runPython as simple as runDeno (a single
+// subprocess, no Go-side dependency introspection) while letting each test
+// file declare exactly the dependencies it needs.
+//
+// Test files are run unlocked (no `--locked`/lock-sidecar handling, unlike
+// the production runtime) — task.test.py isn't a task the approval gate
+// governs, and pinning its resolution is out of scope for this pass.
+func runPython(ctx context.Context, spec *task.Spec, testFile string) (Result, error) {
+	uvPath, err := uvpkg.EnsureUv(uvpkg.DefaultVersion)
+	if err != nil {
+		return Result{TaskID: spec.ID, Runtime: string(runtimePython), TestFile: testFile, Error: err.Error()},
+			fmt.Errorf("tasktest: ensure uv: %w", err)
+	}
+
+	output, exitCode, dur := runCaptured(ctx, uvPath, "run", testFile)
+	passed, failed, skipped := parsePytestSummary(output)
+
+	res := Result{
+		TaskID:   spec.ID,
+		Runtime:  string(runtimePython),
+		TestFile: testFile,
+		Passed:   passed,
+		Failed:   failed,
+		Skipped:  skipped,
+		Duration: dur,
+		ExitCode: exitCode,
+		Output:   output,
+	}
+	// Same convention as runDeno: a non-zero exit with nothing parsed gets a
+	// diagnostic Error string (uv/pytest crashed before producing a summary,
+	// e.g. a dependency failed to resolve, or the script raised at import
+	// time); a clean parse with failures present is a legitimate test
+	// failure, left for the caller to present via Failed/ExitCode.
+	if passed == 0 && failed == 0 && skipped == 0 && exitCode != 0 {
+		res.Error = fmt.Sprintf("pytest exited %d with no summary line", exitCode)
+	}
+	return res, nil
+}
+
+// pytestSummaryLineRe identifies pytest's own summary line among uv's
+// resolution/install chatter and the test run's dot/verbose progress output,
+// e.g.:
+//
+//	"4 passed in 0.02s"
+//	"2 failed, 3 passed in 0.20s"
+//	"1 passed, 1 skipped in 0.05s"
+//	"3 failed in 0.10s"
+//
+// Anchoring on the trailing "in <duration>s" (pytest's own summary suffix)
+// avoids false positives on unrelated lines like "collected 4 items".
+var pytestSummaryLineRe = regexp.MustCompile(`\d+\s+\w+.*\sin\s[\d.]+s\b`)
+
+// pytestCountRe extracts each "<N> <word>" pair from a matched summary line.
+var pytestCountRe = regexp.MustCompile(`(\d+)\s+(passed|failed|skipped|error|errors|xfailed|xpassed)`)
+
+// parsePytestSummary extracts passed/failed/skipped counts from pytest's
+// text summary line. Returns zeros if no summary line is found (e.g. uv or
+// Python crashed before pytest ran). xpassed counts as passed and
+// error/xfailed count as failed/skipped respectively, matching how pytest's
+// own exit code treats them (an error or unexpected failure is a failing
+// outcome; xfail is an expected, non-blocking skip-like outcome).
+func parsePytestSummary(output string) (passed, failed, skipped int) {
+	lines := strings.Split(output, "\n")
+	for i := len(lines) - 1; i >= 0 && i >= len(lines)-20; i-- {
+		line := stripANSI(lines[i])
+		if !pytestSummaryLineRe.MatchString(line) {
+			continue
+		}
+		matches := pytestCountRe.FindAllStringSubmatch(line, -1)
+		if len(matches) == 0 {
+			continue
+		}
+		for _, m := range matches {
+			n, _ := strconv.Atoi(m[1])
+			switch m[2] {
+			case "passed", "xpassed":
+				passed += n
+			case "failed", "error", "errors":
+				failed += n
+			case "skipped", "xfailed":
+				skipped += n
+			}
+		}
+		return
+	}
+	return
+}

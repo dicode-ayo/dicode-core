@@ -46,14 +46,15 @@ Follow this order every time — no exceptions:
 5. Test — ALL tests must pass before proceeding. `test_task("<task-id>")`
    returns a hint pointing at `POST /api/tasks/{id}/test`; make that call. On the
    CLI: `dicode task test <task-id>` (or `make test-tasks` for the full sweep).
-   Deno runtime only today; Python + Docker parity tracked in [#159](https://github.com/dicode-ayo/dicode-core/issues/159).
+   Deno and Python are supported; Docker/Podman parity tracked in
+   [#159](https://github.com/dicode-ayo/dicode-core/issues/159) Phase 3.
 6. Exercise it — `run_task("<task-id>", { key: "value" })` triggers a real run
    and returns the result; verify HTTP calls and secret resolution from it.
 
 ## Hard rules
 
 - **Never ship** a task whose `task.yaml` fails to parse or whose tests fail
-- **Always write `task.test.ts`** — a task without tests should not ship
+- **Always write a test file** (`task.test.ts` for `runtime: deno`, `task.test.py` for `runtime: python`) — a task without tests should not ship
 - `task.ts` **must return a JSON-serializable value** — required for chain triggers
 - **Never hardcode secrets** — use `env.get("VAR")` in the script; declare the var in `permissions.env`
 - **Never declare `DICODE_SOCKET` or `DICODE_TOKEN` in `permissions.env`** — these are internal IPC variables injected automatically; declaring them leaks the token to user code
@@ -281,6 +282,13 @@ return { count: 3, ids: ["a", "b", "c"] }   // must be JSON-serializable
 ```
 
 ## task.test.ts format
+
+(For `runtime: python`, write `task.test.py` instead — same mocking
+philosophy via `tasks/sdk_test.py`, but it's a PEP 723 script with a couple
+of non-obvious requirements around how it's invoked. See
+[docs/concepts/testing.md § Python](../../docs/concepts/testing.md#python)
+and [tasks/examples/hello-python/task.test.py](../examples/hello-python/task.test.py)
+before writing one.)
 
 ```typescript
 // Each test() gets a fresh mock state — mocks don't leak between tests.
