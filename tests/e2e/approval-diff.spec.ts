@@ -318,4 +318,71 @@ test.describe('Approval pending-diff', () => {
       // left armed either way.
     });
   });
+
+  // #643: the two forms redactSecrets' old value-substring sweep could not
+  // see — a plain multiline scalar's line-folded continuation, and the
+  // documented `env:` `KEY=VALUE` shorthand (task.EnvEntry.UnmarshalYAML) —
+  // are both legal task.yaml. This drives both through the real gate on the
+  // unauthenticated-surface-feeding pending-diff endpoint, confirming
+  // neither fake secret literal reaches it while the field's presence (and
+  // the redacted placeholder) still do, and that task.yaml still shows as
+  // changed rather than silently dropping out of the diff.
+  //
+  // Mutates task.yaml directly (like the "diff cannot show" test above)
+  // rather than using withPendingChange, which only touches task.js. No
+  // intermediate approval is needed here: restoring the exact original bytes
+  // in the finally block returns the content hash to the already-approved
+  // baseline, same as withPendingChange's own restore does for task.js.
+  test('permissions.env literals the node-tree redaction closes never reach the pending diff', async ({ request }) => {
+    const yamlPath = path.join(tasksDir(), 'hello-manual', 'task.yaml');
+    const original = fs.readFileSync(yamlPath, 'utf8');
+    const multilineSecret = 'sk-live-E2E-MULTILINE-PROBE';
+    const shorthandSecret = 'sk-live-E2E-SHORTHAND-PROBE';
+    const addedPermissions =
+      'permissions:\n' +
+      '  env:\n' +
+      '    - name: PROBE_MULTILINE\n' +
+      '      value: part-one\n' +
+      `        ${multilineSecret}\n` +
+      `    - TOKEN=${shorthandSecret}\n`;
+
+    try {
+      fs.writeFileSync(yamlPath, original + addedPermissions, 'utf8');
+      await waitForTaskCondition(request, MANUAL_TASK_ID, (t) => t.pending_approval === true);
+
+      const res = await request.get(`/api/tasks/${encodeURIComponent(MANUAL_TASK_ID)}/pending-diff`);
+      expect(res.ok()).toBe(true);
+      const rawBody = await res.text();
+
+      // Neither fake secret literal may appear anywhere in the JSON body —
+      // not just inside unified_diff, since the same content also feeds
+      // OldContent/NewContent and the resolved-config entry.
+      expect(rawBody).not.toContain(multilineSecret);
+      expect(rawBody).not.toContain(shorthandSecret);
+      // json.MarshalIndent HTML-escapes redactedEnvValue's angle brackets
+      // (see TestDiffRedactsParamDefault's comment), so match on the bare
+      // word rather than the constant's literal "<redacted>" text.
+      expect(rawBody).toContain('redacted');
+
+      const body = JSON.parse(rawBody) as {
+        files: Array<{ path: string; status: string; unified_diff: string; content_hidden?: boolean }>;
+      };
+      const yamlFile = body.files.find((f) => f.path === 'task.yaml');
+      expect(yamlFile, 'task.yaml changed but is absent from the diff').toBeTruthy();
+      expect(yamlFile!.status).toBe('modified');
+      // The added permissions/env structure is real, visible content around
+      // the redacted secrets — this change must not be flagged as entirely
+      // unshowable.
+      expect(yamlFile!.content_hidden).not.toBe(true);
+      expect(yamlFile!.unified_diff).toContain('permissions:');
+      expect(yamlFile!.unified_diff).toContain('PROBE_MULTILINE');
+    } finally {
+      try {
+        fs.writeFileSync(yamlPath, original, 'utf8');
+        await waitForTaskCondition(request, MANUAL_TASK_ID, (t) => t.pending_approval !== true);
+      } catch (cleanupError) {
+        console.error('permissions.env redaction test cleanup failed:', cleanupError);
+      }
+    }
+  });
 });

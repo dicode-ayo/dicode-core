@@ -383,71 +383,91 @@ func streamFingerprint(path string, info fs.FileInfo) string {
 	return fmt.Sprintf("sha256=%x", h.Sum(nil))
 }
 
-// minSweptSecretLen bounds the structural sweep below. A literal shorter than
-// this is not credential material, and blanking every occurrence of e.g.
-// "true" or "8080" across a file would wreck the diff it is meant to protect.
-// Short literals are left to redactValueLines' line scrub.
-const minSweptSecretLen = 6
-
 // redactSecrets scrubs literal env secrets out of content before it is stored
 // in a snapshot and rendered to the diff surfaces — including the
 // unauthenticated /approve/{token} page.
 //
 // Two passes, because neither alone is sufficient:
 //
-//  1. redactValueLines rewrites `value:`/`default:` lines in place. This is
-//     what keeps the diff readable — the key and line structure survive, so an
-//     operator still sees *that* the field changed.
-//  2. A structural sweep then parses content as YAML, collects every scalar
-//     actually bound to a `value`/`default` key, and blanks any that survived
-//     pass 1 verbatim.
+//  1. A node-tree walk (collectRedactionTargets/applyNodeRedactions) decodes
+//     content as YAML and, for every `value:`/`default:`/`webhook_secret:`
+//     mapping value (scalar or alias) and every `env:` sequence item written
+//     as bare `KEY=VALUE` shorthand, blanks that node's own line/column range
+//     in the ORIGINAL bytes — not a value-substring search. That makes it
+//     immune to the gap a substring sweep has: a multiline plain or quoted
+//     scalar folds to a single space at parse time (`"part-one\n  cont"` →
+//     `"part-one cont"`), so its parsed value never appears verbatim in the
+//     raw bytes for a substring match to find. Working from node positions
+//     instead of parsed values closes that gap by construction. An alias
+//     target is resolved to its anchor's definition node — the alias site
+//     itself (`*name`) carries no secret text.
+//  2. redactValueLines then runs on the result as defense in depth: it is
+//     line-anchored regex, no YAML parse required, so it still catches a
+//     `value:`-shaped line in content that fails to decode as YAML at all
+//     (a script — see its doc comment) or anything the node walk missed.
 //
-// Pass 2 exists because pass 1 is line-anchored and YAML is not. Verified
-// leaks it catches: flow mappings (`env: [{name: A, value: sk-live-x}]`),
-// flow sequence entries, plain and quoted scalars spanning multiple lines
-// (only the first line matched), and non-lowercase keys (`Value:`). All are
-// legal task.yaml that yaml.v3 binds to EnvEntry.Value/Default, so all would
-// have reached the diff intact. Working from the parsed value rather than the
-// syntax makes the sweep independent of how the secret was written.
-//
-// A parse failure yields no sweep — a non-YAML file (a script, say) has no
-// bound scalars to find, and pass 1 has already run over it.
+// A decode failure (malformed YAML, e.g. most real multi-line JS/TS task
+// scripts containing braces/colons — verified empirically: they routinely do
+// not decode as a single valid YAML document) yields no node-walk targets
+// beyond whatever documents decoded successfully before the failure, exactly
+// as before this change. Blanking the entire file's content on any decode
+// error was considered (and is what closes the gap most conservatively) but
+// rejected: task.yaml itself always parses (pkg/task validates it before a
+// spec ever reaches Admit, so a task.yaml that fails a generic yaml.Node
+// decode could never have been loaded as a task.Spec in the first place —
+// the same syntax layer underlies both), so the secret-carrying structural
+// forms this function targets only ever occur in content that DOES decode.
+// The files that routinely fail to decode are ordinary scripts, which were
+// never YAML-structured to begin with; blanking them wholesale would hide
+// real, benign script diffs behind a placeholder — confirmed against
+// tests/e2e/approval-diff.spec.ts, whose fixture task.js fails a generic
+// yaml.Node decode (its multi-line body trips "mapping values are not
+// allowed in this context") yet several of that file's tests assert the
+// literal added script line IS visible in the rendered diff. Falling back to
+// pass 2 alone for a decode failure — this function's pre-existing, already
+// -accepted-risk behavior for non-YAML content — keeps that working.
 func redactSecrets(content string) string {
-	out := redactValueLines(content)
-	for _, secret := range yamlSecretScalars(content) {
-		if len(secret) < minSweptSecretLen {
-			continue
-		}
-		out = strings.ReplaceAll(out, secret, redactedEnvValue)
-	}
-	return out
-}
-
-// yamlSecretScalars returns every scalar bound to a `value`, `default` or
-// `webhook_secret` key anywhere in content, across all documents. Key matching
-// is case-insensitive: yaml.v3 field binding is, so `Value:` reaches
-// EnvEntry.Value just as `value:` does.
-//
-// webhook_secret is the HMAC key authenticating inbound webhook requests
-// (task.TriggerSpec.WebhookSecret). ContentHash already strips it so it never
-// reaches the committable lock; without the same treatment here an inline
-// literal rendered verbatim on the session-less /approve/{token} page, handing
-// anyone who saw an approve link the ability to forge authenticated triggers
-// for that task.
-func yamlSecretScalars(content string) []string {
-	var found []string
+	var targets []redactionTarget
+	seen := make(map[*yaml.Node]bool)
 	dec := yaml.NewDecoder(strings.NewReader(content))
 	for {
 		var doc yaml.Node
 		if err := dec.Decode(&doc); err != nil {
 			break // EOF or malformed — keep whatever earlier documents yielded
 		}
-		collectSecretScalars(&doc, &found)
+		collectRedactionTargets(&doc, &targets, seen)
 	}
-	return found
+	return redactValueLines(applyNodeRedactions(content, targets))
 }
 
-func collectSecretScalars(n *yaml.Node, out *[]string) {
+// redactionTarget is one YAML node whose raw byte range redactSecrets must
+// blank: either the value half of a `value:`/`default:`/`webhook_secret:`
+// mapping pair (isEnvShorthand false — Node is the scalar to blank, already
+// alias-resolved if it started life as an AliasNode), or a bare `KEY=VALUE`
+// sequence item under an `env:` key (isEnvShorthand true — Node is the whole
+// "KEY=VALUE" scalar; only the substring after the first '=' is secret).
+type redactionTarget struct {
+	node           *yaml.Node
+	isEnvShorthand bool
+}
+
+// collectRedactionTargets walks n (a decoded document, or any node reached
+// while recursing) collecting every redactionTarget reachable from it, across
+// arbitrarily deep nesting. Key matching is case-insensitive: yaml.v3 field
+// binding is, so `Value:` reaches EnvEntry.Value just as `value:` does.
+//
+// webhook_secret is the HMAC key authenticating inbound webhook requests
+// (task.TriggerSpec.WebhookSecret). ContentHash already strips it so it never
+// reaches the committable lock; without the same treatment here an inline
+// literal renders verbatim on the session-less /approve/{token} page, handing
+// anyone who saw an approve link the ability to forge authenticated triggers
+// for that task.
+//
+// seen dedupes by node pointer: multiple aliases can resolve to the same
+// anchor definition, and it must be blanked only once (blanking twice at
+// the same location would be a harmless no-op, but tracking it here keeps
+// applyNodeRedactions' target list free of exact duplicates).
+func collectRedactionTargets(n *yaml.Node, out *[]redactionTarget, seen map[*yaml.Node]bool) {
 	if n == nil {
 		return
 	}
@@ -456,15 +476,159 @@ func collectSecretScalars(n *yaml.Node, out *[]string) {
 			k, v := n.Content[i], n.Content[i+1]
 			switch strings.ToLower(k.Value) {
 			case "value", "default", "webhook_secret":
-				if v.Kind == yaml.ScalarNode && v.Value != "" {
-					*out = append(*out, v.Value)
+				if v.Kind == yaml.ScalarNode || v.Kind == yaml.AliasNode {
+					resolved := v
+					if v.Kind == yaml.AliasNode {
+						// The alias reference (*name) has no secret text of
+						// its own — the real bytes live at the anchor's
+						// definition site, elsewhere in the document.
+						resolved = v.Alias
+					}
+					if resolved != nil && resolved.Kind == yaml.ScalarNode && !seen[resolved] {
+						seen[resolved] = true
+						*out = append(*out, redactionTarget{node: resolved})
+					}
+				}
+			case "env":
+				if v.Kind == yaml.SequenceNode {
+					for _, item := range v.Content {
+						// The documented `- TOKEN=VALUE` shorthand
+						// (task.EnvEntry.UnmarshalYAML) is a bare scalar
+						// sequence item, not a mapping under a value:/
+						// default: key, so it needs its own detection here.
+						if item.Kind == yaml.ScalarNode && strings.Contains(item.Value, "=") && !seen[item] {
+							seen[item] = true
+							*out = append(*out, redactionTarget{node: item, isEnvShorthand: true})
+						}
+					}
 				}
 			}
-			collectSecretScalars(v, out)
+			// Recurse into every value regardless of whether this pair
+			// itself matched above — a value:/default: key can nest.
+			collectRedactionTargets(v, out, seen)
 		}
 		return
 	}
 	for _, c := range n.Content {
-		collectSecretScalars(c, out)
+		collectRedactionTargets(c, out, seen)
 	}
+}
+
+// applyNodeRedactions blanks every target's node location in content and
+// returns the result. Targets are processed in descending (line, column)
+// order so that swallowing a multiline target's continuation lines (which
+// only ever removes lines AFTER its own line) never shifts the line numbers
+// a not-yet-processed, lower-line-number target relies on. Two distinct
+// targets' blanked regions can never overlap: only leaf ScalarNode values
+// become targets, and a target's own line is never itself inside another
+// target's swallowed continuation — YAML's indentation rule means a sibling
+// key can only start at or below the reference indentation a swallow stops
+// at, which is exactly the condition under which a genuinely separate
+// (nested) target could exist in the tree at all.
+func applyNodeRedactions(content string, targets []redactionTarget) string {
+	if len(targets) == 0 {
+		return content
+	}
+	sort.SliceStable(targets, func(i, j int) bool {
+		if targets[i].node.Line != targets[j].node.Line {
+			return targets[i].node.Line > targets[j].node.Line
+		}
+		return targets[i].node.Column > targets[j].node.Column
+	})
+	lines := strings.Split(content, "\n")
+	for _, t := range targets {
+		lines = blankNodeTarget(lines, t)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// blankNodeTarget blanks t's node at its (Line, Column) in lines (1-indexed
+// line, 1-indexed rune column — yaml.Node's documented units) and returns the
+// possibly-shorter result. It generalizes redactValueLines' block-scalar
+// swallow heuristic to every scalar style a value:/default:/webhook_secret:
+// value or an env: KEY=VALUE shorthand item can have:
+//
+//   - Block scalar (Style has LiteralStyle or FoldedStyle — `value: |`/`value:
+//     >`): the header line is kept intact, exactly as redactValueLines already
+//     does, so the diff still shows the field's presence.
+//   - KEY=VALUE shorthand: only the substring after the line's first '=' at or
+//     after the node's own column is secret; the "KEY=" prefix is kept.
+//   - Everything else (plain/quoted/flow scalars, and an alias's resolved
+//     anchor definition): the line is blanked from the node's start column
+//     to end of line. This is what closes the plain-multiline-scalar gap —
+//     TestRedactSecretsCoversMultilineAndShorthand's `value: part-one\n  sk-live-...` folds to
+//     a single parsed value at parse time, but the node's own (Line, Column)
+//     still names exactly where "part-one" starts in the raw bytes,
+//     independent of the fold.
+//
+// In every case, once the target line itself is handled, every following
+// line that is blank or indented more than the reference indentation (the
+// node's own line's leading whitespace/list-dash, via valueKeyIndentPattern —
+// the same measure redactValueLines' block-scalar case already uses) is
+// swallowed into the same single placeholder, matching YAML's own rule that a
+// scalar's continuation must be indented deeper than its containing key.
+func blankNodeTarget(lines []string, t redactionTarget) []string {
+	lineIdx := t.node.Line - 1
+	if lineIdx < 0 || lineIdx >= len(lines) {
+		return lines // defensive: a node position outside the split content
+	}
+	rawLine := lines[lineIdx]
+	keyIndent := len(valueKeyIndentPattern.FindString(rawLine))
+
+	runes := []rune(rawLine)
+	col := t.node.Column - 1 // yaml.Node.Column is 1-indexed
+	if col < 0 {
+		col = 0
+	}
+	if col > len(runes) {
+		col = len(runes)
+	}
+
+	isBlock := t.node.Style&(yaml.LiteralStyle|yaml.FoldedStyle) != 0
+	headerKept := false
+	switch {
+	case t.isEnvShorthand:
+		eq := -1
+		for i := col; i < len(runes); i++ {
+			if runes[i] == '=' {
+				eq = i
+				break
+			}
+		}
+		if eq == -1 {
+			// Defensive: caller only creates this target when Value
+			// contains '=', so this should be unreachable. Blank from the
+			// node's own start rather than leave anything unredacted.
+			eq = col - 1
+		}
+		lines[lineIdx] = string(runes[:eq+1]) + redactedEnvValue
+	case isBlock:
+		headerKept = true // header line ("value: |") is left untouched below
+	default:
+		lines[lineIdx] = string(runes[:col]) + redactedEnvValue
+	}
+
+	j := lineIdx + 1
+	swallowedAny := false
+	for j < len(lines) {
+		if strings.TrimSpace(lines[j]) == "" {
+			swallowedAny = true
+			j++
+			continue
+		}
+		if leadingIndent(lines[j]) > keyIndent {
+			swallowedAny = true
+			j++
+			continue
+		}
+		break
+	}
+	if !swallowedAny {
+		return lines
+	}
+	if headerKept {
+		rest := append([]string{redactedEnvValue}, lines[j:]...)
+		return append(lines[:lineIdx+1], rest...)
+	}
+	return append(lines[:lineIdx+1], lines[j:]...)
 }

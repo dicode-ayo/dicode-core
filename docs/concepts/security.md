@@ -776,22 +776,65 @@ when its content can't be rendered.
 secret value inline in `task.yaml`, as opposed to `Secret` (a secrets-store key
 *name* reference). `task.EnvEntry.Default` carries the same class of material — `envresolve`
 injects it as the variable's value whenever the named secret is absent from
-the store — so it is redacted identically. `snapshotDir` runs every captured
-text file through `redactValueLines`, which blanks the scalar half of any line
-matching a YAML `value:` or `default:` mapping entry
-(`^([ \t]*(?:-[ \t]*)?"?(?:value|default)"?[ \t]*:)[ \t]*(.*)$`, multiline) to the same `<redacted>` placeholder (`redactedEnvValue`) that
-`ContentHash`'s `sanitizePermissions` already uses for the content hash — see
-that doc comment in `pkg/approval/gate.go` for why a literal env value must
-never appear in a low-entropy, offline-attackable form. The `key:` prefix and
-line structure are kept intact, so a diff still shows *that* the field
-changed, never *what* it changed to/from. This happens once, at snapshot read
-time — `Gate.approvedFiles` / `pendingFiles` never hold the un-redacted bytes,
-so the literal cannot reach `Gate.Diff`'s output on any surface (the REST
-endpoint, the dashboard panel, or the unauthenticated `/approve/{token}`
-confirm page). The redaction is deliberately generic — any YAML `value:` line
-in any snapshotted file, not only ones provably inside `permissions.env` —
-since the snapshot has no field-path-aware YAML parse and erring toward
-over-redaction is the right tradeoff for a security fix.
+the store — so it is redacted identically, as is `trigger.webhook_secret` (the
+inbound webhook HMAC key). `snapshotDir` runs every captured text file through
+`redactSecrets` (`pkg/approval/snapshot.go`) before it is stored, so
+`Gate.approvedFiles` / `pendingFiles` never hold the un-redacted bytes — the
+literal cannot reach `Gate.Diff`'s output on any surface (the REST endpoint,
+the dashboard panel, or the unauthenticated `/approve/{token}` confirm page).
+
+`redactSecrets` decodes the content as YAML (`gopkg.in/yaml.v3`, node-tree
+API) and walks the parsed tree for two structural forms:
+
+- Every mapping value bound to a `value`, `default` or `webhook_secret` key
+  (case-insensitive), at any depth — not only inside `permissions.env`. If the
+  value is a YAML alias (`*name`), it is resolved to the anchor's (`&name`)
+  definition node elsewhere in the document, since the alias site itself
+  carries no secret text; the anchor's real bytes are blanked instead.
+- The documented `env:` `KEY=VALUE` shorthand (`- KEY=VALUE` as a sequence
+  item, `task.EnvEntry.UnmarshalYAML`): a bare scalar sequence item under an
+  `env:` key, not a mapping under a `value:`/`default:` key at all, so it
+  needs its own detection. Only the substring after the first `=` is secret;
+  the `KEY=` prefix is kept.
+
+For each match, the redaction blanks that node's own line/column range in the
+**original bytes** — not a search for its parsed value as a substring — which
+is what makes it correct even when the value spans multiple physical lines. A
+multiline plain or quoted scalar folds to a single space at YAML parse time
+(`value: part-one\n  continued` parses to `"part-one continued"`), so the
+parsed value never appears verbatim in the raw bytes for a substring search to
+find; walking node positions instead of parsed values is immune to that by
+construction. The blanking itself reuses the same swallow-following-more-
+indented-lines heuristic a block scalar (`value: |`) needs: the header line
+(or, for a non-block value, the value's own start column) is replaced with the
+`<redacted>` placeholder (`redactedEnvValue`, the same constant `ContentHash`'s
+`sanitizePermissions` uses for the content hash), and every following line
+that is blank or indented more than the field's own key column is swallowed
+into that same placeholder — so a diff still shows *that* the field changed,
+never *what* it changed to/from.
+
+A YAML decode failure (malformed content) yields no additional node-walk
+matches beyond whatever documents decoded successfully before the failure —
+it does **not** blank the whole file. This is a deliberate choice, not an
+oversight: real task scripts (`task.js`/`task.py`) routinely fail to decode as
+a single valid YAML document (multi-line JS/TS with braces and colons trips
+YAML's mapping-value syntax), so blanking on any decode error would hide
+ordinary, non-YAML-structured script diffs behind a placeholder. `task.yaml`
+itself always decodes — `pkg/task` validates it with the same YAML syntax
+layer before a spec ever reaches `Admit`, so a `task.yaml` that fails a
+generic decode could never have been loaded as a `task.Spec` in the first
+place — so the secret-bearing structural forms above only ever occur in
+content that *does* decode.
+
+**`redactValueLines` still runs, as defense in depth, on top of the node-walk
+result.** It is a line-anchored regex (`value:`/`default:`/`webhook_secret:`
+at the start of a line, optionally after list-item/indentation) requiring no
+YAML parse, so it still catches a `value:`-shaped line in content that fails
+to decode as YAML at all — the case above — and anything the node walk
+missed. It is deliberately generic: any line that looks like one of these
+mapping entries in *any* snapshotted text file, not only ones provably inside
+`permissions.env`, since erring toward over-redaction is the right tradeoff
+for a security fix.
 
 **This cache is in-memory only** — like the gate's `pending`/`admitted` maps, it
 is rebuilt by re-`Admit` on daemon restart, not persisted to disk. A diff

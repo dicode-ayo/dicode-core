@@ -834,8 +834,10 @@ func TestDiffFlagsPermissionWidening(t *testing.T) {
 // endpoint and the unauthenticated /approve/{token} page — must never carry
 // the literal.
 //
-// Known still-uncovered forms are asserted as such in
-// TestRedactSecretsKnownGaps rather than silently omitted.
+// Two further forms that a value-substring sweep cannot see at all — a
+// multiline plain scalar's line-folded continuation, and the `KEY=VALUE` env
+// shorthand — are covered by TestRedactSecretsCoversMultilineAndShorthand,
+// which the node-tree-driven redaction below (#643) closes.
 func TestRedactSecretsCoversNonLineFormats(t *testing.T) {
 	cases := map[string]string{
 		"flow mapping":  "permissions:\n  env: [{name: A, value: sk-live-FLOWSTYLE}]\n",
@@ -851,23 +853,90 @@ func TestRedactSecretsCoversNonLineFormats(t *testing.T) {
 	}
 }
 
-// TestRedactSecretsKnownGaps pins the forms redaction does NOT yet cover, so
-// the gap is visible in the test suite rather than discovered on a leak. Each
-// is a legal task.yaml that binds to EnvEntry.Value. See issue for the
-// YAML-node-driven redaction that closes them.
-func TestRedactSecretsKnownGaps(t *testing.T) {
-	gaps := map[string]string{
-		// A multiline scalar's parsed value ("a b") never appears verbatim in
-		// the bytes ("a\n  b"), so the content sweep cannot match it.
+// TestRedactSecretsCoversMultilineAndShorthand pins the two forms #643 found
+// leaking past the old value-substring sweep — both are legal task.yaml that
+// bind to EnvEntry.Value, and neither's raw bytes ever contain the secret
+// literal verbatim in a way a substring search could find:
+//
+//   - A plain multiline scalar line-folds at parse time ("part-one\n  cont" →
+//     "part-one cont"), so the parsed value never appears verbatim in the raw
+//     bytes for a substring match to find; only the first physical line was
+//     ever touched by the old line-anchored regex pass.
+//   - The documented `KEY=VALUE` shorthand (task.EnvEntry.UnmarshalYAML) is a
+//     bare scalar sequence item under `env:`, not a mapping bound to a
+//     value:/default: key at all, so the old structural sweep — which only
+//     ever recursed MappingNodes looking for those key names — never even
+//     visited it.
+//
+// The node-tree-driven redaction in snapshot.go (collectRedactionTargets/
+// applyNodeRedactions) closes both by blanking each target's own line/column
+// range in the raw bytes, rather than searching for its parsed value as a
+// substring.
+func TestRedactSecretsCoversMultilineAndShorthand(t *testing.T) {
+	cases := map[string]string{
 		"plain multiline scalar": "permissions:\n  env:\n    - name: A\n      value: part-one\n        sk-live-CONTINUATION\n",
-		// The documented KEY=VALUE shorthand is a bare seq string, not a
-		// mapping under a value: key, so the sweep never collects it.
-		"KEY=VALUE shorthand": "permissions:\n  env:\n    - TOKEN=sk-live-SHORTHAND\n",
+		"KEY=VALUE shorthand":    "permissions:\n  env:\n    - TOKEN=sk-live-SHORTHAND\n",
 	}
-	for name, in := range gaps {
-		if !strings.Contains(redactSecrets(in), "sk-live-") {
-			t.Errorf("%s is now redacted — good; remove it from the known-gap list", name)
+	for name, in := range cases {
+		out := redactSecrets(in)
+		if strings.Contains(out, "sk-live-") {
+			t.Errorf("%s: literal survived redaction:\n%s", name, out)
 		}
+		if !strings.Contains(out, redactedEnvValue) {
+			t.Errorf("%s: expected %q placeholder in place of the secret:\n%s", name, redactedEnvValue, out)
+		}
+	}
+}
+
+// TestRedactSecretsResolvesAlias covers a value:/default: that is a YAML
+// alias (`*name`) pointing at an anchor (`&name`) defined elsewhere in the
+// same document — untested before #643. The alias reference itself carries
+// no secret text ("*name" is not the secret), so redaction must resolve
+// through to the anchor's definition site and blank the real bytes there,
+// even though that definition is not itself under a value:/default:/
+// webhook_secret: key (nothing requires an anchor's own key to be named
+// "value" — the whole point of an anchor is reuse from any key name).
+//
+// This case has no UI-reachable way to author an anchor/alias pair through
+// the normal task-editing flow (there's no form field for it), so unlike the
+// two forms above it is unit-only — see the PR description for why.
+func TestRedactSecretsResolvesAlias(t *testing.T) {
+	in := "anchors:\n  root: &root sk-live-ANCHORED-SECRET\n" +
+		"permissions:\n  env:\n    - name: A\n      value: *root\n"
+	out := redactSecrets(in)
+	if strings.Contains(out, "sk-live-ANCHORED-SECRET") {
+		t.Errorf("alias-resolved anchor secret survived redaction:\n%s", out)
+	}
+	if !strings.Contains(out, redactedEnvValue) {
+		t.Errorf("expected %q placeholder in place of the anchor's secret:\n%s", redactedEnvValue, out)
+	}
+	// The alias reference line ("value: *root") carries no secret text of its
+	// own, but redactValueLines' line-anchored pass (running as defense in
+	// depth on top of the node walk, see redactSecrets) also matches it —
+	// same as any other "value:" line — and blanks it too. Harmless (the
+	// real secret is already gone from the anchor definition above), but
+	// means both the "root:" and "value:" lines end up showing the
+	// placeholder rather than the literal "*root" text surviving.
+	if !strings.Contains(out, "value:") {
+		t.Errorf("the value: key itself must still be visible so the diff shows the field is present:\n%s", out)
+	}
+}
+
+// TestRedactSecretsResolvesMultilineAlias covers the same alias-resolution
+// path as TestRedactSecretsResolvesAlias, but the anchor's own definition is
+// itself a block scalar spanning multiple lines — confirming the swallow
+// heuristic blankNodeTarget reuses from redactValueLines applies correctly
+// relative to the anchor definition's own indentation, not the alias
+// reference's.
+func TestRedactSecretsResolvesMultilineAlias(t *testing.T) {
+	in := "anchors:\n  root: &root |\n    line-one-sk-live-BLOCKALIAS\n    line-two-sk-live-BLOCKALIAS\n" +
+		"permissions:\n  env:\n    - name: A\n      value: *root\n"
+	out := redactSecrets(in)
+	if strings.Contains(out, "sk-live-BLOCKALIAS") {
+		t.Errorf("alias-resolved multiline anchor secret survived redaction:\n%s", out)
+	}
+	if !strings.Contains(out, redactedEnvValue) {
+		t.Errorf("expected %q placeholder in place of the anchor's secret:\n%s", redactedEnvValue, out)
 	}
 }
 
