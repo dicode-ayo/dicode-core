@@ -192,6 +192,19 @@ func redactValueLines(content string) string {
 	return strings.Join(lines, "\n")
 }
 
+// keyOnlyLinePattern matches a line that ends with a mapping key's colon and
+// nothing else meaningful after it — optionally followed by a YAML anchor
+// tag (`&name`), which is the one thing that can legally sit after the colon
+// on a key-only line without being the value itself. Used by
+// blankNodeTarget to recognize "value:\n  <content on later lines>" (and
+// "root: &root\n  <content>") as the shape where the KEY line, not the
+// scalar's own first line, carries the reference indentation for the
+// swallow loop. Deliberately loose (no `^`-anchored key-name check): a false
+// match here only ever changes which line's indentation is used as the
+// swallow reference, and over-redaction (swallowing more) is the safe
+// failure direction, never under-redaction.
+var keyOnlyLinePattern = regexp.MustCompile(`:[ \t]*(&\S+[ \t]*)?$`)
+
 // leadingIndent returns the number of leading space/tab characters in s —
 // used to compare a line's indentation column against a "value:" block
 // scalar's key column. Byte-counted, not display-width-aware (a mix of tabs
@@ -496,9 +509,25 @@ func collectRedactionTargets(n *yaml.Node, out *[]redactionTarget, seen map[*yam
 						// (task.EnvEntry.UnmarshalYAML) is a bare scalar
 						// sequence item, not a mapping under a value:/
 						// default: key, so it needs its own detection here.
-						if item.Kind == yaml.ScalarNode && strings.Contains(item.Value, "=") && !seen[item] {
-							seen[item] = true
-							*out = append(*out, redactionTarget{node: item, isEnvShorthand: true})
+						//
+						// An item can also be an alias (`- *root`) to an
+						// anchor defined anywhere else in the document —
+						// including under a key this walk never otherwise
+						// visits (task.Spec's plain yaml.Unmarshal has no
+						// KnownFields(true), so an attacker-controlled
+						// task.yaml can carry an extra top-level key solely
+						// to hold the anchor and reference it here). Resolve
+						// through the alias the same way the value:/default:/
+						// webhook_secret: case above does, so the anchor's
+						// real bytes — not the content-free "*root" alias
+						// site — get blanked.
+						target := item
+						if item.Kind == yaml.AliasNode {
+							target = item.Alias
+						}
+						if target != nil && target.Kind == yaml.ScalarNode && strings.Contains(target.Value, "=") && !seen[target] {
+							seen[target] = true
+							*out = append(*out, redactionTarget{node: target, isEnvShorthand: true})
 						}
 					}
 				}
@@ -599,6 +628,40 @@ func applyNodeRedactions(content string, targets []redactionTarget) string {
 // column (leading whitespace only, not consuming the dash) — one level
 // shallower — which every valid body indentation is strictly deeper than,
 // at any nesting depth.
+//
+// A second, unrelated case also needs the reference line to NOT be the
+// node's own line: a plain (non-block-style) scalar whose key's colon has
+// nothing after it on its own line, so the scalar's actual first line of
+// content begins entirely on a LATER physical line — e.g.
+//
+//	value:
+//	  part-one
+//	  sk-live-secret
+//
+// yaml.v3 reports the scalar's own (Line, Column) as pointing at "part-one",
+// not at "value:"'s line. Using that line's own leading indentation (8, the
+// CONTENT's indentation) as the swallow reference compares the next
+// continuation line's indentation (also 8) against itself — equal, not
+// greater — so the swallow loop stops immediately and leaves every line
+// after the first one completely unredacted, the same false-scrubbed-leak
+// shape as the shorthand case above, just for an ordinary mapping value
+// instead of a keyless sequence item. This is detected generically, without
+// needing a reference to the key node: when nothing but whitespace precedes
+// the scalar's own start column on its own line, the key (if this scalar is
+// a mapping value at all) can only be on an earlier line, per YAML's
+// indentation rules — so this walks upward over any blank lines to the
+// nearest non-blank line and, if THAT line looks like a key-only opener
+// (keyOnlyLinePattern), uses its indentation instead. This also naturally
+// covers a multiline scalar reached via alias resolution, whose anchor
+// definition uses this same "key:\n  content" shape under a key of any
+// name (not just value:/default:/webhook_secret:) — see
+// TestRedactSecretsResolvesMultilineAlias's block-style sibling case for
+// the analogous already-covered scenario. The block-scalar and env-shorthand
+// branches above are unaffected: a block scalar's header is always on the
+// key's own line already (rawLine is already correct), and an env shorthand
+// item is either single-line (rawLine already correct) or block-style
+// (handled by the isEnvShorthand&&isBlock case above, which has no "key" to
+// look for at all).
 func blankNodeTarget(lines []string, t redactionTarget) []string {
 	lineIdx := t.node.Line - 1
 	if lineIdx < 0 || lineIdx >= len(lines) {
@@ -617,7 +680,22 @@ func blankNodeTarget(lines []string, t redactionTarget) []string {
 
 	isBlock := t.node.Style&(yaml.LiteralStyle|yaml.FoldedStyle) != 0
 
-	keyIndent := len(valueKeyIndentPattern.FindString(rawLine))
+	// Which line's indentation is the correct swallow reference: normally
+	// the node's own line, but see the doc comment's second case — a plain
+	// scalar whose key-only line precedes it (nothing but whitespace before
+	// the node's own start column) must use that key line instead.
+	keyIndentLine := rawLine
+	if !t.isEnvShorthand && !isBlock && strings.TrimRight(string(runes[:col]), " \t") == "" {
+		k := lineIdx - 1
+		for k >= 0 && strings.TrimSpace(lines[k]) == "" {
+			k--
+		}
+		if k >= 0 && keyOnlyLinePattern.MatchString(strings.TrimRight(lines[k], " \t\r")) {
+			keyIndentLine = lines[k]
+		}
+	}
+
+	keyIndent := len(valueKeyIndentPattern.FindString(keyIndentLine))
 	if t.isEnvShorthand && isBlock {
 		// Bare sequence item, no key name: `keyIndent` above would consume
 		// the dash itself (and its trailing space), landing on the same

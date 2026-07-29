@@ -1198,6 +1198,126 @@ func TestRedactSecretsCoversWebhookSecret(t *testing.T) {
 	}
 }
 
+// TestRedactSecretsCoversKeyOnlyMultilineValue is the regression for a
+// second #653-follow-up review finding: a value:/default:/webhook_secret:
+// key with NOTHING after its colon on its own line, whose scalar begins
+// entirely on a later physical line, e.g.
+//
+//	value:
+//	  part-one
+//	  sk-live-secret
+//
+// yaml.v3 reports the scalar node's own (Line, Column) as pointing at
+// "part-one" — the scalar's own first line — not at "value:"'s line.
+// blankNodeTarget used to derive its swallow-loop reference indentation
+// (keyIndent) from that line's OWN leading indentation, which is the
+// CONTENT's indentation, not the key's. Comparing the next continuation
+// line's indentation against itself (equal, not greater) then stopped the
+// swallow immediately, leaving every line after the first one completely
+// unredacted — while the redacted first line still made the field look
+// fully scrubbed. This only manifests with 2+ continuation lines: with a
+// single continuation line the swallow loop is never reached at all (the
+// lone line is blanked directly), which is why it passed unnoticed before.
+func TestRedactSecretsCoversKeyOnlyMultilineValue(t *testing.T) {
+	cases := map[string]string{
+		"value:, two continuation lines": "permissions:\n  env:\n    - name: A\n      value:\n" +
+			"        part-one\n        sk-live-VALUETWO\n",
+		"value:, three continuation lines": "permissions:\n  env:\n    - name: A\n      value:\n" +
+			"        line-one\n        line-two\n        sk-live-VALUETHREE\n",
+		"default:, two continuation lines": "permissions:\n  env:\n    - name: A\n      default:\n" +
+			"        part-one\n        sk-live-DEFAULTTWO\n",
+		"webhook_secret:, two continuation lines": "name: t\ntrigger:\n  webhook: /hooks/x\n  webhook_secret:\n" +
+			"    part-one\n    sk-live-WEBHOOKTWO\n  auth: any\n",
+		"deeply nested value:, two continuation lines": "outer:\n  deeper:\n    permissions:\n      env:\n" +
+			"        - name: A\n          value:\n            part-one\n            sk-live-NESTEDTWO\n",
+		// Single continuation line must keep working (never regresses to the
+		// bug above) — the swallow loop isn't even reached in this shape,
+		// but pin it anyway as the boundary case just below the 2+-line bug.
+		"value:, single continuation line": "permissions:\n  env:\n    - name: A\n      value:\n" +
+			"        sk-live-VALUEONE\n",
+	}
+	for name, in := range cases {
+		out := redactSecrets(in)
+		if strings.Contains(out, "sk-live-") {
+			t.Errorf("%s: literal survived redaction:\n%s", name, out)
+		}
+		if !strings.Contains(out, redactedEnvValue) {
+			t.Errorf("%s: expected %q placeholder in place of the secret:\n%s", name, redactedEnvValue, out)
+		}
+	}
+}
+
+// TestRedactSecretsKeyOnlyMultilineValueDoesNotRegressSameLineCase pins that
+// the fix for TestRedactSecretsCoversKeyOnlyMultilineValue's shape doesn't
+// disturb the pre-existing, already-correct same-line case — where the
+// scalar's first line DOES continue the "value:" line itself (the common
+// case, and the one TestRedactSecretsCoversMultilineAndShorthand's "plain
+// multiline scalar" entry already covers). Kept as its own test so a
+// regression here is unambiguous about which of the two shapes broke.
+func TestRedactSecretsKeyOnlyMultilineValueDoesNotRegressSameLineCase(t *testing.T) {
+	in := "permissions:\n  env:\n    - name: A\n      value: part-one\n        sk-live-SAMELINE\n"
+	out := redactSecrets(in)
+	if strings.Contains(out, "sk-live-SAMELINE") {
+		t.Errorf("literal survived redaction:\n%s", out)
+	}
+	if !strings.Contains(out, redactedEnvValue) {
+		t.Errorf("expected %q placeholder in place of the secret:\n%s", redactedEnvValue, out)
+	}
+}
+
+// TestRedactSecretsResolvesKeyOnlyMultilineAlias covers the same key-only,
+// scalar-starts-on-a-later-line shape as
+// TestRedactSecretsCoversKeyOnlyMultilineValue, but reached through alias
+// resolution — the anchor's own definition uses the shape under a key of
+// any name (here "root", not value:/default:/webhook_secret:), the same way
+// TestRedactSecretsResolvesMultilineAlias covers it for the block-style
+// case. blankNodeTarget's fix detects this generically from the raw text
+// (walking up to the nearest non-blank "key:"-only line), so it isn't tied
+// to the target having been reached via the value:/default:/webhook_secret:
+// switch case specifically.
+func TestRedactSecretsResolvesKeyOnlyMultilineAlias(t *testing.T) {
+	in := "anchors:\n  root: &root\n    part-one\n    sk-live-ALIASMULTI\n" +
+		"permissions:\n  env:\n    - name: A\n      value: *root\n"
+	out := redactSecrets(in)
+	if strings.Contains(out, "sk-live-ALIASMULTI") {
+		t.Errorf("alias-resolved key-only-multiline anchor secret survived redaction:\n%s", out)
+	}
+	if !strings.Contains(out, redactedEnvValue) {
+		t.Errorf("expected %q placeholder in place of the anchor's secret:\n%s", redactedEnvValue, out)
+	}
+}
+
+// TestRedactSecretsResolvesEnvAliasSequenceItem covers a bare env: sequence
+// item written as an alias (`- *root`) rather than a literal KEY=VALUE
+// scalar — a shape collectRedactionTargets' env: branch did not check for
+// (only item.Kind == yaml.ScalarNode, never yaml.AliasNode). A code-review
+// pass on this same PR flagged the shape but concluded it wasn't
+// exploitable on the reasoning that the anchor's own definition site always
+// gets visited/blanked independently; that holds only when the anchor is
+// itself defined as another literal env: shorthand item (already covered by
+// TestRedactSecretsCoversMultilineAndShorthand's "KEY=VALUE shorthand"
+// case). It does not hold when the anchor is defined under an arbitrary key
+// collectRedactionTargets never otherwise visits — task.Spec's plain
+// yaml.Unmarshal has no KnownFields(true), so an attacker-controlled
+// task.yaml can carry an extra top-level key solely to hold the anchor and
+// reference it from env: by alias, exactly as this test does.
+func TestRedactSecretsResolvesEnvAliasSequenceItem(t *testing.T) {
+	in := "anchors:\n  root: &root TOKEN=sk-live-ENVALIASSEQ\n" +
+		"permissions:\n  env:\n    - *root\n"
+	out := redactSecrets(in)
+	if strings.Contains(out, "sk-live-ENVALIASSEQ") {
+		t.Errorf("alias-resolved env: sequence item secret survived redaction:\n%s", out)
+	}
+	if !strings.Contains(out, redactedEnvValue) {
+		t.Errorf("expected %q placeholder in place of the anchor's secret:\n%s", redactedEnvValue, out)
+	}
+	// The "KEY=" prefix must survive (isEnvShorthand semantics), same as the
+	// literal shorthand case.
+	if !strings.Contains(out, "TOKEN=") {
+		t.Errorf("expected the KEY= prefix to survive redaction:\n%s", out)
+	}
+}
+
 // TestDiffRedactsParamDefault is the regression for a params[].default leak:
 // resolvedFieldsOf feeds both ContentHash and resolvedFieldsText, and the
 // latter (since 7574aba) is what Diff renders verbatim onto every diff

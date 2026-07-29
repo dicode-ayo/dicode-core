@@ -795,7 +795,8 @@ API) and walks the parsed tree for two structural forms:
   item, `task.EnvEntry.UnmarshalYAML`): a bare scalar sequence item under an
   `env:` key, not a mapping under a `value:`/`default:` key at all, so it
   needs its own detection. Only the substring after the first `=` is secret;
-  the `KEY=` prefix is kept.
+  the `KEY=` prefix is kept. A shorthand item written as an alias (`- *root`)
+  is resolved the same way an aliased `value:`/`default:` is, above.
 
 For each match, the redaction blanks that node's own line/column range in the
 **original bytes** — not a search for its parsed value as a substring — which
