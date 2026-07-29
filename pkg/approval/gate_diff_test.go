@@ -1271,10 +1271,10 @@ func TestRedactSecretsKeyOnlyMultilineValueDoesNotRegressSameLineCase(t *testing
 // resolution — the anchor's own definition uses the shape under a key of
 // any name (here "root", not value:/default:/webhook_secret:), the same way
 // TestRedactSecretsResolvesMultilineAlias covers it for the block-style
-// case. blankNodeTarget's fix detects this generically from the raw text
-// (walking up to the nearest non-blank "key:"-only line), so it isn't tied
-// to the target having been reached via the value:/default:/webhook_secret:
-// switch case specifically.
+// case. The owner map collectKeyOwners builds covers mapping values under
+// keys of any name, so the anchor definition's own key node is threaded
+// through as redactionTarget.keyNode regardless of how the target was
+// reached.
 func TestRedactSecretsResolvesKeyOnlyMultilineAlias(t *testing.T) {
 	in := "anchors:\n  root: &root\n    part-one\n    sk-live-ALIASMULTI\n" +
 		"permissions:\n  env:\n    - name: A\n      value: *root\n"
