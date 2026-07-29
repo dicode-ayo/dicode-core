@@ -549,10 +549,12 @@ func applyNodeRedactions(content string, targets []redactionTarget) string {
 // value or an env: KEY=VALUE shorthand item can have:
 //
 //   - Block scalar (Style has LiteralStyle or FoldedStyle — `value: |`/`value:
-//     >`): the header line is kept intact, exactly as redactValueLines already
+//     >`, INCLUDING an env: shorthand item written that way, e.g. `- |`):
+//     the header line is kept intact, exactly as redactValueLines already
 //     does, so the diff still shows the field's presence.
-//   - KEY=VALUE shorthand: only the substring after the line's first '=' at or
-//     after the node's own column is secret; the "KEY=" prefix is kept.
+//   - KEY=VALUE shorthand written as a single-line (non-block) scalar: only
+//     the substring after the line's first '=' at or after the node's own
+//     column is secret; the "KEY=" prefix is kept.
 //   - Everything else (plain/quoted/flow scalars, and an alias's resolved
 //     anchor definition): the line is blanked from the node's start column
 //     to end of line. This is what closes the plain-multiline-scalar gap —
@@ -561,19 +563,48 @@ func applyNodeRedactions(content string, targets []redactionTarget) string {
 //     still names exactly where "part-one" starts in the raw bytes,
 //     independent of the fold.
 //
+// isBlock is checked BEFORE isEnvShorthand: a block scalar's actual content
+// is never on its header line — the header only ever carries the `|`/`>`
+// indicator (plus optional chomp/indent modifiers) regardless of what kind
+// of target the node is, so the KEY=VALUE-on-this-line logic the shorthand
+// branch performs is meaningless for it (searching the header line for '='
+// finds none, since the header is just `- |`) and must never run for a
+// block-styled node. Getting this order backwards lets a shorthand secret
+// written in block style (`- |` / `KEY=VALUE` on the next line) fall into
+// the shorthand branch, find no '=' on the header line, hit the "should be
+// unreachable" defensive fallback, and leave the real secret line for the
+// swallow loop below to catch — which it only does if keyIndent is computed
+// correctly for a bare (keyless) sequence item; see the isEnvShorthand-and-
+// isBlock case below.
+//
 // In every case, once the target line itself is handled, every following
-// line that is blank or indented more than the reference indentation (the
-// node's own line's leading whitespace/list-dash, via valueKeyIndentPattern —
-// the same measure redactValueLines' block-scalar case already uses) is
-// swallowed into the same single placeholder, matching YAML's own rule that a
-// scalar's continuation must be indented deeper than its containing key.
+// line that is blank or indented more than a reference indentation is
+// swallowed into the same single placeholder, matching YAML's own rule that
+// a scalar's continuation must be indented deeper than its containing node.
+// That reference indentation is usually the node's own line's leading
+// whitespace/list-dash-and-space, via valueKeyIndentPattern (the same
+// measure redactValueLines' block-scalar case already uses) — correct for a
+// `key: |` header (content nests one level past the key) and for a `- key:
+// |` header (content nests one level past the key, which itself follows the
+// dash). But a bare `- |` env: shorthand item has no key: the dash IS the
+// header, and idiomatic block-scalar body indentation lands exactly one
+// dash-width past the dash's own column — the same column
+// valueKeyIndentPattern reports (it consumes the dash and its trailing
+// space to reach the mapping-value column, which for a keyless item is also
+// where body content starts). Comparing content indentation with `>` against
+// that column then fails at the idiomatic indent (col == col, not
+// col > col), letting the secret line survive unswallowed while the header
+// still shows <redacted> — a false-scrubbed leak, worse than no redaction
+// attempt. For that one case the reference must instead be the dash's own
+// column (leading whitespace only, not consuming the dash) — one level
+// shallower — which every valid body indentation is strictly deeper than,
+// at any nesting depth.
 func blankNodeTarget(lines []string, t redactionTarget) []string {
 	lineIdx := t.node.Line - 1
 	if lineIdx < 0 || lineIdx >= len(lines) {
 		return lines // defensive: a node position outside the split content
 	}
 	rawLine := lines[lineIdx]
-	keyIndent := len(valueKeyIndentPattern.FindString(rawLine))
 
 	runes := []rune(rawLine)
 	col := t.node.Column - 1 // yaml.Node.Column is 1-indexed
@@ -585,8 +616,21 @@ func blankNodeTarget(lines []string, t redactionTarget) []string {
 	}
 
 	isBlock := t.node.Style&(yaml.LiteralStyle|yaml.FoldedStyle) != 0
+
+	keyIndent := len(valueKeyIndentPattern.FindString(rawLine))
+	if t.isEnvShorthand && isBlock {
+		// Bare sequence item, no key name: `keyIndent` above would consume
+		// the dash itself (and its trailing space), landing on the same
+		// column idiomatic body content uses — see doc comment. Use the
+		// dash's own column instead, so any deeper body indentation compares
+		// strictly greater regardless of how many spaces follow the dash.
+		keyIndent = leadingIndent(rawLine)
+	}
+
 	headerKept := false
 	switch {
+	case isBlock:
+		headerKept = true // header line ("value: |" or "- |") is left untouched below
 	case t.isEnvShorthand:
 		eq := -1
 		for i := col; i < len(runes); i++ {
@@ -602,8 +646,6 @@ func blankNodeTarget(lines []string, t redactionTarget) []string {
 			eq = col - 1
 		}
 		lines[lineIdx] = string(runes[:eq+1]) + redactedEnvValue
-	case isBlock:
-		headerKept = true // header line ("value: |") is left untouched below
 	default:
 		lines[lineIdx] = string(runes[:col]) + redactedEnvValue
 	}

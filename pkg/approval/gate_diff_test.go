@@ -876,6 +876,24 @@ func TestRedactSecretsCoversMultilineAndShorthand(t *testing.T) {
 	cases := map[string]string{
 		"plain multiline scalar": "permissions:\n  env:\n    - name: A\n      value: part-one\n        sk-live-CONTINUATION\n",
 		"KEY=VALUE shorthand":    "permissions:\n  env:\n    - TOKEN=sk-live-SHORTHAND\n",
+		// Block-literal- and block-folded-styled env: shorthand items are the
+		// #653 follow-up finding: collectRedactionTargets flags a bare `- |`/
+		// `- >` sequence item as isEnvShorthand purely from `item.Value`
+		// containing '=', without checking Style — so blankNodeTarget must
+		// route it through the block-scalar branch (header kept, body
+		// swallowed), not the KEY=VALUE-on-this-line branch (which finds no
+		// '=' on a bare `- |` header and used to leave the real secret line
+		// on the next line completely untouched while still rendering a
+		// misleading <redacted> for the header).
+		"KEY=VALUE shorthand, block-literal style": "permissions:\n  env:\n    - |\n      TOKEN=sk-live-BLOCKLIT\n",
+		"KEY=VALUE shorthand, block-folded style":  "permissions:\n  env:\n    - >\n      TOKEN=sk-live-BLOCKFOLD\n",
+		// Same block-literal shorthand, one indentation level deeper (dash
+		// nested under an extra mapping layer) — pins that the fix keys off
+		// the dash's own column, not a specific hardcoded indent width.
+		"KEY=VALUE shorthand, block-literal style, deeper nesting": "outer:\n  permissions:\n    env:\n      - |\n        TOKEN=sk-live-BLOCKDEEP\n",
+		// Same again, with the block body indented even further past the
+		// dash than the idiomatic "dash column + 2" — still must swallow.
+		"KEY=VALUE shorthand, block-literal style, extra body indent": "permissions:\n  env:\n    - |\n          TOKEN=sk-live-BLOCKEXTRA\n",
 	}
 	for name, in := range cases {
 		out := redactSecrets(in)
@@ -884,6 +902,28 @@ func TestRedactSecretsCoversMultilineAndShorthand(t *testing.T) {
 		}
 		if !strings.Contains(out, redactedEnvValue) {
 			t.Errorf("%s: expected %q placeholder in place of the secret:\n%s", name, redactedEnvValue, out)
+		}
+	}
+}
+
+// TestRedactSecretsBlockShorthandVaryingDashIndent is a companion to
+// TestRedactSecretsCoversMultilineAndShorthand's block-style shorthand cases,
+// sweeping several distinct dash indentation levels (rather than a single
+// nested example) to confirm the fix generalizes and isn't tuned to the
+// specific column the original #653 repro happened to use.
+func TestRedactSecretsBlockShorthandVaryingDashIndent(t *testing.T) {
+	// dashIndent starts at 2 (matching "  env:\n"'s own indentation — a
+	// block sequence's dash may sit at the same column as its key, but not
+	// shallower) and increases from there.
+	for dashIndent := 2; dashIndent <= 14; dashIndent += 2 {
+		pad := strings.Repeat(" ", dashIndent)
+		in := "permissions:\n  env:\n" + pad + "- |\n" + pad + "  TOKEN=sk-live-INDENT" + fmt.Sprint(dashIndent) + "\n"
+		out := redactSecrets(in)
+		if strings.Contains(out, "sk-live-") {
+			t.Errorf("dashIndent=%d: literal survived redaction:\n%s", dashIndent, out)
+		}
+		if !strings.Contains(out, redactedEnvValue) {
+			t.Errorf("dashIndent=%d: expected %q placeholder:\n%s", dashIndent, redactedEnvValue, out)
 		}
 	}
 }
