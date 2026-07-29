@@ -1287,6 +1287,140 @@ func TestRedactSecretsResolvesKeyOnlyMultilineAlias(t *testing.T) {
 	}
 }
 
+// TestRedactSecretsCoversCommentBetweenKeyAndMultilineValue is the regression
+// for the third #643-follow-up review finding: TestRedactSecretsCoversKeyOnlyMultilineValue's
+// fix walked upward from the content's own line over BLANK lines only, to find
+// the nearest line matching a "key ends in a colon" text pattern. A YAML
+// comment line — completely ordinary, no attacker trickery required — sitting
+// between the key-only opener and its content is neither blank nor itself
+// colon-terminated, so that walk stopped at the comment, fell back to the
+// content's own (wrong) line, and the exact original leak reappeared, e.g.
+//
+//	value:
+//	  # explains next line
+//	  part-one
+//	  sk-live-secret
+//
+// The fix in this file replaces the whole text-walk heuristic with the real
+// parsed key node (threaded through via redactionTarget.keyNode from
+// collectRedactionTargets/collectKeyOwners), which is immune to this by
+// construction: it is never re-derived from nearby text, comment or no
+// comment. Also covers the same shape via an inline trailing comment on the
+// key's own line (`value: # comment`), which the old heuristic's
+// keyOnlyLinePattern (`:[ \t]*(&\S+[ \t]*)?$`) also could not match — a
+// trailing "# comment" after the colon isn't blank and isn't an anchor tag,
+// so that line would have failed to match keyOnlyLinePattern too, on top of
+// never being reached by the blank-lines-only walk.
+func TestRedactSecretsCoversCommentBetweenKeyAndMultilineValue(t *testing.T) {
+	cases := map[string]string{
+		"standalone comment line, value:": "permissions:\n  env:\n    - name: A\n      value:\n" +
+			"        # explains next line\n        part-one\n        sk-live-COMMENTGAP\n",
+		"inline trailing comment on key's own line, value:": "permissions:\n  env:\n    - name: A\n      value: # comment\n" +
+			"        part-one\n        sk-live-INLINECOMMENT\n",
+		"standalone comment line, default:": "permissions:\n  env:\n    - name: A\n      default:\n" +
+			"        # explains next line\n        part-one\n        sk-live-DEFAULTCOMMENTGAP\n",
+		"multiple comment lines in a row, value:": "permissions:\n  env:\n    - name: A\n      value:\n" +
+			"        # first line of explanation\n        # second line of explanation\n        part-one\n        sk-live-MULTICOMMENTGAP\n",
+		"standalone comment line, webhook_secret:": "name: t\ntrigger:\n  webhook: /hooks/x\n  webhook_secret:\n" +
+			"    # explains next line\n    part-one\n    sk-live-WEBHOOKCOMMENTGAP\n  auth: any\n",
+		"inline trailing comment on key's own line, webhook_secret:": "name: t\ntrigger:\n  webhook: /hooks/x\n  webhook_secret: # comment\n" +
+			"    part-one\n    sk-live-WEBHOOKINLINECOMMENT\n  auth: any\n",
+	}
+	for name, in := range cases {
+		out := redactSecrets(in)
+		if strings.Contains(out, "sk-live-") {
+			t.Errorf("%s: literal survived redaction:\n%s", name, out)
+		}
+		if !strings.Contains(out, redactedEnvValue) {
+			t.Errorf("%s: expected %q placeholder in place of the secret:\n%s", name, redactedEnvValue, out)
+		}
+	}
+}
+
+// TestRedactSecretsKeyNodeThreadingAdversarialShapes tries to break the real-
+// key-node design (rather than the old text-walk heuristic it replaced) with
+// a few more shapes: arbitrarily deep nesting of other key-only lines above
+// the target (which must have zero bearing on the target's OWN key node),
+// trailing whitespace/tabs on the key's own line, and CRLF line endings. None
+// of these should matter to the fix — it only ever reads t.keyNode.Line,
+// never re-scans surrounding text — but a fourth review round already found
+// three real bugs in as many attempts at this function, so this pins that the
+// structural replacement doesn't quietly reintroduce a fourth.
+func TestRedactSecretsKeyNodeThreadingAdversarialShapes(t *testing.T) {
+	t.Run("deeply nested ancestor key-only lines plus a comment gap", func(t *testing.T) {
+		in := "a:\n  b:\n    c:\n      d:\n        permissions:\n          env:\n            - name: A\n              value:\n" +
+			"                # comment\n                part-one\n                sk-live-DEEPNEST\n"
+		out := redactSecrets(in)
+		if strings.Contains(out, "sk-live-DEEPNEST") {
+			t.Errorf("literal survived redaction:\n%s", out)
+		}
+		if !strings.Contains(out, redactedEnvValue) {
+			t.Errorf("expected %q placeholder:\n%s", redactedEnvValue, out)
+		}
+	})
+	t.Run("trailing whitespace and a tab on the key's own line", func(t *testing.T) {
+		in := "permissions:\n  env:\n    - name: A\n      value:  \t \n" +
+			"        part-one\n        sk-live-TRAILWS\n"
+		out := redactSecrets(in)
+		if strings.Contains(out, "sk-live-TRAILWS") {
+			t.Errorf("literal survived redaction:\n%s", out)
+		}
+		if !strings.Contains(out, redactedEnvValue) {
+			t.Errorf("expected %q placeholder:\n%s", redactedEnvValue, out)
+		}
+	})
+	t.Run("CRLF line endings with a comment gap", func(t *testing.T) {
+		unix := "permissions:\n  env:\n    - name: A\n      value:\n" +
+			"        # explains next line\n        part-one\n        sk-live-CRLFCOMMENT\n"
+		in := strings.ReplaceAll(unix, "\n", "\r\n")
+		out := redactSecrets(in)
+		if strings.Contains(out, "sk-live-CRLFCOMMENT") {
+			t.Errorf("literal survived redaction:\n%s", out)
+		}
+		if !strings.Contains(out, redactedEnvValue) {
+			t.Errorf("expected %q placeholder:\n%s", redactedEnvValue, out)
+		}
+	})
+	t.Run("CRLF line endings, plain key:value on one line", func(t *testing.T) {
+		unix := "permissions:\n  env:\n    - name: A\n      value: sk-live-CRLFPLAIN\n"
+		in := strings.ReplaceAll(unix, "\n", "\r\n")
+		out := redactSecrets(in)
+		if strings.Contains(out, "sk-live-CRLFPLAIN") {
+			t.Errorf("literal survived redaction:\n%s", out)
+		}
+		if !strings.Contains(out, redactedEnvValue) {
+			t.Errorf("expected %q placeholder:\n%s", redactedEnvValue, out)
+		}
+	})
+	t.Run("dash and key-only opener on the same line, comment gap before content", func(t *testing.T) {
+		in := "permissions:\n  env:\n    - value:\n" +
+			"        # comment\n        part-one\n        sk-live-DASHKEYCOMMENT\n      name: A\n"
+		out := redactSecrets(in)
+		if strings.Contains(out, "sk-live-DASHKEYCOMMENT") {
+			t.Errorf("literal survived redaction:\n%s", out)
+		}
+		if !strings.Contains(out, redactedEnvValue) {
+			t.Errorf("expected %q placeholder:\n%s", redactedEnvValue, out)
+		}
+		// name: A is a sibling key at the dash's own mapping level, not part
+		// of the swallowed value: — it must survive untouched.
+		if !strings.Contains(out, "name: A") {
+			t.Errorf("sibling key must not be swallowed into the redacted value:\n%s", out)
+		}
+	})
+	t.Run("alias resolving to an anchor under a comment-gapped key-only line", func(t *testing.T) {
+		in := "anchors:\n  root: &root\n    # comment\n    part-one\n    sk-live-ALIASCOMMENTGAP\n" +
+			"permissions:\n  env:\n    - name: A\n      value: *root\n"
+		out := redactSecrets(in)
+		if strings.Contains(out, "sk-live-ALIASCOMMENTGAP") {
+			t.Errorf("literal survived redaction:\n%s", out)
+		}
+		if !strings.Contains(out, redactedEnvValue) {
+			t.Errorf("expected %q placeholder:\n%s", redactedEnvValue, out)
+		}
+	})
+}
+
 // TestRedactSecretsResolvesEnvAliasSequenceItem covers a bare env: sequence
 // item written as an alias (`- *root`) rather than a literal KEY=VALUE
 // scalar — a shape collectRedactionTargets' env: branch did not check for

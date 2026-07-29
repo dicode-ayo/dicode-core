@@ -192,19 +192,6 @@ func redactValueLines(content string) string {
 	return strings.Join(lines, "\n")
 }
 
-// keyOnlyLinePattern matches a line that ends with a mapping key's colon and
-// nothing else meaningful after it — optionally followed by a YAML anchor
-// tag (`&name`), which is the one thing that can legally sit after the colon
-// on a key-only line without being the value itself. Used by
-// blankNodeTarget to recognize "value:\n  <content on later lines>" (and
-// "root: &root\n  <content>") as the shape where the KEY line, not the
-// scalar's own first line, carries the reference indentation for the
-// swallow loop. Deliberately loose (no `^`-anchored key-name check): a false
-// match here only ever changes which line's indentation is used as the
-// swallow reference, and over-redaction (swallowing more) is the safe
-// failure direction, never under-redaction.
-var keyOnlyLinePattern = regexp.MustCompile(`:[ \t]*(&\S+[ \t]*)?$`)
-
 // leadingIndent returns the number of leading space/tab characters in s —
 // used to compare a line's indentation column against a "value:" block
 // scalar's key column. Byte-counted, not display-width-aware (a mix of tabs
@@ -440,28 +427,95 @@ func streamFingerprint(path string, info fs.FileInfo) string {
 // pass 2 alone for a decode failure — this function's pre-existing, already
 // -accepted-risk behavior for non-YAML content — keeps that working.
 func redactSecrets(content string) string {
-	var targets []redactionTarget
-	seen := make(map[*yaml.Node]bool)
+	var docs []*yaml.Node
 	dec := yaml.NewDecoder(strings.NewReader(content))
 	for {
-		var doc yaml.Node
-		if err := dec.Decode(&doc); err != nil {
+		doc := new(yaml.Node)
+		if err := dec.Decode(doc); err != nil {
 			break // EOF or malformed — keep whatever earlier documents yielded
 		}
-		collectRedactionTargets(&doc, &targets, seen)
+		docs = append(docs, doc)
+	}
+
+	// Pass 1: record, for every mapping-value scalar anywhere across all
+	// documents, the key node that owns it. Done as its own complete pass
+	// (rather than inline during target collection) so that when pass 2
+	// resolves an alias to its anchor's definition node, the owner is
+	// already known regardless of whether the alias site or the anchor's
+	// own definition happens to be visited first by the walk — see
+	// collectKeyOwners.
+	keyOf := make(map[*yaml.Node]*yaml.Node)
+	for _, doc := range docs {
+		collectKeyOwners(doc, keyOf)
+	}
+
+	// Pass 2: collect the actual redaction targets, threading each one's
+	// owning key node (when it has one) through for blankNodeTarget to use
+	// as the swallow-loop's indentation reference.
+	var targets []redactionTarget
+	seen := make(map[*yaml.Node]bool)
+	for _, doc := range docs {
+		collectRedactionTargets(doc, &targets, seen, keyOf)
 	}
 	return redactValueLines(applyNodeRedactions(content, targets))
 }
 
 // redactionTarget is one YAML node whose raw byte range redactSecrets must
 // blank: either the value half of a `value:`/`default:`/`webhook_secret:`
-// mapping pair (isEnvShorthand false — Node is the scalar to blank, already
+// mapping pair (isEnvShorthand false — node is the scalar to blank, already
 // alias-resolved if it started life as an AliasNode), or a bare `KEY=VALUE`
-// sequence item under an `env:` key (isEnvShorthand true — Node is the whole
+// sequence item under an `env:` key (isEnvShorthand true — node is the whole
 // "KEY=VALUE" scalar; only the substring after the first '=' is secret).
+//
+// keyNode is the mapping key node that owns node — e.g. for `value: X`,
+// node is the scalar holding X and keyNode is the scalar holding "value".
+// blankNodeTarget uses keyNode's own line (rather than node's own line) as
+// the reference indentation for its swallow loop, which matters whenever
+// node's line isn't the key's line — e.g. `value:\n  X` (nothing after the
+// colon) or an alias resolved to an anchor defined under some other key
+// entirely. It is nil for isEnvShorthand targets (a bare sequence item has
+// no key at all — see blankNodeTarget's dash-column handling for that case)
+// and, rarely, for a mapping-value target whose alias resolves to an anchor
+// that is itself not a mapping value (e.g. anchored on a bare sequence
+// item) — collectKeyOwners only records owners for mapping values.
 type redactionTarget struct {
 	node           *yaml.Node
+	keyNode        *yaml.Node
 	isEnvShorthand bool
+}
+
+// collectKeyOwners walks n (a decoded document, or any node reached while
+// recursing) recording, for every mapping pair anywhere in the tree, keyOf[v]
+// = k — i.e. which key node owns which scalar value node. This is deliberately
+// unconditional on the key's name (unlike collectRedactionTargets' switch):
+// an anchor's definition site can sit under a key of any name at all (see
+// collectRedactionTargets' "env" case doc comment for why), so the owner map
+// must cover every mapping value in the document, not just the value:/
+// default:/webhook_secret:/env: keys collectRedactionTargets itself cares
+// about.
+//
+// Run as its own complete pass before any alias resolution is attempted (see
+// redactSecrets), so the map is fully populated regardless of whether an
+// alias site or its anchor's definition happens to occur earlier in the
+// document — go-yaml already resolves AliasNode.Alias to the correct node
+// independent of traversal order; this map must be equally order-independent.
+func collectKeyOwners(n *yaml.Node, keyOf map[*yaml.Node]*yaml.Node) {
+	if n == nil {
+		return
+	}
+	if n.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			k, v := n.Content[i], n.Content[i+1]
+			if v.Kind == yaml.ScalarNode {
+				keyOf[v] = k
+			}
+			collectKeyOwners(v, keyOf)
+		}
+		return
+	}
+	for _, c := range n.Content {
+		collectKeyOwners(c, keyOf)
+	}
 }
 
 // collectRedactionTargets walks n (a decoded document, or any node reached
@@ -476,11 +530,17 @@ type redactionTarget struct {
 // anyone who saw an approve link the ability to forge authenticated triggers
 // for that task.
 //
+// keyOf is the complete owner map collectKeyOwners already built across the
+// whole document set — used here to attach each target's owning key node
+// (redactionTarget.keyNode) so blankNodeTarget can use the KEY's line, not a
+// guess reconstructed from the target's own line, as its swallow-loop
+// indentation reference.
+//
 // seen dedupes by node pointer: multiple aliases can resolve to the same
 // anchor definition, and it must be blanked only once (blanking twice at
 // the same location would be a harmless no-op, but tracking it here keeps
 // applyNodeRedactions' target list free of exact duplicates).
-func collectRedactionTargets(n *yaml.Node, out *[]redactionTarget, seen map[*yaml.Node]bool) {
+func collectRedactionTargets(n *yaml.Node, out *[]redactionTarget, seen map[*yaml.Node]bool, keyOf map[*yaml.Node]*yaml.Node) {
 	if n == nil {
 		return
 	}
@@ -499,7 +559,15 @@ func collectRedactionTargets(n *yaml.Node, out *[]redactionTarget, seen map[*yam
 					}
 					if resolved != nil && resolved.Kind == yaml.ScalarNode && !seen[resolved] {
 						seen[resolved] = true
-						*out = append(*out, redactionTarget{node: resolved})
+						// keyOf[resolved] is correct whether or not v was an
+						// alias: in the direct (non-alias) case resolved==v,
+						// and collectKeyOwners already recorded k as v's
+						// owner via this exact same mapping pair; in the
+						// alias case it's the anchor definition's own owning
+						// key (possibly a completely different key name,
+						// possibly nil if the anchor isn't a mapping value
+						// at all) — never the alias site's "value:" key k.
+						*out = append(*out, redactionTarget{node: resolved, keyNode: keyOf[resolved]})
 					}
 				}
 			case "env":
@@ -534,12 +602,12 @@ func collectRedactionTargets(n *yaml.Node, out *[]redactionTarget, seen map[*yam
 			}
 			// Recurse into every value regardless of whether this pair
 			// itself matched above — a value:/default: key can nest.
-			collectRedactionTargets(v, out, seen)
+			collectRedactionTargets(v, out, seen, keyOf)
 		}
 		return
 	}
 	for _, c := range n.Content {
-		collectRedactionTargets(c, out, seen)
+		collectRedactionTargets(c, out, seen, keyOf)
 	}
 }
 
@@ -610,58 +678,30 @@ func applyNodeRedactions(content string, targets []redactionTarget) string {
 // line that is blank or indented more than a reference indentation is
 // swallowed into the same single placeholder, matching YAML's own rule that
 // a scalar's continuation must be indented deeper than its containing node.
-// That reference indentation is usually the node's own line's leading
-// whitespace/list-dash-and-space, via valueKeyIndentPattern (the same
-// measure redactValueLines' block-scalar case already uses) — correct for a
-// `key: |` header (content nests one level past the key) and for a `- key:
-// |` header (content nests one level past the key, which itself follows the
-// dash). But a bare `- |` env: shorthand item has no key: the dash IS the
-// header, and idiomatic block-scalar body indentation lands exactly one
-// dash-width past the dash's own column — the same column
-// valueKeyIndentPattern reports (it consumes the dash and its trailing
-// space to reach the mapping-value column, which for a keyless item is also
-// where body content starts). Comparing content indentation with `>` against
-// that column then fails at the idiomatic indent (col == col, not
-// col > col), letting the secret line survive unswallowed while the header
-// still shows <redacted> — a false-scrubbed leak, worse than no redaction
-// attempt. For that one case the reference must instead be the dash's own
-// column (leading whitespace only, not consuming the dash) — one level
-// shallower — which every valid body indentation is strictly deeper than,
-// at any nesting depth.
+// That reference indentation — keyIndent below — comes from one of three
+// places, in order of preference:
 //
-// A second, unrelated case also needs the reference line to NOT be the
-// node's own line: a plain (non-block-style) scalar whose key's colon has
-// nothing after it on its own line, so the scalar's actual first line of
-// content begins entirely on a LATER physical line — e.g.
-//
-//	value:
-//	  part-one
-//	  sk-live-secret
-//
-// yaml.v3 reports the scalar's own (Line, Column) as pointing at "part-one",
-// not at "value:"'s line. Using that line's own leading indentation (8, the
-// CONTENT's indentation) as the swallow reference compares the next
-// continuation line's indentation (also 8) against itself — equal, not
-// greater — so the swallow loop stops immediately and leaves every line
-// after the first one completely unredacted, the same false-scrubbed-leak
-// shape as the shorthand case above, just for an ordinary mapping value
-// instead of a keyless sequence item. This is detected generically, without
-// needing a reference to the key node: when nothing but whitespace precedes
-// the scalar's own start column on its own line, the key (if this scalar is
-// a mapping value at all) can only be on an earlier line, per YAML's
-// indentation rules — so this walks upward over any blank lines to the
-// nearest non-blank line and, if THAT line looks like a key-only opener
-// (keyOnlyLinePattern), uses its indentation instead. This also naturally
-// covers a multiline scalar reached via alias resolution, whose anchor
-// definition uses this same "key:\n  content" shape under a key of any
-// name (not just value:/default:/webhook_secret:) — see
-// TestRedactSecretsResolvesMultilineAlias's block-style sibling case for
-// the analogous already-covered scenario. The block-scalar and env-shorthand
-// branches above are unaffected: a block scalar's header is always on the
-// key's own line already (rawLine is already correct), and an env shorthand
-// item is either single-line (rawLine already correct) or block-style
-// (handled by the isEnvShorthand&&isBlock case above, which has no "key" to
-// look for at all).
+//  1. t.keyNode's own line, when t.keyNode is non-nil (the mapping-value
+//     case: `value:`/`default:`/`webhook_secret:`, or an alias resolved to
+//     an anchor defined under some other key). This is exact: keyNode is the
+//     real parsed key node collectRedactionTargets/collectKeyOwners found by
+//     walking the actual YAML structure, not a guess reconstructed from
+//     nearby text. It is correct identically whether the value starts on the
+//     key's own line (`value: X`) or entirely on a later physical line
+//     (`value:\n  X`) — in the former case keyNode's line and the target
+//     node's own line are simply the same line, so there is nothing to
+//     special-case. Nothing about comments, blank lines, anchors, or
+//     anything else that might appear between the key and its value in the
+//     source can throw this off, because it never re-derives the key's
+//     position from text at all.
+//  2. The bare dash's own column (isEnvShorthand && isBlock): a `- |` env:
+//     shorthand item has no key node at all — the dash IS the header. See
+//     the code below for why this must be the dash's column specifically,
+//     not the column valueKeyIndentPattern would report.
+//  3. The target node's own line (every other case: t.keyNode is nil,
+//     meaning either an isEnvShorthand target, or a mapping-value target
+//     whose alias resolved to an anchor that collectKeyOwners never recorded
+//     an owner for because it isn't itself a mapping value).
 func blankNodeTarget(lines []string, t redactionTarget) []string {
 	lineIdx := t.node.Line - 1
 	if lineIdx < 0 || lineIdx >= len(lines) {
@@ -680,18 +720,14 @@ func blankNodeTarget(lines []string, t redactionTarget) []string {
 
 	isBlock := t.node.Style&(yaml.LiteralStyle|yaml.FoldedStyle) != 0
 
-	// Which line's indentation is the correct swallow reference: normally
-	// the node's own line, but see the doc comment's second case — a plain
-	// scalar whose key-only line precedes it (nothing but whitespace before
-	// the node's own start column) must use that key line instead.
+	// The swallow-loop's reference line: the real key node's own line when
+	// one is known (see doc comment case 1 above), else the target node's
+	// own line.
 	keyIndentLine := rawLine
-	if !t.isEnvShorthand && !isBlock && strings.TrimRight(string(runes[:col]), " \t") == "" {
-		k := lineIdx - 1
-		for k >= 0 && strings.TrimSpace(lines[k]) == "" {
-			k--
-		}
-		if k >= 0 && keyOnlyLinePattern.MatchString(strings.TrimRight(lines[k], " \t\r")) {
-			keyIndentLine = lines[k]
+	if t.keyNode != nil {
+		kIdx := t.keyNode.Line - 1
+		if kIdx >= 0 && kIdx < len(lines) {
+			keyIndentLine = lines[kIdx]
 		}
 	}
 
