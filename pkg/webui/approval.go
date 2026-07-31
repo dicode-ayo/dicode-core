@@ -80,8 +80,16 @@ func (s *Server) MintApproveLink(ctx context.Context, taskID string) (string, er
 // binds the approval to the exact pending version the caller reviewed (see
 // approval.Diff.PendingHash) — mirroring the tokenized /approve/{token} path,
 // which has always bound this way via ApproveIfHash.
+//
+// Hash is a pointer so the handler can tell "field absent" (a caller with no
+// diff to bind to) apart from "field present but empty" (a caller that meant
+// to bind but sent a zero value — e.g. this._diff.pending_hash was falsy on
+// the dashboard). JSON.stringify drops an undefined field entirely, so a bug
+// upstream of the request body producing an empty/missing pending_hash would
+// otherwise silently degrade to the unconditional-approve path with no
+// signal — exactly the blind approval this endpoint exists to prevent.
 type approveRequest struct {
-	Hash string `json:"hash,omitempty"`
+	Hash *string `json:"hash,omitempty"`
 }
 
 // apiApproveTask handles POST /api/tasks/{id}/approve. Auth mirrors the
@@ -100,7 +108,7 @@ type approveRequest struct {
 //
 // Status codes:
 //   - 200 — approved; triggers armed, hash recorded in dicode.lock.
-//   - 400 — malformed JSON body.
+//   - 400 — malformed JSON body, or an explicitly empty "hash" field.
 //   - 404 — no such task.
 //   - 409 — task is not pending approval, or (with stale:true) the supplied
 //     hash no longer matches what's pending.
@@ -122,9 +130,13 @@ func (s *Server) apiApproveTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var err error
-	if body.Hash != "" {
-		err = s.approvalGate.ApproveIfHash(id, body.Hash)
-	} else {
+	switch {
+	case body.Hash != nil && *body.Hash == "":
+		jsonErr(w, "hash must not be empty when supplied", http.StatusBadRequest)
+		return
+	case body.Hash != nil:
+		err = s.approvalGate.ApproveIfHash(id, *body.Hash)
+	default:
 		err = s.approvalGate.Approve(id)
 	}
 	if err != nil {

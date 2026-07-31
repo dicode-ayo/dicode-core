@@ -180,7 +180,13 @@ class DcTaskDetail extends LitElement {
     // (pkg/approval.Diff.PendingHash). Between fetching that diff and this
     // click, a push can re-pend the task at a newer hash — sending the hash
     // back lets the server reject a stale approval instead of silently
-    // arming content the operator never reviewed.
+    // arming content the operator never reviewed. A falsy pending_hash means
+    // the diff we're looking at can't be bound at all — refuse rather than
+    // let the request degrade into an unbound approve with no signal.
+    if (!this._diff.pending_hash) {
+      alert('This diff has no content hash to bind to and cannot be approved from here. Use `dicode task approve` or the approve-link instead.');
+      return;
+    }
     try {
       await post(`/api/tasks/${encodeURIComponent(this.taskid)}/approve`, { hash: this._diff.pending_hash });
       await this._load();
@@ -188,6 +194,8 @@ class DcTaskDetail extends LitElement {
       if (this._isStaleApprovalError(e)) {
         alert('This task changed since you loaded this diff. Showing the current change — review and approve again.');
         this._diff = null;
+        this._diffError = '';
+        this._ackIncomplete = false;
         this._disposeDiffEditors();
         await this._openDiff();
         return;

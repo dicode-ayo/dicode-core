@@ -309,6 +309,34 @@ func TestAPI_ApproveTask_MalformedBody400(t *testing.T) {
 	}
 }
 
+// TestAPI_ApproveTask_ExplicitEmptyHash400 guards against a request that
+// meant to bind but sent a zero-value hash (e.g. a dashboard bug reading a
+// falsy pending_hash) silently degrading into the unconditional-approve
+// path with no signal. An absent "hash" field still means "unbound" (see
+// TestAPI_ApproveTask_ApprovesPending); an explicitly empty one is rejected.
+func TestAPI_ApproveTask_ExplicitEmptyHash400(t *testing.T) {
+	srv, reg, _ := newApprovalTestServer(t, false)
+	registerMinimalTask(t, reg, "repo/pending-task")
+	gate := newFakeGate()
+	gate.pending["repo/pending-task"] = "hash-1"
+	srv.SetApprovalGate(gate)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks/repo%2Fpending-task/approve",
+		strings.NewReader(`{"hash":""}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", w.Code, w.Body.String())
+	}
+	if !gate.IsPending("repo/pending-task") {
+		t.Error("task must stay pending when the hash field is explicitly empty")
+	}
+	if len(gate.approved) != 0 {
+		t.Errorf("approve must not have run: approved = %v", gate.approved)
+	}
+}
+
 func TestAPI_ApproveTask_UnknownTask404(t *testing.T) {
 	srv, _, _ := newApprovalTestServer(t, false)
 	srv.SetApprovalGate(newFakeGate())
