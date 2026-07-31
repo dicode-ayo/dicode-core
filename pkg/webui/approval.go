@@ -2,9 +2,11 @@ package webui
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
+	"io"
 	"net/http"
 	"strings"
 
@@ -74,13 +76,34 @@ func (s *Server) MintApproveLink(ctx context.Context, taskID string) (string, er
 	return s.WebUIBaseURL() + "/approve/" + token, nil
 }
 
+// approveRequest is apiApproveTask's optional JSON body. Hash, when present,
+// binds the approval to the exact pending version the caller reviewed (see
+// approval.Diff.PendingHash) — mirroring the tokenized /approve/{token} path,
+// which has always bound this way via ApproveIfHash.
+type approveRequest struct {
+	Hash string `json:"hash,omitempty"`
+}
+
 // apiApproveTask handles POST /api/tasks/{id}/approve. Auth mirrors the
 // replay endpoint: session cookie or Bearer API key (requireSessionOrAPIKey).
 //
+// The dashboard always has a diff on screen before offering Approve, so it
+// sends back the hash that diff was built from. Between the diff being
+// fetched and this request landing, a push can re-pend the task at a newer
+// hash — approving without checking would silently arm content the operator
+// never reviewed. A hash-carrying request is therefore routed through
+// ApproveIfHash and rejected with 409 (stale:true) on mismatch, so the UI
+// can refetch and tell the operator the change moved under them. Callers
+// with no diff to bind to — `dicode task approve` goes over IPC, not this
+// endpoint, but any other API-key caller in the same position — may omit the
+// hash and get the prior unconditional-approve behavior.
+//
 // Status codes:
 //   - 200 — approved; triggers armed, hash recorded in dicode.lock.
+//   - 400 — malformed JSON body.
 //   - 404 — no such task.
-//   - 409 — task is not pending approval (or the approval failed).
+//   - 409 — task is not pending approval, or (with stale:true) the supplied
+//     hash no longer matches what's pending.
 //   - 503 — approval gate not wired.
 func (s *Server) apiApproveTask(w http.ResponseWriter, r *http.Request) {
 	id := taskIDParam(r)
@@ -92,7 +115,25 @@ func (s *Server) apiApproveTask(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "task not found: "+id, http.StatusNotFound)
 		return
 	}
-	if err := s.approvalGate.Approve(id); err != nil {
+	var body approveRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+		jsonErr(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	var err error
+	if body.Hash != "" {
+		err = s.approvalGate.ApproveIfHash(id, body.Hash)
+	} else {
+		err = s.approvalGate.Approve(id)
+	}
+	if err != nil {
+		if errors.Is(err, approval.ErrHashMismatch) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error(), "stale": true})
+			return
+		}
 		jsonErr(w, err.Error(), http.StatusConflict)
 		return
 	}

@@ -478,6 +478,37 @@ func TestPendingHash(t *testing.T) {
 	}
 }
 
+// TestDiffCarriesPendingHash locks in #645's fix: the dashboard binds its
+// approve request to the hash the diff it rendered actually describes, so
+// Diff must expose that same hash PendingHash reports — not a copy that
+// could silently drift from what ApproveIfHash checks against.
+func TestDiffCarriesPendingHash(t *testing.T) {
+	g, _, _ := newTestGate(t, enabledPolicy())
+	spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "v1")
+	if armed, _ := g.Admit(spec); armed {
+		t.Fatal("expected pending")
+	}
+	wantHash, ok := g.PendingHash("repo/deploy")
+	if !ok || wantHash == "" {
+		t.Fatalf("PendingHash = (%q, %v), want observed hash", wantHash, ok)
+	}
+
+	d, err := g.Diff("repo/deploy")
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+	if d.PendingHash != wantHash {
+		t.Fatalf("Diff.PendingHash = %q, want %q (PendingHash())", d.PendingHash, wantHash)
+	}
+
+	// The hash returned in the diff a caller fetched earlier must go on to
+	// approve correctly through ApproveIfHash — this is the exact value the
+	// webui sends back on Approve.
+	if err := g.ApproveIfHash("repo/deploy", d.PendingHash); err != nil {
+		t.Fatalf("ApproveIfHash(Diff.PendingHash): %v", err)
+	}
+}
+
 func TestApproveIfHashMatch(t *testing.T) {
 	g, arm, lock := newTestGate(t, enabledPolicy())
 	spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "v1")
@@ -518,8 +549,14 @@ func TestApproveIfHashMismatchRejected(t *testing.T) {
 	}
 
 	// The stale hash must not approve the new version.
-	if err := g.ApproveIfHash("repo/deploy", staleHash); err == nil {
+	err := g.ApproveIfHash("repo/deploy", staleHash)
+	if err == nil {
 		t.Fatal("stale-hash approval must be rejected")
+	}
+	// Callers (the webui handler) distinguish "stale review" from any other
+	// approval failure via errors.Is — must stay wrapped, not just similar text.
+	if !errors.Is(err, ErrHashMismatch) {
+		t.Fatalf("expected err to wrap ErrHashMismatch, got %v", err)
 	}
 	if !g.IsPending("repo/deploy") {
 		t.Fatal("task must stay pending after rejected approval")

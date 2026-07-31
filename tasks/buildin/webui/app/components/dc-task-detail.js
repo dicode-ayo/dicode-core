@@ -176,10 +176,31 @@ class DcTaskDetail extends LitElement {
       await this._openDiff();
       return;
     }
+    // Bind the approval to the exact version the diff on screen describes
+    // (pkg/approval.Diff.PendingHash). Between fetching that diff and this
+    // click, a push can re-pend the task at a newer hash — sending the hash
+    // back lets the server reject a stale approval instead of silently
+    // arming content the operator never reviewed.
     try {
-      await post(`/api/tasks/${encodeURIComponent(this.taskid)}/approve`);
+      await post(`/api/tasks/${encodeURIComponent(this.taskid)}/approve`, { hash: this._diff.pending_hash });
       await this._load();
-    } catch(e) { alert('Approve failed: ' + e.message); }
+    } catch(e) {
+      if (this._isStaleApprovalError(e)) {
+        alert('This task changed since you loaded this diff. Showing the current change — review and approve again.');
+        this._diff = null;
+        this._disposeDiffEditors();
+        await this._openDiff();
+        return;
+      }
+      alert('Approve failed: ' + e.message);
+    }
+  }
+
+  // _isStaleApprovalError reports whether e wraps the JSON body apiApproveTask
+  // sends on a hash-mismatch 409 ({"error": "...", "stale": true}) — api.js's
+  // wrapper throws the raw response text as Error.message, so parse it back.
+  _isStaleApprovalError(e) {
+    try { return JSON.parse(e.message).stale === true; } catch { return false; }
   }
 
   async _openDiff() {

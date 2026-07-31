@@ -14,6 +14,14 @@ import (
 // an operator to review before approving. See Gate.Diff.
 type Diff struct {
 	TaskID string `json:"task_id"`
+	// PendingHash is the content hash the gate observed when it held this
+	// task pending — the exact version these Files describe. A caller that
+	// intends to approve what it just reviewed must send this hash back
+	// (Gate.ApproveIfHash) rather than approving unconditionally: the task
+	// can re-pend at a newer hash between the diff being fetched and the
+	// operator clicking Approve, and an unbound approval would silently
+	// arm that newer, unreviewed version instead.
+	PendingHash string `json:"pending_hash"`
 	// HasBaseline is false when no prior approved snapshot is cached for
 	// this task — e.g. a fresh daemon session that has not yet observed
 	// this task at an approved hash (approvedFiles is in-memory only, see
@@ -242,7 +250,7 @@ func (g *Gate) Diff(id string) (Diff, error) {
 	}
 
 	pendingSnap := ent.files
-	out := Diff{TaskID: id, HasBaseline: hasBaseline}
+	out := Diff{TaskID: id, PendingHash: ent.hash, HasBaseline: hasBaseline}
 
 	// No pending snapshot: either the task is dir-less (an inline taskset
 	// entry, taskDirOf == "") or the snapshot failed on this task's first

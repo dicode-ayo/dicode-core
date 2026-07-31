@@ -93,7 +93,11 @@ func (g *fakeApprovalGate) ApproveIfHash(id, hash string) error {
 		return fmt.Errorf("task %q is not pending approval", id)
 	}
 	if hash == "" || cur != hash {
-		return fmt.Errorf("task %q changed since the approval was issued", id)
+		// Wrap the same sentinel the real gate wraps (pkg/approval/gate.go's
+		// approve()), since apiApproveTask distinguishes this case via
+		// errors.Is — a fake that returned a merely similar-looking error
+		// would let that branch silently go untested.
+		return fmt.Errorf("task %q changed since the approval was issued: %w", id, approval.ErrHashMismatch)
 	}
 	delete(g.pending, id)
 	g.approved = append(g.approved, id)
@@ -217,6 +221,91 @@ func TestAPI_ApproveTask_NotPending409(t *testing.T) {
 	srv.Handler().ServeHTTP(w, req)
 	if w.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestAPI_ApproveTask_HashBindsToPendingVersion locks in #645: a request
+// carrying the hash the operator's diff was built from routes through
+// ApproveIfHash and succeeds when that hash still matches what's pending.
+func TestAPI_ApproveTask_HashBindsToPendingVersion(t *testing.T) {
+	srv, reg, _ := newApprovalTestServer(t, false)
+	registerMinimalTask(t, reg, "repo/pending-task")
+	gate := newFakeGate()
+	gate.pending["repo/pending-task"] = "hash-reviewed"
+	srv.SetApprovalGate(gate)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks/repo%2Fpending-task/approve",
+		strings.NewReader(`{"hash":"hash-reviewed"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", w.Code, w.Body.String())
+	}
+	if gate.IsPending("repo/pending-task") {
+		t.Error("task still pending after hash-bound approve")
+	}
+}
+
+// TestAPI_ApproveTask_StaleHash409 is the regression this issue exists for:
+// before binding approval to the reviewed hash, apiApproveTask always called
+// the unconditional Approve and would have armed whatever is CURRENTLY
+// pending regardless of the hash sent — silently approving a version the
+// operator never saw. Posting a hash that no longer matches what's pending
+// must now be rejected, with the task left pending, and the response must
+// say "stale" so the dashboard knows to refetch rather than just failing.
+func TestAPI_ApproveTask_StaleHash409(t *testing.T) {
+	srv, reg, _ := newApprovalTestServer(t, false)
+	registerMinimalTask(t, reg, "repo/pending-task")
+	gate := newFakeGate()
+	// The task re-pended at a newer hash after the operator's diff loaded.
+	gate.pending["repo/pending-task"] = "hash-newer"
+	srv.SetApprovalGate(gate)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks/repo%2Fpending-task/approve",
+		strings.NewReader(`{"hash":"hash-stale-review"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409: %s", w.Code, w.Body.String())
+	}
+	var body map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if stale, _ := body["stale"].(bool); !stale {
+		t.Errorf(`body["stale"] = %v, want true: %s`, body["stale"], w.Body.String())
+	}
+	if !gate.IsPending("repo/pending-task") {
+		t.Error("task must stay pending after a rejected stale-hash approval")
+	}
+	if len(gate.approved) != 0 {
+		t.Errorf("approve must not have run: approved = %v", gate.approved)
+	}
+}
+
+// TestAPI_ApproveTask_MalformedBody400 ensures a caller that does send a
+// body gets a clear 400 on genuinely invalid JSON, distinct from the
+// no-body-at-all case (which must still hit the unbound Approve path — see
+// TestAPI_ApproveTask_ApprovesPending).
+func TestAPI_ApproveTask_MalformedBody400(t *testing.T) {
+	srv, reg, _ := newApprovalTestServer(t, false)
+	registerMinimalTask(t, reg, "repo/pending-task")
+	gate := newFakeGate()
+	gate.pending["repo/pending-task"] = "hash-1"
+	srv.SetApprovalGate(gate)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks/repo%2Fpending-task/approve",
+		strings.NewReader(`{not json`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", w.Code, w.Body.String())
+	}
+	if !gate.IsPending("repo/pending-task") {
+		t.Error("task must stay pending when the request body is malformed")
 	}
 }
 
