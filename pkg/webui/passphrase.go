@@ -165,8 +165,11 @@ func (s *Server) verifyPassphrase(ctx context.Context, candidate string) bool {
 	}
 
 	// YAML override takes precedence. Compare in constant time.
-	if s.cfg.Server.Secret != "" {
-		return subtle.ConstantTimeCompare([]byte(candidate), []byte(s.cfg.Server.Secret)) == 1
+	s.cfgMu.RLock()
+	secret := s.cfg.Server.Secret
+	s.cfgMu.RUnlock()
+	if secret != "" {
+		return subtle.ConstantTimeCompare([]byte(candidate), []byte(secret)) == 1
 	}
 
 	stored, err := s.cachedDBValue(ctx)
@@ -397,13 +400,19 @@ func (s *Server) apiChangePassphrase(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "passphrase storage not available", http.StatusServiceUnavailable)
 		return
 	}
+	s.cfgMu.RLock()
+	authEnabled := s.cfg.Server.Auth
+	yamlSecret := s.cfg.Server.Secret
+	bcryptCost := s.cfg.Server.BcryptCost
+	s.cfgMu.RUnlock()
+
 	// Changing the passphrase is a privileged operation — require a valid session.
-	if s.cfg.Server.Auth && !s.authSessionValid(r) {
+	if authEnabled && !s.authSessionValid(r) {
 		jsonErr(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 	// YAML override is in effect — changing via API would be confusing.
-	if s.cfg.Server.Secret != "" {
+	if yamlSecret != "" {
 		jsonErr(w, "passphrase is set via server.secret in dicode.yaml — remove that field to manage it here", http.StatusConflict)
 		return
 	}
@@ -447,7 +456,7 @@ func (s *Server) apiChangePassphrase(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	hash, err := s.passphraseStore.setHashed(r.Context(), body.Passphrase, s.cfg.Server.BcryptCost)
+	hash, err := s.passphraseStore.setHashed(r.Context(), body.Passphrase, bcryptCost)
 	if err != nil {
 		s.log.Error("failed to store passphrase", zap.Error(err))
 		jsonErr(w, "failed to store passphrase", http.StatusInternalServerError)
