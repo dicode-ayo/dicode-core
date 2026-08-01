@@ -299,6 +299,23 @@ Response: 200 {"status":"ok"}  +  Set-Cookie: dicode_secrets_sess + dicode_devic
 
 There is no secondary "secrets unlock" step — one login grants access to all protected resources including the secrets API.
 
+### Login page — passphrase-required signal
+
+`GET /api/login/context` (unauthenticated, fetched by `pkg/webui/login/login.js`) returns:
+
+```json
+{"title": "Sign in to dicode", "passphrase_required": true}
+```
+
+`passphrase_required` is `false` only when `passphraseSource()` reports `passphraseSourceNone` — i.e. `apiSecretsUnlock` will accept **any** password, including empty. Two cases reach that state:
+
+- `server.auth: false` — the common default. `ensurePassphrase` never generates one when auth is disabled, so `/login` (always publicly reachable, independent of `server.auth`) would otherwise still present what looks like a real credential gate.
+- The narrow first-boot bootstrap window before `ensurePassphrase` has generated and persisted the initial passphrase.
+
+`passphraseSourceUnknown` (transient DB read failure) reports `passphrase_required: true` — login is fail-closed (`503`) in that state, so the page must keep looking like a real gate.
+
+When `passphrase_required` is `false`, the login page removes the password field's `required` attribute and shows an inline notice ("No password is configured for this dicode instance") instead of silently accepting whatever the operator happens to type, which previously implied a real check was happening.
+
 ### Silent refresh flow
 
 ```text

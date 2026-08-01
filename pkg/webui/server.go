@@ -1306,14 +1306,29 @@ func serveLoginFile(name, contentType string) http.HandlerFunc {
 	}
 }
 
-// apiLoginContext returns JSON with the contextual page title. The static login
-// page fetches this via a short JS snippet to avoid server-side HTML rendering.
+// apiLoginContext returns JSON with the contextual page title and whether a
+// real passphrase gates this login. The static login page fetches this via a
+// short JS snippet to avoid server-side HTML rendering.
+//
+// passphrase_required is false only when passphraseSource() reports "none" —
+// either server.auth is false (no passphrase is ever generated in that mode,
+// see ensurePassphrase) or the daemon is in the narrow first-boot bootstrap
+// window before one has been auto-generated. In both cases apiSecretsUnlock
+// accepts any password, so the static HTML's unconditional
+// `<input required>` was misleading: it looked like a real credential gate
+// with no way to tell the operator otherwise. passphraseSourceUnknown (a
+// transient DB read failure) reports required=true — login is fail-closed
+// (503) in that state, so the page must keep looking like a real gate rather
+// than implying it's open.
 func (s *Server) apiLoginContext(w http.ResponseWriter, r *http.Request) {
 	next := r.URL.Query().Get("next")
 	if next != "" && !isSafeNextPath(next) {
 		next = ""
 	}
-	jsonOK(w, map[string]string{"title": s.loginTitle(next)})
+	jsonOK(w, map[string]any{
+		"title":               s.loginTitle(next),
+		"passphrase_required": s.passphraseSource(r.Context()) != passphraseSourceNone,
+	})
 }
 
 // requestScheme returns the externally visible scheme for r. TLS state takes
