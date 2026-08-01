@@ -309,7 +309,10 @@ const (
 // returns passphraseSourceNone on a transient error, which would let
 // apiSecretsUnlock skip the verify check and accept any password.
 func (s *Server) passphraseSource(ctx context.Context) resolvePassphraseSource {
-	if s.cfg.Server.Secret != "" {
+	s.cfgMu.RLock()
+	secret := s.cfg.Server.Secret
+	s.cfgMu.RUnlock()
+	if secret != "" {
 		return passphraseSourceYAML
 	}
 	val, err := s.cachedDBValue(ctx)

@@ -1311,10 +1311,11 @@ func serveLoginFile(name, contentType string) http.HandlerFunc {
 // short JS snippet to avoid server-side HTML rendering.
 //
 // passphrase_required is false only when passphraseSource() reports "none" —
-// either server.auth is false (no passphrase is ever generated in that mode,
-// see ensurePassphrase) or the daemon is in the narrow first-boot bootstrap
-// window before one has been auto-generated. In both cases apiSecretsUnlock
-// accepts any password, so the static HTML's unconditional
+// in practice that means server.auth is false, since ensurePassphrase (called
+// synchronously from Start(), before the HTTP listener ever accepts a
+// connection) generates and persists a passphrase before any request can
+// possibly reach this handler whenever auth is enabled. In that state
+// apiSecretsUnlock accepts any password, so the static HTML's unconditional
 // `<input required>` was misleading: it looked like a real credential gate
 // with no way to tell the operator otherwise. passphraseSourceUnknown (a
 // transient DB read failure) reports required=true — login is fail-closed

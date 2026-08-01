@@ -307,10 +307,7 @@ There is no secondary "secrets unlock" step — one login grants access to all p
 {"title": "Sign in to dicode", "passphrase_required": true}
 ```
 
-`passphrase_required` is `false` only when `passphraseSource()` reports `passphraseSourceNone` — i.e. `apiSecretsUnlock` will accept **any** password, including empty. Two cases reach that state:
-
-- `server.auth: false` — the common default. `ensurePassphrase` never generates one when auth is disabled, so `/login` (always publicly reachable, independent of `server.auth`) would otherwise still present what looks like a real credential gate.
-- The narrow first-boot bootstrap window before `ensurePassphrase` has generated and persisted the initial passphrase.
+`passphrase_required` is `false` only when `passphraseSource()` reports `passphraseSourceNone` — i.e. `apiSecretsUnlock` will accept **any** password, including empty. In practice that's `server.auth: false`, the common default: `ensurePassphrase` never generates a passphrase when auth is disabled, so `/login` (always publicly reachable, independent of `server.auth`) would otherwise still present what looks like a real credential gate. When auth *is* enabled, `ensurePassphrase` runs synchronously in `Start()` before the HTTP listener accepts any connection, so a passphrase always exists by the time this endpoint is reachable — there is no first-boot window where `passphraseSourceNone` is observable over HTTP with auth on.
 
 `passphraseSourceUnknown` (transient DB read failure) reports `passphrase_required: true` — login is fail-closed (`503`) in that state, so the page must keep looking like a real gate.
 
