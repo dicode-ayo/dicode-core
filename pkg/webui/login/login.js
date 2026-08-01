@@ -26,9 +26,9 @@
         document.title = d.title;
         document.getElementById('login-title').textContent = d.title;
       }
-      // No passphrase actually gates this login (server.auth: false, or the
-      // narrow first-boot bootstrap window) — the server accepts any value
-      // here, so don't make the field look like a real credential check.
+      // No passphrase actually gates this login (server.auth: false in
+      // practice) — the server accepts any value here, so don't make the
+      // field look like a real credential check.
       if (d && d.passphrase_required === false) {
         var pwd = document.querySelector('input[name=password]');
         pwd.removeAttribute('required');

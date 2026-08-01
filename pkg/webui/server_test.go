@@ -1150,10 +1150,11 @@ func TestLoginContext_PassphraseRequiredTrue(t *testing.T) {
 }
 
 // TestLoginContext_PassphraseRequiredFalse locks in #639: when no passphrase
-// is configured (passphraseSourceNone — e.g. server.auth: false, or the
-// first-boot bootstrap window), apiSecretsUnlock accepts any password, so
-// /api/login/context must say passphrase_required: false rather than let the
-// static login page keep demanding one it doesn't actually check.
+// is configured (passphraseSourceNone — in practice server.auth: false, since
+// ensurePassphrase always generates one before the listener accepts a
+// connection whenever auth is enabled), apiSecretsUnlock accepts any
+// password, so /api/login/context must say passphrase_required: false rather
+// than let the static login page keep demanding one it doesn't actually check.
 func TestLoginContext_PassphraseRequiredFalse(t *testing.T) {
 	srv := newAuthServerNoDB(t, "")
 	h := srv.Handler()

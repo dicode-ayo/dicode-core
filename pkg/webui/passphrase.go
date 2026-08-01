@@ -240,7 +240,10 @@ func (s *Server) migrateLegacyPlaintext(ctx context.Context, plaintext string) {
 			return cached, nil
 		}
 
-		hash, err := s.passphraseStore.setHashed(ctx, plaintext, s.cfg.Server.BcryptCost)
+		s.cfgMu.RLock()
+		bcryptCost := s.cfg.Server.BcryptCost
+		s.cfgMu.RUnlock()
+		hash, err := s.passphraseStore.setHashed(ctx, plaintext, bcryptCost)
 		if err != nil {
 			return "", err
 		}
