@@ -52,6 +52,77 @@ func TestSourceManager_List_LocalSource_NoPullFieldsInJSON(t *testing.T) {
 	}
 }
 
+// TestSourceManager_List_TasksetSource_FailedCount is the #649 regression
+// lock for the Sources page: a taskset source with one entry that fails to
+// parse must report a non-zero failed_count (and the per-entry detail) via
+// GET /api/sources, so the source-health dot can stop claiming "all clear".
+// A sibling entry that resolves fine must not be affected.
+func TestSourceManager_List_TasksetSource_FailedCount(t *testing.T) {
+	dir := t.TempDir()
+
+	writeMiniTask := func(name, extraYAML string) string {
+		td := filepath.Join(dir, name)
+		if err := os.MkdirAll(td, 0755); err != nil {
+			t.Fatal(err)
+		}
+		yaml := "kind: Task\napiVersion: dicode/v1\nname: " + name + "\nruntime: deno\ntrigger:\n  manual: true\n" + extraYAML
+		if err := os.WriteFile(filepath.Join(td, "task.yaml"), []byte(yaml), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(td, "task.js"), []byte("// task"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		return filepath.Join(td, "task.yaml")
+	}
+	goodPath := writeMiniTask("good", "")
+	// hash_include is a []string field; a bool value fails to unmarshal —
+	// the same class of typo #649 quotes from daemon.log.
+	badPath := writeMiniTask("bad", "hash_include: true\n")
+
+	tsContent := "apiVersion: dicode/v1\nkind: TaskSet\nmetadata:\n  name: infra\nspec:\n  entries:\n" +
+		"    good:\n      ref:\n        path: " + goodPath + "\n" +
+		"    bad:\n      ref:\n        path: " + badPath + "\n"
+	tsPath := filepath.Join(dir, "taskset.yaml")
+	if err := os.WriteFile(tsPath, []byte(tsContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	src := taskset.NewSource("src-id", "infra", &taskset.Ref{Path: tsPath}, "", t.TempDir(), false, 30*time.Second, zap.NewNop())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if _, err := src.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	cfg := &config.Config{}
+	cfg.Spec.Entries = map[string]*taskset.Entry{
+		"infra": {Ref: &taskset.Ref{Path: tsPath}},
+	}
+	m := NewSourceManager(cfg, map[string]*taskset.Source{"infra": src}, t.TempDir(), zap.NewNop())
+
+	infos := m.List()
+	if len(infos) != 1 {
+		t.Fatalf("want 1 source, got %d: %+v", len(infos), infos)
+	}
+	info := infos[0]
+	if info.FailedCount != 1 {
+		t.Fatalf("FailedCount = %d, want 1 (only the bad entry): %+v", info.FailedCount, info)
+	}
+	if len(info.Failures) != 1 || info.Failures[0].ID != "infra/bad" {
+		t.Errorf("Failures = %+v, want exactly infra/bad", info.Failures)
+	}
+
+	// SourceManager.LoadFailures aggregates the same data across sources for
+	// the task-list merge (apiListTasks).
+	agg := m.LoadFailures()
+	if _, ok := agg["infra/bad"]; !ok {
+		t.Errorf("LoadFailures() = %v, want infra/bad present", agg)
+	}
+	if _, ok := agg["infra/good"]; ok {
+		t.Errorf("LoadFailures() should not include the good entry: %v", agg)
+	}
+}
+
 // TestApiSetDevMode_DecodesBranchBody verifies that the new branch/base/run_id
 // JSON fields are wired through the handler's decode path without error.
 // With a nil SourceManager (the default newTestServer setup), the handler

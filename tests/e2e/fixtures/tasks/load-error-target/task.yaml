@@ -1,0 +1,11 @@
+apiVersion: dicode/v1
+kind: Task
+name: Load Error Target
+description: >-
+  Fixture task for the #649 e2e regression (task-load-failure.spec.ts).
+  task-load-failure.spec.ts overwrites this file with a deliberately invalid
+  task.yaml, then restores this exact content in its `finally` block.
+runtime: deno
+trigger:
+  manual: true
+timeout: 10s

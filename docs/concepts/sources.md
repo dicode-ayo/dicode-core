@@ -161,8 +161,18 @@ The reconciler is the component that consumes events from all sources and keeps 
 **Fan-in:** the reconciler fans in channels from all sources using a single goroutine. Events are processed sequentially to avoid registry races.
 
 **Error handling:**
-- If a task's `task.yaml` fails validation on `added` or `updated`, the error is logged and the task is not registered (or the old version is kept for `updated`)
+- If a task's `task.yaml` fails to parse or validate on `added` or `updated`, the task is **not** registered (or, for `updated`, the previously registered good version is kept as-is). This is logged to daemon.log — but it is also recorded as a **load failure** and surfaced through the API/UI (see below) rather than only there. A task never silently disappears because its content stopped parsing (#649).
 - Source errors (git clone failure, auth failure) are logged and retried on the next poll cycle. The reconciler does not crash.
+
+### Load failures stay visible (#649)
+
+Earlier versions of dicode dropped a task from the registry the moment its `task.yaml` failed to parse — with `updated`, this looked like the task was deliberately removed (its trigger silently went dead), and daemon.log was the only place recording why. A parse error no longer does this:
+
+- **The task list never loses the row.** `GET /api/tasks` keeps returning an entry for that ID — either the last successfully registered version (now carrying a `load_error` field with the parse/validate message) if one exists, or a minimal synthetic row if the task has never registered at all. The web UI's Tasks page renders a red **load error** badge on that row (hover for the message) instead of the task just not being in the list.
+- **The Sources page reflects it too.** `GET /api/sources` adds `failed_count` (and a `failures: [{id, source, error, at}]` list) to each source with at least one currently-broken entry. The source's status dot is never shown green while `failed_count > 0`, even if the most recent git pull itself succeeded — a clean pull with a broken `task.yaml` inside it is not "all clear".
+- **The failure clears itself.** Once the entry parses and validates again, the next sync clears its `load_error`/removes it from `failures` automatically — no manual "acknowledge" step, and no stale error left behind.
+
+This applies uniformly to TaskSet-source entries (`ref`-based, resolved by `pkg/taskset`) and to a task loaded directly by the reconciler; both feed the same failure-reporting mechanism. See [`docs/concepts/webui-api.md`](./webui-api.md) for the exact `load_error` / `failed_count` / `failures` field shapes.
 
 ---
 

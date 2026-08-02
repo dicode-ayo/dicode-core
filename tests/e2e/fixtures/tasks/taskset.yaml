@@ -40,6 +40,9 @@ spec:
     suspend-wizard:
       ref:
         path: FIXTURES_TASKS_DIR/suspend-wizard/task.yaml
+    load-error-target:
+      ref:
+        path: FIXTURES_TASKS_DIR/load-error-target/task.yaml
     webui:
       ref:
         path: BUILDIN_WEBUI_TASK_YAML

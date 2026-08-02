@@ -153,6 +153,105 @@ func TestReconciler_InvalidTask_Ignored(t *testing.T) {
 	}
 }
 
+// TestReconciler_InvalidTask_RecordsLoadFailure is the pkg/registry-level
+// regression lock for #649's reconciler.handle() path: a source event whose
+// task.yaml fails to load must be recorded via Registry.LoadFailure rather
+// than only logged, so the webui can still surface it even though the task
+// never registers.
+func TestReconciler_InvalidTask_RecordsLoadFailure(t *testing.T) {
+	dir := t.TempDir()
+	td := filepath.Join(dir, "bad-task")
+	_ = os.MkdirAll(td, 0755)
+	// task.yaml with missing required field (name)
+	_ = os.WriteFile(filepath.Join(td, "task.yaml"), []byte("trigger:\n  manual: true\n"), 0644)
+
+	fs := newFakeSource("test")
+	reg, rec := newTestReconciler(t, fs)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go rec.Run(ctx)
+
+	fs.ch <- source.Event{Kind: source.EventAdded, TaskID: "bad-task", TaskDir: td, Source: "test"}
+	time.Sleep(50 * time.Millisecond)
+
+	fails := reg.LoadFailures()
+	f, ok := fails["bad-task"]
+	if !ok {
+		t.Fatalf("want a recorded load failure for bad-task, got %v", fails)
+	}
+	if f.Source != "test" {
+		t.Errorf("Source = %q, want %q", f.Source, "test")
+	}
+	if f.Error == "" {
+		t.Error("Error should be non-empty")
+	}
+}
+
+// TestReconciler_LoadFailureClearedOnRecovery covers both halves of #649's
+// "don't leave stale failure state behind" requirement: a task that fails to
+// load and then loads cleanly must have its failure record cleared on
+// successful registration, and a task that fails to load and is then
+// genuinely removed must not leave a ghost failure record behind either.
+func TestReconciler_LoadFailureClearedOnRecovery(t *testing.T) {
+	dir := t.TempDir()
+	td := writeTask(t, dir, "flaky-task")
+
+	fs := newFakeSource("test")
+	reg, rec := newTestReconciler(t, fs)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go rec.Run(ctx)
+
+	// Break it first.
+	_ = os.WriteFile(filepath.Join(td, "task.yaml"), []byte("trigger:\n  manual: true\n"), 0644)
+	fs.ch <- source.Event{Kind: source.EventAdded, TaskID: "flaky-task", TaskDir: td, Source: "test"}
+	time.Sleep(50 * time.Millisecond)
+	if _, ok := reg.LoadFailures()["flaky-task"]; !ok {
+		t.Fatal("expected a load failure to be recorded after the broken load")
+	}
+
+	// Fix it and re-emit — Register must clear the failure record.
+	_ = os.WriteFile(filepath.Join(td, "task.yaml"), []byte("name: flaky-task\ntrigger:\n  manual: true\nruntime: deno\n"), 0644)
+	fs.ch <- source.Event{Kind: source.EventUpdated, TaskID: "flaky-task", TaskDir: td, Source: "test"}
+	time.Sleep(50 * time.Millisecond)
+
+	if _, ok := reg.Get("flaky-task"); !ok {
+		t.Fatal("task should now be registered")
+	}
+	if _, ok := reg.LoadFailures()["flaky-task"]; ok {
+		t.Error("load failure should be cleared once the task registers successfully")
+	}
+}
+
+func TestReconciler_LoadFailureClearedOnRemoved(t *testing.T) {
+	dir := t.TempDir()
+	td := filepath.Join(dir, "gone-task")
+	_ = os.MkdirAll(td, 0755)
+	_ = os.WriteFile(filepath.Join(td, "task.yaml"), []byte("trigger:\n  manual: true\n"), 0644)
+
+	fs := newFakeSource("test")
+	reg, rec := newTestReconciler(t, fs)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go rec.Run(ctx)
+
+	fs.ch <- source.Event{Kind: source.EventAdded, TaskID: "gone-task", TaskDir: td, Source: "test"}
+	time.Sleep(50 * time.Millisecond)
+	if _, ok := reg.LoadFailures()["gone-task"]; !ok {
+		t.Fatal("expected a load failure to be recorded")
+	}
+
+	fs.ch <- source.Event{Kind: source.EventRemoved, TaskID: "gone-task", Source: "test"}
+	time.Sleep(50 * time.Millisecond)
+
+	if _, ok := reg.LoadFailures()["gone-task"]; ok {
+		t.Error("load failure should be cleared once the entry is genuinely removed")
+	}
+}
+
 func TestReconciler_OnRegisterCallback(t *testing.T) {
 	dir := t.TempDir()
 	td := writeTask(t, dir, "cb-task")

@@ -141,15 +141,21 @@ class DcTaskList extends LitElement {
   }
 
   // _pullDot renders a small colored dot in a source-group header
-  // reflecting the last pull outcome.
-  //   green = last pull OK
-  //   red   = last pull failed (tooltip shows the error)
+  // reflecting the last pull outcome AND whether any entries under this
+  // source currently fail to load (#649) — a source with failed_count > 0
+  // is never shown green, even if the last git pull itself succeeded: a
+  // clean pull with a broken task.yaml inside it is still not "all clear".
+  //   red   = last pull failed, OR one or more entries failed to load
+  //   green = last pull OK and nothing failed to load
   //   grey  = no pull attempted yet OR never seen by /api/sources
-  // Local sources (type: local) have nothing to pull, so they skip
-  // the dot entirely.
+  // Local sources (type: local) have nothing to pull, so a clean local
+  // source skips the dot entirely — but a local source with load failures
+  // still gets a red dot, since that's independent of pulling.
   _pullDot(ns) {
     const src = this._sources.get(ns);
-    if (src && src.type === 'local') return '';
+    const failed = src?.failed_count || 0;
+
+    if (src && src.type === 'local' && !failed) return '';
 
     let color = '#8c96a3'; // grey default: unknown / pending
     let tip = 'no pull data yet';
@@ -165,6 +171,11 @@ class DcTaskList extends LitElement {
       }
     } else if (!src) {
       tip = 'source not registered with /api/sources';
+    }
+
+    if (failed) {
+      color = '#f85149';
+      tip += ` · ${failed} task${failed === 1 ? '' : 's'} failed to load`;
     }
 
     return html`<span
@@ -186,9 +197,14 @@ class DcTaskList extends LitElement {
     const disabled = t.enabled === false;
     const pending = this._togglePending.has(id);
     const needsApproval = t.pending_approval === true;
+    const loadError = t.load_error || '';
+    // A synthetic row (#649): this ID has never registered a good version,
+    // so there is no live task to toggle or run — only the id/name/error are
+    // meaningful. TaskListItem/PipelineListItem rows never carry this kind.
+    const neverRegistered = t.kind === 'LoadError';
     return html`
       <tr class=${disabled ? 'disabled' : ''} data-task-id=${id}>
-        <td><a href="/tasks/${t.id}" @click=${e => { e.preventDefault(); navigate('/tasks/' + t.id); }}>${shown}</a>${disabled ? html`<span class="badge-paused">paused</span>` : ''}${needsApproval ? html`<span class="badge-pending-approval" title="This task is new or changed and its triggers are not armed until approved">pending approval</span>` : ''}</td>
+        <td><a href="/tasks/${t.id}" @click=${e => { e.preventDefault(); navigate('/tasks/' + t.id); }}>${shown}</a>${disabled ? html`<span class="badge-paused">paused</span>` : ''}${needsApproval ? html`<span class="badge-pending-approval" title="This task is new or changed and its triggers are not armed until approved">pending approval</span>` : ''}${loadError ? html`<span class="badge badge-failure" style="margin-left:0.4rem" title=${loadError}>load error</span>` : ''}</td>
         <td>${t.name}</td>
         <td>${t.trigger?.Webhook
           ? html`<a href="${webhookURL(this._relayBase, t.trigger.Webhook)}" target="_blank" class="meta">${t.trigger_label}</a>`
@@ -200,6 +216,7 @@ class DcTaskList extends LitElement {
           ? html`<span class="badge badge-${t.last_run_status}">${t.last_run_status}</span>`
           : '—'}</td>
         <td style="white-space:nowrap">
+          ${neverRegistered ? html`<span class="meta">—</span>` : html`
           <button class=${`toggle-btn ${disabled ? 'off' : 'on'}`}
                   title=${disabled ? 'Enable task' : 'Disable task'}
                   ?disabled=${pending}
@@ -215,24 +232,33 @@ class DcTaskList extends LitElement {
             ? html`<button class="btn btn-sm btn-approve" title="Review what changed, then approve" @click=${() => this._review(t.id)}>&#9998; Review</button>`
             : ''}
           <button class="btn btn-sm" @click=${() => this._run(t.id)}>&#9654; Run</button>
+          `}
         </td>
       </tr>`;
   }
 
   // _pullSummary renders the inline "last pull …" text next to the
-  // source-group count. Nothing for local sources.
+  // source-group count, plus a "N failed to load" note when this source has
+  // entries currently failing to parse/validate (#649) — shown regardless of
+  // source type, since a local source can have a broken task.yaml too.
   _pullSummary(ns) {
     const src = this._sources.get(ns);
-    if (!src || src.type === 'local') return '';
+    const failed = src?.failed_count || 0;
+    const failedNote = failed
+      ? html`<span class="badge badge-failure" style="margin-left:0.4rem"
+          title=${(src.failures || []).map(f => `${f.id}: ${f.error}`).join('\n')}>${failed} failed to load</span>`
+      : '';
+
+    if (!src || src.type === 'local') return failedNote;
     if (!src.last_pull_at) {
-      return html`<span class="meta">· last pull: —</span>`;
+      return html`<span class="meta">· last pull: —</span>${failedNote}`;
     }
     const rel = this._relTime(src.last_pull_at);
     if (src.last_pull_ok) {
-      return html`<span class="meta">· last pull: ${rel}</span>`;
+      return html`<span class="meta">· last pull: ${rel}</span>${failedNote}`;
     }
     return html`<span class="meta" style="color:#f85149"
-      title=${src.last_pull_error || 'error'}>· last pull: ${rel} · failed</span>`;
+      title=${src.last_pull_error || 'error'}>· last pull: ${rel} · failed</span>${failedNote}`;
   }
 
   _relTime(iso) {

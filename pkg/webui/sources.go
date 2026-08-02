@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"sort"
 	"sync"
 	"time"
 
 	"github.com/dicode/dicode/pkg/config"
 	gitSource "github.com/dicode/dicode/pkg/source/git"
+	"github.com/dicode/dicode/pkg/task"
 	"github.com/dicode/dicode/pkg/taskset"
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
@@ -52,6 +54,17 @@ type SourceInfo struct {
 	LastPullAt    *time.Time `json:"last_pull_at,omitempty"`
 	LastPullOK    bool       `json:"last_pull_ok,omitempty"`
 	LastPullError string     `json:"last_pull_error,omitempty"`
+
+	// FailedCount is the number of entries under this source that currently
+	// fail to resolve/load/validate (#649) — a task.yaml syntax error, for
+	// example. Failures is the same set with per-entry detail; both are
+	// omitted (rather than sent empty) when there are none, so the frontend's
+	// `if (src.failed_count)` guards read cleanly. A source can have
+	// FailedCount > 0 and LastPullOK true at the same time — a bad pull and a
+	// bad task.yaml are independent failure modes, and both must suppress the
+	// "all clear" (green) status dot.
+	FailedCount int                `json:"failed_count,omitempty"`
+	Failures    []task.LoadFailure `json:"failures,omitempty"`
 }
 
 // SourceManager tracks taskset sources by name and provides dev mode control.
@@ -162,12 +175,36 @@ func (m *SourceManager) List() []SourceInfo {
 				info.LastPullOK = ps.OK
 				info.LastPullError = ps.Error
 			}
+			if fails := src.LoadFailures(); len(fails) > 0 {
+				info.FailedCount = len(fails)
+				info.Failures = make([]task.LoadFailure, 0, len(fails))
+				for _, f := range fails {
+					info.Failures = append(info.Failures, f)
+				}
+				sort.Slice(info.Failures, func(i, j int) bool { return info.Failures[i].ID < info.Failures[j].ID })
+			}
 		} else if ref.IsGit() {
 			info.Type = "git"
 		} else {
 			info.Type = "local"
 		}
 		out = append(out, info)
+	}
+	return out
+}
+
+// LoadFailures aggregates the per-source load-failure state (#649) across
+// every live taskset source into one ID → LoadFailure map. Used by
+// apiListTasks to merge failing entries into GET /api/tasks alongside the
+// registry's real registered tasks.
+func (m *SourceManager) LoadFailures() map[string]task.LoadFailure {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make(map[string]task.LoadFailure)
+	for _, src := range m.tasksets {
+		for id, f := range src.LoadFailures() {
+			out[id] = f
+		}
 	}
 	return out
 }

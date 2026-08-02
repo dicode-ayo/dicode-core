@@ -123,30 +123,79 @@ type Registry struct {
 	db      db.DB
 	logHook func(runID, level, msg string, ts int64)
 	logMu   sync.Mutex
+
+	// loadFailures records tasks whose source event failed to load/parse
+	// (#649) — keyed by task ID so a repeated failure for the same ID just
+	// replaces the previous record. Guarded by mu, same as tasks.
+	loadFailures map[string]task.LoadFailure
 }
 
 // New creates an empty Registry backed by the given DB.
 func New(database db.DB) *Registry {
 	return &Registry{
-		tasks: make(map[string]task.Kinded),
-		db:    database,
+		tasks:        make(map[string]task.Kinded),
+		db:           database,
+		loadFailures: make(map[string]task.LoadFailure),
 	}
 }
 
 // Register upserts any task kind into the registry. *task.Spec satisfies
 // task.Kinded, so existing callers passing a *task.Spec keep compiling.
+//
+// A successful registration clears any previously recorded load failure for
+// this ID (#649) — a task that failed to parse and now parses cleanly again
+// shouldn't keep showing a stale error badge.
 func (r *Registry) Register(k task.Kinded) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.tasks[k.TaskID()] = k
+	delete(r.loadFailures, k.TaskID())
 	return nil
 }
 
-// Unregister removes a task from the registry.
+// Unregister removes a task from the registry. Also clears any load-failure
+// record for id — a genuinely removed task shouldn't leave a ghost row
+// behind on the task list.
 func (r *Registry) Unregister(id string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.tasks, id)
+	delete(r.loadFailures, id)
+}
+
+// SetLoadFailure records (or replaces) the load-failure state for a task ID
+// that a source event failed to load/parse. Does not touch r.tasks — if an
+// older good version of this task is still registered, it stays registered;
+// the webui merges this failure onto that existing row rather than the task
+// vanishing (#649).
+func (r *Registry) SetLoadFailure(id, source, errMsg string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.loadFailures[id] = task.LoadFailure{
+		ID:     id,
+		Source: source,
+		Error:  errMsg,
+		At:     time.Now(),
+	}
+}
+
+// ClearLoadFailure removes any recorded load failure for id. No-op if absent.
+func (r *Registry) ClearLoadFailure(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.loadFailures, id)
+}
+
+// LoadFailures returns a snapshot of every currently recorded load failure,
+// keyed by task ID.
+func (r *Registry) LoadFailures() map[string]task.LoadFailure {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make(map[string]task.LoadFailure, len(r.loadFailures))
+	for k, v := range r.loadFailures {
+		out[k] = v
+	}
+	return out
 }
 
 // Get returns the *task.Spec for a Task-kind task, or (nil, false) if not
