@@ -204,7 +204,9 @@ class DcTaskList extends LitElement {
     const neverRegistered = t.kind === 'LoadError';
     return html`
       <tr class=${disabled ? 'disabled' : ''} data-task-id=${id}>
-        <td><a href="/tasks/${t.id}" @click=${e => { e.preventDefault(); navigate('/tasks/' + t.id); }}>${shown}</a>${disabled ? html`<span class="badge-paused">paused</span>` : ''}${needsApproval ? html`<span class="badge-pending-approval" title="This task is new or changed and its triggers are not armed until approved">pending approval</span>` : ''}${loadError ? html`<span class="badge badge-failure" style="margin-left:0.4rem" title=${loadError}>load error</span>` : ''}</td>
+        <td>${neverRegistered
+            ? html`<span>${shown}</span>`
+            : html`<a href="/tasks/${t.id}" @click=${e => { e.preventDefault(); navigate('/tasks/' + t.id); }}>${shown}</a>`}${disabled ? html`<span class="badge-paused">paused</span>` : ''}${needsApproval ? html`<span class="badge-pending-approval" title="This task is new or changed and its triggers are not armed until approved">pending approval</span>` : ''}${loadError ? html`<span class="badge badge-failure" style="margin-left:0.4rem" title=${loadError}>load error</span>` : ''}</td>
         <td>${t.name}</td>
         <td>${t.trigger?.Webhook
           ? html`<a href="${webhookURL(this._relayBase, t.trigger.Webhook)}" target="_blank" class="meta">${t.trigger_label}</a>`

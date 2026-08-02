@@ -179,13 +179,6 @@ func (r *Registry) SetLoadFailure(id, source, errMsg string) {
 	}
 }
 
-// ClearLoadFailure removes any recorded load failure for id. No-op if absent.
-func (r *Registry) ClearLoadFailure(id string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	delete(r.loadFailures, id)
-}
-
 // LoadFailures returns a snapshot of every currently recorded load failure,
 // keyed by task ID.
 func (r *Registry) LoadFailures() map[string]task.LoadFailure {
