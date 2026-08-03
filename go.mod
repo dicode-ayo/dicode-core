@@ -8,15 +8,15 @@ require (
 	github.com/cenkalti/backoff/v4 v4.3.0
 	github.com/coder/websocket v1.8.15
 	github.com/docker/docker v28.5.2+incompatible
-	github.com/docker/go-connections v0.8.0
+	github.com/docker/go-connections v0.8.1
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/go-chi/chi/v5 v5.3.1
 	github.com/go-chi/httprate v0.16.0
-	github.com/go-git/go-git/v5 v5.19.1
+	github.com/go-git/go-git/v5 v5.19.2
 	github.com/google/uuid v1.6.0
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
-	github.com/sergi/go-diff v1.3.2-0.20230802210424-5b0b94c5c0d3
+	github.com/sergi/go-diff v1.4.0
 	go.uber.org/zap v1.28.0
 	golang.org/x/crypto v0.54.0
 	golang.org/x/sync v0.22.0
@@ -24,7 +24,7 @@ require (
 	golang.org/x/term v0.45.0
 	golang.org/x/text v0.40.0
 	gopkg.in/yaml.v3 v3.0.1
-	modernc.org/sqlite v1.54.0
+	modernc.org/sqlite v1.55.0
 )
 
 require (
