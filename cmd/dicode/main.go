@@ -1612,6 +1612,9 @@ func usage() {
 
 Commands:
   daemon [-config dicode.yaml]    start the daemon (usually auto-started)
+  init [path]                     scaffold a git-versionable root taskset
+                                  directory (dicode.yaml + tasks/); no daemon
+                                  or existing config required
   run <task-id> [key=value ...]   trigger a task and wait for the result
                                   on a TTY, walks a suspend wizard inline;
                                   --field name=value pre-supplies a wizard answer

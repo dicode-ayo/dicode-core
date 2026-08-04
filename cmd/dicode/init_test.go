@@ -134,6 +134,50 @@ func TestCmdInit_RefusesExistingConfig(t *testing.T) {
 	}
 }
 
+// TestCmdInit_RejectsDirectoryCollision guards against writeFileIfAbsent
+// silently no-op'ing (and cmdInit reporting success) when a scaffold target
+// like tasks/hello/task.yaml already exists as a directory rather than a
+// file — that would leave a non-runnable scaffold with no diagnostic at all.
+func TestCmdInit_RejectsDirectoryCollision(t *testing.T) {
+	dir := t.TempDir()
+	// tasks/hello/task.yaml is a directory instead of a file.
+	collision := filepath.Join(dir, "tasks", "hello", "task.yaml")
+	if err := os.MkdirAll(collision, 0o755); err != nil {
+		t.Fatalf("seed collision dir: %v", err)
+	}
+
+	if err := cmdInit([]string{dir}); err == nil {
+		t.Fatal("expected cmdInit to error on a directory collision, got nil")
+	}
+}
+
+// TestCmdInit_GitignoreExactMatchOnly guards against writeGitignore treating
+// a loose substring hit (e.g. a prior negation like "!.dicode/") as proof
+// the runtime data dir is already ignored. gitignore semantics are
+// last-match-wins, so ".dicode/" must end up as the final line regardless
+// of what a pre-existing file already contains — a substring.Contains check
+// would wrongly skip appending it here and leave the data dir (which holds
+// the SQLite DB and, post-daemon-start, the passphrase hash) un-ignored.
+func TestCmdInit_GitignoreExactMatchOnly(t *testing.T) {
+	dir := t.TempDir()
+	const preexisting = "node_modules/\n!.dicode/\n"
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(preexisting), 0o644); err != nil {
+		t.Fatalf("seed .gitignore: %v", err)
+	}
+
+	if err := cmdInit([]string{dir}); err != nil {
+		t.Fatalf("cmdInit: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
+	if err != nil {
+		t.Fatalf("read .gitignore: %v", err)
+	}
+	if !strings.HasSuffix(string(got), ".dicode/\n") {
+		t.Errorf(".gitignore = %q, want it to end with the effective (last-match-wins) rule %q", got, ".dicode/\n")
+	}
+}
+
 // TestCmdInit_PreservesExistingTasksTree guards against the clobber this
 // PR's review caught: dicode.yaml not existing only proves *that file* is
 // new — tasks/ can predate it (e.g. an operator who deleted just

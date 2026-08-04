@@ -212,8 +212,16 @@ func scaffoldRootTaskSet(tasksDir string) error {
 
 // writeFileIfAbsent writes content to path at 0o644 unless a file already
 // exists there, in which case it's left untouched — see scaffoldRootTaskSet.
+// A non-regular existing entry (most plausibly a directory — e.g. an
+// operator's own tasks/hello/task.yaml/ subdirectory colliding with this
+// scaffold's example) is an error rather than a silent skip: unlike the
+// regular-file case, cmdInit would otherwise report success while leaving a
+// non-runnable scaffold (a missing task.yaml) with no diagnostic at all.
 func writeFileIfAbsent(path, content string) error {
-	if _, err := os.Stat(path); err == nil {
+	if fi, err := os.Stat(path); err == nil {
+		if !fi.Mode().IsRegular() {
+			return fmt.Errorf("%s exists and is not a regular file (mode %s)", path, fi.Mode())
+		}
 		return nil
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("stat %s: %w", path, err)
@@ -242,7 +250,14 @@ func writeGitignore(path string) error {
 	}
 
 	content := string(existing)
-	if strings.Contains(content, dataDirName+"/") {
+	// Exact-suffix match, not a substring scan: gitignore semantics are
+	// last-match-wins, so a prior rule that merely mentions ".dicode/" —
+	// e.g. a negation like "!.dicode/", or a comment, or a nested
+	// "foo/.dicode/" — does not actually ignore the data dir. Appending our
+	// own rule as the final line always wins regardless of what came
+	// before; only skip when that's already exactly the case (idempotent
+	// re-run), not on a loose substring hit.
+	if strings.HasSuffix(content, line) {
 		return nil
 	}
 	if len(content) > 0 && !strings.HasSuffix(content, "\n") {
