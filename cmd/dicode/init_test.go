@@ -82,6 +82,29 @@ func TestCmdInit_HappyPath(t *testing.T) {
 	if strings.Contains(string(rawYAML), target) {
 		t.Errorf("generated dicode.yaml should not contain the absolute temp path %q", target)
 	}
+	// Regression guard: this file is scaffolded for `git add -A && git push`
+	// (see the "next steps" cmdInit prints), so it must never carry a real,
+	// precedence-winning dashboard credential (pkg/webui/passphrase.go's
+	// verifyPassphrase treats a non-empty server.secret as a standing
+	// plaintext login compared on every request). server.secret must be the
+	// empty string here — the passphrase is generated later, locally, by
+	// ensurePassphrase on first `dicode daemon` start.
+	if cfg.Server.Secret != "" {
+		t.Errorf("cfg.Server.Secret = %q, want empty — dicode init must not bake a live credential into a git-committed file", cfg.Server.Secret)
+	}
+	if !strings.Contains(string(rawYAML), `secret: ""`) {
+		t.Errorf("generated dicode.yaml should contain an empty server.secret, got:\n%s", rawYAML)
+	}
+
+	// The scaffolded directory is meant to be pushed to a remote — keep it
+	// non-world-listable on shared hosts in the meantime (matches the
+	// directory-permission intent onboarding.WriteConfig already documents
+	// for the first-run wizard's own config dir).
+	if fi, err := os.Stat(target); err != nil {
+		t.Fatalf("stat %s: %v", target, err)
+	} else if perm := fi.Mode().Perm(); perm != 0o700 {
+		t.Errorf("scaffolded dir mode = %o, want 0700", perm)
+	}
 }
 
 // TestCmdInit_RefusesExistingConfig guards against clobbering an operator's

@@ -58,7 +58,11 @@ func cmdInit(args []string) error {
 		path = args[0]
 	}
 
-	if err := os.MkdirAll(path, 0o755); err != nil {
+	// 0o700: this directory is meant to be committed to git and pushed to a
+	// remote (see the "next steps" printed below) — keep it non-world-
+	// listable on shared hosts in the meantime, matching the intent already
+	// documented on onboarding.WriteConfig's own MkdirAll.
+	if err := os.MkdirAll(path, 0o700); err != nil {
 		return fmt.Errorf("create %s: %w", path, err)
 	}
 
@@ -81,7 +85,22 @@ func cmdInit(args []string) error {
 		LocalTasksDir: "${CONFIGDIR}/tasks",
 		DataDir:       "${CONFIGDIR}/" + dataDirName,
 		Port:          8080, // matches onboarding's own default (pkg/onboarding/cli.go defaultPort)
-		Passphrase:    onboarding.GeneratePassphrase(),
+		// Deliberately empty: unlike the first-run wizard (which never
+		// leaves the local machine), this directory is meant to be
+		// git-committed and pushed to a remote — see the "next steps"
+		// printed below. onboarding.RenderConfig writes Passphrase verbatim
+		// as server.secret, and pkg/webui/passphrase.go's verifyPassphrase
+		// treats a non-empty server.secret as an unhashed, precedence-
+		// winning plaintext credential compared on every login. Baking a
+		// real one in here would mean `git push` ships a working dashboard
+		// password to the remote, recoverable from history forever even
+		// after later removal. Leaving it empty means no YAML override, so
+		// server.auth's own ensurePassphrase auto-generates a passphrase,
+		// stores only its bcrypt hash in the (gitignored) local database,
+		// and prints the plaintext once — on first `dicode daemon` start,
+		// not here, and never into a file this command tells the operator
+		// to commit.
+		Passphrase: "",
 	}
 
 	if err := onboarding.WriteConfig(configPath, onboarding.RenderConfig(result)); err != nil {
@@ -105,7 +124,15 @@ func cmdInit(args []string) error {
 		}
 	}
 
-	onboarding.PrintSuccess(os.Stdout, result, configPath)
+	fmt.Println("━━━ dicode init complete ━━━")
+	fmt.Println("Config written to", configPath)
+	fmt.Println()
+	fmt.Println("No dashboard passphrase was generated here — this directory is meant to be")
+	fmt.Println("committed to git, and dicode.yaml has no server.secret to keep it that way.")
+	fmt.Println("The first time you run `dicode daemon` (or `make run`) in this directory,")
+	fmt.Println("a passphrase is generated automatically, its hash stored locally (never in")
+	fmt.Println("dicode.yaml), and the plaintext printed once to that terminal — copy it then.")
+	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	fmt.Println()
 	fmt.Println("Next steps:")
 	fmt.Printf("  cd %s\n", path)

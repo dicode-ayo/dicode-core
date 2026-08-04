@@ -43,7 +43,7 @@ git push -u origin main
 - `<path>/.gitignore` — pre-populated with `.dicode/`, the generated data dir, so `git add -A` never sweeps up the SQLite run database or the generated dashboard passphrase.
 - a `.git` repository (via `go-git`, not the `git` binary — consistent with the rest of dicode's git integration), so the directory is ready for `git remote add` immediately. If `<path>` is already a git repo, this step is a no-op.
 
-The dashboard login passphrase is generated fresh and printed once to stdout, same as first-run onboarding — copy it before it scrolls away. `dicode init` refuses to run if `<path>/dicode.yaml` already exists, so it will never clobber a config you're already using.
+Unlike the first-run wizard, `dicode init` does **not** bake a dashboard passphrase into `dicode.yaml` — that file is meant to be committed and pushed, and `server.secret` is a plaintext, precedence-winning credential (see [Security](security.md)), so shipping a real one to a git remote would hand out a working login to anyone who can read the repo. Instead, the passphrase is generated the first time you run `dicode daemon` (or `make run`) in the directory: it's hashed and stored locally (outside git, in the gitignored data dir) and printed once to that terminal — copy it then. `dicode init` refuses to run if `<path>/dicode.yaml` already exists, so it will never clobber a config you're already using.
 
 ---
 
