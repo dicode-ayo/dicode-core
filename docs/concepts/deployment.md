@@ -24,6 +24,29 @@ To run dicode under a process supervisor (systemd, launchd, a Docker restart pol
 
 ---
 
+## `dicode init` — a git-versionable root taskset
+
+The onboarding wizard above is meant for a single machine: it writes `~/dicode-tasks`-style absolute paths into `dicode.yaml`. If instead you want a **portable, git-versioned config directory** — one you can clone onto a different laptop or server and have it just work — use `dicode init` instead. It runs with no daemon and no existing config required:
+
+```bash
+dicode init ~/dicode
+cd ~/dicode
+git remote add origin git@github.com:me/my-dicode-config
+git add -A && git commit -m "init"
+git push -u origin main
+```
+
+`dicode init <path>` (path defaults to `.`) creates:
+
+- `<path>/dicode.yaml` — with every path field written as `${CONFIGDIR}`-relative (e.g. `${CONFIGDIR}/tasks`, `${CONFIGDIR}/.dicode`) instead of home-relative. `${CONFIGDIR}` always resolves to "the directory containing this dicode.yaml", so the same file works unmodified after a fresh `git clone` regardless of whose home directory it lands in.
+- `<path>/tasks/taskset.yaml` plus a `<path>/tasks/hello/` example task (manual-trigger, `runtime: deno`) — a starting point you edit or delete.
+- `<path>/.gitignore` — pre-populated with `.dicode/`, the generated data dir, so `git add -A` never sweeps up the SQLite run database or the generated dashboard passphrase.
+- a `.git` repository (via `go-git`, not the `git` binary — consistent with the rest of dicode's git integration), so the directory is ready for `git remote add` immediately. If `<path>` is already a git repo, this step is a no-op.
+
+The dashboard login passphrase is generated fresh and printed once to stdout, same as first-run onboarding — copy it before it scrolls away. `dicode init` refuses to run if `<path>/dicode.yaml` already exists, so it will never clobber a config you're already using.
+
+---
+
 ## Docker
 
 ```bash

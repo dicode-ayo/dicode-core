@@ -27,6 +27,9 @@
 //	webhook sign [flags]            HMAC-sign a webhook body/timestamp, printing
 //	                                the headers a caller needs to hit a protected
 //	                                dicode webhook (no daemon required)
+//	init [path]                     scaffold a git-versionable root taskset
+//	                                directory (dicode.yaml + tasks/); no daemon
+//	                                or existing config required
 //	version                         print version and exit
 package main
 
@@ -104,6 +107,19 @@ func main() {
 	// relock above — no daemon connection is needed to compute an HMAC.
 	if os.Args[1] == "webhook" {
 		if err := cmdWebhook(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "dicode: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	// `init` scaffolds a brand-new dicode.yaml + tasks/ directory from
+	// scratch — it is the command you run BEFORE any daemon or config
+	// exists, so (like deno/python/relock/webhook above) it must be handled
+	// before ensureDaemon, which would otherwise try to load a config that
+	// doesn't exist yet.
+	if os.Args[1] == "init" {
+		if err := cmdInit(os.Args[2:]); err != nil {
 			fmt.Fprintf(os.Stderr, "dicode: %v\n", err)
 			os.Exit(1)
 		}
