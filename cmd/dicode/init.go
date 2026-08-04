@@ -185,14 +185,15 @@ const helloTaskJS = `export default async function main() {
 `
 
 // scaffoldRootTaskSet creates tasksDir and writes the taskset manifest plus
-// a single "hello" example task under it. Reached only from a from-scratch
-// run (the dicode.yaml guard in cmdInit already refuses when config exists),
-// so no clobber-avoidance beyond that guard is needed.
+// a single "hello" example task under it. The dicode.yaml guard in cmdInit
+// only proves dicode.yaml itself is new — tasks/ can predate it (e.g. an
+// operator who deleted just dicode.yaml, or hand-created tasks/ first), so
+// each file is skipped rather than clobbered if it already exists.
 func scaffoldRootTaskSet(tasksDir string) error {
 	if err := os.MkdirAll(tasksDir, 0o755); err != nil {
 		return fmt.Errorf("create %s: %w", tasksDir, err)
 	}
-	if err := os.WriteFile(filepath.Join(tasksDir, "taskset.yaml"), []byte(rootTaskSetYAML), 0o644); err != nil {
+	if err := writeFileIfAbsent(filepath.Join(tasksDir, "taskset.yaml"), rootTaskSetYAML); err != nil {
 		return fmt.Errorf("write taskset.yaml: %w", err)
 	}
 
@@ -200,13 +201,24 @@ func scaffoldRootTaskSet(tasksDir string) error {
 	if err := os.MkdirAll(helloDir, 0o755); err != nil {
 		return fmt.Errorf("create %s: %w", helloDir, err)
 	}
-	if err := os.WriteFile(filepath.Join(helloDir, "task.yaml"), []byte(helloTaskYAML), 0o644); err != nil {
+	if err := writeFileIfAbsent(filepath.Join(helloDir, "task.yaml"), helloTaskYAML); err != nil {
 		return fmt.Errorf("write hello/task.yaml: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(helloDir, "task.js"), []byte(helloTaskJS), 0o644); err != nil {
+	if err := writeFileIfAbsent(filepath.Join(helloDir, "task.js"), helloTaskJS); err != nil {
 		return fmt.Errorf("write hello/task.js: %w", err)
 	}
 	return nil
+}
+
+// writeFileIfAbsent writes content to path at 0o644 unless a file already
+// exists there, in which case it's left untouched — see scaffoldRootTaskSet.
+func writeFileIfAbsent(path, content string) error {
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("stat %s: %w", path, err)
+	}
+	return os.WriteFile(path, []byte(content), 0o644)
 }
 
 // writeGitignore ensures <path>/.gitignore excludes the runtime data dir

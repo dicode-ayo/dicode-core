@@ -134,6 +134,45 @@ func TestCmdInit_RefusesExistingConfig(t *testing.T) {
 	}
 }
 
+// TestCmdInit_PreservesExistingTasksTree guards against the clobber this
+// PR's review caught: dicode.yaml not existing only proves *that file* is
+// new — tasks/ can predate it (e.g. an operator who deleted just
+// dicode.yaml, or hand-created tasks/ first). scaffoldRootTaskSet must skip
+// files that already exist rather than overwrite them.
+func TestCmdInit_PreservesExistingTasksTree(t *testing.T) {
+	dir := t.TempDir()
+	helloDir := filepath.Join(dir, "tasks", "hello")
+	if err := os.MkdirAll(helloDir, 0o755); err != nil {
+		t.Fatalf("seed tasks/hello: %v", err)
+	}
+	const sentinel = "# hand-written task, do not clobber\nname: MyRealTask\n"
+	taskYAMLPath := filepath.Join(helloDir, "task.yaml")
+	if err := os.WriteFile(taskYAMLPath, []byte(sentinel), 0o644); err != nil {
+		t.Fatalf("seed hello/task.yaml: %v", err)
+	}
+
+	if err := cmdInit([]string{dir}); err != nil {
+		t.Fatalf("cmdInit: %v", err)
+	}
+
+	got, err := os.ReadFile(taskYAMLPath)
+	if err != nil {
+		t.Fatalf("read hello/task.yaml after init: %v", err)
+	}
+	if string(got) != sentinel {
+		t.Errorf("pre-existing hello/task.yaml was overwritten; got %q, want %q", got, sentinel)
+	}
+
+	// Files that genuinely didn't exist yet (task.js, taskset.yaml) must
+	// still get scaffolded — this isn't a blanket "skip the whole tree".
+	if _, err := os.Stat(filepath.Join(helloDir, "task.js")); err != nil {
+		t.Errorf("hello/task.js should still be scaffolded: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "tasks", "taskset.yaml")); err != nil {
+		t.Errorf("tasks/taskset.yaml should still be scaffolded: %v", err)
+	}
+}
+
 // TestCmdInit_ExistingGitRepoIsFine covers running `dicode init` inside a
 // directory that's already a git repo (git.ErrRepositoryAlreadyExists from
 // go-git's PlainInit must be treated as a no-op, not a fatal error).
