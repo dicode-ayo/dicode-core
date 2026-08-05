@@ -155,8 +155,9 @@ func cmdTaskEdit(c *ipc.ControlClient, args []string) error {
 	if res.WebUIURL != "" {
 		fmt.Fprintf(os.Stderr, "open: %s\n", res.WebUIURL)
 	}
-	// Reply is the piped (stdout) value; the AI turn that fills it is not wired
-	// yet, so only print when present to keep stdout empty rather than a blank line.
+	// Reply is the piped (stdout) value, filled whenever <prompt> fired a real
+	// AI turn (#568). Only print when present: a blank prompt is a plain
+	// (non-AI) edit that opens/resumes the session with no turn to reply.
 	if res.Reply != "" {
 		fmt.Println(res.Reply)
 	}

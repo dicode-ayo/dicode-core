@@ -152,11 +152,12 @@ func (s *Server) EditTask(ctx context.Context, sessionID, taskID string) (ipc.Au
 		}
 		_ = s.authoringSessions.UpdateLastTurn(ctx, sess.ID)
 		return ipc.AuthoringEditResult{
-			SessionID:   sess.ID,
-			TaskID:      sess.TaskID,
-			SandboxPath: sess.SandboxPath,
-			Source:      sess.Source,
-			SourceKind:  s.resolveSourceKind(sess.Source),
+			SessionID:      sess.ID,
+			TaskID:         sess.TaskID,
+			SandboxPath:    sess.SandboxPath,
+			Source:         sess.Source,
+			SourceKind:     s.resolveSourceKind(sess.Source),
+			AgentSessionID: derefOrEmpty(sess.AgentSessionID),
 		}, nil
 	}
 
@@ -210,6 +211,8 @@ func (s *Server) EditTask(ctx context.Context, sessionID, taskID string) (ipc.Au
 		SandboxPath: sess.SandboxPath,
 		Source:      source,
 		SourceKind:  s.resolveSourceKind(source),
+		// AgentSessionID is always empty here: this is a brand-new session,
+		// there is no prior AI turn to have set it.
 	}, nil
 }
 
@@ -222,12 +225,36 @@ func (s *Server) resumeOrConflict(ctx context.Context, existing *AuthoringSessio
 	}
 	_ = s.authoringSessions.UpdateLastTurn(ctx, existing.ID)
 	return ipc.AuthoringEditResult{
-		SessionID:   existing.ID,
-		TaskID:      existing.TaskID,
-		SandboxPath: existing.SandboxPath,
-		Source:      existing.Source,
-		SourceKind:  s.resolveSourceKind(existing.Source),
+		SessionID:      existing.ID,
+		TaskID:         existing.TaskID,
+		SandboxPath:    existing.SandboxPath,
+		Source:         existing.Source,
+		SourceKind:     s.resolveSourceKind(existing.Source),
+		AgentSessionID: derefOrEmpty(existing.AgentSessionID),
 	}, nil
+}
+
+// derefOrEmpty returns *p, or "" when p is nil. Used to flatten the
+// nullable AuthoringSession.AgentSessionID onto the IPC wire shape, where a
+// plain string with "" meaning "unset" is simpler for callers than a pointer.
+func derefOrEmpty(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
+}
+
+// UpdateAgentSessionID persists the underlying ai-agent conversation's own
+// session id onto the named authoring session (#568). Implements
+// ipc.AuthoringService for pkg/ipc's handleTaskEdit, which calls this after
+// a successful AI turn so the next `dicode task edit` on the same session
+// continues the same conversation. See authoringSessionStore.UpdateAgentSessionID
+// for the blank-is-noop semantics.
+func (s *Server) UpdateAgentSessionID(ctx context.Context, sessionID, agentSessionID string) error {
+	if s.authoringSessions == nil {
+		return authErr(503, "authoring sessions not available")
+	}
+	return s.authoringSessions.UpdateAgentSessionID(ctx, sessionID, agentSessionID)
 }
 
 // isUniqueConstraint reports whether err is a SQLite UNIQUE-constraint

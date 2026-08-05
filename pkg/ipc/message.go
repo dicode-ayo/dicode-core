@@ -345,6 +345,17 @@ type TaskEditResult struct {
 	SandboxPath string `json:"sandboxPath"`
 	WebUIURL    string `json:"webuiURL"`
 	Reply       string `json:"reply"`
+	// RunID is the AI turn's run id (#568) — set whenever a non-empty
+	// Prompt actually fired a turn (success or suspended). Empty when the
+	// prompt was blank, matching AIResult's shape for the same case.
+	RunID string `json:"runID,omitempty"`
+	// Suspended is true when the AI turn's run paused awaiting further
+	// input (e.g. a dicode.suspend() call inside the underlying task).
+	// Mirrors AIResult.Suspended — task-create doesn't use suspend for
+	// clarification yet (that's Phase 1, docs/design/ai-task-authoring.md),
+	// but the underlying ai-agent task is generic, so a suspending run must
+	// still surface cleanly instead of hanging or erroring.
+	Suspended bool `json:"suspended,omitempty"`
 }
 
 // TaskSaveResult is the cli.task.save response. TaskID or PRURL is the

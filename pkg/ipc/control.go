@@ -57,6 +57,15 @@ type ControlServer struct {
 	// without config (tests).
 	defaultAITask string
 
+	// defaultCreateTask is cfg.AI.CreateTask — the task id handleTaskEdit
+	// fires a real AI turn against when the client passes a non-empty
+	// prompt (`dicode task create --ai` / `dicode task edit <id> "<prompt>"`).
+	// Empty when the daemon was started without config (tests) or a blank
+	// prompt was supplied (a plain, non-AI edit — the pre-#568 behavior).
+	// A non-empty prompt with this still empty is a configuration error,
+	// surfaced the same way handleAI surfaces a blank defaultAITask.
+	defaultCreateTask string
+
 	// testGuard vetoes cli.task.test for a given task ID. The approval gate
 	// wires its FireGuard here so a pending (unapproved) task's test file —
 	// which runs with full host permissions — cannot be executed from the
@@ -82,7 +91,8 @@ const maxReadyWait = 60 * time.Second
 // connections. socketPath is the Unix socket path; tokenPath is where the CLI
 // token is written. defaultAITask is cfg.AI.Task — resolved at daemon startup
 // so the control server can fire the right task when the CLI invokes `dicode ai`
-// without --task.
+// without --task. defaultCreateTask is cfg.AI.CreateTask — the analogous
+// default for `dicode task create --ai` / `dicode task edit`'s prompt threading.
 func NewControlServer(
 	socketPath, tokenPath string,
 	reg *registry.Registry,
@@ -93,6 +103,7 @@ func NewControlServer(
 	log *zap.Logger,
 	database db.DB,
 	defaultAITask string,
+	defaultCreateTask string,
 ) (*ControlServer, error) {
 	secret, err := NewSecret()
 	if err != nil {
@@ -100,18 +111,19 @@ func NewControlServer(
 	}
 
 	cs := &ControlServer{
-		socketPath:      socketPath,
-		tokenPath:       tokenPath,
-		secret:          secret,
-		reg:             reg,
-		engine:          engine,
-		secrets:         secretsMgr,
-		metricsProvider: mp,
-		database:        database,
-		log:             log,
-		defaultAITask:   defaultAITask,
-		startedAt:       time.Now(),
-		version:         version,
+		socketPath:        socketPath,
+		tokenPath:         tokenPath,
+		secret:            secret,
+		reg:               reg,
+		engine:            engine,
+		secrets:           secretsMgr,
+		metricsProvider:   mp,
+		database:          database,
+		log:               log,
+		defaultAITask:     defaultAITask,
+		defaultCreateTask: defaultCreateTask,
+		startedAt:         time.Now(),
+		version:           version,
 	}
 
 	// Issue the CLI token with a long TTL — the daemon re-issues on every restart,
@@ -339,6 +351,14 @@ type AuthoringService interface {
 	EditTask(ctx context.Context, sessionID, taskID string) (AuthoringEditResult, error)
 	SaveTask(ctx context.Context, sessionID string) error
 	CancelTask(ctx context.Context, sessionID string) error
+	// UpdateAgentSessionID persists the underlying ai-agent conversation's
+	// own session id onto the authoring session identified by sessionID
+	// (#568), so the NEXT `dicode task edit` call against the same
+	// authoring session can read it back via EditTask's AgentSessionID and
+	// continue that conversation instead of starting a fresh one. Called by
+	// handleTaskEdit after a successful AI turn; a blank agentSessionID
+	// (some alternative agent tasks may not return one) is a no-op.
+	UpdateAgentSessionID(ctx context.Context, sessionID, agentSessionID string) error
 	// WebUIBaseURL returns scheme://host:port for the daemon's web UI so the
 	// CLI can print an "open: <url>" hint pointing at the session.
 	WebUIBaseURL() string
@@ -361,6 +381,11 @@ type AuthoringEditResult struct {
 	SandboxPath string
 	Source      string
 	SourceKind  string
+	// AgentSessionID is the ai-agent conversation session id stored on this
+	// authoring session from a prior turn (#568), or "" if no AI turn has
+	// happened on it yet. handleTaskEdit reads this before firing the next
+	// turn so multi-call `dicode task edit` continues one conversation.
+	AgentSessionID string
 }
 
 // SetAuthoringService wires the authoring service for cli.task.* dispatch.
@@ -404,6 +429,21 @@ func (cs *ControlServer) handleTaskCreate(ctx context.Context, req Request) (Tas
 	return out, nil
 }
 
+// handleTaskEdit opens or resumes an AI edit session (unchanged: the
+// EditTask call and its 409/single-session-per-source logic are Phase 1
+// territory, not touched here — see docs/design/ai-task-authoring.md), then,
+// when req.Prompt is non-empty, fires a real AI turn against cs.defaultCreateTask
+// (cfg.AI.CreateTask) and folds the reply into the response (#568). A blank
+// prompt is the pre-#568 behavior: open/resume the session and return, no AI
+// call — this is how the plain `dicode task edit <id>` (no prompt) and every
+// existing caller of this handler keeps working unchanged.
+//
+// Multi-turn continuity: the authoring session carries the underlying
+// ai-agent conversation's own session id (res.AgentSessionID, read back from
+// a prior turn) so repeated `dicode task edit <id> "<prompt>"` calls against
+// the same open session continue ONE conversation instead of starting a new
+// one each time. After a successful turn, the freshly returned agent session
+// id is persisted back onto the row via UpdateAgentSessionID for next time.
 func (cs *ControlServer) handleTaskEdit(ctx context.Context, req Request) (TaskEditResult, error) {
 	if cs.authoring == nil {
 		return TaskEditResult{}, errors.New("authoring service not configured")
@@ -419,6 +459,77 @@ func (cs *ControlServer) handleTaskEdit(ctx context.Context, req Request) (TaskE
 		SourceKind:  res.SourceKind,
 		SandboxPath: res.SandboxPath,
 		WebUIURL:    cs.authoring.WebUIBaseURL() + "/?session=" + res.SessionID,
+	}
+	if req.Prompt == "" {
+		return out, nil
+	}
+
+	if cs.defaultCreateTask == "" {
+		return out, fmt.Errorf("session %s opened but no create task configured — set ai.create_task in dicode.yaml", res.SessionID)
+	}
+	if _, ok := cs.reg.Get(cs.defaultCreateTask); !ok {
+		return out, fmt.Errorf("session %s opened but create task %q not registered", res.SessionID, cs.defaultCreateTask)
+	}
+
+	params := map[string]string{
+		"prompt":  req.Prompt,
+		"task_id": res.TaskID,
+	}
+	if res.AgentSessionID != "" {
+		params["session_id"] = res.AgentSessionID
+	}
+
+	runID, err := cs.engine.FireManual(ctx, cs.defaultCreateTask, params)
+	if err != nil {
+		return out, err
+	}
+	// WaitRunSettled (not WaitRun): mirrors handleAI — a suspended turn must
+	// surface immediately rather than blocking on a resume nobody has sent yet.
+	run, err := cs.engine.WaitRunSettled(ctx, runID)
+	if err != nil {
+		return out, err
+	}
+	out.RunID = run.RunID
+	if run.Status == registry.StatusSuspended {
+		out.Suspended = true
+		return out, nil
+	}
+	if run.Status != "success" {
+		// Surface the run id in the error so the CLI user can jump straight to
+		// `dicode logs <run-id>` — the dispatch loop only serialises `out` when
+		// err == nil, mirroring handleAI's equivalent failure path.
+		return out, fmt.Errorf("task run %s finished with status %s — see 'dicode logs %s'",
+			run.RunID, run.Status, run.RunID)
+	}
+
+	// Extract reply + session_id from the return value — same envelope
+	// handling as handleAI, so alternative task-create overrides that don't
+	// match the buildin schema exactly still degrade gracefully.
+	var agentSessionID string
+	switch v := run.ReturnValue.(type) {
+	case nil:
+		// nothing to do — empty reply.
+	case string:
+		out.Reply = v
+	case map[string]any:
+		if s, ok := v["reply"].(string); ok {
+			out.Reply = s
+		}
+		if sid, ok := v["session_id"]; ok && sid != nil {
+			agentSessionID = fmt.Sprint(sid)
+		}
+	default:
+		b, _ := json.Marshal(v)
+		out.Reply = string(b)
+	}
+	if agentSessionID != "" {
+		if uerr := cs.authoring.UpdateAgentSessionID(ctx, res.SessionID, agentSessionID); uerr != nil {
+			// Non-fatal: the turn itself succeeded and the reply is already in
+			// `out`. Losing continuity means the NEXT edit call starts a fresh
+			// agent conversation rather than failing this one.
+			cs.log.Warn("failed to persist agent session id for authoring session",
+				zap.String("session", res.SessionID), zap.Error(uerr))
+		}
 	}
 	return out, nil
 }

@@ -878,7 +878,7 @@ func buildControlServer(cfg *config.Config, dataDir, version string, database db
 			return cm.ChildRSSMB, cm.ChildCPUMs
 		},
 	}
-	ctrlSrv, err := ipc.NewControlServer(socketPath, tokenPath, reg, eng, localSecrets, mp, version, log, database, cfg.AI.Task)
+	ctrlSrv, err := ipc.NewControlServer(socketPath, tokenPath, reg, eng, localSecrets, mp, version, log, database, cfg.AI.Task, cfg.AI.CreateTask)
 	if err != nil {
 		return nil, fmt.Errorf("build control server: %w", err)
 	}
