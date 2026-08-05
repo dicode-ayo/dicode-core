@@ -959,15 +959,14 @@ spec:
 // zero-config: the operator runs it, the boilerplate writes to the
 // synthesized source, and the reconciler picks it up. Without this, every
 // install would need to hand-author an entry in dicode.yaml first.
+//
+// Deliberately does NOT pre-create the ai-tasks directory — applyDefaults
+// must create it itself (#568: a fresh install with no directory used to
+// silently skip synthesis, so a never-before-run `task create` 404'd with
+// "source not found").
 func TestLoad_AIScratchSourceSynthesized(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "dicode.yaml")
-
-	// Create the ai-tasks directory — synthesis only triggers when it exists.
-	aiTasksDir := filepath.Join(dir, "ai-tasks")
-	if err := os.MkdirAll(aiTasksDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
 
 	content := fmt.Sprintf(`
 data_dir: %s
@@ -991,7 +990,13 @@ spec:
 	if entry.Ref == nil {
 		t.Fatalf("Spec.Entries[ai-scratch].Ref = nil; want non-nil local ref")
 	}
-	wantPath := filepath.Join(dir, "ai-tasks")
+	// Ref.Path must be the taskset.yaml FILE inside ai-tasks/, not the bare
+	// directory: taskset.Source computes its fsnotify watch root (and thus
+	// CreateTask's RepoPath()) as filepath.Dir(ref.Path) for local refs, which
+	// assumes ref.Path is a file — a bare-directory ref.Path would silently
+	// resolve the watch root to DataDir itself (one level up), so scaffolded
+	// task files would land beside ai-tasks/ instead of inside it.
+	wantPath := filepath.Join(dir, "ai-tasks", "taskset.yaml")
 	if entry.Ref.Path != wantPath {
 		t.Errorf("Spec.Entries[ai-scratch].Ref.Path = %q, want %q", entry.Ref.Path, wantPath)
 	}
@@ -1004,14 +1009,34 @@ spec:
 	if entry.Ref.Watch == nil || !*entry.Ref.Watch {
 		t.Errorf("Spec.Entries[ai-scratch].Ref.Watch = %v, want explicit true", entry.Ref.Watch)
 	}
+	// The directory AND the minimal taskset.yaml inside it must now exist on
+	// disk — this is the #568 fix: applyDefaults creates them rather than
+	// merely stat-checking for the directory, so a fresh install (this test
+	// never called MkdirAll) still gets a genuinely resolvable ai-scratch
+	// source instead of a 404 (or a silently-misplaced-files bug) on first
+	// `task create`.
+	wantDir := filepath.Join(dir, "ai-tasks")
+	if fi, err := os.Stat(wantDir); err != nil || !fi.IsDir() {
+		t.Errorf("ai-tasks dir %q not created by applyDefaults: %v", wantDir, err)
+	}
+	tsBytes, err := os.ReadFile(wantPath)
+	if err != nil {
+		t.Fatalf("ai-tasks/taskset.yaml not created by applyDefaults: %v", err)
+	}
+	if !strings.Contains(string(tsBytes), "kind: TaskSet") {
+		t.Errorf("ai-tasks/taskset.yaml content = %q, want a kind: TaskSet document", tsBytes)
+	}
 }
 
-// TestLoad_AIScratchNotSynthesizedWithoutDir verifies that when the ai-tasks
-// directory does not exist, no ai-scratch source is injected. This prevents
-// a non-existent directory from being watched, which would cause spurious
-// WARN logs and potential race conditions with other sources sharing the
-// same watchRoot.
-func TestLoad_AIScratchNotSynthesizedWithoutDir(t *testing.T) {
+// TestLoad_AIScratchSynthesizedOnFreshInstall is the regression test for
+// #568: before the fix, applyDefaults only synthesized "ai-scratch" when
+// ${DATADIR}/ai-tasks already existed on disk, which is never true on a
+// genuinely fresh install (no prior `task create` ever run) — so synthesis
+// silently never fired and CreateTask's default-source lookup 404'd with
+// "source not found" for every new user's first attempt. This test asserts
+// both halves of the fix: the directory gets created, and the source
+// synthesizes, in the same Load call that used to do neither.
+func TestLoad_AIScratchSynthesizedOnFreshInstall(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "dicode.yaml")
 
@@ -1026,29 +1051,47 @@ spec:
 	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
+
+	aiTasksDir := filepath.Join(dir, "ai-tasks")
+	if _, err := os.Stat(aiTasksDir); !os.IsNotExist(err) {
+		t.Fatalf("precondition failed: %q must not exist before Load", aiTasksDir)
+	}
+
 	cfg, err := Load(cfgPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := cfg.Spec.Entries["ai-scratch"]; ok {
-		t.Errorf("Spec.Entries[ai-scratch] present; want absent when ai-tasks dir does not exist")
+
+	if fi, err := os.Stat(aiTasksDir); err != nil || !fi.IsDir() {
+		t.Fatalf("ai-tasks dir %q not created by Load/applyDefaults: %v", aiTasksDir, err)
+	}
+	wantTasksetPath := filepath.Join(aiTasksDir, "taskset.yaml")
+	if _, err := os.Stat(wantTasksetPath); err != nil {
+		t.Fatalf("ai-tasks/taskset.yaml not created by Load/applyDefaults: %v", err)
+	}
+	entry, ok := cfg.Spec.Entries["ai-scratch"]
+	if !ok || entry == nil {
+		t.Fatalf("Spec.Entries[ai-scratch] missing; want synthesized entry even on a fresh install with no pre-existing dir")
+	}
+	if entry.Ref == nil || entry.Ref.Path != wantTasksetPath {
+		t.Errorf("Spec.Entries[ai-scratch].Ref = %v, want path %q", entry.Ref, wantTasksetPath)
 	}
 }
 
 // TestLoad_AIScratchSynthesizedFromEmptySpec ensures the synthesis works
 // even when dicode.yaml has no `spec:` block at all (the bare zero-config
-// install), provided the ai-tasks directory exists. A refactor that drops
-// the `cfg.Spec.Entries == nil` map-init guard would pass every other test
-// in this package because they all pre-populate at least one entry — this
-// is the only test that exercises the nil-map allocation path.
+// install). A refactor that drops the `cfg.Spec.Entries == nil` map-init
+// guard would pass every other test in this package because they all
+// pre-populate at least one entry — this is the only test that exercises
+// the nil-map allocation path.
+//
+// No pre-existing ai-tasks dir here either (see #568 fix): applyDefaults
+// creates it itself, so this test's original manual `os.MkdirAll` step is
+// redundant and has been removed — confirmed by TestLoad_AIScratchSynthesizedOnFreshInstall
+// above, which covers the mkdir behavior directly.
 func TestLoad_AIScratchSynthesizedFromEmptySpec(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "dicode.yaml")
-
-	// Create the ai-tasks directory so synthesis triggers.
-	if err := os.MkdirAll(filepath.Join(dir, "ai-tasks"), 0o755); err != nil {
-		t.Fatal(err)
-	}
 
 	content := fmt.Sprintf(`
 data_dir: %s
@@ -1067,7 +1110,7 @@ data_dir: %s
 	if !ok || entry == nil {
 		t.Fatalf("Spec.Entries[ai-scratch] missing; want synthesized entry on empty spec")
 	}
-	wantPath := filepath.Join(dir, "ai-tasks")
+	wantPath := filepath.Join(dir, "ai-tasks", "taskset.yaml")
 	if entry.Ref == nil || entry.Ref.Path != wantPath {
 		t.Errorf("Spec.Entries[ai-scratch].Ref.Path = %v, want %q", entry.Ref, wantPath)
 	}

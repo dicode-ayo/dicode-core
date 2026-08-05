@@ -516,12 +516,18 @@ func applyDefaults(cfg *Config, configDir string) {
 	cfg.Database.Path = expand(cfg.Database.Path)
 
 	// Synthesise the virtual "ai-scratch" local source if the operator
-	// hasn't already defined one AND the ai-tasks directory already exists.
-	// The directory is created lazily by the first AI authoring session
-	// (`dicode task create --ai`); synthesising a source for a non-existent
-	// path causes the taskset resolver to log spurious WARN on every
-	// fsnotify tick and can race with other sources that share the same
-	// watchRoot (both resolve to filepath.Dir of their ref path).
+	// hasn't already defined one. The ai-tasks directory used to be created
+	// lazily by the first AI authoring session (`dicode task create --ai`),
+	// which meant a truly fresh install (no prior task-create run) had no
+	// directory, so synthesis never fired and CreateTask's default-source
+	// lookup 404'd with "source not found" — the phantom-pinning bug (#568).
+	// Fix: create the directory (and a minimal taskset.yaml inside it — see
+	// below) here, unconditionally, every applyDefaults run — mkdir/write on
+	// an already-existing dir/file is a no-op, so this is cheap and
+	// idempotent. 0700 matches the restrictive-directory convention used for
+	// everything else living under DataDir (see the WriteConfig rationale in
+	// pkg/onboarding/onboarding.go) even though this particular dir holds
+	// task scaffolding rather than secrets.
 	//
 	// Synthesis runs before the entry-expansion loop below so the
 	// synthesised ref goes through the same path-expansion + watch-default
@@ -529,11 +535,32 @@ func applyDefaults(cfg *Config, configDir string) {
 	if cfg.Spec.Entries == nil {
 		cfg.Spec.Entries = map[string]*taskset.Entry{}
 	}
-	aiScratchPath := filepath.Join(cfg.DataDir, "ai-tasks")
+	aiScratchDir := filepath.Join(cfg.DataDir, "ai-tasks")
 	if _, exists := cfg.Spec.Entries["ai-scratch"]; !exists {
-		if fi, err := os.Stat(aiScratchPath); err == nil && fi.IsDir() {
+		// Best-effort: a failure here (e.g. read-only DataDir) leaves
+		// ai-scratch unsynthesized rather than aborting config load — the
+		// same degrade-gracefully posture the old os.Stat check had.
+		if err := os.MkdirAll(aiScratchDir, 0700); err == nil {
+			// The ref must point at a FILE, not the bare directory.
+			// taskset.Source computes its fsnotify watch root (and thus
+			// CreateTask's RepoPath()) as filepath.Dir(ref.Path) for local
+			// refs (Resolver.Pull) — that assumes ref.Path is a yaml file. A
+			// bare-directory ref.Path would silently resolve the watch root
+			// to DataDir itself (one level up from ai-tasks), so scaffolded
+			// task files would land beside ai-tasks/ instead of inside it,
+			// invisible to the reconciler. Ensure a minimal taskset.yaml
+			// exists — never overwritten if the operator already customised
+			// it — and point the ref there, matching how every other local
+			// entry in this codebase (and this file's own aiScratchDir
+			// sibling examples) references a concrete yaml file, not a
+			// directory.
+			aiScratchTaskset := filepath.Join(aiScratchDir, "taskset.yaml")
+			if _, err := os.Stat(aiScratchTaskset); os.IsNotExist(err) {
+				skeleton := "apiVersion: dicode/v1\nkind: TaskSet\nmetadata:\n  name: ai-scratch\nspec:\n  entries: {}\n"
+				_ = os.WriteFile(aiScratchTaskset, []byte(skeleton), 0600)
+			}
 			cfg.Spec.Entries["ai-scratch"] = &taskset.Entry{
-				Ref: &taskset.Ref{Path: aiScratchPath},
+				Ref: &taskset.Ref{Path: aiScratchTaskset},
 			}
 		}
 	}
