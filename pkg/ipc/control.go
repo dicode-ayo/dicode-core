@@ -351,13 +351,19 @@ type AuthoringService interface {
 	EditTask(ctx context.Context, sessionID, taskID string) (AuthoringEditResult, error)
 	SaveTask(ctx context.Context, sessionID string) error
 	CancelTask(ctx context.Context, sessionID string) error
-	// UpdateAgentSessionID persists the underlying ai-agent conversation's
-	// own session id onto the authoring session identified by sessionID
-	// (#568), so the NEXT `dicode task edit` call against the same
-	// authoring session can read it back via EditTask's AgentSessionID and
-	// continue that conversation instead of starting a fresh one. Called by
-	// handleTaskEdit after a successful AI turn; a blank agentSessionID
-	// (some alternative agent tasks may not return one) is a no-op.
+	// UpdateAgentSessionID persists the underlying ai-agent run's own
+	// session id onto the authoring session identified by sessionID (#568),
+	// so the NEXT `dicode task edit` call against the same authoring
+	// session can read it back via EditTask's AgentSessionID and re-send it
+	// as the run-group correlation id (see AuthoringEditResult.AgentSessionID
+	// below) for UI/log grouping. This does NOT give the agent
+	// conversational memory — every one-shot turn still starts from an
+	// empty SessionState; see tasks/buildin/ai-agent/task.ts's oneShotTurn.
+	// Real conversational continuity across `task edit` calls is Phase 1
+	// work (session-as-suspended-run, docs/design/ai-task-authoring.md).
+	// Called by handleTaskEdit after a successful AI turn; a blank
+	// agentSessionID (some alternative agent tasks may not return one) is a
+	// no-op.
 	UpdateAgentSessionID(ctx context.Context, sessionID, agentSessionID string) error
 	// WebUIBaseURL returns scheme://host:port for the daemon's web UI so the
 	// CLI can print an "open: <url>" hint pointing at the session.
@@ -381,10 +387,16 @@ type AuthoringEditResult struct {
 	SandboxPath string
 	Source      string
 	SourceKind  string
-	// AgentSessionID is the ai-agent conversation session id stored on this
+	// AgentSessionID is the ai-agent run's own session id stored on this
 	// authoring session from a prior turn (#568), or "" if no AI turn has
 	// happened on it yet. handleTaskEdit reads this before firing the next
-	// turn so multi-call `dicode task edit` continues one conversation.
+	// turn and re-sends it as the session_id param — but the underlying
+	// oneShotTurn (tasks/buildin/ai-agent/task.ts) builds a brand-new empty
+	// SessionState on every call, so this does NOT carry conversational
+	// memory across turns. Its real, worth-keeping effect is tagging every
+	// turn's run under one run-group label (`chat:<id>`) so the WebUI/logs
+	// display repeated edit turns as one expandable row. True multi-turn
+	// continuity is Phase 1 work (session-as-suspended-run).
 	AgentSessionID string
 }
 
@@ -438,12 +450,21 @@ func (cs *ControlServer) handleTaskCreate(ctx context.Context, req Request) (Tas
 // call — this is how the plain `dicode task edit <id>` (no prompt) and every
 // existing caller of this handler keeps working unchanged.
 //
-// Multi-turn continuity: the authoring session carries the underlying
-// ai-agent conversation's own session id (res.AgentSessionID, read back from
-// a prior turn) so repeated `dicode task edit <id> "<prompt>"` calls against
-// the same open session continue ONE conversation instead of starting a new
-// one each time. After a successful turn, the freshly returned agent session
-// id is persisted back onto the row via UpdateAgentSessionID for next time.
+// Run-group correlation (NOT conversational memory): the authoring session
+// carries the underlying ai-agent run's own session id (res.AgentSessionID,
+// read back from a prior turn) and re-sends it as the session_id param on
+// the next turn, so repeated `dicode task edit <id> "<prompt>"` calls
+// against the same open session are tagged under one run-group label
+// (`chat:<id>`) for UI/log grouping. The underlying agent does NOT retain
+// memory between these one-shot turns — oneShotTurn
+// (tasks/buildin/ai-agent/task.ts) builds a brand-new empty SessionState on
+// every call, by design ("one-shot calls share no history"). Real
+// conversational continuity across `task edit` calls requires the
+// chat-loop/suspend-resume path, which is explicitly Phase 1 work
+// (session-as-suspended-run — docs/design/ai-task-authoring.md), not
+// implemented here. After a successful turn, the freshly returned agent
+// session id is persisted back onto the row via UpdateAgentSessionID so the
+// NEXT turn's run-group label carries it too.
 func (cs *ControlServer) handleTaskEdit(ctx context.Context, req Request) (TaskEditResult, error) {
 	if cs.authoring == nil {
 		return TaskEditResult{}, errors.New("authoring service not configured")
@@ -525,8 +546,10 @@ func (cs *ControlServer) handleTaskEdit(ctx context.Context, req Request) (TaskE
 	if agentSessionID != "" {
 		if uerr := cs.authoring.UpdateAgentSessionID(ctx, res.SessionID, agentSessionID); uerr != nil {
 			// Non-fatal: the turn itself succeeded and the reply is already in
-			// `out`. Losing continuity means the NEXT edit call starts a fresh
-			// agent conversation rather than failing this one.
+			// `out`. Losing this means the NEXT edit call's run-group label
+			// starts fresh (a new `chat:<id>`) rather than failing this one —
+			// no conversational memory is at stake either way (see the
+			// handleTaskEdit doc comment above).
 			cs.log.Warn("failed to persist agent session id for authoring session",
 				zap.String("session", res.SessionID), zap.Error(uerr))
 		}

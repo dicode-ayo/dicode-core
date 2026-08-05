@@ -313,12 +313,15 @@ func (s *SQLiteDB) migrate() error {
 	if err != nil {
 		return fmt.Errorf("migrate author_sessions index: %w", err)
 	}
-	// agent_session_id (#568) — the underlying ai-agent conversation's own
-	// session id, threaded through by pkg/ipc's handleTaskEdit so repeated
+	// agent_session_id (#568) — the underlying ai-agent run's own session
+	// id, threaded through by pkg/ipc's handleTaskEdit so repeated
 	// `dicode task edit <id> "<prompt>"` calls against the same open
-	// authoring session continue one conversation instead of starting a
-	// fresh one every turn. Nullable: unset until the first AI turn on a
-	// session completes; a plain (non-AI) edit session never sets it.
+	// authoring session are tagged under one run-group label (`chat:<id>`)
+	// for UI/log correlation — NOT conversational memory; the underlying
+	// agent starts a fresh conversation on every one-shot turn (see
+	// handleTaskEdit's doc comment in pkg/ipc/control.go). Nullable: unset
+	// until the first AI turn on a session completes; a plain (non-AI) edit
+	// session never sets it.
 	if err := addColumnIfMissing(ctx, s.db, "author_sessions", "agent_session_id", "TEXT"); err != nil {
 		return fmt.Errorf("migrate author_sessions.agent_session_id: %w", err)
 	}

@@ -244,12 +244,14 @@ func derefOrEmpty(p *string) string {
 	return *p
 }
 
-// UpdateAgentSessionID persists the underlying ai-agent conversation's own
-// session id onto the named authoring session (#568). Implements
+// UpdateAgentSessionID persists the underlying ai-agent run's own session
+// id onto the named authoring session (#568). Implements
 // ipc.AuthoringService for pkg/ipc's handleTaskEdit, which calls this after
 // a successful AI turn so the next `dicode task edit` on the same session
-// continues the same conversation. See authoringSessionStore.UpdateAgentSessionID
-// for the blank-is-noop semantics.
+// carries the same run-group correlation id — not conversational memory,
+// see the handleTaskEdit doc comment in pkg/ipc/control.go. See
+// authoringSessionStore.UpdateAgentSessionID for the blank-is-noop
+// semantics.
 func (s *Server) UpdateAgentSessionID(ctx context.Context, sessionID, agentSessionID string) error {
 	if s.authoringSessions == nil {
 		return authErr(503, "authoring sessions not available")

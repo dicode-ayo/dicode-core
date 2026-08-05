@@ -246,11 +246,13 @@ func TestAuthoringSessionStore_PurgeExpired(t *testing.T) {
 	}
 }
 
-// TestAuthoringSessionStore_UpdateAgentSessionID pins the #568 multi-turn
-// continuity mechanism: the agent's own session id starts unset, gets
+// TestAuthoringSessionStore_UpdateAgentSessionID pins the #568 run-group
+// correlation mechanism: the agent's own session id starts unset, gets
 // persisted after a turn, and is readable back on the next Get — which is
-// exactly what pkg/ipc's handleTaskEdit relies on to continue the same
-// ai-agent conversation across repeated `dicode task edit` calls.
+// exactly what pkg/ipc's handleTaskEdit relies on to tag repeated
+// `dicode task edit` calls under one run-group label. It does not give the
+// agent conversational memory across those calls (see handleTaskEdit's doc
+// comment in pkg/ipc/control.go).
 func TestAuthoringSessionStore_UpdateAgentSessionID(t *testing.T) {
 	d := openTestDB(t)
 	store := newAuthoringSessionStore(d)
@@ -304,7 +306,8 @@ func TestAuthoringSessionStore_UpdateAgentSessionID(t *testing.T) {
 // TestAuthoringSessionStore_UpdateAgentSessionID_BlankIsNoop asserts that an
 // empty agentSessionID does not clobber a previously stored value — some
 // alternative agent tasks may not return a session id on a given turn, and
-// silently wiping continuity because of that would be a footgun.
+// silently wiping the stored run-group correlation id because of that would
+// be a footgun.
 func TestAuthoringSessionStore_UpdateAgentSessionID_BlankIsNoop(t *testing.T) {
 	d := openTestDB(t)
 	store := newAuthoringSessionStore(d)

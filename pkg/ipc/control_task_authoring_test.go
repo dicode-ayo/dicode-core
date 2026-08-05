@@ -20,8 +20,10 @@ import (
 // agentSessionIDs simulates the author_sessions.agent_session_id column
 // (#568): EditTask overlays it onto editResult.AgentSessionID by session id,
 // and UpdateAgentSessionID writes into it — so a test can drive two
-// successive handleTaskEdit calls and observe multi-turn continuity the same
-// way the real DB-backed authoringSessionStore would provide it.
+// successive handleTaskEdit calls and observe the agent session id carrying
+// across calls (run-group correlation, not conversational memory — see
+// handleTaskEdit's doc comment) the same way the real DB-backed
+// authoringSessionStore would provide it.
 type mockAuthoring struct {
 	createResult AuthoringCreateResult
 	createErr    error
@@ -336,7 +338,7 @@ func TestControl_TaskEdit_PromptFiresAITurn(t *testing.T) {
 		t.Errorf("task_id param = %q, want ai-scratch/t", got["task_id"])
 	}
 	if _, ok := got["session_id"]; ok {
-		t.Errorf("first turn must not send session_id (no prior conversation): params = %v", got)
+		t.Errorf("first turn must not send session_id (no prior turn): params = %v", got)
 	}
 	// The turn's agent session id must have been persisted back onto the
 	// authoring session for the next call to pick up.
@@ -345,11 +347,14 @@ func TestControl_TaskEdit_PromptFiresAITurn(t *testing.T) {
 	}
 }
 
-func TestControl_TaskEdit_MultiTurnContinuity(t *testing.T) {
+func TestControl_TaskEdit_SessionIDCarriesAcrossCalls(t *testing.T) {
 	// A second `dicode task edit <id> "<prompt>"` against the SAME open
-	// authoring session must continue the same ai-agent conversation — the
-	// stored agent_session_id from turn 1 must ride along as the session_id
-	// param on turn 2 (#568).
+	// authoring session must carry turn 1's agent_session_id along as the
+	// session_id param on turn 2 (#568) — this proves run-group correlation
+	// (the two turns' runs get grouped under one `chat:<id>` label for
+	// UI/log display), NOT conversational memory: the underlying agent
+	// still starts each turn from an empty SessionState (see
+	// tasks/buildin/ai-agent/task.ts's oneShotTurn).
 	m := &mockAuthoring{editResult: AuthoringEditResult{SessionID: "s1", TaskID: "ai-scratch/t"}}
 	eng := &promptCapturingEngine{reply: "turn one done", sessID: "asid-1"}
 	cs := newAuthoringAIControl(t, m, eng)
@@ -370,7 +375,7 @@ func TestControl_TaskEdit_MultiTurnContinuity(t *testing.T) {
 		t.Fatalf("FireManual calls = %d, want 2", len(eng.calls))
 	}
 	if got := eng.calls[1]["session_id"]; got != "asid-1" {
-		t.Errorf("turn 2 session_id param = %q, want asid-1 (continuity from turn 1)", got)
+		t.Errorf("turn 2 session_id param = %q, want asid-1 (carried from turn 1)", got)
 	}
 	if got := eng.calls[1]["prompt"]; got != "second message" {
 		t.Errorf("turn 2 prompt param = %q", got)

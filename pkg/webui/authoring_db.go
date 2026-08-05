@@ -20,11 +20,14 @@ type AuthoringSession struct {
 	LastTurnAt  time.Time `json:"last_turn_at"`
 	ClosedAt    *int64    `json:"closed_at"` // nil = open
 	Applied     bool      `json:"applied"`
-	// AgentSessionID is the underlying ai-agent conversation's own session
-	// id (#568). Nil until the session's first AI turn completes; set by
+	// AgentSessionID is the underlying ai-agent run's own session id
+	// (#568). Nil until the session's first AI turn completes; set by
 	// UpdateAgentSessionID afterward so the NEXT `dicode task edit` on the
-	// same authoring session continues that conversation instead of
-	// starting a new one. A plain (non-AI) edit session never sets it.
+	// same authoring session re-sends it, tagging repeated turns under one
+	// run-group label (`chat:<id>`) for UI/log grouping — NOT
+	// conversational memory (see pkg/ipc's handleTaskEdit doc comment; the
+	// underlying agent starts a fresh, empty conversation on every one-shot
+	// turn). A plain (non-AI) edit session never sets it.
 	AgentSessionID *string `json:"agent_session_id,omitempty"`
 }
 
@@ -110,12 +113,14 @@ func (s *authoringSessionStore) UpdateLastTurn(ctx context.Context, id string) e
 	)
 }
 
-// UpdateAgentSessionID persists the underlying ai-agent conversation's own
-// session id onto the authoring session row (#568), so the next `dicode task
-// edit` call against this session can read it back and continue the same
-// conversation instead of starting a fresh one. Called after a successful AI
-// turn; a blank agentSessionID is a no-op write (some alternative agent
-// tasks may not return one) rather than clobbering a previously stored id.
+// UpdateAgentSessionID persists the underlying ai-agent run's own session
+// id onto the authoring session row (#568), so the next `dicode task edit`
+// call against this session can read it back and re-send it as the
+// run-group correlation id for UI/log grouping — the underlying agent has
+// no memory of the prior turn either way (see pkg/ipc's handleTaskEdit doc
+// comment). Called after a successful AI turn; a blank agentSessionID is a
+// no-op write (some alternative agent tasks may not return one) rather
+// than clobbering a previously stored id.
 func (s *authoringSessionStore) UpdateAgentSessionID(ctx context.Context, id, agentSessionID string) error {
 	if agentSessionID == "" {
 		return nil
