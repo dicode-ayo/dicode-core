@@ -66,6 +66,16 @@ func (f *fakeAuthoring) WebUIBaseURL() string { return "http://localhost:8080" }
 // covers directly.
 func dialTestClient(t *testing.T, auth ipc.AuthoringService) (*ipc.ControlClient, func()) {
 	t.Helper()
+	return dialTestClientWithEngine(t, auth, &aiTurnEngine{})
+}
+
+// dialTestClientWithEngine is dialTestClient with the fake engine
+// parameterized, so a test that needs a specific AI-turn outcome (a real
+// non-empty reply, a particular session id, ...) can supply its own
+// ipc.EngineRunner instead of always getting aiTurnEngine's fixed empty
+// ReturnValue (#568 finding 6 — see replyingEngine below).
+func dialTestClientWithEngine(t *testing.T, auth ipc.AuthoringService, eng ipc.EngineRunner) (*ipc.ControlClient, func()) {
+	t.Helper()
 	dir := t.TempDir()
 	socketPath := filepath.Join(dir, "ctrl.sock")
 	tokenPath := filepath.Join(dir, "ctrl.token")
@@ -83,7 +93,7 @@ func dialTestClient(t *testing.T, auth ipc.AuthoringService) (*ipc.ControlClient
 		t.Fatalf("register task-create: %v", err)
 	}
 
-	cs, err := ipc.NewControlServer(socketPath, tokenPath, reg, &aiTurnEngine{}, nil, ipc.MetricsProvider{}, "test", zap.NewNop(), nil, "", "buildin/task-create")
+	cs, err := ipc.NewControlServer(socketPath, tokenPath, reg, eng, nil, ipc.MetricsProvider{}, "test", zap.NewNop(), nil, "", "buildin/task-create")
 	if err != nil {
 		t.Fatalf("NewControlServer: %v", err)
 	}
@@ -146,6 +156,45 @@ func (aiTurnEngine) FireManual(context.Context, string, map[string]string) (stri
 }
 func (aiTurnEngine) WaitRunSettled(context.Context, string) (ipc.RunResult, error) {
 	return ipc.RunResult{RunID: "run-cli-ai", Status: "success", ReturnValue: map[string]any{}}, nil
+}
+
+// replyingEngine is aiTurnEngine's configurable sibling: it fires and
+// settles a successful AI turn that returns a caller-supplied {reply,
+// session_id}, so tests can verify a REAL non-empty reply travels the full
+// control-socket round trip into the right CLI output stream (#568 finding
+// 6) — aiTurnEngine's always-empty ReturnValue can't exercise that.
+type replyingEngine struct {
+	noopEngine
+	reply  string
+	sessID string
+}
+
+func (e *replyingEngine) FireManual(context.Context, string, map[string]string) (string, error) {
+	return "run-cli-reply", nil
+}
+
+func (e *replyingEngine) WaitRunSettled(context.Context, string) (ipc.RunResult, error) {
+	return ipc.RunResult{
+		RunID:       "run-cli-reply",
+		Status:      "success",
+		ReturnValue: map[string]any{"reply": e.reply, "session_id": e.sessID},
+	}, nil
+}
+
+// suspendingEngine fires an AI turn whose run suspends awaiting further
+// input, so tests can verify cmdTaskEdit/cmdTaskCreate surface a suspended
+// run instead of silently printing an empty reply as if the turn finished
+// (#568 finding 3).
+type suspendingEngine struct {
+	noopEngine
+}
+
+func (suspendingEngine) FireManual(context.Context, string, map[string]string) (string, error) {
+	return "run-cli-suspended", nil
+}
+
+func (suspendingEngine) WaitRunSettled(context.Context, string) (ipc.RunResult, error) {
+	return ipc.RunResult{RunID: "run-cli-suspended", Status: registry.StatusSuspended}, nil
 }
 
 // captureOutput redirects os.Stdout and os.Stderr around fn and returns what
@@ -234,6 +283,62 @@ func TestCmdTaskCreate_WithAI_SplitsStreams(t *testing.T) {
 	}
 }
 
+// TestCmdTaskCreate_WithAI_ReplyReachesStderr drives the full control-socket
+// round trip (create chains into edit inside the daemon) with an engine that
+// returns a real non-empty reply, and asserts that exact text lands on
+// stderr while stdout stays the bare task id — matching cmdTaskCreate's
+// documented stdout/stderr convention (#568 finding 6). dialTestClient's
+// default aiTurnEngine always returns an empty ReturnValue, so no other test
+// in this file exercises a real reply reaching the chained --ai path.
+func TestCmdTaskCreate_WithAI_ReplyReachesStderr(t *testing.T) {
+	eng := &replyingEngine{reply: "scaffolded your greeting task", sessID: "asid-cli-2"}
+	c, done := dialTestClientWithEngine(t, &fakeAuthoring{
+		create: ipc.AuthoringCreateResult{TaskID: "ai-scratch/hello", Source: "ai-scratch"},
+		edit:   ipc.AuthoringEditResult{SessionID: "sess-1", Source: "ai-scratch", SourceKind: "local"},
+	}, eng)
+	defer done()
+	out, errOut, err := captureOutput(t, func() error {
+		return cmdTaskCreate(c, []string{"hello", "--ai", "make it greet"})
+	})
+	if err != nil {
+		t.Fatalf("cmdTaskCreate: %v", err)
+	}
+	if strings.TrimSpace(out) != "ai-scratch/hello" {
+		t.Errorf("stdout = %q, want only the task id", out)
+	}
+	if !strings.Contains(errOut, "scaffolded your greeting task") {
+		t.Errorf("stderr missing AI reply: %q", errOut)
+	}
+}
+
+// TestCmdTaskCreate_WithAI_SuspendedRunSurfacesOnStderr asserts cmdTaskCreate
+// checks res.Suspended (#568 finding 3): a suspended chained turn must print
+// a clear stderr message with the run id and a resume hint instead of
+// silently falling through as if the turn succeeded — but the scaffolded
+// task id still reaches stdout, since the file did land on disk.
+func TestCmdTaskCreate_WithAI_SuspendedRunSurfacesOnStderr(t *testing.T) {
+	c, done := dialTestClientWithEngine(t, &fakeAuthoring{
+		create: ipc.AuthoringCreateResult{TaskID: "ai-scratch/hello", Source: "ai-scratch"},
+		edit:   ipc.AuthoringEditResult{SessionID: "sess-1", Source: "ai-scratch", SourceKind: "local"},
+	}, &suspendingEngine{})
+	defer done()
+	out, errOut, err := captureOutput(t, func() error {
+		return cmdTaskCreate(c, []string{"hello", "--ai", "make it greet"})
+	})
+	if err != nil {
+		t.Fatalf("cmdTaskCreate: %v", err)
+	}
+	if strings.TrimSpace(out) != "ai-scratch/hello" {
+		t.Errorf("stdout = %q, want the scaffolded task id even though the turn suspended", out)
+	}
+	if !strings.Contains(errOut, "run-cli-suspended") {
+		t.Errorf("stderr missing suspended run id: %q", errOut)
+	}
+	if !strings.Contains(errOut, "dicode resume") {
+		t.Errorf("stderr missing resume hint: %q", errOut)
+	}
+}
+
 func TestCmdTaskCreate_AIPathChainsEditWithEqualsFlags(t *testing.T) {
 	fa := &recordingAuthoring{fakeAuthoring: fakeAuthoring{
 		create: ipc.AuthoringCreateResult{TaskID: "ai-scratch/x"},
@@ -312,6 +417,58 @@ func TestCmdTaskEdit_SplitsStreams(t *testing.T) {
 		t.Errorf("stderr missing open url: %q", errOut)
 	}
 	_ = out
+}
+
+// TestCmdTaskEdit_AIReplyReachesStdout drives the full control-socket round
+// trip with an engine that returns a real non-empty reply, and asserts that
+// exact text lands on stdout (the piped-value convention documented at the
+// top of this file) — dialTestClient's default aiTurnEngine always returns
+// an empty ReturnValue, so no other test in this file exercises this (#568
+// finding 6).
+func TestCmdTaskEdit_AIReplyReachesStdout(t *testing.T) {
+	eng := &replyingEngine{reply: "here is your edited task", sessID: "asid-cli-1"}
+	c, done := dialTestClientWithEngine(t, &fakeAuthoring{
+		edit: ipc.AuthoringEditResult{SessionID: "e1", Source: "ai-scratch", SourceKind: "local"},
+	}, eng)
+	defer done()
+	out, errOut, err := captureOutput(t, func() error {
+		return cmdTaskEdit(c, []string{"ai-scratch/t", "please", "fix", "it"})
+	})
+	if err != nil {
+		t.Fatalf("cmdTaskEdit: %v", err)
+	}
+	if strings.TrimSpace(out) != "here is your edited task" {
+		t.Errorf("stdout = %q, want the AI reply", out)
+	}
+	if strings.Contains(errOut, "here is your edited task") {
+		t.Errorf("reply leaked into stderr: %q", errOut)
+	}
+}
+
+// TestCmdTaskEdit_SuspendedRunSurfacesOnStderr asserts cmdTaskEdit checks
+// res.Suspended (#568 finding 3): a suspended run must print a clear message
+// with the run id and a resume hint on stderr, and must not print anything
+// on stdout as if the turn had completed normally.
+func TestCmdTaskEdit_SuspendedRunSurfacesOnStderr(t *testing.T) {
+	c, done := dialTestClientWithEngine(t, &fakeAuthoring{
+		edit: ipc.AuthoringEditResult{SessionID: "e1", Source: "ai-scratch", SourceKind: "local"},
+	}, &suspendingEngine{})
+	defer done()
+	out, errOut, err := captureOutput(t, func() error {
+		return cmdTaskEdit(c, []string{"ai-scratch/t", "clarify", "something"})
+	})
+	if err != nil {
+		t.Fatalf("cmdTaskEdit: %v", err)
+	}
+	if !strings.Contains(errOut, "run-cli-suspended") {
+		t.Errorf("stderr missing suspended run id: %q", errOut)
+	}
+	if !strings.Contains(errOut, "dicode resume") {
+		t.Errorf("stderr missing resume hint: %q", errOut)
+	}
+	if strings.TrimSpace(out) != "" {
+		t.Errorf("stdout should stay empty on a suspended run, got %q", out)
+	}
 }
 
 func TestCmdTaskEdit_DashSentinel(t *testing.T) {
