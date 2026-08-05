@@ -1149,6 +1149,55 @@ spec:
 	}
 }
 
+// TestLoad_AIScratchNotSynthesizedWhenWriteFails is the regression test for
+// the finding-5 fix: applyDefaults must not add the "ai-scratch" entry when
+// writing the skeleton taskset.yaml fails, even though the MkdirAll right
+// above it succeeded. Before the fix, the entry was synthesized
+// unconditionally once mkdir succeeded, so a failed write left the ref
+// pointing at a taskset.yaml that doesn't exist on disk — silently breaking
+// `task create` in a way harder to diagnose than a clean "source not found".
+//
+// Forces the write to fail without relying on filesystem permission bits
+// (tests may run as root, which bypasses those): aiScratchTaskset is
+// pre-created as a dangling symlink whose target lives inside a directory
+// that does not exist. os.Stat on a dangling symlink reports IsNotExist
+// (matching the "doesn't exist yet, attempt to create it" branch), but
+// os.WriteFile then fails with ENOENT because the target's parent directory
+// is missing — a reliable, privilege-independent write failure.
+func TestLoad_AIScratchNotSynthesizedWhenWriteFails(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "dicode.yaml")
+
+	content := fmt.Sprintf(`
+data_dir: %s
+`, dir)
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	aiTasksDir := filepath.Join(dir, "ai-tasks")
+	if err := os.MkdirAll(aiTasksDir, 0700); err != nil {
+		t.Fatalf("precondition mkdir: %v", err)
+	}
+	wantTasksetPath := filepath.Join(aiTasksDir, "taskset.yaml")
+	danglingTarget := filepath.Join(aiTasksDir, "missing-subdir", "taskset.yaml")
+	if err := os.Symlink(danglingTarget, wantTasksetPath); err != nil {
+		t.Fatalf("precondition symlink: %v", err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok := cfg.Spec.Entries["ai-scratch"]; ok {
+		t.Errorf("Spec.Entries[ai-scratch] present after a failed WriteFile; want unsynthesized (degrade gracefully, don't point at a nonexistent file)")
+	}
+	if _, err := os.Stat(danglingTarget); !os.IsNotExist(err) {
+		t.Errorf("taskset.yaml unexpectedly exists at %q despite the missing parent dir: %v", danglingTarget, err)
+	}
+}
+
 // TestLoad_AICreateSessionTTLOverride ensures a user-supplied duration string
 // parses into time.Duration so operators can tune the auto-cancel window
 // (short TTLs for shared dev boxes, long for personal installs).

@@ -555,12 +555,28 @@ func applyDefaults(cfg *Config, configDir string) {
 			// sibling examples) references a concrete yaml file, not a
 			// directory.
 			aiScratchTaskset := filepath.Join(aiScratchDir, "taskset.yaml")
-			if _, err := os.Stat(aiScratchTaskset); os.IsNotExist(err) {
+			// writeOK guards the entry synthesis below the same way the
+			// MkdirAll guard above does: if the skeleton file doesn't exist
+			// yet and the write fails (e.g. aiScratchTaskset already exists
+			// as a directory, or DataDir went read-only between the mkdir
+			// and here), pointing the "ai-scratch" ref at it would leave the
+			// entry referencing a file that isn't actually there — worse
+			// than not synthesizing at all, since a real "not found" error
+			// is a much clearer failure than a source that mysteriously
+			// never resolves. A pre-existing file (the common case on every
+			// run after the first) always counts as OK — it's never
+			// overwritten.
+			writeOK := true
+			if _, statErr := os.Stat(aiScratchTaskset); os.IsNotExist(statErr) {
 				skeleton := "apiVersion: dicode/v1\nkind: TaskSet\nmetadata:\n  name: ai-scratch\nspec:\n  entries: {}\n"
-				_ = os.WriteFile(aiScratchTaskset, []byte(skeleton), 0600)
+				if werr := os.WriteFile(aiScratchTaskset, []byte(skeleton), 0600); werr != nil {
+					writeOK = false
+				}
 			}
-			cfg.Spec.Entries["ai-scratch"] = &taskset.Entry{
-				Ref: &taskset.Ref{Path: aiScratchTaskset},
+			if writeOK {
+				cfg.Spec.Entries["ai-scratch"] = &taskset.Entry{
+					Ref: &taskset.Ref{Path: aiScratchTaskset},
+				}
 			}
 		}
 	}
