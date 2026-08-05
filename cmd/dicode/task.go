@@ -86,7 +86,17 @@ func cmdTaskCreate(c *ipc.ControlClient, args []string) error {
 	if res.WebUIURL != "" {
 		fmt.Fprintf(os.Stderr, "open: %s\n", res.WebUIURL)
 	}
-	if res.Reply != "" {
+	// A suspended AI turn hasn't actually finished — don't print an empty
+	// Reply (there won't be one) framed as if the turn completed. The
+	// scaffolded file did land, though, so the task id still goes to
+	// stdout below; only the "success" framing on stderr changes (#568
+	// finding 3). Unreachable via the shipped buildin/task-create (which
+	// only ever uses the non-suspending oneShotTurn) but the underlying
+	// ai-agent task is generic, so a future/custom override that suspends
+	// must still surface cleanly here instead of printing nothing.
+	if res.Suspended {
+		fmt.Fprintf(os.Stderr, "run %s suspended awaiting further input — run `dicode resume %s` to continue\n", res.RunID, res.RunID)
+	} else if res.Reply != "" {
 		fmt.Fprintln(os.Stderr, res.Reply)
 	}
 	fmt.Println(res.TaskID)
@@ -154,6 +164,19 @@ func cmdTaskEdit(c *ipc.ControlClient, args []string) error {
 	}
 	if res.WebUIURL != "" {
 		fmt.Fprintf(os.Stderr, "open: %s\n", res.WebUIURL)
+	}
+	// A suspended AI turn hasn't actually finished — surface that clearly on
+	// stderr with a resume hint rather than falling through to print an
+	// empty Reply as if the turn succeeded (#568 finding 3). Unreachable via
+	// the shipped buildin/task-create (which only ever uses the
+	// non-suspending oneShotTurn) but the underlying ai-agent task is
+	// generic, so a future/custom override that suspends must still surface
+	// cleanly instead of hanging or silently succeeding empty. This isn't
+	// the full interactive chat loop (`followSuspended`) — task edit isn't
+	// an interactive chat UX — just a clear informational message + hint.
+	if res.Suspended {
+		fmt.Fprintf(os.Stderr, "run %s suspended awaiting further input — run `dicode resume %s` to continue\n", res.RunID, res.RunID)
+		return nil
 	}
 	// Reply is the piped (stdout) value, filled whenever <prompt> fired a real
 	// AI turn (#568). Only print when present: a blank prompt is a plain
