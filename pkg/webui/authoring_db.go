@@ -20,6 +20,12 @@ type AuthoringSession struct {
 	LastTurnAt  time.Time `json:"last_turn_at"`
 	ClosedAt    *int64    `json:"closed_at"` // nil = open
 	Applied     bool      `json:"applied"`
+	// AgentSessionID is the underlying ai-agent conversation's own session
+	// id (#568). Nil until the session's first AI turn completes; set by
+	// UpdateAgentSessionID afterward so the NEXT `dicode task edit` on the
+	// same authoring session continues that conversation instead of
+	// starting a new one. A plain (non-AI) edit session never sets it.
+	AgentSessionID *string `json:"agent_session_id,omitempty"`
 }
 
 // authoringSessionStore wraps db.DB to manage author_sessions rows.
@@ -38,10 +44,10 @@ func (s *authoringSessionStore) Create(ctx context.Context, sess AuthoringSessio
 		applied = 1
 	}
 	return s.db.Exec(ctx,
-		`INSERT INTO author_sessions (id, kind, source, task_id, sandbox_path, created_at, last_turn_at, closed_at, applied)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO author_sessions (id, kind, source, task_id, sandbox_path, created_at, last_turn_at, closed_at, applied, agent_session_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		sess.ID, sess.Kind, sess.Source, sess.TaskID, sess.SandboxPath,
-		sess.CreatedAt.Unix(), sess.LastTurnAt.Unix(), sess.ClosedAt, applied,
+		sess.CreatedAt.Unix(), sess.LastTurnAt.Unix(), sess.ClosedAt, applied, sess.AgentSessionID,
 	)
 }
 
@@ -50,7 +56,7 @@ func (s *authoringSessionStore) Get(ctx context.Context, id string) (*AuthoringS
 	var sess AuthoringSession
 	var found bool
 	err := s.db.Query(ctx,
-		`SELECT id, kind, source, task_id, sandbox_path, created_at, last_turn_at, closed_at, applied
+		`SELECT id, kind, source, task_id, sandbox_path, created_at, last_turn_at, closed_at, applied, agent_session_id
 		 FROM author_sessions WHERE id = ?`,
 		[]any{id},
 		func(rows db.Scanner) error {
@@ -75,7 +81,7 @@ func (s *authoringSessionStore) GetOpenForSource(ctx context.Context, source str
 	var sess AuthoringSession
 	var found bool
 	err := s.db.Query(ctx,
-		`SELECT id, kind, source, task_id, sandbox_path, created_at, last_turn_at, closed_at, applied
+		`SELECT id, kind, source, task_id, sandbox_path, created_at, last_turn_at, closed_at, applied, agent_session_id
 		 FROM author_sessions WHERE source = ? AND closed_at IS NULL
 		 LIMIT 1`,
 		[]any{source},
@@ -104,6 +110,22 @@ func (s *authoringSessionStore) UpdateLastTurn(ctx context.Context, id string) e
 	)
 }
 
+// UpdateAgentSessionID persists the underlying ai-agent conversation's own
+// session id onto the authoring session row (#568), so the next `dicode task
+// edit` call against this session can read it back and continue the same
+// conversation instead of starting a fresh one. Called after a successful AI
+// turn; a blank agentSessionID is a no-op write (some alternative agent
+// tasks may not return one) rather than clobbering a previously stored id.
+func (s *authoringSessionStore) UpdateAgentSessionID(ctx context.Context, id, agentSessionID string) error {
+	if agentSessionID == "" {
+		return nil
+	}
+	return s.db.Exec(ctx,
+		`UPDATE author_sessions SET agent_session_id = ? WHERE id = ?`,
+		agentSessionID, id,
+	)
+}
+
 // Close marks a session as closed, setting closed_at and the applied flag.
 func (s *authoringSessionStore) Close(ctx context.Context, id string, applied bool) error {
 	appliedInt := 0
@@ -120,7 +142,7 @@ func (s *authoringSessionStore) Close(ctx context.Context, id string, applied bo
 func (s *authoringSessionStore) ListOpen(ctx context.Context) ([]AuthoringSession, error) {
 	var sessions []AuthoringSession
 	err := s.db.Query(ctx,
-		`SELECT id, kind, source, task_id, sandbox_path, created_at, last_turn_at, closed_at, applied
+		`SELECT id, kind, source, task_id, sandbox_path, created_at, last_turn_at, closed_at, applied, agent_session_id
 		 FROM author_sessions WHERE closed_at IS NULL
 		 ORDER BY created_at DESC`,
 		nil,
@@ -175,9 +197,10 @@ func scanAuthoringSession(rows db.Scanner, sess *AuthoringSession) error {
 	var createdAt, lastTurnAt int64
 	var closedAt sql.NullInt64
 	var applied int
+	var agentSessionID sql.NullString
 	if err := rows.Scan(
 		&sess.ID, &sess.Kind, &sess.Source, &sess.TaskID, &sess.SandboxPath,
-		&createdAt, &lastTurnAt, &closedAt, &applied,
+		&createdAt, &lastTurnAt, &closedAt, &applied, &agentSessionID,
 	); err != nil {
 		return err
 	}
@@ -187,6 +210,9 @@ func scanAuthoringSession(rows db.Scanner, sess *AuthoringSession) error {
 		sess.ClosedAt = &closedAt.Int64
 	}
 	sess.Applied = applied != 0
+	if agentSessionID.Valid {
+		sess.AgentSessionID = &agentSessionID.String
+	}
 	return nil
 }
 
