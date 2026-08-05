@@ -194,3 +194,93 @@ spec:
         fs:
           - path: "${DATADIR}/dev-clones"
             permission: rw
+
+    # ─── task-create: AI-first task scaffolding ─────────────────────────────
+    # Override of ai-agent that scaffolds a brand-new task from a natural-
+    # language description. This is Phase 0 of docs/design/ai-task-authoring.md
+    # ("task create --ai returns a real AI turn") — the AI-authoring
+    # counterpart to auto-fix's AI-diagnosis, cloning its exact permission
+    # set (dev-mode clones, tasks.test, git-pr landing) because scaffolding a
+    # task needs the same sandboxed write → validate → test loop that fixing
+    # one does. Fired via FireManual from the IPC control plane
+    # (`dicode task create --ai "<prompt>"` / `dicode task edit <id>
+    # "<prompt>"`) — trigger stays manual: true, never a webhook, since the
+    # authoring session (not an HTTP caller) owns dispatch.
+    #
+    # Defaults to OpenAI's gpt-4o like dicodai (not auto-fix, which
+    # deliberately carries no provider defaults) so it works zero-config with
+    # just OPENAI_API_KEY set — cfg.AI.CreateTask documents "buildin/task-create"
+    # as the out-of-the-box default other users are expected to just use.
+    task-create:
+      ref:
+        path: ./ai-agent/task.yaml
+      overrides:
+        name: "Task Create (AI)"
+        description: >
+          Scaffolds a brand-new dicode task from a natural-language
+          description. Writes task.yaml + task.ts/task.js + task.test.ts
+          together inside a dev-mode clone, validates the spec, and runs the
+          tests before finishing. Fired by `dicode task create --ai` and
+          `dicode task edit` via the control socket — see
+          docs/design/ai-task-authoring.md (Phase 0).
+        trigger:
+          manual: true
+        params:
+          skills: "dicode-task-dev,dicode-basics"
+          model: "gpt-4o"
+          base_url: "https://api.openai.com/v1"
+          api_key_env: "OPENAI_API_KEY"
+          max_tool_iterations: "30"
+          system_prompt: |
+            You are an AI agent embedded in dicode that scaffolds brand-new
+            automation tasks from a natural-language description. The user
+            describes what they want automated; your job is to create a
+            working task from scratch — a small TypeScript (or Python,
+            Docker) program triggered by a webhook, cron schedule, manual
+            run, or chain event.
+
+            Follow the mandatory workflow from the dicode-task-dev skill, in
+            order, no exceptions:
+            1. list_tasks / get_task first — check whether something close
+               already exists so you don't duplicate it, and copy a close
+               analog's patterns.
+            2. Know what credentials exist (dicode secrets list on the CLI)
+               — never invent a secret name; declare only what's real.
+            3. Enter dev mode on the target source before writing anything,
+               so your edits land in a writable clone.
+            4. Write task.yaml + task.ts (or task.py) + task.test.ts
+               together, as one unit — never ship one file without the
+               others.
+            5. Validate and test before finishing — a task whose task.yaml
+               fails to parse, or whose tests fail, is not done.
+
+            Respect the trigger/permissions schema exactly: exactly one
+            trigger per task.yaml, no hardcoded secrets (reference
+            permissions.env instead), and declare every env var and network
+            host the script actually touches. When the description is
+            ambiguous — missing channel, schedule, endpoint, or similar —
+            ask one focused clarifying question rather than guessing.
+
+            Keep answers focused on the task at hand; the user reviews the
+            scaffolded files (and, on review mode, an opened PR) before they
+            land.
+        env:
+          - OPENAI_API_KEY
+        net:
+          - api.openai.com
+        timeout: 1800s
+        dicode:
+          runs_replay:           true
+          runs_get_input:        true
+          runs_pin_input:        true
+          runs_unpin_input:      true
+          sources_set_dev_mode:  true
+          tasks_test:            true
+          git_commit_push:       true
+          list_tasks:            true
+          get_runs:              true
+          tasks:
+            - "git-pr"
+        fs:
+          - path: "${DATADIR}/dev-clones"
+            permission: rw
