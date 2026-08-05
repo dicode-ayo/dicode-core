@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dicode/dicode/pkg/db"
 	"github.com/dicode/dicode/pkg/registry"
@@ -426,6 +427,111 @@ type erroringFireEngine struct{ mockEngine }
 
 func (e *erroringFireEngine) FireManual(context.Context, string, map[string]string) (string, error) {
 	return "", errors.New("fire boom")
+}
+
+// gatedTurnEngine is a controllable EngineRunner for proving handleTaskEdit's
+// per-session serialization (finding #4). FireManual reports each call's
+// params on fireCh; WaitRunSettled blocks on proceed until the test lets it
+// finish, so the test can pin exactly when a call is "in flight" (holding
+// the session lock) versus attempting to start.
+type gatedTurnEngine struct {
+	mockEngine
+	fireCh  chan map[string]string
+	proceed chan struct{}
+	sessID  string
+	calls   int
+}
+
+func (e *gatedTurnEngine) FireManual(_ context.Context, taskID string, params map[string]string) (string, error) {
+	if taskID != "buildin/task-create" {
+		return "", errors.New("unexpected task id: " + taskID)
+	}
+	e.calls++
+	e.fireCh <- params
+	return fmt.Sprintf("run-%d", e.calls), nil
+}
+
+func (e *gatedTurnEngine) WaitRunSettled(_ context.Context, runID string) (RunResult, error) {
+	<-e.proceed
+	return RunResult{
+		RunID:       runID,
+		Status:      "success",
+		ReturnValue: map[string]any{"reply": "ok", "session_id": e.sessID},
+	}, nil
+}
+
+// TestControl_TaskEdit_ConcurrentSameSession_Serializes proves (not just
+// "doesn't panic") that two concurrent handleTaskEdit calls against the SAME
+// session/task serialize around the AgentSessionID read-fire-write sequence:
+// the second call must observe the first call's persisted AgentSessionID
+// rather than racing past it with a stale read (finding #4's TOCTOU).
+func TestControl_TaskEdit_ConcurrentSameSession_Serializes(t *testing.T) {
+	m := &mockAuthoring{editResult: AuthoringEditResult{SessionID: "s1", TaskID: "ai-scratch/t"}}
+	eng := &gatedTurnEngine{
+		fireCh:  make(chan map[string]string),
+		proceed: make(chan struct{}),
+		sessID:  "asid-1",
+	}
+	cs := newAuthoringAIControl(t, m, eng)
+
+	// Call 1 runs in its own goroutine; it blocks inside WaitRunSettled
+	// until the test sends on `proceed`.
+	call1Done := make(chan error, 1)
+	go func() {
+		_, err := cs.handleTaskEdit(context.Background(), Request{TaskID: "ai-scratch/t", Prompt: "first message"})
+		call1Done <- err
+	}()
+
+	// Wait for call 1 to actually fire — it now holds the session lock and
+	// is parked in WaitRunSettled.
+	select {
+	case params1 := <-eng.fireCh:
+		if _, ok := params1["session_id"]; ok {
+			t.Errorf("call 1 sent a session_id param, want none (first turn): %v", params1)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("call 1 never fired")
+	}
+
+	// Start call 2 concurrently against the same task/session. If
+	// serialization works it must block on the lock (still held by call 1)
+	// rather than firing immediately.
+	call2Done := make(chan error, 1)
+	go func() {
+		_, err := cs.handleTaskEdit(context.Background(), Request{TaskID: "ai-scratch/t", Prompt: "second message"})
+		call2Done <- err
+	}()
+
+	select {
+	case params2 := <-eng.fireCh:
+		t.Fatalf("call 2 fired while call 1 was still in flight — not serialized: %v", params2)
+	case <-time.After(200 * time.Millisecond):
+		// Expected: call 2 is blocked waiting on the session lock.
+	}
+
+	// Release call 1: it finishes its turn, persists AgentSessionID via
+	// UpdateAgentSessionID, and releases the lock.
+	eng.proceed <- struct{}{}
+	if err := <-call1Done; err != nil {
+		t.Fatalf("call 1: %v", err)
+	}
+
+	// Call 2 can now acquire the lock, read the session via EditTask, and
+	// fire — its params must carry call 1's persisted AgentSessionID.
+	var params2 map[string]string
+	select {
+	case params2 = <-eng.fireCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("call 2 never fired after call 1 released the lock")
+	}
+	eng.proceed <- struct{}{}
+	if err := <-call2Done; err != nil {
+		t.Fatalf("call 2: %v", err)
+	}
+
+	if got := params2["session_id"]; got != "asid-1" {
+		t.Errorf("call 2 session_id param = %q, want asid-1 (call 1's persisted AgentSessionID, not a stale read)", got)
+	}
 }
 
 func TestControl_TaskSave(t *testing.T) {

@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/dicode/dicode/pkg/db"
@@ -78,8 +79,37 @@ type ControlServer struct {
 	// ready, preserving pre-barrier behaviour.
 	ready <-chan struct{}
 
+	// sessionEditLocks serializes handleTaskEdit's read(EditTask)-fire-write
+	// (UpdateAgentSessionID) sequence per authoring session, so two
+	// concurrent `dicode task edit` calls against the SAME open session
+	// can't both read the same stale AgentSessionID, both fire, and race to
+	// overwrite each other's persisted run-group correlation id (finding
+	// #4, a TOCTOU: read at EditTask, long FireManual/WaitRunSettled round
+	// trip, write at UpdateAgentSessionID, no lock between). Keyed by
+	// req.SessionID when the caller supplies one, else by req.TaskID (the
+	// common CLI shape: `dicode task edit <id> "<prompt>"`, no --session) —
+	// see lockForTaskEdit. Calls against a DIFFERENT key are not serialized
+	// against each other, so unrelated concurrent edits stay fully
+	// concurrent. sync.Map's zero value is ready to use; values are
+	// *sync.Mutex, created lazily on first use and never removed (the
+	// authoring-session keyspace is small and long-lived relative to a
+	// process lifetime, so this isn't a practical leak).
+	sessionEditLocks sync.Map
+
 	startedAt time.Time
 	version   string
+}
+
+// lockForTaskEdit returns the mutex serializing handleTaskEdit calls that
+// share the given session/task key, creating it on first use. The caller
+// locks it for the whole read-fire-write sequence and unlocks via defer.
+func (cs *ControlServer) lockForTaskEdit(sessionID, taskID string) *sync.Mutex {
+	key := "task:" + taskID
+	if sessionID != "" {
+		key = "sess:" + sessionID
+	}
+	v, _ := cs.sessionEditLocks.LoadOrStore(key, &sync.Mutex{})
+	return v.(*sync.Mutex)
 }
 
 // maxReadyWait caps how long a single cli.ready request may block waiting
@@ -471,6 +501,17 @@ func (cs *ControlServer) handleTaskEdit(ctx context.Context, req Request) (TaskE
 	if cs.authoring == nil {
 		return TaskEditResult{}, errors.New("authoring service not configured")
 	}
+
+	// Serialize the whole read(EditTask)-fire-write sequence per
+	// session/task (finding #4) — see sessionEditLocks' doc comment. Held
+	// across the EditTask call too, not just FireManual onward: EditTask's
+	// return value IS the AgentSessionID read this is protecting, so a
+	// second caller must not perform that read until the first caller's
+	// UpdateAgentSessionID write (if any) has landed.
+	mu := cs.lockForTaskEdit(req.SessionID, req.TaskID)
+	mu.Lock()
+	defer mu.Unlock()
+
 	res, err := cs.authoring.EditTask(ctx, req.SessionID, req.TaskID)
 	if err != nil {
 		return TaskEditResult{}, err
