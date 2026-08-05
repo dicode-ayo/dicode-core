@@ -11,7 +11,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dicode/dicode/pkg/db"
 	"github.com/dicode/dicode/pkg/ipc"
+	"github.com/dicode/dicode/pkg/registry"
+	"github.com/dicode/dicode/pkg/task"
 	"go.uber.org/zap"
 )
 
@@ -47,17 +50,40 @@ func (f *fakeAuthoring) EditTask(_ context.Context, sessionID, taskID string) (i
 
 func (f *fakeAuthoring) SaveTask(_ context.Context, sessionID string) error   { return f.saveErr }
 func (f *fakeAuthoring) CancelTask(_ context.Context, sessionID string) error { return f.cancelErr }
-func (f *fakeAuthoring) WebUIBaseURL() string                                 { return "http://localhost:8080" }
+func (f *fakeAuthoring) UpdateAgentSessionID(_ context.Context, sessionID, agentSessionID string) error {
+	return nil
+}
+func (f *fakeAuthoring) WebUIBaseURL() string { return "http://localhost:8080" }
 
 // dialTestClient boots a ControlServer wired to auth and returns a connected
-// ControlClient plus a cleanup func.
+// ControlClient plus a cleanup func. A "buildin/task-create" task is
+// registered and the server's create-task default points at it, backed by
+// aiTurnEngine, so any prompt threaded through cmdTaskCreate --ai /
+// cmdTaskEdit's positional prompt args (#568) fires a real (fake) turn
+// instead of tripping the "no create task configured" guard — most of these
+// tests exist to check flag-parsing and stdout/stderr splitting, not the
+// AI-threading wiring itself, which pkg/ipc's control_task_authoring_test.go
+// covers directly.
 func dialTestClient(t *testing.T, auth ipc.AuthoringService) (*ipc.ControlClient, func()) {
 	t.Helper()
 	dir := t.TempDir()
 	socketPath := filepath.Join(dir, "ctrl.sock")
 	tokenPath := filepath.Join(dir, "ctrl.token")
 
-	cs, err := ipc.NewControlServer(socketPath, tokenPath, nil, &noopEngine{}, nil, ipc.MetricsProvider{}, "test", zap.NewNop(), nil, "")
+	d, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("db: %v", err)
+	}
+	t.Cleanup(func() { d.Close() })
+	reg := registry.New(d)
+	if err := reg.Register(&task.Spec{
+		ID: "buildin/task-create", Name: "task-create",
+		Trigger: task.TriggerConfig{Manual: true}, Enabled: true,
+	}); err != nil {
+		t.Fatalf("register task-create: %v", err)
+	}
+
+	cs, err := ipc.NewControlServer(socketPath, tokenPath, reg, &aiTurnEngine{}, nil, ipc.MetricsProvider{}, "test", zap.NewNop(), nil, "", "buildin/task-create")
 	if err != nil {
 		t.Fatalf("NewControlServer: %v", err)
 	}
@@ -106,6 +132,21 @@ func (noopEngine) ActiveRunCount() int     { return 0 }
 func (noopEngine) ActiveTaskSlots() int    { return 0 }
 func (noopEngine) MaxConcurrentTasks() int { return 0 }
 func (noopEngine) WaitingTasks() int       { return 0 }
+
+// aiTurnEngine embeds noopEngine but fires and settles a successful AI turn,
+// so dialTestClient's registered "buildin/task-create" can actually be
+// "fired" by handleTaskEdit's prompt-threading branch (#568) without any
+// individual test having to wire its own engine just to get past the guard.
+type aiTurnEngine struct {
+	noopEngine
+}
+
+func (aiTurnEngine) FireManual(context.Context, string, map[string]string) (string, error) {
+	return "run-cli-ai", nil
+}
+func (aiTurnEngine) WaitRunSettled(context.Context, string) (ipc.RunResult, error) {
+	return ipc.RunResult{RunID: "run-cli-ai", Status: "success", ReturnValue: map[string]any{}}, nil
+}
 
 // captureOutput redirects os.Stdout and os.Stderr around fn and returns what
 // each captured. The CLI verbs write directly to the process streams, so this

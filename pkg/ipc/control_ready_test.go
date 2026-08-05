@@ -132,7 +132,7 @@ func readyRegressionEnv(t *testing.T, ready <-chan struct{}) (net.Conn, *registr
 	t.Cleanup(func() { _ = d.Close() })
 	reg := registry.New(d)
 
-	cs, err := NewControlServer(socketPath, tokenPath, reg, &mockEngine{}, nil, MetricsProvider{}, "test", zap.NewNop(), nil, "")
+	cs, err := NewControlServer(socketPath, tokenPath, reg, &mockEngine{}, nil, MetricsProvider{}, "test", zap.NewNop(), nil, "", "")
 	if err != nil {
 		t.Fatalf("NewControlServer: %v", err)
 	}

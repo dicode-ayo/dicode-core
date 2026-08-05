@@ -27,7 +27,7 @@ func controlTestEnv(t *testing.T, mp MetricsProvider) (net.Conn, func()) {
 	log := zap.NewNop()
 	eng := &mockEngine{}
 
-	cs, err := NewControlServer(socketPath, tokenPath, nil, eng, nil, mp, "test", log, nil, "")
+	cs, err := NewControlServer(socketPath, tokenPath, nil, eng, nil, mp, "test", log, nil, "", "")
 	if err != nil {
 		t.Fatalf("NewControlServer: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestControl_Handshake_EmitsEmptyTaskAndRunIDFields(t *testing.T) {
 	socketPath := filepath.Join(dir, "ctrl.sock")
 	tokenPath := filepath.Join(dir, "ctrl.token")
 
-	cs, err := NewControlServer(socketPath, tokenPath, nil, &mockEngine{}, nil, MetricsProvider{}, "test", zap.NewNop(), nil, "")
+	cs, err := NewControlServer(socketPath, tokenPath, nil, &mockEngine{}, nil, MetricsProvider{}, "test", zap.NewNop(), nil, "", "")
 	if err != nil {
 		t.Fatalf("NewControlServer: %v", err)
 	}
@@ -287,7 +287,7 @@ func TestControl_AI_FiresConfiguredTask_AndReturnsReply(t *testing.T) {
 		},
 	}
 
-	cs, err := NewControlServer(socketPath, tokenPath, reg, eng, nil, MetricsProvider{}, "test", zap.NewNop(), nil, "buildin/dicodai")
+	cs, err := NewControlServer(socketPath, tokenPath, reg, eng, nil, MetricsProvider{}, "test", zap.NewNop(), nil, "buildin/dicodai", "")
 	if err != nil {
 		t.Fatalf("NewControlServer: %v", err)
 	}
@@ -384,7 +384,7 @@ func TestControl_AI_NumericSessionID(t *testing.T) {
 		},
 	}
 
-	cs, err := NewControlServer(socketPath, tokenPath, reg, eng, nil, MetricsProvider{}, "test", zap.NewNop(), nil, "buildin/dicodai")
+	cs, err := NewControlServer(socketPath, tokenPath, reg, eng, nil, MetricsProvider{}, "test", zap.NewNop(), nil, "buildin/dicodai", "")
 	if err != nil {
 		t.Fatalf("NewControlServer: %v", err)
 	}
@@ -446,7 +446,7 @@ func TestControl_AI_NoDefault_NoOverride_ReturnsError(t *testing.T) {
 	defer d.Close()
 	reg := registry.New(d)
 
-	cs, err := NewControlServer(socketPath, tokenPath, reg, &mockEngine{}, nil, MetricsProvider{}, "test", zap.NewNop(), nil, "")
+	cs, err := NewControlServer(socketPath, tokenPath, reg, &mockEngine{}, nil, MetricsProvider{}, "test", zap.NewNop(), nil, "", "")
 	if err != nil {
 		t.Fatalf("NewControlServer: %v", err)
 	}
