@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -86,14 +87,16 @@ type ControlServer struct {
 	// overwrite each other's persisted run-group correlation id (finding
 	// #4, a TOCTOU: read at EditTask, long FireManual/WaitRunSettled round
 	// trip, write at UpdateAgentSessionID, no lock between). Keyed by
-	// req.SessionID when the caller supplies one, else by req.TaskID (the
-	// common CLI shape: `dicode task edit <id> "<prompt>"`, no --session) —
-	// see lockForTaskEdit. Calls against a DIFFERENT key are not serialized
-	// against each other, so unrelated concurrent edits stay fully
-	// concurrent. sync.Map's zero value is ready to use; values are
-	// *sync.Mutex, created lazily on first use and never removed (the
-	// authoring-session keyspace is small and long-lived relative to a
-	// process lifetime, so this isn't a practical leak).
+	// source (see lockForTaskEdit) — EditTask's single-session-per-source
+	// invariant means the source IS the session's identity, so this is the
+	// one key that's canonical regardless of which of the two request
+	// shapes (`task edit <id> "<prompt>"` vs `--session <sid>`) a caller
+	// used to reach the SAME open session. Calls against a DIFFERENT
+	// source are not serialized against each other, so unrelated
+	// concurrent edits stay fully concurrent. sync.Map's zero value is
+	// ready to use; values are *sync.Mutex, created lazily on first use and
+	// never removed (the source keyspace is small and long-lived relative
+	// to a process lifetime, so this isn't a practical leak).
 	sessionEditLocks sync.Map
 
 	startedAt time.Time
@@ -101,12 +104,37 @@ type ControlServer struct {
 }
 
 // lockForTaskEdit returns the mutex serializing handleTaskEdit calls that
-// share the given session/task key, creating it on first use. The caller
-// locks it for the whole read-fire-write sequence and unlocks via defer.
+// resolve to the same authoring session, creating it on first use. The
+// caller locks it for the whole read-fire-write sequence and unlocks via
+// defer.
+//
+// Keyed by SOURCE, not by the caller's raw sessionID/taskID: EditTask
+// resolves both "task edit <id> \"<prompt>\"" (taskID only) and "task edit
+// <id> \"<prompt>\" --session <sid>" (both) to the SAME open session via
+// GetOpenForSource, so a lock keyed on whichever field happened to be set
+// would let those two request shapes race right past each other on the one
+// session they both actually touch. Mirrors authoring_service.go's EditTask
+// source derivation exactly (taskID's prefix up to "/") so the key always
+// matches the session EditTask will actually resolve to. sessionID alone
+// (no taskID — a caller resuming purely by session id, not exercised by the
+// CLI today but a valid Request shape) has no source to derive without the
+// same racy DB read this lock exists to protect, so it falls back to a
+// session-keyed lock in that case; that shape never collides with a
+// taskID-bearing call anyway, since EditTask requires taskID whenever
+// sessionID is empty.
 func (cs *ControlServer) lockForTaskEdit(sessionID, taskID string) *sync.Mutex {
-	key := "task:" + taskID
-	if sessionID != "" {
+	var key string
+	switch {
+	case taskID != "":
+		source := taskID
+		if idx := strings.Index(source, "/"); idx > 0 {
+			source = source[:idx]
+		}
+		key = "source:" + source
+	case sessionID != "":
 		key = "sess:" + sessionID
+	default:
+		key = "unkeyed"
 	}
 	v, _ := cs.sessionEditLocks.LoadOrStore(key, &sync.Mutex{})
 	return v.(*sync.Mutex)

@@ -534,6 +534,68 @@ func TestControl_TaskEdit_ConcurrentSameSession_Serializes(t *testing.T) {
 	}
 }
 
+// TestControl_TaskEdit_ConcurrentTaskOnlyAndSession_Serializes covers the gap
+// TestControl_TaskEdit_ConcurrentSameSession_Serializes doesn't: two DIFFERENT
+// request shapes that EditTask resolves to the SAME open session must still
+// serialize against each other. `dicode task edit <id> "<prompt>"` sends
+// TaskID only; `dicode task edit <id> "<prompt>" --session <sid>` sends both.
+// lockForTaskEdit must canonicalize on source (derived from TaskID) rather
+// than keying on whichever of SessionID/TaskID happened to be set, or these
+// two calls would land on different locks and race right past each other on
+// the one session they both actually touch.
+func TestControl_TaskEdit_ConcurrentTaskOnlyAndSession_Serializes(t *testing.T) {
+	m := &mockAuthoring{editResult: AuthoringEditResult{SessionID: "s1", TaskID: "ai-scratch/t"}}
+	eng := &gatedTurnEngine{
+		fireCh:  make(chan map[string]string),
+		proceed: make(chan struct{}),
+		sessID:  "asid-1",
+	}
+	cs := newAuthoringAIControl(t, m, eng)
+
+	// Call 1: task-only shape (no --session).
+	call1Done := make(chan error, 1)
+	go func() {
+		_, err := cs.handleTaskEdit(context.Background(), Request{TaskID: "ai-scratch/t", Prompt: "first message"})
+		call1Done <- err
+	}()
+	select {
+	case <-eng.fireCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("call 1 never fired")
+	}
+
+	// Call 2: task+session shape, resolving (per mockAuthoring.EditTask,
+	// which ignores its inputs and always returns editResult) to the exact
+	// same session as call 1. Must block, not race ahead.
+	call2Done := make(chan error, 1)
+	go func() {
+		_, err := cs.handleTaskEdit(context.Background(), Request{TaskID: "ai-scratch/t", SessionID: "s1", Prompt: "second message"})
+		call2Done <- err
+	}()
+
+	select {
+	case params2 := <-eng.fireCh:
+		t.Fatalf("call 2 (task+session shape) fired while call 1 (task-only shape) was still in flight — different lock keys for the same session: %v", params2)
+	case <-time.After(200 * time.Millisecond):
+		// Expected: blocked on the same lock as call 1.
+	}
+
+	eng.proceed <- struct{}{}
+	if err := <-call1Done; err != nil {
+		t.Fatalf("call 1: %v", err)
+	}
+
+	select {
+	case <-eng.fireCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("call 2 never fired after call 1 released the lock")
+	}
+	eng.proceed <- struct{}{}
+	if err := <-call2Done; err != nil {
+		t.Fatalf("call 2: %v", err)
+	}
+}
+
 func TestControl_TaskSave(t *testing.T) {
 	m := &mockAuthoring{}
 	cs := newAuthoringControl(m)

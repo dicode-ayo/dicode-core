@@ -274,6 +274,9 @@ func TestAuthoringSessionStore_UpdateAgentSessionID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
+	if got == nil {
+		t.Fatal("Get returned nil for sess-agent")
+	}
 	if got.AgentSessionID != nil {
 		t.Fatalf("AgentSessionID = %v before any turn, want nil", got.AgentSessionID)
 	}
@@ -286,6 +289,9 @@ func TestAuthoringSessionStore_UpdateAgentSessionID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get after update: %v", err)
 	}
+	if got == nil {
+		t.Fatal("Get after update returned nil for sess-agent")
+	}
 	if got.AgentSessionID == nil || *got.AgentSessionID != "asid-1" {
 		t.Errorf("AgentSessionID = %v, want asid-1", got.AgentSessionID)
 	}
@@ -297,6 +303,9 @@ func TestAuthoringSessionStore_UpdateAgentSessionID(t *testing.T) {
 	got, err = store.Get(ctx, "sess-agent")
 	if err != nil {
 		t.Fatalf("Get after 2nd update: %v", err)
+	}
+	if got == nil {
+		t.Fatal("Get after 2nd update returned nil for sess-agent")
 	}
 	if got.AgentSessionID == nil || *got.AgentSessionID != "asid-2" {
 		t.Errorf("AgentSessionID after 2nd update = %v, want asid-2", got.AgentSessionID)
@@ -331,6 +340,9 @@ func TestAuthoringSessionStore_UpdateAgentSessionID_BlankIsNoop(t *testing.T) {
 	got, err := store.Get(ctx, "sess-blank")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
+	}
+	if got == nil {
+		t.Fatal("Get returned nil for sess-blank")
 	}
 	if got.AgentSessionID == nil || *got.AgentSessionID != "asid-1" {
 		t.Errorf("AgentSessionID = %v, want unchanged asid-1", got.AgentSessionID)
