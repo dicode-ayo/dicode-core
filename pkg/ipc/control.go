@@ -438,6 +438,8 @@ func (cs *ControlServer) handleTaskCreate(ctx context.Context, req Request) (Tas
 	out.SessionID = edit.SessionID
 	out.WebUIURL = edit.WebUIURL
 	out.Reply = edit.Reply
+	out.RunID = edit.RunID
+	out.Suspended = edit.Suspended
 	return out, nil
 }
 
