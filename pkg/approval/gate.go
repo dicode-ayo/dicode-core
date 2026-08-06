@@ -87,6 +87,37 @@ type Gate struct {
 	// caveats as above.
 	approvedResolved map[string]string
 
+	// approving holds the task IDs for which approve() is currently in
+	// flight, from the moment it confirms id is pending through the moment it
+	// has either promoted or abandoned that pendingEntry into
+	// approvedFiles/approvedResolved. Admit's already-approved fast path (the
+	// g.lock.Approved(id, hash) case) consults it before touching pending or
+	// approvedFiles for that id.
+	//
+	// Why this is needed: Admit's fast path becomes reachable for id the
+	// moment g.lock.Record lands inside approve() — but approve() still has
+	// real work left after that (g.arm, which must run outside g.mu since it
+	// can be slow/do IO, then the pending->approvedFiles promotion). Without
+	// this marker, a concurrent re-Admit of the same id at the same
+	// newly-approved hash — e.g. a source reload re-emitting EventAdded for a
+	// task whose content didn't change — can land in that window and race
+	// approve()'s own promotion: Admit's clearPending deletes the very
+	// pendingEntry approve() still needs to read, and its
+	// snapshotApprovedIfMissing sees approvedFiles[id] already non-nil (the
+	// PREVIOUS approved generation) and skips refreshing it, so it persists a
+	// cache entry pairing the new hash with stale pre-promotion content. Once
+	// Admit's clearPending wins that race, approve()'s own promotion finds
+	// pending[id] gone and silently gives up (see approve()'s comment), so
+	// nothing ever fixes the mismatch. Marking id in-flight makes Admit's fast
+	// path defer entirely to approve() for the pending/approvedFiles/persist
+	// bookkeeping — it still arms (arming twice is already normal: every
+	// auto-approve Admit path and approve() itself call arm independently) —
+	// so approve() is guaranteed to find its own pendingEntry undisturbed when
+	// it resumes.
+	//
+	// Guarded by mu like every other in-memory map here.
+	approving map[string]struct{}
+
 	// snapCache persists approvedFiles/approvedResolved to disk so a restart
 	// doesn't lose the diff baseline (#642). nil disables persistence
 	// entirely (every snapshotCache method tolerates a nil receiver) — set
@@ -134,6 +165,7 @@ func NewGate(policy Policy, lock *Lock, cacheDir string, arm func(task.Kinded) e
 		admitted:         map[string]task.Kinded{},
 		approvedFiles:    map[string]map[string]snapshotValue{},
 		approvedResolved: map[string]string{},
+		approving:        map[string]struct{}{},
 		snapCache:        newSnapshotCache(cacheDir),
 	}
 }
@@ -222,6 +254,21 @@ func (g *Gate) Admit(k task.Kinded) (armed bool, err error) {
 		by = ApprovedByGateDisabled
 	case g.lock.Approved(id, hash):
 		// Already approved at exactly this hash; keep the original record.
+		if g.approveInFlight(id) {
+			// A concurrent approve() call is between recording this exact
+			// hash and promoting its matching pending snapshot into
+			// approvedFiles/approvedResolved — see the approving field's
+			// doc comment for the exact interleaving this avoids. Racing
+			// ahead with our own clearPending/snapshotApprovedIfMissing/
+			// persist here would either delete the pendingEntry approve()
+			// still needs, or persist approvedFiles' pre-promotion (stale)
+			// content tagged with this hash. Just arm: approve() owns the
+			// pending/approvedFiles/persist bookkeeping for this id and
+			// will finish it momentarily, and arming twice for the same
+			// admit is already normal (every auto-approve path below and
+			// approve() itself call arm unconditionally).
+			return true, g.arm(k)
+		}
 		g.clearPending(id)
 		g.snapshotApprovedIfMissing(id, taskDirOf(k))
 		g.recordApprovedResolved(id, k)
@@ -427,10 +474,24 @@ func (g *Gate) ApproveIfHash(id, hash string) error {
 func (g *Gate) approve(id, wantHash, by string) error {
 	g.mu.Lock()
 	ent, ok := g.pending[id]
+	if ok {
+		// Mark id in-flight before releasing mu, covering everything from
+		// here through the deferred clear below — including g.lock.Record
+		// just past this point, which is exactly when Admit's
+		// already-approved fast path for this id/hash first becomes
+		// reachable. See the approving field's doc comment for why this
+		// window needs closing and what it protects against.
+		g.approving[id] = struct{}{}
+	}
 	g.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("task %q is not pending approval", id)
 	}
+	defer func() {
+		g.mu.Lock()
+		delete(g.approving, id)
+		g.mu.Unlock()
+	}()
 	if ent.hash == "" {
 		return fmt.Errorf("task %q has no computable content hash; cannot approve", id)
 	}
@@ -451,6 +512,12 @@ func (g *Gate) approve(id, wantHash, by string) error {
 	// cur is read fresh here, so cur.files is guaranteed to be the exact
 	// snapshot pendingEntry paired with cur.hash — see pendingEntry's doc
 	// comment on why hash and files can never disagree on generation.
+	//
+	// A concurrent Admit at the SAME hash (rather than a newer one) cannot
+	// have deleted pending[id] out from under us here: the approving marker
+	// set above makes Admit's already-approved fast path defer to us for
+	// this id instead of racing clearPending against this exact promotion —
+	// see the approving field's doc comment.
 	g.mu.Lock()
 	promoted := false
 	if cur, ok := g.pending[id]; ok && cur.hash == ent.hash {
@@ -581,6 +648,17 @@ func (g *Gate) clearPending(id string) {
 	g.mu.Lock()
 	delete(g.pending, id)
 	g.mu.Unlock()
+}
+
+// approveInFlight reports whether id currently has an approve() call
+// in-flight — between committing its hash to dicode.lock and either
+// promoting or abandoning the matching pendingEntry. See the approving
+// field's doc comment.
+func (g *Gate) approveInFlight(id string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	_, ok := g.approving[id]
+	return ok
 }
 
 // SourceOf returns the source namespace of a task ID — its first path

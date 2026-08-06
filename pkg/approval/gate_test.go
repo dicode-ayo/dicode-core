@@ -327,6 +327,105 @@ func TestApproveArmFailureKeepsPending(t *testing.T) {
 	}
 }
 
+// TestApproveRacingReAdmitPromotesCorrectSnapshot is the regression for the
+// approve()/Admit race identified in the #642 follow-up security review:
+// approve() commits the pending hash to dicode.lock (via g.lock.Record) —
+// which is exactly what makes Admit's already-approved fast path reachable
+// for that id/hash — and only afterward (past g.arm, which can be slow/do
+// IO) promotes the matching pendingEntry into approvedFiles/approvedResolved.
+//
+// Without the fix, a concurrent re-Admit of the SAME task at the SAME hash
+// landing in that window — a legitimate scenario: e.g. a source reload
+// re-emitting EventAdded for a task whose content on disk didn't change —
+// takes the already-approved fast path itself: it deletes the very
+// pendingEntry approve() still needs (g.clearPending), and its
+// snapshotApprovedIfMissing sees approvedFiles[id] already non-nil (the
+// PRIOR approved generation's content) and skips refreshing it. approve()
+// then resumes, finds its own pendingEntry gone, and silently gives up on
+// promoting — so the newly-approved hash ends up paired with stale
+// pre-promotion content in approvedFiles (and, were persistence enabled,
+// in the on-disk cache too), corrupting the Diff baseline for good.
+//
+// Reproduced deterministically without real goroutines: the fake arm
+// callback below — invoked by approve() strictly between its g.lock.Record
+// call and its own pending->approvedFiles promotion — itself calls g.Admit
+// with the exact same (now-approved) hash. That is precisely the
+// interleaving the finding describes, driven from a single goroutine.
+func TestApproveRacingReAdmitPromotesCorrectSnapshot(t *testing.T) {
+	lock, err := LoadLock(filepath.Join(t.TempDir(), LockFileName))
+	if err != nil {
+		t.Fatalf("LoadLock: %v", err)
+	}
+	g := NewGate(enabledPolicy(), lock, "", func(task.Kinded) error { return nil }, nil)
+
+	root := t.TempDir()
+	spec := writeTaskDir(t, root, "repo/deploy", "F0 content\n")
+
+	// Get the task approved at F0 first, so approvedFiles[id] starts out
+	// non-nil (holding the PRIOR approved generation) — the precondition
+	// that makes snapshotApprovedIfMissing's "already cached, skip" guard
+	// bite for the race below, instead of the (harmless) first-ever-Admit
+	// case where approvedFiles[id] starts nil.
+	if armed, err := g.Admit(spec); err != nil || armed {
+		t.Fatalf("Admit F0 = (%v, %v), want pending", armed, err)
+	}
+	if err := g.Approve("repo/deploy"); err != nil {
+		t.Fatalf("Approve F0: %v", err)
+	}
+
+	// Content changes to F1; the task re-pends at a new hash H1.
+	if err := os.WriteFile(filepath.Join(spec.TaskDir, "task.js"), []byte("F1 content\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if armed, err := g.Admit(spec); err != nil || armed {
+		t.Fatalf("Admit F1 = (%v, %v), want pending", armed, err)
+	}
+
+	// Install the race-injecting arm hook, then approve the F1 pend. The
+	// injected Admit fires exactly once, from inside approve()'s own arm()
+	// call — i.e. after g.lock.Record(id, H1, ...) has already landed but
+	// before approve() gets back to its own pending->approvedFiles
+	// promotion.
+	var injected bool
+	var reAdmitErr error
+	g.arm = func(task.Kinded) error {
+		if !injected {
+			injected = true
+			_, reAdmitErr = g.Admit(spec)
+		}
+		return nil
+	}
+	if err := g.Approve("repo/deploy"); err != nil {
+		t.Fatalf("Approve F1: %v", err)
+	}
+	if !injected {
+		t.Fatal("arm hook never fired — test is not exercising the intended interleaving")
+	}
+	if reAdmitErr != nil {
+		t.Fatalf("injected concurrent Admit(H1) during approve(): %v", reAdmitErr)
+	}
+
+	// The correct content (F1, the version actually just approved) must be
+	// the promoted baseline — not F0, the stale pre-promotion snapshot the
+	// race would otherwise leave behind.
+	g.mu.Lock()
+	files := g.approvedFiles["repo/deploy"]
+	g.mu.Unlock()
+	got, ok := files["task.js"]
+	if !ok {
+		t.Fatalf("approvedFiles missing task.js entirely: %+v", files)
+	}
+	if strings.Contains(got.Content, "F0 content") {
+		t.Fatalf("approvedFiles still holds the stale pre-promotion F0 content: %q", got.Content)
+	}
+	if !strings.Contains(got.Content, "F1 content") {
+		t.Fatalf("approvedFiles = %q, want it to contain the just-approved F1 content", got.Content)
+	}
+	if g.IsPending("repo/deploy") {
+		t.Fatal("task still pending after a successful approve()")
+	}
+}
+
 func TestHashChangeRePends(t *testing.T) {
 	g, _, lock := newTestGate(t, enabledPolicy())
 	spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "v1")
