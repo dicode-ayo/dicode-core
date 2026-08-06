@@ -136,6 +136,33 @@ func TestGuard_FSDenyWinsOverCoveringWriteRoot(t *testing.T) {
 	}
 }
 
+// TestGuard_FSDenyDirectoryCoversNestedFile proves the deny set covers a
+// denied *directory*, not just an exact-path match: with fs_write on the
+// data dir and fs_deny on a subdirectory within it (mirroring the
+// approval-snapshot cache dir added in protectedPaths), a write to a new
+// file nested one level inside that denied directory is rejected even
+// though the file's own realpath never equals the denied directory's
+// realpath.
+func TestGuard_FSDenyDirectoryCoversNestedFile(t *testing.T) {
+	dir := t.TempDir()
+	deniedDir := filepath.Join(dir, "approval-snapshots")
+	if err := os.Mkdir(deniedDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	nested := filepath.Join(deniedDir, "abc123.json")
+	pol := guardPolicy{
+		Net:     guardNet{Mode: "unrestricted"},
+		Run:     guardRun{Mode: "deny"},
+		FSWrite: []string{dir},
+		FSDeny:  []string{deniedDir},
+	}
+	out, err := runGuardScript(t, pol, fmt.Sprintf("open(%q, 'w')", nested))
+	requireDenied(t, out, err, "permissions.fs")
+	if _, statErr := os.Stat(nested); statErr == nil {
+		t.Error("write nested inside denied directory still created the file")
+	}
+}
+
 func TestGuard_FSSymlinkDenied(t *testing.T) {
 	link := filepath.Join(t.TempDir(), "link")
 	pol := guardPolicy{Net: guardNet{Mode: "unrestricted"}, Run: guardRun{Mode: "deny"}}

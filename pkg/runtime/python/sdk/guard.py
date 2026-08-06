@@ -74,8 +74,15 @@ def _dicode_install_guard():
             return True  # fd-based op; no path to match against
         # Compare against the deny set on the canonical (realpath) form so a
         # write reaching a protected path through a symlink still matches.
-        if _os.path.realpath(n) in write_denied:
-            return False
+        # Denied entries may be individual files (dicode.lock) or directories
+        # (the approval-snapshot cache), so use the same prefix-match idiom
+        # as write_roots below rather than exact membership — otherwise a
+        # write to a file nested inside a denied directory would slip
+        # through.
+        rn = _os.path.realpath(n)
+        for denied in write_denied:
+            if rn == denied or rn.startswith(denied + sep):
+                return False
         n = _os.path.abspath(n)
         if n.endswith(".pyc") or (sep + "__pycache__") in n:
             return True
