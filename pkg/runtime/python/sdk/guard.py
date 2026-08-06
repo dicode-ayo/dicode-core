@@ -158,8 +158,23 @@ def _dicode_install_guard():
         elif event in ("os.rename", "shutil.move"):
             _check_write(args[0], event)
             _check_write(args[1], event)
-        elif event in ("os.symlink", "os.link"):
+        elif event == "os.symlink":
             # The mutation is the new link at the destination (args[1]).
+            # args[0] is the symlink target string, which need not exist as
+            # a real path (and often doesn't), so it is not checked.
+            _check_write(args[1], event)
+        elif event == "os.link":
+            # Audit args are (src, dst, src_dir_fd, dst_dir_fd). Unlike
+            # os.symlink, args[0] here is an existing file being aliased —
+            # a hardlink makes dst a second name for the SAME inode as src
+            # (no symlink-style indirection, so realpath resolution in
+            # _write_allowed can't "unmask" it the way it does for
+            # writes-through-a-symlink). Without checking the source, a task
+            # could hardlink a denied file (e.g. an approval-snapshot) into
+            # its own writable directory and then write through the alias to
+            # mutate the denied file's real content. Check both ends, same
+            # as os.rename/shutil.move above.
+            _check_write(args[0], event)
             _check_write(args[1], event)
         elif event in ("os.chmod", "os.chown"):
             _check_write(args[0], event)

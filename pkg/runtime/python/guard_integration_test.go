@@ -163,6 +163,41 @@ func TestGuard_FSDenyDirectoryCoversNestedFile(t *testing.T) {
 	}
 }
 
+// TestGuard_FSHardlinkSourceDenied proves os.link checks the *source* path
+// (args[0]) against fs_deny, not just the destination. Unlike os.symlink, a
+// hardlink makes the new name an alias for the SAME inode as the source —
+// there is no realpath indirection to "unmask" the source at write time — so
+// without a source-side check a task with any writable directory could
+// hardlink a denied file into it and then write through the alias to mutate
+// the denied file's real content, defeating fs_deny entirely.
+func TestGuard_FSHardlinkSourceDenied(t *testing.T) {
+	writeDir := t.TempDir()
+	denyDir := t.TempDir()
+	victim := filepath.Join(denyDir, "protected.json")
+	if err := os.WriteFile(victim, []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(writeDir, "alias.json")
+	pol := guardPolicy{
+		Net:     guardNet{Mode: "unrestricted"},
+		Run:     guardRun{Mode: "deny"},
+		FSWrite: []string{writeDir},
+		FSDeny:  []string{victim},
+	}
+	out, err := runGuardScript(t, pol, fmt.Sprintf("import os\nos.link(%q, %q)", victim, alias))
+	requireDenied(t, out, err, "permissions.fs")
+	if _, statErr := os.Lstat(alias); statErr == nil {
+		t.Error("hardlink of denied source was still created")
+	}
+	content, readErr := os.ReadFile(victim)
+	if readErr != nil {
+		t.Fatalf("read victim: %v", readErr)
+	}
+	if string(content) != "original" {
+		t.Errorf("victim content mutated: got %q", content)
+	}
+}
+
 func TestGuard_FSSymlinkDenied(t *testing.T) {
 	link := filepath.Join(t.TempDir(), "link")
 	pol := guardPolicy{Net: guardNet{Mode: "unrestricted"}, Run: guardRun{Mode: "deny"}}
