@@ -1,12 +1,25 @@
 package daemon
 
 import (
+	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"go.uber.org/zap"
+
+	"github.com/dicode/dicode/pkg/approval"
 	"github.com/dicode/dicode/pkg/config"
+	"github.com/dicode/dicode/pkg/db"
+	"github.com/dicode/dicode/pkg/registry"
+	denoruntime "github.com/dicode/dicode/pkg/runtime/deno"
+	pythonruntime "github.com/dicode/dicode/pkg/runtime/python"
+	"github.com/dicode/dicode/pkg/secrets"
 	"github.com/dicode/dicode/pkg/task"
+	"github.com/dicode/dicode/pkg/trigger"
 )
 
 // TestResolveDataDir documents the resolution order the Docker image
@@ -221,6 +234,86 @@ MIIBFDCBu6ADAgECAgEBMAoGCCqGSM49BAMCMA8xDTALBgNVBAMTBHRlc3QwHhcN
 				t.Errorf("pemContainsCertificate(%q) = %v, want %v", tc.name, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestSetupApprovalGate_ProtectsSnapshotCacheDir is a regression test for the
+// security-review finding on PR #660 / issue #642: the approval gate's
+// sidecar snapshot-cache directory (approval.SnapshotCacheDirName under
+// dataDir) holds "last-approved content" snapshots that snapshotCache.load
+// trusts by comparing a plain, unsigned SHA-256 hash — no HMAC/key material
+// involved — against dicode.lock's current record. A task with a broad or
+// ${DATADIR}-scoped fs-write grant could otherwise forge a cache entry for
+// any task ID and have a malicious content change render as a benign no-op
+// diff on the human review surface. This must be denied the same way
+// dicode.lock/dicode.yaml are.
+//
+// It also pins that the cache directory does not need to exist yet: it is
+// created lazily by snapshotCache.save's os.MkdirAll on first write, and
+// setupApprovalGate runs well before any task has triggered that write.
+func TestSetupApprovalGate_ProtectsSnapshotCacheDir(t *testing.T) {
+	dataDir := t.TempDir()
+	configPath := filepath.Join(dataDir, "dicode.yaml")
+
+	wantCacheDir := filepath.Clean(filepath.Join(dataDir, approval.SnapshotCacheDirName))
+	if _, err := os.Stat(wantCacheDir); err == nil {
+		t.Fatalf("precondition failed: snapshot cache dir %q must not already exist", wantCacheDir)
+	}
+
+	database, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer database.Close()
+
+	reg := registry.New(database)
+	eng := trigger.New(reg, nil, zap.NewNop())
+	rec := registry.NewReconciler(reg, nil, dataDir, zap.NewNop())
+	denoRT := &denoruntime.Runtime{}
+	pythonRT := &pythonruntime.Runtime{}
+
+	noopArm := func(task.Kinded) error { return nil }
+	noopDisarm := func(string) {}
+
+	gate, err := setupApprovalGate(context.Background(), &config.Config{}, configPath, dataDir,
+		database, secrets.Chain{}, eng, denoRT, pythonRT, rec, noopArm, noopDisarm, zap.NewNop())
+	if err != nil {
+		t.Fatalf("setupApprovalGate: %v", err)
+	}
+	if gate == nil {
+		t.Fatal("setupApprovalGate returned a nil gate")
+	}
+
+	for _, tc := range []struct {
+		name string
+		got  []string
+	}{
+		{"deno", denoRT.ProtectedPaths},
+		{"python", pythonRT.ProtectedPaths},
+	} {
+		found := false
+		for _, p := range tc.got {
+			if p == wantCacheDir {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("%s runtime protected paths = %v, want to contain snapshot cache dir %q",
+				tc.name, tc.got, wantCacheDir)
+		}
+		// Sanity: dicode.lock must still be protected too — this test should
+		// fail if that regresses, not just silently pass on the new entry.
+		lockFound := false
+		for _, p := range tc.got {
+			if strings.HasSuffix(p, approval.LockFileName) {
+				lockFound = true
+				break
+			}
+		}
+		if !lockFound {
+			t.Errorf("%s runtime protected paths = %v, want to contain dicode.lock", tc.name, tc.got)
+		}
 	}
 }
 

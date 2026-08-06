@@ -501,6 +501,18 @@ func setupApprovalGate(ctx context.Context, cfg *config.Config, configPath, data
 		return nil, fmt.Errorf("resolve config dir: %w", err)
 	}
 	lockPath := filepath.Join(configDir, approval.LockFileName)
+	// snapshotCacheDir holds the gate's persisted last-approved-content
+	// snapshots (see approval.NewGate below). It must be protected the same
+	// way as dicode.lock/dicode.yaml: snapshotCache.load trusts a cache
+	// entry's plain SHA-256 hash against dicode.lock's current record with no
+	// HMAC/key material involved, so a task with a broad (or
+	// ${DATADIR}-scoped) fs-write grant could otherwise forge a cache file
+	// for any task ID and have a malicious content change render as a
+	// benign no-op diff on the human review surface. canonicalPath tolerates
+	// a not-yet-created path (falls back to filepath.Clean) since this
+	// directory is created lazily by snapshotCache.save's os.MkdirAll on
+	// first write, so protecting it here ahead of that first write is safe.
+	snapshotCacheDir := filepath.Join(dataDir, approval.SnapshotCacheDirName)
 	// Approval-gate state must never be writable by a task. A task with a broad
 	// fs-write grant covering the config dir could otherwise overwrite
 	// dicode.lock to self-approve other pending tasks; deny-write on these paths
@@ -508,7 +520,7 @@ func setupApprovalGate(ctx context.Context, cfg *config.Config, configPath, data
 	// the deny set matches the form a task's write resolves to — a config dir
 	// reached via a symlink would otherwise carry a deny entry that never
 	// matches the canonical write path.
-	protectedPaths := []string{canonicalPath(lockPath)}
+	protectedPaths := []string{canonicalPath(lockPath), canonicalPath(snapshotCacheDir)}
 	if absConfigPath, err := filepath.Abs(configPath); err == nil {
 		protectedPaths = append(protectedPaths, canonicalPath(absConfigPath))
 	}
@@ -575,7 +587,7 @@ func setupApprovalGate(ctx context.Context, cfg *config.Config, configPath, data
 			gatePolicy.TrustedTasks[id] = true
 		}
 	}
-	approvalGate := approval.NewGate(gatePolicy, lock, filepath.Join(dataDir, approval.SnapshotCacheDirName), arm, log)
+	approvalGate := approval.NewGate(gatePolicy, lock, snapshotCacheDir, arm, log)
 	// Pending tasks stay in the registry (API visibility, like Enabled:false)
 	// and remain resolvable by manual / chain / replay fire paths — the fire
 	// guard vetoes those at the engine chokepoint. The same guard also vetoes
