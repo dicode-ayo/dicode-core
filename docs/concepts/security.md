@@ -793,14 +793,54 @@ in any snapshotted file, not only ones provably inside `permissions.env` —
 since the snapshot has no field-path-aware YAML parse and erring toward
 over-redaction is the right tradeoff for a security fix.
 
-**This cache is in-memory only** — like the gate's `pending`/`admitted` maps, it
-is rebuilt by re-`Admit` on daemon restart, not persisted to disk. A diff
-requested immediately after a fresh daemon start, before the reconciler has
-re-admitted a task at least once, has no cached baseline: `Diff.HasBaseline` is
-`false`, and the pending files are reported as `"added"` instead of `"modified"`
-so the UI still shows *something* useful — just without a real "before" to
-compare against. This is a deliberate, documented tradeoff, not a bug: solving
-restart-persistence for the diff cache is out of scope for this change.
+**`approvedFiles`/`approvedResolved` are also persisted to a sidecar cache on
+disk (#642)**, so a daemon restart doesn't lose the diff baseline. The gate's
+`pending`/`admitted` maps stay in-memory-only, rebuilt by re-`Admit` — but every
+write to `approvedFiles[taskID]`/`approvedResolved[taskID]` (the
+already-approved-hash fast path, every auto-approve path, and promotion on a
+successful `Approve`/`ApproveIfHash`) is mirrored to a file under
+`<data_dir>/approval-snapshots/`, one JSON file per task ID (the file name is a
+SHA-256 of the task ID, not the ID itself — task IDs are `/`-namespaced and
+otherwise operator/source-controlled text, neither safe to use directly as a
+path component). Each entry is keyed by task ID and tagged with the content
+hash `dicode.lock` recorded as approved for it at write time.
+
+This is deliberately **not** part of `dicode.lock` itself: the lock is
+documented as human-readable, diffable, and committable, and is meant to travel
+in an operator's git history; this cache holds full (redacted) file content,
+not just a hash, and lives under `data_dir` — the same daemon-private directory
+that already holds the SQLite DB (`pkg/db`) — precisely so it never ends up
+committed alongside the lock.
+
+**Invalidation is hash-based, not time-based or event-based.** On `Admit`, the
+first time a process ever considers a task ID and finds nothing cached
+in-memory for it yet, the gate reads that task's cache file (if any) and
+compares its stored hash against the hash `dicode.lock` *currently* records as
+approved for that ID. A match adopts the cached snapshot as the in-memory
+baseline; anything else — no file, a different hash, a corrupt/unreadable
+file — is treated as no cache at all, exactly the pre-#642 behavior. This is
+what lets the entry require no separate expiry or invalidation logic: it can
+only ever agree with the lock (and get used) or disagree with it (and get
+silently ignored), never go stale in a way that could feed a wrong baseline
+into `Diff`. Forgetting a task (`Gate.Forget`) also deletes its cache file, so
+a later re-added task with the same ID starts clean rather than potentially
+inheriting an orphaned entry.
+
+**Size caps are inherited, not reinvented.** A persisted entry holds exactly
+the same `map[string]snapshotValue` `snapshotDir` already produced under the
+256 KiB-per-file / 200-files-per-task bounds described above — persistence
+serializes what the gate already captured, it does not apply any additional
+limit of its own.
+
+The net effect: a task that is pending approval immediately after a restart —
+the case an operator hits on every `git pull` that triggers a daemon
+restart/upgrade — gets a real diff against its last-approved content as long
+as that task was approved by *some* previous process, not only the current
+one. A task that has *never* been approved in any process (first-ever
+observation) still has no baseline, since there is nothing to have cached: see
+`Diff.HasBaseline` below, still `false` in that case, and the pending files
+still reported as `"added"` instead of `"modified"` so the UI shows *something*
+useful either way.
 
 ### What the diff shows
 

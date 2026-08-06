@@ -63,20 +63,36 @@ type Gate struct {
 	// skips the walk) and promoted from a pendingEntry's own files on a
 	// successful approve(). The current pending (not yet approved) content
 	// snapshot lives on pendingEntry.files itself (see below) rather than in
-	// a standalone map — this is in-memory only, like pending and admitted
-	// above: rebuilt by re-admit on daemon restart, not persisted, so a diff
-	// requested immediately after a restart, before the reconciler has
-	// re-admitted the task, has no baseline (Diff reports HasBaseline=false).
-	// Dir-less (inline) tasks never get a snapshot (see taskDirOf) — nothing
-	// to snapshot.
+	// a standalone map.
+	//
+	// This map itself is in-memory only, like pending and admitted above, and
+	// is rebuilt by re-admit within a process — but unlike those two, every
+	// write to it is also mirrored to the on-disk snapshotCache (see
+	// snapshot_cache.go's persistApprovedSnapshot), keyed by task ID and the
+	// hash dicode.lock currently records as approved. On daemon restart,
+	// Admit's first look at a task consults that cache
+	// (loadCachedApprovedIfMissing) before falling through to the old
+	// no-baseline behavior, so a task that is pending approval right after a
+	// restart still gets a real diff baseline as long as it was ever approved
+	// by a previous process — see docs/concepts/security.md's Pending-Change
+	// Diff section. Dir-less (inline) tasks never get a snapshot (see
+	// taskDirOf) — nothing to snapshot, so nothing to cache either.
 	approvedFiles map[string]map[string]snapshotValue
 
 	// approvedResolved is the rendered resolved-fields text of the
 	// last-approved version, so Diff can show what the post-override
 	// permissions, runtime and trigger actually were — including when the
 	// change came from a taskset override outside the task directory, which
-	// no directory snapshot can see.
+	// no directory snapshot can see. Persisted alongside approvedFiles, same
+	// caveats as above.
 	approvedResolved map[string]string
+
+	// snapCache persists approvedFiles/approvedResolved to disk so a restart
+	// doesn't lose the diff baseline (#642). nil disables persistence
+	// entirely (every snapshotCache method tolerates a nil receiver) — set
+	// this way when NewGate is given an empty cacheDir, e.g. by tests that
+	// don't care about restart survival.
+	snapCache *snapshotCache
 }
 
 // pendingEntry captures the task, the hash observed at decision time, and
@@ -98,7 +114,13 @@ type pendingEntry struct {
 // NewGate builds a Gate. arm is invoked for every task that passes the gate
 // (and again from Approve); it must be safe to call from the reconciler
 // goroutine and from whatever goroutine later calls Approve.
-func NewGate(policy Policy, lock *Lock, arm func(task.Kinded) error, log *zap.Logger) *Gate {
+//
+// cacheDir is the directory (normally a subdirectory of the daemon's
+// data_dir) under which the approved-content snapshot cache is persisted —
+// see snapshot_cache.go. An empty cacheDir disables persistence: Admit and
+// approve behave exactly as before #642, with approvedFiles rebuilt purely
+// in-memory and no diff baseline surviving a restart.
+func NewGate(policy Policy, lock *Lock, cacheDir string, arm func(task.Kinded) error, log *zap.Logger) *Gate {
 	if log == nil {
 		log = zap.NewNop()
 	}
@@ -112,6 +134,7 @@ func NewGate(policy Policy, lock *Lock, arm func(task.Kinded) error, log *zap.Lo
 		admitted:         map[string]task.Kinded{},
 		approvedFiles:    map[string]map[string]snapshotValue{},
 		approvedResolved: map[string]string{},
+		snapCache:        newSnapshotCache(cacheDir),
 	}
 }
 
@@ -180,6 +203,13 @@ func (g *Gate) Admit(k task.Kinded) (armed bool, err error) {
 	g.admitted[id] = k
 	g.mu.Unlock()
 
+	// Restart recovery (#642): if this is the first time this process has
+	// ever considered id, and a previous process's approval left a matching
+	// snapshot on disk, adopt it as the in-memory baseline before making any
+	// admit decision below — including the pending default case, which
+	// otherwise never populates approvedFiles at all.
+	g.loadCachedApprovedIfMissing(id)
+
 	var by string
 	switch {
 	case SourceOf(id) == BuiltinSource:
@@ -195,6 +225,7 @@ func (g *Gate) Admit(k task.Kinded) (armed bool, err error) {
 		g.clearPending(id)
 		g.snapshotApprovedIfMissing(id, taskDirOf(k))
 		g.recordApprovedResolved(id, k)
+		g.persistApprovedSnapshot(id)
 		return true, g.arm(k)
 	case g.Bootstrapping():
 		// Adoption window: seed the current inventory as approved rather
@@ -288,6 +319,7 @@ func (g *Gate) Admit(k task.Kinded) (armed bool, err error) {
 		g.snapshotApproved(id, taskDirOf(k))
 	}
 	g.recordApprovedResolved(id, k)
+	g.persistApprovedSnapshot(id)
 	return true, g.arm(k)
 }
 
@@ -420,14 +452,24 @@ func (g *Gate) approve(id, wantHash, by string) error {
 	// snapshot pendingEntry paired with cur.hash — see pendingEntry's doc
 	// comment on why hash and files can never disagree on generation.
 	g.mu.Lock()
+	promoted := false
 	if cur, ok := g.pending[id]; ok && cur.hash == ent.hash {
 		delete(g.pending, id)
 		if cur.files != nil {
 			g.approvedFiles[id] = cur.files
 			g.approvedResolved[id] = cur.resolved
+			promoted = true
 		}
 	}
 	g.mu.Unlock()
+	// Persist outside the lock, mirroring every other persistApprovedSnapshot
+	// call site (gate.go's Admit paths) — only when this call actually
+	// promoted a snapshot, so a lost promotion race (see the comment above)
+	// cannot persist a cache entry for a hash whose in-memory files were never
+	// actually adopted here.
+	if promoted {
+		g.persistApprovedSnapshot(id)
+	}
 	return nil
 }
 
@@ -440,6 +482,7 @@ func (g *Gate) Forget(id string) {
 	delete(g.approvedFiles, id)
 	delete(g.approvedResolved, id)
 	g.mu.Unlock()
+	g.snapCache.delete(id)
 	if err := g.lock.Remove(id); err != nil {
 		g.log.Warn("approval: lock remove failed",
 			zap.String("task", id), zap.Error(err))

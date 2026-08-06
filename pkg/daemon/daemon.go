@@ -249,7 +249,7 @@ func run(ctx context.Context, cancel context.CancelFunc, cfg *config.Config, con
 	// 7a. Approval gate (#392 phase 1): every new or changed task passes the
 	// trust-on-change gate before its triggers arm. Approval records live in
 	// dicode.lock next to dicode.yaml; trust policy lives in cfg.Approval.
-	approvalGate, err := setupApprovalGate(ctx, cfg, configPath, database, secretsChain, eng, denoRT, pythonRT, rec, arm, disarm, log)
+	approvalGate, err := setupApprovalGate(ctx, cfg, configPath, dataDir, database, secretsChain, eng, denoRT, pythonRT, rec, arm, disarm, log)
 	if err != nil {
 		return err
 	}
@@ -495,7 +495,7 @@ func newArmDisarm(cfg *config.Config, eng *trigger.Engine, gateway *ipc.Gateway,
 // phase 1): protected-path denies, the signed dicode.lock, the bootstrap
 // marker/window handling, the engine/runtime fire-guard wiring, and the
 // reconciler's OnRegister/OnUnregister hooks that drive arm/disarm.
-func setupApprovalGate(ctx context.Context, cfg *config.Config, configPath string, database db.DB, secretsChain secrets.Chain, eng *trigger.Engine, denoRT *denoruntime.Runtime, pythonRT *pythonruntime.Runtime, rec *registry.Reconciler, arm func(task.Kinded) error, disarm func(string), log *zap.Logger) (*approval.Gate, error) {
+func setupApprovalGate(ctx context.Context, cfg *config.Config, configPath, dataDir string, database db.DB, secretsChain secrets.Chain, eng *trigger.Engine, denoRT *denoruntime.Runtime, pythonRT *pythonruntime.Runtime, rec *registry.Reconciler, arm func(task.Kinded) error, disarm func(string), log *zap.Logger) (*approval.Gate, error) {
 	configDir, err := filepath.Abs(filepath.Dir(configPath))
 	if err != nil {
 		return nil, fmt.Errorf("resolve config dir: %w", err)
@@ -575,7 +575,7 @@ func setupApprovalGate(ctx context.Context, cfg *config.Config, configPath strin
 			gatePolicy.TrustedTasks[id] = true
 		}
 	}
-	approvalGate := approval.NewGate(gatePolicy, lock, arm, log)
+	approvalGate := approval.NewGate(gatePolicy, lock, filepath.Join(dataDir, approval.SnapshotCacheDirName), arm, log)
 	// Pending tasks stay in the registry (API visibility, like Enabled:false)
 	// and remain resolvable by manual / chain / replay fire paths — the fire
 	// guard vetoes those at the engine chokepoint. The same guard also vetoes

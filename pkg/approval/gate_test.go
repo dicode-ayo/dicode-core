@@ -58,7 +58,7 @@ func newTestGate(t *testing.T, policy Policy) (*Gate, *fakeArm, *Lock) {
 		t.Fatalf("LoadLock: %v", err)
 	}
 	arm := &fakeArm{}
-	return NewGate(policy, lock, arm.arm, nil), arm, lock
+	return NewGate(policy, lock, "", arm.arm, nil), arm, lock
 }
 
 func enabledPolicy() Policy {
