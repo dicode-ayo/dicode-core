@@ -98,6 +98,40 @@ def _dicode_install_guard():
                 f'permission "w" or "rw" under permissions.fs in task.yaml'
             )
 
+    def _check_no_dir_fd(dir_fd, op):
+        # dir_fd resolves a relative path against an arbitrary open directory
+        # fd instead of the process cwd, which lets a task escape fs_write /
+        # fs_deny entirely (open a handle to a denied or unwritable directory,
+        # then pass its fd here with a bare relative name). It has no
+        # legitimate use in ordinary dicode automation tasks (it exists for
+        # *at()-family race-free filesystem ops), so it is rejected outright
+        # rather than resolved.
+        if dir_fd is not None and dir_fd != -1:
+            raise PermissionError(
+                f"dicode: {op} with dir_fd={dir_fd!r} denied — dir_fd-relative "
+                f"filesystem operations are not permitted for dicode tasks"
+            )
+
+    # os.open cannot be policed via the "open" audit event: that event's args
+    # are documented as exactly (path, mode, flags) and never include dir_fd,
+    # so a call like os.open("name", flags, dir_fd=denied_fd) is invisible to
+    # the hook below — the hook only ever sees the bare relative name and has
+    # no way to know it resolves inside a denied (or otherwise unwritable)
+    # directory. Wrap os.open itself so the dir_fd rejection happens before
+    # the real syscall runs, regardless of whether the task calls it via
+    # `import os; os.open(...)` or any other binding of the same module
+    # object.
+    _real_os_open = _os.open
+
+    def _guarded_os_open(path, flags, mode=0o777, *, dir_fd=None):
+        _check_no_dir_fd(dir_fd, "os.open")
+        return _real_os_open(path, flags, mode)
+
+    # _os IS the os module object (import os as _os), so patching the
+    # attribute here is visible to every other binding of the same module,
+    # including the task's own `import os; os.open(...)`.
+    _os.open = _guarded_os_open
+
     def _is_ip_literal(h):
         try:
             _ipaddress.ip_address(h.strip("[]"))
@@ -147,21 +181,36 @@ def _dicode_install_guard():
                 is_write = any(c in mode for c in "wax+")
             if is_write:
                 _check_write(args[0], "open for writing")
-        elif event in (
-            "os.remove",
-            "os.rmdir",
-            "os.mkdir",
-            "os.truncate",
-            "shutil.rmtree",
-        ):
+        elif event in ("os.remove", "os.rmdir"):
+            # Audit args are (path, dir_fd).
+            _check_no_dir_fd(args[1], event)
+            _check_write(args[0], event)
+        elif event == "os.mkdir":
+            # Audit args are (path, mode, dir_fd).
+            _check_no_dir_fd(args[2], event)
+            _check_write(args[0], event)
+        elif event == "os.truncate":
+            # Audit args are (path, length) — os.truncate has no dir_fd
+            # parameter (the path form already accepts an fd directly).
+            _check_write(args[0], event)
+        elif event == "shutil.rmtree":
             _check_write(args[0], event)
         elif event in ("os.rename", "shutil.move"):
+            # os.rename's audit args are (src, dst, src_dir_fd, dst_dir_fd);
+            # shutil.move's are (src, dst) with no dir_fd slots, so guard the
+            # index lookup.
+            if len(args) > 2:
+                _check_no_dir_fd(args[2], event)
+            if len(args) > 3:
+                _check_no_dir_fd(args[3], event)
             _check_write(args[0], event)
             _check_write(args[1], event)
         elif event == "os.symlink":
-            # The mutation is the new link at the destination (args[1]).
-            # args[0] is the symlink target string, which need not exist as
-            # a real path (and often doesn't), so it is not checked.
+            # Audit args are (src, dst, dir_fd). The mutation is the new
+            # link at the destination (args[1]). args[0] is the symlink
+            # target string, which need not exist as a real path (and often
+            # doesn't), so it is not checked.
+            _check_no_dir_fd(args[2], event)
             _check_write(args[1], event)
         elif event == "os.link":
             # Audit args are (src, dst, src_dir_fd, dst_dir_fd). Unlike
@@ -174,9 +223,17 @@ def _dicode_install_guard():
             # its own writable directory and then write through the alias to
             # mutate the denied file's real content. Check both ends, same
             # as os.rename/shutil.move above.
+            _check_no_dir_fd(args[2], event)
+            _check_no_dir_fd(args[3], event)
             _check_write(args[0], event)
             _check_write(args[1], event)
-        elif event in ("os.chmod", "os.chown"):
+        elif event == "os.chmod":
+            # Audit args are (path, mode, dir_fd).
+            _check_no_dir_fd(args[2], event)
+            _check_write(args[0], event)
+        elif event == "os.chown":
+            # Audit args are (path, uid, gid, dir_fd).
+            _check_no_dir_fd(args[3], event)
             _check_write(args[0], event)
         elif event == "socket.connect":
             if net_mode == "unrestricted":

@@ -208,6 +208,100 @@ func TestGuard_FSSymlinkDenied(t *testing.T) {
 	}
 }
 
+// TestGuard_FSOpenDirFdBypassDenied proves os.open cannot be used to escape
+// fs_write/fs_deny via dir_fd: the "open" audit event's args are documented
+// as exactly (path, mode, flags) — dir_fd is never included — so the guard
+// only ever sees the bare relative filename. The script os.chdir()s into its
+// one writable directory first, so on unfixed guard.py the path-only check
+// resolves that bare relative name against a cwd inside the write grant and
+// (wrongly) allows it, while the real syscall actually resolves the name
+// against denied_fd and creates the file inside the denied directory
+// instead — a full bypass despite the check appearing to pass.
+func TestGuard_FSOpenDirFdBypassDenied(t *testing.T) {
+	writeDir := t.TempDir()
+	deniedDir := t.TempDir()
+	forged := filepath.Join(deniedDir, "forged.json")
+	pol := guardPolicy{
+		Net:     guardNet{Mode: "unrestricted"},
+		Run:     guardRun{Mode: "deny"},
+		FSWrite: []string{writeDir},
+	}
+	payload := fmt.Sprintf(`
+import os
+os.chdir(%q)
+denied_fd = os.open(%q, os.O_RDONLY | os.O_DIRECTORY)
+fd = os.open("forged.json", os.O_WRONLY | os.O_CREAT, dir_fd=denied_fd)
+os.close(fd)
+`, writeDir, deniedDir)
+	out, err := runGuardScript(t, pol, payload)
+	requireDenied(t, out, err, "dir_fd")
+	if _, statErr := os.Stat(forged); statErr == nil {
+		t.Error("dir_fd-relative os.open still created the file inside the denied directory")
+	}
+	if _, statErr := os.Stat(filepath.Join(writeDir, "forged.json")); statErr == nil {
+		t.Error("unexpected: file landed in the writable dir rather than the denied dir — test setup is wrong")
+	}
+}
+
+// TestGuard_FSLinkDirFdBypassDenied proves os.link's dst_dir_fd argument
+// (args[3] of the "os.link" audit event) is checked, not just the bare
+// destination path string. As with the os.open test above, the script
+// chdir()s into its writable directory first so the unfixed path-only check
+// on the bare relative destination name would (wrongly) pass, while the
+// real hardlink lands inside the denied directory via dst_dir_fd.
+func TestGuard_FSLinkDirFdBypassDenied(t *testing.T) {
+	writeDir := t.TempDir()
+	deniedDir := t.TempDir()
+	src := filepath.Join(writeDir, "src.txt")
+	if err := os.WriteFile(src, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	forged := filepath.Join(deniedDir, "forged-link.txt")
+	pol := guardPolicy{
+		Net:     guardNet{Mode: "unrestricted"},
+		Run:     guardRun{Mode: "deny"},
+		FSWrite: []string{writeDir},
+	}
+	payload := fmt.Sprintf(`
+import os
+os.chdir(%q)
+denied_fd = os.open(%q, os.O_RDONLY | os.O_DIRECTORY)
+os.link(%q, "forged-link.txt", dst_dir_fd=denied_fd)
+`, writeDir, deniedDir, src)
+	out, err := runGuardScript(t, pol, payload)
+	requireDenied(t, out, err, "dir_fd")
+	if _, statErr := os.Lstat(forged); statErr == nil {
+		t.Error("dir_fd-relative os.link still created the hardlink inside the denied directory")
+	}
+}
+
+// TestGuard_FSMkdirDirFdBypassDenied proves os.mkdir's dir_fd argument
+// (args[2] of the "os.mkdir" audit event, which is (path, mode, dir_fd)) is
+// checked, not just the bare path string. As above, chdir into the writable
+// dir first so the unfixed path-only check on the bare relative name would
+// (wrongly) pass while the real mkdir(2) lands inside the denied directory.
+func TestGuard_FSMkdirDirFdBypassDenied(t *testing.T) {
+	writeDir := t.TempDir()
+	deniedDir := t.TempDir()
+	forged := filepath.Join(deniedDir, "forged-subdir")
+	pol := guardPolicy{
+		Net:     guardNet{Mode: "unrestricted"},
+		Run:     guardRun{Mode: "deny"},
+		FSWrite: []string{writeDir},
+	}
+	payload := fmt.Sprintf(`
+import os
+os.chdir(%q)
+denied_fd = os.open(%q, os.O_RDONLY | os.O_DIRECTORY)
+os.mkdir("forged-subdir", dir_fd=denied_fd)
+`, writeDir, deniedDir)
+	out, err := runGuardScript(t, pol, payload)
+	requireDenied(t, out, err, "dir_fd")
+	if _, statErr := os.Stat(forged); statErr == nil {
+		t.Error("dir_fd-relative os.mkdir still created the directory inside the denied directory")
+	}
+}
+
 func TestGuard_FSReadAlwaysAllowed(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "readable.txt")
