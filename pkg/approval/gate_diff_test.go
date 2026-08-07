@@ -1065,8 +1065,8 @@ func TestStructuralSecurityDiff(t *testing.T) {
 			"name: a\n", "name: a\npermissions:\n  net: []\n", false},
 		{"omitted list field made explicitly empty, then genuinely widened",
 			"name: a\npermissions:\n  net: []\n", "name: a\npermissions:\n  net: [\"evil.example.com\"]\n", true},
-		{"omitted pointer block made explicitly empty (nil vs zero-value-pointer no-op)",
-			"name: a\nruntime: deno\n", "name: a\nruntime: deno\ndocker: {}\n", false},
+		{"omitted pointer block made explicitly empty (accepted over-flag, NOT normalized — see structuralSecurityDiff's doc comment)",
+			"name: a\nruntime: deno\n", "name: a\nruntime: deno\ndocker: {}\n", true},
 		{"empty pointer block made genuinely non-empty",
 			"name: a\nruntime: docker\ndocker: {}\n", "name: a\nruntime: docker\ndocker:\n  image: attacker/backdoor\n", true},
 	}
@@ -1247,6 +1247,89 @@ func TestDiffFlagsPipelineStageOverrideWidening(t *testing.T) {
 	}
 	if !yamlDiff.SecurityRelevant {
 		t.Errorf("pipeline stage override widening permissions.net must be SecurityRelevant: %q", yamlDiff.UnifiedDiff)
+	}
+}
+
+// TestDiffFlagsPipelineStageOverrideDisablingWebhookAuth is the regression
+// for a code-review finding on an earlier revision of this fix: a
+// normalizePointers helper once nilled out any pointer whose pointee was
+// the zero value, to fix an unrelated cosmetic false-positive (an explicit
+// "docker: {}" reading as SecurityRelevant). That helper walked
+// unconditionally into task.TriggerPatch (reachable through a pipeline
+// Stage's *task.Overrides), whose *bool/*string fields use nil-vs-non-nil
+// itself as the signal — "not patched" vs "explicitly patched to this
+// value", per TriggerPatch's own doc comment — so it collapsed an override
+// that explicitly sets `overrides.trigger.auth: false` (disabling session
+// auth on the downstream task's webhook for that firing — a severe,
+// concrete widening) down to indistinguishable-from-no-override, exactly
+// the false-negative class this whole fix exists to prevent. That helper
+// was removed; this test locks in that the disabling override is still
+// caught.
+func TestDiffFlagsPipelineStageOverrideDisablingWebhookAuth(t *testing.T) {
+	g, _, _ := newTestGate(t, enabledPolicy())
+	dir := t.TempDir()
+	taskDir := filepath.Join(dir, "repo__pipeline2")
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	yamlPath := filepath.Join(taskDir, "task.yaml")
+	base := "apiVersion: v1\nkind: PipelineTask\nname: repo/pipeline2\nsubtype: sequential\n" +
+		"stages:\n  - task: victim\n"
+	if err := os.WriteFile(yamlPath, []byte(base), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	spec := &task.PipelineTask{ID: "repo/pipeline2", TaskDir: taskDir}
+	if _, err := g.Admit(spec); err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+	if err := g.Approve("repo/pipeline2"); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+
+	// Explicitly disable auth via a per-firing trigger patch — the patch's
+	// Auth field decodes to a non-nil *bool pointing at false, not nil.
+	disabled := "apiVersion: v1\nkind: PipelineTask\nname: repo/pipeline2\nsubtype: sequential\n" +
+		"stages:\n  - task: victim\n    overrides:\n      trigger:\n        auth: false\n"
+	if err := os.WriteFile(yamlPath, []byte(disabled), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Admit(spec); err != nil {
+		t.Fatalf("Admit changed: %v", err)
+	}
+
+	d, err := g.Diff("repo/pipeline2")
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+	var yamlDiff *FileDiff
+	for i := range d.Files {
+		if d.Files[i].Path == "task.yaml" {
+			yamlDiff = &d.Files[i]
+		}
+	}
+	if yamlDiff == nil {
+		t.Fatalf("no task.yaml entry in Files: %+v", d.Files)
+	}
+	if !yamlDiff.SecurityRelevant {
+		t.Errorf("pipeline stage override explicitly disabling trigger.auth must be SecurityRelevant: %q", yamlDiff.UnifiedDiff)
+	}
+}
+
+// TestStructuralSecurityDiffPreservesTriggerPatchNilSentinel unit-tests the
+// same property directly against structuralSecurityDiff, isolated from the
+// Gate/snapshot machinery: an override that explicitly patches a *bool
+// field to its zero value (false) must compare as changed from "no override
+// present at all" — nil and non-nil-pointing-at-false must never collapse
+// to the same canonical form.
+func TestStructuralSecurityDiffPreservesTriggerPatchNilSentinel(t *testing.T) {
+	old := "kind: PipelineTask\nstages:\n  - task: victim\n"
+	newYAML := "kind: PipelineTask\nstages:\n  - task: victim\n    overrides:\n      trigger:\n        auth: false\n"
+	changed, ok := structuralSecurityDiff(old, newYAML)
+	if !ok {
+		t.Fatalf("structuralSecurityDiff returned ok=false for valid YAML")
+	}
+	if !changed {
+		t.Error("an override explicitly patching trigger.auth to false must not compare equal to no override at all")
 	}
 }
 

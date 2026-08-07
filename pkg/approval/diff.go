@@ -3,7 +3,6 @@ package approval
 import (
 	"bytes"
 	"fmt"
-	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -296,16 +295,23 @@ type securityStructFields struct {
 // both forms to the same "key: []\n" text before comparing, so equivalent
 // values compare equal regardless of which form produced them.
 //
-// normalizePointers runs first for the analogous pointer-field case: an
-// omitted "docker:" key decodes Docker to a nil *task.DockerConfig, but an
-// explicit "docker: {}" decodes a non-nil pointer to a zero-value
-// DockerConfig — marshaling nil renders "docker: null" while marshaling the
-// zero-value pointee renders "docker: {}", so re-marshaling alone does NOT
-// collapse this pair the way it does for slices. Nilling out any pointer
-// whose pointee is the zero value, on both sides, before marshaling closes
-// that gap the same way for every *T field this struct (transitively)
-// holds — Docker, Trigger.Chain, and any *Overrides reachable through a
-// pipeline Stage — rather than special-casing Docker alone.
+// Deliberately NOT extended to pointer fields the same way (an earlier
+// version of this function tried nilling out any pointer whose pointee was
+// the zero value, to collapse "docker:" omitted vs "docker: {}" the same
+// way). That is wrong in general: task.TriggerPatch's *bool/*string fields
+// (reachable through a pipeline Stage's *task.Overrides) use nil-vs-non-nil
+// itself as the signal — "not patched" vs "patched to this value" — per
+// TriggerPatch's own doc comment. A patch that explicitly sets
+// overrides.trigger.auth: false (disabling session auth on a downstream
+// task's webhook — a real, severe widening) decodes to a non-nil *bool
+// pointing at the zero value false; collapsing that to nil would make it
+// indistinguishable from "no override at all" and silently swallow the flag
+// for exactly the kind of change this fix exists to catch. The cosmetic
+// false-positive this would have fixed (an explicit "docker: {}" on an
+// unrelated edit reads as SecurityRelevant even though it grants nothing)
+// is a strictly lower-severity, over-flag-only cost than that false
+// negative, and the over-flag-rather-than-under-flag bias below already
+// accepts costs exactly like it.
 //
 // ok is false when either side fails to parse as YAML, e.g. a pending edit
 // that is itself invalid YAML mid-write. Callers should fall back to the
@@ -320,8 +326,6 @@ func structuralSecurityDiff(oldText, newText string) (changed, ok bool) {
 	if err := yaml.Unmarshal([]byte(newText), &newFields); err != nil {
 		return false, false
 	}
-	normalizePointers(reflect.ValueOf(&oldFields).Elem())
-	normalizePointers(reflect.ValueOf(&newFields).Elem())
 	oldCanon, err := yaml.Marshal(oldFields)
 	if err != nil {
 		return false, false
@@ -331,52 +335,6 @@ func structuralSecurityDiff(oldText, newText string) (changed, ok bool) {
 		return false, false
 	}
 	return !bytes.Equal(oldCanon, newCanon), true
-}
-
-// normalizePointers walks v (which must be addressable) and nils out any
-// pointer whose pointee, after normalizing its own children first, is the
-// zero value for its type — so a decoded "omitted key" (nil pointer) and a
-// decoded "explicit empty block" (non-nil pointer to a zero-value struct)
-// become indistinguishable before structuralSecurityDiff compares or
-// marshals them. Struct fields, and slice/array/map elements, are visited
-// recursively; a nil slice, array, or map is left alone (handled separately
-// by the marshal-and-compare in structuralSecurityDiff, which already
-// renders nil and empty collections identically). Map values are copied out
-// to an addressable temporary, normalized, and written back with
-// SetMapIndex, since reflect.Value.MapIndex results aren't themselves
-// addressable.
-func normalizePointers(v reflect.Value) {
-	switch v.Kind() {
-	case reflect.Ptr:
-		if v.IsNil() {
-			return
-		}
-		normalizePointers(v.Elem())
-		if v.Elem().IsZero() {
-			v.Set(reflect.Zero(v.Type()))
-		}
-	case reflect.Struct:
-		for i := 0; i < v.NumField(); i++ {
-			if f := v.Field(i); f.CanSet() {
-				normalizePointers(f)
-			}
-		}
-	case reflect.Slice, reflect.Array:
-		for i := 0; i < v.Len(); i++ {
-			normalizePointers(v.Index(i))
-		}
-	case reflect.Map:
-		if v.IsNil() {
-			return
-		}
-		for _, key := range v.MapKeys() {
-			elem := v.MapIndex(key)
-			tmp := reflect.New(elem.Type()).Elem()
-			tmp.Set(elem)
-			normalizePointers(tmp)
-			v.SetMapIndex(key, tmp)
-		}
-	}
 }
 
 // snapshotValuesEqual reports whether two snapshotValues for the same path
