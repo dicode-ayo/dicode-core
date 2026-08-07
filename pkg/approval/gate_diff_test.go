@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -1004,6 +1005,34 @@ func TestStructuralSecurityDiff(t *testing.T) {
 			t.Error("expected ok=false for unparsable new-side YAML")
 		}
 	})
+}
+
+// TestSecurityTriggerFieldsClassified is a reflection tripwire mirroring
+// TestOverrideFieldsClassified (content_hash_guard_test.go): every field of
+// task.TriggerConfig must be explicitly classified as either FOLDED (covered
+// by securityTriggerFields' structural comparison) or EXEMPT (with a
+// recorded justification). Without this, a future TriggerConfig field could
+// land in neither securityTriggerFields nor a documented exclusion, and
+// structuralSecurityDiff would silently stop noticing task.yaml edits to it
+// — compiling and passing every existing test while quietly under-flagging,
+// exactly the silent-scope-growth TestOverrideFieldsClassified guards
+// against on the override surface.
+func TestSecurityTriggerFieldsClassified(t *testing.T) {
+	folded := map[string]string{
+		"Cron":        "securityTriggerFields.Cron",
+		"Webhook":     "securityTriggerFields.Webhook",
+		"WebhookAuth": "securityTriggerFields.WebhookAuth",
+		"Manual":      "securityTriggerFields.Manual",
+		"Chain":       "securityTriggerFields.Chain",
+		"Daemon":      "securityTriggerFields.Daemon",
+		"Restart":     "securityTriggerFields.Restart",
+	}
+	exempt := map[string]string{
+		"WebhookSecret":    "secret value; redacted to redactedEnvValue at snapshot-capture time (see redactValueLines), never present in the content structuralSecurityDiff compares",
+		"ReplayProtection": "governs how a webhook proves its caller, not what the task can touch once fired",
+		"RequireTimestamp": "same as ReplayProtection: authentication posture, not capability",
+	}
+	checkClassified(t, reflect.TypeOf(task.TriggerConfig{}), folded, exempt)
 }
 
 // TestDiffFlagsPipelineStageOverrideWidening is the regression for the
