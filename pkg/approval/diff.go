@@ -65,7 +65,11 @@ type FileDiff struct {
 	// security-bearing field: on task.yaml, a structural comparison of
 	// parsed values (see structuralSecurityDiff) — falling back to the
 	// text-pattern scan (securityFieldPattern/touchesSecurityBlock) only if
-	// the content fails to parse as YAML. Never true for any other file.
+	// the content fails to parse as YAML. That per-file check never fires
+	// for any file other than task.yaml, but ContentHidden below can still
+	// force this true on ANY path: a change that is real but renders no
+	// reviewable content is never safe to leave unflagged, regardless of
+	// which file it's in.
 	SecurityRelevant bool `json:"security_relevant"`
 	// ContentHidden marks a file known to have changed (its raw digest
 	// differs) whose rendered diff shows nothing or shows only redacted or

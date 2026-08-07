@@ -1116,6 +1116,46 @@ func TestSecurityTriggerFieldsClassified(t *testing.T) {
 	checkClassified(t, reflect.TypeOf(task.TriggerConfig{}), folded, exempt)
 }
 
+// TestSecurityStructFieldsClassified is the top-level counterpart to
+// TestSecurityTriggerFieldsClassified: a reflection tripwire requiring every
+// field of task.Spec to be classified as either FOLDED (covered by
+// securityStructFields) or EXEMPT (with a recorded justification), so a
+// future security-bearing Spec field can't land in neither and silently
+// widen structuralSecurityDiff's blind spot the same way the pre-#651 text
+// scan had one.
+func TestSecurityStructFieldsClassified(t *testing.T) {
+	folded := map[string]string{
+		"Runtime":     "securityStructFields.Runtime",
+		"Docker":      "securityStructFields.Docker",
+		"Trigger":     "securityStructFields.Trigger (security-relevant subset — see TestSecurityTriggerFieldsClassified)",
+		"Permissions": "securityStructFields.Permissions",
+		"MCPExposed":  "securityStructFields.MCPExposed — gates remote invocability over /mcp",
+		"MCPPort":     "securityStructFields.MCPPort",
+		"Silent":      "securityStructFields.Silent — gates whether stdout/stderr reach the run log",
+	}
+	exempt := map[string]string{
+		"Name":           "cosmetic: display label only, no capability change",
+		"Description":    "cosmetic: display text only, no capability change",
+		"Version":        "cosmetic: display metadata only, not enforced anywhere",
+		"Author":         "cosmetic: display metadata only, not enforced anywhere",
+		"Params":         "override-mutable, not task.yaml-literal; shown via the always-flagged \"(resolved config)\" synthetic entry (resolvedConfigPath), same as gate.go's resolvedSecurityFields.Params",
+		"Timeout":        "override-mutable, not task.yaml-literal; same as Params — covered by resolvedConfigPath",
+		"OnFailureChain": "routes to another task ID for failure notification, not a capability grant — the invoked task's own permissions and triggers (reviewed independently when that task's own task.yaml changes) govern what it may do, not this field",
+		"Provider":       "CacheTTL only — a caching duration, not a capability or exposure change",
+		"Webui":          "contributes a nav link label in the dashboard header; no capability or reachability change",
+		"RunInputs":      "controls whether this task's own already-run inputs are persisted/retained for display, not what the task can do or who can reach it",
+		"RunResult":      "controls whether this task's own already-computed return value is persisted for display, not what the task can do or who can reach it",
+		"AutoFix":        "controls how the auto-fix loop presents this task's input to itself; no capability or reachability change",
+		"HashInclude":    "widens what the content HASH covers (so an external file edit re-pends this task), the opposite direction of a capability grant — narrowing it could hide a real change, but that's a hash-coverage regression task.Hash's own tests guard, not a SecurityRelevant-flagging concern",
+		"Enabled":        "not stored in YAML (yaml:\"-\"); scheduling only — enables/disables firing, capability when running is unchanged",
+		"Template":       "cosmetic: template-instance identifier for UI grouping, not enforced anywhere",
+		"TaskDir":        "not stored in YAML (yaml:\"-\"); loader-set path, not task.yaml content",
+		"ID":             "not stored in YAML (yaml:\"-\"); loader-derived from directory name, not task.yaml content",
+		"Warnings":       "not stored in YAML (yaml:\"-\"); load-time diagnostics, not task.yaml content",
+	}
+	checkClassified(t, reflect.TypeOf(task.Spec{}), folded, exempt)
+}
+
 // TestDiffFlagsPipelineStageOverrideWidening is the regression for the
 // code-review finding on this same fix: a kind: PipelineTask task.yaml
 // widening a stage's Overrides (pkg/task/overrides.go's task.Overrides —
