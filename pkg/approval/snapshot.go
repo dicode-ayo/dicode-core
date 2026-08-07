@@ -140,15 +140,37 @@ var blockScalarHeaderPattern = regexp.MustCompile(`^[|>][+\-0-9]{0,2}[ \t]*(#.*)
 // ends at the first non-blank line at or below that indentation, or at
 // end-of-file, matching YAML's indentation-based block-scalar termination
 // rule closely enough for a defense-in-depth text scrub. The swallowed run is
-// collapsed into a single redactedEnvValue placeholder line rather than
-// preserving the original line count exactly — simpler to get right, and the
-// diff already communicates "this block changed" via the preserved header
-// line and surrounding hunk. Known imprecisions, both of which only ever
-// over-redact: an explicit indentation indicator (e.g. "|2") is not decoded
-// to find the "true" content column, and a trailing run of blank lines with
-// no further content after them is swallowed even though strict YAML would
-// attribute at most one trailing newline to the scalar.
+// collapsed into a single redactedEnvValue placeholder line, indented two
+// columns past the "value:" key itself, rather than preserving the original
+// line count exactly — simpler to get right, and the diff already
+// communicates "this block changed" via the preserved header line and
+// surrounding hunk. The indentation is load-bearing, not cosmetic: a bare
+// placeholder at column 0 is less indented than its parent node, which ends
+// the block scalar early and leaves a keyless scalar where YAML expects a
+// mapping continuation — invalid YAML that breaks any structural parse of
+// the redacted content downstream (structuralSecurityDiff in
+// pkg/approval/diff.go silently falls back to a cruder text scan on any
+// parse failure). Known imprecisions, both of which only ever over-redact:
+// an explicit indentation indicator (e.g. "|2") is not decoded to find the
+// "true" content column, and a trailing run of blank lines with no further
+// content after them is swallowed even though strict YAML would attribute at
+// most one trailing newline to the scalar.
 func redactValueLines(content string) string {
+	// A block scalar's swallow loop below treats a blank line as swallowed
+	// content unconditionally, including the phantom "" element
+	// strings.Split produces for content's own trailing newline when the
+	// swallowed block runs to end-of-file — collapsing it into the single
+	// placeholder line and silently dropping the file's trailing newline
+	// from the reconstructed text. That's not cosmetic: YAML block-scalar
+	// "clip" chomping keeps exactly one trailing newline on the scalar's
+	// value when the block reaches EOF, same as when more content follows
+	// it — so losing the file's trailing newline here flips the redacted
+	// placeholder's parsed value between "<redacted>" and "<redacted>\n"
+	// depending only on whether something happens to follow the block in
+	// the file, not on anything that actually changed. Restoring the
+	// input's own trailing-newline-ness after reconstruction keeps that
+	// parsed value identical regardless of what (if anything) follows.
+	hadTrailingNewline := strings.HasSuffix(content, "\n")
 	lines := strings.Split(content, "\n")
 	for i := 0; i < len(lines); i++ {
 		m := valueLinePattern.FindStringSubmatch(lines[i])
@@ -182,14 +204,31 @@ func redactValueLines(content string) string {
 			break
 		}
 		if swallowedAny {
-			rest := append([]string{redactedEnvValue}, lines[j:]...)
+			// Indented past the "value:" key's own column (not bare at
+			// column 0): a block scalar's content must be indented more
+			// than its parent node for the line to still parse as part of
+			// the scalar. A bare placeholder would immediately end the
+			// block early and leave a keyless scalar where a mapping
+			// continuation was expected — invalid YAML that breaks any
+			// structural parse of the redacted text (see #651's
+			// structuralSecurityDiff in pkg/approval/diff.go, the reason
+			// this must stay parseable rather than merely diff-readable).
+			placeholder := strings.Repeat(" ", keyIndent+2) + redactedEnvValue
+			rest := append([]string{placeholder}, lines[j:]...)
 			lines = append(lines[:i+1], rest...)
 		}
 		// i is left at the header line; the loop's i++ resumes scanning
 		// at the placeholder (which cannot itself match valueLinePattern)
 		// or, if nothing was swallowed, at the very next line.
 	}
-	return strings.Join(lines, "\n")
+	out := strings.Join(lines, "\n")
+	switch {
+	case hadTrailingNewline && !strings.HasSuffix(out, "\n"):
+		out += "\n"
+	case !hadTrailingNewline && strings.HasSuffix(out, "\n"):
+		out = strings.TrimSuffix(out, "\n")
+	}
+	return out
 }
 
 // leadingIndent returns the number of leading space/tab characters in s —

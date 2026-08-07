@@ -420,6 +420,83 @@ func TestDiffRedactsBlockScalarEnvSecretValue(t *testing.T) {
 	}
 }
 
+// TestStructuralSecurityDiffParsesBlockScalarRedaction is the regression for
+// a code-review finding on #651's structural-flagging fix: redactValueLines
+// (pkg/approval/snapshot.go) used to collapse a block-scalar env value's
+// swallowed content into a bare, zero-indent redactedEnvValue placeholder
+// line. A block scalar's content must be indented MORE than its "value:"
+// key for a line to still parse as part of the scalar, so the bare
+// placeholder produced invalid YAML — structuralSecurityDiff's ok would be
+// false for every task.yaml using this documented syntax, silently and
+// permanently falling back to the pre-#651 text-pattern scan for that task
+// and reintroducing the exact false-positive bug this fix exists to close.
+// TestDiffRedactsBlockScalarEnvSecretValue didn't catch this because the
+// fallback still produces SecurityRelevant: true on its own test case (a
+// real permissions.env change) — this test isolates the actually-broken
+// case: a COSMETIC change that only the structural path can correctly leave
+// unflagged.
+func TestStructuralSecurityDiffParsesBlockScalarRedaction(t *testing.T) {
+	redacted := redactValueLines("name: repo/deploy\n" +
+		"permissions:\n" +
+		"  env:\n" +
+		"    - name: API_KEY\n" +
+		"      value: |\n" +
+		"        super-secret-line-1\n" +
+		"        super-secret-line-2\n")
+	if _, ok := structuralSecurityDiff(redacted, redacted); !ok {
+		t.Fatalf("structuralSecurityDiff could not parse redactValueLines' block-scalar output as YAML:\n%s", redacted)
+	}
+
+	// End-to-end: approve a task whose permissions.env uses block-scalar
+	// syntax, then make a change that touches NO security field (a comment
+	// naming one). If the structural path is really parsing this file, the
+	// flag must be false; if it silently fell back to the text scan, the
+	// comment's "net:" trips securityFieldPattern and the flag comes back
+	// true — the exact bug reported for #651.
+	g, _, _ := newTestGate(t, enabledPolicy())
+	spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "x")
+	yamlPath := filepath.Join(spec.TaskDir, "task.yaml")
+	base := "name: repo/deploy\n" +
+		"permissions:\n" +
+		"  env:\n" +
+		"    - name: API_KEY\n" +
+		"      value: |\n" +
+		"        super-secret-line-1\n" +
+		"        super-secret-line-2\n"
+	if err := os.WriteFile(yamlPath, []byte(base), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if armed, err := g.Admit(spec); err != nil || armed {
+		t.Fatalf("Admit = (%v, %v), want pending", armed, err)
+	}
+	if err := g.Approve("repo/deploy"); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+
+	cosmetic := base + "# note: net: retries configured downstream\n"
+	if err := os.WriteFile(yamlPath, []byte(cosmetic), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if armed, err := g.Admit(spec); err != nil || armed {
+		t.Fatalf("Admit changed = (%v, %v), want pending", armed, err)
+	}
+
+	d, err := g.Diff("repo/deploy")
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+	for _, f := range d.Files {
+		if f.Path != "task.yaml" {
+			continue
+		}
+		if f.SecurityRelevant {
+			t.Errorf("comment-only change on a task with a block-scalar env value must not be SecurityRelevant (structural parse must not have silently fallen back to the text scan): %q", f.UnifiedDiff)
+		}
+		return
+	}
+	t.Fatal("no task.yaml entry in diff")
+}
+
 // TestDiffErrorsOnNonPendingOrUnknownTask covers Diff's error path: an
 // approved (non-pending) task and an entirely unknown task ID both fail.
 func TestDiffErrorsOnNonPendingOrUnknownTask(t *testing.T) {
