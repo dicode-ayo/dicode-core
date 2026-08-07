@@ -984,6 +984,10 @@ func TestStructuralSecurityDiff(t *testing.T) {
 		{"cosmetic name/description only", "name: a\ndescription: old\n", "name: b\ndescription: new\n", false},
 		{"keyword inside unrelated string value",
 			"name: a\n", "name: \"see permissions: docs for details\"\n", false},
+		{"omitted list field made explicitly empty (nil vs empty-slice no-op)",
+			"name: a\n", "name: a\npermissions:\n  net: []\n", false},
+		{"omitted list field made explicitly empty, then genuinely widened",
+			"name: a\npermissions:\n  net: []\n", "name: a\npermissions:\n  net: [\"evil.example.com\"]\n", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

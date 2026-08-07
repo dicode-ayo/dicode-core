@@ -1,8 +1,8 @@
 package approval
 
 import (
+	"bytes"
 	"fmt"
-	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -281,6 +281,16 @@ type securityStructFields struct {
 // parsed field, and a widened list still parses to a different
 // Permissions.Net.
 //
+// Comparison re-marshals both parsed structs to YAML and compares the
+// resulting bytes, rather than reflect.DeepEqual on the structs directly.
+// yaml.Unmarshal leaves an omitted list field nil but an explicit "key: []"
+// decodes it to a non-nil empty slice — semantically identical (both mean
+// "nothing granted"), but reflect.DeepEqual treats nil and empty-non-nil
+// slices as different, which would flag a purely cosmetic
+// omitted-to-explicit-empty edit as SecurityRelevant. Re-marshaling collapses
+// both forms to the same "key: []\n" text before comparing, so equivalent
+// values compare equal regardless of which form produced them.
+//
 // ok is false when either side fails to parse as YAML, e.g. a pending edit
 // that is itself invalid YAML mid-write. Callers should fall back to the
 // text-pattern check in that case rather than treat unparsable content as
@@ -294,7 +304,15 @@ func structuralSecurityDiff(oldText, newText string) (changed, ok bool) {
 	if err := yaml.Unmarshal([]byte(newText), &newFields); err != nil {
 		return false, false
 	}
-	return !reflect.DeepEqual(oldFields, newFields), true
+	oldCanon, err := yaml.Marshal(oldFields)
+	if err != nil {
+		return false, false
+	}
+	newCanon, err := yaml.Marshal(newFields)
+	if err != nil {
+		return false, false
+	}
+	return !bytes.Equal(oldCanon, newCanon), true
 }
 
 // snapshotValuesEqual reports whether two snapshotValues for the same path
