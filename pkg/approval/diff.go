@@ -2,11 +2,15 @@ package approval
 
 import (
 	"fmt"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
 
 	"github.com/sergi/go-diff/diffmatchpatch"
+	"gopkg.in/yaml.v3"
+
+	"github.com/dicode/dicode/pkg/task"
 )
 
 // Diff describes the file-level changes between a pending task's
@@ -57,8 +61,11 @@ type FileDiff struct {
 	// side's real content is still rendered, as a full add/remove against
 	// an empty counterpart (see unifiedDiffText).
 	UnifiedDiff string `json:"unified_diff"`
-	// SecurityRelevant is true when an added or removed line in the diff
-	// touches one of the YAML keys matched by securityFieldPattern.
+	// SecurityRelevant is true when this file's change alters a
+	// security-bearing field: on task.yaml, a structural comparison of
+	// parsed values (see structuralSecurityDiff) — falling back to the
+	// text-pattern scan (securityFieldPattern/touchesSecurityBlock) only if
+	// the content fails to parse as YAML. Never true for any other file.
 	SecurityRelevant bool `json:"security_relevant"`
 	// ContentHidden marks a file known to have changed (its raw digest
 	// differs) whose rendered diff shows nothing or shows only redacted or
@@ -93,15 +100,22 @@ const maxInlineContentBytes = 128 * 1024
 // 56,000px page, which buries the change it exists to surface.
 const diffContextLines = 3
 
-// securityFieldPattern matches an added or removed unified-diff line that
-// touches one of the YAML keys folded into the approval gate's content hash
-// (see the big ContentHash doc comment in gate.go for the authoritative
-// list): permissions, env, run, net, fs, sys, dicode (permissions and its
+// securityFieldPattern is the fallback FileDiff.SecurityRelevant uses for
+// task.yaml only when structuralSecurityDiff cannot parse the content as
+// YAML (see there for why parsed structural comparison is now primary: this
+// pattern is a substring match over rendered diff text, so on its own it
+// fires on any changed line containing a keyword followed by a colon —
+// including inside comments, strings and prose (#651) — while also missing
+// a value change on a line naming no key at all, e.g. an appended
+// net-allowlist entry (touchesSecurityBlock exists to catch that case).
+//
+// Matches an added or removed unified-diff line that touches one of the
+// YAML keys folded into the approval gate's content hash (see the big
+// ContentHash doc comment in gate.go for the authoritative list):
+// permissions, env, run, net, fs, sys, dicode (permissions and its
 // sub-fields, including permissions.dicode.git_commit_push), and the
 // resolved trigger shape (webhook, webhook_auth, cron, manual, daemon,
-// chain). A hit on either side of a hunk means the change could widen what
-// the task can touch or how/whether it fires, so FileDiff.SecurityRelevant
-// flags it for the operator regardless of anywhere else in the diff.
+// chain).
 //
 // The container keys (image, volumes, network_mode, cap_add/cap_drop,
 // privileged, user, env_vars, entrypoint, command, ports, devices, pid_mode,
@@ -181,6 +195,71 @@ func touchesSecurityBlock(diff string) bool {
 		}
 	}
 	return false
+}
+
+// taskYAMLPath is the one file in a task directory that can structurally
+// carry security-bearing fields (permissions, runtime, docker/podman,
+// trigger) — see structuralSecurityDiff.
+const taskYAMLPath = "task.yaml"
+
+// securityTriggerFields is the subset of task.TriggerConfig that changes
+// what a task may do or how/whether it fires — the same fields ContentHash
+// folds into resolvedSecurityFields (see gate.go), minus WebhookSecret,
+// ReplayProtection and RequireTimestamp: those govern how a webhook proves
+// its caller rather than what the task can touch once fired, and the
+// secret's literal value is never present in a snapshot's (already-redacted)
+// Content to compare in the first place.
+type securityTriggerFields struct {
+	Webhook     string               `yaml:"webhook"`
+	WebhookAuth task.WebhookAuthMode `yaml:"auth"`
+	Cron        string               `yaml:"cron"`
+	Manual      bool                 `yaml:"manual"`
+	Daemon      bool                 `yaml:"daemon"`
+	Restart     string               `yaml:"restart"`
+	Chain       *task.ChainTrigger   `yaml:"chain"`
+}
+
+// securityStructFields is the set of task.yaml top-level keys that decide
+// what a task can touch or how it fires, parsed structurally so Diff can
+// compare actual values instead of grepping rendered diff text (see
+// structuralSecurityDiff). Mirrors gate.go's resolvedSecurityFields, minus
+// the override-only fields (Params, Timeout) folded in from taskset
+// overrides rather than task.yaml itself — those are already covered by the
+// always-flagged "(resolved config)" synthetic entry Diff appends
+// separately (see resolvedConfigPath).
+type securityStructFields struct {
+	Runtime     task.Runtime          `yaml:"runtime"`
+	Permissions task.Permissions      `yaml:"permissions"`
+	Docker      *task.DockerConfig    `yaml:"docker"`
+	Trigger     securityTriggerFields `yaml:"trigger"`
+}
+
+// structuralSecurityDiff reports whether old and new task.yaml content
+// differ in any field securityStructFields tracks, parsed as YAML and
+// compared by value — not by scanning the rendered diff text for keyword
+// substrings the way securityFieldPattern/touchesSecurityBlock do. That text
+// scan fires on any changed line containing a security keyword followed by a
+// colon, including inside comments, strings and prose in ANY changed file —
+// and, being line-scoped, still misses a value change on a line that names
+// no key at all (an appended net-allowlist entry). Parsing both sides and
+// comparing values is immune to both: a keyword inside a comment changes no
+// parsed field, and a widened list still parses to a different
+// Permissions.Net.
+//
+// ok is false when either side fails to parse as YAML, e.g. a pending edit
+// that is itself invalid YAML mid-write. Callers should fall back to the
+// text-pattern check in that case rather than treat unparsable content as
+// "no security change" — the fail-open, over-flag-rather-than-under-flag
+// bias the rest of this file already takes (see snapshotValuesEqual).
+func structuralSecurityDiff(oldText, newText string) (changed, ok bool) {
+	var oldFields, newFields securityStructFields
+	if err := yaml.Unmarshal([]byte(oldText), &oldFields); err != nil {
+		return false, false
+	}
+	if err := yaml.Unmarshal([]byte(newText), &newFields); err != nil {
+		return false, false
+	}
+	return !reflect.DeepEqual(oldFields, newFields), true
 }
 
 // snapshotValuesEqual reports whether two snapshotValues for the same path
@@ -288,10 +367,24 @@ func (g *Gate) Diff(id string) (Diff, error) {
 
 		udiff := unifiedDiffText(snapshotDisplayText(oldVal), snapshotDisplayText(newVal))
 		fd := FileDiff{
-			Path:             p,
-			Status:           status,
-			UnifiedDiff:      udiff,
-			SecurityRelevant: securityFieldPattern.MatchString(udiff) || touchesSecurityBlock(udiff),
+			Path:        p,
+			Status:      status,
+			UnifiedDiff: udiff,
+		}
+		// Only task.yaml can structurally carry a security-bearing field —
+		// see taskYAMLPath. Any other changed file (task script, README, …)
+		// is never flagged via this per-file check regardless of what its
+		// text contains; a "permissions:" mention in a code comment names no
+		// actual field. Structural parsing can fail on a task.yaml mid-edit
+		// into invalid YAML, so that case falls back to the conservative
+		// text-pattern scan rather than silently reporting no security
+		// change.
+		if p == taskYAMLPath {
+			if changed, ok := structuralSecurityDiff(snapshotDisplayText(oldVal), snapshotDisplayText(newVal)); ok {
+				fd.SecurityRelevant = changed
+			} else {
+				fd.SecurityRelevant = securityFieldPattern.MatchString(udiff) || touchesSecurityBlock(udiff)
+			}
 		}
 		// The file is known to differ, but the rendering shows nothing an
 		// operator can read: either both sides were uncaptured, or redaction

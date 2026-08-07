@@ -856,27 +856,39 @@ task directory as a failure.
 
 ### Security-relevant highlighting
 
-Flagging combines two checks, both run against the *full* diff before hunking
-elides context. `securityFieldPattern` matches a changed line that itself names
-a security key (`permissions:`, `net:`, `cron:`, …), which catches a block being
-added. `touchesSecurityBlock` tracks YAML indentation to flag a changed line
-*anywhere inside* a `permissions:` or `trigger:` block, which catches one being
-**widened** — appending a host to an already-approved `net:` allowlist changes
-only a list item and names no key, so the pattern alone misses it. Widening an
-existing block is both the likelier change under trust-on-change and the
-stealthier one, so it must flag too. `touchesSecurityBlock` depends on the
-pre-hunk ordering directly: elided context would drop the `permissions:` opener
-that puts a changed line in scope.
+Only `task.yaml` can structurally carry a security-bearing field — it is the
+one file that decides a task's permissions, runtime, docker/podman block, and
+trigger shape. `Diff` flags a `task.yaml` `FileDiff` as `SecurityRelevant:
+true` by parsing both the old and new content as YAML and comparing the parsed
+values (`structuralSecurityDiff` in `pkg/approval/diff.go`): the same field
+set `ContentHash` folds into the approval hash (see its doc comment in
+`pkg/approval/gate.go`) — `permissions`, `runtime`, the `docker`/`podman`
+block, and the security-relevant subset of `trigger` (`webhook`, `auth`,
+`cron`, `manual`, `daemon`, `restart`, `chain`; `webhook_secret` and
+`replay_protection` are excluded — they govern how a webhook authenticates,
+not what the task can do, and the secret's value is never present in a
+snapshot's already-redacted content to compare). No other file in the task
+directory is ever flagged: only `task.yaml` can hold these keys, so a
+security-sounding word in a task script's comment or a README changes no
+parsed field and draws no banner.
 
-A `FileDiff` is flagged `SecurityRelevant: true` when an added or removed line
-in its `UnifiedDiff` touches one of the YAML keys folded into the approval
-gate's content hash (see `ContentHash`'s doc comment in `pkg/approval/gate.go`
-for the authoritative list this mirrors):
+Comparing parsed values instead of scanning rendered diff text (#651) closes
+two failure modes a text scan has going both ways: a security keyword
+appearing anywhere in a changed line — including inside a comment, a string,
+or prose — used to draw the banner even though it changed no field, while a
+real widening that touched no key on its own changed line — appending a host
+to an already-approved `net:` allowlist, say — could pass unflagged. Structural
+comparison sees neither kind of noise: a comment mentioning `net:` parses to
+no field at all, and an appended allowlist entry still parses to a different
+`Permissions.Net`.
 
-`permissions`, `env`, `run`, `net`, `fs`, `sys`, `dicode`, `git_commit_push`,
-`webhook`, `webhook_auth`, `cron`, `manual`, `daemon`, `chain` — each matched
-only when immediately followed (after optional whitespace) by a colon, so a
-substring hit like `environment:` or `blockchain:` does not false-positive.
+The text-pattern scan (`securityFieldPattern`/`touchesSecurityBlock` in
+`pkg/approval/diff.go`) still exists as a fallback for the one case structural
+parsing cannot handle: a pending `task.yaml` edit that is itself invalid YAML
+mid-write. `structuralSecurityDiff` reports `ok: false` in that case rather
+than silently claiming nothing security-relevant changed, and `Diff` falls
+back to the same conservative, over-flag-rather-than-under-flag text scan this
+section used to describe as primary.
 
 Both the dashboard and the token-link confirm page show a highlighted warning
 banner ("This change touches security-relevant fields…") whenever any file in

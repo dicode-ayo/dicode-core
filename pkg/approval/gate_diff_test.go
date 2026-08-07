@@ -829,6 +829,183 @@ func TestDiffFlagsPermissionWidening(t *testing.T) {
 	}
 }
 
+// TestDiffSecurityKeywordInCommentOrScriptNotFlagged is the regression for
+// #651: securityFieldPattern/touchesSecurityBlock (pkg/approval/diff.go)
+// matched any added/removed line naming a security keyword followed by a
+// colon anywhere in the rendered diff, including inside a code comment or a
+// YAML comment — text that changes no actual field. Reproduces the exact
+// report (a single added JS comment line drew the full security banner) plus
+// the YAML-comment analog, and asserts structuralSecurityDiff now decides
+// task.yaml's flag by parsed value instead.
+func TestDiffSecurityKeywordInCommentOrScriptNotFlagged(t *testing.T) {
+	t.Run("comment line in task.js", func(t *testing.T) {
+		g, _, _ := newTestGate(t, enabledPolicy())
+		spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "export default () => 1;\n")
+		if _, err := g.Admit(spec); err != nil {
+			t.Fatalf("Admit: %v", err)
+		}
+		if err := g.Approve("repo/deploy"); err != nil {
+			t.Fatalf("Approve: %v", err)
+		}
+
+		jsPath := filepath.Join(spec.TaskDir, "task.js")
+		updated := "export default () => 1;\n// TODO: net: add retries later\n"
+		if err := os.WriteFile(jsPath, []byte(updated), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := g.Admit(spec); err != nil {
+			t.Fatalf("Admit changed: %v", err)
+		}
+
+		d, err := g.Diff("repo/deploy")
+		if err != nil {
+			t.Fatalf("Diff: %v", err)
+		}
+		for _, f := range d.Files {
+			if f.Path == "task.js" && f.SecurityRelevant {
+				t.Errorf("task.js comment mentioning a security keyword must not be SecurityRelevant: %q", f.UnifiedDiff)
+			}
+		}
+	})
+
+	t.Run("comment line in task.yaml", func(t *testing.T) {
+		g, _, _ := newTestGate(t, enabledPolicy())
+		spec := writeTaskDir(t, t.TempDir(), "repo/deploy2", "x")
+		yamlPath := filepath.Join(spec.TaskDir, "task.yaml")
+		base := "name: repo/deploy2\n"
+		if err := os.WriteFile(yamlPath, []byte(base), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := g.Admit(spec); err != nil {
+			t.Fatalf("Admit: %v", err)
+		}
+		if err := g.Approve("repo/deploy2"); err != nil {
+			t.Fatalf("Approve: %v", err)
+		}
+
+		updated := base + "# note: net: retries are configured downstream\n"
+		if err := os.WriteFile(yamlPath, []byte(updated), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := g.Admit(spec); err != nil {
+			t.Fatalf("Admit changed: %v", err)
+		}
+
+		d, err := g.Diff("repo/deploy2")
+		if err != nil {
+			t.Fatalf("Diff: %v", err)
+		}
+		var yamlDiff *FileDiff
+		for i := range d.Files {
+			if d.Files[i].Path == "task.yaml" {
+				yamlDiff = &d.Files[i]
+			}
+		}
+		if yamlDiff == nil {
+			t.Fatalf("no task.yaml entry in Files: %+v", d.Files)
+		}
+		if yamlDiff.SecurityRelevant {
+			t.Errorf("task.yaml comment mentioning a security keyword must not be SecurityRelevant: %q", yamlDiff.UnifiedDiff)
+		}
+	})
+}
+
+// TestDiffStructuralSecurityDiffFallsBackOnUnparsableYAML covers
+// structuralSecurityDiff's fail-open path: a pending task.yaml edit that is
+// itself invalid YAML cannot be parsed structurally, so Diff must fall back
+// to the conservative text-pattern scan rather than silently report no
+// security change.
+func TestDiffStructuralSecurityDiffFallsBackOnUnparsableYAML(t *testing.T) {
+	g, _, _ := newTestGate(t, enabledPolicy())
+	spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "x")
+	yamlPath := filepath.Join(spec.TaskDir, "task.yaml")
+	base := "name: repo/deploy\n"
+	if err := os.WriteFile(yamlPath, []byte(base), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Admit(spec); err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+	if err := g.Approve("repo/deploy"); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+
+	// Invalid YAML (unterminated flow mapping) that still names a security
+	// key, so structuralSecurityDiff must report ok=false and Diff must fall
+	// back to securityFieldPattern rather than swallow the flag.
+	updated := base + "permissions: {net: [evil.example.com]\n"
+	if err := os.WriteFile(yamlPath, []byte(updated), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Admit(spec); err != nil {
+		t.Fatalf("Admit changed: %v", err)
+	}
+
+	d, err := g.Diff("repo/deploy")
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+	var yamlDiff *FileDiff
+	for i := range d.Files {
+		if d.Files[i].Path == "task.yaml" {
+			yamlDiff = &d.Files[i]
+		}
+	}
+	if yamlDiff == nil {
+		t.Fatalf("no task.yaml entry in Files: %+v", d.Files)
+	}
+	if !yamlDiff.SecurityRelevant {
+		t.Errorf("unparsable task.yaml naming a security key must fall back to flagging SecurityRelevant: %q", yamlDiff.UnifiedDiff)
+	}
+}
+
+// TestStructuralSecurityDiff unit-tests structuralSecurityDiff directly
+// against the field categories it tracks.
+func TestStructuralSecurityDiff(t *testing.T) {
+	cases := []struct {
+		name        string
+		old, new    string
+		wantChanged bool
+	}{
+		{"identical", "runtime: deno\n", "runtime: deno\n", false},
+		{"runtime changed", "runtime: deno\n", "runtime: python\n", true},
+		{"docker block added", "runtime: docker\n", "runtime: docker\ndocker:\n  image: nginx\n", true},
+		{"docker image swapped",
+			"runtime: docker\ndocker:\n  image: nginx\n",
+			"runtime: docker\ndocker:\n  image: attacker/backdoor\n", true},
+		{"docker network_mode host",
+			"runtime: docker\ndocker:\n  image: nginx\n",
+			"runtime: docker\ndocker:\n  image: nginx\n  network_mode: host\n", true},
+		{"trigger cron changed", "trigger:\n  cron: \"0 9 * * *\"\n", "trigger:\n  cron: \"* * * * *\"\n", true},
+		{"webhook_secret changed alone",
+			"trigger:\n  webhook: /hooks/x\n  webhook_secret: old\n",
+			"trigger:\n  webhook: /hooks/x\n  webhook_secret: new\n", false},
+		{"cosmetic name/description only", "name: a\ndescription: old\n", "name: b\ndescription: new\n", false},
+		{"keyword inside unrelated string value",
+			"name: a\n", "name: \"see permissions: docs for details\"\n", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			changed, ok := structuralSecurityDiff(tc.old, tc.new)
+			if !ok {
+				t.Fatalf("structuralSecurityDiff returned ok=false for valid YAML")
+			}
+			if changed != tc.wantChanged {
+				t.Errorf("changed = %v, want %v", changed, tc.wantChanged)
+			}
+		})
+	}
+
+	t.Run("unparsable YAML", func(t *testing.T) {
+		if _, ok := structuralSecurityDiff("permissions: {net: [x]\n", "permissions: {}\n"); ok {
+			t.Error("expected ok=false for unparsable old-side YAML")
+		}
+		if _, ok := structuralSecurityDiff("permissions: {}\n", "permissions: {net: [x]\n"); ok {
+			t.Error("expected ok=false for unparsable new-side YAML")
+		}
+	})
+}
+
 // TestRedactSecretsCoversNonLineFormats covers literal env secrets written in
 // YAML forms the line scrub cannot see. Both surfaces this feeds — the REST
 // endpoint and the unauthenticated /approve/{token} page — must never carry
