@@ -220,13 +220,19 @@ type securityTriggerFields struct {
 }
 
 // securityStructFields is the set of task.yaml top-level keys that decide
-// what a task can touch or how it fires, parsed structurally so Diff can
-// compare actual values instead of grepping rendered diff text (see
-// structuralSecurityDiff). Mirrors gate.go's resolvedSecurityFields, minus
-// the override-only fields (Params, Timeout) folded in from taskset
-// overrides rather than task.yaml itself — those are already covered by the
-// always-flagged "(resolved config)" synthetic entry Diff appends
-// separately (see resolvedConfigPath).
+// what a task can touch, how it fires, or who can reach it, parsed
+// structurally so Diff can compare actual values instead of grepping
+// rendered diff text (see structuralSecurityDiff). A superset of gate.go's
+// resolvedSecurityFields (Permissions, Runtime, and the same trigger
+// subset): Docker, Stages, MCPExposed/MCPPort and Silent are not
+// override-mutable, so ContentHash never needed them in resolvedSecurityFields
+// — a task.yaml edit to any of them already changes the plain directory hash
+// and re-pends the task — but that re-pend still deserves the operator's
+// attention, which is this field's whole job. Params/Timeout are the only
+// resolvedSecurityFields members deliberately left out here: they're
+// override-mutable rather than task.yaml-literal, and their change is
+// already shown via the always-flagged "(resolved config)" synthetic entry
+// Diff appends separately (see resolvedConfigPath).
 //
 // Stages covers kind: PipelineTask task.yaml files: each stage's Overrides
 // (task.Overrides — Net, Fs, Dicode, Trigger, Runtime, Env, …) can widen a
@@ -240,12 +246,27 @@ type securityTriggerFields struct {
 // falling back to text matching for pipelines, keeps this file's security
 // bias (structural over textual) rather than special-casing pipelines back
 // onto the substring scan.
+//
+// MCPExposed/MCPPort decide whether a task becomes visible/callable over the
+// /mcp endpoint (dicode.list_tasks()/dicode.run_task(), pkg/ipc/server.go) —
+// flipping mcp_exposed: true makes a task remotely invokable by any MCP
+// caller, which is exactly the kind of exposure change an operator must not
+// approve unflagged. Silent governs whether stdout/stderr are captured into
+// the run log at all (task.Spec.Silent's own doc comment: task authors set
+// it specifically so a careless console.log of a credential doesn't leak
+// into the log) — disabling it on a credential-handling task reopens that
+// leak channel. Neither field was ever covered by the pre-#651 text-pattern
+// scan either (no keyword in securityFieldPattern named them), so adding them
+// here is new coverage rather than a behavior change for either path.
 type securityStructFields struct {
 	Runtime     task.Runtime          `yaml:"runtime"`
 	Permissions task.Permissions      `yaml:"permissions"`
 	Docker      *task.DockerConfig    `yaml:"docker"`
 	Trigger     securityTriggerFields `yaml:"trigger"`
 	Stages      []task.Stage          `yaml:"stages"`
+	MCPExposed  bool                  `yaml:"mcp_exposed"`
+	MCPPort     int                   `yaml:"mcp_port"`
+	Silent      bool                  `yaml:"silent"`
 }
 
 // structuralSecurityDiff reports whether old and new task.yaml content

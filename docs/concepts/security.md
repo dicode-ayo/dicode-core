@@ -857,14 +857,19 @@ task directory as a failure.
 ### Security-relevant highlighting
 
 Only `task.yaml` can structurally carry a security-bearing field — it is the
-one file that decides a task's permissions, runtime, docker/podman block, and
-trigger shape. `Diff` flags a `task.yaml` `FileDiff` as `SecurityRelevant:
-true` by parsing both the old and new content as YAML and comparing the parsed
-values (`structuralSecurityDiff` in `pkg/approval/diff.go`): the same field
-set `ContentHash` folds into the approval hash (see its doc comment in
+one file that decides a task's permissions, runtime, docker/podman block,
+trigger shape, MCP exposure, and log-capture posture. `Diff` flags a
+`task.yaml` `FileDiff` as `SecurityRelevant: true` by parsing both the old and
+new content as YAML and comparing the parsed values (`structuralSecurityDiff`
+in `pkg/approval/diff.go`, field set `securityStructFields`): a superset of
+the fields `ContentHash` folds into the approval hash (see its doc comment in
 `pkg/approval/gate.go`) — `permissions`, `runtime`, the `docker`/`podman`
-block, and the security-relevant subset of `trigger` (`webhook`, `auth`,
-`cron`, `manual`, `daemon`, `restart`, `chain`; `webhook_secret` and
+block, `stages` (each `kind: PipelineTask` stage's `overrides` can widen a
+downstream task's permissions for that firing without touching its own
+directory), `mcp_exposed`/`mcp_port` (gates remote invocability over `/mcp`),
+`silent` (gates whether stdout/stderr are captured into the run log at all),
+and the security-relevant subset of `trigger` (`webhook`, `auth`, `cron`,
+`manual`, `daemon`, `restart`, `chain`; `webhook_secret` and
 `replay_protection` are excluded — they govern how a webhook authenticates,
 not what the task can do, and the secret's value is never present in a
 snapshot's already-redacted content to compare). No other file in the task

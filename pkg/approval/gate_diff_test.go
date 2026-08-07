@@ -1097,6 +1097,63 @@ func TestDiffFlagsPipelineStageOverrideWidening(t *testing.T) {
 	}
 }
 
+// TestDiffFlagsMCPExposureAndSilentChanges is the regression for a second
+// code-review finding on this fix: securityStructFields originally covered
+// only Permissions/Runtime/Docker/Trigger/Stages, missing task.Spec.MCPExposed
+// (gates remote invocability via /mcp — dicode.list_tasks()/run_task()) and
+// task.Spec.Silent (gates whether stdout/stderr are captured into the run
+// log at all, per its own doc comment: set specifically so a careless log
+// line can't leak a credential). Neither was ever covered by the pre-#651
+// text-pattern scan either — this is new coverage, not a behavior change for
+// the fallback path.
+func TestDiffFlagsMCPExposureAndSilentChanges(t *testing.T) {
+	cases := []struct {
+		name    string
+		base    string
+		changed string
+	}{
+		{"mcp_exposed turned on", "name: t\n", "name: t\nmcp_exposed: true\n"},
+		{"mcp_port added", "name: t\nmcp_exposed: true\n", "name: t\nmcp_exposed: true\nmcp_port: 8080\n"},
+		{"silent turned off", "name: t\nsilent: true\n", "name: t\nsilent: false\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			g, _, _ := newTestGate(t, enabledPolicy())
+			spec := writeTaskDir(t, t.TempDir(), "repo/mcp", "unused\n")
+			yamlPath := filepath.Join(spec.TaskDir, "task.yaml")
+			if err := os.WriteFile(yamlPath, []byte(tc.base), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := g.Admit(spec); err != nil {
+				t.Fatalf("Admit: %v", err)
+			}
+			if err := g.Approve("repo/mcp"); err != nil {
+				t.Fatalf("Approve: %v", err)
+			}
+			if err := os.WriteFile(yamlPath, []byte(tc.changed), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := g.Admit(spec); err != nil {
+				t.Fatalf("Admit changed: %v", err)
+			}
+			d, err := g.Diff("repo/mcp")
+			if err != nil {
+				t.Fatalf("Diff: %v", err)
+			}
+			for _, f := range d.Files {
+				if f.Path != "task.yaml" {
+					continue
+				}
+				if !f.SecurityRelevant {
+					t.Errorf("%s must be SecurityRelevant: %q", tc.name, f.UnifiedDiff)
+				}
+				return
+			}
+			t.Fatal("no task.yaml entry in diff")
+		})
+	}
+}
+
 // TestRedactSecretsCoversNonLineFormats covers literal env secrets written in
 // YAML forms the line scrub cannot see. Both surfaces this feeds — the REST
 // endpoint and the unauthenticated /approve/{token} page — must never carry
