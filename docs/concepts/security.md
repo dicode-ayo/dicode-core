@@ -869,10 +869,11 @@ downstream task's permissions for that firing without touching its own
 directory), `mcp_exposed`/`mcp_port` (gates remote invocability over `/mcp`),
 `silent` (gates whether stdout/stderr are captured into the run log at all),
 and the security-relevant subset of `trigger` (`webhook`, `auth`, `cron`,
-`manual`, `daemon`, `restart`, `chain`; `webhook_secret` and
-`replay_protection` are excluded — they govern how a webhook authenticates,
-not what the task can do, and the secret's value is never present in a
-snapshot's already-redacted content to compare). This per-file structural
+`manual`, `daemon`, `restart`, `chain`; `webhook_secret`,
+`replay_protection`, and `require_timestamp` are excluded — they govern how
+a webhook authenticates, not what the task can do, and the secret's value is
+never present in a snapshot's already-redacted content to compare). This
+per-file structural
 check never fires for any file other than `task.yaml` — only it can hold
 these keys, so a security-sounding word in a task script's comment or a
 README changes no parsed field and draws no banner. Separately, `ContentHidden`
