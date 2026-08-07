@@ -939,10 +939,17 @@ func TestDiffSecurityKeywordInCommentOrScriptNotFlagged(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Diff: %v", err)
 		}
-		for _, f := range d.Files {
-			if f.Path == "task.js" && f.SecurityRelevant {
-				t.Errorf("task.js comment mentioning a security keyword must not be SecurityRelevant: %q", f.UnifiedDiff)
+		var jsDiff *FileDiff
+		for i := range d.Files {
+			if d.Files[i].Path == "task.js" {
+				jsDiff = &d.Files[i]
 			}
+		}
+		if jsDiff == nil {
+			t.Fatalf("no task.js entry in Files: %+v", d.Files)
+		}
+		if jsDiff.SecurityRelevant {
+			t.Errorf("task.js comment mentioning a security keyword must not be SecurityRelevant: %q", jsDiff.UnifiedDiff)
 		}
 	})
 
