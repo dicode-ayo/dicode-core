@@ -1006,6 +1006,68 @@ func TestStructuralSecurityDiff(t *testing.T) {
 	})
 }
 
+// TestDiffFlagsPipelineStageOverrideWidening is the regression for the
+// code-review finding on this same fix: a kind: PipelineTask task.yaml
+// widening a stage's Overrides (pkg/task/overrides.go's task.Overrides —
+// applied per-firing by pkg/trigger/pipeline_runner.go via
+// taskset.ApplyOverrides) grants the downstream task extra permissions for
+// that firing without ever touching the downstream task's own directory. A
+// securityStructFields with no Stages field would decode a pipeline's
+// task.yaml without error (an unmatched "stages" key is not a parse
+// failure), so structuralSecurityDiff would report ok=true and silently
+// skip the change — worse than the pre-fix text scan, which at least caught
+// the literal "permissions:" line anywhere in the diff.
+func TestDiffFlagsPipelineStageOverrideWidening(t *testing.T) {
+	g, _, _ := newTestGate(t, enabledPolicy())
+	dir := t.TempDir()
+	taskDir := filepath.Join(dir, "repo__pipeline")
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	yamlPath := filepath.Join(taskDir, "task.yaml")
+	base := "apiVersion: v1\nkind: PipelineTask\nname: repo/pipeline\nsubtype: sequential\n" +
+		"stages:\n  - task: victim\n"
+	if err := os.WriteFile(yamlPath, []byte(base), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	spec := &task.PipelineTask{ID: "repo/pipeline", TaskDir: taskDir}
+	if _, err := g.Admit(spec); err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+	if err := g.Approve("repo/pipeline"); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+
+	// Widen the downstream stage's permissions via a per-firing override —
+	// no permissions/docker/trigger key changes at the pipeline's own
+	// top level, only inside stages[].overrides.
+	widened := "apiVersion: v1\nkind: PipelineTask\nname: repo/pipeline\nsubtype: sequential\n" +
+		"stages:\n  - task: victim\n    overrides:\n      net: [\"*\"]\n"
+	if err := os.WriteFile(yamlPath, []byte(widened), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Admit(spec); err != nil {
+		t.Fatalf("Admit changed: %v", err)
+	}
+
+	d, err := g.Diff("repo/pipeline")
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+	var yamlDiff *FileDiff
+	for i := range d.Files {
+		if d.Files[i].Path == "task.yaml" {
+			yamlDiff = &d.Files[i]
+		}
+	}
+	if yamlDiff == nil {
+		t.Fatalf("no task.yaml entry in Files: %+v", d.Files)
+	}
+	if !yamlDiff.SecurityRelevant {
+		t.Errorf("pipeline stage override widening permissions.net must be SecurityRelevant: %q", yamlDiff.UnifiedDiff)
+	}
+}
+
 // TestRedactSecretsCoversNonLineFormats covers literal env secrets written in
 // YAML forms the line scrub cannot see. Both surfaces this feeds — the REST
 // endpoint and the unauthenticated /approve/{token} page — must never carry

@@ -227,11 +227,25 @@ type securityTriggerFields struct {
 // overrides rather than task.yaml itself — those are already covered by the
 // always-flagged "(resolved config)" synthetic entry Diff appends
 // separately (see resolvedConfigPath).
+//
+// Stages covers kind: PipelineTask task.yaml files: each stage's Overrides
+// (task.Overrides — Net, Fs, Dicode, Trigger, Runtime, Env, …) can widen a
+// downstream task's permissions for that firing without touching the
+// downstream task's own directory (pkg/trigger/pipeline_runner.go applies
+// them via taskset.ApplyOverrides). A Spec-only field set would decode a
+// pipeline's task.yaml without error — "stages" is just an unmatched key —
+// so structuralSecurityDiff would report ok=true and silently skip the
+// fallback scan while missing the change entirely: worse than either check
+// alone. Comparing the typed Stage/Overrides values directly, rather than
+// falling back to text matching for pipelines, keeps this file's security
+// bias (structural over textual) rather than special-casing pipelines back
+// onto the substring scan.
 type securityStructFields struct {
 	Runtime     task.Runtime          `yaml:"runtime"`
 	Permissions task.Permissions      `yaml:"permissions"`
 	Docker      *task.DockerConfig    `yaml:"docker"`
 	Trigger     securityTriggerFields `yaml:"trigger"`
+	Stages      []task.Stage          `yaml:"stages"`
 }
 
 // structuralSecurityDiff reports whether old and new task.yaml content
