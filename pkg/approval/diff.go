@@ -291,9 +291,12 @@ type securityStructFields struct {
 // decodes it to a non-nil empty slice — semantically identical (both mean
 // "nothing granted"), but reflect.DeepEqual treats nil and empty-non-nil
 // slices as different, which would flag a purely cosmetic
-// omitted-to-explicit-empty edit as SecurityRelevant. Re-marshaling collapses
-// both forms to the same "key: []\n" text before comparing, so equivalent
-// values compare equal regardless of which form produced them.
+// omitted-to-explicit-empty edit as SecurityRelevant. Every list field this
+// struct (transitively) holds carries yaml:"...,omitempty" on its underlying
+// task.* type, so yaml.Marshal omits the key entirely for BOTH the nil and
+// the empty-non-nil form — re-marshaling collapses them to the same bytes
+// before comparing, so equivalent values compare equal regardless of which
+// form produced them.
 //
 // Deliberately NOT extended to pointer fields the same way (an earlier
 // version of this function tried nilling out any pointer whose pointee was
