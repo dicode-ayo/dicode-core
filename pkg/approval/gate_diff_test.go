@@ -1065,6 +1065,10 @@ func TestStructuralSecurityDiff(t *testing.T) {
 			"name: a\n", "name: a\npermissions:\n  net: []\n", false},
 		{"omitted list field made explicitly empty, then genuinely widened",
 			"name: a\npermissions:\n  net: []\n", "name: a\npermissions:\n  net: [\"evil.example.com\"]\n", true},
+		{"omitted pointer block made explicitly empty (nil vs zero-value-pointer no-op)",
+			"name: a\nruntime: deno\n", "name: a\nruntime: deno\ndocker: {}\n", false},
+		{"empty pointer block made genuinely non-empty",
+			"name: a\nruntime: docker\ndocker: {}\n", "name: a\nruntime: docker\ndocker:\n  image: attacker/backdoor\n", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1154,6 +1158,34 @@ func TestSecurityStructFieldsClassified(t *testing.T) {
 		"Warnings":       "not stored in YAML (yaml:\"-\"); load-time diagnostics, not task.yaml content",
 	}
 	checkClassified(t, reflect.TypeOf(task.Spec{}), folded, exempt)
+}
+
+// TestPipelineTaskSecurityFieldsClassified is the kind: PipelineTask
+// counterpart to TestSecurityStructFieldsClassified: a task.yaml with `kind:
+// PipelineTask` decodes into the same securityStructFields (yaml.Unmarshal
+// doesn't care which Go type "should" describe a document, only which tags
+// match), but the field set it needs to cover is task.PipelineTask's, not
+// task.Spec's. Guards against a future PipelineTask-only capability field
+// (mirroring MCPExposed/Silent landing on Spec) going uncovered with no
+// test forcing a decision.
+func TestPipelineTaskSecurityFieldsClassified(t *testing.T) {
+	folded := map[string]string{
+		"Trigger": "securityStructFields.Trigger (security-relevant subset — matches by yaml tag against PipelineTrigger's fields the same as task.Spec's TriggerConfig)",
+		"Stages":  "securityStructFields.Stages — see TestDiffFlagsPipelineStageOverrideWidening",
+	}
+	exempt := map[string]string{
+		"APIVersion":  "schema/format version, not enforced as a capability",
+		"Kind":        "selects which shape this task.yaml is (Spec vs PipelineTask), not itself a capability",
+		"Name":        "cosmetic: display label only, no capability change",
+		"Description": "cosmetic: display text only, no capability change",
+		"Subtype":     "sequential vs parallel stage execution ORDER, not which capabilities any stage uses",
+		"Timeout":     "override-mutable, not task.yaml-literal; shown via the always-flagged \"(resolved config)\" synthetic entry (resolvedConfigPath), same as gate.go's resolvedPipelineSecurityFields.Timeout",
+		"TaskDir":     "not stored in YAML (yaml:\"-\"); loader-set path, not task.yaml content",
+		"ID":          "not stored in YAML (yaml:\"-\"); loader-derived from directory name, not task.yaml content",
+		"Enabled":     "not stored in YAML (yaml:\"-\"); scheduling only — enables/disables firing, capability when running is unchanged",
+		"Warnings":    "not stored in YAML (yaml:\"-\"); load-time diagnostics, not task.yaml content",
+	}
+	checkClassified(t, reflect.TypeOf(task.PipelineTask{}), folded, exempt)
 }
 
 // TestDiffFlagsPipelineStageOverrideWidening is the regression for the

@@ -872,10 +872,14 @@ and the security-relevant subset of `trigger` (`webhook`, `auth`, `cron`,
 `manual`, `daemon`, `restart`, `chain`; `webhook_secret` and
 `replay_protection` are excluded — they govern how a webhook authenticates,
 not what the task can do, and the secret's value is never present in a
-snapshot's already-redacted content to compare). No other file in the task
-directory is ever flagged: only `task.yaml` can hold these keys, so a
-security-sounding word in a task script's comment or a README changes no
-parsed field and draws no banner.
+snapshot's already-redacted content to compare). This per-file structural
+check never fires for any file other than `task.yaml` — only it can hold
+these keys, so a security-sounding word in a task script's comment or a
+README changes no parsed field and draws no banner. Separately, `ContentHidden`
+can still force `SecurityRelevant: true` on *any* path whose change is real
+but renders no reviewable content (both sides uncaptured, or redaction
+collapsing the differing region to identical text) — a change that cannot be
+shown is never safe to leave unflagged, regardless of which file it's in.
 
 Comparing parsed values instead of scanning rendered diff text (#651) closes
 two failure modes a text scan has going both ways: a security keyword
