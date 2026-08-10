@@ -35,6 +35,7 @@ class DcNotifPanel extends LitElement {
   connectedCallback() {
     super.connectedCallback();
     wsOn('run:finished', d => this._addNotif(d));
+    wsOn('approval:pending', d => this._addPendingNotif(d));
     this._maybeShowBanner();
     this._registerSW();
   }
@@ -51,6 +52,21 @@ class DcNotifPanel extends LitElement {
     if (this._swReg?.active && Notification.permission === 'granted') {
       this._swReg.active.postMessage({ type: 'run:complete', ...evt });
     }
+  }
+
+  // A task holding pending approval has no run to surface — the tray's
+  // only signal today is failed runs, so an operator watching for trouble
+  // never learns a task's triggers just went unarmed. Collapse repeat
+  // events for the same task (its hash can keep changing while still
+  // pending) into a single, timestamp-bumped entry rather than spamming
+  // the inbox.
+  _addPendingNotif(evt) {
+    if (!evt?.taskID) return;
+    const list = this._load().filter(n => !(n.status === 'pending_approval' && n.taskID === evt.taskID));
+    list.push({ ts: Date.now(), taskID: evt.taskID, status: 'pending_approval' });
+    this._save(list);
+    this._notifs = [...list];
+    if (!this._open) this._unread++;
   }
 
   _toggle() {
@@ -118,6 +134,22 @@ class DcNotifPanel extends LitElement {
             ` : notifs.map(n => {
               const ago = Math.round((Date.now() - n.ts) / 60000);
               const agoStr = ago < 1 ? 'just now' : ago < 60 ? ago + 'm ago' : Math.round(ago / 60) + 'h ago';
+
+              if (n.status === 'pending_approval') {
+                return html`
+                  <div style="display:flex;align-items:center;gap:var(--space-sm);padding:var(--space-sm) var(--space-md);border-bottom:1px solid var(--border)">
+                    <span style="background:rgba(210, 153, 34, .18);color:#d29922;border-radius:var(--radius-sm);padding:0.1em 0.5em;font-weight:600;font-size:0.78rem">
+                      &#9203; pending
+                    </span>
+                    <div style="flex:1;min-width:0">
+                      <div style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${n.taskID}</div>
+                      <div style="color:var(--muted);font-size:0.75rem">${agoStr}</div>
+                    </div>
+                    <a href="/tasks/${n.taskID}" style="font-size:0.75rem;white-space:nowrap"
+                      @click=${e => { e.preventDefault(); this._open = false; navigate('/tasks/' + n.taskID); }}>Review →</a>
+                  </div>`;
+              }
+
               const ok = n.status === 'success';
               const bg = ok ? 'rgba(166, 227, 161, .15)' : 'rgba(243, 139, 168, .15)';
               const color = ok ? 'var(--green)' : 'var(--red)';
