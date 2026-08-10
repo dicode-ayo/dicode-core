@@ -107,6 +107,10 @@ test.describe('Task list pending-approval signals', () => {
   test('a pending count/filter appears on the list and narrows it', async ({ page, request }) => {
     await withPendingWebhookChange(request, async () => {
       await gotoWebui(page);
+      const rows = page.locator('dc-task-list tbody tr');
+      const idsBefore = await rows.evaluateAll(els => els.map(el => el.getAttribute('data-task-id')));
+      expect(idsBefore.length).toBeGreaterThan(1); // otherwise the filter narrowing this test checks is a no-op
+
       const chip = page.locator('dc-task-list button.pending-filter');
       await expect(chip).toBeVisible();
       await expect(chip).toContainText('pending approval');
@@ -116,9 +120,18 @@ test.describe('Task list pending-approval signals', () => {
       await expect(row).toBeVisible();
       await expect(row.locator('.badge-pending-approval')).toBeVisible();
 
-      // Toggling the filter back off restores the full list.
+      // Every row left visible under the filter must itself be pending —
+      // not just that the known pending row survived narrowing.
+      const visibleCount = await rows.count();
+      for (let i = 0; i < visibleCount; i++) {
+        await expect(rows.nth(i).locator('.badge-pending-approval')).toBeVisible();
+      }
+      expect(visibleCount).toBeLessThan(idsBefore.length);
+
+      // Toggling the filter back off restores the exact original row set.
       await chip.click();
-      await expect(page.locator('dc-task-list tbody tr').first()).toBeVisible();
+      await expect.poll(() => rows.evaluateAll(els => els.map(el => el.getAttribute('data-task-id'))))
+        .toEqual(idsBefore);
     });
   });
 

@@ -22,6 +22,8 @@ class DcNotifPanel extends LitElement {
     this._notifs = this._load();
     this._banner = false;
     this._swReg = null;
+    this._offFinished = null;
+    this._offPending = null;
   }
 
   _load() {
@@ -34,10 +36,16 @@ class DcNotifPanel extends LitElement {
 
   connectedCallback() {
     super.connectedCallback();
-    wsOn('run:finished', d => this._addNotif(d));
-    wsOn('approval:pending', d => this._addPendingNotif(d));
+    this._offFinished = wsOn('run:finished', d => this._addNotif(d));
+    this._offPending = wsOn('approval:pending', d => this._addPendingNotif(d));
     this._maybeShowBanner();
     this._registerSW();
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    this._offFinished?.();
+    this._offPending?.();
   }
 
   _addNotif(evt) {
@@ -62,11 +70,15 @@ class DcNotifPanel extends LitElement {
   // the inbox.
   _addPendingNotif(evt) {
     if (!evt?.taskID) return;
-    const list = this._load().filter(n => !(n.status === 'pending_approval' && n.taskID === evt.taskID));
+    const loaded = this._load();
+    const isNew = !loaded.some(n => n.status === 'pending_approval' && n.taskID === evt.taskID);
+    const list = loaded.filter(n => !(n.status === 'pending_approval' && n.taskID === evt.taskID));
     list.push({ ts: Date.now(), taskID: evt.taskID, status: 'pending_approval' });
     this._save(list);
     this._notifs = [...list];
-    if (!this._open) this._unread++;
+    // Only a genuinely new pending task should bump the unread badge — a
+    // repeat event for a task already inboxed just refreshes its timestamp.
+    if (isNew && !this._open) this._unread++;
   }
 
   _toggle() {
