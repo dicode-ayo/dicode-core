@@ -96,6 +96,13 @@ class DcTaskList extends LitElement {
       this._tasks = tasks;
       this._sources = new Map((sources || []).map(s => [s.name, s]));
       this._relayBase = base;
+      // The pending-filter chip that toggles this only renders while there's
+      // at least one pending task — once the count drops to 0 it vanishes,
+      // so clear the filter itself or it'd be stuck on with no control left
+      // to turn it off.
+      if (this._pendingOnly && !tasks.some(t => t.pending_approval === true)) {
+        this._pendingOnly = false;
+      }
     } catch(e) {
       this._error = e.message;
     }
@@ -209,12 +216,17 @@ class DcTaskList extends LitElement {
       : needsApproval
         ? 'Task is pending approval — triggers are not armed yet'
         : 'Disable task';
+    // Only a webhook trigger has a route that can 404 — cron/manual/chain
+    // triggers just aren't armed, so don't claim a 404 that can't happen.
+    const pendingTriggerTitle = t.trigger?.Webhook
+      ? 'Not live yet — this route will 404 until the pending change is approved'
+      : 'Not armed yet — this trigger stays inactive until the pending change is approved';
     return html`
       <tr class=${disabled ? 'disabled' : ''} data-task-id=${id}>
         <td><a href="/tasks/${t.id}" @click=${e => { e.preventDefault(); navigate('/tasks/' + t.id); }}>${shown}</a>${disabled ? html`<span class="badge-paused">paused</span>` : ''}${needsApproval ? html`<span class="badge-pending-approval" title="This task is new or changed and its triggers are not armed until approved">pending approval</span>` : ''}</td>
         <td>${t.name}</td>
         <td>${needsApproval
-          ? html`<span class="meta" title="Not live yet — this route will 404 until the pending change is approved">${t.trigger_label || 'manual'} (proposed)</span>`
+          ? html`<span class="meta" title=${pendingTriggerTitle}>${t.trigger_label || 'manual'} (proposed)</span>`
           : t.trigger?.Webhook
             ? html`<a href="${webhookURL(this._relayBase, t.trigger.Webhook)}" target="_blank" class="meta">${t.trigger_label}</a>`
             : html`<span class="meta">${t.trigger_label || 'manual'}</span>`}</td>

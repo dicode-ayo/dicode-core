@@ -153,8 +153,14 @@ test.describe('Task list pending-approval signals', () => {
       body: JSON.stringify({ error: 'simulated failure' }),
     }));
 
-    const runBtn = page.locator('dc-task-list button', { hasText: 'Run' }).first();
-    await runBtn.click({ force: true });
+    // Any pending-approval task elsewhere in the shared fixture set has its
+    // Run button natively disabled by this same PR's fix, and a disabled
+    // button never dispatches a click at all (force:true only bypasses
+    // Playwright's own actionability checks, not the browser's native
+    // disabled semantics) — so scope to a button that isn't disabled rather
+    // than assuming the first "Run" in DOM order is clickable.
+    const runBtn = page.locator('dc-task-list button:not([disabled])', { hasText: 'Run' }).first();
+    await runBtn.click();
 
     const toast = page.locator('dc-toast .toast');
     await expect(toast).toBeVisible({ timeout: 5_000 });
