@@ -80,6 +80,21 @@ class DcTable extends LitElement {
     this._recomputeHasRows();
   }
 
+  // The `loading` branch of render() mounts no <slot> at all, so a
+  // consumer that appends rows to the light DOM *while* `loading` is true
+  // (fetch, then populate, then flip `loading` off — the pattern
+  // dc-task-list.js already uses today, sans <dc-table>) can't rely on
+  // slotchange: there's no slot mounted yet to fire it. Recompute here,
+  // in willUpdate (which runs synchronously before render, unlike
+  // updated()), whenever `loading` is about to turn false, so the render
+  // that mounts the real slots also has an up-to-date census instead of
+  // showing a one-render flash of the stale (pre-population) empty state.
+  willUpdate(changedProperties) {
+    if (changedProperties.has('loading') && changedProperties.get('loading') === true && !this.loading) {
+      this._recomputeHasRows();
+    }
+  }
+
   // Bound once (arrow class field, not a prototype method) so every
   // `@slotchange=${this._onSlotChange}` binding below reuses the same
   // function identity — render() runs on every reactive-property change,

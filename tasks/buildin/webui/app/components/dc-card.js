@@ -44,7 +44,12 @@ class DcCard extends LitElement {
       border-bottom: 1px solid var(--border, rgba(160, 196, 255, .15));
     }
     .header[hidden] { display: none; }
-    .header ::slotted(h2), h2 {
+    /* Scoped to slot[name="title"] specifically, not ".header
+       ::slotted(h2)" generically — .header also contains the "actions"
+       slot, and a bare ".header ::slotted(h2)" would match an <h2>
+       slotted into *either* one, leaking the title's heading styling
+       onto whatever an "actions" consumer put there. */
+    slot[name="title"]::slotted(h2), h2 {
       margin: 0;
       font-size: var(--text-lg, 1.15rem);
       font-weight: var(--font-bold, 700);
