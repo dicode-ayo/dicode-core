@@ -5,6 +5,7 @@ import './dc-card.js';
 import './dc-page-header.js';
 import './dc-empty-state.js';
 import './dc-icon-button.js';
+import { KNOWN_VARIANTS } from './dc-status-badge.js';
 import './dc-status-badge.js';
 import './dc-table.js';
 
@@ -30,10 +31,10 @@ const SVG_REFRESH = html`<svg viewBox="0 0 24 24" fill="none" stroke="currentCol
   <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
 </svg>`;
 
-const STATUS_VALUES = [
-  'success', 'failure', 'running', 'crashlooping',
-  'cancelled', 'manual', 'suspended', 'resumed', 'unknown-status',
-];
+// Derived from dc-status-badge's own KNOWN_VARIANTS (not hand-duplicated)
+// so a status added there is automatically exercised here too, plus one
+// deliberately-unrecognized value to demonstrate the neutral fallback.
+const STATUS_VALUES = [...KNOWN_VARIANTS, 'unknown-status'];
 
 const DEMO_TABLE_HEAD = ['ID', 'Name', 'Status'];
 const DEMO_TABLE_ROWS = [
@@ -144,7 +145,12 @@ class DcUiKitDemo extends DcElement {
 
       <dc-card heading="dc-card">
         <dc-card id="card-slots-demo">
-          <div slot="title"><h2>Custom title slot</h2></div>
+          <!-- The h2 itself must carry slot="title" — dc-card's
+               ::slotted(h2) rule (necessarily) only matches nodes
+               directly assigned to the slot, not their descendants, so
+               wrapping the h2 in an intermediate <div slot="title"> would
+               leave it unstyled. -->
+          <h2 slot="title">Custom title slot</h2>
           <div slot="actions">
             <button class="btn btn-sm secondary">Action</button>
           </div>

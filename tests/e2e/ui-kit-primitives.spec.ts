@@ -61,7 +61,9 @@ test.describe('UI Kit primitives (#93 Stage 1)', () => {
     await expect(card).toBeVisible();
     // Slot content lives in the light DOM (projected), title/actions are
     // custom slotted elements rather than the `heading` prop's fallback <h2>.
-    await expect(card.locator('[slot="title"] h2')).toHaveText('Custom title slot');
+    // The h2 carries slot="title" directly — ::slotted() only matches
+    // directly-assigned nodes, not their descendants.
+    await expect(card.locator('h2[slot="title"]')).toHaveText('Custom title slot');
     await expect(card.locator('[slot="actions"] button')).toHaveText('Action');
     await expect(card.locator('p')).toContainText('title');
   });

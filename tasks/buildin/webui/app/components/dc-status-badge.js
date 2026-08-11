@@ -18,7 +18,10 @@ import { LitElement, html, css } from 'https://esm.sh/lit@3';
 //             'resumed'. Unknown/empty values render the neutral style.
 //   variant — alias for `status` (either may be set; `status` wins if both
 //             are given)
-const KNOWN_VARIANTS = new Set([
+// Exported so consumers that need the exact known-status list (e.g. the
+// demo page's exhaustive example) can reuse it instead of hand-duplicating
+// it and drifting out of sync when a status is added here.
+export const KNOWN_VARIANTS = new Set([
   'success', 'failure', 'running', 'crashlooping',
   'cancelled', 'manual', 'suspended', 'resumed',
 ]);

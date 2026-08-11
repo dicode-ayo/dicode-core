@@ -86,11 +86,20 @@ class DcCard extends LitElement {
   // exactly this reason — gets the first render right instead.
   connectedCallback() {
     super.connectedCallback();
+    // Computed fresh and assigned unconditionally (not just set to true
+    // when found) so a disconnect/reconnect cycle with content since
+    // removed — e.g. a future Stage 3 list-rendering consumer reusing
+    // element instances — doesn't leave a stale `true` behind from a
+    // previous connection.
+    let hasTitle = false;
+    let hasActions = false;
     for (const el of this.children) {
       const slot = el.getAttribute('slot');
-      if (slot === 'title') this._hasTitle = true;
-      else if (slot === 'actions') this._hasActions = true;
+      if (slot === 'title') hasTitle = true;
+      else if (slot === 'actions') hasActions = true;
     }
+    this._hasTitle = hasTitle;
+    this._hasActions = hasActions;
   }
 
   _onTitleSlotChange(e) {
