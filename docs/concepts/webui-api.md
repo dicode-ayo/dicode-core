@@ -70,6 +70,8 @@ The UI is a single-page application (SPA) built with [Lit](https://lit.dev) web 
 
 The SPA is itself a dicode task — `buildin/webui` (`tasks/buildin/webui/`, entry point `index.html` loading `app/app.js` as an ES module, components under `app/components/`, routing/websocket helpers under `app/lib/`) — served at the `/hooks/webui` webhook path like any other webhook task. Because it's a task, the reconciler hot-reloads it on change, same as any task in a watched source; no binary rebuild is needed. `pkg/webui`'s own embedded static assets are limited to `dicode.js` and `dicode-oauth-broadcast.js` (the client SDK injected into webhook-served pages), not the SPA itself.
 
+For the component-level architecture (light-DOM app components vs. the Shadow-DOM `dc-card`/`dc-table`/etc. primitives, and the `DcElement` base class), see [WebUI frontend components](webui-components.md).
+
 ### Components
 
 | File | Component | Description |

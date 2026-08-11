@@ -34,7 +34,7 @@ export default defineConfig({
     // Uses the seeded session from global-setup.
     {
       name: 'webui',
-      testMatch: ['**/webui-task.spec.ts'],
+      testMatch: ['**/webui-task.spec.ts', '**/ui-kit-primitives.spec.ts'],
       use: {
         ...devices['Desktop Chrome'],
         baseURL: BASE_URL,
