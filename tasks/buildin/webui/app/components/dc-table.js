@@ -39,6 +39,7 @@ class DcTable extends LitElement {
     emptyMessage: { type: String },
     emptyIcon: { type: String },
     _hasRows: { state: true },
+    _hasHead: { state: true },
   };
 
   static styles = css`
@@ -71,6 +72,7 @@ class DcTable extends LitElement {
     // connectedCallback, so a table that *does* have rows never flashes
     // the empty state on first paint.
     this._hasRows = true;
+    this._hasHead = true;
   }
 
   connectedCallback() {
@@ -78,20 +80,39 @@ class DcTable extends LitElement {
     this._recomputeHasRows();
   }
 
-  // Body rows are any light-DOM children not assigned to the "head" slot.
-  // Checked directly against this.children (rather than relying solely on
-  // slotchange, which isn't guaranteed to fire for an initially-empty
-  // assignment) so the very first render is already correct.
+  // Body rows are any light-DOM children not assigned to the "head" slot;
+  // the head row is any child that is. Checked directly against
+  // this.children (rather than relying solely on slotchange, which isn't
+  // guaranteed to fire for an initially-empty assignment) so the very
+  // first render is already correct. Tracked separately because a head
+  // row can be present with zero body rows (a consumer appending its
+  // header before any data arrives) — see the no-body-rows render branch.
   _recomputeHasRows() {
-    this._hasRows = [...this.children].some(el => el.getAttribute('slot') !== 'head');
+    const children = [...this.children];
+    this._hasRows = children.some(el => el.getAttribute('slot') !== 'head');
+    this._hasHead = children.some(el => el.getAttribute('slot') === 'head');
   }
 
   render() {
     if (this.loading) return html`<div class="loading">Loading…</div>`;
 
     if (!this._hasRows) {
+      // A head row can be present even with zero body rows (a consumer
+      // appends its header before any data arrives) — when it is, still
+      // route it through the table shell so it renders as a styled header
+      // instead of a bare, unbordered <tr>. When there's no head either
+      // (the ordinary fully-empty case), skip the shell entirely — an
+      // empty bordered box floating above the empty-state message would
+      // be its own small visual bug. The default slot has no visible
+      // content in this branch (there are no body rows by definition) but
+      // stays mounted so its slotchange listener still fires when rows
+      // are appended later.
       return html`
-        <slot name="head" @slotchange=${() => this._recomputeHasRows()}></slot>
+        ${this._hasHead ? html`
+          <div class="table" role="table">
+            <div class="thead" role="rowgroup"><slot name="head" @slotchange=${() => this._recomputeHasRows()}></slot></div>
+          </div>
+        ` : html`<slot name="head" @slotchange=${() => this._recomputeHasRows()}></slot>`}
         <slot @slotchange=${() => this._recomputeHasRows()}></slot>
         <dc-empty-state icon=${this.emptyIcon} message=${this.emptyMessage}></dc-empty-state>
       `;

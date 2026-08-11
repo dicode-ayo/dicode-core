@@ -85,9 +85,15 @@ class DcUiKitDemo extends DcElement {
   // markup runs into it too. document.createElement bypasses HTML parsing
   // entirely, so it's unaffected.
   //
-  // Guarded so the `ref` directive's callback (which only fires again if
-  // this exact element instance is torn down and recreated, not on every
-  // re-render — but stay defensive) never double-populates.
+  // Guard is load-bearing, not defensive paranoia: `ref(el => ...)` below
+  // passes a fresh arrow-function closure on every `render()` call, and
+  // Lit's ref directive compares callbacks by reference — so it re-invokes
+  // (with `undefined` then the element again) on every re-render of this
+  // component, not only when the <dc-table> element itself is torn down
+  // and recreated. This component re-renders on every Simulate
+  // success/failure click (they flip `_loading`/`_error`/`_demoResult`),
+  // so without this check each click would re-append a duplicate head row
+  // and duplicate body rows onto the already-populated table.
   _populateTableRows(el) {
     if (!el || el.childElementCount > 0) return;
 
@@ -153,9 +159,9 @@ class DcUiKitDemo extends DcElement {
       </dc-card>
 
       <dc-card heading="dc-table — with rows">
-        <!-- Rows are populated imperatively via ${ref(...)} — see
-             _populateTableRows's doc comment for why they can't be written
-             as literal <tr> markup here. -->
+        <!-- Rows are populated imperatively via the ref directive below —
+             see _populateTableRows's doc comment for why they can't be
+             written as literal tr markup here. -->
         <dc-table id="table-with-rows" ${ref(el => this._populateTableRows(el))}></dc-table>
       </dc-card>
 
