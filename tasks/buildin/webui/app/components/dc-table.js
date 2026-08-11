@@ -92,14 +92,26 @@ class DcTable extends LitElement {
   // Body rows are any light-DOM children not assigned to the "head" slot;
   // the head row is any child that is. Checked directly against
   // this.children (rather than relying solely on slotchange, which isn't
-  // guaranteed to fire for an initially-empty assignment) so the very
-  // first render is already correct. Tracked separately because a head
-  // row can be present with zero body rows (a consumer appending its
-  // header before any data arrives) — see the no-body-rows render branch.
+  // guaranteed to fire for an initially-empty assignment) so that when a
+  // consumer provides rows as literal markup — children of the same
+  // cloned template fragment as the <dc-table> host itself — the very
+  // first render is already correct. That guarantee does NOT extend to
+  // rows attached via a `ref()` callback (see dc-ui-kit-demo.js's
+  // `_populateTableRows`): a ref callback commits after the referenced
+  // element is already connected, so connectedCallback's check here still
+  // sees zero children in that case; the state then self-corrects one
+  // render later once the newly-populated <slot>s fire their initial
+  // `slotchange`. Tracked in one pass (not two separate `.some()` scans)
+  // since this runs on every slotchange, i.e. every row mutation.
   _recomputeHasRows() {
-    const children = [...this.children];
-    this._hasRows = children.some(el => el.getAttribute('slot') !== 'head');
-    this._hasHead = children.some(el => el.getAttribute('slot') === 'head');
+    let hasRows = false;
+    let hasHead = false;
+    for (const el of this.children) {
+      if (el.getAttribute('slot') === 'head') hasHead = true;
+      else hasRows = true;
+    }
+    this._hasRows = hasRows;
+    this._hasHead = hasHead;
   }
 
   render() {
