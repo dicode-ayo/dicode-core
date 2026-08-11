@@ -57,8 +57,23 @@ badge colors change, both places need updating — noted in both files.
 
 ## The six Stage 1 primitives
 
-All under `tasks/buildin/webui/app/components/`. Each is self-contained
-(imports only `lit` and, for `dc-table`, `dc-empty-state`).
+All under `tasks/buildin/webui/app/components/`. Each is self-contained,
+importing only `lit`, `../lib/slot-utils.js` (`dc-card`, `dc-empty-state`),
+and — for `dc-table` — `dc-empty-state`.
+
+`dc-card`, `dc-table`, and `dc-empty-state` each need to know synchronously
+whether a given slot has real (element) content, both on first connection
+and on every later `slotchange` — used to decide whether to show a header
+row, a table shell, or a CTA gap. `dc-card`/`dc-empty-state` share that
+check via `lib/slot-utils.js`'s `hasSlottedElement(host, slotName)`
+(checks `host.children`, not `<slot>.assignedNodes()` — the latter also
+counts whitespace text nodes, which caused a real bug in an earlier
+version of this PR: an empty-looking `<dc-empty-state>` with only
+incidental whitespace between its tags flipped its "has CTA" state on).
+`dc-table` computes its two flags (`_hasRows`/`_hasHead`) together in a
+single pass over `this.children` instead, since it needs both from one
+scan on every row mutation and the two-slot-name shared-helper shape
+would mean scanning twice.
 
 ### `<dc-card>`
 

@@ -1,4 +1,5 @@
 import { LitElement, html, css } from 'https://esm.sh/lit@3';
+import { hasSlottedElement } from '../lib/slot-utils.js';
 
 // <dc-empty-state> — Stage 1 primitive (#93): the centered "nothing here"
 // placeholder duplicated inline in dc-task-list.js
@@ -65,16 +66,19 @@ class DcEmptyState extends LitElement {
   // Synchronous census (not slotchange-only) so a CTA present from the
   // very first connection doesn't render gap-less for one frame before
   // self-correcting — same rationale as dc-card.js's connectedCallback.
-  // Only children with no `slot` attribute are assigned to the default
-  // (CTA) slot — an icon-slot child (`slot="icon"`) must not count.
+  // hasSlottedElement checks this.children (element children only), not
+  // `<slot>.assignedNodes()` — assignedNodes() also counts whitespace
+  // text nodes (e.g. the newline in ordinary multi-line
+  // `<dc-empty-state>\n</dc-empty-state>` markup with no real CTA
+  // element), which would flip _hasCta on for content-free instances and
+  // reproduce the exact "gap never turns off" bug this component's CSS
+  // comment says was deliberately avoided, via a different path.
   connectedCallback() {
     super.connectedCallback();
-    this._hasCta = [...this.children].some(el => !el.hasAttribute('slot'));
+    this._hasCta = hasSlottedElement(this);
   }
 
-  _onCtaSlotChange(e) {
-    this._hasCta = e.target.assignedNodes({ flatten: true }).length > 0;
-  }
+  _onCtaSlotChange = () => { this._hasCta = hasSlottedElement(this); };
 
   render() {
     return html`

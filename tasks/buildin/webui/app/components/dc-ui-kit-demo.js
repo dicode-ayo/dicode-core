@@ -6,7 +6,6 @@ import './dc-page-header.js';
 import './dc-empty-state.js';
 import './dc-icon-button.js';
 import { KNOWN_VARIANTS } from './dc-status-badge.js';
-import './dc-status-badge.js';
 import './dc-table.js';
 
 // <dc-ui-kit-demo> — Stage 1 (#93) proof page: exercises all six new

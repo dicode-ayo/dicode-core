@@ -1,4 +1,5 @@
 import { LitElement, html, css } from 'https://esm.sh/lit@3';
+import { hasSlottedElement } from '../lib/slot-utils.js';
 
 // <dc-card> — Stage 1 primitive (#93): a bordered surface with an optional
 // title/actions header, replacing the ad hoc `<div class="card" style="...">`
@@ -81,43 +82,36 @@ class DcCard extends LitElement {
   // assignment. A card with slotted title/actions content but no
   // `heading` attribute (e.g. dc-ui-kit-demo.js's #card-slots-demo) would
   // render its header hidden on the very first paint, then flash it in
-  // once the state self-corrects. Checking this.children directly here
-  // — mirroring dc-table.js's _recomputeHasRows, which does the same for
-  // exactly this reason — gets the first render right instead.
+  // once the state self-corrects. hasSlottedElement checks this.children
+  // directly — mirroring dc-table.js's/dc-empty-state.js's identical
+  // need — so the first render is already correct, and recomputed fresh
+  // (not just set true when found) so a disconnect/reconnect cycle with
+  // content since removed doesn't leave a stale true from a prior
+  // connection.
   connectedCallback() {
     super.connectedCallback();
-    // Computed fresh and assigned unconditionally (not just set to true
-    // when found) so a disconnect/reconnect cycle with content since
-    // removed — e.g. a future Stage 3 list-rendering consumer reusing
-    // element instances — doesn't leave a stale `true` behind from a
-    // previous connection.
-    let hasTitle = false;
-    let hasActions = false;
-    for (const el of this.children) {
-      const slot = el.getAttribute('slot');
-      if (slot === 'title') hasTitle = true;
-      else if (slot === 'actions') hasActions = true;
-    }
-    this._hasTitle = hasTitle;
-    this._hasActions = hasActions;
+    this._recomputeSlotState();
   }
 
-  _onTitleSlotChange(e) {
-    this._hasTitle = e.target.assignedNodes({ flatten: true }).length > 0;
+  _recomputeSlotState() {
+    this._hasTitle = hasSlottedElement(this, 'title');
+    this._hasActions = hasSlottedElement(this, 'actions');
   }
 
-  _onActionsSlotChange(e) {
-    this._hasActions = e.target.assignedNodes({ flatten: true }).length > 0;
-  }
+  // Bound once (arrow class field) so both `@slotchange` bindings below
+  // reuse one function identity across renders instead of Lit rebinding a
+  // fresh closure on every unrelated re-render — same rationale as
+  // dc-table.js's `_onSlotChange`.
+  _onSlotChange = () => this._recomputeSlotState();
 
   render() {
     const showHeader = !!this.heading || this._hasTitle || this._hasActions;
     return html`
       <div class="header" ?hidden=${!showHeader}>
-        <slot name="title" @slotchange=${this._onTitleSlotChange}>
+        <slot name="title" @slotchange=${this._onSlotChange}>
           ${this.heading ? html`<h2>${this.heading}</h2>` : ''}
         </slot>
-        <div class="actions"><slot name="actions" @slotchange=${this._onActionsSlotChange}></slot></div>
+        <div class="actions"><slot name="actions" @slotchange=${this._onSlotChange}></slot></div>
       </div>
       <div class="body ${this.pad === 'none' ? 'pad-none' : ''}">
         <slot></slot>
