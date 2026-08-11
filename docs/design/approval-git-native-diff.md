@@ -153,11 +153,13 @@ display helpers and are not. `ContentHash` must stay sensitive to a repointed
 
 **Merge into #649**
 
-- #648 a parse error destroys the baseline and reports it as a routine restart —
-  the underlying event is #649's eviction. Under this design the harm changes
-  shape: `Gate.Forget` calls `lock.Remove` (`gate.go:443`), so an eviction
-  deletes the commit record and the task returns as brand new. One issue should
-  cover "a parse failure evicts the task and erases its approval record."
+- #648 a parse error destroys the baseline and reports it as a routine restart.
+  Its premise does not hold: the reconciler's load-failure path only logs, and
+  `Gate.Forget` is wired to `OnUnregister`, which fires only when `task.yaml`
+  leaves `ScanDir` entirely — a parse failure evicts nothing. What survives is
+  #649's own scope, plus a raised stake: `Gate.Forget` calls `lock.Remove`
+  (`gate.go:249`), so under this design a genuine eviction deletes the recorded
+  commit and the task returns as brand new.
 
 ---
 
