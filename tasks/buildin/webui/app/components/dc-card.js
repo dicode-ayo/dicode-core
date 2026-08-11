@@ -74,6 +74,25 @@ class DcCard extends LitElement {
     this._hasActions = false;
   }
 
+  // Without this, `_hasTitle`/`_hasActions` stay at their constructor
+  // defaults (false) until the title/actions `slotchange` listeners fire
+  // — which happens one render *after* the first, since a `<slot>` has
+  // to exist in the rendered shadow tree before it can report an
+  // assignment. A card with slotted title/actions content but no
+  // `heading` attribute (e.g. dc-ui-kit-demo.js's #card-slots-demo) would
+  // render its header hidden on the very first paint, then flash it in
+  // once the state self-corrects. Checking this.children directly here
+  // — mirroring dc-table.js's _recomputeHasRows, which does the same for
+  // exactly this reason — gets the first render right instead.
+  connectedCallback() {
+    super.connectedCallback();
+    for (const el of this.children) {
+      const slot = el.getAttribute('slot');
+      if (slot === 'title') this._hasTitle = true;
+      else if (slot === 'actions') this._hasActions = true;
+    }
+  }
+
   _onTitleSlotChange(e) {
     this._hasTitle = e.target.assignedNodes({ flatten: true }).length > 0;
   }
