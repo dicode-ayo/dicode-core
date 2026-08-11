@@ -90,7 +90,7 @@ class DcTable extends LitElement {
   // that mounts the real slots also has an up-to-date census instead of
   // showing a one-render flash of the stale (pre-population) empty state.
   willUpdate(changedProperties) {
-    if (changedProperties.has('loading') && changedProperties.get('loading') === true && !this.loading) {
+    if (changedProperties.get('loading') === true && !this.loading) {
       this._recomputeHasRows();
     }
   }
