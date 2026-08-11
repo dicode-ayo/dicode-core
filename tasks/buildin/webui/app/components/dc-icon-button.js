@@ -46,9 +46,13 @@ class DcIconButton extends LitElement {
       outline: 2px solid var(--sky, #a0c4ff);
       outline-offset: 2px;
     }
-    :host([variant='danger']) button:hover {
+    :host([variant='danger']) button:hover,
+    :host([variant='danger']) button:focus-visible {
       border-color: var(--red, #f38ba8);
       color: var(--red, #f38ba8);
+    }
+    :host([variant='danger']) button:focus-visible {
+      outline-color: var(--red, #f38ba8);
     }
     button:disabled { opacity: .5; cursor: not-allowed; }
     ::slotted(svg) { width: 18px; height: 18px; }

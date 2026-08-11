@@ -80,6 +80,15 @@ class DcTable extends LitElement {
     this._recomputeHasRows();
   }
 
+  // Bound once (arrow class field, not a prototype method) so every
+  // `@slotchange=${this._onSlotChange}` binding below reuses the same
+  // function identity — render() runs on every reactive-property change,
+  // including unrelated ones like `loading` toggling, and a fresh
+  // `() => this._recomputeHasRows()` closure per occurrence per render
+  // would mean Lit re-diffs/rebinds up to 3 new listeners each time
+  // instead of recognizing the same handler across renders.
+  _onSlotChange = () => this._recomputeHasRows();
+
   // Body rows are any light-DOM children not assigned to the "head" slot;
   // the head row is any child that is. Checked directly against
   // this.children (rather than relying solely on slotchange, which isn't
@@ -110,18 +119,18 @@ class DcTable extends LitElement {
       return html`
         ${this._hasHead ? html`
           <div class="table" role="table">
-            <div class="thead" role="rowgroup"><slot name="head" @slotchange=${() => this._recomputeHasRows()}></slot></div>
+            <div class="thead" role="rowgroup"><slot name="head" @slotchange=${this._onSlotChange}></slot></div>
           </div>
-        ` : html`<slot name="head" @slotchange=${() => this._recomputeHasRows()}></slot>`}
-        <slot @slotchange=${() => this._recomputeHasRows()}></slot>
+        ` : html`<slot name="head" @slotchange=${this._onSlotChange}></slot>`}
+        <slot @slotchange=${this._onSlotChange}></slot>
         <dc-empty-state icon=${this.emptyIcon} message=${this.emptyMessage}></dc-empty-state>
       `;
     }
 
     return html`
       <div class="table" role="table">
-        <div class="thead" role="rowgroup"><slot name="head" @slotchange=${() => this._recomputeHasRows()}></slot></div>
-        <div class="tbody" role="rowgroup"><slot @slotchange=${() => this._recomputeHasRows()}></slot></div>
+        <div class="thead" role="rowgroup"><slot name="head" @slotchange=${this._onSlotChange}></slot></div>
+        <div class="tbody" role="rowgroup"><slot @slotchange=${this._onSlotChange}></slot></div>
       </div>
     `;
   }

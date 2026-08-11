@@ -26,8 +26,8 @@ As of #93 there are two distinct flavors:
 | Role | one per page/route; owns data fetching, routing, app-specific behavior | reusable, presentation-only building blocks composed *by* the app components |
 
 Existing page components predate this split and intentionally stay
-light-DOM/unmigrated in this pass — see `CLAUDE.md`'s note on the narrow
-scope of this change. New reusable pieces (the six primitives below) use
+light-DOM/unmigrated in this pass (see the "Demo page" section below and
+issue #93 for why). New reusable pieces (the six primitives below) use
 Shadow DOM: real encapsulation is worth it once something is meant to be
 dropped into multiple pages without its internals leaking into (or
 colliding with) `global.css`.
@@ -195,6 +195,7 @@ DOM.
 **No existing component has been migrated onto `DcElement` yet.** It ships
 now, unused by the pre-#93 components, so new components can opt in
 immediately; migrating `dc-task-list.js`/`dc-run-detail.js`/etc. onto it is
-Stage 3 follow-up work, chosen to stay out of scope here since (per
-`CLAUDE.md`) every other in-flight PR at the time of this change already
-touches one of those files.
+Stage 3 follow-up work, deliberately kept out of scope here — every other
+PR open against this repo at the time of this change already touches one
+of those files, so migrating them here would have meant stacking merge
+conflicts on top of in-flight work.
