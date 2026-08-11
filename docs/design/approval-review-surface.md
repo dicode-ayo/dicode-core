@@ -208,6 +208,10 @@ outside `resolvedFieldsOf`. Deleting them changes what the gate holds on.
 
 ## Issue disposition
 
+Tracked as epic #667: #668 (record the commit), #669 (end state, deletions),
+#670 (the "what moved" strip), #671 (panel + `pending-state`), #672 (token
+page).
+
 **Closed as superseded** — #640 (synthetic Monaco line numbers), #641 (key the
 diff file list), #642 (persist the snapshot), #643 (redact from the YAML node
 tree), #646 (`hash_include` invisible), #651 (flagging is a text match). Each
