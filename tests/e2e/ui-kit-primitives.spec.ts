@@ -155,6 +155,20 @@ test.describe('UI Kit primitives (#93 Stage 1)', () => {
     await expect(empty.locator('.message')).toHaveText('No rows slotted.');
   });
 
+  // Locks in a bug fixed during this PR's review: a head row present with
+  // zero body rows must still render the head inside the styled table
+  // shell (not as a bare, unstyled <tr>), alongside the empty-state
+  // message — not one or the other.
+  test('dc-table renders a styled head row alongside the empty state when only the head is slotted', async ({ page }) => {
+    const table = page.locator('dc-table#table-head-only');
+    await expect(table.locator('[role="table"]')).toBeVisible();
+    await expect(table.locator('tr[slot="head"] th').first()).toHaveText('ID');
+    await expect(table.locator('tr:not([slot])')).toHaveCount(0);
+    const empty = table.locator('dc-empty-state');
+    await expect(empty).toBeVisible();
+    await expect(empty.locator('.message')).toHaveText('Waiting for data…');
+  });
+
   // ── DcElement base class (Stage 2 plumbing, dogfooded on this page) ─────
 
   test('DcElement _fetch() drives visible loading and success state', async ({ page }) => {

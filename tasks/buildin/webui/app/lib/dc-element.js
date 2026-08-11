@@ -59,6 +59,16 @@ export class DcElement extends LitElement {
   // Returns the resolved value on success, or `undefined` on failure —
   // callers that need to distinguish "no data yet" from "failed" should
   // check `this._error` after awaiting.
+  //
+  // Single-flight only: `_loading`/`_error` are one shared pair per
+  // component instance, not tracked per call. Two overlapping `_fetch()`
+  // calls on the same instance will race each other for both flags —
+  // whichever call's `finally` runs last "wins" `_loading`, and whichever
+  // catch/success handler runs last wins `_error`, regardless of which
+  // call it actually belongs to. Fine for the common "one load in flight
+  // at a time" case this is designed for; a component that can have
+  // multiple independent async operations running concurrently needs its
+  // own per-operation state instead of sharing this pair.
   async _fetch(promiseOrFn) {
     this._loading = true;
     this._error = null;

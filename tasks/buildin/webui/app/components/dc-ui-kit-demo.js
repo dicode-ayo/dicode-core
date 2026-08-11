@@ -94,7 +94,9 @@ class DcUiKitDemo extends DcElement {
   // success/failure click (they flip `_loading`/`_error`/`_demoResult`),
   // so without this check each click would re-append a duplicate head row
   // and duplicate body rows onto the already-populated table.
-  _populateTableRows(el) {
+  // `rows` defaults to the full demo set; #table-head-only passes `[]` to
+  // exercise dc-table's "head present, zero body rows" render branch.
+  _populateTableRows(el, rows = DEMO_TABLE_ROWS) {
     if (!el || el.childElementCount > 0) return;
 
     const head = document.createElement('tr');
@@ -106,7 +108,7 @@ class DcUiKitDemo extends DcElement {
     }
     el.appendChild(head);
 
-    for (const row of DEMO_TABLE_ROWS) {
+    for (const row of rows) {
       const tr = document.createElement('tr');
       const tdID = document.createElement('td');
       tdID.textContent = row.id;
@@ -176,6 +178,15 @@ class DcUiKitDemo extends DcElement {
              property names verbatim (no kebab-case insertion), so an
              "empty-message" attribute would not map to emptyMessage. -->
         <dc-table id="table-empty" .emptyMessage=${'No rows slotted.'} .emptyIcon=${'🗂️'}></dc-table>
+      </dc-card>
+
+      <dc-card heading="dc-table — head row, zero body rows">
+        <!-- Exercises the branch where a consumer appends its header
+             before any data has arrived (a head row present with no body
+             rows yet) — must render the head styled inside the table
+             shell, not as a bare unstyled <tr>, alongside the empty-state
+             message below it. -->
+        <dc-table id="table-head-only" .emptyMessage=${'Waiting for data…'} ${ref(el => this._populateTableRows(el, []))}></dc-table>
       </dc-card>
 
       <dc-card heading="DcElement base class (Stage 2)">
