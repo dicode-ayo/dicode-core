@@ -148,7 +148,7 @@ table rules keep styling their contents without `<dc-table>` needing to
 duplicate them.
 
 **Rows cannot be written as literal `<tr>` markup in a Lit template**, e.g.
-`html\`<dc-table><tr>...</tr></dc-table>\``. The HTML parser only creates
+`` html`<dc-table><tr>...</tr></dc-table>` ``. The HTML parser only creates
 `<tr>`/`<td>`/`<th>` elements while in one of its table-specific insertion
 modes, entered only after a literal `<table>` tag has already been opened
 in the *same* parse — `<dc-table>` doesn't count, so the parser stays in
