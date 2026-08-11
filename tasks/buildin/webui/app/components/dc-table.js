@@ -20,6 +20,19 @@ import './dc-empty-state.js';
 // document tree selectors match it against — so the app's global.css table
 // rules (`th, td { ... }`) keep styling their contents without this
 // component needing to duplicate them.
+//
+// Shell is <div>s with CSS table display roles, NOT literal <table>/<thead>/
+// <tbody> tags. The HTML parser only recognizes <slot> as valid content
+// inside <table>-family elements when parsing *starts* already inside that
+// table context; here it doesn't (this is a plain shadow-root template), so
+// a literal `<table><thead><slot ...></slot></thead>...` gets its <slot>s
+// foster-parented — silently relocated to just before the <table>, leaving
+// <thead>/<tbody> permanently empty and the table itself zero-height.
+// `display: table` on a <div> produces the identical CSS table layout
+// (browsers key table layout off computed `display`, not tag names) without
+// tripping the parser's table-insertion-mode special-casing, since a <div>
+// never switches the parser into that mode in the first place. `role`
+// attributes restore the semantics the swapped tags would otherwise carry.
 class DcTable extends LitElement {
   static properties = {
     loading: { type: Boolean },
@@ -30,7 +43,8 @@ class DcTable extends LitElement {
 
   static styles = css`
     :host { display: block; }
-    table {
+    .table {
+      display: table;
       width: 100%;
       border-collapse: collapse;
       background: var(--card-bg, rgba(255, 255, 255, .04));
@@ -38,6 +52,8 @@ class DcTable extends LitElement {
       border-radius: var(--radius-md, 10px);
       overflow: hidden;
     }
+    .thead { display: table-header-group; }
+    .tbody { display: table-row-group; }
     .loading {
       padding: var(--space-lg, 1.5rem);
       text-align: center;
@@ -82,10 +98,10 @@ class DcTable extends LitElement {
     }
 
     return html`
-      <table>
-        <thead><slot name="head" @slotchange=${() => this._recomputeHasRows()}></slot></thead>
-        <tbody><slot @slotchange=${() => this._recomputeHasRows()}></slot></tbody>
-      </table>
+      <div class="table" role="table">
+        <div class="thead" role="rowgroup"><slot name="head" @slotchange=${() => this._recomputeHasRows()}></slot></div>
+        <div class="tbody" role="rowgroup"><slot @slotchange=${() => this._recomputeHasRows()}></slot></div>
+      </div>
     `;
   }
 }

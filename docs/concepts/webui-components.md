@@ -114,8 +114,8 @@ Bordered table shell around slotted rows, generalizing the
 `<table>...</table>` + "no tasks found" empty-card pattern in
 `dc-task-list.js`.
 
-- Slots: `head` (a single `<tr>` for `<thead>`), default (`<tr>` rows for
-  `<tbody>`)
+- Slots: `head` (a single `<tr>`, rendered as the table's header row group),
+  default (`<tr>` rows rendered as the body row group)
 - Props: `loading` (shows a placeholder instead of rows), `emptyMessage` /
   `emptyIcon` (forwarded to the internal `<dc-empty-state>` when no rows are
   slotted)
@@ -131,6 +131,24 @@ through a `<slot>` only changes where a node paints, not which document
 tree it lives in for CSS-selector purposes — so the app's `global.css`
 table rules keep styling their contents without `<dc-table>` needing to
 duplicate them.
+
+**Rows cannot be written as literal `<tr>` markup in a Lit template**, e.g.
+`html\`<dc-table><tr>...</tr></dc-table>\``. The HTML parser only creates
+`<tr>`/`<td>`/`<th>` elements while in one of its table-specific insertion
+modes, entered only after a literal `<table>` tag has already been opened
+in the *same* parse — `<dc-table>` doesn't count, so the parser stays in
+its default mode the whole way through and silently drops the tag (a
+`<tr>` start tag there is a parse error; the tag is ignored, though its
+text content still leaks through as loose text). This is a general
+HTML-parsing constraint, not specific to `<dc-table>`'s own shadow
+template — it bites any element that isn't literally `<table>`. Build rows
+with `document.createElement`/`appendChild` instead (bypasses HTML parsing
+entirely) and attach them via Lit's `ref()` directive; see
+`_populateTableRows` in `dc-ui-kit-demo.js` for the pattern. `<dc-table>`'s
+own shadow-root shell is `<div>`s with CSS `display: table` roles rather
+than literal `<table>`/`<thead>`/`<tbody>`, for the same underlying
+reason: a literal `<table>` there would foster-parent its own `<slot>`
+children right back out.
 
 ### Demo page
 

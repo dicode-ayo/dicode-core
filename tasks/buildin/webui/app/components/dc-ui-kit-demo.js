@@ -1,4 +1,5 @@
 import { html } from 'https://esm.sh/lit@3';
+import { ref } from 'https://esm.sh/lit@3/directives/ref.js';
 import { DcElement } from '../lib/dc-element.js';
 import './dc-card.js';
 import './dc-page-header.js';
@@ -34,6 +35,13 @@ const STATUS_VALUES = [
   'cancelled', 'manual', 'suspended', 'resumed', 'unknown-status',
 ];
 
+const DEMO_TABLE_HEAD = ['ID', 'Name', 'Status'];
+const DEMO_TABLE_ROWS = [
+  { id: 'task-1', name: 'Example One', status: 'success' },
+  { id: 'task-2', name: 'Example Two', status: 'running' },
+  { id: 'task-3', name: 'Example Three', status: 'failure' },
+];
+
 class DcUiKitDemo extends DcElement {
   static properties = {
     ...DcElement.properties,
@@ -57,6 +65,54 @@ class DcUiKitDemo extends DcElement {
       }, 300);
     }));
     if (result) this._demoResult = result;
+  }
+
+  // Populates <dc-table id="table-with-rows">'s light-DOM row children via
+  // real DOM APIs (document.createElement + appendChild) rather than as
+  // literal <tr>/<th>/<td> markup in the `html` template below.
+  //
+  // Markup would silently fail: the HTML parser only creates <tr>/<td>/<th>
+  // elements while in one of its table-specific insertion modes, which it
+  // only enters after already having opened a literal <table> tag in the
+  // SAME parse. <dc-table> is not a <table> — so parsing a template
+  // containing `<dc-table><tr>...</tr></dc-table>` leaves the parser in its
+  // default "in body" mode the whole way through, where a <tr>/<td>/<th>
+  // start tag is a parse error and the tag is dropped outright (its text
+  // content survives as loose text, but no element is created — verified
+  // empirically, not just from the spec text). This is a general Lit/HTML
+  // constraint, not a dc-table-specific one: it applies to *any* element
+  // that isn't literally <table>, so any consumer wanting rows built from
+  // markup runs into it too. document.createElement bypasses HTML parsing
+  // entirely, so it's unaffected.
+  //
+  // Guarded so the `ref` directive's callback (which only fires again if
+  // this exact element instance is torn down and recreated, not on every
+  // re-render — but stay defensive) never double-populates.
+  _populateTableRows(el) {
+    if (!el || el.childElementCount > 0) return;
+
+    const head = document.createElement('tr');
+    head.slot = 'head';
+    for (const label of DEMO_TABLE_HEAD) {
+      const th = document.createElement('th');
+      th.textContent = label;
+      head.appendChild(th);
+    }
+    el.appendChild(head);
+
+    for (const row of DEMO_TABLE_ROWS) {
+      const tr = document.createElement('tr');
+      const tdID = document.createElement('td');
+      tdID.textContent = row.id;
+      const tdName = document.createElement('td');
+      tdName.textContent = row.name;
+      const tdStatus = document.createElement('td');
+      const badge = document.createElement('dc-status-badge');
+      badge.status = row.status;
+      tdStatus.appendChild(badge);
+      tr.append(tdID, tdName, tdStatus);
+      el.appendChild(tr);
+    }
   }
 
   render() {
@@ -97,12 +153,10 @@ class DcUiKitDemo extends DcElement {
       </dc-card>
 
       <dc-card heading="dc-table — with rows">
-        <dc-table id="table-with-rows">
-          <tr slot="head"><th>ID</th><th>Name</th><th>Status</th></tr>
-          <tr><td>task-1</td><td>Example One</td><td><dc-status-badge status="success"></dc-status-badge></td></tr>
-          <tr><td>task-2</td><td>Example Two</td><td><dc-status-badge status="running"></dc-status-badge></td></tr>
-          <tr><td>task-3</td><td>Example Three</td><td><dc-status-badge status="failure"></dc-status-badge></td></tr>
-        </dc-table>
+        <!-- Rows are populated imperatively via ${ref(...)} — see
+             _populateTableRows's doc comment for why they can't be written
+             as literal <tr> markup here. -->
+        <dc-table id="table-with-rows" ${ref(el => this._populateTableRows(el))}></dc-table>
       </dc-card>
 
       <dc-card heading="dc-table — empty state">

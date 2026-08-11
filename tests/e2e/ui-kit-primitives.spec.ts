@@ -133,7 +133,7 @@ test.describe('UI Kit primitives (#93 Stage 1)', () => {
     // the <dc-table> host (slotting only changes where they *paint*, not
     // where they live in the DOM tree) so these are queried directly,
     // without needing to reach through the shadow root's <slot>.
-    await expect(table.locator('table')).toBeVisible(); // shadow-root shell rendered
+    await expect(table.locator('[role="table"]')).toBeVisible(); // shadow-root shell rendered
     await expect(table.locator('tr[slot="head"] th').first()).toHaveText('ID');
     const bodyRows = table.locator('tr:not([slot])');
     await expect(bodyRows).toHaveCount(3);
@@ -146,7 +146,7 @@ test.describe('UI Kit primitives (#93 Stage 1)', () => {
 
   test('dc-table renders its empty state when no rows are slotted', async ({ page }) => {
     const table = page.locator('dc-table#table-empty');
-    await expect(table.locator('table')).toHaveCount(0);
+    await expect(table.locator('[role="table"]')).toHaveCount(0);
     const empty = table.locator('dc-empty-state');
     await expect(empty).toBeVisible();
     await expect(empty.locator('.icon')).toHaveText('🗂️');
