@@ -155,6 +155,10 @@ spec:
       ref:
         path: ./run-inputs-cleanup/task.yaml
 
+    resume-state-cleanup:
+      ref:
+        path: ./resume-state-cleanup/task.yaml
+
     audit-export-loki:
       ref:
         path: ./audit-export-loki/task.yaml

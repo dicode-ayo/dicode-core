@@ -1,0 +1,42 @@
+apiVersion: dicode/v1
+kind: Task
+name: "Resume-state offload retention sweep"
+description: |
+  Hourly cleanup of expired offloaded resume-state blobs (#570). Calls
+  runs.list_expired_resume_state to find rows carrying an offloaded
+  suspend/resume state blob past retention, then runs.delete_resume_state
+  for each. Mirrors the run-inputs-cleanup pattern.
+
+  A row's blob only becomes sweep-eligible once the row has left the
+  `suspended` status (see Registry.ListExpiredResumeStates) — a still-live
+  suspension is never touched, so this sweep can never strand a dangling
+  reference. The common case is already handled eagerly by ResumeRun right
+  after a successful resume; this sweep is the backstop for the rest
+  (resume-deadline timeouts, a daemon restart mid-resume, a transient
+  storage-task failure during the eager delete).
+
+  retention_seconds defaults to 24h (86400s); the daemon overrides this via
+  dicode.yaml's defaults.resume_state.retention.
+
+runtime: deno
+
+trigger:
+  cron: "23 * * * *"   # hourly at :23 (offset from run-inputs-cleanup's :17)
+
+params:
+  retention_seconds:
+    type: number
+    default: "86400"   # 24 hours
+    description: "Retain orphaned resume-state blobs for at most this many seconds. Daemon overrides via dicode.yaml."
+
+permissions:
+  dicode:
+    runs_list_expired_resume_state: true
+    runs_delete_resume_state: true
+
+# Self-opt-out from input persistence to avoid storing this task's own
+# params on every cron tick.
+run_inputs:
+  enabled: false
+
+timeout: 120s
