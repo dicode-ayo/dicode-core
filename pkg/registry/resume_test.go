@@ -26,7 +26,7 @@ func seedSuspendedRun(t *testing.T, r *Registry, runID, token string, deadline i
 	if _, err := r.StartRunWithID(ctx, runID, "task-x", "", string(TriggerManual), RunKindTask); err != nil {
 		t.Fatalf("StartRunWithID: %v", err)
 	}
-	if _, err := r.SuspendRun(ctx, runID, []byte(`{"step":1}`), []byte(`{"type":"object","properties":{}}`), token, time.Now().UnixMilli(), deadline, nil); err != nil {
+	if _, err := r.SuspendRun(ctx, runID, []byte(`{"step":1}`), []byte(`{"type":"object","properties":{}}`), token, time.Now().UnixMilli(), deadline, nil, nil); err != nil {
 		t.Fatalf("SuspendRun: %v", err)
 	}
 }

@@ -209,6 +209,18 @@ func (s *SQLiteDB) migrate() error {
 		// instead of a recursive walk. NULL only for rows written before this
 		// migration, until backfillRootRunID runs.
 		{"root_run_id", "TEXT"},
+		// resume_state offload columns (#570). Mirror the input_storage_key /
+		// input_size / input_stored_at trio above but deliberately kept as
+		// separate columns rather than reused ones: resume_state and run-input
+		// are semantically different (different GC lifetime, different
+		// encryption sub-key, different storage-key prefix) even though both
+		// delegate byte storage to the same configured storage task. When set,
+		// resume_state itself is NULL and the real state blob lives at
+		// resume_state_storage_key; when unset, resume_state holds the state
+		// inline as before (small-state fast path).
+		{"resume_state_storage_key", "TEXT"},
+		{"resume_state_size", "INTEGER"},
+		{"resume_state_stored_at", "INTEGER"},
 	}
 	for _, m := range runsMigrations {
 		if err := addColumnIfMissing(ctx, s.db, "runs", m.name, m.ddl); err != nil {
@@ -283,6 +295,18 @@ func (s *SQLiteDB) migrate() error {
 	`)
 	if err != nil {
 		return fmt.Errorf("migrate resume indexes: %w", err)
+	}
+
+	// resume_state_storage_key index (#570) — the resume-state-cleanup sweep
+	// (ListExpiredResumeStates) filters on "has an offloaded blob and is past
+	// its retention window"; the partial index keeps it tiny since only
+	// suspended-then-offloaded rows ever populate this column.
+	_, err = s.db.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_runs_resume_state_storage_key ON runs(resume_state_storage_key)
+			WHERE resume_state_storage_key IS NOT NULL;
+	`)
+	if err != nil {
+		return fmt.Errorf("migrate resume_state_storage_key index: %w", err)
 	}
 
 	// author_sessions — AI-first task authoring sessions (#288).
