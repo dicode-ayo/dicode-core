@@ -5,14 +5,11 @@
  * pending hash the operator's diff was built from, not whatever happens to
  * be pending when the request lands.
  *
- * Before this fix, apiApproveTask called the gate's unconditional Approve()
- * regardless of what (if anything) the caller sent, so a dashboard operator
- * reviewing diff v1 who clicks Approve after the reconciler has already
- * re-pended the task at v2 would silently arm v2 — content they never saw.
- * This suite reproduces that race directly: load the diff, mutate the file
- * again behind the open panel (which never auto-refetches), then click
- * Approve. The stale click must be rejected and the panel must refresh to
- * the version that is actually pending, never silently approve it.
+ * The race this covers: an operator reviewing diff v1 clicks Approve after
+ * the reconciler has re-pended the task at v2. The panel never auto-refetches,
+ * so the click carries v1's hash while v2 is what is pending. The stale click
+ * must be rejected and the panel must refresh to the version that is actually
+ * pending, never silently approve it.
  *
  * Reuses the file-change.spec.ts / approval-diff.spec.ts pattern of mutating
  * the hello-manual fixture in the temp copy at DICODE_E2E_TASKS_DIR and

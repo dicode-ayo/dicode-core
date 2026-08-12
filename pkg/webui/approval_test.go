@@ -314,6 +314,8 @@ func TestAPI_ApproveTask_MalformedBody400(t *testing.T) {
 // falsy pending_hash) silently degrading into the unconditional-approve
 // path with no signal. An absent "hash" field still means "unbound" (see
 // TestAPI_ApproveTask_ApprovesPending); an explicitly empty one is rejected.
+//
+//nolint:dupl // the null variant below differs only in the body it sends
 func TestAPI_ApproveTask_ExplicitEmptyHash400(t *testing.T) {
 	srv, reg, _ := newApprovalTestServer(t, false)
 	registerMinimalTask(t, reg, "repo/pending-task")
@@ -331,6 +333,35 @@ func TestAPI_ApproveTask_ExplicitEmptyHash400(t *testing.T) {
 	}
 	if !gate.IsPending("repo/pending-task") {
 		t.Error("task must stay pending when the hash field is explicitly empty")
+	}
+	if len(gate.approved) != 0 {
+		t.Errorf("approve must not have run: approved = %v", gate.approved)
+	}
+}
+
+// TestAPI_ApproveTask_NullHash400 covers the same intent as the empty-string
+// case for a body carrying an explicit null. JSON.stringify keeps a null field
+// where it drops an undefined one, so a falsy pending_hash reaches the handler
+// as a present key — it must not read as "caller has no diff to bind to".
+//
+//nolint:dupl // the empty-string variant above differs only in the body it sends
+func TestAPI_ApproveTask_NullHash400(t *testing.T) {
+	srv, reg, _ := newApprovalTestServer(t, false)
+	registerMinimalTask(t, reg, "repo/pending-task")
+	gate := newFakeGate()
+	gate.pending["repo/pending-task"] = "hash-1"
+	srv.SetApprovalGate(gate)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks/repo%2Fpending-task/approve",
+		strings.NewReader(`{"hash":null}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", w.Code, w.Body.String())
+	}
+	if !gate.IsPending("repo/pending-task") {
+		t.Error("task must stay pending when the hash field is null")
 	}
 	if len(gate.approved) != 0 {
 		t.Errorf("approve must not have run: approved = %v", gate.approved)

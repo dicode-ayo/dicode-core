@@ -478,10 +478,9 @@ func TestPendingHash(t *testing.T) {
 	}
 }
 
-// TestDiffCarriesPendingHash locks in #645's fix: the dashboard binds its
-// approve request to the hash the diff it rendered actually describes, so
-// Diff must expose that same hash PendingHash reports — not a copy that
-// could silently drift from what ApproveIfHash checks against.
+// TestDiffCarriesPendingHash pins the invariant the dashboard's binding rests
+// on: Diff must expose the same hash PendingHash reports, not a copy that
+// could drift from what ApproveIfHash checks against.
 func TestDiffCarriesPendingHash(t *testing.T) {
 	g, _, _ := newTestGate(t, enabledPolicy())
 	spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "v1")
