@@ -23,6 +23,14 @@ const BuiltinSource = "buildin"
 // the task is awaiting approval.
 var ErrPending = errors.New("task pending approval")
 
+// ErrHashMismatch is returned (wrapped) by ApproveIfHash when the task's
+// currently pending hash no longer matches the hash the caller reviewed —
+// e.g. a dashboard operator approving against a diff the reconciler has
+// since superseded with a newer pend. Callers can errors.Is against this to
+// distinguish "stale review, re-fetch and try again" from any other
+// approval failure.
+var ErrHashMismatch = errors.New("task content changed since the approval was reviewed")
+
 // Policy is the operator's trust declaration, derived from the approval
 // block of dicode.yaml.
 type Policy struct {
@@ -403,7 +411,7 @@ func (g *Gate) approve(id, wantHash, by string) error {
 		return fmt.Errorf("task %q has no computable content hash; cannot approve", id)
 	}
 	if wantHash != "" && ent.hash != wantHash {
-		return fmt.Errorf("task %q changed since the approval was issued; re-review and approve the current version", id)
+		return fmt.Errorf("task %q changed since the approval was issued; re-review and approve the current version: %w", id, ErrHashMismatch)
 	}
 	if err := g.lock.Record(id, ent.hash, by); err != nil {
 		return fmt.Errorf("record approval for %q: %w", id, err)
