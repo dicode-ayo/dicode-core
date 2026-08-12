@@ -2,9 +2,11 @@ package webui
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
+	"io"
 	"net/http"
 	"strings"
 
@@ -74,13 +76,55 @@ func (s *Server) MintApproveLink(ctx context.Context, taskID string) (string, er
 	return s.WebUIBaseURL() + "/approve/" + token, nil
 }
 
+// optionalHash separates a "hash" field that is absent from one that is
+// present but carries no usable value. A *string cannot: encoding/json leaves
+// it nil for both {} and {"hash":null}.
+type optionalHash struct {
+	present bool
+	value   string
+}
+
+// UnmarshalJSON records presence for any value the key holds, null included.
+func (o *optionalHash) UnmarshalJSON(b []byte) error {
+	o.present = true
+	if string(b) == "null" {
+		return nil
+	}
+	return json.Unmarshal(b, &o.value)
+}
+
+// approveRequest is apiApproveTask's optional JSON body. Hash, when present,
+// binds the approval to the exact pending version the caller reviewed (see
+// approval.Diff.PendingHash), mirroring the tokenized /approve/{token} path.
+//
+// The handler keys off presence, not emptiness, so a caller that meant to bind
+// but produced no usable value — a falsy pending_hash reaching JSON.stringify
+// as "" or null — is rejected instead of degrading to the unconditional-approve
+// path. Only an absent key means "no diff to bind to".
+type approveRequest struct {
+	Hash optionalHash `json:"hash"`
+}
+
 // apiApproveTask handles POST /api/tasks/{id}/approve. Auth mirrors the
 // replay endpoint: session cookie or Bearer API key (requireSessionOrAPIKey).
 //
+// The dashboard always has a diff on screen before offering Approve, so it
+// sends back the hash that diff was built from. Between the diff being
+// fetched and this request landing, a push can re-pend the task at a newer
+// hash — approving without checking would silently arm content the operator
+// never reviewed. A hash-carrying request is therefore routed through
+// ApproveIfHash and rejected with 409 (stale:true) on mismatch, so the UI
+// can refetch and tell the operator the change moved under them. Callers
+// with no diff to bind to — `dicode task approve` goes over IPC, not this
+// endpoint, but any other API-key caller in the same position — may omit the
+// hash and get the prior unconditional-approve behavior.
+//
 // Status codes:
 //   - 200 — approved; triggers armed, hash recorded in dicode.lock.
+//   - 400 — malformed JSON body, or a "hash" field that is empty or null.
 //   - 404 — no such task.
-//   - 409 — task is not pending approval (or the approval failed).
+//   - 409 — task is not pending approval, or (with stale:true) the supplied
+//     hash no longer matches what's pending.
 //   - 503 — approval gate not wired.
 func (s *Server) apiApproveTask(w http.ResponseWriter, r *http.Request) {
 	id := taskIDParam(r)
@@ -92,7 +136,29 @@ func (s *Server) apiApproveTask(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "task not found: "+id, http.StatusNotFound)
 		return
 	}
-	if err := s.approvalGate.Approve(id); err != nil {
+	var body approveRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+		jsonErr(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	var err error
+	switch {
+	case body.Hash.present && body.Hash.value == "":
+		jsonErr(w, "hash must not be empty or null when supplied", http.StatusBadRequest)
+		return
+	case body.Hash.present:
+		err = s.approvalGate.ApproveIfHash(id, body.Hash.value)
+	default:
+		err = s.approvalGate.Approve(id)
+	}
+	if err != nil {
+		if errors.Is(err, approval.ErrHashMismatch) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error(), "stale": true})
+			return
+		}
 		jsonErr(w, err.Error(), http.StatusConflict)
 		return
 	}

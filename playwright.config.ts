@@ -51,6 +51,7 @@ export default defineConfig({
       testMatch: [
         '**/file-change.spec.ts',
         '**/approval-diff.spec.ts',
+        '**/approval-hash-binding.spec.ts',
         '**/pending-task-list-signals.spec.ts',
         '**/webhooks.spec.ts',
         '**/webhooks-secure.spec.ts',
