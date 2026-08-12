@@ -36,7 +36,7 @@ func newAuthoringTestServer(t *testing.T, sourceName, sourceDir string) *Server 
 
 	var sm *SourceManager
 	if sourceName != "" && sourceDir != "" {
-		sm = NewSourceManager(cfg, nil, "", zap.NewNop())
+		sm = NewSourceManager(cfg, nil, reg, "", zap.NewNop())
 		// Create a minimal taskset source. We only need RepoPath() to return
 		// the dir so the create handler can write files.
 		src := newStubTasksetSource(t, sourceName, sourceDir)

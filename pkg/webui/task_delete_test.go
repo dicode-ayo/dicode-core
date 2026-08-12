@@ -25,7 +25,7 @@ func TestResolveTaskSource_FromIDPrefix(t *testing.T) {
 	cfg.Spec.Entries = map[string]*taskset.Entry{
 		"tasks": {Ref: &taskset.Ref{Path: filepath.Join(dir, "taskset.yaml")}},
 	}
-	m := NewSourceManager(cfg, nil, dir, zap.NewNop())
+	m := NewSourceManager(cfg, nil, nil, dir, zap.NewNop())
 	m.Register("tasks", newStubTasksetSource(t, "tasks", dir))
 
 	name, isGit, err := m.ResolveTaskSource("tasks/my-task", "")
@@ -46,7 +46,7 @@ func TestResolveTaskSource_GitDetected(t *testing.T) {
 	cfg.Spec.Entries = map[string]*taskset.Entry{
 		"remote": {Ref: &taskset.Ref{URL: "https://example.com/repo.git", Branch: "main"}},
 	}
-	m := NewSourceManager(cfg, nil, dir, zap.NewNop())
+	m := NewSourceManager(cfg, nil, nil, dir, zap.NewNop())
 	m.Register("remote", newStubTasksetSource(t, "remote", dir))
 
 	name, isGit, err := m.ResolveTaskSource("remote/thing", "")
@@ -64,7 +64,7 @@ func TestResolveTaskSource_SourceOverride_Mismatch(t *testing.T) {
 	cfg.Spec.Entries = map[string]*taskset.Entry{
 		"tasks": {Ref: &taskset.Ref{Path: filepath.Join(dir, "taskset.yaml")}},
 	}
-	m := NewSourceManager(cfg, nil, dir, zap.NewNop())
+	m := NewSourceManager(cfg, nil, nil, dir, zap.NewNop())
 	m.Register("tasks", newStubTasksetSource(t, "tasks", dir))
 
 	if _, _, err := m.ResolveTaskSource("other/task", "tasks"); err == nil {
@@ -75,7 +75,7 @@ func TestResolveTaskSource_SourceOverride_Mismatch(t *testing.T) {
 func TestResolveTaskSource_UnknownSource(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Spec.Entries = map[string]*taskset.Entry{}
-	m := NewSourceManager(cfg, nil, t.TempDir(), zap.NewNop())
+	m := NewSourceManager(cfg, nil, nil, t.TempDir(), zap.NewNop())
 
 	if _, _, err := m.ResolveTaskSource("ghost/task", ""); err == nil {
 		t.Fatal("expected error for unknown source")
@@ -96,7 +96,7 @@ func TestDeleteTaskFromSource_Local_RemovesDirectory(t *testing.T) {
 	cfg.Spec.Entries = map[string]*taskset.Entry{
 		"tasks": {Ref: &taskset.Ref{Path: filepath.Join(dir, "taskset.yaml")}},
 	}
-	m := NewSourceManager(cfg, nil, dir, zap.NewNop())
+	m := NewSourceManager(cfg, nil, nil, dir, zap.NewNop())
 	m.Register("tasks", newStubTasksetSource(t, "tasks", dir))
 
 	spec := &task.Spec{ID: "tasks/my-task", TaskDir: taskDir}
@@ -126,7 +126,7 @@ func TestDeleteTaskFromSource_Local_RefusesEscape(t *testing.T) {
 	cfg.Spec.Entries = map[string]*taskset.Entry{
 		"tasks": {Ref: &taskset.Ref{Path: filepath.Join(dir, "taskset.yaml")}},
 	}
-	m := NewSourceManager(cfg, nil, dir, zap.NewNop())
+	m := NewSourceManager(cfg, nil, nil, dir, zap.NewNop())
 	m.Register("tasks", newStubTasksetSource(t, "tasks", dir))
 
 	spec := &task.Spec{ID: "tasks/evil", TaskDir: escapeDir}
@@ -163,7 +163,7 @@ func TestDeleteTaskFromSource_Local_RefusesSymlinkEscape(t *testing.T) {
 	cfg.Spec.Entries = map[string]*taskset.Entry{
 		"tasks": {Ref: &taskset.Ref{Path: filepath.Join(dir, "taskset.yaml")}},
 	}
-	m := NewSourceManager(cfg, nil, dir, zap.NewNop())
+	m := NewSourceManager(cfg, nil, nil, dir, zap.NewNop())
 	m.Register("tasks", newStubTasksetSource(t, "tasks", dir))
 
 	spec := &task.Spec{ID: "tasks/evil", TaskDir: link}
@@ -247,7 +247,7 @@ func TestDeleteTaskFromSource_Git_ClonePushesDeleteBranch(t *testing.T) {
 	cfg.Spec.Entries = map[string]*taskset.Entry{
 		"remote": {Ref: &taskset.Ref{URL: remoteURL, Branch: "main"}},
 	}
-	m := NewSourceManager(cfg, nil, dataDir, zap.NewNop())
+	m := NewSourceManager(cfg, nil, nil, dataDir, zap.NewNop())
 
 	src := taskset.NewSource(remoteURL, "remote", &taskset.Ref{URL: remoteURL, Branch: "main"}, "", dataDir, false, 30*time.Second, zap.NewNop())
 	ctx, cancel := context.WithCancel(context.Background())

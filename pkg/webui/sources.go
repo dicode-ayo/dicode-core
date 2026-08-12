@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/dicode/dicode/pkg/config"
+	"github.com/dicode/dicode/pkg/registry"
 	gitSource "github.com/dicode/dicode/pkg/source/git"
 	"github.com/dicode/dicode/pkg/task"
 	"github.com/dicode/dicode/pkg/taskset"
@@ -78,21 +79,31 @@ type SourceManager struct {
 	cfgMu    *sync.RWMutex
 	cfg      *config.Config
 	tasksets map[string]*taskset.Source // source name → live taskset.Source
+	registry *registry.Registry         // may be nil in tests that don't exercise #649 load-failure merging
 	dataDir  string
 	log      *zap.Logger
 }
 
 // NewSourceManager creates a SourceManager.
 // tasksetSources maps source name to the live *taskset.Source (may be nil map for non-taskset setups).
+// reg is the daemon's task registry — its LoadFailures() (#649) are merged
+// into List() for entries that are not (or not yet) backed by a
+// *taskset.Source, e.g. a plain git/local source, or one mid-registration via
+// apiAddSource. May be nil (only local pull-status/load-failure merging is
+// skipped; List() still works). Unlike cfg's mutex (see BindCfgMutex), reg
+// already exists by the time buildSources constructs the SourceManager (step
+// 4 creates the registry, step 7 builds sources — see pkg/daemon/daemon.go),
+// so it's taken as a constructor arg rather than bound later.
 // The cfg mutex is bound separately via BindCfgMutex once the Server is built;
 // chicken-and-egg between daemon initialisation order is why we don't take it here.
-func NewSourceManager(cfg *config.Config, tasksetSources map[string]*taskset.Source, dataDir string, log *zap.Logger) *SourceManager {
+func NewSourceManager(cfg *config.Config, tasksetSources map[string]*taskset.Source, reg *registry.Registry, dataDir string, log *zap.Logger) *SourceManager {
 	if tasksetSources == nil {
 		tasksetSources = make(map[string]*taskset.Source)
 	}
 	return &SourceManager{
 		cfg:      cfg,
 		tasksets: tasksetSources,
+		registry: reg,
 		dataDir:  dataDir,
 		log:      log,
 	}
@@ -185,12 +196,44 @@ func (m *SourceManager) List() []SourceInfo {
 			}
 		} else if ref.IsGit() {
 			info.Type = "git"
+			m.applyRegistryLoadFailures(&info, name)
 		} else {
 			info.Type = "local"
+			m.applyRegistryLoadFailures(&info, name)
 		}
 		out = append(out, info)
 	}
 	return out
+}
+
+// applyRegistryLoadFailures populates info.FailedCount/Failures (#649) for a
+// source that is not backed by a live *taskset.Source — i.e. the List()
+// branches for a plain git/local entry, or one still mid-registration via
+// apiAddSource (claimed in cfg.Spec.Entries but not yet in m.tasksets). Those
+// sources' task-load failures are recorded on the shared registry (see
+// pkg/registry/reconciler.go's handle(), which calls SetLoadFailure for any
+// event whose task.Kinded wasn't pre-resolved by a taskset.Source) rather
+// than on a taskset.Source's own failure map, so this reads from m.registry
+// instead of src.LoadFailures(). Filtered by LoadFailure.Source == name
+// (the entry/source name) — no dedupe needed since a task ID belongs to
+// exactly one source. No-op if m.registry is nil (some test setups don't
+// wire one).
+func (m *SourceManager) applyRegistryLoadFailures(info *SourceInfo, name string) {
+	if m.registry == nil {
+		return
+	}
+	var fails []task.LoadFailure
+	for _, f := range m.registry.LoadFailures() {
+		if f.Source == name {
+			fails = append(fails, f)
+		}
+	}
+	if len(fails) == 0 {
+		return
+	}
+	sort.Slice(fails, func(i, j int) bool { return fails[i].ID < fails[j].ID })
+	info.FailedCount = len(fails)
+	info.Failures = fails
 }
 
 // LoadFailures aggregates the per-source load-failure state (#649) across

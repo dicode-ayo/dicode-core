@@ -251,7 +251,7 @@ Response:
 }
 ```
 
-`failed_count` is the number of entries under this source currently failing to resolve/load/validate; `failures` is the same set with per-entry detail. A source can report `failed_count > 0` with `last_pull_ok: true` at the same time — a bad task.yaml and a bad git pull are independent failure modes.
+`failed_count` is the number of entries under this source currently failing to resolve/load/validate; `failures` is the same set with per-entry detail. A source can report `failed_count > 0` with `last_pull_ok: true` at the same time — a bad task.yaml and a bad git pull are independent failure modes. This applies to every `type` — `taskset`, `git`, and `local` alike, not just `taskset` — so a plain git/local source with a broken task.yaml also reports it here rather than staying at `failed_count: 0`.
 
 ### AI authoring
 
