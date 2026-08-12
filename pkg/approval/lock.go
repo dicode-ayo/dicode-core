@@ -43,6 +43,17 @@ type Record struct {
 	Hash       string    `yaml:"hash"        json:"hash"`
 	ApprovedAt time.Time `yaml:"approved_at" json:"approved_at"`
 	ApprovedBy string    `yaml:"approved_by" json:"approved_by"`
+	// Commit is the git commit the approved content was observed at; empty
+	// for a source with no git history, and for every record written before
+	// this field existed.
+	//
+	// omitempty is load-bearing on both tags. The v3 MAC covers the canonical
+	// JSON of the task map, so an empty Commit must marshal to the same bytes
+	// a pre-migration record did or every lock in the field verifies as
+	// tampered and every task is forced back through the gate. An empty commit
+	// is never a legitimate 40-hex SHA, so omitempty's usual "unset or zero?"
+	// ambiguity does not arise.
+	Commit string `yaml:"commit,omitempty" json:"commit,omitempty"`
 }
 
 // lockFile is the on-disk YAML shape of dicode.lock.
@@ -260,7 +271,11 @@ func (l *Lock) Get(id string) (Record, bool) {
 // Record writes (or updates) the approved hash for id and persists the lock.
 // A no-op when the recorded hash already matches, so steady-state reconciles
 // don't rewrite the file or reset approved_at.
-func (l *Lock) Record(id, hash, by string) error {
+//
+// commit is the git commit the approved content was observed at, or "" when
+// there is none. It is decoration: nothing about whether a task is approved
+// depends on it.
+func (l *Lock) Record(id, hash, by, commit string) error {
 	if hash == "" {
 		return fmt.Errorf("approval lock: refusing to record empty hash for %q", id)
 	}
@@ -269,7 +284,7 @@ func (l *Lock) Record(id, hash, by string) error {
 	if rec, ok := l.tasks[id]; ok && rec.Hash == hash {
 		return nil
 	}
-	l.tasks[id] = Record{Hash: hash, ApprovedAt: time.Now().UTC(), ApprovedBy: by}
+	l.tasks[id] = Record{Hash: hash, ApprovedAt: time.Now().UTC(), ApprovedBy: by, Commit: commit}
 	return l.save()
 }
 

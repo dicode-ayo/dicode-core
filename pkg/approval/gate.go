@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dicode/dicode/internal/gitops"
 	"github.com/dicode/dicode/pkg/task"
 	"go.uber.org/zap"
 )
@@ -51,11 +52,12 @@ type Policy struct {
 // Decoupled from the trigger engine via the arm callback so it can be unit
 // tested with a fake.
 type Gate struct {
-	policy Policy
-	lock   *Lock
-	arm    func(task.Kinded) error
-	hashFn func(task.Kinded) (string, error)
-	log    *zap.Logger
+	policy   Policy
+	lock     *Lock
+	arm      func(task.Kinded) error
+	hashFn   func(task.Kinded) (string, error)
+	commitFn func(task.Kinded) string
+	log      *zap.Logger
 
 	mu          sync.Mutex
 	pending     map[string]pendingEntry
@@ -87,19 +89,21 @@ type Gate struct {
 	approvedResolved map[string]string
 }
 
-// pendingEntry captures the task, the hash observed at decision time, and
-// the content snapshot taken at that same moment (dir-relative path -> file
-// content; nil for a dir-less task or a snapshot failure). hash and files
-// are always written together in a single critical section (see Admit's
-// default case) so a reader can never observe a hash paired with a snapshot
-// from a different generation — the fix for a race where approve() could
-// promote a snapshot that was stale relative to the pending hash it was
-// being matched against (previously hash and files lived in two separate
-// maps, updated under two separate lock acquisitions).
+// pendingEntry captures the task, the hash observed at decision time, and the
+// content snapshot, commit and resolved fields observed at that same moment
+// (files is dir-relative path -> file content; nil for a dir-less task or a
+// snapshot failure). Every field is written in one critical section (see
+// Admit's default case) so a reader can never observe a hash paired with a
+// snapshot, commit or resolved text from a different generation: approve()
+// matches on hash and promotes the rest, so a mismatched generation would
+// promote content that was never the content approved.
 type pendingEntry struct {
-	kinded   task.Kinded
-	hash     string
-	files    map[string]snapshotValue
+	kinded task.Kinded
+	hash   string
+	files  map[string]snapshotValue
+	// commit is the git commit the pending content was observed at, "" when
+	// the source has no git history.
+	commit   string
 	resolved string
 }
 
@@ -115,6 +119,7 @@ func NewGate(policy Policy, lock *Lock, arm func(task.Kinded) error, log *zap.Lo
 		lock:             lock,
 		arm:              arm,
 		hashFn:           ContentHash,
+		commitFn:         headCommitOf,
 		log:              log,
 		pending:          map[string]pendingEntry{},
 		admitted:         map[string]task.Kinded{},
@@ -125,6 +130,9 @@ func NewGate(policy Policy, lock *Lock, arm func(task.Kinded) error, log *zap.Lo
 
 // SetHashFunc overrides the content-hash function (tests).
 func (g *Gate) SetHashFunc(fn func(task.Kinded) (string, error)) { g.hashFn = fn }
+
+// SetCommitFunc overrides the commit resolver (tests).
+func (g *Gate) SetCommitFunc(fn func(task.Kinded) string) { g.commitFn = fn }
 
 // SetPendingHook installs the operator-notification hook. It is invoked only
 // on the transition into pending — a task newly held, or a held task observed
@@ -252,11 +260,18 @@ func (g *Gate) Admit(k task.Kinded) (armed bool, err error) {
 			}
 		}
 
+		// Resolved on every pend, not only when the hash changes: the recorded
+		// commit is the baseline the next comparison runs from, and one that
+		// lags behind the last commit this content was seen at yields a range
+		// full of commits that never touched the task. Kept outside the lock —
+		// it opens the repository.
+		commit := g.commitFn(k)
+
 		g.mu.Lock()
-		// hash and files are written together in one critical section: a
-		// concurrent Approve/ApproveIfHash can never observe a pending[id]
-		// whose hash and files disagree on which generation they describe.
-		g.pending[id] = pendingEntry{kinded: k, hash: hash, files: files, resolved: resolvedFieldsText(k)}
+		// hash, files and commit are written together in one critical section:
+		// a concurrent Approve/ApproveIfHash can never observe a pending[id]
+		// whose fields disagree on which generation they describe.
+		g.pending[id] = pendingEntry{kinded: k, hash: hash, files: files, commit: commit, resolved: resolvedFieldsText(k)}
 		hook := g.pendingHook
 		g.mu.Unlock()
 		if hook != nil && changed {
@@ -275,7 +290,14 @@ func (g *Gate) Admit(k task.Kinded) (armed bool, err error) {
 	hashUnchanged := g.lock.Approved(id, hash)
 	g.clearPending(id)
 	if hash != "" {
-		if err := g.lock.Record(id, hash, by); err != nil {
+		// Only resolved when the record is actually about to change: Record is
+		// a no-op at an unchanged hash, so resolving here on every ~30s poll
+		// of an unchanged trusted task would open the repository for nothing.
+		commit := ""
+		if !hashUnchanged {
+			commit = g.commitFn(k)
+		}
+		if err := g.lock.Record(id, hash, by, commit); err != nil {
 			// Inventory write failure must not keep a trusted task from
 			// running; surface it and arm anyway.
 			g.log.Warn("approval: lock write failed",
@@ -313,6 +335,24 @@ func taskDirOf(k task.Kinded) string {
 	default:
 		return ""
 	}
+}
+
+// headCommitOf returns the git commit k's task directory currently sits at, or
+// "" when there is none: a dir-less inline task, a local source outside any
+// repository, or a repository with no commit yet. Every failure degrades to ""
+// rather than surfacing, because the commit is decoration on the approval
+// record — no gate decision reads it — and "outside a repository" is the
+// ordinary state of a local source rather than a fault.
+func headCommitOf(k task.Kinded) string {
+	dir := taskDirOf(k)
+	if dir == "" {
+		return ""
+	}
+	commit, err := gitops.HeadCommit(dir)
+	if err != nil {
+		return ""
+	}
+	return commit
 }
 
 // takeSnapshot captures dir's current on-disk content for id's what-labeled
@@ -413,7 +453,7 @@ func (g *Gate) approve(id, wantHash, by string) error {
 	if wantHash != "" && ent.hash != wantHash {
 		return fmt.Errorf("task %q changed since the approval was issued; re-review and approve the current version: %w", id, ErrHashMismatch)
 	}
-	if err := g.lock.Record(id, ent.hash, by); err != nil {
+	if err := g.lock.Record(id, ent.hash, by, ent.commit); err != nil {
 		return fmt.Errorf("record approval for %q: %w", id, err)
 	}
 	if err := g.arm(ent.kinded); err != nil {
