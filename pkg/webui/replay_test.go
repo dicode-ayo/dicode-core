@@ -107,7 +107,7 @@ func TestApiReplayRun_409OnSuspendedRun(t *testing.T) {
 	if _, err := reg.StartRunWithID(ctx, "susp-run", "user-task", "", "manual", "task"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := reg.SuspendRun(ctx, "susp-run", []byte(`{"step":1}`), nil, "tok", time.Now().UnixMilli(), 0, nil); err != nil {
+	if _, err := reg.SuspendRun(ctx, "susp-run", []byte(`{"step":1}`), nil, "tok", time.Now().UnixMilli(), 0, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	runner := &suspendGuardRunner{}

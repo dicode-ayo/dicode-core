@@ -164,7 +164,7 @@ func TestEngine_WaitRun_FollowsResumeChain(t *testing.T) {
 	if _, err := e.reg.StartRunWithID(ctx, origID, "wizard", "", string(registry.TriggerManual), registry.RunKindTask); err != nil {
 		t.Fatalf("StartRunWithID: %v", err)
 	}
-	if _, err := e.reg.SuspendRun(ctx, origID, []byte(`{"step":1}`), nil, "tok", time.Now().UnixMilli(), 0, nil); err != nil {
+	if _, err := e.reg.SuspendRun(ctx, origID, []byte(`{"step":1}`), nil, "tok", time.Now().UnixMilli(), 0, nil, nil); err != nil {
 		t.Fatalf("SuspendRun: %v", err)
 	}
 
