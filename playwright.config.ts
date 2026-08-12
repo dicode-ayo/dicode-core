@@ -50,7 +50,7 @@ export default defineConfig({
       name: 'unauthenticated',
       testMatch: [
         '**/file-change.spec.ts',
-        '**/approval-diff.spec.ts',
+        '**/approval-review.spec.ts',
         '**/approval-hash-binding.spec.ts',
         '**/pending-task-list-signals.spec.ts',
         '**/task-load-failure.spec.ts',

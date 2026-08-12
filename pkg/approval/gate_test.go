@@ -478,36 +478,6 @@ func TestPendingHash(t *testing.T) {
 	}
 }
 
-// TestDiffCarriesPendingHash pins the invariant the dashboard's binding rests
-// on: Diff must expose the same hash PendingHash reports, not a copy that
-// could drift from what ApproveIfHash checks against.
-func TestDiffCarriesPendingHash(t *testing.T) {
-	g, _, _ := newTestGate(t, enabledPolicy())
-	spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "v1")
-	if armed, _ := g.Admit(spec); armed {
-		t.Fatal("expected pending")
-	}
-	wantHash, ok := g.PendingHash("repo/deploy")
-	if !ok || wantHash == "" {
-		t.Fatalf("PendingHash = (%q, %v), want observed hash", wantHash, ok)
-	}
-
-	d, err := g.Diff("repo/deploy")
-	if err != nil {
-		t.Fatalf("Diff: %v", err)
-	}
-	if d.PendingHash != wantHash {
-		t.Fatalf("Diff.PendingHash = %q, want %q (PendingHash())", d.PendingHash, wantHash)
-	}
-
-	// The hash returned in the diff a caller fetched earlier must go on to
-	// approve correctly through ApproveIfHash — this is the exact value the
-	// webui sends back on Approve.
-	if err := g.ApproveIfHash("repo/deploy", d.PendingHash); err != nil {
-		t.Fatalf("ApproveIfHash(Diff.PendingHash): %v", err)
-	}
-}
-
 func TestApproveIfHashMatch(t *testing.T) {
 	g, arm, lock := newTestGate(t, enabledPolicy())
 	spec := writeTaskDir(t, t.TempDir(), "repo/deploy", "v1")

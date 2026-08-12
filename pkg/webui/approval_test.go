@@ -23,41 +23,41 @@ import (
 
 // fakeApprovalGate implements ApprovalGate over an in-memory pending map.
 type fakeApprovalGate struct {
-	mu       sync.Mutex
-	pending  map[string]string // task id → observed hash
-	approved []string
-	diffs    map[string]approval.Diff // task id → canned Diff for the test to assert against
-	diffErrs map[string]error         // task id → error Diff should return instead
+	mu        sync.Mutex
+	pending   map[string]string // task id → observed hash
+	approved  []string
+	states    map[string]approval.State // task id → canned State to assert against
+	stateErrs map[string]error          // task id → error State should return instead
 }
 
 func newFakeGate() *fakeApprovalGate {
 	return &fakeApprovalGate{pending: map[string]string{}}
 }
 
-// setDiff stashes the Diff Diff(id) should return, for tests that don't need
-// the real gate's snapshot machinery.
-func (g *fakeApprovalGate) setDiff(id string, d approval.Diff) {
+// setState stashes the State State(id) should return, for tests that don't
+// need a real gate behind the endpoint.
+func (g *fakeApprovalGate) setState(id string, st approval.State) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.diffs == nil {
-		g.diffs = map[string]approval.Diff{}
+	if g.states == nil {
+		g.states = map[string]approval.State{}
 	}
-	g.diffs[id] = d
+	g.states[id] = st
 }
 
-func (g *fakeApprovalGate) Diff(id string) (approval.Diff, error) {
+func (g *fakeApprovalGate) State(id string) (approval.State, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if err, ok := g.diffErrs[id]; ok {
-		return approval.Diff{}, err
+	if err, ok := g.stateErrs[id]; ok {
+		return approval.State{}, err
 	}
-	if d, ok := g.diffs[id]; ok {
-		return d, nil
+	if st, ok := g.states[id]; ok {
+		return st, nil
 	}
 	if _, ok := g.pending[id]; !ok {
-		return approval.Diff{}, fmt.Errorf("task %q is not pending approval", id)
+		return approval.State{}, fmt.Errorf("task %q is not pending approval", id)
 	}
-	return approval.Diff{TaskID: id}, nil
+	return approval.State{TaskID: id}, nil
 }
 
 func (g *fakeApprovalGate) IsPending(id string) bool {
@@ -515,45 +515,49 @@ func TestAPI_ApproveTask_SessionCookieWorks(t *testing.T) {
 	}
 }
 
-// ── GET /api/tasks/{id}/pending-diff ─────────────────────────────────────────
+// ── GET /api/tasks/{id}/pending-state ────────────────────────────────────────
 
-func TestAPI_ApprovalDiff_HappyPath(t *testing.T) {
+func TestAPI_ApprovalState_HappyPath(t *testing.T) {
 	srv, reg, _ := newApprovalTestServer(t, false)
 	registerMinimalTask(t, reg, "repo/pending-task")
 	gate := newFakeGate()
 	gate.pending["repo/pending-task"] = "hash-1"
-	gate.setDiff("repo/pending-task", approval.Diff{
+	gate.setState("repo/pending-task", approval.State{
 		TaskID:      "repo/pending-task",
-		HasBaseline: true,
-		Files: []approval.FileDiff{
-			{Path: "task.js", Status: "modified", UnifiedDiff: "- old\n+ new\n", SecurityRelevant: false},
-		},
+		PendingHash: "hash-1",
+		Runtime:     "deno",
+		Triggers:    []approval.Trigger{{Kind: approval.TriggerCron, Cron: "0 9 * * *"}},
+		Permissions: approval.Permissions{Net: []string{"api.github.com"}},
+		Files:       []task.FileMeta{{Path: "task.js", Kind: task.FileKindRegular, Size: 12, Hash: "abc"}},
 	})
 	srv.SetApprovalGate(gate)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/tasks/repo%2Fpending-task/pending-diff", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/repo%2Fpending-task/pending-state", nil)
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d: %s", w.Code, w.Body.String())
 	}
-	var d approval.Diff
-	if err := json.NewDecoder(w.Body).Decode(&d); err != nil {
+	var st approval.State
+	if err := json.NewDecoder(w.Body).Decode(&st); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if !d.HasBaseline {
-		t.Error("HasBaseline = false, want true")
+	if st.PendingHash != "hash-1" {
+		t.Errorf("PendingHash = %q", st.PendingHash)
 	}
-	if len(d.Files) != 1 || d.Files[0].Path != "task.js" {
-		t.Fatalf("Files = %+v", d.Files)
+	if len(st.Triggers) != 1 || st.Triggers[0].Cron != "0 9 * * *" {
+		t.Errorf("Triggers = %+v", st.Triggers)
+	}
+	if len(st.Files) != 1 || st.Files[0].Path != "task.js" {
+		t.Fatalf("Files = %+v", st.Files)
 	}
 }
 
-func TestAPI_ApprovalDiff_UnknownTask404(t *testing.T) {
+func TestAPI_ApprovalState_UnknownTask404(t *testing.T) {
 	srv, _, _ := newApprovalTestServer(t, false)
 	srv.SetApprovalGate(newFakeGate())
 
-	req := httptest.NewRequest(http.MethodGet, "/api/tasks/ghost/pending-diff", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/ghost/pending-state", nil)
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 	if w.Code != http.StatusNotFound {
@@ -561,12 +565,12 @@ func TestAPI_ApprovalDiff_UnknownTask404(t *testing.T) {
 	}
 }
 
-func TestAPI_ApprovalDiff_NotPending409(t *testing.T) {
+func TestAPI_ApprovalState_NotPending409(t *testing.T) {
 	srv, reg, _ := newApprovalTestServer(t, false)
 	registerMinimalTask(t, reg, "repo/normal-task")
 	srv.SetApprovalGate(newFakeGate())
 
-	req := httptest.NewRequest(http.MethodGet, "/api/tasks/repo%2Fnormal-task/pending-diff", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/repo%2Fnormal-task/pending-state", nil)
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 	if w.Code != http.StatusConflict {
@@ -574,11 +578,11 @@ func TestAPI_ApprovalDiff_NotPending409(t *testing.T) {
 	}
 }
 
-func TestAPI_ApprovalDiff_NoGate503(t *testing.T) {
+func TestAPI_ApprovalState_NoGate503(t *testing.T) {
 	srv, reg, _ := newApprovalTestServer(t, false)
 	registerMinimalTask(t, reg, "repo/x")
 
-	req := httptest.NewRequest(http.MethodGet, "/api/tasks/repo%2Fx/pending-diff", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/repo%2Fx/pending-state", nil)
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 	if w.Code != http.StatusServiceUnavailable {
@@ -586,14 +590,14 @@ func TestAPI_ApprovalDiff_NoGate503(t *testing.T) {
 	}
 }
 
-func TestAPI_ApprovalDiff_RequiresAuth(t *testing.T) {
+func TestAPI_ApprovalState_RequiresAuth(t *testing.T) {
 	srv, reg, _ := newApprovalTestServer(t, true)
 	registerMinimalTask(t, reg, "repo/pending-task")
 	gate := newFakeGate()
 	gate.pending["repo/pending-task"] = "hash-1"
 	srv.SetApprovalGate(gate)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/tasks/repo%2Fpending-task/pending-diff", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/repo%2Fpending-task/pending-state", nil)
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 	if w.Code != http.StatusUnauthorized {
@@ -672,24 +676,16 @@ func TestApproveLink_GetConfirmPageDoesNotConsume(t *testing.T) {
 	}
 }
 
-// TestApproveLink_ConfirmPageShowsDiff is the regression for #604 on the
-// tokenized link surface: the confirm page must render the pending diff
-// (the changed file, its +/- lines, and a security-relevant warning) so an
-// operator approving from a notification link — no session, no dashboard —
-// isn't approving blind either.
-func TestApproveLink_ConfirmPageShowsDiff(t *testing.T) {
+// The token link travels through Slack, email or ntfy, so whatever the
+// confirm page renders is visible to everyone in that channel. It carries the
+// task identity and nothing about the task's contents.
+func TestApproveLink_ConfirmPageRendersNoTaskInternals(t *testing.T) {
 	srv, gate, _ := newTokenLinkServer(t)
-	gate.setDiff("repo/pending-task", approval.Diff{
+	gate.setState("repo/pending-task", approval.State{
 		TaskID:      "repo/pending-task",
-		HasBaseline: true,
-		Files: []approval.FileDiff{
-			{
-				Path:             "task.yaml",
-				Status:           "modified",
-				UnifiedDiff:      "  name: repo/pending-task\n- permissions: {}\n+ permissions:\n+   net: [\"*\"]\n",
-				SecurityRelevant: true,
-			},
-		},
+		PendingHash: "hash-1",
+		Permissions: approval.Permissions{Net: []string{"exfil.example.com"}},
+		Files:       []task.FileMeta{{Path: "task.yaml", Kind: task.FileKindRegular}},
 	})
 	link, err := srv.MintApproveLink(context.Background(), "repo/pending-task")
 	if err != nil {
@@ -704,14 +700,13 @@ func TestApproveLink_ConfirmPageShowsDiff(t *testing.T) {
 		t.Fatalf("status = %d: %s", w.Code, w.Body.String())
 	}
 	body := w.Body.String()
-	if !strings.Contains(body, "task.yaml") {
-		t.Errorf("confirm page missing changed file name: %s", body)
+	if !strings.Contains(body, "repo/pending-task") {
+		t.Errorf("confirm page missing the task it approves: %s", body)
 	}
-	if !strings.Contains(body, "net") {
-		t.Errorf("confirm page missing diff content: %s", body)
-	}
-	if !strings.Contains(body, "security-relevant") {
-		t.Errorf("confirm page missing security-relevant badge: %s", body)
+	for _, leak := range []string{"exfil.example.com", "task.yaml"} {
+		if strings.Contains(body, leak) {
+			t.Errorf("confirm page leaked %q into a session-less surface: %s", leak, body)
+		}
 	}
 }
 

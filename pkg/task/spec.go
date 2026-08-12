@@ -174,12 +174,12 @@ func (m *WebhookAuthMode) UnmarshalYAML(value *yaml.Node) error {
 	}
 }
 
-// webhookSecretResolved reports whether s is a usable HMAC secret rather than an
+// WebhookSecretResolved reports whether s is a usable HMAC secret rather than an
 // empty string or an unresolved ${VAR} placeholder (the referenced env var was
 // not set at load time). The ${ check is a heuristic — a real secret is opaque
 // random bytes and won't contain "${" — and it fails safe: a false "unresolved"
 // only downgrades auth: any to session.
-func webhookSecretResolved(s string) bool {
+func WebhookSecretResolved(s string) bool {
 	return s != "" && !strings.Contains(s, "${")
 }
 
@@ -194,7 +194,7 @@ func webhookSecretResolved(s string) bool {
 // expansion, the only point where a real secret is distinguishable from a
 // placeholder. Shared by kind: Task and kind: PipelineTask.
 func normalizeWebhookAuthFields(mode *WebhookAuthMode, secret *string, replayProtection, requireTimestamp **bool, warnings *[]string) {
-	if *mode != WebhookAuthAny || webhookSecretResolved(*secret) {
+	if *mode != WebhookAuthAny || WebhookSecretResolved(*secret) {
 		return
 	}
 	*mode = WebhookAuthSession

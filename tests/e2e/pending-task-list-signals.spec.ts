@@ -12,7 +12,7 @@
  * Reuses hello-webhook (also driven by webhooks.spec.ts) — safe under this
  * suite's serial (workers: 1, fullyParallel: false) execution as long as
  * the file is restored to its exact original bytes before the test ends,
- * per the pattern documented in approval-diff.spec.ts.
+ * per the pattern documented in approval-review.spec.ts.
  */
 
 import { test, expect } from '@playwright/test';

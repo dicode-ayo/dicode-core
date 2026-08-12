@@ -11,11 +11,11 @@
  * must be rejected and the panel must refresh to the version that is actually
  * pending, never silently approve it.
  *
- * Reuses the file-change.spec.ts / approval-diff.spec.ts pattern of mutating
+ * Reuses the file-change.spec.ts / approval-review.spec.ts pattern of mutating
  * the hello-manual fixture in the temp copy at DICODE_E2E_TASKS_DIR and
  * polling the API for the reconciler to catch up. Runs in the same
  * "unauthenticated" project (workers: 1, fullyParallel: false) as
- * approval-diff.spec.ts, so it follows the same non-parallel, restore-exact-
+ * approval-review.spec.ts, so it follows the same non-parallel, restore-exact-
  * bytes-when-done discipline that suite documents.
  */
 
@@ -57,7 +57,7 @@ async function waitForTaskCondition(
 }
 
 /**
- * Polls GET /pending-diff (the source of pending_hash — /api/tasks/{id}
+ * Polls GET /pending-state (the source of pending_hash — /api/tasks/{id}
  * itself carries no content-hash field) until the gate reports a pending
  * hash other than notHash, i.e. the reconciler has re-pended the task at a
  * newer version. Returns that new hash. Tracks the last non-matching
@@ -74,7 +74,7 @@ async function waitForNewPendingHash(
   const deadline = Date.now() + timeoutMs;
   let last = '<no response yet>';
   while (Date.now() < deadline) {
-    const res = await request.get(`/api/tasks/${encodeURIComponent(taskID)}/pending-diff`);
+    const res = await request.get(`/api/tasks/${encodeURIComponent(taskID)}/pending-state`);
     if (res.ok()) {
       const body = await res.json() as { pending_hash?: string };
       if (body.pending_hash && body.pending_hash !== notHash) return body.pending_hash;
@@ -85,6 +85,23 @@ async function waitForNewPendingHash(
     await new Promise((r) => setTimeout(r, 500));
   }
   throw new Error(`Task ${taskID} did not re-pend at a new hash within ${timeoutMs}ms (last response: ${last})`);
+}
+
+/**
+ * fileDigest returns the first 12 hex characters of task.js's inventory hash
+ * — the form the review panel renders, and the only per-version discriminator
+ * on a surface that shows no file content.
+ */
+async function fileDigest(
+  request: import('@playwright/test').APIRequestContext,
+  taskID: string,
+): Promise<string> {
+  const res = await request.get(`/api/tasks/${encodeURIComponent(taskID)}/pending-state`);
+  if (!res.ok()) throw new Error(`pending-state ${res.status()}: ${await res.text()}`);
+  const body = await res.json() as { files?: Array<{ path: string; hash?: string }> };
+  const js = body.files?.find((f) => f.path === 'task.js');
+  if (!js?.hash) throw new Error(`task.js missing from the inventory: ${JSON.stringify(body.files)}`);
+  return js.hash.slice(0, 12);
 }
 
 test.describe('Approval hash binding', () => {
@@ -106,15 +123,15 @@ test.describe('Approval hash binding', () => {
 
     try {
       // Clear the daemon's 10s approval-bootstrap window (see
-      // approval-diff.spec.ts's withPendingChange doc comment) — this is the
+      // approval-review.spec.ts's withPendingChange doc comment) — this is the
       // first mutation in this serial-execution file.
       await new Promise((r) => setTimeout(r, 15_000));
 
       fs.writeFileSync(taskJsPath, original + `\n${markerV1}\n`, 'utf8');
       await waitForTaskCondition(request, MANUAL_TASK_ID, (t) => t.pending_approval === true);
-      const diffRes = await request.get(`/api/tasks/${encodeURIComponent(MANUAL_TASK_ID)}/pending-diff`);
-      expect(diffRes.ok()).toBe(true);
-      const staleHash = (await diffRes.json() as { pending_hash: string }).pending_hash;
+      const stateRes = await request.get(`/api/tasks/${encodeURIComponent(MANUAL_TASK_ID)}/pending-state`);
+      expect(stateRes.ok()).toBe(true);
+      const staleHash = (await stateRes.json() as { pending_hash: string }).pending_hash;
       expect(staleHash).toBeTruthy();
 
       // The task re-pends at a newer hash before the (simulated) operator's
@@ -134,9 +151,9 @@ test.describe('Approval hash binding', () => {
       expect(after.pending_approval).toBe(true);
 
       // Approving with the CURRENT hash succeeds.
-      const currentDiff = await (await request.get(`/api/tasks/${encodeURIComponent(MANUAL_TASK_ID)}/pending-diff`)).json() as { pending_hash: string };
+      const currentState = await (await request.get(`/api/tasks/${encodeURIComponent(MANUAL_TASK_ID)}/pending-state`)).json() as { pending_hash: string };
       const okRes = await request.post(`/api/tasks/${encodeURIComponent(MANUAL_TASK_ID)}/approve`, {
-        data: { hash: currentDiff.pending_hash },
+        data: { hash: currentState.pending_hash },
       });
       expect(okRes.ok()).toBe(true);
       await waitForTaskCondition(request, MANUAL_TASK_ID, (t) => t.pending_approval !== true);
@@ -157,12 +174,15 @@ test.describe('Approval hash binding', () => {
     }
   });
 
-  // Dashboard-level: the diff panel is left open on an old version (it never
-  // auto-refetches — see dc-task-detail.js's _diff caching), the file
+  // Dashboard-level: the review panel is left open on an old version (it
+  // never auto-refetches — see dc-task-detail.js's _state caching), the file
   // changes again underneath it, and the operator clicks the now-stale
   // Approve button. Must refuse, tell the operator, and refresh to the
   // version actually pending — never arm the version they never reviewed.
-  test('clicking Approve against a diff the reconciler has superseded refreshes instead of silently approving', async ({ page, request }) => {
+  //
+  // The panel renders no file content, so the two versions are told apart by
+  // the inventory hash the panel shows for task.js.
+  test('clicking Approve against a review the reconciler has superseded refreshes instead of silently approving', async ({ page, request }) => {
     const taskJsPath = path.join(tasksDir(), 'hello-manual', 'task.js');
     const original = fs.readFileSync(taskJsPath, 'utf8');
     // Unique to this test — see the API-level test's comment on why marker
@@ -174,31 +194,35 @@ test.describe('Approval hash binding', () => {
       fs.writeFileSync(taskJsPath, original + `\n${markerV1}\n`, 'utf8');
       await waitForTaskCondition(request, MANUAL_TASK_ID, (t) => t.pending_approval === true);
 
+      const v1 = await fileDigest(request, MANUAL_TASK_ID);
+
       await gotoWebui(page);
       await navigateInSpa(page, `/tasks/${MANUAL_TASK_ID}`);
       await waitForTaskDetail(page);
-      // The diff panel opens automatically for a pending task and shows v1.
-      await expect(page.locator('dc-task-detail')).toContainText(markerV1, { timeout: 10_000 });
+      // The review panel opens automatically for a pending task and shows v1.
+      await expect(page.locator('dc-task-detail')).toContainText(v1, { timeout: 10_000 });
 
-      const beforeHash = ((await (await request.get(`/api/tasks/${encodeURIComponent(MANUAL_TASK_ID)}/pending-diff`)).json()) as { pending_hash: string }).pending_hash;
+      const beforeHash = ((await (await request.get(`/api/tasks/${encodeURIComponent(MANUAL_TASK_ID)}/pending-state`)).json()) as { pending_hash: string }).pending_hash;
 
-      // Mutate again while the panel is still showing v1 — the loaded _diff
+      // Mutate again while the panel is still showing v1 — the loaded _state
       // is now stale, exactly as it would be after a real reconciler poll
       // landed between the operator opening the panel and clicking Approve.
       fs.writeFileSync(taskJsPath, original + `\n${markerV1}\n${markerV2}\n`, 'utf8');
       await waitForNewPendingHash(request, MANUAL_TASK_ID, beforeHash);
+      const v2 = await fileDigest(request, MANUAL_TASK_ID);
+      expect(v2).not.toBe(v1);
 
       // The panel must not have refetched on its own — this is the trap the
       // fix closes, not a UI bug to route around.
-      await expect(page.locator('dc-task-detail')).toContainText(markerV1);
-      await expect(page.locator('dc-task-detail')).not.toContainText(markerV2);
+      await expect(page.locator('dc-task-detail')).toContainText(v1);
+      await expect(page.locator('dc-task-detail')).not.toContainText(v2);
 
       page.once('dialog', (d) => d.accept());
       await page.locator('button', { hasText: 'Approve' }).click({ force: true });
 
       // Refused and refreshed: the panel now shows the version that is
       // actually pending, and the task is still awaiting approval.
-      await expect(page.locator('dc-task-detail')).toContainText(markerV2, { timeout: 15_000 });
+      await expect(page.locator('dc-task-detail')).toContainText(v2, { timeout: 15_000 });
       const stillPending = await (await request.get(`/api/tasks/${encodeURIComponent(MANUAL_TASK_ID)}`)).json() as Record<string, unknown>;
       expect(stillPending.pending_approval).toBe(true);
 

@@ -30,12 +30,10 @@ class DcTaskDetail extends LitElement {
     _showStages:      { state: true },
     _expanded:        { state: true }, // Set<runID> — top-level rows with children currently expanded
     _children:        { state: true }, // Map<parentRunID, Run[]> — lazily-fetched child rows
-    _diffOpen:        { state: true }, // pending-approval diff panel expand/collapse
-    _diff:            { state: true }, // last-fetched GET /pending-diff body, or null
-    _diffError:       { state: true },
-    _diffLoading:     { state: true },
-    _monacoOff:       { state: true }, // Monaco unreachable — render diffs as text
-    _ackIncomplete:   { state: true }, // operator acknowledged an incomplete diff
+    _stateOpen:       { state: true }, // pending-approval review panel expand/collapse
+    _state:           { state: true }, // last-fetched GET /pending-state body, or null
+    _stateError:      { state: true },
+    _stateLoading:    { state: true },
   };
 
   constructor() {
@@ -47,10 +45,7 @@ class DcTaskDetail extends LitElement {
     this._showStages = false;
     this._expanded = new Set();
     this._children = new Map();
-    this._diffOpen = false; this._diff = null; this._diffError = ''; this._diffLoading = false;
-    this._diffEditors = new Map();
-    this._monacoOff = false;
-    this._ackIncomplete = false;
+    this._stateOpen = false; this._state = null; this._stateError = ''; this._stateLoading = false;
     this._editor = null;
     this._relayBase = '';
     this._offStarted = null; this._offFinished = null;
@@ -61,7 +56,6 @@ class DcTaskDetail extends LitElement {
       this._cleanup();
       this._load();
     }
-    if (this._diffOpen) this._mountDiffEditors();
   }
 
   connectedCallback() {
@@ -83,15 +77,13 @@ class DcTaskDetail extends LitElement {
     this._offStarted?.(); this._offStarted = null;
     this._offFinished?.(); this._offFinished = null;
     if (this._editor) { this._editor.dispose(); this._editor = null; }
-    this._disposeDiffEditors();
   }
 
   async _load() {
     if (!this.taskid) return;
     this._task = null; this._runs = null; this._error = null;
     this._editorOpen = false; this._triggerOpen = false;
-    this._disposeDiffEditors();
-    this._diffOpen = false; this._diff = null; this._diffError = ''; this._diffLoading = false; this._ackIncomplete = false;
+    this._stateOpen = false; this._state = null; this._stateError = ''; this._stateLoading = false;
     try {
       const [task, runs, base] = await Promise.all([
         get(`/api/tasks/${encodeURIComponent(this.taskid)}`),
@@ -107,10 +99,10 @@ class DcTaskDetail extends LitElement {
       else if (t.chain || t.Chain) this._triggerType = 'chain';
       else if (t.daemon || t.Daemon) this._triggerType = 'daemon';
       else this._triggerType = 'manual';
-      // A pending task's whole reason for being on screen is the change
-      // awaiting review, so it opens with the diff already up rather than
-      // behind a click.
-      if (task.pending_approval) this._openDiff();
+      // A pending task's whole reason for being on screen is the review
+      // awaiting it, so it opens with the panel already up rather than behind
+      // a click.
+      if (task.pending_approval) this._openState();
     } catch(e) {
       this._error = e.message;
       return;
@@ -141,63 +133,41 @@ class DcTaskDetail extends LitElement {
     } catch(e) { alert('Failed: ' + e.message); }
   }
 
-  // Approval is offered only while a fetched diff is actually rendered.
-  // Derived rather than latched: a flag set when the fetch *starts* let a
-  // double-click approve against a "Loading diff…" panel, and a flag that
-  // survived an error let it approve against an error message. Both are
-  // approving without having seen the change.
+  // Approval is offered only while a fetched end state is on screen. Derived,
+  // never latched: a loading, errored or collapsed panel all disarm, since
+  // each would be approving without having seen what will run.
   //
-  // A failed fetch therefore does NOT arm. That deliberately blocks approval
-  // in the dashboard when the diff endpoint is broken; `dicode task approve`
-  // and the tokenized link remain as escape hatches, and neither of those
+  // A failed fetch therefore blocks approval from the dashboard. `dicode task
+  // approve` and the tokenized link remain as escape hatches, and neither
   // pretends a review happened.
   get _approveArmed() {
-    if (!this._diffOpen || !this._diff || this._diffLoading || this._diffError) return false;
-    // An incomplete diff cannot be approved in one click. The gate held this
-    // task for a reason the diff does not account for, so approving here is
-    // approving something unseen — it stays possible, but only as a
-    // deliberate, separately-labelled act.
-    if (this._diff.incomplete && !this._ackIncomplete) return false;
-    return true;
-  }
-
-  get _diffIncomplete() {
-    return !!(this._diff && this._diff.incomplete);
+    return !!(this._stateOpen && this._state && !this._stateLoading && !this._stateError);
   }
 
   async _approve() {
     if (!this._approveArmed) {
-      // Second stage of the incomplete-diff path: the panel and its warning
-      // are already on screen, so this click is the acknowledgement.
-      if (this._diffOpen && this._diff && !this._diffLoading && !this._diffError && this._diffIncomplete) {
-        this._ackIncomplete = true;
-        return;
-      }
-      await this._openDiff();
+      await this._openState();
       return;
     }
-    // Bind the approval to the exact version the diff on screen describes
-    // (pkg/approval.Diff.PendingHash). Between fetching that diff and this
-    // click, a push can re-pend the task at a newer hash — sending the hash
-    // back lets the server reject a stale approval instead of silently
-    // arming content the operator never reviewed. A falsy pending_hash means
-    // the diff we're looking at can't be bound at all — refuse rather than
-    // let the request degrade into an unbound approve with no signal.
-    if (!this._diff.pending_hash) {
-      alert('This diff has no content hash to bind to and cannot be approved from here. Use `dicode task approve` or the approve-link instead.');
+    // Bind the approval to the exact version on screen. Between fetching that
+    // state and this click, a push can re-pend the task at a newer hash —
+    // sending the hash back lets the server reject a stale approval instead of
+    // silently arming content the operator never reviewed. A falsy
+    // pending_hash cannot be bound at all — refuse rather than let the request
+    // degrade into an unbound approve with no signal.
+    if (!this._state.pending_hash) {
+      alert('This review has no content hash to bind to and cannot be approved from here. Use `dicode task approve` or the approve-link instead.');
       return;
     }
     try {
-      await post(`/api/tasks/${encodeURIComponent(this.taskid)}/approve`, { hash: this._diff.pending_hash });
+      await post(`/api/tasks/${encodeURIComponent(this.taskid)}/approve`, { hash: this._state.pending_hash });
       await this._load();
     } catch(e) {
       if (this._isStaleApprovalError(e)) {
-        alert('This task changed since you loaded this diff. Showing the current change — review and approve again.');
-        this._diff = null;
-        this._diffError = '';
-        this._ackIncomplete = false;
-        this._disposeDiffEditors();
-        await this._openDiff();
+        alert('This task changed since you loaded this review. Showing the current version — review and approve again.');
+        this._state = null;
+        this._stateError = '';
+        await this._openState();
         return;
       }
       alert('Approve failed: ' + e.message);
@@ -211,176 +181,125 @@ class DcTaskDetail extends LitElement {
     try { return JSON.parse(e.message).stale === true; } catch { return false; }
   }
 
-  async _openDiff() {
-    this._diffOpen = true;
-    if (this._diff || this._diffLoading) return;
-    this._diffLoading = true;
-    this._diffError = '';
+  async _openState() {
+    this._stateOpen = true;
+    if (this._state || this._stateLoading) return;
+    this._stateLoading = true;
+    this._stateError = '';
     // The element is reused across task navigations, so a slow response can
     // outlive the task that asked for it. Bind the result to the task it was
-    // requested for and drop it otherwise — rendering task A's files under
-    // task B's heading would put an operator one click from approving B
-    // having reviewed A.
+    // requested for and drop it otherwise — rendering task A's state under
+    // task B's heading would put an operator one click from approving B having
+    // reviewed A.
     const requestedFor = this.taskid;
     try {
-      const body = await get(`/api/tasks/${encodeURIComponent(requestedFor)}/pending-diff`);
+      const body = await get(`/api/tasks/${encodeURIComponent(requestedFor)}/pending-state`);
       if (this.taskid !== requestedFor) return;
       if (body && body.task_id && body.task_id !== requestedFor) return;
-      this._diff = body;
+      this._state = body;
     } catch(e) {
       if (this.taskid !== requestedFor) return;
-      this._diffError = e.message;
+      this._stateError = e.message;
     } finally {
-      if (this.taskid === requestedFor) this._diffLoading = false;
+      if (this.taskid === requestedFor) this._stateLoading = false;
     }
   }
 
-  async _toggleDiff() {
-    if (this._diffOpen) {
-      this._diffOpen = false;
-      this._disposeDiffEditors();
-      return;
-    }
-    await this._openDiff();
+  async _toggleState() {
+    if (this._stateOpen) { this._stateOpen = false; return; }
+    await this._openState();
   }
 
-  // _renderDiffLine splits one "+ "/"- "/"  " prefixed line of a FileDiff's
-  // UnifiedDiff (see pkg/approval/diff.go) into a colored span. A line
-  // matching none of those prefixes is the snapshotPlaceholder note
-  // (binary/too-large/uncaptured) and renders in muted italic.
-  _renderDiffLine(line) {
-    if (line.startsWith('+ ')) return html`<span style="display:block;background:rgba(63,185,80,0.15);color:#3fb950">${line.slice(2)}</span>`;
-    if (line.startsWith('- ')) return html`<span style="display:block;background:rgba(248,81,73,0.15);color:#f85149">${line.slice(2)}</span>`;
-    if (line.startsWith('  ')) return html`<span style="display:block;color:var(--muted)">${line.slice(2)}</span>`;
-    return html`<span style="display:block;color:var(--muted);font-style:italic">${line}</span>`;
+  _renderTrigger(t) {
+    switch (t.kind) {
+      case 'cron':    return html`<code>${t.cron}</code>`;
+      case 'webhook': return html`<code>${t.webhook}</code>${t.auth ? html` <span class="meta">auth: ${t.auth}</span>` : ''}${t.signed ? html` <span class="meta">signed</span>` : ''}`;
+      case 'daemon':  return html`daemon${t.restart ? html` <span class="meta">restart: ${t.restart}</span>` : ''}`;
+      case 'chain':   return html`after <code>${t.chain_from}</code>${t.chain_on ? html` <span class="meta">on ${t.chain_on}</span>` : ''}`;
+      default:        return html`manual`;
+    }
   }
 
-  _renderDiffPanel() {
-    if (this._diffLoading) return html`<div class="meta" style="margin-top:0.5rem">Loading diff…</div>`;
-    if (this._diffError) return html`<p style="color:#f85149;margin-top:0.5rem">Failed to load diff: ${this._diffError}</p>`;
-    if (!this._diff) return '';
-    const diff = this._diff;
-    const files = diff.files || [];
-    // An empty file list is never an all-clear: the gate held this task for
-    // a reason, and if it is not in these files it is somewhere this surface
-    // cannot see. Say that instead of printing reassuring copy.
-    if (files.length === 0) {
-      return html`
-        <div class="card" style="margin-top:0.75rem;margin-bottom:var(--space-md)">
-          <div style="background:rgba(248,81,73,0.12);border:1px solid #f85149;color:#f85149;padding:0.6rem 0.8rem;border-radius:6px;font-size:0.9rem">
-            &#9888; <strong>This diff cannot show why the task changed.</strong>
-            <div style="margin-top:0.4rem;color:var(--fg)">${diff.incomplete_reason || 'No file-level changes were found, yet the gate is holding this task.'}</div>
-          </div>
-        </div>`;
+  // An env entry renders as its declaration — the name the task sees and where
+  // the value comes from. The reference is never followed and no value is ever
+  // sent to this surface.
+  _renderEnvSource(e) {
+    switch (e.kind) {
+      case 'secret':  return html`secret <code>${e.ref}</code>`;
+      case 'task':    return html`task <code>${e.ref}</code>`;
+      case 'literal': return html`literal`;
+      default:        return html`host env <code>${e.ref}</code>`;
     }
-    const anySecurityRelevant = files.some(f => f.security_relevant);
+  }
+
+  _renderSection(title, body) {
     return html`
-      <div class="card" style="margin-top:0.75rem;margin-bottom:var(--space-md)">
-        ${!diff.has_baseline ? html`
-          <div style="background:rgba(210,153,34,0.12);border:1px solid #d29922;color:#d29922;padding:0.5rem 0.75rem;border-radius:6px;margin-bottom:0.75rem;font-size:0.85rem">
-            No prior approved version is cached for this task (fresh daemon session) — the files below are shown as new content, not a diff against a known-good baseline.
-          </div>` : ''}
-        ${diff.incomplete ? html`
-          <div style="background:rgba(248,81,73,0.12);border:1px solid #f85149;color:#f85149;padding:0.5rem 0.75rem;border-radius:6px;margin-bottom:0.75rem;font-size:0.85rem">
-            &#9888; <strong>Incomplete diff.</strong> ${diff.incomplete_reason || 'Part of this change cannot be displayed.'}
-          </div>` : ''}
-        ${anySecurityRelevant ? html`
-          <div style="background:rgba(248,81,73,0.12);border:1px solid #f85149;color:#f85149;padding:0.5rem 0.75rem;border-radius:6px;margin-bottom:0.75rem;font-size:0.85rem">
-            &#9888; This change touches security-relevant fields (permissions, env, triggers, …). Review carefully before approving.
-          </div>` : ''}
-        ${files.map(f => html`
-          <div style="margin-bottom:1rem">
-            <div style="font-family:monospace;font-weight:600;margin-bottom:0.35rem;display:flex;align-items:center;gap:0.5rem">
-              <span>${f.path}</span>
-              <span style="font-size:0.7rem;padding:0.05rem 0.4rem;border-radius:3px;background:var(--bg-alt);color:var(--muted);text-transform:uppercase">${f.status}</span>
-              ${f.security_relevant ? html`<span style="font-size:0.7rem;padding:0.05rem 0.4rem;border-radius:3px;background:rgba(248,81,73,0.18);color:#f85149;border:1px solid rgba(248,81,73,0.45)">security-relevant</span>` : ''}
-              ${f.content_hidden ? html`<span title="This file changed, but the change is inside redacted or uncaptured content and cannot be shown here" style="font-size:0.7rem;padding:0.05rem 0.4rem;border-radius:3px;background:rgba(248,81,73,0.18);color:#f85149;border:1px solid rgba(248,81,73,0.45)">change not shown</span>` : ''}
-            </div>
-            ${this._hasInlineSides(f)
-              ? html`<div class="dc-diff-editor" data-diff-path=${f.path}
-                       style="height:${this._diffEditorHeight(f)}px;border-radius:6px;overflow:hidden;border:1px solid var(--border)"></div>`
-              : html`<pre style="background:var(--bg-alt);padding:0.6rem 0.75rem;border-radius:6px;overflow-x:auto;font-size:0.8rem;line-height:1.45;margin:0;white-space:pre-wrap;overflow-wrap:anywhere">${(f.unified_diff || '').split('\n').filter(l => l !== '').map(l => this._renderDiffLine(l))}</pre>`}
-          </div>`)}
+      <div style="margin-bottom:0.9rem">
+        <div style="font-size:0.75rem;text-transform:uppercase;letter-spacing:0.04em;color:var(--muted);margin-bottom:0.3rem">${title}</div>
+        ${body}
       </div>`;
   }
 
-  // Monaco needs both sides verbatim; the API omits them for oversized and
-  // binary files (see maxInlineContentBytes), which fall back to the hunked
-  // text rendering — as does an unreachable Monaco. A diff surface that
-  // renders nothing must never be what an operator approves against, so the
-  // text path stays reachable whenever Monaco is not.
-  _hasInlineSides(f) {
-    if (this._monacoOff) return false;
-    return typeof f.old_content === 'string' || typeof f.new_content === 'string';
-  }
+  _renderStatePanel() {
+    if (this._stateLoading) return html`<div class="meta" style="margin-top:0.5rem">Loading…</div>`;
+    if (this._stateError) return html`<p style="color:#f85149;margin-top:0.5rem">Failed to load the review: ${this._stateError}</p>`;
+    if (!this._state) return '';
+    const st = this._state;
+    const perms = st.permissions || {};
+    const files = st.files || [];
+    const rowStyle = 'display:flex;gap:0.5rem;align-items:baseline;font-size:0.85rem;padding:0.15rem 0';
+    return html`
+      <div class="card" style="margin-top:0.75rem;margin-bottom:var(--space-md)">
+        <div class="meta" style="margin-bottom:0.75rem">
+          This is the task as it will run if you approve it. Review the change itself at its source.
+        </div>
 
-  // Sized to the rendered content, not to a fixed window. hideUnchangedRegions
-  // collapses the untouched bulk, so this stays small for a one-line edit —
-  // but a diff that does not fit must grow the page rather than hide its tail
-  // behind an inner scrollbar, which reads as "the diff ends here" while
-  // Approve stays pinned in view above it.
-  _diffEditorHeight(f) {
-    const lines = (f.unified_diff || '').split('\n').filter((l) => l !== '');
-    // Wrapping turns a long line into several rows; approximate rather than
-    // measure, and err high — extra whitespace is harmless, a hidden tail is not.
-    const rows = lines.reduce((n, l) => n + Math.max(1, Math.ceil(l.length / 110)), 0);
-    return Math.min(2400, Math.max(160, (rows + 4) * 19));
-  }
+        ${this._renderSection('Runs as', html`
+          <div style=${rowStyle}>
+            ${st.runtime ? html`<code>${st.runtime}</code>` : html`<span class="meta">pipeline</span>`}
+            ${st.image ? html`<code>${st.image}</code>` : ''}
+            ${st.network_mode ? html`<span class="meta">network: ${st.network_mode}</span>` : ''}
+            ${st.timeout ? html`<span class="meta">timeout ${st.timeout}</span>` : ''}
+          </div>`)}
 
-  // Mounts a Monaco diff editor into every .dc-diff-editor placeholder the
-  // last render produced. Monaco owns its own DOM, so Lit must not re-render
-  // into a mounted container — each is keyed by path and mounted once.
-  _mountDiffEditors() {
-    const nodes = this.querySelectorAll('.dc-diff-editor');
-    if (!nodes.length || !this._diff) return;
-    const pending = [...nodes].filter(n => !this._diffEditors.has(n.dataset.diffPath));
-    if (!pending.length) return;
+        ${st.triggers && st.triggers.length ? this._renderSection('Fires on', html`
+          ${st.triggers.map(t => html`<div style=${rowStyle}><strong>${t.kind}</strong> ${this._renderTrigger(t)}</div>`)}`) : ''}
 
-    const mount = () => {
-      for (const node of pending) {
-        const f = (this._diff.files || []).find(x => x.path === node.dataset.diffPath);
-        if (!f || this._diffEditors.has(f.path) || !node.isConnected) continue;
-        const lang = f.path.endsWith('.ts') ? 'typescript'
-          : f.path.endsWith('.py') ? 'python'
-          : f.path.endsWith('.yaml') || f.path.endsWith('.yml') ? 'yaml'
-          : 'javascript';
-        const ed = monaco.editor.createDiffEditor(node, {
-          theme: monacoTheme(), fontSize: 13, readOnly: true, renderSideBySide: false,
-          minimap: { enabled: false }, scrollBeyondLastLine: false, automaticLayout: true,
-          hideUnchangedRegions: { enabled: true, contextLineCount: 3, minimumLineCount: 3 },
-          // A review surface must never clip a changed line out of sight: a
-          // payload appended past the right edge renders as a benign line, or
-          // as one byte-identical to the line it replaced.
-          wordWrap: 'on',
-          scrollbar: { alwaysConsumeMouseWheel: false },
-        });
-        ed.setModel({
-          original: monaco.editor.createModel(f.old_content || '', lang),
-          modified: monaco.editor.createModel(f.new_content || '', lang),
-        });
-        this._diffEditors.set(f.path, ed);
-      }
-    };
+        ${this._renderSection('Can reach', html`
+          ${perms.net && perms.net.length ? html`<div style=${rowStyle}><strong>net</strong> ${perms.net.map(h => html`<code>${h}</code> `)}</div>` : ''}
+          ${perms.fs && perms.fs.length ? html`<div style=${rowStyle}><strong>fs</strong> ${perms.fs.map(f => html`<code>${f.path}</code> <span class="meta">${f.permission}</span> `)}</div>` : ''}
+          ${perms.run && perms.run.length ? html`<div style=${rowStyle}><strong>run</strong> ${perms.run.map(r => html`<code>${r}</code> `)}</div>` : ''}
+          ${perms.sys && perms.sys.length ? html`<div style=${rowStyle}><strong>sys</strong> ${perms.sys.map(r => html`<code>${r}</code> `)}</div>` : ''}
+          ${perms.dicode ? html`<div style=${rowStyle}><strong>dicode</strong> <code>${Object.keys(perms.dicode).join(', ')}</code></div>` : ''}
+          ${perms.env_read_exposed ? html`<div style=${rowStyle}><strong>env</strong> <span class="meta">unrestricted reads</span></div>` : ''}
+          ${!perms.net?.length && !perms.fs?.length && !perms.run?.length && !perms.sys?.length && !perms.dicode && !perms.env_read_exposed
+            ? html`<div style=${rowStyle}><span class="meta">nothing — no network, filesystem, subprocess or dicode access</span></div>` : ''}`)}
 
-    const guarded = () => { try { mount(); } catch { this._monacoOff = true; } };
-    if (window.monaco?.editor?.createDiffEditor) { guarded(); return; }
-    // The AMD loader is itself CDN-hosted (index.html), so an offline or
-    // egress-filtered deploy has no `require` at all.
-    if (typeof require === 'undefined') { this._monacoOff = true; return; }
-    require.config({ paths: { vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs' } });
-    require(['vs/editor/editor.main'], guarded, () => { this._monacoOff = true; });
-  }
+        ${st.env && st.env.length ? this._renderSection('Environment', html`
+          ${st.env.map(e => html`<div style=${rowStyle}><code>${e.name}</code> ← ${this._renderEnvSource(e)}${e.has_default ? html` <span class="meta">has default</span>` : ''}${e.optional ? html` <span class="meta">optional</span>` : ''}</div>`)}`) : ''}
 
-  // Monaco editors are not garbage-collected with their container — models
-  // and the editor itself leak across task navigations without this.
-  _disposeDiffEditors() {
-    for (const ed of this._diffEditors.values()) {
-      const m = ed.getModel();
-      m?.original?.dispose();
-      m?.modified?.dispose();
-      ed.dispose();
-    }
-    this._diffEditors.clear();
+        ${st.params && st.params.length ? this._renderSection('Params', html`
+          ${st.params.map(pm => html`<div style=${rowStyle}><code>${pm.name}</code>${pm.type ? html` <span class="meta">${pm.type}</span>` : ''}${pm.required ? html` <span class="meta">required</span>` : ''}${pm.has_default ? html` <span class="meta">has default</span>` : ''}</div>`)}`) : ''}
+
+        ${st.stages && st.stages.length ? this._renderSection('Stages', html`
+          ${st.stages.map((sg, i) => html`<div style=${rowStyle}><span class="meta">${i + 1}.</span> <code>${sg.task}</code>${sg.overridden ? html` <span class="meta">overridden</span>` : ''}</div>`)}`) : ''}
+
+        ${st.container ? this._renderSection('Container', html`
+          ${st.container.volumes?.length ? html`<div style=${rowStyle}><strong>volumes</strong> ${st.container.volumes.map(v => html`<code>${v}</code> `)}</div>` : ''}
+          ${st.container.ports?.length ? html`<div style=${rowStyle}><strong>ports</strong> ${st.container.ports.map(v => html`<code>${v}</code> `)}</div>` : ''}
+          ${st.container.cap_add?.length ? html`<div style=${rowStyle}><strong>cap_add</strong> ${st.container.cap_add.map(v => html`<code>${v}</code> `)}</div>` : ''}
+          ${st.container.user ? html`<div style=${rowStyle}><strong>user</strong> <code>${st.container.user}</code></div>` : ''}
+          ${st.container.env_names?.length ? html`<div style=${rowStyle}><strong>env</strong> ${st.container.env_names.map(v => html`<code>${v}</code> `)}</div>` : ''}`) : ''}
+
+        ${files.length ? this._renderSection(`Files (${files.length})`, html`
+          ${files.map(f => html`
+            <div style=${rowStyle}>
+              <code>${f.path}</code>
+              ${f.kind === 'symlink' ? html`<span class="meta">→ ${f.target}</span>`
+                : f.kind === 'missing' ? html`<span style="color:#f85149">missing</span>`
+                : html`<span class="meta">${f.size} B</span><span class="meta" style="font-family:monospace">${(f.hash || '').slice(0, 12)}</span>`}
+            </div>`)}`) : ''}
+      </div>`;
   }
 
   _openEditor() {
@@ -780,16 +699,14 @@ class DcTaskDetail extends LitElement {
           style="padding:0 0.45rem;font-size:0.75rem;border-radius:3px;background:rgba(210,153,34,0.18);color:#d29922;border:1px solid rgba(210,153,34,0.45)">pending approval</span>` : ''}
         ${needsApproval ? html`<button class="btn" style="background:#d29922" @click=${() => this._approve()}
           title=${this._approveArmed
-            ? (this._diffIncomplete ? 'Approve despite an incomplete diff' : 'Approve this version and arm its triggers')
-            : (this._diffIncomplete ? 'This diff cannot show the whole change — read the warning first' : 'Show what changed before approving')}
-          >${this._approveArmed
-            ? (this._diffIncomplete ? html`&#9888; Approve anyway` : html`&#10003; Approve`)
-            : (this._diffIncomplete ? html`&#9888; Approve without a full diff` : html`&#9998; Review changes`)}</button>` : ''}
-        ${needsApproval ? html`<button class="btn btn-sm secondary" @click=${() => this._toggleDiff()}>${this._diffOpen ? 'Hide diff' : 'View diff'}</button>` : ''}
+            ? 'Approve this version and arm its triggers'
+            : 'Show what will run before approving'}
+          >${this._approveArmed ? html`&#10003; Approve` : html`&#9998; Review`}</button>` : ''}
+        ${needsApproval ? html`<button class="btn btn-sm secondary" @click=${() => this._toggleState()}>${this._stateOpen ? 'Hide review' : 'Review'}</button>` : ''}
         <button class="btn" @click=${() => this._run()}>&#9654; Run now</button>
         ${hasEditor ? html`<button class="btn" style="background:var(--muted)" @click=${() => this._openEditor()}>&#9998; Edit code</button>` : ''}
       </div>
-      ${needsApproval && this._diffOpen ? this._renderDiffPanel() : ''}
+      ${needsApproval && this._stateOpen ? this._renderStatePanel() : ''}
       ${task.description ? html`<div class="task-desc">${unsafeHTML(marked.parse(task.description))}</div>` : ''}
 
       <div class="card" style="margin-bottom:var(--space-md);display:flex;align-items:center;gap:0.75rem">
