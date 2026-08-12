@@ -299,6 +299,20 @@ Response: 200 {"status":"ok"}  +  Set-Cookie: dicode_secrets_sess + dicode_devic
 
 There is no secondary "secrets unlock" step — one login grants access to all protected resources including the secrets API.
 
+### Login page — passphrase-required signal
+
+`GET /api/login/context` (unauthenticated, fetched by `pkg/webui/login/login.js`) returns:
+
+```json
+{"title": "Sign in to dicode", "passphrase_required": true}
+```
+
+`passphrase_required` is `false` only when `passphraseSource()` reports `passphraseSourceNone` — i.e. `apiSecretsUnlock` will accept **any** password, including empty. In practice that's `server.auth: false`, the common default: `ensurePassphrase` never generates a passphrase when auth is disabled, so `/login` (always publicly reachable, independent of `server.auth`) would otherwise still present what looks like a real credential gate. When auth *is* enabled, `ensurePassphrase` runs synchronously in `Start()` before the HTTP listener accepts any connection, so a passphrase always exists by the time this endpoint is reachable — there is no first-boot window where `passphraseSourceNone` is observable over HTTP with auth on.
+
+`passphraseSourceUnknown` (transient DB read failure) reports `passphrase_required: true` — login is fail-closed (`503`) in that state, so the page must keep looking like a real gate.
+
+When `passphrase_required` is `false`, the login page removes the password field's `required` attribute and shows an inline notice ("No password is configured for this dicode instance") instead of silently accepting whatever the operator happens to type, which previously implied a real check was happening.
+
 ### Silent refresh flow
 
 ```text
@@ -1027,3 +1041,4 @@ Top-level security blocks in `Config` (siblings of `server:`, not nested under i
 | Replay retarget blocked | A task-scoped `dicode.runs.replay` call cannot redirect the replay at a different task ID — the target is pinned to the original run's task |
 | `dicode` permission overrides are exhaustive | `mergeDicodePerms` merges all `DicodePermissions` fields including `secrets_has` and `crypto`; added exhaustiveness test guards against future fields being silently dropped |
 | Pending-approval changes are reviewable, not blind | `Gate.Diff` (#604) surfaces a file-level diff of a pending task's changes — including a security-relevant highlight for permission/env/trigger edits — on both the dashboard's Approve button and the tokenized `/approve/{token}` link page before the operator confirms |
+| Task list doesn't misrepresent a pending task as live (#650) | A held task's toggle no longer shows a plain "on" green dot, its trigger column no longer hyperlinks a webhook route that 404s until approved, and `Run` is disabled with a tooltip rather than silently 400ing behind a raw `alert()`. A pending count/filter and a notification-tray entry (wired to the existing `approval:pending` WebSocket event) make held tasks discoverable at a glance instead of requiring a per-row badge scan. |

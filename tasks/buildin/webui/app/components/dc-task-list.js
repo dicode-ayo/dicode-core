@@ -12,6 +12,7 @@ class DcTaskList extends LitElement {
     _sources:       { state: true },
     _error:         { state: true },
     _filter:        { state: true },
+    _pendingOnly:   { state: true },
     _collapsed:     { state: true },
     _togglePending: { state: true },
   };
@@ -22,12 +23,14 @@ class DcTaskList extends LitElement {
     this._sources = new Map(); // source name → entry (with pull-health fields)
     this._error = null;
     this._filter = '';
+    this._pendingOnly = false;
     // Persisted collapse state: set of namespace keys that are folded shut.
     this._collapsed = this._loadCollapsed();
     this._relayBase = '';
     this._offFinished = null;
     this._offStarted = null;
     this._offChanged = null;
+    this._offPending = null;
     this._togglePending = new Set();
   }
 
@@ -69,6 +72,10 @@ class DcTaskList extends LitElement {
       );
     });
     this._offChanged = wsOn('tasks:changed', () => this._load());
+    // A task can flip into pending approval between polls (reconciler picks
+    // up an out-of-band content change); reload so the held-state badge/
+    // count/toggle-tint appear without waiting on the next full refresh.
+    this._offPending = wsOn('approval:pending', () => this._load());
   }
 
   disconnectedCallback() {
@@ -76,6 +83,7 @@ class DcTaskList extends LitElement {
     this._offFinished?.();
     this._offStarted?.();
     this._offChanged?.();
+    this._offPending?.();
   }
 
   async _load() {
@@ -88,6 +96,13 @@ class DcTaskList extends LitElement {
       this._tasks = tasks;
       this._sources = new Map((sources || []).map(s => [s.name, s]));
       this._relayBase = base;
+      // The pending-filter chip that toggles this only renders while there's
+      // at least one pending task — once the count drops to 0 it vanishes,
+      // so clear the filter itself or it'd be stuck on with no control left
+      // to turn it off.
+      if (this._pendingOnly && !tasks.some(t => t.pending_approval === true)) {
+        this._pendingOnly = false;
+      }
     } catch(e) {
       this._error = e.message;
     }
@@ -97,7 +112,7 @@ class DcTaskList extends LitElement {
     try {
       const r = await post(`/api/tasks/${encodeURIComponent(taskID)}/run`);
       navigate(`/runs/${r.runId}`);
-    } catch(e) { alert('Failed to run task: ' + e.message); }
+    } catch(e) { this._toast('Failed to run task: ' + e.message); }
   }
 
   // A table row has nowhere to render a diff, so the list never approves —
@@ -109,11 +124,13 @@ class DcTaskList extends LitElement {
 
   // Group tasks by top-level namespace segment, applying the active
   // filter as a case-insensitive substring match against ID, name, and
-  // trigger label. Tasks without '/' in their ID go in the '' bucket.
-  // Empty groups are omitted from the result.
+  // trigger label, further narrowed to pending-approval tasks when the
+  // "pending" quick filter is on. Tasks without '/' in their ID go in the
+  // '' bucket. Empty groups are omitted from the result.
   _grouped() {
     const q = this._filter.trim().toLowerCase();
     const match = (t) => {
+      if (this._pendingOnly && t.pending_approval !== true) return false;
       if (!q) return true;
       return (
         t.id.toLowerCase().includes(q) ||
@@ -138,6 +155,10 @@ class DcTaskList extends LitElement {
 
   _matchingCount() {
     return this._grouped().reduce((n, [, ts]) => n + ts.length, 0);
+  }
+
+  _pendingCount() {
+    return (this._tasks || []).filter(t => t.pending_approval === true).length;
   }
 
   // _pullDot renders a small colored dot in a source-group header
@@ -202,15 +223,31 @@ class DcTaskList extends LitElement {
     // so there is no live task to toggle or run — only the id/name/error are
     // meaningful. TaskListItem/PipelineListItem rows never carry this kind.
     const neverRegistered = t.kind === 'LoadError';
+    // A held task's triggers aren't armed: the toggle dot must not read as a
+    // plain "on" green, the trigger column must not link a route that 404s,
+    // and Run must not silently no-op against the server's 400.
+    const toggleState = disabled ? 'off' : needsApproval ? 'held' : 'on';
+    const toggleTitle = disabled
+      ? 'Enable task'
+      : needsApproval
+        ? 'Task is pending approval — triggers are not armed yet'
+        : 'Disable task';
+    // Only a webhook trigger has a route that can 404 — cron/manual/chain
+    // triggers just aren't armed, so don't claim a 404 that can't happen.
+    const pendingTriggerTitle = t.trigger?.Webhook
+      ? 'Not live yet — this route will 404 until the pending change is approved'
+      : 'Not armed yet — this trigger stays inactive until the pending change is approved';
     return html`
       <tr class=${disabled ? 'disabled' : ''} data-task-id=${id}>
         <td>${neverRegistered
             ? html`<span>${shown}</span>`
             : html`<a href="/tasks/${t.id}" @click=${e => { e.preventDefault(); navigate('/tasks/' + t.id); }}>${shown}</a>`}${disabled ? html`<span class="badge-paused">paused</span>` : ''}${needsApproval ? html`<span class="badge-pending-approval" title="This task is new or changed and its triggers are not armed until approved">pending approval</span>` : ''}${loadError ? html`<span class="badge badge-failure" style="margin-left:0.4rem" title=${loadError}>load error</span>` : ''}</td>
         <td>${t.name}</td>
-        <td>${t.trigger?.Webhook
-          ? html`<a href="${webhookURL(this._relayBase, t.trigger.Webhook)}" target="_blank" class="meta">${t.trigger_label}</a>`
-          : html`<span class="meta">${t.trigger_label || 'manual'}</span>`}</td>
+        <td>${needsApproval
+          ? html`<span class="meta" title=${pendingTriggerTitle}>${t.trigger_label || 'manual'} (proposed)</span>`
+          : t.trigger?.Webhook
+            ? html`<a href="${webhookURL(this._relayBase, t.trigger.Webhook)}" target="_blank" class="meta">${t.trigger_label}</a>`
+            : html`<span class="meta">${t.trigger_label || 'manual'}</span>`}</td>
         <td>${t.last_run_id
           ? html`<a href="/runs/${t.last_run_id}" @click=${e => { e.preventDefault(); navigate('/runs/' + t.last_run_id); }}>${t.last_run_id.slice(0, 8)}</a>`
           : '—'}</td>
@@ -219,8 +256,8 @@ class DcTaskList extends LitElement {
           : '—'}</td>
         <td style="white-space:nowrap">
           ${neverRegistered ? html`<span class="meta">—</span>` : html`
-          <button class=${`toggle-btn ${disabled ? 'off' : 'on'}`}
-                  title=${disabled ? 'Enable task' : 'Disable task'}
+          <button class=${`toggle-btn ${toggleState}`}
+                  title=${toggleTitle}
                   ?disabled=${pending}
                   @click=${(e) => this._onToggle(e, t)}>
             ${disabled
@@ -233,7 +270,10 @@ class DcTaskList extends LitElement {
           ${needsApproval
             ? html`<button class="btn btn-sm btn-approve" title="Review what changed, then approve" @click=${() => this._review(t.id)}>&#9998; Review</button>`
             : ''}
-          <button class="btn btn-sm" @click=${() => this._run(t.id)}>&#9654; Run</button>
+          <button class="btn btn-sm"
+                  ?disabled=${needsApproval}
+                  title=${needsApproval ? 'Cannot run — task is pending approval' : 'Run now'}
+                  @click=${() => this._run(t.id)}>&#9654; Run</button>
           `}
         </td>
       </tr>`;
@@ -333,7 +373,9 @@ class DcTaskList extends LitElement {
     const isNamespaced = groups.some(([ns]) => ns !== '');
 
     const matching = this._matchingCount();
-    const noMatches = this._filter && matching === 0;
+    const pendingCount = this._pendingCount();
+    const filterActive = this._filter || this._pendingOnly;
+    const noMatches = filterActive && matching === 0;
 
     return html`
       <style>
@@ -372,12 +414,27 @@ class DcTaskList extends LitElement {
         dc-task-list .btn-approve { background: #d29922; }
         dc-task-list .toggle-btn.on  { color: var(--accent, #4caf50); }
         dc-task-list .toggle-btn.off { color: var(--muted, #888); }
+        dc-task-list .toggle-btn.held { color: #d29922; }
         dc-task-list .toggle-btn svg { display: inline-block; width: 18px; height: 18px; vertical-align: middle; }
+        dc-task-list .pending-filter {
+          border: 1px solid rgba(210, 153, 34, 0.45);
+          color: #d29922;
+          background: transparent;
+        }
+        dc-task-list .pending-filter.active {
+          background: rgba(210, 153, 34, 0.18);
+        }
       </style>
       <div style="display:flex;align-items:center;gap:var(--space-md);margin-bottom:var(--space-md)">
         <h1 style="margin:0">Tasks</h1>
+        ${pendingCount > 0 ? html`
+          <button class="btn btn-sm pending-filter ${this._pendingOnly ? 'active' : ''}"
+                  title="Show only tasks pending approval"
+                  @click=${() => { this._pendingOnly = !this._pendingOnly; }}>
+            &#9203; ${pendingCount} pending approval
+          </button>` : ''}
         <span class="meta" style="flex:0 0 auto">
-          ${this._filter ? `${matching} / ${this._tasks.length}` : ''}
+          ${filterActive ? `${matching} / ${this._tasks.length}` : ''}
         </span>
         <div style="flex:1"></div>
         <input type="search"
@@ -394,7 +451,9 @@ class DcTaskList extends LitElement {
         </div>
       ` : noMatches ? html`
         <div class="card" style="text-align:center;color:var(--muted);padding:var(--space-xl)">
-          No tasks match “${this._filter}”.
+          ${this._filter
+            ? html`No tasks match “${this._filter}”${this._pendingOnly ? ' among pending-approval tasks' : ''}.`
+            : html`No tasks are pending approval.`}
         </div>
       ` : isNamespaced ? html`
         ${groups.map(([ns, tasks]) => {

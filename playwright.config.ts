@@ -52,6 +52,7 @@ export default defineConfig({
         '**/file-change.spec.ts',
         '**/approval-diff.spec.ts',
         '**/approval-hash-binding.spec.ts',
+        '**/pending-task-list-signals.spec.ts',
         '**/task-load-failure.spec.ts',
         '**/webhooks.spec.ts',
         '**/webhooks-secure.spec.ts',
@@ -66,6 +67,7 @@ export default defineConfig({
         '**/suspend-resume.spec.ts',
         '**/cli-suspend.spec.ts',
         '**/run-tree-collapse.spec.ts',
+        '**/login-no-passphrase.spec.ts',
       ],
       use: {
         ...devices['Desktop Chrome'],

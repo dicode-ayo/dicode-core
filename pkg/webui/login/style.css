@@ -9,3 +9,4 @@ body{margin:0;font:16px/1.4 system-ui,sans-serif;background:#0f1115;color:#e6e8e
 .dc-login button{margin-top:0.5rem;padding:0.65rem;background:#3b82f6;border:0;color:#fff;font:inherit;font-weight:600;border-radius:4px;cursor:pointer}
 .dc-login button:hover{background:#2563eb}
 .dc-err{margin:0 0 0.5rem;padding:0.5rem 0.7rem;background:#3a1a1a;border:1px solid #6b2424;color:#fca5a5;border-radius:4px;font-size:0.85rem}
+.dc-note{margin:0 0 0.5rem;padding:0.5rem 0.7rem;background:#1a2634;border:1px solid #2a3f56;color:#93c5fd;border-radius:4px;font-size:0.85rem}

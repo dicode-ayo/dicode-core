@@ -1,18 +1,21 @@
 # Testing & Validation
 
 > **Status**: This document describes the testing and validation system. Layer 2
-> (`dicode task test`) is implemented for the Deno runtime: `pkg/tasktest`
-> drives `deno test` and parses its summary, and `tasks/sdk-test.ts` provides
-> a real (opt-in) mock harness — `params`/`env`/`kv`/`http.mock`/`assert.*`/
-> `runTask()` — used by this repo's built-in and example tasks. Layer 1
-> (`dicode task validate`), Layer 3 (`dicode run --dry-run`), and
+> (`dicode task test`) is implemented for the Deno and Python runtimes:
+> `pkg/tasktest` drives `deno test` (Deno) or `uv run` + pytest (Python) and
+> parses each runtime's summary output. `tasks/sdk-test.ts` (Deno) and
+> `tasks/sdk_test.py` (Python) provide real (opt-in) mock harnesses —
+> `params`/`env`/`kv`/HTTP mocking/`runTask()`|`run_task()` — used by this
+> repo's built-in and example tasks. Docker and Podman are **not yet
+> supported** (tracked as Phase 3 of [#159](https://github.com/dicode-ayo/dicode-core/issues/159)).
+> Layer 1 (`dicode task validate`), Layer 3 (`dicode run --dry-run`), and
 > `dicode ci init` remain planned.
 
 Dicode is designed with four validation layers, each catching different classes of problems.
 
 ```text
 Layer 1: Static validation     — schema + syntax, zero execution, instant        [planned]
-Layer 2: Unit tests            — mocked globals, full task run, local             [implemented: Deno]
+Layer 2: Unit tests            — mocked globals, full task run, local             [implemented: Deno, Python]
 Layer 3: Dry run               — real secrets, intercepted HTTP, no side effects  [planned]
 Layer 4: CI guardrails         — layers 1+2 on every push, offline-safe           [partial: see CI job below]
 ```
@@ -53,9 +56,13 @@ dicode task test --all                      # planned — <id> is currently requ
 dicode task test <id> --watch               # planned — re-run on file save
 ```
 
-Runs `task.test.ts` (Deno runtime) through the Deno test runner. The current
-implementation captures aggregate passed/failed/skipped counts from Deno's
-summary line.
+Runs the task's sibling `task.test.*` through its runtime's test runner:
+`task.test.ts`/`.js`/`.mjs` (Deno runtime) through `deno test`, or
+`task.test.py` (Python runtime) through `uv run` + pytest. `pkg/tasktest`
+captures aggregate passed/failed/skipped counts from each runtime's own
+summary output — Deno's `ok | N passed | N failed (Nms)` line, or pytest's
+`N passed, N failed in N.NNs` line. Docker and Podman tasks cannot ship a
+test file yet (#159 Phase 3).
 
 ### Output formats
 
@@ -77,9 +84,9 @@ and `tasks/examples/**`, plus `tasks/examples/repo-prune/prune-stale-refs.test.s
 repo — `task.test.ts` only mocks `Deno.Command`, so it never exercises the
 script that actually deletes branches/worktrees). `make test-tasks` runs the
 same three commands locally. Only `runtime: deno` tasks can ship a
-`task.test.ts` today — the harness below doesn't support Python/Docker/Podman
-(#159) — so nothing under `tasks/examples/**` is silently excluded; there's
-simply nothing else the glob could match yet.
+`task.test.ts` — `runtime: python` tasks ship a `task.test.py` instead (see
+[Python](#python) below); Docker/Podman tasks can't ship a test file at all
+yet (#159 Phase 3).
 
 ### CI job: `test-tasks-cli`
 
@@ -91,12 +98,25 @@ against the built-in task set (using `ci/dicode-tasktest.yaml`) and runs:
 ```
 
 The resulting JUnit XML is uploaded as a workflow artifact. The daemon log is
-uploaded on failure for post-mortem inspection.
+uploaded on failure for post-mortem inspection. `buildin/webui` is a Deno
+task; there is currently no built-in Python task in the daemon's task set for
+this job to exercise the same way, so this job's daemon-backed coverage stays
+Deno-only for now. Python coverage instead comes from `pkg/tasktest`'s own Go
+tests (`TestRun_Python`, which drives `runPython` through a real `uv`
+subprocess) plus a dedicated `test-tasks` job step that runs
+`tasks/examples/hello-python/task.test.py` directly via `uv run` (no
+daemon needed — see that job's YAML for why a task.test.py can be invoked
+standalone).
 
-`pkg/tasktest` itself only shells out to `deno test` and parses the summary
-line — it does not provide any mocking on its own. The mocked globals below
-(`http.mock`, `env.set`, `runTask()`, `assert.*`) come from a separate,
-repo-local test harness: `tasks/sdk-test.ts`. A `task.test.ts` opts in with:
+`pkg/tasktest` itself only shells out to the runtime's own test runner
+(`deno test`, or `uv run` for Python) and parses its summary output — it does
+not provide any mocking on its own. Mocking comes from a separate,
+repo-local test harness per runtime: `tasks/sdk-test.ts` (Deno) or
+`tasks/sdk_test.py` (Python).
+
+## Deno
+
+A `task.test.ts` opts into the harness with:
 
 ```typescript
 import { setupHarness } from "../../sdk-test.ts";
@@ -191,6 +211,94 @@ There is no `assert.httpCallCount` — assert on `http.lastRequestBody` or count
 ### Test isolation
 
 All tests in a `task.test.ts` run in the same Deno process — there's no per-test goja/interpreter isolation. `setupHarness`'s `test()` wrapper calls `resetMocks()` before each case, which clears the in-memory params/env/kv maps, HTTP mocks, and call log, and re-seeds params from `task.yaml` defaults. State does not leak between test cases as long as you go through the mocked globals rather than module-level variables in `task.ts`.
+
+## Python
+
+`runtime: python` tasks ship a `task.test.py` next to `task.py`. Two things
+make it work with `dicode task test`/`pkg/tasktest.runPython`, both
+non-negotiable:
+
+1. **It's a PEP 723 script.** `pkg/tasktest` invokes it as a single
+   `uv run <task.test.py>` — no extra flags, no `--with` packages bolted on
+   from the Go side. That means the file's own inline `# /// script`
+   header must declare every dependency it needs: `pytest`, plus whatever
+   the adjacent `task.py` imports (e.g. `httpx`).
+2. **It ends with a `run_pytest_main(__file__)` call under
+   `if __name__ == "__main__":`.** `uv run` executes the file as `__main__`;
+   that block is what actually invokes pytest. `run_pytest_main` (from
+   `sdk_test.py`) also bakes in `--import-mode=importlib`, which is required
+   — pytest's default import mode derives a dotted module name from a file's
+   basename by stripping only the trailing `.py`, so `task.test.py` becomes
+   module name `task.test`, which Python then tries to import as submodule
+   `test` of package `task` and fails with `ModuleNotFoundError: No module
+   named 'task'`. `--import-mode=importlib` sidesteps this entirely.
+
+```python
+# task.test.py
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["pytest", "httpx>=0.27"]
+# ///
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+from sdk_test import (
+    _dicode_harness_reset,  # noqa: F401 — registers the autouse per-test reset fixture
+    http,
+    params,
+    run_pytest_main,
+    run_task,
+    setup_harness,
+)
+
+setup_harness(__file__)
+
+
+def test_greets_by_name():
+    params.set("name", "Ada")
+    http.mock("GET", "https://httpbin.org/get", {"status": 200, "body": {"origin": "127.0.0.1"}})
+
+    result = run_task()
+
+    assert result["greeting"] == "Hello, Ada! (run #1)"
+
+
+if __name__ == "__main__":
+    run_pytest_main(__file__)
+```
+
+See [tasks/examples/hello-python/task.test.py](../../tasks/examples/hello-python/task.test.py)
+for a complete, working example (params, kv persistence, httpx mocking, and
+an explicit "unmocked call fails loudly" test), and
+[tasks/sdk_test.py](../../tasks/sdk_test.py)'s module docstring for the full
+design rationale.
+
+### Mock API
+
+**`http.mock(method, urlPattern, response)`** / **`http.mock_once(...)`** — intercept `httpx` calls (`httpx.Client`/`httpx.AsyncClient`, both sync and async — the client every Python example task in this repo uses today). `response` is `{"status": ..., "headers": {...}, "body": ...}`; dict/list bodies are returned as a JSON response. Tasks using `urllib`/`requests` directly instead of `httpx` are **not** intercepted by this harness — plain stdlib HTTP mocking is out of scope for this pass.
+
+**`http.last_request_body(method, urlPattern)`** — the body of the most recent matching call
+
+**`env.set(key, value)`** / **`env.get(key, default=None)`** — env values for this test (independent of real `os.environ` — a task that reads `os.environ` directly, like `hello-python`'s `HTTPBIN_URL` lookup, bypasses this mock; set real env vars via `monkeypatch.setenv` in that case)
+
+**`params.set(name, value)`** / **`params.get(name, default=None)`** / **`params.get_async(...)`** — parameter values for this test
+
+**`kv.set(key, value)` / `kv.get(key)` / `kv.delete(key)` / `kv.list(prefix="")`** (plus `_async` variants) — pre-populate or inspect the in-memory KV store
+
+**`run_task()`** — exec the sibling `task.py`'s body (PEP 723 header stripped) against the mocked globals and call its `main()` (sync or async, auto-detected), returning its result. Falls back to the module-level `result` variable for a no-`main` task.
+
+**`dicode`** — a `MockDicode` shaped like the real `dicode` module (`run_task`, `list_tasks`, `get_runs`, `set_group` + `.group_calls`, `.runs`/`.tasks`/`.sources`/`.git`/`.secrets`/`.audit`). `suspend()`/resume simulation is out of scope for this harness.
+
+### Assert API
+
+Python's `assert` statement is a keyword, so unlike the TS harness there is no `assert.equal`/`assert.ok` namespace — use plain `assert` statements (pytest rewrites them with full introspection on failure). HTTP-specific assertions are free functions:
+
+**`assert_http_called(method, urlPattern)`** / **`assert_http_not_called(method, urlPattern)`** / **`assert_http_called_with(method, urlPattern, body=...)`**
+
+### Test isolation
+
+Unlike the Deno harness (which imports `task.ts` once and reuses the loaded module across every `test()` case), `run_task()` re-reads and re-`exec()`s `task.py`'s body fresh on every call — there is no task-module-level state to leak between test cases in the first place. The autouse `_dicode_harness_reset` pytest fixture (import it by name into your test file to register it — pytest discovers fixtures via a test's enclosing module namespace) clears params/env/kv/http mocks/call log before every test function.
 
 ### Output
 
@@ -290,6 +398,6 @@ Rule of thumb: if the AI can't generate passing tests for a task it just wrote, 
 | Command | What it checks | Needs secrets? | Needs network? | Status |
 |---|---|---|---|---|
 | `dicode task validate` | Schema, syntax, cycles | ⚠️ warns if missing | No | Planned |
-| `dicode task test <id>` | Unit tests, mocks via `tasks/sdk-test.ts` | No | No | Implemented (Deno) |
+| `dicode task test <id>` | Unit tests, mocks via `tasks/sdk-test.ts` / `tasks/sdk_test.py` | No | No | Implemented (Deno, Python); Docker/Podman tracked as #159 Phase 3 |
 | `dicode run <id> --dry-run` | End-to-end with intercepted HTTP | Yes | No | Planned |
 | `dicode run <id>` | Live execution | Yes | Yes | Implemented |

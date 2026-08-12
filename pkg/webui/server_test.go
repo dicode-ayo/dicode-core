@@ -1170,15 +1170,16 @@ func TestLoginContext_ShowsTaskNameForWebhookNext(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
-	var resp map[string]string
+	var resp map[string]any
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if !contains(resp["title"], "AI Assistant") {
-		t.Errorf("expected task name in title, got %q", resp["title"])
+	title, _ := resp["title"].(string)
+	if !contains(title, "AI Assistant") {
+		t.Errorf("expected task name in title, got %q", title)
 	}
-	if !contains(resp["title"], "Chat with your tasks") {
-		t.Errorf("expected task description in title, got %q", resp["title"])
+	if !contains(title, "Chat with your tasks") {
+		t.Errorf("expected task description in title, got %q", title)
 	}
 }
 
@@ -1192,10 +1193,57 @@ func TestLoginContext_GenericTitleForUnknownNext(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
-	var resp map[string]string
+	var resp map[string]any
 	_ = json.NewDecoder(w.Body).Decode(&resp)
-	if !contains(resp["title"], "Sign in to dicode") {
-		t.Errorf("expected generic fallback title, got %q", resp["title"])
+	title, _ := resp["title"].(string)
+	if !contains(title, "Sign in to dicode") {
+		t.Errorf("expected generic fallback title, got %q", title)
+	}
+}
+
+// TestLoginContext_PassphraseRequiredTrue verifies /api/login/context reports
+// passphrase_required: true when a real passphrase (YAML secret here) gates
+// login — apiSecretsUnlock will reject a wrong or empty password in this state,
+// so the login page must keep its "required" password field.
+func TestLoginContext_PassphraseRequiredTrue(t *testing.T) {
+	srv := newAuthServer(t, "hunter2")
+	h := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/login/context", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if required, _ := resp["passphrase_required"].(bool); !required {
+		t.Errorf("passphrase_required = %v, want true", resp["passphrase_required"])
+	}
+}
+
+// TestLoginContext_PassphraseRequiredFalse locks in #639: when no passphrase
+// is configured (passphraseSourceNone — in practice server.auth: false, since
+// ensurePassphrase always generates one before the listener accepts a
+// connection whenever auth is enabled), apiSecretsUnlock accepts any
+// password, so /api/login/context must say passphrase_required: false rather
+// than let the static login page keep demanding one it doesn't actually check.
+func TestLoginContext_PassphraseRequiredFalse(t *testing.T) {
+	srv := newAuthServerNoDB(t, "")
+	h := srv.Handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/login/context", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if required, ok := resp["passphrase_required"].(bool); ok && required {
+		t.Errorf("passphrase_required = %v, want false", resp["passphrase_required"])
+	} else if !ok {
+		t.Fatalf("passphrase_required missing or wrong type: %#v", resp["passphrase_required"])
 	}
 }
 
@@ -1550,13 +1598,14 @@ func TestLoginContext_UnsafeNextDropped(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
-	var resp map[string]string
+	var resp map[string]any
 	_ = json.NewDecoder(w.Body).Decode(&resp)
-	if contains(resp["title"], "evil.com") {
-		t.Errorf("unsafe next must not leak into login context title, got %q", resp["title"])
+	title, _ := resp["title"].(string)
+	if contains(title, "evil.com") {
+		t.Errorf("unsafe next must not leak into login context title, got %q", title)
 	}
-	if !contains(resp["title"], "Sign in to dicode") {
-		t.Errorf("expected generic title when next is unsafe, got %q", resp["title"])
+	if !contains(title, "Sign in to dicode") {
+		t.Errorf("expected generic title when next is unsafe, got %q", title)
 	}
 }
 
