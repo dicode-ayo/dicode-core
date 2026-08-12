@@ -468,9 +468,13 @@ func (g *Gate) approve(id, wantHash, by string) error {
 	// same guard gates promoting the pending snapshot -> approvedFiles: if a
 	// newer pend raced in, cur.hash no longer equals ent.hash, so cur.files
 	// (that newer, unapproved content) must not become the new baseline.
-	// cur is read fresh here, so cur.files is guaranteed to be the exact
-	// snapshot pendingEntry paired with cur.hash — see pendingEntry's doc
-	// comment on why hash and files can never disagree on generation.
+	//
+	// A same-hash re-pend can still have replaced the entry between the record
+	// above and here. Promoting cur is right regardless: an equal hash means
+	// equal content, so cur.files and cur.resolved describe what was approved.
+	// The commit recorded above is then the earlier of two commits carrying
+	// that content — one reconcile generation stale in a decorative field, not
+	// a commit that disagrees with the approved hash.
 	g.mu.Lock()
 	if cur, ok := g.pending[id]; ok && cur.hash == ent.hash {
 		delete(g.pending, id)
