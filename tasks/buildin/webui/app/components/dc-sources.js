@@ -81,6 +81,36 @@ class DcSources extends LitElement {
     this._devInputs = { ...this._devInputs, [name]: value };
   }
 
+  // _healthDot renders a small colored status dot for a source card (#649).
+  //   red   = one or more entries failed to load, OR the last pull failed
+  //   green = last pull OK and nothing failed to load
+  //   grey  = no pull attempted yet / not applicable (e.g. clean local source)
+  // A source must never show green while it has load failures — a task.yaml
+  // typo is exactly the kind of break a clean git pull won't catch.
+  _healthDot(src) {
+    const failed = src.failed_count || 0;
+    if (!failed && src.type === 'local') return '';
+
+    let color = '#8c96a3';
+    let tip = 'no pull data yet';
+    if (src.last_pull_at) {
+      const when = new Date(src.last_pull_at).toLocaleString();
+      if (src.last_pull_ok) {
+        color = '#3fb950';
+        tip = `last pull: ${when} · OK`;
+      } else {
+        color = '#f85149';
+        tip = `last pull: ${when} · ${src.last_pull_error || 'error'}`;
+      }
+    }
+    if (failed) {
+      color = '#f85149';
+      tip += ` · ${failed} task${failed === 1 ? '' : 's'} failed to load`;
+    }
+    return html`<span title=${tip}
+      style="display:inline-block;width:0.55rem;height:0.55rem;border-radius:50%;background:${color};cursor:help"></span>`;
+  }
+
   render() {
     if (this._error) return html`<p style="color:red">Error: ${this._error}</p>`;
 
@@ -111,9 +141,13 @@ class DcSources extends LitElement {
           <!-- Left: source info -->
           <div style="flex:1;min-width:0">
             <div style="display:flex;align-items:center;gap:var(--space-sm);margin-bottom:0.3rem">
+              ${this._healthDot(src)}
               <strong>${src.name}</strong>
               <span class="badge badge-manual">${src.type}</span>
               ${src.dev_mode ? html`<span class="badge" style="background:rgba(249, 226, 175, .15);color:var(--yellow)">DEV MODE</span>` : ''}
+              ${src.failed_count ? html`<span class="badge badge-failure"
+                  title=${(src.failures || []).map(f => `${f.id}: ${f.error}`).join('\n')}>
+                  ${src.failed_count} failed to load</span>` : ''}
               ${status ? html`<span class="meta" style="${status.startsWith('Error') ? 'color:var(--red)' : ''}">${status}</span>` : ''}
             </div>
             ${src.url ? html`<div class="meta" style="word-break:break-all">${src.url}${src.branch ? html` &nbsp;<span style="color:var(--lavender)">${src.branch}</span>` : ''}</div>` : ''}

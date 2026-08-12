@@ -1557,6 +1557,11 @@ type TaskListItem struct {
 	// PendingApproval flags a task held by the trust-on-change approval gate:
 	// its triggers are not armed until an operator approves it.
 	PendingApproval bool `json:"pending_approval,omitempty"`
+	// LoadError is set when this task's most recent reload attempt failed to
+	// parse/validate (#649): the row shown is the last successfully
+	// registered version, but a newer edit is currently broken and its
+	// triggers were never updated to match it.
+	LoadError string `json:"load_error,omitempty"`
 }
 
 // PipelineListItem is the shape returned by GET /api/tasks for a kind:
@@ -1572,11 +1577,39 @@ type PipelineListItem struct {
 	LastRunID       string `json:"last_run_id,omitempty"`
 	LastRunStatus   string `json:"last_run_status,omitempty"`
 	PendingApproval bool   `json:"pending_approval,omitempty"`
+	LoadError       string `json:"load_error,omitempty"`
+}
+
+// FailedTaskListItem is a synthetic GET /api/tasks row for an entry that has
+// never registered a good version — a task.yaml that failed to parse on its
+// very first load — so there is no *task.Spec/*task.PipelineTask to embed
+// (#649). Kept minimal: this is a status row, not a stand-in for the real
+// task shape, so most list columns render as their zero value / "—".
+type FailedTaskListItem struct {
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Kind         string `json:"kind"`
+	Enabled      bool   `json:"enabled"`
+	TriggerLabel string `json:"trigger_label"`
+	LoadError    string `json:"load_error"`
 }
 
 func (s *Server) apiListTasks(w http.ResponseWriter, r *http.Request) {
 	kinded := s.registry.AllKinded()
-	items := make([]any, 0, len(kinded))
+	// failures merges the reconciler's own direct-load failures (plain
+	// git/local sources) with every taskset source's resolve failures — both
+	// feed the same task.LoadFailure sink type (#649). Consumed twice below:
+	// first to flag rows for IDs that ARE registered (an older good version
+	// stays visible, now with an error badge), then to synthesize rows for
+	// IDs that have never registered at all.
+	failures := s.registry.LoadFailures()
+	if s.sourceMgr != nil {
+		for id, f := range s.sourceMgr.LoadFailures() {
+			failures[id] = f
+		}
+	}
+	items := make([]any, 0, len(kinded)+len(failures))
+	seen := make(map[string]bool, len(kinded))
 	for _, k := range kinded {
 		// Last-run lookup is identical across kinds.
 		var lastRunID, lastRunStatus string
@@ -1592,6 +1625,8 @@ func (s *Server) apiListTasks(w http.ResponseWriter, r *http.Request) {
 			lastRunStatus = string(trigger.DaemonCrashLooping)
 		}
 		pendingApproval := s.taskPendingApproval(k.TaskID())
+		seen[k.TaskID()] = true
+		loadErr := failures[k.TaskID()].Error
 		switch v := k.(type) {
 		case *task.Spec:
 			items = append(items, TaskListItem{
@@ -1601,6 +1636,7 @@ func (s *Server) apiListTasks(w http.ResponseWriter, r *http.Request) {
 				LastRunID:       lastRunID,
 				LastRunStatus:   lastRunStatus,
 				PendingApproval: pendingApproval,
+				LoadError:       loadErr,
 			})
 		case *task.PipelineTask:
 			items = append(items, PipelineListItem{
@@ -1612,6 +1648,7 @@ func (s *Server) apiListTasks(w http.ResponseWriter, r *http.Request) {
 				LastRunID:       lastRunID,
 				LastRunStatus:   lastRunStatus,
 				PendingApproval: pendingApproval,
+				LoadError:       loadErr,
 			})
 		default:
 			// Forward-compat safety net: the registry only ever holds
@@ -1631,8 +1668,31 @@ func (s *Server) apiListTasks(w http.ResponseWriter, r *http.Request) {
 				LastRunID:       lastRunID,
 				LastRunStatus:   lastRunStatus,
 				PendingApproval: pendingApproval,
+				LoadError:       loadErr,
 			})
 		}
+	}
+	// Entries that have never registered a good version (a task.yaml that
+	// failed to parse on its very first load) have no *task.Spec/*Kinded to
+	// merge onto — synthesize a minimal row instead of leaving them absent
+	// from the list (#649). Sorted so the list order is deterministic.
+	var failedIDs []string
+	for id := range failures {
+		if !seen[id] {
+			failedIDs = append(failedIDs, id)
+		}
+	}
+	sort.Strings(failedIDs)
+	for _, id := range failedIDs {
+		f := failures[id]
+		items = append(items, FailedTaskListItem{
+			ID:           id,
+			Name:         id,
+			Kind:         "LoadError",
+			Enabled:      false,
+			TriggerLabel: "—",
+			LoadError:    f.Error,
+		})
 	}
 	jsonOK(w, items)
 }

@@ -218,6 +218,79 @@ func TestAPI_ListTasks_UnknownKind(t *testing.T) {
 	}
 }
 
+// TestAPI_ListTasks_LoadFailure_MergedOntoExistingRow is the #649 regression
+// lock for the "an older good version is still registered" case: the
+// registry's own load-failure record (the reconciler's direct-load path) must
+// be merged onto the still-registered task's row as load_error, not replace
+// it or spawn a duplicate synthetic row.
+func TestAPI_ListTasks_LoadFailure_MergedOntoExistingRow(t *testing.T) {
+	srv, reg := newTestServer(t)
+	registerTask(t, reg, "flaky-task", `return 1`)
+	reg.SetLoadFailure("flaky-task", "test-source", "cannot unmarshal !!bool true into []string")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body)
+	}
+
+	var items []map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&items); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var matches []map[string]any
+	for _, it := range items {
+		if it["id"] == "flaky-task" {
+			matches = append(matches, it)
+		}
+	}
+	if len(matches) != 1 {
+		t.Fatalf("want exactly 1 row for flaky-task (no duplicate synthetic row), got %d: %v", len(matches), matches)
+	}
+	if matches[0]["load_error"] != "cannot unmarshal !!bool true into []string" {
+		t.Errorf("load_error = %v, want the recorded failure message", matches[0]["load_error"])
+	}
+	// The still-registered fields must remain intact — this is a merge, not a
+	// replacement.
+	if matches[0]["name"] != "flaky-task" {
+		t.Errorf("name = %v, want flaky-task (existing row fields must survive the merge)", matches[0]["name"])
+	}
+}
+
+// TestAPI_ListTasks_LoadFailure_NeverRegistered_SyntheticRow covers the other
+// half of #649: a task ID that has NEVER registered a good version (first
+// load failed) must still appear in the list — as a synthetic row carrying
+// load_error — instead of being entirely absent.
+func TestAPI_ListTasks_LoadFailure_NeverRegistered_SyntheticRow(t *testing.T) {
+	srv, reg := newTestServer(t)
+	reg.SetLoadFailure("never-registered", "test-source", "boom: invalid yaml")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body)
+	}
+
+	var items []map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&items); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var found map[string]any
+	for _, it := range items {
+		if it["id"] == "never-registered" {
+			found = it
+		}
+	}
+	if found == nil {
+		t.Fatalf("a task that never registered but has a load failure must still be listed, got: %v", items)
+	}
+	if found["load_error"] != "boom: invalid yaml" {
+		t.Errorf("load_error = %v, want %q", found["load_error"], "boom: invalid yaml")
+	}
+}
+
 func TestAPI_GetTask(t *testing.T) {
 	srv, reg := newTestServer(t)
 	registerTask(t, reg, "my-task", `return 1`)

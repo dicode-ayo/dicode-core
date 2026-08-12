@@ -66,6 +66,14 @@ type Source struct {
 	// "never attempted" (local sources, or before Start).
 	pullStatus pullStatusState
 
+	// loadFailures tracks entries that failed to resolve/load/validate on the
+	// most recent sync — exposed via LoadFailures() so the webui can keep
+	// them visible instead of vanishing (#649). Replaced wholesale on every
+	// syncAndEmit so an entry that starts resolving cleanly again (or is
+	// genuinely removed from the taskset spec) drops out automatically.
+	failuresMu sync.RWMutex
+	failures   map[string]task.LoadFailure
+
 	parentOverrides *Overrides // overrides applied at the dicode.yaml entry level
 }
 
@@ -125,6 +133,7 @@ func NewSource(
 		pollInterval: pollInterval,
 		log:          log,
 		snapshot:     make(map[string]taskSnap),
+		failures:     make(map[string]task.LoadFailure),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -496,12 +505,40 @@ func (s *Source) DevRootPath() string {
 // DataDir returns the daemon data directory used for source clones.
 func (s *Source) DataDir() string { return s.dataDir }
 
+// LoadFailures returns a snapshot of every entry that failed to resolve,
+// load, or validate on this source's most recent sync, keyed by entry ID
+// (#649). Empty (never nil) once at least one sync has completed cleanly.
+func (s *Source) LoadFailures() map[string]task.LoadFailure {
+	s.failuresMu.RLock()
+	defer s.failuresMu.RUnlock()
+	out := make(map[string]task.LoadFailure, len(s.failures))
+	for k, v := range s.failures {
+		out[k] = v
+	}
+	return out
+}
+
+// setLoadFailures replaces the recorded failure set wholesale with the
+// outcome of the sync that just ran. Replacing rather than merging means an
+// entry that now resolves cleanly, or was removed from the taskset spec
+// entirely, drops out on its own — no separate "clear" call needed.
+func (s *Source) setLoadFailures(fails []ResolveFailure) {
+	m := make(map[string]task.LoadFailure, len(fails))
+	now := time.Now()
+	for _, f := range fails {
+		m[f.ID] = task.LoadFailure{ID: f.ID, Source: s.id, Error: f.Error.Error(), At: now}
+	}
+	s.failuresMu.Lock()
+	s.failures = m
+	s.failuresMu.Unlock()
+}
+
 // Namespace returns this source's root namespace segment.
 func (s *Source) Namespace() string { return s.namespace }
 
 // Sync triggers an immediate re-resolution without emitting events.
 func (s *Source) Sync(ctx context.Context) error {
-	_, err := s.resolve(ctx)
+	_, _, err := s.resolve(ctx)
 	return err
 }
 
@@ -667,7 +704,7 @@ func (s *Source) pollFallback(ctx context.Context, ch chan<- source.Event) {
 }
 
 func (s *Source) syncAndEmit(ctx context.Context, ch chan<- source.Event) error {
-	tasks, err := s.resolve(ctx)
+	tasks, failures, err := s.resolve(ctx)
 	if err != nil {
 		return err
 	}
@@ -683,8 +720,46 @@ func (s *Source) syncAndEmit(ctx context.Context, ch chan<- source.Event) error 
 
 	s.mu.Lock()
 	prev := s.snapshot
+	// An entry that failed to resolve this pass must not look "removed" to
+	// DiffSnapshots below (#649) — that's the exact mechanism that made a
+	// broken task.yaml vanish instead of surfacing an error: the resolver
+	// already omits failed entries from `tasks`/`current`, so without this,
+	// any entry with a prior snapshot would emit EventRemoved and the
+	// reconciler would unregister a previously-good task. Carrying the prior
+	// snapshot entry forward unchanged keeps its hash stable — no event
+	// fires for it at all — while setLoadFailures below still records the
+	// failure for the webui. A brand-new entry failing for the first time has
+	// no prior snapshot to carry forward, so it simply doesn't appear in
+	// `current` (never added) until it resolves cleanly; it's still visible
+	// via the load-failure side channel even though it never registers.
+	//
+	// A failure's ID is not always a leaf task's own ID: when a nested
+	// `kind: TaskSet` entry itself fails to resolve (e.g. its taskset.yaml is
+	// unparseable), resolveNestedRef reports exactly one ResolveFailure keyed
+	// on the nested group's namespace (e.g. "infra/subgroup"), even though
+	// every previously-resolved leaf task under that namespace (e.g.
+	// "infra/subgroup/deploy") also vanished from `current` this pass. Those
+	// leaf IDs were never registered under "infra/subgroup" itself — only
+	// their own namespaced IDs exist in `prev` — so an exact-key lookup alone
+	// misses them and DiffSnapshots would see them as removed. Carry forward
+	// every prev entry whose ID is f.ID itself OR a namespace-descendant of it
+	// (ID == f.ID, or ID has prefix f.ID+"/") to cover both the leaf-failure
+	// case (ID == f.ID, no descendants) and the nested-group-failure case
+	// (f.ID's descendants) uniformly.
+	for _, f := range failures {
+		for id, snap := range prev {
+			if id != f.ID && !strings.HasPrefix(id, f.ID+"/") {
+				continue
+			}
+			if _, already := current[id]; !already {
+				current[id] = snap
+			}
+		}
+	}
 	s.snapshot = current
 	s.mu.Unlock()
+
+	s.setLoadFailures(failures)
 
 	added, updated, removed := source.DiffSnapshots(prev, current, func(t taskSnap) string { return t.specHash })
 
@@ -717,7 +792,7 @@ func (s *Source) send(ch chan<- source.Event, ev source.Event) {
 	}
 }
 
-func (s *Source) resolve(ctx context.Context) ([]*ResolvedTask, error) {
+func (s *Source) resolve(ctx context.Context) ([]*ResolvedTask, []ResolveFailure, error) {
 	configDefaults, err := s.loadConfigDefaults()
 	if err != nil {
 		s.log.Warn("taskset source: config load failed",

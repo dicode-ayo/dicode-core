@@ -243,6 +243,203 @@ spec:
 	}
 }
 
+// TestSource_FailedEditDoesNotEmitRemoved is the pkg/taskset-level regression
+// lock for #649: editing a previously-good task.yaml into one that fails to
+// parse must NOT emit EventRemoved for it — that's the exact mechanism that
+// made a task vanish from the registry (DiffSnapshots sees a resolve failure
+// as "absent from cur", i.e. removed). No event at all should fire (the prior
+// snapshot entry is carried forward unchanged), and the failure must show up
+// via LoadFailures() instead.
+func TestSource_FailedEditDoesNotEmitRemoved(t *testing.T) {
+	dir := t.TempDir()
+	taskDir := writeTaskDir(t, dir, "deploy")
+
+	tsContent := `
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: infra
+spec:
+  entries:
+    deploy:
+      ref:
+        path: ` + filepath.Join(taskDir, "task.yaml") + `
+`
+	tsPath := writeTaskSetFile(t, dir, "taskset.yaml", tsContent)
+
+	src := newTestSource(t, "infra", tsPath)
+	ctx := context.Background()
+
+	// Prime the snapshot with one good task.
+	ch1 := make(chan source.Event, 8)
+	if err := src.syncAndEmit(ctx, ch1); err != nil {
+		t.Fatal(err)
+	}
+	close(ch1)
+	added := collectEvents(t, ch1, time.Second)
+	if len(added) != 1 || added[0].Kind != source.EventAdded {
+		t.Fatalf("setup: want 1 Added event, got %v", added)
+	}
+	if len(src.LoadFailures()) != 0 {
+		t.Fatalf("LoadFailures should be empty before any bad edit, got %v", src.LoadFailures())
+	}
+
+	// Break the task.yaml the same way #649 reproduced it: a field that
+	// expects a string/array gets a bool ("cannot unmarshal !!bool true
+	// into []string" per the issue's quoted daemon.log line).
+	broken := "kind: Task\napiVersion: dicode/v1\nname: deploy\nruntime: deno\ntrigger:\n  manual: true\nhash_include: true\n"
+	if err := os.WriteFile(filepath.Join(taskDir, "task.yaml"), []byte(broken), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	ch2 := make(chan source.Event, 8)
+	if err := src.syncAndEmit(ctx, ch2); err != nil {
+		t.Fatal(err)
+	}
+	close(ch2)
+
+	events := collectEvents(t, ch2, time.Second)
+	if len(events) != 0 {
+		t.Fatalf("a resolve failure on a previously-good task must not emit ANY event (especially not Removed), got %v", events)
+	}
+
+	fails := src.LoadFailures()
+	f, ok := fails["infra/deploy"]
+	if !ok {
+		t.Fatalf("expected a recorded load failure for infra/deploy, got %v", fails)
+	}
+	if f.Error == "" {
+		t.Error("failure Error should be non-empty")
+	}
+
+	// Fix it again — the task must resolve cleanly and the failure record
+	// must clear (#649's "don't leave stale failure state behind").
+	if err := os.WriteFile(filepath.Join(taskDir, "task.yaml"), []byte(
+		"kind: Task\napiVersion: dicode/v1\nname: deploy\nruntime: deno\ntrigger:\n  cron: \"0 9 * * *\"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	ch3 := make(chan source.Event, 8)
+	if err := src.syncAndEmit(ctx, ch3); err != nil {
+		t.Fatal(err)
+	}
+	close(ch3)
+	recovered := collectEvents(t, ch3, time.Second)
+	if len(recovered) != 1 || recovered[0].Kind != source.EventUpdated {
+		t.Fatalf("want 1 Updated event on recovery, got %v", recovered)
+	}
+	if len(src.LoadFailures()) != 0 {
+		t.Errorf("LoadFailures should clear once the entry resolves again, got %v", src.LoadFailures())
+	}
+}
+
+// TestSource_NestedTaskSetFailureDoesNotEmitRemoved is the pkg/taskset-level
+// regression lock for the "one level deeper" variant of #649: a nested
+// `kind: TaskSet` entry whose taskset.yaml itself starts failing to parse
+// (not an individual leaf task.yaml inside it) must not cause
+// DiffSnapshots to see the group's previously-resolved children as removed.
+//
+// resolveNestedRef reports exactly one ResolveFailure keyed on the nested
+// group's own namespace ID (e.g. "infra/backend"), which is never itself a
+// registered task ID — only its children ("infra/backend/api-deploy",
+// "infra/backend/worker") are. Without carrying forward every prev entry
+// that is a namespace-descendant of the failing ID (not just an exact-key
+// match), those children would vanish from `current` this pass and
+// DiffSnapshots would emit EventRemoved for each, causing the reconciler to
+// unregister live, previously-good tasks.
+func TestSource_NestedTaskSetFailureDoesNotEmitRemoved(t *testing.T) {
+	dir := t.TempDir()
+	nestedDir := t.TempDir()
+	apiDeployDir := writeTaskDir(t, nestedDir, "api-deploy")
+	workerDir := writeTaskDir(t, nestedDir, "worker")
+
+	nestedTS := `
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: backend
+spec:
+  entries:
+    api-deploy:
+      ref:
+        path: ` + filepath.Join(apiDeployDir, "task.yaml") + `
+    worker:
+      ref:
+        path: ` + filepath.Join(workerDir, "task.yaml") + `
+`
+	nestedPath := writeTaskSetFile(t, nestedDir, "taskset.yaml", nestedTS)
+
+	rootTS := `
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: infra
+spec:
+  entries:
+    backend:
+      ref:
+        path: ` + nestedPath + `
+`
+	rootPath := writeTaskSetFile(t, dir, "taskset.yaml", rootTS)
+
+	src := newTestSource(t, "infra", rootPath)
+	ctx := context.Background()
+
+	// Prime the snapshot: both nested leaf tasks resolve cleanly.
+	ch1 := make(chan source.Event, 8)
+	if err := src.syncAndEmit(ctx, ch1); err != nil {
+		t.Fatal(err)
+	}
+	close(ch1)
+	added := collectEvents(t, ch1, time.Second)
+	if len(added) != 2 {
+		t.Fatalf("setup: want 2 Added events, got %v", added)
+	}
+	if len(src.LoadFailures()) != 0 {
+		t.Fatalf("LoadFailures should be empty before any bad edit, got %v", src.LoadFailures())
+	}
+
+	// Break the NESTED taskset.yaml itself (not a leaf task.yaml) so the
+	// whole subtree fails to resolve as a group.
+	if err := os.WriteFile(nestedPath, []byte("not: [valid, taskset"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	ch2 := make(chan source.Event, 8)
+	if err := src.syncAndEmit(ctx, ch2); err != nil {
+		t.Fatal(err)
+	}
+	close(ch2)
+
+	events := collectEvents(t, ch2, time.Second)
+	if len(events) != 0 {
+		t.Fatalf("a nested-taskset resolve failure must not emit ANY event for its previously-good children (especially not Removed), got %v", events)
+	}
+
+	fails := src.LoadFailures()
+	if _, ok := fails["infra/backend"]; !ok {
+		t.Fatalf("expected a recorded load failure for the nested group infra/backend, got %v", fails)
+	}
+
+	// Fix the nested taskset.yaml again — both leaves must still be present
+	// (carried forward with their original hash, so no Updated fires either)
+	// and the group failure must clear.
+	if err := os.WriteFile(nestedPath, []byte(nestedTS), 0644); err != nil {
+		t.Fatal(err)
+	}
+	ch3 := make(chan source.Event, 8)
+	if err := src.syncAndEmit(ctx, ch3); err != nil {
+		t.Fatal(err)
+	}
+	close(ch3)
+	recovered := collectEvents(t, ch3, time.Second)
+	if len(recovered) != 0 {
+		t.Fatalf("re-resolving to the same content should not re-emit events for unchanged children, got %v", recovered)
+	}
+	if len(src.LoadFailures()) != 0 {
+		t.Errorf("LoadFailures should clear once the nested group resolves again, got %v", src.LoadFailures())
+	}
+}
+
 func TestSource_SpecCarriedInEvent(t *testing.T) {
 	// Verify overrides are applied and the resolved spec is in the event.
 	dir := t.TempDir()
@@ -372,7 +569,7 @@ spec:
 		WithParentOverrides(parent),
 	)
 
-	tasks, err := src.resolve(context.Background())
+	tasks, _, err := src.resolve(context.Background())
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}

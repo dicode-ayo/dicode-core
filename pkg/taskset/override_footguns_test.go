@@ -49,7 +49,7 @@ spec:
 	r := newResolver(t)
 	r.log = log
 
-	results, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil, nil)
+	results, _, err := r.Resolve(context.Background(), "infra", &Ref{Path: tsPath}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Resolve top-level error: %v", err)
 	}

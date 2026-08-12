@@ -33,6 +33,20 @@ type repoKey struct {
 	Branch string
 }
 
+// ResolveFailure describes one taskset entry that failed to resolve, load, or
+// validate during a Resolve call. Unlike a whole-Resolve error (a malformed
+// taskset.yaml itself), a ResolveFailure is scoped to a single entry — the
+// rest of the tree still resolves normally. Callers use the ID to keep the
+// entry discoverable elsewhere (e.g. the webui task list) instead of it
+// silently vanishing when its task.yaml fails to parse (#649).
+type ResolveFailure struct {
+	// ID is the namespaced entry ID (matches ResolvedTask.ID for a
+	// successfully resolved sibling), e.g. "infra/backend/deploy".
+	ID string
+	// Error is the underlying resolution/load/validate failure.
+	Error error
+}
+
 // Resolver resolves a TaskSet tree into a flat list of ResolvedTasks.
 // It deduplicates git clones so that N entries referencing the same (url, branch)
 // pair share a single local clone directory.
@@ -90,15 +104,23 @@ func (r *Resolver) DevMode() bool {
 // context — the resolver itself always sets TASK_SET_DIR from the resolved
 // root taskset.yaml path, so source loaders don't need to. The map is
 // treated as read-only; the resolver never mutates or retains it.
-func (r *Resolver) Resolve(ctx context.Context, namespace string, tsRef *Ref, configDefaults *Defaults, parentOverrides *Overrides, extraVars map[string]string) ([]*ResolvedTask, error) {
+//
+// The returned []ResolveFailure lists entries that failed to resolve/load/
+// validate — these are omitted from the []*ResolvedTask result (as before)
+// but are not silently dropped: callers can surface them so a task with a
+// parse error stays discoverable instead of vanishing (#649). A non-nil
+// error return is reserved for failures of the ROOT taskset.yaml itself
+// (can't even start resolving); per-entry failures always come back via the
+// []ResolveFailure slice with a nil error.
+func (r *Resolver) Resolve(ctx context.Context, namespace string, tsRef *Ref, configDefaults *Defaults, parentOverrides *Overrides, extraVars map[string]string) ([]*ResolvedTask, []ResolveFailure, error) {
 	tsPath, err := r.resolveRef(ctx, tsRef, "", nil, "")
 	if err != nil {
-		return nil, fmt.Errorf("resolve ref for namespace %q: %w", namespace, err)
+		return nil, nil, fmt.Errorf("resolve ref for namespace %q: %w", namespace, err)
 	}
 
 	ts, err := LoadTaskSet(tsPath)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// Compute the repo-root directory for ref path template expansion.
@@ -153,7 +175,7 @@ func (r *Resolver) resolveBody(
 	extraVars map[string]string,
 	repoDir string,
 	cloneRoot string,
-) ([]*ResolvedTask, error) {
+) ([]*ResolvedTask, []ResolveFailure, error) {
 	// Deprecation warnings for removed precedence levels.
 	if defaultsNonEmpty(configDefaults) {
 		r.log.Warn("taskset: kind:Config spec.defaults is deprecated and no longer applied to the override stack; migrate settings to dicode.yaml defaults:",
@@ -167,6 +189,7 @@ func (r *Resolver) resolveBody(
 	}
 
 	var results []*ResolvedTask
+	var failures []ResolveFailure
 
 	for key, entry := range ts.Spec.Entries {
 		fullID := joinNamespace(namespace, key)
@@ -203,6 +226,7 @@ func (r *Resolver) resolveBody(
 			if err := resolved.Validate(); err != nil {
 				r.log.Warn("taskset: merged spec failed validate after override apply; skipping",
 					zap.String("entry", fullID), zap.Error(err))
+				failures = append(failures, ResolveFailure{ID: fullID, Error: err})
 				continue
 			}
 			results = append(results, &ResolvedTask{
@@ -229,6 +253,7 @@ func (r *Resolver) resolveBody(
 		if err != nil {
 			r.log.Warn("taskset: failed to resolve ref",
 				zap.String("entry", fullID), zap.Error(err))
+			failures = append(failures, ResolveFailure{ID: fullID, Error: err})
 			continue
 		}
 
@@ -236,6 +261,7 @@ func (r *Resolver) resolveBody(
 		if err != nil {
 			r.log.Warn("taskset: failed to detect kind",
 				zap.String("path", localPath), zap.Error(err))
+			failures = append(failures, ResolveFailure{ID: fullID, Error: err})
 			continue
 		}
 
@@ -260,6 +286,7 @@ func (r *Resolver) resolveBody(
 			if err != nil {
 				r.log.Warn("taskset: failed to load task",
 					zap.String("entry", fullID), zap.Error(err))
+				failures = append(failures, ResolveFailure{ID: fullID, Error: err})
 				continue
 			}
 			for _, w := range spec.Warnings {
@@ -278,6 +305,7 @@ func (r *Resolver) resolveBody(
 			if err := resolved.Validate(); err != nil {
 				r.log.Warn("taskset: merged spec failed validate after override apply; skipping",
 					zap.String("entry", fullID), zap.Error(err))
+				failures = append(failures, ResolveFailure{ID: fullID, Error: err})
 				continue
 			}
 			results = append(results, &ResolvedTask{
@@ -306,6 +334,7 @@ func (r *Resolver) resolveBody(
 			if err != nil {
 				r.log.Warn("taskset: failed to load pipeline",
 					zap.String("entry", fullID), zap.Error(err))
+				failures = append(failures, ResolveFailure{ID: fullID, Error: err})
 				continue
 			}
 			p.ID = fullID
@@ -316,6 +345,7 @@ func (r *Resolver) resolveBody(
 			if err := p.Validate(); err != nil {
 				r.log.Warn("taskset: pipeline failed validate; skipping",
 					zap.String("entry", fullID), zap.Error(err))
+				failures = append(failures, ResolveFailure{ID: fullID, Error: err})
 				continue
 			}
 			results = append(results, &ResolvedTask{
@@ -339,10 +369,11 @@ func (r *Resolver) resolveBody(
 			if ref.IsGit() {
 				nestedCloneRoot = filepath.Dir(localPath)
 			}
-			nested, err := r.resolveNestedRef(ctx, fullID, localPath, nestedOverrides, extraVars, repoDir, nestedCloneRoot)
+			nested, nestedFailures, err := r.resolveNestedRef(ctx, fullID, localPath, nestedOverrides, extraVars, repoDir, nestedCloneRoot)
 			if err != nil {
 				r.log.Warn("taskset: failed to resolve nested taskset",
 					zap.String("entry", fullID), zap.Error(err))
+				failures = append(failures, ResolveFailure{ID: fullID, Error: err})
 				continue
 			}
 			// If this entry is disabled, propagate disabled to all its children
@@ -353,20 +384,22 @@ func (r *Resolver) resolveBody(
 				}
 			}
 			results = append(results, nested...)
+			failures = append(failures, nestedFailures...)
 
 		default:
 			r.log.Warn("taskset: unknown kind, skipping",
 				zap.String("entry", fullID), zap.String("kind", string(kind)))
+			failures = append(failures, ResolveFailure{ID: fullID, Error: fmt.Errorf("unknown kind %q", kind)})
 		}
 	}
 
-	return results, nil
+	return results, failures, nil
 }
 
-func (r *Resolver) resolveNestedRef(ctx context.Context, namespace, tsPath string, overrides *Overrides, extraVars map[string]string, repoDir string, cloneRoot string) ([]*ResolvedTask, error) {
+func (r *Resolver) resolveNestedRef(ctx context.Context, namespace, tsPath string, overrides *Overrides, extraVars map[string]string, repoDir string, cloneRoot string) ([]*ResolvedTask, []ResolveFailure, error) {
 	ts, err := LoadTaskSet(tsPath)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// Pass nil for configDefaults: deprecation warnings are emitted once at the
 	// public Resolve entry point; nested sets do not re-emit them.

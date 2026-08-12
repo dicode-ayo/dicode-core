@@ -53,6 +53,7 @@ export default defineConfig({
         '**/approval-diff.spec.ts',
         '**/approval-hash-binding.spec.ts',
         '**/pending-task-list-signals.spec.ts',
+        '**/task-load-failure.spec.ts',
         '**/webhooks.spec.ts',
         '**/webhooks-secure.spec.ts',
         '**/webhook-sign-cli.spec.ts',

@@ -27,6 +27,7 @@ server:
 - Status badges: success / failed / running / never run
 - Tasks grouped by namespace when TaskSet sources are configured (e.g. `infra/deploy-backend` → "infra" section)
 - Click a task to open its detail page
+- A task whose `task.yaml` currently fails to parse or validate stays in the list — badged **load error** (hover for the message) — instead of silently disappearing (#649); see [Sources & Reconciler — Load failures stay visible](sources.md#load-failures-stay-visible-649)
 
 ### Task detail (`/tasks/{id}`)
 
@@ -50,6 +51,7 @@ server:
 ### Sources (`/sources`)
 
 - All configured sources with type badge (local/git), path/URL, branch
+- A status dot per source — green only when the last pull succeeded (if applicable) **and** every entry currently parses; a source with one or more load failures shows red with a "N failed to load" badge instead (#649), even if its most recent git pull was clean
 - Dev mode toggle per TaskSet source — enter a local path and enable to swap the source root immediately
 - Branch picker for git sources (lazy-loaded from `/api/sources/:name/branches`)
 - Status messages auto-clear after 3s
@@ -112,6 +114,14 @@ All API responses are JSON.
 | `GET` | `/api/tasks/{id}` | Get task detail (spec + last run) |
 | `POST` | `/api/tasks/{id}/run` | Manual trigger |
 | `GET` | `/api/tasks/{id}/runs` | Run history (last 50) |
+
+**GET `/api/tasks`** response items normally embed the full task spec (flattened) plus a few list-only fields; a task currently failing to load/parse additionally carries:
+
+```json
+{ "id": "infra/deploy-backend", "...": "...", "load_error": "cannot unmarshal !!bool `true` into []string" }
+```
+
+`load_error` is omitted entirely when the task is loading cleanly. For an ID that has **never** registered a good version at all (its very first load already failed, so there's no spec to attach `load_error` to), the response instead includes a minimal synthetic entry — `{"id", "name", "kind": "LoadError", "enabled": false, "trigger_label": "—", "load_error"}` — so the ID is still discoverable rather than being absent from the list (#649).
 
 **POST `/api/tasks/{id}/run`** — trigger with optional param overrides:
 
@@ -225,6 +235,23 @@ Response:
   "dev_path": "/tmp/dev-tasks/taskset.yaml"
 }
 ```
+
+**GET `/api/sources`** items also carry pull-health and load-failure fields (#649) — `last_pull_at`/`last_pull_ok`/`last_pull_error` are omitted until a pull has actually been attempted, and `failed_count`/`failures` are omitted while everything under that source parses cleanly:
+
+```json
+{
+  "name": "infra",
+  "type": "taskset",
+  "last_pull_at": "2026-08-02T10:00:00Z",
+  "last_pull_ok": true,
+  "failed_count": 1,
+  "failures": [
+    { "id": "infra/deploy-backend", "source": "infra", "error": "cannot unmarshal !!bool `true` into []string", "at": "2026-08-02T10:00:03Z" }
+  ]
+}
+```
+
+`failed_count` is the number of entries under this source currently failing to resolve/load/validate; `failures` is the same set with per-entry detail. A source can report `failed_count > 0` with `last_pull_ok: true` at the same time — a bad task.yaml and a bad git pull are independent failure modes. This applies to every `type` — `taskset`, `git`, and `local` alike, not just `taskset` — so a plain git/local source with a broken task.yaml also reports it here rather than staying at `failed_count: 0`.
 
 ### AI authoring
 

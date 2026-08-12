@@ -252,6 +252,13 @@ func (rc *Reconciler) handle(ev source.Event) {
 					zap.String("source", ev.Source),
 					zap.Error(err),
 				)
+				// Surface the failure (#649) instead of only logging it: any
+				// earlier-good registration for this ID stays in the registry
+				// untouched (this event is simply not applied), and the webui
+				// merges this record onto that row — or, for a task that has
+				// never registered, synthesizes a row for it — so it doesn't
+				// silently vanish from the task list.
+				rc.registry.SetLoadFailure(ev.TaskID, ev.Source, err.Error())
 				return
 			}
 			k = loaded
