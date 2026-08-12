@@ -843,6 +843,23 @@ Two surfaces expose it:
   absent. Approve is only offered while the panel is open — collapsing it
   reverts the button to re-opening the diff, and the task list has no approve
   action at all, only a "Review" hand-off to this page.
+
+  `Diff.pending_hash` carries the exact content hash these `Files` describe.
+  The dashboard's Approve click sends it back in the request body
+  (`POST /api/tasks/{id}/approve {"hash": "..."}`), and the handler routes a
+  hash-carrying request through `Gate.ApproveIfHash` instead of the
+  unconditional `Approve` — the same binding the tokenized `/approve/{token}`
+  link has always used (#392), now also covering the session/API-key path
+  (#645). Between the diff loading and the click landing, a push can re-pend
+  the task at a newer hash — the panel does not poll or listen for that — so
+  without this binding the click would silently arm whatever is *currently*
+  pending, not the version the operator reviewed. A mismatch responds `409`
+  with `{"stale": true}`; the dashboard shows that as "this task changed
+  since you loaded this diff" and re-fetches the panel to the version
+  actually pending, rather than retrying the same approval. Callers with no
+  diff to bind to — `dicode task approve` goes over the control-socket IPC,
+  not this REST endpoint, so it is unaffected — may omit `hash` and keep the
+  prior unconditional-approve behavior.
 - The tokenized `/approve/{token}` link page — no session, the token itself is
   the auth boundary. It fetches the same `Diff` server-side and renders it into
   the bare HTML/CSS confirm page (no JS, per that page's existing constraint),
