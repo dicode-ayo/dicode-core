@@ -96,8 +96,24 @@ func (e *Engine) suspendRun(opts *pkgruntime.RunOptions, result *pkgruntime.RunR
 		state = nil // the real state now lives in the blob; don't also write it inline
 	}
 
-	return e.registry.SuspendRun(context.Background(), opts.RunID,
+	suspended, err := e.registry.SuspendRun(context.Background(), opts.RunID,
 		state, result.ResumeSchema, token, nowMs, deadlineMs, carryJSON, blobRef)
+	if !suspended && err == nil && blobRef != nil {
+		// SuspendRun's UPDATE is guarded on status = running, so `suspended ==
+		// false, err == nil` means a concurrent finalize (kill / shutdown
+		// drain) already moved the run out of `running` before this landed —
+		// no row was written, and the blob just persisted above is now
+		// orphaned. Nothing else can ever find it: the eager GC in ResumeRun
+		// only runs on an actual resume, and the TTL sweep
+		// (Registry.ListExpiredResumeStates) only scans rows that still have
+		// resume_state_storage_key set, which this row never got. Delete it
+		// now, best-effort, so it doesn't leak forever.
+		if derr := e.resumeStateStore.Delete(context.Background(), blobRef.StorageKey); derr != nil {
+			e.log.Warn("suspend: orphaned resume-state blob cleanup failed (run left running before suspend landed)",
+				zap.String("run", opts.RunID), zap.String("error_class", "storage_delete"))
+		}
+	}
+	return suspended, err
 }
 
 // newResumeToken returns a 32-byte crypto/rand token, hex-encoded. Long and

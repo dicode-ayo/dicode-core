@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/dicode/dicode/pkg/registry"
+	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	"github.com/dicode/dicode/pkg/task"
 )
 
@@ -294,5 +295,62 @@ func TestResumeRun_EagerlyDeletesOffloadedBlobAfterSuccessfulResume(t *testing.T
 	}
 	if runner.deletes != 1 {
 		t.Errorf("storage task delete called %d times, want 1", runner.deletes)
+	}
+}
+
+// TestSuspendRun_OrphanedBlobCleanedUpWhenRowLeftRunning locks in a leak
+// found during code review: SuspendRun's UPDATE is guarded on status =
+// running, so if a concurrent finalize (kill / shutdown drain) has already
+// moved the run out of running by the time suspendRun's registry.SuspendRun
+// call lands, the row is left untouched (suspended=false, err=nil) — but the
+// blob was already durably written to storage in the step before. Nothing
+// else can ever find that blob: the eager GC in ResumeRun only runs on an
+// actual resume of this row, and the TTL sweep only scans rows that have
+// resume_state_storage_key set, which this row never got. suspendRun must
+// notice the false/nil return and delete the now-orphaned blob itself.
+func TestSuspendRun_OrphanedBlobCleanedUpWhenRowLeftRunning(t *testing.T) {
+	eng, reg := newSuspendEnv(t, &suspendExec{})
+	runner := newMockStorageRunner()
+	eng.SetResumeStateStore(registry.NewResumeStateStore(resumeStateTestCrypto(), runner, "buildin/local-storage", "/data/resume-state"))
+	eng.SetResumeStateThresholdBytes(4) // force offload
+
+	runID, err := reg.StartRun(context.Background(), "wiz", "")
+	if err != nil {
+		t.Fatalf("StartRun: %v", err)
+	}
+	// Simulate a concurrent finalize (e.g. a kill or shutdown drain) that
+	// moved the run out of `running` before the suspend below lands.
+	if err := reg.FinishRun(context.Background(), runID, registry.StatusCancelled); err != nil {
+		t.Fatalf("FinishRun: %v", err)
+	}
+
+	opts := &pkgruntime.RunOptions{RunID: runID}
+	result := &pkgruntime.RunResult{Suspended: true, ResumeState: []byte(`{"step":"ask_name"}`)}
+	suspended, serr := eng.suspendRun(opts, result)
+	if serr != nil {
+		t.Fatalf("suspendRun: unexpected error %v", serr)
+	}
+	if suspended {
+		t.Fatal("suspendRun reported suspended=true for a run that had already left `running`")
+	}
+
+	// The blob was durably written before the (no-op) row update — it must
+	// not survive as an orphan with nothing left to reference it.
+	blobKey := "resume-state/" + runID
+	if runner.has(blobKey) {
+		t.Error("orphaned resume-state blob was not cleaned up")
+	}
+	if runner.deletes != 1 {
+		t.Errorf("storage task delete called %d times, want 1 (orphan cleanup)", runner.deletes)
+	}
+
+	// The row itself must stay exactly as the concurrent finalize left it —
+	// suspendRun's cleanup must not resurrect or otherwise touch it.
+	after, gerr := reg.GetRun(context.Background(), runID)
+	if gerr != nil {
+		t.Fatal(gerr)
+	}
+	if after.Status != registry.StatusCancelled {
+		t.Errorf("status = %q, want unchanged %q", after.Status, registry.StatusCancelled)
 	}
 }

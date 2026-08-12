@@ -478,6 +478,20 @@ func newArmDisarm(cfg *config.Config, eng *trigger.Engine, gateway *ipc.Gateway,
 				}
 			}
 		}
+		// Same override, for buildin/resume-state-cleanup's retention_seconds
+		// default — matches dicode.yaml's defaults.resume_state.retention (#570).
+		// Without this the task.yaml-baked 24h default silently ignores whatever
+		// an operator configures, exactly as run-inputs-cleanup's own override
+		// above exists to prevent.
+		if isSpec && spec.ID == "buildin/resume-state-cleanup" && cfg.Defaults.ResumeState.Retention > 0 {
+			retStr := fmt.Sprintf("%d", int64(cfg.Defaults.ResumeState.Retention.Seconds()))
+			for i := range spec.Params {
+				if spec.Params[i].Name == "retention_seconds" {
+					spec.Params[i].Default = retStr
+					break
+				}
+			}
+		}
 		if isSpec && gateRelayServerBody(spec, cfg) {
 			log.Info("relay-server-body disabled — relay not configured (set relay.enabled + relay.server_url in dicode.yaml to run it)",
 				zap.String("task", spec.ID))

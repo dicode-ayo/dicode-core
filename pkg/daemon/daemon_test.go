@@ -132,6 +132,73 @@ func TestRetentionOverrideSkippedWhenZero(t *testing.T) {
 	}
 }
 
+// TestResumeStateRetentionOverrideInArm mirrors
+// TestRetentionOverrideInOnRegister for buildin/resume-state-cleanup (#570).
+// Found during code review: the arm closure had the run-inputs-cleanup
+// override but no equivalent for resume-state-cleanup, so dicode.yaml's
+// defaults.resume_state.retention was silently ignored — the cleanup task
+// always ran with its task.yaml-baked 24h default regardless of what an
+// operator configured, despite the task's own doc comment and the design
+// doc both claiming the override existed. Exercises the same mutation logic
+// added to the arm closure in daemon.go.
+func TestResumeStateRetentionOverrideInArm(t *testing.T) {
+	retention := 6 * time.Hour // 21600s
+	cfg := &config.Config{}
+	cfg.Defaults.ResumeState.Retention = retention
+
+	spec := &task.Spec{
+		ID: "buildin/resume-state-cleanup",
+		Params: task.Params{
+			{Name: "retention_seconds", Default: "86400", Type: "number"},
+		},
+	}
+
+	if spec.ID == "buildin/resume-state-cleanup" && cfg.Defaults.ResumeState.Retention > 0 {
+		retStr := fmt.Sprintf("%d", int64(cfg.Defaults.ResumeState.Retention.Seconds()))
+		for i := range spec.Params {
+			if spec.Params[i].Name == "retention_seconds" {
+				spec.Params[i].Default = retStr
+				break
+			}
+		}
+	}
+
+	want := fmt.Sprintf("%d", int64(retention.Seconds())) // "21600"
+	got := spec.Params[0].Default
+	if got != want {
+		t.Errorf("retention_seconds default = %q, want %q", got, want)
+	}
+}
+
+// TestResumeStateRetentionOverrideSkippedWhenZero mirrors
+// TestRetentionOverrideSkippedWhenZero for resume-state-cleanup: an unset
+// (zero) defaults.resume_state.retention must leave the task's own 24h
+// default untouched.
+func TestResumeStateRetentionOverrideSkippedWhenZero(t *testing.T) {
+	cfg := &config.Config{} // Retention == 0
+
+	spec := &task.Spec{
+		ID: "buildin/resume-state-cleanup",
+		Params: task.Params{
+			{Name: "retention_seconds", Default: "86400", Type: "number"},
+		},
+	}
+
+	if spec.ID == "buildin/resume-state-cleanup" && cfg.Defaults.ResumeState.Retention > 0 {
+		retStr := fmt.Sprintf("%d", int64(cfg.Defaults.ResumeState.Retention.Seconds()))
+		for i := range spec.Params {
+			if spec.Params[i].Name == "retention_seconds" {
+				spec.Params[i].Default = retStr
+				break
+			}
+		}
+	}
+
+	if got := spec.Params[0].Default; got != "86400" {
+		t.Errorf("expected default unchanged (86400) when retention is zero, got %q", got)
+	}
+}
+
 // TestRelayServerBodyGate exercises the gate the arm closure applies before
 // eng.Register. The configured-relay branch is the load-bearing half — it must
 // NOT disable the task when the operator has set up the relay, or the relay
