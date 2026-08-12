@@ -735,7 +735,26 @@ tasks:
     hash: sha256:...
     approved_at: 2026-06-01T12:00:00Z
     approved_by: manual
+    commit: 4f2b9c8e...   # 40-hex; absent when no commit describes the task
 ```
+
+`commit:` is the git commit the approved content was observed at, captured when
+the task is held pending rather than when the operator clicks approve, so it
+describes the version that was reviewed rather than wherever the repository has
+moved to by the time the operator clicks.
+
+It is recorded only when HEAD actually tracks the task's directory. A source
+outside any repository records none, and so does one whose tasks merely sit
+inside an unrelated repository — a folder under a version-controlled home
+directory — since that repository's HEAD describes none of their content.
+
+The commit is decoration: the review surface uses it to show what moved since
+the last approval, and no gate decision reads it. A task with no recorded commit
+approves and arms exactly like one that has it.
+
+Records written before `commit:` existed keep verifying: the field is
+`omitempty`, so an absent commit contributes nothing to the MAC payload and
+those records still hash to the bytes they were signed over.
 
 The `bootstrapped: true` field is omitted (YAML `omitempty`) until
 `MarkBootstrapped()` is called. Legacy unsigned files (`version: 1`, no `mac:`)

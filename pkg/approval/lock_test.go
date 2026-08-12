@@ -27,10 +27,10 @@ func TestLockRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadLock: %v", err)
 	}
-	if err := l.Record("repo/deploy", "abc123", ApprovedByManual); err != nil {
+	if err := l.Record("repo/deploy", "abc123", ApprovedByManual, ""); err != nil {
 		t.Fatalf("Record: %v", err)
 	}
-	if err := l.Record("buildin/mcp", "def456", ApprovedByBuiltin); err != nil {
+	if err := l.Record("buildin/mcp", "def456", ApprovedByBuiltin, ""); err != nil {
 		t.Fatalf("Record: %v", err)
 	}
 
@@ -66,11 +66,11 @@ func TestLockApprovedEmptyHashNeverMatches(t *testing.T) {
 func TestLockRecordSameHashKeepsOriginal(t *testing.T) {
 	path := filepath.Join(t.TempDir(), LockFileName)
 	l, _ := LoadLock(path)
-	if err := l.Record("repo/deploy", "abc", ApprovedByManual); err != nil {
+	if err := l.Record("repo/deploy", "abc", ApprovedByManual, ""); err != nil {
 		t.Fatalf("Record: %v", err)
 	}
 	first, _ := l.Get("repo/deploy")
-	if err := l.Record("repo/deploy", "abc", ApprovedByTrustedSource); err != nil {
+	if err := l.Record("repo/deploy", "abc", ApprovedByTrustedSource, ""); err != nil {
 		t.Fatalf("Record same hash: %v", err)
 	}
 	second, _ := l.Get("repo/deploy")
@@ -81,7 +81,7 @@ func TestLockRecordSameHashKeepsOriginal(t *testing.T) {
 
 func TestLockRecordEmptyHashRejected(t *testing.T) {
 	l, _ := LoadLock(filepath.Join(t.TempDir(), LockFileName))
-	if err := l.Record("repo/deploy", "", ApprovedByManual); err == nil {
+	if err := l.Record("repo/deploy", "", ApprovedByManual, ""); err == nil {
 		t.Fatal("expected error recording empty hash")
 	}
 }
@@ -89,7 +89,7 @@ func TestLockRecordEmptyHashRejected(t *testing.T) {
 func TestLockRemove(t *testing.T) {
 	path := filepath.Join(t.TempDir(), LockFileName)
 	l, _ := LoadLock(path)
-	if err := l.Record("repo/deploy", "abc", ApprovedByManual); err != nil {
+	if err := l.Record("repo/deploy", "abc", ApprovedByManual, ""); err != nil {
 		t.Fatalf("Record: %v", err)
 	}
 	if err := l.Remove("repo/deploy"); err != nil {
@@ -111,7 +111,7 @@ func TestLockRemove(t *testing.T) {
 func TestLockFileHasHeaderComment(t *testing.T) {
 	path := filepath.Join(t.TempDir(), LockFileName)
 	l, _ := LoadLock(path)
-	if err := l.Record("repo/deploy", "abc", ApprovedByManual); err != nil {
+	if err := l.Record("repo/deploy", "abc", ApprovedByManual, ""); err != nil {
 		t.Fatalf("Record: %v", err)
 	}
 	data, err := os.ReadFile(path)
@@ -153,7 +153,7 @@ func TestLoadSignedLock_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("initial LoadSignedLock: %v", err)
 	}
-	if err := l.Record("repo/deploy", "abc123", ApprovedByManual); err != nil {
+	if err := l.Record("repo/deploy", "abc123", ApprovedByManual, ""); err != nil {
 		t.Fatalf("Record: %v", err)
 	}
 
@@ -180,7 +180,7 @@ func TestLoadSignedLock_LegacyUpgrade(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadLock: %v", err)
 	}
-	if err := l.Record("repo/deploy", "abc123", ApprovedByManual); err != nil {
+	if err := l.Record("repo/deploy", "abc123", ApprovedByManual, ""); err != nil {
 		t.Fatalf("Record: %v", err)
 	}
 
@@ -226,7 +226,7 @@ func TestLoadSignedLock_TamperedContent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadSignedLock: %v", err)
 	}
-	if err := l.Record("repo/deploy", "abc123", ApprovedByManual); err != nil {
+	if err := l.Record("repo/deploy", "abc123", ApprovedByManual, ""); err != nil {
 		t.Fatalf("Record: %v", err)
 	}
 
@@ -259,7 +259,7 @@ func TestLoadSignedLock_WrongKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadSignedLock: %v", err)
 	}
-	if err := l.Record("repo/deploy", "abc123", ApprovedByManual); err != nil {
+	if err := l.Record("repo/deploy", "abc123", ApprovedByManual, ""); err != nil {
 		t.Fatalf("Record: %v", err)
 	}
 
@@ -285,7 +285,7 @@ func TestLoadSignedLock_UnsignedModeAcceptsSignedFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadSignedLock: %v", err)
 	}
-	if err := l.Record("repo/deploy", "abc123", ApprovedByManual); err != nil {
+	if err := l.Record("repo/deploy", "abc123", ApprovedByManual, ""); err != nil {
 		t.Fatalf("Record: %v", err)
 	}
 
@@ -308,7 +308,7 @@ func TestLockSignedFileHasMACField(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadSignedLock: %v", err)
 	}
-	if err := l.Record("repo/deploy", "abc", ApprovedByManual); err != nil {
+	if err := l.Record("repo/deploy", "abc", ApprovedByManual, ""); err != nil {
 		t.Fatalf("Record: %v", err)
 	}
 	data, err := os.ReadFile(path)
@@ -326,7 +326,7 @@ func TestLockMACIsValidHex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadSignedLock: %v", err)
 	}
-	if err := l.Record("repo/deploy", "abc", ApprovedByManual); err != nil {
+	if err := l.Record("repo/deploy", "abc", ApprovedByManual, ""); err != nil {
 		t.Fatalf("Record: %v", err)
 	}
 	data, _ := os.ReadFile(path)
@@ -350,7 +350,7 @@ func TestLoadSignedLock_UppercaseHexMAC(t *testing.T) {
 	key := testSigningKey()
 
 	l, _ := LoadSignedLock(path, key)
-	if err := l.Record("repo/deploy", "abc", ApprovedByManual); err != nil {
+	if err := l.Record("repo/deploy", "abc", ApprovedByManual, ""); err != nil {
 		t.Fatalf("Record: %v", err)
 	}
 
@@ -420,7 +420,7 @@ func TestLoadSignedLock_BootstrappedCoveredByMAC(t *testing.T) {
 	path := filepath.Join(t.TempDir(), LockFileName)
 	key := testSigningKey()
 	l, _ := LoadSignedLock(path, key)
-	_ = l.Record("repo/deploy", "abc", ApprovedByManual)
+	_ = l.Record("repo/deploy", "abc", ApprovedByManual, "")
 	_ = l.MarkBootstrapped()
 
 	data, _ := os.ReadFile(path)
@@ -449,7 +449,7 @@ func TestLoadSignedLock_V1UpgradeBootstrappedFalse(t *testing.T) {
 	key := testSigningKey()
 	// Write unsigned v1 lock.
 	unsigned, _ := LoadLock(path)
-	_ = unsigned.Record("repo/deploy", "abc123", ApprovedByManual)
+	_ = unsigned.Record("repo/deploy", "abc123", ApprovedByManual, "")
 
 	// Load with signing key: upgrades to v3.
 	upgraded, err := LoadSignedLock(path, key)
@@ -528,7 +528,7 @@ func TestLoadSignedLock_RecordAfterTamperDetection(t *testing.T) {
 	key := testSigningKey()
 
 	l, _ := LoadSignedLock(path, key)
-	_ = l.Record("repo/deploy", "abc", ApprovedByManual)
+	_ = l.Record("repo/deploy", "abc", ApprovedByManual, "")
 
 	// Tamper.
 	data, _ := os.ReadFile(path)
@@ -540,7 +540,7 @@ func TestLoadSignedLock_RecordAfterTamperDetection(t *testing.T) {
 	}
 
 	// Re-approval should succeed and produce a valid signed lock.
-	if err := tampered.Record("repo/deploy", "abc", ApprovedByManual); err != nil {
+	if err := tampered.Record("repo/deploy", "abc", ApprovedByManual, ""); err != nil {
 		t.Fatalf("Record after tamper: %v", err)
 	}
 
