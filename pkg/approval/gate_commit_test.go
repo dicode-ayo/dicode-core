@@ -188,9 +188,9 @@ func TestUnchangedTrustedTaskSkipsCommitLookup(t *testing.T) {
 	}
 }
 
-// TestForgetDropsRecordedCommit pins the stake carried over from #648: Forget
-// removes the lock entry, so an eviction discards the recorded commit and the
-// task returns as brand new.
+// TestForgetDropsRecordedCommit pins the cost of an eviction: Forget removes
+// the whole lock entry, so the recorded commit goes with it and the task
+// returns as brand new rather than as one whose history is known.
 func TestForgetDropsRecordedCommit(t *testing.T) {
 	g, _, lock := newTestGate(t, enabledPolicy())
 	root := t.TempDir()
@@ -221,20 +221,34 @@ func TestHeadCommitOfDirlessTask(t *testing.T) {
 	}
 }
 
-// TestHeadCommitOfNestedTaskDir pins that a task nested inside a clone resolves
-// the clone's HEAD rather than requiring the task dir to be the repo root.
-func TestHeadCommitOfNestedTaskDir(t *testing.T) {
+// TestApproveRecordsNoCommitForUntrackedTaskDir covers a local source whose
+// tasks merely sit inside an unrelated repository — a folder under a
+// version-controlled home directory. That repository's HEAD describes none of
+// the task's content, so stamping the record with it would hand the review
+// surface a commit range computed from a commit the task never appeared in.
+func TestApproveRecordsNoCommitForUntrackedTaskDir(t *testing.T) {
+	g, _, lock := newTestGate(t, enabledPolicy())
 	root := t.TempDir()
-	nested := filepath.Join(root, "tasks", "deploy")
-	if err := os.MkdirAll(nested, 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "unrelated.txt"), []byte("x\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(nested, "task.yaml"), []byte("name: t\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	want := commitAll(t, root)
+	commitAll(t, root)
 
-	if got := headCommitOf(&task.Spec{ID: "repo/deploy", TaskDir: nested}); got != want {
-		t.Fatalf("headCommitOf = %q, want %q", got, want)
+	// Written after the commit, so the repository does not track it.
+	spec := writeTaskDir(t, root, "repo/deploy", "export default () => {}")
+
+	if armed, err := g.Admit(spec); err != nil || armed {
+		t.Fatalf("Admit: armed=%v err=%v", armed, err)
+	}
+	if err := g.Approve("repo/deploy"); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+
+	rec, ok := lock.Get("repo/deploy")
+	if !ok {
+		t.Fatal("no record written")
+	}
+	if rec.Commit != "" {
+		t.Fatalf("Commit = %q, want empty for a task the repository does not track", rec.Commit)
 	}
 }

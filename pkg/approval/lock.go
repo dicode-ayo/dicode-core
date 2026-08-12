@@ -43,16 +43,16 @@ type Record struct {
 	Hash       string    `yaml:"hash"        json:"hash"`
 	ApprovedAt time.Time `yaml:"approved_at" json:"approved_at"`
 	ApprovedBy string    `yaml:"approved_by" json:"approved_by"`
-	// Commit is the git commit the approved content was observed at; empty
-	// for a source with no git history, and for every record written before
-	// this field existed.
+	// Commit is the git commit the approved content was observed at, empty
+	// when no commit describes it.
 	//
-	// omitempty is load-bearing on both tags. The v3 MAC covers the canonical
-	// JSON of the task map, so an empty Commit must marshal to the same bytes
-	// a pre-migration record did or every lock in the field verifies as
-	// tampered and every task is forced back through the gate. An empty commit
-	// is never a legitimate 40-hex SHA, so omitempty's usual "unset or zero?"
-	// ambiguity does not arise.
+	// omitempty is load-bearing on both tags: the v3 MAC covers the canonical
+	// JSON of the task map, so a record carrying no commit must marshal to the
+	// same bytes as one from a lock whose records have no commit field at all.
+	// Without it every such lock verifies as tampered, all records are
+	// discarded, and every task is forced back through the gate. An empty
+	// commit and an absent one mean the same thing here, since a commit is
+	// otherwise always a 40-hex SHA.
 	Commit string `yaml:"commit,omitempty" json:"commit,omitempty"`
 }
 

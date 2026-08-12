@@ -90,13 +90,17 @@ type Gate struct {
 }
 
 // pendingEntry captures the task, the hash observed at decision time, and the
-// content snapshot, commit and resolved fields observed at that same moment
-// (files is dir-relative path -> file content; nil for a dir-less task or a
-// snapshot failure). Every field is written in one critical section (see
-// Admit's default case) so a reader can never observe a hash paired with a
-// snapshot, commit or resolved text from a different generation: approve()
-// matches on hash and promotes the rest, so a mismatched generation would
-// promote content that was never the content approved.
+// content snapshot, commit and resolved fields observed alongside it (files is
+// dir-relative path -> file content; nil for a dir-less task or a snapshot
+// failure).
+//
+// Every field is published in one critical section (see Admit's default case).
+// That makes the entry atomic to readers — approve() matches on hash and
+// promotes the rest, so a torn entry would promote content that was never the
+// content approved. It does not make the four observations simultaneous: each
+// is read from disk in turn, so a source that syncs mid-Admit can pair a hash
+// with a snapshot or commit from either side of it. The reconciler syncs and
+// admits in sequence, and the following Admit corrects the entry.
 type pendingEntry struct {
 	kinded task.Kinded
 	hash   string
