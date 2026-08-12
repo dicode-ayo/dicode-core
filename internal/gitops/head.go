@@ -1,11 +1,13 @@
 package gitops
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 
 	gogit "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
 // HeadCommit returns the hex commit ID at HEAD of the git repository that
@@ -66,7 +68,12 @@ func headTracks(repo *gogit.Repository, head plumbing.Hash, dir string) (bool, e
 		return false, fmt.Errorf("read tree of %s: %w", head, err)
 	}
 	if _, err := tree.FindEntry(filepath.ToSlash(rel)); err != nil {
-		return false, nil
+		// Absence is the answer; anything else is the repository failing to
+		// answer, which must not read as "untracked".
+		if errors.Is(err, object.ErrEntryNotFound) || errors.Is(err, object.ErrDirectoryNotFound) {
+			return false, nil
+		}
+		return false, fmt.Errorf("look up %s in tree of %s: %w", rel, head, err)
 	}
 	return true, nil
 }

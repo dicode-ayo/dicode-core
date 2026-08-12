@@ -8,13 +8,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
 
-// preCommitRecord is Record as it was before Commit existed. The v3 MAC covers
-// the canonical JSON of the whole task map, so this is the exact shape whose
-// bytes every lock in the field was signed over.
+// preCommitRecord is the record shape carried by deployed lock files that have
+// no commit field. The v3 MAC covers the canonical JSON of the whole task map,
+// so this is the exact shape whose bytes those files were signed over.
 type preCommitRecord struct {
 	Hash       string    `json:"hash"`
 	ApprovedAt time.Time `json:"approved_at"`
@@ -175,9 +176,5 @@ func TestLockRecord_UnchangedHashKeepsRecord(t *testing.T) {
 
 // fakeCommit returns a 40-character stand-in for a commit SHA.
 func fakeCommit(c string) string {
-	out := ""
-	for len(out) < 40 {
-		out += c
-	}
-	return out[:40]
+	return strings.Repeat(c, 40)[:40]
 }
