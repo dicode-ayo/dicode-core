@@ -732,10 +732,27 @@ func (s *Source) syncAndEmit(ctx context.Context, ch chan<- source.Event) error 
 	// no prior snapshot to carry forward, so it simply doesn't appear in
 	// `current` (never added) until it resolves cleanly; it's still visible
 	// via the load-failure side channel even though it never registers.
+	//
+	// A failure's ID is not always a leaf task's own ID: when a nested
+	// `kind: TaskSet` entry itself fails to resolve (e.g. its taskset.yaml is
+	// unparseable), resolveNestedRef reports exactly one ResolveFailure keyed
+	// on the nested group's namespace (e.g. "infra/subgroup"), even though
+	// every previously-resolved leaf task under that namespace (e.g.
+	// "infra/subgroup/deploy") also vanished from `current` this pass. Those
+	// leaf IDs were never registered under "infra/subgroup" itself — only
+	// their own namespaced IDs exist in `prev` — so an exact-key lookup alone
+	// misses them and DiffSnapshots would see them as removed. Carry forward
+	// every prev entry whose ID is f.ID itself OR a namespace-descendant of it
+	// (ID == f.ID, or ID has prefix f.ID+"/") to cover both the leaf-failure
+	// case (ID == f.ID, no descendants) and the nested-group-failure case
+	// (f.ID's descendants) uniformly.
 	for _, f := range failures {
-		if snap, ok := prev[f.ID]; ok {
-			if _, already := current[f.ID]; !already {
-				current[f.ID] = snap
+		for id, snap := range prev {
+			if id != f.ID && !strings.HasPrefix(id, f.ID+"/") {
+				continue
+			}
+			if _, already := current[id]; !already {
+				current[id] = snap
 			}
 		}
 	}
