@@ -7,9 +7,11 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/dicode/dicode/pkg/db"
 	"github.com/dicode/dicode/pkg/registry"
 	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	"github.com/dicode/dicode/pkg/task"
+	"go.uber.org/zap"
 )
 
 // mockStorageRunner is a minimal in-memory registry.TaskRunner double for the
@@ -352,5 +354,55 @@ func TestSuspendRun_OrphanedBlobCleanedUpWhenRowLeftRunning(t *testing.T) {
 	}
 	if after.Status != registry.StatusCancelled {
 		t.Errorf("status = %q, want unchanged %q", after.Status, registry.StatusCancelled)
+	}
+}
+
+// TestSuspendRun_OrphanedBlobCleanedUpOnGenuineSuspendRunError covers the
+// other half of the same leak: the first fix only cleaned up when
+// registry.SuspendRun returned (false, nil) — a real SuspendRun error
+// (suspended=false, err!=nil, e.g. a transient DB failure on the UPDATE
+// itself) left the just-persisted blob just as unreachable, but the cleanup
+// condition required err == nil and so skipped it. Forces a genuine
+// SuspendRun error by closing the underlying DB after the run row exists but
+// before suspendRun's UPDATE runs.
+func TestSuspendRun_OrphanedBlobCleanedUpOnGenuineSuspendRunError(t *testing.T) {
+	d, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	reg := registry.New(d)
+	eng := New(reg, &suspendExec{}, zap.NewNop())
+	runner := newMockStorageRunner()
+	eng.SetResumeStateStore(registry.NewResumeStateStore(resumeStateTestCrypto(), runner, "buildin/local-storage", "/data/resume-state"))
+	eng.SetResumeStateThresholdBytes(4) // force offload
+
+	runID, err := reg.StartRun(context.Background(), "wiz", "")
+	if err != nil {
+		t.Fatalf("StartRun: %v", err)
+	}
+
+	if err := d.Close(); err != nil {
+		t.Fatalf("close db: %v", err)
+	}
+
+	opts := &pkgruntime.RunOptions{RunID: runID}
+	result := &pkgruntime.RunResult{Suspended: true, ResumeState: []byte(`{"step":"ask_name"}`)}
+	suspended, serr := eng.suspendRun(opts, result)
+	if serr == nil {
+		t.Fatal("expected a genuine SuspendRun error against a closed DB")
+	}
+	if suspended {
+		t.Fatal("suspendRun reported suspended=true despite the SuspendRun error")
+	}
+
+	// The blob was durably written (via the mock storage runner, unaffected
+	// by the closed real DB) before the failed UPDATE — it must still be
+	// cleaned up rather than left orphaned.
+	blobKey := "resume-state/" + runID
+	if runner.has(blobKey) {
+		t.Error("orphaned resume-state blob was not cleaned up after a genuine SuspendRun error")
+	}
+	if runner.deletes != 1 {
+		t.Errorf("storage task delete called %d times, want 1 (orphan cleanup)", runner.deletes)
 	}
 }

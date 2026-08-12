@@ -98,18 +98,20 @@ func (e *Engine) suspendRun(opts *pkgruntime.RunOptions, result *pkgruntime.RunR
 
 	suspended, err := e.registry.SuspendRun(context.Background(), opts.RunID,
 		state, result.ResumeSchema, token, nowMs, deadlineMs, carryJSON, blobRef)
-	if !suspended && err == nil && blobRef != nil {
-		// SuspendRun's UPDATE is guarded on status = running, so `suspended ==
-		// false, err == nil` means a concurrent finalize (kill / shutdown
-		// drain) already moved the run out of `running` before this landed —
-		// no row was written, and the blob just persisted above is now
-		// orphaned. Nothing else can ever find it: the eager GC in ResumeRun
-		// only runs on an actual resume, and the TTL sweep
+	if !suspended && blobRef != nil {
+		// The blob was already durably persisted above, but no row ended up
+		// referencing it — either because SuspendRun's UPDATE (guarded on
+		// status = running) affected no rows (a concurrent kill / shutdown
+		// drain already moved the run out of running: suspended=false,
+		// err=nil), or because the UPDATE itself failed outright (a
+		// transient SQLite error: suspended=false, err!=nil). Both leave the
+		// blob equally unreachable — the eager GC in ResumeRun only runs on
+		// an actual resume of this row, and the TTL sweep
 		// (Registry.ListExpiredResumeStates) only scans rows that still have
-		// resume_state_storage_key set, which this row never got. Delete it
-		// now, best-effort, so it doesn't leak forever.
+		// resume_state_storage_key set, which this row never got either way.
+		// Delete it now, best-effort, so it doesn't leak forever.
 		if derr := e.resumeStateStore.Delete(context.Background(), blobRef.StorageKey); derr != nil {
-			e.log.Warn("suspend: orphaned resume-state blob cleanup failed (run left running before suspend landed)",
+			e.log.Warn("suspend: orphaned resume-state blob cleanup failed (row never referenced the persisted blob)",
 				zap.String("run", opts.RunID), zap.String("error_class", "storage_delete"))
 		}
 	}

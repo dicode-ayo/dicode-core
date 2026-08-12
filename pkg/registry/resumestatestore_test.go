@@ -153,3 +153,61 @@ func TestResumeStateStore_PersistPropagatesRunnerError(t *testing.T) {
 		t.Error("expected error from runner to propagate")
 	}
 }
+
+// notOKRunner simulates buildin/local-storage catching its own internal
+// failure and returning it as a normal {"ok": false, "error": "..."}
+// payload — a nil Go error from RunTaskSync — rather than an uncaught
+// exception. Reproduces tasks/buildin/local-storage/task.ts's actual
+// contract: every branch in its outer try/catch returns, never throws.
+type notOKRunner struct{ msg string }
+
+func (r *notOKRunner) RunTaskSync(ctx context.Context, taskID string, params map[string]string) (any, error) {
+	return map[string]any{"ok": false, "error": r.msg}, nil
+}
+
+// TestResumeStateStore_PersistRejectsOKFalse locks in a bug found during
+// code review: Persist checked only RunTaskSync's Go error, not the
+// storage task's own "ok" field. A put the storage task caught and reported
+// as failed (disk full, permission denied, ...) was returned to the caller
+// as nil error with a real key/size — suspendRun then landed the run
+// StatusSuspended with resume_state_storage_key pointing at a blob that was
+// never actually written, exactly the dangling-reference case #570 exists
+// to prevent. Before this fix, this test's Persist call returned err == nil.
+func TestResumeStateStore_PersistRejectsOKFalse(t *testing.T) {
+	c := newTestResumeStateCrypto(t)
+	s := NewResumeStateStore(c, &notOKRunner{msg: "disk full"}, "any-storage", "/data/resume-state")
+	runID := uuid.New().String()
+	if _, _, _, err := s.Persist(context.Background(), runID, []byte(`{}`)); err == nil {
+		t.Fatal("expected Persist to fail when the storage task reports ok:false")
+	}
+}
+
+// TestResumeStateStore_FetchRejectsOKFalse is Fetch's counterpart: an
+// ok:false get response (as opposed to the legitimate ok:true,value:""
+// missing-key case) must not be silently treated as "unavailable" — it's a
+// real storage-task failure, not an absent blob, and conflating the two
+// would surface the wrong error to an operator debugging a stuck resume.
+func TestResumeStateStore_FetchRejectsOKFalse(t *testing.T) {
+	c := newTestResumeStateCrypto(t)
+	s := NewResumeStateStore(c, &notOKRunner{msg: "permission denied"}, "any-storage", "/data/resume-state")
+	runID := uuid.New().String()
+	_, err := s.Fetch(context.Background(), runID, "resume-state/"+runID, time.Now().Unix())
+	if err == nil {
+		t.Fatal("expected Fetch to fail when the storage task reports ok:false")
+	}
+	if errors.Is(err, ErrResumeStateUnavailable) {
+		t.Error("an ok:false failure must not be reported as ErrResumeStateUnavailable (a real storage error, not a missing key)")
+	}
+}
+
+// TestResumeStateStore_DeleteRejectsOKFalse is Delete's counterpart: a
+// delete the storage task caught and reported as failed must not be treated
+// as a successful GC — silently believing the blob is gone leaves it
+// permanently orphaned on disk with no DB reference to ever find it again.
+func TestResumeStateStore_DeleteRejectsOKFalse(t *testing.T) {
+	c := newTestResumeStateCrypto(t)
+	s := NewResumeStateStore(c, &notOKRunner{msg: "permission denied"}, "any-storage", "/data/resume-state")
+	if err := s.Delete(context.Background(), "resume-state/x"); err == nil {
+		t.Fatal("expected Delete to fail when the storage task reports ok:false")
+	}
+}

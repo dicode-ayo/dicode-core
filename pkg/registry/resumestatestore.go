@@ -77,6 +77,31 @@ func NewResumeStateStore(crypto *InputCrypto, runner TaskRunner, storageTask, ro
 	return &ResumeStateStore{crypto: crypto, runner: runner, storageTask: storageTask, root: root}
 }
 
+// storageResult validates a storage-task response map's "ok" field.
+// buildin/local-storage catches its own internal failures (disk full,
+// permission denied, an invalid key) in an outer try/catch and returns them
+// as a normal {"ok": false, "error": "..."} payload rather than an uncaught
+// exception (see tasks/buildin/local-storage/task.ts) — so RunTaskSync
+// returning a nil error does NOT mean the operation succeeded. Every call
+// site must check "ok" explicitly; skipping this check is exactly how a
+// failed put could be mistaken for a durable write, landing a run
+// StatusSuspended with a storage key that points at nothing (the dangling-
+// reference case #570 exists to prevent).
+func storageResult(res any) (map[string]any, error) {
+	resMap, ok := res.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("storage task returned non-map: %T", res)
+	}
+	if okField, _ := resMap["ok"].(bool); !okField {
+		msg, _ := resMap["error"].(string)
+		if msg == "" {
+			msg = "storage task reported failure"
+		}
+		return nil, errors.New(msg)
+	}
+	return resMap, nil
+}
+
 // Persist marshals + encrypts + stores a raw resume-state blob, keyed by the
 // suspending run's own ID (so AAD binding and the storage key line up with
 // what Fetch is called with later — the same convention InputStore uses).
@@ -91,13 +116,17 @@ func (s *ResumeStateStore) Persist(ctx context.Context, runID string, state []by
 	}
 	key = resumeStateKeyPrefix + runID
 	enc := base64.StdEncoding.EncodeToString(blob)
-	if _, err := s.runner.RunTaskSync(ctx, s.storageTask, map[string]string{
+	res, err := s.runner.RunTaskSync(ctx, s.storageTask, map[string]string{
 		"op":     "put",
 		"key":    key,
 		"value":  enc,
 		"root":   s.root,
 		"prefix": resumeStateKeyPrefix,
-	}); err != nil {
+	})
+	if err != nil {
+		return "", 0, 0, fmt.Errorf("storage put: %w", err)
+	}
+	if _, err := storageResult(res); err != nil {
 		return "", 0, 0, fmt.Errorf("storage put: %w", err)
 	}
 	return key, len(blob), storedAt, nil
@@ -117,10 +146,13 @@ func (s *ResumeStateStore) Fetch(ctx context.Context, runID, key string, storedA
 	if err != nil {
 		return nil, fmt.Errorf("storage get: %w", err)
 	}
-	resMap, ok := res.(map[string]any)
-	if !ok {
-		return nil, fmt.Errorf("storage task returned non-map: %T", res)
+	resMap, err := storageResult(res)
+	if err != nil {
+		return nil, fmt.Errorf("storage get: %w", err)
 	}
+	// A genuinely missing key comes back {"ok": true, "value": ""} (see
+	// task.ts's NotFound branch) — distinct from the {"ok": false} failure
+	// case storageResult already rejected above.
 	encStr, _ := resMap["value"].(string)
 	if encStr == "" {
 		return nil, ErrResumeStateUnavailable
@@ -139,13 +171,16 @@ func (s *ResumeStateStore) Fetch(ctx context.Context, runID, key string, storedA
 // Delete removes the stored blob via the configured storage task. Idempotent
 // at the contract level — the storage task does not error on missing keys.
 func (s *ResumeStateStore) Delete(ctx context.Context, key string) error {
-	_, err := s.runner.RunTaskSync(ctx, s.storageTask, map[string]string{
+	res, err := s.runner.RunTaskSync(ctx, s.storageTask, map[string]string{
 		"op":     "delete",
 		"key":    key,
 		"root":   s.root,
 		"prefix": resumeStateKeyPrefix,
 	})
 	if err != nil {
+		return fmt.Errorf("storage delete: %w", err)
+	}
+	if _, err := storageResult(res); err != nil {
 		return fmt.Errorf("storage delete: %w", err)
 	}
 	return nil
