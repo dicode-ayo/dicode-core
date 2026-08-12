@@ -2715,3 +2715,107 @@ func TestServer_Suspend_GrantedForDeno(t *testing.T) {
 		t.Fatal("expected suspend payload recorded for deno")
 	}
 }
+
+// TestIPC_DeleteResumeState_RejectsStillSuspendedRun locks in the fix for a
+// gap found during #570's security review: dicode.runs.delete_resume_state
+// must refuse to touch a run that is still `suspended` — that row's offload
+// blob is a live reference a future ResumeRun will dereference (the same
+// invariant Registry.ListExpiredResumeStates already enforces for the batch
+// GC path). Before this guard, a task holding runs_delete_resume_state could
+// pass ANY run ID — including one belonging to a different, in-flight
+// conversation — and the handler would unconditionally clear its offload
+// columns. Because SuspendRun nulls the inline resume_state column whenever
+// a blob is offloaded, that left ResumeRun's fallback (resumeState :=
+// run.ResumeState) at nil: the resume token stayed valid and the resume
+// "succeeded" silently handing the continuation task an empty state instead
+// of erroring — the same class of bug list_expired_resume_state's own
+// status filter exists to prevent.
+func TestIPC_DeleteResumeState_RejectsStillSuspendedRun(t *testing.T) {
+	e := newTestEnv(t)
+
+	runID, err := e.reg.StartRun(context.Background(), "conversation-task", "")
+	if err != nil {
+		t.Fatalf("StartRun: %v", err)
+	}
+	ref := &registry.ResumeStateBlobRef{StorageKey: "resume-state/" + runID, Size: 999, StoredAt: 1714400000}
+	if _, err := e.reg.SuspendRun(context.Background(), runID,
+		nil, nil, "tok", time.Now().UnixMilli(), 0, nil, ref); err != nil {
+		t.Fatalf("SuspendRun: %v", err)
+	}
+
+	spec := &task.Spec{
+		Permissions: task.Permissions{
+			Dicode: &task.DicodePermissions{RunsDeleteResumeState: true},
+		},
+	}
+	conn, _ := e.startWithSpec(t, nil, nil, spec, nil)
+
+	sendMsg(t, conn, map[string]any{
+		"id":     "1",
+		"method": "dicode.runs.delete_resume_state",
+		"runID":  runID,
+	})
+	resp := recvMsg(t, conn)
+	errMsg, _ := resp["error"].(string)
+	if !strings.Contains(errMsg, "still-suspended") {
+		t.Fatalf("expected a still-suspended rejection, got error=%q result=%v", errMsg, resp["result"])
+	}
+
+	// The blob reference must survive untouched — a still-suspended run's
+	// resume must still be able to rehydrate it.
+	run, err := e.reg.GetRun(context.Background(), runID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if run.ResumeStateStorageKey != ref.StorageKey {
+		t.Errorf("resume_state_storage_key = %q, want untouched %q", run.ResumeStateStorageKey, ref.StorageKey)
+	}
+	if run.Status != registry.StatusSuspended {
+		t.Errorf("status = %q, want still %q", run.Status, registry.StatusSuspended)
+	}
+}
+
+// TestIPC_DeleteResumeState_AllowsNonSuspendedRun is the counterpart: once a
+// run has left `suspended` (resumed here), delete_resume_state must still
+// work — the guard added above must not become a blanket block.
+func TestIPC_DeleteResumeState_AllowsNonSuspendedRun(t *testing.T) {
+	e := newTestEnv(t)
+
+	runID, err := e.reg.StartRun(context.Background(), "conversation-task", "")
+	if err != nil {
+		t.Fatalf("StartRun: %v", err)
+	}
+	ref := &registry.ResumeStateBlobRef{StorageKey: "resume-state/" + runID, Size: 999, StoredAt: 1714400000}
+	if _, err := e.reg.SuspendRun(context.Background(), runID,
+		nil, nil, "tok", time.Now().UnixMilli(), 0, nil, ref); err != nil {
+		t.Fatalf("SuspendRun: %v", err)
+	}
+	if err := e.reg.MarkRunResumed(context.Background(), runID); err != nil {
+		t.Fatalf("MarkRunResumed: %v", err)
+	}
+
+	spec := &task.Spec{
+		Permissions: task.Permissions{
+			Dicode: &task.DicodePermissions{RunsDeleteResumeState: true},
+		},
+	}
+	conn, _ := e.startWithSpec(t, nil, nil, spec, nil)
+
+	sendMsg(t, conn, map[string]any{
+		"id":     "1",
+		"method": "dicode.runs.delete_resume_state",
+		"runID":  runID,
+	})
+	resp := recvMsg(t, conn)
+	if resp["error"] != nil {
+		t.Fatalf("delete_resume_state on a resumed run rejected: %v", resp["error"])
+	}
+
+	run, err := e.reg.GetRun(context.Background(), runID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if run.ResumeStateStorageKey != "" {
+		t.Errorf("resume_state_storage_key = %q, want cleared", run.ResumeStateStorageKey)
+	}
+}

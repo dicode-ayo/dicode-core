@@ -237,12 +237,19 @@ func (e *Engine) ResumeRun(ctx context.Context, token string, input []byte) (str
 	// blob an eager delete missed (daemon restart mid-resume, storage task
 	// transiently down, etc).
 	if run.ResumeStateStorageKey != "" && e.resumeStateStore != nil {
+		// Log only a sanitized error category, not the raw error chain: a
+		// storage-task failure here can transit env-resolver internals where
+		// CodeQL tracks a secretKey taint label (see pipeline_runner.go's
+		// identical rationale), so emitting it raw trips a false-positive
+		// go/clear-text-logging alert. The category is enough for ops to
+		// triage a best-effort GC failure; the resume itself already
+		// succeeded and the resume-state-cleanup TTL sweep is the backstop.
 		if derr := e.resumeStateStore.Delete(context.Background(), run.ResumeStateStorageKey); derr != nil {
 			e.log.Warn("resume: eager resume-state blob delete failed; TTL sweep will retry",
-				zap.String("run", run.ID), zap.Error(derr))
+				zap.String("run", run.ID), zap.String("error_class", "storage_delete"))
 		} else if cerr := e.registry.ClearResumeStateBlob(context.Background(), run.ID); cerr != nil {
 			e.log.Warn("resume: clear resume-state blob columns failed",
-				zap.String("run", run.ID), zap.Error(cerr))
+				zap.String("run", run.ID), zap.String("error_class", "clear_columns"))
 		}
 	}
 

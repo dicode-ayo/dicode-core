@@ -1002,6 +1002,19 @@ func (s *Server) handleConn(conn net.Conn) {
 				reply(req.ID, nil, err.Error())
 				continue
 			}
+			// A still-suspended row's blob is a live reference a future
+			// ResumeRun will dereference (same invariant ListExpiredResumeStates
+			// enforces for the batch GC path). Without this check, any caller
+			// holding runs_delete_resume_state could clear a DIFFERENT,
+			// in-flight conversation's offload columns out from under it: since
+			// SuspendRun nulls the inline resume_state column whenever a blob is
+			// offloaded, clearing the columns here leaves ResumeRun's fallback
+			// (resumeState := run.ResumeState) at nil — the token stays valid and
+			// the resume "succeeds" with silently empty state instead of erroring.
+			if run.Status == registry.StatusSuspended {
+				reply(req.ID, nil, "ipc: cannot delete resume state for a still-suspended run")
+				continue
+			}
 			if run.ResumeStateStorageKey != "" && s.resumeStateStore != nil {
 				if err := s.resumeStateStore.Delete(s.ctx, run.ResumeStateStorageKey); err != nil {
 					_ = err
