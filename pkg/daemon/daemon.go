@@ -376,7 +376,7 @@ func wireRunInputPersistence(cfg *config.Config, secretsChain secrets.Chain, reg
 // initSources builds the task sources + source manager, wires them into both
 // runtimes, and creates the reconciler (step 7).
 func initSources(cfg *config.Config, dataDir string, reg *registry.Registry, denoRT *denoruntime.Runtime, pythonRT *pythonruntime.Runtime, log *zap.Logger) (*webui.SourceManager, *registry.Reconciler, error) {
-	sources, sourceMgr, err := buildSources(cfg, dataDir, log)
+	sources, sourceMgr, err := buildSources(cfg, dataDir, reg, log)
 	if err != nil {
 		return nil, nil, fmt.Errorf("build sources: %w", err)
 	}
@@ -1237,7 +1237,7 @@ func buildSecretsChain(cfg *config.Config, dataDir string, database db.DB, log *
 	return chain, localProvider
 }
 
-func buildSources(cfg *config.Config, dataDir string, log *zap.Logger) ([]source.Source, *webui.SourceManager, error) {
+func buildSources(cfg *config.Config, dataDir string, reg *registry.Registry, log *zap.Logger) ([]source.Source, *webui.SourceManager, error) {
 	tasksetSources := make(map[string]*taskset.Source)
 	var sources []source.Source
 
@@ -1252,7 +1252,7 @@ func buildSources(cfg *config.Config, dataDir string, log *zap.Logger) ([]source
 		tasksetSources[name] = ts
 	}
 
-	sourceMgr := webui.NewSourceManager(cfg, tasksetSources, dataDir, log)
+	sourceMgr := webui.NewSourceManager(cfg, tasksetSources, reg, dataDir, log)
 	return sources, sourceMgr, nil
 }
 

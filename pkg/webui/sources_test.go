@@ -38,7 +38,7 @@ func TestSourceManager_List_LocalSource_NoPullFieldsInJSON(t *testing.T) {
 	cfg.Spec.Entries = map[string]*taskset.Entry{
 		"tasks": {Ref: &taskset.Ref{Path: "/tmp/tasks", Watch: &watchTrue}},
 	}
-	m := NewSourceManager(cfg, nil, t.TempDir(), zap.NewNop())
+	m := NewSourceManager(cfg, nil, nil, t.TempDir(), zap.NewNop())
 
 	b, err := json.Marshal(m.List())
 	if err != nil {
@@ -98,7 +98,7 @@ func TestSourceManager_List_TasksetSource_FailedCount(t *testing.T) {
 	cfg.Spec.Entries = map[string]*taskset.Entry{
 		"infra": {Ref: &taskset.Ref{Path: tsPath}},
 	}
-	m := NewSourceManager(cfg, map[string]*taskset.Source{"infra": src}, t.TempDir(), zap.NewNop())
+	m := NewSourceManager(cfg, map[string]*taskset.Source{"infra": src}, nil, t.TempDir(), zap.NewNop())
 
 	infos := m.List()
 	if len(infos) != 1 {
@@ -120,6 +120,84 @@ func TestSourceManager_List_TasksetSource_FailedCount(t *testing.T) {
 	}
 	if _, ok := agg["infra/good"]; ok {
 		t.Errorf("LoadFailures() should not include the good entry: %v", agg)
+	}
+}
+
+// TestSourceManager_List_NonTasksetSource_FailedCount is the regression lock
+// for the gap a PR #656 review pass found: List()'s `else if ref.IsGit()` /
+// `else` branches — taken for a source name that's in cfg.Spec.Entries but
+// has no live *taskset.Source yet (a plain git/local source in steady state,
+// or one still mid-registration via apiAddSource's claim-then-Register
+// window) — never consulted any load-failure state at all, so those sources
+// kept reporting FailedCount == 0 even when the registry had a recorded
+// failure for one of their tasks (reconciler.go's handle() calls
+// registry.SetLoadFailure for exactly this event shape: ev.Kinded == nil,
+// i.e. not pre-resolved by a taskset.Source). Covers both "git" and "local"
+// typed entries, and confirms a failure recorded against one source name
+// never leaks into another's count (SourceManager has no live taskset.Source
+// to consult for either, so both entries below use the tasksetSources==nil
+// path exactly like the previously-uncovered branches).
+func TestSourceManager_List_NonTasksetSource_FailedCount(t *testing.T) {
+	d, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("db: %v", err)
+	}
+	t.Cleanup(func() { d.Close() })
+	reg := registry.New(d)
+
+	cfg := &config.Config{}
+	cfg.Spec.Entries = map[string]*taskset.Entry{
+		"local-src": {Ref: &taskset.Ref{Path: "/tmp/local-tasks"}},
+		"git-src":   {Ref: &taskset.Ref{URL: "https://example.com/repo.git", Branch: "main"}},
+	}
+	m := NewSourceManager(cfg, nil, reg, t.TempDir(), zap.NewNop())
+
+	reg.SetLoadFailure("local-src/bad", "local-src", "yaml: line 3: hash_include must be a list")
+	reg.SetLoadFailure("git-src/broken", "git-src", "yaml: unknown field foo")
+
+	infos := m.List()
+	byName := make(map[string]SourceInfo, len(infos))
+	for _, i := range infos {
+		byName[i.Name] = i
+	}
+
+	local, ok := byName["local-src"]
+	if !ok {
+		t.Fatalf("local-src missing from List(): %+v", infos)
+	}
+	if local.Type != "local" {
+		t.Fatalf("local-src Type = %q, want local", local.Type)
+	}
+	if local.FailedCount != 1 || len(local.Failures) != 1 || local.Failures[0].ID != "local-src/bad" {
+		t.Errorf("local-src failures = %+v, want exactly local-src/bad", local)
+	}
+
+	git, ok := byName["git-src"]
+	if !ok {
+		t.Fatalf("git-src missing from List(): %+v", infos)
+	}
+	if git.Type != "git" {
+		t.Fatalf("git-src Type = %q, want git", git.Type)
+	}
+	if git.FailedCount != 1 || len(git.Failures) != 1 || git.Failures[0].ID != "git-src/broken" {
+		t.Errorf("git-src failures = %+v, want exactly git-src/broken", git)
+	}
+}
+
+// TestSourceManager_List_NonTasksetSource_NilRegistry guards against a nil
+// panic: SourceManager.registry is nil in many test setups (and — briefly —
+// would be nil in production if this constructor arg were ever omitted), so
+// List() must tolerate it rather than dereferencing a nil *registry.Registry.
+func TestSourceManager_List_NonTasksetSource_NilRegistry(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Spec.Entries = map[string]*taskset.Entry{
+		"local-src": {Ref: &taskset.Ref{Path: "/tmp/local-tasks"}},
+	}
+	m := NewSourceManager(cfg, nil, nil, t.TempDir(), zap.NewNop())
+
+	infos := m.List()
+	if len(infos) != 1 || infos[0].FailedCount != 0 {
+		t.Fatalf("List() = %+v, want one failure-free local-src", infos)
 	}
 }
 
@@ -176,7 +254,7 @@ func TestApiSaveConfigRaw_SyncsSourceManagerCfg(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load initial config: %v", err)
 	}
-	sourceMgr := NewSourceManager(initialCfg, nil, dir, zap.NewNop())
+	sourceMgr := NewSourceManager(initialCfg, nil, nil, dir, zap.NewNop())
 
 	// Build server with the SourceManager and the cfgPath so the handler can
 	// write and hot-reload the config.
@@ -642,7 +720,7 @@ func TestApiSaveConfigRaw_ReResolvesSourceOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load initial cfg: %v", err)
 	}
-	sourceMgr := NewSourceManager(initialCfg, map[string]*taskset.Source{"buildin": src}, dir, zap.NewNop())
+	sourceMgr := NewSourceManager(initialCfg, map[string]*taskset.Source{"buildin": src}, nil, dir, zap.NewNop())
 	srv, _ := newTestServerWithSourceMgr(t, initialCfg, cfgPath, sourceMgr)
 
 	// Raw-config save that revokes the task via an entry override.
@@ -701,7 +779,7 @@ func newTestServerWithReconciler(t *testing.T, cfg *config.Config) (*Server, *re
 	t.Cleanup(cancel)
 	go func() { _ = rec.Run(ctx) }()
 
-	sourceMgr := NewSourceManager(cfg, nil, t.TempDir(), zap.NewNop())
+	sourceMgr := NewSourceManager(cfg, nil, reg, t.TempDir(), zap.NewNop())
 
 	srv, err := New(8080, reg, eng, cfg, "", nil, rec, sourceMgr, "", NewLogBroadcaster(), zap.NewNop(), d, ipc.NewGateway())
 	if err != nil {
