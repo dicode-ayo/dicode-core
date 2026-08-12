@@ -3,7 +3,7 @@
 Playwright suite covering the REST API, webhook triggers, cron, file-change
 reconciliation, the SPA at `/hooks/webui`, the auth flow, auth-provider
 connections, dev-mode/clone-mode, task suspend/resume, run-input persistence,
-and the MCP JSON-RPC surface. 124 tests, ~3.5 min end-to-end (132 with the
+and the MCP JSON-RPC surface. 128 tests, ~3.5 min end-to-end (136 with the
 opt-in relay project).
 
 ## One-time setup
@@ -103,7 +103,7 @@ file.
 
 | Project | Server config | What runs | storageState |
 |---|---|---|---|
-| `unauthenticated` | `auth: false`, no passphrase | webhooks, webhooks-secure, cron, file-change, config, mcp, dev-mode-clone, run-input-persistence, task-toggle, suspend-resume, cli-suspend specs | seeded session |
+| `unauthenticated` | `auth: false`, no passphrase | webhooks, webhooks-secure, cron, file-change, approval-diff, pending-task-list-signals, config, mcp, dev-mode-clone, run-input-persistence, task-toggle, suspend-resume, cli-suspend specs | seeded session |
 | `webui` | same as above | `webui-task.spec.ts` — SPA tests | seeded session |
 | `authenticated` | `auth: true`, `secret: test-passphrase-12345` | `auth.spec.ts`, `auth-providers.spec.ts` | none (tests the login flow) |
 | `relay` | separate broker + daemon pair on random ports, not the shared global-setup daemon | `relay-protocol.spec.ts`, `relay-buildin.spec.ts` — opt-in via `DICODE_E2E_RELAY=1` | none |
@@ -113,8 +113,8 @@ The authenticated project is a separate server start, hence a separate
 
 ## Test inventory
 
-124 non-relay tests total: 87 in `unauthenticated` + 14 in `webui` + 23 in
-`authenticated` (132 including the 8 opt-in `relay` tests).
+128 non-relay tests total: 91 in `unauthenticated` + 14 in `webui` + 23 in
+`authenticated` (136 including the 8 opt-in `relay` tests).
 
 ### [webhooks.spec.ts](webhooks.spec.ts) — Open Webhook (8 tests)
 
@@ -344,6 +344,18 @@ and the corresponding WebUI toggle.
 | 3 | PATCH unknown field returns 400 | Unsupported override field is rejected. |
 | 4 | UI toggle flips the row and persists across reload | Task-list toggle control reflects and survives a page reload. |
 | 5 | dc-toast surfaces a visible message when the API rejects a toggle | UI shows an error toast on a failed toggle. |
+
+### [pending-task-list-signals.spec.ts](pending-task-list-signals.spec.ts) — Pending-approval signals on the task list (4 tests)
+
+Runs in the `unauthenticated` project. Covers #650: a pending (unapproved)
+task must not present as live and healthy in the task list.
+
+| # | Test | Verifies |
+|---|---|---|
+| 1 | a pending row reads as held, not live: no green dot, no dead link, Run disabled | The toggle drops the plain "on" green tint and gets a pending-specific tooltip; the trigger column doesn't hyperlink a route that 404s; Run is disabled with an explanatory tooltip. |
+| 2 | a pending count/filter appears on the list and narrows it | A "N pending approval" chip appears and, when clicked, narrows the list to only pending tasks. |
+| 3 | the notification tray surfaces the pending transition | The existing `approval:pending` WebSocket event now reaches `dc-notif-panel`, producing a visible, reviewable inbox entry. |
+| 4 | a Run failure surfaces via toast, never a native alert | Any `/run` failure (not just the pending-approval case) renders as a `dc-toast`, not a browser `alert()`. |
 
 ### [suspend-resume.spec.ts](suspend-resume.spec.ts) — Suspend/resume WebUI (2 tests)
 
