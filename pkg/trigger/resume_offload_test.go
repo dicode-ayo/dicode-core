@@ -64,6 +64,23 @@ func (m *mockStorageRunner) has(key string) bool {
 	return ok
 }
 
+// counts and value are locked accessors for the test-assertion side —
+// RunTaskSync mutates puts/gets/deletes/store under m.mu from the engine's
+// own goroutine, so reading them directly from the test goroutine (as this
+// file used to) is a data race under `go test -race`: waitStatus's DB
+// polling creates no happens-before edge with these in-memory fields.
+func (m *mockStorageRunner) counts() (puts, gets, deletes int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.puts, m.gets, m.deletes
+}
+
+func (m *mockStorageRunner) value(key string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.store[key]
+}
+
 // resumeStateTestCrypto returns a fixed 32-byte InputCrypto for deterministic
 // tests — mirrors pkg/registry's newTestInputCrypto (unexported there too).
 func resumeStateTestCrypto() *registry.InputCrypto {
@@ -101,8 +118,8 @@ func TestSuspend_SmallState_StaysInline_NoOffloadCall(t *testing.T) {
 	if run.ResumeStateStorageKey != "" {
 		t.Errorf("resume_state_storage_key = %q, want empty (state is under threshold)", run.ResumeStateStorageKey)
 	}
-	if runner.puts != 0 {
-		t.Errorf("storage task put called %d times, want 0 for a small state", runner.puts)
+	if puts, _, _ := runner.counts(); puts != 0 {
+		t.Errorf("storage task put called %d times, want 0 for a small state", puts)
 	}
 }
 
@@ -142,14 +159,14 @@ func TestSuspend_LargeState_OffloadsAndResumeRehydratesTransparently(t *testing.
 	if run.ResumeStateStorageKey != "resume-state/"+runID {
 		t.Errorf("resume_state_storage_key = %q, want %q", run.ResumeStateStorageKey, "resume-state/"+runID)
 	}
-	if runner.puts != 1 {
-		t.Errorf("storage task put called %d times, want 1", runner.puts)
+	if puts, _, _ := runner.counts(); puts != 1 {
+		t.Errorf("storage task put called %d times, want 1", puts)
 	}
 	if !runner.has(run.ResumeStateStorageKey) {
 		t.Fatal("blob not actually present in the storage backend")
 	}
 	// The stored blob must be ciphertext, not the plaintext state.
-	stored, _ := base64.StdEncoding.DecodeString(runner.store[run.ResumeStateStorageKey])
+	stored, _ := base64.StdEncoding.DecodeString(runner.value(run.ResumeStateStorageKey))
 	if string(stored) == `{"step":"ask_name"}` {
 		t.Error("stored blob is plaintext, not encrypted")
 	}
@@ -167,8 +184,8 @@ func TestSuspend_LargeState_OffloadsAndResumeRehydratesTransparently(t *testing.
 	if string(exec.seenResumeState) != `{"step":"ask_name"}` {
 		t.Errorf("continuation resume_state = %q, want the original inline value", exec.seenResumeState)
 	}
-	if runner.gets != 1 {
-		t.Errorf("storage task get called %d times, want 1", runner.gets)
+	if _, gets, _ := runner.counts(); gets != 1 {
+		t.Errorf("storage task get called %d times, want 1", gets)
 	}
 }
 
@@ -295,8 +312,8 @@ func TestResumeRun_EagerlyDeletesOffloadedBlobAfterSuccessfulResume(t *testing.T
 	if runner.has(blobKey) {
 		t.Error("blob still present in storage backend after eager GC")
 	}
-	if runner.deletes != 1 {
-		t.Errorf("storage task delete called %d times, want 1", runner.deletes)
+	if _, _, deletes := runner.counts(); deletes != 1 {
+		t.Errorf("storage task delete called %d times, want 1", deletes)
 	}
 }
 
@@ -342,8 +359,8 @@ func TestSuspendRun_OrphanedBlobCleanedUpWhenRowLeftRunning(t *testing.T) {
 	if runner.has(blobKey) {
 		t.Error("orphaned resume-state blob was not cleaned up")
 	}
-	if runner.deletes != 1 {
-		t.Errorf("storage task delete called %d times, want 1 (orphan cleanup)", runner.deletes)
+	if _, _, deletes := runner.counts(); deletes != 1 {
+		t.Errorf("storage task delete called %d times, want 1 (orphan cleanup)", deletes)
 	}
 
 	// The row itself must stay exactly as the concurrent finalize left it —
@@ -402,7 +419,7 @@ func TestSuspendRun_OrphanedBlobCleanedUpOnGenuineSuspendRunError(t *testing.T) 
 	if runner.has(blobKey) {
 		t.Error("orphaned resume-state blob was not cleaned up after a genuine SuspendRun error")
 	}
-	if runner.deletes != 1 {
-		t.Errorf("storage task delete called %d times, want 1 (orphan cleanup)", runner.deletes)
+	if _, _, deletes := runner.counts(); deletes != 1 {
+		t.Errorf("storage task delete called %d times, want 1 (orphan cleanup)", deletes)
 	}
 }

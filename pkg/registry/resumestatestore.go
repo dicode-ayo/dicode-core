@@ -124,9 +124,19 @@ func (s *ResumeStateStore) Persist(ctx context.Context, runID string, state []by
 		"prefix": resumeStateKeyPrefix,
 	})
 	if err != nil {
+		// The key is deterministic (resume-state/<runID>) and a "failed" put
+		// can still have written bytes to disk before reporting failure (a
+		// partial write, or a failure the runner didn't attribute to this
+		// call cleanly) — best-effort clean up so a caller retrying Persist
+		// under the same runID never has a stale/partial blob sitting under
+		// the key it's about to reuse. Persist has already failed either way;
+		// this cleanup's own error is deliberately swallowed rather than
+		// masking the real failure below.
+		_ = s.Delete(ctx, key)
 		return "", 0, 0, fmt.Errorf("storage put: %w", err)
 	}
 	if _, err := storageResult(res); err != nil {
+		_ = s.Delete(ctx, key)
 		return "", 0, 0, fmt.Errorf("storage put: %w", err)
 	}
 	return key, len(blob), storedAt, nil

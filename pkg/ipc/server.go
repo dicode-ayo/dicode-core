@@ -1015,12 +1015,24 @@ func (s *Server) handleConn(conn net.Conn) {
 				reply(req.ID, nil, "ipc: cannot delete resume state for a still-suspended run")
 				continue
 			}
-			if run.ResumeStateStorageKey != "" && s.resumeStateStore != nil {
+			// Clear the DB columns only once the blob is actually gone — the
+			// TTL sweep's next pass is this row's only remaining way to find
+			// an orphaned blob, and it can only do that via the very
+			// resume_state_storage_key column ClearResumeStateBlob would
+			// erase. Reporting success (or silently no-op'ing when no store
+			// is wired) while the blob still exists would strand it: no
+			// future sweep would ever revisit this row.
+			if run.ResumeStateStorageKey != "" {
+				if s.resumeStateStore == nil {
+					reply(req.ID, nil, "ipc: resume-state store not configured")
+					continue
+				}
 				if err := s.resumeStateStore.Delete(s.ctx, run.ResumeStateStorageKey); err != nil {
-					_ = err
-					s.log.Warn("delete_resume_state: storage delete failed; will still clear columns",
+					s.log.Warn("delete_resume_state: storage delete failed",
 						zap.String("run", req.RunID),
 						zap.String("error_class", "storage_delete"))
+					reply(req.ID, nil, "ipc: resume-state storage delete failed")
+					continue
 				}
 			}
 			if err := s.registry.ClearResumeStateBlob(s.ctx, req.RunID); err != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -2775,6 +2776,24 @@ func TestIPC_DeleteResumeState_RejectsStillSuspendedRun(t *testing.T) {
 	}
 }
 
+// fakeResumeStateRunner is a minimal registry.TaskRunner double for
+// dicode.runs.delete_resume_state's storage-delete call — lets tests force
+// the storage task to succeed or fail without a real buildin/local-storage
+// Deno task.
+type fakeResumeStateRunner struct{ deleteErr error }
+
+func (r *fakeResumeStateRunner) RunTaskSync(_ context.Context, _ string, params map[string]string) (any, error) {
+	if params["op"] == "delete" && r.deleteErr != nil {
+		return nil, r.deleteErr
+	}
+	return map[string]any{"ok": true}, nil
+}
+
+func newFakeResumeStateStore(deleteErr error) *registry.ResumeStateStore {
+	key := make([]byte, 32)
+	return registry.NewResumeStateStore(registry.NewInputCrypto(key), &fakeResumeStateRunner{deleteErr: deleteErr}, "buildin/local-storage", "/data/resume-state")
+}
+
 // TestIPC_DeleteResumeState_AllowsNonSuspendedRun is the counterpart: once a
 // run has left `suspended` (resumed here), delete_resume_state must still
 // work — the guard added above must not become a blanket block.
@@ -2799,7 +2818,8 @@ func TestIPC_DeleteResumeState_AllowsNonSuspendedRun(t *testing.T) {
 			Dicode: &task.DicodePermissions{RunsDeleteResumeState: true},
 		},
 	}
-	conn, _ := e.startWithSpec(t, nil, nil, spec, nil)
+	conn, srv := e.startWithSpec(t, nil, nil, spec, nil)
+	srv.SetResumeStateStore(newFakeResumeStateStore(nil))
 
 	sendMsg(t, conn, map[string]any{
 		"id":     "1",
@@ -2817,5 +2837,105 @@ func TestIPC_DeleteResumeState_AllowsNonSuspendedRun(t *testing.T) {
 	}
 	if run.ResumeStateStorageKey != "" {
 		t.Errorf("resume_state_storage_key = %q, want cleared", run.ResumeStateStorageKey)
+	}
+}
+
+// TestIPC_DeleteResumeState_NoStoreConfigured_KeepsReference covers the case
+// CodeRabbit review flagged: before this fix, a nil resumeStateStore made the
+// handler silently skip the storage delete but still clear the DB columns —
+// reporting success while orphaning the blob (unreachable by any future TTL
+// sweep, since the sweep query depends on the very column just cleared).
+func TestIPC_DeleteResumeState_NoStoreConfigured_KeepsReference(t *testing.T) {
+	e := newTestEnv(t)
+
+	runID, err := e.reg.StartRun(context.Background(), "conversation-task", "")
+	if err != nil {
+		t.Fatalf("StartRun: %v", err)
+	}
+	ref := &registry.ResumeStateBlobRef{StorageKey: "resume-state/" + runID, Size: 999, StoredAt: 1714400000}
+	if _, err := e.reg.SuspendRun(context.Background(), runID,
+		nil, nil, "tok", time.Now().UnixMilli(), 0, nil, ref); err != nil {
+		t.Fatalf("SuspendRun: %v", err)
+	}
+	if err := e.reg.MarkRunResumed(context.Background(), runID); err != nil {
+		t.Fatalf("MarkRunResumed: %v", err)
+	}
+
+	spec := &task.Spec{
+		Permissions: task.Permissions{
+			Dicode: &task.DicodePermissions{RunsDeleteResumeState: true},
+		},
+	}
+	// No SetResumeStateStore call — resumeStateStore stays nil.
+	conn, _ := e.startWithSpec(t, nil, nil, spec, nil)
+
+	sendMsg(t, conn, map[string]any{
+		"id":     "1",
+		"method": "dicode.runs.delete_resume_state",
+		"runID":  runID,
+	})
+	resp := recvMsg(t, conn)
+	errMsg, _ := resp["error"].(string)
+	if !strings.Contains(errMsg, "not configured") {
+		t.Fatalf("expected a not-configured error, got error=%q result=%v", errMsg, resp["result"])
+	}
+
+	run, err := e.reg.GetRun(context.Background(), runID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if run.ResumeStateStorageKey != ref.StorageKey {
+		t.Errorf("resume_state_storage_key = %q, want untouched %q (blob was never actually deleted)", run.ResumeStateStorageKey, ref.StorageKey)
+	}
+}
+
+// TestIPC_DeleteResumeState_StorageDeleteFails_KeepsReference is the other
+// half of the same CodeRabbit finding: a Delete call that reaches the
+// storage task but fails must not clear the DB reference either — before
+// this fix the handler logged the failure and cleared the columns anyway,
+// silently orphaning the blob (unreachable by the TTL sweep, which only
+// revisits rows that still have resume_state_storage_key set) while
+// reporting {"ok": true} to the caller.
+func TestIPC_DeleteResumeState_StorageDeleteFails_KeepsReference(t *testing.T) {
+	e := newTestEnv(t)
+
+	runID, err := e.reg.StartRun(context.Background(), "conversation-task", "")
+	if err != nil {
+		t.Fatalf("StartRun: %v", err)
+	}
+	ref := &registry.ResumeStateBlobRef{StorageKey: "resume-state/" + runID, Size: 999, StoredAt: 1714400000}
+	if _, err := e.reg.SuspendRun(context.Background(), runID,
+		nil, nil, "tok", time.Now().UnixMilli(), 0, nil, ref); err != nil {
+		t.Fatalf("SuspendRun: %v", err)
+	}
+	if err := e.reg.MarkRunResumed(context.Background(), runID); err != nil {
+		t.Fatalf("MarkRunResumed: %v", err)
+	}
+
+	spec := &task.Spec{
+		Permissions: task.Permissions{
+			Dicode: &task.DicodePermissions{RunsDeleteResumeState: true},
+		},
+	}
+	conn, srv := e.startWithSpec(t, nil, nil, spec, nil)
+	srv.SetResumeStateStore(newFakeResumeStateStore(errors.New("storage backend unreachable")))
+
+	sendMsg(t, conn, map[string]any{
+		"id":     "1",
+		"method": "dicode.runs.delete_resume_state",
+		"runID":  runID,
+	})
+	resp := recvMsg(t, conn)
+	errMsg, _ := resp["error"].(string)
+	if !strings.Contains(errMsg, "storage delete failed") {
+		t.Fatalf("expected a storage-delete-failure error, got error=%q result=%v", errMsg, resp["result"])
+	}
+
+	run, err := e.reg.GetRun(context.Background(), runID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if run.ResumeStateStorageKey != ref.StorageKey {
+		t.Errorf("resume_state_storage_key = %q, want untouched %q (blob was never actually deleted)", run.ResumeStateStorageKey, ref.StorageKey)
 	}
 }

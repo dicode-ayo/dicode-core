@@ -155,7 +155,11 @@ store a structured `{store, key}` reference in `resume_state`, offload the blob 
 `buildin/blob-storage` / `buildin/local-storage`, rehydrate on resume via the storage task's `get`
 (never a raw fetchable URL — SSRF/coupling), GC keyed to the root run on conversation end.
 **Shipped (#570, 2026-08-12) — see "Resume-state offload, as shipped" below for the concrete
-threshold/columns/GC design; this paragraph is the original intent and matches what landed.**
+threshold/columns/GC design that landed. One detail above doesn't match: the reference is NOT
+a `{store, key}` structure embedded in `resume_state` — it's three dedicated `runs` columns
+(`resume_state_storage_key`/`_size`/`_stored_at`), with `resume_state` left NULL when offloaded.
+Everything else — offload the blob, rehydrate via the storage task's `get`, never a raw fetchable
+URL, GC keyed to the run — matches what landed.**
 
 **Ending a conversation:** the run ends when the handler **returns instead of suspending**,
 triggered by (a) an explicit end-marker in the resume input → `success` (primary), (b) idle TTL —
@@ -214,8 +218,13 @@ line (1 existing file changed). A local vLLM / any OpenAI-compat = 0 code, 1 yam
   on every storage-task call, and its own `runs` columns
   (`resume_state_storage_key`/`_size`/`_stored_at`) — so it can never collide with run-input
   offload even though both share `buildin/local-storage` as the byte store. See "Resume-state
-  offload, as shipped" below for the full design. The `{store,key}` reference is **internal to
-  Go, invisible to tasks** (and encrypted) — not a task-side protocol. The 8 MiB IPC frame cap
+  offload, as shipped" below for the full design. **Encryption scope:** the blob itself
+  (`AES`/`InputCrypto`, AEAD-bound to the run) is encrypted — the `resume_state_storage_key`/
+  `_size`/`_stored_at` columns that reference it are plain metadata, not encrypted, and are
+  reachable by any task holding the `runs_list_expired_resume_state`/`runs_delete_resume_state`
+  permission via `dicode.runs.*` (currently only `buildin/resume-state-cleanup`). The reference
+  is **internal to Go, invisible to tasks** as a value they read or construct — not a
+  task-side protocol. The 8 MiB IPC frame cap
   (raised from the pre-#593 ~128 KiB single-write cliff) is what makes offload non-optional
   for a long conversation, not a nicety.
 - **Suspend/end notification reuses the `approvalNotifier` pattern.** The WebUI already

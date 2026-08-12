@@ -22,7 +22,7 @@ params:
   key:
     type: string
     required: true
-    description: "Storage key, expected shape: run-inputs/<runID>"
+    description: "Storage key, expected shape: <prefix><id> (e.g. run-inputs/<runID>, resume-state/<runID>, relay/<id>)"
   value:
     type: string
     default: ""
