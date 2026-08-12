@@ -54,11 +54,12 @@ jobs:
 
       # Only tasks/examples/** entries that ship a task.test.ts run here — see
       # issue #551. Today that's deploy-wizard, repo-prune, and suspend-wizard,
-      # all runtime: deno. The Layer-2 unit-test harness (tasks/sdk-test.ts)
-      # only supports the Deno runtime (#159), so a docker/podman/python
-      # example (hello-docker, hello-podman, hello-python, nginx-start) can't
-      # ship a task.test.ts today — nothing is silently skipped, there's
-      # simply nothing else the glob could match yet.
+      # all runtime: deno. The Layer-2 unit-test harness only covers Deno
+      # (tasks/sdk-test.ts) and Python (tasks/sdk_test.py, #159 Phase 2) — a
+      # docker/podman example (hello-docker, hello-podman, nginx-start) can't
+      # ship a test file yet (#159 Phase 3 remains unstarted). hello-python's
+      # task.test.py is run separately below (it's a PEP 723 script executed
+      # via `uv run`, not `deno test`, so this glob correctly skips it).
       - name: Run Deno tests for tasks/examples/*
         run: deno test --allow-all --config=tasks/deno.json 'tasks/examples/**/task.test.ts'
 
@@ -68,6 +69,19 @@ jobs:
       # script against a throwaway repo (gh stubbed on PATH, no network).
       - name: Run repo-prune shell guard tests
         run: bash tasks/examples/repo-prune/prune-stale-refs.test.sh
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.7.3"
+
+      # Python's Layer-2 harness (#159 Phase 2): tasks/examples/hello-python
+      # ships the one Python task.test.py in this repo today. Each
+      # task.test.py is a self-running PEP 723 script (see
+      # docs/concepts/testing.md § Python for the exact contract — the same
+      # one pkg/tasktest.runPython relies on), so a plain `uv run <file>`
+      # exercises it directly; no daemon needed, unlike test-tasks-cli below.
+      - name: Run Python task test for tasks/examples/hello-python
+        run: uv run tasks/examples/hello-python/task.test.py
 
   test-tasks-cli:
     name: Test buildin tasks (dicode CLI)

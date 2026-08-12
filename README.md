@@ -1149,7 +1149,7 @@ The testing and validation system is designed with four layers. Not all are impl
 |---|---|---|---|
 | E2E tests | Playwright | Full UI + API integration regressions | ✅ Implemented |
 | Static validation | `dicode task validate` | Schema errors, syntax, chain cycles | Planned |
-| Unit tests | `dicode task test` | Logic bugs, wrong HTTP calls, bad return values | ✅ Implemented (Deno; Python/Docker/Podman tracked as #159) |
+| Unit tests | `dicode task test` | Logic bugs, wrong HTTP calls, bad return values | ✅ Implemented (Deno, Python; Docker/Podman tracked as #159) |
 | Dry run | `dicode task run --dry-run` | Secret resolution, correct endpoints | Planned |
 
 > **Note**: E2E tests use Playwright and cover core UI flows, file changes, webhooks, config, and auth. Unit tests run via `dicode task test <task-id>` or `make test-tasks` — the CLI routes through the same executor as the MCP `test_task` tool so any caller (human, built-in agent, third-party AI) gets the same results. `task validate` and `task run --dry-run` are not yet implemented. Current CLI supports: `run`, `list`, `logs`, `status`, `ai`, `task test`, `task pending`, `task approve`, `secrets`, `relay`, `webhook sign`, `version`. When the trust-on-change approval gate is holding tasks, `dicode list` marks them `pending` in an APPROVAL column and `dicode task pending` lists each held task with its short content hash — copy an id straight into `dicode task approve <task-id>`.
@@ -1169,18 +1169,21 @@ Will check: `task.yaml` schema, script syntax, env var resolution, chain cycle d
 
 ### Layer 2 — Unit tests (`dicode task test`)
 
-Write a sibling `task.test.ts` (or `.js` / `.mjs`) and run it through the task's runtime:
+Write a sibling test file and run it through the task's runtime:
 
 ```bash
-dicode task test buildin/webui           # via the daemon (CLI → IPC → executor)
-make test-tasks                          # task.test.ts files in tasks/buildin/ and tasks/examples/, plus the repo-prune shell guard
+dicode task test buildin/webui               # via the daemon (CLI → IPC → executor)
+make test-tasks                              # task.test.ts files in tasks/buildin/ and tasks/examples/, plus the repo-prune shell guard
+uv run tasks/examples/hello-python/task.test.py  # Python: directly, no daemon required
 ```
 
-The harness (`tasks/sdk-test.ts`) provides in-memory mocks for the production SDK: `params.set`, `env.set`, `kv.set/get`, `http.mock` / `mockOnce`, `assert.*`, plus `runTask()` which invokes the task's default export. Each `test()` case gets a fresh mock state. See [tasks/buildin/webui/task.test.ts](tasks/buildin/webui/task.test.ts) and [tasks/buildin/ai-agent/task.test.ts](tasks/buildin/ai-agent/task.test.ts) for working examples.
+**Deno** (`task.test.ts` / `.js` / `.mjs`) — the harness (`tasks/sdk-test.ts`) provides in-memory mocks for the production SDK: `params.set`, `env.set`, `kv.set/get`, `http.mock` / `mockOnce`, `assert.*`, plus `runTask()` which invokes the task's default export. Each `test()` case gets a fresh mock state. See [tasks/buildin/webui/task.test.ts](tasks/buildin/webui/task.test.ts) and [tasks/buildin/ai-agent/task.test.ts](tasks/buildin/ai-agent/task.test.ts) for working examples.
+
+**Python** (`task.test.py`) — the harness (`tasks/sdk_test.py`) provides the equivalent mocks (`params`, `env`, `kv`, `http.mock`/`http.mock_once` over httpx, `run_task()`, a `dicode`-shaped mock) via pytest. A `task.test.py` is itself a PEP 723 script (`uv run`-executable) that ends with `run_pytest_main(__file__)` — see [docs/concepts/testing.md § Python](docs/concepts/testing.md#python) for the exact contract, and [tasks/examples/hello-python/task.test.py](tasks/examples/hello-python/task.test.py) for a working example.
 
 The same executor is exposed as the `test_task` MCP tool, so any MCP-capable agent (Claude Code, Cursor) can drive testing without dicode-specific plumbing.
 
-Runtime support: **Deno ✅**. Python, Docker, Podman tracked as #159.
+Runtime support: **Deno ✅, Python ✅**. Docker, Podman tracked as #159 (Phase 3).
 
 ### Layers 3–4 — Dry run, CI (planned)
 
@@ -1237,7 +1240,7 @@ When `server.auth: true`, add an API key from the Security page:
 | `list_tasks` | All registered tasks with id, trigger, status, last run time |
 | `get_task(id)` | Full task content: task.yaml + script source |
 | `run_task(id)` | Trigger a live run — returns run ID |
-| `test_task(id)` | Run the task's sibling `task.test.*` through its runtime. Returns pass/fail counts + full stdout. Deno supported; other runtimes return a clear "not yet supported" error (#159). |
+| `test_task(id)` | Run the task's sibling `task.test.*` through its runtime. Returns pass/fail counts + full stdout. Deno and Python supported; Docker/Podman return a clear "not yet supported" error (#159 Phase 3). |
 | `list_sources` | List configured task sources with dev mode status |
 | `switch_dev_mode(source, enabled, path?)` | Toggle dev mode for a source |
 
