@@ -104,34 +104,53 @@ async function withPendingChange(
 
     await body({ mutatedSize: Buffer.byteLength(mutated, 'utf8') });
   } finally {
-    // Restore exact original bytes, then converge rather than merely waiting.
-    // dicode.lock holds one hash per task, so a test that approves anything —
-    // or a preceding spec file that did — leaves the record pointing at
-    // content other than the restored bytes, and the restore alone never
-    // clears pending. Keep approving whatever is currently pending until the
-    // reconciler has caught up to the restored bytes and the task settles
-    // armed, so later tests and later spec files start from "original content,
-    // approved".
-    //
-    // Errors here are logged rather than thrown so a genuine failure from
-    // body() above isn't masked by a cleanup problem.
+    // Restore exact original bytes: the content hash returns to the
+    // already-approved record, so the reconciler re-arms it without any
+    // explicit re-approval. Only a test that approves the mutated content
+    // needs more than this (see settleToRestored). Errors here are logged
+    // rather than thrown so a genuine failure from body() above isn't masked
+    // by a cleanup problem.
     try {
       fs.writeFileSync(taskJsPath, original, 'utf8');
-      const deadline = Date.now() + 60_000;
-      for (;;) {
-        const t = await (await request.get(`/api/tasks/${encodeURIComponent(MANUAL_TASK_ID)}`)).json() as Record<string, unknown>;
-        if (t.pending_approval !== true) break;
-        if (Date.now() > deadline) {
-          console.error('hello-manual did not settle after restore');
-          break;
-        }
-        await request.post(`/api/tasks/${encodeURIComponent(MANUAL_TASK_ID)}/approve`);
-        await new Promise((r) => setTimeout(r, 1_000));
-      }
+      await waitForTaskCondition(request, MANUAL_TASK_ID, (t) => t.pending_approval !== true);
     } catch (cleanupError) {
       console.error('withPendingChange cleanup failed:', cleanupError);
     }
   }
+}
+
+/**
+ * settleToRestored returns hello-manual to "original content, approved" after a
+ * test that clicked Approve.
+ *
+ * That click records the mutated content's hash, replacing the record the
+ * restored bytes match, so the restore re-pends the task — but not
+ * instantly: the reconciler has to observe the write first. Polling for
+ * "not pending" and exiting on the first hit therefore reports success while
+ * the re-pend is still in flight, stranding the task for later spec files.
+ *
+ * So this requires the task to be observed settled on several consecutive
+ * polls spanning more than one reconcile, approving whatever is pending in
+ * between. It tolerates the test having failed before its approve click, in
+ * which case no re-pend comes and the consecutive-clean check simply passes.
+ */
+async function settleToRestored(
+  request: import('@playwright/test').APIRequestContext,
+): Promise<void> {
+  const deadline = Date.now() + 90_000;
+  const cleanRunNeeded = 8; // 8 polls x 2s = 16s of quiet, well past an fsnotify re-pend
+  let clean = 0;
+  while (Date.now() < deadline) {
+    const t = await (await request.get(`/api/tasks/${encodeURIComponent(MANUAL_TASK_ID)}`)).json() as Record<string, unknown>;
+    if (t.pending_approval === true) {
+      clean = 0;
+      await request.post(`/api/tasks/${encodeURIComponent(MANUAL_TASK_ID)}/approve`);
+    } else if (++clean >= cleanRunNeeded) {
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 2_000));
+  }
+  console.error('hello-manual did not settle to the restored content');
 }
 
 test.describe('Approval review surface', () => {
@@ -203,7 +222,12 @@ test.describe('Approval review surface', () => {
   });
 
   test('the review panel is up on arrival, and hiding it disarms Approve', async ({ page, request }) => {
-    await withPendingChange(request, async () => {
+    const taskJsPath = path.join(tasksDir(), 'hello-manual', 'task.js');
+    const original = fs.readFileSync(taskJsPath, 'utf8');
+    try {
+      fs.writeFileSync(taskJsPath, original + `\n${BODY_MARKER}\n`, 'utf8');
+      await waitForTaskCondition(request, MANUAL_TASK_ID, (t) => t.pending_approval === true);
+
       await gotoWebui(page);
       await navigateInSpa(page, `/tasks/${MANUAL_TASK_ID}`);
       await waitForTaskDetail(page);
@@ -240,10 +264,16 @@ test.describe('Approval review surface', () => {
 
       await approveBtn.click({ force: true });
       await waitForTaskCondition(request, MANUAL_TASK_ID, (t) => t.pending_approval !== true);
-      // This click records the mutated content's hash, replacing the record
-      // the restored bytes match. withPendingChange's cleanup converges by
-      // re-approving until the task settles on the restored content — which is
-      // also why this test runs last in the file.
-    });
+    } finally {
+      // This click recorded the mutated content's hash, so the restore below
+      // re-pends the task — which is why this test runs last in the file and
+      // settles explicitly rather than through withPendingChange.
+      try {
+        fs.writeFileSync(taskJsPath, original, 'utf8');
+        await settleToRestored(request);
+      } catch (cleanupError) {
+        console.error('approve-click cleanup failed:', cleanupError);
+      }
+    }
   });
 });
