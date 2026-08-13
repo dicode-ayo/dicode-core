@@ -33,7 +33,7 @@ const BODY_MARKER = '// e2e-review-probe-marker';
 // set's own per-minute cron/storage tasks — mirrors cron.spec.ts's spec-
 // level override for the same class of "wait on the real daemon's
 // background loops" test.
-test.setTimeout(120_000);
+test.setTimeout(180_000);
 
 type PendingState = {
   task_id: string;
@@ -104,15 +104,30 @@ async function withPendingChange(
 
     await body({ mutatedSize: Buffer.byteLength(mutated, 'utf8') });
   } finally {
-    // Restore exact original bytes: the content hash returns to the
-    // already-approved record, so the reconciler re-arms it without any
-    // explicit re-approval, leaving a clean baseline for later specs. Errors
-    // here are logged rather than thrown so a genuine failure from body()
-    // above isn't masked by a cleanup problem — losing the real failure's
-    // message would make the next CI run harder to diagnose than this one.
+    // Restore exact original bytes, then converge rather than merely waiting.
+    // dicode.lock holds one hash per task, so a test that approves anything —
+    // or a preceding spec file that did — leaves the record pointing at
+    // content other than the restored bytes, and the restore alone never
+    // clears pending. Keep approving whatever is currently pending until the
+    // reconciler has caught up to the restored bytes and the task settles
+    // armed, so later tests and later spec files start from "original content,
+    // approved".
+    //
+    // Errors here are logged rather than thrown so a genuine failure from
+    // body() above isn't masked by a cleanup problem.
     try {
       fs.writeFileSync(taskJsPath, original, 'utf8');
-      await waitForTaskCondition(request, MANUAL_TASK_ID, (t) => t.pending_approval !== true);
+      const deadline = Date.now() + 60_000;
+      for (;;) {
+        const t = await (await request.get(`/api/tasks/${encodeURIComponent(MANUAL_TASK_ID)}`)).json() as Record<string, unknown>;
+        if (t.pending_approval !== true) break;
+        if (Date.now() > deadline) {
+          console.error('hello-manual did not settle after restore');
+          break;
+        }
+        await request.post(`/api/tasks/${encodeURIComponent(MANUAL_TASK_ID)}/approve`);
+        await new Promise((r) => setTimeout(r, 1_000));
+      }
     } catch (cleanupError) {
       console.error('withPendingChange cleanup failed:', cleanupError);
     }
@@ -123,7 +138,7 @@ test.describe('Approval review surface', () => {
   test('pending-state reports the resolved task and its file inventory, without code', async ({ request }) => {
     // This test alone carries the 15s bootstrap wait on top of the file-level
     // budget — give it headroom so a slow reconciler doesn't clip cleanup.
-    test.setTimeout(180_000);
+    test.setTimeout(240_000);
     await withPendingChange(request, async ({ mutatedSize }) => {
       const res = await request.get(`/api/tasks/${encodeURIComponent(MANUAL_TASK_ID)}/pending-state`);
       expect(res.ok()).toBe(true);
@@ -144,51 +159,6 @@ test.describe('Approval review surface', () => {
       // No code bytes anywhere in the payload.
       expect(JSON.stringify(state)).not.toContain(BODY_MARKER);
     }, 15_000);
-  });
-
-  test('the review panel is up on arrival, and hiding it disarms Approve', async ({ page, request }) => {
-    await withPendingChange(request, async () => {
-      await gotoWebui(page);
-      await navigateInSpa(page, `/tasks/${MANUAL_TASK_ID}`);
-      await waitForTaskDetail(page);
-
-      // Scope to the badge's own title attribute rather than a bare text
-      // match: the page also streams live daemon log lines containing
-      // "pending approval" as a substring, which a plain hasText locator
-      // resolves to under strict mode.
-      await expect(page.locator('span[title="This task is new or changed and its triggers are not armed until approved"]')).toBeVisible();
-
-      // Landing on a pending task must show what will run without any click.
-      await expect(page.locator('dc-task-detail')).toContainText('task.js', { timeout: 15_000 });
-      await expect(page.locator('dc-task-detail')).toContainText('Runs as');
-      const hideBtn = page.locator('button', { hasText: 'Hide review' });
-      await expect(hideBtn).toBeVisible();
-
-      const approveBtn = page.locator('button', { hasText: /^\s*✓ Approve\s*$/ });
-      await expect(approveBtn).toBeVisible();
-
-      // Collapsing disarms: approval is not offered against a review the
-      // operator has put back out of view.
-      await hideBtn.click({ force: true });
-      const reviewBtn = page.locator('button', { hasText: /^\s*✎ Review\s*$/ });
-      await expect(reviewBtn).toBeVisible();
-      await expect(approveBtn).toHaveCount(0);
-
-      // …and the disarmed button re-opens the panel rather than approving.
-      await reviewBtn.click({ force: true });
-      await expect(page.locator('dc-task-detail')).toContainText('task.js', { timeout: 10_000 });
-      const afterReopen = await (
-        await request.get(`/api/tasks/${encodeURIComponent(MANUAL_TASK_ID)}`)
-      ).json() as Record<string, unknown>;
-      expect(afterReopen.pending_approval).toBe(true);
-
-      await approveBtn.click({ force: true });
-      await waitForTaskCondition(request, MANUAL_TASK_ID, (t) => t.pending_approval !== true);
-      // Restoring the original bytes in withPendingChange's finally returns
-      // the content hash to the record approved by the click above (or by
-      // bootstrap, if the test failed before it), so the task is left armed
-      // either way.
-    });
   });
 
   test('the panel renders with no CDN reachable', async ({ page, request }) => {
@@ -229,6 +199,51 @@ test.describe('Approval review surface', () => {
         await request.get(`/api/tasks/${encodeURIComponent(MANUAL_TASK_ID)}`)
       ).json() as Record<string, unknown>;
       expect(afterHandoff.pending_approval).toBe(true);
+    });
+  });
+
+  test('the review panel is up on arrival, and hiding it disarms Approve', async ({ page, request }) => {
+    await withPendingChange(request, async () => {
+      await gotoWebui(page);
+      await navigateInSpa(page, `/tasks/${MANUAL_TASK_ID}`);
+      await waitForTaskDetail(page);
+
+      // Scope to the badge's own title attribute rather than a bare text
+      // match: the page also streams live daemon log lines containing
+      // "pending approval" as a substring, which a plain hasText locator
+      // resolves to under strict mode.
+      await expect(page.locator('span[title="This task is new or changed and its triggers are not armed until approved"]')).toBeVisible();
+
+      // Landing on a pending task must show what will run without any click.
+      await expect(page.locator('dc-task-detail')).toContainText('task.js', { timeout: 15_000 });
+      await expect(page.locator('dc-task-detail')).toContainText('Runs as');
+      const hideBtn = page.locator('button', { hasText: 'Hide review' });
+      await expect(hideBtn).toBeVisible();
+
+      const approveBtn = page.locator('button', { hasText: /^\s*✓ Approve\s*$/ });
+      await expect(approveBtn).toBeVisible();
+
+      // Collapsing disarms: approval is not offered against a review the
+      // operator has put back out of view.
+      await hideBtn.click({ force: true });
+      const reviewBtn = page.locator('button', { hasText: /^\s*✎ Review\s*$/ });
+      await expect(reviewBtn).toBeVisible();
+      await expect(approveBtn).toHaveCount(0);
+
+      // …and the disarmed button re-opens the panel rather than approving.
+      await reviewBtn.click({ force: true });
+      await expect(page.locator('dc-task-detail')).toContainText('task.js', { timeout: 10_000 });
+      const afterReopen = await (
+        await request.get(`/api/tasks/${encodeURIComponent(MANUAL_TASK_ID)}`)
+      ).json() as Record<string, unknown>;
+      expect(afterReopen.pending_approval).toBe(true);
+
+      await approveBtn.click({ force: true });
+      await waitForTaskCondition(request, MANUAL_TASK_ID, (t) => t.pending_approval !== true);
+      // This click records the mutated content's hash, replacing the record
+      // the restored bytes match. withPendingChange's cleanup converges by
+      // re-approving until the task settles on the restored content — which is
+      // also why this test runs last in the file.
     });
   });
 });
