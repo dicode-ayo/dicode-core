@@ -231,10 +231,7 @@ func (s *Server) hasValidSession(w http.ResponseWriter, r *http.Request) bool {
 			}
 			s.sm.Put(r.Context(), "authenticated", true)
 			if newDevToken != "" {
-				s.cfgMu.RLock()
-				secure := secureCookies(s.cfg)
-				s.cfgMu.RUnlock()
-				setDeviceCookie(w, newDevToken, secure)
+				setDeviceCookie(w, newDevToken, s.secureCookies())
 			}
 			return true
 		}
