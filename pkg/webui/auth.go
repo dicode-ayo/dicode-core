@@ -222,7 +222,11 @@ func (s *Server) hasValidSession(w http.ResponseWriter, r *http.Request) bool {
 	}
 	if s.dbSessions != nil {
 		if dc, err := r.Cookie(deviceCookie); err == nil {
-			newDevToken, ok, driftReject := s.dbSessions.renewFromDevice(r.Context(), dc.Value, clientIP(r, s.cfg.Server.TrustProxy), r.Header.Get("User-Agent"), s.cfg.Server.DeviceBinding)
+			s.cfgMu.RLock()
+			trustProxy := s.cfg.Server.TrustProxy
+			deviceBinding := s.cfg.Server.DeviceBinding
+			s.cfgMu.RUnlock()
+			newDevToken, ok, driftReject := s.dbSessions.renewFromDevice(r.Context(), dc.Value, clientIP(r, trustProxy), r.Header.Get("User-Agent"), deviceBinding)
 			if !ok {
 				if driftReject {
 					clearDeviceCookie(w)
