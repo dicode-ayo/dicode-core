@@ -392,6 +392,11 @@ func TestStateWireFormatMatchesWhatTheRendererReads(t *testing.T) {
 		FS:  []task.FSEntry{{Path: "/etc", Permission: "rw"}},
 		Env: []task.EnvEntry{{Name: "API_KEY", From: "env:GH_TOKEN"}},
 	}
+	spec.Docker = &task.DockerConfig{
+		Image: "alpine:3.20", Volumes: []string{"/:/host"}, CapAdd: []string{"SYS_ADMIN"},
+		CapDrop: []string{"ALL"}, SecurityOpt: []string{"no-new-privileges:true"},
+		User: "root", ReadOnly: true, EnvVars: map[string]string{"TOKEN": "leak"},
+	}
 
 	_, st := pendSpec(t, spec)
 
@@ -446,6 +451,16 @@ func TestStateWireFormatMatchesWhatTheRendererReads(t *testing.T) {
 	if _, ok := pm["has_default"]; !ok {
 		t.Errorf("param entry missing %q: keys %v", "has_default", keysOf(pm))
 	}
+	// Container hardening decides what the task can reach independently of
+	// permissions, so every field of it is part of the contract.
+	if c, ok := wire["container"].(map[string]any); ok {
+		for _, k := range []string{"volumes", "cap_add", "cap_drop", "security_opt", "user", "read_only", "env_names"} {
+			if _, ok := c[k]; !ok {
+				t.Errorf("container missing %q: keys %v", k, keysOf(c))
+			}
+		}
+	}
+
 	trig, _ := wire["triggers"].([]any)
 	tr, _ := trig[0].(map[string]any)
 	for _, k := range []string{"kind", "cron"} {

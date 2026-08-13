@@ -199,6 +199,12 @@ func (g *Gate) State(id string) (State, error) {
 		Enabled:     ent.kinded.IsEnabled(),
 	}
 
+	// ent.kinded is read outside the lock. The one in-place mutation of an
+	// admitted spec (the arm callback rewriting a param default) is scoped to a
+	// builtin task ID, and builtins never pend — Admit auto-approves
+	// BuiltinSource before the pending branch — so no spec reachable here is
+	// concurrently written. A future in-place mutation of a gated task's spec
+	// would break that.
 	switch s := ent.kinded.(type) {
 	case *task.Spec:
 		stateFromSpec(&st, s)

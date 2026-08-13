@@ -232,6 +232,11 @@ class DcTaskDetail extends LitElement {
     }
   }
 
+  _renderList(label, values) {
+    if (!values?.length) return '';
+    return html`<div style="display:flex;gap:0.5rem;align-items:baseline;font-size:0.85rem;padding:0.15rem 0"><strong>${label}</strong> ${values.map(v => html`<code>${v}</code> `)}</div>`;
+  }
+
   _renderSection(title, body) {
     return html`
       <div style="margin-bottom:0.9rem">
@@ -285,11 +290,24 @@ class DcTaskDetail extends LitElement {
           ${st.stages.map((sg, i) => html`<div style=${rowStyle}><span class="meta">${i + 1}.</span> <code>${sg.task}</code>${sg.overridden ? html` <span class="meta">overridden</span>` : ''}</div>`)}`) : ''}
 
         ${st.container ? this._renderSection('Container', html`
-          ${st.container.volumes?.length ? html`<div style=${rowStyle}><strong>volumes</strong> ${st.container.volumes.map(v => html`<code>${v}</code> `)}</div>` : ''}
-          ${st.container.ports?.length ? html`<div style=${rowStyle}><strong>ports</strong> ${st.container.ports.map(v => html`<code>${v}</code> `)}</div>` : ''}
-          ${st.container.cap_add?.length ? html`<div style=${rowStyle}><strong>cap_add</strong> ${st.container.cap_add.map(v => html`<code>${v}</code> `)}</div>` : ''}
+          ${this._renderList('volumes', st.container.volumes)}
+          ${this._renderList('ports', st.container.ports)}
+          ${this._renderList('extra_hosts', st.container.extra_hosts)}
+          ${this._renderList('cap_add', st.container.cap_add)}
+          ${this._renderList('cap_drop', st.container.cap_drop)}
+          ${this._renderList('security_opt', st.container.security_opt)}
+          ${this._renderList('entrypoint', st.container.entrypoint)}
+          ${this._renderList('command', st.container.command)}
+          ${this._renderList('env', st.container.env_names)}
           ${st.container.user ? html`<div style=${rowStyle}><strong>user</strong> <code>${st.container.user}</code></div>` : ''}
-          ${st.container.env_names?.length ? html`<div style=${rowStyle}><strong>env</strong> ${st.container.env_names.map(v => html`<code>${v}</code> `)}</div>` : ''}`) : ''}
+          ${st.container.pull_policy ? html`<div style=${rowStyle}><strong>pull_policy</strong> <code>${st.container.pull_policy}</code></div>` : ''}
+          ${st.container.read_only ? html`<div style=${rowStyle}><strong>read_only</strong> <code>true</code></div>` : ''}`) : ''}
+
+        ${st.files_error ? html`
+          <div style="background:rgba(248,81,73,0.12);border:1px solid #f85149;color:#f85149;padding:0.5rem 0.75rem;border-radius:6px;margin-bottom:0.9rem;font-size:0.85rem">
+            &#9888; <strong>The file list could not be built.</strong>
+            <div style="margin-top:0.3rem;color:var(--fg)">${st.files_error}</div>
+          </div>` : ''}
 
         ${files.length ? this._renderSection(`Files (${files.length})`, html`
           ${files.map(f => html`

@@ -89,7 +89,7 @@ So the review surface renders **end state**.
 **End state — the resolved task.** Runtime and image, triggers with the concrete
 cron expression or webhook URL, effective permissions after taskset overrides,
 params with a has-default marker, env declarations, timeout. Structured fields,
-bounded size, no file content.
+no file content.
 
 A param's default is author-written literal content, so it is reported as
 present and never rendered — the same rule the env declarations follow. Showing
