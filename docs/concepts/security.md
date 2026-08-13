@@ -132,6 +132,16 @@ incoming request
       else           → redirect /?auth=required
 ```
 
+The session-cookie check and the device-token renewal/write-back both live in a
+single helper, `hasValidSession` — `requireAuth` just calls it. Every other
+session-consuming gate (`webhookAuthGuard` for `trigger.auth: session`/`any`
+webhooks, and `sessionOrAPIKeyMiddleware` behind `requireSessionOrAPIKey` /
+`requireSessionOrNonEphemeralAPIKey` — e.g. `/api/tasks/{id}/approve`,
+`/api/runs/{id}/replay`, `/api/runs/{id}/resume`, `/mcp`) calls the same
+helper, so a rotated device cookie is written back to the response and the
+scs session is marked `authenticated` identically no matter which route the
+request came in through (#681).
+
 **Public paths** (never require auth):
 
 - `POST /api/auth/login` — login endpoint itself
