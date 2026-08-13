@@ -210,17 +210,33 @@ func isSafeNextPath(next string) bool {
 // or a device token that can be auto-renewed. On a strict-drift reject the
 // offending device row is hard-revoked inside renewFromDevice; w lets this path
 // clear the now-dead device cookie so the browser stops replaying it.
+//
+// This is the single place device-token rotation is consumed: on a successful
+// device-token renewal it marks the scs session "authenticated" and, when
+// renewFromDevice rotated the token, writes the fresh device cookie back via
+// w. Every caller (requireAuth, webhookAuthGuard, sessionOrAPIKeyMiddleware)
+// goes through here so none of them can silently drop a rotated cookie (#681).
 func (s *Server) hasValidSession(w http.ResponseWriter, r *http.Request) bool {
 	if s.sm.GetBool(r.Context(), "authenticated") {
 		return true
 	}
 	if s.dbSessions != nil {
 		if dc, err := r.Cookie(deviceCookie); err == nil {
-			_, ok, driftReject := s.dbSessions.renewFromDevice(r.Context(), dc.Value, clientIP(r, s.cfg.Server.TrustProxy), r.Header.Get("User-Agent"), s.cfg.Server.DeviceBinding)
-			if !ok && driftReject {
-				clearDeviceCookie(w)
+			newDevToken, ok, driftReject := s.dbSessions.renewFromDevice(r.Context(), dc.Value, clientIP(r, s.cfg.Server.TrustProxy), r.Header.Get("User-Agent"), s.cfg.Server.DeviceBinding)
+			if !ok {
+				if driftReject {
+					clearDeviceCookie(w)
+				}
+				return false
 			}
-			return ok
+			s.sm.Put(r.Context(), "authenticated", true)
+			if newDevToken != "" {
+				s.cfgMu.RLock()
+				secure := secureCookies(s.cfg)
+				s.cfgMu.RUnlock()
+				setDeviceCookie(w, newDevToken, secure)
+			}
+			return true
 		}
 	}
 	return false
@@ -281,31 +297,13 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 			return
 		}
 
-		// Check scs session first.
-		if s.sm.GetBool(r.Context(), "authenticated") {
+		// Check scs session, then fall back to device-token auto-renewal.
+		// hasValidSession writes the rotated device cookie back and marks the
+		// scs session on success (and clears the cookie on a strict-drift
+		// reject), so a single call covers both paths.
+		if s.hasValidSession(w, r) {
 			next.ServeHTTP(w, r)
 			return
-		}
-
-		// Session missing or expired — try device token for auto-renewal.
-		if dc, err := r.Cookie(deviceCookie); err == nil {
-			newDevToken, ok, driftReject := s.dbSessions.renewFromDevice(r.Context(), dc.Value, clientIP(r, s.cfg.Server.TrustProxy), r.Header.Get("User-Agent"), s.cfg.Server.DeviceBinding)
-			if ok {
-				s.sm.Put(r.Context(), "authenticated", true)
-				if newDevToken != "" {
-					s.cfgMu.RLock()
-					secure := secureCookies(s.cfg)
-					s.cfgMu.RUnlock()
-					setDeviceCookie(w, newDevToken, secure)
-				}
-				next.ServeHTTP(w, r)
-				return
-			}
-			// A strict-drift reject already hard-revoked the row; clear the now-
-			// dead cookie so the browser stops replaying it.
-			if driftReject {
-				clearDeviceCookie(w)
-			}
 		}
 
 		s.auditDenied(r, "no valid session")

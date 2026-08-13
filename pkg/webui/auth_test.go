@@ -660,6 +660,165 @@ func TestAuth_DeviceToken_Rotation(t *testing.T) {
 	}
 }
 
+// ── Device-token rotation cookie propagation (#681) ──────────────────────────
+//
+// Regression coverage for the bug where hasValidSession (used by
+// webhookAuthGuard and sessionOrAPIKeyMiddleware) rotated the device row on
+// use but silently discarded the freshly-issued token instead of writing it
+// back as a cookie — leaving the browser with neither a valid session nor a
+// valid device row on its very next request. requireAuth's inline duplicate
+// of the rotation logic did write the cookie back, so it was never affected;
+// the fix consolidates rotation into hasValidSession so every caller gets it.
+
+// newRotatableDeviceRow inserts a device row old enough (created_at further
+// back than deviceRotateAfter) that the next renewFromDevice call rotates it,
+// issuing a fresh token. Returns the still-valid raw token to present as the
+// device cookie.
+func newRotatableDeviceRow(t *testing.T, srv *Server) string {
+	t.Helper()
+	return issueRow(t, srv.dbSessions.db, "203.0.113.10", strptr(uaFamily(chromeMac)), deviceRotateAfter+time.Hour)
+}
+
+// TestAuth_DeviceTokenRotation_WritesCookieBackOnEveryPath is the table-driven
+// regression test for #681: a request carrying an expired/absent scs session
+// but a valid, renewable device cookie must receive a Set-Cookie for the
+// rotated device token no matter which of the three auth gates it passes
+// through. Before the fix this failed for the sessionOrAPIKeyMiddleware and
+// webhookAuthGuard postures (both go through hasValidSession), while
+// requireAuth passed because it duplicated the write-back logic inline.
+func TestAuth_DeviceTokenRotation_WritesCookieBackOnEveryPath(t *testing.T) {
+	cases := []struct {
+		name    string
+		request func(t *testing.T, srv *Server) *http.Request
+	}{
+		{
+			// Normal page/API route, gated by requireAuth.
+			name: "requireAuth",
+			request: func(t *testing.T, srv *Server) *http.Request {
+				req := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
+				req.Header.Set("User-Agent", chromeMac)
+				return req
+			},
+		},
+		{
+			// /api/tasks/{id}/approve-style route, gated by
+			// sessionOrAPIKeyMiddleware via requireSessionOrNonEphemeralAPIKey.
+			name: "sessionOrAPIKeyMiddleware",
+			request: func(t *testing.T, srv *Server) *http.Request {
+				req := httptest.NewRequest(http.MethodPost, "/api/tasks/repo%2Fsome-task/approve", nil)
+				req.Header.Set("User-Agent", chromeMac)
+				return req
+			},
+		},
+		{
+			// Webhook with trigger.auth: session, gated by webhookAuthGuard.
+			name: "webhookAuthGuard session mode",
+			request: func(t *testing.T, srv *Server) *http.Request {
+				armSpecWebhook(t, srv, "buildin/session-hook", "/hooks/session-hook", task.WebhookAuthSession, "")
+				req := httptest.NewRequest(http.MethodPost, "/hooks/session-hook", nil)
+				req.Header.Set("User-Agent", chromeMac)
+				return req
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newAuthServer(t, "hunter2")
+			h := srv.Handler()
+
+			raw := newRotatableDeviceRow(t, srv)
+			req := tc.request(t, srv)
+			req.AddCookie(&http.Cookie{Name: deviceCookie, Value: raw})
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+
+			var gotDevCookie *http.Cookie
+			for _, c := range w.Result().Cookies() {
+				if c.Name == deviceCookie {
+					gotDevCookie = c
+				}
+			}
+			if gotDevCookie == nil {
+				t.Fatalf("%s: expected a rotated device Set-Cookie in the response, got none (status %d, body %s)", tc.name, w.Code, w.Body)
+			}
+			if gotDevCookie.Value == "" || gotDevCookie.Value == raw {
+				t.Errorf("%s: expected a NEW rotated device token, got %q (original %q)", tc.name, gotDevCookie.Value, raw)
+			}
+			if w.Code == http.StatusUnauthorized {
+				t.Errorf("%s: request should have been let through on a valid renewable device token, got 401", tc.name)
+			}
+		})
+	}
+}
+
+// TestAuth_ExpiredSessionLiveDevice_RenewsAndLetsThrough is the specific
+// end-to-end case from #681: the scs session cookie is missing/expired but
+// the device cookie is present and valid. The request must both receive a
+// fresh device Set-Cookie AND be let through (not denied). It drives this
+// through sessionOrAPIKeyMiddleware (POST /api/tasks/{id}/approve) — one of
+// the two previously-broken paths — and confirms the downstream business
+// action (approving a pending task) actually completes, not just that the
+// HTTP status looks like a pass: before the fix hasValidSession's ok=true
+// already let requests like this one through (so the approval succeeded
+// either way), but it silently dropped the rotated cookie, which is the
+// specific regression this test locks in.
+func TestAuth_ExpiredSessionLiveDevice_RenewsAndLetsThrough(t *testing.T) {
+	srv := newAuthServer(t, "hunter2")
+	h := srv.Handler()
+
+	if err := srv.registry.Register(&task.Spec{ID: "repo/pending-task", Name: "repo/pending-task", Trigger: task.TriggerConfig{Manual: true}, Enabled: true}); err != nil {
+		t.Fatalf("register task: %v", err)
+	}
+	gate := newFakeGate()
+	gate.pending["repo/pending-task"] = "hash-1"
+	srv.SetApprovalGate(gate)
+
+	raw := newRotatableDeviceRow(t, srv)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks/repo%2Fpending-task/approve", nil)
+	req.Header.Set("User-Agent", chromeMac)
+	// No session cookie at all — simulates an expired/never-established scs
+	// session, exactly as if the cookie had aged out.
+	req.AddCookie(&http.Cookie{Name: deviceCookie, Value: raw})
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected the request to be let through and the approval to succeed on a valid device token, got %d: %s", w.Code, w.Body)
+	}
+	if gate.IsPending("repo/pending-task") {
+		t.Error("task should have been approved — request was not actually let through")
+	}
+
+	var gotDevCookie *http.Cookie
+	for _, c := range w.Result().Cookies() {
+		if c.Name == deviceCookie {
+			gotDevCookie = c
+		}
+	}
+	if gotDevCookie == nil {
+		t.Fatal("expected a Set-Cookie for the rotated device token, got none")
+	}
+	if gotDevCookie.Value == "" || gotDevCookie.Value == raw {
+		t.Errorf("expected a NEW rotated device token, got %q (original %q)", gotDevCookie.Value, raw)
+	}
+	if gotDevCookie.HttpOnly != true {
+		t.Error("rotated device cookie must be HttpOnly")
+	}
+
+	// The rotated token must now be usable on a follow-up request — proof the
+	// old row was replaced, not just duplicated.
+	req2 := httptest.NewRequest(http.MethodGet, "/api/tasks", nil)
+	req2.Header.Set("User-Agent", chromeMac)
+	req2.AddCookie(gotDevCookie)
+	w2 := httptest.NewRecorder()
+	h.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusOK {
+		t.Errorf("rotated device token should be accepted on the next request, got %d: %s", w2.Code, w2.Body)
+	}
+}
+
 // TestWebhookAuthGuard_LongestPrefixWins is a regression test for the auth
 // bypass where a public webhook at /hooks/ai would shadow the authenticated
 // /hooks/ai/dicodai preset because the guard took the first prefix match from
