@@ -234,6 +234,30 @@ func TestMCP_Rejects_NoAuth(t *testing.T) {
 	}
 }
 
+// TestMCP_Rejects_SessionOnly is regression coverage for #698: /mcp is
+// documented (CLAUDE.md, docs/concepts/mcp-server.md, docs/concepts/security.md)
+// as API-key-gated, but was actually mounted on requireSessionOrAPIKey, which
+// also accepted a plain authenticated browser session with no API key at all.
+// A valid session cookie (no Authorization header) must now be rejected.
+func TestMCP_Rejects_SessionOnly(t *testing.T) {
+	srv := newAuthServer(t, "hunter2")
+	h := srv.Handler()
+
+	cookie := login(t, h, "hunter2", false)
+	if cookie == nil {
+		t.Fatal("login failed — no session cookie")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/mcp", nil)
+	req.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("GET /mcp with session cookie only (no API key): expected 401, got %d", w.Code)
+	}
+}
+
 // ── 3. SSRF validation — isAllowedGitScheme ──────────────────────────────────
 
 func TestIsAllowedGitScheme_Allowed(t *testing.T) {

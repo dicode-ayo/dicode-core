@@ -137,4 +137,31 @@ test.describe('Authentication', () => {
     const afterRes = await request.get('/api/tasks');
     expect(afterRes.status()).toBe(401);
   });
+
+  // Regression coverage for #698: /mcp is documented as API-key-gated, but
+  // was actually mounted on a session-OR-API-key middleware, so a plain
+  // browser session (no API key at all) could reach it too.
+  test('GET /mcp with a session cookie but no API key → 401', async ({ request }) => {
+    await login(request, TEST_PASSPHRASE);
+    const res = await request.get('/mcp');
+    expect(res.status()).toBe(401);
+  });
+
+  test('GET /mcp with a Bearer API key succeeds', async ({ request }) => {
+    await login(request, TEST_PASSPHRASE);
+    const keyRes = await request.post('/api/auth/keys', {
+      data: { name: 'mcp-auth-e2e-key' },
+      headers: { 'Content-Type': 'application/json' },
+    });
+    expect(keyRes.ok()).toBe(true);
+    const { key } = (await keyRes.json()) as { key: string };
+    expect(key).toBeTruthy();
+
+    const res = await request.get('/mcp', {
+      headers: { Authorization: `Bearer ${key}` },
+    });
+    expect(res.ok()).toBe(true);
+    const body = (await res.json()) as { name: string; protocol: string };
+    expect(body.name).toBe('dicode');
+  });
 });

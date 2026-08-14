@@ -583,16 +583,22 @@ func (s *Server) Handler() http.Handler {
 		})
 	})
 
-	// MCP endpoint — accepts session cookie OR Bearer API key so machine callers
-	// work without a browser session. Mounted outside the requireAuth group so
-	// Bearer-only clients are not rejected before the key is checked. The actual
-	// JSON-RPC dispatch lives in the buildin/mcp dicode task (tasks/buildin/mcp/task.ts).
+	// MCP endpoint — Bearer API key only (#698). Mounted outside the requireAuth
+	// group so Bearer-only clients are not rejected before the key is checked.
+	// No session-cookie fallback: nothing in the WebUI actually calls /mcp from
+	// the browser (the Security page's "copy claude mcp add command" only
+	// builds a CLI string; the AI chat panel goes through /api/ai/chat), and
+	// allowing a plain authenticated browser session to reach /mcp would widen
+	// the credential surface beyond the documented API-key-only policy (an XSS
+	// or CSRF on another same-origin page would get MCP access without ever
+	// holding an API key). The actual JSON-RPC dispatch lives in the
+	// buildin/mcp dicode task (tasks/buildin/mcp/task.ts).
 	// MCP is a *bool pointer; nil = default enabled once applyDefaults has filled it in.
 	s.cfgMu.RLock()
 	mcpEnabled := s.cfg == nil || s.cfg.Server.MCP == nil || *s.cfg.Server.MCP
 	s.cfgMu.RUnlock()
 	if mcpEnabled {
-		r.With(s.requireSessionOrAPIKey).HandleFunc("/mcp", s.handleMCP)
+		r.With(s.requireAPIKey).HandleFunc("/mcp", s.handleMCP)
 	}
 
 	// Task test endpoint (#208) — API-key gated, mounted OUTSIDE the
@@ -2209,13 +2215,16 @@ func randomRunID() string {
 // succeeds the way the old Go MCP server did); POST rewrites the URL path
 // and re-enters the trigger engine's webhook dispatch via the gateway.
 //
+// Every caller here has already cleared requireAPIKey (#698) — /mcp accepts
+// a Bearer API key only, no session-cookie fallback.
+//
 // Before forwarding a POST, a Bearer-authenticated caller holding a scoped
 // ephemeral per-run MCP token (#567) is checked against mcpScopeCheck: the
 // buildin/mcp task itself always runs with full dicode permissions
 // (list_tasks: true, tasks: ["*"]), so it cannot be relied on to
 // self-restrict — enforcement has to happen here, before the request ever
-// reaches it. Session-cookie callers and unscoped (operator/CLI/dashboard)
-// API keys are unaffected and forward exactly as before this change.
+// reaches it. Unscoped (operator/CLI/dashboard) API keys are unaffected and
+// forward exactly as before this change.
 func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		w.Header().Set("Content-Type", "application/json")
@@ -2232,10 +2241,10 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Scoping only applies to Bearer API-key auth. A session-cookie caller
-	// (browser dashboard) has no ephemeral scope to check — forward as today.
+	// Every request past requireAPIKey carries a Bearer token; resolve its
+	// MCP scope, if any.
 	scope, found := s.scopeForRequest(r)
-	// !found: the api-key middleware upstream (requireSessionOrAPIKey)
+	// !found: the api-key middleware upstream (requireAPIKey)
 	// already validated this token: this is a defensive no-op, not a
 	// second auth gate. scope == nil: unscoped operator/CLI/dashboard
 	// key — full access, forward unchanged.

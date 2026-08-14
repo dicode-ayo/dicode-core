@@ -243,17 +243,13 @@ func (s *Server) hasValidSession(w http.ResponseWriter, r *http.Request) bool {
 	return false
 }
 
-// requireSessionOrAPIKey accepts either a session cookie OR a Bearer API key.
-// Used by endpoints that need to be reachable from both the WebUI (cookies)
-// and CLI/CI tooling (Bearer). When server.auth is disabled this is a no-op.
-func (s *Server) requireSessionOrAPIKey(next http.Handler) http.Handler {
-	return s.sessionOrAPIKeyMiddleware(s.apiKeys.validate)(next)
-}
-
-// requireSessionOrNonEphemeralAPIKey is requireSessionOrAPIKey that rejects
-// ephemeral per-run MCP tokens on the Bearer path (a session cookie is still
-// accepted). Governance endpoints an agent must not self-serve — task
-// approval above all — gate on this (see validateNonEphemeral).
+// requireSessionOrNonEphemeralAPIKey accepts either a session cookie OR a
+// Bearer API key, rejecting ephemeral per-run MCP tokens on the Bearer path
+// (a session cookie is still accepted). Used by endpoints that need to be
+// reachable from both the WebUI (cookies) and CLI/CI tooling (Bearer), but
+// that an agent must not self-serve with its own run's token — task approval
+// above all (see validateNonEphemeral). When server.auth is disabled this is
+// a no-op.
 func (s *Server) requireSessionOrNonEphemeralAPIKey(next http.Handler) http.Handler {
 	return s.sessionOrAPIKeyMiddleware(s.apiKeys.validateNonEphemeral)(next)
 }

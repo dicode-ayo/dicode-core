@@ -13,7 +13,7 @@ server:
   port: 8765
   auth: true
   secret: test-passphrase-12345
-  mcp: false
+  mcp: true
 spec:
   entries:
     e2e-tests:

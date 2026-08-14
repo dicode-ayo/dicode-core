@@ -135,9 +135,10 @@ incoming request
 The session-cookie check and the device-token renewal/write-back both live in a
 single helper, `hasValidSession` — `requireAuth` just calls it. Every other
 session-consuming gate (`webhookAuthGuard` for `trigger.auth: session`/`any`
-webhooks, and `sessionOrAPIKeyMiddleware` behind `requireSessionOrAPIKey` /
+webhooks, and `sessionOrAPIKeyMiddleware` behind
 `requireSessionOrNonEphemeralAPIKey` — e.g. `/api/tasks/{id}/approve`,
-`/api/runs/{id}/replay`, `/api/runs/{id}/resume`, `/mcp`) calls the same
+`/api/runs/{id}/replay`, `/api/runs/{id}/resume`; `/mcp` is Bearer API-key
+only, see #698) calls the same
 helper, so a rotated device cookie is written back to the response and the
 scs session is marked `authenticated` identically no matter which route the
 request came in through (#681).
