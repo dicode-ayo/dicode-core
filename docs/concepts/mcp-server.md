@@ -188,7 +188,7 @@ Hint-style tool: returns a text pointer telling the MCP client to call `POST /ap
 
 ## Security
 
-The `/mcp` endpoint requires a `dck_` API key (Bearer) when `server.auth: true` (`pkg/webui/apikeys.go` `requireAPIKey`, wired via `requireSessionOrAPIKey`). Without auth it is open on localhost. See [security.md](security.md) Phase 4 for the full authentication model.
+The `/mcp` endpoint requires a `dck_` API key (Bearer) when `server.auth: true` (`pkg/webui/apikeys.go` `requireAPIKey`, wired directly on the `/mcp` route — no session-cookie fallback). Without auth it is open on localhost. See [security.md](security.md) Phase 4 for the full authentication model.
 
 ### Ephemeral per-run tokens are capability-scoped
 
