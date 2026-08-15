@@ -106,7 +106,8 @@ type approveRequest struct {
 }
 
 // apiApproveTask handles POST /api/tasks/{id}/approve. Auth mirrors the
-// replay endpoint: session cookie or Bearer API key (requireSessionOrAPIKey).
+// replay endpoint: session cookie or non-ephemeral Bearer API key
+// (requireSessionOrNonEphemeralAPIKey).
 //
 // The dashboard always has a diff on screen before offering Approve, so it
 // sends back the hash that diff was built from. Between the diff being
