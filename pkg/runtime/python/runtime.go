@@ -286,6 +286,9 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 	runOnce := func() (staleLock bool) {
 		result.Error = nil
 		result.ChainInput = nil
+		result.ReturnValue = nil
+		result.OutputContentType = ""
+		result.OutputContent = ""
 
 		_, locked, err := stageLockSidecar(scriptPath, tmpFile.Name())
 		if err != nil {
@@ -333,8 +336,11 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 		exitErr, exitedFirst := pkgruntime.AwaitBridgeCompletion(srv.ReturnCh(), doneCh, pkgruntime.BridgeShutdownGrace,
 			func(retVal any) {
 				result.ChainInput = retVal
+				result.ReturnValue = retVal
 				if out := srv.Output(); out != nil {
 					result.ChainInput = out.Data
+					result.OutputContentType = out.ContentType
+					result.OutputContent = out.Content
 				}
 			},
 			func() { _ = cmd.Process.Signal(syscall.SIGTERM) },
@@ -342,6 +348,8 @@ func (e *executor) Execute(ctx context.Context, spec *task.Spec, opts pkgruntime
 		if exitedFirst {
 			if out := srv.Output(); out != nil {
 				result.ChainInput = out.Data
+				result.OutputContentType = out.ContentType
+				result.OutputContent = out.Content
 			}
 			if exitErr != nil {
 				result.Error = exitErr

@@ -120,6 +120,7 @@ JS/TS execution (the former goja-based `pkg/runtime/js` is gone):
 - `runtime.go` — Python tasks via a `uv`-provisioned interpreter subprocess (`pkg/uv`)
 - `guard.go` — in-interpreter enforcement of declared fs/net/run permissions
 - SDK embedded from `pkg/runtime/python/sdk/dicode_sdk.py`
+- `Execute` populates `RunResult.ReturnValue`, `OutputContentType` and `OutputContent` from the run (#680, matching `pkg/runtime/deno`) — `dicode.run_task` and `output.html(...)`/`output.text(...)`/etc. now work for Python tasks the way `docs/python-runtime.md`'s parity table always claimed.
 
 ### `pkg/runtime/docker/` ✅
 
