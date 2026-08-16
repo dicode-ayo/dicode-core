@@ -921,11 +921,14 @@ func (s *Spec) validate() error {
 // stays within the strict-descendant boundary task.Hash's resolveInclude
 // enforces at hash time — dir's parent directory, i.e. at most one ".." hop
 // up from the task's own directory. Checked here too, at config-load time,
-// rather than leaving it to fail only inside task.Hash later: an entry that
-// fails there causes pkg/taskset/source.go's snapHash to silently fall back
-// to a spec-only hash, dropping ALL dir-content change detection for the
-// task (not just the broken include's contribution) until the entry is
-// fixed — a config error should surface immediately instead.
+// rather than leaving it to fail only inside task.Hash later: a lexically
+// out-of-bounds entry is a config typo an author can fix on the spot, so it
+// should surface immediately as a load error instead of waiting for the
+// reconciler's next poll. This check can't catch every escape, though — a
+// symlink partway down an in-bounds-looking path can still redirect outside
+// the boundary, and that's only visible once task.Hash actually resolves it
+// at hash time (see resolveInclude, and pkg/taskset/source.go's snapHash for
+// how that later failure is handled — #682).
 //
 // Purely lexical, no filesystem access (symlink-aware containment is
 // task.Hash's job, once an absolute dir is known — see resolveInclude).

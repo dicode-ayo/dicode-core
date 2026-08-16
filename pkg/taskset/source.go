@@ -3,6 +3,7 @@ package taskset
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -712,7 +713,7 @@ func (s *Source) syncAndEmit(ctx context.Context, ch chan<- source.Event) error 
 	current := make(map[string]taskSnap, len(tasks))
 	for _, rt := range tasks {
 		current[rt.ID] = taskSnap{
-			specHash: snapHash(rt.Kinded, rt.TaskDir),
+			specHash: s.snapHash(rt.Kinded, rt.TaskDir, rt.ID),
 			kinded:   rt.Kinded,
 			taskDir:  rt.TaskDir,
 		}
@@ -857,18 +858,61 @@ func hashKinded(k task.Kinded) string {
 // capture, so a script-only edit must still perturb the hash — otherwise no
 // update is emitted and the approval gate never re-pends the changed task
 // (#530). A dir-less inline task hashes its spec alone.
-func snapHash(k task.Kinded, taskDir string) string {
+//
+// It's a method (not a free function) so the error path below can log
+// through s.log — see the #682 comment on that path for why silence there
+// is unacceptable.
+func (s *Source) snapHash(k task.Kinded, taskDir, taskID string) string {
 	specHash := hashKinded(k)
 	if taskDir == "" {
 		return specHash
 	}
 	var hashInclude []string
-	if s, ok := k.(*task.Spec); ok {
-		hashInclude = s.HashInclude
+	if sp, ok := k.(*task.Spec); ok {
+		hashInclude = sp.HashInclude
 	}
 	dirHash, err := task.Hash(taskDir, hashInclude...)
-	if err != nil {
-		return specHash
+	if err == nil {
+		return specHash + ":" + dirHash
 	}
-	return specHash + ":" + dirHash
+
+	// #682: task.Hash fails here only when a hash_include entry escapes its
+	// sibling-task boundary through a symlink — a case the load-time lexical
+	// pre-check in pkg/task/spec.go can't catch, because the escape is only
+	// visible after the symlink is resolved (see
+	// TestHash_IncludeThroughSymlinkedIntermediateDirIsRejected). This used
+	// to fall back to specHash alone, silently dropping the ENTIRE directory
+	// — including the task's own script — from the change-detection
+	// identity: a script edit then changed no spec field, the hash stayed
+	// stable, syncAndEmit saw no diff, and the approval gate was never
+	// re-armed for the edit. That's a silent approval-gate bypass, not
+	// merely a missed reload, so the error must be loud and must still
+	// perturb the identity — not just get folded away.
+	//
+	// Best-effort fallback: hash taskDir alone, without hash_include. The
+	// entry that's escaping lives outside taskDir by construction
+	// (hash_include only ever reaches siblings, never taskDir itself), so
+	// this narrower hash is unaffected by the same failure and keeps
+	// catching ordinary script edits for as long as the include stays
+	// broken — it doesn't just fire once and go blind again. err.Error() is
+	// static for a given (path, boundary) pair, so folding its digest in is
+	// deterministic across repeated polls with nothing else changed: one
+	// loud transition into "changed" per new edit, not a firehose on every
+	// ~30s reconciler tick. A full redesign that propagates this error to
+	// callers instead of folding it into the hash is tracked separately
+	// (#688) — out of scope here.
+	s.log.Warn("taskset source: task dir hash failed, treating task as changed",
+		zap.String("task", taskID),
+		zap.String("taskDir", taskDir),
+		zap.Error(err),
+	)
+	fallback, fbErr := task.Hash(taskDir)
+	if fbErr != nil {
+		// taskDir itself is unreadable (rare — hash_include escaping is the
+		// documented failure mode, not this). Nothing left to fold in beyond
+		// the error digest below.
+		fallback = ""
+	}
+	errDigest := sha256.Sum256([]byte(err.Error()))
+	return specHash + ":" + fallback + ":hash-error:" + hex.EncodeToString(errDigest[:])
 }

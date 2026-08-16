@@ -192,6 +192,97 @@ spec:
 	}
 }
 
+// TestSource_ScriptEditThroughSymlinkEscapedHashIncludeEmitsUpdate is the
+// regression for #682: a hash_include entry that escapes its sibling-task
+// boundary through a symlink makes task.Hash fail on every sync — the escape
+// is only visible after resolving the symlink, which the load-time lexical
+// pre-check in pkg/task/spec.go can't catch (same construction as
+// TestHash_IncludeThroughSymlinkedIntermediateDirIsRejected in
+// pkg/task/hash_test.go). Before the fix, snapHash silently fell back to
+// specHash alone on that error, and specHash never reflects a script-only
+// edit, so the hash stayed stable forever, syncAndEmit never saw a diff, and
+// the approval gate was never re-armed for the edit — a silent
+// approval-gate bypass. The fix must still detect the edit even while the
+// hash_include failure persists unchanged from one sync to the next.
+func TestSource_ScriptEditThroughSymlinkEscapedHashIncludeEmitsUpdate(t *testing.T) {
+	parent := t.TempDir()
+	tasksRoot := filepath.Join(parent, "tasks-root")
+	if err := os.MkdirAll(tasksRoot, 0755); err != nil {
+		t.Fatalf("mkdir tasksRoot: %v", err)
+	}
+	outside := filepath.Join(parent, "outside")
+	if err := os.MkdirAll(outside, 0755); err != nil {
+		t.Fatalf("mkdir outside: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("host-secret"), 0644); err != nil {
+		t.Fatalf("write outside file: %v", err)
+	}
+
+	// A symlinked directory INSIDE tasksRoot (the sibling-task boundary)
+	// that physically redirects outside it. Lexically,
+	// "../evil-link/secret.txt" looks contained within tasksRoot — only
+	// resolving the symlink reveals it actually escapes to outside/secret.txt.
+	evilLink := filepath.Join(tasksRoot, "evil-link")
+	if err := os.Symlink(outside, evilLink); err != nil {
+		t.Skipf("symlinks unsupported here: %v", err)
+	}
+
+	taskDir := filepath.Join(tasksRoot, "deploy")
+	if err := os.MkdirAll(taskDir, 0755); err != nil {
+		t.Fatalf("mkdir taskDir: %v", err)
+	}
+	taskYAML := "apiVersion: dicode/v1\nkind: Task\nname: deploy\nruntime: deno\n" +
+		"trigger:\n  cron: \"0 8 * * *\"\n" +
+		"hash_include:\n  - \"../evil-link/secret.txt\"\n"
+	writeFile(t, taskDir, "task.yaml", taskYAML)
+	writeFile(t, taskDir, "task.js", "// v1")
+
+	tsContent := `
+apiVersion: dicode/v1
+kind: TaskSet
+metadata:
+  name: infra
+spec:
+  entries:
+    deploy:
+      ref:
+        path: ` + filepath.Join(taskDir, "task.yaml") + `
+`
+	tsPath := writeTaskSetFile(t, parent, "taskset.yaml", tsContent)
+
+	src := newTestSource(t, "infra", tsPath)
+
+	ch0 := make(chan source.Event, 8)
+	if err := src.syncAndEmit(context.Background(), ch0); err != nil {
+		t.Fatalf("initial syncAndEmit: %v", err)
+	}
+	close(ch0)
+	initial := collectEvents(t, ch0, time.Second)
+	if len(initial) != 1 || initial[0].Kind != source.EventAdded {
+		t.Fatalf("initial sync: want 1 EventAdded, got %d: %v", len(initial), initial)
+	}
+
+	// Edit only task.js — task.yaml (and thus the resolved spec, and the
+	// hash_include escape condition itself) is unchanged.
+	if err := os.WriteFile(filepath.Join(taskDir, "task.js"), []byte("// v2 edited"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	ch := make(chan source.Event, 8)
+	if err := src.syncAndEmit(context.Background(), ch); err != nil {
+		t.Fatalf("second syncAndEmit: %v", err)
+	}
+	close(ch)
+
+	events := collectEvents(t, ch, time.Second)
+	if len(events) != 1 || events[0].Kind != source.EventUpdated {
+		t.Fatalf("script edit behind symlink-escaped hash_include: want 1 EventUpdated, got %d: %v", len(events), events)
+	}
+	if events[0].TaskID != "infra/deploy" {
+		t.Errorf("TaskID: %q", events[0].TaskID)
+	}
+}
+
 func TestSource_RemovedEmitted(t *testing.T) {
 	dir := t.TempDir()
 	taskDir := writeTaskDir(t, dir, "deploy")
@@ -647,5 +738,57 @@ spec:
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for refresh-driven Updated event")
+	}
+}
+
+// TestSnapHash_ErrorFoldIsDeterministicAndDiffersFromGoodHash is a focused
+// unit test on snapHash's #682 error path, independent of syncAndEmit: a
+// hash_include entry that escapes through a symlink must fold into a hash
+// that (a) differs from the hash computed before the include started
+// failing, and (b) is identical across repeated calls while the same
+// failure persists unchanged — the "one loud transition, not a firehose"
+// property described at the fix site.
+func TestSnapHash_ErrorFoldIsDeterministicAndDiffersFromGoodHash(t *testing.T) {
+	parent := t.TempDir()
+	tasksRoot := filepath.Join(parent, "tasks-root")
+	if err := os.MkdirAll(tasksRoot, 0755); err != nil {
+		t.Fatalf("mkdir tasksRoot: %v", err)
+	}
+	outside := filepath.Join(parent, "outside")
+	if err := os.MkdirAll(outside, 0755); err != nil {
+		t.Fatalf("mkdir outside: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("host-secret"), 0644); err != nil {
+		t.Fatalf("write outside file: %v", err)
+	}
+	evilLink := filepath.Join(tasksRoot, "evil-link")
+	if err := os.Symlink(outside, evilLink); err != nil {
+		t.Skipf("symlinks unsupported here: %v", err)
+	}
+
+	taskDir := filepath.Join(tasksRoot, "deploy")
+	if err := os.MkdirAll(taskDir, 0755); err != nil {
+		t.Fatalf("mkdir taskDir: %v", err)
+	}
+	writeFile(t, taskDir, "task.yaml", "name: deploy\n")
+	writeFile(t, taskDir, "task.js", "// v1")
+
+	src := &Source{log: zap.NewNop()}
+	spec := &task.Spec{Name: "deploy"}
+
+	// No hash_include yet: task.Hash succeeds — this is the "good" hash a
+	// prior sync would have recorded before the include started escaping.
+	goodHash := src.snapHash(spec, taskDir, "infra/deploy")
+
+	// Now the include escapes via evil-link: every call fails identically.
+	spec.HashInclude = []string{"../evil-link/secret.txt"}
+	errHash1 := src.snapHash(spec, taskDir, "infra/deploy")
+	errHash2 := src.snapHash(spec, taskDir, "infra/deploy")
+
+	if errHash1 != errHash2 {
+		t.Errorf("snapHash not deterministic across repeated identical errors: %q != %q", errHash1, errHash2)
+	}
+	if errHash1 == goodHash {
+		t.Errorf("error-folded hash must differ from the prior good hash; both were %q", errHash1)
 	}
 }
