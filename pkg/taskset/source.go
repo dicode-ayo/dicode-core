@@ -3,7 +3,6 @@ package taskset
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -876,12 +875,15 @@ func (s *Source) snapHash(k task.Kinded, taskDir, taskID string) string {
 		return specHash + ":" + dirHash
 	}
 
-	// #682: task.Hash fails here only when a hash_include entry escapes its
-	// sibling-task boundary through a symlink — a case the load-time lexical
-	// pre-check in pkg/task/spec.go can't catch, because the escape is only
-	// visible after the symlink is resolved (see
-	// TestHash_IncludeThroughSymlinkedIntermediateDirIsRejected). This used
-	// to fall back to specHash alone, silently dropping the ENTIRE directory
+	// #682: task.Hash can fail here for several reasons (an unreadable
+	// taskDir, a broken in-dir symlink's readlink call) but the one this fix
+	// targets is a hash_include entry escaping its sibling-task boundary
+	// through a symlink — a case the load-time lexical pre-check in
+	// pkg/task/spec.go can't catch, because the escape is only visible after
+	// the symlink is resolved (see
+	// TestHash_IncludeThroughSymlinkedIntermediateDirIsRejected). Whatever
+	// the cause, this used to fall back to specHash alone, silently dropping
+	// the ENTIRE directory
 	// — including the task's own script — from the change-detection
 	// identity: a script edit then changed no spec field, the hash stayed
 	// stable, syncAndEmit saw no diff, and the approval gate was never
@@ -923,5 +925,5 @@ func (s *Source) snapHash(k task.Kinded, taskDir, taskID string) string {
 		fallback = ""
 	}
 	errDigest := sha256.Sum256([]byte(err.Error()))
-	return specHash + ":" + fallback + ":hash-error:" + hex.EncodeToString(errDigest[:])
+	return specHash + ":" + fallback + ":hash-error:" + fmt.Sprintf("%x", errDigest)
 }
