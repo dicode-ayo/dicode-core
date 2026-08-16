@@ -889,18 +889,27 @@ func (s *Source) snapHash(k task.Kinded, taskDir, taskID string) string {
 	// merely a missed reload, so the error must be loud and must still
 	// perturb the identity — not just get folded away.
 	//
-	// Best-effort fallback: hash taskDir alone, without hash_include. The
-	// entry that's escaping lives outside taskDir by construction
-	// (hash_include only ever reaches siblings, never taskDir itself), so
-	// this narrower hash is unaffected by the same failure and keeps
-	// catching ordinary script edits for as long as the include stays
-	// broken — it doesn't just fire once and go blind again. err.Error() is
-	// static for a given (path, boundary) pair, so folding its digest in is
-	// deterministic across repeated polls with nothing else changed: one
+	// Best-effort fallback: hash taskDir alone, without hash_include. This
+	// narrower hash skips the includes loop entirely, so it's unaffected by
+	// a failure there regardless of which entry is escaping or where it
+	// points — not because hash_include is guaranteed to stay outside
+	// taskDir (a zero-".."-hop entry like "subdir/file.txt" passes the
+	// lexical check in pkg/task/spec.go and does resolve inside taskDir).
+	// It keeps catching ordinary script edits for as long as the include
+	// stays broken — it doesn't just fire once and go blind again. err.Error()
+	// is static for a given (path, boundary) pair, so folding its digest in
+	// is deterministic across repeated polls with nothing else changed: one
 	// loud transition into "changed" per new edit, not a firehose on every
 	// ~30s reconciler tick. A full redesign that propagates this error to
 	// callers instead of folding it into the hash is tracked separately
 	// (#688) — out of scope here.
+	//
+	// This re-walks taskDir a second time (task.Hash above already walked it
+	// once before failing on the includes step) for as long as the failure
+	// persists. Accepted trade-off: the failure is a misconfiguration an
+	// operator is expected to fix, not steady-state behavior, and reusing
+	// the first walk's entries would mean threading walkTree's internal
+	// result across Hash's public boundary for a cold-path cost.
 	s.log.Warn("taskset source: task dir hash failed, treating task as changed",
 		zap.String("task", taskID),
 		zap.String("taskDir", taskDir),
