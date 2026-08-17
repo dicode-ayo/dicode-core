@@ -147,7 +147,7 @@ class DcConfig extends LitElement {
       <div class="card">
         <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:0.75rem">
           <h2 style="margin:0">AI</h2>
-          <span style="font-size:0.82rem;color:var(--muted)">${this._aiStatus}</span>
+          <span style="font-size:0.82rem;color:var(--dicode-muted)">${this._aiStatus}</span>
         </div>
         <div class="cfg-form">
           <div class="field"><label>AI task</label>
@@ -167,11 +167,11 @@ class DcConfig extends LitElement {
       <div class="card">
         <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:0.75rem">
           <h2 style="margin:0">Server</h2>
-          <span style="font-size:0.82rem;color:var(--muted)">${this._srvStatus}</span>
+          <span style="font-size:0.82rem;color:var(--dicode-muted)">${this._srvStatus}</span>
         </div>
         <div class="cfg-form">
           <div class="field"><label>Port</label>
-            <input .value=${String(srv.Port || srv.port || '')} disabled style="color:var(--muted);cursor:not-allowed">
+            <input .value=${String(srv.Port || srv.port || '')} disabled style="color:var(--dicode-muted);cursor:not-allowed">
             <div class="hint">Changing port requires restart; edit dicode.yaml directly.</div>
           </div>
           <div class="field"><label>Log level</label>
@@ -208,9 +208,9 @@ class DcConfig extends LitElement {
       <div class="card">
         <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:0.75rem">
           <h2 style="margin:0">Sources (${sources.length})</h2>
-          <span style="font-size:0.82rem;color:var(--muted)">${this._srcStatus}</span>
+          <span style="font-size:0.82rem;color:var(--dicode-muted)">${this._srcStatus}</span>
         </div>
-        <table style="margin-bottom:var(--space-md)">
+        <table style="margin-bottom:var(--dicode-space-md)">
           <thead><tr><th>Type</th><th>Path / URL</th><th>Details</th><th></th></tr></thead>
           <tbody>
             ${sources.length === 0 ? html`
@@ -220,12 +220,12 @@ class DcConfig extends LitElement {
                 <td><span class="badge badge-manual">${s.Type || s.type || ''}</span></td>
                 <td style="word-break:break-all">${s.Path || s.path || s.URL || s.url || ''}</td>
                 <td class="meta">${(s.Type || s.type) === 'git' ? `branch: ${s.Branch || s.branch || ''}` : `watch: ${s.Watch || s.watch || false}`}</td>
-                <td><button class="btn btn-sm" style="background:var(--red)" @click=${() => this._removeSource(s.name)}>Remove</button></td>
+                <td><button class="btn btn-sm" style="background:var(--dicode-red)" @click=${() => this._removeSource(s.name)}>Remove</button></td>
               </tr>`)}
           </tbody>
         </table>
         <details>
-          <summary style="cursor:pointer;font-size:0.85rem;color:var(--lavender);user-select:none">+ Add source</summary>
+          <summary style="cursor:pointer;font-size:0.85rem;color:var(--dicode-lavender);user-select:none">+ Add source</summary>
           <div class="cfg-form" style="margin-top:0.75rem">
             <div class="field"><label>Name</label>
               <input id="new-src-name" placeholder="my-source">
@@ -262,9 +262,9 @@ class DcConfig extends LitElement {
       <div class="card">
         <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:0.75rem">
           <h2 style="margin:0">Raw YAML</h2>
-          <span style="font-size:0.82rem;color:var(--muted)">${this._cfgStatus}</span>
+          <span style="font-size:0.82rem;color:var(--dicode-muted)">${this._cfgStatus}</span>
         </div>
-        <div id="config-monaco" style="height:400px;border-radius:var(--radius-sm);overflow:hidden;margin-bottom:0.75rem"></div>
+        <div id="config-monaco" style="height:400px;border-radius:var(--dicode-radius-sm);overflow:hidden;margin-bottom:0.75rem"></div>
         <button class="btn" @click=${() => this._saveRaw()}>&#128190; Save</button>
       </div>`;
   }

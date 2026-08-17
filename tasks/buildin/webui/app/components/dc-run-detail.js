@@ -211,12 +211,12 @@ class DcRunDetail extends LitElement {
   }
 
   _renderResumeField(name, prop) {
-    const req = this._isRequired(name) ? html`<span style="color:var(--red)"> *</span>` : '';
+    const req = this._isRequired(name) ? html`<span style="color:var(--dicode-red)"> *</span>` : '';
     const label = prop.title || name;
     const desc = prop.description ? html`<span class="meta" style="display:block;font-weight:normal">${prop.description}</span>` : '';
     let input;
     if (prop.type === 'boolean') {
-      return html`<div style="margin-bottom:var(--space-md)">
+      return html`<div style="margin-bottom:var(--dicode-space-md)">
         <label><input type="checkbox" name=${name} ?checked=${prop.default === true}> ${label}${req}</label>
         ${desc}
       </div>`;
@@ -231,8 +231,8 @@ class DcRunDetail extends LitElement {
     } else {
       input = html`<input type="text" name=${name} .value=${prop.default ?? ''} style="width:100%">`;
     }
-    return html`<div style="margin-bottom:var(--space-md)">
-      <label style="display:block;font-weight:var(--font-semibold);margin-bottom:.25rem">${label}${req}</label>
+    return html`<div style="margin-bottom:var(--dicode-space-md)">
+      <label style="display:block;font-weight:var(--dicode-font-semibold);margin-bottom:.25rem">${label}${req}</label>
       ${desc}
       ${input}
     </div>`;
@@ -243,13 +243,13 @@ class DcRunDetail extends LitElement {
     if (!schema) return '';
     const props = Object.entries(schema.properties || {});
     return html`
-      <h2 style="margin-top:var(--space-lg)">${schema.title || 'Waiting on your input'}</h2>
+      <h2 style="margin-top:var(--dicode-space-lg)">${schema.title || 'Waiting on your input'}</h2>
       <div class="card">
         ${schema.description ? html`<p class="meta" style="margin-top:0">${schema.description}</p>` : ''}
         <form @submit=${e => this._submitResume(e)}>
           ${props.map(([name, prop]) => this._renderResumeField(name, prop))}
-          ${this._resumeError ? html`<p style="color:var(--red)">${this._resumeError}</p>` : ''}
-          <div style="margin-top:var(--space-md)">
+          ${this._resumeError ? html`<p style="color:var(--dicode-red)">${this._resumeError}</p>` : ''}
+          <div style="margin-top:var(--dicode-space-md)">
             <button class="btn" type="submit" ?disabled=${this._resuming}>${this._resuming ? 'Resuming…' : 'Submit'}</button>
           </div>
         </form>
@@ -283,12 +283,12 @@ class DcRunDetail extends LitElement {
     const children = this._children || [];
 
     return html`
-      <div style="margin-bottom:var(--space-md)">
+      <div style="margin-bottom:var(--dicode-space-md)">
         <a href="tasks/${encodeURIComponent(taskID)}">← ${taskName}</a>
       </div>
 
       ${parent ? html`
-        <div class="card" style="margin-bottom:var(--space-md);display:flex;gap:var(--space-md);align-items:center">
+        <div class="card" style="margin-bottom:var(--dicode-space-md);display:flex;gap:var(--dicode-space-md);align-items:center">
           <span class="meta">Parent run</span>
           <a href="runs/${parent.ID || parent.id}">
             ${parentTask ? `${parentTask} · ` : ''}<code>${(parent.ID || parent.id || '').slice(0,8)}</code>
@@ -296,7 +296,7 @@ class DcRunDetail extends LitElement {
         </div>` : ''}
 
       <div class="card">
-        <div style="display:flex;gap:var(--space-md);align-items:center;flex-wrap:wrap">
+        <div style="display:flex;gap:var(--dicode-space-md);align-items:center;flex-wrap:wrap">
           <span class="badge badge-${status}">${status}</span>
           <strong>${taskName}</strong>
           ${trigSrc ? html`<span class="meta badge badge-manual">${trigSrc}</span>` : ''}
@@ -305,7 +305,7 @@ class DcRunDetail extends LitElement {
           <span class="meta">${this._duration || (finishedAt ? fmtDuration(startedAt, finishedAt) : isRunning ? 'running…' : '—')}</span>
           <a href="/runs/${this.runid}/result" target="_blank" class="btn btn-sm secondary" style="margin-left:auto">Result ↗</a>
           ${isRunning ? html`
-            <button class="btn" style="background:var(--red)" @click=${() => this._kill()}>Kill</button>`
+            <button class="btn" style="background:var(--dicode-red)" @click=${() => this._kill()}>Kill</button>`
             : (status === 'success' || status === 'failure') ? html`
             <button class="btn btn-sm" @click=${() => this._replay()} title="Re-fire this run with its persisted input">Replay</button>` : ''}
         </div>
@@ -314,7 +314,7 @@ class DcRunDetail extends LitElement {
       ${status === 'suspended' ? this._renderResumeForm() : ''}
 
       ${children.length ? html`
-        <h2 style="margin-top:var(--space-lg)">Sub-runs <span class="meta">(${children.length})</span></h2>
+        <h2 style="margin-top:var(--dicode-space-lg)">Sub-runs <span class="meta">(${children.length})</span></h2>
         <table>
           <thead><tr><th>Run</th><th>Status</th><th>Started</th><th>Duration</th></tr></thead>
           <tbody>
@@ -336,14 +336,14 @@ class DcRunDetail extends LitElement {
           ${otype === 'text/html'
             ? html`<iframe .srcdoc=${ocontent}
                 sandbox="allow-scripts allow-same-origin"
-                style="width:100%;border:none;border-radius:var(--radius-sm);display:block"
+                style="width:100%;border:none;border-radius:var(--dicode-radius-sm);display:block"
                 @load=${e => { e.target.style.height = (e.target.contentDocument.body.scrollHeight + 32) + 'px'; }}>
               </iframe>`
-            : html`<pre style="margin:0;border-radius:var(--radius-sm)">${ocontent}</pre>`}
+            : html`<pre style="margin:0;border-radius:var(--dicode-radius-sm)">${ocontent}</pre>`}
         </div>` : retval ? html`
         <h2>Return value</h2>
         <div class="card" style="padding:0">
-          <pre style="margin:0;border-radius:var(--radius-sm)">${displayRV}</pre>
+          <pre style="margin:0;border-radius:var(--dicode-radius-sm)">${displayRV}</pre>
         </div>` : ''}
 
       <h2>Logs</h2>

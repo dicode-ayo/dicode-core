@@ -115,14 +115,14 @@ class DcSources extends LitElement {
     if (this._error) return html`<p style="color:red">Error: ${this._error}</p>`;
 
     return html`
-      <div style="display:flex;align-items:center;gap:var(--space-md);margin-bottom:var(--space-md)">
+      <div style="display:flex;align-items:center;gap:var(--dicode-space-md);margin-bottom:var(--dicode-space-md)">
         <h1 style="margin:0">Sources</h1>
         <button class="btn btn-sm secondary" @click=${() => this._load()}>&#8635; Reload</button>
       </div>
 
       ${!this._sources ? html`<div class="meta">Loading…</div>` : html`
         ${this._sources.length === 0 ? html`
-          <div class="card" style="text-align:center;color:var(--muted);padding:var(--space-xl)">
+          <div class="card" style="text-align:center;color:var(--dicode-muted);padding:var(--dicode-space-xl)">
             No sources configured. Add one in <a href="/config" @click=${e => { e.preventDefault(); window.navigate('/config'); }}>Config</a>.
           </div>
         ` : this._sources.map(src => this._sourceCard(src))}
@@ -140,20 +140,20 @@ class DcSources extends LitElement {
         <div style="display:flex;align-items:flex-start;gap:0.75rem;flex-wrap:wrap">
           <!-- Left: source info -->
           <div style="flex:1;min-width:0">
-            <div style="display:flex;align-items:center;gap:var(--space-sm);margin-bottom:0.3rem">
+            <div style="display:flex;align-items:center;gap:var(--dicode-space-sm);margin-bottom:0.3rem">
               ${this._healthDot(src)}
               <strong>${src.name}</strong>
               <span class="badge badge-manual">${src.type}</span>
-              ${src.dev_mode ? html`<span class="badge" style="background:rgba(249, 226, 175, .15);color:var(--yellow)">DEV MODE</span>` : ''}
+              ${src.dev_mode ? html`<span class="badge" style="background:rgba(249, 226, 175, .15);color:var(--dicode-yellow)">DEV MODE</span>` : ''}
               ${src.failed_count ? html`<span class="badge badge-failure"
                   title=${(src.failures || []).map(f => `${f.id}: ${f.error}`).join('\n')}>
                   ${src.failed_count} failed to load</span>` : ''}
-              ${status ? html`<span class="meta" style="${status.startsWith('Error') ? 'color:var(--red)' : ''}">${status}</span>` : ''}
+              ${status ? html`<span class="meta" style="${status.startsWith('Error') ? 'color:var(--dicode-red)' : ''}">${status}</span>` : ''}
             </div>
-            ${src.url ? html`<div class="meta" style="word-break:break-all">${src.url}${src.branch ? html` &nbsp;<span style="color:var(--lavender)">${src.branch}</span>` : ''}</div>` : ''}
+            ${src.url ? html`<div class="meta" style="word-break:break-all">${src.url}${src.branch ? html` &nbsp;<span style="color:var(--dicode-lavender)">${src.branch}</span>` : ''}</div>` : ''}
             ${src.path && !src.url ? html`<div class="meta" style="word-break:break-all">${src.path}</div>` : ''}
             ${src.dev_mode && src.dev_path ? html`
-              <div class="meta" style="margin-top:0.3rem;color:var(--yellow)">
+              <div class="meta" style="margin-top:0.3rem;color:var(--dicode-yellow)">
                 &#128194; Dev path: <code>${src.dev_path}</code>
               </div>` : ''}
           </div>
@@ -165,7 +165,7 @@ class DcSources extends LitElement {
                 ${branches ? '&#8635;' : '&#9660;'} Branches
               </button>
               ${branches?.length ? html`
-                <select style="margin-left:0.5rem;padding:0.25rem;border-radius:var(--radius-sm);border:1px solid var(--border);font-size:0.82rem">
+                <select style="margin-left:0.5rem;padding:0.25rem;border-radius:var(--dicode-radius-sm);border:var(--dicode-border-width) solid var(--dicode-border);font-size:0.82rem">
                   ${branches.map(b => html`<option ?selected=${b === src.branch}>${b}</option>`)}
                 </select>` : ''}
             </div>
@@ -174,23 +174,23 @@ class DcSources extends LitElement {
 
         <!-- Dev mode controls (taskset sources only) -->
         ${isTaskset ? html`
-          <div style="margin-top:0.75rem;padding-top:0.75rem;border-top:1px solid var(--border)">
+          <div style="margin-top:0.75rem;padding-top:0.75rem;border-top:var(--dicode-border-width) solid var(--dicode-border)">
             <div style="display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap">
-              <span style="font-size:0.82rem;font-weight:600;color:var(--muted)">Dev mode</span>
+              <span style="font-size:0.82rem;font-weight:600;color:var(--dicode-muted)">Dev mode</span>
 
               ${!src.dev_mode ? html`
                 <input
                   .value=${devInput}
                   @input=${e => this._setDevInput(src.name, e.target.value)}
                   placeholder="/absolute/path/to/local/taskset.yaml"
-                  style="flex:1;min-width:200px;padding:0.3rem 0.5rem;border:1px solid var(--border);border-radius:var(--radius-sm);font-size:0.82rem;font-family:monospace">
+                  style="flex:1;min-width:200px;padding:0.3rem 0.5rem;border:var(--dicode-border-width) solid var(--dicode-border);border-radius:var(--dicode-radius-sm);font-size:0.82rem;font-family:monospace">
               ` : html`
-                <code style="font-size:0.82rem;color:var(--yellow);flex:1">${src.dev_path}</code>
+                <code style="font-size:0.82rem;color:var(--dicode-yellow);flex:1">${src.dev_path}</code>
               `}
 
               <button
                 class="btn btn-sm ${src.dev_mode ? '' : 'secondary'}"
-                style="${src.dev_mode ? 'background:var(--yellow)' : ''}"
+                style="${src.dev_mode ? 'background:var(--dicode-yellow)' : ''}"
                 @click=${() => this._toggleDevMode(src)}>
                 ${src.dev_mode ? '&#128990; Disable dev mode' : '&#128994; Enable dev mode'}
               </button>

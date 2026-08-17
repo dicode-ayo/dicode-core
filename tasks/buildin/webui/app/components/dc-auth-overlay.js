@@ -73,16 +73,16 @@ class DcAuthOverlay extends LitElement {
     return html`
       <div style="
         position:fixed;inset:0;z-index:9999;
-        background:var(--overlay-bg);backdrop-filter:blur(2px);
+        background:var(--dicode-overlay-bg);backdrop-filter:blur(2px);
         display:flex;align-items:center;justify-content:center;
       ">
         <div style="
-          background:var(--bg-alt);border:1px solid var(--border);
-          border-radius:var(--radius-lg);padding:var(--space-xl) 2.25rem;
-          width:100%;max-width:380px;box-shadow:var(--shadow-strong);
+          background:var(--dicode-bg-alt);border:var(--dicode-border-width) solid var(--dicode-border);
+          border-radius:var(--dicode-radius-lg);padding:var(--dicode-space-xl) 2.25rem;
+          width:100%;max-width:380px;box-shadow:var(--dicode-shadow-strong);
         ">
           <div style="font-size:1.5rem;margin-bottom:0.25rem">&#9889; dicode</div>
-          <p style="color:var(--muted);font-size:0.9rem;margin-bottom:1.25rem">
+          <p style="color:var(--dicode-muted);font-size:0.9rem;margin-bottom:1.25rem">
             Enter your passphrase to continue.
           </p>
 
@@ -91,18 +91,18 @@ class DcAuthOverlay extends LitElement {
             type="password"
             placeholder="Passphrase"
             class="input"
-            style="width:100%;margin-bottom:0.75rem;font-size:1rem;padding:var(--space-sm) 0.6rem"
+            style="width:100%;margin-bottom:0.75rem;font-size:1rem;padding:var(--dicode-space-sm) 0.6rem"
             @keydown=${this._onKeydown}
             ?disabled=${this._loading}
           >
 
-          <label style="display:flex;align-items:center;gap:var(--space-sm);font-size:0.85rem;color:var(--muted);margin-bottom:var(--space-md);cursor:pointer">
+          <label style="display:flex;align-items:center;gap:var(--dicode-space-sm);font-size:0.85rem;color:var(--dicode-muted);margin-bottom:var(--dicode-space-md);cursor:pointer">
             <input id="auth-trust" type="checkbox" style="width:auto">
             Trust this browser for 30 days
           </label>
 
           ${this._error ? html`
-            <p style="color:var(--red);font-size:0.85rem;margin-bottom:0.75rem">${this._error}</p>
+            <p style="color:var(--dicode-red);font-size:0.85rem;margin-bottom:0.75rem">${this._error}</p>
           ` : ''}
 
           <button

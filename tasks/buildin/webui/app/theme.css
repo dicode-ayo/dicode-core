@@ -2,9 +2,13 @@
  * ║                                                                           ║
  * ║                    dicode Design System — theme.css                       ║
  * ║                                                                           ║
- * ║  Single source of truth for colors, spacing, typography, radii, shadows,  ║
- * ║  transitions, and z-index used across dicode-site, dicode-core WebUI,     ║
- * ║  and dicode-relay.                                                        ║
+ * ║  Single source of truth for colors, spacing, typography, radii, borders,  ║
+ * ║  focus rings, control sizes, shadows, transitions, and z-index used       ║
+ * ║  across dicode-site and the dicode-core WebUI.                            ║
+ * ║                                                                           ║
+ * ║  Every token is namespaced --dicode-* so it cannot collide with a host    ║
+ * ║  page's own custom properties. Component-local properties stay            ║
+ * ║  unprefixed — the prefix is what marks a name as part of this contract.   ║
  * ║                                                                           ║
  * ║  To use in another project:                                               ║
  * ║                                                                           ║
@@ -26,122 +30,122 @@
 
 :root {
   /* ━━━ BACKGROUNDS ━━━ */
-  --bg:                #0d0d1a;    /* page background */
-  --bg-alt:            #1a1a2e;    /* alternate section */
-  --bg-accent:         #16213e;    /* third tier / gradient stop */
-  --card-bg:           rgba(255, 255, 255, .04);    /* card surface */
-  --overlay-bg:        rgba(13, 13, 26, .85);       /* modal/sheet overlay */
+  --dicode-bg:                #0d0d1a;    /* page background */
+  --dicode-bg-alt:            #1a1a2e;    /* alternate section */
+  --dicode-bg-accent:         #16213e;    /* third tier / gradient stop */
+  --dicode-card-bg:           rgba(255, 255, 255, .04);    /* card surface */
+  --dicode-overlay-bg:        rgba(13, 13, 26, .85);       /* modal/sheet overlay */
 
   /* ━━━ FOREGROUND ━━━ */
-  --text:              #e8eaf0;    /* body text */
-  --heading:           #ffffff;    /* h1-h6 */
-  --muted:             #8b93a8;    /* secondary text, labels */
-  --lavender:          #cdd6f4;    /* tertiary accent text */
+  --dicode-text:              #e8eaf0;    /* body text */
+  --dicode-heading:           #ffffff;    /* h1-h6 */
+  --dicode-muted:             #8b93a8;    /* secondary text, labels */
+  --dicode-lavender:          #cdd6f4;    /* tertiary accent text */
 
   /* ━━━ BRAND ━━━ */
-  --blue:              #0d6efd;    /* primary action */
-  --blue2:             #3a8bfd;    /* primary hover */
-  --sky:               #a0c4ff;    /* accent text, pills, tags */
-  --green:             #a6e3a1;    /* success */
-  --yellow:            #f9e2af;    /* warning */
-  --red:               #f38ba8;    /* error / destructive */
+  --dicode-blue:              #0d6efd;    /* primary action */
+  --dicode-blue2:             #3a8bfd;    /* primary hover */
+  --dicode-sky:               #a0c4ff;    /* accent text, pills, tags */
+  --dicode-green:             #a6e3a1;    /* success */
+  --dicode-yellow:            #f9e2af;    /* warning */
+  --dicode-red:               #f38ba8;    /* error / destructive */
 
   /* ━━━ BORDERS ━━━ */
-  --border:            rgba(160, 196, 255, .15);    /* default */
-  --border-strong:     rgba(160, 196, 255, .35);    /* hover/focus */
-  --border-dashed:     rgba(13, 110, 253, .5);      /* special/dashed */
+  --dicode-border:            rgba(160, 196, 255, .15);    /* default */
+  --dicode-border-strong:     rgba(160, 196, 255, .35);    /* hover/focus */
+  --dicode-border-dashed:     rgba(13, 110, 253, .5);      /* special/dashed */
 
   /* ━━━ NAVIGATION ━━━ */
-  --nav-bg:            rgba(13, 13, 26, .8);
-  --nav-bg-scrolled:   rgba(13, 13, 26, .97);
+  --dicode-nav-bg:            rgba(13, 13, 26, .8);
+  --dicode-nav-bg-scrolled:   rgba(13, 13, 26, .97);
 
   /* ━━━ TINTS (used for icon bgs, callouts) ━━━ */
-  --blue-tint:         rgba(13, 110, 253, .12);
-  --blue-tint-strong:  rgba(13, 110, 253, .18);
+  --dicode-blue-tint:         rgba(13, 110, 253, .12);
+  --dicode-blue-tint-strong:  rgba(13, 110, 253, .18);
 
   /* ━━━ HERO GLOW (radial gradients) ━━━ */
-  --hero-glow-1:       rgba(13, 110, 253, .35);
-  --hero-glow-2:       rgba(13, 110, 253, .12);
+  --dicode-hero-glow-1:       rgba(13, 110, 253, .35);
+  --dicode-hero-glow-2:       rgba(13, 110, 253, .12);
 
   /* ━━━ SHADOWS ━━━ */
-  --shadow-sm:         0 2px 8px rgba(0, 0, 0, .2);
-  --shadow:            0 4px 16px rgba(0, 0, 0, .3);
-  --shadow-card:       0 12px 40px rgba(0, 0, 0, .4);
-  --shadow-strong:     0 16px 48px rgba(0, 0, 0, .4);
-  --shadow-glow:       0 4px 24px rgba(13, 110, 253, .4);
-  --shadow-glow-lg:    0 8px 32px rgba(13, 110, 253, .5);
+  --dicode-shadow-sm:         0 2px 8px rgba(0, 0, 0, .2);
+  --dicode-shadow:            0 4px 16px rgba(0, 0, 0, .3);
+  --dicode-shadow-card:       0 12px 40px rgba(0, 0, 0, .4);
+  --dicode-shadow-strong:     0 16px 48px rgba(0, 0, 0, .4);
+  --dicode-shadow-glow:       0 4px 24px rgba(13, 110, 253, .4);
+  --dicode-shadow-glow-lg:    0 8px 32px rgba(13, 110, 253, .5);
 
   /* ━━━ CODE BLOCKS (theme-aware syntax highlighting) ━━━ */
-  --code-bg:           #1e1e2e;
-  --code-text:         #e8eaf0;
-  --code-border:       rgba(160, 196, 255, .15);
-  --code-filename:     #8b93a8;
-  --code-kw:           #89b4fa;
-  --code-str:          #a6e3a1;
-  --code-cmt:          #585b70;
-  --code-fn:           #cba6f7;
-  --code-num:          #fab387;
-  --code-prop:         #f38ba8;
+  --dicode-code-bg:           #1e1e2e;
+  --dicode-code-text:         #e8eaf0;
+  --dicode-code-border:       rgba(160, 196, 255, .15);
+  --dicode-code-filename:     #8b93a8;
+  --dicode-code-kw:           #89b4fa;
+  --dicode-code-str:          #a6e3a1;
+  --dicode-code-cmt:          #585b70;
+  --dicode-code-fn:           #cba6f7;
+  --dicode-code-num:          #fab387;
+  --dicode-code-prop:         #f38ba8;
 }
 
 /* ─── LIGHT MODE ──────────────────────────────────────────────────────────── */
 
 :root[data-theme="light"] {
   /* Backgrounds */
-  --bg:                #f7f8fc;
-  --bg-alt:            #eef1f8;
-  --bg-accent:         #e5e9f3;
-  --card-bg:           rgba(13, 13, 26, .03);
-  --overlay-bg:        rgba(13, 13, 26, .4);
+  --dicode-bg:                #f7f8fc;
+  --dicode-bg-alt:            #eef1f8;
+  --dicode-bg-accent:         #e5e9f3;
+  --dicode-card-bg:           rgba(13, 13, 26, .03);
+  --dicode-overlay-bg:        rgba(13, 13, 26, .4);
 
   /* Foreground */
-  --text:              #1a1a2e;
-  --heading:           #0d0d1a;
-  --muted:             #5c6680;
-  --lavender:          #4c6ef5;
+  --dicode-text:              #1a1a2e;
+  --dicode-heading:           #0d0d1a;
+  --dicode-muted:             #5c6680;
+  --dicode-lavender:          #4c6ef5;
 
   /* Brand — saturated versions for contrast on light bg */
-  --sky:               #0d6efd;
-  --green:             #16a34a;
-  --yellow:            #ca8a04;
-  --red:               #dc2626;
+  --dicode-sky:               #0d6efd;
+  --dicode-green:             #16a34a;
+  --dicode-yellow:            #ca8a04;
+  --dicode-red:               #dc2626;
 
   /* Borders */
-  --border:            rgba(13, 13, 26, .1);
-  --border-strong:     rgba(13, 13, 26, .2);
-  --border-dashed:     rgba(13, 110, 253, .5);
+  --dicode-border:            rgba(13, 13, 26, .1);
+  --dicode-border-strong:     rgba(13, 13, 26, .2);
+  --dicode-border-dashed:     rgba(13, 110, 253, .5);
 
   /* Navigation */
-  --nav-bg:            rgba(247, 248, 252, .85);
-  --nav-bg-scrolled:   rgba(247, 248, 252, .97);
+  --dicode-nav-bg:            rgba(247, 248, 252, .85);
+  --dicode-nav-bg-scrolled:   rgba(247, 248, 252, .97);
 
   /* Tints */
-  --blue-tint:         rgba(13, 110, 253, .08);
-  --blue-tint-strong:  rgba(13, 110, 253, .12);
+  --dicode-blue-tint:         rgba(13, 110, 253, .08);
+  --dicode-blue-tint-strong:  rgba(13, 110, 253, .12);
 
   /* Hero glow — softer */
-  --hero-glow-1:       rgba(13, 110, 253, .18);
-  --hero-glow-2:       rgba(13, 110, 253, .08);
+  --dicode-hero-glow-1:       rgba(13, 110, 253, .18);
+  --dicode-hero-glow-2:       rgba(13, 110, 253, .08);
 
   /* Shadows — darker tint for depth on light bg */
-  --shadow-sm:         0 2px 8px rgba(13, 13, 26, .06);
-  --shadow:            0 4px 16px rgba(13, 13, 26, .08);
-  --shadow-card:       0 12px 40px rgba(13, 13, 26, .12);
-  --shadow-strong:     0 16px 48px rgba(13, 13, 26, .15);
-  --shadow-glow:       0 4px 24px rgba(13, 110, 253, .25);
-  --shadow-glow-lg:    0 8px 32px rgba(13, 110, 253, .35);
+  --dicode-shadow-sm:         0 2px 8px rgba(13, 13, 26, .06);
+  --dicode-shadow:            0 4px 16px rgba(13, 13, 26, .08);
+  --dicode-shadow-card:       0 12px 40px rgba(13, 13, 26, .12);
+  --dicode-shadow-strong:     0 16px 48px rgba(13, 13, 26, .15);
+  --dicode-shadow-glow:       0 4px 24px rgba(13, 110, 253, .25);
+  --dicode-shadow-glow-lg:    0 8px 32px rgba(13, 110, 253, .35);
 
   /* Code — GitHub-style */
-  --code-bg:           #f6f8fa;
-  --code-text:         #24292f;
-  --code-border:       rgba(13, 13, 26, .12);
-  --code-filename:     #6e7781;
-  --code-kw:           #cf222e;
-  --code-str:          #0a3069;
-  --code-cmt:          #6e7781;
-  --code-fn:           #8250df;
-  --code-num:          #0550ae;
-  --code-prop:         #116329;
+  --dicode-code-bg:           #f6f8fa;
+  --dicode-code-text:         #24292f;
+  --dicode-code-border:       rgba(13, 13, 26, .12);
+  --dicode-code-filename:     #6e7781;
+  --dicode-code-kw:           #cf222e;
+  --dicode-code-str:          #0a3069;
+  --dicode-code-cmt:          #6e7781;
+  --dicode-code-fn:           #8250df;
+  --dicode-code-num:          #0550ae;
+  --dicode-code-prop:         #116329;
 }
 
 /* ─── SPACING SCALE ────────────────────────────────────────────────────────
@@ -149,114 +153,153 @@
  */
 
 :root {
-  --space-0:     0;
-  --space-xs:    .25rem;   /*  4px */
-  --space-sm:    .5rem;    /*  8px */
-  --space-md:    1rem;     /* 16px */
-  --space-lg:    1.5rem;   /* 24px */
-  --space-xl:    2rem;     /* 32px */
-  --space-2xl:   3rem;     /* 48px */
-  --space-3xl:   4rem;     /* 64px */
-  --space-4xl:   6rem;     /* 96px */
-  --space-5xl:   8rem;     /* 128px */
+  --dicode-space-0:     0;
+  --dicode-space-xs:    .25rem;   /*  4px */
+  --dicode-space-sm:    .5rem;    /*  8px */
+  --dicode-space-md:    1rem;     /* 16px */
+  --dicode-space-lg:    1.5rem;   /* 24px */
+  --dicode-space-xl:    2rem;     /* 32px */
+  --dicode-space-2xl:   3rem;     /* 48px */
+  --dicode-space-3xl:   4rem;     /* 64px */
+  --dicode-space-4xl:   6rem;     /* 96px */
+  --dicode-space-5xl:   8rem;     /* 128px */
 }
 
 /* ─── TYPOGRAPHY ──────────────────────────────────────────────────────────── */
 
 :root {
-  --font-sans:   system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  --font-mono:   "Fira Code", "Cascadia Code", ui-monospace, SFMono-Regular,
+  --dicode-font-sans:   system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --dicode-font-mono:   "Fira Code", "Cascadia Code", ui-monospace, SFMono-Regular,
                  Menlo, Monaco, Consolas, "Liberation Mono", monospace;
 
   /* Font sizes — fluid clamp() for hero headings */
-  --text-xs:     .72rem;    /* 11.5px */
-  --text-sm:     .82rem;    /* 13px */
-  --text-base:   .9rem;     /* 14.4px — body */
-  --text-md:     1rem;      /* 16px */
-  --text-lg:     1.15rem;   /* 18.4px */
-  --text-xl:     1.4rem;    /* 22.4px */
-  --text-2xl:    1.8rem;    /* 28.8px */
-  --text-3xl:    2.4rem;    /* 38.4px */
-  --text-4xl:    clamp(2rem, 4vw, 2.8rem);          /* section titles */
-  --text-5xl:    clamp(2.6rem, 6vw, 5rem);          /* hero h1 */
+  --dicode-text-xs:     .72rem;    /* 11.5px */
+  --dicode-text-sm:     .82rem;    /* 13px */
+  --dicode-text-base:   .9rem;     /* 14.4px — body */
+  --dicode-text-md:     1rem;      /* 16px */
+  --dicode-text-lg:     1.15rem;   /* 18.4px */
+  --dicode-text-xl:     1.4rem;    /* 22.4px */
+  --dicode-text-2xl:    1.8rem;    /* 28.8px */
+  --dicode-text-3xl:    2.4rem;    /* 38.4px */
+  --dicode-text-4xl:    clamp(2rem, 4vw, 2.8rem);          /* section titles */
+  --dicode-text-5xl:    clamp(2.6rem, 6vw, 5rem);          /* hero h1 */
 
   /* Font weights */
-  --font-normal:     400;
-  --font-medium:     500;
-  --font-semibold:   600;
-  --font-bold:       700;
-  --font-extrabold:  800;
+  --dicode-font-normal:     400;
+  --dicode-font-medium:     500;
+  --dicode-font-semibold:   600;
+  --dicode-font-bold:       700;
+  --dicode-font-extrabold:  800;
 
   /* Line heights */
-  --leading-tight:    1.1;
-  --leading-snug:     1.3;
-  --leading-normal:   1.6;
-  --leading-relaxed:  1.75;
+  --dicode-leading-tight:    1.1;
+  --dicode-leading-snug:     1.3;
+  --dicode-leading-normal:   1.6;
+  --dicode-leading-relaxed:  1.75;
 
   /* Letter spacing */
-  --tracking-tight:   -.03em;
-  --tracking-normal:  0;
-  --tracking-wide:    .06em;
-  --tracking-wider:   .1em;
+  --dicode-tracking-tight:   -.03em;
+  --dicode-tracking-normal:  0;
+  --dicode-tracking-wide:    .06em;
+  --dicode-tracking-wider:   .1em;
 }
 
 /* ─── RADII ───────────────────────────────────────────────────────────────── */
 
 :root {
-  --radius-sm:    6px;      /* tags, small buttons */
-  --radius:       14px;     /* cards, inputs (legacy name) */
-  --radius-md:    10px;     /* buttons */
-  --radius-lg:    20px;     /* large cards, modals */
-  --radius-pill:  9999px;   /* pills, circular badges */
-  --radius-full:  50%;      /* avatars, dots */
+  --dicode-radius-sm:    6px;      /* tags, small buttons */
+  --dicode-radius:       14px;     /* cards, inputs (legacy name) */
+  --dicode-radius-md:    10px;     /* buttons */
+  --dicode-radius-lg:    20px;     /* large cards, modals */
+  --dicode-radius-pill:  9999px;   /* pills, circular badges */
+  --dicode-radius-full:  50%;      /* avatars, dots */
+}
+
+/* ─── BORDER WIDTHS ───────────────────────────────────────────────────────── */
+
+:root {
+  --dicode-border-width:        1px;   /* default hairline — cards, inputs, table cells */
+  --dicode-border-width-thick:  2px;   /* emphasis, active/selected edges */
+}
+
+/* ─── FOCUS RING ──────────────────────────────────────────────────────────────
+ *  Keyboard focus is the one affordance a user cannot discover by looking, so
+ *  it stays uniform across every control rather than being restyled per
+ *  component. Pair with :focus-visible, never :focus, so pointer users don't
+ *  get a ring they didn't ask for.
+ */
+
+:root {
+  --dicode-focus-ring-width:   2px;
+  --dicode-focus-ring-offset:  2px;
+  --dicode-focus-ring-color:   var(--dicode-sky);
+  /* Shorthand for the common case: outline: var(--dicode-focus-ring); */
+  --dicode-focus-ring:         var(--dicode-focus-ring-width) solid var(--dicode-focus-ring-color);
+}
+
+/* ─── CONTROL SIZES ───────────────────────────────────────────────────────────
+ *  Hit-target and icon dimensions for interactive controls. Deliberately not
+ *  the spacing scale: --dicode-space-xl happens to also be 2rem, but a
+ *  control's size and the gap next to it are different decisions that should
+ *  be free to diverge.
+ */
+
+:root {
+  --dicode-control-size-sm:  1.75rem;   /* 28px — dense toolbars */
+  --dicode-control-size:     2rem;      /* 32px — default icon button */
+  --dicode-control-size-lg:  2.5rem;    /* 40px — primary actions, touch */
+
+  --dicode-icon-size-sm:     1rem;      /* 16px */
+  --dicode-icon-size:        1.125rem;  /* 18px — matches --dicode-control-size */
+  --dicode-icon-size-lg:     1.5rem;    /* 24px */
 }
 
 /* ─── TRANSITIONS ─────────────────────────────────────────────────────────── */
 
 :root {
-  --ease:              cubic-bezier(.4, 0, .2, 1);
-  --ease-out:          cubic-bezier(0, 0, .2, 1);
-  --ease-in-out:       cubic-bezier(.4, 0, .6, 1);
+  --dicode-ease:              cubic-bezier(.4, 0, .2, 1);
+  --dicode-ease-out:          cubic-bezier(0, 0, .2, 1);
+  --dicode-ease-in-out:       cubic-bezier(.4, 0, .6, 1);
 
-  --duration-fast:     150ms;
-  --duration:          250ms;
-  --duration-slow:     400ms;
-  --duration-slower:   650ms;
+  --dicode-duration-fast:     150ms;
+  --dicode-duration:          250ms;
+  --dicode-duration-slow:     400ms;
+  --dicode-duration-slower:   650ms;
 
   /* Shorthand timing for common use */
-  --transition-fast:   all var(--duration-fast) var(--ease);
-  --transition:        all var(--duration) var(--ease);
-  --transition-slow:   all var(--duration-slow) var(--ease);
+  --dicode-transition-fast:   all var(--dicode-duration-fast) var(--dicode-ease);
+  --dicode-transition:        all var(--dicode-duration) var(--dicode-ease);
+  --dicode-transition-slow:   all var(--dicode-duration-slow) var(--dicode-ease);
 }
 
 /* ─── Z-INDEX SCALE ───────────────────────────────────────────────────────── */
 
 :root {
-  --z-base:         0;
-  --z-dropdown:     10;
-  --z-sticky:       20;
-  --z-fixed:        30;
-  --z-overlay:      40;
-  --z-modal:        50;
-  --z-nav:          100;
-  --z-hamburger:    110;
-  --z-toast:        500;
-  --z-tooltip:      1000;
+  --dicode-z-base:         0;
+  --dicode-z-dropdown:     10;
+  --dicode-z-sticky:       20;
+  --dicode-z-fixed:        30;
+  --dicode-z-overlay:      40;
+  --dicode-z-modal:        50;
+  --dicode-z-nav:          100;
+  --dicode-z-hamburger:    110;
+  --dicode-z-toast:        500;
+  --dicode-z-tooltip:      1000;
 }
 
 /* ─── BREAKPOINTS (for reference — use in @media queries) ─────────────────── */
 
 :root {
-  --breakpoint-sm:    380px;   /* small phones */
-  --breakpoint-md:    640px;   /* large phones */
-  --breakpoint-lg:    768px;   /* tablets */
-  --breakpoint-xl:    900px;   /* small laptops */
-  --breakpoint-2xl:   1120px;  /* desktops — max container width */
+  --dicode-breakpoint-sm:    380px;   /* small phones */
+  --dicode-breakpoint-md:    640px;   /* large phones */
+  --dicode-breakpoint-lg:    768px;   /* tablets */
+  --dicode-breakpoint-xl:    900px;   /* small laptops */
+  --dicode-breakpoint-2xl:   1120px;  /* desktops — max container width */
 }
 
 /* ─── SMOOTH THEME TRANSITIONS ────────────────────────────────────────────── */
 
 html {
-  transition: background-color var(--duration) var(--ease),
-              color var(--duration) var(--ease);
+  transition: background-color var(--dicode-duration) var(--dicode-ease),
+              color var(--dicode-duration) var(--dicode-ease);
 }

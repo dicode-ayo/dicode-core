@@ -129,7 +129,7 @@ class DcSecurity extends LitElement {
           </thead>
           <tbody>
             ${this._devices.length === 0 ? html`
-              <tr><td colspan="5" style="text-align:center;color:var(--muted)">No trusted devices.</td></tr>
+              <tr><td colspan="5" style="text-align:center;color:var(--dicode-muted)">No trusted devices.</td></tr>
             ` : this._devices.map(d => html`
               <tr>
                 <td style="font-size:0.8rem;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title=${d.label}>
@@ -137,13 +137,13 @@ class DcSecurity extends LitElement {
                 </td>
                 <td>
                   <code style="font-size:0.8rem">${d.ip || '—'}</code>
-                  ${d.drift ? html`<span style="margin-left:0.4rem;font-size:0.7rem;color:var(--red);border:1px solid var(--red);border-radius:3px;padding:0 0.3rem"
+                  ${d.drift ? html`<span style="margin-left:0.4rem;font-size:0.7rem;color:var(--dicode-red);border:var(--dicode-border-width) solid var(--dicode-red);border-radius:3px;padding:0 0.3rem"
                     title=${`Device-binding drift: ${d.drift_reason}. The cookie was presented from a different IP subnet or browser family than it was issued for.`}>drift: ${d.drift_reason}</span>` : ''}
                 </td>
                 <td style="font-size:0.8rem">${this._fmtDate(d.last_seen)}</td>
                 <td style="font-size:0.8rem">${this._fmtDate(d.expires_at)}</td>
                 <td style="text-align:right">
-                  <button class="btn btn-sm" style="background:var(--red)"
+                  <button class="btn btn-sm" style="background:var(--dicode-red)"
                     @click=${() => this._revokeDevice(d.id)}>Revoke</button>
                 </td>
               </tr>
@@ -160,11 +160,11 @@ class DcSecurity extends LitElement {
       </p>
 
       ${this._newKeyRaw ? html`
-        <div class="card" style="background:rgba(166, 227, 161, .15);margin-bottom:var(--space-md)">
+        <div class="card" style="background:rgba(166, 227, 161, .15);margin-bottom:var(--dicode-space-md)">
           <p style="font-size:0.85rem;font-weight:600;margin-bottom:0.4rem">
             ✓ New API key created — copy it now, it won't be shown again.
           </p>
-          <div style="display:flex;gap:var(--space-sm);align-items:center">
+          <div style="display:flex;gap:var(--dicode-space-sm);align-items:center">
             <code style="font-size:0.82rem;word-break:break-all;flex:1">${this._newKeyRaw}</code>
             <button class="btn btn-sm" @click=${() => this._copyKey()}>Copy</button>
             <button class="btn btn-sm secondary" @click=${() => this._newKeyRaw = ''}>Dismiss</button>
@@ -180,7 +180,7 @@ class DcSecurity extends LitElement {
             <summary style="cursor:pointer;font-size:0.85rem;font-weight:600">
               ▸ Connect to Claude Code (one-liner)
             </summary>
-            <div style="margin-top:0.5rem;display:flex;gap:var(--space-sm);align-items:center">
+            <div style="margin-top:0.5rem;display:flex;gap:var(--dicode-space-sm);align-items:center">
               <code style="font-size:0.78rem;word-break:break-all;flex:1;background:rgba(0,0,0,.2);padding:0.5rem;border-radius:4px">${this._claudeMcpAddCmd(this._newKeyRaw)}</code>
               <button class="btn btn-sm" @click=${() => this._copyClaudeCmd()}>Copy</button>
             </div>
@@ -193,9 +193,9 @@ class DcSecurity extends LitElement {
         </div>
       ` : ''}
 
-      <div class="card" style="margin-bottom:var(--space-md)">
+      <div class="card" style="margin-bottom:var(--dicode-space-md)">
         <h2 style="margin-bottom:0.75rem">Create API Key</h2>
-        <div style="display:flex;gap:var(--space-sm)">
+        <div style="display:flex;gap:var(--dicode-space-sm)">
           <input
             placeholder="Key name (e.g. Claude Desktop)"
             class="input"
@@ -215,14 +215,14 @@ class DcSecurity extends LitElement {
           </thead>
           <tbody>
             ${this._keys.length === 0 ? html`
-              <tr><td colspan="4" style="text-align:center;color:var(--muted)">No API keys.</td></tr>
+              <tr><td colspan="4" style="text-align:center;color:var(--dicode-muted)">No API keys.</td></tr>
             ` : this._keys.map(k => html`
               <tr>
                 <td>${k.name}</td>
                 <td><code style="font-size:0.82rem">${k.prefix}</code></td>
                 <td style="font-size:0.82rem">${k.last_used ? this._fmtDate(k.last_used) : '—'}</td>
                 <td style="text-align:right">
-                  <button class="btn btn-sm" style="background:var(--red)"
+                  <button class="btn btn-sm" style="background:var(--dicode-red)"
                     @click=${() => this._revokeKey(k.id)}>Revoke</button>
                 </td>
               </tr>
@@ -232,13 +232,13 @@ class DcSecurity extends LitElement {
       `}
 
       <!-- ── Danger Zone ─────────────────────────────────────── -->
-      <h2 style="margin-top:2rem;color:var(--red)">Danger Zone</h2>
-      <div class="card" style="border:1px solid var(--red)">
+      <h2 style="margin-top:2rem;color:var(--dicode-red)">Danger Zone</h2>
+      <div class="card" style="border:var(--dicode-border-width) solid var(--dicode-red)">
         <p style="font-size:0.85rem;margin-bottom:0.75rem">
           Revoke <strong>all</strong> active sessions and trusted devices on this server.
           Every browser will need to re-authenticate.
         </p>
-        <button class="btn" style="background:var(--red)" @click=${() => this._logoutAll()}>
+        <button class="btn" style="background:var(--dicode-red)" @click=${() => this._logoutAll()}>
           Revoke all sessions &amp; devices
         </button>
       </div>

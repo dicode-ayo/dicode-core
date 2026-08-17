@@ -37,10 +37,25 @@ colliding with) `global.css`.
 Shadow DOM blocks style *rules* from crossing in, but CSS **custom property
 values** still inherit through shadow boundaries (`:host` picks them up like
 any other descendant). Every primitive's `css` styles reference the same
-tokens defined in `theme.css` (`var(--space-md)`, `var(--card-bg)`,
-`var(--blue)`, ...) with no hard-coded fallback value, so swapping
+tokens defined in `theme.css` (`var(--dicode-space-md)`, `var(--dicode-card-bg)`,
+`var(--dicode-blue)`, ...) with no hard-coded fallback value, so swapping
 `data-theme="light"`/`"dark"` on `<html>` re-tints primitives exactly like
 the rest of the app, with no extra wiring.
+
+Every design token is namespaced `--dicode-*`, and the prefix carries meaning:
+a `--dicode-` name is part of the shared contract defined in `theme.css`, while
+anything unprefixed is a component's own local property. That keeps the two
+from being mistaken for each other at a call site, and stops the sheet
+colliding with a host page's own `--text` or `--border` when it is used as the
+drop-in it advertises itself as.
+
+`theme.css` is a verbatim copy of dicode-site's, which is the canonical source
+and the URL external projects link against. Token changes belong upstream
+first and get re-vendored here; editing this copy in place forks the design
+system. Beyond colors, spacing, type, and radii, it also defines border
+widths, the shared focus ring (`--dicode-focus-ring*`), and control/icon sizes
+— reach for those rather than re-deciding `1px`, `2px` outlines, or a hit
+target per component.
 
 Earlier drafts of these components carried a fallback on every `var()`
 matching the dark-theme default, in case a primitive ever landed on a page
@@ -58,7 +73,7 @@ after the theme flips, so light mode ends up tinting with a color the
 theme no longer uses. Derive it from the live token instead:
 
 ```css
-background: color-mix(in srgb, var(--green) 15%, transparent);
+background: color-mix(in srgb, var(--dicode-green) 15%, transparent);
 ```
 
 Where a primitive's own palette needs to match `global.css` exactly (see

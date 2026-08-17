@@ -24,7 +24,7 @@ class DcRelayStatus extends LitElement {
       border-radius: 999px;
       font-size: 0.78rem;
       font-weight: 500;
-      border: 1px solid transparent;
+      border: var(--dicode-border-width) solid transparent;
       cursor: help;
       user-select: none;
     }

@@ -396,7 +396,7 @@ class DcTaskList extends LitElement {
           border: none;
           cursor: pointer;
           padding: 0.25rem;
-          color: var(--muted);
+          color: var(--dicode-muted);
           vertical-align: middle;
         }
         dc-task-list .toggle-btn:disabled { cursor: wait; }
@@ -408,16 +408,16 @@ class DcTaskList extends LitElement {
           border-radius: 3px;
           background: rgba(210, 153, 34, 0.18);
           color: #d29922;
-          border: 1px solid rgba(210, 153, 34, 0.45);
+          border: var(--dicode-border-width) solid rgba(210, 153, 34, 0.45);
           vertical-align: middle;
         }
         dc-task-list .btn-approve { background: #d29922; }
         dc-task-list .toggle-btn.on  { color: var(--accent, #4caf50); }
-        dc-task-list .toggle-btn.off { color: var(--muted, #888); }
+        dc-task-list .toggle-btn.off { color: var(--dicode-muted, #888); }
         dc-task-list .toggle-btn.held { color: #d29922; }
         dc-task-list .toggle-btn svg { display: inline-block; width: 18px; height: 18px; vertical-align: middle; }
         dc-task-list .pending-filter {
-          border: 1px solid rgba(210, 153, 34, 0.45);
+          border: var(--dicode-border-width) solid rgba(210, 153, 34, 0.45);
           color: #d29922;
           background: transparent;
         }
@@ -425,7 +425,7 @@ class DcTaskList extends LitElement {
           background: rgba(210, 153, 34, 0.18);
         }
       </style>
-      <div style="display:flex;align-items:center;gap:var(--space-md);margin-bottom:var(--space-md)">
+      <div style="display:flex;align-items:center;gap:var(--dicode-space-md);margin-bottom:var(--dicode-space-md)">
         <h1 style="margin:0">Tasks</h1>
         ${pendingCount > 0 ? html`
           <button class="btn btn-sm pending-filter ${this._pendingOnly ? 'active' : ''}"
@@ -442,15 +442,15 @@ class DcTaskList extends LitElement {
           .value=${this._filter}
           @input=${e => this._filter = e.target.value}
           style="min-width:14rem;padding:0.35rem 0.6rem;border-radius:6px;
-                 border:1px solid var(--border);background:var(--bg-alt);
+                 border:var(--dicode-border-width) solid var(--dicode-border);background:var(--dicode-bg-alt);
                  color:inherit;font:inherit" />
       </div>
       ${this._tasks.length === 0 ? html`
-        <div class="card" style="text-align:center;color:var(--muted);padding:var(--space-xl)">
+        <div class="card" style="text-align:center;color:var(--dicode-muted);padding:var(--dicode-space-xl)">
           No tasks found. Add tasks to your data directory.
         </div>
       ` : noMatches ? html`
-        <div class="card" style="text-align:center;color:var(--muted);padding:var(--space-xl)">
+        <div class="card" style="text-align:center;color:var(--dicode-muted);padding:var(--dicode-space-xl)">
           ${this._filter
             ? html`No tasks match “${this._filter}”${this._pendingOnly ? ' among pending-approval tasks' : ''}.`
             : html`No tasks are pending approval.`}
@@ -467,11 +467,11 @@ class DcTaskList extends LitElement {
                 @keydown=${e => {
                   if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this._toggleGroup(ns); }
                 }}
-                style="display:flex;align-items:center;gap:var(--space-sm);margin-bottom:0.4rem;cursor:pointer;user-select:none"
+                style="display:flex;align-items:center;gap:var(--dicode-space-sm);margin-bottom:0.4rem;cursor:pointer;user-select:none"
                 title=${collapsed ? 'Expand group' : 'Collapse group'}>
-                <span style="display:inline-block;width:0.8rem;text-align:center;color:var(--muted);transition:transform 0.1s ease;transform:rotate(${collapsed ? '-90' : '0'}deg)">▾</span>
+                <span style="display:inline-block;width:0.8rem;text-align:center;color:var(--dicode-muted);transition:transform 0.1s ease;transform:rotate(${collapsed ? '-90' : '0'}deg)">▾</span>
                 ${this._pullDot(ns)}
-                <span style="font-size:0.78rem;font-weight:700;color:var(--lavender);text-transform:uppercase;letter-spacing:0.05em">${ns}</span>
+                <span style="font-size:0.78rem;font-weight:700;color:var(--dicode-lavender);text-transform:uppercase;letter-spacing:0.05em">${ns}</span>
                 <span class="meta">(${tasks.length})</span>
                 ${this._pullSummary(ns)}
               </div>` : ''}

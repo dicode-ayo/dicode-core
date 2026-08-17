@@ -71,12 +71,12 @@ class DcMetrics extends LitElement {
 
   render() {
     if (this._loading) return html`<div class="meta">Loading…</div>`;
-    if (this._error)   return html`<p style="color:var(--red)">Error: ${this._error}</p>`;
+    if (this._error)   return html`<p style="color:var(--dicode-red)">Error: ${this._error}</p>`;
 
     const { daemon, tasks } = this._data;
 
     return html`
-      <div style="display:flex;align-items:center;gap:var(--space-md);margin-bottom:var(--space-md);flex-wrap:wrap">
+      <div style="display:flex;align-items:center;gap:var(--dicode-space-md);margin-bottom:var(--dicode-space-md);flex-wrap:wrap">
         <h1 style="margin:0">Metrics</h1>
         <span class="meta">auto-refreshes every ${POLL_INTERVAL_MS / 1000}s</span>
         ${this._lastUpdated
@@ -86,7 +86,7 @@ class DcMetrics extends LitElement {
           : ''}
       </div>
 
-      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:var(--space-md)">
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:var(--dicode-space-md)">
 
         <!-- Tasks card -->
         <div class="card">

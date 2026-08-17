@@ -25,16 +25,16 @@ class DcEmptyState extends LitElement {
     :host {
       display: block;
       text-align: center;
-      color: var(--muted);
-      padding: var(--space-xl);
+      color: var(--dicode-muted);
+      padding: var(--dicode-space-xl);
     }
     .icon {
-      font-size: var(--text-2xl);
+      font-size: var(--dicode-text-2xl);
       line-height: 1;
-      margin-bottom: var(--space-sm);
+      margin-bottom: var(--dicode-space-sm);
     }
     .message {
-      font-size: var(--text-base);
+      font-size: var(--dicode-text-base);
     }
     /* Only add the gap above the CTA slot when it actually has content —
        avoids reserving dead space for icon/message-only instances.
@@ -53,7 +53,7 @@ class DcEmptyState extends LitElement {
        component's one-CTA-element contract. */
     slot:not([name])::slotted(*) {
       display: inline-block;
-      margin-block-start: var(--space-md);
+      margin-block-start: var(--dicode-space-md);
     }
   `;
 

@@ -27,36 +27,36 @@ class DcIconButton extends LitElement {
       display: flex;
       align-items: center;
       justify-content: center;
-      inline-size: 2rem;
-      block-size: 2rem;
+      inline-size: var(--dicode-control-size);
+      block-size: var(--dicode-control-size);
       padding: 0;
       background: transparent;
-      border: 1px solid var(--border);
-      border-radius: var(--radius-md);
-      color: var(--muted);
+      border: var(--dicode-border-width) solid var(--dicode-border);
+      border-radius: var(--dicode-radius-md);
+      color: var(--dicode-muted);
       cursor: pointer;
       font: inherit;
-      transition: background .2s var(--ease), border-color .2s var(--ease), color .2s var(--ease);
+      transition: background var(--dicode-duration-fast) var(--dicode-ease), border-color var(--dicode-duration-fast) var(--dicode-ease), color var(--dicode-duration-fast) var(--dicode-ease);
     }
     button:hover {
-      background: var(--card-bg);
-      border-color: var(--sky);
-      color: var(--sky);
+      background: var(--dicode-card-bg);
+      border-color: var(--dicode-sky);
+      color: var(--dicode-sky);
     }
     button:focus-visible {
-      outline: 2px solid var(--sky);
-      outline-offset: 2px;
+      outline: var(--dicode-focus-ring);
+      outline-offset: var(--dicode-focus-ring-offset);
     }
     :host([variant='danger']) button:hover,
     :host([variant='danger']) button:focus-visible {
-      border-color: var(--red);
-      color: var(--red);
+      border-color: var(--dicode-red);
+      color: var(--dicode-red);
     }
     :host([variant='danger']) button:focus-visible {
-      outline-color: var(--red);
+      outline-color: var(--dicode-red);
     }
     button:disabled { opacity: .5; cursor: not-allowed; }
-    ::slotted(svg) { inline-size: 1.125rem; block-size: 1.125rem; }
+    ::slotted(svg) { inline-size: var(--dicode-icon-size); block-size: var(--dicode-icon-size); }
   `;
 
   constructor() {

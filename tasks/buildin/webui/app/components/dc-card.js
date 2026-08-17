@@ -7,7 +7,7 @@ import { hasSlottedElement } from '../lib/slot-utils.js';
 //
 // Unlike the app's existing light-DOM `dc-*` components, primitives use
 // Shadow DOM for real style encapsulation. Theming still flows through —
-// custom-property values (var(--card-bg), var(--border), ...) cross the
+// custom-property values (var(--dicode-card-bg), var(--dicode-border), ...) cross the
 // shadow boundary even though rules don't, so this stays in sync with
 // global.css's `.card` look without importing global.css itself. See
 // docs/concepts/webui-components.md.
@@ -31,23 +31,23 @@ class DcCard extends LitElement {
   static styles = css`
     :host {
       display: block;
-      background: var(--card-bg);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      /* .2s bypasses theme.css's own --duration-fast/--duration tokens —
+      background: var(--dicode-card-bg);
+      border: var(--dicode-border-width) solid var(--dicode-border);
+      border-radius: var(--dicode-radius);
+      /* var(--dicode-duration-fast) bypasses theme.css's own --dicode-duration-fast/--dicode-duration tokens —
          faithfully matching global.css's prevailing (also-untokenized)
          pattern rather than inventing a new one here. Tracked in #710
          alongside global.css's own instances, to fix once and consistently
          rather than renegotiate per component. */
-      transition: border-color .2s var(--ease);
+      transition: border-color var(--dicode-duration-fast) var(--dicode-ease);
     }
-    :host(:hover) { border-color: var(--border-strong); }
+    :host(:hover) { border-color: var(--dicode-border-strong); }
     .header {
       display: flex;
       align-items: center;
-      gap: var(--space-md);
-      padding: var(--space-md) var(--space-lg);
-      border-bottom: 1px solid var(--border);
+      gap: var(--dicode-space-md);
+      padding: var(--dicode-space-md) var(--dicode-space-lg);
+      border-bottom: var(--dicode-border-width) solid var(--dicode-border);
     }
     .header[hidden] { display: none; }
     /* Scoped to slot[name="title"] specifically, not ".header
@@ -57,18 +57,18 @@ class DcCard extends LitElement {
        onto whatever an "actions" consumer put there. */
     slot[name="title"]::slotted(h2), h2 {
       margin: 0;
-      font-size: var(--text-lg);
-      font-weight: var(--font-bold);
-      color: var(--heading);
-      line-height: var(--leading-snug);
+      font-size: var(--dicode-text-lg);
+      font-weight: var(--dicode-font-bold);
+      color: var(--dicode-heading);
+      line-height: var(--dicode-leading-snug);
     }
     .actions {
       margin-inline-start: auto;
       display: flex;
       align-items: center;
-      gap: var(--space-sm);
+      gap: var(--dicode-space-sm);
     }
-    .body { padding: var(--space-md) var(--space-lg); }
+    .body { padding: var(--dicode-space-md) var(--dicode-space-lg); }
     :host([pad='none']) .body { padding: 0; }
   `;
 

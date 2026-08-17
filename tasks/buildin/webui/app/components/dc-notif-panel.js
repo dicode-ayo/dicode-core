@@ -124,38 +124,38 @@ class DcNotifPanel extends LitElement {
     return html`
       <!-- Bell icon -->
       <div @click=${() => this._toggle()}
-        style="margin-left:auto;cursor:pointer;position:relative;padding:0.25rem 0.5rem;color:var(--muted);font-size:1.1rem"
+        style="margin-left:auto;cursor:pointer;position:relative;padding:0.25rem 0.5rem;color:var(--dicode-muted);font-size:1.1rem"
         title="Notifications">
         &#128276;
         ${this._unread > 0 ? html`
-          <span style="position:absolute;top:0;right:0;background:var(--red);color:var(--heading);border-radius:9px;font-size:0.65rem;padding:1px 5px;font-weight:700">
+          <span style="position:absolute;top:0;right:0;background:var(--dicode-red);color:var(--dicode-heading);border-radius:9px;font-size:0.65rem;padding:1px 5px;font-weight:700">
             ${this._unread > 99 ? '99+' : this._unread}
           </span>` : ''}
       </div>
 
       <!-- Inbox panel -->
       ${this._open ? html`
-        <div style="display:block;position:fixed;top:48px;right:0;width:340px;max-height:480px;overflow-y:auto;background:var(--bg-alt);border:1px solid var(--border);border-radius:var(--radius-md) 0 0 var(--radius-md);box-shadow:var(--shadow);z-index:200">
-          <div style="display:flex;align-items:center;padding:var(--space-sm) var(--space-md);border-bottom:1px solid var(--border);background:var(--bg-alt)">
+        <div style="display:block;position:fixed;top:48px;right:0;width:340px;max-height:480px;overflow-y:auto;background:var(--dicode-bg-alt);border:var(--dicode-border-width) solid var(--dicode-border);border-radius:var(--dicode-radius-md) 0 0 var(--dicode-radius-md);box-shadow:var(--dicode-shadow);z-index:200">
+          <div style="display:flex;align-items:center;padding:var(--dicode-space-sm) var(--dicode-space-md);border-bottom:var(--dicode-border-width) solid var(--dicode-border);background:var(--dicode-bg-alt)">
             <strong style="font-size:0.9rem">Notifications</strong>
-            <button @click=${() => this._clear()} style="margin-left:auto;background:none;border:none;cursor:pointer;color:var(--muted);font-size:0.8rem">Clear</button>
+            <button @click=${() => this._clear()} style="margin-left:auto;background:none;border:none;cursor:pointer;color:var(--dicode-muted);font-size:0.8rem">Clear</button>
           </div>
           <div style="font-size:0.85rem">
             ${notifs.length === 0 ? html`
-              <div style="padding:var(--space-md);color:var(--muted);text-align:center">No notifications yet.</div>
+              <div style="padding:var(--dicode-space-md);color:var(--dicode-muted);text-align:center">No notifications yet.</div>
             ` : notifs.map(n => {
               const ago = Math.round((Date.now() - n.ts) / 60000);
               const agoStr = ago < 1 ? 'just now' : ago < 60 ? ago + 'm ago' : Math.round(ago / 60) + 'h ago';
 
               if (n.status === 'pending_approval') {
                 return html`
-                  <div style="display:flex;align-items:center;gap:var(--space-sm);padding:var(--space-sm) var(--space-md);border-bottom:1px solid var(--border)">
-                    <span style="background:rgba(210, 153, 34, .18);color:#d29922;border-radius:var(--radius-sm);padding:0.1em 0.5em;font-weight:600;font-size:0.78rem">
+                  <div style="display:flex;align-items:center;gap:var(--dicode-space-sm);padding:var(--dicode-space-sm) var(--dicode-space-md);border-bottom:var(--dicode-border-width) solid var(--dicode-border)">
+                    <span style="background:rgba(210, 153, 34, .18);color:#d29922;border-radius:var(--dicode-radius-sm);padding:0.1em 0.5em;font-weight:600;font-size:0.78rem">
                       &#9203; pending
                     </span>
                     <div style="flex:1;min-width:0">
                       <div style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${n.taskID}</div>
-                      <div style="color:var(--muted);font-size:0.75rem">${agoStr}</div>
+                      <div style="color:var(--dicode-muted);font-size:0.75rem">${agoStr}</div>
                     </div>
                     <a href="/tasks/${n.taskID}" style="font-size:0.75rem;white-space:nowrap"
                       @click=${e => { e.preventDefault(); this._open = false; navigate('/tasks/' + n.taskID); }}>Review →</a>
@@ -164,15 +164,15 @@ class DcNotifPanel extends LitElement {
 
               const ok = n.status === 'success';
               const bg = ok ? 'rgba(166, 227, 161, .15)' : 'rgba(243, 139, 168, .15)';
-              const color = ok ? 'var(--green)' : 'var(--red)';
+              const color = ok ? 'var(--dicode-green)' : 'var(--dicode-red)';
               return html`
-                <div style="display:flex;align-items:center;gap:var(--space-sm);padding:var(--space-sm) var(--space-md);border-bottom:1px solid var(--border)">
-                  <span style="background:${bg};color:${color};border-radius:var(--radius-sm);padding:0.1em 0.5em;font-weight:600;font-size:0.78rem">
+                <div style="display:flex;align-items:center;gap:var(--dicode-space-sm);padding:var(--dicode-space-sm) var(--dicode-space-md);border-bottom:var(--dicode-border-width) solid var(--dicode-border)">
+                  <span style="background:${bg};color:${color};border-radius:var(--dicode-radius-sm);padding:0.1em 0.5em;font-weight:600;font-size:0.78rem">
                     ${ok ? '✓' : '✗'} ${n.status}
                   </span>
                   <div style="flex:1;min-width:0">
                     <div style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${n.taskName}</div>
-                    <div style="color:var(--muted);font-size:0.75rem">${agoStr}</div>
+                    <div style="color:var(--dicode-muted);font-size:0.75rem">${agoStr}</div>
                   </div>
                   <a href="/runs/${n.runID}" style="font-size:0.75rem;white-space:nowrap"
                     @click=${e => { e.preventDefault(); this._open = false; navigate('/runs/' + n.runID); }}>View →</a>
@@ -183,10 +183,10 @@ class DcNotifPanel extends LitElement {
 
       <!-- Permission banner -->
       ${this._banner ? html`
-        <div style="display:flex;position:fixed;bottom:2.5rem;left:0;right:0;background:var(--bg-alt);color:var(--lavender);padding:0.6rem 1.5rem;align-items:center;gap:var(--space-md);z-index:150;border-top:1px solid var(--border)">
+        <div style="display:flex;position:fixed;bottom:2.5rem;left:0;right:0;background:var(--dicode-bg-alt);color:var(--dicode-lavender);padding:0.6rem 1.5rem;align-items:center;gap:var(--dicode-space-md);z-index:150;border-top:var(--dicode-border-width) solid var(--dicode-border)">
           <span style="flex:1">&#9889; dicode can send browser notifications when tasks complete.</span>
           <button class="btn btn-sm" @click=${() => this._requestPermission()}>Allow</button>
-          <button @click=${() => this._dismissBanner()} style="background:none;border:none;cursor:pointer;color:var(--muted);font-size:1.1rem">✕</button>
+          <button @click=${() => this._dismissBanner()} style="background:none;border:none;cursor:pointer;color:var(--dicode-muted);font-size:1.1rem">✕</button>
         </div>` : ''}`;
   }
 }

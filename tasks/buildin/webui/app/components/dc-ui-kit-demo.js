@@ -134,14 +134,14 @@ class DcUiKitDemo extends DcElement {
       </dc-page-header>
 
       <dc-card heading="dc-status-badge">
-        <p class="meta" style="margin-bottom:var(--space-sm)">One pill per known status value, plus an unrecognized value falling back to the neutral style.</p>
-        <div style="display:flex;gap:var(--space-sm);flex-wrap:wrap" id="status-badges">
+        <p class="meta" style="margin-bottom:var(--dicode-space-sm)">One pill per known status value, plus an unrecognized value falling back to the neutral style.</p>
+        <div style="display:flex;gap:var(--dicode-space-sm);flex-wrap:wrap" id="status-badges">
           ${STATUS_VALUES.map(s => html`<dc-status-badge status=${s}></dc-status-badge>`)}
         </div>
       </dc-card>
 
       <dc-card heading="dc-icon-button">
-        <div style="display:flex;gap:var(--space-sm);align-items:center">
+        <div style="display:flex;gap:var(--dicode-space-sm);align-items:center">
           <dc-icon-button label="Refresh" id="icon-btn-default">${SVG_REFRESH}</dc-icon-button>
           <dc-icon-button label="Delete" variant="danger" id="icon-btn-danger">${SVG_TRASH}</dc-icon-button>
           <dc-icon-button label="Disabled example" disabled id="icon-btn-disabled">${SVG_TRASH}</dc-icon-button>
@@ -190,13 +190,13 @@ class DcUiKitDemo extends DcElement {
       </dc-card>
 
       <dc-card heading="DcElement base class (Stage 2)">
-        <p class="meta" style="margin-bottom:var(--space-sm)">Demonstrates the shared <code>_loading</code>/<code>_error</code> state and <code>_fetch()</code> helper with a simulated async call.</p>
-        <div style="display:flex;gap:var(--space-sm);margin-bottom:var(--space-sm)">
+        <p class="meta" style="margin-bottom:var(--dicode-space-sm)">Demonstrates the shared <code>_loading</code>/<code>_error</code> state and <code>_fetch()</code> helper with a simulated async call.</p>
+        <div style="display:flex;gap:var(--dicode-space-sm);margin-bottom:var(--dicode-space-sm)">
           <button class="btn btn-sm" id="simulate-ok" @click=${() => this._simulate(false)} ?disabled=${this._loading}>Simulate success</button>
           <button class="btn btn-sm danger" id="simulate-fail" @click=${() => this._simulate(true)} ?disabled=${this._loading}>Simulate failure</button>
         </div>
         ${this._loading ? html`<div class="meta" id="demo-loading">Loading…</div>` : ''}
-        ${this._error ? html`<p style="color:var(--red)" id="demo-error">Error: ${this._error}</p>` : ''}
+        ${this._error ? html`<p style="color:var(--dicode-red)" id="demo-error">Error: ${this._error}</p>` : ''}
         ${this._demoResult ? html`<p class="meta" id="demo-result">${this._demoResult}</p>` : ''}
       </dc-card>
     `;
