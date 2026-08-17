@@ -23,6 +23,7 @@ import { test, expect } from '@playwright/test';
 import * as fs from 'fs';
 import * as path from 'path';
 import { gotoWebui, navigateInSpa, waitForTaskDetail } from './helpers/webui';
+import { settleApproved } from './helpers/approval';
 
 const MANUAL_TASK_ID = 'e2e-tests/hello-manual';
 
@@ -160,14 +161,7 @@ test.describe('Approval hash binding', () => {
     } finally {
       try {
         fs.writeFileSync(taskJsPath, original, 'utf8');
-        const deadline = Date.now() + 30_000;
-        for (;;) {
-          const t = await (await request.get(`/api/tasks/${encodeURIComponent(MANUAL_TASK_ID)}`)).json() as Record<string, unknown>;
-          if (t.pending_approval !== true) break;
-          if (Date.now() > deadline) { console.error('task did not settle after restore'); break; }
-          await request.post(`/api/tasks/${encodeURIComponent(MANUAL_TASK_ID)}/approve`);
-          await new Promise((r) => setTimeout(r, 1_000));
-        }
+        await settleApproved(request, MANUAL_TASK_ID);
       } catch (cleanupError) {
         console.error('hash-binding API test cleanup failed:', cleanupError);
       }
@@ -233,14 +227,7 @@ test.describe('Approval hash binding', () => {
     } finally {
       try {
         fs.writeFileSync(taskJsPath, original, 'utf8');
-        const deadline = Date.now() + 30_000;
-        for (;;) {
-          const t = await (await request.get(`/api/tasks/${encodeURIComponent(MANUAL_TASK_ID)}`)).json() as Record<string, unknown>;
-          if (t.pending_approval !== true) break;
-          if (Date.now() > deadline) { console.error('task did not settle after restore'); break; }
-          await request.post(`/api/tasks/${encodeURIComponent(MANUAL_TASK_ID)}/approve`);
-          await new Promise((r) => setTimeout(r, 1_000));
-        }
+        await settleApproved(request, MANUAL_TASK_ID);
       } catch (cleanupError) {
         console.error('hash-binding dashboard test cleanup failed:', cleanupError);
       }

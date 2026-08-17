@@ -20,6 +20,7 @@ import { test, expect } from '@playwright/test';
 import * as fs from 'fs';
 import * as path from 'path';
 import { gotoWebui, navigateInSpa, waitForTaskDetail } from './helpers/webui';
+import { settleApproved } from './helpers/approval';
 
 const MANUAL_TASK_ID = 'e2e-tests/hello-manual';
 const BODY_MARKER = '// e2e-review-probe-marker';
@@ -111,7 +112,8 @@ async function withPendingChange(
   // Restore exact original bytes: the content hash returns to the
   // already-approved record, so the reconciler re-arms it without any explicit
   // re-approval. Only a test that approves the mutated content needs more than
-  // this (see settleToRestored).
+  // this. settleApproved handles both, and tolerates a fixture left dirty by an
+  // earlier spec file.
   //
   // A cleanup that fails leaves hello-manual pending for every later test and
   // spec file, so it fails the test rather than being logged away — silence
@@ -121,46 +123,12 @@ async function withPendingChange(
   let cleanupError: unknown;
   try {
     fs.writeFileSync(taskJsPath, original, 'utf8');
-    await waitForTaskCondition(request, MANUAL_TASK_ID, (t) => t.pending_approval !== true);
+    await settleApproved(request, MANUAL_TASK_ID);
   } catch (err) {
     cleanupError = err;
   }
   if (bodyError) throw bodyError;
   if (cleanupError) throw cleanupError;
-}
-
-/**
- * settleToRestored returns hello-manual to "original content, approved" after a
- * test that clicked Approve.
- *
- * That click records the mutated content's hash, replacing the record the
- * restored bytes match, so the restore re-pends the task — but not
- * instantly: the reconciler has to observe the write first. Polling for
- * "not pending" and exiting on the first hit therefore reports success while
- * the re-pend is still in flight, stranding the task for later spec files.
- *
- * So this requires the task to be observed settled on several consecutive
- * polls spanning more than one reconcile, approving whatever is pending in
- * between. It tolerates the test having failed before its approve click, in
- * which case no re-pend comes and the consecutive-clean check simply passes.
- */
-async function settleToRestored(
-  request: import('@playwright/test').APIRequestContext,
-): Promise<void> {
-  const deadline = Date.now() + 90_000;
-  const cleanRunNeeded = 8; // 8 polls x 2s = 16s of quiet, well past an fsnotify re-pend
-  let clean = 0;
-  while (Date.now() < deadline) {
-    const t = await (await request.get(`/api/tasks/${encodeURIComponent(MANUAL_TASK_ID)}`)).json() as Record<string, unknown>;
-    if (t.pending_approval === true) {
-      clean = 0;
-      await request.post(`/api/tasks/${encodeURIComponent(MANUAL_TASK_ID)}/approve`);
-    } else if (++clean >= cleanRunNeeded) {
-      return;
-    }
-    await new Promise((r) => setTimeout(r, 2_000));
-  }
-  throw new Error('hello-manual did not settle to the restored content within 90s');
 }
 
 test.describe('Approval review surface', () => {
@@ -285,7 +253,7 @@ test.describe('Approval review surface', () => {
     let cleanupError: unknown;
     try {
       fs.writeFileSync(taskJsPath, original, 'utf8');
-      await settleToRestored(request);
+      await settleApproved(request, MANUAL_TASK_ID);
     } catch (err) {
       cleanupError = err;
     }
