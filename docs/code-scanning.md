@@ -15,15 +15,21 @@ schedule:     weekly
 languages:    actions, go, javascript, javascript-typescript, python, typescript
 ```
 
-Two consequences follow from that, and both surprise people:
+`schedule: weekly` is the *additional* scheduled scan. It is not the only one: `main` is
+analysed on every push, which `/code-scanning/analyses?ref=refs/heads/main` shows
+directly — one analysis per commit SHA, several a day. The Go analysis on `main` has
+reported 18 results on every commit for weeks.
 
-**`main` is scanned weekly, not on push.** No CodeQL check attaches to a commit on
-`main`, so "main is green" is not an observable state. Alerts on `main` sit in the
-baseline until the next scheduled scan refreshes it.
+Two consequences follow, and both surprise people:
 
-**Pull requests fail on alerts that are new relative to that baseline** — not on the
-absolute alert count. A PR can be red while introducing no new vulnerability, which is
-the failure mode the model pack below exists to prevent.
+**Pull requests fail on alerts that are new relative to the `main` baseline** — not on
+the absolute alert count. A PR can be red while introducing no new vulnerability, which
+is the failure mode the model pack below exists to prevent.
+
+**A PR's analysis is diff-informed**, so it is not a way to test an analysis change. A
+PR that edits no Go files reports `results=0` for Go regardless of what the query would
+find on the full tree. To see the effect of a model or query change, either run it
+locally as below, or read the post-merge analysis on `main`.
 
 ## Why relocating code turns the check red
 
@@ -84,15 +90,22 @@ property of the call site, not of the function.
 
 GitHub documents model packs in default setup as supported for C/C++, C#, Java/Kotlin,
 Python, Ruby and Rust. **Go is not on that list**, even though the Go pack itself
-implements the `barrierModel` extensible predicate and honours it locally. If a future
-scan shows the `pkg/task/hash.go` alerts returning, that is the reason, and the fix is
-to migrate to advanced setup — a `.github/workflows/codeql.yml` that passes the pack to
-`github/codeql-action/init` explicitly — rather than to change the models.
+implements the `barrierModel` extensible predicate and honours it locally.
+
+Because PR analyses are diff-informed, this cannot be settled on a PR that touches no
+Go source. The check is the first `main` analysis after the pack merges: the Go result
+count should fall from 18 to 12. If it stays at 18, default setup is ignoring the pack,
+and the fix is to migrate to advanced setup — a `.github/workflows/codeql.yml` passing
+the pack to `github/codeql-action/init` explicitly — rather than to change the models.
 
 ## Reproducing the results locally
 
 Worth doing: it takes a few minutes and it is the only way to iterate on a model or
 check a suspected false positive without pushing.
+
+The local numbers match CI exactly: the unmodelled full Go suite yields 18 results
+locally, which is what every `main` analysis reports. Applying the pack takes that to
+12.
 
 Install the bundle — use the **bundle**, not a bare CLI, so the query and extractor
 versions match what Actions runs:
