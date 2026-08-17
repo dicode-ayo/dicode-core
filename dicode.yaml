@@ -13,7 +13,10 @@ database:
   path: ${DATADIR}/data.db
   type: sqlite
 relay:
-  enabled: true
+  # Disabled: the stale ws://localhost:5553 is a pre-mTLS value the v4 validator
+  # rejects (needs wss://<broker>:5554). Re-enable with a real wss:// broker when
+  # you want the relay; not needed to run the ops/relay-edge + relay-cloudflared tasks.
+  enabled: false
   server_url: ws://localhost:5553
   # For an HA relay with multiple broker instances, replace server_url with a
   # server_urls list (one wss:// mTLS endpoint per instance, TLS passthrough).
@@ -22,8 +25,9 @@ relay:
   #   - wss://relay-a.example.com:5554
   #   - wss://relay-b.example.com:5554
 log_level: info
-# ai:
-#   task: buildin/dicodai  # task id invoked for AI operations (webui + CLI)
+ai:
+  task: buildin/ai-agent-claude-cli   # AI operations run on the Claude CLI (Pro/Max subscription)
+  notify_task: buildin/notifications  # ping via native desktop notification when a run suspends awaiting input
 runtimes:
   python:
     version: 0.7.3
@@ -49,4 +53,8 @@ spec:
     examples:
       ref:
         path: ${CONFIGDIR}/tasks/examples/taskset.yaml
+        watch: true
+    ops:
+      ref:
+        path: ${CONFIGDIR}/tasks/ops/taskset.yaml
         watch: true

@@ -9,6 +9,12 @@ on:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
+# Least-privilege GITHUB_TOKEN default for every job. A job needing more (see
+# comment-pr) overrides this wholesale — a job-level block replaces, not
+# extends, the workflow-level one.
+permissions:
+  contents: read
+
 jobs:
   test:
     name: Test
@@ -42,8 +48,6 @@ jobs:
   test-tasks:
     name: Test tasks (Deno)
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
     steps:
       - uses: actions/checkout@v7
       - uses: denoland/setup-deno@v2
@@ -87,8 +91,6 @@ jobs:
     name: Test buildin tasks (dicode CLI)
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    permissions:
-      contents: read
     env:
       DICODE_DATA_DIR: /tmp/dicode-ci
     steps:
@@ -196,8 +198,6 @@ jobs:
     if: github.event_name == 'pull_request'
     needs: [test, lint]
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
     outputs:
       url-linux-amd64:   ${{ steps.upload-linux-amd64.outputs.artifact-url }}
       url-linux-arm64:   ${{ steps.upload-linux-arm64.outputs.artifact-url }}
