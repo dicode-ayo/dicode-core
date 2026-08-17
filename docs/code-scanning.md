@@ -101,16 +101,13 @@ Two further reasons not to reach for this, if the above is ever fixed upstream:
   and Rust. **Go is absent from that list**, so a pack that works locally may be inert in
   CI — which would leave the suppression dormant rather than absent, ready to activate
   silently if Go is added or the repo moves to advanced setup.
-- `safeTaskFilePath` is symlink-blind. It does a purely lexical `Rel` check and never
-  stats, so a link committed at `taskDir/style.css` is followed by the `os.ReadFile` and
-  `os.WriteFile` in `apiGetFile`/`apiSaveFile`. Certifying it to CodeQL as a path
-  sanitizer would record, in machine-readable form, the opposite of the decision this
-  repo makes everywhere else — `pkg/webui/task_delete.go`, `taskset.containedPath` and
-  `Spec.ScriptPath` all treat git-materialized symlinks as in scope. See the open item
-  below.
+- Certifying a function as a sanitizer records a judgement in machine-readable form, and
+  the judgement can be wrong in ways nothing re-checks. `safeTaskFilePath` was
+  symlink-blind at the time it was proposed as a barrier — the model would have asserted
+  containment the function did not provide.
 
-So the relocation churn is not solved here. It is explained, and the alerts it churns
-are triaged below with reasons that survive being re-read.
+Fixing the code at the boundary — see the triage below — removes alerts without any of
+this. It is the better tool wherever it applies.
 
 ## Reproducing the results locally
 
@@ -177,84 +174,65 @@ taint paths of everything a row removes.
 
 ## Standing triage
 
-The full `go-code-scanning` suite reports **18** results: **15** `go/path-injection`,
-two `go/cookie-secure-not-set` (`pkg/webui/sessions_db.go:377`, `:391`) and one
-`go/weak-sensitive-data-hashing` (`pkg/webui/apikeys.go:258`). All eighteen are unfixed,
-deliberately, and each is dismissed in the Security tab with a written reason. That is
-what makes a red check meaningful: anything not on this list is something new.
+`go/path-injection` reported 15 results. Five are **fixed** by the changes alongside this
+document; the remaining ten are one finding, accepted by design and dismissed in the
+Security tab with a written reason.
 
-The fifteen `go/path-injection` results fall into three groups.
+### Fixed
 
-**Operator-supplied source paths** — ten results: `pkg/taskset/loader.go:31`, `:49`,
-`pkg/task/spec.go:692`, `pkg/task/pipeline.go:89`, `pkg/taskset/resolver.go:484`, and
-`pkg/task/hash.go:299`, `:315`, `:343`, `:353`, plus `pkg/webui/server.go:1047` and
-`:1077` by a different route (see below).
+| Was | Fix |
+|---|---|
+| `pkg/webui/server.go:1047`, `:1077` | `canonicalTaskFile` returns the entry from `allowedFiles` rather than the request's copy, so no request-derived string reaches `filepath.Join`. |
+| `internal/installer/installer.go:92`, `internal/fsutil/fsutil.go:17`, `:45` | The runtime-install route now validates `version` against `runtimeVersionPattern` before it becomes a cache path *and* a release download URL. `pathguard.Within` in `EnsureBinary` remains as the second layer. |
 
-The first nine all carry the same taint: `LocalPath` from the add-source request body
-(`pkg/webui/sources.go:321`), which becomes a taskset root and then a task directory.
-Whoever can set it can already ship task code that runs on the host, so reading a YAML
-file or hashing a directory is strictly less power. This is the trusted-author model in
-[ADR-0002](./adr/0002-trust-boundary-is-the-merge.md). "The author is trusted" is a claim
-about the *merge* boundary — not the same claim as "this string is not remote input" —
-and `threat_model: remote` is right to flag them.
+Both are boundary fixes: the value is constrained where it enters, not audited at each
+of the sinks it reaches. That is also why they close several alerts each.
 
-The four `hash.go` results are the ones #699 relocated, and they belong **here**, not
-under "a sanitizer we did not model". Their existing dismissals cite `resolveInclude`'s
-containment, which bounds the `hash_include` value; the taint in every one of these
-flows is `absDir` instead. Those dismissal texts should be replaced with the reason
-above.
+`internal/fsutil/fsutil.go:56` still reports, but by a different route — it is reached
+from `resolveYAMLPath`, not the installer — so it belongs to the group below.
 
-`pkg/webui/server.go:1047`/`:1077` are the task-file editor's `os.ReadFile`/`os.WriteFile`.
-Their taint is the `filename` URL parameter, which is gated on a nine-entry exact-match
-allowlist and then forced to a bare `Base` name by `safeTaskFilePath`, so the request
-cannot steer the path. Those two are genuine false positives — but see the symlink item
-below, which is a *different* weakness at the same two sinks.
+### Accepted: operator-supplied source paths
 
-**A guard CodeQL cannot be told about** — `internal/installer/installer.go:92` and
-`internal/fsutil/fsutil.go:17`, `:45`, `:56`. These four are one finding, not four.
-They share a source and a guard: the `version` form value on the
-runtime-install route (`pkg/webui/server.go:3084`) becomes
-`~/.cache/dicode/<runtime>/<version>/<bin>` in `pkg/deno`/`pkg/uv`, and reaches
-`installer.EnsureBinary`. Traversal there is genuinely reachable in principle — a
-`version` of `../../..` is attacker-shaped input — and what stops it is
-`pathguard.Within(cacheBase, cachePath)` at `installer.go:83`, which also rejects
-equality with the base. Every one of the four sinks sits after that check:
-`installer.go:92` directly, and the three `fsutil` helpers via `installer.go:88` and
-`:125`. The guard dominates; it is simply not expressible as a `barrierGuardModel` for
-the reasons above. (Precisely, `Within` accepts `p == root`; the `cachePath ==
-filepath.Clean(cacheBase)` clause alongside it is what rejects the base itself.)
+Ten results, one taint: `LocalPath` on the add-source request body
+(`pkg/webui/sources.go:321`), which becomes a taskset root and then a task directory,
+reaching `pkg/task/hash.go:299`, `:315`, `:343`, `:353`, `pkg/taskset/resolver.go:484`,
+`internal/fsutil/fsutil.go:56`, `pkg/taskset/loader.go:31`, `:49`,
+`pkg/task/spec.go:692` and `pkg/task/pipeline.go:89`.
 
-`fsutil`'s helpers are unopinionated pass-throughs and should not grow validation of
-their own — containment belongs at the call site, which is where it is. The residual
-weakness is that `Within` is lexical, so a symlink already planted inside the cache tree
-could redirect a write; that requires prior filesystem access, at which point writing to
-the binary cache is not the interesting capability.
+Naming a host directory *is* the local-source feature; there is no root to confine it to
+without removing the feature. Whoever can set it can already ship task code that runs on
+the host, so reading a YAML file or hashing a directory is strictly less power. This is
+the trusted-author model in [ADR-0002](./adr/0002-trust-boundary-is-the-merge.md).
+"The author is trusted" is a claim about the *merge* boundary — not the same claim as
+"this string is not remote input" — and `threat_model: remote` is right to flag it.
 
-### Open: the task-file editor follows symlinks
+The four `hash.go` results are the ones #699 relocated, and they belong here. Their
+earlier dismissals cited `resolveInclude`'s containment, which bounds the `hash_include`
+value; the taint in every one of these flows is `absDir` instead.
 
-Not a CodeQL finding — `go/path-injection` does not model symlink following — but it
-surfaced while checking whether `safeTaskFilePath` could be certified as a sanitizer, and
-it is the most serious thing on this page.
+Two results outside `go/path-injection` are also accepted and dismissed with reasons:
+`go/cookie-secure-not-set` on `pkg/webui/sessions_db.go:377` and `:391`, and
+`go/weak-sensitive-data-hashing` on `pkg/webui/apikeys.go:258`.
 
-`safeTaskFilePath` (`pkg/webui/server.go:988`) does a purely lexical `Rel` check and
-never stats the candidate. A git source that commits `tasks/foo/style.css` as a symlink
-to, say, `~/.ssh/authorized_keys` gets it materialized as a real link by go-git;
-`style.css` is in `allowedFiles` but is not a script candidate, so `Spec.ScriptPath`'s
-symlink rejection never applies and the task registers normally. `GET
-/api/tasks/{id}/files/style.css` then reads the target, and `POST` writes attacker
-content to it as the daemon user.
+That is what makes a red check meaningful: anything not on this list is something new.
 
-The route is session-gated and the author is trusted at the merge boundary, so this sits
-inside ADR-0002. But the repo has decided elsewhere that this specific class *is*
-defended — `pkg/webui/task_delete.go:107`, `taskset.containedPath`, `resolveInclude`, and
-`Spec.ScriptPath`, which rejects a symlinked `task.ts` with the comment "Symlinks are
-rejected to prevent reading files outside the task directory". The editor is the
-inconsistent one.
+### Also fixed: the task-file editor followed symlinks
 
-Fix: `os.Lstat` + `ModeSymlink` rejection matching `ScriptPath`, or
-`pathguard.WithinResolved`, with a case added to `pkg/webui/safetaskpath_test.go`. Note
-that `resolveInclude` deliberately *supports* symlinked shared modules, so tightening the
-editor needs a decision about whether legitimately symlinked task files exist.
+Never a CodeQL finding — `go/path-injection` does not model symlink following — but it
+surfaced while checking whether `safeTaskFilePath` could honestly be certified as a
+sanitizer, and it was the most serious thing found.
+
+`safeTaskFilePath` did a purely lexical `Rel` check and never stat'd the candidate. A
+source repo that commits `tasks/foo/style.css` as a symlink gets it materialized as a
+real on-disk link by go-git; `style.css` is in `allowedFiles` but is not a script
+candidate, so `Spec.ScriptPath`'s symlink rejection never applied and the task registered
+normally. `GET /api/tasks/{id}/files/style.css` then read the target, and `POST` wrote
+attacker content to it as the daemon user.
+
+It now canonicalizes with `pathguard.WithinResolved`, matching `pkg/webui/task_delete.go`,
+`taskset.containedPath` and `resolveInclude`. A link pointing at a sibling inside the task
+dir stays editable, because that is contained; one resolving outside is rejected, as is an
+escape through a symlinked intermediate directory.
 
 ### A dismissal that rests on a false premise
 
