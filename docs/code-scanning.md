@@ -168,14 +168,24 @@ file is strictly less power. This is the trusted-author model in
 is a claim about the *merge* boundary — it is not the same claim as "this string is not
 remote input", and `threat_model: remote` is right to flag them.
 
-**A guard CodeQL cannot be told about** — `internal/installer/installer.go:92`.
-`EnsureBinary` calls `pathguard.Within(cacheBase, cachePath)` and rejects equality with
-the base before the `MkdirAll`. The guard dominates the sink; it is simply not
-expressible as a `barrierGuardModel` for the reasons above.
+**A guard CodeQL cannot be told about** — `internal/installer/installer.go:92` and
+`internal/fsutil/fsutil.go:17`, `:45`, `:56`. These four are one finding, not four.
+They share a source and a guard: the `version` form value on the
+runtime-install route (`pkg/webui/server.go:3084`) becomes
+`~/.cache/dicode/<runtime>/<version>/<bin>` in `pkg/deno`/`pkg/uv`, and reaches
+`installer.EnsureBinary`. Traversal there is genuinely reachable in principle — a
+`version` of `../../..` is attacker-shaped input — and what stops it is
+`pathguard.Within(cacheBase, cachePath)` at `installer.go:83`, which also rejects
+equality with the base. Every one of the four sinks sits after that check:
+`installer.go:92` directly, and the three `fsutil` helpers via `installer.go:88` and
+`:125`. The guard dominates; it is simply not expressible as a `barrierGuardModel` for
+the reasons above.
 
-**Unreviewed** — `internal/fsutil/fsutil.go:17`, `:45`, `:56`. Dismissed as "won't fix"
-with no written reason, which is the state this page exists to eliminate. They need a
-decision.
+`fsutil`'s helpers are unopinionated pass-throughs and should not grow validation of
+their own — containment belongs at the call site, which is where it is. The residual
+weakness is that `Within` is lexical, so a symlink already planted inside the cache tree
+could redirect a write; that requires prior filesystem access, at which point writing to
+the binary cache is not the interesting capability.
 
 ### One dismissal is wrong
 
