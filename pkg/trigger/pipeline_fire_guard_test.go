@@ -54,9 +54,18 @@ func TestFireGuardVetoesPipelineChainFire(t *testing.T) {
 		t.Fatalf("register pipeline: %v", err)
 	}
 
-	// Hold the pipeline Pending: veto any fire of its task ID.
+	// Hold the pipeline Pending: veto any fire of its task ID. guardSeen
+	// signals that firePipelineChains's goroutine actually reached the guard,
+	// so the assertion below doesn't race a dispatch that simply hasn't run
+	// yet — a reintroduced bypass must be caught deterministically, not by
+	// outlasting a fixed polling window.
+	guardSeen := make(chan struct{}, 1)
 	env.engine.SetFireGuard(func(taskID string) error {
 		if taskID == "guarded-chained-pipe" {
+			select {
+			case guardSeen <- struct{}{}:
+			default:
+			}
 			return fmt.Errorf("task pending approval: %s", taskID)
 		}
 		return nil
@@ -72,19 +81,20 @@ func TestFireGuardVetoesPipelineChainFire(t *testing.T) {
 		t.Fatalf("upstream run status = %q, want success", upRun.Status)
 	}
 
-	// firePipelineChains dispatches the vetoed fire from a goroutine; give it
-	// a moment to run. Because the veto fires before any run record or Deno
-	// subprocess is created, this settles near-instantly when the fix holds.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		runs, err := env.reg.ListRuns(context.Background(), "guarded-chained-pipe", 10)
-		if err != nil {
-			t.Fatalf("ListRuns: %v", err)
-		}
-		if len(runs) != 0 {
-			t.Fatalf("pending pipeline fired via chain edge despite fire guard veto: %d run(s) found", len(runs))
-		}
-		time.Sleep(50 * time.Millisecond)
+	// firePipelineChains dispatches the vetoed fire from a goroutine; wait for
+	// it to actually reach the guard before asserting on run records, rather
+	// than racing a fixed polling window.
+	select {
+	case <-guardSeen:
+	case <-time.After(5 * time.Second):
+		t.Fatal("chain dispatch did not reach the fire guard")
+	}
+	runs, err := env.reg.ListRuns(context.Background(), "guarded-chained-pipe", 10)
+	if err != nil {
+		t.Fatalf("ListRuns: %v", err)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("pending pipeline fired via chain edge despite fire guard veto: %d run(s) found", len(runs))
 	}
 }
 
