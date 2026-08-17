@@ -69,6 +69,12 @@ type PipelineRunner struct {
 // through engine registration, so a pipeline whose stages were deregistered (or
 // that lost the reconcile-ordering race, see #341) is rejected loudly here
 // rather than dispatched and failed mid-flight.
+//
+// It also consults checkFireGuard itself (#678), so a Pending pipeline can
+// never fire — regardless of whether the caller went through fireKinded
+// first. fireKinded checks the guard too; that check is redundant for callers
+// that reach firePipeline through it, but this one is what protects any
+// caller that doesn't.
 func (e *Engine) firePipeline(ctx context.Context, p *task.PipelineTask, opts pkgruntime.RunOptions, source registry.TriggerSource) (string, error) {
 	// Reserve a drain slot before creating the parent run row. Refused once
 	// shutdown has begun so a chain-dispatched pipeline can't finalize past the
@@ -83,6 +89,16 @@ func (e *Engine) firePipeline(ctx context.Context, p *task.PipelineTask, opts pk
 			e.runWG.Done()
 		}
 	}()
+
+	// Re-check the fire guard here too, not just in fireKinded: firePipeline
+	// must be safe to call directly. fireKinded's own check (run.go) makes this
+	// redundant for callers that already route through it, but a future
+	// pipeline-firing path that calls firePipeline directly (reintroducing the
+	// #678 bypass) is vetoed here regardless. Same shape as
+	// startRunWithParent's checkFireGuard call for kind: Task.
+	if err := e.checkFireGuard(p.ID); err != nil {
+		return "", err
+	}
 
 	if err := e.validatePipelineRefs(p); err != nil {
 		return "", fmt.Errorf("pipeline %q failed validation: %w", p.ID, err)

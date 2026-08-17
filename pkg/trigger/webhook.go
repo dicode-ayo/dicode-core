@@ -409,7 +409,7 @@ func (e *Engine) handlePipelineWebhook(w http.ResponseWriter, r *http.Request, p
 	e.log.Info("pipeline webhook trigger", zap.String("path", r.URL.Path), zap.String("task", pipe.ID))
 	// Decouple from the request context so the async pipeline survives the HTTP
 	// response (mirrors fireAsync's use of context.Background()).
-	runID, err := e.firePipeline(context.Background(), pipe, pkgruntime.RunOptions{
+	runID, err := e.fireKinded(context.Background(), pipe, pkgruntime.RunOptions{
 		Input:      input,
 		Params:     params,
 		WebhookCtx: webhookCtx,

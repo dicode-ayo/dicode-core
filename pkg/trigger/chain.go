@@ -260,7 +260,7 @@ func (e *Engine) firePipelineChains(ctx context.Context, completedTaskID, runID,
 		e.log.Info("chain trigger (pipeline)",
 			zap.String("from", completedTaskID), zap.String("to", p.ID), zap.String("on", on))
 		go func(p *task.PipelineTask, in interface{}, params map[string]string) {
-			if _, err := e.firePipeline(ctx, p, pkgruntime.RunOptions{
+			if _, err := e.fireKinded(ctx, p, pkgruntime.RunOptions{
 				ParentRunID: runID,
 				Input:       in,
 				Params:      params,
