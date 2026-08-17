@@ -1,0 +1,151 @@
+package trigger
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/dicode/dicode/pkg/registry"
+	"github.com/dicode/dicode/pkg/task"
+)
+
+// TestFireGuardVetoesPipelineChainFire is the regression test for #678: a
+// pipeline chain-triggered off an upstream task's completion used to fire via
+// a direct e.firePipeline(...) call in firePipelineChains, bypassing
+// checkFireGuard entirely. A pipeline the Approval Gate is holding Pending
+// (unarmed) would still run when the chain edge fired. firePipelineChains now
+// routes through fireKinded like every other fire path, so the veto applies
+// here too.
+func TestFireGuardVetoesPipelineChainFire(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires Deno subprocess")
+	}
+	env := newTestEnv(t)
+	dir := t.TempDir()
+
+	stage := writeTask(t, dir, "guarded-chain-stage",
+		`export default async function main() { return "ok" }`, task.TriggerConfig{Manual: true})
+	upstream := writeTask(t, dir, "guarded-chain-up",
+		`export default async function main() { return "done" }`, task.TriggerConfig{Manual: true})
+	for _, s := range []*task.Spec{stage, upstream} {
+		if err := env.reg.Register(s); err != nil {
+			t.Fatal(err)
+		}
+		if err := env.engine.Register(s); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	pipe := &task.PipelineTask{
+		APIVersion: "dicode/v1", Kind: task.KindPipelineTask,
+		ID: "guarded-chained-pipe", Name: "GCP", Subtype: "sequential", Enabled: true,
+		Trigger: task.PipelineTrigger{Chain: &task.ChainTrigger{From: "guarded-chain-up", On: "success"}},
+		Stages:  []task.Stage{{Task: "guarded-chain-stage"}},
+	}
+	if err := env.reg.Register(pipe); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.engine.Register(pipe); err != nil {
+		t.Fatalf("register pipeline: %v", err)
+	}
+
+	// Hold the pipeline Pending: veto any fire of its task ID.
+	env.engine.SetFireGuard(func(taskID string) error {
+		if taskID == "guarded-chained-pipe" {
+			return fmt.Errorf("task pending approval: %s", taskID)
+		}
+		return nil
+	})
+
+	if _, err := env.engine.FireManual(context.Background(), "guarded-chain-up", nil); err != nil {
+		t.Fatalf("FireManual up: %v", err)
+	}
+
+	// The chain edge fires once the upstream run completes.
+	upRun := findRun(t, env, "guarded-chain-up", registry.RunKindTask, 30*time.Second)
+	if upRun.Status != registry.StatusSuccess {
+		t.Fatalf("upstream run status = %q, want success", upRun.Status)
+	}
+
+	// firePipelineChains dispatches the vetoed fire from a goroutine; give it
+	// a moment to run. Because the veto fires before any run record or Deno
+	// subprocess is created, this settles near-instantly when the fix holds.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		runs, err := env.reg.ListRuns(context.Background(), "guarded-chained-pipe", 10)
+		if err != nil {
+			t.Fatalf("ListRuns: %v", err)
+		}
+		if len(runs) != 0 {
+			t.Fatalf("pending pipeline fired via chain edge despite fire guard veto: %d run(s) found", len(runs))
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// TestFireGuardVetoesPipelineWebhookFire is the webhook-half of the #678
+// regression: the pipeline webhook handler used to fire via a direct
+// e.firePipeline(...) call, bypassing checkFireGuard. A POST to a Pending
+// pipeline's own webhook would still start it. The handler now routes through
+// fireKinded, so a fire-guard veto rejects the request (500, guard error
+// surfaced in the body) and no run row is created.
+func TestFireGuardVetoesPipelineWebhookFire(t *testing.T) {
+	env := newTestEnv(t)
+	stage := &task.Spec{ID: "guarded-webhook-stage", Name: "S", Enabled: true,
+		Runtime: task.RuntimeDeno, Trigger: task.TriggerConfig{Manual: true}}
+	if err := env.reg.Register(stage); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.engine.Register(stage); err != nil {
+		t.Fatal(err)
+	}
+
+	pipe := &task.PipelineTask{
+		APIVersion: "dicode/v1", Kind: task.KindPipelineTask,
+		ID: "guarded-webhook-pipe", Name: "GWP", Subtype: "sequential", Enabled: true,
+		Trigger: task.PipelineTrigger{Webhook: "/hooks/guarded-webhook-pipe"},
+		Stages:  []task.Stage{{Task: "guarded-webhook-stage"}},
+	}
+	if err := env.reg.Register(pipe); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.engine.Register(pipe); err != nil {
+		t.Fatalf("register pipeline: %v", err)
+	}
+
+	// Hold the pipeline Pending: veto any fire of its task ID.
+	env.engine.SetFireGuard(func(taskID string) error {
+		if taskID == "guarded-webhook-pipe" {
+			return fmt.Errorf("task pending approval: %s", taskID)
+		}
+		return nil
+	})
+
+	handler := env.engine.WebhookHandler()
+	req := httptest.NewRequest(http.MethodPost, "/hooks/guarded-webhook-pipe", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("webhook POST to a pending pipeline status = %d, want %d: %s",
+			w.Code, http.StatusInternalServerError, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "pending approval") {
+		t.Fatalf("response body = %q, want it to surface the fire guard veto", w.Body.String())
+	}
+	if w.Header().Get("X-Run-Id") != "" {
+		t.Fatalf("expected no X-Run-Id header on a vetoed fire, got %q", w.Header().Get("X-Run-Id"))
+	}
+
+	runs, err := env.reg.ListRuns(context.Background(), "guarded-webhook-pipe", 10)
+	if err != nil {
+		t.Fatalf("ListRuns: %v", err)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("pending pipeline fired via its own webhook despite fire guard veto: %d run(s) found", len(runs))
+	}
+}
