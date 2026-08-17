@@ -60,26 +60,26 @@ class DcStatusBadge extends LitElement {
        under [data-theme="light"], and a baked-in tint would keep tinting
        with a hue the active theme no longer uses. */
     .badge-success {
-      background: rgba(166, 227, 161, .15);
+      background: color-mix(in srgb, var(--green) 15%, transparent);
       color: var(--green);
-      border-color: rgba(166, 227, 161, .3);
+      border-color: color-mix(in srgb, var(--green) 30%, transparent);
     }
     .badge-failure {
-      background: rgba(243, 139, 168, .15);
+      background: color-mix(in srgb, var(--red) 15%, transparent);
       color: var(--red);
-      border-color: rgba(243, 139, 168, .3);
+      border-color: color-mix(in srgb, var(--red) 30%, transparent);
     }
     .badge-running {
-      background: rgba(249, 226, 175, .15);
+      background: color-mix(in srgb, var(--yellow) 15%, transparent);
       color: var(--yellow);
-      border-color: rgba(249, 226, 175, .3);
+      border-color: color-mix(in srgb, var(--yellow) 30%, transparent);
     }
     /* crashlooping (#458): a daemon stuck in a spawn/crash/backoff loop —
        stronger red than badge-failure so it stands out. */
     .badge-crashlooping {
-      background: rgba(243, 139, 168, .28);
+      background: color-mix(in srgb, var(--red) 28%, transparent);
       color: var(--red);
-      border-color: rgba(243, 139, 168, .4);
+      border-color: color-mix(in srgb, var(--red) 40%, transparent);
     }
     .badge-cancelled {
       background: var(--card-bg);

@@ -42,15 +42,24 @@ tokens defined in `theme.css` (`var(--space-md)`, `var(--card-bg)`,
 `data-theme="light"`/`"dark"` on `<html>` re-tints primitives exactly like
 the rest of the app, with no extra wiring.
 
-Earlier drafts of these components carried a fallback on every `var()` —
-67 of them across the six primitives — matching the dark-theme default, in
-case a primitive ever landed on a page that didn't load `theme.css`. That
-consumer doesn't exist: `index.html` loads `global.css`, whose first
-statement is `@import './theme.css'`, and every page in this app goes
-through `index.html`. A speculative consumer isn't worth 67 hand-copied
-literals that silently drift the moment a token is re-tuned — restoring
-fallbacks later, if a token-less host page ever becomes real, is a
-mechanical change; hunting stale copies after the fact is not.
+Earlier drafts of these components carried a fallback on every `var()`
+matching the dark-theme default, in case a primitive ever landed on a page
+that didn't load `theme.css`. That consumer doesn't exist: `index.html`
+loads `global.css`, whose first statement is `@import './theme.css'`, and
+every page in this app goes through `index.html`. A speculative consumer
+isn't worth a hand-copied literal beside every token that silently drifts
+the moment one is re-tuned — restoring fallbacks later, if a token-less
+host page ever becomes real, is a mechanical change; hunting stale copies
+after the fact is not.
+
+For the same reason, never bake a token's *current value* into a derived
+color. A tint written as `rgba()` of the dark-theme hue keeps that hue
+after the theme flips, so light mode ends up tinting with a color the
+theme no longer uses. Derive it from the live token instead:
+
+```css
+background: color-mix(in srgb, var(--green) 15%, transparent);
+```
 
 Where a primitive's own palette needs to match `global.css` exactly (see
 `dc-status-badge` below), the relevant rules are copied into the

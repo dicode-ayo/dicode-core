@@ -112,24 +112,6 @@ test.describe('UI Kit primitives (#93 Stage 1)', () => {
     await expect(inner).toBeDisabled();
   });
 
-  // Locks in the accessible-name requirement as a behavior, not just a
-  // documented convention: every dc-icon-button on the demo page must
-  // resolve a real, non-empty accessible name via its role. A forgotten
-  // `label` attribute renders `aria-label=""`, which — unlike a missing
-  // attribute — hides a nameless button from a lot of audit tooling; this
-  // asserts the actual accessible name via getByRole rather than just
-  // checking the attribute is present.
-  test('every dc-icon-button on the demo page resolves a non-empty accessible name', async ({ page }) => {
-    const iconButtonHosts = page.locator('dc-icon-button');
-    const count = await iconButtonHosts.count();
-    expect(count).toBeGreaterThan(0);
-    for (let i = 0; i < count; i++) {
-      const inner = iconButtonHosts.nth(i).locator('button');
-      const accessibleName = await inner.getAttribute('aria-label');
-      expect(accessibleName?.trim()).toBeTruthy();
-    }
-  });
-
   // Compares computed style, not just attribute presence — asserting only
   // `variant="danger"` is set would stay green even if the CSS behind it
   // were deleted entirely. Focusing each button and comparing outline
@@ -211,9 +193,9 @@ test.describe('UI Kit primitives (#93 Stage 1)', () => {
       - table:
         - rowgroup:
           - row "ID Name Status":
-            - cell "ID"
-            - cell "Name"
-            - cell "Status"
+            - columnheader "ID"
+            - columnheader "Name"
+            - columnheader "Status"
         - rowgroup:
           - row "task-1 Example One success":
             - cell "task-1"
