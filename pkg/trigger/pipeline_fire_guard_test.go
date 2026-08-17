@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/dicode/dicode/pkg/registry"
+	pkgruntime "github.com/dicode/dicode/pkg/runtime"
 	"github.com/dicode/dicode/pkg/task"
 )
 
@@ -147,5 +148,62 @@ func TestFireGuardVetoesPipelineWebhookFire(t *testing.T) {
 	}
 	if len(runs) != 0 {
 		t.Fatalf("pending pipeline fired via its own webhook despite fire guard veto: %d run(s) found", len(runs))
+	}
+}
+
+// TestFireGuardVetoesDirectFirePipelineCall closes the architectural gap noted
+// in review of #704 (PR comment on #704): firePipeline had no fire-guard check
+// of its own, so pipeline safety depended entirely on every caller remembering
+// to route through fireKinded first. This calls e.firePipeline directly
+// (bypassing fireKinded's own checkFireGuard call entirely) to prove the guard
+// is enforced by firePipeline itself, not merely by its callers.
+func TestFireGuardVetoesDirectFirePipelineCall(t *testing.T) {
+	env := newTestEnv(t)
+	stage := &task.Spec{ID: "guarded-direct-stage", Name: "S", Enabled: true,
+		Runtime: task.RuntimeDeno, Trigger: task.TriggerConfig{Manual: true}}
+	if err := env.reg.Register(stage); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.engine.Register(stage); err != nil {
+		t.Fatal(err)
+	}
+
+	pipe := &task.PipelineTask{
+		APIVersion: "dicode/v1", Kind: task.KindPipelineTask,
+		ID: "guarded-direct-pipe", Name: "GDP", Subtype: "sequential", Enabled: true,
+		Trigger: task.PipelineTrigger{Manual: true},
+		Stages:  []task.Stage{{Task: "guarded-direct-stage"}},
+	}
+	if err := env.reg.Register(pipe); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.engine.Register(pipe); err != nil {
+		t.Fatalf("register pipeline: %v", err)
+	}
+
+	// Hold the pipeline Pending: veto any fire of its task ID.
+	env.engine.SetFireGuard(func(taskID string) error {
+		if taskID == "guarded-direct-pipe" {
+			return fmt.Errorf("task pending approval: %s", taskID)
+		}
+		return nil
+	})
+
+	// Call firePipeline directly, not through fireKinded, to exercise
+	// firePipeline's own internal checkFireGuard call in isolation.
+	runID, err := env.engine.firePipeline(context.Background(), pipe, pkgruntime.RunOptions{}, registry.TriggerManual)
+	if err == nil || !strings.Contains(err.Error(), "pending approval") {
+		t.Fatalf("firePipeline called directly = (%q, %v), want a pending-approval veto error", runID, err)
+	}
+	if runID != "" {
+		t.Fatalf("firePipeline returned a non-empty run ID on a vetoed fire: %q", runID)
+	}
+
+	runs, err := env.reg.ListRuns(context.Background(), "guarded-direct-pipe", 10)
+	if err != nil {
+		t.Fatalf("ListRuns: %v", err)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("firePipeline created a run row despite fire guard veto: %d run(s) found", len(runs))
 	}
 }
