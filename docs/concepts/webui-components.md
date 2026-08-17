@@ -163,12 +163,8 @@ Bordered table shell around slotted rows, generalizing the
 `<table>...</table>` + "no tasks found" empty-card pattern in
 `dc-task-list.js`.
 
-- Slots: `head` (a single `<tr>`, rendered as the table's header row group —
-  each `<th>` needs an explicit `scope="col"`; the shell's `<div
-  role="table">` doesn't give a slotted `<th>` an implicit `columnheader`
-  role the way a literal `<table>`/`<thead>` would, verified via an offline
-  `ariaSnapshot()` check), default (`<tr>` rows rendered as the body row
-  group)
+- Slots: `head` (a single `<tr>`, rendered as the table's header row group),
+  default (`<tr>` rows rendered as the body row group)
 - Props: `loading` (shows a placeholder instead of rows), `emptyMessage` /
   `emptyIcon` (forwarded to the internal `<dc-empty-state>` when no rows are
   slotted) — set via the plain `empty-message="..."`/`empty-icon="..."`
@@ -199,6 +195,16 @@ own shadow-root shell is `<div>`s with CSS `display: table` roles rather
 than literal `<table>`/`<thead>`/`<tbody>`, for the same underlying
 reason: a literal `<table>` there would foster-parent its own `<slot>`
 children right back out.
+
+Because those rows sit outside any real `<table>`, the roles a browser
+infers for them aren't portable: the same tree reported `columnheader` for a
+slotted `<th>` in one Chromium build and `cell` — a table exposing no
+column headers at all — in another. `<dc-table>` therefore *declares* the
+roles rather than relying on inference, stamping `role="row"` and
+`columnheader`/`rowheader`/`cell` onto the slotted elements in the pass it
+already makes over them on every `slotchange`. Consumers get correct table
+semantics without having to know any of this; `tests/e2e/ui-kit-primitives.spec.ts`
+pins the resulting tree with an aria snapshot.
 
 ### Demo page
 

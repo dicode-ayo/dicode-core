@@ -6,16 +6,9 @@ import './dc-empty-state.js';
 // "no rows" card-message pattern in dc-task-list.js.
 //
 // Slots:
-//   head      — a single <tr> (with <th> cells) rendered inside <thead>.
-//               Each <th> needs an explicit scope="col" — unlike a <th>
-//               inside a literal <table>/<thead>, one slotted into this
-//               shell's <div role="table"> doesn't get an implicit
-//               columnheader accessibility role from ambient table
-//               context; verified empirically (offline Playwright
-//               ariaSnapshot()) that without scope it composes as a plain
-//               "cell" and with scope="col" it correctly composes as
-//               "columnheader". See dc-ui-kit-demo.js's
-//               _populateTableRows for the pattern.
+//   head      — a single <tr> (with <th> cells) rendered inside <thead>;
+//               its cells get the columnheader role stamped on them, so a
+//               consumer needn't carry that themselves
 //   (default) — <tr> rows rendered inside <tbody>
 //
 // Props:
