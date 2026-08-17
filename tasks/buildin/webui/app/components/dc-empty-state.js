@@ -27,32 +27,24 @@ class DcEmptyState extends LitElement {
     :host {
       display: block;
       text-align: center;
-      color: var(--muted, #8b93a8);
-      padding: var(--space-xl, 2rem);
+      color: var(--muted);
+      padding: var(--space-xl);
     }
     .icon {
-      font-size: 1.8rem;
+      font-size: var(--text-2xl);
       line-height: 1;
-      margin-bottom: var(--space-sm, .5rem);
+      margin-bottom: var(--space-sm);
     }
     .message {
-      font-size: var(--text-base, .9rem);
+      font-size: var(--text-base);
     }
-    .cta {
-      margin-top: 0;
-    }
-    /* Only add the gap above the CTA slot when it actually has content —
-       avoids reserving dead space for icon/message-only instances.
-       Deliberately NOT ".cta:has(*)": the default slot's own <slot>
-       element is unconditionally a child of .cta regardless of whether
-       anything is assigned to it, since :has() matches against this
-       shadow tree, not the flattened/slotted tree — so that selector
-       would always match and the "only when it has content" gap would
-       never actually turn off. Tracked in JS instead, matching the
-       pattern dc-card.js/dc-table.js already use in this PR for the same
-       kind of slot-presence check. */
+    /* Gap only when the CTA slot has content, so icon/message-only
+       instances reserve no dead space. The presence test cannot be
+       ".cta:has(*)": :has() matches against this shadow tree, where the
+       <slot> element is unconditionally a child of .cta whether or not
+       anything is assigned to it, so that selector always matches. */
     .cta.has-content {
-      margin-top: var(--space-md, 1rem);
+      margin-top: var(--space-md);
     }
   `;
 
@@ -63,16 +55,12 @@ class DcEmptyState extends LitElement {
     this._hasCta = false;
   }
 
-  // Synchronous census (not slotchange-only) so a CTA present from the
-  // very first connection doesn't render gap-less for one frame before
-  // self-correcting — same rationale as dc-card.js's connectedCallback.
-  // hasSlottedElement checks this.children (element children only), not
-  // `<slot>.assignedNodes()` — assignedNodes() also counts whitespace
-  // text nodes (e.g. the newline in ordinary multi-line
-  // `<dc-empty-state>\n</dc-empty-state>` markup with no real CTA
-  // element), which would flip _hasCta on for content-free instances and
-  // reproduce the exact "gap never turns off" bug this component's CSS
-  // comment says was deliberately avoided, via a different path.
+  // Synchronous census, not slotchange-only, so a CTA present from the
+  // first connection never renders gap-less for a frame before
+  // self-correcting. hasSlottedElement counts element children only:
+  // `<slot>.assignedNodes()` would also count the whitespace text node
+  // that ordinary multi-line `<dc-empty-state>` markup leaves behind,
+  // turning the gap on for instances with no CTA at all.
   connectedCallback() {
     super.connectedCallback();
     this._hasCta = hasSlottedElement(this);

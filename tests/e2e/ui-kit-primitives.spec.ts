@@ -87,16 +87,52 @@ test.describe('UI Kit primitives (#93 Stage 1)', () => {
     await expect(inner).not.toBeDisabled();
   });
 
+  // `label` is documented as required; an empty one renders aria-label=""
+  // — a button with no accessible name, which the empty attribute then
+  // hides from tooling that flags nameless buttons. Assert the resolved
+  // name rather than the attribute's presence, for every instance on the
+  // page, so a future icon-button added without a label fails here.
+  test('every dc-icon-button resolves a non-empty accessible name', async ({ page }) => {
+    const buttons = page.locator('dc-icon-button');
+    const count = await buttons.count();
+    expect(count).toBeGreaterThan(0);
+
+    for (let i = 0; i < count; i++) {
+      const host = buttons.nth(i);
+      const id = await host.getAttribute('id');
+      const name = await host.locator('button').evaluate(
+        el => el.getAttribute('aria-label')?.trim() ?? '',
+      );
+      expect(name, `<dc-icon-button id="${id}"> has no accessible name`).not.toBe('');
+    }
+  });
+
   test('dc-icon-button reflects the disabled property to its inner <button>', async ({ page }) => {
     const inner = page.locator('dc-icon-button#icon-btn-disabled button');
     await expect(inner).toBeDisabled();
   });
 
-  test('dc-icon-button danger variant is a distinct visual variant from default', async ({ page }) => {
-    const danger = page.locator('dc-icon-button#icon-btn-danger');
-    await expect(danger).toHaveAttribute('variant', 'danger');
-    const defaultBtn = page.locator('dc-icon-button#icon-btn-default');
-    await expect(defaultBtn).not.toHaveAttribute('variant', 'danger');
+  // The danger variant only changes hover/focus colors, so this has to
+  // drive a real hover — asserting the attribute alone would stay green
+  // with the `:host([variant='danger'])` rules deleted outright.
+  test('dc-icon-button danger variant hovers to a different color than default', async ({ page }) => {
+    const danger = page.locator('dc-icon-button#icon-btn-danger button');
+    const plain = page.locator('dc-icon-button#icon-btn-default button');
+
+    await danger.hover();
+    const dangerHover = await danger.evaluate(el => {
+      const s = getComputedStyle(el);
+      return { color: s.color, border: s.borderTopColor };
+    });
+
+    await plain.hover();
+    const plainHover = await plain.evaluate(el => {
+      const s = getComputedStyle(el);
+      return { color: s.color, border: s.borderTopColor };
+    });
+
+    expect(dangerHover.color).not.toBe(plainHover.color);
+    expect(dangerHover.border).not.toBe(plainHover.border);
   });
 
   // ── dc-status-badge ──────────────────────────────────────────────────────
@@ -123,8 +159,17 @@ test.describe('UI Kit primitives (#93 Stage 1)', () => {
     expect(successColor).not.toBe(failureColor);
   });
 
-  test('dc-status-badge status values total nine example pills', async ({ page }) => {
-    await expect(page.locator('#status-badges dc-status-badge')).toHaveCount(9);
+  // Derived from the component's own exported set rather than hand-counted,
+  // so adding a status stays a one-line change there instead of silently
+  // invalidating a literal here.
+  test('the demo renders one pill per known status, plus the unknown-value example', async ({ page }) => {
+    const knownCount = await page.evaluate(async (base) => {
+      const mod = await import(`${base}/app/components/dc-status-badge.js`);
+      return mod.KNOWN_STATUSES.size;
+    }, WEBUI_URL);
+
+    expect(knownCount).toBeGreaterThan(0);
+    await expect(page.locator('#status-badges dc-status-badge')).toHaveCount(knownCount + 1);
   });
 
   // ── dc-table ─────────────────────────────────────────────────────────────
@@ -146,6 +191,34 @@ test.describe('UI Kit primitives (#93 Stage 1)', () => {
     await expect(bodyRows.first().locator('dc-status-badge .badge')).toHaveText('success');
   });
 
+  // The shell is <div role="table">, not a real <table>, and the rows are
+  // slotted from the light DOM — so whether <tr>/<th>/<td> still map to
+  // row/columnheader/cell has to be asserted, not assumed. They do, via
+  // the composed tree, with no explicit role attributes on the rows.
+  test('dc-table exposes rows and cells to the accessibility tree', async ({ page }) => {
+    await expect(page.locator('dc-table#table-with-rows')).toMatchAriaSnapshot(`
+      - table:
+        - rowgroup:
+          - row "ID Name Status":
+            - columnheader "ID"
+            - columnheader "Name"
+            - columnheader "Status"
+        - rowgroup:
+          - row "task-1 Example One success":
+            - cell "task-1"
+            - cell "Example One"
+            - cell "success"
+          - row "task-2 Example Two running":
+            - cell "task-2"
+            - cell "Example Two"
+            - cell "running"
+          - row "task-3 Example Three failure":
+            - cell "task-3"
+            - cell "Example Three"
+            - cell "failure"
+    `);
+  });
+
   test('dc-table renders its empty state when no rows are slotted', async ({ page }) => {
     const table = page.locator('dc-table#table-empty');
     await expect(table.locator('[role="table"]')).toHaveCount(0);
@@ -155,10 +228,9 @@ test.describe('UI Kit primitives (#93 Stage 1)', () => {
     await expect(empty.locator('.message')).toHaveText('No rows slotted.');
   });
 
-  // Locks in a bug fixed during this PR's review: a head row present with
-  // zero body rows must still render the head inside the styled table
-  // shell (not as a bare, unstyled <tr>), alongside the empty-state
-  // message — not one or the other.
+  // A head row present with zero body rows must still render inside the
+  // styled table shell — not as a bare, unstyled <tr> — alongside the
+  // empty-state message, not one or the other.
   test('dc-table renders a styled head row alongside the empty state when only the head is slotted', async ({ page }) => {
     const table = page.locator('dc-table#table-head-only');
     await expect(table.locator('[role="table"]')).toBeVisible();

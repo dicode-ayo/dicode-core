@@ -38,13 +38,19 @@ Shadow DOM blocks style *rules* from crossing in, but CSS **custom property
 values** still inherit through shadow boundaries (`:host` picks them up like
 any other descendant). Every primitive's `css` styles reference the same
 tokens defined in `theme.css` (`var(--space-md)`, `var(--card-bg)`,
-`var(--blue)`, ...) with a hard-coded fallback matching the dark-theme
-default, so:
+`var(--blue)`, ...), so swapping `data-theme="light"`/`"dark"` on `<html>`
+re-tints primitives exactly like the rest of the app, with no extra wiring.
 
-- swapping `data-theme="light"`/`"dark"` on `<html>` re-tints primitives
-  exactly like the rest of the app, with no extra wiring:
-- a primitive dropped onto a page that doesn't happen to load `theme.css`
-  still renders sensibly, via the fallback values.
+Reference tokens bare (`var(--card-bg)`), without a hard-coded fallback.
+`index.html` loads `global.css`, whose first statement is
+`@import './theme.css'` — so there is no token-less host page to guard
+against, and each fallback would be one more hand-copy of a token value to
+drift out of sync the next time one is re-tuned.
+
+Never bake a token's *current value* into a derived color — a tint written
+as `rgba()` of the dark-theme hue keeps that hue after the theme flips.
+Derive it from the live token instead, with `color-mix(in srgb, var(--green)
+15%, transparent)`.
 
 Where a primitive's own palette needs to match `global.css` exactly (see
 `dc-status-badge` below), the relevant rules are copied into the
@@ -109,15 +115,18 @@ required `label` prop supplying `aria-label`/`title` — the accessible name
 never depends on the icon being self-describing.
 
 - Slots: default (icon content)
-- Props: `label` (required), `variant` (`'default'` | `'danger'`), `disabled`
+- Props: `label` (required — an empty one warns, since an icon-only button
+  then has no accessible name at all), `variant` (`'danger'`; unset gives the
+  default look), `disabled`
 
 ### `<dc-status-badge>`
 
 Colored status pill generalizing `<span class="badge badge-${status}">`.
 
-- Props: `status` (or `variant` as an alias) — one of `success`, `failure`,
-  `running`, `crashlooping`, `cancelled`, `manual`, `suspended`, `resumed`;
-  any other value renders the neutral/default style.
+- Props: `status` — one of `success`, `failure`, `running`, `crashlooping`,
+  `cancelled`, `manual`, `suspended`, `resumed`; any other value renders the
+  neutral/default style. The set is exported as `KNOWN_STATUSES` so callers
+  that need to enumerate it don't hand-duplicate the list.
 
 Its palette is a copy of `global.css`'s `.badge`/`.badge-*` rules (see
 [Theming across the shadow boundary](#theming-across-the-shadow-boundary)
@@ -133,13 +142,7 @@ Bordered table shell around slotted rows, generalizing the
   default (`<tr>` rows rendered as the body row group)
 - Props: `loading` (shows a placeholder instead of rows), `emptyMessage` /
   `emptyIcon` (forwarded to the internal `<dc-empty-state>` when no rows are
-  slotted)
-
-`emptyMessage`/`emptyIcon` must be set as JS properties (`.emptyMessage=`)
-rather than HTML attributes from a Lit template — Lit's default attribute
-name for a property is just the lowercased property name (`emptymessage`),
-not a kebab-cased one, so a literal `empty-message="..."` attribute would
-not bind.
+  slotted), settable as the `empty-message` / `empty-icon` attributes
 
 Slotted `<tr>`/`<td>`/`<th>` elements stay in the *light* DOM — projection
 through a `<slot>` only changes where a node paints, not which document

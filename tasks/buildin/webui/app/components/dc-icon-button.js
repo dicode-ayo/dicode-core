@@ -10,8 +10,9 @@ import { LitElement, html, css } from 'https://esm.sh/lit@3';
 //   (default) — icon content, typically an inline <svg>
 //
 // Props:
-//   label    — accessible name (required); also used as the title tooltip
-//   variant  — 'default' | 'danger' — tints hover/focus color
+//   label    — accessible name (required; warns when empty); also used as
+//              the title tooltip
+//   variant  — 'danger' tints hover/focus color; unset gives the default look
 //   disabled — standard boolean
 class DcIconButton extends LitElement {
   static properties = {
@@ -26,43 +27,56 @@ class DcIconButton extends LitElement {
       display: flex;
       align-items: center;
       justify-content: center;
-      width: 32px;
-      height: 32px;
+      inline-size: 2rem;
+      block-size: 2rem;
       padding: 0;
       background: transparent;
-      border: 1px solid var(--border, rgba(160, 196, 255, .15));
-      border-radius: var(--radius-md, 10px);
-      color: var(--muted, #8b93a8);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      color: var(--muted);
       cursor: pointer;
       font: inherit;
-      transition: background .2s var(--ease, ease), border-color .2s var(--ease, ease), color .2s var(--ease, ease);
+      transition: background .2s var(--ease), border-color .2s var(--ease), color .2s var(--ease);
     }
     button:hover {
-      background: var(--card-bg, rgba(255, 255, 255, .04));
-      border-color: var(--sky, #a0c4ff);
-      color: var(--sky, #a0c4ff);
+      background: var(--card-bg);
+      border-color: var(--sky);
+      color: var(--sky);
     }
     button:focus-visible {
-      outline: 2px solid var(--sky, #a0c4ff);
+      outline: 2px solid var(--sky);
       outline-offset: 2px;
     }
     :host([variant='danger']) button:hover,
     :host([variant='danger']) button:focus-visible {
-      border-color: var(--red, #f38ba8);
-      color: var(--red, #f38ba8);
+      border-color: var(--red);
+      color: var(--red);
     }
     :host([variant='danger']) button:focus-visible {
-      outline-color: var(--red, #f38ba8);
+      outline-color: var(--red);
     }
     button:disabled { opacity: .5; cursor: not-allowed; }
-    ::slotted(svg) { width: 18px; height: 18px; }
+    ::slotted(svg) { inline-size: 1.125rem; block-size: 1.125rem; }
   `;
 
   constructor() {
     super();
     this.label = '';
-    this.variant = 'default';
     this.disabled = false;
+  }
+
+  // An icon-only button whose `label` is empty has no accessible name at
+  // all, and `aria-label=""` hides that from the audit tooling that would
+  // otherwise flag a nameless button — so the omission has to announce
+  // itself here or it ships silently.
+  willUpdate(changedProperties) {
+    super.willUpdate(changedProperties);
+    if (changedProperties.has('label') && !this.label) {
+      console.warn(
+        '<dc-icon-button> requires a non-empty `label`: an icon-only button has no accessible name without one.',
+        this,
+      );
+    }
   }
 
   render() {

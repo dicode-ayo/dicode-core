@@ -36,8 +36,8 @@ import './dc-empty-state.js';
 class DcTable extends LitElement {
   static properties = {
     loading: { type: Boolean },
-    emptyMessage: { type: String },
-    emptyIcon: { type: String },
+    emptyMessage: { type: String, attribute: 'empty-message' },
+    emptyIcon: { type: String, attribute: 'empty-icon' },
     _hasRows: { state: true },
     _hasHead: { state: true },
   };
@@ -48,18 +48,18 @@ class DcTable extends LitElement {
       display: table;
       width: 100%;
       border-collapse: collapse;
-      background: var(--card-bg, rgba(255, 255, 255, .04));
-      border: 1px solid var(--border, rgba(160, 196, 255, .15));
-      border-radius: var(--radius-md, 10px);
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
       overflow: hidden;
     }
     .thead { display: table-header-group; }
     .tbody { display: table-row-group; }
     .loading {
-      padding: var(--space-lg, 1.5rem);
+      padding: var(--space-lg);
       text-align: center;
-      color: var(--muted, #8b93a8);
-      font-size: var(--text-sm, .82rem);
+      color: var(--muted);
+      font-size: var(--text-sm);
     }
   `;
 
@@ -90,6 +90,7 @@ class DcTable extends LitElement {
   // that mounts the real slots also has an up-to-date census instead of
   // showing a one-render flash of the stale (pre-population) empty state.
   willUpdate(changedProperties) {
+    super.willUpdate(changedProperties);
     if (changedProperties.get('loading') === true && !this.loading) {
       this._recomputeHasRows();
     }

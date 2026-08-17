@@ -25,7 +25,7 @@ import { LitElement } from 'https://esm.sh/lit@3';
 //     }
 //     render() {
 //       if (this._loading) return html`<div class="meta">Loading…</div>`;
-//       if (this._error) return html`<p style="color:red">Error: ${this._error}</p>`;
+//       if (this._error) return html`<p style="color:var(--red)">Error: ${this._error}</p>`;
 //       ...
 //     }
 //   }
