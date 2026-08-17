@@ -57,6 +57,14 @@ Two functions are modelled, both via `barrierModel` on their returned path:
 | `pkg/task.resolveInclude` | Returns only after a lexical strict-descendant check against the task's parent dir *and* a symlink-canonicalized containment check. The value returned is the canonicalized path, not the caller's lexical guess. |
 | `pkg/webui.safeTaskFilePath` | Rejects any filename that is not a bare `Base` name, then re-checks containment with `filepath.Rel` after `Join`. |
 
+Read the second row narrowly. It says the `filename` request parameter cannot steer the
+path, which is the question `go/path-injection` asks. It does **not** say the resulting
+path is safe to open: `safeTaskFilePath` resolves no symlinks, so a link planted at
+`taskDir/task.js` is followed by the `os.ReadFile`/`os.WriteFile` in `apiGetFile` and
+`apiSaveFile`. That is a real gap — `pkg/webui/task_delete.go` guards the same class with
+`EvalSymlinks` + `pathguard.ResolveExisting`, and `resolveInclude` does too — but it is
+not one this query models, so the barrier suppresses no detection of it.
+
 A barrier model is a claim CodeQL takes on trust. What actually keeps these two
 functions honest is their Go test suites — `pkg/task/hash_test.go` pins traversal
 rejection, bare `..` rejection and symlink escape; `internal/pathguard/pathguard_test.go`
