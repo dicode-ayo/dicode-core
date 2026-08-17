@@ -15,13 +15,10 @@ extensions:
       # success path.
       - ["github.com/dicode/dicode/pkg/webui", "", False, "safeTaskFilePath", "", "", "ReturnValue[0]", "path-injection", "manual"]
 
-# pathguard.Within, pathguard.WithinResolved and taskset.containedPath are this
-# repo's other containment guards, and barrierGuardModel cannot express any of
-# them. Go's MaD guard support (semmle/go/dataflow/ExternalFlow.qll) requires the
-# guard to be the boolean value of the call expression itself, whereas every one
-# of these returns (bool, error) or error and is tested through a destructured
-# variable; convertAcceptingValue additionally implements only "true"/"false",
-# leaving "null" — the shape an error-returning guard needs — inert. Rows for
-# them were written, measured against a local database, and silenced nothing.
-# Their alerts stay dismissed in the Security tab instead. See
-# docs/development/codeql.md.
+# barrierGuardModel cannot express pathguard.Within, pathguard.WithinResolved or
+# taskset.containedPath. Go's MaD guard support (semmle/go/dataflow/ExternalFlow.qll)
+# requires the guard to be the boolean value of the call expression itself, whereas
+# each of these returns (bool, error) or error and is tested through a destructured
+# variable; convertAcceptingValue implements only "true"/"false", leaving "null" —
+# the shape an error-returning guard needs — inert. Their alerts are dismissed in the
+# Security tab instead. See docs/code-scanning.md.

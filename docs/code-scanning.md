@@ -17,8 +17,7 @@ languages:    actions, go, javascript, javascript-typescript, python, typescript
 
 `schedule: weekly` is the *additional* scheduled scan. It is not the only one: `main` is
 analysed on every push, which `/code-scanning/analyses?ref=refs/heads/main` shows
-directly — one analysis per commit SHA, several a day. The Go analysis on `main` has
-reported 18 results on every commit for weeks.
+directly — one analysis per commit SHA, several a day.
 
 Two consequences follow, and both surprise people:
 
@@ -93,19 +92,20 @@ Python, Ruby and Rust. **Go is not on that list**, even though the Go pack itsel
 implements the `barrierModel` extensible predicate and honours it locally.
 
 Because PR analyses are diff-informed, this cannot be settled on a PR that touches no
-Go source. The check is the first `main` analysis after the pack merges: the Go result
-count should fall from 18 to 12. If it stays at 18, default setup is ignoring the pack,
-and the fix is to migrate to advanced setup — a `.github/workflows/codeql.yml` passing
-the pack to `github/codeql-action/init` explicitly — rather than to change the models.
+Go source. The check is a `main` analysis with the pack in place: the Go result count
+should be 12 rather than the unmodelled 18. If it is 18, default setup is ignoring the
+pack, and the fix is to migrate to advanced setup — a `.github/workflows/codeql.yml`
+passing the pack to `github/codeql-action/init` explicitly — rather than to change the
+models.
 
 ## Reproducing the results locally
 
 Worth doing: it takes a few minutes and it is the only way to iterate on a model or
 check a suspected false positive without pushing.
 
-The local numbers match CI exactly: the unmodelled full Go suite yields 18 results
-locally, which is what every `main` analysis reports. Applying the pack takes that to
-12.
+Local results match CI's: the unmodelled full Go suite yields 18 results, and the pack
+takes that to 12. If a local run disagrees with an analysis on `main`, the bundle
+version or the query suite has drifted from what Actions runs.
 
 Install the bundle — use the **bundle**, not a bare CLI, so the query and extractor
 versions match what Actions runs:
@@ -224,4 +224,6 @@ skipped exactly where an operator names a host path directly through the
 session-authenticated add-source route. That is the trusted-author case above, not an
 unguarded traversal.
 
-The verdict stands; the recorded reason should be replaced with this one.
+This is the rationale that holds for that alert. The text in the Security tab predates
+it and states the false premise instead; treat this section as authoritative until the
+two agree.
