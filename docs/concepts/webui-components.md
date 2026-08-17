@@ -163,8 +163,12 @@ Bordered table shell around slotted rows, generalizing the
 `<table>...</table>` + "no tasks found" empty-card pattern in
 `dc-task-list.js`.
 
-- Slots: `head` (a single `<tr>`, rendered as the table's header row group),
-  default (`<tr>` rows rendered as the body row group)
+- Slots: `head` (a single `<tr>`, rendered as the table's header row group —
+  each `<th>` needs an explicit `scope="col"`; the shell's `<div
+  role="table">` doesn't give a slotted `<th>` an implicit `columnheader`
+  role the way a literal `<table>`/`<thead>` would, verified via an offline
+  `ariaSnapshot()` check), default (`<tr>` rows rendered as the body row
+  group)
 - Props: `loading` (shows a placeholder instead of rows), `emptyMessage` /
   `emptyIcon` (forwarded to the internal `<dc-empty-state>` when no rows are
   slotted) — set via the plain `empty-message="..."`/`empty-icon="..."`
