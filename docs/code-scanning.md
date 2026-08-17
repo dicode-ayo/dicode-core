@@ -210,7 +210,7 @@ The four `hash.go` results are the ones #699 relocated, and they belong here. Th
 earlier dismissals cited `resolveInclude`'s containment, which bounds the `hash_include`
 value; the taint in every one of these flows is `absDir` instead.
 
-Two results outside `go/path-injection` are also accepted and dismissed with reasons:
+Three results outside `go/path-injection` are also accepted and dismissed with reasons:
 `go/cookie-secure-not-set` on `pkg/webui/sessions_db.go:377` and `:391`, and
 `go/weak-sensitive-data-hashing` on `pkg/webui/apikeys.go:258`.
 
