@@ -23,7 +23,7 @@ import { hasSlottedElement } from '../lib/slot-utils.js';
 class DcCard extends LitElement {
   static properties = {
     heading: { type: String },
-    pad: { type: String },
+    pad: { type: String, reflect: true },
     _hasTitle: { state: true },
     _hasActions: { state: true },
   };
@@ -31,18 +31,23 @@ class DcCard extends LitElement {
   static styles = css`
     :host {
       display: block;
-      background: var(--card-bg, rgba(255, 255, 255, .04));
-      border: 1px solid var(--border, rgba(160, 196, 255, .15));
-      border-radius: var(--radius, 14px);
-      transition: border-color .2s var(--ease, ease);
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      /* .2s bypasses theme.css's own --duration-fast/--duration tokens —
+         faithfully matching global.css's prevailing (also-untokenized)
+         pattern rather than inventing a new one here. Tracked in #710
+         alongside global.css's own instances, to fix once and consistently
+         rather than renegotiate per component. */
+      transition: border-color .2s var(--ease);
     }
-    :host(:hover) { border-color: var(--border-strong, rgba(160, 196, 255, .35)); }
+    :host(:hover) { border-color: var(--border-strong); }
     .header {
       display: flex;
       align-items: center;
-      gap: var(--space-md, 1rem);
-      padding: var(--space-md, 1rem) var(--space-lg, 1.5rem);
-      border-bottom: 1px solid var(--border, rgba(160, 196, 255, .15));
+      gap: var(--space-md);
+      padding: var(--space-md) var(--space-lg);
+      border-bottom: 1px solid var(--border);
     }
     .header[hidden] { display: none; }
     /* Scoped to slot[name="title"] specifically, not ".header
@@ -52,19 +57,19 @@ class DcCard extends LitElement {
        onto whatever an "actions" consumer put there. */
     slot[name="title"]::slotted(h2), h2 {
       margin: 0;
-      font-size: var(--text-lg, 1.15rem);
-      font-weight: var(--font-bold, 700);
-      color: var(--heading, #fff);
-      line-height: var(--leading-snug, 1.3);
+      font-size: var(--text-lg);
+      font-weight: var(--font-bold);
+      color: var(--heading);
+      line-height: var(--leading-snug);
     }
     .actions {
-      margin-left: auto;
+      margin-inline-start: auto;
       display: flex;
       align-items: center;
-      gap: var(--space-sm, .5rem);
+      gap: var(--space-sm);
     }
-    .body { padding: var(--space-md, 1rem) var(--space-lg, 1.5rem); }
-    .body.pad-none { padding: 0; }
+    .body { padding: var(--space-md) var(--space-lg); }
+    :host([pad='none']) .body { padding: 0; }
   `;
 
   constructor() {
@@ -113,7 +118,7 @@ class DcCard extends LitElement {
         </slot>
         <div class="actions"><slot name="actions" @slotchange=${this._onSlotChange}></slot></div>
       </div>
-      <div class="body ${this.pad === 'none' ? 'pad-none' : ''}">
+      <div class="body">
         <slot></slot>
       </div>
     `;

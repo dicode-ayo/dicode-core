@@ -5,7 +5,7 @@ import './dc-card.js';
 import './dc-page-header.js';
 import './dc-empty-state.js';
 import './dc-icon-button.js';
-import { KNOWN_VARIANTS } from './dc-status-badge.js';
+import { KNOWN_STATUSES } from './dc-status-badge.js';
 import './dc-table.js';
 
 // <dc-ui-kit-demo> — Stage 1 (#93) proof page: exercises all six new
@@ -30,10 +30,10 @@ const SVG_REFRESH = html`<svg viewBox="0 0 24 24" fill="none" stroke="currentCol
   <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
 </svg>`;
 
-// Derived from dc-status-badge's own KNOWN_VARIANTS (not hand-duplicated)
+// Derived from dc-status-badge's own KNOWN_STATUSES (not hand-duplicated)
 // so a status added there is automatically exercised here too, plus one
 // deliberately-unrecognized value to demonstrate the neutral fallback.
-const STATUS_VALUES = [...KNOWN_VARIANTS, 'unknown-status'];
+const STATUS_VALUES = [...KNOWN_STATUSES, 'unknown-status'];
 
 const DEMO_TABLE_HEAD = ['ID', 'Name', 'Status'];
 const DEMO_TABLE_ROWS = [
@@ -173,11 +173,7 @@ class DcUiKitDemo extends DcElement {
       </dc-card>
 
       <dc-card heading="dc-table — empty state">
-        <!-- emptyMessage/emptyIcon are set as JS properties (.prop=) rather
-             than attributes — Lit's default attribute reflection lowercases
-             property names verbatim (no kebab-case insertion), so an
-             "empty-message" attribute would not map to emptyMessage. -->
-        <dc-table id="table-empty" .emptyMessage=${'No rows slotted.'} .emptyIcon=${'🗂️'}></dc-table>
+        <dc-table id="table-empty" empty-message="No rows slotted." empty-icon="🗂️"></dc-table>
       </dc-card>
 
       <dc-card heading="dc-table — head row, zero body rows">
@@ -186,7 +182,7 @@ class DcUiKitDemo extends DcElement {
              rows yet) — must render the head styled inside the table
              shell, not as a bare unstyled <tr>, alongside the empty-state
              message below it. -->
-        <dc-table id="table-head-only" .emptyMessage=${'Waiting for data…'} ${ref(el => this._populateTableRows(el, []))}></dc-table>
+        <dc-table id="table-head-only" empty-message="Waiting for data…" ${ref(el => this._populateTableRows(el, []))}></dc-table>
       </dc-card>
 
       <dc-card heading="DcElement base class (Stage 2)">
