@@ -88,8 +88,13 @@ So the review surface renders **end state**.
 
 **End state — the resolved task.** Runtime and image, triggers with the concrete
 cron expression or webhook URL, effective permissions after taskset overrides,
-params with defaults, env declarations, timeout. Structured fields, bounded
-size, no file content.
+params with a has-default marker, env declarations, timeout. Structured fields,
+no file content.
+
+A param's default is author-written literal content, so it is reported as
+present and never rendered — the same rule the env declarations follow. Showing
+the value would reintroduce one of the two leaks ADR-0003 records against the
+masking approach.
 
 **A file inventory.** Names, sizes, per-file hashes — the one code-shaped fact
 the spec cannot carry, so a new file is visible without rendering any code.
@@ -251,12 +256,18 @@ this work. Do not close.
 
 ---
 
-## Open questions
+## Resolved questions
 
-1. **Pipelines.** `kind: Pipeline` has no runtime, image, or permissions, so its
-   end state is a different shape — presumably its steps and the tasks they
-   invoke. Whether that is one renderer with empty sections or two renderers is
-   unresolved.
-2. **Inventory provenance.** `task.ScanDir` already computes per-file hashes for
-   the content hash. The inventory should reuse them rather than walking the
-   directory a second time, but the gate does not hold that data today.
+1. **Pipelines.** One renderer with empty sections, plus a stage list. A
+   pipeline carries no runtime, image or permissions, so those fields are
+   simply absent; its triggers, timeout, file inventory and stages render
+   through the same `State`. A second renderer would duplicate every shared
+   section to express what an empty field already says.
+2. **Inventory provenance.** The premise was wrong: `task.ScanDir` returns
+   taskID → whole-directory hash, not per-file hashes. The per-file digests
+   exist only inside `Hash`'s walk and are never returned, so there was nothing
+   to reuse. `Hash`'s entry collection is extracted as `collectEntries` and
+   shared with `task.Inventory` instead, which is what keeps the two describing
+   the same file set — including `hash_include` targets and missing includes,
+   both of which perturb the content hash from outside the task directory.
+   `Inventory` digests each file itself; it runs per review, not per poll.

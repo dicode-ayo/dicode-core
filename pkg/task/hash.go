@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -246,60 +247,10 @@ func resolveInclude(absDir, boundary, inc string) (string, error) {
 // nested more than one level below its taskset root that needs to reach a
 // shared module further up is out of scope for this feature today.
 func Hash(dir string, includes ...string) (string, error) {
-	entries, err := walkTree(dir, "")
+	entries, err := collectEntries(dir, includes...)
 	if err != nil {
-		return "", fmt.Errorf("hash %s: %w", dir, err)
+		return "", err
 	}
-
-	if len(includes) > 0 {
-		absDir, err := filepath.Abs(dir)
-		if err != nil {
-			return "", fmt.Errorf("resolve %s: %w", dir, err)
-		}
-		boundary := filepath.Dir(absDir)
-
-		for _, inc := range includes {
-			if inc == "" {
-				continue
-			}
-			label := "include:" + filepath.ToSlash(inc)
-			incAbs, err := resolveInclude(absDir, boundary, inc)
-			if err != nil {
-				return "", err
-			}
-			info, err := os.Lstat(incAbs)
-			if err != nil {
-				if os.IsNotExist(err) {
-					entries = append(entries, hashEntry{label: label, missing: true})
-					continue
-				}
-				return "", fmt.Errorf("hash include %s: %w", inc, err)
-			}
-			switch {
-			case info.Mode()&fs.ModeSymlink != 0:
-				target, err := os.Readlink(incAbs)
-				if err != nil {
-					return "", fmt.Errorf("hash include %s: readlink: %w", inc, err)
-				}
-				entries = append(entries, hashEntry{label: label, isLink: true, target: target})
-			case info.IsDir():
-				sub, err := walkTree(incAbs, label+"/")
-				if err != nil {
-					return "", fmt.Errorf("hash include %s: %w", inc, err)
-				}
-				entries = append(entries, sub...)
-			case info.Mode().IsRegular():
-				entries = append(entries, hashEntry{label: label, abs: incAbs, info: info})
-			default:
-				// Socket, device, FIFO, etc. — skip, matching walkTree's
-				// handling of the same types encountered during a normal
-				// dir walk: reading them can block indefinitely (e.g. a
-				// FIFO with no writer), and they carry no task content.
-			}
-		}
-	}
-
-	sort.Slice(entries, func(i, j int) bool { return entries[i].label < entries[j].label })
 
 	h := sha256.New()
 	for _, e := range entries {
@@ -322,33 +273,107 @@ func Hash(dir string, includes ...string) (string, error) {
 			// that alone is enough to make a missing include distinguishable
 			// from both "not configured" and "present with any content".
 		default:
-			// Reuse the FileInfo already obtained while classifying a
-			// hash_include entry (identical to what os.Stat would return,
-			// since we confirmed it's not a symlink) instead of stat'ing the
-			// same path a second time. In-dir entries from walkTree never
-			// have one cached — they take the os.Stat below as before.
-			info := e.info
-			if info == nil {
-				var statErr error
-				info, statErr = os.Stat(e.abs)
-				if statErr != nil {
-					return "", fmt.Errorf("hash %s: %w", e.abs, statErr)
-				}
+			info, statErr := e.stat()
+			if statErr != nil {
+				return "", fmt.Errorf("hash %s: %w", e.abs, statErr)
 			}
-			if info.Size() > maxHashedFileBytes {
-				fmt.Fprintf(h, "%d\x00%d", info.Size(), info.ModTime().UnixNano())
-			} else {
-				data, err := os.ReadFile(e.abs)
-				if err != nil {
-					return "", fmt.Errorf("hash %s: %w", e.abs, err)
-				}
-				h.Write(data)
+			if err := writeFileContribution(h, e.abs, info); err != nil {
+				return "", err
 			}
 		}
 		h.Write([]byte{0})
 	}
 
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// writeFileContribution writes the bytes a regular file contributes to a
+// digest: its content, or — past maxHashedFileBytes — a size+mtime descriptor.
+// Shared with Inventory so a file's inventory hash cannot describe different
+// bytes than its contribution to the content hash.
+func writeFileContribution(w io.Writer, abs string, info os.FileInfo) error {
+	if info.Size() > maxHashedFileBytes {
+		_, err := fmt.Fprintf(w, "%d\x00%d", info.Size(), info.ModTime().UnixNano())
+		return err
+	}
+	data, err := os.ReadFile(abs)
+	if err != nil {
+		return fmt.Errorf("hash %s: %w", abs, err)
+	}
+	_, err = w.Write(data)
+	return err
+}
+
+// stat returns e's FileInfo, reusing the one captured while classifying a
+// hash_include entry (identical to os.Stat's result, the path having been
+// confirmed a non-symlink). In-dir entries from walkTree carry none, since
+// WalkDir's fs.DirEntry does not surface a size.
+func (e hashEntry) stat() (os.FileInfo, error) {
+	if e.info != nil {
+		return e.info, nil
+	}
+	return os.Stat(e.abs)
+}
+
+// collectEntries gathers the hashEntry set covering dir and its includes, in
+// the sorted label order the digest depends on. Shared by Hash and Inventory
+// so the two can never disagree about which files constitute a task.
+func collectEntries(dir string, includes ...string) ([]hashEntry, error) {
+	entries, err := walkTree(dir, "")
+	if err != nil {
+		return nil, fmt.Errorf("hash %s: %w", dir, err)
+	}
+
+	if len(includes) > 0 {
+		absDir, err := filepath.Abs(dir)
+		if err != nil {
+			return nil, fmt.Errorf("resolve %s: %w", dir, err)
+		}
+		boundary := filepath.Dir(absDir)
+
+		for _, inc := range includes {
+			if inc == "" {
+				continue
+			}
+			label := "include:" + filepath.ToSlash(inc)
+			incAbs, err := resolveInclude(absDir, boundary, inc)
+			if err != nil {
+				return nil, err
+			}
+			info, err := os.Lstat(incAbs)
+			if err != nil {
+				if os.IsNotExist(err) {
+					entries = append(entries, hashEntry{label: label, missing: true})
+					continue
+				}
+				return nil, fmt.Errorf("hash include %s: %w", inc, err)
+			}
+			switch {
+			case info.Mode()&fs.ModeSymlink != 0:
+				target, err := os.Readlink(incAbs)
+				if err != nil {
+					return nil, fmt.Errorf("hash include %s: readlink: %w", inc, err)
+				}
+				entries = append(entries, hashEntry{label: label, isLink: true, target: target})
+			case info.IsDir():
+				sub, err := walkTree(incAbs, label+"/")
+				if err != nil {
+					return nil, fmt.Errorf("hash include %s: %w", inc, err)
+				}
+				entries = append(entries, sub...)
+			case info.Mode().IsRegular():
+				entries = append(entries, hashEntry{label: label, abs: incAbs, info: info})
+			default:
+				// Socket, device, FIFO, etc. — skip, matching walkTree's
+				// handling of the same types encountered during a normal
+				// dir walk: reading them can block indefinitely (e.g. a
+				// FIFO with no writer), and they carry no task content.
+			}
+		}
+	}
+
+	sort.Slice(entries, func(i, j int) bool { return entries[i].label < entries[j].label })
+	return entries, nil
 }
 
 // ScanDir scans the tasks/ directory in a repo and returns a map of

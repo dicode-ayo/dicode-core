@@ -775,183 +775,90 @@ treats the file as tampered.
 
 ---
 
-## Pending-Change Diff (#604)
+## Pending-Change Review
 
-Before this feature the operator approved a pending (content-changed) task
-**blind**: `dicode.lock` only ever stores a content hash, never file bytes, so
-by the time a task shows up pending, the working tree already holds the *new*
-content and there is no "before" snapshot on disk to diff against. `pkg/approval.Gate`
-now keeps an in-memory snapshot cache to close that gap, and the WebUI surfaces
-it wherever an operator can click Approve.
+`dicode.lock` stores a content hash, never file bytes, so by the time a task
+shows up pending the working tree already holds the *new* content and there is
+no "before" on disk. Rather than reconstruct one, the review surface renders
+**end state**: the resolved task as it will run if the operator arms it.
 
-### Snapshot cache
+The reframe is that under the trust model above the operator has already seen
+this change on the git host, with line comments, blame and CI status — by the
+time dicode pends the task, the diff has been reviewed and merged. The decision
+in front of the operator is not *what moved*, it is **what will run if I arm
+this**. See `docs/design/approval-review-surface.md` and ADR-0001..0003.
 
-`Gate` maintains one additional map, guarded by the same mutex as `pending`:
+### What the surface shows
 
-- `approvedFiles[taskID]` — the last-known-approved content snapshot (dir-relative
-  path → file text), refreshed whenever `Admit` treats the current on-disk dir as
-  already-approved content (the already-approved-hash fast path, and every
-  auto-approve path: builtin / trusted-source / trusted-task / gate-disabled /
-  bootstrap).
+`Gate.State` (`pkg/approval/state.go`) builds an `approval.State` from the
+pending task's parsed spec:
 
-The current pending (not yet approved) content snapshot lives alongside the
-task and its observed hash on `pendingEntry.files`, itself a value in the
-existing `pending[taskID]` map — not a standalone map. Keeping hash and files
-on the same struct, written together in one critical section, means a reader
-can never observe a hash paired with a snapshot from a different generation
-(the fix for a race where `approve()` could promote a snapshot that was stale
-relative to the pending hash it was being matched against). On a successful
-`Approve` / `ApproveIfHash`, `pendingEntry.files` is promoted to
-`approvedFiles[taskID]` and the pending entry is deleted — becoming the new
-baseline for the *next* change. `Forget` (task removal) clears both the
-pending entry and `approvedFiles[taskID]`.
+- **Runs as** — runtime, container image, network mode, resolved timeout.
+- **Fires on** — every resolved trigger, with the concrete cron expression or
+  webhook path, its auth mode, and whether a webhook secret is configured.
+- **Can reach** — the resolved, post-override permission set: `net`, `fs`,
+  `run`, `sys`, the `dicode` API grants, and unrestricted-env-read.
+- **Environment** — one declaration per entry: the name the task sees and where
+  the value comes from (`host` / `secret` / `task` / `literal`).
+- **Params** — name, type, required, and whether a default is configured.
+- **Container** — volumes, ports, added capabilities, user, and the *names* of
+  literal container env vars.
+- **Stages** — for `kind: PipelineTask`, the stage list and which stages patch
+  their target's spec.
+- **Files** — a per-file inventory: path, size, and a SHA-256 over exactly the
+  bytes the content hash folds in for that file (`task.Inventory`). This is the
+  one code-shaped fact the spec cannot carry, so a new or edited file is visible
+  without any content being rendered.
 
-Each snapshot is built by `snapshotDir` (`pkg/approval/snapshot.go`), which walks
-the task directory the same way `task.Hash`'s walker does (skipping
-`node_modules` and `.git`). To keep this cheap enough to run on every `Admit` —
-including every ~30s reconcile poll — each snapshot is bounded: at most 256 KiB
-read per file and 200 files per task. A file over either cap, or one that fails
-UTF-8 validation (binary), gets a placeholder entry ("binary or file too large
-to diff") instead of its raw bytes, so the file still shows up as changed even
-when its content can't be rendered.
+Because it derives from the checkout rather than a baseline, a task with no git
+history, no prior approval and no cached snapshot still gets a complete surface.
+A dirty working tree is not a special case: the daemon runs the checkout, so
+what is shown is what will run.
 
-**Literal secret values are redacted before storage.** `task.EnvEntry.Value`
-(`pkg/task/spec.go`) lets a task's `permissions.env` block carry a literal
-secret value inline in `task.yaml`, as opposed to `Secret` (a secrets-store key
-*name* reference). `task.EnvEntry.Default` carries the same class of material — `envresolve`
-injects it as the variable's value whenever the named secret is absent from
-the store — so it is redacted identically. `snapshotDir` runs every captured
-text file through `redactValueLines`, which blanks the scalar half of any line
-matching a YAML `value:` or `default:` mapping entry
-(`^([ \t]*(?:-[ \t]*)?"?(?:value|default)"?[ \t]*:)[ \t]*(.*)$`, multiline) to the same `<redacted>` placeholder (`redactedEnvValue`) that
-`ContentHash`'s `sanitizePermissions` already uses for the content hash — see
-that doc comment in `pkg/approval/gate.go` for why a literal env value must
-never appear in a low-entropy, offline-attackable form. The `key:` prefix and
-line structure are kept intact, so a diff still shows *that* the field
-changed, never *what* it changed to/from. This happens once, at snapshot read
-time — `Gate.approvedFiles` / `pendingFiles` never hold the un-redacted bytes,
-so the literal cannot reach `Gate.Diff`'s output on any surface (the REST
-endpoint, the dashboard panel, or the unauthenticated `/approve/{token}`
-confirm page). The redaction is deliberately generic — any YAML `value:` line
-in any snapshotted file, not only ones provably inside `permissions.env` —
-since the snapshot has no field-path-aware YAML parse and erring toward
-over-redaction is the right tradeoff for a security fix.
+### Two invariants
 
-**This cache is in-memory only** — like the gate's `pending`/`admitted` maps, it
-is rebuilt by re-`Admit` on daemon restart, not persisted to disk. A diff
-requested immediately after a fresh daemon start, before the reconciler has
-re-admitted a task at least once, has no cached baseline: `Diff.HasBaseline` is
-`false`, and the pending files are reported as `"added"` instead of `"modified"`
-so the UI still shows *something* useful — just without a real "before" to
-compare against. This is a deliberate, documented tradeoff, not a bug: solving
-restart-persistence for the diff cache is out of scope for this change.
+**No secret is dereferenced at render time.** An env entry declaring
+`from: env:GH_TOKEN` renders as `API_KEY ← host env GH_TOKEN`; the reference is
+never followed. Literal values written inline in `task.yaml` — the `- KEY=VALUE`
+shorthand, a `params[].default`, `docker.env_vars`, chain-edge params — never
+render at all, only their presence or their names. Effective permissions still
+resolve (policy, not values) and taskset overrides still resolve (config, not
+values); only the value lookup stops.
 
-### What the diff shows
+`pkg/secrets/redactor.go` does not help here and must not be reached for. It is
+value-based — it string-replaces the values resolved for a *run* in that run's
+log output — so it cannot mask a literal that was never in the secrets store,
+and it is built per run while a pending task has not run. See ADR-0003.
 
-`Gate.Diff(taskID)` returns a `Diff{ TaskID, HasBaseline, Files []FileDiff }`.
-Each `FileDiff` is `{ Path, Status, UnifiedDiff, SecurityRelevant, OldContent,
-NewContent }` — only changed files are included (`Status` is `"added"`,
-`"removed"`, or `"modified"`; unchanged files are omitted entirely).
-`UnifiedDiff` is a readable ` `/`-`/`+` prefixed rendering (line-mode diff via
-`github.com/sergi/go-diff/diffmatchpatch`), not byte-perfect POSIX unified diff
-format — just clear text for a human to scan before clicking Approve.
+**No code bytes render in dicode.** The git host renders code better, and the
+operator has already been there. No blob is opened, so there is no size cap, no
+truncation banner and no "too large to display" state to design.
 
-**Hunking.** `UnifiedDiff` keeps `diffContextLines` (3) of context either side
-of each change and collapses longer runs into a `⋯ N unchanged lines` marker.
-Without this the entire file ships as context: a one-line edit to a 3,000-line
-task rendered 3,005 lines and a 56,000px page, and ten such files came to
-1.2 MB — burying the change the diff exists to surface. The marker matches none
-of the ` `/`-`/`+` prefixes, so both renderers already class it as a note
-without special-casing elision. Security-relevant flagging runs against the
-*full* diff before hunking, so elision can never hide a flagged line from the
-check — only from the rendering.
+### Surfaces
 
-`OldContent`/`NewContent` are the two sides of those hunks reconstructed as
-plain text, for a client-side viewer to render itself. They are deliberately
-derived from the hunked diff rather than the whole file: shipping both full
-sides costs *more* than the unhunked diff it replaced (measured 1.2 MB → 2.3 MB
-across ten changed files, versus 15 KB hunked). Both are omitted when either
-side is a placeholder or would exceed `maxInlineContentBytes` (128 KiB), which
-is only reachable when a file changes nearly end-to-end; a client must fall
-back to `UnifiedDiff` when they are absent.
+- `GET /api/tasks/{id}/pending-state` — same auth group as
+  `POST /api/tasks/{id}/approve` (`requireSessionOrNonEphemeralAPIKey`). 404
+  unknown task, 409 not pending, 503 gate not wired.
+- **Task detail** (`dc-task-detail.js`) — the panel opens by default for a
+  pending task. Approve is armed only while a successfully fetched panel is on
+  screen: collapsing it, a failed fetch, or a still-loading fetch all disarm,
+  because each would be approving without having seen what will run. The task
+  list has no approve button at all — a table row has nowhere to show a review,
+  so it hands off to the detail page.
+- `/approve/{token}` — the session-less link travels through Slack, email or
+  ntfy, so whatever it renders is visible to everyone in that channel. It shows
+  the task ID and its short hash, and nothing about the task's contents.
 
-Two surfaces expose it:
+**Approval binds to the reviewed hash.** The panel sends
+`State.PendingHash` back with the approve request (#645). Between the panel
+loading and the click landing, a push can re-pend the task at a newer hash; the
+server rejects the stale approval with `{"stale": true}` and the dashboard
+re-fetches to the version actually pending rather than silently arming content
+the operator never reviewed.
 
-- `GET /api/tasks/{id}/pending-diff` — same auth group as
-  `POST /api/tasks/{id}/approve` (session cookie or non-ephemeral API key).
-  `200` with the `Diff` body, `404` unknown task, `409` task not pending,
-  `503` gate not wired. The dashboard's task-detail page opens this panel by
-  default for a pending task and mounts a Monaco diff editor per file from
-  `OldContent`/`NewContent` (virtualized, syntax-highlighted, folds unchanged
-  regions), falling back to the `UnifiedDiff` text rendering when the sides are
-  absent. Approve is only offered while the panel is open — collapsing it
-  reverts the button to re-opening the diff, and the task list has no approve
-  action at all, only a "Review" hand-off to this page.
-
-  `Diff.pending_hash` carries the exact content hash these `Files` describe.
-  The dashboard's Approve click sends it back in the request body
-  (`POST /api/tasks/{id}/approve {"hash": "..."}`), and the handler routes a
-  hash-carrying request through `Gate.ApproveIfHash` instead of the
-  unconditional `Approve` — the same binding the tokenized `/approve/{token}`
-  link has always used (#392), now also covering the session/API-key path
-  (#645). Between the diff loading and the click landing, a push can re-pend
-  the task at a newer hash — the panel does not poll or listen for that — so
-  without this binding the click would silently arm whatever is *currently*
-  pending, not the version the operator reviewed. A mismatch responds `409`
-  with `{"stale": true}`; the dashboard shows that as "this task changed
-  since you loaded this diff" and re-fetches the panel to the version
-  actually pending, rather than retrying the same approval. Callers with no
-  diff to bind to — `dicode task approve` goes over the control-socket IPC,
-  not this REST endpoint, so it is unaffected — may omit `hash` and keep the
-  prior unconditional-approve behavior.
-- The tokenized `/approve/{token}` link page — no session, the token itself is
-  the auth boundary. It fetches the same `Diff` server-side and renders it into
-  the bare HTML/CSS confirm page (no JS, per that page's existing constraint),
-  with colored +/− lines and a "no baseline" notice when `HasBaseline` is false.
-  Monaco cannot serve this page, so the hunked `UnifiedDiff` text is what keeps
-  it readable for large changes.
-
-Dir-less (inline taskset) tasks have no files to snapshot — `Diff` returns
-gracefully (`Files` empty, no error) rather than treating the absence of a
-task directory as a failure.
-
-### Security-relevant highlighting
-
-Flagging combines two checks, both run against the *full* diff before hunking
-elides context. `securityFieldPattern` matches a changed line that itself names
-a security key (`permissions:`, `net:`, `cron:`, …), which catches a block being
-added. `touchesSecurityBlock` tracks YAML indentation to flag a changed line
-*anywhere inside* a `permissions:` or `trigger:` block, which catches one being
-**widened** — appending a host to an already-approved `net:` allowlist changes
-only a list item and names no key, so the pattern alone misses it. Widening an
-existing block is both the likelier change under trust-on-change and the
-stealthier one, so it must flag too. `touchesSecurityBlock` depends on the
-pre-hunk ordering directly: elided context would drop the `permissions:` opener
-that puts a changed line in scope.
-
-A `FileDiff` is flagged `SecurityRelevant: true` when an added or removed line
-in its `UnifiedDiff` touches one of the YAML keys folded into the approval
-gate's content hash (see `ContentHash`'s doc comment in `pkg/approval/gate.go`
-for the authoritative list this mirrors):
-
-`permissions`, `env`, `run`, `net`, `fs`, `sys`, `dicode`, `git_commit_push`,
-`webhook`, `webhook_auth`, `cron`, `manual`, `daemon`, `chain` — each matched
-only when immediately followed (after optional whitespace) by a colon, so a
-substring hit like `environment:` or `blockchain:` does not false-positive.
-
-Both the dashboard and the token-link confirm page show a highlighted warning
-banner ("This change touches security-relevant fields…") whenever any file in
-the diff is flagged, drawing the operator's eye to exactly the changes that
-could widen what the task can touch or how/whether it fires — permission
-grants, env var wiring, or a trigger rewire (e.g. a manual task quietly turned
-into an unauthenticated webhook) — without requiring them to read every line
-of every file.
-
-**Out of scope for this change:** `dicode task approve` (the CLI) does not
-show a diff — the issue explicitly marked this "ideally," not required, to
-keep the change's surface area small. The WebUI approve button, the
-task-detail pending banner, and the tokenized approve-link page are covered;
-a CLI diff view can follow later if wanted.
+**Out of scope:** `dicode task approve` (the CLI) does not render end state; it
+goes over the control-socket IPC and is the deliberate escape hatch for when the
+dashboard cannot render a review at all.
 
 ---
 
@@ -1070,5 +977,5 @@ Top-level security blocks in `Config` (siblings of `server:`, not nested under i
 | Daemon crypto namespace isolated | `permissions.dicode.crypto: ["*"]` never grants access to daemon-private sub-keys (e.g. `dicode/run-inputs/v1`); these are listed in `daemonPrivateCryptoContexts` in `pkg/ipc/server.go` and denied before any grant check |
 | Replay retarget blocked | A task-scoped `dicode.runs.replay` call cannot redirect the replay at a different task ID — the target is pinned to the original run's task |
 | `dicode` permission overrides are exhaustive | `mergeDicodePerms` merges all `DicodePermissions` fields including `secrets_has` and `crypto`; added exhaustiveness test guards against future fields being silently dropped |
-| Pending-approval changes are reviewable, not blind | `Gate.Diff` (#604) surfaces a file-level diff of a pending task's changes — including a security-relevant highlight for permission/env/trigger edits — on both the dashboard's Approve button and the tokenized `/approve/{token}` link page before the operator confirms |
+| Pending-approval changes are reviewable, not blind | `Gate.State` renders the resolved task a pending change would arm — triggers, effective permissions, env declarations and a per-file inventory — on the dashboard before the operator confirms, without rendering code or dereferencing a secret |
 | Task list doesn't misrepresent a pending task as live (#650) | A held task's toggle no longer shows a plain "on" green dot, its trigger column no longer hyperlinks a webhook route that 404s until approved, and `Run` is disabled with a tooltip rather than silently 400ing behind a raw `alert()`. A pending count/filter and a notification-tray entry (wired to the existing `approval:pending` WebSocket event) make held tasks discoverable at a glance instead of requiring a per-row badge scan. |

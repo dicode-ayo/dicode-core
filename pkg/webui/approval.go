@@ -8,7 +8,6 @@ import (
 	"html/template"
 	"io"
 	"net/http"
-	"strings"
 
 	"github.com/dicode/dicode/pkg/approval"
 	"github.com/go-chi/chi/v5"
@@ -25,7 +24,7 @@ type ApprovalGate interface {
 	PendingHash(id string) (string, bool)
 	Approve(id string) error
 	ApproveIfHash(id, hash string) error
-	Diff(id string) (approval.Diff, error)
+	State(id string) (approval.State, error)
 }
 
 // SetApprovalGate wires the approval gate. Call after New and before Start.
@@ -168,18 +167,16 @@ func (s *Server) apiApproveTask(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]any{"task_id": id, "approved": true})
 }
 
-// apiApprovalDiff handles GET /api/tasks/{id}/pending-diff: the file-level
-// diff between a pending task's last-approved content (if cached) and its
-// current pending content, so the operator can review what changed before
-// approving. Auth mirrors apiApproveTask (same route group).
+// apiApprovalPendingState handles GET /api/tasks/{id}/pending-state: the
+// resolved end state of a pending task — what will run if the operator arms
+// it. Auth mirrors apiApproveTask (same route group).
 //
 // Status codes:
-//   - 200 — the Diff body (may have an empty Files list if nothing changed
-//     at the file level, e.g. a dir-less/inline task).
+//   - 200 — the State body.
 //   - 404 — no such task.
 //   - 409 — task is not pending approval.
 //   - 503 — approval gate not wired.
-func (s *Server) apiApprovalDiff(w http.ResponseWriter, r *http.Request) {
+func (s *Server) apiApprovalPendingState(w http.ResponseWriter, r *http.Request) {
 	id := taskIDParam(r)
 	if s.approvalGate == nil {
 		jsonErr(w, "approval gate not available", http.StatusServiceUnavailable)
@@ -189,12 +186,12 @@ func (s *Server) apiApprovalDiff(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "task not found: "+id, http.StatusNotFound)
 		return
 	}
-	diff, err := s.approvalGate.Diff(id)
+	state, err := s.approvalGate.State(id)
 	if err != nil {
 		jsonErr(w, err.Error(), http.StatusConflict)
 		return
 	}
-	jsonOK(w, diff)
+	jsonOK(w, state)
 }
 
 // approvePageTmpl renders the token-link confirm / result pages. Bare HTML on
@@ -209,20 +206,6 @@ main{max-width:44rem;padding:2rem;background:#1d1f26;border:1px solid #33363f;bo
 code{background:#2a2d36;padding:0.15rem 0.4rem;border-radius:4px;word-break:break-all}
 button{background:#3fb950;color:#fff;border:none;border-radius:6px;padding:0.6rem 1.4rem;font-size:1rem;cursor:pointer}
 .err{color:#f85149}.ok{color:#3fb950}.meta{color:#8c96a3;font-size:0.85rem}
-.warn-banner{background:rgba(248,81,73,0.12);border:1px solid #f85149;color:#f85149;padding:0.75rem 1rem;border-radius:6px;margin-bottom:1rem;font-size:0.9rem}
-.no-baseline{background:rgba(210,153,34,0.12);border:1px solid #d29922;color:#d29922;padding:0.6rem 1rem;border-radius:6px;margin-bottom:1rem;font-size:0.85rem}
-.file-diff{margin-bottom:1rem}
-.file-header{font-family:monospace;font-weight:600;margin-bottom:0.35rem;display:flex;align-items:center;gap:0.5rem}
-.status-badge{font-size:0.7rem;padding:0.05rem 0.4rem;border-radius:3px;background:#2a2d36;color:#8c96a3;text-transform:uppercase}
-.sec-badge{font-size:0.7rem;padding:0.05rem 0.4rem;border-radius:3px;background:rgba(248,81,73,0.18);color:#f85149;border:1px solid rgba(248,81,73,0.45)}
-pre.diffblock{background:#0d0f13;padding:0.6rem 0.75rem;border-radius:6px;font-size:0.8rem;line-height:1.45;margin:0;white-space:pre-wrap;overflow-wrap:anywhere}
-.diffline{display:block}
-.diffline.add{background:rgba(63,185,80,0.15);color:#3fb950}
-.diffline.del{background:rgba(248,81,73,0.15);color:#f85149}
-.diffline.ctx{color:#8c96a3}
-.diffline.note{color:#8c96a3;font-style:italic}
-details.diff-toggle{margin-top:1.25rem}
-details.diff-toggle summary{cursor:pointer;color:#8c96a3;font-size:0.85rem;margin-bottom:0.75rem}
 </style></head><body><main>
 {{if .Error}}
   <h1 class="err">Approval failed</h1>
@@ -236,32 +219,6 @@ details.diff-toggle summary{cursor:pointer;color:#8c96a3;font-size:0.85rem;margi
   <p>This will approve task <code>{{.TaskID}}</code> at content hash <code>{{.Hash}}</code> and arm its triggers.</p>
   <p class="meta">Only approve if you reviewed this task change. The link is single-use.</p>
   <form method="post"><button type="submit">Approve task</button></form>
-
-  {{if .Diff}}
-  <details class="diff-toggle" open>
-    <summary>What changed ({{len .Diff.Files}} file{{if ne (len .Diff.Files) 1}}s{{end}})</summary>
-    {{if not .Diff.HasBaseline}}
-      <div class="no-baseline">No prior approved version is cached for this task (fresh daemon session) — the files below are shown as new content, not a diff against a known-good baseline.</div>
-    {{end}}
-    {{if .Diff.Incomplete}}
-      <div class="warn-banner">&#9888; <strong>Incomplete diff.</strong> {{.Diff.IncompleteReason}}</div>
-    {{end}}
-    {{if .Diff.AnySecurityRelevant}}
-      <div class="warn-banner">&#9888; This change touches security-relevant fields (permissions, env, triggers, …). Review carefully before approving.</div>
-    {{end}}
-    {{range .Diff.Files}}
-      <div class="file-diff">
-        <div class="file-header">
-          <span>{{.Path}}</span>
-          <span class="status-badge">{{.Status}}</span>
-          {{if .SecurityRelevant}}<span class="sec-badge">security-relevant</span>{{end}}
-          {{if .ContentHidden}}<span class="sec-badge">change not shown</span>{{end}}
-        </div>
-        <pre class="diffblock">{{range .Lines}}<span class="diffline {{.Class}}">{{.Text}}</span>{{end}}</pre>
-      </div>
-    {{end}}
-  </details>
-  {{end}}
 {{end}}
 </main></body></html>`))
 
@@ -270,68 +227,6 @@ type approvePageData struct {
 	Hash     string
 	Approved bool
 	Error    string
-	Diff     *diffPageView
-}
-
-// diffPageView is the token-link page's rendering-friendly projection of
-// approval.Diff: each file's UnifiedDiff text is pre-split into
-// prefix-classified lines so the bare-HTML/no-JS template can color them
-// without any client-side logic.
-type diffPageView struct {
-	HasBaseline         bool
-	AnySecurityRelevant bool
-	Incomplete          bool
-	IncompleteReason    string
-	Files               []diffFileView
-}
-
-type diffFileView struct {
-	Path             string
-	Status           string
-	SecurityRelevant bool
-	ContentHidden    bool
-	Lines            []diffLineView
-}
-
-type diffLineView struct {
-	Class string // "add", "del", "ctx", or "note" (placeholder/uncategorized text)
-	Text  string
-}
-
-// buildDiffPageView projects an approval.Diff into diffPageView, splitting
-// each FileDiff.UnifiedDiff into individually classed lines by its "+ "/"- "/
-// "  " prefix (see unifiedDiffText in pkg/approval/diff.go) so the template
-// can render add/remove/context lines with distinct colors. A line matching
-// none of those prefixes (the snapshotPlaceholder note) is classed "note".
-func buildDiffPageView(d approval.Diff) diffPageView {
-	view := diffPageView{
-		HasBaseline:      d.HasBaseline,
-		Incomplete:       d.Incomplete,
-		IncompleteReason: d.IncompleteReason,
-	}
-	for _, f := range d.Files {
-		fv := diffFileView{Path: f.Path, Status: f.Status, SecurityRelevant: f.SecurityRelevant, ContentHidden: f.ContentHidden}
-		if f.SecurityRelevant {
-			view.AnySecurityRelevant = true
-		}
-		for _, line := range strings.Split(strings.TrimRight(f.UnifiedDiff, "\n"), "\n") {
-			if line == "" {
-				continue
-			}
-			switch {
-			case strings.HasPrefix(line, "+ "):
-				fv.Lines = append(fv.Lines, diffLineView{Class: "add", Text: line[2:]})
-			case strings.HasPrefix(line, "- "):
-				fv.Lines = append(fv.Lines, diffLineView{Class: "del", Text: line[2:]})
-			case strings.HasPrefix(line, "  "):
-				fv.Lines = append(fv.Lines, diffLineView{Class: "ctx", Text: line[2:]})
-			default:
-				fv.Lines = append(fv.Lines, diffLineView{Class: "note", Text: line})
-			}
-		}
-		view.Files = append(view.Files, fv)
-	}
-	return view
 }
 
 func (s *Server) renderApprovePage(w http.ResponseWriter, status int, data approvePageData) {
@@ -366,18 +261,7 @@ func (s *Server) handleApproveLinkPage(w http.ResponseWriter, r *http.Request) {
 		s.renderApprovePage(w, http.StatusConflict, approvePageData{Error: "the task is no longer pending at the version this link was issued for"})
 		return
 	}
-	data := approvePageData{TaskID: info.TaskID, Hash: shortHash(info.Hash)}
-	if d, err := s.approvalGate.Diff(info.TaskID); err != nil {
-		// The diff is a review aid, not the approval boundary — if it can't
-		// be built (e.g. a transient snapshot error) the confirm page still
-		// renders and approval still works, just without the "what changed"
-		// section.
-		s.log.Warn("approve link: diff unavailable", zap.String("task", info.TaskID), zap.Error(err))
-	} else {
-		view := buildDiffPageView(d)
-		data.Diff = &view
-	}
-	s.renderApprovePage(w, http.StatusOK, data)
+	s.renderApprovePage(w, http.StatusOK, approvePageData{TaskID: info.TaskID, Hash: shortHash(info.Hash)})
 }
 
 // handleApproveLinkRedeem serves POST /approve/{token}: consumes the token

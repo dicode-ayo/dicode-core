@@ -103,7 +103,7 @@ file.
 
 | Project | Server config | What runs | storageState |
 |---|---|---|---|
-| `unauthenticated` | `auth: false`, no passphrase | webhooks, webhooks-secure, cron, file-change, approval-diff, pending-task-list-signals, config, mcp, dev-mode-clone, run-input-persistence, task-toggle, suspend-resume, cli-suspend specs | seeded session |
+| `unauthenticated` | `auth: false`, no passphrase | webhooks, webhooks-secure, cron, file-change, approval-review, pending-task-list-signals, config, mcp, dev-mode-clone, run-input-persistence, task-toggle, suspend-resume, cli-suspend specs | seeded session |
 | `webui` | same as above | `webui-task.spec.ts` — SPA tests | seeded session |
 | `authenticated` | `auth: true`, `secret: test-passphrase-12345` | `auth.spec.ts`, `auth-providers.spec.ts` | none (tests the login flow) |
 | `relay` | separate broker + daemon pair on random ports, not the shared global-setup daemon | `relay-protocol.spec.ts`, `relay-buildin.spec.ts` — opt-in via `DICODE_E2E_RELAY=1` | none |
