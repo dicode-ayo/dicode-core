@@ -103,6 +103,13 @@ class DcUiKitDemo extends DcElement {
     head.slot = 'head';
     for (const label of DEMO_TABLE_HEAD) {
       const th = document.createElement('th');
+      // scope="col" is required here, not decorative: unlike a <th> inside
+      // a literal <table>/<thead>, a <th> slotted into dc-table's div-based
+      // shell doesn't get an implicit columnheader role from ambient table
+      // context — verified empirically (offline Playwright ariaSnapshot()
+      // repro) that without scope it composes as a plain "cell", and with
+      // scope="col" it correctly composes as "columnheader".
+      th.setAttribute('scope', 'col');
       th.textContent = label;
       head.appendChild(th);
     }
