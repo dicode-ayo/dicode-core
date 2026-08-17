@@ -62,20 +62,29 @@ class DcIconButton extends LitElement {
   constructor() {
     super();
     this.label = '';
+    // No default assigned: `variant` reflects, and with @lit/reactive-element's
+    // actual reflection timing, a constructor-assigned default would stamp
+    // `variant="default"` onto every instance's host attribute on first
+    // update. Nothing keys off that value — the stylesheet only knows
+    // `:host([variant='danger'])`, and any other/missing value already gets
+    // the base look — so the sentinel attribute would buy nothing while
+    // becoming an undocumented part of the DOM consumers could start
+    // depending on. Leaving it unset means no attribute is written until a
+    // consumer actually sets `variant="danger"`.
     this.disabled = false;
   }
 
-  // An icon-only button whose `label` is empty has no accessible name at
-  // all, and `aria-label=""` hides that from the audit tooling that would
-  // otherwise flag a nameless button — so the omission has to announce
-  // itself here or it ships silently.
+  // `label` is documented as required (it's the button's only accessible
+  // name — an icon alone isn't one), but nothing enforced that: the
+  // constructor's `''` default plus `aria-label=${this.label}` silently
+  // renders `aria-label=""`, which gives an icon-only button no accessible
+  // name at all — and the empty (not missing) attribute hides the gap from
+  // audit tooling that would otherwise flag a nameless button. Surfacing it
+  // loudly in dev rather than only in an accessibility audit.
   willUpdate(changedProperties) {
     super.willUpdate(changedProperties);
     if (changedProperties.has('label') && !this.label) {
-      console.warn(
-        '<dc-icon-button> requires a non-empty `label`: an icon-only button has no accessible name without one.',
-        this,
-      );
+      console.warn('<dc-icon-button> requires a non-empty `label`; an icon-only button has no accessible name without one.', this);
     }
   }
 

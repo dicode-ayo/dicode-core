@@ -36,6 +36,11 @@ import './dc-empty-state.js';
 class DcTable extends LitElement {
   static properties = {
     loading: { type: Boolean },
+    // Explicit kebab-case attribute names — Lit's default attribute name
+    // for a property is just the lowercased property name verbatim (no
+    // kebab-case insertion), so without this a plain `empty-message="..."`
+    // attribute wouldn't bind and a consumer would have to reach for the
+    // less-common `.emptyMessage=${...}` JS-property binding instead.
     emptyMessage: { type: String, attribute: 'empty-message' },
     emptyIcon: { type: String, attribute: 'empty-icon' },
     _hasRows: { state: true },

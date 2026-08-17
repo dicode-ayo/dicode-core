@@ -34,6 +34,11 @@ class DcCard extends LitElement {
       background: var(--card-bg);
       border: 1px solid var(--border);
       border-radius: var(--radius);
+      /* .2s bypasses theme.css's own --duration-fast/--duration tokens —
+         faithfully matching global.css's prevailing (also-untokenized)
+         pattern rather than inventing a new one here. Tracked in #710
+         alongside global.css's own instances, to fix once and consistently
+         rather than renegotiate per component. */
       transition: border-color .2s var(--ease);
     }
     :host(:hover) { border-color: var(--border-strong); }

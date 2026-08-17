@@ -38,19 +38,19 @@ Shadow DOM blocks style *rules* from crossing in, but CSS **custom property
 values** still inherit through shadow boundaries (`:host` picks them up like
 any other descendant). Every primitive's `css` styles reference the same
 tokens defined in `theme.css` (`var(--space-md)`, `var(--card-bg)`,
-`var(--blue)`, ...), so swapping `data-theme="light"`/`"dark"` on `<html>`
-re-tints primitives exactly like the rest of the app, with no extra wiring.
+`var(--blue)`, ...) with no hard-coded fallback value, so swapping
+`data-theme="light"`/`"dark"` on `<html>` re-tints primitives exactly like
+the rest of the app, with no extra wiring.
 
-Reference tokens bare (`var(--card-bg)`), without a hard-coded fallback.
-`index.html` loads `global.css`, whose first statement is
-`@import './theme.css'` — so there is no token-less host page to guard
-against, and each fallback would be one more hand-copy of a token value to
-drift out of sync the next time one is re-tuned.
-
-Never bake a token's *current value* into a derived color — a tint written
-as `rgba()` of the dark-theme hue keeps that hue after the theme flips.
-Derive it from the live token instead, with `color-mix(in srgb, var(--green)
-15%, transparent)`.
+Earlier drafts of these components carried a fallback on every `var()` —
+67 of them across the six primitives — matching the dark-theme default, in
+case a primitive ever landed on a page that didn't load `theme.css`. That
+consumer doesn't exist: `index.html` loads `global.css`, whose first
+statement is `@import './theme.css'`, and every page in this app goes
+through `index.html`. A speculative consumer isn't worth 67 hand-copied
+literals that silently drift the moment a token is re-tuned — restoring
+fallbacks later, if a token-less host page ever becomes real, is a
+mechanical change; hunting stale copies after the fact is not.
 
 Where a primitive's own palette needs to match `global.css` exactly (see
 `dc-status-badge` below), the relevant rules are copied into the
@@ -64,22 +64,35 @@ badge colors change, both places need updating — noted in both files.
 ## The six Stage 1 primitives
 
 All under `tasks/buildin/webui/app/components/`. Each is self-contained,
-importing only `lit`, `../lib/slot-utils.js` (`dc-card`, `dc-empty-state`),
-and — for `dc-table` — `dc-empty-state`.
+importing only `lit`, `../lib/slot-utils.js` (`dc-card` only), and — for
+`dc-table` — `dc-empty-state`.
 
-`dc-card`, `dc-table`, and `dc-empty-state` each need to know synchronously
-whether a given slot has real (element) content, both on first connection
-and on every later `slotchange` — used to decide whether to show a header
-row, a table shell, or a CTA gap. `dc-card`/`dc-empty-state` share that
-check via `lib/slot-utils.js`'s `hasSlottedElement(host, slotName)`
-(checks `host.children`, not `<slot>.assignedNodes()` — the latter also
-counts whitespace text nodes, which caused a real bug in an earlier
-version of this PR: an empty-looking `<dc-empty-state>` with only
-incidental whitespace between its tags flipped its "has CTA" state on).
-`dc-table` computes its two flags (`_hasRows`/`_hasHead`) together in a
-single pass over `this.children` instead, since it needs both from one
-scan on every row mutation and the two-slot-name shared-helper shape
-would mean scanning twice.
+`dc-card` and `dc-table` each need to know synchronously whether a given
+slot has real (element) content, both on first connection and on every
+later `slotchange` — used to decide whether to show a header row or a
+table shell. `dc-card` uses `lib/slot-utils.js`'s `hasSlottedElement(host,
+slotName)` (checks `host.children`, not `<slot>.assignedNodes()` — the
+latter also counts whitespace text nodes, which caused a real bug in an
+earlier version of this PR: an empty-looking instance with only incidental
+whitespace between its tags flipped a "has content" state on that should
+have stayed off). `dc-table` computes its two flags (`_hasRows`/`_hasHead`)
+together in a single pass over `this.children` instead, since it needs
+both from one scan on every row mutation and the two-slot-name
+shared-helper shape would mean scanning twice.
+
+`dc-empty-state` sidesteps the whole class of problem for its one
+content-presence check (does the default "CTA" slot have anything in it)
+by using `::slotted(*)` directly in CSS rather than tracking presence in
+JS at all — `::slotted()` only matches elements actually assigned to a
+slot, never whitespace text nodes, so `slot:not([name])::slotted(*) {
+margin-block-start: ...; }` turns a CTA's top margin on exactly when
+there's a real CTA element, with no census, no `connectedCallback`
+override, and no `slotchange` listener needed. This is possible here
+specifically because the styling need is "target the slotted element(s)
+directly" (a margin on each) rather than "toggle a class on an ancestor
+wrapper" — `dc-card`/`dc-table` need the latter (hide/show a header *box*
+around the slotted content), which `::slotted()` alone can't do, since it
+can't reach up to style an ancestor based on slot contents.
 
 ### `<dc-card>`
 
@@ -112,7 +125,11 @@ Composed internally by `<dc-table>` for its empty state.
 
 A real `<button>` around a slotted icon (typically inline `<svg>`), with a
 required `label` prop supplying `aria-label`/`title` — the accessible name
-never depends on the icon being self-describing.
+never depends on the icon being self-describing. A missing/empty `label`
+logs a `console.warn` (an icon-only button with an empty `aria-label` has
+no accessible name at all, and — unlike a missing attribute — the empty
+one hides the gap from a lot of audit tooling), and the demo page's e2e
+coverage asserts every instance resolves a non-empty accessible name.
 
 - Slots: default (icon content)
 - Props: `label` (required — an empty one warns, since an icon-only button
@@ -124,9 +141,8 @@ never depends on the icon being self-describing.
 Colored status pill generalizing `<span class="badge badge-${status}">`.
 
 - Props: `status` — one of `success`, `failure`, `running`, `crashlooping`,
-  `cancelled`, `manual`, `suspended`, `resumed`; any other value renders the
-  neutral/default style. The set is exported as `KNOWN_STATUSES` so callers
-  that need to enumerate it don't hand-duplicate the list.
+  `cancelled`, `manual`, `suspended`, `resumed` (exported as
+  `KNOWN_STATUSES`); any other value renders the neutral/default style.
 
 Its palette is a copy of `global.css`'s `.badge`/`.badge-*` rules (see
 [Theming across the shadow boundary](#theming-across-the-shadow-boundary)
@@ -142,7 +158,10 @@ Bordered table shell around slotted rows, generalizing the
   default (`<tr>` rows rendered as the body row group)
 - Props: `loading` (shows a placeholder instead of rows), `emptyMessage` /
   `emptyIcon` (forwarded to the internal `<dc-empty-state>` when no rows are
-  slotted), settable as the `empty-message` / `empty-icon` attributes
+  slotted) — set via the plain `empty-message="..."`/`empty-icon="..."`
+  HTML attributes (each declares an explicit `attribute:` mapping, since
+  Lit's default attribute name for a property is just the lowercased
+  property name verbatim, not a kebab-cased one)
 
 Slotted `<tr>`/`<td>`/`<th>` elements stay in the *light* DOM — projection
 through a `<slot>` only changes where a node paints, not which document

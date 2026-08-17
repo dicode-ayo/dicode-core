@@ -1,5 +1,4 @@
 import { LitElement, html, css } from 'https://esm.sh/lit@3';
-import { hasSlottedElement } from '../lib/slot-utils.js';
 
 // <dc-empty-state> — Stage 1 primitive (#93): the centered "nothing here"
 // placeholder duplicated inline in dc-task-list.js
@@ -20,7 +19,6 @@ class DcEmptyState extends LitElement {
   static properties = {
     icon: { type: String },
     message: { type: String },
-    _hasCta: { state: true },
   };
 
   static styles = css`
@@ -38,13 +36,24 @@ class DcEmptyState extends LitElement {
     .message {
       font-size: var(--text-base);
     }
-    /* Gap only when the CTA slot has content, so icon/message-only
-       instances reserve no dead space. The presence test cannot be
-       ".cta:has(*)": :has() matches against this shadow tree, where the
-       <slot> element is unconditionally a child of .cta whether or not
-       anything is assigned to it, so that selector always matches. */
-    .cta.has-content {
-      margin-top: var(--space-md);
+    /* Only add the gap above the CTA slot when it actually has content —
+       avoids reserving dead space for icon/message-only instances.
+       ::slotted(*) only matches an element that is actually assigned to
+       the slot — a whitespace text node between this component's open
+       and close tags (ordinary multi-line markup with no real CTA
+       element) never matches — so this needs no JS census, no
+       connectedCallback, and no slotchange listener; the browser's own
+       slot-assignment tracking does the work. (An earlier version of
+       this component tried ".cta:has(*)" for the same goal — wrong,
+       because :has() matches this shadow tree, where the <slot> element
+       itself is unconditionally present regardless of assignment, not
+       the flattened/slotted tree.) Caveat: the margin lands on each
+       slotted element individually rather than once on a wrapper, so two
+       stacked CTA elements would each carry it — acceptable for this
+       component's one-CTA-element contract. */
+    slot:not([name])::slotted(*) {
+      display: inline-block;
+      margin-block-start: var(--space-md);
     }
   `;
 
@@ -52,27 +61,13 @@ class DcEmptyState extends LitElement {
     super();
     this.icon = '';
     this.message = '';
-    this._hasCta = false;
   }
-
-  // Synchronous census, not slotchange-only, so a CTA present from the
-  // first connection never renders gap-less for a frame before
-  // self-correcting. hasSlottedElement counts element children only:
-  // `<slot>.assignedNodes()` would also count the whitespace text node
-  // that ordinary multi-line `<dc-empty-state>` markup leaves behind,
-  // turning the gap on for instances with no CTA at all.
-  connectedCallback() {
-    super.connectedCallback();
-    this._hasCta = hasSlottedElement(this);
-  }
-
-  _onCtaSlotChange = () => { this._hasCta = hasSlottedElement(this); };
 
   render() {
     return html`
       <slot name="icon">${this.icon ? html`<div class="icon" aria-hidden="true">${this.icon}</div>` : ''}</slot>
       <div class="message">${this.message}</div>
-      <div class="cta ${this._hasCta ? 'has-content' : ''}"><slot @slotchange=${this._onCtaSlotChange}></slot></div>
+      <slot></slot>
     `;
   }
 }
