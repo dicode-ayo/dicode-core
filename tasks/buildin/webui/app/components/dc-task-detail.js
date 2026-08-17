@@ -216,7 +216,7 @@ class DcTaskDetail extends LitElement {
       case 'webhook': return html`<code>${t.webhook}</code>${t.auth ? html` <span class="meta">auth: ${t.auth}</span>` : ''}${t.signed ? html` <span class="meta">signed</span>` : ''}`;
       case 'daemon':  return html`daemon${t.restart ? html` <span class="meta">restart: ${t.restart}</span>` : ''}`;
       case 'chain':   return html`after <code>${t.chain_from}</code>${t.chain_on ? html` <span class="meta">on ${t.chain_on}</span>` : ''}`;
-      default:        return html`manual`;
+      default:        return ''; // kind alone says it (manual)
     }
   }
 
@@ -720,7 +720,7 @@ class DcTaskDetail extends LitElement {
             ? 'Approve this version and arm its triggers'
             : 'Show what will run before approving'}
           >${this._approveArmed ? html`&#10003; Approve` : html`&#9998; Review`}</button>` : ''}
-        ${needsApproval ? html`<button class="btn btn-sm secondary" @click=${() => this._toggleState()}>${this._stateOpen ? 'Hide review' : 'Review'}</button>` : ''}
+        ${needsApproval ? html`<button class="btn btn-sm secondary" @click=${() => this._toggleState()}>${this._stateOpen ? 'Hide review' : 'Show review'}</button>` : ''}
         <button class="btn" @click=${() => this._run()}>&#9654; Run now</button>
         ${hasEditor ? html`<button class="btn" style="background:var(--muted)" @click=${() => this._openEditor()}>&#9998; Edit code</button>` : ''}
       </div>
