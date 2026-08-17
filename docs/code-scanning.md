@@ -200,16 +200,28 @@ weakness is that `Within` is lexical, so a symlink already planted inside the ca
 could redirect a write; that requires prior filesystem access, at which point writing to
 the binary cache is not the interesting capability.
 
-### One dismissal is wrong
+### One dismissal rests on a false premise
 
 `pkg/taskset/resolver.go:484` is dismissed as a false positive on the grounds that
 `resolveYAMLPath` "only ever receives a path already cleared by `containedPath`". It
-does not. In `resolveRef`, the non-git branch runs `containedPath` inside
-`if cloneRoot != ""`, and the function's own doc comment says *"Pass `""` to skip the
-containment check"* — so there is a path to `resolveYAMLPath` on which no containment
-check runs at all.
+does not. In `resolveRef` the non-git branch runs `containedPath` inside
+`if cloneRoot != ""`, and the doc comment says *"Pass `""` to skip the containment
+check"*, so there is a route to `resolveYAMLPath` on which no containment check runs.
 
-The alert is still arguably acceptable: the taint path CodeQL reports originates at the
-session-authenticated add-source route, where an operator names a host path
-deliberately, which lands it in the trusted-author group above. But the recorded reason
-is a false premise rather than a judgement, and should be replaced with the real one.
+Tracing every caller shows the alert is nonetheless correctly dismissed, for a
+different reason than the one recorded. `cloneRoot` is empty in exactly two places, both
+deliberate:
+
+- `Resolve` (`resolver.go:116`) resolving the **root** taskset ref, where there is no
+  enclosing directory to contain the path to — the root is what defines the boundary.
+- `resolver.go:135` for **local, non-git sources**. Git sources get
+  `cloneRoot = repoDir`.
+
+Inside `resolveRef` the git branch calls `containedPath(localDir, resolved)`
+unconditionally. So containment is enforced exactly where repo-authored content supplies
+the path — the case where a committed symlink or `../` could escape a clone — and
+skipped exactly where an operator names a host path directly through the
+session-authenticated add-source route. That is the trusted-author case above, not an
+unguarded traversal.
+
+The verdict stands; the recorded reason should be replaced with this one.
