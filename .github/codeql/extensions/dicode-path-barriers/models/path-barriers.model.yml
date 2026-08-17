@@ -1,0 +1,27 @@
+extensions:
+  - addsTo:
+      pack: codeql/go-all
+      extensible: barrierModel
+    data:
+      # resolveInclude returns only after the candidate has cleared both a
+      # lexical strict-descendant check against the task's parent directory and
+      # a symlink-canonicalized containment check (EvalSymlinks on both sides,
+      # then pathguard.Within). The value returned is the canonicalized path,
+      # not the caller's lexical guess, so every read reached from it is bounded.
+      - ["github.com/dicode/dicode/pkg/task", "", False, "resolveInclude", "", "", "ReturnValue[0]", "path-injection", "manual"]
+      # safeTaskFilePath rejects any filename that is not a bare Base name — no
+      # separators, no "." or ".." — then re-checks that Join stayed inside the
+      # task dir via filepath.Rel. The joined path is returned only on the
+      # success path.
+      - ["github.com/dicode/dicode/pkg/webui", "", False, "safeTaskFilePath", "", "", "ReturnValue[0]", "path-injection", "manual"]
+
+# pathguard.Within, pathguard.WithinResolved and taskset.containedPath are this
+# repo's other containment guards, and barrierGuardModel cannot express any of
+# them. Go's MaD guard support (semmle/go/dataflow/ExternalFlow.qll) requires the
+# guard to be the boolean value of the call expression itself, whereas every one
+# of these returns (bool, error) or error and is tested through a destructured
+# variable; convertAcceptingValue additionally implements only "true"/"false",
+# leaving "null" — the shape an error-returning guard needs — inert. Rows for
+# them were written, measured against a local database, and silenced nothing.
+# Their alerts stay dismissed in the Security tab instead. See
+# docs/development/codeql.md.

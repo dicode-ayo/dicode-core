@@ -33,6 +33,7 @@
 ## Design documents
 
 - [Security Plan](./security-plan.md) — threat model, phases 1–4 design decisions, Phase 5 RBAC north star
+- [Code Scanning](./code-scanning.md) — CodeQL configuration, the path-sanitizer model pack, reproducing scans locally, standing alert triage
 
 ## Runtime guides
 
