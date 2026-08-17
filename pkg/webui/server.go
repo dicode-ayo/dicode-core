@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/alexedwards/scs/v2"
 	"github.com/dicode/dicode/internal/fsutil"
+	"github.com/dicode/dicode/internal/pathguard"
 	"github.com/dicode/dicode/pkg/approval"
 	"github.com/dicode/dicode/pkg/audit"
 	"github.com/dicode/dicode/pkg/config"
@@ -966,12 +968,25 @@ func (s *Server) apiSaveConfigRaw(w http.ResponseWriter, r *http.Request) {
 }
 
 // allowedFiles restricts which files the editor API can read/write.
-var allowedFiles = map[string]bool{
-	"task.js": true, "task.ts": true, "task.py": true,
-	"task.test.js": true, "task.test.ts": true,
-	"Dockerfile": true,
+var allowedFiles = []string{
+	"task.js", "task.ts", "task.py",
+	"task.test.js", "task.test.ts",
+	"Dockerfile",
 	// Webhook UI files — editable via the built-in code editor.
-	"index.html": true, "style.css": true, "script.js": true,
+	"index.html", "style.css", "script.js",
+}
+
+// canonicalTaskFile matches name against allowedFiles and returns the entry
+// from that list rather than the caller's string. Everything downstream builds
+// paths from the returned literal, so a request value never reaches the
+// filesystem even if the comparison were later loosened.
+func canonicalTaskFile(name string) (string, bool) {
+	for _, allowed := range allowedFiles {
+		if allowed == name {
+			return allowed, true
+		}
+	}
+	return "", false
 }
 
 // safeTaskFilePath resolves filename inside taskDir with belt-and-suspenders
@@ -983,6 +998,15 @@ var allowedFiles = map[string]bool{
 //  2. After Clean+Join, assert the absolute result is still rooted in the
 //     absolute form of taskDir (filepath.Rel returns a path with no leading
 //     "..").
+//  3. Canonicalize symlinks on both sides and re-check containment.
+//
+// Step 3 is required because go-git materializes repo-committed symlinks as
+// real on-disk links, so a source repo can plant tasks/foo/style.css -> a host
+// path: the name passes every lexical check while the os.ReadFile/os.WriteFile
+// downstream follows the link out of the task dir. Spec.ScriptPath rejects a
+// symlinked task script for the same reason, and Hash folds an in-dir symlink's
+// target string rather than its content — so a file reached through a link is
+// one the approval gate never sees change.
 //
 // Returns an error when the candidate escapes taskDir.
 func safeTaskFilePath(taskDir, filename string) (string, error) {
@@ -1000,6 +1024,13 @@ func safeTaskFilePath(taskDir, filename string) (string, error) {
 	joined := filepath.Join(absDir, filename)
 	rel, err := filepath.Rel(absDir, joined)
 	if err != nil || rel == "." || strings.HasPrefix(rel, "..") || strings.ContainsRune(rel, filepath.Separator) {
+		return "", fmt.Errorf("path escapes task dir")
+	}
+	within, err := pathguard.WithinResolved(absDir, joined)
+	if err != nil {
+		return "", fmt.Errorf("resolve task file: %w", err)
+	}
+	if !within {
 		return "", fmt.Errorf("path escapes task dir")
 	}
 	return joined, nil
@@ -1022,8 +1053,9 @@ func (s *Server) taskOr404(w http.ResponseWriter, id string) (*task.Spec, bool) 
 // task, and validate the filename stays inside the task dir. ok=false means
 // an error response was already written.
 func (s *Server) resolveTaskFile(w http.ResponseWriter, r *http.Request) (path, id, filename string, ok bool) {
-	id, filename = taskIDParam(r), chi.URLParam(r, "filename")
-	if !allowedFiles[filename] {
+	id = taskIDParam(r)
+	filename, allowed := canonicalTaskFile(chi.URLParam(r, "filename"))
+	if !allowed {
 		jsonErr(w, "file not allowed", http.StatusBadRequest)
 		return "", "", "", false
 	}
@@ -3063,6 +3095,13 @@ func (s *Server) apiListRuntimes(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, out)
 }
 
+// runtimeVersionPattern bounds a runtime version to the shape Deno and uv
+// actually publish. The value is interpolated into both a cache path under
+// ~/.cache/dicode and a release download URL, so anything outside this shape —
+// a separator, a "..", a scheme — is a traversal or URL-redirection attempt
+// rather than a version.
+var runtimeVersionPattern = regexp.MustCompile(`^[0-9]+(\.[0-9]+){0,2}(-[0-9A-Za-z.]+)?$`)
+
 func (s *Server) apiInstallRuntime(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	var mgr pkgruntime.ManagedRuntime
@@ -3091,6 +3130,10 @@ func (s *Server) apiInstallRuntime(w http.ResponseWriter, r *http.Request) {
 		} else {
 			version = mgr.DefaultVersion()
 		}
+	}
+	if !runtimeVersionPattern.MatchString(version) {
+		jsonErr(w, "invalid version", http.StatusBadRequest)
+		return
 	}
 
 	s.log.Info("installing runtime", zap.String("runtime", name), zap.String("version", version))
