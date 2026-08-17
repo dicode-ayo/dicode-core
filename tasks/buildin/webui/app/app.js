@@ -20,6 +20,7 @@ import './components/dc-metrics.js';
 import './components/dc-relay-status.js';
 import './components/dc-toast.js';
 import './components/dc-nav.js';
+import './components/dc-ui-kit-demo.js';
 
 // ── Auth overlay ──────────────────────────────────────────────────────────────
 // Inject a single <dc-auth-overlay> into the document body. The API client
@@ -57,6 +58,10 @@ route(/^\/secrets$/,   () => { app.innerHTML = '<dc-secrets></dc-secrets>'; });
 route(/^\/security$/,  () => { app.innerHTML = '<dc-security></dc-security>'; });
 route(/^\/sources$/,   () => { app.innerHTML = '<dc-sources></dc-sources>'; });
 route(/^\/metrics$/,   () => { app.innerHTML = '<dc-metrics></dc-metrics>'; });
+// Stage 1 (#93) primitives demo page — not linked from the persistent nav,
+// reachable by direct URL like any other route. See
+// docs/concepts/webui-components.md.
+route(/^\/ui-kit$/,    () => { app.innerHTML = '<dc-ui-kit-demo></dc-ui-kit-demo>'; });
 route(/^\/$/,          () => { app.innerHTML = '<dc-task-list></dc-task-list>'; });
 
 // Expose navigate globally for any inline hrefs

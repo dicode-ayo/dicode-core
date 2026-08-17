@@ -127,12 +127,16 @@ tr:last-child td { border-bottom: none; }
   color: var(--muted);
   border: 1px solid var(--border);
 }
-.badge-success   { background: rgba(166, 227, 161, .15); color: var(--green);  border-color: rgba(166, 227, 161, .3); }
-.badge-failure   { background: rgba(243, 139, 168, .15); color: var(--red);    border-color: rgba(243, 139, 168, .3); }
-.badge-running   { background: rgba(249, 226, 175, .15); color: var(--yellow); border-color: rgba(249, 226, 175, .3); }
+/* Tints are mixed from the live token rather than written as fixed rgba() of
+   its dark-theme value: --green/--red/--yellow all change under
+   [data-theme="light"], and a baked-in tint would keep tinting with a hue the
+   active theme no longer uses. Kept identical to dc-status-badge.js's copy. */
+.badge-success   { background: color-mix(in srgb, var(--green) 15%, transparent);  color: var(--green);  border-color: color-mix(in srgb, var(--green) 30%, transparent); }
+.badge-failure   { background: color-mix(in srgb, var(--red) 15%, transparent);    color: var(--red);    border-color: color-mix(in srgb, var(--red) 30%, transparent); }
+.badge-running   { background: color-mix(in srgb, var(--yellow) 15%, transparent); color: var(--yellow); border-color: color-mix(in srgb, var(--yellow) 30%, transparent); }
 /* crashlooping (#458): a daemon stuck in a spawn/crash/backoff loop — stronger
    red than badge-failure so a persistently-broken daemon stands out. */
-.badge-crashlooping { background: rgba(243, 139, 168, .28); color: var(--red); border-color: rgba(243, 139, 168, .4); }
+.badge-crashlooping { background: color-mix(in srgb, var(--red) 28%, transparent); color: var(--red); border-color: color-mix(in srgb, var(--red) 40%, transparent); }
 .badge-cancelled { background: var(--card-bg); color: var(--muted); border-color: var(--border); }
 .badge-manual    { background: var(--card-bg); color: var(--muted); border-color: var(--border); }
 /* suspended (#95): a run paused waiting on user input — blue "waiting on you". */
