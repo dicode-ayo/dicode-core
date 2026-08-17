@@ -32,7 +32,8 @@ import './dc-empty-state.js';
 // (browsers key table layout off computed `display`, not tag names) without
 // tripping the parser's table-insertion-mode special-casing, since a <div>
 // never switches the parser into that mode in the first place. `role`
-// attributes restore the semantics the swapped tags would otherwise carry.
+// attributes restore the semantics the swapped tags would otherwise carry —
+// on the shell here, and on the slotted rows and cells in _stampRowRoles.
 class DcTable extends LitElement {
   static properties = {
     loading: { type: Boolean },
@@ -128,11 +129,32 @@ class DcTable extends LitElement {
     let hasRows = false;
     let hasHead = false;
     for (const el of this.children) {
-      if (el.getAttribute('slot') === 'head') hasHead = true;
+      const isHead = el.getAttribute('slot') === 'head';
+      if (isHead) hasHead = true;
       else hasRows = true;
+      this._stampRowRoles(el, isHead);
     }
     this._hasRows = hasRows;
     this._hasHead = hasHead;
+  }
+
+  // A <tr>/<th>/<td> outside any <table> only maps to row/columnheader/cell
+  // by inference, and engines disagree: the same tree reports columnheader
+  // for a slotted <th> in one Chromium build and cell — a table with no
+  // header semantics at all — in another. Declaring the roles the swapped
+  // tags would have carried removes the inference, so the accessibility
+  // tree is the same everywhere. A <th> in the head slot is a column
+  // header; elsewhere it labels its own row.
+  _stampRowRoles(row, isHead) {
+    if (row.tagName !== 'TR') return;
+    row.setAttribute('role', 'row');
+    for (const cell of row.children) {
+      if (cell.tagName === 'TH') {
+        cell.setAttribute('role', isHead ? 'columnheader' : 'rowheader');
+      } else if (cell.tagName === 'TD') {
+        cell.setAttribute('role', 'cell');
+      }
+    }
   }
 
   render() {

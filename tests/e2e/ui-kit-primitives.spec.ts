@@ -182,11 +182,11 @@ test.describe('UI Kit primitives (#93 Stage 1)', () => {
   // dc-table's shell is <div role="table">/<div role="rowgroup"> rather
   // than literal <table>/<thead>/<tbody> (see dc-table.js's doc comment on
   // why), and its rows/cells are real <tr>/<th>/<td> elements slotted in
-  // from the light DOM rather than descendants of an actual <table> in the
-  // same tree — worth verifying the composed accessibility tree still
-  // reads as a real table (cells keeping their `cell`/`columnheader` role)
-  // rather than assuming it, since HTML-AAM's role mapping for <td>/<th>
-  // is normally scoped to table-context ancestors.
+  // from the light DOM rather than descendants of an actual <table>. Left to
+  // inference that is not portable — the same tree reported `columnheader`
+  // for the slotted <th> in one Chromium build and `cell`, i.e. a table with
+  // no header semantics, in another — so dc-table declares the roles and
+  // this pins the result.
   test('dc-table composes an accessible table tree despite the div/slot shell', async ({ page }) => {
     const table = page.locator('dc-table#table-with-rows');
     await expect(table).toMatchAriaSnapshot(`
