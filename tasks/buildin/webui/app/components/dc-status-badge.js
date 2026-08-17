@@ -12,13 +12,6 @@ import { LitElement, html, css } from 'https://esm.sh/lit@3';
 // keeping both light/dark themes in sync. If global.css's badge colors
 // change, update both.
 //
-// Known issue, tracked in #710 (not fixed here to avoid this file and
-// global.css drifting apart on the fix itself): the tint rgba() literals
-// below are baked from the dark theme's --green/--red/--yellow values, so
-// in light mode `color` correctly follows the live (light) token while
-// `background`/`border-color` keep the dark hue. Inherited faithfully from
-// global.css, which has the identical bug.
-//
 // Props:
 //   status  — status string, e.g. 'success' | 'failure' | 'running' |
 //             'crashlooping' | 'cancelled' | 'manual' | 'suspended' |
@@ -48,59 +41,59 @@ class DcStatusBadge extends LitElement {
     .badge {
       display: inline-block;
       padding: .2em .6em;
-      border-radius: var(--radius-sm);
-      font-size: var(--text-xs);
-      font-weight: var(--font-semibold);
-      background: var(--card-bg);
-      color: var(--muted);
-      border: 1px solid var(--border);
+      border-radius: var(--dicode-radius-sm);
+      font-size: var(--dicode-text-xs);
+      font-weight: var(--dicode-font-semibold);
+      background: var(--dicode-card-bg);
+      color: var(--dicode-muted);
+      border: var(--dicode-border-width) solid var(--dicode-border);
     }
-    /* Tints are mixed from the live token rather than written as fixed
-       rgba() of its dark-theme value: --green/--red/--yellow all change
+    /* Tints are mixed from the live token rather than written as a fixed
+       rgba() of its dark-theme value: the green/red/yellow tokens all change
        under [data-theme="light"], and a baked-in tint would keep tinting
        with a hue the active theme no longer uses. */
     .badge-success {
-      background: color-mix(in srgb, var(--green) 15%, transparent);
-      color: var(--green);
-      border-color: color-mix(in srgb, var(--green) 30%, transparent);
+      background: color-mix(in srgb, var(--dicode-green) 15%, transparent);
+      color: var(--dicode-green);
+      border-color: color-mix(in srgb, var(--dicode-green) 30%, transparent);
     }
     .badge-failure {
-      background: color-mix(in srgb, var(--red) 15%, transparent);
-      color: var(--red);
-      border-color: color-mix(in srgb, var(--red) 30%, transparent);
+      background: color-mix(in srgb, var(--dicode-red) 15%, transparent);
+      color: var(--dicode-red);
+      border-color: color-mix(in srgb, var(--dicode-red) 30%, transparent);
     }
     .badge-running {
-      background: color-mix(in srgb, var(--yellow) 15%, transparent);
-      color: var(--yellow);
-      border-color: color-mix(in srgb, var(--yellow) 30%, transparent);
+      background: color-mix(in srgb, var(--dicode-yellow) 15%, transparent);
+      color: var(--dicode-yellow);
+      border-color: color-mix(in srgb, var(--dicode-yellow) 30%, transparent);
     }
     /* crashlooping (#458): a daemon stuck in a spawn/crash/backoff loop —
        stronger red than badge-failure so it stands out. */
     .badge-crashlooping {
-      background: color-mix(in srgb, var(--red) 28%, transparent);
-      color: var(--red);
-      border-color: color-mix(in srgb, var(--red) 40%, transparent);
+      background: color-mix(in srgb, var(--dicode-red) 28%, transparent);
+      color: var(--dicode-red);
+      border-color: color-mix(in srgb, var(--dicode-red) 40%, transparent);
     }
     .badge-cancelled {
-      background: var(--card-bg);
-      color: var(--muted);
-      border-color: var(--border);
+      background: var(--dicode-card-bg);
+      color: var(--dicode-muted);
+      border-color: var(--dicode-border);
     }
     .badge-manual {
-      background: var(--card-bg);
-      color: var(--muted);
-      border-color: var(--border);
+      background: var(--dicode-card-bg);
+      color: var(--dicode-muted);
+      border-color: var(--dicode-border);
     }
     /* suspended (#95): a run paused waiting on user input — blue "waiting on you". */
     .badge-suspended {
-      background: var(--blue-tint);
-      color: var(--sky);
-      border-color: var(--blue-tint-strong);
+      background: var(--dicode-blue-tint);
+      color: var(--dicode-sky);
+      border-color: var(--dicode-blue-tint-strong);
     }
     .badge-resumed {
-      background: var(--card-bg);
-      color: var(--muted);
-      border-color: var(--border);
+      background: var(--dicode-card-bg);
+      color: var(--dicode-muted);
+      border-color: var(--dicode-border);
     }
   `;
 

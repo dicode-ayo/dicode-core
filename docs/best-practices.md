@@ -1128,13 +1128,13 @@ This codebase uses inline styles extensively throughout the templates. This crea
   --color-badge-failure-bg: #f8d7da;
   --color-badge-failure-text: #842029;
 
-  --space-xs: 0.25rem;
-  --space-sm: 0.5rem;
-  --space-md: 1rem;
-  --space-lg: 1.5rem;
+  --dicode-space-xs: 0.25rem;
+  --dicode-space-sm: 0.5rem;
+  --dicode-space-md: 1rem;
+  --dicode-space-lg: 1.5rem;
 
-  --radius-sm: 4px;
-  --radius-md: 6px;
+  --dicode-radius-sm: 4px;
+  --dicode-radius-md: 6px;
 
   --font-size-sm: 0.82rem;
   --font-size-base: 0.9rem;

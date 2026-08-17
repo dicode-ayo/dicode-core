@@ -20,27 +20,27 @@ class DcPageHeader extends LitElement {
     :host {
       display: flex;
       align-items: center;
-      gap: var(--space-md);
-      margin-bottom: var(--space-md);
+      gap: var(--dicode-space-md);
+      margin-bottom: var(--dicode-space-md);
       flex-wrap: wrap;
     }
-    .titles { display: flex; flex-direction: column; gap: var(--space-xs); min-width: 0; }
+    .titles { display: flex; flex-direction: column; gap: var(--dicode-space-xs); min-width: 0; }
     h1 {
       margin: 0;
-      font-size: var(--text-xl);
-      font-weight: var(--font-bold);
-      color: var(--heading);
-      line-height: var(--leading-snug);
+      font-size: var(--dicode-text-xl);
+      font-weight: var(--dicode-font-bold);
+      color: var(--dicode-heading);
+      line-height: var(--dicode-leading-snug);
     }
     .subtitle {
-      font-size: var(--text-sm);
-      color: var(--muted);
+      font-size: var(--dicode-text-sm);
+      color: var(--dicode-muted);
     }
     .actions {
       margin-inline-start: auto;
       display: flex;
       align-items: center;
-      gap: var(--space-sm);
+      gap: var(--dicode-space-sm);
       flex-wrap: wrap;
     }
   `;

@@ -56,18 +56,18 @@ class DcTable extends LitElement {
       display: table;
       width: 100%;
       border-collapse: collapse;
-      background: var(--card-bg);
-      border: 1px solid var(--border);
-      border-radius: var(--radius-md);
+      background: var(--dicode-card-bg);
+      border: var(--dicode-border-width) solid var(--dicode-border);
+      border-radius: var(--dicode-radius-md);
       overflow: hidden;
     }
     .thead { display: table-header-group; }
     .tbody { display: table-row-group; }
     .loading {
-      padding: var(--space-lg);
+      padding: var(--dicode-space-lg);
       text-align: center;
-      color: var(--muted);
-      font-size: var(--text-sm);
+      color: var(--dicode-muted);
+      font-size: var(--dicode-text-sm);
     }
   `;
 

@@ -63,11 +63,11 @@ class DcToast extends LitElement {
         }
         dc-toast .toast {
           pointer-events: auto;
-          background: var(--card-bg, #1e1e1e);
-          color: var(--text, #ddd);
-          border: 1px solid var(--border, #333);
-          border-left: 3px solid var(--sky, #4caf50);
-          border-radius: var(--radius-md, 4px);
+          background: var(--dicode-card-bg, #1e1e1e);
+          color: var(--dicode-text, #ddd);
+          border: var(--dicode-border-width) solid var(--dicode-border, #333);
+          border-left: 3px solid var(--dicode-sky, #4caf50);
+          border-radius: var(--dicode-radius-md, 4px);
           padding: 0.6rem 0.9rem;
           max-width: 360px;
           box-shadow: 0 4px 12px rgba(0,0,0,.35);
@@ -75,7 +75,7 @@ class DcToast extends LitElement {
           display: flex;
           align-items: flex-start;
           gap: 0.5rem;
-          animation: dc-toast-in .15s ease-out;
+          animation: dc-toast-in var(--dicode-duration-fast) ease-out;
         }
         dc-toast .toast.error { border-left-color: #e57373; }
         dc-toast .toast .msg { flex: 1; word-break: break-word; }

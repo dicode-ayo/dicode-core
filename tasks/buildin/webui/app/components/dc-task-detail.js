@@ -240,7 +240,7 @@ class DcTaskDetail extends LitElement {
   _renderSection(title, body) {
     return html`
       <div style="margin-bottom:0.9rem">
-        <div style="font-size:0.75rem;text-transform:uppercase;letter-spacing:0.04em;color:var(--muted);margin-bottom:0.3rem">${title}</div>
+        <div style="font-size:0.75rem;text-transform:uppercase;letter-spacing:0.04em;color:var(--dicode-muted);margin-bottom:0.3rem">${title}</div>
         ${body}
       </div>`;
   }
@@ -254,7 +254,7 @@ class DcTaskDetail extends LitElement {
     const files = st.files || [];
     const rowStyle = 'display:flex;gap:0.5rem;align-items:baseline;font-size:0.85rem;padding:0.15rem 0';
     return html`
-      <div class="card" style="margin-top:0.75rem;margin-bottom:var(--space-md)">
+      <div class="card" style="margin-top:0.75rem;margin-bottom:var(--dicode-space-md)">
         <div class="meta" style="margin-bottom:0.75rem">
           This is the task as it will run if you approve it. Review the change itself at its source.
         </div>
@@ -304,7 +304,7 @@ class DcTaskDetail extends LitElement {
           ${st.container.read_only ? html`<div style=${rowStyle}><strong>read_only</strong> <code>true</code></div>` : ''}`) : ''}
 
         ${st.files_error ? html`
-          <div style="background:rgba(248,81,73,0.12);border:1px solid #f85149;color:#f85149;padding:0.5rem 0.75rem;border-radius:6px;margin-bottom:0.9rem;font-size:0.85rem">
+          <div style="background:rgba(248,81,73,0.12);border:var(--dicode-border-width) solid #f85149;color:#f85149;padding:0.5rem 0.75rem;border-radius:6px;margin-bottom:0.9rem;font-size:0.85rem">
             &#9888; <strong>The file list could not be built.</strong>
             <div style="margin-top:0.3rem;color:var(--fg)">${st.files_error}</div>
           </div>` : ''}
@@ -546,7 +546,7 @@ class DcTaskDetail extends LitElement {
             @click=${() => this._toggleExpand(r.ID)}>${expanded ? '▾' : '▸'}</button>` : ''}
           <a href="runs/${r.ID}">${r.ID.slice(0,8)}</a>
           ${isPipeline ? html`<span class="badge" title="Pipeline run"
-            style="margin-left:.5rem;font-size:0.7rem;background:rgba(137, 220, 235, .15);color:var(--sky)">pipeline</span>` : ''}
+            style="margin-left:.5rem;font-size:0.7rem;background:rgba(137, 220, 235, .15);color:var(--dicode-sky)">pipeline</span>` : ''}
           ${hint ? html`<span class="meta" style="margin-left:.5rem">${hint}</span>` : ''}
         </td>
         <td><span class="badge badge-${r.Status}">${r.Status}</span></td>
@@ -606,14 +606,14 @@ class DcTaskDetail extends LitElement {
     // "failed_after_preflight" is a retained enum value; its current
     // meaning is simply "daemon body launch failed".
     const STYLES = {
-      running:                { bg: 'rgba(166, 227, 161, .15)', fg: 'var(--green)',  text: 'Running' },
-      stopping:               { bg: 'rgba(249, 226, 175, .15)', fg: 'var(--yellow)', text: 'Stopping…' },
-      failed_after_preflight: { bg: 'rgba(243, 139, 168, .15)', fg: 'var(--red)',    text: '⨯ Launch failed' },
-      crashed:                { bg: 'rgba(243, 139, 168, .28)', fg: 'var(--red)',    text: '⨯ Crashed (no restart)' },
-      crashlooping:           { bg: 'rgba(243, 139, 168, .28)', fg: 'var(--red)',    text: '⟳ Crash-looping' },
-      stopped:                { bg: 'rgba(166, 173, 200, .15)', fg: 'var(--muted)',  text: 'Stopped' },
+      running:                { bg: 'rgba(166, 227, 161, .15)', fg: 'var(--dicode-green)',  text: 'Running' },
+      stopping:               { bg: 'rgba(249, 226, 175, .15)', fg: 'var(--dicode-yellow)', text: 'Stopping…' },
+      failed_after_preflight: { bg: 'rgba(243, 139, 168, .15)', fg: 'var(--dicode-red)',    text: '⨯ Launch failed' },
+      crashed:                { bg: 'rgba(243, 139, 168, .28)', fg: 'var(--dicode-red)',    text: '⨯ Crashed (no restart)' },
+      crashlooping:           { bg: 'rgba(243, 139, 168, .28)', fg: 'var(--dicode-red)',    text: '⟳ Crash-looping' },
+      stopped:                { bg: 'rgba(166, 173, 200, .15)', fg: 'var(--dicode-muted)',  text: 'Stopped' },
     };
-    const s = STYLES[state] || { bg: 'rgba(166, 173, 200, .15)', fg: 'var(--muted)', text: state };
+    const s = STYLES[state] || { bg: 'rgba(166, 173, 200, .15)', fg: 'var(--dicode-muted)', text: state };
     return html`<span
       data-daemon-state=${state}
       title="Daemon state: ${state}"
@@ -632,13 +632,13 @@ class DcTaskDetail extends LitElement {
     const stages = task.stages || task.Stages || [];
     if (!stages.length) {
       return html`
-        <div class="card" style="margin-bottom:var(--space-md)">
+        <div class="card" style="margin-bottom:var(--dicode-space-md)">
           <h2 style="margin:0 0 0.5rem">Stages</h2>
           <p class="meta" style="margin:0">This pipeline has no stages.</p>
         </div>`;
     }
     return html`
-      <div class="card" style="margin-bottom:var(--space-md)">
+      <div class="card" style="margin-bottom:var(--dicode-space-md)">
         <h2 style="margin:0 0 0.75rem">Stages</h2>
         <ol style="margin:0;padding-left:1.5rem;display:flex;flex-direction:column;gap:0.4rem">
           ${stages.map(s => {
@@ -648,7 +648,7 @@ class DcTaskDetail extends LitElement {
               <li>
                 <a href="tasks/${encodeURIComponent(id)}" style="font-family:monospace">${id}</a>
                 ${hasOverrides ? html`<span class="badge" title="This stage applies overrides"
-                  style="margin-left:.5rem;font-size:0.7rem;background:rgba(249, 226, 175, .15);color:var(--yellow)">overrides</span>` : ''}
+                  style="margin-left:.5rem;font-size:0.7rem;background:rgba(249, 226, 175, .15);color:var(--dicode-yellow)">overrides</span>` : ''}
               </li>`;
           })}
         </ol>
@@ -673,7 +673,7 @@ class DcTaskDetail extends LitElement {
       <label>Path<br>
         <input id="trig-webhook" class="input" .value=${webhook} style="width:100%;margin-top:0.25rem">
       </label>
-      ${fullURL ? html`<div style="margin-top:0.5rem;font-size:0.85rem;color:var(--muted)">
+      ${fullURL ? html`<div style="margin-top:0.5rem;font-size:0.85rem;color:var(--dicode-muted)">
         Relay URL: <code style="user-select:all;word-break:break-all">${fullURL}</code>
       </div>` : ''}`;
     }
@@ -711,10 +711,10 @@ class DcTaskDetail extends LitElement {
     const needsApproval = task.pending_approval === true;
 
     return html`
-      <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:var(--space-sm)">
+      <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:var(--dicode-space-sm)">
         <h1 style="margin:0">${task.name}</h1>
         ${needsApproval ? html`<span title="This task is new or changed and its triggers are not armed until approved"
-          style="padding:0 0.45rem;font-size:0.75rem;border-radius:3px;background:rgba(210,153,34,0.18);color:#d29922;border:1px solid rgba(210,153,34,0.45)">pending approval</span>` : ''}
+          style="padding:0 0.45rem;font-size:0.75rem;border-radius:3px;background:rgba(210,153,34,0.18);color:#d29922;border:var(--dicode-border-width) solid rgba(210,153,34,0.45)">pending approval</span>` : ''}
         ${needsApproval ? html`<button class="btn" style="background:#d29922" @click=${() => this._approve()}
           title=${this._approveArmed
             ? 'Approve this version and arm its triggers'
@@ -722,30 +722,30 @@ class DcTaskDetail extends LitElement {
           >${this._approveArmed ? html`&#10003; Approve` : html`&#9998; Review`}</button>` : ''}
         ${needsApproval ? html`<button class="btn btn-sm secondary" @click=${() => this._toggleState()}>${this._stateOpen ? 'Hide review' : 'Show review'}</button>` : ''}
         <button class="btn" @click=${() => this._run()}>&#9654; Run now</button>
-        ${hasEditor ? html`<button class="btn" style="background:var(--muted)" @click=${() => this._openEditor()}>&#9998; Edit code</button>` : ''}
+        ${hasEditor ? html`<button class="btn" style="background:var(--dicode-muted)" @click=${() => this._openEditor()}>&#9998; Edit code</button>` : ''}
       </div>
       ${needsApproval && this._stateOpen ? this._renderStatePanel() : ''}
       ${task.description ? html`<div class="task-desc">${unsafeHTML(marked.parse(task.description))}</div>` : ''}
 
-      <div class="card" style="margin-bottom:var(--space-md);display:flex;align-items:center;gap:0.75rem">
+      <div class="card" style="margin-bottom:var(--dicode-space-md);display:flex;align-items:center;gap:0.75rem">
         <span style="font-size:0.85rem"><strong>Trigger:</strong> ${task.trigger_label || 'manual'}</span>
         ${task.daemon_state ? this._renderDaemonState(task.daemon_state) : ''}
-        <button class="btn btn-sm" style="background:var(--muted);margin-left:auto"
+        <button class="btn btn-sm" style="background:var(--dicode-muted);margin-left:auto"
           @click=${() => { this._triggerOpen = !this._triggerOpen; }}>&#9998; Edit trigger</button>
       </div>
 
       ${isPipeline ? this._renderStages(task) : ''}
 
       ${this._triggerOpen ? html`
-        <div class="card" style="margin-bottom:var(--space-md)">
+        <div class="card" style="margin-bottom:var(--dicode-space-md)">
           <h2 style="margin-bottom:0.75rem">Edit Trigger</h2>
-          <div style="display:flex;gap:var(--space-sm);margin-bottom:var(--space-md);flex-wrap:wrap">
+          <div style="display:flex;gap:var(--dicode-space-sm);margin-bottom:var(--dicode-space-md);flex-wrap:wrap">
             ${['manual','cron','webhook','chain','daemon'].map(t => html`
               <button class="btn btn-sm ${t === this._triggerType ? '' : 'secondary'}"
                 @click=${() => { this._triggerType = t; }}>${t}</button>`)}
           </div>
           ${this._triggerFields()}
-          <div style="display:flex;gap:var(--space-sm);margin-top:1rem">
+          <div style="display:flex;gap:var(--dicode-space-sm);margin-top:1rem">
             <button class="btn" @click=${() => this._saveTrigger()}>Save</button>
             <button class="btn secondary" @click=${() => { this._triggerOpen = false; }}>Cancel</button>
           </div>
@@ -753,47 +753,47 @@ class DcTaskDetail extends LitElement {
 
       ${this._editorOpen && hasEditor ? html`
         <div class="card" style="margin-top:1.5rem;padding:0.75rem">
-          <div style="display:flex;align-items:center;gap:var(--space-sm);margin-bottom:var(--space-sm);flex-wrap:wrap">
+          <div style="display:flex;align-items:center;gap:var(--dicode-space-sm);margin-bottom:var(--dicode-space-sm);flex-wrap:wrap">
             <button class="btn btn-sm" @click=${() => this._loadEditorFile(scriptFile)}>${scriptFile}</button>
             ${task.test_exists ? html`
               <button class="btn btn-sm secondary" @click=${() => this._loadEditorFile(testFile)}>${testFile}</button>` : ''}
-            <div style="margin-left:auto;display:flex;gap:var(--space-sm);align-items:center">
+            <div style="margin-left:auto;display:flex;gap:var(--dicode-space-sm);align-items:center">
               <span style="font-size:0.8rem">${this._editorStatus}</span>
               <button class="btn btn-sm" @click=${() => this._saveEditor()}>&#128190; Save</button>
-              <button class="btn btn-sm" style="background:var(--lavender)" @click=${() => { this._aiOpen = !this._aiOpen; }}>&#129302; AI</button>
+              <button class="btn btn-sm" style="background:var(--dicode-lavender)" @click=${() => { this._aiOpen = !this._aiOpen; }}>&#129302; AI</button>
               <button class="btn btn-sm secondary" @click=${() => this._closeEditor()}>✕ Close</button>
             </div>
           </div>
           <div style="display:flex;gap:0.75rem;align-items:stretch">
-            <div id="monaco-container" style="flex:1;min-width:0;height:440px;border-radius:var(--radius-sm);overflow:hidden"></div>
+            <div id="monaco-container" style="flex:1;min-width:0;height:440px;border-radius:var(--dicode-radius-sm);overflow:hidden"></div>
             ${this._aiOpen ? html`
-              <div style="width:360px;flex-shrink:0;display:flex;flex-direction:column;background:var(--bg-alt);border-radius:var(--radius-sm);border:1px solid var(--border);overflow:hidden">
-                <div style="padding:var(--space-sm) 0.75rem;background:var(--bg-alt);border-bottom:1px solid var(--border)">
-                  <span style="color:var(--sky);font-weight:600;font-size:0.85rem">&#129302; AI Task Dev</span>
+              <div style="width:360px;flex-shrink:0;display:flex;flex-direction:column;background:var(--dicode-bg-alt);border-radius:var(--dicode-radius-sm);border:var(--dicode-border-width) solid var(--dicode-border);overflow:hidden">
+                <div style="padding:var(--dicode-space-sm) 0.75rem;background:var(--dicode-bg-alt);border-bottom:var(--dicode-border-width) solid var(--dicode-border)">
+                  <span style="color:var(--dicode-sky);font-weight:600;font-size:0.85rem">&#129302; AI Task Dev</span>
                 </div>
-                <div id="ai-history" style="flex:1;overflow-y:auto;padding:0.75rem;font-size:0.8rem;color:var(--lavender);min-height:240px;max-height:300px;line-height:1.5">
+                <div id="ai-history" style="flex:1;overflow-y:auto;padding:0.75rem;font-size:0.8rem;color:var(--dicode-lavender);min-height:240px;max-height:300px;line-height:1.5">
                   ${this._aiHistory.map(m => html`
-                    <div style="margin-bottom:var(--space-sm)">
-                      <strong style="color:${m.role === 'user' ? 'var(--sky)' : 'var(--green)'}">${m.role === 'user' ? 'You' : 'AI'}:</strong>
+                    <div style="margin-bottom:var(--dicode-space-sm)">
+                      <strong style="color:${m.role === 'user' ? 'var(--dicode-sky)' : 'var(--dicode-green)'}">${m.role === 'user' ? 'You' : 'AI'}:</strong>
                       ${m.text}
                     </div>`)}
                 </div>
-                <div style="padding:0.2rem 0.75rem;font-size:0.7rem;color:var(--muted);border-top:1px solid var(--border);min-height:1.4rem;font-family:monospace">
+                <div style="padding:0.2rem 0.75rem;font-size:0.7rem;color:var(--dicode-muted);border-top:var(--dicode-border-width) solid var(--dicode-border);min-height:1.4rem;font-family:monospace">
                   ${this._aiStatus}
                 </div>
-                <div style="padding:var(--space-sm);border-top:1px solid var(--border);display:flex;flex-direction:column;gap:0.4rem">
+                <div style="padding:var(--dicode-space-sm);border-top:var(--dicode-border-width) solid var(--dicode-border);display:flex;flex-direction:column;gap:0.4rem">
                   <textarea id="ai-input"
                     placeholder="Describe the task… (Ctrl+Enter to send)"
-                    style="width:100%;background:var(--bg);color:var(--lavender);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.45rem 0.5rem;font-size:0.78rem;resize:none;height:72px;font-family:system-ui,sans-serif;outline:none;box-sizing:border-box"
+                    style="width:100%;background:var(--dicode-bg);color:var(--dicode-lavender);border:var(--dicode-border-width) solid var(--dicode-border);border-radius:var(--dicode-radius-sm);padding:0.45rem 0.5rem;font-size:0.78rem;resize:none;height:72px;font-family:system-ui,sans-serif;outline:none;box-sizing:border-box"
                     @keydown=${e => { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { this._aiSend(); e.preventDefault(); } }}>
                   </textarea>
-                  <button class="btn btn-sm" style="background:var(--lavender)" @click=${() => this._aiSend()}>Send</button>
+                  <button class="btn btn-sm" style="background:var(--dicode-lavender)" @click=${() => this._aiSend()}>Send</button>
                 </div>
               </div>` : ''}
           </div>
         </div>` : ''}
 
-      <div style="display:flex;align-items:baseline;gap:var(--space-md);margin-top:var(--space-lg)">
+      <div style="display:flex;align-items:baseline;gap:var(--dicode-space-md);margin-top:var(--dicode-space-lg)">
         <h2 style="margin:0">Recent runs</h2>
         <label class="meta" style="margin-left:auto;cursor:pointer">
           <input type="checkbox"
@@ -806,7 +806,7 @@ class DcTaskDetail extends LitElement {
         <thead><tr><th>Run ID</th><th>Status</th><th>Started</th><th>Duration</th><th></th></tr></thead>
         <tbody>
           ${!this._runs?.length ? html`
-            <tr><td colspan="5" style="text-align:center;color:var(--muted)">No runs yet.</td></tr>
+            <tr><td colspan="5" style="text-align:center;color:var(--dicode-muted)">No runs yet.</td></tr>
           ` : this._buildRunItems().map(item => item.kind === 'group'
               ? this._renderGroupRow(item)
               : this._renderRunRow(item.run))}
