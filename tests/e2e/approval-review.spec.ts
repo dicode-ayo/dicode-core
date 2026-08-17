@@ -93,6 +93,7 @@ async function withPendingChange(
   const original = fs.readFileSync(taskJsPath, 'utf8');
   const mutated = original + `\n${BODY_MARKER}\n`;
 
+  let bodyError: unknown;
   try {
     if (preMutateDelayMs > 0) {
       await new Promise((r) => setTimeout(r, preMutateDelayMs));
@@ -103,20 +104,29 @@ async function withPendingChange(
     await waitForTaskCondition(request, MANUAL_TASK_ID, (t) => t.pending_approval === true);
 
     await body({ mutatedSize: Buffer.byteLength(mutated, 'utf8') });
-  } finally {
-    // Restore exact original bytes: the content hash returns to the
-    // already-approved record, so the reconciler re-arms it without any
-    // explicit re-approval. Only a test that approves the mutated content
-    // needs more than this (see settleToRestored). Errors here are logged
-    // rather than thrown so a genuine failure from body() above isn't masked
-    // by a cleanup problem.
-    try {
-      fs.writeFileSync(taskJsPath, original, 'utf8');
-      await waitForTaskCondition(request, MANUAL_TASK_ID, (t) => t.pending_approval !== true);
-    } catch (cleanupError) {
-      console.error('withPendingChange cleanup failed:', cleanupError);
-    }
+  } catch (err) {
+    bodyError = err;
   }
+
+  // Restore exact original bytes: the content hash returns to the
+  // already-approved record, so the reconciler re-arms it without any explicit
+  // re-approval. Only a test that approves the mutated content needs more than
+  // this (see settleToRestored).
+  //
+  // A cleanup that fails leaves hello-manual pending for every later test and
+  // spec file, so it fails the test rather than being logged away — silence
+  // here turns one broken fixture into a cascade of unrelated-looking failures
+  // elsewhere. A genuine body failure still wins, being the more informative of
+  // the two.
+  let cleanupError: unknown;
+  try {
+    fs.writeFileSync(taskJsPath, original, 'utf8');
+    await waitForTaskCondition(request, MANUAL_TASK_ID, (t) => t.pending_approval !== true);
+  } catch (err) {
+    cleanupError = err;
+  }
+  if (bodyError) throw bodyError;
+  if (cleanupError) throw cleanupError;
 }
 
 /**
@@ -150,7 +160,7 @@ async function settleToRestored(
     }
     await new Promise((r) => setTimeout(r, 2_000));
   }
-  console.error('hello-manual did not settle to the restored content');
+  throw new Error('hello-manual did not settle to the restored content within 90s');
 }
 
 test.describe('Approval review surface', () => {
@@ -224,6 +234,7 @@ test.describe('Approval review surface', () => {
   test('the review panel is up on arrival, and hiding it disarms Approve', async ({ page, request }) => {
     const taskJsPath = path.join(tasksDir(), 'hello-manual', 'task.js');
     const original = fs.readFileSync(taskJsPath, 'utf8');
+    let bodyError: unknown;
     try {
       fs.writeFileSync(taskJsPath, original + `\n${BODY_MARKER}\n`, 'utf8');
       await waitForTaskCondition(request, MANUAL_TASK_ID, (t) => t.pending_approval === true);
@@ -264,16 +275,21 @@ test.describe('Approval review surface', () => {
 
       await approveBtn.click({ force: true });
       await waitForTaskCondition(request, MANUAL_TASK_ID, (t) => t.pending_approval !== true);
-    } finally {
-      // This click recorded the mutated content's hash, so the restore below
-      // re-pends the task — which is why this test runs last in the file and
-      // settles explicitly rather than through withPendingChange.
-      try {
-        fs.writeFileSync(taskJsPath, original, 'utf8');
-        await settleToRestored(request);
-      } catch (cleanupError) {
-        console.error('approve-click cleanup failed:', cleanupError);
-      }
+    } catch (err) {
+      bodyError = err;
     }
+
+    // This click recorded the mutated content's hash, so the restore below
+    // re-pends the task — which is why this test runs last in the file and
+    // settles explicitly rather than through withPendingChange.
+    let cleanupError: unknown;
+    try {
+      fs.writeFileSync(taskJsPath, original, 'utf8');
+      await settleToRestored(request);
+    } catch (err) {
+      cleanupError = err;
+    }
+    if (bodyError) throw bodyError;
+    if (cleanupError) throw cleanupError;
   });
 });
