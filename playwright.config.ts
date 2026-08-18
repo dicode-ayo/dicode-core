@@ -38,6 +38,7 @@ export default defineConfig({
         '**/webui-task.spec.ts',
         '**/ui-kit-primitives.spec.ts',
         '**/design-tokens.spec.ts',
+        '**/component-token-vars.spec.ts',
       ],
       use: {
         ...devices['Desktop Chrome'],
