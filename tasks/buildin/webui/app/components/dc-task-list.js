@@ -387,8 +387,8 @@ class DcTaskList extends LitElement {
           padding: 0 0.4rem;
           font-size: 0.7rem;
           border-radius: 3px;
-          background: var(--badge-bg, #2a2a2a);
-          color: var(--badge-fg, #aaa);
+          background: var(--dicode-card-bg);
+          color: var(--dicode-muted);
           vertical-align: middle;
         }
         dc-task-list .toggle-btn {
@@ -412,7 +412,7 @@ class DcTaskList extends LitElement {
           vertical-align: middle;
         }
         dc-task-list .btn-approve { background: #d29922; }
-        dc-task-list .toggle-btn.on  { color: var(--accent, #4caf50); }
+        dc-task-list .toggle-btn.on  { color: var(--dicode-green); }
         dc-task-list .toggle-btn.off { color: var(--dicode-muted, #888); }
         dc-task-list .toggle-btn.held { color: #d29922; }
         dc-task-list .toggle-btn svg { display: inline-block; width: 18px; height: 18px; vertical-align: middle; }

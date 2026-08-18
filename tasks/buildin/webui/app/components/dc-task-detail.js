@@ -306,7 +306,7 @@ class DcTaskDetail extends LitElement {
         ${st.files_error ? html`
           <div style="background:rgba(248,81,73,0.12);border:var(--dicode-border-width) solid #f85149;color:#f85149;padding:0.5rem 0.75rem;border-radius:6px;margin-bottom:0.9rem;font-size:0.85rem">
             &#9888; <strong>The file list could not be built.</strong>
-            <div style="margin-top:0.3rem;color:var(--fg)">${st.files_error}</div>
+            <div style="margin-top:0.3rem;color:var(--dicode-text)">${st.files_error}</div>
           </div>` : ''}
 
         ${files.length ? this._renderSection(`Files (${files.length})`, html`
