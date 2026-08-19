@@ -35,8 +35,8 @@ var optionalBridgeDeps = map[string]bool{
 // does not enforce by construction: buildRuntimes wires each dependency twice,
 // once per socket-bridge runtime, and a setter called for only one of them
 // leaves that runtime's capability dead at boot with no compile-time signal.
-// Setters called outside buildRuntimes are late-wired and exempt, so the
-// fields this actually covers are the ones listed as required below.
+// Dependencies wired outside buildRuntimes are late-wired and exempt, so the
+// covered set is every field not named above.
 func TestBuildRuntimesWiresBothRuntimes(t *testing.T) {
 	database, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
 	if err != nil {
@@ -86,10 +86,10 @@ func isNilValue(v reflect.Value) bool {
 	}
 }
 
-// snapshotDeps are the BridgeDeps fields NewIPCServer reads from its receiver
-// — the snapshot NewExecutor took — rather than from the live manager. A
-// dependency wired after NewExecutor never reaches a run through them, so the
-// manager holding it is not enough.
+// snapshotDeps are dependencies NewIPCServer reads from its receiver — the copy
+// NewExecutor took — rather than from the live manager, and that buildRuntimes
+// must therefore have set before it constructs an executor. A dependency wired
+// onto the manager afterwards is nil for every run that executor serves.
 var snapshotDeps = []string{"Registry", "DB", "Log", "IPCSecret", "Engine", "Gateway", "SecretsManager"}
 
 // TestPythonExecutorSnapshotsDeps holds NewExecutor's copy list to the set
@@ -113,7 +113,11 @@ func TestPythonExecutorSnapshotsDeps(t *testing.T) {
 
 	deps := reflect.ValueOf(pythonRT.NewExecutor("/nonexistent/uv")).Elem().FieldByName("BridgeDeps")
 	for _, name := range snapshotDeps {
-		if isNilValue(deps.FieldByName(name)) {
+		f := deps.FieldByName(name)
+		if !f.IsValid() {
+			t.Fatalf("BridgeDeps has no field %q: renaming a field must not silently drop its coverage", name)
+		}
+		if isNilValue(f) {
 			t.Errorf("executor BridgeDeps.%s is nil: NewExecutor does not copy it, so no run it serves sees it", name)
 		}
 	}
