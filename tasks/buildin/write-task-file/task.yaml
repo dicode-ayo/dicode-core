@@ -21,12 +21,15 @@ params:
     type: string
     required: true
     description: "Absolute path of the file, inside the task's own directory."
-  roots:
-    type: string
-    default: "${DATADIR}/ai-tasks"
-    description: "Comma-separated directories a task directory may live in. Writes anywhere else are refused."
 
 permissions:
+  # The writable roots ride in env, not params: an ai-agent turns every
+  # declared param into a model-settable tool argument, so a roots param
+  # would let the caller widen the boundary meant to contain it.
+  env:
+    - name: DICODE_TASK_FILE_ROOTS
+      value: "${DATADIR}/ai-tasks"
+
   # The caller picks the path, so this grant is the outer boundary and
   # task.ts's assertTaskFilePath is the inner one. Widening this to a source
   # the daemon resolves taskset files from hands the caller the daemon's

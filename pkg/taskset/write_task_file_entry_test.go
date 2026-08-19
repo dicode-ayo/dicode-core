@@ -56,15 +56,22 @@ func TestWriteTaskFileEntry_IsRegisteredWithScopedGrants(t *testing.T) {
 	}
 
 	// The grant is the outer boundary; the task's own path check is the inner
-	// one, and it needs the roots to enforce anything.
+	// one, and it needs the roots to enforce anything. They ride in env
+	// because an ai-agent hands the model every declared param as a settable
+	// tool argument — a roots param would be caller-controlled.
 	roots := ""
-	for _, p := range spec.Params {
-		if p.Name == "roots" {
-			roots = p.Default
+	for _, e := range spec.Permissions.Env {
+		if e.Name == "DICODE_TASK_FILE_ROOTS" {
+			roots = e.Value
 		}
 	}
 	if roots != "/data/ai-tasks" {
-		t.Errorf("write-task-file roots default = %q, want /data/ai-tasks", roots)
+		t.Errorf("write-task-file roots env = %q, want /data/ai-tasks", roots)
+	}
+	for _, p := range spec.Params {
+		if p.Name == "roots" {
+			t.Errorf("write-task-file declares a roots param (%+v) — the model can set it", p)
+		}
 	}
 
 	if spec.Description == "" {

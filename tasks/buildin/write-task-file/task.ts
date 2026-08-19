@@ -5,6 +5,8 @@
 // this file is the inner one: a write is only ever one of a task's own files,
 // inside a directory of its own.
 
+import { parseAll as parseYamlAll } from "jsr:@std/yaml@1";
+
 import type { DicodeSdk } from "../../sdk.ts";
 
 interface WriteResult {
@@ -50,24 +52,51 @@ export function assertTaskFilePath(path: string, roots: string[]): void {
       `invalid path: ${JSON.stringify(path)} is outside the writable roots (${roots.join(", ")})`,
     );
   }
+  // Exactly <root>/<task>/<file>: the shape the resolver reads. Shallower is
+  // the source root, which belongs to the source rather than to any task;
+  // deeper reaches subtrees the content hash skips (node_modules, .git), where
+  // an edit would not re-pend an already-approved task.
   const segments = path.slice(root.replace(/\/+$/, "").length + 1).split("/");
-  if (segments.length < 2) {
+  if (segments.length !== 2) {
     throw new Error(
-      `invalid path: ${JSON.stringify(path)} — a task's files live in a directory of their own, not in the source root`,
+      `invalid path: ${JSON.stringify(path)} — a task's files live directly in a directory of their own under ${root}`,
     );
   }
   for (const segment of segments) {
     if (segment === "" || segment === "." || segment === "..") {
       throw new Error(`invalid path: empty or relative segment in ${JSON.stringify(path)}`);
     }
-    if (segment === ".git") {
-      throw new Error(`invalid path: ${JSON.stringify(path)} reaches into a git directory`);
-    }
   }
   const name = segments[segments.length - 1];
   if (!TASK_FILES.has(name)) {
     throw new Error(
       `invalid path: ${JSON.stringify(name)} is not a task file — allowed: ${[...TASK_FILES].join(", ")}`,
+    );
+  }
+}
+
+// assertTaskDocument throws unless content is a task manifest. The resolver
+// decides what a file is by reading its `kind`, not by its name: a task.yaml
+// declaring `kind: TaskSet` is resolved as one, and a taskset entry may carry
+// a git ref whose auth.token_env the daemon reads from its own environment and
+// sends to that ref's URL on the next reconcile — no approval in between.
+export function assertTaskDocument(path: string, content: string): void {
+  if (!path.endsWith("/task.yaml") && !path.endsWith("/task.yml")) {
+    return;
+  }
+  let docs: unknown[];
+  try {
+    docs = parseYamlAll(content) as unknown[];
+  } catch (e) {
+    throw new Error(`invalid task.yaml: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  if (docs.length !== 1) {
+    throw new Error(`invalid task.yaml: expected one document, got ${docs.length}`);
+  }
+  const kind = (docs[0] as Record<string, unknown> | null)?.kind;
+  if (kind !== "Task") {
+    throw new Error(
+      `invalid task.yaml: kind is ${JSON.stringify(kind ?? null)}, and this tool writes tasks only`,
     );
   }
 }
@@ -81,14 +110,17 @@ export default async function main({ params }: DicodeSdk): Promise<WriteResult> 
   if (!path) {
     throw new Error("missing required param: path");
   }
-  const roots = ((await params.get("roots")) ?? "")
+  // Not a param: an ai-agent exposes every declared param to the model as a
+  // tool argument, which would put the boundary in the caller's hands.
+  const roots = (Deno.env.get("DICODE_TASK_FILE_ROOTS") ?? "")
     .split(",")
     .map((r) => r.trim())
     .filter(Boolean);
   if (roots.length === 0) {
-    throw new Error("missing required param: roots");
+    throw new Error("DICODE_TASK_FILE_ROOTS is not set — the task has no writable root");
   }
   assertTaskFilePath(path, roots);
+  assertTaskDocument(path, content);
 
   await Deno.mkdir(path.slice(0, path.lastIndexOf("/")), { recursive: true });
 
