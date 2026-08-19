@@ -332,11 +332,17 @@ func TestControl_TaskEdit_PromptFiresAITurn(t *testing.T) {
 		t.Fatalf("FireManual calls = %d, want 1", len(eng.calls))
 	}
 	got := eng.calls[0]
-	if got["prompt"] != "scaffold a slack notifier" {
-		t.Errorf("prompt param = %q", got["prompt"])
+	// #723: buildin/ai-agent declares no "task_id" param and never reads
+	// one — a bare param would silently vanish (FireManual doesn't
+	// validate against the task's schema) and the agent would never learn
+	// its target. The target must ride inside "prompt" itself, where the
+	// model actually sees it.
+	wantPrompt := "(Target task: ai-scratch/t)\n\nscaffold a slack notifier"
+	if got["prompt"] != wantPrompt {
+		t.Errorf("prompt param = %q, want %q", got["prompt"], wantPrompt)
 	}
-	if got["task_id"] != "ai-scratch/t" {
-		t.Errorf("task_id param = %q, want ai-scratch/t", got["task_id"])
+	if _, ok := got["task_id"]; ok {
+		t.Errorf("must not send a bare task_id param — ai-agent doesn't declare or read one (#723): params = %v", got)
 	}
 	if _, ok := got["session_id"]; ok {
 		t.Errorf("first turn must not send session_id (no prior turn): params = %v", got)
@@ -378,8 +384,8 @@ func TestControl_TaskEdit_SessionIDCarriesAcrossCalls(t *testing.T) {
 	if got := eng.calls[1]["session_id"]; got != "asid-1" {
 		t.Errorf("turn 2 session_id param = %q, want asid-1 (carried from turn 1)", got)
 	}
-	if got := eng.calls[1]["prompt"]; got != "second message" {
-		t.Errorf("turn 2 prompt param = %q", got)
+	if want, got := "(Target task: ai-scratch/t)\n\nsecond message", eng.calls[1]["prompt"]; got != want {
+		t.Errorf("turn 2 prompt param = %q, want %q", got, want)
 	}
 }
 
