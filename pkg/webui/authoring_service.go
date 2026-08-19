@@ -73,12 +73,32 @@ func (s *Server) CreateTask(ctx context.Context, name, source string) (ipc.Autho
 		return ipc.AuthoringCreateResult{}, authErr(503, "source has no repo path; is it started?")
 	}
 	taskDir := filepath.Join(filepath.Dir(tasksetPath), name)
-	if _, err := os.Stat(filepath.Join(taskDir, "task.yaml")); err == nil {
-		return ipc.AuthoringCreateResult{}, authErr(409, "task %q already exists in source %q", name, source)
-	}
-	if err := os.MkdirAll(taskDir, 0755); err != nil {
+	// Exclusive create, not Stat-then-MkdirAll: two concurrent CreateTask
+	// calls for the same (source, name) — a double-submitted request, a
+	// client retry racing the original — could otherwise both pass the Stat
+	// check before either had written task.yaml, and both proceed to
+	// scaffold/register the same name. os.Mkdir is atomic, so only one
+	// caller can win taskDir; the loser gets EEXIST and a 409, matching the
+	// existing conflict contract without a TOCTOU window.
+	if err := os.Mkdir(taskDir, 0755); err != nil {
+		if os.IsExist(err) {
+			return ipc.AuthoringCreateResult{}, authErr(409, "task %q already exists in source %q", name, source)
+		}
 		return ipc.AuthoringCreateResult{}, authErr(500, "create task dir: %v", err)
 	}
+	// Exclusive Mkdir means this call owns taskDir outright — nothing else
+	// could have raced it into existence — so any failure past this point
+	// removes the whole directory rather than leaving a partial scaffold
+	// that would permanently 409 every retry of this name (a write failing
+	// after task.yaml landed but before task.js, or registration failing
+	// after both files landed, previously left exactly that trap). Success
+	// is the only path that must NOT clean up.
+	success := false
+	defer func() {
+		if !success {
+			os.RemoveAll(taskDir)
+		}
+	}()
 
 	taskYAML := fmt.Sprintf(`apiVersion: dicode/v1
 kind: Task
@@ -106,19 +126,13 @@ timeout: 30s
 	// Resolution walks spec.entries and never scans the source tree, so a
 	// scaffolded directory stays invisible to the daemon until it is listed.
 	if err := taskset.AddTaskEntry(tasksetPath, name); err != nil {
-		// An unregistered scaffold is invisible to the resolver but still trips
-		// the existence check above, so drop what we just wrote rather than
-		// wedging the name against every retry. Remove (not RemoveAll) so a
-		// directory holding anything else is left alone.
-		os.Remove(filepath.Join(taskDir, "task.js"))
-		os.Remove(filepath.Join(taskDir, "task.yaml"))
-		os.Remove(taskDir)
 		if errors.Is(err, taskset.ErrEntryConflict) {
 			return ipc.AuthoringCreateResult{}, authErr(409, "task name %q is already bound to another path in source %q", name, source)
 		}
 		return ipc.AuthoringCreateResult{}, authErr(500, "register task in taskset: %v", err)
 	}
 
+	success = true
 	return ipc.AuthoringCreateResult{
 		TaskID: source + "/" + name,
 		Source: source,
