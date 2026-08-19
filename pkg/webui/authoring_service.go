@@ -73,12 +73,32 @@ func (s *Server) CreateTask(ctx context.Context, name, source string) (ipc.Autho
 		return ipc.AuthoringCreateResult{}, authErr(503, "source has no repo path; is it started?")
 	}
 	taskDir := filepath.Join(filepath.Dir(tasksetPath), name)
-	if _, err := os.Stat(filepath.Join(taskDir, "task.yaml")); err == nil {
-		return ipc.AuthoringCreateResult{}, authErr(409, "task %q already exists in source %q", name, source)
-	}
-	if err := os.MkdirAll(taskDir, 0755); err != nil {
+	// Exclusive create, not Stat-then-MkdirAll: two concurrent CreateTask
+	// calls for the same (source, name) — a double-submitted request, a
+	// client retry racing the original — could otherwise both pass the Stat
+	// check before either had written task.yaml, and both proceed to
+	// scaffold/register the same name. os.Mkdir is atomic, so only one
+	// caller can win taskDir; the loser gets EEXIST and a 409, matching the
+	// existing conflict contract without a TOCTOU window.
+	if err := os.Mkdir(taskDir, 0755); err != nil {
+		if os.IsExist(err) {
+			return ipc.AuthoringCreateResult{}, authErr(409, "task %q already exists in source %q", name, source)
+		}
 		return ipc.AuthoringCreateResult{}, authErr(500, "create task dir: %v", err)
 	}
+	// Exclusive Mkdir means this call owns taskDir outright — nothing else
+	// could have raced it into existence — so any failure past this point
+	// removes the whole directory rather than leaving a partial scaffold
+	// that would permanently 409 every retry of this name (a write failing
+	// after task.yaml landed but before task.js, or registration failing
+	// after both files landed, previously left exactly that trap). Success
+	// is the only path that must NOT clean up.
+	success := false
+	defer func() {
+		if !success {
+			os.RemoveAll(taskDir)
+		}
+	}()
 
 	taskYAML := fmt.Sprintf(`apiVersion: dicode/v1
 kind: Task
@@ -106,19 +126,13 @@ timeout: 30s
 	// Resolution walks spec.entries and never scans the source tree, so a
 	// scaffolded directory stays invisible to the daemon until it is listed.
 	if err := taskset.AddTaskEntry(tasksetPath, name); err != nil {
-		// An unregistered scaffold is invisible to the resolver but still trips
-		// the existence check above, so drop what we just wrote rather than
-		// wedging the name against every retry. Remove (not RemoveAll) so a
-		// directory holding anything else is left alone.
-		os.Remove(filepath.Join(taskDir, "task.js"))
-		os.Remove(filepath.Join(taskDir, "task.yaml"))
-		os.Remove(taskDir)
 		if errors.Is(err, taskset.ErrEntryConflict) {
 			return ipc.AuthoringCreateResult{}, authErr(409, "task name %q is already bound to another path in source %q", name, source)
 		}
 		return ipc.AuthoringCreateResult{}, authErr(500, "register task in taskset: %v", err)
 	}
 
+	success = true
 	return ipc.AuthoringCreateResult{
 		TaskID: source + "/" + name,
 		Source: source,
@@ -152,11 +166,12 @@ func (s *Server) EditTask(ctx context.Context, sessionID, taskID string) (ipc.Au
 		}
 		_ = s.authoringSessions.UpdateLastTurn(ctx, sess.ID)
 		return ipc.AuthoringEditResult{
-			SessionID:   sess.ID,
-			TaskID:      sess.TaskID,
-			SandboxPath: sess.SandboxPath,
-			Source:      sess.Source,
-			SourceKind:  s.resolveSourceKind(sess.Source),
+			SessionID:      sess.ID,
+			TaskID:         sess.TaskID,
+			SandboxPath:    sess.SandboxPath,
+			Source:         sess.Source,
+			SourceKind:     s.resolveSourceKind(sess.Source),
+			AgentSessionID: derefOrEmpty(sess.AgentSessionID),
 		}, nil
 	}
 
@@ -210,6 +225,8 @@ func (s *Server) EditTask(ctx context.Context, sessionID, taskID string) (ipc.Au
 		SandboxPath: sess.SandboxPath,
 		Source:      source,
 		SourceKind:  s.resolveSourceKind(source),
+		// AgentSessionID is always empty here: this is a brand-new session,
+		// there is no prior AI turn to have set it.
 	}, nil
 }
 
@@ -222,12 +239,38 @@ func (s *Server) resumeOrConflict(ctx context.Context, existing *AuthoringSessio
 	}
 	_ = s.authoringSessions.UpdateLastTurn(ctx, existing.ID)
 	return ipc.AuthoringEditResult{
-		SessionID:   existing.ID,
-		TaskID:      existing.TaskID,
-		SandboxPath: existing.SandboxPath,
-		Source:      existing.Source,
-		SourceKind:  s.resolveSourceKind(existing.Source),
+		SessionID:      existing.ID,
+		TaskID:         existing.TaskID,
+		SandboxPath:    existing.SandboxPath,
+		Source:         existing.Source,
+		SourceKind:     s.resolveSourceKind(existing.Source),
+		AgentSessionID: derefOrEmpty(existing.AgentSessionID),
 	}, nil
+}
+
+// derefOrEmpty returns *p, or "" when p is nil. Used to flatten the
+// nullable AuthoringSession.AgentSessionID onto the IPC wire shape, where a
+// plain string with "" meaning "unset" is simpler for callers than a pointer.
+func derefOrEmpty(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
+}
+
+// UpdateAgentSessionID persists the underlying ai-agent run's own session
+// id onto the named authoring session (#568). Implements
+// ipc.AuthoringService for pkg/ipc's handleTaskEdit, which calls this after
+// a successful AI turn so the next `dicode task edit` on the same session
+// carries the same run-group correlation id — not conversational memory,
+// see the handleTaskEdit doc comment in pkg/ipc/control.go. See
+// authoringSessionStore.UpdateAgentSessionID for the blank-is-noop
+// semantics.
+func (s *Server) UpdateAgentSessionID(ctx context.Context, sessionID, agentSessionID string) error {
+	if s.authoringSessions == nil {
+		return authErr(503, "authoring sessions not available")
+	}
+	return s.authoringSessions.UpdateAgentSessionID(ctx, sessionID, agentSessionID)
 }
 
 // isUniqueConstraint reports whether err is a SQLite UNIQUE-constraint

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/dicode/dicode/pkg/config"
@@ -550,5 +551,110 @@ func TestAPITaskCreate_UnregisterableNameLeavesNothingBehind(t *testing.T) {
 	// The name stays usable once shortened — no wedge left behind.
 	if w := postJSON(h, "/api/task/create", map[string]string{"name": "regcheck"}); w.Code != http.StatusCreated {
 		t.Fatalf("subsequent create status = %d, want 201; body: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestCreateTask_ConcurrentSameName_OnlyOneWins exercises the TOCTOU fix: two
+// concurrent CreateTask calls for the same (source, name) previously raced
+// on a Stat-then-MkdirAll pair — both could observe "task.yaml absent" before
+// either had written it, and both would proceed to scaffold/register the
+// same name. os.Mkdir's exclusivity means exactly one caller can create
+// taskDir; every other caller must see the same 409 a sequential second call
+// would.
+//
+// Statistical power note (measured empirically, not just asserted): with the
+// old Stat-then-MkdirAll code reinstated, this test with only 2 goroutines
+// catches the bug in roughly 2/40 runs — the pre-write window is narrow
+// enough that two racing goroutines usually just serialize on the Go
+// scheduler without ever landing inside it. 16 goroutines (120 racing pairs
+// instead of 1) raise that odds substantially without needing a
+// synchronization seam in CreateTask itself, which would mean adding
+// test-only instrumentation to production code for a fix that's already
+// correct by construction (os.Mkdir is atomic — see the fix's own comment).
+// This is a probabilistic regression guard, not a deterministic one; it does
+// not flake in the passing direction (40/40 stable against the fixed code).
+func TestCreateTask_ConcurrentSameName_OnlyOneWins(t *testing.T) {
+	dir := t.TempDir()
+	srv := newAuthoringTestServer(t, "ai-scratch", dir)
+
+	const n = 16
+	var wg sync.WaitGroup
+	results := make([]error, n)
+	for i := range results {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, err := srv.CreateTask(context.Background(), "regcheck", "ai-scratch")
+			results[i] = err
+		}(i)
+	}
+	wg.Wait()
+
+	successes, conflicts := 0, 0
+	for _, err := range results {
+		switch {
+		case err == nil:
+			successes++
+		case strings.Contains(err.Error(), "already exists"):
+			conflicts++
+		default:
+			t.Errorf("unexpected error: %v", err)
+		}
+	}
+	if successes != 1 || conflicts != n-1 {
+		t.Fatalf("successes=%d conflicts=%d, want exactly 1 success and %d conflicts (results: %v)", successes, conflicts, n-1, results)
+	}
+
+	// The winner's files must be intact, not partially overwritten by a
+	// racing writer that got past a stale existence check.
+	yaml, err := os.ReadFile(filepath.Join(dir, "regcheck", "task.yaml"))
+	if err != nil {
+		t.Fatalf("read task.yaml: %v", err)
+	}
+	if !strings.Contains(string(yaml), "name: regcheck") {
+		t.Errorf("task.yaml looks corrupted: %q", yaml)
+	}
+
+	// The registration side must also be exclusive: a regression that let
+	// AddTaskEntry run more than once for "regcheck" (e.g. two winners of a
+	// weaker directory-exclusivity check) would still pass the assertions
+	// above while leaving the taskset unresolvable, since a duplicate key in
+	// spec.entries is undefined YAML map behavior.
+	ts, err := os.ReadFile(filepath.Join(dir, "taskset.yaml"))
+	if err != nil {
+		t.Fatalf("read taskset.yaml: %v", err)
+	}
+	if n := strings.Count(string(ts), "regcheck:"); n != 1 {
+		t.Errorf("taskset.yaml has %d regcheck entries, want 1:\n%s", n, ts)
+	}
+}
+
+// TestCreateTask_RegistrationFailureCleansUpDirectory locks in the cleanup
+// fix: a failure AFTER files are written (here, AddTaskEntry hitting a name
+// already bound to a different path) must remove the whole scaffold, not
+// just the two known files — otherwise the directory survives and every
+// future create of this name 409s against a task that was never usable.
+func TestCreateTask_RegistrationFailureCleansUpDirectory(t *testing.T) {
+	dir := t.TempDir()
+	srv := newAuthoringTestServer(t, "ai-scratch", dir)
+
+	// Bind "regcheck" to a different path AFTER the source starts (it seeds
+	// its own empty taskset.yaml on creation — see newStubTasksetSource) so
+	// AddTaskEntry hits ErrEntryConflict only once CreateTask has already
+	// written both files. AddTaskEntry re-reads tsPath from disk on every
+	// call, so this is visible to it without restarting the source.
+	tsYAML := filepath.Join(dir, "taskset.yaml")
+	conflicting := "apiVersion: dicode/v1\nkind: TaskSet\nspec:\n  entries:\n    regcheck:\n      ref:\n        path: ./elsewhere/task.yaml\n"
+	if err := os.WriteFile(tsYAML, []byte(conflicting), 0644); err != nil {
+		t.Fatalf("seed conflicting taskset.yaml: %v", err)
+	}
+
+	_, err := srv.CreateTask(context.Background(), "regcheck", "ai-scratch")
+	if err == nil || !strings.Contains(err.Error(), "already bound") {
+		t.Fatalf("err = %v, want an 'already bound' conflict", err)
+	}
+
+	if _, statErr := os.Stat(filepath.Join(dir, "regcheck")); !os.IsNotExist(statErr) {
+		t.Errorf("scaffold directory survived a registration failure (stat err = %v) — it will permanently 409 every future create of this name", statErr)
 	}
 }

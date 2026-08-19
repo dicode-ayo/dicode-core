@@ -62,7 +62,7 @@ func newCrashloopControlEnv(t *testing.T, eng EngineRunner) (*ControlServer, str
 	dir := t.TempDir()
 	cs, err := NewControlServer(
 		filepath.Join(dir, "ctrl.sock"), filepath.Join(dir, "ctrl.token"),
-		reg, eng, nil, MetricsProvider{}, "test", zap.NewNop(), nil, "",
+		reg, eng, nil, MetricsProvider{}, "test", zap.NewNop(), nil, "", "",
 	)
 	if err != nil {
 		t.Fatalf("NewControlServer: %v", err)

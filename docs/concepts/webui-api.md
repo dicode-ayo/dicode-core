@@ -301,6 +301,8 @@ Response: `202`
 { "session_id": "sess_abc123", "sandbox_path": "/tmp/dicode-edit-abc", "source": "default", "source_kind": "local" }
 ```
 
+`prompt` opens/resumes the session but does not (yet) fire an AI turn over REST — the CLI's `dicode task create --ai "<prompt>"` / `dicode task edit <task-id> "<prompt>"` is the path that actually dispatches `ai.create_task` and returns a reply today (see [AI Task Authoring](./ai-generation.md)); wiring the same turn onto this endpoint is tracked under issue #120.
+
 **POST `/api/task/save`**:
 
 ```json

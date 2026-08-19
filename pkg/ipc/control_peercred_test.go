@@ -23,7 +23,7 @@ func TestControlServerPeerCred(t *testing.T) {
 	socketPath := filepath.Join(dir, "ctrl.sock")
 	tokenPath := filepath.Join(dir, "ctrl.token")
 
-	cs, err := NewControlServer(socketPath, tokenPath, nil, &mockEngine{}, nil, MetricsProvider{}, "test", zap.NewNop(), nil, "")
+	cs, err := NewControlServer(socketPath, tokenPath, nil, &mockEngine{}, nil, MetricsProvider{}, "test", zap.NewNop(), nil, "", "")
 	if err != nil {
 		t.Fatalf("NewControlServer: %v", err)
 	}

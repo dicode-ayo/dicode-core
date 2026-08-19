@@ -246,6 +246,109 @@ func TestAuthoringSessionStore_PurgeExpired(t *testing.T) {
 	}
 }
 
+// TestAuthoringSessionStore_UpdateAgentSessionID pins the #568 run-group
+// correlation mechanism: the agent's own session id starts unset, gets
+// persisted after a turn, and is readable back on the next Get — which is
+// exactly what pkg/ipc's handleTaskEdit relies on to tag repeated
+// `dicode task edit` calls under one run-group label. It does not give the
+// agent conversational memory across those calls (see handleTaskEdit's doc
+// comment in pkg/ipc/control.go).
+func TestAuthoringSessionStore_UpdateAgentSessionID(t *testing.T) {
+	d := openTestDB(t)
+	store := newAuthoringSessionStore(d)
+	ctx := context.Background()
+
+	now := time.Now()
+	sess := AuthoringSession{
+		ID:         "sess-agent",
+		Kind:       "edit",
+		Source:     "ai-scratch",
+		CreatedAt:  now,
+		LastTurnAt: now,
+	}
+	if err := store.Create(ctx, sess); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	got, err := store.Get(ctx, "sess-agent")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got == nil {
+		t.Fatal("Get returned nil for sess-agent")
+	}
+	if got.AgentSessionID != nil {
+		t.Fatalf("AgentSessionID = %v before any turn, want nil", got.AgentSessionID)
+	}
+
+	if err := store.UpdateAgentSessionID(ctx, "sess-agent", "asid-1"); err != nil {
+		t.Fatalf("UpdateAgentSessionID: %v", err)
+	}
+
+	got, err = store.Get(ctx, "sess-agent")
+	if err != nil {
+		t.Fatalf("Get after update: %v", err)
+	}
+	if got == nil {
+		t.Fatal("Get after update returned nil for sess-agent")
+	}
+	if got.AgentSessionID == nil || *got.AgentSessionID != "asid-1" {
+		t.Errorf("AgentSessionID = %v, want asid-1", got.AgentSessionID)
+	}
+
+	// A second turn's session id overwrites the first.
+	if err := store.UpdateAgentSessionID(ctx, "sess-agent", "asid-2"); err != nil {
+		t.Fatalf("UpdateAgentSessionID (2nd): %v", err)
+	}
+	got, err = store.Get(ctx, "sess-agent")
+	if err != nil {
+		t.Fatalf("Get after 2nd update: %v", err)
+	}
+	if got == nil {
+		t.Fatal("Get after 2nd update returned nil for sess-agent")
+	}
+	if got.AgentSessionID == nil || *got.AgentSessionID != "asid-2" {
+		t.Errorf("AgentSessionID after 2nd update = %v, want asid-2", got.AgentSessionID)
+	}
+}
+
+// TestAuthoringSessionStore_UpdateAgentSessionID_BlankIsNoop asserts that an
+// empty agentSessionID does not clobber a previously stored value — some
+// alternative agent tasks may not return a session id on a given turn, and
+// silently wiping the stored run-group correlation id because of that would
+// be a footgun.
+func TestAuthoringSessionStore_UpdateAgentSessionID_BlankIsNoop(t *testing.T) {
+	d := openTestDB(t)
+	store := newAuthoringSessionStore(d)
+	ctx := context.Background()
+
+	now := time.Now()
+	sess := AuthoringSession{
+		ID: "sess-blank", Kind: "edit", Source: "ai-scratch",
+		CreatedAt: now, LastTurnAt: now,
+	}
+	if err := store.Create(ctx, sess); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.UpdateAgentSessionID(ctx, "sess-blank", "asid-1"); err != nil {
+		t.Fatalf("UpdateAgentSessionID: %v", err)
+	}
+	if err := store.UpdateAgentSessionID(ctx, "sess-blank", ""); err != nil {
+		t.Fatalf("UpdateAgentSessionID(blank): %v", err)
+	}
+
+	got, err := store.Get(ctx, "sess-blank")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got == nil {
+		t.Fatal("Get returned nil for sess-blank")
+	}
+	if got.AgentSessionID == nil || *got.AgentSessionID != "asid-1" {
+		t.Errorf("AgentSessionID = %v, want unchanged asid-1", got.AgentSessionID)
+	}
+}
+
 func TestAuthoringSessionStore_UpdateLastTurn(t *testing.T) {
 	d := openTestDB(t)
 	store := newAuthoringSessionStore(d)

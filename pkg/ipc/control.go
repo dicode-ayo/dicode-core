@@ -8,6 +8,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/dicode/dicode/pkg/db"
@@ -57,6 +59,15 @@ type ControlServer struct {
 	// without config (tests).
 	defaultAITask string
 
+	// defaultCreateTask is cfg.AI.CreateTask — the task id handleTaskEdit
+	// fires a real AI turn against when the client passes a non-empty
+	// prompt (`dicode task create --ai` / `dicode task edit <id> "<prompt>"`).
+	// Empty when the daemon was started without config (tests) or a blank
+	// prompt was supplied (a plain, non-AI edit — the pre-#568 behavior).
+	// A non-empty prompt with this still empty is a configuration error,
+	// surfaced the same way handleAI surfaces a blank defaultAITask.
+	defaultCreateTask string
+
 	// testGuard vetoes cli.task.test for a given task ID. The approval gate
 	// wires its FireGuard here so a pending (unapproved) task's test file —
 	// which runs with full host permissions — cannot be executed from the
@@ -69,8 +80,64 @@ type ControlServer struct {
 	// ready, preserving pre-barrier behaviour.
 	ready <-chan struct{}
 
+	// sessionEditLocks serializes handleTaskEdit's read(EditTask)-fire-write
+	// (UpdateAgentSessionID) sequence per authoring session, so two
+	// concurrent `dicode task edit` calls against the SAME open session
+	// can't both read the same stale AgentSessionID, both fire, and race to
+	// overwrite each other's persisted run-group correlation id (finding
+	// #4, a TOCTOU: read at EditTask, long FireManual/WaitRunSettled round
+	// trip, write at UpdateAgentSessionID, no lock between). Keyed by
+	// source (see lockForTaskEdit) — EditTask's single-session-per-source
+	// invariant means the source IS the session's identity, so this is the
+	// one key that's canonical regardless of which of the two request
+	// shapes (`task edit <id> "<prompt>"` vs `--session <sid>`) a caller
+	// used to reach the SAME open session. Calls against a DIFFERENT
+	// source are not serialized against each other, so unrelated
+	// concurrent edits stay fully concurrent. sync.Map's zero value is
+	// ready to use; values are *sync.Mutex, created lazily on first use and
+	// never removed (the source keyspace is small and long-lived relative
+	// to a process lifetime, so this isn't a practical leak).
+	sessionEditLocks sync.Map
+
 	startedAt time.Time
 	version   string
+}
+
+// lockForTaskEdit returns the mutex serializing handleTaskEdit calls that
+// resolve to the same authoring session, creating it on first use. The
+// caller locks it for the whole read-fire-write sequence and unlocks via
+// defer.
+//
+// Keyed by SOURCE, not by the caller's raw sessionID/taskID: EditTask
+// resolves both "task edit <id> \"<prompt>\"" (taskID only) and "task edit
+// <id> \"<prompt>\" --session <sid>" (both) to the SAME open session via
+// GetOpenForSource, so a lock keyed on whichever field happened to be set
+// would let those two request shapes race right past each other on the one
+// session they both actually touch. Mirrors authoring_service.go's EditTask
+// source derivation exactly (taskID's prefix up to "/") so the key always
+// matches the session EditTask will actually resolve to. sessionID alone
+// (no taskID — a caller resuming purely by session id, not exercised by the
+// CLI today but a valid Request shape) has no source to derive without the
+// same racy DB read this lock exists to protect, so it falls back to a
+// session-keyed lock in that case; that shape never collides with a
+// taskID-bearing call anyway, since EditTask requires taskID whenever
+// sessionID is empty.
+func (cs *ControlServer) lockForTaskEdit(sessionID, taskID string) *sync.Mutex {
+	var key string
+	switch {
+	case taskID != "":
+		source := taskID
+		if idx := strings.Index(source, "/"); idx > 0 {
+			source = source[:idx]
+		}
+		key = "source:" + source
+	case sessionID != "":
+		key = "sess:" + sessionID
+	default:
+		key = "unkeyed"
+	}
+	v, _ := cs.sessionEditLocks.LoadOrStore(key, &sync.Mutex{})
+	return v.(*sync.Mutex)
 }
 
 // maxReadyWait caps how long a single cli.ready request may block waiting
@@ -82,7 +149,8 @@ const maxReadyWait = 60 * time.Second
 // connections. socketPath is the Unix socket path; tokenPath is where the CLI
 // token is written. defaultAITask is cfg.AI.Task — resolved at daemon startup
 // so the control server can fire the right task when the CLI invokes `dicode ai`
-// without --task.
+// without --task. defaultCreateTask is cfg.AI.CreateTask — the analogous
+// default for `dicode task create --ai` / `dicode task edit`'s prompt threading.
 func NewControlServer(
 	socketPath, tokenPath string,
 	reg *registry.Registry,
@@ -93,6 +161,7 @@ func NewControlServer(
 	log *zap.Logger,
 	database db.DB,
 	defaultAITask string,
+	defaultCreateTask string,
 ) (*ControlServer, error) {
 	secret, err := NewSecret()
 	if err != nil {
@@ -100,18 +169,19 @@ func NewControlServer(
 	}
 
 	cs := &ControlServer{
-		socketPath:      socketPath,
-		tokenPath:       tokenPath,
-		secret:          secret,
-		reg:             reg,
-		engine:          engine,
-		secrets:         secretsMgr,
-		metricsProvider: mp,
-		database:        database,
-		log:             log,
-		defaultAITask:   defaultAITask,
-		startedAt:       time.Now(),
-		version:         version,
+		socketPath:        socketPath,
+		tokenPath:         tokenPath,
+		secret:            secret,
+		reg:               reg,
+		engine:            engine,
+		secrets:           secretsMgr,
+		metricsProvider:   mp,
+		database:          database,
+		log:               log,
+		defaultAITask:     defaultAITask,
+		defaultCreateTask: defaultCreateTask,
+		startedAt:         time.Now(),
+		version:           version,
 	}
 
 	// Issue the CLI token with a long TTL — the daemon re-issues on every restart,
@@ -339,6 +409,20 @@ type AuthoringService interface {
 	EditTask(ctx context.Context, sessionID, taskID string) (AuthoringEditResult, error)
 	SaveTask(ctx context.Context, sessionID string) error
 	CancelTask(ctx context.Context, sessionID string) error
+	// UpdateAgentSessionID persists the underlying ai-agent run's own
+	// session id onto the authoring session identified by sessionID (#568),
+	// so the NEXT `dicode task edit` call against the same authoring
+	// session can read it back via EditTask's AgentSessionID and re-send it
+	// as the run-group correlation id (see AuthoringEditResult.AgentSessionID
+	// below) for UI/log grouping. This does NOT give the agent
+	// conversational memory — every one-shot turn still starts from an
+	// empty SessionState; see tasks/buildin/ai-agent/task.ts's oneShotTurn.
+	// Real conversational continuity across `task edit` calls is Phase 1
+	// work (session-as-suspended-run, docs/design/ai-task-authoring.md).
+	// Called by handleTaskEdit after a successful AI turn; a blank
+	// agentSessionID (some alternative agent tasks may not return one) is a
+	// no-op.
+	UpdateAgentSessionID(ctx context.Context, sessionID, agentSessionID string) error
 	// WebUIBaseURL returns scheme://host:port for the daemon's web UI so the
 	// CLI can print an "open: <url>" hint pointing at the session.
 	WebUIBaseURL() string
@@ -361,6 +445,17 @@ type AuthoringEditResult struct {
 	SandboxPath string
 	Source      string
 	SourceKind  string
+	// AgentSessionID is the ai-agent run's own session id stored on this
+	// authoring session from a prior turn (#568), or "" if no AI turn has
+	// happened on it yet. handleTaskEdit reads this before firing the next
+	// turn and re-sends it as the session_id param — but the underlying
+	// oneShotTurn (tasks/buildin/ai-agent/task.ts) builds a brand-new empty
+	// SessionState on every call, so this does NOT carry conversational
+	// memory across turns. Its real, worth-keeping effect is tagging every
+	// turn's run under one run-group label (`chat:<id>`) so the WebUI/logs
+	// display repeated edit turns as one expandable row. True multi-turn
+	// continuity is Phase 1 work (session-as-suspended-run).
+	AgentSessionID string
 }
 
 // SetAuthoringService wires the authoring service for cli.task.* dispatch.
@@ -401,13 +496,50 @@ func (cs *ControlServer) handleTaskCreate(ctx context.Context, req Request) (Tas
 	out.SessionID = edit.SessionID
 	out.WebUIURL = edit.WebUIURL
 	out.Reply = edit.Reply
+	out.RunID = edit.RunID
+	out.Suspended = edit.Suspended
 	return out, nil
 }
 
+// handleTaskEdit opens or resumes an AI edit session (unchanged: the
+// EditTask call and its 409/single-session-per-source logic are Phase 1
+// territory, not touched here — see docs/design/ai-task-authoring.md), then,
+// when req.Prompt is non-empty, fires a real AI turn against cs.defaultCreateTask
+// (cfg.AI.CreateTask) and folds the reply into the response (#568). A blank
+// prompt is the pre-#568 behavior: open/resume the session and return, no AI
+// call — this is how the plain `dicode task edit <id>` (no prompt) and every
+// existing caller of this handler keeps working unchanged.
+//
+// Run-group correlation (NOT conversational memory): the authoring session
+// carries the underlying ai-agent run's own session id (res.AgentSessionID,
+// read back from a prior turn) and re-sends it as the session_id param on
+// the next turn, so repeated `dicode task edit <id> "<prompt>"` calls
+// against the same open session are tagged under one run-group label
+// (`chat:<id>`) for UI/log grouping. The underlying agent does NOT retain
+// memory between these one-shot turns — oneShotTurn
+// (tasks/buildin/ai-agent/task.ts) builds a brand-new empty SessionState on
+// every call, by design ("one-shot calls share no history"). Real
+// conversational continuity across `task edit` calls requires the
+// chat-loop/suspend-resume path, which is explicitly Phase 1 work
+// (session-as-suspended-run — docs/design/ai-task-authoring.md), not
+// implemented here. After a successful turn, the freshly returned agent
+// session id is persisted back onto the row via UpdateAgentSessionID so the
+// NEXT turn's run-group label carries it too.
 func (cs *ControlServer) handleTaskEdit(ctx context.Context, req Request) (TaskEditResult, error) {
 	if cs.authoring == nil {
 		return TaskEditResult{}, errors.New("authoring service not configured")
 	}
+
+	// Serialize the whole read(EditTask)-fire-write sequence per
+	// session/task (finding #4) — see sessionEditLocks' doc comment. Held
+	// across the EditTask call too, not just FireManual onward: EditTask's
+	// return value IS the AgentSessionID read this is protecting, so a
+	// second caller must not perform that read until the first caller's
+	// UpdateAgentSessionID write (if any) has landed.
+	mu := cs.lockForTaskEdit(req.SessionID, req.TaskID)
+	mu.Lock()
+	defer mu.Unlock()
+
 	res, err := cs.authoring.EditTask(ctx, req.SessionID, req.TaskID)
 	if err != nil {
 		return TaskEditResult{}, err
@@ -419,6 +551,88 @@ func (cs *ControlServer) handleTaskEdit(ctx context.Context, req Request) (TaskE
 		SourceKind:  res.SourceKind,
 		SandboxPath: res.SandboxPath,
 		WebUIURL:    cs.authoring.WebUIBaseURL() + "/?session=" + res.SessionID,
+	}
+	if req.Prompt == "" {
+		return out, nil
+	}
+
+	if cs.defaultCreateTask == "" {
+		return out, fmt.Errorf("session %s opened but no create task configured — set ai.create_task in dicode.yaml", res.SessionID)
+	}
+	if _, ok := cs.reg.Get(cs.defaultCreateTask); !ok {
+		return out, fmt.Errorf("session %s opened but create task %q not registered", res.SessionID, cs.defaultCreateTask)
+	}
+
+	// The agent's target must ride in `prompt` itself, not a bare `task_id`
+	// param: buildin/ai-agent's task.yaml declares no such param and
+	// oneShotTurn never reads one (#723) — `dicode.task_id` inside the
+	// task refers to ai-agent's OWN identity, a different thing entirely.
+	// FireManual doesn't validate params against the task's declared
+	// schema, so an undeclared "task_id" silently vanishes on the wire; the
+	// agent would receive only the raw prompt with no idea what task it's
+	// supposed to be working on. Prefixing the target into the prompt text
+	// is the cheapest fix that's guaranteed visible to the model regardless
+	// of which ai-agent-family task cfg.AI.CreateTask points at.
+	params := map[string]string{
+		"prompt": fmt.Sprintf("(Target task: %s)\n\n%s", res.TaskID, req.Prompt),
+	}
+	if res.AgentSessionID != "" {
+		params["session_id"] = res.AgentSessionID
+	}
+
+	runID, err := cs.engine.FireManual(ctx, cs.defaultCreateTask, params)
+	if err != nil {
+		return out, err
+	}
+	// WaitRunSettled (not WaitRun): mirrors handleAI — a suspended turn must
+	// surface immediately rather than blocking on a resume nobody has sent yet.
+	run, err := cs.engine.WaitRunSettled(ctx, runID)
+	if err != nil {
+		return out, err
+	}
+	out.RunID = run.RunID
+	if run.Status == registry.StatusSuspended {
+		out.Suspended = true
+		return out, nil
+	}
+	if run.Status != "success" {
+		// Surface the run id in the error so the CLI user can jump straight to
+		// `dicode logs <run-id>` — the dispatch loop only serialises `out` when
+		// err == nil, mirroring handleAI's equivalent failure path.
+		return out, fmt.Errorf("task run %s finished with status %s — see 'dicode logs %s'",
+			run.RunID, run.Status, run.RunID)
+	}
+
+	// Extract reply + session_id from the return value — same envelope
+	// handling as handleAI, so alternative task-create overrides that don't
+	// match the buildin schema exactly still degrade gracefully.
+	var agentSessionID string
+	switch v := run.ReturnValue.(type) {
+	case nil:
+		// nothing to do — empty reply.
+	case string:
+		out.Reply = v
+	case map[string]any:
+		if s, ok := v["reply"].(string); ok {
+			out.Reply = s
+		}
+		if sid, ok := v["session_id"]; ok && sid != nil {
+			agentSessionID = fmt.Sprint(sid)
+		}
+	default:
+		b, _ := json.Marshal(v)
+		out.Reply = string(b)
+	}
+	if agentSessionID != "" {
+		if uerr := cs.authoring.UpdateAgentSessionID(ctx, res.SessionID, agentSessionID); uerr != nil {
+			// Non-fatal: the turn itself succeeded and the reply is already in
+			// `out`. Losing this means the NEXT edit call's run-group label
+			// starts fresh (a new `chat:<id>`) rather than failing this one —
+			// no conversational memory is at stake either way (see the
+			// handleTaskEdit doc comment above).
+			cs.log.Warn("failed to persist agent session id for authoring session",
+				zap.String("session", res.SessionID), zap.Error(uerr))
+		}
 	}
 	return out, nil
 }
