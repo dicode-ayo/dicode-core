@@ -156,6 +156,43 @@ func (s *Source) RepoPath() string {
 	return s.watchRoot
 }
 
+// RootTaskSetPath returns the absolute path of the taskset file this source
+// currently resolves from — the dev-mode override when one is active, the
+// clone-local root for a git ref, otherwise the local ref itself. A ref
+// pointing at a directory yields the taskset.yaml inside it, matching the file
+// resolution picks up. Returns "" before Start has established the watch root
+// of a git source.
+//
+// Callers that write into a source (task scaffolding, task removal) need this
+// rather than RepoPath: the entry they add or drop lives in this file, and its
+// directory — not the repo root — is what a relative ref resolves against.
+func (s *Source) RootTaskSetPath() string {
+	s.mu.Lock()
+	devRootPath := s.devRootPath
+	watchRoot := s.watchRoot
+	s.mu.Unlock()
+
+	if devRootPath != "" && s.resolver.DevMode() {
+		return devRootPath
+	}
+
+	path := s.rootRef.Path
+	if s.rootRef.IsGit() {
+		if watchRoot == "" {
+			return ""
+		}
+		if path == "" {
+			path = "taskset.yaml"
+		}
+		path = filepath.Join(watchRoot, path)
+	}
+	path = resolveYAMLPath(filepath.Clean(path))
+	if fi, err := os.Stat(path); err == nil && fi.IsDir() {
+		path = filepath.Join(path, "taskset.yaml")
+	}
+	return path
+}
+
 // Start performs an initial resolution, emits events, then watches for changes.
 // For git refs the root repo is cloned eagerly so fsnotify can be set up on the
 // local clone directory immediately. The returned channel is closed when ctx is

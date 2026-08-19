@@ -73,6 +73,7 @@ export default defineConfig({
         '**/cli-suspend.spec.ts',
         '**/run-tree-collapse.spec.ts',
         '**/login-no-passphrase.spec.ts',
+        '**/task-create-registers.spec.ts',
       ],
       use: {
         ...devices['Desktop Chrome'],

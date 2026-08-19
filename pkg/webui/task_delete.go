@@ -135,12 +135,42 @@ func (m *SourceManager) deleteLocal(taskID, sourceName string, spec *task.Spec, 
 	if err != nil {
 		return ipc.TaskDeleteOutcome{}, err
 	}
+	// Drop the taskset entry first: an entry left pointing at a removed
+	// directory resolves as a load failure on every sync, so the task would
+	// stay visible as broken instead of gone. RemoveTaskEntry matches the ref
+	// against taskDir, which must still exist for that comparison.
+	if err := m.removeTasksetEntry(taskID, sourceName, taskDir, src); err != nil {
+		return ipc.TaskDeleteOutcome{}, err
+	}
 	if err := os.RemoveAll(taskDir); err != nil {
 		return ipc.TaskDeleteOutcome{}, fmt.Errorf("remove task directory: %w", err)
 	}
 	m.log.Info("task deleted from local source",
 		zap.String("task", taskID), zap.String("source", sourceName), zap.String("dir", taskDir))
 	return ipc.TaskDeleteOutcome{Source: sourceName, Mode: "local"}, nil
+}
+
+// removeTasksetEntry drops the deleted task's key from the source's root
+// taskset file. Only a task listed directly by that file is handled: a deeper
+// id names an entry inside a nested taskset, which the nested file owns.
+func (m *SourceManager) removeTasksetEntry(taskID, sourceName, taskDir string, src *taskset.Source) error {
+	key := strings.TrimPrefix(taskID, sourceName+"/")
+	if key == "" || key == taskID || strings.Contains(key, "/") {
+		return nil
+	}
+	tsPath := src.RootTaskSetPath()
+	if tsPath == "" {
+		return nil
+	}
+	removed, err := taskset.RemoveTaskEntry(tsPath, key, taskDir)
+	if err != nil {
+		return fmt.Errorf("remove taskset entry: %w", err)
+	}
+	if removed {
+		m.log.Info("taskset entry removed",
+			zap.String("task", taskID), zap.String("source", sourceName), zap.String("taskset", tsPath))
+	}
+	return nil
 }
 
 // deleteGit clones the source repo, removes the task directory, and pushes the
