@@ -12,11 +12,9 @@ import (
 )
 
 // A taskset override's permissions.fs path must be ${VAR}-expanded the same way
-// the base task.yaml's own paths are. Before this was wired, an override's path
-// reached the sandbox as the literal string "${DATADIR}/dev-clones", which
-// matches no real directory — so the grant silently denied every access instead
-// of failing loudly (buildin/auto-fix and buildin/task-create both shipped with
-// exactly one such dead grant).
+// the base task.yaml's own paths are. An unexpanded path reaches the sandbox as
+// a literal "${DATADIR}/…" string, which matches no directory and denies every
+// access silently rather than failing loudly.
 func TestResolve_OverrideFSPathIsTemplateExpanded(t *testing.T) {
 	root := t.TempDir()
 	dataDir := filepath.Join(root, "data")
@@ -87,10 +85,11 @@ spec:
 	}
 }
 
-// Expansion must not write machine-specific absolute paths back into the parsed
-// taskset — the raw-config editor and the approval diff render that config back
-// to the operator, who wrote ${DATADIR}.
-func TestResolve_OverrideExpansionLeavesParsedConfigUntouched(t *testing.T) {
+// Expansion must not write machine-specific absolute paths back into the
+// caller's override layers. Source holds its parentOverrides for the daemon's
+// lifetime and re-resolves on every reconcile tick, so an in-place expansion
+// would bake the first tick's paths into long-lived config state.
+func TestResolve_DoesNotMutateCallerParentOverrides(t *testing.T) {
 	root := t.TempDir()
 	dataDir := filepath.Join(root, "data")
 	taskDir := filepath.Join(root, "tasks", "agent")
@@ -115,35 +114,43 @@ metadata:
   name: ts
 spec:
   entries:
-    agent-override:
+    agent:
       ref:
         path: ./agent/task.yaml
-      overrides:
-        fs:
-          - path: "${DATADIR}/dev-clones"
-            permission: rw
 `)
 
-	ts, err := LoadTaskSet(tsPath)
-	if err != nil {
-		t.Fatalf("LoadTaskSet: %v", err)
-	}
-	entry := ts.Spec.Entries["agent-override"]
-	if entry == nil || entry.Overrides == nil || len(entry.Overrides.Fs) != 1 {
-		t.Fatalf("fixture did not parse as expected")
+	const authored = "${DATADIR}/dev-clones"
+	parent := &Overrides{
+		Entries: map[string]*Overrides{
+			"agent": {Fs: []task.FSEntry{{Path: authored, Permission: "rw"}}},
+		},
 	}
 
 	r := NewResolver(dataDir, false, zap.NewNop())
-	if _, _, err := r.Resolve(t.Context(), "", &Ref{Path: tsPath}, nil, nil, nil); err != nil {
-		t.Fatalf("Resolve: %v", err)
-	}
+	// Twice: a second tick must see the same authored text the first one did.
+	for tick := 1; tick <= 2; tick++ {
+		resolved, failures, err := r.Resolve(t.Context(), "", &Ref{Path: tsPath}, nil, parent, nil)
+		if err != nil {
+			t.Fatalf("tick %d Resolve: %v", tick, err)
+		}
+		if len(failures) > 0 {
+			t.Fatalf("tick %d unexpected failures: %+v", tick, failures)
+		}
 
-	// Re-load and confirm the on-disk/parsed override still reads as authored.
-	ts2, err := LoadTaskSet(tsPath)
-	if err != nil {
-		t.Fatalf("LoadTaskSet (2): %v", err)
-	}
-	if got := ts2.Spec.Entries["agent-override"].Overrides.Fs[0].Path; got != "${DATADIR}/dev-clones" {
-		t.Errorf("parsed override path = %q, want the authored %q", got, "${DATADIR}/dev-clones")
+		var got *task.Spec
+		for _, rt := range resolved {
+			if spec, ok := rt.Kinded.(*task.Spec); ok {
+				got = spec
+			}
+		}
+		if got == nil || len(got.Permissions.FS) != 1 {
+			t.Fatalf("tick %d: entry did not resolve with the override grant", tick)
+		}
+		if want := filepath.Join(dataDir, "dev-clones"); got.Permissions.FS[0].Path != want {
+			t.Errorf("tick %d resolved path = %q, want %q", tick, got.Permissions.FS[0].Path, want)
+		}
+		if p := parent.Entries["agent"].Fs[0].Path; p != authored {
+			t.Fatalf("tick %d mutated the caller's parentOverrides: %q, want %q", tick, p, authored)
+		}
 	}
 }

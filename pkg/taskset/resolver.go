@@ -270,20 +270,7 @@ func (r *Resolver) resolveBody(
 		switch kind {
 		case KindTask:
 			taskDir := filepath.Dir(localPath)
-			extras := extraVars
-			if extras == nil {
-				extras = make(map[string]string, 1)
-			}
-			if _, ok := extras[task.VarDataDir]; !ok && r.dataDir != "" {
-				// Don't clobber a caller-supplied DATADIR (allows tests to override).
-				// Clone before mutate — extraVars may be shared across loop iterations.
-				cloned := make(map[string]string, len(extras)+1)
-				for k, v := range extras {
-					cloned[k] = v
-				}
-				cloned[task.VarDataDir] = r.dataDir
-				extras = cloned
-			}
+			extras := r.withDataDir(extraVars)
 			spec, err := task.LoadDirWithVars(taskDir, extras)
 			if err != nil {
 				r.log.Warn("taskset: failed to load task",
@@ -320,20 +307,7 @@ func (r *Resolver) resolveBody(
 
 		case KindPipelineTask:
 			taskDir := filepath.Dir(localPath)
-			extras := extraVars
-			if extras == nil {
-				extras = make(map[string]string, 1)
-			}
-			if _, ok := extras[task.VarDataDir]; !ok && r.dataDir != "" {
-				// Don't clobber a caller-supplied DATADIR (allows tests to override).
-				// Clone before mutate — extraVars may be shared across loop iterations.
-				cloned := make(map[string]string, len(extras)+1)
-				for k, v := range extras {
-					cloned[k] = v
-				}
-				cloned[task.VarDataDir] = r.dataDir
-				extras = cloned
-			}
+			extras := r.withDataDir(extraVars)
 			p, err := task.LoadPipelineDir(taskDir, extras)
 			if err != nil {
 				r.log.Warn("taskset: failed to load pipeline",
@@ -579,8 +553,8 @@ func buildOverrideLayers(setDefaults *Defaults, parentEntryOverride, entryOverri
 }
 
 // withDataDir returns extras with DATADIR populated from the resolver unless
-// the caller already supplied one (tests do). Never mutates the input —
-// extraVars is shared across loop iterations.
+// the caller already supplied one (which lets tests override it). Clones
+// before mutating: extraVars is shared across loop iterations.
 func (r *Resolver) withDataDir(extras map[string]string) map[string]string {
 	if _, ok := extras[task.VarDataDir]; ok || r.dataDir == "" {
 		return extras
