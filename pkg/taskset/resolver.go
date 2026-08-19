@@ -215,7 +215,9 @@ func (r *Resolver) resolveBody(
 		}
 
 		if entry.Inline != nil {
-			layers := buildOverrideLayers(ts.Spec.Defaults, parentEntryOverride, entry.Overrides)
+			layers := expandOverrideLayers(
+				buildOverrideLayers(ts.Spec.Defaults, parentEntryOverride, entry.Overrides),
+				filepath.Dir(tsPath), r.withDataDir(extraVars))
 			resolved := applyOverrides(entry.Inline, layers...)
 			resolved.ID = fullID
 			resolved.TaskDir = filepath.Dir(tsPath)
@@ -295,7 +297,9 @@ func (r *Resolver) resolveBody(
 					zap.String("warning", w),
 				)
 			}
-			layers := buildOverrideLayers(ts.Spec.Defaults, parentEntryOverride, entry.Overrides)
+			layers := expandOverrideLayers(
+				buildOverrideLayers(ts.Spec.Defaults, parentEntryOverride, entry.Overrides),
+				taskDir, extras)
 			resolved := applyOverrides(spec, layers...)
 			resolved.ID = fullID
 			resolved.Enabled = enabled
@@ -571,6 +575,30 @@ func buildOverrideLayers(setDefaults *Defaults, parentEntryOverride, entryOverri
 	layers = append(layers, defaultsToOverrides(setDefaults))
 	layers = append(layers, parentEntryOverride)
 	layers = append(layers, entryOverrides) // entry overrides win (leaf wins)
+	return layers
+}
+
+// withDataDir returns extras with DATADIR populated from the resolver unless
+// the caller already supplied one (tests do). Never mutates the input —
+// extraVars is shared across loop iterations.
+func (r *Resolver) withDataDir(extras map[string]string) map[string]string {
+	if _, ok := extras[task.VarDataDir]; ok || r.dataDir == "" {
+		return extras
+	}
+	cloned := make(map[string]string, len(extras)+1)
+	maps.Copy(cloned, extras)
+	cloned[task.VarDataDir] = r.dataDir
+	return cloned
+}
+
+// expandOverrideLayers substitutes ${VAR} in every layer, returning copies so
+// the parsed taskset config keeps the operator's original ${DATADIR}/… text.
+// Without this an override's permissions.fs path reaches the sandbox as a
+// literal "${DATADIR}/x", which matches nothing and silently denies access.
+func expandOverrideLayers(layers []*Overrides, taskDir string, extras map[string]string) []*Overrides {
+	for i, l := range layers {
+		layers[i] = task.ExpandOverrideLayer(l, taskDir, extras)
+	}
 	return layers
 }
 
