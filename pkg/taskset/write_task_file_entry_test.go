@@ -45,18 +45,26 @@ func TestWriteTaskFileEntry_IsRegisteredWithScopedGrants(t *testing.T) {
 	}
 
 	// ${DATADIR}/ai-tasks is the ai-scratch source config.go synthesises, so
-	// it is where `dicode task create` scaffolds by default; dev-clones is
-	// where dev-mode/auto-fix work lands.
-	want := map[string]bool{"/data/ai-tasks": false, "/data/dev-clones": false}
-	for _, g := range spec.Permissions.FS {
-		if _, tracked := want[g.Path]; tracked && g.Permission == "rw" {
-			want[g.Path] = true
+	// it is where `dicode task create` scaffolds. Every other root is a
+	// widening: a directory the daemon resolves taskset files from hands the
+	// caller the daemon's git credentials through a ref's auth.token_env.
+	if len(spec.Permissions.FS) != 1 {
+		t.Fatalf("write-task-file fs grants = %+v, want exactly ${DATADIR}/ai-tasks", spec.Permissions.FS)
+	}
+	if g := spec.Permissions.FS[0]; g.Path != "/data/ai-tasks" || g.Permission != "rw" {
+		t.Errorf("write-task-file fs grant = %+v, want /data/ai-tasks rw", g)
+	}
+
+	// The grant is the outer boundary; the task's own path check is the inner
+	// one, and it needs the roots to enforce anything.
+	roots := ""
+	for _, p := range spec.Params {
+		if p.Name == "roots" {
+			roots = p.Default
 		}
 	}
-	for path, granted := range want {
-		if !granted {
-			t.Errorf("write-task-file missing rw fs grant for %s; got %+v", path, spec.Permissions.FS)
-		}
+	if roots != "/data/ai-tasks" {
+		t.Errorf("write-task-file roots default = %q, want /data/ai-tasks", roots)
 	}
 
 	if spec.Description == "" {
@@ -71,7 +79,7 @@ func TestWriteTaskFileEntry_IsRegisteredWithScopedGrants(t *testing.T) {
 func TestAuthoringAgents_AllowWriteTaskFile(t *testing.T) {
 	specs := resolveBuildin(t, "/data")
 
-	for _, id := range []string{"buildin/task-create", "buildin/auto-fix"} {
+	for _, id := range []string{"buildin/task-create"} {
 		spec, ok := specs[id]
 		if !ok {
 			t.Errorf("%s not resolved", id)
