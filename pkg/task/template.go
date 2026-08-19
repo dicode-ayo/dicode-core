@@ -189,6 +189,25 @@ func expandOverrides(o *Overrides, vars map[string]string) {
 	}
 }
 
+// ExpandOverrideLayer returns a copy of o with ${VAR} substitution applied,
+// using the same var map a task loaded from taskDir sees.
+//
+// The input is left untouched: the resolver re-resolves the parsed taskset on
+// every reconcile tick, and expanding in place would bake machine-specific
+// absolute paths into the config the raw-config editor and approval diff
+// render back to the operator.
+func ExpandOverrideLayer(o *Overrides, taskDir string, extras map[string]string) *Overrides {
+	if o == nil {
+		return nil
+	}
+	cp := *o
+	cp.Params = append(ParamOverrides(nil), o.Params...)
+	cp.Fs = append([]FSEntry(nil), o.Fs...)
+	cp.Env = append([]EnvEntry(nil), o.Env...)
+	expandOverrides(&cp, builtinVars(taskDir, extras))
+	return &cp
+}
+
 // builtinVars returns the template var map for a task loaded from dir, with
 // any extra vars merged in (extras take precedence over builtins). Pass nil
 // for extras when loading a task outside of a source context.

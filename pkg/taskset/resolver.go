@@ -215,7 +215,9 @@ func (r *Resolver) resolveBody(
 		}
 
 		if entry.Inline != nil {
-			layers := buildOverrideLayers(ts.Spec.Defaults, parentEntryOverride, entry.Overrides)
+			layers := expandOverrideLayers(
+				buildOverrideLayers(ts.Spec.Defaults, parentEntryOverride, entry.Overrides),
+				filepath.Dir(tsPath), r.withDataDir(extraVars))
 			resolved := applyOverrides(entry.Inline, layers...)
 			resolved.ID = fullID
 			resolved.TaskDir = filepath.Dir(tsPath)
@@ -268,20 +270,7 @@ func (r *Resolver) resolveBody(
 		switch kind {
 		case KindTask:
 			taskDir := filepath.Dir(localPath)
-			extras := extraVars
-			if extras == nil {
-				extras = make(map[string]string, 1)
-			}
-			if _, ok := extras[task.VarDataDir]; !ok && r.dataDir != "" {
-				// Don't clobber a caller-supplied DATADIR (allows tests to override).
-				// Clone before mutate — extraVars may be shared across loop iterations.
-				cloned := make(map[string]string, len(extras)+1)
-				for k, v := range extras {
-					cloned[k] = v
-				}
-				cloned[task.VarDataDir] = r.dataDir
-				extras = cloned
-			}
+			extras := r.withDataDir(extraVars)
 			spec, err := task.LoadDirWithVars(taskDir, extras)
 			if err != nil {
 				r.log.Warn("taskset: failed to load task",
@@ -295,7 +284,9 @@ func (r *Resolver) resolveBody(
 					zap.String("warning", w),
 				)
 			}
-			layers := buildOverrideLayers(ts.Spec.Defaults, parentEntryOverride, entry.Overrides)
+			layers := expandOverrideLayers(
+				buildOverrideLayers(ts.Spec.Defaults, parentEntryOverride, entry.Overrides),
+				taskDir, extras)
 			resolved := applyOverrides(spec, layers...)
 			resolved.ID = fullID
 			resolved.Enabled = enabled
@@ -316,20 +307,7 @@ func (r *Resolver) resolveBody(
 
 		case KindPipelineTask:
 			taskDir := filepath.Dir(localPath)
-			extras := extraVars
-			if extras == nil {
-				extras = make(map[string]string, 1)
-			}
-			if _, ok := extras[task.VarDataDir]; !ok && r.dataDir != "" {
-				// Don't clobber a caller-supplied DATADIR (allows tests to override).
-				// Clone before mutate — extraVars may be shared across loop iterations.
-				cloned := make(map[string]string, len(extras)+1)
-				for k, v := range extras {
-					cloned[k] = v
-				}
-				cloned[task.VarDataDir] = r.dataDir
-				extras = cloned
-			}
+			extras := r.withDataDir(extraVars)
 			p, err := task.LoadPipelineDir(taskDir, extras)
 			if err != nil {
 				r.log.Warn("taskset: failed to load pipeline",
@@ -571,6 +549,30 @@ func buildOverrideLayers(setDefaults *Defaults, parentEntryOverride, entryOverri
 	layers = append(layers, defaultsToOverrides(setDefaults))
 	layers = append(layers, parentEntryOverride)
 	layers = append(layers, entryOverrides) // entry overrides win (leaf wins)
+	return layers
+}
+
+// withDataDir returns extras with DATADIR populated from the resolver unless
+// the caller already supplied one (which lets tests override it). Clones
+// before mutating: extraVars is shared across loop iterations.
+func (r *Resolver) withDataDir(extras map[string]string) map[string]string {
+	if _, ok := extras[task.VarDataDir]; ok || r.dataDir == "" {
+		return extras
+	}
+	cloned := make(map[string]string, len(extras)+1)
+	maps.Copy(cloned, extras)
+	cloned[task.VarDataDir] = r.dataDir
+	return cloned
+}
+
+// expandOverrideLayers substitutes ${VAR} in every layer, returning copies so
+// the parsed taskset config keeps the operator's original ${DATADIR}/… text.
+// Without this an override's permissions.fs path reaches the sandbox as a
+// literal "${DATADIR}/x", which matches nothing and silently denies access.
+func expandOverrideLayers(layers []*Overrides, taskDir string, extras map[string]string) []*Overrides {
+	for i, l := range layers {
+		layers[i] = task.ExpandOverrideLayer(l, taskDir, extras)
+	}
 	return layers
 }
 
