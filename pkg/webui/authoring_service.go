@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/dicode/dicode/pkg/ipc"
+	"github.com/dicode/dicode/pkg/taskset"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
@@ -56,12 +57,25 @@ func (s *Server) CreateTask(ctx context.Context, name, source string) (ipc.Autho
 	if name == "" {
 		return ipc.AuthoringCreateResult{}, authErr(400, "invalid task name")
 	}
+	// The entry key is what makes the scaffolded directory resolvable, so a
+	// name the taskset would refuse must fail before any file is written —
+	// otherwise the directory lands, registration fails, and the existence
+	// check below rejects every retry.
+	if err := taskset.ValidateEntryName(name); err != nil {
+		return ipc.AuthoringCreateResult{}, authErr(400, "invalid task name: %v", err)
+	}
 
-	repoPath := src.RepoPath()
-	if repoPath == "" {
+	// Scaffold beside the source's root taskset file, not at the repo root:
+	// the entry added below points at "./<name>/task.yaml", which the resolver
+	// reads relative to the taskset file's own directory.
+	tasksetPath := src.RootTaskSetPath()
+	if tasksetPath == "" {
 		return ipc.AuthoringCreateResult{}, authErr(503, "source has no repo path; is it started?")
 	}
-	taskDir := filepath.Join(repoPath, name)
+	taskDir := filepath.Join(filepath.Dir(tasksetPath), name)
+	if _, err := os.Stat(filepath.Join(taskDir, "task.yaml")); err == nil {
+		return ipc.AuthoringCreateResult{}, authErr(409, "task %q already exists in source %q", name, source)
+	}
 	if err := os.MkdirAll(taskDir, 0755); err != nil {
 		return ipc.AuthoringCreateResult{}, authErr(500, "create task dir: %v", err)
 	}
@@ -79,12 +93,30 @@ timeout: 30s
 		return ipc.AuthoringCreateResult{}, authErr(500, "write task.yaml: %v", err)
 	}
 
-	taskJS := `export default async function main() {
-  dicode.log.info("Hello from " + dicode.params.task_id);
+	// The SDK reaches task code through the handler's ctx argument, not a
+	// global — boilerplate that reads a bare `dicode` throws on the first run.
+	taskJS := `export default async function main({ dicode }) {
+  console.log("Hello from " + dicode.task_id);
 }
 `
 	if err := os.WriteFile(filepath.Join(taskDir, "task.js"), []byte(taskJS), 0644); err != nil {
 		return ipc.AuthoringCreateResult{}, authErr(500, "write task.js: %v", err)
+	}
+
+	// Resolution walks spec.entries and never scans the source tree, so a
+	// scaffolded directory stays invisible to the daemon until it is listed.
+	if err := taskset.AddTaskEntry(tasksetPath, name); err != nil {
+		// An unregistered scaffold is invisible to the resolver but still trips
+		// the existence check above, so drop what we just wrote rather than
+		// wedging the name against every retry. Remove (not RemoveAll) so a
+		// directory holding anything else is left alone.
+		os.Remove(filepath.Join(taskDir, "task.js"))
+		os.Remove(filepath.Join(taskDir, "task.yaml"))
+		os.Remove(taskDir)
+		if errors.Is(err, taskset.ErrEntryConflict) {
+			return ipc.AuthoringCreateResult{}, authErr(409, "task name %q is already bound to another path in source %q", name, source)
+		}
+		return ipc.AuthoringCreateResult{}, authErr(500, "register task in taskset: %v", err)
 	}
 
 	return ipc.AuthoringCreateResult{

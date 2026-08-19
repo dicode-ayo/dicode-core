@@ -56,7 +56,7 @@ func newStubTasksetSource(t *testing.T, name, dir string) *taskset.Source {
 	t.Helper()
 	// Write a minimal taskset.yaml so taskset.NewSource doesn't fail.
 	tsYAML := filepath.Join(dir, "taskset.yaml")
-	if err := os.WriteFile(tsYAML, []byte("apiVersion: dicode/v1\nkind: TaskSet\n"), 0644); err != nil {
+	if err := os.WriteFile(tsYAML, []byte("apiVersion: dicode/v1\nkind: TaskSet\nspec:\n  entries: {}\n"), 0644); err != nil {
 		t.Fatalf("write taskset.yaml: %v", err)
 	}
 	ref := &taskset.Ref{Path: tsYAML}
@@ -119,6 +119,58 @@ func TestAPITaskCreate_HappyPath(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "my-cool-task", "task.js")); err != nil {
 		t.Errorf("task.js not found on disk: %v", err)
+	}
+}
+
+// Scaffolding files is only half the job: the source resolves through
+// spec.entries, so an unlisted directory never becomes a task.
+func TestAPITaskCreate_ScaffoldedTaskResolves(t *testing.T) {
+	dir := t.TempDir()
+	srv := newAuthoringTestServer(t, "ai-scratch", dir)
+
+	w := postJSON(srv.Handler(), "/api/task/create", map[string]string{"name": "regcheck"})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body: %s", w.Code, w.Body.String())
+	}
+
+	tsPath := filepath.Join(dir, "taskset.yaml")
+	resolver := taskset.NewResolver(t.TempDir(), false, zap.NewNop())
+	tasks, failures, err := resolver.Resolve(context.Background(), "ai-scratch", &taskset.Ref{Path: tsPath}, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("resolve source: %v", err)
+	}
+	if len(failures) != 0 {
+		t.Fatalf("resolve failures: %v", failures)
+	}
+	if len(tasks) != 1 || tasks[0].ID != "ai-scratch/regcheck" {
+		t.Fatalf("resolved %d tasks (%v), want ai-scratch/regcheck", len(tasks), tasks)
+	}
+}
+
+func TestAPITaskCreate_ExistingTaskConflicts(t *testing.T) {
+	dir := t.TempDir()
+	srv := newAuthoringTestServer(t, "ai-scratch", dir)
+	h := srv.Handler()
+
+	if w := postJSON(h, "/api/task/create", map[string]string{"name": "regcheck"}); w.Code != http.StatusCreated {
+		t.Fatalf("first create status = %d, want 201; body: %s", w.Code, w.Body.String())
+	}
+	// Rewrite the script so a clobbering second create would be visible.
+	scriptPath := filepath.Join(dir, "regcheck", "task.js")
+	if err := os.WriteFile(scriptPath, []byte("// authored\n"), 0o644); err != nil {
+		t.Fatalf("write task.js: %v", err)
+	}
+
+	w := postJSON(h, "/api/task/create", map[string]string{"name": "regcheck"})
+	if w.Code != http.StatusConflict {
+		t.Fatalf("second create status = %d, want 409; body: %s", w.Code, w.Body.String())
+	}
+	script, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatalf("read task.js: %v", err)
+	}
+	if string(script) != "// authored\n" {
+		t.Errorf("task.js was overwritten: %q", script)
 	}
 }
 
@@ -475,5 +527,28 @@ func TestSanitizeTaskName(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("sanitizeTaskName(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+// A name the taskset would refuse as an entry key must be rejected before any
+// file is written. Otherwise the scaffold lands unregistered — invisible to the
+// resolver, yet still tripping the existence check that guards every retry.
+func TestAPITaskCreate_UnregisterableNameLeavesNothingBehind(t *testing.T) {
+	dir := t.TempDir()
+	srv := newAuthoringTestServer(t, "ai-scratch", dir)
+	h := srv.Handler()
+
+	long := strings.Repeat("a", 70)
+	w := postJSON(h, "/api/task/create", map[string]string{"name": long})
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("create status = %d, want 400; body: %s", w.Code, w.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, long)); !os.IsNotExist(err) {
+		t.Errorf("scaffold directory survived a rejected create (stat err = %v)", err)
+	}
+
+	// The name stays usable once shortened — no wedge left behind.
+	if w := postJSON(h, "/api/task/create", map[string]string{"name": "regcheck"}); w.Code != http.StatusCreated {
+		t.Fatalf("subsequent create status = %d, want 201; body: %s", w.Code, w.Body.String())
 	}
 }

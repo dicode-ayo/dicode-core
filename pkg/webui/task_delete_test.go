@@ -112,6 +112,43 @@ func TestDeleteTaskFromSource_Local_RemovesDirectory(t *testing.T) {
 	}
 }
 
+// An entry left pointing at a removed directory resolves as a load failure on
+// every sync, so deleting a task must take its taskset entry with it.
+func TestDeleteTaskFromSource_Local_RemovesTasksetEntry(t *testing.T) {
+	dir := t.TempDir()
+	taskDir := filepath.Join(dir, "my-task")
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(taskDir, "task.yaml"), []byte("name: x\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	cfg := &config.Config{}
+	cfg.Spec.Entries = map[string]*taskset.Entry{
+		"tasks": {Ref: &taskset.Ref{Path: filepath.Join(dir, "taskset.yaml")}},
+	}
+	m := NewSourceManager(cfg, nil, nil, dir, zap.NewNop())
+	src := newStubTasksetSource(t, "tasks", dir)
+	m.Register("tasks", src)
+	if err := taskset.AddTaskEntry(filepath.Join(dir, "taskset.yaml"), "my-task"); err != nil {
+		t.Fatalf("seed entry: %v", err)
+	}
+
+	spec := &task.Spec{ID: "tasks/my-task", TaskDir: taskDir}
+	if _, err := m.DeleteTaskFromSource(context.Background(), "tasks/my-task", "tasks", spec); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+
+	ts, err := taskset.LoadTaskSet(filepath.Join(dir, "taskset.yaml"))
+	if err != nil {
+		t.Fatalf("load taskset: %v", err)
+	}
+	if _, still := ts.Spec.Entries["my-task"]; still {
+		t.Fatalf("entry survived the delete: %v", ts.Spec.Entries)
+	}
+}
+
 // A TaskDir that escapes the source root must be refused — defends against a
 // stale or crafted spec removing arbitrary directories.
 func TestDeleteTaskFromSource_Local_RefusesEscape(t *testing.T) {

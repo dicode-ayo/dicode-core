@@ -278,6 +278,11 @@ Response: `201`
 { "task_id": "my-task", "source": "default", "files": ["task.yaml", "task.ts"] }
 ```
 
+The files are written beside the source's root `taskset.yaml`, and an entry for
+them is appended to it — a task directory that is not listed there never
+resolves. Creating a task whose directory already exists returns `409` rather
+than overwriting it.
+
 **POST `/api/task/edit`** — create a new session or resume an existing one:
 
 ```json
