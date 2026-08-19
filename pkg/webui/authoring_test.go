@@ -554,18 +554,32 @@ func TestAPITaskCreate_UnregisterableNameLeavesNothingBehind(t *testing.T) {
 	}
 }
 
-// TestCreateTask_ConcurrentSameName_OnlyOneWins locks in the TOCTOU fix: two
+// TestCreateTask_ConcurrentSameName_OnlyOneWins exercises the TOCTOU fix: two
 // concurrent CreateTask calls for the same (source, name) previously raced
 // on a Stat-then-MkdirAll pair — both could observe "task.yaml absent" before
 // either had written it, and both would proceed to scaffold/register the
 // same name. os.Mkdir's exclusivity means exactly one caller can create
-// taskDir; the loser must see the same 409 a sequential second call would.
+// taskDir; every other caller must see the same 409 a sequential second call
+// would.
+//
+// Statistical power note (measured empirically, not just asserted): with the
+// old Stat-then-MkdirAll code reinstated, this test with only 2 goroutines
+// catches the bug in roughly 2/40 runs — the pre-write window is narrow
+// enough that two racing goroutines usually just serialize on the Go
+// scheduler without ever landing inside it. 16 goroutines (120 racing pairs
+// instead of 1) raise that odds substantially without needing a
+// synchronization seam in CreateTask itself, which would mean adding
+// test-only instrumentation to production code for a fix that's already
+// correct by construction (os.Mkdir is atomic — see the fix's own comment).
+// This is a probabilistic regression guard, not a deterministic one; it does
+// not flake in the passing direction (40/40 stable against the fixed code).
 func TestCreateTask_ConcurrentSameName_OnlyOneWins(t *testing.T) {
 	dir := t.TempDir()
 	srv := newAuthoringTestServer(t, "ai-scratch", dir)
 
+	const n = 16
 	var wg sync.WaitGroup
-	results := make([]error, 2)
+	results := make([]error, n)
 	for i := range results {
 		wg.Add(1)
 		go func(i int) {
@@ -587,8 +601,8 @@ func TestCreateTask_ConcurrentSameName_OnlyOneWins(t *testing.T) {
 			t.Errorf("unexpected error: %v", err)
 		}
 	}
-	if successes != 1 || conflicts != 1 {
-		t.Fatalf("successes=%d conflicts=%d, want exactly 1 of each (results: %v)", successes, conflicts, results)
+	if successes != 1 || conflicts != n-1 {
+		t.Fatalf("successes=%d conflicts=%d, want exactly 1 success and %d conflicts (results: %v)", successes, conflicts, n-1, results)
 	}
 
 	// The winner's files must be intact, not partially overwritten by a
