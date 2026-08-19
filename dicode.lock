@@ -2,7 +2,7 @@
 # Trust policy lives in dicode.yaml (approval:); this file records which
 # content hash of each task is approved to run.
 version: 3
-mac: 6eefb06e8018419e654be6903dcea9d0a574b433c445ac08d66d782b5c5bc4d5
+mac: a8ac8eb1e30e719ee8a09fa40a023269dadccb6e65b3d7cfa977347bc5b77559
 bootstrapped: true
 tasks:
     auth/openrouter-oauth:
@@ -10,12 +10,12 @@ tasks:
         approved_at: 2026-07-02T09:07:15.281541237Z
         approved_by: bootstrap
     buildin/ai-agent:
-        hash: 85bc019ac2e40c59f577c7d6c9c19cd4b83f69374093d80e1e9b4b6dc572cd7c
-        approved_at: 2026-07-02T09:07:15.394961092Z
+        hash: 3302383063c985409450051f93d66acd939d4849f3ecbe99aecbe33f0fd1c03c
+        approved_at: 2026-08-19T14:21:46.344340919Z
         approved_by: builtin
     buildin/ai-agent-claude-cli:
-        hash: 0cf6871e66eff500e305d4b9f21ee70c18124f04fb016db0040a968d5ebd87f6
-        approved_at: 2026-07-02T09:07:15.359919297Z
+        hash: 696ba091433a2a4d70f015fd59dbe8480d39efbe654197bfab0bf77b10a0905b
+        approved_at: 2026-08-19T14:21:46.530975307Z
         approved_by: builtin
     buildin/alert:
         hash: 6822b5eca7553e99527e45b6ff690e4051b814fc50977b542d89822729640606
@@ -26,60 +26,60 @@ tasks:
         approved_at: 2026-07-02T09:07:15.360436473Z
         approved_by: builtin
     buildin/auth-providers:
-        hash: 5c1262965c415909231eab1ba7445539470bd69de3ac0a2848b1aee5e2ebcdfb
-        approved_at: 2026-07-02T09:07:15.333250214Z
+        hash: 58cdb867a4d0c71e2ea4e4d37d3f4436d683c71ea970968ec1f92a3a36ee2c4d
+        approved_at: 2026-08-19T14:21:46.25308503Z
         approved_by: builtin
     buildin/auth-relay:
-        hash: 9faa69c18f1c59dd8153184b80a2ee309456b4b4e5bc45f6a47b55039b851b70
-        approved_at: 2026-07-02T09:07:15.332651577Z
+        hash: f952def46cb2ad814ceb8aa4f6c284784785ba6ba014b42d8d47dcff412e351b
+        approved_at: 2026-08-19T14:21:46.798640603Z
         approved_by: builtin
     buildin/auth-start:
-        hash: 9bf4887696e075cdcd127ba783955bec76ac588b717d1912c9f4059b6357a3e6
-        approved_at: 2026-07-02T09:07:15.394045781Z
+        hash: 2711bf307443044f6997d15c231a7d6a00c52d3f11b1cb56a1e7a00c2e7b9a8a
+        approved_at: 2026-08-19T14:21:46.721556758Z
         approved_by: builtin
     buildin/auto-fix:
-        hash: 1061e6f20078df67d0e6dc4ef0ddb2cc252b0b20fd19ca3c3b4a3cb68a583af3
-        approved_at: 2026-07-02T09:07:15.33226987Z
+        hash: 0e7bf1aaf3dfe1e444965061f875edc6e265cd61ef53e13d7ed6d06bcd56d18a
+        approved_at: 2026-08-19T14:21:46.52339651Z
         approved_by: builtin
     buildin/blob-storage:
         hash: 692a3b22df0b1b158b46a41685ee15e1a3aaf46239e74765a7e095be2b0636b7
         approved_at: 2026-07-02T09:07:15.333663644Z
         approved_by: builtin
     buildin/dev-clones-cleanup:
-        hash: da558d3b377be377bebbd099eed72d01fe617bfa934fa931d7742d6d1be95bdc
-        approved_at: 2026-07-02T10:41:49.651880632Z
+        hash: 5f027ffd3520e7421e11678525917f91508c36aa310228f01bdab6d7fa2ab477
+        approved_at: 2026-08-19T14:21:46.749244437Z
         approved_by: builtin
     buildin/dicodai:
-        hash: 2ba64e4086a88876cf538999d50d38b0d267c1c9c557748ab2bd679b0da9ad93
-        approved_at: 2026-07-02T09:07:15.330145022Z
+        hash: 115401d1d4d600f44dbeaf655d7af7c5461b0d7e4471a29b9c113bc3b6a95d25
+        approved_at: 2026-08-19T14:21:46.784497047Z
         approved_by: builtin
     buildin/git-pr:
-        hash: aee1e0a2f09d5558015a42d93c2dc3800ee9795e1394e8d1a306b247455924b1
-        approved_at: 2026-07-02T10:42:25.884439851Z
+        hash: 157dd2f0b5dc0f54bbe9b8f52d7414af34c532f968f75781e39401e2e3066da1
+        approved_at: 2026-08-19T14:21:46.50022658Z
         approved_by: builtin
     buildin/local-storage:
-        hash: d4583cb13a63fa26f58a2d384e33714559805f213d65e44bc6c7e74068db4474
-        approved_at: 2026-07-02T09:07:15.394465401Z
+        hash: 3cdf7f2911997381e5c0ddf50c76fc556d9a620c31a745eaef69825a6f67fa57
+        approved_at: 2026-08-19T14:21:46.357248228Z
         approved_by: builtin
     buildin/mcp:
         hash: 18bd9229c1e236415385b7db588884589e9fb37ed3ec71ee7139dacb2e26c8ea
         approved_at: 2026-07-02T09:07:15.331488403Z
         approved_by: builtin
     buildin/notifications:
-        hash: 138d62bc2002a3da8315701d18df4e09bf99927a546b27c5f220ffe652d2c3e1
-        approved_at: 2026-07-02T09:07:15.331877009Z
+        hash: b4af40478f1d550108472e807a678d3dc5e2265aefd51df30328cb26f31a17db
+        approved_at: 2026-08-19T14:21:46.330179695Z
         approved_by: builtin
     buildin/relay-client:
-        hash: 5751ad01d3518e0d51d4af993686ff6858183ed69ed962078bf0dd523cd8b97d
-        approved_at: 2026-07-02T09:07:15.334021158Z
+        hash: 048e45495404c1bb2225d07f658994ed53824812ea72b732f51bedfbd3aa29f7
+        approved_at: 2026-08-19T14:21:46.370101868Z
         approved_by: builtin
     buildin/relay-server:
-        hash: 4aecc918a09df6991bc6b38aabe76aad68b6248ca990d5bdf82582fb2b5e93e6
-        approved_at: 2026-07-02T09:07:15.330844959Z
+        hash: c4d1c053558d2ca64f4734027f4a1ce56ff729f56b5cc6d8302c3e03b281a332
+        approved_at: 2026-08-19T14:21:46.538313734Z
         approved_by: builtin
     buildin/relay-server-body:
-        hash: 067f7d3aabf5bbc38c678ce163cfe98c48a7ef2cbf0615cc28bc9fd84298280c
-        approved_at: 2026-07-02T09:07:15.307239059Z
+        hash: a5b8d601a9b605773b0a1917335fdb7ec11ca6fed60076282b1fc72eedb6eba0
+        approved_at: 2026-08-19T14:21:46.228786103Z
         approved_by: builtin
     buildin/run-inputs-cleanup:
         hash: 94caa86483c009edd09249153b02469bd204ffa5f1d41b12d0c612a2693c76d4
@@ -90,16 +90,16 @@ tasks:
         approved_at: 2026-07-02T09:07:15.330530914Z
         approved_by: builtin
     buildin/temp-cleanup:
-        hash: 79d510c850e5c5d94efcea2d07f351f03aec32a9484df35917e33ac86495196b
-        approved_at: 2026-07-02T10:16:26.444857551Z
+        hash: c95bd075970b1f5089314b1c212ec0beac6b65dbc4f4fbfcd3e09473fa78fad6
+        approved_at: 2026-08-19T14:21:46.508533106Z
         approved_by: builtin
     buildin/tray:
-        hash: c10e8a6502f508a06719578b7620dd24a59431ffc8cce2f3c2c98c64c8e1962e
-        approved_at: 2026-07-02T09:07:15.368908107Z
+        hash: 46a0c977a7407c91fd5ea19a2e0d78bfd9a32f23e1c93c41d99ba224f508b47a
+        approved_at: 2026-08-19T14:21:46.546147937Z
         approved_by: builtin
     buildin/webui:
-        hash: 19cc481b2df27573f7f21efbfc4a380a0c5c4523e7e25fb8837ec9879c65a62b
-        approved_at: 2026-07-02T09:07:15.393563015Z
+        hash: 228ff917ec603b8365782af008cfc908c88b5751e9f4a83e352b79ffc711a6a8
+        approved_at: 2026-08-19T14:21:46.736822724Z
         approved_by: builtin
     examples/ai-agent-groq:
         hash: df4833976e96834b32a98b29255dce4f9db5586adedf42c8c4bc01e182ca75f4

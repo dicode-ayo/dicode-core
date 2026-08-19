@@ -529,3 +529,26 @@ func TestSanitizeTaskName(t *testing.T) {
 		}
 	}
 }
+
+// A name the taskset would refuse as an entry key must be rejected before any
+// file is written. Otherwise the scaffold lands unregistered — invisible to the
+// resolver, yet still tripping the existence check that guards every retry.
+func TestAPITaskCreate_UnregisterableNameLeavesNothingBehind(t *testing.T) {
+	dir := t.TempDir()
+	srv := newAuthoringTestServer(t, "ai-scratch", dir)
+	h := srv.Handler()
+
+	long := strings.Repeat("a", 70)
+	w := postJSON(h, "/api/task/create", map[string]string{"name": long})
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("create status = %d, want 400; body: %s", w.Code, w.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, long)); !os.IsNotExist(err) {
+		t.Errorf("scaffold directory survived a rejected create (stat err = %v)", err)
+	}
+
+	// The name stays usable once shortened — no wedge left behind.
+	if w := postJSON(h, "/api/task/create", map[string]string{"name": "regcheck"}); w.Code != http.StatusCreated {
+		t.Fatalf("subsequent create status = %d, want 201; body: %s", w.Code, w.Body.String())
+	}
+}

@@ -57,6 +57,13 @@ func (s *Server) CreateTask(ctx context.Context, name, source string) (ipc.Autho
 	if name == "" {
 		return ipc.AuthoringCreateResult{}, authErr(400, "invalid task name")
 	}
+	// The entry key is what makes the scaffolded directory resolvable, so a
+	// name the taskset would refuse must fail before any file is written —
+	// otherwise the directory lands, registration fails, and the existence
+	// check below rejects every retry.
+	if err := taskset.ValidateEntryName(name); err != nil {
+		return ipc.AuthoringCreateResult{}, authErr(400, "invalid task name: %v", err)
+	}
 
 	// Scaffold beside the source's root taskset file, not at the repo root:
 	// the entry added below points at "./<name>/task.yaml", which the resolver
@@ -99,8 +106,15 @@ timeout: 30s
 	// Resolution walks spec.entries and never scans the source tree, so a
 	// scaffolded directory stays invisible to the daemon until it is listed.
 	if err := taskset.AddTaskEntry(tasksetPath, name); err != nil {
+		// An unregistered scaffold is invisible to the resolver but still trips
+		// the existence check above, so drop what we just wrote rather than
+		// wedging the name against every retry. Remove (not RemoveAll) so a
+		// directory holding anything else is left alone.
+		os.Remove(filepath.Join(taskDir, "task.js"))
+		os.Remove(filepath.Join(taskDir, "task.yaml"))
+		os.Remove(taskDir)
 		if errors.Is(err, taskset.ErrEntryConflict) {
-			return ipc.AuthoringCreateResult{}, authErr(409, "task %q already exists in source %q", name, source)
+			return ipc.AuthoringCreateResult{}, authErr(409, "task name %q is already bound to another path in source %q", name, source)
 		}
 		return ipc.AuthoringCreateResult{}, authErr(500, "register task in taskset: %v", err)
 	}

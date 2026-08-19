@@ -144,6 +144,12 @@ func refTargets(tsDir, ref, taskDir string) bool {
 	return err == nil && within
 }
 
+// ValidateEntryName reports whether name is usable as a spec.entries key.
+// Callers that create files named after the entry must check this before
+// writing anything: a name this package refuses cannot be registered, and an
+// unregistered task directory is invisible to the resolver.
+func ValidateEntryName(name string) error { return validateEntryName(name) }
+
 func validateEntryName(name string) error {
 	if !entryNameRe.MatchString(name) {
 		return fmt.Errorf("invalid taskset entry name %q", name)
