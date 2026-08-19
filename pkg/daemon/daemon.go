@@ -1180,6 +1180,7 @@ func buildRuntimes(
 	if err != nil {
 		log.Fatal("python runtime init", zap.Error(err))
 	}
+	pythonMgr.SetEngine(eng)
 	pythonMgr.SetGateway(gateway)
 	pythonMgr.SetSecretsManager(secretsMgr)
 	eng.SetPythonRuntime(pythonMgr)
