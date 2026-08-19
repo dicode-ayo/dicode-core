@@ -21,7 +21,6 @@ import (
 // unset. Every other field is a hard dependency of the socket bridge, so a
 // new field is treated as required until it is listed here.
 var optionalBridgeDeps = map[string]bool{
-	"SecretsManager": true, // dicode.secrets_set/delete; nil when no local provider
 	"InputStore":     true, // wireRunInputPersistence, only when a SubKeyDeriver exists
 	"SecretOutputCh": true, // swapped in per provider invocation by the trigger engine
 	"Replayer":       true, // wireRunInputPersistence
@@ -33,9 +32,11 @@ var optionalBridgeDeps = map[string]bool{
 }
 
 // TestBuildRuntimesWiresBothRuntimes guards the wiring obligation BridgeDeps
-// does not enforce by construction: daemon.go calls every setter twice, once
-// per socket-bridge runtime, and a setter called for only one of them leaves
-// that runtime's capability dead at boot with no compile-time signal.
+// does not enforce by construction: buildRuntimes wires each dependency twice,
+// once per socket-bridge runtime, and a setter called for only one of them
+// leaves that runtime's capability dead at boot with no compile-time signal.
+// Setters called outside buildRuntimes are late-wired and exempt, so the
+// fields this actually covers are the ones listed as required below.
 func TestBuildRuntimesWiresBothRuntimes(t *testing.T) {
 	database, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
 	if err != nil {
@@ -45,7 +46,7 @@ func TestBuildRuntimesWiresBothRuntimes(t *testing.T) {
 
 	reg := registry.New(database)
 	_, _, denoRT, pythonRT, err := buildRuntimes(
-		context.Background(), &config.Config{}, reg, secrets.Chain{}, nil,
+		context.Background(), &config.Config{}, reg, secrets.Chain{}, stubSecretsManager{},
 		database, zap.NewNop(), ipc.NewGateway(),
 	)
 	if err != nil {
@@ -84,3 +85,43 @@ func isNilValue(v reflect.Value) bool {
 		return false
 	}
 }
+
+// snapshotDeps are the BridgeDeps fields NewIPCServer reads from its receiver
+// — the snapshot NewExecutor took — rather than from the live manager. A
+// dependency wired after NewExecutor never reaches a run through them, so the
+// manager holding it is not enough.
+var snapshotDeps = []string{"Registry", "DB", "Log", "IPCSecret", "Engine", "Gateway", "SecretsManager"}
+
+// TestPythonExecutorSnapshotsDeps holds NewExecutor's copy list to the set
+// NewIPCServer reads from its receiver: a per-version executor serves runs from
+// its own snapshot, so a dependency the manager holds but NewExecutor omits is
+// nil for every run that executor serves.
+func TestPythonExecutorSnapshotsDeps(t *testing.T) {
+	database, err := db.Open(db.Config{Type: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer database.Close()
+
+	_, _, _, pythonRT, err := buildRuntimes(
+		context.Background(), &config.Config{}, registry.New(database), secrets.Chain{},
+		stubSecretsManager{}, database, zap.NewNop(), ipc.NewGateway(),
+	)
+	if err != nil {
+		t.Fatalf("buildRuntimes: %v", err)
+	}
+
+	deps := reflect.ValueOf(pythonRT.NewExecutor("/nonexistent/uv")).Elem().FieldByName("BridgeDeps")
+	for _, name := range snapshotDeps {
+		if isNilValue(deps.FieldByName(name)) {
+			t.Errorf("executor BridgeDeps.%s is nil: NewExecutor does not copy it, so no run it serves sees it", name)
+		}
+	}
+}
+
+type stubSecretsManager struct{}
+
+func (stubSecretsManager) List(context.Context) ([]string, error)    { return nil, nil }
+func (stubSecretsManager) Has(context.Context, string) (bool, error) { return false, nil }
+func (stubSecretsManager) Set(_ context.Context, _, _ string) error  { return nil }
+func (stubSecretsManager) Delete(context.Context, string) error      { return nil }
