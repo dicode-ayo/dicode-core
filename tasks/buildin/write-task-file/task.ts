@@ -84,6 +84,18 @@ export function assertTaskDocument(path: string, content: string): void {
   if (!path.endsWith("/task.yaml") && !path.endsWith("/task.yml")) {
     return;
   }
+  // U+0085, U+2028 and U+2029 are line breaks in YAML 1.1 and ordinary
+  // characters in 1.2. The daemon's parser honours them and this one does
+  // not, so a manifest containing them splits into different documents on
+  // each side — and the daemon's side is the one that decides what the file
+  // is. A task manifest has no need for them.
+  const split = content.match(/[\u0085\u2028\u2029]/);
+  if (split) {
+    throw new Error(
+      `invalid task.yaml: contains U+${split[0].codePointAt(0)!.toString(16).toUpperCase().padStart(4, "0")}, ` +
+        `which the daemon's YAML parser reads as a line break and this one does not`,
+    );
+  }
   let docs: unknown[];
   try {
     docs = parseYamlAll(content) as unknown[];

